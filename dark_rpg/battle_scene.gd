@@ -161,11 +161,15 @@ func _draw_top_bar() -> void:
 func _draw_enemy_area() -> void:
 	_panel(Vector2(0, 48), Vector2(SCREEN_W, 185), Color(0.07, 0.03, 0.11))
 
+	# プレイヤー（怪物）スプライトを左側に表示
+	_tex_rect(SpriteGenerator.get_player(), Vector2(8, 52), Vector2(72, 90))
+
 	if enemies.is_empty():
 		return
 
+	# 敵は右側（x=88以降）に配置
 	var total_w: float = enemies.size() * ENEMY_W + (enemies.size() - 1) * ENEMY_GAP
-	var sx: float = (SCREEN_W - total_w) / 2.0
+	var sx: float = 88.0 + (SCREEN_W - 88.0 - total_w) / 2.0
 
 	for i in range(enemies.size()):
 		var e: Dictionary = enemies[i]
@@ -180,6 +184,9 @@ func _draw_enemy_area() -> void:
 		box.mouse_filter = Control.MOUSE_FILTER_STOP
 		var idx: int = i
 		box.gui_input.connect(func(ev: InputEvent) -> void: _on_enemy_click(ev, idx))
+
+		# 敵スプライトをボックス右側に表示
+		_tex_rect(SpriteGenerator.get_enemy(e["type"]), Vector2(ex + ENEMY_W - 68, ey + 4), Vector2(60, 75))
 
 		# 名前
 		_label(e["name"], Vector2(ex + 8, ey + 4), 14, Color(1, 1, 1))
@@ -274,16 +281,10 @@ func _draw_hand() -> void:
 		# 仕切り
 		_panel(Vector2(cx, cy + 52), Vector2(CARD_W, 2), Color(0.25, 0.25, 0.25))
 
-		# タイプアイコン
-		var type_str: String
-		match cd["type"]:
-			"attack":  type_str = "[攻]"
-			"defense": type_str = "[防]"
-			"skill":   type_str = "[技]"
-			"power":   type_str = "[力]"
-			_:         type_str = "[ ]"
-		_label(type_str, Vector2(cx + 32, cy + 58), 20,
-			Color(1, 1, 1) if can_play else Color(0.4, 0.4, 0.4))
+		# カードアイコン（自動生成画像）
+		var icon_mod: Color = Color.WHITE if can_play else Color(0.4, 0.4, 0.4)
+		_tex_rect(SpriteGenerator.get_card_icon(cd["type"]),
+			Vector2(cx + (CARD_W - 36) / 2.0, cy + 56), Vector2(36, 36), icon_mod)
 
 		# 説明
 		var desc_lbl: Label = Label.new()
@@ -573,6 +574,16 @@ func _label(text: String, pos: Vector2, font_size: int, col: Color) -> Label:
 	l.modulate = col
 	add_child(l)
 	return l
+
+func _tex_rect(tex: ImageTexture, pos: Vector2, size: Vector2, mod: Color = Color.WHITE) -> TextureRect:
+	var tr: TextureRect = TextureRect.new()
+	tr.texture      = tex
+	tr.position     = pos
+	tr.size         = size
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.modulate     = mod
+	add_child(tr)
+	return tr
 
 func _button(text: String, pos: Vector2, size: Vector2, callback: Callable) -> Button:
 	var b: Button = Button.new()
