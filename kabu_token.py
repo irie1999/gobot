@@ -4,7 +4,6 @@ https://kabucom.github.io/kabusapi/ptal/index.html
 """
 
 import requests
-import json
 
 
 # ---- 設定 ----
@@ -33,7 +32,7 @@ def get_token(password: str, base_url: str = BASE_URL) -> str:
     headers = {"Content-Type": "application/json"}
     body = {"APIPassword": password}
 
-    response = requests.post(url, headers=headers, data=json.dumps(body))
+    response = requests.post(url, headers=headers, json=body)
     response.raise_for_status()
 
     token = response.json().get("Token")
