@@ -64,13 +64,8 @@ NOTIFY_INTERVAL = 1.0
 
 # ── Telegram 送信 ────────────────────────────────────────────────
 def send_telegram(message: str, dry_run: bool = False) -> bool:
-    """Telegram にメッセージを送信する。dry_run=True ならコンソール出力のみ。"""
+    """Telegram にメッセージを送信する。dry_run=True なら何もしない。"""
     if dry_run or not TELEGRAM_BOT_TOKEN:
-        tag = "[DRY RUN]" if dry_run else "[Telegram未設定]"
-        print(f"\n{tag}")
-        print("─" * 52)
-        print(message)
-        print("─" * 52)
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -88,7 +83,7 @@ def send_telegram(message: str, dry_run: bool = False) -> bool:
 
 
 # ── データ取得 ────────────────────────────────────────────────────
-def fetch_data(start: str, end: str) -> pd.DataFrame:
+def fetch_data(start: str, end: str, silent: bool = False) -> pd.DataFrame:
     import yfinance as yf
 
     # インジケーター計算のウォームアップ用に200日多く取得
@@ -97,7 +92,8 @@ def fetch_data(start: str, end: str) -> pd.DataFrame:
     fetch_end = (datetime.strptime(end, "%Y-%m-%d")
                  + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    print(f"[yfinance] {SYMBOL} データ取得中 (ウォームアップ含む)...")
+    if not silent:
+        print(f"[yfinance] {SYMBOL} データ取得中 (ウォームアップ含む)...")
     df = yf.download(SYMBOL, start=warmup_start, end=fetch_end,
                      interval="1d", auto_adjust=True, progress=False)
     if df.empty:
@@ -109,8 +105,9 @@ def fetch_data(start: str, end: str) -> pd.DataFrame:
         df.index = df.index.tz_convert("Asia/Tokyo").tz_localize(None)
     df.columns = [c.lower() for c in df.columns]
     df = df[["open", "high", "low", "close", "volume"]].dropna()
-    print(f"  取得成功: {len(df):,} 本 "
-          f"({df.index[0].date()} 〜 {df.index[-1].date()})")
+    if not silent:
+        print(f"  取得成功: {len(df):,} 本 "
+              f"({df.index[0].date()} 〜 {df.index[-1].date()})")
     return df
 
 
@@ -351,13 +348,14 @@ def backtest(df: pd.DataFrame, dry_run: bool) -> tuple[list[dict], list[tuple]]:
         # ── ポジション保有中：シグナル判定 ────────────────────
         if in_pos and not pending_exit:
             if row["low"] <= stop_price:
-                # ストップロス通知
                 msg = build_stop_msg(row, date_str, entry_price,
                                      stop_price, qty, entry_dt)
-                print(f"  {date_str}  ⚠ ストップ到達")
+                if not dry_run:
+                    print(f"  {date_str}  ⚠ ストップ到達")
                 send_telegram(msg, dry_run=dry_run)
                 notify_count += 1
-                time.sleep(NOTIFY_INTERVAL)
+                if not dry_run:
+                    time.sleep(NOTIFY_INTERVAL)
 
                 pending_exit        = True
                 pending_exit_reason = f"ストップロス(ATR×{ATR_STOP_MULT})"
@@ -365,12 +363,13 @@ def backtest(df: pd.DataFrame, dry_run: bool) -> tuple[list[dict], list[tuple]]:
                 pending_exit_row    = row
 
             elif row["exit_sig"]:
-                # 売りシグナル通知
                 msg = build_sell_msg(row, date_str, entry_price, qty, entry_dt)
-                print(f"  {date_str}  売りシグナル")
+                if not dry_run:
+                    print(f"  {date_str}  売りシグナル")
                 send_telegram(msg, dry_run=dry_run)
                 notify_count += 1
-                time.sleep(NOTIFY_INTERVAL)
+                if not dry_run:
+                    time.sleep(NOTIFY_INTERVAL)
 
                 pending_exit        = True
                 pending_exit_reason = "シグナル"
@@ -379,12 +378,13 @@ def backtest(df: pd.DataFrame, dry_run: bool) -> tuple[list[dict], list[tuple]]:
 
         # ── 新規エントリー：シグナル判定 ──────────────────────
         if not in_pos and not pending_entry and row["entry_sig"]:
-            # 買いシグナル通知
             msg = build_buy_msg(row, date_str, cash)
-            print(f"  {date_str}  買いシグナル  終値:{row['close']:,.0f}  RSI:{row['rsi']:.1f}")
+            if not dry_run:
+                print(f"  {date_str}  買いシグナル  終値:{row['close']:,.0f}  RSI:{row['rsi']:.1f}")
             send_telegram(msg, dry_run=dry_run)
             notify_count += 1
-            time.sleep(NOTIFY_INTERVAL)
+            if not dry_run:
+                time.sleep(NOTIFY_INTERVAL)
 
             pending_entry         = True
             pending_entry_atr     = row["atr"]
@@ -410,7 +410,8 @@ def backtest(df: pd.DataFrame, dry_run: bool) -> tuple[list[dict], list[tuple]]:
         })
         equity.append((df.index[-1], cash))
 
-    print(f"\n  Telegram 通知送信数: {notify_count} 件")
+    if not dry_run:
+        print(f"\n  Telegram 通知送信数: {notify_count} 件")
     return trades, equity
 
 
@@ -595,15 +596,16 @@ def main():
 
     dry_run = args.no_notify or not TELEGRAM_BOT_TOKEN
 
-    print("=" * 60)
-    print(f"  スイングトレード バックテスト + Telegram 通知テスト")
-    print(f"  銘柄   : {SYMBOL_NAME} ({SYMBOL})")
-    print(f"  期間   : {start_date} 〜 {end_date}")
-    print(f"  通知   : {'DRY RUN（コンソール出力のみ）' if dry_run else 'Telegram 送信あり'}")
-    print("=" * 60 + "\n")
+    if not dry_run:
+        print("=" * 60)
+        print(f"  スイングトレード バックテスト + Telegram 通知テスト")
+        print(f"  銘柄   : {SYMBOL_NAME} ({SYMBOL})")
+        print(f"  期間   : {start_date} 〜 {end_date}")
+        print(f"  通知   : Telegram 送信あり")
+        print("=" * 60 + "\n")
 
     # 1. データ取得 & インジケーター
-    df_all = fetch_data(start_date, end_date)
+    df_all = fetch_data(start_date, end_date, silent=dry_run)
     df_all = add_indicators(df_all)
     df_all = add_signals(df_all)
 
@@ -612,10 +614,11 @@ def main():
         (df_all.index >= start_date) & (df_all.index <= end_date)
     ].copy()
 
-    print(f"\nウォームアップ: {len(df_all) - len(df_target):,} 本")
-    print(f"バックテスト対象: {len(df_target)} 営業日 "
-          f"({df_target.index[0].date()} 〜 {df_target.index[-1].date()})")
-    print("\nシグナル検出中 (シグナル発生ごとに通知送信)...\n")
+    if not dry_run:
+        print(f"\nウォームアップ: {len(df_all) - len(df_target):,} 本")
+        print(f"バックテスト対象: {len(df_target)} 営業日 "
+              f"({df_target.index[0].date()} 〜 {df_target.index[-1].date()})")
+        print("\nシグナル検出中 (シグナル発生ごとに通知送信)...\n")
 
     # 3. バックテスト実行（通知含む）
     trades, equity = backtest(df_target, dry_run=dry_run)
@@ -627,10 +630,12 @@ def main():
     # 5. バックテスト結果サマリーを Telegram 送信
     if metrics:
         summary_msg = build_summary_msg(metrics, start_date, end_date)
-        print("\n最終サマリーを Telegram に送信中...")
+        if not dry_run:
+            print("\n最終サマリーを Telegram に送信中...")
         send_telegram(summary_msg, dry_run=dry_run)
 
-    print("\n完了。スマホの Telegram を確認してください。")
+    if not dry_run:
+        print("\n完了。スマホの Telegram を確認してください。")
 
 
 if __name__ == "__main__":
