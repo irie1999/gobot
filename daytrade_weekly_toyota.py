@@ -2,14 +2,17 @@
 週次デイトレ バックテスト — 2026/03/16 週（月〜金）
 銘柄  : トヨタ自動車 (7203.T)
 データ: yfinance 1 分足（ネット遮断時は合成データで自動フォールバック）
-戦略  : 移動平均クロス（短期 MA / 長期 MA）
+戦略  : マルチシグナル（MA クロス + RSI + Bollinger Bands）
 
 ルール:
   - 毎日独立してポジションを持つ（持越しなし）
   - 引けまでに未決済なら強制決済
   - 初期資金は毎日リセットせず、前日の最終資産を翌日に引き継ぐ
+  - 複数シグナル合算で売買判断（トレード回数増加）
+  - 最大保有時間 MAX_HOLD_BARS 分で強制利確/損切り
 """
 
+import math
 import random
 from collections import deque
 from datetime import datetime, timedelta
@@ -19,10 +22,23 @@ SYMBOL       = "7203.T"
 WEEK_START   = "2026-03-16"   # 月曜日
 INTERVAL     = "1m"
 
-SHORT_PERIOD = 5
-LONG_PERIOD  = 25
-QTY          = 100            # 1 回の取引株数
-INITIAL_CASH = 1_000_000      # 週初めの資金（円）
+# MA クロス（短縮して感応度アップ）
+SHORT_PERIOD  = 3
+LONG_PERIOD   = 10
+
+# RSI
+RSI_PERIOD    = 14
+RSI_OVERSOLD  = 35    # 以下で買いシグナル
+RSI_OVERBOUGHT = 68   # 以上で売りシグナル
+
+# Bollinger Bands
+BB_PERIOD     = 20
+BB_K          = 2.0   # 標準偏差倍率
+
+# 共通
+QTY           = 100           # 1 回の取引株数
+INITIAL_CASH  = 1_000_000     # 週初めの資金（円）
+MAX_HOLD_BARS = 30            # 最大保有バー数（分）でタイムカット
 
 # 東証セッション（前場・後場）
 SESSIONS = [
@@ -145,64 +161,175 @@ def load_week_bars(dates: list[str]) -> tuple[dict[str, list[dict]], str]:
     return data, source
 
 
-# ── 3. MA クロス戦略 ─────────────────────────────────────────
+# ── 3. インジケーター計算 ──────────────────────────────────────
 
-class MACross:
-    def __init__(self, short: int, long_: int):
-        self.buf  = deque(maxlen=long_)
-        self.short = short
-        self.long_ = long_
-        self.prev: str | None = None
+class IndicatorEngine:
+    """MA クロス + RSI + Bollinger Bands をリアルタイム計算"""
+
+    def __init__(self):
+        self._prices: deque[float] = deque(maxlen=max(LONG_PERIOD, BB_PERIOD, RSI_PERIOD + 1))
+        self._prev_sig: str | None = None
+
+        # RSI 用
+        self._prev_close: float | None = None
+        self._gains: deque[float] = deque(maxlen=RSI_PERIOD)
+        self._losses: deque[float] = deque(maxlen=RSI_PERIOD)
 
     def reset(self):
-        """1 日の終わりにリセット（翌日は独立した判断）"""
-        self.buf.clear()
-        self.prev = None
+        self._prices.clear()
+        self._prev_sig = None
+        self._prev_close = None
+        self._gains.clear()
+        self._losses.clear()
 
-    def feed(self, price: float) -> str | None:
-        self.buf.append(price)
-        if len(self.buf) < self.long_:
+    def _ma(self, n: int) -> float | None:
+        lst = list(self._prices)
+        if len(lst) < n:
             return None
-        s   = sum(list(self.buf)[-self.short:]) / self.short
-        l   = sum(self.buf) / self.long_
-        sig = "buy" if s > l else "sell"
-        if sig != self.prev:
-            self.prev = sig
-            return sig
-        return None
+        return sum(lst[-n:]) / n
+
+    def _rsi(self) -> float | None:
+        if len(self._gains) < RSI_PERIOD:
+            return None
+        avg_g = sum(self._gains) / RSI_PERIOD
+        avg_l = sum(self._losses) / RSI_PERIOD
+        if avg_l == 0:
+            return 100.0
+        rs = avg_g / avg_l
+        return 100 - 100 / (1 + rs)
+
+    def _bollinger(self) -> tuple[float | None, float | None]:
+        lst = list(self._prices)
+        if len(lst) < BB_PERIOD:
+            return None, None
+        chunk = lst[-BB_PERIOD:]
+        mean  = sum(chunk) / BB_PERIOD
+        std   = math.sqrt(sum((x - mean) ** 2 for x in chunk) / BB_PERIOD)
+        return mean - BB_K * std, mean + BB_K * std
+
+    def feed(self, price: float) -> dict:
+        """
+        Returns dict with keys:
+          ma_signal  : "buy" | "sell" | None   (MA クロス変化時のみ)
+          rsi        : float | None
+          bb_lower   : float | None
+          bb_upper   : float | None
+        """
+        # RSI 差分更新
+        if self._prev_close is not None:
+            diff = price - self._prev_close
+            self._gains.append(max(diff, 0.0))
+            self._losses.append(max(-diff, 0.0))
+        self._prev_close = price
+        self._prices.append(price)
+
+        s = self._ma(SHORT_PERIOD)
+        l = self._ma(LONG_PERIOD)
+
+        ma_signal = None
+        if s is not None and l is not None:
+            sig = "buy" if s > l else "sell"
+            if sig != self._prev_sig:
+                self._prev_sig = sig
+                ma_signal = sig
+
+        bb_lower, bb_upper = self._bollinger()
+        rsi = self._rsi()
+
+        return {
+            "ma_signal": ma_signal,
+            "rsi":       rsi,
+            "bb_lower":  bb_lower,
+            "bb_upper":  bb_upper,
+        }
 
 
-# ── 4. 1 日分バックテスト ────────────────────────────────────
+# ── 4. マルチシグナル売買判断 ──────────────────────────────────
+
+def should_buy(ind: dict, price: float) -> bool:
+    """
+    買いシグナル（いずれかで発動 → トレード頻度アップ）
+      1) MA クロスアップ
+      2) RSI 売られすぎ（< RSI_OVERSOLD）
+      3) Bollinger 下限タッチ + RSI < 50
+    """
+    if ind["ma_signal"] == "buy":
+        return True
+    rsi = ind["rsi"]
+    if rsi is not None and rsi < RSI_OVERSOLD:
+        return True
+    bb_l = ind["bb_lower"]
+    if bb_l is not None and price <= bb_l and rsi is not None and rsi < 50:
+        return True
+    return False
+
+
+def should_sell(ind: dict, price: float) -> bool:
+    """
+    売りシグナル（いずれかで発動 → 素早い利確）
+      1) MA クロスダウン
+      2) RSI 買われすぎ（> RSI_OVERBOUGHT）
+      3) Bollinger 上限タッチ
+    """
+    if ind["ma_signal"] == "sell":
+        return True
+    rsi = ind["rsi"]
+    if rsi is not None and rsi > RSI_OVERBOUGHT:
+        return True
+    bb_u = ind["bb_upper"]
+    if bb_u is not None and price >= bb_u:
+        return True
+    return False
+
+
+# ── 5. 1 日分バックテスト ────────────────────────────────────
 
 def backtest_day(bars: list[dict], cash: float) -> tuple[list[dict], float]:
-    strat   = MACross(SHORT_PERIOD, LONG_PERIOD)
-    entry_p = None
+    engine   = IndicatorEngine()
+    entry_p  = None
     entry_dt = None
-    trades  = []
+    hold_bars = 0
+    trades   = []
 
     for bar in bars:
-        price  = bar["close"]
-        dt     = bar["dt"]
-        signal = strat.feed(price)
+        price = bar["close"]
+        dt    = bar["dt"]
+        ind   = engine.feed(price)
 
-        if signal == "buy" and entry_p is None:
-            cost = price * QTY
-            if cash >= cost:
-                cash    -= cost
-                entry_p  = price
-                entry_dt = dt
+        # ── ポジションなし → 買い判断 ──
+        if entry_p is None:
+            if should_buy(ind, price):
+                cost = price * QTY
+                if cash >= cost:
+                    cash     -= cost
+                    entry_p   = price
+                    entry_dt  = dt
+                    hold_bars = 0
 
-        elif signal == "sell" and entry_p is not None:
-            cash += price * QTY
-            trades.append({
-                "entry_dt":    entry_dt,
-                "exit_dt":     dt,
-                "entry_price": entry_p,
-                "exit_price":  price,
-                "pnl":         (price - entry_p) * QTY,
-                "cash":        cash,
-            })
-            entry_p = None
+        # ── ポジションあり → 売り判断 ──
+        else:
+            hold_bars += 1
+            sell_reason = None
+
+            if should_sell(ind, price):
+                sell_reason = "シグナル決済"
+            elif hold_bars >= MAX_HOLD_BARS:
+                sell_reason = f"タイムカット({MAX_HOLD_BARS}分)"
+
+            if sell_reason:
+                cash += price * QTY
+                trades.append({
+                    "entry_dt":    entry_dt,
+                    "exit_dt":     dt,
+                    "entry_price": entry_p,
+                    "exit_price":  price,
+                    "pnl":         (price - entry_p) * QTY,
+                    "cash":        cash,
+                    "note":        sell_reason,
+                })
+                entry_p   = None
+                entry_dt  = None
+                hold_bars = 0
 
     # 引け強制決済
     if entry_p is not None:
@@ -221,17 +348,18 @@ def backtest_day(bars: list[dict], cash: float) -> tuple[list[dict], float]:
     return trades, cash
 
 
-# ── 5. レポート ──────────────────────────────────────────────
+# ── 6. レポート ──────────────────────────────────────────────
 
 DAY_JP = ["月", "火", "水", "木", "金"]
 
 def report(week_result: dict, source: str):
-    W = 62
+    W = 68
     print("=" * W)
     print(f"  週次デイトレ バックテスト  {WEEK_START} 週  {SYMBOL} (トヨタ)")
     print("=" * W)
     print(f"  データ  : {source}")
-    print(f"  MA      : 短期 {SHORT_PERIOD} / 長期 {LONG_PERIOD}  /  取引株数 {QTY} 株")
+    print(f"  戦略    : MA({SHORT_PERIOD}/{LONG_PERIOD}) + RSI({RSI_PERIOD}) + BB({BB_PERIOD},{BB_K}σ)")
+    print(f"  タイムカット: {MAX_HOLD_BARS} 分  /  取引株数 {QTY} 株")
     print(f"  初期資金: {INITIAL_CASH:,.0f} 円")
     print("=" * W)
 
@@ -239,15 +367,15 @@ def report(week_result: dict, source: str):
     prev_cash  = INITIAL_CASH
 
     for i, (date_str, info) in enumerate(week_result.items()):
-        dow    = DAY_JP[i]
-        trades = info["trades"]
-        cash   = info["final_cash"]
-        n_bars = info["n_bars"]
+        dow     = DAY_JP[i]
+        trades  = info["trades"]
+        cash    = info["final_cash"]
+        n_bars  = info["n_bars"]
         day_pnl = cash - prev_cash
 
-        wins   = [t for t in trades if t["pnl"] > 0]
+        wins  = [t for t in trades if t["pnl"] > 0]
         losses = [t for t in trades if t["pnl"] <= 0]
-        win_r  = len(wins) / len(trades) * 100 if trades else 0.0
+        win_r = len(wins) / len(trades) * 100 if trades else 0.0
 
         sign = "+" if day_pnl >= 0 else ""
         print(f"\n【{dow}】{date_str}  ({n_bars} 本)  "
@@ -257,7 +385,7 @@ def report(week_result: dict, source: str):
 
         if trades:
             print(f"  {'エントリー':5} {'決済':5}  {'買値':>7} {'売値':>7}  {'損益':>9}  結果")
-            print(f"  " + "-" * 50)
+            print(f"  " + "-" * 56)
             for t in trades:
                 mark = "○" if t["pnl"] > 0 else "●"
                 note = " " + t.get("note", "")
@@ -326,7 +454,7 @@ def report(week_result: dict, source: str):
         print(f"  {DAY_JP[i]} {date_str}  {sign}{pnl:>7,.0f} 円  |{bar}")
 
 
-# ── 6. エントリーポイント ────────────────────────────────────
+# ── 7. エントリーポイント ────────────────────────────────────
 
 if __name__ == "__main__":
     dates       = trading_days(WEEK_START)
