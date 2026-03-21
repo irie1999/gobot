@@ -1,31 +1,37 @@
 """
-スイングトレード シグナル通知スクリプト【LINE Notify版】
+スイングトレード シグナル通知スクリプト【Telegram Bot版】
 銘柄  : 味の素 (2802.T)  ← SYMBOL を変えれば他銘柄でも動作
 戦略  : swing_backtest_ajinomoto.py と同一ロジック
-執行  : シグナル発生 → LINE に通知 → 翌朝に人間が成行注文
+執行  : シグナル発生 → Telegram に通知 → 翌朝に人間が成行注文
 
 ■ 事前準備:
-  1. LINE Notify トークン取得
-       https://notify-bot.line.me/my/ でトークンを発行
-  2. 環境変数にセット（または下の LINE_NOTIFY_TOKEN を直接書く）
-       export LINE_NOTIFY_TOKEN="your_token_here"
-  3. 依存ライブラリのインストール
+  1. Telegram Bot を作成
+       Telegram で @BotFather を開き /newbot を送信
+       → API Token が発行される（例: 7123456789:AAFxxx...）
+
+  2. Chat ID を取得
+       作成した Bot に何かメッセージを送った後、ブラウザで以下を開く:
+       https://api.telegram.org/bot<TOKEN>/getUpdates
+       → "chat":{"id": の数字が Chat ID（例: 123456789）
+
+  3. 環境変数にセット
+       export TELEGRAM_BOT_TOKEN="7123456789:AAFxxx..."
+       export TELEGRAM_CHAT_ID="123456789"
+
+  4. 依存ライブラリのインストール
        pip install yfinance pandas numpy requests schedule
 
 ■ 実行方法:
-  # 即時シグナルチェック（手動実行）
-  python swing_notify.py --now
+  # 即時シグナルチェック（手動実行・テスト用）
+  python swing_notify.py now
 
-  # スケジューラー起動（毎営業日 15:30 に自動チェック）
-  python swing_notify.py
+  # スケジューラー起動（毎営業日 15:35 に自動チェック）
+  python swing_notify.py schedule
 
-■ ポジション管理:
-  position.json に現在のポジション情報を保存します。
-  手動で注文した後は position.json を更新してください。
-  （将来的に自動更新を追加できます）
-
-⚠ 注意: LINE Notify は 2025年3月末でサービス終了予定のため、
-         後継サービス (LINE Messaging API) への移行も別途検討してください。
+■ ポジション管理（翌朝注文執行後に手動更新）:
+  python swing_notify.py position set 2850 100 2710  # 買い執行後
+  python swing_notify.py position clear              # 売り執行後
+  python swing_notify.py position show               # 確認
 """
 
 import argparse
@@ -47,9 +53,9 @@ import schedule
 SYMBOL        = "2802.T"   # 味の素
 SYMBOL_NAME   = "味の素"
 
-# LINE Notify トークン（環境変数推奨）
-LINE_NOTIFY_TOKEN = os.environ.get("LINE_NOTIFY_TOKEN", "your_token_here")
-LINE_NOTIFY_URL   = "https://notify-api.line.me/api/notify"
+# Telegram Bot（環境変数推奨）
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "your_bot_token_here")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "your_chat_id_here")
 
 # ポジション状態ファイル
 POSITION_FILE = Path(__file__).parent / "position.json"
@@ -85,29 +91,29 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── LINE Notify 送信 ──────────────────────────────────────────────
+# ── Telegram 送信 ────────────────────────────────────────────────
 def send_line(message: str) -> bool:
-    """LINE Notify にメッセージを送信する。成功で True を返す。"""
-    if LINE_NOTIFY_TOKEN == "your_token_here":
-        log.warning("LINE_NOTIFY_TOKEN が未設定です。コンソール出力のみ行います。")
+    """Telegram Bot にメッセージを送信する。成功で True を返す。"""
+    if TELEGRAM_BOT_TOKEN == "your_bot_token_here":
+        log.warning("TELEGRAM_BOT_TOKEN が未設定です。コンソール出力のみ行います。")
         print("\n" + "=" * 50)
-        print("[LINE 通知プレビュー]")
+        print("[Telegram 通知プレビュー]")
         print(message)
         print("=" * 50 + "\n")
         return False
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         resp = requests.post(
-            LINE_NOTIFY_URL,
-            headers={"Authorization": f"Bearer {LINE_NOTIFY_TOKEN}"},
-            data={"message": message},
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=10,
         )
         resp.raise_for_status()
-        log.info("LINE 通知送信成功")
+        log.info("Telegram 通知送信成功")
         return True
     except requests.exceptions.RequestException as e:
-        log.error("LINE 通知失敗: %s", e)
+        log.error("Telegram 通知失敗: %s", e)
         return False
 
 
@@ -333,7 +339,7 @@ def build_no_signal_message(row: pd.Series, pos: dict, today: str) -> str:
 # ── メインチェック処理 ─────────────────────────────────────────
 def check_and_notify(daily_report: bool = False) -> None:
     """
-    シグナルチェックを実行し LINE に通知する。
+    シグナルチェックを実行し Telegram に通知する。
     daily_report=True の場合、シグナルなしでも日次レポートを送信。
     """
     now = datetime.now()
@@ -434,7 +440,7 @@ def cmd_show_position() -> None:
 
 # ── CLI エントリーポイント ─────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="スイングトレード LINE 通知ツール")
+    parser = argparse.ArgumentParser(description="スイングトレード Telegram 通知ツール")
     sub = parser.add_subparsers(dest="cmd")
 
     # --now: 即時チェック
