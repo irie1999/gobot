@@ -133,21 +133,8 @@ def generate_day_bars_5m(date_str: str, open_price: float, seed: int) -> list[di
 
 
 def load_bars(dates: list[str]) -> tuple[dict[str, list[dict]], str]:
-    try:
-        data   = fetch_yfinance(START_DATE, END_DATE)
-        source = f"yfinance ({SYMBOL} {INTERVAL})"
-    except Exception as e:
-        print(f"[警告] yfinance 取得失敗: {e}")
-        print("[フォールバック] 合成データを使用\n")
-        price = 3_560.0
-        data  = {}
-        for i, d in enumerate(dates):
-            seed = int(d.replace("-", "")) + i * 7
-            bars = generate_day_bars_5m(d, price, seed)
-            if bars:
-                price = bars[-1]["close"]
-                data[d] = bars
-        source = "合成データ (seed 固定, 5 分足)"
+    data   = fetch_yfinance(START_DATE, END_DATE)
+    source = f"yfinance ({SYMBOL} {INTERVAL})"
     return data, source
 
 
