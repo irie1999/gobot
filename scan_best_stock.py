@@ -21,7 +21,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # ── パラメータ（swing_backtest_4month.py と同設定） ──────────
-BACKTEST_DAYS  = 60                 # 直近2ヶ月
+BACKTEST_DAYS  = 365                # 直近1年
 EMA_FAST       = 5
 EMA_MID        = 20
 EMA_SLOW       = 50
@@ -235,7 +235,7 @@ def run_backtest(symbol: str, name: str) -> dict | None:
 # ── メイン ───────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print(f"  直近2ヶ月 スイングトレード 銘柄スキャン")
+    print(f"  直近1年 スイングトレード 銘柄スキャン")
     print(f"  初期資金: {INITIAL_CASH:,}円  リスク: {RISK_PER_TRADE*100:.0f}%/トレード")
     print(f"  対象: {len(SYMBOLS)}銘柄  期間: 直近{BACKTEST_DAYS}日")
     print("=" * 70)
@@ -256,7 +256,7 @@ if __name__ == "__main__":
 
     W = 70
     print("\n" + "=" * W)
-    print("  【利益率ランキング】直近2ヶ月")
+    print("  【利益率ランキング】直近1年")
     print("=" * W)
     print(f"  {'順位':>3}  {'銘柄':8}  {'名称':16}  {'回数':>4}  {'勝率':>5}  "
           f"{'損益':>10}  {'利益率':>7}")
