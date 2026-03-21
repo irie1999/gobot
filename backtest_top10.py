@@ -284,53 +284,124 @@ def main():
 
     print(" " * 60, end="\r")
 
-    # ── 銘柄別サマリー ────────────────────────────────────────
-    print(f"\n{'─'*65}")
-    print(f"  {'銘柄名':<16} {'取引':>4} {'勝率':>7} {'損益(円)':>10} {'収益率':>7} {'PF':>6}")
-    print(f"{'─'*65}")
+    m          = portfolio_metrics(all_trades)
+    total_pnl  = sum(r["total_pnl"] for r in results)
+    total_init = INITIAL_CASH * len(WATCH_LIST)
+    total_ret  = total_pnl / total_init * 100
+    years      = (datetime.strptime(end, "%Y-%m-%d") -
+                  datetime.strptime(start, "%Y-%m-%d")).days / 365.25
+    cagr       = ((total_init + total_pnl) / total_init) ** (1 / years) - 1
+
+    W  = 72   # 表の幅
+    SB = "═"  # 二重線
+    DB = "─"  # 単線
+
+    def bar(ch=DB, w=W): return ch * w
+    def row(*cols, widths, align="left"):
+        """cols を widths に合わせて整形した1行を返す。"""
+        cells = []
+        for i, (val, w) in enumerate(zip(cols, widths)):
+            if i == 0:
+                cells.append(f" {val:<{w}}")
+            else:
+                cells.append(f"{val:>{w}} ")
+        return "│" + "│".join(cells) + "│"
+
+    def pnl_str(v):
+        return f"+{v:,.0f}" if v >= 0 else f"{v:,.0f}"
+
+    def pct_str(v):
+        return f"+{v:.1f}%" if v >= 0 else f"{v:.1f}%"
+
+    def pf_str(v):
+        return "  ∞" if v == float("inf") else f"{v:.2f}"
+
+    # ── ヘッダー ──────────────────────────────────────────────
+    print()
+    print(f"╔{bar(SB)}╗")
+    title = f"バックテスト結果  {start} 〜 {end}  (約5年)"
+    print(f"║ {title:<{W-2}} ║")
+    init_str = (f"初期資金 {INITIAL_CASH:,}円/銘柄 × {len(WATCH_LIST)}銘柄"
+                f" = {total_init:,}円   "
+                f"コスト上限{MAX_COST_RATIO*100:.0f}%  "
+                f"リスク{RISK_PER_TRADE*100:.0f}%  "
+                f"ストップATR×{ATR_STOP_MULT}")
+    print(f"║ {init_str:<{W-2}} ║")
+    print(f"╠{bar(SB)}╣")
+
+    # ── 銘柄別テーブル ────────────────────────────────────────
+    # 列幅: 銘柄名16 | 取引4 | 勝率7 | 損益12 | 収益率8 | 最大利益12 | 最大損失12 | PF6
+    CW = [14, 4, 7, 12, 8, 10, 10, 6]
+    hdrs = ("銘柄名", "取引", "勝率", "損益(円)", "収益率", "最大利益", "最大損失", "PF")
+    print(f"║ {'銘柄別パフォーマンス':<{W-2}} ║")
+    print(f"╠{'┬'.join(DB*(w+2) for w in CW)}╣".replace("╠", "╟").replace("╣", "╢"))
+    print(row(*hdrs, widths=CW))
+    print(f"╠{'┼'.join(DB*(w+2) for w in CW)}╣".replace("╠", "╟").replace("╣", "╢"))
 
     for r in results:
-        pf_s = "  ∞" if r["profit_factor"] == float("inf") else f"{r['profit_factor']:6.2f}"
-        sign = "+" if r["total_pnl"] >= 0 else ""
-        print(
-            f"  {r['name']:<16} {r['trades']:>4} {r['win_rate']:>6.1f}%"
-            f" {sign}{r['total_pnl']:>9,.0f} {sign}{r['return_pct']:>5.1f}%"
-            f" {pf_s}"
-        )
+        td    = r["trades_detail"]
+        mxw   = max((t["pnl"] for t in td), default=0)
+        mxl   = min((t["pnl"] for t in td), default=0)
+        print(row(
+            r["name"],
+            r["trades"],
+            f"{r['win_rate']:.1f}%",
+            pnl_str(r["total_pnl"]),
+            pct_str(r["return_pct"]),
+            f"+{mxw:,.0f}",
+            f"{mxl:,.0f}",
+            pf_str(r["profit_factor"]),
+            widths=CW,
+        ))
 
-    print(f"{'─'*65}")
+    # 合計行
+    print(f"╠{'┼'.join(DB*(w+2) for w in CW)}╣".replace("╠", "╟").replace("╣", "╢"))
+    print(row(
+        "【合計】",
+        m["n_trades"],
+        f"{m['win_rate']:.1f}%",
+        pnl_str(total_pnl),
+        pct_str(total_ret),
+        f"+{m['best_trade']:,.0f}",
+        f"{m['worst_trade']:,.0f}",
+        pf_str(m["profit_factor"]),
+        widths=CW,
+    ))
+    print(f"╚{'╧'.join(SB*(w+2) for w in CW)}╝".replace("╚", "╙").replace("╝", "╜"))
 
-    # ── ポートフォリオ合計 ────────────────────────────────────
-    m             = portfolio_metrics(all_trades)
-    total_pnl     = sum(r["total_pnl"] for r in results)
-    total_init    = INITIAL_CASH * len(WATCH_LIST)
-    total_ret_pct = total_pnl / total_init * 100
-    years         = (datetime.strptime(end, "%Y-%m-%d") -
-                     datetime.strptime(start, "%Y-%m-%d")).days / 365.25
-    cagr          = ((total_init + total_pnl) / total_init) ** (1 / years) - 1
+    # ── ポートフォリオ指標 ────────────────────────────────────
+    pf_disp = "∞" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
+    sign    = "+" if total_pnl >= 0 else ""
 
-    pf_s = "∞（損失ゼロ）" if m["profit_factor"] == float("inf") \
-           else f"{m['profit_factor']:.2f}"
-    sign = "+" if total_pnl >= 0 else ""
+    print()
+    print(f"╔{bar(SB)}╗")
+    print(f"║ {'ポートフォリオ指標':<{W-2}} ║")
+    print(f"╠{bar(SB)}╣")
 
-    print(f"\n{'='*65}")
-    print(f"  【ポートフォリオ合計】")
-    print(f"{'='*65}")
-    print(f"  総損益            : {sign}{total_pnl:,.0f} 円")
-    print(f"  総収益率          : {sign}{total_ret_pct:.2f} %")
-    print(f"  年率換算(CAGR)    : {cagr*100:+.2f} %")
-    print(f"  総取引数          : {m['n_trades']} 回")
-    print(f"  勝率              : {m['win_rate']:.1f} %")
-    print(f"  プロフィットファクター: {pf_s}")
-    print(f"  最大ドローダウン  : -{m['max_drawdown']:.2f} %")
-    print(f"  平均保有日数      : {m['avg_hold_days']:.1f} 日")
-    print(f"  平均損益/トレード : {m['avg_pnl']:+,.0f} 円")
-    print(f"  最大利益トレード  : +{m['best_trade']:,.0f} 円")
-    print(f"  最大損失トレード  : {m['worst_trade']:,.0f} 円")
-    print(f"  決済内訳          : シグナル {m['signal_count']} / "
-          f"ストップ {m['stop_count']} / "
-          f"強制 {m['force_count']}")
-    print(f"{'='*65}\n")
+    # 2列レイアウト
+    KW, VW = 16, 16   # キー幅・値幅
+    GAP = 4
+    def kv(k, v): return f"  {k:<{KW}}: {v:<{VW}}"
+    def kv2(k1, v1, k2, v2):
+        return f"║ {kv(k1,v1)}{' '*GAP}{kv(k2,v2):<{W - KW - VW - GAP - 6}} ║"
+
+    print(kv2("総損益",          f"{sign}{total_pnl:,.0f} 円",
+              "年率(CAGR)",      f"{cagr*100:+.2f} %"))
+    print(kv2("総収益率",         f"{sign}{total_ret:.2f} %",
+              "最大DD",          f"-{m['max_drawdown']:.2f} %"))
+    print(kv2("総取引数",         f"{m['n_trades']} 回",
+              "平均保有日数",     f"{m['avg_hold_days']:.1f} 日"))
+    print(kv2("勝率",            f"{m['win_rate']:.1f} %",
+              "平均損益",        f"{m['avg_pnl']:+,.0f} 円"))
+    print(kv2("PF",             pf_disp,
+              "最大利益",        f"+{m['best_trade']:,.0f} 円"))
+    exit_str = (f"シグナル {m['signal_count']} / "
+                f"ストップ {m['stop_count']} / "
+                f"強制 {m['force_count']}")
+    print(kv2("決済内訳",         exit_str,
+              "最大損失",        f"{m['worst_trade']:,.0f} 円"))
+    print(f"╚{bar(SB)}╝")
+    print()
 
 
 if __name__ == "__main__":
