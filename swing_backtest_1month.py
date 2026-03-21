@@ -1,8 +1,12 @@
 """
 スイングトレード バックテスト【直近1ヶ月・現物取引版】
 銘柄  : トヨタ自動車 (7203.T)
-データ: yfinance 日足（直近30日）
+データ: yfinance 日足
 戦略  : マルチシグナル（MA クロス + RSI + Bollinger Bands）
+
+■ 仕組み:
+  - ウォームアップ期間（WARMUP_DAYS）分の過去データでインジケーターを初期化
+  - 直近1ヶ月（DAYS_AGO）のみ売買対象
 
 ■ 現物取引ルール:
   - 初期資金     : 100 万円
@@ -25,12 +29,15 @@ from collections import deque
 from datetime import datetime, timedelta
 
 # ── パラメータ ──────────────────────────────────────────────
-SYMBOL     = "7203.T"
-END_DATE   = datetime.today().strftime("%Y-%m-%d")
-DAYS_AGO   = 30
-START_DATE = (datetime.strptime(END_DATE, "%Y-%m-%d")
-              - timedelta(days=DAYS_AGO)).strftime("%Y-%m-%d")
-INTERVAL   = "1d"
+SYMBOL      = "7203.T"
+END_DATE    = datetime.today().strftime("%Y-%m-%d")
+DAYS_AGO    = 30                    # バックテスト対象期間（1ヶ月）
+WARMUP_DAYS = 90                    # インジケーター初期化用の追加取得日数
+START_DATE  = (datetime.strptime(END_DATE, "%Y-%m-%d")
+               - timedelta(days=DAYS_AGO)).strftime("%Y-%m-%d")
+FETCH_START = (datetime.strptime(END_DATE, "%Y-%m-%d")
+               - timedelta(days=DAYS_AGO + WARMUP_DAYS)).strftime("%Y-%m-%d")
+INTERVAL    = "1d"
 
 # MA クロス（日足スイング用）
 SHORT_PERIOD   = 5
@@ -59,14 +66,16 @@ def calc_qty(cash: float, price: float) -> int:
 
 
 # ── yfinance 日足取得 ─────────────────────────────────────────
-def fetch_bars() -> list[dict]:
+def fetch_bars() -> tuple[list[dict], list[dict]]:
+    """(ウォームアップ用バー, バックテスト対象バー) を返す"""
     import yfinance as yf
     import pandas as pd
 
     end_next = (datetime.strptime(END_DATE, "%Y-%m-%d")
                 + timedelta(days=1)).strftime("%Y-%m-%d")
-    print(f"[yfinance] {SYMBOL}  {START_DATE} 〜 {END_DATE}  interval={INTERVAL} を取得中...")
-    df = yf.download(SYMBOL, start=START_DATE, end=end_next,
+    print(f"[yfinance] {SYMBOL}  {FETCH_START} 〜 {END_DATE}  interval={INTERVAL} を取得中"
+          f"（ウォームアップ{WARMUP_DAYS}日 + 対象{DAYS_AGO}日）...")
+    df = yf.download(SYMBOL, start=FETCH_START, end=end_next,
                      interval=INTERVAL, auto_adjust=True, progress=False)
     if df.empty:
         raise RuntimeError("yfinance: データが空でした（ネット接続を確認してください）")
@@ -76,15 +85,20 @@ def fetch_bars() -> list[dict]:
     if df.index.tz is not None:
         df.index = df.index.tz_convert("Asia/Tokyo").tz_localize(None)
 
-    bars = [
+    all_bars = [
         {"dt":     row.Index.to_pydatetime(),
          "open":   float(row.Open),  "high":  float(row.High),
          "low":    float(row.Low),   "close": float(row.Close),
          "volume": int(row.Volume)}
         for row in df.itertuples()
     ]
-    print(f"[yfinance] 取得成功: {len(bars)} 本\n")
-    return bars
+
+    cutoff   = datetime.strptime(START_DATE, "%Y-%m-%d")
+    warmup   = [b for b in all_bars if b["dt"] < cutoff]
+    target   = [b for b in all_bars if b["dt"] >= cutoff]
+    print(f"[yfinance] 取得成功: 全{len(all_bars)}本  "
+          f"（ウォームアップ{len(warmup)}本 / 対象{len(target)}本）\n")
+    return warmup, target
 
 
 # ── インジケーター ────────────────────────────────────────────
@@ -164,8 +178,13 @@ def long_exit(ind: dict, price: float) -> bool:
 
 
 # ── バックテスト ──────────────────────────────────────────────
-def backtest(bars: list[dict]) -> tuple[list[dict], list[float]]:
-    engine    = IndicatorEngine()
+def backtest(warmup: list[dict], bars: list[dict]) -> tuple[list[dict], list[float]]:
+    engine = IndicatorEngine()
+
+    # ウォームアップ：インジケーターを育てるが売買しない
+    for bar in warmup:
+        engine.feed(bar["close"])
+
     in_pos    = False
     entry_p   = 0.0
     entry_dt  = None
@@ -339,8 +358,8 @@ def report(trades: list[dict], equity: list[float], n_bars: int):
 
 # ── エントリーポイント ────────────────────────────────────────
 if __name__ == "__main__":
-    bars = fetch_bars()
+    warmup, bars = fetch_bars()
     print(f"バックテスト実行中... ({len(bars)} 営業日)\n")
-    trades, equity = backtest(bars)
+    trades, equity = backtest(warmup, bars)
     print(f"完了: {len(trades)} トレード\n")
     report(trades, equity, len(bars))
