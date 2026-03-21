@@ -27,7 +27,27 @@ if not TOKEN or not CHAT_ID:
     print('  export TELEGRAM_CHAT_ID="123456789"')
     sys.exit(1)
 
+# ── Step 0: Webhook 削除 + 競合解消 ─────────────────────────
+print("Step 0: Webhook 削除 + 競合するポーリングをリセット ...")
+try:
+    r = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
+        json={"drop_pending_updates": True},
+        timeout=10,
+    )
+    j = r.json()
+    if j.get("ok"):
+        print("  ✅ Webhook 削除 / pending updates クリア完了")
+    else:
+        print(f"  ⚠ deleteWebhook: {j}")
+except Exception as e:
+    print(f"  ⚠ deleteWebhook エラー: {e}")
+
+import time
+time.sleep(2)   # 他のポーリングが切れるのを待つ
+
 # ── Step 1: Bot 情報確認 ─────────────────────────────────────
+print()
 print("Step 1: Bot 接続確認 (getMe) ...")
 try:
     r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe", timeout=10)
