@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 # ── パラメータ ──────────────────────────────────────────────
 SYMBOL   = "7203.T"
 END_DATE = "2026-03-21"
-DAYS_AGO = 365 * 2          # 2年分（日足は長期取得可能）
+DAYS_AGO = 30               # 1ヶ月分
 START_DATE = (datetime.strptime(END_DATE, "%Y-%m-%d")
               - timedelta(days=DAYS_AGO)).strftime("%Y-%m-%d")
 INTERVAL = "1d"
@@ -242,7 +242,7 @@ def report(trades: list[dict], equity: list[float]):
     print("=" * W)
     print(f"  スイングトレード バックテスト【現物取引版】  {SYMBOL} (トヨタ自動車)")
     print("=" * W)
-    print(f"  期間     : {START_DATE} 〜 {END_DATE}  ({DAYS_AGO // 365} 年間)")
+    print(f"  期間     : {START_DATE} 〜 {END_DATE}  ({DAYS_AGO} 日間)")
     print(f"  データ   : yfinance 日足")
     print(f"  戦略     : MA({SHORT_PERIOD}/{LONG_PERIOD}) + RSI({RSI_PERIOD}) + BB({BB_PERIOD},{BB_K}σ)")
     print(f"  タイムカット: 最大 {MAX_HOLD_DAYS} 営業日")
@@ -296,7 +296,7 @@ def report(trades: list[dict], equity: list[float]):
             cur_l += 1; cur_w = 0; streak_l = max(streak_l, cur_l)
 
     print("\n" + "=" * W)
-    print(f"  【{DAYS_AGO // 365} 年間サマリー】（スイングトレード・現物）")
+    print(f"  【直近 {DAYS_AGO} 日間サマリー】（スイングトレード・現物）")
     print("=" * W)
     print(f"  初期資金             : {INITIAL_CASH:>14,.0f} 円")
     print(f"  最終資金残高         : {final:>14,.0f} 円")
