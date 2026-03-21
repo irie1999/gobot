@@ -25,10 +25,10 @@ from datetime import datetime, timedelta
 # ── パラメータ ──────────────────────────────────────────────
 SYMBOL     = "7203.T"
 END_DATE   = "2026-03-21"
-DAYS_AGO   = 60
+DAYS_AGO   = 7
 START_DATE = (datetime.strptime(END_DATE, "%Y-%m-%d")
               - timedelta(days=DAYS_AGO)).strftime("%Y-%m-%d")
-INTERVAL   = "5m"
+INTERVAL   = "1m"
 
 # MA クロス
 SHORT_PERIOD   = 3
@@ -47,7 +47,7 @@ BB_K      = 2.0
 INITIAL_CASH = 1_000_000   # 100 万円
 LOT_SIZE     = 100          # 1 単元 = 100 株
 MAX_QTY      = 500          # 最大取引株数（5 単元）
-MAX_HOLD_BARS = 6           # 6 本 × 5 分 = 30 分タイムカット
+MAX_HOLD_BARS = 30          # 30 本 × 1 分 = 30 分タイムカット
 
 
 # ── 取引株数計算（買付余力内の最大単元数） ──────────────────
@@ -279,7 +279,7 @@ DAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 def report(result: dict, source: str):
     W = 74
     print("=" * W)
-    print(f"  直近 {DAYS_AGO} 日デイトレ バックテスト【現物取引版】  {SYMBOL} (トヨタ)")
+    print(f"  直近 {DAYS_AGO} 日デイトレ バックテスト【現物取引版】  {SYMBOL} (トヨタ自動車)")
     print("=" * W)
     print(f"  期間     : {START_DATE} 〜 {END_DATE}")
     print(f"  データ   : {source}")
