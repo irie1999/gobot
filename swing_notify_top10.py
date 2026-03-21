@@ -92,10 +92,11 @@ BB_PERIOD       = 20
 BB_K            = 2.0
 ATR_PERIOD      = 14
 ATR_STOP_MULT   = 1.5
-RISK_PER_TRADE  = 0.03
+RISK_PER_TRADE  = 0.03   # 1トレードで許容する損失の割合（口座残高比）
 INITIAL_CASH    = 500_000
-LOT_SIZE        = 100
-MAX_QTY         = 500
+# S株（1株単位）設定
+MAX_COST_RATIO  = 0.30   # 1銘柄に投入する資金の上限（口座残高比）
+MAX_QTY         = 3000   # 最大株数（上限ガード）
 
 # ── ロギング ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -269,11 +270,33 @@ def handle_callback(callback_query: dict) -> None:
         log.warning("不明なコールバックデータ: %s", data)
 
 
+def _reset_webhook() -> None:
+    """
+    Webhook を削除して pending updates をクリアする。
+    409 Conflict（複数の getUpdates が競合）を防ぐために
+    ポーリング開始前に必ず呼ぶ。
+    """
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+            timeout=10,
+        )
+        if r.json().get("ok"):
+            log.info("Webhook 削除 / pending updates クリア完了")
+        else:
+            log.warning("deleteWebhook 応答: %s", r.json())
+    except Exception as e:
+        log.warning("deleteWebhook エラー（無視して続行）: %s", e)
+    time.sleep(2)  # 他のポーリング接続が切れるのを待つ
+
+
 def run_callback_handler() -> None:
     """
     Telegram のコールバッククエリをロングポーリングで受信し続けるスレッド。
     schedule モード時にバックグラウンドスレッドとして起動する。
     """
+    _reset_webhook()
     log.info("コールバックハンドラー起動（ロングポーリング）")
     offset = None
 
@@ -370,14 +393,26 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── 推奨株数計算 ───────────────────────────────────────────────
-def calc_qty(cash: float, atr: float) -> int:
+# ── 推奨株数計算（S株 = 1株単位） ─────────────────────────────
+def calc_qty(cash: float, atr: float, close: float = 0.0) -> int:
+    """
+    S株（1株単位）向け推奨株数。
+    ① リスク基準 : 許容損失額 / ストップ幅
+    ② コスト上限 : 口座残高 × MAX_COST_RATIO / 株価
+    ①②の小さい方を採用し MAX_QTY で上限ガード。
+    """
     stop_dist = atr * ATR_STOP_MULT
     if stop_dist <= 0:
         return 0
-    raw  = int(cash * RISK_PER_TRADE / stop_dist)
-    lots = min(raw // LOT_SIZE, MAX_QTY // LOT_SIZE)
-    return lots * LOT_SIZE
+    # ① ATR リスク基準
+    qty_by_risk = int(cash * RISK_PER_TRADE / stop_dist)
+    # ② コスト上限基準
+    if close > 0:
+        qty_by_cost = int(cash * MAX_COST_RATIO / close)
+    else:
+        qty_by_cost = qty_by_risk
+    qty = min(qty_by_risk, qty_by_cost, MAX_QTY)
+    return max(qty, 1)   # 最低1株
 
 
 # ── ポジション管理 ─────────────────────────────────────────────
@@ -441,8 +476,15 @@ def build_buy_message(symbol: str, name: str,
     close    = row["close"]
     atr      = row["atr"]
     stop     = close - atr * ATR_STOP_MULT
-    qty      = calc_qty(INITIAL_CASH, atr)
+    qty      = calc_qty(INITIAL_CASH, atr, close)
     cost_est = close * qty
+    # 株数の根拠を表示（リスク基準 or コスト上限で絞られたか）
+    qty_risk = int(INITIAL_CASH * RISK_PER_TRADE / (atr * ATR_STOP_MULT)) if atr > 0 else 0
+    qty_cost = int(INITIAL_CASH * MAX_COST_RATIO / close) if close > 0 else 0
+    if qty_cost < qty_risk:
+        qty_basis = f"コスト上限({MAX_COST_RATIO*100:.0f}%)"
+    else:
+        qty_basis = f"リスク管理({RISK_PER_TRADE*100:.0f}%損失許容)"
     msg = (
         f"\n【買いシグナル発生】{name}({symbol})\n"
         f"─────────────────────\n"
@@ -453,8 +495,8 @@ def build_buy_message(symbol: str, name: str,
         f"EMA{EMA_SLOW}上 : {'✓ 上昇トレンド中' if close > row['ema_slow'] else '✗'}\n"
         f"RSI         : {row['rsi']:.1f}\n"
         f"─────────────────────\n"
-        f"★ 翌朝 SBI証券で成行買い\n"
-        f"推奨株数    : {qty} 株\n"
+        f"★ SBI証券 S株で成行買い（1株単位）\n"
+        f"推奨株数    : {qty} 株  ← {qty_basis}\n"
         f"概算コスト  : {cost_est:,.0f} 円\n"
         f"ストップ目安: {stop:,.0f} 円 (ATR×{ATR_STOP_MULT})\n"
         f"ATR         : {atr:.1f} 円\n"
@@ -462,7 +504,7 @@ def build_buy_message(symbol: str, name: str,
         f"⬇ 注文執行後にボタンをタップ"
     )
     buttons = [[{
-        "text": f"✅ 成行買い済み（{qty}株）→ ポジション自動登録",
+        "text": f"✅ S株買い済み（{qty}株）→ ポジション自動登録",
         "callback_data": f"BUY_DONE:{symbol}:{close:.0f}:{qty}:{stop:.0f}",
     }]]
     return msg, buttons
@@ -631,6 +673,113 @@ def cmd_clear_position(symbol: str) -> None:
     print(f"[{symbol} {name}] ポジションをクリアしました")
 
 
+def cmd_test_notify(signal_type: str = "buy") -> None:
+    """
+    モックデータで Telegram 通知を送り、ボタン動作を実機確認する。
+    yfinance 不要。環境変数 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID が必要。
+    """
+    import pandas as pd
+
+    if not _is_token_set():
+        print("❌ TELEGRAM_BOT_TOKEN が未設定です。")
+        print('  export TELEGRAM_BOT_TOKEN="..."')
+        print('  export TELEGRAM_CHAT_ID="..."')
+        return
+
+    SYMBOL = "8604.T"
+    NAME   = "野村HD（テスト）"
+    TODAY  = datetime.now().strftime("%Y-%m-%d(%a)")
+
+    # 野村HD の実勢に近いモック値（S株想定）
+    CLOSE  = 850.0
+    ATR    = 20.0
+    STOP   = CLOSE - ATR * ATR_STOP_MULT
+    QTY    = calc_qty(INITIAL_CASH, ATR, CLOSE)
+
+    mock_row_buy = pd.Series({
+        "close": CLOSE, "low": 840.0, "rsi": 52.0, "atr": ATR,
+        "ema_slow": 820.0, "ema_fast": 848.0, "ema_mid": 840.0,
+        "bb_upper": 920.0, "bb_lower": 780.0, "bb_band": 70.0,
+        "ema_cross_up": False, "entry_sig": True, "exit_sig": False,
+    })
+    mock_row_sell = pd.Series({
+        "close": 920.0, "low": 910.0, "rsi": 68.0, "atr": ATR,
+        "ema_slow": 820.0, "ema_fast": 910.0, "ema_mid": 890.0,
+        "bb_upper": 920.0, "bb_lower": 780.0, "bb_band": 70.0,
+        "ema_cross_up": False, "entry_sig": False, "exit_sig": True,
+    })
+    mock_row_stop = pd.Series({
+        "close": 805.0, "low": 803.0, "rsi": 42.0, "atr": ATR,
+        "ema_slow": 820.0, "ema_fast": 808.0, "ema_mid": 815.0,
+        "bb_upper": 920.0, "bb_lower": 780.0, "bb_band": 70.0,
+        "ema_cross_up": False, "entry_sig": False, "exit_sig": False,
+    })
+    mock_pos = {
+        "in_pos": True, "entry_price": CLOSE, "stop_price": STOP,
+        "qty": QTY, "entry_dt": datetime.now().strftime("%Y-%m-%d"),
+    }
+
+    label_map = {"buy": "買いシグナル", "sell": "売りシグナル", "stop": "ストップ到達"}
+    prefix_map = {"buy": "BUY_DONE", "sell": "SELL_DONE", "stop": "STOP_DONE"}
+
+    print(f"\n{'='*60}")
+    print(f"  Telegram 通知テスト: {label_map[signal_type]}")
+    print(f"  ※ モックデータ使用（{NAME}）")
+    print(f"{'='*60}")
+
+    # 通知送信
+    _reset_webhook()
+    if signal_type == "buy":
+        msg, buttons = build_buy_message(SYMBOL, NAME, mock_row_buy, TODAY)
+    elif signal_type == "sell":
+        msg, buttons = build_sell_message(SYMBOL, NAME, mock_row_sell, mock_pos, TODAY)
+    else:
+        msg, buttons = build_stop_message(SYMBOL, NAME, mock_row_stop, mock_pos, TODAY)
+
+    ok = send_telegram_keyboard(msg, buttons)
+    if not ok:
+        print("  ❌ 送信失敗。ログを確認してください。")
+        return
+
+    print(f"  ✅ 通知送信完了")
+    print(f"  ⏳ Telegram のボタンをタップしてください（60秒以内）...")
+
+    # コールバック待機
+    offset   = None
+    deadline = time.time() + 60
+    expected = prefix_map[signal_type]
+
+    while time.time() < deadline:
+        remaining = int(deadline - time.time())
+        try:
+            url    = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            params = {
+                "timeout":         min(10, remaining),
+                "allowed_updates": ["callback_query"],
+            }
+            if offset is not None:
+                params["offset"] = offset
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            for upd in resp.json().get("result", []):
+                offset = upd["update_id"] + 1
+                cq = upd.get("callback_query")
+                if cq:
+                    data = cq.get("data", "")
+                    if data.startswith(expected):
+                        print(f"  ✅ コールバック受信: {data}")
+                        handle_callback(cq)
+                        print(f"\n  テスト完了 ✅")
+                        return
+                    else:
+                        answer_callback_query(cq["id"], "")   # 読み捨て
+        except Exception as e:
+            log.warning("テスト待機エラー: %s", e)
+            time.sleep(2)
+
+    print("  ⏰ タイムアウト（ボタンがタップされませんでした）")
+
+
 def cmd_show_positions() -> None:
     print("\n現在のポジション一覧:")
     print("-" * 65)
@@ -659,6 +808,12 @@ if __name__ == "__main__":
     sub.add_parser(
         "schedule",
         help=f"スケジューラー起動（毎営業日 {RUN_TIME} チェック + ボタン応答を常時待機）"
+    )
+
+    p_test = sub.add_parser("test", help="Telegram 通知 + ボタン動作を実機確認")
+    p_test.add_argument(
+        "--type", choices=["buy", "sell", "stop"], default="buy",
+        help="送信するシグナル種別（デフォルト: buy）",
     )
 
     p_pos = sub.add_parser("position", help="ポジション管理（緊急時・確認用）")
@@ -700,6 +855,9 @@ if __name__ == "__main__":
 
     elif args.cmd == "now":
         check_all(daily_report=getattr(args, "daily", False))
+
+    elif args.cmd == "test":
+        cmd_test_notify(args.type)
 
     elif args.cmd == "position":
         if args.pos_cmd == "show":
