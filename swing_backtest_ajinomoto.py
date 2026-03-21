@@ -178,6 +178,11 @@ def backtest(df: pd.DataFrame) -> tuple[list[dict], list[tuple]]:
     """
     df: バックテスト対象期間のみ（インジケーター計算済み）
     returns: (trades, equity_curve)
+
+    ■ 執行モデル（翌営業日始値）:
+      シグナル発生日の終値確定後 → 人間が翌朝に成行注文 → 翌日始値で約定
+      エントリー / シグナルエグジット / ストップロス すべて翌日始値
+      ※ ギャップダウンでストップを割り込んだ場合はその日の始値で執行（スリッページ再現）
     """
     trades      = []
     equity      = [(df.index[0], float(INITIAL_CASH))]
@@ -187,66 +192,92 @@ def backtest(df: pd.DataFrame) -> tuple[list[dict], list[tuple]]:
     entry_price = 0.0
     stop_price  = 0.0
     entry_dt    = None
+    signal_dt   = None          # エントリーシグナル発生日
     qty         = 0
+
+    # ── 翌日執行用フラグ ─────────────────────────────────────
+    pending_entry     = False
+    pending_entry_atr = 0.0
+    pending_entry_sig_dt = None  # シグナル発生日（記録用）
+
+    pending_exit      = False
+    pending_exit_reason = ""
+    pending_exit_sig_dt = None   # シグナル発生日（記録用）
 
     for dt, row in df.iterrows():
         if any(pd.isna([row["rsi"], row["ema_slow"], row["atr"],
                         row["bb_upper"], row["bb_lower"]])):
             continue
 
-        # ── ポジション保有中 ──────────────────────────────────
-        if in_pos:
-            exit_reason = None
-
-            # ハードストップ（当日安値で判定）
-            if row["low"] <= stop_price:
-                exit_price  = stop_price
-                exit_reason = f"ストップロス(ATR×{ATR_STOP_MULT})"
-
-            # シグナルエグジット（終値）
-            elif row["exit_sig"]:
-                exit_price  = row["close"]
-                exit_reason = "シグナル"
-
-            if exit_reason:
-                pnl   = (exit_price - entry_price) * qty
-                cash += exit_price * qty
-                trades.append({
-                    "entry_dt":    entry_dt,
-                    "exit_dt":     dt,
-                    "entry_price": entry_price,
-                    "exit_price":  exit_price,
-                    "stop_price":  stop_price,
-                    "qty":         qty,
-                    "hold_days":   (dt - entry_dt).days,
-                    "pnl":         pnl,
-                    "cash":        cash,
-                    "note":        exit_reason,
-                })
-                equity.append((dt, cash))
-                in_pos = False
-
-        # ── 新規エントリー ────────────────────────────────────
-        if not in_pos and row["entry_sig"]:
-            qty = calc_qty(cash, row["atr"])
-            if qty > 0:
-                ep          = row["close"]
-                sp          = ep - row["atr"] * ATR_STOP_MULT
-                cost        = ep * qty
+        # ── 翌日始値：ペンディングエントリー執行 ────────────
+        if pending_entry and not in_pos:
+            new_qty = calc_qty(cash, pending_entry_atr)
+            if new_qty > 0:
+                ep   = row["open"]                          # 翌日始値で約定
+                sp   = ep - pending_entry_atr * ATR_STOP_MULT
+                cost = ep * new_qty
                 if cost <= cash:
                     cash       -= cost
                     entry_price = ep
                     stop_price  = sp
-                    entry_dt    = dt
+                    entry_dt    = dt                        # 執行日
+                    signal_dt   = pending_entry_sig_dt      # シグナル発生日
+                    qty         = new_qty
                     in_pos      = True
                     equity.append((dt, cash))
+            pending_entry     = False
+            pending_entry_atr = 0.0
 
-    # 最終バーで未決済を強制クローズ
+        # ── 翌日始値：ペンディングエグジット執行 ────────────
+        if pending_exit and in_pos:
+            # ギャップリスク: 始値がストップより低ければ始値で執行
+            exit_price  = row["open"]
+            pnl         = (exit_price - entry_price) * qty
+            cash       += exit_price * qty
+            trades.append({
+                "signal_dt":   pending_exit_sig_dt,
+                "entry_dt":    entry_dt,
+                "exit_dt":     dt,                         # 執行日
+                "entry_price": entry_price,
+                "exit_price":  exit_price,
+                "stop_price":  stop_price,
+                "qty":         qty,
+                "hold_days":   (dt - entry_dt).days,
+                "pnl":         pnl,
+                "cash":        cash,
+                "note":        pending_exit_reason,
+            })
+            equity.append((dt, cash))
+            in_pos              = False
+            pending_exit        = False
+            pending_exit_reason = ""
+
+        # ── ポジション保有中：当日終値でシグナル判定 → 翌日執行 ──
+        if in_pos and not pending_exit:
+            # ハードストップ（当日安値でトリガー判定 → 翌日始値執行）
+            if row["low"] <= stop_price:
+                pending_exit          = True
+                pending_exit_reason   = f"ストップロス(ATR×{ATR_STOP_MULT})"
+                pending_exit_sig_dt   = dt
+            # シグナルエグジット
+            elif row["exit_sig"]:
+                pending_exit          = True
+                pending_exit_reason   = "シグナル"
+                pending_exit_sig_dt   = dt
+
+        # ── 新規エントリー：当日終値でシグナル判定 → 翌日始値執行 ──
+        if not in_pos and not pending_entry and row["entry_sig"]:
+            pending_entry         = True
+            pending_entry_atr     = row["atr"]
+            pending_entry_sig_dt  = dt
+
+    # 最終バーで未決済を強制クローズ（終値）
     if in_pos:
         last = df.iloc[-1]
         pnl  = (last["close"] - entry_price) * qty
         cash += last["close"] * qty
         trades.append({
+            "signal_dt":   None,
             "entry_dt":    entry_dt,
             "exit_dt":     df.index[-1],
             "entry_price": entry_price,
@@ -337,6 +368,7 @@ def report(df_target: pd.DataFrame, trades: list[dict],
     print(f"  エントリー   : 終値>EMA{EMA_SLOW}（トレンド） かつ "
           f"[RSI<{RSI_ENTRY} or EMAクロス or BB下限タッチ]")
     print(f"  エグジット   : RSI>{RSI_EXIT} or BB上限 or EMA短期クロス or ATR×{ATR_STOP_MULT}ストップ")
+    print(f"  ★執行モデル  : シグナル発生翌営業日の始値で成行執行（人間が翌朝注文）")
     print(f"  ポジション   : リスク{RISK_PER_TRADE*100:.1f}%÷ATR×{ATR_STOP_MULT}で株数算出")
     print(f"  初期資金     : {INITIAL_CASH:,.0f} 円")
     print("=" * W)
@@ -345,16 +377,20 @@ def report(df_target: pd.DataFrame, trades: list[dict],
     if not trades:
         print("\n  ※ 期間内にトレードは発生しませんでした")
     else:
-        print(f"\n{'#':>3}  {'エントリー':10} {'エグジット':10} "
+        print(f"\n  ※ エントリー/エグジット日は【執行日（翌営業日始値）】")
+        print(f"\n{'#':>3}  {'シグナル':8} {'エントリー':10} {'エグジット':10} "
               f"{'保有':>4} {'株数':>4} {'取得値':>7} {'決済値':>7} "
               f"{'ストップ':>7} {'損益':>10} {'資金残高':>13}  メモ")
-        print("-" * W)
+        print("-" * (W + 10))
         for i, t in enumerate(trades, 1):
-            e_dow = DAY_JP[t["entry_dt"].weekday()]
-            x_dow = DAY_JP[t["exit_dt"].weekday()]
-            sign  = "+" if t["pnl"] >= 0 else ""
+            e_dow   = DAY_JP[t["entry_dt"].weekday()]
+            x_dow   = DAY_JP[t["exit_dt"].weekday()]
+            sign    = "+" if t["pnl"] >= 0 else ""
+            sig_str = (t["signal_dt"].strftime("%m/%d")
+                       if t.get("signal_dt") else "  ─  ")
             print(
                 f"  {i:>2}  "
+                f"{sig_str}→     "
                 f"{t['entry_dt'].strftime('%m/%d')}({e_dow})    "
                 f"{t['exit_dt'].strftime('%m/%d')}({x_dow})    "
                 f"{t['hold_days']:>3}日  "
@@ -397,12 +433,14 @@ def report(df_target: pd.DataFrame, trades: list[dict],
     # ── 損益バーチャート ─────────────────────────────────────
     if trades:
         max_abs = max(abs(t["pnl"]) for t in trades) or 1
-        print(f"\n--- トレード別損益チャート ---")
+        print(f"\n--- トレード別損益チャート（シグナル日→執行日） ---")
         for i, t in enumerate(trades, 1):
-            w    = max(1, int(abs(t["pnl"]) / max_abs * 38))
-            bar  = ("▪" if t["pnl"] >= 0 else "▫") * w
-            sign = "+" if t["pnl"] >= 0 else ""
-            print(f"  #{i:>2} {t['entry_dt'].strftime('%m/%d')}→"
+            w       = max(1, int(abs(t["pnl"]) / max_abs * 38))
+            bar     = ("▪" if t["pnl"] >= 0 else "▫") * w
+            sign    = "+" if t["pnl"] >= 0 else ""
+            sig_str = (t["signal_dt"].strftime("%m/%d")
+                       if t.get("signal_dt") else "─────")
+            print(f"  #{i:>2} sig:{sig_str}→exec:{t['entry_dt'].strftime('%m/%d')}→"
                   f"{t['exit_dt'].strftime('%m/%d')} "
                   f"({t['hold_days']:>2}日) "
                   f"{sign}{t['pnl']:>9,.0f}円  |{bar}")
