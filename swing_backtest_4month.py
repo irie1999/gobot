@@ -51,12 +51,12 @@ BACKTEST_DAYS   = 120               # バックテスト対象: 直近4ヶ月
 # EMA
 EMA_FAST        = 5
 EMA_MID         = 20
-EMA_SLOW        = 200
+EMA_SLOW        = 50                # トレンドフィルター（200→50 で緩和）
 
 # RSI
 RSI_PERIOD      = 14
-RSI_ENTRY       = 40                # これ以下でエントリー候補
-RSI_EXIT        = 65                # これ以上でエグジット
+RSI_ENTRY       = 55                # これ以下でエントリー候補（40→55 で緩和）
+RSI_EXIT        = 60                # これ以上でエグジット（65→60 で早め利確）
 
 # Bollinger Bands
 BB_PERIOD       = 20
@@ -64,7 +64,7 @@ BB_K            = 2.0
 
 # ATR
 ATR_PERIOD      = 14
-ATR_STOP_MULT   = 2.5               # ストップロス = ATR × 2.5
+ATR_STOP_MULT   = 1.5               # ストップロス = ATR × 1.5（2.5→1.5 で資金回転向上）
 
 # リスク管理
 RISK_PER_TRADE  = 0.015             # 1トレードあたりのリスク許容 1.5%
@@ -107,6 +107,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_mid"]  = c.ewm(span=EMA_MID,   adjust=False).mean()
     df["ema_slow"] = c.ewm(span=EMA_SLOW,  adjust=False).mean()
 
+    # EMA ゴールデンクロス（fast が mid を上抜けた瞬間）
+    df["ema_cross_up"] = (
+        (df["ema_fast"] > df["ema_mid"]) &
+        (df["ema_fast"].shift(1) <= df["ema_mid"].shift(1))
+    )
+
     # RSI
     delta   = c.diff()
     gain    = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -132,16 +138,25 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── エントリー / エグジットシグナル ──────────────────────────
 def add_signals(df: pd.DataFrame) -> pd.DataFrame:
-    # エントリー: EMA200上 AND RSI押し目 AND BB下限付近
-    df["entry_sig"] = (
-        (df["close"] > df["ema_slow"]) &
-        (df["rsi"]   < RSI_ENTRY) &
-        (df["close"] <= df["bb_lower"] + df["bb_band"])
-    )
-    # エグジット: RSI高値 OR BB上限 OR 短期クロス下
+    # トレンドフィルター: EMA50 上（上昇トレンド中のみロング）
+    trend_up = df["close"] > df["ema_slow"]
+
+    # シグナルA: RSI 押し目（売られすぎからの反発）
+    sig_rsi = df["rsi"] < RSI_ENTRY
+
+    # シグナルB: EMA ゴールデンクロス（短期上抜け）
+    sig_cross = df["ema_cross_up"]
+
+    # シグナルC: ボリンジャー下限タッチ（平均回帰）
+    sig_bb = df["close"] <= df["bb_lower"] + df["bb_band"]
+
+    # エントリー: トレンド方向 AND (A or B or C のどれか1つ)
+    df["entry_sig"] = trend_up & (sig_rsi | sig_cross | sig_bb)
+
+    # エグジット: RSI 高値 OR BB上限 OR 短期クロス下
     df["exit_sig"] = (
-        (df["rsi"]   > RSI_EXIT) |
-        (df["close"] >= df["bb_upper"]) |
+        (df["rsi"]      > RSI_EXIT) |
+        (df["close"]    >= df["bb_upper"]) |
         (df["ema_fast"] < df["ema_mid"])
     )
     return df
@@ -319,7 +334,8 @@ def report(df_target: pd.DataFrame, trades: list[dict],
     print(f"  データ       : yfinance 日足（最大期間取得・ウォームアップ済み）")
     print(f"  戦略         : EMA({EMA_FAST}/{EMA_MID}/{EMA_SLOW}) + RSI({RSI_PERIOD}) "
           f"+ BB({BB_PERIOD},{BB_K}σ) + ATR({ATR_PERIOD})")
-    print(f"  エントリー   : 終値>EMA{EMA_SLOW} かつ RSI<{RSI_ENTRY} かつ BB下限付近")
+    print(f"  エントリー   : 終値>EMA{EMA_SLOW}（トレンド） かつ "
+          f"[RSI<{RSI_ENTRY} or EMAクロス or BB下限タッチ]")
     print(f"  エグジット   : RSI>{RSI_EXIT} or BB上限 or EMA短期クロス or ATR×{ATR_STOP_MULT}ストップ")
     print(f"  ポジション   : リスク{RISK_PER_TRADE*100:.1f}%÷ATR×{ATR_STOP_MULT}で株数算出")
     print(f"  初期資金     : {INITIAL_CASH:,.0f} 円")
