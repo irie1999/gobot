@@ -6,6 +6,8 @@
   python backtest_top10.py
 """
 
+import base64
+import io
 import os
 import subprocess
 import sys
@@ -14,15 +16,15 @@ warnings.filterwarnings("ignore")
 
 from datetime import datetime, timedelta
 
+import logging
+import matplotlib
+matplotlib.use("Agg")
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from openpyxl import Workbook
-from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.chart.series import DataPoint
-from openpyxl.styles import (Alignment, Border, Font, GradientFill,
-                              PatternFill, Side)
-from openpyxl.utils import get_column_letter
 
 # ── 戦略パラメータ（swing_notify_top10.py と完全一致） ──────────
 WATCH_LIST = [
@@ -261,9 +263,9 @@ def portfolio_metrics(all_trades: list) -> dict:
     }
 
 
-# ── Excel エクスポート ────────────────────────────────────────
-def export_excel(results: list, all_trades: list, m: dict,
-                 start: str, end: str, path: str = "backtest_result.xlsx") -> str:
+# ── HTML エクスポート ─────────────────────────────────────────
+def export_html(results: list, all_trades: list, m: dict,
+                start: str, end: str, path: str = "backtest_result.html") -> str:
 
     total_pnl  = sum(r["total_pnl"] for r in results)
     total_init = INITIAL_CASH * len(WATCH_LIST)
@@ -271,385 +273,272 @@ def export_excel(results: list, all_trades: list, m: dict,
     years      = (datetime.strptime(end, "%Y-%m-%d") -
                   datetime.strptime(start, "%Y-%m-%d")).days / 365.25
     cagr       = ((total_init + total_pnl) / total_init) ** (1 / years) - 1
+    sign       = "+" if total_pnl >= 0 else ""
+    pf_disp    = "∞" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
 
-    wb = Workbook()
+    plt.rcParams["font.family"] = ["IPAexGothic", "Noto Sans CJK JP",
+                                   "Hiragino Sans", "MS Gothic", "sans-serif"]
 
-    # ── 共通スタイル定義 ─────────────────────────────────────
-    C_HEADER_BG  = "1F3864"   # 濃紺
-    C_HEADER_FG  = "FFFFFF"
-    C_SUB_BG     = "2E75B6"   # 中青
-    C_ALT        = "D9E1F2"   # 薄青（偶数行）
-    C_PROFIT     = "C6EFCE"   # 薄緑
-    C_PROFIT_FG  = "276221"
-    C_LOSS       = "FFC7CE"   # 薄赤
-    C_LOSS_FG    = "9C0006"
-    C_TOTAL_BG   = "FFD966"   # 黄（合計行）
-    C_TOTAL_FG   = "000000"
-    C_BORDER     = "B8CCE4"
+    def fig_to_b64(fig) -> str:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode()
 
-    def hdr_font(sz=11, bold=True, color=C_HEADER_FG):
-        return Font(name="Yu Gothic UI", size=sz, bold=bold, color=color)
-
-    def body_font(sz=10, bold=False, color="000000"):
-        return Font(name="Yu Gothic UI", size=sz, bold=bold, color=color)
-
-    def fill(hex_color):
-        return PatternFill("solid", fgColor=hex_color)
-
-    def thin_border(colors=None):
-        c = colors or C_BORDER
-        s = Side(style="thin", color=c)
-        return Border(left=s, right=s, top=s, bottom=s)
-
-    def center():
-        return Alignment(horizontal="center", vertical="center", wrap_text=False)
-
-    def right():
-        return Alignment(horizontal="right", vertical="center")
-
-    def left():
-        return Alignment(horizontal="left", vertical="center")
-
-    NUM_FMT  = '#,##0'
-    PCT_FMT  = '0.0%'
-    DATE_FMT = 'YYYY/MM/DD'
-
-    # ════════════════════════════════════════════════════════
-    # Sheet1: サマリー
-    # ════════════════════════════════════════════════════════
-    ws = wb.active
-    ws.title = "サマリー"
-    ws.sheet_view.showGridLines = False
-
-    # --- タイトル ---
-    ws.merge_cells("B2:K2")
-    tc = ws["B2"]
-    tc.value = f"バックテスト結果  {start} ～ {end}（約5年）"
-    tc.font      = Font(name="Yu Gothic UI", size=16, bold=True, color=C_HEADER_FG)
-    tc.fill      = fill(C_HEADER_BG)
-    tc.alignment = center()
-    ws.row_dimensions[2].height = 30
-
-    ws.merge_cells("B3:K3")
-    sc = ws["B3"]
-    sc.value = (f"初期資金 {INITIAL_CASH:,}円/銘柄 × {len(WATCH_LIST)}銘柄"
-                f"  コスト上限{MAX_COST_RATIO*100:.0f}%  "
-                f"リスク{RISK_PER_TRADE*100:.0f}%  "
-                f"ストップATR×{ATR_STOP_MULT}")
-    sc.font      = Font(name="Yu Gothic UI", size=10, color="FFFFFF")
-    sc.fill      = fill(C_SUB_BG)
-    sc.alignment = center()
-    ws.row_dimensions[3].height = 18
-
-    # --- 銘柄別テーブル ヘッダー ---
-    COL_HDR = ["銘柄名", "コード", "取引数", "勝率", "総損益(円)",
-               "収益率", "最大利益(円)", "最大損失(円)", "PF", "平均保有日数"]
-    START_ROW = 5
-    for ci, h in enumerate(COL_HDR, start=2):
-        cell = ws.cell(row=START_ROW, column=ci, value=h)
-        cell.font      = hdr_font(11)
-        cell.fill      = fill(C_HEADER_BG)
-        cell.alignment = center()
-        cell.border    = thin_border("FFFFFF")
-    ws.row_dimensions[START_ROW].height = 22
-
-    # --- 銘柄別データ行 ---
-    for ri, r in enumerate(results):
-        row_num = START_ROW + 1 + ri
-        td      = r["trades_detail"]
-        mxw     = max((t["pnl"] for t in td), default=0)
-        mxl     = min((t["pnl"] for t in td), default=0)
-        avg_h   = (sum((t["exit_dt"] - t["entry_dt"]).days for t in td) / len(td)
-                   if td else 0)
-        pf_val  = None if r["profit_factor"] == float("inf") else r["profit_factor"]
-
-        row_data = [
-            r["name"], r["symbol"], r["trades"],
-            r["win_rate"] / 100,
-            r["total_pnl"], r["return_pct"] / 100,
-            mxw, mxl, pf_val, round(avg_h, 1),
-        ]
-        is_profit = r["total_pnl"] >= 0
-        bg = C_PROFIT if is_profit else C_LOSS
-        fg = C_PROFIT_FG if is_profit else C_LOSS_FG
-        alt_bg = C_ALT if ri % 2 == 1 else "FFFFFF"
-
-        for ci, val in enumerate(row_data, start=2):
-            cell = ws.cell(row=row_num, column=ci, value=val)
-            cell.border = thin_border()
-
-            # 損益列(F=col6)と収益率列(G=col7)だけ色分け、他は交互色
-            if ci == 6:   # 総損益
-                cell.fill = fill(bg)
-                cell.font = body_font(color=fg, bold=True)
-                cell.number_format = '#,##0;[Red]-#,##0'
-                cell.alignment = right()
-            elif ci == 7:  # 収益率
-                cell.fill = fill(bg)
-                cell.font = body_font(color=fg, bold=True)
-                cell.number_format = '+0.0%;-0.0%'
-                cell.alignment = right()
-            elif ci in (8, 9):   # 最大利益/最大損失
-                cell.fill = fill(alt_bg)
-                cell.font = body_font()
-                cell.number_format = '#,##0;[Red]-#,##0'
-                cell.alignment = right()
-            elif ci == 4:  # 勝率
-                cell.fill = fill(alt_bg)
-                cell.font = body_font()
-                cell.number_format = '0.0%'
-                cell.alignment = center()
-            elif ci == 10:  # PF
-                cell.fill = fill(alt_bg)
-                cell.font = body_font()
-                cell.number_format = '0.00'
-                cell.alignment = center()
-            else:
-                cell.fill = fill(alt_bg)
-                cell.font = body_font()
-                cell.alignment = center() if ci in (3, 5) else left()
-        ws.row_dimensions[row_num].height = 18
-
-    # --- 合計行 ---
-    total_row = START_ROW + 1 + len(results)
-    pf_total  = None if m["profit_factor"] == float("inf") else m["profit_factor"]
-    total_data = [
-        "【合計】", "", m["n_trades"],
-        m["win_rate"] / 100,
-        total_pnl, total_ret / 100,
-        m["best_trade"], m["worst_trade"],
-        pf_total, round(m["avg_hold_days"], 1),
-    ]
-    for ci, val in enumerate(total_data, start=2):
-        cell = ws.cell(row=total_row, column=ci, value=val)
-        cell.font   = Font(name="Yu Gothic UI", size=10, bold=True, color=C_TOTAL_FG)
-        cell.fill   = fill(C_TOTAL_BG)
-        cell.border = thin_border("B8860B")
-        if ci == 4:
-            cell.number_format = '0.0%'; cell.alignment = center()
-        elif ci == 6:
-            cell.number_format = '#,##0;[Red]-#,##0'; cell.alignment = right()
-        elif ci == 7:
-            cell.number_format = '+0.0%;-0.0%'; cell.alignment = right()
-        elif ci in (8, 9):
-            cell.number_format = '#,##0;[Red]-#,##0'; cell.alignment = right()
-        elif ci == 10:
-            cell.number_format = '0.00'; cell.alignment = center()
-        else:
-            cell.alignment = center() if ci in (3, 5) else left()
-    ws.row_dimensions[total_row].height = 20
-
-    # --- 列幅 ---
-    col_widths = [2, 16, 10, 6, 7, 14, 8, 14, 14, 7, 12]
-    for ci, w in enumerate(col_widths, start=1):
-        ws.column_dimensions[get_column_letter(ci)].width = w
-
-    # --- ポートフォリオ指標ボックス ---
-    sign = "+" if total_pnl >= 0 else ""
-    pf_disp = "∞" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
-    metrics_data = [
-        ("総損益",             f"{sign}{total_pnl:,.0f} 円"),
-        ("総収益率",            f"{sign}{total_ret:.2f} %"),
-        ("年率換算(CAGR)",      f"{cagr*100:+.2f} %"),
-        ("最大ドローダウン",      f"-{m['max_drawdown']:.2f} %"),
-        ("総取引数",            f"{m['n_trades']} 回"),
-        ("勝率",               f"{m['win_rate']:.1f} %"),
-        ("プロフィットファクター", pf_disp),
-        ("平均保有日数",         f"{m['avg_hold_days']:.1f} 日"),
-        ("平均損益/トレード",     f"{m['avg_pnl']:+,.0f} 円"),
-        ("最大利益トレード",      f"+{m['best_trade']:,.0f} 円"),
-        ("最大損失トレード",      f"{m['worst_trade']:,.0f} 円"),
-        ("決済: シグナル",       f"{m['signal_count']} 回"),
-        ("決済: ストップ",       f"{m['stop_count']} 回"),
-        ("決済: 強制クローズ",    f"{m['force_count']} 回"),
-    ]
-    METRIC_START_ROW = total_row + 2
-    ws.merge_cells(f"B{METRIC_START_ROW}:C{METRIC_START_ROW}")
-    mh = ws.cell(row=METRIC_START_ROW, column=2, value="ポートフォリオ指標")
-    mh.font = hdr_font(12); mh.fill = fill(C_HEADER_BG); mh.alignment = center()
-    ws.row_dimensions[METRIC_START_ROW].height = 22
-
-    for mi, (key, val) in enumerate(metrics_data):
-        r_num = METRIC_START_ROW + 1 + mi
-        kc = ws.cell(row=r_num, column=2, value=key)
-        vc = ws.cell(row=r_num, column=3, value=val)
-        kc.font = body_font(bold=True); kc.fill = fill(C_ALT)
-        kc.alignment = left(); kc.border = thin_border()
-        vc.font = body_font()
-        vc.fill = fill("FFFFFF")
-        vc.alignment = right(); vc.border = thin_border()
-        ws.row_dimensions[r_num].height = 17
-
-    # ════════════════════════════════════════════════════════
-    # Sheet2: 全トレード一覧
-    # ════════════════════════════════════════════════════════
-    ws2 = wb.create_sheet("全トレード")
-    ws2.sheet_view.showGridLines = False
-
-    trade_hdrs = ["銘柄名", "コード", "エントリー日", "決済日",
-                  "保有日数", "買値(円)", "売値(円)", "株数",
-                  "損益(円)", "損益率", "決済理由"]
-    for ci, h in enumerate(trade_hdrs, start=2):
-        cell = ws2.cell(row=2, column=ci, value=h)
-        cell.font = hdr_font(11); cell.fill = fill(C_HEADER_BG)
-        cell.alignment = center(); cell.border = thin_border("FFFFFF")
-    ws2.row_dimensions[2].height = 22
-
-    reason_map = {"signal": "シグナル", "stop": "ストップ", "force_close": "強制"}
-    sorted_trades = sorted(all_trades, key=lambda t: t["entry_dt"])
-    for ri, t in enumerate(sorted_trades):
-        row_num = 3 + ri
-        hold    = (t["exit_dt"] - t["entry_dt"]).days
-        pnl_r   = (t["exit_price"] - t["entry_price"]) / t["entry_price"]
-        is_p    = t["pnl"] >= 0
-        row_bg  = C_ALT if ri % 2 == 1 else "FFFFFF"
-
-        row_vals = [
-            t["name"], t["symbol"],
-            t["entry_dt"].strftime("%Y/%m/%d"),
-            t["exit_dt"].strftime("%Y/%m/%d"),
-            hold, t["entry_price"], t["exit_price"], t["qty"],
-            t["pnl"], pnl_r,
-            reason_map.get(t["reason"], t["reason"]),
-        ]
-        for ci, val in enumerate(row_vals, start=2):
-            cell = ws2.cell(row=row_num, column=ci, value=val)
-            cell.border = thin_border()
-            cell.font   = body_font()
-            if ci == 10:   # 損益
-                cell.fill = fill(C_PROFIT if is_p else C_LOSS)
-                cell.font = body_font(color=C_PROFIT_FG if is_p else C_LOSS_FG, bold=True)
-                cell.number_format = '#,##0;[Red]-#,##0'
-                cell.alignment = right()
-            elif ci == 11:  # 損益率
-                cell.fill = fill(C_PROFIT if is_p else C_LOSS)
-                cell.font = body_font(color=C_PROFIT_FG if is_p else C_LOSS_FG)
-                cell.number_format = '+0.0%;-0.0%'
-                cell.alignment = right()
-            elif ci in (7, 8, 9):
-                cell.fill = fill(row_bg)
-                cell.number_format = '#,##0.0'
-                cell.alignment = right()
-            elif ci == 5:
-                cell.fill = fill(row_bg)
-                cell.number_format = '#,##0'
-                cell.alignment = right()
-            else:
-                cell.fill = fill(row_bg)
-                cell.alignment = center()
-        ws2.row_dimensions[row_num].height = 16
-
-    ws2.auto_filter.ref = f"B2:{get_column_letter(2 + len(trade_hdrs) - 1)}{2 + len(sorted_trades)}"
-    t2_col_w = [2, 14, 10, 11, 11, 7, 10, 10, 6, 12, 9, 10]
-    for ci, w in enumerate(t2_col_w, start=1):
-        ws2.column_dimensions[get_column_letter(ci)].width = w
-
-    # ════════════════════════════════════════════════════════
-    # Sheet3: 損益推移（グラフ用データ + グラフ）
-    # ════════════════════════════════════════════════════════
-    ws3 = wb.create_sheet("損益推移")
-    ws3.sheet_view.showGridLines = False
-
-    # 累積損益データを日付順に構築
+    # ── グラフ① 累積損益推移（折れ線） ──────────────────────
     sorted_td = sorted(all_trades, key=lambda t: t["exit_dt"])
-    ws3.cell(row=1, column=1, value="決済日").font   = hdr_font()
-    ws3.cell(row=1, column=2, value="累積損益(円)").font = hdr_font()
-    ws3.cell(row=1, column=1).fill = fill(C_HEADER_BG)
-    ws3.cell(row=1, column=2).fill = fill(C_HEADER_BG)
-    ws3.cell(row=1, column=1).alignment = center()
-    ws3.cell(row=1, column=2).alignment = center()
+    cum_dates, cum_vals = [datetime.strptime(start, "%Y-%m-%d")], [0.0]
+    acc = 0.0
+    for t in sorted_td:
+        acc += t["pnl"]
+        cum_dates.append(t["exit_dt"])
+        cum_vals.append(acc)
 
-    cum = 0
-    ws3.cell(row=2, column=1, value=start).number_format = DATE_FMT
-    ws3.cell(row=2, column=2, value=0)
-    for ri, t in enumerate(sorted_td, start=3):
-        cum += t["pnl"]
-        dc = ws3.cell(row=ri, column=1, value=t["exit_dt"].strftime("%Y/%m/%d"))
-        vc = ws3.cell(row=ri, column=2, value=round(cum))
-        dc.alignment = center()
-        vc.number_format = '#,##0;[Red]-#,##0'
-        vc.alignment = right()
+    fig1, ax1 = plt.subplots(figsize=(11, 4), facecolor="#f8f9fa")
+    ax1.set_facecolor("#ffffff")
+    color = "#2e75b6" if cum_vals[-1] >= 0 else "#c00000"
+    ax1.plot(cum_dates, cum_vals, color=color, linewidth=2)
+    ax1.fill_between(cum_dates, cum_vals, 0,
+                     where=[v >= 0 for v in cum_vals],
+                     alpha=0.15, color="#2e75b6")
+    ax1.fill_between(cum_dates, cum_vals, 0,
+                     where=[v < 0 for v in cum_vals],
+                     alpha=0.15, color="#c00000")
+    ax1.axhline(0, color="#888", linewidth=0.8, linestyle="--")
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda x, _: f"{x:+,.0f}"))
+    ax1.set_title("累積損益推移", fontsize=13, pad=10)
+    ax1.grid(axis="y", linestyle=":", alpha=0.5)
+    ax1.spines[["top", "right"]].set_visible(False)
+    img_line = fig_to_b64(fig1)
 
-    data_rows = 2 + len(sorted_td)
-    ws3.column_dimensions["A"].width = 13
-    ws3.column_dimensions["B"].width = 14
+    # ── グラフ② 銘柄別 総損益（棒グラフ） ─────────────────
+    names  = [r["name"] for r in results]
+    pnls   = [r["total_pnl"] for r in results]
+    colors = ["#276221" if v >= 0 else "#9c0006" for v in pnls]
 
-    # 折れ線グラフ（累積損益推移）
-    line = LineChart()
-    line.title  = "累積損益推移"
-    line.style  = 10
-    line.y_axis.title = "累積損益 (円)"
-    line.x_axis.title = "決済日"
-    line.width  = 22
-    line.height = 14
-    line.y_axis.numFmt = '#,##0'
+    fig2, ax2 = plt.subplots(figsize=(10, 4), facecolor="#f8f9fa")
+    ax2.set_facecolor("#ffffff")
+    bars = ax2.bar(names, pnls, color=colors, width=0.6, edgecolor="white")
+    ax2.axhline(0, color="#888", linewidth=0.8)
+    for bar_, val in zip(bars, pnls):
+        ax2.text(bar_.get_x() + bar_.get_width() / 2,
+                 val + (max(abs(v) for v in pnls) * 0.02 * (1 if val >= 0 else -1)),
+                 f"{val:+,.0f}", ha="center", va="bottom" if val >= 0 else "top",
+                 fontsize=8)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda x, _: f"{x:+,.0f}"))
+    ax2.set_title("銘柄別 総損益 (円)", fontsize=13, pad=10)
+    ax2.grid(axis="y", linestyle=":", alpha=0.5)
+    ax2.spines[["top", "right"]].set_visible(False)
+    plt.xticks(rotation=20, ha="right")
+    img_bar_pnl = fig_to_b64(fig2)
 
-    data_ref = Reference(ws3, min_col=2, min_row=1, max_row=data_rows)
-    line.add_data(data_ref, titles_from_data=True)
-    line.series[0].graphicalProperties.line.solidFill = "2E75B6"
-    line.series[0].graphicalProperties.line.width     = 20000
-    cats = Reference(ws3, min_col=1, min_row=2, max_row=data_rows)
-    line.set_categories(cats)
-    ws3.add_chart(line, "D2")
+    # ── グラフ③ 銘柄別 勝率（棒グラフ） ────────────────────
+    wrs = [r["win_rate"] for r in results]
+    wr_colors = ["#2e75b6" if w >= 50 else "#e06c00" for w in wrs]
 
-    # ════════════════════════════════════════════════════════
-    # Sheet1 に棒グラフ2本追加（サマリーシートに戻る）
-    # ════════════════════════════════════════════════════════
-    # グラフ用データ（非表示列 M/N に書き出し）
-    GCOL = 13  # 列M
-    ws.cell(row=4, column=GCOL,   value="銘柄")
-    ws.cell(row=4, column=GCOL+1, value="損益(円)")
-    ws.cell(row=4, column=GCOL+2, value="勝率(%)")
-    for gi, r in enumerate(results):
-        ws.cell(row=5+gi, column=GCOL,   value=r["name"])
-        ws.cell(row=5+gi, column=GCOL+1, value=round(r["total_pnl"]))
-        ws.cell(row=5+gi, column=GCOL+2, value=round(r["win_rate"], 1))
+    fig3, ax3 = plt.subplots(figsize=(10, 4), facecolor="#f8f9fa")
+    ax3.set_facecolor("#ffffff")
+    ax3.bar(names, wrs, color=wr_colors, width=0.6, edgecolor="white")
+    ax3.axhline(50, color="#888", linewidth=1, linestyle="--", label="50%")
+    ax3.set_ylim(0, 100)
+    ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+    ax3.set_title("銘柄別 勝率 (%)", fontsize=13, pad=10)
+    ax3.grid(axis="y", linestyle=":", alpha=0.5)
+    ax3.spines[["top", "right"]].set_visible(False)
+    plt.xticks(rotation=20, ha="right")
+    img_bar_wr = fig_to_b64(fig3)
 
-    n = len(results)
+    # ── HTML 組み立て ─────────────────────────────────────
+    reason_map = {"signal": "シグナル", "stop": "ストップ", "force_close": "強制"}
 
-    # 棒グラフ①: 銘柄別損益
-    bar1 = BarChart()
-    bar1.type    = "col"
-    bar1.title   = "銘柄別 総損益"
-    bar1.style   = 10
-    bar1.y_axis.title = "損益 (円)"
-    bar1.y_axis.numFmt = '#,##0'
-    bar1.width   = 20
-    bar1.height  = 13
+    def pnl_td(val, fmt=","):
+        s = "profit" if val >= 0 else "loss"
+        sign_ = "+" if val >= 0 else ""
+        return f'<td class="{s}">{sign_}{val:{fmt}.0f}</td>'
 
-    d1 = Reference(ws, min_col=GCOL+1, min_row=4, max_row=4+n)
-    c1 = Reference(ws, min_col=GCOL,   min_row=5, max_row=4+n)
-    bar1.add_data(d1, titles_from_data=True)
-    bar1.set_categories(c1)
-    # 利益/損失で色分け
-    for idx, r in enumerate(results):
-        pt = DataPoint(idx=idx)
-        pt.graphicalProperties.solidFill = C_PROFIT_FG if r["total_pnl"] >= 0 else "9C0006"
-        bar1.series[0].dPt.append(pt)
-    ws.add_chart(bar1, "E6")
+    # 銘柄別テーブル行
+    sym_rows = ""
+    for r in results:
+        td    = r["trades_detail"]
+        mxw   = max((t["pnl"] for t in td), default=0)
+        mxl   = min((t["pnl"] for t in td), default=0)
+        avg_h = (sum((t["exit_dt"] - t["entry_dt"]).days for t in td) / len(td)
+                 if td else 0)
+        pf_s  = "∞" if r["profit_factor"] == float("inf") else f"{r['profit_factor']:.2f}"
+        rc    = "profit-row" if r["total_pnl"] >= 0 else "loss-row"
+        sym_rows += (
+            f'<tr class="{rc}">'
+            f'<td>{r["name"]}</td><td>{r["symbol"]}</td>'
+            f'<td class="num">{r["trades"]}</td>'
+            f'<td class="num">{r["win_rate"]:.1f}%</td>'
+            + pnl_td(r["total_pnl"]) +
+            f'<td class="num">{"+" if r["return_pct"]>=0 else ""}{r["return_pct"]:.1f}%</td>'
+            + pnl_td(mxw) + pnl_td(mxl) +
+            f'<td class="num">{pf_s}</td>'
+            f'<td class="num">{avg_h:.1f}</td>'
+            f'</tr>\n'
+        )
 
-    # 棒グラフ②: 銘柄別勝率
-    bar2 = BarChart()
-    bar2.type    = "col"
-    bar2.title   = "銘柄別 勝率"
-    bar2.style   = 10
-    bar2.y_axis.title = "勝率 (%)"
-    bar2.y_axis.numFmt = '0.0'
-    bar2.y_axis.scaling.min = 0
-    bar2.y_axis.scaling.max = 100
-    bar2.width   = 20
-    bar2.height  = 13
+    # 全トレード行
+    trade_rows = ""
+    for t in sorted(all_trades, key=lambda x: x["entry_dt"]):
+        hold  = (t["exit_dt"] - t["entry_dt"]).days
+        pnl_r = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+        rc    = "profit-row" if t["pnl"] >= 0 else "loss-row"
+        trade_rows += (
+            f'<tr class="{rc}">'
+            f'<td>{t["name"]}</td><td>{t["symbol"]}</td>'
+            f'<td>{t["entry_dt"].strftime("%Y/%m/%d")}</td>'
+            f'<td>{t["exit_dt"].strftime("%Y/%m/%d")}</td>'
+            f'<td class="num">{hold}</td>'
+            f'<td class="num">{t["entry_price"]:,.1f}</td>'
+            f'<td class="num">{t["exit_price"]:,.1f}</td>'
+            f'<td class="num">{t["qty"]}</td>'
+            + pnl_td(t["pnl"]) +
+            f'<td class="num">{"+" if pnl_r>=0 else ""}{pnl_r:.1f}%</td>'
+            f'<td>{reason_map.get(t["reason"], t["reason"])}</td>'
+            f'</tr>\n'
+        )
 
-    d2 = Reference(ws, min_col=GCOL+2, min_row=4, max_row=4+n)
-    bar2.add_data(d2, titles_from_data=True)
-    bar2.set_categories(c1)
-    for idx in range(n):
-        pt = DataPoint(idx=idx)
-        pt.graphicalProperties.solidFill = "2E75B6"
-        bar2.series[0].dPt.append(pt)
-    ws.add_chart(bar2, "E22")
+    # KPI カード
+    kpi_color = "#276221" if total_pnl >= 0 else "#9c0006"
+    kpis = [
+        ("総損益",           f'<span style="color:{kpi_color};font-size:1.6em;font-weight:700">{sign}{total_pnl:,.0f} 円</span>'),
+        ("総収益率",          f"{sign}{total_ret:.2f} %"),
+        ("年率(CAGR)",       f"{cagr*100:+.2f} %"),
+        ("最大ドローダウン",    f"-{m['max_drawdown']:.2f} %"),
+        ("総取引数",          f"{m['n_trades']} 回"),
+        ("勝率",             f"{m['win_rate']:.1f} %"),
+        ("PF",              pf_disp),
+        ("平均保有日数",       f"{m['avg_hold_days']:.1f} 日"),
+        ("平均損益",          f"{m['avg_pnl']:+,.0f} 円"),
+        ("最大利益",          f"+{m['best_trade']:,.0f} 円"),
+        ("最大損失",          f"{m['worst_trade']:,.0f} 円"),
+        ("決済内訳",          f"シグナル {m['signal_count']} / ストップ {m['stop_count']} / 強制 {m['force_count']}"),
+    ]
+    kpi_html = "".join(
+        f'<div class="kpi-card"><div class="kpi-label">{k}</div>'
+        f'<div class="kpi-value">{v}</div></div>'
+        for k, v in kpis
+    )
 
-    wb.save(path)
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>バックテスト結果</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Yu Gothic UI","Hiragino Sans","Noto Sans JP",sans-serif;
+          background: #f0f2f5; color: #222; font-size: 14px; }}
+  .header {{ background: linear-gradient(135deg,#1f3864,#2e75b6);
+             color: #fff; padding: 24px 32px; }}
+  .header h1 {{ font-size: 1.5em; margin-bottom: 6px; }}
+  .header p  {{ opacity: .85; font-size: .9em; }}
+  .section   {{ margin: 24px 32px; }}
+  h2 {{ font-size: 1.1em; color: #1f3864; border-left: 4px solid #2e75b6;
+        padding-left: 10px; margin-bottom: 14px; }}
+  /* KPI cards */
+  .kpi-grid  {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+  .kpi-card  {{ background: #fff; border-radius: 8px; padding: 14px 18px;
+                min-width: 160px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+  .kpi-label {{ font-size: .78em; color: #666; margin-bottom: 4px; }}
+  .kpi-value {{ font-size: 1.15em; font-weight: 600; }}
+  /* Table */
+  table  {{ width: 100%; border-collapse: collapse; background: #fff;
+             border-radius: 8px; overflow: hidden;
+             box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+  thead th {{ background: #1f3864; color: #fff; padding: 10px 12px;
+              text-align: center; font-size: .88em; white-space: nowrap; }}
+  tbody tr:hover {{ background: #eaf1fb !important; }}
+  td {{ padding: 8px 12px; border-bottom: 1px solid #e8edf3; white-space: nowrap; }}
+  .num   {{ text-align: right; }}
+  .profit     {{ text-align: right; color: #276221; font-weight: 600; }}
+  .loss       {{ text-align: right; color: #9c0006; font-weight: 600; }}
+  .profit-row {{ background: #f0fff4; }}
+  .loss-row   {{ background: #fff5f5; }}
+  tfoot td {{ background: #ffd966; font-weight: 700; padding: 9px 12px; }}
+  /* Chart */
+  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
+  .chart-card {{ background: #fff; border-radius: 8px; padding: 16px;
+                 box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+  .chart-card img {{ width: 100%; height: auto; }}
+  .chart-wide {{ grid-column: 1 / -1; }}
+  @media (max-width: 700px) {{ .chart-grid {{ grid-template-columns: 1fr; }} }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📊 バックテスト結果 — swing_notify_top10.py 戦略</h1>
+  <p>期間: {start} ～ {end}（約5年）　初期資金: {INITIAL_CASH:,}円/銘柄 × {len(WATCH_LIST)}銘柄
+     　コスト上限{MAX_COST_RATIO*100:.0f}%　リスク{RISK_PER_TRADE*100:.0f}%　ストップATR×{ATR_STOP_MULT}
+     　生成: {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
+</div>
+
+<div class="section">
+  <h2>ポートフォリオ指標</h2>
+  <div class="kpi-grid">{kpi_html}</div>
+</div>
+
+<div class="section">
+  <h2>グラフ</h2>
+  <div class="chart-grid">
+    <div class="chart-card chart-wide">
+      <img src="data:image/png;base64,{img_line}" alt="累積損益推移">
+    </div>
+    <div class="chart-card">
+      <img src="data:image/png;base64,{img_bar_pnl}" alt="銘柄別損益">
+    </div>
+    <div class="chart-card">
+      <img src="data:image/png;base64,{img_bar_wr}" alt="銘柄別勝率">
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>銘柄別パフォーマンス</h2>
+  <table>
+    <thead><tr>
+      <th>銘柄名</th><th>コード</th><th>取引数</th><th>勝率</th>
+      <th>総損益(円)</th><th>収益率</th><th>最大利益(円)</th>
+      <th>最大損失(円)</th><th>PF</th><th>平均保有日数</th>
+    </tr></thead>
+    <tbody>{sym_rows}</tbody>
+    <tfoot><tr>
+      <td colspan="2">【合計】</td>
+      <td class="num">{m['n_trades']}</td>
+      <td class="num">{m['win_rate']:.1f}%</td>
+      <td class="{'profit' if total_pnl>=0 else 'loss'}">{sign}{total_pnl:,.0f}</td>
+      <td class="num">{sign}{total_ret:.1f}%</td>
+      <td class="profit">+{m['best_trade']:,.0f}</td>
+      <td class="loss">{m['worst_trade']:,.0f}</td>
+      <td class="num">{pf_disp}</td>
+      <td class="num">{m['avg_hold_days']:.1f}</td>
+    </tr></tfoot>
+  </table>
+</div>
+
+<div class="section">
+  <h2>全トレード一覧 ({len(all_trades)} 件)</h2>
+  <table>
+    <thead><tr>
+      <th>銘柄名</th><th>コード</th><th>エントリー日</th><th>決済日</th>
+      <th>保有日数</th><th>買値(円)</th><th>売値(円)</th><th>株数</th>
+      <th>損益(円)</th><th>損益率</th><th>決済理由</th>
+    </tr></thead>
+    <tbody>{trade_rows}</tbody>
+  </table>
+</div>
+
+</body>
+</html>"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
     return path
 
 
@@ -804,11 +693,11 @@ def main():
     print(f"╚{bar(SB)}╝")
     print()
 
-    # ── Excel 出力 ────────────────────────────────────────────
-    xlsx_path = "backtest_result.xlsx"
-    export_excel(results, all_trades, m, start, end, xlsx_path)
-    abs_path  = os.path.abspath(xlsx_path)
-    print(f"  Excel を保存しました: {abs_path}")
+    # ── HTML 出力 ─────────────────────────────────────────────
+    html_path = "backtest_result.html"
+    export_html(results, all_trades, m, start, end, html_path)
+    abs_path  = os.path.abspath(html_path)
+    print(f"  HTML レポートを保存しました: {abs_path}")
 
     # OS に応じて自動で開く
     try:
