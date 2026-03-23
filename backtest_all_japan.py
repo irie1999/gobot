@@ -633,9 +633,23 @@ def main():
     print("\n[4/4] HTML レポート生成中 ...")
     html_path = os.path.join(os.path.dirname(__file__), "backtest_all_japan.html")
     export_html(algo_top, len(stock_list), len(ind_data), start, end, html_path)
-    print(f"  保存完了: {os.path.abspath(html_path)}")
+    abs_path = os.path.abspath(html_path)
+    print(f"  保存完了: {abs_path}")
+
+    try:
+        if sys.platform == "win32":
+            os.startfile(abs_path)
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", abs_path], check=False)
+        else:
+            import subprocess
+            subprocess.run(["xdg-open", abs_path], check=False)
+    except Exception:
+        pass
+
     print(f"\n{'='*W}")
-    print("  完了！HTMLレポートを開いて詳細を確認してください。")
+    print("  完了！HTMLレポートを確認してください。")
     print(f"{'='*W}\n")
 
 
