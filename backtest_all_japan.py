@@ -1,14 +1,14 @@
 """
-全日本上場株バックテスト
-  A0: ベースライン
+全日本上場株バックテスト + 本日売買シグナル
   A6: ストキャスティクス
 
 処理フロー:
   1. JPX 公開リストから全上場銘柄コードを取得（失敗時はフォールバックリスト）
   2. ThreadPoolExecutor で並列ダウンロード → disk キャッシュ保存
-  3. A0 / A6 で各銘柄バックテスト
-  4. アルゴリズムごとに利益上位 TOP_N 銘柄を出力
-  5. HTML レポートを生成
+  3. A6 で各銘柄バックテスト → 利益上位 TOP_N を選定
+  4. 上位銘柄の最新終値シグナルを判定（BUY / SELL / HOLD）
+  5. 初期資金 50万円での推奨株数を計算
+  6. HTML レポートを生成（自動で開く）
 
 使い方:
   python backtest_all_japan.py            # キャッシュを使って実行
@@ -50,8 +50,9 @@ INITIAL_CASH   = 500_000
 MAX_COST_RATIO = 0.10
 MAX_QTY        = 3000
 
-TOP_N    = 10          # 上位表示件数（--top で上書き）
-WORKERS  = 30          # 並列ダウンロードスレッド数
+TOP_N        = 10          # 上位表示件数（--top で上書き）
+WORKERS      = 30          # 並列ダウンロードスレッド数
+SIGNAL_CASH  = 500_000     # シグナル判定時の資金（株数計算用）
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache_japan")
 
 JPX_URL = (
@@ -300,7 +301,6 @@ def algo_A6_stoch(df: pd.DataFrame) -> pd.DataFrame:
 
 
 ALGORITHMS = [
-    ("A0: ベースライン",      algo_A0_baseline),
     ("A6: ストキャスティクス", algo_A6_stoch),
 ]
 
@@ -398,6 +398,76 @@ def backtest_symbol(df: pd.DataFrame, symbol: str, name: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
+# 本日シグナル判定
+# ════════════════════════════════════════════════════════════════
+
+def check_today_signals(
+    top_symbols: list[dict],
+    ind_data: dict,
+) -> list[dict]:
+    """
+    A6 上位銘柄の最新終値シグナルを判定する。
+
+    シグナルロジック（A6 ストキャスティクス）:
+      BUY  : 直近で %K が %D を 30 以下から上抜け
+      SELL : 直近で %K が %D を 60 以上から下抜け
+      HOLD : どちらでもない
+
+    戻り値: [{symbol, name, signal, close, stoch_k, stoch_d,
+               atr, qty, cost, rank}, ...]
+    """
+    results = []
+    sym_set = {r["symbol"]: r for r in top_symbols}
+
+    for (symbol, name), df in ind_data.items():
+        if symbol not in sym_set:
+            continue
+        if len(df) < 3:
+            continue
+        try:
+            # A6 シグナルを付与
+            df2 = algo_A6_stoch(df.copy())
+            last = df2.iloc[-1]
+            prev = df2.iloc[-2]
+
+            entry = bool(last["entry_sig"])
+            exit_ = bool(last["exit_sig"])
+
+            if entry:
+                signal = "BUY"
+            elif exit_:
+                signal = "SELL"
+            else:
+                signal = "HOLD"
+
+            close   = float(last["close"])
+            atr_val = float(last["atr"]) if not np.isnan(last["atr"]) else 0.0
+            qty     = calc_qty(SIGNAL_CASH, atr_val, close) if signal == "BUY" else 0
+            cost    = round(close * qty) if qty > 0 else 0
+
+            results.append({
+                "symbol":   symbol,
+                "name":     name,
+                "signal":   signal,
+                "close":    close,
+                "stoch_k":  round(float(last["stoch_k"]), 1) if not np.isnan(last["stoch_k"]) else 0.0,
+                "stoch_d":  round(float(last["stoch_d"]), 1) if not np.isnan(last["stoch_d"]) else 0.0,
+                "atr":      round(atr_val, 1),
+                "qty":      qty,
+                "cost":     cost,
+                "rank":     sym_set[symbol].get("rank", 0),
+                "total_pnl": sym_set[symbol]["total_pnl"],
+            })
+        except Exception:
+            pass
+
+    # BUY → SELL → HOLD の順、同一シグナル内は rank 順
+    order = {"BUY": 0, "SELL": 1, "HOLD": 2}
+    results.sort(key=lambda x: (order[x["signal"]], x["rank"]))
+    return results
+
+
+# ════════════════════════════════════════════════════════════════
 # HTML レポート
 # ════════════════════════════════════════════════════════════════
 
@@ -428,8 +498,60 @@ def _top_table_html(top_rows: list[dict], algo_id: str) -> str:
     return rows
 
 
+def _signal_section_html(signals: list[dict]) -> str:
+    """シグナルテーブル HTML を生成する"""
+    rows = ""
+    for r in signals:
+        sig = r["signal"]
+        if sig == "BUY":
+            badge = '<span class="badge buy">🟢 BUY</span>'
+            qty_cell = (f'<td class="num buy-text">'
+                        f'<strong>{r["qty"]:,} 株</strong><br>'
+                        f'<small>≈ {r["cost"]:,}円</small></td>')
+        elif sig == "SELL":
+            badge = '<span class="badge sell">🔴 SELL</span>'
+            qty_cell = '<td class="num">—</td>'
+        else:
+            badge = '<span class="badge hold">⚪ HOLD</span>'
+            qty_cell = '<td class="num">—</td>'
+
+        rows += (
+            f'<tr>'
+            f'<td class="num">{r["rank"]}</td>'
+            f'<td>{r["symbol"]}</td>'
+            f'<td>{r["name"]}</td>'
+            f'<td style="text-align:center">{badge}</td>'
+            f'<td class="num">{r["close"]:,.1f}</td>'
+            f'<td class="num">{r["stoch_k"]:.1f}</td>'
+            f'<td class="num">{r["stoch_d"]:.1f}</td>'
+            f'<td class="num">{r["atr"]:.1f}</td>'
+            f'{qty_cell}'
+            f'</tr>\n'
+        )
+
+    return f"""
+<div class="section">
+  <h2 class="sec">📡 本日の売買シグナル（A6: ストキャスティクス）— 資金 {SIGNAL_CASH:,}円</h2>
+  <p style="margin-bottom:12px;color:#555;font-size:.9em">
+    ※ シグナルは<strong>本日終値時点</strong>の判定です。
+    翌営業日の始値での執行を想定しています。<br>
+    BUY: %K が %D を 30以下から上抜け ／ SELL: %K が %D を 60以上から下抜け
+  </p>
+  <table>
+    <thead><tr>
+      <th>順位</th><th>コード</th><th>銘柄名</th><th>シグナル</th>
+      <th>終値(円)</th><th>%K</th><th>%D</th><th>ATR</th>
+      <th>推奨株数 / 概算コスト</th>
+    </tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+"""
+
+
 def export_html(
     algo_top: list[tuple[str, list[dict]]],
+    signals: list[dict],
     n_total: int,
     n_ok: int,
     start: str,
@@ -518,20 +640,31 @@ def export_html(
   .num{{text-align:right}}
   .profit{{text-align:right;color:#276221;font-weight:600}}
   .loss{{text-align:right;color:#9c0006;font-weight:600}}
+  .buy-text{{color:#276221;font-weight:700}}
   .chart-card{{background:#fff;border-radius:8px;padding:16px;
                box-shadow:0 1px 4px rgba(0,0,0,.1);
                margin:0 32px 20px}}
   .chart-card img{{width:100%;height:auto}}
+  .badge{{display:inline-block;padding:3px 10px;border-radius:12px;
+          font-weight:700;font-size:.88em}}
+  .badge.buy{{background:#e6f4ea;color:#276221}}
+  .badge.sell{{background:#fce8e6;color:#9c0006}}
+  .badge.hold{{background:#f1f3f4;color:#666}}
+  .signal-box{{background:#fffde7;border:2px solid #ffd600;
+               border-radius:10px;margin:24px 32px;padding:18px 24px}}
+  .signal-box h2{{font-size:1.1em;color:#1a1a2e;margin-bottom:6px}}
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>📊 全日本上場株バックテスト — A0/A6</h1>
+  <h1>📊 全日本上場株バックテスト — A6: ストキャスティクス</h1>
   <p>期間: {start} ～ {end}（約5年）
      対象: {n_ok} / {n_total} 銘柄（データ取得成功分）
      初期資金: {INITIAL_CASH:,}円/銘柄　ストップ: ATR×{ATR_STOP_MULT}<br>
      生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
 </div>
+
+{_signal_section_html(signals)}
 
 {tables_html}
 
@@ -563,18 +696,18 @@ def main():
 
     W = 72
     print(f"\n{'='*W}")
-    print(f"  全日本上場株バックテスト — A0: ベースライン / A6: ストキャスティクス")
+    print(f"  全日本上場株バックテスト — A6: ストキャスティクス")
     print(f"  期間: {start} ～ {end}  初期資金: {INITIAL_CASH:,}円/銘柄")
-    print(f"  キャッシュ: {'使用' if use_cache else '無効（再取得）'}  上位表示: {top_n}件")
+    print(f"  シグナル資金: {SIGNAL_CASH:,}円  キャッシュ: {'使用' if use_cache else '無効'}  上位: {top_n}件")
     print(f"{'='*W}\n")
 
     # ── STEP 1: 銘柄リスト ──────────────────────────────────────
-    print("[1/4] 銘柄リスト取得中 ...")
+    print("[1/5] 銘柄リスト取得中 ...")
     stock_list = fetch_jpx_stock_list()
     print(f"  対象銘柄数: {len(stock_list)}\n")
 
     # ── STEP 2: データダウンロード ──────────────────────────────
-    print(f"[2/4] データダウンロード中 (並列 {WORKERS} スレッド) ...")
+    print(f"[2/5] データダウンロード中 (並列 {WORKERS} スレッド) ...")
     t0 = time.time()
     raw_data = parallel_download(stock_list, start, end, use_cache)
     elapsed  = time.time() - t0
@@ -584,9 +717,8 @@ def main():
         print("ERROR: 有効なデータが取得できませんでした。")
         sys.exit(1)
 
-    # ── STEP 3: インジケーター計算 ───────────────────────────────
-    print("[3/4] インジケーター計算 & バックテスト実行中 ...")
-    # インジケーターを一度だけ計算してキャッシュ
+    # ── STEP 3: インジケーター計算 & バックテスト ────────────────
+    print("[3/5] インジケーター計算 & バックテスト実行中 ...")
     ind_data = {}
     for key, df in raw_data.items():
         try:
@@ -595,7 +727,6 @@ def main():
             pass
     print(f"  インジケーター計算完了: {len(ind_data)} 銘柄")
 
-    # アルゴごとにバックテスト
     algo_top: list[tuple[str, list[dict]]] = []
 
     for algo_name, algo_fn in ALGORITHMS:
@@ -608,20 +739,19 @@ def main():
             except Exception:
                 pass
 
-        # 利益でソート → 上位 top_n
         sym_results.sort(key=lambda x: x["total_pnl"], reverse=True)
         top_rows = sym_results[:top_n]
+        # rank 情報を埋め込む
+        for rank, r in enumerate(top_rows, 1):
+            r["rank"] = rank
         algo_top.append((algo_name, top_rows))
 
-        # コンソール出力
-        sgn_total = "+" if sym_results[0]["total_pnl"] >= 0 else "" if sym_results else ""
         print(f"\n  ┌─ {algo_name}  (バックテスト銘柄数: {len(sym_results)}) ─")
         print(f"  │ {'順位':<4} {'コード':<10} {'銘柄名':<20} "
               f"{'総損益':>12} {'収益率':>8} {'勝率':>7} {'取引数':>6}")
         print(f"  │ {'─'*70}")
         for rank, r in enumerate(top_rows, 1):
             sgn = "+" if r["total_pnl"] >= 0 else ""
-            pf  = "∞" if r["profit_factor"] == float("inf") else f"{r['profit_factor']:.2f}"
             print(f"  │ {rank:<4} {r['symbol']:<10} {r['name']:<20} "
                   f"{sgn}{r['total_pnl']:>10,.0f}円 "
                   f"{sgn}{r['return_pct']:>6.1f}% "
@@ -629,10 +759,28 @@ def main():
                   f"{r['n_trades']:>5}回")
         print(f"  └{'─'*72}")
 
-    # ── STEP 4: HTML レポート ────────────────────────────────────
-    print("\n[4/4] HTML レポート生成中 ...")
+    # ── STEP 4: 本日シグナル判定 ─────────────────────────────────
+    print(f"\n[4/5] 本日売買シグナル判定中 (資金 {SIGNAL_CASH:,}円) ...")
+    # A6 の上位銘柄を対象にシグナル判定
+    a6_top = next((rows for name, rows in algo_top if "A6" in name), [])
+    signals = check_today_signals(a6_top, ind_data)
+
+    print(f"\n  {'─'*W}")
+    print(f"  {'シグナル':<8} {'コード':<10} {'銘柄名':<20} "
+          f"{'終値':>8} {'%K':>6} {'%D':>6} {'推奨株数':>8} {'概算コスト':>12}")
+    print(f"  {'─'*W}")
+    for s in signals:
+        sig_mark = {"BUY": "🟢 BUY ", "SELL": "🔴 SELL", "HOLD": "⚪ HOLD"}[s["signal"]]
+        qty_str  = f"{s['qty']:,}株 ({s['cost']:,}円)" if s["signal"] == "BUY" else "—"
+        print(f"  {sig_mark}  {s['symbol']:<10} {s['name']:<20} "
+              f"{s['close']:>8,.1f} {s['stoch_k']:>6.1f} {s['stoch_d']:>6.1f} "
+              f"{qty_str:>22}")
+    print(f"  {'─'*W}")
+
+    # ── STEP 5: HTML レポート ────────────────────────────────────
+    print(f"\n[5/5] HTML レポート生成中 ...")
     html_path = os.path.join(os.path.dirname(__file__), "backtest_all_japan.html")
-    export_html(algo_top, len(stock_list), len(ind_data), start, end, html_path)
+    export_html(algo_top, signals, len(stock_list), len(ind_data), start, end, html_path)
     abs_path = os.path.abspath(html_path)
     print(f"  保存完了: {abs_path}")
 
