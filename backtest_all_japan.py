@@ -59,31 +59,30 @@ JPX_URL = (
     "tvdivq0000001vg2-att/data_j.xls"
 )
 
-# フォールバック用: 主要 TSE 銘柄コード (4桁)
-FALLBACK_CODES = [
-    1301,1332,1333,1376,1414,1605,1662,1925,1928,1963,
-    2002,2269,2282,2413,2501,2502,2503,2531,2768,2801,
-    2802,2871,2914,3086,3099,3382,3402,3407,3436,3659,
-    3861,3863,3938,4004,4021,4042,4043,4061,4063,4151,
-    4183,4188,4208,4307,4452,4502,4503,4506,4507,4519,
-    4523,4543,4568,4578,4612,4661,4689,4704,4751,4755,
-    4901,4902,5002,5020,5101,5108,5201,5214,5232,5233,
-    5301,5332,5333,5401,5406,5411,5541,5631,5706,5711,
-    5713,5714,5801,5802,5803,5901,6098,6103,6113,6146,
-    6178,6273,6301,6302,6305,6326,6361,6367,6376,6383,
-    6412,6417,6471,6472,6473,6501,6503,6504,6506,6594,
-    6645,6674,6701,6702,6703,6724,6752,6758,6762,6770,
-    6841,6857,6861,6902,6952,6954,6971,6976,6981,7003,
-    7004,7011,7012,7013,7186,7201,7202,7203,7205,7211,
-    7261,7267,7269,7270,7272,7731,7733,7735,7741,7751,
-    7752,7762,7832,7911,7912,7951,7974,8001,8002,8003,
-    8015,8031,8035,8053,8058,8233,8252,8253,8267,8304,
-    8306,8308,8309,8316,8331,8354,8355,8358,8377,8411,
-    8591,8601,8604,8630,8725,8750,8766,8795,8801,8802,
-    8803,8804,8830,9001,9005,9007,9008,9009,9020,9022,
-    9064,9101,9104,9107,9202,9301,9432,9433,9434,9503,
-    9531,9532,9602,9613,9735,9766,9983,9984,
-]
+# ローカル銘柄リスト: JPX からダウンロードした CSV を置くパス
+# （ヘッダー行: code,name）
+LOCAL_LIST_CSV = os.path.join(os.path.dirname(__file__), "japan_stocks.csv")
+
+def _generate_candidate_codes() -> list[int]:
+    """
+    TSE 銘柄コードが存在しやすい範囲を網羅した候補コードを生成する。
+    無効コードは並列ダウンロード時にスキップされる。
+    TSE コード体系:
+      1300-1999  水産・食料・農林
+      2000-2999  食品・たばこ
+      3000-3999  繊維・紙・化学（一部）
+      4000-4999  化学・医薬
+      5000-5999  石油・窯業・鉄鋼
+      6000-6999  機械・電機
+      7000-7999  精密・輸送・その他製造
+      8000-8999  商社・金融・不動産
+      9000-9999  運輸・通信・サービス
+    コードは連続せず飛び番が多いため、全範囲を候補にしてスキャンする。
+    """
+    candidates = []
+    for code in range(1300, 10000):
+        candidates.append(code)
+    return candidates
 
 
 # ════════════════════════════════════════════════════════════════
@@ -91,16 +90,36 @@ FALLBACK_CODES = [
 # ════════════════════════════════════════════════════════════════
 
 def fetch_jpx_stock_list() -> list[tuple[str, str]]:
-    """JPX 公開 Excel から (ticker, 銘柄名) リストを返す。失敗時はフォールバック。"""
+    """
+    銘柄リストを以下の優先順で取得する:
+      1. ローカル CSV (japan_stocks.csv) ← 最速・確実
+      2. JPX 公開 Excel (ネット接続時)
+      3. 全範囲スキャン候補 (1300-9999) ← ダウンロード時にフィルタ
+    """
+    # ── 優先①: ローカル CSV ───────────────────────────────────
+    if os.path.exists(LOCAL_LIST_CSV):
+        try:
+            df = pd.read_csv(LOCAL_LIST_CSV, dtype=str)
+            pairs = []
+            for _, row in df.iterrows():
+                code = str(row.get("code", "")).strip().replace(".0", "")
+                name = str(row.get("name", f"コード{code}")).strip()
+                if len(code) == 4 and code.isdigit():
+                    pairs.append((f"{code}.T", name))
+            if pairs:
+                print(f"  ローカル CSV から {len(pairs)} 銘柄 読み込み")
+                return pairs
+        except Exception as e:
+            print(f"  ⚠ ローカル CSV 読み込み失敗: {e}")
+
+    # ── 優先②: JPX 公開 Excel ─────────────────────────────────
     print("  JPX 上場銘柄リスト取得中 ...")
     try:
-        resp = requests.get(JPX_URL, timeout=30,
+        resp = requests.get(JPX_URL, timeout=20,
                             headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
-        df = pd.read_excel(io.BytesIO(resp.content), header=0, dtype=str)
-        # 列名を正規化
+        df = pd.read_excel(io.BytesIO(resp.content), header=0, dtype=str, engine="xlrd")
         df.columns = [str(c).strip() for c in df.columns]
-        # コード列・銘柄名列を探す
         code_col = next((c for c in df.columns if "コード" in c), None)
         name_col = next((c for c in df.columns if "銘柄名" in c), None)
         if code_col is None or name_col is None:
@@ -114,8 +133,13 @@ def fetch_jpx_stock_list() -> list[tuple[str, str]]:
         print(f"  JPX リスト取得成功: {len(pairs)} 銘柄")
         return pairs
     except Exception as e:
-        print(f"  ⚠ JPX リスト取得失敗 ({e}) → フォールバックリストを使用")
-        return [(f"{c}.T", f"コード{c}") for c in FALLBACK_CODES]
+        print(f"  ⚠ JPX リスト取得失敗 ({e})")
+
+    # ── 優先③: 全範囲スキャン (1300-9999 の候補コード) ─────────
+    candidates = _generate_candidate_codes()
+    print(f"  → 全範囲スキャンモード: {len(candidates)} 候補コードを試みます")
+    print(f"    (無効コードはダウンロード時に自動スキップ。初回は時間がかかります)")
+    return [(f"{c}.T", f"{c}") for c in candidates]
 
 
 # ════════════════════════════════════════════════════════════════
