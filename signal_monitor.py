@@ -194,7 +194,7 @@ def save_positions(positions: dict) -> None:
         json.dump(positions, f, ensure_ascii=False, indent=2)
 
 
-def do_buy(symbol: str, signals: dict, positions: dict) -> None:
+def do_buy(symbol: str, signals: dict, positions: dict, qty_input: str | None = None) -> None:
     """買い記録"""
     sym_upper = symbol.upper()
     # .T を補完
@@ -226,17 +226,25 @@ def do_buy(symbol: str, signals: dict, positions: dict) -> None:
     stop      = info["stop"]
     atr       = info["atr"]
     stop_dist = atr * ATR_STOP_MULT
+    risk_amt  = INITIAL_CASH * RISK_PER_TRADE
 
-    # ATRベース枚数計算（S株: 1株単位）
-    # 購入株数 = 許容損失額 ÷ ストップ幅
-    risk_amt = INITIAL_CASH * RISK_PER_TRADE
-    if stop_dist > 0:
-        qty = min(int(risk_amt / stop_dist), MAX_QTY)
+    # 株数：引数指定 > ATRベース自動計算
+    if qty_input is not None:
+        try:
+            qty = int(qty_input.replace(",", ""))
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"  ✗ 株数が不正です: {qty_input}  （正の整数を入力してください）")
+            return
+        qty_note = f"（指定株数）"
     else:
-        qty = 1
-
-    if qty <= 0:
-        qty = 1  # 最低1株
+        if stop_dist > 0:
+            qty = min(int(risk_amt / stop_dist), MAX_QTY)
+        else:
+            qty = 1
+        qty = max(qty, 1)
+        qty_note = f"（ATRベース推奨）"
 
     cost = price * qty
 
@@ -249,7 +257,7 @@ def do_buy(symbol: str, signals: dict, positions: dict) -> None:
     }
     save_positions(positions)
     print(f"  ✔ 買い記録: {info['name']}({sym_upper})")
-    print(f"    取得価格 : {price:,.1f}円 × {qty}株  （購入金額: {cost:,.0f}円）")
+    print(f"    取得価格 : {price:,.1f}円 × {qty}株 {qty_note}  （購入金額: {cost:,.0f}円）")
     print(f"    ストップ : {stop:,.1f}円  (ATR={atr:,.1f}円 × {ATR_STOP_MULT})")
     print(f"    許容損失 : {risk_amt:,.0f}円 （資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}%） ※S株")
 
@@ -298,7 +306,7 @@ def do_update_price(symbol: str, new_price_str: str, signals: dict, positions: d
         print()
 
 
-def do_sell(symbol: str, signals: dict, positions: dict) -> None:
+def do_sell(symbol: str, signals: dict, positions: dict, qty_input: str | None = None) -> None:
     """売り記録"""
     sym_upper = symbol.upper()
     if not sym_upper.endswith(".T") and sym_upper.isdigit():
@@ -308,16 +316,31 @@ def do_sell(symbol: str, signals: dict, positions: dict) -> None:
         print(f"  ✗ {sym_upper} のポジションはありません。")
         return
 
-    pos   = positions[sym_upper]
-    name  = pos["name"]
-    entry = pos["entry_price"]
-    qty   = pos["qty"]
+    pos        = positions[sym_upper]
+    name       = pos["name"]
+    entry      = pos["entry_price"]
+    held_qty   = pos["qty"]
+
+    # 売り株数：引数指定 > 全売り
+    if qty_input is not None:
+        try:
+            sell_qty = int(qty_input.replace(",", ""))
+            if sell_qty <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"  ✗ 株数が不正です: {qty_input}  （正の整数を入力してください）")
+            return
+        if sell_qty > held_qty:
+            print(f"  ✗ 保有株数({held_qty}株)を超えています: {sell_qty}株")
+            return
+    else:
+        sell_qty = held_qty  # 全売り
 
     # 現在価格をシグナルから取得
     info  = signals.get(sym_upper)
     if info:
         exit_price = info["close"]
-        pnl        = (exit_price - entry) * qty
+        pnl        = (exit_price - entry) * sell_qty
         pnl_str    = f"{pnl:+,.0f}円"
         pct        = (exit_price - entry) / entry * 100
         pct_str    = f"{pct:+.1f}%"
@@ -326,10 +349,16 @@ def do_sell(symbol: str, signals: dict, positions: dict) -> None:
         pnl_str    = "（価格不明）"
         pct_str    = ""
 
-    del positions[sym_upper]
-    save_positions(positions)
+    remaining = held_qty - sell_qty
+    if remaining > 0:
+        pos["qty"] = remaining
+        save_positions(positions)
+    else:
+        del positions[sym_upper]
+        save_positions(positions)
 
-    print(f"  ✔ 売り記録: {name}({sym_upper})")
+    print(f"  ✔ 売り記録: {name}({sym_upper})  {sell_qty}株売り", end="")
+    print(f"  （残: {remaining}株）" if remaining > 0 else "  （全売り）")
     print(f"    取得価格 : {entry:,.1f}円  →  ", end="")
     if exit_price:
         print(f"現在価格: {exit_price:,.1f}円")
@@ -546,9 +575,9 @@ def show_help() -> None:
   ─── コマンド一覧 ───────────────────────────────────────────
   s  / signal                  シグナル再取得・表示
   l  / list                    ポジション一覧
-  b  <コード>                  買い記録         例: b 7203.T  または  b 7203
+  b  <コード> [株数]            買い記録         例: b 7203.T  または  b 7203 50  （株数省略→ATR推奨）
   u  <コード> <約定価格>       取得価格を更新   例: u 7203.T 3250  または  u 7203 3250
-  x  <コード>                  売り記録         例: x 7203.T  または  x 7203
+  x  <コード> [株数]           売り記録         例: x 7203.T  または  x 7203 30  （株数省略→全売り）
   h  / help                    このヘルプを表示
   q  / quit / exit             終了
   ────────────────────────────────────────────────────────────
@@ -624,17 +653,19 @@ def main() -> None:
 
         elif cmd in ("b", "buy"):
             if len(parts) < 2:
-                print("  使い方: b <銘柄コード>   例: b 7203.T")
+                print("  使い方: b <銘柄コード> [株数]   例: b 7203.T  または  b 7203 50")
             else:
                 positions = load_positions()
-                do_buy(parts[1], signals, positions)
+                qty_arg = parts[2] if len(parts) >= 3 else None
+                do_buy(parts[1], signals, positions, qty_arg)
 
         elif cmd in ("x", "sell"):
             if len(parts) < 2:
-                print("  使い方: x <銘柄コード>   例: x 7203.T")
+                print("  使い方: x <銘柄コード> [株数]   例: x 7203.T  または  x 7203 30")
             else:
                 positions = load_positions()
-                do_sell(parts[1], signals, positions)
+                qty_arg = parts[2] if len(parts) >= 3 else None
+                do_sell(parts[1], signals, positions, qty_arg)
 
         elif cmd in ("u", "update"):
             if len(parts) < 3:
