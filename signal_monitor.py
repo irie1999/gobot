@@ -156,7 +156,14 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
     else:
         signal = "HOLD"
 
-    stop = close - atr * ATR_STOP_MULT
+    stop      = close - atr * ATR_STOP_MULT
+    stop_dist = atr * ATR_STOP_MULT
+    risk_amt  = INITIAL_CASH * RISK_PER_TRADE
+    if stop_dist > 0:
+        qty = min(int(risk_amt / stop_dist), MAX_QTY)
+    else:
+        qty = 1
+    qty = max(qty, 1)
 
     return {
         "symbol": symbol,
@@ -168,6 +175,7 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
         "atr":    atr,
         "stop":   stop,
         "signal": signal,
+        "qty":    qty,
     }
 
 
@@ -385,25 +393,37 @@ def show_signals(signals: dict, positions: dict) -> None:
 
     date_str = items[0]["date"] if items else datetime.now().strftime("%Y-%m-%d")
     print()
-    print(f"  ══════════════════════════════════════════════════════════")
-    print(f"  ストキャスティクス シグナル一覧  [{date_str}]")
-    print(f"  ══════════════════════════════════════════════════════════")
+    print(f"  ══════════════════════════════════════════════════════════════════")
+    print(f"  ストキャスティクス シグナル一覧  [{date_str}]  ※S株（1株単位）")
+    print(f"  ══════════════════════════════════════════════════════════════════")
     print(f"  {'#':<3} {'銘柄':<22} {'終値':>7} {'%K':>6} {'%D':>6} "
-          f"{'ストップ':>8}  シグナル")
-    print(f"  {'─'*3} {'─'*22} {'─'*7} {'─'*6} {'─'*6} {'─'*8}  {'─'*28}")
+          f"{'ストップ':>8} {'推奨株数':>8}  シグナル")
+    print(f"  {'─'*3} {'─'*22} {'─'*7} {'─'*6} {'─'*6} {'─'*8} {'─'*8}  {'─'*28}")
 
     for i, s in enumerate(items, 1):
-        sym   = s["symbol"]
+        sym    = s["symbol"]
+        sig    = s["signal"]
+        label  = f"{s['name']}({sym})"
+        sig_lbl = SIGNAL_LABEL[sig]
+
+        # 推奨株数: BUY/WATCH_BUY → 新規買い推奨株数, SELL → 保有株数, それ以外 → -
+        if sig in ("BUY", "WATCH_BUY"):
+            qty_str = f"{s['qty']:>6}株買"
+        elif sig == "SELL" and sym in positions:
+            held = positions[sym]["qty"]
+            qty_str = f"{held:>6}株売"
+        else:
+            qty_str = f"{'─':>7} "
+
         pos_mark = " [保有中]" if sym in positions else ""
-        label = f"{s['name']}({sym})"
-        sig   = SIGNAL_LABEL[s["signal"]]
         print(f"  {i:<3} {label:<22} {s['close']:>7,.1f} "
-              f"{s['k']:>6.1f} {s['d']:>6.1f} {s['stop']:>8,.1f}  {sig}{pos_mark}")
+              f"{s['k']:>6.1f} {s['d']:>6.1f} {s['stop']:>8,.1f} {qty_str:>8}  {sig_lbl}{pos_mark}")
 
     print()
     buy_count  = sum(1 for s in signals.values() if s["signal"] == "BUY")
     sell_count = sum(1 for s in signals.values() if s["signal"] == "SELL")
     print(f"  買いシグナル: {buy_count}件  売りシグナル: {sell_count}件")
+    print(f"  ※ 推奨株数 = 資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}% ÷ (ATR × {ATR_STOP_MULT})")
     print()
 
 
