@@ -8,12 +8,13 @@
   python signal_monitor.py
 
 ■ コマンド一覧:
-  s / signal    シグナル再取得・表示
-  l / list      ポジション一覧
-  b <コード>    買い記録   例: b 7203.T
-  x <コード>    売り記録   例: x 7203.T
-  h / help      ヘルプ表示
-  q / quit      終了
+  s / signal              シグナル再取得・表示
+  l / list                ポジション一覧
+  b <コード>              買い記録         例: b 7203.T
+  u <コード> <約定価格>   取得価格を更新   例: u 7203.T 3250
+  x <コード>              売り記録         例: x 7203.T
+  h / help                ヘルプ表示
+  q / quit                終了
 """
 
 import json
@@ -209,6 +210,50 @@ def do_buy(symbol: str, signals: dict, positions: dict) -> None:
     print(f"    ストップ : {stop:,.1f}円  (ATR×{ATR_STOP_MULT} = {info['atr']:,.1f}円)")
 
 
+def do_update_price(symbol: str, new_price_str: str, signals: dict, positions: dict) -> None:
+    """約定価格でポジションの取得価格を更新する"""
+    sym_upper = symbol.upper()
+    if not sym_upper.endswith(".T") and sym_upper.isdigit():
+        sym_upper += ".T"
+
+    if sym_upper not in positions:
+        print(f"  ✗ {sym_upper} のポジションはありません。先に 'b {symbol}' で登録してください。")
+        return
+
+    try:
+        new_price = float(new_price_str.replace(",", ""))
+        if new_price <= 0:
+            raise ValueError
+    except ValueError:
+        print(f"  ✗ 価格が不正です: {new_price_str}  （正の数値を入力してください）")
+        return
+
+    pos       = positions[sym_upper]
+    old_price = pos["entry_price"]
+    name      = pos["name"]
+
+    # ATRを使ってストップ価格を再計算（シグナルデータがあれば）
+    info = signals.get(sym_upper)
+    if info and info["atr"] > 0:
+        new_stop = round(new_price - info["atr"] * ATR_STOP_MULT, 1)
+    else:
+        # ATRが取れない場合は旧ストップとの差分を維持
+        diff = pos["stop_price"] - old_price
+        new_stop = round(new_price + diff, 1)
+
+    pos["entry_price"] = new_price
+    pos["stop_price"]  = new_stop
+    save_positions(positions)
+
+    print(f"  ✔ 取得価格を更新: {name}({sym_upper})")
+    print(f"    取得価格 : {old_price:,.1f}円  →  {new_price:,.1f}円")
+    print(f"    ストップ : {new_stop:,.1f}円", end="")
+    if info and info["atr"] > 0:
+        print(f"  (ATR×{ATR_STOP_MULT} = {info['atr']:,.1f}円)")
+    else:
+        print()
+
+
 def do_sell(symbol: str, signals: dict, positions: dict) -> None:
     """売り記録"""
     sym_upper = symbol.upper()
@@ -332,12 +377,13 @@ def show_signals(signals: dict, positions: dict) -> None:
 def show_help() -> None:
     print("""
   ─── コマンド一覧 ───────────────────────────────────────────
-  s  / signal          シグナル再取得・表示
-  l  / list            ポジション一覧
-  b  <コード>          買い記録    例: b 7203.T  または  b 7203
-  x  <コード>          売り記録    例: x 7203.T  または  x 7203
-  h  / help            このヘルプを表示
-  q  / quit / exit     終了
+  s  / signal                  シグナル再取得・表示
+  l  / list                    ポジション一覧
+  b  <コード>                  買い記録         例: b 7203.T  または  b 7203
+  u  <コード> <約定価格>       取得価格を更新   例: u 7203.T 3250  または  u 7203 3250
+  x  <コード>                  売り記録         例: x 7203.T  または  x 7203
+  h  / help                    このヘルプを表示
+  q  / quit / exit             終了
   ────────────────────────────────────────────────────────────
   ※ コードは .T なしの数字4桁でも入力可（自動補完）
 """)
@@ -420,6 +466,13 @@ def main() -> None:
             else:
                 positions = load_positions()
                 do_sell(parts[1], signals, positions)
+
+        elif cmd in ("u", "update"):
+            if len(parts) < 3:
+                print("  使い方: u <銘柄コード> <約定価格>   例: u 7203.T 3250")
+            else:
+                positions = load_positions()
+                do_update_price(parts[1], parts[2], signals, positions)
 
         else:
             print(f"  ✗ 不明なコマンド: {cmd}  ('h' でヘルプ)")
