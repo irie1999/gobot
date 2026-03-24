@@ -20,6 +20,8 @@
 import json
 import os
 import sys
+import tempfile
+import webbrowser
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -427,6 +429,117 @@ def show_signals(signals: dict, positions: dict) -> None:
     print()
 
 
+# ── HTML レポート生成 & 自動オープン ──────────────────────────
+SIGNAL_BG = {
+    "BUY":        "#fff3cd",  # 黄
+    "SELL":       "#f8d7da",  # 赤
+    "WATCH_BUY":  "#d1ecf1",  # 水色
+    "WATCH_SELL": "#fce8d5",  # オレンジ
+    "HOLD":       "#ffffff",
+}
+SIGNAL_BADGE = {
+    "BUY":        ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">★ BUY</span>', "買いシグナル！"),
+    "SELL":       ('<span style="background:#dc3545;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">▼ SELL</span>', "売りシグナル！"),
+    "WATCH_BUY":  ('<span style="background:#17a2b8;color:#fff;padding:2px 8px;border-radius:4px;">◎ WATCH</span>', "過売り圏（買い候補）"),
+    "WATCH_SELL": ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;">△ WATCH</span>', "過買い圏（売り候補）"),
+    "HOLD":       ('<span style="color:#888;">HOLD</span>', ""),
+}
+
+
+def generate_html(signals: dict, positions: dict) -> str:
+    items = sorted(signals.values(), key=lambda x: SIGNAL_ORDER[x["signal"]])
+    date_str = items[0]["date"] if items else datetime.now().strftime("%Y-%m-%d")
+    buy_count  = sum(1 for s in signals.values() if s["signal"] == "BUY")
+    sell_count = sum(1 for s in signals.values() if s["signal"] == "SELL")
+
+    rows = []
+    for i, s in enumerate(items, 1):
+        sym  = s["symbol"]
+        sig  = s["signal"]
+        bg   = SIGNAL_BG[sig]
+        badge, note = SIGNAL_BADGE[sig]
+
+        if sig in ("BUY", "WATCH_BUY"):
+            qty_html = f'<span style="color:#007bff;font-weight:bold;">{s["qty"]}株買</span>'
+        elif sig == "SELL" and sym in positions:
+            held = positions[sym]["qty"]
+            qty_html = f'<span style="color:#dc3545;font-weight:bold;">{held}株売</span>'
+        else:
+            qty_html = '<span style="color:#ccc;">─</span>'
+
+        pos_badge = ' <span style="background:#6c757d;color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;">保有中</span>' if sym in positions else ""
+
+        rows.append(f"""
+        <tr style="background:{bg};">
+          <td style="text-align:center;">{i}</td>
+          <td>{s["name"]}<br><small style="color:#666;">{sym}</small>{pos_badge}</td>
+          <td style="text-align:right;">{s["close"]:,.1f}</td>
+          <td style="text-align:right;">{s["k"]:.1f}</td>
+          <td style="text-align:right;">{s["d"]:.1f}</td>
+          <td style="text-align:right;">{s["stop"]:,.1f}</td>
+          <td style="text-align:center;">{qty_html}</td>
+          <td>{badge} {note}</td>
+        </tr>""")
+
+    rows_html = "\n".join(rows)
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>シグナルモニター [{date_str}]</title>
+  <style>
+    body {{ font-family: "Hiragino Sans", "Meiryo", sans-serif; background:#f5f5f5; margin:0; padding:20px; }}
+    h1 {{ font-size:20px; margin-bottom:4px; }}
+    .meta {{ color:#666; font-size:13px; margin-bottom:16px; }}
+    .summary {{ display:flex; gap:12px; margin-bottom:16px; }}
+    .badge {{ padding:6px 16px; border-radius:6px; font-weight:bold; font-size:14px; }}
+    .badge-buy  {{ background:#fff3cd; border:1px solid #fd7e14; color:#fd7e14; }}
+    .badge-sell {{ background:#f8d7da; border:1px solid #dc3545; color:#dc3545; }}
+    table {{ border-collapse:collapse; width:100%; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,.1); }}
+    th {{ background:#343a40; color:#fff; padding:10px 12px; text-align:left; font-size:13px; white-space:nowrap; }}
+    td {{ padding:9px 12px; border-bottom:1px solid #eee; font-size:13px; white-space:nowrap; }}
+    tr:last-child td {{ border-bottom:none; }}
+    .note {{ font-size:11px; color:#888; margin-top:12px; }}
+  </style>
+</head>
+<body>
+  <h1>ストキャスティクス シグナル一覧</h1>
+  <div class="meta">基準日: {date_str}　|　生成: {generated}　|　対象: 上位30銘柄（S株・1株単位）</div>
+  <div class="summary">
+    <div class="badge badge-buy">★ 買いシグナル: {buy_count} 件</div>
+    <div class="badge badge-sell">▼ 売りシグナル: {sell_count} 件</div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>銘柄</th><th>終値</th><th>%K</th><th>%D</th>
+        <th>ストップ</th><th>推奨株数</th><th>シグナル</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows_html}
+    </tbody>
+  </table>
+  <p class="note">※ 推奨株数 = 資金 {INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}% ÷ (ATR × {ATR_STOP_MULT})</p>
+</body>
+</html>"""
+
+
+def open_html_report(signals: dict, positions: dict) -> None:
+    html = generate_html(signals, positions)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False,
+        encoding="utf-8", prefix="signal_monitor_"
+    )
+    tmp.write(html)
+    tmp.close()
+    print(f"  HTMLレポートを開きます: {tmp.name}")
+    webbrowser.open(f"file://{tmp.name}")
+
+
 # ── ヘルプ ────────────────────────────────────────────────────
 def show_help() -> None:
     print("""
@@ -472,6 +585,7 @@ def main() -> None:
     positions = load_positions()
     signals   = fetch_all_signals()
     show_signals(signals, positions)
+    open_html_report(signals, positions)
 
     if positions:
         print("  ─── 保有ポジション ───")
@@ -500,6 +614,7 @@ def main() -> None:
         elif cmd in ("s", "signal"):
             signals = fetch_all_signals()
             show_signals(signals, positions)
+            open_html_report(signals, positions)
 
         elif cmd in ("l", "list"):
             positions = load_positions()
