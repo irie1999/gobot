@@ -69,11 +69,10 @@ STOCH_OVERBOUGHT = 70
 ATR_PERIOD       = 14
 ATR_STOP_MULT    = 2.0
 
-# ── ポジションサイジング パラメータ ───────────────────────────
+# ── ポジションサイジング パラメータ（S株：1株単位） ──────────
 INITIAL_CASH   = 500_000   # 運用資金（円）
 RISK_PER_TRADE = 0.02      # 1トレードあたり許容損失率 2%
-LOT_SIZE       = 100       # 最小売買単位（株）
-MAX_QTY        = 1000      # 最大購入株数
+MAX_QTY        = 9999      # 最大購入株数
 
 # ── ポジション保存ファイル ─────────────────────────────────────
 POSITION_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
@@ -218,16 +217,16 @@ def do_buy(symbol: str, signals: dict, positions: dict) -> None:
     atr       = info["atr"]
     stop_dist = atr * ATR_STOP_MULT
 
-    # ATRベース枚数計算: 許容損失額 ÷ ストップ幅 → LOT_SIZE単位に丸め
+    # ATRベース枚数計算（S株: 1株単位）
+    # 購入株数 = 許容損失額 ÷ ストップ幅
     risk_amt = INITIAL_CASH * RISK_PER_TRADE
     if stop_dist > 0:
-        raw = int(risk_amt / stop_dist)
-        qty = min(raw // LOT_SIZE, MAX_QTY // LOT_SIZE) * LOT_SIZE
+        qty = min(int(risk_amt / stop_dist), MAX_QTY)
     else:
-        qty = LOT_SIZE
+        qty = 1
 
     if qty <= 0:
-        qty = LOT_SIZE  # 最低1単元
+        qty = 1  # 最低1株
 
     cost = price * qty
 
@@ -242,7 +241,7 @@ def do_buy(symbol: str, signals: dict, positions: dict) -> None:
     print(f"  ✔ 買い記録: {info['name']}({sym_upper})")
     print(f"    取得価格 : {price:,.1f}円 × {qty}株  （購入金額: {cost:,.0f}円）")
     print(f"    ストップ : {stop:,.1f}円  (ATR={atr:,.1f}円 × {ATR_STOP_MULT})")
-    print(f"    許容損失 : {risk_amt:,.0f}円 （資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}%）")
+    print(f"    許容損失 : {risk_amt:,.0f}円 （資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}%） ※S株")
 
 
 def do_update_price(symbol: str, new_price_str: str, signals: dict, positions: dict) -> None:
