@@ -194,7 +194,7 @@ def save_positions(positions: dict) -> None:
         json.dump(positions, f, ensure_ascii=False, indent=2)
 
 
-def do_buy(symbol: str, signals: dict, positions: dict, qty_input: str | None = None) -> None:
+def do_buy(symbol: str, signals: dict, positions: dict, qty_input: str | None = None, price_input: str | None = None) -> None:
     """買い記録"""
     sym_upper = symbol.upper()
     # .T を補完
@@ -222,11 +222,25 @@ def do_buy(symbol: str, signals: dict, positions: dict, qty_input: str | None = 
         if ans != "y":
             return
 
-    price     = info["close"]
-    stop      = info["stop"]
     atr       = info["atr"]
     stop_dist = atr * ATR_STOP_MULT
     risk_amt  = INITIAL_CASH * RISK_PER_TRADE
+
+    # 取得価格：引数指定 > 現在終値
+    if price_input is not None:
+        try:
+            price = float(price_input.replace(",", ""))
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"  ✗ 取得価格が不正です: {price_input}  （正の数値を入力してください）")
+            return
+        price_note = "（指定価格）"
+    else:
+        price = info["close"]
+        price_note = "（現在終値）"
+
+    stop = price - atr * ATR_STOP_MULT
 
     # 株数：引数指定 > ATRベース自動計算
     if qty_input is not None:
@@ -257,7 +271,7 @@ def do_buy(symbol: str, signals: dict, positions: dict, qty_input: str | None = 
     }
     save_positions(positions)
     print(f"  ✔ 買い記録: {info['name']}({sym_upper})")
-    print(f"    取得価格 : {price:,.1f}円 × {qty}株 {qty_note}  （購入金額: {cost:,.0f}円）")
+    print(f"    取得価格 : {price:,.1f}円 {price_note} × {qty}株 {qty_note}  （購入金額: {cost:,.0f}円）")
     print(f"    ストップ : {stop:,.1f}円  (ATR={atr:,.1f}円 × {ATR_STOP_MULT})")
     print(f"    許容損失 : {risk_amt:,.0f}円 （資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}%） ※S株")
 
@@ -635,7 +649,7 @@ def show_help() -> None:
   ─── コマンド一覧 ───────────────────────────────────────────
   s  / signal                  シグナル再取得・表示
   l  / list                    ポジション一覧
-  b  <コード> [株数]            買い記録         例: b 7203.T  または  b 7203 50  （株数省略→ATR推奨）
+  b  <コード> [株数] [取得価格]  買い記録         例: b 7203.T  または  b 7203 50 3250  （省略→ATR推奨・現在終値）
   u  <コード> <約定価格>       取得価格を更新   例: u 7203.T 3250  または  u 7203 3250
   x  <コード> [株数]           売り記録         例: x 7203.T  または  x 7203 30  （株数省略→全売り）
   h  / help                    このヘルプを表示
@@ -713,11 +727,12 @@ def main() -> None:
 
         elif cmd in ("b", "buy"):
             if len(parts) < 2:
-                print("  使い方: b <銘柄コード> [株数]   例: b 7203.T  または  b 7203 50")
+                print("  使い方: b <銘柄コード> [株数] [取得価格]   例: b 7203.T  または  b 7203 50 3250")
             else:
                 positions = load_positions()
-                qty_arg = parts[2] if len(parts) >= 3 else None
-                do_buy(parts[1], signals, positions, qty_arg)
+                qty_arg   = parts[2] if len(parts) >= 3 else None
+                price_arg = parts[3] if len(parts) >= 4 else None
+                do_buy(parts[1], signals, positions, qty_arg, price_arg)
 
         elif cmd in ("x", "sell"):
             if len(parts) < 2:
