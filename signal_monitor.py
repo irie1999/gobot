@@ -513,6 +513,65 @@ def generate_html(signals: dict, positions: dict) -> str:
     rows_html = "\n".join(rows)
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # ── ポジションテーブル ──
+    pos_rows = []
+    total_pnl = 0.0
+    for sym, pos in positions.items():
+        entry    = pos["entry_price"]
+        qty      = pos["qty"]
+        stop     = pos["stop_price"]
+        entry_dt = pos["entry_date"]
+        info     = signals.get(sym)
+        if info:
+            cur  = info["close"]
+            pnl  = (cur - entry) * qty
+            pct  = (cur - entry) / entry * 100
+            total_pnl += pnl
+            cur_str  = f"{cur:,.1f}"
+            pnl_col  = "#28a745" if pnl >= 0 else "#dc3545"
+            pnl_str  = f'<span style="color:{pnl_col};font-weight:bold;">{pnl:+,.0f}円</span>'
+            pct_str  = f'<span style="color:{pnl_col};">{pct:+.1f}%</span>'
+        else:
+            cur_str = "─"
+            pnl_str = "─"
+            pct_str = "─"
+        sig_now = signals.get(sym, {}).get("signal", "")
+        sig_badge = SIGNAL_BADGE.get(sig_now, ("", ""))
+        pos_rows.append(f"""
+        <tr>
+          <td>{pos["name"]}<br><small style="color:#666;">{sym}</small></td>
+          <td style="text-align:center;">{entry_dt}</td>
+          <td style="text-align:right;">{entry:,.1f}</td>
+          <td style="text-align:right;">{cur_str}</td>
+          <td style="text-align:right;">{qty}</td>
+          <td style="text-align:right;">{pnl_str}</td>
+          <td style="text-align:right;">{pct_str}</td>
+          <td style="text-align:right;">{stop:,.1f}</td>
+          <td>{sig_badge[0]}</td>
+        </tr>""")
+
+    total_col = "#28a745" if total_pnl >= 0 else "#dc3545"
+    if pos_rows:
+        pos_rows.append(f"""
+        <tr style="background:#f8f9fa;font-weight:bold;">
+          <td colspan="5" style="text-align:right;">合計損益</td>
+          <td style="text-align:right;color:{total_col};">{total_pnl:+,.0f}円</td>
+          <td colspan="3"></td>
+        </tr>""")
+        pos_section = f"""
+  <h2 style="font-size:16px;margin-top:32px;margin-bottom:8px;">保有ポジション ({len(positions)}件)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>銘柄</th><th>取得日</th><th>取得価格</th><th>現在値</th><th>株数</th>
+        <th>損益</th><th>損益率</th><th>ストップ</th><th>現シグナル</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(pos_rows)}</tbody>
+  </table>"""
+    else:
+        pos_section = '<p style="color:#888;margin-top:32px;">保有ポジションなし</p>'
+
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -553,6 +612,7 @@ def generate_html(signals: dict, positions: dict) -> str:
     </tbody>
   </table>
   <p class="note">※ 推奨株数 = 資金 {INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}% ÷ (ATR × {ATR_STOP_MULT})</p>
+  {pos_section}
 </body>
 </html>"""
 
