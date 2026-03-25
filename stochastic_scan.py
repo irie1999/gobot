@@ -354,39 +354,37 @@ def make_demo_data(symbol: str, seed: int, base_price: float = 2000.0,
     return df
 
 
-# ── 1銘柄バックテスト ────────────────────────────────────────
-def run_backtest(symbol: str, name: str, demo: bool = False,
-                 demo_seed: int = 42) -> dict | None:
-    if demo:
-        # 銘柄ごとに異なるシードとドリフトで疑似データを生成
-        seed       = demo_seed
-        base_price = float(hash(symbol) % 5000 + 1000)
-        drift      = (demo_seed % 7 - 3) * 0.0001  # -0.0003 ～ +0.0003
-        df         = make_demo_data(symbol, seed, base_price, drift)
-    else:
-        import yfinance as yf
-        try:
-            raw = yf.download(symbol, period="max", interval="1d",
-                              auto_adjust=True, progress=False)
-            if raw.empty:
-                return None
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            raw.columns = [str(c).lower() for c in raw.columns]
-            raw = raw[["open", "high", "low", "close", "volume"]].dropna()
-            if len(raw) < MA_TREND_PERIOD + 30:
-                return None
-            # numpy経由で完全に再構築 → Gaps in blk ref_locs を根本解決
-            df = pd.DataFrame({
-                "open":   raw["open"].to_numpy(dtype=float),
-                "high":   raw["high"].to_numpy(dtype=float),
-                "low":    raw["low"].to_numpy(dtype=float),
-                "close":  raw["close"].to_numpy(dtype=float),
-                "volume": raw["volume"].to_numpy(dtype=float),
-            }, index=raw.index)
-        except Exception:
+# ── データ取得（メインスレッドのみ呼び出す） ─────────────────
+def fetch_df(symbol: str) -> pd.DataFrame | None:
+    """yfinance でデータを取得し、クリーンな DataFrame を返す。
+    スレッド競合を避けるため、必ずメインスレッドから順次呼び出すこと。"""
+    import yfinance as yf
+    try:
+        raw = yf.download(symbol, period="max", interval="1d",
+                          auto_adjust=True, progress=False)
+        if raw.empty:
             return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        if len(raw) < MA_TREND_PERIOD + 30:
+            return None
+        # numpy 経由で完全再構築（Gaps in blk ref_locs 対策）
+        return pd.DataFrame({
+            "open":   raw["open"].to_numpy(dtype=float),
+            "high":   raw["high"].to_numpy(dtype=float),
+            "low":    raw["low"].to_numpy(dtype=float),
+            "close":  raw["close"].to_numpy(dtype=float),
+            "volume": raw["volume"].to_numpy(dtype=float),
+        }, index=raw.index)
+    except Exception:
+        return None
 
+
+# ── 1銘柄バックテスト（DataFrameを受け取る・並列実行OK） ──────
+def backtest_from_df(symbol: str, name: str, df: pd.DataFrame) -> dict | None:
+    """calc_stochastic → バックテスト計算のみ。yfinance 非使用。"""
     df = calc_stochastic(df)
 
     cutoff    = pd.Timestamp(datetime.today() - timedelta(days=BACKTEST_DAYS))
@@ -435,12 +433,11 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
             risk_amt  = cash * RISK_PER_TRADE
             stop_dist = row["atr"] * ATR_STOP_MULT
             if stop_dist > 0:
-                raw = int(risk_amt / stop_dist)
-                q   = min(raw // LOT_SIZE, MAX_QTY // LOT_SIZE) * LOT_SIZE
+                q_raw = int(risk_amt / stop_dist)
+                q     = min(q_raw // LOT_SIZE, MAX_QTY // LOT_SIZE) * LOT_SIZE
                 if q > 0 and row["close"] * q <= cash:
                     cash        -= row["close"] * q
                     entry_price  = row["close"]
-                    # 初期トレイリングストップ = 終値 − ATR × TRAIL_MULT
                     trail_stop   = row["close"] - row["atr"] * ATR_TRAIL_MULT
                     entry_dt     = dt
                     qty          = q
@@ -481,6 +478,17 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
     }
 
 
+# ── 後方互換ラッパー（デモモード用） ────────────────────────────
+def run_backtest(symbol: str, name: str, demo: bool = False,
+                 demo_seed: int = 42) -> dict | None:
+    """デモモード専用。本番は fetch_df + backtest_from_df を直接使う。"""
+    seed       = demo_seed
+    base_price = float(hash(symbol) % 5000 + 1000)
+    drift      = (demo_seed % 7 - 3) * 0.0001
+    df         = make_demo_data(symbol, seed, base_price, drift)
+    return backtest_from_df(symbol, name, df)
+
+
 # ── 現在シグナルチェック ─────────────────────────────────────
 def check_today_signals(results: list, demo: bool) -> None:
     """ランキング上位銘柄について本日のシグナルを確認する。"""
@@ -502,25 +510,8 @@ def check_today_signals(results: list, demo: bool) -> None:
             drift      = (i % 7 - 3) * 0.0001
             df = make_demo_data(symbol, seed, base_price, drift)
         else:
-            try:
-                raw = yf.download(symbol, period="6mo", interval="1d",
-                                  auto_adjust=True, progress=False)
-                if raw.empty:
-                    continue
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                raw.columns = [str(c).lower() for c in raw.columns]
-                raw = raw[["open", "high", "low", "close", "volume"]].dropna()
-                if len(raw) < MA_TREND_PERIOD + 10:
-                    continue
-                df = pd.DataFrame({
-                    "open":   raw["open"].to_numpy(dtype=float),
-                    "high":   raw["high"].to_numpy(dtype=float),
-                    "low":    raw["low"].to_numpy(dtype=float),
-                    "close":  raw["close"].to_numpy(dtype=float),
-                    "volume": raw["volume"].to_numpy(dtype=float),
-                }, index=raw.index)
-            except Exception:
+            df = fetch_df(symbol)
+            if df is None:
                 continue
 
         df   = calc_stochastic(df)
@@ -586,28 +577,41 @@ if __name__ == "__main__":
             else:
                 print("スキップ（データなし or トレードなし）")
     else:
-        # 本番モードは並列ダウンロード（WORKERS スレッド）
-        print(f"  並列処理中（{WORKERS}スレッド）... しばらくお待ちください\n")
-        seed_map = {sym: i * 7 + 3 for i, (sym, _) in enumerate(SYMBOLS, 1)}
+        # ── Phase 1: データ取得（メインスレッドで順次実行・yfinance競合防止）──
+        print(f"  [Phase 1] データ取得中（順次実行）...")
+        stock_data: dict[str, tuple[str, pd.DataFrame]] = {}
+        for i, (sym, nm) in enumerate(SYMBOLS, 1):
+            print(f"  [{i:>3}/{len(SYMBOLS)}] {sym} {nm:24} 取得中...", end="\r", flush=True)
+            df = fetch_df(sym)
+            if df is not None:
+                stock_data[sym] = (nm, df)
+        print(f"\n  取得完了: {len(stock_data)}/{len(SYMBOLS)} 銘柄\n")
+
+        # ── Phase 2: バックテスト計算（並列実行・IO不使用なので安全）──
+        print(f"  [Phase 2] バックテスト計算中（{WORKERS}スレッド並列）...")
 
         def _bt(args):
-            sym, nm, seed = args
-            return run_backtest(sym, nm, demo=False, demo_seed=seed)
+            sym, nm, df = args
+            return backtest_from_df(sym, nm, df)
 
-        tasks = [(sym, nm, seed_map[sym]) for sym, nm in SYMBOLS]
+        tasks = [(sym, nm, df) for sym, (nm, df) in stock_data.items()]
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            future_to_sym = {ex.submit(_bt, t): t for t in tasks}
+            future_to_sym = {ex.submit(_bt, t): t[0] for t in tasks}
             for fut in as_completed(future_to_sym):
-                sym, nm, _ = future_to_sym[fut]
+                sym = future_to_sym[fut]
                 done_count += 1
-                r = fut.result()
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    print(f"  [{done_count:>3}] {sym}  エラー: {e}")
+                    continue
                 if r:
                     results.append(r)
                     sign = "+" if r["ret_pct"] >= 0 else ""
-                    print(f"  [{done_count:>3}/{len(SYMBOLS)}] {sym} {nm:24}  "
+                    print(f"  [{done_count:>3}/{len(stock_data)}] {sym} {r['name']:24}  "
                           f"{r['trades']:3}回  {sign}{r['ret_pct']:6.1f}%  勝率{r['win_rate']:.0f}%")
                 else:
-                    print(f"  [{done_count:>3}/{len(SYMBOLS)}] {sym} {nm:24}  スキップ")
+                    print(f"  [{done_count:>3}/{len(stock_data)}] {sym}  スキップ")
 
     results.sort(key=lambda x: x["ret_pct"], reverse=True)
 
