@@ -10,6 +10,7 @@
 ■ コマンド一覧:
   s / signal              シグナル再取得・表示
   l / list                ポジション一覧
+  c / check               保有ポジションの売買判断チェック
   b <コード>              買い記録         例: b 7203.T
   u <コード> <約定価格>   取得価格を更新   例: u 7203.T 3250
   x <コード>              売り記録         例: x 7203.T
@@ -437,6 +438,108 @@ def show_positions(positions: dict, signals: dict) -> None:
     print(f"  合計損益: {total_pnl:+,.0f}円")
 
 
+# ── 保有ポジション A7 売買チェック ───────────────────────────
+def do_check_positions(positions: dict, signals: dict) -> None:
+    """保有ポジションについて A7 出口条件を評価し、売買判断を表示する"""
+    if not positions:
+        print("  （保有ポジションなし）")
+        return
+
+    print()
+    print(f"  ══════════════════════════════════════════════════════════════════════")
+    print(f"  保有ポジション 売買チェック  [{datetime.now().strftime('%Y-%m-%d %H:%M')}]")
+    print(f"  ══════════════════════════════════════════════════════════════════════")
+
+    for sym, pos in positions.items():
+        name       = pos["name"]
+        entry      = pos["entry_price"]
+        qty        = pos["qty"]
+        stop_saved = pos["stop_price"]   # 買い時に記録した初期ストップ
+        entry_dt   = pos["entry_date"]
+
+        # シグナルデータ取得（キャッシュ優先、なければ新規取得）
+        info = signals.get(sym)
+        if info is None:
+            print(f"\n  [{sym}] {name}  データ取得中...", end=" ", flush=True)
+            # WATCH_LIST にない銘柄でも名前をposから補完
+            info = fetch_signal(sym, name)
+            if info:
+                signals[sym] = info
+                print("OK")
+            else:
+                print("取得失敗")
+
+        print(f"\n  ┌─ {name}({sym})  取得日: {entry_dt}")
+
+        if info is None:
+            print(f"  │  ✗ データ取得失敗 → 判断不可")
+            print(f"  └─ ストップ価格（記録値）: {stop_saved:,.1f}円")
+            continue
+
+        cur       = info["close"]
+        atr       = info["atr"]
+        ma75      = info["ma75"]
+        k         = info["k"]
+        d         = info["d"]
+        trend_up  = info["trend_up"]
+        trail_ref = cur - atr * ATR_TRAIL_MULT  # 現在終値ベースのトレイル参照値
+        pnl       = (cur - entry) * qty
+        pct       = (cur - entry) / entry * 100
+        pnl_sign  = "+" if pnl >= 0 else ""
+
+        # ── A7 出口条件チェック ──
+        reasons_sell   = []
+        reasons_caution = []
+
+        # 条件1: 現在の終値が初期ストップを下回っている
+        if cur <= stop_saved:
+            reasons_sell.append(f"終値({cur:,.1f}) ≤ ストップ({stop_saved:,.1f})")
+
+        # 条件2: デッドクロス（A7 exit_sig）
+        if info["signal"] == "SELL":
+            reasons_sell.append(f"%K({k:.1f}) < %D({d:.1f}) デッドクロス発生")
+
+        # 条件3: 75MA割れ（トレンド転換）
+        if not trend_up:
+            reasons_caution.append(f"終値({cur:,.1f}) < 75MA({ma75:,.1f}) → 下降トレンド")
+
+        # 条件4: K が過買い圏からの下落
+        if k > STOCH_OVERBOUGHT:
+            reasons_caution.append(f"%K={k:.1f} 過買い圏 → 売りシグナル待ち")
+
+        # ── 判定 ──
+        if reasons_sell:
+            verdict     = "🔴 売り推奨"
+            verdict_detail = "【A7 売り条件あり】 早めに利確・損切りを検討"
+        elif len(reasons_caution) >= 2:
+            verdict     = "🟡 要注意"
+            verdict_detail = "【複数の警戒条件】 トレイリングストップを引き上げ済か確認"
+        elif reasons_caution:
+            verdict     = "🟡 要注意"
+            verdict_detail = "【警戒条件あり】 状況を引き続き監視"
+        else:
+            verdict     = "🟢 保有継続"
+            verdict_detail = "【A7 保有継続】 出口条件なし"
+
+        # ── 表示 ──
+        print(f"  │  取得価格   : {entry:>9,.1f}円  ×{qty}株")
+        print(f"  │  現在値     : {cur:>9,.1f}円   損益: {pnl_sign}{pnl:,.0f}円 ({pct:+.1f}%)")
+        print(f"  │  ストップ   : {stop_saved:>9,.1f}円   トレイル参照: {trail_ref:,.1f}円")
+        print(f"  │  75MA       : {ma75:>9,.1f}円   トレンド: {'↑上昇' if trend_up else '↓下降'}")
+        print(f"  │  %K / %D   : {k:>6.1f} / {d:.1f}   シグナル: {info['signal']}")
+
+        if reasons_sell:
+            for r in reasons_sell:
+                print(f"  │  ⚠ 売り条件: {r}")
+        if reasons_caution:
+            for r in reasons_caution:
+                print(f"  │  △ 警戒    : {r}")
+
+        print(f"  └─ 判定: {verdict}  {verdict_detail}")
+
+    print()
+
+
 # ── シグナル表示 ──────────────────────────────────────────────
 SIGNAL_LABEL = {
     "BUY":         "★ BUY      ← 買いシグナル！（75MA上・トレンド確認済）",
@@ -680,6 +783,7 @@ def show_help() -> None:
   ─── コマンド一覧 ───────────────────────────────────────────
   s  / signal                  シグナル再取得・表示
   l  / list                    ポジション一覧
+  c  / check                   保有ポジションの A7 売買判断チェック
   b  <コード> [株数] [取得価格]  買い記録         例: b 7203.T  または  b 7203 50 3250  （省略→ATR推奨・現在終値）
   u  <コード> <約定価格>       取得価格を更新   例: u 7203.T 3250  または  u 7203 3250
   x  <コード> [株数]           売り記録         例: x 7203.T  または  x 7203 30  （株数省略→全売り）
@@ -687,6 +791,7 @@ def show_help() -> None:
   q  / quit / exit             終了
   ────────────────────────────────────────────────────────────
   ※ コードは .T なしの数字4桁でも入力可（自動補完）
+  ※ check: 🔴売り推奨（ストップ割れ/デッドクロス）  🟡要注意（75MA割れ等）  🟢保有継続
 """)
 
 
@@ -755,6 +860,10 @@ def main() -> None:
             print()
             print("  ─── 保有ポジション ───")
             show_positions(positions, signals)
+
+        elif cmd in ("c", "check"):
+            positions = load_positions()
+            do_check_positions(positions, signals)
 
         elif cmd in ("b", "buy"):
             if len(parts) < 2:
