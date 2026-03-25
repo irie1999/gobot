@@ -62,14 +62,16 @@ WATCH_LIST = [
     ("5741.T",  "UACJ"),               # 30位 +16.0%
 ]
 
-# ── ストキャスティクス パラメータ ─────────────────────────────
+# ── ストキャスティクス パラメータ（A7: トレンドフィルター付き）──
 STOCH_K_PERIOD   = 14
 STOCH_SMOOTH     = 3
 STOCH_D_PERIOD   = 3
 STOCH_OVERSOLD   = 30
 STOCH_OVERBOUGHT = 70
 ATR_PERIOD       = 14
-ATR_STOP_MULT    = 2.0
+ATR_STOP_MULT    = 1.5          # 初期ストップロス倍率
+ATR_TRAIL_MULT   = 2.0          # トレイリングストップ倍率
+MA_TREND_PERIOD  = 75           # トレンドフィルター移動平均期間
 
 # ── ポジションサイジング パラメータ（S株：1株単位） ──────────
 INITIAL_CASH   = 500_000   # 運用資金（円）
@@ -98,12 +100,17 @@ def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
     df["stoch_k"] = slow_k
     df["stoch_d"] = slow_d
 
+    # 75日移動平均線（トレンドフィルター）
+    ma75 = c.rolling(MA_TREND_PERIOD).mean()
+    df["ma75"] = ma75
+
     prev_k = slow_k.shift(1)
     prev_d = slow_d.shift(1)
 
     df["golden_cross"] = (slow_k > slow_d) & (prev_k <= prev_d)
     df["dead_cross"]   = (slow_k < slow_d) & (prev_k >= prev_d)
-    df["entry_sig"]    = df["golden_cross"] & (slow_k < STOCH_OVERBOUGHT)
+    # A7: トレンドフィルター（終値 > 75MA）追加
+    df["entry_sig"]    = df["golden_cross"] & (slow_k < STOCH_OVERBOUGHT) & (c > ma75)
     df["exit_sig"]     = df["dead_cross"]
 
     prev_c = c.shift(1)
@@ -116,7 +123,8 @@ def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
 # ── 1銘柄のシグナル取得 ───────────────────────────────────────
 def fetch_signal(symbol: str, name: str) -> dict | None:
     try:
-        df = yf.download(symbol, period="60d", interval="1d",
+        # 75日MA計算に十分なデータを取得するため6ヶ月分取得
+        df = yf.download(symbol, period="6mo", interval="1d",
                          auto_adjust=True, progress=False)
         if df.empty:
             return None
@@ -127,7 +135,7 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
     except Exception:
         return None
 
-    min_rows = STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
+    min_rows = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
     if len(df) < min_rows:
         return None
 
@@ -141,9 +149,11 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
     d     = float(last["stoch_d"])
     close = float(last["close"])
     atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+    ma75  = float(last["ma75"]) if not pd.isna(last["ma75"]) else 0.0
     date  = df.index[-1].strftime("%Y-%m-%d")
+    trend_up = close > ma75 if ma75 > 0 else False
 
-    # シグナル判定
+    # シグナル判定（A7: トレンドフィルター考慮）
     entry = bool(last["entry_sig"])
     exit_ = bool(last["exit_sig"])
 
@@ -151,16 +161,19 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
         signal = "BUY"
     elif exit_:
         signal = "SELL"
-    elif k < STOCH_OVERSOLD:
-        signal = "WATCH_BUY"   # 過売り圏 → もうすぐ買いシグナル候補
+    elif k < STOCH_OVERSOLD and trend_up:
+        signal = "WATCH_BUY"   # 過売り圏かつ上昇トレンド → 買いシグナル待ち
+    elif k < STOCH_OVERSOLD and not trend_up:
+        signal = "WATCH_BUY↓"  # 過売り圏だがトレンド下向き → 75MA回復待ち
     elif k > STOCH_OVERBOUGHT:
-        signal = "WATCH_SELL"  # 過買い圏 → もうすぐ売りシグナル候補
+        signal = "WATCH_SELL"  # 過買い圏 → 売りシグナル待ち
     else:
         signal = "HOLD"
 
-    stop      = close - atr * ATR_STOP_MULT
-    stop_dist = atr * ATR_STOP_MULT
-    risk_amt  = INITIAL_CASH * RISK_PER_TRADE
+    # トレイリングストップ価格（参考値：現在の終値ベース）
+    trail_stop = close - atr * ATR_TRAIL_MULT
+    stop_dist  = atr * ATR_STOP_MULT
+    risk_amt   = INITIAL_CASH * RISK_PER_TRADE
     if stop_dist > 0:
         qty = min(int(risk_amt / stop_dist), MAX_QTY)
     else:
@@ -168,16 +181,18 @@ def fetch_signal(symbol: str, name: str) -> dict | None:
     qty = max(qty, 1)
 
     return {
-        "symbol": symbol,
-        "name":   name,
-        "date":   date,
-        "close":  close,
-        "k":      k,
-        "d":      d,
-        "atr":    atr,
-        "stop":   stop,
-        "signal": signal,
-        "qty":    qty,
+        "symbol":    symbol,
+        "name":      name,
+        "date":      date,
+        "close":     close,
+        "k":         k,
+        "d":         d,
+        "atr":       atr,
+        "ma75":      ma75,
+        "trend_up":  trend_up,
+        "stop":      trail_stop,
+        "signal":    signal,
+        "qty":       qty,
     }
 
 
@@ -423,14 +438,15 @@ def show_positions(positions: dict, signals: dict) -> None:
 
 # ── シグナル表示 ──────────────────────────────────────────────
 SIGNAL_LABEL = {
-    "BUY":        "★ BUY      ← 買いシグナル！",
-    "SELL":       "▼ SELL     ← 売りシグナル！",
-    "WATCH_BUY":  "◎ WATCH    過売り圏（買い候補）",
-    "WATCH_SELL": "△ WATCH    過買い圏（売り候補）",
-    "HOLD":       "  HOLD",
+    "BUY":         "★ BUY      ← 買いシグナル！（75MA上・トレンド確認済）",
+    "SELL":        "▼ SELL     ← 売りシグナル！",
+    "WATCH_BUY":   "◎ WATCH↑  過売り圏・上昇トレンド（買い候補）",
+    "WATCH_BUY↓":  "○ WATCH↓  過売り圏・75MA下（トレンド回復待ち）",
+    "WATCH_SELL":  "△ WATCH    過買い圏（売り候補）",
+    "HOLD":        "  HOLD",
 }
 
-SIGNAL_ORDER = {"BUY": 0, "SELL": 1, "WATCH_BUY": 2, "WATCH_SELL": 3, "HOLD": 4}
+SIGNAL_ORDER = {"BUY": 0, "SELL": 1, "WATCH_BUY": 2, "WATCH_BUY↓": 3, "WATCH_SELL": 4, "HOLD": 5}
 
 
 def show_signals(signals: dict, positions: dict) -> None:
@@ -438,18 +454,20 @@ def show_signals(signals: dict, positions: dict) -> None:
 
     date_str = items[0]["date"] if items else datetime.now().strftime("%Y-%m-%d")
     print()
-    print(f"  ══════════════════════════════════════════════════════════════════")
-    print(f"  ストキャスティクス シグナル一覧  [{date_str}]  ※S株（1株単位）")
-    print(f"  ══════════════════════════════════════════════════════════════════")
-    print(f"  {'#':<3} {'銘柄':<22} {'終値':>7} {'%K':>6} {'%D':>6} "
-          f"{'ストップ':>8} {'推奨株数':>8}  シグナル")
-    print(f"  {'─'*3} {'─'*22} {'─'*7} {'─'*6} {'─'*6} {'─'*8} {'─'*8}  {'─'*28}")
+    print(f"  ══════════════════════════════════════════════════════════════════════════")
+    print(f"  A7 シグナル一覧  [{date_str}]  ※トレンドフィルター付き・S株（1株単位）")
+    print(f"  ══════════════════════════════════════════════════════════════════════════")
+    print(f"  {'#':<3} {'銘柄':<22} {'終値':>7} {'75MA':>8} {'TRD':>4} {'%K':>6} {'%D':>6} "
+          f"{'トレイル':>8} {'推奨株数':>8}  シグナル")
+    print(f"  {'─'*3} {'─'*22} {'─'*7} {'─'*8} {'─'*4} {'─'*6} {'─'*6} {'─'*8} {'─'*8}  {'─'*46}")
 
     for i, s in enumerate(items, 1):
-        sym    = s["symbol"]
-        sig    = s["signal"]
-        label  = f"{s['name']}({sym})"
-        sig_lbl = SIGNAL_LABEL[sig]
+        sym      = s["symbol"]
+        sig      = s["signal"]
+        label    = f"{s['name']}({sym})"
+        sig_lbl  = SIGNAL_LABEL[sig]
+        ma75_str = f"{s['ma75']:>8,.1f}" if s.get("ma75", 0) > 0 else f"{'─':>8}"
+        trd_str  = "↑" if s.get("trend_up") else "↓"
 
         # 推奨株数: BUY/WATCH_BUY → 新規買い推奨株数, SELL → 保有株数, それ以外 → -
         if sig in ("BUY", "WATCH_BUY"):
@@ -461,31 +479,36 @@ def show_signals(signals: dict, positions: dict) -> None:
             qty_str = f"{'─':>7} "
 
         pos_mark = " [保有中]" if sym in positions else ""
-        print(f"  {i:<3} {label:<22} {s['close']:>7,.1f} "
+        print(f"  {i:<3} {label:<22} {s['close']:>7,.1f} {ma75_str} {trd_str:>4} "
               f"{s['k']:>6.1f} {s['d']:>6.1f} {s['stop']:>8,.1f} {qty_str:>8}  {sig_lbl}{pos_mark}")
 
     print()
     buy_count  = sum(1 for s in signals.values() if s["signal"] == "BUY")
     sell_count = sum(1 for s in signals.values() if s["signal"] == "SELL")
-    print(f"  買いシグナル: {buy_count}件  売りシグナル: {sell_count}件")
-    print(f"  ※ 推奨株数 = 資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}% ÷ (ATR × {ATR_STOP_MULT})")
+    watch_up   = sum(1 for s in signals.values() if s["signal"] == "WATCH_BUY")
+    watch_dn   = sum(1 for s in signals.values() if s["signal"] == "WATCH_BUY↓")
+    print(f"  買いシグナル: {buy_count}件  売りシグナル: {sell_count}件  "
+          f"WATCH↑: {watch_up}件  WATCH↓: {watch_dn}件（75MA回復待ち）")
+    print(f"  ※ トレイルストップ = 終値 − ATR × {ATR_TRAIL_MULT}  推奨株数 = 資金{INITIAL_CASH:,}円 × {RISK_PER_TRADE*100:.0f}% ÷ (ATR × {ATR_STOP_MULT})")
     print()
 
 
 # ── HTML レポート生成 & 自動オープン ──────────────────────────
 SIGNAL_BG = {
-    "BUY":        "#fff3cd",  # 黄
-    "SELL":       "#f8d7da",  # 赤
-    "WATCH_BUY":  "#d1ecf1",  # 水色
-    "WATCH_SELL": "#fce8d5",  # オレンジ
-    "HOLD":       "#ffffff",
+    "BUY":         "#fff3cd",  # 黄
+    "SELL":        "#f8d7da",  # 赤
+    "WATCH_BUY":   "#d1ecf1",  # 水色
+    "WATCH_BUY↓":  "#e8e8e8",  # グレー（75MA下）
+    "WATCH_SELL":  "#fce8d5",  # オレンジ
+    "HOLD":        "#ffffff",
 }
 SIGNAL_BADGE = {
-    "BUY":        ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">★ BUY</span>', "買いシグナル！"),
-    "SELL":       ('<span style="background:#dc3545;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">▼ SELL</span>', "売りシグナル！"),
-    "WATCH_BUY":  ('<span style="background:#17a2b8;color:#fff;padding:2px 8px;border-radius:4px;">◎ WATCH</span>', "過売り圏（買い候補）"),
-    "WATCH_SELL": ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;">△ WATCH</span>', "過買い圏（売り候補）"),
-    "HOLD":       ('<span style="color:#888;">HOLD</span>', ""),
+    "BUY":         ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">★ BUY</span>', "買いシグナル！（75MA上・トレンド確認済）"),
+    "SELL":        ('<span style="background:#dc3545;color:#fff;padding:2px 8px;border-radius:4px;font-weight:bold;">▼ SELL</span>', "売りシグナル！"),
+    "WATCH_BUY":   ('<span style="background:#17a2b8;color:#fff;padding:2px 8px;border-radius:4px;">◎ WATCH↑</span>', "過売り圏・上昇トレンド（買い候補）"),
+    "WATCH_BUY↓":  ('<span style="background:#888;color:#fff;padding:2px 8px;border-radius:4px;">○ WATCH↓</span>', "過売り圏・75MA下（トレンド回復待ち）"),
+    "WATCH_SELL":  ('<span style="background:#fd7e14;color:#fff;padding:2px 8px;border-radius:4px;">△ WATCH</span>', "過買い圏（売り候補）"),
+    "HOLD":        ('<span style="color:#888;">HOLD</span>', ""),
 }
 
 
@@ -511,12 +534,19 @@ def generate_html(signals: dict, positions: dict) -> str:
             qty_html = '<span style="color:#ccc;">─</span>'
 
         pos_badge = ' <span style="background:#6c757d;color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;">保有中</span>' if sym in positions else ""
+        trend_html = ('<span style="color:#28a745;font-weight:bold;">↑</span>'
+                      if s.get("trend_up") else
+                      '<span style="color:#dc3545;">↓</span>')
+        ma75_val = s.get("ma75", 0)
+        ma75_html = f"{ma75_val:,.1f}" if ma75_val > 0 else "─"
 
         rows.append(f"""
         <tr style="background:{bg};">
           <td style="text-align:center;">{i}</td>
           <td>{s["name"]}<br><small style="color:#666;">{sym}</small>{pos_badge}</td>
           <td style="text-align:right;">{s["close"]:,.1f}</td>
+          <td style="text-align:right;">{ma75_html}</td>
+          <td style="text-align:center;">{trend_html}</td>
           <td style="text-align:right;">{s["k"]:.1f}</td>
           <td style="text-align:right;">{s["d"]:.1f}</td>
           <td style="text-align:right;">{s["stop"]:,.1f}</td>
@@ -608,8 +638,8 @@ def generate_html(signals: dict, positions: dict) -> str:
   </style>
 </head>
 <body>
-  <h1>ストキャスティクス シグナル一覧</h1>
-  <div class="meta">基準日: {date_str}　|　生成: {generated}　|　対象: 上位30銘柄（S株・1株単位）</div>
+  <h1>A7 シグナル一覧（トレンドフィルター付きストキャスティクス + ATRトレイリングストップ）</h1>
+  <div class="meta">基準日: {date_str}　|　生成: {generated}　|　対象: 上位30銘柄（S株・1株単位）　|　トレンドフィルター: {MA_TREND_PERIOD}日MA　|　トレイル倍率: ATR×{ATR_TRAIL_MULT}</div>
   <div class="summary">
     <div class="badge badge-buy">★ 買いシグナル: {buy_count} 件</div>
     <div class="badge badge-sell">▼ 売りシグナル: {sell_count} 件</div>
@@ -617,8 +647,8 @@ def generate_html(signals: dict, positions: dict) -> str:
   <table>
     <thead>
       <tr>
-        <th>#</th><th>銘柄</th><th>終値</th><th>%K</th><th>%D</th>
-        <th>ストップ</th><th>推奨株数</th><th>シグナル</th>
+        <th>#</th><th>銘柄</th><th>終値</th><th>75MA</th><th>TRD</th><th>%K</th><th>%D</th>
+        <th>トレイルStop</th><th>推奨株数</th><th>シグナル</th>
       </tr>
     </thead>
     <tbody>

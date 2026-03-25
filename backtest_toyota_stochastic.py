@@ -1,10 +1,13 @@
 """
-トヨタ自動車 (7203.T) A6: ストキャスティクス バックテスト
-──────────────────────────────────────────────────────────
-アルゴリズム A6: ストキャスティクス クロス
+トヨタ自動車 (7203.T) A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ
+──────────────────────────────────────────────────────────────────────────────────────
+アルゴリズム A7: トレンドフィルター付きストキャスティクス クロス
+
   Entry: スロー%K が %D を 30 以下から上抜け（ゴールデンクロス）
+         かつ 終値 > 75日移動平均線（上昇トレンド確認）
   Exit : スロー%K が %D を 60 以上から下抜け（デッドクロス）
-  ストップロス: ATR × 1.5
+         または ATR × 2.0 トレイリングストップ発動
+  トレイリングストップ: 終値 − ATR × 2.0（含み益に応じて自動切り上げ）
 
 使い方:
   pip install yfinance pandas numpy matplotlib
@@ -35,11 +38,14 @@ NAME         = "トヨタ自動車"
 YEARS        = 5               # バックテスト期間（年）
 INITIAL_CASH = 500_000         # 初期資金（円）
 
-ATR_PERIOD     = 14
-ATR_STOP_MULT  = 1.5
-RISK_PER_TRADE = 0.03          # 1トレードあたりリスク 3%
-MAX_COST_RATIO = 0.10          # 1回の購入上限 10%
-MAX_QTY        = 3000
+ATR_PERIOD      = 14
+ATR_STOP_MULT   = 1.5          # 初期ストップロス倍率
+ATR_TRAIL_MULT  = 2.0          # トレイリングストップ倍率
+RISK_PER_TRADE  = 0.03         # 1トレードあたりリスク 3%
+MAX_COST_RATIO  = 0.10         # 1回の購入上限 10%
+MAX_QTY         = 3000
+
+MA_TREND_PERIOD = 75           # トレンドフィルター移動平均期間
 
 STOCH_K  = 14
 STOCH_SM = 3
@@ -73,6 +79,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     df["atr"] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
+    # 75日移動平均線（トレンドフィルター）
+    df["ma75"] = c.rolling(MA_TREND_PERIOD).mean()
+
     # スロー・ストキャスティクス
     hh = h.rolling(STOCH_K).max()
     ll = l.rolling(STOCH_K).min()
@@ -86,8 +95,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["cross_up"] = (slow_k > slow_d) & (slow_k.shift(1) <= slow_d.shift(1))
     df["cross_dn"] = (slow_k < slow_d) & (slow_k.shift(1) >= slow_d.shift(1))
 
-    # A6 シグナル
-    df["entry_sig"] = df["cross_up"] & (slow_k.shift(1) < 30)
+    # A7 シグナル（トレンドフィルター: 終値 > 75MA のときのみエントリー）
+    df["entry_sig"] = df["cross_up"] & (slow_k.shift(1) < 30) & (c > df["ma75"])
     df["exit_sig"]  = df["cross_dn"] & (slow_k.shift(1) > 60)
 
     return df
@@ -97,7 +106,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def run_backtest(df: pd.DataFrame) -> dict:
     cash        = float(INITIAL_CASH)
     in_pos      = False
-    entry_price = stop_price = 0.0
+    entry_price = trail_stop = 0.0
     qty         = 0
     entry_dt    = None
     trades      = []
@@ -112,9 +121,11 @@ def run_backtest(df: pd.DataFrame) -> dict:
         # ── エグジット ──
         if in_pos:
             exit_p = exit_r = None
-            if today["low"] <= stop_price:
-                exit_p = min(float(today["open"]), stop_price)
-                exit_r = "ストップ"
+
+            # トレイリングストップ発動判定（当日始値を下限に使用）
+            if today["low"] <= trail_stop:
+                exit_p = min(float(today["open"]), trail_stop)
+                exit_r = "トレイリング"
             elif prev["exit_sig"]:
                 exit_p = float(today["open"])
                 exit_r = "シグナル"
@@ -133,6 +144,12 @@ def run_backtest(df: pd.DataFrame) -> dict:
                     "hold_days":   (df.index[i] - entry_dt).days,
                 })
                 in_pos = False
+            else:
+                # トレイリングストップを切り上げ（終値ベース・下がらない）
+                atr_v     = float(today["atr"]) if not pd.isna(today["atr"]) else 0.0
+                candidate = float(today["close"]) - atr_v * ATR_TRAIL_MULT
+                if candidate > trail_stop:
+                    trail_stop = candidate
 
         # ── エントリー ──
         if not in_pos and prev["entry_sig"]:
@@ -146,7 +163,8 @@ def run_backtest(df: pd.DataFrame) -> dict:
                 if q > 0 and cost <= cash:
                     cash        -= cost
                     entry_price  = float(today["open"])
-                    stop_price   = entry_price - stop_dist
+                    # 初期トレイリングストップ = エントリー価格 − ATR × TRAIL_MULT
+                    trail_stop   = entry_price - float(today["atr"]) * ATR_TRAIL_MULT
                     qty          = q
                     entry_dt     = df.index[i]
                     in_pos       = True
@@ -221,6 +239,11 @@ def make_price_chart(df: pd.DataFrame, trades: list) -> str:
     # 株価
     ax1.plot(df.index, df["close"], color="#a0c4ff", linewidth=1.2, label="終値")
 
+    # 75日移動平均線（トレンドフィルター）
+    if "ma75" in df.columns:
+        ax1.plot(df.index, df["ma75"], color="#ff9100", linewidth=1.0,
+                 linestyle="--", label="75MA", alpha=0.85)
+
     # トレードマーカー
     for t in trades:
         ax1.axvline(t["entry_dt"], color="#00e676", alpha=0.4, linewidth=0.8)
@@ -230,7 +253,7 @@ def make_price_chart(df: pd.DataFrame, trades: list) -> str:
         ax1.scatter(t["exit_dt"],  t["exit_price"],
                     marker="v", color="#ff5252", s=60, zorder=5)
 
-    ax1.set_title(f"{NAME} ({SYMBOL})  A6: ストキャスティクス バックテスト",
+    ax1.set_title(f"{NAME} ({SYMBOL})  A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ",
                   color="#e0e0e0", fontsize=13, pad=10)
     ax1.set_ylabel("株価 (円)", color="#e0e0e0")
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
@@ -395,7 +418,7 @@ def export_html(df: pd.DataFrame, result: dict, start: str, end: str) -> None:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{NAME} A6: ストキャスティクス バックテスト</title>
+<title>{NAME} A7: トレンドフィルター付きストキャスティクス バックテスト</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{font-family:"Yu Gothic UI","Hiragino Sans","Noto Sans JP",sans-serif;
@@ -437,15 +460,16 @@ def export_html(df: pd.DataFrame, result: dict, start: str, end: str) -> None:
 <body>
 
 <div class="header">
-  <h1>📊 {NAME}（{SYMBOL}）— A6: ストキャスティクス バックテスト</h1>
+  <h1>📊 {NAME}（{SYMBOL}）— A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ</h1>
   <p>
     バックテスト期間: {start} ～ {end}（直近 {YEARS} 年）<br>
-    アルゴリズム: A6 ストキャスティクス クロス
-    Entry: %K が %D を <strong>30 以下</strong>から上抜け ／
-    Exit: %K が %D を <strong>60 以上</strong>から下抜け<br>
-    ストップロス: ATR({ATR_PERIOD}) × {ATR_STOP_MULT}
-    初期資金: {INITIAL_CASH:,}円
-    リスク/トレード: {RISK_PER_TRADE*100:.0f}%<br>
+    アルゴリズム: A7 — Entry: %K が %D を <strong>30 以下</strong>から上抜け
+    かつ <strong>終値 &gt; 75MA</strong>（上昇トレンド確認）／
+    Exit: %K が %D を <strong>60 以上</strong>から下抜け
+    または <strong>ATRトレイリングストップ</strong>発動<br>
+    初期ストップ: ATR({ATR_PERIOD}) × {ATR_STOP_MULT}
+    トレイリング: ATR({ATR_PERIOD}) × {ATR_TRAIL_MULT}（含み益に応じて自動切り上げ）
+    初期資金: {INITIAL_CASH:,}円　リスク/トレード: {RISK_PER_TRADE*100:.0f}%<br>
     生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}
   </p>
 </div>
@@ -455,12 +479,13 @@ def export_html(df: pd.DataFrame, result: dict, start: str, end: str) -> None:
 <div class="params">
   <strong>パラメータ</strong>：
   ストキャスティクス %K={STOCH_K} / Smooth={STOCH_SM} / %D={STOCH_D} ／
-  ATR={ATR_PERIOD} ／ ストップ倍率={ATR_STOP_MULT} ／
+  ATR={ATR_PERIOD} ／ 初期ストップ倍率={ATR_STOP_MULT} ／ トレイリング倍率={ATR_TRAIL_MULT} ／
+  トレンドフィルター: {MA_TREND_PERIOD}日移動平均線（終値 &gt; MA時のみエントリー）／
   過売りライン=30 ／ 過買いライン=60（Exit判定）
 </div>
 
 <div class="section">
-  <h2 class="sec">株価チャート & ストキャスティクス（エントリー/エグジット）</h2>
+  <h2 class="sec">株価チャート・75MA & ストキャスティクス（エントリー/エグジット）</h2>
   <div class="chart-card"><img src="data:image/png;base64,{price_img}" alt="株価チャート"></div>
 </div>
 
@@ -496,7 +521,7 @@ def main():
     start = (datetime.today() - timedelta(days=365 * YEARS + 60)).strftime("%Y-%m-%d")
 
     print(f"\n{'='*60}")
-    print(f"  {NAME} ({SYMBOL})  A6: ストキャスティクス バックテスト")
+    print(f"  {NAME} ({SYMBOL})  A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ")
     print(f"  期間: {start} ～ {end}  初期資金: {INITIAL_CASH:,}円")
     print(f"{'='*60}")
 
@@ -504,6 +529,7 @@ def main():
     df = fetch_data(SYMBOL, start, end)
     print(f"  取得完了: {len(df)} 日分")
 
+    print(f"  トレンドフィルター: {MA_TREND_PERIOD}日MA  トレイリング倍率: ATR×{ATR_TRAIL_MULT}")
     print("[2/3] インジケーター計算 & バックテスト実行中 ...")
     df = add_indicators(df)
     result = run_backtest(df)

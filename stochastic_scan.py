@@ -1,14 +1,14 @@
 """
 ストキャスティクス 銘柄スキャナー（日経225）
 ────────────────────────────────────────
-ストキャスティクスアルゴリズムを使って日経225銘柄をバックテストし、
-利益が高い銘柄をランキング表示します。
+A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ
 
 ■ ストキャスティクス戦略:
   エントリー: スロー%K が %D を下から上にクロス（ゴールデンクロス）
               かつ %K が過売り圏（< STOCH_OVERSOLD=30）から脱出
+              かつ 終値 > 75日移動平均線（上昇トレンド確認）
   エグジット:  スロー%K が %D を上から下にクロス（デッドクロス）
-              または ストップロス（ATR×2.0 下）
+              または ATRトレイリングストップ発動（ATR×2.0・含み益に応じて切り上げ）
 
 ■ 実行方法:
   pip install yfinance pandas numpy
@@ -29,7 +29,9 @@ STOCH_SMOOTH     = 3            # %K の平滑化（スロー版）
 STOCH_OVERSOLD   = 30           # 過売りライン
 STOCH_OVERBOUGHT = 70           # 過買いライン
 ATR_PERIOD       = 14
-ATR_STOP_MULT    = 2.0
+ATR_STOP_MULT    = 1.5          # 初期ストップロス倍率
+ATR_TRAIL_MULT   = 2.0          # トレイリングストップ倍率
+MA_TREND_PERIOD  = 75           # トレンドフィルター移動平均期間
 RISK_PER_TRADE   = 0.03         # 3%
 INITIAL_CASH     = 500_000
 LOT_SIZE         = 100
@@ -103,13 +105,16 @@ SYMBOLS = [
 # ── ストキャスティクス計算 ────────────────────────────────────
 def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
     """
-    スロー・ストキャスティクスを計算する。
+    スロー・ストキャスティクスを計算する（A7: トレンドフィルター付き）
       FastK = (Close - LowestLow[K]) / (HighestHigh[K] - LowestLow[K]) * 100
       SlowK = SMA(FastK, smooth)   ← スロー化
       SlowD = SMA(SlowK, D_period) ← シグナル線
+      MA75  = SMA(Close, 75)       ← トレンドフィルター
     エントリー: ゴールデンクロス (SlowK が SlowD を上抜け)
                かつ SlowK < STOCH_OVERBOUGHT（過買い追いかけ防止）
+               かつ 終値 > 75MA（上昇トレンド確認）
     エグジット:  デッドクロス (SlowK が SlowD を下抜け)
+               または ATRトレイリングストップ発動
     """
     h = df["high"]
     l = df["low"]
@@ -123,8 +128,12 @@ def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
     slow_k = fast_k.rolling(STOCH_SMOOTH).mean()
     slow_d = slow_k.rolling(STOCH_D_PERIOD).mean()
 
+    # 75日移動平均線（トレンドフィルター）
+    ma75 = c.rolling(MA_TREND_PERIOD).mean()
+
     df["stoch_k"] = slow_k
     df["stoch_d"] = slow_d
+    df["ma75"]    = ma75
 
     prev_k = slow_k.shift(1)
     prev_d = slow_d.shift(1)
@@ -132,8 +141,8 @@ def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
     df["golden_cross"] = (slow_k > slow_d) & (prev_k <= prev_d)
     df["dead_cross"]   = (slow_k < slow_d) & (prev_k >= prev_d)
 
-    # エントリー: ゴールデンクロス かつ 過買い圏でない
-    df["entry_sig"] = df["golden_cross"] & (slow_k < STOCH_OVERBOUGHT)
+    # エントリー: ゴールデンクロス かつ 過買い圏でない かつ 75MA上（トレンドフィルター）
+    df["entry_sig"] = df["golden_cross"] & (slow_k < STOCH_OVERBOUGHT) & (c > ma75)
     # エグジット: デッドクロス
     df["exit_sig"]  = df["dead_cross"]
 
@@ -204,7 +213,7 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
     in_pos      = False
     cash        = float(INITIAL_CASH)
     trades      = []
-    entry_price = stop_price = 0.0
+    entry_price = trail_stop = 0.0
     entry_dt    = None
     qty         = 0
 
@@ -215,9 +224,9 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
         # ── ポジション保有中: エグジット判定 ──
         if in_pos:
             reason = exit_p = None
-            if row["low"] <= stop_price:
-                exit_p = stop_price
-                reason = "ストップ"
+            if row["low"] <= trail_stop:
+                exit_p = trail_stop
+                reason = "トレイリング"
             elif row["exit_sig"]:
                 exit_p = row["close"]
                 reason = "シグナル"
@@ -230,6 +239,11 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
                     "note":      reason,
                 })
                 in_pos = False
+            else:
+                # トレイリングストップを切り上げ（下がらない）
+                candidate = row["close"] - row["atr"] * ATR_TRAIL_MULT
+                if candidate > trail_stop:
+                    trail_stop = candidate
 
         # ── ポジションなし: エントリー判定 ──
         if not in_pos and row["entry_sig"]:
@@ -241,7 +255,8 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
                 if q > 0 and row["close"] * q <= cash:
                     cash        -= row["close"] * q
                     entry_price  = row["close"]
-                    stop_price   = row["close"] - stop_dist
+                    # 初期トレイリングストップ = 終値 − ATR × TRAIL_MULT
+                    trail_stop   = row["close"] - row["atr"] * ATR_TRAIL_MULT
                     entry_dt     = dt
                     qty          = q
                     in_pos       = True
@@ -354,10 +369,10 @@ if __name__ == "__main__":
     print(f"  ストキャスティクス 銘柄スキャン（日経225）")
     if demo_mode:
         print(f"  ※ デモモード（疑似データ使用）")
-    print(f"  アルゴリズム: スロー・ストキャスティクス  "
-          f"%K={STOCH_K_PERIOD}  %D={STOCH_D_PERIOD}  Smooth={STOCH_SMOOTH}")
-    print(f"  エントリー: ゴールデンクロス（%K < {STOCH_OVERBOUGHT}）")
-    print(f"  エグジット:  デッドクロス  |  ストップロス: ATR×{ATR_STOP_MULT}")
+    print(f"  アルゴリズム: A7 スロー・ストキャスティクス + トレンドフィルター + ATRトレイリングストップ")
+    print(f"  %K={STOCH_K_PERIOD}  %D={STOCH_D_PERIOD}  Smooth={STOCH_SMOOTH}  トレンドフィルター: {MA_TREND_PERIOD}日MA")
+    print(f"  エントリー: ゴールデンクロス（%K < {STOCH_OVERBOUGHT}）かつ 終値 > {MA_TREND_PERIOD}日MA")
+    print(f"  エグジット:  デッドクロス  |  ATRトレイリングストップ: ATR×{ATR_TRAIL_MULT}（切り上げ式）")
     print(f"  初期資金: {INITIAL_CASH:,}円  リスク/トレード: {RISK_PER_TRADE*100:.0f}%")
     print(f"  対象: {len(SYMBOLS)}銘柄  バックテスト期間: 直近{BACKTEST_DAYS}日")
     print("=" * W)
