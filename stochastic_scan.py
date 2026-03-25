@@ -228,7 +228,7 @@ SYMBOLS = [
     ("8316.T", "三井住友フィナンシャルG"),
     ("8331.T", "千葉銀行"),
     ("8354.T", "ふくおかFG"),
-    ("8355.T", "静岡銀行"),
+    # ("8355.T", "静岡銀行"),  # データ不備
     ("8377.T", "ほくほくFG"),
     ("8411.T", "みずほフィナンシャルG"),
     ("8601.T", "大和証券グループ本社"),
@@ -366,18 +366,24 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
     else:
         import yfinance as yf
         try:
-            df = yf.download(symbol, period="max", interval="1d",
-                             auto_adjust=True, progress=False)
-            if df.empty:
+            raw = yf.download(symbol, period="max", interval="1d",
+                              auto_adjust=True, progress=False)
+            if raw.empty:
                 return None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df.columns = [c.lower() for c in df.columns]
-            df = df[["open", "high", "low", "close", "volume"]].dropna()
-            # スレッドセーフのため内部ブロックを再構築（Gaps in blk ref_locs 対策）
-            df = df.copy()
-            if df.empty or len(df) < MA_TREND_PERIOD + 30:
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            raw.columns = [str(c).lower() for c in raw.columns]
+            raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+            if len(raw) < MA_TREND_PERIOD + 30:
                 return None
+            # numpy経由で完全に再構築 → Gaps in blk ref_locs を根本解決
+            df = pd.DataFrame({
+                "open":   raw["open"].to_numpy(dtype=float),
+                "high":   raw["high"].to_numpy(dtype=float),
+                "low":    raw["low"].to_numpy(dtype=float),
+                "close":  raw["close"].to_numpy(dtype=float),
+                "volume": raw["volume"].to_numpy(dtype=float),
+            }, index=raw.index)
         except Exception:
             return None
 
@@ -497,17 +503,23 @@ def check_today_signals(results: list, demo: bool) -> None:
             df = make_demo_data(symbol, seed, base_price, drift)
         else:
             try:
-                # 75MA計算に十分なデータを取得するため6ヶ月分取得
-                df = yf.download(symbol, period="6mo", interval="1d",
-                                 auto_adjust=True, progress=False)
-                if df.empty:
+                raw = yf.download(symbol, period="6mo", interval="1d",
+                                  auto_adjust=True, progress=False)
+                if raw.empty:
                     continue
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                df.columns = [c.lower() for c in df.columns]
-                df = df[["open", "high", "low", "close", "volume"]].dropna().copy()
-                if len(df) < MA_TREND_PERIOD + 10:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw.columns = [str(c).lower() for c in raw.columns]
+                raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+                if len(raw) < MA_TREND_PERIOD + 10:
                     continue
+                df = pd.DataFrame({
+                    "open":   raw["open"].to_numpy(dtype=float),
+                    "high":   raw["high"].to_numpy(dtype=float),
+                    "low":    raw["low"].to_numpy(dtype=float),
+                    "close":  raw["close"].to_numpy(dtype=float),
+                    "volume": raw["volume"].to_numpy(dtype=float),
+                }, index=raw.index)
             except Exception:
                 continue
 
