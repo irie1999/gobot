@@ -1,14 +1,18 @@
 """
-2か月バックテスト（A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ）
+期間指定バックテスト（A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ）
 ────────────────────────────────────────────────────────────────────────
 対象銘柄: 日経225 全銘柄（219銘柄）
-バックテスト期間: 直近60日間（指標計算には6ヶ月分データを使用）
+バックテスト期間: 自由に指定可（デフォルト: 直近1ヶ月）
 
 ■ 実行方法:
-  python backtest_1month.py               # 日経225 全スキャン（ランキング表示）
-  python backtest_1month.py 7203.T        # 特定銘柄のみ詳細表示
-  python backtest_1month.py --days 30     # 直近30日に変更
-  python backtest_1month.py --top 50      # 上位50件表示（デフォルト30）
+  python backtest_1month.py               # 直近1ヶ月（デフォルト）
+  python backtest_1month.py --months 3    # 直近3ヶ月
+  python backtest_1month.py --months 6    # 直近6ヶ月
+  python backtest_1month.py --years 1     # 直近1年
+  python backtest_1month.py --years 5     # 直近5年（最大）
+  python backtest_1month.py --days 45     # 直近45日（日数で直接指定）
+  python backtest_1month.py 7203.T --years 2  # 特定銘柄のみ詳細表示
+  python backtest_1month.py --years 3 --top 50  # 上位50件表示
 
 ■ 出力:
   - 銘柄ごとの損益・勝率・平均保有日数
@@ -260,7 +264,7 @@ SYMBOLS = [
 ]
 
 # ── パラメータ ──────────────────────────────────────────────
-BACKTEST_DAYS    = 60           # バックテスト期間（日）← ここを変更
+BACKTEST_DAYS    = 30           # デフォルトのバックテスト期間（日）
 WORKERS          = 16           # 並列バックテスト数（データ取得は順次）
 STOCH_K_PERIOD   = 14
 STOCH_D_PERIOD   = 3
@@ -312,10 +316,22 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── データ取得（メインスレッドから順次呼び出し） ─────────────
-def fetch_df(symbol: str) -> pd.DataFrame | None:
-    """6ヶ月分のデータを取得（75MA計算に十分な履歴が必要）"""
+def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
+    """バックテスト期間 + 指標計算バッファ分のデータを取得する。
+    75MA(75日) + ストキャスティクス(20日) + バックテスト期間 + 余裕30日 を確保。"""
+    # 必要な総日数（取引日ベース → カレンダー日換算で×1.5）
+    buf_days  = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD + 30
+    total_cal = int((backtest_days + buf_days) * 1.5)
+
+    if   total_cal <= 180:   period = "6mo"
+    elif total_cal <= 365:   period = "1y"
+    elif total_cal <= 730:   period = "2y"
+    elif total_cal <= 1095:  period = "3y"
+    elif total_cal <= 1825:  period = "5y"
+    else:                    period = "max"
+
     try:
-        raw = yf.download(symbol, period="6mo", interval="1d",
+        raw = yf.download(symbol, period=period, interval="1d",
                           auto_adjust=True, progress=False)
         if raw.empty:
             return None
@@ -533,17 +549,48 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int = 30) -> N
 
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="A7 直近N日バックテスト（日経225）")
-    parser.add_argument("symbol", nargs="?",  default=None,
+    parser = argparse.ArgumentParser(
+        description="A7 期間指定バックテスト（日経225）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+使用例:
+  python backtest_1month.py                    # 直近1ヶ月（デフォルト）
+  python backtest_1month.py --months 3         # 直近3ヶ月
+  python backtest_1month.py --years 1          # 直近1年
+  python backtest_1month.py --years 5          # 直近5年（最大）
+  python backtest_1month.py --days 45          # 直近45日
+  python backtest_1month.py 7203.T --years 2   # トヨタ 2年詳細
+  python backtest_1month.py --years 3 --top 50 # 3年 上位50件表示
+""")
+    parser.add_argument("symbol",   nargs="?", default=None,
                         help="特定銘柄コード（省略時は全225銘柄スキャン）")
-    parser.add_argument("--days", type=int,   default=BACKTEST_DAYS,
-                        help=f"バックテスト日数（デフォルト: {BACKTEST_DAYS}日）")
-    parser.add_argument("--top",  type=int,   default=30,
+    parser.add_argument("--days",   type=int,  default=None,
+                        help="バックテスト日数（直接指定）")
+    parser.add_argument("--months", type=int,  default=None,
+                        help="バックテスト月数（1〜60）")
+    parser.add_argument("--years",  type=int,  default=None,
+                        help="バックテスト年数（1〜5）")
+    parser.add_argument("--top",    type=int,  default=30,
                         help="ランキング表示件数（デフォルト: 30）")
     args = parser.parse_args()
 
-    days = args.days
-    print(f"\n  A7 直近{days}日バックテスト  (開始: "
+    # 期間を日数に変換（優先順位: --days > --months > --years > デフォルト1ヶ月）
+    if args.days is not None:
+        days = args.days
+        period_label = f"{days}日"
+    elif args.months is not None:
+        months = max(1, min(args.months, 60))
+        days   = months * 30
+        period_label = f"{months}ヶ月"
+    elif args.years is not None:
+        years = max(1, min(args.years, 5))
+        days  = years * 365
+        period_label = f"{years}年"
+    else:
+        days = BACKTEST_DAYS  # 30日（1ヶ月）
+        period_label = "1ヶ月"
+
+    print(f"\n  A7 直近{period_label}バックテスト  (開始: "
           f"{(datetime.today()-timedelta(days=days)).strftime('%Y-%m-%d')} ～ 本日)")
     print(f"  75MA トレンドフィルター + ATRトレイリングストップ×{ATR_TRAIL_MULT}\n")
 
@@ -566,7 +613,7 @@ def main() -> None:
     print(f"  [Phase 1] データ取得中 ({total}銘柄)...")
     for i, (sym, name) in enumerate(target, 1):
         print(f"  [{i:3d}/{total}] {name}({sym})", end=" ", flush=True)
-        df = fetch_df(sym)
+        df = fetch_df(sym, backtest_days=days)
         if df is None:
             print("× スキップ")
         else:
