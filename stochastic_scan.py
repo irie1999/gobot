@@ -174,9 +174,9 @@ SYMBOLS = [
     ("6758.T", "ソニーグループ"),
     ("6762.T", "TDK"),
     ("6770.T", "アルプスアルパイン"),
-    ("6773.T", "パイオニア"),
-    ("6794.T", "フォスター電機"),
-    ("6796.T", "クラリオン"),
+    # ("6773.T", "パイオニア"),     # 上場廃止
+    # ("6794.T", "フォスター電機"), # 上場廃止
+    # ("6796.T", "クラリオン"),     # 上場廃止
     ("6806.T", "ヒロセ電機"),
     ("6841.T", "横河電機"),
     ("6857.T", "アドバンテスト"),
@@ -238,7 +238,7 @@ SYMBOLS = [
     ("8697.T", "日本取引所グループ"),
     ("8725.T", "MS&ADインシュアランスG"),
     ("8750.T", "第一生命HD"),
-    ("8752.T", "三井住友海上グループHD"),
+    # ("8752.T", "三井住友海上グループHD"), # データ不備（合併等）
     ("8766.T", "東京海上HD"),
     ("8795.T", "T&Dホールディングス"),
     ("8801.T", "三井不動産"),
@@ -268,7 +268,7 @@ SYMBOLS = [
     ("9531.T", "東京ガス"),
     ("9532.T", "大阪ガス"),
     ("9602.T", "東宝"),
-    ("9613.T", "NTTデータグループ"),
+    # ("9613.T", "NTTデータグループ"), # データ不備（再編等）
     ("9735.T", "セコム"),
     ("9766.T", "コナミグループ"),
     ("9983.T", "ファーストリテイリング"),
@@ -290,9 +290,10 @@ def calc_stochastic(df: pd.DataFrame) -> pd.DataFrame:
     エグジット:  デッドクロス (SlowK が SlowD を下抜け)
                または ATRトレイリングストップ発動
     """
-    h = df["high"]
-    l = df["low"]
-    c = df["close"]
+    # MultiIndex残存対策：明示的にSeriesへ変換
+    h = df["high"].squeeze()
+    l = df["low"].squeeze()
+    c = df["close"].squeeze()
 
     lowest_low   = l.rolling(STOCH_K_PERIOD).min()
     highest_high = h.rolling(STOCH_K_PERIOD).max()
@@ -373,6 +374,10 @@ def run_backtest(symbol: str, name: str, demo: bool = False,
                 df.columns = df.columns.get_level_values(0)
             df.columns = [c.lower() for c in df.columns]
             df = df[["open", "high", "low", "close", "volume"]].dropna()
+            # スレッドセーフのため内部ブロックを再構築（Gaps in blk ref_locs 対策）
+            df = df.copy()
+            if df.empty or len(df) < MA_TREND_PERIOD + 30:
+                return None
         except Exception:
             return None
 
@@ -492,14 +497,17 @@ def check_today_signals(results: list, demo: bool) -> None:
             df = make_demo_data(symbol, seed, base_price, drift)
         else:
             try:
-                df = yf.download(symbol, period="3mo", interval="1d",
+                # 75MA計算に十分なデータを取得するため6ヶ月分取得
+                df = yf.download(symbol, period="6mo", interval="1d",
                                  auto_adjust=True, progress=False)
                 if df.empty:
                     continue
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df.columns = [c.lower() for c in df.columns]
-                df = df[["open", "high", "low", "close", "volume"]].dropna()
+                df = df[["open", "high", "low", "close", "volume"]].dropna().copy()
+                if len(df) < MA_TREND_PERIOD + 10:
+                    continue
             except Exception:
                 continue
 
