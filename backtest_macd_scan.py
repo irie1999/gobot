@@ -334,8 +334,7 @@ ATR_STOP_MULT   = 1.5
 ATR_TRAIL_MULT  = 1.8           # 2.5→1.8: 短期で利確を早める
 
 INITIAL_CASH    = 500_000
-RISK_PER_TRADE  = 0.02
-MAX_COST_RATIO  = 0.10
+POSITION_SIZE   = 50_000  # 1銘柄あたり購入金額（固定）
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
@@ -580,13 +579,11 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
         if not in_pos and bool(prev["entry_sig"]):
             if not _check_entry_filters(prev):
                 continue
-            atr_v     = float(prev["atr"])
-            stop_dist = atr_v * ATR_STOP_MULT
-            if stop_dist > 0:
-                q_risk = int(cash * RISK_PER_TRADE / stop_dist)
-                q_cost = int(cash * MAX_COST_RATIO / float(row["open"])) if float(row["open"]) > 0 else q_risk
-                q      = max(min(q_risk, q_cost, MAX_QTY), 0)
-                cost   = float(row["open"]) * q
+            atr_v = float(prev["atr"])
+            op    = float(row["open"])
+            if op > 0:
+                q    = max(min(int(POSITION_SIZE / op), MAX_QTY), 0)
+                cost = op * q
                 if q > 0 and cost <= cash:
                     cash        -= cost
                     entry_price  = float(row["open"])
@@ -815,9 +812,7 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
         for _, sym, name, row, prev in candidates[:slots]:
             ep    = float(row["open"])
             atr_v = float(prev["atr"])
-            alloc = cash / (MAX_POSITIONS - len(positions))
-            q     = max(int(alloc / ep) if ep > 0 else 0, 0)
-            q     = min(q, MAX_QTY)
+            q     = max(min(int(POSITION_SIZE / ep) if ep > 0 else 0, MAX_QTY), 0)
             cost  = ep * q
             if q <= 0 or cost > cash:
                 continue
