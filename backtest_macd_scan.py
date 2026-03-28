@@ -683,10 +683,36 @@ def print_detail(r: dict, backtest_days: int) -> None:
     print("=" * 68)
     print(f"  {r['name']}({r['symbol']})  [{since} ～ {today}]")
     print("=" * 68)
+    trades = r["trade_log"]
+    wins   = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] <= 0]
+
+    win_avg_hold  = (sum(t["hold_days"] for t in wins)   / len(wins)   if wins   else 0)
+    loss_avg_hold = (sum(t["hold_days"] for t in losses) / len(losses) if losses else 0)
+    max_win_pnl   = max((t["pnl"] for t in wins), default=0)
+    max_win_pct   = max(
+        ((t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100 for t in wins),
+        default=0
+    )
+
+    nk_trades  = [t for t in trades if t.get("nikkei_up") is not None]
+    nk_up_tr   = [t for t in nk_trades if t.get("nikkei_up") is True]
+    nk_dn_tr   = [t for t in nk_trades if t.get("nikkei_up") is False]
+    nk_up_win  = sum(1 for t in nk_up_tr if t["pnl"] > 0)
+    nk_dn_win  = sum(1 for t in nk_dn_tr if t["pnl"] > 0)
+
     print(f"  トレード数       : {r['trades']}回  （勝: {r['wins']}  負: {r['losses']}）")
     print(f"  勝率             : {r['win_rate']:.1f}%    プロフィットファクター: {pf_s}")
     print(f"  損益合計         : {sign}{r['total']:,.0f}円  （{sign}{r['ret_pct']:.2f}%）")
-    print(f"  平均保有日数     : {r['avg_hold']:.1f}日")
+    print(f"  平均保有日数     : 勝ち {win_avg_hold:.1f}日  /  負け {loss_avg_hold:.1f}日"
+          f"  （全体 {r['avg_hold']:.1f}日）")
+    print(f"  最大勝ちトレード : {max_win_pnl:+,.0f}円  （{max_win_pct:+.2f}%）")
+    if nk_trades:
+        print(f"  エントリー時日経 : "
+              f"↑上昇 {len(nk_up_tr)}回（勝{nk_up_win}勝率{nk_up_win/len(nk_up_tr)*100:.0f}%）  "
+              f"↓下落 {len(nk_dn_tr)}回（勝{nk_dn_win}勝率{nk_dn_win/len(nk_dn_tr)*100:.0f}%）"
+              if nk_up_tr and nk_dn_tr else
+              f"↑上昇 {len(nk_up_tr)}回  ↓下落 {len(nk_dn_tr)}回")
     print(f"  現在値           : {r['last_close']:,.1f}円  "
           f"MACDヒスト: {r['last_hist']:+.2f}  25MA: {r['last_ma25']:,.1f}  "
           f"トレンド: {'↑' if r['last_close'] > r['last_ma25'] else '↓'}")
@@ -760,9 +786,33 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     profitable = sum(1 for r in results if r["ret_pct"] > 0)
     avg_ret    = sum(r["ret_pct"] for r in results) / len(results)
     no_sig_cnt = len(SYMBOLS) - len(results)
+
+    # ── 全銘柄合算の詳細統計 ──
+    all_trades = [t for r in results for t in r["trade_log"]]
+    all_wins   = [t for t in all_trades if t["pnl"] > 0]
+    all_losses = [t for t in all_trades if t["pnl"] <= 0]
+    win_hold   = (sum(t["hold_days"] for t in all_wins)   / len(all_wins)   if all_wins   else 0)
+    loss_hold  = (sum(t["hold_days"] for t in all_losses) / len(all_losses) if all_losses else 0)
+    max_win    = max((t["pnl"] for t in all_wins), default=0)
+    max_win_r  = max(
+        ((t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100 for t in all_wins),
+        default=0
+    )
+    nk_up_tr  = [t for t in all_trades if t.get("nikkei_up") is True]
+    nk_dn_tr  = [t for t in all_trades if t.get("nikkei_up") is False]
+    nk_up_win = sum(1 for t in nk_up_tr if t["pnl"] > 0)
+    nk_dn_win = sum(1 for t in nk_dn_tr if t["pnl"] > 0)
+
     print(f"  スキャン: {len(SYMBOLS)}銘柄  取引あり: {len(results)}件  "
           f"取引なし: {no_sig_cnt}件  トレード計: {total_tr}回")
     print(f"  プラス銘柄: {profitable}/{len(results)}  平均損益率: {avg_ret:+.2f}%")
+    print(f"  平均保有日数     勝ち: {win_hold:.1f}日  /  負け: {loss_hold:.1f}日")
+    print(f"  最大勝ちトレード: {max_win:+,.0f}円  （{max_win_r:+.2f}%）")
+    if nk_up_tr or nk_dn_tr:
+        up_wr = f"{nk_up_win/len(nk_up_tr)*100:.0f}%" if nk_up_tr else "--"
+        dn_wr = f"{nk_dn_win/len(nk_dn_tr)*100:.0f}%" if nk_dn_tr else "--"
+        print(f"  エントリー時日経 ↑上昇: {len(nk_up_tr)}回 勝率{up_wr}  "
+              f"↓下落: {len(nk_dn_tr)}回 勝率{dn_wr}")
     print()
     print(f"  【エントリー】 MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})  "
           f"①ヒスト ゼロ上抜け  または  ②ヒスト正値＋2日連続上昇")
