@@ -22,8 +22,10 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
 """
 
 import argparse
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -818,6 +820,227 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     print()
 
 
+# ── HTML レポート生成 ───────────────────────────────────────
+def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
+    since = (datetime.today() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today = datetime.today().strftime("%Y-%m-%d")
+    sorted_r = sorted(results, key=lambda x: x["ret_pct"], reverse=True)
+
+    # ── チャート用データ（全銘柄） ──
+    chart_labels = [f"{r['name']}" for r in sorted_r]
+    chart_vals   = [round(r["ret_pct"], 2)  for r in sorted_r]
+    chart_colors = [
+        "rgba(34,197,94,0.8)"  if v >= 0 else "rgba(239,68,68,0.8)"
+        for v in chart_vals
+    ]
+
+    # ── サマリー統計 ──
+    total_tr   = sum(r["trades"]  for r in results)
+    profitable = sum(1 for r in results if r["ret_pct"] > 0)
+    avg_ret    = sum(r["ret_pct"] for r in results) / len(results)
+
+    # ── 銘柄行HTML ──
+    rows_html = ""
+    for rank, r in enumerate(sorted_r, 1):
+        pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+        sign  = "+" if r["ret_pct"] >= 0 else ""
+        cls   = "pos" if r["ret_pct"] >= 0 else "neg"
+        trend = "↑" if r["last_close"] > r["last_ma25"] else "↓"
+
+        # トレード詳細行
+        trade_rows = ""
+        for t in r["trade_log"]:
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+            t_cls   = "pos" if t["pnl"] >= 0 else "neg"
+            nk_s    = ("↑ON" if t.get("nikkei_up") is True
+                       else "↓OFF" if t.get("nikkei_up") is False else "--")
+            ma75_s  = "↑" if t.get("above_ma75")  else "↓"
+            ma200_s = "↑" if t.get("above_ma200") else "↓"
+            nh25_s  = "↑" if t.get("new_high25")  else "-"
+            mark    = " ★" if t["reason"] == "保有中（最終日終値）" else ""
+            trade_rows += f"""
+            <tr class="trade-row">
+              <td>{t['entry_dt'].strftime('%Y-%m-%d')}</td>
+              <td>{t['exit_dt'].strftime('%Y-%m-%d')}</td>
+              <td class="num">{t['entry_price']:,.0f}</td>
+              <td class="num">{t['exit_price']:,.0f}</td>
+              <td class="num {t_cls}">{t['pnl']:+,.0f}円<br><small>{pnl_pct:+.1f}%</small></td>
+              <td class="num">{t['hold_days']}日</td>
+              <td>{t['reason']}{mark}</td>
+              <td>{t.get('sector','--')}</td>
+              <td class="num">{t.get('ma25_dev',0):+.1f}%</td>
+              <td>MA75{ma75_s} MA200{ma200_s} 25H{nh25_s}</td>
+              <td class="num">{t.get('atr_pct',0):.1f}%</td>
+              <td class="num">{t.get('vol_ratio',0):.1f}x</td>
+              <td class="num">{t.get('macd_hist',0):+.3f}</td>
+              <td class="num">{t.get('rsi',0):.0f}</td>
+              <td>{nk_s}</td>
+            </tr>"""
+
+        rows_html += f"""
+        <tr class="stock-row {cls}" onclick="toggleTrades('{r['symbol']}')">
+          <td class="rank">{rank}</td>
+          <td class="name">{r['name']}<br><small>{r['symbol']}</small></td>
+          <td class="num {cls}">{sign}{r['total']:,.0f}円</td>
+          <td class="num {cls}">{sign}{r['ret_pct']:.2f}%</td>
+          <td class="num">{r['win_rate']:.0f}%</td>
+          <td class="num">{pf_s}</td>
+          <td class="num">{r['trades']}</td>
+          <td class="num">{r['avg_hold']:.1f}日</td>
+          <td class="num">{r['last_close']:,.0f} {trend}</td>
+          <td class="expand-btn">▼</td>
+        </tr>
+        <tr class="trades-detail" id="detail-{r['symbol']}" style="display:none">
+          <td colspan="10">
+            <table class="inner-table">
+              <thead>
+                <tr>
+                  <th>エントリー</th><th>エグジット</th><th>買値</th><th>売値</th>
+                  <th>損益</th><th>保有</th><th>決済理由</th><th>業種</th>
+                  <th>MA乖離</th><th>MA位置</th><th>ATR%</th><th>出来高比</th>
+                  <th>MACD</th><th>RSI</th><th>日経</th>
+                </tr>
+              </thead>
+              <tbody>{trade_rows}</tbody>
+            </table>
+          </td>
+        </tr>"""
+
+    # ── フィルター表示 ──
+    excl_s = "、".join(sorted(EXCLUDE_SECTORS)) if EXCLUDE_SECTORS else "なし"
+    filter_html = (
+        f"MA乖離 ≤{FILTER_MA_DEV_MAX}%　"
+        f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%　"
+        f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}　"
+        f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x　"
+        f"除外セクター: {excl_s}"
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MACDバックテスト {label} — {today}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+          background: #0f172a; color: #e2e8f0; font-size: 13px; }}
+  h1 {{ padding: 18px 24px 6px; font-size: 1.3rem; color: #f1f5f9; }}
+  .subtitle {{ padding: 0 24px 16px; color: #94a3b8; font-size: 0.85rem; }}
+  .stats {{ display: flex; gap: 16px; padding: 0 24px 20px; flex-wrap: wrap; }}
+  .stat-card {{ background: #1e293b; border-radius: 8px; padding: 12px 20px;
+                min-width: 130px; }}
+  .stat-card .val {{ font-size: 1.5rem; font-weight: 700; color: #38bdf8; }}
+  .stat-card .lbl {{ font-size: 0.75rem; color: #64748b; margin-top: 2px; }}
+  .chart-wrap {{ padding: 0 24px 24px; }}
+  .chart-wrap canvas {{ background: #1e293b; border-radius: 8px;
+                        padding: 12px; max-height: 300px; }}
+  .filter-bar {{ margin: 0 24px 16px; background: #1e293b; border-radius: 6px;
+                 padding: 8px 14px; color: #94a3b8; font-size: 0.8rem; }}
+  table.main-table {{ width: calc(100% - 48px); margin: 0 24px 32px;
+                      border-collapse: collapse; }}
+  table.main-table th {{ background: #1e293b; padding: 8px 10px; text-align: center;
+                         color: #94a3b8; font-weight: 600; white-space: nowrap;
+                         border-bottom: 1px solid #334155; }}
+  table.main-table td {{ padding: 7px 10px; border-bottom: 1px solid #1e293b;
+                         white-space: nowrap; }}
+  .stock-row {{ background: #0f172a; cursor: pointer; transition: background .15s; }}
+  .stock-row:hover {{ background: #1e293b; }}
+  .rank {{ color: #64748b; text-align: center; width: 36px; }}
+  .name {{ color: #e2e8f0; font-weight: 600; }}
+  .name small {{ color: #64748b; font-weight: 400; }}
+  .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .pos {{ color: #4ade80; }}
+  .neg {{ color: #f87171; }}
+  .expand-btn {{ text-align: center; color: #475569; }}
+  .trades-detail td {{ padding: 0 !important; }}
+  table.inner-table {{ width: 100%; border-collapse: collapse;
+                       background: #0a1120; font-size: 0.78rem; }}
+  table.inner-table th {{ background: #162032; padding: 5px 8px;
+                          color: #64748b; white-space: nowrap; }}
+  table.inner-table td {{ padding: 5px 8px; border-bottom: 1px solid #162032;
+                          white-space: nowrap; }}
+  .trade-row:nth-child(even) {{ background: #0d1826; }}
+</style>
+</head>
+<body>
+<h1>MACDブレイクアウト × 出来高急増 × ATRトレイリング　バックテスト</h1>
+<p class="subtitle">期間: {since} ～ {today}（直近{label}）
+  MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})　ATR×{ATR_TRAIL_MULT}トレイリング</p>
+
+<div class="stats">
+  <div class="stat-card"><div class="val">{len(results)}</div><div class="lbl">シグナル銘柄数</div></div>
+  <div class="stat-card"><div class="val">{total_tr}</div><div class="lbl">総トレード数</div></div>
+  <div class="stat-card"><div class="val">{profitable}/{len(results)}</div><div class="lbl">プラス銘柄</div></div>
+  <div class="stat-card"><div class="val {'pos' if avg_ret>=0 else 'neg'}"
+    style="color:{'#4ade80' if avg_ret>=0 else '#f87171'}">{avg_ret:+.2f}%</div>
+    <div class="lbl">平均損益率</div></div>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="barChart"></canvas>
+</div>
+
+<div class="filter-bar">フィルター: {filter_html}</div>
+
+<table class="main-table">
+  <thead>
+    <tr>
+      <th>#</th><th>銘柄</th><th>損益</th><th>損益率</th>
+      <th>勝率</th><th>PF</th><th>取引数</th><th>平均保有</th><th>現在値</th><th></th>
+    </tr>
+  </thead>
+  <tbody>{rows_html}</tbody>
+</table>
+
+<script>
+const ctx = document.getElementById('barChart').getContext('2d');
+new Chart(ctx, {{
+  type: 'bar',
+  data: {{
+    labels: {chart_labels},
+    datasets: [{{
+      label: '損益率 (%)',
+      data: {chart_vals},
+      backgroundColor: {chart_colors},
+      borderRadius: 3,
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{
+        callbacks: {{
+          label: ctx => ctx.parsed.y.toFixed(2) + '%'
+        }}
+      }}
+    }},
+    scales: {{
+      x: {{ ticks: {{ color: '#64748b', font: {{ size: 10 }} }},
+             grid: {{ color: '#1e293b' }} }},
+      y: {{ ticks: {{ color: '#64748b',
+                      callback: v => v + '%' }},
+             grid: {{ color: '#1e293b' }} }}
+    }}
+  }}
+}});
+
+function toggleTrades(sym) {{
+  const el = document.getElementById('detail-' + sym);
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}}
+</script>
+</body>
+</html>"""
+
+    path = Path(f"macd_report_{datetime.today().strftime('%Y%m%d')}_{label}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -923,6 +1146,12 @@ def main() -> None:
             print_detail(r, days)
     else:
         print_ranking(results, days, args.top)
+
+    # ── HTML レポート ─────────────────────────────────────────
+    html_path = generate_html(results, days, label)
+    print(f"  HTMLレポート: {html_path.resolve()}")
+    webbrowser.open(html_path.resolve().as_uri())
+    print()
 
     # ── CSV出力 ───────────────────────────────────────────────
     rows = []
