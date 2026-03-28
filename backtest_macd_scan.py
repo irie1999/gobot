@@ -350,12 +350,17 @@ FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限（出来高の裏付けを�
 FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限（異常急騰を除外）
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
-MAX_POSITIONS   = 5     # 同時保有最大銘柄数
-HALF_PROFIT_PCT = 5.0   # 半分利確ライン（%）
-HARD_STOP_PCT   = 2.0   # 即損切りライン（%）
+MAX_POSITIONS        = 5     # 同時保有最大銘柄数（地合い良好時）
+MAX_POSITIONS_BEAR   = 2     # 日経MA25割れ時は絞る
+HALF_PROFIT_PCT      = 7.0   # 半分利確ライン（高ボラ対応: 5→7%）
+HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応: 2→3%）
 
-# 除外セクター（海運・非鉄・商社は一時的に対象外）
-EXCLUDE_SECTORS = {"海運", "非鉄", "商社"}
+# ── 相場分析に基づくセクター設定（2026年3月更新）────────────────
+# 除外: 関税直撃・業績悪化・金利逆風セクター
+EXCLUDE_SECTORS  = {"海運", "非鉄", "商社", "自動車", "鉄鋼", "小売"}
+
+# 優先: 金利上昇恩恵・防衛予算増・AI需要セクター（ポートフォリオ選択時に優先）
+PREFER_SECTORS   = {"銀行", "保険", "重工", "半導体", "IT", "電力", "ガス"}
 
 
 # ── インジケーター計算 ──────────────────────────────────────
@@ -689,7 +694,8 @@ def _check_entry_filters(prev: pd.Series) -> bool:
 def run_portfolio(stock_data_map: dict, backtest_days: int,
                   nikkei_df: pd.DataFrame | None = None) -> dict | None:
     """MAX_POSITIONS 銘柄同時保有のポートフォリオシミュレーション。
-    ・MACDヒスト高い順で最大3銘柄に入る
+    ・優先セクター優先 → MACDヒスト高い順で最大N銘柄に入る
+    ・日経MA25割れ時は MAX_POSITIONS_BEAR に縮小
     ・+HALF_PROFIT_PCT% で半分利確
     ・-HARD_STOP_PCT% で即損切り"""
     cutoff = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
@@ -808,9 +814,18 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
                 continue
             if not _check_entry_filters(prev):
                 continue
-            candidates.append((float(prev["macd_hist"]), sym, name, row, prev))
+            # 優先セクターにボーナス（ソート用スコア）
+            sector_bonus = 1.0 if SECTOR.get(sym, "") in PREFER_SECTORS else 0.0
+            score = sector_bonus * 10 + float(prev["macd_hist"])
+            candidates.append((score, sym, name, row, prev))
 
-        # MACDヒスト高い順 → slots 分だけ入る
+        # 優先セクター → MACDヒスト高い順 → slots 分だけ入る
+        # 日経地合い（MA25割れ）でMAX_POSITIONSを縮小
+        nk_now = _nikkei_trend(nikkei_df, dt)
+        max_pos = MAX_POSITIONS_BEAR if nk_now is False else MAX_POSITIONS
+        slots   = max_pos - len(positions)
+        if slots <= 0:
+            continue
         candidates.sort(reverse=True, key=lambda x: x[0])
         for _, sym, name, row, prev in candidates[:slots]:
             ep    = float(row["open"])
@@ -925,10 +940,13 @@ def print_portfolio(pr: dict, backtest_days: int, label: str) -> None:
         dn_wr = f"{nk_dn_win/len(nk_dn_tr)*100:.0f}%" if nk_dn_tr else "--"
         print(f"  エントリー時日経  ↑上昇: {len(nk_up_tr)}回 勝率{up_wr}  "
               f"↓下落: {len(nk_dn_tr)}回 勝率{dn_wr}")
+    prefer_s = "、".join(sorted(PREFER_SECTORS))
+    excl_s2  = "、".join(sorted(EXCLUDE_SECTORS))
     print(f"  【ルール】 +{HALF_PROFIT_PCT:.0f}%で半分利確  "
           f"-{HARD_STOP_PCT:.0f}%で即損切り  "
-          f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  "
-          f"MA乖離 ≤{FILTER_MA_DEV_MAX}%")
+          f"地合い良好:{MAX_POSITIONS}銘柄 / 日経MA25割れ:{MAX_POSITIONS_BEAR}銘柄")
+    print(f"  【優先】 {prefer_s}")
+    print(f"  【除外】 {excl_s2}")
     print()
 
     if trades:
