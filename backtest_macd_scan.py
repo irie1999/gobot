@@ -336,6 +336,18 @@ RISK_PER_TRADE  = 0.02
 MAX_COST_RATIO  = 0.10
 MAX_QTY         = 9999
 
+# ── エントリーフィルター ──────────────────────────────────────
+FILTER_MA_DEV_MAX   =  5.0   # MA乖離の上限（%）— 過熱買いを避ける
+FILTER_ATR_PCT_MIN  =  2.0   # ATR% 下限 — 動きが小さすぎる銘柄を除外
+FILTER_ATR_PCT_MAX  =  4.0   # ATR% 上限 — 過度にボラが高い銘柄を除外
+FILTER_RSI_MIN      = 45.0   # RSI 下限 — 弱すぎる銘柄を除外
+FILTER_RSI_MAX      = 65.0   # RSI 上限 — 買われすぎを除外
+FILTER_VOL_RATIO_MIN =  1.2  # 出来高比 下限
+FILTER_VOL_RATIO_MAX =  1.8  # 出来高比 上限 — 異常急騰を除外
+
+# 除外セクター（海運・非鉄・商社は一時的に対象外）
+EXCLUDE_SECTORS = {"海運", "非鉄", "商社"}
+
 
 # ── インジケーター計算 ──────────────────────────────────────
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -500,6 +512,10 @@ def _nikkei_trend(nikkei_df: pd.DataFrame | None, dt: pd.Timestamp) -> bool | No
 # ── 1銘柄バックテスト ────────────────────────────────────────
 def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                  backtest_days: int, nikkei_df: pd.DataFrame | None = None) -> dict | None:
+    # セクター除外
+    if SECTOR.get(symbol, "その他") in EXCLUDE_SECTORS:
+        return None
+
     df = calc_indicators(df)
 
     cutoff    = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
@@ -554,6 +570,19 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
 
         # ── エントリー ──
         if not in_pos and bool(prev["entry_sig"]):
+            # ── 指標フィルター ──────────────────────────────
+            _ma_dev   = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
+            _atr_pct  = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
+            _rsi      = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
+            _vol_r    = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
+            if not (
+                abs(_ma_dev)  <= FILTER_MA_DEV_MAX               and
+                FILTER_ATR_PCT_MIN  <= _atr_pct  <= FILTER_ATR_PCT_MAX  and
+                FILTER_RSI_MIN      <= _rsi      <= FILTER_RSI_MAX      and
+                FILTER_VOL_RATIO_MIN <= _vol_r   <= FILTER_VOL_RATIO_MAX
+            ):
+                continue
+            # ────────────────────────────────────────────────
             atr_v     = float(prev["atr"])
             stop_dist = atr_v * ATR_STOP_MULT
             if stop_dist > 0:
@@ -740,6 +769,12 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     print(f"  【決済】 ①ヒスト ゼロ下抜け  または  ②ヒスト負値＋2日連続下落  "
           f"または  ③ATRトレイリング×{ATR_TRAIL_MULT}")
     print(f"  【資金】 {INITIAL_CASH:,}円/銘柄  リスク{RISK_PER_TRADE*100:.0f}%/トレード")
+    print(f"  【フィルター】 MA乖離 ≤{FILTER_MA_DEV_MAX}%  "
+          f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%  "
+          f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  "
+          f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x")
+    excl = "、".join(sorted(EXCLUDE_SECTORS)) if EXCLUDE_SECTORS else "なし"
+    print(f"  【除外セクター】 {excl}")
     print()
 
     # ── 全トレード詳細（ランキング上位銘柄） ────────────────
