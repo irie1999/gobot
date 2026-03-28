@@ -1102,7 +1102,7 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
           f"＋ 終値 >{MA_TREND_PERIOD}日MA")
     print(f"  【決済】 ①ヒスト ゼロ下抜け  または  ②ヒスト負値＋2日連続下落  "
           f"または  ③ATRトレイリング×{ATR_TRAIL_MULT}")
-    print(f"  【資金】 {INITIAL_CASH:,}円/銘柄  リスク{RISK_PER_TRADE*100:.0f}%/トレード")
+    print(f"  【資金】 {INITIAL_CASH:,}円（総枠）  1銘柄 {POSITION_SIZE:,}円固定")
     ma200_s = "MA200上のみ" if FILTER_MA200_ABOVE else "MA200不問"
     print(f"  【フィルター】 MA乖離 ≤{FILTER_MA_DEV_MAX}%  {ma200_s}  "
           f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%  "
