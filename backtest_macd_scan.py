@@ -339,14 +339,19 @@ MAX_COST_RATIO  = 0.10
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
-FILTER_MA_DEV_MAX    =  3.0   # MA乖離の上限（%）— 過熱買いを避ける
+FILTER_MA_DEV_MAX    =  3.0   # MA乖離の上限（%）
 FILTER_MA200_ABOVE   = True   # True = 終値がMA200より上のみ許可
-FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限 — 動きが小さすぎる銘柄を除外
-FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限 — 過度にボラが高い銘柄を除外
-FILTER_RSI_MIN       = 45.0   # RSI 下限 — 弱すぎる銘柄を除外
-FILTER_RSI_MAX       = 65.0   # RSI 上限 — 買われすぎを除外
+FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限
+FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限
+FILTER_RSI_MIN       = 45.0   # RSI 下限
+FILTER_RSI_MAX       = 52.0   # RSI 上限（65→52: モメンタム初期段階のみ）
 FILTER_VOL_RATIO_MIN =  1.2   # 出来高比 下限
-FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限 — 異常急騰を除外
+FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限
+
+# ── ポートフォリオ管理 ─────────────────────────────────────────
+MAX_POSITIONS   = 3     # 同時保有最大銘柄数（上位3銘柄のみ）
+HALF_PROFIT_PCT = 5.0   # 半分利確ライン（%）
+HARD_STOP_PCT   = 2.0   # 即損切りライン（%）
 
 # 除外セクター（海運・非鉄・商社は一時的に対象外）
 EXCLUDE_SECTORS = {"海運", "非鉄", "商社"}
@@ -573,23 +578,8 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
 
         # ── エントリー ──
         if not in_pos and bool(prev["entry_sig"]):
-            # ── 指標フィルター ──────────────────────────────
-            _ma_dev    = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
-            _atr_pct   = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
-            _rsi       = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
-            _vol_r     = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
-            _close     = float(prev["close"])
-            _ma200     = float(prev["ma200"])      if not pd.isna(prev["ma200"])     else None
-            _above_200 = (_ma200 is not None) and (_close > _ma200)
-            if not (
-                abs(_ma_dev)   <= FILTER_MA_DEV_MAX                              and
-                (not FILTER_MA200_ABOVE or _above_200)                           and
-                FILTER_ATR_PCT_MIN  <= _atr_pct  <= FILTER_ATR_PCT_MAX          and
-                FILTER_RSI_MIN      <= _rsi      <= FILTER_RSI_MAX               and
-                FILTER_VOL_RATIO_MIN <= _vol_r   <= FILTER_VOL_RATIO_MAX
-            ):
+            if not _check_entry_filters(prev):
                 continue
-            # ────────────────────────────────────────────────
             atr_v     = float(prev["atr"])
             stop_dist = atr_v * ATR_STOP_MULT
             if stop_dist > 0:
@@ -675,6 +665,298 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
         "last_hist":  last_hist,
         "last_ma25":  last_ma25,
     }
+
+
+# ── ポートフォリオバックテスト（最大MAX_POSITIONS同時保有）────
+def _check_entry_filters(prev: pd.Series) -> bool:
+    """エントリーフィルター判定（共通）"""
+    _ma_dev  = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
+    _atr_pct = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
+    _rsi     = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
+    _vol_r   = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
+    _close   = float(prev["close"])
+    _ma200   = float(prev["ma200"]) if not pd.isna(prev["ma200"]) else None
+    _above200 = (_ma200 is not None) and (_close > _ma200)
+    return (
+        abs(_ma_dev)  <= FILTER_MA_DEV_MAX                         and
+        (not FILTER_MA200_ABOVE or _above200)                       and
+        FILTER_ATR_PCT_MIN <= _atr_pct <= FILTER_ATR_PCT_MAX       and
+        FILTER_RSI_MIN     <= _rsi     <= FILTER_RSI_MAX            and
+        FILTER_VOL_RATIO_MIN <= _vol_r <= FILTER_VOL_RATIO_MAX
+    )
+
+
+def run_portfolio(stock_data_map: dict, backtest_days: int,
+                  nikkei_df: pd.DataFrame | None = None) -> dict | None:
+    """MAX_POSITIONS 銘柄同時保有のポートフォリオシミュレーション。
+    ・MACDヒスト高い順で最大3銘柄に入る
+    ・+HALF_PROFIT_PCT% で半分利確
+    ・-HARD_STOP_PCT% で即損切り"""
+    cutoff = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
+
+    # インジケーター計算 + 期間絞り込み
+    dfs: dict[str, tuple[str, pd.DataFrame]] = {}
+    for sym, (name, df) in stock_data_map.items():
+        if SECTOR.get(sym, "その他") in EXCLUDE_SECTORS:
+            continue
+        df_i = calc_indicators(df)
+        df_t = df_i[df_i.index >= cutoff]
+        if len(df_t) >= 5:
+            dfs[sym] = (name, df_t)
+    if not dfs:
+        return None
+
+    # 全取引日を統合してソート
+    all_dates = sorted({d for _, df_t in dfs.values() for d in df_t.index})
+
+    cash      = float(INITIAL_CASH)
+    positions: dict = {}   # sym → position dict
+    trades    = []
+
+    for dt in all_dates:
+        # ── エグジット ──────────────────────────────────────
+        for sym in list(positions.keys()):
+            name, df_t = dfs[sym]
+            if dt not in df_t.index:
+                continue
+            loc = df_t.index.get_loc(dt)
+            if loc == 0:
+                continue
+            row  = df_t.iloc[loc]
+            prev = df_t.iloc[loc - 1]
+            pos  = positions[sym]
+
+            if pd.isna(row["macd_hist"]) or pd.isna(row["atr"]):
+                continue
+
+            exit_p = exit_r = None
+            lo = float(row["low"])
+            op = float(row["open"])
+
+            # 優先①: 即損切り -HARD_STOP_PCT%
+            if lo <= pos["hard_stop"]:
+                exit_p = min(op, pos["hard_stop"])
+                exit_r = f"損切り(-{HARD_STOP_PCT:.0f}%)"
+            # 優先②: MACD クロス
+            elif bool(prev["exit_sig"]):
+                exit_p = op
+                exit_r = "MACDクロス"
+            # 優先③: ATR トレイリング
+            elif lo <= pos["trail_stop"]:
+                exit_p = min(op, pos["trail_stop"])
+                exit_r = "トレイリング"
+
+            if exit_p is not None:
+                qty = pos["qty"]
+                pnl = (exit_p - pos["entry_price"]) * qty
+                cash += exit_p * qty
+                trades.append({
+                    "symbol": sym, "name": name,
+                    "entry_dt": pos["entry_dt"], "exit_dt": dt,
+                    "entry_price": pos["entry_price"], "exit_price": exit_p,
+                    "qty": qty, "pnl": pnl,
+                    "hold_days": (dt - pos["entry_dt"]).days,
+                    "reason": exit_r,
+                    **pos["meta"],
+                })
+                del positions[sym]
+                continue
+
+            # 半分利確 +HALF_PROFIT_PCT%（クローズで判定）
+            if not pos["half_taken"]:
+                cl = float(row["close"])
+                gain = (cl - pos["entry_price"]) / pos["entry_price"] * 100
+                if gain >= HALF_PROFIT_PCT:
+                    hq = pos["qty"] // 2
+                    if hq > 0:
+                        cash += cl * hq
+                        pnl_h = (cl - pos["entry_price"]) * hq
+                        trades.append({
+                            "symbol": sym, "name": name,
+                            "entry_dt": pos["entry_dt"], "exit_dt": dt,
+                            "entry_price": pos["entry_price"], "exit_price": cl,
+                            "qty": hq, "pnl": pnl_h,
+                            "hold_days": (dt - pos["entry_dt"]).days,
+                            "reason": f"半分利確(+{gain:.1f}%)",
+                            **pos["meta"],
+                        })
+                        pos["qty"] -= hq
+                        pos["half_taken"] = True
+
+            # ATR トレイリング更新
+            cand = float(row["close"]) - float(row["atr"]) * ATR_TRAIL_MULT
+            if cand > pos["trail_stop"]:
+                pos["trail_stop"] = cand
+
+        # ── エントリー ──────────────────────────────────────
+        slots = MAX_POSITIONS - len(positions)
+        if slots <= 0:
+            continue
+
+        candidates = []
+        for sym, (name, df_t) in dfs.items():
+            if sym in positions or dt not in df_t.index:
+                continue
+            loc = df_t.index.get_loc(dt)
+            if loc == 0:
+                continue
+            row  = df_t.iloc[loc]
+            prev = df_t.iloc[loc - 1]
+            if pd.isna(prev["entry_sig"]) or not bool(prev["entry_sig"]):
+                continue
+            if pd.isna(row["atr"]):
+                continue
+            if not _check_entry_filters(prev):
+                continue
+            candidates.append((float(prev["macd_hist"]), sym, name, row, prev))
+
+        # MACDヒスト高い順 → slots 分だけ入る
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        for _, sym, name, row, prev in candidates[:slots]:
+            ep    = float(row["open"])
+            atr_v = float(prev["atr"])
+            alloc = cash / (MAX_POSITIONS - len(positions))
+            q     = max(int(alloc / ep) if ep > 0 else 0, 0)
+            q     = min(q, MAX_QTY)
+            cost  = ep * q
+            if q <= 0 or cost > cash:
+                continue
+            cash -= cost
+            meta = {
+                "sector":      SECTOR.get(sym, "その他"),
+                "price_tier":  "高位" if ep >= 5000 else "中位" if ep >= 1000 else "低位",
+                "ma25_dev":    float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 0.0,
+                "above_ma75":  bool(ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
+                "above_ma200": bool(ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
+                "new_high25":  bool(prev["new_high25"]),
+                "atr_val":     atr_v,
+                "atr_pct":     float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0,
+                "vol":         float(prev["volume"]),
+                "vol_ratio":   float(prev["vol_ratio"]) if not pd.isna(prev["vol_ratio"]) else 0.0,
+                "macd_hist":   float(prev["macd_hist"]),
+                "rsi":         float(prev["rsi"])        if not pd.isna(prev["rsi"])        else 0.0,
+                "nikkei_up":   _nikkei_trend(nikkei_df, dt),
+            }
+            positions[sym] = {
+                "name":       name,
+                "entry_price": ep,
+                "qty":         q,
+                "hard_stop":   ep * (1 - HARD_STOP_PCT / 100),
+                "trail_stop":  ep - atr_v * ATR_TRAIL_MULT,
+                "half_taken":  False,
+                "entry_dt":    dt,
+                "meta":        meta,
+            }
+
+    # 未決済 → 最終日終値で仮決済
+    for sym, pos in positions.items():
+        name, df_t = dfs[sym]
+        lp  = float(df_t.iloc[-1]["close"])
+        pnl = (lp - pos["entry_price"]) * pos["qty"]
+        cash += lp * pos["qty"]
+        trades.append({
+            "symbol": sym, "name": name,
+            "entry_dt": pos["entry_dt"], "exit_dt": df_t.index[-1],
+            "entry_price": pos["entry_price"], "exit_price": lp,
+            "qty": pos["qty"], "pnl": pnl,
+            "hold_days": (df_t.index[-1] - pos["entry_dt"]).days,
+            "reason": "保有中（最終日終値）★",
+            **pos["meta"],
+        })
+
+    if not trades:
+        return None
+
+    total    = cash - INITIAL_CASH
+    ret_pct  = total / INITIAL_CASH * 100
+    wins     = [t for t in trades if t["pnl"] > 0]
+    losses   = [t for t in trades if t["pnl"] <= 0]
+    win_rate = len(wins) / len(trades) * 100
+    avg_hold = sum(t["hold_days"] for t in trades) / len(trades)
+    pf       = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
+                if losses and sum(t["pnl"] for t in losses) != 0 else float("inf"))
+
+    return {
+        "trades":    len(trades),
+        "wins":      len(wins),
+        "losses":    len(losses),
+        "win_rate":  win_rate,
+        "pf":        pf,
+        "total":     total,
+        "ret_pct":   ret_pct,
+        "avg_hold":  avg_hold,
+        "trade_log": trades,
+    }
+
+
+def print_portfolio(pr: dict, backtest_days: int, label: str) -> None:
+    since = (datetime.today() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today = datetime.today().strftime("%Y-%m-%d")
+    sign  = "+" if pr["total"] >= 0 else ""
+    pf_s  = "∞" if pr["pf"] == float("inf") else f"{pr['pf']:.2f}"
+
+    trades = pr["trade_log"]
+    wins   = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] <= 0]
+
+    win_hold  = sum(t["hold_days"] for t in wins)   / len(wins)   if wins   else 0
+    loss_hold = sum(t["hold_days"] for t in losses) / len(losses) if losses else 0
+    max_win   = max((t["pnl"] for t in wins), default=0)
+    max_win_r = max(
+        ((t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100 for t in wins),
+        default=0,
+    )
+    nk_up_tr  = [t for t in trades if t.get("nikkei_up") is True]
+    nk_dn_tr  = [t for t in trades if t.get("nikkei_up") is False]
+    nk_up_win = sum(1 for t in nk_up_tr if t["pnl"] > 0)
+    nk_dn_win = sum(1 for t in nk_dn_tr if t["pnl"] > 0)
+
+    print()
+    print("═" * 72)
+    print(f"  ポートフォリオ結果  最大{MAX_POSITIONS}銘柄同時保有  "
+          f"[{since} ～ {today}]（直近{label}）")
+    print("═" * 72)
+    print(f"  資金: {INITIAL_CASH:,}円  →  {INITIAL_CASH + pr['total']:,.0f}円  "
+          f"（{sign}{pr['total']:,.0f}円  {sign}{pr['ret_pct']:.2f}%）")
+    print(f"  トレード: {pr['trades']}回  勝: {pr['wins']}  負: {pr['losses']}  "
+          f"勝率: {pr['win_rate']:.1f}%  PF: {pf_s}")
+    print(f"  平均保有  勝ち: {win_hold:.1f}日  /  負け: {loss_hold:.1f}日")
+    print(f"  最大勝ちトレード: {max_win:+,.0f}円  （{max_win_r:+.2f}%）")
+    if nk_up_tr or nk_dn_tr:
+        up_wr = f"{nk_up_win/len(nk_up_tr)*100:.0f}%" if nk_up_tr else "--"
+        dn_wr = f"{nk_dn_win/len(nk_dn_tr)*100:.0f}%" if nk_dn_tr else "--"
+        print(f"  エントリー時日経  ↑上昇: {len(nk_up_tr)}回 勝率{up_wr}  "
+              f"↓下落: {len(nk_dn_tr)}回 勝率{dn_wr}")
+    print(f"  【ルール】 +{HALF_PROFIT_PCT:.0f}%で半分利確  "
+          f"-{HARD_STOP_PCT:.0f}%で即損切り  "
+          f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  "
+          f"MA乖離 ≤{FILTER_MA_DEV_MAX}%")
+    print()
+
+    if trades:
+        print(f"  {'#':<3} {'銘柄':<18} {'エントリー':>10} {'エグジット':>10} "
+              f"{'買値':>8} {'売値':>8} {'損益':>10}  決済理由")
+        print("  " + "─" * 84)
+        for i, t in enumerate(trades, 1):
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+            label_s = f"{t['name']}({t['symbol']})"
+            nk_s    = ("↑" if t.get("nikkei_up") is True
+                       else "↓" if t.get("nikkei_up") is False else "-")
+            print(f"  {i:<3} {label_s:<18} "
+                  f"{t['entry_dt'].strftime('%Y-%m-%d'):>10} "
+                  f"{t['exit_dt'].strftime('%Y-%m-%d'):>10} "
+                  f"{t['entry_price']:>8,.0f} {t['exit_price']:>8,.0f} "
+                  f"{t['pnl']:>+10,.0f}({pnl_pct:>+5.1f}%)  "
+                  f"{t['reason']}  日経{nk_s}")
+            print(f"       業種:{t.get('sector','--'):5s}  "
+                  f"MA乖離:{t.get('ma25_dev',0):+4.1f}%  "
+                  f"ATR:{t.get('atr_pct',0):.1f}%  "
+                  f"出来高比:{t.get('vol_ratio',0):.1f}x  "
+                  f"MACD:{t.get('macd_hist',0):+.3f}  "
+                  f"RSI:{t.get('rsi',0):.0f}  "
+                  f"保有{t['hold_days']}日")
+        print("  " + "─" * 84)
+    print()
 
 
 # ── 単銘柄詳細表示 ──────────────────────────────────────────
@@ -1203,6 +1485,16 @@ def main() -> None:
             print_detail(r, days)
     else:
         print_ranking(results, days, args.top)
+
+    # ── ポートフォリオシミュレーション（最大3銘柄同時保有）──────
+    if not args.symbol:
+        print(f"  [Phase 3] ポートフォリオシミュレーション中"
+              f"（最大{MAX_POSITIONS}銘柄同時保有）...")
+        pr = run_portfolio(stock_data, days, nikkei_df=nikkei_df)
+        if pr:
+            print_portfolio(pr, days, label)
+        else:
+            print("  シグナルなし（ポートフォリオ）\n")
 
     # ── HTML レポート ─────────────────────────────────────────
     html_path = generate_html(results, days, label)
