@@ -339,13 +339,14 @@ MAX_COST_RATIO  = 0.10
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
-FILTER_MA_DEV_MAX   =  5.0   # MA乖離の上限（%）— 過熱買いを避ける
-FILTER_ATR_PCT_MIN  =  2.0   # ATR% 下限 — 動きが小さすぎる銘柄を除外
-FILTER_ATR_PCT_MAX  =  4.0   # ATR% 上限 — 過度にボラが高い銘柄を除外
-FILTER_RSI_MIN      = 45.0   # RSI 下限 — 弱すぎる銘柄を除外
-FILTER_RSI_MAX      = 65.0   # RSI 上限 — 買われすぎを除外
-FILTER_VOL_RATIO_MIN =  1.2  # 出来高比 下限
-FILTER_VOL_RATIO_MAX =  1.8  # 出来高比 上限 — 異常急騰を除外
+FILTER_MA_DEV_MAX    =  3.0   # MA乖離の上限（%）— 過熱買いを避ける
+FILTER_MA200_ABOVE   = True   # True = 終値がMA200より上のみ許可
+FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限 — 動きが小さすぎる銘柄を除外
+FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限 — 過度にボラが高い銘柄を除外
+FILTER_RSI_MIN       = 45.0   # RSI 下限 — 弱すぎる銘柄を除外
+FILTER_RSI_MAX       = 65.0   # RSI 上限 — 買われすぎを除外
+FILTER_VOL_RATIO_MIN =  1.2   # 出来高比 下限
+FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限 — 異常急騰を除外
 
 # 除外セクター（海運・非鉄・商社は一時的に対象外）
 EXCLUDE_SECTORS = {"海運", "非鉄", "商社"}
@@ -573,14 +574,18 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
         # ── エントリー ──
         if not in_pos and bool(prev["entry_sig"]):
             # ── 指標フィルター ──────────────────────────────
-            _ma_dev   = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
-            _atr_pct  = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
-            _rsi      = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
-            _vol_r    = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
+            _ma_dev    = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
+            _atr_pct   = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
+            _rsi       = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
+            _vol_r     = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
+            _close     = float(prev["close"])
+            _ma200     = float(prev["ma200"])      if not pd.isna(prev["ma200"])     else None
+            _above_200 = (_ma200 is not None) and (_close > _ma200)
             if not (
-                abs(_ma_dev)  <= FILTER_MA_DEV_MAX               and
-                FILTER_ATR_PCT_MIN  <= _atr_pct  <= FILTER_ATR_PCT_MAX  and
-                FILTER_RSI_MIN      <= _rsi      <= FILTER_RSI_MAX      and
+                abs(_ma_dev)   <= FILTER_MA_DEV_MAX                              and
+                (not FILTER_MA200_ABOVE or _above_200)                           and
+                FILTER_ATR_PCT_MIN  <= _atr_pct  <= FILTER_ATR_PCT_MAX          and
+                FILTER_RSI_MIN      <= _rsi      <= FILTER_RSI_MAX               and
                 FILTER_VOL_RATIO_MIN <= _vol_r   <= FILTER_VOL_RATIO_MAX
             ):
                 continue
@@ -821,7 +826,8 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     print(f"  【決済】 ①ヒスト ゼロ下抜け  または  ②ヒスト負値＋2日連続下落  "
           f"または  ③ATRトレイリング×{ATR_TRAIL_MULT}")
     print(f"  【資金】 {INITIAL_CASH:,}円/銘柄  リスク{RISK_PER_TRADE*100:.0f}%/トレード")
-    print(f"  【フィルター】 MA乖離 ≤{FILTER_MA_DEV_MAX}%  "
+    ma200_s = "MA200上のみ" if FILTER_MA200_ABOVE else "MA200不問"
+    print(f"  【フィルター】 MA乖離 ≤{FILTER_MA_DEV_MAX}%  {ma200_s}  "
           f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%  "
           f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  "
           f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x")
@@ -958,8 +964,9 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
 
     # ── フィルター表示 ──
     excl_s = "、".join(sorted(EXCLUDE_SECTORS)) if EXCLUDE_SECTORS else "なし"
+    ma200_fs = "MA200上のみ" if FILTER_MA200_ABOVE else "MA200不問"
     filter_html = (
-        f"MA乖離 ≤{FILTER_MA_DEV_MAX}%　"
+        f"MA乖離 ≤{FILTER_MA_DEV_MAX}%　{ma200_fs}　"
         f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%　"
         f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}　"
         f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x　"
