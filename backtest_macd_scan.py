@@ -742,6 +742,46 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     print(f"  【資金】 {INITIAL_CASH:,}円/銘柄  リスク{RISK_PER_TRADE*100:.0f}%/トレード")
     print()
 
+    # ── 全トレード詳細（ランキング上位銘柄） ────────────────
+    print("─" * 80)
+    print(f"  全トレード詳細  （上位 {top_n} 銘柄）")
+    print("─" * 80)
+    hdr1 = (f"  {'銘柄':<18} {'エントリー':>10} {'エグジット':>10} "
+            f"{'買値':>8} {'売値':>8} {'損益':>9}{'損益率':>7}  決済理由")
+    hdr2 = (f"  {'':18} {'業種':>5}{'株価帯':>4}"
+            f"  MA乖離  MA75  MA200  25H"
+            f"  ATR%  出来高比  MACD    RSI  日経")
+    print(hdr1)
+    print(hdr2)
+    print("  " + "─" * 78)
+
+    for r in display:
+        for t in r["trade_log"]:
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+            mark    = "★" if t["reason"] == "保有中（最終日終値）" else " "
+            label   = f"{r['name']}({r['symbol']})"
+            nk_s    = ("↑ON" if t.get("nikkei_up") is True
+                       else "↓OFF" if t.get("nikkei_up") is False
+                       else " -- ")
+            ma75_s  = "↑" if t.get("above_ma75")  else "↓"
+            ma200_s = "↑" if t.get("above_ma200") else "↓"
+            nh25_s  = "↑" if t.get("new_high25")  else "-"
+            print(f" {mark}{label:<18} "
+                  f"{t['entry_dt'].strftime('%Y-%m-%d'):>10} "
+                  f"{t['exit_dt'].strftime('%Y-%m-%d'):>10} "
+                  f"{t['entry_price']:>8,.0f} {t['exit_price']:>8,.0f} "
+                  f"{t['pnl']:>+9,.0f}{pnl_pct:>+6.1f}%  {t['reason']}")
+            print(f"  {'':18} {t.get('sector','--'):>5s}{t.get('price_tier','--'):>4s}"
+                  f"  {t.get('ma25_dev',0):>+5.1f}%"
+                  f"  MA75{ma75_s}  MA200{ma200_s}  25H{nh25_s}"
+                  f"  {t.get('atr_pct',0):>4.1f}%"
+                  f"  {t.get('vol_ratio',0):>5.1f}x"
+                  f"  {t.get('macd_hist',0):>+6.3f}"
+                  f"  {t.get('rsi',0):>5.1f}"
+                  f"  {nk_s}")
+        print("  " + "·" * 60)
+    print()
+
 
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
