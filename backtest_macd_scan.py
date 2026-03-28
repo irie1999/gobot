@@ -338,17 +338,19 @@ POSITION_SIZE   = 50_000  # 1銘柄あたり購入金額（固定）
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
-FILTER_MA_DEV_MAX    =  1.0   # MA乖離 ±1%以内（かなり重要）
-FILTER_MA200_ABOVE   = True   # True = 終値がMA200より上のみ許可
-FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限
-FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限
-FILTER_RSI_MIN       = 45.0   # RSI 下限（超重要）
-FILTER_RSI_MAX       = 50.0   # RSI 上限（超重要）
-FILTER_VOL_RATIO_MIN =  1.2   # 出来高比 下限
-FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限
+# 【設計方針】シグナルの質はMACDアルゴリズムに任せる。
+#   フィルターは「明らかなNG」だけを除外する門番として使う。
+FILTER_MA_DEV_MAX    =  7.0   # MA乖離 ±7%以内（過熱・乖離しすぎを除外）
+FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期トレンド確認）
+FILTER_ATR_PCT_MIN   =  1.0   # ATR% 下限（動かなさすぎる銘柄を除外）
+FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限（暴れすぎる銘柄を除外）
+FILTER_RSI_MIN       = 35.0   # RSI 下限（売られすぎ圏を除外）
+FILTER_RSI_MAX       = 70.0   # RSI 上限（買われすぎ圏を除外）
+FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限（出来高の裏付けを確認）
+FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限（異常急騰を除外）
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
-MAX_POSITIONS   = 3     # 同時保有最大銘柄数（上位3銘柄のみ）
+MAX_POSITIONS   = 5     # 同時保有最大銘柄数
 HALF_PROFIT_PCT = 5.0   # 半分利確ライン（%）
 HARD_STOP_PCT   = 2.0   # 即損切りライン（%）
 
@@ -428,8 +430,8 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     zero_cross_up = (histogram > 0) & (prev_hist <= 0)
     # Entry パターン2: ヒストグラムが正値かつ2日連続上昇
     hist_accel    = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
-    # ⑤ MACDヒスト2日以上連続上昇を必須条件とする（ゼロクロス単独エントリー廃止）
-    df["entry_sig"] = hist_accel & vol_ok & trend_ok
+    # Entry: ゼロクロス上抜け OR ヒスト2日連続加速（どちらかでOK）
+    df["entry_sig"] = (zero_cross_up | hist_accel) & vol_ok & trend_ok
 
     # Exit パターン1: ヒストグラムがゼロライン下抜け
     zero_cross_dn = (histogram < 0) & (prev_hist >= 0)
