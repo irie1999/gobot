@@ -264,7 +264,58 @@ SYMBOLS = [
     ("9984.T", "ソフトバンクグループ"),
 ]
 
-# ── パラメータ ──────────────────────────────────────────────
+# ── 業種マップ ─────────────────────────────────────────────
+SECTOR = {
+    "1332.T":"水産","1333.T":"水産","1605.T":"石油","1721.T":"建設","1801.T":"建設",
+    "1802.T":"建設","1803.T":"建設","1808.T":"建設","1812.T":"建設","1925.T":"建設",
+    "1928.T":"建設","1963.T":"建設","2002.T":"食品","2269.T":"食品","2282.T":"食品",
+    "2413.T":"サービス","2432.T":"サービス","2501.T":"食品","2502.T":"食品",
+    "2503.T":"食品","2531.T":"食品","2768.T":"商社","2801.T":"食品","2802.T":"食品",
+    "2871.T":"食品","2914.T":"食品","3086.T":"小売","3099.T":"小売","3105.T":"繊維",
+    "3289.T":"不動産","3382.T":"小売","3401.T":"繊維","3402.T":"繊維","3405.T":"化学",
+    "3407.T":"化学","3436.T":"半導体","3861.T":"紙・パ","3863.T":"紙・パ",
+    "4004.T":"化学","4005.T":"化学","4021.T":"化学","4042.T":"化学","4043.T":"化学",
+    "4061.T":"化学","4063.T":"化学","4183.T":"化学","4188.T":"化学","4208.T":"化学",
+    "4272.T":"化学","4307.T":"IT","4324.T":"サービス","4502.T":"医薬","4503.T":"医薬",
+    "4506.T":"医薬","4507.T":"医薬","4519.T":"医薬","4523.T":"医薬","4543.T":"医療機器",
+    "4568.T":"医薬","4578.T":"医薬","4631.T":"化学","4689.T":"IT","4704.T":"IT",
+    "4751.T":"IT","4755.T":"IT","4901.T":"精密","4902.T":"精密","5019.T":"石油",
+    "5020.T":"石油","5101.T":"ゴム","5108.T":"ゴム","5201.T":"ガラス","5214.T":"ガラス",
+    "5232.T":"セメント","5233.T":"セメント","5301.T":"化学","5332.T":"窯業",
+    "5333.T":"窯業","5401.T":"鉄鋼","5406.T":"鉄鋼","5411.T":"鉄鋼","5631.T":"機械",
+    "5703.T":"非鉄","5706.T":"非鉄","5707.T":"非鉄","5711.T":"非鉄","5713.T":"非鉄",
+    "5714.T":"非鉄","5741.T":"非鉄","5801.T":"非鉄","5802.T":"非鉄","5803.T":"非鉄",
+    "6098.T":"サービス","6103.T":"機械","6113.T":"機械","6178.T":"金融","6273.T":"機械",
+    "6301.T":"機械","6302.T":"機械","6305.T":"機械","6326.T":"機械","6361.T":"機械",
+    "6367.T":"機械","6370.T":"機械","6383.T":"機械","6406.T":"機械","6412.T":"娯楽",
+    "6417.T":"娯楽","6471.T":"機械","6472.T":"機械","6473.T":"機械","6479.T":"電機",
+    "6501.T":"電機","6503.T":"電機","6504.T":"電機","6506.T":"電機","6526.T":"半導体",
+    "6532.T":"サービス","6586.T":"機械","6594.T":"電機","6645.T":"電機","6674.T":"電機",
+    "6701.T":"電機","6702.T":"電機","6723.T":"半導体","6724.T":"精密","6752.T":"電機",
+    "6753.T":"電機","6754.T":"電機","6758.T":"電機","6762.T":"電機","6770.T":"電機",
+    "6806.T":"電機","6841.T":"電機","6857.T":"半導体","6861.T":"電機","6902.T":"自動車",
+    "6952.T":"電機","6954.T":"電機","6971.T":"電機","6981.T":"電機","6988.T":"化学",
+    "7003.T":"重工","7011.T":"重工","7012.T":"重工","7013.T":"重工","7201.T":"自動車",
+    "7202.T":"自動車","7203.T":"自動車","7205.T":"自動車","7211.T":"自動車",
+    "7261.T":"自動車","7267.T":"自動車","7270.T":"自動車","7272.T":"自動車",
+    "7731.T":"精密","7733.T":"精密","7735.T":"半導体","7741.T":"精密","7751.T":"精密",
+    "7752.T":"精密","7762.T":"精密","7832.T":"娯楽","7951.T":"楽器","8001.T":"商社",
+    "8002.T":"商社","8015.T":"商社","8031.T":"商社","8035.T":"半導体","8053.T":"商社",
+    "8058.T":"商社","8233.T":"小売","8252.T":"小売","8253.T":"金融","8267.T":"小売",
+    "8303.T":"銀行","8304.T":"銀行","8306.T":"銀行","8308.T":"銀行","8309.T":"銀行",
+    "8316.T":"銀行","8331.T":"銀行","8354.T":"銀行","8377.T":"銀行","8411.T":"銀行",
+    "8601.T":"証券","8604.T":"証券","8628.T":"証券","8630.T":"保険","8697.T":"金融",
+    "8725.T":"保険","8750.T":"保険","8766.T":"保険","8795.T":"保険","8801.T":"不動産",
+    "8802.T":"不動産","8804.T":"不動産","8830.T":"不動産","9001.T":"陸運","9005.T":"陸運",
+    "9007.T":"陸運","9008.T":"陸運","9009.T":"陸運","9020.T":"陸運","9021.T":"陸運",
+    "9022.T":"陸運","9064.T":"陸運","9101.T":"海運","9104.T":"海運","9107.T":"海運",
+    "9202.T":"空運","9301.T":"倉庫","9432.T":"通信","9433.T":"通信","9434.T":"通信",
+    "9501.T":"電力","9502.T":"電力","9503.T":"電力","9531.T":"ガス","9532.T":"ガス",
+    "9602.T":"娯楽","9735.T":"サービス","9766.T":"娯楽","9983.T":"小売",
+    "9984.T":"IT",
+}
+
+
 BACKTEST_DAYS   = 30            # デフォルト（1ヶ月）
 WORKERS         = 16            # 並列バックテスト数
 
@@ -309,34 +360,61 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     vol_ma = v.rolling(VOL_MA_PERIOD).mean()
     ma10   = c.rolling(MA_TREND_PERIOD).mean()
 
+    # ── 追加指標 ──────────────────────────────────────────
+    # RSI(14)
+    delta    = c.diff()
+    gain     = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss     = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+    rsi      = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
+    # 移動平均（75日・200日）
+    ma75  = c.rolling(75).mean()
+    ma200 = c.rolling(200).mean()
+
+    # ATR % (ボラティリティ率)
+    atr_pct = atr / c * 100
+
+    # 出来高比率
+    vol_ratio = v / vol_ma.replace(0, np.nan)
+
+    # 25日高値ブレイク（前日までの直近25日高値を本日終値が超えているか）
+    high25    = h.rolling(25).max().shift(1)
+    new_high25 = c > high25
+
+    # 25MA乖離率
+    ma25_dev  = (c - ma10) / ma10.replace(0, np.nan) * 100
+
     prev_hist  = histogram.shift(1)
     prev2_hist = histogram.shift(2)
 
     df = df.copy()
-    df["atr"]       = atr
-    df["macd"]      = macd_line
-    df["macd_sig"]  = signal_line
-    df["macd_hist"] = histogram
-    df["vol_ma"]    = vol_ma
-    df["ma25"]      = ma10   # 列名は互換性のため ma25 のまま
+    df["atr"]        = atr
+    df["atr_pct"]    = atr_pct
+    df["macd"]       = macd_line
+    df["macd_sig"]   = signal_line
+    df["macd_hist"]  = histogram
+    df["vol_ma"]     = vol_ma
+    df["vol_ratio"]  = vol_ratio
+    df["ma25"]       = ma10
+    df["ma25_dev"]   = ma25_dev
+    df["ma75"]       = ma75
+    df["ma200"]      = ma200
+    df["rsi"]        = rsi
+    df["new_high25"] = new_high25
 
-    vol_ok    = v > vol_ma * VOL_SPIKE_MULT          # 出来高急増
-    trend_ok  = c > ma10                             # 短期上昇トレンド
+    vol_ok   = v > vol_ma * VOL_SPIKE_MULT
+    trend_ok = c > ma10
 
-    # Entry パターン1: ヒストグラムがゼロライン上抜け（モメンタム転換）
+    # Entry パターン1: ヒストグラムがゼロライン上抜け
     zero_cross_up = (histogram > 0) & (prev_hist <= 0)
-
-    # Entry パターン2: ヒストグラムが正値かつ2日連続上昇（モメンタム加速）
-    hist_accel = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
-
+    # Entry パターン2: ヒストグラムが正値かつ2日連続上昇
+    hist_accel    = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
     df["entry_sig"] = (zero_cross_up | hist_accel) & vol_ok & trend_ok
 
-    # Exit パターン1: ヒストグラムがゼロライン下抜け（モメンタム喪失）
+    # Exit パターン1: ヒストグラムがゼロライン下抜け
     zero_cross_dn = (histogram < 0) & (prev_hist >= 0)
-
-    # Exit パターン2: ヒストグラムが負値かつ2日連続下落（下落加速）
-    hist_decel = (histogram < 0) & (histogram < prev_hist) & (prev_hist < prev2_hist)
-
+    # Exit パターン2: ヒストグラムが負値かつ2日連続下落
+    hist_decel    = (histogram < 0) & (histogram < prev_hist) & (prev_hist < prev2_hist)
     df["exit_sig"] = zero_cross_dn | hist_decel
 
     return df
@@ -345,8 +423,8 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ── データ取得（メインスレッドから順次） ──────────────────
 def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
     """バックテスト期間 + 指標計算バッファ分を取得。
-    MACD(26日) + Signal(9日) + VolMA(20日) + MA25 + バックテスト + 余裕30日。"""
-    buf_days  = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD + 30
+    MA200計算のため 200日 + 余裕30日 をバッファとして確保。"""
+    buf_days  = 200 + 30          # MA200 が主要なボトルネック
     total_cal = int((backtest_days + buf_days) * 1.5)
 
     if   total_cal <= 180:  period = "6mo"
@@ -379,9 +457,49 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         return None
 
 
+# ── 日経平均データ取得 ──────────────────────────────────────
+def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
+    """^N225 を取得し 25日MA と 地合いフラグを付与。"""
+    buf_days  = 200 + 30
+    total_cal = int((backtest_days + buf_days) * 1.5)
+    if   total_cal <= 180:  period = "6mo"
+    elif total_cal <= 365:  period = "1y"
+    elif total_cal <= 730:  period = "2y"
+    elif total_cal <= 1095: period = "3y"
+    elif total_cal <= 1825: period = "5y"
+    else:                   period = "max"
+    try:
+        raw = yf.download("^N225", period=period, interval="1d",
+                          auto_adjust=True, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw[["close"]].dropna()
+        raw["ma25"] = raw["close"].rolling(25).mean()
+        return raw
+    except Exception:
+        return None
+
+
+def _nikkei_trend(nikkei_df: pd.DataFrame | None, dt: pd.Timestamp) -> bool | None:
+    """指定日の日経平均が 25MA より上か（上=リスクオン）。"""
+    if nikkei_df is None:
+        return None
+    # dtより前の直近行を使用
+    past = nikkei_df[nikkei_df.index <= dt]
+    if past.empty:
+        return None
+    row = past.iloc[-1]
+    if pd.isna(row["ma25"]):
+        return None
+    return bool(row["close"] > row["ma25"])
+
+
 # ── 1銘柄バックテスト ────────────────────────────────────────
 def run_backtest(symbol: str, name: str, df: pd.DataFrame,
-                 backtest_days: int) -> dict | None:
+                 backtest_days: int, nikkei_df: pd.DataFrame | None = None) -> dict | None:
     df = calc_indicators(df)
 
     cutoff    = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
@@ -426,6 +544,7 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                     "pnl":         pnl,
                     "hold_days":   (dt - entry_dt).days,
                     "reason":      exit_r,
+                    **entry_meta,
                 })
                 in_pos = False
             else:
@@ -449,6 +568,23 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                     entry_dt     = dt
                     qty          = q
                     in_pos       = True
+                    # ── エントリー時の詳細メタデータを保存 ──
+                    _ep  = entry_price
+                    entry_meta = {
+                        "sector":      SECTOR.get(symbol, "その他"),
+                        "price_tier":  "高位" if _ep >= 5000 else "中位" if _ep >= 1000 else "低位",
+                        "ma25_dev":    float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 0.0,
+                        "above_ma75":  bool(_ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
+                        "above_ma200": bool(_ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
+                        "new_high25":  bool(prev["new_high25"]),
+                        "atr_val":     float(prev["atr"]),
+                        "atr_pct":     float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0,
+                        "vol":         float(prev["volume"]),
+                        "vol_ratio":   float(prev["vol_ratio"]) if not pd.isna(prev["vol_ratio"]) else 0.0,
+                        "macd_hist":   float(prev["macd_hist"]),
+                        "rsi":         float(prev["rsi"])        if not pd.isna(prev["rsi"])        else 0.0,
+                        "nikkei_up":   _nikkei_trend(nikkei_df, dt),
+                    }
 
     # 未決済を最終日終値で仮決済
     open_pos = None
@@ -465,6 +601,7 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
             "pnl":         pnl,
             "hold_days":   (df_target.index[-1] - entry_dt).days,
             "reason":      "保有中（最終日終値）",
+            **entry_meta,
         }
         trades.append(open_pos)
 
@@ -530,11 +667,27 @@ def print_detail(r: dict, backtest_days: int) -> None:
         print("  " + "─" * 82)
         for i, t in enumerate(r["trade_log"], 1):
             mark = " ★" if t["reason"] == "保有中（最終日終値）" else ""
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
             print(f"  {i:<3} {t['entry_dt'].strftime('%Y-%m-%d'):>12} "
                   f"{t['exit_dt'].strftime('%Y-%m-%d'):>12} "
                   f"{t['entry_price']:>9,.1f} {t['exit_price']:>9,.1f} "
-                  f"{t['qty']:>5} {t['pnl']:>+10,.0f} {t['hold_days']:>4}日  "
-                  f"{t['reason']}{mark}")
+                  f"{t['qty']:>5} {t['pnl']:>+10,.0f}({pnl_pct:>+5.1f}%) "
+                  f"{t['hold_days']:>3}日  {t['reason']}{mark}")
+            # ── エントリー時指標行 ──────────────────────────────
+            nk  = ("↑リスクON" if t.get("nikkei_up") is True
+                   else "↓リスクOFF" if t.get("nikkei_up") is False
+                   else "日経:--")
+            ma75_s  = "MA75↑" if t.get("above_ma75")  else "MA75↓"
+            ma200_s = "MA200↑" if t.get("above_ma200") else "MA200↓"
+            nh25_s  = "25H↑" if t.get("new_high25") else "25H-"
+            print(f"       業種:{t.get('sector','--'):5s}  {t.get('price_tier','--'):2s}株"
+                  f"  MA乖離:{t.get('ma25_dev', 0):+5.1f}%"
+                  f"  {ma75_s}  {ma200_s}  {nh25_s}"
+                  f"  ATR:{t.get('atr_pct', 0):.1f}%"
+                  f"  出来高比:{t.get('vol_ratio', 0):.1f}x"
+                  f"  MACD:{t.get('macd_hist', 0):+.2f}"
+                  f"  RSI:{t.get('rsi', 0):.0f}"
+                  f"  {nk}")
         print("  " + "─" * 82)
         if r["open_pos"]:
             print("  ★ = 現在保有中（最終日終値で仮決済）")
@@ -649,10 +802,16 @@ def main() -> None:
     total      = len(target)
     stock_data = {}
 
+    # 日経平均データ取得
+    print(f"  日経平均データ取得中...")
+    nikkei_df = fetch_nikkei(days)
+    nk_s = "取得成功" if nikkei_df is not None else "取得失敗（地合い判定スキップ）"
+    print(f"  日経225: {nk_s}\n")
+
     # Phase 1: 順次データ取得
     print(f"  [Phase 1] データ取得中 ({total}銘柄)...")
     for i, (sym, name) in enumerate(target, 1):
-        print(f"  [{i:2d}/{total}] {name}({sym})", end=" ", flush=True)
+        print(f"  [{i:3d}/{total}] {name}({sym})", end=" ", flush=True)
         df = fetch_df(sym, backtest_days=days)
         if df is None:
             print("× スキップ")
@@ -666,7 +825,7 @@ def main() -> None:
     results = []
 
     def _bt(task):
-        return run_backtest(task[0], task[1], task[2], days)
+        return run_backtest(task[0], task[1], task[2], days, nikkei_df=nikkei_df)
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futures = {ex.submit(_bt, t): t[0] for t in tasks}
@@ -689,6 +848,40 @@ def main() -> None:
             print_detail(r, days)
     else:
         print_ranking(results, days, args.top)
+
+    # ── CSV出力 ───────────────────────────────────────────────
+    rows = []
+    for r in results:
+        for t in r["trade_log"]:
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+            rows.append({
+                "symbol":      r["symbol"],
+                "name":        r["name"],
+                "entry_dt":    t["entry_dt"].strftime("%Y-%m-%d"),
+                "exit_dt":     t["exit_dt"].strftime("%Y-%m-%d"),
+                "entry_price": t["entry_price"],
+                "exit_price":  t["exit_price"],
+                "qty":         t["qty"],
+                "pnl":         t["pnl"],
+                "pnl_pct":     round(pnl_pct, 2),
+                "hold_days":   t["hold_days"],
+                "reason":      t["reason"],
+                "sector":      t.get("sector", ""),
+                "price_tier":  t.get("price_tier", ""),
+                "ma25_dev":    round(t.get("ma25_dev", 0), 2),
+                "above_ma75":  t.get("above_ma75", ""),
+                "above_ma200": t.get("above_ma200", ""),
+                "new_high25":  t.get("new_high25", ""),
+                "atr_pct":     round(t.get("atr_pct", 0), 2),
+                "vol_ratio":   round(t.get("vol_ratio", 0), 2),
+                "macd_hist":   round(t.get("macd_hist", 0), 4),
+                "rsi":         round(t.get("rsi", 0), 1),
+                "nikkei_up":   t.get("nikkei_up", ""),
+            })
+    if rows:
+        csv_path = f"macd_trades_{datetime.today().strftime('%Y%m%d')}_{label}.csv"
+        pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+        print(f"  CSVエクスポート: {csv_path}  ({len(rows)}件)\n")
 
 
 if __name__ == "__main__":
