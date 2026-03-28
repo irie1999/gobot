@@ -338,12 +338,12 @@ POSITION_SIZE   = 50_000  # 1銘柄あたり購入金額（固定）
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
-FILTER_MA_DEV_MAX    =  3.0   # MA乖離 ±3%以内（4%以上は絶対NG）
+FILTER_MA_DEV_MAX    =  1.0   # MA乖離 ±1%以内（かなり重要）
 FILTER_MA200_ABOVE   = True   # True = 終値がMA200より上のみ許可
 FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限
 FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限
-FILTER_RSI_MIN       = 45.0   # RSI 下限（絶対）
-FILTER_RSI_MAX       = 52.0   # RSI 上限（55以上は絶対NG）
+FILTER_RSI_MIN       = 45.0   # RSI 下限（超重要）
+FILTER_RSI_MAX       = 50.0   # RSI 上限（超重要）
 FILTER_VOL_RATIO_MIN =  1.2   # 出来高比 下限
 FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限
 
@@ -428,7 +428,8 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     zero_cross_up = (histogram > 0) & (prev_hist <= 0)
     # Entry パターン2: ヒストグラムが正値かつ2日連続上昇
     hist_accel    = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
-    df["entry_sig"] = (zero_cross_up | hist_accel) & vol_ok & trend_ok
+    # ⑤ MACDヒスト2日以上連続上昇を必須条件とする（ゼロクロス単独エントリー廃止）
+    df["entry_sig"] = hist_accel & vol_ok & trend_ok
 
     # Exit パターン1: ヒストグラムがゼロライン下抜け
     zero_cross_dn = (histogram < 0) & (prev_hist >= 0)
