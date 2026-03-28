@@ -268,16 +268,17 @@ SYMBOLS = [
 BACKTEST_DAYS   = 30            # デフォルト（1ヶ月）
 WORKERS         = 16            # 並列バックテスト数
 
-MACD_FAST       = 12
-MACD_SLOW       = 26
-MACD_SIGNAL     = 9
+# MACD パラメータ（短期最適化: 高速シグナル検出）
+MACD_FAST       = 5             # 12→5: 短期の動きを素早く捉える
+MACD_SLOW       = 13            # 26→13
+MACD_SIGNAL     = 4             # 9→4
 VOL_MA_PERIOD   = 20
-VOL_SPIKE_MULT  = 1.5
-MA_TREND_PERIOD = 25
+VOL_SPIKE_MULT  = 1.2           # 1.5→1.2: 出来高閾値を緩和
+MA_TREND_PERIOD = 10            # 25→10: 短期トレンド確認
 
 ATR_PERIOD      = 14
 ATR_STOP_MULT   = 1.5
-ATR_TRAIL_MULT  = 2.5
+ATR_TRAIL_MULT  = 1.8           # 2.5→1.8: 短期で利確を早める
 
 INITIAL_CASH    = 500_000
 RISK_PER_TRADE  = 0.02
@@ -306,9 +307,10 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # 出来高・トレンドフィルター
     vol_ma = v.rolling(VOL_MA_PERIOD).mean()
-    ma25   = c.rolling(MA_TREND_PERIOD).mean()
+    ma10   = c.rolling(MA_TREND_PERIOD).mean()
 
-    prev_hist = histogram.shift(1)
+    prev_hist  = histogram.shift(1)
+    prev2_hist = histogram.shift(2)
 
     df = df.copy()
     df["atr"]       = atr
@@ -316,15 +318,26 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_sig"]  = signal_line
     df["macd_hist"] = histogram
     df["vol_ma"]    = vol_ma
-    df["ma25"]      = ma25
+    df["ma25"]      = ma10   # 列名は互換性のため ma25 のまま
 
-    # Entry: ヒストグラムがゼロライン上抜け AND 出来高急増 AND 上昇トレンド
-    df["entry_sig"] = ((histogram > 0) & (prev_hist <= 0)
-                       & (v > vol_ma * VOL_SPIKE_MULT)
-                       & (c > ma25))
+    vol_ok    = v > vol_ma * VOL_SPIKE_MULT          # 出来高急増
+    trend_ok  = c > ma10                             # 短期上昇トレンド
 
-    # Exit: ヒストグラムがゼロライン下抜け
-    df["exit_sig"]  = (histogram < 0) & (prev_hist >= 0)
+    # Entry パターン1: ヒストグラムがゼロライン上抜け（モメンタム転換）
+    zero_cross_up = (histogram > 0) & (prev_hist <= 0)
+
+    # Entry パターン2: ヒストグラムが正値かつ2日連続上昇（モメンタム加速）
+    hist_accel = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
+
+    df["entry_sig"] = (zero_cross_up | hist_accel) & vol_ok & trend_ok
+
+    # Exit パターン1: ヒストグラムがゼロライン下抜け（モメンタム喪失）
+    zero_cross_dn = (histogram < 0) & (prev_hist >= 0)
+
+    # Exit パターン2: ヒストグラムが負値かつ2日連続下落（下落加速）
+    hist_decel = (histogram < 0) & (histogram < prev_hist) & (prev_hist < prev2_hist)
+
+    df["exit_sig"] = zero_cross_dn | hist_decel
 
     return df
 
@@ -567,9 +580,12 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
           f"取引なし: {no_sig_cnt}件  トレード計: {total_tr}回")
     print(f"  プラス銘柄: {profitable}/{len(results)}  平均損益率: {avg_ret:+.2f}%")
     print()
-    print(f"  【アルゴリズム】 MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}) ヒストグラム ゼロクロス上抜け"
-          f"  ＋  出来高 >{VOL_SPIKE_MULT}×20日平均  ＋  終値 >25MA")
-    print(f"  【決済】 ヒストグラム ゼロクロス下抜け  or  ATRトレイリング×{ATR_TRAIL_MULT}")
+    print(f"  【エントリー】 MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})  "
+          f"①ヒスト ゼロ上抜け  または  ②ヒスト正値＋2日連続上昇")
+    print(f"              ＋ 出来高 >{VOL_SPIKE_MULT}×{VOL_MA_PERIOD}日平均  "
+          f"＋ 終値 >{MA_TREND_PERIOD}日MA")
+    print(f"  【決済】 ①ヒスト ゼロ下抜け  または  ②ヒスト負値＋2日連続下落  "
+          f"または  ③ATRトレイリング×{ATR_TRAIL_MULT}")
     print(f"  【資金】 {INITIAL_CASH:,}円/銘柄  リスク{RISK_PER_TRADE*100:.0f}%/トレード")
     print()
 
