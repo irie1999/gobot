@@ -339,14 +339,14 @@ MAX_COST_RATIO  = 0.10
 MAX_QTY         = 9999
 
 # ── エントリーフィルター ──────────────────────────────────────
-FILTER_MA_DEV_MAX    =  3.0   # MA乖離の上限（%）
+FILTER_MA_DEV_MAX    =  5.0   # MA乖離の上限（%）  3→5
 FILTER_MA200_ABOVE   = True   # True = 終値がMA200より上のみ許可
-FILTER_ATR_PCT_MIN   =  2.5   # ATR% 下限
-FILTER_ATR_PCT_MAX   =  3.5   # ATR% 上限
-FILTER_RSI_MIN       = 45.0   # RSI 下限
-FILTER_RSI_MAX       = 52.0   # RSI 上限（65→52: モメンタム初期段階のみ）
-FILTER_VOL_RATIO_MIN =  1.2   # 出来高比 下限
-FILTER_VOL_RATIO_MAX =  1.5   # 出来高比 上限
+FILTER_ATR_PCT_MIN   =  1.5   # ATR% 下限  2.5→1.5
+FILTER_ATR_PCT_MAX   =  5.0   # ATR% 上限  3.5→5.0
+FILTER_RSI_MIN       = 40.0   # RSI 下限   45→40
+FILTER_RSI_MAX       = 62.0   # RSI 上限   52→62
+FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限  1.2→1.1
+FILTER_VOL_RATIO_MAX =  2.0   # 出来高比 上限  1.5→2.0
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
 MAX_POSITIONS   = 3     # 同時保有最大銘柄数（上位3銘柄のみ）
