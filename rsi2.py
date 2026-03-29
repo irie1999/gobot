@@ -125,6 +125,48 @@ SYMBOLS = [
 _CACHE_DIR = Path(".rsi2_cache")
 
 
+def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
+    """日経平均(^N225)を取得し MA25・MA200 を付与する。"""
+    buf = 200 + 30
+    dl_start = (_TODAY - timedelta(days=backtest_days + buf)).strftime("%Y-%m-%d")
+    dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        raw = yf.download("^N225", start=dl_start, end=dl_end,
+                          interval="1d", auto_adjust=False, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
+        s = raw["close"].dropna()
+        df = pd.DataFrame({"close": s.to_numpy(dtype=float)}, index=s.index)
+        df["ma25"]  = df["close"].rolling(25).mean()
+        df["ma200"] = df["close"].rolling(200).mean()
+        return df
+    except Exception:
+        return None
+
+
+def _market_info(nikkei_df: pd.DataFrame | None) -> dict:
+    """直近の日経平均・MA25・MA200 から地合い情報を返す。"""
+    if nikkei_df is None or nikkei_df.empty:
+        return {"ok": False}
+    row = nikkei_df.dropna(subset=["ma25", "ma200"]).iloc[-1]
+    cl, ma25, ma200 = float(row["close"]), float(row["ma25"]), float(row["ma200"])
+    above25  = cl > ma25
+    above200 = cl > ma200
+    if above25 and above200:
+        phase, phase_cls = "リスクオン  ▲上昇トレンド", "on"
+    elif above200:
+        phase, phase_cls = "要注意  MA200上・MA25割れ",  "caution"
+    else:
+        phase, phase_cls = "リスクオフ  ▼下降トレンド", "off"
+    return dict(ok=True, close=cl, ma25=ma25, ma200=ma200,
+                above25=above25, above200=above200,
+                phase=phase, phase_cls=phase_cls)
+
+
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     # ── 優先: fetch_all.py が保存した永続キャッシュ ──────────────
     # ファイル名: .rsi2_cache/{symbol}.pkl（日付なし・長期保存）
@@ -517,7 +559,7 @@ new Chart(document.getElementById('cumChart'), {{
 
 # ── ランキング表示（スキャンモード） ───────────────────────
 def print_ranking(results: list[dict], days: int, label: str,
-                  top: int | None = None) -> None:
+                  top: int | None = None, mkt: dict | None = None) -> None:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
     ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
@@ -532,6 +574,12 @@ def print_ranking(results: list[dict], days: int, label: str,
     print(f"  RSI(2) 平均回帰  {len(SYMBOLS)}銘柄スキャン  直近{label}"
           + (f"  上位{top}銘柄" if top else ""))
     print(f"  期間: {since} ～ {today}")
+    if mkt and mkt.get("ok"):
+        a25  = "▲" if mkt["above25"]  else "▼"
+        a200 = "▲" if mkt["above200"] else "▼"
+        print(f"  【地合い】日経平均 {mkt['close']:,.0f}円  "
+              f"MA25 {mkt['ma25']:,.0f}{a25}  MA200 {mkt['ma200']:,.0f}{a200}  "
+              f"→ {mkt['phase']}")
     print(f"  【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値エントリー")
     print(f"  【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / "
           f"-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確")
@@ -558,8 +606,30 @@ def print_ranking(results: list[dict], days: int, label: str,
 
 
 # ── スキャン用 HTML ─────────────────────────────────────────
+def _mkt_banner_html(mkt: dict | None) -> str:
+    """地合いバナーの HTML を返す。mkt が None または ok=False なら空文字。"""
+    if not mkt or not mkt.get("ok"):
+        return '<div class="mkt-banner mkt-unknown"><span>地合い情報を取得できませんでした</span></div>'
+    cls  = {"on": "mkt-on", "caution": "mkt-caution", "off": "mkt-off"}.get(mkt["phase_cls"], "mkt-unknown")
+    a25  = "▲" if mkt["above25"]  else "▼"
+    a200 = "▲" if mkt["above200"] else "▼"
+    c25  = "#4ade80" if mkt["above25"]  else "#f87171"
+    c200 = "#4ade80" if mkt["above200"] else "#f87171"
+    return f'''\
+<div class="mkt-banner {cls}">
+  <div class="mkt-item"><div class="mkt-lbl">地合い</div>
+    <div class="mkt-val">{mkt["phase"]}</div></div>
+  <div class="mkt-item"><div class="mkt-lbl">日経平均</div>
+    <div class="mkt-val">{mkt["close"]:,.0f}円</div></div>
+  <div class="mkt-item"><div class="mkt-lbl">MA25</div>
+    <div class="mkt-val" style="color:{c25}">{mkt["ma25"]:,.0f} {a25}</div></div>
+  <div class="mkt-item"><div class="mkt-lbl">MA200</div>
+    <div class="mkt-val" style="color:{c200}">{mkt["ma200"]:,.0f} {a200}</div></div>
+</div>'''
+
+
 def generate_html_scan(results: list[dict], days: int, label: str,
-                       top: int | None = None) -> Path:
+                       top: int | None = None, mkt: dict | None = None) -> Path:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
     ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
@@ -629,6 +699,15 @@ tr:hover>td{{background:#1b1f35!important}}
 .inner-table{{width:100%;font-size:0.84em;background:#0d0f1a}}
 .inner-table th{{background:#0d0f1a;font-size:0.8em}}
 .footer{{margin-top:32px;color:#444;font-size:0.78em;text-align:right}}
+.mkt-banner{{border-radius:8px;padding:10px 16px;margin:14px 0;
+             font-size:0.9em;display:flex;align-items:center;gap:18px;flex-wrap:wrap}}
+.mkt-on     {{background:#0f2a1a;border:1px solid #166534;color:#4ade80}}
+.mkt-caution{{background:#2a1f0a;border:1px solid #92400e;color:#fbbf24}}
+.mkt-off    {{background:#2a0f0f;border:1px solid #7f1d1d;color:#f87171}}
+.mkt-unknown{{background:#16192a;border:1px solid #252840;color:#666}}
+.mkt-item{{display:flex;flex-direction:column;align-items:center;gap:2px}}
+.mkt-lbl{{font-size:0.75em;opacity:.7}}
+.mkt-val{{font-size:1.1em;font-weight:700}}
 </style>
 </head>
 <body>
@@ -637,7 +716,7 @@ tr:hover>td{{background:#1b1f35!important}}
 <div class="meta">【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値エントリー
   / 【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル /
   -{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確</div>
-
+{_mkt_banner_html(mkt)}
 <div class="cards">
   <div class="card"><div class="clabel">合計損益</div>
     <div class="cval {total_cls}">{total_pnl:+,.0f}円</div></div>
@@ -783,6 +862,7 @@ def main() -> None:
 
     stock_data: dict = {}
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        nk_fut  = ex.submit(fetch_nikkei, days)           # 日経平均を並行取得
         futs = {ex.submit(fetch, sym, days): (sym, name) for sym, name in SYMBOLS}
         done = 0
         for fut in as_completed(futs):
@@ -792,7 +872,10 @@ def main() -> None:
             df = fut.result()
             if df is not None:
                 stock_data[sym] = (name, df)
+        nk_df = nk_fut.result()
     print(f"\r  取得完了: {len(stock_data)}/{len(SYMBOLS)} 銘柄              ")
+
+    mkt = _market_info(nk_df)
 
     results = []
     for sym, (name, df) in stock_data.items():
@@ -817,8 +900,8 @@ def main() -> None:
         print("  シグナルが発生した銘柄がありませんでした。")
         return
 
-    print_ranking(results, days, label, top=args.top)
-    path = generate_html_scan(results, days, label, top=args.top)
+    print_ranking(results, days, label, top=args.top, mkt=mkt)
+    path = generate_html_scan(results, days, label, top=args.top, mkt=mkt)
     print(f"  HTMLレポート保存: {path}")
     webbrowser.open(f"file://{path.resolve()}")
 
