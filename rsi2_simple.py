@@ -277,27 +277,36 @@ def resolve_dates(args) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 # ── データ取得 ──────────────────────────────────────────────────
 def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
-    # MA200 ウォームアップのため start より 400 日前から取得
-    dl_start = (start - timedelta(days=400)).strftime("%Y-%m-%d")
-    dl_end   = (end   + timedelta(days=1  )).strftime("%Y-%m-%d")
+    # MA200バッファ(230日) + バックテスト期間 をカレンダー日数×1.5倍で period に変換
+    buf_days  = 200 + 30
+    total_cal = int(((end - start).days + buf_days) * 1.5)
+
+    if   total_cal <= 180:  period = "6mo"
+    elif total_cal <= 365:  period = "1y"
+    elif total_cal <= 730:  period = "2y"
+    elif total_cal <= 1095: period = "3y"
+    elif total_cal <= 1825: period = "5y"
+    else:                   period = "max"
+
     try:
-        raw = yf.download(symbol, start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=True, progress=False)
+        raw = yf.download(symbol, period=period, interval="1d",
+                          auto_adjust=True, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
-            # yfinance ≥0.2 は (Price, Ticker) または (Ticker, Price) の MultiIndex を返す
-            # 価格列名が含まれるレベルを選択する
-            price_names = {"open", "high", "low", "close", "volume"}
-            for level in range(raw.columns.nlevels):
-                names = {v.lower() for v in raw.columns.get_level_values(level)}
-                if price_names & names:
-                    raw.columns = raw.columns.get_level_values(level)
-                    break
+            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
-        # 重複列（Adj Close 等）を除去
-        raw = raw.loc[:, ~raw.columns.duplicated()]
-        return raw[["open", "high", "low", "close", "volume"]].dropna()
+        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        if len(raw) < 210:
+            return None
+        # 各列を明示的に1D float配列に変換（MultiIndex残存による DataFrame化を防ぐ）
+        return pd.DataFrame({
+            "open":   raw["open"].to_numpy(dtype=float),
+            "high":   raw["high"].to_numpy(dtype=float),
+            "low":    raw["low"].to_numpy(dtype=float),
+            "close":  raw["close"].to_numpy(dtype=float),
+            "volume": raw["volume"].to_numpy(dtype=float),
+        }, index=raw.index)
     except Exception:
         return None
 
@@ -821,7 +830,7 @@ def main() -> None:
         name = next((n for s, n in SYMBOLS if s == sym), sym)
         print(f"\n  データ取得中: {sym}  {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')} ...")
         df = fetch(sym, start, end)
-        if df is None or len(df) < 210:
+        if df is None:
             print(f"  エラー: {sym} のデータ取得に失敗しました")
             return
         df = calc(df)
@@ -847,7 +856,7 @@ def main() -> None:
             done += 1
             print(f"\r  取得中 {done}/{len(SYMBOLS)} ...", end="", flush=True)
             df = fut.result()
-            if df is not None and len(df) >= 210:
+            if df is not None:
                 stock_data[sym] = (name, df)
     print(f"\r  取得完了: {len(stock_data)}/{len(SYMBOLS)} 銘柄              ")
 
