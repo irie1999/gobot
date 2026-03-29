@@ -1,5 +1,5 @@
 """
-MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄スキャナー（225銘柄）
+MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄スキャナー
 ────────────────────────────────────────────────────────────────────────
 【アルゴリズム】
   Entry（3条件すべて）:
@@ -12,8 +12,10 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
     B. ATRトレイリングストップ発動（ATR × 2.5）
 
 ■ 実行方法:
-  python backtest_macd_scan.py --signal           # 明日の売買シグナルスキャン（推奨）
+  python backtest_macd_scan.py --signal           # 明日の売買シグナルスキャン（推奨・19銘柄）
+  python backtest_macd_scan.py --signal --all     # 明日の売買シグナルスキャン（225銘柄全部）
   python backtest_macd_scan.py                    # 直近1ヶ月バックテスト（デフォルト）
+  python backtest_macd_scan.py --all              # 225銘柄でバックテスト
   python backtest_macd_scan.py --months 3         # 直近3ヶ月
   python backtest_macd_scan.py --years 1          # 直近1年
   python backtest_macd_scan.py --years 5          # 直近5年
@@ -38,32 +40,16 @@ try:
 except ImportError:
     _RSI2_CACHE_DIR = None
 
-# ── 監視対象銘柄（バックテスト検証済み20銘柄）───────────────
-# 1年間バックテスト結果に基づく選定（2026年3月）
-# FOCUS5銘柄 + 優先候補14銘柄（高島屋はFOCUSと重複のため1カウント）
-SYMBOLS = [
-    # ── FOCUS 5銘柄（バックテスト最優秀・スコア+20ボーナス）──
-    ("6754.T", "アンリツ"),          # 1年最高益 +11,855円  4勝1敗
-    ("5741.T", "UACJ"),             # +18.4%の大勝ちあり  2勝0敗
-    ("8233.T", "高島屋"),            # +13.3%+16.6% 完璧  2勝0敗
-    ("1802.T", "大林組"),            # 建設PREFER +15.8%  2勝0敗
-    ("8795.T", "T&Dホールディングス"), # 保険PREFER 大勝ち2回 2勝1敗
-    # ── 優先候補 14銘柄（シグナル出たら積極的に検討）────────
-    ("7012.T", "川崎重工業"),         # 重工PREFER  2勝0敗
-    ("7013.T", "IHI"),              # 重工PREFER  2勝0敗
-    ("4507.T", "塩野義製薬"),         # 医薬        3勝0敗
-    ("5232.T", "住友大阪セメント"),    # セメント    3勝0敗
-    ("5703.T", "日本軽金属HD"),       # 非鉄        2勝0敗
-    ("4063.T", "信越化学工業"),       # 化学        2勝0敗
-    ("6770.T", "アルプスアルパイン"), # 電機        2勝0敗
-    ("6702.T", "富士通"),            # 電機        2勝0敗
-    ("6701.T", "NEC"),              # 電機        2勝0敗
-    ("9433.T", "KDDI"),             # 通信        2勝0敗
-    ("9008.T", "京王電鉄"),          # 陸運        2勝0敗
-    ("9022.T", "東海旅客鉄道"),       # 陸運        2勝1敗
-    ("8252.T", "丸井グループ"),       # 小売        2勝1敗（日経↑時のみ）
-    ("8267.T", "イオン"),            # 小売        3勝1敗（内需・日経↓でも可）
-]
+# ── 銘柄リストは外部ファイルから読み込む ──────────────────────
+# symbols_watch.py : 監視対象19銘柄（デフォルト）
+# symbols_all.py   : 日経225全銘柄（--all フラグ時）
+# ※ main() で --all フラグに応じて動的に切り替える
+from symbols_watch import SYMBOLS as _WATCH_SYMBOLS
+from symbols_watch import FOCUS_SYMBOLS as _WATCH_FOCUS_SYMBOLS
+from symbols_all import SYMBOLS as _ALL_SYMBOLS
+
+# デフォルトは監視対象19銘柄（main()で--allフラグにより上書き可）
+SYMBOLS = _WATCH_SYMBOLS
 
 # ── 業種マップ ─────────────────────────────────────────────
 SECTOR = {
@@ -193,7 +179,7 @@ PREFER_SECTORS   = {"銀行", "保険", "重工", "建設", "電力", "ガス"}
 #   8233 高島屋        : +13.3%+16.6% 完璧     2勝0敗
 #   1802 大林組        : 建設PREFER +15.8%     2勝0敗
 #   8795 T&DホールD   : 保険PREFER +17.7%     2勝1敗
-FOCUS_SYMBOLS    = {"6754.T", "5741.T", "8233.T", "1802.T", "8795.T"}
+FOCUS_SYMBOLS    = _WATCH_FOCUS_SYMBOLS
 # PREFER_SECTORSから半導体を除外（高VI時は真っ先に売られる）
 
 # ── インジケーター計算 ──────────────────────────────────────
@@ -1614,7 +1600,18 @@ def main() -> None:
                         help="ランキング表示件数（デフォルト: 30）")
     parser.add_argument("--signal", action="store_true",
                         help="明日の売買シグナルをスキャンして表示（バックテストなし）")
+    parser.add_argument("--all",    action="store_true",
+                        help="日経225全銘柄を対象にする（デフォルト: 監視対象19銘柄）")
     args = parser.parse_args()
+
+    # ── 銘柄リストを選択 ──────────────────────────────────────
+    global SYMBOLS, FOCUS_SYMBOLS
+    if args.all:
+        SYMBOLS       = _ALL_SYMBOLS
+        FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS   # FOCUS設定はwatchのまま維持
+    else:
+        SYMBOLS       = _WATCH_SYMBOLS
+        FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
 
     # 期間を日数に変換
     if args.days is not None:
@@ -1634,8 +1631,9 @@ def main() -> None:
 
     if args.signal:
         # ── シグナルスキャンモード ─────────────────────────────
+        mode_label = "日経225全銘柄" if args.all else f"監視対象{len(SYMBOLS)}銘柄"
         print(f"\n  MACDブレイクアウト  明日の売買シグナルスキャン")
-        print(f"  シグナル日: {datetime.today().strftime('%Y-%m-%d')}  (日経225 全銘柄)\n")
+        print(f"  シグナル日: {datetime.today().strftime('%Y-%m-%d')}  ({mode_label})\n")
 
         target = SYMBOLS
         total  = len(target)
