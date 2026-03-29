@@ -286,8 +286,17 @@ def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame |
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
+            # yfinance ≥0.2 は (Price, Ticker) または (Ticker, Price) の MultiIndex を返す
+            # 価格列名が含まれるレベルを選択する
+            price_names = {"open", "high", "low", "close", "volume"}
+            for level in range(raw.columns.nlevels):
+                names = {v.lower() for v in raw.columns.get_level_values(level)}
+                if price_names & names:
+                    raw.columns = raw.columns.get_level_values(level)
+                    break
         raw.columns = [str(c).lower() for c in raw.columns]
+        # 重複列（Adj Close 等）を除去
+        raw = raw.loc[:, ~raw.columns.duplicated()]
         return raw[["open", "high", "low", "close", "volume"]].dropna()
     except Exception:
         return None
