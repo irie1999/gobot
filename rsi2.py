@@ -295,10 +295,11 @@ def backtest(df: pd.DataFrame, backtest_days: int) -> list[dict]:
 
             if exit_p is not None:
                 pnl = (exit_p - entry_p) * qty
+                pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
                     entry_dt=entry_dt, exit_dt=dt,
                     entry_p=entry_p, exit_p=exit_p, qty=qty,
-                    pnl=pnl, hold=(dt - entry_dt).days, reason=reason,
+                    pnl=pnl, pct=pct, hold=(dt - entry_dt).days, reason=reason,
                 ))
                 in_pos = half_done = False
                 continue
@@ -308,10 +309,11 @@ def backtest(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                 if (cl - entry_p) / entry_p * 100 >= HALF_PROFIT_PCT:
                     hq = qty // 2
                     if hq > 0:
+                        pct_h = (cl - entry_p) / entry_p * 100
                         trades.append(dict(
                             entry_dt=entry_dt, exit_dt=dt,
                             entry_p=entry_p, exit_p=cl, qty=hq,
-                            pnl=(cl - entry_p) * hq,
+                            pnl=(cl - entry_p) * hq, pct=pct_h,
                             hold=(dt - entry_dt).days, reason="半分利確",
                         ))
                         qty -= hq
@@ -338,6 +340,7 @@ def backtest(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=lp, qty=qty,
             pnl=(lp - entry_p) * qty,
+            pct=(lp - entry_p) / entry_p * 100,
             hold=(df.index[-1] - entry_dt).days, reason="保有中★",
         ))
 
@@ -562,7 +565,7 @@ def print_ranking(results: list[dict], days: int, label: str,
                   top: int | None = None, mkt: dict | None = None) -> None:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
-    ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
+    ranked = sorted(results, key=lambda x: (-x["total_pct"], x["symbol"]))
     disp   = ranked[:top] if top else ranked
 
     total_pnl = sum(r["total"] for r in results)
@@ -587,16 +590,18 @@ def print_ranking(results: list[dict], days: int, label: str,
     print(f"  スキャン: {len(SYMBOLS)}銘柄  シグナルあり: {len(results)}銘柄  "
           f"トレード計: {total_tr}回  プラス銘柄: {plus_cnt}/{len(results)}")
     print()
-    print(f"  {'順位':<4} {'銘柄':<22} {'損益':>10} {'勝率':>6} "
+    print(f"  {'順位':<4} {'銘柄':<22} {'損益':>10} {'累積%':>7} {'勝率':>6} "
           f"{'PF':>5} {'取引':>4} {'平均保有':>7}")
-    print("  " + "─" * 60)
+    print("  " + "─" * 68)
     for rank, r in enumerate(disp, 1):
         pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
         sign  = "+" if r["total"] >= 0 else ""
-        bar   = ("▲" if r["total"] >= 0 else "▽") * min(int(abs(r["total"]) / 5000), 8)
+        psign = "+" if r["total_pct"] >= 0 else ""
+        bar   = ("▲" if r["total_pct"] >= 0 else "▽") * min(int(abs(r["total_pct"]) / 3), 8)
         label2 = f"{r['name']}({r['symbol']})"
         print(f"  {rank:<4} {label2:<22} "
               f"{sign}{r['total']:>9,.0f}円  "
+              f"{psign}{r['total_pct']:>5.1f}%  "
               f"{r['wr']:>5.1f}%  {pf_s:>5}  "
               f"{r['trades']:>3}回  {r['avg_hold']:>5.1f}日  {bar}")
     print("  " + "─" * 60)
@@ -632,7 +637,7 @@ def generate_html_scan(results: list[dict], days: int, label: str,
                        top: int | None = None, mkt: dict | None = None) -> Path:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
-    ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
+    ranked = sorted(results, key=lambda x: (-x["total_pct"], x["symbol"]))
     disp   = ranked[:top] if top else ranked
 
     total_pnl = sum(r["total"] for r in results)
@@ -888,9 +893,10 @@ def main() -> None:
         wr    = len(wins) / len(trades) * 100
         pf    = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
                  if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+        total_pct = sum(t["pct"] for t in trades)
         results.append(dict(
             symbol=sym, name=name,
-            trades=len(trades), total=total,
+            trades=len(trades), total=total, total_pct=total_pct,
             wr=wr, pf=pf,
             avg_hold=sum(t["hold"] for t in trades) / len(trades),
             trade_log=trades,
