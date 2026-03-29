@@ -1,15 +1,19 @@
 """
-RSI(2) 平均回帰バックテスト  軽量版（1銘柄）
-────────────────────────────────────────────
+RSI(2) 平均回帰バックテスト  軽量版（255銘柄スキャン / 1銘柄詳細）
+──────────────────────────────────────────────────────────────────
 使い方:
-  python rsi2.py 7011.T                # 三菱重工（デフォルト1年）
-  python rsi2.py 7011.T --years 2      # 2年
-  python rsi2.py 7011.T --months 6     # 6ヶ月
-  python rsi2.py 7011.T --days 90      # 90日
+  python rsi2.py                       # 255銘柄スキャン（1年）
+  python rsi2.py --years 2             # 2年
+  python rsi2.py --months 6            # 6ヶ月
+  python rsi2.py --days 90             # 90日
+  python rsi2.py --top 30              # 上位30銘柄のみ表示
+  python rsi2.py 7011.T                # 1銘柄詳細
+  python rsi2.py 7011.T --years 3      # 1銘柄 3年
 """
 
 import argparse
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,6 +30,89 @@ HALF_PROFIT_PCT =   5.0   # 半分利確 %
 ATR_TRAIL_MULT  =   2.0   # ATR トレイリング係数
 POSITION_SIZE   = 100_000 # 1回あたりの投資金額（円）
 BACKTEST_DAYS   =   365   # デフォルトのバックテスト日数
+WORKERS         =    16   # 並列ダウンロード数
+
+# ── 対象255銘柄（日経225） ───────────────────────────────────
+SYMBOLS = [
+    ("1332.T", "ニッスイ"), ("1333.T", "マルハニチロ"), ("1605.T", "INPEX"),
+    ("1721.T", "コムシスHD"), ("1801.T", "大成建設"), ("1802.T", "大林組"),
+    ("1803.T", "清水建設"), ("1808.T", "長谷工コーポレーション"), ("1812.T", "鹿島建設"),
+    ("1925.T", "大和ハウス工業"), ("1928.T", "積水ハウス"), ("1963.T", "日揮HD"),
+    ("2002.T", "日清製粉グループ本社"), ("2269.T", "明治HD"), ("2282.T", "日本ハム"),
+    ("2413.T", "エムスリー"), ("2432.T", "ディー・エヌ・エー"), ("2501.T", "サッポロHD"),
+    ("2502.T", "アサヒグループHD"), ("2503.T", "キリンHD"), ("2531.T", "宝HD"),
+    ("2768.T", "双日"), ("2801.T", "キッコーマン"), ("2802.T", "味の素"),
+    ("2871.T", "ニチレイ"), ("2914.T", "日本たばこ産業"),
+    ("3086.T", "J.フロントリテイリング"), ("3099.T", "三越伊勢丹HD"),
+    ("3105.T", "日清紡HD"), ("3289.T", "東急不動産HD"), ("3382.T", "セブン&アイHD"),
+    ("3401.T", "帝人"), ("3402.T", "東レ"), ("3405.T", "クラレ"), ("3407.T", "旭化成"),
+    ("3436.T", "SUMCO"), ("3861.T", "王子HD"), ("3863.T", "日本製紙"),
+    ("4004.T", "レゾナックHD"), ("4005.T", "住友化学"), ("4021.T", "日産化学"),
+    ("4042.T", "東ソー"), ("4043.T", "トクヤマ"), ("4061.T", "デンカ"),
+    ("4063.T", "信越化学工業"), ("4183.T", "三井化学"), ("4188.T", "三菱ケミカルG"),
+    ("4208.T", "UBE"), ("4272.T", "日本化薬"), ("4307.T", "野村総合研究所"),
+    ("4324.T", "電通グループ"), ("4502.T", "武田薬品工業"), ("4503.T", "アステラス製薬"),
+    ("4506.T", "住友ファーマ"), ("4507.T", "塩野義製薬"), ("4519.T", "中外製薬"),
+    ("4523.T", "エーザイ"), ("4543.T", "テルモ"), ("4568.T", "第一三共"),
+    ("4578.T", "大塚HD"), ("4631.T", "DIC"), ("4689.T", "LINEヤフー"),
+    ("4704.T", "トレンドマイクロ"), ("4751.T", "サイバーエージェント"),
+    ("4755.T", "楽天グループ"), ("4901.T", "富士フイルムHD"), ("4902.T", "コニカミノルタ"),
+    ("5019.T", "出光興産"), ("5020.T", "ENEOSホールディングス"),
+    ("5101.T", "横浜ゴム"), ("5108.T", "ブリヂストン"), ("5201.T", "AGC"),
+    ("5214.T", "日本電気硝子"), ("5232.T", "住友大阪セメント"), ("5233.T", "太平洋セメント"),
+    ("5301.T", "東海カーボン"), ("5332.T", "TOTO"), ("5333.T", "日本碍子"),
+    ("5401.T", "日本製鉄"), ("5406.T", "神戸製鋼所"), ("5411.T", "JFEホールディングス"),
+    ("5631.T", "日本製鋼所"), ("5703.T", "日本軽金属HD"), ("5706.T", "三井金属鉱業"),
+    ("5707.T", "東邦亜鉛"), ("5711.T", "三菱マテリアル"), ("5713.T", "住友金属鉱山"),
+    ("5714.T", "DOWAホールディングス"), ("5741.T", "UACJ"), ("5801.T", "古河電気工業"),
+    ("5802.T", "住友電気工業"), ("5803.T", "フジクラ"), ("6098.T", "リクルートHD"),
+    ("6103.T", "オークマ"), ("6113.T", "アマダ"), ("6178.T", "日本郵政"),
+    ("6273.T", "SMC"), ("6301.T", "小松製作所"), ("6302.T", "住友重機械工業"),
+    ("6305.T", "日立建機"), ("6326.T", "クボタ"), ("6361.T", "荏原製作所"),
+    ("6367.T", "ダイキン工業"), ("6370.T", "栗田工業"), ("6383.T", "ダイフク"),
+    ("6406.T", "フジテック"), ("6412.T", "平和"), ("6417.T", "SANKYO"),
+    ("6471.T", "日本精工"), ("6472.T", "NTN"), ("6473.T", "ジェイテクト"),
+    ("6479.T", "ミネベアミツミ"), ("6501.T", "日立製作所"), ("6503.T", "三菱電機"),
+    ("6504.T", "富士電機"), ("6506.T", "安川電機"), ("6526.T", "ソシオネクスト"),
+    ("6532.T", "ベイカレントコンサルティング"), ("6586.T", "マキタ"), ("6594.T", "ニデック"),
+    ("6645.T", "オムロン"), ("6674.T", "GSユアサ"), ("6701.T", "NEC"),
+    ("6702.T", "富士通"), ("6723.T", "ルネサスエレクトロニクス"), ("6724.T", "セイコーエプソン"),
+    ("6752.T", "パナソニックHD"), ("6753.T", "シャープ"), ("6754.T", "アンリツ"),
+    ("6758.T", "ソニーグループ"), ("6762.T", "TDK"), ("6770.T", "アルプスアルパイン"),
+    ("6806.T", "ヒロセ電機"), ("6841.T", "横河電機"), ("6857.T", "アドバンテスト"),
+    ("6861.T", "キーエンス"), ("6902.T", "デンソー"), ("6952.T", "カシオ計算機"),
+    ("6954.T", "ファナック"), ("6971.T", "京セラ"), ("6981.T", "村田製作所"),
+    ("6988.T", "日東電工"), ("7003.T", "三井E&S"), ("7011.T", "三菱重工業"),
+    ("7012.T", "川崎重工業"), ("7013.T", "IHI"), ("7201.T", "日産自動車"),
+    ("7202.T", "いすゞ自動車"), ("7203.T", "トヨタ自動車"), ("7205.T", "日野自動車"),
+    ("7211.T", "三菱自動車工業"), ("7261.T", "マツダ"), ("7267.T", "本田技研工業"),
+    ("7270.T", "SUBARU"), ("7272.T", "ヤマハ発動機"), ("7731.T", "ニコン"),
+    ("7733.T", "オリンパス"), ("7735.T", "SCREENホールディングス"), ("7741.T", "HOYA"),
+    ("7751.T", "キヤノン"), ("7752.T", "リコー"), ("7762.T", "シチズン時計"),
+    ("7832.T", "バンダイナムコHD"), ("7951.T", "ヤマハ"), ("8001.T", "伊藤忠商事"),
+    ("8002.T", "丸紅"), ("8015.T", "豊田通商"), ("8031.T", "三井物産"),
+    ("8035.T", "東京エレクトロン"), ("8053.T", "住友商事"), ("8058.T", "三菱商事"),
+    ("8233.T", "高島屋"), ("8252.T", "丸井グループ"), ("8253.T", "クレディセゾン"),
+    ("8267.T", "イオン"), ("8303.T", "新生銀行"), ("8304.T", "あおぞら銀行"),
+    ("8306.T", "三菱UFJフィナンシャルG"), ("8308.T", "りそなHD"),
+    ("8309.T", "三井住友トラストHD"), ("8316.T", "三井住友フィナンシャルG"),
+    ("8331.T", "千葉銀行"), ("8354.T", "ふくおかFG"), ("8377.T", "ほくほくFG"),
+    ("8411.T", "みずほフィナンシャルG"), ("8601.T", "大和証券グループ本社"),
+    ("8604.T", "野村HD"), ("8628.T", "松井証券"), ("8630.T", "SOMPOホールディングス"),
+    ("8697.T", "日本取引所グループ"), ("8725.T", "MS&ADインシュアランスG"),
+    ("8750.T", "第一生命HD"), ("8766.T", "東京海上HD"), ("8795.T", "T&Dホールディングス"),
+    ("8801.T", "三井不動産"), ("8802.T", "三菱地所"), ("8804.T", "東京建物"),
+    ("8830.T", "住友不動産"), ("9001.T", "東武鉄道"), ("9005.T", "東急"),
+    ("9007.T", "小田急電鉄"), ("9008.T", "京王電鉄"), ("9009.T", "京成電鉄"),
+    ("9020.T", "東日本旅客鉄道"), ("9021.T", "西日本旅客鉄道"), ("9022.T", "東海旅客鉄道"),
+    ("9064.T", "ヤマトHD"), ("9101.T", "日本郵船"), ("9104.T", "商船三井"),
+    ("9107.T", "川崎汽船"), ("9202.T", "ANAホールディングス"), ("9301.T", "三菱倉庫"),
+    ("9432.T", "日本電信電話"), ("9433.T", "KDDI"), ("9434.T", "ソフトバンク"),
+    ("9501.T", "東京電力HD"), ("9502.T", "中部電力"), ("9503.T", "関西電力"),
+    ("9531.T", "東京ガス"), ("9532.T", "大阪ガス"), ("9602.T", "東宝"),
+    ("9735.T", "セコム"), ("9766.T", "コナミグループ"),
+    ("9983.T", "ファーストリテイリング"), ("9984.T", "ソフトバンクグループ"),
+]
 
 
 # ── データ取得 ──────────────────────────────────────────────
@@ -392,25 +479,242 @@ new Chart(document.getElementById('cumChart'), {{
     return path
 
 
+# ── ランキング表示（スキャンモード） ───────────────────────
+def print_ranking(results: list[dict], days: int, label: str,
+                  top: int | None = None) -> None:
+    since  = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    today  = datetime.today().strftime("%Y-%m-%d")
+    ranked = sorted(results, key=lambda x: x["total"], reverse=True)
+    disp   = ranked[:top] if top else ranked
+
+    total_pnl = sum(r["total"] for r in results)
+    total_tr  = sum(r["trades"] for r in results)
+    plus_cnt  = sum(1 for r in results if r["total"] > 0)
+
+    print()
+    print("═" * 72)
+    print(f"  RSI(2) 平均回帰  {len(SYMBOLS)}銘柄スキャン  直近{label}"
+          + (f"  上位{top}銘柄" if top else ""))
+    print(f"  期間: {since} ～ {today}")
+    print(f"  【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値エントリー")
+    print(f"  【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / "
+          f"-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確")
+    print("═" * 72)
+    print(f"  スキャン: {len(SYMBOLS)}銘柄  シグナルあり: {len(results)}銘柄  "
+          f"トレード計: {total_tr}回  プラス銘柄: {plus_cnt}/{len(results)}")
+    print()
+    print(f"  {'順位':<4} {'銘柄':<22} {'損益':>10} {'勝率':>6} "
+          f"{'PF':>5} {'取引':>4} {'平均保有':>7}")
+    print("  " + "─" * 60)
+    for rank, r in enumerate(disp, 1):
+        pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+        sign  = "+" if r["total"] >= 0 else ""
+        bar   = ("▲" if r["total"] >= 0 else "▽") * min(int(abs(r["total"]) / 5000), 8)
+        label2 = f"{r['name']}({r['symbol']})"
+        print(f"  {rank:<4} {label2:<22} "
+              f"{sign}{r['total']:>9,.0f}円  "
+              f"{r['wr']:>5.1f}%  {pf_s:>5}  "
+              f"{r['trades']:>3}回  {r['avg_hold']:>5.1f}日  {bar}")
+    print("  " + "─" * 60)
+    sign = "+" if total_pnl >= 0 else ""
+    print(f"  合計損益（全銘柄・重複あり）: {sign}{total_pnl:,.0f}円")
+    print()
+
+
+# ── スキャン用 HTML ─────────────────────────────────────────
+def generate_html_scan(results: list[dict], days: int, label: str,
+                       top: int | None = None) -> Path:
+    since  = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    today  = datetime.today().strftime("%Y-%m-%d")
+    ranked = sorted(results, key=lambda x: x["total"], reverse=True)
+    disp   = ranked[:top] if top else ranked
+
+    total_pnl = sum(r["total"] for r in results)
+    total_tr  = sum(r["trades"] for r in results)
+    plus_cnt  = sum(1 for r in results if r["total"] > 0)
+    total_cls = "pos" if total_pnl >= 0 else "neg"
+    top_label = f"  上位{top}銘柄" if top else ""
+
+    # ランキング行
+    rank_rows = ""
+    for rank, r in enumerate(disp, 1):
+        pf_s = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+        cls  = "win" if r["total"] >= 0 else "lose"
+        pcls = "pos" if r["total"] >= 0 else "neg"
+        rank_rows += (
+            f'<tr class="{cls}" onclick="toggleDetail(\'{r["symbol"]}\')" style="cursor:pointer">'
+            f'<td>{rank}</td>'
+            f'<td>{r["symbol"]}</td>'
+            f'<td>{r["name"]}</td>'
+            f'<td class="{pcls}">{r["total"]:+,.0f}円</td>'
+            f'<td>{r["wr"]:.1f}%</td>'
+            f'<td>{pf_s}</td>'
+            f'<td>{r["trades"]}</td>'
+            f'<td>{r["avg_hold"]:.1f}日</td>'
+            f'</tr>\n'
+            f'<tr id="detail-{r["symbol"]}" style="display:none">'
+            f'<td colspan="8" style="padding:0">{_trade_table(r["trade_log"])}</td>'
+            f'</tr>\n'
+        )
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RSI(2) {len(SYMBOLS)}銘柄スキャン {label}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
+      background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}}
+h1{{font-size:1.35em;color:#fff;border-left:4px solid #3a86ff;
+    padding-left:12px;margin-bottom:6px}}
+.meta{{color:#666;font-size:0.82em;margin:2px 0 0 16px}}
+.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}}
+.card{{background:#16192a;border:1px solid #252840;border-radius:10px;
+       padding:14px 20px;min-width:130px}}
+.clabel{{font-size:0.72em;color:#777;letter-spacing:.05em}}
+.cval{{font-size:1.55em;font-weight:700;margin-top:3px}}
+.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
+.chart-wrap{{background:#16192a;border:1px solid #252840;border-radius:10px;
+             padding:16px;margin:20px 0}}
+table{{width:100%;border-collapse:collapse;font-size:0.86em}}
+th{{background:#16192a;color:#888;padding:8px 12px;text-align:right;
+    border-bottom:1px solid #252840;white-space:nowrap}}
+th:first-child,th:nth-child(2),th:nth-child(3){{text-align:left}}
+td{{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
+td:first-child,td:nth-child(2),td:nth-child(3){{text-align:left}}
+tr.win>td{{background:rgba(74,222,128,.04)}}
+tr.lose>td{{background:rgba(248,113,113,.04)}}
+tr.hold>td{{background:rgba(251,191,36,.06)}}
+tr:hover>td{{background:#1b1f35!important}}
+.inner-table{{width:100%;font-size:0.84em;background:#0d0f1a}}
+.inner-table th{{background:#0d0f1a;font-size:0.8em}}
+.footer{{margin-top:32px;color:#444;font-size:0.78em;text-align:right}}
+</style>
+</head>
+<body>
+<h1>RSI(2) 平均回帰  {len(SYMBOLS)}銘柄スキャン  直近{label}{top_label}</h1>
+<div class="meta">期間: {since} ～ {today}</div>
+<div class="meta">【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値エントリー
+  / 【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル /
+  -{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確</div>
+
+<div class="cards">
+  <div class="card"><div class="clabel">合計損益</div>
+    <div class="cval {total_cls}">{total_pnl:+,.0f}円</div></div>
+  <div class="card"><div class="clabel">スキャン銘柄</div>
+    <div class="cval neu">{len(SYMBOLS)}銘柄</div></div>
+  <div class="card"><div class="clabel">シグナルあり</div>
+    <div class="cval neu">{len(results)}銘柄</div></div>
+  <div class="card"><div class="clabel">トレード計</div>
+    <div class="cval neu">{total_tr}回</div></div>
+  <div class="card"><div class="clabel">プラス銘柄</div>
+    <div class="cval pos">{plus_cnt}/{len(results)}</div></div>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="barChart" height="60"></canvas>
+</div>
+
+<p style="color:#666;font-size:0.82em;margin-bottom:8px">
+  ▼ 行をクリックするとトレード明細を展開
+</p>
+<table>
+<thead><tr>
+  <th>#</th><th>コード</th><th>銘柄名</th>
+  <th>損益</th><th>勝率</th><th>PF</th><th>取引数</th><th>平均保有</th>
+</tr></thead>
+<tbody>
+{rank_rows}
+</tbody>
+</table>
+
+<div class="footer">生成: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>
+
+<script>
+const labels = {[r['name'] for r in disp]};
+const vals   = {[round(r['total']) for r in disp]};
+const colors = vals.map(v => v >= 0 ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.7)');
+new Chart(document.getElementById('barChart'), {{
+  type: 'bar',
+  data: {{ labels, datasets: [{{ label:'損益(円)', data:vals, backgroundColor:colors, borderRadius:3 }}] }},
+  options: {{
+    responsive: true,
+    plugins: {{ legend: {{ display:false }},
+      tooltip: {{ callbacks: {{ label: c => c.parsed.y.toLocaleString()+'円' }} }} }},
+    scales: {{
+      x: {{ ticks: {{ color:'#555', font:{{size:10}}, maxRotation:45 }}, grid:{{ color:'#1e2030' }} }},
+      y: {{ ticks: {{ color:'#555', callback: v => v.toLocaleString()+'円' }}, grid:{{ color:'#1e2030' }} }}
+    }}
+  }}
+}});
+function toggleDetail(sym) {{
+  const el = document.getElementById('detail-' + sym);
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}}
+</script>
+</body>
+</html>"""
+
+    path = Path(f"rsi2_scan_{datetime.today().strftime('%Y%m%d')}_{label}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
+def _trade_table(trades: list[dict]) -> str:
+    """トレード明細の内部テーブルHTML"""
+    rows = ""
+    for i, t in enumerate(trades, 1):
+        pct = (t["exit_p"] - t["entry_p"]) / t["entry_p"] * 100
+        cls = "hold" if "保有中" in t["reason"] else ("win" if t["pnl"] > 0 else "lose")
+        rows += (
+            f'<tr class="{cls}">'
+            f'<td>{i}</td>'
+            f'<td>{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td>{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td>{t["entry_p"]:,.0f}</td><td>{t["exit_p"]:,.0f}</td>'
+            f'<td>{t["qty"]}</td>'
+            f'<td class="{"pos" if t["pnl"]>=0 else "neg"}">{t["pnl"]:+,.0f}円</td>'
+            f'<td class="{"pos" if pct>=0 else "neg"}">{pct:+.1f}%</td>'
+            f'<td>{t["hold"]}日</td><td>{t["reason"]}</td>'
+            f'</tr>\n'
+        )
+    return (
+        '<table class="inner-table"><thead><tr>'
+        '<th>#</th><th>エントリー</th><th>エグジット</th>'
+        '<th>買値</th><th>売値</th><th>株数</th>'
+        '<th>損益</th><th>変化率</th><th>保有日数</th><th>決済理由</th>'
+        f'</tr></thead><tbody>{rows}</tbody></table>'
+    )
+
+
 # ── メイン ──────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="RSI(2) 平均回帰バックテスト（1銘柄）",
+        description="RSI(2) 平均回帰バックテスト（255銘柄スキャン / 1銘柄詳細）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python rsi2.py 7011.T                # 三菱重工（1年）
+  python rsi2.py                       # 255銘柄スキャン（1年）
+  python rsi2.py --years 2             # 2年スキャン
+  python rsi2.py --months 6            # 6ヶ月スキャン
+  python rsi2.py --days 90             # 90日スキャン
+  python rsi2.py --top 30              # 上位30銘柄のみ表示
+  python rsi2.py 7011.T                # 三菱重工 詳細（1年）
   python rsi2.py 7203.T --years 3      # トヨタ 3年
-  python rsi2.py 9984.T --months 6     # SBG 6ヶ月
-  python rsi2.py 6758.T --days 90      # ソニー 90日
 """)
-    parser.add_argument("symbol", help="銘柄コード（例: 7011.T）")
+    parser.add_argument("symbol",  nargs="?", default=None,
+                        help="銘柄コード（省略時は255銘柄スキャン）")
     parser.add_argument("--days",   type=int, default=None, help="バックテスト日数")
     parser.add_argument("--months", type=int, default=None, help="バックテスト月数")
     parser.add_argument("--years",  type=int, default=None, help="バックテスト年数")
+    parser.add_argument("--top",    type=int, default=None,
+                        help="上位N銘柄のみ表示（スキャンモード）")
     args = parser.parse_args()
 
-    # 期間を日数とラベルに変換
     if args.days is not None:
         days, label = args.days, f"{args.days}日"
     elif args.months is not None:
@@ -420,21 +724,65 @@ def main() -> None:
     else:
         days, label = BACKTEST_DAYS, "1年"
 
-    sym = args.symbol.upper()
-    if not sym.endswith(".T"):
-        sym += ".T"
-
-    print(f"\n  データ取得中: {sym} ...")
-    df = fetch(sym, days)
-    if df is None:
-        print(f"  エラー: {sym} のデータ取得に失敗しました\n")
+    # ── 1銘柄詳細モード ─────────────────────────────────────
+    if args.symbol:
+        sym = args.symbol.upper()
+        if not sym.endswith(".T"):
+            sym += ".T"
+        print(f"\n  データ取得中: {sym} ...")
+        df = fetch(sym, days)
+        if df is None:
+            print(f"  エラー: {sym} のデータ取得に失敗しました\n")
+            return
+        df     = calc(df)
+        trades = backtest(df, days)
+        print_result(sym, trades, days, label)
+        path = generate_html(sym, trades, days, label)
+        print(f"  HTMLレポート保存: {path}")
+        webbrowser.open(f"file://{path.resolve()}")
         return
 
-    df     = calc(df)
-    trades = backtest(df, days)
-    print_result(sym, trades, days, label)
+    # ── 255銘柄スキャンモード ────────────────────────────────
+    print(f"\n  RSI(2) 平均回帰  {len(SYMBOLS)}銘柄データ取得中 ...")
 
-    path = generate_html(sym, trades, days, label)
+    stock_data: dict = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(fetch, sym, days): (sym, name) for sym, name in SYMBOLS}
+        done = 0
+        for fut in as_completed(futs):
+            sym, name = futs[fut]
+            done += 1
+            print(f"\r  取得中 {done}/{len(SYMBOLS)} ...", end="", flush=True)
+            df = fut.result()
+            if df is not None:
+                stock_data[sym] = (name, df)
+    print(f"\r  取得完了: {len(stock_data)}/{len(SYMBOLS)} 銘柄              ")
+
+    results = []
+    for sym, (name, df) in stock_data.items():
+        trades = backtest(calc(df), days)
+        if not trades:
+            continue
+        wins  = [t for t in trades if t["pnl"] > 0]
+        loss  = [t for t in trades if t["pnl"] <= 0]
+        total = sum(t["pnl"] for t in trades)
+        wr    = len(wins) / len(trades) * 100
+        pf    = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
+                 if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+        results.append(dict(
+            symbol=sym, name=name,
+            trades=len(trades), total=total,
+            wr=wr, pf=pf,
+            avg_hold=sum(t["hold"] for t in trades) / len(trades),
+            trade_log=trades,
+        ))
+
+    if not results:
+        print("  シグナルが発生した銘柄がありませんでした。")
+        return
+
+    print_ranking(results, days, label, top=args.top)
+    path = generate_html_scan(results, days, label, top=args.top)
     print(f"  HTMLレポート保存: {path}")
     webbrowser.open(f"file://{path.resolve()}")
 
