@@ -117,6 +117,7 @@ def _detect_split(existing: pd.DataFrame, new_raw: pd.DataFrame,
 
 
 
+def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
     existing = _load(symbol)
 
     if existing is not None and not existing.empty:
