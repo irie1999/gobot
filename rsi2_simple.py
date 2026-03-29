@@ -277,20 +277,14 @@ def resolve_dates(args) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 # ── データ取得 ──────────────────────────────────────────────────
 def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
-    # MA200バッファ(230日) + バックテスト期間 をカレンダー日数×1.5倍で period に変換
-    buf_days  = 200 + 30
-    total_cal = int(((end - start).days + buf_days) * 1.5)
-
-    if   total_cal <= 180:  period = "6mo"
-    elif total_cal <= 365:  period = "1y"
-    elif total_cal <= 730:  period = "2y"
-    elif total_cal <= 1095: period = "3y"
-    elif total_cal <= 1825: period = "5y"
-    else:                   period = "max"
+    # start/end を固定日付で指定することで毎回同じデータを取得する
+    buf_days = 200 + 30   # MA200 ウォームアップ用バッファ
+    dl_start = (start - timedelta(days=buf_days)).strftime("%Y-%m-%d")
+    dl_end   = (end   + timedelta(days=1)).strftime("%Y-%m-%d")   # end は exclusive
 
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end,
+                          interval="1d", auto_adjust=True, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):

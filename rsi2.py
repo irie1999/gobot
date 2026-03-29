@@ -120,19 +120,14 @@ SYMBOLS = [
 
 # ── データ取得 ──────────────────────────────────────────────
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
-    buf_days  = 200 + 30
-    total_cal = int((backtest_days + buf_days) * 1.5)
-
-    if   total_cal <= 180:  period = "6mo"
-    elif total_cal <= 365:  period = "1y"
-    elif total_cal <= 730:  period = "2y"
-    elif total_cal <= 1095: period = "3y"
-    elif total_cal <= 1825: period = "5y"
-    else:                   period = "max"
+    # _TODAY 基準の固定日付を使うことで毎回同じデータを取得する
+    buf_days  = 200 + 30   # MA200 ウォームアップ用バッファ
+    dl_start  = (_TODAY - timedelta(days=backtest_days + buf_days)).strftime("%Y-%m-%d")
+    dl_end    = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")   # end は exclusive
 
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end,
+                          interval="1d", auto_adjust=True, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
