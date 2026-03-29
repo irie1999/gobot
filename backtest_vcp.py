@@ -347,10 +347,10 @@ WORKERS         = 16            # 並列バックテスト数
 EMA21_PERIOD    = 21    # 短期EMA（Minervini式: 機関投資家参照基準線）
 MA50_PERIOD     = 50    # 中期SMA（トレンド中軸）
 ATR_PERIOD      = 14    # ATR（ボラティリティ計測）
-VCP_WINDOW      = 5     # ブレイクアウト確認ウィンドウ（7→5日: 高値更新しやすく）
-ATR_COMPRESS    = 1.20  # 収縮判定: 上限を緩め「異常膨張時だけ除外」する程度に
+VCP_WINDOW      = 3     # ブレイクアウト確認ウィンドウ（3日: 下落相場でも反発を捕捉）
+ATR_COMPRESS    = 1.50  # 収縮判定: 事実上無効化（計算・表示のみ）
 RS_LOOKBACK     = 40    # 相対強度比較期間（約2ヶ月）
-RS_MIN          = -0.20 # 日経対比 -20%以上の銘柄のみ対象（裾野を広げる）
+RS_MIN          = -0.30 # 日経対比 -30%以上（事実上無効化）
 
 VOL_MA_PERIOD   = 20    # 出来高移動平均
 ATR_TRAIL_MULT  = 2.5   # ATRトレイル係数（高ボラ対応）
@@ -454,17 +454,16 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     new_high25 = c > h.rolling(25).max().shift(1)
 
     # ── Entry シグナル（VCP ブレイクアウト） ─────────────────
-    # 条件1: トレンド（MA50>MA200 かつ 終値>EMA21）
-    # ※ ema21>ma50 は修正相場で崩れやすいため除外して取引回数を確保
-    trend_ok    = (ma50 > ma200) & (c > ema21)
-    # 条件2: ボラ収縮（直近5日TR%が21日平均の80%以下）
-    compress_ok = atr_compress <= ATR_COMPRESS
-    # 条件3: ブレイクアウト（終値が前VCP_WINDOW日の最高終値を上抜け）
+    # 条件1: 長期トレンド（終値 > MA200）
+    # ※ MA50>MA200 は修正相場で多くの銘柄がデスクロスするため除外
+    trend_ok    = c > ma200
+    # 条件2: 短期ブレイクアウト（終値が前VCP_WINDOW日の最高終値を上抜け）
     breakout_ok = c > high_vcp
-    # 条件4: 出来高急増（機関投資家の本格参入）
+    # 条件3: 出来高急増（機関投資家の本格参入）
     vol_ok      = v > vol_ma * FILTER_VOL_SURGE
+    # ※ compress_ok は計算・表示のみ。シグナルには使わない
     df = df.copy()
-    df["entry_sig"] = trend_ok & compress_ok & breakout_ok & vol_ok
+    df["entry_sig"] = trend_ok & breakout_ok & vol_ok
 
     # ── Exit シグナル（EMA21 下抜け） ─────────────────────
     # 終値が EMA21 を下から上抜けていた → 今日下抜け（短期トレンド転換）
