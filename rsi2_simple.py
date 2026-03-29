@@ -262,10 +262,12 @@ WORKERS         =  16     # 並列ダウンロード数
 
 # ── 期間解決 ────────────────────────────────────────────────────
 def resolve_dates(args) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """--start / --end / --years から (start, end) を確定する"""
+    """--start / --end / --days / --years から (start, end) を確定する"""
     end = pd.Timestamp(args.end) if args.end else pd.Timestamp(datetime.today().date())
     if args.start:
         start = pd.Timestamp(args.start)
+    elif args.days is not None:
+        start = end - timedelta(days=args.days)
     else:
         start = end - pd.DateOffset(years=args.years)
     if start >= end:
@@ -778,7 +780,9 @@ def main() -> None:
     parser.add_argument("symbol", nargs="?", default=None,
                         help="銘柄コード指定で1銘柄詳細表示（省略で全銘柄スキャン）")
     parser.add_argument("--years", type=int, default=BACKTEST_YEARS,
-                        help="バックテスト期間（年）。--start 指定時は無視される")
+                        help="バックテスト期間（年）。--start/--days 指定時は無視される")
+    parser.add_argument("--days", type=int, default=None,
+                        help="何日前からバックテスト（例: 90）。--start 指定時は無視される")
     parser.add_argument("--start", metavar="YYYY-MM-DD", default=None,
                         help="バックテスト開始日（例: 2023-01-01）")
     parser.add_argument("--end", metavar="YYYY-MM-DD", default=None,
