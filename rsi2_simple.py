@@ -337,19 +337,19 @@ def calc(df: pd.DataFrame) -> pd.DataFrame:
     l = df["low"]
 
     d     = c.diff()
-    gain  = d.clip(lower=0).ewm(span=2, adjust=False).mean()
-    loss  = (-d).clip(lower=0).ewm(span=2, adjust=False).mean()
+    gain  = d.clip(lower=0).ewm(com=1,  adjust=False).mean()   # Wilder α=1/2
+    loss  = (-d).clip(lower=0).ewm(com=1, adjust=False).mean()
     rsi2  = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
 
-    g14   = d.clip(lower=0).ewm(span=14, adjust=False).mean()
-    l14   = (-d).clip(lower=0).ewm(span=14, adjust=False).mean()
+    g14   = d.clip(lower=0).ewm(com=13, adjust=False).mean()   # Wilder α=1/14
+    l14   = (-d).clip(lower=0).ewm(com=13, adjust=False).mean()
     rsi14 = 100 - 100 / (1 + g14 / l14.replace(0, np.nan))
 
     ma200 = c.rolling(200).mean()
     ma50  = c.rolling(50).mean()
     prev  = c.shift(1)
     tr    = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
-    atr   = tr.ewm(span=14, adjust=False).mean()
+    atr   = tr.ewm(com=13, adjust=False).mean()                 # Wilder α=1/14
 
     df = df.copy()
     df["rsi2"]  = rsi2
