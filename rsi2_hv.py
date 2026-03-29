@@ -12,7 +12,8 @@ RSI(2) 平均回帰バックテスト 拡張版 — 高ボラ対応・自動レ�
      → トレード数半減・平均利益2倍・DD大幅減 (Connors VIX Reversal II)
 
 使い方:
-  python rsi2_hv.py                    # 全銘柄スキャン（1年）
+  python rsi2_hv.py                    # 監視20銘柄スキャン（1年）
+  python rsi2_hv.py --all              # 日経225全銘柄スキャン（1年）
   python rsi2_hv.py --years 2          # 2年
   python rsi2_hv.py 7011.T             # 1銘柄詳細
   python rsi2_hv.py --mode normal      # 強制的に通常モード
@@ -34,10 +35,14 @@ import pandas as pd
 
 # rsi2.py のデータ取得・指標計算を流用
 from rsi2 import (
-    SYMBOLS, _TODAY, WORKERS, _CACHE_DIR,
+    SYMBOLS as _ALL_SYMBOLS, _TODAY, WORKERS, _CACHE_DIR,
     calc,
     _market_info, _mkt_banner_html, _trade_table,
 )
+
+# デフォルトは選定済み監視20銘柄（--all で日経225全銘柄に切替）
+from symbols_watch_rsi2 import SYMBOLS as _WATCH_SYMBOLS_RSI2
+SYMBOLS = _WATCH_SYMBOLS_RSI2
 
 import yfinance as yf
 
@@ -689,7 +694,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python rsi2_hv.py                    # 全銘柄スキャン（1年）
+  python rsi2_hv.py                    # 監視20銘柄スキャン（1年）
+  python rsi2_hv.py --all              # 日経225全銘柄スキャン（1年）
   python rsi2_hv.py --years 2          # 2年スキャン
   python rsi2_hv.py 7011.T             # 三菱重工 詳細
   python rsi2_hv.py --mode normal      # 強制的に通常モード
@@ -699,6 +705,8 @@ def main() -> None:
   python rsi2_hv.py --vix              # VIXフィルター有効化
 """)
     parser.add_argument("symbol",    nargs="?", default=None)
+    parser.add_argument("--all",     action="store_true",
+                        help="日経225全銘柄をスキャン（デフォルト: 監視20銘柄）")
     parser.add_argument("--days",    type=int, default=None)
     parser.add_argument("--months",  type=int, default=None)
     parser.add_argument("--years",   type=int, default=None)
@@ -712,6 +720,11 @@ def main() -> None:
     parser.add_argument("--vix",      dest="use_vix",   action="store_true",
                         help="VIX RSI(7)>50 フィルターを有効化")
     args = parser.parse_args()
+
+    # 銘柄リスト切り替え
+    global SYMBOLS
+    if args.all:
+        SYMBOLS = _ALL_SYMBOLS
 
     if args.days is not None:
         days, label = args.days, f"{args.days}日"
