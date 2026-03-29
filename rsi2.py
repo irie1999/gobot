@@ -132,11 +132,10 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.download("^N225", start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False)
+                          interval="1d", auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         s = raw["close"].dropna()
@@ -203,16 +202,10 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
 
     try:
         raw = yf.download(symbol, start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False)
+                          interval="1d", auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            price_names = {"open", "high", "low", "close", "volume"}
-            l0 = {str(c).lower() for c in raw.columns.get_level_values(0)}
-            if l0 & price_names:
-                raw.columns = raw.columns.get_level_values(0)
-            else:
-                raw.columns = raw.columns.get_level_values(1)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()

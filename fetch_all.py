@@ -25,7 +25,7 @@ import yfinance as yf
 
 from rsi2 import SYMBOLS, _CACHE_DIR
 
-WORKERS      = 8    # 並列数（多すぎるとネットワーク負荷でエラーが増える）
+WORKERS      = 1    # 並列数（1=直列: yfinance の内部キャッシュ競合を防ぐ）
 MAX_RETRY    = 3    # ダウンロード失敗時のリトライ回数
 RETRY_DELAY  = 3    # リトライ間隔（秒）
 DEFAULT_YEARS = 5
@@ -58,15 +58,7 @@ def _save(symbol: str, df: pd.DataFrame) -> None:
 # ── ダウンロード（リトライあり） ────────────────────────────
 
 def _normalize(raw: pd.DataFrame) -> pd.DataFrame | None:
-    """MultiIndex の正規化・重複除去・列選択を行う共通処理。"""
-    if isinstance(raw.columns, pd.MultiIndex):
-        # level 0 と level 1 のどちらが価格名（open/high/...）かを検出
-        price_names = {"open", "high", "low", "close", "volume"}
-        l0 = {str(c).lower() for c in raw.columns.get_level_values(0)}
-        if l0 & price_names:
-            raw.columns = raw.columns.get_level_values(0)
-        else:
-            raw.columns = raw.columns.get_level_values(1)
+    """列名正規化・重複除去・列選択を行う共通処理。"""
     raw.columns = [str(c).lower() for c in raw.columns]
     raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]  # 重複列を削除
     need = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
@@ -82,7 +74,8 @@ def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
     for attempt in range(1, MAX_RETRY + 1):
         try:
             raw = yf.download(symbol, start=dl_start, end=dl_end,
-                              interval="1d", auto_adjust=False, progress=False)
+                              interval="1d", auto_adjust=False, progress=False,
+                              multi_level_index=False)
             if not raw.empty:
                 raw = _normalize(raw)
                 if raw is not None:

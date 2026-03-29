@@ -58,12 +58,12 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     period = _period_str(backtest_days)
     try:
         raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=False, progress=False)
+                          auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         if len(raw) < 210:
             return None
@@ -83,12 +83,12 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     period = _period_str(backtest_days)
     try:
         raw = yf.download("^N225", period=period, interval="1d",
-                          auto_adjust=False, progress=False)
+                          auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["close"]].dropna().copy()
         raw["ma25"]  = raw["close"].rolling(25).mean()
         raw["ma200"] = raw["close"].rolling(200).mean()
@@ -130,12 +130,12 @@ def fetch_vix(backtest_days: int) -> pd.Series | None:
     period = _period_str(backtest_days)
     try:
         raw = yf.download("^VIX", period=period, interval="1d",
-                          auto_adjust=False, progress=False)
+                          auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         c = raw["close"].dropna().astype(float)
         d    = c.diff()
         gain = d.clip(lower=0).ewm(com=6, adjust=False).mean()   # Wilder RSI(7)
