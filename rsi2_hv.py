@@ -34,9 +34,68 @@ import pandas as pd
 # rsi2.py のデータ取得・指標計算を流用
 from rsi2 import (
     SYMBOLS, _TODAY, WORKERS,
-    fetch, fetch_nikkei, calc,
-    _market_info, _mkt_banner_html, _trade_table, _CACHE_DIR,
+    calc,
+    _market_info, _mkt_banner_html, _trade_table,
 )
+
+import yfinance as yf
+
+
+def _period_str(backtest_days: int) -> str:
+    """backtest_macd_scan.py と同じ period 選択ロジック。"""
+    buf_days  = 200 + 30
+    total_cal = int((backtest_days + buf_days) * 1.5)
+    if   total_cal <= 180:  return "6mo"
+    elif total_cal <= 365:  return "1y"
+    elif total_cal <= 730:  return "2y"
+    elif total_cal <= 1095: return "3y"
+    elif total_cal <= 1825: return "5y"
+    else:                   return "max"
+
+
+def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
+    """backtest_macd_scan.py と同じ方式でダウンロード。
+    キャッシュなし・auto_adjust=True・period= 指定。"""
+    period = _period_str(backtest_days)
+    try:
+        raw = yf.download(symbol, period=period, interval="1d",
+                          auto_adjust=True, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        if len(raw) < 210:
+            return None
+        return pd.DataFrame({
+            "open":   raw["open"].to_numpy(dtype=float),
+            "high":   raw["high"].to_numpy(dtype=float),
+            "low":    raw["low"].to_numpy(dtype=float),
+            "close":  raw["close"].to_numpy(dtype=float),
+            "volume": raw["volume"].to_numpy(dtype=float),
+        }, index=raw.index)
+    except Exception:
+        return None
+
+
+def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
+    """backtest_macd_scan.py と同じ方式で日経平均を取得。"""
+    period = _period_str(backtest_days)
+    try:
+        raw = yf.download("^N225", period=period, interval="1d",
+                          auto_adjust=True, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw[["close"]].dropna().copy()
+        raw["ma25"]  = raw["close"].rolling(25).mean()
+        raw["ma200"] = raw["close"].rolling(200).mean()
+        return raw
+    except Exception:
+        return None
 
 # ── パラメーター: 通常モード ─────────────────────────────────
 NORMAL = dict(
@@ -69,19 +128,15 @@ BACKTEST_DAYS = 365
 # ── VIX データ取得 ───────────────────────────────────────────
 def fetch_vix(backtest_days: int) -> pd.Series | None:
     """^VIX を取得して RSI(7) を返す（失敗時は None）。"""
-    import yfinance as yf
-    buf = 60
-    dl_start = (_TODAY - timedelta(days=backtest_days + buf)).strftime("%Y-%m-%d")
-    dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
+    period = _period_str(backtest_days)
     try:
-        raw = yf.download("^VIX", start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False)
+        raw = yf.download("^VIX", period=period, interval="1d",
+                          auto_adjust=True, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
-        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         c = raw["close"].dropna().astype(float)
         d    = c.diff()
         gain = d.clip(lower=0).ewm(com=6, adjust=False).mean()   # Wilder RSI(7)
