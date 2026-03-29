@@ -11,9 +11,11 @@ RSI(2) 平均回帰戦略  軽量版（255銘柄スキャン対応）
 """
 
 import argparse
+import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -275,12 +277,27 @@ def resolve_dates(args) -> tuple[pd.Timestamp, pd.Timestamp]:
     return start, end
 
 
+# キャッシュディレクトリ（当日分を保存し、翌日以降は自動的に再取得）
+_CACHE_DIR = Path(".rsi2_cache")
+
+
 # ── データ取得 ──────────────────────────────────────────────────
 def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
-    # start/end を固定日付で指定することで毎回同じデータを取得する
-    buf_days = 200 + 30   # MA200 ウォームアップ用バッファ
+    buf_days = 200 + 30
     dl_start = (start - timedelta(days=buf_days)).strftime("%Y-%m-%d")
-    dl_end   = (end   + timedelta(days=1)).strftime("%Y-%m-%d")   # end は exclusive
+    dl_end   = (end   + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # キャッシュファイル: .rsi2_cache/7011T_20260329_start_end.pkl
+    _CACHE_DIR.mkdir(exist_ok=True)
+    cache_key  = f"{symbol.replace('.','_')}_{end.strftime('%Y%m%d')}_{dl_start}_{dl_end}"
+    cache_file = _CACHE_DIR / f"{cache_key}.pkl"
+
+    if cache_file.exists():
+        try:
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            cache_file.unlink(missing_ok=True)
 
     try:
         raw = yf.download(symbol, start=dl_start, end=dl_end,
@@ -293,14 +310,16 @@ def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame |
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         if len(raw) < 210:
             return None
-        # 各列を明示的に1D float配列に変換（MultiIndex残存による DataFrame化を防ぐ）
-        return pd.DataFrame({
+        df = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw["volume"].to_numpy(dtype=float),
         }, index=raw.index)
+        with open(cache_file, "wb") as f:
+            pickle.dump(df, f)
+        return df
     except Exception:
         return None
 
