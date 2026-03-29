@@ -1,18 +1,19 @@
 """
 期間指定バックテスト（A7: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ）
 ────────────────────────────────────────────────────────────────────────
-対象銘柄: 日経225 全銘柄（219銘柄）
+対象銘柄: デフォルトはA7監視対象20銘柄（--all で日経225全銘柄）
 バックテスト期間: 自由に指定可（デフォルト: 直近1ヶ月）
 
 ■ 実行方法:
-  python backtest_1month.py               # 直近1ヶ月（デフォルト）
-  python backtest_1month.py --months 3    # 直近3ヶ月
-  python backtest_1month.py --months 6    # 直近6ヶ月
-  python backtest_1month.py --years 1     # 直近1年
-  python backtest_1month.py --years 5     # 直近5年（最大）
-  python backtest_1month.py --days 45     # 直近45日（日数で直接指定）
-  python backtest_1month.py 7203.T --years 2  # 特定銘柄のみ詳細表示
-  python backtest_1month.py --years 3 --top 50  # 上位50件表示
+  python backtest_stoch_atr_trail.py               # 直近1ヶ月（デフォルト）
+  python backtest_stoch_atr_trail.py --months 3    # 直近3ヶ月
+  python backtest_stoch_atr_trail.py --months 6    # 直近6ヶ月
+  python backtest_stoch_atr_trail.py --years 1     # 直近1年
+  python backtest_stoch_atr_trail.py --years 5     # 直近5年（最大）
+  python backtest_stoch_atr_trail.py --days 45     # 直近45日（日数で直接指定）
+  python backtest_stoch_atr_trail.py 7203.T --years 2  # 特定銘柄のみ詳細表示
+  python backtest_stoch_atr_trail.py --years 3 --top 50  # 上位50件表示
+  python backtest_stoch_atr_trail.py --all --years 1     # 日経225全銘柄 1年
 
 ■ 出力:
   - 銘柄ごとの損益・勝率・平均保有日数
@@ -36,8 +37,8 @@ try:
 except ImportError:
     _RSI2_CACHE_DIR = None
 
-# ── 日経225 全銘柄 ──────────────────────────────────────────
-SYMBOLS = [
+# ── 日経225 全銘柄（--all 時に使用）────────────────────────
+_ALL_SYMBOLS = [
     ("1332.T", "ニッスイ"),
     ("1333.T", "マルハニチロ"),
     ("1605.T", "INPEX"),
@@ -270,6 +271,10 @@ SYMBOLS = [
     ("9983.T", "ファーストリテイリング"),
     ("9984.T", "ソフトバンクグループ"),
 ]
+
+# デフォルトはA7監視対象20銘柄
+from symbols_watch_a7 import SYMBOLS as _WATCH_SYMBOLS_A7
+SYMBOLS = _WATCH_SYMBOLS_A7
 
 # ── パラメータ ──────────────────────────────────────────────
 BACKTEST_DAYS    = 30           # デフォルトのバックテスト期間（日）
@@ -733,16 +738,19 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python backtest_1month.py                    # 直近1ヶ月（デフォルト）
-  python backtest_1month.py --months 3         # 直近3ヶ月
-  python backtest_1month.py --years 1          # 直近1年
-  python backtest_1month.py --years 5          # 直近5年（最大）
-  python backtest_1month.py --days 45          # 直近45日
-  python backtest_1month.py 7203.T --years 2   # トヨタ 2年詳細
-  python backtest_1month.py --years 3 --top 50 # 3年 上位50件表示
+  python backtest_stoch_atr_trail.py                    # 直近1ヶ月（デフォルト・監視20銘柄）
+  python backtest_stoch_atr_trail.py --months 3         # 直近3ヶ月
+  python backtest_stoch_atr_trail.py --years 1          # 直近1年
+  python backtest_stoch_atr_trail.py --years 5          # 直近5年（最大）
+  python backtest_stoch_atr_trail.py --days 45          # 直近45日
+  python backtest_stoch_atr_trail.py 7203.T --years 2   # トヨタ 2年詳細
+  python backtest_stoch_atr_trail.py --years 3 --top 50 # 3年 上位50件表示
+  python backtest_stoch_atr_trail.py --all --years 1    # 日経225全銘柄 1年
 """)
     parser.add_argument("symbol",   nargs="?", default=None,
-                        help="特定銘柄コード（省略時は全225銘柄スキャン）")
+                        help="特定銘柄コード（省略時は監視対象銘柄スキャン）")
+    parser.add_argument("--all",    action="store_true",
+                        help="日経225全銘柄をスキャン（デフォルト: A7監視対象20銘柄）")
     parser.add_argument("--days",   type=int,  default=None,
                         help="バックテスト日数（直接指定）")
     parser.add_argument("--months", type=int,  default=None,
@@ -752,6 +760,11 @@ def main() -> None:
     parser.add_argument("--top",    type=int,  default=30,
                         help="ランキング表示件数（デフォルト: 30）")
     args = parser.parse_args()
+
+    # 銘柄リスト切り替え
+    global SYMBOLS
+    if args.all:
+        SYMBOLS = _ALL_SYMBOLS
 
     # 期間を日数に変換（優先順位: --days > --months > --years > デフォルト1ヶ月）
     if args.days is not None:
