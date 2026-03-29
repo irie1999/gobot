@@ -347,10 +347,10 @@ WORKERS         = 16            # 並列バックテスト数
 EMA21_PERIOD    = 21    # 短期EMA（Minervini式: 機関投資家参照基準線）
 MA50_PERIOD     = 50    # 中期SMA（トレンド中軸）
 ATR_PERIOD      = 14    # ATR（ボラティリティ計測）
-VCP_WINDOW      = 7     # ボラ収縮確認ウィンドウ（7日=約1週間）
-ATR_COMPRESS    = 0.90  # 収縮判定: 直近5日TR% / 21日平均TR% < この値（0.80→0.90: より検出しやすく）
+VCP_WINDOW      = 5     # ブレイクアウト確認ウィンドウ（7→5日: 高値更新しやすく）
+ATR_COMPRESS    = 1.20  # 収縮判定: 上限を緩め「異常膨張時だけ除外」する程度に
 RS_LOOKBACK     = 40    # 相対強度比較期間（約2ヶ月）
-RS_MIN          = -0.15 # 日経対比 -15%以上の銘柄のみ対象（-10→-15: 裾野を広げる）
+RS_MIN          = -0.20 # 日経対比 -20%以上の銘柄のみ対象（裾野を広げる）
 
 VOL_MA_PERIOD   = 20    # 出来高移動平均
 ATR_TRAIL_MULT  = 2.5   # ATRトレイル係数（高ボラ対応）
@@ -361,9 +361,9 @@ MAX_QTY         = 9999
 
 # ── エントリーフィルター ─────────────────────────────────────────
 FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
-FILTER_RSI_MIN       = 40.0   # RSI下限（過度な売られすぎは基調転換の疑い）
-FILTER_RSI_MAX       = 65.0   # RSI上限（過熱時はブレイク失敗リスク高）
-FILTER_VOL_SURGE     =  1.3   # ブレイクアウト時の出来高倍率（1.5→1.3: 取引増加）
+FILTER_RSI_MIN       = 35.0   # RSI下限（40→35: 押し目深めも対象に）
+FILTER_RSI_MAX       = 70.0   # RSI上限（65→70: 強い銘柄も逃さない）
+FILTER_VOL_SURGE     =  1.2   # ブレイクアウト時の出来高倍率（1.3→1.2: 取引増加）
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
 MAX_POSITIONS        = 5     # 同時保有最大銘柄数（地合い良好時）
@@ -454,8 +454,9 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     new_high25 = c > h.rolling(25).max().shift(1)
 
     # ── Entry シグナル（VCP ブレイクアウト） ─────────────────
-    # 条件1: トレンド一致（EMA21>MA50>MA200 かつ 終値>EMA21）
-    trend_ok    = (ema21 > ma50) & (ma50 > ma200) & (c > ema21)
+    # 条件1: トレンド（MA50>MA200 かつ 終値>EMA21）
+    # ※ ema21>ma50 は修正相場で崩れやすいため除外して取引回数を確保
+    trend_ok    = (ma50 > ma200) & (c > ema21)
     # 条件2: ボラ収縮（直近5日TR%が21日平均の80%以下）
     compress_ok = atr_compress <= ATR_COMPRESS
     # 条件3: ブレイクアウト（終値が前VCP_WINDOW日の最高終値を上抜け）
