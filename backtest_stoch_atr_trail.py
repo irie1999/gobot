@@ -21,12 +21,18 @@
 """
 
 import argparse
+import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+try:
+    from rsi2 import _CACHE_DIR as _RSI2_CACHE_DIR
+except ImportError:
+    _RSI2_CACHE_DIR = None
 
 # ── 日経225 全銘柄 ──────────────────────────────────────────
 SYMBOLS = [
@@ -315,41 +321,61 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── データ取得（メインスレッドから順次呼び出し） ─────────────
+# ── データ取得（永続キャッシュ付き） ────────────────────────
 def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
     """バックテスト期間 + 指標計算バッファ分のデータを取得する。
-    75MA(75日) + ストキャスティクス(20日) + バックテスト期間 + 余裕30日 を確保。"""
-    # 必要な総日数（取引日ベース → カレンダー日換算で×1.5）
-    buf_days  = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD + 30
-    total_cal = int((backtest_days + buf_days) * 1.5)
+    backtest_macd_scan.py と同じキャッシュ（.rsi2_cache/*.pkl）を共有。
+    キャッシュが新鮮（10日以内・210行以上）なら再取得しない。"""
+    _today = pd.Timestamp(datetime.today().date())
 
-    if   total_cal <= 180:   period = "6mo"
-    elif total_cal <= 365:   period = "1y"
-    elif total_cal <= 730:   period = "2y"
-    elif total_cal <= 1095:  period = "3y"
-    elif total_cal <= 1825:  period = "5y"
-    else:                    period = "max"
+    # ── 永続キャッシュを確認 ──────────────────────────────────
+    if _RSI2_CACHE_DIR is not None:
+        persistent = _RSI2_CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+        if persistent.exists():
+            try:
+                with open(persistent, "rb") as f:
+                    cached = pickle.load(f)
+                last_date = cached.index[-1]
+                stale = last_date < (_today - timedelta(days=10))
+                if len(cached) >= 210 and not stale:
+                    return cached
+            except Exception:
+                pass
+
+    # ── キャッシュなし／古い → yfinance から取得 ─────────────
+    buf_days = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD + 30
+    dl_start = (datetime.today() - timedelta(days=int((backtest_days + buf_days) * 1.5))).strftime("%Y-%m-%d")
+    dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
+                          auto_adjust=False, progress=False, multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        if "adj close" in raw.columns:
+            raw = raw.rename(columns={"adj close": "adj_close"})
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         min_needed = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
         if len(raw) < min_needed:
             return None
-        # numpy 再構築（スレッド競合対策）
-        return pd.DataFrame({
+        df = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw["volume"].to_numpy(dtype=float),
         }, index=raw.index)
+        # キャッシュに保存
+        if _RSI2_CACHE_DIR is not None:
+            try:
+                _RSI2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                persistent = _RSI2_CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+                with open(persistent, "wb") as f:
+                    pickle.dump(df, f)
+            except Exception:
+                pass
+        return df
     except Exception:
         return None
 
@@ -610,15 +636,16 @@ def main() -> None:
     stock_data = {}  # sym -> (name, df)
 
     # Phase 1: 順次データ取得（yfinance はスレッドセーフでないため）
-    print(f"  [Phase 1] データ取得中 ({total}銘柄)...")
+    print(f"  [Phase 1] データ取得中 ({total}銘柄)  ※キャッシュ済みは高速スキップ")
+    skipped = 0
     for i, (sym, name) in enumerate(target, 1):
-        print(f"  [{i:3d}/{total}] {name}({sym})", end=" ", flush=True)
         df = fetch_df(sym, backtest_days=days)
         if df is None:
-            print("× スキップ")
+            skipped += 1
         else:
-            print("✓")
             stock_data[sym] = (name, df)
+        print(f"  {i}/{total} 取得済  (スキップ: {skipped})", end="\r", flush=True)
+    print(f"  {total}/{total} 完了  成功: {len(stock_data)}銘柄  スキップ: {skipped}銘柄      ")
 
     # Phase 2: 並列バックテスト計算（IO なし・スレッドセーフ）
     print(f"\n  [Phase 2] バックテスト計算中 ({len(stock_data)}銘柄, {WORKERS}並列)...")
