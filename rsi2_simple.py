@@ -2,10 +2,12 @@
 RSI(2) 平均回帰戦略  軽量版（255銘柄スキャン対応）
 ─────────────────────────────────────────────────
 使い方:
-  python rsi2_simple.py              # 255銘柄スキャン（1年）
-  python rsi2_simple.py --years 2    # 255銘柄スキャン（2年）
-  python rsi2_simple.py 7011.T       # 1銘柄詳細
-  python rsi2_simple.py 7011.T --years 2
+  python rsi2_simple.py                                  # 255銘柄スキャン（1年）
+  python rsi2_simple.py --years 2                        # 2年
+  python rsi2_simple.py --start 2023-01-01               # 開始日指定
+  python rsi2_simple.py --start 2023-01-01 --end 2024-06-30
+  python rsi2_simple.py 7011.T                           # 1銘柄詳細
+  python rsi2_simple.py 7011.T --start 2022-01-01 --end 2023-12-31
 """
 
 import argparse
@@ -257,12 +259,27 @@ BACKTEST_YEARS  =   1     # デフォルトのバックテスト期間
 WORKERS         =  16     # 並列ダウンロード数
 
 
+# ── 期間解決 ────────────────────────────────────────────────────
+def resolve_dates(args) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """--start / --end / --years から (start, end) を確定する"""
+    end = pd.Timestamp(args.end) if args.end else pd.Timestamp(datetime.today().date())
+    if args.start:
+        start = pd.Timestamp(args.start)
+    else:
+        start = end - pd.DateOffset(years=args.years)
+    if start >= end:
+        raise ValueError(f"--start ({start.date()}) は --end ({end.date()}) より前の日付にしてください")
+    return start, end
+
+
 # ── データ取得 ──────────────────────────────────────────────────
-def fetch(symbol: str, years: int) -> pd.DataFrame | None:
-    period = f"{years + 1}y"
+def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
+    # MA200 ウォームアップのため start より 400 日前から取得
+    dl_start = (start - timedelta(days=400)).strftime("%Y-%m-%d")
+    dl_end   = (end   + timedelta(days=1  )).strftime("%Y-%m-%d")
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end,
+                          interval="1d", auto_adjust=True, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
@@ -304,9 +321,10 @@ def calc(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── バックテスト ────────────────────────────────────────────────
-def backtest(df: pd.DataFrame, years: int) -> list[dict]:
-    cutoff = pd.Timestamp(datetime.today() - timedelta(days=years * 365))
-    df = df[df.index >= cutoff].copy()
+def backtest(df: pd.DataFrame,
+             start: pd.Timestamp,
+             end: pd.Timestamp) -> list[dict]:
+    df = df[(df.index >= start) & (df.index <= end)].copy()
 
     trades    = []
     in_pos    = False
@@ -337,7 +355,7 @@ def backtest(df: pd.DataFrame, years: int) -> list[dict]:
                 reason = "トレイリング"
             elif float(prev["rsi2"]) >= RSI2_EXIT:
                 exit_p = op
-                reason = f"RSI2回復"
+                reason = "RSI2回復"
 
             if exit_p is not None:
                 pnl = (exit_p - entry_p) * qty
@@ -360,7 +378,7 @@ def backtest(df: pd.DataFrame, years: int) -> list[dict]:
                             entry_p=entry_p, exit_p=cl,
                             qty=hq, pnl=(cl - entry_p) * hq,
                             hold=(dt - entry_dt).days,
-                            reason=f"半分利確",
+                            reason="半分利確",
                         ))
                         qty -= hq
                         half_done = True
@@ -395,7 +413,8 @@ def backtest(df: pd.DataFrame, years: int) -> list[dict]:
 
 
 # ── 1銘柄詳細表示 ───────────────────────────────────────────────
-def show_detail(symbol: str, name: str, trades: list[dict], years: int) -> None:
+def show_detail(symbol: str, name: str, trades: list[dict],
+                start: pd.Timestamp, end: pd.Timestamp) -> None:
     if not trades:
         print(f"\n  [{symbol}]  シグナルなし\n")
         return
@@ -409,13 +428,10 @@ def show_detail(symbol: str, name: str, trades: list[dict], years: int) -> None:
     wh    = sum(t["hold"] for t in wins) / len(wins)   if wins else 0
     lh    = sum(t["hold"] for t in loss) / len(loss)   if loss else 0
 
-    since = (datetime.today() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
-    today = datetime.today().strftime("%Y-%m-%d")
-
     print()
     print("═" * 62)
-    print(f"  RSI(2) 平均回帰  [{symbol}] {name}  直近{years}年")
-    print(f"  期間: {since} ～ {today}")
+    print(f"  RSI(2) 平均回帰  [{symbol}] {name}")
+    print(f"  期間: {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')}")
     print("═" * 62)
     print(f"  トレード: {len(trades)}回  勝: {len(wins)}  負: {len(loss)}")
     print(f"  勝率: {wr:.1f}%   PF: {'∞' if pf == float('inf') else f'{pf:.2f}'}   損益: {total:+,.0f}円")
@@ -437,22 +453,21 @@ def show_detail(symbol: str, name: str, trades: list[dict], years: int) -> None:
     print()
 
 
-# ── 50銘柄ランキング表示 ────────────────────────────────────────
-def show_ranking(results: list[dict], years: int) -> None:
-    since = (datetime.today() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
-    today = datetime.today().strftime("%Y-%m-%d")
-
-    ranked = sorted(results, key=lambda x: x["total"], reverse=True)
+# ── 255銘柄ランキング表示 ───────────────────────────────────────
+def show_ranking(results: list[dict],
+                 start: pd.Timestamp, end: pd.Timestamp) -> None:
+    ranked    = sorted(results, key=lambda x: x["total"], reverse=True)
     total_tr  = sum(r["trades"] for r in results)
     total_pnl = sum(r["total"]  for r in results)
     plus_cnt  = sum(1 for r in results if r["total"] > 0)
 
     print()
     print("═" * 72)
-    print(f"  RSI(2) 平均回帰戦略  50銘柄スキャン  直近{years}年")
-    print(f"  期間: {since} ～ {today}")
+    print(f"  RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン")
+    print(f"  期間: {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')}")
     print(f"  【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上  →  翌日始値エントリー")
-    print(f"  【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / -{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確")
+    print(f"  【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / "
+          f"-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確")
     print("═" * 72)
     print(f"  スキャン: {len(SYMBOLS)}銘柄  シグナルあり: {len(results)}銘柄  "
           f"トレード計: {total_tr}回  プラス銘柄: {plus_cnt}/{len(results)}")
@@ -481,10 +496,20 @@ def show_ranking(results: list[dict], years: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="RSI(2) 平均回帰バックテスト")
     parser.add_argument("symbol", nargs="?", default=None,
-                        help="銘柄コード指定で1銘柄詳細表示（省略で50銘柄スキャン）")
+                        help="銘柄コード指定で1銘柄詳細表示（省略で全銘柄スキャン）")
     parser.add_argument("--years", type=int, default=BACKTEST_YEARS,
-                        help="バックテスト期間（年）")
+                        help="バックテスト期間（年）。--start 指定時は無視される")
+    parser.add_argument("--start", metavar="YYYY-MM-DD", default=None,
+                        help="バックテスト開始日（例: 2023-01-01）")
+    parser.add_argument("--end", metavar="YYYY-MM-DD", default=None,
+                        help="バックテスト終了日（例: 2024-12-31）。省略時は今日")
     args = parser.parse_args()
+
+    try:
+        start, end = resolve_dates(args)
+    except ValueError as e:
+        print(f"  エラー: {e}")
+        return
 
     # ── 1銘柄モード ──────────────────────────────────────────────
     if args.symbol:
@@ -492,21 +517,24 @@ def main() -> None:
         if not sym.endswith(".T"):
             sym += ".T"
         name = next((n for s, n in SYMBOLS if s == sym), sym)
-        print(f"\n  データ取得中: {sym} ...")
-        df = fetch(sym, args.years)
+        print(f"\n  データ取得中: {sym}  {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')} ...")
+        df = fetch(sym, start, end)
         if df is None or len(df) < 210:
             print(f"  エラー: {sym} のデータ取得に失敗しました")
             return
-        show_detail(sym, name, backtest(calc(df), args.years), args.years)
+        df = calc(df)
+        trades = backtest(df, start, end)
+        show_detail(sym, name, trades, start, end)
         return
 
-    # ── 50銘柄スキャンモード ──────────────────────────────────────
+    # ── 全銘柄スキャンモード ──────────────────────────────────────
     print(f"\n  RSI(2) 平均回帰  {len(SYMBOLS)}銘柄データ取得中 ...")
+    print(f"  期間: {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')}")
 
     # Phase1: 並列ダウンロード
     stock_data: dict[str, tuple[str, pd.DataFrame]] = {}
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(fetch, sym, args.years): (sym, name)
+        futs = {ex.submit(fetch, sym, start, end): (sym, name)
                 for sym, name in SYMBOLS}
         done = 0
         for fut in as_completed(futs):
@@ -521,7 +549,7 @@ def main() -> None:
     # Phase2: バックテスト
     results = []
     for sym, (name, df) in stock_data.items():
-        trades = backtest(calc(df), args.years)
+        trades = backtest(calc(df), start, end)
         if not trades:
             continue
         wins  = [t for t in trades if t["pnl"] > 0]
@@ -542,7 +570,7 @@ def main() -> None:
         print("  シグナルが発生した銘柄がありませんでした。")
         return
 
-    show_ranking(results, args.years)
+    show_ranking(results, start, end)
 
 
 if __name__ == "__main__":
