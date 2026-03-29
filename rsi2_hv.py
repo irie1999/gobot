@@ -687,6 +687,296 @@ function toggleDetail(sym){{
     return path
 
 
+# ── シグナルスキャン ─────────────────────────────────────────
+def scan_signals_rsi2(
+    stock_data_map: dict,
+    results_90d: list[dict],
+    params: dict,
+    use_ibs: bool,
+    use_consec: bool,
+    vix_rsi,
+) -> dict:
+    """本日終値ベースで翌日の買い/売りシグナルを判定する。
+    stock_data_map : {sym: (name, df_raw)}
+    results_90d    : run_backtest(90日) の結果（保有中銘柄の検出に使用）
+    """
+    today = _TODAY.strftime("%Y-%m-%d")
+    p     = params
+
+    # 90日バックテストで保有中の銘柄マップ
+    open_pos_map: dict[str, dict] = {}
+    for r in results_90d:
+        for t in r.get("trade_log", []):
+            if "保有中" in t.get("reason", ""):
+                open_pos_map[r["symbol"]] = {"result": r, "trade": t}
+                break
+
+    buy: list[dict]  = []
+    sell: list[dict] = []
+    hold: list[dict] = []
+
+    for sym, (name, df_raw) in stock_data_map.items():
+        df = calc(df_raw)
+        if len(df) < 3:
+            continue
+
+        last  = df.iloc[-1]   # 本日
+        prev  = df.iloc[-2]   # 前日（エントリー判定に使う）
+        prev2 = df.iloc[-3]   # 前々日（連続RSI確認）
+
+        if pd.isna(prev["rsi2"]) or pd.isna(prev["ma200"]) or pd.isna(prev2["rsi2"]):
+            continue
+
+        last_close  = float(last["close"])
+        last_rsi2   = float(last["rsi2"])
+        prev_rsi2   = float(prev["rsi2"])
+        prev2_rsi2  = float(prev2["rsi2"])
+        last_ma200  = float(last["ma200"]) if not pd.isna(last["ma200"]) else 0.0
+        last_atr    = float(last["atr"])   if not pd.isna(last["atr"])   else 0.0
+        atr_pct     = last_atr / last_close * 100 if last_close > 0 else 0.0
+        above_ma200 = last_close > last_ma200
+        h_l = float(last["high"]) - float(last["low"])
+        ibs = (last_close - float(last["low"])) / h_l if h_l > 0 else 1.0
+        signal_dt = str(df.index[-1].date())
+
+        # ── 買いシグナル判定 ─────────────────────────────────
+        ok_rsi    = last_rsi2 <= p["RSI2_ENTRY"]
+        ok_ma200  = above_ma200
+        ok_consec = (not use_consec) or (prev_rsi2 <= p["RSI2_ENTRY"])
+        ok_ibs    = (not use_ibs) or (ibs < 0.35)
+        ok_vix    = True
+        if vix_rsi is not None:
+            try:
+                vr = float(vix_rsi.asof(df.index[-1]))
+                ok_vix = (not pd.isna(vr)) and vr > 50
+            except Exception:
+                ok_vix = True
+
+        if ok_rsi and ok_ma200 and ok_consec and ok_ibs and ok_vix:
+            filters = []
+            if use_consec: filters.append(f"連続RSI({prev_rsi2:.1f}→{last_rsi2:.1f})")
+            if use_ibs:    filters.append(f"IBS={ibs:.2f}")
+            buy.append({
+                "symbol":     sym,
+                "name":       name,
+                "close":      last_close,
+                "rsi2":       last_rsi2,
+                "rsi2_prev":  prev_rsi2,
+                "ma200":      last_ma200,
+                "atr_pct":    atr_pct,
+                "ibs":        ibs,
+                "above_ma200": above_ma200,
+                "signal_dt":  signal_dt,
+                "filters":    " / ".join(filters) if filters else "基本のみ",
+            })
+
+        # ── 売り/継続保有 ─────────────────────────────────────
+        if sym in open_pos_map:
+            t          = open_pos_map[sym]["trade"]
+            entry_p    = t["entry_p"]
+            entry_dt   = t["entry_dt"]
+            hold_days  = (pd.Timestamp(_TODAY) - entry_dt).days
+            unrealized = (last_close - entry_p) / entry_p * 100
+
+            common = {
+                "symbol":      sym,
+                "name":        name,
+                "close":       last_close,
+                "entry_price": entry_p,
+                "entry_dt":    str(entry_dt.date()),
+                "hold_days":   hold_days,
+                "unrealized":  unrealized,
+                "rsi2":        last_rsi2,
+                "atr_pct":     atr_pct,
+            }
+            # RSI(2) ≥ 出口閾値 → 売りシグナル
+            if last_rsi2 >= p["RSI2_EXIT"]:
+                common["exit_reason"] = f"RSI(2)={last_rsi2:.1f}≥{p['RSI2_EXIT']}"
+                sell.append(common)
+            else:
+                hold.append(common)
+
+    buy.sort(key=lambda x: x["rsi2"])  # RSI(2) が低い順（最も売られた銘柄を優先）
+    return {"buy": buy, "sell": sell, "hold": hold, "today": today}
+
+
+def print_signals_rsi2(sig: dict, mode_label: str, params: dict) -> None:
+    """scan_signals_rsi2 の結果をターミナルに表示。"""
+    today = sig["today"]
+    buy   = sig["buy"]
+    sell  = sig["sell"]
+    hold  = sig["hold"]
+    p     = params
+
+    print()
+    print("═" * 68)
+    print(f"  RSI(2)シグナル【{mode_label}】  {today} 引け後")
+    print(f"  エントリー: RSI(2)≤{p['RSI2_ENTRY']} + MA200上 / エグジット: RSI(2)≥{p['RSI2_EXIT']}")
+    print("═" * 68)
+
+    # ── 買いシグナル ──────────────────────────────────────────
+    print(f"\n  ◆ 買いシグナル  ({len(buy)} 銘柄)  ← 明日の始値で購入候補")
+    if not buy:
+        print("    なし")
+    else:
+        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'RSI2':>5} {'MA200':>8} {'IBS':>5} {'ATR%':>5}  フィルター")
+        print("  " + "─" * 72)
+        for i, c in enumerate(buy, 1):
+            label = f"{c['name']}({c['symbol']})"
+            ma_mark = "↑" if c["above_ma200"] else "↓"
+            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} "
+                  f"{c['rsi2']:>5.1f} {c['ma200']:>8,.0f}{ma_mark} "
+                  f"{c['ibs']:>5.2f} {c['atr_pct']:>5.1f}%  {c['filters']}")
+
+    # ── 売りシグナル ──────────────────────────────────────────
+    print(f"\n  ◆ 売りシグナル  ({len(sell)} 銘柄)  ← 明日の始値で売却候補")
+    if not sell:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} "
+              f"{'保有日':>5} {'RSI2':>5}  出口理由")
+        print("  " + "─" * 70)
+        for c in sell:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+                  f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
+                  f"{c['rsi2']:>5.1f}  {c['exit_reason']}")
+
+    # ── 継続保有 ──────────────────────────────────────────────
+    print(f"\n  ◆ 継続保有  ({len(hold)} 銘柄)  ← RSI(2)回復待ち・保有継続")
+    if not hold:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} "
+              f"{'保有日':>5} {'RSI2':>5}")
+        print("  " + "─" * 60)
+        for c in hold:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+                  f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
+                  f"{c['rsi2']:>5.1f}")
+
+    print()
+    print(f"  ※ 翌営業日の始値で執行（成行 or 寄付指値）")
+    print(f"  ※ 保有中銘柄は直近90日バックテストで検出（実際のポジションと異なる場合あり）")
+    print()
+
+
+def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
+    """RSI(2)シグナルをHTMLレポートに出力する。"""
+    today = sig["today"]
+    buy   = sig["buy"]
+    sell  = sig["sell"]
+    hold  = sig["hold"]
+    p     = params
+
+    def _buy_rows(items: list[dict]) -> str:
+        if not items:
+            return '<tr><td colspan="8" style="text-align:center;color:#888">なし</td></tr>'
+        rows = ""
+        for c in items:
+            ma_cls  = "pos" if c["above_ma200"] else "neg"
+            ibs_cls = "pos" if c["ibs"] < 0.35 else ""
+            rows += f"""<tr>
+  <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['close']:,.0f}</td>
+  <td class="num pos">{c['rsi2']:.1f}</td>
+  <td class="num {ma_cls}">{c['ma200']:,.0f}</td>
+  <td class="num {ibs_cls}">{c['ibs']:.2f}</td>
+  <td class="num">{c['atr_pct']:.1f}%</td>
+  <td>{c['filters']}</td>
+  <td>{c['signal_dt']}</td>
+</tr>"""
+        return rows
+
+    def _pos_rows(items: list[dict], show_reason: bool) -> str:
+        if not items:
+            return '<tr><td colspan="8" style="text-align:center;color:#888">なし</td></tr>'
+        rows = ""
+        for c in items:
+            sign = "+" if c["unrealized"] >= 0 else ""
+            cls  = "pos" if c["unrealized"] >= 0 else "neg"
+            extra = f"<td>{c.get('exit_reason','')}</td>" if show_reason else ""
+            rows += f"""<tr>
+  <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['close']:,.0f}</td>
+  <td class="num">{c['entry_price']:,.0f}</td>
+  <td class="num {cls}">{sign}{c['unrealized']:.1f}%</td>
+  <td class="num">{c['hold_days']}日</td>
+  <td class="num">{c['rsi2']:.1f}</td>
+  {extra}
+</tr>"""
+        return rows
+
+    buy_head_extra  = "<th>フィルター</th><th>シグナル日</th>"
+    sell_head_extra = "<th>出口理由</th>"
+    colspan_buy  = 8
+    colspan_pos  = 7
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>RSI(2)シグナル {today}</title>
+<style>
+  body {{ background:#1a1a2e; color:#e0e0e0; font-family:'Meiryo',sans-serif; padding:20px; }}
+  h1   {{ color:#00d4ff; font-size:1.3em; border-bottom:1px solid #444; padding-bottom:8px; }}
+  h2   {{ color:#ffd700; font-size:1.1em; margin-top:28px; }}
+  table {{ border-collapse:collapse; width:100%; margin-top:8px; }}
+  th   {{ background:#2a2a4a; color:#aaa; padding:8px 12px; text-align:left; font-size:.85em; }}
+  td   {{ padding:7px 12px; border-bottom:1px solid #2a2a3a; font-size:.9em; }}
+  tr:hover td {{ background:#252540; }}
+  .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+  .pos {{ color:#4caf50; }}
+  .neg {{ color:#f44336; }}
+  .note {{ color:#888; font-size:.8em; margin-top:16px; }}
+</style>
+</head>
+<body>
+<h1>RSI(2)シグナル【{mode_label}】― {today} 引け後</h1>
+<p style="color:#aaa;font-size:.85em">
+  エントリー: RSI(2)≤{p['RSI2_ENTRY']} + MA200上 ／ エグジット: RSI(2)≥{p['RSI2_EXIT']}
+  ／ ATRトレイル×{p['ATR_TRAIL_MULT']} ／ 損切り-{p['HARD_STOP_PCT']}% ／ 半分利確+{p['HALF_PROFIT_PCT']}%
+</p>
+
+<h2>◆ 買いシグナル（{len(buy)} 銘柄）― 明日の始値で購入候補</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>RSI(2)</th><th>MA200</th><th>IBS</th>
+    <th>ATR%</th>{buy_head_extra}
+  </tr></thead>
+  <tbody>{_buy_rows(buy)}</tbody>
+</table>
+
+<h2>◆ 売りシグナル（{len(sell)} 銘柄）― 明日の始値で売却候補</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th>
+    <th>保有日</th><th>RSI(2)</th>{sell_head_extra}
+  </tr></thead>
+  <tbody>{_pos_rows(sell, show_reason=True)}</tbody>
+</table>
+
+<h2>◆ 継続保有（{len(hold)} 銘柄）― RSI(2)回復待ち・保有継続</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>RSI(2)</th>
+  </tr></thead>
+  <tbody>{_pos_rows(hold, show_reason=False)}</tbody>
+</table>
+
+<p class="note">※ 保有中銘柄は直近90日バックテストで検出（実際のポジションとは異なる場合があります）</p>
+<p class="note">生成: {today}</p>
+</body>
+</html>"""
+
+    path = Path(f"signal_rsi2_{today}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 # ── メイン ──────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -694,6 +984,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
+  python rsi2_hv.py --signal           # 明日の売買シグナル（監視20銘柄）
+  python rsi2_hv.py --signal --all     # 明日の売買シグナル（日経225全銘柄）
   python rsi2_hv.py                    # 監視20銘柄スキャン（1年）
   python rsi2_hv.py --all              # 日経225全銘柄スキャン（1年）
   python rsi2_hv.py --years 2          # 2年スキャン
@@ -705,6 +997,8 @@ def main() -> None:
   python rsi2_hv.py --vix              # VIXフィルター有効化
 """)
     parser.add_argument("symbol",    nargs="?", default=None)
+    parser.add_argument("--signal",  action="store_true",
+                        help="明日の売買シグナルをスキャンしてHTML出力")
     parser.add_argument("--all",     action="store_true",
                         help="日経225全銘柄をスキャン（デフォルト: 監視20銘柄）")
     parser.add_argument("--days",    type=int, default=None)
@@ -734,6 +1028,94 @@ def main() -> None:
         days, label = args.years * 365, f"{args.years}年"
     else:
         days, label = BACKTEST_DAYS, "1年"
+
+    if args.signal:
+        # ── シグナルスキャンモード ───────────────────────────────
+        mode_label_s = "日経225全銘柄" if args.all else f"監視対象{len(SYMBOLS)}銘柄"
+        print(f"\n  RSI(2)シグナルスキャン  ({mode_label_s})")
+        print(f"  シグナル日: {_TODAY.strftime('%Y-%m-%d')}\n")
+
+        # 日経・VIX取得でモード確定
+        print(f"  日経・VIXデータ取得中...")
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            nk_fut  = ex.submit(fetch_nikkei, 90)
+            vix_fut = ex.submit(fetch_vix, 90) if args.use_vix else None
+            nk_df   = nk_fut.result()
+            vix_rsi = vix_fut.result() if vix_fut else None
+
+        mkt = _market_info(nk_df)
+        if args.mode == "hv":
+            params, mode_label = HV, "高ボラモード（手動指定）"
+        elif args.mode == "normal":
+            params, mode_label = NORMAL, "通常モード（手動指定）"
+        else:
+            if mkt.get("ok") and mkt["above200"]:
+                params, mode_label = NORMAL, "通常モード（自動: 日経MA200上）"
+            else:
+                params, mode_label = HV, "高ボラモード（自動: 日経MA200割れ）"
+
+        # 株価データ取得
+        total      = len(SYMBOLS)
+        stock_data: dict = {}
+        print(f"  [Phase 1] データ取得中 ({total}銘柄)  ※キャッシュ済みは高速スキップ")
+        skipped = 0
+        for i, (sym, name) in enumerate(SYMBOLS, 1):
+            df = fetch(sym, 90)
+            if df is None:
+                skipped += 1
+            else:
+                stock_data[sym] = (name, df)
+            print(f"  {i}/{total} 取得済  (スキップ: {skipped})", end="\r", flush=True)
+        print(f"  {total}/{total} 完了  成功: {len(stock_data)}銘柄  スキップ: {skipped}銘柄      ")
+
+        # 90日バックテストで保有中銘柄を検出
+        print(f"\n  [Phase 2] 保有中銘柄の検出（直近90日バックテスト）...")
+        tasks_90 = [(s, n, d) for s, (n, d) in stock_data.items()]
+        results_90: list[dict] = []
+
+        def _bt90(task):
+            trades = backtest_hv(
+                calc(task[2]), 90, params,
+                use_ibs=args.use_ibs, use_consec=args.use_consec, vix_rsi=vix_rsi,
+            )
+            if not trades:
+                return None
+            wins  = [t for t in trades if t["pnl"] > 0]
+            loss  = [t for t in trades if t["pnl"] <= 0]
+            total_pnl = sum(t["pnl"] for t in trades)
+            wr    = len(wins) / len(trades) * 100
+            pf    = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
+                     if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+            return dict(
+                symbol=task[0], name=task[1],
+                trades=len(trades), total=total_pnl, total_pct=sum(t["pct"] for t in trades),
+                wr=wr, pf=pf,
+                avg_hold=sum(t["hold"] for t in trades) / len(trades),
+                trade_log=trades,
+            )
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futures = {ex.submit(_bt90, t): t[0] for t in tasks_90}
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                r = fut.result()
+                if r:
+                    results_90.append(r)
+                print(f"  計算中 {done}/{len(tasks_90)}", end="\r", flush=True)
+        print()
+
+        print(f"\n  [Phase 3] シグナル解析中...")
+        sig = scan_signals_rsi2(stock_data, results_90, params,
+                                 use_ibs=args.use_ibs, use_consec=args.use_consec,
+                                 vix_rsi=vix_rsi)
+        print_signals_rsi2(sig, mode_label, params)
+
+        html_path = generate_signal_html_rsi2(sig, mode_label, params)
+        print(f"  HTMLレポート: {html_path.resolve()}")
+        webbrowser.open(html_path.resolve().as_uri())
+        print()
+        return
 
     # ── 日経・VIX を並行取得 ─────────────────────────────────
     print(f"\n  データ準備中 ...")
