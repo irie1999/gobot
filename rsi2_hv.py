@@ -35,7 +35,7 @@ import pandas as pd
 from rsi2 import (
     SYMBOLS, _TODAY, WORKERS,
     fetch, fetch_nikkei, calc,
-    _market_info, _mkt_banner_html, _CACHE_DIR,
+    _market_info, _mkt_banner_html, _trade_table, _CACHE_DIR,
 )
 
 # ── パラメーター: 通常モード ─────────────────────────────────
@@ -337,6 +337,279 @@ def print_ranking(results: list[dict], days: int, label: str,
     print()
 
 
+# ── HTML生成（1銘柄詳細）────────────────────────────────────
+def generate_html_hv(symbol: str, trades: list[dict],
+                     backtest_days: int, label: str,
+                     params: dict, mode_label: str, flags: str) -> Path:
+    since = (_TODAY - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today = _TODAY.strftime("%Y-%m-%d")
+    p     = params
+
+    wins  = [t for t in trades if t["pnl"] > 0]
+    loss  = [t for t in trades if t["pnl"] <= 0]
+    total = sum(t["pnl"] for t in trades) if trades else 0
+    wr    = len(wins) / len(trades) * 100 if trades else 0
+    pf    = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
+             if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+    pf_s  = "∞" if pf == float("inf") else f"{pf:.2f}"
+    wh    = sum(t["hold"] for t in wins) / len(wins) if wins else 0
+    lh    = sum(t["hold"] for t in loss) / len(loss) if loss else 0
+    total_pct = sum(t["pct"] for t in trades) if trades else 0
+    total_cls = "pos" if total >= 0 else "neg"
+
+    cum, chart_dates, chart_cum = 0.0, [], []
+    for t in trades:
+        cum += t["pnl"]
+        chart_dates.append(t["exit_dt"].strftime("%Y-%m-%d"))
+        chart_cum.append(round(cum, 0))
+
+    rows = ""
+    for i, t in enumerate(trades, 1):
+        cls = "hold" if "保有中" in t["reason"] else ("win" if t["pnl"] > 0 else "lose")
+        rows += (
+            f'<tr class="{cls}">'
+            f'<td>{i}</td>'
+            f'<td>{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td>{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td>{t["entry_p"]:,.0f}</td><td>{t["exit_p"]:,.0f}</td>'
+            f'<td>{t["qty"]}</td>'
+            f'<td class="{"pos" if t["pnl"]>=0 else "neg"}">{t["pnl"]:+,.0f}円</td>'
+            f'<td class="{"pos" if t["pct"]>=0 else "neg"}">{t["pct"]:+.2f}%</td>'
+            f'<td>{t["hold"]}日</td><td>{t["reason"]}</td>'
+            f'</tr>\n'
+        )
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RSI(2)拡張版 [{symbol}] {label}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
+      background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}}
+h1{{font-size:1.35em;color:#fff;border-left:4px solid #a78bfa;padding-left:12px;margin-bottom:6px}}
+.meta{{color:#666;font-size:0.82em;margin:2px 0 0 16px}}
+.mode-badge{{display:inline-block;background:#1e1b4b;border:1px solid #a78bfa;
+             color:#a78bfa;border-radius:6px;padding:2px 10px;font-size:0.8em;margin-left:8px}}
+.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}}
+.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:14px 20px;min-width:130px}}
+.clabel{{font-size:0.72em;color:#777;letter-spacing:.05em}}
+.cval{{font-size:1.55em;font-weight:700;margin-top:3px}}
+.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
+.chart-wrap{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:16px;margin:20px 0;max-width:900px}}
+table{{width:100%;border-collapse:collapse;font-size:0.86em;margin-top:16px}}
+th{{background:#16192a;color:#888;padding:8px 12px;text-align:right;border-bottom:1px solid #252840;white-space:nowrap}}
+th:first-child,th:nth-child(2),th:nth-child(3),th:last-child{{text-align:left}}
+td{{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
+td:first-child,td:nth-child(2),td:nth-child(3),td:last-child{{text-align:left}}
+tr.win>td{{background:rgba(74,222,128,.04)}}
+tr.lose>td{{background:rgba(248,113,113,.04)}}
+tr.hold>td{{background:rgba(251,191,36,.06)}}
+tr:hover>td{{background:#1b1f35!important}}
+.footer{{margin-top:32px;color:#444;font-size:0.78em;text-align:right}}
+</style>
+</head>
+<body>
+<h1>RSI(2)拡張版 [{symbol}] 直近{label}<span class="mode-badge">{mode_label}</span></h1>
+<div class="meta">期間: {since} ～ {today} &nbsp;|&nbsp; フィルター: {flags}</div>
+<div class="meta">【条件】RSI(2)≤{p['RSI2_ENTRY']:.0f} + MA200上 &nbsp;
+  【決済】RSI(2)≥{p['RSI2_EXIT']:.0f} / ATR×{p['ATR_TRAIL_MULT']}トレイル /
+  -{p['HARD_STOP_PCT']:.0f}%損切り / +{p['HALF_PROFIT_PCT']:.0f}%半分利確</div>
+
+<div class="cards">
+  <div class="card"><div class="clabel">損益合計</div>
+    <div class="cval {total_cls}">{total:+,.0f}円</div></div>
+  <div class="card"><div class="clabel">累積リターン</div>
+    <div class="cval {total_cls}">{total_pct:+.2f}%</div></div>
+  <div class="card"><div class="clabel">勝率</div>
+    <div class="cval neu">{wr:.1f}%</div></div>
+  <div class="card"><div class="clabel">プロフィットF</div>
+    <div class="cval neu">{pf_s}</div></div>
+  <div class="card"><div class="clabel">トレード数</div>
+    <div class="cval neu">{len(trades)}回</div></div>
+  <div class="card"><div class="clabel">勝/負</div>
+    <div class="cval neu">{len(wins)}勝{len(loss)}負</div></div>
+  <div class="card"><div class="clabel">平均保有(勝)</div>
+    <div class="cval pos">{wh:.1f}日</div></div>
+  <div class="card"><div class="clabel">平均保有(負)</div>
+    <div class="cval neg">{lh:.1f}日</div></div>
+</div>
+
+<div class="chart-wrap"><canvas id="cumChart" height="80"></canvas></div>
+
+<table>
+<thead><tr>
+  <th>#</th><th>エントリー</th><th>エグジット</th>
+  <th>買値</th><th>売値</th><th>株数</th>
+  <th>損益</th><th>変化率</th><th>保有日数</th><th>決済理由</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<div class="footer">生成: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>
+
+<script>
+new Chart(document.getElementById('cumChart'), {{
+  type:'line',
+  data:{{labels:{chart_dates},datasets:[{{label:'累積損益（円）',data:{chart_cum},
+    borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,0.08)',
+    borderWidth:2,pointRadius:3,fill:true,tension:0.3}}]}},
+  options:{{responsive:true,
+    plugins:{{legend:{{labels:{{color:'#aaa'}}}},
+      tooltip:{{callbacks:{{label:c=>c.parsed.y.toLocaleString()+'円'}}}}}},
+    scales:{{x:{{ticks:{{color:'#666',maxTicksLimit:12}},grid:{{color:'#1e2030'}}}},
+      y:{{ticks:{{color:'#666',callback:v=>v.toLocaleString()+'円'}},grid:{{color:'#1e2030'}}}}}}}}
+}});
+</script>
+</body></html>"""
+
+    path = Path(f"rsi2hv_{symbol.replace('.','_')}_{_TODAY.strftime('%Y%m%d')}_{label}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
+# ── HTML生成（スキャン）──────────────────────────────────────
+def generate_html_scan_hv(results: list[dict], days: int, label: str,
+                           top: int | None, params: dict,
+                           mode_label: str, flags: str,
+                           mkt: dict | None) -> Path:
+    since   = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
+    today   = _TODAY.strftime("%Y-%m-%d")
+    ranked  = sorted(results, key=lambda x: (-x["total_pct"], x["symbol"]))
+    disp    = ranked[:top] if top else ranked
+    p       = params
+
+    total_pnl = sum(r["total"] for r in results)
+    total_tr  = sum(r["trades"] for r in results)
+    plus_cnt  = sum(1 for r in results if r["total"] > 0)
+    total_cls = "pos" if total_pnl >= 0 else "neg"
+    top_label = f"  上位{top}銘柄" if top else ""
+
+    rank_rows = ""
+    for rank, r in enumerate(disp, 1):
+        pf_s = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+        cls  = "win" if r["total"] >= 0 else "lose"
+        pcls = "pos" if r["total"] >= 0 else "neg"
+        rank_rows += (
+            f'<tr class="{cls}" onclick="toggleDetail(\'{r["symbol"]}\')" style="cursor:pointer">'
+            f'<td>{rank}</td><td>{r["symbol"]}</td><td>{r["name"]}</td>'
+            f'<td class="{pcls}">{r["total"]:+,.0f}円</td>'
+            f'<td class="{pcls}">{r["total_pct"]:+.2f}%</td>'
+            f'<td>{r["wr"]:.1f}%</td><td>{pf_s}</td>'
+            f'<td>{r["trades"]}</td><td>{r["avg_hold"]:.1f}日</td>'
+            f'</tr>\n'
+            f'<tr id="detail-{r["symbol"]}" style="display:none">'
+            f'<td colspan="9" style="padding:0">{_trade_table(r["trade_log"])}</td>'
+            f'</tr>\n'
+        )
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RSI(2)拡張版 {len(SYMBOLS)}銘柄スキャン {label}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
+      background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}}
+h1{{font-size:1.35em;color:#fff;border-left:4px solid #a78bfa;padding-left:12px;margin-bottom:6px}}
+.meta{{color:#666;font-size:0.82em;margin:2px 0 0 16px}}
+.mode-badge{{display:inline-block;background:#1e1b4b;border:1px solid #a78bfa;
+             color:#a78bfa;border-radius:6px;padding:2px 10px;font-size:0.8em;margin-left:8px}}
+.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}}
+.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:14px 20px;min-width:130px}}
+.clabel{{font-size:0.72em;color:#777;letter-spacing:.05em}}
+.cval{{font-size:1.55em;font-weight:700;margin-top:3px}}
+.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
+.chart-wrap{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:16px;margin:20px 0}}
+table{{width:100%;border-collapse:collapse;font-size:0.86em}}
+th{{background:#16192a;color:#888;padding:8px 12px;text-align:right;
+    border-bottom:1px solid #252840;white-space:nowrap}}
+th:first-child,th:nth-child(2),th:nth-child(3){{text-align:left}}
+td{{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
+td:first-child,td:nth-child(2),td:nth-child(3){{text-align:left}}
+tr.win>td{{background:rgba(74,222,128,.04)}}
+tr.lose>td{{background:rgba(248,113,113,.04)}}
+tr.hold>td{{background:rgba(251,191,36,.06)}}
+tr:hover>td{{background:#1b1f35!important}}
+.inner-table{{width:100%;font-size:0.84em;background:#0d0f1a}}
+.inner-table th{{background:#0d0f1a;font-size:0.8em}}
+.footer{{margin-top:32px;color:#444;font-size:0.78em;text-align:right}}
+.mkt-banner{{border-radius:8px;padding:10px 16px;margin:14px 0;
+             font-size:0.9em;display:flex;align-items:center;gap:18px;flex-wrap:wrap}}
+.mkt-on{{background:#0f2a1a;border:1px solid #166534;color:#4ade80}}
+.mkt-caution{{background:#2a1f0a;border:1px solid #92400e;color:#fbbf24}}
+.mkt-off{{background:#2a0f0f;border:1px solid #7f1d1d;color:#f87171}}
+.mkt-unknown{{background:#16192a;border:1px solid #252840;color:#666}}
+.mkt-item{{display:flex;flex-direction:column;align-items:center;gap:2px}}
+.mkt-lbl{{font-size:0.75em;opacity:.7}}
+.mkt-val{{font-size:1.1em;font-weight:700}}
+</style>
+</head>
+<body>
+<h1>RSI(2)拡張版  {len(SYMBOLS)}銘柄スキャン  直近{label}{top_label}<span class="mode-badge">{mode_label}</span></h1>
+<div class="meta">期間: {since} ～ {today} &nbsp;|&nbsp; フィルター: {flags}</div>
+<div class="meta">【条件】RSI(2)≤{p['RSI2_ENTRY']:.0f} + MA200上 &nbsp;
+  【決済】RSI(2)≥{p['RSI2_EXIT']:.0f} / ATR×{p['ATR_TRAIL_MULT']}トレイル /
+  -{p['HARD_STOP_PCT']:.0f}%損切り / +{p['HALF_PROFIT_PCT']:.0f}%半分利確</div>
+{_mkt_banner_html(mkt)}
+<div class="cards">
+  <div class="card"><div class="clabel">合計損益</div>
+    <div class="cval {total_cls}">{total_pnl:+,.0f}円</div></div>
+  <div class="card"><div class="clabel">スキャン銘柄</div>
+    <div class="cval neu">{len(SYMBOLS)}銘柄</div></div>
+  <div class="card"><div class="clabel">シグナルあり</div>
+    <div class="cval neu">{len(results)}銘柄</div></div>
+  <div class="card"><div class="clabel">トレード計</div>
+    <div class="cval neu">{total_tr}回</div></div>
+  <div class="card"><div class="clabel">プラス銘柄</div>
+    <div class="cval pos">{plus_cnt}/{len(results)}</div></div>
+</div>
+
+<div class="chart-wrap"><canvas id="barChart" height="60"></canvas></div>
+
+<p style="color:#666;font-size:0.82em;margin-bottom:8px">▼ 行をクリックするとトレード明細を展開</p>
+<table>
+<thead><tr>
+  <th>#</th><th>コード</th><th>銘柄名</th>
+  <th>損益</th><th>累積%</th><th>勝率</th><th>PF</th><th>取引数</th><th>平均保有</th>
+</tr></thead>
+<tbody>{rank_rows}</tbody>
+</table>
+<div class="footer">生成: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>
+
+<script>
+const labels = {[r['name'] for r in disp]};
+const vals   = {[round(r['total_pct'], 2) for r in disp]};
+const colors = vals.map(v => v >= 0 ? 'rgba(167,139,250,0.7)' : 'rgba(248,113,113,0.7)');
+new Chart(document.getElementById('barChart'), {{
+  type:'bar',
+  data:{{labels,datasets:[{{label:'累積リターン(%)',data:vals,backgroundColor:colors,borderRadius:3}}]}},
+  options:{{responsive:true,
+    plugins:{{legend:{{display:false}},
+      tooltip:{{callbacks:{{label:c=>c.parsed.y.toFixed(2)+'%'}}}}}},
+    scales:{{
+      x:{{ticks:{{color:'#555',font:{{size:10}},maxRotation:45}},grid:{{color:'#1e2030'}}}},
+      y:{{ticks:{{color:'#555',callback:v=>v.toFixed(1)+'%'}},grid:{{color:'#1e2030'}}}}}}}}
+}});
+function toggleDetail(sym){{
+  const el=document.getElementById('detail-'+sym);
+  el.style.display=el.style.display==='none'?'':'none';
+}}
+</script>
+</body></html>"""
+
+    path = Path(f"rsi2hv_scan_{_TODAY.strftime('%Y%m%d')}_{label}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 # ── メイン ──────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -434,6 +707,9 @@ def main() -> None:
                              use_consec=args.use_consec,
                              vix_rsi=vix_rsi)
         print_result(sym, trades, days, label, params, mode_label, flags)
+        path = generate_html_hv(sym, trades, days, label, params, mode_label, flags)
+        print(f"  HTMLレポート保存: {path}")
+        webbrowser.open(f"file://{path.resolve()}")
         return
 
     # ── 全銘柄スキャンモード ─────────────────────────────────
@@ -476,6 +752,10 @@ def main() -> None:
         return
 
     print_ranking(results, days, label, args.top, params, mode_label, flags, mkt)
+    path = generate_html_scan_hv(results, days, label, args.top, params,
+                                  mode_label, flags, mkt)
+    print(f"  HTMLレポート保存: {path}")
+    webbrowser.open(f"file://{path.resolve()}")
 
 
 if __name__ == "__main__":
