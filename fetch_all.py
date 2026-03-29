@@ -57,6 +57,25 @@ def _save(symbol: str, df: pd.DataFrame) -> None:
 
 # ── ダウンロード（リトライあり） ────────────────────────────
 
+def _normalize(raw: pd.DataFrame) -> pd.DataFrame | None:
+    """MultiIndex の正規化・重複除去・列選択を行う共通処理。"""
+    if isinstance(raw.columns, pd.MultiIndex):
+        # level 0 と level 1 のどちらが価格名（open/high/...）かを検出
+        price_names = {"open", "high", "low", "close", "volume"}
+        l0 = {str(c).lower() for c in raw.columns.get_level_values(0)}
+        if l0 & price_names:
+            raw.columns = raw.columns.get_level_values(0)
+        else:
+            raw.columns = raw.columns.get_level_values(1)
+    raw.columns = [str(c).lower() for c in raw.columns]
+    raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]  # 重複列を削除
+    need = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+    if len(need) < 5:
+        return None
+    raw = raw[need].dropna()
+    return raw if not raw.empty else None
+
+
 def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
     """yfinanceでダウンロード。失敗時は最大 MAX_RETRY 回リトライ。"""
     last_err = None
@@ -65,13 +84,9 @@ def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
             raw = yf.download(symbol, start=dl_start, end=dl_end,
                               interval="1d", auto_adjust=True, progress=False)
             if not raw.empty:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                raw.columns = [str(c).lower() for c in raw.columns]
-                raw = raw[["open", "high", "low", "close", "volume"]].dropna()
-                if not raw.empty:
+                raw = _normalize(raw)
+                if raw is not None:
                     return raw
-            # 空だった場合はリトライ
             last_err = "empty"
         except Exception as e:
             last_err = str(e)

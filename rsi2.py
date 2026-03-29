@@ -160,8 +160,14 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
+            price_names = {"open", "high", "low", "close", "volume"}
+            l0 = {str(c).lower() for c in raw.columns.get_level_values(0)}
+            if l0 & price_names:
+                raw.columns = raw.columns.get_level_values(0)
+            else:
+                raw.columns = raw.columns.get_level_values(1)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         if len(raw) < 210:
             return None
