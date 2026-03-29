@@ -97,7 +97,26 @@ def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
 
 # ── 1銘柄の更新処理 ─────────────────────────────────────────
 
-def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
+def _detect_split(existing: pd.DataFrame, new_raw: pd.DataFrame,
+                  threshold: float = 0.15) -> bool:
+    """キャッシュ末尾と新規データ先頭の価格乖離から株式分割を検知する。
+    threshold: 15%以上乖離していれば分割とみなす（配当・通常変動と区別）
+    """
+    if existing is None or existing.empty or new_raw is None or new_raw.empty:
+        return False
+    # 重複する日付がある場合は比較できないのでスキップ
+    overlap = existing.index.intersection(new_raw.index)
+    if overlap.empty:
+        return False
+    old_close = float(existing.loc[overlap[-1], "close"])
+    new_close = float(new_raw.loc[overlap[-1], "close"])
+    if old_close <= 0 or new_close <= 0:
+        return False
+    ratio = max(old_close, new_close) / min(old_close, new_close)
+    return ratio > (1 + threshold)
+
+
+
     existing = _load(symbol)
 
     if existing is not None and not existing.empty:
@@ -105,8 +124,8 @@ def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
         # 直近7日以内（土日・祝日考慮）なら最新とみなしてスキップ
         if not force and last_date >= _TODAY - timedelta(days=7):
             return symbol, f"最新 ({last_date.strftime('%Y-%m-%d')} 計{len(existing)}行)"
-        # 差分のみ取得
-        dl_start = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        # 差分のみ取得（重複1日分含めて分割検知に使う）
+        dl_start = last_date.strftime("%Y-%m-%d")
         mode = "差分"
     else:
         # 初回: 指定年数分を取得
@@ -120,6 +139,15 @@ def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
         if existing is not None and not existing.empty:
             return symbol, f"{mode}（新データなし）"
         return symbol, "エラー: ダウンロード失敗"
+
+    # ── 株式分割検知: 価格が15%以上乖離 → 全件再取得 ──────────
+    if mode == "差分" and _detect_split(existing, raw):
+        full_start = (_TODAY - timedelta(days=years * 365 + 30)).strftime("%Y-%m-%d")
+        raw = _download(symbol, full_start, dl_end)
+        if raw is None:
+            return symbol, "エラー: 分割検知後の再取得失敗"
+        mode = "分割再取得"
+        existing = None  # キャッシュを全て置き換える
 
     new_df = pd.DataFrame({
         "open":   raw["open"].to_numpy(dtype=float),
