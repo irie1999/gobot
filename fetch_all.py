@@ -212,6 +212,14 @@ def main() -> None:
     args = ap.parse_args()
 
     _CACHE_DIR.mkdir(exist_ok=True)
+
+    # 既存キャッシュを全削除してから新規ダウンロード
+    existing_files = list(_CACHE_DIR.glob("*.pkl"))
+    if existing_files:
+        for f in existing_files:
+            f.unlink()
+        print(f"既存キャッシュ削除: {len(existing_files)}ファイル")
+
     print(f"日経225 日足データ ダウンロード  {len(SYMBOLS)}銘柄 / {args.years}年分")
     print(f"保存先: {_CACHE_DIR.resolve()}")
     print(f"並列数: {WORKERS}  リトライ: {MAX_RETRY}回\n")
