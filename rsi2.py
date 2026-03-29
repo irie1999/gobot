@@ -121,21 +121,32 @@ SYMBOLS = [
 
 # ── データ取得 ──────────────────────────────────────────────
 
-# キャッシュディレクトリ（当日分を保存し、翌日以降は自動的に再取得）
+# キャッシュディレクトリ
 _CACHE_DIR = Path(".rsi2_cache")
 
 
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
+    # ── 優先: fetch_all.py が保存した永続キャッシュ ──────────────
+    # ファイル名: .rsi2_cache/{symbol}.pkl（日付なし・長期保存）
+    persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+    if persistent.exists():
+        try:
+            with open(persistent, "rb") as f:
+                df = pickle.load(f)
+            if len(df) >= 210:
+                return df
+        except Exception:
+            persistent.unlink(missing_ok=True)
+
+    # ── フォールバック: 当日限りの一時キャッシュ ──────────────────
     buf_days = 200 + 30
     dl_start = (_TODAY - timedelta(days=backtest_days + buf_days)).strftime("%Y-%m-%d")
     dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # キャッシュファイル: .rsi2_cache/7011T_20260329_start_end.pkl
     _CACHE_DIR.mkdir(exist_ok=True)
     cache_key  = f"{symbol.replace('.','_')}_{_TODAY.strftime('%Y%m%d')}_{dl_start}_{dl_end}"
     cache_file = _CACHE_DIR / f"{cache_key}.pkl"
 
-    # キャッシュヒット → ディスクから読み込み（yfinance呼び出しなし）
     if cache_file.exists():
         try:
             with open(cache_file, "rb") as f:
@@ -143,7 +154,6 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
         except Exception:
             cache_file.unlink(missing_ok=True)
 
-    # キャッシュミス → ダウンロードしてキャッシュ保存
     try:
         raw = yf.download(symbol, start=dl_start, end=dl_end,
                           interval="1d", auto_adjust=True, progress=False)
