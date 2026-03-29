@@ -348,9 +348,9 @@ EMA21_PERIOD    = 21    # 短期EMA（Minervini式: 機関投資家参照基準�
 MA50_PERIOD     = 50    # 中期SMA（トレンド中軸）
 ATR_PERIOD      = 14    # ATR（ボラティリティ計測）
 VCP_WINDOW      = 7     # ボラ収縮確認ウィンドウ（7日=約1週間）
-ATR_COMPRESS    = 0.80  # 収縮判定: 直近5日TR% / 21日平均TR% < この値
+ATR_COMPRESS    = 0.90  # 収縮判定: 直近5日TR% / 21日平均TR% < この値（0.80→0.90: より検出しやすく）
 RS_LOOKBACK     = 40    # 相対強度比較期間（約2ヶ月）
-RS_MIN          = -0.10 # 日経対比 -10%以上の銘柄のみ対象
+RS_MIN          = -0.15 # 日経対比 -15%以上の銘柄のみ対象（-10→-15: 裾野を広げる）
 
 VOL_MA_PERIOD   = 20    # 出来高移動平均
 ATR_TRAIL_MULT  = 2.5   # ATRトレイル係数（高ボラ対応）
@@ -363,7 +363,7 @@ MAX_QTY         = 9999
 FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
 FILTER_RSI_MIN       = 40.0   # RSI下限（過度な売られすぎは基調転換の疑い）
 FILTER_RSI_MAX       = 65.0   # RSI上限（過熱時はブレイク失敗リスク高）
-FILTER_VOL_SURGE     =  1.5   # ブレイクアウト時の出来高倍率（機関投資家確認）
+FILTER_VOL_SURGE     =  1.3   # ブレイクアウト時の出来高倍率（1.5→1.3: 取引増加）
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
 MAX_POSITIONS        = 5     # 同時保有最大銘柄数（地合い良好時）
@@ -425,9 +425,12 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ── 正規化TR（ボラ収縮判定用） ────────────────────────────
     # tr_norm: 当日のTR を終値で割ったボラ率（ATRと違いスムージングなし）
     tr_norm     = tr / c.replace(0, np.nan)
-    tr_norm_5d  = tr_norm.rolling(5).mean()    # 直近5日平均（現在の収縮度）
-    tr_norm_21d = tr_norm.rolling(21).mean()   # 21日平均（通常時の基準）
-    # compress < ATR_COMPRESS → ボラが収縮中（VCP成立の前提条件）
+    # ★ .shift(1) で「前日時点」の平均を使う
+    #    ブレイクアウト当日は TR が大きく tr_norm_5d が膨らむため、
+    #    シフトしないと compress_ok が必ずFalse になりシグナルが消える
+    tr_norm_5d  = tr_norm.rolling(5).mean().shift(1)   # 前日時点の5日平均
+    tr_norm_21d = tr_norm.rolling(21).mean().shift(1)  # 前日時点の21日平均
+    # compress < ATR_COMPRESS → ブレイクアウト前にボラが収縮していた
     atr_compress = tr_norm_5d / tr_norm_21d.replace(0, np.nan)
 
     # ── VCPウィンドウ高値 ──────────────────────────────────
