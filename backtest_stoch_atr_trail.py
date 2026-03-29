@@ -731,6 +731,252 @@ function toggleTrades(sym) {{
     return path
 
 
+# ── A7シグナルスキャン ────────────────────────────────────────
+def scan_signals_a7(stock_data_map: dict, results_90d: list[dict]) -> dict:
+    """本日のA7エントリー/エグジットシグナルをスキャンする。
+    stock_data_map: {sym: (name, df)}
+    results_90d   : run_backtest(90日) の結果リスト（保有中銘柄の検出に使用）
+    戻り値: {"buy": [...], "sell": [...], "hold": [...], "today": str}
+    """
+    today = datetime.today().strftime("%Y-%m-%d")
+
+    # 90日バックテストで保有中の銘柄マップ
+    open_pos_map: dict[str, dict] = {}
+    for r in results_90d:
+        if r.get("open_pos") and r.get("trade_log"):
+            last_trade = r["trade_log"][-1]
+            if "保有中" in last_trade.get("reason", ""):
+                open_pos_map[r["symbol"]] = r
+
+    buy: list[dict]  = []
+    sell: list[dict] = []
+    hold: list[dict] = []
+
+    for sym, (name, df) in stock_data_map.items():
+        df_ind = calc_indicators(df)
+        if len(df_ind) < 5:
+            continue
+
+        last = df_ind.iloc[-1]
+        if pd.isna(last["stoch_k"]) or pd.isna(last["stoch_d"]) or pd.isna(last["atr"]):
+            continue
+
+        last_close = float(last["close"])
+        last_k     = float(last["stoch_k"])
+        last_d     = float(last["stoch_d"])
+        last_ma75  = float(last["ma75"]) if not pd.isna(last["ma75"]) else 0.0
+        last_atr   = float(last["atr"])
+        atr_pct    = last_atr / last_close * 100 if last_close > 0 else 0.0
+        trend_up   = last_close > last_ma75
+        signal_dt  = str(df_ind.index[-1].date())
+
+        # ── 買いシグナル: ゴールデンクロス + %K<70 + 75MA上 ──
+        if bool(last["entry_sig"]):
+            buy.append({
+                "symbol":     sym,
+                "name":       name,
+                "close":      last_close,
+                "stoch_k":    last_k,
+                "stoch_d":    last_d,
+                "ma75":       last_ma75,
+                "atr_pct":    atr_pct,
+                "trend_up":   trend_up,
+                "signal_dt":  signal_dt,
+            })
+
+        # ── 売り/継続保有 ──────────────────────────────────────
+        if sym in open_pos_map:
+            bt          = open_pos_map[sym]
+            last_trade  = bt["trade_log"][-1]
+            entry_price = last_trade["entry_price"]
+            entry_dt    = last_trade["entry_dt"]
+            hold_days   = (datetime.today() - entry_dt.to_pydatetime()).days
+            unrealized  = (last_close - entry_price) / entry_price * 100
+
+            common = {
+                "symbol":      sym,
+                "name":        name,
+                "close":       last_close,
+                "entry_price": entry_price,
+                "entry_dt":    str(entry_dt.date()),
+                "hold_days":   hold_days,
+                "unrealized":  unrealized,
+                "stoch_k":     last_k,
+                "stoch_d":     last_d,
+                "trend_up":    trend_up,
+            }
+            if bool(last["exit_sig"]):
+                sell.append(common)
+            else:
+                hold.append(common)
+
+    buy.sort(key=lambda x: x["stoch_k"])  # %K が低い順（より深い押し目を優先）
+    return {"buy": buy, "sell": sell, "hold": hold, "today": today}
+
+
+def print_signals_a7(sig: dict) -> None:
+    """scan_signals_a7 の結果をターミナルに表示。"""
+    today = sig["today"]
+    buy   = sig["buy"]
+    sell  = sig["sell"]
+    hold  = sig["hold"]
+
+    print()
+    print("═" * 68)
+    print(f"  A7シグナル（ストキャスティクス + ATRトレイリング）  {today} 引け後")
+    print("═" * 68)
+
+    # ── 買いシグナル ───────────────────────────────────────
+    print(f"\n  ◆ 買いシグナル  ({len(buy)} 銘柄)  ← 明日の始値で購入候補")
+    if not buy:
+        print("    なし")
+    else:
+        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'%K':>5} {'%D':>5} {'ATR%':>5}  状態")
+        print("  " + "─" * 60)
+        for i, c in enumerate(buy, 1):
+            trend = "↑MA75上" if c["trend_up"] else "↓MA75下"
+            label = f"{c['name']}({c['symbol']})"
+            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} "
+                  f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f} {c['atr_pct']:>5.1f}%  {trend}")
+
+    # ── 売りシグナル ───────────────────────────────────────
+    print(f"\n  ◆ 売りシグナル  ({len(sell)} 銘柄)  ← 明日の始値で売却候補")
+    if not sell:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
+        print("  " + "─" * 65)
+        for c in sell:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+                  f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
+                  f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f}")
+
+    # ── 継続保有 ──────────────────────────────────────────
+    print(f"\n  ◆ 継続保有  ({len(hold)} 銘柄)  ← デッドクロスなし・保有継続")
+    if not hold:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
+        print("  " + "─" * 65)
+        for c in hold:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+                  f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
+                  f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f}")
+
+    print()
+    print(f"  ※ エントリー条件: ゴールデンクロス(%K>%D) + %K<{STOCH_OVERBOUGHT} + 終値>{MA_TREND_PERIOD}MA")
+    print(f"  ※ エグジット条件: デッドクロス or ATRトレイリングストップ(×{ATR_TRAIL_MULT})")
+    print(f"  ※ 翌営業日の始値で執行")
+    print()
+
+
+def generate_signal_html_a7(sig: dict) -> Path:
+    """A7シグナルをHTMLレポートに出力する。"""
+    today = sig["today"]
+    buy   = sig["buy"]
+    sell  = sig["sell"]
+    hold  = sig["hold"]
+
+    def _rows(items: list[dict], mode: str) -> str:
+        if not items:
+            return '<tr><td colspan="8" style="text-align:center;color:#888">なし</td></tr>'
+        rows = ""
+        for c in items:
+            trend = "↑MA75上" if c["trend_up"] else "↓MA75下"
+            if mode == "buy":
+                rows += f"""<tr>
+  <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['close']:,.0f}</td>
+  <td class="num">{c['stoch_k']:.1f}</td>
+  <td class="num">{c['stoch_d']:.1f}</td>
+  <td class="num">{c['atr_pct']:.1f}%</td>
+  <td>{trend}</td>
+  <td>{c['signal_dt']}</td>
+</tr>"""
+            else:
+                sign = "+" if c["unrealized"] >= 0 else ""
+                cls  = "pos" if c["unrealized"] >= 0 else "neg"
+                rows += f"""<tr>
+  <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['close']:,.0f}</td>
+  <td class="num">{c['entry_price']:,.0f}</td>
+  <td class="num {cls}">{sign}{c['unrealized']:.1f}%</td>
+  <td class="num">{c['hold_days']}日</td>
+  <td class="num">{c['stoch_k']:.1f}</td>
+  <td class="num">{c['stoch_d']:.1f}</td>
+  <td>{trend}</td>
+</tr>"""
+        return rows
+
+    buy_rows  = _rows(buy,  "buy")
+    sell_rows = _rows(sell, "pos")
+    hold_rows = _rows(hold, "pos")
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>A7シグナル {today}</title>
+<style>
+  body {{ background:#1a1a2e; color:#e0e0e0; font-family:'Meiryo',sans-serif; padding:20px; }}
+  h1   {{ color:#00d4ff; font-size:1.3em; border-bottom:1px solid #444; padding-bottom:8px; }}
+  h2   {{ color:#ffd700; font-size:1.1em; margin-top:28px; }}
+  table {{ border-collapse:collapse; width:100%; margin-top:8px; }}
+  th   {{ background:#2a2a4a; color:#aaa; padding:8px 12px; text-align:left; font-size:.85em; }}
+  td   {{ padding:7px 12px; border-bottom:1px solid #2a2a3a; font-size:.9em; }}
+  tr:hover td {{ background:#252540; }}
+  .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+  .pos {{ color:#4caf50; }}
+  .neg {{ color:#f44336; }}
+  .note {{ color:#888; font-size:.8em; margin-top:16px; }}
+</style>
+</head>
+<body>
+<h1>A7シグナル（ストキャスティクス + ATRトレイリング）― {today} 引け後</h1>
+<p style="color:#aaa;font-size:.85em">
+  エントリー: ゴールデンクロス(%K&gt;%D) + %K&lt;{STOCH_OVERBOUGHT} + 終値&gt;{MA_TREND_PERIOD}MA ／
+  エグジット: デッドクロス or ATRトレイリング×{ATR_TRAIL_MULT}
+</p>
+
+<h2>◆ 買いシグナル（{len(buy)} 銘柄）― 明日の始値で購入候補</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>%K</th><th>%D</th><th>ATR%</th><th>トレンド</th><th>シグナル日</th>
+  </tr></thead>
+  <tbody>{buy_rows}</tbody>
+</table>
+
+<h2>◆ 売りシグナル（{len(sell)} 銘柄）― 明日の始値で売却候補</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
+  </tr></thead>
+  <tbody>{sell_rows}</tbody>
+</table>
+
+<h2>◆ 継続保有（{len(hold)} 銘柄）― デッドクロスなし・保有継続</h2>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
+  </tr></thead>
+  <tbody>{hold_rows}</tbody>
+</table>
+
+<p class="note">※ 保有中銘柄は直近90日バックテストで検出（実際のポジションとは異なる場合があります）</p>
+<p class="note">生成: {today}</p>
+</body>
+</html>"""
+
+    fname = f"signal_a7_{today}.html"
+    path  = Path(fname)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -738,7 +984,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python backtest_stoch_atr_trail.py                    # 直近1ヶ月（デフォルト・監視20銘柄）
+  python backtest_stoch_atr_trail.py --signal           # 明日の売買シグナル（監視20銘柄）
+  python backtest_stoch_atr_trail.py --signal --all     # 明日の売買シグナル（日経225全銘柄）
+  python backtest_stoch_atr_trail.py                    # 直近1ヶ月バックテスト（監視20銘柄）
   python backtest_stoch_atr_trail.py --months 3         # 直近3ヶ月
   python backtest_stoch_atr_trail.py --years 1          # 直近1年
   python backtest_stoch_atr_trail.py --years 5          # 直近5年（最大）
@@ -749,6 +997,8 @@ def main() -> None:
 """)
     parser.add_argument("symbol",   nargs="?", default=None,
                         help="特定銘柄コード（省略時は監視対象銘柄スキャン）")
+    parser.add_argument("--signal", action="store_true",
+                        help="明日の売買シグナルをスキャンしてHTML出力")
     parser.add_argument("--all",    action="store_true",
                         help="日経225全銘柄をスキャン（デフォルト: A7監視対象20銘柄）")
     parser.add_argument("--days",   type=int,  default=None,
@@ -765,6 +1015,55 @@ def main() -> None:
     global SYMBOLS
     if args.all:
         SYMBOLS = _ALL_SYMBOLS
+
+    if args.signal:
+        # ── シグナルスキャンモード ───────────────────────────────
+        mode_label = "日経225全銘柄" if args.all else f"A7監視対象{len(SYMBOLS)}銘柄"
+        print(f"\n  A7シグナルスキャン  ({mode_label})")
+        print(f"  シグナル日: {datetime.today().strftime('%Y-%m-%d')}\n")
+
+        target = SYMBOLS
+        total  = len(target)
+        stock_data: dict = {}
+
+        print(f"  [Phase 1] データ取得中 ({total}銘柄)  ※キャッシュ済みは高速スキップ")
+        skipped = 0
+        for i, (sym, name) in enumerate(target, 1):
+            df = fetch_df(sym, backtest_days=90)
+            if df is None:
+                skipped += 1
+            else:
+                stock_data[sym] = (name, df)
+            print(f"  {i}/{total} 取得済  (スキップ: {skipped})", end="\r", flush=True)
+        print(f"  {total}/{total} 完了  成功: {len(stock_data)}銘柄  スキップ: {skipped}銘柄      ")
+
+        print(f"\n  [Phase 2] 保有中銘柄の検出（直近90日バックテスト）...")
+        tasks_90 = [(s, n, d) for s, (n, d) in stock_data.items()]
+        results_90: list[dict] = []
+
+        def _bt90(task):
+            return run_backtest(task[0], task[1], task[2], 90)
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futures = {ex.submit(_bt90, t): t[0] for t in tasks_90}
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                r = fut.result()
+                if r:
+                    results_90.append(r)
+                print(f"  計算中 {done}/{len(tasks_90)}", end="\r", flush=True)
+        print()
+
+        print(f"\n  [Phase 3] シグナル解析中...")
+        sig = scan_signals_a7(stock_data, results_90)
+        print_signals_a7(sig)
+
+        html_path = generate_signal_html_a7(sig)
+        print(f"  HTMLレポート: {html_path.resolve()}")
+        webbrowser.open(html_path.resolve().as_uri())
+        print()
+        return
 
     # 期間を日数に変換（優先順位: --days > --months > --years > デフォルト1ヶ月）
     if args.days is not None:
