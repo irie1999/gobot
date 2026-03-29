@@ -2,17 +2,16 @@
 RSI(2) 平均回帰戦略  軽量版（255銘柄スキャン対応）
 ─────────────────────────────────────────────────
 使い方:
-  python rsi2_simple.py                                  # 255銘柄スキャン（1年）
+  python rsi2_simple.py                                  # 255銘柄スキャン（1年）→ ブラウザ自動表示
   python rsi2_simple.py --years 2                        # 2年
   python rsi2_simple.py --start 2023-01-01               # 開始日指定
   python rsi2_simple.py --start 2023-01-01 --end 2024-06-30
-  python rsi2_simple.py --html                           # HTMLレポート出力（自動命名）
-  python rsi2_simple.py 7011.T                           # 1銘柄詳細
+  python rsi2_simple.py 7011.T                           # 1銘柄詳細 → ブラウザ自動表示
   python rsi2_simple.py 7011.T --start 2022-01-01 --end 2023-12-31
-  python rsi2_simple.py 7011.T --html                    # 1銘柄HTMLレポート
 """
 
 import argparse
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
@@ -766,10 +765,11 @@ def build_html_ranking(results: list[dict],
     return html
 
 
-def save_html(html: str, path: str) -> None:
+def save_and_open_html(html: str, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"  HTMLレポート保存: {path}")
+    webbrowser.open(f"file://{__import__('os').path.abspath(path)}")
 
 
 # ── メイン ──────────────────────────────────────────────────────
@@ -783,8 +783,6 @@ def main() -> None:
                         help="バックテスト開始日（例: 2023-01-01）")
     parser.add_argument("--end", metavar="YYYY-MM-DD", default=None,
                         help="バックテスト終了日（例: 2024-12-31）。省略時は今日")
-    parser.add_argument("--html", action="store_true",
-                        help="HTMLレポートをファイルに出力する")
     args = parser.parse_args()
 
     try:
@@ -807,10 +805,9 @@ def main() -> None:
         df = calc(df)
         trades = backtest(df, start, end)
         show_detail(sym, name, trades, start, end)
-        if args.html:
-            fname = (f"rsi2_{sym.replace('.', '')}_{start.strftime('%Y%m%d')}"
-                     f"_{end.strftime('%Y%m%d')}.html")
-            save_html(build_html_detail(sym, name, trades, start, end), fname)
+        fname = (f"rsi2_{sym.replace('.', '')}_{start.strftime('%Y%m%d')}"
+                 f"_{end.strftime('%Y%m%d')}.html")
+        save_and_open_html(build_html_detail(sym, name, trades, start, end), fname)
         return
 
     # ── 全銘柄スキャンモード ──────────────────────────────────────
@@ -857,10 +854,9 @@ def main() -> None:
         return
 
     show_ranking(results, start, end)
-    if args.html:
-        fname = (f"rsi2_scan_{start.strftime('%Y%m%d')}"
-                 f"_{end.strftime('%Y%m%d')}.html")
-        save_html(build_html_ranking(results, start, end), fname)
+    fname = (f"rsi2_scan_{start.strftime('%Y%m%d')}"
+             f"_{end.strftime('%Y%m%d')}.html")
+    save_and_open_html(build_html_ranking(results, start, end), fname)
 
 
 if __name__ == "__main__":
