@@ -520,7 +520,7 @@ def print_ranking(results: list[dict], days: int, label: str,
                   top: int | None = None) -> None:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
-    ranked = sorted(results, key=lambda x: x["total"], reverse=True)
+    ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
     disp   = ranked[:top] if top else ranked
 
     total_pnl = sum(r["total"] for r in results)
@@ -562,7 +562,7 @@ def generate_html_scan(results: list[dict], days: int, label: str,
                        top: int | None = None) -> Path:
     since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
     today  = _TODAY.strftime("%Y-%m-%d")
-    ranked = sorted(results, key=lambda x: x["total"], reverse=True)
+    ranked = sorted(results, key=lambda x: (-x["total"], x["symbol"]))
     disp   = ranked[:top] if top else ranked
 
     total_pnl = sum(r["total"] for r in results)
