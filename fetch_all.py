@@ -5,15 +5,17 @@
 使い方:
   python fetch_all.py              # 全銘柄ダウンロード（デフォルト5年分）
   python fetch_all.py --years 10   # 10年分
-  python fetch_all.py --update     # 差分のみ更新（既存データの続きを取得）
+  python fetch_all.py --force      # 最新キャッシュも強制更新
 
 初回は全銘柄をダウンロードして .rsi2_cache/{symbol}.pkl に保存します。
 2回目以降は前回の続き（差分）のみ取得して追記します。
+ネットワークエラーは自動リトライ（最大3回）します。
 rsi2.py は自動的にこのキャッシュを優先使用します。
 """
 
 import argparse
 import pickle
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,7 +25,9 @@ import yfinance as yf
 
 from rsi2 import SYMBOLS, _CACHE_DIR
 
-WORKERS = 16
+WORKERS      = 8    # 並列数（多すぎるとネットワーク負荷でエラーが増える）
+MAX_RETRY    = 3    # ダウンロード失敗時のリトライ回数
+RETRY_DELAY  = 3    # リトライ間隔（秒）
 DEFAULT_YEARS = 5
 _TODAY = pd.Timestamp(datetime.now().date())
 
@@ -51,6 +55,31 @@ def _save(symbol: str, df: pd.DataFrame) -> None:
         pickle.dump(df, f)
 
 
+# ── ダウンロード（リトライあり） ────────────────────────────
+
+def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
+    """yfinanceでダウンロード。失敗時は最大 MAX_RETRY 回リトライ。"""
+    last_err = None
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            raw = yf.download(symbol, start=dl_start, end=dl_end,
+                              interval="1d", auto_adjust=True, progress=False)
+            if not raw.empty:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw.columns = [str(c).lower() for c in raw.columns]
+                raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+                if not raw.empty:
+                    return raw
+            # 空だった場合はリトライ
+            last_err = "empty"
+        except Exception as e:
+            last_err = str(e)
+        if attempt < MAX_RETRY:
+            time.sleep(RETRY_DELAY * attempt)
+    return None  # 全リトライ失敗
+
+
 # ── 1銘柄の更新処理 ─────────────────────────────────────────
 
 def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
@@ -70,43 +99,64 @@ def _update(symbol: str, years: int, force: bool) -> tuple[str, str]:
         mode = "新規"
 
     dl_end = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
+    raw = _download(symbol, dl_start, dl_end)
 
-    try:
-        raw = yf.download(symbol, start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=True, progress=False)
-        if raw.empty:
-            if existing is not None:
-                return symbol, f"{mode}（新データなし）"
-            return symbol, "データなし"
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        raw.columns = [str(c).lower() for c in raw.columns]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
-
-        new_df = pd.DataFrame({
-            "open":   raw["open"].to_numpy(dtype=float),
-            "high":   raw["high"].to_numpy(dtype=float),
-            "low":    raw["low"].to_numpy(dtype=float),
-            "close":  raw["close"].to_numpy(dtype=float),
-            "volume": raw["volume"].to_numpy(dtype=float),
-        }, index=raw.index)
-
+    if raw is None:
         if existing is not None and not existing.empty:
-            combined = pd.concat([existing, new_df])
-            combined = combined[~combined.index.duplicated(keep="last")]
-            combined.sort_index(inplace=True)
-        else:
-            combined = new_df
+            return symbol, f"{mode}（新データなし）"
+        return symbol, "エラー: ダウンロード失敗"
 
-        _save(symbol, combined)
-        return symbol, f"{mode} +{len(new_df)}行 → 計{len(combined)}行"
+    new_df = pd.DataFrame({
+        "open":   raw["open"].to_numpy(dtype=float),
+        "high":   raw["high"].to_numpy(dtype=float),
+        "low":    raw["low"].to_numpy(dtype=float),
+        "close":  raw["close"].to_numpy(dtype=float),
+        "volume": raw["volume"].to_numpy(dtype=float),
+    }, index=raw.index)
 
-    except Exception as e:
-        return symbol, f"エラー: {e}"
+    if existing is not None and not existing.empty:
+        combined = pd.concat([existing, new_df])
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined.sort_index(inplace=True)
+    else:
+        combined = new_df
+
+    _save(symbol, combined)
+    return symbol, f"{mode} +{len(new_df)}行 → 計{len(combined)}行"
 
 
 # ── メイン ──────────────────────────────────────────────────
+
+def _run(targets: list[tuple[str, str]], years: int, force: bool,
+         total: int, done_offset: int) -> tuple[int, int, int, list]:
+    """targets を並列ダウンロードして (ok, skip, err, results) を返す。"""
+    done = done_offset
+    ok = skip = err = 0
+    results = []
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(_update, sym, years, force): (sym, name)
+                for sym, name in targets}
+        for fut in as_completed(futs):
+            sym, name = futs[fut]
+            _, status = fut.result()
+            done += 1
+
+            if "エラー" in status:
+                err += 1
+                icon = "✗"
+            elif "最新" in status or "新データなし" in status:
+                skip += 1
+                icon = "–"
+            else:
+                ok += 1
+                icon = "✓"
+
+            results.append((icon, sym, name, status))
+            print(f"  [{done:3d}/{total}] {icon} {sym:8s}  {name[:14]:14s}  {status}")
+
+    return ok, skip, err, results
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -119,39 +169,43 @@ def main() -> None:
 
     _CACHE_DIR.mkdir(exist_ok=True)
     print(f"日経225 日足データ ダウンロード  {len(SYMBOLS)}銘柄 / {args.years}年分")
-    print(f"保存先: {_CACHE_DIR.resolve()}\n")
+    print(f"保存先: {_CACHE_DIR.resolve()}")
+    print(f"並列数: {WORKERS}  リトライ: {MAX_RETRY}回\n")
 
-    done = ok = skip = err = 0
-    results: list[tuple[str, str, str]] = []
+    # ── 第1ラウンド ─────────────────────────────────────────
+    ok, skip, err, results = _run(SYMBOLS, args.years, args.force,
+                                  total=len(SYMBOLS), done_offset=0)
 
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(_update, sym, args.years, args.force): (sym, name)
-                for sym, name in SYMBOLS}
-        for fut in as_completed(futs):
-            sym, name = futs[fut]
-            _, status = fut.result()
-            done += 1
+    # ── エラー銘柄を再試行（最大2ラウンド追加） ───────────────
+    for round_n in range(2, 4):
+        failed = [(sym, name) for icon, sym, name, _ in results if icon == "✗"]
+        if not failed:
+            break
+        print(f"\n  ─── リトライ {round_n - 1}回目: {len(failed)}銘柄 ───")
+        time.sleep(5)
+        r_ok, r_skip, r_err, r_results = _run(
+            failed, args.years, args.force,
+            total=len(failed), done_offset=0)
+        ok   += r_ok
+        skip += r_skip
+        err   = r_err  # 最終ラウンドのエラー数で上書き
+        # resultsのエラー分を更新結果で置き換え
+        retry_map = {sym: (icon, status) for icon, sym, _, status in r_results}
+        results = [(icon if sym not in retry_map else retry_map[sym][0],
+                    sym, name,
+                    status if sym not in retry_map else retry_map[sym][1])
+                   for icon, sym, name, status in results]
 
-            if "エラー" in status or status == "データなし":
-                err += 1
-                icon = "✗"
-            elif "最新" in status:
-                skip += 1
-                icon = "–"
-            else:
-                ok += 1
-                icon = "✓"
-
-            results.append((icon, sym, name, status))
-            print(f"  [{done:3d}/{len(SYMBOLS)}] {icon} {sym:8s}  {name[:14]:14s}  {status}")
-
+    # ── 最終サマリー ────────────────────────────────────────
     print()
     print(f"完了  更新: {ok}銘柄  スキップ: {skip}銘柄  エラー: {err}銘柄")
-    if err:
-        print("\nエラー銘柄:")
-        for icon, sym, name, status in results:
-            if icon == "✗":
-                print(f"  {sym}  {name}  {status}")
+
+    final_errors = [(sym, name, status) for icon, sym, name, status in results
+                    if icon == "✗"]
+    if final_errors:
+        print(f"\n未取得銘柄 ({len(final_errors)}銘柄):")
+        for sym, name, status in final_errors:
+            print(f"  {sym}  {name}  {status}")
 
 
 if __name__ == "__main__":
