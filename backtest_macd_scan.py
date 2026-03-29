@@ -12,7 +12,8 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
     B. ATRトレイリングストップ発動（ATR × 2.5）
 
 ■ 実行方法:
-  python backtest_macd_scan.py                    # 直近1ヶ月（デフォルト）
+  python backtest_macd_scan.py --signal           # 明日の売買シグナルスキャン（推奨）
+  python backtest_macd_scan.py                    # 直近1ヶ月バックテスト（デフォルト）
   python backtest_macd_scan.py --months 3         # 直近3ヶ月
   python backtest_macd_scan.py --years 1          # 直近1年
   python backtest_macd_scan.py --years 5          # 直近5年
@@ -22,6 +23,7 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
 """
 
 import argparse
+import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -30,6 +32,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+try:
+    from rsi2 import _CACHE_DIR as _RSI2_CACHE_DIR
+except ImportError:
+    _RSI2_CACHE_DIR = None
 
 # ── 日経225 全銘柄 ──────────────────────────────────────────
 SYMBOLS = [
@@ -479,25 +486,35 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ── データ取得（メインスレッドから順次） ──────────────────
 def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
     """バックテスト期間 + 指標計算バッファ分を取得。
+    永続キャッシュ(.rsi2_cache)があれば優先使用。
     MA200計算のため 200日 + 余裕30日 をバッファとして確保。"""
-    buf_days  = 200 + 30          # MA200 が主要なボトルネック
-    total_cal = int((backtest_days + buf_days) * 1.5)
+    _today = pd.Timestamp(datetime.today().date())
 
-    if   total_cal <= 180:  period = "6mo"
-    elif total_cal <= 365:  period = "1y"
-    elif total_cal <= 730:  period = "2y"
-    elif total_cal <= 1095: period = "3y"
-    elif total_cal <= 1825: period = "5y"
-    else:                   period = "max"
+    # ── 永続キャッシュを確認 ────────────────────────────────
+    if _RSI2_CACHE_DIR is not None:
+        persistent = _RSI2_CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+        if persistent.exists():
+            try:
+                with open(persistent, "rb") as f:
+                    cached = pickle.load(f)
+                last_date = cached.index[-1]
+                stale = last_date < (_today - timedelta(days=10))
+                if len(cached) >= 210 and not stale:
+                    return cached
+            except Exception:
+                pass
+
+    buf_days  = 200 + 30
+    dl_start  = (datetime.today() - timedelta(days=int((backtest_days + buf_days) * 1.5))).strftime("%Y-%m-%d")
+    dl_end    = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
+                          auto_adjust=False, progress=False, multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         min_needed = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD
         if len(raw) < min_needed:
@@ -516,22 +533,16 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
 # ── 日経平均データ取得 ──────────────────────────────────────
 def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     """^N225 を取得し 25日MA と 地合いフラグを付与。"""
-    buf_days  = 200 + 30
-    total_cal = int((backtest_days + buf_days) * 1.5)
-    if   total_cal <= 180:  period = "6mo"
-    elif total_cal <= 365:  period = "1y"
-    elif total_cal <= 730:  period = "2y"
-    elif total_cal <= 1095: period = "3y"
-    elif total_cal <= 1825: period = "5y"
-    else:                   period = "max"
+    buf_days = 200 + 30
+    dl_start = (datetime.today() - timedelta(days=int((backtest_days + buf_days) * 1.5))).strftime("%Y-%m-%d")
+    dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.download("^N225", period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+        raw = yf.download("^N225", start=dl_start, end=dl_end, interval="1d",
+                          auto_adjust=False, progress=False, multi_level_index=False)
         if raw.empty:
             return None
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
+        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["close"]].dropna()
         raw["ma25"] = raw["close"].rolling(25).mean()
         return raw
@@ -720,6 +731,354 @@ def _check_entry_filters(prev: pd.Series) -> bool:
         FILTER_RSI_MIN     <= _rsi     <= FILTER_RSI_MAX            and
         FILTER_VOL_RATIO_MIN <= _vol_r <= FILTER_VOL_RATIO_MAX
     )
+
+
+# ── 本日シグナルスキャン ────────────────────────────────────
+def scan_today_signals(stock_data_map: dict,
+                       results_90d: list[dict],
+                       nikkei_df: pd.DataFrame | None) -> dict:
+    """本日のエントリー/エグジットシグナルをスキャンする。
+    stock_data_map: {sym: (name, df)}
+    results_90d: run_backtest(90日) の結果リスト（保有中銘柄の検出に使用）
+    戻り値: {"buy": [...], "sell": [...], "hold": [...], "today": str,
+             "nikkei_close": float|None, "nikkei_ma25": float|None, "nikkei_up": bool|None}
+    """
+    today = datetime.today().strftime("%Y-%m-%d")
+
+    # 日経トレンド
+    nk_close = nk_ma25 = None
+    nk_up = None
+    if nikkei_df is not None and not nikkei_df.empty:
+        last_nk = nikkei_df.dropna(subset=["ma25"])
+        if not last_nk.empty:
+            nk_close = float(last_nk.iloc[-1]["close"])
+            nk_ma25  = float(last_nk.iloc[-1]["ma25"])
+            nk_up    = nk_close > nk_ma25
+
+    # 90日バックテストで保有中の銘柄マップ
+    open_pos_map: dict[str, dict] = {}
+    for r in results_90d:
+        if r.get("open_pos") and r.get("trade_log"):
+            last_trade = r["trade_log"][-1]
+            if "保有中" in last_trade.get("reason", ""):
+                open_pos_map[r["symbol"]] = r
+
+    buy: list[dict] = []
+    sell: list[dict] = []
+    hold: list[dict] = []
+
+    for sym, (name, df) in stock_data_map.items():
+        if sym in EXCLUDE_SYMBOLS:
+            continue
+        if SECTOR.get(sym, "その他") in EXCLUDE_SECTORS:
+            continue
+
+        df_ind = calc_indicators(df)
+        if len(df_ind) < 5:
+            continue
+
+        last = df_ind.iloc[-1]
+        if pd.isna(last["macd_hist"]) or pd.isna(last["atr"]):
+            continue
+
+        sector       = SECTOR.get(sym, "その他")
+        focus_bonus  = 20.0 if sym in FOCUS_SYMBOLS else 0.0
+        sector_bonus = 10.0 if sector in PREFER_SECTORS else 0.0
+        macd_h       = float(last["macd_hist"])
+        score        = focus_bonus + sector_bonus + macd_h
+
+        last_close  = float(last["close"])
+        last_rsi    = float(last["rsi"])    if not pd.isna(last["rsi"])    else 0.0
+        last_vol_r  = float(last["vol_ratio"]) if not pd.isna(last["vol_ratio"]) else 0.0
+        last_atr_p  = float(last["atr_pct"])   if not pd.isna(last["atr_pct"])   else 0.0
+        last_ma_dev = float(last["ma25_dev"])   if not pd.isna(last["ma25_dev"])  else 0.0
+        above_ma200 = (last_close > float(last["ma200"])) if not pd.isna(last["ma200"]) else False
+
+        # ── 買いシグナル: 本日entry_sig=True かつフィルター通過 ──
+        if bool(last["entry_sig"]) and _check_entry_filters(last):
+            buy.append({
+                "symbol":       sym,
+                "name":         name,
+                "sector":       sector,
+                "score":        score,
+                "close":        last_close,
+                "macd_hist":    macd_h,
+                "rsi":          last_rsi,
+                "vol_ratio":    last_vol_r,
+                "atr_pct":      last_atr_p,
+                "ma25_dev":     last_ma_dev,
+                "above_ma200":  above_ma200,
+                "focus":        sym in FOCUS_SYMBOLS,
+                "prefer_sector": sector in PREFER_SECTORS,
+                "signal_date":  str(df_ind.index[-1].date()),
+            })
+
+        # ── 売り/継続保有 ──
+        if sym in open_pos_map:
+            bt = open_pos_map[sym]
+            last_trade  = bt["trade_log"][-1]
+            entry_price = last_trade["entry_price"]
+            entry_dt    = last_trade["entry_dt"]
+            hold_days   = (datetime.today() - entry_dt.to_pydatetime()).days
+            unrealized  = (last_close - entry_price) / entry_price * 100
+
+            common = {
+                "symbol":       sym,
+                "name":         name,
+                "sector":       sector,
+                "close":        last_close,
+                "entry_price":  entry_price,
+                "entry_dt":     str(entry_dt.date()),
+                "hold_days":    hold_days,
+                "unrealized":   unrealized,
+                "macd_hist":    macd_h,
+                "rsi":          last_rsi,
+            }
+            if bool(last["exit_sig"]):
+                sell.append(common)
+            else:
+                hold.append(common)
+
+    buy.sort(key=lambda x: x["score"], reverse=True)
+    return {
+        "buy":          buy,
+        "sell":         sell,
+        "hold":         hold,
+        "today":        today,
+        "nikkei_close": nk_close,
+        "nikkei_ma25":  nk_ma25,
+        "nikkei_up":    nk_up,
+    }
+
+
+def print_signals(sig: dict) -> None:
+    """scan_today_signals の結果をターミナルに表示。"""
+    today  = sig["today"]
+    nk_cl  = sig["nikkei_close"]
+    nk_m25 = sig["nikkei_ma25"]
+    nk_up  = sig["nikkei_up"]
+    buy    = sig["buy"]
+    sell   = sig["sell"]
+    hold   = sig["hold"]
+
+    nk_str = "データなし"
+    if nk_cl is not None:
+        trend = "↑上昇（リスクオン）" if nk_up else "↓下落（リスクオフ）"
+        nk_str = f"{nk_cl:,.0f}  MA25={nk_m25:,.0f}  {trend}"
+
+    print()
+    print("═" * 72)
+    print(f"  明日の売買シグナル  ({today} 引け後)")
+    print(f"  日経225: {nk_str}")
+    print("═" * 72)
+
+    # ── 買いシグナル ───────────────────────────────────────
+    print(f"\n  ◆ 買いシグナル  ({len(buy)} 銘柄)  ← 明日の始値で購入候補")
+    if not buy:
+        print("    なし")
+    else:
+        print(f"  {'順位':<4} {'銘柄':<20} {'業種':5} {'スコア':>6} "
+              f"{'終値':>8} {'MACD':>8} {'RSI':>5} {'出来高比':>6} {'ATR%':>5}  メモ")
+        print("  " + "─" * 80)
+        for i, c in enumerate(buy, 1):
+            flags = []
+            if c["focus"]:        flags.append("★重要")
+            if c["prefer_sector"]: flags.append("優先業種")
+            if c["above_ma200"]:   flags.append("MA200↑")
+            flag_s = "  ".join(flags)
+            label = f"{c['name']}({c['symbol']})"
+            print(f"  {i:<4} {label:<20} {c['sector']:5} {c['score']:>6.1f} "
+                  f"{c['close']:>8,.0f} {c['macd_hist']:>+8.3f} "
+                  f"{c['rsi']:>5.1f} {c['vol_ratio']:>6.1f}x {c['atr_pct']:>5.1f}%  {flag_s}")
+
+    # ── 売りシグナル ───────────────────────────────────────
+    print(f"\n  ◆ 売りシグナル  ({len(sell)} 銘柄)  ← 明日の始値で売却候補")
+    if not sell:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<20} {'業種':5} {'終値':>8} {'買値':>8} "
+              f"{'含み損益':>9} {'保有日':>5} {'RSI':>5} {'MACD':>8}")
+        print("  " + "─" * 70)
+        for c in sell:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<20} {c['sector']:5} {c['close']:>8,.0f} "
+                  f"{c['entry_price']:>8,.0f} {sign}{c['unrealized']:>+8.1f}% "
+                  f"{c['hold_days']:>4}日 {c['rsi']:>5.1f} {c['macd_hist']:>+8.3f}")
+
+    # ── 継続保有 ──────────────────────────────────────────
+    print(f"\n  ◆ 継続保有  ({len(hold)} 銘柄)  ← 売りシグナルなし・保有継続")
+    if not hold:
+        print("    なし")
+    else:
+        print(f"  {'銘柄':<20} {'業種':5} {'終値':>8} {'買値':>8} "
+              f"{'含み損益':>9} {'保有日':>5} {'RSI':>5} {'MACD':>8}")
+        print("  " + "─" * 70)
+        for c in hold:
+            label = f"{c['name']}({c['symbol']})"
+            sign  = "+" if c["unrealized"] >= 0 else ""
+            print(f"  {label:<20} {c['sector']:5} {c['close']:>8,.0f} "
+                  f"{c['entry_price']:>8,.0f} {sign}{c['unrealized']:>+8.1f}% "
+                  f"{c['hold_days']:>4}日 {c['rsi']:>5.1f} {c['macd_hist']:>+8.3f}")
+
+    print()
+    print(f"  ※ シグナル日={today} の引け後の指標に基づく")
+    print(f"  ※ 買値/売値は翌営業日の始値となります")
+    print()
+
+
+def generate_signal_html(sig: dict) -> Path:
+    """scan_today_signals の結果を HTML ファイルに書き出す。"""
+    today  = sig["today"]
+    nk_cl  = sig["nikkei_close"]
+    nk_m25 = sig["nikkei_ma25"]
+    nk_up  = sig["nikkei_up"]
+    buy    = sig["buy"]
+    sell   = sig["sell"]
+    hold   = sig["hold"]
+
+    nk_str   = "データなし"
+    nk_cls   = ""
+    if nk_cl is not None:
+        trend  = "↑上昇（リスクオン）" if nk_up else "↓下落（リスクオフ）"
+        nk_cls = "pos" if nk_up else "neg"
+        nk_str = f"{nk_cl:,.0f} / MA25={nk_m25:,.0f}  {trend}"
+
+    def buy_rows_html() -> str:
+        if not buy:
+            return '<tr><td colspan="9" style="text-align:center;color:#64748b">シグナルなし</td></tr>'
+        out = ""
+        for i, c in enumerate(buy, 1):
+            flags = []
+            if c["focus"]:         flags.append("★重要")
+            if c["prefer_sector"]: flags.append("優先業種")
+            if c["above_ma200"]:   flags.append("MA200↑")
+            flag_s = "　".join(flags)
+            out += f"""<tr>
+              <td class="num">{i}</td>
+              <td class="name">{c['name']}<br><small>{c['symbol']}</small></td>
+              <td>{c['sector']}</td>
+              <td class="num pos">{c['score']:.1f}</td>
+              <td class="num">{c['close']:,.0f}</td>
+              <td class="num {'pos' if c['macd_hist']>=0 else 'neg'}">{c['macd_hist']:+.3f}</td>
+              <td class="num">{c['rsi']:.1f}</td>
+              <td class="num">{c['vol_ratio']:.1f}x</td>
+              <td>{flag_s}</td>
+            </tr>"""
+        return out
+
+    def sell_rows_html(lst: list, is_sell: bool) -> str:
+        if not lst:
+            return '<tr><td colspan="8" style="text-align:center;color:#64748b">なし</td></tr>'
+        out = ""
+        for c in lst:
+            sign = "+" if c["unrealized"] >= 0 else ""
+            u_cls = "pos" if c["unrealized"] >= 0 else "neg"
+            out += f"""<tr>
+              <td class="name">{c['name']}<br><small>{c['symbol']}</small></td>
+              <td>{c['sector']}</td>
+              <td class="num">{c['close']:,.0f}</td>
+              <td class="num">{c['entry_price']:,.0f}</td>
+              <td class="num {u_cls}">{sign}{c['unrealized']:.1f}%</td>
+              <td class="num">{c['hold_days']}日</td>
+              <td class="num">{c['rsi']:.1f}</td>
+              <td class="num {'pos' if c['macd_hist']>=0 else 'neg'}">{c['macd_hist']:+.3f}</td>
+            </tr>"""
+        return out
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>売買シグナル {today}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+          background: #0f172a; color: #e2e8f0; font-size: 13px; padding: 20px; }}
+  h1 {{ font-size: 1.4rem; color: #f1f5f9; margin-bottom: 6px; }}
+  .subtitle {{ color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px; }}
+  .nikkei-bar {{ background: #1e293b; border-radius: 8px; padding: 12px 18px;
+                 margin-bottom: 20px; font-size: 0.95rem; }}
+  .nikkei-bar .lbl {{ color: #64748b; }}
+  .section {{ margin-bottom: 32px; }}
+  .section h2 {{ font-size: 1.05rem; color: #38bdf8; margin-bottom: 10px;
+                 padding-bottom: 4px; border-bottom: 1px solid #334155; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th {{ background: #1e293b; padding: 7px 10px; text-align: center;
+        color: #94a3b8; font-weight: 600; white-space: nowrap;
+        border-bottom: 1px solid #334155; }}
+  td {{ padding: 7px 10px; border-bottom: 1px solid #1e293b; white-space: nowrap; }}
+  tr:hover {{ background: #1e293b; }}
+  .name {{ font-weight: 600; }}
+  .name small {{ color: #64748b; font-weight: 400; display: block; }}
+  .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .pos {{ color: #4ade80; }}
+  .neg {{ color: #f87171; }}
+  .note {{ color: #94a3b8; font-size: 0.8rem; margin-top: 16px; }}
+</style>
+</head>
+<body>
+<h1>MACDブレイクアウト　明日の売買シグナル</h1>
+<p class="subtitle">シグナル日: {today}（引け後）　→　翌営業日の始値で執行</p>
+
+<div class="nikkei-bar">
+  <span class="lbl">日経225: </span>
+  <span class="{nk_cls}">{nk_str}</span>
+</div>
+
+<div class="section">
+  <h2>◆ 買いシグナル ({len(buy)} 銘柄)　← 明日の始値で購入候補</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>銘柄</th><th>業種</th><th>スコア</th>
+        <th>終値</th><th>MACDヒスト</th><th>RSI</th><th>出来高比</th><th>備考</th>
+      </tr>
+    </thead>
+    <tbody>{buy_rows_html()}</tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>◆ 売りシグナル ({len(sell)} 銘柄)　← 明日の始値で売却候補</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>銘柄</th><th>業種</th><th>現在値</th><th>買値</th>
+        <th>含み損益</th><th>保有日</th><th>RSI</th><th>MACDヒスト</th>
+      </tr>
+    </thead>
+    <tbody>{sell_rows_html(sell, True)}</tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>◆ 継続保有 ({len(hold)} 銘柄)　← 売りシグナルなし・保有継続</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>銘柄</th><th>業種</th><th>現在値</th><th>買値</th>
+        <th>含み損益</th><th>保有日</th><th>RSI</th><th>MACDヒスト</th>
+      </tr>
+    </thead>
+    <tbody>{sell_rows_html(hold, False)}</tbody>
+  </table>
+</div>
+
+<p class="note">
+  ※ スコア = 重要銘柄ボーナス(+20) + 優先業種ボーナス(+10) + MACDヒスト値<br>
+  ※ エントリーフィルター: MA乖離 ≤{FILTER_MA_DEV_MAX}%　MA200上位のみ
+  ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%　RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}
+  出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x<br>
+  ※ 保有中判定: 直近90日バックテスト結果に基づく
+</p>
+</body>
+</html>"""
+
+    path = Path(f"signal_{today}.html")
+    path.write_text(html, encoding="utf-8")
+    return path
 
 
 def run_portfolio(stock_data_map: dict, backtest_days: int,
@@ -1437,7 +1796,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python backtest_macd_scan.py                    # 直近1ヶ月
+  python backtest_macd_scan.py --signal           # 明日の売買シグナル（推奨）
+  python backtest_macd_scan.py                    # 直近1ヶ月バックテスト
   python backtest_macd_scan.py --months 3         # 直近3ヶ月
   python backtest_macd_scan.py --years 1          # 直近1年
   python backtest_macd_scan.py --years 5          # 直近5年
@@ -1455,6 +1815,8 @@ def main() -> None:
                         help="バックテスト年数（1〜5）")
     parser.add_argument("--top",    type=int,  default=30,
                         help="ランキング表示件数（デフォルト: 30）")
+    parser.add_argument("--signal", action="store_true",
+                        help="明日の売買シグナルをスキャンして表示（バックテストなし）")
     args = parser.parse_args()
 
     # 期間を日数に変換
@@ -1472,6 +1834,59 @@ def main() -> None:
         label = "1ヶ月"
 
     since = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    if args.signal:
+        # ── シグナルスキャンモード ─────────────────────────────
+        print(f"\n  MACDブレイクアウト  明日の売買シグナルスキャン")
+        print(f"  シグナル日: {datetime.today().strftime('%Y-%m-%d')}  (日経225 全銘柄)\n")
+
+        target = SYMBOLS
+        total  = len(target)
+        stock_data: dict = {}
+
+        print(f"  日経平均データ取得中...")
+        nikkei_df = fetch_nikkei(90)
+        nk_s = "取得成功" if nikkei_df is not None else "取得失敗"
+        print(f"  日経225: {nk_s}\n")
+
+        print(f"  [Phase 1] データ取得中 ({total}銘柄)...")
+        for i, (sym, name) in enumerate(target, 1):
+            df = fetch_df(sym, backtest_days=90)
+            if df is not None:
+                stock_data[sym] = (name, df)
+            if i % 50 == 0 or i == total:
+                print(f"  {i}/{total} 取得済", end="\r", flush=True)
+        print(f"  {total}/{total} 取得済  ({len(stock_data)}銘柄成功)")
+
+        print(f"\n  [Phase 2] 保有中銘柄の検出（直近90日バックテスト）...")
+        tasks_90 = [(s, n, d) for s, (n, d) in stock_data.items()]
+        results_90: list[dict] = []
+
+        def _bt90(task):
+            return run_backtest(task[0], task[1], task[2], 90, nikkei_df=nikkei_df)
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futures = {ex.submit(_bt90, t): t[0] for t in tasks_90}
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                r = fut.result()
+                if r:
+                    results_90.append(r)
+                print(f"  計算中 {done}/{len(tasks_90)}", end="\r", flush=True)
+        print()
+
+        print(f"\n  [Phase 3] シグナル解析中...")
+        sig = scan_today_signals(stock_data, results_90, nikkei_df)
+        print_signals(sig)
+
+        html_path = generate_signal_html(sig)
+        print(f"  HTMLレポート: {html_path.resolve()}")
+        webbrowser.open(html_path.resolve().as_uri())
+        print()
+        return
+
+    # ── バックテストモード（既存） ───────────────────────────────
     print(f"\n  MACDブレイクアウト × 出来高 × ATRトレイリング  直近{label}バックテスト")
     print(f"  期間: {since} ～ {datetime.today().strftime('%Y-%m-%d')}\n")
 
