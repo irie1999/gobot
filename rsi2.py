@@ -151,7 +151,10 @@ def _market_info(nikkei_df: pd.DataFrame | None) -> dict:
     """直近の日経平均・MA25・MA200 から地合い情報を返す。"""
     if nikkei_df is None or nikkei_df.empty:
         return {"ok": False}
-    row = nikkei_df.dropna(subset=["ma25", "ma200"]).iloc[-1]
+    filtered = nikkei_df.dropna(subset=["ma25", "ma200"])
+    if filtered.empty:
+        return {"ok": False}
+    row = filtered.iloc[-1]
     cl, ma25, ma200 = float(row["close"]), float(row["ma25"]), float(row["ma200"])
     above25  = cl > ma25
     above200 = cl > ma200

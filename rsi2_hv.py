@@ -96,10 +96,12 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
 
 def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     """日経平均を取得。auto_adjust=False（実際の終値）。"""
-    period = _period_str(backtest_days)
+    buf = 200 + 30
+    dl_start = (_TODAY - timedelta(days=backtest_days + buf)).strftime("%Y-%m-%d")
+    dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.download("^N225", period=period, interval="1d",
-                          auto_adjust=False, progress=False,
+        raw = yf.download("^N225", start=dl_start, end=dl_end,
+                          interval="1d", auto_adjust=False, progress=False,
                           multi_level_index=False)
         if raw.empty:
             return None
