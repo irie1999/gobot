@@ -301,7 +301,7 @@ def fetch(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame |
 
     try:
         raw = yf.download(symbol, start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=True, progress=False)
+                          interval="1d", auto_adjust=False, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):

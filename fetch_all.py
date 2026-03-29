@@ -82,7 +82,7 @@ def _download(symbol: str, dl_start: str, dl_end: str) -> pd.DataFrame | None:
     for attempt in range(1, MAX_RETRY + 1):
         try:
             raw = yf.download(symbol, start=dl_start, end=dl_end,
-                              interval="1d", auto_adjust=True, progress=False)
+                              interval="1d", auto_adjust=False, progress=False)
             if not raw.empty:
                 raw = _normalize(raw)
                 if raw is not None:
