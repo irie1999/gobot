@@ -22,8 +22,10 @@
 
 import argparse
 import pickle
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -573,6 +575,157 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int = 30) -> N
     print()
 
 
+# ── HTML レポート生成 ────────────────────────────────────────
+def generate_html(results: list[dict], backtest_days: int,
+                  period_label: str, single_sym: str | None = None) -> Path:
+    today = datetime.today().strftime("%Y-%m-%d")
+    since = (datetime.today() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    sorted_r = sorted(results, key=lambda x: x["ret_pct"], reverse=True)
+
+    total_trades = sum(r["trades"] for r in results)
+    profitable   = sum(1 for r in results if r["ret_pct"] > 0)
+    avg_ret      = sum(r["ret_pct"] for r in results) / len(results) if results else 0
+    no_trade_cnt = len(SYMBOLS) - len(results)
+
+    # ── ランキング行 ──────────────────────────────────────────
+    ranking_rows = ""
+    for rank, r in enumerate(sorted_r, 1):
+        sign     = "+" if r["ret_pct"] >= 0 else ""
+        cls      = "pos" if r["ret_pct"] >= 0 else "neg"
+        trend    = "↑" if r["last_close"] > r["last_ma75"] else "↓"
+        open_tag = " ★" if r["open_pos"] else ""
+        pf_wins  = sum(t["pnl"] for t in r["trade_log"] if t["pnl"] > 0)
+        pf_loss  = sum(-t["pnl"] for t in r["trade_log"] if t["pnl"] < 0)
+        pf_val   = f"{pf_wins/pf_loss:.2f}" if pf_loss > 0 else "∞"
+
+        # トレード明細行（折りたたみ）
+        trade_rows = ""
+        for t in r["trade_log"]:
+            t_cls  = "pos" if t["pnl"] >= 0 else "neg"
+            mark   = " ★" if t["reason"] == "保有中（最終日終値）" else ""
+            pnl_pct = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+            trade_rows += f"""
+            <tr class="trade-row">
+              <td>{t['entry_dt'].strftime('%Y-%m-%d')}</td>
+              <td>{t['exit_dt'].strftime('%Y-%m-%d')}</td>
+              <td class="num">{t['entry_price']:,.0f}</td>
+              <td class="num">{t['exit_price']:,.0f}</td>
+              <td class="num {t_cls}">{t['pnl']:+,.0f}円<br><small>{pnl_pct:+.1f}%</small></td>
+              <td class="num">{t['hold_days']}日</td>
+              <td>{t['reason']}{mark}</td>
+            </tr>"""
+
+        ranking_rows += f"""
+        <tr class="stock-row {cls}" onclick="toggleTrades('{r['symbol']}')">
+          <td class="rank">{rank}</td>
+          <td class="name">{r['name']}<br><small>{r['symbol']}</small></td>
+          <td class="num {cls}">{sign}{r['total']:,.0f}円</td>
+          <td class="num {cls}">{sign}{r['ret_pct']:.1f}%</td>
+          <td class="num">{r['win_rate']:.0f}%</td>
+          <td class="num">{pf_val}</td>
+          <td class="num">{r['trades']}</td>
+          <td class="num">{r['avg_hold']:.1f}日</td>
+          <td class="num">{r['last_close']:,.0f} {trend}<br>
+            <small>%K={r['last_k']:.0f} %D={r['last_d']:.0f}</small></td>
+          <td class="open-mark">{"●保有中" if r['open_pos'] else ""}</td>
+        </tr>
+        <tr class="trade-detail" id="detail-{r['symbol']}" style="display:none">
+          <td colspan="10">
+            <table class="inner-table">
+              <thead>
+                <tr><th>エントリー</th><th>エグジット</th><th>取得価格</th>
+                    <th>売却価格</th><th>損益</th><th>保有日</th><th>出口理由</th></tr>
+              </thead>
+              <tbody>{trade_rows}</tbody>
+            </table>
+          </td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A7バックテスト {period_label} {today}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+          background: #0f172a; color: #e2e8f0; font-size: 13px; padding: 20px; }}
+  h1 {{ font-size: 1.4rem; color: #f1f5f9; margin-bottom: 6px; }}
+  .subtitle {{ color: #94a3b8; font-size: 0.85rem; margin-bottom: 16px; }}
+  .summary {{ display: flex; gap: 20px; flex-wrap: wrap;
+              background: #1e293b; border-radius: 8px; padding: 14px 20px;
+              margin-bottom: 20px; font-size: 0.9rem; }}
+  .summary .item {{ display: flex; flex-direction: column; }}
+  .summary .lbl {{ color: #64748b; font-size: 0.75rem; margin-bottom: 2px; }}
+  .summary .val {{ font-weight: 600; font-size: 1rem; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th {{ background: #1e293b; padding: 7px 10px; text-align: center;
+        color: #94a3b8; font-weight: 600; white-space: nowrap;
+        border-bottom: 1px solid #334155; position: sticky; top: 0; z-index: 1; }}
+  td {{ padding: 7px 10px; border-bottom: 1px solid #1e293b; white-space: nowrap; }}
+  .stock-row {{ cursor: pointer; }}
+  .stock-row:hover {{ background: #1e293b; }}
+  .name {{ font-weight: 600; }}
+  .name small {{ color: #64748b; font-weight: 400; display: block; }}
+  .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .rank {{ text-align: center; color: #64748b; font-weight: 700; }}
+  .pos {{ color: #4ade80; }}
+  .neg {{ color: #f87171; }}
+  .open-mark {{ color: #fbbf24; font-weight: 600; text-align: center; }}
+  .trade-detail td {{ background: #0f172a; padding: 0; }}
+  .inner-table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+  .inner-table th {{ background: #0f172a; color: #475569; padding: 5px 10px; position: static; }}
+  .inner-table td {{ padding: 5px 10px; border-bottom: 1px solid #1e293b; }}
+  .note {{ color: #64748b; font-size: 0.8rem; margin-top: 16px; }}
+</style>
+</head>
+<body>
+<h1>A7 ストキャスティクス + ATRトレイリング　バックテスト結果</h1>
+<p class="subtitle">期間: {since} ～ {today}（直近{period_label}）　クリックでトレード明細を展開</p>
+
+<div class="summary">
+  <div class="item"><span class="lbl">スキャン銘柄</span><span class="val">{len(SYMBOLS)}銘柄</span></div>
+  <div class="item"><span class="lbl">取引あり</span><span class="val">{len(results)}件</span></div>
+  <div class="item"><span class="lbl">取引なし</span><span class="val">{no_trade_cnt}件</span></div>
+  <div class="item"><span class="lbl">トレード総数</span><span class="val">{total_trades}回</span></div>
+  <div class="item"><span class="lbl">プラス銘柄</span><span class="val">{profitable}/{len(results)}</span></div>
+  <div class="item"><span class="lbl">平均損益率</span>
+    <span class="val {'pos' if avg_ret >= 0 else 'neg'}">{avg_ret:+.2f}%</span></div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th><th>銘柄</th><th>損益</th><th>損益率</th><th>勝率</th>
+      <th>PF</th><th>取引数</th><th>平均保有</th><th>現在値 / Stoch</th><th>保有</th>
+    </tr>
+  </thead>
+  <tbody>{ranking_rows}</tbody>
+</table>
+
+<p class="note">
+  ※ 75MA トレンドフィルター（終値 &gt; 75MA のみエントリー）<br>
+  ※ エントリー: ストキャスティクス %K が %D をゴールデンクロス かつ %K &lt; 70<br>
+  ※ エグジット: デッドクロス または ATRトレイリングストップ（×{ATR_TRAIL_MULT}）<br>
+  ※ 運用資金 {INITIAL_CASH:,}円/銘柄　ATRストップ×{ATR_STOP_MULT}
+</p>
+
+<script>
+function toggleTrades(sym) {{
+  const el = document.getElementById('detail-' + sym);
+  el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
+}}
+</script>
+</body>
+</html>"""
+
+    fname = f"backtest_stoch_{period_label}_{today}.html"
+    path  = Path(fname)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -682,6 +835,12 @@ def main() -> None:
         print(f"  結果: {sign}{r['total']:,.0f}円  ({sign}{r['ret_pct']:.2f}%)")
     else:
         print_ranking(results, days, args.top)
+
+    # HTML レポートを自動生成・ブラウザで開く
+    html_path = generate_html(results, days, period_label,
+                              single_sym=args.symbol if args.symbol else None)
+    print(f"  HTMLレポート: {html_path.resolve()}")
+    webbrowser.open(html_path.resolve().as_uri())
 
 
 if __name__ == "__main__":
