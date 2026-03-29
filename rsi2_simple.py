@@ -458,28 +458,32 @@ def show_detail(symbol: str, name: str, trades: list[dict],
 
 # ── 255銘柄ランキング表示 ───────────────────────────────────────
 def show_ranking(results: list[dict],
-                 start: pd.Timestamp, end: pd.Timestamp) -> None:
+                 start: pd.Timestamp, end: pd.Timestamp,
+                 top: int | None = None) -> None:
     ranked    = sorted(results, key=lambda x: x["total"], reverse=True)
     total_tr  = sum(r["trades"] for r in results)
     total_pnl = sum(r["total"]  for r in results)
     plus_cnt  = sum(1 for r in results if r["total"] > 0)
+    display   = ranked[:top] if top else ranked
+    top_label = f"  上位{top}銘柄表示" if top else ""
 
     print()
     print("═" * 72)
-    print(f"  RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン")
+    print(f"  RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン{top_label}")
     print(f"  期間: {start.strftime('%Y-%m-%d')} ～ {end.strftime('%Y-%m-%d')}")
     print(f"  【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上  →  翌日始値エントリー")
     print(f"  【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / "
           f"-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確")
     print("═" * 72)
     print(f"  スキャン: {len(SYMBOLS)}銘柄  シグナルあり: {len(results)}銘柄  "
-          f"トレード計: {total_tr}回  プラス銘柄: {plus_cnt}/{len(results)}")
+          f"トレード計: {total_tr}回  プラス銘柄: {plus_cnt}/{len(results)}"
+          + (f"  表示: 上位{top}/" if top else ""))
     print()
     print(f"  {'順位':<4} {'銘柄':<22} {'損益':>10} {'勝率':>6} "
           f"{'PF':>5} {'取引':>4} {'平均保有':>7}")
     print("  " + "─" * 60)
 
-    for rank, r in enumerate(ranked, 1):
+    for rank, r in enumerate(display, 1):
         pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
         sign  = "+" if r["total"] >= 0 else ""
         bar   = ("▲" if r["total"] >= 0 else "▽") * min(int(abs(r["total"]) / 5000), 8)
@@ -655,14 +659,16 @@ def build_html_detail(symbol: str, name: str, trades: list[dict],
 
 # ── HTML: 255銘柄ランキング ──────────────────────────────────────
 def build_html_ranking(results: list[dict],
-                       start: pd.Timestamp, end: pd.Timestamp) -> str:
+                       start: pd.Timestamp, end: pd.Timestamp,
+                       top: int | None = None) -> str:
     ranked    = sorted(results, key=lambda x: x["total"], reverse=True)
     total_tr  = sum(r["trades"] for r in results)
     total_pnl = sum(r["total"]  for r in results)
     plus_cnt  = sum(1 for r in results if r["total"] > 0)
+    display   = ranked[:top] if top else ranked
 
     rank_rows = []
-    for rank, r in enumerate(ranked, 1):
+    for rank, r in enumerate(display, 1):
         cls = "profit" if r["total"] >= 0 else "loss"
         rank_rows.append(
             f'<tr class="{cls}">'
@@ -679,9 +685,9 @@ def build_html_ranking(results: list[dict],
             f'</tr>'
         )
 
-    # 全トレード明細（アコーディオン展開）
+    # トレード明細（アコーディオン展開）
     detail_html = ""
-    for r in ranked:
+    for r in display:
         sym, nm = r["symbol"], r["name"]
         detail_rows = []
         for i, t in enumerate(r["trade_log"], 1):
@@ -724,8 +730,9 @@ def build_html_ranking(results: list[dict],
             f'</tbody></table></div></details>\n'
         )
 
+    top_label = f"  上位{top}銘柄" if top else ""
     html  = _HTML_HEAD
-    html += f'<h1>RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン</h1>\n'
+    html += f'<h1>RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン{top_label}</h1>\n'
     html += f'<div class="meta">期間: {start.strftime("%Y-%m-%d")} ～ {end.strftime("%Y-%m-%d")}</div>\n'
     html += f'<div class="meta">【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値 / '
     html += f'【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / '
@@ -787,6 +794,8 @@ def main() -> None:
                         help="バックテスト開始日（例: 2023-01-01）")
     parser.add_argument("--end", metavar="YYYY-MM-DD", default=None,
                         help="バックテスト終了日（例: 2024-12-31）。省略時は今日")
+    parser.add_argument("--top", type=int, default=None,
+                        help="損益上位N銘柄のみ表示（例: --top 50）。省略時は全銘柄")
     args = parser.parse_args()
 
     try:
@@ -857,10 +866,10 @@ def main() -> None:
         print("  シグナルが発生した銘柄がありませんでした。")
         return
 
-    show_ranking(results, start, end)
+    show_ranking(results, start, end, top=args.top)
     fname = (f"rsi2_scan_{start.strftime('%Y%m%d')}"
              f"_{end.strftime('%Y%m%d')}.html")
-    save_and_open_html(build_html_ranking(results, start, end), fname)
+    save_and_open_html(build_html_ranking(results, start, end, top=args.top), fname)
 
 
 if __name__ == "__main__":
