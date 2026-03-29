@@ -321,47 +321,75 @@ SECTOR = {
 BACKTEST_DAYS   = 30            # デフォルト（1ヶ月）
 WORKERS         = 16            # 並列バックテスト数
 
-# MACD パラメータ（短期最適化: 高速シグナル検出）
-MACD_FAST       = 5             # 12→5: 短期の動きを素早く捉える
-MACD_SLOW       = 13            # 26→13
-MACD_SIGNAL     = 4             # 9→4
+# ──────────────────────────────────────────────────────────────
+# MACD パラメータ【2026年3月 相場分析に基づく更新】
+# 日経VI=40〜48（超高ボラ）→ 高速MACD(5,13,4)はノイズ過多
+# スイングトレード(3〜10日)の標準推奨設定 MACD(12,26,9) に変更
+# 出所: Fintokei / ForexTester 高ボラ相場スイング検証
+# ──────────────────────────────────────────────────────────────
+MACD_FAST       = 12            # 5→12: 高ボラ時のノイズ除去
+MACD_SLOW       = 26            # 13→26: 標準設定（世界標準）
+MACD_SIGNAL     = 9             # 4→9:  標準設定
 VOL_MA_PERIOD   = 20
-VOL_SPIKE_MULT  = 1.2           # 1.5→1.2: 出来高閾値を緩和
-MA_TREND_PERIOD = 10            # 25→10: 短期トレンド確認
+VOL_SPIKE_MULT  = 1.2
+MA_TREND_PERIOD = 25            # 10→25: 中期トレンド確認に戻す
 
 ATR_PERIOD      = 14
 ATR_STOP_MULT   = 1.5
-ATR_TRAIL_MULT  = 1.8           # 2.5→1.8: 短期で利確を早める
+ATR_TRAIL_MULT  = 2.0           # 1.8→2.0: 高ボラで早く狩られすぎない
 
 INITIAL_CASH    = 500_000
 POSITION_SIZE   = 50_000  # 1銘柄あたり購入金額（固定）
 MAX_QTY         = 9999
 
-# ── エントリーフィルター ──────────────────────────────────────
-# 【設計方針】シグナルの質はMACDアルゴリズムに任せる。
-#   フィルターは「明らかなNG」だけを除外する門番として使う。
-FILTER_MA_DEV_MAX    =  7.0   # MA乖離 ±7%以内（過熱・乖離しすぎを除外）
-FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期トレンド確認）
-FILTER_ATR_PCT_MIN   =  1.0   # ATR% 下限（動かなさすぎる銘柄を除外）
-FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限（暴れすぎる銘柄を除外）
-FILTER_RSI_MIN       = 35.0   # RSI 下限（売られすぎ圏を除外）
-FILTER_RSI_MAX       = 70.0   # RSI 上限（買われすぎ圏を除外）
-FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限（出来高の裏付けを確認）
-FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限（異常急騰を除外）
+# ── エントリーフィルター【2026年3月 高ボラ相場対応】─────────────
+# 日経VI=46 → ATRが大きく振れる → フィルター幅を広めに設定
+# RSI: 高VI時は深い押し目(25〜35)からの反発を狙う
+FILTER_MA_DEV_MAX    =  7.0   # MA乖離 ±7%以内
+FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
+FILTER_ATR_PCT_MIN   =  2.0   # ATR% 下限（高ボラ相場：最低2%の動きが必要）
+FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限
+FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：20〜25の深い押し目を拾う）
+FILTER_RSI_MAX       = 65.0   # RSI 上限（65超は買われすぎNG）
+FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限
+FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
 MAX_POSITIONS        = 5     # 同時保有最大銘柄数（地合い良好時）
 MAX_POSITIONS_BEAR   = 2     # 日経MA25割れ時は絞る
-HALF_PROFIT_PCT      = 7.0   # 半分利確ライン（高ボラ対応: 5→7%）
-HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応: 2→3%）
+HALF_PROFIT_PCT      = 7.0   # 半分利確ライン（高ボラ：トレンドを引っ張る）
+HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応：2%では早すぎる）
 
-# ── 相場分析に基づくセクター設定（2026年3月更新）────────────────
-# 除外: 関税直撃・業績悪化・金利逆風セクター
+# ── 相場分析に基づくセクター設定【2026年3月 詳細分析版】──────────
+#
+# 【除外】関税直撃・業績悪化・金利逆風
+#   自動車: トヨタ▲6000億、マツダ「サバイバルモード」
+#   鉄鋼:  アナリスト最低評価継続
+#   小売:  訪日需要剥落、内需低迷
+#   海運/非鉄/商社: 前回分析から継続除外
+#
 EXCLUDE_SECTORS  = {"海運", "非鉄", "商社", "自動車", "鉄鋼", "小売"}
 
-# 優先: 金利上昇恩恵・防衛予算増・AI需要セクター（ポートフォリオ選択時に優先）
-PREFER_SECTORS   = {"銀行", "保険", "重工", "半導体", "IT", "電力", "ガス"}
+# 【優先】構造的強セクター（ポートフォリオ選択スコア+10ボーナス）
+#   銀行:  BOJ 0.75%→利上げ継続。MUFG/SMFG/みずほ全社最高益ペース
+#   重工:  防衛予算2年前倒しでGDP2%達成。三菱重工+137%（バックログ10.7兆）
+#   保険:  金利上昇＋円安で運用益拡大
+#   建設:  国内需要・防衛インフラ・震災対応
+#   電力/ガス: 内需ディフェンシブ、地政学リスク耐性高
+#
+PREFER_SECTORS   = {"銀行", "保険", "重工", "建設", "電力", "ガス"}
 
+# 【最重要銘柄】分析で特定した高確信度銘柄（スコア追加+20ボーナス）
+#   8316 SMFG     : 当期純利益 +29% YoY、最高値更新
+#   7011 三菱重工  : バックログ10.7兆、ATH ¥5,208 からの押し目
+#   7013 IHI      : 航空エンジン+防衛、時価総額3.5年で6倍
+#   8035 TEL      : PER31x（6857の半値）、CEO「2026年は最高の年」
+#   8766 東京海上  : 保険×金利上昇、安定配当
+#   8316.T 重複回避のため .T 付きで管理
+FOCUS_SYMBOLS    = {"8316.T", "7011.T", "7013.T", "8035.T", "8766.T"}
+
+# 【半導体注意】6857 アドバンテスト: PER54x、3月下落を主導 → 現状は様子見
+# PREFER_SECTORSから半導体を除外（高VI時は真っ先に売られる）
 
 # ── インジケーター計算 ──────────────────────────────────────
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -814,9 +842,10 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
                 continue
             if not _check_entry_filters(prev):
                 continue
-            # 優先セクターにボーナス（ソート用スコア）
-            sector_bonus = 1.0 if SECTOR.get(sym, "") in PREFER_SECTORS else 0.0
-            score = sector_bonus * 10 + float(prev["macd_hist"])
+            # スコアリング: 最重要銘柄(+20) > 優先セクター(+10) > その他(+0) + MACDヒスト
+            focus_bonus  = 20.0 if sym in FOCUS_SYMBOLS else 0.0
+            sector_bonus = 10.0 if SECTOR.get(sym, "") in PREFER_SECTORS else 0.0
+            score = focus_bonus + sector_bonus + float(prev["macd_hist"])
             candidates.append((score, sym, name, row, prev))
 
         # 優先セクター → MACDヒスト高い順 → slots 分だけ入る
