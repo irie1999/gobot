@@ -54,12 +54,11 @@ def _period_str(backtest_days: int) -> str:
 
 
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
-    """backtest_macd_scan.py と同じ方式でダウンロード。
-    キャッシュなし・auto_adjust=True・period= 指定。"""
+    """キャッシュなし・auto_adjust=False（実際の株価）・period= 指定。"""
     period = _period_str(backtest_days)
     try:
         raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+                          auto_adjust=False, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
@@ -80,11 +79,11 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
 
 
 def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
-    """backtest_macd_scan.py と同じ方式で日経平均を取得。"""
+    """日経平均を取得。auto_adjust=False（実際の終値）。"""
     period = _period_str(backtest_days)
     try:
         raw = yf.download("^N225", period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+                          auto_adjust=False, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
@@ -131,7 +130,7 @@ def fetch_vix(backtest_days: int) -> pd.Series | None:
     period = _period_str(backtest_days)
     try:
         raw = yf.download("^VIX", period=period, interval="1d",
-                          auto_adjust=True, progress=False)
+                          auto_adjust=False, progress=False)
         if raw.empty:
             return None
         if isinstance(raw.columns, pd.MultiIndex):
