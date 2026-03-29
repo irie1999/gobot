@@ -191,10 +191,10 @@ def backtest_hv(
             exit_p = reason = None
 
             if lo <= entry_p * (1 - p["HARD_STOP_PCT"] / 100):
-                exit_p = min(op, entry_p * (1 - p["HARD_STOP_PCT"] / 100))
-                reason = f"損切り(-{p['HARD_STOP_PCT']:.0f}%)"
+                exit_p = op   # 当日始値（実際の市場データ）で決済
+                reason = "損切り"
             elif lo <= trail:
-                exit_p = min(op, trail)
+                exit_p = op   # 当日始値（実際の市場データ）で決済
                 reason = "トレイリング"
             elif float(prev["rsi2"]) >= p["RSI2_EXIT"]:
                 exit_p = op
