@@ -1,15 +1,18 @@
 """
-MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄スキャナー（225銘柄）
+VCP (Volatility Contraction Pattern) × 相対強度  銘柄スキャナー（225銘柄）
 ────────────────────────────────────────────────────────────────────────
 【アルゴリズム】
-  Entry（3条件すべて）:
-    1. MACDヒストグラムがゼロラインを下から上抜け（前日<=0 → 当日>0）
-    2. 出来高 > 20日平均 × 1.5倍  ← 機関投資家の本物の参入
-    3. 終値 > 25日移動平均線       ← 短期上昇トレンド確認
+  Entry（翌日始値、全条件必須）:
+    1. EMA21 > MA50 > MA200 かつ 終値 > EMA21（短中長期トレンド一致）
+    2. 直近5日TR% < 21日平均TR% × 0.80（ボラティリティ収縮中）
+    3. 終値 > 前7日間の最高終値（収縮後のブレイクアウト）
+    4. 出来高 > 20日平均 × 1.5倍（機関投資家の本格参入）
+    5. RSI 40〜65 ／ MA200上 ／ 日経対比RS ≥ -10%
 
   Exit（いずれか）:
-    A. MACDヒストグラムがゼロラインを上から下抜け（前日>=0 → 当日<0）
-    B. ATRトレイリングストップ発動（ATR × 2.5）
+    A. ATR × 2.5 トレイリングストップ
+    B. 終値が EMA21 を下抜け（短期トレンド転換）
+    C. 損切り -3% ／ 半分利確 +8%
 
 ■ 実行方法:
   python backtest_macd_scan.py                    # 直近1ヶ月（デフォルト）
@@ -321,44 +324,52 @@ SECTOR = {
 BACKTEST_DAYS   = 30            # デフォルト（1ヶ月）
 WORKERS         = 16            # 並列バックテスト数
 
-# ──────────────────────────────────────────────────────────────
-# MACD パラメータ【2026年3月 相場分析に基づく更新】
-# 日経VI=40〜48（超高ボラ）→ 高速MACD(5,13,4)はノイズ過多
-# スイングトレード(3〜10日)の標準推奨設定 MACD(12,26,9) に変更
-# 出所: Fintokei / ForexTester 高ボラ相場スイング検証
-# ──────────────────────────────────────────────────────────────
-MACD_FAST       = 8             # バランス設定: (5,13,4)より遅く (12,26,9)より速い
-MACD_SLOW       = 17            # 高ボラでも30日間に3〜5回シグナルが出る
-MACD_SIGNAL     = 5
-VOL_MA_PERIOD   = 20
-VOL_SPIKE_MULT  = 1.2
-MA_TREND_PERIOD = 10            # 25→10: 修正相場では25MA割れが多く全滅するため
+# ── VCP (Volatility Contraction Pattern) × 相対強度 ────────────────
+# 【戦略概要】
+#   機関投資家の買い集め → 株価がじっくり収縮（ボラ低下）→ 出来高急増で上放れ
+#   MACDクロスよりも 1〜2 週間早いシグナル = RSI40〜55・低MA乖離でエントリー可能
+#
+#   Entry（全条件を満たした翌日始値）:
+#     1. EMA21 > MA50 > MA200 かつ 終値 > EMA21（短中長期トレンド一致）
+#     2. 直近5日TR% が 21日平均TR% の 80%以下（ボラティリティ収縮中）
+#     3. 終値 > 前7日間の最高終値（収縮後のブレイクアウト）
+#     4. 出来高 > 20日平均 × 1.5倍（機関投資家の本物の参入）
+#     5. MA200 上（長期上昇トレンド確認）
+#     6. RSI 40〜65（過熱でも底でもない適切な水準）
+#     7. 日経対比リターン ≥ -10%（弱い銘柄を除外）
+#
+#   Exit（いずれか）:
+#     A. ATR × 2.5 トレイリングストップ
+#     B. 終値が EMA21 を下抜け（短期トレンド転換）
+#     C. -3% ハードストップ
+#     D. +8% で半分利確
 
-ATR_PERIOD      = 14
-ATR_STOP_MULT   = 1.5
-ATR_TRAIL_MULT  = 2.0           # 1.8→2.0: 高ボラで早く狩られすぎない
+EMA21_PERIOD    = 21    # 短期EMA（Minervini式: 機関投資家参照基準線）
+MA50_PERIOD     = 50    # 中期SMA（トレンド中軸）
+ATR_PERIOD      = 14    # ATR（ボラティリティ計測）
+VCP_WINDOW      = 7     # ボラ収縮確認ウィンドウ（7日=約1週間）
+ATR_COMPRESS    = 0.80  # 収縮判定: 直近5日TR% / 21日平均TR% < この値
+RS_LOOKBACK     = 40    # 相対強度比較期間（約2ヶ月）
+RS_MIN          = -0.10 # 日経対比 -10%以上の銘柄のみ対象
+
+VOL_MA_PERIOD   = 20    # 出来高移動平均
+ATR_TRAIL_MULT  = 2.5   # ATRトレイル係数（高ボラ対応）
 
 INITIAL_CASH    = 500_000
 POSITION_SIZE   = 50_000  # 1銘柄あたり購入金額（固定）
 MAX_QTY         = 9999
 
-# ── エントリーフィルター【2026年3月 高ボラ相場対応】─────────────
-# 日経VI=46 → ATRが大きく振れる → フィルター幅を広めに設定
-# RSI: 高VI時は深い押し目(25〜35)からの反発を狙う
-FILTER_MA_DEV_MAX    =  4.0   # MA乖離 ±4%以内（7%→4%: 過熱エントリー除外）
+# ── エントリーフィルター ─────────────────────────────────────────
 FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
-FILTER_ATR_PCT_MIN   =  1.5   # ATR% 下限（2.0→1.5: 保険・銀行株対応）
-FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限
-FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：深い押し目を拾う）
-FILTER_RSI_MAX       = 58.0   # RSI 上限（68→58: RSI60超エントリーは損失多発）
-FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限
-FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限
+FILTER_RSI_MIN       = 40.0   # RSI下限（過度な売られすぎは基調転換の疑い）
+FILTER_RSI_MAX       = 65.0   # RSI上限（過熱時はブレイク失敗リスク高）
+FILTER_VOL_SURGE     =  1.5   # ブレイクアウト時の出来高倍率（機関投資家確認）
 
 # ── ポートフォリオ管理 ─────────────────────────────────────────
 MAX_POSITIONS        = 5     # 同時保有最大銘柄数（地合い良好時）
 MAX_POSITIONS_BEAR   = 2     # 日経MA25割れ時は絞る
-HALF_PROFIT_PCT      = 7.0   # 半分利確ライン（高ボラ：トレンドを引っ張る）
-HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応：2%では早すぎる）
+HALF_PROFIT_PCT      = 8.0   # 半分利確ライン（VCP: より深いトレンドを狙う）
+HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応）
 
 # ── 相場分析に基づくセクター設定【2026年3月 詳細分析版】──────────
 #
@@ -392,86 +403,87 @@ FOCUS_SYMBOLS    = {"8316.T", "7011.T", "7013.T", "8035.T", "8766.T"}
 # 【半導体注意】6857 アドバンテスト: PER54x、3月下落を主導 → 現状は様子見
 # PREFER_SECTORSから半導体を除外（高VI時は真っ先に売られる）
 
-# ── インジケーター計算 ──────────────────────────────────────
+# ── インジケーター計算（VCP × 相対強度） ──────────────────────────
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     c = df["close"]
     h = df["high"]
     l = df["low"]
     v = df["volume"]
 
-    # ATR
-    prev_c = c.shift(1)
-    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    atr    = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
-    # MACD
-    ema_fast    = c.ewm(span=MACD_FAST,   adjust=False).mean()
-    ema_slow    = c.ewm(span=MACD_SLOW,   adjust=False).mean()
-    macd_line   = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    histogram   = macd_line - signal_line
-
-    # 出来高・トレンドフィルター
-    vol_ma = v.rolling(VOL_MA_PERIOD).mean()
-    ma10   = c.rolling(MA_TREND_PERIOD).mean()
-
-    # ── 追加指標 ──────────────────────────────────────────
-    # RSI(14)
-    delta    = c.diff()
-    gain     = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    loss     = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
-    rsi      = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-
-    # 移動平均（75日・200日）
+    # ── トレンド系 ──────────────────────────────────────────
+    ema21 = c.ewm(span=EMA21_PERIOD, adjust=False).mean()
+    ma50  = c.rolling(MA50_PERIOD).mean()
     ma75  = c.rolling(75).mean()
     ma200 = c.rolling(200).mean()
 
-    # ATR % (ボラティリティ率)
-    atr_pct = atr / c * 100
+    # ── ATR(14) ──────────────────────────────────────────────
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    atr_pct = atr / c.replace(0, np.nan) * 100
 
-    # 出来高比率
+    # ── 正規化TR（ボラ収縮判定用） ────────────────────────────
+    # tr_norm: 当日のTR を終値で割ったボラ率（ATRと違いスムージングなし）
+    tr_norm     = tr / c.replace(0, np.nan)
+    tr_norm_5d  = tr_norm.rolling(5).mean()    # 直近5日平均（現在の収縮度）
+    tr_norm_21d = tr_norm.rolling(21).mean()   # 21日平均（通常時の基準）
+    # compress < ATR_COMPRESS → ボラが収縮中（VCP成立の前提条件）
+    atr_compress = tr_norm_5d / tr_norm_21d.replace(0, np.nan)
+
+    # ── VCPウィンドウ高値 ──────────────────────────────────
+    # 前日時点の直近 VCP_WINDOW 日最高終値 → これを本日終値が上抜けたらブレイクアウト
+    high_vcp = c.rolling(VCP_WINDOW).max().shift(1)
+
+    # ── 出来高 ────────────────────────────────────────────
+    vol_ma    = v.rolling(VOL_MA_PERIOD).mean()
     vol_ratio = v / vol_ma.replace(0, np.nan)
 
-    # 25日高値ブレイク（前日までの直近25日高値を本日終値が超えているか）
-    high25    = h.rolling(25).max().shift(1)
-    new_high25 = c > high25
+    # ── RSI(14) ───────────────────────────────────────────
+    delta = c.diff()
+    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+    rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
 
-    # 25MA乖離率
-    ma25_dev  = (c - ma10) / ma10.replace(0, np.nan) * 100
+    # ── MA乖離率（EMA21基準） ──────────────────────────────
+    ma_dev = (c - ema21) / ema21.replace(0, np.nan) * 100
 
-    prev_hist  = histogram.shift(1)
-    prev2_hist = histogram.shift(2)
+    # ── 25日高値ブレイク（表示用） ─────────────────────────
+    new_high25 = c > h.rolling(25).max().shift(1)
 
+    # ── Entry シグナル（VCP ブレイクアウト） ─────────────────
+    # 条件1: トレンド一致（EMA21>MA50>MA200 かつ 終値>EMA21）
+    trend_ok    = (ema21 > ma50) & (ma50 > ma200) & (c > ema21)
+    # 条件2: ボラ収縮（直近5日TR%が21日平均の80%以下）
+    compress_ok = atr_compress <= ATR_COMPRESS
+    # 条件3: ブレイクアウト（終値が前VCP_WINDOW日の最高終値を上抜け）
+    breakout_ok = c > high_vcp
+    # 条件4: 出来高急増（機関投資家の本格参入）
+    vol_ok      = v > vol_ma * FILTER_VOL_SURGE
     df = df.copy()
-    df["atr"]        = atr
-    df["atr_pct"]    = atr_pct
-    df["macd"]       = macd_line
-    df["macd_sig"]   = signal_line
-    df["macd_hist"]  = histogram
-    df["vol_ma"]     = vol_ma
-    df["vol_ratio"]  = vol_ratio
-    df["ma25"]       = ma10
-    df["ma25_dev"]   = ma25_dev
-    df["ma75"]       = ma75
-    df["ma200"]      = ma200
-    df["rsi"]        = rsi
-    df["new_high25"] = new_high25
+    df["entry_sig"] = trend_ok & compress_ok & breakout_ok & vol_ok
 
-    vol_ok   = v > vol_ma * VOL_SPIKE_MULT
-    trend_ok = c > ma10
+    # ── Exit シグナル（EMA21 下抜け） ─────────────────────
+    # 終値が EMA21 を下から上抜けていた → 今日下抜け（短期トレンド転換）
+    df["exit_sig"] = (c < ema21) & (c.shift(1) >= ema21.shift(1))
 
-    # Entry パターン1: ヒストグラムがゼロライン上抜け
-    zero_cross_up = (histogram > 0) & (prev_hist <= 0)
-    # Entry パターン2: ヒストグラムが正値かつ2日連続上昇
-    hist_accel    = (histogram > 0) & (histogram > prev_hist) & (prev_hist > prev2_hist)
-    # Entry: ゼロクロス上抜け OR ヒスト2日連続加速（どちらかでOK）
-    df["entry_sig"] = (zero_cross_up | hist_accel) & vol_ok & trend_ok
-
-    # Exit パターン1: ヒストグラムがゼロライン下抜け
-    zero_cross_dn = (histogram < 0) & (prev_hist >= 0)
-    # Exit パターン2: ヒストグラムが負値かつ2日連続下落
-    hist_decel    = (histogram < 0) & (histogram < prev_hist) & (prev_hist < prev2_hist)
-    df["exit_sig"] = zero_cross_dn | hist_decel
+    # ── 出力列 ────────────────────────────────────────────
+    df["ema21"]        = ema21
+    df["ma50"]         = ma50
+    df["ma75"]         = ma75
+    df["ma200"]        = ma200
+    df["atr"]          = atr
+    df["atr_pct"]      = atr_pct
+    df["atr_compress"] = atr_compress
+    df["high_vcp"]     = high_vcp
+    df["vol_ma"]       = vol_ma
+    df["vol_ratio"]    = vol_ratio
+    df["rsi"]          = rsi
+    df["ma_dev"]       = ma_dev
+    df["new_high25"]   = new_high25
+    # 後方互換エイリアス（表示・メタデータ参照用）
+    df["ma25"]         = ema21
+    df["ma25_dev"]     = ma_dev
+    df["above_ma50"]   = c > ma50
 
     return df
 
@@ -499,7 +511,7 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
             raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
-        min_needed = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD
+        min_needed = 200 + VOL_MA_PERIOD + VCP_WINDOW + EMA21_PERIOD
         if len(raw) < min_needed:
             return None
         return pd.DataFrame({
@@ -564,6 +576,14 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
 
     df = calc_indicators(df)
 
+    # 相対強度（日経対比）を全期間で計算してから期間を切り出す
+    if nikkei_df is not None:
+        nk_c = nikkei_df["close"].reindex(df.index, method="ffill")
+        df["rs_diff"] = (df["close"].pct_change(RS_LOOKBACK)
+                         - nk_c.pct_change(RS_LOOKBACK))
+    else:
+        df["rs_diff"] = 0.0  # Nikkeiデータなし → RSフィルターをスキップ
+
     cutoff    = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
     df_target = df[df.index >= cutoff].copy()
 
@@ -582,7 +602,7 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
         prev = df_target.iloc[i - 1] if i > 0 else row
         dt   = df_target.index[i]
 
-        if pd.isna(row["macd_hist"]) or pd.isna(row["atr"]):
+        if pd.isna(row["ema21"]) or pd.isna(row["atr"]):
             continue
 
         # ── エグジット ──
@@ -593,7 +613,7 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                 exit_r = "トレイリング"
             elif bool(prev["exit_sig"]):
                 exit_p = float(row["open"])
-                exit_r = "MACDクロス"
+                exit_r = "EMA21割れ"
             if exit_p is not None:
                 pnl   = (exit_p - entry_price) * qty
                 cash += exit_p * qty
@@ -633,19 +653,20 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                     # ── エントリー時の詳細メタデータを保存 ──
                     _ep  = entry_price
                     entry_meta = {
-                        "sector":      SECTOR.get(symbol, "その他"),
-                        "price_tier":  "高位" if _ep >= 5000 else "中位" if _ep >= 1000 else "低位",
-                        "ma25_dev":    float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 0.0,
-                        "above_ma75":  bool(_ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
-                        "above_ma200": bool(_ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
-                        "new_high25":  bool(prev["new_high25"]),
-                        "atr_val":     float(prev["atr"]),
-                        "atr_pct":     float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0,
-                        "vol":         float(prev["volume"]),
-                        "vol_ratio":   float(prev["vol_ratio"]) if not pd.isna(prev["vol_ratio"]) else 0.0,
-                        "macd_hist":   float(prev["macd_hist"]),
-                        "rsi":         float(prev["rsi"])        if not pd.isna(prev["rsi"])        else 0.0,
-                        "nikkei_up":   _nikkei_trend(nikkei_df, dt),
+                        "sector":       SECTOR.get(symbol, "その他"),
+                        "price_tier":   "高位" if _ep >= 5000 else "中位" if _ep >= 1000 else "低位",
+                        "ma25_dev":     float(prev["ma_dev"])       if not pd.isna(prev["ma_dev"])       else 0.0,
+                        "above_ma75":   bool(_ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
+                        "above_ma200":  bool(_ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
+                        "new_high25":   bool(prev["new_high25"]),
+                        "atr_val":      float(prev["atr"]),
+                        "atr_pct":      float(prev["atr_pct"])      if not pd.isna(prev["atr_pct"])      else 0.0,
+                        "atr_compress": float(prev["atr_compress"]) if not pd.isna(prev["atr_compress"]) else 1.0,
+                        "vol":          float(prev["volume"]),
+                        "vol_ratio":    float(prev["vol_ratio"])    if not pd.isna(prev["vol_ratio"])    else 0.0,
+                        "rs_diff":      float(prev["rs_diff"])      if not pd.isna(prev["rs_diff"])      else 0.0,
+                        "rsi":          float(prev["rsi"])           if not pd.isna(prev["rsi"])          else 0.0,
+                        "nikkei_up":    _nikkei_trend(nikkei_df, dt),
                     }
 
     # 未決済を最終日終値で仮決済
@@ -681,8 +702,8 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
 
     last      = df_target.iloc[-1]
     last_close = float(last["close"])
-    last_hist  = float(last["macd_hist"]) if not pd.isna(last["macd_hist"]) else 0.0
-    last_ma25  = float(last["ma25"])      if not pd.isna(last["ma25"])      else 0.0
+    last_hist  = float(last["rs_diff"]) if not pd.isna(last["rs_diff"]) else 0.0
+    last_ma25  = float(last["ema21"])     if not pd.isna(last["ema21"])     else 0.0
 
     return {
         "symbol":    symbol,
@@ -705,27 +726,31 @@ def run_backtest(symbol: str, name: str, df: pd.DataFrame,
 
 # ── ポートフォリオバックテスト（最大MAX_POSITIONS同時保有）────
 def _check_entry_filters(prev: pd.Series) -> bool:
-    """エントリーフィルター判定（共通）"""
-    _ma_dev  = float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 999.0
-    _atr_pct = float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0
-    _rsi     = float(prev["rsi"])        if not pd.isna(prev["rsi"])       else 0.0
-    _vol_r   = float(prev["vol_ratio"])  if not pd.isna(prev["vol_ratio"]) else 0.0
-    _close   = float(prev["close"])
-    _ma200   = float(prev["ma200"]) if not pd.isna(prev["ma200"]) else None
+    """VCP エントリーフィルター判定（共通）
+    calc_indicators() の entry_sig が True のあと、追加条件を確認する。
+    ・MA200 上（長期トレンド確認）
+    ・RSI 過熱・売られすぎ排除
+    ・相対強度（rs_diff 列が存在する場合）
+    """
+    _rsi    = float(prev["rsi"])    if not pd.isna(prev["rsi"])    else 0.0
+    _close  = float(prev["close"])
+    _ma200  = float(prev["ma200"])  if not pd.isna(prev["ma200"])  else None
     _above200 = (_ma200 is not None) and (_close > _ma200)
+    # 相対強度フィルター（rs_diff 列は run_backtest/run_portfolio で追加）
+    _rs = (float(prev["rs_diff"])
+           if ("rs_diff" in prev.index and not pd.isna(prev["rs_diff"]))
+           else RS_MIN)  # 列なければギリギリ通過扱い
     return (
-        abs(_ma_dev)  <= FILTER_MA_DEV_MAX                         and
-        (not FILTER_MA200_ABOVE or _above200)                       and
-        FILTER_ATR_PCT_MIN <= _atr_pct <= FILTER_ATR_PCT_MAX       and
-        FILTER_RSI_MIN     <= _rsi     <= FILTER_RSI_MAX            and
-        FILTER_VOL_RATIO_MIN <= _vol_r <= FILTER_VOL_RATIO_MAX
+        (not FILTER_MA200_ABOVE or _above200) and
+        FILTER_RSI_MIN <= _rsi <= FILTER_RSI_MAX and
+        _rs >= RS_MIN
     )
 
 
 def run_portfolio(stock_data_map: dict, backtest_days: int,
                   nikkei_df: pd.DataFrame | None = None) -> dict | None:
     """MAX_POSITIONS 銘柄同時保有のポートフォリオシミュレーション。
-    ・優先セクター優先 → MACDヒスト高い順で最大N銘柄に入る
+    ・優先セクター優先 → 相対強度(RS)高い順で最大N銘柄に入る
     ・日経MA25割れ時は MAX_POSITIONS_BEAR に縮小
     ・+HALF_PROFIT_PCT% で半分利確
     ・-HARD_STOP_PCT% で即損切り"""
@@ -739,6 +764,13 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
         if sym in EXCLUDE_SYMBOLS:
             continue
         df_i = calc_indicators(df)
+        # 相対強度（日経対比）を全期間で計算
+        if nikkei_df is not None:
+            nk_c = nikkei_df["close"].reindex(df_i.index, method="ffill")
+            df_i["rs_diff"] = (df_i["close"].pct_change(RS_LOOKBACK)
+                               - nk_c.pct_change(RS_LOOKBACK))
+        else:
+            df_i["rs_diff"] = 0.0
         df_t = df_i[df_i.index >= cutoff]
         if len(df_t) >= 5:
             dfs[sym] = (name, df_t)
@@ -765,7 +797,7 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
             prev = df_t.iloc[loc - 1]
             pos  = positions[sym]
 
-            if pd.isna(row["macd_hist"]) or pd.isna(row["atr"]):
+            if pd.isna(row["ema21"]) or pd.isna(row["atr"]):
                 continue
 
             exit_p = exit_r = None
@@ -776,10 +808,10 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
             if lo <= pos["hard_stop"]:
                 exit_p = min(op, pos["hard_stop"])
                 exit_r = f"損切り(-{HARD_STOP_PCT:.0f}%)"
-            # 優先②: MACD クロス
+            # 優先②: EMA21 下抜け（短期トレンド転換）
             elif bool(prev["exit_sig"]):
                 exit_p = op
-                exit_r = "MACDクロス"
+                exit_r = "EMA21割れ"
             # 優先③: ATR トレイリング
             elif lo <= pos["trail_stop"]:
                 exit_p = min(op, pos["trail_stop"])
@@ -847,13 +879,14 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
                 continue
             if not _check_entry_filters(prev):
                 continue
-            # スコアリング: 最重要銘柄(+20) > 優先セクター(+10) > その他(+0) + MACDヒスト
+            # スコアリング: 最重要銘柄(+20) > 優先セクター(+10) > 相対強度(RS×100)
             focus_bonus  = 20.0 if sym in FOCUS_SYMBOLS else 0.0
             sector_bonus = 10.0 if SECTOR.get(sym, "") in PREFER_SECTORS else 0.0
-            score = focus_bonus + sector_bonus + float(prev["macd_hist"])
+            rs_score = float(prev["rs_diff"]) * 100 if not pd.isna(prev["rs_diff"]) else 0.0
+            score = focus_bonus + sector_bonus + rs_score
             candidates.append((score, sym, name, row, prev))
 
-        # 優先セクター → MACDヒスト高い順 → slots 分だけ入る
+        # 優先セクター → RS高い順 → slots 分だけ入る
         # 日経地合い（MA25割れ）でMAX_POSITIONSを縮小
         nk_now = _nikkei_trend(nikkei_df, dt)
         max_pos = MAX_POSITIONS_BEAR if nk_now is False else MAX_POSITIONS
@@ -870,18 +903,19 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
                 continue
             cash -= cost
             meta = {
-                "sector":      SECTOR.get(sym, "その他"),
-                "price_tier":  "高位" if ep >= 5000 else "中位" if ep >= 1000 else "低位",
-                "ma25_dev":    float(prev["ma25_dev"])  if not pd.isna(prev["ma25_dev"])  else 0.0,
-                "above_ma75":  bool(ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
-                "above_ma200": bool(ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
-                "new_high25":  bool(prev["new_high25"]),
-                "atr_val":     atr_v,
-                "atr_pct":     float(prev["atr_pct"])   if not pd.isna(prev["atr_pct"])   else 0.0,
-                "vol":         float(prev["volume"]),
-                "vol_ratio":   float(prev["vol_ratio"]) if not pd.isna(prev["vol_ratio"]) else 0.0,
-                "macd_hist":   float(prev["macd_hist"]),
-                "rsi":         float(prev["rsi"])        if not pd.isna(prev["rsi"])        else 0.0,
+                "sector":       SECTOR.get(sym, "その他"),
+                "price_tier":   "高位" if ep >= 5000 else "中位" if ep >= 1000 else "低位",
+                "ma25_dev":     float(prev["ma_dev"])       if not pd.isna(prev["ma_dev"])       else 0.0,
+                "above_ma75":   bool(ep > float(prev["ma75"]))  if not pd.isna(prev["ma75"])  else False,
+                "above_ma200":  bool(ep > float(prev["ma200"])) if not pd.isna(prev["ma200"]) else False,
+                "new_high25":   bool(prev["new_high25"]),
+                "atr_val":      atr_v,
+                "atr_pct":      float(prev["atr_pct"])      if not pd.isna(prev["atr_pct"])      else 0.0,
+                "atr_compress": float(prev["atr_compress"]) if not pd.isna(prev["atr_compress"]) else 1.0,
+                "vol":          float(prev["volume"]),
+                "vol_ratio":    float(prev["vol_ratio"])    if not pd.isna(prev["vol_ratio"])    else 0.0,
+                "rs_diff":      float(prev["rs_diff"])      if not pd.isna(prev["rs_diff"])      else 0.0,
+                "rsi":          float(prev["rsi"])           if not pd.isna(prev["rsi"])          else 0.0,
                 "nikkei_up":   _nikkei_trend(nikkei_df, dt),
             }
             positions[sym] = {
@@ -1001,8 +1035,9 @@ def print_portfolio(pr: dict, backtest_days: int, label: str) -> None:
             print(f"       業種:{t.get('sector','--'):5s}  "
                   f"MA乖離:{t.get('ma25_dev',0):+4.1f}%  "
                   f"ATR:{t.get('atr_pct',0):.1f}%  "
+                  f"収縮:{t.get('atr_compress',1.0):.2f}  "
                   f"出来高比:{t.get('vol_ratio',0):.1f}x  "
-                  f"MACD:{t.get('macd_hist',0):+.3f}  "
+                  f"RS:{t.get('rs_diff',0):+.3f}  "
                   f"RSI:{t.get('rsi',0):.0f}  "
                   f"保有{t['hold_days']}日")
         print("  " + "─" * 84)
@@ -1051,7 +1086,7 @@ def print_detail(r: dict, backtest_days: int) -> None:
               if nk_up_tr and nk_dn_tr else
               f"↑上昇 {len(nk_up_tr)}回  ↓下落 {len(nk_dn_tr)}回")
     print(f"  現在値           : {r['last_close']:,.1f}円  "
-          f"MACDヒスト: {r['last_hist']:+.2f}  25MA: {r['last_ma25']:,.1f}  "
+          f"RS(日経対比): {r['last_hist']:+.2f}  EMA21: {r['last_ma25']:,.1f}  "
           f"トレンド: {'↑' if r['last_close'] > r['last_ma25'] else '↓'}")
     print()
 
@@ -1078,8 +1113,9 @@ def print_detail(r: dict, backtest_days: int) -> None:
                   f"  MA乖離:{t.get('ma25_dev', 0):+5.1f}%"
                   f"  {ma75_s}  {ma200_s}  {nh25_s}"
                   f"  ATR:{t.get('atr_pct', 0):.1f}%"
+                  f"  収縮:{t.get('atr_compress', 1.0):.2f}"
                   f"  出来高比:{t.get('vol_ratio', 0):.1f}x"
-                  f"  MACD:{t.get('macd_hist', 0):+.2f}"
+                  f"  RS:{t.get('rs_diff', 0):+.3f}"
                   f"  RSI:{t.get('rsi', 0):.0f}"
                   f"  {nk}")
         print("  " + "─" * 82)
@@ -1097,7 +1133,7 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
 
     print()
     print("═" * 80)
-    print(f"  MACDブレイクアウト × 出来高 × ATRトレイリング  "
+    print(f"  VCP (Volatility Contraction Pattern) × 相対強度  "
           f"ランキング TOP{top_n}  [{since} ～ {today}]")
     print("═" * 80)
     print(f"  {'順位':<4} {'銘柄':<24} {'損益':>10} {'損益率':>8} {'勝率':>6} "
@@ -1107,7 +1143,7 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
     for rank, r in enumerate(display, 1):
         sign  = "+" if r["ret_pct"] >= 0 else ""
         trend = "↑" if r["last_close"] > r["last_ma25"] else "↓"
-        hist_s = f"{r['last_hist']:+.2f}"
+        rs_s   = f"{r['last_hist']:+.2f}"   # last_hist は rs_diff を格納
         pf_s   = "∞" if r["pf"] == float("inf") else f"{r['pf']:.1f}"
         bar    = ("▲" if r["ret_pct"] >= 0 else "▽") * min(int(abs(r["ret_pct"]) / 2), 12)
 
@@ -1116,7 +1152,7 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
               f"{sign}{r['total']:>9,.0f}円 {sign}{r['ret_pct']:>6.1f}% "
               f"{r['win_rate']:>5.0f}% {pf_s:>5} {r['trades']:>3}回 "
               f"{r['avg_hold']:>5.1f}日  {r['last_close']:>7,.0f}{trend} "
-              f"ヒスト:{hist_s}  {bar}")
+              f"RS:{rs_s}  {bar}")
 
     print("  " + "─" * 76)
     total_tr   = sum(r["trades"] for r in results)
@@ -1151,20 +1187,18 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
         print(f"  エントリー時日経 ↑上昇: {len(nk_up_tr)}回 勝率{up_wr}  "
               f"↓下落: {len(nk_dn_tr)}回 勝率{dn_wr}")
     print()
-    print(f"  【エントリー】 MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})  "
-          f"①ヒスト ゼロ上抜け  または  ②ヒスト正値＋2日連続上昇")
-    print(f"              ＋ 出来高 >{VOL_SPIKE_MULT}×{VOL_MA_PERIOD}日平均  "
-          f"＋ 終値 >{MA_TREND_PERIOD}日MA")
-    print(f"  【決済】 ①ヒスト ゼロ下抜け  または  ②ヒスト負値＋2日連続下落  "
-          f"または  ③ATRトレイリング×{ATR_TRAIL_MULT}")
-    print(f"  【資金】 {INITIAL_CASH:,}円（総枠）  1銘柄 {POSITION_SIZE:,}円固定")
     ma200_s = "MA200上のみ" if FILTER_MA200_ABOVE else "MA200不問"
-    print(f"  【フィルター】 MA乖離 ≤{FILTER_MA_DEV_MAX}%  {ma200_s}  "
-          f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%  "
-          f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  "
-          f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x")
     excl = "、".join(sorted(EXCLUDE_SECTORS)) if EXCLUDE_SECTORS else "なし"
-    print(f"  【除外セクター】 {excl}")
+    excl_sym = "、".join(sorted(EXCLUDE_SYMBOLS)) if EXCLUDE_SYMBOLS else "なし"
+    print(f"  【戦略】 VCP (Volatility Contraction Pattern) × 相対強度")
+    print(f"  【エントリー】 ①EMA21>MA50>MA200 ＋ 終値>EMA21（トレンド一致）")
+    print(f"              ②直近5日TR% < 21日平均TR%×{ATR_COMPRESS}（ボラ収縮）")
+    print(f"              ③終値 > 前{VCP_WINDOW}日間最高終値（ブレイクアウト）")
+    print(f"              ④出来高 > {VOL_MA_PERIOD}日平均×{FILTER_VOL_SURGE}倍（機関投資家参入）")
+    print(f"              ⑤RS(日経対比{RS_LOOKBACK}日) ≥ {RS_MIN:+.0%}  RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}  {ma200_s}")
+    print(f"  【決済】 ①ATRトレイリング×{ATR_TRAIL_MULT}  ②EMA21下抜け  ③損切り-{HARD_STOP_PCT:.0f}%  ④+{HALF_PROFIT_PCT:.0f}%半分利確")
+    print(f"  【資金】 {INITIAL_CASH:,}円（総枠）  1銘柄 {POSITION_SIZE:,}円固定")
+    print(f"  【除外セクター】 {excl}  【除外銘柄】 {excl_sym}")
     print()
 
     # ── 全トレード詳細（ランキング上位銘柄） ────────────────
@@ -1175,7 +1209,7 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
             f"{'買値':>8} {'売値':>8} {'損益':>9}{'損益率':>7}  決済理由")
     hdr2 = (f"  {'':18} {'業種':>5}{'株価帯':>4}"
             f"  MA乖離  MA75  MA200  25H"
-            f"  ATR%  出来高比  MACD    RSI  日経")
+            f"  ATR%  収縮  出来高比  RS%    RSI  日経")
     print(hdr1)
     print(hdr2)
     print("  " + "─" * 78)
@@ -1201,7 +1235,8 @@ def print_ranking(results: list[dict], backtest_days: int, top_n: int) -> None:
                   f"  MA75{ma75_s}  MA200{ma200_s}  25H{nh25_s}"
                   f"  {t.get('atr_pct',0):>4.1f}%"
                   f"  {t.get('vol_ratio',0):>5.1f}x"
-                  f"  {t.get('macd_hist',0):>+6.3f}"
+                  f"  {t.get('atr_compress',1.0):>4.2f}"
+                  f"  {t.get('rs_diff',0)*100:>+5.1f}%"
                   f"  {t.get('rsi',0):>5.1f}"
                   f"  {nk_s}")
         print("  " + "·" * 60)
@@ -1260,7 +1295,7 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
               <td>MA75{ma75_s} MA200{ma200_s} 25H{nh25_s}</td>
               <td class="num">{t.get('atr_pct',0):.1f}%</td>
               <td class="num">{t.get('vol_ratio',0):.1f}x</td>
-              <td class="num">{t.get('macd_hist',0):+.3f}</td>
+              <td class="num">{t.get('rs_diff',0)*100:+.1f}%</td>
               <td class="num">{t.get('rsi',0):.0f}</td>
               <td>{nk_s}</td>
             </tr>"""
@@ -1286,7 +1321,7 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
                   <th>エントリー</th><th>エグジット</th><th>買値</th><th>売値</th>
                   <th>損益</th><th>保有</th><th>決済理由</th><th>業種</th>
                   <th>MA乖離</th><th>MA位置</th><th>ATR%</th><th>出来高比</th>
-                  <th>MACD</th><th>RSI</th><th>日経</th>
+                  <th>RS%</th><th>RSI</th><th>日経</th>
                 </tr>
               </thead>
               <tbody>{trade_rows}</tbody>
@@ -1296,13 +1331,13 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
 
     # ── フィルター表示 ──
     excl_s = "、".join(sorted(EXCLUDE_SECTORS)) if EXCLUDE_SECTORS else "なし"
+    excl_sym_s = "、".join(sorted(EXCLUDE_SYMBOLS)) if EXCLUDE_SYMBOLS else "なし"
     ma200_fs = "MA200上のみ" if FILTER_MA200_ABOVE else "MA200不問"
     filter_html = (
-        f"MA乖離 ≤{FILTER_MA_DEV_MAX}%　{ma200_fs}　"
-        f"ATR {FILTER_ATR_PCT_MIN}〜{FILTER_ATR_PCT_MAX}%　"
-        f"RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}　"
-        f"出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x　"
-        f"除外セクター: {excl_s}"
+        f"VCP(ボラ収縮{ATR_COMPRESS}×＋ブレイクアウト{VCP_WINDOW}日)　"
+        f"出来高 >{FILTER_VOL_SURGE}x　RSI {FILTER_RSI_MIN:.0f}〜{FILTER_RSI_MAX:.0f}　"
+        f"RS(日経対比{RS_LOOKBACK}日) ≥{RS_MIN:+.0%}　{ma200_fs}　"
+        f"除外セクター: {excl_s}　除外銘柄: {excl_sym_s}"
     )
 
     html = f"""<!DOCTYPE html>
@@ -1310,7 +1345,7 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MACDバックテスト {label} — {today}</title>
+<title>VCPバックテスト {label} — {today}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1355,9 +1390,9 @@ def generate_html(results: list[dict], backtest_days: int, label: str) -> Path:
 </style>
 </head>
 <body>
-<h1>MACDブレイクアウト × 出来高急増 × ATRトレイリング　バックテスト</h1>
+<h1>VCP (Volatility Contraction Pattern) × 相対強度　バックテスト</h1>
 <p class="subtitle">期間: {since} ～ {today}（直近{label}）
-  MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})　ATR×{ATR_TRAIL_MULT}トレイリング</p>
+  VCP {VCP_WINDOW}日収縮({ATR_COMPRESS})　ATR×{ATR_TRAIL_MULT}トレイリング　RS≥{RS_MIN:+.0%}</p>
 
 <div class="stats">
   <div class="stat-card"><div class="val">{len(results)}</div><div class="lbl">シグナル銘柄数</div></div>
@@ -1433,7 +1468,7 @@ function toggleTrades(sym) {{
 # ── メイン ─────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="MACDブレイクアウト × 出来高 バックテスト（日経225）",
+        description="VCP × 相対強度 バックテスト（日経225）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
@@ -1472,7 +1507,7 @@ def main() -> None:
         label = "1ヶ月"
 
     since = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-    print(f"\n  MACDブレイクアウト × 出来高 × ATRトレイリング  直近{label}バックテスト")
+    print(f"\n  VCP (Volatility Contraction Pattern) × 相対強度  直近{label}バックテスト")
     print(f"  期間: {since} ～ {datetime.today().strftime('%Y-%m-%d')}\n")
 
     # 対象銘柄を絞り込み
@@ -1577,12 +1612,13 @@ def main() -> None:
                 "new_high25":  t.get("new_high25", ""),
                 "atr_pct":     round(t.get("atr_pct", 0), 2),
                 "vol_ratio":   round(t.get("vol_ratio", 0), 2),
-                "macd_hist":   round(t.get("macd_hist", 0), 4),
+                "rs_diff":     round(t.get("rs_diff", 0), 4),
+                "atr_compress": round(t.get("atr_compress", 1.0), 3),
                 "rsi":         round(t.get("rsi", 0), 1),
                 "nikkei_up":   t.get("nikkei_up", ""),
             })
     if rows:
-        csv_path = f"macd_trades_{datetime.today().strftime('%Y%m%d')}_{label}.csv"
+        csv_path = f"vcp_trades_{datetime.today().strftime('%Y%m%d')}_{label}.csv"
         pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
         print(f"  CSVエクスポート: {csv_path}  ({len(rows)}件)\n")
 
