@@ -25,6 +25,7 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
 """
 
 import argparse
+import json
 import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -634,7 +635,7 @@ def scan_today_signals(stock_data_map: dict,
     }
 
 
-def print_signals(sig: dict) -> None:
+def print_signals(sig: dict, portfolio: dict | None = None) -> None:
     """scan_today_signals の結果をターミナルに表示。"""
     today  = sig["today"]
     nk_cl  = sig["nikkei_close"]
@@ -709,8 +710,18 @@ def print_signals(sig: dict) -> None:
     print(f"  ※ 買値/売値は翌営業日の始値となります")
     print()
 
+    # ── 実際の保有ポジション ──────────────────────────────────
+    if portfolio:
+        current_prices = {s: d["buy"][0]["close"] if d.get("buy") else None
+                         for s, d in {}.items()}  # placeholder — prices from sig
+        # 現在値を buy/sell/hold の close から引く
+        price_map: dict[str, float] = {}
+        for item in buy + sell + hold:
+            price_map[item["symbol"]] = item["close"]
+        print_portfolio_status(portfolio, price_map)
 
-def generate_signal_html(sig: dict) -> Path:
+
+def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
     """scan_today_signals の結果を HTML ファイルに書き出す。"""
     today  = sig["today"]
     nk_cl  = sig["nikkei_close"]
@@ -768,6 +779,39 @@ def generate_signal_html(sig: dict) -> Path:
               <td class="num {'pos' if c['macd_hist']>=0 else 'neg'}">{c['macd_hist']:+.3f}</td>
             </tr>"""
         return out
+
+    # ── 実際のポートフォリオ HTML セクション ──────────────────
+    portfolio_section_html = ""
+    if portfolio and (portfolio.get("positions") or portfolio.get("history")):
+        price_map: dict[str, float] = {}
+        for item in buy + sell + hold:
+            price_map[item["symbol"]] = item["close"]
+        pos_rows, hist_rows = portfolio_rows_html(portfolio, price_map)
+        portfolio_section_html = f"""
+<div class="section">
+  <h2>◆ 実際の保有ポジション</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>銘柄</th><th>株数</th><th>買値</th><th>現在値</th>
+        <th>含み損益(円)</th><th>含み%</th><th>評価額</th><th>購入日</th>
+      </tr>
+    </thead>
+    <tbody>{pos_rows}</tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>◆ 取引履歴（直近10件）</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>銘柄</th><th>株数</th><th>買値</th><th>売値</th>
+        <th>損益(円)</th><th>損益%</th><th>期間</th>
+      </tr>
+    </thead>
+    <tbody>{hist_rows}</tbody>
+  </table>
+</div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -856,12 +900,296 @@ def generate_signal_html(sig: dict) -> Path:
   出来高比 {FILTER_VOL_RATIO_MIN}〜{FILTER_VOL_RATIO_MAX}x<br>
   ※ 保有中判定: 直近90日バックテスト結果に基づく
 </p>
+{portfolio_section_html}
 </body>
 </html>"""
 
     path = Path(f"signal_{today}.html")
     path.write_text(html, encoding="utf-8")
     return path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 実際の取引記録（portfolio.json）
+# ══════════════════════════════════════════════════════════════════════════════
+
+PORTFOLIO_FILE = Path("portfolio.json")
+
+
+def load_portfolio() -> dict:
+    """portfolio.json を読み込む。なければ空を返す。"""
+    if PORTFOLIO_FILE.exists():
+        try:
+            with open(PORTFOLIO_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"positions": [], "history": []}
+
+
+def save_portfolio(portfolio: dict) -> None:
+    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+        json.dump(portfolio, f, ensure_ascii=False, indent=2)
+
+
+def _sym_name(symbol: str) -> str:
+    """SYMBOLS から銘柄名を引く。見つからなければ symbol をそのまま返す。"""
+    for sym, name in (list(_WATCH_SYMBOLS) + list(_ALL_SYMBOLS)):
+        if sym == symbol:
+            return name
+    return symbol
+
+
+def portfolio_add_buy(symbol: str, qty: int, price: float,
+                      date: str | None = None) -> None:
+    """買い取引を登録する。"""
+    portfolio = load_portfolio()
+    entry = {
+        "symbol":    symbol,
+        "name":      _sym_name(symbol),
+        "qty":       qty,
+        "buy_price": price,
+        "buy_date":  date or datetime.today().strftime("%Y-%m-%d"),
+    }
+    portfolio["positions"].append(entry)
+    save_portfolio(portfolio)
+    total_cost = qty * price
+    print(f"\n  ✔ 買い登録: {entry['name']}({symbol})  "
+          f"{qty}株 × ¥{price:,.0f} = ¥{total_cost:,.0f}  [{entry['buy_date']}]")
+    print(f"  portfolio.json に保存しました。\n")
+
+
+def portfolio_add_sell(symbol: str, qty: int, price: float,
+                       date: str | None = None) -> None:
+    """売り取引を登録する。FIFO で最古ポジションから消費する。"""
+    portfolio = load_portfolio()
+    sell_date = date or datetime.today().strftime("%Y-%m-%d")
+
+    # 対象銘柄のオープンポジションを古い順に収集
+    open_pos = [p for p in portfolio["positions"] if p["symbol"] == symbol]
+    if not open_pos:
+        print(f"\n  ✘ エラー: {symbol} の保有ポジションが見つかりません。\n")
+        return
+
+    remaining = qty
+    total_buy_cost = 0.0
+    consumed = []
+
+    for pos in sorted(open_pos, key=lambda x: x["buy_date"]):
+        if remaining <= 0:
+            break
+        take = min(remaining, pos["qty"])
+        total_buy_cost += take * pos["buy_price"]
+        consumed.append((pos, take))
+        remaining -= take
+
+    if remaining > 0:
+        print(f"\n  ✘ エラー: 売却数量 {qty}株 が保有数量を超えています "
+              f"（保有合計: {qty - remaining}株）。\n")
+        return
+
+    # ポジション更新
+    sell_price_total = qty * price
+    buy_price_total  = total_buy_cost
+    profit           = sell_price_total - buy_price_total
+    profit_pct       = profit / buy_price_total * 100 if buy_price_total else 0.0
+
+    for pos, take in consumed:
+        pos["qty"] -= take
+        if pos["qty"] == 0:
+            portfolio["positions"].remove(pos)
+            portfolio["history"].append({
+                "symbol":      symbol,
+                "name":        pos["name"],
+                "qty":         take,
+                "buy_price":   pos["buy_price"],
+                "buy_date":    pos["buy_date"],
+                "sell_price":  price,
+                "sell_date":   sell_date,
+                "profit":      round(take * (price - pos["buy_price"]), 0),
+                "profit_pct":  round((price - pos["buy_price"]) / pos["buy_price"] * 100, 2),
+            })
+        else:
+            portfolio["history"].append({
+                "symbol":      symbol,
+                "name":        pos["name"],
+                "qty":         take,
+                "buy_price":   pos["buy_price"],
+                "buy_date":    pos["buy_date"],
+                "sell_price":  price,
+                "sell_date":   sell_date,
+                "profit":      round(take * (price - pos["buy_price"]), 0),
+                "profit_pct":  round((price - pos["buy_price"]) / pos["buy_price"] * 100, 2),
+            })
+
+    save_portfolio(portfolio)
+    sign = "+" if profit >= 0 else ""
+    print(f"\n  ✔ 売り登録: {_sym_name(symbol)}({symbol})  "
+          f"{qty}株 × ¥{price:,.0f}  [{sell_date}]")
+    print(f"     損益: {sign}¥{profit:,.0f}  ({sign}{profit_pct:.1f}%)")
+    print(f"  portfolio.json に保存しました。\n")
+
+
+def print_portfolio_status(portfolio: dict,
+                           current_prices: dict | None = None) -> None:
+    """保有中ポジション + 取引履歴をターミナルに表示。"""
+    positions = portfolio.get("positions", [])
+    history   = portfolio.get("history", [])
+
+    print()
+    print("═" * 72)
+    print("  実際の保有ポジション")
+    print("═" * 72)
+
+    if not positions:
+        print("  保有なし")
+    else:
+        print(f"  {'銘柄':<22} {'株数':>5} {'買値':>8} {'現在値':>8} "
+              f"{'含み損益(円)':>12} {'含み%':>7} {'評価額':>10} {'購入日'}")
+        print("  " + "─" * 84)
+        total_cost = total_value = 0.0
+        for p in positions:
+            sym   = p["symbol"]
+            name  = p["name"]
+            qty   = p["qty"]
+            bp    = p["buy_price"]
+            bdate = p["buy_date"]
+            cp    = current_prices.get(sym) if current_prices else None
+            label = f"{name}({sym})"
+            if cp is not None:
+                unr     = (cp - bp) * qty
+                unr_pct = (cp - bp) / bp * 100
+                val     = cp * qty
+                sign    = "+" if unr >= 0 else ""
+                color_s = sign
+                print(f"  {label:<22} {qty:>5,} {bp:>8,.0f} {cp:>8,.0f} "
+                      f"{sign}{unr:>+11,.0f} {sign}{unr_pct:>+6.1f}% "
+                      f"{val:>10,.0f}  {bdate}")
+                total_cost  += bp * qty
+                total_value += val
+            else:
+                print(f"  {label:<22} {qty:>5,} {bp:>8,.0f} {'─':>8} "
+                      f"{'─':>12} {'─':>7} {'─':>10}  {bdate}")
+                total_cost += bp * qty
+        if current_prices:
+            total_unr = total_value - total_cost
+            sign = "+" if total_unr >= 0 else ""
+            print("  " + "─" * 84)
+            print(f"  {'合計':<22} {'':>5} {'':>8} {'':>8} "
+                  f"{sign}{total_unr:>+11,.0f} {'':>7} {total_value:>10,.0f}")
+
+    # 取引履歴（最新10件）
+    if history:
+        print(f"\n  取引履歴（直近{min(len(history),10)}件）")
+        print(f"  {'銘柄':<22} {'株数':>5} {'買値':>8} {'売値':>8} "
+              f"{'損益(円)':>10} {'損益%':>7} {'購入日':<12} {'売却日'}")
+        print("  " + "─" * 90)
+        for h in history[-10:][::-1]:
+            label = f"{h['name']}({h['symbol']})"
+            sign  = "+" if h["profit"] >= 0 else ""
+            print(f"  {label:<22} {h['qty']:>5,} {h['buy_price']:>8,.0f} "
+                  f"{h['sell_price']:>8,.0f} {sign}{h['profit']:>+9,.0f} "
+                  f"{sign}{h['profit_pct']:>+6.1f}%  {h['buy_date']:<12} {h['sell_date']}")
+
+        total_profit = sum(h["profit"] for h in history)
+        wins  = sum(1 for h in history if h["profit"] > 0)
+        total_profit_sign = "+" if total_profit >= 0 else ""
+        print("  " + "─" * 90)
+        print(f"  累計損益: {total_profit_sign}¥{total_profit:,.0f}  "
+              f"勝率: {wins}/{len(history)} ({wins/len(history)*100:.0f}%)")
+    print()
+
+
+def portfolio_rows_html(portfolio: dict,
+                        current_prices: dict | None = None) -> str:
+    """保有ポジションの HTML テーブル行を生成する。"""
+    positions = portfolio.get("positions", [])
+    history   = portfolio.get("history", [])
+
+    # --- 保有中 ---
+    pos_rows = ""
+    if not positions:
+        pos_rows = '<tr><td colspan="8" style="text-align:center;color:#64748b">保有なし</td></tr>'
+    else:
+        total_cost = total_value = 0.0
+        for p in positions:
+            sym   = p["symbol"]
+            qty   = p["qty"]
+            bp    = p["buy_price"]
+            cp    = current_prices.get(sym) if current_prices else None
+            label = f"{p['name']}<br><small>{sym}</small>"
+            if cp is not None:
+                unr     = (cp - bp) * qty
+                unr_pct = (cp - bp) / bp * 100
+                val     = cp * qty
+                sign    = "+" if unr >= 0 else ""
+                cls     = "pos" if unr >= 0 else "neg"
+                pos_rows += f"""<tr>
+                  <td class="name">{label}</td>
+                  <td class="num">{qty:,}</td>
+                  <td class="num">{bp:,.0f}</td>
+                  <td class="num">{cp:,.0f}</td>
+                  <td class="num {cls}">{sign}{unr:+,.0f}</td>
+                  <td class="num {cls}">{sign}{unr_pct:+.1f}%</td>
+                  <td class="num">{val:,.0f}</td>
+                  <td>{p['buy_date']}</td>
+                </tr>"""
+                total_cost  += bp * qty
+                total_value += val
+            else:
+                pos_rows += f"""<tr>
+                  <td class="name">{label}</td>
+                  <td class="num">{qty:,}</td>
+                  <td class="num">{bp:,.0f}</td>
+                  <td class="num" style="color:#64748b">─</td>
+                  <td class="num" style="color:#64748b">─</td>
+                  <td class="num" style="color:#64748b">─</td>
+                  <td class="num" style="color:#64748b">─</td>
+                  <td>{p['buy_date']}</td>
+                </tr>"""
+                total_cost += bp * qty
+        if current_prices and total_value:
+            unr = total_value - total_cost
+            sign = "+" if unr >= 0 else ""
+            cls  = "pos" if unr >= 0 else "neg"
+            pos_rows += f"""<tr style="font-weight:600;background:#1e293b">
+              <td>合計</td><td></td><td></td><td></td>
+              <td class="num {cls}">{sign}{unr:+,.0f}</td>
+              <td></td>
+              <td class="num">{total_value:,.0f}</td>
+              <td></td>
+            </tr>"""
+
+    # --- 取引履歴（最新10件） ---
+    hist_rows = ""
+    if not history:
+        hist_rows = '<tr><td colspan="7" style="text-align:center;color:#64748b">履歴なし</td></tr>'
+    else:
+        for h in history[-10:][::-1]:
+            sign = "+" if h["profit"] >= 0 else ""
+            cls  = "pos" if h["profit"] >= 0 else "neg"
+            label = f"{h['name']}<br><small>{h['symbol']}</small>"
+            hist_rows += f"""<tr>
+              <td class="name">{label}</td>
+              <td class="num">{h['qty']:,}</td>
+              <td class="num">{h['buy_price']:,.0f}</td>
+              <td class="num">{h['sell_price']:,.0f}</td>
+              <td class="num {cls}">{sign}{h['profit']:+,.0f}</td>
+              <td class="num {cls}">{sign}{h['profit_pct']:+.1f}%</td>
+              <td>{h['buy_date']} → {h['sell_date']}</td>
+            </tr>"""
+        total_profit = sum(h["profit"] for h in history)
+        wins = sum(1 for h in history if h["profit"] > 0)
+        sign = "+" if total_profit >= 0 else ""
+        cls  = "pos" if total_profit >= 0 else "neg"
+        hist_rows += f"""<tr style="font-weight:600;background:#1e293b">
+          <td>累計</td><td></td><td></td><td></td>
+          <td class="num {cls}">{sign}{total_profit:+,.0f}</td>
+          <td class="num {cls}">{wins}/{len(history)} ({wins/len(history)*100:.0f}%)</td>
+          <td></td>
+        </tr>"""
+
+    return pos_rows, hist_rows
 
 
 def run_portfolio(stock_data_map: dict, backtest_days: int,
@@ -1579,14 +1907,13 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python backtest_macd_scan.py --signal           # 明日の売買シグナル（推奨）
-  python backtest_macd_scan.py                    # 直近1ヶ月バックテスト
-  python backtest_macd_scan.py --months 3         # 直近3ヶ月
-  python backtest_macd_scan.py --years 1          # 直近1年
-  python backtest_macd_scan.py --years 5          # 直近5年
-  python backtest_macd_scan.py --days 45          # 直近45日
-  python backtest_macd_scan.py 7203.T --years 2   # トヨタ 2年 詳細
-  python backtest_macd_scan.py --years 3 --top 20 # 3年 上位20件
+  python backtest_macd_scan.py --signal              # 明日の売買シグナル（推奨）
+  python backtest_macd_scan.py --buy  6754.T 100 850 # 買い登録（アンリツ 100株 ¥850）
+  python backtest_macd_scan.py --sell 6754.T 100 920 # 売り登録（アンリツ 100株 ¥920）
+  python backtest_macd_scan.py --portfolio            # 保有ポジション一覧
+  python backtest_macd_scan.py                       # 直近1ヶ月バックテスト
+  python backtest_macd_scan.py --months 3            # 直近3ヶ月
+  python backtest_macd_scan.py --years 1             # 直近1年
 """)
     parser.add_argument("symbol",   nargs="?", default=None,
                         help="特定銘柄コード（省略時は225銘柄スキャン）")
@@ -1602,6 +1929,14 @@ def main() -> None:
                         help="明日の売買シグナルをスキャンして表示（バックテストなし）")
     parser.add_argument("--all",    action="store_true",
                         help="日経225全銘柄を対象にする（デフォルト: 監視対象19銘柄）")
+    parser.add_argument("--buy",  nargs=3, metavar=("SYMBOL", "QTY", "PRICE"),
+                        help="買い登録: --buy 6754.T 100 850")
+    parser.add_argument("--sell", nargs=3, metavar=("SYMBOL", "QTY", "PRICE"),
+                        help="売り登録: --sell 6754.T 100 920")
+    parser.add_argument("--portfolio", action="store_true",
+                        help="実際の保有ポジション・取引履歴を表示")
+    parser.add_argument("--date", default=None,
+                        help="取引日付（--buy/--sell 用, 省略時は今日） 例: 2026-03-28")
     args = parser.parse_args()
 
     # ── 銘柄リストを選択 ──────────────────────────────────────
@@ -1612,6 +1947,36 @@ def main() -> None:
     else:
         SYMBOLS       = _WATCH_SYMBOLS
         FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
+
+    # ── 買い登録 ────────────────────────────────────────────
+    if args.buy:
+        sym, qty_s, price_s = args.buy
+        try:
+            qty   = int(qty_s)
+            price = float(price_s)
+        except ValueError:
+            print(f"\n  ✘ エラー: QTY は整数、PRICE は数値で指定してください。\n")
+            return
+        portfolio_add_buy(sym.upper(), qty, price, args.date)
+        return
+
+    # ── 売り登録 ────────────────────────────────────────────
+    if args.sell:
+        sym, qty_s, price_s = args.sell
+        try:
+            qty   = int(qty_s)
+            price = float(price_s)
+        except ValueError:
+            print(f"\n  ✘ エラー: QTY は整数、PRICE は数値で指定してください。\n")
+            return
+        portfolio_add_sell(sym.upper(), qty, price, args.date)
+        return
+
+    # ── ポートフォリオ表示 ──────────────────────────────────
+    if args.portfolio:
+        portfolio = load_portfolio()
+        print_portfolio_status(portfolio)
+        return
 
     # 期間を日数に変換
     if args.days is not None:
@@ -1673,9 +2038,10 @@ def main() -> None:
 
         print(f"\n  [Phase 3] シグナル解析中...")
         sig = scan_today_signals(stock_data, results_90, nikkei_df)
-        print_signals(sig)
+        portfolio = load_portfolio()
+        print_signals(sig, portfolio)
 
-        html_path = generate_signal_html(sig)
+        html_path = generate_signal_html(sig, portfolio)
         print(f"  HTMLレポート: {html_path.resolve()}")
         webbrowser.open(html_path.resolve().as_uri())
         print()
