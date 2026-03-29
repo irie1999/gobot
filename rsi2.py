@@ -170,13 +170,18 @@ def _market_info(nikkei_df: pd.DataFrame | None) -> dict:
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     # ── 優先: fetch_all.py が保存した永続キャッシュ ──────────────
     # ファイル名: .rsi2_cache/{symbol}.pkl（日付なし・長期保存）
+    # 鮮度チェック: 最終行が7営業日以上古い場合はキャッシュを無視して再取得
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
-            if len(df) >= 210:
+            last_date = df.index[-1]
+            stale = last_date < (_TODAY - timedelta(days=10))  # 土日祝考慮で10日
+            if len(df) >= 210 and not stale:
                 return df
+            # 古い場合はキャッシュを削除して再取得
+            persistent.unlink(missing_ok=True)
         except Exception:
             persistent.unlink(missing_ok=True)
 
