@@ -327,12 +327,12 @@ WORKERS         = 16            # 並列バックテスト数
 # スイングトレード(3〜10日)の標準推奨設定 MACD(12,26,9) に変更
 # 出所: Fintokei / ForexTester 高ボラ相場スイング検証
 # ──────────────────────────────────────────────────────────────
-MACD_FAST       = 12            # 5→12: 高ボラ時のノイズ除去
-MACD_SLOW       = 26            # 13→26: 標準設定（世界標準）
-MACD_SIGNAL     = 9             # 4→9:  標準設定
+MACD_FAST       = 8             # バランス設定: (5,13,4)より遅く (12,26,9)より速い
+MACD_SLOW       = 17            # 高ボラでも30日間に3〜5回シグナルが出る
+MACD_SIGNAL     = 5
 VOL_MA_PERIOD   = 20
 VOL_SPIKE_MULT  = 1.2
-MA_TREND_PERIOD = 25            # 10→25: 中期トレンド確認に戻す
+MA_TREND_PERIOD = 10            # 25→10: 修正相場では25MA割れが多く全滅するため
 
 ATR_PERIOD      = 14
 ATR_STOP_MULT   = 1.5
@@ -347,10 +347,10 @@ MAX_QTY         = 9999
 # RSI: 高VI時は深い押し目(25〜35)からの反発を狙う
 FILTER_MA_DEV_MAX    =  7.0   # MA乖離 ±7%以内
 FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
-FILTER_ATR_PCT_MIN   =  2.0   # ATR% 下限（高ボラ相場：最低2%の動きが必要）
+FILTER_ATR_PCT_MIN   =  1.5   # ATR% 下限（2.0→1.5: 保険・銀行株対応）
 FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限
-FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：20〜25の深い押し目を拾う）
-FILTER_RSI_MAX       = 65.0   # RSI 上限（65超は買われすぎNG）
+FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：深い押し目を拾う）
+FILTER_RSI_MAX       = 68.0   # RSI 上限（65→68: 少し余裕を持たせる）
 FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限
 FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限
 
