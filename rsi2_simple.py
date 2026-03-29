@@ -6,8 +6,10 @@ RSI(2) 平均回帰戦略  軽量版（255銘柄スキャン対応）
   python rsi2_simple.py --years 2                        # 2年
   python rsi2_simple.py --start 2023-01-01               # 開始日指定
   python rsi2_simple.py --start 2023-01-01 --end 2024-06-30
+  python rsi2_simple.py --html                           # HTMLレポート出力（自動命名）
   python rsi2_simple.py 7011.T                           # 1銘柄詳細
   python rsi2_simple.py 7011.T --start 2022-01-01 --end 2023-12-31
+  python rsi2_simple.py 7011.T --html                    # 1銘柄HTMLレポート
 """
 
 import argparse
@@ -492,6 +494,284 @@ def show_ranking(results: list[dict],
     print()
 
 
+# ── HTML共通CSS/JS ──────────────────────────────────────────────
+_HTML_HEAD = """\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RSI(2) バックテスト結果</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
+     background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}
+h1{font-size:1.35em;color:#fff;border-left:4px solid #3a86ff;
+   padding-left:12px;margin-bottom:6px}
+.meta{color:#666;font-size:0.82em;margin:2px 0 0 16px}
+.cards{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}
+.card{background:#16192a;border:1px solid #252840;border-radius:10px;
+      padding:14px 20px;min-width:130px}
+.clabel{font-size:0.72em;color:#777;letter-spacing:.05em}
+.cval{font-size:1.55em;font-weight:700;margin-top:3px}
+.pos{color:#4ade80}.neg{color:#f87171}.neu{color:#c8cfe8}
+.section{margin-top:28px}
+.section h2{font-size:1em;color:#aaa;text-transform:uppercase;
+            letter-spacing:.1em;margin-bottom:10px;border-bottom:1px solid #252840;
+            padding-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:0.86em}
+th{background:#16192a;color:#888;padding:8px 12px;text-align:right;
+   cursor:pointer;user-select:none;border-bottom:1px solid #252840;
+   white-space:nowrap}
+th:first-child,th.left{text-align:left}
+th[data-dir="asc"]::after{content:" ▲";color:#3a86ff}
+th[data-dir="desc"]::after{content:" ▼";color:#3a86ff}
+td{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;
+   white-space:nowrap}
+td:first-child,td.left{text-align:left}
+tr.profit>td{background:rgba(74,222,128,.04)}
+tr.loss>td{background:rgba(248,113,113,.04)}
+tr.hold>td{background:rgba(251,191,36,.06)}
+tr:hover>td{background:#1b1f35!important}
+.total-row>td{font-weight:700;background:#16192a;
+              border-top:2px solid #252840;color:#fff}
+.tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:0.78em}
+.tag-win{background:#1a3d2b;color:#4ade80}
+.tag-loss{background:#3d1a1a;color:#f87171}
+.tag-hold{background:#3d3010;color:#fbbf24}
+.footer{margin-top:32px;color:#444;font-size:0.78em;text-align:right}
+</style>
+</head>
+<body>
+"""
+
+_HTML_SORT_JS = """\
+<script>
+(function(){
+  document.querySelectorAll('table.sortable').forEach(function(tbl){
+    var ths=tbl.querySelectorAll('thead th[data-col]');
+    ths.forEach(function(th){
+      th.addEventListener('click',function(){
+        var col=+th.dataset.col, numeric=th.dataset.numeric==='1';
+        var dir=th.dataset.dir==='asc'?'desc':'asc';
+        ths.forEach(function(h){delete h.dataset.dir});
+        th.dataset.dir=dir;
+        var rows=Array.from(tbl.tBodies[0].rows);
+        rows.sort(function(a,b){
+          var av=a.cells[col].dataset.val||a.cells[col].innerText.replace(/[,円%]/g,'').trim();
+          var bv=b.cells[col].dataset.val||b.cells[col].innerText.replace(/[,円%]/g,'').trim();
+          if(numeric){av=parseFloat(av)||0;bv=parseFloat(bv)||0}
+          if(av<bv)return dir==='asc'?-1:1;
+          if(av>bv)return dir==='asc'?1:-1;
+          return 0;
+        });
+        rows.forEach(function(r){tbl.tBodies[0].appendChild(r)});
+      });
+    });
+  });
+})();
+</script>
+"""
+
+
+def _pf_str(pf: float) -> str:
+    return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+
+def _sign_cls(val: float) -> str:
+    return "pos" if val >= 0 else "neg"
+
+
+# ── HTML: 1銘柄詳細 ─────────────────────────────────────────────
+def build_html_detail(symbol: str, name: str, trades: list[dict],
+                      start: pd.Timestamp, end: pd.Timestamp) -> str:
+    wins  = [t for t in trades if t["pnl"] > 0]
+    loss  = [t for t in trades if t["pnl"] <= 0]
+    total = sum(t["pnl"] for t in trades)
+    wr    = len(wins) / len(trades) * 100 if trades else 0
+    pf    = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
+             if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+    wh    = sum(t["hold"] for t in wins) / len(wins) if wins else 0
+    lh    = sum(t["hold"] for t in loss) / len(loss) if loss else 0
+
+    rows = []
+    for i, t in enumerate(trades, 1):
+        pct  = (t["exit_p"] - t["entry_p"]) / t["entry_p"] * 100
+        cls  = "hold" if "保有中" in t["reason"] else ("profit" if t["pnl"] > 0 else "loss")
+        tag_cls = "tag-hold" if cls == "hold" else ("tag-win" if t["pnl"] > 0 else "tag-loss")
+        rows.append(
+            f'<tr class="{cls}">'
+            f'<td class="left">{i}</td>'
+            f'<td class="left">{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td class="left">{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
+            f'<td>{t["entry_p"]:,.0f}</td>'
+            f'<td>{t["exit_p"]:,.0f}</td>'
+            f'<td class="{_sign_cls(t["pnl"])}" data-val="{t["pnl"]:.0f}">'
+            f'{t["pnl"]:+,.0f}円</td>'
+            f'<td class="{_sign_cls(pct)}">{pct:+.1f}%</td>'
+            f'<td>{t["hold"]}日</td>'
+            f'<td class="left"><span class="tag {tag_cls}">{t["reason"]}</span></td>'
+            f'</tr>'
+        )
+
+    html  = _HTML_HEAD
+    html += f'<h1>RSI(2) 平均回帰  [{symbol}] {name}</h1>\n'
+    html += f'<div class="meta">期間: {start.strftime("%Y-%m-%d")} ～ {end.strftime("%Y-%m-%d")}</div>\n'
+    html += f'<div class="meta">【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値 / '
+    html += f'【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / '
+    html += f'-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確</div>\n'
+
+    html += '<div class="cards">\n'
+    for label, val, fmt in [
+        ("損益合計",    total,         f'<span class="{_sign_cls(total)} cval">{total:+,.0f}円</span>'),
+        ("勝率",        wr,            f'<span class="neu cval">{wr:.1f}%</span>'),
+        ("プロフィットF", pf,          f'<span class="neu cval">{_pf_str(pf)}</span>'),
+        ("トレード数",   len(trades),  f'<span class="neu cval">{len(trades)}回</span>'),
+        ("勝/負",       0,             f'<span class="neu cval">{len(wins)}勝{len(loss)}負</span>'),
+        ("平均保有(勝)", wh,           f'<span class="pos cval">{wh:.1f}日</span>'),
+        ("平均保有(負)", lh,           f'<span class="neg cval">{lh:.1f}日</span>'),
+    ]:
+        html += f'<div class="card"><div class="clabel">{label}</div>{fmt}</div>\n'
+    html += '</div>\n'
+
+    html += '<div class="section"><h2>トレード一覧</h2>\n'
+    html += '<table class="sortable"><thead><tr>'
+    for i, (h, num) in enumerate([
+        ("#", 0), ("エントリー", 0), ("エグジット", 0),
+        ("買値", 1), ("売値", 1), ("損益", 1), ("変化率", 1),
+        ("保有日数", 1), ("決済理由", 0),
+    ]):
+        left = ' class="left"' if i < 3 or i == 8 else ''
+        html += f'<th{left} data-col="{i}" data-numeric="{num}">{h}</th>'
+    html += '</tr></thead><tbody>\n'
+    html += "\n".join(rows)
+    html += '\n</tbody></table></div>\n'
+    html += f'<div class="footer">生成: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>\n'
+    html += _HTML_SORT_JS
+    html += '</body></html>\n'
+    return html
+
+
+# ── HTML: 255銘柄ランキング ──────────────────────────────────────
+def build_html_ranking(results: list[dict],
+                       start: pd.Timestamp, end: pd.Timestamp) -> str:
+    ranked    = sorted(results, key=lambda x: x["total"], reverse=True)
+    total_tr  = sum(r["trades"] for r in results)
+    total_pnl = sum(r["total"]  for r in results)
+    plus_cnt  = sum(1 for r in results if r["total"] > 0)
+
+    rank_rows = []
+    for rank, r in enumerate(ranked, 1):
+        cls = "profit" if r["total"] >= 0 else "loss"
+        rank_rows.append(
+            f'<tr class="{cls}">'
+            f'<td>{rank}</td>'
+            f'<td class="left">{r["symbol"]}</td>'
+            f'<td class="left">{r["name"]}</td>'
+            f'<td class="{_sign_cls(r["total"])}" data-val="{r["total"]:.0f}">'
+            f'{r["total"]:+,.0f}円</td>'
+            f'<td>{r["wr"]:.1f}%</td>'
+            f'<td data-val="{r["pf"] if r["pf"]!=float("inf") else 9999}">'
+            f'{_pf_str(r["pf"])}</td>'
+            f'<td>{r["trades"]}</td>'
+            f'<td>{r["avg_hold"]:.1f}</td>'
+            f'</tr>'
+        )
+
+    # 全トレード明細（アコーディオン展開）
+    detail_html = ""
+    for r in ranked:
+        sym, nm = r["symbol"], r["name"]
+        detail_rows = []
+        for i, t in enumerate(r["trade_log"], 1):
+            pct = (t["exit_p"] - t["entry_p"]) / t["entry_p"] * 100
+            cls = "hold" if "保有中" in t["reason"] else ("profit" if t["pnl"] > 0 else "loss")
+            tag_cls = "tag-hold" if cls == "hold" else ("tag-win" if t["pnl"] > 0 else "tag-loss")
+            detail_rows.append(
+                f'<tr class="{cls}">'
+                f'<td>{i}</td>'
+                f'<td class="left">{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
+                f'<td class="left">{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
+                f'<td>{t["entry_p"]:,.0f}</td>'
+                f'<td>{t["exit_p"]:,.0f}</td>'
+                f'<td class="{_sign_cls(t["pnl"])}">{t["pnl"]:+,.0f}円</td>'
+                f'<td class="{_sign_cls(pct)}">{pct:+.1f}%</td>'
+                f'<td>{t["hold"]}日</td>'
+                f'<td class="left"><span class="tag {tag_cls}">{t["reason"]}</span></td>'
+                f'</tr>'
+            )
+        detail_html += (
+            f'<details style="margin:4px 0;border:1px solid #252840;border-radius:6px">'
+            f'<summary style="padding:8px 12px;cursor:pointer;background:#16192a;'
+            f'border-radius:6px;list-style:none;color:#c8cfe8">'
+            f'▶ {sym} {nm}'
+            f'  <span class="{_sign_cls(r["total"])}">{r["total"]:+,.0f}円</span>'
+            f'  勝率{r["wr"]:.1f}%  {r["trades"]}回</summary>'
+            f'<div style="padding:8px">'
+            f'<table><thead><tr>'
+            f'<th data-col="0">#</th>'
+            f'<th class="left" data-col="1">エントリー</th>'
+            f'<th class="left" data-col="2">エグジット</th>'
+            f'<th data-col="3" data-numeric="1">買値</th>'
+            f'<th data-col="4" data-numeric="1">売値</th>'
+            f'<th data-col="5" data-numeric="1">損益</th>'
+            f'<th data-col="6" data-numeric="1">変化率</th>'
+            f'<th data-col="7" data-numeric="1">保有日数</th>'
+            f'<th class="left" data-col="8">決済理由</th>'
+            f'</tr></thead><tbody>'
+            + "\n".join(detail_rows) +
+            f'</tbody></table></div></details>\n'
+        )
+
+    html  = _HTML_HEAD
+    html += f'<h1>RSI(2) 平均回帰戦略  {len(SYMBOLS)}銘柄スキャン</h1>\n'
+    html += f'<div class="meta">期間: {start.strftime("%Y-%m-%d")} ～ {end.strftime("%Y-%m-%d")}</div>\n'
+    html += f'<div class="meta">【条件】RSI(2)≤{RSI2_ENTRY:.0f} + MA{MA_TREND}上 → 翌日始値 / '
+    html += f'【決済】RSI(2)≥{RSI2_EXIT:.0f} / ATR×{ATR_TRAIL_MULT}トレイル / '
+    html += f'-{HARD_STOP_PCT:.0f}%損切り / +{HALF_PROFIT_PCT:.0f}%半分利確</div>\n'
+
+    html += '<div class="cards">\n'
+    for label, fmt in [
+        ("合計損益",    f'<span class="{_sign_cls(total_pnl)} cval">{total_pnl:+,.0f}円</span>'),
+        ("スキャン銘柄", f'<span class="neu cval">{len(SYMBOLS)}銘柄</span>'),
+        ("シグナルあり", f'<span class="neu cval">{len(results)}銘柄</span>'),
+        ("トレード計",  f'<span class="neu cval">{total_tr}回</span>'),
+        ("プラス銘柄",  f'<span class="pos cval">{plus_cnt}/{len(results)}</span>'),
+    ]:
+        html += f'<div class="card"><div class="clabel">{label}</div>{fmt}</div>\n'
+    html += '</div>\n'
+
+    html += '<div class="section"><h2>銘柄ランキング</h2>\n'
+    html += '<table class="sortable"><thead><tr>'
+    for i, (h, num) in enumerate([
+        ("順位", 1), ("コード", 0), ("銘柄名", 0),
+        ("損益(円)", 1), ("勝率(%)", 1), ("PF", 1),
+        ("取引数", 1), ("平均保有(日)", 1),
+    ]):
+        left = ' class="left"' if i in (1, 2) else ""
+        html += f'<th{left} data-col="{i}" data-numeric="{num}">{h}</th>'
+    html += '</tr></thead><tbody>\n'
+    html += "\n".join(rank_rows)
+    html += f'\n<tr class="total-row"><td colspan="3">合計（全銘柄・重複あり）</td>'
+    html += f'<td class="{_sign_cls(total_pnl)}">{total_pnl:+,.0f}円</td>'
+    html += f'<td colspan="4"></td></tr>'
+    html += '\n</tbody></table></div>\n'
+
+    html += '<div class="section"><h2>銘柄別トレード明細</h2>\n'
+    html += detail_html
+    html += '</div>\n'
+    html += f'<div class="footer">生成: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>\n'
+    html += _HTML_SORT_JS
+    html += '</body></html>\n'
+    return html
+
+
+def save_html(html: str, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  HTMLレポート保存: {path}")
+
+
 # ── メイン ──────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="RSI(2) 平均回帰バックテスト")
@@ -503,6 +783,8 @@ def main() -> None:
                         help="バックテスト開始日（例: 2023-01-01）")
     parser.add_argument("--end", metavar="YYYY-MM-DD", default=None,
                         help="バックテスト終了日（例: 2024-12-31）。省略時は今日")
+    parser.add_argument("--html", action="store_true",
+                        help="HTMLレポートをファイルに出力する")
     args = parser.parse_args()
 
     try:
@@ -525,6 +807,10 @@ def main() -> None:
         df = calc(df)
         trades = backtest(df, start, end)
         show_detail(sym, name, trades, start, end)
+        if args.html:
+            fname = (f"rsi2_{sym.replace('.', '')}_{start.strftime('%Y%m%d')}"
+                     f"_{end.strftime('%Y%m%d')}.html")
+            save_html(build_html_detail(sym, name, trades, start, end), fname)
         return
 
     # ── 全銘柄スキャンモード ──────────────────────────────────────
@@ -571,6 +857,10 @@ def main() -> None:
         return
 
     show_ranking(results, start, end)
+    if args.html:
+        fname = (f"rsi2_scan_{start.strftime('%Y%m%d')}"
+                 f"_{end.strftime('%Y%m%d')}.html")
+        save_html(build_html_ranking(results, start, end), fname)
 
 
 if __name__ == "__main__":
