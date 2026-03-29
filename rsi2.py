@@ -32,6 +32,9 @@ POSITION_SIZE   = 100_000 # 1回あたりの投資金額（円）
 BACKTEST_DAYS   =   365   # デフォルトのバックテスト日数
 WORKERS         =    16   # 並列ダウンロード数
 
+# 実行開始時刻を一度だけ固定（毎回 _TODAY を呼ぶと結果がずれる）
+_TODAY = pd.Timestamp(datetime.now().date())
+
 # ── 対象255銘柄（日経225） ───────────────────────────────────
 SYMBOLS = [
     ("1332.T", "ニッスイ"), ("1333.T", "マルハニチロ"), ("1605.T", "INPEX"),
@@ -181,7 +184,7 @@ def calc(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── バックテスト ────────────────────────────────────────────
 def backtest(df: pd.DataFrame, backtest_days: int) -> list[dict]:
-    cutoff = pd.Timestamp(datetime.today() - timedelta(days=backtest_days))
+    cutoff = pd.Timestamp(_TODAY - timedelta(days=backtest_days))
     df = df[df.index >= cutoff].copy()
 
     trades    = []
@@ -269,8 +272,8 @@ def backtest(df: pd.DataFrame, backtest_days: int) -> list[dict]:
 # ── ターミナル表示 ──────────────────────────────────────────
 def print_result(symbol: str, trades: list[dict],
                  backtest_days: int, label: str) -> None:
-    since = (datetime.today() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
-    today = datetime.today().strftime("%Y-%m-%d")
+    since = (_TODAY - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today = _TODAY.strftime("%Y-%m-%d")
 
     if not trades:
         print(f"\n  [{symbol}]  シグナルなし（{since} ～ {today}）\n")
@@ -318,8 +321,8 @@ def print_result(symbol: str, trades: list[dict],
 # ── HTML レポート生成 ───────────────────────────────────────
 def generate_html(symbol: str, trades: list[dict],
                   backtest_days: int, label: str) -> Path:
-    since = (datetime.today() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
-    today = datetime.today().strftime("%Y-%m-%d")
+    since = (_TODAY - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today = _TODAY.strftime("%Y-%m-%d")
 
     wins  = [t for t in trades if t["pnl"] > 0]
     loss  = [t for t in trades if t["pnl"] <= 0]
@@ -474,7 +477,7 @@ new Chart(document.getElementById('cumChart'), {{
 </body>
 </html>"""
 
-    path = Path(f"rsi2_{symbol.replace('.','_')}_{datetime.today().strftime('%Y%m%d')}_{label}.html")
+    path = Path(f"rsi2_{symbol.replace('.','_')}_{_TODAY.strftime('%Y%m%d')}_{label}.html")
     path.write_text(html, encoding="utf-8")
     return path
 
@@ -482,8 +485,8 @@ new Chart(document.getElementById('cumChart'), {{
 # ── ランキング表示（スキャンモード） ───────────────────────
 def print_ranking(results: list[dict], days: int, label: str,
                   top: int | None = None) -> None:
-    since  = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-    today  = datetime.today().strftime("%Y-%m-%d")
+    since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
+    today  = _TODAY.strftime("%Y-%m-%d")
     ranked = sorted(results, key=lambda x: x["total"], reverse=True)
     disp   = ranked[:top] if top else ranked
 
@@ -524,8 +527,8 @@ def print_ranking(results: list[dict], days: int, label: str,
 # ── スキャン用 HTML ─────────────────────────────────────────
 def generate_html_scan(results: list[dict], days: int, label: str,
                        top: int | None = None) -> Path:
-    since  = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-    today  = datetime.today().strftime("%Y-%m-%d")
+    since  = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
+    today  = _TODAY.strftime("%Y-%m-%d")
     ranked = sorted(results, key=lambda x: x["total"], reverse=True)
     disp   = ranked[:top] if top else ranked
 
@@ -659,7 +662,7 @@ function toggleDetail(sym) {{
 </body>
 </html>"""
 
-    path = Path(f"rsi2_scan_{datetime.today().strftime('%Y%m%d')}_{label}.html")
+    path = Path(f"rsi2_scan_{_TODAY.strftime('%Y%m%d')}_{label}.html")
     path.write_text(html, encoding="utf-8")
     return path
 
