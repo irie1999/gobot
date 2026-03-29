@@ -345,12 +345,12 @@ MAX_QTY         = 9999
 # ── エントリーフィルター【2026年3月 高ボラ相場対応】─────────────
 # 日経VI=46 → ATRが大きく振れる → フィルター幅を広めに設定
 # RSI: 高VI時は深い押し目(25〜35)からの反発を狙う
-FILTER_MA_DEV_MAX    =  7.0   # MA乖離 ±7%以内
+FILTER_MA_DEV_MAX    =  4.0   # MA乖離 ±4%以内（7%→4%: 過熱エントリー除外）
 FILTER_MA200_ABOVE   = True   # MA200より上のみ（長期上昇トレンド確認）
 FILTER_ATR_PCT_MIN   =  1.5   # ATR% 下限（2.0→1.5: 保険・銀行株対応）
 FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限
 FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：深い押し目を拾う）
-FILTER_RSI_MAX       = 68.0   # RSI 上限（65→68: 少し余裕を持たせる）
+FILTER_RSI_MAX       = 58.0   # RSI 上限（68→58: RSI60超エントリーは損失多発）
 FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限
 FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限
 
@@ -369,6 +369,7 @@ HARD_STOP_PCT        = 3.0   # 即損切りライン（高ボラ対応：2%で�
 #   海運/非鉄/商社: 前回分析から継続除外
 #
 EXCLUDE_SECTORS  = {"海運", "非鉄", "商社", "自動車", "鉄鋼", "小売"}
+EXCLUDE_SYMBOLS  = {"6526.T"}   # ソシオネクスト: 1年で4敗0勝 → 除外
 
 # 【優先】構造的強セクター（ポートフォリオ選択スコア+10ボーナス）
 #   銀行:  BOJ 0.75%→利上げ継続。MUFG/SMFG/みずほ全社最高益ペース
@@ -555,8 +556,10 @@ def _nikkei_trend(nikkei_df: pd.DataFrame | None, dt: pd.Timestamp) -> bool | No
 # ── 1銘柄バックテスト ────────────────────────────────────────
 def run_backtest(symbol: str, name: str, df: pd.DataFrame,
                  backtest_days: int, nikkei_df: pd.DataFrame | None = None) -> dict | None:
-    # セクター除外
+    # セクター除外 / 個別銘柄除外
     if SECTOR.get(symbol, "その他") in EXCLUDE_SECTORS:
+        return None
+    if symbol in EXCLUDE_SYMBOLS:
         return None
 
     df = calc_indicators(df)
@@ -732,6 +735,8 @@ def run_portfolio(stock_data_map: dict, backtest_days: int,
     dfs: dict[str, tuple[str, pd.DataFrame]] = {}
     for sym, (name, df) in stock_data_map.items():
         if SECTOR.get(sym, "その他") in EXCLUDE_SECTORS:
+            continue
+        if sym in EXCLUDE_SYMBOLS:
             continue
         df_i = calc_indicators(df)
         df_t = df_i[df_i.index >= cutoff]
