@@ -1948,34 +1948,27 @@ def main() -> None:
         SYMBOLS       = _WATCH_SYMBOLS
         FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
 
-    # ── 買い登録 ────────────────────────────────────────────
+    # ── 買い/売り/ポートフォリオ → portfolio.py に委譲 ─────────
     if args.buy:
         sym, qty_s, price_s = args.buy
-        try:
-            qty   = int(qty_s)
-            price = float(price_s)
-        except ValueError:
-            print(f"\n  ✘ エラー: QTY は整数、PRICE は数値で指定してください。\n")
-            return
-        portfolio_add_buy(sym.upper(), qty, price, args.date)
+        date_opt = ["--date", args.date] if args.date else []
+        import subprocess, sys
+        subprocess.run([sys.executable, "portfolio.py",
+                        "--buy", sym.upper(), qty_s, price_s,
+                        "--strategy", "MACD"] + date_opt)
         return
 
-    # ── 売り登録 ────────────────────────────────────────────
     if args.sell:
         sym, qty_s, price_s = args.sell
-        try:
-            qty   = int(qty_s)
-            price = float(price_s)
-        except ValueError:
-            print(f"\n  ✘ エラー: QTY は整数、PRICE は数値で指定してください。\n")
-            return
-        portfolio_add_sell(sym.upper(), qty, price, args.date)
+        date_opt = ["--date", args.date] if args.date else []
+        import subprocess, sys
+        subprocess.run([sys.executable, "portfolio.py",
+                        "--sell", sym.upper(), qty_s, price_s] + date_opt)
         return
 
-    # ── ポートフォリオ表示 ──────────────────────────────────
     if args.portfolio:
-        portfolio = load_portfolio()
-        print_portfolio_status(portfolio)
+        import subprocess, sys
+        subprocess.run([sys.executable, "portfolio.py"])
         return
 
     # 期間を日数に変換
@@ -2040,6 +2033,12 @@ def main() -> None:
         sig = scan_today_signals(stock_data, results_90, nikkei_df)
         portfolio = load_portfolio()
         print_signals(sig, portfolio)
+
+        try:
+            from portfolio import print_positions_for_signal
+            print_positions_for_signal("MACD")
+        except ImportError:
+            pass
 
         html_path = generate_signal_html(sig, portfolio)
         print(f"  HTMLレポート: {html_path.resolve()}")

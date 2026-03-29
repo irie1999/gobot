@@ -1059,6 +1059,12 @@ def main() -> None:
         sig = scan_signals_a7(stock_data, results_90)
         print_signals_a7(sig)
 
+        try:
+            from portfolio import print_positions_for_signal
+            print_positions_for_signal("A7")
+        except ImportError:
+            pass
+
         html_path = generate_signal_html_a7(sig)
         print(f"  HTMLレポート: {html_path.resolve()}")
         webbrowser.open(html_path.resolve().as_uri())

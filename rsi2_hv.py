@@ -1111,6 +1111,12 @@ def main() -> None:
                                  vix_rsi=vix_rsi)
         print_signals_rsi2(sig, mode_label, params)
 
+        try:
+            from portfolio import print_positions_for_signal
+            print_positions_for_signal("RSI2")
+        except ImportError:
+            pass
+
         html_path = generate_signal_html_rsi2(sig, mode_label, params)
         print(f"  HTMLレポート: {html_path.resolve()}")
         webbrowser.open(html_path.resolve().as_uri())
