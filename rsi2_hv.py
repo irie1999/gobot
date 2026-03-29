@@ -23,6 +23,7 @@ RSI(2) 平均回帰バックテスト 拡張版 — 高ボラ対応・自動レ�
 """
 
 import argparse
+import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -33,7 +34,7 @@ import pandas as pd
 
 # rsi2.py のデータ取得・指標計算を流用
 from rsi2 import (
-    SYMBOLS, _TODAY, WORKERS,
+    SYMBOLS, _TODAY, WORKERS, _CACHE_DIR,
     calc,
     _market_info, _mkt_banner_html, _trade_table,
 )
@@ -54,7 +55,22 @@ def _period_str(backtest_days: int) -> str:
 
 
 def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
-    """キャッシュなし・auto_adjust=False（実際の株価）・period= 指定。"""
+    """永続キャッシュ優先（fetch_all.py 作成分）・フォールバックでダウンロード。"""
+    # ── 永続キャッシュ確認 ──────────────────────────────────────
+    persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+    if persistent.exists():
+        try:
+            with open(persistent, "rb") as f:
+                df = pickle.load(f)
+            last_date = df.index[-1]
+            stale = last_date < (_TODAY - timedelta(days=10))  # 土日祝考慮で10日
+            if len(df) >= 210 and not stale:
+                return df
+            persistent.unlink(missing_ok=True)
+        except Exception:
+            persistent.unlink(missing_ok=True)
+
+    # ── フォールバック: 直接ダウンロード ──────────────────────────
     period = _period_str(backtest_days)
     try:
         raw = yf.download(symbol, period=period, interval="1d",
