@@ -99,16 +99,31 @@ def load_local_xls(path: str) -> pd.DataFrame:
 
 def _parse_xls(file_obj) -> pd.DataFrame:
     """JPX Excel を解析して整形済み DataFrame を返す。"""
-    # JPX の xls は先頭行がヘッダ
+    # JPX の data_j.xls は旧来の .xls (BIFF) 形式 → xlrd が必須
+    # xlsx (zip形式) に変わった場合のみ openpyxl にフォールバック
     try:
         raw = pd.read_excel(file_obj, engine="xlrd",
                             dtype={"コード": str})
-    except Exception:
-        # xlrd がダメなら openpyxl (xlsx 形式の場合)
+    except ImportError:
+        raise RuntimeError(
+            "xlrd がインストールされていません。以下を実行してください:\n"
+            "  pip install xlrd>=2.0.1\n"
+            "\nインストール後に再実行してください。"
+        )
+    except Exception as e:
+        # xlrd で読めない場合は xlsx (openpyxl) を試みる
         if hasattr(file_obj, "seek"):
             file_obj.seek(0)
-        raw = pd.read_excel(file_obj, engine="openpyxl",
-                            dtype={"コード": str})
+        try:
+            raw = pd.read_excel(file_obj, engine="openpyxl",
+                                dtype={"コード": str})
+        except Exception:
+            raise RuntimeError(
+                f"Excel ファイルの読み込みに失敗しました: {e}\n"
+                "xlrd と openpyxl の両方で読み込みを試みましたが失敗しました。\n"
+                "  pip install xlrd>=2.0.1 openpyxl\n"
+                "を実行してから再試行してください。"
+            )
 
     # カラム名を正規化（スペース除去）
     raw.columns = [str(c).strip() for c in raw.columns]
