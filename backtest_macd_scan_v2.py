@@ -1948,12 +1948,27 @@ def main() -> None:
 
     # ── 銘柄リストを選択 ──────────────────────────────────────
     # V2: デフォルトは225全銘柄。--watch で監視19銘柄に絞る。
+    # symbols_listed_*.py が存在すれば全上場銘柄を自動使用。
     global SYMBOLS, FOCUS_SYMBOLS
     FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
     if args.watch:
         SYMBOLS = _WATCH_SYMBOLS
     else:
-        SYMBOLS = _ALL_SYMBOLS   # デフォルト: 225銘柄
+        # 全上場銘柄ファイルを自動検出（prime → standard → all の順）
+        _listed_symbols = None
+        for _candidate in ["symbols_listed_prime.py",
+                           "symbols_listed_standard.py",
+                           "symbols_listed_all.py"]:
+            _p = Path(_candidate)
+            if _p.exists():
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location("_listed_macd", _p)
+                _mod  = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                _listed_symbols = _mod.SYMBOLS
+                print(f"  銘柄ユニバース: {_candidate} ({len(_listed_symbols)}銘柄)")
+                break
+        SYMBOLS = _listed_symbols if _listed_symbols else _ALL_SYMBOLS
 
     # ── 買い/売り/ポートフォリオ → portfolio.py に委譲 ─────────
     if args.buy:

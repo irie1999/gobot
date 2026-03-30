@@ -1019,10 +1019,28 @@ def main() -> None:
     args = parser.parse_args()
 
     # V2: デフォルトは225全銘柄。--watch で監視20銘柄に切替。
+    # symbols_listed_*.py が存在すれば全上場銘柄を自動使用。
     global SYMBOLS
     if args.watch:
         SYMBOLS = _WATCH_SYMBOLS_A7
-    # else: SYMBOLS はすでに _ALL_SYMBOLS (モジュール初期値)
+    else:
+        # 全上場銘柄ファイルを自動検出（prime → standard → all の順）
+        _listed_symbols = None
+        for _candidate in ["symbols_listed_prime.py",
+                           "symbols_listed_standard.py",
+                           "symbols_listed_all.py"]:
+            _p = Path(_candidate)
+            if _p.exists():
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location("_listed_stoch", _p)
+                _mod  = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                _listed_symbols = _mod.SYMBOLS
+                print(f"  銘柄ユニバース: {_candidate} ({len(_listed_symbols)}銘柄)")
+                break
+        if _listed_symbols:
+            SYMBOLS = _listed_symbols
+        # else: SYMBOLS はすでに _ALL_SYMBOLS (モジュール初期値)
 
     if args.signal:
         # ── シグナルスキャンモード ───────────────────────────────
