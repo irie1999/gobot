@@ -481,16 +481,26 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python select_symbols_v2.py              # 全戦略（225銘柄 × 4期間）
+  python select_symbols_v2.py              # 全戦略（対象: 全上場 or 225銘柄）
   python select_symbols_v2.py --macd       # MACD のみ
   python select_symbols_v2.py --a7         # A7 のみ
   python select_symbols_v2.py --rsi2       # RSI2 のみ
   python select_symbols_v2.py --top 25     # 各戦略 25 銘柄選定
+  python select_symbols_v2.py --universe prime     # プライム上場銘柄
+  python select_symbols_v2.py --universe standard  # プライム+スタンダード
+  python select_symbols_v2.py --universe all       # 全上場銘柄
+  python select_symbols_v2.py --universe 225       # 日経225のみ（デフォルト）
+
+  ※ prime/standard/all を使う場合は先に以下を実行:
+    python fetch_listed_symbols.py --market prime
 """)
     parser.add_argument("--macd",  action="store_true", help="MACD 戦略のみ実行")
     parser.add_argument("--a7",    action="store_true", help="A7 戦略のみ実行")
     parser.add_argument("--rsi2",  action="store_true", help="RSI2 戦略のみ実行")
     parser.add_argument("--top",   type=int, default=20, help="選定銘柄数 (default: 20)")
+    parser.add_argument("--universe", default=None,
+                        choices=["225", "prime", "standard", "all"],
+                        help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225)")
     args = parser.parse_args()
 
     # フラグ未指定 → 全戦略
@@ -502,14 +512,47 @@ def main() -> None:
     top_n  = args.top
     today  = datetime.today().strftime("%Y-%m-%d")
 
-    # 対象: 日経 225 全銘柄
-    # 各モジュールの _ALL_SYMBOLS を使用（全て同じ 225 銘柄リスト）
-    all_symbols = macd_mod._ALL_SYMBOLS  # 225 銘柄
+    # ── 対象銘柄ユニバースを決定 ───────────────────────────────
+    universe_label = ""
+    all_symbols: list[tuple]
+
+    if args.universe == "225" or args.universe is None:
+        # 全上場ファイルを優先して自動選択
+        for candidate in ["symbols_listed_prime.py",
+                          "symbols_listed_standard.py",
+                          "symbols_listed_all.py"]:
+            p = Path(candidate)
+            if p.exists() and args.universe is None:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("_listed", p)
+                mod  = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                all_symbols   = mod.SYMBOLS
+                universe_label = f"{candidate} ({len(all_symbols)}銘柄)"
+                break
+        else:
+            all_symbols   = macd_mod._ALL_SYMBOLS  # 225 銘柄
+            universe_label = f"日経225 ({len(all_symbols)}銘柄)"
+    else:
+        fname = f"symbols_listed_{args.universe}.py"
+        p = Path(fname)
+        if not p.exists():
+            print(f"\n  エラー: {fname} が見つかりません。")
+            print(f"  先に以下を実行してください:")
+            print(f"    python fetch_listed_symbols.py --market {args.universe}\n")
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_listed", p)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        all_symbols   = mod.SYMBOLS
+        universe_label = f"{fname} ({len(all_symbols)}銘柄)"
 
     print()
     print("=" * 60)
     print(f"  V2 銘柄選定  ({today})")
-    print(f"  対象: {len(all_symbols)} 銘柄 × 4期間 (1M/3M/6M/1Y)")
+    print(f"  対象ユニバース: {universe_label}")
+    print(f"  期間: 1M / 3M / 6M / 1Y")
     print(f"  選定数: 各戦略 TOP {top_n}")
     print("=" * 60)
 
