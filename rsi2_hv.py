@@ -68,7 +68,7 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
             last_date = df.index[-1]
-            stale = last_date < (_TODAY - timedelta(days=10))  # 土日祝考慮で10日
+            stale = last_date < (_TODAY - timedelta(days=3))   # 土日祝考慮で3日
             if len(df) >= 210 and not stale:
                 return df
             persistent.unlink(missing_ok=True)
