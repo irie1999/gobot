@@ -89,13 +89,21 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
         raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         if len(raw) < 210:
             return None
-        return pd.DataFrame({
+        df = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw["volume"].to_numpy(dtype=float),
         }, index=raw.index)
+        # キャッシュに保存
+        try:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(persistent, "wb") as f:
+                pickle.dump(df, f)
+        except Exception:
+            pass
+        return df
     except Exception:
         return None
 

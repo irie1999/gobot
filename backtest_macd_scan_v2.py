@@ -308,13 +308,22 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         min_needed = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD
         if len(raw) < min_needed:
             return None
-        return pd.DataFrame({
+        df = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw["volume"].to_numpy(dtype=float),
         }, index=raw.index)
+        # キャッシュに保存
+        if _RSI2_CACHE_DIR is not None:
+            try:
+                _RSI2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                with open(_RSI2_CACHE_DIR / f"{symbol.replace('.', '_')}.pkl", "wb") as f:
+                    pickle.dump(df, f)
+            except Exception:
+                pass
+        return df
     except Exception:
         return None
 
