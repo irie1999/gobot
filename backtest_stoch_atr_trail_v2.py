@@ -1,10 +1,10 @@
 """
 期間指定バックテスト（A7 V2: トレンドフィルター付きストキャスティクス + ATRトレイリングストップ）
 ────────────────────────────────────────────────────────────────────────
-【V2 変更点: 取引回数増加チューニング】
-  - STOCH_K_PERIOD   14 → 9   (ストキャスティクスを高速化: シグナル増加)
-  - MA_TREND_PERIOD  75 → 50  (トレンドフィルターを短縮: より多くの銘柄が対象)
-  - STOCH_OVERBOUGHT 70 → 80  (買われすぎ判定を緩和: より広い%Kでエントリー)
+【V2 コンセプト】
+  パラメータは V1 と同じ（シグナル品質を維持）
+  デフォルト対象を日経225 全銘柄に拡大 → 高品質シグナルをより多く獲得
+  ※ パラメータを緩めると利益率が低下するため、対象拡大で取引回数を増やす
 
 対象銘柄: デフォルトはA7監視対象20銘柄（--all で日経225全銘柄）
 バックテスト期間: 自由に指定可（デフォルト: 直近1ヶ月）
@@ -277,22 +277,22 @@ _ALL_SYMBOLS = [
     ("9984.T", "ソフトバンクグループ"),
 ]
 
-# デフォルトはA7監視対象20銘柄
+# V2: デフォルトは日経225全銘柄（--watch で監視20銘柄に切替）
 from symbols_watch_a7 import SYMBOLS as _WATCH_SYMBOLS_A7
-SYMBOLS = _WATCH_SYMBOLS_A7
+SYMBOLS = _ALL_SYMBOLS
 
 # ── パラメータ ──────────────────────────────────────────────
 BACKTEST_DAYS    = 30           # デフォルトのバックテスト期間（日）
 WORKERS          = 16           # 並列バックテスト数（データ取得は順次）
-STOCH_K_PERIOD   = 9            # V2: 14→9 高速化でシグナル増加
+STOCH_K_PERIOD   = 14           # V1 と同じ（品質維持）
 STOCH_D_PERIOD   = 3
 STOCH_SMOOTH     = 3
 STOCH_OVERSOLD   = 30
-STOCH_OVERBOUGHT = 80           # V2: 70→80 買われすぎ判定を緩和
+STOCH_OVERBOUGHT = 70           # V1 と同じ（品質維持）
 ATR_PERIOD       = 14
 ATR_STOP_MULT    = 1.5
 ATR_TRAIL_MULT   = 2.0
-MA_TREND_PERIOD  = 50           # V2: 75→50 トレンドフィルター短縮
+MA_TREND_PERIOD  = 75           # V1 と同じ（品質維持）
 
 INITIAL_CASH     = 500_000      # 運用資金（円）
 RISK_PER_TRADE   = 0.02         # 1トレードあたり許容損失率 2%
@@ -715,7 +715,7 @@ def generate_html(results: list[dict], backtest_days: int,
 </table>
 
 <p class="note">
-  ※ {MA_TREND_PERIOD}MA トレンドフィルター（終値 &gt; {MA_TREND_PERIOD}MA のみエントリー）<br>
+  ※ 75MA トレンドフィルター（終値 &gt; 75MA のみエントリー）<br>
   ※ エントリー: ストキャスティクス %K が %D をゴールデンクロス かつ %K &lt; 70<br>
   ※ エグジット: デッドクロス または ATRトレイリングストップ（×{ATR_TRAIL_MULT}）<br>
   ※ 運用資金 {INITIAL_CASH:,}円/銘柄　ATRストップ×{ATR_STOP_MULT}
@@ -1004,8 +1004,10 @@ def main() -> None:
                         help="特定銘柄コード（省略時は監視対象銘柄スキャン）")
     parser.add_argument("--signal", action="store_true",
                         help="明日の売買シグナルをスキャンしてHTML出力")
+    parser.add_argument("--watch",  action="store_true",
+                        help="監視対象20銘柄に絞る（デフォルト: 日経225全銘柄）")
     parser.add_argument("--all",    action="store_true",
-                        help="日経225全銘柄をスキャン（デフォルト: A7監視対象20銘柄）")
+                        help="日経225全銘柄をスキャン（V2ではデフォルト）")
     parser.add_argument("--days",   type=int,  default=None,
                         help="バックテスト日数（直接指定）")
     parser.add_argument("--months", type=int,  default=None,
@@ -1016,14 +1018,15 @@ def main() -> None:
                         help="ランキング表示件数（デフォルト: 30）")
     args = parser.parse_args()
 
-    # 銘柄リスト切り替え
+    # V2: デフォルトは225全銘柄。--watch で監視20銘柄に切替。
     global SYMBOLS
-    if args.all:
-        SYMBOLS = _ALL_SYMBOLS
+    if args.watch:
+        SYMBOLS = _WATCH_SYMBOLS_A7
+    # else: SYMBOLS はすでに _ALL_SYMBOLS (モジュール初期値)
 
     if args.signal:
         # ── シグナルスキャンモード ───────────────────────────────
-        mode_label = "日経225全銘柄" if args.all else f"A7監視対象{len(SYMBOLS)}銘柄"
+        mode_label = f"A7監視対象{len(SYMBOLS)}銘柄" if args.watch else f"日経225全{len(SYMBOLS)}銘柄"
         print(f"\n  A7シグナルスキャン  ({mode_label})")
         print(f"  シグナル日: {datetime.today().strftime('%Y-%m-%d')}\n")
 

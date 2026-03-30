@@ -1,11 +1,10 @@
 """
-RSI(2) 平均回帰バックテスト 拡張版 V2 — 取引回数増加・高ボラ対応
+RSI(2) 平均回帰バックテスト 拡張版 V2 — 高ボラ対応・自動レジーム切替
 ────────────────────────────────────────────────────────────────────
-【V2 変更点: 取引回数増加チューニング】
-  - NORMAL RSI2_ENTRY  10 → 15  (エントリー閾値を引き上げ: シグナル増加)
-  - HV     RSI2_ENTRY   5 → 8   (高ボラ時もエントリー閾値を緩和)
-  - use_consec デフォルト → False (連続RSI確認を無効化: 1日シグナルでOK)
-    ※ 元の厳格なフィルターを使いたい場合は --consec オプションを付加
+【V2 コンセプト】
+  パラメータは V1 と同じ（シグナル品質を維持）
+  デフォルト対象を日経225 全銘柄に拡大 → 高品質シグナルをより多く獲得
+  ※ パラメータを緩めると利益率が低下するため、対象拡大で取引回数を増やす
 
 改善点（海外論文・過去事例に基づく）:
   1. 自動レジーム検知: 日経MA200 で「通常 / 高ボラ」を判定しパラメータ切替
@@ -42,9 +41,9 @@ from rsi2 import (
     _market_info, _mkt_banner_html, _trade_table,
 )
 
-# デフォルトは選定済み監視20銘柄（--all で日経225全銘柄に切替）
+# V2: デフォルトは日経225全銘柄（--watch で監視20銘柄に切替）
 from symbols_watch_rsi2 import SYMBOLS as _WATCH_SYMBOLS_RSI2
-SYMBOLS = _WATCH_SYMBOLS_RSI2
+SYMBOLS = _ALL_SYMBOLS
 
 import yfinance as yf
 
@@ -123,7 +122,7 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
 
 # ── パラメーター: 通常モード ─────────────────────────────────
 NORMAL = dict(
-    RSI2_ENTRY      = 15.0,   # V2: 10→15 エントリー閾値を引き上げ（シグナル増加）
+    RSI2_ENTRY      = 10.0,   # V1 と同じ（品質維持）
     RSI2_EXIT       = 65.0,   # RSI(2) ≥ 閾値 → 翌日売り
     HARD_STOP_PCT   =  3.0,   # 即損切り %
     HALF_PROFIT_PCT =  5.0,   # 半分利確 %
@@ -138,7 +137,7 @@ NORMAL = dict(
 #   HALF_PROFIT 3 : 急落初動20日はリバウンドを早取り (ScienceDirect 2023)
 #   ATR_TRAIL 1.5 : ATRが大きいので2倍は遠すぎる
 HV = dict(
-    RSI2_ENTRY      =  8.0,   # V2: 5→8 高ボラ時もエントリー閾値を緩和
+    RSI2_ENTRY      =  5.0,   # V1 と同じ（品質維持）
     RSI2_EXIT       = 75.0,
     HARD_STOP_PCT   =  5.0,
     HALF_PROFIT_PCT =  3.0,
@@ -1001,8 +1000,10 @@ def main() -> None:
     parser.add_argument("symbol",    nargs="?", default=None)
     parser.add_argument("--signal",  action="store_true",
                         help="明日の売買シグナルをスキャンしてHTML出力")
+    parser.add_argument("--watch",   action="store_true",
+                        help="監視対象20銘柄に絞る（デフォルト: 日経225全銘柄）")
     parser.add_argument("--all",     action="store_true",
-                        help="日経225全銘柄をスキャン（デフォルト: 監視20銘柄）")
+                        help="日経225全銘柄をスキャン（V2ではデフォルト）")
     parser.add_argument("--days",    type=int, default=None)
     parser.add_argument("--months",  type=int, default=None)
     parser.add_argument("--years",   type=int, default=None)
@@ -1021,10 +1022,11 @@ def main() -> None:
     parser.set_defaults(use_ibs=True, use_consec=False)
     args = parser.parse_args()
 
-    # 銘柄リスト切り替え
+    # V2: デフォルトは225全銘柄。--watch で監視20銘柄に切替。
     global SYMBOLS
-    if args.all:
-        SYMBOLS = _ALL_SYMBOLS
+    if args.watch:
+        SYMBOLS = _WATCH_SYMBOLS_RSI2
+    # else: SYMBOLS はすでに _ALL_SYMBOLS (モジュール初期値)
 
     if args.days is not None:
         days, label = args.days, f"{args.days}日"

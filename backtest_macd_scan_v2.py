@@ -1,17 +1,16 @@
 """
 MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄スキャナー V2
 ────────────────────────────────────────────────────────────────────────
-【V2 変更点: 取引回数増加チューニング】
-  - VOL_SPIKE_MULT  1.2 → 1.0  (出来高フィルターを緩和)
-  - FILTER_RSI_MAX  58  → 65   (RSI上限を引き上げ)
-  - FILTER_MA_DEV_MAX 4.0 → 5.0 (MA乖離許容幅を拡大)
-  - FILTER_MA200_ABOVE → False  (MA200上位フィルターを無効化)
+【V2 コンセプト】
+  パラメータは V1 と同じ（シグナル品質を維持）
+  デフォルト対象を日経225 全銘柄に拡大 → 高品質シグナルをより多く獲得
+  ※ パラメータを緩めると利益率が低下するため、対象拡大で取引回数を増やす
 
 【アルゴリズム】
   Entry（3条件すべて）:
     1. MACDヒストグラムがゼロラインを下から上抜け（前日<=0 → 当日>0）
        OR ヒストグラムが正値かつ2日連続加速
-    2. 出来高 > 20日平均 × 1.0倍  ← 出来高条件を緩和
+    2. 出来高 > 20日平均 × 1.2倍  ← 機関投資家の本物の参入
     3. 終値 > 10日移動平均線       ← 短期上昇トレンド確認
 
   Exit（いずれか）:
@@ -19,10 +18,9 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
     B. ATRトレイリングストップ発動（ATR × 2.0）
 
 ■ 実行方法:
-  python backtest_macd_scan_v2.py --signal           # 明日の売買シグナルスキャン（推奨・19銘柄）
-  python backtest_macd_scan_v2.py --signal --all     # 明日の売買シグナルスキャン（225銘柄全部）
-  python backtest_macd_scan_v2.py                    # 直近1ヶ月バックテスト（デフォルト）
-  python backtest_macd_scan_v2.py --all              # 225銘柄でバックテスト
+  python backtest_macd_scan_v2.py --signal           # 明日の売買シグナルスキャン（225銘柄・デフォルト）
+  python backtest_macd_scan_v2.py --signal --watch   # 明日の売買シグナルスキャン（監視19銘柄）
+  python backtest_macd_scan_v2.py                    # 直近1ヶ月バックテスト（225銘柄）
   python backtest_macd_scan_v2.py --months 3         # 直近3ヶ月
   python backtest_macd_scan_v2.py --years 1          # 直近1年
   python backtest_macd_scan_v2.py --years 5          # 直近5年
@@ -56,8 +54,8 @@ from symbols_watch import SYMBOLS as _WATCH_SYMBOLS
 from symbols_watch import FOCUS_SYMBOLS as _WATCH_FOCUS_SYMBOLS
 from symbols_all import SYMBOLS as _ALL_SYMBOLS
 
-# デフォルトは監視対象19銘柄（main()で--allフラグにより上書き可）
-SYMBOLS = _WATCH_SYMBOLS
+# V2: デフォルトは日経225全銘柄（--watch で監視19銘柄に切替）
+SYMBOLS = _ALL_SYMBOLS
 
 # ── 業種マップ ─────────────────────────────────────────────
 SECTOR = {
@@ -124,7 +122,7 @@ MACD_FAST       = 8             # バランス設定: (5,13,4)より遅く (12,2
 MACD_SLOW       = 17            # 高ボラでも30日間に3〜5回シグナルが出る
 MACD_SIGNAL     = 5
 VOL_MA_PERIOD   = 20
-VOL_SPIKE_MULT  = 1.0           # V2: 1.2→1.0 出来高フィルター緩和
+VOL_SPIKE_MULT  = 1.2           # V1 と同じ（品質維持）
 MA_TREND_PERIOD = 10            # 25→10: 修正相場では25MA割れが多く全滅するため
 
 ATR_PERIOD      = 14
@@ -138,12 +136,12 @@ MAX_QTY         = 9999
 # ── エントリーフィルター【2026年3月 高ボラ相場対応】─────────────
 # 日経VI=46 → ATRが大きく振れる → フィルター幅を広めに設定
 # RSI: 高VI時は深い押し目(25〜35)からの反発を狙う
-FILTER_MA_DEV_MAX    =  5.0   # V2: 4.0→5.0 MA乖離許容幅を拡大
-FILTER_MA200_ABOVE   = False   # V2: True→False MA200上位フィルターを無効化（より多くの銘柄が対象）
+FILTER_MA_DEV_MAX    =  4.0   # V1 と同じ（品質維持）
+FILTER_MA200_ABOVE   = True    # V1 と同じ（品質維持）
 FILTER_ATR_PCT_MIN   =  1.5   # ATR% 下限（2.0→1.5: 保険・銀行株対応）
 FILTER_ATR_PCT_MAX   =  8.0   # ATR% 上限
 FILTER_RSI_MIN       = 25.0   # RSI 下限（高VI時：深い押し目を拾う）
-FILTER_RSI_MAX       = 65.0   # V2: 58→65 RSI上限を引き上げ（より多くのエントリー）
+FILTER_RSI_MAX       = 58.0   # V1 と同じ（品質維持）
 FILTER_VOL_RATIO_MIN =  1.1   # 出来高比 下限
 FILTER_VOL_RATIO_MAX =  3.0   # 出来高比 上限
 
@@ -1934,8 +1932,10 @@ def main() -> None:
                         help="ランキング表示件数（デフォルト: 30）")
     parser.add_argument("--signal", action="store_true",
                         help="明日の売買シグナルをスキャンして表示（バックテストなし）")
+    parser.add_argument("--watch",  action="store_true",
+                        help="監視対象19銘柄に絞る（デフォルト: 日経225全銘柄）")
     parser.add_argument("--all",    action="store_true",
-                        help="日経225全銘柄を対象にする（デフォルト: 監視対象19銘柄）")
+                        help="日経225全銘柄を対象にする（V2ではデフォルトで全銘柄）")
     parser.add_argument("--buy",  nargs=3, metavar=("SYMBOL", "QTY", "PRICE"),
                         help="買い登録: --buy 6754.T 100 850")
     parser.add_argument("--sell", nargs=3, metavar=("SYMBOL", "QTY", "PRICE"),
@@ -1947,13 +1947,13 @@ def main() -> None:
     args = parser.parse_args()
 
     # ── 銘柄リストを選択 ──────────────────────────────────────
+    # V2: デフォルトは225全銘柄。--watch で監視19銘柄に絞る。
     global SYMBOLS, FOCUS_SYMBOLS
-    if args.all:
-        SYMBOLS       = _ALL_SYMBOLS
-        FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS   # FOCUS設定はwatchのまま維持
+    FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
+    if args.watch:
+        SYMBOLS = _WATCH_SYMBOLS
     else:
-        SYMBOLS       = _WATCH_SYMBOLS
-        FOCUS_SYMBOLS = _WATCH_FOCUS_SYMBOLS
+        SYMBOLS = _ALL_SYMBOLS   # デフォルト: 225銘柄
 
     # ── 買い/売り/ポートフォリオ → portfolio.py に委譲 ─────────
     if args.buy:
