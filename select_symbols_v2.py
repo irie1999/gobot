@@ -854,6 +854,125 @@ def _charts_html(
 """
 
 
+def analyze_cross_strategy(
+    macd_sel: list[dict] | None,
+    a7_sel:   list[dict] | None,
+    rsi2_sel: list[dict] | None,
+) -> list[dict]:
+    """3戦略横断で監視銘柄をスコアリングして返す。
+    戻り値: [{"symbol", "name", "strategies": [...], "ranks": {...}, "n_strat", "total_score"}, ...]
+    """
+    all_syms: dict[str, dict] = {}
+    for sel, label in [(macd_sel, "MACD"), (a7_sel, "A7"), (rsi2_sel, "RSI2")]:
+        for rank, d in enumerate(sel or [], 1):
+            sym = d["symbol"]
+            if sym not in all_syms:
+                all_syms[sym] = {
+                    "symbol": sym, "name": d["name"],
+                    "strategies": [], "ranks": {},
+                    "periods": d.get("periods", {}),
+                    "score": d.get("score", 0),
+                    "ret_sum": d.get("ret_sum", 0.0),
+                    "pos_cnt": d.get("pos_cnt", 0),
+                    "last_open":  d.get("last_open"),
+                    "last_close": d.get("last_close"),
+                }
+            all_syms[sym]["strategies"].append(label)
+            all_syms[sym]["ranks"][label] = rank
+
+    for d in all_syms.values():
+        n = len(d["strategies"])
+        rank_score = sum(21 - r for r in d["ranks"].values())
+        d["n_strat"]     = n
+        d["rank_score"]  = rank_score
+        d["total_score"] = n * 100 + rank_score
+
+    return sorted(all_syms.values(), key=lambda x: -x["total_score"])
+
+
+def print_watchlist(watch: list[dict]) -> None:
+    """横断分析結果をコンソールに表示"""
+    print()
+    print("=" * 70)
+    print("  ★ 横断分析 監視銘柄 推奨リスト")
+    print("=" * 70)
+
+    tiers = [
+        ("★★★ 3戦略一致 — 最優先",  [d for d in watch if d["n_strat"] == 3]),
+        ("★★  2戦略一致 — 高優先度", [d for d in watch if d["n_strat"] == 2]),
+        ("★   1戦略 上位5位以内",    [d for d in watch
+                                       if d["n_strat"] == 1 and min(d["ranks"].values()) <= 5]),
+    ]
+    for title, items in tiers:
+        if not items:
+            continue
+        print(f"\n  [{title}]")
+        print(f"  {'銘柄':<22} {'コード':<10} {'戦略(ランク)'}")
+        print("  " + "-" * 56)
+        for d in items:
+            ranks_str = "  ".join(f"{k}:{v}位" for k, v in d["ranks"].items())
+            print(f"  {d['name']:<22} {d['symbol']:<10} {ranks_str}")
+    print()
+
+
+def _watchlist_section_html(watch: list[dict]) -> str:
+    """横断分析結果の HTML セクションを生成"""
+    if not watch:
+        return ""
+
+    def _tier(n):
+        if n == 3: return "★★★", "#f59e0b", "3戦略一致"
+        if n == 2: return "★★",  "#4ade80", "2戦略一致"
+        return "★",    "#38bdf8", "1戦略"
+
+    _bg  = {"MACD": "#1e3a5f", "A7": "#1a3d2b", "RSI2": "#3d2a00"}
+    _fg  = {"MACD": "#38bdf8", "A7": "#4ade80", "RSI2": "#f59e0b"}
+
+    rows = ""
+    for i, d in enumerate(watch, 1):
+        star, color, tier_label = _tier(d["n_strat"])
+        strat_badges = "".join(
+            f'<span style="background:{_bg[s]};color:{_fg[s]};'
+            f'border-radius:3px;padding:1px 5px;font-size:.75em;margin-right:3px">'
+            f'{s} #{d["ranks"][s]}</span>'
+            for s in d["strategies"]
+        )
+        open_s  = f'{d["last_open"]:,.0f}'  if d.get("last_open")  else "—"
+        close_s = f'{d["last_close"]:,.0f}' if d.get("last_close") else "—"
+        ret_s   = f'+{d["ret_sum"]:.1f}%' if d["ret_sum"] >= 0 else f'{d["ret_sum"]:.1f}%'
+        ret_cls = "pos" if d["ret_sum"] >= 0 else "neg"
+        rows += (
+            f'<tr>'
+            f'<td class="rank">{i}</td>'
+            f'<td style="color:{color};font-weight:700;text-align:center">{star}</td>'
+            f'<td class="name">{d["name"]}<br><small>{d["symbol"]}</small></td>'
+            f'<td>{strat_badges}</td>'
+            f'<td class="num">{open_s}</td>'
+            f'<td class="num">{close_s}</td>'
+            f'<td class="num">{d["pos_cnt"]}/4</td>'
+            f'<td class="num {ret_cls}">{ret_s}</td>'
+            f'</tr>\n'
+        )
+
+    return f"""
+<div style="background:#162032;border:1px solid #334155;border-radius:8px;padding:16px;margin-bottom:24px">
+<h2 style="color:#f59e0b;border-left:4px solid #f59e0b;padding-left:10px;margin:0 0 12px">
+  ★ 横断分析 監視銘柄 推奨リスト
+  <span style="font-size:.75em;color:#64748b;font-weight:400;margin-left:8px">
+    （複数戦略で選ばれた銘柄を優先）
+  </span>
+</h2>
+<table>
+  <thead><tr>
+    <th>#</th><th>評価</th><th>銘柄</th><th>選定戦略（順位）</th>
+    <th>始値</th><th>終値</th><th>期間+</th><th>累積リターン</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+</div>
+"""
+
+
 def generate_html(
     macd_sel:   list[dict] | None,
     a7_sel:     list[dict] | None,
@@ -864,10 +983,14 @@ def generate_html(
     macd_data:  dict | None = None,
     a7_data:    dict | None = None,
     rsi2_data:  dict | None = None,
+    watchlist:  list[dict] | None = None,
 ) -> Path:
     today = datetime.today().strftime("%Y-%m-%d")
 
     body = ""
+    # 横断分析 監視銘柄（最上部に表示）
+    if watchlist:
+        body += _watchlist_section_html(watchlist)
     # グラフセクション（選定結果がある場合のみ）
     if macd_sel or a7_sel or rsi2_sel:
         body += _charts_html(macd_sel, a7_sel, rsi2_sel)
@@ -1061,10 +1184,35 @@ def main() -> None:
             rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
             rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
+    # ── 横断分析: 3戦略で共通して選ばれた銘柄を監視リストに ──
+    watchlist = None
+    if sum(1 for s in [macd_sel, a7_sel, rsi2_sel] if s) >= 2:
+        watchlist = analyze_cross_strategy(macd_sel, a7_sel, rsi2_sel)
+        print_watchlist(watchlist)
+        # 監視銘柄ファイルを出力
+        today = datetime.today().strftime("%Y-%m-%d")
+        lines = [
+            '"""',
+            f'横断分析 監視銘柄 — 3戦略バックテスト選定 ({today})',
+            'select_symbols_v2.py により自動生成',
+            '"""',
+            'SYMBOLS = [',
+        ]
+        for d in watchlist:
+            star = "★★★" if d["n_strat"] == 3 else ("★★" if d["n_strat"] == 2 else "★")
+            strat_str = "/".join(
+                f'{s}#{d["ranks"][s]}' for s in d["strategies"]
+            )
+            lines.append(f'    ("{d["symbol"]}", "{d["name"]}"),  # {star} [{strat_str}]')
+        lines.append(']')
+        Path("symbols_watch_combined.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"  → symbols_watch_combined.py を出力しました")
+
     # HTML レポート
     html_path = generate_html(macd_sel, a7_sel, rsi2_sel,
                                macd_sig, a7_sig, rsi2_sig,
-                               macd_data, a7_data, rsi2_data)
+                               macd_data, a7_data, rsi2_data,
+                               watchlist)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
     webbrowser.open(html_path.resolve().as_uri())
     print()
