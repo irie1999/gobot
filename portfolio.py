@@ -26,6 +26,12 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+import http.server
+import socketserver
+import threading
+import urllib.parse
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -394,6 +400,465 @@ def print_positions_for_signal(strategy: str | None = None) -> None:
     print()
 
 
+# ── 監視銘柄リストを全ファイルから収集 ─────────────────────
+def _all_symbols() -> list[tuple[str, str]]:
+    seen: dict[str, str] = {}
+    for mod in ("symbols_watch_combined", "symbols_watch_rsi2",
+                "symbols_watch_a7", "symbols_watch", "symbols_all"):
+        try:
+            m = __import__(mod)
+            for sym, name in m.SYMBOLS:
+                seen.setdefault(sym, name)
+        except Exception:
+            pass
+    return sorted(seen.items())
+
+
+# ── Web UI ──────────────────────────────────────────────────
+_WEB_HTML = r"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ポートフォリオ管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e0e0e0;min-height:100vh}
+h1{padding:18px 24px;font-size:1.25rem;background:#1a1d27;border-bottom:1px solid #2a2d3a;color:#7eb3ff}
+.tabs{display:flex;background:#1a1d27;border-bottom:2px solid #2a2d3a}
+.tab{padding:11px 22px;cursor:pointer;font-size:.9rem;color:#888;transition:.2s}
+.tab:hover{color:#ccc}
+.tab.active{color:#7eb3ff;border-bottom:2px solid #7eb3ff;margin-bottom:-2px}
+.panel{display:none;padding:24px}
+.panel.active{display:block}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{background:#1e2233;color:#7eb3ff;padding:9px 10px;text-align:left;font-weight:600}
+td{padding:8px 10px;border-bottom:1px solid #1e2233}
+tr:hover td{background:#1a1d27}
+.pos{color:#4caf7d}.neg{color:#e05c5c}.neutral{color:#888}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:.75rem;font-weight:600}
+.badge-macd{background:#1e3a5f;color:#7eb3ff}
+.badge-a7{background:#1a3d2b;color:#6ecf8a}
+.badge-rsi2{background:#3d2a00;color:#ffa040}
+.card{background:#1a1d27;border:1px solid #2a2d3a;border-radius:8px;padding:20px;max-width:480px}
+.card h3{margin-bottom:16px;color:#aaa;font-size:.9rem;text-transform:uppercase;letter-spacing:.05em}
+.form-row{margin-bottom:14px}
+label{display:block;font-size:.8rem;color:#888;margin-bottom:5px}
+input,select{width:100%;padding:9px 12px;background:#0f1117;border:1px solid #2a2d3a;
+  border-radius:6px;color:#e0e0e0;font-size:.9rem;outline:none}
+input:focus,select:focus{border-color:#7eb3ff}
+.btn{padding:10px 22px;border:none;border-radius:6px;cursor:pointer;font-size:.9rem;font-weight:600;transition:.2s}
+.btn-buy{background:#1a4a2e;color:#6ecf8a}
+.btn-buy:hover{background:#225c39}
+.btn-sell{background:#4a1a1a;color:#e07070}
+.btn-sell:hover{background:#5c2222}
+.msg{margin-top:14px;padding:10px 14px;border-radius:6px;font-size:.85rem;display:none}
+.msg.ok{background:#1a3d2b;color:#6ecf8a;display:block}
+.msg.err{background:#3d1a1a;color:#e07070;display:block}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+.scard{background:#1a1d27;border:1px solid #2a2d3a;border-radius:8px;padding:16px}
+.scard .strat{font-size:.75rem;font-weight:700;text-transform:uppercase;margin-bottom:8px}
+.scard .val{font-size:1.3rem;font-weight:700}
+.scard .sub{font-size:.78rem;color:#666;margin-top:4px}
+.refresh{float:right;font-size:.78rem;color:#555;margin-top:4px}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #333;
+  border-top-color:#7eb3ff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<h1>ポートフォリオ管理</h1>
+<div class="tabs">
+  <div class="tab active" onclick="showTab('positions')">保有ポジション</div>
+  <div class="tab" onclick="showTab('buy')">買い登録</div>
+  <div class="tab" onclick="showTab('sell')">売り登録</div>
+  <div class="tab" onclick="showTab('history')">取引履歴</div>
+  <div class="tab" onclick="showTab('summary')">サマリー</div>
+</div>
+
+<!-- 保有ポジション -->
+<div id="tab-positions" class="panel active">
+  <span class="refresh" id="pos-refresh"></span>
+  <div id="pos-content"><span class="spinner"></span> 読み込み中...</div>
+</div>
+
+<!-- 買い登録 -->
+<div id="tab-buy" class="panel">
+  <div class="card">
+    <h3>買い登録</h3>
+    <div class="form-row">
+      <label>銘柄コード</label>
+      <input id="b-sym" list="sym-list" placeholder="例: 9022.T" autocomplete="off">
+      <datalist id="sym-list">__DATALIST__</datalist>
+    </div>
+    <div class="form-row">
+      <label>株数</label>
+      <input id="b-qty" type="number" min="1" step="1" placeholder="例: 100">
+    </div>
+    <div class="form-row">
+      <label>買値（円）</label>
+      <input id="b-price" type="number" min="0" step="1" placeholder="例: 2500">
+    </div>
+    <div class="form-row">
+      <label>手法</label>
+      <select id="b-strat">
+        <option>MACD</option><option>A7</option><option>RSI2</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>日付（省略で今日）</label>
+      <input id="b-date" type="date">
+    </div>
+    <button class="btn btn-buy" onclick="doBuy()">買い登録する</button>
+    <div id="b-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- 売り登録 -->
+<div id="tab-sell" class="panel">
+  <div class="card">
+    <h3>売り登録</h3>
+    <div class="form-row">
+      <label>銘柄（保有中から選択）</label>
+      <select id="s-sym"><option value="">-- 選択してください --</option></select>
+    </div>
+    <div class="form-row">
+      <label>株数</label>
+      <input id="s-qty" type="number" min="1" step="1" placeholder="例: 100">
+    </div>
+    <div class="form-row">
+      <label>売値（円）</label>
+      <input id="s-price" type="number" min="0" step="1" placeholder="例: 2700">
+    </div>
+    <div class="form-row">
+      <label>日付（省略で今日）</label>
+      <input id="s-date" type="date">
+    </div>
+    <button class="btn btn-sell" onclick="doSell()">売り登録する</button>
+    <div id="s-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- 取引履歴 -->
+<div id="tab-history" class="panel">
+  <div id="hist-content"><span class="spinner"></span> 読み込み中...</div>
+</div>
+
+<!-- サマリー -->
+<div id="tab-summary" class="panel">
+  <div id="sum-content"><span class="spinner"></span> 読み込み中...</div>
+</div>
+
+<script>
+const STRAT_BADGE = {
+  MACD:'<span class="badge badge-macd">MACD</span>',
+  A7:  '<span class="badge badge-a7">A7</span>',
+  RSI2:'<span class="badge badge-rsi2">RSI2</span>',
+};
+function badge(s){return STRAT_BADGE[s]||s}
+function pnlClass(v){return v>0?'pos':v<0?'neg':'neutral'}
+function fmt(v){return v==null?'—':v.toLocaleString('ja-JP',{maximumFractionDigits:0})}
+function fmtPct(v){return v==null?'—':(v>=0?'+':'')+v.toFixed(2)+'%'}
+
+function showTab(name){
+  document.querySelectorAll('.tab').forEach((t,i)=>{
+    t.classList.toggle('active', ['positions','buy','sell','history','summary'][i]===name)
+  });
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  if(name==='positions') loadPositions();
+  if(name==='history')   loadHistory();
+  if(name==='summary')   loadSummary();
+  if(name==='sell')      loadSellSyms();
+}
+
+async function api(path, body){
+  const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+// ── ポジション ──
+async function loadPositions(){
+  document.getElementById('pos-refresh').textContent='';
+  document.getElementById('pos-content').innerHTML='<span class="spinner"></span> 読み込み中...';
+  const d = await api('/api/data');
+  const pos = d.positions||[];
+  const prices = d.prices||{};
+  if(!pos.length){
+    document.getElementById('pos-content').innerHTML='<p style="color:#666;padding:20px">保有ポジションはありません。</p>';
+    return;
+  }
+  const strats = ['MACD','A7','RSI2'];
+  let html='';
+  let tc=0,tv=0,tp=0;
+  for(const st of strats){
+    const grp=pos.filter(p=>p.strategy===st);
+    if(!grp.length) continue;
+    html+=`<h3 style="margin:20px 0 8px;font-size:.85rem;color:#aaa">${badge(st)} 戦略</h3>`;
+    html+=`<table><thead><tr><th>銘柄</th><th>株数</th><th>買値</th><th>現在値</th><th>含み損益</th><th>損益%</th><th>保有日</th><th>買付日</th></tr></thead><tbody>`;
+    for(const p of grp.sort((a,b)=>a.buy_date>b.buy_date?1:-1)){
+      const cur=prices[p.symbol];
+      const cost=p.buy_price*p.qty;
+      const val=cur!=null?cur*p.qty:cost;
+      const pnl=cur!=null?val-cost:null;
+      const pct=pnl!=null?pnl/cost*100:null;
+      const days=Math.floor((Date.now()-new Date(p.buy_date))/(86400000));
+      tc+=cost; tv+=val; if(pnl!=null) tp+=pnl;
+      const pc=pnlClass(pnl);
+      html+=`<tr>
+        <td><b>${p.name}</b><br><small style="color:#555">${p.symbol}</small></td>
+        <td>${p.qty}</td>
+        <td>¥${fmt(p.buy_price)}</td>
+        <td>${cur!=null?'¥'+fmt(cur):'<span class="neutral">—</span>'}</td>
+        <td class="${pc}">${pnl!=null?(pnl>=0?'+':'')+' ¥'+fmt(Math.abs(pnl)):'—'}</td>
+        <td class="${pc}">${fmtPct(pct)}</td>
+        <td>${days}日</td>
+        <td>${p.buy_date}</td>
+      </tr>`;
+    }
+    html+='</tbody></table>';
+  }
+  const tpc=pnlClass(tp);
+  html+=`<div style="margin-top:16px;padding:12px 16px;background:#1e2233;border-radius:6px;font-size:.85rem">
+    買付合計: ¥${fmt(tc)} ／ 評価合計: ¥${fmt(tv)} ／
+    含み損益: <span class="${tpc}">${tp>=0?'+':''} ¥${fmt(Math.abs(tp))}</span>
+  </div>`;
+  if(d.realized!=null){
+    const r=d.realized, tot=tp+r;
+    html+=`<div style="margin-top:8px;padding:10px 16px;background:#1a1d27;border-radius:6px;font-size:.82rem;color:#888">
+      実現損益: <span class="${pnlClass(r)}">${r>=0?'+':''} ¥${fmt(Math.abs(r))}</span>
+      ／ 総合損益: <span class="${pnlClass(tot)}">${tot>=0?'+':''} ¥${fmt(Math.abs(tot))}</span>
+    </div>`;
+  }
+  document.getElementById('pos-content').innerHTML=html;
+  document.getElementById('pos-refresh').textContent='更新: '+new Date().toLocaleTimeString('ja-JP');
+}
+
+// ── 買い ──
+async function doBuy(){
+  const sym=(document.getElementById('b-sym').value||'').trim().toUpperCase();
+  const qty=parseInt(document.getElementById('b-qty').value);
+  const price=parseFloat(document.getElementById('b-price').value);
+  const strat=document.getElementById('b-strat').value;
+  const date=document.getElementById('b-date').value||null;
+  const msg=document.getElementById('b-msg');
+  if(!sym||isNaN(qty)||isNaN(price)){msg.className='msg err';msg.textContent='銘柄・株数・価格を入力してください';return}
+  const r=await api('/api/buy',{symbol:sym,qty,price,strategy:strat,date});
+  if(r.ok){msg.className='msg ok';msg.textContent=r.message;}
+  else{msg.className='msg err';msg.textContent=r.error;}
+}
+
+// ── 売り ──
+async function loadSellSyms(){
+  const d=await api('/api/data');
+  const pos=d.positions||[];
+  const sel=document.getElementById('s-sym');
+  const syms=[...new Set(pos.map(p=>p.symbol))];
+  sel.innerHTML='<option value="">-- 選択してください --</option>'+
+    syms.map(s=>{const p=pos.find(x=>x.symbol===s);return`<option value="${s}">${p.name} (${s}) 保有:${pos.filter(x=>x.symbol===s).reduce((a,b)=>a+b.qty,0)}株</option>`}).join('');
+}
+
+async function doSell(){
+  const sym=document.getElementById('s-sym').value;
+  const qty=parseInt(document.getElementById('s-qty').value);
+  const price=parseFloat(document.getElementById('s-price').value);
+  const date=document.getElementById('s-date').value||null;
+  const msg=document.getElementById('s-msg');
+  if(!sym||isNaN(qty)||isNaN(price)){msg.className='msg err';msg.textContent='銘柄・株数・価格を入力してください';return}
+  const r=await api('/api/sell',{symbol:sym,qty,price,date});
+  if(r.ok){msg.className='msg ok';msg.textContent=r.message;loadSellSyms();}
+  else{msg.className='msg err';msg.textContent=r.error;}
+}
+
+// ── 履歴 ──
+async function loadHistory(){
+  document.getElementById('hist-content').innerHTML='<span class="spinner"></span>';
+  const d=await api('/api/data');
+  const hist=(d.history||[]).slice().sort((a,b)=>b.sell_date>a.sell_date?1:-1);
+  if(!hist.length){document.getElementById('hist-content').innerHTML='<p style="color:#666;padding:20px">取引履歴はありません。</p>';return}
+  let html=`<table><thead><tr><th>手法</th><th>銘柄</th><th>株数</th><th>買値</th><th>売値</th><th>損益</th><th>損益%</th><th>買付日</th><th>売却日</th></tr></thead><tbody>`;
+  let total=0;
+  for(const h of hist){
+    const pc=pnlClass(h.profit);
+    total+=h.profit;
+    html+=`<tr>
+      <td>${badge(h.strategy||'MACD')}</td>
+      <td><b>${h.name}</b><br><small style="color:#555">${h.symbol}</small></td>
+      <td>${h.qty}</td>
+      <td>¥${fmt(h.buy_price)}</td>
+      <td>¥${fmt(h.sell_price)}</td>
+      <td class="${pc}">${h.profit>=0?'+':''} ¥${fmt(Math.abs(h.profit))}</td>
+      <td class="${pc}">${h.profit_pct>=0?'+':''}${h.profit_pct.toFixed(2)}%</td>
+      <td>${h.buy_date}</td>
+      <td>${h.sell_date}</td>
+    </tr>`;
+  }
+  html+='</tbody></table>';
+  const tc=pnlClass(total);
+  html+=`<div style="margin-top:12px;padding:10px 16px;background:#1e2233;border-radius:6px;font-size:.85rem">
+    実現損益合計: <span class="${tc}">${total>=0?'+':''} ¥${fmt(Math.abs(total))}</span>
+  </div>`;
+  document.getElementById('hist-content').innerHTML=html;
+}
+
+// ── サマリー ──
+async function loadSummary(){
+  document.getElementById('sum-content').innerHTML='<span class="spinner"></span>';
+  const d=await api('/api/summary');
+  const st=d.strategies||{};
+  let html='<div class="summary-grid">';
+  for(const [name,s] of Object.entries(st)){
+    const tot=s.unrealized+s.realized;
+    const pc=pnlClass(tot);
+    html+=`<div class="scard">
+      <div class="strat">${badge(name)}</div>
+      <div class="val ${pc}">${tot>=0?'+':''} ¥${fmt(Math.abs(tot))}</div>
+      <div class="sub">含み: <span class="${pnlClass(s.unrealized)}">${s.unrealized>=0?'+':''}¥${fmt(Math.abs(s.unrealized))}</span>
+        ／ 実現: <span class="${pnlClass(s.realized)}">${s.realized>=0?'+':''}¥${fmt(Math.abs(s.realized))}</span>
+      </div>
+      <div class="sub">決済${s.trades}回 勝率${s.win_rate.toFixed(0)}%</div>
+    </div>`;
+  }
+  html+='</div>';
+  const g=d.grand||{};
+  const gtot=(g.unrealized||0)+(g.realized||0);
+  html+=`<div style="padding:16px;background:#1e2233;border-radius:8px;font-size:.9rem">
+    <b style="color:#aaa">全戦略合計</b><br><br>
+    含み損益: <span class="${pnlClass(g.unrealized)}">${(g.unrealized||0)>=0?'+':''}¥${fmt(Math.abs(g.unrealized||0))}</span><br>
+    実現損益: <span class="${pnlClass(g.realized)}">${(g.realized||0)>=0?'+':''}¥${fmt(Math.abs(g.realized||0))}</span><br>
+    <b>総合損益: <span class="${pnlClass(gtot)}">${gtot>=0?'+':''}¥${fmt(Math.abs(gtot))}</span></b>
+  </div>`;
+  document.getElementById('sum-content').innerHTML=html;
+}
+
+// 起動時
+loadPositions();
+</script>
+</body>
+</html>
+"""
+
+
+def _build_html() -> str:
+    syms = _all_symbols()
+    opts = "".join(f'<option value="{s}">{s} {n}</option>' for s, n in syms)
+    return _WEB_HTML.replace("__DATALIST__", opts)
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):  # suppress access log
+        pass
+
+    def _send_json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+
+        if path == "/" or path == "/index.html":
+            body = _build_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/data":
+            data = load()
+            syms = list({p["symbol"] for p in data["positions"]})
+            prices = fetch_current_prices(syms)
+            realized = sum(float(h["profit"]) for h in data.get("history", []))
+            self._send_json({
+                "positions": data["positions"],
+                "history":   data["history"],
+                "prices":    {k: float(v) for k, v in prices.items()},
+                "realized":  realized,
+            })
+
+        elif path == "/api/summary":
+            data  = load()
+            syms  = list({p["symbol"] for p in data["positions"]})
+            prices = fetch_current_prices(syms)
+            result = {}
+            gu = gr = 0.0
+            for strat in STRATEGIES:
+                pos_g  = [p for p in data["positions"] if p.get("strategy") == strat]
+                hist_g = [h for h in data["history"]   if h.get("strategy") == strat]
+                unreal = sum((prices.get(p["symbol"], float(p["buy_price"])) - float(p["buy_price"])) * int(p["qty"])
+                             for p in pos_g)
+                real   = sum(float(h["profit"]) for h in hist_g)
+                trades = len(hist_g)
+                wins   = sum(1 for h in hist_g if float(h["profit"]) > 0)
+                result[strat] = {
+                    "unrealized": round(unreal, 0),
+                    "realized":   round(real, 0),
+                    "trades":     trades,
+                    "win_rate":   wins / trades * 100 if trades else 0.0,
+                }
+                gu += unreal; gr += real
+            self._send_json({"strategies": result,
+                             "grand": {"unrealized": round(gu, 0), "realized": round(gr, 0)}})
+        else:
+            self.send_response(404); self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body   = json.loads(self.rfile.read(length) or b"{}")
+        path   = urllib.parse.urlparse(self.path).path
+
+        if path == "/api/buy":
+            try:
+                sym   = str(body["symbol"]).upper()
+                if not sym.endswith(".T"):
+                    sym += ".T"
+                qty   = int(body["qty"])
+                price = float(body["price"])
+                strat = str(body.get("strategy", "MACD"))
+                date  = body.get("date") or None
+                if strat not in STRATEGIES:
+                    raise ValueError(f"unknown strategy {strat}")
+                cmd_buy(sym, qty, price, strat, date)
+                self._send_json({"ok": True,
+                    "message": f"✔ 買い登録: {sym} {qty}株 ×¥{price:,.0f} [{strat}]"})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
+        elif path == "/api/sell":
+            try:
+                sym   = str(body["symbol"]).upper()
+                qty   = int(body["qty"])
+                price = float(body["price"])
+                date  = body.get("date") or None
+                cmd_sell(sym, qty, price, date)
+                self._send_json({"ok": True,
+                    "message": f"✔ 売り登録: {sym} {qty}株 ×¥{price:,.0f}"})
+            except SystemExit:
+                self._send_json({"ok": False, "error": "保有数量を超えているか、ポジションがありません"})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+        else:
+            self.send_response(404); self.end_headers()
+
+
+def cmd_web(port: int = 7654) -> None:
+    url = f"http://localhost:{port}"
+    print(f"\n  ポートフォリオ Web UI を起動しました → {url}")
+    print(f"  終了するには Ctrl+C を押してください。\n")
+    with socketserver.TCPServer(("", port), _Handler) as httpd:
+        httpd.allow_reuse_address = True
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n  Web UI を終了しました。")
+
+
 # ── メイン ──────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -423,7 +888,15 @@ def main() -> None:
                         help="決済済み取引履歴を表示")
     parser.add_argument("--summary",  action="store_true",
                         help="戦略別損益サマリーを表示")
+    parser.add_argument("--web",      action="store_true",
+                        help="ブラウザでポートフォリオ管理画面を開く (localhost:7654)")
+    parser.add_argument("--port",     type=int, default=7654,
+                        help="--web 時のポート番号（デフォルト: 7654）")
     args = parser.parse_args()
+
+    if args.web:
+        cmd_web(args.port)
+        return
 
     if args.buy:
         sym, qty_s, price_s = args.buy
