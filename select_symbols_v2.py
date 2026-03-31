@@ -62,8 +62,8 @@ def run_macd_period(sym: str, name: str, df, days: int) -> dict | None:
         return None
 
 
-def run_macd_all(target: list[tuple], top_n: int) -> list[dict]:
-    """全対象銘柄 × 4期間 MACD バックテストを実行し、推奨銘柄リストを返す"""
+def run_macd_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
+    """全対象銘柄 × 4期間 MACD バックテストを実行し、(推奨銘柄リスト, stock_data) を返す"""
     total = len(target)
     print(f"\n  [MACD] データ取得中 ({total}銘柄)...")
     stock_data: dict[str, tuple] = {}
@@ -113,7 +113,7 @@ def run_macd_all(target: list[tuple], top_n: int) -> list[dict]:
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
-    return ranked[:top_n]
+    return ranked[:top_n], stock_data
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -140,7 +140,7 @@ def run_a7_period(sym: str, name: str, df, days: int) -> dict | None:
         return None
 
 
-def run_a7_all(target: list[tuple], top_n: int) -> list[dict]:
+def run_a7_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
     total = len(target)
     print(f"\n  [A7] データ取得中 ({total}銘柄)...")
     stock_data: dict[str, tuple] = {}
@@ -188,7 +188,7 @@ def run_a7_all(target: list[tuple], top_n: int) -> list[dict]:
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
-    return ranked[:top_n]
+    return ranked[:top_n], stock_data
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -225,7 +225,7 @@ def run_rsi2_period(sym: str, name: str, df_raw, days: int, params: dict) -> dic
         return None
 
 
-def run_rsi2_all(target: list[tuple], top_n: int) -> list[dict]:
+def run_rsi2_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict, dict, str]:
     # 日経データでモード判定
     print(f"\n  [RSI2] 日経データ取得・モード判定中...")
     nk_df  = rsi2_mod.fetch_nikkei(365)
@@ -285,7 +285,7 @@ def run_rsi2_all(target: list[tuple], top_n: int) -> list[dict]:
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
-    return ranked[:top_n]
+    return ranked[:top_n], stock_data, params, mode_label
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -360,6 +360,114 @@ def print_results(selected: list[dict], strategy: str, top_n: int) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# シグナルスキャン（選定銘柄を対象）
+# ══════════════════════════════════════════════════════════════════════
+
+def _selected_data_map(selected: list[dict], stock_data: dict) -> dict:
+    """選定銘柄のみの stock_data_map を返す"""
+    return {d["symbol"]: stock_data[d["symbol"]]
+            for d in selected if d["symbol"] in stock_data}
+
+
+def _run_90d_backtest_list(selected: list[dict], stock_data: dict,
+                           bt_fn) -> list[dict]:
+    """選定銘柄の90日バックテスト結果リストを返す（保有中検出用）"""
+    results = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {
+            ex.submit(bt_fn, d["symbol"], d["name"],
+                      stock_data[d["symbol"]][1], 90): d["symbol"]
+            for d in selected if d["symbol"] in stock_data
+        }
+        for fut in as_completed(futs):
+            r = fut.result()
+            if r is not None:
+                results.append(r)
+    return results
+
+
+def scan_macd_signals(selected: list[dict], stock_data: dict) -> dict:
+    """選定MACD銘柄のシグナルスキャン"""
+    print("  [MACD] シグナルスキャン中...")
+    sdm      = _selected_data_map(selected, stock_data)
+    results  = _run_90d_backtest_list(selected, stock_data, macd_mod.run_backtest)
+    nikkei   = macd_mod.fetch_nikkei(90)
+    return macd_mod.scan_today_signals(sdm, results, nikkei)
+
+
+def scan_a7_signals(selected: list[dict], stock_data: dict) -> dict:
+    """選定A7銘柄のシグナルスキャン"""
+    print("  [A7] シグナルスキャン中...")
+    sdm     = _selected_data_map(selected, stock_data)
+    results = _run_90d_backtest_list(selected, stock_data, a7_mod.run_backtest)
+    return a7_mod.scan_signals_a7(sdm, results)
+
+
+def scan_rsi2_signals(selected: list[dict], stock_data: dict,
+                      params: dict) -> dict:
+    """選定RSI2銘柄のシグナルスキャン"""
+    print("  [RSI2] シグナルスキャン中...")
+    sdm     = _selected_data_map(selected, stock_data)
+    results = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {
+            ex.submit(
+                rsi2_mod.backtest_hv,
+                rsi2_mod.calc(stock_data[d["symbol"]][1]),
+                90, params, True, False,
+            ): d for d in selected if d["symbol"] in stock_data
+        }
+        for fut in as_completed(futs):
+            d = futs[fut]
+            trades = fut.result()
+            if trades:
+                results.append({"symbol": d["symbol"], "name": d["name"],
+                                "trade_log": [{"reason": t.get("reason", "")}
+                                              for t in trades]})
+    return rsi2_mod.scan_signals_rsi2(sdm, results, params,
+                                       use_ibs=True, use_consec=False,
+                                       vix_rsi=None)
+
+
+def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
+    """シグナル結果のHTMLセクションを生成"""
+    if sig is None:
+        return ""
+    buy  = sig.get("buy",  [])
+    sell = sig.get("sell", [])
+    today = sig.get("today", "")
+
+    def _rows(items, cls, label):
+        if not items:
+            return f'<tr><td colspan="4" style="color:#64748b;text-align:center">{label}なし</td></tr>'
+        rows = ""
+        for s in items:
+            rows += (f'<tr class="{cls}">'
+                     f'<td class="name">{s.get("name","")}'
+                     f'<br><small>{s.get("symbol","")}</small></td>'
+                     f'<td class="num">{s.get("close", s.get("price","")):.0f}円</td>'
+                     f'<td class="num">{s.get("reason","")}</td>'
+                     f'<td class="num">{label}</td></tr>\n')
+        return rows
+
+    return f"""
+<h2 style="color:{color};border-left:4px solid {color};
+           padding-left:10px;margin:30px 0 10px">
+  {strategy} 本日シグナル（選定銘柄対象） — {today}
+</h2>
+<table>
+  <thead>
+    <tr><th>銘柄</th><th>現在値</th><th>理由</th><th>区分</th></tr>
+  </thead>
+  <tbody>
+    {_rows(buy,  "buy-row",  "買い")}
+    {_rows(sell, "sell-row", "売り")}
+  </tbody>
+</table>
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════
 # HTML レポート生成
 # ══════════════════════════════════════════════════════════════════════
 
@@ -408,19 +516,25 @@ def _strategy_table_html(selected: list[dict], strategy: str, color: str) -> str
 
 
 def generate_html(
-    macd_sel: list[dict] | None,
-    a7_sel:   list[dict] | None,
-    rsi2_sel: list[dict] | None,
+    macd_sel:  list[dict] | None,
+    a7_sel:    list[dict] | None,
+    rsi2_sel:  list[dict] | None,
+    macd_sig:  dict | None = None,
+    a7_sig:    dict | None = None,
+    rsi2_sig:  dict | None = None,
 ) -> Path:
     today = datetime.today().strftime("%Y-%m-%d")
 
     body = ""
     if macd_sel:
         body += _strategy_table_html(macd_sel, "MACD V2", "#38bdf8")
+        body += _signal_section_html(macd_sig,  "MACD V2", "#38bdf8")
     if a7_sel:
         body += _strategy_table_html(a7_sel,   "A7 V2",   "#4ade80")
+        body += _signal_section_html(a7_sig,    "A7 V2",   "#4ade80")
     if rsi2_sel:
         body += _strategy_table_html(rsi2_sel, "RSI2 V2", "#f59e0b")
+        body += _signal_section_html(rsi2_sig,  "RSI2 V2", "#f59e0b")
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -447,6 +561,8 @@ tr:hover{{background:#1e293b}}
 .pos{{color:#4ade80}}
 .neg{{color:#f87171}}
 .note{{color:#94a3b8;font-size:.8em;margin-top:20px}}
+.buy-row td:last-child{{color:#4ade80;font-weight:700}}
+.sell-row td:last-child{{color:#f87171;font-weight:700}}
 </style>
 </head>
 <body>
@@ -494,10 +610,12 @@ def main() -> None:
   ※ prime/standard/all を使う場合は先に以下を実行:
     python fetch_listed_symbols.py --market prime
 """)
-    parser.add_argument("--macd",  action="store_true", help="MACD 戦略のみ実行")
-    parser.add_argument("--a7",    action="store_true", help="A7 戦略のみ実行")
-    parser.add_argument("--rsi2",  action="store_true", help="RSI2 戦略のみ実行")
-    parser.add_argument("--top",   type=int, default=20, help="選定銘柄数 (default: 20)")
+    parser.add_argument("--macd",   action="store_true", help="MACD 戦略のみ実行")
+    parser.add_argument("--a7",     action="store_true", help="A7 戦略のみ実行")
+    parser.add_argument("--rsi2",   action="store_true", help="RSI2 戦略のみ実行")
+    parser.add_argument("--top",    type=int, default=20, help="選定銘柄数 (default: 20)")
+    parser.add_argument("--signal", action="store_true",
+                        help="バックテスト選定後に本日シグナルスキャンも実行")
     parser.add_argument("--universe", default=None,
                         choices=["225", "prime", "standard", "all"],
                         help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225)")
@@ -557,27 +675,41 @@ def main() -> None:
     print("=" * 60)
 
     macd_sel = a7_sel = rsi2_sel = None
+    macd_sig = a7_sig = rsi2_sig = None
+    macd_data = a7_data = rsi2_data = {}
+    rsi2_params = rsi2_mod.NORMAL
+    rsi2_mode   = "通常モード"
 
     if do_macd:
-        macd_sel = run_macd_all(all_symbols, top_n)
+        macd_sel, macd_data = run_macd_all(all_symbols, top_n)
         print_results(macd_sel, "MACD V2", top_n)
         p = write_symbols_file(macd_sel, "MACD V2", "symbols_watch_macd_v2.py")
         print(f"  → {p} を出力しました")
+        if args.signal:
+            macd_sig = scan_macd_signals(macd_sel, macd_data)
+            macd_mod.print_signals(macd_sig)
 
     if do_a7:
-        a7_sel = run_a7_all(all_symbols, top_n)
+        a7_sel, a7_data = run_a7_all(all_symbols, top_n)
         print_results(a7_sel, "A7 V2", top_n)
         p = write_symbols_file(a7_sel, "A7 V2", "symbols_watch_a7_v2.py")
         print(f"  → {p} を出力しました")
+        if args.signal:
+            a7_sig = scan_a7_signals(a7_sel, a7_data)
+            a7_mod.print_signals_a7(a7_sig)
 
     if do_rsi2:
-        rsi2_sel = run_rsi2_all(all_symbols, top_n)
+        rsi2_sel, rsi2_data, rsi2_params, rsi2_mode = run_rsi2_all(all_symbols, top_n)
         print_results(rsi2_sel, "RSI2 V2", top_n)
         p = write_symbols_file(rsi2_sel, "RSI2 V2", "symbols_watch_rsi2_v2.py")
         print(f"  → {p} を出力しました")
+        if args.signal:
+            rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
+            rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
     # HTML レポート
-    html_path = generate_html(macd_sel, a7_sel, rsi2_sel)
+    html_path = generate_html(macd_sel, a7_sel, rsi2_sel,
+                               macd_sig, a7_sig, rsi2_sig)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
     webbrowser.open(html_path.resolve().as_uri())
     print()
