@@ -80,21 +80,16 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
             persistent.unlink(missing_ok=True)
 
     # ── フォールバック: 直接ダウンロード ──────────────────────────
+    period = _period_str(backtest_days)
     try:
-        # Ticker.history() を使用（単一銘柄に適しており、並列呼び出しでも安全）
-        ticker = yf.Ticker(symbol)
-        raw = ticker.history(period="2y", interval="1d", auto_adjust=False)
+        raw = yf.download(symbol, period=period, interval="1d",
+                          auto_adjust=False, progress=False,
+                          multi_level_index=False)
         if raw.empty:
             return None
-        # タイムゾーン付きインデックスをnaiveに変換
-        if raw.index.tz is not None:
-            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
-        if len(available) < 5:
-            return None
-        raw = raw[available].dropna()
+        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         if len(raw) < 210:
             return None
         df = pd.DataFrame({

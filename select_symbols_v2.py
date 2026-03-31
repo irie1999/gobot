@@ -670,6 +670,190 @@ def _strategy_table_html(selected: list[dict], strategy: str, color: str,
 """
 
 
+def _charts_html(
+    macd_sel: list[dict] | None,
+    a7_sel:   list[dict] | None,
+    rsi2_sel: list[dict] | None,
+) -> str:
+    """Chart.js グラフ（期間別平均リターン + 銘柄別散布）を生成"""
+    period_keys   = ["1ヶ月", "3ヶ月", "6ヶ月", "1年"]
+    period_labels = ["1M",    "3M",    "6M",    "1Y"]
+
+    import json as _json
+
+    def _period_avg(sel):
+        """期間ごとの平均リターン [%] を計算"""
+        avgs = []
+        for pk in period_keys:
+            vals = [d["periods"][pk]["ret_pct"]
+                    for d in (sel or [])
+                    if pk in d.get("periods", {})]
+            avgs.append(round(sum(vals) / len(vals), 2) if vals else None)
+        return avgs
+
+    def _scatter_data(sel):
+        """銘柄ごとの {x: period_index, y: ret_pct, label: name} リスト"""
+        points = []
+        for d in (sel or []):
+            for pi, pk in enumerate(period_keys):
+                r = d.get("periods", {}).get(pk)
+                if r:
+                    points.append({
+                        "x": pi, "y": round(r["ret_pct"], 2),
+                        "label": f'{d["name"]}({d["symbol"]})'
+                    })
+        return points
+
+    macd_avgs = _period_avg(macd_sel)
+    a7_avgs   = _period_avg(a7_sel)
+    rsi2_avgs = _period_avg(rsi2_sel)
+    macd_pts  = _scatter_data(macd_sel)
+    a7_pts    = _scatter_data(a7_sel)
+    rsi2_pts  = _scatter_data(rsi2_sel)
+
+    # 最高スコア銘柄の期間別リターン折れ線
+    def _top_lines(sel, color):
+        if not sel:
+            return "[]"
+        datasets = []
+        for d in (sel or [])[:5]:
+            vals = [d["periods"].get(pk, {}).get("ret_pct") for pk in period_keys]
+            datasets.append({
+                "label": f'{d["name"]}({d["symbol"]})',
+                "data":  vals,
+                "borderColor": color,
+                "backgroundColor": "transparent",
+                "borderWidth": 1,
+                "pointRadius": 3,
+            })
+        return _json.dumps(datasets)
+
+    return f"""
+<h2 style="color:#e2e8f0;border-left:4px solid #6366f1;padding-left:10px;margin:30px 0 12px">
+  期間別リターン サマリーグラフ
+</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px">
+
+  <!-- 戦略比較: 期間別平均リターン -->
+  <div style="background:#1e293b;border-radius:8px;padding:16px">
+    <p style="color:#94a3b8;font-size:.8em;margin-bottom:8px">
+      戦略×期間 平均リターン（選定銘柄 TOP{len(macd_sel or a7_sel or rsi2_sel or [])}の平均）
+    </p>
+    <canvas id="chartAvg" style="max-height:260px"></canvas>
+  </div>
+
+  <!-- 銘柄散布: 各期間のリターン分布 -->
+  <div style="background:#1e293b;border-radius:8px;padding:16px">
+    <p style="color:#94a3b8;font-size:.8em;margin-bottom:8px">
+      銘柄別リターン分布（各点 = 1銘柄×1期間）
+    </p>
+    <canvas id="chartScatter" style="max-height:260px"></canvas>
+  </div>
+
+  <!-- MACD上位銘柄: 期間別折れ線 -->
+  <div style="background:#1e293b;border-radius:8px;padding:16px">
+    <p style="color:#94a3b8;font-size:.8em;margin-bottom:8px">MACD 上位5銘柄 期間別リターン</p>
+    <canvas id="chartMacd" style="max-height:260px"></canvas>
+  </div>
+
+  <!-- A7/RSI2上位銘柄: 期間別折れ線 -->
+  <div style="background:#1e293b;border-radius:8px;padding:16px">
+    <p style="color:#94a3b8;font-size:.8em;margin-bottom:8px">A7 / RSI2 上位5銘柄 期間別リターン</p>
+    <canvas id="chartA7rsi2" style="max-height:260px"></canvas>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+(function(){{
+  const labs = {_json.dumps(period_labels)};
+  const gridC = '#334155', tickC = '#94a3b8';
+
+  function axOpts(title) {{
+    return {{
+      grid: {{color: gridC}},
+      ticks: {{color: tickC}},
+      title: {{display: !!title, text: title, color: tickC, font: {{size:11}}}}
+    }};
+  }}
+
+  // ── 戦略比較棒グラフ ──────────────────────────
+  new Chart(document.getElementById('chartAvg'), {{
+    type: 'bar',
+    data: {{
+      labels: labs,
+      datasets: [
+        {{label:'MACD', data:{_json.dumps(macd_avgs)}, backgroundColor:'rgba(56,189,248,0.7)', borderColor:'#38bdf8', borderWidth:1}},
+        {{label:'A7',   data:{_json.dumps(a7_avgs)},   backgroundColor:'rgba(74,222,128,0.7)', borderColor:'#4ade80', borderWidth:1}},
+        {{label:'RSI2', data:{_json.dumps(rsi2_avgs)}, backgroundColor:'rgba(245,158,11,0.7)', borderColor:'#f59e0b', borderWidth:1}},
+      ]
+    }},
+    options: {{
+      responsive:true, maintainAspectRatio:true,
+      plugins: {{legend:{{labels:{{color:tickC}}}}, tooltip:{{callbacks:{{label:ctx=>ctx.dataset.label+': '+(ctx.parsed.y!=null?ctx.parsed.y.toFixed(1)+'%':'N/A')}}}}}},
+      scales: {{
+        x: axOpts('期間'),
+        y: {{...axOpts('平均リターン (%)'), ticks: {{color:tickC, callback:v=>v+'%'}}}}
+      }}
+    }}
+  }});
+
+  // ── 散布図 ──────────────────────────────────
+  const pMap = {{'0':'1M','1':'3M','2':'6M','3':'1Y'}};
+  new Chart(document.getElementById('chartScatter'), {{
+    type: 'scatter',
+    data: {{
+      datasets: [
+        {{label:'MACD', data:{_json.dumps(macd_pts)}, backgroundColor:'rgba(56,189,248,0.5)'}},
+        {{label:'A7',   data:{_json.dumps(a7_pts)},   backgroundColor:'rgba(74,222,128,0.5)'}},
+        {{label:'RSI2', data:{_json.dumps(rsi2_pts)}, backgroundColor:'rgba(245,158,11,0.5)'}},
+      ]
+    }},
+    options: {{
+      responsive:true, maintainAspectRatio:true,
+      plugins: {{
+        legend:{{labels:{{color:tickC}}}},
+        tooltip:{{callbacks:{{label:ctx=>ctx.raw.label+' '+pMap[ctx.raw.x]+': '+(ctx.raw.y?.toFixed(1)??'N/A')+'%'}}}}
+      }},
+      scales: {{
+        x: {{...axOpts('期間'), min:-0.5, max:3.5,
+              ticks:{{color:tickC, callback:v=>(['1M','3M','6M','1Y'][Math.round(v)]||'')}}}},
+        y: {{...axOpts('リターン (%)'), ticks:{{color:tickC, callback:v=>v+'%'}}}}
+      }}
+    }}
+  }});
+
+  // ── MACD折れ線 ──────────────────────────────
+  new Chart(document.getElementById('chartMacd'), {{
+    type: 'line',
+    data: {{labels: labs, datasets: {_top_lines(macd_sel, "#38bdf8")}}},
+    options: {{
+      responsive:true, maintainAspectRatio:true,
+      plugins:{{legend:{{labels:{{color:tickC,font:{{size:10}}}}}},
+               tooltip:{{callbacks:{{label:ctx=>ctx.dataset.label+': '+(ctx.parsed.y!=null?ctx.parsed.y.toFixed(1)+'%':'N/A')}}}}}},
+      scales:{{ x:axOpts(), y:{{...axOpts('リターン (%)'), ticks:{{color:tickC,callback:v=>v+'%'}}}}}}
+    }}
+  }});
+
+  // ── A7+RSI2折れ線 ──────────────────────────
+  const a7ds   = {_top_lines(a7_sel,   "#4ade80")};
+  const rsi2ds = {_top_lines(rsi2_sel, "#f59e0b")};
+  new Chart(document.getElementById('chartA7rsi2'), {{
+    type: 'line',
+    data: {{labels: labs, datasets: [...a7ds, ...rsi2ds]}},
+    options: {{
+      responsive:true, maintainAspectRatio:true,
+      plugins:{{legend:{{labels:{{color:tickC,font:{{size:10}}}}}},
+               tooltip:{{callbacks:{{label:ctx=>ctx.dataset.label+': '+(ctx.parsed.y!=null?ctx.parsed.y.toFixed(1)+'%':'N/A')}}}}}},
+      scales:{{ x:axOpts(), y:{{...axOpts('リターン (%)'), ticks:{{color:tickC,callback:v=>v+'%'}}}}}}
+    }}
+  }});
+}})();
+</script>
+"""
+
+
 def generate_html(
     macd_sel:   list[dict] | None,
     a7_sel:     list[dict] | None,
@@ -684,6 +868,9 @@ def generate_html(
     today = datetime.today().strftime("%Y-%m-%d")
 
     body = ""
+    # グラフセクション（選定結果がある場合のみ）
+    if macd_sel or a7_sel or rsi2_sel:
+        body += _charts_html(macd_sel, a7_sel, rsi2_sel)
     if macd_sel:
         body += _strategy_table_html(macd_sel, "MACD V2", "#38bdf8", macd_data)
         body += _signal_section_html(macd_sig,  "MACD V2", "#38bdf8")

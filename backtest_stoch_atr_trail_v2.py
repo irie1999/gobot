@@ -363,20 +363,15 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
     dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        # Ticker.history() を使用（単一銘柄に適しており、並列呼び出しでも安全）
-        ticker = yf.Ticker(symbol)
-        raw = ticker.history(period="2y", interval="1d", auto_adjust=False)
+        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
+                          auto_adjust=False, progress=False, multi_level_index=False)
         if raw.empty:
             return None
-        # タイムゾーン付きインデックスをnaiveに変換
-        if raw.index.tz is not None:
-            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
+        if "adj close" in raw.columns:
+            raw = raw.rename(columns={"adj close": "adj_close"})
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
-        if len(available) < 5:
-            return None
-        raw = raw[available].dropna()
+        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
         min_needed = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
         if len(raw) < min_needed:
             return None
