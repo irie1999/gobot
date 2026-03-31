@@ -1087,7 +1087,8 @@ def main() -> None:
   python select_symbols_v2.py --macd       # MACD のみ
   python select_symbols_v2.py --a7         # A7 のみ
   python select_symbols_v2.py --rsi2       # RSI2 のみ
-  python select_symbols_v2.py                    # MACD=10, A7=25, RSI2=35（推奨デフォルト）
+  python select_symbols_v2.py                    # MACD=10, A7=25, RSI2=35 + 今日のシグナル判定
+  python select_symbols_v2.py --no-signal        # シグナルスキャンをスキップ
   python select_symbols_v2.py --top 20           # 全戦略一括で 20 銘柄
   python select_symbols_v2.py --top-rsi2 40      # RSI2 のみ 40 銘柄に変更
   python select_symbols_v2.py --universe prime     # プライム上場銘柄
@@ -1109,8 +1110,8 @@ def main() -> None:
                         help="A7 選定銘柄数 (default: 25)")
     parser.add_argument("--top-rsi2",  type=int, default=35,  dest="top_rsi2",
                         help="RSI2 選定銘柄数 (default: 35)")
-    parser.add_argument("--signal", action="store_true",
-                        help="バックテスト選定後に本日シグナルスキャンも実行")
+    parser.add_argument("--no-signal", action="store_true", dest="no_signal",
+                        help="シグナルスキャンをスキップ（デフォルトは自動実行）")
     parser.add_argument("--universe", default=None,
                         choices=["225", "prime", "standard", "all"],
                         help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225)")
@@ -1183,7 +1184,7 @@ def main() -> None:
         print_results(macd_sel, "MACD V2", top_macd)
         p = write_symbols_file(macd_sel, "MACD V2", "symbols_watch_macd_v2.py")
         print(f"  → {p} を出力しました")
-        if args.signal:
+        if not args.no_signal:
             macd_sig = scan_macd_signals(macd_sel, macd_data)
             macd_mod.print_signals(macd_sig)
 
@@ -1192,7 +1193,7 @@ def main() -> None:
         print_results(a7_sel, "A7 V2", top_a7)
         p = write_symbols_file(a7_sel, "A7 V2", "symbols_watch_a7_v2.py")
         print(f"  → {p} を出力しました")
-        if args.signal:
+        if not args.no_signal:
             a7_sig = scan_a7_signals(a7_sel, a7_data)
             a7_mod.print_signals_a7(a7_sig)
 
@@ -1201,7 +1202,7 @@ def main() -> None:
         print_results(rsi2_sel, "RSI2 V2", top_rsi2)
         p = write_symbols_file(rsi2_sel, "RSI2 V2", "symbols_watch_rsi2_v2.py")
         print(f"  → {p} を出力しました")
-        if args.signal:
+        if not args.no_signal:
             rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
             rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
