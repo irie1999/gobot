@@ -288,23 +288,26 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
                     cached = pickle.load(f)
                 last_date = cached.index[-1]
                 stale = last_date < (_today - timedelta(days=3))
-                if len(cached) >= 210 and not stale:
+                # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
+                price_range = float(cached["close"].max() - cached["close"].min())
+                valid = price_range > 0.01 * float(cached["close"].mean())
+                if len(cached) >= 210 and not stale and valid:
                     return cached
             except Exception:
                 pass
 
-    buf_days  = 200 + 30
-    dl_start  = (datetime.today() - timedelta(days=int((backtest_days + buf_days) * 1.5))).strftime("%Y-%m-%d")
-    dl_end    = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-
     try:
-        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
-                          auto_adjust=False, progress=False, multi_level_index=False)
+        # Ticker.history() を使用（単一銘柄に適しており、並列呼び出しでも安全）
+        ticker = yf.Ticker(symbol)
+        raw = ticker.history(period="2y", interval="1d", auto_adjust=False)
         if raw.empty:
             return None
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        if len(available) < 5:
+            return None
+        raw = raw[available].dropna()
         min_needed = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD
         if len(raw) < min_needed:
             return None

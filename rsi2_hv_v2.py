@@ -70,23 +70,28 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
                 df = pickle.load(f)
             last_date = df.index[-1]
             stale = last_date < (_TODAY - timedelta(days=3))   # 土日祝考慮で3日
-            if len(df) >= 210 and not stale:
+            # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
+            price_range = float(df["close"].max() - df["close"].min())
+            valid = price_range > 0.01 * float(df["close"].mean())
+            if len(df) >= 210 and not stale and valid:
                 return df
             persistent.unlink(missing_ok=True)
         except Exception:
             persistent.unlink(missing_ok=True)
 
     # ── フォールバック: 直接ダウンロード ──────────────────────────
-    period = _period_str(backtest_days)
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=False, progress=False,
-                          multi_level_index=False)
+        # Ticker.history() を使用（単一銘柄に適しており、並列呼び出しでも安全）
+        ticker = yf.Ticker(symbol)
+        raw = ticker.history(period="2y", interval="1d", auto_adjust=False)
         if raw.empty:
             return None
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        if len(available) < 5:
+            return None
+        raw = raw[available].dropna()
         if len(raw) < 210:
             return None
         df = pd.DataFrame({

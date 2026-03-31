@@ -63,6 +63,15 @@ def run_macd_period(sym: str, name: str, df, days: int) -> dict | None:
         return None
 
 
+def _is_valid_df(df) -> bool:
+    """DataFrameが正常なデータを含んでいるか検証（価格変動あり）"""
+    if df is None or df.empty or len(df) < 10:
+        return False
+    close = df["close"]
+    price_range = float(close.max() - close.min())
+    return price_range > 0.01 * float(close.mean())
+
+
 def run_macd_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
     """全対象銘柄 × 4期間 MACD バックテストを実行し、(推奨銘柄リスト, stock_data) を返す"""
     total = len(target)
@@ -70,7 +79,7 @@ def run_macd_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
     stock_data: dict[str, tuple] = {}
     for i, (sym, name) in enumerate(target, 1):
         df = macd_mod.fetch_df(sym, backtest_days=365)
-        if df is not None:
+        if df is not None and _is_valid_df(df):
             stock_data[sym] = (name, df)
         print(f"  {i}/{total}", end="\r", flush=True)
     print(f"  完了 {len(stock_data)}銘柄      ")
@@ -153,7 +162,7 @@ def run_a7_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
     stock_data: dict[str, tuple] = {}
     for i, (sym, name) in enumerate(target, 1):
         df = a7_mod.fetch_df(sym, backtest_days=365)
-        if df is not None:
+        if df is not None and _is_valid_df(df):
             stock_data[sym] = (name, df)
         print(f"  {i}/{total}", end="\r", flush=True)
     print(f"  完了 {len(stock_data)}銘柄      ")
@@ -258,7 +267,7 @@ def run_rsi2_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict, dic
     stock_data: dict[str, tuple] = {}
     for i, (sym, name) in enumerate(target, 1):
         df = rsi2_mod.fetch(sym, backtest_days=365)
-        if df is not None:
+        if df is not None and _is_valid_df(df):
             stock_data[sym] = (name, df)
         print(f"  {i}/{total}", end="\r", flush=True)
     print(f"  完了 {len(stock_data)}銘柄      ")

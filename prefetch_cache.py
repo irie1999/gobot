@@ -32,7 +32,7 @@ CACHE_DIR   = Path(".rsi2_cache")
 CACHE_DAYS  = 3      # 何日以内のデータをフレッシュとみなすか
 BUF_DAYS    = 230    # MA200 + 余裕（210行以上確保するため）
 DL_PERIOD   = "2y"   # yfinance の period 指定（約500営業日 > BUF_DAYS）
-WORKERS     = 16     # デフォルト並列数
+WORKERS     = 4      # 並列数（yfinance はスレッドセーフでないため少なめに設定）
 
 
 # ── 銘柄リスト取得 ────────────────────────────────────────────
@@ -101,18 +101,27 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
         return "skip"
 
     try:
-        raw = yf.download(symbol, period=DL_PERIOD, interval="1d",
-                          auto_adjust=False, progress=False,
-                          multi_level_index=False)
+        # Ticker.history() を使用（単一銘柄ダウンロードに適しており、並列でも安全）
+        ticker = yf.Ticker(symbol)
+        raw = ticker.history(period=DL_PERIOD, interval="1d", auto_adjust=False)
         if raw.empty:
             return "empty"
 
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        # history() は 'dividends', 'stock splits' も返すので必要列だけ選択
+        available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        if len(available) < 5:
+            return "empty"
+        raw = raw[available].dropna()
 
         if len(raw) < 210:
             return "short"
+
+        # 価格の変動があるか検証（全て同じ値ならデータ異常）
+        price_range = float(raw["close"].max() - raw["close"].min())
+        if price_range < 0.01:
+            return "error:no_price_variation"
 
         df = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
