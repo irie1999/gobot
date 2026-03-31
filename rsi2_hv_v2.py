@@ -892,6 +892,7 @@ def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
             ibs_cls = "pos" if c["ibs"] < 0.35 else ""
             rows += f"""<tr>
   <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['open']:,.0f}</td>
   <td class="num">{c['close']:,.0f}</td>
   <td class="num pos">{c['rsi2']:.1f}</td>
   <td class="num {ma_cls}">{c['ma200']:,.0f}</td>
@@ -912,6 +913,7 @@ def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
             extra = f"<td>{c.get('exit_reason','')}</td>" if show_reason else ""
             rows += f"""<tr>
   <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['open']:,.0f}</td>
   <td class="num">{c['close']:,.0f}</td>
   <td class="num">{c['entry_price']:,.0f}</td>
   <td class="num {cls}">{sign}{c['unrealized']:.1f}%</td>
@@ -955,7 +957,7 @@ def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
 <h2>◆ 買いシグナル（{len(buy)} 銘柄）― 明日の始値で購入候補</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>RSI(2)</th><th>MA200</th><th>IBS</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>RSI(2)</th><th>MA200</th><th>IBS</th>
     <th>ATR%</th>{buy_head_extra}
   </tr></thead>
   <tbody>{_buy_rows(buy)}</tbody>
@@ -964,7 +966,7 @@ def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
 <h2>◆ 売りシグナル（{len(sell)} 銘柄）― 明日の始値で売却候補</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>買値</th><th>含み損益</th>
     <th>保有日</th><th>RSI(2)</th>{sell_head_extra}
   </tr></thead>
   <tbody>{_pos_rows(sell, show_reason=True)}</tbody>
@@ -973,7 +975,7 @@ def generate_signal_html_rsi2(sig: dict, mode_label: str, params: dict) -> Path:
 <h2>◆ 継続保有（{len(hold)} 銘柄）― RSI(2)回復待ち・保有継続</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>RSI(2)</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>RSI(2)</th>
   </tr></thead>
   <tbody>{_pos_rows(hold, show_reason=False)}</tbody>
 </table>

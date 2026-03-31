@@ -897,6 +897,7 @@ def generate_signal_html_a7(sig: dict) -> Path:
             if mode == "buy":
                 rows += f"""<tr>
   <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['open']:,.0f}</td>
   <td class="num">{c['close']:,.0f}</td>
   <td class="num">{c['stoch_k']:.1f}</td>
   <td class="num">{c['stoch_d']:.1f}</td>
@@ -909,6 +910,7 @@ def generate_signal_html_a7(sig: dict) -> Path:
                 cls  = "pos" if c["unrealized"] >= 0 else "neg"
                 rows += f"""<tr>
   <td>{c['name']}<br><small>{c['symbol']}</small></td>
+  <td class="num">{c['open']:,.0f}</td>
   <td class="num">{c['close']:,.0f}</td>
   <td class="num">{c['entry_price']:,.0f}</td>
   <td class="num {cls}">{sign}{c['unrealized']:.1f}%</td>
@@ -952,7 +954,7 @@ def generate_signal_html_a7(sig: dict) -> Path:
 <h2>◆ 買いシグナル（{len(buy)} 銘柄）― 明日の始値で購入候補</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>%K</th><th>%D</th><th>ATR%</th><th>トレンド</th><th>シグナル日</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>%K</th><th>%D</th><th>ATR%</th><th>トレンド</th><th>シグナル日</th>
   </tr></thead>
   <tbody>{buy_rows}</tbody>
 </table>
@@ -960,7 +962,7 @@ def generate_signal_html_a7(sig: dict) -> Path:
 <h2>◆ 売りシグナル（{len(sell)} 銘柄）― 明日の始値で売却候補</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
   </tr></thead>
   <tbody>{sell_rows}</tbody>
 </table>
@@ -968,7 +970,7 @@ def generate_signal_html_a7(sig: dict) -> Path:
 <h2>◆ 継続保有（{len(hold)} 銘柄）― デッドクロスなし・保有継続</h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
+    <th>銘柄</th><th>始値</th><th>終値</th><th>買値</th><th>含み損益</th><th>保有日</th><th>%K</th><th>%D</th><th>トレンド</th>
   </tr></thead>
   <tbody>{hold_rows}</tbody>
 </table>

@@ -769,6 +769,7 @@ def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
               <td class="name">{c['name']}<br><small>{c['symbol']}</small></td>
               <td>{c['sector']}</td>
               <td class="num pos">{c['score']:.1f}</td>
+              <td class="num">{c['open']:,.0f}</td>
               <td class="num">{c['close']:,.0f}</td>
               <td class="num {'pos' if c['macd_hist']>=0 else 'neg'}">{c['macd_hist']:+.3f}</td>
               <td class="num">{c['rsi']:.1f}</td>
@@ -787,6 +788,7 @@ def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
             out += f"""<tr>
               <td class="name">{c['name']}<br><small>{c['symbol']}</small></td>
               <td>{c['sector']}</td>
+              <td class="num">{c['open']:,.0f}</td>
               <td class="num">{c['close']:,.0f}</td>
               <td class="num">{c['entry_price']:,.0f}</td>
               <td class="num {u_cls}">{sign}{c['unrealized']:.1f}%</td>
@@ -876,7 +878,7 @@ def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
     <thead>
       <tr>
         <th>#</th><th>銘柄</th><th>業種</th><th>スコア</th>
-        <th>終値</th><th>MACDヒスト</th><th>RSI</th><th>出来高比</th><th>備考</th>
+        <th>始値</th><th>終値</th><th>MACDヒスト</th><th>RSI</th><th>出来高比</th><th>備考</th>
       </tr>
     </thead>
     <tbody>{buy_rows_html()}</tbody>
@@ -888,7 +890,7 @@ def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
   <table>
     <thead>
       <tr>
-        <th>銘柄</th><th>業種</th><th>現在値</th><th>買値</th>
+        <th>銘柄</th><th>業種</th><th>始値</th><th>終値</th><th>買値</th>
         <th>含み損益</th><th>保有日</th><th>RSI</th><th>MACDヒスト</th>
       </tr>
     </thead>
@@ -901,7 +903,7 @@ def generate_signal_html(sig: dict, portfolio: dict | None = None) -> Path:
   <table>
     <thead>
       <tr>
-        <th>銘柄</th><th>業種</th><th>現在値</th><th>買値</th>
+        <th>銘柄</th><th>業種</th><th>始値</th><th>終値</th><th>買値</th>
         <th>含み損益</th><th>保有日</th><th>RSI</th><th>MACDヒスト</th>
       </tr>
     </thead>
