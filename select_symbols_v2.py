@@ -1030,18 +1030,25 @@ def generate_html(
     # 横断分析 監視銘柄（最上部に表示）
     if watchlist:
         body += _watchlist_section_html(watchlist)
-    # グラフセクション（選定結果がある場合のみ）
+    # グラフセクション（バックテスト結果がある場合のみ）
     if macd_sel or a7_sel or rsi2_sel:
         body += _charts_html(macd_sel, a7_sel, rsi2_sel)
+    # バックテストテーブル + シグナル（sel がある場合）
     if macd_sel:
         body += _strategy_table_html(macd_sel, "MACD V2", "#38bdf8", macd_data)
-        body += _signal_section_html(macd_sig,  "MACD V2", "#38bdf8")
     if a7_sel:
         body += _strategy_table_html(a7_sel,   "A7 V2",   "#4ade80", a7_data)
-        body += _signal_section_html(a7_sig,    "A7 V2",   "#4ade80")
     if rsi2_sel:
         body += _strategy_table_html(rsi2_sel, "RSI2 V2", "#f59e0b", rsi2_data)
+    # シグナルセクションは sel の有無に関わらず表示
+    if macd_sig:
+        body += _signal_section_html(macd_sig,  "MACD V2", "#38bdf8")
+    if a7_sig:
+        body += _signal_section_html(a7_sig,    "A7 V2",   "#4ade80")
+    if rsi2_sig:
         body += _signal_section_html(rsi2_sig,  "RSI2 V2", "#f59e0b")
+    if not body:
+        body = '<p style="color:#64748b;padding:24px">本日のシグナルはありません。</p>'
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
