@@ -464,6 +464,21 @@ input:focus,select:focus{border-color:#7eb3ff}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #333;
   border-top-color:#7eb3ff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
+.btn-edit{padding:3px 10px;font-size:.75rem;background:#1e2a3a;color:#7eb3ff;border:1px solid #2a3d5a;
+  border-radius:4px;cursor:pointer;transition:.15s}
+.btn-edit:hover{background:#2a3d5a}
+.btn-del{padding:3px 8px;font-size:.75rem;background:#2a1a1a;color:#e07070;border:1px solid #4a2a2a;
+  border-radius:4px;cursor:pointer;margin-left:4px;transition:.15s}
+.btn-del:hover{background:#3d2020}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;align-items:center;justify-content:center}
+.overlay.open{display:flex}
+.modal{background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:28px;width:420px;max-width:95vw}
+.modal h3{color:#7eb3ff;margin-bottom:18px;font-size:1rem}
+.modal-sym{font-size:.8rem;color:#666;margin-bottom:18px}
+.btn-save{background:#1e3a5f;color:#7eb3ff;padding:9px 22px;border:none;border-radius:6px;cursor:pointer;font-weight:600;transition:.2s}
+.btn-save:hover{background:#2a4d7a}
+.btn-cancel{background:#222;color:#888;padding:9px 16px;border:none;border-radius:6px;cursor:pointer;margin-left:8px}
+.btn-cancel:hover{background:#2a2d3a}
 </style>
 </head>
 <body>
@@ -549,6 +564,38 @@ input:focus,select:focus{border-color:#7eb3ff}
   <div id="sum-content"><span class="spinner"></span> 読み込み中...</div>
 </div>
 
+<!-- 編集モーダル -->
+<div class="overlay" id="edit-overlay" onclick="closeEdit(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h3>買い取引を修正</h3>
+    <div class="modal-sym" id="edit-sym-label"></div>
+    <input type="hidden" id="edit-idx">
+    <div class="form-row">
+      <label>株数</label>
+      <input id="edit-qty" type="number" min="1" step="1">
+    </div>
+    <div class="form-row">
+      <label>買値（円）</label>
+      <input id="edit-price" type="number" min="0" step="1">
+    </div>
+    <div class="form-row">
+      <label>手法</label>
+      <select id="edit-strat">
+        <option>MACD</option><option>A7</option><option>RSI2</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>買付日</label>
+      <input id="edit-date" type="date">
+    </div>
+    <div id="edit-msg" class="msg"></div>
+    <div style="margin-top:18px">
+      <button class="btn-save" onclick="doEdit()">保存</button>
+      <button class="btn-cancel" onclick="closeEdit()">キャンセル</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const STRAT_BADGE = {
   MACD:'<span class="badge badge-macd">MACD</span>',
@@ -596,7 +643,7 @@ async function loadPositions(){
     const grp=pos.filter(p=>p.strategy===st);
     if(!grp.length) continue;
     html+=`<h3 style="margin:20px 0 8px;font-size:.85rem;color:#aaa">${badge(st)} 戦略</h3>`;
-    html+=`<table><thead><tr><th>銘柄</th><th>株数</th><th>買値</th><th>現在値</th><th>含み損益</th><th>損益%</th><th>保有日</th><th>買付日</th></tr></thead><tbody>`;
+    html+=`<table><thead><tr><th>銘柄</th><th>株数</th><th>買値</th><th>現在値</th><th>含み損益</th><th>損益%</th><th>保有日</th><th>買付日</th><th></th></tr></thead><tbody>`;
     for(const p of grp.sort((a,b)=>a.buy_date>b.buy_date?1:-1)){
       const cur=prices[p.symbol];
       const cost=p.buy_price*p.qty;
@@ -606,6 +653,8 @@ async function loadPositions(){
       const days=Math.floor((Date.now()-new Date(p.buy_date))/(86400000));
       tc+=cost; tv+=val; if(pnl!=null) tp+=pnl;
       const pc=pnlClass(pnl);
+      const idx=p._idx;
+      const pd=JSON.stringify(p).replace(/"/g,'&quot;');
       html+=`<tr>
         <td><b>${p.name}</b><br><small style="color:#555">${p.symbol}</small></td>
         <td>${p.qty}</td>
@@ -615,6 +664,10 @@ async function loadPositions(){
         <td class="${pc}">${fmtPct(pct)}</td>
         <td>${days}日</td>
         <td>${p.buy_date}</td>
+        <td style="white-space:nowrap">
+          <button class="btn-edit" onclick='openEdit(${idx},${JSON.stringify(p)})'>編集</button>
+          <button class="btn-del" onclick="delPos(${idx},'${p.symbol}')">削除</button>
+        </td>
       </tr>`;
     }
     html+='</tbody></table>';
@@ -732,6 +785,46 @@ async function loadSummary(){
   document.getElementById('sum-content').innerHTML=html;
 }
 
+// ── 編集モーダル ──
+function openEdit(idx, p){
+  document.getElementById('edit-idx').value=idx;
+  document.getElementById('edit-sym-label').textContent=`${p.name}（${p.symbol}）`;
+  document.getElementById('edit-qty').value=p.qty;
+  document.getElementById('edit-price').value=p.buy_price;
+  document.getElementById('edit-strat').value=p.strategy||'MACD';
+  document.getElementById('edit-date').value=p.buy_date;
+  document.getElementById('edit-msg').className='msg';
+  document.getElementById('edit-overlay').classList.add('open');
+}
+function closeEdit(e){
+  if(e && e.target!==document.getElementById('edit-overlay')) return;
+  document.getElementById('edit-overlay').classList.remove('open');
+}
+
+async function doEdit(){
+  const idx=parseInt(document.getElementById('edit-idx').value);
+  const qty=parseInt(document.getElementById('edit-qty').value);
+  const price=parseFloat(document.getElementById('edit-price').value);
+  const strat=document.getElementById('edit-strat').value;
+  const date=document.getElementById('edit-date').value;
+  const msg=document.getElementById('edit-msg');
+  if(isNaN(qty)||isNaN(price)||!date){msg.className='msg err';msg.textContent='入力値を確認してください';return}
+  const r=await api('/api/edit-position',{idx,qty,price,strategy:strat,buy_date:date});
+  if(r.ok){
+    msg.className='msg ok';msg.textContent='✔ 保存しました';
+    setTimeout(()=>{document.getElementById('edit-overlay').classList.remove('open');loadPositions();},700);
+  } else {
+    msg.className='msg err';msg.textContent=r.error;
+  }
+}
+
+async function delPos(idx, sym){
+  if(!confirm(`${sym} のこのポジションを削除しますか？`)) return;
+  const r=await api('/api/delete-position',{idx});
+  if(r.ok) loadPositions();
+  else alert(r.error);
+}
+
 // 起動時
 loadPositions();
 </script>
@@ -774,8 +867,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             syms = list({p["symbol"] for p in data["positions"]})
             prices = fetch_current_prices(syms)
             realized = sum(float(h["profit"]) for h in data.get("history", []))
+            positions_with_idx = [dict(p, _idx=i) for i, p in enumerate(data["positions"])]
             self._send_json({
-                "positions": data["positions"],
+                "positions": positions_with_idx,
                 "history":   data["history"],
                 "prices":    {k: float(v) for k, v in prices.items()},
                 "realized":  realized,
@@ -842,6 +936,36 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "保有数量を超えているか、ポジションがありません"})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
+
+        elif path == "/api/edit-position":
+            try:
+                idx   = int(body["idx"])
+                data  = load()
+                pos   = data["positions"]
+                if idx < 0 or idx >= len(pos):
+                    raise IndexError("ポジションが見つかりません")
+                pos[idx]["qty"]       = int(body["qty"])
+                pos[idx]["buy_price"] = float(body["price"])
+                pos[idx]["strategy"]  = str(body.get("strategy", pos[idx].get("strategy", "MACD")))
+                pos[idx]["buy_date"]  = str(body["buy_date"])
+                save(data)
+                self._send_json({"ok": True})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
+        elif path == "/api/delete-position":
+            try:
+                idx  = int(body["idx"])
+                data = load()
+                pos  = data["positions"]
+                if idx < 0 or idx >= len(pos):
+                    raise IndexError("ポジションが見つかりません")
+                pos.pop(idx)
+                save(data)
+                self._send_json({"ok": True})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
         else:
             self.send_response(404); self.end_headers()
 
