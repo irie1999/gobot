@@ -98,7 +98,7 @@ def run_macd_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
                     }
                 scores[sym]["periods"][label] = r
 
-    # スコアリング
+    # スコアリング + 直近価格を d に格納
     for d in scores.values():
         sc = 0
         ret_sum = 0.0
@@ -111,14 +111,17 @@ def run_macd_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
         d["score"]   = sc
         d["ret_sum"] = ret_sum
         d["pos_cnt"] = sum(1 for r in d["periods"].values() if r["ret_pct"] > 0)
+        # 直近の始値・終値を銘柄ごとに格納
+        sym = d["symbol"]
+        if sym in stock_data:
+            _df = stock_data[sym][1]
+            if not _df.empty:
+                d["last_open"]  = float(_df.iloc[-1]["open"])
+                d["last_close"] = float(_df.iloc[-1]["close"])
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
     return ranked[:top_n], stock_data
-
-
-# ══════════════════════════════════════════════════════════════════════
-# A7 バックテスト
 # ══════════════════════════════════════════════════════════════════════
 
 def run_a7_period(sym: str, name: str, df, days: int) -> dict | None:
@@ -189,6 +192,13 @@ def run_a7_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict]:
         d["score"]   = sc
         d["ret_sum"] = ret_sum
         d["pos_cnt"] = sum(1 for r in d["periods"].values() if r["ret_pct"] > 0)
+        # 直近の始値・終値を銘柄ごとに格納
+        sym = d["symbol"]
+        if sym in stock_data:
+            _df = stock_data[sym][1]
+            if not _df.empty:
+                d["last_open"]  = float(_df.iloc[-1]["open"])
+                d["last_close"] = float(_df.iloc[-1]["close"])
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
@@ -287,6 +297,13 @@ def run_rsi2_all(target: list[tuple], top_n: int) -> tuple[list[dict], dict, dic
         d["score"]   = sc
         d["ret_sum"] = ret_sum
         d["pos_cnt"] = sum(1 for r in d["periods"].values() if r["ret_pct"] > 0)
+        # 直近の始値・終値を銘柄ごとに格納
+        sym = d["symbol"]
+        if sym in stock_data:
+            _df = stock_data[sym][1]
+            if not _df.empty:
+                d["last_open"]  = float(_df.iloc[-1]["open"])
+                d["last_close"] = float(_df.iloc[-1]["close"])
 
     ranked = sorted(scores.values(),
                     key=lambda x: (-x["score"], -x["ret_sum"]))
@@ -547,13 +564,9 @@ def _strategy_table_html(selected: list[dict], strategy: str, color: str,
         p   = d["periods"]
         sym = d["symbol"]
 
-        # 直近の始値・終値を stock_data から取得
-        open_val = close_val = None
-        if stock_data and sym in stock_data:
-            df_last = stock_data[sym][1]
-            if not df_last.empty:
-                open_val  = float(df_last.iloc[-1]["open"])
-                close_val = float(df_last.iloc[-1]["close"])
+        # 直近の始値・終値（スコアリングループで各銘柄ごとに格納済み）
+        open_val  = d.get("last_open")
+        close_val = d.get("last_close")
 
         def cell(label):
             r = p.get(label)
