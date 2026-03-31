@@ -50,13 +50,14 @@ def run_macd_period(sym: str, name: str, df, days: int) -> dict | None:
         if r is None:
             return None
         return {
-            "symbol":   sym,
-            "name":     name,
-            "trades":   r["trades"],
-            "win_rate": r["win_rate"],
-            "ret_pct":  r["ret_pct"],
-            "pf":       r["pf"],
-            "avg_hold": r["avg_hold"],
+            "symbol":    sym,
+            "name":      name,
+            "trades":    r["trades"],
+            "win_rate":  r["win_rate"],
+            "ret_pct":   r["ret_pct"],
+            "pf":        r["pf"],
+            "avg_hold":  r["avg_hold"],
+            "trade_log": r.get("trade_log", []),
         }
     except Exception:
         return None
@@ -125,16 +126,19 @@ def run_a7_period(sym: str, name: str, df, days: int) -> dict | None:
         r = a7_mod.run_backtest(sym, name, df, days)
         if r is None:
             return None
+        tlog = r.get("trade_log", [])
+        pf = (sum(t["pnl"] for t in tlog if t["pnl"] > 0) /
+              abs(sum(t["pnl"] for t in tlog if t["pnl"] < 0))
+              if any(t["pnl"] < 0 for t in tlog) else float("inf"))
         return {
-            "symbol":   sym,
-            "name":     name,
-            "trades":   r["trades"],
-            "win_rate": r["win_rate"],
-            "ret_pct":  r["ret_pct"],
-            "pf":       (sum(t["pnl"] for t in r["trade_log"] if t["pnl"] > 0) /
-                         abs(sum(t["pnl"] for t in r["trade_log"] if t["pnl"] < 0))
-                         if any(t["pnl"] < 0 for t in r["trade_log"]) else float("inf")),
-            "avg_hold": r["avg_hold"],
+            "symbol":    sym,
+            "name":      name,
+            "trades":    r["trades"],
+            "win_rate":  r["win_rate"],
+            "ret_pct":   r["ret_pct"],
+            "pf":        pf,
+            "avg_hold":  r["avg_hold"],
+            "trade_log": tlog,
         }
     except Exception:
         return None
@@ -213,13 +217,14 @@ def run_rsi2_period(sym: str, name: str, df_raw, days: int, params: dict) -> dic
                     if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
         avg_hold = sum(t["hold"] for t in trades) / len(trades)
         return {
-            "symbol":   sym,
-            "name":     name,
-            "trades":   len(trades),
-            "win_rate": wr,
-            "ret_pct":  ret_pct,
-            "pf":       pf,
-            "avg_hold": avg_hold,
+            "symbol":    sym,
+            "name":      name,
+            "trades":    len(trades),
+            "win_rate":  wr,
+            "ret_pct":   ret_pct,
+            "pf":        pf,
+            "avg_hold":  avg_hold,
+            "trade_log": trades,
         }
     except Exception:
         return None
@@ -433,81 +438,209 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
     """シグナル結果のHTMLセクションを生成"""
     if sig is None:
         return ""
-    buy  = sig.get("buy",  [])
-    sell = sig.get("sell", [])
+    buy   = sig.get("buy",  [])
+    sell  = sig.get("sell", [])
+    hold  = sig.get("hold", [])
     today = sig.get("today", "")
 
-    def _rows(items, cls, label):
+    def _extra_cols(s: dict) -> str:
+        """戦略固有の指標を追加列として返す"""
+        cols = ""
+        if "macd_hist" in s:
+            cls = "pos" if s["macd_hist"] >= 0 else "neg"
+            cols += f'<td class="num {cls}">{s["macd_hist"]:+.3f}</td>'
+            cols += f'<td class="num">{s.get("rsi", 0):.1f}</td>'
+            cols += f'<td class="num">{s.get("vol_ratio", 0):.1f}x</td>'
+        elif "stoch_k" in s:
+            cols += f'<td class="num">{s["stoch_k"]:.1f}</td>'
+            cols += f'<td class="num">{s.get("stoch_d", 0):.1f}</td>'
+            cols += f'<td class="num">{s.get("atr_pct", 0):.1f}%</td>'
+        elif "rsi2" in s:
+            cols += f'<td class="num pos">{s["rsi2"]:.1f}</td>'
+            cols += f'<td class="num">{s.get("ibs", 0):.2f}</td>'
+            cols += f'<td class="num">{s.get("atr_pct", 0):.1f}%</td>'
+        return cols
+
+    def _extra_headers(items: list) -> str:
         if not items:
-            return f'<tr><td colspan="4" style="color:#64748b;text-align:center">{label}なし</td></tr>'
+            return ""
+        s = items[0]
+        if "macd_hist" in s:
+            return "<th>MACD</th><th>RSI</th><th>出来高比</th>"
+        elif "stoch_k" in s:
+            return "<th>%K</th><th>%D</th><th>ATR%</th>"
+        elif "rsi2" in s:
+            return "<th>RSI2</th><th>IBS</th><th>ATR%</th>"
+        return ""
+
+    all_items = buy + sell + hold
+    extra_h = _extra_headers(all_items)
+
+    def _buy_rows(items):
+        if not items:
+            return f'<tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
         rows = ""
         for s in items:
-            rows += (f'<tr class="{cls}">'
-                     f'<td class="name">{s.get("name","")}'
-                     f'<br><small>{s.get("symbol","")}</small></td>'
-                     f'<td class="num">{s.get("close", s.get("price","")):.0f}円</td>'
-                     f'<td class="num">{s.get("reason","")}</td>'
-                     f'<td class="num">{label}</td></tr>\n')
+            open_s  = f'{s["open"]:,.0f}' if "open" in s else "—"
+            close_s = f'{s["close"]:,.0f}' if "close" in s else "—"
+            rows += (f'<tr class="buy-row">'
+                     f'<td class="name">{s.get("name","")}<br><small>{s.get("symbol","")}</small></td>'
+                     f'<td class="num">{open_s}</td>'
+                     f'<td class="num">{close_s}</td>'
+                     + _extra_cols(s) +
+                     f'<td style="color:#4ade80;font-weight:700">買い</td></tr>\n')
         return rows
 
-    return f"""
-<h2 style="color:{color};border-left:4px solid {color};
-           padding-left:10px;margin:30px 0 10px">
-  {strategy} 本日シグナル（選定銘柄対象） — {today}
-</h2>
-<table>
-  <thead>
-    <tr><th>銘柄</th><th>現在値</th><th>理由</th><th>区分</th></tr>
-  </thead>
-  <tbody>
-    {_rows(buy,  "buy-row",  "買い")}
-    {_rows(sell, "sell-row", "売り")}
-  </tbody>
-</table>
-"""
+    def _sell_rows(items, label, cls):
+        if not items:
+            return ""
+        rows = ""
+        for s in items:
+            open_s    = f'{s["open"]:,.0f}' if "open" in s else "—"
+            close_s   = f'{s["close"]:,.0f}' if "close" in s else "—"
+            entry_s   = f'{s["entry_price"]:,.0f}' if "entry_price" in s else "—"
+            unreal    = s.get("unrealized", 0)
+            u_cls     = "pos" if unreal >= 0 else "neg"
+            sign      = "+" if unreal >= 0 else ""
+            hold_days = s.get("hold_days", "—")
+            rows += (f'<tr class="{cls}">'
+                     f'<td class="name">{s.get("name","")}<br><small>{s.get("symbol","")}</small></td>'
+                     f'<td class="num">{open_s}</td>'
+                     f'<td class="num">{close_s}</td>'
+                     + _extra_cols(s) +
+                     f'<td class="num">{entry_s}</td>'
+                     f'<td class="num {u_cls}">{sign}{unreal:.1f}%</td>'
+                     f'<td class="num">{hold_days}日</td>'
+                     f'<td style="color:#f87171;font-weight:700">{label}</td></tr>\n')
+        return rows
+
+    buy_body  = _buy_rows(buy)
+    sell_body = _sell_rows(sell, "売り", "sell-row") + _sell_rows(hold, "保有継続", "hold-row")
+
+    sell_section = ""
+    if sell or hold:
+        sell_section = (
+            f'<table style="margin-top:6px"><thead><tr>'
+            f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}'
+            f'<th>買値</th><th>含み損益</th><th>保有日</th><th>区分</th>'
+            f'</tr></thead><tbody>{sell_body}</tbody></table>'
+        )
+
+    return (
+        f'<h2 style="color:{color};border-left:4px solid {color};padding-left:10px;margin:30px 0 10px">'
+        f'  {strategy} 本日シグナル（選定銘柄対象） — {today}</h2>'
+        f'<table><thead><tr>'
+        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th>区分</th>'
+        f'</tr></thead><tbody>{buy_body}</tbody></table>'
+        + sell_section
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════
 # HTML レポート生成
 # ══════════════════════════════════════════════════════════════════════
 
-def _strategy_table_html(selected: list[dict], strategy: str, color: str) -> str:
+def _strategy_table_html(selected: list[dict], strategy: str, color: str,
+                          stock_data: dict | None = None) -> str:
     rows = ""
     for i, d in enumerate(selected, 1):
-        p = d["periods"]
+        p   = d["periods"]
+        sym = d["symbol"]
+
+        # 直近の始値・終値を stock_data から取得
+        open_val = close_val = None
+        if stock_data and sym in stock_data:
+            df_last = stock_data[sym][1]
+            if not df_last.empty:
+                open_val  = float(df_last.iloc[-1]["open"])
+                close_val = float(df_last.iloc[-1]["close"])
+
         def cell(label):
             r = p.get(label)
             if r is None:
-                return '<td class="num" style="color:#555">N/A</td><td class="num" style="color:#555">-</td>'
-            cls = "pos" if r["ret_pct"] >= 0 else "neg"
+                return '<td class="num" style="color:#555">N/A</td><td class="num" style="color:#555">-</td><td class="num" style="color:#555">-</td>'
+            cls  = "pos" if r["ret_pct"] >= 0 else "neg"
             sign = "+" if r["ret_pct"] >= 0 else ""
+            pf_s = "∞" if r["pf"] == float("inf") else f'{r["pf"]:.1f}'
             return (f'<td class="num {cls}">{sign}{r["ret_pct"]:.1f}%</td>'
-                    f'<td class="num">{r["trades"]}回</td>')
+                    f'<td class="num">{r["trades"]}回</td>'
+                    f'<td class="num">{r["win_rate"]:.0f}%/{pf_s}</td>')
 
-        mark  = "★" if d["pos_cnt"] >= 3 else ""
-        label = f'{d["name"]}<br><small>{d["symbol"]}</small>'
+        # 期間別取引履歴のトグル行
+        detail_rows = ""
+        for period_label, r in p.items():
+            tlog = r.get("trade_log", [])
+            if not tlog:
+                continue
+            for t in tlog:
+                entry_dt  = t.get("entry_dt", t.get("entry_date", ""))
+                exit_dt   = t.get("exit_dt",  t.get("exit_date",  ""))
+                entry_p   = t.get("entry_price", t.get("entry_p", 0))
+                exit_p    = t.get("exit_price",  t.get("exit_p",  0))
+                pnl       = t.get("pnl", 0)
+                hold      = t.get("hold_days", t.get("hold", 0))
+                reason    = t.get("reason", "")
+                pct       = (exit_p - entry_p) / entry_p * 100 if entry_p else 0
+                t_cls     = "pos" if pnl >= 0 else "neg"
+                sign_t    = "+" if pnl >= 0 else ""
+                # datetime を文字列に変換
+                if hasattr(entry_dt, "strftime"):
+                    entry_dt = entry_dt.strftime("%Y-%m-%d")
+                if hasattr(exit_dt, "strftime"):
+                    exit_dt = exit_dt.strftime("%Y-%m-%d")
+                detail_rows += (
+                    f'<tr style="background:#060e1a">'
+                    f'<td colspan="2" style="color:#64748b;padding-left:20px">{period_label}</td>'
+                    f'<td class="num" style="color:#94a3b8">{entry_dt}</td>'
+                    f'<td class="num" style="color:#94a3b8">{exit_dt}</td>'
+                    f'<td class="num">{entry_p:,.0f}</td>'
+                    f'<td class="num">{exit_p:,.0f}</td>'
+                    f'<td class="num {t_cls}">{sign_t}{pct:.1f}%</td>'
+                    f'<td class="num">{hold}日</td>'
+                    f'<td colspan="5" style="color:#64748b">{reason}</td>'
+                    f'</tr>\n'
+                )
+
+        mark   = "★" if d["pos_cnt"] >= 3 else ""
+        label  = f'{d["name"]}<br><small>{sym}</small>'
+        open_s  = f'{open_val:,.0f}' if open_val else "—"
+        close_s = f'{close_val:,.0f}' if close_val else "—"
+
         rows += (
-            f'<tr>'
+            f'<tr class="stock-row" onclick="toggleDetail(\'{sym}\')" style="cursor:pointer">'
             f'<td class="rank">{i}</td>'
             f'<td class="name">{mark}{label}</td>'
+            f'<td class="num">{open_s}</td>'
+            f'<td class="num">{close_s}</td>'
             f'<td class="num">{d["score"]}</td>'
             f'<td class="num">{d["pos_cnt"]}/4</td>'
             + cell("1ヶ月") + cell("3ヶ月") + cell("6ヶ月") + cell("1年") +
+            f'<td class="expand-btn">▼</td>'
             f'</tr>\n'
+            f'<tr id="detail-{sym}" style="display:none">'
+            f'<td colspan="16" style="padding:0">'
+            f'<table style="width:100%;font-size:.8em;border-collapse:collapse">'
+            f'<thead><tr style="background:#162032">'
+            f'<th colspan="2">期間</th><th>エントリー</th><th>エグジット</th>'
+            f'<th>買値</th><th>売値</th><th>損益%</th><th>保有日</th>'
+            f'<th colspan="5">決済理由</th></tr></thead>'
+            f'<tbody>{detail_rows if detail_rows else "<tr><td colspan=13 style=color:#555;text-align:center>履歴なし</td></tr>"}</tbody>'
+            f'</table></td></tr>\n'
         )
 
     return f"""
 <h2 style="color:{color};border-left:4px solid {color};padding-left:10px;margin:30px 0 10px">
-  {strategy} 推奨銘柄
+  {strategy} 推奨銘柄 <span style="font-size:.8em;color:#64748b;font-weight:400">（銘柄行をクリックで取引履歴を展開）</span>
 </h2>
 <table>
   <thead>
     <tr>
-      <th>#</th><th>銘柄</th><th>スコア</th><th>期間+</th>
-      <th>1M%</th><th>1M回</th>
-      <th>3M%</th><th>3M回</th>
-      <th>6M%</th><th>6M回</th>
-      <th>1Y%</th><th>1Y回</th>
+      <th>#</th><th>銘柄</th><th>始値</th><th>終値</th><th>スコア</th><th>期間+</th>
+      <th>1M%</th><th>1M回</th><th>1M勝率/PF</th>
+      <th>3M%</th><th>3M回</th><th>3M勝率/PF</th>
+      <th>6M%</th><th>6M回</th><th>6M勝率/PF</th>
+      <th>1Y%</th><th>1Y回</th><th>1Y勝率/PF</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>{rows}</tbody>
@@ -516,24 +649,27 @@ def _strategy_table_html(selected: list[dict], strategy: str, color: str) -> str
 
 
 def generate_html(
-    macd_sel:  list[dict] | None,
-    a7_sel:    list[dict] | None,
-    rsi2_sel:  list[dict] | None,
-    macd_sig:  dict | None = None,
-    a7_sig:    dict | None = None,
-    rsi2_sig:  dict | None = None,
+    macd_sel:   list[dict] | None,
+    a7_sel:     list[dict] | None,
+    rsi2_sel:   list[dict] | None,
+    macd_sig:   dict | None = None,
+    a7_sig:     dict | None = None,
+    rsi2_sig:   dict | None = None,
+    macd_data:  dict | None = None,
+    a7_data:    dict | None = None,
+    rsi2_data:  dict | None = None,
 ) -> Path:
     today = datetime.today().strftime("%Y-%m-%d")
 
     body = ""
     if macd_sel:
-        body += _strategy_table_html(macd_sel, "MACD V2", "#38bdf8")
+        body += _strategy_table_html(macd_sel, "MACD V2", "#38bdf8", macd_data)
         body += _signal_section_html(macd_sig,  "MACD V2", "#38bdf8")
     if a7_sel:
-        body += _strategy_table_html(a7_sel,   "A7 V2",   "#4ade80")
+        body += _strategy_table_html(a7_sel,   "A7 V2",   "#4ade80", a7_data)
         body += _signal_section_html(a7_sig,    "A7 V2",   "#4ade80")
     if rsi2_sel:
-        body += _strategy_table_html(rsi2_sel, "RSI2 V2", "#f59e0b")
+        body += _strategy_table_html(rsi2_sel, "RSI2 V2", "#f59e0b", rsi2_data)
         body += _signal_section_html(rsi2_sig,  "RSI2 V2", "#f59e0b")
 
     html = f"""<!DOCTYPE html>
@@ -563,7 +699,16 @@ tr:hover{{background:#1e293b}}
 .note{{color:#94a3b8;font-size:.8em;margin-top:20px}}
 .buy-row td:last-child{{color:#4ade80;font-weight:700}}
 .sell-row td:last-child{{color:#f87171;font-weight:700}}
+.hold-row td:last-child{{color:#94a3b8;font-weight:700}}
+.stock-row:hover{{background:#1e293b;cursor:pointer}}
+.expand-btn{{text-align:center;color:#475569;width:28px}}
 </style>
+<script>
+function toggleDetail(sym){{
+  var el = document.getElementById('detail-' + sym);
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}}
+</script>
 </head>
 <body>
 <h1>V2 銘柄選定レポート</h1>
@@ -709,7 +854,8 @@ def main() -> None:
 
     # HTML レポート
     html_path = generate_html(macd_sel, a7_sel, rsi2_sel,
-                               macd_sig, a7_sig, rsi2_sig)
+                               macd_sig, a7_sig, rsi2_sig,
+                               macd_data, a7_data, rsi2_data)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
     webbrowser.open(html_path.resolve().as_uri())
     print()
