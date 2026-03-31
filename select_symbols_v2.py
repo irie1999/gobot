@@ -403,6 +403,36 @@ def print_results(selected: list[dict], strategy: str, top_n: int) -> None:
 # シグナルスキャン（選定銘柄を対象）
 # ══════════════════════════════════════════════════════════════════════
 
+def _load_watch_file(path: str) -> list[tuple[str, str]]:
+    """symbols_watch_*_v2.py からシンボルリストを読み込む"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_watch_tmp", p)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return list(getattr(mod, "SYMBOLS", []))
+
+
+def _fetch_signal_data(symbols: list[tuple], fetch_fn) -> dict:
+    """シグナルスキャン専用: watchlistのデータを取得（バックテストなし）"""
+    stock_data: dict = {}
+    print(f"  データ取得中... ({len(symbols)}銘柄)")
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(fetch_fn, sym, backtest_days=365): (sym, name)
+                for sym, name in symbols}
+        for fut in as_completed(futs):
+            sym, name = futs[fut]
+            try:
+                df = fut.result()
+                if df is not None and _is_valid_df(df):
+                    stock_data[sym] = (name, df)
+            except Exception:
+                pass
+    return stock_data
+
+
 def _selected_data_map(selected: list[dict], stock_data: dict) -> dict:
     """選定銘柄のみの stock_data_map を返す"""
     return {d["symbol"]: stock_data[d["symbol"]]
@@ -1099,42 +1129,108 @@ def main() -> None:
   ※ prime/standard/all を使う場合は先に以下を実行:
     python fetch_listed_symbols.py --market prime
 """)
-    parser.add_argument("--macd",   action="store_true", help="MACD 戦略のみ実行")
-    parser.add_argument("--a7",     action="store_true", help="A7 戦略のみ実行")
-    parser.add_argument("--rsi2",   action="store_true", help="RSI2 戦略のみ実行")
+    parser.add_argument("--backtest", action="store_true",
+                        help="フルバックテストを実行して監視銘柄を更新（週1回程度）")
+    parser.add_argument("--macd",   action="store_true", help="MACD 戦略のみ（--backtest 時）")
+    parser.add_argument("--a7",     action="store_true", help="A7 戦略のみ（--backtest 時）")
+    parser.add_argument("--rsi2",   action="store_true", help="RSI2 戦略のみ（--backtest 時）")
     parser.add_argument("--top",    type=int, default=None,
-                        help="全戦略の選定銘柄数を一括指定（個別指定を上書き）")
+                        help="全戦略の選定銘柄数を一括指定（--backtest 時）")
     parser.add_argument("--top-macd",  type=int, default=10,  dest="top_macd",
-                        help="MACD 選定銘柄数 (default: 10)")
+                        help="MACD 選定銘柄数 (default: 10, --backtest 時)")
     parser.add_argument("--top-a7",    type=int, default=25,  dest="top_a7",
-                        help="A7 選定銘柄数 (default: 25)")
+                        help="A7 選定銘柄数 (default: 25, --backtest 時)")
     parser.add_argument("--top-rsi2",  type=int, default=35,  dest="top_rsi2",
-                        help="RSI2 選定銘柄数 (default: 35)")
-    parser.add_argument("--no-signal", action="store_true", dest="no_signal",
-                        help="シグナルスキャンをスキップ（デフォルトは自動実行）")
+                        help="RSI2 選定銘柄数 (default: 35, --backtest 時)")
     parser.add_argument("--universe", default=None,
                         choices=["225", "prime", "standard", "all"],
-                        help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225)")
+                        help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225, --backtest 時)")
     args = parser.parse_args()
 
-    # フラグ未指定 → 全戦略
+    today = datetime.today().strftime("%Y-%m-%d")
+
+    # ══════════════════════════════════════════════════════════
+    # デフォルト: 既存の監視リストからシグナルのみ出力
+    # ══════════════════════════════════════════════════════════
+    if not args.backtest:
+        print()
+        print("=" * 60)
+        print(f"  シグナルスキャン  ({today})")
+        print(f"  対象: 既存の監視リスト (symbols_watch_*_v2.py)")
+        print("=" * 60)
+
+        macd_syms = _load_watch_file("symbols_watch_macd_v2.py")
+        a7_syms   = _load_watch_file("symbols_watch_a7_v2.py")
+        rsi2_syms = _load_watch_file("symbols_watch_rsi2_v2.py")
+
+        if not (macd_syms or a7_syms or rsi2_syms):
+            print("\n  監視リストが見つかりません。")
+            print("  先に以下を実行して監視銘柄を選定してください:")
+            print("    python select_symbols_v2.py --backtest\n")
+            return
+
+        macd_sig = a7_sig = rsi2_sig = None
+        rsi2_params = rsi2_mod.NORMAL
+        rsi2_mode   = "通常モード"
+
+        if macd_syms:
+            print(f"\n  [MACD] {len(macd_syms)}銘柄")
+            macd_data = _fetch_signal_data(macd_syms, macd_mod.fetch_df)
+            macd_sel  = [{"symbol": s, "name": n} for s, n in macd_syms
+                         if s in macd_data]
+            macd_sig  = scan_macd_signals(macd_sel, macd_data)
+            macd_mod.print_signals(macd_sig)
+
+        if a7_syms:
+            print(f"\n  [A7] {len(a7_syms)}銘柄")
+            a7_data = _fetch_signal_data(a7_syms, a7_mod.fetch_df)
+            a7_sel  = [{"symbol": s, "name": n} for s, n in a7_syms
+                       if s in a7_data]
+            a7_sig  = scan_a7_signals(a7_sel, a7_data)
+            a7_mod.print_signals_a7(a7_sig)
+
+        if rsi2_syms:
+            print(f"\n  [RSI2] {len(rsi2_syms)}銘柄")
+            nk_df = rsi2_mod.fetch_nikkei(90)
+            mkt   = rsi2_mod._market_info(nk_df)
+            if mkt.get("ok") and mkt["above200"]:
+                rsi2_params = rsi2_mod.NORMAL
+                rsi2_mode   = "通常モード"
+            else:
+                rsi2_params = rsi2_mod.HV
+                rsi2_mode   = "高ボラモード"
+            print(f"  市場モード: {rsi2_mode}")
+            rsi2_data = _fetch_signal_data(rsi2_syms, rsi2_mod.fetch)
+            rsi2_sel  = [{"symbol": s, "name": n} for s, n in rsi2_syms
+                         if s in rsi2_data]
+            rsi2_sig  = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
+            rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
+
+        html_path = generate_html(None, None, None,
+                                   macd_sig, a7_sig, rsi2_sig,
+                                   {}, {}, {}, watchlist=None)
+        print(f"\n  HTMLレポート: {html_path.resolve()}")
+        webbrowser.open(html_path.resolve().as_uri())
+        print()
+        return
+
+    # ══════════════════════════════════════════════════════════
+    # --backtest: フルバックテスト実行
+    # ══════════════════════════════════════════════════════════
     run_all = not (args.macd or args.a7 or args.rsi2)
     do_macd = run_all or args.macd
     do_a7   = run_all or args.a7
     do_rsi2 = run_all or args.rsi2
 
-    # --top で一括上書き、なければ戦略ごとの値を使用
     top_macd = args.top if args.top else args.top_macd
     top_a7   = args.top if args.top else args.top_a7
     top_rsi2 = args.top if args.top else args.top_rsi2
-    today  = datetime.today().strftime("%Y-%m-%d")
 
     # ── 対象銘柄ユニバースを決定 ───────────────────────────────
     universe_label = ""
     all_symbols: list[tuple]
 
     if args.universe == "225" or args.universe is None:
-        # 全上場ファイルを優先して自動選択
         for candidate in ["symbols_listed_prime.py",
                           "symbols_listed_standard.py",
                           "symbols_listed_all.py"]:
@@ -1144,11 +1240,11 @@ def main() -> None:
                 spec = importlib.util.spec_from_file_location("_listed", p)
                 mod  = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                all_symbols   = mod.SYMBOLS
+                all_symbols    = mod.SYMBOLS
                 universe_label = f"{candidate} ({len(all_symbols)}銘柄)"
                 break
         else:
-            all_symbols   = macd_mod._ALL_SYMBOLS  # 225 銘柄
+            all_symbols    = macd_mod._ALL_SYMBOLS
             universe_label = f"日経225 ({len(all_symbols)}銘柄)"
     else:
         fname = f"symbols_listed_{args.universe}.py"
@@ -1162,12 +1258,12 @@ def main() -> None:
         spec = importlib.util.spec_from_file_location("_listed", p)
         mod  = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        all_symbols   = mod.SYMBOLS
+        all_symbols    = mod.SYMBOLS
         universe_label = f"{fname} ({len(all_symbols)}銘柄)"
 
     print()
     print("=" * 60)
-    print(f"  V2 銘柄選定  ({today})")
+    print(f"  V2 銘柄選定 + シグナル  ({today})")
     print(f"  対象ユニバース: {universe_label}")
     print(f"  期間: 1M / 3M / 6M / 1Y")
     print(f"  選定数: MACD={top_macd} / A7={top_a7} / RSI2={top_rsi2}")
@@ -1184,35 +1280,30 @@ def main() -> None:
         print_results(macd_sel, "MACD V2", top_macd)
         p = write_symbols_file(macd_sel, "MACD V2", "symbols_watch_macd_v2.py")
         print(f"  → {p} を出力しました")
-        if not args.no_signal:
-            macd_sig = scan_macd_signals(macd_sel, macd_data)
-            macd_mod.print_signals(macd_sig)
+        macd_sig = scan_macd_signals(macd_sel, macd_data)
+        macd_mod.print_signals(macd_sig)
 
     if do_a7:
         a7_sel, a7_data = run_a7_all(all_symbols, top_a7)
         print_results(a7_sel, "A7 V2", top_a7)
         p = write_symbols_file(a7_sel, "A7 V2", "symbols_watch_a7_v2.py")
         print(f"  → {p} を出力しました")
-        if not args.no_signal:
-            a7_sig = scan_a7_signals(a7_sel, a7_data)
-            a7_mod.print_signals_a7(a7_sig)
+        a7_sig = scan_a7_signals(a7_sel, a7_data)
+        a7_mod.print_signals_a7(a7_sig)
 
     if do_rsi2:
         rsi2_sel, rsi2_data, rsi2_params, rsi2_mode = run_rsi2_all(all_symbols, top_rsi2)
         print_results(rsi2_sel, "RSI2 V2", top_rsi2)
         p = write_symbols_file(rsi2_sel, "RSI2 V2", "symbols_watch_rsi2_v2.py")
         print(f"  → {p} を出力しました")
-        if not args.no_signal:
-            rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
-            rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
+        rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
+        rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
-    # ── 横断分析: 3戦略で共通して選ばれた銘柄を監視リストに ──
+    # ── 横断分析 ──────────────────────────────────────────────
     watchlist = None
     if sum(1 for s in [macd_sel, a7_sel, rsi2_sel] if s) >= 2:
         watchlist = analyze_cross_strategy(macd_sel, a7_sel, rsi2_sel)
         print_watchlist(watchlist)
-        # 監視銘柄ファイルを出力
-        today = datetime.today().strftime("%Y-%m-%d")
         lines = [
             '"""',
             f'横断分析 監視銘柄 — 3戦略バックテスト選定 ({today})',
@@ -1222,15 +1313,12 @@ def main() -> None:
         ]
         for d in watchlist:
             star = "★★★" if d["n_strat"] == 3 else ("★★" if d["n_strat"] == 2 else "★")
-            strat_str = "/".join(
-                f'{s}#{d["ranks"][s]}' for s in d["strategies"]
-            )
+            strat_str = "/".join(f'{s}#{d["ranks"][s]}' for s in d["strategies"])
             lines.append(f'    ("{d["symbol"]}", "{d["name"]}"),  # {star} [{strat_str}]')
         lines.append(']')
         Path("symbols_watch_combined.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"  → symbols_watch_combined.py を出力しました")
 
-    # HTML レポート
     html_path = generate_html(macd_sel, a7_sel, rsi2_sel,
                                macd_sig, a7_sig, rsi2_sig,
                                macd_data, a7_data, rsi2_data,
