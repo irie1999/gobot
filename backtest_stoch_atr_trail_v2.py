@@ -368,6 +368,9 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         raw = ticker.history(period="2y", interval="1d", auto_adjust=False)
         if raw.empty:
             return None
+        # タイムゾーン付きインデックスをnaiveに変換
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
