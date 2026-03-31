@@ -26,6 +26,7 @@ elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import argparse
+import importlib
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -33,7 +34,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# ── 各戦略の V2 モジュールをインポート ────────────────────────
+# ── 各戦略モジュール（起動時に v1/v2 を切替） ─────────────────
 import backtest_macd_scan_v2         as macd_mod
 import backtest_stoch_atr_trail_v2   as a7_mod
 import rsi2_hv_v2                    as rsi2_mod
@@ -1115,19 +1116,20 @@ function toggleDetail(sym){{
 # ══════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    global macd_mod, a7_mod, rsi2_mod  # --v1 で差し替え可能にする
+
     parser = argparse.ArgumentParser(
         description="V2 銘柄選定スクリプト — 3戦略×4期間バックテスト自動実行",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python select_symbols_v2.py              # 全戦略（対象: 全上場 or 225銘柄）
-  python select_symbols_v2.py --macd       # MACD のみ
-  python select_symbols_v2.py --a7         # A7 のみ
-  python select_symbols_v2.py --rsi2       # RSI2 のみ
-  python select_symbols_v2.py                    # MACD=10, A7=25, RSI2=35 + 今日のシグナル判定
-  python select_symbols_v2.py --no-signal        # シグナルスキャンをスキップ
-  python select_symbols_v2.py --top 20           # 全戦略一括で 20 銘柄
-  python select_symbols_v2.py --top-rsi2 40      # RSI2 のみ 40 銘柄に変更
+  python select_symbols_v2.py                     # 監視リストからシグナル判定（毎日）
+  python select_symbols_v2.py --backtest          # V2 フルバックテスト + 銘柄更新（週1回）
+  python select_symbols_v2.py --backtest --v1     # V1（日経225）フルバックテスト
+  python select_symbols_v2.py --v1                # V1 監視リストからシグナル判定
+  python select_symbols_v2.py --backtest --v1 --universe 225  # V1 で 225 銘柄スキャン
+  python select_symbols_v2.py --top 20            # 全戦略一括で 20 銘柄
+  python select_symbols_v2.py --top-rsi2 40       # RSI2 のみ 40 銘柄に変更
   python select_symbols_v2.py --universe prime     # プライム上場銘柄
   python select_symbols_v2.py --universe standard  # プライム+スタンダード
   python select_symbols_v2.py --universe all       # 全上場銘柄
@@ -1152,7 +1154,29 @@ def main() -> None:
     parser.add_argument("--universe", default=None,
                         choices=["225", "prime", "standard", "all"],
                         help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225, --backtest 時)")
+    parser.add_argument("--v1", action="store_true",
+                        help="V1 モジュール使用（日経225対象・旧パラメータ）")
     args = parser.parse_args()
+
+    # ── V1/V2 モジュール切替 ──────────────────────────────────
+    if args.v1:
+        global macd_mod, a7_mod, rsi2_mod
+        macd_mod = importlib.import_module("backtest_macd_scan")
+        a7_mod   = importlib.import_module("backtest_stoch_atr_trail")
+        rsi2_mod = importlib.import_module("rsi2_hv")
+        # --v1 時のデフォルト監視リストファイル名
+        macd_watch_file  = "symbols_watch_macd_v1.py"
+        a7_watch_file    = "symbols_watch_a7_v1.py"
+        rsi2_watch_file  = "symbols_watch_rsi2_v1.py"
+        ver_label = "V1（日経225）"
+        # --v1 時は universe デフォルトを 225 に
+        if args.universe is None:
+            args.universe = "225"
+    else:
+        macd_watch_file  = "symbols_watch_macd_v2.py"
+        a7_watch_file    = "symbols_watch_a7_v2.py"
+        rsi2_watch_file  = "symbols_watch_rsi2_v2.py"
+        ver_label = "V2"
 
     today = datetime.today().strftime("%Y-%m-%d")
 
@@ -1162,18 +1186,19 @@ def main() -> None:
     if not args.backtest:
         print()
         print("=" * 60)
-        print(f"  シグナルスキャン  ({today})")
-        print(f"  対象: 既存の監視リスト (symbols_watch_*_v2.py)")
+        print(f"  シグナルスキャン [{ver_label}]  ({today})")
+        print(f"  対象: 既存の監視リスト")
         print("=" * 60)
 
-        macd_syms = _load_watch_file("symbols_watch_macd_v2.py")
-        a7_syms   = _load_watch_file("symbols_watch_a7_v2.py")
-        rsi2_syms = _load_watch_file("symbols_watch_rsi2_v2.py")
+        macd_syms = _load_watch_file(macd_watch_file)
+        a7_syms   = _load_watch_file(a7_watch_file)
+        rsi2_syms = _load_watch_file(rsi2_watch_file)
 
         if not (macd_syms or a7_syms or rsi2_syms):
             print("\n  監視リストが見つかりません。")
             print("  先に以下を実行して監視銘柄を選定してください:")
-            print("    python select_symbols_v2.py --backtest\n")
+            v1_flag = " --v1" if args.v1 else ""
+            print(f"    python select_symbols_v2.py --backtest{v1_flag}\n")
             return
 
         macd_sig = a7_sig = rsi2_sig = None
@@ -1270,7 +1295,7 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print(f"  V2 銘柄選定 + シグナル  ({today})")
+    print(f"  銘柄選定 + シグナル [{ver_label}]  ({today})")
     print(f"  対象ユニバース: {universe_label}")
     print(f"  期間: 1M / 3M / 6M / 1Y")
     print(f"  選定数: MACD={top_macd} / A7={top_a7} / RSI2={top_rsi2}")
@@ -1284,24 +1309,24 @@ def main() -> None:
 
     if do_macd:
         macd_sel, macd_data = run_macd_all(all_symbols, top_macd)
-        print_results(macd_sel, "MACD V2", top_macd)
-        p = write_symbols_file(macd_sel, "MACD V2", "symbols_watch_macd_v2.py")
+        print_results(macd_sel, f"MACD {ver_label}", top_macd)
+        p = write_symbols_file(macd_sel, f"MACD {ver_label}", macd_watch_file)
         print(f"  → {p} を出力しました")
         macd_sig = scan_macd_signals(macd_sel, macd_data)
         macd_mod.print_signals(macd_sig)
 
     if do_a7:
         a7_sel, a7_data = run_a7_all(all_symbols, top_a7)
-        print_results(a7_sel, "A7 V2", top_a7)
-        p = write_symbols_file(a7_sel, "A7 V2", "symbols_watch_a7_v2.py")
+        print_results(a7_sel, f"A7 {ver_label}", top_a7)
+        p = write_symbols_file(a7_sel, f"A7 {ver_label}", a7_watch_file)
         print(f"  → {p} を出力しました")
         a7_sig = scan_a7_signals(a7_sel, a7_data)
         a7_mod.print_signals_a7(a7_sig)
 
     if do_rsi2:
         rsi2_sel, rsi2_data, rsi2_params, rsi2_mode = run_rsi2_all(all_symbols, top_rsi2)
-        print_results(rsi2_sel, "RSI2 V2", top_rsi2)
-        p = write_symbols_file(rsi2_sel, "RSI2 V2", "symbols_watch_rsi2_v2.py")
+        print_results(rsi2_sel, f"RSI2 {ver_label}", top_rsi2)
+        p = write_symbols_file(rsi2_sel, f"RSI2 {ver_label}", rsi2_watch_file)
         print(f"  → {p} を出力しました")
         rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
         rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
