@@ -17,11 +17,6 @@
 """
 
 
-# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-elif hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import argparse
 import base64
@@ -34,6 +29,13 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 
 warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)

@@ -15,6 +15,12 @@ MACD / A7（ストキャスティクス+ATR）/ RSI(2) の --signal を並列実
   python scan_all.py --vix             # RSI2のVIXフィルター有効化
 """
 
+
+import argparse
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import io
 
 # Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
@@ -23,11 +29,6 @@ if hasattr(sys.stdout, "reconfigure"):
 elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-import argparse
-import subprocess
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 
 def run_script(label: str, cmd: list[str]) -> tuple[str, str, str]:

@@ -18,13 +18,6 @@
   q / quit                終了
 """
 
-import io
-
-# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-elif hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import json
 import os
@@ -36,6 +29,14 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import io
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 
 # ── 監視銘柄（MACDブレイクアウト × 出来高急増バックテスト 上位10銘柄） ────
 # 2026-03-25 スキャン結果
