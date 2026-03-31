@@ -780,6 +780,7 @@ def scan_signals_a7(stock_data_map: dict, results_90d: list[dict]) -> dict:
             buy.append({
                 "symbol":     sym,
                 "name":       name,
+                "open":       float(last["open"]),
                 "close":      last_close,
                 "stoch_k":    last_k,
                 "stoch_d":    last_d,
@@ -801,6 +802,7 @@ def scan_signals_a7(stock_data_map: dict, results_90d: list[dict]) -> dict:
             common = {
                 "symbol":      sym,
                 "name":        name,
+                "open":        float(last["open"]),
                 "close":       last_close,
                 "entry_price": entry_price,
                 "entry_dt":    str(entry_dt.date()),
@@ -836,12 +838,12 @@ def print_signals_a7(sig: dict) -> None:
     if not buy:
         print("    なし")
     else:
-        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'%K':>5} {'%D':>5} {'ATR%':>5}  状態")
-        print("  " + "─" * 60)
+        print(f"  {'#':<3} {'銘柄':<22} {'始値':>8} {'終値':>8} {'%K':>5} {'%D':>5} {'ATR%':>5}  状態")
+        print("  " + "─" * 70)
         for i, c in enumerate(buy, 1):
             trend = "↑MA75上" if c["trend_up"] else "↓MA75下"
             label = f"{c['name']}({c['symbol']})"
-            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} "
+            print(f"  {i:<3} {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} "
                   f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f} {c['atr_pct']:>5.1f}%  {trend}")
 
     # ── 売りシグナル ───────────────────────────────────────
@@ -849,12 +851,12 @@ def print_signals_a7(sig: dict) -> None:
     if not sell:
         print("    なし")
     else:
-        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
-        print("  " + "─" * 65)
+        print(f"  {'銘柄':<22} {'始値':>8} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
+        print("  " + "─" * 75)
         for c in sell:
             label = f"{c['name']}({c['symbol']})"
             sign  = "+" if c["unrealized"] >= 0 else ""
-            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+            print(f"  {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
                   f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
                   f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f}")
 
@@ -863,12 +865,12 @@ def print_signals_a7(sig: dict) -> None:
     if not hold:
         print("    なし")
     else:
-        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
-        print("  " + "─" * 65)
+        print(f"  {'銘柄':<22} {'始値':>8} {'終値':>8} {'買値':>8} {'含み損益':>9} {'保有日':>5} {'%K':>5} {'%D':>5}")
+        print("  " + "─" * 75)
         for c in hold:
             label = f"{c['name']}({c['symbol']})"
             sign  = "+" if c["unrealized"] >= 0 else ""
-            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+            print(f"  {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
                   f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
                   f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f}")
 

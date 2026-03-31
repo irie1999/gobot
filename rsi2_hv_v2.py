@@ -768,6 +768,7 @@ def scan_signals_rsi2(
             buy.append({
                 "symbol":     sym,
                 "name":       name,
+                "open":       float(df.iloc[-1]["open"]),
                 "close":      last_close,
                 "rsi2":       last_rsi2,
                 "rsi2_prev":  prev_rsi2,
@@ -790,6 +791,7 @@ def scan_signals_rsi2(
             common = {
                 "symbol":      sym,
                 "name":        name,
+                "open":        float(df.iloc[-1]["open"]),
                 "close":       last_close,
                 "entry_price": entry_p,
                 "entry_dt":    str(entry_dt.date()),
@@ -828,12 +830,12 @@ def print_signals_rsi2(sig: dict, mode_label: str, params: dict) -> None:
     if not buy:
         print("    なし")
     else:
-        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'RSI2':>5} {'MA200':>8} {'IBS':>5} {'ATR%':>5}  フィルター")
-        print("  " + "─" * 72)
+        print(f"  {'#':<3} {'銘柄':<22} {'始値':>8} {'終値':>8} {'RSI2':>5} {'MA200':>8} {'IBS':>5} {'ATR%':>5}  フィルター")
+        print("  " + "─" * 82)
         for i, c in enumerate(buy, 1):
             label = f"{c['name']}({c['symbol']})"
             ma_mark = "↑" if c["above_ma200"] else "↓"
-            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} "
+            print(f"  {i:<3} {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} "
                   f"{c['rsi2']:>5.1f} {c['ma200']:>8,.0f}{ma_mark} "
                   f"{c['ibs']:>5.2f} {c['atr_pct']:>5.1f}%  {c['filters']}")
 
@@ -842,13 +844,13 @@ def print_signals_rsi2(sig: dict, mode_label: str, params: dict) -> None:
     if not sell:
         print("    なし")
     else:
-        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} "
+        print(f"  {'銘柄':<22} {'始値':>8} {'終値':>8} {'買値':>8} {'含み損益':>9} "
               f"{'保有日':>5} {'RSI2':>5}  出口理由")
-        print("  " + "─" * 70)
+        print("  " + "─" * 80)
         for c in sell:
             label = f"{c['name']}({c['symbol']})"
             sign  = "+" if c["unrealized"] >= 0 else ""
-            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+            print(f"  {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
                   f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
                   f"{c['rsi2']:>5.1f}  {c['exit_reason']}")
 
@@ -857,13 +859,13 @@ def print_signals_rsi2(sig: dict, mode_label: str, params: dict) -> None:
     if not hold:
         print("    なし")
     else:
-        print(f"  {'銘柄':<22} {'終値':>8} {'買値':>8} {'含み損益':>9} "
+        print(f"  {'銘柄':<22} {'始値':>8} {'終値':>8} {'買値':>8} {'含み損益':>9} "
               f"{'保有日':>5} {'RSI2':>5}")
-        print("  " + "─" * 60)
+        print("  " + "─" * 70)
         for c in hold:
             label = f"{c['name']}({c['symbol']})"
             sign  = "+" if c["unrealized"] >= 0 else ""
-            print(f"  {label:<22} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
+            print(f"  {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} {c['entry_price']:>8,.0f} "
                   f"{sign}{c['unrealized']:>+8.1f}% {c['hold_days']:>4}日 "
                   f"{c['rsi2']:>5.1f}")
 
