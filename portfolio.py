@@ -970,15 +970,31 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
 
+class _ReuseServer(socketserver.TCPServer):
+    allow_reuse_address = True  # bind前に設定が必要（Windows WinError 10048 対策）
+
+
 def cmd_web(port: int = 7654) -> None:
     url = f"http://localhost:{port}"
-    print(f"\n  ポートフォリオ Web UI を起動しました → {url}")
-    print(f"  終了するには Ctrl+C を押してください。\n")
-    with socketserver.TCPServer(("", port), _Handler) as httpd:
-        httpd.allow_reuse_address = True
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    # ポートが使用中なら次のポートを試す
+    for p in range(port, port + 10):
         try:
-            httpd.serve_forever()
+            server = _ReuseServer(("", p), _Handler)
+            break
+        except OSError:
+            continue
+    else:
+        print(f"\n  ✘ ポート {port}〜{port+9} がすべて使用中です。他のアプリを終了してから再実行してください。\n")
+        return
+    actual_url = f"http://localhost:{p}"
+    if p != port:
+        print(f"\n  ポート {port} は使用中のため {p} で起動します。")
+    print(f"\n  ポートフォリオ Web UI を起動しました → {actual_url}")
+    print(f"  終了するには Ctrl+C を押してください。\n")
+    with server:
+        threading.Timer(0.5, lambda: webbrowser.open(actual_url)).start()
+        try:
+            server.serve_forever()
         except KeyboardInterrupt:
             print("\n  Web UI を終了しました。")
 
