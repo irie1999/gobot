@@ -1087,7 +1087,9 @@ def main() -> None:
   python select_symbols_v2.py --macd       # MACD のみ
   python select_symbols_v2.py --a7         # A7 のみ
   python select_symbols_v2.py --rsi2       # RSI2 のみ
-  python select_symbols_v2.py --top 25     # 各戦略 25 銘柄選定
+  python select_symbols_v2.py                    # MACD=10, A7=25, RSI2=35（推奨デフォルト）
+  python select_symbols_v2.py --top 20           # 全戦略一括で 20 銘柄
+  python select_symbols_v2.py --top-rsi2 40      # RSI2 のみ 40 銘柄に変更
   python select_symbols_v2.py --universe prime     # プライム上場銘柄
   python select_symbols_v2.py --universe standard  # プライム+スタンダード
   python select_symbols_v2.py --universe all       # 全上場銘柄
@@ -1099,7 +1101,14 @@ def main() -> None:
     parser.add_argument("--macd",   action="store_true", help="MACD 戦略のみ実行")
     parser.add_argument("--a7",     action="store_true", help="A7 戦略のみ実行")
     parser.add_argument("--rsi2",   action="store_true", help="RSI2 戦略のみ実行")
-    parser.add_argument("--top",    type=int, default=20, help="選定銘柄数 (default: 20)")
+    parser.add_argument("--top",    type=int, default=None,
+                        help="全戦略の選定銘柄数を一括指定（個別指定を上書き）")
+    parser.add_argument("--top-macd",  type=int, default=10,  dest="top_macd",
+                        help="MACD 選定銘柄数 (default: 10)")
+    parser.add_argument("--top-a7",    type=int, default=25,  dest="top_a7",
+                        help="A7 選定銘柄数 (default: 25)")
+    parser.add_argument("--top-rsi2",  type=int, default=35,  dest="top_rsi2",
+                        help="RSI2 選定銘柄数 (default: 35)")
     parser.add_argument("--signal", action="store_true",
                         help="バックテスト選定後に本日シグナルスキャンも実行")
     parser.add_argument("--universe", default=None,
@@ -1113,7 +1122,10 @@ def main() -> None:
     do_a7   = run_all or args.a7
     do_rsi2 = run_all or args.rsi2
 
-    top_n  = args.top
+    # --top で一括上書き、なければ戦略ごとの値を使用
+    top_macd = args.top if args.top else args.top_macd
+    top_a7   = args.top if args.top else args.top_a7
+    top_rsi2 = args.top if args.top else args.top_rsi2
     today  = datetime.today().strftime("%Y-%m-%d")
 
     # ── 対象銘柄ユニバースを決定 ───────────────────────────────
@@ -1157,7 +1169,7 @@ def main() -> None:
     print(f"  V2 銘柄選定  ({today})")
     print(f"  対象ユニバース: {universe_label}")
     print(f"  期間: 1M / 3M / 6M / 1Y")
-    print(f"  選定数: 各戦略 TOP {top_n}")
+    print(f"  選定数: MACD={top_macd} / A7={top_a7} / RSI2={top_rsi2}")
     print("=" * 60)
 
     macd_sel = a7_sel = rsi2_sel = None
@@ -1167,8 +1179,8 @@ def main() -> None:
     rsi2_mode   = "通常モード"
 
     if do_macd:
-        macd_sel, macd_data = run_macd_all(all_symbols, top_n)
-        print_results(macd_sel, "MACD V2", top_n)
+        macd_sel, macd_data = run_macd_all(all_symbols, top_macd)
+        print_results(macd_sel, "MACD V2", top_macd)
         p = write_symbols_file(macd_sel, "MACD V2", "symbols_watch_macd_v2.py")
         print(f"  → {p} を出力しました")
         if args.signal:
@@ -1176,8 +1188,8 @@ def main() -> None:
             macd_mod.print_signals(macd_sig)
 
     if do_a7:
-        a7_sel, a7_data = run_a7_all(all_symbols, top_n)
-        print_results(a7_sel, "A7 V2", top_n)
+        a7_sel, a7_data = run_a7_all(all_symbols, top_a7)
+        print_results(a7_sel, "A7 V2", top_a7)
         p = write_symbols_file(a7_sel, "A7 V2", "symbols_watch_a7_v2.py")
         print(f"  → {p} を出力しました")
         if args.signal:
@@ -1185,8 +1197,8 @@ def main() -> None:
             a7_mod.print_signals_a7(a7_sig)
 
     if do_rsi2:
-        rsi2_sel, rsi2_data, rsi2_params, rsi2_mode = run_rsi2_all(all_symbols, top_n)
-        print_results(rsi2_sel, "RSI2 V2", top_n)
+        rsi2_sel, rsi2_data, rsi2_params, rsi2_mode = run_rsi2_all(all_symbols, top_rsi2)
+        print_results(rsi2_sel, "RSI2 V2", top_rsi2)
         p = write_symbols_file(rsi2_sel, "RSI2 V2", "symbols_watch_rsi2_v2.py")
         print(f"  → {p} を出力しました")
         if args.signal:
