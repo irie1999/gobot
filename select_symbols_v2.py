@@ -27,6 +27,7 @@ elif hasattr(sys.stdout, "buffer"):
 
 import argparse
 import importlib
+import importlib.util
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -409,7 +410,6 @@ def _load_watch_file(path: str) -> list[tuple[str, str]]:
     p = Path(path)
     if not p.exists():
         return []
-    import importlib.util
     spec = importlib.util.spec_from_file_location("_watch_tmp", p)
     mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -1268,7 +1268,6 @@ def main() -> None:
                           "symbols_listed_all.py"]:
             p = Path(candidate)
             if p.exists() and args.universe is None:
-                import importlib.util
                 spec = importlib.util.spec_from_file_location("_listed", p)
                 mod  = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
@@ -1286,7 +1285,6 @@ def main() -> None:
             print(f"  先に以下を実行してください:")
             print(f"    python fetch_listed_symbols.py --market {args.universe}\n")
             return
-        import importlib.util
         spec = importlib.util.spec_from_file_location("_listed", p)
         mod  = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
