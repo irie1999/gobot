@@ -29,6 +29,15 @@ MACDブレイクアウト × 出来高急増 × ATRトレイリング  銘柄ス
   python backtest_macd_scan_v2.py --years 3 --top 30 # 上位30件表示
 """
 
+import io
+import sys
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 import argparse
 import json
 import pickle

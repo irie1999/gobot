@@ -10,6 +10,15 @@ RSI(2) 平均回帰戦略  軽量版（255銘柄スキャン対応）
   python rsi2_simple.py 7011.T --start 2022-01-01 --end 2023-12-31
 """
 
+import io
+import sys
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 import argparse
 import pickle
 import webbrowser

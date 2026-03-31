@@ -15,6 +15,13 @@
   python backtest_compare.py
 """
 
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 import base64
 import io
 import logging

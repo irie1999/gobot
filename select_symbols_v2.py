@@ -16,6 +16,15 @@ V2 銘柄選定スクリプト — 3戦略 × 4期間バックテスト自動実
   - select_v2_report.html       (総合 HTML レポート・自動で開く)
 """
 
+import io
+import sys
+
+# Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+elif hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 import argparse
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
