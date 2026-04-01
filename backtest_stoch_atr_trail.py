@@ -348,21 +348,15 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         persistent = _RSI2_CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
         if persistent.exists():
             try:
-                with open(persistent, "rb") as f:
-                    cached = pickle.load(f)
-                last_date = cached.index[-1]
-                _is_weekday = _today.weekday() < 5  # 月〜金
-                _now_jst = datetime.now(timezone(timedelta(hours=9)))
-                if _is_weekday and (_now_jst.hour, _now_jst.minute) >= (15, 30):
-                    _required = _today
-                else:
-                    _prev = _today - pd.Timedelta(days=1)
-                    while _prev.weekday() >= 5:
-                        _prev -= pd.Timedelta(days=1)
-                    _required = _prev
-                stale = pd.Timestamp(last_date.date()) < _required
-                if len(cached) >= 210 and not stale:
-                    return cached
+                # ファイル更新日時が今日（JST）なら新鮮と判定
+                _mtime = datetime.fromtimestamp(
+                    persistent.stat().st_mtime, tz=timezone(timedelta(hours=9)))
+                _fresh = _mtime.date() == datetime.now(timezone(timedelta(hours=9))).date()
+                if _fresh:
+                    with open(persistent, "rb") as f:
+                        cached = pickle.load(f)
+                    if len(cached) >= 210:
+                        return cached
             except Exception:
                 pass
 

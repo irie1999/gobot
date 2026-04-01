@@ -75,25 +75,19 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
-            with open(persistent, "rb") as f:
-                df = pickle.load(f)
-            last_date = df.index[-1]
-            _is_weekday = _TODAY.weekday() < 5  # 月〜金
-            _now_jst = datetime.now(timezone(timedelta(hours=9)))
-            if _is_weekday and (_now_jst.hour, _now_jst.minute) >= (15, 30):
-                _required = _TODAY
-            else:
-                _prev = _TODAY - pd.Timedelta(days=1)
-                while _prev.weekday() >= 5:
-                    _prev -= pd.Timedelta(days=1)
-                _required = _prev
-            stale = pd.Timestamp(last_date.date()) < _required
-            # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
-            price_range = float(df["close"].max() - df["close"].min())
-            valid = price_range > 0.01 * float(df["close"].mean())
-            if len(df) >= 210 and not stale and valid:
-                return df
-            persistent.unlink(missing_ok=True)
+            # ファイル更新日時が今日（JST）なら新鮮と判定
+            _mtime = datetime.fromtimestamp(
+                persistent.stat().st_mtime, tz=timezone(timedelta(hours=9)))
+            if _mtime.date() == datetime.now(timezone(timedelta(hours=9))).date():
+                with open(persistent, "rb") as f:
+                    df = pickle.load(f)
+                # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
+                price_range = float(df["close"].max() - df["close"].min())
+                valid = price_range > 0.01 * float(df["close"].mean())
+                if len(df) >= 210 and valid:
+                    return df
+        except Exception:
+            pass
         except Exception:
             persistent.unlink(missing_ok=True)
 

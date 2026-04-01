@@ -79,35 +79,19 @@ def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
 JST = timezone(timedelta(hours=9))
 
 
-def _last_close_date() -> pd.Timestamp:
-    """直近の東証クローズ日を返す。
-    平日15:30（JST）以降なら当日、それ以前なら前営業日。"""
-    now = datetime.now(JST)
-    today = pd.Timestamp(now.date())
-    is_weekday = today.weekday() < 5
-    if is_weekday:
-        market_closed = (now.hour, now.minute) >= (15, 30)
-        if market_closed:
-            return today
-        # 市場クローズ前 → 前営業日へ
-    # 土日 or 平日クローズ前: 直前の営業日を返す
-    prev = today - pd.Timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= pd.Timedelta(days=1)
-    return prev
-
-
 def _is_fresh(path: Path) -> bool:
-    """キャッシュが有効（新鮮）かどうか確認する。
-    直近の東証クローズ日のデータがあればフレッシュと判定。"""
+    """キャッシュが今日（JST）にダウンロードされていれば新鮮と判定。
+    yfinanceのデータ遅延（1〜2日）を考慮し、データの日付ではなく
+    ファイルの更新日時で判断する。"""
     if not path.exists():
         return False
     try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=JST)
+        if mtime.date() != datetime.now(JST).date():
+            return False
         with open(path, "rb") as f:
             df = pickle.load(f)
-        last_date = pd.Timestamp(df.index[-1].date())
-        required  = _last_close_date()
-        return len(df) >= 210 and last_date >= required
+        return len(df) >= 210
     except Exception:
         return False
 
