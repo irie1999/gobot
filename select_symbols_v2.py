@@ -1024,6 +1024,7 @@ def generate_html(
     a7_data:    dict | None = None,
     rsi2_data:  dict | None = None,
     watchlist:  list[dict] | None = None,
+    ver:        str = "v2",
 ) -> Path:
     today = datetime.today().strftime("%Y-%m-%d")
 
@@ -1106,7 +1107,7 @@ function toggleDetail(sym){{
 </body>
 </html>"""
 
-    path = Path(f"select_v2_report_{today}.html")
+    path = Path(f"select_{ver}_report_{today}.html")
     path.write_text(html, encoding="utf-8")
     return path
 
@@ -1238,9 +1239,10 @@ def main() -> None:
             rsi2_sig  = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
             rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
+        _ver = "v1" if args.v1 else "v2"
         html_path = generate_html(None, None, None,
                                    macd_sig, a7_sig, rsi2_sig,
-                                   {}, {}, {}, watchlist=None)
+                                   {}, {}, {}, watchlist=None, ver=_ver)
         print(f"\n  HTMLレポート: {html_path.resolve()}")
         webbrowser.open(html_path.resolve().as_uri())
         print()
@@ -1349,10 +1351,11 @@ def main() -> None:
         Path("symbols_watch_combined.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"  → symbols_watch_combined.py を出力しました")
 
+    _ver = "v1" if args.v1 else "v2"
     html_path = generate_html(macd_sel, a7_sel, rsi2_sel,
                                macd_sig, a7_sig, rsi2_sig,
                                macd_data, a7_data, rsi2_data,
-                               watchlist)
+                               watchlist, ver=_ver)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
     webbrowser.open(html_path.resolve().as_uri())
     print()
