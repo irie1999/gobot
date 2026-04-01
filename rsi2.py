@@ -40,7 +40,7 @@ HALF_PROFIT_PCT =   5.0   # 半分利確 %
 ATR_TRAIL_MULT  =   2.0   # ATR トレイリング係数
 POSITION_SIZE   = 100_000 # 1回あたりの投資金額（円）
 BACKTEST_DAYS   =   365   # デフォルトのバックテスト日数
-WORKERS         =    16   # 並列ダウンロード数
+WORKERS         =     4   # 並列数（16だとyfinanceレート制限で全銘柄同一データになる）
 
 # 実行開始時刻を一度だけ固定（毎回 _TODAY を呼ぶと結果がずれる）
 _TODAY = pd.Timestamp(datetime.now().date())

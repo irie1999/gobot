@@ -292,7 +292,7 @@ SYMBOLS = _ALL_SYMBOLS
 
 # ── パラメータ ──────────────────────────────────────────────
 BACKTEST_DAYS    = 30           # デフォルトのバックテスト期間（日）
-WORKERS          = 16           # 並列バックテスト数（データ取得は順次）
+WORKERS          = 4            # 並列数（16だとyfinanceレート制限で全銘柄同一データになる）
 STOCH_K_PERIOD   = 14           # V1 と同じ（品質維持）
 STOCH_D_PERIOD   = 3
 STOCH_SMOOTH     = 3
