@@ -27,8 +27,17 @@ for sym, name in symbols:
         else:
             if df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
-            print(df[["Close"]].tail(5).to_string())
-            print(f"  → 最新日付: {df.index[-1].date()}  終値: {df['Close'].iloc[-1]:.0f}")
+            # 全列を表示（Open/High/Low/Close/Volume等）
+            print("[全列（直近5日）]")
+            print(df.tail(5).to_string())
+            # NaNを除いた最終行（有効データ）
+            valid = df[df["Close"].notna()]
+            if not valid.empty:
+                last = valid.iloc[-1]
+                print(f"\n  → 有効な最新日付: {valid.index[-1].date()}")
+                print(f"     Close={last['Close']:.0f}  Open={last['Open']:.0f}  Volume={last['Volume']:.0f}")
+            else:
+                print("  → 有効データなし")
     except Exception as e:
         print(f"  エラー: {e}")
     print()
