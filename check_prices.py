@@ -21,9 +21,29 @@ for sym, name in symbols:
         ticker = yf.Ticker(sym)
         dl_start = (now_jst - timedelta(days=10)).strftime("%Y-%m-%d")
         dl_end   = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
-        # auto_adjust=False, actions=False で生の終値を取得（配当調整NaN問題を回避）
+        # 方法1: start/end 指定
         df = ticker.history(start=dl_start, end=dl_end, interval="1d",
                             auto_adjust=False, actions=False)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        print("[方法1: start/end指定]")
+        print(df[["Open","High","Low","Close","Volume"]].tail(3).to_string())
+
+        # 方法2: period指定（別エンドポイント）
+        df2 = ticker.history(period="5d", interval="1d", auto_adjust=False, actions=False)
+        if df2.index.tz is not None:
+            df2.index = df2.index.tz_localize(None)
+        print("\n[方法2: period=5d]")
+        print(df2[["Open","High","Low","Close","Volume"]].tail(3).to_string())
+
+        # fast_info で最終価格確認
+        try:
+            fi = ticker.fast_info
+            print(f"\n[fast_info] last_price={fi.last_price:.0f}")
+        except Exception:
+            pass
+
+        df = df  # 方法1のdfを使用
         if df.empty:
             print("  データなし")
         else:
