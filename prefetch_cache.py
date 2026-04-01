@@ -124,7 +124,20 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
         available = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
         if len(available) < 5:
             return "empty"
-        raw = raw[available].dropna()
+        raw = raw[available]
+
+        # 最終行のCloseがNaNだが出来高あり → fast_infoで補完
+        # （yfinanceのhistory()が確定終値を返さないケースへの対処）
+        last = raw.iloc[-1]
+        if pd.isna(last["close"]) and last["volume"] > 0:
+            try:
+                last_price = ticker.fast_info.last_price
+                if last_price and not pd.isna(last_price):
+                    raw.at[raw.index[-1], "close"] = float(last_price)
+            except Exception:
+                pass
+
+        raw = raw.dropna(subset=["close"])  # close がNaNの行のみ除去
 
         if len(raw) < 210:
             return "short"

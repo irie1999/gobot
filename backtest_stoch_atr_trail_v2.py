@@ -384,7 +384,17 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         cols = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
-        raw = raw[cols].dropna()
+        raw = raw[cols]
+        # 最終行のCloseがNaNだが出来高あり → fast_infoで補完
+        _last = raw.iloc[-1]
+        if pd.isna(_last["close"]) and _last["volume"] > 0:
+            try:
+                _lp = yf.Ticker(symbol).fast_info.last_price
+                if _lp and not pd.isna(_lp):
+                    raw.at[raw.index[-1], "close"] = float(_lp)
+            except Exception:
+                pass
+        raw = raw.dropna(subset=["close"])
         min_needed = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
         if len(raw) < min_needed:
             return None
