@@ -690,8 +690,8 @@ def print_signals(sig: dict, portfolio: dict | None = None) -> None:
         print("    なし")
     else:
         print(f"  {'順位':<4} {'銘柄':<20} {'業種':5} {'スコア':>6} "
-              f"{'始値':>8} {'終値':>8} {'推奨指値':>9} {'MACD':>8} {'RSI':>5} {'出来高比':>6} {'ATR%':>5}  メモ")
-        print("  " + "─" * 100)
+              f"{'始値':>8} {'終値':>8} {'MACD':>8} {'RSI':>5} {'出来高比':>6} {'ATR%':>5}  メモ")
+        print("  " + "─" * 90)
         for i, c in enumerate(buy, 1):
             flags = []
             if c["focus"]:        flags.append("★重要")
@@ -699,10 +699,8 @@ def print_signals(sig: dict, portfolio: dict | None = None) -> None:
             if c["above_ma200"]:   flags.append("MA200↑")
             flag_s = "  ".join(flags)
             label = f"{c['name']}({c['symbol']})"
-            # MACD: ブレイクアウト型 — 終値+0.3%上限
-            lp = round(c['close'] * 1.003)
             print(f"  {i:<4} {label:<20} {c['sector']:5} {c['score']:>6.1f} "
-                  f"{c['open']:>8,.0f} {c['close']:>8,.0f} {lp:>9,.0f} {c['macd_hist']:>+8.3f} "
+                  f"{c['open']:>8,.0f} {c['close']:>8,.0f} {c['macd_hist']:>+8.3f} "
                   f"{c['rsi']:>5.1f} {c['vol_ratio']:>6.1f}x {c['atr_pct']:>5.1f}%  {flag_s}")
 
     # ── 売りシグナル ───────────────────────────────────────
