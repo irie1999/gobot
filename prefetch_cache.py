@@ -160,7 +160,7 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
 
         with open(cache_path, "wb") as f:
             pickle.dump(df, f)
-        return "ok"
+        return f"ok:{df.index[-1].date()}"
 
     except Exception as e:
         return f"error:{e}"
@@ -204,6 +204,7 @@ def main():
 
     # 並列ダウンロード
     results = {"ok": 0, "skip": 0, "empty": 0, "short": 0, "error": 0}
+    latest_dates: list[str] = []
     done = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -215,8 +216,11 @@ def main():
             sym, name = futures[future]
             status = future.result()
 
-            if status == "ok":
+            if status.startswith("ok"):
                 results["ok"] += 1
+                # "ok:2026-04-01" 形式から日付を取得
+                if ":" in status:
+                    latest_dates.append(status.split(":", 1)[1])
             elif status == "skip":
                 results["skip"] += 1
             elif status == "empty":
@@ -238,6 +242,8 @@ def main():
     print()  # 改行
     print(f"\n  完了!")
     print(f"    新規保存  : {results['ok']}銘柄")
+    if latest_dates:
+        print(f"    最新日付  : {max(latest_dates)}（ダウンロード済み銘柄の最新終値日）")
     print(f"    スキップ  : {results['skip']}銘柄（キャッシュ済）")
     print(f"    データなし: {results['empty'] + results['short']}銘柄")
     print(f"    エラー    : {results['error']}銘柄")

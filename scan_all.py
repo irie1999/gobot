@@ -47,13 +47,16 @@ def _warn_if_before_close() -> None:
             print()
 
 
-def _prefetch_prices(py: str) -> None:
-    """スキャン前に株価キャッシュを取得する（prefetch_cache.py を使用）"""
-    print("  株価ダウンロード中（.rsi2_cache/）...")
-    result = subprocess.run(
-        [py, "prefetch_cache.py", "--universe", "225"],
-        text=True, encoding="utf-8"
-    )
+def _prefetch_prices(py: str, universe: str | None = None) -> None:
+    """スキャン前に株価キャッシュを取得する（prefetch_cache.py を使用）
+    universe=None の場合は symbols_listed_*.py を自動検出し全銘柄を対象にする。
+    universe="225" の場合は日経225のみ。"""
+    label = f"（{universe}銘柄）" if universe else "（全銘柄 自動検出）"
+    print(f"  株価ダウンロード中 {label}...")
+    cmd = [py, "prefetch_cache.py"]
+    if universe:
+        cmd += ["--universe", universe]
+    result = subprocess.run(cmd, text=True, encoding="utf-8")
     if result.returncode != 0:
         print("  ※ 株価ダウンロードに失敗しました（スキャンは続行します）")
     print()
@@ -94,7 +97,11 @@ def main() -> None:
     py    = sys.executable
 
     _warn_if_before_close()
-    _prefetch_prices(py)
+    # V1（日経225）のみの場合は225銘柄、V2または両方の場合は全銘柄を自動検出
+    if args.nikkei225 and not args.run_all:
+        _prefetch_prices(py, universe="225")
+    else:
+        _prefetch_prices(py)  # symbols_listed_*.py を自動検出（なければ225）
 
     # 戦略フラグ（共通）
     strat_flags = []
