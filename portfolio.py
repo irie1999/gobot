@@ -169,12 +169,13 @@ def cmd_import_csv(path: str, strategy: str, date: str | None,
         return
 
     print()
-    confirm = input("  上記の内容で portfolio.json に登録しますか？ (y/N): ").strip().lower()
+    confirm = input("  既存ポジションを全削除してCSVで上書き登録しますか？ (y/N): ").strip().lower()
     if confirm != "y":
         print("  キャンセルしました。\n")
         return
 
     data = load()
+    data["positions"] = []  # 既存ポジションを全削除してCSVで上書き
     for item in items:
         data["positions"].append({
             "symbol":    item["symbol"],
@@ -737,7 +738,7 @@ input:focus,select:focus{border-color:#7eb3ff}
     </div>
     <div id="csv-preview" style="display:none;margin-top:16px"></div>
     <div style="margin-top:14px">
-      <button class="btn btn-buy" id="csv-import-btn" style="display:none" onclick="doImportCSV()">一括登録する</button>
+      <button class="btn btn-buy" id="csv-import-btn" style="display:none" onclick="doImportCSV()">既存を削除してCSVで上書き登録</button>
     </div>
     <div id="csv-msg" class="msg"></div>
     <hr style="border-color:#2a2d3a;margin:24px 0">
@@ -1315,6 +1316,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError(f"不正な手法: {default_strat}")
                 buy_date = date or datetime.today().strftime("%Y-%m-%d")
                 data = load()
+                data["positions"] = []  # 既存ポジションを全削除してCSVで上書き
                 for item in items:
                     sym  = str(item["symbol"])
                     name = str(item.get("name", sym))
