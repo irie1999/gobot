@@ -37,7 +37,7 @@ import argparse
 import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +79,15 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
                 df = pickle.load(f)
             last_date = df.index[-1]
             _is_weekday = _TODAY.weekday() < 5  # 月〜金
-            stale = last_date.date() < _TODAY.date() and _is_weekday  # 平日は毎日再取得
+            _now_jst = datetime.now(timezone(timedelta(hours=9)))
+            if _is_weekday and (_now_jst.hour, _now_jst.minute) >= (15, 30):
+                _required = _TODAY
+            else:
+                _prev = _TODAY - pd.Timedelta(days=1)
+                while _prev.weekday() >= 5:
+                    _prev -= pd.Timedelta(days=1)
+                _required = _prev
+            stale = pd.Timestamp(last_date.date()) < _required
             # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
             price_range = float(df["close"].max() - df["close"].min())
             valid = price_range > 0.01 * float(df["close"].mean())

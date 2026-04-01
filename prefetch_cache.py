@@ -21,7 +21,7 @@ import importlib.util
 import pickle
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -76,21 +76,38 @@ def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
 
 # ── キャッシュ確認 ────────────────────────────────────────────
 
+JST = timezone(timedelta(hours=9))
+
+
+def _last_close_date() -> pd.Timestamp:
+    """直近の東証クローズ日を返す。
+    平日15:30（JST）以降なら当日、それ以前なら前営業日。"""
+    now = datetime.now(JST)
+    today = pd.Timestamp(now.date())
+    is_weekday = today.weekday() < 5
+    if is_weekday:
+        market_closed = (now.hour, now.minute) >= (15, 30)
+        if market_closed:
+            return today
+        # 市場クローズ前 → 前営業日へ
+    # 土日 or 平日クローズ前: 直前の営業日を返す
+    prev = today - pd.Timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= pd.Timedelta(days=1)
+    return prev
+
+
 def _is_fresh(path: Path) -> bool:
-    """キャッシュが有効（新鮮）かどうか確認する。平日は当日データを必須とする。"""
+    """キャッシュが有効（新鮮）かどうか確認する。
+    直近の東証クローズ日のデータがあればフレッシュと判定。"""
     if not path.exists():
         return False
     try:
         with open(path, "rb") as f:
             df = pickle.load(f)
-        last_date = df.index[-1]
-        today = pd.Timestamp(datetime.today().date())
-        is_weekday = today.weekday() < 5  # 月〜金
-        if is_weekday:
-            return len(df) >= 210 and last_date.date() >= today.date()
-        else:
-            # 土日は直近3日以内のデータがあればOK
-            return len(df) >= 210 and last_date >= (today - timedelta(days=3))
+        last_date = pd.Timestamp(df.index[-1].date())
+        required  = _last_close_date()
+        return len(df) >= 210 and last_date >= required
     except Exception:
         return False
 
