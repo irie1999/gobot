@@ -88,14 +88,16 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     # ── フォールバック: 直接ダウンロード ──────────────────────────
     period = _period_str(backtest_days)
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
-                          auto_adjust=False, progress=False,
-                          multi_level_index=False)
+        raw = yf.Ticker(symbol).history(period=period, interval="1d",
+                                         auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        cols = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        raw = raw[cols].dropna()
         if len(raw) < 210:
             return None
         return pd.DataFrame({
@@ -115,11 +117,12 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     dl_start = (_TODAY - timedelta(days=backtest_days + buf)).strftime("%Y-%m-%d")
     dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.download("^N225", start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False,
-                          multi_level_index=False)
+        raw = yf.Ticker("^N225").history(start=dl_start, end=dl_end,
+                                          interval="1d", auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["close"]].dropna().copy()
@@ -162,11 +165,12 @@ def fetch_vix(backtest_days: int) -> pd.Series | None:
     """^VIX を取得して RSI(7) を返す（失敗時は None）。"""
     period = _period_str(backtest_days)
     try:
-        raw = yf.download("^VIX", period=period, interval="1d",
-                          auto_adjust=False, progress=False,
-                          multi_level_index=False)
+        raw = yf.Ticker("^VIX").history(period=period, interval="1d",
+                                         auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         c = raw["close"].dropna().astype(float)

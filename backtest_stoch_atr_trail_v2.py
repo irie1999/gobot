@@ -373,15 +373,16 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
     dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
-                          auto_adjust=False, progress=False, multi_level_index=False)
+        raw = yf.Ticker(symbol).history(start=dl_start, end=dl_end, interval="1d",
+                                         auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
-        if "adj close" in raw.columns:
-            raw = raw.rename(columns={"adj close": "adj_close"})
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        cols = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        raw = raw[cols].dropna()
         min_needed = MA_TREND_PERIOD + STOCH_K_PERIOD + STOCH_SMOOTH + STOCH_D_PERIOD
         if len(raw) < min_needed:
             return None

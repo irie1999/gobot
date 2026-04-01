@@ -303,13 +303,16 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
     dl_end    = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        raw = yf.download(symbol, start=dl_start, end=dl_end, interval="1d",
-                          auto_adjust=False, progress=False, multi_level_index=False)
+        raw = yf.Ticker(symbol).history(start=dl_start, end=dl_end, interval="1d",
+                                         auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        raw = raw[["open", "high", "low", "close", "volume"]].dropna()
+        cols = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
+        raw = raw[cols].dropna()
         min_needed = MACD_SLOW + MACD_SIGNAL + VOL_MA_PERIOD + MA_TREND_PERIOD
         if len(raw) < min_needed:
             return None
@@ -331,10 +334,12 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     dl_start = (datetime.today() - timedelta(days=int((backtest_days + buf_days) * 1.5))).strftime("%Y-%m-%d")
     dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.download("^N225", start=dl_start, end=dl_end, interval="1d",
-                          auto_adjust=False, progress=False, multi_level_index=False)
+        raw = yf.Ticker("^N225").history(start=dl_start, end=dl_end, interval="1d",
+                                          auto_adjust=False)
         if raw.empty:
             return None
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["close"]].dropna()
