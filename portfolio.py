@@ -14,6 +14,8 @@
   python portfolio.py --history                    # 決済済み取引履歴
   python portfolio.py --history --strategy RSI2   # 戦略別履歴
   python portfolio.py --summary                    # 戦略別損益サマリー
+  python portfolio.py --import-csv sbi_holdings.csv --strategy RSI2
+  python portfolio.py --import-csv sbi_holdings.csv --dry-run  # 確認のみ
 """
 
 import argparse
@@ -39,6 +41,124 @@ import yfinance as yf
 
 PORTFOLIO_FILE = Path("portfolio.json")
 STRATEGIES     = ("MACD", "A7", "RSI2")
+
+
+import csv as _csv
+
+# ── SBI証券 CSV パーサー ─────────────────────────────────────
+def _parse_sbi_csv(text: str) -> list[dict]:
+    """SBI証券「保有株式」CSVをパースして [{symbol,name,qty,price}, ...] を返す。
+    ヘッダー行を自動検出するため、余分な見出し行があっても動作する。"""
+    CODE_KEYS  = {"銘柄コード", "コード", "証券コード"}
+    NAME_KEYS  = {"銘柄名", "銘柄"}
+    QTY_KEYS   = {"保有株数", "株数", "数量", "保有数量"}
+    PRICE_KEYS = {"平均取得単価", "取得単価", "平均単価", "取得価格", "平均取得価額"}
+
+    reader = _csv.reader(text.splitlines())
+    all_rows = list(reader)
+
+    col_code = col_name = col_qty = col_price = -1
+    data_start = -1
+
+    for i, row in enumerate(all_rows):
+        cells = [c.strip() for c in row]
+        for j, cell in enumerate(cells):
+            if cell in CODE_KEYS  and col_code  < 0: col_code  = j
+            if cell in NAME_KEYS  and col_name  < 0: col_name  = j
+            if cell in QTY_KEYS   and col_qty   < 0: col_qty   = j
+            if cell in PRICE_KEYS and col_price < 0: col_price = j
+        if col_code >= 0 and col_qty >= 0 and col_price >= 0:
+            data_start = i + 1
+            break
+
+    if data_start < 0:
+        return []
+
+    items = []
+    for row in all_rows[data_start:]:
+        if not row or not any(c.strip() for c in row):
+            continue
+        try:
+            code_raw = row[col_code].strip() if col_code < len(row) else ""
+            if not code_raw or not code_raw.isdigit():
+                continue
+            symbol = code_raw + ".T"
+            name   = row[col_name].strip() if (col_name >= 0 and col_name < len(row)) else symbol
+            qty    = int(row[col_qty].replace(",", "").strip())
+            price  = float(row[col_price].replace(",", "").strip())
+            if qty <= 0 or price <= 0:
+                continue
+            items.append({"symbol": symbol, "name": name, "qty": qty, "price": price})
+        except (ValueError, IndexError):
+            continue
+    return items
+
+
+# ── CSV 一括インポート（CLI用） ───────────────────────────────
+def cmd_import_csv(path: str, strategy: str, date: str | None,
+                   dry_run: bool = False) -> None:
+    """SBI証券の保有株式CSVから portfolio.json へ一括インポート。"""
+    fp = Path(path)
+    if not fp.exists():
+        print(f"\n  ✘ ファイルが見つかりません: {path}\n")
+        sys.exit(1)
+
+    text = None
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            text = fp.read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        print(f"\n  ✘ CSVのエンコードを認識できませんでした。\n")
+        sys.exit(1)
+
+    items = _parse_sbi_csv(text)
+    if not items:
+        print(f"\n  ✘ SBI証券の保有株式CSVとして認識できませんでした。\n"
+              f"    「銘柄コード」「保有株数」「平均取得単価」列が含まれているか確認してください。\n")
+        sys.exit(1)
+
+    buy_date = date or datetime.today().strftime("%Y-%m-%d")
+
+    print()
+    print("═" * 64)
+    print(f"  SBI証券 CSVインポート  [{strategy}]  {buy_date}")
+    print("═" * 64)
+    print(f"  {'銘柄':<26} {'株数':>6} {'平均取得単価':>12}  {'取得金額':>12}")
+    print("  " + "─" * 60)
+    total = 0.0
+    for item in items:
+        cost = item["qty"] * item["price"]
+        total += cost
+        label = f"{item['name']}({item['symbol']})"
+        print(f"  {label:<26} {item['qty']:>6,} {item['price']:>12,.0f}  {cost:>12,.0f}")
+    print("  " + "─" * 60)
+    print(f"  合計 {len(items)} 銘柄   取得金額合計: ¥{total:,.0f}")
+
+    if dry_run:
+        print(f"\n  [DRY RUN] portfolio.json への書き込みは行いません。\n")
+        return
+
+    print()
+    confirm = input("  上記の内容で portfolio.json に登録しますか？ (y/N): ").strip().lower()
+    if confirm != "y":
+        print("  キャンセルしました。\n")
+        return
+
+    data = load()
+    for item in items:
+        data["positions"].append({
+            "symbol":    item["symbol"],
+            "name":      item["name"],
+            "strategy":  strategy,
+            "qty":       item["qty"],
+            "buy_price": item["price"],
+            "buy_date":  buy_date,
+        })
+    save(data)
+    print(f"\n  ✔ {len(items)} 銘柄を登録しました。\n")
 
 
 # ── ファイル I/O ────────────────────────────────────────────
@@ -489,6 +609,7 @@ input:focus,select:focus{border-color:#7eb3ff}
   <div class="tab" onclick="showTab('sell')">売り登録</div>
   <div class="tab" onclick="showTab('history')">取引履歴</div>
   <div class="tab" onclick="showTab('summary')">サマリー</div>
+  <div class="tab" onclick="showTab('csv')">CSV取込</div>
 </div>
 
 <!-- 保有ポジション -->
@@ -564,6 +685,37 @@ input:focus,select:focus{border-color:#7eb3ff}
   <div id="sum-content"><span class="spinner"></span> 読み込み中...</div>
 </div>
 
+<!-- CSV取込 -->
+<div id="tab-csv" class="panel">
+  <div class="card" style="max-width:580px">
+    <h3>SBI証券 保有株式 CSV取込</h3>
+    <p style="font-size:.8rem;color:#666;margin-bottom:16px">
+      SBI証券 → 口座管理 → 保有株式 → CSV形式でダウンロード したファイルを選択してください。<br>
+      Shift-JIS / UTF-8 どちらも対応しています。
+    </p>
+    <div class="form-row">
+      <label>CSVファイル</label>
+      <input type="file" id="csv-file" accept=".csv" onchange="onCSVFile()"
+        style="padding:6px;cursor:pointer">
+    </div>
+    <div class="form-row">
+      <label>手法</label>
+      <select id="csv-strat">
+        <option>MACD</option><option>A7</option><option>RSI2</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>買付日（省略で今日）</label>
+      <input id="csv-date" type="date">
+    </div>
+    <div id="csv-preview" style="display:none;margin-top:16px"></div>
+    <div style="margin-top:14px">
+      <button class="btn btn-buy" id="csv-import-btn" style="display:none" onclick="doImportCSV()">一括登録する</button>
+    </div>
+    <div id="csv-msg" class="msg"></div>
+  </div>
+</div>
+
 <!-- 編集モーダル -->
 <div class="overlay" id="edit-overlay" onclick="closeEdit(event)">
   <div class="modal" onclick="event.stopPropagation()">
@@ -609,7 +761,7 @@ function fmtPct(v){return v==null?'—':(v>=0?'+':'')+v.toFixed(2)+'%'}
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{
-    t.classList.toggle('active', ['positions','buy','sell','history','summary'][i]===name)
+    t.classList.toggle('active', ['positions','buy','sell','history','summary','csv'][i]===name)
   });
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
@@ -825,6 +977,66 @@ async function delPos(idx, sym){
   else alert(r.error);
 }
 
+// ── CSV取込 ──
+let _csvItems = [];
+
+async function onCSVFile(){
+  const file = document.getElementById('csv-file').files[0];
+  const msg  = document.getElementById('csv-msg');
+  const prev = document.getElementById('csv-preview');
+  const btn  = document.getElementById('csv-import-btn');
+  if(!file){ prev.style.display='none'; btn.style.display='none'; return; }
+  msg.className='msg'; prev.style.display='none'; btn.style.display='none';
+  prev.innerHTML='<span class="spinner"></span> 解析中...'; prev.style.display='block';
+
+  // Shift-JIS → UTF-16 で読み込む（SBI証券はShift-JIS）
+  const buf  = await file.arrayBuffer();
+  let text;
+  try { text = new TextDecoder('shift-jis').decode(buf); }
+  catch(e){ text = new TextDecoder('utf-8').decode(buf); }
+
+  const r = await api('/api/preview-csv', {csv_text: text});
+  if(!r.ok || !r.items || !r.items.length){
+    prev.style.display='none';
+    msg.className='msg err';
+    msg.textContent = r.error || 'SBI証券の保有株式CSVとして認識できませんでした';
+    return;
+  }
+  let html=`<table><thead><tr><th>銘柄</th><th>株数</th><th>平均取得単価</th><th>取得金額</th></tr></thead><tbody>`;
+  let total=0;
+  for(const item of r.items){
+    const cost=item.qty*item.price; total+=cost;
+    html+=`<tr>
+      <td><b>${item.name}</b><br><small style="color:#555">${item.symbol}</small></td>
+      <td>${item.qty.toLocaleString('ja-JP')}</td>
+      <td>¥${fmt(item.price)}</td>
+      <td>¥${fmt(cost)}</td>
+    </tr>`;
+  }
+  html+=`</tbody></table><div style="margin-top:8px;font-size:.82rem;color:#888">${r.items.length}銘柄  取得金額合計: ¥${fmt(total)}</div>`;
+  prev.innerHTML=html;
+  prev.style.display='block';
+  btn.style.display='inline-block';
+  msg.className='msg';
+  _csvItems = r.items;
+}
+
+async function doImportCSV(){
+  const strat = document.getElementById('csv-strat').value;
+  const date  = document.getElementById('csv-date').value || null;
+  const msg   = document.getElementById('csv-msg');
+  if(!_csvItems.length){ msg.className='msg err'; msg.textContent='先にCSVファイルを選択してください'; return; }
+  const r = await api('/api/import-csv', {items:_csvItems, strategy:strat, date});
+  if(r.ok){
+    msg.className='msg ok';
+    msg.textContent=`✔ ${r.imported}銘柄を登録しました`;
+    document.getElementById('csv-import-btn').style.display='none';
+    _csvItems=[];
+  } else {
+    msg.className='msg err'; msg.textContent=r.error;
+  }
+}
+
 // 起動時
 loadPositions();
 </script>
@@ -966,6 +1178,42 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
 
+        elif path == "/api/preview-csv":
+            try:
+                csv_text = str(body.get("csv_text", ""))
+                items = _parse_sbi_csv(csv_text)
+                if not items:
+                    self._send_json({"ok": False,
+                        "error": "SBI証券の保有株式CSVとして認識できませんでした。"
+                                 "「銘柄コード」「保有株数」「平均取得単価」列を確認してください。"})
+                else:
+                    self._send_json({"ok": True, "items": items})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
+        elif path == "/api/import-csv":
+            try:
+                items    = body.get("items", [])
+                strategy = str(body.get("strategy", "MACD"))
+                date     = body.get("date") or None
+                if strategy not in STRATEGIES:
+                    raise ValueError(f"不正な手法: {strategy}")
+                buy_date = date or datetime.today().strftime("%Y-%m-%d")
+                data = load()
+                for item in items:
+                    data["positions"].append({
+                        "symbol":    str(item["symbol"]),
+                        "name":      str(item.get("name", item["symbol"])),
+                        "strategy":  strategy,
+                        "qty":       int(item["qty"]),
+                        "buy_price": float(item["price"]),
+                        "buy_date":  buy_date,
+                    })
+                save(data)
+                self._send_json({"ok": True, "imported": len(items)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
         else:
             self.send_response(404); self.end_headers()
 
@@ -1028,14 +1276,22 @@ def main() -> None:
                         help="決済済み取引履歴を表示")
     parser.add_argument("--summary",  action="store_true",
                         help="戦略別損益サマリーを表示")
-    parser.add_argument("--web",      action="store_true",
+    parser.add_argument("--web",        action="store_true",
                         help="ブラウザでポートフォリオ管理画面を開く (localhost:7654)")
-    parser.add_argument("--port",     type=int, default=7654,
+    parser.add_argument("--port",       type=int, default=7654,
                         help="--web 時のポート番号（デフォルト: 7654）")
+    parser.add_argument("--import-csv", dest="import_csv", metavar="FILE",
+                        help="SBI証券の保有株式CSVを一括インポート")
+    parser.add_argument("--dry-run",    dest="dry_run", action="store_true",
+                        help="--import-csv の確認表示のみ（実際には登録しない）")
     args = parser.parse_args()
 
     if args.web:
         cmd_web(args.port)
+        return
+
+    if args.import_csv:
+        cmd_import_csv(args.import_csv, args.strategy, args.date, args.dry_run)
         return
 
     if args.buy:
