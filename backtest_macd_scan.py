@@ -311,7 +311,7 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
         if raw.empty:
             return None
         if raw.index.tz is not None:
-            raw.index = raw.index.tz_convert(None)
+            raw.index = raw.index.tz_localize(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         cols = [c for c in ["open", "high", "low", "close", "volume"] if c in raw.columns]
@@ -342,7 +342,7 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
         if raw.empty:
             return None
         if raw.index.tz is not None:
-            raw.index = raw.index.tz_convert(None)
+            raw.index = raw.index.tz_localize(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         raw = raw[["close"]].dropna()

@@ -26,7 +26,7 @@ for sym, name in symbols:
             print("  データなし")
         else:
             if df.index.tz is not None:
-                df.index = df.index.tz_convert(None)
+                df.index = df.index.tz_localize(None)
             print(df[["Close"]].tail(5).to_string())
             print(f"  → 最新日付: {df.index[-1].date()}  終値: {df['Close'].iloc[-1]:.0f}")
     except Exception as e:

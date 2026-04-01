@@ -117,7 +117,7 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
             return "empty"
         # タイムゾーン付きインデックスをnaiveに変換
         if raw.index.tz is not None:
-            raw.index = raw.index.tz_convert(None)
+            raw.index = raw.index.tz_localize(None)
         raw.columns = [str(c).lower() for c in raw.columns]
         raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
         # history() は 'dividends', 'stock splits' も返すので必要列だけ選択
