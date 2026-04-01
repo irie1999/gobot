@@ -35,28 +35,6 @@ elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
-def _auto_pull() -> None:
-    """起動時に git pull --no-edit を実行して最新コードを取得する"""
-    try:
-        result = subprocess.run(
-            ["git", "pull", "--no-edit"],
-            capture_output=True, text=True, encoding="utf-8"
-        )
-        if result.returncode == 0:
-            msg = result.stdout.strip()
-            if "Already up to date" in msg or "既に最新" in msg:
-                print("  git pull: 最新です")
-            else:
-                print("  git pull: コードを更新しました")
-                for line in msg.splitlines():
-                    print(f"    {line}")
-        else:
-            print(f"  git pull: 失敗（{result.stderr.strip()[:80]}）")
-    except Exception as e:
-        print(f"  git pull: スキップ（{e}）")
-    print()
-
-
 def _wait_for_market_close() -> None:
     """平日15:30（JST）前に実行された場合、クローズまで待機する"""
     now = datetime.now(JST)
@@ -117,8 +95,6 @@ def main() -> None:
     parser.add_argument("--no-wait", action="store_true", dest="no_wait",
                         help="15:30待機をスキップして今すぐ実行（前日終値になる場合あり）")
     args = parser.parse_args()
-
-    _auto_pull()
 
     if not args.no_wait:
         _wait_for_market_close()
