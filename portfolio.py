@@ -1044,21 +1044,28 @@ async function onCSVFile(){
     msg.textContent = r.error || 'SBI証券の保有株式CSVとして認識できませんでした';
     return;
   }
+  const sel = (sym, val) => {
+    const opts = ['MACD','A7','RSI2'].map(s=>
+      `<option value="${s}"${s===val?' selected':''}>${s}</option>`).join('');
+    return `<select data-sym="${sym}" class="csv-strat-sel"
+      style="background:#0f1117;border:1px solid #2a2d3a;color:#e0e0e0;
+             border-radius:4px;padding:3px 6px;font-size:.8rem">${opts}</select>`;
+  };
   let html=`<table><thead><tr><th>銘柄</th><th>手法</th><th>株数</th><th>平均取得単価</th><th>取得金額</th></tr></thead><tbody>`;
   let total=0;
-  for(const item of r.items){
+  for(let i=0;i<r.items.length;i++){
+    const item=r.items[i];
     const cost=item.qty*item.price; total+=cost;
-    const strat=item.strategy||'—';
-    const sb=STRAT_BADGE[strat]||`<span style="color:#888">${strat}</span>`;
+    const detected=item.strategy||'MACD';
     html+=`<tr>
       <td><b>${item.name}</b><br><small style="color:#555">${item.symbol}</small></td>
-      <td>${sb}</td>
+      <td>${sel(i, detected)}</td>
       <td>${item.qty.toLocaleString('ja-JP')}</td>
       <td>¥${fmt(item.price)}</td>
       <td>¥${fmt(cost)}</td>
     </tr>`;
   }
-  html+=`</tbody></table><div style="margin-top:8px;font-size:.82rem;color:#888">${r.items.length}銘柄  取得金額合計: ¥${fmt(total)}<br>手法は監視リストから自動判定。「—」は未登録（デフォルト手法を使用）</div>`;
+  html+=`</tbody></table><div style="margin-top:8px;font-size:.82rem;color:#888">${r.items.length}銘柄  取得金額合計: ¥${fmt(total)}<br>手法はドロップダウンで変更できます</div>`;
   prev.innerHTML=html;
   prev.style.display='block';
   btn.style.display='inline-block';
@@ -1067,11 +1074,14 @@ async function onCSVFile(){
 }
 
 async function doImportCSV(){
-  const strat = document.getElementById('csv-strat').value;
+  // 各行のセレクトボックスから手法を収集
+  document.querySelectorAll('.csv-strat-sel').forEach((el,i)=>{
+    if(_csvItems[i]) _csvItems[i].strategy = el.value;
+  });
   const date  = document.getElementById('csv-date').value || null;
   const msg   = document.getElementById('csv-msg');
   if(!_csvItems.length){ msg.className='msg err'; msg.textContent='先にCSVファイルを選択してください'; return; }
-  const r = await api('/api/import-csv', {items:_csvItems, strategy:strat, date});
+  const r = await api('/api/import-csv', {items:_csvItems, date});
   if(r.ok){
     msg.className='msg ok';
     msg.textContent=`✔ ${r.imported}銘柄を登録しました`;
