@@ -141,7 +141,7 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.download("^N225", start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False,
+                          interval="1d", auto_adjust=True, progress=False,
                           multi_level_index=False)
         if raw.empty:
             return None
@@ -214,7 +214,7 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
 
     try:
         raw = yf.download(symbol, start=dl_start, end=dl_end,
-                          interval="1d", auto_adjust=False, progress=False,
+                          interval="1d", auto_adjust=True, progress=False,
                           multi_level_index=False)
         if raw.empty:
             return None

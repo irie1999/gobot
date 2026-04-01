@@ -21,7 +21,7 @@ for sym, name in symbols:
         ticker = yf.Ticker(sym)
         dl_start = (now_jst - timedelta(days=10)).strftime("%Y-%m-%d")
         dl_end   = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
-        df = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=False)
+        df = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=True)
         if df.empty:
             print("  データなし")
         else:
