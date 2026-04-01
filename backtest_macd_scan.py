@@ -291,7 +291,8 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
                 with open(persistent, "rb") as f:
                     cached = pickle.load(f)
                 last_date = cached.index[-1]
-                stale = last_date < (_today - timedelta(days=3))
+                _is_weekday = _today.weekday() < 5  # 月〜金
+                stale = last_date.date() < _today.date() and _is_weekday
                 if len(cached) >= 210 and not stale:
                     return cached
             except Exception:

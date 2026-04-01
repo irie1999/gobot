@@ -357,7 +357,8 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
                 with open(persistent, "rb") as f:
                     cached = pickle.load(f)
                 last_date = cached.index[-1]
-                stale = last_date < (_today - timedelta(days=3))
+                _is_weekday = _today.weekday() < 5  # 月〜金
+                stale = last_date.date() < _today.date() and _is_weekday
                 # キャッシュ検証: 価格変動があるか確認（汚染されたキャッシュを除外）
                 price_range = float(cached["close"].max() - cached["close"].min())
                 valid = price_range > 0.01 * float(cached["close"].mean())

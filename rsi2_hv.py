@@ -77,7 +77,8 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
             last_date = df.index[-1]
-            stale = last_date < (_TODAY - timedelta(days=3))   # 土日祝考慮で3日
+            _is_weekday = _TODAY.weekday() < 5  # 月〜金
+            stale = last_date.date() < _TODAY.date() and _is_weekday  # 平日は毎日再取得
             if len(df) >= 210 and not stale:
                 return df
             persistent.unlink(missing_ok=True)
