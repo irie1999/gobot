@@ -1280,11 +1280,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         "error": "SBI証券の保有株式CSVとして認識できませんでした。"
                                  "「銘柄コード」「保有株数」「平均取得単価」列を確認してください。"})
                 else:
-                    # 手法自動判定・銘柄名補完
+                    # 手法自動判定・銘柄名補完（監視リスト → yfinance フォールバック）
                     for item in items:
                         if item["name"] == item["symbol"]:
                             item["name"] = _lookup_name(item["symbol"])
                         item["strategy"] = _detect_strategy(item["symbol"]) or ""
+                    # 名前がまだシンボルのものを yfinance で一括取得
+                    still_unnamed = [i for i in items if i["name"] == i["symbol"]]
+                    if still_unnamed:
+                        try:
+                            syms = [i["symbol"] for i in still_unnamed]
+                            tickers = yf.Tickers(" ".join(syms))
+                            for item in still_unnamed:
+                                try:
+                                    info = tickers.tickers[item["symbol"]].info
+                                    name = (info.get("shortName") or
+                                            info.get("longName") or "")
+                                    if name:
+                                        item["name"] = name
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     self._send_json({"ok": True, "items": items})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
