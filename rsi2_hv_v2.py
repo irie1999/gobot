@@ -98,9 +98,14 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
             persistent.unlink(missing_ok=True)
 
     # ── フォールバック: 直接ダウンロード ──────────────────────────
-    period = _period_str(backtest_days)
+    # period= はyfinanceサーバー基準で切り捨てが起こるため、明示的なstart/endを使用
+    buf_days = 200 + 30
+    _total_cal = int((backtest_days + buf_days) * 1.5)
+    _now_jst = datetime.now(timezone(timedelta(hours=9)))
+    _dl_start = (_now_jst - timedelta(days=_total_cal)).strftime("%Y-%m-%d")
+    _dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.Ticker(symbol).history(period=period, interval="1d",
+        raw = yf.Ticker(symbol).history(start=_dl_start, end=_dl_end, interval="1d",
                                          auto_adjust=False)
         if raw.empty:
             return None
@@ -183,9 +188,13 @@ BACKTEST_DAYS = 365
 # ── VIX データ取得 ───────────────────────────────────────────
 def fetch_vix(backtest_days: int) -> pd.Series | None:
     """^VIX を取得して RSI(7) を返す（失敗時は None）。"""
-    period = _period_str(backtest_days)
+    buf_days = 200 + 30
+    _total_cal = int((backtest_days + buf_days) * 1.5)
+    _now_jst = datetime.now(timezone(timedelta(hours=9)))
+    _dl_start = (_now_jst - timedelta(days=_total_cal)).strftime("%Y-%m-%d")
+    _dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        raw = yf.Ticker("^VIX").history(period=period, interval="1d",
+        raw = yf.Ticker("^VIX").history(start=_dl_start, end=_dl_end, interval="1d",
                                          auto_adjust=False)
         if raw.empty:
             return None

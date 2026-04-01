@@ -123,8 +123,12 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
 
     try:
         # Ticker.history() を使用（単一銘柄ダウンロードに適しており、並列でも安全）
+        # period= はyfinanceサーバー基準で切り捨てが起こるため、明示的なstart/endを使用
+        _now_jst = datetime.now(JST)
+        dl_start = (_now_jst - timedelta(days=730)).strftime("%Y-%m-%d")
+        dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
         ticker = yf.Ticker(symbol)
-        raw = ticker.history(period=DL_PERIOD, interval="1d", auto_adjust=False)
+        raw = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=False)
         if raw.empty:
             return "empty"
         # タイムゾーン付きインデックスをnaiveに変換
