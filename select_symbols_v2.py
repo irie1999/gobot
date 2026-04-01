@@ -360,6 +360,11 @@ def write_symbols_file(selected: list[dict], strategy: str, filename: str) -> Pa
         lines.append(f'    ("{d["symbol"]}", "{d["name"]}"),  {comment}')
 
     lines.append(']')
+    lines.append('')
+    lines.append('SCORES = {')
+    for d in selected:
+        lines.append(f'    "{d["symbol"]}": {d["score"]},')
+    lines.append('}')
     path = Path(filename)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -414,6 +419,27 @@ def _load_watch_file(path: str) -> list[tuple[str, str]]:
     mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return list(getattr(mod, "SYMBOLS", []))
+
+
+def _load_watch_scores(path: str) -> dict[str, int]:
+    """監視ファイルの SCORES dict を読み込む（存在しない場合は空dict）"""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    spec = importlib.util.spec_from_file_location("_watch_scores_tmp", p)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return dict(getattr(mod, "SCORES", {}))
+
+
+def _enrich_sig_scores(sig: dict | None, scores: dict[str, int]) -> None:
+    """シグナル結果の各アイテムに bt_score（バックテスト選定スコア）を付加"""
+    if not sig or not scores:
+        return
+    for item in sig.get("buy", []) + sig.get("sell", []) + sig.get("hold", []):
+        sym = item.get("symbol", "")
+        if sym in scores:
+            item["bt_score"] = scores[sym]
 
 
 def _fetch_signal_data(symbols: list[tuple], fetch_fn) -> dict:
@@ -542,9 +568,16 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
     all_items = buy + sell + hold
     extra_h = _extra_headers(all_items)
 
+    def _score_col(s: dict) -> str:
+        sc = s.get("bt_score")
+        if sc is None:
+            return '<td class="num">—</td>'
+        color = "#f59e0b" if sc >= 24 else ("#4ade80" if sc >= 16 else "#94a3b8")
+        return f'<td class="num" style="color:{color};font-weight:700">{sc}</td>'
+
     def _buy_rows(items):
         if not items:
-            return f'<tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
+            return f'<tr><td colspan="7" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
         rows = ""
         for s in items:
             open_s  = f'{s["open"]:,.0f}' if "open" in s else "—"
@@ -554,6 +587,7 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
                      f'<td class="num">{open_s}</td>'
                      f'<td class="num">{close_s}</td>'
                      + _extra_cols(s) +
+                     _score_col(s) +
                      f'<td style="color:#4ade80;font-weight:700">買い</td></tr>\n')
         return rows
 
@@ -574,6 +608,7 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
                      f'<td class="num">{open_s}</td>'
                      f'<td class="num">{close_s}</td>'
                      + _extra_cols(s) +
+                     _score_col(s) +
                      f'<td class="num">{entry_s}</td>'
                      f'<td class="num {u_cls}">{sign}{unreal:.1f}%</td>'
                      f'<td class="num">{hold_days}日</td>'
@@ -588,6 +623,7 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
         sell_section = (
             f'<table style="margin-top:6px"><thead><tr>'
             f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}'
+            f'<th title="バックテスト選定スコア（最大28点）">スコア</th>'
             f'<th>買値</th><th>含み損益</th><th>保有日</th><th>区分</th>'
             f'</tr></thead><tbody>{sell_body}</tbody></table>'
         )
@@ -596,7 +632,7 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
         f'<h2 style="color:{color};border-left:4px solid {color};padding-left:10px;margin:30px 0 10px">'
         f'  {strategy} 本日シグナル（選定銘柄対象） — {today}</h2>'
         f'<table><thead><tr>'
-        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th>区分</th>'
+        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th title="バックテスト選定スコア（最大28点）">スコア</th><th>区分</th>'
         f'</tr></thead><tbody>{buy_body}</tbody></table>'
         + sell_section
     )
@@ -1212,6 +1248,7 @@ def main() -> None:
             macd_sel  = [{"symbol": s, "name": n} for s, n in macd_syms
                          if s in macd_data]
             macd_sig  = scan_macd_signals(macd_sel, macd_data)
+            _enrich_sig_scores(macd_sig, _load_watch_scores(macd_watch_file))
             macd_mod.print_signals(macd_sig)
 
         if a7_syms:
@@ -1220,6 +1257,7 @@ def main() -> None:
             a7_sel  = [{"symbol": s, "name": n} for s, n in a7_syms
                        if s in a7_data]
             a7_sig  = scan_a7_signals(a7_sel, a7_data)
+            _enrich_sig_scores(a7_sig, _load_watch_scores(a7_watch_file))
             a7_mod.print_signals_a7(a7_sig)
 
         if rsi2_syms:
@@ -1237,6 +1275,7 @@ def main() -> None:
             rsi2_sel  = [{"symbol": s, "name": n} for s, n in rsi2_syms
                          if s in rsi2_data]
             rsi2_sig  = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
+            _enrich_sig_scores(rsi2_sig, _load_watch_scores(rsi2_watch_file))
             rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
         _ver = "v1" if args.v1 else "v2"
@@ -1313,6 +1352,7 @@ def main() -> None:
         p = write_symbols_file(macd_sel, f"MACD {ver_label}", macd_watch_file)
         print(f"  → {p} を出力しました")
         macd_sig = scan_macd_signals(macd_sel, macd_data)
+        _enrich_sig_scores(macd_sig, {d["symbol"]: d["score"] for d in macd_sel})
         macd_mod.print_signals(macd_sig)
 
     if do_a7:
@@ -1321,6 +1361,7 @@ def main() -> None:
         p = write_symbols_file(a7_sel, f"A7 {ver_label}", a7_watch_file)
         print(f"  → {p} を出力しました")
         a7_sig = scan_a7_signals(a7_sel, a7_data)
+        _enrich_sig_scores(a7_sig, {d["symbol"]: d["score"] for d in a7_sel})
         a7_mod.print_signals_a7(a7_sig)
 
     if do_rsi2:
@@ -1329,6 +1370,7 @@ def main() -> None:
         p = write_symbols_file(rsi2_sel, f"RSI2 {ver_label}", rsi2_watch_file)
         print(f"  → {p} を出力しました")
         rsi2_sig = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)
+        _enrich_sig_scores(rsi2_sig, {d["symbol"]: d["score"] for d in rsi2_sel})
         rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
     # ── 横断分析 ──────────────────────────────────────────────
