@@ -851,12 +851,14 @@ def print_signals_a7(sig: dict) -> None:
     if not buy:
         print("    なし")
     else:
-        print(f"  {'#':<3} {'銘柄':<22} {'始値':>8} {'終値':>8} {'%K':>5} {'%D':>5} {'ATR%':>5}  状態")
-        print("  " + "─" * 70)
+        print(f"  {'#':<3} {'銘柄':<22} {'始値':>8} {'終値':>8} {'推奨指値':>9} {'%K':>5} {'%D':>5} {'ATR%':>5}  状態")
+        print("  " + "─" * 80)
         for i, c in enumerate(buy, 1):
             trend = "↑MA75上" if c["trend_up"] else "↓MA75下"
             label = f"{c['name']}({c['symbol']})"
-            print(f"  {i:<3} {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} "
+            # A7: モメンタム型 — 終値−0.2%
+            lp = round(c['close'] * 0.998)
+            print(f"  {i:<3} {label:<22} {c['open']:>8,.0f} {c['close']:>8,.0f} {lp:>9,.0f} "
                   f"{c['stoch_k']:>5.1f} {c['stoch_d']:>5.1f} {c['atr_pct']:>5.1f}%  {trend}")
 
     # ── 売りシグナル ───────────────────────────────────────

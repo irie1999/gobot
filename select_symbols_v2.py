@@ -542,18 +542,41 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
     all_items = buy + sell + hold
     extra_h = _extra_headers(all_items)
 
+    def _limit_price(s: dict) -> str:
+        """戦略ごとに推奨指値価格を計算して文字列で返す"""
+        close = s.get("close", 0)
+        if not close:
+            return "—"
+        atr_pct = s.get("atr_pct", 1.0)
+        if "macd_hist" in s:
+            # MACD: ブレイクアウト型 — 終値+0.3%上限（追いかけすぎ防止）
+            lp = round(close * 1.003)
+        elif "stoch_k" in s:
+            # A7(Stoch): モメンタム型 — 終値−0.2%
+            lp = round(close * 0.998)
+        elif "rsi2" in s:
+            # RSI2: 平均回帰型 — ATRの30%分だけ押し目待ち
+            lp = round(close * (1 - atr_pct / 100 * 0.3))
+        else:
+            lp = round(close)
+        return f'{lp:,.0f}'
+
     def _buy_rows(items):
+        n_extra = len(_extra_headers(items).split("<th>")) - 1 if items else 0
+        colspan = 4 + n_extra  # 銘柄,始値,終値,指値,区分 = 5、extraは別途
         if not items:
-            return f'<tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
+            return f'<tr><td colspan="{colspan + 1}" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
         rows = ""
         for s in items:
             open_s  = f'{s["open"]:,.0f}' if "open" in s else "—"
             close_s = f'{s["close"]:,.0f}' if "close" in s else "—"
+            lp_s    = _limit_price(s)
             rows += (f'<tr class="buy-row">'
                      f'<td class="name">{s.get("name","")}<br><small>{s.get("symbol","")}</small></td>'
                      f'<td class="num">{open_s}</td>'
                      f'<td class="num">{close_s}</td>'
                      + _extra_cols(s) +
+                     f'<td class="num" style="color:#fbbf24;font-weight:700">{lp_s}</td>'
                      f'<td style="color:#4ade80;font-weight:700">買い</td></tr>\n')
         return rows
 
@@ -596,7 +619,7 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
         f'<h2 style="color:{color};border-left:4px solid {color};padding-left:10px;margin:30px 0 10px">'
         f'  {strategy} 本日シグナル（選定銘柄対象） — {today}</h2>'
         f'<table><thead><tr>'
-        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th>区分</th>'
+        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th>推奨指値</th><th>区分</th>'
         f'</tr></thead><tbody>{buy_body}</tbody></table>'
         + sell_section
     )

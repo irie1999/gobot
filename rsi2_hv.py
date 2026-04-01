@@ -824,16 +824,18 @@ def print_signals_rsi2(sig: dict, mode_label: str, params: dict) -> None:
     print("═" * 68)
 
     # ── 買いシグナル ──────────────────────────────────────────
-    print(f"\n  ◆ 買いシグナル  ({len(buy)} 銘柄)  ← 明日の始値で購入候補")
+    print(f"\n  ◆ 買いシグナル  ({len(buy)} 銘柄)  ← 明日の推奨指値で購入候補")
     if not buy:
         print("    なし")
     else:
-        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'RSI2':>5} {'MA200':>8} {'IBS':>5} {'ATR%':>5}  フィルター")
-        print("  " + "─" * 72)
+        print(f"  {'#':<3} {'銘柄':<22} {'終値':>8} {'推奨指値':>9} {'RSI2':>5} {'MA200':>8} {'IBS':>5} {'ATR%':>5}  フィルター")
+        print("  " + "─" * 82)
         for i, c in enumerate(buy, 1):
             label = f"{c['name']}({c['symbol']})"
             ma_mark = "↑" if c["above_ma200"] else "↓"
-            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} "
+            # RSI2: 平均回帰型 — ATRの30%分だけ押し目待ち
+            lp = round(c['close'] * (1 - c['atr_pct'] / 100 * 0.3))
+            print(f"  {i:<3} {label:<22} {c['close']:>8,.0f} {lp:>9,.0f} "
                   f"{c['rsi2']:>5.1f} {c['ma200']:>8,.0f}{ma_mark} "
                   f"{c['ibs']:>5.2f} {c['atr_pct']:>5.1f}%  {c['filters']}")
 
