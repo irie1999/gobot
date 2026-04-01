@@ -1290,6 +1290,8 @@ def cmd_web(port: int = 7654) -> None:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\n  Web UI を終了しました。")
+            import os
+            os._exit(0)
 
 
 # ── メイン ──────────────────────────────────────────────────
