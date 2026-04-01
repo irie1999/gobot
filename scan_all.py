@@ -34,6 +34,19 @@ elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
+def _warn_if_before_close() -> None:
+    """15:30（JST）前に実行した場合、本日終値が未確定である旨を警告する。"""
+    now_jst = datetime.now(JST)
+    if now_jst.weekday() < 5:  # 平日のみ
+        market_close = now_jst.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now_jst < market_close:
+            print(f"  ⚠  現在時刻 {now_jst.strftime('%H:%M')} JST — 東証は15:30に閉場します。")
+            print(f"     本日（{now_jst.strftime('%m/%d')}）の終値はまだ確定していないため、")
+            print(f"     前営業日の終値が使用されます。")
+            print(f"     15:30以降に再実行すると本日終値が反映されます。")
+            print()
+
+
 def _prefetch_prices(py: str) -> None:
     """スキャン前に株価キャッシュを取得する（prefetch_cache.py を使用）"""
     print("  株価ダウンロード中（.rsi2_cache/）...")
@@ -80,6 +93,7 @@ def main() -> None:
     today = datetime.now(JST).strftime("%Y-%m-%d")
     py    = sys.executable
 
+    _warn_if_before_close()
     _prefetch_prices(py)
 
     # 戦略フラグ（共通）
