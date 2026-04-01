@@ -40,7 +40,7 @@ from pathlib import Path
 import yfinance as yf
 
 PORTFOLIO_FILE = Path("portfolio.json")
-STRATEGIES     = ("MACD", "A7", "RSI2")
+STRATEGIES     = ("MACD", "A7", "RSI2", "MACD225", "A7225", "RSI2225")
 
 
 import csv as _csv
@@ -48,19 +48,26 @@ import csv as _csv
 # ── 手法自動判定 ─────────────────────────────────────────────
 def _detect_strategy(symbol: str) -> str:
     """シンボルがどの手法の監視リストに含まれるか調べて返す。
-    複数に含まれる場合は RSI2 > A7 > MACD の優先順。見つからない場合は空文字。"""
-    watch_map = [
-        ("RSI2", "symbols_watch_rsi2"),
-        ("A7",   "symbols_watch_a7"),
-        ("MACD", "symbols_watch"),
+    全銘柄(V2)を優先し、日経225(V1/_225)は -225 suffix で区別。"""
+    # 全銘柄 V2 ウォッチファイル (優先)
+    v2_map = [
+        ("RSI2",    "symbols_watch_rsi2_v2"),
+        ("A7",      "symbols_watch_a7_v2"),
+        ("MACD",    "symbols_watch_macd_v2"),
     ]
-    for strat, mod_name in watch_map:
+    # 日経225 V1 ウォッチファイル
+    v1_map = [
+        ("RSI2225", "symbols_watch_rsi2_225"),
+        ("A7225",   "symbols_watch_a7_225"),
+        ("MACD225", "symbols_watch_225"),
+    ]
+    for strat, mod_name in v2_map + v1_map:
         try:
             m = __import__(mod_name)
             if any(sym == symbol for sym, _ in m.SYMBOLS):
                 return strat
         except Exception:
-            pass
+            continue
     return ""
 
 # ── SBI証券 CSV パーサー ─────────────────────────────────────
@@ -347,7 +354,7 @@ def cmd_list() -> None:
     print("  保有ポジション一覧")
     print("═" * 78)
 
-    strategy_order = ["MACD", "A7", "RSI2"]
+    strategy_order = ["MACD", "A7", "RSI2", "MACD225", "A7225", "RSI2225"]
     total_cost = total_value = total_profit = 0.0
 
     for strat in strategy_order:
@@ -595,6 +602,9 @@ tr:hover td{background:#1a1d27}
 .badge-macd{background:#1e3a5f;color:#7eb3ff}
 .badge-a7{background:#1a3d2b;color:#6ecf8a}
 .badge-rsi2{background:#3d2a00;color:#ffa040}
+.badge-macd225{background:#0e2040;color:#5090d0;border:1px solid #2a4a7a}
+.badge-a7225{background:#0e2a1a;color:#4aaf6a;border:1px solid #1a4a2a}
+.badge-rsi2225{background:#2a1800;color:#d08030;border:1px solid #4a3000}
 .card{background:#1a1d27;border:1px solid #2a2d3a;border-radius:8px;padding:20px;max-width:480px}
 .card h3{margin-bottom:16px;color:#aaa;font-size:.9rem;text-transform:uppercase;letter-spacing:.05em}
 .form-row{margin-bottom:14px}
@@ -674,6 +684,7 @@ input:focus,select:focus{border-color:#7eb3ff}
       <label>手法</label>
       <select id="b-strat">
         <option>MACD</option><option>A7</option><option>RSI2</option>
+        <option>MACD225</option><option>A7225</option><option>RSI2225</option>
       </select>
     </div>
     <div class="form-row">
@@ -737,6 +748,7 @@ input:focus,select:focus{border-color:#7eb3ff}
       <label>手法</label>
       <select id="csv-strat">
         <option>MACD</option><option>A7</option><option>RSI2</option>
+        <option>MACD225</option><option>A7225</option><option>RSI2225</option>
       </select>
     </div>
     <div class="form-row">
@@ -776,6 +788,7 @@ input:focus,select:focus{border-color:#7eb3ff}
       <label>手法</label>
       <select id="edit-strat">
         <option>MACD</option><option>A7</option><option>RSI2</option>
+        <option>MACD225</option><option>A7225</option><option>RSI2225</option>
       </select>
     </div>
     <div class="form-row">
@@ -792,9 +805,12 @@ input:focus,select:focus{border-color:#7eb3ff}
 
 <script>
 const STRAT_BADGE = {
-  MACD:'<span class="badge badge-macd">MACD</span>',
-  A7:  '<span class="badge badge-a7">A7</span>',
-  RSI2:'<span class="badge badge-rsi2">RSI2</span>',
+  MACD:    '<span class="badge badge-macd">MACD</span>',
+  A7:      '<span class="badge badge-a7">A7</span>',
+  RSI2:    '<span class="badge badge-rsi2">RSI2</span>',
+  MACD225: '<span class="badge badge-macd225">MACD<sup>225</sup></span>',
+  A7225:   '<span class="badge badge-a7225">A7<sup>225</sup></span>',
+  RSI2225: '<span class="badge badge-rsi2225">RSI2<sup>225</sup></span>',
 };
 function badge(s){return STRAT_BADGE[s]||s}
 function pnlClass(v){return v>0?'pos':v<0?'neg':'neutral'}
@@ -830,7 +846,7 @@ async function loadPositions(){
     document.getElementById('pos-content').innerHTML='<p style="color:#666;padding:20px">保有ポジションはありません。</p>';
     return;
   }
-  const strats = ['MACD','A7','RSI2'];
+  const strats = ['MACD','A7','RSI2','MACD225','A7225','RSI2225'];
   let html='';
   let tc=0,tv=0,tp=0;
   for(const st of strats){
@@ -1045,7 +1061,7 @@ async function onCSVFile(){
     return;
   }
   const sel = (sym, val) => {
-    const opts = ['MACD','A7','RSI2'].map(s=>
+    const opts = ['MACD','A7','RSI2','MACD225','A7225','RSI2225'].map(s=>
       `<option value="${s}"${s===val?' selected':''}>${s}</option>`).join('');
     return `<select data-sym="${sym}" class="csv-strat-sel"
       style="background:#0f1117;border:1px solid #2a2d3a;color:#e0e0e0;

@@ -1164,10 +1164,10 @@ def main() -> None:
         macd_mod = importlib.import_module("backtest_macd_scan")
         a7_mod   = importlib.import_module("backtest_stoch_atr_trail")
         rsi2_mod = importlib.import_module("rsi2_hv")
-        # --v1 時のデフォルト監視リストファイル名
-        macd_watch_file  = "symbols_watch.py"
-        a7_watch_file    = "symbols_watch_a7.py"
-        rsi2_watch_file  = "symbols_watch_rsi2.py"
+        # --v1 時のデフォルト監視リストファイル名（日経225専用）
+        macd_watch_file  = "symbols_watch_225.py"
+        a7_watch_file    = "symbols_watch_a7_225.py"
+        rsi2_watch_file  = "symbols_watch_rsi2_225.py"
         ver_label = "V1（日経225）"
         # --v1 時は universe デフォルトを 225 に
         if args.universe is None:
