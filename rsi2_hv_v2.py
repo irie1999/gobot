@@ -100,7 +100,7 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
     _dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.Ticker(symbol).history(start=_dl_start, end=_dl_end, interval="1d",
-                                         auto_adjust=True)
+                                         auto_adjust=False, actions=False)
         if raw.empty:
             return None
         if raw.index.tz is not None:
@@ -131,13 +131,13 @@ def fetch(symbol: str, backtest_days: int) -> pd.DataFrame | None:
 
 
 def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
-    """日経平均を取得。auto_adjust=True（実際の終値）。"""
+    """日経平均を取得。auto_adjust=False, actions=False（生データ）。"""
     buf = 200 + 30
     dl_start = (_TODAY - timedelta(days=backtest_days + buf)).strftime("%Y-%m-%d")
     dl_end   = (_TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.Ticker("^N225").history(start=dl_start, end=dl_end,
-                                          interval="1d", auto_adjust=True)
+                                          interval="1d", auto_adjust=False, actions=False)
         if raw.empty:
             return None
         if raw.index.tz is not None:
@@ -189,7 +189,7 @@ def fetch_vix(backtest_days: int) -> pd.Series | None:
     _dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.Ticker("^VIX").history(start=_dl_start, end=_dl_end, interval="1d",
-                                         auto_adjust=True)
+                                         auto_adjust=False, actions=False)
         if raw.empty:
             return None
         if raw.index.tz is not None:

@@ -314,7 +314,7 @@ def fetch_df(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | 
 
     try:
         raw = yf.Ticker(symbol).history(start=dl_start, end=dl_end, interval="1d",
-                                         auto_adjust=True)
+                                         auto_adjust=False, actions=False)
         if raw.empty:
             return None
         if raw.index.tz is not None:
@@ -354,7 +354,7 @@ def fetch_nikkei(backtest_days: int) -> pd.DataFrame | None:
     dl_end   = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         raw = yf.Ticker("^N225").history(start=dl_start, end=dl_end, interval="1d",
-                                          auto_adjust=True)
+                                          auto_adjust=False, actions=False)
         if raw.empty:
             return None
         if raw.index.tz is not None:

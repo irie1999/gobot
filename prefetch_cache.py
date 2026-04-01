@@ -112,7 +112,7 @@ def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
         dl_start = (_now_jst - timedelta(days=730)).strftime("%Y-%m-%d")
         dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
         ticker = yf.Ticker(symbol)
-        raw = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=True)
+        raw = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=False, actions=False)
         if raw.empty:
             return "empty"
         # タイムゾーン付きインデックスをnaiveに変換
