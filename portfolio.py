@@ -1203,16 +1203,44 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(e)})
 
         elif path == "/api/fix-names":
-            # シンボル=名前になっているポジションを監視リストで一括補完
+            # シンボル=名前になっているポジションを監視リスト→yfinanceで一括補完
             try:
                 data = load()
+                # 補完が必要なシンボルを収集
+                need = [pos["symbol"] for pos in data["positions"]
+                        if pos["name"] == pos["symbol"]]
+                # まず監視リストで解決
+                resolved_map: dict[str, str] = {}
+                for sym in need:
+                    name = _lookup_name(sym)
+                    if name != sym:
+                        resolved_map[sym] = name
+                # 残りは yfinance で一括取得
+                still_need = [s for s in need if s not in resolved_map]
+                if still_need:
+                    try:
+                        tickers = yf.Tickers(" ".join(still_need))
+                        for sym in still_need:
+                            try:
+                                info = tickers.tickers[sym].info
+                                name = (info.get("longName") or
+                                        info.get("shortName") or "")
+                                # 英語名が返る場合が多いので shortName を優先
+                                short = info.get("shortName") or ""
+                                if short:
+                                    name = short
+                                if name and name != sym:
+                                    resolved_map[sym] = name
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 fixed = 0
                 for pos in data["positions"]:
-                    if pos["name"] == pos["symbol"]:
-                        resolved = _lookup_name(pos["symbol"])
-                        if resolved != pos["symbol"]:
-                            pos["name"] = resolved
-                            fixed += 1
+                    sym = pos["symbol"]
+                    if pos["name"] == sym and sym in resolved_map:
+                        pos["name"] = resolved_map[sym]
+                        fixed += 1
                 save(data)
                 self._send_json({"ok": True, "fixed": fixed})
             except Exception as e:
