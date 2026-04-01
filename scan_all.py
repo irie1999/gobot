@@ -13,15 +13,14 @@ MACD / A7（ストキャスティクス+ATR）/ RSI(2) のシグナルを一括�
   python scan_all.py --rsi2       # RSI2のみ
 
 株価キャッシュ:
-  .rsi2_cache/ に銘柄ごとの株価を保存（3日以内は再ダウンロード不要）。
-  初回 or キャッシュ切れの場合は自動でダウンロードしてからスキャンします。
+  .rsi2_cache/ に銘柄ごとの株価を保存。平日は毎日再ダウンロード。
+  本日終値を取得するには 15:30（JST）以降に実行してください。
 """
 
 import argparse
 import subprocess
 import sys
 import io
-import time
 import webbrowser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -33,34 +32,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
-
-def _wait_for_market_close() -> None:
-    """平日15:30（JST）前に実行された場合、クローズまで待機する"""
-    now = datetime.now(JST)
-    if now.weekday() >= 5:  # 土日はスキップ
-        return
-    close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    if now >= close_time:
-        return
-
-    wait_sec = int((close_time - now).total_seconds())
-    print(f"  ⏳ 市場クローズ前です（現在 {now.strftime('%H:%M')} JST）")
-    print(f"  　 本日終値取得のため 15:30 まで待機します（約{wait_sec//60}分{wait_sec%60}秒）")
-    print(f"  　 今すぐ実行する場合は Ctrl+C → python scan_all.py --no-wait で起動してください")
-    print()
-
-    while True:
-        now = datetime.now(JST)
-        remaining = int((close_time - now).total_seconds())
-        if remaining <= 0:
-            break
-        m, s = divmod(remaining, 60)
-        print(f"\r  　 待機中... あと {m:02d}:{s:02d}", end="", flush=True)
-        time.sleep(5)
-
-    print(f"\r  　 15:30 になりました。スキャンを開始します。{' ' * 20}")
-    print()
 
 
 def _run_scan(py: str, flags: list[str], label: str) -> int:
@@ -85,22 +56,17 @@ def main() -> None:
   python scan_all.py --a7         # A7のみ
   python scan_all.py --rsi2       # RSI2のみ
 """)
-    parser.add_argument("--225",    dest="nikkei225", action="store_true",
+    parser.add_argument("--225",  dest="nikkei225", action="store_true",
                         help="日経225 V1モジュールで実行")
-    parser.add_argument("--all",    dest="run_all",   action="store_true",
+    parser.add_argument("--all",  dest="run_all",   action="store_true",
                         help="V1（日経225）+ V2（全銘柄）両方実行")
-    parser.add_argument("--macd",    action="store_true", help="MACDのみ実行")
-    parser.add_argument("--a7",      action="store_true", help="A7のみ実行")
-    parser.add_argument("--rsi2",    action="store_true", help="RSI2のみ実行")
-    parser.add_argument("--no-wait", action="store_true", dest="no_wait",
-                        help="15:30待機をスキップして今すぐ実行（前日終値になる場合あり）")
+    parser.add_argument("--macd", action="store_true", help="MACDのみ実行")
+    parser.add_argument("--a7",   action="store_true", help="A7のみ実行")
+    parser.add_argument("--rsi2", action="store_true", help="RSI2のみ実行")
     args = parser.parse_args()
 
-    if not args.no_wait:
-        _wait_for_market_close()
-
-    today  = datetime.now(JST).strftime("%Y-%m-%d")
-    py     = sys.executable
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    py    = sys.executable
 
     # 戦略フラグ（共通）
     strat_flags = []
@@ -120,7 +86,6 @@ def main() -> None:
     print(f"║  対象: {label:<62}║")
     print("╚" + "═" * 70 + "╝")
     print()
-    print("  ※ 株価キャッシュ: .rsi2_cache/ （3日以内は再ダウンロード不要）")
 
     html_files = []
 
