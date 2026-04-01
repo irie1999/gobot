@@ -211,18 +211,25 @@ def save(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ── 銘柄名を全戦略リストから引く ───────────────────────────
+# ── 銘柄名を各リストから引く（優先順: 監視リスト → 全上場銘柄DB） ──
 def _lookup_name(symbol: str) -> str:
-    try:
-        from symbols_watch    import SYMBOLS as _m
-        from symbols_all      import SYMBOLS as _ma
-        from symbols_watch_a7 import SYMBOLS as _a7
-        from symbols_watch_rsi2 import SYMBOLS as _r2
-        for sym, name in list(_m) + list(_ma) + list(_a7) + list(_r2):
-            if sym == symbol:
-                return name
-    except ImportError:
-        pass
+    sources = [
+        "symbols_watch_rsi2",
+        "symbols_watch_a7",
+        "symbols_watch",
+        "symbols_all",
+        "symbols_listed_prime",     # fetch_listed_symbols.py で生成
+        "symbols_listed_standard",
+        "symbols_listed_all",
+    ]
+    for mod_name in sources:
+        try:
+            m = __import__(mod_name)
+            for sym, name in m.SYMBOLS:
+                if sym == symbol:
+                    return name
+        except Exception:
+            continue
     return symbol
 
 
@@ -1229,44 +1236,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(e)})
 
         elif path == "/api/fix-names":
-            # シンボル=名前になっているポジションを監視リスト→yfinanceで一括補完
+            # シンボル=名前になっているポジションを _lookup_name() で一括補完
             try:
                 data = load()
-                # 補完が必要なシンボルを収集
-                need = [pos["symbol"] for pos in data["positions"]
-                        if pos["name"] == pos["symbol"]]
-                # まず監視リストで解決
-                resolved_map: dict[str, str] = {}
-                for sym in need:
-                    name = _lookup_name(sym)
-                    if name != sym:
-                        resolved_map[sym] = name
-                # 残りは yfinance で一括取得
-                still_need = [s for s in need if s not in resolved_map]
-                if still_need:
-                    try:
-                        tickers = yf.Tickers(" ".join(still_need))
-                        for sym in still_need:
-                            try:
-                                info = tickers.tickers[sym].info
-                                name = (info.get("longName") or
-                                        info.get("shortName") or "")
-                                # 英語名が返る場合が多いので shortName を優先
-                                short = info.get("shortName") or ""
-                                if short:
-                                    name = short
-                                if name and name != sym:
-                                    resolved_map[sym] = name
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
                 fixed = 0
                 for pos in data["positions"]:
                     sym = pos["symbol"]
-                    if pos["name"] == sym and sym in resolved_map:
-                        pos["name"] = resolved_map[sym]
-                        fixed += 1
+                    if pos["name"] == sym:
+                        resolved = _lookup_name(sym)
+                        if resolved != sym:
+                            pos["name"] = resolved
+                            fixed += 1
                 save(data)
                 self._send_json({"ok": True, "fixed": fixed})
             except Exception as e:
@@ -1286,23 +1266,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         if item["name"] == item["symbol"]:
                             item["name"] = _lookup_name(item["symbol"])
                         item["strategy"] = _detect_strategy(item["symbol"]) or ""
-                    # 名前がまだシンボルのものを yfinance で一括取得
-                    still_unnamed = [i for i in items if i["name"] == i["symbol"]]
-                    if still_unnamed:
-                        try:
-                            syms = [i["symbol"] for i in still_unnamed]
-                            tickers = yf.Tickers(" ".join(syms))
-                            for item in still_unnamed:
-                                try:
-                                    info = tickers.tickers[item["symbol"]].info
-                                    name = (info.get("shortName") or
-                                            info.get("longName") or "")
-                                    if name:
-                                        item["name"] = name
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
                     self._send_json({"ok": True, "items": items})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
