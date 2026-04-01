@@ -29,7 +29,6 @@ import yfinance as yf
 
 # ── キャッシュ設定 ────────────────────────────────────────────
 CACHE_DIR   = Path(".rsi2_cache")
-CACHE_DAYS  = 3      # 何日以内のデータをフレッシュとみなすか
 BUF_DAYS    = 230    # MA200 + 余裕（210行以上確保するため）
 DL_PERIOD   = "2y"   # yfinance の period 指定（約500営業日 > BUF_DAYS）
 WORKERS     = 4      # 並列数（yfinance はスレッドセーフでないため少なめに設定）
@@ -78,7 +77,7 @@ def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
 # ── キャッシュ確認 ────────────────────────────────────────────
 
 def _is_fresh(path: Path) -> bool:
-    """キャッシュが有効（新鮮）かどうか確認する。"""
+    """キャッシュが有効（新鮮）かどうか確認する。平日は当日データを必須とする。"""
     if not path.exists():
         return False
     try:
@@ -86,7 +85,12 @@ def _is_fresh(path: Path) -> bool:
             df = pickle.load(f)
         last_date = df.index[-1]
         today = pd.Timestamp(datetime.today().date())
-        return len(df) >= 210 and last_date >= (today - timedelta(days=CACHE_DAYS))
+        is_weekday = today.weekday() < 5  # 月〜金
+        if is_weekday:
+            return len(df) >= 210 and last_date.date() >= today.date()
+        else:
+            # 土日は直近3日以内のデータがあればOK
+            return len(df) >= 210 and last_date >= (today - timedelta(days=3))
     except Exception:
         return False
 

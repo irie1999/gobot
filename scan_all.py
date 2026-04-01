@@ -34,6 +34,18 @@ elif hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
+def _prefetch_prices(py: str) -> None:
+    """スキャン前に株価キャッシュを取得する（prefetch_cache.py を使用）"""
+    print("  株価ダウンロード中（.rsi2_cache/）...")
+    result = subprocess.run(
+        [py, "prefetch_cache.py", "--universe", "225"],
+        text=True, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        print("  ※ 株価ダウンロードに失敗しました（スキャンは続行します）")
+    print()
+
+
 def _run_scan(py: str, flags: list[str], label: str) -> int:
     """select_symbols_v2.py を実行して終了コードを返す（ブラウザは開かない）"""
     cmd = [py, "select_symbols_v2.py"] + flags + ["--no-browser"]
@@ -67,6 +79,8 @@ def main() -> None:
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     py    = sys.executable
+
+    _prefetch_prices(py)
 
     # 戦略フラグ（共通）
     strat_flags = []
