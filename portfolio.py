@@ -120,6 +120,11 @@ def cmd_import_csv(path: str, strategy: str, date: str | None,
               f"    「銘柄コード」「保有株数」「平均取得単価」列が含まれているか確認してください。\n")
         sys.exit(1)
 
+    # 銘柄名がシンボルのままなら監視リストから補完
+    for item in items:
+        if item["name"] == item["symbol"]:
+            item["name"] = _lookup_name(item["symbol"])
+
     buy_date = date or datetime.today().strftime("%Y-%m-%d")
 
     print()
@@ -713,6 +718,13 @@ input:focus,select:focus{border-color:#7eb3ff}
       <button class="btn btn-buy" id="csv-import-btn" style="display:none" onclick="doImportCSV()">一括登録する</button>
     </div>
     <div id="csv-msg" class="msg"></div>
+    <hr style="border-color:#2a2d3a;margin:24px 0">
+    <h3 style="margin-bottom:10px">既存ポジションの銘柄名を修正</h3>
+    <p style="font-size:.8rem;color:#666;margin-bottom:12px">
+      銘柄コードのまま登録されているポジションを、監視リストの銘柄名で一括補完します。
+    </p>
+    <button class="btn" style="background:#1e2a3a;color:#aaa" onclick="doFixNames()">銘柄名を補完する</button>
+    <div id="fix-msg" class="msg"></div>
   </div>
 </div>
 
@@ -1037,6 +1049,18 @@ async function doImportCSV(){
   }
 }
 
+async function doFixNames(){
+  const msg = document.getElementById('fix-msg');
+  msg.className='msg'; msg.textContent='';
+  const r = await api('/api/fix-names', {});
+  if(r.ok){
+    msg.className='msg ok';
+    msg.textContent = r.fixed > 0 ? `✔ ${r.fixed}件の銘柄名を補完しました` : '補完対象なし（すでに銘柄名が設定済み）';
+  } else {
+    msg.className='msg err'; msg.textContent=r.error;
+  }
+}
+
 // 起動時
 loadPositions();
 </script>
@@ -1178,6 +1202,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
 
+        elif path == "/api/fix-names":
+            # シンボル=名前になっているポジションを監視リストで一括補完
+            try:
+                data = load()
+                fixed = 0
+                for pos in data["positions"]:
+                    if pos["name"] == pos["symbol"]:
+                        resolved = _lookup_name(pos["symbol"])
+                        if resolved != pos["symbol"]:
+                            pos["name"] = resolved
+                            fixed += 1
+                save(data)
+                self._send_json({"ok": True, "fixed": fixed})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+
         elif path == "/api/preview-csv":
             try:
                 csv_text = str(body.get("csv_text", ""))
@@ -1201,9 +1241,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 buy_date = date or datetime.today().strftime("%Y-%m-%d")
                 data = load()
                 for item in items:
+                    sym  = str(item["symbol"])
+                    name = str(item.get("name", sym))
+                    # 銘柄名がシンボルのままなら監視リストから補完
+                    if name == sym:
+                        name = _lookup_name(sym)
                     data["positions"].append({
-                        "symbol":    str(item["symbol"]),
-                        "name":      str(item.get("name", item["symbol"])),
+                        "symbol":    sym,
+                        "name":      name,
                         "strategy":  strategy,
                         "qty":       int(item["qty"]),
                         "buy_price": float(item["price"]),
