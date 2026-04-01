@@ -45,6 +45,24 @@ STRATEGIES     = ("MACD", "A7", "RSI2")
 
 import csv as _csv
 
+# ── 手法自動判定 ─────────────────────────────────────────────
+def _detect_strategy(symbol: str) -> str:
+    """シンボルがどの手法の監視リストに含まれるか調べて返す。
+    複数に含まれる場合は RSI2 > A7 > MACD の優先順。見つからない場合は空文字。"""
+    watch_map = [
+        ("RSI2", "symbols_watch_rsi2"),
+        ("A7",   "symbols_watch_a7"),
+        ("MACD", "symbols_watch"),
+    ]
+    for strat, mod_name in watch_map:
+        try:
+            m = __import__(mod_name)
+            if any(sym == symbol for sym, _ in m.SYMBOLS):
+                return strat
+        except Exception:
+            pass
+    return ""
+
 # ── SBI証券 CSV パーサー ─────────────────────────────────────
 def _parse_sbi_csv(text: str) -> list[dict]:
     """SBI証券「保有株式」CSVをパースして [{symbol,name,qty,price}, ...] を返す。
@@ -120,27 +138,31 @@ def cmd_import_csv(path: str, strategy: str, date: str | None,
               f"    「銘柄コード」「保有株数」「平均取得単価」列が含まれているか確認してください。\n")
         sys.exit(1)
 
-    # 銘柄名がシンボルのままなら監視リストから補完
+    # 銘柄名がシンボルのままなら監視リストから補完 / 手法を自動判定
     for item in items:
         if item["name"] == item["symbol"]:
             item["name"] = _lookup_name(item["symbol"])
+        detected = _detect_strategy(item["symbol"])
+        item["strategy"] = detected if detected else strategy
 
     buy_date = date or datetime.today().strftime("%Y-%m-%d")
 
     print()
-    print("═" * 64)
-    print(f"  SBI証券 CSVインポート  [{strategy}]  {buy_date}")
-    print("═" * 64)
-    print(f"  {'銘柄':<26} {'株数':>6} {'平均取得単価':>12}  {'取得金額':>12}")
-    print("  " + "─" * 60)
+    print("═" * 70)
+    print(f"  SBI証券 CSVインポート  {buy_date}")
+    print("═" * 70)
+    print(f"  {'銘柄':<26} {'手法':>6} {'株数':>6} {'平均取得単価':>12}  {'取得金額':>12}")
+    print("  " + "─" * 66)
     total = 0.0
     for item in items:
         cost = item["qty"] * item["price"]
         total += cost
         label = f"{item['name']}({item['symbol']})"
-        print(f"  {label:<26} {item['qty']:>6,} {item['price']:>12,.0f}  {cost:>12,.0f}")
-    print("  " + "─" * 60)
+        strat_s = item["strategy"] or f"{strategy}*"
+        print(f"  {label:<26} {strat_s:>6} {item['qty']:>6,} {item['price']:>12,.0f}  {cost:>12,.0f}")
+    print("  " + "─" * 66)
     print(f"  合計 {len(items)} 銘柄   取得金額合計: ¥{total:,.0f}")
+    print(f"  ※ * は監視リストに未登録のため --strategy の値を使用")
 
     if dry_run:
         print(f"\n  [DRY RUN] portfolio.json への書き込みは行いません。\n")
@@ -157,7 +179,7 @@ def cmd_import_csv(path: str, strategy: str, date: str | None,
         data["positions"].append({
             "symbol":    item["symbol"],
             "name":      item["name"],
-            "strategy":  strategy,
+            "strategy":  item["strategy"] or strategy,
             "qty":       item["qty"],
             "buy_price": item["price"],
             "buy_date":  buy_date,
@@ -1014,18 +1036,21 @@ async function onCSVFile(){
     msg.textContent = r.error || 'SBI証券の保有株式CSVとして認識できませんでした';
     return;
   }
-  let html=`<table><thead><tr><th>銘柄</th><th>株数</th><th>平均取得単価</th><th>取得金額</th></tr></thead><tbody>`;
+  let html=`<table><thead><tr><th>銘柄</th><th>手法</th><th>株数</th><th>平均取得単価</th><th>取得金額</th></tr></thead><tbody>`;
   let total=0;
   for(const item of r.items){
     const cost=item.qty*item.price; total+=cost;
+    const strat=item.strategy||'—';
+    const sb=STRAT_BADGE[strat]||`<span style="color:#888">${strat}</span>`;
     html+=`<tr>
       <td><b>${item.name}</b><br><small style="color:#555">${item.symbol}</small></td>
+      <td>${sb}</td>
       <td>${item.qty.toLocaleString('ja-JP')}</td>
       <td>¥${fmt(item.price)}</td>
       <td>¥${fmt(cost)}</td>
     </tr>`;
   }
-  html+=`</tbody></table><div style="margin-top:8px;font-size:.82rem;color:#888">${r.items.length}銘柄  取得金額合計: ¥${fmt(total)}</div>`;
+  html+=`</tbody></table><div style="margin-top:8px;font-size:.82rem;color:#888">${r.items.length}銘柄  取得金額合計: ¥${fmt(total)}<br>手法は監視リストから自動判定。「—」は未登録（デフォルト手法を使用）</div>`;
   prev.innerHTML=html;
   prev.style.display='block';
   btn.style.display='inline-block';
@@ -1255,29 +1280,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         "error": "SBI証券の保有株式CSVとして認識できませんでした。"
                                  "「銘柄コード」「保有株数」「平均取得単価」列を確認してください。"})
                 else:
+                    # 手法自動判定・銘柄名補完
+                    for item in items:
+                        if item["name"] == item["symbol"]:
+                            item["name"] = _lookup_name(item["symbol"])
+                        item["strategy"] = _detect_strategy(item["symbol"]) or ""
                     self._send_json({"ok": True, "items": items})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
 
         elif path == "/api/import-csv":
             try:
-                items    = body.get("items", [])
-                strategy = str(body.get("strategy", "MACD"))
-                date     = body.get("date") or None
-                if strategy not in STRATEGIES:
-                    raise ValueError(f"不正な手法: {strategy}")
+                items       = body.get("items", [])
+                default_strat = str(body.get("strategy", "MACD"))
+                date        = body.get("date") or None
+                if default_strat not in STRATEGIES:
+                    raise ValueError(f"不正な手法: {default_strat}")
                 buy_date = date or datetime.today().strftime("%Y-%m-%d")
                 data = load()
                 for item in items:
                     sym  = str(item["symbol"])
                     name = str(item.get("name", sym))
-                    # 銘柄名がシンボルのままなら監視リストから補完
                     if name == sym:
                         name = _lookup_name(sym)
+                    # item に strategy が付いていればそれを優先、なければ自動判定→デフォルト
+                    strat = str(item.get("strategy", "")) or _detect_strategy(sym) or default_strat
                     data["positions"].append({
                         "symbol":    sym,
                         "name":      name,
-                        "strategy":  strategy,
+                        "strategy":  strat,
                         "qty":       int(item["qty"]),
                         "buy_price": float(item["price"]),
                         "buy_date":  buy_date,
