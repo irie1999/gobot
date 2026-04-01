@@ -1093,7 +1093,7 @@ def generate_html(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V2 銘柄選定レポート {today}</title>
+<title>{"V1 日経225" if ver == "v1" else "V2 全銘柄"} 銘柄選定レポート {today}</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;
@@ -1127,7 +1127,7 @@ function toggleDetail(sym){{
 </script>
 </head>
 <body>
-<h1>V2 銘柄選定レポート</h1>
+<h1>{"V1 日経225" if ver == "v1" else "V2 全銘柄"} 銘柄選定レポート</h1>
 <p class="subtitle">
   生成: {today} &nbsp;|&nbsp;
   スコア = 期間プラス×3 + 勝率60%以上×2 + 取引2回以上×1 + PF1.5以上×1<br>
@@ -1193,6 +1193,8 @@ def main() -> None:
                         help="スキャン対象 (default: 全上場ファイルがあれば使用、なければ225, --backtest 時)")
     parser.add_argument("--v1", action="store_true",
                         help="V1 モジュール使用（日経225対象・旧パラメータ）")
+    parser.add_argument("--no-browser", action="store_true", dest="no_browser",
+                        help="HTMLをブラウザで自動表示しない（scan_all.py から呼び出す時など）")
     args = parser.parse_args()
 
     # ── V1/V2 モジュール切替 ──────────────────────────────────
@@ -1283,7 +1285,8 @@ def main() -> None:
                                    macd_sig, a7_sig, rsi2_sig,
                                    {}, {}, {}, watchlist=None, ver=_ver)
         print(f"\n  HTMLレポート: {html_path.resolve()}")
-        webbrowser.open(html_path.resolve().as_uri())
+        if not args.no_browser:
+            webbrowser.open(html_path.resolve().as_uri())
         print()
         return
 
@@ -1399,7 +1402,8 @@ def main() -> None:
                                macd_data, a7_data, rsi2_data,
                                watchlist, ver=_ver)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
-    webbrowser.open(html_path.resolve().as_uri())
+    if not args.no_browser:
+        webbrowser.open(html_path.resolve().as_uri())
     print()
 
 

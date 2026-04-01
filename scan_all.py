@@ -33,8 +33,8 @@ elif hasattr(sys.stdout, "buffer"):
 
 
 def _run_scan(py: str, flags: list[str], label: str) -> int:
-    """select_symbols_v2.py を実行して終了コードを返す"""
-    cmd = [py, "select_symbols_v2.py"] + flags
+    """select_symbols_v2.py を実行して終了コードを返す（ブラウザは開かない）"""
+    cmd = [py, "select_symbols_v2.py"] + flags + ["--no-browser"]
     print(f"\n  ▶ {label} スキャン開始")
     print("  " + "─" * 60)
     result = subprocess.run(cmd, text=True, encoding="utf-8")
