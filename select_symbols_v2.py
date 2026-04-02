@@ -519,8 +519,7 @@ def scan_rsi2_signals(selected: list[dict], stock_data: dict,
             trades = fut.result()
             if trades:
                 results.append({"symbol": d["symbol"], "name": d["name"],
-                                "trade_log": [{"reason": t.get("reason", "")}
-                                              for t in trades]})
+                                "trade_log": trades})
     return rsi2_mod.scan_signals_rsi2(sdm, results, params,
                                        use_ibs=True, use_consec=False,
                                        vix_rsi=None)
