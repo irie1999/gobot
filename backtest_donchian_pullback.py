@@ -905,7 +905,7 @@ def main() -> None:
 
     if args.watchlist:
         symbols = _load_symbols(args.universe)
-        periods = WATCHLIST_PERIODS
+        periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
         bt_cache = _load_bt_cache()
         cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods))) in bt_cache)
         print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
