@@ -832,7 +832,7 @@ def main() -> None:
 
     if args.watchlist:
         symbols = _load_symbols(args.universe)
-        periods = WATCHLIST_PERIODS
+        periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
         bt_cache = _load_bt_cache()
         cache_key_sample = (symbols[0][0] if symbols else "", tuple(sorted(periods)))
         cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods)), LOT_SIZE) in bt_cache)
