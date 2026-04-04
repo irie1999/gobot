@@ -102,6 +102,16 @@ def build_combined_html(tabs: list[tuple[str, str | None]], scan_dt: str) -> Pat
         body = m.group(1) if m else content
         body = re.sub(r'<script[^>]*>.*?</script>', '', body,
                       flags=re.DOTALL | re.IGNORECASE)
+
+        # タブ間でIDが重複しないようにタブ番号でプレフィックスを付ける
+        tab_idx = len(tab_bodies)
+        body = re.sub(r'id="d_', f'id="d_t{tab_idx}_', body)
+        body = re.sub(r"id='d_", f"id='d_t{tab_idx}_", body)
+        body = re.sub(r'onclick="toggleDetail\(\'',
+                      f'onclick="toggleDetail(\'t{tab_idx}_', body)
+        body = re.sub(r"onclick=\"toggleDetail\('",
+                      f"onclick=\"toggleDetail('t{tab_idx}_", body)
+
         tab_bodies.append(body.strip())
 
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
