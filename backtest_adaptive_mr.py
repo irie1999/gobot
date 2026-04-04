@@ -841,6 +841,7 @@ def _process_symbol_multiperiod(
 
     today_sig   = _has_signal_today(df)
     last_regime = str(df.iloc[-1].get("regime", "normal")) if len(df) > 0 else "normal"
+    last_close  = float(df.iloc[-1]["close"]) if len(df) > 0 else 0.0
 
     result = dict(
         symbol        = symbol,
@@ -849,6 +850,7 @@ def _process_symbol_multiperiod(
         period_trades = period_trades,    # {days: [trade dicts]}
         today_sig     = today_sig,
         last_regime   = last_regime,
+        last_close    = last_close,
     )
     if bt_cache is not None:
         bt_cache[cache_key] = (mtime, result)
@@ -1160,6 +1162,28 @@ def main() -> None:
 
         path = build_watchlist_html(candidates, periods)
         print(f"\n  HTMLレポート保存: {path}")
+        # CSV出力（run_ranking.py用）
+        import csv as _csv
+        _csv_path = Path(f"candidates_adaptive_mr.csv")
+        with open(_csv_path, "w", newline="", encoding="utf-8") as _f:
+            _w = _csv.writer(_f)
+            _w.writerow(["symbol","name","last_close",
+                         "30_n","30_wr","30_pf","30_total",
+                         "90_n","90_wr","90_pf","90_total",
+                         "180_n","180_wr","180_pf","180_total",
+                         "365_n","365_wr","365_pf","365_total"])
+            for _c in candidates:
+                _pr = _c["period_results"]
+                _row = [_c["symbol"], _c["name"], _c.get("last_close", 0)]
+                for _d in [30, 90, 180, 365]:
+                    _s = _pr.get(_d, {})
+                    _pf = _s.get("pf", 0) or 0
+                    _row += [_s.get("n", 0),
+                             round(_s.get("wr", 0) or 0, 1),
+                             round(0 if _pf == float("inf") else _pf, 4),
+                             round(_s.get("total", 0) or 0, 0)]
+                _w.writerow(_row)
+        print(f"CSV: {_csv_path.resolve()}")
         if not args.no_browser:
             webbrowser.open(f"file://{path.resolve()}")
         return
