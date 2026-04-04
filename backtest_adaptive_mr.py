@@ -395,6 +395,8 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     reason      = reason,
                     limit_price = entry_p,   # filled at limit
                     regime      = entry_regime,
+                    stop_p      = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
+                    target_p    = float("nan"),  # adaptive_mr has no fixed profit target
                 ))
                 in_pos = False
                 pending_order = None
@@ -465,6 +467,8 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             reason      = "保有中★",
             limit_price = entry_p,
             regime      = entry_regime,
+            stop_p      = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
+            target_p    = float("nan"),  # adaptive_mr has no fixed profit target
         ))
 
     return trades
@@ -798,9 +802,11 @@ def _process_symbol_multiperiod(
         return None
 
     period_results: dict[int, dict] = {}
+    period_trades:  dict[int, list] = {}
     for days in periods:
         trades = backtest_amr(df, days)
         period_results[days] = _calc_period_stats(trades)
+        period_trades[days]  = trades
 
     today_sig   = _has_signal_today(df)
     last_regime = str(df.iloc[-1].get("regime", "normal")) if len(df) > 0 else "normal"
@@ -809,6 +815,7 @@ def _process_symbol_multiperiod(
         symbol        = symbol,
         name          = name,
         period_results= period_results,   # {days: {n, wr, pf, total}}
+        period_trades = period_trades,    # {days: [trade dicts]}
         today_sig     = today_sig,
         last_regime   = last_regime,
     )
@@ -838,10 +845,10 @@ def build_watchlist_html(
 
     # ヘッダー列
     period_headers = "".join(
-        f'<th colspan="3">{d}日</th>' for d in periods_s
+        f'<th colspan="4">{d}日</th>' for d in periods_s
     )
     period_subheaders = "".join(
-        '<th>回数</th><th>勝率</th><th>PF</th>' for _ in periods_s
+        '<th>回数</th><th>勝率</th><th>PF</th><th>損益(円)</th>' for _ in periods_s
     )
 
     rows = ""
@@ -860,10 +867,14 @@ def build_watchlist_html(
             pf_s = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "—"
             wr_cls = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
             pf_cls = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
+            total   = s.get("total", 0.0)
+            tot_cls = "pos" if total >= 0 else "neg"
+            tot_s   = f"{total:+,.0f}" if n > 0 else "—"
             period_cells += (
                 f'<td>{n}</td>'
                 f'<td class="{wr_cls}">{wr_s}</td>'
                 f'<td class="{pf_cls}">{pf_s}</td>'
+                f'<td class="{tot_cls}">{tot_s}</td>'
             )
 
         lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
@@ -883,6 +894,60 @@ def build_watchlist_html(
         )
 
     signal_count = sum(1 for c in candidates if c["today_sig"])
+
+    detail_html = ""
+    for c in candidates:
+        pt = c.get("period_trades", {})
+        if not pt:
+            continue
+        sections = ""
+        for d in periods_s:
+            trades = pt.get(d, [])
+            if not trades:
+                continue
+            total_pnl = sum(t["pnl"] for t in trades)
+            wins      = [t for t in trades if t["pnl"] > 0]
+            tc_cls    = "pos" if total_pnl >= 0 else "neg"
+            t_rows = ""
+            for i, t in enumerate(trades, 1):
+                cls   = "win" if t["pnl"] > 0 else ("hold" if "保有中" in t.get("reason","") else "lose")
+                lp    = t.get("limit_price", t["entry_p"])
+                sl    = t.get("stop_p", float("nan"))
+                tgt   = t.get("target_p", float("nan"))
+                sl_s  = f'{sl:,.0f}'  if not pd.isna(sl)  else "—"
+                tgt_s = f'{tgt:,.0f}' if not pd.isna(tgt) else "—"
+                rg    = t.get("regime", "")
+                t_rows += (
+                    f'<tr class="{cls}"><td>{i}</td>'
+                    f'<td>{t["entry_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{t["exit_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{lp:,.0f}</td>'
+                    f'<td>{t["entry_p"]:,.0f}</td>'
+                    f'<td class="neg">{sl_s}</td>'
+                    f'<td class="pos">{tgt_s}</td>'
+                    f'<td>{t["exit_p"]:,.0f}</td>'
+                    f'<td class="{"pos" if t["pct"]>=0 else "neg"}">{t["pct"]:+.1f}%</td>'
+                    f'<td class="{"pos" if t["pnl"]>=0 else "neg"}">{t["pnl"]:+,.0f}円</td>'
+                    f'<td>{t["hold"]}日</td>'
+                    f'<td>{t.get("reason","")}</td>'
+                    f'<td>{rg}</td></tr>\n'
+                )
+            sections += f"""
+<h3 style="margin:14px 0 6px;font-size:0.95em;color:#94a3b8">{d}日間
+  <span style="color:#666;font-size:0.85em">
+    {len(trades)}回 / 勝:{len(wins)} / 損益:<span class="{tc_cls}">{total_pnl:+,.0f}円</span>
+  </span></h3>
+<table><thead><tr>
+  <th>#</th><th>IN</th><th>OUT</th>
+  <th>指値</th><th>約定値</th><th>逆指値</th><th>利確目標</th><th>決済値</th>
+  <th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th><th>レジーム</th>
+</tr></thead><tbody>{t_rows}</tbody></table>"""
+        if sections:
+            detail_html += f"""
+<div style="background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0">
+  <h2 style="font-size:1.05em;color:#e2e8f0;margin-bottom:4px">{c["symbol"]}
+    <span style="color:#94a3b8;font-size:0.85em;font-weight:400">{c["name"]}</span>
+  </h2>{sections}</div>"""
 
     html = f"""\
 <!DOCTYPE html>
@@ -950,6 +1015,7 @@ tr:hover>td{{background:#1b1f35}}
 </tbody>
 </table>
 
+{detail_html}
 <div class="footer">★ = 本日シグナルあり（買い指値注文を出す候補）</div>
 </body></html>"""
 

@@ -55,6 +55,12 @@ ENTRY_EXPIRE   = 3
 MAX_HOLD       = 15
 MA_FILTER      = 200
 JST            = timezone(timedelta(hours=9))
+
+WATCHLIST_PERIODS = [30, 90, 180, 365]
+WL_MIN_TRADES     = 1
+WL_MIN_WR         = 55.0
+WL_MIN_PF         = 1.0
+WL_MIN_ACTIVE     = 2
 _TODAY         = pd.Timestamp(datetime.now(tz=JST).date())
 _CACHE_DIR     = Path(".rsi2_cache")
 
@@ -647,6 +653,186 @@ def build_html(
     return path
 
 
+def _calc_period_stats(trades):
+    if not trades:
+        return dict(n=0, wr=float("nan"), pf=float("nan"), total=0.0)
+    wins = [t for t in trades if t["pnl"] > 0]
+    loss = [t for t in trades if t["pnl"] <= 0]
+    wr   = len(wins) / len(trades) * 100
+    ls   = abs(sum(t["pnl"] for t in loss))
+    pf   = sum(t["pnl"] for t in wins) / ls if ls > 0 else float("inf")
+    return dict(n=len(trades), wr=wr, pf=pf, total=sum(t["pnl"] for t in trades))
+
+
+def _process_symbol_multiperiod(symbol, name, periods):
+    max_days = max(periods)
+    df_raw = fetch(symbol, max_days)
+    if df_raw is None:
+        return None
+    df = calc(df_raw)
+    if len(df) < 50:
+        return None
+    period_results = {}
+    period_trades  = {}
+    for days in periods:
+        trades = backtest_bb_vol(df, days)
+        period_results[days] = _calc_period_stats(trades)
+        period_trades[days]  = trades
+    today_sig = _has_signal_today(df)
+    return dict(symbol=symbol, name=name, period_results=period_results,
+                period_trades=period_trades, today_sig=today_sig)
+
+
+def _passes_watchlist_filter(period_results):
+    active = [(days, s) for days, s in period_results.items() if s["n"] >= WL_MIN_TRADES]
+    if len(active) < WL_MIN_ACTIVE:
+        return False
+    for days, s in active:
+        if pd.isna(s["wr"]) or s["wr"] < WL_MIN_WR:
+            return False
+        pf = s["pf"]
+        if pd.isna(pf) or (pf != float("inf") and pf < WL_MIN_PF):
+            return False
+    return True
+
+
+def build_watchlist_html(candidates, periods):
+    today_str = _TODAY.strftime("%Y-%m-%d")
+    scan_dt   = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    periods_s = sorted(periods)
+    period_headers    = "".join(f'<th colspan="4">{d}日</th>' for d in periods_s)
+    period_subheaders = "".join('<th>回数</th><th>勝率</th><th>PF</th><th>損益(円)</th>' for _ in periods_s)
+
+    rows = ""
+    for c in candidates:
+        pr  = c["period_results"]
+        sig = c["today_sig"]
+        sig_mark = "★" if sig else ""
+        period_cells = ""
+        for d in periods_s:
+            s      = pr.get(d, {})
+            n      = s.get("n", 0)
+            wr     = s.get("wr", float("nan"))
+            pf     = s.get("pf", float("nan"))
+            total  = s.get("total", 0.0)
+            wr_s   = f"{wr:.0f}%" if not pd.isna(wr) else "—"
+            pf_s   = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "—"
+            wr_cls = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
+            pf_cls = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
+            tot_cls = "pos" if total >= 0 else "neg"
+            tot_s   = f"{total:+,.0f}" if n > 0 else "—"
+            period_cells += f'<td>{n}</td><td class="{wr_cls}">{wr_s}</td><td class="{pf_cls}">{pf_s}</td><td class="{tot_cls}">{tot_s}</td>'
+        cl_s = f'{sig["close"]:,.0f}' if sig else "—"
+        lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
+        st_s = f'{sig["stop"]:,.0f}' if sig else "—"
+        rows += (
+            f'<tr><td>{sig_mark}{c["symbol"]}</td><td>{c["name"]}</td>'
+            f'<td>{cl_s}</td><td class="pos">{lp_s}</td><td class="neg">{st_s}</td>'
+            + period_cells + f'</tr>\n'
+        )
+
+    signal_count = sum(1 for c in candidates if c["today_sig"])
+
+    # トレード詳細セクション
+    detail_html = ""
+    for c in candidates:
+        pt = c.get("period_trades", {})
+        if not pt:
+            continue
+        sections = ""
+        for d in periods_s:
+            trades = pt.get(d, [])
+            if not trades:
+                continue
+            total_pnl = sum(t["pnl"] for t in trades)
+            wins      = [t for t in trades if t["pnl"] > 0]
+            tc_cls    = "pos" if total_pnl >= 0 else "neg"
+            t_rows = ""
+            for i, t in enumerate(trades, 1):
+                cls   = "win" if t["pnl"] > 0 else ("hold" if "保有中" in t.get("reason","") else "lose")
+                lp    = t.get("limit_p", t.get("limit_price", t["entry_p"]))
+                sl    = t.get("stop_p", float("nan"))
+                tgt   = t.get("target_p", float("nan"))
+                sl_s  = f'{sl:,.0f}'  if not pd.isna(sl)  else "—"
+                tgt_s = f'{tgt:,.0f}' if not pd.isna(tgt) else "—"
+                t_rows += (
+                    f'<tr class="{cls}"><td>{i}</td>'
+                    f'<td>{t["entry_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{t["exit_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{lp:,.0f}</td>'
+                    f'<td>{t["entry_p"]:,.0f}</td>'
+                    f'<td class="neg">{sl_s}</td>'
+                    f'<td class="pos">{tgt_s}</td>'
+                    f'<td>{t["exit_p"]:,.0f}</td>'
+                    f'<td class="{"pos" if t["pct"]>=0 else "neg"}">{t["pct"]:+.1f}%</td>'
+                    f'<td class="{"pos" if t["pnl"]>=0 else "neg"}">{t["pnl"]:+,.0f}円</td>'
+                    f'<td>{t["hold"]}日</td>'
+                    f'<td>{t.get("reason","")}</td></tr>\n'
+                )
+            sections += f"""
+<h3 style="margin:14px 0 6px;font-size:0.95em;color:#94a3b8">{d}日間
+  <span style="color:#666;font-size:0.85em">
+    {len(trades)}回 / 勝:{len(wins)} / 損益:<span class="{tc_cls}">{total_pnl:+,.0f}円</span>
+  </span></h3>
+<table><thead><tr>
+  <th>#</th><th>IN</th><th>OUT</th>
+  <th>指値</th><th>約定値</th><th>逆指値</th><th>利確目標</th><th>決済値</th>
+  <th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th>
+</tr></thead><tbody>{t_rows}</tbody></table>"""
+        if sections:
+            detail_html += f"""
+<div style="background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0">
+  <h2 style="font-size:1.05em;color:#e2e8f0;margin-bottom:4px">{c["symbol"]}
+    <span style="color:#94a3b8;font-size:0.85em;font-weight:400">{c["name"]}</span>
+  </h2>{sections}</div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>監視銘柄リスト（BB出来高） {today_str}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f1117;color:#dde1ec;padding:24px;font-size:13px}}
+h1{{font-size:1.35em;color:#fff;border-left:4px solid #38bdf8;padding-left:12px;margin-bottom:6px}}
+.meta{{color:#555;font-size:0.8em;margin:2px 0 16px 16px}}
+.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0 24px}}
+.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:12px 18px;min-width:120px}}
+.clabel{{font-size:0.7em;color:#666}}.cval{{font-size:1.4em;font-weight:700;margin-top:2px}}
+.criteria{{background:#131825;border:1px solid #1e3a5f;border-radius:8px;padding:12px 18px;margin:0 0 20px;font-size:0.85em;color:#7ab3d4}}
+.criteria b{{color:#38bdf8}}
+table{{width:100%;border-collapse:collapse;font-size:0.83em}}
+th{{background:#16192a;color:#666;padding:7px 10px;text-align:right;border-bottom:2px solid #252840;white-space:nowrap}}
+th:first-child,th:nth-child(2),th:nth-child(3),th:nth-child(4),th:nth-child(5){{text-align:left}}
+th[colspan]{{text-align:center;border-left:1px solid #2a2f4a;color:#94a3b8}}
+td{{padding:6px 10px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
+td:first-child,td:nth-child(2),td:nth-child(3),td:nth-child(4),td:nth-child(5){{text-align:left}}
+tr.win>td{{background:rgba(74,222,128,.04)}}
+tr.lose>td{{background:rgba(248,113,113,.04)}}
+tr.hold>td{{background:rgba(251,191,36,.06)}}
+tr:hover>td{{background:#1b1f35!important}}
+.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
+.footer{{margin-top:28px;color:#333;font-size:0.75em;text-align:right}}
+</style></head><body>
+<h1>監視銘柄リスト — BB下限＋出来高急増戦略</h1>
+<div class="meta">スキャン: {scan_dt} ／ 期間: {', '.join(str(d)+'日' for d in periods_s)}</div>
+<div class="criteria">選定基準：<b>有効期間 ≥ {WL_MIN_ACTIVE}個</b> ／ <b>勝率 ≥ {WL_MIN_WR:.0f}%</b> ／ <b>PF ≥ {WL_MIN_PF}</b></div>
+<div class="cards">
+  <div class="card"><div class="clabel">候補銘柄数</div><div class="cval pos">{len(candidates)}</div></div>
+  <div class="card"><div class="clabel">本日シグナル</div><div class="cval pos">{signal_count}</div></div>
+</div>
+<table><thead>
+<tr><th rowspan="2">コード</th><th rowspan="2">銘柄名</th>
+<th rowspan="2">終値</th><th rowspan="2">指値</th><th rowspan="2">損切り</th>
+{period_headers}</tr>
+<tr>{period_subheaders}</tr>
+</thead><tbody>{rows}</tbody></table>
+{detail_html}
+<div class="footer">★ = 本日シグナルあり</div>
+</body></html>"""
+    out = Path(f"watchlist_bb_vol_{today_str}.html")
+    out.write_text(html, encoding="utf-8")
+    return out
+
+
 # ── メイン処理 ────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -669,11 +855,55 @@ def main() -> None:
                         help="銘柄ユニバース: watch（監視銘柄）/ 225（日経225）/ all（全上場銘柄）")
     parser.add_argument("--no-browser", action="store_true",
                         help="HTMLレポートをブラウザで自動起動しない")
+    parser.add_argument("--watchlist", action="store_true", help="4期間(30/90/180/365日)で監視銘柄を選定")
     args = parser.parse_args()
 
     backtest_days = args.days
     since_str     = (_TODAY - pd.Timedelta(days=backtest_days)).strftime("%Y-%m-%d")
     today_str     = _TODAY.strftime("%Y-%m-%d")
+
+    if not args.watchlist and args.universe in ("225", "all") and not args.symbol:
+        args.watchlist = True
+
+    if args.watchlist:
+        symbols = _load_symbols(args.universe)
+        periods = WATCHLIST_PERIODS
+        print(f"\n監視銘柄選定モード: {len(symbols)}銘柄 / 期間:{periods}日")
+        print(f"基準: 有効期間≥{WL_MIN_ACTIVE} / 勝率≥{WL_MIN_WR}% / PF≥{WL_MIN_PF}")
+        all_results = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futs = {ex.submit(_process_symbol_multiperiod, sym, name, periods): (sym, name)
+                    for sym, name in symbols}
+            for fut in as_completed(futs):
+                done += 1
+                try:
+                    r = fut.result()
+                    if r:
+                        all_results.append(r)
+                except Exception:
+                    pass
+                if done % 20 == 0 or done == len(symbols):
+                    print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
+        print()
+        candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
+        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("total", 0))
+        print(f"\n選定結果: {len(candidates)}銘柄")
+        print("  " + "─" * 100)
+        for c in candidates:
+            sig  = c["today_sig"]
+            mark = "★" if sig else "  "
+            pr   = c["period_results"]
+            stats_str = "  ".join(
+                f"{d}日:勝率{pr[d]['wr']:.0f}%/PF{pr[d]['pf']:.1f}/{pr[d]['total']:+,.0f}円" if pr[d]['n'] > 0 else f"{d}日:—"
+                for d in sorted(periods)
+            )
+            print(f"  {mark} {c['symbol']:<10} {c['name']:<22}  {stats_str}")
+        path = build_watchlist_html(candidates, periods)
+        print(f"\nHTML: {path.resolve()}")
+        if not args.no_browser:
+            webbrowser.open(f"file://{path.resolve()}")
+        return
 
     # ── 1銘柄モード ──────────────────────────────────────────
     if args.symbol:
