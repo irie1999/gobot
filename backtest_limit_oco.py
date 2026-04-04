@@ -565,7 +565,7 @@ def _price_cache_mtime(symbol: str) -> float:
 def _process_symbol_multiperiod(symbol, name, periods, bt_cache: dict | None = None):
     # ── キャッシュヒット確認 ────────────────────────────────────
     mtime = _price_cache_mtime(symbol)
-    cache_key = (symbol, tuple(sorted(periods)))
+    cache_key = (symbol, tuple(sorted(periods)), LOT_SIZE)
     if bt_cache is not None and cache_key in bt_cache:
         cached_mtime, cached_result = bt_cache[cache_key]
         if cached_mtime == mtime and mtime > 0:
@@ -835,7 +835,7 @@ def main() -> None:
         periods = WATCHLIST_PERIODS
         bt_cache = _load_bt_cache()
         cache_key_sample = (symbols[0][0] if symbols else "", tuple(sorted(periods)))
-        cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods))) in bt_cache)
+        cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods)), LOT_SIZE) in bt_cache)
         print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
         if cached_count:
             print(f"  キャッシュ: {cached_count}銘柄（株価更新なし → スキップ）")
