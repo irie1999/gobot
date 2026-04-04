@@ -53,6 +53,12 @@ DEFAULT_PARAMS = dict(
     FORCE_EXIT_DAYS   = 10,     # 最大保有日数（超過で終値強制決済）
 )
 
+# ── 監視銘柄選定パラメーター ─────────────────────────────────────
+WATCHLIST_PERIODS = [30, 90, 180, 365]   # 1か月/3か月/6か月/1年
+WL_MIN_TRADES     = 3
+WL_MIN_WR         = 60.0
+WL_MIN_PF         = 1.2
+
 # ── グリッドサーチ候補 ───────────────────────────────────────────
 GRID = dict(
     RSI2_ENTRY        = [5.0, 10.0, 15.0],
@@ -506,6 +512,121 @@ def build_html(
 </body></html>"""
 
 
+def _calc_period_stats(trades):
+    if not trades:
+        return dict(n=0, wr=float("nan"), pf=float("nan"), total=0.0)
+    wins = [t for t in trades if t["pnl"] > 0]
+    loss = [t for t in trades if t["pnl"] <= 0]
+    wr   = len(wins) / len(trades) * 100
+    ls   = abs(sum(t["pnl"] for t in loss))
+    pf   = sum(t["pnl"] for t in wins) / ls if ls > 0 else float("inf")
+    return dict(n=len(trades), wr=wr, pf=pf, total=sum(t["pnl"] for t in trades))
+
+
+def _process_symbol_multiperiod(symbol, name, periods):
+    max_days = max(periods)
+    df_raw = fetch(symbol, max_days)
+    if df_raw is None:
+        return None
+    df = calc(df_raw)
+    if len(df) < 50:
+        return None
+    period_results = {}
+    for days in periods:
+        trades = backtest_limit(df, days, DEFAULT_PARAMS)
+        period_results[days] = _calc_period_stats(trades)
+    today_sig = _has_signal_today(df, DEFAULT_PARAMS)
+    return dict(symbol=symbol, name=name, period_results=period_results, today_sig=today_sig)
+
+
+def _passes_watchlist_filter(period_results):
+    for days, s in period_results.items():
+        if s["n"] < WL_MIN_TRADES:
+            return False
+        if pd.isna(s["wr"]) or s["wr"] < WL_MIN_WR:
+            return False
+        pf = s["pf"]
+        if pd.isna(pf) or (pf != float("inf") and pf < WL_MIN_PF):
+            return False
+    return True
+
+
+def build_watchlist_html(candidates, periods):
+    today_str = datetime.now(JST).strftime("%Y-%m-%d")
+    scan_dt   = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    periods_s = sorted(periods)
+    period_headers    = "".join(f'<th colspan="3">{d}日</th>' for d in periods_s)
+    period_subheaders = "".join('<th>回数</th><th>勝率</th><th>PF</th>' for _ in periods_s)
+
+    rows = ""
+    for c in candidates:
+        pr  = c["period_results"]
+        sig = c["today_sig"]
+        sig_mark = "★" if sig else ""
+        period_cells = ""
+        for d in periods_s:
+            s    = pr.get(d, {})
+            n    = s.get("n", 0)
+            wr   = s.get("wr", float("nan"))
+            pf   = s.get("pf", float("nan"))
+            wr_s = f"{wr:.0f}%" if not pd.isna(wr) else "—"
+            pf_s = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "—"
+            wr_cls = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
+            pf_cls = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
+            period_cells += f'<td>{n}</td><td class="{wr_cls}">{wr_s}</td><td class="{pf_cls}">{pf_s}</td>'
+        cl_s = f'{sig["close"]:,.0f}' if sig else "—"
+        lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
+        st_s = f'{sig["stop_loss"]:,.0f}' if sig else "—"
+        rows += (
+            f'<tr><td>{sig_mark}{c["symbol"]}</td><td>{c["name"]}</td>'
+            f'<td>{cl_s}</td><td class="pos">{lp_s}</td><td class="neg">{st_s}</td>'
+            + period_cells + f'</tr>\n'
+        )
+
+    signal_count = sum(1 for c in candidates if c["today_sig"])
+    html = f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>監視銘柄リスト（指値OCO） {today_str}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f1117;color:#dde1ec;padding:24px;font-size:13px}}
+h1{{font-size:1.35em;color:#fff;border-left:4px solid #38bdf8;padding-left:12px;margin-bottom:6px}}
+.meta{{color:#555;font-size:0.8em;margin:2px 0 16px 16px}}
+.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0 24px}}
+.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:12px 18px;min-width:120px}}
+.clabel{{font-size:0.7em;color:#666}}.cval{{font-size:1.4em;font-weight:700;margin-top:2px}}
+.criteria{{background:#131825;border:1px solid #1e3a5f;border-radius:8px;padding:12px 18px;margin:0 0 20px;font-size:0.85em;color:#7ab3d4}}
+.criteria b{{color:#38bdf8}}
+table{{width:100%;border-collapse:collapse;font-size:0.83em}}
+th{{background:#16192a;color:#666;padding:7px 10px;text-align:right;border-bottom:2px solid #252840;white-space:nowrap}}
+th:first-child,th:nth-child(2),th:nth-child(3),th:nth-child(4),th:nth-child(5){{text-align:left}}
+th[colspan]{{text-align:center;border-left:1px solid #2a2f4a;color:#94a3b8}}
+td{{padding:6px 10px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
+td:first-child,td:nth-child(2),td:nth-child(3),td:nth-child(4),td:nth-child(5){{text-align:left}}
+tr:hover>td{{background:#1b1f35}}
+.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
+.footer{{margin-top:28px;color:#333;font-size:0.75em;text-align:right}}
+</style></head><body>
+<h1>監視銘柄リスト — 指値OCO戦略</h1>
+<div class="meta">スキャン: {scan_dt} ／ 期間: {', '.join(str(d)+'日' for d in periods_s)}</div>
+<div class="criteria">選定基準（全期間で満たすこと）：<b>取引回数 ≥ {WL_MIN_TRADES}回</b> ／ <b>勝率 ≥ {WL_MIN_WR:.0f}%</b> ／ <b>PF ≥ {WL_MIN_PF}</b></div>
+<div class="cards">
+  <div class="card"><div class="clabel">候補銘柄数</div><div class="cval pos">{len(candidates)}</div></div>
+  <div class="card"><div class="clabel">本日シグナル</div><div class="cval pos">{signal_count}</div></div>
+</div>
+<table><thead>
+<tr><th rowspan="2">コード</th><th rowspan="2">銘柄名</th>
+<th rowspan="2">終値</th><th rowspan="2">指値</th><th rowspan="2">損切り</th>
+{period_headers}</tr>
+<tr>{period_subheaders}</tr>
+</thead><tbody>{rows}</tbody></table>
+<div class="footer">★ = 本日シグナルあり</div>
+</body></html>"""
+    out = Path(f"watchlist_limit_oco_{today_str}.html")
+    out.write_text(html, encoding="utf-8")
+    return out
+
+
 # ── メイン ────────────────────────────────────────────────────────
 def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
     import importlib.util
@@ -561,7 +682,45 @@ def main() -> None:
     parser.add_argument("--days",     type=int, default=BACKTEST_DAYS, help="バックテスト期間（日）")
     parser.add_argument("--universe", default=None, help="225 / prime / standard / all")
     parser.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
+    parser.add_argument("--watchlist", action="store_true", help="4期間(30/90/180/365日)バックテストで監視銘柄を選定")
     args = parser.parse_args()
+
+    if args.watchlist:
+        symbols = _load_symbols(args.universe)
+        periods = WATCHLIST_PERIODS
+        print(f"\n監視銘柄選定モード: {len(symbols)}銘柄 / 期間:{periods}日")
+        print(f"基準: 取引≥{WL_MIN_TRADES} / 勝率≥{WL_MIN_WR}% / PF≥{WL_MIN_PF}")
+        all_results = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futs = {ex.submit(_process_symbol_multiperiod, sym, name, periods): (sym, name)
+                    for sym, name in symbols}
+            for fut in as_completed(futs):
+                done += 1
+                r = fut.result()
+                if r:
+                    all_results.append(r)
+                if done % 20 == 0 or done == len(symbols):
+                    print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
+        print()
+        candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
+        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("wr", 0))
+        print(f"\n選定結果: {len(candidates)}銘柄")
+        for c in candidates:
+            sig  = c["today_sig"]
+            mark = "★" if sig else "  "
+            pr   = c["period_results"]
+            stats_str = "  ".join(
+                f"{d}日:勝率{pr[d]['wr']:.0f}%/PF{pr[d]['pf']:.1f}" if pr[d]['n'] > 0 else f"{d}日:—"
+                for d in sorted(periods)
+            )
+            print(f"  {mark} {c['symbol']:12} {c['name']:20}  {stats_str}")
+        path = build_watchlist_html(candidates, periods)
+        print(f"\nHTML: {path.resolve()}")
+        if not args.no_browser:
+            import webbrowser
+            webbrowser.open(f"file://{path.resolve()}")
+        return
 
     backtest_days = args.days
     scan_dt_str   = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
