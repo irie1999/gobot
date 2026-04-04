@@ -692,7 +692,7 @@ def _process_symbol_multiperiod(symbol, name, periods, bt_cache=None):
     cache_key = (symbol, tuple(sorted(periods)))
     if bt_cache is not None and cache_key in bt_cache:
         cached_mtime, cached_result = bt_cache[cache_key]
-        if cached_mtime == mtime and mtime > 0:
+        if cached_mtime == mtime and mtime > 0 and "period_trades" in cached_result:
             return cached_result
 
     max_days = max(periods)
