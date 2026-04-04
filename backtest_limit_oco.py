@@ -40,7 +40,7 @@ JST           = timezone(timedelta(hours=9))
 _TODAY        = datetime.now(JST).date()
 _CACHE_DIR    = Path(".rsi2_cache")
 _BT_CACHE     = _CACHE_DIR / "bt_results_limit_oco.pkl"   # バックテスト結果キャッシュ
-POSITION_SIZE = 100_000   # 1回あたり投資金額（円）
+LOT_SIZE      = 100       # 1回あたり株数（固定100株）
 BACKTEST_DAYS = 365
 WORKERS       = 4
 
@@ -212,7 +212,7 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
                 entry_dt      = dt
                 profit_target = entry_p + signal_atr * p["PROFIT_ATR_MULT"]
                 stop_loss     = entry_p - signal_atr * p["STOP_ATR_MULT"]
-                qty           = max(int(POSITION_SIZE / entry_p), 1)
+                qty           = LOT_SIZE
                 state         = "in_pos"
                 days_pending  = 0
 

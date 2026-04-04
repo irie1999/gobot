@@ -37,7 +37,7 @@ import yfinance as yf
 
 # ── 定数 ─────────────────────────────────────────────────────
 WORKERS         = 4
-POSITION_SIZE   = 100_000   # 1回あたりの投資金額（円）
+LOT_SIZE        = 100       # 1回あたり株数（固定100株）
 BACKTEST_DAYS   = 365       # デフォルトのバックテスト日数
 JST             = timezone(timedelta(hours=9))
 _TODAY          = pd.Timestamp(datetime.now(tz=JST).date())
@@ -252,7 +252,7 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
                 reason = f"最大{MAX_HOLD}日"
 
             if exit_p is not None:
-                pnl = (exit_p - entry_p) / entry_p * POSITION_SIZE
+                pnl = (exit_p - entry_p) * LOT_SIZE
                 pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
                     entry_dt  = entry_dt,
@@ -312,7 +312,7 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
         last_cl   = float(df.iloc[-1]["close"])
         last_dt   = df.index[-1]
         hold_days = (last_dt - entry_dt).days
-        pnl = (last_cl - entry_p) / entry_p * POSITION_SIZE
+        pnl = (last_cl - entry_p) * LOT_SIZE
         pct = (last_cl - entry_p) / entry_p * 100
         trades.append(dict(
             entry_dt  = entry_dt,

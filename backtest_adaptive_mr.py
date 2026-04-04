@@ -51,7 +51,7 @@ import yfinance as yf
 
 # ── 定数 ─────────────────────────────────────────────────────
 WORKERS        = 4
-POSITION_SIZE  = 100_000   # 1回あたりの投資金額（円）
+LOT_SIZE       = 100       # 1回あたり株数（固定100株）
 BACKTEST_DAYS  = 365       # デフォルトのバックテスト日数
 JST            = timezone(timedelta(hours=9))
 _TODAY         = pd.Timestamp(datetime.now(tz=JST).date())
@@ -440,7 +440,7 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             # ポジションサイズ: ATR >= 70パーセンタイル → ハーフサイズ
             prev_atr_pct = prev.get("atr_pct", float("nan"))
             size_mult    = 0.5 if (not pd.isna(prev_atr_pct) and prev_atr_pct >= ATR_HIGH_PCT) else 1.0
-            q            = max(int(POSITION_SIZE * size_mult / lim_price), 1) if lim_price > 0 else 1
+            q            = LOT_SIZE
 
             pending_order = {
                 "limit_price":  lim_price,

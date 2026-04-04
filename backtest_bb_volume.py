@@ -44,7 +44,7 @@ import yfinance as yf
 
 # ── 定数 ─────────────────────────────────────────────────────
 WORKERS        = 4
-POSITION_SIZE  = 100_000
+LOT_SIZE       = 100       # 1回あたり株数（固定100株）
 BB_PERIOD      = 20
 BB_STD         = 2.0
 VOL_PERIOD     = 20
@@ -273,8 +273,8 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     exit_reason = "BBミッド到達"
 
                 if exit_p is not None:
-                    qty = max(int(POSITION_SIZE / entry_p), 1)
-                    pnl = (exit_p - entry_p) / entry_p * POSITION_SIZE
+                    qty = LOT_SIZE
+                    pnl = (exit_p - entry_p) * LOT_SIZE
                     pct = (exit_p - entry_p) / entry_p * 100
                     trades.append(dict(
                         entry_dt=entry_dt, exit_dt=dt,
@@ -305,7 +305,7 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                 exit_reason = f"最大{MAX_HOLD}日"
 
             if exit_p is not None:
-                pnl = (exit_p - entry_p) / entry_p * POSITION_SIZE
+                pnl = (exit_p - entry_p) * LOT_SIZE
                 pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
                     entry_dt=entry_dt, exit_dt=dt,
@@ -338,7 +338,7 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
         last_cl = float(df.iloc[-1]["close"])
         last_dt = df.index[-1]
         hold    = (last_dt - entry_dt).days
-        pnl     = (last_cl - entry_p) / entry_p * POSITION_SIZE
+        pnl     = (last_cl - entry_p) * LOT_SIZE
         pct     = (last_cl - entry_p) / entry_p * 100
         trades.append(dict(
             entry_dt=entry_dt, exit_dt=last_dt,
