@@ -717,17 +717,20 @@ def main() -> None:
                     print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
         print()
         candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
-        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("wr", 0))
+        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("total", 0))
         print(f"\n選定結果: {len(candidates)}銘柄")
+        print(f"  {'':2} {'コード':<10} {'銘柄名':<22} " + "  ".join(f"{d}日" .ljust(28) for d in sorted(periods)))
+        print(f"  {'':2} {'':10} {'':22} " + "  ".join("勝率   PF    損益(円)".ljust(28) for _ in periods))
+        print("  " + "─" * 120)
         for c in candidates:
             sig  = c["today_sig"]
             mark = "★" if sig else "  "
             pr   = c["period_results"]
             stats_str = "  ".join(
-                f"{d}日:勝率{pr[d]['wr']:.0f}%/PF{pr[d]['pf']:.1f}" if pr[d]['n'] > 0 else f"{d}日:—"
+                f"{pr[d]['wr']:.0f}%  {pr[d]['pf']:.1f}  {pr[d]['total']:>+10,.0f}円" if pr[d]['n'] > 0 else f"{'—':<28}"
                 for d in sorted(periods)
             )
-            print(f"  {mark} {c['symbol']:12} {c['name']:20}  {stats_str}")
+            print(f"  {mark} {c['symbol']:<10} {c['name']:<22}  {stats_str}")
         path = build_watchlist_html(candidates, periods)
         print(f"\nHTML: {path.resolve()}")
         if not args.no_browser:
