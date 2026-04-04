@@ -691,6 +691,10 @@ def main() -> None:
     parser.add_argument("--watchlist", action="store_true", help="4期間(30/90/180/365日)バックテストで監視銘柄を選定")
     args = parser.parse_args()
 
+    # --universe 225/all の場合、--symbol 未指定なら自動で4期間バックテストモードへ
+    if not args.watchlist and args.universe in ("225", "all") and not args.symbol:
+        args.watchlist = True
+
     if args.watchlist:
         symbols = _load_symbols(args.universe)
         periods = WATCHLIST_PERIODS

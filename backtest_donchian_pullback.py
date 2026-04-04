@@ -788,6 +788,10 @@ def main() -> None:
     since_str     = (_TODAY - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
     today_str     = _TODAY.strftime("%Y-%m-%d")
 
+    # --universe 225/all の場合、--symbol 未指定なら自動で4期間バックテストモードへ
+    if not args.watchlist and args.universe in ("225", "all") and not args.symbol:
+        args.watchlist = True
+
     if args.watchlist:
         symbols = _load_symbols(args.universe)
         periods = WATCHLIST_PERIODS
