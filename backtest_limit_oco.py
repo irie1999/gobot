@@ -787,9 +787,10 @@ def main() -> None:
                 if done % 20 == 0 or done == len(symbols):
                     print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
         print()
-        candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
-        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("total", 0))
-        print(f"\n選定結果: {len(candidates)}銘柄")
+        # フィルターなし・全銘柄を利益順にソート
+        candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
+        candidates.sort(key=lambda r: -sum(s.get("total", 0) for s in r["period_results"].values()))
+        print(f"\nスキャン結果（利益順）: {len(candidates)}銘柄")
         print(f"  {'':2} {'コード':<10} {'銘柄名':<22} " + "  ".join(f"{d}日" .ljust(28) for d in sorted(periods)))
         print(f"  {'':2} {'':10} {'':22} " + "  ".join("勝率   PF    損益(円)".ljust(28) for _ in periods))
         print("  " + "─" * 120)

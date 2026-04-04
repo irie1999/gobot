@@ -1085,15 +1085,12 @@ def main() -> None:
                     print(f"  {done_count}/{len(symbols)} 完了...", end="\r", flush=True)
         print()
 
-        candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
-        # 最長期間の勝率降順でソート
-        longest = max(periods)
-        candidates.sort(
-            key=lambda r: -r["period_results"].get(longest, {}).get("wr", 0)
-        )
+        # フィルターなし・全銘柄を利益順にソート
+        candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
+        candidates.sort(key=lambda r: -sum(s.get("total", 0) for s in r["period_results"].values()))
 
         print(f"\n  スキャン完了: {len(all_results)}銘柄処理")
-        print(f"  選定結果: {len(candidates)}銘柄が全基準を満足\n")
+        print(f"  スキャン結果（利益順）: {len(candidates)}銘柄\n")
         for c in candidates:
             sig_mark = "★" if c["today_sig"] else " "
             pr_summary = "  ".join(
