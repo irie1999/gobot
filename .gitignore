@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 *.log
 positions_top10/
+.rsi2_cache/
