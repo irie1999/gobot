@@ -42,6 +42,7 @@ BACKTEST_DAYS   = 365       # デフォルトのバックテスト日数
 JST             = timezone(timedelta(hours=9))
 _TODAY          = pd.Timestamp(datetime.now(tz=JST).date())
 _CACHE_DIR      = Path(".rsi2_cache")
+_BT_CACHE       = _CACHE_DIR / "bt_results_donchian_pullback.pkl"
 
 BREAK_PERIOD    = 20     # N日高値ブレイクアウト判定期間
 VOL_MA_PERIOD   = 20     # 出来高移動平均期間
@@ -655,7 +656,36 @@ def _calc_period_stats(trades):
     return dict(n=len(trades), wr=wr, pf=pf, total=sum(t["pnl"] for t in trades))
 
 
-def _process_symbol_multiperiod(symbol, name, periods):
+def _load_bt_cache() -> dict:
+    try:
+        if _BT_CACHE.exists():
+            with open(_BT_CACHE, "rb") as f:
+                return pickle.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_bt_cache(cache: dict) -> None:
+    try:
+        _CACHE_DIR.mkdir(exist_ok=True)
+        with open(_BT_CACHE, "wb") as f:
+            pickle.dump(cache, f)
+    except Exception:
+        pass
+
+def _price_cache_mtime(symbol: str) -> float:
+    p = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+    return p.stat().st_mtime if p.exists() else 0.0
+
+
+def _process_symbol_multiperiod(symbol, name, periods, bt_cache=None):
+    mtime = _price_cache_mtime(symbol)
+    cache_key = (symbol, tuple(sorted(periods)))
+    if bt_cache is not None and cache_key in bt_cache:
+        cached_mtime, cached_result = bt_cache[cache_key]
+        if cached_mtime == mtime and mtime > 0:
+            return cached_result
+
     max_days = max(periods)
     df_raw = fetch(symbol, max_days)
     if df_raw is None:
@@ -670,7 +700,10 @@ def _process_symbol_multiperiod(symbol, name, periods):
         period_results[days] = _calc_period_stats(trades)
         period_trades[days]  = trades
     today_sig = _has_signal_today(df)
-    return dict(symbol=symbol, name=name, period_results=period_results, period_trades=period_trades, today_sig=today_sig)
+    result = dict(symbol=symbol, name=name, period_results=period_results, period_trades=period_trades, today_sig=today_sig)
+    if bt_cache is not None:
+        bt_cache[cache_key] = (mtime, result)
+    return result
 
 
 def _passes_watchlist_filter(period_results):
@@ -854,20 +887,28 @@ def main() -> None:
     if args.watchlist:
         symbols = _load_symbols(args.universe)
         periods = WATCHLIST_PERIODS
-        print(f"\n監視銘柄選定モード: {len(symbols)}銘柄 / 期間:{periods}日")
-        print(f"基準: 取引≥{WL_MIN_TRADES} / 勝率≥{WL_MIN_WR}% / PF≥{WL_MIN_PF}")
+        bt_cache = _load_bt_cache()
+        cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods))) in bt_cache)
+        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
+        if cached_count:
+            print(f"  キャッシュ: {cached_count}銘柄（株価更新なし → スキップ）")
+        print(f"  データ取得・バックテスト中 (並列{WORKERS}スレッド) ...")
         all_results = []
         done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = {ex.submit(_process_symbol_multiperiod, sym, name, periods): (sym, name)
+            futs = {ex.submit(_process_symbol_multiperiod, sym, name, periods, bt_cache): (sym, name)
                     for sym, name in symbols}
             for fut in as_completed(futs):
                 done += 1
-                r = fut.result()
-                if r:
-                    all_results.append(r)
+                try:
+                    r = fut.result()
+                    if r:
+                        all_results.append(r)
+                except Exception:
+                    pass
                 if done % 20 == 0 or done == len(symbols):
                     print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
+        _save_bt_cache(bt_cache)
         print()
         # フィルターなし・全銘柄を利益順にソート
         candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
