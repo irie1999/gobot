@@ -741,6 +741,7 @@ def build_watchlist_html(candidates, periods):
         pr  = c["period_results"]
         sig = c["today_sig"]
         sig_mark = "★" if sig else ""
+        sym_id = c["symbol"].replace(".", "_").replace("-", "_")
         period_cells = ""
         for d in periods_s:
             s      = pr.get(d, {})
@@ -759,19 +760,13 @@ def build_watchlist_html(candidates, periods):
         lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
         st_s = f'{sig["stop"]:,.0f}' if sig else "—"
         rows += (
-            f'<tr><td>{sig_mark}{c["symbol"]}</td><td>{c["name"]}</td>'
+            f'<tr class="sym-row" onclick="toggleDetail(\'{sym_id}\')">'
+            f'<td>▶\u00a0{sig_mark}{c["symbol"]}</td><td>{c["name"]}</td>'
             f'<td>{cl_s}</td><td class="pos">{lp_s}</td><td class="neg">{st_s}</td>'
             + period_cells + f'</tr>\n'
         )
-
-    signal_count = sum(1 for c in candidates if c["today_sig"])
-
-    # トレード詳細セクション
-    detail_html = ""
-    for c in candidates:
+        # Build inline detail row
         pt = c.get("period_trades", {})
-        if not pt:
-            continue
         sections = ""
         for d in periods_s:
             trades = pt.get(d, [])
@@ -812,12 +807,12 @@ def build_watchlist_html(candidates, periods):
   <th>指値</th><th>約定値</th><th>逆指値</th><th>利確目標</th><th>決済値</th>
   <th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th>
 </tr></thead><tbody>{t_rows}</tbody></table>"""
-        if sections:
-            detail_html += f"""
-<div style="background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0">
-  <h2 style="font-size:1.05em;color:#e2e8f0;margin-bottom:4px">{c["symbol"]}
-    <span style="color:#94a3b8;font-size:0.85em;font-weight:400">{c["name"]}</span>
-  </h2>{sections}</div>"""
+        rows += (
+            f'<tr id="d_{sym_id}" class="detail-row" style="display:none">'
+            f'<td colspan="99"><div class="detail-inner">{sections}</div></td></tr>\n'
+        )
+
+    signal_count = sum(1 for c in candidates if c["today_sig"])
 
     html = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
@@ -844,6 +839,12 @@ tr.hold>td{{background:rgba(251,191,36,.06)}}
 tr:hover>td{{background:#1b1f35!important}}
 .pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
 .footer{{margin-top:28px;color:#333;font-size:0.75em;text-align:right}}
+.sym-row{{cursor:pointer}}
+.sym-row td:first-child{{user-select:none}}
+.detail-row>td{{padding:0;background:#0d1020!important;border-bottom:2px solid #252840}}
+.detail-inner{{padding:12px 20px}}
+.detail-inner table{{width:auto;min-width:600px}}
+.detail-inner th{{background:#0d1020}}
 </style></head><body>
 <h1>監視銘柄リスト — BB下限＋出来高急増戦略</h1>
 <div class="meta">スキャン: {scan_dt} ／ 期間: {', '.join(str(d)+'日' for d in periods_s)}</div>
@@ -858,8 +859,20 @@ tr:hover>td{{background:#1b1f35!important}}
 {period_headers}</tr>
 <tr>{period_subheaders}</tr>
 </thead><tbody>{rows}</tbody></table>
-{detail_html}
 <div class="footer">★ = 本日シグナルあり</div>
+<script>
+function toggleDetail(id){{
+  var r=document.getElementById('d_'+id);
+  if(!r)return;
+  var open=r.style.display==='table-row';
+  r.style.display=open?'none':'table-row';
+  var sym=r.previousElementSibling;
+  if(sym){{
+    var td=sym.querySelector('td');
+    if(td) td.textContent=td.textContent.replace(/^[▶▼]\u00a0/,''+(open?'▶\u00a0':'▼\u00a0'));
+  }}
+}}
+</script>
 </body></html>"""
     out = Path(f"watchlist_bb_vol_{today_str}.html")
     out.write_text(html, encoding="utf-8")
