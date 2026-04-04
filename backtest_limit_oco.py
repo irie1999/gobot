@@ -233,6 +233,8 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
                         pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
                         hold=0, reason=exit_reason,
                         limit_price=limit_price,
+                        stop_loss=stop_loss,
+                        profit_target=profit_target,
                     ))
                     state = "idle"
                 continue
@@ -392,22 +394,30 @@ def _trade_table_html(trades: list[dict]) -> str:
     for i, t in enumerate(trades, 1):
         cls   = _pct_class(t["pct"])
         mark  = "★" if "保有中" in t["reason"] else ""
-        lp    = t.get("limit_price", t["entry_p"])
+        lp    = t.get("limit_price",   t["entry_p"])
+        sl    = t.get("stop_loss",     float("nan"))
+        tgt   = t.get("profit_target", float("nan"))
+        pnl   = t.get("pnl", 0.0)
+        sl_s  = f'{sl:,.0f}'  if not pd.isna(sl)  else "—"
+        tgt_s = f'{tgt:,.0f}' if not pd.isna(tgt) else "—"
         rows += (
             f'<tr><td>{mark}{i}</td>'
             f'<td>{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
             f'<td>{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
             f'<td>{lp:,.0f}</td>'
             f'<td>{t["entry_p"]:,.0f}</td>'
+            f'<td class="neg">{sl_s}</td>'
+            f'<td class="pos">{tgt_s}</td>'
             f'<td>{t["exit_p"]:,.0f}</td>'
             f'<td class="{cls}">{t["pct"]:+.1f}%</td>'
+            f'<td class="{cls}">{pnl:+,.0f}円</td>'
             f'<td>{t["hold"]}日</td>'
             f'<td>{t["reason"]}</td></tr>\n'
         )
     header = (
         "<tr><th>#</th><th>エントリー日</th><th>決済日</th>"
-        "<th>指値</th><th>約定値</th><th>決済値</th>"
-        "<th>損益%</th><th>保有</th><th>理由</th></tr>"
+        "<th>指値</th><th>約定値</th><th>逆指値</th><th>利確目標</th><th>決済値</th>"
+        "<th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th></tr>"
     )
     return f"<table>{header}{rows}</table>"
 
@@ -533,11 +543,14 @@ def _process_symbol_multiperiod(symbol, name, periods):
     if len(df) < 50:
         return None
     period_results = {}
+    period_trades  = {}
     for days in periods:
         trades = backtest_limit(df, days, DEFAULT_PARAMS)
         period_results[days] = _calc_period_stats(trades)
+        period_trades[days]  = trades
     today_sig = _has_signal_today(df, DEFAULT_PARAMS)
-    return dict(symbol=symbol, name=name, period_results=period_results, today_sig=today_sig)
+    return dict(symbol=symbol, name=name, period_results=period_results,
+                period_trades=period_trades, today_sig=today_sig)
 
 
 def _passes_watchlist_filter(period_results):
@@ -558,8 +571,8 @@ def build_watchlist_html(candidates, periods):
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     scan_dt   = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
     periods_s = sorted(periods)
-    period_headers    = "".join(f'<th colspan="3">{d}日</th>' for d in periods_s)
-    period_subheaders = "".join('<th>回数</th><th>勝率</th><th>PF</th>' for _ in periods_s)
+    period_headers    = "".join(f'<th colspan="4">{d}日</th>' for d in periods_s)
+    period_subheaders = "".join('<th>回数</th><th>勝率</th><th>PF</th><th>損益(円)</th>' for _ in periods_s)
 
     rows = ""
     for c in candidates:
@@ -574,9 +587,12 @@ def build_watchlist_html(candidates, periods):
             pf   = s.get("pf", float("nan"))
             wr_s = f"{wr:.0f}%" if not pd.isna(wr) else "—"
             pf_s = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "—"
-            wr_cls = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
-            pf_cls = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
-            period_cells += f'<td>{n}</td><td class="{wr_cls}">{wr_s}</td><td class="{pf_cls}">{pf_s}</td>'
+            wr_cls  = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
+            pf_cls  = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
+            total   = s.get("total", 0.0)
+            tot_cls = "pos" if total >= 0 else "neg"
+            tot_s   = f"{total:+,.0f}" if n > 0 else "—"
+            period_cells += f'<td>{n}</td><td class="{wr_cls}">{wr_s}</td><td class="{pf_cls}">{pf_s}</td><td class="{tot_cls}">{tot_s}</td>'
         cl_s = f'{sig["close"]:,.0f}' if sig else "—"
         lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
         st_s = f'{sig["stop_loss"]:,.0f}' if sig else "—"
@@ -587,6 +603,60 @@ def build_watchlist_html(candidates, periods):
         )
 
     signal_count = sum(1 for c in candidates if c["today_sig"])
+
+    # トレード詳細セクション（各銘柄・各期間）
+    detail_html = ""
+    for c in candidates:
+        pt = c.get("period_trades", {})
+        if not pt:
+            continue
+        sections = ""
+        for d in periods_s:
+            trades = pt.get(d, [])
+            if not trades:
+                continue
+            total_pnl = sum(t["pnl"] for t in trades)
+            wins      = [t for t in trades if t["pnl"] > 0]
+            tc_cls    = "pos" if total_pnl >= 0 else "neg"
+            t_rows = ""
+            for i, t in enumerate(trades, 1):
+                cls   = "win" if t["pnl"] > 0 else ("hold" if "保有中" in t["reason"] else "lose")
+                lp    = t.get("limit_price",   t["entry_p"])
+                sl    = t.get("stop_loss",     float("nan"))
+                tgt   = t.get("profit_target", float("nan"))
+                sl_s  = f'{sl:,.0f}'  if not pd.isna(sl)  else "—"
+                tgt_s = f'{tgt:,.0f}' if not pd.isna(tgt) else "—"
+                t_rows += (
+                    f'<tr class="{cls}"><td>{i}</td>'
+                    f'<td>{t["entry_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{t["exit_dt"].strftime("%m/%d")}</td>'
+                    f'<td>{lp:,.0f}</td>'
+                    f'<td>{t["entry_p"]:,.0f}</td>'
+                    f'<td class="neg">{sl_s}</td>'
+                    f'<td class="pos">{tgt_s}</td>'
+                    f'<td>{t["exit_p"]:,.0f}</td>'
+                    f'<td class="{"pos" if t["pct"]>=0 else "neg"}">{t["pct"]:+.1f}%</td>'
+                    f'<td class="{"pos" if t["pnl"]>=0 else "neg"}">{t["pnl"]:+,.0f}円</td>'
+                    f'<td>{t["hold"]}日</td>'
+                    f'<td>{t["reason"]}</td></tr>\n'
+                )
+            sections += f"""
+<h3 style="margin:14px 0 6px;font-size:0.95em;color:#94a3b8">{d}日間
+  <span style="color:#666;font-size:0.85em">
+    {len(trades)}回 / 勝:{len(wins)} / 損益:<span class="{tc_cls}">{total_pnl:+,.0f}円</span>
+  </span></h3>
+<table><thead><tr>
+  <th>#</th><th>IN</th><th>OUT</th>
+  <th>指値</th><th>約定値</th><th>逆指値</th><th>利確目標</th><th>決済値</th>
+  <th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th>
+</tr></thead><tbody>{t_rows}</tbody></table>"""
+        if sections:
+            detail_html += f"""
+<div style="background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0">
+  <h2 style="font-size:1.05em;color:#e2e8f0;margin-bottom:4px">{c["symbol"]}
+    <span style="color:#94a3b8;font-size:0.85em;font-weight:400">{c["name"]}</span>
+  </h2>{sections}</div>"""
+
     html = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>監視銘柄リスト（指値OCO） {today_str}</title>
@@ -623,6 +693,7 @@ tr:hover>td{{background:#1b1f35}}
 {period_headers}</tr>
 <tr>{period_subheaders}</tr>
 </thead><tbody>{rows}</tbody></table>
+{detail_html}
 <div class="footer">★ = 本日シグナルあり</div>
 </body></html>"""
     out = Path(f"watchlist_limit_oco_{today_str}.html")
