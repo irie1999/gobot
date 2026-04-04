@@ -919,7 +919,7 @@ def build_watchlist_html(
         cl_s = f'{sig["close"]:,.0f}'        if sig else "—"
 
         rows += (
-            f'<tr class="sym-row" onclick="toggleDetail(\'{sym_id}\')">'
+            f'<tr class="sym-row" onclick="toggleDetail(this)">'
             f'<td>▶\u00a0{sig_mark}{c["symbol"]}</td>'
             f'<td>{c["name"]}</td>'
             f'<td>{c["last_regime"]}</td>'
@@ -975,7 +975,7 @@ def build_watchlist_html(
   <th>損益%</th><th>損益(円)</th><th>保有</th><th>理由</th><th>レジーム</th>
 </tr></thead><tbody>{t_rows}</tbody></table>"""
         rows += (
-            f'<tr id="d_{sym_id}" class="detail-row" style="display:none">'
+            f'<tr class="detail-row" style="display:none">'
             f'<td colspan="99"><div class="detail-inner">{sections}</div></td>'
             f'</tr>\n'
         )
@@ -1059,16 +1059,13 @@ tr.hold>td{{background:rgba(251,191,36,.06)}}
 
 <div class="footer">★ = 本日シグナルあり（買い指値注文を出す候補）</div>
 <script>
-function toggleDetail(id){{
-  var r=document.getElementById('d_'+id);
-  if(!r)return;
-  var open=r.style.display==='table-row';
-  r.style.display=open?'none':'table-row';
-  var sym=r.previousElementSibling;
-  if(sym){{
-    var td=sym.querySelector('td');
-    if(td) td.textContent=td.textContent.replace(/^[▶▼]\u00a0/,''+(open?'▶\u00a0':'▼\u00a0'));
-  }}
+function toggleDetail(row){{
+  var next=row.nextElementSibling;
+  if(!next||!next.classList.contains('detail-row'))return;
+  var open=next.style.display==='table-row';
+  next.style.display=open?'none':'table-row';
+  var td=row.querySelector('td');
+  if(td)td.textContent=td.textContent.replace(/^[▶▼]\u00a0/,''+(open?'▶\u00a0':'▼\u00a0'));
 }}
 </script>
 </body></html>"""

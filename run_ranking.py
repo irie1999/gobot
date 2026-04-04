@@ -103,15 +103,6 @@ def build_combined_html(tabs: list[tuple[str, str | None]], scan_dt: str) -> Pat
         body = re.sub(r'<script[^>]*>.*?</script>', '', body,
                       flags=re.DOTALL | re.IGNORECASE)
 
-        # タブ間でIDが重複しないようにタブ番号でプレフィックスを付ける
-        tab_idx = len(tab_bodies)
-        body = re.sub(r'id="d_', f'id="d_t{tab_idx}_', body)
-        body = re.sub(r"id='d_", f"id='d_t{tab_idx}_", body)
-        body = re.sub(r'onclick="toggleDetail\(\'',
-                      f'onclick="toggleDetail(\'t{tab_idx}_', body)
-        body = re.sub(r"onclick=\"toggleDetail\('",
-                      f"onclick=\"toggleDetail('t{tab_idx}_", body)
-
         tab_bodies.append(body.strip())
 
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
@@ -173,19 +164,13 @@ function switchTab(n){{
     t.style.display=i===n?'block':'none';
   }});
 }}
-function toggleDetail(id){{
-  var r=document.getElementById('d_'+id);
-  if(!r)return;
-  var open=r.style.display==='table-row';
-  r.style.display=open?'none':'table-row';
-  var sym=r.previousElementSibling;
-  if(sym){{
-    var td=sym.querySelector('td');
-    if(td)td.textContent=td.textContent.replace(
-      /^[\u25b6\u25bc]\u00a0/,
-      ''+(open?'\u25b6\u00a0':'\u25bc\u00a0')
-    );
-  }}
+function toggleDetail(row){{
+  var next=row.nextElementSibling;
+  if(!next||!next.classList.contains('detail-row'))return;
+  var open=next.style.display==='table-row';
+  next.style.display=open?'none':'table-row';
+  var td=row.querySelector('td');
+  if(td)td.textContent=td.textContent.replace(/^[\u25b6\u25bc]\u00a0/,''+(open?'\u25b6\u00a0':'\u25bc\u00a0'));
 }}
 </script>
 </body>
