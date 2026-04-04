@@ -724,7 +724,6 @@ def main() -> None:
         path = build_watchlist_html(candidates, periods)
         print(f"\nHTML: {path.resolve()}")
         if not args.no_browser:
-            import webbrowser
             webbrowser.open(f"file://{path.resolve()}")
         return
 
