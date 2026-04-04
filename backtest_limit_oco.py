@@ -55,9 +55,10 @@ DEFAULT_PARAMS = dict(
 
 # ── 監視銘柄選定パラメーター ─────────────────────────────────────
 WATCHLIST_PERIODS = [30, 90, 180, 365]   # 1か月/3か月/6か月/1年
-WL_MIN_TRADES     = 3
-WL_MIN_WR         = 60.0
-WL_MIN_PF         = 1.2
+WL_MIN_TRADES     = 1      # 取引ありのピリオドで判定（0件は除外）
+WL_MIN_WR         = 55.0   # 勝率55%以上
+WL_MIN_PF         = 1.0    # PF 1.0以上（損益トントン以上）
+WL_MIN_ACTIVE     = 2      # 取引ありのピリオドが最低この数必要
 
 # ── グリッドサーチ候補 ───────────────────────────────────────────
 GRID = dict(
@@ -540,9 +541,11 @@ def _process_symbol_multiperiod(symbol, name, periods):
 
 
 def _passes_watchlist_filter(period_results):
-    for days, s in period_results.items():
-        if s["n"] < WL_MIN_TRADES:
-            return False
+    # 取引ありのピリオドのみ判定（取引0件のピリオドはスキップ）
+    active = [(days, s) for days, s in period_results.items() if s["n"] >= WL_MIN_TRADES]
+    if len(active) < WL_MIN_ACTIVE:
+        return False  # 取引のあるピリオドが少なすぎる
+    for days, s in active:
         if pd.isna(s["wr"]) or s["wr"] < WL_MIN_WR:
             return False
         pf = s["pf"]
