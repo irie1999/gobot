@@ -853,7 +853,7 @@ def main() -> None:
         print()
         # フィルターなし・全銘柄を利益順にソート
         candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
-        candidates.sort(key=lambda r: -sum(s.get("total", 0) for s in r["period_results"].values()))
+        candidates.sort(key=lambda r: (-sum(s.get("total", 0) for s in r["period_results"].values()), r["symbol"]))
         print(f"\nスキャン結果（利益順）: {len(candidates)}銘柄")
         print(f"  {'':2} {'コード':<10} {'銘柄名':<22} " + "  ".join(f"{d}日" .ljust(28) for d in sorted(periods)))
         print(f"  {'':2} {'':10} {'':22} " + "  ".join("勝率   PF    損益(円)".ljust(28) for _ in periods))
