@@ -51,6 +51,7 @@ BB_STD         = 2.0
 KC_PERIOD      = 20
 KC_ATR_MULT    = 1.5
 MOM_PERIOD     = 12
+MA_PERIOD      = 200
 STOP_ATR_MULT  = 1.5
 PROF_ATR_MULT  = 2.5
 MAX_HOLD       = 10
@@ -153,7 +154,7 @@ def calc(df: pd.DataFrame) -> pd.DataFrame:
     df["atr"] = tr.ewm(com=13, adjust=False).mean()
 
     # MA200
-    df["ma200"] = c.rolling(200).mean()
+    df["ma200"] = c.rolling(MA_PERIOD).mean()
 
     # ボリンジャーバンド (20, 2σ)
     bb_mid        = c.rolling(BB_PERIOD).mean()
