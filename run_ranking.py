@@ -35,10 +35,11 @@ WEIGHTS   = {30: 0.50, 90: 0.25, 180: 0.15, 365: 0.10}
 TOP_N     = 20
 
 STRATEGIES = [
-    ("limit_oco",         "backtest_limit_oco.py",         "指値OCO戦略"),
-    ("adaptive_mr",       "backtest_adaptive_mr.py",       "アダプティブMR戦略"),
-    ("donchian_pullback", "backtest_donchian_pullback.py", "ドンチャン押し目戦略"),
-    ("bb_volume",         "backtest_bb_volume.py",         "BB出来高戦略"),
+    ("limit_oco",         "backtest_limit_oco.py",          "指値OCO戦略"),
+    ("adaptive_mr",       "backtest_adaptive_mr.py",        "アダプティブMR戦略"),
+    ("donchian_pullback", "backtest_donchian_pullback.py",  "ドンチャン押し目戦略"),
+    ("bb_volume",         "backtest_bb_volume.py",          "BB出来高戦略"),
+    ("strong_pullback",   "backtest_strong_pullback.py",    "強い株の押し目戦略"),
 ]
 
 HTML_GLOBS = {
@@ -46,6 +47,7 @@ HTML_GLOBS = {
     "adaptive_mr":       "watchlist_adaptive_mr_*.html",
     "donchian_pullback": "watchlist_donchian_*.html",
     "bb_volume":         "watchlist_bb_vol_*.html",
+    "strong_pullback":   "watchlist_strong_pullback_*.html",
 }
 
 
