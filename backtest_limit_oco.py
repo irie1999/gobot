@@ -629,21 +629,26 @@ tr:hover>td{{background:#1b1f35}}
 
 # ── メイン ────────────────────────────────────────────────────────
 def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
-    import importlib.util
-    if universe is None:
-        for candidate in ["symbols_listed_prime.py",
-                          "symbols_listed_standard.py",
-                          "symbols_listed_all.py"]:
-            p = Path(candidate)
-            if p.exists():
-                spec = importlib.util.spec_from_file_location("_listed", p)
-                mod  = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                print(f"  銘柄ユニバース: {candidate} ({len(mod.SYMBOLS)}銘柄)")
-                return mod.SYMBOLS
+    """ユニバース名に応じて銘柄リストを返す。
+    watch : 監視銘柄 / 225 : 日経225 / all : 全上場銘柄
+    """
+    if universe == "watch":
+        from symbols_watch_rsi2 import SYMBOLS as _W
+        return list(_W)
+    if universe == "all":
+        _p = Path("symbols_listed_all.py")
+        if _p.exists():
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location("_listed_all", _p)
+            _mod  = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            print(f"  銘柄ユニバース: 全上場銘柄 ({len(_mod.SYMBOLS)}銘柄)")
+            return list(_mod.SYMBOLS)
+        print("  ※ symbols_listed_all.py が見つかりません。日経225を使用します。")
+    # "225" または None またはその他 → 日経225
     from symbols_all import SYMBOLS as _S
     print(f"  銘柄ユニバース: 日経225 ({len(_S)}銘柄)")
-    return _S
+    return list(_S)
 
 
 def _run_single(sym: str, name: str, backtest_days: int, optimize: bool) -> dict | None:
@@ -680,7 +685,8 @@ def main() -> None:
     parser.add_argument("--symbol",   help="個別銘柄コード（例: 7203.T）")
     parser.add_argument("--optimize", action="store_true", help="パラメーター最適化（グリッドサーチ）")
     parser.add_argument("--days",     type=int, default=BACKTEST_DAYS, help="バックテスト期間（日）")
-    parser.add_argument("--universe", default=None, help="225 / prime / standard / all")
+    parser.add_argument("--universe", default="225", choices=["watch", "225", "all"],
+                        help="銘柄ユニバース: watch（監視銘柄）/ 225（日経225）/ all（全上場銘柄）")
     parser.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
     parser.add_argument("--watchlist", action="store_true", help="4期間(30/90/180/365日)バックテストで監視銘柄を選定")
     args = parser.parse_args()

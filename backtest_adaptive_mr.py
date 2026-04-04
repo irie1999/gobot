@@ -88,9 +88,25 @@ except ImportError:
 
 
 def _load_symbols(universe: str) -> list[tuple[str, str]]:
-    """ユニバース名に応じて銘柄リストを返す。"""
+    """ユニバース名に応じて銘柄リストを返す。
+    watch : 監視銘柄（symbols_watch_rsi2.py）
+    225   : 日経225（symbols_all.py）
+    all   : 全上場銘柄（symbols_listed_all.py、なければ日経225）
+    """
+    if universe == "225":
+        from symbols_all import SYMBOLS as _S225
+        return list(_S225)
     if universe == "all":
-        return list(_ALL_SYMBOLS)
+        _p = Path("symbols_listed_all.py")
+        if _p.exists():
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location("_listed_all", _p)
+            _mod  = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            return list(_mod.SYMBOLS)
+        print("  ※ symbols_listed_all.py が見つかりません。日経225を使用します。")
+        from symbols_all import SYMBOLS as _S225
+        return list(_S225)
     return list(_WATCH_SYMBOLS)
 
 
@@ -960,8 +976,8 @@ def main() -> None:
     parser.add_argument("--days",       type=int,  default=BACKTEST_DAYS,
                         help=f"バックテスト日数（デフォルト: {BACKTEST_DAYS}）")
     parser.add_argument("--universe",   type=str,  default="watch",
-                        choices=["watch", "all"],
-                        help="銘柄ユニバース: watch（監視銘柄）または all（日経225）")
+                        choices=["watch", "225", "all"],
+                        help="銘柄ユニバース: watch（監視銘柄）/ 225（日経225）/ all（全上場銘柄）")
     parser.add_argument("--watchlist",  action="store_true",
                         help=f"5期間({'/'.join(str(p) for p in WATCHLIST_PERIODS)}日)バックテストで監視銘柄を選定")
     parser.add_argument("--no-browser", action="store_true",

@@ -1,13 +1,26 @@
 """
-BB下限＋出来高急増 指値エントリー バックテスト
-================================================
-- Signal: close <= BB lower band AND volume > 2x average AND close > MA200
-- Entry: Limit order at BB lower band * 0.999
-- Exit: BB mid band (profit), -1.5xATR (stop), max 15 days
-Usage:
-  python backtest_bb_volume.py
-  python backtest_bb_volume.py --symbol 7203.T
-  python backtest_bb_volume.py --universe all
+BB下限＋出来高急増 指値エントリー バックテスト & シグナルスキャン
+──────────────────────────────────────────────────────────
+■ 戦略概要
+  1. シグナル判定（終値ベース）
+     - 終値 <= ボリンジャーバンド下限
+     - 出来高 > 20日平均出来高 × 2.0（急増）
+     - 終値 > MA200（上昇トレンド）
+
+  2. 指値エントリー（翌日から有効）
+     - 指値価格 = BB下限 × (1 - 0.001)
+     - 有効日数 = 3日
+
+  3. OCO決済
+     - 目標: BB中央バンド（シグナル時点）
+     - 損切り: エントリー価格 - ATR × 1.5
+     - 最大保有: 15日
+
+■ 実行方法
+  python backtest_bb_volume.py                   # 全銘柄スキャン
+  python backtest_bb_volume.py --symbol 7203.T   # 個別銘柄詳細
+  python backtest_bb_volume.py --days 365        # バックテスト期間変更
+  python backtest_bb_volume.py --no-browser      # ブラウザ自動起動なし
 """
 
 import io
@@ -29,6 +42,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+# ── 定数 ─────────────────────────────────────────────────────
 WORKERS        = 4
 POSITION_SIZE  = 100_000
 BB_PERIOD      = 20
@@ -41,29 +55,46 @@ ENTRY_EXPIRE   = 3
 MAX_HOLD       = 15
 MA_FILTER      = 200
 JST            = timezone(timedelta(hours=9))
-
-WATCHLIST_PERIODS = [30, 90, 180, 365]
-WL_MIN_TRADES     = 3
-WL_MIN_WR         = 60.0
-WL_MIN_PF         = 1.2
 _TODAY         = pd.Timestamp(datetime.now(tz=JST).date())
 _CACHE_DIR     = Path(".rsi2_cache")
 
+BACKTEST_DAYS  = 365
+
+# ── 銘柄ユニバース ────────────────────────────────────────────
 from symbols_watch_rsi2 import SYMBOLS as _WATCH_SYMBOLS
+
 try:
-    from rsi2 import SYMBOLS as _ALL_SYMBOLS
+    from symbols_all import SYMBOLS as _ALL_SYMBOLS
 except ImportError:
     _ALL_SYMBOLS = _WATCH_SYMBOLS
 
 
-def _load_symbols(universe):
+def _load_symbols(universe: str) -> list[tuple[str, str]]:
+    """ユニバース名に応じて銘柄リストを返す。
+    watch : 監視銘柄 / 225 : 日経225 / all : 全上場銘柄
+    """
+    if universe == "225":
+        from symbols_all import SYMBOLS as _S225
+        return list(_S225)
     if universe == "all":
-        return list(_ALL_SYMBOLS)
+        _p = Path("symbols_listed_all.py")
+        if _p.exists():
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location("_listed_all", _p)
+            _mod  = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            return list(_mod.SYMBOLS)
+        print("  ※ symbols_listed_all.py が見つかりません。日経225を使用します。")
+        from symbols_all import SYMBOLS as _S225
+        return list(_S225)
     return list(_WATCH_SYMBOLS)
 
 
-def fetch(symbol, backtest_days):
+# ── データ取得 ────────────────────────────────────────────────
+def fetch(symbol: str, backtest_days: int) -> "pd.DataFrame | None":
+    """永続キャッシュ優先（.rsi2_cache/*.pkl）・フォールバックでyfinanceダウンロード。"""
     _CACHE_DIR.mkdir(exist_ok=True)
+
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
@@ -75,6 +106,7 @@ def fetch(symbol, backtest_days):
                     return df
         except Exception:
             pass
+
     buf_days  = 200 + 30
     total_cal = int((backtest_days + buf_days) * 1.5)
     now_jst   = datetime.now(JST)
@@ -105,185 +137,256 @@ def fetch(symbol, backtest_days):
         raw = raw.dropna(subset=["close"])
         if len(raw) < 210:
             return None
-        df = pd.DataFrame({
+        return pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw.get("volume", pd.Series(0, index=raw.index)).to_numpy(dtype=float),
         }, index=raw.index)
-        with open(persistent, "wb") as f:
-            pickle.dump(df, f)
-        return df
     except Exception:
         return None
 
 
-def calc(df):
+# ── 指標計算 ──────────────────────────────────────────────────
+def calc(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    BB下限＋出来高急増シグナルに必要な指標を計算する。
+
+    追加列:
+      ma200     : 200日移動平均（トレンドフィルター）
+      atr       : ATR14 (Wilder smoothing, com=13)
+      bb_mid    : ボリンジャーバンド中央（20日SMA）
+      bb_upper  : BB上限（+2σ）
+      bb_lower  : BB下限（-2σ）
+      vol_ma    : 出来高20日移動平均
+      vol_ratio : 出来高 / vol_ma
+      signal    : エントリーシグナル（bool）
+    """
     df   = df.copy()
     c    = df["close"]
     h    = df["high"]
     l    = df["low"]
-    v    = df["volume"]
     prev = c.shift(1)
 
-    df["ma200"]   = c.rolling(MA_FILTER).mean()
-    tr            = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
-    df["atr"]     = tr.ewm(com=13, adjust=False).mean()
-    df["bb_mid"]  = c.rolling(BB_PERIOD).mean()
+    # MA200
+    df["ma200"] = c.rolling(MA_FILTER).mean()
+
+    # ATR14 — Wilder smoothing (com=13)
+    tr          = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
+    df["atr"]   = tr.ewm(com=13, adjust=False).mean()
+
+    # ボリンジャーバンド (BB_PERIOD, BB_STD σ)
+    bb_mid        = c.rolling(BB_PERIOD).mean()
     bb_std_s      = c.rolling(BB_PERIOD).std()
-    df["bb_upper"] = df["bb_mid"] + BB_STD * bb_std_s
-    df["bb_lower"] = df["bb_mid"] - BB_STD * bb_std_s
-    df["vol_ma"]   = v.rolling(VOL_PERIOD).mean()
-    df["vol_ratio"] = v / df["vol_ma"].replace(0, np.nan)
-    df["signal"]   = (
+    df["bb_mid"]  = bb_mid
+    df["bb_upper"]= bb_mid + BB_STD * bb_std_s
+    df["bb_lower"]= bb_mid - BB_STD * bb_std_s
+
+    # 出来高指標
+    vol_ma         = df["volume"].rolling(VOL_PERIOD).mean()
+    df["vol_ma"]   = vol_ma
+    df["vol_ratio"]= df["volume"] / vol_ma.replace(0, np.nan)
+
+    # シグナル: 終値 <= BB下限 & 出来高急増 & MA200上
+    df["signal"] = (
         (c <= df["bb_lower"]) &
-        (v > VOL_SURGE * df["vol_ma"]) &
+        (df["volume"] > VOL_SURGE * vol_ma) &
         (c > df["ma200"])
     )
+
     return df
 
 
-def _has_signal_today(df):
-    if len(df) < 2:
-        return None
-    last      = df.iloc[-1]
-    bb_lower  = last.get("bb_lower", float("nan"))
-    bb_mid    = last.get("bb_mid",   float("nan"))
-    atr       = last.get("atr",      float("nan"))
-    vol_ratio = last.get("vol_ratio", float("nan"))
-    if not last.get("signal", False):
-        return None
-    if pd.isna(bb_lower) or pd.isna(atr):
-        return None
-    limit_p = bb_lower * (1 - LIMIT_BELOW_BB)
-    return {
-        "close":       float(last["close"]),
-        "bb_lower":    float(bb_lower),
-        "bb_mid":      float(bb_mid),
-        "atr":         float(atr),
-        "vol_ratio":   float(vol_ratio) if not pd.isna(vol_ratio) else float("nan"),
-        "limit_price": limit_p,
-        "stop":        limit_p - STOP_ATR_MULT * atr,
-        "target":      float(bb_mid),
-    }
+# ── バックテスト（指値エントリー + BB中央バンド目標）──────────
+def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
+    """
+    BB下限タッチ＋出来高急増シグナルに基づく指値エントリーバックテスト。
 
-
-def backtest_bb_vol(df, backtest_days):
-    cutoff = pd.Timestamp(_TODAY - timedelta(days=backtest_days))
-    df = df[df.index >= cutoff].copy()
+    エントリー: 前バーにsignal==True → 翌日以降 limit_price=bb_lower*(1-LIMIT_BELOW_BB) 指値
+    目標: シグナル時点の bb_mid
+    損切り: entry_p - STOP_ATR_MULT * entry_atr
+    有効期限: ENTRY_EXPIRE 日
+    最大保有: MAX_HOLD 日
+    """
+    cutoff = pd.Timestamp(_TODAY - pd.Timedelta(days=backtest_days))
+    df     = df[df.index >= cutoff].copy()
     if len(df) < 3:
         return []
 
-    trades        = []
-    in_pos        = False
+    trades: list[dict] = []
+
+    # 状態変数
+    state         = "idle"    # idle / pending / in_pos
+    limit_price   = 0.0
+    entry_target  = 0.0       # bb_mid at signal time (target)
+    entry_atr     = 0.0
     entry_p       = 0.0
     entry_dt      = None
-    entry_atr     = 0.0
-    entry_target  = 0.0
-    pending_order = None
+    stop_p        = 0.0
+    target_p      = 0.0
+    days_pending  = 0
 
     for i in range(1, len(df)):
         row  = df.iloc[i]
         prev = df.iloc[i - 1]
         dt   = df.index[i]
-        op   = float(row["open"])
-        hi   = float(row["high"])
-        lo   = float(row["low"])
-        cl   = float(row["close"])
 
-        if in_pos:
-            hold_days   = (dt - entry_dt).days
-            stop_level  = entry_p - STOP_ATR_MULT * entry_atr
-            target_level = entry_target
+        op = float(row["open"])
+        hi = float(row["high"])
+        lo = float(row["low"])
+        cl = float(row["close"])
 
-            exit_p = None
-            reason = None
-            if op <= stop_level:
-                exit_p = op
-                reason = "ギャップストップ"
-            elif lo <= stop_level:
-                exit_p = stop_level
-                reason = "ストップロス"
-            elif hi >= target_level:
-                exit_p = target_level
-                reason = "BBミッド到達"
-            elif hold_days >= MAX_HOLD:
-                exit_p = cl
-                reason = f"最大{MAX_HOLD}日"
+        # ── pending: 指値注文の約定チェック ──────────────────────
+        if state == "pending":
+            days_pending += 1
+
+            if days_pending > ENTRY_EXPIRE:
+                state        = "idle"
+                days_pending = 0
+
+            elif lo <= limit_price:
+                entry_p      = limit_price
+                entry_dt     = dt
+                stop_p       = entry_p - STOP_ATR_MULT * entry_atr
+                target_p     = entry_target
+                state        = "in_pos"
+                days_pending = 0
+
+                # 約定同日に損切り／目標到達チェック
+                exit_p = exit_reason = None
+                if op <= stop_p:
+                    exit_p      = op
+                    exit_reason = "ギャップストップ"
+                elif lo <= stop_p:
+                    exit_p      = stop_p
+                    exit_reason = "ストップロス"
+                elif hi >= target_p:
+                    exit_p      = target_p
+                    exit_reason = "BBミッド到達"
+
+                if exit_p is not None:
+                    qty = max(int(POSITION_SIZE / entry_p), 1)
+                    pnl = (exit_p - entry_p) / entry_p * POSITION_SIZE
+                    pct = (exit_p - entry_p) / entry_p * 100
+                    trades.append(dict(
+                        entry_dt=entry_dt, exit_dt=dt,
+                        entry_p=entry_p, exit_p=exit_p,
+                        limit_p=limit_price, stop_p=stop_p, target_p=target_p,
+                        atr=entry_atr, pnl=pnl, pct=pct, hold=0,
+                        reason=exit_reason,
+                    ))
+                    state = "idle"
+            continue
+
+        # ── in_pos: 決済チェック ──────────────────────────────────
+        if state == "in_pos":
+            hold = (dt - entry_dt).days
+            exit_p = exit_reason = None
+
+            if op <= stop_p:
+                exit_p      = op
+                exit_reason = "ギャップストップ"
+            elif lo <= stop_p:
+                exit_p      = stop_p
+                exit_reason = "ストップロス"
+            elif hi >= target_p:
+                exit_p      = target_p
+                exit_reason = "BBミッド到達"
+            elif hold >= MAX_HOLD:
+                exit_p      = cl
+                exit_reason = f"最大{MAX_HOLD}日"
 
             if exit_p is not None:
                 pnl = (exit_p - entry_p) / entry_p * POSITION_SIZE
                 pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
-                    entry_dt = entry_dt,
-                    exit_dt  = dt,
-                    entry_p  = entry_p,
-                    exit_p   = exit_p,
-                    limit_p  = entry_p,
-                    stop_p   = entry_p - STOP_ATR_MULT * entry_atr,
-                    target_p = entry_target,
-                    atr      = entry_atr,
-                    pnl      = pnl,
-                    pct      = pct,
-                    hold     = hold_days,
-                    reason   = reason,
+                    entry_dt=entry_dt, exit_dt=dt,
+                    entry_p=entry_p, exit_p=exit_p,
+                    limit_p=limit_price, stop_p=stop_p, target_p=target_p,
+                    atr=entry_atr, pnl=pnl, pct=pct, hold=hold,
+                    reason=exit_reason,
                 ))
-                in_pos        = False
-                pending_order = None
+                state = "idle"
             continue
 
-        if pending_order is not None:
-            age = (dt - pending_order["placed_dt"]).days
-            if age > ENTRY_EXPIRE:
-                pending_order = None
-            elif lo <= pending_order["limit_price"]:
-                entry_p      = pending_order["limit_price"]
-                entry_atr    = pending_order["atr"]
-                entry_target = pending_order["bb_mid"]
-                entry_dt     = dt
-                in_pos       = True
+        # ── idle: シグナル判定 ────────────────────────────────────
+        if state == "idle":
+            if not bool(prev.get("signal", False)):
+                continue
+            bb_lower_p = float(prev.get("bb_lower", float("nan")))
+            bb_mid_p   = float(prev.get("bb_mid",   float("nan")))
+            atr_p      = float(prev.get("atr",      float("nan")))
+            if pd.isna(bb_lower_p) or pd.isna(bb_mid_p) or pd.isna(atr_p):
                 continue
 
-        if not in_pos and pending_order is None:
-            if prev.get("signal", False):
-                bb_lower = prev.get("bb_lower", float("nan"))
-                bb_mid   = prev.get("bb_mid",   float("nan"))
-                prev_atr = prev.get("atr",       float("nan"))
-                if not pd.isna(bb_lower) and not pd.isna(prev_atr):
-                    pending_order = {
-                        "limit_price": float(bb_lower) * (1 - LIMIT_BELOW_BB),
-                        "atr":         float(prev_atr),
-                        "bb_mid":      float(bb_mid),
-                        "placed_dt":   dt,
-                    }
+            limit_price  = bb_lower_p * (1 - LIMIT_BELOW_BB)
+            entry_target = bb_mid_p
+            entry_atr    = atr_p
+            state        = "pending"
+            days_pending = 0
 
-    if in_pos:
+    # 未決済ポジション（バックテスト最終日）
+    if state == "in_pos":
         last_cl = float(df.iloc[-1]["close"])
-        pnl = (last_cl - entry_p) / entry_p * POSITION_SIZE
-        pct = (last_cl - entry_p) / entry_p * 100
+        last_dt = df.index[-1]
+        hold    = (last_dt - entry_dt).days
+        pnl     = (last_cl - entry_p) / entry_p * POSITION_SIZE
+        pct     = (last_cl - entry_p) / entry_p * 100
         trades.append(dict(
-            entry_dt = entry_dt,
-            exit_dt  = df.index[-1],
-            entry_p  = entry_p,
-            exit_p   = last_cl,
-            limit_p  = entry_p,
-            stop_p   = entry_p - STOP_ATR_MULT * entry_atr,
-            target_p = entry_target,
-            atr      = entry_atr,
-            pnl      = pnl,
-            pct      = pct,
-            hold     = (df.index[-1] - entry_dt).days,
-            reason   = "保有中",
+            entry_dt=entry_dt, exit_dt=last_dt,
+            entry_p=entry_p, exit_p=last_cl,
+            limit_p=limit_price, stop_p=stop_p, target_p=target_p,
+            atr=entry_atr, pnl=pnl, pct=pct, hold=hold,
+            reason="保有中",
         ))
+
     return trades
 
 
-def _process_symbol(symbol, name, backtest_days):
+# ── 今日のシグナル判定 ────────────────────────────────────────
+def _has_signal_today(df: pd.DataFrame) -> "dict | None":
+    """最新バー（今日）のBB下限＋出来高急増シグナルを判定する。"""
+    if len(df) < 2:
+        return None
+    last = df.iloc[-1]
+
+    sig       = bool(last.get("signal", False))
+    bb_lower  = float(last.get("bb_lower",  float("nan")))
+    bb_mid    = float(last.get("bb_mid",    float("nan")))
+    atr       = float(last.get("atr",       float("nan")))
+    vol_ratio = float(last.get("vol_ratio", float("nan")))
+    close     = float(last["close"])
+
+    if not sig:
+        return None
+    if pd.isna(bb_lower) or pd.isna(atr):
+        return None
+
+    lp = bb_lower * (1 - LIMIT_BELOW_BB)
+    return dict(
+        close       = close,
+        bb_lower    = bb_lower,
+        bb_mid      = bb_mid,
+        atr         = atr,
+        vol_ratio   = vol_ratio,
+        limit_price = lp,
+        stop        = lp - STOP_ATR_MULT * atr,
+        target      = bb_mid,
+    )
+
+
+# ── 1銘柄処理（スレッドプール用） ────────────────────────────
+def _process_symbol(
+    symbol: str,
+    name: str,
+    backtest_days: int,
+) -> "dict | None":
     df = fetch(symbol, backtest_days)
     if df is None:
         return None
     df = calc(df)
+
     trades    = backtest_bb_vol(df, backtest_days)
     today_sig = _has_signal_today(df)
     wins      = [t for t in trades if t["pnl"] > 0]
@@ -296,6 +399,7 @@ def _process_symbol(symbol, name, backtest_days):
         if losses and sum(t["pnl"] for t in losses) != 0
         else float("inf")
     )
+
     return dict(
         symbol      = symbol,
         name        = name,
@@ -309,88 +413,137 @@ def _process_symbol(symbol, name, backtest_days):
     )
 
 
-def build_html(signals, scan_results, backtest_days, universe):
+# ── HTML レポート生成 ─────────────────────────────────────────
+_CSS = """\
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
+     background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}
+h1{font-size:1.4em;color:#fff;border-left:4px solid #38bdf8;padding-left:12px;margin-bottom:6px}
+h2{font-size:1.1em;color:#e2e8f0;margin:24px 0 8px;border-left:3px solid #a78bfa;padding-left:10px}
+.meta{color:#666;font-size:0.82em;margin:2px 0 8px 16px}
+.cards{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
+.card{background:#16192a;border:1px solid #252840;border-radius:10px;padding:14px 20px;min-width:130px}
+.clabel{font-size:0.72em;color:#777;letter-spacing:.05em}
+.cval{font-size:1.55em;font-weight:700;margin-top:3px}
+.pos{color:#4ade80}.neg{color:#f87171}.neu{color:#c8cfe8}
+.section{background:#11141f;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0}
+.section-title{font-size:1.0em;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;
+               margin-bottom:12px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:0.85em}
+th{background:#16192a;color:#888;padding:8px 12px;text-align:right;
+   border-bottom:1px solid #252840;white-space:nowrap}
+th:first-child,th:nth-child(2),th:nth-child(3){text-align:left}
+td{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}
+td:first-child,td:nth-child(2),td:nth-child(3){text-align:left}
+tr.win>td{background:rgba(74,222,128,.04)}
+tr.lose>td{background:rgba(248,113,113,.04)}
+tr.hold>td{background:rgba(251,191,36,.06)}
+tr:hover>td{background:#1b1f35!important}
+.detail-section{background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:20px;margin:24px 0}
+.name-label{color:#94a3b8;font-size:0.85em;font-weight:400}
+.detail-stats{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 14px;font-size:0.88em;color:#888}
+.detail-stats b{color:#dde1ec}
+.footer{margin-top:32px;color:#444;font-size:0.78em;text-align:right}
+"""
+
+
+def build_html(
+    signals: list[dict],
+    scan_results: list[dict],
+    backtest_days: int,
+    universe: str,
+) -> Path:
     today_str = _TODAY.strftime("%Y-%m-%d")
-    since_str = (_TODAY - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    since_str = (_TODAY - pd.Timedelta(days=backtest_days)).strftime("%Y-%m-%d")
     gen_time  = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
 
+    # シグナルテーブル行
     signal_rows = ""
     for s in signals:
-        sym  = s.get("symbol", "")
-        name = s.get("name", "")
-        cl   = s.get("close",       float("nan"))
-        bl   = s.get("bb_lower",    float("nan"))
-        lp   = s.get("limit_price", float("nan"))
-        st   = s.get("stop",        float("nan"))
-        tg   = s.get("target",      float("nan"))
-        atr  = s.get("atr",         float("nan"))
-        vr   = s.get("vol_ratio",   float("nan"))
-        wr   = s.get("win_rate",    float("nan"))
-        pf   = s.get("pf",          float("nan"))
-        wr_s = f"{wr:.1f}%" if not pd.isna(wr) else "N/A"
-        pf_s = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "N/A"
-        vr_s = f"{vr:.1f}x" if not pd.isna(vr) else "—"
-        atr_s = f"{atr:,.0f}" if not pd.isna(atr) else "—"
+        sym       = s.get("symbol",    "")
+        name      = s.get("name",      "")
+        cl        = s.get("close",     float("nan"))
+        bb_lower  = s.get("bb_lower",  float("nan"))
+        bb_mid    = s.get("bb_mid",    float("nan"))
+        atr       = s.get("atr",       float("nan"))
+        vol_ratio = s.get("vol_ratio", float("nan"))
+        lp        = s.get("limit_price", float("nan"))
+        stop_v    = s.get("stop",      float("nan"))
+        wr        = s.get("win_rate",  float("nan"))
+        pf        = s.get("pf",        float("nan"))
+
+        vol_s = f"{vol_ratio:.1f}x" if not pd.isna(vol_ratio) else "—"
+        atr_s = f"{atr:,.0f}"       if not pd.isna(atr)       else "—"
+        wr_s  = f"{wr:.1f}%"        if not pd.isna(wr)        else "N/A"
+        pf_s  = ("inf" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "N/A"
+
         signal_rows += (
             f'<tr>'
-            f'<td><b>{sym}</b></td><td>{name}</td>'
+            f'<td><b>{sym}</b></td>'
+            f'<td>{name}</td>'
             f'<td class="neu">{cl:,.0f}</td>'
-            f'<td class="neu">{bl:,.0f}</td>'
-            f'<td class="pos">{lp:,.0f}</td>'
-            f'<td class="neg">{st:,.0f}</td>'
-            f'<td class="pos">{tg:,.0f}</td>'
+            f'<td class="neg">{bb_lower:,.0f}</td>'
+            f'<td class="pos"><b>{lp:,.0f}</b></td>'
+            f'<td class="neg">{stop_v:,.0f}</td>'
+            f'<td class="pos">{bb_mid:,.0f}</td>'
             f'<td class="neu">{atr_s}</td>'
-            f'<td class="neu">{vr_s}</td>'
-            f'<td class="{"pos" if not pd.isna(wr) and wr>=55 else "neu"}">{wr_s}</td>'
-            f'<td class="{"pos" if not pd.isna(pf) and pf>=1.5 else "neu"}">{pf_s}</td>'
+            f'<td class="pos">{vol_s}</td>'
+            f'<td class="{"pos" if not pd.isna(wr) and wr >= 60 else "neu"}">{wr_s}</td>'
+            f'<td class="{"pos" if not pd.isna(pf) and pf >= 1.5 else "neu"}">{pf_s}</td>'
             f'</tr>\n'
         )
     if not signal_rows:
         signal_rows = '<tr><td colspan="11" style="text-align:center;color:#555;padding:20px">本日シグナルなし</td></tr>\n'
 
+    # 詳細セクション（シグナル銘柄のみ）
     detail_sections = ""
     signal_symbols  = {s["symbol"] for s in signals}
     for r in scan_results:
         if r["symbol"] not in signal_symbols:
             continue
-        trades = r.get("trades_list", [])
-        wins   = [t for t in trades if t["pnl"] > 0]
-        losses = [t for t in trades if t["pnl"] <= 0]
-        total  = sum(t["pnl"] for t in trades)
-        wr_v   = len(wins) / len(trades) * 100 if trades else 0
-        pf_v   = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
-                  if losses and sum(t["pnl"] for t in losses) != 0 else float("inf"))
-        pf_str = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+        trd   = r.get("trades_list", [])
+        wins  = [t for t in trd if t["pnl"] > 0]
+        losses= [t for t in trd if t["pnl"] <= 0]
+        total = sum(t["pnl"] for t in trd)
+        wr_v  = len(wins) / len(trd) * 100 if trd else 0
+        pf_v  = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
+                 if losses and sum(t["pnl"] for t in losses) != 0 else float("inf"))
+        pf_s2 = "inf" if pf_v == float("inf") else f"{pf_v:.2f}"
         tc_cls = "pos" if total >= 0 else "neg"
+
         trade_rows = ""
-        for i, t in enumerate(trades, 1):
+        for i, t in enumerate(trd, 1):
             cls = "hold" if "保有中" in t.get("reason", "") else ("win" if t["pnl"] > 0 else "lose")
             trade_rows += (
                 f'<tr class="{cls}">'
                 f'<td>{i}</td>'
                 f'<td>{t["entry_dt"].strftime("%Y-%m-%d")}</td>'
                 f'<td>{t["exit_dt"].strftime("%Y-%m-%d")}</td>'
-                f'<td>{t.get("limit_p", t["entry_p"]):,.0f}</td>'
+                f'<td>{t["limit_p"]:,.0f}</td>'
                 f'<td>{t["entry_p"]:,.0f}</td>'
+                f'<td>{t["stop_p"]:,.0f}</td>'
+                f'<td>{t["target_p"]:,.0f}</td>'
                 f'<td>{t["exit_p"]:,.0f}</td>'
                 f'<td class="{"pos" if t["pct"]>=0 else "neg"}">{t["pct"]:+.2f}%</td>'
                 f'<td>{t["hold"]}日</td>'
                 f'<td>{t.get("reason","")}</td>'
                 f'</tr>\n'
             )
+
         detail_sections += f"""
 <div class="detail-section">
   <h2>{r["symbol"]} &nbsp;<span class="name-label">{r["name"]}</span></h2>
   <div class="detail-stats">
-    <span>トレード: <b>{len(trades)}</b></span>
-    <span>勝率: <b class="{"pos" if wr_v>=55 else "neu"}">{wr_v:.1f}%</b></span>
-    <span>PF: <b class="{"pos" if pf_v>=1.5 else "neu"}">{pf_str}</b></span>
+    <span>トレード: <b>{len(trd)}</b></span>
+    <span>勝率: <b class="{"pos" if wr_v>=60 else "neu"}">{wr_v:.1f}%</b></span>
+    <span>PF: <b class="{"pos" if pf_v>=1.5 else "neu"}">{pf_s2}</b></span>
     <span>損益: <b class="{tc_cls}">{total:+,.0f}円</b></span>
+    <span>勝/負: <b>{len(wins)}/{len(losses)}</b></span>
   </div>
   <table>
   <thead><tr>
     <th>#</th><th>エントリー</th><th>エグジット</th>
-    <th>指値</th><th>約定価格</th><th>決済価格</th>
+    <th>指値</th><th>約定価格</th><th>損切り</th><th>BBミッド目標</th><th>決済価格</th>
     <th>変化率</th><th>保有日数</th><th>決済理由</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
@@ -398,7 +551,8 @@ def build_html(signals, scan_results, backtest_days, universe):
 </div>
 """
 
-    ranked = sorted(scan_results, key=lambda x: (-x.get("total_pct", 0), x["symbol"]))
+    # スキャン結果テーブル
+    ranked    = sorted(scan_results, key=lambda x: (-x.get("total_pct", 0), x["symbol"]))
     scan_rows = ""
     for rank, r in enumerate(ranked, 1):
         wr_v  = r.get("win_rate", float("nan"))
@@ -408,13 +562,17 @@ def build_html(signals, scan_results, backtest_days, universe):
         tr_n  = r.get("trade_count", 0)
         pcls  = "pos" if tot >= 0 else "neg"
         wr_s  = f"{wr_v:.1f}%" if not pd.isna(wr_v) else "—"
-        pf_s2 = ("∞" if pf_v == float("inf") else f"{pf_v:.2f}") if not pd.isna(pf_v) else "—"
+        pf_s2 = ("inf" if pf_v == float("inf") else f"{pf_v:.2f}") if not pd.isna(pf_v) else "—"
         scan_rows += (
             f'<tr class="{"win" if tot>=0 else "lose"}">'
-            f'<td>{rank}</td><td>{r["symbol"]}</td><td>{r["name"]}</td>'
+            f'<td>{rank}</td>'
+            f'<td>{r["symbol"]}</td>'
+            f'<td>{r["name"]}</td>'
             f'<td class="{pcls}">{tot:+,.0f}円</td>'
             f'<td class="{pcls}">{tp:+.2f}%</td>'
-            f'<td>{wr_s}</td><td>{pf_s2}</td><td>{tr_n}</td>'
+            f'<td>{wr_s}</td>'
+            f'<td>{pf_s2}</td>'
+            f'<td>{tr_n}</td>'
             f'</tr>\n'
         )
 
@@ -431,46 +589,19 @@ def build_html(signals, scan_results, backtest_days, universe):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BB下限＋出来高急増 バックテスト {today_str}</title>
+<title>BB下限+出来高急増 バックテスト {today_str}</title>
 <style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:'Helvetica Neue',Arial,'Hiragino Sans','Noto Sans JP',sans-serif;
-      background:#0f1117;color:#dde1ec;padding:24px;font-size:14px}}
-h1{{font-size:1.4em;color:#fff;border-left:4px solid #38bdf8;padding-left:12px;margin-bottom:6px}}
-h2{{font-size:1.1em;color:#e2e8f0;margin:24px 0 8px;border-left:3px solid #a78bfa;padding-left:10px}}
-.meta{{color:#666;font-size:0.82em;margin:2px 0 8px 16px}}
-.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}}
-.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:14px 20px;min-width:130px}}
-.clabel{{font-size:0.72em;color:#777;letter-spacing:.05em}}
-.cval{{font-size:1.55em;font-weight:700;margin-top:3px}}
-.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
-.section{{background:#11141f;border:1px solid #1e2235;border-radius:10px;padding:16px;margin:20px 0}}
-.section-title{{font-size:1.0em;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;
-                margin-bottom:12px;font-weight:600}}
-table{{width:100%;border-collapse:collapse;font-size:0.85em}}
-th{{background:#16192a;color:#888;padding:8px 12px;text-align:right;
-    border-bottom:1px solid #252840;white-space:nowrap}}
-th:first-child,th:nth-child(2),th:nth-child(3){{text-align:left}}
-td{{padding:7px 12px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
-td:first-child,td:nth-child(2),td:nth-child(3){{text-align:left}}
-tr.win>td{{background:rgba(74,222,128,.04)}}
-tr.lose>td{{background:rgba(248,113,113,.04)}}
-tr.hold>td{{background:rgba(251,191,36,.06)}}
-tr:hover>td{{background:#1b1f35!important}}
-.detail-section{{background:#13162b;border:1px solid #1e2235;border-radius:10px;padding:20px;margin:24px 0}}
-.name-label{{color:#94a3b8;font-size:0.85em;font-weight:400}}
-.detail-stats{{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 14px;font-size:0.88em;color:#888}}
-.detail-stats b{{color:#dde1ec}}
-.footer{{margin-top:32px;color:#444;font-size:0.78em;text-align:right}}
+{_CSS}
 </style>
 </head>
 <body>
-<h1>BB下限＋出来高急増 バックテスト</h1>
+<h1>BB下限+出来高急増 バックテスト</h1>
 <div class="meta">
   期間: {since_str} 〜 {today_str} &nbsp;|&nbsp;
   ユニバース: {universe} ({nuniv}銘柄) &nbsp;|&nbsp;
-  BB: {BB_PERIOD}日/{BB_STD}σ / 出来高急増: {VOL_SURGE}倍 / 損切り: {STOP_ATR_MULT}xATR / 最大{MAX_HOLD}日
+  バックテスト: {backtest_days}日
 </div>
+
 <div class="cards">
   <div class="card"><div class="clabel">本日シグナル</div>
     <div class="cval {"pos" if nsigs > 0 else "neu"}">{nsigs}銘柄</div></div>
@@ -481,18 +612,21 @@ tr:hover>td{{background:#1b1f35!important}}
   <div class="card"><div class="clabel">プラス銘柄</div>
     <div class="cval neu">{plus_count}/{nuniv}</div></div>
 </div>
+
 <div class="section">
-  <div class="section-title">本日のシグナル — BB下限タッチ＋出来高{VOL_SURGE}倍急増</div>
+  <div class="section-title">本日のシグナル — BB下限タッチ + 出来高急増 + MA200上</div>
   <table>
   <thead><tr>
     <th>コード</th><th>銘柄名</th><th>終値</th><th>BB下限</th>
-    <th>指値</th><th>損切り</th><th>BBミッド(目標)</th><th>ATR</th><th>出来高比</th>
-    <th>勝率</th><th>PF</th>
+    <th>指値</th><th>損切り</th><th>BBミッド(目標)</th>
+    <th>ATR</th><th>出来高比</th><th>勝率</th><th>PF</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
   </table>
 </div>
+
 {detail_sections}
+
 <div class="section">
   <div class="section-title">スキャン結果ランキング ({since_str} 〜 {today_str})</div>
   <table>
@@ -503,7 +637,8 @@ tr:hover>td{{background:#1b1f35!important}}
   <tbody>{scan_rows}</tbody>
   </table>
 </div>
-<div class="footer">生成: {gen_time} &nbsp;|&nbsp; BB下限＋出来高急増 指値エントリー</div>
+
+<div class="footer">生成: {gen_time} &nbsp;|&nbsp; BB下限+出来高急増 (BB{BB_PERIOD}/{BB_STD}σ + VOL{VOL_SURGE}x)</div>
 </body></html>"""
 
     fname = f"bb_vol_bt_{today_str}.html"
@@ -512,269 +647,162 @@ tr:hover>td{{background:#1b1f35!important}}
     return path
 
 
-def _calc_period_stats(trades):
-    if not trades:
-        return dict(n=0, wr=float("nan"), pf=float("nan"), total=0.0)
-    wins = [t for t in trades if t["pnl"] > 0]
-    loss = [t for t in trades if t["pnl"] <= 0]
-    wr   = len(wins) / len(trades) * 100
-    ls   = abs(sum(t["pnl"] for t in loss))
-    pf   = sum(t["pnl"] for t in wins) / ls if ls > 0 else float("inf")
-    return dict(n=len(trades), wr=wr, pf=pf, total=sum(t["pnl"] for t in trades))
-
-
-def _process_symbol_multiperiod(symbol, name, periods):
-    max_days = max(periods)
-    df_raw = fetch(symbol, max_days)
-    if df_raw is None:
-        return None
-    df = calc(df_raw)
-    if len(df) < 50:
-        return None
-    period_results = {}
-    for days in periods:
-        trades = backtest_bb_vol(df, days)
-        period_results[days] = _calc_period_stats(trades)
-    today_sig = _has_signal_today(df)
-    return dict(symbol=symbol, name=name, period_results=period_results, today_sig=today_sig)
-
-
-def _passes_watchlist_filter(period_results):
-    for days, s in period_results.items():
-        if s["n"] < WL_MIN_TRADES:
-            return False
-        if pd.isna(s["wr"]) or s["wr"] < WL_MIN_WR:
-            return False
-        pf = s["pf"]
-        if pd.isna(pf) or (pf != float("inf") and pf < WL_MIN_PF):
-            return False
-    return True
-
-
-def build_watchlist_html(candidates, periods):
-    today_str = _TODAY.strftime("%Y-%m-%d")
-    scan_dt   = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
-    periods_s = sorted(periods)
-    period_headers    = "".join(f'<th colspan="3">{d}日</th>' for d in periods_s)
-    period_subheaders = "".join('<th>回数</th><th>勝率</th><th>PF</th>' for _ in periods_s)
-
-    rows = ""
-    for c in candidates:
-        pr  = c["period_results"]
-        sig = c["today_sig"]
-        sig_mark = "★" if sig else ""
-        period_cells = ""
-        for d in periods_s:
-            s    = pr.get(d, {})
-            n    = s.get("n", 0)
-            wr   = s.get("wr", float("nan"))
-            pf   = s.get("pf", float("nan"))
-            wr_s = f"{wr:.0f}%" if not pd.isna(wr) else "—"
-            pf_s = ("∞" if pf == float("inf") else f"{pf:.2f}") if not pd.isna(pf) else "—"
-            wr_cls = "pos" if (not pd.isna(wr) and wr >= WL_MIN_WR) else "neg"
-            pf_cls = "pos" if (pf == float("inf") or (not pd.isna(pf) and pf >= WL_MIN_PF)) else "neg"
-            period_cells += f'<td>{n}</td><td class="{wr_cls}">{wr_s}</td><td class="{pf_cls}">{pf_s}</td>'
-        cl_s = f'{sig["close"]:,.0f}' if sig else "—"
-        lp_s = f'{sig["limit_price"]:,.0f}' if sig else "—"
-        st_s = f'{sig["stop"]:,.0f}' if sig else "—"
-        rows += (
-            f'<tr><td>{sig_mark}{c["symbol"]}</td><td>{c["name"]}</td>'
-            f'<td>{cl_s}</td><td class="pos">{lp_s}</td><td class="neg">{st_s}</td>'
-            + period_cells + f'</tr>\n'
-        )
-
-    signal_count = sum(1 for c in candidates if c["today_sig"])
-    html = f"""<!DOCTYPE html>
-<html lang="ja"><head><meta charset="UTF-8">
-<title>監視銘柄リスト（BB出来高） {today_str}</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f1117;color:#dde1ec;padding:24px;font-size:13px}}
-h1{{font-size:1.35em;color:#fff;border-left:4px solid #38bdf8;padding-left:12px;margin-bottom:6px}}
-.meta{{color:#555;font-size:0.8em;margin:2px 0 16px 16px}}
-.cards{{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0 24px}}
-.card{{background:#16192a;border:1px solid #252840;border-radius:10px;padding:12px 18px;min-width:120px}}
-.clabel{{font-size:0.7em;color:#666}}.cval{{font-size:1.4em;font-weight:700;margin-top:2px}}
-.criteria{{background:#131825;border:1px solid #1e3a5f;border-radius:8px;padding:12px 18px;margin:0 0 20px;font-size:0.85em;color:#7ab3d4}}
-.criteria b{{color:#38bdf8}}
-table{{width:100%;border-collapse:collapse;font-size:0.83em}}
-th{{background:#16192a;color:#666;padding:7px 10px;text-align:right;border-bottom:2px solid #252840;white-space:nowrap}}
-th:first-child,th:nth-child(2),th:nth-child(3),th:nth-child(4),th:nth-child(5){{text-align:left}}
-th[colspan]{{text-align:center;border-left:1px solid #2a2f4a;color:#94a3b8}}
-td{{padding:6px 10px;text-align:right;border-bottom:1px solid #1c1f30;white-space:nowrap}}
-td:first-child,td:nth-child(2),td:nth-child(3),td:nth-child(4),td:nth-child(5){{text-align:left}}
-tr:hover>td{{background:#1b1f35}}
-.pos{{color:#4ade80}}.neg{{color:#f87171}}.neu{{color:#c8cfe8}}
-.footer{{margin-top:28px;color:#333;font-size:0.75em;text-align:right}}
-</style></head><body>
-<h1>監視銘柄リスト — BB下限＋出来高急増戦略</h1>
-<div class="meta">スキャン: {scan_dt} ／ 期間: {', '.join(str(d)+'日' for d in periods_s)}</div>
-<div class="criteria">選定基準（全期間で満たすこと）：<b>取引回数 ≥ {WL_MIN_TRADES}回</b> ／ <b>勝率 ≥ {WL_MIN_WR:.0f}%</b> ／ <b>PF ≥ {WL_MIN_PF}</b></div>
-<div class="cards">
-  <div class="card"><div class="clabel">候補銘柄数</div><div class="cval pos">{len(candidates)}</div></div>
-  <div class="card"><div class="clabel">本日シグナル</div><div class="cval pos">{signal_count}</div></div>
-</div>
-<table><thead>
-<tr><th rowspan="2">コード</th><th rowspan="2">銘柄名</th>
-<th rowspan="2">終値</th><th rowspan="2">指値</th><th rowspan="2">損切り</th>
-{period_headers}</tr>
-<tr>{period_subheaders}</tr>
-</thead><tbody>{rows}</tbody></table>
-<div class="footer">★ = 本日シグナルあり</div>
-</body></html>"""
-    out = Path(f"watchlist_bb_vol_{today_str}.html")
-    out.write_text(html, encoding="utf-8")
-    return out
-
-
-def main():
+# ── メイン処理 ────────────────────────────────────────────────
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="BB下限＋出来高急増 指値エントリー バックテスト",
+        description="BB下限+出来高急増 指値エントリー バックテスト & シグナルスキャン",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--symbol",     default=None)
-    parser.add_argument("--days",       type=int, default=365)
-    parser.add_argument("--universe",   choices=["watch", "all"], default="watch")
-    parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--watchlist", action="store_true", help="4期間(30/90/180/365日)で監視銘柄を選定")
+        epilog="""\
+使用例:
+  python backtest_bb_volume.py                    # 監視銘柄スキャン（1年）
+  python backtest_bb_volume.py --universe all     # 全銘柄スキャン
+  python backtest_bb_volume.py --symbol 7011.T    # 1銘柄詳細
+  python backtest_bb_volume.py --days 180         # 180日バックテスト
+  python backtest_bb_volume.py --no-browser       # ブラウザ自動起動なし
+""")
+    parser.add_argument("--symbol",     type=str, default=None,
+                        help="銘柄コード（省略時はユニバース全体スキャン）")
+    parser.add_argument("--days",       type=int, default=BACKTEST_DAYS,
+                        help=f"バックテスト日数（デフォルト: {BACKTEST_DAYS}）")
+    parser.add_argument("--universe",   type=str, default="watch",
+                        choices=["watch", "225", "all"],
+                        help="銘柄ユニバース: watch（監視銘柄）/ 225（日経225）/ all（全上場銘柄）")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="HTMLレポートをブラウザで自動起動しない")
     args = parser.parse_args()
 
-    if args.watchlist:
-        symbols = _load_symbols(args.universe)
-        periods = WATCHLIST_PERIODS
-        print(f"\n監視銘柄選定モード: {len(symbols)}銘柄 / 期間:{periods}日")
-        print(f"基準: 取引≥{WL_MIN_TRADES} / 勝率≥{WL_MIN_WR}% / PF≥{WL_MIN_PF}")
-        all_results = []
-        done = 0
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = {ex.submit(_process_symbol_multiperiod, sym, name, periods): (sym, name)
-                    for sym, name in symbols}
-            for fut in as_completed(futs):
-                done += 1
+    backtest_days = args.days
+    since_str     = (_TODAY - pd.Timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    today_str     = _TODAY.strftime("%Y-%m-%d")
+
+    # ── 1銘柄モード ──────────────────────────────────────────
+    if args.symbol:
+        sym = args.symbol.upper()
+        if not sym.endswith(".T"):
+            sym += ".T"
+        name = sym
+        print(f"\n  データ取得中: {sym} ...")
+        df = fetch(sym, backtest_days)
+        if df is None:
+            print(f"  エラー: {sym} のデータ取得に失敗しました\n")
+            return
+        df     = calc(df)
+        trades = backtest_bb_vol(df, backtest_days)
+        sig    = _has_signal_today(df)
+
+        wins  = [t for t in trades if t["pnl"] > 0]
+        loss  = [t for t in trades if t["pnl"] <= 0]
+        total = sum(t["pnl"] for t in trades)
+        wr    = len(wins) / len(trades) * 100 if trades else 0
+        pf_v  = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in loss))
+                 if loss and sum(t["pnl"] for t in loss) != 0 else float("inf"))
+        pf_s  = "inf" if pf_v == float("inf") else f"{pf_v:.2f}"
+
+        print(f"\n  [{sym}]  {since_str} 〜 {today_str}  ({backtest_days}日)")
+        print(f"  トレード: {len(trades)}回  勝率: {wr:.1f}%  PF: {pf_s}  損益: {total:+,.0f}円")
+        print()
+        for i, t in enumerate(trades, 1):
+            mark = "★" if "保有中" in t.get("reason", "") else " "
+            print(f" {mark}{i:3d}  "
+                  f"{t['entry_dt'].strftime('%Y-%m-%d')} -> "
+                  f"{t['exit_dt'].strftime('%Y-%m-%d')}  "
+                  f"指値:{t['limit_p']:,.0f}  "
+                  f"約定:{t['entry_p']:,.0f}  "
+                  f"損切:{t['stop_p']:,.0f}  "
+                  f"目標:{t['target_p']:,.0f}  "
+                  f"決済:{t['exit_p']:,.0f}  "
+                  f"{t['pct']:+.2f}%  "
+                  f"{t['hold']}日  "
+                  f"{t.get('reason','')}")
+
+        if sig:
+            print(f"\n  ★ 本日シグナルあり!")
+            print(f"     終値: {sig['close']:,.0f}  BB下限: {sig['bb_lower']:,.0f}  ATR: {sig['atr']:,.0f}")
+            print(f"     指値: {sig['limit_price']:,.0f}  損切り: {sig['stop']:,.0f}  目標(BBミッド): {sig['target']:,.0f}")
+            print(f"     出来高比: {sig['vol_ratio']:.1f}x")
+        else:
+            print(f"\n  本日シグナルなし")
+
+        result_entry = dict(
+            symbol      = sym,
+            name        = name,
+            trades_list = trades,
+            trade_count = len(trades),
+            win_rate    = wr,
+            pf          = pf_v,
+            total       = total,
+            total_pct   = sum(t["pct"] for t in trades),
+            today_sig   = sig,
+        )
+        sigs_list = []
+        if sig:
+            sigs_list = [{**sig, "symbol": sym, "name": name, "win_rate": wr, "pf": pf_v}]
+        path = build_html(sigs_list, [result_entry], backtest_days, args.universe)
+        print(f"\n  HTMLレポート保存: {path}")
+        if not args.no_browser:
+            webbrowser.open(f"file://{path.resolve()}")
+        return
+
+    # ── スキャンモード ────────────────────────────────────────
+    symbols = _load_symbols(args.universe)
+    print(f"\n  BB下限+出来高急増 スキャン")
+    print(f"  {len(symbols)}銘柄  期間: {since_str} 〜 {today_str}  ({backtest_days}日)")
+    print(f"  データ取得・バックテスト中 (並列{WORKERS}スレッド) ...")
+
+    all_results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {
+            executor.submit(_process_symbol, sym, name, backtest_days): (sym, name)
+            for sym, name in symbols
+        }
+        done_count = 0
+        for fut in as_completed(futures):
+            done_count += 1
+            try:
                 r = fut.result()
                 if r:
                     all_results.append(r)
-                if done % 20 == 0 or done == len(symbols):
-                    print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
-        print()
-        candidates = [r for r in all_results if _passes_watchlist_filter(r["period_results"])]
-        candidates.sort(key=lambda r: -r["period_results"].get(max(periods), {}).get("wr", 0))
-        print(f"\n選定結果: {len(candidates)}銘柄")
-        for c in candidates:
-            sig  = c["today_sig"]
-            mark = "★" if sig else "  "
-            pr   = c["period_results"]
-            stats_str = "  ".join(
-                f"{d}日:勝率{pr[d]['wr']:.0f}%/PF{pr[d]['pf']:.1f}" if pr[d]['n'] > 0 else f"{d}日:—"
-                for d in sorted(periods)
-            )
-            print(f"  {mark} {c['symbol']:12} {c['name']:20}  {stats_str}")
-        path = build_watchlist_html(candidates, periods)
-        print(f"\nHTML: {path.resolve()}")
-        if not args.no_browser:
-            webbrowser.open(f"file://{path.resolve()}")
-        return
+            except Exception:
+                pass
+            if done_count % 20 == 0 or done_count == len(symbols):
+                print(f"  {done_count}/{len(symbols)} 完了...", end="\r", flush=True)
+    print()
 
-    if args.symbol:
-        print(f"\n{args.symbol} バックテスト ({args.days}日)")
-        df = fetch(args.symbol, args.days)
-        if df is None:
-            print("データ取得失敗")
-            return
-        df     = calc(df)
-        trades = backtest_bb_vol(df, args.days)
-        sig    = _has_signal_today(df)
-
-        print(f"\n{'#':>3}  {'エントリー':10}  {'エグジット':10}  {'指値':>8}  {'約定':>8}  {'決済':>8}  {'変化率':>7}  {'保有':>4}  決済理由")
-        print("-" * 90)
-        for i, t in enumerate(trades, 1):
-            print(
-                f"{i:>3}  {t['entry_dt'].strftime('%Y-%m-%d'):10}  "
-                f"{t['exit_dt'].strftime('%Y-%m-%d'):10}  "
-                f"{t.get('limit_p', t['entry_p']):>8,.0f}  "
-                f"{t['entry_p']:>8,.0f}  {t['exit_p']:>8,.0f}  "
-                f"{t['pct']:>+6.2f}%  {t['hold']:>3}日  {t.get('reason','')}"
-            )
-        wins   = [t for t in trades if t["pnl"] > 0]
-        losses = [t for t in trades if t["pnl"] <= 0]
-        total  = sum(t["pnl"] for t in trades)
-        wr     = len(wins) / len(trades) * 100 if trades else 0
-        pf     = (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
-                  if losses and sum(t["pnl"] for t in losses) != 0 else float("inf"))
-        print(f"\n合計: {len(trades)}回  勝率: {wr:.1f}%  PF: {'∞' if pf==float('inf') else f'{pf:.2f}'}  損益: {total:+,.0f}円")
-
-        if sig:
-            print(f"\n【本日シグナルあり】")
-            print(f"  終値: {sig['close']:,.0f}  BB下限: {sig['bb_lower']:,.0f}  BBミッド: {sig['bb_mid']:,.0f}")
-            print(f"  指値: {sig['limit_price']:,.0f}  損切り: {sig['stop']:,.0f}  目標: {sig['target']:,.0f}")
-            print(f"  出来高比: {sig['vol_ratio']:.1f}x")
-
-        results = [_process_symbol(args.symbol, "", args.days)]
-        results = [r for r in results if r]
-        sigs    = []
-        if sig:
-            sig["symbol"] = args.symbol
-            sig["name"]   = ""
-            sigs.append(sig)
-        path = build_html(sigs, results, args.days, "single")
-        print(f"\nHTMLレポート: {path.resolve()}")
-        if not args.no_browser:
-            webbrowser.open(f"file://{path.resolve()}")
-        return
-
-    symbols = _load_symbols(args.universe)
-    print(f"\nBB下限＋出来高急増 スキャン ({args.universe}: {len(symbols)}銘柄, {args.days}日)")
-
-    results = []
     signals = []
-    done    = 0
+    for r in all_results:
+        sig = r.get("today_sig")
+        if sig:
+            signals.append({
+                **sig,
+                "symbol":   r["symbol"],
+                "name":     r["name"],
+                "win_rate": r.get("win_rate", float("nan")),
+                "pf":       r.get("pf",       float("nan")),
+            })
 
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(_process_symbol, sym, name, args.days): (sym, name)
-                for sym, name in symbols}
-        for fut in as_completed(futs):
-            done += 1
-            r = fut.result()
-            if r:
-                results.append(r)
-                if r["today_sig"]:
-                    sig = dict(r["today_sig"])
-                    sig["symbol"]   = r["symbol"]
-                    sig["name"]     = r["name"]
-                    sig["win_rate"] = r["win_rate"]
-                    sig["pf"]       = r["pf"]
-                    signals.append(sig)
-            if done % 20 == 0 or done == len(symbols):
-                print(f"  {done}/{len(symbols)} 完了")
+    total_pnl    = sum(r.get("total", 0) for r in all_results)
+    total_trades = sum(r.get("trade_count", 0) for r in all_results)
+    plus_count   = sum(1 for r in all_results if r.get("total", 0) > 0)
 
-    ranked       = sorted(results, key=lambda x: (-x.get("total_pct", 0), x["symbol"]))
-    total_trades = sum(r["trade_count"] for r in results)
-    total_pnl    = sum(r["total"] for r in results)
-    plus_count   = sum(1 for r in results if r["total"] > 0)
-
-    print(f"\n── スキャン結果 ──────────────────────────────────────")
-    print(f"銘柄数: {len(results)}  トレード計: {total_trades}  損益合計: {total_pnl:+,.0f}円  プラス銘柄: {plus_count}")
+    print(f"\n  スキャン完了: {len(all_results)}/{len(symbols)}銘柄処理")
+    print(f"  全損益: {total_pnl:+,.0f}円  トレード: {total_trades}回  "
+          f"プラス銘柄: {plus_count}/{len(all_results)}")
 
     if signals:
-        print(f"\n【本日のシグナル】 {len(signals)}銘柄")
-        for s in signals:
-            print(f"  {s['symbol']:12} {s['name']:20} 終値:{s['close']:>8,.0f}  "
-                  f"指値:{s['limit_price']:>8,.0f}  出来高比:{s.get('vol_ratio',0):.1f}x")
+        print(f"\n  ★ 本日シグナル ({len(signals)}銘柄):")
+        for s in sorted(signals, key=lambda x: x["symbol"]):
+            print(f"     {s['symbol']:10s} {s['name'][:14]:<14}  "
+                  f"終値:{s['close']:,.0f}  "
+                  f"BB下限:{s['bb_lower']:,.0f}  "
+                  f"指値:{s['limit_price']:,.0f}  "
+                  f"損切:{s['stop']:,.0f}  "
+                  f"目標:{s['target']:,.0f}  "
+                  f"出来高比:{s['vol_ratio']:.1f}x")
     else:
-        print("\n本日シグナルなし")
+        print(f"\n  本日シグナルなし")
 
-    print(f"\n── ランキング (上位20) ───────────────────────────────")
-    print(f"{'#':>3}  {'銘柄':12}  {'名称':20}  {'損益':>10}  {'累積%':>7}  {'勝率':>6}  {'PF':>6}  {'回数':>4}")
-    print("-" * 80)
-    for rank, r in enumerate(ranked[:20], 1):
-        wr_s = f"{r['win_rate']:.1f}%" if not pd.isna(r['win_rate']) else "—"
-        pf_v = r['pf']
-        pf_s = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
-        print(f"{rank:>3}  {r['symbol']:12}  {r['name']:20}  "
-              f"{r['total']:>+10,.0f}  {r['total_pct']:>+6.2f}%  {wr_s:>6}  {pf_s:>6}  {r['trade_count']:>4}")
-
-    path = build_html(signals, results, args.days, args.universe)
-    print(f"\nHTMLレポート: {path.resolve()}")
+    path = build_html(signals, all_results, backtest_days, args.universe)
+    print(f"\n  HTMLレポート保存: {path}")
     if not args.no_browser:
         webbrowser.open(f"file://{path.resolve()}")
 
