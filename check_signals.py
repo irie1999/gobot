@@ -439,38 +439,55 @@ def check_history(from_date: date, to_date: date, verbose: bool,
     # ── HTML 生成 ────────────────────────────────────────────────
     now_str  = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
     rows_data_sorted = sorted(rows_data, key=lambda r: -r["count"])
+    WD = ["月","火","水","木","金","土","日"]
 
-    table_rows = ""
+    # 銘柄別ブロック（<details> で展開）
+    stock_blocks = ""
     for r in rows_data_sorted:
-        color = STRATEGY_COLOR.get(
-            next((k for k, v in STRATEGY_NAMES.items() if v == r["strat"]), ""),
-            "#94a3b8"
+        color   = STRATEGY_COLOR.get(
+            next((k for k, v in STRATEGY_NAMES.items() if v == r["strat"]), ""), "#94a3b8"
         )
         cnt_cls = "up" if r["count"] >= 3 else ("neu" if r["count"] >= 1 else "dn")
-        # 全発生日をバッジで表示
-        date_badges = ""
-        for d in r["signal_dates"]:
-            date_badges += f"<span style='display:inline-block;background:#21262d;border-radius:4px;padding:1px 7px;margin:2px 3px 2px 0;font-size:.8em'>{d}</span>"
-        if not date_badges:
-            date_badges = "<span style='color:#4b5563'>—</span>"
 
-        table_rows += (
-            f"<tr>"
-            f"<td>{r['symbol']}</td>"
-            f"<td>{r['name']}</td>"
-            f"<td><span class='badge' style='color:{color};border-color:{color}'>{r['strat']}</span></td>"
-            f"<td class='{cnt_cls}' style='font-weight:600;font-size:1.1em'>{r['count']}回</td>"
-            f"<td>{date_badges}</td>"
-            f"</tr>"
-        )
+        # 詳細テーブル（発生日 × 曜日）
+        detail_rows = ""
+        for i, ds in enumerate(r["signal_dates"], 1):
+            d_obj = date.fromisoformat(ds)
+            wd    = WD[d_obj.weekday()]
+            detail_rows += (
+                f"<tr>"
+                f"<td style='color:#8b949e;width:2em'>{i}</td>"
+                f"<td>{ds}</td>"
+                f"<td style='color:#8b949e'>{wd}曜日</td>"
+                f"</tr>"
+            )
+        if not detail_rows:
+            detail_rows = "<tr><td colspan='3' style='color:#4b5563'>発生なし</td></tr>"
 
-    # 月次カレンダー（全銘柄合算のシグナル数をヒートマップ表示）
-    all_dates: dict[str, int] = {}
+        stock_blocks += f"""
+<details class="stock-row">
+  <summary>
+    <span class="s-sym">{r['symbol']}</span>
+    <span class="s-name">{r['name']}</span>
+    <span class="badge" style="color:{color};border-color:{color}">{r['strat']}</span>
+    <span class="s-count {cnt_cls}">{r['count']}回</span>
+    <span class="s-hint">▶ クリックで全発生日</span>
+  </summary>
+  <div class="s-detail">
+    <table class="s-dtable">
+      <thead><tr><th>#</th><th>発生日</th><th>曜日</th></tr></thead>
+      <tbody>{detail_rows}</tbody>
+    </table>
+  </div>
+</details>"""
+
+    # 月次カレンダー（全銘柄合算）
+    all_dates_agg: dict[str, int] = {}
     for r in rows_data:
         for d in r["signal_dates"]:
-            all_dates[d] = all_dates.get(d, 0) + 1
+            all_dates_agg[d] = all_dates_agg.get(d, 0) + 1
 
-    cal_html = _build_calendar_heatmap(all_dates, from_date, to_date)
+    cal_html = _build_calendar_heatmap(all_dates_agg, from_date, to_date)
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -480,16 +497,36 @@ def check_history(from_date: date, to_date: date, verbose: bool,
 <style>
 {_CSS}
 .up{{color:#3fb950}}.dn{{color:#f85149}}.neu{{color:#8b949e}}
-table{{border-collapse:collapse;width:100%;margin-bottom:24px}}
-th{{background:#161b22;color:#8b949e;padding:7px 10px;text-align:left;
-   border-bottom:2px solid #21262d;font-size:.85em}}
-td{{padding:7px 10px;border-bottom:1px solid #21262d;vertical-align:top}}
-tr:hover td{{background:#161b22}}
-.cal-grid{{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:24px}}
-.cal-day{{width:28px;height:28px;border-radius:4px;display:flex;align-items:center;
-          justify-content:center;font-size:.72em;cursor:default}}
-.cal-month{{margin-bottom:16px}}
-.cal-month h3{{font-size:.85em;color:#8b949e;margin:0 0 6px}}
+/* カレンダー */
+.cal-wrap{{display:flex;flex-wrap:wrap;gap:24px;margin-bottom:24px}}
+.cal-month{{min-width:220px}}
+.cal-month h3{{font-size:.9em;color:#8b949e;margin:0 0 6px;font-weight:600}}
+.cal-grid{{display:grid;grid-template-columns:repeat(7,34px);gap:2px}}
+.cal-wh{{height:22px;display:flex;align-items:center;justify-content:center;
+         font-size:.72em;color:#4b5563;font-weight:600}}
+.cal-cell{{height:38px;border-radius:5px;display:flex;flex-direction:column;
+           align-items:center;justify-content:center;cursor:default;position:relative}}
+.cal-cell.empty{{background:transparent!important}}
+.cal-dnum{{font-size:.65em;color:rgba(255,255,255,.45);line-height:1.1}}
+.cal-cnt{{font-size:.85em;font-weight:700;line-height:1.1}}
+/* 銘柄ブロック */
+.stock-row{{margin-bottom:4px;border:1px solid #21262d;border-radius:6px;overflow:hidden}}
+.stock-row summary{{
+  display:flex;align-items:center;gap:12px;padding:10px 14px;
+  cursor:pointer;list-style:none;background:#161b22;user-select:none}}
+.stock-row summary::-webkit-details-marker{{display:none}}
+.stock-row[open] summary{{background:#1c2128;border-bottom:1px solid #21262d}}
+.stock-row:hover summary{{background:#1c2128}}
+.s-sym{{font-family:monospace;font-size:.88em;color:#8b949e;width:70px;flex-shrink:0}}
+.s-name{{flex:1;font-weight:600}}
+.s-count{{font-size:1.15em;font-weight:700;width:50px;text-align:right}}
+.s-hint{{font-size:.75em;color:#4b5563;margin-left:4px}}
+.s-detail{{padding:12px 16px;background:#0d1117}}
+.s-dtable{{border-collapse:collapse;width:auto;min-width:280px}}
+.s-dtable th{{background:#161b22;color:#8b949e;padding:5px 14px;text-align:left;
+              border-bottom:1px solid #21262d;font-size:.82em}}
+.s-dtable td{{padding:4px 14px;border-bottom:1px solid #161b22;font-size:.88em}}
+.s-dtable tr:last-child td{{border-bottom:none}}
 </style>
 </head>
 <body>
@@ -501,21 +538,14 @@ tr:hover td{{background:#161b22}}
   </span>
 </h1>
 
-<h2>▶ 発生カレンダー（色が濃いほど多い）</h2>
+<h2>▶ 発生カレンダー（色が濃いほど多い / 数字 = 銘柄数）</h2>
 {cal_html}
 
-<h2>▶ 銘柄別 発生回数（多い順）</h2>
-<table>
-<thead><tr>
-  <th>コード</th><th>銘柄名</th><th>戦略</th>
-  <th>回数</th><th>発生日</th>
-</tr></thead>
-<tbody>{table_rows}</tbody>
-</table>
+<h2>▶ 銘柄別 発生回数（多い順 / クリックで発生日を展開）</h2>
+{stock_blocks}
 </body>
 </html>"""
 
-    today_s  = datetime.now(JST).strftime("%Y%m%d")
     out_path = Path(f"signal_history_{from_date}_{to_date}.html")
     out_path.write_text(html, encoding="utf-8")
     print(f"HTML: {out_path.resolve()}")
@@ -525,9 +555,8 @@ tr:hover td{{background:#161b22}}
 
 def _build_calendar_heatmap(all_dates: dict[str, int],
                              from_date: date, to_date: date) -> str:
-    """日付ごとのシグナル数をカレンダーヒートマップで返す。"""
-    if not all_dates:
-        return "<p style='color:#4b5563'>シグナルなし</p>"
+    """日付ごとのシグナル数をカレンダーヒートマップで返す（週グリッド形式）。"""
+    import calendar as cal_mod
 
     max_count = max(all_dates.values()) if all_dates else 1
 
@@ -535,45 +564,48 @@ def _build_calendar_heatmap(all_dates: dict[str, int],
         if n == 0:
             return "#161b22"
         intensity = min(n / max(max_count, 1), 1.0)
-        # 緑のグラデーション（薄→濃）
         g = int(80 + intensity * 175)
         return f"rgb(0,{g},60)"
 
-    # 月ごとにグループ化
-    import calendar as cal_mod
-    months: dict[tuple, list] = {}
+    WD_LABELS = ["月","火","水","木","金","土","日"]
+
+    # 月ごとにグループ化（全日 = 範囲外も含む）
+    months: dict[tuple, list[date]] = {}
     cur = from_date.replace(day=1)
-    while cur <= to_date:
+    while cur <= to_date.replace(day=1):
         key = (cur.year, cur.month)
-        months[key] = []
-        # その月の全日を列挙
         _, last_day = cal_mod.monthrange(cur.year, cur.month)
-        for day in range(1, last_day + 1):
-            d = date(cur.year, cur.month, day)
-            if from_date <= d <= to_date:
-                months[key].append(d)
+        months[key] = [date(cur.year, cur.month, d) for d in range(1, last_day + 1)]
         cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-    html = ""
-    for (year, month), days in months.items():
-        if not days:
-            continue
-        mn = ["1月","2月","3月","4月","5月","6月",
-              "7月","8月","9月","10月","11月","12月"][month - 1]
-        html += f"<div class='cal-month'><h3>{year}年 {mn}</h3><div class='cal-grid'>"
-        # 月の最初の曜日まで空白
-        first_dow = days[0].weekday()  # 0=月曜
-        for _ in range(first_dow):
-            html += "<div class='cal-day' style='background:transparent'></div>"
-        for d in days:
-            ds   = str(d)
-            n    = all_dates.get(ds, 0)
-            bg   = bg_color(n)
-            tip  = f"{ds}: {n}件" if n > 0 else ds
-            text = str(n) if n > 0 else ""
-            html += (f"<div class='cal-day' style='background:{bg}' title='{tip}'>"
-                     f"{text}</div>")
-        html += "</div></div>"
+    MN = ["1月","2月","3月","4月","5月","6月",
+          "7月","8月","9月","10月","11月","12月"]
+
+    html = "<div class='cal-wrap'>"
+    for (year, month), all_days in months.items():
+        mn = MN[month - 1]
+        # 曜日ヘッダー
+        grid = "".join(f"<div class='cal-wh'>{w}</div>" for w in WD_LABELS)
+        # 月の1日の曜日オフセット
+        first_dow = all_days[0].weekday()
+        grid += "<div class='cal-cell empty'></div>" * first_dow
+        for d in all_days:
+            in_range = (from_date <= d <= to_date)
+            n   = all_dates.get(str(d), 0) if in_range else 0
+            bg  = bg_color(n) if in_range else "#0d1117"
+            tip = f"{d}: {n}銘柄" if (in_range and n > 0) else str(d)
+            cnt_html = (f"<span class='cal-cnt' style='color:#fff'>{n}</span>"
+                        if n > 0 else "")
+            opacity = "1" if in_range else "0.3"
+            grid += (
+                f"<div class='cal-cell' style='background:{bg};opacity:{opacity}'"
+                f" title='{tip}'>"
+                f"<span class='cal-dnum'>{d.day}</span>"
+                f"{cnt_html}"
+                f"</div>"
+            )
+        html += f"<div class='cal-month'><h3>{year}年 {mn}</h3><div class='cal-grid'>{grid}</div></div>"
+    html += "</div>"
     return html
 
 
