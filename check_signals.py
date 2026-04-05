@@ -38,32 +38,24 @@ LOT = 100
 
 # ── 監視リスト ────────────────────────────────────────────────────────
 WATCHLIST: list[tuple[str, str, list[str]]] = [
-    # ── 強い押し目 ────────────────────────────────────────────────────
-    ("7012.T", "川崎重工業",              ["strong_pullback", "limit_oco"]),
-    ("7013.T", "IHI",                     ["strong_pullback", "donchian"]),
-    ("5981.T", "東京製綱",                ["strong_pullback"]),
-    ("9044.T", "南海電鉄",                ["strong_pullback"]),
-    ("4118.T", "カネカ",                  ["strong_pullback"]),
-    ("7952.T", "河合楽器",                ["strong_pullback"]),
-    ("8795.T", "T&Dホールディングス",      ["strong_pullback"]),
-    ("9042.T", "阪急阪神HD",              ["strong_pullback"]),
-    ("5702.T", "大紀アルミニウム工業所",   ["strong_pullback"]),
-    ("9503.T", "関西電力",                ["strong_pullback"]),
-    ("5333.T", "日本碍子",                ["strong_pullback"]),
-    # ── アダプティブMR ───────────────────────────────────────────────
-    ("1605.T", "INPEX",                   ["adaptive_mr", "donchian"]),
-    ("6361.T", "荏原製作所",              ["adaptive_mr"]),
-    ("8802.T", "三菱地所",                ["adaptive_mr"]),
-    ("2809.T", "キユーピー",              ["adaptive_mr"]),
-    ("6058.T", "ベクトル",                ["adaptive_mr"]),
-    # ── ドンチャン押し目 ─────────────────────────────────────────────
-    ("5844.T", "京都フィナンシャルグループ", ["donchian", "strong_pullback"]),
-    ("6963.T", "ローム",                  ["donchian"]),
-    ("7389.T", "あいちフィナンシャルグループ", ["donchian"]),
-    # ── BB出来高 ────────────────────────────────────────────────────
-    ("5741.T", "UACJ",                    ["bb_volume"]),
-    ("9742.T", "アイネス",                ["bb_volume"]),
-    ("6282.T", "オイレス工業",            ["bb_volume"]),
+    # ── 強い押し目（1800銘柄バックテスト + 4期間スコア選定）──────────
+    ("6146.T", "ディスコ",                        ["strong_pullback"]),
+    ("6871.T", "日本マイクロニクス",               ["strong_pullback"]),
+    ("7236.T", "ティラド",                        ["strong_pullback"]),
+    ("7012.T", "川崎重工業",                      ["strong_pullback"]),
+    ("5108.T", "ブリヂストン",                    ["strong_pullback"]),
+    ("4025.T", "多木化学",                        ["strong_pullback"]),
+    ("8218.T", "コメリ",                          ["strong_pullback"]),
+    ("3946.T", "トーモク",                        ["strong_pullback"]),
+    ("6183.T", "ベルシステム２４ホールディングス", ["strong_pullback"]),
+    ("3636.T", "三菱総合研究所",                  ["strong_pullback"]),
+    ("8153.T", "モスフードサービス",               ["strong_pullback"]),
+    ("8194.T", "ライフコーポレーション",           ["strong_pullback"]),
+    ("9046.T", "神戸電鉄",                        ["strong_pullback"]),
+    ("9405.T", "朝日放送グループホールディングス", ["strong_pullback"]),
+    ("8081.T", "カナデン",                        ["strong_pullback"]),
+    ("6454.T", "マックス",                        ["strong_pullback"]),
+    ("6196.T", "ストライク",                      ["strong_pullback"]),
 ]
 
 STRATEGY_NAMES = {
