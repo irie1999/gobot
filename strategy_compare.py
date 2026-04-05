@@ -83,7 +83,12 @@ def _load_stocks(universe: str) -> list[tuple[str, str]]:
     print(f"  銘柄ユニバース: 監視22銘柄")
     return _STOCKS_22
 
-_CACHE_PATH = Path(".rsi2_cache") / "sc_results.pkl"
+_CACHE_PATH    = Path(".rsi2_cache") / "sc_results.pkl"
+_SP_CACHE_PATH = Path(".rsi2_cache") / "sp_multi.pkl"
+
+# 強い押し目 監視リスト選定用 ― 4期間とその重み（直近重視）
+WATCHLIST_PERIODS = [30, 90, 180, 365]
+PERIOD_WEIGHTS    = {30: 4.0, 90: 3.0, 180: 2.0, 365: 1.0}
 
 STRATEGIES: list[tuple[str, str]] = [
     ("adaptive_mr",    "アダプティブMR"),
@@ -402,10 +407,85 @@ def _run_backtest_main(args) -> None:
         print(f"  ※ 戦略が見つかりません: {args.strategy}")
         return
 
-    n_total = n_sym * len(run_strats)
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    is_sp_only = (len(run_strats) == 1 and run_strats[0][0] == "strong_pullback")
 
-    strat_label = "5戦略" if len(run_strats) == 5 else f"{run_strats[0][1]}"
+    # ── 強い押し目 単体実行: 4期間まとめて実行してスコア選定用キャッシュを作る ──
+    if is_sp_only:
+        n_total = n_sym * len(WATCHLIST_PERIODS)
+        print(f"\n{'='*65}")
+        print(f"  バックテスト実行: 強い押し目（4期間スコア選定モード）")
+        print(f"  {n_sym}銘柄 × {len(WATCHLIST_PERIODS)}期間 = {n_total}組")
+        print(f"  期間: {WATCHLIST_PERIODS}日  重み: {PERIOD_WEIGHTS}")
+        print(f"  生成: {now_str}")
+        if args.universe == "all":
+            print(f"  ※ 大規模実行: 完了まで時間がかかる場合があります")
+        print(f"{'='*65}\n")
+
+        # {period: {sym: [trades]}} の形で収集
+        sp_multi: dict[int, dict[str, list[dict]]] = {p: {} for p in WATCHLIST_PERIODS}
+
+        tasks_sp = [(sym, p) for sym, _ in stocks for p in WATCHLIST_PERIODS]
+
+        def _task_sp(sym: str, period: int):
+            trades = _run(sym, "strong_pullback", period)
+            for t in trades:
+                t["symbol"] = sym
+            return sym, period, trades
+
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_task_sp, sym, p): (sym, p) for sym, p in tasks_sp}
+            done = 0
+            report_interval = max(n_sym // 5, 10)
+            for f in as_completed(futs):
+                sym, period, trades = f.result()
+                sp_multi[period][sym] = trades
+                done += 1
+                if done % report_interval == 0 or done == n_total:
+                    pct = done / n_total * 100
+                    elapsed = datetime.now(JST).strftime("%H:%M:%S")
+                    print(f"  [{elapsed}] 進捗: {done}/{n_total} ({pct:.0f}%)")
+
+        # 365日の全取引で集計表示
+        all_trades_365 = [t for trades in sp_multi[365].values() for t in trades]
+        s365 = _stats(all_trades_365)
+        print(f"\n  強い押し目 / 365日  {s365['n']}件  勝率{s365['wr']:.1f}%  "
+              f"PF{_pf_str(s365['pf'])}  {s365['total']:+,.0f}円")
+
+        # sp_multi キャッシュ保存
+        _SP_CACHE_PATH.parent.mkdir(exist_ok=True)
+        sp_cache = {
+            "sp_multi": sp_multi,
+            "stocks":   stocks,
+            "periods":  WATCHLIST_PERIODS,
+            "saved_at": datetime.now(JST).isoformat(),
+        }
+        try:
+            with open(_SP_CACHE_PATH, "wb") as f:
+                pickle.dump(sp_cache, f)
+            print(f"  キャッシュ保存: {_SP_CACHE_PATH}")
+        except Exception as e:
+            print(f"  ※ キャッシュ保存失敗: {e}")
+
+        # 既存のsc_results.pkも更新（365日分をマージ）
+        if _CACHE_PATH.exists():
+            try:
+                with open(_CACHE_PATH, "rb") as f:
+                    prev = pickle.load(f)
+                prev["all_results"]["strong_pullback"] = sp_multi[365]
+                prev["saved_at"] = datetime.now(JST).isoformat()
+                with open(_CACHE_PATH, "wb") as f:
+                    pickle.dump(prev, f)
+            except Exception:
+                pass
+
+        print(f"{'='*65}\n")
+        print("  ※ 監視リスト生成: python strategy_compare.py --build-watchlist")
+        return
+
+    # ── 通常実行（all または単一戦略、SPは除く）──────────────────────
+    n_total = n_sym * len(run_strats)
+    strat_label = "5戦略" if len(run_strats) == 5 else run_strats[0][1]
     print(f"\n{'='*65}")
     print(f"  バックテスト実行: {strat_label}")
     print(f"  {n_sym}銘柄 × {len(run_strats)}戦略 = {n_total}組  直近{args.days}日")
@@ -414,7 +494,7 @@ def _run_backtest_main(args) -> None:
         print(f"  ※ 大規模実行: 完了まで時間がかかる場合があります")
     print(f"{'='*65}\n")
 
-    # キャッシュをロードしてマージ（既存の他戦略データを保持）
+    # キャッシュをロードしてマージ
     if _CACHE_PATH.exists():
         try:
             with open(_CACHE_PATH, "rb") as f:
@@ -425,7 +505,6 @@ def _run_backtest_main(args) -> None:
     else:
         all_results = {k: {} for k, _ in STRATEGIES}
 
-    # 実行対象の戦略をリセット
     for k, _ in run_strats:
         all_results[k] = {}
 
@@ -440,7 +519,7 @@ def _run_backtest_main(args) -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_task, sym, k): (sym, k) for sym, k in tasks}
         done = 0
-        report_interval = max(n_sym // 5, 10)  # 20%ごとに進捗表示
+        report_interval = max(n_sym // 5, 10)
         for f in as_completed(futs):
             sym, k, trades = f.result()
             all_results[k][sym] = trades
@@ -450,7 +529,6 @@ def _run_backtest_main(args) -> None:
                 elapsed = datetime.now(JST).strftime("%H:%M:%S")
                 print(f"  [{elapsed}] 進捗: {done}/{n_total} ({pct:.0f}%)")
 
-    # 実行した戦略の集計・表示
     strat_stats: dict[str, dict] = {}
     print(f"\n  {'戦略':<16}  {'取引':>5}  {'勝率':>6}  {'PF':>6}  "
           f"{'合計損益':>12}  {'最大DD':>10}  {'連敗':>4}")
@@ -463,7 +541,6 @@ def _run_backtest_main(args) -> None:
         print(f"  {nm:<16}  {s['n']:>5}件  {s['wr']:>5.1f}%  {pf_s:>6}  "
               f"{s['total']:>+12,.0f}円  ▼{s['max_dd']:>9,.0f}円  {s['max_consec_loss']:>4}連敗")
 
-    # キャッシュ保存
     _CACHE_PATH.parent.mkdir(exist_ok=True)
     cache_data = {"all_results": all_results, "stocks": stocks,
                   "days": args.days, "saved_at": datetime.now(JST).isoformat()}
@@ -474,7 +551,6 @@ def _run_backtest_main(args) -> None:
     except Exception as e:
         print(f"  ※ キャッシュ保存失敗: {e}")
 
-    # HTML出力（ヒートマップは大規模時は省略）
     html    = build_html(strat_stats, all_results if n_sym <= 100 else {}, args.days, n_sym)
     today_s = datetime.now(JST).strftime("%Y%m%d")
     suffix  = f"_{args.universe}" if args.universe != "watch" else ""
@@ -709,81 +785,179 @@ details>summary::-webkit-details-marker{{display:none}}
 # 監視リスト生成（キャッシュから上位銘柄を抽出）
 # ─────────────────────────────────────────────────────────────────────
 
+def _relative_rank(vals: dict[str, float], higher_is_better: bool) -> dict[str, int]:
+    """銘柄ごとの値を1〜5の相対ランクに変換する（取引なし=0）。"""
+    syms = [s for s, v in vals.items() if v is not None and not math.isnan(v)]
+    if not syms:
+        return {s: 0 for s in vals}
+    sorted_syms = sorted(syms, key=lambda s: vals[s], reverse=higher_is_better)
+    n = len(sorted_syms)
+    ranks: dict[str, int] = {s: 0 for s in vals}
+    for i, s in enumerate(sorted_syms):
+        ranks[s] = max(1, 5 - int(i * 5 / n))
+    return ranks
+
+
+def _score_stocks_multi(
+    sp_multi: dict[int, dict[str, list[dict]]],
+    stock_dict: dict[str, str],
+    top: int,
+    min_trades: int,
+) -> list[dict]:
+    """4期間スコアで銘柄をランキングする（直近重視）。
+
+    スコア指標（各期間）:
+      - PF: 1〜5点
+      - 勝率: 1〜5点
+      - 平均損益: 1〜5点
+    期間重み: 30日×4 / 90日×3 / 180日×2 / 365日×1
+    最大スコア: 15点 × (4+3+2+1) = 150点
+    """
+    # 全銘柄リスト（全期間の和集合）
+    all_syms: set[str] = set()
+    for p in WATCHLIST_PERIODS:
+        all_syms |= sp_multi.get(p, {}).keys()
+
+    # 期間ごとに各指標の相対ランクを計算
+    period_scores: dict[str, float] = {s: 0.0 for s in all_syms}
+    period_stats:  dict[str, dict[int, dict]] = {s: {} for s in all_syms}
+
+    for p in WATCHLIST_PERIODS:
+        w  = PERIOD_WEIGHTS[p]
+        pd_data = sp_multi.get(p, {})
+
+        pf_vals  = {}
+        wr_vals  = {}
+        avg_vals = {}
+
+        for sym in all_syms:
+            trades = pd_data.get(sym, [])
+            s = _stats(trades)
+            period_stats[sym][p] = s
+            if s["n"] >= min_trades:
+                pf_v = min(s["pf"], 10.0) if s["pf"] != float("inf") else 10.0
+                pf_vals[sym]  = pf_v
+                wr_vals[sym]  = s["wr"]
+                avg_vals[sym] = s["avg"]
+
+        r_pf  = _relative_rank(pf_vals,  higher_is_better=True)
+        r_wr  = _relative_rank(wr_vals,  higher_is_better=True)
+        r_avg = _relative_rank(avg_vals, higher_is_better=True)
+
+        for sym in all_syms:
+            period_scores[sym] += (r_pf.get(sym, 0) + r_wr.get(sym, 0) + r_avg.get(sym, 0)) * w
+
+    # 365日の成績を基準にフィルタ（最低限の取引数と収益性）
+    results: list[dict] = []
+    for sym in all_syms:
+        s365 = period_stats[sym].get(365, {})
+        if s365.get("n", 0) < min_trades:
+            continue
+        score = period_scores[sym]
+        # 期間別スコアを収集（表示用）
+        per_period = {}
+        for p in WATCHLIST_PERIODS:
+            ps = period_stats[sym].get(p, {})
+            per_period[p] = ps
+        results.append(dict(
+            symbol     = sym,
+            name       = stock_dict.get(sym, sym),
+            score      = score,
+            per_period = per_period,
+            # 365日の代表成績
+            n          = s365["n"],
+            wr         = s365["wr"],
+            pf         = s365["pf"],
+            total      = s365["total"],
+            avg        = s365["avg"],
+            max_dd     = s365["max_dd"],
+            max_cl     = s365["max_consec_loss"],
+        ))
+
+    results.sort(key=lambda x: -x["score"])
+    return results[:top]
+
+
 def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) -> None:
-    """キャッシュから強い押し目の上位銘柄を抽出して新しい監視リストを生成する。"""
-    if not _CACHE_PATH.exists():
+    """キャッシュから強い押し目の上位銘柄を4期間スコアで選定して監視リストを生成する。"""
+
+    # ── 4期間キャッシュ（推奨）から読み込む ──────────────────────
+    use_multi = _SP_CACHE_PATH.exists()
+    if use_multi:
+        with open(_SP_CACHE_PATH, "rb") as f:
+            sp_cache = pickle.load(f)
+        sp_multi   = sp_cache["sp_multi"]
+        stocks     = sp_cache["stocks"]
+        saved_at   = sp_cache.get("saved_at", "不明")
+        mode_label = "4期間スコア選定"
+    elif _CACHE_PATH.exists():
+        # フォールバック：1期間（365日）のみ
+        with open(_CACHE_PATH, "rb") as f:
+            cache = pickle.load(f)
+        sp_trades = cache["all_results"].get("strong_pullback", {})
+        sp_multi  = {365: sp_trades}
+        stocks    = cache["stocks"]
+        saved_at  = cache.get("saved_at", "不明")
+        mode_label = "365日のみ（フォールバック）"
+        print("  ※ 4期間キャッシュがありません。365日のみで選定します。")
+        print("    先に実行: python strategy_compare.py --universe all --strategy strong_pullback --workers 6\n")
+    else:
         print("キャッシュが見つかりません。先に以下を実行してください：")
-        print("  python strategy_compare.py --universe all --workers 6")
+        print("  python strategy_compare.py --universe all --strategy strong_pullback --workers 6")
         return
 
     print(f"\n{'='*65}")
-    print(f"  監視リスト生成（強い押し目 上位銘柄）")
+    print(f"  監視リスト生成（強い押し目 / {mode_label}）")
     print(f"{'='*65}\n")
+    print(f"  キャッシュ: {len(stocks)}銘柄 / 保存日時: {saved_at[:16]}")
+    if use_multi:
+        print(f"  スコア重み: {' / '.join(f'{p}日×{int(PERIOD_WEIGHTS[p])}' for p in WATCHLIST_PERIODS)}")
+    print()
 
-    with open(_CACHE_PATH, "rb") as f:
-        cache = pickle.load(f)
-
-    all_results: dict = cache["all_results"]
-    stocks: list      = cache["stocks"]
-    days: int         = cache["days"]
-    saved_at: str     = cache.get("saved_at", "不明")
-    print(f"  キャッシュ: {len(stocks)}銘柄 / {days}日 / 保存日時: {saved_at[:16]}\n")
-
-    strat_key = "strong_pullback"
     stock_dict = {sym: nm for sym, nm in stocks}
 
-    # 銘柄ごとに統計を計算
-    ranked: list[dict] = []
-    for sym, trades in all_results.get(strat_key, {}).items():
-        if not trades:
-            continue
-        s = _stats(trades)
-        if s["n"] < min_trades:
-            continue
-        pf = s["pf"]
-        if pf == float("inf"):
-            pf_val = 99.0  # ∞ は最高評価
-        else:
-            pf_val = pf
-        if pf_val < min_pf:
-            continue
-        ranked.append(dict(
-            symbol  = sym,
-            name    = stock_dict.get(sym, sym),
-            n       = s["n"],
-            wr      = s["wr"],
-            pf      = s["pf"],
-            pf_val  = pf_val,
-            total   = s["total"],
-            avg     = s["avg"],
-            max_dd  = s["max_dd"],
-            max_cl  = s["max_consec_loss"],
-        ))
+    # 4期間スコアでランキング
+    selected = _score_stocks_multi(sp_multi, stock_dict, top, min_trades)
 
-    # PF 降順でソート
-    ranked.sort(key=lambda x: (-x["pf_val"], -x["total"]))
-    selected = ranked[:top]
+    # min_pf フィルタ（365日PFが基準）
+    def _pf_ok(r):
+        pf = r["pf"]
+        pf_val = min(pf, 99.0) if pf == float("inf") else pf
+        return pf_val >= min_pf
+    selected = [r for r in selected if _pf_ok(r)]
 
-    print(f"  フィルタ: 最小取引数 {min_trades}件 / 最小PF {min_pf:.1f}")
-    print(f"  該当銘柄: {len(ranked)}件 → 上位{len(selected)}銘柄を選定\n")
-    print(f"  {'コード':<10}  {'銘柄名':<24}  {'取引':>4}  {'勝率':>6}  {'PF':>6}  "
-          f"{'合計損益':>10}  {'平均':>8}  {'最大DD':>10}  {'連敗':>4}")
-    print("  " + "─" * 90)
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    print(f"  フィルタ: 最小取引数 {min_trades}件 / 最小PF(365日) {min_pf:.1f}")
+    print(f"  選定銘柄: {len(selected)}銘柄\n")
+
+    # コンソール出力（スコア＋4期間PF）
+    period_header = "  ".join(f"{p}日PF" for p in WATCHLIST_PERIODS)
+    print(f"  {'コード':<10}  {'銘柄名':<22}  {'スコア':>6}  {period_header}  {'365日勝率':>8}  {'365日損益':>10}")
+    print("  " + "─" * 100)
     for r in selected:
+        pf_cols = []
+        for p in WATCHLIST_PERIODS:
+            ps = r["per_period"].get(p, {})
+            if ps.get("n", 0) == 0:
+                pf_cols.append(f"{'—':>7}")
+            else:
+                pf_v = ps["pf"]
+                s = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                pf_cols.append(f"{s:>7}")
         pf_s = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
-        print(f"  {r['symbol']:<10}  {r['name']:<24}  {r['n']:>4}件  {r['wr']:>5.1f}%  "
-              f"{pf_s:>6}  {r['total']:>+10,.0f}円  {r['avg']:>+8,.0f}円  "
-              f"▼{r['max_dd']:>9,.0f}円  {r['max_cl']:>4}連敗")
+        print(f"  {r['symbol']:<10}  {r['name']:<22}  {r['score']:>6.1f}  "
+              f"{'  '.join(pf_cols)}  {r['wr']:>7.1f}%  {r['total']:>+10,.0f}円")
 
     # watchlist_sp.py として出力
-    out_py  = Path("watchlist_sp.py")
-    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
-    lines   = [
+    out_py = Path("watchlist_sp.py")
+    weight_str = " / ".join(f"{p}日×{int(PERIOD_WEIGHTS[p])}" for p in WATCHLIST_PERIODS)
+    lines = [
         '"""',
-        f"強い押し目 監視リスト（自動生成）",
+        "強い押し目 監視リスト（自動生成）",
         f"生成日時: {now_str}",
-        f"元データ: {len(stocks)}銘柄 / 直近{days}日 / PF≥{min_pf} / 取引≥{min_trades}件",
-        f"選定: 上位{len(selected)}銘柄（PF降順）",
+        f"元データ: {len(stocks)}銘柄 / PF≥{min_pf}(365日) / 取引≥{min_trades}件",
+        f"スコア: 4期間({weight_str})×3指標(PF/勝率/平均損益) 相対ランク",
+        f"選定: 上位{len(selected)}銘柄（スコア降順）",
         '"""',
         "",
         "WATCHLIST_SP: list[tuple[str, str]] = [",
@@ -794,71 +968,76 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) 
     out_py.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n  監視リスト保存: {out_py.resolve()}")
 
-    # HTML レポート出力
-    _css = """
-body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;
-     margin:0;padding:20px;font-size:14px}
-h1{font-size:1.3em;border-bottom:1px solid #21262d;padding-bottom:10px}
-h2{font-size:1em;color:#58a6ff;margin:20px 0 8px}
-table{border-collapse:collapse;width:100%}
-th{background:#161b22;color:#8b949e;padding:7px 10px;text-align:left;
-   border-bottom:2px solid #21262d;font-size:.85em}
-td{padding:6px 10px;border-bottom:1px solid #21262d}
-tr:hover td{background:#161b22}
-.up{color:#3fb950}.dn{color:#f85149}.sub{color:#8b949e;font-size:.82em}
-"""
-    rows = ""
+    # ── ランキングHTML ──────────────────────────────────────────────
+    today_s = datetime.now(JST).strftime("%Y%m%d")
+
+    # 期間別PFセル
+    def _period_td(r, p):
+        ps = r["per_period"].get(p, {})
+        if ps.get("n", 0) == 0:
+            return "<td style='color:#4b5563'>—</td>"
+        pf_v = ps["pf"]
+        pf_s = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+        cls  = "up" if ps["total"] > 0 else "dn"
+        n    = ps["n"]
+        return f"<td class='{cls}'>{pf_s}<div class='sub'>{n}件</div></td>"
+
+    rank_rows = ""
     for i, r in enumerate(selected, 1):
-        pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
         cls   = "up" if r["total"] > 0 else "dn"
-        rows += (
+        pf_s  = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+        w_color = "#f0c000" if i <= 3 else ("#94a3b8" if i <= 10 else "#e6edf3")
+        rank_rows += (
             f"<tr>"
-            f"<td style='font-weight:700'>{i}</td>"
+            f"<td style='font-weight:700;color:{w_color}'>{i}</td>"
             f"<td>{r['symbol']}</td>"
             f"<td>{r['name']}</td>"
-            f"<td>{r['n']}件</td>"
-            f"<td>{r['wr']:.1f}%</td>"
-            f"<td>{pf_s}</td>"
+            f"<td style='font-weight:600;color:#38bdf8'>{r['score']:.1f}</td>"
+            + "".join(_period_td(r, p) for p in WATCHLIST_PERIODS)
+            + f"<td>{r['wr']:.1f}%</td>"
             f"<td class='{cls}'>{r['total']:+,.0f}円</td>"
-            f"<td class='{cls}'>{r['avg']:+,.0f}円</td>"
             f"<td class='dn'>▼{r['max_dd']:,.0f}円</td>"
             f"<td>{r['max_cl']}連敗</td>"
             f"</tr>"
         )
-    html = f"""<!DOCTYPE html>
+
+    weight_label = " / ".join(f"{p}日(×{int(PERIOD_WEIGHTS[p])})" for p in WATCHLIST_PERIODS)
+    rank_html = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>強い押し目 監視リスト</title>
-<style>{_css}</style></head>
+<style>{_CSS}
+.sub{{color:#8b949e;font-size:.78em}}
+</style></head>
 <body>
 <h1>強い押し目 監視リスト（{len(selected)}銘柄）
   <span style="font-size:.75em;color:#8b949e">
-    元データ: {len(stocks)}銘柄 / 直近{days}日 / 生成: {now_str}
+    元データ: {len(stocks)}銘柄 / 生成: {now_str}
   </span>
 </h1>
 <p style="font-size:.82em;color:#4b5563">
-  フィルタ: PF≥{min_pf} / 最小取引{min_trades}件 / 上位{len(selected)}銘柄（PF降順）<br>
+  スコア: {weight_label} × 3指標（PF・勝率・平均損益）相対ランク / PF≥{min_pf}(365日) / 取引≥{min_trades}件<br>
   監視リストファイル: <code>watchlist_sp.py</code>
 </p>
 <table>
 <thead><tr>
-  <th>#</th><th>コード</th><th>銘柄名</th><th>取引数</th>
-  <th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益</th>
-  <th>最大DD</th><th>最大連敗</th>
+  <th>#</th><th>コード</th><th>銘柄名</th><th>スコア</th>
+  {"".join(f"<th>{p}日 PF</th>" for p in WATCHLIST_PERIODS)}
+  <th>勝率(365)</th><th>合計(365)</th><th>最大DD</th><th>最大連敗</th>
 </tr></thead>
-<tbody>{rows}</tbody>
+<tbody>{rank_rows}</tbody>
 </table>
 </body></html>"""
-    today_s  = datetime.now(JST).strftime("%Y%m%d")
+
     out_html = Path(f"watchlist_sp_{today_s}.html")
-    out_html.write_text(html, encoding="utf-8")
+    out_html.write_text(rank_html, encoding="utf-8")
     print(f"  HTMLレポート（ランキング）: {out_html.resolve()}")
     if not no_browser:
         webbrowser.open(f"file://{out_html.resolve()}")
 
-    # バックテスト詳細HTML（選定銘柄の取引履歴＆エクイティカーブ）
-    sp_results: dict[str, list[dict]] = all_results.get(strat_key, {})
-    bt_html      = _build_watchlist_backtest_html(selected, sp_results, days, len(stocks))
-    out_bt_html  = Path(f"watchlist_sp_backtest_{today_s}.html")
+    # ── バックテスト詳細HTML（365日の取引履歴＆エクイティカーブ）──
+    sp_results_365: dict[str, list[dict]] = sp_multi.get(365, {})
+    bt_html     = _build_watchlist_backtest_html(selected, sp_results_365, 365, len(stocks))
+    out_bt_html = Path(f"watchlist_sp_backtest_{today_s}.html")
     out_bt_html.write_text(bt_html, encoding="utf-8")
     print(f"  HTMLレポート（バックテスト）: {out_bt_html.resolve()}")
     if not no_browser:
