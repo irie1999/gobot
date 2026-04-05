@@ -29,14 +29,35 @@ import backtest_limit_oco         as _oco
 JST = timezone(timedelta(hours=9))
 
 WATCHLIST: list[tuple[str, str, list[str]]] = [
-    ("7012.T", "川崎重工業",             ["strong_pullback", "limit_oco"]),
-    ("1605.T", "INPEX",                  ["adaptive_mr", "donchian"]),
+    # ── 強い押し目（上昇トレンド中の押し目・高ボラ耐性あり） ──────
+    ("7012.T", "川崎重工業",       ["strong_pullback", "limit_oco"]),  # 2戦略で直近プラス
+    ("7013.T", "IHI",              ["strong_pullback", "donchian"]),   # 防衛・航空
+    ("5981.T", "東京製綱",         ["strong_pullback"]),               # 全期間完全一致
+    ("9044.T", "南海電鉄",         ["strong_pullback"]),               # 鉄道ディフェンシブ
+    ("4118.T", "カネカ",           ["strong_pullback"]),               # 30日+27k
+    ("7952.T", "河合楽器",         ["strong_pullback"]),               # 全期間一定+28k
+    ("8795.T", "T&Dホールディングス", ["strong_pullback"]),            # 30日+27k
+    ("9042.T", "阪急阪神HD",       ["strong_pullback"]),               # 30日+28k
+    ("5702.T", "大紀アルミニウム工業所", ["strong_pullback"]),         # 全期間一定+20k
+    ("9503.T", "関西電力",         ["strong_pullback"]),               # 公益ディフェンシブ
+    ("5333.T", "日本碍子",         ["strong_pullback"]),               # 全期間一定+24k
+
+    # ── アダプティブMR（高ボラ逆張り・現相場に最適） ─────────────
+    ("1605.T", "INPEX",            ["adaptive_mr", "donchian"]),       # MR1位
+    ("6361.T", "荏原製作所",       ["adaptive_mr"]),                   # MR2位・30日+31k
+    ("8802.T", "三菱地所",         ["adaptive_mr"]),                   # 30日+11k・改善傾向
+    ("2809.T", "キユーピー",       ["adaptive_mr"]),                   # 30日+8k・食品DF
+    ("6058.T", "ベクトル",         ["adaptive_mr"]),                   # 30日+6k・低位株
+
+    # ── ドンチャン押し目（ブレイクアウト後の押し目） ──────────────
     ("5844.T", "京都フィナンシャルグループ", ["donchian", "strong_pullback"]),
-    ("6361.T", "荏原製作所",             ["adaptive_mr"]),
-    ("5981.T", "東京製綱",               ["strong_pullback"]),
-    ("5741.T", "UACJ",                   ["bb_volume"]),
-    ("7013.T", "IHI",                    ["strong_pullback", "donchian"]),
-    ("9044.T", "南海電鉄",               ["strong_pullback"]),
+    ("6963.T", "ローム",           ["donchian"]),                      # 30日+15k
+    ("7389.T", "あいちフィナンシャルグループ", ["donchian"]),          # 30日+17k
+
+    # ── BB出来高（BB下限＋出来高急増） ───────────────────────────
+    ("5741.T", "UACJ",             ["bb_volume"]),                     # 30日+24k
+    ("9742.T", "アイネス",         ["bb_volume"]),                     # 全期間一定+7k
+    ("6282.T", "オイレス工業",     ["bb_volume"]),                     # 全期間一定+7k
 ]
 
 STRATEGY_NAMES = {
