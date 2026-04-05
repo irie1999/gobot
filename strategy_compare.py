@@ -393,22 +393,43 @@ def build_html(strat_stats: dict, all_results: dict, days: int, n_sym: int = 22)
 def _run_backtest_main(args) -> None:
     stocks  = _load_stocks(args.universe)
     n_sym   = len(stocks)
-    n_total = n_sym * len(STRATEGIES)
+
+    # 実行する戦略を絞り込む
+    run_strats = STRATEGIES if args.strategy == "all" else [
+        (k, nm) for k, nm in STRATEGIES if k == args.strategy
+    ]
+    if not run_strats:
+        print(f"  ※ 戦略が見つかりません: {args.strategy}")
+        return
+
+    n_total = n_sym * len(run_strats)
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
 
+    strat_label = "5戦略" if len(run_strats) == 5 else f"{run_strats[0][1]}"
     print(f"\n{'='*65}")
-    print(f"  5戦略 横断バックテスト比較")
-    print(f"  {n_sym}銘柄 × 5戦略 = {n_total}組  直近{args.days}日")
+    print(f"  バックテスト実行: {strat_label}")
+    print(f"  {n_sym}銘柄 × {len(run_strats)}戦略 = {n_total}組  直近{args.days}日")
     print(f"  生成: {now_str}")
     if args.universe == "all":
-        print(f"  ※ 大規模実行: 完了まで数時間かかる場合があります")
+        print(f"  ※ 大規模実行: 完了まで時間がかかる場合があります")
     print(f"{'='*65}\n")
 
-    # 全組み合わせを並列実行（戦略ごとに進捗表示）
-    all_results: dict[str, dict[str, list[dict]]] = {k: {} for k, _ in STRATEGIES}
-    strat_counts: dict[str, int] = {k: 0 for k, _ in STRATEGIES}
+    # キャッシュをロードしてマージ（既存の他戦略データを保持）
+    if _CACHE_PATH.exists():
+        try:
+            with open(_CACHE_PATH, "rb") as f:
+                prev = pickle.load(f)
+            all_results: dict[str, dict[str, list[dict]]] = prev.get("all_results", {k: {} for k, _ in STRATEGIES})
+        except Exception:
+            all_results = {k: {} for k, _ in STRATEGIES}
+    else:
+        all_results = {k: {} for k, _ in STRATEGIES}
 
-    tasks = [(sym, k) for sym, _ in stocks for k, _ in STRATEGIES]
+    # 実行対象の戦略をリセット
+    for k, _ in run_strats:
+        all_results[k] = {}
+
+    tasks = [(sym, k) for sym, _ in stocks for k, _ in run_strats]
 
     def _task(sym: str, k: str):
         trades = _run(sym, k, args.days)
@@ -423,19 +444,18 @@ def _run_backtest_main(args) -> None:
         for f in as_completed(futs):
             sym, k, trades = f.result()
             all_results[k][sym] = trades
-            strat_counts[k] += 1
             done += 1
             if done % report_interval == 0 or done == n_total:
                 pct = done / n_total * 100
                 elapsed = datetime.now(JST).strftime("%H:%M:%S")
                 print(f"  [{elapsed}] 進捗: {done}/{n_total} ({pct:.0f}%)")
 
-    # 戦略ごとに集計・表示
+    # 実行した戦略の集計・表示
     strat_stats: dict[str, dict] = {}
     print(f"\n  {'戦略':<16}  {'取引':>5}  {'勝率':>6}  {'PF':>6}  "
           f"{'合計損益':>12}  {'最大DD':>10}  {'連敗':>4}")
     print("  " + "─" * 68)
-    for k, nm in STRATEGIES:
+    for k, nm in run_strats:
         all_trades = [t for trades in all_results[k].values() for t in trades]
         s = _stats(all_trades)
         strat_stats[k] = s
@@ -848,8 +868,12 @@ tr:hover td{background:#161b22}
 
 
 def main() -> None:
+    strat_keys = [k for k, _ in STRATEGIES]
     parser = argparse.ArgumentParser(description="5戦略 横断バックテスト比較 ＆ 監視リスト生成")
     parser.add_argument("--universe",        default="watch", choices=["watch", "all"])
+    parser.add_argument("--strategy",        default="all",
+                        choices=["all"] + strat_keys,
+                        help="実行する戦略（デフォルト: all / 例: strong_pullback）")
     parser.add_argument("--days",            type=int, default=365)
     parser.add_argument("--workers",         type=int, default=8)
     parser.add_argument("--no-browser",      action="store_true")
