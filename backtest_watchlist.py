@@ -380,8 +380,11 @@ def build_html(results: list[dict], all_trades: list[dict],
     total_s = _stats(all_trades)
 
     # ── サマリーテーブル ─────────────────────────────────────────
+    active_results  = [r for r in results if r["stats"]["n"] > 0]
+    no_trade_results = [r for r in results if r["stats"]["n"] == 0]
+
     rows = ""
-    for r in results:
+    for r in active_results:
         s       = r["stats"]
         color   = STRATEGY_COLOR.get(r["key"], "#94a3b8")
         strat   = STRATEGY_NAMES.get(r["key"], r["key"])
@@ -404,12 +407,12 @@ def build_html(results: list[dict], all_trades: list[dict],
             f"<td data-v='{s['max_consec_loss']}'>{s['max_consec_loss']}連敗</td>"
             f"</tr>"
         )
-    # 合計行
+    # 合計行（取引あり銘柄のみ）
     total_cls = "up" if total_s["total"] > 0 else ("dn" if total_s["total"] < 0 else "neu")
     total_avg_cls = "up" if total_s["avg"] > 0 else "dn"
     rows += (
         f"<tr class='total-row'>"
-        f"<td colspan='3'>合計</td>"
+        f"<td colspan='3'>合計 ({len(active_results)}銘柄)</td>"
         f"<td>{total_s['n']}</td>"
         f"<td>{total_s['wr']:.1f}%</td>"
         f"<td>{_pf_str(total_s['pf'])}</td>"
@@ -421,6 +424,18 @@ def build_html(results: list[dict], all_trades: list[dict],
         f"<td>{total_s['max_consec_loss']}連敗</td>"
         f"</tr>"
     )
+
+    # 取引なし銘柄を薄く追記
+    if no_trade_results:
+        strat_names = ", ".join(
+            STRATEGY_NAMES.get(r["key"], r["key"]) for r in no_trade_results[:3]
+        )
+        rows += (
+            f"<tr style='color:#4b5563;font-size:.82em'>"
+            f"<td colspan='3' style='padding-top:8px'>取引なし（{days}日間）: "
+            + "  ".join(f"{r['symbol']} {r['name']}" for r in no_trade_results)
+            + "</td><td colspan='9'></td></tr>"
+        )
 
     summary_table = f"""
 <table id="summary">
@@ -441,9 +456,9 @@ def build_html(results: list[dict], all_trades: list[dict],
 <tbody>{rows}</tbody>
 </table>"""
 
-    # ── 銘柄別トレード詳細 ─────────────────────────────────────
+    # ── 銘柄別トレード詳細（取引あり銘柄のみ）────────────────────
     detail_blocks = ""
-    for r in results:
+    for r in active_results:
         strat = STRATEGY_NAMES.get(r["key"], r["key"])
         s     = r["stats"]
         trade_rows = _trade_rows(r["trades"])
@@ -549,15 +564,21 @@ def main() -> None:
     print("  " + "─" * len(hdr))
 
     all_trades: list[dict] = []
+    no_trade_syms: list[str] = []
     for r in results:
         s     = r["stats"]
         strat = STRATEGY_NAMES.get(r["key"], r["key"])
+        all_trades.extend(r["trades"])
+        if s["n"] == 0:
+            no_trade_syms.append(r["symbol"])
+            continue
         pnl_s = f"{s['total']:>+12,.0f}円"
         avg_s = f"{s['avg']:>+9,.0f}円"
         print(f"  {r['symbol']:<{W[0]}}  {r['name']:<{W[1]}}  {strat:<{W[2]}}"
               f"  {s['n']:>{W[3]}}  {s['wr']:>5.1f}%  {_pf_str(s['pf']):>{W[5]}}"
               f"  {pnl_s}  {avg_s}")
-        all_trades.extend(r["trades"])
+    if no_trade_syms:
+        print(f"\n  取引なし（{args.days}日間）: {' '.join(no_trade_syms)}")
 
     total = _stats(all_trades)
     print("  " + "─" * len(hdr))
