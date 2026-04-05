@@ -75,23 +75,44 @@ def _run_backtest(symbol: str, key: str, days: int) -> list[dict]:
 def _stats(trades: list[dict]) -> dict:
     if not trades:
         return dict(n=0, wins=0, wr=0.0, pf=0.0, total=0.0,
-                    avg=0.0, max_win=0.0, max_loss=0.0)
-    pnls  = [t["pnl"] for t in trades]
-    wins  = [p for p in pnls if p > 0]
-    loss  = [p for p in pnls if p <= 0]
-    wr    = len(wins) / len(pnls) * 100
+                    avg=0.0, max_win=0.0, max_loss=0.0,
+                    max_dd=0.0, max_consec_loss=0)
+    sorted_t   = sorted(trades, key=lambda t: t.get("exit_dt") or "")
+    pnls       = [t["pnl"] for t in sorted_t]
+    wins       = [p for p in pnls if p > 0]
+    loss       = [p for p in pnls if p <= 0]
+    wr         = len(wins) / len(pnls) * 100
     gross_win  = sum(wins)
     gross_loss = abs(sum(loss))
-    pf    = gross_win / gross_loss if gross_loss > 0 else float("inf")
+    pf         = gross_win / gross_loss if gross_loss > 0 else float("inf")
+
+    # 最大ドローダウン（累積損益のピーク→谷）
+    cum, peak, max_dd = 0.0, 0.0, 0.0
+    for p in pnls:
+        cum  += p
+        peak  = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+
+    # 最大連敗数
+    max_consec = cur_consec = 0
+    for p in pnls:
+        if p <= 0:
+            cur_consec += 1
+            max_consec  = max(max_consec, cur_consec)
+        else:
+            cur_consec  = 0
+
     return dict(
-        n        = len(pnls),
-        wins     = len(wins),
-        wr       = wr,
-        pf       = pf,
-        total    = sum(pnls),
-        avg      = sum(pnls) / len(pnls),
-        max_win  = max(pnls),
-        max_loss = min(pnls),
+        n              = len(pnls),
+        wins           = len(wins),
+        wr             = wr,
+        pf             = pf,
+        total          = sum(pnls),
+        avg            = sum(pnls) / len(pnls),
+        max_win        = max(pnls),
+        max_loss       = min(pnls),
+        max_dd         = max_dd,
+        max_consec_loss= max_consec,
     )
 
 
@@ -273,6 +294,86 @@ def _pf_str(pf: float) -> str:
     return "∞" if pf == float("inf") else f"{pf:.2f}"
 
 
+def _strategy_scoring(results: list[dict]) -> str:
+    """
+    戦略ごとに銘柄をまとめ、5指標をスコアリングして優先度テーブルを返す。
+    指標: 勝率・PF・平均損益・最大DD・最大連敗（各0〜5点、合計25点満点）
+    """
+    from collections import defaultdict
+
+    # 戦略ごとに全トレードを集約
+    strat_trades: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        strat_trades[r["key"]].extend(r["trades"])
+
+    if not strat_trades:
+        return "<p style='color:#4b5563'>データなし</p>"
+
+    # 各戦略の集計統計
+    strat_stats = {k: _stats(v) for k, v in strat_trades.items()}
+
+    # スコアリング（相対ランキングで 1〜5点）
+    def _rank_scores(keys: list[str], metric_fn, higher_is_better: bool) -> dict[str, int]:
+        vals = [(k, metric_fn(strat_stats[k])) for k in keys]
+        vals.sort(key=lambda x: x[1], reverse=higher_is_better)
+        n = len(vals)
+        scores = {}
+        for rank, (k, _) in enumerate(vals):
+            scores[k] = max(1, round(5 - rank * 4 / max(n - 1, 1)))
+        return scores
+
+    keys = list(strat_stats.keys())
+    sc_wr   = _rank_scores(keys, lambda s: s["wr"],              True)
+    sc_pf   = _rank_scores(keys, lambda s: min(s["pf"], 10),     True)
+    sc_avg  = _rank_scores(keys, lambda s: s["avg"],             True)
+    sc_dd   = _rank_scores(keys, lambda s: s["max_dd"],          False)   # 低い方が良い
+    sc_cl   = _rank_scores(keys, lambda s: s["max_consec_loss"], False)   # 低い方が良い
+
+    # テーブル生成（合計スコア降順）
+    ranked = sorted(keys, key=lambda k: -(sc_wr[k]+sc_pf[k]+sc_avg[k]+sc_dd[k]+sc_cl[k]))
+
+    def bar(score: int, max_s: int = 5) -> str:
+        filled = "■" * score + "□" * (max_s - score)
+        color  = "#3fb950" if score >= 4 else ("#f0883e" if score >= 2 else "#f85149")
+        return f"<span style='color:{color};letter-spacing:1px'>{filled}</span> {score}"
+
+    rows = ""
+    for rank, k in enumerate(ranked, 1):
+        s     = strat_stats[k]
+        color = STRATEGY_COLOR.get(k, "#94a3b8")
+        name  = STRATEGY_NAMES.get(k, k)
+        total = sc_wr[k] + sc_pf[k] + sc_avg[k] + sc_dd[k] + sc_cl[k]
+        medal = ["🥇", "🥈", "🥉", "4位", "5位"][rank - 1] if rank <= 5 else str(rank)
+        pf_s  = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+        rows += (
+            f"<tr>"
+            f"<td style='font-weight:700'>{medal}</td>"
+            f"<td><span class='badge' style='color:{color};border-color:{color}'>{name}</span></td>"
+            f"<td>{s['n']}件</td>"
+            f"<td>{bar(sc_wr[k])}<div class='sub'>{s['wr']:.1f}%</div></td>"
+            f"<td>{bar(sc_pf[k])}<div class='sub'>PF {pf_s}</div></td>"
+            f"<td>{bar(sc_avg[k])}<div class='sub'>{s['avg']:+,.0f}円/件</div></td>"
+            f"<td>{bar(sc_dd[k])}<div class='sub'>▼{s['max_dd']:,.0f}円</div></td>"
+            f"<td>{bar(sc_cl[k])}<div class='sub'>{s['max_consec_loss']}連敗</div></td>"
+            f"<td style='font-weight:700;font-size:1.1em'>{total}/25</td>"
+            f"</tr>"
+        )
+
+    return f"""<table>
+<thead><tr>
+  <th>順位</th><th>戦略</th><th>取引数</th>
+  <th>勝率</th><th>PF</th><th>平均損益</th>
+  <th>最大DD<br><span style='font-weight:normal;font-size:.85em'>(低い方が良)</span></th>
+  <th>最大連敗<br><span style='font-weight:normal;font-size:.85em'>(少ない方が良)</span></th>
+  <th>合計スコア</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<p style='font-size:.8em;color:#4b5563;margin-top:4px'>
+  ※ 各指標を相対ランキングで1〜5点採点（25点満点）。バックテスト期間({days}日)の結果に基づく。
+</p>"""
+
+
 def build_html(results: list[dict], all_trades: list[dict],
                days: int, preset_name: str) -> str:
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -281,10 +382,12 @@ def build_html(results: list[dict], all_trades: list[dict],
     # ── サマリーテーブル ─────────────────────────────────────────
     rows = ""
     for r in results:
-        s      = r["stats"]
-        color  = STRATEGY_COLOR.get(r["key"], "#94a3b8")
-        strat  = STRATEGY_NAMES.get(r["key"], r["key"])
+        s       = r["stats"]
+        color   = STRATEGY_COLOR.get(r["key"], "#94a3b8")
+        strat   = STRATEGY_NAMES.get(r["key"], r["key"])
         pnl_cls = "up" if s["total"] > 0 else ("dn" if s["total"] < 0 else "neu")
+        avg_cls = "up" if s["avg"] > 0 else "dn"
+        pf_val  = 0 if s["pf"] == float("inf") else s["pf"]
         rows += (
             f"<tr>"
             f"<td>{r['symbol']}</td>"
@@ -292,15 +395,18 @@ def build_html(results: list[dict], all_trades: list[dict],
             f"<td><span class='badge' style='color:{color};border-color:{color}'>{strat}</span></td>"
             f"<td data-v='{s['n']}'>{s['n']}</td>"
             f"<td data-v='{s['wr']:.1f}'>{s['wr']:.1f}%</td>"
-            f"<td data-v='{0 if s['pf']==float('inf') else s['pf']:.2f}'>{_pf_str(s['pf'])}</td>"
+            f"<td data-v='{pf_val:.2f}'>{_pf_str(s['pf'])}</td>"
             f"<td data-v='{s['total']:.0f}' class='{pnl_cls}'>{s['total']:+,.0f}円</td>"
-            f"<td data-v='{s['avg']:.0f}' class='{'up' if s['avg']>0 else 'dn'}'>{s['avg']:+,.0f}円</td>"
+            f"<td data-v='{s['avg']:.0f}' class='{avg_cls}'>{s['avg']:+,.0f}円</td>"
             f"<td class='up'>{s['max_win']:+,.0f}円</td>"
             f"<td class='dn'>{s['max_loss']:+,.0f}円</td>"
+            f"<td class='dn' data-v='{s['max_dd']:.0f}'>▼{s['max_dd']:,.0f}円</td>"
+            f"<td data-v='{s['max_consec_loss']}'>{s['max_consec_loss']}連敗</td>"
             f"</tr>"
         )
     # 合計行
     total_cls = "up" if total_s["total"] > 0 else ("dn" if total_s["total"] < 0 else "neu")
+    total_avg_cls = "up" if total_s["avg"] > 0 else "dn"
     rows += (
         f"<tr class='total-row'>"
         f"<td colspan='3'>合計</td>"
@@ -308,9 +414,11 @@ def build_html(results: list[dict], all_trades: list[dict],
         f"<td>{total_s['wr']:.1f}%</td>"
         f"<td>{_pf_str(total_s['pf'])}</td>"
         f"<td class='{total_cls}'>{total_s['total']:+,.0f}円</td>"
-        f"<td class='{'up' if total_s['avg']>0 else 'dn'}'>{total_s['avg']:+,.0f}円</td>"
+        f"<td class='{total_avg_cls}'>{total_s['avg']:+,.0f}円</td>"
         f"<td class='up'>{total_s['max_win']:+,.0f}円</td>"
         f"<td class='dn'>{total_s['max_loss']:+,.0f}円</td>"
+        f"<td class='dn'>▼{total_s['max_dd']:,.0f}円</td>"
+        f"<td>{total_s['max_consec_loss']}連敗</td>"
         f"</tr>"
     )
 
@@ -327,6 +435,8 @@ def build_html(results: list[dict], all_trades: list[dict],
   <th onclick="sortTable(this.closest('table'),7)">平均損益</th>
   <th onclick="sortTable(this.closest('table'),8)">最大利益</th>
   <th onclick="sortTable(this.closest('table'),9)">最大損失</th>
+  <th onclick="sortTable(this.closest('table'),10)">最大DD</th>
+  <th onclick="sortTable(this.closest('table'),11)">最大連敗</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>"""
@@ -357,7 +467,8 @@ def build_html(results: list[dict], all_trades: list[dict],
   </table>
 </details>"""
 
-    equity_svg = _equity_svg(all_trades)
+    equity_svg   = _equity_svg(all_trades)
+    scoring_html = _strategy_scoring(results)
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -375,6 +486,9 @@ def build_html(results: list[dict], all_trades: list[dict],
 <p style="font-size:.8em;color:#4b5563;margin-bottom:16px">
   ※ 主戦略のみ使用 / ロット {LOT}株固定 / 列ヘッダーでソート可
 </p>
+
+<h2>▶ 戦略別スコアリング（優先度評価）</h2>
+{scoring_html}
 
 <h2>▶ 銘柄別サマリー</h2>
 {summary_table}

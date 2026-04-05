@@ -234,20 +234,43 @@ def _run_backtest(symbol: str, days: int) -> list[dict]:
 def _stats(trades: list[dict]) -> dict:
     if not trades:
         return dict(n=0, wins=0, wr=0.0, pf=0.0, total=0.0,
-                    avg=0.0, max_win=0.0, max_loss=0.0)
-    wins   = [t["pnl"] for t in trades if t["pnl"] > 0]
-    losses = [t["pnl"] for t in trades if t["pnl"] <= 0]
-    gross_w = sum(wins)
-    gross_l = abs(sum(losses))
-    pf = gross_w / gross_l if gross_l > 0 else float("inf")
+                    avg=0.0, max_win=0.0, max_loss=0.0,
+                    max_dd=0.0, max_consec_loss=0)
+    sorted_t   = sorted(trades, key=lambda t: t.get("exit_dt") or "")
+    pnls       = [t["pnl"] for t in sorted_t]
+    wins       = [p for p in pnls if p > 0]
+    losses     = [p for p in pnls if p <= 0]
+    gross_w    = sum(wins)
+    gross_l    = abs(sum(losses))
+    pf         = gross_w / gross_l if gross_l > 0 else float("inf")
+
+    # 最大ドローダウン
+    cum, peak, max_dd = 0.0, 0.0, 0.0
+    for p in pnls:
+        cum  += p
+        peak  = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+
+    # 最大連敗数
+    max_consec = cur_consec = 0
+    for p in pnls:
+        if p <= 0:
+            cur_consec += 1
+            max_consec  = max(max_consec, cur_consec)
+        else:
+            cur_consec  = 0
+
     return dict(
-        n=len(trades), wins=len(wins),
-        wr=len(wins) / len(trades) * 100,
-        pf=pf,
-        total=sum(t["pnl"] for t in trades),
-        avg=sum(t["pnl"] for t in trades) / len(trades),
-        max_win=max((t["pnl"] for t in trades), default=0),
-        max_loss=min((t["pnl"] for t in trades), default=0),
+        n              = len(pnls),
+        wins           = len(wins),
+        wr             = len(wins) / len(pnls) * 100,
+        pf             = pf,
+        total          = sum(pnls),
+        avg            = sum(pnls) / len(pnls),
+        max_win        = max(pnls),
+        max_loss       = min(pnls),
+        max_dd         = max_dd,
+        max_consec_loss= max_consec,
     )
 
 
@@ -362,6 +385,8 @@ def build_backtest_html(
             f"<td class='{avg_cls}'>{s['avg']:+,.0f}円</td>"
             f"<td class='up'>{s['max_win']:+,.0f}円</td>"
             f"<td class='dn'>{s['max_loss']:+,.0f}円</td>"
+            f"<td class='dn' data-v='{s['max_dd']:.0f}'>▼{s['max_dd']:,.0f}円</td>"
+            f"<td data-v='{s['max_consec_loss']}'>{s['max_consec_loss']}連敗</td>"
             f"</tr>"
         )
 
@@ -377,6 +402,8 @@ def build_backtest_html(
         f"<td class='{'up' if total_s['avg']>0 else 'dn'}'>{total_s['avg']:+,.0f}円</td>"
         f"<td class='up'>{total_s['max_win']:+,.0f}円</td>"
         f"<td class='dn'>{total_s['max_loss']:+,.0f}円</td>"
+        f"<td class='dn'>▼{total_s['max_dd']:,.0f}円</td>"
+        f"<td>{total_s['max_consec_loss']}連敗</td>"
         f"</tr>"
     )
 
@@ -430,7 +457,7 @@ def build_backtest_html(
 <thead><tr>
   <th>コード</th><th>銘柄名</th><th>取引数</th><th>勝ち</th>
   <th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益</th>
-  <th>最大利益</th><th>最大損失</th>
+  <th>最大利益</th><th>最大損失</th><th>最大DD</th><th>最大連敗</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
@@ -445,18 +472,76 @@ def build_backtest_html(
 # メイン
 # ─────────────────────────────────────────────────────────────────────
 
+def _check_signal_on(df: pd.DataFrame) -> bool:
+    """df の最終バーでシグナルが立っているか判定（履歴用）。"""
+    if len(df) < 2:
+        return False
+    return _amr._has_signal_today(df) is not None
+
+
+def run_history(days: int) -> None:
+    """過去 days 日間のシグナル発生回数を銘柄ごとに集計して表示。"""
+    today      = datetime.now(JST).date()
+    from_date  = today - timedelta(days=days)
+    fetch_days = days + 400   # 指標計算用に余裕をもたせる
+
+    print(f"\n{'='*70}")
+    print(f"  アダプティブMR シグナル発生頻度")
+    print(f"  集計期間: {from_date} 〜 {today}  ({days}日間)  {len(STOCKS)}銘柄")
+    print(f"{'='*70}\n")
+
+    results = []
+
+    def _scan(sym: str, nm: str):
+        df = _fetch_df(sym, fetch_days)
+        if df is None or len(df) < 50:
+            return sym, nm, [], 0
+        idx = [(i, (d.date() if hasattr(d, "date") else d)) for i, d in enumerate(df.index)]
+        sig_dates: list[str] = []
+        for i, d in idx:
+            if d < from_date or d > today or i < 50:
+                continue
+            if _check_signal_on(df.iloc[:i + 1]):
+                sig_dates.append(str(d))
+        return sym, nm, sig_dates, len(sig_dates)
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(_scan, s, n): (s, n) for s, n in STOCKS}
+        for f in as_completed(futs):
+            sym, nm, sig_dates, cnt = f.result()
+            results.append((sym, nm, cnt, sig_dates))
+
+    results.sort(key=lambda x: -x[2])
+    total_signals = sum(r[2] for r in results)
+
+    print(f"  {'コード':<10}  {'銘柄名':<22}  {'回数':>4}  直近5件")
+    print("  " + "─" * 65)
+    for sym, nm, cnt, dates in results:
+        recent = "  ".join(dates[-5:]) if dates else "—"
+        print(f"  {sym:<10}  {nm:<22}  {cnt:>4}件  {recent}")
+
+    print(f"\n  合計シグナル: {total_signals}件  ({days}日間 / {len(STOCKS)}銘柄)")
+    avg_per_month = total_signals / (days / 30)
+    print(f"  月平均: {avg_per_month:.1f}件\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="アダプティブMR専用 シグナル＆バックテスト",
     )
     parser.add_argument("--backtest",   action="store_true", help="バックテストモード")
-    parser.add_argument("--days",       type=int, default=365, help="バックテスト日数（デフォルト365）")
+    parser.add_argument("--history",    action="store_true", help="シグナル発生頻度モード")
+    parser.add_argument("--days",       type=int, default=365, help="バックテスト/履歴の日数（デフォルト365）")
     parser.add_argument("--date",       type=str, default=None, help="シグナル判定日 YYYY-MM-DD")
     parser.add_argument("--no-browser", action="store_true", help="ブラウザ自動起動しない")
     args = parser.parse_args()
 
     no_browser  = args.no_browser
     target_date = date.fromisoformat(args.date) if args.date else None
+
+    if args.history:
+        run_history(args.days)
+        return
 
     if args.backtest:
         # ── バックテストモード ──────────────────────────────────────
