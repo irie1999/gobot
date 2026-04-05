@@ -1,7 +1,7 @@
 """
-check_signals_budget.py  ―  50万円予算選定銘柄のシグナルチェック＆バックテスト
+check_signals_budget.py  ―  監視銘柄のシグナルチェック＆バックテスト（check_signals.pyと同形式）
 ==========================================================================
-build_watchlist_budget.py で選定した15銘柄（50万円予算）を対象に
+check_signals.py と同じ17銘柄を対象に
 check_signals.py と同じ形式でシグナル確認とバックテストを行う。
 
 【今日のシグナル確認】
@@ -30,29 +30,25 @@ import backtest_strong_pullback as _sp
 JST = timezone(timedelta(hours=9))
 LOT = 100
 
-# ── 監視リスト（50万円予算 / 4期間スコア35以上）─────────────────────────
+# ── 監視リスト（1800銘柄バックテスト + 4期間スコア選定）────────────────
 WATCHLIST: list[tuple[str, str]] = [
-    # score45
-    ("3636.T", "三菱総合研究所"),
-    ("5108.T", "ブリヂストン"),
-    ("6183.T", "ベルシステム２４ホールディングス"),
+    ("6146.T", "ディスコ"),
+    ("6871.T", "日本マイクロニクス"),
+    ("7236.T", "ティラド"),
     ("7012.T", "川崎重工業"),
-    ("8153.T", "モスフードサービス"),
-    ("8218.T", "コメリ"),
-    ("9046.T", "神戸電鉄"),
-    # score43
-    ("9405.T", "朝日放送グループホールディングス"),
-    # score40
-    ("3946.T", "トーモク"),
+    ("5108.T", "ブリヂストン"),
     ("4025.T", "多木化学"),
-    # score39
-    ("6196.T", "ストライク"),
-    ("6454.T", "マックス"),
-    # score38
-    ("8081.T", "カナデン"),
+    ("8218.T", "コメリ"),
+    ("3946.T", "トーモク"),
+    ("6183.T", "ベルシステム２４ホールディングス"),
+    ("3636.T", "三菱総合研究所"),
+    ("8153.T", "モスフードサービス"),
     ("8194.T", "ライフコーポレーション"),
-    # score35
-    ("9381.T", "エーアイテイー"),
+    ("9046.T", "神戸電鉄"),
+    ("9405.T", "朝日放送グループホールディングス"),
+    ("8081.T", "カナデン"),
+    ("6454.T", "マックス"),
+    ("6196.T", "ストライク"),
 ]
 
 _CSS = """
@@ -207,11 +203,11 @@ def build_signal_html(active: list, waiting: list, target_date: date | None) -> 
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>シグナルチェック {ref_label} ― 50万円予算</title>
+<title>シグナルチェック {ref_label}</title>
 <style>{_CSS}</style>
 </head>
 <body>
-<h1>監視銘柄シグナルチェック（50万円予算選定）
+<h1>監視銘柄シグナルチェック
   <span style="font-size:.8em;color:#8b949e">
     判定日: {ref_label} &nbsp;|&nbsp; {len(WATCHLIST)}銘柄 &nbsp;|&nbsp; 生成: {now_str}
   </span>
@@ -355,11 +351,11 @@ def build_backtest_html(all_results: list[dict], days: int) -> str:
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>バックテスト {days}日 ― 50万円予算選定</title>
+<title>バックテスト {days}日</title>
 <style>{_CSS}</style>
 </head>
 <body>
-<h1>強い押し目 バックテスト（50万円予算選定銘柄）
+<h1>強い押し目 バックテスト
   <span style="font-size:.8em;color:#8b949e">
     直近{days}日 &nbsp;|&nbsp; {len(WATCHLIST)}銘柄 &nbsp;|&nbsp; 生成: {now_str}
   </span>
@@ -386,7 +382,7 @@ def build_backtest_html(all_results: list[dict], days: int) -> str:
 def check_today_main(target_date: date | None, no_browser: bool) -> None:
     ref = target_date or datetime.now(JST).date()
     print(f"\n{'='*65}")
-    print(f"  シグナルチェック（50万円予算）  判定日: {ref}  ({len(WATCHLIST)}銘柄)")
+    print(f"  シグナルチェック  判定日: {ref}  ({len(WATCHLIST)}銘柄)")
     print(f"{'='*65}\n")
 
     active, waiting = _collect_signals(target_date)
@@ -422,7 +418,7 @@ def run_backtest(days: int, no_browser: bool) -> None:
     today_s = datetime.now(JST).strftime("%Y%m%d")
 
     print(f"\n{'='*65}")
-    print(f"  バックテスト（50万円予算）  直近{days}日  ({len(WATCHLIST)}銘柄)")
+    print(f"  バックテスト  直近{days}日  ({len(WATCHLIST)}銘柄)")
     print(f"{'='*65}\n")
 
     all_results: list[dict] = []
@@ -467,7 +463,7 @@ def run_backtest(days: int, no_browser: bool) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="50万円予算選定銘柄 シグナル＆バックテスト")
+    parser = argparse.ArgumentParser(description="監視銘柄 シグナル＆バックテスト")
     parser.add_argument("--date",       type=str,  help="シグナル確認日（YYYY-MM-DD）")
     parser.add_argument("--days",       type=int,  default=365, help="バックテスト日数（デフォルト365）")
     parser.add_argument("--backtest",   action="store_true", help="バックテストモード")
