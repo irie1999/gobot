@@ -71,6 +71,7 @@ IBS_EXIT       = 0.75   # IBS決済閾値
 RSI2_EXIT      = 75.0   # RSI(2)決済閾値
 STOP_ATR_NORM  = 2.0    # 通常時ストップ（ATR倍率）
 STOP_ATR_HIGH  = 2.5    # 高ボラ時ストップ（ATR倍率）
+TARGET_ATR_MULT = 2.0   # 利確目標（ATR倍率）
 ENTRY_EXPIRE   = 2      # エントリー指値の有効期限（日数）
 MAX_HOLD       = 7      # 最大保有日数
 SMA_PERIOD     = 5      # 決済用SMA期間
@@ -362,8 +363,13 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             stop_mult = STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM
             stop_lvl  = entry_p - entry_atr * stop_mult
 
+            # 利確（当日ハイが目標到達）
+            if hi >= entry_target:
+                exit_p = entry_target
+                reason = "利確"
+
             # ハードストップ（当日ローが到達）
-            if lo <= stop_lvl:
+            elif lo <= stop_lvl:
                 exit_p = max(stop_lvl, lo)   # ギャップダウン考慮
                 reason = "ストップ"
 
@@ -403,7 +409,7 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     limit_price  = entry_p,   # filled at limit
                     regime       = entry_regime,
                     stop_p       = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
-                    target_p     = float("nan"),  # adaptive_mr has no fixed profit target
+                    target_p     = entry_target,
                     signal_dt    = signal_dt,
                     signal_close = signal_close,
                 ))
@@ -428,6 +434,7 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     hold_days     = 0
                     signal_dt     = pending_order["signal_dt"]
                     signal_close  = pending_order["signal_close"]
+                    entry_target  = entry_p + entry_atr * TARGET_ATR_MULT
                     in_pos        = True
                     pending_order = None
 
