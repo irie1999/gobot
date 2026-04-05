@@ -68,6 +68,16 @@ STRATEGY_NAMES = {
     "limit_oco":      "指値OCO",
 }
 
+# ── プリセット定義 ─────────────────────────────────────────────────
+# WATCHLIST の銘柄コードで構成するグループ名
+PRESETS: dict[str, list[str]] = {
+    "core": [                    # 優先度A+B の元8銘柄
+        "7012.T", "1605.T", "5844.T", "6361.T",
+        "5981.T", "5741.T", "7013.T", "9044.T",
+    ],
+    "all": [],                   # 空 = WATCHLIST 全体（22銘柄）
+}
+
 LOT = 100
 
 
@@ -317,50 +327,46 @@ def main() -> None:
         epilog="""\
 使用例:
   python check_signals.py                                        # 全銘柄・今日のシグナル
-  python check_signals.py --stocks 7012.T 1605.T 6361.T         # 指定銘柄のみ
-  python check_signals.py --list                                 # 登録銘柄一覧
-  python check_signals.py --history --days 90                   # 過去90日の発生回数
-  python check_signals.py --history --days 90 --stocks 7012.T   # 指定銘柄の過去集計
+  python check_signals.py                     # 全22銘柄・今日のシグナル
+  python check_signals.py --preset core       # 元の8銘柄のみ
+  python check_signals.py --preset all        # 全22銘柄（デフォルトと同じ）
+  python check_signals.py --list              # 登録銘柄一覧（プリセット付き）
+  python check_signals.py --history --days 90               # 過去90日の発生回数
+  python check_signals.py --history --days 90 --preset core # 元8銘柄で過去集計
   python check_signals.py --history --from 2025-10-01 --to 2026-03-31
-  python check_signals.py --history --days 180 --verbose        # 全発生日も表示
+  python check_signals.py --history --days 180 --verbose    # 全発生日も表示
 """)
-    parser.add_argument("--verbose",  "-v", action="store_true", help="詳細表示")
-    parser.add_argument("--history",        action="store_true", help="過去期間集計モード")
-    parser.add_argument("--days",     type=int, default=90,
+    preset_choices = list(PRESETS.keys())
+    parser.add_argument("--preset",  "-p", choices=preset_choices, default="all",
+                        help=f"銘柄グループを選択: {' / '.join(preset_choices)}（デフォルト: all）")
+    parser.add_argument("--verbose", "-v", action="store_true", help="詳細表示")
+    parser.add_argument("--history",       action="store_true", help="過去期間集計モード")
+    parser.add_argument("--days",    type=int, default=90,
                         help="過去N日を集計（--history時）")
     parser.add_argument("--from",  dest="from_date", metavar="YYYY-MM-DD",
                         help="集計開始日")
     parser.add_argument("--to",    dest="to_date",   metavar="YYYY-MM-DD",
                         help="集計終了日（デフォルト: 今日）")
-    parser.add_argument("--stocks", nargs="+", metavar="CODE",
-                        help="チェック対象を指定銘柄コードに絞る（例: 7012.T 1605.T）")
-    parser.add_argument("--list",   action="store_true",
+    parser.add_argument("--list",  action="store_true",
                         help="登録銘柄の一覧を表示して終了")
     args = parser.parse_args()
 
     # ── 銘柄一覧表示 ────────────────────────────────────────────
     if args.list:
-        print(f"\n登録銘柄一覧 （{len(WATCHLIST)}銘柄）")
-        print("─" * 60)
-        for sym, nm, strats in WATCHLIST:
-            strat_str = " + ".join(STRATEGY_NAMES.get(s, s) for s in strats)
-            print(f"  {sym:<10}  {nm:<22}  {strat_str}")
+        for pname, pcodes in PRESETS.items():
+            label = f"【{pname}】 {len(pcodes) if pcodes else len(WATCHLIST)}銘柄"
+            print(f"\n{label}")
+            print("─" * 60)
+            wl_p = [r for r in WATCHLIST if r[0] in pcodes] if pcodes else WATCHLIST
+            for sym, nm, strats in wl_p:
+                strat_str = " + ".join(STRATEGY_NAMES.get(s, s) for s in strats)
+                print(f"  {sym:<10}  {nm:<22}  {strat_str}")
         print()
         return
 
-    # ── 銘柄フィルタ ────────────────────────────────────────────
-    if args.stocks:
-        requested = {s.upper() for s in args.stocks}
-        wl = [row for row in WATCHLIST if row[0].upper() in requested]
-        not_found = requested - {row[0].upper() for row in wl}
-        if not_found:
-            print(f"※ 登録されていない銘柄コード: {', '.join(sorted(not_found))}")
-            print(f"  --list で登録銘柄を確認できます\n")
-        if not wl:
-            print("対象銘柄が見つかりませんでした。")
-            return
-    else:
-        wl = None  # None = WATCHLIST全体を使う
+    # ── プリセット適用 ───────────────────────────────────────────
+    codes = PRESETS.get(args.preset, [])
+    wl = [r for r in WATCHLIST if r[0] in codes] if codes else None  # None = 全体
 
     # ── 実行 ────────────────────────────────────────────────────
     if args.history:
