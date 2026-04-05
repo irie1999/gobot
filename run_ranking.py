@@ -245,6 +245,50 @@ def print_ranking(key: str, name: str) -> None:
     print()
 
 
+def build_paste_text(days: int) -> str:
+    """全戦略の結果をまとめた貼り付け用テキストを生成する。"""
+    scan_dt = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    lines = []
+    lines.append(f"# バックテスト結果サマリー  {scan_dt}")
+    lines.append(f"# 評価期間: {days}日まで / 銘柄フィルター: 株価≤{MAX_PRICE:,}円")
+    lines.append(f"# スコア = 30日×50% + 90日×25% + 180日×15% + 365日×10%")
+    lines.append("")
+
+    any_data = False
+    for key, _, name in STRATEGIES:
+        data = load_csv(key)
+        if not data:
+            lines.append(f"## 【{name}】データなし")
+            lines.append("")
+            continue
+
+        filtered = [r for r in data if 0 < r["last_close"] <= MAX_PRICE]
+        filtered.sort(key=weighted_score, reverse=True)
+        top = filtered[:TOP_N]
+        any_data = True
+
+        lines.append(f"## 【{name}】 TOP{len(top)}銘柄 （全{len(filtered)}銘柄中）")
+        header = f"{'順':>3}  {'コード':<10}  {'銘柄名':<20}  {'株価':>6}  {'30日損益':>9}  {'90日損益':>9}  {'180日損益':>9}  {'365日損益':>9}  {'勝率30d':>7}  {'PF30d':>6}  {'スコア':>9}"
+        lines.append(header)
+        lines.append("─" * len(header))
+        for i, r in enumerate(top, 1):
+            s = weighted_score(r)
+            wr30 = f"{r['30_wr']*100:.0f}%" if r['30_wr'] > 0 else "  —"
+            pf30 = f"{r['30_pf']:.2f}" if r['30_pf'] > 0 else "   —"
+            lines.append(
+                f"{i:>3}  {r['symbol']:<10}  {r['name']:<20}  {r['last_close']:>6,.0f}  "
+                f"{fmt_pnl(r['30_total'])}  {fmt_pnl(r['90_total'])}  "
+                f"{fmt_pnl(r['180_total'])}  {fmt_pnl(r['365_total'])}  "
+                f"{wr30:>7}  {pf30:>6}  {s:>+9,.0f}"
+            )
+        lines.append("")
+
+    if not any_data:
+        lines.append("※ データなし。先にバックテストを実行してください。")
+
+    return "\n".join(lines)
+
+
 # ── メイン ────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -261,6 +305,7 @@ def main() -> None:
     parser.add_argument("--days",       type=int, default=365)
     parser.add_argument("--no-run",     action="store_true", help="バックテストをスキップ")
     parser.add_argument("--no-browser", action="store_true", help="ブラウザを自動起動しない")
+    parser.add_argument("--paste",      action="store_true", help="貼り付け用テキストを出力してファイルにも保存")
     args = parser.parse_args()
 
     scan_dt = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -293,6 +338,20 @@ def main() -> None:
 
     if not args.no_browser:
         webbrowser.open(f"file://{combined.resolve()}")
+
+    # ── 貼り付け用テキスト出力 ────────────────────────────────────
+    if args.paste:
+        paste_text = build_paste_text(args.days)
+        today_str = datetime.now(JST).strftime("%Y-%m-%d")
+        paste_path = Path(f"result_summary_{today_str}.txt")
+        paste_path.write_text(paste_text, encoding="utf-8")
+        print(f"\n{'='*80}")
+        print("  ▼ 以下のテキストをコピーしてClaude等に貼り付けてください")
+        print(f"{'='*80}\n")
+        print(paste_text)
+        print(f"\n{'='*80}")
+        print(f"  ファイルにも保存しました: {paste_path.resolve()}")
+        print(f"{'='*80}\n")
 
 
 if __name__ == "__main__":
