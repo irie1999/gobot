@@ -144,6 +144,7 @@ tr:nth-child(even){background:#0d1117}
 tr:nth-child(odd){background:#161b22}
 tr.total-row td{background:#1a2332;font-weight:bold;border-top:2px solid #38bdf8}
 .up{color:#3fb950}.dn{color:#f85149}.neu{color:#8b949e}
+.sub{font-size:.75em;color:#6b7280;margin-top:1px}
 .badge{display:inline-block;padding:2px 9px;border-radius:10px;
        font-size:.75em;font-weight:bold;border:1px solid}
 .equity-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:24px}
@@ -210,22 +211,45 @@ def _equity_svg(all_trades: list[dict], width: int = 700, height: int = 160) -> 
 
 def _trade_rows(trades: list[dict]) -> str:
     if not trades:
-        return "<tr><td colspan='7' style='color:#4b5563;text-align:center'>トレードなし</td></tr>"
+        return "<tr><td colspan='11' style='color:#4b5563;text-align:center'>トレードなし</td></tr>"
     rows = ""
     for t in sorted(trades, key=lambda t: t.get("exit_dt") or ""):
-        pnl     = t["pnl"]
-        cls     = "up" if pnl > 0 else "dn"
-        reason  = t.get("reason", "—")
-        entry_d = str(t.get("entry_dt", ""))[:10]
-        exit_d  = str(t.get("exit_dt",  ""))[:10]
-        hold    = t.get("hold", "—")
+        pnl      = t["pnl"]
+        pnl_cls  = "up" if pnl > 0 else "dn"
+        reason   = t.get("reason", "—")
+        entry_d  = str(t.get("entry_dt", ""))[:10]
+        exit_d   = str(t.get("exit_dt",  ""))[:10]
+        hold     = t.get("hold", "—")
+
+        # 指値・損切・目標（戦略によってキー名が異なる）
+        limit_p  = t.get("limit_p")  or t.get("limit_price") or t.get("entry_p", 0)
+        stop_p   = t.get("stop_p")   or t.get("stop_loss")   or t.get("stop",    0)
+        target_p = t.get("target_p") or t.get("profit_target") or t.get("target", 0)
+        entry_p  = t.get("entry_p", 0)
+        exit_p   = t.get("exit_p",  0)
+        atr      = t.get("atr", 0)
+
+        # 指値からの乖離率
+        slip = (entry_p - limit_p) / limit_p * 100 if limit_p else 0
+        slip_s = f"<div class='sub'>約定 {slip:+.1f}%</div>" if abs(slip) > 0.01 else ""
+
+        # ストップまでのリスク
+        risk     = entry_p - stop_p if stop_p else 0
+        rr_val   = (target_p - entry_p) / risk if (risk > 0 and target_p) else None
+        rr_s     = f"{rr_val:.1f}R" if rr_val else "—"
+
         rows += (
             f"<tr>"
-            f"<td>{entry_d}</td><td>{exit_d}</td>"
-            f"<td>¥{t.get('entry_p',0):,.0f}</td>"
-            f"<td>¥{t.get('exit_p',0):,.0f}</td>"
-            f"<td class='{cls}'>{pnl:+,.0f}円</td>"
+            f"<td>{entry_d}</td>"
+            f"<td>{exit_d}</td>"
+            f"<td>¥{limit_p:,.0f}<div class='sub'>指値</div></td>"
+            f"<td>¥{entry_p:,.0f}{slip_s}</td>"
+            f"<td class='dn'>¥{stop_p:,.0f}<div class='sub'>リスク¥{risk:,.0f}</div></td>"
+            f"<td class='up'>¥{target_p:,.0f}<div class='sub'>{rr_s}</div></td>"
+            f"<td>¥{exit_p:,.0f}</td>"
+            f"<td class='{pnl_cls}'>{pnl:+,.0f}円</td>"
             f"<td>{hold}日</td>"
+            f"<td class='neu' style='font-size:.78em'>ATR¥{atr:,.0f}</td>"
             f"<td>{reason}</td>"
             f"</tr>"
         )
@@ -308,8 +332,12 @@ def build_html(results: list[dict], all_trades: list[dict],
   </summary>
   <table style="margin-top:6px">
     <thead><tr>
-      <th>エントリー日</th><th>決済日</th><th>エントリー価格</th>
-      <th>決済価格</th><th>損益</th><th>保有日数</th><th>決済理由</th>
+      <th>エントリー日</th><th>決済日</th>
+      <th>指値<br><span style='font-weight:normal;font-size:.85em'>(注文)</span></th>
+      <th>約定価格</th>
+      <th>損切<br><span style='font-weight:normal;font-size:.85em'>(逆指値)</span></th>
+      <th>目標<br><span style='font-weight:normal;font-size:.85em'>(指値)</span></th>
+      <th>決済価格</th><th>損益</th><th>保有日数</th><th>ATR</th><th>決済理由</th>
     </tr></thead>
     <tbody>{trade_rows}</tbody>
   </table>
