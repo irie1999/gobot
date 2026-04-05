@@ -14,6 +14,7 @@ backtest_watchlist.py  ―  監視銘柄バックテスト損益レポート
 from __future__ import annotations
 
 import argparse
+import math
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -233,16 +234,21 @@ def _trade_rows(trades: list[dict]) -> str:
         exit_p   = t.get("exit_p",  0)
         atr      = t.get("atr", 0)
 
+        # nan/0 ガード
+        def _valid(v): return v is not None and not (isinstance(v, float) and math.isnan(v)) and v != 0
+
         # 指値からの乖離率
-        slip = (entry_p - limit_p) / limit_p * 100 if limit_p else 0
+        slip = (entry_p - limit_p) / limit_p * 100 if _valid(limit_p) else 0
         slip_s = f"<div class='sub'>約定 {slip:+.1f}%</div>" if abs(slip) > 0.01 else ""
 
         # ストップまでのリスク
-        risk     = entry_p - stop_p if stop_p else 0
-        rr_val   = (target_p - entry_p) / risk if (risk > 0 and target_p) else None
-        rr_s     = f"{rr_val:.1f}R" if rr_val else "—"
+        risk   = entry_p - stop_p if _valid(stop_p) else 0
+        rr_val = (target_p - entry_p) / risk if (risk > 0 and _valid(target_p)) else None
+        rr_s   = f"{rr_val:.1f}R" if rr_val else "—"
 
-        sig_cl_s = f"¥{sig_cl:,.0f}" if sig_cl else "—"
+        sig_cl_s    = f"¥{sig_cl:,.0f}" if sig_cl else "—"
+        target_s    = f"¥{target_p:,.0f}" if _valid(target_p) else "—(動的)"
+        stop_s      = f"¥{stop_p:,.0f}" if _valid(stop_p) else "—"
 
         rows += (
             f"<tr>"
@@ -251,8 +257,8 @@ def _trade_rows(trades: list[dict]) -> str:
             f"<td>{exit_d}</td>"
             f"<td>¥{limit_p:,.0f}<div class='sub'>指値</div></td>"
             f"<td>¥{entry_p:,.0f}{slip_s}</td>"
-            f"<td class='dn'>¥{stop_p:,.0f}<div class='sub'>リスク¥{risk:,.0f}</div></td>"
-            f"<td class='up'>¥{target_p:,.0f}<div class='sub'>{rr_s}</div></td>"
+            f"<td class='dn'>{stop_s}<div class='sub'>{'リスク¥' + f'{risk:,.0f}' if risk else ''}</div></td>"
+            f"<td class='up'>{target_s}<div class='sub'>{rr_s}</div></td>"
             f"<td>¥{exit_p:,.0f}</td>"
             f"<td class='{pnl_cls}'>{pnl:+,.0f}円</td>"
             f"<td>{hold}日</td>"
