@@ -167,17 +167,18 @@ def _sig_to_display(key: str, sig: dict) -> dict:
 # 今日のシグナル確認
 # ─────────────────────────────────────────────────────────────────────
 
-def check_today(verbose: bool) -> None:
+def check_today(verbose: bool, watchlist: list | None = None) -> None:
+    wl  = watchlist if watchlist is not None else WATCHLIST
     now = datetime.now(JST)
     print(f"\n{'='*72}")
     print(f"  監視銘柄シグナルチェック  {now.strftime('%Y-%m-%d %H:%M JST')}")
-    print(f"  対象: {len(WATCHLIST)}銘柄 / ロットサイズ: {LOT}株")
+    print(f"  対象: {len(wl)}銘柄 / ロットサイズ: {LOT}株")
     print(f"{'='*72}\n")
 
     active: list[tuple[str, str, dict]] = []
     waiting: list[tuple[str, str]] = []
 
-    for symbol, name, strategies in WATCHLIST:
+    for symbol, name, strategies in wl:
         hits = []
         for key in strategies:
             df = _fetch_and_calc(symbol, key, 365)
@@ -229,7 +230,8 @@ def check_today(verbose: bool) -> None:
 # 過去期間のシグナル発生回数
 # ─────────────────────────────────────────────────────────────────────
 
-def check_history(from_date: date, to_date: date, verbose: bool) -> None:
+def check_history(from_date: date, to_date: date, verbose: bool, watchlist: list | None = None) -> None:
+    wl = watchlist if watchlist is not None else WATCHLIST
     # 指標計算のウォームアップ期間（200日MA等のため）
     WARMUP_DAYS = 400
     fetch_days  = (to_date - from_date).days + WARMUP_DAYS + 60
@@ -238,7 +240,7 @@ def check_history(from_date: date, to_date: date, verbose: bool) -> None:
     print(f"\n{'='*80}")
     print(f"  過去シグナル発生回数  {now.strftime('%Y-%m-%d %H:%M JST')}")
     print(f"  集計期間: {from_date}  〜  {to_date}  ({(to_date - from_date).days + 1}日間)")
-    print(f"  対象: {len(WATCHLIST)}銘柄 / 各銘柄の担当戦略で集計")
+    print(f"  対象: {len(wl)}銘柄 / 各銘柄の担当戦略で集計")
     print(f"{'='*80}\n")
 
     # ヘッダー
@@ -253,7 +255,7 @@ def check_history(from_date: date, to_date: date, verbose: bool) -> None:
 
     total_signals = 0
 
-    for symbol, name, strategies in WATCHLIST:
+    for symbol, name, strategies in wl:
         for key in strategies:
             df = _fetch_and_calc(symbol, key, fetch_days)
             if df is None:
@@ -314,22 +316,53 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 使用例:
-  python check_signals.py                                   # 今日のシグナル
-  python check_signals.py --verbose                         # 今日（指標値付き）
-  python check_signals.py --history --days 90               # 過去90日の発生回数
+  python check_signals.py                                        # 全銘柄・今日のシグナル
+  python check_signals.py --stocks 7012.T 1605.T 6361.T         # 指定銘柄のみ
+  python check_signals.py --list                                 # 登録銘柄一覧
+  python check_signals.py --history --days 90                   # 過去90日の発生回数
+  python check_signals.py --history --days 90 --stocks 7012.T   # 指定銘柄の過去集計
   python check_signals.py --history --from 2025-10-01 --to 2026-03-31
-  python check_signals.py --history --days 180 --verbose    # 全発生日も表示
+  python check_signals.py --history --days 180 --verbose        # 全発生日も表示
 """)
     parser.add_argument("--verbose",  "-v", action="store_true", help="詳細表示")
     parser.add_argument("--history",        action="store_true", help="過去期間集計モード")
     parser.add_argument("--days",     type=int, default=90,
-                        help="過去N営業日を集計（--history時、--from/--toより優先度低）")
+                        help="過去N日を集計（--history時）")
     parser.add_argument("--from",  dest="from_date", metavar="YYYY-MM-DD",
                         help="集計開始日")
     parser.add_argument("--to",    dest="to_date",   metavar="YYYY-MM-DD",
                         help="集計終了日（デフォルト: 今日）")
+    parser.add_argument("--stocks", nargs="+", metavar="CODE",
+                        help="チェック対象を指定銘柄コードに絞る（例: 7012.T 1605.T）")
+    parser.add_argument("--list",   action="store_true",
+                        help="登録銘柄の一覧を表示して終了")
     args = parser.parse_args()
 
+    # ── 銘柄一覧表示 ────────────────────────────────────────────
+    if args.list:
+        print(f"\n登録銘柄一覧 （{len(WATCHLIST)}銘柄）")
+        print("─" * 60)
+        for sym, nm, strats in WATCHLIST:
+            strat_str = " + ".join(STRATEGY_NAMES.get(s, s) for s in strats)
+            print(f"  {sym:<10}  {nm:<22}  {strat_str}")
+        print()
+        return
+
+    # ── 銘柄フィルタ ────────────────────────────────────────────
+    if args.stocks:
+        requested = {s.upper() for s in args.stocks}
+        wl = [row for row in WATCHLIST if row[0].upper() in requested]
+        not_found = requested - {row[0].upper() for row in wl}
+        if not_found:
+            print(f"※ 登録されていない銘柄コード: {', '.join(sorted(not_found))}")
+            print(f"  --list で登録銘柄を確認できます\n")
+        if not wl:
+            print("対象銘柄が見つかりませんでした。")
+            return
+    else:
+        wl = None  # None = WATCHLIST全体を使う
+
+    # ── 実行 ────────────────────────────────────────────────────
     if args.history:
         today = datetime.now(JST).date()
         if args.from_date:
@@ -338,9 +371,9 @@ def main() -> None:
         else:
             to_dt   = date.fromisoformat(args.to_date) if args.to_date else today
             from_dt = to_dt - timedelta(days=args.days)
-        check_history(from_dt, to_dt, args.verbose)
+        check_history(from_dt, to_dt, args.verbose, wl)
     else:
-        check_today(args.verbose)
+        check_today(args.verbose, wl)
 
 
 if __name__ == "__main__":
