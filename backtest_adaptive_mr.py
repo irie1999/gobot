@@ -363,35 +363,20 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             stop_mult = STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM
             stop_lvl  = entry_p - entry_atr * stop_mult
 
-            # 利確（当日ハイが目標到達）
+            # 利確指値（当日ハイが目標到達） → exit_p = target で一致
             if hi >= entry_target:
                 exit_p = entry_target
                 reason = "利確"
 
-            # ハードストップ（当日ローが到達）
+            # 損切り逆指値（当日ローがストップ以下）
             elif lo <= stop_lvl:
                 exit_p = max(stop_lvl, lo)   # ギャップダウン考慮
-                reason = "ストップ"
+                reason = "損切り"
 
-            # 翌日IBS > 0.75（反転確認）
-            elif not pd.isna(cur_ibs) and cur_ibs > IBS_EXIT:
-                exit_p = op
-                reason = "IBS反転"
-
-            # 翌日RSI(2) > 75（平均回帰完了）
-            elif not pd.isna(cur_rsi2) and cur_rsi2 > RSI2_EXIT:
-                exit_p = op
-                reason = "RSI2回復"
-
-            # 終値が5日SMAを上抜け
-            elif not pd.isna(cur_sma5) and cl > cur_sma5:
-                exit_p = cl
-                reason = "SMA5クロス"
-
-            # 最大保有日数
+            # 最大保有日数（強制決済）
             elif hold_days >= MAX_HOLD:
                 exit_p = cl
-                reason = f"最大保有{MAX_HOLD}日"
+                reason = f"強制決済({MAX_HOLD}日)"
 
             if exit_p is not None:
                 pnl = (exit_p - entry_p) * qty
@@ -406,9 +391,10 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     pct          = pct,
                     hold         = hold_days,
                     reason       = reason,
-                    limit_price  = entry_p,   # filled at limit
+                    limit_price  = entry_p,
+                    atr          = entry_atr,
                     regime       = entry_regime,
-                    stop_p       = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
+                    stop_p       = stop_lvl,
                     target_p     = entry_target,
                     signal_dt    = signal_dt,
                     signal_close = signal_close,
@@ -486,9 +472,10 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             hold         = (df.index[-1] - entry_dt).days,
             reason       = "保有中★",
             limit_price  = entry_p,
+            atr          = entry_atr,
             regime       = entry_regime,
             stop_p       = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
-            target_p     = float("nan"),  # adaptive_mr has no fixed profit target
+            target_p     = entry_target,
             signal_dt    = signal_dt,
             signal_close = signal_close,
         ))
