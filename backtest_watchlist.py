@@ -294,7 +294,7 @@ def _pf_str(pf: float) -> str:
     return "∞" if pf == float("inf") else f"{pf:.2f}"
 
 
-def _strategy_scoring(results: list[dict]) -> str:
+def _strategy_scoring(results: list[dict], days: int = 0) -> str:
     """
     戦略ごとに銘柄をまとめ、5指標をスコアリングして優先度テーブルを返す。
     指標: 勝率・PF・平均損益・最大DD・最大連敗（各0〜5点、合計25点満点）
@@ -468,7 +468,7 @@ def build_html(results: list[dict], all_trades: list[dict],
 </details>"""
 
     equity_svg   = _equity_svg(all_trades)
-    scoring_html = _strategy_scoring(results)
+    scoring_html = _strategy_scoring(results, days)
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
