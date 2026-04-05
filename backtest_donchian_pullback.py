@@ -140,13 +140,19 @@ def fetch(symbol: str, backtest_days: int) -> "pd.DataFrame | None":
         raw = raw.dropna(subset=["close"])
         if len(raw) < 210:
             return None
-        return pd.DataFrame({
+        df_out = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
             "high":   raw["high"].to_numpy(dtype=float),
             "low":    raw["low"].to_numpy(dtype=float),
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw.get("volume", pd.Series(0, index=raw.index)).to_numpy(dtype=float),
         }, index=raw.index)
+        try:
+            with open(persistent, "wb") as f:
+                pickle.dump(df_out, f)
+        except Exception:
+            pass
+        return df_out
     except Exception:
         return None
 
