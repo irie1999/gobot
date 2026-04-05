@@ -467,6 +467,225 @@ def _run_backtest_main(args) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# 監視リスト生成 ― バックテストHTML ヘルパー
+# ─────────────────────────────────────────────────────────────────────
+
+def _wl_equity_svg(all_trades: list[dict]) -> str:
+    """全トレードの累積損益折れ線SVGを返す。"""
+    sorted_t = sorted(all_trades, key=lambda t: t.get("exit_dt") or "")
+    cum = 0.0
+    pts = [(0, 0.0)]
+    for t in sorted_t:
+        cum += t["pnl"]
+        pts.append((len(pts), cum))
+
+    if len(pts) < 2:
+        return "<p style='color:#4b5563'>データ不足</p>"
+
+    W, H, PAD = 900, 200, 30
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    mn, mx = min(ys), max(ys)
+    rng = mx - mn or 1
+
+    def px(i): return PAD + (i / max(xs)) * (W - 2 * PAD)
+    def py(v): return H - PAD - ((v - mn) / rng) * (H - 2 * PAD)
+
+    coords = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in pts)
+    zero_y = py(0)
+    color  = "#3fb950" if cum >= 0 else "#f85149"
+
+    return (
+        f'<svg viewBox="0 0 {W} {H}" style="width:100%;max-width:{W}px">'
+        f'<line x1="{PAD}" y1="{zero_y:.1f}" x2="{W-PAD}" y2="{zero_y:.1f}" '
+        f'stroke="#21262d" stroke-width="1"/>'
+        f'<polyline points="{coords}" fill="none" stroke="{color}" stroke-width="2"/>'
+        f'<text x="{PAD}" y="{H-5}" fill="#8b949e" font-size="11">0円</text>'
+        f'<text x="{W-PAD}" y="20" fill="{color}" font-size="11" text-anchor="end">'
+        f'{cum:+,.0f}円</text>'
+        f'</svg>'
+    )
+
+
+def _wl_trade_rows(trades: list[dict]) -> str:
+    """強い押し目トレードの行HTMLを返す。"""
+    if not trades:
+        return "<tr><td colspan='11' style='color:#4b5563;text-align:center'>トレードなし</td></tr>"
+    rows = ""
+    for t in sorted(trades, key=lambda t: t.get("exit_dt") or ""):
+        pnl     = t["pnl"]
+        cls     = "up" if pnl > 0 else "dn"
+        entry_d = str(t.get("entry_dt", ""))[:10]
+        exit_d  = str(t.get("exit_dt",  ""))[:10]
+        sig_d   = str(t.get("signal_dt", ""))[:10]
+        sig_cl  = t.get("signal_close", 0) or 0
+        entry_p = t.get("entry_p", 0) or t.get("limit_p", 0)
+        exit_p  = t.get("exit_p",  0)
+        stop_p  = t.get("stop_p",  0)
+        target  = t.get("target_p", 0)
+        atr     = t.get("atr",     0)
+        hold    = t.get("hold",    "—")
+        reason  = t.get("reason",  "—")
+
+        def _v(v): return v is not None and not (isinstance(v, float) and math.isnan(v)) and v != 0
+        risk   = entry_p - stop_p if _v(stop_p) else 0
+        rr_val = (target - entry_p) / risk if (risk > 0 and _v(target)) else None
+        rr_s   = f"{rr_val:.1f}R" if rr_val else "—"
+        tgt_s  = f"¥{target:,.0f}" if _v(target) else "—"
+        stp_s  = f"¥{stop_p:,.0f}" if _v(stop_p) else "—"
+        sig_s  = f"¥{sig_cl:,.0f}" if sig_cl else "—"
+
+        rows += (
+            f"<tr>"
+            f"<td>{sig_d}<div class='sub'>{sig_s}</div></td>"
+            f"<td>{entry_d}</td>"
+            f"<td>{exit_d}</td>"
+            f"<td class='up'>¥{entry_p:,.0f}<div class='sub'>指値</div></td>"
+            f"<td class='dn'>{stp_s}<div class='sub'>{'リスク¥' + f'{risk:,.0f}' if risk else ''}</div></td>"
+            f"<td class='up'>{tgt_s}<div class='sub'>{rr_s}</div></td>"
+            f"<td>¥{exit_p:,.0f}</td>"
+            f"<td class='{cls}'>{pnl:+,.0f}円</td>"
+            f"<td>{hold}日</td>"
+            f"<td class='neu' style='font-size:.78em'>¥{atr:,.0f}</td>"
+            f"<td>{reason}</td>"
+            f"</tr>"
+        )
+    return rows
+
+
+def _build_watchlist_backtest_html(
+    selected: list[dict],
+    sp_results: dict[str, list[dict]],
+    days: int,
+    n_universe: int,
+) -> str:
+    """選定銘柄の強い押し目バックテスト結果をHTML形式で返す。"""
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+
+    # 銘柄ごとに stats を計算
+    results = []
+    all_trades: list[dict] = []
+    for r in selected:
+        sym    = r["symbol"]
+        nm     = r["name"]
+        trades = sp_results.get(sym, [])
+        s      = _stats(trades)
+        results.append(dict(symbol=sym, name=nm, trades=trades, stats=s))
+        all_trades.extend(trades)
+
+    total_s = _stats(all_trades)
+
+    def pf_str(pf): return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    # サマリーテーブル
+    sum_rows = ""
+    for r in sorted(results, key=lambda x: (-x["stats"]["total"], x["symbol"])):
+        s       = r["stats"]
+        cls     = "up" if s["total"] > 0 else ("dn" if s["total"] < 0 else "neu")
+        avg_cls = "up" if s["avg"] > 0 else "dn"
+        pf_val  = 0 if s["pf"] == float("inf") else s["pf"]
+        sum_rows += (
+            f"<tr>"
+            f"<td>{r['symbol']}</td>"
+            f"<td>{r['name']}</td>"
+            f"<td data-v='{s['n']}'>{s['n']}</td>"
+            f"<td>{s['wins']}</td>"
+            f"<td data-v='{s['wr']:.1f}'>{s['wr']:.1f}%</td>"
+            f"<td data-v='{pf_val:.2f}'>{pf_str(s['pf'])}</td>"
+            f"<td data-v='{s['total']:.0f}' class='{cls}'>{s['total']:+,.0f}円</td>"
+            f"<td class='{avg_cls}'>{s['avg']:+,.0f}円</td>"
+            f"<td class='up'>{s['max_win']:+,.0f}円</td>"
+            f"<td class='dn'>{s['max_loss']:+,.0f}円</td>"
+            f"<td class='dn' data-v='{s['max_dd']:.0f}'>▼{s['max_dd']:,.0f}円</td>"
+            f"<td data-v='{s['max_consec_loss']}'>{s['max_consec_loss']}連敗</td>"
+            f"</tr>"
+        )
+    tc = "up" if total_s["total"] > 0 else ("dn" if total_s["total"] < 0 else "neu")
+    sum_rows += (
+        f"<tr style='font-weight:600;border-top:2px solid #21262d'>"
+        f"<td colspan='2'>合計 ({len(results)}銘柄)</td>"
+        f"<td>{total_s['n']}</td>"
+        f"<td>{total_s['wins']}</td>"
+        f"<td>{total_s['wr']:.1f}%</td>"
+        f"<td>{pf_str(total_s['pf'])}</td>"
+        f"<td class='{tc}'>{total_s['total']:+,.0f}円</td>"
+        f"<td class='{'up' if total_s['avg']>0 else 'dn'}'>{total_s['avg']:+,.0f}円</td>"
+        f"<td class='up'>{total_s['max_win']:+,.0f}円</td>"
+        f"<td class='dn'>{total_s['max_loss']:+,.0f}円</td>"
+        f"<td class='dn'>▼{total_s['max_dd']:,.0f}円</td>"
+        f"<td>{total_s['max_consec_loss']}連敗</td>"
+        f"</tr>"
+    )
+
+    # トレード詳細（銘柄別折りたたみ）
+    details = ""
+    for r in sorted(results, key=lambda x: (-x["stats"]["total"], x["symbol"])):
+        s = r["stats"]
+        if s["n"] == 0:
+            continue
+        trade_rows = _wl_trade_rows(r["trades"])
+        cls = "up" if s["total"] > 0 else "dn"
+        details += f"""
+<details>
+  <summary>
+    ▶ {r['symbol']} {r['name']} &nbsp;
+    {s['n']}件 / 勝率{s['wr']:.0f}% / PF{pf_str(s['pf'])} /
+    <span class='{cls}'>{s['total']:+,.0f}円</span>
+  </summary>
+  <table style="margin-top:6px">
+    <thead><tr>
+      <th>シグナル日<br><span style='font-weight:normal;font-size:.85em'>(終値)</span></th>
+      <th>約定日</th><th>決済日</th>
+      <th>指値<br><span style='font-weight:normal;font-size:.85em'>(注文)</span></th>
+      <th>損切<br><span style='font-weight:normal;font-size:.85em'>(逆指値)</span></th>
+      <th>利確目標</th>
+      <th>決済価格</th><th>損益</th><th>保有日数</th><th>ATR</th><th>理由</th>
+    </tr></thead>
+    <tbody>{trade_rows}</tbody>
+  </table>
+</details>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>強い押し目 監視銘柄バックテスト {days}日</title>
+<style>{_CSS}
+details>summary{{cursor:pointer;padding:10px;background:#161b22;
+                border-radius:6px;margin-bottom:4px;list-style:none}}
+details>summary::-webkit-details-marker{{display:none}}
+</style>
+</head>
+<body>
+<h1>強い押し目 監視銘柄バックテスト
+  <span style="font-size:.75em;color:#8b949e">
+    {len(selected)}銘柄 / 直近{days}日 / ユニバース{n_universe}銘柄から選定 / 生成: {now_str}
+  </span>
+</h1>
+<p style="font-size:.85em;color:#4b5563;margin-bottom:16px">
+  ※ キャッシュデータから強い押し目上位銘柄のバックテスト結果を表示 / ロット100株固定
+</p>
+
+<h2>累積損益</h2>
+{_wl_equity_svg(all_trades)}
+
+<h2>銘柄別サマリー</h2>
+<table>
+<thead><tr>
+  <th>コード</th><th>銘柄名</th><th>取引数</th><th>勝ち</th>
+  <th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益</th>
+  <th>最大利益</th><th>最大損失</th><th>最大DD</th><th>最大連敗</th>
+</tr></thead>
+<tbody>{sum_rows}</tbody>
+</table>
+
+<h2>銘柄別トレード詳細（クリックで展開）</h2>
+{details}
+</body>
+</html>"""
+
+
+# ─────────────────────────────────────────────────────────────────────
 # 監視リスト生成（キャッシュから上位銘柄を抽出）
 # ─────────────────────────────────────────────────────────────────────
 
@@ -609,12 +828,22 @@ tr:hover td{background:#161b22}
 <tbody>{rows}</tbody>
 </table>
 </body></html>"""
-    today_s = datetime.now(JST).strftime("%Y%m%d")
+    today_s  = datetime.now(JST).strftime("%Y%m%d")
     out_html = Path(f"watchlist_sp_{today_s}.html")
     out_html.write_text(html, encoding="utf-8")
-    print(f"  HTMLレポート: {out_html.resolve()}")
+    print(f"  HTMLレポート（ランキング）: {out_html.resolve()}")
     if not no_browser:
         webbrowser.open(f"file://{out_html.resolve()}")
+
+    # バックテスト詳細HTML（選定銘柄の取引履歴＆エクイティカーブ）
+    sp_results: dict[str, list[dict]] = all_results.get(strat_key, {})
+    bt_html      = _build_watchlist_backtest_html(selected, sp_results, days, len(stocks))
+    out_bt_html  = Path(f"watchlist_sp_backtest_{today_s}.html")
+    out_bt_html.write_text(bt_html, encoding="utf-8")
+    print(f"  HTMLレポート（バックテスト）: {out_bt_html.resolve()}")
+    if not no_browser:
+        webbrowser.open(f"file://{out_bt_html.resolve()}")
+
     print(f"\n{'='*65}\n")
 
 
