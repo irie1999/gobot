@@ -878,7 +878,8 @@ def _score_stocks_multi(
     return results[:top]
 
 
-def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) -> None:
+def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool,
+                    min_pf_90: float = 1.0, min_total: int = 10_000) -> None:
     """キャッシュから強い押し目の上位銘柄を4期間スコアで選定して監視リストを生成する。"""
 
     # ── 4期間キャッシュ（推奨）から読み込む ──────────────────────
@@ -919,15 +920,31 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) 
     # 4期間スコアでランキング
     selected = _score_stocks_multi(sp_multi, stock_dict, top, min_trades)
 
-    # min_pf フィルタ（365日PFが基準）
-    def _pf_ok(r):
-        pf = r["pf"]
-        pf_val = min(pf, 99.0) if pf == float("inf") else pf
-        return pf_val >= min_pf
-    selected = [r for r in selected if _pf_ok(r)]
+    # ── フィルタ適用 ──────────────────────────────────────────────
+    before = len(selected)
+
+    # 365日 PF フィルタ
+    def _pf_val(pf): return min(pf, 99.0) if pf == float("inf") else pf
+    selected = [r for r in selected if _pf_val(r["pf"]) >= min_pf]
+
+    # 直近90日 PF ≥ min_pf_90（—=取引なしは除外しない、0.00=損失は除外）
+    def _pf90_ok(r):
+        ps = r["per_period"].get(90, {})
+        if ps.get("n", 0) == 0:
+            return True   # 90日で取引なし → フィルタ対象外（期間が短い場合を考慮）
+        pf90 = ps["pf"]
+        return _pf_val(pf90) >= min_pf_90
+    selected = [r for r in selected if _pf90_ok(r)]
+
+    # 合計損益（365日）≥ min_total
+    selected = [r for r in selected if r["total"] >= min_total]
 
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
-    print(f"  フィルタ: 最小取引数 {min_trades}件 / 最小PF(365日) {min_pf:.1f}")
+    print(f"  フィルタ適用: {before}銘柄 → {len(selected)}銘柄")
+    print(f"    ・最小取引数 {min_trades}件（365日）")
+    print(f"    ・最小PF {min_pf:.1f}（365日）")
+    print(f"    ・直近90日 PF ≥ {min_pf_90:.1f}")
+    print(f"    ・合計損益 ≥ +{min_total:,}円（365日）")
     print(f"  選定銘柄: {len(selected)}銘柄\n")
 
     # コンソール出力（スコア＋4期間PF）
@@ -955,7 +972,7 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) 
         '"""',
         "強い押し目 監視リスト（自動生成）",
         f"生成日時: {now_str}",
-        f"元データ: {len(stocks)}銘柄 / PF≥{min_pf}(365日) / 取引≥{min_trades}件",
+        f"元データ: {len(stocks)}銘柄 / PF≥{min_pf}(365日) / 90日PF≥{min_pf_90} / 合計≥+{min_total:,}円 / 取引≥{min_trades}件",
         f"スコア: 4期間({weight_str})×3指標(PF/勝率/平均損益) 相対ランク",
         f"選定: 上位{len(selected)}銘柄（スコア降順）",
         '"""',
@@ -1015,7 +1032,8 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool) 
   </span>
 </h1>
 <p style="font-size:.82em;color:#4b5563">
-  スコア: {weight_label} × 3指標（PF・勝率・平均損益）相対ランク / PF≥{min_pf}(365日) / 取引≥{min_trades}件<br>
+  スコア: {weight_label} × 3指標（PF・勝率・平均損益）相対ランク<br>
+  フィルタ: PF≥{min_pf}(365日) / 90日PF≥{min_pf_90} / 合計損益≥+{min_total:,}円 / 取引≥{min_trades}件<br>
   監視リストファイル: <code>watchlist_sp.py</code>
 </p>
 <table>
@@ -1062,13 +1080,18 @@ def main() -> None:
     parser.add_argument("--top",             type=int,   default=30,
                         help="選定銘柄数（デフォルト30）")
     parser.add_argument("--min-pf",          type=float, default=1.5,
-                        help="最小PFフィルタ（デフォルト1.5）")
+                        help="最小PFフィルタ・365日（デフォルト1.5）")
+    parser.add_argument("--min-pf-90",       type=float, default=1.0,
+                        help="直近90日 最小PFフィルタ（デフォルト1.0）")
+    parser.add_argument("--min-total",       type=int,   default=10_000,
+                        help="最小合計損益フィルタ・365日（デフォルト10000円）")
     parser.add_argument("--min-trades",      type=int,   default=3,
                         help="最小取引数フィルタ（デフォルト3件）")
     args = parser.parse_args()
 
     if args.build_watchlist:
-        build_watchlist(args.top, args.min_pf, args.min_trades, args.no_browser)
+        build_watchlist(args.top, args.min_pf, args.min_trades, args.no_browser,
+                        args.min_pf_90, args.min_total)
         return
 
     _run_backtest_main(args)
