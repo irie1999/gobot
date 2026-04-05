@@ -1112,10 +1112,11 @@ def main() -> None:
     # ── 監視銘柄選定モード（--watchlist）────────────────────────
     if args.watchlist:
         symbols = _load_symbols(args.universe)
-        periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
+        periods      = WATCHLIST_PERIODS   # 常に全期間でバックテスト（キャッシュ安定化）
+        show_periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
         bt_cache = _load_bt_cache()
         cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods))) in bt_cache)
-        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
+        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日 / 表示:{show_periods}日")
         if cached_count:
             print(f"  キャッシュ: {cached_count}銘柄（株価更新なし → スキップ）")
         print(f"  基準: 全期間で 取引≥{WL_MIN_TRADES}回 / 勝率≥{WL_MIN_WR}% / PF≥{WL_MIN_PF}")
@@ -1141,9 +1142,9 @@ def main() -> None:
         _save_bt_cache(bt_cache)
         print()
 
-        # フィルターなし・全銘柄を利益順にソート
-        candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
-        candidates.sort(key=lambda r: (-sum(s.get("total", 0) for s in r["period_results"].values()), r["symbol"]))
+        # 表示対象期間に取引があった銘柄のみ・表示期間の損益順でソート
+        candidates = [r for r in all_results if any(r["period_results"].get(d, {}).get("n", 0) > 0 for d in show_periods)]
+        candidates.sort(key=lambda r: (-sum(r["period_results"].get(d, {}).get("total", 0) for d in show_periods), r["symbol"]))
 
         print(f"\n  スキャン完了: {len(all_results)}銘柄処理")
         print(f"  スキャン結果（利益順）: {len(candidates)}銘柄\n")
@@ -1153,11 +1154,11 @@ def main() -> None:
                 f"{d}日:[{c['period_results'].get(d,{}).get('n',0)}回 "
                 f"WR{c['period_results'].get(d,{}).get('wr',0):.0f}% "
                 f"PF{c['period_results'].get(d,{}).get('pf',0):.1f}]"
-                for d in sorted(periods)
+                for d in sorted(show_periods)
             )
             print(f"  {sig_mark}{c['symbol']:8s} {c['name'][:14]:<14}  {pr_summary}")
 
-        path = build_watchlist_html(candidates, periods)
+        path = build_watchlist_html(candidates, show_periods)
         print(f"\n  HTMLレポート保存: {path}")
         # CSV出力（run_ranking.py用）
         import csv as _csv

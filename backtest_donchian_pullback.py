@@ -905,10 +905,11 @@ def main() -> None:
 
     if args.watchlist:
         symbols = _load_symbols(args.universe)
-        periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
+        periods      = WATCHLIST_PERIODS   # 常に全期間でバックテスト（キャッシュ安定化）
+        show_periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
         bt_cache = _load_bt_cache()
         cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods))) in bt_cache)
-        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
+        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日 / 表示:{show_periods}日")
         if cached_count:
             print(f"  キャッシュ: {cached_count}銘柄（株価更新なし → スキップ）")
         print(f"  データ取得・バックテスト中 (並列{WORKERS}スレッド) ...")
@@ -929,9 +930,9 @@ def main() -> None:
                     print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
         _save_bt_cache(bt_cache)
         print()
-        # フィルターなし・全銘柄を利益順にソート
-        candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
-        candidates.sort(key=lambda r: (-sum(s.get("total", 0) for s in r["period_results"].values()), r["symbol"]))
+        # 表示対象期間に取引があった銘柄のみ・表示期間の損益順でソート
+        candidates = [r for r in all_results if any(r["period_results"].get(d, {}).get("n", 0) > 0 for d in show_periods)]
+        candidates.sort(key=lambda r: (-sum(r["period_results"].get(d, {}).get("total", 0) for d in show_periods), r["symbol"]))
         print(f"\nスキャン結果（利益順）: {len(candidates)}銘柄")
         for c in candidates:
             sig  = c["today_sig"]
@@ -939,10 +940,10 @@ def main() -> None:
             pr   = c["period_results"]
             stats_str = "  ".join(
                 f"{d}日:勝率{pr[d]['wr']:.0f}%/PF{pr[d]['pf']:.1f}" if pr[d]['n'] > 0 else f"{d}日:—"
-                for d in sorted(periods)
+                for d in sorted(show_periods)
             )
             print(f"  {mark} {c['symbol']:12} {c['name']:20}  {stats_str}")
-        path = build_watchlist_html(candidates, periods)
+        path = build_watchlist_html(candidates, show_periods)
         print(f"\nHTML: {path.resolve()}")
         # CSV出力（run_ranking.py用）
         import csv as _csv

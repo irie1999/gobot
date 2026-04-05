@@ -830,11 +830,11 @@ def main() -> None:
 
     if args.watchlist:
         symbols = _load_symbols(args.universe)
-        periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
+        periods      = WATCHLIST_PERIODS   # 常に全期間でバックテスト（キャッシュ安定化）
+        show_periods = [p for p in WATCHLIST_PERIODS if p <= args.days] or [args.days]
         bt_cache = _load_bt_cache()
-        cache_key_sample = (symbols[0][0] if symbols else "", tuple(sorted(periods)))
         cached_count = sum(1 for sym, _ in symbols if (sym, tuple(sorted(periods)), LOT_SIZE) in bt_cache)
-        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日")
+        print(f"\nバックテスト実行: {len(symbols)}銘柄 / 期間:{periods}日 / 表示:{show_periods}日")
         if cached_count:
             print(f"  キャッシュ: {cached_count}銘柄（株価更新なし → スキップ）")
         all_results = []
@@ -851,12 +851,12 @@ def main() -> None:
                     print(f"  {done}/{len(symbols)} 完了", end="\r", flush=True)
         _save_bt_cache(bt_cache)
         print()
-        # フィルターなし・全銘柄を利益順にソート
-        candidates = [r for r in all_results if any(s["n"] > 0 for s in r["period_results"].values())]
-        candidates.sort(key=lambda r: (-sum(s.get("total", 0) for s in r["period_results"].values()), r["symbol"]))
+        # 表示対象期間に取引があった銘柄のみ・表示期間の損益順でソート
+        candidates = [r for r in all_results if any(r["period_results"].get(d, {}).get("n", 0) > 0 for d in show_periods)]
+        candidates.sort(key=lambda r: (-sum(r["period_results"].get(d, {}).get("total", 0) for d in show_periods), r["symbol"]))
         print(f"\nスキャン結果（利益順）: {len(candidates)}銘柄")
-        print(f"  {'':2} {'コード':<10} {'銘柄名':<22} " + "  ".join(f"{d}日" .ljust(28) for d in sorted(periods)))
-        print(f"  {'':2} {'':10} {'':22} " + "  ".join("勝率   PF    損益(円)".ljust(28) for _ in periods))
+        print(f"  {'':2} {'コード':<10} {'銘柄名':<22} " + "  ".join(f"{d}日".ljust(28) for d in sorted(show_periods)))
+        print(f"  {'':2} {'':10} {'':22} " + "  ".join("勝率   PF    損益(円)".ljust(28) for _ in show_periods))
         print("  " + "─" * 120)
         for c in candidates:
             sig  = c["today_sig"]
@@ -864,10 +864,10 @@ def main() -> None:
             pr   = c["period_results"]
             stats_str = "  ".join(
                 f"{pr[d]['wr']:.0f}%  {pr[d]['pf']:.1f}  {pr[d]['total']:>+10,.0f}円" if pr[d]['n'] > 0 else f"{'—':<28}"
-                for d in sorted(periods)
+                for d in sorted(show_periods)
             )
             print(f"  {mark} {c['symbol']:<10} {c['name']:<22}  {stats_str}")
-        path = build_watchlist_html(candidates, periods)
+        path = build_watchlist_html(candidates, show_periods)
         print(f"\nHTML: {path.resolve()}")
         # CSV出力（run_ranking.py用）
         import csv as _csv
