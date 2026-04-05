@@ -869,3 +869,7 @@ def main() -> None:
         return
 
     _run_backtest_main(args)
+
+
+if __name__ == "__main__":
+    main()
