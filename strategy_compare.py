@@ -131,15 +131,15 @@ def _run(symbol: str, key: str, days: int) -> list[dict]:
         elif key == "strong_pullback":
             df = _sp.fetch(symbol, days)
             if df is None: return []
-            return _sp.backtest_sp(_sp.calc(df), days)
+            return _sp.backtest_strong_pullback(_sp.calc(df), days)
         elif key == "donchian":
             df = _don.fetch(symbol, days)
             if df is None: return []
-            return _don.backtest_don(_don.calc(df), days)
+            return _don.backtest_donchian(_don.calc(df), days)
         elif key == "bb_volume":
             df = _bbv.fetch(symbol, days)
             if df is None: return []
-            return _bbv.backtest_bbv(_bbv.calc(df), days)
+            return _bbv.backtest_bb_vol(_bbv.calc(df), days)
         elif key == "limit_oco":
             df = _oco.fetch(symbol, days)
             if df is None: return []
