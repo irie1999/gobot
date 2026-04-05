@@ -1,13 +1,20 @@
 """
 strategy_compare.py  ―  5戦略 横断バックテスト比較
 =====================================================
-22銘柄すべてに5戦略をそれぞれ適用し、
+銘柄群すべてに5戦略をそれぞれ適用し、
 戦略単位で集計・スコアリングして優先度を評価する。
 
 使い方:
-  python strategy_compare.py              # 365日
-  python strategy_compare.py --days 180   # 期間変更
+  python strategy_compare.py                        # 22銘柄 / 365日
+  python strategy_compare.py --universe all         # 東証プライム全銘柄（要事前生成）
+  python strategy_compare.py --days 180             # 期間変更
   python strategy_compare.py --no-browser
+
+事前準備（--universe all を使う場合）:
+  python download_tse_symbols.py   # 東証プライム銘柄リスト生成（1回だけ）
+
+注意: 1800銘柄×5戦略の実行には数時間かかります。
+      戦略ごとに途中経過が表示されます。
 """
 
 from __future__ import annotations
@@ -29,8 +36,8 @@ import backtest_limit_oco         as _oco
 
 JST = timezone(timedelta(hours=9))
 
-# ── 比較対象銘柄（22銘柄共通）────────────────────────────────────
-STOCKS: list[tuple[str, str]] = [
+# ── デフォルト22銘柄 ─────────────────────────────────────────────
+_STOCKS_22: list[tuple[str, str]] = [
     ("7012.T", "川崎重工業"),
     ("7013.T", "IHI"),
     ("5981.T", "東京製綱"),
@@ -54,6 +61,25 @@ STOCKS: list[tuple[str, str]] = [
     ("9742.T", "アイネス"),
     ("6282.T", "オイレス工業"),
 ]
+
+
+def _load_stocks(universe: str) -> list[tuple[str, str]]:
+    """銘柄リストを返す。universe='all' なら symbols_listed_all.py を使用。"""
+    if universe == "all":
+        p = Path("symbols_listed_all.py")
+        if not p.exists():
+            print("  ※ symbols_listed_all.py が見つかりません。")
+            print("  先に: python download_tse_symbols.py  を実行してください。")
+            raise SystemExit(1)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_listed_all", p)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        stocks = list(mod.SYMBOLS)
+        print(f"  銘柄ユニバース: 東証プライム全銘柄 ({len(stocks)}銘柄)")
+        return stocks
+    print(f"  銘柄ユニバース: 監視22銘柄")
+    return _STOCKS_22
 
 STRATEGIES: list[tuple[str, str]] = [
     ("adaptive_mr",    "アダプティブMR"),
@@ -294,10 +320,10 @@ def _heatmap(all_results: dict[str, dict[str, list[dict]]]) -> str:
 # HTML生成
 # ─────────────────────────────────────────────────────────────────────
 
-def build_html(strat_stats: dict, all_results: dict, days: int) -> str:
+def build_html(strat_stats: dict, all_results: dict, days: int, n_sym: int = 22) -> str:
     now_str    = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
     score_html = _score_table(strat_stats, days)
-    heat_html  = _heatmap(all_results)
+    heat_html  = _heatmap(all_results) if all_results else "<p style='color:#4b5563'>※ 銘柄数が多いためヒートマップは省略</p>"
 
     # 戦略別サマリー行
     summary_rows = ""
@@ -329,11 +355,11 @@ def build_html(strat_stats: dict, all_results: dict, days: int) -> str:
 <body>
 <h1>5戦略 横断バックテスト比較
   <span style="font-size:.75em;color:#8b949e">
-    22銘柄 × 5戦略 &nbsp;|&nbsp; 直近{days}日 &nbsp;|&nbsp; 生成: {now_str}
+    {n_sym}銘柄 × 5戦略 &nbsp;|&nbsp; 直近{days}日 &nbsp;|&nbsp; 生成: {now_str}
   </span>
 </h1>
 <p style="font-size:.85em;color:#4b5563;margin-bottom:16px">
-  ※ 同じ22銘柄に全戦略を適用して公平比較 / ロット100株固定
+  ※ 同じ{n_sym}銘柄に全戦略を適用して公平比較 / ロット100株固定
 </p>
 
 <h2>▶ 戦略優先度スコアリング</h2>
@@ -362,57 +388,72 @@ def build_html(strat_stats: dict, all_results: dict, days: int) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="5戦略 横断バックテスト比較")
+    parser.add_argument("--universe",   default="watch",
+                        choices=["watch", "all"],
+                        help="watch=22銘柄(デフォルト) / all=東証プライム全銘柄")
     parser.add_argument("--days",       type=int, default=365)
+    parser.add_argument("--workers",    type=int, default=8,
+                        help="並列ワーカー数（大規模時は4〜6推奨）")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
+    stocks  = _load_stocks(args.universe)
+    n_sym   = len(stocks)
+    n_total = n_sym * len(STRATEGIES)
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+
     print(f"\n{'='*65}")
     print(f"  5戦略 横断バックテスト比較")
-    print(f"  22銘柄 × 5戦略  直近{args.days}日  生成: {now_str}")
+    print(f"  {n_sym}銘柄 × 5戦略 = {n_total}組  直近{args.days}日")
+    print(f"  生成: {now_str}")
+    if args.universe == "all":
+        print(f"  ※ 大規模実行: 完了まで数時間かかる場合があります")
     print(f"{'='*65}\n")
 
-    # 全組み合わせを並列実行
-    # all_results[strategy_key][symbol] = trades
+    # 全組み合わせを並列実行（戦略ごとに進捗表示）
     all_results: dict[str, dict[str, list[dict]]] = {k: {} for k, _ in STRATEGIES}
+    strat_counts: dict[str, int] = {k: 0 for k, _ in STRATEGIES}
 
-    tasks = [(sym, k) for sym, _ in STOCKS for k, _ in STRATEGIES]
+    tasks = [(sym, k) for sym, _ in stocks for k, _ in STRATEGIES]
 
     def _task(sym: str, k: str):
         trades = _run(sym, k, args.days)
-        # symbol をトレードに付与（ヒートマップ用）
         for t in trades:
             t["symbol"] = sym
         return sym, k, trades
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_task, sym, k): (sym, k) for sym, k in tasks}
         done = 0
+        report_interval = max(n_sym // 5, 10)  # 20%ごとに進捗表示
         for f in as_completed(futs):
             sym, k, trades = f.result()
             all_results[k][sym] = trades
+            strat_counts[k] += 1
             done += 1
-            if done % 22 == 0:
-                strat_nm = dict(STRATEGIES).get(k, k)
-                print(f"  進捗: {done}/{len(tasks)}")
+            if done % report_interval == 0 or done == n_total:
+                pct = done / n_total * 100
+                elapsed = datetime.now(JST).strftime("%H:%M:%S")
+                print(f"  [{elapsed}] 進捗: {done}/{n_total} ({pct:.0f}%)")
 
-    # 戦略ごとに集計
+    # 戦略ごとに集計・表示
     strat_stats: dict[str, dict] = {}
-    print(f"\n  {'戦略':<16}  {'件数':>4}  {'勝率':>6}  {'PF':>6}  {'合計損益':>12}  {'最大DD':>10}  {'最大連敗':>6}")
-    print("  " + "─" * 65)
+    print(f"\n  {'戦略':<16}  {'取引':>5}  {'勝率':>6}  {'PF':>6}  "
+          f"{'合計損益':>12}  {'最大DD':>10}  {'連敗':>4}")
+    print("  " + "─" * 68)
     for k, nm in STRATEGIES:
-        all_trades = []
-        for trades in all_results[k].values():
-            all_trades.extend(trades)
+        all_trades = [t for trades in all_results[k].values() for t in trades]
         s = _stats(all_trades)
         strat_stats[k] = s
         pf_s = _pf_str(s["pf"])
-        print(f"  {nm:<16}  {s['n']:>4}件  {s['wr']:>5.1f}%  {pf_s:>6}  "
+        print(f"  {nm:<16}  {s['n']:>5}件  {s['wr']:>5.1f}%  {pf_s:>6}  "
               f"{s['total']:>+12,.0f}円  ▼{s['max_dd']:>9,.0f}円  {s['max_consec_loss']:>4}連敗")
 
-    html    = build_html(strat_stats, all_results, args.days)
+    # HTML出力（ヒートマップは大規模時は省略）
+    html    = build_html(strat_stats, all_results if n_sym <= 100 else {}, args.days, n_sym)
     today_s = datetime.now(JST).strftime("%Y%m%d")
-    out     = Path(f"strategy_compare_{today_s}.html")
+    suffix  = f"_{args.universe}" if args.universe != "watch" else ""
+    out     = Path(f"strategy_compare{suffix}_{today_s}.html")
     out.write_text(html, encoding="utf-8")
     print(f"\nHTML: {out.resolve()}")
     if not args.no_browser:
