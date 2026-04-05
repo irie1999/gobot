@@ -391,19 +391,21 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                 pnl = (exit_p - entry_p) * qty
                 pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
-                    entry_dt    = entry_dt,
-                    exit_dt     = dt,
-                    entry_p     = entry_p,
-                    exit_p      = exit_p,
-                    qty         = qty,
-                    pnl         = pnl,
-                    pct         = pct,
-                    hold        = hold_days,
-                    reason      = reason,
-                    limit_price = entry_p,   # filled at limit
-                    regime      = entry_regime,
-                    stop_p      = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
-                    target_p    = float("nan"),  # adaptive_mr has no fixed profit target
+                    entry_dt     = entry_dt,
+                    exit_dt      = dt,
+                    entry_p      = entry_p,
+                    exit_p       = exit_p,
+                    qty          = qty,
+                    pnl          = pnl,
+                    pct          = pct,
+                    hold         = hold_days,
+                    reason       = reason,
+                    limit_price  = entry_p,   # filled at limit
+                    regime       = entry_regime,
+                    stop_p       = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
+                    target_p     = float("nan"),  # adaptive_mr has no fixed profit target
+                    signal_dt    = signal_dt,
+                    signal_close = signal_close,
                 ))
                 in_pos = False
                 pending_order = None
@@ -418,13 +420,15 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             else:
                 # 当日ローが指値以下 → 約定
                 if lo <= pending_order["limit_price"]:
-                    entry_p      = pending_order["limit_price"]
-                    entry_atr    = pending_order["atr"]
-                    entry_regime = pending_order["regime"]
-                    qty          = pending_order["qty"]
-                    entry_dt     = dt
-                    hold_days    = 0
-                    in_pos       = True
+                    entry_p       = pending_order["limit_price"]
+                    entry_atr     = pending_order["atr"]
+                    entry_regime  = pending_order["regime"]
+                    qty           = pending_order["qty"]
+                    entry_dt      = dt
+                    hold_days     = 0
+                    signal_dt     = pending_order["signal_dt"]
+                    signal_close  = pending_order["signal_close"]
+                    in_pos        = True
                     pending_order = None
 
         # ── ポジションなし・注文なし: エントリーシグナル判定 ─
@@ -455,6 +459,8 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                 "expire_after": ENTRY_EXPIRE,
                 "atr":          prev_atr,
                 "regime":       regime_str,
+                "signal_dt":    prev.name,
+                "signal_close": float(prev["close"]),
             }
 
     # 保有中ポジションを評価額で記録
@@ -463,19 +469,21 @@ def backtest_amr(df: pd.DataFrame, backtest_days: int) -> list[dict]:
         pnl     = (last_cl - entry_p) * qty
         pct     = (last_cl - entry_p) / entry_p * 100
         trades.append(dict(
-            entry_dt    = entry_dt,
-            exit_dt     = df.index[-1],
-            entry_p     = entry_p,
-            exit_p      = last_cl,
-            qty         = qty,
-            pnl         = pnl,
-            pct         = pct,
-            hold        = (df.index[-1] - entry_dt).days,
-            reason      = "保有中★",
-            limit_price = entry_p,
-            regime      = entry_regime,
-            stop_p      = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
-            target_p    = float("nan"),  # adaptive_mr has no fixed profit target
+            entry_dt     = entry_dt,
+            exit_dt      = df.index[-1],
+            entry_p      = entry_p,
+            exit_p       = last_cl,
+            qty          = qty,
+            pnl          = pnl,
+            pct          = pct,
+            hold         = (df.index[-1] - entry_dt).days,
+            reason       = "保有中★",
+            limit_price  = entry_p,
+            regime       = entry_regime,
+            stop_p       = entry_p - entry_atr * (STOP_ATR_HIGH if entry_regime == "high" else STOP_ATR_NORM),
+            target_p     = float("nan"),  # adaptive_mr has no fixed profit target
+            signal_dt    = signal_dt,
+            signal_close = signal_close,
         ))
 
     return trades

@@ -261,18 +261,20 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
                 pnl = (exit_p - entry_p) * LOT_SIZE
                 pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
-                    entry_dt  = entry_dt,
-                    exit_dt   = current_date,
-                    entry_p   = entry_p,
-                    exit_p    = exit_p,
-                    limit_p   = limit_p_entry,
-                    stop_p    = stop_level,
-                    target_p  = target_level,
-                    atr       = entry_atr,
-                    pnl       = pnl,
-                    pct       = pct,
-                    hold      = hold_days,
-                    reason    = reason,
+                    entry_dt     = entry_dt,
+                    exit_dt      = current_date,
+                    entry_p      = entry_p,
+                    exit_p       = exit_p,
+                    limit_p      = limit_p_entry,
+                    stop_p       = stop_level,
+                    target_p     = target_level,
+                    atr          = entry_atr,
+                    pnl          = pnl,
+                    pct          = pct,
+                    hold         = hold_days,
+                    reason       = reason,
+                    signal_dt    = signal_dt,
+                    signal_close = signal_close,
                 ))
                 in_pos        = False
                 pending_order = None
@@ -292,6 +294,8 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
                 limit_p_entry = entry_p
                 stop_level    = entry_p - STOP_ATR_MULT   * entry_atr
                 target_level  = entry_p + TARGET_ATR_MULT * entry_atr
+                signal_dt     = pending_order["signal_dt"]
+                signal_close  = pending_order["signal_close"]
                 in_pos        = True
                 pending_order = None
             continue
@@ -307,10 +311,12 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
 
         lim_price = prev_don_high * (1.0 - LIMIT_OFFSET)
         pending_order = {
-            "limit_price": lim_price,
-            "atr":         prev_atr,
-            "placed_date": current_date,
-            "expire":      ENTRY_EXPIRE,
+            "limit_price":  lim_price,
+            "atr":          prev_atr,
+            "placed_date":  current_date,
+            "expire":       ENTRY_EXPIRE,
+            "signal_dt":    prev.name,
+            "signal_close": float(prev["close"]),
         }
 
     # 未決済ポジション（バックテスト最終日）
@@ -321,18 +327,20 @@ def backtest_donchian(df: pd.DataFrame, backtest_days: int) -> list:
         pnl = (last_cl - entry_p) * LOT_SIZE
         pct = (last_cl - entry_p) / entry_p * 100
         trades.append(dict(
-            entry_dt  = entry_dt,
-            exit_dt   = last_dt,
-            entry_p   = entry_p,
-            exit_p    = last_cl,
-            limit_p   = limit_p_entry,
-            stop_p    = stop_level,
-            target_p  = target_level,
-            atr       = entry_atr,
-            pnl       = pnl,
-            pct       = pct,
-            hold      = hold_days,
-            reason    = "保有中",
+            entry_dt     = entry_dt,
+            exit_dt      = last_dt,
+            entry_p      = entry_p,
+            exit_p       = last_cl,
+            limit_p      = limit_p_entry,
+            stop_p       = stop_level,
+            target_p     = target_level,
+            atr          = entry_atr,
+            pnl          = pnl,
+            pct          = pct,
+            hold         = hold_days,
+            reason       = "保有中",
+            signal_dt    = signal_dt,
+            signal_close = signal_close,
         ))
 
     return trades

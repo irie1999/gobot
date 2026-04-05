@@ -211,7 +211,7 @@ def _equity_svg(all_trades: list[dict], width: int = 700, height: int = 160) -> 
 
 def _trade_rows(trades: list[dict]) -> str:
     if not trades:
-        return "<tr><td colspan='11' style='color:#4b5563;text-align:center'>トレードなし</td></tr>"
+        return "<tr><td colspan='13' style='color:#4b5563;text-align:center'>トレードなし</td></tr>"
     rows = ""
     for t in sorted(trades, key=lambda t: t.get("exit_dt") or ""):
         pnl      = t["pnl"]
@@ -220,6 +220,10 @@ def _trade_rows(trades: list[dict]) -> str:
         entry_d  = str(t.get("entry_dt", ""))[:10]
         exit_d   = str(t.get("exit_dt",  ""))[:10]
         hold     = t.get("hold", "—")
+
+        # シグナル日・シグナル株価
+        sig_dt    = str(t.get("signal_dt", ""))[:10]
+        sig_cl    = t.get("signal_close", 0) or 0
 
         # 指値・損切・目標（戦略によってキー名が異なる）
         limit_p  = t.get("limit_p")  or t.get("limit_price") or t.get("entry_p", 0)
@@ -238,8 +242,11 @@ def _trade_rows(trades: list[dict]) -> str:
         rr_val   = (target_p - entry_p) / risk if (risk > 0 and target_p) else None
         rr_s     = f"{rr_val:.1f}R" if rr_val else "—"
 
+        sig_cl_s = f"¥{sig_cl:,.0f}" if sig_cl else "—"
+
         rows += (
             f"<tr>"
+            f"<td>{sig_dt}<div class='sub'>{sig_cl_s}</div></td>"
             f"<td>{entry_d}</td>"
             f"<td>{exit_d}</td>"
             f"<td>¥{limit_p:,.0f}<div class='sub'>指値</div></td>"
@@ -332,7 +339,8 @@ def build_html(results: list[dict], all_trades: list[dict],
   </summary>
   <table style="margin-top:6px">
     <thead><tr>
-      <th>エントリー日</th><th>決済日</th>
+      <th>シグナル日<br><span style='font-weight:normal;font-size:.85em'>(終値)</span></th>
+      <th>約定日</th><th>決済日</th>
       <th>指値<br><span style='font-weight:normal;font-size:.85em'>(注文)</span></th>
       <th>約定価格</th>
       <th>損切<br><span style='font-weight:normal;font-size:.85em'>(逆指値)</span></th>

@@ -288,6 +288,7 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                         limit_p=limit_price, stop_p=stop_p, target_p=target_p,
                         atr=entry_atr, pnl=pnl, pct=pct, hold=0,
                         reason=exit_reason,
+                        signal_dt=signal_dt, signal_close=signal_close,
                     ))
                     state = "idle"
             continue
@@ -319,6 +320,7 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
                     limit_p=limit_price, stop_p=stop_p, target_p=target_p,
                     atr=entry_atr, pnl=pnl, pct=pct, hold=hold,
                     reason=exit_reason,
+                    signal_dt=signal_dt, signal_close=signal_close,
                 ))
                 state = "idle"
             continue
@@ -333,11 +335,13 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             if pd.isna(bb_lower_p) or pd.isna(bb_mid_p) or pd.isna(atr_p):
                 continue
 
-            limit_price  = bb_lower_p * (1 - LIMIT_BELOW_BB)
-            entry_target = bb_mid_p
-            entry_atr    = atr_p
-            state        = "pending"
-            days_pending = 0
+            limit_price   = bb_lower_p * (1 - LIMIT_BELOW_BB)
+            entry_target  = bb_mid_p
+            entry_atr     = atr_p
+            signal_dt     = prev.name
+            signal_close  = float(prev["close"])
+            state         = "pending"
+            days_pending  = 0
 
     # 未決済ポジション（バックテスト最終日）
     if state == "in_pos":
@@ -352,6 +356,7 @@ def backtest_bb_vol(df: pd.DataFrame, backtest_days: int) -> list[dict]:
             limit_p=limit_price, stop_p=stop_p, target_p=target_p,
             atr=entry_atr, pnl=pnl, pct=pct, hold=hold,
             reason="保有中",
+            signal_dt=signal_dt, signal_close=signal_close,
         ))
 
     return trades

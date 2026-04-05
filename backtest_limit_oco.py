@@ -243,6 +243,7 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
                         limit_price=limit_price,
                         stop_loss=stop_loss,
                         profit_target=profit_target,
+                        signal_dt=signal_dt, signal_close=signal_close,
                     ))
                     state = "idle"
                 continue
@@ -270,6 +271,7 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
                     pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
                     hold=hold, reason=exit_reason,
                     limit_price=limit_price,
+                    signal_dt=signal_dt, signal_close=signal_close,
                 ))
                 state = "idle"
             continue
@@ -290,10 +292,11 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
                 continue
 
             # 指値注文を設定
-            limit_price  = close_p - atr_p * p["ENTRY_ATR_MULT"]
-            signal_atr   = atr_p
-            signal_dt    = prev.name
-            state        = "pending"
+            limit_price   = close_p - atr_p * p["ENTRY_ATR_MULT"]
+            signal_atr    = atr_p
+            signal_dt     = prev.name
+            signal_close  = close_p
+            state         = "pending"
             days_pending = 0
 
     # 未決済ポジション（バックテスト最終日）
@@ -307,6 +310,7 @@ def backtest_limit(df: pd.DataFrame, backtest_days: int, params: dict) -> list[d
             pct=(lp - entry_p) / entry_p * 100,
             hold=hold, reason="保有中★",
             limit_price=limit_price,
+            signal_dt=signal_dt, signal_close=signal_close,
         ))
 
     return trades
