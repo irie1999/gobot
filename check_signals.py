@@ -376,14 +376,15 @@ def check_today(target_date: date | None, verbose: bool,
 # ─────────────────────────────────────────────────────────────────────
 
 def check_history(from_date: date, to_date: date, verbose: bool,
-                  watchlist: list | None) -> None:
+                  watchlist: list | None, no_browser: bool = False) -> None:
     wl         = watchlist if watchlist is not None else WATCHLIST
     today      = datetime.now(JST).date()
     fetch_days = (today - from_date).days + 365 + 60
+    period_days = (to_date - from_date).days + 1
 
     print(f"\n{'='*80}")
     print(f"  過去シグナル発生回数")
-    print(f"  集計期間: {from_date} 〜 {to_date}  ({(to_date - from_date).days + 1}日間)")
+    print(f"  集計期間: {from_date} 〜 {to_date}  ({period_days}日間)")
     print(f"  対象: {len(wl)}銘柄")
     print(f"{'='*80}\n")
 
@@ -392,6 +393,8 @@ def check_history(from_date: date, to_date: date, verbose: bool,
     print("  " + hdr)
     print("  " + "─" * len(hdr))
 
+    # 集計
+    rows_data: list[dict] = []
     total = 0
     for symbol, name, strategies in wl:
         for key in strategies:
@@ -399,6 +402,8 @@ def check_history(from_date: date, to_date: date, verbose: bool,
             strat = STRATEGY_NAMES.get(key, key)
             if df is None:
                 print(f"  {symbol:<{W[0]}}  {name:<{W[1]}}  {strat:<{W[2]}}  {'—':>{W[3]}}  データ取得失敗")
+                rows_data.append(dict(symbol=symbol, name=name, strat=strat,
+                                      count=0, signal_dates=[], error=True))
                 continue
 
             idx_dates = [(i, (d.date() if hasattr(d, "date") else d))
@@ -421,11 +426,155 @@ def check_history(from_date: date, to_date: date, verbose: bool,
 
             if verbose and len(signal_dates) > 5:
                 print(f"  {'':>{W[0]}}  {'':>{W[1]}}  全発生日: {'  '.join(signal_dates)}")
+
+            rows_data.append(dict(symbol=symbol, name=name, strat=strat,
+                                  count=count, signal_dates=signal_dates, error=False))
         print()
 
     print("─" * 80)
-    print(f"  合計: {total}回")
+    avg_per_month = total / (period_days / 30) if period_days > 0 else 0
+    print(f"  合計: {total}回  月平均: {avg_per_month:.1f}回")
     print(f"{'='*80}\n")
+
+    # ── HTML 生成 ────────────────────────────────────────────────
+    now_str  = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    rows_data_sorted = sorted(rows_data, key=lambda r: -r["count"])
+
+    table_rows = ""
+    for r in rows_data_sorted:
+        color = STRATEGY_COLOR.get(
+            next((k for k, v in STRATEGY_NAMES.items() if v == r["strat"]), ""),
+            "#94a3b8"
+        )
+        cnt_cls = "up" if r["count"] >= 3 else ("neu" if r["count"] >= 1 else "dn")
+        # 全発生日をバッジで表示
+        date_badges = ""
+        for d in r["signal_dates"]:
+            date_badges += f"<span style='display:inline-block;background:#21262d;border-radius:4px;padding:1px 7px;margin:2px 3px 2px 0;font-size:.8em'>{d}</span>"
+        if not date_badges:
+            date_badges = "<span style='color:#4b5563'>—</span>"
+
+        table_rows += (
+            f"<tr>"
+            f"<td>{r['symbol']}</td>"
+            f"<td>{r['name']}</td>"
+            f"<td><span class='badge' style='color:{color};border-color:{color}'>{r['strat']}</span></td>"
+            f"<td class='{cnt_cls}' style='font-weight:600;font-size:1.1em'>{r['count']}回</td>"
+            f"<td>{date_badges}</td>"
+            f"</tr>"
+        )
+
+    # 月次カレンダー（全銘柄合算のシグナル数をヒートマップ表示）
+    all_dates: dict[str, int] = {}
+    for r in rows_data:
+        for d in r["signal_dates"]:
+            all_dates[d] = all_dates.get(d, 0) + 1
+
+    cal_html = _build_calendar_heatmap(all_dates, from_date, to_date)
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>シグナル発生頻度 {from_date}〜{to_date}</title>
+<style>
+{_CSS}
+.up{{color:#3fb950}}.dn{{color:#f85149}}.neu{{color:#8b949e}}
+table{{border-collapse:collapse;width:100%;margin-bottom:24px}}
+th{{background:#161b22;color:#8b949e;padding:7px 10px;text-align:left;
+   border-bottom:2px solid #21262d;font-size:.85em}}
+td{{padding:7px 10px;border-bottom:1px solid #21262d;vertical-align:top}}
+tr:hover td{{background:#161b22}}
+.cal-grid{{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:24px}}
+.cal-day{{width:28px;height:28px;border-radius:4px;display:flex;align-items:center;
+          justify-content:center;font-size:.72em;cursor:default}}
+.cal-month{{margin-bottom:16px}}
+.cal-month h3{{font-size:.85em;color:#8b949e;margin:0 0 6px}}
+</style>
+</head>
+<body>
+<h1>シグナル発生頻度
+  <span style="font-size:.75em;color:#8b949e">
+    {from_date} 〜 {to_date}（{period_days}日間） &nbsp;|&nbsp;
+    {len(wl)}銘柄 &nbsp;|&nbsp; 合計{total}回 / 月平均{avg_per_month:.1f}回 &nbsp;|&nbsp;
+    生成: {now_str}
+  </span>
+</h1>
+
+<h2>▶ 発生カレンダー（色が濃いほど多い）</h2>
+{cal_html}
+
+<h2>▶ 銘柄別 発生回数（多い順）</h2>
+<table>
+<thead><tr>
+  <th>コード</th><th>銘柄名</th><th>戦略</th>
+  <th>回数</th><th>発生日</th>
+</tr></thead>
+<tbody>{table_rows}</tbody>
+</table>
+</body>
+</html>"""
+
+    today_s  = datetime.now(JST).strftime("%Y%m%d")
+    out_path = Path(f"signal_history_{from_date}_{to_date}.html")
+    out_path.write_text(html, encoding="utf-8")
+    print(f"HTML: {out_path.resolve()}")
+    if not no_browser:
+        webbrowser.open(f"file://{out_path.resolve()}")
+
+
+def _build_calendar_heatmap(all_dates: dict[str, int],
+                             from_date: date, to_date: date) -> str:
+    """日付ごとのシグナル数をカレンダーヒートマップで返す。"""
+    if not all_dates:
+        return "<p style='color:#4b5563'>シグナルなし</p>"
+
+    max_count = max(all_dates.values()) if all_dates else 1
+
+    def bg_color(n: int) -> str:
+        if n == 0:
+            return "#161b22"
+        intensity = min(n / max(max_count, 1), 1.0)
+        # 緑のグラデーション（薄→濃）
+        g = int(80 + intensity * 175)
+        return f"rgb(0,{g},60)"
+
+    # 月ごとにグループ化
+    import calendar as cal_mod
+    months: dict[tuple, list] = {}
+    cur = from_date.replace(day=1)
+    while cur <= to_date:
+        key = (cur.year, cur.month)
+        months[key] = []
+        # その月の全日を列挙
+        _, last_day = cal_mod.monthrange(cur.year, cur.month)
+        for day in range(1, last_day + 1):
+            d = date(cur.year, cur.month, day)
+            if from_date <= d <= to_date:
+                months[key].append(d)
+        cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    html = ""
+    for (year, month), days in months.items():
+        if not days:
+            continue
+        mn = ["1月","2月","3月","4月","5月","6月",
+              "7月","8月","9月","10月","11月","12月"][month - 1]
+        html += f"<div class='cal-month'><h3>{year}年 {mn}</h3><div class='cal-grid'>"
+        # 月の最初の曜日まで空白
+        first_dow = days[0].weekday()  # 0=月曜
+        for _ in range(first_dow):
+            html += "<div class='cal-day' style='background:transparent'></div>"
+        for d in days:
+            ds   = str(d)
+            n    = all_dates.get(ds, 0)
+            bg   = bg_color(n)
+            tip  = f"{ds}: {n}件" if n > 0 else ds
+            text = str(n) if n > 0 else ""
+            html += (f"<div class='cal-day' style='background:{bg}' title='{tip}'>"
+                     f"{text}</div>")
+        html += "</div></div>"
+    return html
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -483,7 +632,7 @@ def main() -> None:
         to_dt = date.fromisoformat(args.to_date) if args.to_date else today
         from_dt = (date.fromisoformat(args.from_date) if args.from_date
                    else to_dt - timedelta(days=args.days))
-        check_history(from_dt, to_dt, args.verbose, wl)
+        check_history(from_dt, to_dt, args.verbose, wl, args.no_browser)
     else:
         target = date.fromisoformat(args.date) if args.date else None
         check_today(target, args.verbose, wl, args.preset, args.no_browser)
