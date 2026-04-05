@@ -38,24 +38,28 @@ LOT = 100
 
 # ── 監視リスト ────────────────────────────────────────────────────────
 WATCHLIST: list[tuple[str, str, list[str]]] = [
-    # ── 強い押し目（1800銘柄バックテスト + 4期間スコア選定）──────────
-    ("6146.T", "ディスコ",                        ["strong_pullback"]),
-    ("6871.T", "日本マイクロニクス",               ["strong_pullback"]),
-    ("7236.T", "ティラド",                        ["strong_pullback"]),
-    ("7012.T", "川崎重工業",                      ["strong_pullback"]),
-    ("5108.T", "ブリヂストン",                    ["strong_pullback"]),
-    ("4025.T", "多木化学",                        ["strong_pullback"]),
-    ("8218.T", "コメリ",                          ["strong_pullback"]),
-    ("3946.T", "トーモク",                        ["strong_pullback"]),
-    ("6183.T", "ベルシステム２４ホールディングス", ["strong_pullback"]),
+    # ── 強い押し目（全銘柄バックテスト + 4期間スコア選定 / 50万円予算 / スコア35以上）──
+    # score45
     ("3636.T", "三菱総合研究所",                  ["strong_pullback"]),
+    ("5108.T", "ブリヂストン",                    ["strong_pullback"]),
+    ("6183.T", "ベルシステム２４ホールディングス", ["strong_pullback"]),
+    ("7012.T", "川崎重工業",                      ["strong_pullback"]),
     ("8153.T", "モスフードサービス",               ["strong_pullback"]),
-    ("8194.T", "ライフコーポレーション",           ["strong_pullback"]),
+    ("8218.T", "コメリ",                          ["strong_pullback"]),
     ("9046.T", "神戸電鉄",                        ["strong_pullback"]),
+    # score43
     ("9405.T", "朝日放送グループホールディングス", ["strong_pullback"]),
-    ("8081.T", "カナデン",                        ["strong_pullback"]),
-    ("6454.T", "マックス",                        ["strong_pullback"]),
+    # score40
+    ("3946.T", "トーモク",                        ["strong_pullback"]),
+    ("4025.T", "多木化学",                        ["strong_pullback"]),
+    # score39
     ("6196.T", "ストライク",                      ["strong_pullback"]),
+    ("6454.T", "マックス",                        ["strong_pullback"]),
+    # score38
+    ("8081.T", "カナデン",                        ["strong_pullback"]),
+    ("8194.T", "ライフコーポレーション",           ["strong_pullback"]),
+    # score35
+    ("9381.T", "エーアイテイー",                  ["strong_pullback"]),
 ]
 
 STRATEGY_NAMES = {
@@ -75,9 +79,9 @@ STRATEGY_COLOR = {
 }
 
 PRESETS: dict[str, list[str]] = {
-    # 合計損益上位8銘柄（スコア選定17銘柄から）
-    "core": ["6146.T", "6871.T", "7236.T", "7012.T",
-             "5108.T", "4025.T", "8218.T", "3946.T"],
+    # score45上位7銘柄（50万円予算 / 4期間スコア選定）
+    "core": ["3636.T", "5108.T", "6183.T", "7012.T",
+             "8153.T", "8218.T", "9046.T"],
     "all":  [],  # 空 = WATCHLIST 全体
 }
 
