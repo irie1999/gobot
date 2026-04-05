@@ -393,19 +393,21 @@ def check_history(from_date: date, to_date: date, verbose: bool,
     print("  " + hdr)
     print("  " + "─" * len(hdr))
 
-    # 集計
+    # 集計（シグナル + バックテスト同時実行）
     rows_data: list[dict] = []
     total = 0
+    bt_days = (today - from_date).days  # バックテスト用: from_date からの日数
     for symbol, name, strategies in wl:
         for key in strategies:
             df = _fetch_and_calc(symbol, key, fetch_days)
             strat = STRATEGY_NAMES.get(key, key)
             if df is None:
                 print(f"  {symbol:<{W[0]}}  {name:<{W[1]}}  {strat:<{W[2]}}  {'—':>{W[3]}}  データ取得失敗")
-                rows_data.append(dict(symbol=symbol, name=name, strat=strat,
-                                      count=0, signal_dates=[], error=True))
+                rows_data.append(dict(symbol=symbol, name=name, strat=strat, key=key,
+                                      count=0, signal_dates=[], trades=[], error=True))
                 continue
 
+            # シグナル発生日の集計
             idx_dates = [(i, (d.date() if hasattr(d, "date") else d))
                          for i, d in enumerate(df.index)]
             signal_dates: list[str] = []
@@ -419,50 +421,143 @@ def check_history(from_date: date, to_date: date, verbose: bool,
                 if _check_signal(df.iloc[:i + 1], key):
                     signal_dates.append(str(d))
 
+            # バックテスト（to_date までのデータで実行）
+            try:
+                df_period = df[df.index <= pd.Timestamp(to_date)]
+                if key == "strong_pullback":
+                    trades = _sp.backtest_strong_pullback(df_period, bt_days)
+                elif key == "adaptive_mr":
+                    trades = _amr.backtest_amr(df_period, bt_days)
+                elif key == "donchian":
+                    trades = _don.backtest_donchian(df_period, bt_days)
+                elif key == "bb_volume":
+                    trades = _bbv.backtest_bb_vol(df_period, bt_days)
+                elif key == "limit_oco":
+                    trades = _oco.backtest_limit(df_period, bt_days, _oco.DEFAULT_PARAMS)
+                else:
+                    trades = []
+            except Exception:
+                trades = []
+
             count = len(signal_dates)
             total += count
             recent_str = "  ".join(signal_dates[-5:]) if signal_dates else "—"
-            print(f"  {symbol:<{W[0]}}  {name:<{W[1]}}  {strat:<{W[2]}}  {count:>{W[3]}}回  {recent_str}")
+            pnl_total = sum(t["pnl"] for t in trades)
+            print(f"  {symbol:<{W[0]}}  {name:<{W[1]}}  {strat:<{W[2]}}  "
+                  f"{count:>{W[3]}}回  {recent_str}  ({len(trades)}取引 {pnl_total:+,.0f}円)")
 
-            if verbose and len(signal_dates) > 5:
-                print(f"  {'':>{W[0]}}  {'':>{W[1]}}  全発生日: {'  '.join(signal_dates)}")
-
-            rows_data.append(dict(symbol=symbol, name=name, strat=strat,
-                                  count=count, signal_dates=signal_dates, error=False))
+            rows_data.append(dict(symbol=symbol, name=name, strat=strat, key=key,
+                                  count=count, signal_dates=signal_dates,
+                                  trades=trades, error=False))
         print()
 
     print("─" * 80)
     avg_per_month = total / (period_days / 30) if period_days > 0 else 0
-    print(f"  合計: {total}回  月平均: {avg_per_month:.1f}回")
+    all_trades_all = [t for r in rows_data for t in r.get("trades", [])]
+    total_pnl = sum(t["pnl"] for t in all_trades_all)
+    print(f"  シグナル合計: {total}回  月平均: {avg_per_month:.1f}回")
+    print(f"  損益合計: {total_pnl:+,.0f}円")
     print(f"{'='*80}\n")
 
     # ── HTML 生成 ────────────────────────────────────────────────
     now_str  = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
-    rows_data_sorted = sorted(rows_data, key=lambda r: -r["count"])
+    # 合計損益の大きい順にソート
+    rows_data_sorted = sorted(
+        rows_data,
+        key=lambda r: sum(t["pnl"] for t in r.get("trades", [])),
+        reverse=True
+    )
     WD = ["月","火","水","木","金","土","日"]
+
+    def _pf_str(pf: float) -> str:
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _stats_r(trades: list[dict]) -> dict:
+        if not trades:
+            return dict(n=0, wins=0, wr=0.0, pf=0.0, total=0.0, avg=0.0,
+                        max_win=0.0, max_loss=0.0, max_dd=0.0)
+        pnls    = [t["pnl"] for t in sorted(trades, key=lambda t: t.get("exit_dt") or "")]
+        wins    = [p for p in pnls if p > 0]
+        losses  = [p for p in pnls if p <= 0]
+        gw, gl  = sum(wins), abs(sum(losses))
+        pf      = gw / gl if gl > 0 else float("inf")
+        cum = peak = max_dd = 0.0
+        for p in pnls:
+            cum += p; peak = max(peak, cum); max_dd = max(max_dd, peak - cum)
+        return dict(n=len(pnls), wins=len(wins),
+                    wr=len(wins)/len(pnls)*100 if pnls else 0.0,
+                    pf=pf, total=sum(pnls),
+                    avg=sum(pnls)/len(pnls),
+                    max_win=max(pnls), max_loss=min(pnls), max_dd=max_dd)
+
+    def _valid(v) -> bool:
+        import math as _m
+        return v is not None and not (isinstance(v, float) and _m.isnan(v)) and v != 0
 
     # 銘柄別ブロック（<details> で展開）
     stock_blocks = ""
     for r in rows_data_sorted:
-        color   = STRATEGY_COLOR.get(
+        color  = STRATEGY_COLOR.get(
             next((k for k, v in STRATEGY_NAMES.items() if v == r["strat"]), ""), "#94a3b8"
         )
-        cnt_cls = "up" if r["count"] >= 3 else ("neu" if r["count"] >= 1 else "dn")
+        trades = r.get("trades", [])
+        s      = _stats_r(trades)
+        pnl_cls = "up" if s["total"] > 0 else ("dn" if s["total"] < 0 else "neu")
 
-        # 詳細テーブル（発生日 × 曜日）
-        detail_rows = ""
-        for i, ds in enumerate(r["signal_dates"], 1):
-            d_obj = date.fromisoformat(ds)
-            wd    = WD[d_obj.weekday()]
-            detail_rows += (
+        # サマリー行（合計損益・勝率・PF）
+        summary_info = ""
+        if s["n"] > 0:
+            summary_info = (
+                f"<span class='{pnl_cls}' style='font-weight:700;min-width:90px'>"
+                f"{s['total']:+,.0f}円</span>"
+                f"<span style='color:#8b949e;font-size:.82em'>"
+                f" {s['n']}件 勝率{s['wr']:.0f}% PF{_pf_str(s['pf'])}</span>"
+            )
+        else:
+            summary_info = "<span style='color:#4b5563;font-size:.82em'>取引なし</span>"
+
+        sig_cnt_cls = "up" if r["count"] >= 3 else ("neu" if r["count"] >= 1 else "dn")
+
+        # トレード詳細テーブル
+        trade_rows = ""
+        for t in sorted(trades, key=lambda x: x.get("exit_dt") or ""):
+            pnl     = t["pnl"]
+            tc      = "up" if pnl > 0 else "dn"
+            sig_d   = str(t.get("signal_dt",  ""))[:10]
+            sig_cl  = t.get("signal_close", 0) or 0
+            entry_d = str(t.get("entry_dt",   ""))[:10]
+            exit_d  = str(t.get("exit_dt",    ""))[:10]
+            entry_p = t.get("entry_p", 0) or t.get("limit_p", 0)
+            exit_p  = t.get("exit_p",  0)
+            stop_p  = t.get("stop_p",  0)
+            target  = t.get("target_p", 0)
+            atr     = t.get("atr",     0)
+            hold    = t.get("hold",    "—")
+            reason  = t.get("reason",  "—")
+            risk    = entry_p - stop_p if _valid(stop_p) else 0
+            rr_val  = (target - entry_p) / risk if (risk > 0 and _valid(target)) else None
+            rr_s    = f"{rr_val:.1f}R" if rr_val else "—"
+            sig_s   = f"¥{sig_cl:,.0f}" if sig_cl else "—"
+            stp_s   = f"¥{stop_p:,.0f}" if _valid(stop_p) else "—"
+            tgt_s   = f"¥{target:,.0f}" if _valid(target) else "—"
+            trade_rows += (
                 f"<tr>"
-                f"<td style='color:#8b949e;width:2em'>{i}</td>"
-                f"<td>{ds}</td>"
-                f"<td style='color:#8b949e'>{wd}曜日</td>"
+                f"<td>{sig_d}<div class='sub'>{sig_s}</div></td>"
+                f"<td>{entry_d}</td>"
+                f"<td>{exit_d}</td>"
+                f"<td class='up'>¥{entry_p:,.0f}<div class='sub'>指値</div></td>"
+                f"<td class='dn'>{stp_s}"
+                f"{'<div class=sub>リスク¥' + f'{risk:,.0f}</div>' if risk else ''}</td>"
+                f"<td class='up'>{tgt_s}<div class='sub'>{rr_s}</div></td>"
+                f"<td>¥{exit_p:,.0f}</td>"
+                f"<td class='{tc}'>{pnl:+,.0f}円</td>"
+                f"<td>{hold}日</td>"
+                f"<td class='neu' style='font-size:.78em'>¥{atr:,.0f}</td>"
+                f"<td>{reason}</td>"
                 f"</tr>"
             )
-        if not detail_rows:
-            detail_rows = "<tr><td colspan='3' style='color:#4b5563'>発生なし</td></tr>"
+        if not trade_rows:
+            trade_rows = "<tr><td colspan='11' style='color:#4b5563;text-align:center'>取引なし</td></tr>"
 
         stock_blocks += f"""
 <details class="stock-row">
@@ -470,13 +565,20 @@ def check_history(from_date: date, to_date: date, verbose: bool,
     <span class="s-sym">{r['symbol']}</span>
     <span class="s-name">{r['name']}</span>
     <span class="badge" style="color:{color};border-color:{color}">{r['strat']}</span>
-    <span class="s-count {cnt_cls}">{r['count']}回</span>
-    <span class="s-hint">▶ クリックで全発生日</span>
+    {summary_info}
+    <span style="margin-left:auto;color:#8b949e;font-size:.82em">
+      シグナル <span class="{sig_cnt_cls}">{r['count']}回</span>
+    </span>
   </summary>
   <div class="s-detail">
-    <table class="s-dtable">
-      <thead><tr><th>#</th><th>発生日</th><th>曜日</th></tr></thead>
-      <tbody>{detail_rows}</tbody>
+    <table class="s-dtable" style="width:100%">
+      <thead><tr>
+        <th>シグナル日<br><span style="font-weight:normal;font-size:.85em">(終値)</span></th>
+        <th>約定日</th><th>決済日</th>
+        <th>指値</th><th>逆指値</th><th>利確目標</th>
+        <th>決済価格</th><th>損益</th><th>保有</th><th>ATR</th><th>理由</th>
+      </tr></thead>
+      <tbody>{trade_rows}</tbody>
     </table>
   </div>
 </details>"""
@@ -527,6 +629,7 @@ def check_history(from_date: date, to_date: date, verbose: bool,
               border-bottom:1px solid #21262d;font-size:.82em}}
 .s-dtable td{{padding:4px 14px;border-bottom:1px solid #161b22;font-size:.88em}}
 .s-dtable tr:last-child td{{border-bottom:none}}
+.sub{{color:#8b949e;font-size:.78em;margin-top:2px}}
 </style>
 </head>
 <body>
@@ -541,7 +644,7 @@ def check_history(from_date: date, to_date: date, verbose: bool,
 <h2>▶ 発生カレンダー（色が濃いほど多い / 数字 = 銘柄数）</h2>
 {cal_html}
 
-<h2>▶ 銘柄別 発生回数（多い順 / クリックで発生日を展開）</h2>
+<h2>▶ 銘柄別 バックテスト結果（利益順 / クリックでトレード詳細を展開）</h2>
 {stock_blocks}
 </body>
 </html>"""
