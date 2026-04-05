@@ -136,9 +136,9 @@ def _collect_signals(target_date: date | None) -> tuple[list, list]:
             continue
         sig = _sp._has_signal_today(df)
         if sig:
-            entry_p  = sig.get("limit_p",  0) or sig.get("limit_price", 0)
-            stop_p   = sig.get("stop_p",   0) or sig.get("stop_loss",   0)
-            target_p = sig.get("target_p", 0) or sig.get("profit_target", 0)
+            entry_p  = sig.get("limit_price", 0)
+            stop_p   = sig.get("stop",   0)
+            target_p = sig.get("target", 0)
             atr      = sig.get("atr",  0)
             rsi5     = sig.get("rsi5", 0)
             close    = sig.get("close", float(df.iloc[-1]["close"]))
