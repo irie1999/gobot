@@ -1289,6 +1289,12 @@ def main() -> None:
             _enrich_sig_scores(rsi2_sig, _load_watch_scores(rsi2_watch_file))
             rsi2_mod.print_signals_rsi2(rsi2_sig, rsi2_mode, rsi2_params)
 
+        # target_date 指定時はシグナルdictの "today" フィールドを上書き
+        if target_date:
+            for sig in [macd_sig, a7_sig, rsi2_sig]:
+                if sig is not None:
+                    sig["today"] = target_date
+
         _ver = "v1" if args.v1 else "v2"
         html_path = generate_html(None, None, None,
                                    macd_sig, a7_sig, rsi2_sig,
