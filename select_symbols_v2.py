@@ -442,10 +442,12 @@ def _enrich_sig_scores(sig: dict | None, scores: dict[str, int]) -> None:
             item["bt_score"] = scores[sym]
 
 
-def _fetch_signal_data(symbols: list[tuple], fetch_fn) -> dict:
+def _fetch_signal_data(symbols: list[tuple], fetch_fn,
+                       target_date: str | None = None) -> dict:
     """シグナルスキャン専用: watchlistのデータを取得（バックテストなし）"""
     stock_data: dict = {}
-    print(f"  データ取得中... ({len(symbols)}銘柄)")
+    print(f"  データ取得中... ({len(symbols)}銘柄)" +
+          (f"  ※判定日: {target_date}" if target_date else ""))
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         futs = {ex.submit(fetch_fn, sym, backtest_days=365): (sym, name)
                 for sym, name in symbols}
@@ -454,7 +456,10 @@ def _fetch_signal_data(symbols: list[tuple], fetch_fn) -> dict:
             try:
                 df = fut.result()
                 if df is not None and _is_valid_df(df):
-                    stock_data[sym] = (name, df)
+                    if target_date:
+                        df = df[df.index <= pd.Timestamp(target_date)]
+                    if df is not None and not df.empty:
+                        stock_data[sym] = (name, df)
             except Exception:
                 pass
     return stock_data
@@ -1194,6 +1199,8 @@ def main() -> None:
                         help="V1 モジュール使用（日経225対象・旧パラメータ）")
     parser.add_argument("--no-browser", action="store_true", dest="no_browser",
                         help="HTMLをブラウザで自動表示しない（scan_all.py から呼び出す時など）")
+    parser.add_argument("--date", type=str, default=None, dest="date",
+                        help="シグナル判定日を指定（例: 2026-04-04）省略時は今日")
     args = parser.parse_args()
 
     # ── V1/V2 モジュール切替 ──────────────────────────────────
@@ -1222,9 +1229,12 @@ def main() -> None:
     # デフォルト: 既存の監視リストからシグナルのみ出力
     # ══════════════════════════════════════════════════════════
     if not args.backtest:
+        target_date = args.date  # None = 今日
+        date_label  = target_date if target_date else today
+
         print()
         print("=" * 60)
-        print(f"  シグナルスキャン [{ver_label}]  ({today})")
+        print(f"  シグナルスキャン [{ver_label}]  ({date_label})")
         print(f"  対象: 既存の監視リスト")
         print("=" * 60)
 
@@ -1245,7 +1255,7 @@ def main() -> None:
 
         if macd_syms:
             print(f"\n  [MACD] {len(macd_syms)}銘柄")
-            macd_data = _fetch_signal_data(macd_syms, macd_mod.fetch_df)
+            macd_data = _fetch_signal_data(macd_syms, macd_mod.fetch_df, target_date)
             macd_sel  = [{"symbol": s, "name": n} for s, n in macd_syms
                          if s in macd_data]
             macd_sig  = scan_macd_signals(macd_sel, macd_data)
@@ -1254,7 +1264,7 @@ def main() -> None:
 
         if a7_syms:
             print(f"\n  [A7] {len(a7_syms)}銘柄")
-            a7_data = _fetch_signal_data(a7_syms, a7_mod.fetch_df)
+            a7_data = _fetch_signal_data(a7_syms, a7_mod.fetch_df, target_date)
             a7_sel  = [{"symbol": s, "name": n} for s, n in a7_syms
                        if s in a7_data]
             a7_sig  = scan_a7_signals(a7_sel, a7_data)
@@ -1272,7 +1282,7 @@ def main() -> None:
                 rsi2_params = rsi2_mod.HV
                 rsi2_mode   = "高ボラモード"
             print(f"  市場モード: {rsi2_mode}")
-            rsi2_data = _fetch_signal_data(rsi2_syms, rsi2_mod.fetch)
+            rsi2_data = _fetch_signal_data(rsi2_syms, rsi2_mod.fetch, target_date)
             rsi2_sel  = [{"symbol": s, "name": n} for s, n in rsi2_syms
                          if s in rsi2_data]
             rsi2_sig  = scan_rsi2_signals(rsi2_sel, rsi2_data, rsi2_params)

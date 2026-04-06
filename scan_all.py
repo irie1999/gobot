@@ -5,12 +5,13 @@ MACD / A7（ストキャスティクス+ATR）/ RSI(2) のシグナルを一括�
 1つのHTMLレポートにまとめて出力する。
 
 使い方:
-  python scan_all.py              # 全戦略・全銘柄V2（監視リスト対象）
-  python scan_all.py --225        # 全戦略・日経225 V1（監視リスト対象）
-  python scan_all.py --all        # V1（日経225）+ V2（全銘柄）両方実行
-  python scan_all.py --macd       # MACDのみ
-  python scan_all.py --a7         # A7のみ
-  python scan_all.py --rsi2       # RSI2のみ
+  python scan_all.py                        # 全戦略・全銘柄V2（今日）
+  python scan_all.py --date 2026-04-04      # 指定日のシグナル判定
+  python scan_all.py --225                  # 全戦略・日経225 V1（監視リスト対象）
+  python scan_all.py --all                  # V1（日経225）+ V2（全銘柄）両方実行
+  python scan_all.py --macd                 # MACDのみ
+  python scan_all.py --a7                   # A7のみ
+  python scan_all.py --rsi2                 # RSI2のみ
 
 株価キャッシュ:
   .rsi2_cache/ に銘柄ごとの株価を保存。平日は毎日再ダウンロード。
@@ -77,18 +78,22 @@ def main() -> None:
     parser.add_argument("--macd", action="store_true", help="MACDのみ実行")
     parser.add_argument("--a7",   action="store_true", help="A7のみ実行")
     parser.add_argument("--rsi2", action="store_true", help="RSI2のみ実行")
+    parser.add_argument("--date", type=str, default=None,
+                        help="シグナル判定日を指定（例: 2026-04-04）省略時は今日")
     args = parser.parse_args()
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     py    = sys.executable
 
-    _warn_if_before_close()
+    if not args.date:
+        _warn_if_before_close()
 
     # 戦略フラグ（共通）
     strat_flags = []
     if args.macd:  strat_flags.append("--macd")
     if args.a7:    strat_flags.append("--a7")
     if args.rsi2:  strat_flags.append("--rsi2")
+    if args.date:  strat_flags += ["--date", args.date]
 
     print()
     print("╔" + "═" * 70 + "╗")
@@ -98,7 +103,8 @@ def main() -> None:
         label = "V1（日経225）"
     else:
         label = "V2（全銘柄）"
-    print(f"║  全戦略シグナル一括スキャン  {today}  {' ' * max(0, 32 - len(today))}║")
+    date_label = args.date if args.date else today
+    print(f"║  全戦略シグナル一括スキャン  {date_label}  {' ' * max(0, 32 - len(date_label))}║")
     print(f"║  対象: {label:<62}║")
     print("╚" + "═" * 70 + "╝")
     print()
