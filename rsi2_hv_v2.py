@@ -803,19 +803,26 @@ def scan_signals_rsi2(
             filters = []
             if use_consec: filters.append(f"連続RSI({prev_rsi2:.1f}→{last_rsi2:.1f})")
             if use_ibs:    filters.append(f"IBS={ibs:.2f}")
+            limit_price  = round(last_close - last_atr * 0.5, 0)
+            stop_price   = round(limit_price - last_atr * 2.0, 0)
+            target_price = round(limit_price + last_atr * 4.0, 0)
             buy.append({
-                "symbol":     sym,
-                "name":       name,
-                "open":       float(df.iloc[-1]["open"]),
-                "close":      last_close,
-                "rsi2":       last_rsi2,
-                "rsi2_prev":  prev_rsi2,
-                "ma200":      last_ma200,
-                "atr_pct":    atr_pct,
-                "ibs":        ibs,
-                "above_ma200": above_ma200,
-                "signal_dt":  signal_dt,
-                "filters":    " / ".join(filters) if filters else "基本のみ",
+                "symbol":       sym,
+                "name":         name,
+                "open":         float(df.iloc[-1]["open"]),
+                "close":        last_close,
+                "rsi2":         last_rsi2,
+                "rsi2_prev":    prev_rsi2,
+                "ma200":        last_ma200,
+                "atr":          last_atr,
+                "atr_pct":      atr_pct,
+                "ibs":          ibs,
+                "above_ma200":  above_ma200,
+                "signal_dt":    signal_dt,
+                "filters":      " / ".join(filters) if filters else "基本のみ",
+                "limit_price":  limit_price,
+                "stop_price":   stop_price,
+                "target_price": target_price,
             })
 
         # ── 売り/継続保有 ─────────────────────────────────────

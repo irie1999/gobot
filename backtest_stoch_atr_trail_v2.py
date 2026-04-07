@@ -804,17 +804,24 @@ def scan_signals_a7(stock_data_map: dict, results_90d: list[dict]) -> dict:
 
         # ── 買いシグナル: ゴールデンクロス + %K<70 + 75MA上 ──
         if bool(last["entry_sig"]):
+            limit_price  = last_close
+            stop_price   = round(last_close - last_atr * ATR_STOP_MULT, 0)
+            target_price = round(last_close + last_atr * 3.0, 0)
             buy.append({
-                "symbol":     sym,
-                "name":       name,
-                "open":       float(last["open"]),
-                "close":      last_close,
-                "stoch_k":    last_k,
-                "stoch_d":    last_d,
-                "ma75":       last_ma75,
-                "atr_pct":    atr_pct,
-                "trend_up":   trend_up,
-                "signal_dt":  signal_dt,
+                "symbol":       sym,
+                "name":         name,
+                "open":         float(last["open"]),
+                "close":        last_close,
+                "stoch_k":      last_k,
+                "stoch_d":      last_d,
+                "ma75":         last_ma75,
+                "atr":          last_atr,
+                "atr_pct":      atr_pct,
+                "trend_up":     trend_up,
+                "signal_dt":    signal_dt,
+                "limit_price":  limit_price,
+                "stop_price":   stop_price,
+                "target_price": target_price,
             })
 
         # ── 売り/継続保有 ──────────────────────────────────────

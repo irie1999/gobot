@@ -579,9 +579,30 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
         color = "#f59e0b" if sc >= 24 else ("#4ade80" if sc >= 16 else "#94a3b8")
         return f'<td class="num" style="color:{color};font-weight:700">{sc}</td>'
 
+    def _order_cells(s: dict) -> str:
+        """指値/逆指値/目標/RR セルを返す"""
+        lp  = s.get("limit_price")
+        sp  = s.get("stop_price")
+        tp  = s.get("target_price")
+        if lp and sp and tp and lp > sp:
+            rr = (tp - lp) / (lp - sp)
+            rr_color = "#4ade80" if rr >= 2.0 else ("#fbbf24" if rr >= 1.0 else "#f87171")
+            rr_s = f'<span style="color:{rr_color};font-weight:700">{rr:.1f}R</span>'
+        else:
+            rr_s = "—"
+        lp_s = f'¥{lp:,.0f}' if lp else "—"
+        sp_s = f'¥{sp:,.0f}' if sp else "—"
+        tp_s = f'¥{tp:,.0f}' if tp else "—"
+        return (
+            f'<td class="num" style="color:#4ade80">{lp_s}</td>'
+            f'<td class="num" style="color:#f87171">{sp_s}</td>'
+            f'<td class="num" style="color:#60a5fa">{tp_s}</td>'
+            f'<td class="num">{rr_s}</td>'
+        )
+
     def _buy_rows(items):
         if not items:
-            return f'<tr><td colspan="7" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
+            return f'<tr><td colspan="11" style="color:#64748b;text-align:center">買いシグナルなし</td></tr>'
         rows = ""
         for s in items:
             open_s  = f'{s["open"]:,.0f}' if "open" in s else "—"
@@ -590,9 +611,10 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
                      f'<td class="name">{s.get("name","")}<br><small>{s.get("symbol","")}</small></td>'
                      f'<td class="num">{open_s}</td>'
                      f'<td class="num">{close_s}</td>'
-                     + _extra_cols(s) +
-                     _score_col(s) +
-                     f'<td style="color:#4ade80;font-weight:700">買い</td></tr>\n')
+                     + _extra_cols(s)
+                     + _order_cells(s)
+                     + _score_col(s)
+                     + f'<td style="color:#4ade80;font-weight:700">買い</td></tr>\n')
         return rows
 
     def _sell_rows(items, label, cls):
@@ -636,7 +658,12 @@ def _signal_section_html(sig: dict | None, strategy: str, color: str) -> str:
         f'<h2 style="color:{color};border-left:4px solid {color};padding-left:10px;margin:30px 0 10px">'
         f'  {strategy} 本日シグナル（選定銘柄対象） — {today}</h2>'
         f'<table><thead><tr>'
-        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}<th title="バックテスト選定スコア（最大28点）">スコア</th><th>区分</th>'
+        f'<th>銘柄</th><th>始値</th><th>終値</th>{extra_h}'
+        f'<th style="color:#4ade80">指値（買い）</th>'
+        f'<th style="color:#f87171">逆指値（損切）</th>'
+        f'<th style="color:#60a5fa">目標</th>'
+        f'<th>RR</th>'
+        f'<th title="バックテスト選定スコア（最大28点）">スコア</th><th>区分</th>'
         f'</tr></thead><tbody>{buy_body}</tbody></table>'
         + sell_section
     )

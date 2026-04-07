@@ -624,6 +624,10 @@ def scan_today_signals(stock_data_map: dict,
 
         # ── 買いシグナル: 本日entry_sig=True かつフィルター通過 ──
         if bool(last["entry_sig"]) and _check_entry_filters(last):
+            last_atr    = float(last["atr"])
+            limit_price = last_close
+            stop_price  = round(last_close - last_atr * ATR_STOP_MULT, 0)
+            target_price= round(last_close + last_atr * 3.0, 0)
             buy.append({
                 "symbol":       sym,
                 "name":         name,
@@ -635,11 +639,15 @@ def scan_today_signals(stock_data_map: dict,
                 "rsi":          last_rsi,
                 "vol_ratio":    last_vol_r,
                 "atr_pct":      last_atr_p,
+                "atr":          last_atr,
                 "ma25_dev":     last_ma_dev,
                 "above_ma200":  above_ma200,
                 "focus":        sym in FOCUS_SYMBOLS,
                 "prefer_sector": sector in PREFER_SECTORS,
                 "signal_date":  str(df_ind.index[-1].date()),
+                "limit_price":  limit_price,
+                "stop_price":   stop_price,
+                "target_price": target_price,
             })
 
         # ── 売り/継続保有 ──
