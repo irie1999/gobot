@@ -93,7 +93,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | Non
                 price_range = float(df["close"].max() - df["close"].min())
                 valid = price_range > 0.01 * float(df["close"].mean())
                 if len(df) >= 210 and valid:
-                    return df
+                    # 株価異常値を除去
+                    pct_chg = df["close"].pct_change().abs()
+                    df = df[pct_chg <= 0.5].copy()
+                    if len(df) >= 210:
+                        return df
         except Exception:
             pass
 
@@ -125,6 +129,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | Non
             except Exception:
                 pass
         raw = raw.dropna(subset=["close"])
+        if len(raw) < 210:
+            return None
+        # 株価異常値を除去（前日比±50%超はデータエラーとして除外）
+        pct_chg = raw["close"].pct_change().abs()
+        raw = raw[pct_chg <= 0.5].copy()
         if len(raw) < 210:
             return None
         df_out = pd.DataFrame({
