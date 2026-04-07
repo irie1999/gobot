@@ -54,6 +54,9 @@ INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
 BACKTEST_DAYS = 365
 WORKERS       = 4
+MAX_QTY       = 9999   # 最大株数（低価格株の過剰ポジション防止）
+MIN_PRICE     = 100.0  # 最低株価（データ異常排除）
+MAX_ATR_RATIO = 0.20   # ATR/終値の上限（20%超は異常ボラ・データ異常として除外）
 
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
@@ -319,7 +322,7 @@ def run_limit_backtest(
                 entry_p    = limit_price
                 entry_dt   = dt
                 hold_start = i
-                qty        = max(1, int(POSITION_SIZE / entry_p))
+                qty        = min(MAX_QTY, max(1, int(POSITION_SIZE / entry_p)))
                 state      = "in_pos"
 
                 # 約定と同日に決済が発生するか確認
@@ -387,15 +390,22 @@ def run_limit_backtest(
             if pd.isna(atr_prev) or atr_prev <= 0:
                 continue
 
-            signals += 1
             close_prev = float(prev["close"])
+
+            # データ異常・低価格株を除外
+            if close_prev < MIN_PRICE:
+                continue
+            if atr_prev / close_prev > MAX_ATR_RATIO:
+                continue
 
             lp = close_prev - atr_prev * entry_atr_mult
             sp = lp - atr_prev * stop_atr_mult
             tp = lp + atr_prev * target_atr_mult
 
-            if lp <= 0 or sp <= 0:
+            if lp <= 0 or sp <= 0 or tp <= lp:
                 continue
+
+            signals += 1
 
             limit_price  = lp
             stop_price   = sp
