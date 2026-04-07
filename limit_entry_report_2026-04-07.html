@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>指値エントリー バックテスト — 2026-04-07</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 20px;
+  }
+  h1 { color: #60a5fa; margin-bottom: 4px; font-size: 1.6rem; }
+  .subtitle { color: #94a3b8; margin-bottom: 24px; font-size: 0.9rem; }
+  h2 { color: #60a5fa; margin: 28px 0 12px; font-size: 1.2rem; border-left: 3px solid #60a5fa; padding-left: 10px; }
+  h3 { color: #cbd5e1; margin: 0 0 10px; font-size: 1rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .card {
+    background: #1e293b;
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 24px;
+    overflow-x: auto;
+  }
+  .trade-section {
+    background: #1e293b;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th {
+    background: #0f172a;
+    color: #94a3b8;
+    padding: 8px 12px;
+    text-align: right;
+    white-space: nowrap;
+    border-bottom: 1px solid #334155;
+  }
+  th:first-child, th:nth-child(2) { text-align: left; }
+  td {
+    padding: 7px 12px;
+    border-bottom: 1px solid #1e293b;
+    text-align: right;
+    white-space: nowrap;
+  }
+  td:first-child, td:nth-child(2) { text-align: left; }
+  tr:hover td { background: #263045; }
+  .sym { color: #60a5fa; font-weight: 600; }
+  .profit { color: #4ade80; }
+  .loss   { color: #f87171; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+  .tag-macd  { background: #1e40af; color: #93c5fd; }
+  .tag-a7    { background: #5b21b6; color: #c4b5fd; }
+  .tag-rsi2  { background: #065f46; color: #6ee7b7; }
+  small { color: #64748b; font-size: 0.8rem; }
+  .params-note { color: #64748b; font-size: 0.8rem; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<h1>指値エントリー バックテスト</h1>
+<p class="subtitle">
+  対象期間: 直近 30日 &nbsp;|&nbsp;
+  指値有効: 3日 &nbsp;|&nbsp;
+  最大保有: 15日 &nbsp;|&nbsp;
+  生成日時: 2026-04-07
+</p>
+
+<h2>戦略別サマリー</h2>
+<div class="card">
+  <table>
+    <thead><tr>
+      <th>戦略</th><th>シグナル数</th><th>約定数</th><th>取引数</th>
+      <th>勝</th><th>負</th><th>勝率</th><th>PF</th><th>合計損益</th><th>フィル率</th>
+    </tr></thead>
+    <tbody>
+        <tr>
+          <td class="sym">MACD</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>0.00</td>
+          <td class="profit">+0円</td>
+          <td>0.0%</td>
+        </tr>
+        <tr>
+          <td class="sym">A7</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>0.00</td>
+          <td class="profit">+0円</td>
+          <td>0.0%</td>
+        </tr>
+        <tr>
+          <td class="sym">RSI2</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0</td>
+          <td>0.0%</td>
+          <td>0.00</td>
+          <td class="profit">+0円</td>
+          <td>0.0%</td>
+        </tr></tbody>
+  </table>
+</div>
+
+<h2>銘柄ランキング（合計損益順）</h2>
+<div class="card">
+  <table>
+    <thead><tr>
+      <th>順位</th><th>銘柄</th><th>戦略</th><th>シグナル</th>
+      <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th>
+      <th>平均保有日数</th><th>フィル率(%)</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<h2>個別トレード明細</h2>
+
+
+</body>
+</html>
