@@ -54,9 +54,10 @@ INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
 BACKTEST_DAYS = 365
 WORKERS       = 4
-MAX_QTY       = 9999   # 最大株数（低価格株の過剰ポジション防止）
-MIN_PRICE     = 100.0  # 最低株価（データ異常排除）
-MAX_ATR_RATIO = 0.20   # ATR/終値の上限（20%超は異常ボラ・データ異常として除外）
+MAX_QTY       = 9999        # 最大株数（低価格株の過剰ポジション防止）
+MIN_PRICE     = 100.0       # 最低株価（データ異常排除）
+MAX_PRICE     = 100_000.0   # 最高株価（日本株最大~7万円、100万超はデータ異常）
+MAX_ATR_RATIO = 0.20        # ATR/終値の上限（20%超は異常ボラ・データ異常として除外）
 
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
@@ -406,8 +407,8 @@ def run_limit_backtest(
 
             close_prev = float(prev["close"])
 
-            # データ異常・低価格株を除外
-            if close_prev < MIN_PRICE:
+            # データ異常・低価格株・高価格異常を除外
+            if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
                 continue
             if atr_prev / close_prev > MAX_ATR_RATIO:
                 continue
