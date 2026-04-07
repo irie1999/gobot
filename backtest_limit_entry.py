@@ -350,13 +350,14 @@ def run_limit_backtest(
                     exit_reason = None
 
                 if exit_p is not None:
-                    pnl = (exit_p - entry_p) * qty
-                    trades.append(dict(
-                        entry_dt=entry_dt, exit_dt=dt,
-                        entry_p=entry_p, exit_p=exit_p, qty=qty,
-                        pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                        hold_days=0, reason=exit_reason,
-                    ))
+                    if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
+                        pnl = (exit_p - entry_p) * qty
+                        trades.append(dict(
+                            entry_dt=entry_dt, exit_dt=dt,
+                            entry_p=entry_p, exit_p=exit_p, qty=qty,
+                            pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                            hold_days=0, reason=exit_reason,
+                        ))
                     state = "idle"
                 continue
 
@@ -381,6 +382,10 @@ def run_limit_backtest(
                 exit_reason = "タイムカット"
 
             if exit_p is not None:
+                # 異常価格ガード: exit_p が entry_p の 0.1〜10倍の範囲外はスキップ
+                if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):
+                    state = "idle"
+                    continue
                 pnl = (exit_p - entry_p) * qty
                 trades.append(dict(
                     entry_dt=entry_dt, exit_dt=dt,
