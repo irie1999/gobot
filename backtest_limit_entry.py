@@ -52,6 +52,7 @@ ENTRY_EXPIRE  = 3      # 指値有効日数
 MAX_HOLD      = 15     # 最大保有日数
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
+FIXED_QTY     = 100         # 固定株数（常に100株）
 BACKTEST_DAYS = 365
 WORKERS       = 4
 MAX_QTY       = 9999        # 最大株数（低価格株の過剰ポジション防止）
@@ -342,7 +343,7 @@ def run_limit_backtest(
                 entry_dt      = dt
                 hold_start    = i
                 days_to_fill  = i - signal_idx   # シグナルから約定までの営業日数
-                qty           = min(MAX_QTY, max(1, int(POSITION_SIZE / entry_p)))
+                qty           = FIXED_QTY
                 state         = "in_pos"
 
                 # 約定と同日に決済が発生するか確認
