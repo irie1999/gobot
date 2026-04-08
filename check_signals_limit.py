@@ -70,9 +70,12 @@ STRATEGY_PARAMS = {
 }
 
 
-# ── 本日シグナル確認 ──────────────────────────────────────────────
-def check_today_signal(symbol: str, strategy: str) -> dict | None:
-    """最新データで本日（最終足）のシグナルを確認。"""
+# ── シグナル確認（任意日対応）────────────────────────────────────
+def check_signal_on_date(symbol: str, strategy: str, target_date: "date | None" = None) -> dict | None:
+    """
+    target_date の前営業日にシグナルが出ているか確認。
+    target_date=None のときは最新日（本日）を対象とする。
+    """
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, 365)
     if df is None or len(df) < 5:
@@ -82,29 +85,44 @@ def check_today_signal(symbol: str, strategy: str) -> dict | None:
     except Exception:
         return None
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    if target_date is None:
+        # 最終足の前日がシグナル対象
+        prev_idx  = -2
+        next_idx  = -1
+    else:
+        # target_date 以前で最も近い営業日を "next"（翌日足）とし
+        # その一つ前を "prev"（シグナル足）とする
+        ts = pd.Timestamp(target_date)
+        candidates = df.index[df.index <= ts]
+        if len(candidates) < 2:
+            return None
+        next_idx  = df.index.get_loc(candidates[-1])   # target_date 当日or直前
+        prev_idx  = next_idx - 1
+        if prev_idx < 0:
+            return None
+
+    prev      = df.iloc[prev_idx]
+    next_row  = df.iloc[next_idx]
     entry_sig = bool(prev.get("entry_sig", False))
-    close_p   = float(last.get("close", 0))
     atr_v     = float(prev.get("atr", 0))
 
     if not entry_sig or atr_v <= 0:
         return None
 
-    close_prev = float(prev["close"])
-    lp = close_prev - atr_v * STRATEGY_PARAMS[strategy][1]
-    sp = lp - atr_v * STRATEGY_PARAMS[strategy][2]
-    tp = lp + atr_v * STRATEGY_PARAMS[strategy][3]
+    close_prev  = float(prev["close"])
+    current_p   = float(next_row["close"])
+    lp = close_prev - atr_v * em
+    sp = lp - atr_v * sm
+    tp = lp + atr_v * tm
 
-    # シグナル発生日・シグナル時株価（prevの日付と終値）
-    sig_dt    = df.index[-2]
-    sig_date  = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
+    sig_dt   = df.index[prev_idx]
+    sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
         limit_price=round(lp, 0),
         stop_price=round(sp, 0),
         target_price=round(tp, 0),
-        current_price=close_p,
+        current_price=current_p,
         signal_date=sig_date,
         signal_price=round(close_prev, 0),
     )
@@ -123,15 +141,13 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
         if r and r["trades"] >= 1:
             period_results[days] = r
 
-    # 本日シグナル
-    today_sig = check_today_signal(symbol, strategy)
-
+    # シグナル確認（target_dateはbacktest_one呼び出し元から渡す）
     return dict(
         symbol=symbol,
         name=name,
         strategy=strategy,
         period_results=period_results,
-        today_sig=today_sig,
+        today_sig=None,   # main()で別途セット
     )
 
 
@@ -142,7 +158,7 @@ def _pf_str(pf: float) -> str:
     return f"{pf:.2f}"
 
 
-def build_html(all_items: list[dict], show_days: int) -> str:
+def build_html(all_items: list[dict], show_days: int, date_label: str = "本日") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
     # ── サマリー（戦略別）
@@ -194,7 +210,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = '<tr><td colspan="8" style="text-align:center;color:#94a3b8">本日シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="8" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # ── 銘柄別バックテスト結果（全期間比較）
     period_headers = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -331,7 +347,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
 </head>
 <body>
 <h1>監視銘柄 指値エントリー バックテスト</h1>
-<p class="subtitle">生成日: {today_str} ／ 表示期間: {show_days}日 ／ 銘柄数: {len(all_items)}銘柄（MACD×10 / A7×8 / RSI2×6）</p>
+<p class="subtitle">生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日 ／ 銘柄数: {len(all_items)}銘柄（MACD×10 / A7×8 / RSI2×6）</p>
 
 <h2>戦略サマリー（{show_days}日）</h2>
 <table>
@@ -341,7 +357,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
   <tbody>{summary_rows}</tbody>
 </table>
 
-<h2>本日シグナル <span class="signal-badge">要確認</span></h2>
+<h2>シグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>シグナル日</th><th>シグナル時株価</th><th>現在値</th><th>指値（エントリー）</th><th>損切り</th><th>目標</th>
@@ -371,14 +387,28 @@ def build_html(all_items: list[dict], show_days: int) -> str:
 
 
 def main() -> None:
+    from datetime import date as _date
     parser = argparse.ArgumentParser(description="監視銘柄 指値バックテスト")
     parser.add_argument("--days",        type=int, default=365, help="表示期間(日) ※バックテストは常に全期間実行")
+    parser.add_argument("--date",        type=str, default=None,
+                        help="シグナル確認日 YYYY-MM-DD（省略時=本日）")
     parser.add_argument("--no-browser",  action="store_true")
-    parser.add_argument("--signal-only", action="store_true", help="本日シグナル銘柄のみターミナル表示")
+    parser.add_argument("--signal-only", action="store_true", help="シグナル銘柄のみターミナル表示")
     parser.add_argument("--workers",     type=int, default=_DEFAULT_WORKERS)
     args = parser.parse_args()
 
-    print(f"監視銘柄バックテスト開始 ({len(WATCHLIST)}銘柄)...", flush=True)
+    # シグナル確認日の解析
+    if args.date:
+        try:
+            sig_date = datetime.strptime(args.date, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"[ERROR] --date の形式が不正です: {args.date}  (例: 2026-03-28)", file=sys.stderr)
+            sys.exit(1)
+    else:
+        sig_date = None   # None = 本日（最新）
+
+    date_label = args.date if args.date else "本日"
+    print(f"監視銘柄バックテスト開始 ({len(WATCHLIST)}銘柄) シグナル確認日: {date_label}...", flush=True)
 
     all_items: list[dict] = []
 
@@ -404,16 +434,21 @@ def main() -> None:
     order = {(s, st): i for i, (s, _, st) in enumerate(WATCHLIST)}
     all_items.sort(key=lambda x: order.get((x["symbol"], x["strategy"]), 999))
 
+    # シグナル確認（任意日）
+    print(f"  シグナル確認中 ({date_label})...", flush=True)
+    for item in all_items:
+        item["today_sig"] = check_signal_on_date(item["symbol"], item["strategy"], sig_date)
+
     # ── ターミナル出力 ──
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
     print("=" * 80)
-    print(f"  監視銘柄 指値バックテスト結果  {today}  ({args.days}日表示)")
+    print(f"  監視銘柄 指値バックテスト結果  {today}  ({args.days}日表示)  シグナル確認日: {date_label}")
     print("=" * 80)
 
-    # 本日シグナル
+    # シグナル
     signals_today = [i for i in all_items if i["today_sig"]]
-    print(f"\n【本日シグナル】 {len(signals_today)}件")
+    print(f"\n【シグナル ({date_label})】 {len(signals_today)}件")
     if signals_today:
         print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'シグナル日':<12} {'信号株価':>8} {'現在値':>8} {'指値':>8} {'損切り':>8} {'目標':>8}")
         print("  " + "-" * 92)
@@ -455,8 +490,9 @@ def main() -> None:
                   f" {r['trades']:>4} {r['win_rate']:>5.1f}% {pf_s:>6} {r['total_pnl']:>+10,.0f}円  {fill_str}")
 
     # HTMLレポート出力
-    out_path = Path(f"watchlist_limit_{today}.html")
-    html = build_html(all_items, show_days)
+    date_suffix = args.date if args.date else today
+    out_path = Path(f"watchlist_limit_{date_suffix}.html")
+    html = build_html(all_items, show_days, date_label)
     out_path.write_text(html, encoding="utf-8")
     print(f"\nHTMLレポート: {out_path.resolve()}")
 
