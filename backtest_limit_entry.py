@@ -303,6 +303,7 @@ def run_limit_backtest(
     stop_price    = 0.0
     target_price  = 0.0
     expire_idx    = 0
+    signal_idx    = 0         # シグナル発生バー番号（約定日数計算用）
     hold_start    = 0
     entry_p       = 0.0
     entry_dt: pd.Timestamp | None = None
@@ -329,11 +330,12 @@ def run_limit_backtest(
 
             elif lo <= limit_price:
                 # 約定
-                entry_p    = limit_price
-                entry_dt   = dt
-                hold_start = i
-                qty        = min(MAX_QTY, max(1, int(POSITION_SIZE / entry_p)))
-                state      = "in_pos"
+                entry_p       = limit_price
+                entry_dt      = dt
+                hold_start    = i
+                days_to_fill  = i - signal_idx   # シグナルから約定までの営業日数
+                qty           = min(MAX_QTY, max(1, int(POSITION_SIZE / entry_p)))
+                state         = "in_pos"
 
                 # 約定と同日に決済が発生するか確認
                 if hi >= target_price and lo <= stop_price:
@@ -357,7 +359,7 @@ def run_limit_backtest(
                             entry_dt=entry_dt, exit_dt=dt,
                             entry_p=entry_p, exit_p=exit_p, qty=qty,
                             pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                            hold_days=0, reason=exit_reason,
+                            hold_days=0, days_to_fill=days_to_fill, reason=exit_reason,
                         ))
                     state = "idle"
                 continue
@@ -392,7 +394,7 @@ def run_limit_backtest(
                     entry_dt=entry_dt, exit_dt=dt,
                     entry_p=entry_p, exit_p=exit_p, qty=qty,
                     pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                    hold_days=hold_days, reason=exit_reason,
+                    hold_days=hold_days, days_to_fill=days_to_fill, reason=exit_reason,
                 ))
                 state = "idle"
             continue
@@ -422,11 +424,13 @@ def run_limit_backtest(
 
             signals += 1
 
-            limit_price  = lp
-            stop_price   = sp
-            target_price = tp
-            expire_idx   = i + ENTRY_EXPIRE
-            state        = "pending"
+            limit_price   = lp
+            stop_price    = sp
+            target_price  = tp
+            expire_idx    = i + ENTRY_EXPIRE
+            signal_idx    = i
+            days_to_fill  = 0
+            state         = "pending"
 
     # 未決済ポジション
     if state == "in_pos" and entry_dt is not None:
@@ -437,7 +441,7 @@ def run_limit_backtest(
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=cl_last, qty=qty,
             pnl=pnl, pct=(cl_last - entry_p) / entry_p * 100,
-            hold_days=hold_days, reason="保有中",
+            hold_days=hold_days, days_to_fill=days_to_fill, reason="保有中",
         ))
 
     # 異常トレードをデバッグ出力

@@ -228,10 +228,13 @@ def build_html(all_items: list[dict], show_days: int) -> str:
         if not logs:
             continue
         trade_rows = ""
+        fill_days_list = []
         for t in logs:
             pnl_cls = "profit" if t["pnl"] > 0 else "loss"
             e_str = t["entry_dt"].strftime("%Y-%m-%d") if hasattr(t["entry_dt"], "strftime") else str(t["entry_dt"])
             x_str = t["exit_dt"].strftime("%Y-%m-%d")  if hasattr(t["exit_dt"],  "strftime") else str(t["exit_dt"])
+            dtf = t.get("days_to_fill", "-")
+            fill_days_list.append(dtf) if isinstance(dtf, int) else None
             trade_rows += f"""
               <tr>
                 <td>{e_str}</td><td>{x_str}</td>
@@ -239,11 +242,23 @@ def build_html(all_items: list[dict], show_days: int) -> str:
                 <td>{t['qty']}</td>
                 <td class="{pnl_cls}">{t['pnl']:+,.0f}</td>
                 <td class="{pnl_cls}">{t['pct']:+.2f}%</td>
-                <td>{t['hold_days']}日</td><td>{t['reason']}</td>
+                <td>{t['hold_days']}日</td>
+                <td class="limit">{dtf}日</td>
+                <td>{t['reason']}</td>
               </tr>"""
         strat = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
         pnl_cls2 = "profit" if pnl_total >= 0 else "loss"
+        # 約定日数統計
+        if fill_days_list:
+            avg_fill = sum(fill_days_list) / len(fill_days_list)
+            min_fill = min(fill_days_list)
+            max_fill = max(fill_days_list)
+            dist = {d: fill_days_list.count(d) for d in sorted(set(fill_days_list))}
+            dist_str = " / ".join(f"{d}日:{n}回" for d, n in dist.items())
+            fill_stat = f'<p class="fill-stat">約定日数 — 平均:{avg_fill:.1f}日 最短:{min_fill}日 最長:{max_fill}日 &nbsp;|&nbsp; 分布: {dist_str}</p>'
+        else:
+            fill_stat = ""
         trade_sections += f"""
       <div class="trade-section">
         <h3>{item['symbol']} {item['name']}
@@ -251,12 +266,13 @@ def build_html(all_items: list[dict], show_days: int) -> str:
           <span class="{pnl_cls2}">{pnl_total:+,.0f}円</span>
           <small>（{show_days}日）</small>
         </h3>
+        {fill_stat}
         <table>
           <thead><tr>
             <th>エントリー</th><th>エグジット</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
-            <th>保有日数</th><th>理由</th>
+            <th>保有日数</th><th>約定日数</th><th>理由</th>
           </tr></thead>
           <tbody>{trade_rows}</tbody>
         </table>
@@ -289,6 +305,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
   .signal-badge {{ background:#f59e0b; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .card {{ background:#1e293b; border-radius:8px; padding:16px; margin-bottom:16px; }}
+  .fill-stat {{ color:#facc15; font-size:0.82rem; margin-bottom:6px; }}
 </style>
 </head>
 <body>
@@ -393,8 +410,8 @@ def main() -> None:
     # 銘柄別サマリー
     show_days = args.days
     print(f"\n【銘柄別バックテスト ({show_days}日)】")
-    print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'取引':>4} {'勝率':>6} {'PF':>6} {'損益':>10}")
-    print("  " + "-" * 70)
+    print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'取引':>4} {'勝率':>6} {'PF':>6} {'損益':>10}  {'約定日数(平均/最短/最長)':>20}")
+    print("  " + "-" * 90)
     for strat in ["MACD", "A7", "RSI2"]:
         items = [i for i in all_items if i["strategy"] == strat]
         for item in items:
@@ -403,8 +420,17 @@ def main() -> None:
                 print(f"  {item['symbol']:<12} {item['name']:<20} {strat:<6} {'データなし':>30}")
                 continue
             pf_s = _pf_str(r["pf"])
+            fill_days = [t.get("days_to_fill") for t in r["trade_log"] if isinstance(t.get("days_to_fill"), int)]
+            if fill_days:
+                avg_f = sum(fill_days) / len(fill_days)
+                fill_info = f"avg:{avg_f:.1f} min:{min(fill_days)} max:{max(fill_days)}"
+                dist = {d: fill_days.count(d) for d in sorted(set(fill_days))}
+                dist_str = " ".join(f"{d}日×{n}" for d, n in dist.items())
+                fill_str = f"{fill_info}  [{dist_str}]"
+            else:
+                fill_str = "-"
             print(f"  {item['symbol']:<12} {item['name']:<20} {strat:<6}"
-                  f" {r['trades']:>4} {r['win_rate']:>5.1f}% {pf_s:>6} {r['total_pnl']:>+10,.0f}円")
+                  f" {r['trades']:>4} {r['win_rate']:>5.1f}% {pf_s:>6} {r['total_pnl']:>+10,.0f}円  {fill_str}")
 
     # HTMLレポート出力
     out_path = Path(f"watchlist_limit_{today}.html")
