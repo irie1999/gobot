@@ -304,6 +304,9 @@ def run_limit_backtest(
     target_price  = 0.0
     expire_idx    = 0
     signal_idx    = 0         # シグナル発生バー番号（約定日数計算用）
+    signal_dt     = None      # シグナル発生日
+    signal_price  = 0.0       # シグナル発生時の終値
+    days_to_fill  = 0
     hold_start    = 0
     entry_p       = 0.0
     entry_dt: pd.Timestamp | None = None
@@ -359,7 +362,9 @@ def run_limit_backtest(
                             entry_dt=entry_dt, exit_dt=dt,
                             entry_p=entry_p, exit_p=exit_p, qty=qty,
                             pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                            hold_days=0, days_to_fill=days_to_fill, reason=exit_reason,
+                            hold_days=0, days_to_fill=days_to_fill,
+                            signal_dt=signal_dt, signal_price=signal_price,
+                            reason=exit_reason,
                         ))
                     state = "idle"
                 continue
@@ -394,7 +399,9 @@ def run_limit_backtest(
                     entry_dt=entry_dt, exit_dt=dt,
                     entry_p=entry_p, exit_p=exit_p, qty=qty,
                     pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                    hold_days=hold_days, days_to_fill=days_to_fill, reason=exit_reason,
+                    hold_days=hold_days, days_to_fill=days_to_fill,
+                    signal_dt=signal_dt, signal_price=signal_price,
+                    reason=exit_reason,
                 ))
                 state = "idle"
             continue
@@ -430,6 +437,8 @@ def run_limit_backtest(
             expire_idx    = i + ENTRY_EXPIRE
             signal_idx    = i
             days_to_fill  = 0
+            signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
+            signal_price  = close_prev         # その日の終値
             state         = "pending"
 
     # 未決済ポジション
@@ -441,7 +450,9 @@ def run_limit_backtest(
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=cl_last, qty=qty,
             pnl=pnl, pct=(cl_last - entry_p) / entry_p * 100,
-            hold_days=hold_days, days_to_fill=days_to_fill, reason="保有中",
+            hold_days=hold_days, days_to_fill=days_to_fill,
+            signal_dt=signal_dt, signal_price=signal_price,
+            reason="保有中",
         ))
 
     # 異常トレードをデバッグ出力

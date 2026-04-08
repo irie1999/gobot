@@ -239,12 +239,17 @@ def build_html(all_items: list[dict], show_days: int) -> str:
         fill_days_list = []
         for t in logs:
             pnl_cls = "profit" if t["pnl"] > 0 else "loss"
-            e_str = t["entry_dt"].strftime("%Y-%m-%d") if hasattr(t["entry_dt"], "strftime") else str(t["entry_dt"])
-            x_str = t["exit_dt"].strftime("%Y-%m-%d")  if hasattr(t["exit_dt"],  "strftime") else str(t["exit_dt"])
+            e_str  = t["entry_dt"].strftime("%Y-%m-%d") if hasattr(t["entry_dt"], "strftime") else str(t["entry_dt"])
+            x_str  = t["exit_dt"].strftime("%Y-%m-%d")  if hasattr(t["exit_dt"],  "strftime") else str(t["exit_dt"])
+            sig_dt = t.get("signal_dt")
+            s_str  = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt) if sig_dt else "-"
+            s_p    = t.get("signal_price", "-")
+            s_p_str = f"{s_p:,.0f}" if isinstance(s_p, float) else str(s_p)
             dtf = t.get("days_to_fill", "-")
             fill_days_list.append(dtf) if isinstance(dtf, int) else None
             trade_rows += f"""
               <tr>
+                <td>{s_str}</td><td class="limit">{s_p_str}</td>
                 <td>{e_str}</td><td>{x_str}</td>
                 <td>{t['entry_p']:,.0f}</td><td>{t['exit_p']:,.0f}</td>
                 <td>{t['qty']}</td>
@@ -277,6 +282,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
         {fill_stat}
         <table>
           <thead><tr>
+            <th>シグナル日</th><th>シグナル時株価</th>
             <th>エントリー</th><th>エグジット</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
