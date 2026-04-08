@@ -96,11 +96,17 @@ def check_today_signal(symbol: str, strategy: str) -> dict | None:
     sp = lp - atr_v * STRATEGY_PARAMS[strategy][2]
     tp = lp + atr_v * STRATEGY_PARAMS[strategy][3]
 
+    # シグナル発生日・シグナル時株価（prevの日付と終値）
+    sig_dt    = df.index[-2]
+    sig_date  = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
+
     return dict(
         limit_price=round(lp, 0),
         stop_price=round(sp, 0),
         target_price=round(tp, 0),
         current_price=close_p,
+        signal_date=sig_date,
+        signal_price=round(close_prev, 0),
     )
 
 
@@ -180,13 +186,15 @@ def build_html(all_items: list[dict], show_days: int) -> str:
         <tr>
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td>{sig['signal_date']}</td>
+          <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
           <td class="limit">{sig['limit_price']:,.0f}</td>
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = '<tr><td colspan="6" style="text-align:center;color:#94a3b8">本日シグナルなし</td></tr>'
+        signal_rows = '<tr><td colspan="8" style="text-align:center;color:#94a3b8">本日シグナルなし</td></tr>'
 
     # ── 銘柄別バックテスト結果（全期間比較）
     period_headers = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -323,7 +331,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
 <h2>本日シグナル <span class="signal-badge">要確認</span></h2>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>戦略</th><th>現在値</th><th>指値（エントリー）</th><th>損切り</th><th>目標</th>
+    <th>銘柄</th><th>戦略</th><th>シグナル日</th><th>シグナル時株価</th><th>現在値</th><th>指値（エントリー）</th><th>損切り</th><th>目標</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
@@ -394,11 +402,12 @@ def main() -> None:
     signals_today = [i for i in all_items if i["today_sig"]]
     print(f"\n【本日シグナル】 {len(signals_today)}件")
     if signals_today:
-        print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'現在値':>8} {'指値':>8} {'損切り':>8} {'目標':>8}")
-        print("  " + "-" * 72)
+        print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'シグナル日':<12} {'信号株価':>8} {'現在値':>8} {'指値':>8} {'損切り':>8} {'目標':>8}")
+        print("  " + "-" * 92)
         for item in signals_today:
             sig = item["today_sig"]
             print(f"  {item['symbol']:<12} {item['name']:<20} {item['strategy']:<6}"
+                  f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['limit_price']:>8,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}")
     else:
