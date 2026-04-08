@@ -247,10 +247,16 @@ def build_html(all_items: list[dict], show_days: int) -> str:
             s_p_str = f"{s_p:,.0f}" if isinstance(s_p, float) else str(s_p)
             dtf = t.get("days_to_fill", "-")
             fill_days_list.append(dtf) if isinstance(dtf, int) else None
+            ol = t.get("order_limit")
+            os_ = t.get("order_stop")
+            ol_str  = f"{ol:,.0f}"  if isinstance(ol,  float) else str(ol  or "-")
+            os_str  = f"{os_:,.0f}" if isinstance(os_, float) else str(os_ or "-")
             trade_rows += f"""
               <tr>
                 <td>{s_str}</td><td class="limit">{s_p_str}</td>
                 <td>{e_str}</td><td>{x_str}</td>
+                <td class="limit">{ol_str}</td>
+                <td class="loss">{os_str}</td>
                 <td>{t['entry_p']:,.0f}</td><td>{t['exit_p']:,.0f}</td>
                 <td>{t['qty']}</td>
                 <td class="{pnl_cls}">{t['pnl']:+,.0f}</td>
@@ -284,6 +290,7 @@ def build_html(all_items: list[dict], show_days: int) -> str:
           <thead><tr>
             <th>シグナル日</th><th>シグナル時株価</th>
             <th>エントリー</th><th>エグジット</th>
+            <th>指値</th><th>逆指値</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
             <th>保有日数</th><th>約定日数</th><th>理由</th>
