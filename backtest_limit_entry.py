@@ -275,9 +275,13 @@ def run_limit_backtest(
     target_atr_mult: float,
     backtest_days: int,
     strategy_name: str,
+    entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う）
 ) -> dict:
     """
-    指値エントリー + OCO決済 バックテスト。
+    指値 or 逆指値エントリー + OCO決済 バックテスト。
+
+    entry_type="limit": 安値 <= order_price で約定（押し目買い）
+    entry_type="stop" : 高値 >= order_price で約定（ブレイクアウト買い）
 
     Returns: per-symbol result dict
     """
@@ -325,13 +329,14 @@ def run_limit_backtest(
         if pd.isna(atr_prev) or atr_prev <= 0:
             continue
 
-        # ── pending: 指値注文の約定チェック ──────────────────────
+        # ── pending: 注文の約定チェック ──────────────────────────
         if state == "pending":
             if i > expire_idx:
                 # 有効期限切れ → キャンセル
                 state = "idle"
 
-            elif lo <= limit_price:
+            elif (entry_type == "stop" and hi >= limit_price) or \
+                 (entry_type != "stop" and lo <= limit_price):
                 # 約定
                 entry_p       = limit_price
                 entry_dt      = dt
@@ -424,7 +429,13 @@ def run_limit_backtest(
             if atr_prev / close_prev > MAX_ATR_RATIO:
                 continue
 
-            lp = close_prev - atr_prev * entry_atr_mult
+            if entry_type == "stop":
+                # 逆指値：終値 + ATR×mult を上抜けたら買う
+                lp = close_prev + atr_prev * entry_atr_mult
+            else:
+                # 指値：終値 - ATR×mult まで下がれば買う
+                lp = close_prev - atr_prev * entry_atr_mult
+
             sp = lp - atr_prev * stop_atr_mult
             tp = lp + atr_prev * target_atr_mult
 

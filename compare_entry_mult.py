@@ -1,7 +1,10 @@
 """
-compare_entry_mult.py  ―  entry_atr_mult 比較バックテスト
+compare_entry_mult.py  ―  エントリー方式 比較バックテスト
 =================================================================
-現行設定（RSI2=0.5）と全戦略 entry_atr_mult=0.0 を並べて比較する。
+3パターンを並べて比較する:
+  A) 指値（現行）: 終値以下で買う  entry_atr_mult=0.0
+  B) 逆指値      : 終値以上で買う  entry_atr_mult=0.0
+  C) 逆指値+ATR  : 終値+ATR×0.1以上で買う
 
 【使い方】
   python compare_entry_mult.py               # 365日
@@ -55,17 +58,23 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("5981.T", "東京製綱",              "RSI2"),
 ]
 
-# ── 2つの設定 ──────────────────────────────────────────────────────
-CONFIGS = {
-    "現行 (RSI2=0.5)": {
-        "MACD": (calc_macd, 0.0, 1.5, 3.0),
-        "A7":   (calc_a7,   0.0, 1.5, 3.0),
-        "RSI2": (calc_rsi2, 0.5, 2.0, 4.0),
+# ── 3パターンの設定 ────────────────────────────────────────────────
+# (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, entry_type)
+CONFIGS: dict[str, dict[str, tuple]] = {
+    "A: 指値 (終値以下で買う)": {
+        "MACD": (calc_macd, 0.0, 1.5, 3.0, "limit"),
+        "A7":   (calc_a7,   0.0, 1.5, 3.0, "limit"),
+        "RSI2": (calc_rsi2, 0.0, 2.0, 4.0, "limit"),
     },
-    "全て0.0 (RSI2=0.0)": {
-        "MACD": (calc_macd, 0.0, 1.5, 3.0),
-        "A7":   (calc_a7,   0.0, 1.5, 3.0),
-        "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),
+    "B: 逆指値 (終値以上で買う)": {
+        "MACD": (calc_macd, 0.0, 1.5, 3.0, "stop"),
+        "A7":   (calc_a7,   0.0, 1.5, 3.0, "stop"),
+        "RSI2": (calc_rsi2, 0.0, 2.0, 4.0, "stop"),
+    },
+    "C: 逆指値+ATR (終値+ATR×0.1以上)": {
+        "MACD": (calc_macd, 0.1, 1.5, 3.0, "stop"),
+        "A7":   (calc_a7,   0.1, 1.5, 3.0, "stop"),
+        "RSI2": (calc_rsi2, 0.1, 2.0, 4.0, "stop"),
     },
 }
 
@@ -75,11 +84,12 @@ def _pf_str(pf: float) -> str:
 
 
 def run_one(symbol: str, name: str, strategy: str, days: int, config: dict) -> dict | None:
-    calc_fn, em, sm, tm = config[strategy]
+    calc_fn, em, sm, tm, etype = config[strategy]
     df = fetch(symbol, days)
     if df is None:
         return None
-    return run_limit_backtest(symbol, name, df, calc_fn, em, sm, tm, days, strategy)
+    return run_limit_backtest(symbol, name, df, calc_fn, em, sm, tm, days, strategy,
+                              entry_type=etype)
 
 
 def build_html(
@@ -175,7 +185,9 @@ def build_html(
 <h1>entry_atr_mult 比較バックテスト</h1>
 <p class="subtitle">
   生成日: {today_str} ／ 期間: {show_days}日 ／ 銘柄: 24銘柄<br>
-  現行: MACD/A7=0.0, RSI2=0.5 &nbsp;|&nbsp; 比較: 全戦略=0.0
+  A: 指値（終値以下で買う）&nbsp;|&nbsp;
+  B: 逆指値（終値以上で買う）&nbsp;|&nbsp;
+  C: 逆指値+ATR×0.1（終値+ATR×0.1以上で買う）
 </p>
 
 <h2>戦略サマリー比較（{show_days}日）</h2>
