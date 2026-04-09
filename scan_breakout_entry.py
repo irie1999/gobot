@@ -45,7 +45,8 @@ PERIOD_WEIGHTS = {30: 4.0, 90: 3.0, 180: 2.0, 365: 1.0}
 def calc_donchian(df: pd.DataFrame) -> pd.DataFrame:
     """
     ドンチャン高値ブレイクアウト
-    シグナル: 終値 > 20日高値（前日時点）AND 終値 > 50日MA
+    シグナル: 終値 > 15日高値（前日時点）AND 終値 > 50日MA
+    ※ 旧20日→15日に変更（シグナル頻度向上）
     """
     c, h, l = df["close"], df["high"], df["low"]
 
@@ -54,21 +55,22 @@ def calc_donchian(df: pd.DataFrame) -> pd.DataFrame:
     tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     atr    = tr.ewm(span=14, adjust=False).mean()
 
-    # ドンチャン上限（前日時点の20日高値）
-    high20 = h.rolling(20).max().shift(1)
+    # ドンチャン上限（前日時点の15日高値）
+    high15 = h.rolling(15).max().shift(1)
 
     # トレンドフィルター
     ma50 = c.rolling(50).mean()
 
     df["atr"]       = atr
-    df["entry_sig"] = (c > high20) & (c > ma50)
+    df["entry_sig"] = (c > high15) & (c > ma50)
     return df
 
 
 def calc_vol_breakout(df: pd.DataFrame) -> pd.DataFrame:
     """
     出来高急増ブレイクアウト
-    シグナル: 終値 > 10日高値（前日時点）AND 出来高 > 20日平均×2.0
+    シグナル: 終値 > 5日高値（前日時点）AND 出来高 > 20日平均×1.5
+    ※ 旧10日高値・2.0x→5日高値・1.5x に変更（シグナル頻度向上）
     """
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
 
@@ -77,19 +79,20 @@ def calc_vol_breakout(df: pd.DataFrame) -> pd.DataFrame:
     tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     atr    = tr.ewm(span=14, adjust=False).mean()
 
-    # 10日高値ブレイク + 出来高2倍
-    high10  = h.rolling(10).max().shift(1)
+    # 5日高値ブレイク + 出来高1.5倍
+    high5   = h.rolling(5).max().shift(1)
     vol_ma  = v.rolling(20).mean()
 
     df["atr"]       = atr
-    df["entry_sig"] = (c > high10) & (v > vol_ma * 2.0)
+    df["entry_sig"] = (c > high5) & (v > vol_ma * 1.5)
     return df
 
 
 def calc_momentum(df: pd.DataFrame) -> pd.DataFrame:
     """
     モメンタムブレイクアウト
-    シグナル: ROC(10日) > 5% AND MA25 > MA75 AND 出来高 > 20日平均×1.2
+    シグナル: ROC(10日) > 3% AND MA25 > MA75 AND 出来高 > 20日平均×1.2
+    ※ 旧5%→3% に変更（シグナル頻度向上）
     """
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
 
@@ -105,7 +108,7 @@ def calc_momentum(df: pd.DataFrame) -> pd.DataFrame:
     vol_ma = v.rolling(20).mean()
 
     df["atr"]       = atr
-    df["entry_sig"] = (roc > 5.0) & (ma25 > ma75) & (v > vol_ma * 1.2)
+    df["entry_sig"] = (roc > 3.0) & (ma25 > ma75) & (v > vol_ma * 1.2)
     return df
 
 
