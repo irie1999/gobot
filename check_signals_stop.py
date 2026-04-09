@@ -93,7 +93,7 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     if target_date is None:
-        prev_idx, next_idx = -2, -1
+        prev_idx, next_idx = -1, -1   # 引け後運用: 当日終値でシグナル判定
     else:
         ts = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
