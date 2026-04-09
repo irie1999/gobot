@@ -122,7 +122,8 @@ def _backtest_one(symbol: str, name: str, strategy: str, pattern: str,
 def scan_all(symbols: list[tuple[str, str]],
              strategies: list[str],
              patterns: list[str],
-             workers: int) -> dict[str, dict[str, list[dict]]]:
+             workers: int,
+             max_price: float | None = None) -> dict[str, dict[str, list[dict]]]:
     """
     Returns: results[strategy][pattern] = list[dict]
     """
@@ -134,6 +135,9 @@ def scan_all(symbols: list[tuple[str, str]],
         symbol, name = sym_name
         df = fetch(symbol, max(PERIODS))
         if df is None:
+            return []
+        # 株価フィルター: 最新終値 > max_price の銘柄をスキップ
+        if max_price is not None and float(df["close"].iloc[-1]) > max_price:
             return []
         out = []
         for st in strategies:
@@ -378,6 +382,8 @@ def main() -> None:
                         help="実行パターン指定 (省略時=全て)")
     parser.add_argument("--top",        type=int,   default=30)
     parser.add_argument("--min-score",  type=float, default=20.0)
+    parser.add_argument("--max-price",  type=float, default=None,
+                        help="最大株価フィルター (例: 5000 → 100株で50万円以下)")
     parser.add_argument("--workers",    type=int,   default=_DEFAULT_WORKERS)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
@@ -390,8 +396,11 @@ def main() -> None:
 
     patterns = args.pattern if args.pattern else ["A", "B", "C"]
 
+    if args.max_price:
+        print(f"  株価フィルター: ≤ {args.max_price:,.0f}円（100株 ≤ {args.max_price*100:,.0f}円）", flush=True)
+
     symbols = _load_symbols()
-    results = scan_all(symbols, strategies, patterns, args.workers)
+    results = scan_all(symbols, strategies, patterns, args.workers, args.max_price)
 
     print_text_report(results, args.top, args.min_score, strategies, patterns)
 
