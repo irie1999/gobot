@@ -128,12 +128,10 @@ def check_signal_on_date(symbol: str, strategy: str,
     else:
         ts = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
-        if len(cands) < 2:
+        if len(cands) < 1:
             return None
-        next_idx = df.index.get_loc(cands[-1])
-        prev_idx = next_idx - 1
-        if prev_idx < 0:
-            return None
+        prev_idx = df.index.get_loc(cands[-1])  # 指定日そのものを判定
+        next_idx = prev_idx
 
     prev      = df.iloc[prev_idx]
     next_row  = df.iloc[next_idx]
