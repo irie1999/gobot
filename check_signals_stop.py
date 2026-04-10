@@ -80,6 +80,34 @@ STRATEGY_PARAMS = {
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
 
 
+def calc_recommend_score(period_results: dict) -> tuple[int, str]:
+    """
+    バックテスト成績からおすすめスコア(0-100)とランクを計算。
+      勝率     : 最大40点
+      PF       : 最大30点（PF=10でキャップ、∞は10扱い）
+      期間安定性: 最大20点（プラス期間数 / 有効期間数）
+      取引回数  : 最大10点（20取引で満点）
+    """
+    results = [r for r in period_results.values() if r and r.get("trades", 0) > 0]
+    if not results:
+        return 0, "-"
+
+    avg_wr   = sum(r["win_rate"] for r in results) / len(results)
+    avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10)
+                   for r in results) / len(results)
+    stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
+    t_trades = sum(r["trades"] for r in results)
+
+    score = round(
+        avg_wr * 0.4
+        + (avg_pf / 10) * 30
+        + stable * 20
+        + min(t_trades / 20, 1) * 10
+    )
+    rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+    return score, rank
+
+
 def check_signal_on_date(symbol: str, strategy: str,
                          target_date=None) -> dict | None:
     """target_date の前営業日にシグナルが出ているか確認。"""
@@ -184,17 +212,21 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="{cls}">{s['pnl']:+,.0f}円</td>
         </tr>"""
 
-    # シグナル行
+    # シグナル行（スコア降順で表示）
+    signal_items = [(item, calc_recommend_score(item["period_results"]))
+                    for item in all_items if item["today_sig"]]
+    signal_items.sort(key=lambda x: x[1][0], reverse=True)
+
     signal_rows = ""
-    for item in sorted(all_items, key=lambda x: x["strategy"]):
-        sig = item["today_sig"]
-        if not sig:
-            continue
+    for item, (score, rank) in signal_items:
+        sig   = item["today_sig"]
         strat = item["strategy"]
+        rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
         signal_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score}点</td>
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
@@ -203,7 +235,7 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="8" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="9" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -328,6 +360,11 @@ def build_html(all_items: list[dict], show_days: int,
   .signal-badge {{ background:#38bdf8; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
+  .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
+  .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
+  .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
+  .rank-c {{ background:#94a3b8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
+  .score-cell {{ text-align:center; }}
 </style>
 </head>
 <body>
@@ -351,7 +388,7 @@ def build_html(all_items: list[dict], show_days: int,
 </p>
 <table>
   <thead><tr>
-    <th>銘柄</th><th>戦略</th><th>シグナル日</th><th>シグナル時株価</th>
+    <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
     <th>現在値</th><th>逆指値（エントリー）</th><th>損切り</th><th>目標</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
@@ -429,18 +466,21 @@ def main() -> None:
     print(f"  監視銘柄 逆指値バックテスト  {today}  ({args.days}日表示)  シグナル確認日: {date_label}")
     print("=" * 85)
 
-    signals_today = [i for i in all_items if i["today_sig"]]
+    signals_today = [(i, calc_recommend_score(i["period_results"]))
+                     for i in all_items if i["today_sig"]]
+    signals_today.sort(key=lambda x: x[1][0], reverse=True)
     print(f"\n【シグナル ({date_label})】 {len(signals_today)}件")
     if signals_today:
         print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'シグナル日':<12} "
-              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'損切り':>8} {'目標':>8}")
-        print("  " + "-" * 95)
-        for item in signals_today:
+              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'損切り':>8} {'目標':>8} スコア")
+        print("  " + "-" * 108)
+        for item, (score, rank) in signals_today:
             sig = item["today_sig"]
             print(f"  {item['symbol']:<12} {item['name']:<20} {item['strategy']:<6}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>8,.0f}"
-                  f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}")
+                  f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
+                  f"  {rank}{score}点")
     else:
         print("  (なし)")
 
