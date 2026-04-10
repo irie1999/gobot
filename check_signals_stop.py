@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import json
+
 import pandas as pd
 
 from backtest_limit_entry import (
@@ -77,7 +79,78 @@ STRATEGY_PARAMS = {
     "A7":   (calc_a7,   0.0, 1.5, 3.0),
     "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # 指値版は0.5だったがstopは0.0に統一
 }
-ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
+ENTRY_TYPE    = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
+MAX_HOLD_DAYS = 20       # タイムアウト（営業日）
+SIGNALS_FILE  = Path("active_signals_stop.json")
+
+
+def load_active_signals() -> dict:
+    if SIGNALS_FILE.exists():
+        try:
+            return json.loads(SIGNALS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_active_signals(signals: dict) -> None:
+    SIGNALS_FILE.write_text(
+        json.dumps(signals, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_active_signals(signals: dict) -> list[str]:
+    """
+    アクティブシグナルを最新状態に更新する。
+      signal  → 高値 ≥ 逆指値価格 で holding に遷移
+      holding → 安値 ≤ 損切り / 高値 ≥ 目標 / 日数超過 で削除
+    戻り値: ログメッセージリスト
+    """
+    remove_keys, logs = [], []
+
+    for key, sig in list(signals.items()):
+        df = fetch(sig["symbol"], 60)
+        if df is None or df.empty:
+            continue
+        sig["current_price"] = float(df.iloc[-1]["close"])
+
+        # ── signal → holding ─────────────────────────────────────────
+        if sig["status"] == "signal":
+            sig_ts = pd.Timestamp(sig["signal_date"])
+            after  = df[df.index > sig_ts]
+            for dt, row in after.iterrows():
+                if float(row["high"]) >= sig["order_price"]:
+                    entry_p = max(float(row["open"]), sig["order_price"])
+                    sig.update(status="holding",
+                               entry_date=dt.strftime("%Y-%m-%d"),
+                               entry_price=round(entry_p),
+                               hold_days=0)
+                    logs.append(f"  [約定→保有中] {sig['symbol']} {sig['name']} "
+                                f"エントリー:{entry_p:,.0f}円 ({dt.strftime('%Y-%m-%d')})")
+                    break
+
+        # ── holding → 出口チェック ────────────────────────────────────
+        if sig["status"] == "holding":
+            entry_ts    = pd.Timestamp(sig["entry_date"])
+            after_entry = df[df.index > entry_ts]
+            sig["hold_days"] = len(after_entry)
+            exited = False
+            for dt, row in after_entry.iterrows():
+                if float(row["low"]) <= sig["stop_price"]:
+                    logs.append(f"  [損切り→削除] {sig['symbol']} {sig['name']} "
+                                f"損切り:{sig['stop_price']:,.0f}円 ({dt.strftime('%Y-%m-%d')})")
+                    remove_keys.append(key); exited = True; break
+                if float(row["high"]) >= sig["target_price"]:
+                    logs.append(f"  [利確→削除] {sig['symbol']} {sig['name']} "
+                                f"目標:{sig['target_price']:,.0f}円 ({dt.strftime('%Y-%m-%d')})")
+                    remove_keys.append(key); exited = True; break
+            if not exited and sig["hold_days"] >= MAX_HOLD_DAYS:
+                logs.append(f"  [タイムアウト→削除] {sig['symbol']} {sig['name']} "
+                            f"{sig['hold_days']}営業日経過")
+                remove_keys.append(key)
+
+    for key in remove_keys:
+        del signals[key]
+    return logs
 
 
 def check_signal_on_date(symbol: str, strategy: str,
@@ -151,7 +224,10 @@ def _pf_str(pf: float) -> str:
 
 
 def build_html(all_items: list[dict], show_days: int,
-               date_label: str = "本日") -> str:
+               date_label: str = "本日",
+               active_signals: dict | None = None) -> str:
+    if active_signals is None:
+        active_signals = {}
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
     # サマリー
@@ -184,16 +260,14 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="{cls}">{s['pnl']:+,.0f}円</td>
         </tr>"""
 
-    # シグナル行
-    signal_rows = ""
-    for item in sorted(all_items, key=lambda x: x["strategy"]):
-        sig = item["today_sig"]
-        if not sig:
-            continue
-        strat = item["strategy"]
-        signal_rows += f"""
+    # ── 逆指値待機中（signal）────────────────────────────────────────
+    pending_rows = ""
+    for sig in sorted([s for s in active_signals.values() if s["status"] == "signal"],
+                      key=lambda x: (x["strategy"], x["signal_date"])):
+        strat = sig["strategy"]
+        pending_rows += f"""
         <tr>
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
+          <td class="sym">{sig['symbol']}<br><small>{sig['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
@@ -202,8 +276,33 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
-    if not signal_rows:
-        signal_rows = f'<tr><td colspan="8" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+    if not pending_rows:
+        pending_rows = '<tr><td colspan="8" style="text-align:center;color:#64748b">待機中シグナルなし</td></tr>'
+
+    # ── 保有中（holding）────────────────────────────────────────────
+    holding_rows = ""
+    for sig in sorted([s for s in active_signals.values() if s["status"] == "holding"],
+                      key=lambda x: (x["strategy"], x.get("entry_date", ""))):
+        strat = sig["strategy"]
+        ep  = sig.get("entry_price") or 0
+        cp  = sig.get("current_price") or 0
+        unr = (cp - ep) * 100
+        pnl_cls = "profit" if unr >= 0 else "loss"
+        holding_rows += f"""
+        <tr>
+          <td class="sym">{sig['symbol']}<br><small>{sig['name']}</small></td>
+          <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td>{sig['signal_date']}</td>
+          <td>{sig.get('entry_date', '-')}</td>
+          <td>{ep:,.0f}</td>
+          <td>{cp:,.0f}</td>
+          <td class="loss">{sig['stop_price']:,.0f}</td>
+          <td class="profit">{sig['target_price']:,.0f}</td>
+          <td>{sig.get('hold_days', 0)}日</td>
+          <td class="{pnl_cls}">{unr:+,.0f}円</td>
+        </tr>"""
+    if not holding_rows:
+        holding_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b">保有中銘柄なし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -225,7 +324,8 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{r['win_rate']:.0f}%</td>"
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
-            mark = "🔔" if item["today_sig"] else ""
+            active_set = {(s["symbol"], s["strategy"]) for s in active_signals.values()}
+            mark = "🔔" if (item["symbol"], item["strategy"]) in active_set else ""
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
@@ -345,16 +445,30 @@ def build_html(all_items: list[dict], show_days: int,
   <tbody>{summary_rows}</tbody>
 </table>
 
-<h2>シグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
+<h2>監視中シグナル <span class="signal-badge">要確認</span></h2>
+
+<h3 style="color:#38bdf8;margin:16px 0 8px">▶ 逆指値注文 待機中</h3>
 <p style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px">
-  ※ 逆指値注文（青色）= 翌日高値がこの価格以上になれば約定
+  ※ 逆指値（青色）= 高値がこの価格以上になれば約定
 </p>
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>シグナル日</th><th>シグナル時株価</th>
     <th>現在値</th><th>逆指値（エントリー）</th><th>損切り</th><th>目標</th>
   </tr></thead>
-  <tbody>{signal_rows}</tbody>
+  <tbody>{pending_rows}</tbody>
+</table>
+
+<h3 style="color:#4ade80;margin:16px 0 8px">▶ 保有中</h3>
+<p style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px">
+  ※ 損切り・利確・{MAX_HOLD_DAYS}営業日タイムアウトで自動削除
+</p>
+<table>
+  <thead><tr>
+    <th>銘柄</th><th>戦略</th><th>シグナル日</th><th>エントリー日</th><th>エントリー価格</th>
+    <th>現在値</th><th>損切り</th><th>目標</th><th>保有日数</th><th>含み損益(100株)</th>
+  </tr></thead>
+  <tbody>{holding_rows}</tbody>
 </table>
 
 <h2>銘柄別バックテスト（4期間比較）</h2>
@@ -398,6 +512,16 @@ def main() -> None:
     date_label = args.date if args.date else "本日"
     print(f"逆指値バックテスト開始 ({len(WATCHLIST)}銘柄) シグナル確認日: {date_label}...", flush=True)
 
+    # ── アクティブシグナル管理（--date 指定時はスキップ）──────────────
+    if sig_date is None:
+        active_signals = load_active_signals()
+        if active_signals:
+            print(f"  保存済みシグナル {len(active_signals)}件を更新中...", flush=True)
+            for log in update_active_signals(active_signals):
+                print(log, flush=True)
+    else:
+        active_signals = {}
+
     all_items: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -423,25 +547,59 @@ def main() -> None:
         item["today_sig"] = check_signal_on_date(
             item["symbol"], item["strategy"], sig_date)
 
+    # 新しいシグナルをアクティブリストに追加・保存（--date 指定時はスキップ）
+    if sig_date is None:
+        for item in all_items:
+            sig = item.get("today_sig")
+            if sig:
+                key = f"{item['symbol']}_{item['strategy']}"
+                if key not in active_signals:
+                    active_signals[key] = dict(
+                        symbol=item["symbol"], name=item["name"],
+                        strategy=item["strategy"], status="signal",
+                        signal_date=sig["signal_date"],
+                        signal_price=sig["signal_price"],
+                        order_price=sig["order_price"],
+                        stop_price=sig["stop_price"],
+                        target_price=sig["target_price"],
+                        current_price=sig["current_price"],
+                        entry_date=None, entry_price=None, hold_days=0,
+                    )
+        save_active_signals(active_signals)
+
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
     print("=" * 85)
     print(f"  監視銘柄 逆指値バックテスト  {today}  ({args.days}日表示)  シグナル確認日: {date_label}")
     print("=" * 85)
 
-    signals_today = [i for i in all_items if i["today_sig"]]
-    print(f"\n【シグナル ({date_label})】 {len(signals_today)}件")
-    if signals_today:
+    pending = [s for s in active_signals.values() if s["status"] == "signal"]
+    holding = [s for s in active_signals.values() if s["status"] == "holding"]
+    print(f"\n【監視中シグナル】 待機:{len(pending)}件  保有中:{len(holding)}件")
+    if pending:
+        print(f"  [待機中]")
         print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'シグナル日':<12} "
               f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'損切り':>8} {'目標':>8}")
         print("  " + "-" * 95)
-        for item in signals_today:
-            sig = item["today_sig"]
-            print(f"  {item['symbol']:<12} {item['name']:<20} {item['strategy']:<6}"
+        for sig in sorted(pending, key=lambda x: (x["strategy"], x["signal_date"])):
+            print(f"  {sig['symbol']:<12} {sig['name']:<20} {sig['strategy']:<6}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>8,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}")
-    else:
+    if holding:
+        print(f"  [保有中]")
+        print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<6} {'エントリー日':<12} "
+              f"{'エントリー価格':>8} {'現在値':>8} {'損切り':>8} {'目標':>8} {'保有日数':>6} {'含み損益':>10}")
+        print("  " + "-" * 107)
+        for sig in sorted(holding, key=lambda x: x.get("entry_date", "")):
+            ep  = sig.get("entry_price") or 0
+            cp  = sig.get("current_price") or 0
+            unr = (cp - ep) * 100
+            print(f"  {sig['symbol']:<12} {sig['name']:<20} {sig['strategy']:<6}"
+                  f" {sig.get('entry_date','-'):<12} {ep:>8,.0f}"
+                  f" {cp:>8,.0f} {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
+                  f" {sig.get('hold_days',0):>6}日 {unr:>+10,.0f}円")
+    if not pending and not holding:
         print("  (なし)")
 
     if args.signal_only:
@@ -463,7 +621,7 @@ def main() -> None:
 
     date_suffix = args.date if args.date else today
     out_path    = Path(f"watchlist_stop_{date_suffix}.html")
-    out_path.write_text(build_html(all_items, show_days, date_label), encoding="utf-8")
+    out_path.write_text(build_html(all_items, show_days, date_label, active_signals), encoding="utf-8")
     print(f"\nHTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
