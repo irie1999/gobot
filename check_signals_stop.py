@@ -108,6 +108,13 @@ def update_active_signals(signals: dict) -> list[str]:
     remove_keys, logs = [], []
 
     for key, sig in list(signals.items()):
+        # 旧フォーマット（statusなし）は signal として扱う
+        if "status" not in sig:
+            sig["status"]      = "signal"
+            sig.setdefault("entry_date",  None)
+            sig.setdefault("entry_price", None)
+            sig.setdefault("hold_days",   0)
+
         df = fetch(sig["symbol"], 60)
         if df is None or df.empty:
             continue
