@@ -447,22 +447,23 @@ def main() -> None:
     date_label = args.date if args.date else "本日"
     print(f"ブレイクアウトバックテスト開始 ({len(WATCHLIST)}銘柄) シグナル確認日: {date_label}...", flush=True)
 
-    # ── アクティブシグナル読み込み & 約定確認 ──────────────────────
-    active_signals = load_active_signals()
-    if active_signals:
-        print(f"  保存済みシグナル {len(active_signals)}件を確認中...", flush=True)
-        filled_keys = []
-        for key, sig in list(active_signals.items()):
-            filled, current_p = check_active_signal(sig)
-            active_signals[key]["current_price"] = current_p
-            if filled:
-                filled_keys.append(key)
-                print(f"  [約定済み→削除] {sig['symbol']} {sig['name']} {sig['strategy']} "
-                      f"逆指値:{sig['order_price']:,.0f}円", flush=True)
-        for key in filled_keys:
-            del active_signals[key]
-    else:
+    # ── アクティブシグナル読み込み & 約定確認（--date 指定時はスキップ）──
+    if sig_date is not None:
         active_signals = {}
+    else:
+        active_signals = load_active_signals()
+        if active_signals:
+            print(f"  保存済みシグナル {len(active_signals)}件を確認中...", flush=True)
+            filled_keys = []
+            for key, sig in list(active_signals.items()):
+                filled, current_p = check_active_signal(sig)
+                active_signals[key]["current_price"] = current_p
+                if filled:
+                    filled_keys.append(key)
+                    print(f"  [約定済み→削除] {sig['symbol']} {sig['name']} {sig['strategy']} "
+                          f"逆指値:{sig['order_price']:,.0f}円", flush=True)
+            for key in filled_keys:
+                del active_signals[key]
 
     all_items: list[dict] = []
 
@@ -489,23 +490,24 @@ def main() -> None:
         item["today_sig"] = check_signal_on_date(
             item["symbol"], item["strategy"], sig_date)
 
-    # 新しいシグナルをアクティブリストに追加・保存
-    for item in all_items:
-        sig = item.get("today_sig")
-        if sig:
-            key = f"{item['symbol']}_{item['strategy']}"
-            active_signals[key] = dict(
-                symbol=item["symbol"],
-                name=item["name"],
-                strategy=item["strategy"],
-                signal_date=sig["signal_date"],
-                signal_price=sig["signal_price"],
-                order_price=sig["order_price"],
-                stop_price=sig["stop_price"],
-                target_price=sig["target_price"],
-                current_price=sig["current_price"],
-            )
-    save_active_signals(active_signals)
+    # 新しいシグナルをアクティブリストに追加・保存（--date 指定時はスキップ）
+    if sig_date is None:
+        for item in all_items:
+            sig = item.get("today_sig")
+            if sig:
+                key = f"{item['symbol']}_{item['strategy']}"
+                active_signals[key] = dict(
+                    symbol=item["symbol"],
+                    name=item["name"],
+                    strategy=item["strategy"],
+                    signal_date=sig["signal_date"],
+                    signal_price=sig["signal_price"],
+                    order_price=sig["order_price"],
+                    stop_price=sig["stop_price"],
+                    target_price=sig["target_price"],
+                    current_price=sig["current_price"],
+                )
+        save_active_signals(active_signals)
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
