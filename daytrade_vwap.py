@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
@@ -62,7 +61,6 @@ ENTRY_CUTOFF   = dtime(14, 30)
 
 FIXED_QTY      = 100
 INITIAL_CASH   = 1_000_000
-WORKERS        = 4
 
 AM_START = dtime(9, 0)
 AM_END   = dtime(11, 30)
@@ -87,26 +85,67 @@ DEFAULT_SYMBOLS = [
 # データ取得
 # ─────────────────────────────────────────────────────────────
 
-def fetch_intraday(symbol: str, days: int, interval: str = INTERVAL) -> pd.DataFrame | None:
-    try:
-        df = yf.download(
-            symbol, period=f"{days}d", interval=interval,
-            auto_adjust=False, progress=False,
-        )
-    except Exception as e:
-        print(f"  [warn] {symbol}: {e}", file=sys.stderr)
-        return None
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame | None:
+    """yfinance DataFrame を JST naive / lower-case columns に正規化。"""
     if df is None or df.empty:
         return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    df = df.copy()
     df.columns = [str(c).lower() for c in df.columns]
+    df = df.dropna(subset=["close"])
+    if df.empty:
+        return None
     df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
         df.index = df.index.tz_convert("Asia/Tokyo").tz_localize(None)
     cols = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
-    df = df[cols].dropna(subset=["close"])
+    df = df[cols]
     return df if not df.empty else None
+
+
+def fetch_intraday_batch(symbols: list[str], days: int,
+                         interval: str = INTERVAL) -> dict[str, pd.DataFrame]:
+    """
+    yfinance のマルチシンボル・バッチダウンロード。
+    複数銘柄を一度に渡すことで curl_cffi セッション混線を回避する。
+    """
+    if not symbols:
+        return {}
+    try:
+        df = yf.download(
+            " ".join(symbols),
+            period=f"{days}d",
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception as e:
+        print(f"  [warn] batch download error: {e}", file=sys.stderr)
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if isinstance(df.columns, pd.MultiIndex):
+        tickers_in_df = set(df.columns.get_level_values(0))
+        for sym in symbols:
+            if sym not in tickers_in_df:
+                continue
+            sub = _normalize_df(df[sym])
+            if sub is not None:
+                result[sym] = sub
+    else:
+        sub = _normalize_df(df)
+        if sub is not None:
+            result[symbols[0]] = sub
+    return result
+
+
+def fetch_intraday(symbol: str, days: int, interval: str = INTERVAL) -> pd.DataFrame | None:
+    """単一銘柄取得 (後方互換)。内部で batch 経由。"""
+    return fetch_intraday_batch([symbol], days, interval).get(symbol)
 
 
 def split_by_day(df: pd.DataFrame) -> dict:
@@ -291,10 +330,10 @@ def backtest_vwap_day(day_df: pd.DataFrame, stop_pct: float,
 # 銘柄単位バックテスト
 # ─────────────────────────────────────────────────────────────
 
-def backtest_symbol(symbol: str, name: str, days: int,
+def backtest_symbol(symbol: str, name: str, df: pd.DataFrame,
                     stop_pct: float, target_r: float, tol: float) -> dict | None:
-    df = fetch_intraday(symbol, days)
-    if df is None:
+    """pre-fetched df を使って銘柄バックテスト。"""
+    if df is None or df.empty:
         return None
     daily = split_by_day(df)
     if len(daily) < 3:
@@ -524,7 +563,6 @@ def main() -> None:
                         help="リスクリワード比 (例: 2.0)")
     parser.add_argument("--tol", type=float, default=PULLBACK_TOL,
                         help="押し目タッチ許容率 (例: 0.001 = 0.1%%)")
-    parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--no-html", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
@@ -541,20 +579,25 @@ def main() -> None:
     print(f"VWAP Pullback バックテスト開始: {len(targets)}銘柄 / {args.days}日 / "
           f"stop={args.stop_pct*100:.2f}% / R={args.target_r}", flush=True)
 
+    symbols_list = [s for s, _ in targets]
+    print(f"データ取得中 ({len(symbols_list)}銘柄, batch)...", flush=True)
+    fetched = fetch_intraday_batch(symbols_list, args.days)
+    print(f"  取得成功: {len(fetched)}/{len(symbols_list)}銘柄", flush=True)
+    for sym in symbols_list:
+        if sym not in fetched:
+            print(f"  [skip] {sym}: データ取得失敗", flush=True)
+
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(backtest_symbol, sym, name, args.days,
-                          args.stop_pct, args.target_r, args.tol): sym
-                for sym, name in targets}
-        for i, fut in enumerate(as_completed(futs), 1):
-            sym = futs[fut]
-            try:
-                r = fut.result()
-                if r:
-                    results.append(r)
-            except Exception as e:
-                print(f"  [err] {sym}: {e}", file=sys.stderr)
-            print(f"  {i}/{len(targets)} 完了", flush=True)
+    for sym, name in targets:
+        if sym not in fetched:
+            continue
+        try:
+            r = backtest_symbol(sym, name, fetched[sym],
+                                args.stop_pct, args.target_r, args.tol)
+            if r:
+                results.append(r)
+        except Exception as e:
+            print(f"  [err] {sym}: {e}", file=sys.stderr)
 
     order = {s: i for i, (s, _) in enumerate(targets)}
     results.sort(key=lambda x: order.get(x["symbol"], 999))
