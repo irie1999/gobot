@@ -306,11 +306,18 @@ monkey-patch はスレッド間で競合するので、代わりに:
 ### 13.5 実行手順
 
 ```
-# Step 1: Walk-forward スキャン (225銘柄 × 6戦略 × 3 fold)
-python scan_walkforward.py                      # 両戦略ファミリー
+# Step 0 (初回のみ): ユニバース (銘柄リスト) を生成
+python fetch_listed_symbols.py --market prime   # プライム ~1800銘柄 (推奨)
+python fetch_listed_symbols.py --market all     # 全市場 ~4000銘柄
+# → symbols_listed_prime.py / symbols_listed_all.py が生成される
+
+# Step 1: Walk-forward スキャン (ユニバース × 6戦略 × 3 fold)
+python scan_walkforward.py                      # 自動検出: prime > all > 225
 python scan_walkforward.py --family stop        # 逆指値Bのみ
 python scan_walkforward.py --family breakout    # ブレイクアウトのみ
 python scan_walkforward.py --workers 8          # 並列数
+python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
+python scan_walkforward.py --limit 50           # 先頭50銘柄だけ (デバッグ)
 # → walkforward_results/walkforward_<STRATEGY>_<date>.csv  が出力される
 
 # Step 2: CSV から WATCHLIST 提案を生成
@@ -355,10 +362,21 @@ watchlist_proposal_2026-07-11.py    ← 世代比較可能
 
 ### 13.8 既知の限界
 
-- **銘柄ユニバース**: 現在 `symbols_all.SYMBOLS` = 日経225 の 225 銘柄。
-  過去に `symbols_listed_all.py` (1800 銘柄) を使っていた痕跡が
-  `scan_entry_compare.py:57` にあるが、ファイルは存在しない。ユニバースを
-  広げたい場合はまずこのファイルを再生成する必要あり。
+- **銘柄ユニバース**: `scan_walkforward.load_universe()` が以下の順で自動検出:
+  1. `symbols_listed_prime.py`    (プライム ~1800銘柄) ← **推奨**
+  2. `symbols_listed_all.py`      (全上場 ~4000銘柄)
+  3. `symbols_listed_standard.py` (プライム+スタンダード)
+  4. `symbols_all.py`             (日経225, 225銘柄) ← フォールバック
+
+  `symbols_listed_*.py` は `fetch_listed_symbols.py` で生成。JPX の `data_j.xls`
+  をダウンロードしてパースする仕組みで、7日間キャッシュ (`.jpx_listed_cache.pkl`)
+  あり。JPX の Excel フォーマット変更時は `fetch_listed_symbols._parse_xls`
+  の調整が必要。
+- **初回実行時間**: 1800銘柄 × 6戦略 × 3fold × 2(train/test) = 約6.5万回の
+  バックテスト。yfinance から各銘柄 800日分の日足をDLするため、初回は
+  1〜2時間かかることがある。2回目以降は `.rsi2_cache/` のキャッシュで数分に短縮。
+- **yfinance レート制限**: 1800銘柄を一気に叩くとレートリミットに引っかかる可能性。
+  その場合は `--limit 500` で分割実行 → キャッシュが貯まってから全量実行を推奨。
 - **FIXED_QTY=100 固定**: 銘柄間リスクが不均等。Walk-forward 検証も 100 株固定の
   前提で行うので、高ボラ銘柄が不利。将来的に volatility-parity 化する余地あり。
 - **ベンチマーク比較なし**: 日経平均との相対パフォーマンスは見ていない。

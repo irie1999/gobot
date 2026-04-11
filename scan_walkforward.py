@@ -1,9 +1,21 @@
 """
 scan_walkforward.py  ―  Walk-forward 方式による銘柄スキャン
 =================================================================
-225銘柄 × 6戦略 (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト) に対し、
-非重複の 3 fold Walk-forward バックテストを実行し、
+ユニバース (デフォルト=プライム市場 ~1800銘柄) × 6戦略
+  (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト)
+に対し、非重複の 3 fold Walk-forward バックテストを実行し、
 TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽出する。
+
+【ユニバース】
+  優先順位 (--symbols 未指定時):
+    1. symbols_listed_prime.py    (プライム市場 ~1800銘柄)
+    2. symbols_listed_all.py      (全上場 ~4000銘柄)
+    3. symbols_listed_standard.py (プライム+スタンダード)
+    4. symbols_all.py             (日経225, 225銘柄)
+
+  生成方法:
+    python fetch_listed_symbols.py --market prime   # プライム取得 (推奨)
+    python fetch_listed_symbols.py --market all     # 全市場
 
 【Walk-forward 構造】 (基準日=本日, 単位=暦日)
   Fold 1: TRAIN 730〜540日前  /  TEST 540〜360日前
@@ -19,17 +31,26 @@ TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽�
   walkforward_results/walkforward_<STRATEGY>_<YYYY-MM-DD>.csv
 
 【使い方】
+  # 準備: ユニバースを取得 (初回のみ)
+  python fetch_listed_symbols.py --market prime
+
+  # 本番スキャン
   python scan_walkforward.py                      # 全戦略 (6つ)
   python scan_walkforward.py --family stop        # 逆指値Bのみ
   python scan_walkforward.py --family breakout    # ブレイクアウトのみ
   python scan_walkforward.py --workers 8
   python scan_walkforward.py --top 50             # 表示する上位N
+  python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
+  python scan_walkforward.py --limit 50           # 先頭50銘柄だけ (デバッグ)
 
 注意:
   - backtest_limit_entry.run_limit_backtest を内部で使う。 _TODAY は触らない
     (スレッドセーフ) ので、df を事前にトリミングして backtest_days パラメータで
     ウィンドウを制御している。
   - TRAIN と TEST は時期をずらした非重複ウィンドウ。TEST は擬似的な "未来データ" 扱い。
+  - 1800銘柄 × 6戦略 × 3fold × 2(train/test) = 約6.5万回のバックテスト。
+    初回は yfinance からのデータDLが走るため、1〜2時間かかる場合があります。
+    2回目以降は .rsi2_cache/ のキャッシュで高速化されます。
 """
 
 from __future__ import annotations
@@ -52,11 +73,58 @@ from backtest_limit_entry import (
 from scan_breakout_entry import (
     calc_donchian, calc_vol_breakout, calc_momentum,
 )
-from symbols_all import SYMBOLS
 from risk_metrics import enrich_backtest_result
 
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
+
+# ── ユニバース (銘柄リスト) 自動検出 ─────────────────────────────
+# 優先順位: --symbols 指定 > symbols_listed_prime.py > symbols_listed_all.py >
+#           symbols_listed_standard.py > symbols_all.py (日経225)
+# symbols_listed_*.py は fetch_listed_symbols.py で生成する:
+#   python fetch_listed_symbols.py --market prime   # プライム ~1800銘柄
+#   python fetch_listed_symbols.py --market all     # 全市場 ~4000銘柄
+_UNIVERSE_CANDIDATES = [
+    "symbols_listed_prime.py",
+    "symbols_listed_all.py",
+    "symbols_listed_standard.py",
+    "symbols_all.py",
+]
+
+
+def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str]], str]:
+    """
+    ユニバースを読み込んで (symbols, source_name) を返す。
+    explicit_path が指定されていればそれを最優先。
+    """
+    import importlib.util
+
+    candidates: list[str] = []
+    if explicit_path:
+        candidates.append(explicit_path)
+    candidates.extend(_UNIVERSE_CANDIDATES)
+
+    for cand in candidates:
+        p = Path(cand)
+        if not p.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(p.stem, p)
+            mod  = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            syms = [tuple(t) for t in mod.SYMBOLS]
+            return syms, p.name
+        except Exception as e:
+            print(f"[WARN] {cand} の読み込みに失敗: {e}", file=sys.stderr)
+            continue
+
+    raise RuntimeError(
+        "ユニバースファイルが見つかりません。以下のいずれかを用意してください:\n"
+        "  - python fetch_listed_symbols.py --market prime  (推奨, 約1800銘柄)\n"
+        "  - python fetch_listed_symbols.py --market all    (全上場, 約4000銘柄)\n"
+        "  - symbols_all.py (日経225)"
+    )
+
 
 # ── 戦略定義 ─────────────────────────────────────────────────────
 # (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family)
@@ -238,6 +306,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
     parser.add_argument("--top",     type=int, default=30,
                         help="表示する上位N (CSVは全件保存)")
+    parser.add_argument("--symbols", type=str, default=None,
+                        help="ユニバースファイル (省略時は symbols_listed_prime.py → "
+                             "symbols_listed_all.py → symbols_all.py の順で自動検出)")
+    parser.add_argument("--limit",   type=int, default=0,
+                        help="ユニバースを先頭 N 件に制限 (デバッグ用, 0=制限なし)")
     args = parser.parse_args()
 
     if args.family == "stop":
@@ -247,13 +320,23 @@ def main() -> None:
     else:
         strategies = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
 
+    # ユニバース読み込み
+    try:
+        symbols, universe_name = load_universe(args.symbols)
+    except RuntimeError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.limit > 0:
+        symbols = symbols[: args.limit]
+
     print("=" * 78)
     print(f"Walk-forward スキャン開始")
-    print(f"  基準日   : {TODAY}")
-    print(f"  ユニバース: {len(SYMBOLS)} 銘柄")
-    print(f"  戦略     : {', '.join(strategies)}")
-    print(f"  Folds    : {len(FOLDS)}")
-    print(f"  Workers  : {args.workers}")
+    print(f"  基準日    : {TODAY}")
+    print(f"  ユニバース: {universe_name} ({len(symbols)} 銘柄)")
+    print(f"  戦略      : {', '.join(strategies)}")
+    print(f"  Folds     : {len(FOLDS)}")
+    print(f"  Workers   : {args.workers}")
     print("=" * 78)
     print("Fold 構造:")
     for name, ts, te, vs, ve in FOLDS:
@@ -262,6 +345,12 @@ def main() -> None:
         test_s  = (TODAY - timedelta(days=vs)).isoformat()
         test_e  = (TODAY - timedelta(days=ve)).isoformat()
         print(f"  {name}: TRAIN {train_s}〜{train_e}  /  TEST {test_s}〜{test_e}")
+    print("=" * 78)
+
+    # 所要時間の目安を表示
+    total_tasks = len(symbols) * len(strategies) * len(FOLDS) * 2
+    print(f"合計バックテスト数: {total_tasks:,} "
+          f"({len(symbols)}銘柄 × {len(strategies)}戦略 × {len(FOLDS)}fold × 2(train/test))")
     print("=" * 78)
 
     out_dir = Path("walkforward_results")
@@ -273,8 +362,9 @@ def main() -> None:
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(walkforward_one, sym, name, strategy): sym
-                    for sym, name in SYMBOLS}
+                    for sym, name in symbols}
             done = 0
+            progress_every = max(len(symbols) // 20, 25)
             for fut in as_completed(futs):
                 done += 1
                 try:
@@ -283,8 +373,8 @@ def main() -> None:
                         results.append(r)
                 except Exception:
                     pass
-                if done % 25 == 0:
-                    print(f"  進捗: {done}/{len(SYMBOLS)}  候補: {len(results)}",
+                if done % progress_every == 0:
+                    print(f"  進捗: {done}/{len(symbols)}  候補: {len(results)}",
                           flush=True)
 
         survivors = [r for r in results if r["folds_passed"] >= 2]
