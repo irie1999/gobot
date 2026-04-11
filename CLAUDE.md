@@ -304,6 +304,32 @@ monkey-patch はスレッド間で競合するので、代わりに:
 これで `_TODAY` を触らずに任意ウィンドウを切り出せます。ThreadPoolExecutor で
 並列実行しても安全です (`scan_walkforward._run_window` 参照)。
 
+### 13.4.5 予算フィルター (--budget / --max-price)
+
+`FIXED_QTY=100` 株固定のため、「100株買える株価の銘柄のみ」をスキャン対象に
+絞り込める `--budget` / `--max-price` オプションを両スクリプトに用意しています。
+
+- `scan_walkforward.py --budget 600000` → `latest_price > 6000` の銘柄はスキャンせずスキップ
+  (未スキャンなので計算コストも削減)
+- `build_watchlist.py --budget 600000` → 既存 CSV を事後フィルター (再スキャン不要)
+
+`latest_price` は `scan_walkforward.walkforward_one()` で
+`full_df.iloc[-1]["close"]` として取得され、**予算指定が無くても** CSV に
+含まれます (`walkforward_results/*.csv` の `latest_price` カラム)。
+古い CSV に `latest_price` が無い場合、`build_watchlist.py --budget` は
+そのフィルターをスキップします (後方互換)。
+
+換算式: `effective_max_price = budget / 100` (FIXED_QTY=100 株想定)。
+もし 1 回の発注で使う株数を将来変えるなら、ここを書き換える必要があります。
+
+**注意点**:
+- フィルターは **最新終値** (データの最終日) で判定します。過去の高値ではありません。
+- 過去には手の届いた (例: シグナル発生日は 5,800円) が、直近の上昇で手の届かない
+  (8,000円) 銘柄は除外されます。これは「今日から運用を始める」という前提では正しい挙動です。
+- 予算ギリギリの銘柄を選ぶと、1 回のトレードでほぼ全資金を投入することになります。
+  複数ポジション同時保有したい場合は `--budget (全額 / 希望同時保有数)` を指定してください
+  (例: 60万円で 3 銘柄持ちたい → `--budget 200000`)。
+
 ### 13.5 実行手順
 
 ```
@@ -319,13 +345,17 @@ python scan_walkforward.py --family breakout    # ブレイクアウトのみ
 python scan_walkforward.py --workers 8          # 並列数
 python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
 python scan_walkforward.py --limit 50           # 先頭50銘柄だけ (デバッグ)
+python scan_walkforward.py --budget 600000      # 60万円で100株買える銘柄のみ
+python scan_walkforward.py --max-price 6000     # 株価6000円以下 (--budget と同義)
 # → walkforward_results/walkforward_<STRATEGY>_<date>.csv  が出力される
+# → CSV には latest_price カラムが含まれる (--budget 無しでも計測される)
 
 # Step 2: CSV から WATCHLIST 提案を生成
 python build_watchlist.py                       # 戦略あたり10銘柄
 python build_watchlist.py --per-strategy 8      # 戦略あたり8銘柄
 python build_watchlist.py --max-dd 10           # MaxDD上限10%
 python build_watchlist.py --min-sharpe 0.3      # Sharpe下限0.3
+python build_watchlist.py --budget 600000       # 60万円で100株買える銘柄のみ (事後フィルター)
 # → watchlist_proposal_<date>.py  が出力される
 
 # Step 3: 提案 WATCHLIST で検証バックテスト (HTML 自動オープン)

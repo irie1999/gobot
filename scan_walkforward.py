@@ -43,6 +43,11 @@ TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽�
   python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
   python scan_walkforward.py --limit 50           # 先頭50銘柄だけ (デバッグ)
 
+  # 予算フィルター
+  python scan_walkforward.py --budget 600000      # 60万円で100株買える銘柄のみ
+  python scan_walkforward.py --max-price 6000     # 株価6000円以下のみ (上と同義)
+  python scan_walkforward.py --budget 300000 --workers 8  # 30万円予算で並列8
+
 注意:
   - backtest_limit_entry.run_limit_backtest を内部で使う。 _TODAY は触らない
     (スレッドセーフ) ので、df を事前にトリミングして backtest_days パラメータで
@@ -213,11 +218,24 @@ def _passes_test(r: dict | None) -> bool:
 
 
 # ── 1 銘柄 × 1 戦略 × 3 fold ─────────────────────────────────────
-def walkforward_one(symbol: str, name: str, strategy_name: str) -> dict | None:
+def walkforward_one(symbol: str, name: str, strategy_name: str,
+                    max_price: float = 0.0) -> dict | None:
     calc_fn, em, sm, tm, family = STRATEGY_DEFS[strategy_name]
 
     full_df = fetch(symbol, 800)   # Walk-forward には ~2年のデータが必要
     if full_df is None or len(full_df) < 400:
+        return None
+
+    # 最新終値 (予算フィルター & CSV出力用)
+    try:
+        latest_price = float(full_df.iloc[-1]["close"])
+    except Exception:
+        return None
+    if latest_price <= 0:
+        return None
+
+    # 価格フィルター: max_price > 0 のとき最新終値 > max_price の銘柄は除外
+    if max_price > 0 and latest_price > max_price:
         return None
 
     folds_passed  = 0
@@ -285,6 +303,7 @@ def walkforward_one(symbol: str, name: str, strategy_name: str) -> dict | None:
 
     return dict(
         symbol=symbol, name=name, strategy=strategy_name, family=family,
+        latest_price=round(latest_price, 0),
         folds_passed=folds_passed,
         total_test_trades=total_test_tr,
         total_test_pnl=round(total_test_pnl, 0),
@@ -311,7 +330,17 @@ def main() -> None:
                              "symbols_listed_all.py → symbols_all.py の順で自動検出)")
     parser.add_argument("--limit",   type=int, default=0,
                         help="ユニバースを先頭 N 件に制限 (デバッグ用, 0=制限なし)")
+    parser.add_argument("--max-price", type=float, default=0.0,
+                        help="最新終値の上限 (円/株). 0=制限なし")
+    parser.add_argument("--budget",  type=float, default=0.0,
+                        help="総予算 (円). 100株買える銘柄に絞る = --max-price (予算/100). "
+                             "--max-price と併用時は --max-price 優先")
     args = parser.parse_args()
+
+    # budget → max_price 換算 (FIXED_QTY=100 株)
+    effective_max_price = args.max_price
+    if args.budget > 0 and args.max_price == 0:
+        effective_max_price = args.budget / 100.0
 
     if args.family == "stop":
         strategies = ["MACD", "A7", "RSI2"]
@@ -337,6 +366,11 @@ def main() -> None:
     print(f"  戦略      : {', '.join(strategies)}")
     print(f"  Folds     : {len(FOLDS)}")
     print(f"  Workers   : {args.workers}")
+    if effective_max_price > 0:
+        budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
+        print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
+    else:
+        print(f"  価格上限  : なし")
     print("=" * 78)
     print("Fold 構造:")
     for name, ts, te, vs, ve in FOLDS:
@@ -361,7 +395,8 @@ def main() -> None:
         results: list[dict] = []
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = {ex.submit(walkforward_one, sym, name, strategy): sym
+            futs = {ex.submit(walkforward_one, sym, name, strategy,
+                              effective_max_price): sym
                     for sym, name in symbols}
             done = 0
             progress_every = max(len(symbols) // 20, 25)
@@ -385,7 +420,8 @@ def main() -> None:
         # ── CSV 保存 (全候補) ──
         csv_path = out_dir / f"walkforward_{strategy}_{TODAY}.csv"
         fields = [
-            "symbol", "name", "strategy", "family", "folds_passed",
+            "symbol", "name", "strategy", "family", "latest_price",
+            "folds_passed",
             "total_test_trades", "total_test_pnl", "total_train_pnl",
             "avg_test_pf", "avg_test_wr",
             "max_drawdown_pct", "max_consecutive_losses", "sharpe",
@@ -406,11 +442,12 @@ def main() -> None:
             continue
         print(f"\n  ▼ {strategy} 上位 {n}:")
         print(f"  {'銘柄':<10}{'名前':<22}"
-              f"{'fld':>5}{'trades':>8}{'TEST_PnL':>12}"
+              f"{'株価':>8}{'fld':>5}{'trades':>8}{'TEST_PnL':>12}"
               f"{'PF':>7}{'WR':>8}{'MaxDD%':>9}{'連敗':>6}{'Shrp':>7}")
-        print("  " + "-" * 100)
+        print("  " + "-" * 108)
         for r in survivors[:n]:
             print(f"  {r['symbol']:<10}{r['name'][:20]:<22}"
+                  f"{r.get('latest_price', 0):>8,.0f}"
                   f"{r['folds_passed']:>5}{r['total_test_trades']:>8}"
                   f"{r['total_test_pnl']:>+12,.0f}"
                   f"{r['avg_test_pf']:>7.2f}{r['avg_test_wr']:>7.1f}%"

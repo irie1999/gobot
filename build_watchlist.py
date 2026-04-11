@@ -25,6 +25,10 @@ check_signals_stop.py / check_signals_breakout.py の WATCHLIST に
   python build_watchlist.py --min-sharpe 0.3
   python build_watchlist.py --input-dir walkforward_results
 
+【予算フィルター】 (CSV に latest_price がある場合のみ有効)
+  python build_watchlist.py --budget 600000       # 60万円で100株買える銘柄のみ
+  python build_watchlist.py --max-price 6000      # 株価6000円以下 (上と同義)
+
 【出力】
   watchlist_proposal_<YYYY-MM-DD>.py  … WATCHLIST 提案 (貼り付け用)
   標準出力                              … フィルター通過状況のサマリー
@@ -66,7 +70,8 @@ def apply_filters(rows: list[dict],
                   min_folds: int,
                   max_dd_pct: float,
                   max_consec_losses: int,
-                  min_sharpe: float) -> list[dict]:
+                  min_sharpe: float,
+                  max_price: float = 0.0) -> list[dict]:
     """フィルターを適用した行のみ返す。"""
     survivors = []
     for r in rows:
@@ -80,6 +85,12 @@ def apply_filters(rows: list[dict],
             continue
         if _float(r.get("total_test_pnl", 0)) <= 0:
             continue
+        # 価格フィルター: latest_price > max_price の銘柄を除外
+        # (CSV に latest_price が無い古いファイルはスキップしない)
+        if max_price > 0:
+            price = _float(r.get("latest_price", 0))
+            if price > 0 and price > max_price:
+                continue
         survivors.append(r)
     return survivors
 
@@ -98,15 +109,18 @@ def format_watchlist_block(rows: list[dict], title: str) -> str:
         name   = r.get("name", "")
         strat  = r.get("strategy", "")
         folds  = r.get("folds_passed", "")
+        price  = _float(r.get("latest_price", 0))
+        cost   = price * 100  # 100株購入コスト
         pnl    = _float(r.get("total_test_pnl", 0))
         pf     = r.get("avg_test_pf", "")
         wr     = r.get("avg_test_wr", "")
         dd     = r.get("max_drawdown_pct", "")
         cl     = r.get("max_consecutive_losses", "")
         shrp   = r.get("sharpe", "")
+        price_str = f"{price:,.0f}円(100株={cost:,.0f}円)" if price > 0 else "価格不明"
         lines.append(
             f'    ("{sym}", "{name}", "{strat}"),'
-            f"  # folds={folds} pnl={pnl:+,.0f} pf={pf} wr={wr}% "
+            f"  # {price_str} folds={folds} pnl={pnl:+,.0f} pf={pf} wr={wr}% "
             f"DD={dd}% 連敗{cl} Shrp{shrp}"
         )
     return "\n".join(lines)
@@ -121,10 +135,20 @@ def main() -> None:
                         help="MaxDD 上限 (%%) デフォルト15")
     parser.add_argument("--max-consec-losses", type=int, default=5)
     parser.add_argument("--min-sharpe",  type=float, default=0.0)
+    parser.add_argument("--max-price",   type=float, default=0.0,
+                        help="最新終値の上限 (円/株). 0=制限なし")
+    parser.add_argument("--budget",      type=float, default=0.0,
+                        help="総予算 (円). 100株買える銘柄のみに絞る。"
+                             "--max-price と併用時は --max-price 優先")
     parser.add_argument("--input-dir",   type=Path, default=Path("walkforward_results"))
     parser.add_argument("--date",        type=str, default=str(TODAY),
                         help="読み込む CSV の日付 (デフォルト本日)")
     args = parser.parse_args()
+
+    # budget → max_price 換算 (FIXED_QTY=100 株)
+    effective_max_price = args.max_price
+    if args.budget > 0 and args.max_price == 0:
+        effective_max_price = args.budget / 100.0
 
     strategies_stop = ["MACD", "A7", "RSI2"]
     strategies_brk  = ["DON", "VOL", "MOM"]
@@ -136,6 +160,9 @@ def main() -> None:
           f"MaxDD<={args.max_dd}%  "
           f"連敗<={args.max_consec_losses}  "
           f"Sharpe>={args.min_sharpe}")
+    if effective_max_price > 0:
+        budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
+        print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
     print(f"  選定数    : 戦略あたり {args.per_strategy} 銘柄")
     print("=" * 78)
 
@@ -158,6 +185,7 @@ def main() -> None:
             max_dd_pct=args.max_dd,
             max_consec_losses=args.max_consec_losses,
             min_sharpe=args.min_sharpe,
+            max_price=effective_max_price,
         )
         filtered.sort(key=composite_score, reverse=True)
         top = filtered[: args.per_strategy]
@@ -166,11 +194,15 @@ def main() -> None:
         print(f"  全候補={len(rows)}  フィルター通過={len(filtered)}  選定={len(top)}")
 
         if top:
-            print(f"  {'銘柄':<10}{'名前':<22}{'fld':>5}{'PnL':>12}"
+            print(f"  {'銘柄':<10}{'名前':<22}{'株価':>8}{'100株':>10}"
+                  f"{'fld':>5}{'PnL':>12}"
                   f"{'PF':>7}{'WR':>8}{'DD%':>8}{'連敗':>6}{'Shrp':>7}")
-            print("  " + "-" * 90)
+            print("  " + "-" * 108)
             for r in top:
+                price = _float(r.get("latest_price", 0))
+                cost  = price * 100
                 print(f"  {r['symbol']:<10}{r['name'][:20]:<22}"
+                      f"{price:>8,.0f}{cost:>10,.0f}"
                       f"{r['folds_passed']:>5}{_float(r['total_test_pnl']):>+12,.0f}"
                       f"{r['avg_test_pf']:>7}{r['avg_test_wr']:>7}%"
                       f"{r['max_drawdown_pct']:>8}"
@@ -194,6 +226,9 @@ def main() -> None:
         f.write("scan_walkforward.py → build_watchlist.py の結果\n\n")
         f.write(f"フィルター: folds>={args.min_folds}, MaxDD<={args.max_dd}%, "
                 f"連敗<={args.max_consec_losses}, Sharpe>={args.min_sharpe}\n")
+        if effective_max_price > 0:
+            budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
+            f.write(f"価格上限  : {effective_max_price:,.0f}円/株{budget_str}\n")
         f.write(f"選定数    : 戦略あたり {args.per_strategy} 銘柄\n")
         f.write(f"全候補数  : {total_candidates}  選定数 {total_selected}\n")
         f.write('"""\n\n')
