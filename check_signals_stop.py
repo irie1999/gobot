@@ -28,8 +28,12 @@ from backtest_limit_entry import (
     fetch,
     calc_macd, calc_a7, calc_rsi2,
     run_limit_backtest,
+    fetch_n225_return,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
+    INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
+from risk_metrics import enrich_backtest_result
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
@@ -182,12 +186,13 @@ def build_html(all_items: list[dict], show_days: int,
                date_label: str = "本日") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
-    # サマリー
+    # サマリー (戦略別に trade_log を結合してリスク指標計算)
     strategy_summary: dict[str, dict] = {}
     for item in all_items:
         strat = item["strategy"]
         if strat not in strategy_summary:
-            strategy_summary[strat] = dict(trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0)
+            strategy_summary[strat] = dict(
+                trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
         pr = item["period_results"].get(show_days) or {}
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
@@ -198,18 +203,36 @@ def build_html(all_items: list[dict], show_days: int,
                     strategy_summary[strat]["gp"] += t["pnl"]
                 else:
                     strategy_summary[strat]["gl"] += abs(t["pnl"])
+            strategy_summary[strat]["trade_log"].extend(pr.get("trade_log", []))
+
+    # ベンチマーク (日経平均) リターン
+    n225_ret = fetch_n225_return(show_days)
 
     summary_rows = ""
     for strat, s in strategy_summary.items():
         wr  = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
         pf  = s["gp"] / s["gl"] if s["gl"] > 0 else (float("inf") if s["gp"] > 0 else 0)
         cls = "profit" if s["pnl"] >= 0 else "loss"
+        # リスク指標
+        enriched = enrich_backtest_result({"trade_log": s["trade_log"]}, _INITIAL_CASH)
+        max_dd_pct = enriched.get("max_drawdown_pct", 0.0)
+        max_cl     = enriched.get("max_consecutive_losses", 0)
+        sharpe     = enriched.get("sharpe", 0.0)
+        # ベンチマーク相対 α (戦略リターン - 日経リターン, INITIAL_CASH 基準)
+        strat_ret_pct = s["pnl"] / _INITIAL_CASH * 100 if _INITIAL_CASH > 0 else 0
+        alpha         = strat_ret_pct - n225_ret
+        alpha_cls     = "profit" if alpha >= 0 else "loss"
+        dd_cls        = "profit" if max_dd_pct < 10 else ("loss" if max_dd_pct > 20 else "")
         summary_rows += f"""
         <tr>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
           <td>{s['trades']}</td><td>{s['wins']}</td>
           <td>{wr:.1f}%</td><td>{_pf_str(pf)}</td>
           <td class="{cls}">{s['pnl']:+,.0f}円</td>
+          <td class="{dd_cls}">{max_dd_pct:.1f}%</td>
+          <td>{max_cl}</td>
+          <td>{sharpe:.2f}</td>
+          <td class="{alpha_cls}">{alpha:+.1f}%</td>
         </tr>"""
 
     # シグナル行（スコア降順で表示）
@@ -371,13 +394,17 @@ def build_html(all_items: list[dict], show_days: int,
 <h1>監視銘柄 逆指値エントリー バックテスト</h1>
 <p class="subtitle">
   生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日<br>
-  エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）
+  エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）<br>
+  コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値買い+/損切り売り-）／
+  手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／
+  ベンチマーク: 日経平均 ({show_days}日) <strong>{n225_ret:+.1f}%</strong>
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>
 <table>
   <thead><tr>
     <th>戦略</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益合計</th>
+    <th>MaxDD%</th><th>連敗</th><th>Sharpe</th><th>α vs 日経</th>
   </tr></thead>
   <tbody>{summary_rows}</tbody>
 </table>

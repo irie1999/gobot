@@ -97,19 +97,24 @@ run_signals.py
 
 ---
 
-## 5. 共通定数 (backtest_limit_entry.py:47-61)
+## 5. 共通定数 (backtest_limit_entry.py:47-70)
 
 ```
-ENTRY_EXPIRE  = 3         # 指値/逆指値の有効日数 (シグナル発生から3営業日)
-MAX_HOLD      = 15        # 最大保有日数 (超えたら "タイムカット" で終値決済)
-FIXED_QTY     = 100       # 常に100株固定 (取引数量)
-INITIAL_CASH  = 500_000
-POSITION_SIZE = 100_000
-BACKTEST_DAYS = 365
-WORKERS       = 4         # run_signals.py の --workers デフォルト
-MIN_PRICE     = 100.0
-MAX_PRICE     = 100_000.0
-MAX_ATR_RATIO = 0.20      # ATR/終値 > 20% の異常ボラ銘柄は除外
+ENTRY_EXPIRE      = 3         # 指値/逆指値の有効日数 (シグナル発生から3営業日)
+MAX_HOLD          = 15        # 最大保有日数 (超えたら "タイムカット" で終値決済)
+FIXED_QTY         = 100       # 常に100株固定 (取引数量)
+INITIAL_CASH      = 500_000
+POSITION_SIZE     = 100_000
+BACKTEST_DAYS     = 365
+WORKERS           = 4         # run_signals.py の --workers デフォルト
+MIN_PRICE         = 100.0
+MAX_PRICE         = 100_000.0
+MAX_ATR_RATIO     = 0.20      # ATR/終値 > 20% の異常ボラ銘柄は除外
+
+# 実運用コストモデル (§14 参照)
+SLIPPAGE_STOP_PCT = 0.005     # 逆指値買い +0.5% / 損切り売り -0.5% の不利約定
+SLIPPAGE_LIMIT_PCT = 0.0      # 指値は注文価格ちょうどで約定
+FEE_PCT_ONE_WAY   = 0.001     # 手数料 片道 0.1% → 往復 0.2%
 ```
 
 状態機械は `idle → pending → in_pos → idle` (`backtest_limit_entry.py:306-415`)。
@@ -423,11 +428,121 @@ watchlist_proposal_2026-07-11.py    ← 世代比較可能
   その場合は `--limit 500` で分割実行 → キャッシュが貯まってから全量実行を推奨。
 - **FIXED_QTY=100 固定**: 銘柄間リスクが不均等。Walk-forward 検証も 100 株固定の
   前提で行うので、高ボラ銘柄が不利。将来的に volatility-parity 化する余地あり。
-- **ベンチマーク比較なし**: 日経平均との相対パフォーマンスは見ていない。
-  ブル相場で "勝った" 戦略がベンチマーク未達のケースを拾えない。
+- **ベンチマーク比較**: §14 で `fetch_n225_return` を追加済み。build_html の
+  戦略サマリーに α vs 日経 列が表示されます。
 - **セクター制約なし**: 地銀 7-8 銘柄のような集中が起きうる。出力 CSV に
   セクター情報は無いので、目視で確認するか将来的に `yfinance` 等で sector
   を追加する必要がある。
 - **データキャッシュ**: `backtest_limit_entry.fetch` は日次キャッシュ
   (`.rsi2_cache/`) を使う。2回目以降の実行は高速だが、古いキャッシュが
   あると古いデータでスキャンしてしまうので、定期的に削除推奨。
+
+---
+
+## 14. 実運用コストモデル & リスク指標 & フォワードテスト
+
+バックテストと実運用の乖離を小さくするため、以下の改善を追加済みです。
+
+### 14.1 スリッページ & 手数料モデル
+
+`backtest_limit_entry.py:66-69` に定数を集中:
+
+```python
+SLIPPAGE_STOP_PCT  = 0.005   # 逆指値買い +0.5% / 損切り売り -0.5%
+SLIPPAGE_LIMIT_PCT = 0.0
+FEE_PCT_ONE_WAY    = 0.001   # 片道 0.1%, 往復 0.2%
+```
+
+適用箇所 (`run_limit_backtest`):
+- **逆指値買い約定** (`:348-357`): `entry_p = limit_price * (1 + SLIPPAGE_STOP_PCT)`
+- **損切り売り約定** (`:376-380`, `:428-430`): `exit_p = stop_price * (1 - SLIPPAGE_STOP_PCT)`
+- **目標達成 / タイムカット**: スリッページなし (指値・成行 close で処理)
+- **手数料**: 全トレードで `fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY` を pnl から差し引き
+
+このモデル変更は **`run_signals.py` / `verify_watchlist.py` / `scan_walkforward.py`**
+すべてに同時適用されます (モジュール定数変更だけ)。
+変更後は過去の CSV / HTML の数字と **直接比較できない** 点に注意。
+必要なら `scan_walkforward.py` を再実行して新しい CSV を得てください。
+
+パラメータを変えたい場合は該当定数を編集するだけ。例: 信用取引で手数料 0.05% なら
+`FEE_PCT_ONE_WAY = 0.0005` に。
+
+### 14.2 HTML にリスク指標 & ベンチマーク α を表示
+
+`check_signals_stop.py:181-` と `check_signals_breakout.py:186-` の `build_html`
+の戦略サマリーテーブルに以下の 4 列を追加:
+
+| 列 | 計算元 |
+|---|---|
+| **MaxDD%** | `risk_metrics.calc_max_drawdown` (戦略別の結合 trade_log から) |
+| **連敗** | `risk_metrics.calc_max_consecutive_losses` |
+| **Sharpe** | `risk_metrics.calc_sharpe` (年率換算, 1年=20取引想定) |
+| **α vs 日経** | `(戦略リターン% / INITIAL_CASH) - 日経平均リターン%` |
+
+サブタイトルに以下を表示:
+- スリッページ値 (e.g. 0.50%)
+- 手数料値 (e.g. 片道 0.10% / 往復 0.20%)
+- 日経平均リターン (e.g. +12.3% over 365日)
+
+日経平均は `backtest_limit_entry.fetch_n225_return(days)` で取得
+(プロセス内でキャッシュ)。失敗時は 0.0 を返すので HTML には影響しない。
+
+### 14.3 フォワードテスト (紙トレード記録)
+
+`forward_test.py` が毎日のシグナルを CSV (`forward_test_log.csv`) に蓄積し、
+実データで約定・決済を自動判定するスクリプト。
+
+```
+python forward_test.py --record            # 毎日引け後に実行
+python forward_test.py --record --no-update # 既存評価をスキップ
+python forward_test.py --report            # 全期間の集計レポート
+python forward_test.py --report --days 30  # 過去30日分のみ
+```
+
+**動作フロー**:
+1. `collect_today_signals()`: `check_signals_stop` と `check_signals_breakout` の
+   全 WATCHLIST × 全戦略で今日のシグナルを `check_signal_on_date(None)` で検出
+2. `evaluate_entry()`: 既存の log 行について
+   - pending → fetch で最新データ取得 → 高値 ≥ 注文価格なら filled (entry_p に
+     スリッページ込み)、3営業日以内に約定しなければ expired
+   - filled → 目標/損切り/タイムカット (MAX_HOLD=15日) を判定、決済時の pnl を
+     手数料込みで計算
+3. 新規シグナルと更新されたログを CSV に保存
+
+**CSV 行の status 遷移**:
+```
+pending → filled → { target, stop, timeout, holding }
+pending → expired (3営業日以内に約定せず)
+```
+
+`holding` は「約定したがまだ決済していない」中間状態。次回 `--record` 時に
+再評価される。
+
+**レポートの読み方**:
+- `fill率` = 約定したシグナル / 全シグナル。実運用でこれが 50% を下回るなら
+  `entry_atr_mult` の調整や逆指値→成行切替を検討
+- `勝率` = target / (target + stop + timeout)。バックテスト値から
+  10〜30% 劣化が目安
+- `損益` = 決済済みの合計円 (スリッページ・手数料込み)。プラスなら戦略が機能
+
+運用例:
+- Day 1: `python forward_test.py --record` → 今日のシグナル10件記録
+- Day 2: `python forward_test.py --record` → 昨日の10件を再評価 (約定7件, 期限切3件)
+  + 今日の新規シグナル記録
+- Day 30: `python forward_test.py --report --days 30` → 過去30日の集計
+
+バックテストと現実のズレを定量的に測れるので、**運用判断の根拠になる唯一の数字** です。
+CLAUDE.md §10 の「やらない方が良いこと (過去の失敗)」を更新する前に、必ずフォワード
+テストで裏を取ってから変更することをおすすめします。
+
+### 14.4 注意点
+
+- **フォワードテストは本物の取引ではない**: 実運用と違い、資金制約・保有数制約・
+  税金は無視されている。「どの銘柄に入るべきか / 勝率がどう推移するか」の
+  参考データとして使ってください。
+- **コストモデルは近似**: 実際の手数料は証券会社プランによって大きく異なる。
+  信用取引は現物よりかなり安い (0.03%程度)。逆にスリッページは個別銘柄の流動性で
+  激しく変わる (出来高の少ない銘柄で -2% とかザラ)。
+- **CSV のマージは注意**: `forward_test.py` は重複 (record_date + symbol + strategy)
+  を排除するが、手動で CSV を編集するときは注意。最悪、ログを消して `--record`
+  しなおせば OK (過去日の遡及記録はできない)。

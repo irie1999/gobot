@@ -60,6 +60,15 @@ MIN_PRICE     = 100.0       # 最低株価（データ異常排除）
 MAX_PRICE     = 100_000.0   # 最高株価（日本株最大~7万円、100万超はデータ異常）
 MAX_ATR_RATIO = 0.20        # ATR/終値の上限（20%超は異常ボラ・データ異常として除外）
 
+# ── 実運用コストモデル (Phase B) ─────────────────────────────────
+# 逆指値 (stop buy) はギャップアップで不利な約定になりやすい前提。
+# バックテストでは注文価格ちょうどで約定する仮定だったため、
+# 実運用との乖離を埋めるための定数。
+SLIPPAGE_STOP_PCT = 0.005   # 逆指値約定時の不利スリッページ (買い +0.5%, 売り -0.5%)
+SLIPPAGE_LIMIT_PCT = 0.0    # 指値は注文価格で約定する前提 (または有利なら良化)
+FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
+                            # (SBI/楽天の現物格安プラン想定。信用取引はもっと低い)
+
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
 MACD_SLOW         = 17
@@ -83,6 +92,46 @@ ATR_PERIOD_RSI2   = 14
 
 
 # ── データ取得 ──────────────────────────────────────────────────
+# ── ベンチマーク (日経平均) リターン ────────────────────────────
+_N225_CACHE: dict[int, float] = {}
+
+
+def fetch_n225_return(days: int) -> float:
+    """
+    日経平均 (^N225) の直近 days 日間のリターン (%) を返す。
+    プロセス内でキャッシュ。失敗時は 0.0。
+    """
+    if days in _N225_CACHE:
+        return _N225_CACHE[days]
+    try:
+        # 直近 days 営業日のデータを取得 (買い注文マージン込みで +20)
+        buf = max(int(days * 1.5) + 20, 40)
+        now_jst  = datetime.now(JST)
+        dl_start = (now_jst - timedelta(days=buf)).strftime("%Y-%m-%d")
+        dl_end   = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
+        raw = yf.Ticker("^N225").history(
+            start=dl_start, end=dl_end,
+            interval="1d", auto_adjust=False, actions=False
+        )
+        if len(raw) < 2:
+            _N225_CACHE[days] = 0.0
+            return 0.0
+        # days 営業日前以降のデータで計算
+        cutoff = now_jst - timedelta(days=days)
+        subset = raw[raw.index >= pd.Timestamp(cutoff, tz=raw.index.tz)] \
+                 if raw.index.tz else raw[raw.index >= pd.Timestamp(cutoff)]
+        if len(subset) < 2:
+            subset = raw
+        start_p = float(subset["Close"].iloc[0])
+        end_p   = float(subset["Close"].iloc[-1])
+        ret = (end_p - start_p) / start_p * 100.0
+        _N225_CACHE[days] = ret
+        return ret
+    except Exception:
+        _N225_CACHE[days] = 0.0
+        return 0.0
+
+
 def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
     """永続キャッシュ優先・フォールバックでダウンロード。"""
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
@@ -339,7 +388,11 @@ def run_limit_backtest(
             elif (entry_type == "stop" and hi >= limit_price) or \
                  (entry_type != "stop" and lo <= limit_price):
                 # 約定
-                entry_p       = limit_price
+                # スリッページ: 逆指値買いは不利な方向に +X%
+                if entry_type == "stop":
+                    entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
+                else:
+                    entry_p = limit_price * (1.0 + SLIPPAGE_LIMIT_PCT)
                 entry_dt      = dt
                 hold_start    = i
                 days_to_fill  = i - signal_idx   # シグナルから約定までの営業日数
@@ -362,12 +415,18 @@ def run_limit_backtest(
                     exit_reason = None
 
                 if exit_p is not None:
+                    # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
+                    if exit_reason == "損切り":
+                        exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
                     if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
-                        pnl = (exit_p - entry_p) * qty
+                        # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                        fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                        pnl = (exit_p - entry_p) * qty - fee
                         trades.append(dict(
                             entry_dt=entry_dt, exit_dt=dt,
                             entry_p=entry_p, exit_p=exit_p, qty=qty,
                             pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                            fee=round(fee, 0),
                             hold_days=0, days_to_fill=days_to_fill,
                             signal_dt=signal_dt, signal_price=signal_price,
                             order_limit=limit_price, order_stop=stop_price,
@@ -401,11 +460,17 @@ def run_limit_backtest(
                 if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):
                     state = "idle"
                     continue
-                pnl = (exit_p - entry_p) * qty
+                # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
+                if exit_reason == "損切り":
+                    exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                pnl = (exit_p - entry_p) * qty - fee
                 trades.append(dict(
                     entry_dt=entry_dt, exit_dt=dt,
                     entry_p=entry_p, exit_p=exit_p, qty=qty,
                     pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                    fee=round(fee, 0),
                     hold_days=hold_days, days_to_fill=days_to_fill,
                     signal_dt=signal_dt, signal_price=signal_price,
                     order_limit=limit_price, order_stop=stop_price,
@@ -459,11 +524,14 @@ def run_limit_backtest(
     if state == "in_pos" and entry_dt is not None:
         cl_last = float(df.iloc[-1]["close"])
         hold_days = len(df) - 1 - hold_start
-        pnl = (cl_last - entry_p) * qty
+        # 未決済ポジションにも手数料 (往復) を控除
+        fee = (entry_p + cl_last) * qty * FEE_PCT_ONE_WAY
+        pnl = (cl_last - entry_p) * qty - fee
         trades.append(dict(
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=cl_last, qty=qty,
             pnl=pnl, pct=(cl_last - entry_p) / entry_p * 100,
+            fee=round(fee, 0),
             hold_days=hold_days, days_to_fill=days_to_fill,
             signal_dt=signal_dt, signal_price=signal_price,
             order_limit=limit_price, order_stop=stop_price,
@@ -487,6 +555,7 @@ def run_limit_backtest(
     gross_loss   = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
     pf           = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
     total_pnl    = sum(t["pnl"] for t in trades)
+    total_fee    = sum(t.get("fee", 0) for t in trades)
     avg_hold     = sum(t["hold_days"] for t in trades) / filled if filled > 0 else 0.0
     fill_rate    = filled / signals * 100 if signals > 0 else 0.0
 
@@ -495,6 +564,8 @@ def run_limit_backtest(
         signals=signals, filled=filled,
         trades=filled, wins=wins, losses=losses,
         win_rate=win_rate, pf=pf, total_pnl=total_pnl,
+        total_fee=total_fee,
+        slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=avg_hold, fill_rate=fill_rate,
         trade_log=trades,
     )
@@ -505,6 +576,8 @@ def _empty_result(symbol: str, name: str, strategy: str) -> dict:
         symbol=symbol, name=name, strategy=strategy,
         signals=0, filled=0, trades=0, wins=0, losses=0,
         win_rate=0.0, pf=0.0, total_pnl=0.0,
+        total_fee=0.0,
+        slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=0.0, fill_rate=0.0, trade_log=[],
     )
 
