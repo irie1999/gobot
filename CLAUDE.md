@@ -267,8 +267,9 @@ WATCHLIST を更新するときは:
 | ファイル | 役割 |
 |---|---|
 | `risk_metrics.py` | MaxDD / 最大連敗 / Sharpe / 資産曲線 / リカバリーファクター |
-| `scan_walkforward.py` | 225銘柄 × 6戦略 × 3 fold の Walk-forward バックテスト → CSV |
+| `scan_walkforward.py` | ユニバース (~1800銘柄) × 6戦略 × 3 fold の Walk-forward バックテスト → CSV |
 | `build_watchlist.py` | CSV を読んでフィルター・ランキング → WATCHLIST 提案の Python コード |
+| `verify_watchlist.py` | 提案ファイルで check_signals_stop/breakout を monkey-patch 実行 → 検証 HTML 自動表示 |
 
 ### 13.2 Walk-forward の fold 設計 (`scan_walkforward.FOLDS`)
 
@@ -327,8 +328,21 @@ python build_watchlist.py --max-dd 10           # MaxDD上限10%
 python build_watchlist.py --min-sharpe 0.3      # Sharpe下限0.3
 # → watchlist_proposal_<date>.py  が出力される
 
-# Step 3: 提案を check_signals_stop.py / check_signals_breakout.py に貼り付け
-# Step 4: run_signals.py --days 365 で比較検証
+# Step 3: 提案 WATCHLIST で検証バックテスト (HTML 自動オープン)
+python verify_watchlist.py                      # 最新の提案ファイルを自動検出
+python verify_watchlist.py --days 180           # 期間指定
+python verify_watchlist.py --stop-only          # 逆指値Bのみ
+python verify_watchlist.py --no-browser         # ブラウザ起動しない
+# → signals_verification_<date>.html  が出力・オープン
+# 既存コードは一切変更せず、ランタイムで _stop.WATCHLIST / _brk.WATCHLIST を
+# monkey-patch して run_signals のバックテスト経路を再利用する。
+
+# Step 4: 結果に納得したら手動で差し替え
+# watchlist_proposal_<date>.py の STOP_WATCHLIST / BRK_WATCHLIST を
+# check_signals_stop.py / check_signals_breakout.py の WATCHLIST に貼り付け
+
+# Step 5: 旧 vs 新の比較 (必要なら)
+python run_signals.py --days 365                # 差し替え後で最終確認
 ```
 
 ### 13.6 WATCHLIST を更新する際のチェックリスト
