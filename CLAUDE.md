@@ -230,6 +230,9 @@ WATCHLIST を更新するときは:
 - 保有中ポジションの追跡機能の再導入 (§6 参照)
 - シグナル判定日を "翌営業日" に戻すこと (`1182492` で -2 → -1 に直した)
 - `--date` 指定時に「アクティブシグナルを混在」させること (`300b166` で revert 済み)
+- **現 WATCHLIST の選定方法 (同一期間でスキャン→再バックテスト)** をそのまま
+  使い続けること。これは in-sample bias で勝率/PF が異常に高く出る。
+  再選定するなら **Walk-forward (§13)** を使う。
 
 ---
 
@@ -250,3 +253,119 @@ WATCHLIST を更新するときは:
 そのまま kabu API に流し込む場合は、`check_signal_on_date` の返り値
 (`order_price` / `stop_price` / `target_price`) をそのまま `sendorder` に渡せる
 設計になっていることを押さえておいてください。接続先は デモ `18081` / 本番 `18080`。
+
+---
+
+## 13. Walk-forward 銘柄選定 (新パイプライン)
+
+既存の「スキャン→同期間再バックテスト」が持つ **in-sample bias** を排除するため、
+時期をずらした Walk-forward 方式で WATCHLIST を再選定する 3 スクリプトを追加しました。
+**今後 WATCHLIST を差し替えるときは必ずこのパイプラインを使ってください。**
+
+### 13.1 ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| `risk_metrics.py` | MaxDD / 最大連敗 / Sharpe / 資産曲線 / リカバリーファクター |
+| `scan_walkforward.py` | 225銘柄 × 6戦略 × 3 fold の Walk-forward バックテスト → CSV |
+| `build_watchlist.py` | CSV を読んでフィルター・ランキング → WATCHLIST 提案の Python コード |
+
+### 13.2 Walk-forward の fold 設計 (`scan_walkforward.FOLDS`)
+
+```
+Fold 1: TRAIN 730〜540日前  /  TEST 540〜360日前
+Fold 2: TRAIN 540〜360日前  /  TEST 360〜180日前
+Fold 3: TRAIN 360〜180日前  /  TEST 180〜  0日前
+```
+
+- TRAIN と TEST は非重複
+- TRAIN (選定) は「そのパターンで銘柄を選ぶ期間」、TEST は「擬似的な未来データ」
+- 3 fold 全てで TRAIN+TEST を通過した銘柄 = **時期依存しない本物の候補**
+
+### 13.3 合格条件 (`scan_walkforward.py:65-70`)
+
+| 区分 | trades | PF | win_rate | total_pnl |
+|------|--------|-----|----------|-----------|
+| TRAIN | ≥3 | ≥1.5 | ≥55% | >0 |
+| TEST  | ≥2 | ≥1.2 | ≥45% | >0 |
+
+閾値を弄るときはここを直接編集するか、引数化してください。
+
+### 13.4 実装のキモ: df トリミングで _TODAY を触らない
+
+`run_limit_backtest` は内部で `_TODAY - backtest_days` を cutoff に使う前提設計。
+Walk-forward ではウィンドウごとに異なる start/end が必要ですが、`_TODAY` の
+monkey-patch はスレッド間で競合するので、代わりに:
+
+1. `full_df[full_df.index <= window_end]` で df 後方を事前トリミング
+2. `backtest_days = (_TODAY - window_start).days` で start を指定
+
+これで `_TODAY` を触らずに任意ウィンドウを切り出せます。ThreadPoolExecutor で
+並列実行しても安全です (`scan_walkforward._run_window` 参照)。
+
+### 13.5 実行手順
+
+```
+# Step 1: Walk-forward スキャン (225銘柄 × 6戦略 × 3 fold)
+python scan_walkforward.py                      # 両戦略ファミリー
+python scan_walkforward.py --family stop        # 逆指値Bのみ
+python scan_walkforward.py --family breakout    # ブレイクアウトのみ
+python scan_walkforward.py --workers 8          # 並列数
+# → walkforward_results/walkforward_<STRATEGY>_<date>.csv  が出力される
+
+# Step 2: CSV から WATCHLIST 提案を生成
+python build_watchlist.py                       # 戦略あたり10銘柄
+python build_watchlist.py --per-strategy 8      # 戦略あたり8銘柄
+python build_watchlist.py --max-dd 10           # MaxDD上限10%
+python build_watchlist.py --min-sharpe 0.3      # Sharpe下限0.3
+# → watchlist_proposal_<date>.py  が出力される
+
+# Step 3: 提案を check_signals_stop.py / check_signals_breakout.py に貼り付け
+# Step 4: run_signals.py --days 365 で比較検証
+```
+
+### 13.6 WATCHLIST を更新する際のチェックリスト
+
+1. `scan_walkforward.py` を実行 → 全 6 戦略の CSV が出ているか
+2. `build_watchlist.py` を実行 → `watchlist_proposal_<date>.py` を確認
+3. 提案の中に **folds_passed=3 の銘柄** が最低でも数銘柄あるか?
+   (ゼロの場合、閾値が厳しすぎる or 相場環境が異常)
+4. `max_drawdown_pct` が全銘柄 15% 以下に収まっているか
+5. `train_to_test_degradation_pct` が極端に高い (>80%) 銘柄は除外推奨
+   → overfit の兆候
+6. 新 WATCHLIST を `check_signals_stop.py` / `check_signals_breakout.py` に貼り付け
+7. `python run_signals.py --days 365` で旧 WATCHLIST と成績を比較
+8. 勝率/PF が現実的な値 (50-65% / 1.2-2.0) に落ち着いたら成功
+
+### 13.7 WATCHLIST の「世代管理」
+
+スキャン結果 CSV は日付付きなので、過去の選定結果を残せます。
+
+```
+walkforward_results/
+  walkforward_MACD_2026-04-11.csv
+  walkforward_MACD_2026-07-11.csv   ← 3ヶ月後の再選定
+  ...
+watchlist_proposal_2026-04-11.py
+watchlist_proposal_2026-07-11.py    ← 世代比較可能
+```
+
+「前回選定銘柄が次のスキャンでも生き残るか」を見ることで、選定の再現性を
+継続的に検証できます。理想的には **3ヶ月ごと** に再実行するのがおすすめ。
+
+### 13.8 既知の限界
+
+- **銘柄ユニバース**: 現在 `symbols_all.SYMBOLS` = 日経225 の 225 銘柄。
+  過去に `symbols_listed_all.py` (1800 銘柄) を使っていた痕跡が
+  `scan_entry_compare.py:57` にあるが、ファイルは存在しない。ユニバースを
+  広げたい場合はまずこのファイルを再生成する必要あり。
+- **FIXED_QTY=100 固定**: 銘柄間リスクが不均等。Walk-forward 検証も 100 株固定の
+  前提で行うので、高ボラ銘柄が不利。将来的に volatility-parity 化する余地あり。
+- **ベンチマーク比較なし**: 日経平均との相対パフォーマンスは見ていない。
+  ブル相場で "勝った" 戦略がベンチマーク未達のケースを拾えない。
+- **セクター制約なし**: 地銀 7-8 銘柄のような集中が起きうる。出力 CSV に
+  セクター情報は無いので、目視で確認するか将来的に `yfinance` 等で sector
+  を追加する必要がある。
+- **データキャッシュ**: `backtest_limit_entry.fetch` は日次キャッシュ
+  (`.rsi2_cache/`) を使う。2回目以降の実行は高速だが、古いキャッシュが
+  あると古いデータでスキャンしてしまうので、定期的に削除推奨。
