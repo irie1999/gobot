@@ -42,6 +42,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from daytrade_symbols import DAYTRADE_SYMBOLS
+
 JST = timezone(timedelta(hours=9))
 
 # ── パラメータ ──────────────────────────────────────────────
@@ -67,18 +69,7 @@ AM_END   = dtime(11, 30)
 PM_START = dtime(12, 30)
 PM_END   = dtime(15, 0)
 
-DEFAULT_SYMBOLS = [
-    ("7203.T", "トヨタ自動車"),
-    ("9984.T", "ソフトバンクG"),
-    ("8306.T", "三菱UFJ"),
-    ("6758.T", "ソニーG"),
-    ("9432.T", "NTT"),
-    ("6098.T", "リクルートHD"),
-    ("8035.T", "東京エレクトロン"),
-    ("6861.T", "キーエンス"),
-    ("7974.T", "任天堂"),
-    ("8001.T", "伊藤忠商事"),
-]
+DEFAULT_SYMBOLS = DAYTRADE_SYMBOLS  # 共通リスト (60銘柄)
 
 
 # ─────────────────────────────────────────────────────────────
