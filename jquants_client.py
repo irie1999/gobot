@@ -470,6 +470,131 @@ def _cmd_daily(args: argparse.Namespace) -> None:
         print(df[cols].tail(5).to_string(index=False))
 
 
+def _cmd_diagnose(args: argparse.Namespace) -> None:
+    """
+    認証方法を総当たりで試す診断モード。
+    J-Quants の仕様が不明な時に、どの認証ヘッダー/パラメータ形式が
+    通るかを自動判定する。
+    """
+    token = os.environ.get("JQUANTS_API_KEY") or os.environ.get("JQUANTS_ID_TOKEN") \
+        or os.environ.get("JQUANTS_REFRESH_TOKEN")
+    if not token:
+        print("[ERROR] JQUANTS_API_KEY / JQUANTS_ID_TOKEN / JQUANTS_REFRESH_TOKEN "
+              "のいずれかを .env or 環境変数に設定してください", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"診断対象トークン: 長さ {len(token)}, 先頭 {token[:10]}..., 末尾 ...{token[-5:]}")
+    print()
+
+    test_url = f"{JQUANTS_BASE_URL}/listed/info"
+    test_params = {"code": "72030"}
+
+    # ── ① 各種 Authorization ヘッダー形式を試す ───────────────
+    print("━" * 60)
+    print("[1] ヘッダー/クエリで直接認証できるか")
+    print("━" * 60)
+
+    direct_variants = [
+        ("Authorization: Bearer <token>",
+         {"Authorization": f"Bearer {token}"}, {}),
+        ("Authorization: Token <token>",
+         {"Authorization": f"Token {token}"}, {}),
+        ("Authorization: ApiKey <token>",
+         {"Authorization": f"ApiKey {token}"}, {}),
+        ("Authorization: <token>",
+         {"Authorization": token}, {}),
+        ("X-API-KEY: <token>",
+         {"X-API-KEY": token}, {}),
+        ("x-api-key: <token>",
+         {"x-api-key": token}, {}),
+        ("X-API-Token: <token>",
+         {"X-API-Token": token}, {}),
+        ("query param apikey",
+         {}, {"apikey": token}),
+        ("query param api_key",
+         {}, {"api_key": token}),
+        ("query param key",
+         {}, {"key": token}),
+    ]
+
+    hit = None
+    for name, headers, extra_params in direct_variants:
+        try:
+            params = dict(test_params)
+            params.update(extra_params)
+            r = requests.get(test_url, headers=headers, params=params,
+                             timeout=REQUEST_TIMEOUT)
+            mark = "✓" if r.status_code == 200 else " "
+            msg = (r.text[:80] + "...") if len(r.text) > 80 else r.text
+            print(f"  {mark} {name:<35} → {r.status_code} {msg}")
+            if r.status_code == 200 and hit is None:
+                hit = name
+        except Exception as e:
+            print(f"    {name:<35} → EXCEPTION {e}")
+
+    if hit:
+        print()
+        print(f"✓✓ 直接認証成功: {hit}")
+        return
+
+    # ── ② トークン交換エンドポイントを試す ────────────────
+    print()
+    print("━" * 60)
+    print("[2] トークン交換 → ID Token 取得 のパターン")
+    print("━" * 60)
+
+    exchange_variants = [
+        # (description, method, path, headers, params, body)
+        ("POST /token/auth_refresh  query param (現行実装)",
+         "POST", "/token/auth_refresh",
+         {}, {"refreshtoken": token}, None),
+        ("POST /token/auth_refresh  body JSON",
+         "POST", "/token/auth_refresh",
+         {"Content-Type": "application/json"}, {},
+         {"refreshtoken": token}),
+        ("POST /token/auth_refresh  body JSON (apikey key)",
+         "POST", "/token/auth_refresh",
+         {"Content-Type": "application/json"}, {},
+         {"apikey": token}),
+        ("GET  /token/auth_refresh",
+         "GET", "/token/auth_refresh",
+         {}, {"refreshtoken": token}, None),
+    ]
+
+    for name, method, path, headers, params, body in exchange_variants:
+        try:
+            url = f"{JQUANTS_BASE_URL}{path}"
+            if method == "GET":
+                r = requests.get(url, headers=headers, params=params,
+                                 timeout=REQUEST_TIMEOUT)
+            else:
+                r = requests.post(url, headers=headers, params=params,
+                                  json=body, timeout=REQUEST_TIMEOUT)
+            mark = "✓" if r.status_code == 200 else " "
+            msg = (r.text[:80] + "...") if len(r.text) > 80 else r.text
+            print(f"  {mark} {name:<50} → {r.status_code} {msg}")
+            if r.status_code == 200:
+                print(f"  ↳ レスポンス: {r.text[:300]}")
+        except Exception as e:
+            print(f"    {name:<50} → EXCEPTION {e}")
+
+    # ── ③ その他の情報エンドポイントで 200 が返るか ─────────
+    print()
+    print("━" * 60)
+    print("[3] 参考情報: ベースURL・エンドポイント存在確認")
+    print("━" * 60)
+    for path in ["/listed/info", "/prices/daily_quotes"]:
+        try:
+            r = requests.get(f"{JQUANTS_BASE_URL}{path}", timeout=10)
+            print(f"  {path:<30} (無認証) → {r.status_code}")
+        except Exception as e:
+            print(f"  {path:<30} → EXCEPTION {e}")
+
+    print()
+    print("診断完了。どの方法も 200 にならない場合は、")
+    print("Dashboard > API Documentation で公式の認証方法を確認してください。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="J-Quants API クライアント CLI")
     sub = parser.add_subparsers(dest="cmd")
@@ -487,6 +612,10 @@ def main() -> None:
     p_daily.add_argument("--from-date", dest="from_date", help="YYYY-MM-DD")
     p_daily.add_argument("--to-date", dest="to_date", help="YYYY-MM-DD")
     p_daily.set_defaults(func=_cmd_daily)
+
+    p_diag = sub.add_parser("diagnose",
+                            help="認証方法を総当たりで診断")
+    p_diag.set_defaults(func=_cmd_diagnose)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):
