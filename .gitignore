@@ -10,6 +10,9 @@ report_combined_*.html
 result_summary_*.txt
 daytrade_*_*.html
 
+# downloaded data (too large for git)
+data/
+
 # credentials (never commit)
 .env
 .env.local
