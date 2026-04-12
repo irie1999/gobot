@@ -310,28 +310,52 @@ INTRADAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
     """
-    J-Quants 分足レスポンスを yfinance 互換形式に変換。
+    J-Quants V2 分足レスポンスを yfinance 互換形式に変換。
     Index: tz-naive DatetimeIndex (JST前提)
     Columns: [open, high, low, close, volume]
+
+    J-Quants V2 の分足レスポンスは:
+      - Date="2026-04-10", Time="09:00" が分離
+      - OHLCV が省略名: O, H, L, C, Vo
+      - jquants_client.py で正規化済みの場合: DateTime, Open, High, Low, Close, Volume
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # DateTime カラムを探す
+    # ── DateTime 列の解決 ──────────────────────────────────
     dt_col = None
-    for cand in ["DateTime", "datetime", "Datetime", "date_time",
-                  "Time", "time", "Date", "date"]:
-        if cand in df.columns:
-            dt_col = cand
-            break
+
+    # パターン1: 既に "DateTime" 列がある (client で結合済み)
+    if "DateTime" in df.columns:
+        dt_col = "DateTime"
+    # パターン2: Date + Time が分離 (生データ)
+    elif "Date" in df.columns and "Time" in df.columns:
+        df["DateTime"] = pd.to_datetime(
+            df["Date"].astype(str) + " " + df["Time"].astype(str),
+            format="%Y-%m-%d %H:%M",
+        )
+        dt_col = "DateTime"
+    # パターン3: その他の名前
+    else:
+        for cand in ["datetime", "Datetime", "date_time", "Date", "date"]:
+            if cand in df.columns:
+                dt_col = cand
+                break
+
     if dt_col is None:
         return pd.DataFrame()
 
     df[dt_col] = pd.to_datetime(df[dt_col])
 
-    # OHLCV カラムマッピング
+    # ── OHLCV カラムマッピング ─────────────────────────────
+    # 省略名 O/H/L/C/Vo → 正規化
+    rename_map = {"O": "Open", "H": "High", "L": "Low",
+                  "C": "Close", "Vo": "Volume"}
+    df = df.rename(columns={k: v for k, v in rename_map.items()
+                            if k in df.columns})
+
     col_map: dict[str, str] | None = None
     for cols in [
         ("Open", "High", "Low", "Close", "Volume"),

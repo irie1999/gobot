@@ -351,20 +351,30 @@ class JQuantsClient:
 
         df = pd.DataFrame(rows)
 
-        # DateTime カラムをパース
-        dt_col = None
-        for cand in ["DateTime", "datetime", "Datetime", "date_time",
-                      "Time", "time", "Date", "date"]:
-            if cand in df.columns:
-                dt_col = cand
-                break
-        if dt_col:
-            df[dt_col] = pd.to_datetime(df[dt_col])
-            df = df.sort_values(dt_col).reset_index(drop=True)
+        # J-Quants V2 分足: Date="2026-04-10", Time="09:00" が分離
+        # → "DateTime" 列に結合
+        if "Date" in df.columns and "Time" in df.columns:
+            df["DateTime"] = pd.to_datetime(
+                df["Date"].astype(str) + " " + df["Time"].astype(str),
+                format="%Y-%m-%d %H:%M",
+            )
+            df = df.sort_values("DateTime").reset_index(drop=True)
+        else:
+            # DateTime が1列の場合 (将来の仕様変更に備える)
+            for cand in ["DateTime", "datetime", "Datetime", "date_time"]:
+                if cand in df.columns:
+                    df[cand] = pd.to_datetime(df[cand])
+                    df = df.sort_values(cand).reset_index(drop=True)
+                    break
+
+        # V2 省略カラム名を正式名に変換: O→Open, H→High, L→Low, C→Close, Vo→Volume
+        rename_map = {"O": "Open", "H": "High", "L": "Low",
+                      "C": "Close", "Vo": "Volume", "Va": "TurnoverValue"}
+        df = df.rename(columns={k: v for k, v in rename_map.items()
+                                if k in df.columns})
 
         # 数値列を float 化
-        for col in ["Open", "High", "Low", "Close", "Volume",
-                     "TurnoverValue", "open", "high", "low", "close", "volume"]:
+        for col in ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
