@@ -65,6 +65,7 @@ _load_dotenv()
 
 # ── ORB パラメータ ──────────────────────────────────────────
 OR_MINUTES     = 30       # オープニングレンジ: 9:00-9:30
+GAP_MAX_PCT    = 2.0      # ギャップフィルター: 前日比2%超は見送り
 TARGET_K       = 1.5      # 目標 = エントリー + OR幅 × K
 TRAILING_TRIGGER = 0.5    # 含み益50%でトレーリング発動
 FORCE_CLOSE_TIME = dtime(14, 55)
@@ -187,10 +188,21 @@ class ORBTracker:
             log.info("OR確定: 高値=%.0f 安値=%.0f 幅=%.0f",
                      self.or_hi, self.or_lo, self.or_w)
 
-    def check_signal(self, now: datetime) -> dict | None:
-        """ORBシグナルを判定。"""
+    def check_signal(self, now: datetime,
+                     prev_close: float | None = None) -> dict | None:
+        """ORBシグナルを判定 (ギャップフィルター付き)。"""
         if self.signal_fired or not self.or_confirmed:
             return None
+        # ギャップフィルター
+        if prev_close and prev_close > 0 and self.bars:
+            open_p = self.bars[0]["open"]
+            gap = abs(open_p - prev_close) / prev_close * 100
+            if gap > GAP_MAX_PCT:
+                if not self.signal_fired:
+                    self.signal_fired = True  # この日は取引しない
+                    log.info("ギャップ %.1f%% > %.1f%% → 本日見送り",
+                             gap, GAP_MAX_PCT)
+                return None
         if now.time() < dtime(9, 30) or now.time() >= ENTRY_CUTOFF:
             return None
         if len(self.bars) < 2:
@@ -266,13 +278,25 @@ def run(args):
     tracker = ORBTracker()
     pos: Position | None = None
     trades: list[dict] = []
+    prev_close: float | None = None
+
+    # 前日終値を取得 (ギャップフィルター用)
+    try:
+        board = client.get_board(symbol)
+        prev_close = board.get("PreviousClose")
+        if prev_close:
+            prev_close = float(prev_close)
+            log.info("前日終値: %.0f", prev_close)
+    except Exception:
+        pass
 
     mode = "DRY RUN" if dry else "本番"
     log.info("=" * 50)
     log.info("  ORB デイトレボット [%s]", mode)
     log.info("  銘柄: %s / 予算: %s円 / リスク: %s円",
              symbol, f"{budget:,}", f"{max_risk:,}")
-    log.info("  OR: 9:00-9:30 / 目標: OR幅×%.1f / 前場限定", TARGET_K)
+    log.info("  OR: 9:00-9:30 / 目標: OR幅×%.1f / Gap≤%.1f%% / 前場限定",
+             TARGET_K, GAP_MAX_PCT)
     log.info("=" * 50)
 
     while True:
@@ -329,7 +353,7 @@ def run(args):
 
         # ── 未保有 → シグナルチェック ─────────────────
         elif pos is None:
-            sig = tracker.check_signal(now)
+            sig = tracker.check_signal(now, prev_close=prev_close)
             if sig:
                 qty = calc_qty(price, sig["stop"], budget, max_risk)
                 log.info("★ ORBシグナル! 価格=%.0f OR高値=%.0f "

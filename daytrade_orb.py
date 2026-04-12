@@ -58,6 +58,9 @@ ENTRY_CUTOFF  = dtime(14, 30)   # 新規エントリー打ち切り
 FIXED_QTY     = 100         # 固定株数
 INITIAL_CASH  = 1_000_000   # 初期資金 (評価用)
 
+# フィルター
+GAP_MAX_PCT   = 2.0         # 前日比ギャップ上限 (%)。超えたら見送り
+
 # 立会時間
 AM_START = dtime(9, 0)
 AM_END   = dtime(11, 30)
@@ -72,7 +75,8 @@ DEFAULT_SYMBOLS = DAYTRADE_SYMBOLS  # 共通リスト (60銘柄)
 # ─────────────────────────────────────────────────────────────
 
 def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
-                     or_minutes: int) -> dict | None:
+                     or_minutes: int,
+                     prev_close: float | None = None) -> dict | None:
     """1日分のORBバックテスト。エントリー0〜1回 (1ポジ/日)。"""
     or_end = (datetime.combine(datetime.today(), AM_START)
               + timedelta(minutes=or_minutes)).time()
@@ -87,6 +91,13 @@ def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
     or_w  = or_hi - or_lo
     if or_w <= 0:
         return None
+
+    # ギャップフィルター: 前日比が大きい日は見送り
+    if prev_close and prev_close > 0:
+        open_price = float(or_bars.iloc[0]["open"])
+        gap_pct = abs(open_price - prev_close) / prev_close * 100
+        if gap_pct > GAP_MAX_PCT:
+            return None
 
     # 状態
     state    = "idle"       # idle / in_pos / closed
@@ -216,10 +227,15 @@ def backtest_symbol(symbol: str, name: str, df: pd.DataFrame,
         return None
 
     trades = []
-    for date, day_df in daily.items():
-        t = backtest_orb_day(day_df, target_k, or_minutes)
+    dates = sorted(daily.keys())
+    prev_close = None
+    for date in dates:
+        day_df = daily[date]
+        t = backtest_orb_day(day_df, target_k, or_minutes,
+                             prev_close=prev_close)
         if t:
             trades.append(t)
+        prev_close = float(day_df.iloc[-1]["close"])
 
     if not trades:
         return dict(symbol=symbol, name=name, trades=[], stats=_empty_stats())
