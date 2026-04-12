@@ -316,9 +316,11 @@ def fetch_intraday(symbol: str, days: int = 60,
     while current < now:
         chunk_end = min(current + timedelta(days=30), now)
         chunk_idx += 1
+        from_d = current.strftime("%Y%m%d")
+        to_d = chunk_end.strftime("%Y%m%d")
         try:
             raw = fetch_method(
-                start_dt=current, end_dt=chunk_end,
+                code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
             )
             if raw is not None and not raw.empty:
                 # 銘柄フィルタ

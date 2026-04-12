@@ -120,10 +120,12 @@ def _cmd_minute(args):
         "15m": "get_eq_bars_15minute",
     }
     method_name = method_map.get(args.interval, "get_eq_bars_5minute")
-    print(f"{args.interval} 取得中: {args.code}  {start.date()} 〜 {now.date()}")
+    from_d = start.strftime("%Y%m%d")
+    to_d = now.strftime("%Y%m%d")
+    print(f"{args.interval} 取得中: {args.code}  {from_d} 〜 {to_d}")
     try:
         method = getattr(cli, method_name)
-        df = method(start_dt=start, end_dt=now)
+        df = method(code=args.code, from_yyyymmdd=from_d, to_yyyymmdd=to_d)
         if df is not None and "Code" in df.columns:
             df = df[df["Code"].astype(str).str.startswith(args.code[:4])]
         if df is not None and not df.empty:
