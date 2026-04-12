@@ -16,9 +16,15 @@ for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
         break
 
 df = pd.read_csv("scan_orb_result.csv")
+BUDGET = 600_000
+max_price = BUDGET / 100  # 6,000円
+
 g = df[(df["n"] >= 10) & (df["pf"] < 100) & (df["pf"] >= 1.5)]
+# 株価フィルタ: 60万で100株買える銘柄のみ
+if "price" in df.columns:
+    g = g[g["price"] <= max_price]
 g = g.sort_values("pf", ascending=False)
-print(f"{len(g)}銘柄")
+print(f"{len(g)}銘柄 (株価{max_price:,.0f}円以下)")
 
 # J-Quants から銘柄名を取得
 names = {}
