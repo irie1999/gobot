@@ -415,6 +415,8 @@ def main() -> None:
     parser.add_argument("--budget", type=int, default=0,
                         help="投資資金 (円)。100株で買える銘柄のみに絞り込み "
                              "(例: --budget 600000 → 株価6000円以下)")
+    parser.add_argument("--all-local", action="store_true",
+                        help="ローカル保存済みの全銘柄を対象にする (data/minute_5m/)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -422,7 +424,20 @@ def main() -> None:
         print("[info] yfinance 5分足は最大60日 → 60日に調整", file=sys.stderr)
         args.days = 60
 
-    if args.symbols:
+    if args.all_local:
+        from daytrade_data import available_local_symbols
+        local_codes = available_local_symbols()
+        # J-Quants 5桁コード → yfinance 4桁.T に変換
+        targets = []
+        for code in local_codes:
+            if len(code) == 5 and code.endswith("0") and code.isdigit():
+                yf = code[:4] + ".T"
+            else:
+                yf = code + ".T"
+            targets.append((yf, yf))
+        args.source = "local"
+        print(f"ローカル全銘柄モード: {len(targets)}銘柄", flush=True)
+    elif args.symbols:
         targets = [(s, s) for s in args.symbols]
     else:
         targets = DEFAULT_SYMBOLS
