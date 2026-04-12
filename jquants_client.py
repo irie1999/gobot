@@ -284,6 +284,93 @@ class JQuantsClient:
         return df
 
     # ─────────────────────────────────────────────────────────
+    # エンドポイント: 分足株価 (アドオン)
+    # ─────────────────────────────────────────────────────────
+
+    def get_minute_quotes(
+        self,
+        code: str,
+        date: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame:
+        """
+        1分足 OHLCV を取得 (V2: /equities/bars/minute)。
+        分足・ティックアドオン契約が必要。
+
+        引数:
+          code      : 5桁銘柄コード (例: "72030")
+          date      : 特定日のみ取得 (YYYY-MM-DD)
+          from_date : 取得開始日 (YYYY-MM-DD)
+          to_date   : 取得終了日 (YYYY-MM-DD)
+
+        戻り値:
+          DataFrame (DateTime, Code, Open, High, Low, Close, Volume 等)
+
+        注意:
+          - 大量データなのでページネーションが発生する
+          - 長期間をまとめて取ると遅い → 日付チャンクで取るのが安全
+        """
+        params: dict = {"code": code}
+        if date:
+            params["date"] = date
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        path = "/equities/bars/minute"
+        data = self._get(path, params=params)
+
+        # レスポンスキーの候補
+        rows: list[dict] = []
+        for key in ("minute_quotes", "bars", "data", "quotes",
+                     "minute_bars", "results"):
+            if key in data:
+                rows.extend(data[key] or [])
+                break
+        else:
+            if isinstance(data, list):
+                rows = data
+
+        # ページネーション
+        pagination_key = data.get("pagination_key") if isinstance(data, dict) else None
+        while pagination_key:
+            page_params = dict(params)
+            page_params["pagination_key"] = pagination_key
+            page = self._get(path, params=page_params)
+            for key in ("minute_quotes", "bars", "data", "quotes",
+                         "minute_bars", "results"):
+                if key in page:
+                    rows.extend(page[key] or [])
+                    break
+            pagination_key = page.get("pagination_key") if isinstance(page, dict) else None
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+
+        # DateTime カラムをパース
+        dt_col = None
+        for cand in ["DateTime", "datetime", "Datetime", "date_time",
+                      "Time", "time", "Date", "date"]:
+            if cand in df.columns:
+                dt_col = cand
+                break
+        if dt_col:
+            df[dt_col] = pd.to_datetime(df[dt_col])
+            df = df.sort_values(dt_col).reset_index(drop=True)
+
+        # 数値列を float 化
+        for col in ["Open", "High", "Low", "Close", "Volume",
+                     "TurnoverValue", "open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df
+
+    # ─────────────────────────────────────────────────────────
     # エンドポイント: 財務・その他
     # ─────────────────────────────────────────────────────────
 

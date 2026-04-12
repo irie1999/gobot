@@ -301,6 +301,198 @@ def fetch_daily_batch(
 
 
 # ─────────────────────────────────────────────────────────────
+# 分足取得 (アドオン)
+# ─────────────────────────────────────────────────────────────
+
+INTRADAY_CACHE_DIR = CACHE_ROOT / "minute"
+INTRADAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    J-Quants 分足レスポンスを yfinance 互換形式に変換。
+    Index: tz-naive DatetimeIndex (JST前提)
+    Columns: [open, high, low, close, volume]
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+
+    # DateTime カラムを探す
+    dt_col = None
+    for cand in ["DateTime", "datetime", "Datetime", "date_time",
+                  "Time", "time", "Date", "date"]:
+        if cand in df.columns:
+            dt_col = cand
+            break
+    if dt_col is None:
+        return pd.DataFrame()
+
+    df[dt_col] = pd.to_datetime(df[dt_col])
+
+    # OHLCV カラムマッピング
+    col_map: dict[str, str] | None = None
+    for cols in [
+        ("Open", "High", "Low", "Close", "Volume"),
+        ("open", "high", "low", "close", "volume"),
+    ]:
+        if all(c in df.columns for c in cols):
+            col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
+            break
+    if col_map is None:
+        return pd.DataFrame()
+
+    out = pd.DataFrame({
+        new: pd.to_numeric(df[old], errors="coerce")
+        for old, new in col_map.items()
+    }, index=df[dt_col].values)
+
+    # tz 情報を削除 (tz-naive に統一)
+    if out.index.tz is not None:
+        out.index = out.index.tz_convert("Asia/Tokyo").tz_localize(None)
+
+    out = out.dropna(subset=["close"])
+    out.index.name = "DateTime"
+    out = out.sort_index()
+    return out
+
+
+def _resample_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
+    """1分足 → 5分足にリサンプル。"""
+    if df_1m.empty:
+        return df_1m
+    df_5m = df_1m.resample("5min", label="left", closed="left").agg({
+        "open":   "first",
+        "high":   "max",
+        "low":    "min",
+        "close":  "last",
+        "volume": "sum",
+    }).dropna(subset=["close"])
+    return df_5m
+
+
+def _intraday_cache_path(jq_code: str) -> Path:
+    return INTRADAY_CACHE_DIR / f"{jq_code}.pkl"
+
+
+def fetch_intraday(
+    symbol: str,
+    days: int = 60,
+    interval: str = "5m",
+    use_cache: bool = True,
+) -> pd.DataFrame | None:
+    """
+    J-Quants V2 で分足データを取得。1分足を取得して指定 interval にリサンプル。
+
+    Args:
+        symbol   : "7203.T" or "72030"
+        days     : 取得日数 (最大730 = 2年)
+        interval : "1m" or "5m" (デフォルト 5m)
+        use_cache: True ならキャッシュ優先
+
+    Returns:
+        DataFrame (open/high/low/close/volume, tz-naive DatetimeIndex)
+    """
+    jq_code = yf_to_jquants(symbol)
+    cache_path = _intraday_cache_path(jq_code)
+
+    # キャッシュチェック
+    if use_cache and cache_path.exists():
+        try:
+            mtime = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=JST)
+            if mtime.date() == datetime.now(JST).date():
+                cached = pickle.loads(cache_path.read_bytes())
+                if isinstance(cached, pd.DataFrame) and not cached.empty:
+                    df_1m = _normalize_minute(cached)
+                    if not df_1m.empty:
+                        cutoff = pd.Timestamp(
+                            datetime.now(JST).date() - timedelta(days=days)
+                        )
+                        df_1m = df_1m[df_1m.index >= cutoff]
+                        return _resample_to_5m(df_1m) if interval == "5m" else df_1m
+        except Exception as e:
+            print(f"  [cache] intraday load error {jq_code}: {e}", file=sys.stderr)
+
+    # API から取得 (日付を30日ずつチャンクで取得、大量データ対応)
+    now = datetime.now(JST)
+    total_start = now - timedelta(days=days)
+    chunk_size = 30  # 30日ずつ取得
+
+    cli = get_client()
+    all_raws: list[pd.DataFrame] = []
+
+    current = total_start
+    chunk_idx = 0
+    while current < now:
+        chunk_end = min(current + timedelta(days=chunk_size), now)
+        from_d = current.strftime("%Y-%m-%d")
+        to_d = chunk_end.strftime("%Y-%m-%d")
+        chunk_idx += 1
+
+        try:
+            raw = cli.get_minute_quotes(
+                code=jq_code, from_date=from_d, to_date=to_d
+            )
+            if not raw.empty:
+                all_raws.append(raw)
+                print(f"    chunk {chunk_idx}: {from_d}〜{to_d} → {len(raw)}行",
+                      flush=True)
+        except JQuantsError as e:
+            print(f"    chunk {chunk_idx}: {from_d}〜{to_d} → ERROR: {e}",
+                  file=sys.stderr)
+
+        current = chunk_end + timedelta(days=1)
+
+    if not all_raws:
+        print(f"  [warn] {symbol}: 分足データなし", file=sys.stderr)
+        return None
+
+    combined = pd.concat(all_raws, ignore_index=True)
+
+    # キャッシュ保存
+    if use_cache:
+        try:
+            cache_path.write_bytes(pickle.dumps(combined))
+        except Exception as e:
+            print(f"  [cache] save error {jq_code}: {e}", file=sys.stderr)
+
+    # 正規化 + リサンプル
+    df_1m = _normalize_minute(combined)
+    if df_1m.empty:
+        return None
+
+    return _resample_to_5m(df_1m) if interval == "5m" else df_1m
+
+
+def fetch_intraday_batch(
+    symbols: list[str],
+    days: int = 60,
+    interval: str = "5m",
+    use_cache: bool = True,
+) -> dict[str, pd.DataFrame]:
+    """
+    複数銘柄の分足を取得。
+
+    Returns:
+        {symbol: DataFrame} (yfinance 形式の symbol をキーとする)
+    """
+    result: dict[str, pd.DataFrame] = {}
+    total = len(symbols)
+    for i, sym in enumerate(symbols, 1):
+        print(f"  [{i:>3}/{total}] {sym} 分足取得中...", flush=True)
+        df = fetch_intraday(sym, days=days, interval=interval,
+                            use_cache=use_cache)
+        if df is not None and not df.empty:
+            result[sym] = df
+            print(f"  [{i:>3}/{total}] {sym}: {len(df)}本 ({interval})", flush=True)
+        else:
+            print(f"  [{i:>3}/{total}] {sym}: データなし", flush=True)
+    print(f"  取得成功: {len(result)}/{total}銘柄", flush=True)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────
 
@@ -314,10 +506,14 @@ def _format_head_tail(df: pd.DataFrame, n: int = 5) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="J-Quants 高レベル日足取得ユーティリティ"
+        description="J-Quants 高レベル株価取得ユーティリティ"
     )
     parser.add_argument("symbols", nargs="*", help="銘柄コード (例: 7203.T 9984.T)")
     parser.add_argument("--days", type=int, default=365, help="取得日数")
+    parser.add_argument("--intraday", action="store_true",
+                        help="分足モード (1分足取得→5分足変換、アドオン契約必要)")
+    parser.add_argument("--interval", choices=["1m", "5m"], default="5m",
+                        help="分足の間隔 (--intraday 時)")
     parser.add_argument("--no-cache", action="store_true", help="キャッシュ無視")
     parser.add_argument("--no-adjust", action="store_true", help="分割調整なしで取得")
     parser.add_argument("--watchlist", action="store_true",
@@ -342,6 +538,49 @@ def main() -> None:
     use_cache = not args.no_cache
     use_adjust = not args.no_adjust
 
+    # ── 分足モード ──────────────────────────────────────────
+    if args.intraday:
+        mode = f"分足 ({args.interval})"
+        if len(symbols) == 1:
+            sym = symbols[0]
+            print(f"{mode} 取得: {sym} ({yf_to_jquants(sym)}) / {args.days}日")
+            df = fetch_intraday(sym, days=args.days, interval=args.interval,
+                                use_cache=use_cache)
+            if df is None or df.empty:
+                print("データなし")
+                return
+            print(f"\n取得結果: {len(df)}本 ({args.interval})")
+            if hasattr(df.index[0], "date"):
+                n_days = len(set(df.index.date))
+                print(f"  期間: {df.index[0]} 〜 {df.index[-1]}  ({n_days}営業日)")
+            if args.summary:
+                print(f"  最新終値: {df.iloc[-1]['close']:,.0f}")
+                print(f"  期間最高値: {df['high'].max():,.0f}")
+                print(f"  期間最安値: {df['low'].min():,.0f}")
+                print(f"  平均出来高/バー: {df['volume'].mean():,.0f}")
+                print(f"  バー数/日: {len(df) / max(n_days, 1):.0f}")
+            else:
+                print()
+                print(_format_head_tail(df))
+        else:
+            print(f"{mode} バッチ取得: {len(symbols)}銘柄 / {args.days}日")
+            dfs = fetch_intraday_batch(symbols, days=args.days,
+                                        interval=args.interval,
+                                        use_cache=use_cache)
+            print()
+            print(f"{'銘柄':<10} {'本数':>8} {'営業日':>5} {'開始':<20} {'終了':<20}")
+            print("-" * 72)
+            for sym in symbols:
+                if sym not in dfs:
+                    print(f"  {sym:<10} {'---':>8} (取得失敗)")
+                    continue
+                df = dfs[sym]
+                n_d = len(set(df.index.date)) if hasattr(df.index[0], "date") else 0
+                print(f"  {sym:<10} {len(df):>8} {n_d:>5} "
+                      f"{str(df.index[0]):<20} {str(df.index[-1]):<20}")
+        return
+
+    # ── 日足モード (デフォルト) ─────────────────────────────
     if len(symbols) == 1:
         sym = symbols[0]
         print(f"取得: {sym} ({yf_to_jquants(sym)}) / {args.days}日")
