@@ -31,7 +31,8 @@ try:
         if master is not None and not master.empty:
             for _, row in master.iterrows():
                 code = str(row.get("Code", ""))
-                name = str(row.get("CompanyName", ""))
+                # CoName (V2) or CompanyName (V1)
+                name = str(row.get("CoName", row.get("CompanyName", "")))
                 if len(code) >= 4 and name:
                     yf_code = code[:4] + ".T"
                     names[yf_code] = name
