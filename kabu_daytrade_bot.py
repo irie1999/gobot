@@ -1,35 +1,28 @@
 """
-kabu_daytrade_bot.py  ―  kabuステーション連携デイトレ自動売買ボット
+kabu_daytrade_bot.py  ―  ORB専用 kabuステーション自動売買ボット
 ==================================================================
-バックテスト済みの3戦略 (ORB / Pivot / RSI) を使い、
-kabuステーション REST API 経由で実際に売買する。
+バックテスト実績 PF 1.32 / 勝率 52.6% の ORB 戦略で、
+kabuステーション REST API 経由で実売買する。
+
+【ORB戦略】
+  1. 9:00-9:30 のオープニングレンジ (OR) を記録
+  2. 9:30 以降、5分足終値が OR 高値を上抜け → 買い
+  3. 損切り: OR 安値
+  4. 目標: エントリー + OR幅 × 1.5
+  5. トレーリング: 含み益50%で建値撤退に切替
+  6. 14:55 強制決済
+  7. 1日1ポジ制限
 
 【前提】
-  - kabuステーション が起動中 (localhost:18080 or 18081)
-  - .env に KABU_API_PASSWORD=... を設定
-  - 取引口座が有効
-
-【動作フロー】
-  8:55  起動 → トークン取得
-  9:00  前場開始 → 5分足を蓄積開始
-  9:30  ORB シグナル監視開始 (OR 確定後)
-  9:00~ Pivot/RSI シグナルも同時監視
-  シグナル発生 → 成行注文 (1日1ポジ制限)
-  保有中 → 損切り/目標/トレーリング監視
-  14:55 強制決済
-  15:00 日次レポート表示 → 終了
+  - kabuステーション が起動中
+  - .env に設定:
+      KABU_API_PASSWORD=your_password
+      KABU_BASE_URL=http://localhost:18080  (本番)
 
 【使い方】
-  python kabu_daytrade_bot.py                    # 本番 (実注文)
-  python kabu_daytrade_bot.py --dry-run          # ドライラン (注文しない)
-  python kabu_daytrade_bot.py --symbol 8306      # 特定銘柄
-  python kabu_daytrade_bot.py --budget 600000    # 予算指定
-
-【設定】
-  .env:
-    KABU_API_PASSWORD=your_password
-    KABU_BASE_URL=http://localhost:18080   # 本番
-    # KABU_BASE_URL=http://localhost:18081 # デモ
+  python kabu_daytrade_bot.py --dry-run --symbol 8306   # ドライラン
+  python kabu_daytrade_bot.py --symbol 8306              # 本番
+  python kabu_daytrade_bot.py --symbol 8306 --budget 600000
 """
 
 from __future__ import annotations
@@ -39,11 +32,9 @@ import logging
 import os
 import sys
 import time
-from collections import deque
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
 import requests
 
 JST = timezone(timedelta(hours=9))
@@ -55,250 +46,166 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
-# ── .env ローダ ─────────────────────────────────────────────
+# ── .env ────────────────────────────────────────────────────
 def _load_dotenv():
     for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
         if not p.exists():
             continue
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
-            return
-        except Exception:
-            pass
-
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+        return
 
 _load_dotenv()
 
+# ── ORB パラメータ ──────────────────────────────────────────
+OR_MINUTES     = 30       # オープニングレンジ: 9:00-9:30
+TARGET_K       = 1.5      # 目標 = エントリー + OR幅 × K
+TRAILING_TRIGGER = 0.5    # 含み益50%でトレーリング発動
+FORCE_CLOSE_TIME = dtime(14, 55)
+ENTRY_CUTOFF     = dtime(11, 0)  # 前場のみ
+
 
 # ─────────────────────────────────────────────────────────────
-# kabuステーション API クライアント
+# kabuステーション API
 # ─────────────────────────────────────────────────────────────
 
 class KabuClient:
-    """kabuステーション REST API クライアント。"""
-
-    def __init__(self, password: str | None = None,
-                 base_url: str | None = None):
-        self.password = password or os.environ.get("KABU_API_PASSWORD", "")
-        self.base_url = base_url or os.environ.get(
-            "KABU_BASE_URL", "http://localhost:18080")
-        self.token: str | None = None
-
+    def __init__(self):
+        self.password = os.environ.get("KABU_API_PASSWORD", "")
+        self.base_url = os.environ.get("KABU_BASE_URL", "http://localhost:18080")
+        self.token = None
         if not self.password:
-            raise RuntimeError(
-                "KABU_API_PASSWORD が必要です。.env に設定してください。")
+            raise RuntimeError("KABU_API_PASSWORD を .env に設定してください")
 
-    def refresh_token(self) -> None:
-        url = f"{self.base_url}/kabusapi/token"
-        r = requests.post(url, json={"APIPassword": self.password},
-                          headers={"Content-Type": "application/json"},
-                          timeout=10)
+    def refresh_token(self):
+        r = requests.post(
+            f"{self.base_url}/kabusapi/token",
+            json={"APIPassword": self.password},
+            headers={"Content-Type": "application/json"}, timeout=10)
         r.raise_for_status()
         self.token = r.json()["Token"]
-        log.info("kabu トークン取得成功")
+        log.info("トークン取得成功")
 
-    def _h(self) -> dict:
+    def _h(self):
         return {"X-API-KEY": self.token, "Content-Type": "application/json"}
 
-    def get_board(self, symbol: str, exchange: int = 1) -> dict:
-        """板情報 (現在値含む) を取得。"""
-        url = f"{self.base_url}/kabusapi/board/{symbol}@{exchange}"
-        r = requests.get(url, headers=self._h(), timeout=10)
+    def get_board(self, symbol, exchange=1):
+        r = requests.get(f"{self.base_url}/kabusapi/board/{symbol}@{exchange}",
+                         headers=self._h(), timeout=10)
         if r.status_code == 401:
             self.refresh_token()
-            r = requests.get(url, headers=self._h(), timeout=10)
+            r = requests.get(f"{self.base_url}/kabusapi/board/{symbol}@{exchange}",
+                             headers=self._h(), timeout=10)
         r.raise_for_status()
         return r.json()
 
-    def get_price(self, symbol: str, exchange: int = 1) -> float:
-        """現在値。"""
+    def get_price(self, symbol, exchange=1):
         data = self.get_board(symbol, exchange)
         price = data.get("CurrentPrice") or data.get("CalcPrice")
         if price is None:
             raise ValueError(f"価格取得失敗: {symbol}")
         return float(price)
 
-    def send_order(self, symbol: str, side: str, qty: int,
-                   exchange: int = 1, order_type: int = 2,
-                   price: float = 0) -> dict:
-        """
-        注文送信。
-        side: "2"=買い, "1"=売り
-        order_type: 1=指値, 2=成行
-        """
-        url = f"{self.base_url}/kabusapi/sendorder"
+    def buy(self, symbol, qty, exchange=1):
+        return self._order(symbol, "2", qty, exchange)
+
+    def sell(self, symbol, qty, exchange=1):
+        return self._order(symbol, "1", qty, exchange)
+
+    def _order(self, symbol, side, qty, exchange=1):
         body = {
-            "Password": self.password,
-            "Symbol": symbol,
-            "Exchange": exchange,
-            "SecurityType": 1,    # 株式
-            "Side": side,
-            "CashMargin": 1,      # 現物
-            "DelivType": 2,       # お預り金
-            "FundType": "AA",
-            "AccountType": 4,     # 特定
-            "Qty": qty,
-            "FrontOrderType": order_type,
-            "Price": price,
-            "ExpireDay": 0,       # 当日
+            "Password": self.password, "Symbol": symbol,
+            "Exchange": exchange, "SecurityType": 1, "Side": side,
+            "CashMargin": 1, "DelivType": 2, "FundType": "AA",
+            "AccountType": 4, "Qty": qty,
+            "FrontOrderType": 2, "Price": 0, "ExpireDay": 0,
         }
-        r = requests.post(url, headers=self._h(), json=body, timeout=10)
+        r = requests.post(f"{self.base_url}/kabusapi/sendorder",
+                          headers=self._h(), json=body, timeout=10)
         if r.status_code == 401:
             self.refresh_token()
-            r = requests.post(url, headers=self._h(), json=body, timeout=10)
+            r = requests.post(f"{self.base_url}/kabusapi/sendorder",
+                              headers=self._h(), json=body, timeout=10)
         r.raise_for_status()
         return r.json()
 
-    def get_positions(self) -> list[dict]:
-        """保有ポジション一覧。"""
-        url = f"{self.base_url}/kabusapi/positions"
-        r = requests.get(url, headers=self._h(), timeout=10)
-        if r.status_code == 401:
-            self.refresh_token()
-            r = requests.get(url, headers=self._h(), timeout=10)
-        r.raise_for_status()
-        return r.json() or []
-
 
 # ─────────────────────────────────────────────────────────────
-# 5分足バッファ
+# 5分足バッファ + ORB判定
 # ─────────────────────────────────────────────────────────────
 
-class BarBuffer:
-    """リアルタイム価格から5分足を構築するバッファ。"""
+class ORBTracker:
+    """5分足の構築とORBシグナル判定を一体化。"""
 
     def __init__(self):
         self.bars: list[dict] = []
-        self._current_bar: dict | None = None
-        self._bar_start: datetime | None = None
+        self._cur: dict | None = None
+        self._bar_start = None
+        self.or_hi = 0.0
+        self.or_lo = 0.0
+        self.or_w = 0.0
+        self.or_confirmed = False
+        self.signal_fired = False  # 1日1回制限
 
     def update(self, price: float, now: datetime) -> dict | None:
-        """価格を入力し、5分足が確定したら返す。"""
-        bar_time = now.replace(
-            minute=(now.minute // 5) * 5, second=0, microsecond=0)
-
+        """価格を入力。5分足確定時にバーを返す。"""
+        bar_time = now.replace(minute=(now.minute // 5) * 5,
+                               second=0, microsecond=0)
         if self._bar_start is None or bar_time > self._bar_start:
-            # 新しいバー開始
-            completed = self._current_bar
-            self._current_bar = {
-                "time": bar_time, "open": price, "high": price,
-                "low": price, "close": price,
-            }
+            completed = self._cur
+            self._cur = {"time": bar_time, "open": price,
+                         "high": price, "low": price, "close": price}
             self._bar_start = bar_time
             if completed:
                 self.bars.append(completed)
+                self._update_or(completed)
                 return completed
             return None
-        else:
-            # 既存バー更新
-            self._current_bar["high"] = max(self._current_bar["high"], price)
-            self._current_bar["low"] = min(self._current_bar["low"], price)
-            self._current_bar["close"] = price
+        self._cur["high"] = max(self._cur["high"], price)
+        self._cur["low"] = min(self._cur["low"], price)
+        self._cur["close"] = price
+        return None
+
+    def _update_or(self, bar: dict):
+        """OR (9:00-9:30) を更新。"""
+        if bar["time"].time() < dtime(9, 30):
+            if self.or_hi == 0:
+                self.or_hi = bar["high"]
+                self.or_lo = bar["low"]
+            else:
+                self.or_hi = max(self.or_hi, bar["high"])
+                self.or_lo = min(self.or_lo, bar["low"])
+            self.or_w = self.or_hi - self.or_lo
+        elif not self.or_confirmed and self.or_w > 0:
+            self.or_confirmed = True
+            log.info("OR確定: 高値=%.0f 安値=%.0f 幅=%.0f",
+                     self.or_hi, self.or_lo, self.or_w)
+
+    def check_signal(self, now: datetime) -> dict | None:
+        """ORBシグナルを判定。"""
+        if self.signal_fired or not self.or_confirmed:
+            return None
+        if now.time() < dtime(9, 30) or now.time() >= ENTRY_CUTOFF:
+            return None
+        if len(self.bars) < 2:
             return None
 
-    @property
-    def closes(self) -> list[float]:
-        return [b["close"] for b in self.bars]
+        price = self.bars[-1]["close"]
+        prev = self.bars[-2]["close"]
 
-    @property
-    def highs(self) -> list[float]:
-        return [b["high"] for b in self.bars]
-
-    @property
-    def lows(self) -> list[float]:
-        return [b["low"] for b in self.bars]
-
-    @property
-    def or_range(self) -> tuple[float, float, float]:
-        """9:00-9:30 のオープニングレンジ (hi, lo, width)。"""
-        or_bars = [b for b in self.bars
-                   if b["time"].time() < dtime(9, 30)]
-        if not or_bars:
-            return 0, 0, 0
-        hi = max(b["high"] for b in or_bars)
-        lo = min(b["low"] for b in or_bars)
-        return hi, lo, hi - lo
-
-
-# ─────────────────────────────────────────────────────────────
-# シグナル判定
-# ─────────────────────────────────────────────────────────────
-
-def calc_rsi(closes: list[float], period: int = 14) -> float | None:
-    """直近の RSI を計算。"""
-    if len(closes) < period + 1:
+        if price > self.or_hi and price > prev:
+            self.signal_fired = True
+            return {
+                "stop": self.or_lo,
+                "target": price + self.or_w * TARGET_K,
+            }
         return None
-    deltas = [closes[i] - closes[i-1] for i in range(-period, 0)]
-    gains = [d for d in deltas if d > 0]
-    losses = [-d for d in deltas if d < 0]
-    avg_g = sum(gains) / period if gains else 0
-    avg_l = sum(losses) / period if losses else 0
-    if avg_l == 0:
-        return 100.0
-    return 100.0 - 100.0 / (1.0 + avg_g / avg_l)
-
-
-def check_signals(buf: BarBuffer, prev_day: dict | None,
-                  now: datetime) -> dict | None:
-    """
-    3戦略のシグナルを同時チェック。優先度: ORB > Pivot > RSI。
-    Returns: {"strategy": str, "stop": float, "target": float} or None
-    """
-    bars = buf.bars
-    if len(bars) < 3:
-        return None
-
-    t = now.time()
-    if t >= dtime(11, 0):  # 前場限定
-        return None
-
-    price = bars[-1]["close"]
-    prev_close = bars[-2]["close"]
-
-    # ── ORB (9:30 以降) ─────────────────────────────
-    if t >= dtime(9, 30):
-        or_hi, or_lo, or_w = buf.or_range
-        if or_w > 0 and price > or_hi and price > prev_close:
-            target = price + or_w * 1.5
-            stop = or_lo
-            if price > stop:
-                return {"strategy": "ORB", "stop": stop,
-                        "target": target}
-
-    # ── Pivot (前日データ必要) ───────────────────────
-    if prev_day and prev_day.get("pp") and prev_day.get("s1"):
-        pp = prev_day["pp"]
-        s1 = prev_day["s1"]
-        if pp > s1 > 0:
-            bar_lo = bars[-1]["low"]
-            if (bar_lo <= s1 * 1.002
-                    and price > s1
-                    and price > prev_close):
-                target = pp
-                stop = s1 - (pp - s1) * 0.5
-                if price > stop and target > price:
-                    return {"strategy": "Pivot", "stop": stop,
-                            "target": target}
-
-    # ── RSI ─────────────────────────────────────────
-    rsi = calc_rsi(buf.closes)
-    if rsi is not None and rsi <= 30:
-        if price > prev_close and price > bars[-1]["open"]:
-            stop = price * (1 - 0.005)
-            target = price * (1 + 0.015)
-            return {"strategy": "RSI", "stop": stop,
-                    "target": target}
-
-    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -306,29 +213,21 @@ def check_signals(buf: BarBuffer, prev_day: dict | None,
 # ─────────────────────────────────────────────────────────────
 
 class Position:
-    """アクティブポジションの追跡。"""
-
-    def __init__(self, symbol: str, entry_p: float, qty: int,
-                 stop: float, target: float, strategy: str):
-        self.symbol = symbol
+    def __init__(self, entry_p, qty, stop, target):
         self.entry_p = entry_p
         self.qty = qty
         self.stop = stop
         self.target = target
-        self.orig_stop = stop
-        self.strategy = strategy
         self.trailing = False
         self.entry_time = datetime.now(JST)
 
     def check_exit(self, price: float) -> str | None:
-        """決済条件をチェック。Returns: 理由 or None。"""
-        # トレーリング: 含み益50%で建値撤退
         if not self.trailing and self.target > self.entry_p:
             progress = (price - self.entry_p) / (self.target - self.entry_p)
-            if progress >= 0.5:
+            if progress >= TRAILING_TRIGGER:
                 self.stop = self.entry_p
                 self.trailing = True
-                log.info("  → トレーリング発動 (建値撤退)")
+                log.info("  トレーリング発動 → 建値撤退に切替")
 
         if price >= self.target:
             return "目標達成"
@@ -338,11 +237,10 @@ class Position:
 
 
 # ─────────────────────────────────────────────────────────────
-# メインループ
+# ポジションサイジング
 # ─────────────────────────────────────────────────────────────
 
-def calc_position_size(entry_p: float, stop_p: float,
-                       budget: int, max_risk: int) -> int:
+def calc_qty(entry_p, stop_p, budget, max_risk):
     risk = abs(entry_p - stop_p)
     if risk <= 0:
         return 100
@@ -351,57 +249,42 @@ def calc_position_size(entry_p: float, stop_p: float,
     return max(100, qty)
 
 
-def run_bot(args) -> None:
+# ─────────────────────────────────────────────────────────────
+# メインループ
+# ─────────────────────────────────────────────────────────────
+
+def run(args):
     client = KabuClient()
     client.refresh_token()
 
     symbol = args.symbol
     budget = args.budget
     max_risk = args.max_risk
-    dry_run = args.dry_run
+    dry = args.dry_run
     poll = args.poll
 
-    buf = BarBuffer()
-    position: Position | None = None
+    tracker = ORBTracker()
+    pos: Position | None = None
     trades: list[dict] = []
-    prev_day: dict | None = None
 
-    # 前日のピボット計算 (前日終値は初回価格取得時に推定)
-    try:
-        board = client.get_board(symbol)
-        prev_close = board.get("PreviousClose") or board.get("CalcPrice")
-        prev_high = board.get("PreviousHigh") or prev_close
-        prev_low = board.get("PreviousLow") or prev_close
-        if prev_close and prev_high and prev_low:
-            pp = (prev_high + prev_low + prev_close) / 3
-            s1 = 2 * pp - prev_high
-            prev_day = {"pp": pp, "s1": s1}
-            log.info("前日ピボット: PP=%.0f S1=%.0f", pp, s1)
-    except Exception as e:
-        log.warning("前日データ取得失敗: %s", e)
-
-    mode = "DRY RUN" if dry_run else "本番"
+    mode = "DRY RUN" if dry else "本番"
     log.info("=" * 50)
-    log.info("  kabu デイトレボット [%s]", mode)
-    log.info("  銘柄: %s / 予算: %s円 / リスク: %s円/trade",
+    log.info("  ORB デイトレボット [%s]", mode)
+    log.info("  銘柄: %s / 予算: %s円 / リスク: %s円",
              symbol, f"{budget:,}", f"{max_risk:,}")
+    log.info("  OR: 9:00-9:30 / 目標: OR幅×%.1f / 前場限定", TARGET_K)
     log.info("=" * 50)
 
     while True:
         now = datetime.now(JST)
         t = now.time()
 
-        # 15:00 以降は終了
         if t >= dtime(15, 0):
             log.info("大引け → 終了")
             break
-
-        # 9:00 前は待機
         if t < dtime(8, 59):
             time.sleep(30)
             continue
-
-        # 昼休み (11:30-12:30)
         if dtime(11, 30) <= t < dtime(12, 30):
             time.sleep(30)
             continue
@@ -414,128 +297,92 @@ def run_bot(args) -> None:
             continue
 
         # 5分足更新
-        completed_bar = buf.update(price, now)
-        if completed_bar:
-            log.info("5m足確定: %s O=%.0f H=%.0f L=%.0f C=%.0f",
-                     completed_bar["time"].strftime("%H:%M"),
-                     completed_bar["open"], completed_bar["high"],
-                     completed_bar["low"], completed_bar["close"])
+        bar = tracker.update(price, now)
+        if bar:
+            log.info("5m: %s O=%.0f H=%.0f L=%.0f C=%.0f",
+                     bar["time"].strftime("%H:%M"),
+                     bar["open"], bar["high"], bar["low"], bar["close"])
 
-        # ── 保有中: 決済チェック ─────────────────────
-        if position:
-            # 14:55 強制決済
-            if t >= dtime(14, 55):
+        # ── 保有中 → 決済チェック ───────────────────
+        if pos:
+            if t >= FORCE_CLOSE_TIME:
                 reason = "引け強制"
-                log.info("★ 強制決済 (%s) 現在値=%.0f", reason, price)
-                if not dry_run:
-                    try:
-                        result = client.send_order(
-                            symbol, side="1", qty=position.qty)
-                        log.info("  注文結果: %s", result)
-                    except Exception as e:
-                        log.error("  注文エラー: %s", e)
-                pnl = (price - position.entry_p) * position.qty
-                trades.append({
-                    "strategy": position.strategy,
-                    "entry_p": position.entry_p, "exit_p": price,
-                    "qty": position.qty, "pnl": pnl, "reason": reason,
-                    "entry_time": position.entry_time,
-                    "exit_time": now,
-                })
-                log.info("  損益: %+,.0f円", pnl)
-                position = None
-                continue
+            else:
+                reason = pos.check_exit(price)
 
-            reason = position.check_exit(price)
             if reason:
-                log.info("★ 決済 (%s) 現在値=%.0f", reason, price)
-                if not dry_run:
+                pnl = (price - pos.entry_p) * pos.qty
+                log.info("★ 決済 [%s] %.0f→%.0f  %+,.0f円",
+                         reason, pos.entry_p, price, pnl)
+                if not dry:
                     try:
-                        result = client.send_order(
-                            symbol, side="1", qty=position.qty)
-                        log.info("  注文結果: %s", result)
+                        res = client.sell(symbol, pos.qty)
+                        log.info("  注文: %s", res)
                     except Exception as e:
-                        log.error("  注文エラー: %s", e)
-                pnl = (price - position.entry_p) * position.qty
+                        log.error("  注文失敗: %s", e)
                 trades.append({
-                    "strategy": position.strategy,
-                    "entry_p": position.entry_p, "exit_p": price,
-                    "qty": position.qty, "pnl": pnl, "reason": reason,
-                    "entry_time": position.entry_time,
-                    "exit_time": now,
+                    "entry": pos.entry_p, "exit": price,
+                    "qty": pos.qty, "pnl": pnl, "reason": reason,
+                    "entry_time": pos.entry_time, "exit_time": now,
                 })
-                log.info("  損益: %+,.0f円", pnl)
-                position = None
+                pos = None
 
-        # ── 未保有: シグナルチェック ─────────────────
-        elif position is None and t < dtime(11, 0):
-            sig = check_signals(buf, prev_day, now)
+        # ── 未保有 → シグナルチェック ─────────────────
+        elif pos is None:
+            sig = tracker.check_signal(now)
             if sig:
-                qty = calc_position_size(
-                    price, sig["stop"], budget, max_risk)
-                log.info("★ シグナル [%s] 価格=%.0f 損切=%.0f "
-                         "目標=%.0f 株数=%d",
-                         sig["strategy"], price, sig["stop"],
-                         sig["target"], qty)
-                if not dry_run:
+                qty = calc_qty(price, sig["stop"], budget, max_risk)
+                log.info("★ ORBシグナル! 価格=%.0f OR高値=%.0f "
+                         "損切=%.0f 目標=%.0f 株数=%d",
+                         price, tracker.or_hi,
+                         sig["stop"], sig["target"], qty)
+                if not dry:
                     try:
-                        result = client.send_order(
-                            symbol, side="2", qty=qty)
-                        log.info("  注文結果: %s", result)
+                        res = client.buy(symbol, qty)
+                        log.info("  注文: %s", res)
                     except Exception as e:
-                        log.error("  注文エラー: %s", e)
+                        log.error("  注文失敗: %s", e)
                         time.sleep(poll)
                         continue
-
-                position = Position(
-                    symbol, price, qty,
-                    sig["stop"], sig["target"], sig["strategy"])
+                pos = Position(price, qty, sig["stop"], sig["target"])
 
         time.sleep(poll)
 
-    # ── 日次レポート ────────────────────────────────
+    # ── 日次レポート ──────────────────────────────
     print()
     print("=" * 50)
-    print(f"  日次レポート  {now.strftime('%Y-%m-%d')}  [{mode}]")
+    print(f"  ORBデイトレ日次レポート [{mode}]")
+    print(f"  {now.strftime('%Y-%m-%d')}  銘柄: {symbol}")
     print("=" * 50)
+    if tracker.or_confirmed:
+        print(f"  OR: 高値={tracker.or_hi:,.0f}  "
+              f"安値={tracker.or_lo:,.0f}  幅={tracker.or_w:,.0f}")
     if trades:
-        total_pnl = sum(t["pnl"] for t in trades)
+        total = sum(t["pnl"] for t in trades)
         for t in trades:
-            mark = "○" if t["pnl"] > 0 else "●"
-            print(f"  {mark} [{t['strategy']:<6}] "
-                  f"{t['entry_p']:,.0f}→{t['exit_p']:,.0f} "
-                  f"{t['pnl']:+,.0f}円 ({t['reason']})")
-        print(f"\n  合計: {total_pnl:+,.0f}円  "
-              f"{len(trades)}トレード")
+            m = "○" if t["pnl"] > 0 else "●"
+            print(f"  {m} {t['entry']:,.0f}→{t['exit']:,.0f}  "
+                  f"{t['pnl']:+,.0f}円  ({t['reason']})")
+        print(f"\n  合計: {total:+,.0f}円")
     else:
         print("  トレードなし")
     print("=" * 50)
 
 
-# ─────────────────────────────────────────────────────────────
-# main
-# ─────────────────────────────────────────────────────────────
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="kabuステーション デイトレ自動売買ボット")
+    parser = argparse.ArgumentParser(description="ORB デイトレ自動売買")
     parser.add_argument("--symbol", default="8306",
                         help="銘柄コード (デフォルト: 8306 三菱UFJ)")
     parser.add_argument("--budget", type=int, default=600_000)
     parser.add_argument("--max-risk", type=int, default=6_000)
-    parser.add_argument("--poll", type=int, default=10,
-                        help="価格取得間隔 (秒)")
+    parser.add_argument("--poll", type=int, default=10, help="取得間隔(秒)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="ドライラン (注文を送信しない)")
+                        help="ドライラン (注文しない)")
     args = parser.parse_args()
-
     try:
-        run_bot(args)
+        run(args)
     except KeyboardInterrupt:
         log.info("Ctrl+C → 終了")
-    except Exception as e:
-        log.error("致命的エラー: %s", e)
-        sys.exit(1)
 
 
 if __name__ == "__main__":
