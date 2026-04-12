@@ -279,6 +279,9 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"],
                         default="auto")
+    parser.add_argument("--budget", type=int, default=0,
+                        help="投資資金 (円)。100株で買える銘柄のみに絞り込み "
+                             "(例: --budget 600000 → 株価6000円以下)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -291,8 +294,9 @@ def main() -> None:
     else:
         targets = DEFAULT_SYMBOLS
 
+    budget_str = f" / 予算{args.budget:,}円" if args.budget > 0 else ""
     print(f"デイトレ3戦略比較: {len(targets)}銘柄 / {args.days}日 / "
-          f"source={args.source}", flush=True)
+          f"source={args.source}{budget_str}", flush=True)
 
     # データ取得
     symbols_list = [s for s, _ in targets]
@@ -304,8 +308,35 @@ def main() -> None:
         print("[ERROR] データが取得できませんでした", file=sys.stderr)
         sys.exit(1)
 
+    # 予算フィルタ: 最新終値 × 100株 が予算以内の銘柄のみ
+    if args.budget > 0:
+        max_price = args.budget / 100
+        before = len(fetched)
+        excluded = []
+        filtered = {}
+        for sym, df in fetched.items():
+            latest_close = float(df.iloc[-1]["close"])
+            if latest_close <= max_price:
+                filtered[sym] = df
+            else:
+                excluded.append((sym, latest_close))
+        fetched = filtered
+        targets = [(s, n) for s, n in targets if s in fetched]
+        print(f"  予算フィルタ: {before} → {len(fetched)}銘柄 "
+              f"(株価{max_price:,.0f}円以下)", flush=True)
+        if excluded:
+            excluded.sort(key=lambda x: x[1], reverse=True)
+            for sym, price in excluded[:5]:
+                print(f"    除外: {sym} ({price:,.0f}円)", flush=True)
+            if len(excluded) > 5:
+                print(f"    ... 他{len(excluded)-5}銘柄", flush=True)
+
+    if not fetched:
+        print("[ERROR] 予算内で購入可能な銘柄がありません", file=sys.stderr)
+        sys.exit(1)
+
     # 3戦略実行
-    print("バックテスト実行中...", flush=True)
+    print(f"バックテスト実行中 ({len(fetched)}銘柄)...", flush=True)
     results = run_all_strategies(fetched, targets)
 
     # コンソール
