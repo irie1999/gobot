@@ -117,7 +117,108 @@ def print_comparison(results: dict[str, list[dict]], days: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# HTML レポート
+# HTML: 個別トレード明細
+# ─────────────────────────────────────────────────────────────
+
+def _build_trade_details(results: dict[str, list[dict]],
+                         strat_colors: dict[str, str]) -> str:
+    """銘柄ごと×戦略ごとの個別トレード明細HTMLを生成。"""
+    # 銘柄を集約
+    sym_trades: dict[str, list[tuple[str, dict]]] = {}
+    for strat_name, items in results.items():
+        for item in items:
+            sym = item["symbol"]
+            name = item["name"]
+            key = f"{sym} {name}"
+            if key not in sym_trades:
+                sym_trades[key] = []
+            for t in item.get("trades", []):
+                sym_trades[key].append((strat_name, t))
+
+    # 銘柄別にトレードを時系列ソート
+    sections = ""
+    for sym_key in sorted(sym_trades.keys()):
+        trades = sym_trades[sym_key]
+        if not trades:
+            continue
+
+        # 戦略別の損益サマリー
+        strat_pnl = {}
+        for strat, t in trades:
+            strat_pnl[strat] = strat_pnl.get(strat, 0) + t["pnl"]
+        total_pnl = sum(strat_pnl.values())
+        total_cls = "profit" if total_pnl >= 0 else "loss"
+
+        pnl_badges = " ".join(
+            f'<span style="color:{strat_colors.get(s,"#e2e8f0")}">'
+            f'{s} {p:+,.0f}</span>'
+            for s, p in strat_pnl.items()
+        )
+
+        # トレード行 (時系列ソート)
+        trades_sorted = sorted(trades, key=lambda x: str(x[1].get("entry_dt", "")))
+        trows = ""
+        for strat, t in trades_sorted:
+            pnl_cls = "profit" if t["pnl"] > 0 else "loss"
+            color = strat_colors.get(strat, "#e2e8f0")
+
+            entry_dt = t.get("entry_dt")
+            exit_dt = t.get("exit_dt")
+            if hasattr(entry_dt, "strftime"):
+                e_date = entry_dt.strftime("%Y-%m-%d")
+                e_time = entry_dt.strftime("%H:%M")
+            else:
+                e_date = str(entry_dt)[:10] if entry_dt else "-"
+                e_time = str(entry_dt)[11:16] if entry_dt else "-"
+            if hasattr(exit_dt, "strftime"):
+                x_time = exit_dt.strftime("%H:%M")
+            else:
+                x_time = str(exit_dt)[11:16] if exit_dt else "-"
+
+            reason = t.get("reason", "-")
+            entry_p = t.get("entry_p", 0)
+            exit_p = t.get("exit_p", 0)
+            stop_p = t.get("stop_p", t.get("order_stop", 0))
+            target_p = t.get("target_p", 0)
+
+            trows += f"""
+              <tr>
+                <td style="color:{color};font-weight:600">{strat}</td>
+                <td>{e_date}</td>
+                <td>{e_time}</td>
+                <td>{x_time}</td>
+                <td>{entry_p:,.1f}</td>
+                <td class="loss">{stop_p:,.1f}</td>
+                <td class="profit">{target_p:,.1f}</td>
+                <td>{exit_p:,.1f}</td>
+                <td class="{pnl_cls}">{t['pnl']:+,.0f}</td>
+                <td class="{pnl_cls}">{t.get('pct', 0):+.2f}%</td>
+                <td>{reason}</td>
+              </tr>"""
+
+        sections += f"""
+      <details class="trade-section">
+        <summary>
+          <strong>{sym_key}</strong>
+          &nbsp; <span class="{total_cls}">{total_pnl:+,.0f}円</span>
+          &nbsp; <small>{len(trades)}取引</small>
+          &nbsp; {pnl_badges}
+        </summary>
+        <table>
+          <thead><tr>
+            <th>戦略</th><th>日付</th><th>Entry</th><th>Exit</th>
+            <th>買値</th><th>損切</th><th>目標</th><th>決済値</th>
+            <th>損益</th><th>%</th><th>理由</th>
+          </tr></thead>
+          <tbody>{trows}</tbody>
+        </table>
+      </details>"""
+
+    return sections
+
+
+# ─────────────────────────────────────────────────────────────
+# HTML: メインレポート
 # ─────────────────────────────────────────────────────────────
 
 def build_comparison_html(results: dict[str, list[dict]], days: int,
@@ -222,6 +323,13 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
   .summary-item {{ text-align:center; }}
   .summary-item .label {{ color:#94a3b8; font-size:0.8rem; }}
   .summary-item .value {{ font-size:1.4rem; font-weight:700; }}
+  details.trade-section {{ margin-bottom:8px; background:#1e293b; border-radius:6px; padding:0; }}
+  details.trade-section summary {{ cursor:pointer; padding:10px 14px; font-size:0.9rem; list-style:none; }}
+  details.trade-section summary::-webkit-details-marker {{ display:none; }}
+  details.trade-section summary::before {{ content:"▶ "; font-size:0.7rem; color:#94a3b8; }}
+  details.trade-section[open] summary::before {{ content:"▼ "; }}
+  details.trade-section[open] {{ padding-bottom:8px; }}
+  details.trade-section table {{ margin:0 14px 8px; width:calc(100% - 28px); }}
 </style>
 </head>
 <body>
@@ -263,6 +371,9 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
   </thead>
   <tbody>{symbol_rows}</tbody>
 </table>
+
+<h2>個別トレード一覧</h2>
+{_build_trade_details(results, strat_colors)}
 
 </body>
 </html>"""
