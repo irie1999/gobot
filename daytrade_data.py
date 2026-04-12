@@ -293,6 +293,42 @@ def load_intraday_batch(symbols: list[str], days: int = 60,
     return result
 
 
+# ─────────────────────────────────────────────────────────────
+# ポジションサイジング
+# ─────────────────────────────────────────────────────────────
+
+def calc_position_size(entry_p: float, stop_p: float,
+                       budget: int = 600_000,
+                       max_risk: int = 6_000) -> int:
+    """
+    固定リスク額方式のポジションサイジング。
+
+    1トレードの最大損失額を max_risk 円に固定し、
+    損切り幅から逆算して株数を決定する。
+
+    Args:
+        entry_p : エントリー価格
+        stop_p  : 損切り価格
+        budget  : 投資資金 (円)
+        max_risk: 1トレードの最大損失額 (円)
+
+    Returns:
+        株数 (100株単位、最低100株)
+    """
+    risk_per_share = abs(entry_p - stop_p)
+    if risk_per_share <= 0:
+        return 100
+
+    # リスクから逆算した株数
+    qty_by_risk = int(max_risk / risk_per_share / 100) * 100
+
+    # 予算から逆算した最大株数
+    qty_by_budget = int(budget / entry_p / 100) * 100
+
+    qty = min(qty_by_risk, qty_by_budget)
+    return max(100, qty)
+
+
 def split_by_day(df: pd.DataFrame) -> dict:
     """DatetimeIndex の DataFrame を日付ごとに分割。"""
     result = {}
