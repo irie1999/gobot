@@ -94,25 +94,48 @@ class JQuantsError(Exception):
 
 
 class JQuantsClient:
-    """J-Quants API クライアント。認証・リトライ・ページネーションを内包。"""
+    """J-Quants API クライアント。認証・リトライ・ページネーションを内包。
+
+    対応する認証方式 (優先度順):
+      1. API Key (新方式)           : JQUANTS_API_KEY
+         → Bearer として直接使用、交換不要、短い opaque トークン
+      2. ID Token (直接指定)         : JQUANTS_ID_TOKEN
+         → Bearer として直接使用、24時間有効
+      3. Refresh Token (従来方式)    : JQUANTS_REFRESH_TOKEN
+         → /v1/token/auth_refresh で ID Token を取得
+      4. メール+パスワード (フルパス) : JQUANTS_MAIL + JQUANTS_PASSWORD
+         → /v1/token/auth_user で refresh token → ID token の順に取得
+    """
 
     def __init__(
         self,
+        api_key: str | None = None,
+        id_token: str | None = None,
         refresh_token: str | None = None,
         mail: str | None = None,
         password: str | None = None,
         cache_dir: Path | None = None,
     ) -> None:
+        self.api_key = api_key or os.environ.get("JQUANTS_API_KEY")
+        self.direct_id_token = id_token or os.environ.get("JQUANTS_ID_TOKEN")
         self.refresh_token = refresh_token or os.environ.get("JQUANTS_REFRESH_TOKEN")
         self.mail = mail or os.environ.get("JQUANTS_MAIL")
         self.password = password or os.environ.get("JQUANTS_PASSWORD")
 
-        if not self.refresh_token and not (self.mail and self.password):
+        has_credential = bool(
+            self.api_key
+            or self.direct_id_token
+            or self.refresh_token
+            or (self.mail and self.password)
+        )
+        if not has_credential:
             raise JQuantsError(
-                "認証情報が必要です。以下のどちらかを設定してください:\n"
-                "  (A) 環境変数 JQUANTS_REFRESH_TOKEN (推奨)\n"
-                "      マイページ https://jpx-jquants.com/mypage で取得\n"
-                "  (B) 環境変数 JQUANTS_MAIL と JQUANTS_PASSWORD"
+                "認証情報が必要です。以下のいずれかを設定してください:\n"
+                "  (A) JQUANTS_API_KEY          新方式 API Key (推奨)\n"
+                "      Dashboard > API Key で取得\n"
+                "  (B) JQUANTS_ID_TOKEN         24時間有効な ID Token\n"
+                "  (C) JQUANTS_REFRESH_TOKEN    従来のリフレッシュトークン\n"
+                "  (D) JQUANTS_MAIL + JQUANTS_PASSWORD  メール+パスワード"
             )
 
         self._cache_dir = cache_dir or CACHE_DIR
@@ -171,7 +194,7 @@ class JQuantsClient:
             raise JQuantsError("refreshToken がレスポンスに含まれていません")
 
     def _refresh_id_token(self) -> None:
-        """refresh_token から ID token を取得。"""
+        """refresh_token から ID token を取得 (従来方式)。"""
         if not self.refresh_token:
             self._exchange_mail_for_refresh_token()
 
@@ -198,17 +221,45 @@ class JQuantsClient:
         )
 
     def _ensure_token(self) -> None:
+        # 1. API Key 方式: 交換不要、直接 Bearer として使用
+        if self.api_key:
+            self._id_token = self.api_key
+            # 有効期限は長期 (実質無期限扱い)
+            self._id_token_expiry = datetime.now() + timedelta(days=365)
+            return
+
+        # 2. ID Token 直接指定方式: そのまま使用
+        if self.direct_id_token:
+            self._id_token = self.direct_id_token
+            self._id_token_expiry = datetime.now() + timedelta(hours=ID_TOKEN_TTL_HOURS)
+            return
+
+        # 3. キャッシュ済みの ID Token が有効なら使用
         if (
             self._id_token
             and self._id_token_expiry
             and self._id_token_expiry > datetime.now()
         ):
             return
+
+        # 4. refresh token / mail+password フロー
         self._refresh_id_token()
 
     def _headers(self) -> dict:
         self._ensure_token()
         return {"Authorization": f"Bearer {self._id_token}"}
+
+    def auth_method(self) -> str:
+        """現在使用している認証方式名を返す (デバッグ用)。"""
+        if self.api_key:
+            return "API Key (新方式)"
+        if self.direct_id_token:
+            return "ID Token (直接指定)"
+        if self.refresh_token:
+            return "Refresh Token (従来方式)"
+        if self.mail and self.password:
+            return "メール+パスワード"
+        return "なし"
 
     # ─────────────────────────────────────────────────────────
     # 汎用 GET (リトライ・ページネーション対応)
@@ -363,11 +414,32 @@ class JQuantsClient:
 
 def _cmd_auth(args: argparse.Namespace) -> None:
     cli = JQuantsClient()
+    print(f"認証方式: {cli.auth_method()}")
     cli._ensure_token()
-    print("✓ 認証成功")
-    print(f"  ID token: {cli._id_token[:20]}...{cli._id_token[-10:]}")
-    print(f"  有効期限: {cli._id_token_expiry}")
-    print(f"  キャッシュ: {cli._token_cache_path}")
+    print("✓ 認証準備完了")
+    if cli._id_token:
+        preview = f"{cli._id_token[:20]}...{cli._id_token[-10:]}" if len(cli._id_token) > 40 else cli._id_token
+        print(f"  token preview: {preview}")
+        print(f"  token length : {len(cli._id_token)}")
+    print(f"  有効期限     : {cli._id_token_expiry}")
+    print(f"  キャッシュ   : {cli._token_cache_path}")
+
+    # 実際に API を叩いて動作確認
+    print()
+    print("動作確認: /listed/info で1銘柄取得中...")
+    try:
+        df = cli.get_listed_info(code="72030")
+        if df.empty:
+            print("  [warn] レスポンスは空でした")
+        else:
+            print("  ✓ API 呼び出し成功")
+            cols = [c for c in ["Code", "CompanyName", "MarketCodeName"]
+                    if c in df.columns]
+            if cols:
+                print("  " + df[cols].head(1).to_string(index=False).replace("\n", "\n  "))
+    except JQuantsError as e:
+        print(f"  [ERROR] API 呼び出し失敗: {e}")
+        raise
 
 
 def _cmd_listed(args: argparse.Namespace) -> None:
