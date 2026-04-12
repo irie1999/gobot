@@ -124,7 +124,7 @@ def print_comparison(results: dict[str, list[dict]], days: int) -> None:
         all_trades = []
         for item in items:
             all_trades.extend(item.get("trades", []))
-        s = orb_calc_stats(all_trades) if all_trades else _empty_stats()
+        s = _calc_stats(all_trades) if all_trades else _empty_stats()
         cls = "+" if s["total_pnl"] >= 0 else ""
         print(f"  {strat_name:<12} {s['n']:>5} {s['win_rate']:>5.1f}% "
               f"{_pf_str(s['pf']):>6} {s['total_pnl']:>+14,.0f} "
@@ -248,7 +248,7 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
         all_trades = []
         for item in items:
             all_trades.extend(item.get("trades", []))
-        strat_summaries[strat_name] = orb_calc_stats(all_trades) if all_trades else _empty_stats()
+        strat_summaries[strat_name] = _calc_stats(all_trades) if all_trades else _empty_stats()
 
     strat_colors = {"ORB": "#fbbf24", "VWAP": "#a78bfa", "VolSurge": "#fb923c",
                      "Pivot": "#22d3ee", "RSI": "#f472b6"}
