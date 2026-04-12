@@ -93,34 +93,67 @@ def _normalize_daily(df: pd.DataFrame, use_adjusted: bool = True) -> pd.DataFram
     既存形式 (backtest_limit_entry.py:fetch() 互換):
       - Index: DatetimeIndex (tz-naive)
       - Columns: [open, high, low, close, volume] (lowercase)
+
+    V1 列名 (Open, High, Low, Close, Volume, AdjustmentClose) と
+    V2 列名 (小文字バリアントや変形) の両方に対応する。
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"])
 
-    if use_adjusted and "AdjustmentClose" in df.columns:
-        col_map = {
-            "AdjustmentOpen":   "open",
-            "AdjustmentHigh":   "high",
-            "AdjustmentLow":    "low",
-            "AdjustmentClose":  "close",
-            "AdjustmentVolume": "volume",
-        }
-    else:
-        col_map = {
-            "Open":   "open",
-            "High":   "high",
-            "Low":    "low",
-            "Close":  "close",
-            "Volume": "volume",
-        }
+    # Date カラム名のバリアントに対応
+    date_col = None
+    for cand in ["Date", "date", "tradingDate", "TradingDate"]:
+        if cand in df.columns:
+            date_col = cand
+            break
+    if date_col is None:
+        return pd.DataFrame()
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    # カラム名マッピング候補 (優先度順)
+    # 調整済み列と未調整列の両バリアントを網羅
+    candidates_adjusted = [
+        ("AdjustmentOpen",   "AdjustmentHigh",   "AdjustmentLow",
+         "AdjustmentClose",  "AdjustmentVolume"),
+        ("adjustmentOpen",   "adjustmentHigh",   "adjustmentLow",
+         "adjustmentClose",  "adjustmentVolume"),
+        ("adj_open",         "adj_high",         "adj_low",
+         "adj_close",        "adj_volume"),
+    ]
+    candidates_raw = [
+        ("Open",   "High",   "Low",   "Close",   "Volume"),
+        ("open",   "high",   "low",   "close",   "volume"),
+    ]
+
+    col_map: dict[str, str] | None = None
+    if use_adjusted:
+        for cols in candidates_adjusted:
+            if all(c in df.columns for c in cols):
+                col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
+                break
+    if col_map is None:
+        for cols in candidates_raw:
+            if all(c in df.columns for c in cols):
+                col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
+                break
+    if col_map is None:
+        # 最後の手段: close 1列があれば何とか使う
+        close_col = next((c for c in df.columns
+                          if c.lower() in ("close", "adjustmentclose", "adj_close")),
+                         None)
+        if close_col is None:
+            return pd.DataFrame()
+        out = pd.DataFrame({"close": pd.to_numeric(df[close_col], errors="coerce")},
+                           index=df[date_col].values)
+        out.index.name = "Date"
+        return out.dropna(subset=["close"])
 
     out = pd.DataFrame({
         new: pd.to_numeric(df[old], errors="coerce")
-        for old, new in col_map.items() if old in df.columns
-    }, index=df["Date"].values)
+        for old, new in col_map.items()
+    }, index=df[date_col].values)
     out = out.dropna(subset=["close"])
     out.index.name = "Date"
     return out

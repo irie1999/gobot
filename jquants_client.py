@@ -1,24 +1,29 @@
 """
-jquants_client.py  ―  J-Quants API 低レベルクライアント
+jquants_client.py  ―  J-Quants API V2 クライアント
 ==================================================================
-JPX (日本取引所グループ) 公式 J-Quants API の認証とデータ取得を扱う。
+JPX 公式 J-Quants API V2 の株価・財務データ取得クライアント。
 
-【認証フロー】
-  1. https://jpx-jquants.com のマイページで「リフレッシュトークン」を取得
-  2. 環境変数に設定:
-        export JQUANTS_REFRESH_TOKEN="eyJhbGciOi..."
-     または メール/パスワードでも可:
-        export JQUANTS_MAIL="you@example.com"
-        export JQUANTS_PASSWORD="yourpassword"
-  3. 初回呼び出しで /v1/token/auth_refresh により ID トークン取得
-  4. ID トークンを ~/.jquants_cache/id_token.json にキャッシュ
-     (有効期限 24h、余裕を持って 20h で再取得)
+【V2 認証】
+  - Dashboard > API Key で取得した API Key を x-api-key ヘッダーで送信
+  - API Key に有効期限なし (無期限)
+  - refresh token / id token の交換フローは不要
+
+【認証情報の設定】
+  環境変数:
+    JQUANTS_API_KEY=DMRipP16cr...h16a4
+  または .env ファイル:
+    JQUANTS_API_KEY=DMRipP16cr...h16a4
+
+  .env はプロジェクトルートに置くと自動で読み込まれる。
 
 【対応エンドポイント (Free プラン)】
-  - /v1/listed/info            上場銘柄一覧
-  - /v1/prices/daily_quotes    日足四本値
-  - /v1/fins/statements        財務情報
-  - /v1/fins/announcement      決算発表予定
+  - /v2/equities/master              上場銘柄一覧
+  - /v2/equities/bars/daily          日足株価
+  - /v2/equities/investor-types      投資部門別売買状況
+  - /v2/equities/earnings-calendar   決算発表予定
+  - /v2/fins/details                 財務諸表
+  - /v2/fins/dividend                配当情報
+  - /v2/markets/calendar             営業日カレンダー
 
 【使い方】
   from jquants_client import JQuantsClient
@@ -28,10 +33,11 @@ JPX (日本取引所グループ) 公式 J-Quants API の認証とデータ取�
                             to_date="2025-12-31")
   print(df.head())
 
-【CLI テスト】
-  python jquants_client.py auth            # 認証テスト
-  python jquants_client.py listed          # 上場銘柄一覧取得
-  python jquants_client.py daily 72030     # トヨタの日足1年分
+【CLI】
+  python jquants_client.py auth              # 認証テスト
+  python jquants_client.py listed            # 上場銘柄一覧
+  python jquants_client.py daily 72030       # トヨタ日足
+  python jquants_client.py diagnose          # 認証診断 (デバッグ用)
 """
 
 from __future__ import annotations
@@ -47,18 +53,17 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-JQUANTS_BASE_URL = "https://api.jquants.com/v1"
+# ── J-Quants V2 API 設定 ─────────────────────────────────────
+JQUANTS_BASE_URL = "https://api.jquants.com/v2"
 CACHE_DIR = Path.home() / ".jquants_cache"
-ID_TOKEN_CACHE = CACHE_DIR / "id_token.json"
-ID_TOKEN_TTL_HOURS = 20  # 実際は 24h、余裕を持たせる
 REQUEST_TIMEOUT = 60
 
 
 def _load_dotenv(path: Path | None = None) -> None:
     """
     最小限の .env ローダ (python-dotenv 不要)。
-    プロジェクトルート (CWD or このファイルの親) の .env を読み込み、
-    未設定の環境変数のみを上書きせず追加する。
+    CWD または このファイルの親の .env を読み込み、
+    未設定の環境変数のみを追加する (既存値は上書きしない)。
     """
     candidates = []
     if path:
@@ -94,178 +99,34 @@ class JQuantsError(Exception):
 
 
 class JQuantsClient:
-    """J-Quants API クライアント。認証・リトライ・ページネーションを内包。
-
-    対応する認証方式 (優先度順):
-      1. API Key (新方式)           : JQUANTS_API_KEY
-         → Bearer として直接使用、交換不要、短い opaque トークン
-      2. ID Token (直接指定)         : JQUANTS_ID_TOKEN
-         → Bearer として直接使用、24時間有効
-      3. Refresh Token (従来方式)    : JQUANTS_REFRESH_TOKEN
-         → /v1/token/auth_refresh で ID Token を取得
-      4. メール+パスワード (フルパス) : JQUANTS_MAIL + JQUANTS_PASSWORD
-         → /v1/token/auth_user で refresh token → ID token の順に取得
-    """
+    """J-Quants API V2 クライアント。x-api-key ヘッダー認証。"""
 
     def __init__(
         self,
         api_key: str | None = None,
-        id_token: str | None = None,
-        refresh_token: str | None = None,
-        mail: str | None = None,
-        password: str | None = None,
         cache_dir: Path | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("JQUANTS_API_KEY")
-        self.direct_id_token = id_token or os.environ.get("JQUANTS_ID_TOKEN")
-        self.refresh_token = refresh_token or os.environ.get("JQUANTS_REFRESH_TOKEN")
-        self.mail = mail or os.environ.get("JQUANTS_MAIL")
-        self.password = password or os.environ.get("JQUANTS_PASSWORD")
-
-        has_credential = bool(
-            self.api_key
-            or self.direct_id_token
-            or self.refresh_token
-            or (self.mail and self.password)
-        )
-        if not has_credential:
+        if not self.api_key:
             raise JQuantsError(
-                "認証情報が必要です。以下のいずれかを設定してください:\n"
-                "  (A) JQUANTS_API_KEY          新方式 API Key (推奨)\n"
-                "      Dashboard > API Key で取得\n"
-                "  (B) JQUANTS_ID_TOKEN         24時間有効な ID Token\n"
-                "  (C) JQUANTS_REFRESH_TOKEN    従来のリフレッシュトークン\n"
-                "  (D) JQUANTS_MAIL + JQUANTS_PASSWORD  メール+パスワード"
+                "API Key が必要です。以下のどちらかを設定してください:\n"
+                "  (A) 環境変数   JQUANTS_API_KEY=...\n"
+                "  (B) .env ファイル  JQUANTS_API_KEY=...\n"
+                "API Key は Dashboard > API Key で取得可能です。"
             )
 
         self._cache_dir = cache_dir or CACHE_DIR
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._token_cache_path = self._cache_dir / "id_token.json"
-
-        self._id_token: str | None = None
-        self._id_token_expiry: datetime | None = None
-        self._load_cached_token()
 
     # ─────────────────────────────────────────────────────────
-    # 認証
+    # 低レベル HTTP
     # ─────────────────────────────────────────────────────────
-
-    def _load_cached_token(self) -> None:
-        if not self._token_cache_path.exists():
-            return
-        try:
-            data = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
-            expiry = datetime.fromisoformat(data["expiry"])
-            if expiry > datetime.now():
-                self._id_token = data["id_token"]
-                self._id_token_expiry = expiry
-        except Exception:
-            pass
-
-    def _save_cached_token(self) -> None:
-        if not (self._id_token and self._id_token_expiry):
-            return
-        try:
-            self._token_cache_path.write_text(
-                json.dumps({
-                    "id_token": self._id_token,
-                    "expiry": self._id_token_expiry.isoformat(),
-                }),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            print(f"[jquants] token cache write failed: {e}", file=sys.stderr)
-
-    def _exchange_mail_for_refresh_token(self) -> None:
-        """メール+パスワードから refresh token を取得。"""
-        url = f"{JQUANTS_BASE_URL}/token/auth_user"
-        r = requests.post(
-            url,
-            json={"mailaddress": self.mail, "password": self.password},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if r.status_code != 200:
-            raise JQuantsError(
-                f"メール認証失敗: {r.status_code} {r.text[:200]}"
-            )
-        data = r.json()
-        self.refresh_token = data.get("refreshToken")
-        if not self.refresh_token:
-            raise JQuantsError("refreshToken がレスポンスに含まれていません")
-
-    def _refresh_id_token(self) -> None:
-        """refresh_token から ID token を取得 (従来方式)。"""
-        if not self.refresh_token:
-            self._exchange_mail_for_refresh_token()
-
-        url = f"{JQUANTS_BASE_URL}/token/auth_refresh"
-        r = requests.post(
-            url,
-            params={"refreshtoken": self.refresh_token},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if r.status_code != 200:
-            raise JQuantsError(
-                f"ID token 取得失敗: {r.status_code} {r.text[:200]}"
-            )
-        data = r.json()
-        self._id_token = data.get("idToken")
-        if not self._id_token:
-            raise JQuantsError("idToken がレスポンスに含まれていません")
-        self._id_token_expiry = datetime.now() + timedelta(hours=ID_TOKEN_TTL_HOURS)
-        self._save_cached_token()
-        print(
-            f"[jquants] ID token 取得 (有効期限: "
-            f"{self._id_token_expiry.strftime('%Y-%m-%d %H:%M')})",
-            file=sys.stderr,
-        )
-
-    def _ensure_token(self) -> None:
-        # 1. API Key 方式: 交換不要、直接 Bearer として使用
-        if self.api_key:
-            self._id_token = self.api_key
-            # 有効期限は長期 (実質無期限扱い)
-            self._id_token_expiry = datetime.now() + timedelta(days=365)
-            return
-
-        # 2. ID Token 直接指定方式: そのまま使用
-        if self.direct_id_token:
-            self._id_token = self.direct_id_token
-            self._id_token_expiry = datetime.now() + timedelta(hours=ID_TOKEN_TTL_HOURS)
-            return
-
-        # 3. キャッシュ済みの ID Token が有効なら使用
-        if (
-            self._id_token
-            and self._id_token_expiry
-            and self._id_token_expiry > datetime.now()
-        ):
-            return
-
-        # 4. refresh token / mail+password フロー
-        self._refresh_id_token()
 
     def _headers(self) -> dict:
-        self._ensure_token()
-        return {"Authorization": f"Bearer {self._id_token}"}
-
-    def auth_method(self) -> str:
-        """現在使用している認証方式名を返す (デバッグ用)。"""
-        if self.api_key:
-            return "API Key (新方式)"
-        if self.direct_id_token:
-            return "ID Token (直接指定)"
-        if self.refresh_token:
-            return "Refresh Token (従来方式)"
-        if self.mail and self.password:
-            return "メール+パスワード"
-        return "なし"
-
-    # ─────────────────────────────────────────────────────────
-    # 汎用 GET (リトライ・ページネーション対応)
-    # ─────────────────────────────────────────────────────────
+        return {"x-api-key": self.api_key}
 
     def _get(self, path: str, params: dict | None = None) -> dict:
+        """GET /v2{path}。リトライ/レート制限対応。"""
         url = f"{JQUANTS_BASE_URL}{path}"
         for attempt in range(4):
             r = requests.get(
@@ -274,11 +135,15 @@ class JQuantsClient:
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 401:
-                # トークン期限切れ → 再取得
-                print("[jquants] 401, refreshing token", file=sys.stderr)
-                self._id_token = None
-                self._id_token_expiry = None
-                continue
+                raise JQuantsError(
+                    f"認証失敗 (401): API Key が無効または期限切れです。\n"
+                    f"  {r.text[:200]}"
+                )
+            if r.status_code == 403:
+                raise JQuantsError(
+                    f"アクセス拒否 (403): このエンドポイントは現在のプランで"
+                    f"利用できません。\n  {path}\n  {r.text[:200]}"
+                )
             if r.status_code == 429 or r.status_code >= 500:
                 wait = 2 ** attempt
                 print(
@@ -313,7 +178,7 @@ class JQuantsClient:
     def get_listed_info(self, code: str | None = None,
                         date: str | None = None) -> pd.DataFrame:
         """
-        上場銘柄一覧を取得。
+        上場銘柄一覧を取得 (V2 エンドポイント: /equities/master)。
 
         code: 5桁銘柄コード (例: "72030")
         date: 基準日 YYYY-MM-DD (省略時は最新)
@@ -323,11 +188,20 @@ class JQuantsClient:
             params["code"] = code
         if date:
             params["date"] = date
-        rows = self._get_paginated("/listed/info", params, "info")
+        rows = self._get_paginated("/equities/master", params, "info")
+        if not rows:
+            # V2 の別レスポンス形式を試す
+            data = self._get("/equities/master", params=params)
+            for key in ("info", "data", "results", "items"):
+                if key in data:
+                    rows = data[key] or []
+                    break
+            if not rows and isinstance(data, list):
+                rows = data
         return pd.DataFrame(rows)
 
     # ─────────────────────────────────────────────────────────
-    # エンドポイント: 日足四本値
+    # エンドポイント: 日足株価
     # ─────────────────────────────────────────────────────────
 
     def get_daily_quotes(
@@ -338,7 +212,7 @@ class JQuantsClient:
         to_date: str | None = None,
     ) -> pd.DataFrame:
         """
-        日足 OHLC を取得。
+        日足 OHLC を取得 (V2 エンドポイント: /equities/bars/daily)。
 
         引数:
           code      : 5桁銘柄コード (例: "72030" for トヨタ)
@@ -347,13 +221,9 @@ class JQuantsClient:
           to_date   : 取得終了日 (YYYY-MM-DD)
 
         戻り値:
-          DataFrame 列 (J-Quants 生フォーマット):
-          [Date, Code, Open, High, Low, Close, Volume, TurnoverValue,
-           AdjustmentFactor, AdjustmentOpen, AdjustmentHigh,
-           AdjustmentLow, AdjustmentClose, AdjustmentVolume]
-
-        注意: 分割調整済み (Adjustment*) 列があるので、
-              バックテストでは基本 Adjustment* を使うべき。
+          J-Quants V2 のレスポンス DataFrame。
+          列名は API の返却形式に従う (通常: Date, Code, Open, High, Low,
+          Close, Volume, TurnoverValue, Adjustment*)。
         """
         if not (code or date):
             raise JQuantsError("code または date のどちらか必須")
@@ -368,14 +238,39 @@ class JQuantsClient:
         if to_date:
             params["to"] = to_date
 
-        rows = self._get_paginated("/prices/daily_quotes", params, "daily_quotes")
+        # V2 レスポンスキーは複数候補があり得るため順に試す
+        path = "/equities/bars/daily"
+        data = self._get(path, params=params)
+
+        # レスポンス本体 (ページネーション対応)
+        rows: list[dict] = []
+        for key in ("daily_quotes", "bars", "data", "quotes"):
+            if key in data:
+                rows.extend(data[key] or [])
+                break
+        else:
+            if isinstance(data, list):
+                rows = data
+
+        # 残りのページ
+        pagination_key = data.get("pagination_key") if isinstance(data, dict) else None
+        while pagination_key:
+            page_params = dict(params)
+            page_params["pagination_key"] = pagination_key
+            page = self._get(path, params=page_params)
+            for key in ("daily_quotes", "bars", "data", "quotes"):
+                if key in page:
+                    rows.extend(page[key] or [])
+                    break
+            pagination_key = page.get("pagination_key") if isinstance(page, dict) else None
+
         if not rows:
             return pd.DataFrame()
 
         df = pd.DataFrame(rows)
         if "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"])
-            df = df.sort_values(["Date", "Code"]).reset_index(drop=True)
+            df = df.sort_values(["Date"]).reset_index(drop=True)
 
         # 数値列を float 化
         numeric_cols = [
@@ -386,60 +281,75 @@ class JQuantsClient:
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-
         return df
 
     # ─────────────────────────────────────────────────────────
-    # エンドポイント: 財務情報
+    # エンドポイント: 財務・その他
     # ─────────────────────────────────────────────────────────
 
-    def get_financial_statements(self, code: str | None = None,
-                                 date: str | None = None) -> pd.DataFrame:
+    def get_financial_details(self, code: str | None = None,
+                              date: str | None = None) -> pd.DataFrame:
+        """財務諸表を取得 (V2: /fins/details)。"""
         params: dict = {}
         if code:
             params["code"] = code
         if date:
             params["date"] = date
-        rows = self._get_paginated("/fins/statements", params, "statements")
-        return pd.DataFrame(rows)
+        data = self._get("/fins/details", params=params)
+        for key in ("statements", "details", "data"):
+            if key in data:
+                return pd.DataFrame(data[key] or [])
+        return pd.DataFrame()
 
-    def get_announcement(self) -> pd.DataFrame:
-        data = self._get("/fins/announcement")
-        return pd.DataFrame(data.get("announcement", []))
+    def get_earnings_calendar(self) -> pd.DataFrame:
+        """決算発表予定 (V2: /equities/earnings-calendar)。"""
+        data = self._get("/equities/earnings-calendar")
+        for key in ("announcement", "calendar", "data"):
+            if key in data:
+                return pd.DataFrame(data[key] or [])
+        return pd.DataFrame()
+
+    def get_trading_calendar(self, from_date: str | None = None,
+                             to_date: str | None = None) -> pd.DataFrame:
+        """営業日カレンダー (V2: /markets/calendar)。"""
+        params: dict = {}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        data = self._get("/markets/calendar", params=params)
+        for key in ("trading_calendar", "calendar", "data"):
+            if key in data:
+                return pd.DataFrame(data[key] or [])
+        return pd.DataFrame()
 
 
 # ─────────────────────────────────────────────────────────────
-# CLI テスト
+# CLI
 # ─────────────────────────────────────────────────────────────
 
 def _cmd_auth(args: argparse.Namespace) -> None:
     cli = JQuantsClient()
-    print(f"認証方式: {cli.auth_method()}")
-    cli._ensure_token()
-    print("✓ 認証準備完了")
-    if cli._id_token:
-        preview = f"{cli._id_token[:20]}...{cli._id_token[-10:]}" if len(cli._id_token) > 40 else cli._id_token
-        print(f"  token preview: {preview}")
-        print(f"  token length : {len(cli._id_token)}")
-    print(f"  有効期限     : {cli._id_token_expiry}")
-    print(f"  キャッシュ   : {cli._token_cache_path}")
-
-    # 実際に API を叩いて動作確認
+    preview = (f"{cli.api_key[:10]}...{cli.api_key[-5:]}"
+               if len(cli.api_key) > 20 else cli.api_key)
+    print(f"API Key: {preview}  (長さ {len(cli.api_key)})")
+    print(f"Base URL: {JQUANTS_BASE_URL}")
     print()
-    print("動作確認: /listed/info で1銘柄取得中...")
+    print("動作確認: /equities/master で1銘柄取得中...")
     try:
         df = cli.get_listed_info(code="72030")
         if df.empty:
             print("  [warn] レスポンスは空でした")
         else:
-            print("  ✓ API 呼び出し成功")
-            cols = [c for c in ["Code", "CompanyName", "MarketCodeName"]
+            print(f"  ✓ 認証成功 ({len(df)}件)")
+            cols = [c for c in ["Code", "CompanyName", "CompanyNameEnglish",
+                                "MarketCodeName", "Sector17CodeName"]
                     if c in df.columns]
             if cols:
-                print("  " + df[cols].head(1).to_string(index=False).replace("\n", "\n  "))
+                print("  " + df[cols].head(3).to_string(index=False).replace("\n", "\n  "))
     except JQuantsError as e:
-        print(f"  [ERROR] API 呼び出し失敗: {e}")
-        raise
+        print(f"  [ERROR] {e}")
+        sys.exit(1)
 
 
 def _cmd_listed(args: argparse.Namespace) -> None:
@@ -447,9 +357,8 @@ def _cmd_listed(args: argparse.Namespace) -> None:
     df = cli.get_listed_info(code=args.code)
     print(f"上場銘柄: {len(df)}件")
     if not df.empty:
-        cols = [c for c in ["Date", "Code", "CompanyName", "CompanyNameEnglish",
-                            "Sector17CodeName", "Sector33CodeName",
-                            "MarketCodeName"] if c in df.columns]
+        cols = [c for c in ["Date", "Code", "CompanyName", "MarketCodeName",
+                            "Sector17CodeName"] if c in df.columns]
         print(df[cols].head(20).to_string(index=False))
 
 
@@ -466,137 +375,47 @@ def _cmd_daily(args: argparse.Namespace) -> None:
         cols = [c for c in ["Date", "Code", "Open", "High", "Low", "Close",
                             "Volume", "AdjustmentClose"] if c in df.columns]
         print(df[cols].head(10).to_string(index=False))
-        print("...")
-        print(df[cols].tail(5).to_string(index=False))
+        if len(df) > 10:
+            print("...")
+            print(df[cols].tail(5).to_string(index=False))
 
 
 def _cmd_diagnose(args: argparse.Namespace) -> None:
     """
-    認証方法を総当たりで試す診断モード。
-    J-Quants の仕様が不明な時に、どの認証ヘッダー/パラメータ形式が
-    通るかを自動判定する。
+    V2 への移行確認のための診断モード。
+    /v2/equities/master と /v2/equities/bars/daily を x-api-key で叩く。
     """
-    token = os.environ.get("JQUANTS_API_KEY") or os.environ.get("JQUANTS_ID_TOKEN") \
-        or os.environ.get("JQUANTS_REFRESH_TOKEN")
+    token = os.environ.get("JQUANTS_API_KEY")
     if not token:
-        print("[ERROR] JQUANTS_API_KEY / JQUANTS_ID_TOKEN / JQUANTS_REFRESH_TOKEN "
-              "のいずれかを .env or 環境変数に設定してください", file=sys.stderr)
+        print("[ERROR] JQUANTS_API_KEY が設定されていません", file=sys.stderr)
         sys.exit(1)
 
-    print(f"診断対象トークン: 長さ {len(token)}, 先頭 {token[:10]}..., 末尾 ...{token[-5:]}")
+    print(f"API Key: 長さ {len(token)}, 先頭 {token[:10]}..., 末尾 ...{token[-5:]}")
+    print(f"Base URL: {JQUANTS_BASE_URL}")
     print()
 
-    test_url = f"{JQUANTS_BASE_URL}/listed/info"
-    test_params = {"code": "72030"}
-
-    # ── ① 各種 Authorization ヘッダー形式を試す ───────────────
-    print("━" * 60)
-    print("[1] ヘッダー/クエリで直接認証できるか")
-    print("━" * 60)
-
-    direct_variants = [
-        ("Authorization: Bearer <token>",
-         {"Authorization": f"Bearer {token}"}, {}),
-        ("Authorization: Token <token>",
-         {"Authorization": f"Token {token}"}, {}),
-        ("Authorization: ApiKey <token>",
-         {"Authorization": f"ApiKey {token}"}, {}),
-        ("Authorization: <token>",
-         {"Authorization": token}, {}),
-        ("X-API-KEY: <token>",
-         {"X-API-KEY": token}, {}),
-        ("x-api-key: <token>",
-         {"x-api-key": token}, {}),
-        ("X-API-Token: <token>",
-         {"X-API-Token": token}, {}),
-        ("query param apikey",
-         {}, {"apikey": token}),
-        ("query param api_key",
-         {}, {"api_key": token}),
-        ("query param key",
-         {}, {"key": token}),
+    headers = {"x-api-key": token}
+    test_cases = [
+        ("/equities/master", {"code": "72030"}),
+        ("/equities/bars/daily", {"code": "72030",
+                                   "from": "2025-01-01", "to": "2025-12-31"}),
+        ("/markets/calendar", {"from": "2026-04-01", "to": "2026-04-10"}),
     ]
-
-    hit = None
-    for name, headers, extra_params in direct_variants:
+    for path, params in test_cases:
+        url = f"{JQUANTS_BASE_URL}{path}"
         try:
-            params = dict(test_params)
-            params.update(extra_params)
-            r = requests.get(test_url, headers=headers, params=params,
+            r = requests.get(url, headers=headers, params=params,
                              timeout=REQUEST_TIMEOUT)
             mark = "✓" if r.status_code == 200 else " "
-            msg = (r.text[:80] + "...") if len(r.text) > 80 else r.text
-            print(f"  {mark} {name:<35} → {r.status_code} {msg}")
-            if r.status_code == 200 and hit is None:
-                hit = name
+            msg = (r.text[:120] + "...") if len(r.text) > 120 else r.text
+            print(f"  {mark} GET {path:<35} → {r.status_code}")
+            print(f"      {msg}")
         except Exception as e:
-            print(f"    {name:<35} → EXCEPTION {e}")
-
-    if hit:
-        print()
-        print(f"✓✓ 直接認証成功: {hit}")
-        return
-
-    # ── ② トークン交換エンドポイントを試す ────────────────
-    print()
-    print("━" * 60)
-    print("[2] トークン交換 → ID Token 取得 のパターン")
-    print("━" * 60)
-
-    exchange_variants = [
-        # (description, method, path, headers, params, body)
-        ("POST /token/auth_refresh  query param (現行実装)",
-         "POST", "/token/auth_refresh",
-         {}, {"refreshtoken": token}, None),
-        ("POST /token/auth_refresh  body JSON",
-         "POST", "/token/auth_refresh",
-         {"Content-Type": "application/json"}, {},
-         {"refreshtoken": token}),
-        ("POST /token/auth_refresh  body JSON (apikey key)",
-         "POST", "/token/auth_refresh",
-         {"Content-Type": "application/json"}, {},
-         {"apikey": token}),
-        ("GET  /token/auth_refresh",
-         "GET", "/token/auth_refresh",
-         {}, {"refreshtoken": token}, None),
-    ]
-
-    for name, method, path, headers, params, body in exchange_variants:
-        try:
-            url = f"{JQUANTS_BASE_URL}{path}"
-            if method == "GET":
-                r = requests.get(url, headers=headers, params=params,
-                                 timeout=REQUEST_TIMEOUT)
-            else:
-                r = requests.post(url, headers=headers, params=params,
-                                  json=body, timeout=REQUEST_TIMEOUT)
-            mark = "✓" if r.status_code == 200 else " "
-            msg = (r.text[:80] + "...") if len(r.text) > 80 else r.text
-            print(f"  {mark} {name:<50} → {r.status_code} {msg}")
-            if r.status_code == 200:
-                print(f"  ↳ レスポンス: {r.text[:300]}")
-        except Exception as e:
-            print(f"    {name:<50} → EXCEPTION {e}")
-
-    # ── ③ その他の情報エンドポイントで 200 が返るか ─────────
-    print()
-    print("━" * 60)
-    print("[3] 参考情報: ベースURL・エンドポイント存在確認")
-    print("━" * 60)
-    for path in ["/listed/info", "/prices/daily_quotes"]:
-        try:
-            r = requests.get(f"{JQUANTS_BASE_URL}{path}", timeout=10)
-            print(f"  {path:<30} (無認証) → {r.status_code}")
-        except Exception as e:
-            print(f"  {path:<30} → EXCEPTION {e}")
-
-    print()
-    print("診断完了。どの方法も 200 にならない場合は、")
-    print("Dashboard > API Documentation で公式の認証方法を確認してください。")
+            print(f"  GET {path:<35} → EXCEPTION {e}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="J-Quants API クライアント CLI")
+    parser = argparse.ArgumentParser(description="J-Quants API V2 クライアント CLI")
     sub = parser.add_subparsers(dest="cmd")
 
     p_auth = sub.add_parser("auth", help="認証テスト")
@@ -613,8 +432,7 @@ def main() -> None:
     p_daily.add_argument("--to-date", dest="to_date", help="YYYY-MM-DD")
     p_daily.set_defaults(func=_cmd_daily)
 
-    p_diag = sub.add_parser("diagnose",
-                            help="認証方法を総当たりで診断")
+    p_diag = sub.add_parser("diagnose", help="V2 エンドポイント疎通確認")
     p_diag.set_defaults(func=_cmd_diagnose)
 
     args = parser.parse_args()
