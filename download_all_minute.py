@@ -122,24 +122,37 @@ def get_all_symbols(cli, market_filter: str | None = None) -> list[dict]:
         sys.exit(1)
 
     print(f"  全銘柄: {len(df)}件", flush=True)
+    print(f"  カラム: {list(df.columns)}", flush=True)
 
-    # 市場フィルタ
-    if market_filter and "MarketCodeName" in df.columns:
+    # 市場フィルタ (V2 のカラム名バリアントに対応)
+    if market_filter:
         market_map = {
             "prime":    "プライム",
             "standard": "スタンダード",
             "growth":   "グロース",
         }
         keyword = market_map.get(market_filter.lower(), market_filter)
-        df = df[df["MarketCodeName"].str.contains(keyword, na=False)]
-        print(f"  {keyword}フィルタ後: {len(df)}件", flush=True)
+        filtered = False
+        for col in ["MarketCodeName", "MarketCode", "market_code_name",
+                     "Section", "section", "Market", "market"]:
+            if col in df.columns:
+                before = len(df)
+                df = df[df[col].astype(str).str.contains(keyword, na=False)]
+                if len(df) < before:
+                    print(f"  {col} で '{keyword}' フィルタ: "
+                          f"{before} → {len(df)}件", flush=True)
+                    filtered = True
+                    break
+        if not filtered:
+            print(f"  [warn] 市場フィルタ '{keyword}' に一致するカラムなし。"
+                  f"全銘柄を対象にします。", flush=True)
 
     # 必要な列を抽出
     symbols = []
     for _, row in df.iterrows():
         code = str(row.get("Code", ""))
-        name = str(row.get("CompanyName", ""))
-        market = str(row.get("MarketCodeName", ""))
+        name = str(row.get("CompanyName", row.get("company_name", "")))
+        market = str(row.get("MarketCodeName", row.get("market_code_name", "")))
         if code and len(code) >= 4:
             symbols.append({"code": code, "name": name, "market": market})
 
@@ -148,9 +161,15 @@ def get_all_symbols(cli, market_filter: str | None = None) -> list[dict]:
 
 
 # ── 1銘柄ダウンロード ───────────────────────────────────────
+CHUNK_SLEEP    = 2.0    # チャンク間の待機 (秒)
+SYMBOL_SLEEP   = 1.0    # 銘柄間の待機 (秒)
+RATE_LIMIT_BASE = 30    # 429 エラー時の最小待機 (秒)
+MAX_RETRY      = 5      # 最大リトライ回数
+
+
 def download_one(cli, code: str, name: str, days: int,
-                 interval: str, retry: int = 3) -> pd.DataFrame | None:
-    """1銘柄の分足を30日チャンクで取得。"""
+                 interval: str) -> pd.DataFrame | None:
+    """1銘柄の分足を30日チャンクで取得 (レート制限対策強化)。"""
     method_map = {
         "1m":  "get_eq_bars_minute",
         "5m":  "get_eq_bars_5minute",
@@ -168,30 +187,42 @@ def download_one(cli, code: str, name: str, days: int,
     all_dfs: list[pd.DataFrame] = []
     current = start
     while current < now:
+        if _interrupted:
+            break
         chunk_end = min(current + timedelta(days=chunk_size), now)
         from_d = current.strftime("%Y%m%d")
         to_d = chunk_end.strftime("%Y%m%d")
 
-        for attempt in range(retry):
+        success = False
+        for attempt in range(MAX_RETRY):
             try:
                 raw = fetch_method(
                     code=code, from_yyyymmdd=from_d, to_yyyymmdd=to_d
                 )
                 if raw is not None and not raw.empty:
-                    # 銘柄フィルタ (念のため)
                     if "Code" in raw.columns:
                         raw = raw[raw["Code"].astype(str) == code].copy()
                     if not raw.empty:
                         all_dfs.append(raw)
+                success = True
                 break
             except Exception as e:
-                if attempt < retry - 1:
+                err_str = str(e)
+                if "429" in err_str or "too many" in err_str.lower():
+                    # 429 レート制限 → 長めに待機
+                    wait = RATE_LIMIT_BASE * (2 ** attempt)
+                    print(f"      [429] wait {wait}s (retry {attempt+1}/{MAX_RETRY})",
+                          flush=True)
+                    time.sleep(wait)
+                elif attempt < MAX_RETRY - 1:
                     wait = 2 ** (attempt + 1)
                     time.sleep(wait)
                 else:
-                    print(f"      [err] {code} chunk {from_d}-{to_d}: {e}",
+                    print(f"      [err] {code} {from_d}-{to_d}: {err_str[:80]}",
                           file=sys.stderr)
 
+        # チャンク間の待機 (レート制限回避)
+        time.sleep(CHUNK_SLEEP)
         current = chunk_end + timedelta(days=1)
 
     if not all_dfs:
