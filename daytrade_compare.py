@@ -71,9 +71,29 @@ STRATEGY_MAP = {
 }
 
 
-def _process_symbol(args_tuple):
-    """1銘柄×指定戦略を処理 (multiprocessing用)。"""
-    sym, name, df, strat_names, budget = args_tuple
+def _process_symbol_from_file(args_tuple):
+    """1銘柄を処理 (ファイルから読み込み、メモリ転送なし)。"""
+    sym, name, pkl_path, strat_names, budget, days = args_tuple
+    import pickle
+    from daytrade_data import normalize_minute_df, resample_to_5m
+    try:
+        raw = pickle.loads(pkl_path.read_bytes())
+        df = normalize_minute_df(raw)
+        if df.empty:
+            return {}
+        df = resample_to_5m(df)
+        if df.empty:
+            return {}
+        import pandas as pd
+        from datetime import datetime, timedelta, timezone
+        cutoff = pd.Timestamp(datetime.now(timezone(timedelta(hours=9))).date()
+                              - timedelta(days=days))
+        df = df[df.index >= cutoff]
+        if len(df) < 50:
+            return {}
+    except Exception:
+        return {}
+
     results = {}
     for sn in strat_names:
         fn = STRATEGY_MAP.get(sn)
@@ -91,27 +111,39 @@ def run_all_strategies(fetched: dict[str, pd.DataFrame],
                        targets: list[tuple[str, str]],
                        budget: int = BUDGET,
                        strat_names: list[str] | None = None,
-                       workers: int = 1) -> dict[str, list[dict]]:
-    """指定戦略を全銘柄に適用。workers>1で並列処理。"""
+                       workers: int = 1,
+                       days: int = 730) -> dict[str, list[dict]]:
+    """指定戦略を全銘柄に適用。workers>1でファイルベース並列処理。"""
     if strat_names is None:
         strat_names = list(STRATEGY_MAP.keys())
 
     results = {s: [] for s in strat_names}
-    valid = [(sym, name, fetched[sym]) for sym, name in targets if sym in fetched]
-    total = len(valid)
+    total = len([s for s, _ in targets if s in fetched])
 
     if workers > 1:
+        # ファイルベース並列 (メモリ転送なし)
         from multiprocessing import Pool
-        args_list = [(sym, name, df, strat_names, budget)
-                     for sym, name, df in valid]
+        from daytrade_data import DATA_DIR, yf_to_jquants
+        args_list = []
+        for sym, name in targets:
+            if sym not in fetched:
+                continue
+            jq = yf_to_jquants(sym)
+            pkl = DATA_DIR / f"{jq}.pkl"
+            if pkl.exists():
+                args_list.append((sym, name, pkl, strat_names, budget, days))
+
         with Pool(workers) as pool:
-            for i, res in enumerate(pool.imap(_process_symbol, args_list), 1):
+            for i, res in enumerate(pool.imap_unordered(
+                    _process_symbol_from_file, args_list, chunksize=20), 1):
                 for sn, r in res.items():
                     results[sn].append(r)
-                if i % 200 == 0 or i == total:
-                    print(f"  {i}/{total} 銘柄完了", flush=True)
+                if i % 500 == 0 or i == len(args_list):
+                    print(f"  {i}/{len(args_list)} 銘柄完了", flush=True)
     else:
-        for i, (sym, name, df) in enumerate(valid, 1):
+        valid = [(sym, name) for sym, name in targets if sym in fetched]
+        for i, (sym, name) in enumerate(valid, 1):
+            df = fetched[sym]
             for sn in strat_names:
                 fn = STRATEGY_MAP.get(sn)
                 if fn:
@@ -121,8 +153,8 @@ def run_all_strategies(fetched: dict[str, pd.DataFrame],
                             results[sn].append(r)
                     except Exception:
                         pass
-            if i % 200 == 0 or i == total:
-                print(f"  {i}/{total} 銘柄完了", flush=True)
+            if i % 500 == 0 or i == len(valid):
+                print(f"  {i}/{len(valid)} 銘柄完了", flush=True)
 
         if i % 10 == 0 or i == total:
             print(f"  {i}/{total} 銘柄完了", flush=True)
@@ -519,7 +551,8 @@ def main() -> None:
     print(f"バックテスト実行中 ({len(fetched)}銘柄 × {len(strats)}戦略 "
           f"/ workers={args.workers})...", flush=True)
     results = run_all_strategies(fetched, targets, budget=budget_val,
-                                 strat_names=strats, workers=args.workers)
+                                 strat_names=strats, workers=args.workers,
+                                 days=args.days)
 
     # コンソール
     print_comparison(results, args.days)
