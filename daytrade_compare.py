@@ -276,7 +276,11 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
             sym = item["symbol"]
             if sym not in all_symbols:
                 all_symbols[sym] = {"name": item["name"]}
-            all_symbols[sym][strat_name] = item["stats"]
+            # stats がない場合 (Pivot/RSI) は trades から計算
+            if "stats" in item:
+                all_symbols[sym][strat_name] = item["stats"]
+            else:
+                all_symbols[sym][strat_name] = _calc_stats(item.get("trades", []))
 
     symbol_rows = ""
     sorted_syms = sorted(all_symbols.keys(),
