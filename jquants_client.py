@@ -54,6 +54,41 @@ ID_TOKEN_TTL_HOURS = 20  # 実際は 24h、余裕を持たせる
 REQUEST_TIMEOUT = 60
 
 
+def _load_dotenv(path: Path | None = None) -> None:
+    """
+    最小限の .env ローダ (python-dotenv 不要)。
+    プロジェクトルート (CWD or このファイルの親) の .env を読み込み、
+    未設定の環境変数のみを上書きせず追加する。
+    """
+    candidates = []
+    if path:
+        candidates.append(Path(path))
+    candidates.extend([
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ])
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+            return
+        except Exception as e:
+            print(f"[jquants] .env load error ({p}): {e}", file=sys.stderr)
+
+
+# モジュール import 時に .env を自動読み込み
+_load_dotenv()
+
+
 class JQuantsError(Exception):
     """J-Quants API 関連のエラー。"""
 

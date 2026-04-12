@@ -3,7 +3,14 @@ __pycache__/
 *.log
 positions_top10/
 .rsi2_cache/
+.jquants_cache/
 watchlist_*.html
 candidates_*.csv
 report_combined_*.html
 result_summary_*.txt
+daytrade_*_*.html
+
+# credentials (never commit)
+.env
+.env.local
+.env.*.local
