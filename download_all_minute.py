@@ -304,10 +304,13 @@ def main() -> None:
     if prog["started_at"] is None:
         prog["started_at"] = datetime.now(JST).isoformat()
 
-    # 未完了銘柄
-    todo = [s for s in symbols if s["code"] not in completed_set]
+    # 未完了銘柄 (進捗JSON + ファイル存在の両方でスキップ判定)
+    existing_files = set(f.stem for f in DATA_DIR.glob("*.pkl")) if DATA_DIR.exists() else set()
+    skip_set = completed_set | existing_files
+    todo = [s for s in symbols if s["code"] not in skip_set]
+    skipped_by_file = len(existing_files - completed_set)
     print(f"\n対象: {len(symbols)}銘柄  完了済み: {len(completed_set)}  "
-          f"残り: {len(todo)}")
+          f"ファイル存在スキップ: {skipped_by_file}  残り: {len(todo)}")
     print()
 
     if not todo:
