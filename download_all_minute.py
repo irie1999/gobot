@@ -169,7 +169,14 @@ MAX_RETRY      = 5      # 最大リトライ回数
 
 def download_one(cli, code: str, name: str, days: int,
                  interval: str) -> pd.DataFrame | None:
-    """1銘柄の分足を30日チャンクで取得 (レート制限対策強化)。"""
+    """
+    1銘柄の分足をチャンクで取得。
+
+    高速化:
+      - チャンクサイズ 90日 (30→90日で API呼出し 1/3)
+      - 適応的スリープ (成功時0.3秒、429時のみ長く)
+      - 連続空チャンク3回でスキップ (データなし銘柄を即判定)
+    """
     method_map = {
         "1m":  "get_eq_bars_minute",
         "5m":  "get_eq_bars_5minute",
@@ -182,10 +189,13 @@ def download_one(cli, code: str, name: str, days: int,
 
     now = datetime.now(JST)
     start = now - timedelta(days=days)
-    chunk_size = 30
+    chunk_size = 90  # 高速化①: 30→90日 (API呼出し 1/3)
 
     all_dfs: list[pd.DataFrame] = []
     current = start
+    empty_streak = 0
+    current_sleep = 0.3  # 高速化②: 成功時は短いスリープ
+
     while current < now:
         if _interrupted:
             break
@@ -193,7 +203,6 @@ def download_one(cli, code: str, name: str, days: int,
         from_d = current.strftime("%Y%m%d")
         to_d = chunk_end.strftime("%Y%m%d")
 
-        success = False
         for attempt in range(MAX_RETRY):
             try:
                 raw = fetch_method(
@@ -204,37 +213,41 @@ def download_one(cli, code: str, name: str, days: int,
                         raw = raw[raw["Code"].astype(str) == code].copy()
                     if not raw.empty:
                         all_dfs.append(raw)
-                success = True
+                        empty_streak = 0
+                        current_sleep = 0.3
+                    else:
+                        empty_streak += 1
+                else:
+                    empty_streak += 1
                 break
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str or "too many" in err_str.lower():
-                    # 429 レート制限 → 長めに待機
                     wait = RATE_LIMIT_BASE * (2 ** attempt)
-                    print(f"      [429] wait {wait}s (retry {attempt+1}/{MAX_RETRY})",
-                          flush=True)
+                    print(f"      [429] wait {wait}s", flush=True)
                     time.sleep(wait)
+                    current_sleep = 2.0
                 elif attempt < MAX_RETRY - 1:
-                    wait = 2 ** (attempt + 1)
-                    time.sleep(wait)
+                    time.sleep(2 ** (attempt + 1))
                 else:
-                    print(f"      [err] {code} {from_d}-{to_d}: {err_str[:80]}",
+                    print(f"      [err] {code} {from_d}-{to_d}: {err_str[:60]}",
                           file=sys.stderr)
+                    empty_streak += 1
 
-        # チャンク間の待機 (レート制限回避)
-        time.sleep(CHUNK_SLEEP)
+        # 高速化③: 連続空チャンク → データなしと判断してスキップ
+        if empty_streak >= 3:
+            break
+
+        time.sleep(current_sleep)
         current = chunk_end + timedelta(days=1)
 
     if not all_dfs:
         return None
 
     combined = pd.concat(all_dfs, ignore_index=True)
-
-    # 重複除去
     dt_cols = [c for c in ["Date", "Time", "DateTime"] if c in combined.columns]
     if dt_cols:
         combined = combined.drop_duplicates(subset=dt_cols, keep="last")
-
     return combined
 
 
@@ -370,8 +383,8 @@ def main() -> None:
         prog["completed"].append(code)
         save_progress(prog)
 
-        # API レート制限対策 (連続リクエスト間の小休止)
-        time.sleep(0.5)
+        # 銘柄間の小休止 (0.2秒 — チャンク内で適応スリープ済み)
+        time.sleep(0.2)
 
     # ── サマリー ────────────────────────────────────────────
     elapsed = time.time() - start_time
