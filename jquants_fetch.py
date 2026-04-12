@@ -1,39 +1,32 @@
 """
-jquants_fetch.py  ―  J-Quants 高レベル取得ユーティリティ
+jquants_fetch.py  ―  J-Quants V2 株価取得ユーティリティ
 ==================================================================
-既存の backtest_limit_entry.py:fetch() と同じ形式 (lowercase カラム /
-tz-naive datetime index) の DataFrame を返す yfinance 互換インターフェース。
+公式 jquantsapi ライブラリ (jquants-api-client) をラップし、
+既存の backtest コードと互換の DataFrame を返す。
+
+【セットアップ】
+  pip install jquants-api-client
+
+  .env に以下を記載:
+    JQUANTS_API_KEY=ダッシュボードで取得した API Key
 
 【主な機能】
-  1. 銘柄コード変換      : "7203.T" ↔ "72030"
-  2. 日足取得            : fetch_daily(symbol, days)
-  3. バッチ日足取得      : fetch_daily_batch(symbols, days)
-  4. ディスクキャッシュ  : ~/.jquants_cache/daily/<code>.pkl
-                          当日のデータのみ再取得、過去データは再利用
-  5. 分割調整           : AdjustmentOpen/High/Low/Close/Volume を使用
-
-【使い方】
-  from jquants_fetch import fetch_daily, fetch_daily_batch
-
-  # 単一銘柄
-  df = fetch_daily("7203.T", days=365)
-  print(df.head())
-
-  # 複数銘柄
-  dfs = fetch_daily_batch(["7203.T", "9984.T", "8306.T"], days=90)
-  for sym, df in dfs.items():
-      print(sym, df.shape)
+  - fetch_daily(symbol, days)            日足 (yfinance互換形式)
+  - fetch_daily_batch(symbols, days)     日足バッチ
+  - fetch_intraday(symbol, days, "5m")   5分足 (yfinance互換形式)
+  - fetch_intraday_batch(symbols, days)  5分足バッチ
+  - yf_to_jquants("7203.T") → "72030"   コード変換
 
 【CLI】
-  python jquants_fetch.py 7203.T               # トヨタ1年
-  python jquants_fetch.py 7203.T --days 90     # 90日
-  python jquants_fetch.py 7203.T 9984.T 8306.T # 複数銘柄バッチ
-  python jquants_fetch.py --watchlist          # DAYTRADE_SYMBOLS を全取得
+  python jquants_fetch.py 7203.T --days 90              # 日足
+  python jquants_fetch.py 7203.T --intraday --days 60   # 5分足
+  python jquants_fetch.py --watchlist --intraday --days 60  # 60銘柄5分足
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import pickle
 import sys
 from datetime import datetime, timedelta, timezone
@@ -41,40 +34,83 @@ from pathlib import Path
 
 import pandas as pd
 
-from jquants_client import JQuantsClient, JQuantsError
-
 JST = timezone(timedelta(hours=9))
 CACHE_ROOT = Path.home() / ".jquants_cache"
 DAILY_CACHE_DIR = CACHE_ROOT / "daily"
-DAILY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MINUTE_CACHE_DIR = CACHE_ROOT / "minute"
+
+for d in [CACHE_ROOT, DAILY_CACHE_DIR, MINUTE_CACHE_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
 
 # ─────────────────────────────────────────────────────────────
-# 銘柄コード変換 (yfinance ↔ J-Quants)
+# .env ローダ (python-dotenv 不要)
+# ─────────────────────────────────────────────────────────────
+
+def _load_dotenv() -> None:
+    for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
+        if not p.exists():
+            continue
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+            return
+        except Exception:
+            pass
+
+
+_load_dotenv()
+
+
+# ─────────────────────────────────────────────────────────────
+# 公式クライアント (シングルトン)
+# ─────────────────────────────────────────────────────────────
+
+_CLIENT = None
+
+
+def get_client():
+    """jquantsapi.ClientV2 のシングルトン。"""
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
+    try:
+        import jquantsapi
+    except ImportError:
+        print("[ERROR] jquants-api-client が未インストールです。\n"
+              "  pip install jquants-api-client", file=sys.stderr)
+        sys.exit(1)
+    api_key = os.environ.get("JQUANTS_API_KEY")
+    if not api_key:
+        print("[ERROR] JQUANTS_API_KEY が設定されていません。\n"
+              "  .env ファイルまたは環境変数に設定してください。",
+              file=sys.stderr)
+        sys.exit(1)
+    _CLIENT = jquantsapi.ClientV2(api_key=api_key)
+    return _CLIENT
+
+
+# ─────────────────────────────────────────────────────────────
+# 銘柄コード変換
 # ─────────────────────────────────────────────────────────────
 
 def yf_to_jquants(yf_code: str) -> str:
-    """
-    "7203.T" → "72030"
-
-    日本の東証上場株式は 2022年の市場再編以降 5桁コードに統一。
-    ほとんどの銘柄は 4桁コード + チェックデジット "0"。
-    すでに 5桁の場合はそのまま返す。
-    """
+    """7203.T → 72030"""
     code = yf_code.strip().upper().replace(".T", "")
-    if len(code) == 5 and code.isdigit():
-        return code
     if len(code) == 4 and code.isdigit():
         return code + "0"
-    # それ以外 (英字含む etc.) はそのまま
     return code
 
 
 def jquants_to_yf(jq_code: str) -> str:
-    """
-    "72030" → "7203.T"
-
-    末尾の "0" (チェックデジット) を取り除いて ".T" を付加。
-    """
+    """72030 → 7203.T"""
     code = str(jq_code).strip()
     if len(code) == 5 and code.endswith("0") and code.isdigit():
         return code[:4] + ".T"
@@ -82,80 +118,61 @@ def jquants_to_yf(jq_code: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# DataFrame 正規化 (J-Quants → yfinance 互換)
+# DataFrame 正規化 (→ yfinance 互換)
 # ─────────────────────────────────────────────────────────────
 
-def _normalize_daily(df: pd.DataFrame, use_adjusted: bool = True) -> pd.DataFrame:
+def _normalize(df: pd.DataFrame, dt_col: str = "Date") -> pd.DataFrame:
     """
-    J-Quants daily_quotes レスポンスを
-    既存の backtest コードが期待する形式に変換。
+    公式クライアントの返す DataFrame を
+    既存 backtest コードが期待する形式に変換。
 
-    既存形式 (backtest_limit_entry.py:fetch() 互換):
-      - Index: DatetimeIndex (tz-naive)
-      - Columns: [open, high, low, close, volume] (lowercase)
-
-    V1 列名 (Open, High, Low, Close, Volume, AdjustmentClose) と
-    V2 列名 (小文字バリアントや変形) の両方に対応する。
+    出力: Index=DatetimeIndex(tz-naive), columns=[open,high,low,close,volume]
     """
     if df is None or df.empty:
         return pd.DataFrame()
-
     df = df.copy()
 
-    # Date カラム名のバリアントに対応
-    date_col = None
-    for cand in ["Date", "date", "tradingDate", "TradingDate"]:
-        if cand in df.columns:
-            date_col = cand
-            break
-    if date_col is None:
+    # ── DateTime 解決 ─────────────────────────────────────
+    if dt_col in df.columns:
+        df[dt_col] = pd.to_datetime(df[dt_col])
+    elif "DateTime" in df.columns:
+        dt_col = "DateTime"
+        df[dt_col] = pd.to_datetime(df[dt_col])
+    elif "Date" in df.columns and "Time" in df.columns:
+        dt_col = "DateTime"
+        df[dt_col] = pd.to_datetime(
+            df["Date"].astype(str) + " " + df["Time"].astype(str))
+    else:
         return pd.DataFrame()
-    df[date_col] = pd.to_datetime(df[date_col])
 
-    # カラム名マッピング候補 (優先度順)
-    # 調整済み列と未調整列の両バリアントを網羅
-    candidates_adjusted = [
-        ("AdjustmentOpen",   "AdjustmentHigh",   "AdjustmentLow",
-         "AdjustmentClose",  "AdjustmentVolume"),
-        ("adjustmentOpen",   "adjustmentHigh",   "adjustmentLow",
-         "adjustmentClose",  "adjustmentVolume"),
-        ("adj_open",         "adj_high",         "adj_low",
-         "adj_close",        "adj_volume"),
-    ]
-    candidates_raw = [
-        ("Open",   "High",   "Low",   "Close",   "Volume"),
-        ("open",   "high",   "low",   "close",   "volume"),
-    ]
+    # ── OHLCV 解決 ────────────────────────────────────────
+    # 公式クライアントは AdjustmentClose 等を返す
+    rename_map = {"O": "Open", "H": "High", "L": "Low",
+                  "C": "Close", "Vo": "Volume"}
+    df = df.rename(columns=rename_map)
 
-    col_map: dict[str, str] | None = None
-    if use_adjusted:
-        for cols in candidates_adjusted:
-            if all(c in df.columns for c in cols):
-                col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
-                break
-    if col_map is None:
-        for cols in candidates_raw:
-            if all(c in df.columns for c in cols):
-                col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
-                break
-    if col_map is None:
-        # 最後の手段: close 1列があれば何とか使う
-        close_col = next((c for c in df.columns
-                          if c.lower() in ("close", "adjustmentclose", "adj_close")),
-                         None)
-        if close_col is None:
-            return pd.DataFrame()
-        out = pd.DataFrame({"close": pd.to_numeric(df[close_col], errors="coerce")},
-                           index=df[date_col].values)
-        out.index.name = "Date"
-        return out.dropna(subset=["close"])
+    # 調整済み列を優先
+    ohlcv: dict[str, str] | None = None
+    for cols in [
+        ("AdjustmentOpen", "AdjustmentHigh", "AdjustmentLow",
+         "AdjustmentClose", "AdjustmentVolume"),
+        ("Open", "High", "Low", "Close", "Volume"),
+        ("open", "high", "low", "close", "volume"),
+    ]:
+        if all(c in df.columns for c in cols):
+            ohlcv = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
+            break
+    if ohlcv is None:
+        return pd.DataFrame()
 
     out = pd.DataFrame({
         new: pd.to_numeric(df[old], errors="coerce").values
-        for old, new in col_map.items()
-    }, index=df[date_col].values)
+        for old, new in ohlcv.items()
+    }, index=pd.to_datetime(df[dt_col]).values)
+
     out = out.dropna(subset=["close"])
-    out.index.name = "Date"
+    out.index.name = dt_col
+    out = out.sort_index()
     return out
 
 
@@ -163,135 +180,84 @@ def _normalize_daily(df: pd.DataFrame, use_adjusted: bool = True) -> pd.DataFram
 # キャッシュ
 # ─────────────────────────────────────────────────────────────
 
-def _cache_path(jq_code: str) -> Path:
-    return DAILY_CACHE_DIR / f"{jq_code}.pkl"
+def _cache_path(cache_dir: Path, jq_code: str) -> Path:
+    return cache_dir / f"{jq_code}.pkl"
 
 
-def _load_cache(jq_code: str) -> pd.DataFrame | None:
-    p = _cache_path(jq_code)
-    if not p.exists():
-        return None
-    try:
-        df = pickle.loads(p.read_bytes())
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            return df
-    except Exception as e:
-        print(f"  [cache] load error {jq_code}: {e}", file=sys.stderr)
-    return None
-
-
-def _save_cache(jq_code: str, df: pd.DataFrame) -> None:
-    if df is None or df.empty:
-        return
-    try:
-        _cache_path(jq_code).write_bytes(pickle.dumps(df))
-    except Exception as e:
-        print(f"  [cache] save error {jq_code}: {e}", file=sys.stderr)
-
-
-def _cache_is_fresh(jq_code: str) -> bool:
-    """当日の日付で既にキャッシュが更新されていれば fresh。"""
-    p = _cache_path(jq_code)
-    if not p.exists():
+def _is_fresh(path: Path) -> bool:
+    if not path.exists():
         return False
-    mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=JST)
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=JST)
     return mtime.date() == datetime.now(JST).date()
 
 
+def _load_pkl(path: Path) -> pd.DataFrame | None:
+    try:
+        return pickle.loads(path.read_bytes())
+    except Exception:
+        return None
+
+
+def _save_pkl(path: Path, df: pd.DataFrame) -> None:
+    try:
+        path.write_bytes(pickle.dumps(df))
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────
-# 取得関数
+# 日足取得
 # ─────────────────────────────────────────────────────────────
 
-_CLIENT: JQuantsClient | None = None
-
-
-def get_client() -> JQuantsClient:
-    """プロセス内でクライアントをシングルトン化 (認証キャッシュ共有)。"""
-    global _CLIENT
-    if _CLIENT is None:
-        _CLIENT = JQuantsClient()
-    return _CLIENT
-
-
-def fetch_daily(
-    symbol: str,
-    days: int = 365,
-    use_cache: bool = True,
-    use_adjusted: bool = True,
-) -> pd.DataFrame | None:
-    """
-    指定銘柄の日足を取得。yfinance 互換の DataFrame を返す。
-
-    Args:
-        symbol     : "7203.T" または "72030"
-        days       : 取得日数 (営業日ではなく暦日)
-        use_cache  : True ならキャッシュを優先、当日分のみ差分取得
-        use_adjusted: True なら AdjustmentClose 等を使用 (推奨)
-
-    Returns:
-        DataFrame with columns [open, high, low, close, volume]
-        or None if fetch failed.
-    """
+def fetch_daily(symbol: str, days: int = 365,
+                use_cache: bool = True) -> pd.DataFrame | None:
     jq_code = yf_to_jquants(symbol)
+    cp = _cache_path(DAILY_CACHE_DIR, jq_code)
 
-    # キャッシュチェック
-    if use_cache and _cache_is_fresh(jq_code):
-        cached = _load_cache(jq_code)
-        if cached is not None:
-            df_norm = _normalize_daily(cached, use_adjusted=use_adjusted)
-            # days 分に絞り込む
+    if use_cache and _is_fresh(cp):
+        cached = _load_pkl(cp)
+        if cached is not None and not cached.empty:
             cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
-            df_norm = df_norm[df_norm.index >= cutoff]
-            return df_norm if not df_norm.empty else None
+            out = cached[cached.index >= cutoff]
+            if not out.empty:
+                return out
 
-    # API から取得
-    now = datetime.now(JST)
-    from_d = (now - timedelta(days=days + 30)).strftime("%Y-%m-%d")  # バッファ +30日
-    to_d = now.strftime("%Y-%m-%d")
+    from dateutil import tz as dtz
+    now = datetime.now(tz=dtz.gettz("Asia/Tokyo"))
+    start = now - timedelta(days=days + 30)
 
     try:
         cli = get_client()
-        raw = cli.get_daily_quotes(code=jq_code, from_date=from_d, to_date=to_d)
-    except JQuantsError as e:
-        print(f"  [err] {symbol} ({jq_code}): {e}", file=sys.stderr)
+        raw = cli.get_eq_bars_daily_range(start_dt=start, end_dt=now)
+    except Exception as e:
+        print(f"  [err] {symbol}: {e}", file=sys.stderr)
         return None
 
-    if raw.empty:
-        print(f"  [warn] {symbol}: データなし", file=sys.stderr)
+    if raw is None or raw.empty:
         return None
 
-    # キャッシュ保存 (生データのまま)
+    # 銘柄フィルタ (get_eq_bars_daily_range は全銘柄返す可能性)
+    if "Code" in raw.columns:
+        raw = raw[raw["Code"].astype(str).str.startswith(jq_code[:4])].copy()
+
+    df = _normalize(raw, dt_col="Date")
+    if df.empty:
+        return None
+
     if use_cache:
-        _save_cache(jq_code, raw)
+        _save_pkl(cp, df)
 
-    # 正規化
-    df_norm = _normalize_daily(raw, use_adjusted=use_adjusted)
-    cutoff = pd.Timestamp(now.date() - timedelta(days=days))
-    df_norm = df_norm[df_norm.index >= cutoff]
-    return df_norm if not df_norm.empty else None
+    cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
+    df = df[df.index >= cutoff]
+    return df if not df.empty else None
 
 
-def fetch_daily_batch(
-    symbols: list[str],
-    days: int = 365,
-    use_cache: bool = True,
-    use_adjusted: bool = True,
-) -> dict[str, pd.DataFrame]:
-    """
-    複数銘柄の日足を取得。
-
-    J-Quants の daily_quotes API は銘柄単位の取得だが、内部でシングルトン
-    クライアントを使い認証を1回だけに抑える。
-    並列化はしない (API の rate limit 保護のため)。
-
-    Returns:
-        {symbol: DataFrame} (yfinance 形式の symbol をキーとする)
-    """
+def fetch_daily_batch(symbols: list[str], days: int = 365,
+                      use_cache: bool = True) -> dict[str, pd.DataFrame]:
     result: dict[str, pd.DataFrame] = {}
     total = len(symbols)
     for i, sym in enumerate(symbols, 1):
-        df = fetch_daily(sym, days=days, use_cache=use_cache,
-                         use_adjusted=use_adjusted)
+        df = fetch_daily(sym, days=days, use_cache=use_cache)
         if df is not None and not df.empty:
             result[sym] = df
         print(f"  [{i:>3}/{total}] {sym}: "
@@ -304,214 +270,100 @@ def fetch_daily_batch(
 # 分足取得 (アドオン)
 # ─────────────────────────────────────────────────────────────
 
-INTRADAY_CACHE_DIR = CACHE_ROOT / "minute"
-INTRADAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
+def fetch_intraday(symbol: str, days: int = 60,
+                   interval: str = "5m",
+                   use_cache: bool = True) -> pd.DataFrame | None:
     """
-    J-Quants V2 分足レスポンスを yfinance 互換形式に変換。
-    Index: tz-naive DatetimeIndex (JST前提)
-    Columns: [open, high, low, close, volume]
+    J-Quants 公式クライアントで分足を取得。
 
-    J-Quants V2 の分足レスポンスは:
-      - Date="2026-04-10", Time="09:00" が分離
-      - OHLCV が省略名: O, H, L, C, Vo
-      - jquants_client.py で正規化済みの場合: DateTime, Open, High, Low, Close, Volume
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-
-    # ── DateTime 列の解決 ──────────────────────────────────
-    dt_col = None
-
-    # パターン1: 既に "DateTime" 列がある (client で結合済み)
-    if "DateTime" in df.columns:
-        dt_col = "DateTime"
-    # パターン2: Date + Time が分離 (生データ)
-    elif "Date" in df.columns and "Time" in df.columns:
-        df["DateTime"] = pd.to_datetime(
-            df["Date"].astype(str) + " " + df["Time"].astype(str),
-            format="%Y-%m-%d %H:%M",
-        )
-        dt_col = "DateTime"
-    # パターン3: その他の名前
-    else:
-        for cand in ["datetime", "Datetime", "date_time", "Date", "date"]:
-            if cand in df.columns:
-                dt_col = cand
-                break
-
-    if dt_col is None:
-        return pd.DataFrame()
-
-    df[dt_col] = pd.to_datetime(df[dt_col])
-
-    # ── OHLCV カラムマッピング ─────────────────────────────
-    # 省略名 O/H/L/C/Vo → 正規化
-    rename_map = {"O": "Open", "H": "High", "L": "Low",
-                  "C": "Close", "Vo": "Volume"}
-    df = df.rename(columns={k: v for k, v in rename_map.items()
-                            if k in df.columns})
-
-    col_map: dict[str, str] | None = None
-    for cols in [
-        ("Open", "High", "Low", "Close", "Volume"),
-        ("open", "high", "low", "close", "volume"),
-    ]:
-        if all(c in df.columns for c in cols):
-            col_map = dict(zip(cols, ["open", "high", "low", "close", "volume"]))
-            break
-    if col_map is None:
-        return pd.DataFrame()
-
-    # .values で numpy 配列に変換してから DataFrame を構築
-    # (Series の integer index と datetime index のアライメント不一致を防ぐ)
-    out = pd.DataFrame({
-        new: pd.to_numeric(df[old], errors="coerce").values
-        for old, new in col_map.items()
-    }, index=df[dt_col].values)
-
-    # tz 情報を削除 (tz-naive に統一)
-    if out.index.tz is not None:
-        out.index = out.index.tz_convert("Asia/Tokyo").tz_localize(None)
-
-    out = out.dropna(subset=["close"])
-    out.index.name = "DateTime"
-    out = out.sort_index()
-    return out
-
-
-def _resample_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
-    """1分足 → 5分足にリサンプル。"""
-    if df_1m.empty:
-        return df_1m
-    df_5m = df_1m.resample("5min", label="left", closed="left").agg({
-        "open":   "first",
-        "high":   "max",
-        "low":    "min",
-        "close":  "last",
-        "volume": "sum",
-    }).dropna(subset=["close"])
-    return df_5m
-
-
-def _intraday_cache_path(jq_code: str) -> Path:
-    return INTRADAY_CACHE_DIR / f"{jq_code}.pkl"
-
-
-def fetch_intraday(
-    symbol: str,
-    days: int = 60,
-    interval: str = "5m",
-    use_cache: bool = True,
-) -> pd.DataFrame | None:
-    """
-    J-Quants V2 で分足データを取得。1分足を取得して指定 interval にリサンプル。
-
-    Args:
-        symbol   : "7203.T" or "72030"
-        days     : 取得日数 (最大730 = 2年)
-        interval : "1m" or "5m" (デフォルト 5m)
-        use_cache: True ならキャッシュ優先
-
-    Returns:
-        DataFrame (open/high/low/close/volume, tz-naive DatetimeIndex)
+    interval: "1m", "5m", "15m"
     """
     jq_code = yf_to_jquants(symbol)
-    cache_path = _intraday_cache_path(jq_code)
+    cp = _cache_path(MINUTE_CACHE_DIR, f"{jq_code}_{interval}")
 
-    # キャッシュチェック
-    if use_cache and cache_path.exists():
-        try:
-            mtime = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=JST)
-            if mtime.date() == datetime.now(JST).date():
-                cached = pickle.loads(cache_path.read_bytes())
-                if isinstance(cached, pd.DataFrame) and not cached.empty:
-                    df_1m = _normalize_minute(cached)
-                    if not df_1m.empty:
-                        cutoff = pd.Timestamp(
-                            datetime.now(JST).date() - timedelta(days=days)
-                        )
-                        df_1m = df_1m[df_1m.index >= cutoff]
-                        return _resample_to_5m(df_1m) if interval == "5m" else df_1m
-        except Exception as e:
-            print(f"  [cache] intraday load error {jq_code}: {e}", file=sys.stderr)
+    if use_cache and _is_fresh(cp):
+        cached = _load_pkl(cp)
+        if cached is not None and not cached.empty:
+            cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
+            out = cached[cached.index >= cutoff]
+            if not out.empty:
+                return out
 
-    # API から取得 (日付を30日ずつチャンクで取得、大量データ対応)
-    now = datetime.now(JST)
-    total_start = now - timedelta(days=days)
-    chunk_size = 30  # 30日ずつ取得
+    from dateutil import tz as dtz
+    now = datetime.now(tz=dtz.gettz("Asia/Tokyo"))
+    start = now - timedelta(days=days)
 
     cli = get_client()
-    all_raws: list[pd.DataFrame] = []
 
-    current = total_start
+    # interval に応じて公式メソッドを選択
+    method_map = {
+        "1m":  "get_eq_bars_minute",
+        "5m":  "get_eq_bars_5minute",
+        "15m": "get_eq_bars_15minute",
+    }
+    method_name = method_map.get(interval, "get_eq_bars_5minute")
+    fetch_method = getattr(cli, method_name, None)
+
+    if fetch_method is None:
+        print(f"  [err] {method_name} が jquantsapi に存在しません",
+              file=sys.stderr)
+        return None
+
+    # 30日チャンクで取得 (大量データ対応)
+    all_dfs: list[pd.DataFrame] = []
+    current = start
     chunk_idx = 0
     while current < now:
-        chunk_end = min(current + timedelta(days=chunk_size), now)
-        from_d = current.strftime("%Y-%m-%d")
-        to_d = chunk_end.strftime("%Y-%m-%d")
+        chunk_end = min(current + timedelta(days=30), now)
         chunk_idx += 1
-
         try:
-            raw = cli.get_minute_quotes(
-                code=jq_code, from_date=from_d, to_date=to_d
+            raw = fetch_method(
+                start_dt=current, end_dt=chunk_end,
             )
-            if not raw.empty:
-                all_raws.append(raw)
-                print(f"    chunk {chunk_idx}: {from_d}〜{to_d} → {len(raw)}行",
-                      flush=True)
-        except JQuantsError as e:
-            print(f"    chunk {chunk_idx}: {from_d}〜{to_d} → ERROR: {e}",
-                  file=sys.stderr)
-
+            if raw is not None and not raw.empty:
+                # 銘柄フィルタ
+                if "Code" in raw.columns:
+                    raw = raw[raw["Code"].astype(str).str.startswith(
+                        jq_code[:4])].copy()
+                if not raw.empty:
+                    all_dfs.append(raw)
+                    print(f"    chunk {chunk_idx}: "
+                          f"{current.strftime('%Y-%m-%d')}〜"
+                          f"{chunk_end.strftime('%Y-%m-%d')} → "
+                          f"{len(raw)}行", flush=True)
+        except Exception as e:
+            print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
         current = chunk_end + timedelta(days=1)
 
-    if not all_raws:
+    if not all_dfs:
         print(f"  [warn] {symbol}: 分足データなし", file=sys.stderr)
         return None
 
-    combined = pd.concat(all_raws, ignore_index=True)
-
-    # キャッシュ保存
-    if use_cache:
-        try:
-            cache_path.write_bytes(pickle.dumps(combined))
-        except Exception as e:
-            print(f"  [cache] save error {jq_code}: {e}", file=sys.stderr)
-
-    # 正規化 + リサンプル
-    df_1m = _normalize_minute(combined)
-    if df_1m.empty:
+    combined = pd.concat(all_dfs, ignore_index=True)
+    df = _normalize(combined)
+    if df.empty:
         return None
 
-    return _resample_to_5m(df_1m) if interval == "5m" else df_1m
+    if use_cache:
+        _save_pkl(cp, df)
+
+    return df
 
 
-def fetch_intraday_batch(
-    symbols: list[str],
-    days: int = 60,
-    interval: str = "5m",
-    use_cache: bool = True,
-) -> dict[str, pd.DataFrame]:
-    """
-    複数銘柄の分足を取得。
-
-    Returns:
-        {symbol: DataFrame} (yfinance 形式の symbol をキーとする)
-    """
+def fetch_intraday_batch(symbols: list[str], days: int = 60,
+                         interval: str = "5m",
+                         use_cache: bool = True) -> dict[str, pd.DataFrame]:
     result: dict[str, pd.DataFrame] = {}
     total = len(symbols)
     for i, sym in enumerate(symbols, 1):
-        print(f"  [{i:>3}/{total}] {sym} 分足取得中...", flush=True)
+        print(f"  [{i:>3}/{total}] {sym} ({interval}) 取得中...", flush=True)
         df = fetch_intraday(sym, days=days, interval=interval,
                             use_cache=use_cache)
         if df is not None and not df.empty:
             result[sym] = df
-            print(f"  [{i:>3}/{total}] {sym}: {len(df)}本 ({interval})", flush=True)
+            n_days = len(set(df.index.date)) if hasattr(df.index[0], "date") else 0
+            print(f"  [{i:>3}/{total}] {sym}: {len(df)}本 / {n_days}営業日",
+                  flush=True)
         else:
             print(f"  [{i:>3}/{total}] {sym}: データなし", flush=True)
     print(f"  取得成功: {len(result)}/{total}銘柄", flush=True)
@@ -522,37 +374,28 @@ def fetch_intraday_batch(
 # CLI
 # ─────────────────────────────────────────────────────────────
 
-def _format_head_tail(df: pd.DataFrame, n: int = 5) -> str:
-    return "\n".join([
-        df.head(n).to_string(),
-        "...",
-        df.tail(n).to_string(),
-    ])
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="J-Quants 高レベル株価取得ユーティリティ"
-    )
-    parser.add_argument("symbols", nargs="*", help="銘柄コード (例: 7203.T 9984.T)")
+        description="J-Quants V2 株価取得ユーティリティ (公式クライアント使用)")
+    parser.add_argument("symbols", nargs="*",
+                        help="銘柄コード (例: 7203.T 9984.T)")
     parser.add_argument("--days", type=int, default=365, help="取得日数")
     parser.add_argument("--intraday", action="store_true",
-                        help="分足モード (1分足取得→5分足変換、アドオン契約必要)")
-    parser.add_argument("--interval", choices=["1m", "5m"], default="5m",
-                        help="分足の間隔 (--intraday 時)")
-    parser.add_argument("--no-cache", action="store_true", help="キャッシュ無視")
-    parser.add_argument("--no-adjust", action="store_true", help="分割調整なしで取得")
+                        help="分足モード (アドオン契約必要)")
+    parser.add_argument("--interval", choices=["1m", "5m", "15m"],
+                        default="5m", help="分足の間隔")
+    parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--watchlist", action="store_true",
-                        help="daytrade_symbols.DAYTRADE_SYMBOLS を全取得")
-    parser.add_argument("--summary", action="store_true",
-                        help="詳細表示せずサマリーのみ")
+                        help="daytrade_symbols.DAYTRADE_SYMBOLS 全銘柄")
+    parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
 
     if args.watchlist:
         try:
             from daytrade_symbols import DAYTRADE_SYMBOLS
         except ImportError:
-            print("[ERROR] daytrade_symbols.py が見つかりません", file=sys.stderr)
+            print("[ERROR] daytrade_symbols.py が見つかりません",
+                  file=sys.stderr)
             sys.exit(1)
         symbols = [s for s, _ in DAYTRADE_SYMBOLS]
     elif args.symbols:
@@ -562,91 +405,81 @@ def main() -> None:
         sys.exit(1)
 
     use_cache = not args.no_cache
-    use_adjust = not args.no_adjust
 
-    # ── 分足モード ──────────────────────────────────────────
+    # ── 分足モード ────────────────────────────────────────
     if args.intraday:
-        mode = f"分足 ({args.interval})"
         if len(symbols) == 1:
             sym = symbols[0]
-            print(f"{mode} 取得: {sym} ({yf_to_jquants(sym)}) / {args.days}日")
-            df = fetch_intraday(sym, days=args.days, interval=args.interval,
-                                use_cache=use_cache)
+            print(f"分足 ({args.interval}) 取得: {sym} "
+                  f"({yf_to_jquants(sym)}) / {args.days}日")
+            df = fetch_intraday(sym, days=args.days,
+                                interval=args.interval, use_cache=use_cache)
             if df is None or df.empty:
                 print("データなし")
                 return
+            n_days = len(set(df.index.date))
             print(f"\n取得結果: {len(df)}本 ({args.interval})")
-            if hasattr(df.index[0], "date"):
-                n_days = len(set(df.index.date))
-                print(f"  期間: {df.index[0]} 〜 {df.index[-1]}  ({n_days}営業日)")
+            print(f"  期間: {df.index[0]} 〜 {df.index[-1]}  "
+                  f"({n_days}営業日)")
             if args.summary:
                 print(f"  最新終値: {df.iloc[-1]['close']:,.0f}")
-                print(f"  期間最高値: {df['high'].max():,.0f}")
-                print(f"  期間最安値: {df['low'].min():,.0f}")
-                print(f"  平均出来高/バー: {df['volume'].mean():,.0f}")
+                print(f"  最高値: {df['high'].max():,.0f}")
+                print(f"  最安値: {df['low'].min():,.0f}")
                 print(f"  バー数/日: {len(df) / max(n_days, 1):.0f}")
             else:
                 print()
-                print(_format_head_tail(df))
+                print(df.head(5).to_string())
+                print("...")
+                print(df.tail(5).to_string())
         else:
-            print(f"{mode} バッチ取得: {len(symbols)}銘柄 / {args.days}日")
+            print(f"分足 ({args.interval}) バッチ: {len(symbols)}銘柄 "
+                  f"/ {args.days}日")
             dfs = fetch_intraday_batch(symbols, days=args.days,
                                         interval=args.interval,
                                         use_cache=use_cache)
-            print()
-            print(f"{'銘柄':<10} {'本数':>8} {'営業日':>5} {'開始':<20} {'終了':<20}")
-            print("-" * 72)
+            print(f"\n{'銘柄':<10} {'本数':>8} {'営業日':>5}")
+            print("-" * 30)
             for sym in symbols:
                 if sym not in dfs:
-                    print(f"  {sym:<10} {'---':>8} (取得失敗)")
+                    print(f"  {sym:<10} {'---':>8}")
                     continue
                 df = dfs[sym]
-                n_d = len(set(df.index.date)) if hasattr(df.index[0], "date") else 0
-                print(f"  {sym:<10} {len(df):>8} {n_d:>5} "
-                      f"{str(df.index[0]):<20} {str(df.index[-1]):<20}")
+                nd = len(set(df.index.date))
+                print(f"  {sym:<10} {len(df):>8} {nd:>5}")
         return
 
-    # ── 日足モード (デフォルト) ─────────────────────────────
+    # ── 日足モード (デフォルト) ────────────────────────────
     if len(symbols) == 1:
         sym = symbols[0]
-        print(f"取得: {sym} ({yf_to_jquants(sym)}) / {args.days}日")
-        df = fetch_daily(sym, days=args.days, use_cache=use_cache,
-                         use_adjusted=use_adjust)
+        print(f"日足取得: {sym} ({yf_to_jquants(sym)}) / {args.days}日")
+        df = fetch_daily(sym, days=args.days, use_cache=use_cache)
         if df is None or df.empty:
             print("データなし")
             return
         print(f"\n取得結果: {len(df)}本 "
               f"({df.index[0].date()} 〜 {df.index[-1].date()})")
         if args.summary:
-            print(f"  始値:  {df.iloc[0]['open']:,.0f}")
-            print(f"  終値:  {df.iloc[-1]['close']:,.0f}")
+            print(f"  終値: {df.iloc[-1]['close']:,.0f}")
             print(f"  最高値: {df['high'].max():,.0f}")
             print(f"  最安値: {df['low'].min():,.0f}")
-            print(f"  平均出来高: {df['volume'].mean():,.0f}")
         else:
             print()
-            print(_format_head_tail(df))
-        return
-
-    # バッチ取得
-    print(f"バッチ取得: {len(symbols)}銘柄 / {args.days}日")
-    dfs = fetch_daily_batch(symbols, days=args.days,
-                            use_cache=use_cache, use_adjusted=use_adjust)
-
-    print()
-    print(f"{'銘柄':<10} {'本数':>5} {'開始':<12} {'終了':<12} "
-          f"{'最新終値':>10} {'平均出来高':>15}")
-    print("-" * 72)
-    for sym in symbols:
-        if sym not in dfs:
-            print(f"  {sym:<10} {'---':>5} (取得失敗)")
-            continue
-        df = dfs[sym]
-        print(f"  {sym:<10} {len(df):>5} "
-              f"{str(df.index[0].date()):<12} "
-              f"{str(df.index[-1].date()):<12} "
-              f"{df.iloc[-1]['close']:>10,.0f} "
-              f"{df['volume'].mean():>15,.0f}")
+            print(df.head(5).to_string())
+            print("...")
+            print(df.tail(5).to_string())
+    else:
+        print(f"日足バッチ: {len(symbols)}銘柄 / {args.days}日")
+        dfs = fetch_daily_batch(symbols, days=args.days,
+                                use_cache=use_cache)
+        print(f"\n{'銘柄':<10} {'本数':>5} {'終値':>10}")
+        print("-" * 30)
+        for sym in symbols:
+            if sym not in dfs:
+                print(f"  {sym:<10} {'---':>5}")
+                continue
+            df = dfs[sym]
+            print(f"  {sym:<10} {len(df):>5} "
+                  f"{df.iloc[-1]['close']:>10,.0f}")
 
 
 if __name__ == "__main__":
