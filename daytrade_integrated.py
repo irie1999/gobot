@@ -349,13 +349,18 @@ def build_html(all_items: list[dict], stats: dict,
         c = "profit" if ist["total_pnl"] >= 0 else "loss"
         vs_n = sum(1 for t in trades if t["strategy"] == "VolSurge")
         orb_n = sum(1 for t in trades if t["strategy"] == "ORB")
+        # 戦略タグ
+        tags = ""
+        if orb_n > 0:
+            tags += f'<span class="tag tag-orb">ORB</span> '
+        if vs_n > 0:
+            tags += f'<span class="tag tag-vs">VS</span> '
         sym_rows += f"""
         <tr>
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
+          <td class="sym">{item['name']}<br><small class="code">{item['symbol']}</small> {tags}</td>
           <td>{ist['n']}</td>
-          <td><span style="color:#fb923c">{vs_n}</span>/<span style="color:#fbbf24">{orb_n}</span></td>
           <td>{ist['win_rate']:.0f}%</td><td>{_pf_str(ist['pf'])}</td>
-          <td class="{c}">{ist['total_pnl']:+,.0f}</td>
+          <td class="{c}">{ist['total_pnl']:+,.0f}円</td>
           <td class="profit">{ist['avg_win']:+,.0f}</td>
           <td class="loss">{ist['avg_loss']:+,.0f}</td>
           <td class="loss">{ist['max_dd']:+.1f}%</td>
@@ -371,11 +376,11 @@ def build_html(all_items: list[dict], stats: dict,
         trows = ""
         for t in sorted(item["trades"], key=lambda x: str(x.get("entry_dt", ""))):
             pc = "profit" if t["pnl"] > 0 else "loss"
-            sc = "#fb923c" if t["strategy"] == "VolSurge" else "#fbbf24"
+            stag = '<span class="tag tag-vs">VS</span>' if t["strategy"] == "VolSurge" else '<span class="tag tag-orb">ORB</span>'
             ed = t["entry_dt"].strftime("%Y-%m-%d %H:%M") if hasattr(t["entry_dt"], "strftime") else str(t["entry_dt"])
             xd = t["exit_dt"].strftime("%H:%M") if hasattr(t["exit_dt"], "strftime") else str(t["exit_dt"])
             trows += f"""<tr>
-              <td style="color:{sc}">{t['strategy']}</td>
+              <td>{stag}</td>
               <td>{ed}</td><td>{xd}</td>
               <td>{t['qty']}</td>
               <td>{t['entry_p']:,.1f}</td><td class="loss">{t['stop_p']:,.1f}</td>
@@ -384,9 +389,9 @@ def build_html(all_items: list[dict], stats: dict,
               <td>{t['reason']}</td></tr>"""
         trade_sections += f"""
         <details class="trade-section">
-          <summary><strong>{item['symbol']} {item['name']}</strong>
+          <summary><strong>{item['name']}</strong> <small class="code">{item['symbol']}</small>
             <span class="{tc}">{tpnl:+,.0f}円</span>
-            <small>{len(item['trades'])}取引</small></summary>
+            <small>({len(item['trades'])}取引)</small></summary>
           <table><thead><tr>
             <th>戦略</th><th>Entry</th><th>Exit</th><th>株数</th>
             <th>買値</th><th>損切</th><th>目標</th><th>決済値</th>
@@ -407,8 +412,12 @@ def build_html(all_items: list[dict], stats: dict,
   th{{background:#1e293b;color:#94a3b8;padding:5px 7px;text-align:center;border:1px solid #334155;white-space:nowrap}}
   td{{padding:4px 7px;border:1px solid #1e293b;text-align:right;white-space:nowrap}}
   tr:hover td{{background:#1e293b}}
-  .sym{{text-align:left;font-weight:600;min-width:100px}}
+  .sym{{text-align:left;font-weight:600;min-width:140px}}
+  .sym .code{{color:#64748b;font-weight:400;font-size:0.75rem}}
   .profit{{color:#4ade80}}.loss{{color:#f87171}}
+  .tag{{display:inline-block;padding:1px 7px;border-radius:99px;font-size:0.72rem;font-weight:600}}
+  .tag-orb{{background:#1d4ed8;color:#bfdbfe}}
+  .tag-vs{{background:#c2410c;color:#fed7aa}}
   .box{{background:#1e293b;padding:14px;border-radius:8px;margin-bottom:14px;display:flex;gap:24px;flex-wrap:wrap}}
   .box .item{{text-align:center}}.box .label{{color:#94a3b8;font-size:0.75rem}}
   .box .val{{font-size:1.3rem;font-weight:700}}
@@ -453,7 +462,7 @@ def build_html(all_items: list[dict], stats: dict,
 
 <h2>銘柄別サマリー</h2>
 <table><thead><tr>
-  <th>銘柄</th><th>取引</th><th>VS/ORB</th><th>勝率</th><th>PF</th>
+  <th>銘柄</th><th>取引</th><th>勝率</th><th>PF</th>
   <th>損益</th><th>平均利益</th><th>平均損失</th><th>DD</th>
 </tr></thead><tbody>{sym_rows}</tbody></table>
 
