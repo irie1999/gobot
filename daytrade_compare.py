@@ -61,44 +61,68 @@ def _pf_str(pf: float) -> str:
 BUDGET = 600_000
 MAX_RISK = 6_000
 
+STRATEGY_MAP = {
+    "ORB": lambda sym, name, df, budget: orb_backtest_symbol(sym, name, df, TARGET_K, OR_MINUTES),
+    "VWAP": lambda sym, name, df, budget: vwap_backtest_symbol(sym, name, df, STOP_PCT, VWAP_TARGET_R, PULLBACK_TOL),
+    "VolSurge": lambda sym, name, df, budget: volsurge_backtest_symbol(
+        sym, name, df, VOL_MULT, VOL_LOOKBACK, BREAK_LOOKBACK, VOL_TARGET_R, MIN_BODY_PCT, STOP_BUFFER_PCT),
+    "Pivot": lambda sym, name, df, budget: pivot_backtest_symbol(sym, name, df, budget, MAX_RISK),
+    "RSI": lambda sym, name, df, budget: rsi_backtest_symbol(sym, name, df, budget, MAX_RISK),
+}
+
+
+def _process_symbol(args_tuple):
+    """1銘柄×指定戦略を処理 (multiprocessing用)。"""
+    sym, name, df, strat_names, budget = args_tuple
+    results = {}
+    for sn in strat_names:
+        fn = STRATEGY_MAP.get(sn)
+        if fn:
+            try:
+                r = fn(sym, name, df, budget)
+                if r:
+                    results[sn] = r
+            except Exception:
+                pass
+    return results
+
+
 def run_all_strategies(fetched: dict[str, pd.DataFrame],
                        targets: list[tuple[str, str]],
-                       budget: int = BUDGET) -> dict[str, list[dict]]:
-    """5戦略を全銘柄に適用し、結果を返す。"""
-    results = {"ORB": [], "VWAP": [], "VolSurge": [], "Pivot": [], "RSI": []}
+                       budget: int = BUDGET,
+                       strat_names: list[str] | None = None,
+                       workers: int = 1) -> dict[str, list[dict]]:
+    """指定戦略を全銘柄に適用。workers>1で並列処理。"""
+    if strat_names is None:
+        strat_names = list(STRATEGY_MAP.keys())
 
-    total = len(targets)
-    for i, (sym, name) in enumerate(targets, 1):
-        if sym not in fetched:
-            continue
-        df = fetched[sym]
+    results = {s: [] for s in strat_names}
+    valid = [(sym, name, fetched[sym]) for sym, name in targets if sym in fetched]
+    total = len(valid)
 
-        # ① ORB
-        r = orb_backtest_symbol(sym, name, df, TARGET_K, OR_MINUTES)
-        if r:
-            results["ORB"].append(r)
-
-        # ② VWAP
-        r = vwap_backtest_symbol(sym, name, df, STOP_PCT, VWAP_TARGET_R, PULLBACK_TOL)
-        if r:
-            results["VWAP"].append(r)
-
-        # ③ VolSurge
-        r = volsurge_backtest_symbol(
-            sym, name, df, VOL_MULT, VOL_LOOKBACK,
-            BREAK_LOOKBACK, VOL_TARGET_R, MIN_BODY_PCT, STOP_BUFFER_PCT)
-        if r:
-            results["VolSurge"].append(r)
-
-        # ④ Pivot
-        r = pivot_backtest_symbol(sym, name, df, budget, MAX_RISK)
-        if r:
-            results["Pivot"].append(r)
-
-        # ⑤ RSI
-        r = rsi_backtest_symbol(sym, name, df, budget, MAX_RISK)
-        if r:
-            results["RSI"].append(r)
+    if workers > 1:
+        from multiprocessing import Pool
+        args_list = [(sym, name, df, strat_names, budget)
+                     for sym, name, df in valid]
+        with Pool(workers) as pool:
+            for i, res in enumerate(pool.imap(_process_symbol, args_list), 1):
+                for sn, r in res.items():
+                    results[sn].append(r)
+                if i % 200 == 0 or i == total:
+                    print(f"  {i}/{total} 銘柄完了", flush=True)
+    else:
+        for i, (sym, name, df) in enumerate(valid, 1):
+            for sn in strat_names:
+                fn = STRATEGY_MAP.get(sn)
+                if fn:
+                    try:
+                        r = fn(sym, name, df, budget)
+                        if r:
+                            results[sn].append(r)
+                    except Exception:
+                        pass
+            if i % 200 == 0 or i == total:
+                print(f"  {i}/{total} 銘柄完了", flush=True)
 
         if i % 10 == 0 or i == total:
             print(f"  {i}/{total} 銘柄完了", flush=True)
@@ -417,6 +441,12 @@ def main() -> None:
                              "(例: --budget 600000 → 株価6000円以下)")
     parser.add_argument("--all-local", action="store_true",
                         help="ローカル保存済みの全銘柄を対象にする (data/minute_5m/)")
+    parser.add_argument("--strategy", nargs="*",
+                        choices=["ORB", "VWAP", "VolSurge", "Pivot", "RSI"],
+                        default=None,
+                        help="実行する戦略 (省略=全5戦略、例: --strategy ORB VolSurge)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="並列処理数 (例: --workers 4)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -483,10 +513,13 @@ def main() -> None:
         print("[ERROR] 予算内で購入可能な銘柄がありません", file=sys.stderr)
         sys.exit(1)
 
-    # 5戦略実行
+    # 戦略実行
     budget_val = args.budget if args.budget > 0 else BUDGET
-    print(f"バックテスト実行中 ({len(fetched)}銘柄 × 5戦略)...", flush=True)
-    results = run_all_strategies(fetched, targets, budget=budget_val)
+    strats = args.strategy or list(STRATEGY_MAP.keys())
+    print(f"バックテスト実行中 ({len(fetched)}銘柄 × {len(strats)}戦略 "
+          f"/ workers={args.workers})...", flush=True)
+    results = run_all_strategies(fetched, targets, budget=budget_val,
+                                 strat_names=strats, workers=args.workers)
 
     # コンソール
     print_comparison(results, args.days)
