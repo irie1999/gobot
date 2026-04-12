@@ -79,7 +79,7 @@ def attach_vwap(day_df: pd.DataFrame) -> pd.DataFrame:
     vol = df["volume"].astype(float)
     cum_v = vol.cumsum().replace(0, np.nan)
     df["vwap"] = (tp * vol).cumsum() / cum_v
-    df["vwap"] = df["vwap"].fillna(method="ffill").fillna(df["close"])
+    df["vwap"] = df["vwap"].ffill().fillna(df["close"])
     return df
 
 
