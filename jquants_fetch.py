@@ -151,7 +151,7 @@ def _normalize_daily(df: pd.DataFrame, use_adjusted: bool = True) -> pd.DataFram
         return out.dropna(subset=["close"])
 
     out = pd.DataFrame({
-        new: pd.to_numeric(df[old], errors="coerce")
+        new: pd.to_numeric(df[old], errors="coerce").values
         for old, new in col_map.items()
     }, index=df[date_col].values)
     out = out.dropna(subset=["close"])
@@ -367,8 +367,10 @@ def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
     if col_map is None:
         return pd.DataFrame()
 
+    # .values で numpy 配列に変換してから DataFrame を構築
+    # (Series の integer index と datetime index のアライメント不一致を防ぐ)
     out = pd.DataFrame({
-        new: pd.to_numeric(df[old], errors="coerce")
+        new: pd.to_numeric(df[old], errors="coerce").values
         for old, new in col_map.items()
     }, index=df[dt_col].values)
 
