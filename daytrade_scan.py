@@ -71,8 +71,8 @@ def get_prime_symbols() -> list[str]:
             cli = jquantsapi.ClientV2(api_key=api_key)
             df = cli.get_eq_master()
             if df is not None and not df.empty:
-                # プライム市場フィルタ
-                for col in ["MarketCodeName", "MarketCode", "market_code_name"]:
+                # プライム市場フィルタ (V2列名: MktNm)
+                for col in ["MktNm", "MarketCodeName", "MarketCode", "market_code_name"]:
                     if col in df.columns:
                         prime = df[df[col].astype(str).str.contains(
                             "プライム", na=False)]
