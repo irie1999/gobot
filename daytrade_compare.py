@@ -473,6 +473,8 @@ def main() -> None:
                              "(例: --budget 600000 → 株価6000円以下)")
     parser.add_argument("--all-local", action="store_true",
                         help="ローカル保存済みの全銘柄を対象にする (data/minute_5m/)")
+    parser.add_argument("--prime", action="store_true",
+                        help="東証プライム上場銘柄のみ (~1800銘柄)")
     parser.add_argument("--strategy", nargs="*",
                         choices=["ORB", "VWAP", "VolSurge", "Pivot", "RSI"],
                         default=None,
@@ -486,10 +488,17 @@ def main() -> None:
         print("[info] yfinance 5分足は最大60日 → 60日に調整", file=sys.stderr)
         args.days = 60
 
-    if args.all_local:
+    if args.prime:
+        # J-Quants からプライム銘柄リスト取得
+        from daytrade_scan import get_prime_symbols
+        prime_codes = get_prime_symbols()
+        targets = [(s, s) for s in prime_codes]
+        if args.source == "auto":
+            args.source = "local"
+        print(f"プライム市場: {len(targets)}銘柄", flush=True)
+    elif args.all_local:
         from daytrade_data import available_local_symbols
         local_codes = available_local_symbols()
-        # J-Quants 5桁コード → yfinance 4桁.T に変換
         targets = []
         for code in local_codes:
             if len(code) == 5 and code.endswith("0") and code.isdigit():
