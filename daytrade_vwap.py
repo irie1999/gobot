@@ -41,9 +41,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from daytrade_symbols import DAYTRADE_SYMBOLS
+from daytrade_data import load_intraday_batch, split_by_day
 
 JST = timezone(timedelta(hours=9))
 
@@ -70,82 +70,6 @@ PM_START = dtime(12, 30)
 PM_END   = dtime(15, 0)
 
 DEFAULT_SYMBOLS = DAYTRADE_SYMBOLS  # 共通リスト (60銘柄)
-
-
-# ─────────────────────────────────────────────────────────────
-# データ取得
-# ─────────────────────────────────────────────────────────────
-
-def _normalize_df(df: pd.DataFrame) -> pd.DataFrame | None:
-    """yfinance DataFrame を JST naive / lower-case columns に正規化。"""
-    if df is None or df.empty:
-        return None
-    df = df.copy()
-    df.columns = [str(c).lower() for c in df.columns]
-    df = df.dropna(subset=["close"])
-    if df.empty:
-        return None
-    df.index = pd.to_datetime(df.index)
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert("Asia/Tokyo").tz_localize(None)
-    cols = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
-    df = df[cols]
-    return df if not df.empty else None
-
-
-def fetch_intraday_batch(symbols: list[str], days: int,
-                         interval: str = INTERVAL) -> dict[str, pd.DataFrame]:
-    """
-    yfinance のマルチシンボル・バッチダウンロード。
-    複数銘柄を一度に渡すことで curl_cffi セッション混線を回避する。
-    """
-    if not symbols:
-        return {}
-    try:
-        df = yf.download(
-            " ".join(symbols),
-            period=f"{days}d",
-            interval=interval,
-            auto_adjust=False,
-            progress=False,
-            group_by="ticker",
-            threads=True,
-        )
-    except Exception as e:
-        print(f"  [warn] batch download error: {e}", file=sys.stderr)
-        return {}
-
-    if df is None or df.empty:
-        return {}
-
-    result: dict[str, pd.DataFrame] = {}
-    if isinstance(df.columns, pd.MultiIndex):
-        tickers_in_df = set(df.columns.get_level_values(0))
-        for sym in symbols:
-            if sym not in tickers_in_df:
-                continue
-            sub = _normalize_df(df[sym])
-            if sub is not None:
-                result[sym] = sub
-    else:
-        sub = _normalize_df(df)
-        if sub is not None:
-            result[symbols[0]] = sub
-    return result
-
-
-def fetch_intraday(symbol: str, days: int, interval: str = INTERVAL) -> pd.DataFrame | None:
-    """単一銘柄取得 (後方互換)。内部で batch 経由。"""
-    return fetch_intraday_batch([symbol], days, interval).get(symbol)
-
-
-def split_by_day(df: pd.DataFrame) -> dict:
-    result = {}
-    for date in sorted(set(df.index.date)):
-        sub = df[df.index.date == date]
-        if len(sub) >= 5:
-            result[date] = sub
-    return result
 
 
 def attach_vwap(day_df: pd.DataFrame) -> pd.DataFrame:
@@ -554,12 +478,15 @@ def main() -> None:
                         help="リスクリワード比 (例: 2.0)")
     parser.add_argument("--tol", type=float, default=PULLBACK_TOL,
                         help="押し目タッチ許容率 (例: 0.001 = 0.1%%)")
+    parser.add_argument("--source", choices=["auto", "local", "yfinance"],
+                        default="auto",
+                        help="データソース (auto=ローカル優先, local=保存データのみ)")
     parser.add_argument("--no-html", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    if args.days > 60:
-        print("[info] 5分足は最大60日 → 60日に調整", file=sys.stderr)
+    if args.source == "yfinance" and args.days > 60:
+        print("[info] yfinance 5分足は最大60日 → 60日に調整", file=sys.stderr)
         args.days = 60
 
     if args.symbols:
@@ -568,15 +495,13 @@ def main() -> None:
         targets = DEFAULT_SYMBOLS
 
     print(f"VWAP Pullback バックテスト開始: {len(targets)}銘柄 / {args.days}日 / "
-          f"stop={args.stop_pct*100:.2f}% / R={args.target_r}", flush=True)
+          f"stop={args.stop_pct*100:.2f}% / R={args.target_r} / source={args.source}",
+          flush=True)
 
     symbols_list = [s for s, _ in targets]
-    print(f"データ取得中 ({len(symbols_list)}銘柄, batch)...", flush=True)
-    fetched = fetch_intraday_batch(symbols_list, args.days)
+    print(f"データ取得中 ({len(symbols_list)}銘柄)...", flush=True)
+    fetched = load_intraday_batch(symbols_list, args.days, source=args.source)
     print(f"  取得成功: {len(fetched)}/{len(symbols_list)}銘柄", flush=True)
-    for sym in symbols_list:
-        if sym not in fetched:
-            print(f"  [skip] {sym}: データ取得失敗", flush=True)
 
     results: list[dict] = []
     for sym, name in targets:
