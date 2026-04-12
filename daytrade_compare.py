@@ -1,14 +1,14 @@
 """
-daytrade_compare.py  ―  3戦略一括実行 & 比較レポート
+daytrade_compare.py  ―  5戦略一括実行 & 比較レポート
 ==================================================================
-ORB / VWAP Pullback / Volume Surge の3戦略を一括バックテストし、
+ORB / VWAP / VolSurge / Pivot / RSI の5戦略を一括バックテストし、
 銘柄別×戦略別の比較HTMLレポートを生成してブラウザで自動表示する。
 
 【使い方】
-  python daytrade_compare.py                          # デフォルト60銘柄・60日
-  python daytrade_compare.py --source local --days 730  # ローカル2年
-  python daytrade_compare.py --days 30                # 30日
-  python daytrade_compare.py 7203.T 9984.T 8306.T     # 個別銘柄
+  python daytrade_compare.py                                    # 60銘柄・60日
+  python daytrade_compare.py --source yfinance --days 60 --budget 600000
+  python daytrade_compare.py --source local --days 730
+  python daytrade_compare.py 7203.T 9984.T 8306.T
 """
 
 from __future__ import annotations
@@ -27,20 +27,23 @@ from daytrade_data import load_intraday_batch, split_by_day
 
 # ── 戦略モジュール import ────────────────────────────────────
 from daytrade_orb import (
-    backtest_orb_day, backtest_symbol as orb_backtest_symbol,
-    _calc_stats as orb_calc_stats, _empty_stats,
-    OR_MINUTES, TARGET_K,
+    backtest_symbol as orb_backtest_symbol,
+    _calc_stats, _empty_stats, OR_MINUTES, TARGET_K,
 )
 from daytrade_vwap import (
-    backtest_vwap_day, backtest_symbol as vwap_backtest_symbol,
-    _calc_stats as vwap_calc_stats,
+    backtest_symbol as vwap_backtest_symbol,
     STOP_PCT, TARGET_R as VWAP_TARGET_R, PULLBACK_TOL,
 )
 from daytrade_volsurge import (
-    backtest_volsurge_day, backtest_symbol as volsurge_backtest_symbol,
-    _calc_stats as volsurge_calc_stats,
+    backtest_symbol as volsurge_backtest_symbol,
     VOL_MULT, VOL_LOOKBACK, BREAK_LOOKBACK,
     TARGET_R as VOL_TARGET_R, MIN_BODY_PCT, STOP_BUFFER_PCT,
+)
+from daytrade_pivot import (
+    backtest_symbol as pivot_backtest_symbol,
+)
+from daytrade_rsi import (
+    backtest_symbol as rsi_backtest_symbol,
 )
 
 JST = timezone(timedelta(hours=9))
@@ -52,13 +55,17 @@ def _pf_str(pf: float) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# 3戦略一括バックテスト
+# 5戦略一括バックテスト
 # ─────────────────────────────────────────────────────────────
 
+BUDGET = 600_000
+MAX_RISK = 6_000
+
 def run_all_strategies(fetched: dict[str, pd.DataFrame],
-                       targets: list[tuple[str, str]]) -> dict[str, list[dict]]:
-    """3戦略を全銘柄に適用し、結果を返す。"""
-    results = {"ORB": [], "VWAP": [], "VolSurge": []}
+                       targets: list[tuple[str, str]],
+                       budget: int = BUDGET) -> dict[str, list[dict]]:
+    """5戦略を全銘柄に適用し、結果を返す。"""
+    results = {"ORB": [], "VWAP": [], "VolSurge": [], "Pivot": [], "RSI": []}
 
     total = len(targets)
     for i, (sym, name) in enumerate(targets, 1):
@@ -66,22 +73,32 @@ def run_all_strategies(fetched: dict[str, pd.DataFrame],
             continue
         df = fetched[sym]
 
-        # ORB
+        # ① ORB
         r = orb_backtest_symbol(sym, name, df, TARGET_K, OR_MINUTES)
         if r:
             results["ORB"].append(r)
 
-        # VWAP
+        # ② VWAP
         r = vwap_backtest_symbol(sym, name, df, STOP_PCT, VWAP_TARGET_R, PULLBACK_TOL)
         if r:
             results["VWAP"].append(r)
 
-        # VolSurge
+        # ③ VolSurge
         r = volsurge_backtest_symbol(
             sym, name, df, VOL_MULT, VOL_LOOKBACK,
             BREAK_LOOKBACK, VOL_TARGET_R, MIN_BODY_PCT, STOP_BUFFER_PCT)
         if r:
             results["VolSurge"].append(r)
+
+        # ④ Pivot
+        r = pivot_backtest_symbol(sym, name, df, budget, MAX_RISK)
+        if r:
+            results["Pivot"].append(r)
+
+        # ⑤ RSI
+        r = rsi_backtest_symbol(sym, name, df, budget, MAX_RISK)
+        if r:
+            results["RSI"].append(r)
 
         if i % 10 == 0 or i == total:
             print(f"  {i}/{total} 銘柄完了", flush=True)
@@ -233,7 +250,8 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
             all_trades.extend(item.get("trades", []))
         strat_summaries[strat_name] = orb_calc_stats(all_trades) if all_trades else _empty_stats()
 
-    strat_colors = {"ORB": "#fbbf24", "VWAP": "#a78bfa", "VolSurge": "#fb923c"}
+    strat_colors = {"ORB": "#fbbf24", "VWAP": "#a78bfa", "VolSurge": "#fb923c",
+                     "Pivot": "#22d3ee", "RSI": "#f472b6"}
 
     # 戦略サマリーテーブル
     summary_rows = ""
@@ -264,18 +282,18 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
     sorted_syms = sorted(all_symbols.keys(),
                          key=lambda s: sum(
                              all_symbols[s].get(st, {}).get("total_pnl", 0)
-                             for st in ["ORB", "VWAP", "VolSurge"]),
+                             for st in ["ORB", "VWAP", "VolSurge", "Pivot", "RSI"]),
                          reverse=True)
 
     for sym in sorted_syms:
         info = all_symbols[sym]
         name = info["name"]
         total_pnl = sum(info.get(st, {}).get("total_pnl", 0)
-                        for st in ["ORB", "VWAP", "VolSurge"])
+                        for st in ["ORB", "VWAP", "VolSurge", "Pivot", "RSI"])
         total_cls = "profit" if total_pnl >= 0 else "loss"
 
         cells = ""
-        for strat in ["ORB", "VWAP", "VolSurge"]:
+        for strat in ["ORB", "VWAP", "VolSurge", "Pivot", "RSI"]:
             s = info.get(strat)
             if s and s.get("n", 0) > 0:
                 cls = "profit" if s["total_pnl"] >= 0 else "loss"
@@ -296,7 +314,7 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
     # 戦略別サブヘッダー
     strat_headers = ""
     strat_subheads = ""
-    for strat in ["ORB", "VWAP", "VolSurge"]:
+    for strat in ["ORB", "VWAP", "VolSurge", "Pivot", "RSI"]:
         color = strat_colors.get(strat, "#e2e8f0")
         strat_headers += f'<th colspan="4" style="color:{color}">{strat}</th>'
         strat_subheads += '<th>N</th><th>WR</th><th>PF</th><th>損益</th>'
@@ -385,7 +403,7 @@ def build_comparison_html(results: dict[str, list[dict]], days: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="デイトレ3戦略一括比較バックテスト")
+        description="デイトレ5戦略一括比較バックテスト")
     parser.add_argument("symbols", nargs="*")
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"],
@@ -406,7 +424,7 @@ def main() -> None:
         targets = DEFAULT_SYMBOLS
 
     budget_str = f" / 予算{args.budget:,}円" if args.budget > 0 else ""
-    print(f"デイトレ3戦略比較: {len(targets)}銘柄 / {args.days}日 / "
+    print(f"デイトレ5戦略比較: {len(targets)}銘柄 / {args.days}日 / "
           f"source={args.source}{budget_str}", flush=True)
 
     # データ取得
@@ -446,9 +464,10 @@ def main() -> None:
         print("[ERROR] 予算内で購入可能な銘柄がありません", file=sys.stderr)
         sys.exit(1)
 
-    # 3戦略実行
-    print(f"バックテスト実行中 ({len(fetched)}銘柄)...", flush=True)
-    results = run_all_strategies(fetched, targets)
+    # 5戦略実行
+    budget_val = args.budget if args.budget > 0 else BUDGET
+    print(f"バックテスト実行中 ({len(fetched)}銘柄 × 5戦略)...", flush=True)
+    results = run_all_strategies(fetched, targets, budget=budget_val)
 
     # コンソール
     print_comparison(results, args.days)
