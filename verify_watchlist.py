@@ -151,9 +151,9 @@ def main() -> None:
     # モード選択 (実際の切替は import 前に sys.argv で行う)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true",
-                            help="積極利確モード (tm=1.5, 目標+4.5%)")
+                            help="積極利確モード (tm=1.5, 目標+4.5%, デフォルト)")
     mode_group.add_argument("--conservative", action="store_true",
-                            help="標準モード (tm=3.0, デフォルト)")
+                            help="標準モード (tm=3.0, 旧デフォルト)")
     args = parser.parse_args()
 
     # ── 提案ファイル決定 ──
@@ -273,7 +273,8 @@ def main() -> None:
 
     # 片方しか無い場合はフルHTMLを直接出力
     date_suffix = args.date if args.date else today_str
-    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+    # aggressive (デフォルト) は suffix なし、conservative は "_conservative"
+    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "aggressive" else ""
     out_path    = Path(f"signals_verification{mode_suffix}_{date_suffix}.html")
 
     if stop_html and brk_html:

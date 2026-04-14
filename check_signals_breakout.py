@@ -92,12 +92,13 @@ STRATEGY_PARAMS_AGGRESSIVE = {
 }
 
 import os as _os
-TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
-if TRADING_MODE == "aggressive":
-    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
-else:
+# デフォルトは aggressive (回転率優先)。--conservative で旧モード。
+TRADING_MODE = _os.getenv("TRADING_MODE", "aggressive").lower()
+if TRADING_MODE == "conservative":
     STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
-    TRADING_MODE = "conservative"
+else:
+    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
+    TRADING_MODE = "aggressive"
 
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 前日終値 で約定）
 

@@ -71,7 +71,8 @@ JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
 
 # モードごとにログを分ける (conservative と aggressive を混ぜない)
-_mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+# aggressive (デフォルト) は suffix なし、conservative は "_conservative"
+_mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "aggressive" else ""
 LOG_FILE = Path(f"forward_test_log{_mode_suffix}.csv")
 
 FIELDS = [
@@ -451,9 +452,9 @@ def main() -> None:
     # モード選択 (実際の切替は import 前に sys.argv で行う)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true",
-                            help="積極利確モード (tm=1.5) のログを記録")
+                            help="積極利確モード (tm=1.5, デフォルト)")
     mode_group.add_argument("--conservative", action="store_true",
-                            help="標準モード (デフォルト)")
+                            help="標準モード (tm=3.0, 旧デフォルト)")
     args = parser.parse_args()
 
     if not args.record and not args.report:

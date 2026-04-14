@@ -6,12 +6,14 @@ check_signals_breakout.py（DON / VOL / MOM ブレイクアウト）
 を1コマンドで実行し、タブ付きHTMLに統合する。
 
 【使い方】
-  python run_signals.py                    # 全期間(365日) HTMLレポート
+  python run_signals.py                    # 全期間(365日) HTMLレポート (aggressive)
   python run_signals.py --days 90          # 直近90日
   python run_signals.py --date 2026-04-08  # 任意日シグナル確認
   python run_signals.py --signal-only      # シグナルのみ表示
   python run_signals.py --no-browser       # HTML生成のみ（ブラウザ起動しない）
-  python run_signals.py --aggressive       # 積極利確モード (tm=1.5 目標+4.5%)
+  python run_signals.py --conservative     # 旧モード (tm=3.0 目標+9%)
+
+※ デフォルトは aggressive モード (2026-04-14 以降)
 """
 
 from __future__ import annotations
@@ -133,9 +135,9 @@ def main() -> None:
     # モード選択 (実際の切替は import 前に sys.argv で行う)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true",
-                            help="積極利確モード (tm=1.5, 目標+4.5% 小さめで回転率優先)")
+                            help="積極利確モード (tm=1.5, 目標+4.5%, デフォルト)")
     mode_group.add_argument("--conservative", action="store_true",
-                            help="標準モード (tm=3.0, 目標+9% デフォルト)")
+                            help="標準モード (tm=3.0, 目標+9%, 旧デフォルト)")
     args = parser.parse_args()
 
     if args.date:
@@ -201,7 +203,8 @@ def main() -> None:
     brk_html  = _brk.build_html(brk_items,  show_days, date_label)
 
     date_suffix = args.date if args.date else today
-    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+    # aggressive (デフォルト) は suffix なし、conservative は "_conservative"
+    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "aggressive" else ""
     out_path    = Path(f"signals_combined{mode_suffix}_{date_suffix}.html")
     out_path.write_text(build_combined_html(stop_html, brk_html), encoding="utf-8")
     print(f"HTMLレポート: {out_path.resolve()}")
