@@ -218,11 +218,23 @@ def build_html(all_items: list[dict], show_days: int,
         max_dd_pct = enriched.get("max_drawdown_pct", 0.0)
         max_cl     = enriched.get("max_consecutive_losses", 0)
         sharpe     = enriched.get("sharpe", 0.0)
+        hs         = enriched.get("hold_stats", {})
         # ベンチマーク相対 α (戦略リターン - 日経リターン, INITIAL_CASH 基準)
         strat_ret_pct = s["pnl"] / _INITIAL_CASH * 100 if _INITIAL_CASH > 0 else 0
         alpha         = strat_ret_pct - n225_ret
         alpha_cls     = "profit" if alpha >= 0 else "loss"
         dd_cls        = "profit" if max_dd_pct < 10 else ("loss" if max_dd_pct > 20 else "")
+        # 平均保有日数の表示 (メイン + 理由別内訳)
+        hold_break    = []
+        if hs.get("target_n", 0):
+            hold_break.append(f"目標{hs['target_avg']:.1f}({hs['target_n']})")
+        if hs.get("stop_n", 0):
+            hold_break.append(f"損切{hs['stop_avg']:.1f}({hs['stop_n']})")
+        if hs.get("tc_n", 0):
+            hold_break.append(f"TC{hs['tc_avg']:.0f}({hs['tc_n']})")
+        if hs.get("same_day_n", 0):
+            hold_break.append(f"同日({hs['same_day_n']})")
+        hold_break_str = " / ".join(hold_break) if hold_break else ""
         summary_rows += f"""
         <tr>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
@@ -233,6 +245,7 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{max_cl}</td>
           <td>{sharpe:.2f}</td>
           <td class="{alpha_cls}">{alpha:+.1f}%</td>
+          <td>{hs.get('avg', 0):.1f}日<br><small class="hold-break">{hold_break_str}</small></td>
         </tr>"""
 
     # シグナル行（スコア降順で表示）
@@ -383,6 +396,7 @@ def build_html(all_items: list[dict], show_days: int,
   .signal-badge {{ background:#38bdf8; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
+  .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
@@ -405,6 +419,7 @@ def build_html(all_items: list[dict], show_days: int,
   <thead><tr>
     <th>戦略</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益合計</th>
     <th>MaxDD%</th><th>連敗</th><th>Sharpe</th><th>α vs 日経</th>
+    <th>平均保有<br><small style="font-weight:normal">日数（内訳：件数）</small></th>
   </tr></thead>
   <tbody>{summary_rows}</tbody>
 </table>

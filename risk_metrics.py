@@ -127,6 +127,57 @@ def calc_recovery_factor(trade_log: list[dict],
     return round(total_pnl / max_dd, 3)
 
 
+def calc_hold_stats(trade_log: list[dict]) -> dict:
+    """
+    保有日数の統計を返す。
+
+    Returns dict with keys:
+      avg        : 全トレードの平均保有日数
+      count      : 全トレード数
+      target_avg : 目標達成トレードの平均保有日数 (無ければ 0)
+      stop_avg   : 損切りトレードの平均保有日数
+      tc_avg     : タイムカット (必ず MAX_HOLD なのでほぼ固定)
+      held_avg   : 保有中 (期間末で未決済) の平均経過日数
+      target_n / stop_n / tc_n / held_n : 件数
+    """
+    empty = dict(avg=0.0, count=0,
+                 target_avg=0.0, stop_avg=0.0, tc_avg=0.0, held_avg=0.0,
+                 target_n=0, stop_n=0, tc_n=0, held_n=0, same_day_n=0)
+    if not trade_log:
+        return empty
+
+    by_reason: dict[str, list[int]] = {
+        "目標達成": [], "損切り": [], "タイムカット": [], "保有中": []
+    }
+    all_days: list[int] = []
+    same_day = 0
+    for t in trade_log:
+        days   = int(t.get("hold_days", 0) or 0)
+        reason = str(t.get("reason", ""))
+        all_days.append(days)
+        if days == 0:
+            same_day += 1
+        if reason in by_reason:
+            by_reason[reason].append(days)
+
+    def _avg(lst: list[int]) -> float:
+        return round(sum(lst) / len(lst), 1) if lst else 0.0
+
+    return dict(
+        avg=_avg(all_days),
+        count=len(all_days),
+        target_avg=_avg(by_reason["目標達成"]),
+        stop_avg  =_avg(by_reason["損切り"]),
+        tc_avg    =_avg(by_reason["タイムカット"]),
+        held_avg  =_avg(by_reason["保有中"]),
+        target_n=len(by_reason["目標達成"]),
+        stop_n  =len(by_reason["損切り"]),
+        tc_n    =len(by_reason["タイムカット"]),
+        held_n  =len(by_reason["保有中"]),
+        same_day_n=same_day,
+    )
+
+
 def enrich_backtest_result(result: dict[str, Any],
                            initial_cash: float = 500_000) -> dict[str, Any]:
     """
@@ -148,6 +199,7 @@ def enrich_backtest_result(result: dict[str, Any],
     result["max_consecutive_wins"]   = calc_max_consecutive_wins(trade_log)
     result["sharpe"]                 = calc_sharpe(trade_log, initial_cash)
     result["recovery_factor"]        = calc_recovery_factor(trade_log, initial_cash)
+    result["hold_stats"]             = calc_hold_stats(trade_log)
     return result
 
 
@@ -156,12 +208,18 @@ if __name__ == "__main__":
     # ダミーのトレードログ
     from datetime import datetime
     dummy = [
-        {"entry_dt": datetime(2025,1,1), "exit_dt": datetime(2025,1,3), "pnl":  5000},
-        {"entry_dt": datetime(2025,1,5), "exit_dt": datetime(2025,1,7), "pnl":  8000},
-        {"entry_dt": datetime(2025,1,10),"exit_dt": datetime(2025,1,12),"pnl": -3000},
-        {"entry_dt": datetime(2025,1,15),"exit_dt": datetime(2025,1,17),"pnl": -4000},
-        {"entry_dt": datetime(2025,1,20),"exit_dt": datetime(2025,1,22),"pnl": 10000},
-        {"entry_dt": datetime(2025,1,25),"exit_dt": datetime(2025,1,27),"pnl": -2000},
+        {"entry_dt": datetime(2025,1,1), "exit_dt": datetime(2025,1,3), "pnl":  5000,
+         "hold_days": 2, "reason": "目標達成"},
+        {"entry_dt": datetime(2025,1,5), "exit_dt": datetime(2025,1,7), "pnl":  8000,
+         "hold_days": 2, "reason": "目標達成"},
+        {"entry_dt": datetime(2025,1,10),"exit_dt": datetime(2025,1,12),"pnl": -3000,
+         "hold_days": 2, "reason": "損切り"},
+        {"entry_dt": datetime(2025,1,15),"exit_dt": datetime(2025,1,30),"pnl": -4000,
+         "hold_days": 15, "reason": "タイムカット"},
+        {"entry_dt": datetime(2025,2,1), "exit_dt": datetime(2025,2,6), "pnl": 10000,
+         "hold_days": 5, "reason": "目標達成"},
+        {"entry_dt": datetime(2025,2,8), "exit_dt": datetime(2025,2,8), "pnl": -2000,
+         "hold_days": 0, "reason": "損切り"},
     ]
     result = {"trade_log": dummy}
     enriched = enrich_backtest_result(result)
@@ -171,4 +229,5 @@ if __name__ == "__main__":
     print("max_consec_wins    :", enriched["max_consecutive_wins"])
     print("sharpe             :", enriched["sharpe"])
     print("recovery_factor    :", enriched["recovery_factor"])
+    print("hold_stats         :", enriched["hold_stats"])
     print("equity_curve       :", calc_equity_curve(dummy))
