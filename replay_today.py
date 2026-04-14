@@ -218,11 +218,15 @@ def main():
     print("=" * 70)
 
     first_signal: tuple | None = None  # (priority, sym, name, events, trade)
+    no_data = 0
 
     for i, (code4, name) in enumerate(WATCH_SYMBOLS, 1):
         code5 = code4 + "0"
         df = fetch_day(cli, code5, date)
         if df is None or df.empty:
+            no_data += 1
+            if i <= 3 or no_data == len(WATCH_SYMBOLS):
+                print(f"[{i:>2}/{len(WATCH_SYMBOLS)}] {name} ({code4}): データなし")
             continue
 
         prev_close = fetch_prev_close(cli, code5, date)
@@ -246,6 +250,17 @@ def main():
     # 最初にシグナルが出た銘柄 (実運用ではこれを取引)
     print()
     print("=" * 70)
+    if no_data == len(WATCH_SYMBOLS):
+        print(f"  [警告] {date} のデータが全銘柄で取得できませんでした。")
+        print(f"  考えられる原因:")
+        print(f"    1. 土日祝日 (取引なし)")
+        print(f"    2. J-Quants分足データは翌営業日提供の可能性")
+        print(f"    3. APIエラー")
+        print(f"  → --date オプションで前営業日を指定して再実行してください。")
+        print(f"    例: python replay_today.py --date 2026-04-11")
+        print("=" * 70)
+        return
+
     if first_signal:
         _, code, name, trade, _ = first_signal
         mark = "○" if trade["pnl"] > 0 else "●"
