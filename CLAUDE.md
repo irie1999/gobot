@@ -546,3 +546,105 @@ CLAUDE.md §10 の「やらない方が良いこと (過去の失敗)」を更�
 - **CSV のマージは注意**: `forward_test.py` は重複 (record_date + symbol + strategy)
   を排除するが、手動で CSV を編集するときは注意。最悪、ログを消して `--record`
   しなおせば OK (過去日の遡及記録はできない)。
+
+---
+
+## 15. トレードモード プリセット (conservative / aggressive)
+
+目標倍率 (tm) と損切倍率 (sm) を「積極利確型」に切り替える 2 プリセットが
+全スクリプトで使えます。**デフォルトは conservative** (既存 WATCHLIST や既存
+バックテストとの整合性を保つため)。
+
+### 15.1 プリセット値
+
+| 戦略 | conservative (em, sm, tm) | aggressive (em, sm, tm) | 目標%→ | 損切%→ |
+|---|---|---|---|---|
+| MACD | 0.0, 1.5, 3.0 | 0.0, 1.0, **1.5** | +9% → **+4.5%** | -4.5% → -3% |
+| A7   | 0.0, 1.5, 3.0 | 0.0, 1.0, **1.5** | +9% → **+4.5%** | -4.5% → -3% |
+| RSI2 | 0.0, 2.0, 4.0 | 0.0, 1.2, **1.8** | +12% → **+5.4%** | -6% → -3.6% |
+| DON  | 0.0, 1.5, 3.0 | 0.0, 1.0, **1.5** | +9% → **+4.5%** | -4.5% → -3% |
+| VOL  | 0.0, 1.5, 3.0 | 0.0, 1.0, **1.5** | +9% → **+4.5%** | -4.5% → -3% |
+| MOM  | 0.0, 1.5, 3.0 | 0.0, 1.0, **1.5** | +9% → **+4.5%** | -4.5% → -3% |
+
+aggressive は **1.5R 設定** (target = 1.5 × stop)、回転率重視。
+ATR 換算で表記しているので、実効 % は銘柄のボラにより変動します。
+
+### 15.2 切替方法
+
+**CLI フラグ (推奨)**:
+```
+python run_signals.py --aggressive       # 積極利確で実行
+python verify_watchlist.py --aggressive
+python scan_walkforward.py --aggressive --budget 600000
+python forward_test.py --record --aggressive
+```
+
+実際の切替: 各スクリプトの **最初の import より前** に `sys.argv` を
+チェックして `os.environ["TRADING_MODE"] = "aggressive"` を設定する。
+その後 `check_signals_stop` / `check_signals_breakout` / `scan_walkforward`
+が import されると、モジュールトップで env var を読んで
+`STRATEGY_PARAMS` / `STRATEGY_DEFS` をプリセットに差し替える。
+
+**環境変数 (シェル全体で固定)**:
+```
+export TRADING_MODE=aggressive
+python run_signals.py   # 自動的に aggressive
+```
+
+### 15.3 出力ファイル名の分離
+
+モードごとに出力ファイルを分けるので、**誤って混ざる心配は無い**。
+
+| スクリプト | conservative 出力 | aggressive 出力 |
+|---|---|---|
+| run_signals.py | `signals_combined_YYYY-MM-DD.html` | `signals_combined_aggressive_YYYY-MM-DD.html` |
+| verify_watchlist.py | `signals_verification_YYYY-MM-DD.html` | `signals_verification_aggressive_YYYY-MM-DD.html` |
+| scan_walkforward.py | `walkforward_STRATEGY_YYYY-MM-DD.csv` | `walkforward_STRATEGY_aggressive_YYYY-MM-DD.csv` |
+| forward_test.py | `forward_test_log.csv` | `forward_test_log_aggressive.csv` |
+
+### 15.4 運用上の注意
+
+- **WATCHLIST は互換**: aggressive モードに切替えても、`check_signals_stop.WATCHLIST` /
+  `check_signals_breakout.WATCHLIST` の銘柄リストはそのまま使える。ただし
+  **各戦略に最適な銘柄構成はモードごとに違う可能性**がある (aggressive は小さな
+  利幅を取るため、よりトレンドが弱くても勝てる銘柄が向く)。
+  理想的には `scan_walkforward.py --aggressive` で aggressive 用 WATCHLIST を
+  別途作り、提案ファイル → `check_signals_*.py` に貼り付けると良い。
+- **バックテスト数字の比較は同モード内で**: conservative と aggressive の
+  数字を直接比較すると誤解を生む。例えば aggressive は「勝率高いが総損益は低い」
+  ケースが多い。どちらが優れているかは Sharpe 比率や期待値で判断するのが妥当。
+- **フォワードテストはモードごとに別ログ**: `forward_test_log.csv` (conservative)
+  と `forward_test_log_aggressive.csv` が独立。両方記録したければ 2 回実行:
+  ```
+  python forward_test.py --record                # conservative
+  python forward_test.py --record --aggressive   # aggressive
+  ```
+- **ENTRY_EXPIRE / MAX_HOLD は共通**: 現状プリセットで変えていない
+  (3 営業日有効 / 15 日保有上限)。より回転率を上げたいなら `backtest_limit_entry.py`
+  の `MAX_HOLD = 15 → 7`, `ENTRY_EXPIRE = 3 → 2` を検討。こちらはモジュール
+  定数なので手動書き換え。
+
+### 15.5 A/B テストの流れ (推奨)
+
+```
+# 同じ日に 2 モード実行して数字を比較
+python run_signals.py                  # conservative
+python run_signals.py --aggressive     # aggressive
+
+# 並べてブラウザで開き、以下を比較:
+#  - 勝率 (aggressive の方が高いはず)
+#  - PF (conservative の方が高いはず)
+#  - 総損益 (年間で勝つ方を選ぶ)
+#  - 平均保有日数 (aggressive は短い)
+#  - Sharpe 比率 (リスク調整後)
+
+# フォワードテストも 2 モード並行で記録
+python forward_test.py --record                 # conservative ログ
+python forward_test.py --record --aggressive    # aggressive ログ
+
+# 1ヶ月後、それぞれレポート
+python forward_test.py --report                 # conservative 実績
+python forward_test.py --report --aggressive    # aggressive 実績
+```
+
+実運用のどちらが優秀かは **バックテストではなく フォワードテストの実績** で判断してください。

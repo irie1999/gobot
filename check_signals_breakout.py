@@ -76,12 +76,29 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("4343.T", "イオンファンタジー",       "MOM"),   # 1期間 100%  4回 +105K
 ]
 
-# ── パラメータ (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult)
-STRATEGY_PARAMS = {
-    "DON": (calc_donchian,    0.0, 1.5, 3.0),
+# ── パラメータ (プリセット切替) ───────────────────────────────────
+# TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
+# デフォルトは conservative (現行踏襲)
+STRATEGY_PARAMS_CONSERVATIVE = {
+    "DON": (calc_donchian,     0.0, 1.5, 3.0),
     "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
-    "MOM": (calc_momentum,    0.0, 1.5, 3.0),
+    "MOM": (calc_momentum,     0.0, 1.5, 3.0),
 }
+# aggressive: 利確 1.5R で回転率優先
+STRATEGY_PARAMS_AGGRESSIVE = {
+    "DON": (calc_donchian,     0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3%
+    "VOL": (calc_vol_breakout, 0.0, 1.0, 1.5),
+    "MOM": (calc_momentum,     0.0, 1.0, 1.5),
+}
+
+import os as _os
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
+    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
+else:
+    STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
+    TRADING_MODE = "conservative"
+
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 前日終値 で約定）
 
 
@@ -435,7 +452,8 @@ def build_html(all_items: list[dict], show_days: int,
 <body>
 <h1>ブレイクアウト戦略 逆指値エントリー バックテスト</h1>
 <p class="subtitle">
-  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日<br>
+  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日 ／
+  <span style="color:#fbbf24">モード: <strong>{TRADING_MODE}</strong></span><br>
   エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）<br>
   コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値買い+/損切り売り-）／
   手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／

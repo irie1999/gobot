@@ -41,11 +41,18 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── TRADING_MODE を import 前に設定 ──
+if "--aggressive" in sys.argv:
+    os.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    os.environ["TRADING_MODE"] = "conservative"
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
@@ -141,6 +148,12 @@ def main() -> None:
                         help="逆指値B (MACD/A7/RSI2) のみ検証")
     parser.add_argument("--brk-only",    action="store_true",
                         help="ブレイクアウト (DON/VOL/MOM) のみ検証")
+    # モード選択 (実際の切替は import 前に sys.argv で行う)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5, 目標+4.5%)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (tm=3.0, デフォルト)")
     args = parser.parse_args()
 
     # ── 提案ファイル決定 ──
@@ -182,7 +195,7 @@ def main() -> None:
 
     # ── 概要表示 ──
     print("=" * 78)
-    print(f"WATCHLIST 検証バックテスト")
+    print(f"WATCHLIST 検証バックテスト  モード: {_stop.TRADING_MODE}")
     print(f"  提案ファイル: {args.proposal}")
     print(f"  逆指値B     : {len(stop_wl)} 銘柄×戦略"
           f"{' (スキップ)' if args.brk_only else ''}")
@@ -260,7 +273,8 @@ def main() -> None:
 
     # 片方しか無い場合はフルHTMLを直接出力
     date_suffix = args.date if args.date else today_str
-    out_path    = Path(f"signals_verification_{date_suffix}.html")
+    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+    out_path    = Path(f"signals_verification{mode_suffix}_{date_suffix}.html")
 
     if stop_html and brk_html:
         combined = build_combined_html(stop_html, brk_html)

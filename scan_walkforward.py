@@ -131,9 +131,10 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
     )
 
 
-# ── 戦略定義 ─────────────────────────────────────────────────────
+# ── 戦略定義 (プリセット切替) ─────────────────────────────────
 # (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family)
-STRATEGY_DEFS: dict[str, tuple] = {
+# TRADING_MODE=aggressive のとき積極利確プリセットを使う
+STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "MACD": (calc_macd,        0.0, 1.5, 3.0, "stop"),
     "A7":   (calc_a7,          0.0, 1.5, 3.0, "stop"),
     "RSI2": (calc_rsi2,        0.0, 2.0, 4.0, "stop"),
@@ -141,6 +142,22 @@ STRATEGY_DEFS: dict[str, tuple] = {
     "VOL":  (calc_vol_breakout,0.0, 1.5, 3.0, "breakout"),
     "MOM":  (calc_momentum,    0.0, 1.5, 3.0, "breakout"),
 }
+STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
+    "MACD": (calc_macd,        0.0, 1.0, 1.5, "stop"),
+    "A7":   (calc_a7,          0.0, 1.0, 1.5, "stop"),
+    "RSI2": (calc_rsi2,        0.0, 1.2, 1.8, "stop"),
+    "DON":  (calc_donchian,    0.0, 1.0, 1.5, "breakout"),
+    "VOL":  (calc_vol_breakout,0.0, 1.0, 1.5, "breakout"),
+    "MOM":  (calc_momentum,    0.0, 1.0, 1.5, "breakout"),
+}
+
+import os as _os
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
+    STRATEGY_DEFS = STRATEGY_DEFS_AGGRESSIVE
+else:
+    STRATEGY_DEFS = STRATEGY_DEFS_CONSERVATIVE
+    TRADING_MODE = "conservative"
 
 # ── Walk-forward fold 定義 (days ago from today) ──
 # (name, train_start, train_end, test_start, test_end)  すべて "今日からN日前"
@@ -366,6 +383,7 @@ def main() -> None:
     print(f"  戦略      : {', '.join(strategies)}")
     print(f"  Folds     : {len(FOLDS)}")
     print(f"  Workers   : {args.workers}")
+    print(f"  モード    : {TRADING_MODE}")
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
@@ -418,7 +436,9 @@ def main() -> None:
         print(f"\n  {strategy}: 全候補={len(results)}  2fold以上通過={len(survivors)}")
 
         # ── CSV 保存 (全候補) ──
-        csv_path = out_dir / f"walkforward_{strategy}_{TODAY}.csv"
+        # aggressive モードなら suffix を付けて conservative と区別
+        mode_suffix = "_aggressive" if TRADING_MODE == "aggressive" else ""
+        csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
             "folds_passed",

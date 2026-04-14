@@ -75,12 +75,29 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("4631.T", "DIC",                    "RSI2"),   # 180+365d 80-100%  5回
 ]
 
-# ── 逆指値版パラメータ（entry_atr_mult=0.0 で終値以上なら約定）──
-STRATEGY_PARAMS = {
+# ── 逆指値版パラメータ (プリセット切替) ───────────────────────
+# TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
+# デフォルトは conservative (現行踏襲)
+STRATEGY_PARAMS_CONSERVATIVE = {
     "MACD": (calc_macd, 0.0, 1.5, 3.0),
     "A7":   (calc_a7,   0.0, 1.5, 3.0),
     "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # 指値版は0.5だったがstopは0.0に統一
 }
+# aggressive: 利確 1R 近辺で積極確定、回転率優先
+STRATEGY_PARAMS_AGGRESSIVE = {
+    "MACD": (calc_macd, 0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3% (1.5R)
+    "A7":   (calc_a7,   0.0, 1.0, 1.5),
+    "RSI2": (calc_rsi2, 0.0, 1.2, 1.8),   # 目標 +5.4% / 損切 -3.6% (1.5R)
+}
+
+import os as _os
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
+    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
+else:
+    STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
+    TRADING_MODE = "conservative"   # 正規化
+
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
 
 
@@ -431,7 +448,8 @@ def build_html(all_items: list[dict], show_days: int,
 <body>
 <h1>監視銘柄 逆指値エントリー バックテスト</h1>
 <p class="subtitle">
-  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日<br>
+  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日 ／
+  <span style="color:#fbbf24">モード: <strong>{TRADING_MODE}</strong></span><br>
   エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）<br>
   コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値買い+/損切り売り-）／
   手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／

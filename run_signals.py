@@ -11,17 +11,25 @@ check_signals_breakout.py（DON / VOL / MOM ブレイクアウト）
   python run_signals.py --date 2026-04-08  # 任意日シグナル確認
   python run_signals.py --signal-only      # シグナルのみ表示
   python run_signals.py --no-browser       # HTML生成のみ（ブラウザ起動しない）
+  python run_signals.py --aggressive       # 積極利確モード (tm=1.5 目標+4.5%)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── TRADING_MODE を import 前に設定 (check_signals_* が読み取る) ──
+if "--aggressive" in sys.argv:
+    os.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    os.environ["TRADING_MODE"] = "conservative"
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
@@ -122,6 +130,12 @@ def main() -> None:
     parser.add_argument("--signal-only", action="store_true",
                         help="シグナルのみ表示（HTML生成をスキップ）")
     parser.add_argument("--workers",     type=int, default=_stop._DEFAULT_WORKERS)
+    # モード選択 (実際の切替は import 前に sys.argv で行う)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5, 目標+4.5% 小さめで回転率優先)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (tm=3.0, 目標+9% デフォルト)")
     args = parser.parse_args()
 
     if args.date:
@@ -135,7 +149,7 @@ def main() -> None:
 
     date_label = args.date if args.date else "本日"
     n_total = len(_stop.WATCHLIST) + len(_brk.WATCHLIST)
-    print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}...", flush=True)
+    print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}  モード: {_stop.TRADING_MODE}", flush=True)
     print(f"  逆指値B: {len(_stop.WATCHLIST)}銘柄  /  ブレイクアウト: {len(_brk.WATCHLIST)}銘柄", flush=True)
 
     # 両グループを並列実行
@@ -187,7 +201,8 @@ def main() -> None:
     brk_html  = _brk.build_html(brk_items,  show_days, date_label)
 
     date_suffix = args.date if args.date else today
-    out_path    = Path(f"signals_combined_{date_suffix}.html")
+    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+    out_path    = Path(f"signals_combined{mode_suffix}_{date_suffix}.html")
     out_path.write_text(build_combined_html(stop_html, brk_html), encoding="utf-8")
     print(f"HTMLレポート: {out_path.resolve()}")
 

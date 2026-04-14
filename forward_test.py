@@ -46,10 +46,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── TRADING_MODE を import 前に設定 ──
+if "--aggressive" in sys.argv:
+    os.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    os.environ["TRADING_MODE"] = "conservative"
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
@@ -63,7 +70,9 @@ from backtest_limit_entry import (
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
 
-LOG_FILE = Path("forward_test_log.csv")
+# モードごとにログを分ける (conservative と aggressive を混ぜない)
+_mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+LOG_FILE = Path(f"forward_test_log{_mode_suffix}.csv")
 
 FIELDS = [
     "record_date", "symbol", "name", "strategy", "family",
@@ -263,7 +272,8 @@ def evaluate_entry(row: dict) -> dict:
 # ── 記録モード ───────────────────────────────────────────────────
 def cmd_record(update_existing: bool = True) -> None:
     print("=" * 78)
-    print(f"フォワードテスト 記録モード ({TODAY})")
+    print(f"フォワードテスト 記録モード ({TODAY})  モード: {_stop.TRADING_MODE}")
+    print(f"ログファイル: {LOG_FILE}")
     print("=" * 78)
 
     log = load_log()
@@ -321,7 +331,8 @@ def cmd_report(days: int | None = None) -> None:
         sys.exit(1)
 
     print("=" * 78)
-    print(f"フォワードテスト レポート ({TODAY})")
+    print(f"フォワードテスト レポート ({TODAY})  モード: {_stop.TRADING_MODE}")
+    print(f"ログファイル: {LOG_FILE}")
     print("=" * 78)
 
     # 期間フィルター
@@ -437,6 +448,12 @@ def main() -> None:
                         help="集計レポートを表示")
     parser.add_argument("--days",      type=int, default=None,
                         help="--report 時に集計対象日数を制限 (デフォルト: 全期間)")
+    # モード選択 (実際の切替は import 前に sys.argv で行う)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5) のログを記録")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (デフォルト)")
     args = parser.parse_args()
 
     if not args.record and not args.report:
