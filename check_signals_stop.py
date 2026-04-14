@@ -33,7 +33,7 @@ from backtest_limit_entry import (
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
-from risk_metrics import enrich_backtest_result
+from risk_metrics import enrich_backtest_result, calc_hold_stats
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
@@ -293,12 +293,17 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{r['win_rate']:.0f}%</td>"
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
+            # show_days 期間の平均保有日数
+            pr_show   = item["period_results"].get(show_days) or {}
+            hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
+            hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
             mark = "🔔" if item["today_sig"] else ""
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
           {cells}
+          <td>{hold_cell}</td>
         </tr>"""
 
     # 個別トレード
@@ -348,6 +353,23 @@ def build_html(all_items: list[dict], show_days: int,
             fill_stat = f'<p class="fill-stat">約定日数 — 平均:{avg_f:.1f}日 最短:{min(fill_days_list)}日 最長:{max(fill_days_list)}日 | 分布: {dist_str}</p>'
         else:
             fill_stat = ""
+        # 保有日数統計 (理由別内訳付き)
+        hs_sec = calc_hold_stats(logs)
+        hold_stat = ""
+        if hs_sec["count"] > 0:
+            hold_break = []
+            if hs_sec["target_n"]:
+                hold_break.append(f"目標{hs_sec['target_avg']:.1f}日({hs_sec['target_n']})")
+            if hs_sec["stop_n"]:
+                hold_break.append(f"損切{hs_sec['stop_avg']:.1f}日({hs_sec['stop_n']})")
+            if hs_sec["tc_n"]:
+                hold_break.append(f"TC{hs_sec['tc_avg']:.0f}日({hs_sec['tc_n']})")
+            if hs_sec["same_day_n"]:
+                hold_break.append(f"同日({hs_sec['same_day_n']})")
+            if hs_sec["held_n"]:
+                hold_break.append(f"保有中{hs_sec['held_avg']:.1f}日({hs_sec['held_n']})")
+            brk = " / ".join(hold_break)
+            hold_stat = f'<p class="hold-stat">保有日数 — 平均:{hs_sec["avg"]:.1f}日 | 内訳: {brk}</p>'
         trade_sections += f"""
       <div class="trade-section">
         <h3>{item['symbol']} {item['name']}
@@ -356,6 +378,7 @@ def build_html(all_items: list[dict], show_days: int,
           <small>（{show_days}日）</small>
         </h3>
         {fill_stat}
+        {hold_stat}
         <table>
           <thead><tr>
             <th>シグナル日</th><th>シグナル時株価</th>
@@ -396,6 +419,7 @@ def build_html(all_items: list[dict], show_days: int,
   .signal-badge {{ background:#38bdf8; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
+  .hold-stat {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
   .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
@@ -442,6 +466,7 @@ def build_html(all_items: list[dict], show_days: int,
     <tr>
       <th rowspan="2">銘柄</th><th rowspan="2">戦略</th>
       {period_headers}
+      <th rowspan="2">平均<br>保有<br><small>({show_days}日)</small></th>
     </tr>
     <tr>{period_subheads}</tr>
   </thead>
