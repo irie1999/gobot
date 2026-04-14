@@ -59,7 +59,7 @@ print("-" * 80)
 for i, (_, r) in enumerate(g.head(30).iterrows(), 1):
     name = names.get(r["symbol"], r["symbol"])[:22]
     print(f"{i:>3} {name:<25} {r['symbol']:<10} {r['price']:>5,.0f} "
-          f"{r['n']:>4} {r['wr']:>4.0f}% {r['pf']:>5.2f} "
+          f"{r['n']:>4} {r['win_rate']:>4.0f}% {r['pf']:>5.2f} "
           f"{r['total_pnl']:>+10,.0f}")
 
 # 上位20銘柄を daytrade_symbols.py に保存
