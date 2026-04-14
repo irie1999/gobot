@@ -549,44 +549,46 @@ CLAUDE.md §10 の「やらない方が良いこと (過去の失敗)」を更�
 
 ---
 
-## 15. トレードモード プリセット (aggressive / conservative)
+## 15. トレードモード プリセット (conservative / aggressive)
 
 目標倍率 (tm) と損切倍率 (sm) の 2 プリセットを全スクリプトで切替可能。
-**デフォルトは aggressive (積極利確型, 回転率重視)**。旧来の大きい目標を
-使いたい場合は `--conservative` で opt-in。
+**デフォルトは conservative** (標準)。回転率優先の積極利確モードを使いたい場合は
+`--aggressive` で opt-in。
 
-ユーザー指示により 2026-04-14 以降 aggressive をデフォルト化 (commit 履歴参照)。
+(過去に aggressive をデフォルト化した経緯あり、2026-04-14 に conservative に戻した。
+コミット履歴参照)
 
 ### 15.1 プリセット値
 
-| 戦略 | **aggressive (デフォルト)** | conservative (opt-in) | 目標% | 損切% |
+| 戦略 | **conservative (デフォルト)** | aggressive (opt-in) | 目標% | 損切% |
 |---|---|---|---|---|
-| MACD | **0.0, 1.0, 1.5** | 0.0, 1.5, 3.0 | **+4.5%** / 旧+9% | -3% / 旧-4.5% |
-| A7   | **0.0, 1.0, 1.5** | 0.0, 1.5, 3.0 | **+4.5%** / 旧+9% | -3% / 旧-4.5% |
-| RSI2 | **0.0, 1.2, 1.8** | 0.0, 2.0, 4.0 | **+5.4%** / 旧+12% | -3.6% / 旧-6% |
-| DON  | **0.0, 1.0, 1.5** | 0.0, 1.5, 3.0 | **+4.5%** / 旧+9% | -3% / 旧-4.5% |
-| VOL  | **0.0, 1.0, 1.5** | 0.0, 1.5, 3.0 | **+4.5%** / 旧+9% | -3% / 旧-4.5% |
-| MOM  | **0.0, 1.0, 1.5** | 0.0, 1.5, 3.0 | **+4.5%** / 旧+9% | -3% / 旧-4.5% |
+| MACD | **0.0, 1.5, 3.0** | 0.0, 1.0, 1.5 | **+9%** / 積極+4.5% | -4.5% / 積極-3% |
+| A7   | **0.0, 1.5, 3.0** | 0.0, 1.0, 1.5 | **+9%** / 積極+4.5% | -4.5% / 積極-3% |
+| RSI2 | **0.0, 2.0, 4.0** | 0.0, 1.2, 1.8 | **+12%** / 積極+5.4% | -6% / 積極-3.6% |
+| DON  | **0.0, 1.5, 3.0** | 0.0, 1.0, 1.5 | **+9%** / 積極+4.5% | -4.5% / 積極-3% |
+| VOL  | **0.0, 1.5, 3.0** | 0.0, 1.0, 1.5 | **+9%** / 積極+4.5% | -4.5% / 積極-3% |
+| MOM  | **0.0, 1.5, 3.0** | 0.0, 1.0, 1.5 | **+9%** / 積極+4.5% | -4.5% / 積極-3% |
 
-aggressive は **1.5R 設定** (target = 1.5 × stop)、回転率重視。
+conservative は **2R 設定** (target = 2 × stop)、勝率・PF重視。
+aggressive は **1.5R 設定**、回転率重視。
 ATR 換算で表記しているので、実効 % は銘柄のボラにより変動します。
 
 ### 15.2 切替方法
 
-**デフォルト (aggressive) で実行**:
+**デフォルト (conservative) で実行**:
 ```
-python run_signals.py                    # aggressive モード (デフォルト)
+python run_signals.py                    # conservative モード (デフォルト)
 python verify_watchlist.py               # 同上
 python scan_walkforward.py --budget 600000
 python forward_test.py --record
 ```
 
-**旧モード (conservative) で実行 (opt-in)**:
+**積極利確 (aggressive) で実行 (opt-in)**:
 ```
-python run_signals.py --conservative
-python verify_watchlist.py --conservative
-python scan_walkforward.py --conservative --budget 600000
-python forward_test.py --record --conservative
+python run_signals.py --aggressive
+python verify_watchlist.py --aggressive
+python scan_walkforward.py --aggressive --budget 600000
+python forward_test.py --record --aggressive
 ```
 
 実際の切替: 各スクリプトの **最初の import より前** に `sys.argv` を
@@ -597,26 +599,20 @@ python forward_test.py --record --conservative
 
 **環境変数 (シェル全体で固定)**:
 ```
-export TRADING_MODE=conservative   # 常に旧モードで固定
-python run_signals.py              # --conservative 不要
+export TRADING_MODE=aggressive   # 常に aggressive で固定
+python run_signals.py            # --aggressive 不要
 ```
 
 ### 15.3 出力ファイル名の分離
 
-**デフォルト (aggressive) は suffix なし**、**conservative は `_conservative` suffix**。
+**デフォルト (conservative) は suffix なし**、**aggressive は `_aggressive` suffix**。
 
-| スクリプト | aggressive (デフォルト) 出力 | conservative 出力 |
+| スクリプト | conservative (デフォルト) 出力 | aggressive 出力 |
 |---|---|---|
-| run_signals.py | `signals_combined_YYYY-MM-DD.html` | `signals_combined_conservative_YYYY-MM-DD.html` |
-| verify_watchlist.py | `signals_verification_YYYY-MM-DD.html` | `signals_verification_conservative_YYYY-MM-DD.html` |
-| scan_walkforward.py | `walkforward_STRATEGY_YYYY-MM-DD.csv` | `walkforward_STRATEGY_conservative_YYYY-MM-DD.csv` |
-| forward_test.py | `forward_test_log.csv` | `forward_test_log_conservative.csv` |
-
-**重要な移行注意** (2026-04-14 以降):
-デフォルトが aggressive に変わったため、これ以降に生成される
-`signals_combined_YYYY-MM-DD.html` (suffix なし) は **aggressive の結果** です。
-それ以前に生成された同名 HTML は conservative の結果 (手動で `_conservative`
-を付けてリネームしておくと混乱を避けられる)。
+| run_signals.py | `signals_combined_YYYY-MM-DD.html` | `signals_combined_aggressive_YYYY-MM-DD.html` |
+| verify_watchlist.py | `signals_verification_YYYY-MM-DD.html` | `signals_verification_aggressive_YYYY-MM-DD.html` |
+| scan_walkforward.py | `walkforward_STRATEGY_YYYY-MM-DD.csv` | `walkforward_STRATEGY_aggressive_YYYY-MM-DD.csv` |
+| forward_test.py | `forward_test_log.csv` | `forward_test_log_aggressive.csv` |
 
 ### 15.4 運用上の注意
 
@@ -644,8 +640,8 @@ python run_signals.py              # --conservative 不要
 
 ```
 # 同じ日に 2 モード実行して数字を比較
-python run_signals.py                     # aggressive (デフォルト)
-python run_signals.py --conservative      # 旧モード
+python run_signals.py                  # conservative (デフォルト)
+python run_signals.py --aggressive     # aggressive
 
 # 並べてブラウザで開き、以下を比較:
 #  - 勝率 (aggressive の方が高いはず)
@@ -655,12 +651,12 @@ python run_signals.py --conservative      # 旧モード
 #  - Sharpe 比率 (リスク調整後)
 
 # フォワードテストも 2 モード並行で記録
-python forward_test.py --record                  # aggressive ログ (デフォルト)
-python forward_test.py --record --conservative   # conservative ログ
+python forward_test.py --record                # conservative ログ (デフォルト)
+python forward_test.py --record --aggressive   # aggressive ログ
 
 # 1ヶ月後、それぞれレポート
-python forward_test.py --report                  # aggressive 実績
-python forward_test.py --report --conservative   # conservative 実績
+python forward_test.py --report                # conservative 実績
+python forward_test.py --report --aggressive   # aggressive 実績
 ```
 
 実運用のどちらが優秀かは **バックテストではなく フォワードテストの実績** で判断してください。

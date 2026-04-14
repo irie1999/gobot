@@ -48,8 +48,8 @@ TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽�
   python scan_walkforward.py --max-price 6000     # 株価6000円以下のみ (上と同義)
   python scan_walkforward.py --budget 300000 --workers 8  # 30万円予算で並列8
 
-  # モード (デフォルト=aggressive, 2026-04-14 以降)
-  python scan_walkforward.py --conservative       # 旧モード (tm=3.0)
+  # モード (デフォルト=conservative, tm=3.0 目標+9%)
+  python scan_walkforward.py --aggressive         # 積極利確 (tm=1.5 目標+4.5%)
 
 注意:
   - backtest_limit_entry.run_limit_backtest を内部で使う。 _TODAY は触らない
@@ -155,13 +155,13 @@ STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
 }
 
 import os as _os
-# デフォルトは aggressive (回転率優先)。--conservative で旧モード。
-TRADING_MODE = _os.getenv("TRADING_MODE", "aggressive").lower()
-if TRADING_MODE == "conservative":
-    STRATEGY_DEFS = STRATEGY_DEFS_CONSERVATIVE
-else:
+# デフォルトは conservative (標準)。--aggressive で積極利確。
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
     STRATEGY_DEFS = STRATEGY_DEFS_AGGRESSIVE
-    TRADING_MODE = "aggressive"
+else:
+    STRATEGY_DEFS = STRATEGY_DEFS_CONSERVATIVE
+    TRADING_MODE = "conservative"
 
 # ── Walk-forward fold 定義 (days ago from today) ──
 # (name, train_start, train_end, test_start, test_end)  すべて "今日からN日前"
@@ -440,8 +440,8 @@ def main() -> None:
         print(f"\n  {strategy}: 全候補={len(results)}  2fold以上通過={len(survivors)}")
 
         # ── CSV 保存 (全候補) ──
-        # aggressive (デフォルト) は suffix なし、conservative は "_conservative"
-        mode_suffix = f"_{TRADING_MODE}" if TRADING_MODE != "aggressive" else ""
+        # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
+        mode_suffix = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
         csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
