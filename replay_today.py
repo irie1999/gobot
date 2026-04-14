@@ -52,14 +52,45 @@ def get_client():
     return jquantsapi.ClientV2(api_key=os.environ["JQUANTS_API_KEY"])
 
 
+DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+
+
 def fetch_day(cli, code5: str, date: str):
-    """指定日の5分足を取得。"""
+    """指定日の5分足を取得 (ローカル優先)。"""
+    # ローカルpklから取得を試みる
+    pkl_path = DATA_DIR / f"{code5}.pkl"
+    if pkl_path.exists():
+        try:
+            import pickle
+            raw = pickle.loads(pkl_path.read_bytes())
+            if not raw.empty and "Date" in raw.columns:
+                # 指定日のデータだけ抽出
+                day_df = raw[raw["Date"].astype(str).str[:10] == date].copy()
+                if not day_df.empty:
+                    day_df["DateTime"] = pd.to_datetime(
+                        day_df["Date"].astype(str) + " " + day_df["Time"].astype(str),
+                        format="%Y-%m-%d %H:%M"
+                    )
+                    day_df = day_df.sort_values("DateTime")
+                    day_df = day_df.rename(columns={
+                        "O": "open", "H": "high", "L": "low",
+                        "C": "close", "Vo": "volume"
+                    })
+                    for c in ["open", "high", "low", "close", "volume"]:
+                        if c in day_df.columns:
+                            day_df[c] = pd.to_numeric(day_df[c], errors="coerce")
+                    day_df = day_df.set_index("DateTime")
+                    return day_df
+        except Exception:
+            pass
+
+    # ローカルになければ API から取得
     d = date.replace("-", "")
     try:
         df = cli.get_eq_bars_5minute(
             code=code5, from_yyyymmdd=d, to_yyyymmdd=d
         )
-    except Exception as e:
+    except Exception:
         return None
     if df is None or df.empty:
         return None
@@ -68,7 +99,6 @@ def fetch_day(cli, code5: str, date: str):
     if df.empty:
         return None
 
-    # Date+Time → DateTime
     df["DateTime"] = pd.to_datetime(
         df["Date"].astype(str) + " " + df["Time"].astype(str),
         format="%Y-%m-%d %H:%M"
