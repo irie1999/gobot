@@ -62,8 +62,8 @@ for i, (_, r) in enumerate(g.head(30).iterrows(), 1):
           f"{r['n']:>4} {r['win_rate']:>4.0f}% {r['pf']:>5.2f} "
           f"{r['total_pnl']:>+10,.0f}")
 
-# 上位20銘柄を daytrade_symbols.py に保存
-top_n = 20
+# 上位50銘柄を daytrade_symbols.py に保存
+top_n = 50
 top = g.head(top_n)
 lines = [
     '"""Donchianスキャン選定銘柄 (PF>=2.0 & 取引>=10 & 株価<=6000)"""\n\n',

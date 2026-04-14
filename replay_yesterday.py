@@ -23,29 +23,15 @@ import pandas as pd
 JST = timezone(timedelta(hours=9))
 DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
-# WATCH_SYMBOLS (kabu_daytrade_bot.py と同じ)
-WATCH_SYMBOLS = [
-    ("8032", "日本紙パルプ商事"),
-    ("2130", "メンバーズ"),
-    ("8008", "ヨンドシーHD"),
-    ("7979", "松風"),
-    ("3036", "アルコニックス"),
-    ("3176", "三洋貿易"),
-    ("4611", "大日本塗料"),
-    ("2288", "丸大食品"),
-    ("8584", "ジャックス"),
-    ("6966", "三井ハイテック"),
-    ("9229", "サンウェルズ"),
-    ("5480", "日本冶金工業"),
-    ("7874", "レック"),
-    ("9023", "東京地下鉄"),
-    ("6997", "日本ケミコン"),
-    ("4099", "四国化成HD"),
-    ("8343", "秋田銀行"),
-    ("6315", "TOWA"),
-    ("8346", "東邦銀行"),
-    ("3040", "ソリトンシステムズ"),
-]
+# daytrade_symbols.py から動的読み込み (50銘柄)
+try:
+    from daytrade_symbols import DAYTRADE_SYMBOLS
+    WATCH_SYMBOLS = [(s.replace(".T", ""), n) for s, n in DAYTRADE_SYMBOLS]
+except ImportError:
+    WATCH_SYMBOLS = [
+        ("8032", "日本紙パルプ商事"),
+        ("7979", "松風"),
+    ]
 
 # 共通パラメータ
 BUDGET = 600_000
