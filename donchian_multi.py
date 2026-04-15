@@ -1,11 +1,12 @@
 """
-donchian_multi.py  ―  Donchian 複数ポジ同時保有 + 3段階トレーリング
-==================================================================
-A: 複数ポジション同時保有 (最大3ポジ、資金20万ずつ)
+donchian_multi.py  ―  Donchian 複数ポジ同時保有 + 3段階トレーリング + 動的キャピタル
+============================================================================
+A: 複数ポジション同時保有 (最大3ポジ、動的キャピタル割当)
+   → 1ポジだけの時は全予算(60万)を使用、2ポジ目以降は残資金を使用
 B: 3段階トレーリングストップ
-  +25%進捗 → 建値 (損失ゼロ)
-  +50%進捗 → +25% リスク分ロック
-  +75%進捗 → +50% リスク分ロック
+  +50%進捗 → 建値 (損失ゼロ)
+  +75%進捗 → +25% リスク分ロック
+  +90%進捗 → +50% リスク分ロック
 
 【使い方】
   python donchian_multi.py --days 60
@@ -93,15 +94,20 @@ def _get_prev_close(code5: str, date: str) -> float | None:
         return None
 
 
-def _calc_qty(entry_p, stop_p, capital_per_pos, max_risk):
-    """ポジションサイジング (固定リスク + 資金上限)。"""
+def _calc_qty(entry_p, stop_p, available_capital, max_risk):
+    """ポジションサイジング (固定リスク + 動的資金上限)。
+    available_capital: このポジに使える残り資金 (既存ポジが使っていない分)。
+    """
     risk = abs(entry_p - stop_p)
     if risk <= 0:
-        return 100
+        return 0
     qty_by_risk = int(max_risk / risk / 100) * 100
-    qty_by_cap = int(capital_per_pos / entry_p / 100) * 100
+    qty_by_cap = int(available_capital / entry_p / 100) * 100
     qty = min(qty_by_risk, qty_by_cap)
-    return max(100, qty)
+    # 100株未満なら見送り (資金不足)
+    if qty < 100:
+        return 0
+    return qty
 
 
 def _update_trailing(pos, bar_close):
@@ -155,9 +161,7 @@ def _check_exit(pos, bar, time_now):
 
 
 def backtest_day_multi(date: str, max_pos: int, budget: int, max_risk: int):
-    """1日分バックテスト (複数ポジ対応)。"""
-    capital_per_pos = budget / max_pos
-
+    """1日分バックテスト (複数ポジ対応、動的キャピタル割当)。"""
     # 全銘柄データを読込
     symbols_data = {}
     prev_closes = {}
@@ -254,7 +258,13 @@ def backtest_day_multi(date: str, max_pos: int, budget: int, max_risk: int):
                     continue
                 risk = entry_p - stop_p
                 target_p = entry_p + risk * TARGET_R
-                qty = _calc_qty(entry_p, stop_p, capital_per_pos, max_risk)
+
+                # 動的キャピタル: 既存ポジが使っていない残り資金を全投入
+                used_capital = sum(p["entry_p"] * p["qty"] for p in positions)
+                available_capital = budget - used_capital
+                qty = _calc_qty(entry_p, stop_p, available_capital, max_risk)
+                if qty < 100:
+                    continue
 
                 positions.append({
                     "symbol": code4, "name": name, "date": date,
