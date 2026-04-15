@@ -48,8 +48,14 @@ ORB_TARGET_K = 1.5
 
 # Donchian
 DON_PERIOD = 20
-DON_TARGET_R = 2.0          # 目標 R:R = 2.0 (建値stop @ +1R = 50%進捗)
+DON_TARGET_R = 2.0          # 目標 R:R = 2.0
 DON_WARMUP = 20
+# Donchian 複層トレーリング: (進捗率, ロックするリスク倍率)
+# 50%進捗で建値, 75%進捗で +0.5Rロック
+DON_TRAIL_STEPS = [
+    (0.50, 0.0),   # +1R (50%) → 建値 stop
+    (0.75, 0.5),   # +1.5R (75%) → +0.5R ロック
+]
 
 
 def calc_qty(entry_p, stop_p, budget=BUDGET, max_risk=MAX_RISK):
@@ -106,14 +112,21 @@ def get_prev_close(code5: str, date: str) -> float | None:
 
 def simulate_exit(day_df, entry_idx, entry_p, entry_dt,
                   stop_p, target_p, qty, strategy,
-                  force_close=FORCE_CLOSE):
-    """決済シミュレート。"""
+                  force_close=FORCE_CLOSE, trail_steps=None):
+    """決済シミュレート。
+    trail_steps: [(進捗率, ロックするリスク倍率), ...] の昇順リスト。
+                 None なら従来の単段 (0.5進捗で建値) 挙動。
+    """
     highs = day_df["high"].to_numpy(dtype=float)
     lows = day_df["low"].to_numpy(dtype=float)
     closes = day_df["close"].to_numpy(dtype=float)
     times = day_df.index
     orig_stop = stop_p
-    trailing = False
+    # 従来挙動の互換: trail_steps 未指定なら単段 (建値のみ)
+    steps = trail_steps if trail_steps is not None else [(TRAILING_TRIGGER, 0.0)]
+    trail_level = 0   # 0=初期, 1以降=ロック
+    stop_labels = ("損切り", "建値撤退", "+0.5Rロック", "トレール")
+    risk = entry_p - orig_stop
 
     for i in range(entry_idx, len(day_df)):
         t = times[i].time()
@@ -123,22 +136,27 @@ def simulate_exit(day_df, entry_idx, entry_p, entry_dt,
             return _trade(entry_dt, times[i], entry_p, cl, orig_stop,
                           target_p, qty, strategy, "引け強制")
 
-        if not trailing and target_p > entry_p:
-            if (cl - entry_p) / (target_p - entry_p) >= TRAILING_TRIGGER:
-                stop_p = entry_p
-                trailing = True
-
+        # 1. 決済判定 (現在の stop で保守的に)
+        exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
         if lo <= stop_p and hi >= target_p:
             return _trade(entry_dt, times[i], entry_p, stop_p, orig_stop,
-                          target_p, qty, strategy,
-                          "建値撤退" if trailing else "損切り")
+                          target_p, qty, strategy, exit_reason)
         if hi >= target_p:
             return _trade(entry_dt, times[i], entry_p, target_p, orig_stop,
                           target_p, qty, strategy, "目標達成")
         if lo <= stop_p:
             return _trade(entry_dt, times[i], entry_p, stop_p, orig_stop,
-                          target_p, qty, strategy,
-                          "建値撤退" if trailing else "損切り")
+                          target_p, qty, strategy, exit_reason)
+
+        # 2. 複層トレーリング更新 (バー高値で次バー以降に適用)
+        if target_p > entry_p and risk > 0:
+            progress = (hi - entry_p) / (target_p - entry_p)
+            for idx, (trigger, lock_r) in enumerate(steps):
+                if progress >= trigger and trail_level <= idx:
+                    new_stop = entry_p + risk * lock_r
+                    if new_stop > stop_p:
+                        stop_p = new_stop
+                        trail_level = idx + 1
 
     return _trade(entry_dt, times[-1], entry_p, float(closes[-1]),
                   orig_stop, target_p, qty, strategy, "引け強制")
@@ -241,7 +259,8 @@ def run_donchian(day_df, prev_close=None):
             qty = calc_qty(entry_p, stop_p)
             info = {"don_hi": don_hi, "don_lo": don_lo, "break_bar": times[i]}
             trade = simulate_exit(day_df, i + 1, entry_p, times[i + 1],
-                                  stop_p, target_p, qty, "Donchian")
+                                  stop_p, target_p, qty, "Donchian",
+                                  trail_steps=DON_TRAIL_STEPS)
             return trade, info
     return None, {}
 

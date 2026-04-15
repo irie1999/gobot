@@ -44,9 +44,14 @@ DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 6_000
 DON_PERIOD       = 20         # 過去何本の高値
-TARGET_R         = 2.0         # 目標 R:R = 2.0 (建値stop @ +1R で含み益確保)
+TARGET_R         = 2.0         # 目標 R:R = 2.0
 GAP_MAX_PCT      = 2.0
-TRAILING_TRIGGER = 0.5         # 50%進捗 (=+1R) で建値移動
+# 複層トレーリング: (進捗率, ロックするリスク倍率)
+# 50%進捗で建値, 75%進捗で +0.5Rロック, 100%でtarget利確
+TRAIL_STEPS = [
+    (0.50, 0.0),   # +1R (50%) → 建値 stop (損失ゼロ)
+    (0.75, 0.5),   # +1.5R (75%) → +0.5R ロック (利益確定)
+]
 FORCE_CLOSE      = dtime(14, 55)
 ENTRY_CUTOFF     = dtime(11, 0)
 WARMUP           = 20
@@ -69,12 +74,12 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
             return None
 
     state = "idle"
-    entry_p = stop_p = target_p = 0.0
+    entry_p = stop_p = target_p = orig_stop = 0.0
     entry_dt = exit_dt = None
     exit_p = None
     reason = None
     qty = 0
-    trailing = False
+    trail_level = 0   # 0=初期stop, 1=建値, 2=+0.5Rロック
 
     i = WARMUP
     while i < n:
@@ -85,21 +90,29 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
             if t >= FORCE_CLOSE:
                 exit_p, exit_dt, reason = cl, times[i], "引け強制"
                 break
-            if not trailing and target_p > entry_p:
-                if (cl - entry_p) / (target_p - entry_p) >= TRAILING_TRIGGER:
-                    stop_p = entry_p
-                    trailing = True
+            # 1. 決済チェック (現在のstopで判定、保守的)
+            stop_labels = ("損切り", "建値撤退", "+0.5Rロック")
+            exit_reason = stop_labels[min(trail_level, 2)]
             if lo <= stop_p and hi >= target_p:
-                exit_p, exit_dt = stop_p, times[i]
-                reason = "建値撤退" if trailing else "損切り"
+                # 同バーで両方ヒット → stop優先 (保守的)
+                exit_p, exit_dt, reason = stop_p, times[i], exit_reason
                 break
             if hi >= target_p:
                 exit_p, exit_dt, reason = target_p, times[i], "目標達成"
                 break
             if lo <= stop_p:
-                exit_p, exit_dt = stop_p, times[i]
-                reason = "建値撤退" if trailing else "損切り"
+                exit_p, exit_dt, reason = stop_p, times[i], exit_reason
                 break
+            # 2. 複層トレーリング更新 (このバーの高値ベースで次バー以降に適用)
+            if target_p > entry_p:
+                risk = entry_p - orig_stop
+                progress = (hi - entry_p) / (target_p - entry_p)
+                for idx, (trigger, lock_r) in enumerate(TRAIL_STEPS):
+                    if progress >= trigger and trail_level <= idx:
+                        new_stop = entry_p + risk * lock_r
+                        if new_stop > stop_p:
+                            stop_p = new_stop
+                            trail_level = idx + 1
             i += 1
             continue
 
@@ -115,13 +128,14 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
             stop_p = don_lo
+            orig_stop = don_lo
             if entry_p <= stop_p:
                 i += 1
                 continue
             target_p = entry_p + (entry_p - stop_p) * TARGET_R
             qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
             state = "in_pos"
-            trailing = False
+            trail_level = 0
             i += 2
             continue
 
