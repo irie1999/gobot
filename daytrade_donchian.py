@@ -204,6 +204,46 @@ def build_html(items, stats, days, budget, source):
         rows += f'<td class="loss">{ist["avg_loss"]:+,.0f}</td>'
         rows += f'<td class="loss">{ist["max_dd"]:+.1f}%</td></tr>'
 
+    # 全トレードを時系列で並べて明細化
+    all_trades = []
+    for it in items:
+        for t in it["trades"]:
+            tt = dict(t)
+            tt["symbol"] = it["symbol"]
+            tt["name"] = it["name"]
+            all_trades.append(tt)
+    all_trades.sort(key=lambda x: str(x.get("entry_dt", "")))
+
+    def _fmt_dt(dt):
+        if hasattr(dt, "strftime"):
+            return dt.strftime("%m-%d %H:%M")
+        return str(dt)[:16] if dt else "-"
+
+    trade_rows = ""
+    for t in all_trades:
+        pc = "profit" if t["pnl"] > 0 else "loss"
+        ed = _fmt_dt(t.get("entry_dt"))
+        xd = _fmt_dt(t.get("exit_dt"))
+        hold = ""
+        try:
+            delta = t["exit_dt"] - t["entry_dt"]
+            mins = int(delta.total_seconds() // 60)
+            hold = f"{mins}分"
+        except Exception:
+            hold = "-"
+        trade_rows += f"""<tr>
+          <td class="sym">{t['name']}<br><small class="code">{t['symbol']}.T</small></td>
+          <td>{ed}</td><td>{xd}</td><td>{hold}</td>
+          <td>{t['entry_p']:,.0f}</td>
+          <td class="loss">{t['stop_p']:,.0f}</td>
+          <td class="profit">{t['target_p']:,.0f}</td>
+          <td>{t['exit_p']:,.0f}</td>
+          <td>{t['qty']}</td>
+          <td class="{pc}">{t['pnl']:+,.0f}</td>
+          <td class="{pc}">{t['pct']:+.2f}%</td>
+          <td>{t['reason']}</td>
+        </tr>"""
+
     return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>Donchian Breakout — {today}</title>
 <style>*{{box-sizing:border-box;margin:0;padding:0}}
@@ -233,6 +273,13 @@ td{{padding:5px 8px;border:1px solid #1e293b;text-align:right;white-space:nowrap
 <h2>銘柄別</h2><table><thead><tr><th>銘柄</th><th>取引</th><th>勝率</th><th>PF</th>
 <th>損益</th><th>平均利益</th><th>平均損失</th><th>DD</th></tr></thead>
 <tbody>{rows}</tbody></table>
+
+<h2>個別トレード明細 ({len(all_trades)}件 / 時系列順)</h2>
+<table><thead><tr>
+<th>銘柄</th><th>Entry</th><th>Exit</th><th>保有</th>
+<th>買値</th><th>損切</th><th>目標</th><th>決済値</th>
+<th>株数</th><th>損益</th><th>%</th><th>決済理由</th>
+</tr></thead><tbody>{trade_rows}</tbody></table>
 </body></html>"""
 
 
