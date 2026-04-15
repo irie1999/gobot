@@ -48,7 +48,7 @@ ORB_TARGET_K = 1.5
 
 # Donchian
 DON_PERIOD = 20
-DON_TARGET_R = 1.5
+DON_TARGET_R = 2.0          # 目標 R:R = 2.0 (建値stop @ +1R = 50%進捗)
 DON_WARMUP = 20
 
 

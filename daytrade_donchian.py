@@ -44,9 +44,9 @@ DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 6_000
 DON_PERIOD       = 20         # 過去何本の高値
-TARGET_R         = 1.5
+TARGET_R         = 2.0         # 目標 R:R = 2.0 (建値stop @ +1R で含み益確保)
 GAP_MAX_PCT      = 2.0
-TRAILING_TRIGGER = 0.5
+TRAILING_TRIGGER = 0.5         # 50%進捗 (=+1R) で建値移動
 FORCE_CLOSE      = dtime(14, 55)
 ENTRY_CUTOFF     = dtime(11, 0)
 WARMUP           = 20
