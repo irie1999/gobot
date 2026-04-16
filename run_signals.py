@@ -182,13 +182,15 @@ def main() -> None:
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
     if all_sigs:
         print(f"  {'銘柄':<12} {'名前':<24} {'戦略':<6} {'種別':<8} {'シグナル日':<12} "
-              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'損切り':>8} {'目標':>8} スコア")
-        print("  " + "-" * 124)
+              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'指値上限':>8} {'損切り':>8} {'目標':>8} スコア")
+        print("  " + "-" * 134)
         for item, score, rank, kind in all_sigs:
             sig = item["today_sig"]
+            limit_entry = sig.get("limit_entry_price", sig["order_price"])
             print(f"  {item['symbol']:<12} {item['name']:<24} {item['strategy']:<6} {kind:<8}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>8,.0f}"
+                  f" {limit_entry:>8,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
                   f"  {rank}{score}点")
     else:

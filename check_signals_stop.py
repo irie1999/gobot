@@ -29,7 +29,7 @@ from backtest_limit_entry import (
     calc_macd, calc_a7, calc_rsi2,
     run_limit_backtest,
     fetch_n225_return,
-    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -163,15 +163,18 @@ def check_signal_on_date(symbol: str, strategy: str,
     current_p  = float(next_row["close"])
 
     # 逆指値: 終値 + ATR×em（emが0.0なら終値ちょうど）
-    order_p = close_prev + atr_v * em
-    sl      = order_p - atr_v * sm   # 損切り
-    tp      = order_p + atr_v * tm   # 目標
+    order_p     = close_prev + atr_v * em
+    sl          = order_p - atr_v * sm   # 損切り
+    tp          = order_p + atr_v * tm   # 目標
+    # 逆指値→指値注文の指値上限 (kabu 発注時 AfterHitPrice 用)
+    limit_entry = order_p * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
-        order_price=round(order_p, 0),   # 逆指値注文価格
+        order_price=round(order_p, 0),         # 逆指値トリガー価格
+        limit_entry_price=round(limit_entry, 0),  # 逆指値→指値 の指値上限 (+1%)
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,
@@ -285,11 +288,12 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
           <td class="stop">{sig['order_price']:,.0f}</td>
+          <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="9" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="10" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -430,6 +434,7 @@ def build_html(all_items: list[dict], show_days: int,
   .profit {{ color:#4ade80; }}
   .loss   {{ color:#f87171; }}
   .stop   {{ color:#38bdf8; }}
+  .limit-entry {{ color:#fb923c; }}
   .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
   .tag-macd {{ background:#1d4ed8; color:#bfdbfe; }}
   .tag-a7   {{ background:#065f46; color:#a7f3d0; }}
@@ -469,12 +474,13 @@ def build_html(all_items: list[dict], show_days: int,
 
 <h2>シグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
 <p style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px">
-  ※ 逆指値注文（青色）= 翌日高値がこの価格以上になれば約定
+  ※ 逆指値注文（青色）= 翌日高値がこの価格以上になれば発動<br>
+  ※ 指値上限（橙色, +{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%）= 逆指値→指値発注時の指値。寄付ギャップがこれ以下なら約定、超えたら不約定
 </p>
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値（エントリー）</th><th>損切り</th><th>目標</th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
