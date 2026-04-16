@@ -132,23 +132,60 @@ def fetch_n225_return(days: int) -> float:
         return 0.0
 
 
+def _expected_latest_bar_date():
+    """
+    現在時刻から「期待される最新の取引日」を返す。
+      - 平日 15:00 JST 以降 → 今日 (引け済み)
+      - 平日 15:00 JST より前 → 前営業日
+      - 土曜日             → 金曜日
+      - 日曜日             → 金曜日
+      - 月曜日 15時前      → 前金曜日
+    祝日は考慮しない (祝日でデータが無い場合は yfinance が前営業日を返すので
+    結果オーライ)。
+    """
+    now    = datetime.now(JST)
+    today  = now.date()
+    wd     = today.weekday()  # 0=Mon ... 6=Sun
+
+    if wd == 5:  # 土
+        return today - timedelta(days=1)
+    if wd == 6:  # 日
+        return today - timedelta(days=2)
+
+    # 平日
+    if now.hour >= 15:
+        return today  # 引け後 → 今日
+    # 引け前 → 前営業日
+    if wd == 0:  # 月
+        return today - timedelta(days=3)  # 前金曜
+    return today - timedelta(days=1)
+
+
 def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
-    """永続キャッシュ優先・フォールバックでダウンロード。"""
+    """永続キャッシュ優先・フォールバックでダウンロード。
+
+    キャッシュ判定:
+      - キャッシュ内 df の最新バー日付 >= _expected_latest_bar_date() なら有効
+      - そうでなければ再取得 (引け前作成 → 引け後実行 のパターンも自動更新)
+    """
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
-            mtime = datetime.fromtimestamp(persistent.stat().st_mtime, tz=JST)
-            if mtime.date() == datetime.now(JST).date():
-                with open(persistent, "rb") as f:
-                    df = pickle.load(f)
+            with open(persistent, "rb") as f:
+                df = pickle.load(f)
+            if len(df) >= 210:
+                latest_bar = df.index[-1]
+                latest_date = latest_bar.date() if hasattr(latest_bar, "date") else latest_bar
+                expected    = _expected_latest_bar_date()
                 price_range = float(df["close"].max() - df["close"].min())
-                valid = price_range > 0.01 * float(df["close"].mean())
-                if len(df) >= 210 and valid:
+                valid_range = price_range > 0.01 * float(df["close"].mean())
+                if latest_date >= expected and valid_range:
                     # 株価異常値を除去
                     pct_chg = df["close"].pct_change().abs()
                     df = df[pct_chg <= 0.5].copy()
                     if len(df) >= 210:
                         return df
+                # 古いキャッシュ → fall through で再取得
         except Exception:
             pass
 
