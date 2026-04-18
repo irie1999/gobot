@@ -17,21 +17,23 @@ for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
 
 df = pd.read_csv("scan_donchian_result.csv")
 
-# フィルタ条件:
-# - 取引数 ≥ 10 (統計的に意味のある数)
-# - PF ≥ 2.0 (高品質)
+# フィルタ条件 (強化版):
+# - 取引数 ≥ 20 (統計的信頼性を向上、東京地下鉄のような外れ値を排除)
+# - 勝率 ≥ 60% (勝率重視で安定性UP)
+# - PF ≥ 2.5 (より高品質)
 # - PF < 50 (極端な数値を除外)
 # - 株価 ≤ 6000円 (予算60万で購入可能)
 # - 損益 > 0
 g = df[
-    (df["n"] >= 10)
-    & (df["pf"] >= 2.0)
+    (df["n"] >= 20)
+    & (df["win_rate"] >= 60)
+    & (df["pf"] >= 2.5)
     & (df["pf"] < 50)
     & (df["price"] <= 6000)
     & (df["total_pnl"] > 0)
 ].sort_values("pf", ascending=False)
 
-print(f"フィルタ後 (取引≥10 / PF 2.0-50 / 株価≤6000): {len(g)}銘柄")
+print(f"フィルタ後 (取引≥20 / 勝率≥60% / PF 2.5-50 / 株価≤6000): {len(g)}銘柄")
 print()
 
 # J-Quants から銘柄名取得
