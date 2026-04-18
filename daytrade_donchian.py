@@ -47,12 +47,11 @@ DON_PERIOD       = 20         # 過去何本の高値
 TARGET_R         = 2.0         # 目標 R:R = 2.0 (伸ばせる時は伸ばす)
 GAP_MAX_PCT      = 2.0
 # 複層トレーリング: (進捗率, ロックするリスク倍率)
-# 早期から細かくロックし、引け強制・建値撤退を減らす
+# 早期から含み益を保護し、引け強制時も +0.3R以上をロック
 TRAIL_STEPS = [
-    (0.15, 0.1),   # +0.3R進捗 → +0.1Rロック (建値撤退を利益に転換)
-    (0.30, 0.3),   # +0.6R進捗 → +0.3Rロック
-    (0.50, 0.6),   # +1.0R進捗 → +0.6Rロック
-    (0.75, 1.2),   # +1.5R進捗 → +1.2Rロック
+    (0.25, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
+    (0.50, 0.3),   # +1R進捗   → +0.3Rロック
+    (0.75, 0.7),   # +1.5R進捗 → +0.7Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
 ENTRY_CUTOFF     = dtime(11, 0)
@@ -93,7 +92,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
                 exit_p, exit_dt, reason = cl, times[i], "引け強制"
                 break
             # 1. 決済チェック (現在のstopで判定、保守的)
-            stop_labels = ("損切り", "+0.1Rロック", "+0.3Rロック", "+0.6Rロック", "+1.2Rロック")
+            stop_labels = ("損切り", "建値撤退", "+0.3Rロック", "+0.7Rロック")
             exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
             if lo <= stop_p and hi >= target_p:
                 # 同バーで両方ヒット → stop優先 (保守的)
