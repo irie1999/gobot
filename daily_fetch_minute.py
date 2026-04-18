@@ -11,7 +11,8 @@ daily_fetch_minute.py  ―  毎日の5分足データ自動取得 + 欠損日補
   4. 重複バーは自動除去
 
 【使い方】
-  python daily_fetch_minute.py                  # 全銘柄更新
+  python daily_fetch_minute.py                  # 全銘柄更新 (月次スキャン用、1-2時間)
+  python daily_fetch_minute.py --daytrade-only  # 監視20銘柄のみ (日次運用、数分)
   python daily_fetch_minute.py --limit 10       # テスト (10銘柄)
   python daily_fetch_minute.py --check-only     # 欠損確認のみ (取得しない)
 
@@ -158,6 +159,8 @@ def main():
                         help="処理銘柄数の上限 (テスト用)")
     parser.add_argument("--check-only", action="store_true",
                         help="欠損確認のみ (取得しない)")
+    parser.add_argument("--daytrade-only", action="store_true",
+                        help="daytrade_symbols.py の20銘柄のみ更新 (日次運用用)")
     args = parser.parse_args()
 
     if not DATA_DIR.exists():
@@ -167,8 +170,26 @@ def main():
     cli = get_client()
     today = datetime.now(JST).strftime("%Y-%m-%d")
 
-    # 全pkl ファイル
-    pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+    # 対象 pkl ファイル決定
+    if args.daytrade_only:
+        try:
+            from daytrade_symbols import DAYTRADE_SYMBOLS
+        except ImportError:
+            print("[ERROR] daytrade_symbols.py が見つかりません", file=sys.stderr)
+            sys.exit(1)
+        # "8032.T" → "80320" に変換
+        target_codes = [s.replace(".T", "") + "0" for s, _ in DAYTRADE_SYMBOLS]
+        pkl_files = []
+        for code5 in target_codes:
+            pkl = DATA_DIR / f"{code5}.pkl"
+            if pkl.exists():
+                pkl_files.append(pkl)
+            else:
+                print(f"  [warn] {code5}.pkl が存在しません (スキップ)")
+        pkl_files.sort()
+        print(f"daytrade対象: {len(pkl_files)}/{len(target_codes)}銘柄")
+    else:
+        pkl_files = sorted(DATA_DIR.glob("*.pkl"))
     if args.limit > 0:
         pkl_files = pkl_files[:args.limit]
 
