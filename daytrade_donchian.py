@@ -334,6 +334,27 @@ def main():
     print(f"\n取引:{stats['n']}  勝率:{stats['win_rate']:.1f}%  PF:{_pf(stats['pf'])}  "
           f"損益:{stats['total_pnl']:+,.0f}  DD:{stats['max_dd']:+.1f}%")
 
+    # 銘柄別テキスト出力 (貼り付け用)
+    print(f"\n{'='*78}")
+    print(f"  銘柄別サマリ ({len(items)}銘柄)")
+    print("=" * 78)
+    print(f"{'銘柄':<22} {'コード':<8} {'取引':>4} {'勝率':>5} {'PF':>7} "
+          f"{'損益':>10} {'DD':>6}")
+    print("-" * 78)
+    rows = []
+    for it in items:
+        if not it["trades"]:
+            continue
+        ist = calc_stats(it["trades"], args.budget)
+        rows.append((it["name"], it["symbol"], ist))
+    rows.sort(key=lambda x: x[2]["total_pnl"], reverse=True)
+    for name, sym, ist in rows:
+        disp = name[:20] if len(name) <= 20 else name[:19] + "…"
+        print(f"{disp:<22} {sym:<8} {ist['n']:>4} {ist['win_rate']:>4.0f}% "
+              f"{_pf(ist['pf']):>7} {ist['total_pnl']:>+10,.0f} "
+              f"{ist['max_dd']:>+5.1f}%")
+    print("=" * 78)
+
     out = Path(f"daytrade_donchian_{datetime.now(JST).strftime('%Y%m%d')}.html")
     out.write_text(build_html(items, stats, args.days, args.budget, args.source),
                    encoding="utf-8")
