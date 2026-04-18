@@ -125,7 +125,9 @@ def main():
     args = parser.parse_args()
 
     if args.workers <= 0:
-        args.workers = max(1, (os.cpu_count() or 2) - 1)
+        # Windowsではプロセス起動毎にpandas/numpyを再ロードするためメモリ大量消費。
+        # デフォルトは最大8に制限 (ページングファイル不足回避)。
+        args.workers = min(8, max(1, (os.cpu_count() or 2) - 1))
 
     if args.source == "yfinance" and args.days > 60:
         args.days = 60
