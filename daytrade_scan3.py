@@ -92,6 +92,8 @@ def main():
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
     parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--strategy", choices=["all", "donchian", "macd", "stoch"],
+                        default="all", help="実行する戦略 (default: all)")
     args = parser.parse_args()
 
     if args.source == "yfinance" and args.days > 60:
@@ -114,17 +116,22 @@ def main():
     targets = [(s, n) for s, n in targets if s in fetched]
     print(f"  予算フィルタ後: {len(fetched)}銘柄", flush=True)
 
-    # 3戦略実行
-    don_results = scan_strategy(fetched, targets, don_bt, "Donchian", args.budget)
-    macd_results = scan_strategy(fetched, targets, macd_bt, "MACD", args.budget)
-    stoch_results = scan_strategy(fetched, targets, stoch_bt, "Stoch+ATR", args.budget)
+    # 戦略実行
+    don_results = []
+    macd_results = []
+    stoch_results = []
 
-    # コンソール出力
-    print_top(don_results, "Donchian", args.top)
-    print_top(macd_results, "MACD Break", args.top)
-    print_top(stoch_results, "Stoch+ATR", args.top)
+    if args.strategy in ("all", "donchian"):
+        don_results = scan_strategy(fetched, targets, don_bt, "Donchian", args.budget)
+        print_top(don_results, "Donchian", args.top)
+    if args.strategy in ("all", "macd"):
+        macd_results = scan_strategy(fetched, targets, macd_bt, "MACD", args.budget)
+        print_top(macd_results, "MACD Break", args.top)
+    if args.strategy in ("all", "stoch"):
+        stoch_results = scan_strategy(fetched, targets, stoch_bt, "Stoch+ATR", args.budget)
+        print_top(stoch_results, "Stoch+ATR", args.top)
 
-    # CSV保存
+    # CSV保存 (結果がある戦略のみ)
     for results, name in [(don_results, "donchian"),
                           (macd_results, "macd_break"),
                           (stoch_results, "stoch_atr")]:
@@ -135,7 +142,10 @@ def main():
             df.to_csv(csv_path, index=False, encoding="utf-8-sig")
             print(f"\n保存: {csv_path}")
 
-    # 共通銘柄 (3戦略全てで PF≥1.3)
+    # 共通銘柄 (3戦略全てで PF≥1.3、all モード時のみ)
+    if args.strategy != "all":
+        return
+
     def _good(results):
         return set(r["symbol"] for r in results
                    if r["pf"] < 100 and r["pf"] >= 1.3 and r["n"] >= 5)
