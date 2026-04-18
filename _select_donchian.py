@@ -17,15 +17,15 @@ for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
 
 df = pd.read_csv("scan_donchian_result.csv")
 
-# フィルタ条件 (強化版):
-# - 取引数 ≥ 15 (統計的信頼性を保ちつつ20銘柄程度確保)
+# フィルタ条件 (180日スキャン向け):
+# - 取引数 ≥ 8 (180日=6ヶ月なので取引数は少なめ)
 # - 勝率 ≥ 60% (勝率重視で安定性UP)
 # - PF ≥ 2.5 (より高品質)
 # - PF < 50 (極端な数値を除外)
 # - 株価 ≤ 6000円 (予算60万で購入可能)
 # - 損益 > 0
 g = df[
-    (df["n"] >= 15)
+    (df["n"] >= 8)
     & (df["win_rate"] >= 60)
     & (df["pf"] >= 2.5)
     & (df["pf"] < 50)
@@ -33,7 +33,7 @@ g = df[
     & (df["total_pnl"] > 0)
 ].sort_values("pf", ascending=False)
 
-print(f"フィルタ後 (取引≥15 / 勝率≥60% / PF 2.5-50 / 株価≤6000): {len(g)}銘柄")
+print(f"フィルタ後 (取引≥8 / 勝率≥60% / PF 2.5-50 / 株価≤6000): {len(g)}銘柄")
 print()
 
 # J-Quants から銘柄名取得
