@@ -12,8 +12,10 @@ Donchian / MACD Break / Stoch+ATR の3戦略で全銘柄バックテストし、
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import webbrowser
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,28 +44,52 @@ def calc_stats(trades, budget=BUDGET):
                 total_pnl=sum(t["pnl"] for t in trades))
 
 
-def scan_strategy(fetched, targets, bt_fn, strat_name, budget):
-    """1戦略で全銘柄スキャン。"""
+_BT_FNS = {"donchian": don_bt, "macd": macd_bt, "stoch": stoch_bt}
+
+
+def _worker_scan(task):
+    """ワーカー: 1銘柄をバックテスト。(sym, name, df, strat_key, budget)"""
+    sym, name, df, strat_key, budget = task
+    bt_fn = _BT_FNS[strat_key]
+    try:
+        r = bt_fn(sym, name, df, budget, 6000)
+    except Exception:
+        return None
+    if not (r and r.get("trades")):
+        return None
+    s = calc_stats(r["trades"], budget)
+    if not (s and s["n"] >= 5):
+        return None
+    return {
+        "symbol": sym, "name": name,
+        "price": float(df.iloc[-1]["close"]),
+        **s
+    }
+
+
+def scan_strategy(fetched, targets, strat_key, strat_name, budget, workers):
+    """1戦略で全銘柄スキャン (並列)。"""
+    tasks = [(sym, name, fetched[sym], strat_key, budget)
+             for sym, name in targets if sym in fetched]
+    total = len(tasks)
+    print(f"\n[{strat_name}] スキャン中... ({total}銘柄 / {workers}並列)", flush=True)
+
     results = []
-    total = len(targets)
-    print(f"\n[{strat_name}] スキャン中...", flush=True)
-    for i, (sym, name) in enumerate(targets, 1):
-        if sym not in fetched:
-            continue
-        try:
-            r = bt_fn(sym, name, fetched[sym], budget, 6000)
-        except Exception:
-            continue
-        if r and r.get("trades"):
-            s = calc_stats(r["trades"], budget)
-            if s and s["n"] >= 5:
-                results.append({
-                    "symbol": sym, "name": name,
-                    "price": float(fetched[sym].iloc[-1]["close"]),
-                    **s
-                })
-        if i % 200 == 0 or i == total:
-            print(f"  {i}/{total} 完了 ({len(results)}銘柄ヒット)", flush=True)
+    if workers <= 1:
+        for i, task in enumerate(tasks, 1):
+            r = _worker_scan(task)
+            if r is not None:
+                results.append(r)
+            if i % 200 == 0 or i == total:
+                print(f"  {i}/{total} 完了 ({len(results)}銘柄ヒット)", flush=True)
+        return results
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for i, r in enumerate(pool.map(_worker_scan, tasks, chunksize=10), 1):
+            if r is not None:
+                results.append(r)
+            if i % 200 == 0 or i == total:
+                print(f"  {i}/{total} 完了 ({len(results)}銘柄ヒット)", flush=True)
     return results
 
 
@@ -94,7 +120,12 @@ def main():
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--strategy", choices=["all", "donchian", "macd", "stoch"],
                         default="all", help="実行する戦略 (default: all)")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="並列ワーカー数 (0=自動, 1=逐次)")
     args = parser.parse_args()
+
+    if args.workers <= 0:
+        args.workers = max(1, (os.cpu_count() or 2) - 1)
 
     if args.source == "yfinance" and args.days > 60:
         args.days = 60
@@ -122,13 +153,16 @@ def main():
     stoch_results = []
 
     if args.strategy in ("all", "donchian"):
-        don_results = scan_strategy(fetched, targets, don_bt, "Donchian", args.budget)
+        don_results = scan_strategy(fetched, targets, "donchian", "Donchian",
+                                    args.budget, args.workers)
         print_top(don_results, "Donchian", args.top)
     if args.strategy in ("all", "macd"):
-        macd_results = scan_strategy(fetched, targets, macd_bt, "MACD", args.budget)
+        macd_results = scan_strategy(fetched, targets, "macd", "MACD",
+                                     args.budget, args.workers)
         print_top(macd_results, "MACD Break", args.top)
     if args.strategy in ("all", "stoch"):
-        stoch_results = scan_strategy(fetched, targets, stoch_bt, "Stoch+ATR", args.budget)
+        stoch_results = scan_strategy(fetched, targets, "stoch", "Stoch+ATR",
+                                      args.budget, args.workers)
         print_top(stoch_results, "Stoch+ATR", args.top)
 
     # CSV保存 (結果がある戦略のみ)
