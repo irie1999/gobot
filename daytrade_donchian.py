@@ -43,8 +43,8 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 6_000
-DON_PERIOD       = 15         # 過去何本の高値 (15本=75分、シグナル増)
-TARGET_R         = 2.0         # 目標 R:R = 2.0 (伸ばせる時は伸ばす)
+DON_PERIOD       = 20         # 過去何本の高値
+TARGET_R         = 2.0         # 目標 R:R = 2.0
 GAP_MAX_PCT      = 2.0
 # 複層トレーリング: (進捗率, ロックするリスク倍率)
 TRAIL_STEPS = [
@@ -53,8 +53,8 @@ TRAIL_STEPS = [
     (0.75, 0.7),   # +1.5R進捗 → +0.7Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
-ENTRY_CUTOFF     = dtime(13, 0)   # 後場13:00まで (取引機会増)
-WARMUP           = 15
+ENTRY_CUTOFF     = dtime(11, 0)
+WARMUP           = 20
 
 
 def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
