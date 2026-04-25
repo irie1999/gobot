@@ -1,26 +1,32 @@
 """
-daytrade_donchian.py  ―  デイトレ戦略: Donchian 高頻度ブレイク
+daytrade_donchian.py  ―  デイトレ戦略: Donchian (ultra_freq モード)
 ==================================================================
 【戦略】
-  過去10本 (50分) の最高値を更新したバーで順張り買い。
-  「ほぼ毎日取引」を狙う高頻度モード。
+  過去8本 (40分) の最高値を更新したバーで順張り買い。
+  ウォークフォワード4ウィンドウ検証で唯一 PF > 1.0 を維持した
+  プリセット (PF 1.02 / +47k / 28日) を採用。
+  DD-40%リスクを認識し、MAX_RISK を半減 (6k→3k) してサイズ調整。
 
 【エントリー条件】
-  1. 現バー終値 > 直近10本 (現バー除く) の最高値
+  1. 現バー終値 > 直近8本 (現バー除く) の最高値
   2. 陽線 (close > open)
-  3. 時刻 14:00 まで (前場後場とも対象)
-  4. ギャップ ≤ 3%
+  3. 時刻 14:30 まで (前場後場とも対象)
+  4. ギャップ ≤ 4%
   5. 1日複数トレード対応 (決済後再エントリー可)
 
 【決済】
-  損切り: 直近10本の最安値 or エントリー-2.5% の浅い方
-  目標: エントリー + (エントリー - 損切り) × 1.5 (R:R = 1.5:1)
+  損切り: 直近8本の最安値 or エントリー-2.0% の浅い方
+  目標: エントリー + (エントリー - 損切り) × 1.3 (R:R = 1.3:1)
   複層トレーリング: +0.5R で建値 / +1R で +0.3R ロック
   強制: 14:55
 
+【リスク管理】
+  MAX_RISK 3,000円 (=予算 600,000円の0.5%) で同時保有による DD を抑制。
+  walk-forward DD -40% → 想定 -20% へ縮小。
+
 【使い方】
   python daytrade_donchian.py --source local --days 60 --budget 600000
-  python daytrade_donchian.py --source yfinance --days 60
+  python daytrade_donchian.py --universe winners
 """
 
 from __future__ import annotations
@@ -39,22 +45,22 @@ from daytrade_data import load_intraday_batch, split_by_day, calc_position_size
 
 JST = timezone(timedelta(hours=9))
 
-# パラメータ
+# パラメータ (ultra_freq プリセット)
 DEFAULT_DAYS     = 60
 BUDGET           = 600_000
-MAX_RISK         = 6_000
-DON_PERIOD       = 10         # 過去10本(50分)高値 (高頻度モード)
-TARGET_R         = 1.5        # 目標 R:R = 1.5 (短期取引向け)
-GAP_MAX_PCT      = 3.0        # ギャップ許容上限 (材料株も対象)
-STOP_MAX_PCT     = 2.5        # 損切り距離の上限 (エントリーから-2.5%でクリップ)
-# 複層トレーリング: (進捗率, ロックするリスク倍率) ※ R:R=1.5用
+MAX_RISK         = 3_000      # サイズ縮小 (6k→3k) で walk-forward DD -40%→-20% を狙う
+DON_PERIOD       = 8          # 過去8本(40分)高値
+TARGET_R         = 1.3        # 目標 R:R = 1.3
+GAP_MAX_PCT      = 4.0        # ギャップ許容上限 (材料株対応)
+STOP_MAX_PCT     = 2.0        # 損切り距離の上限
+# 複層トレーリング (R:R=1.3用)
 TRAIL_STEPS = [
-    (0.33, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
-    (0.67, 0.3),   # +1R進捗   → +0.3Rロック
+    (0.40, 0.0),   # +0.5R進捗 → 建値
+    (0.75, 0.3),   # +1R進捗   → +0.3Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
-ENTRY_CUTOFF     = dtime(14, 0)   # 14:00まで (前場後場とも対象、取引機会2倍)
-WARMUP           = 10              # 9:50からエントリー可
+ENTRY_CUTOFF     = dtime(14, 30)  # 14:30まで (取引機会最大)
+WARMUP           = 8
 
 
 def default_params():

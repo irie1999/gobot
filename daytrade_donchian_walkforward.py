@@ -40,7 +40,7 @@ from daytrade_donchian_compare import PRESETS, _load_universe, extract_winners
 
 JST = timezone(timedelta(hours=9))
 BUDGET = 600_000
-MAX_RISK = 6_000
+MAX_RISK = 3_000   # 1取引あたり最大損失 (DD抑制のため 6k→3k に縮小)
 
 
 def _pf(v):
