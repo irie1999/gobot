@@ -77,6 +77,18 @@ PRESETS = {
         entry_cutoff=dtime(14, 30),
         warmup=8,
     ),
+    # high_freq の質 (DON=10, R:R=1.5, STOP 2.5%, 早期建値) +
+    # ultra_freq の取引機会 (entry_cutoff=14:30, gap=3.5%) を組合せた折衷案
+    "hybrid": dict(
+        don_period=10,
+        target_r=1.5,
+        gap_max_pct=3.5,
+        stop_max_pct=2.5,
+        trail_steps=[(0.33, 0.0), (0.67, 0.3)],
+        force_close=dtime(14, 55),
+        entry_cutoff=dtime(14, 30),
+        warmup=10,
+    ),
 }
 
 
