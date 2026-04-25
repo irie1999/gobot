@@ -86,7 +86,64 @@ def _load_universe(name):
     if name == "n225":
         from symbols_all import SYMBOLS
         return SYMBOLS
+    if name == "winners":
+        try:
+            from daytrade_donchian_winners import SYMBOLS
+            return SYMBOLS
+        except ImportError as e:
+            raise SystemExit(
+                "daytrade_donchian_winners.py が存在しません。\n"
+                "先に --extract-winners で生成してください:\n"
+                "  python daytrade_donchian_compare.py --universe n225 --extract-winners"
+            ) from e
     raise ValueError(f"unknown universe: {name}")
+
+
+def extract_winners(target_result, budget, min_pf, min_trades, min_pnl):
+    """指定プリセットの銘柄別結果から勝てている銘柄を抽出。"""
+    winners = []
+    for it in target_result["items"]:
+        if not it["trades"]:
+            continue
+        ist = calc_stats(it["trades"], budget)
+        if (ist["n"] >= min_trades and
+                ist["pf"] >= min_pf and
+                ist["total_pnl"] >= min_pnl):
+            winners.append((it["symbol"], it["name"], ist))
+    winners.sort(key=lambda x: -x[2]["total_pnl"])
+    return winners
+
+
+def write_winners_file(winners, target_preset, params, out_path):
+    """勝ち銘柄を Python リスト形式で書き出し。"""
+    lines = [
+        '"""',
+        f'Donchian 高頻度プリセット ({target_preset}) で勝てた銘柄リスト',
+        '',
+        '抽出条件: 各銘柄バックテスト結果から PF/取引数/損益で絞り込み',
+        '※ 過去の結果に基づくため、将来も同様にワークするとは限りません',
+        '   (overfitting/survivorship bias に注意)',
+        '"""',
+        '',
+        'import datetime',
+        '',
+        f'PRESET_NAME = {target_preset!r}',
+        f'PRESET_PARAMS = dict(',
+    ]
+    for k, v in params.items():
+        lines.append(f'    {k}={v!r},')
+    lines.append(')')
+    lines.append('')
+    lines.append('SYMBOLS = [')
+    for sym, name, ist in winners:
+        pf_str = "inf" if ist["pf"] == float("inf") else f'{ist["pf"]:.2f}'
+        lines.append(
+            f'    ({sym!r}, {name!r}),  '
+            f'# PF={pf_str} trades={ist["n"]} pnl={ist["total_pnl"]:+,.0f} '
+            f'win={ist["win_rate"]:.0f}%'
+        )
+    lines.append(']')
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _pf(v):
@@ -272,10 +329,23 @@ def main():
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
-    parser.add_argument("--universe", choices=["watch", "n225"], default="watch")
+    parser.add_argument("--universe", choices=["watch", "n225", "winners"], default="watch",
+                        help="watch / n225 / winners (要 --extract-winners で先に生成)")
     parser.add_argument("--presets", default="all",
                         help="カンマ区切りでプリセット指定 (例: high_freq,balanced) / "
                              "'all' で全プリセット (デフォルト)")
+    parser.add_argument("--extract-winners", action="store_true",
+                        help="ターゲットプリセットの結果から勝ち銘柄を抽出し "
+                             "daytrade_donchian_winners.py に保存")
+    parser.add_argument("--target-preset", default="ultra_freq",
+                        choices=list(PRESETS.keys()),
+                        help="勝ち銘柄抽出の対象プリセット (デフォルト: ultra_freq)")
+    parser.add_argument("--min-pf", type=float, default=1.5,
+                        help="勝ち銘柄の最低PF (デフォルト: 1.5)")
+    parser.add_argument("--min-trades", type=int, default=10,
+                        help="勝ち銘柄の最低取引数 (デフォルト: 10)")
+    parser.add_argument("--min-pnl", type=int, default=0,
+                        help="勝ち銘柄の最低損益 (デフォルト: 0)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -320,6 +390,41 @@ def main():
 
     print_param_table(preset_results)
     print_comparison(preset_results, total_days)
+
+    # 勝ち銘柄抽出
+    if args.extract_winners:
+        target_result = next((r for r in preset_results if r["name"] == args.target_preset), None)
+        if target_result is None:
+            print(f"\n[warn] target preset '{args.target_preset}' was not run; "
+                  f"勝ち銘柄抽出をスキップ", flush=True)
+        else:
+            winners = extract_winners(target_result, args.budget,
+                                      args.min_pf, args.min_trades, args.min_pnl)
+            print(f"\n{'='*78}")
+            print(f"  勝ち銘柄抽出 [{args.target_preset}] "
+                  f"PF≥{args.min_pf} & 取引≥{args.min_trades} & 損益≥{args.min_pnl:,}")
+            print("=" * 78)
+            print(f"{'銘柄':<22} {'コード':<8} {'取引':>4} {'勝率':>5} "
+                  f"{'PF':>7} {'損益':>10} {'DD':>6}")
+            print("-" * 78)
+            total_pnl = 0
+            for sym, name, ist in winners:
+                disp = name[:20] if len(name) <= 20 else name[:19] + "…"
+                pf_str = "∞" if ist["pf"] == float("inf") else f'{ist["pf"]:.2f}'
+                print(f"{disp:<22} {sym:<8} {ist['n']:>4} {ist['win_rate']:>4.0f}% "
+                      f"{pf_str:>7} {ist['total_pnl']:>+10,.0f} "
+                      f"{ist['max_dd']:>+5.1f}%")
+                total_pnl += ist["total_pnl"]
+            print("-" * 78)
+            print(f"  {len(winners)}銘柄抽出 / 合計損益: {total_pnl:+,.0f}円")
+            print("=" * 78)
+
+            out_winners = Path("daytrade_donchian_winners.py")
+            write_winners_file(winners, args.target_preset,
+                              PRESETS[args.target_preset], out_winners)
+            print(f"\n勝ち銘柄リスト: {out_winners.resolve()}")
+            print(f"使用例: python daytrade_donchian_compare.py "
+                  f"--universe winners --presets {args.target_preset}")
 
     # HTML
     stamp = datetime.now(JST).strftime('%Y%m%d')
