@@ -1,26 +1,26 @@
 """
-daytrade_donchian.py  ―  デイトレ戦略: Donchian 20本高値ブレイク
+daytrade_donchian.py  ―  デイトレ戦略: Donchian 高頻度ブレイク
 ==================================================================
 【戦略】
-  過去20本 (100分) の最高値を更新したバーで順張り買い。
-  トレンド継続を狙う古典的ブレイクアウト。
+  過去10本 (50分) の最高値を更新したバーで順張り買い。
+  「ほぼ毎日取引」を狙う高頻度モード。
 
 【エントリー条件】
-  1. 現バー終値 > 直近20本 (現バー除く) の最高値
+  1. 現バー終値 > 直近10本 (現バー除く) の最高値
   2. 陽線 (close > open)
-  3. 時刻 11:00 まで
-  4. 当日ポジションなし
-  5. ギャップ ≤ 2%
+  3. 時刻 14:00 まで (前場後場とも対象)
+  4. ギャップ ≤ 3%
+  5. 1日複数トレード対応 (決済後再エントリー可)
 
 【決済】
-  損切り: 直近20本の最安値
+  損切り: 直近10本の最安値 or エントリー-2.5% の浅い方
   目標: エントリー + (エントリー - 損切り) × 1.5 (R:R = 1.5:1)
-  トレーリング: 含み益50%で建値撤退
+  複層トレーリング: +0.5R で建値 / +1R で +0.3R ロック
   強制: 14:55
 
 【使い方】
-  python daytrade_donchian.py --source yfinance --days 60 --budget 600000
-  python daytrade_donchian.py --source local --days 730 --budget 600000
+  python daytrade_donchian.py --source local --days 60 --budget 600000
+  python daytrade_donchian.py --source yfinance --days 60
 """
 
 from __future__ import annotations
@@ -43,19 +43,18 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 6_000
-DON_PERIOD       = 20         # 過去何本の高値
-TARGET_R         = 2.0         # 目標 R:R = 2.0
-GAP_MAX_PCT      = 2.0
-STOP_MAX_PCT     = 2.5         # 損切り距離の上限 (エントリーから-2.5%でクリップ)
-# 複層トレーリング: (進捗率, ロックするリスク倍率)
+DON_PERIOD       = 10         # 過去10本(50分)高値 (高頻度モード)
+TARGET_R         = 1.5        # 目標 R:R = 1.5 (短期取引向け)
+GAP_MAX_PCT      = 3.0        # ギャップ許容上限 (材料株も対象)
+STOP_MAX_PCT     = 2.5        # 損切り距離の上限 (エントリーから-2.5%でクリップ)
+# 複層トレーリング: (進捗率, ロックするリスク倍率) ※ R:R=1.5用
 TRAIL_STEPS = [
-    (0.25, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
-    (0.50, 0.3),   # +1R進捗   → +0.3Rロック
-    (0.75, 0.7),   # +1.5R進捗 → +0.7Rロック
+    (0.33, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
+    (0.67, 0.3),   # +1R進捗   → +0.3Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
-ENTRY_CUTOFF     = dtime(11, 0)
-WARMUP           = 20
+ENTRY_CUTOFF     = dtime(14, 0)   # 14:00まで (前場後場とも対象、取引機会2倍)
+WARMUP           = 10              # 9:50からエントリー可
 
 
 def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
@@ -103,7 +102,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
             if t >= FORCE_CLOSE:
                 _finish_trade(cl, times[i], "引け強制")
                 break
-            stop_labels = ("損切り", "建値撤退", "+0.3Rロック", "+0.7Rロック")
+            stop_labels = ("損切り", "建値撤退", "+0.3Rロック")
             exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
             if lo <= stop_p and hi >= target_p:
                 _finish_trade(stop_p, times[i], exit_reason)
