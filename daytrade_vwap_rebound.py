@@ -24,8 +24,9 @@ BUDGET         = 600_000
 MAX_RISK       = 6_000
 TARGET_PCT     = 0.008          # 最低利確幅 (+0.8%)
 TARGET_RANGE_K = 0.5            # 当日値幅の50%を伸び余地として目標化
-STOP_BELOW_VWAP = 0.003
-VOL_MULT       = 1.2
+STOP_BELOW_VWAP = 0.005         # ストップ拡大 (VWAP-0.5%) でヒゲ刈り回避
+VOL_MULT       = 1.5            # 出来高 1.2→1.5倍 (強い突破のみ)
+TREND_PCT      = 0.002          # 当日陽線フィルタ: 始値+0.2%以上
 FORCE_CLOSE    = dtime(14, 55)
 ENTRY_CUTOFF   = dtime(13, 0)
 WARMUP         = 5
@@ -55,6 +56,7 @@ def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
 
     trades = []
     state = "idle"
+    entered_today = False           # 1日1回制限 (連敗防止)
     entry_p = stop_p = target_p = 0.0
     entry_dt = None
     qty = 0
@@ -101,12 +103,17 @@ def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
             i += 1
             continue
 
+        # 1日1回制限: 一度エントリーしたら同日再エントリーしない
+        if entered_today:
+            i += 1
+            continue
+
         prev_below = closes[i - 1] < vwap[i - 1]
         curr_above = cl > vwap[i]
         avg_vol = volumes[max(0, i - 5):i].mean() if i >= 1 else 1
         vol_ok = volumes[i] > avg_vol * VOL_MULT if avg_vol > 0 else False
-        # 当日トレンドフィルタ: 当日始値より上 (= 日中陽線) のみ採用
-        bullish_day = cl >= opens[0]
+        # 当日トレンドフィルタ: 始値+TREND_PCT以上 (薄陽日を除外)
+        bullish_day = cl >= opens[0] * (1 + TREND_PCT)
 
         if prev_below and curr_above and vol_ok and bullish_day:
             if i + 1 >= n:
@@ -125,6 +132,7 @@ def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
                 continue
             qty = calc_position_size(entry_p, stop_p, budget, max_risk)
             state = "in_pos"
+            entered_today = True
             i += 2
             continue
 

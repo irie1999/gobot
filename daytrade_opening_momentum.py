@@ -42,15 +42,15 @@ JST = timezone(timedelta(hours=9))
 BUDGET         = 600_000
 MAX_RISK       = 6_000
 PRE_BARS       = 5          # 9:00-9:25 の5本で勢い判定
-MOMENTUM_PCT   = 0.003      # 5本目終値が寄付+0.3%以上
-BULLISH_MIN    = 3          # 5本中3本以上が陽線
-PULLBACK_PCT   = 0.003      # 高値から-0.3%以上の押し目で待機
-STOP_BUFFER    = 0.001      # 押し目安値 ×(1 - 0.1%) をストップ
-TARGET_R       = 1.5        # R:R 1.5:1
+MOMENTUM_PCT   = 0.005      # 5本目終値が寄付+0.5%以上 (勢い銘柄に絞る)
+BULLISH_MIN    = 4          # 5本中4本以上が陽線 (強気度を厳格化)
+PULLBACK_PCT   = 0.005      # 高値から-0.5%以上の押し目で待機 (浅い押し目を除外)
+STOP_BUFFER    = 0.003      # 押し目安値 ×(1 - 0.3%) をストップ (ヒゲ刈り回避)
+TARGET_R       = 2.0        # R:R 2.0:1 (損益分岐に必要なW/L比を確保)
 # 2段階トレーリング: (進捗率, ロックするリスク倍率)
 TRAIL_STEPS = [
-    (0.375, 0.0),   # +0.5R進捗 → 建値撤退
-    (0.75,  0.4),   # +1R進捗   → +0.4Rロック
+    (0.375, 0.0),   # +0.75R進捗 → 建値撤退
+    (0.75,  0.5),   # +1.5R進捗  → +0.5Rロック
 ]
 ENTRY_CUTOFF   = dtime(11, 0)
 EXIT_CUTOFF    = dtime(11, 30)
@@ -84,7 +84,7 @@ def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
     trail_level = 0
     state = "wait_pullback"
     pivot_high = highs[:PRE_BARS].max()
-    stop_labels = ("損切り", "建値撤退", "+0.4Rロック")
+    stop_labels = ("損切り", "建値撤退", "+0.5Rロック")
 
     def _finish(exit_p, exit_dt, reason):
         pnl = (exit_p - entry_p) * qty
