@@ -1,8 +1,27 @@
 """
-daytrade_opening_momentum.py  ―  寄付モメンタム戦略
+daytrade_opening_momentum.py  ―  寄付モメンタム押し目戦略 (v2)
 ==================================================================
-寄付直後 (9:00-9:15) の値動き方向に順張り。
-毎銘柄・毎日必ず判定 → 圧倒的シグナル量。
+寄付5本 (9:00-9:25) で強い上昇を確認した銘柄を「強気監視」に登録し、
+その後の高値からの押し目→反発バーで押し目買いを入れる。
+v1 (寄付3本目買い) は寄付ジャンプの天井を掴みやすかったため再設計。
+
+【エントリー】
+  Step 1 (9:25時点で勢い判定):
+    - 5本目終値 > 寄付 × (1 + MOMENTUM_PCT)  (寄付+0.3%)
+    - 5本中 BULLISH_MIN 本以上が陽線         (3/5)
+    Step 1 が成立しない日はその日エントリーなし。
+
+  Step 2 (9:25〜11:00で押し目待ち):
+    - 9:00以降の最高値を pivot_high として追跡
+    - 現バー安値 ≤ pivot_high × (1 - PULLBACK_PCT)
+    - 現バーが陽線 (close > open)
+    → 翌バー寄付で買い
+
+【決済】
+  ストップ: 押し目バー安値 × (1 - STOP_BUFFER)
+  目標   : エントリー + (エントリー - ストップ) × TARGET_R
+  トレーリング: 2段階 (建値撤退 → +0.4Rロック)
+  強制決済: EXIT_CUTOFF (11:30)
 """
 
 from __future__ import annotations
@@ -20,100 +39,103 @@ from daytrade_data import load_intraday_batch, split_by_day, calc_position_size
 
 JST = timezone(timedelta(hours=9))
 
-BUDGET        = 600_000
-MAX_RISK      = 6_000
-MOMENTUM_PCT  = 0.003   # 寄付から +0.3% でモメンタム確認
-TARGET_PCT    = 0.008   # +0.8% 利確 (R:R 1.6:1)
-STOP_PCT      = 0.005   # -0.5% 損切り (ノイズ回避)
-VOL_MULT      = 1.5     # 出来高フィルタ: 初期バーの1.5倍
+BUDGET         = 600_000
+MAX_RISK       = 6_000
+PRE_BARS       = 5          # 9:00-9:25 の5本で勢い判定
+MOMENTUM_PCT   = 0.003      # 5本目終値が寄付+0.3%以上
+BULLISH_MIN    = 3          # 5本中3本以上が陽線
+PULLBACK_PCT   = 0.003      # 高値から-0.3%以上の押し目で待機
+STOP_BUFFER    = 0.001      # 押し目安値 ×(1 - 0.1%) をストップ
+TARGET_R       = 1.5        # R:R 1.5:1
 # 2段階トレーリング: (進捗率, ロックするリスク倍率)
 TRAIL_STEPS = [
-    (0.375, 0.0),   # +0.3R進捗 → 建値撤退
-    (0.75,  0.4),   # +0.6R進捗 → +0.4Rロック
+    (0.375, 0.0),   # +0.5R進捗 → 建値撤退
+    (0.75,  0.4),   # +1R進捗   → +0.4Rロック
 ]
-FORCE_CLOSE   = dtime(14, 55)
-EXIT_CUTOFF   = dtime(11, 30)  # 前場終了で退場
-CHECK_BAR     = 3
+ENTRY_CUTOFF   = dtime(11, 0)
+EXIT_CUTOFF    = dtime(11, 30)
+FORCE_CLOSE    = dtime(14, 55)
 
 
 def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
-    opens   = day_df["open"].to_numpy(dtype=float)
-    highs   = day_df["high"].to_numpy(dtype=float)
-    lows    = day_df["low"].to_numpy(dtype=float)
-    closes  = day_df["close"].to_numpy(dtype=float)
-    volumes = day_df["volume"].to_numpy(dtype=float)
-    times   = day_df.index
+    opens  = day_df["open"].to_numpy(dtype=float)
+    highs  = day_df["high"].to_numpy(dtype=float)
+    lows   = day_df["low"].to_numpy(dtype=float)
+    closes = day_df["close"].to_numpy(dtype=float)
+    times  = day_df.index
     n = len(day_df)
 
-    if n < CHECK_BAR + 2:
+    if n < PRE_BARS + 3:
         return []
 
+    # === Step 1: 9:25 (PRE_BARS本目) で勢い判定 ===
     open_price = opens[0]
-    check_close = closes[CHECK_BAR - 1]
-
-    if check_close <= open_price * (1 + MOMENTUM_PCT):
+    check_close = closes[PRE_BARS - 1]
+    if check_close < open_price * (1 + MOMENTUM_PCT):
+        return []
+    bullish_count = sum(1 for j in range(PRE_BARS) if closes[j] > opens[j])
+    if bullish_count < BULLISH_MIN:
         return []
 
-    bullish_count = sum(1 for j in range(CHECK_BAR) if closes[j] > opens[j])
-    if bullish_count < 2:
-        return []
-
-    # 出来高フィルタ: CHECK_BAR目の出来高が初期バー平均の1.5倍以上
-    avg_vol = volumes[:CHECK_BAR].mean()
-    if avg_vol <= 0 or volumes[CHECK_BAR - 1] < avg_vol * VOL_MULT:
-        return []
-
-    entry_bar = CHECK_BAR
-    if entry_bar >= n:
-        return []
-
-    entry_p = opens[entry_bar]
-    entry_dt = times[entry_bar]
-    target_p = entry_p * (1 + TARGET_PCT)
-    stop_p = entry_p * (1 - STOP_PCT)
-    orig_stop = stop_p
-
-    if entry_p <= stop_p:
-        return []
-
-    qty = calc_position_size(entry_p, stop_p, budget, max_risk)
+    # === Step 2: PRE_BARS以降、押し目→反発バーを待つ ===
+    entry_p = stop_p = target_p = orig_stop = 0.0
+    entry_dt = None
+    qty = 0
     trail_level = 0
+    state = "wait_pullback"
+    pivot_high = highs[:PRE_BARS].max()
     stop_labels = ("損切り", "建値撤退", "+0.4Rロック")
 
-    for i in range(entry_bar, n):
+    def _finish(exit_p, exit_dt, reason):
+        pnl = (exit_p - entry_p) * qty
+        pct = (exit_p - entry_p) / entry_p * 100
+        return dict(entry_dt=entry_dt, exit_dt=exit_dt,
+                    entry_p=entry_p, exit_p=exit_p,
+                    stop_p=stop_p, target_p=target_p,
+                    qty=qty, pnl=pnl, pct=pct,
+                    strategy="OpenMomentum", reason=reason)
+
+    i = PRE_BARS
+    while i < n:
         t = times[i].time()
-        hi, lo, cl = highs[i], lows[i], closes[i]
+        hi, lo, cl, op = highs[i], lows[i], closes[i], opens[i]
 
-        # 前場終了で退場
+        if state == "wait_pullback":
+            if t >= ENTRY_CUTOFF:
+                return []
+            # 高値更新
+            if hi > pivot_high:
+                pivot_high = hi
+            # 押し目+陽線で次バー寄付エントリー
+            pullback_trigger = pivot_high * (1 - PULLBACK_PCT)
+            if lo <= pullback_trigger and cl > op:
+                if i + 1 >= n:
+                    return []
+                entry_p = opens[i + 1]
+                entry_dt = times[i + 1]
+                stop_p = lo * (1 - STOP_BUFFER)
+                orig_stop = stop_p
+                if entry_p <= stop_p:
+                    i += 1
+                    continue
+                target_p = entry_p + (entry_p - stop_p) * TARGET_R
+                qty = calc_position_size(entry_p, stop_p, budget, max_risk)
+                state = "in_pos"
+                trail_level = 0
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # state == "in_pos"
         if t >= EXIT_CUTOFF:
-            pnl = (cl - entry_p) * qty
-            pct = (cl - entry_p) / entry_p * 100
-            return [dict(entry_dt=entry_dt, exit_dt=times[i],
-                        entry_p=entry_p, exit_p=cl,
-                        stop_p=stop_p, target_p=target_p,
-                        qty=qty, pnl=pnl, pct=pct,
-                        strategy="OpenMomentum", reason="前場終了")]
-
+            return [_finish(cl, times[i], "前場終了")]
         if lo <= stop_p:
-            pnl = (stop_p - entry_p) * qty
-            pct = (stop_p - entry_p) / entry_p * 100
             reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
-            return [dict(entry_dt=entry_dt, exit_dt=times[i],
-                        entry_p=entry_p, exit_p=stop_p,
-                        stop_p=stop_p, target_p=target_p,
-                        qty=qty, pnl=pnl, pct=pct,
-                        strategy="OpenMomentum", reason=reason)]
-
+            return [_finish(stop_p, times[i], reason)]
         if hi >= target_p:
-            pnl = (target_p - entry_p) * qty
-            pct = (target_p - entry_p) / entry_p * 100
-            return [dict(entry_dt=entry_dt, exit_dt=times[i],
-                        entry_p=entry_p, exit_p=target_p,
-                        stop_p=stop_p, target_p=target_p,
-                        qty=qty, pnl=pnl, pct=pct,
-                        strategy="OpenMomentum", reason="目標達成")]
-
-        # 2段階トレーリング: 進捗率に応じてストップを切り上げ
+            return [_finish(target_p, times[i], "目標達成")]
+        # 2段階トレーリング
         if target_p > entry_p:
             risk = entry_p - orig_stop
             progress = (hi - entry_p) / (target_p - entry_p)
@@ -123,15 +145,11 @@ def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
                     if new_stop > stop_p:
                         stop_p = new_stop
                         trail_level = idx + 1
+        i += 1
 
-    exit_p = closes[-1]
-    pnl = (exit_p - entry_p) * qty
-    pct = (exit_p - entry_p) / entry_p * 100
-    return [dict(entry_dt=entry_dt, exit_dt=times[-1],
-                entry_p=entry_p, exit_p=exit_p,
-                stop_p=stop_p, target_p=target_p,
-                qty=qty, pnl=pnl, pct=pct,
-                strategy="OpenMomentum", reason="引け強制")]
+    if state == "in_pos":
+        return [_finish(closes[-1], times[-1], "引け強制")]
+    return []
 
 
 def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
