@@ -24,20 +24,23 @@ BUDGET       = 600_000
 MAX_RISK     = 6_000
 GAP_MIN_PCT  = 1.0
 GAP_MAX_PCT  = 3.0
+VOL_MULT     = 1.2          # エントリーバー出来高 ≥ 直前5本平均×1.2
+STOP_MAX_PCT = 2.0          # 損切り距離の上限 (-2.0%でクリップ)
 FORCE_CLOSE  = dtime(14, 55)
 ENTRY_CUTOFF = dtime(11, 0)
 WARMUP       = 3
 
 
-def backtest_day(day_df, prev_close):
+def backtest_day(day_df, prev_close, budget=BUDGET, max_risk=MAX_RISK):
     if prev_close is None or prev_close <= 0:
         return []
 
-    opens  = day_df["open"].to_numpy(dtype=float)
-    highs  = day_df["high"].to_numpy(dtype=float)
-    lows   = day_df["low"].to_numpy(dtype=float)
-    closes = day_df["close"].to_numpy(dtype=float)
-    times  = day_df.index
+    opens   = day_df["open"].to_numpy(dtype=float)
+    highs   = day_df["high"].to_numpy(dtype=float)
+    lows    = day_df["low"].to_numpy(dtype=float)
+    closes  = day_df["close"].to_numpy(dtype=float)
+    volumes = day_df["volume"].to_numpy(dtype=float)
+    times   = day_df.index
     n = len(day_df)
 
     if n < WARMUP + 2:
@@ -95,18 +98,26 @@ def backtest_day(day_df, prev_close):
             i += 1
             continue
 
-        if cl > opens[0]:
+        # 反発確認: ①始値超え ②陽線バー ③出来高が直前5本平均×VOL_MULT以上
+        if cl > opens[0] and cl > opens[i]:
+            ref_start = max(0, i - 5)
+            avg_vol = volumes[ref_start:i].mean() if i > ref_start else 0
+            if avg_vol <= 0 or volumes[i] < avg_vol * VOL_MULT:
+                i += 1
+                continue
             if i + 1 >= n:
                 break
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
             day_low = lows[:i + 1].min()
-            stop_p = day_low * 0.999
+            # 損切り: 当日安値の0.999倍 or エントリー-STOP_MAX_PCT% の浅い方
+            stop_floor = entry_p * (1 - STOP_MAX_PCT / 100)
+            stop_p = max(day_low * 0.999, stop_floor)
             target_p = prev_close
             if entry_p >= target_p or entry_p <= stop_p:
                 i += 1
                 continue
-            qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+            qty = calc_position_size(entry_p, stop_p, budget, max_risk)
             state = "in_pos"
             i += 2
             continue
@@ -128,7 +139,7 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     prev_close = None
     for d in dates:
         if prev_close is not None:
-            day_trades = backtest_day(daily[d], prev_close)
+            day_trades = backtest_day(daily[d], prev_close, budget, max_risk)
             trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)

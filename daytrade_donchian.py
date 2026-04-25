@@ -46,6 +46,7 @@ MAX_RISK         = 6_000
 DON_PERIOD       = 20         # 過去何本の高値
 TARGET_R         = 2.0         # 目標 R:R = 2.0
 GAP_MAX_PCT      = 2.0
+STOP_MAX_PCT     = 2.5         # 損切り距離の上限 (エントリーから-2.5%でクリップ)
 # 複層トレーリング: (進捗率, ロックするリスク倍率)
 TRAIL_STEPS = [
     (0.25, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
@@ -57,7 +58,8 @@ ENTRY_CUTOFF     = dtime(11, 0)
 WARMUP           = 20
 
 
-def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
+def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
+                          budget=BUDGET, max_risk=MAX_RISK):
     """1日分のバックテスト。複数トレード対応 (決済後に再エントリー可)。"""
     opens  = day_df["open"].to_numpy(dtype=float)
     highs  = day_df["high"].to_numpy(dtype=float)
@@ -141,13 +143,16 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
                 break
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
-            stop_p = don_lo
-            orig_stop = don_lo
+            # 損切り: ドンチャン安値 or エントリー-STOP_MAX_PCT% の浅い方
+            #   → 安値が遠すぎる場合に株数が100に張り付くのを回避
+            stop_floor = entry_p * (1 - STOP_MAX_PCT / 100)
+            stop_p = max(don_lo, stop_floor)
+            orig_stop = stop_p
             if entry_p <= stop_p:
                 i += 1
                 continue
             target_p = entry_p + (entry_p - stop_p) * TARGET_R
-            qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+            qty = calc_position_size(entry_p, stop_p, budget, max_risk)
             state = "in_pos"
             trail_level = 0
             i += 2
@@ -169,7 +174,7 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     trades = []
     prev_close = None
     for d in dates:
-        day_trades = backtest_donchian_day(daily[d], prev_close)
+        day_trades = backtest_donchian_day(daily[d], prev_close, budget, max_risk)
         trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)

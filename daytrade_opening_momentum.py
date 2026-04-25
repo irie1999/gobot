@@ -26,12 +26,17 @@ MOMENTUM_PCT  = 0.003   # 寄付から +0.3% でモメンタム確認
 TARGET_PCT    = 0.008   # +0.8% 利確 (R:R 1.6:1)
 STOP_PCT      = 0.005   # -0.5% 損切り (ノイズ回避)
 VOL_MULT      = 1.5     # 出来高フィルタ: 初期バーの1.5倍
+# 2段階トレーリング: (進捗率, ロックするリスク倍率)
+TRAIL_STEPS = [
+    (0.375, 0.0),   # +0.3R進捗 → 建値撤退
+    (0.75,  0.4),   # +0.6R進捗 → +0.4Rロック
+]
 FORCE_CLOSE   = dtime(14, 55)
 EXIT_CUTOFF   = dtime(11, 30)  # 前場終了で退場
 CHECK_BAR     = 3
 
 
-def backtest_day(day_df, prev_close=None):
+def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
     opens   = day_df["open"].to_numpy(dtype=float)
     highs   = day_df["high"].to_numpy(dtype=float)
     lows    = day_df["low"].to_numpy(dtype=float)
@@ -66,12 +71,14 @@ def backtest_day(day_df, prev_close=None):
     entry_dt = times[entry_bar]
     target_p = entry_p * (1 + TARGET_PCT)
     stop_p = entry_p * (1 - STOP_PCT)
+    orig_stop = stop_p
 
     if entry_p <= stop_p:
         return []
 
-    qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
-    trailing_active = False
+    qty = calc_position_size(entry_p, stop_p, budget, max_risk)
+    trail_level = 0
+    stop_labels = ("損切り", "建値撤退", "+0.4Rロック")
 
     for i in range(entry_bar, n):
         t = times[i].time()
@@ -90,7 +97,7 @@ def backtest_day(day_df, prev_close=None):
         if lo <= stop_p:
             pnl = (stop_p - entry_p) * qty
             pct = (stop_p - entry_p) / entry_p * 100
-            reason = "建値撤退" if trailing_active else "損切り"
+            reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
             return [dict(entry_dt=entry_dt, exit_dt=times[i],
                         entry_p=entry_p, exit_p=stop_p,
                         stop_p=stop_p, target_p=target_p,
@@ -106,10 +113,16 @@ def backtest_day(day_df, prev_close=None):
                         qty=qty, pnl=pnl, pct=pct,
                         strategy="OpenMomentum", reason="目標達成")]
 
-        # トレーリング: +0.3%で建値ストップ
-        if not trailing_active and hi >= entry_p * (1 + 0.003):
-            stop_p = entry_p
-            trailing_active = True
+        # 2段階トレーリング: 進捗率に応じてストップを切り上げ
+        if target_p > entry_p:
+            risk = entry_p - orig_stop
+            progress = (hi - entry_p) / (target_p - entry_p)
+            for idx, (trigger, lock_r) in enumerate(TRAIL_STEPS):
+                if progress >= trigger and trail_level <= idx:
+                    new_stop = entry_p + risk * lock_r
+                    if new_stop > stop_p:
+                        stop_p = new_stop
+                        trail_level = idx + 1
 
     exit_p = closes[-1]
     pnl = (exit_p - entry_p) * qty
@@ -129,7 +142,7 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     trades = []
     prev_close = None
     for d in dates:
-        day_trades = backtest_day(daily[d], prev_close)
+        day_trades = backtest_day(daily[d], prev_close, budget, max_risk)
         trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)

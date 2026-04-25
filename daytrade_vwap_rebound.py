@@ -22,7 +22,8 @@ JST = timezone(timedelta(hours=9))
 
 BUDGET         = 600_000
 MAX_RISK       = 6_000
-TARGET_PCT     = 0.008
+TARGET_PCT     = 0.008          # 最低利確幅 (+0.8%)
+TARGET_RANGE_K = 0.5            # 当日値幅の50%を伸び余地として目標化
 STOP_BELOW_VWAP = 0.003
 VOL_MULT       = 1.2
 FORCE_CLOSE    = dtime(14, 55)
@@ -38,7 +39,7 @@ def _calc_vwap(highs, lows, closes, volumes):
     return cum_tpv / cum_vol
 
 
-def backtest_day(day_df, prev_close=None):
+def backtest_day(day_df, prev_close=None, budget=BUDGET, max_risk=MAX_RISK):
     opens   = day_df["open"].to_numpy(dtype=float)
     highs   = day_df["high"].to_numpy(dtype=float)
     lows    = day_df["low"].to_numpy(dtype=float)
@@ -104,18 +105,25 @@ def backtest_day(day_df, prev_close=None):
         curr_above = cl > vwap[i]
         avg_vol = volumes[max(0, i - 5):i].mean() if i >= 1 else 1
         vol_ok = volumes[i] > avg_vol * VOL_MULT if avg_vol > 0 else False
+        # 当日トレンドフィルタ: 当日始値より上 (= 日中陽線) のみ採用
+        bullish_day = cl >= opens[0]
 
-        if prev_below and curr_above and vol_ok:
+        if prev_below and curr_above and vol_ok and bullish_day:
             if i + 1 >= n:
                 break
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
             stop_p = vwap[i] * (1 - STOP_BELOW_VWAP)
-            target_p = entry_p * (1 + TARGET_PCT)
+            # 動的ターゲット: 当日値幅 × TARGET_RANGE_K を伸び余地に加算
+            #   値動き乏しい日は固定+0.8%、ボラ日は値幅に応じて拡大
+            day_range = highs[:i + 1].max() - lows[:i + 1].min()
+            dyn_target = entry_p + day_range * TARGET_RANGE_K
+            min_target = entry_p * (1 + TARGET_PCT)
+            target_p = max(min_target, dyn_target)
             if entry_p <= stop_p:
                 i += 1
                 continue
-            qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+            qty = calc_position_size(entry_p, stop_p, budget, max_risk)
             state = "in_pos"
             i += 2
             continue
@@ -136,7 +144,7 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     trades = []
     prev_close = None
     for d in dates:
-        day_trades = backtest_day(daily[d], prev_close)
+        day_trades = backtest_day(daily[d], prev_close, budget, max_risk)
         trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)
