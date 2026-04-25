@@ -156,6 +156,13 @@ def _t_str(t):
     return f"{t.hour:02d}:{t.minute:02d}"
 
 
+def _fmt_dt(dt):
+    """datetime → 'MM-DD HH:MM' 文字列。"""
+    if hasattr(dt, "strftime"):
+        return dt.strftime("%m-%d %H:%M")
+    return str(dt)[:16] if dt else "-"
+
+
 # ─────────────────────────────────────────────────────────────
 # 実行
 # ─────────────────────────────────────────────────────────────
@@ -293,6 +300,53 @@ def build_html(preset_results, total_days, days, budget, source, universe):
         <th>損益</th><th>平均利益</th><th>平均損失</th><th>DD</th></tr></thead>
         <tbody>{sym_rows}</tbody></table>"""
 
+    # 個別トレード明細 (各プリセット、時系列順)
+    trade_html = ""
+    for r in preset_results:
+        all_trades = []
+        for it in r["items"]:
+            for t in it["trades"]:
+                tt = dict(t)
+                tt["symbol"] = it["symbol"]
+                tt["name"] = it["name"]
+                all_trades.append(tt)
+        if not all_trades:
+            continue
+        all_trades.sort(key=lambda x: str(x.get("entry_dt", "")))
+
+        rows = ""
+        for t in all_trades:
+            pc = "profit" if t["pnl"] > 0 else "loss"
+            ed = _fmt_dt(t.get("entry_dt"))
+            xd = _fmt_dt(t.get("exit_dt"))
+            try:
+                delta = t["exit_dt"] - t["entry_dt"]
+                hold = f"{int(delta.total_seconds() // 60)}分"
+            except Exception:
+                hold = "-"
+            rows += f"""<tr>
+              <td class="sym">{t['name']}<br><small class="code">{t['symbol']}.T</small></td>
+              <td>{ed}</td><td>{xd}</td><td>{hold}</td>
+              <td>{t['entry_p']:,.1f}</td>
+              <td class="loss">{t['stop_p']:,.1f}</td>
+              <td class="profit">{t['target_p']:,.1f}</td>
+              <td>{t['exit_p']:,.1f}</td>
+              <td>{t['qty']:,}</td>
+              <td class="{pc}">{t['pnl']:+,.0f}</td>
+              <td class="{pc}">{t['pct']:+.2f}%</td>
+              <td>{t['reason']}</td></tr>"""
+
+        trade_html += f"""
+        <details>
+        <summary><h2 style="display:inline">{r['name']} 個別トレード明細
+            ({len(all_trades)}件 / 時系列順) ▼</h2></summary>
+        <table><thead><tr>
+        <th>銘柄</th><th>Entry</th><th>Exit</th><th>保有</th>
+        <th>買値</th><th>損切</th><th>目標</th><th>決済値</th>
+        <th>株数</th><th>損益</th><th>%</th><th>決済理由</th>
+        </tr></thead><tbody>{rows}</tbody></table>
+        </details>"""
+
     return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>Donchian プリセット比較 — {today}</title>
 <style>*{{box-sizing:border-box;margin:0;padding:0}}
@@ -321,6 +375,7 @@ td{{padding:5px 8px;border:1px solid #1e293b;text-align:right;white-space:nowrap
 <th>平均利益</th><th>平均損失</th></tr></thead>
 <tbody>{comp_rows}</tbody></table>
 {detail_html}
+{trade_html}
 </body></html>"""
 
 
