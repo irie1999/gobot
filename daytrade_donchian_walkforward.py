@@ -285,6 +285,82 @@ td{{padding:5px 8px;border:1px solid #1e293b;text-align:right;white-space:nowrap
 </body></html>"""
 
 
+def build_summary_html(all_results, days, budget, source, universe,
+                       train_days, test_days, min_pf, min_trades, min_pnl):
+    """全プリセット横断のサマリHTML。"""
+    today = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+
+    # サマリテーブル
+    rows = ""
+    for pname, params, windows, stats, _, total_test_days in all_results:
+        s = stats
+        cls = "profit" if s["total_pnl"] >= 0 else "loss"
+        if s["pf"] >= 1.5:
+            verdict = '<span class="profit">✓ 本番候補</span>'
+        elif s["pf"] >= 1.0:
+            verdict = '<span style="color:#f59e0b">△ マージン少</span>'
+        else:
+            verdict = '<span class="loss">✗ overfit</span>'
+        rows += f"""<tr>
+          <td class="sym">{pname}</td>
+          <td>{s['n']}</td><td>{s['win_rate']:.1f}%</td>
+          <td>{_pf(s['pf'])}</td>
+          <td class="{cls}">{s['total_pnl']:+,.0f}</td>
+          <td class="loss">{s['max_dd']:+.1f}%</td>
+          <td>{len(windows)} window / {total_test_days}日</td>
+          <td>{verdict}</td></tr>"""
+
+    # 各プリセットの window 詳細
+    detail = ""
+    for pname, params, windows, stats, _, total_test_days in all_results:
+        win_rows = ""
+        for idx, w in enumerate(windows, 1):
+            cls = "profit" if w["test_pnl"] >= 0 else "loss"
+            wr = f"{w['test_winrate']:.1f}%" if w["test_trades"] > 0 else "-"
+            win_rows += f"""<tr>
+              <td>{idx}</td>
+              <td>{w['train_start']}〜{w['train_end']}</td>
+              <td>{w['test_start']}〜{w['test_end']}</td>
+              <td>{w['n_winners']}→{w['n_winners_traded']}</td>
+              <td>{w['test_trades']}</td>
+              <td>{wr}</td>
+              <td class="{cls}">{w['test_pnl']:+,.0f}</td></tr>"""
+        detail += f"""
+        <h3>{pname}</h3>
+        <table><thead><tr><th>#</th><th>訓練期</th><th>検証期</th>
+        <th>勝銘柄→取引</th><th>取引</th><th>勝率</th>
+        <th>損益(検証期)</th></tr></thead>
+        <tbody>{win_rows}</tbody></table>"""
+
+    return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
+<title>Donchian ウォークフォワード 全プリセット — {today}</title>
+<style>*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:"Segoe UI","Hiragino Sans",sans-serif;background:#0f172a;color:#e2e8f0;padding:20px}}
+h1{{color:#10b981;margin-bottom:4px;font-size:1.5rem}}
+.sub{{color:#94a3b8;margin-bottom:20px;font-size:.85rem}}
+h2{{color:#10b981;margin:24px 0 10px;font-size:1.15rem;border-left:4px solid #10b981;padding-left:10px}}
+h3{{color:#a7f3d0;margin:16px 0 6px;font-size:.95rem}}
+table{{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:.85rem}}
+th{{background:#1e293b;color:#94a3b8;padding:6px 8px;text-align:center;border:1px solid #334155;white-space:nowrap}}
+td{{padding:5px 8px;border:1px solid #1e293b;text-align:right;white-space:nowrap}}
+.sym{{text-align:left;font-weight:600;min-width:140px}}
+.profit{{color:#4ade80}}.loss{{color:#f87171}}
+</style></head><body>
+<h1>Donchian ウォークフォワード - 全プリセット横断検証</h1>
+<p class="sub">生成:{today} / source:{source} / universe:{universe} /
+ 全期間:{days}日 / 訓練:{train_days}日 / 検証:{test_days}日 / 予算:{budget:,}円<br>
+ 抽出基準: PF≥{min_pf} & 取引≥{min_trades} & 損益≥{min_pnl:,}</p>
+
+<h2>プリセット横断サマリ</h2>
+<table><thead><tr><th>preset</th><th>取引</th><th>勝率</th><th>PF</th>
+<th>損益(検証期合計)</th><th>DD</th><th>window/日数</th><th>判定</th></tr></thead>
+<tbody>{rows}</tbody></table>
+
+<h2>プリセット別 ウィンドウ詳細</h2>
+{detail}
+</body></html>"""
+
+
 def main():
     parser = argparse.ArgumentParser(description="Donchian ウォークフォワード検証")
     parser.add_argument("--days", type=int, default=60)
@@ -292,7 +368,8 @@ def main():
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
     parser.add_argument("--universe", choices=["watch", "n225"], default="n225")
     parser.add_argument("--target-preset", default="ultra_freq",
-                        choices=list(PRESETS.keys()))
+                        choices=list(PRESETS.keys()) + ["all"],
+                        help="検証対象プリセット (all で全4プリセット一括実行)")
     parser.add_argument("--train-days", type=int, default=30,
                         help="訓練期間(日数, デフォルト: 30)")
     parser.add_argument("--test-days", type=int, default=15,
@@ -306,8 +383,9 @@ def main():
 
     targets = _load_universe(args.universe)
     symbols = [s for s, _ in targets]
+    preset_label = "all (4プリセット一括)" if args.target_preset == "all" else args.target_preset
     print(f"ウォークフォワード検証 [universe={args.universe} / "
-          f"preset={args.target_preset} / "
+          f"preset={preset_label} / "
           f"train={args.train_days}日 / test={args.test_days}日]: "
           f"{len(targets)}銘柄 / {args.days}日", flush=True)
 
@@ -328,32 +406,70 @@ def main():
             f"train({args.train_days}) + test({args.test_days})"
         )
 
-    params = PRESETS[args.target_preset]
     print(f"\n  抽出基準: PF≥{args.min_pf} / 取引≥{args.min_trades} / 損益≥{args.min_pnl:,}\n",
           flush=True)
 
-    windows, overall_stats, all_test_trades = run_walkforward(
-        fetched, name_map, params, all_dates,
-        args.train_days, args.test_days,
-        args.budget, MAX_RISK,
-        args.min_pf, args.min_trades, args.min_pnl,
-    )
+    preset_names = list(PRESETS.keys()) if args.target_preset == "all" else [args.target_preset]
 
-    total_test_days = sum(args.test_days for _ in windows)
-    print_walkforward(windows, overall_stats, total_test_days, params, args.target_preset)
+    all_results = []  # list of (preset_name, params, windows, stats, trades)
+    for pname in preset_names:
+        params = PRESETS[pname]
+        print(f"\n=== プリセット [{pname}] 検証中 ===", flush=True)
+        windows, overall_stats, test_trades = run_walkforward(
+            fetched, name_map, params, all_dates,
+            args.train_days, args.test_days,
+            args.budget, MAX_RISK,
+            args.min_pf, args.min_trades, args.min_pnl,
+        )
+        total_test_days = sum(args.test_days for _ in windows)
+        print_walkforward(windows, overall_stats, total_test_days, params, pname)
+        all_results.append((pname, params, windows, overall_stats, test_trades, total_test_days))
 
-    # HTML出力
+    # 全プリセット集計 (all モード時)
+    if len(all_results) > 1:
+        print(f"\n{'='*100}")
+        print(f"  ウォークフォワード プリセット横断比較")
+        print("=" * 100)
+        print(f"{'preset':<14} {'取引':>5} {'勝率':>6} {'PF':>7} "
+              f"{'損益':>11} {'DD':>7} {'判定':>10}")
+        print("-" * 100)
+        for pname, _, _, stats, _, _ in all_results:
+            verdict = "✓本番候補" if stats["pf"] >= 1.5 \
+                      else "△マージン少" if stats["pf"] >= 1.0 \
+                      else "✗ overfit"
+            print(f"{pname:<14} {stats['n']:>5} {stats['win_rate']:>5.1f}% "
+                  f"{_pf(stats['pf']):>7} {stats['total_pnl']:>+11,.0f} "
+                  f"{stats['max_dd']:>+6.1f}% {verdict:>10}")
+        print("=" * 100)
+
+    # HTML出力 (プリセットごとに1ファイル)
     stamp = datetime.now(JST).strftime('%Y%m%d_%H%M')
-    out = Path(f"daytrade_donchian_walkforward_{args.universe}_{args.target_preset}_{stamp}.html")
-    out.write_text(build_html(
-        windows, overall_stats, total_test_days, args.target_preset,
-        params, args.days, args.budget, args.source, args.universe,
-        args.train_days, args.test_days,
-        args.min_pf, args.min_trades, args.min_pnl,
-    ), encoding="utf-8")
-    print(f"\nHTML: {out.resolve()}")
-    if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+    out_paths = []
+    for pname, params, windows, overall_stats, _, total_test_days in all_results:
+        out = Path(f"daytrade_donchian_walkforward_{args.universe}_{pname}_{stamp}.html")
+        out.write_text(build_html(
+            windows, overall_stats, total_test_days, pname,
+            params, args.days, args.budget, args.source, args.universe,
+            args.train_days, args.test_days,
+            args.min_pf, args.min_trades, args.min_pnl,
+        ), encoding="utf-8")
+        out_paths.append(out)
+        print(f"\nHTML [{pname}]: {out.resolve()}")
+
+    # all モード: 横断比較用のサマリHTMLも作成
+    if len(all_results) > 1:
+        out_summary = Path(f"daytrade_donchian_walkforward_{args.universe}_all_{stamp}.html")
+        out_summary.write_text(build_summary_html(
+            all_results, args.days, args.budget, args.source, args.universe,
+            args.train_days, args.test_days,
+            args.min_pf, args.min_trades, args.min_pnl,
+        ), encoding="utf-8")
+        print(f"\nHTML [all_summary]: {out_summary.resolve()}")
+        if not args.no_browser:
+            webbrowser.open(out_summary.resolve().as_uri())
+    else:
+        if not args.no_browser and out_paths:
+            webbrowser.open(out_paths[0].resolve().as_uri())
 
 
 if __name__ == "__main__":
