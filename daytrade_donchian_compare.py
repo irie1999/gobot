@@ -217,7 +217,8 @@ def print_comparison(preset_results, total_days):
         best_pf = max(preset_results, key=lambda x: x["stats"]["pf"]
                       if x["stats"]["pf"] < 100 else 0)
         most_freq = max(preset_results, key=lambda x: x["trade_days"])
-        print(f"\n  最高利益: {best_pnl['name']} ({best_pnl['stats']['total_pnl']:+,.0f}円)")
+        pnl_label = "最高利益" if best_pnl["stats"]["total_pnl"] >= 0 else "最少損失"
+        print(f"\n  {pnl_label}: {best_pnl['name']} ({best_pnl['stats']['total_pnl']:+,.0f}円)")
         print(f"  最高PF:   {best_pf['name']} (PF {_pf(best_pf['stats']['pf'])})")
         print(f"  最高頻度: {most_freq['name']} ({most_freq['trade_days']}/{total_days}日)")
 
@@ -261,10 +262,11 @@ def build_html(preset_results, total_days, days, budget, source, universe):
           <td class="profit">{s['avg_win']:+,.0f}</td>
           <td class="loss">{s['avg_loss']:+,.0f}</td></tr>"""
 
-    # 銘柄別 (最高利益プリセットのみ)
+    # 銘柄別 (損益最良プリセットのみ)
     detail_html = ""
     if preset_results:
         best = max(preset_results, key=lambda x: x["stats"]["total_pnl"])
+        best_label = "最高利益" if best["stats"]["total_pnl"] >= 0 else "最少損失"
         rows = []
         for it in best["items"]:
             if not it["trades"]:
@@ -284,7 +286,7 @@ def build_html(preset_results, total_days, days, budget, source, universe):
               <td class="loss">{ist['avg_loss']:+,.0f}</td>
               <td class="loss">{ist['max_dd']:+.1f}%</td></tr>"""
         detail_html = f"""
-        <h2>銘柄別 (最高利益プリセット: {best['name']}) — TOP30</h2>
+        <h2>銘柄別 ({best_label}プリセット: {best['name']}) — TOP30</h2>
         <table><thead><tr><th>銘柄</th><th>取引</th><th>勝率</th><th>PF</th>
         <th>損益</th><th>平均利益</th><th>平均損失</th><th>DD</th></tr></thead>
         <tbody>{sym_rows}</tbody></table>"""
