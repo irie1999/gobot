@@ -7,6 +7,8 @@ Donchian / GapReversal / VWAP / OpenMomentum を同一データ・同一期間�
 【使い方】
   python daytrade_compare.py
   python daytrade_compare.py --days 60 --source local
+  python daytrade_compare.py --universe n225        # 日経225全銘柄
+  python daytrade_compare.py --universe watch       # daytrade_symbols.py の20銘柄
 """
 
 from __future__ import annotations
@@ -18,6 +20,15 @@ from pathlib import Path
 
 from daytrade_symbols import DAYTRADE_SYMBOLS
 from daytrade_data import load_intraday_batch
+
+
+def _load_universe(name):
+    if name == "watch":
+        return DAYTRADE_SYMBOLS
+    if name == "n225":
+        from symbols_all import SYMBOLS
+        return SYMBOLS
+    raise ValueError(f"unknown universe: {name}")
 
 from daytrade_donchian import backtest_symbol as don_bt, calc_stats as don_stats
 from daytrade_gap_reversal import backtest_symbol as gr_bt, calc_stats as gr_stats
@@ -194,12 +205,15 @@ def main():
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
+    parser.add_argument("--universe", choices=["watch", "n225"], default="watch",
+                        help="銘柄ユニバース: watch=DAYTRADE_SYMBOLS(20), n225=日経225全銘柄")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    targets = DAYTRADE_SYMBOLS
+    targets = _load_universe(args.universe)
     symbols = [s for s, _ in targets]
-    print(f"4戦略比較: {len(targets)}銘柄 / {args.days}日 / 予算{args.budget:,}円",
+    print(f"4戦略比較 [universe={args.universe}]: "
+          f"{len(targets)}銘柄 / {args.days}日 / 予算{args.budget:,}円",
           flush=True)
 
     fetched = load_intraday_batch(symbols, args.days, source=args.source)
@@ -233,7 +247,8 @@ def main():
     print_comparison(results, total_days)
 
     # HTML出力
-    out = Path(f"daytrade_compare_{datetime.now(JST).strftime('%Y%m%d')}.html")
+    stamp = datetime.now(JST).strftime('%Y%m%d')
+    out = Path(f"daytrade_compare_{args.universe}_{stamp}.html")
     out.write_text(build_html(results, total_days, args.days, args.budget, args.source),
                    encoding="utf-8")
     print(f"\nHTML: {out.resolve()}")
