@@ -57,9 +57,40 @@ ENTRY_CUTOFF     = dtime(14, 0)   # 14:00まで (前場後場とも対象、取�
 WARMUP           = 10              # 9:50からエントリー可
 
 
+def default_params():
+    """現状のモジュール定数をparamsディクショナリで返す (高頻度モード設定)。"""
+    return dict(
+        don_period=DON_PERIOD,
+        target_r=TARGET_R,
+        gap_max_pct=GAP_MAX_PCT,
+        stop_max_pct=STOP_MAX_PCT,
+        trail_steps=TRAIL_STEPS,
+        force_close=FORCE_CLOSE,
+        entry_cutoff=ENTRY_CUTOFF,
+        warmup=WARMUP,
+    )
+
+
 def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
-                          budget=BUDGET, max_risk=MAX_RISK):
-    """1日分のバックテスト。複数トレード対応 (決済後に再エントリー可)。"""
+                          budget=BUDGET, max_risk=MAX_RISK,
+                          params=None):
+    """1日分のバックテスト。複数トレード対応 (決済後に再エントリー可)。
+
+    params: dict 型のパラメータ上書き。Noneなら default_params() を使用。
+    """
+    if params is None:
+        p = default_params()
+    else:
+        p = {**default_params(), **params}
+    DON_P    = p["don_period"]
+    TGT_R    = p["target_r"]
+    GAP_MAX  = p["gap_max_pct"]
+    STOP_MAX = p["stop_max_pct"]
+    TRAILS   = p["trail_steps"]
+    FCLOSE   = p["force_close"]
+    ECUT     = p["entry_cutoff"]
+    WUP      = p["warmup"]
+
     opens  = day_df["open"].to_numpy(dtype=float)
     highs  = day_df["high"].to_numpy(dtype=float)
     lows   = day_df["low"].to_numpy(dtype=float)
@@ -67,12 +98,12 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
     times  = day_df.index
     n = len(day_df)
 
-    if n < WARMUP + 2:
+    if n < WUP + 2:
         return []
 
     open_p = opens[0]
     if prev_close and prev_close > 0:
-        if abs(open_p - prev_close) / prev_close * 100 > GAP_MAX_PCT:
+        if abs(open_p - prev_close) / prev_close * 100 > GAP_MAX:
             return []
 
     trades = []
@@ -93,13 +124,13 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
             strategy="Donchian", reason=reason,
         ))
 
-    i = WARMUP
+    i = WUP
     while i < n:
         t = times[i].time()
         hi, lo, cl, op = highs[i], lows[i], closes[i], opens[i]
 
         if state == "in_pos":
-            if t >= FORCE_CLOSE:
+            if t >= FCLOSE:
                 _finish_trade(cl, times[i], "引け強制")
                 break
             stop_labels = ("損切り", "建値撤退", "+0.3Rロック")
@@ -122,7 +153,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
             if target_p > entry_p:
                 risk = entry_p - orig_stop
                 progress = (hi - entry_p) / (target_p - entry_p)
-                for idx, (trigger, lock_r) in enumerate(TRAIL_STEPS):
+                for idx, (trigger, lock_r) in enumerate(TRAILS):
                     if progress >= trigger and trail_level <= idx:
                         new_stop = entry_p + risk * lock_r
                         if new_stop > stop_p:
@@ -131,26 +162,26 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
             i += 1
             continue
 
-        if t >= ENTRY_CUTOFF:
+        if t >= ECUT:
             i += 1
             continue
 
-        don_hi = highs[max(0, i - DON_PERIOD):i].max()
-        don_lo = lows[max(0, i - DON_PERIOD):i].min()
+        don_hi = highs[max(0, i - DON_P):i].max()
+        don_lo = lows[max(0, i - DON_P):i].min()
         if cl > don_hi and cl > op:
             if i + 1 >= n:
                 break
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
-            # 損切り: ドンチャン安値 or エントリー-STOP_MAX_PCT% の浅い方
+            # 損切り: ドンチャン安値 or エントリー-STOP_MAX% の浅い方
             #   → 安値が遠すぎる場合に株数が100に張り付くのを回避
-            stop_floor = entry_p * (1 - STOP_MAX_PCT / 100)
+            stop_floor = entry_p * (1 - STOP_MAX / 100)
             stop_p = max(don_lo, stop_floor)
             orig_stop = stop_p
             if entry_p <= stop_p:
                 i += 1
                 continue
-            target_p = entry_p + (entry_p - stop_p) * TARGET_R
+            target_p = entry_p + (entry_p - stop_p) * TGT_R
             qty = calc_position_size(entry_p, stop_p, budget, max_risk)
             state = "in_pos"
             trail_level = 0
@@ -165,7 +196,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
     return trades
 
 
-def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
+def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK, params=None):
     daily = split_by_day(df)
     dates = sorted(daily.keys())
     if len(dates) < 2:
@@ -173,7 +204,7 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     trades = []
     prev_close = None
     for d in dates:
-        day_trades = backtest_donchian_day(daily[d], prev_close, budget, max_risk)
+        day_trades = backtest_donchian_day(daily[d], prev_close, budget, max_risk, params)
         trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)
