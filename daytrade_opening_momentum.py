@@ -22,11 +22,12 @@ JST = timezone(timedelta(hours=9))
 
 BUDGET        = 600_000
 MAX_RISK      = 6_000
-MOMENTUM_PCT  = 0.003
-TARGET_PCT    = 0.005
-STOP_PCT      = 0.003
-MAX_HOLD_BARS = 6
+MOMENTUM_PCT  = 0.003   # 寄付から +0.3% でモメンタム確認
+TARGET_PCT    = 0.008   # +0.8% 利確 (R:R 1.6:1)
+STOP_PCT      = 0.005   # -0.5% 損切り (ノイズ回避)
+VOL_MULT      = 1.5     # 出来高フィルタ: 初期バーの1.5倍
 FORCE_CLOSE   = dtime(14, 55)
+EXIT_CUTOFF   = dtime(11, 30)  # 前場終了で退場
 CHECK_BAR     = 3
 
 
@@ -35,6 +36,7 @@ def backtest_day(day_df, prev_close=None):
     highs   = day_df["high"].to_numpy(dtype=float)
     lows    = day_df["low"].to_numpy(dtype=float)
     closes  = day_df["close"].to_numpy(dtype=float)
+    volumes = day_df["volume"].to_numpy(dtype=float)
     times   = day_df.index
     n = len(day_df)
 
@@ -51,6 +53,11 @@ def backtest_day(day_df, prev_close=None):
     if bullish_count < 2:
         return []
 
+    # 出来高フィルタ: CHECK_BAR目の出来高が初期バー平均の1.5倍以上
+    avg_vol = volumes[:CHECK_BAR].mean()
+    if avg_vol <= 0 or volumes[CHECK_BAR - 1] < avg_vol * VOL_MULT:
+        return []
+
     entry_bar = CHECK_BAR
     if entry_bar >= n:
         return []
@@ -58,32 +65,32 @@ def backtest_day(day_df, prev_close=None):
     entry_p = opens[entry_bar]
     entry_dt = times[entry_bar]
     target_p = entry_p * (1 + TARGET_PCT)
-    stop_open = open_price
-    stop_pct = entry_p * (1 - STOP_PCT)
-    stop_p = max(stop_open, stop_pct)
+    stop_p = entry_p * (1 - STOP_PCT)
 
     if entry_p <= stop_p:
         return []
 
     qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+    trailing_active = False
 
-    for i in range(entry_bar, min(entry_bar + MAX_HOLD_BARS, n)):
+    for i in range(entry_bar, n):
         t = times[i].time()
         hi, lo, cl = highs[i], lows[i], closes[i]
 
-        if t >= FORCE_CLOSE:
+        # 前場終了で退場
+        if t >= EXIT_CUTOFF:
             pnl = (cl - entry_p) * qty
             pct = (cl - entry_p) / entry_p * 100
             return [dict(entry_dt=entry_dt, exit_dt=times[i],
                         entry_p=entry_p, exit_p=cl,
                         stop_p=stop_p, target_p=target_p,
                         qty=qty, pnl=pnl, pct=pct,
-                        strategy="OpenMomentum", reason="引け強制")]
+                        strategy="OpenMomentum", reason="前場終了")]
 
         if lo <= stop_p:
             pnl = (stop_p - entry_p) * qty
             pct = (stop_p - entry_p) / entry_p * 100
-            reason = "損切り" if stop_p < entry_p else "始値割れ"
+            reason = "建値撤退" if trailing_active else "損切り"
             return [dict(entry_dt=entry_dt, exit_dt=times[i],
                         entry_p=entry_p, exit_p=stop_p,
                         stop_p=stop_p, target_p=target_p,
@@ -99,15 +106,19 @@ def backtest_day(day_df, prev_close=None):
                         qty=qty, pnl=pnl, pct=pct,
                         strategy="OpenMomentum", reason="目標達成")]
 
-    exit_bar = min(entry_bar + MAX_HOLD_BARS - 1, n - 1)
-    exit_p = closes[exit_bar]
+        # トレーリング: +0.3%で建値ストップ
+        if not trailing_active and hi >= entry_p * (1 + 0.003):
+            stop_p = entry_p
+            trailing_active = True
+
+    exit_p = closes[-1]
     pnl = (exit_p - entry_p) * qty
     pct = (exit_p - entry_p) / entry_p * 100
-    return [dict(entry_dt=entry_dt, exit_dt=times[exit_bar],
+    return [dict(entry_dt=entry_dt, exit_dt=times[-1],
                 entry_p=entry_p, exit_p=exit_p,
                 stop_p=stop_p, target_p=target_p,
                 qty=qty, pnl=pnl, pct=pct,
-                strategy="OpenMomentum", reason="時間切れ")]
+                strategy="OpenMomentum", reason="引け強制")]
 
 
 def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
