@@ -43,22 +43,22 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 6_000
-DON_PERIOD       = 20         # 過去何本の高値
+DON_PERIOD       = 15         # 過去何本の高値 (15本=75分、シグナル増)
 TARGET_R         = 2.0         # 目標 R:R = 2.0 (伸ばせる時は伸ばす)
 GAP_MAX_PCT      = 2.0
 # 複層トレーリング: (進捗率, ロックするリスク倍率)
-# 早期から含み益を保護し、引け強制時も +0.3R以上をロック
 TRAIL_STEPS = [
     (0.25, 0.0),   # +0.5R進捗 → 建値 (損失ゼロ)
     (0.50, 0.3),   # +1R進捗   → +0.3Rロック
     (0.75, 0.7),   # +1.5R進捗 → +0.7Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
-ENTRY_CUTOFF     = dtime(11, 0)
-WARMUP           = 20
+ENTRY_CUTOFF     = dtime(13, 0)   # 後場13:00まで (取引機会増)
+WARMUP           = 15
 
 
 def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
+    """1日分のバックテスト。複数トレード対応 (決済後に再エントリー可)。"""
     opens  = day_df["open"].to_numpy(dtype=float)
     highs  = day_df["high"].to_numpy(dtype=float)
     lows   = day_df["low"].to_numpy(dtype=float)
@@ -67,20 +67,30 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
     n = len(day_df)
 
     if n < WARMUP + 2:
-        return None
+        return []
 
     open_p = opens[0]
     if prev_close and prev_close > 0:
         if abs(open_p - prev_close) / prev_close * 100 > GAP_MAX_PCT:
-            return None
+            return []
 
+    trades = []
     state = "idle"
     entry_p = stop_p = target_p = orig_stop = 0.0
-    entry_dt = exit_dt = None
-    exit_p = None
-    reason = None
+    entry_dt = None
     qty = 0
-    trail_level = 0   # 0=初期stop, 1=建値, 2=+0.5Rロック
+    trail_level = 0
+
+    def _finish_trade(exit_p, exit_dt, reason):
+        pnl = (exit_p - entry_p) * qty
+        pct = (exit_p - entry_p) / entry_p * 100
+        trades.append(dict(
+            entry_dt=entry_dt, exit_dt=exit_dt,
+            entry_p=entry_p, exit_p=exit_p,
+            stop_p=stop_p, target_p=target_p,
+            qty=qty, pnl=pnl, pct=pct,
+            strategy="Donchian", reason=reason,
+        ))
 
     i = WARMUP
     while i < n:
@@ -89,22 +99,25 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
 
         if state == "in_pos":
             if t >= FORCE_CLOSE:
-                exit_p, exit_dt, reason = cl, times[i], "引け強制"
+                _finish_trade(cl, times[i], "引け強制")
                 break
-            # 1. 決済チェック (現在のstopで判定、保守的)
             stop_labels = ("損切り", "建値撤退", "+0.3Rロック", "+0.7Rロック")
             exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
             if lo <= stop_p and hi >= target_p:
-                # 同バーで両方ヒット → stop優先 (保守的)
-                exit_p, exit_dt, reason = stop_p, times[i], exit_reason
-                break
+                _finish_trade(stop_p, times[i], exit_reason)
+                state = "idle"
+                i += 1
+                continue
             if hi >= target_p:
-                exit_p, exit_dt, reason = target_p, times[i], "目標達成"
-                break
+                _finish_trade(target_p, times[i], "目標達成")
+                state = "idle"
+                i += 1
+                continue
             if lo <= stop_p:
-                exit_p, exit_dt, reason = stop_p, times[i], exit_reason
-                break
-            # 2. 複層トレーリング更新 (このバーの高値ベースで次バー以降に適用)
+                _finish_trade(stop_p, times[i], exit_reason)
+                state = "idle"
+                i += 1
+                continue
             if target_p > entry_p:
                 risk = entry_p - orig_stop
                 progress = (hi - entry_p) / (target_p - entry_p)
@@ -118,11 +131,11 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
             continue
 
         if t >= ENTRY_CUTOFF:
-            break
+            i += 1
+            continue
 
-        # Donchian条件: 過去20本の最高値を更新 + 陽線
-        don_hi = highs[i - DON_PERIOD:i].max()
-        don_lo = lows[i - DON_PERIOD:i].min()
+        don_hi = highs[max(0, i - DON_PERIOD):i].max()
+        don_lo = lows[max(0, i - DON_PERIOD):i].min()
         if cl > don_hi and cl > op:
             if i + 1 >= n:
                 break
@@ -142,21 +155,10 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
 
         i += 1
 
-    if state == "in_pos" and exit_p is None:
-        exit_p, exit_dt, reason = closes[-1], times[-1], "引け強制"
+    if state == "in_pos":
+        _finish_trade(closes[-1], times[-1], "引け強制")
 
-    if exit_p is None or entry_dt is None:
-        return None
-
-    pnl = (exit_p - entry_p) * qty
-    pct = (exit_p - entry_p) / entry_p * 100
-    return dict(
-        entry_dt=entry_dt, exit_dt=exit_dt,
-        entry_p=entry_p, exit_p=exit_p,
-        stop_p=stop_p, target_p=target_p,
-        qty=qty, pnl=pnl, pct=pct,
-        strategy="Donchian", reason=reason,
-    )
+    return trades
 
 
 def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
@@ -167,9 +169,8 @@ def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     trades = []
     prev_close = None
     for d in dates:
-        t = backtest_donchian_day(daily[d], prev_close)
-        if t:
-            trades.append(t)
+        day_trades = backtest_donchian_day(daily[d], prev_close)
+        trades.extend(day_trades)
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)
 
