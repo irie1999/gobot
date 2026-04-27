@@ -117,6 +117,17 @@ def _load_universe(name):
     if name == "n225":
         from symbols_all import SYMBOLS
         return SYMBOLS
+    if name == "prime":
+        # 東証プライム全銘柄 (約1800)
+        try:
+            from symbols_listed_all import SYMBOLS
+            return SYMBOLS
+        except ImportError as e:
+            raise SystemExit(
+                "symbols_listed_all.py が存在しません。\n"
+                "先に銘柄リストをダウンロードしてください:\n"
+                "  python download_tse_symbols.py --market prime"
+            ) from e
     if name == "winners":
         try:
             from daytrade_donchian_winners import SYMBOLS
@@ -488,8 +499,11 @@ def main():
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
-    parser.add_argument("--universe", choices=["watch", "n225", "winners"], default="watch",
-                        help="watch / n225 / winners (要 --extract-winners で先に生成)")
+    parser.add_argument("--universe", choices=["watch", "n225", "prime", "winners"],
+                        default="watch",
+                        help="watch=DAYTRADE_SYMBOLS(20) / n225=日経225 / "
+                             "prime=東証プライム全銘柄(約1800、要symbols_listed_all.py) / "
+                             "winners=要 --extract-winners")
     parser.add_argument("--presets", default="all",
                         help="カンマ区切りでプリセット指定 (例: high_freq,balanced) / "
                              "'all' で全プリセット (デフォルト)")
