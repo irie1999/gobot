@@ -79,6 +79,20 @@ PRESETS = {
         entry_cutoff=dtime(14, 30),
         warmup=8,
     ),
+    # ultra_freq_v2: avg勝が小さい問題を改善
+    #   TARGET_R 1.3→2.0 で利幅拡大
+    #   trail_steps [(0.50, 0.2), (0.80, 0.5)] で早期建値撤退を抑制
+    #   → 反転時も最低+200〜500ロック、目標到達で+2.0R確保
+    "ultra_freq_v2": dict(
+        don_period=8,
+        target_r=2.0,
+        gap_max_pct=4.0,
+        stop_max_pct=2.0,
+        trail_steps=[(0.50, 0.2), (0.80, 0.5)],
+        force_close=dtime(14, 55),
+        entry_cutoff=dtime(14, 30),
+        warmup=8,
+    ),
 }
 
 
