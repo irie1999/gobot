@@ -126,15 +126,25 @@ def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
     """1分足 → 5分足。既に5分足なら不要。"""
     if df.empty:
         return df
+    # NaT (Not a Time) を除外 (J-Quants データに混入することあり)
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = df[df.index.notna()]
+    if df.empty or len(df) < 2:
+        return df
     # 平均バー間隔を推定
-    if len(df) >= 2:
+    try:
         avg_gap = (df.index[-1] - df.index[0]).total_seconds() / (len(df) - 1)
         if avg_gap >= 250:  # 既に ~5分足
             return df
-    return df.resample("5min", label="left", closed="left").agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna(subset=["close"])
+    except Exception:
+        return df
+    try:
+        return df.resample("5min", label="left", closed="left").agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna(subset=["close"])
+    except Exception:
+        return df
 
 
 # ─────────────────────────────────────────────────────────────
@@ -142,7 +152,9 @@ def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 
 def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
-    """ローカル pickle から読み込み → 正規化 → 期間フィルタ。"""
+    """ローカル pickle から読み込み → 正規化 → 期間フィルタ。
+    破損ファイルや変換失敗時は None を返してスキップ。
+    """
     jq_code = yf_to_jquants(symbol)
     pkl_path = DATA_DIR / f"{jq_code}.pkl"
     if not pkl_path.exists():
@@ -154,15 +166,27 @@ def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
     if not isinstance(raw, pd.DataFrame) or raw.empty:
         return None
 
-    df = normalize_minute_df(raw)
+    try:
+        df = normalize_minute_df(raw)
+    except Exception:
+        return None
     if df.empty:
         return None
 
-    df = resample_to_5m(df)
+    try:
+        df = resample_to_5m(df)
+    except Exception:
+        return None
+
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return None
 
     # 期間フィルタ
-    cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
-    df = df[df.index >= cutoff]
+    try:
+        cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
+        df = df[df.index >= cutoff]
+    except Exception:
+        return None
     return df if not df.empty else None
 
 
