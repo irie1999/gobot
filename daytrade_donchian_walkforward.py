@@ -366,7 +366,10 @@ def main():
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
-    parser.add_argument("--universe", choices=["watch", "n225"], default="n225")
+    parser.add_argument("--universe", choices=["watch", "n225", "prime", "winners"],
+                        default="n225",
+                        help="watch=20銘柄 / n225=日経225 / "
+                             "prime=東証プライム1559 / winners=要 --extract-winners")
     parser.add_argument("--target-preset", default="ultra_freq_v2",
                         choices=list(PRESETS.keys()) + ["all"],
                         help="検証対象プリセット (all で全4プリセット一括実行)")
