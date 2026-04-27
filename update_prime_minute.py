@@ -196,11 +196,11 @@ def main():
     # クライアント初期化
     print("\nJ-Quants クライアント初期化中...")
     try:
-        from jquants_fetch import _ensure_client
-        cli = _ensure_client()
+        from jquants_fetch import get_client
+        cli = get_client()
         print("✓ 認証成功")
     except Exception as e:
-        print(f"✗ 認証失敗: {e}")
+        print(f"✗ 認証失敗: {type(e).__name__}: {e}")
         sys.exit(1)
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
