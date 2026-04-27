@@ -37,52 +37,11 @@ MAX_RISK = 3_000   # 1取引あたり最大損失 (DD抑制のため 6k→3k に
 # ─────────────────────────────────────────────────────────────
 
 PRESETS = {
-    "high_freq": dict(
-        don_period=10,
-        target_r=1.5,
-        gap_max_pct=3.0,
-        stop_max_pct=2.5,
-        trail_steps=[(0.33, 0.0), (0.67, 0.3)],
-        force_close=dtime(14, 55),
-        entry_cutoff=dtime(14, 0),
-        warmup=10,
-    ),
-    "balanced": dict(
-        don_period=15,
-        target_r=1.8,
-        gap_max_pct=2.5,
-        stop_max_pct=2.5,
-        trail_steps=[(0.30, 0.0), (0.60, 0.3), (0.85, 0.6)],
-        force_close=dtime(14, 55),
-        entry_cutoff=dtime(13, 0),
-        warmup=15,
-    ),
-    "conservative": dict(
-        don_period=20,
-        target_r=2.0,
-        gap_max_pct=2.0,
-        stop_max_pct=2.5,
-        trail_steps=[(0.25, 0.0), (0.50, 0.3), (0.75, 0.7)],
-        force_close=dtime(14, 55),
-        entry_cutoff=dtime(11, 0),
-        warmup=20,
-    ),
-    # ★ メイン採用 (ultra_freq) ★
-    # walk-forward 4ウィンドウ検証で唯一 PF > 1.0 を維持
-    "ultra_freq": dict(
-        don_period=8,
-        target_r=1.3,
-        gap_max_pct=4.0,
-        stop_max_pct=2.0,
-        trail_steps=[(0.40, 0.0), (0.75, 0.3)],
-        force_close=dtime(14, 55),
-        entry_cutoff=dtime(14, 30),
-        warmup=8,
-    ),
-    # ultra_freq_v2: avg勝が小さい問題を改善
-    #   TARGET_R 1.3→2.0 で利幅拡大
-    #   trail_steps [(0.50, 0.2), (0.80, 0.5)] で早期建値撤退を抑制
-    #   → 反転時も最低+200〜500ロック、目標到達で+2.0R確保
+    # ★ 実行戦略: ultra_freq_v2 ★
+    # 30日バックテスト(1ポジ): PF 1.94, +8,490円
+    # 30日バックテスト(2ポジ): PF 2.35, +17,480円
+    # 採用根拠: avg勝 +1,013 vs avg負 -538 で損益比 1.88
+    #          R:R 2.0 + 遅め+利益確保型トレーリングが効く
     "ultra_freq_v2": dict(
         don_period=8,
         target_r=2.0,
@@ -92,21 +51,6 @@ PRESETS = {
         force_close=dtime(14, 55),
         entry_cutoff=dtime(14, 30),
         warmup=8,
-    ),
-    # ultra_freq_atr: ATR(14)ベース動的ストップ
-    #   ボラの高い銘柄: 広いstop / 低い銘柄: タイトstop
-    #   → 銘柄ごとの値動きに合わせた最適サイジング
-    "ultra_freq_atr": dict(
-        don_period=8,
-        target_r=2.0,
-        gap_max_pct=4.0,
-        stop_max_pct=2.5,
-        trail_steps=[(0.50, 0.2), (0.80, 0.5)],
-        force_close=dtime(14, 55),
-        entry_cutoff=dtime(14, 30),
-        warmup=14,        # ATR14のため warmup延長
-        atr_period=14,
-        atr_multiplier=1.5,
     ),
 }
 
@@ -510,9 +454,9 @@ def main():
     parser.add_argument("--extract-winners", action="store_true",
                         help="ターゲットプリセットの結果から勝ち銘柄を抽出し "
                              "daytrade_donchian_winners.py に保存")
-    parser.add_argument("--target-preset", default="ultra_freq",
+    parser.add_argument("--target-preset", default="ultra_freq_v2",
                         choices=list(PRESETS.keys()),
-                        help="勝ち銘柄抽出の対象プリセット (デフォルト: ultra_freq)")
+                        help="勝ち銘柄抽出の対象プリセット (デフォルト: ultra_freq_v2)")
     parser.add_argument("--min-pf", type=float, default=1.5,
                         help="勝ち銘柄の最低PF (デフォルト: 1.5)")
     parser.add_argument("--min-trades", type=int, default=10,

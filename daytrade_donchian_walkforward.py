@@ -367,7 +367,7 @@ def main():
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
     parser.add_argument("--universe", choices=["watch", "n225"], default="n225")
-    parser.add_argument("--target-preset", default="ultra_freq",
+    parser.add_argument("--target-preset", default="ultra_freq_v2",
                         choices=list(PRESETS.keys()) + ["all"],
                         help="検証対象プリセット (all で全4プリセット一括実行)")
     parser.add_argument("--train-days", type=int, default=30,
