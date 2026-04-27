@@ -161,6 +161,8 @@ def main():
                         help="欠損確認のみ (取得しない)")
     parser.add_argument("--daytrade-only", action="store_true",
                         help="daytrade_symbols.py の20銘柄のみ更新 (日次運用用)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="並列スレッド数 (デフォルト1=順次、推奨3-5)")
     args = parser.parse_args()
 
     if not DATA_DIR.exists():
@@ -193,7 +195,8 @@ def main():
     if args.limit > 0:
         pkl_files = pkl_files[:args.limit]
 
-    print(f"日次更新: {len(pkl_files)}銘柄 / 基準日: {today}", flush=True)
+    print(f"日次更新: {len(pkl_files)}銘柄 / 基準日: {today} / "
+          f"並列: {args.workers}", flush=True)
 
     # 欠損チェック + 取得
     updated = 0
@@ -201,48 +204,74 @@ def main():
     errors = 0
     total_bars = 0
 
-    for i, pkl_path in enumerate(pkl_files, 1):
-        code = pkl_path.stem  # "72030"
-
-        # 最終日確認
+    def _process_one(pkl_path):
+        """1銘柄の更新処理。(更新有無, バー数) を返す。"""
+        code = pkl_path.stem
         last_date = get_last_date(pkl_path)
         if last_date is None:
-            skipped += 1
-            continue
-
-        # 最終日が今日ならスキップ
+            return ("skip", 0, code, "no last_date")
         if last_date >= today:
-            skipped += 1
-            continue
-
-        # 欠損日数
+            return ("skip", 0, code, "up-to-date")
         gap_days = (datetime.strptime(today, "%Y-%m-%d")
                     - datetime.strptime(last_date, "%Y-%m-%d")).days
-
-        # 翌日から今日まで取得
         fetch_from = (datetime.strptime(last_date, "%Y-%m-%d")
                       + timedelta(days=1)).strftime("%Y-%m-%d")
-
         if args.check_only:
-            if gap_days > 1:
-                print(f"  {code}: 最終日 {last_date} → {gap_days}日分の欠損")
-            continue
+            return ("check", gap_days, code, last_date)
+        try:
+            bars = fetch_and_append(cli, code, pkl_path, fetch_from, today)
+            if bars > 0:
+                return ("ok", bars, code, "")
+            else:
+                return ("err", 0, code, "no bars")
+        except Exception as e:
+            return ("err", 0, code, str(e))
 
-        # 取得
-        bars = fetch_and_append(cli, code, pkl_path, fetch_from, today)
-        if bars > 0:
-            total_bars += bars
-            updated += 1
-        else:
-            errors += 1
-
-        if i % 100 == 0 or i == len(pkl_files):
-            print(f"  {i}/{len(pkl_files)} 処理済み "
-                  f"(更新:{updated} スキップ:{skipped} エラー:{errors})",
-                  flush=True)
-
-        # レート制限対策
-        time.sleep(0.3)
+    if args.workers <= 1:
+        # 順次処理 (従来通り)
+        for i, pkl_path in enumerate(pkl_files, 1):
+            status, bars, code, msg = _process_one(pkl_path)
+            if status == "skip":
+                skipped += 1
+            elif status == "check":
+                if bars > 1:
+                    print(f"  {code}: 最終日 {msg} → {bars}日分の欠損")
+            elif status == "ok":
+                total_bars += bars
+                updated += 1
+            elif status == "err":
+                errors += 1
+            if i % 100 == 0 or i == len(pkl_files):
+                print(f"  {i}/{len(pkl_files)} 処理済み "
+                      f"(更新:{updated} スキップ:{skipped} エラー:{errors})",
+                      flush=True)
+            time.sleep(0.3)
+    else:
+        # 並列処理
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        completed = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(_process_one, p): p for p in pkl_files}
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    status, bars, code, msg = future.result()
+                    if status == "skip":
+                        skipped += 1
+                    elif status == "check":
+                        if bars > 1:
+                            print(f"  {code}: {bars}日分の欠損")
+                    elif status == "ok":
+                        total_bars += bars
+                        updated += 1
+                    elif status == "err":
+                        errors += 1
+                except Exception as e:
+                    errors += 1
+                if completed % 100 == 0 or completed == len(pkl_files):
+                    print(f"  {completed}/{len(pkl_files)} 処理済み "
+                          f"(更新:{updated} スキップ:{skipped} エラー:{errors})",
+                          flush=True)
 
     print()
     print("=" * 50)
