@@ -141,10 +141,29 @@ class KabuClient:
         return {"X-API-KEY": self.token, "Content-Type": "application/json"}
 
     def register(self, symbols):
-        body = {"Symbols": [{"Symbol": s, "Exchange": 1} for s in symbols]}
-        r = requests.put(f"{self.base_url}/kabusapi/register",
-                         headers=self._h(), json=body, timeout=10)
-        r.raise_for_status()
+        """銘柄登録 (1銘柄ずつ試行、検証環境で取扱外の銘柄はスキップ)。
+
+        Returns:
+            (registered, failed): 登録成功/失敗の銘柄コードリスト
+        """
+        registered = []
+        failed = []
+        for s in symbols:
+            try:
+                body = {"Symbols": [{"Symbol": s, "Exchange": 1}]}
+                r = requests.put(f"{self.base_url}/kabusapi/register",
+                                 headers=self._h(), json=body, timeout=10)
+                if r.status_code == 401:
+                    self.refresh_token()
+                    r = requests.put(f"{self.base_url}/kabusapi/register",
+                                     headers=self._h(), json=body, timeout=10)
+                if r.status_code == 200 and r.json().get("RegistList"):
+                    registered.append(s)
+                else:
+                    failed.append(s)
+            except Exception:
+                failed.append(s)
+        return registered, failed
 
     def get_price(self, symbol, exchange=1):
         r = requests.get(f"{self.base_url}/kabusapi/board/{symbol}@{exchange}",
@@ -381,8 +400,16 @@ def run(args):
     client.refresh_token()
 
     syms = [s for s, _ in WATCH_SYMBOLS]
-    client.register(syms)
-    log.info("銘柄登録: %d銘柄", len(syms))
+    registered, failed = client.register(syms)
+    log.info("銘柄登録: %d/%d 銘柄成功", len(registered), len(syms))
+    if failed:
+        log.warning("登録失敗 (検証環境で取扱外の可能性): %d銘柄 → %s",
+                    len(failed), failed[:10] if len(failed) > 10 else failed)
+    # 登録成功した銘柄のみ監視対象に
+    active_symbols = [(s, n) for s, n in WATCH_SYMBOLS if s in registered]
+    if not active_symbols:
+        log.error("登録できた銘柄が0件 → 終了")
+        return
 
     dry = args.dry_run
     poll = args.poll
@@ -391,7 +418,7 @@ def run(args):
     max_concurrent = args.max_concurrent
     margin = args.margin
 
-    trackers = {s: DonchianTracker(s, n) for s, n in WATCH_SYMBOLS}
+    trackers = {s: DonchianTracker(s, n) for s, n in active_symbols}
     positions: dict[str, Position] = {}
     trades: list[dict] = []
 
@@ -407,7 +434,7 @@ def run(args):
     trade_type = "デイトレ信用" if margin else "現物"
     log.info("=" * 60)
     log.info("  Donchian (ultra_freq) %d銘柄監視ボット [%s / %s]",
-             len(WATCH_SYMBOLS), mode, trade_type)
+             len(active_symbols), mode, trade_type)
     log.info("  予算: %s円 / リスク: %s円/取引 / 最大同時保有: %d",
              f"{budget:,}", f"{max_risk:,}", max_concurrent)
     log.info("=" * 60)
@@ -508,7 +535,7 @@ def run(args):
     # ── 日次レポート ───────────────────────────────
     print()
     print("=" * 65)
-    print(f"  Donchian (ultra_freq) {len(WATCH_SYMBOLS)}銘柄監視 日次レポート [{mode}]")
+    print(f"  Donchian (ultra_freq) {len(active_symbols)}銘柄監視 日次レポート [{mode}]")
     print(f"  {now.strftime('%Y-%m-%d')}")
     print("=" * 65)
 
