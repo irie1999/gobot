@@ -164,6 +164,77 @@ def _fmt_dt(dt):
 
 
 # ─────────────────────────────────────────────────────────────
+# 同時保有数制限フィルタ (実取引のbot設定と合わせるため)
+# ─────────────────────────────────────────────────────────────
+
+def apply_concurrent_limit(result, max_concurrent, budget):
+    """
+    バックテスト結果に同時保有数制限を適用。
+    全trades をエントリー時刻順にソートし、保有中ポジ数 < max_concurrent
+    のときだけ採用。それ以外はスキップ(現実的な約定能力をシミュレート)。
+    """
+    # 全trades に銘柄情報を付与
+    all_trades = []
+    for it in result["items"]:
+        for t in it["trades"]:
+            tt = dict(t)
+            tt["__symbol__"] = it["symbol"]
+            tt["__name__"] = it["name"]
+            all_trades.append(tt)
+
+    all_trades.sort(key=lambda t: str(t.get("entry_dt", "")))
+
+    accepted = []
+    open_exits = []  # 現在オープン中のポジの exit_dt リスト
+
+    for t in all_trades:
+        entry_dt = t.get("entry_dt")
+        if entry_dt is None:
+            continue
+        # entry より前に exit したポジを open_exits から外す
+        open_exits = [e for e in open_exits if e is not None and e > entry_dt]
+        if len(open_exits) < max_concurrent:
+            accepted.append(t)
+            exit_dt = t.get("exit_dt")
+            if exit_dt is not None:
+                open_exits.append(exit_dt)
+
+    # items を再構築
+    items_by_sym = {}
+    for t in accepted:
+        sym = t["__symbol__"]
+        if sym not in items_by_sym:
+            items_by_sym[sym] = {
+                "symbol": sym,
+                "name": t["__name__"],
+                "trades": [],
+            }
+        clean_t = {k: v for k, v in t.items() if not k.startswith("__")}
+        items_by_sym[sym]["trades"].append(clean_t)
+    new_items = list(items_by_sym.values())
+
+    # stats 再計算
+    clean_trades = [{k: v for k, v in t.items() if not k.startswith("__")}
+                    for t in accepted]
+    new_stats = calc_stats(clean_trades, budget)
+
+    trade_dates = set()
+    for t in clean_trades:
+        dt = t.get("entry_dt")
+        if hasattr(dt, "date"):
+            trade_dates.add(dt.date())
+
+    return dict(
+        name=result["name"],
+        params=result["params"],
+        items=new_items,
+        stats=new_stats,
+        all_trades=clean_trades,
+        trade_days=len(trade_dates),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # 実行
 # ─────────────────────────────────────────────────────────────
 
@@ -405,6 +476,8 @@ def main():
                         help="勝ち銘柄の最低取引数 (デフォルト: 10)")
     parser.add_argument("--min-pnl", type=int, default=0,
                         help="勝ち銘柄の最低損益 (デフォルト: 0)")
+    parser.add_argument("--max-concurrent", type=int, default=0,
+                        help="同時保有銘柄数の上限 (0=制限なし、実botと合わせる場合は1)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -446,6 +519,20 @@ def main():
               f"PF:{_pf(s['pf'])}  損益:{s['total_pnl']:+,.0f}  "
               f"DD:{s['max_dd']:+.1f}%  取引日:{r['trade_days']}/{total_days}")
         preset_results.append(r)
+
+    # 同時保有数制限の適用 (--max-concurrent N で実botと合わせる)
+    if args.max_concurrent > 0:
+        print(f"\n[同時保有数制限を適用: max_concurrent={args.max_concurrent}]",
+              flush=True)
+        for i, r in enumerate(preset_results):
+            before_n = r["stats"]["n"]
+            before_pnl = r["stats"]["total_pnl"]
+            preset_results[i] = apply_concurrent_limit(r, args.max_concurrent, args.budget)
+            after_n = preset_results[i]["stats"]["n"]
+            after_pnl = preset_results[i]["stats"]["total_pnl"]
+            print(f"  {r['name']:<14} 取引:{before_n}→{after_n}  "
+                  f"損益:{before_pnl:+,.0f}→{after_pnl:+,.0f}",
+                  flush=True)
 
     print_param_table(preset_results)
     print_comparison(preset_results, total_days)
