@@ -73,7 +73,7 @@ def _load_dotenv():
 _load_dotenv()
 
 
-# ── Donchian (ultra_freq) パラメータ ──────────────────────────
+# ── Donchian (ultra_freq_v2) パラメータ ──────────────────────
 DON_PERIOD       = 8
 TARGET_R         = 2.0
 GAP_MAX_PCT      = 4.0
@@ -81,10 +81,19 @@ STOP_MAX_PCT     = 2.0
 TRAIL_STEPS      = [(0.50, 0.2), (0.80, 0.5)]
 FORCE_CLOSE_TIME = dtime(14, 50)  # 14:55の引け強制決済前に余裕を持って能動決済
 ENTRY_CUTOFF     = dtime(14, 30)
+ENTRY_START      = dtime(9, 30)   # この時刻以降エントリー可 (寄付直後の混乱回避)
 WARMUP_BARS      = 8
 BUDGET           = 600_000
 MAX_RISK         = 3_000
 MAX_CONCURRENT_POSITIONS = 5
+
+# 連敗時のサイズ縮小
+LOSING_STREAK_HALVE     = 3   # 3連敗で qty 半減
+LOSING_STREAK_PAUSE     = 5   # 5連敗で当日終了
+
+# 市況フィルタ (日経225のMA20)
+NIKKEI_SYMBOL    = "1321"     # 日経225連動型ETF (NEXT FUNDS)
+NIKKEI_MA_PERIOD = 20         # MA20 で判定 (5分足ベースで100分平均)
 
 STOP_LABELS = ("損切り", "+0.2Rロック", "+0.5Rロック")
 
@@ -388,13 +397,86 @@ class Position:
 # サイジング
 # ─────────────────────────────────────────────────────────────
 
-def calc_qty(entry_p, stop_p, budget, max_risk):
+def calc_qty(entry_p, stop_p, budget, max_risk, size_factor=1.0):
+    """サイズ計算。size_factor=0.5 でハーフサイズ(連敗時用)。"""
     risk_per_share = abs(entry_p - stop_p)
     if risk_per_share <= 0:
         return 100
-    qty_by_risk = int(max_risk / risk_per_share / 100) * 100
+    effective_risk = max_risk * size_factor
+    qty_by_risk = int(effective_risk / risk_per_share / 100) * 100
     qty_by_budget = int(budget / entry_p / 100) * 100
     return max(100, min(qty_by_risk, qty_by_budget))
+
+
+# ─────────────────────────────────────────────────────────────
+# 市況フィルタ (日経MA20)
+# ─────────────────────────────────────────────────────────────
+
+class MarketRegimeFilter:
+    """日経225ETF(1321)のMA20で相場環境を判定。
+    現在価格 < MA20 ならエントリー停止 (下落トレンド回避)。"""
+
+    def __init__(self, client, symbol=NIKKEI_SYMBOL, ma_period=NIKKEI_MA_PERIOD):
+        self.client = client
+        self.symbol = symbol
+        self.ma_period = ma_period
+        self.prices: list[float] = []   # 5分足のclose
+        self._cur_bar_start: datetime | None = None
+        self._cur_close: float | None = None
+        self._registered = False
+        self._last_status: bool | None = None  # True=取引可, False=取引停止
+
+    def setup(self):
+        """日経ETFを registerして、初期化。"""
+        try:
+            body = {"Symbols": [{"Symbol": self.symbol, "Exchange": 1}]}
+            r = requests.put(f"{self.client.base_url}/kabusapi/register",
+                             headers=self.client._h(), json=body, timeout=10)
+            if r.status_code == 200:
+                self._registered = True
+                log.info("市況フィルタ用ETF (%s) を登録", self.symbol)
+        except Exception as e:
+            log.warning("市況フィルタETF登録失敗: %s (フィルタ無効化)", e)
+
+    def update(self, now: datetime):
+        """価格を取得して 5分足 を更新。"""
+        if not self._registered:
+            return
+        try:
+            price, _ = self.client.get_price(self.symbol)
+            if price is None:
+                return
+        except Exception:
+            return
+
+        bar_time = now.replace(minute=(now.minute // 5) * 5,
+                               second=0, microsecond=0)
+        if self._cur_bar_start is None or bar_time > self._cur_bar_start:
+            if self._cur_close is not None:
+                self.prices.append(self._cur_close)
+                if len(self.prices) > self.ma_period * 2:
+                    self.prices = self.prices[-self.ma_period * 2:]
+            self._cur_bar_start = bar_time
+            self._cur_close = price
+        else:
+            self._cur_close = price
+
+    def is_bullish(self) -> bool:
+        """現在価格 >= MA20 なら True (取引可)。データ不足時は True (フィルタ無効)。"""
+        if not self._registered:
+            return True
+        if len(self.prices) < self.ma_period:
+            return True   # データ不足時はフィルタ無効
+        if self._cur_close is None:
+            return True
+        ma = sum(self.prices[-self.ma_period:]) / self.ma_period
+        bullish = self._cur_close >= ma
+        if self._last_status != bullish:
+            self._last_status = bullish
+            status = "✓ 取引可" if bullish else "✗ 取引停止 (下落トレンド)"
+            log.info("市況フィルタ: 日経 %.1f / MA20 %.1f → %s",
+                     self._cur_close, ma, status)
+        return bullish
 
 
 # ─────────────────────────────────────────────────────────────
@@ -431,6 +513,14 @@ def run(args):
     trackers = {s: DonchianTracker(s, n) for s, n in active_symbols}
     positions: dict[str, Position] = {}
     trades: list[dict] = []
+    losing_streak = 0   # 連敗カウンタ (負け→+1, 勝ち→0にreset)
+    paused_today = False  # 連敗 LOSING_STREAK_PAUSE 達成で当日停止
+
+    # 市況フィルタ初期化 (--no-market-filter で無効化可)
+    market_filter = None
+    if not args.no_market_filter:
+        market_filter = MarketRegimeFilter(client)
+        market_filter.setup()
 
     # 前日終値を取得
     for sym, tracker in trackers.items():
@@ -462,6 +552,10 @@ def run(args):
         if dtime(11, 30) <= t < dtime(12, 30):
             time.sleep(30)
             continue
+
+        # 市況フィルタ用の日経価格更新
+        if market_filter is not None:
+            market_filter.update(now)
 
         # 全銘柄の価格更新
         for sym, tracker in trackers.items():
@@ -508,13 +602,38 @@ def run(args):
                     "exit_time": now.strftime("%H:%M:%S"),
                 })
                 to_close.append(sym)
+
+                # 連敗カウンタ更新
+                if pnl > 0:
+                    if losing_streak > 0:
+                        log.info("  → 連敗リセット (%d→0)", losing_streak)
+                    losing_streak = 0
+                else:
+                    losing_streak += 1
+                    if losing_streak >= LOSING_STREAK_PAUSE:
+                        paused_today = True
+                        log.warning("  ★ %d連敗達成 → 当日エントリー停止",
+                                    losing_streak)
+                    elif losing_streak >= LOSING_STREAK_HALVE:
+                        log.info("  → 連敗 %d 件、次回ハーフサイズ",
+                                 losing_streak)
         for sym in to_close:
             del positions[sym]
 
         # ── 新規シグナルチェック (空きスロットがあれば) ─────
+        # フィルタ条件:
+        #   - 同時保有数余裕 < max_concurrent
+        #   - 時刻 ENTRY_START 〜 ENTRY_CUTOFF
+        #   - 連敗5以上で当日停止 (paused_today)
+        #   - 市況フィルタ通過 (日経MA20上)
+        market_ok = market_filter.is_bullish() if market_filter else True
         if (len(positions) < max_concurrent
-                and t >= dtime(9, 30)
-                and t < ENTRY_CUTOFF):
+                and ENTRY_START <= t < ENTRY_CUTOFF
+                and not paused_today
+                and market_ok):
+            # 連敗時のサイズ縮小判定
+            size_factor = 0.5 if losing_streak >= LOSING_STREAK_HALVE else 1.0
+
             for sym, tracker in trackers.items():
                 if sym in positions:
                     continue
@@ -523,11 +642,13 @@ def run(args):
                 sig = tracker.check_signal()
                 if sig:
                     qty = calc_qty(sig["entry_p"], sig["stop"],
-                                   budget, max_risk)
+                                   budget, max_risk, size_factor=size_factor)
+                    size_note = " [連敗中ハーフサイズ]" if size_factor < 1.0 else ""
                     log.info("★ Donchianブレイク! %s %s  価格=%.0f "
-                             "8本高値=%.0f 損切=%.0f 目標=%.0f 株数=%d",
+                             "8本高値=%.0f 損切=%.0f 目標=%.0f 株数=%d%s",
                              sym, tracker.name, sig["entry_p"],
-                             sig["don_hi"], sig["stop"], sig["target"], qty)
+                             sig["don_hi"], sig["stop"], sig["target"], qty,
+                             size_note)
                     if not dry:
                         try:
                             res = client.buy(sym, qty, margin=margin)
@@ -595,7 +716,19 @@ def main():
                              "すぐシグナルが出る代わりに精度は落ちる(検証用)")
     parser.add_argument("--demo-count", type=int, default=40,
                         help="デモモード時の監視銘柄数 (日経225先頭からN銘柄, デフォルト40)")
+    parser.add_argument("--no-market-filter", action="store_true",
+                        help="市況フィルタ(日経MA20)を無効化")
+    parser.add_argument("--entry-start", default="09:30",
+                        help="エントリー開始時刻 HH:MM (デフォルト 09:30)")
     args = parser.parse_args()
+
+    # entry-start CLIフラグを反映
+    try:
+        h, m = args.entry_start.split(":")
+        global ENTRY_START
+        ENTRY_START = dtime(int(h), int(m))
+    except Exception:
+        log.warning("--entry-start の形式不正 (HH:MM必須)、デフォルト09:30を使用")
 
     if args.demo:
         global DON_PERIOD, WARMUP_BARS, ENTRY_CUTOFF, TARGET_R, GAP_MAX_PCT, STOP_MAX_PCT
