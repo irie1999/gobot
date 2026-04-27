@@ -478,6 +478,9 @@ def main():
                         help="勝ち銘柄の最低損益 (デフォルト: 0)")
     parser.add_argument("--max-concurrent", type=int, default=0,
                         help="同時保有銘柄数の上限 (0=制限なし、実botと合わせる場合は1)")
+    parser.add_argument("--max-risk", type=int, default=MAX_RISK,
+                        help=f"1取引あたり最大損失 (デフォルト: {MAX_RISK}, "
+                             "実botと合わせる場合は1000)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -513,7 +516,7 @@ def main():
     for pname in preset_names:
         params = PRESETS[pname]
         print(f"[{pname}] 実行中...", flush=True)
-        r = run_preset(pname, params, fetched, targets, args.budget, MAX_RISK)
+        r = run_preset(pname, params, fetched, targets, args.budget, args.max_risk)
         s = r["stats"]
         print(f"  → 取引:{s['n']}  勝率:{s['win_rate']:.1f}%  "
               f"PF:{_pf(s['pf'])}  損益:{s['total_pnl']:+,.0f}  "
