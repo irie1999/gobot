@@ -102,6 +102,18 @@ def _load_watch_symbols():
         return []
 
 
+def _load_demo_symbols(max_count=40):
+    """デモモード用: 日経225全銘柄から先頭N銘柄を読み込み (動作確認用)。"""
+    try:
+        from symbols_all import SYMBOLS as N225_SYMBOLS
+        symbols = [(s.replace(".T", ""), n) for s, n in N225_SYMBOLS[:max_count]]
+        log.warning("DEMO MODE: 日経225先頭%d銘柄を監視対象に設定", len(symbols))
+        return symbols
+    except ImportError:
+        log.warning("symbols_all.py が見つかりません。winnersを使用")
+        return _load_watch_symbols()
+
+
 WATCH_SYMBOLS = _load_watch_symbols()
 
 
@@ -541,22 +553,28 @@ def main():
                         help="信用取引(デイトレ信用 = 一般信用短期)で発注。"
                              "未指定なら現物取引")
     parser.add_argument("--demo", action="store_true",
-                        help="デモモード: ブレイク条件を大幅に緩和。"
-                             "DON_PERIOD=3, WARMUP=3, GAP=6%%, R:R=1.0 等。"
+                        help="デモモード: ブレイク条件を大幅に緩和し、"
+                             "監視銘柄も日経225先頭から拡大。"
                              "すぐシグナルが出る代わりに精度は落ちる(検証用)")
+    parser.add_argument("--demo-count", type=int, default=40,
+                        help="デモモード時の監視銘柄数 (日経225先頭からN銘柄, デフォルト40)")
     args = parser.parse_args()
 
     if args.demo:
         global DON_PERIOD, WARMUP_BARS, ENTRY_CUTOFF, TARGET_R, GAP_MAX_PCT, STOP_MAX_PCT
+        global WATCH_SYMBOLS
         DON_PERIOD = 3       # 3本(15分)高値ブレイク
         WARMUP_BARS = 3      # 9:15以降エントリー可
         ENTRY_CUTOFF = dtime(14, 50)
         TARGET_R = 1.0       # R:R 1:1 で素早く決済
         GAP_MAX_PCT = 6.0
         STOP_MAX_PCT = 1.5
+        # 監視銘柄も拡大: winners 21銘柄 → 日経225先頭40銘柄
+        WATCH_SYMBOLS = _load_demo_symbols(max_count=args.demo_count)
         log.warning("=" * 60)
         log.warning("  ★ DEMO MODE 有効 (条件緩和でシグナル多発) ★")
         log.warning("  DON=3, WARMUP=3, R:R=1.0, GAP=6.0%%, STOP=1.5%%")
+        log.warning("  監視銘柄: %d銘柄 (日経225先頭から)", len(WATCH_SYMBOLS))
         log.warning("  実運用では使わないでください")
         log.warning("=" * 60)
     try:
