@@ -32,7 +32,8 @@ echo  モード: ドライラン (本番環境想定) >> "%logfile%"
 echo ============================================== >> "%logfile%"
 
 REM bot 実行 (標準出力&エラーをログに追記)
-python kabu_donchian_bot.py --dry-run --budget 200000 --max-risk 1000 --max-concurrent 1 --margin --poll 30 >> "%logfile%" 2>&1
+REM 同時保有2ポジ (max-concurrent 2) で運用
+python kabu_donchian_bot.py --dry-run --budget 200000 --max-risk 1000 --max-concurrent 2 --margin --poll 30 >> "%logfile%" 2>&1
 
 REM 終了メッセージ
 echo. >> "%logfile%"

@@ -25,11 +25,12 @@ set "logfile=logs\%today%_live.log"
 echo ============================================== >> "%logfile%"
 echo  起動: %date% %time% >> "%logfile%"
 echo  モード: 本番運用 (実発注!) >> "%logfile%"
-echo  予算: 200,000 / リスク: 1,000 / 同時保有: 1 >> "%logfile%"
+echo  予算: 200,000 / リスク: 1,000 / 同時保有: 2 >> "%logfile%"
 echo ============================================== >> "%logfile%"
 
 REM 本番実行 (--dry-run なし)
-python kabu_donchian_bot.py --budget 200000 --max-risk 1000 --max-concurrent 1 --margin --poll 30 >> "%logfile%" 2>&1
+REM 同時保有2ポジ (max-concurrent 2) で運用
+python kabu_donchian_bot.py --budget 200000 --max-risk 1000 --max-concurrent 2 --margin --poll 30 >> "%logfile%" 2>&1
 
 echo. >> "%logfile%"
 echo ============================================== >> "%logfile%"
