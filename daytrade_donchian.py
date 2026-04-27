@@ -76,7 +76,22 @@ def default_params():
         force_close=FORCE_CLOSE,
         entry_cutoff=ENTRY_CUTOFF,
         warmup=WARMUP,
+        atr_period=0,        # 0 = ATR使わない (ドンチャン安値ベース)
+        atr_multiplier=1.5,  # ATR×1.5 をストップ幅に
     )
+
+
+def _calc_atr(highs, lows, closes, period, end_idx):
+    """指定index時点のATR (True Range の period平均) を計算。"""
+    if end_idx < period + 1:
+        return None
+    trs = []
+    for j in range(end_idx - period, end_idx):
+        h, l = highs[j], lows[j]
+        prev_c = closes[j - 1] if j > 0 else closes[j]
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+    return sum(trs) / period if trs else None
 
 
 def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
@@ -98,6 +113,8 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
     FCLOSE   = p["force_close"]
     ECUT     = p["entry_cutoff"]
     WUP      = p["warmup"]
+    ATR_P    = p.get("atr_period", 0)
+    ATR_MULT = p.get("atr_multiplier", 1.5)
 
     opens  = day_df["open"].to_numpy(dtype=float)
     highs  = day_df["high"].to_numpy(dtype=float)
@@ -181,10 +198,20 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
                 break
             entry_p = opens[i + 1]
             entry_dt = times[i + 1]
-            # 損切り: ドンチャン安値 or エントリー-STOP_MAX% の浅い方
-            #   → 安値が遠すぎる場合に株数が100に張り付くのを回避
+            # 損切り計算:
+            #   ATR有効: エントリー - ATR×倍率
+            #   ATR無効: ドンチャン安値ベース
+            #   いずれもエントリー-STOP_MAX% でクリップ
             stop_floor = entry_p * (1 - STOP_MAX / 100)
-            stop_p = max(don_lo, stop_floor)
+            if ATR_P > 0:
+                atr = _calc_atr(highs, lows, closes, ATR_P, i)
+                if atr is not None:
+                    atr_stop = entry_p - atr * ATR_MULT
+                    stop_p = max(atr_stop, stop_floor)
+                else:
+                    stop_p = max(don_lo, stop_floor)
+            else:
+                stop_p = max(don_lo, stop_floor)
             orig_stop = stop_p
             if entry_p <= stop_p:
                 i += 1

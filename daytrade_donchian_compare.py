@@ -93,6 +93,21 @@ PRESETS = {
         entry_cutoff=dtime(14, 30),
         warmup=8,
     ),
+    # ultra_freq_atr: ATR(14)ベース動的ストップ
+    #   ボラの高い銘柄: 広いstop / 低い銘柄: タイトstop
+    #   → 銘柄ごとの値動きに合わせた最適サイジング
+    "ultra_freq_atr": dict(
+        don_period=8,
+        target_r=2.0,
+        gap_max_pct=4.0,
+        stop_max_pct=2.5,
+        trail_steps=[(0.50, 0.2), (0.80, 0.5)],
+        force_close=dtime(14, 55),
+        entry_cutoff=dtime(14, 30),
+        warmup=14,        # ATR14のため warmup延長
+        atr_period=14,
+        atr_multiplier=1.5,
+    ),
 }
 
 

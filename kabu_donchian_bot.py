@@ -73,6 +73,14 @@ def _load_dotenv():
 _load_dotenv()
 
 
+# セクター分散モジュール (任意)
+try:
+    from sector_map import can_add_sector
+    SECTOR_FILTER_AVAILABLE = True
+except ImportError:
+    SECTOR_FILTER_AVAILABLE = False
+
+
 # ── Donchian (ultra_freq_v2) パラメータ ──────────────────────
 DON_PERIOD       = 8
 TARGET_R         = 2.0
@@ -639,6 +647,12 @@ def run(args):
                     continue
                 if len(positions) >= max_concurrent:
                     break
+                # セクター分散制限 (--no-sector-filter で無効化可)
+                if (SECTOR_FILTER_AVAILABLE and not args.no_sector_filter
+                        and not can_add_sector(sym, list(positions.keys()),
+                                                max_per_sector=1)):
+                    log.debug("  %s: 同一セクター既保有 → スキップ", sym)
+                    continue
                 sig = tracker.check_signal()
                 if sig:
                     qty = calc_qty(sig["entry_p"], sig["stop"],
@@ -718,6 +732,8 @@ def main():
                         help="デモモード時の監視銘柄数 (日経225先頭からN銘柄, デフォルト40)")
     parser.add_argument("--no-market-filter", action="store_true",
                         help="市況フィルタ(日経MA20)を無効化")
+    parser.add_argument("--no-sector-filter", action="store_true",
+                        help="セクター分散制限(同一セクター上限1)を無効化")
     parser.add_argument("--entry-start", default="09:30",
                         help="エントリー開始時刻 HH:MM (デフォルト 09:30)")
     args = parser.parse_args()
