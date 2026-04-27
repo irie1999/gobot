@@ -540,7 +540,25 @@ def main():
     parser.add_argument("--margin", action="store_true",
                         help="信用取引(デイトレ信用 = 一般信用短期)で発注。"
                              "未指定なら現物取引")
+    parser.add_argument("--demo", action="store_true",
+                        help="デモモード: ブレイク条件を大幅に緩和。"
+                             "DON_PERIOD=3, WARMUP=3, GAP=6%%, R:R=1.0 等。"
+                             "すぐシグナルが出る代わりに精度は落ちる(検証用)")
     args = parser.parse_args()
+
+    if args.demo:
+        global DON_PERIOD, WARMUP_BARS, ENTRY_CUTOFF, TARGET_R, GAP_MAX_PCT, STOP_MAX_PCT
+        DON_PERIOD = 3       # 3本(15分)高値ブレイク
+        WARMUP_BARS = 3      # 9:15以降エントリー可
+        ENTRY_CUTOFF = dtime(14, 50)
+        TARGET_R = 1.0       # R:R 1:1 で素早く決済
+        GAP_MAX_PCT = 6.0
+        STOP_MAX_PCT = 1.5
+        log.warning("=" * 60)
+        log.warning("  ★ DEMO MODE 有効 (条件緩和でシグナル多発) ★")
+        log.warning("  DON=3, WARMUP=3, R:R=1.0, GAP=6.0%%, STOP=1.5%%")
+        log.warning("  実運用では使わないでください")
+        log.warning("=" * 60)
     try:
         run(args)
     except KeyboardInterrupt:
