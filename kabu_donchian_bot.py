@@ -1,5 +1,5 @@
 """
-kabu_donchian_bot.py  ―  Donchian (ultra_freq) 自動売買ボット
+kabu_donchian_bot.py  ―  Donchian (ultra_freq_v2) 自動売買ボット
 ==================================================================
 複数銘柄を同時監視し、過去8本(40分)の高値ブレイク+陽線でエントリー。
 最大同時保有数を制限してリスク管理を自動化。
@@ -12,10 +12,10 @@ kabu_donchian_bot.py  ―  Donchian (ultra_freq) 自動売買ボット
   14:55      強制決済
   15:00      日次レポート
 
-【パラメータ】(daytrade_donchian.py の ultra_freq と同期)
-  DON_PERIOD=8  TARGET_R=1.3  GAP_MAX_PCT=4.0
+【パラメータ】(daytrade_donchian.py の ultra_freq_v2 と同期)
+  DON_PERIOD=8  TARGET_R=2.0  GAP_MAX_PCT=4.0
   STOP_MAX_PCT=2.0  ENTRY_CUTOFF=14:30
-  TRAIL_STEPS=[(0.40, 0.0), (0.75, 0.3)]
+  TRAIL_STEPS=[(0.50, 0.2), (0.80, 0.5)]
   BUDGET=600,000  MAX_RISK=3,000  MAX_CONCURRENT=5
 
 【監視銘柄】
@@ -75,10 +75,10 @@ _load_dotenv()
 
 # ── Donchian (ultra_freq) パラメータ ──────────────────────────
 DON_PERIOD       = 8
-TARGET_R         = 1.3
+TARGET_R         = 2.0
 GAP_MAX_PCT      = 4.0
 STOP_MAX_PCT     = 2.0
-TRAIL_STEPS      = [(0.40, 0.0), (0.75, 0.3)]
+TRAIL_STEPS      = [(0.50, 0.2), (0.80, 0.5)]
 FORCE_CLOSE_TIME = dtime(14, 50)  # 14:55の引け強制決済前に余裕を持って能動決済
 ENTRY_CUTOFF     = dtime(14, 30)
 WARMUP_BARS      = 8
@@ -86,7 +86,7 @@ BUDGET           = 600_000
 MAX_RISK         = 3_000
 MAX_CONCURRENT_POSITIONS = 5
 
-STOP_LABELS = ("損切り", "建値撤退", "+0.3Rロック")
+STOP_LABELS = ("損切り", "+0.2Rロック", "+0.5Rロック")
 
 
 # ── 監視銘柄 (winners リストから読み込み) ──────────────────

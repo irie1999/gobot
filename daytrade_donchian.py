@@ -1,11 +1,11 @@
 """
-daytrade_donchian.py  ―  デイトレ戦略: Donchian (ultra_freq モード)
+daytrade_donchian.py  ―  デイトレ戦略: Donchian (ultra_freq_v2 モード)
 ==================================================================
 【戦略】
   過去8本 (40分) の最高値を更新したバーで順張り買い。
-  ウォークフォワード4ウィンドウ検証で唯一 PF > 1.0 を維持した
-  プリセット (PF 1.02 / +47k / 28日) を採用。
-  DD-40%リスクを認識し、MAX_RISK を半減 (6k→3k) してサイズ調整。
+  30日バックテストで PF 1.94 / 勝率53% を達成した
+  ultra_freq_v2 プリセットを採用。
+  R:R 2.0 + 遅め+利益確保型トレーリングで avg勝を最大化。
 
 【エントリー条件】
   1. 現バー終値 > 直近8本 (現バー除く) の最高値
@@ -16,8 +16,8 @@ daytrade_donchian.py  ―  デイトレ戦略: Donchian (ultra_freq モード)
 
 【決済】
   損切り: 直近8本の最安値 or エントリー-2.0% の浅い方
-  目標: エントリー + (エントリー - 損切り) × 1.3 (R:R = 1.3:1)
-  複層トレーリング: +0.5R で建値 / +1R で +0.3R ロック
+  目標: エントリー + (エントリー - 損切り) × 2.0 (R:R = 2.0:1)
+  複層トレーリング: +1R で +0.2R / +1.6R で +0.5R ロック
   強制: 14:55
 
 【リスク管理】
@@ -45,18 +45,20 @@ from daytrade_data import load_intraday_batch, split_by_day, calc_position_size
 
 JST = timezone(timedelta(hours=9))
 
-# パラメータ (ultra_freq プリセット)
+# パラメータ (ultra_freq_v2 プリセット)
 DEFAULT_DAYS     = 60
 BUDGET           = 600_000
 MAX_RISK         = 3_000      # サイズ縮小 (6k→3k) で walk-forward DD -40%→-20% を狙う
 DON_PERIOD       = 8          # 過去8本(40分)高値
-TARGET_R         = 1.3        # 目標 R:R = 1.3
+TARGET_R         = 2.0        # 目標 R:R = 2.0 (利幅最大化)
 GAP_MAX_PCT      = 4.0        # ギャップ許容上限 (材料株対応)
 STOP_MAX_PCT     = 2.0        # 損切り距離の上限
-# 複層トレーリング (R:R=1.3用)
+# 複層トレーリング (R:R=2.0用、avg勝最大化)
+#   +1R 進捗 → +0.2R ロック (建値ではなく+200円確保)
+#   +1.6R 進捗 → +0.5R ロック
 TRAIL_STEPS = [
-    (0.40, 0.0),   # +0.5R進捗 → 建値
-    (0.75, 0.3),   # +1R進捗   → +0.3Rロック
+    (0.50, 0.2),   # +1R進捗 → +0.2Rロック
+    (0.80, 0.5),   # +1.6R進捗 → +0.5Rロック
 ]
 FORCE_CLOSE      = dtime(14, 55)
 ENTRY_CUTOFF     = dtime(14, 30)  # 14:30まで (取引機会最大)
@@ -139,7 +141,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None,
             if t >= FCLOSE:
                 _finish_trade(cl, times[i], "引け強制")
                 break
-            stop_labels = ("損切り", "建値撤退", "+0.3Rロック")
+            stop_labels = ("損切り", "+0.2Rロック", "+0.5Rロック")
             exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
             if lo <= stop_p and hi >= target_p:
                 _finish_trade(stop_p, times[i], exit_reason)
