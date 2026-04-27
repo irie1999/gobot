@@ -143,6 +143,9 @@ class KabuClient:
     def register(self, symbols):
         """銘柄登録 (1銘柄ずつ試行、検証環境で取扱外の銘柄はスキップ)。
 
+        APIは累積登録銘柄リストを返すため、対象銘柄が
+        RegistList に含まれているかをチェック。
+
         Returns:
             (registered, failed): 登録成功/失敗の銘柄コードリスト
         """
@@ -157,8 +160,13 @@ class KabuClient:
                     self.refresh_token()
                     r = requests.put(f"{self.base_url}/kabusapi/register",
                                      headers=self._h(), json=body, timeout=10)
-                if r.status_code == 200 and r.json().get("RegistList"):
-                    registered.append(s)
+                if r.status_code == 200:
+                    items = r.json().get("RegistList", [])
+                    # APIは累積で全登録済み銘柄を返すので、対象が含まれているか確認
+                    if any(item.get("Symbol") == s for item in items):
+                        registered.append(s)
+                    else:
+                        failed.append(s)
                 else:
                     failed.append(s)
             except Exception:
