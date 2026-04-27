@@ -145,6 +145,7 @@ class KabuClient:
 
         APIは累積登録銘柄リストを返すため、対象銘柄が
         RegistList に含まれているかをチェック。
+        APIレート制限回避のため各リクエスト間に小さなsleep。
 
         Returns:
             (registered, failed): 登録成功/失敗の銘柄コードリスト
@@ -171,6 +172,7 @@ class KabuClient:
                     failed.append(s)
             except Exception:
                 failed.append(s)
+            time.sleep(0.2)  # API レート制限回避 (1秒に5リクエストまで)
         return registered, failed
 
     def get_price(self, symbol, exchange=1):
