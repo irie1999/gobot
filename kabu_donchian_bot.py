@@ -79,7 +79,7 @@ TARGET_R         = 1.3
 GAP_MAX_PCT      = 4.0
 STOP_MAX_PCT     = 2.0
 TRAIL_STEPS      = [(0.40, 0.0), (0.75, 0.3)]
-FORCE_CLOSE_TIME = dtime(14, 55)
+FORCE_CLOSE_TIME = dtime(14, 50)  # 14:55の引け強制決済前に余裕を持って能動決済
 ENTRY_CUTOFF     = dtime(14, 30)
 WARMUP_BARS      = 8
 BUDGET           = 600_000
@@ -147,13 +147,20 @@ class KabuClient:
         prev = data.get("PreviousClose")
         return float(price) if price else None, float(prev) if prev else None
 
-    def buy(self, symbol, qty, exchange=1):
+    def buy(self, symbol, qty, exchange=1, margin=False):
+        """買い注文。margin=True で信用新規買い (デイトレ信用)。"""
+        if margin:
+            return self._margin_order(symbol, "2", qty, exchange, open_pos=True)
         return self._order(symbol, "2", qty, exchange)
 
-    def sell(self, symbol, qty, exchange=1):
+    def sell(self, symbol, qty, exchange=1, margin=False):
+        """売り注文。margin=True で信用返済売り (デイトレ信用)。"""
+        if margin:
+            return self._margin_order(symbol, "1", qty, exchange, open_pos=False)
         return self._order(symbol, "1", qty, exchange)
 
     def _order(self, symbol, side, qty, exchange=1):
+        """現物注文。"""
         body = {
             "Password": self.password, "Symbol": symbol,
             "Exchange": exchange, "SecurityType": 1, "Side": side,
@@ -161,6 +168,35 @@ class KabuClient:
             "AccountType": 4, "Qty": qty,
             "FrontOrderType": 2, "Price": 0, "ExpireDay": 0,
         }
+        r = requests.post(f"{self.base_url}/kabusapi/sendorder",
+                          headers=self._h(), json=body, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
+    def _margin_order(self, symbol, side, qty, exchange=1, open_pos=True):
+        """信用注文 (デイトレ信用 = 一般信用短期)。
+
+        open_pos=True : 新規建て (CashMargin=2)
+        open_pos=False: 返済    (CashMargin=3, 古い順から)
+        """
+        body = {
+            "Password": self.password,
+            "Symbol": symbol,
+            "Exchange": exchange,
+            "SecurityType": 1,
+            "Side": side,
+            "CashMargin": 2 if open_pos else 3,
+            "MarginTradeType": 3,    # 一般信用(短期=デイトレ信用)
+            "DelivType": 0 if open_pos else 2,
+            "AccountType": 4,
+            "Qty": qty,
+            "FrontOrderType": 2,     # 成行
+            "Price": 0,
+            "ExpireDay": 0,
+        }
+        if not open_pos:
+            # 返済時: 古い順から決済 (1ポジ運用なら同じ建玉のみ)
+            body["ClosePositionOrder"] = 0
         r = requests.post(f"{self.base_url}/kabusapi/sendorder",
                           headers=self._h(), json=body, timeout=10)
         r.raise_for_status()
@@ -341,6 +377,7 @@ def run(args):
     budget = args.budget
     max_risk = args.max_risk
     max_concurrent = args.max_concurrent
+    margin = args.margin
 
     trackers = {s: DonchianTracker(s, n) for s, n in WATCH_SYMBOLS}
     positions: dict[str, Position] = {}
@@ -355,9 +392,10 @@ def run(args):
             pass
 
     mode = "DRY RUN" if dry else "本番"
+    trade_type = "デイトレ信用" if margin else "現物"
     log.info("=" * 60)
-    log.info("  Donchian (ultra_freq) %d銘柄監視ボット [%s]",
-             len(WATCH_SYMBOLS), mode)
+    log.info("  Donchian (ultra_freq) %d銘柄監視ボット [%s / %s]",
+             len(WATCH_SYMBOLS), mode, trade_type)
     log.info("  予算: %s円 / リスク: %s円/取引 / 最大同時保有: %d",
              f"{budget:,}", f"{max_risk:,}", max_concurrent)
     log.info("=" * 60)
@@ -409,7 +447,7 @@ def run(args):
                          pos.entry_p, price, pos.qty, pnl)
                 if not dry:
                     try:
-                        res = client.sell(pos.symbol, pos.qty)
+                        res = client.sell(pos.symbol, pos.qty, margin=margin)
                         log.info("  注文: %s", res)
                     except Exception as e:
                         log.error("  注文失敗: %s", e)
@@ -443,7 +481,7 @@ def run(args):
                              sig["don_hi"], sig["stop"], sig["target"], qty)
                     if not dry:
                         try:
-                            res = client.buy(sym, qty)
+                            res = client.buy(sym, qty, margin=margin)
                             log.info("  注文: %s", res)
                         except Exception as e:
                             log.error("  注文失敗: %s", e)
@@ -499,6 +537,9 @@ def main():
     parser.add_argument("--poll", type=int, default=10, help="取得間隔(秒)")
     parser.add_argument("--dry-run", action="store_true",
                         help="ドライラン (注文を発注しない)")
+    parser.add_argument("--margin", action="store_true",
+                        help="信用取引(デイトレ信用 = 一般信用短期)で発注。"
+                             "未指定なら現物取引")
     args = parser.parse_args()
     try:
         run(args)
