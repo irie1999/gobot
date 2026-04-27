@@ -239,17 +239,19 @@ def main():
     updated = 0
     no_data = 0
     errors = 0
+    skipped = 0
     total_bars = 0
     completed = 0
     progress_lock = Lock()
     error_types = Counter()
     error_samples = []
+    verbose_log = []
 
     def _process(code5):
         pkl_path = DATA_DIR / f"{code5}.pkl"
         last_date = get_last_date(pkl_path)
         if last_date and last_date >= today:
-            return ("skip", 0, "", "", code5)
+            return ("skip", 0, "up-to-date", f"last={last_date} today={today}", code5)
         # 取得開始日: 最終日 + 1日 (バッファあり)
         if last_date:
             from_date = (datetime.strptime(last_date, "%Y-%m-%d")
@@ -269,6 +271,8 @@ def main():
                 completed += 1
                 try:
                     status, bars, err_type, err_msg, code5 = future.result()
+                    if args.verbose:
+                        verbose_log.append(f"  {code5}: {status} bars={bars} {err_type} {err_msg}")
                     if status == "ok":
                         updated += 1
                         total_bars += bars
@@ -277,6 +281,7 @@ def main():
                         no_data += 1
                         completed_codes.add(code5)
                     elif status == "skip":
+                        skipped += 1
                         completed_codes.add(code5)
                     elif status == "err":
                         errors += 1
@@ -288,7 +293,7 @@ def main():
                     error_types[type(e).__name__] += 1
                 if completed % 50 == 0 or completed == len(codes5):
                     print(f"  {completed}/{len(codes5)} "
-                          f"(更新:{updated} データなし:{no_data} エラー:{errors} +バー:{total_bars:,})",
+                          f"(更新:{updated} データなし:{no_data} スキップ:{skipped} エラー:{errors} +バー:{total_bars:,})",
                           flush=True)
                 # 進捗保存 (100件ごと)
                 if completed % 100 == 0:
@@ -315,12 +320,18 @@ def main():
 
     print()
     print("=" * 60)
-    print(f"  プライム1800銘柄 更新完了")
+    print(f"  プライム 更新完了")
     print(f"  処理: {len(codes5)}銘柄")
     print(f"  ✓ 更新: {updated}  (バー追加: {total_bars:,})")
     print(f"  ⚪ データなし: {no_data}")
+    print(f"  ⏭ スキップ(既に最新): {skipped}")
     print(f"  ✗ エラー: {errors}")
     print()
+    if args.verbose and verbose_log:
+        print("  詳細ログ:")
+        for line in verbose_log[:30]:
+            print(line)
+        print()
     if error_types:
         print("  エラー種別:")
         for err_type, count in error_types.most_common():
