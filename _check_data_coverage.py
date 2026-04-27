@@ -22,6 +22,38 @@ import pandas as pd
 DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
 
+def _extract_dates(df: pd.DataFrame):
+    """DataFrame から日時インデックス/カラムを抽出して開始・終了日を返す。"""
+    if df is None or df.empty:
+        return None, None
+
+    # ① DatetimeIndex
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.index[0], df.index[-1]
+
+    # ② DateTime カラム (J-Quants V2)
+    for col in ("DateTime", "datetime", "Date"):
+        if col in df.columns:
+            try:
+                dt = pd.to_datetime(df[col], errors="coerce").dropna()
+                if len(dt) > 0:
+                    return dt.iloc[0], dt.iloc[-1]
+            except Exception:
+                continue
+
+    # ③ Date + Time
+    if "Date" in df.columns and "Time" in df.columns:
+        try:
+            dt = pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str),
+                                errors="coerce").dropna()
+            if len(dt) > 0:
+                return dt.iloc[0], dt.iloc[-1]
+        except Exception:
+            pass
+
+    return None, None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--detail", action="store_true",
@@ -57,10 +89,14 @@ def main():
         try:
             df = pickle.loads(f.read_bytes())
             if isinstance(df, pd.DataFrame) and not df.empty:
-                all_starts.append(df.index[0])
-                all_ends.append(df.index[-1])
-                all_lengths.append(len(df))
-                sizes.append(f.stat().st_size)
+                start, end = _extract_dates(df)
+                if start is not None and end is not None:
+                    all_starts.append(start)
+                    all_ends.append(end)
+                    all_lengths.append(len(df))
+                    sizes.append(f.stat().st_size)
+                else:
+                    error_files.append(f"{f.name} (日付なし)")
             else:
                 error_files.append(f.name)
         except Exception as e:
@@ -111,7 +147,10 @@ def main():
     for f in sample_files:
         try:
             df = pickle.loads(f.read_bytes())
-            print(f"{f.stem:<10} {str(df.index[0]):<20} {str(df.index[-1]):<20} "
+            start, end = _extract_dates(df)
+            start_s = str(start)[:19] if start else "N/A"
+            end_s = str(end)[:19] if end else "N/A"
+            print(f"{f.stem:<10} {start_s:<20} {end_s:<20} "
                   f"{len(df):>10,} {f.stat().st_size/1024:>10.1f}")
         except Exception:
             pass
@@ -123,7 +162,10 @@ def main():
     print(f"=" * 70)
     end_date_dist = defaultdict(int)
     for end in all_ends:
-        end_date_dist[end.date()] += 1
+        try:
+            end_date_dist[pd.Timestamp(end).date()] += 1
+        except Exception:
+            pass
     for date in sorted(end_date_dist.keys(), reverse=True)[:10]:
         bar = "█" * min(50, end_date_dist[date] * 50 // len(files))
         print(f"  {date}: {end_date_dist[date]:>5,}  {bar}")
@@ -136,7 +178,8 @@ def main():
         for f in files:
             try:
                 df = pickle.loads(f.read_bytes())
-                print(f"  {f.stem}: {df.index[0]} 〜 {df.index[-1]}  ({len(df):,}本)")
+                start, end = _extract_dates(df)
+                print(f"  {f.stem}: {start} 〜 {end}  ({len(df):,}本)")
             except Exception:
                 pass
 
