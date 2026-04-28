@@ -228,15 +228,22 @@ def main() -> None:
     all_sigs.sort(key=lambda x: x[1], reverse=True)
 
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
+    print(f"  信用購入力: {effective_cash:,.0f}円 (保証金 {args.budget:,.0f}円 × {args.leverage}倍)")
     if all_sigs:
-        print(f"  {'銘柄':<12}{'名前':<22}{'戦略':<6}{'逆指値':>8}"
+        print(f"  {'銘柄':<12}{'名前':<22}{'戦略':<6}{'株価':>8}"
+              f"{'最大株数':>8}{'購入額':>10}{'逆指値':>8}"
               f"{'指値上限':>8}{'損切り':>8}{'目標':>8}  スコア")
-        print("  " + "-" * 100)
+        print("  " + "-" * 130)
         for item, score, rank, kind in all_sigs:
             sig = item["today_sig"]
             limit_entry = sig.get("limit_entry_price", sig["order_price"])
+            price = float(sig["order_price"])
+            # 購入可能株数 (100株単位)
+            max_shares = int(effective_cash // price // 100) * 100
+            cost = max_shares * price
             print(f"  {item['symbol']:<12}{item['name'][:20]:<22}"
                   f"{item['strategy']:<6}"
+                  f"{price:>8,.0f}{max_shares:>7}株{cost:>10,.0f}"
                   f"{sig['order_price']:>8,.0f}{limit_entry:>8,.0f}"
                   f"{sig['stop_price']:>8,.0f}{sig['target_price']:>8,.0f}"
                   f"  {rank}{score}点")
@@ -259,6 +266,35 @@ def main() -> None:
         f"【信用取引版】逆指値シグナルレポート "
         f"(保証金{args.budget/10000:.0f}万×{args.leverage}倍 "
         f"金利{args.interest*100:.1f}% MAX_HOLD={args.max_hold}日)",
+    )
+
+    # シグナル表の直前に購入可能株数の情報を挿入
+    purchase_info = (
+        f'<div style="background:#1e293b;border:1px solid #334155;padding:12px 16px;'
+        f'margin:12px 0;border-radius:6px;font-size:0.88rem">'
+        f'<strong style="color:#fbbf24">信用購入力: {effective_cash:,.0f}円</strong>'
+        f' (保証金 {args.budget:,.0f}円 × {args.leverage}倍)<br>'
+        f'<span style="color:#94a3b8">'
+    )
+    # 各シグナル銘柄の購入可能株数を計算
+    for item, score, rank, kind in all_sigs:
+        sig = item["today_sig"]
+        price = float(sig["order_price"])
+        max_shares = int(effective_cash // price // 100) * 100
+        cost = max_shares * price
+        remaining = effective_cash - cost
+        purchase_info += (
+            f'{item["symbol"]} {item["name"]}: '
+            f'<strong style="color:#4ade80">{max_shares}株</strong> '
+            f'(約{cost:,.0f}円, 残{remaining:,.0f}円)　'
+        )
+    purchase_info += '</span></div>'
+
+    # "要確認" バッジの直後に挿入
+    combined = combined.replace(
+        '要確認</span></h2>',
+        f'要確認</span></h2>\n{purchase_info}',
+        1,  # 最初の1箇所のみ
     )
 
     date_suffix = args.date if args.date else today_str
