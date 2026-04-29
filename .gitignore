@@ -7,3 +7,13 @@ watchlist_*.html
 candidates_*.csv
 report_combined_*.html
 result_summary_*.txt
+daytrade_*_*.html
+
+# downloaded data (too large for git)
+data/
+.jquants_cache/
+
+# credentials (never commit)
+.env
+.env.local
+.env.*.local
