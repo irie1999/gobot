@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.log
+positions_top10/
+.rsi2_cache/
+watchlist_*.html
+candidates_*.csv
+report_combined_*.html
+result_summary_*.txt

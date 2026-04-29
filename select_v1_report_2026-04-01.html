@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V2 銘柄選定レポート 2026-04-01</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;
+     background:#0f172a;color:#e2e8f0;padding:24px;font-size:13px}
+h1{font-size:1.4em;color:#fff;margin-bottom:6px}
+.subtitle{color:#94a3b8;font-size:.85em;margin-bottom:24px}
+h2{font-size:1.1em;margin:0}
+table{width:100%;border-collapse:collapse;margin-bottom:10px}
+th{background:#1e293b;padding:7px 10px;text-align:center;color:#94a3b8;
+    font-weight:600;white-space:nowrap;border-bottom:1px solid #334155}
+td{padding:7px 10px;border-bottom:1px solid #1e293b;white-space:nowrap}
+tr:hover{background:#1e293b}
+.rank{text-align:center;color:#64748b;font-weight:700}
+.name{font-weight:600}
+.name small{color:#64748b;font-weight:400;display:block}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.pos{color:#4ade80}
+.neg{color:#f87171}
+.note{color:#94a3b8;font-size:.8em;margin-top:20px}
+.buy-row td:last-child{color:#4ade80;font-weight:700}
+.sell-row td:last-child{color:#f87171;font-weight:700}
+.hold-row td:last-child{color:#94a3b8;font-weight:700}
+.stock-row:hover{background:#1e293b;cursor:pointer}
+.expand-btn{text-align:center;color:#475569;width:28px}
+</style>
+<script>
+function toggleDetail(sym){
+  var el = document.getElementById('detail-' + sym);
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+</script>
+</head>
+<body>
+<h1>V2 銘柄選定レポート</h1>
+<p class="subtitle">
+  生成: 2026-04-01 &nbsp;|&nbsp;
+  スコア = 期間プラス×3 + 勝率60%以上×2 + 取引2回以上×1 + PF1.5以上×1<br>
+  ★ = 3期間以上プラス &nbsp;|&nbsp; use_consec=False, use_ibs=True (RSI2)
+</p>
+<h2 style="color:#38bdf8;border-left:4px solid #38bdf8;padding-left:10px;margin:30px 0 10px">  MACD V2 本日シグナル（選定銘柄対象） — 2026-04-01</h2><table><thead><tr><th>銘柄</th><th>始値</th><th>終値</th><th>区分</th></tr></thead><tbody><tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr></tbody></table><h2 style="color:#4ade80;border-left:4px solid #4ade80;padding-left:10px;margin:30px 0 10px">  A7 V2 本日シグナル（選定銘柄対象） — 2026-04-01</h2><table><thead><tr><th>銘柄</th><th>始値</th><th>終値</th><th>区分</th></tr></thead><tbody><tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr></tbody></table><h2 style="color:#f59e0b;border-left:4px solid #f59e0b;padding-left:10px;margin:30px 0 10px">  RSI2 V2 本日シグナル（選定銘柄対象） — 2026-04-01</h2><table><thead><tr><th>銘柄</th><th>始値</th><th>終値</th><th>区分</th></tr></thead><tbody><tr><td colspan="6" style="color:#64748b;text-align:center">買いシグナルなし</td></tr></tbody></table>
+<p class="note">
+  ※ 各戦略の V2 パラメータ使用<br>
+  ※ MACD V2: VOL_SPIKE×1.0 / RSI上限65 / MA200フィルター無効<br>
+  ※ A7 V2: STOCH_K=9 / 50MA トレンドフィルター / 過熱判定80<br>
+  ※ RSI2 V2: NORMAL ENTRY≤15 / HV ENTRY≤8 / 連続RSI確認なし
+</p>
+</body>
+</html>

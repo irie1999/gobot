@@ -4,13 +4,12 @@ https://kabucom.github.io/kabusapi/ptal/index.html
 """
 
 import requests
-import json
 
 
 # ---- 設定 ----
 API_PASSWORD = "your_password_here"   # kabuステーションのAPIパスワード
-BASE_URL = "http://localhost:18080"    # 本番: 18080 / 本番(SSL): 18081
-                                       # デモ:  18081 は使わず 18080 を使う
+BASE_URL = "http://localhost:18081"    # 本番: 18080 / 本番(SSL): 18081
+                                       # デモ:  18081
 # ---- トークン取得 ----
 
 def get_token(password: str, base_url: str = BASE_URL) -> str:
@@ -33,7 +32,7 @@ def get_token(password: str, base_url: str = BASE_URL) -> str:
     headers = {"Content-Type": "application/json"}
     body = {"APIPassword": password}
 
-    response = requests.post(url, headers=headers, data=json.dumps(body))
+    response = requests.post(url, headers=headers, json=body)
     response.raise_for_status()
 
     token = response.json().get("Token")
