@@ -369,13 +369,16 @@ def run_limit_backtest(
     target_atr_mult: float,
     backtest_days: int,
     strategy_name: str,
-    entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う）
+    entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う） / "stop_sell"=逆指値売り
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
 
-    entry_type="limit": 安値 <= order_price で約定（押し目買い）
-    entry_type="stop" : 高値 >= order_price で約定（ブレイクアウト買い）
+    entry_type="limit"    : 安値 <= order_price で約定（押し目買い）
+    entry_type="stop"     : 高値 >= order_price で約定（ブレイクアウト買い）
+    entry_type="stop_sell": 安値 <= order_price で約定（逆指値売り・空売り）
+                            order_p = close - atr*em, stop (損切り) = order_p + atr*sm (上方)
+                            target (利確) = order_p - atr*tm (下方), PnL=(entry-exit)*qty
 
     Returns: per-symbol result dict
     """
@@ -394,6 +397,7 @@ def run_limit_backtest(
 
     trades: list[dict] = []
     signals = 0
+    is_short = (entry_type == "stop_sell")
 
     # 状態変数
     state         = "idle"    # idle / pending / in_pos
@@ -429,29 +433,37 @@ def run_limit_backtest(
                 # 有効期限切れ → キャンセル
                 state = "idle"
 
-            elif (entry_type == "stop" and hi >= limit_price) or \
-                 (entry_type != "stop" and lo <= limit_price):
+            elif (entry_type == "stop"      and hi >= limit_price) or \
+                 (entry_type == "stop_sell" and lo <= limit_price) or \
+                 (entry_type == "limit"     and lo <= limit_price):
                 # 約定
-                # スリッページ: 逆指値買いは不利な方向に +X%
                 if entry_type == "stop":
                     entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
+                elif entry_type == "stop_sell":
+                    entry_p = limit_price * (1.0 - SLIPPAGE_STOP_PCT)
                 else:
                     entry_p = limit_price * (1.0 + SLIPPAGE_LIMIT_PCT)
                 entry_dt      = dt
                 hold_start    = i
-                days_to_fill  = i - signal_idx   # シグナルから約定までの営業日数
+                days_to_fill  = i - signal_idx
                 qty           = FIXED_QTY
                 state         = "in_pos"
 
                 # 約定と同日に決済が発生するか確認
-                if hi >= target_price and lo <= stop_price:
-                    # 両方ヒット → 目標達成優先（有利な方）
+                if is_short:
+                    hit_tgt = lo <= target_price
+                    hit_stp = hi >= stop_price
+                else:
+                    hit_tgt = hi >= target_price
+                    hit_stp = lo <= stop_price
+
+                if hit_tgt and hit_stp:
                     exit_p      = target_price
                     exit_reason = "目標達成"
-                elif hi >= target_price:
+                elif hit_tgt:
                     exit_p      = target_price
                     exit_reason = "目標達成"
-                elif lo <= stop_price:
+                elif hit_stp:
                     exit_p      = stop_price
                     exit_reason = "損切り"
                 else:
@@ -459,17 +471,23 @@ def run_limit_backtest(
                     exit_reason = None
 
                 if exit_p is not None:
-                    # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
                     if exit_reason == "損切り":
-                        exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                        if is_short:
+                            exit_p = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                        else:
+                            exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
                     if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
-                        # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
                         fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
-                        pnl = (exit_p - entry_p) * qty - fee
+                        if is_short:
+                            pnl = (entry_p - exit_p) * qty - fee
+                            pct = (entry_p - exit_p) / entry_p * 100
+                        else:
+                            pnl = (exit_p - entry_p) * qty - fee
+                            pct = (exit_p - entry_p) / entry_p * 100
                         trades.append(dict(
                             entry_dt=entry_dt, exit_dt=dt,
                             entry_p=entry_p, exit_p=exit_p, qty=qty,
-                            pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                            pnl=pnl, pct=pct,
                             fee=round(fee, 0),
                             hold_days=0, days_to_fill=days_to_fill,
                             signal_dt=signal_dt, signal_price=signal_price,
@@ -485,14 +503,20 @@ def run_limit_backtest(
             exit_p    = None
             exit_reason = None
 
-            if hi >= target_price and lo <= stop_price:
-                # 両方ヒット → 目標達成優先（有利な方）
+            if is_short:
+                hit_tgt = lo <= target_price
+                hit_stp = hi >= stop_price
+            else:
+                hit_tgt = hi >= target_price
+                hit_stp = lo <= stop_price
+
+            if hit_tgt and hit_stp:
                 exit_p      = target_price
                 exit_reason = "目標達成"
-            elif hi >= target_price:
+            elif hit_tgt:
                 exit_p      = target_price
                 exit_reason = "目標達成"
-            elif lo <= stop_price:
+            elif hit_stp:
                 exit_p      = stop_price
                 exit_reason = "損切り"
             elif hold_days >= MAX_HOLD:
@@ -500,20 +524,25 @@ def run_limit_backtest(
                 exit_reason = "タイムカット"
 
             if exit_p is not None:
-                # 異常価格ガード: exit_p が entry_p の 0.1〜10倍の範囲外はスキップ
                 if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):
                     state = "idle"
                     continue
-                # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
                 if exit_reason == "損切り":
-                    exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
-                # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                    if is_short:
+                        exit_p = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                    else:
+                        exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
                 fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
-                pnl = (exit_p - entry_p) * qty - fee
+                if is_short:
+                    pnl = (entry_p - exit_p) * qty - fee
+                    pct = (entry_p - exit_p) / entry_p * 100
+                else:
+                    pnl = (exit_p - entry_p) * qty - fee
+                    pct = (exit_p - entry_p) / entry_p * 100
                 trades.append(dict(
                     entry_dt=entry_dt, exit_dt=dt,
                     entry_p=entry_p, exit_p=exit_p, qty=qty,
-                    pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                    pnl=pnl, pct=pct,
                     fee=round(fee, 0),
                     hold_days=hold_days, days_to_fill=days_to_fill,
                     signal_dt=signal_dt, signal_price=signal_price,
@@ -540,17 +569,26 @@ def run_limit_backtest(
                 continue
 
             if entry_type == "stop":
-                # 逆指値：終値 + ATR×mult を上抜けたら買う
+                # 逆指値（買い）：終値 + ATR×mult を上抜けたら買う
                 lp = close_prev + atr_prev * entry_atr_mult
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
+            elif entry_type == "stop_sell":
+                # 逆指値（売り）：終値 - ATR×mult を下抜けたら売る
+                lp = close_prev - atr_prev * entry_atr_mult
+                sp = lp + atr_prev * stop_atr_mult   # 損切り (ABOVE entry)
+                tp = lp - atr_prev * target_atr_mult  # 目標   (BELOW entry)
+                if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
+                    continue
             else:
                 # 指値：終値 - ATR×mult まで下がれば買う
                 lp = close_prev - atr_prev * entry_atr_mult
-
-            sp = lp - atr_prev * stop_atr_mult
-            tp = lp + atr_prev * target_atr_mult
-
-            if lp <= 0 or sp <= 0 or tp <= lp:
-                continue
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
 
             signals += 1
 
@@ -568,13 +606,17 @@ def run_limit_backtest(
     if state == "in_pos" and entry_dt is not None:
         cl_last = float(df.iloc[-1]["close"])
         hold_days = len(df) - 1 - hold_start
-        # 未決済ポジションにも手数料 (往復) を控除
         fee = (entry_p + cl_last) * qty * FEE_PCT_ONE_WAY
-        pnl = (cl_last - entry_p) * qty - fee
+        if is_short:
+            pnl = (entry_p - cl_last) * qty - fee
+            pct = (entry_p - cl_last) / entry_p * 100
+        else:
+            pnl = (cl_last - entry_p) * qty - fee
+            pct = (cl_last - entry_p) / entry_p * 100
         trades.append(dict(
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=cl_last, qty=qty,
-            pnl=pnl, pct=(cl_last - entry_p) / entry_p * 100,
+            pnl=pnl, pct=pct,
             fee=round(fee, 0),
             hold_days=hold_days, days_to_fill=days_to_fill,
             signal_dt=signal_dt, signal_price=signal_price,
