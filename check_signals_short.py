@@ -40,6 +40,7 @@ import pandas as pd
 from backtest_limit_entry import (
     fetch,
     calc_macd_short, calc_a7_short, calc_rsi2_short,
+    calc_donchian_short, calc_vol_breakdown, calc_momentum_short,
     run_limit_backtest,
     fetch_n225_return,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
@@ -77,20 +78,53 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("4063.T", "信越化学工業",           "RSI2_S"),
     ("6594.T", "日本電産（ニデック）",   "RSI2_S"),
     ("4901.T", "富士フイルムHD",         "RSI2_S"),
+    # ── DON_S ドンチャン安値ブレイクダウン候補 ──
+    ("7201.T", "日産自動車",             "DON_S"),
+    ("4689.T", "LINEヤフー",             "DON_S"),
+    ("2413.T", "エムスリー",             "DON_S"),
+    ("6752.T", "パナソニックHD",         "DON_S"),
+    ("4901.T", "富士フイルムHD",         "DON_S"),
+    ("6594.T", "日本電産（ニデック）",   "DON_S"),
+    ("6981.T", "村田製作所",             "DON_S"),
+    ("4568.T", "第一三共",               "DON_S"),
+    # ── VOL_S 出来高急増ブレイクダウン候補 ──
+    ("9984.T", "ソフトバンクグループ",   "VOL_S"),
+    ("6758.T", "ソニーグループ",         "VOL_S"),
+    ("8035.T", "東京エレクトロン",       "VOL_S"),
+    ("6861.T", "キーエンス",             "VOL_S"),
+    ("4063.T", "信越化学工業",           "VOL_S"),
+    ("6367.T", "ダイキン工業",           "VOL_S"),
+    ("6702.T", "富士通",                 "VOL_S"),
+    ("4543.T", "テルモ",                 "VOL_S"),
+    # ── MOM_S モメンタム下落候補 ──
+    ("7201.T", "日産自動車",             "MOM_S"),
+    ("2413.T", "エムスリー",             "MOM_S"),
+    ("4689.T", "LINEヤフー",             "MOM_S"),
+    ("6752.T", "パナソニックHD",         "MOM_S"),
+    ("9984.T", "ソフトバンクグループ",   "MOM_S"),
+    ("6702.T", "富士通",                 "MOM_S"),
+    ("7974.T", "任天堂",                 "MOM_S"),
+    ("4568.T", "第一三共",               "MOM_S"),
 ]
 
 # ── ショート戦略パラメータ ─────────────────────────────────────────
 # conservative (デフォルト): 2R 設定
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "MACD_S":  (calc_macd_short,  0.0, 1.5, 3.0),
-    "A7_S":    (calc_a7_short,    0.0, 1.5, 3.0),
-    "RSI2_S":  (calc_rsi2_short,  0.0, 2.0, 4.0),
+    "MACD_S":  (calc_macd_short,     0.0, 1.5, 3.0),
+    "A7_S":    (calc_a7_short,       0.0, 1.5, 3.0),
+    "RSI2_S":  (calc_rsi2_short,     0.0, 2.0, 4.0),
+    "DON_S":   (calc_donchian_short, 0.0, 1.5, 3.0),
+    "VOL_S":   (calc_vol_breakdown,  0.0, 1.5, 3.0),
+    "MOM_S":   (calc_momentum_short, 0.0, 1.5, 3.0),
 }
 # aggressive: 1.5R 設定（回転率優先）
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "MACD_S":  (calc_macd_short,  0.0, 1.0, 1.5),
-    "A7_S":    (calc_a7_short,    0.0, 1.0, 1.5),
-    "RSI2_S":  (calc_rsi2_short,  0.0, 1.2, 1.8),
+    "MACD_S":  (calc_macd_short,     0.0, 1.0, 1.5),
+    "A7_S":    (calc_a7_short,       0.0, 1.0, 1.5),
+    "RSI2_S":  (calc_rsi2_short,     0.0, 1.2, 1.8),
+    "DON_S":   (calc_donchian_short, 0.0, 1.0, 1.5),
+    "VOL_S":   (calc_vol_breakdown,  0.0, 1.0, 1.5),
+    "MOM_S":   (calc_momentum_short, 0.0, 1.0, 1.5),
 }
 
 TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
@@ -295,7 +329,7 @@ def build_html(all_items: list[dict], show_days: int,
     period_subheads = "<th>取引</th><th>勝率</th><th>PF</th><th>損益</th>" * len(PERIODS)
 
     stock_rows = ""
-    for strat in ["MACD_S", "A7_S", "RSI2_S"]:
+    for strat in ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]:
         items = [i for i in all_items if i["strategy"] == strat]
         items.sort(
             key=lambda x: (x["period_results"].get(show_days) or {}).get("total_pnl", -999999),
@@ -435,6 +469,9 @@ def build_html(all_items: list[dict], show_days: int,
   .tag-macd-s  {{ background:#831843; color:#fbcfe8; }}
   .tag-a7-s    {{ background:#7c2d12; color:#fed7aa; }}
   .tag-rsi2-s  {{ background:#4c1d95; color:#ddd6fe; }}
+  .tag-don-s   {{ background:#134e4a; color:#99f6e4; }}
+  .tag-vol-s   {{ background:#1e3a5f; color:#93c5fd; }}
+  .tag-mom-s   {{ background:#3b1f2b; color:#f9a8d4; }}
   .signal-badge {{ background:#f472b6; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .fill-stat {{ color:#f472b6; font-size:0.82rem; margin-bottom:6px; }}
@@ -600,7 +637,7 @@ def main() -> None:
     print(f"\n【銘柄別バックテスト ({show_days}日)】")
     print(f"  {'銘柄':<12} {'名前':<20} {'戦略':<8} {'取引':>4} {'勝率':>6} {'PF':>6} {'損益':>10}")
     print("  " + "-" * 72)
-    for strat in ["MACD_S", "A7_S", "RSI2_S"]:
+    for strat in ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]:
         for item in [i for i in all_items if i["strategy"] == strat]:
             r = item["period_results"].get(show_days)
             if not r:

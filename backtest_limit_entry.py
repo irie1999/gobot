@@ -467,6 +467,70 @@ def calc_rsi2_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_donchian_short(df: pd.DataFrame) -> pd.DataFrame:
+    """ドンチャン安値ブレイクダウン × MA50下方フィルター（空売り用）。
+    ロング版 calc_donchian の鏡: 終値 < 15日安値(前日) AND 終値 < MA50
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    low15 = l.rolling(15).min().shift(1)   # 前日時点の15日安値
+    ma50  = c.rolling(50).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (c < low15) & (c < ma50)
+    return df
+
+
+def calc_vol_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """出来高急増ブレイクダウン × 安値更新（空売り用）。
+    ロング版 calc_vol_breakout の鏡: 終値 < 5日安値(前日) AND 出来高 > 20日平均×1.5
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    low5   = l.rolling(5).min().shift(1)   # 前日時点の5日安値
+    vol_ma = v.rolling(20).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (c < low5) & (v > vol_ma * 1.5)
+    return df
+
+
+def calc_momentum_short(df: pd.DataFrame) -> pd.DataFrame:
+    """モメンタム下落 × トレンド下降フィルター（空売り用）。
+    ロング版 calc_momentum の鏡: ROC(10) < -3% AND MA25 < MA75 AND 出来高>20日平均×1.2
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    roc    = c.pct_change(10) * 100
+    ma25   = c.rolling(25).mean()
+    ma75   = c.rolling(75).mean()
+    vol_ma = v.rolling(20).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (roc < -3.0) & (ma25 < ma75) & (v > vol_ma * 1.2)
+    return df
+
+
 # ── 指値エントリー バックテスト ─────────────────────────────────
 def run_limit_backtest(
     symbol: str,
