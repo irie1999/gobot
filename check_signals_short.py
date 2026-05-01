@@ -239,13 +239,16 @@ def build_html(all_items: list[dict], show_days: int,
                date_label: str = "本日") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
-    # ── 戦略サマリー ──────────────────────────────────────────────
-    strategy_summary: dict[str, dict] = {}
+    # ── 戦略サマリー（全6戦略を常に表示） ─────────────────────────
+    ALL_STRATS = ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]
+    strategy_summary: dict[str, dict] = {
+        s: dict(trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
+        for s in ALL_STRATS
+    }
     for item in all_items:
         strat = item["strategy"]
         if strat not in strategy_summary:
-            strategy_summary[strat] = dict(
-                trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
+            continue
         pr = item["period_results"].get(show_days) or {}
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
@@ -261,7 +264,8 @@ def build_html(all_items: list[dict], show_days: int,
     n225_ret = fetch_n225_return(show_days)
 
     summary_rows = ""
-    for strat, s in strategy_summary.items():
+    for strat in ALL_STRATS:
+        s   = strategy_summary[strat]
         wr  = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
         pf  = s["gp"] / s["gl"] if s["gl"] > 0 else (float("inf") if s["gp"] > 0 else 0)
         cls = "profit" if s["pnl"] >= 0 else "loss"
@@ -271,8 +275,7 @@ def build_html(all_items: list[dict], show_days: int,
         sharpe     = enriched.get("sharpe", 0.0)
         hs         = enriched.get("hold_stats", {})
         strat_ret_pct = s["pnl"] / _INITIAL_CASH * 100 if _INITIAL_CASH > 0 else 0
-        # ショートは日経が下がるほど α が出る（逆相関）
-        alpha     = strat_ret_pct + n225_ret  # ショートリターン + 日経リターン = α相当
+        alpha     = strat_ret_pct + n225_ret
         alpha_cls = "profit" if alpha >= 0 else "loss"
         dd_cls    = "profit" if max_dd_pct < 10 else ("loss" if max_dd_pct > 20 else "")
         hold_break = []
@@ -285,7 +288,15 @@ def build_html(all_items: list[dict], show_days: int,
         if hs.get("same_day_n", 0):
             hold_break.append(f"同日({hs['same_day_n']})")
         hold_break_str = " / ".join(hold_break) if hold_break else ""
-        summary_rows += f"""
+        # 取引なしの場合は "-" 表示
+        if s["trades"] == 0:
+            summary_rows += f"""
+        <tr>
+          <td><span class="tag tag-{strat.lower().replace('_s','')}-s">{strat}</span></td>
+          <td colspan="10" style="color:#475569;text-align:center">データなし（WATCHLISTを更新してください）</td>
+        </tr>"""
+        else:
+            summary_rows += f"""
         <tr>
           <td><span class="tag tag-{strat.lower().replace('_s','')}-s">{strat}</span></td>
           <td>{s['trades']}</td><td>{s['wins']}</td>
@@ -305,8 +316,8 @@ def build_html(all_items: list[dict], show_days: int,
 
     signal_rows = ""
     for item, (score, rank) in signal_items:
-        sig   = item["today_sig"]
-        strat = item["strategy"]
+        sig      = item["today_sig"]
+        strat    = item["strategy"]
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
         signal_rows += f"""
         <tr>
@@ -316,7 +327,7 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
-          <td class="short-entry">{sig['order_price']:,.0f}</td>
+          <td class="stop">{sig['order_price']:,.0f}</td>
           <td class="limit-entry">{sig.get('limit_short_entry', sig['order_price']):,.0f}</td>
           <td class="profit">{sig['stop_price']:,.0f}</td>
           <td class="loss">{sig['target_price']:,.0f}</td>
@@ -329,7 +340,7 @@ def build_html(all_items: list[dict], show_days: int,
     period_subheads = "<th>取引</th><th>勝率</th><th>PF</th><th>損益</th>" * len(PERIODS)
 
     stock_rows = ""
-    for strat in ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]:
+    for strat in ALL_STRATS:
         items = [i for i in all_items if i["strategy"] == strat]
         items.sort(
             key=lambda x: (x["period_results"].get(show_days) or {}).get("total_pnl", -999999),
@@ -378,35 +389,35 @@ def build_html(all_items: list[dict], show_days: int,
             s_p_str = f"{s_p:,.0f}" if isinstance(s_p, float) else str(s_p)
             dtf     = t.get("days_to_fill", "-")
             fill_days_list.append(dtf) if isinstance(dtf, int) else None
-            ol  = t.get("order_limit")
-            osl = t.get("order_stop")
+            ol      = t.get("order_limit")
+            osl     = t.get("order_stop")
             ol_str  = f"{ol:,.0f}"  if isinstance(ol,  float) else str(ol  or "-")
             osl_str = f"{osl:,.0f}" if isinstance(osl, float) else str(osl or "-")
             trade_rows += f"""
               <tr>
-                <td>{s_str}</td><td class="short-entry">{s_p_str}</td>
+                <td>{s_str}</td><td class="stop">{s_p_str}</td>
                 <td>{e_str}</td><td>{x_str}</td>
-                <td class="short-entry">{ol_str}</td>
+                <td class="stop">{ol_str}</td>
                 <td class="profit">{osl_str}</td>
                 <td>{t['entry_p']:,.0f}</td><td>{t['exit_p']:,.0f}</td>
                 <td>{t['qty']}</td>
                 <td class="{pnl_cls}">{t['pnl']:+,.0f}</td>
                 <td class="{pnl_cls}">{t['pct']:+.2f}%</td>
                 <td>{t['hold_days']}日</td>
-                <td class="short-entry">{dtf}日</td>
+                <td class="stop">{dtf}日</td>
                 <td>{t['reason']}</td>
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
         pc2       = "profit" if pnl_total >= 0 else "loss"
         if fill_days_list:
-            avg_f    = sum(fill_days_list) / len(fill_days_list)
-            dist     = {d: fill_days_list.count(d) for d in sorted(set(fill_days_list))}
-            dist_str = " / ".join(f"{d}日:{n}回" for d, n in dist.items())
+            avg_f     = sum(fill_days_list) / len(fill_days_list)
+            dist      = {d: fill_days_list.count(d) for d in sorted(set(fill_days_list))}
+            dist_str  = " / ".join(f"{d}日:{n}回" for d, n in dist.items())
             fill_stat = f'<p class="fill-stat">約定日数 — 平均:{avg_f:.1f}日 最短:{min(fill_days_list)}日 最長:{max(fill_days_list)}日 | 分布: {dist_str}</p>'
         else:
             fill_stat = ""
-        hs_sec = calc_hold_stats(logs)
+        hs_sec    = calc_hold_stats(logs)
         hold_stat = ""
         if hs_sec["count"] > 0:
             hold_break = []
@@ -420,7 +431,7 @@ def build_html(all_items: list[dict], show_days: int,
                 hold_break.append(f"同日({hs_sec['same_day_n']})")
             if hs_sec["held_n"]:
                 hold_break.append(f"保有中{hs_sec['held_avg']:.1f}日({hs_sec['held_n']})")
-            brk = " / ".join(hold_break)
+            brk       = " / ".join(hold_break)
             hold_stat = f'<p class="hold-stat">保有日数 — 平均:{hs_sec["avg"]:.1f}日 | 内訳: {brk}</p>'
         trade_sections += f"""
       <div class="trade-section">
@@ -452,9 +463,9 @@ def build_html(all_items: list[dict], show_days: int,
 <style>
   * {{ box-sizing:border-box; margin:0; padding:0; }}
   body {{ font-family:"Segoe UI","Hiragino Sans",sans-serif; background:#0f172a; color:#e2e8f0; padding:20px; }}
-  h1 {{ color:#f472b6; margin-bottom:4px; font-size:1.6rem; }}
+  h1 {{ color:#60a5fa; margin-bottom:4px; font-size:1.6rem; }}
   .subtitle {{ color:#94a3b8; margin-bottom:24px; font-size:0.9rem; }}
-  h2 {{ color:#f472b6; margin:28px 0 12px; font-size:1.2rem; border-left:3px solid #f472b6; padding-left:10px; }}
+  h2 {{ color:#60a5fa; margin:28px 0 12px; font-size:1.2rem; border-left:3px solid #60a5fa; padding-left:10px; }}
   h3 {{ color:#e2e8f0; margin:16px 0 8px; font-size:1rem; }}
   table {{ width:100%; border-collapse:collapse; margin-bottom:16px; font-size:0.82rem; }}
   th {{ background:#1e293b; color:#94a3b8; padding:6px 8px; text-align:center; border:1px solid #334155; white-space:nowrap; }}
@@ -463,36 +474,29 @@ def build_html(all_items: list[dict], show_days: int,
   .sym  {{ text-align:left; font-weight:600; min-width:120px; }}
   .profit {{ color:#4ade80; }}
   .loss   {{ color:#f87171; }}
-  .short-entry {{ color:#f472b6; }}
+  .stop   {{ color:#38bdf8; }}
   .limit-entry {{ color:#fb923c; }}
   .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
-  .tag-macd-s  {{ background:#831843; color:#fbcfe8; }}
-  .tag-a7-s    {{ background:#7c2d12; color:#fed7aa; }}
-  .tag-rsi2-s  {{ background:#4c1d95; color:#ddd6fe; }}
-  .tag-don-s   {{ background:#134e4a; color:#99f6e4; }}
-  .tag-vol-s   {{ background:#1e3a5f; color:#93c5fd; }}
-  .tag-mom-s   {{ background:#3b1f2b; color:#f9a8d4; }}
-  .signal-badge {{ background:#f472b6; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
+  .tag-macd-s {{ background:#1d4ed8; color:#bfdbfe; }}
+  .tag-a7-s   {{ background:#065f46; color:#a7f3d0; }}
+  .tag-rsi2-s {{ background:#7c3aed; color:#ddd6fe; }}
+  .tag-don-s  {{ background:#134e4a; color:#99f6e4; }}
+  .tag-vol-s  {{ background:#1e3a5f; color:#93c5fd; }}
+  .tag-mom-s  {{ background:#4c1d95; color:#e9d5ff; }}
+  .signal-badge {{ background:#38bdf8; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
-  .fill-stat {{ color:#f472b6; font-size:0.82rem; margin-bottom:6px; }}
-  .hold-stat {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
+  .fill-stat  {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
+  .hold-stat  {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
   .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-c {{ background:#94a3b8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .score-cell {{ text-align:center; }}
-  .risk-warning {{ background:#450a0a; border:1px solid #991b1b; padding:10px 14px; border-radius:6px;
-                   color:#fca5a5; font-size:0.85rem; margin-bottom:16px; }}
 </style>
 </head>
 <body>
 <h1>監視銘柄 逆指値ショートエントリー バックテスト</h1>
-<div class="risk-warning">
-  ⚠ 空売りはリスクが高く、損失が理論上無限大になる可能性があります。<br>
-  ⚠ 逆日歩・調達コスト・売り建て規制を必ず確認してから実運用してください。<br>
-  ⚠ この出力は投資助言ではありません。投資は自己責任で。
-</div>
 <p class="subtitle">
   生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日 ／
   <span style="color:#fbbf24">モード: <strong>{TRADING_MODE}</strong></span><br>
@@ -500,7 +504,8 @@ def build_html(all_items: list[dict], show_days: int,
   コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値売り-/損切り買戻+）／
   手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／
   ベンチマーク: 日経平均 ({show_days}日) <strong>{n225_ret:+.1f}%</strong>
-  <span style="color:#94a3b8;font-size:0.85rem">（ショート戦略では日経下落時に α が出る）</span>
+  <span style="color:#94a3b8;font-size:0.85rem">（ショート: 日経下落時に α が出る）</span><br>
+  <span style="color:#f87171;font-size:0.82rem">⚠ 空売りは損失無限大リスクあり。逆日歩・調達コスト・売り建て規制を必ず確認。</span>
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>
@@ -513,11 +518,11 @@ def build_html(all_items: list[dict], show_days: int,
   <tbody>{summary_rows}</tbody>
 </table>
 
-<h2>ショートシグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
+<h2>シグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
 <p style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px">
-  ※ 逆指値売り（ピンク色）= 翌日安値がこの価格以下になれば空売り発動<br>
-  ※ 指値下限（橙色, -{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%）= 逆指値→指値発注時の最低売価<br>
-  ※ 損切り（緑色）= 買い戻し上限価格（ロスカット）／ 目標（赤色）= 買い戻し目標価格
+  ※ 逆指値売り（青色）= 翌日安値がこの価格以下になれば空売り発動<br>
+  ※ 指値下限（橙色, -{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%）= 逆指値→指値発注時の最低売価。寄付ギャップがこれ以上下なら約定、超えたら不約定<br>
+  ※ 損切り（緑色）= 買い戻し上限価格 ／ 目標（赤色）= 買い戻し目標価格
 </p>
 <table>
   <thead><tr>
