@@ -510,24 +510,25 @@ def calc_vol_breakdown(df: pd.DataFrame) -> pd.DataFrame:
 
 def calc_momentum_short(df: pd.DataFrame) -> pd.DataFrame:
     """モメンタム下落 × トレンド下降フィルター（空売り用）。
-    ロング版 calc_momentum の鏡: ROC(10) < -3% AND MA25 < MA75 AND 出来高>20日平均×1.2
+    ROC(10) < -2% AND MA25 < MA75 AND MA50 < MA200
+    出来高条件は除外（シグナル頻度を確保するため）
     """
     c = df["close"]
     h = df["high"]
     l = df["low"]
-    v = df["volume"]
 
     prev_c = c.shift(1)
     tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     atr    = tr.ewm(span=14, adjust=False).mean()
 
-    roc    = c.pct_change(10) * 100
-    ma25   = c.rolling(25).mean()
-    ma75   = c.rolling(75).mean()
-    vol_ma = v.rolling(20).mean()
+    roc  = c.pct_change(10) * 100
+    ma25 = c.rolling(25).mean()
+    ma50 = c.rolling(50).mean()
+    ma75 = c.rolling(75).mean()
+    ma200= c.rolling(200).mean()
 
     df["atr"]       = atr
-    df["entry_sig"] = (roc < -3.0) & (ma25 < ma75) & (v > vol_ma * 1.2)
+    df["entry_sig"] = (roc < -2.0) & (ma25 < ma75) & (ma50 < ma200)
     return df
 
 

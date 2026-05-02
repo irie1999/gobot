@@ -66,7 +66,7 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("6869.T", "シスメックス",           "MACD_S"),
     ("5406.T", "神戸製鋼所",            "MACD_S"),
     ("7888.T", "三光合成",              "MACD_S"),
-    ("6652.T", "IDEC",                 "MACD_S"),
+    # ("6652.T", "IDEC", "MACD_S"),  # 除外: 365d PF 0.09 (-10,213円) 2026-05-02
     ("8624.T", "いちよし証券",           "MACD_S"),
     # ── A7_S Walk-forward 上位5 ──
     ("2760.T", "東京エレクトロンデバイス", "A7_S"),
@@ -325,6 +325,14 @@ def build_html(all_items: list[dict], show_days: int,
         sig      = item["today_sig"]
         strat    = item["strategy"]
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
+        price    = float(sig["order_price"])
+        # 逆日歩リスク判定: 株価300円以下 or 500円以下は注意
+        if price <= 300:
+            gyaku_badge = '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72rem">⚠逆日歩高</span>'
+        elif price <= 500:
+            gyaku_badge = '<span style="background:#d97706;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72rem">⚠逆日歩注意</span>'
+        else:
+            gyaku_badge = '<span style="color:#4ade80;font-size:0.72rem">✓貸株確認を</span>'
         signal_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
@@ -337,9 +345,10 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="limit-entry">{sig.get('limit_short_entry', sig['order_price']):,.0f}</td>
           <td class="profit">{sig['stop_price']:,.0f}</td>
           <td class="loss">{sig['target_price']:,.0f}</td>
+          <td style="text-align:center">{gyaku_badge}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="10" style="text-align:center;color:#94a3b8">{date_label} ショートシグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="11" style="text-align:center;color:#94a3b8">{date_label} ショートシグナルなし</td></tr>'
 
     # ── 4期間比較 ────────────────────────────────────────────────
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -538,6 +547,7 @@ def build_html(all_items: list[dict], show_days: int,
     <th>現在値</th><th>逆指値(売)<br><small>(トリガー)</small></th>
     <th>指値下限<br><small>(-{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th>
     <th>損切り<br><small>(買戻上限)</small></th><th>目標<br><small>(買戻目標)</small></th>
+    <th>逆日歩<br><small>リスク</small></th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
@@ -646,12 +656,14 @@ def main() -> None:
               f"{'信号株価':>8} {'現在値':>8} {'逆指値(売)':>10} {'損切り':>8} {'目標':>8} スコア")
         print("  " + "-" * 115)
         for item, (score, rank) in signals_today:
-            sig = item["today_sig"]
+            sig   = item["today_sig"]
+            price = float(sig["order_price"])
+            gyaku = " ⚠逆日歩高" if price <= 300 else (" ⚠逆日歩注意" if price <= 500 else "")
             print(f"  {item['symbol']:<12} {item['name']:<20} {item['strategy']:<8}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>10,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
-                  f"  {rank}{score}点")
+                  f"  {rank}{score}点{gyaku}")
     else:
         print("  (なし)")
 
