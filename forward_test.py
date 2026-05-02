@@ -60,6 +60,7 @@ elif "--conservative" in sys.argv:
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
+import check_signals_short    as _short
 
 from backtest_limit_entry import (
     fetch,
@@ -134,8 +135,9 @@ def collect_today_signals() -> list[dict]:
                 ))
         return out
 
-    signals.extend(_scan_group(_stop, "stop"))
-    signals.extend(_scan_group(_brk,  "breakout"))
+    signals.extend(_scan_group(_stop,  "stop"))
+    signals.extend(_scan_group(_brk,   "breakout"))
+    signals.extend(_scan_group(_short, "short_stop"))
     return signals
 
 
@@ -154,6 +156,7 @@ def evaluate_entry(row: dict) -> dict:
     order_price  = float(row["order_price"])
     stop_price   = float(row["stop_price"])
     target_price = float(row["target_price"])
+    is_short     = row.get("family") == "short_stop"
 
     df = fetch(symbol, 400)
     if df is None or len(df) < 5:
@@ -197,30 +200,49 @@ def evaluate_entry(row: dict) -> dict:
                 row["updated_date"] = str(TODAY)
                 return row
             hi = float(r["high"])
-            if hi >= order_price:
-                # 約定 (逆指値): スリッページ込みの entry_p
-                entry_p = order_price * (1.0 + SLIPPAGE_STOP_PCT)
+            lo = float(r["low"])
+            filled_now = (lo <= order_price) if is_short else (hi >= order_price)
+            if filled_now:
+                if is_short:
+                    # 逆指値売り: 不利な方向（安め）にスリッページ
+                    entry_p = order_price * (1.0 - SLIPPAGE_STOP_PCT)
+                else:
+                    entry_p = order_price * (1.0 + SLIPPAGE_STOP_PCT)
                 row["fill_date"]  = dt.strftime("%Y-%m-%d")
                 row["fill_price"] = round(entry_p, 2)
                 state = "filled"
                 fill_idx = i
                 # 同日に決済可能か
-                lo = float(r["low"])
-                if hi >= target_price and lo <= stop_price:
-                    exit_price = target_price
-                    exit_reason = "target"
-                elif hi >= target_price:
-                    exit_price = target_price
-                    exit_reason = "target"
-                elif lo <= stop_price:
-                    exit_price = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
-                    exit_reason = "stop"
+                if is_short:
+                    # ショート: 目標=さらに安く, 損切り=高値が止値超え
+                    if lo <= target_price and hi >= stop_price:
+                        exit_price  = target_price
+                        exit_reason = "target"
+                    elif lo <= target_price:
+                        exit_price  = target_price
+                        exit_reason = "target"
+                    elif hi >= stop_price:
+                        exit_price  = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                        exit_reason = "stop"
+                else:
+                    if hi >= target_price and lo <= stop_price:
+                        exit_price  = target_price
+                        exit_reason = "target"
+                    elif hi >= target_price:
+                        exit_price  = target_price
+                        exit_reason = "target"
+                    elif lo <= stop_price:
+                        exit_price  = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
+                        exit_reason = "stop"
                 if exit_reason:
                     row["exit_date"]  = dt.strftime("%Y-%m-%d")
                     row["exit_price"] = round(exit_price, 2)
                     row["status"]     = exit_reason
                     fee = (entry_p + exit_price) * FIXED_QTY * FEE_PCT_ONE_WAY
-                    row["pnl"]        = round((exit_price - entry_p) * FIXED_QTY - fee, 0)
+                    if is_short:
+                        row["pnl"] = round((entry_p - exit_price) * FIXED_QTY - fee, 0)
+                    else:
+                        row["pnl"] = round((exit_price - entry_p) * FIXED_QTY - fee, 0)
                     row["updated_date"] = str(TODAY)
                     return row
                 break
@@ -240,24 +262,41 @@ def evaluate_entry(row: dict) -> dict:
             hi = float(r["high"])
             lo = float(r["low"])
             cl = float(r["close"])
-            if hi >= target_price and lo <= stop_price:
-                exit_price = target_price
-                exit_reason = "target"
-            elif hi >= target_price:
-                exit_price = target_price
-                exit_reason = "target"
-            elif lo <= stop_price:
-                exit_price = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
-                exit_reason = "stop"
-            elif hold_days >= MAX_HOLD:
-                exit_price = cl
-                exit_reason = "timeout"
+            if is_short:
+                if lo <= target_price and hi >= stop_price:
+                    exit_price  = target_price
+                    exit_reason = "target"
+                elif lo <= target_price:
+                    exit_price  = target_price
+                    exit_reason = "target"
+                elif hi >= stop_price:
+                    exit_price  = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                    exit_reason = "stop"
+                elif hold_days >= MAX_HOLD:
+                    exit_price  = cl
+                    exit_reason = "timeout"
+            else:
+                if hi >= target_price and lo <= stop_price:
+                    exit_price  = target_price
+                    exit_reason = "target"
+                elif hi >= target_price:
+                    exit_price  = target_price
+                    exit_reason = "target"
+                elif lo <= stop_price:
+                    exit_price  = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
+                    exit_reason = "stop"
+                elif hold_days >= MAX_HOLD:
+                    exit_price  = cl
+                    exit_reason = "timeout"
             if exit_reason:
                 row["exit_date"]  = dt.strftime("%Y-%m-%d")
                 row["exit_price"] = round(exit_price, 2)
                 row["status"]     = exit_reason
                 fee = (entry_p + exit_price) * FIXED_QTY * FEE_PCT_ONE_WAY
-                row["pnl"]        = round((exit_price - entry_p) * FIXED_QTY - fee, 0)
+                if is_short:
+                    row["pnl"] = round((entry_p - exit_price) * FIXED_QTY - fee, 0)
+                else:
+                    row["pnl"] = round((exit_price - entry_p) * FIXED_QTY - fee, 0)
                 row["updated_date"] = str(TODAY)
                 return row
 
@@ -391,7 +430,8 @@ def cmd_report(days: int | None = None) -> None:
     print("ファミリー別集計")
     print("=" * 78)
 
-    for family_label, family_key in [("逆指値B", "stop"), ("ブレイクアウト", "breakout")]:
+    for family_label, family_key in [("逆指値B", "stop"), ("ブレイクアウト", "breakout"),
+                                      ("ショート", "short_stop")]:
         filtered = [r for r in rows if r.get("family") == family_key]
         if not filtered:
             continue
