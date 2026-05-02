@@ -75,6 +75,8 @@ import pandas as pd
 from backtest_limit_entry import (
     fetch,
     calc_macd, calc_a7, calc_rsi2,
+    calc_macd_short, calc_a7_short, calc_rsi2_short,
+    calc_donchian_short, calc_vol_breakdown, calc_momentum_short,
     run_limit_backtest,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -138,20 +140,34 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 # (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family)
 # TRADING_MODE=aggressive のとき積極利確プリセットを使う
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.5, 3.0, "stop"),
-    "A7":   (calc_a7,          0.0, 1.5, 3.0, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 2.0, 4.0, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.5, 3.0, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.5, 3.0, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.5, 3.0, "breakout"),
+    "MACD":   (calc_macd,          0.0, 1.5, 3.0, "stop"),
+    "A7":     (calc_a7,            0.0, 1.5, 3.0, "stop"),
+    "RSI2":   (calc_rsi2,          0.0, 2.0, 4.0, "stop"),
+    "DON":    (calc_donchian,      0.0, 1.5, 3.0, "breakout"),
+    "VOL":    (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout"),
+    "MOM":    (calc_momentum,      0.0, 1.5, 3.0, "breakout"),
+    # ── ショート戦略 ──
+    "MACD_S": (calc_macd_short,    0.0, 1.5, 3.0, "short_stop"),
+    "A7_S":   (calc_a7_short,      0.0, 1.5, 3.0, "short_stop"),
+    "RSI2_S": (calc_rsi2_short,    0.0, 2.0, 4.0, "short_stop"),
+    "DON_S":  (calc_donchian_short,0.0, 1.5, 3.0, "short_stop"),
+    "VOL_S":  (calc_vol_breakdown, 0.0, 1.5, 3.0, "short_stop"),
+    "MOM_S":  (calc_momentum_short,0.0, 1.5, 3.0, "short_stop"),
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.0, 1.5, "stop"),
-    "A7":   (calc_a7,          0.0, 1.0, 1.5, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 1.2, 1.8, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.0, 1.5, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.0, 1.5, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.0, 1.5, "breakout"),
+    "MACD":   (calc_macd,          0.0, 1.0, 1.5, "stop"),
+    "A7":     (calc_a7,            0.0, 1.0, 1.5, "stop"),
+    "RSI2":   (calc_rsi2,          0.0, 1.2, 1.8, "stop"),
+    "DON":    (calc_donchian,      0.0, 1.0, 1.5, "breakout"),
+    "VOL":    (calc_vol_breakout,  0.0, 1.0, 1.5, "breakout"),
+    "MOM":    (calc_momentum,      0.0, 1.0, 1.5, "breakout"),
+    # ── ショート戦略 ──
+    "MACD_S": (calc_macd_short,    0.0, 1.0, 1.5, "short_stop"),
+    "A7_S":   (calc_a7_short,      0.0, 1.0, 1.5, "short_stop"),
+    "RSI2_S": (calc_rsi2_short,    0.0, 1.2, 1.8, "short_stop"),
+    "DON_S":  (calc_donchian_short,0.0, 1.0, 1.5, "short_stop"),
+    "VOL_S":  (calc_vol_breakdown, 0.0, 1.0, 1.5, "short_stop"),
+    "MOM_S":  (calc_momentum_short,0.0, 1.0, 1.5, "short_stop"),
 }
 
 import os as _os
@@ -266,9 +282,9 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 
     for fold_name, ts, te, vs, ve in FOLDS:
         train_r = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              ts, te, strategy_name)
+                              ts, te, strategy_name, entry_type=family)
         test_r  = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              vs, ve, strategy_name)
+                              vs, ve, strategy_name, entry_type=family)
 
         pass_train = _passes_train(train_r)
         pass_test  = _passes_test(test_r)
@@ -342,7 +358,9 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 # ── メイン ───────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-forward 銘柄スキャナー")
-    parser.add_argument("--family",  choices=["stop", "breakout", "both"], default="both")
+    parser.add_argument("--family",
+                        choices=["stop", "breakout", "short_stop", "both"],
+                        default="both")
     parser.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
     parser.add_argument("--top",     type=int, default=30,
                         help="表示する上位N (CSVは全件保存)")
@@ -367,8 +385,11 @@ def main() -> None:
         strategies = ["MACD", "A7", "RSI2"]
     elif args.family == "breakout":
         strategies = ["DON", "VOL", "MOM"]
+    elif args.family == "short_stop":
+        strategies = ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]
     else:
-        strategies = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+        strategies = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM",
+                      "MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]
 
     # ユニバース読み込み
     try:
