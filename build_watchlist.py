@@ -24,6 +24,8 @@ check_signals_stop.py / check_signals_breakout.py の WATCHLIST に
   python build_watchlist.py --max-dd 10
   python build_watchlist.py --min-sharpe 0.3
   python build_watchlist.py --input-dir walkforward_results
+  python build_watchlist.py --family short_stop   # ショートのみ
+  python build_watchlist.py --family all          # ロング+ショート全戦略
 
 【予算フィルター】 (CSV に latest_price がある場合のみ有効)
   python build_watchlist.py --budget 600000       # 60万円で100株買える銘柄のみ
@@ -143,6 +145,9 @@ def main() -> None:
     parser.add_argument("--input-dir",   type=Path, default=Path("walkforward_results"))
     parser.add_argument("--date",        type=str, default=str(TODAY),
                         help="読み込む CSV の日付 (デフォルト本日)")
+    parser.add_argument("--family",      choices=["stop", "breakout", "short_stop", "all"],
+                        default="all",
+                        help="処理する戦略ファミリー (デフォルト: all)")
     args = parser.parse_args()
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
@@ -150,9 +155,18 @@ def main() -> None:
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    strategies_stop = ["MACD", "A7", "RSI2"]
-    strategies_brk  = ["DON", "VOL", "MOM"]
-    all_strats      = strategies_stop + strategies_brk
+    strategies_stop  = ["MACD", "A7", "RSI2"]
+    strategies_brk   = ["DON", "VOL", "MOM"]
+    strategies_short = ["MACD_S", "A7_S", "RSI2_S", "DON_S", "VOL_S", "MOM_S"]
+
+    if args.family == "stop":
+        all_strats = strategies_stop
+    elif args.family == "breakout":
+        all_strats = strategies_brk
+    elif args.family == "short_stop":
+        all_strats = strategies_short
+    else:
+        all_strats = strategies_stop + strategies_brk + strategies_short
 
     print("=" * 78)
     print(f"WATCHLIST 構築  基準日: {args.date}")
@@ -166,8 +180,9 @@ def main() -> None:
     print(f"  選定数    : 戦略あたり {args.per_strategy} 銘柄")
     print("=" * 78)
 
-    stop_blocks: list[str] = []
-    brk_blocks:  list[str] = []
+    stop_blocks:  list[str] = []
+    brk_blocks:   list[str] = []
+    short_blocks: list[str] = []
 
     total_candidates = 0
     total_selected   = 0
@@ -215,6 +230,8 @@ def main() -> None:
         block = format_watchlist_block(top, f"{strategy} Walk-forward 上位 {len(top)}")
         if strategy in strategies_stop:
             stop_blocks.append(block)
+        elif strategy in strategies_short:
+            short_blocks.append(block)
         else:
             brk_blocks.append(block)
 
@@ -244,7 +261,14 @@ def main() -> None:
         f.write("# check_signals_breakout.py の WATCHLIST に貼り付け (ブレイクアウト)\n")
         f.write("# ============================================================\n")
         f.write("BRK_WATCHLIST: list[tuple[str, str, str]] = [\n")
-        f.write("\n".join(brk_blocks))
+        f.write("\n".join(brk_blocks) if brk_blocks else "")
+        f.write("\n]\n\n")
+
+        f.write("# ============================================================\n")
+        f.write("# check_signals_short.py の WATCHLIST に貼り付け (ショート)\n")
+        f.write("# ============================================================\n")
+        f.write("SHORT_WATCHLIST: list[tuple[str, str, str]] = [\n")
+        f.write("\n".join(short_blocks) if short_blocks else "")
         f.write("\n]\n")
 
     print(f"\n" + "=" * 78)
@@ -252,10 +276,11 @@ def main() -> None:
     print(f"  選定総数: {total_selected} 銘柄")
     print("=" * 78)
     print(f"\n次ステップ:")
-    print(f"  1. {out_path.name} を開き、STOP_WATCHLIST / BRK_WATCHLIST を確認")
+    print(f"  1. {out_path.name} を開き、STOP_WATCHLIST / BRK_WATCHLIST / SHORT_WATCHLIST を確認")
     print(f"  2. check_signals_stop.py の WATCHLIST を置き換え")
     print(f"  3. check_signals_breakout.py の WATCHLIST を置き換え")
-    print(f"  4. python run_signals.py --days 365 で比較検証")
+    print(f"  4. check_signals_short.py の WATCHLIST を置き換え")
+    print(f"  5. python run_signals.py --days 365 で比較検証")
 
 
 if __name__ == "__main__":
