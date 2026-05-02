@@ -134,7 +134,8 @@ else:
     STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
     TRADING_MODE = "conservative"
 
-ENTRY_TYPE = "short_stop"   # 逆指値売り（安値 ≤ 注文価格 で約定）
+ENTRY_TYPE  = "short_stop"   # 逆指値売り（安値 ≤ 注文価格 で約定）
+_MAX_PRICE: float | None = None   # --budget / --max-price で実行時に設定
 
 
 def calc_recommend_score(period_results: dict) -> tuple[int, str]:
@@ -168,6 +169,9 @@ def check_signal_on_date(symbol: str, strategy: str,
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, 365)
     if df is None or len(df) < 5:
+        return None
+    # 予算フィルター: 最新終値が上限超なら除外
+    if _MAX_PRICE is not None and float(df.iloc[-1]["close"]) > _MAX_PRICE:
         return None
     try:
         df = calc_fn(df)
@@ -219,6 +223,9 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, max(PERIODS))
     if df is None:
+        return None
+    # 予算フィルター: 最新終値が上限超なら除外
+    if _MAX_PRICE is not None and float(df.iloc[-1]["close"]) > _MAX_PRICE:
         return None
     period_results: dict[int, dict] = {}
     for days in PERIODS:
@@ -504,7 +511,9 @@ def build_html(all_items: list[dict], show_days: int,
   コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値売り-/損切り買戻+）／
   手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／
   ベンチマーク: 日経平均 ({show_days}日) <strong>{n225_ret:+.1f}%</strong>
-  <span style="color:#94a3b8;font-size:0.85rem">（ショート: 日経下落時に α が出る）</span><br>
+  <span style="color:#94a3b8;font-size:0.85rem">（ショート: 日経下落時に α が出る）</span> ／
+  株価フィルター: <strong>{"≤" + f"{_MAX_PRICE:,.0f}円" if _MAX_PRICE is not None else "なし"}</strong>
+  {"（予算 " + f"{_MAX_PRICE*100:,.0f}円 ÷ 100株）" if _MAX_PRICE is not None else ""}<br>
   <span style="color:#f87171;font-size:0.82rem">⚠ 空売りは損失無限大リスクあり。逆日歩・調達コスト・売り建て規制を必ず確認。</span>
 </p>
 
@@ -564,7 +573,18 @@ def main() -> None:
     parser.add_argument("--workers",     type=int,  default=_DEFAULT_WORKERS)
     parser.add_argument("--aggressive",  action="store_true",
                         help="aggressive モード (目標 1.5R, 回転率優先)")
+    parser.add_argument("--budget",      type=float, default=500_000,
+                        help="予算上限 (円, デフォルト500000 → 株価5,000円以下に絞込)")
+    parser.add_argument("--max-price",   type=float, default=None,
+                        help="最大株価フィルター (円, --budget より優先)")
     args = parser.parse_args()
+
+    # 予算フィルター設定
+    global _MAX_PRICE
+    if args.max_price is not None:
+        _MAX_PRICE = args.max_price
+    elif args.budget is not None:
+        _MAX_PRICE = args.budget / 100  # FIXED_QTY=100株
 
     # --aggressive フラグ対応
     if args.aggressive:
@@ -583,7 +603,8 @@ def main() -> None:
         sig_date = None
 
     date_label = args.date if args.date else "本日"
-    print(f"逆指値ショートバックテスト開始 ({len(WATCHLIST)}銘柄) シグナル確認日: {date_label}...", flush=True)
+    price_filter_str = f"株価≤{_MAX_PRICE:,.0f}円" if _MAX_PRICE is not None else "なし"
+    print(f"逆指値ショートバックテスト開始 ({len(WATCHLIST)}銘柄) シグナル確認日: {date_label} 株価フィルター: {price_filter_str}", flush=True)
     print("⚠ 空売りは損失無限大リスクがあります。逆日歩・規制を確認してください。", flush=True)
 
     all_items: list[dict] = []
