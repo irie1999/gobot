@@ -77,6 +77,7 @@ from backtest_limit_entry import (
     calc_macd, calc_a7, calc_rsi2,
     calc_macd_short, calc_a7_short, calc_rsi2_short,
     calc_donchian_short, calc_vol_breakdown, calc_momentum_short,
+    calc_bb_reversal_short,
     run_limit_backtest,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -151,8 +152,8 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "A7_S":   (calc_a7_short,      0.0, 1.5, 3.0, "short_stop"),
     "RSI2_S": (calc_rsi2_short,    0.0, 2.0, 4.0, "short_stop"),
     "DON_S":  (calc_donchian_short,0.0, 1.5, 3.0, "short_stop"),
-    "VOL_S":  (calc_vol_breakdown, 0.0, 1.5, 3.0, "short_stop"),
-    "MOM_S":  (calc_momentum_short,0.0, 1.5, 3.0, "short_stop"),
+    "VOL_S":  (calc_vol_breakdown,    0.0, 1.5, 3.0, "short_stop"),
+    "MOM_S":  (calc_bb_reversal_short,0.0, 1.5, 3.0, "short_stop"),  # BB上限タッチ+陰線反転
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "MACD":   (calc_macd,          0.0, 1.0, 1.5, "stop"),
@@ -162,12 +163,12 @@ STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "VOL":    (calc_vol_breakout,  0.0, 1.0, 1.5, "breakout"),
     "MOM":    (calc_momentum,      0.0, 1.0, 1.5, "breakout"),
     # ── ショート戦略 ──
-    "MACD_S": (calc_macd_short,    0.0, 1.0, 1.5, "short_stop"),
-    "A7_S":   (calc_a7_short,      0.0, 1.0, 1.5, "short_stop"),
-    "RSI2_S": (calc_rsi2_short,    0.0, 1.2, 1.8, "short_stop"),
-    "DON_S":  (calc_donchian_short,0.0, 1.0, 1.5, "short_stop"),
-    "VOL_S":  (calc_vol_breakdown, 0.0, 1.0, 1.5, "short_stop"),
-    "MOM_S":  (calc_momentum_short,0.0, 1.0, 1.5, "short_stop"),
+    "MACD_S": (calc_macd_short,      0.0, 1.0, 1.5, "short_stop"),
+    "A7_S":   (calc_a7_short,        0.0, 1.0, 1.5, "short_stop"),
+    "RSI2_S": (calc_rsi2_short,      0.0, 1.2, 1.8, "short_stop"),
+    "DON_S":  (calc_donchian_short,  0.0, 1.0, 1.5, "short_stop"),
+    "VOL_S":  (calc_vol_breakdown,   0.0, 1.0, 1.5, "short_stop"),
+    "MOM_S":  (calc_bb_reversal_short,0.0, 1.0, 1.5, "short_stop"),  # BB上限タッチ+陰線反転
 }
 
 import os as _os

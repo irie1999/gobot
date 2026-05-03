@@ -532,6 +532,47 @@ def calc_momentum_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_bb_reversal_short(df: pd.DataFrame) -> pd.DataFrame:
+    """ボリンジャーバンド上限タッチ + 陰線反転 ショートシグナル（MOM_S代替）。
+
+    ベアマーケット不要。個別株の局所的な過熱リバーサルを捉える。
+    条件:
+      - 前日終値 >= BB上限 (20日MA + 2σ) → 過熱
+      - 当日終値 < 前日終値 → 反転の兆し（陰線）
+      - RSI(14) >= 65 → 依然として買われすぎ圏
+      - 出来高 > 20日平均 × 1.2 → 確認
+    """
+    df = df.copy()
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    ma20  = c.rolling(20).mean()
+    std20 = c.rolling(20).std(ddof=1)
+    upper = ma20 + 2.0 * std20
+
+    delta = c.diff()
+    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+    rsi14 = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
+    vol_ma = v.rolling(20).mean()
+
+    prev_above_bb = prev_c >= upper.shift(1)   # 前日終値がBBアッパー以上
+    today_down    = c < prev_c                  # 当日下落
+    rsi_high      = rsi14 >= 65
+    vol_ok        = v > vol_ma * 1.2
+
+    df["atr"]       = atr
+    df["entry_sig"] = prev_above_bb & today_down & rsi_high & vol_ok
+    return df
+
+
 # ── 指値エントリー バックテスト ─────────────────────────────────
 def run_limit_backtest(
     symbol: str,

@@ -4,6 +4,12 @@ check_signals_short.py  ―  監視銘柄 逆指値ショートエントリー �
 check_signals_stop.py の空売り版。
 エントリー条件: 安値 ≤ 前日終値（下がれば売る）= 逆指値売り（信用売り）
 
+【MOM_S 戦略について】
+  旧実装: calc_momentum_short (ROC<-2% + MA25<MA75 + MA50<MA200)
+    → ベアマーケット依存のため現行強気相場でシグナルゼロ
+  新実装: calc_bb_reversal_short (BB上限タッチ + 陰線反転 + RSI≥65 + 出来高増)
+    → 個別株の局所的過熱リバーサルを捉える。相場環境非依存
+
 【空売りの仕組み】
   order_p = close_prev - ATR × em   （em=0.0 → 終値ちょうど）
   stop    = order_p + ATR × sm      （損切り = 買い戻し価格: 上）
@@ -41,6 +47,7 @@ from backtest_limit_entry import (
     fetch,
     calc_macd_short, calc_a7_short, calc_rsi2_short,
     calc_donchian_short, calc_vol_breakdown, calc_momentum_short,
+    calc_bb_reversal_short,
     run_limit_backtest,
     fetch_n225_return,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
@@ -97,36 +104,36 @@ WATCHLIST: list[tuple[str, str, str]] = [
     # ("8798.T", "アドバンスクリエイト", "DON_S"),  # 除外: 176円 逆日歩高リスク
     ("9990.T", "サックスバーHD",        "DON_S"),   # 追加: folds=3, PF 5.28, 739円
     ("1414.T", "ショーボンドHD",        "DON_S"),   # 追加: PF 7.13, WR 75%, Sharpe 2.58
-    # ── VOL_S Walk-forward 上位7 ──
+    # ── VOL_S Walk-forward 上位5 ──
     ("9612.T", "ラックランド",          "VOL_S"),
     ("1419.T", "タマホーム",            "VOL_S"),
     ("4933.T", "I-ne",                "VOL_S"),
-    ("4923.T", "コタ",                 "VOL_S"),
+    # ("4923.T", "コタ", "VOL_S"),        # 除外: 365d PF 1.05 (要再スキャン)
     ("6615.T", "UMCエレクトロニクス",   "VOL_S"),
     ("9041.T", "近鉄グループHD",        "VOL_S"),
-    ("4151.T", "協和キリン",            "VOL_S"),
-    # ── MOM_S: Walk-forward 合格ゼロのため無し ──
-    # （scan_walkforward.py --family short_stop で再スキャン後に追加）
+    # ("4151.T", "協和キリン", "VOL_S"),  # 除外: 365d PF 1.01 (要再スキャン)
+    # ── MOM_S: BB上限タッチ+陰線反転戦略（scan_walkforward後に銘柄追加） ──
+    # calc_bb_reversal_short に切替済み。--family short_stop で再スキャン後追加。
 ]
 
 # ── ショート戦略パラメータ ─────────────────────────────────────────
 # conservative (デフォルト): 2R 設定
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "MACD_S":  (calc_macd_short,     0.0, 1.5, 3.0),
-    "A7_S":    (calc_a7_short,       0.0, 1.5, 3.0),
-    "RSI2_S":  (calc_rsi2_short,     0.0, 2.0, 4.0),
-    "DON_S":   (calc_donchian_short, 0.0, 1.5, 3.0),
-    "VOL_S":   (calc_vol_breakdown,  0.0, 1.5, 3.0),
-    "MOM_S":   (calc_momentum_short, 0.0, 1.5, 3.0),
+    "MACD_S":  (calc_macd_short,       0.0, 1.5, 3.0),
+    "A7_S":    (calc_a7_short,         0.0, 1.5, 3.0),
+    "RSI2_S":  (calc_rsi2_short,       0.0, 2.0, 4.0),
+    "DON_S":   (calc_donchian_short,   0.0, 1.5, 3.0),
+    "VOL_S":   (calc_vol_breakdown,    0.0, 1.5, 3.0),
+    "MOM_S":   (calc_bb_reversal_short,0.0, 1.5, 3.0),  # BB上限タッチ+陰線反転
 }
 # aggressive: 1.5R 設定（回転率優先）
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "MACD_S":  (calc_macd_short,     0.0, 1.0, 1.5),
-    "A7_S":    (calc_a7_short,       0.0, 1.0, 1.5),
-    "RSI2_S":  (calc_rsi2_short,     0.0, 1.2, 1.8),
-    "DON_S":   (calc_donchian_short, 0.0, 1.0, 1.5),
-    "VOL_S":   (calc_vol_breakdown,  0.0, 1.0, 1.5),
-    "MOM_S":   (calc_momentum_short, 0.0, 1.0, 1.5),
+    "MACD_S":  (calc_macd_short,       0.0, 1.0, 1.5),
+    "A7_S":    (calc_a7_short,         0.0, 1.0, 1.5),
+    "RSI2_S":  (calc_rsi2_short,       0.0, 1.2, 1.8),
+    "DON_S":   (calc_donchian_short,   0.0, 1.0, 1.5),
+    "VOL_S":   (calc_vol_breakdown,    0.0, 1.0, 1.5),
+    "MOM_S":   (calc_bb_reversal_short,0.0, 1.0, 1.5),  # BB上限タッチ+陰線反転
 }
 
 TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
