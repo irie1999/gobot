@@ -398,7 +398,13 @@ def calc_macd_short(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calc_a7_short(df: pd.DataFrame) -> pd.DataFrame:
-    """ストキャスティクスデスクロス × MA75下降フィルター（空売り用）。"""
+    """ストキャスティクスデスクロス × MA75下降フィルター（空売り用）。
+
+    強化条件 (2026-05-03):
+      旧: slow_k > 30 (売られすぎ除外のみ)
+      新: slow_k > 50 (中立〜高値圏限定) + MA25 < MA75 (短期下降トレンド確認)
+      → 売られすぎ直前の「戻り売り」シグナルを除外し、精度向上
+    """
     df = df.copy()
     h = df["high"]
     l = df["low"]
@@ -411,25 +417,24 @@ def calc_a7_short(df: pd.DataFrame) -> pd.DataFrame:
     slow_k = fast_k.rolling(STOCH_SMOOTH).mean()
     slow_d = slow_k.rolling(STOCH_D_PERIOD).mean()
 
+    ma25 = c.rolling(25).mean()
     ma75 = c.rolling(MA_TREND_PERIOD_A7).mean()
 
     prev_k = slow_k.shift(1)
     prev_d = slow_d.shift(1)
-    # デスクロス: slow_k が slow_d を下抜け
     death_cross = (slow_k < slow_d) & (prev_k >= prev_d)
 
     prev_c = c.shift(1)
     tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     atr    = tr.ewm(span=ATR_PERIOD_A7, adjust=False).mean()
 
-    STOCH_OVERSOLD_THRESH = 30  # すでに売られすぎなら除外
-
     df["stoch_k"]   = slow_k
     df["stoch_d"]   = slow_d
+    df["ma25"]      = ma25
     df["ma75"]      = ma75
     df["atr"]       = atr
-    # デスクロス + 売られすぎではない + MA75 下方
-    df["entry_sig"] = death_cross & (slow_k > STOCH_OVERSOLD_THRESH) & (c < ma75)
+    # デスクロス + 中立〜高値圏 (>50) + 短期下降トレンド (MA25<MA75) + MA75下方
+    df["entry_sig"] = death_cross & (slow_k > 50) & (ma25 < ma75) & (c < ma75)
 
     return df
 
