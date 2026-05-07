@@ -354,14 +354,17 @@ def build_html(all_items: list[dict], show_days: int,
             ol  = t.get("order_limit")
             osl = t.get("order_stop")
             otg = t.get("order_target")
+            ole = ol * (1.0 + LIMIT_ENTRY_MARGIN_PCT) if isinstance(ol, float) else None
             ol_str  = f"{ol:,.0f}"  if isinstance(ol,  float) else str(ol  or "-")
             osl_str = f"{osl:,.0f}" if isinstance(osl, float) else str(osl or "-")
             otg_str = f"{otg:,.0f}" if isinstance(otg, float) else str(otg or "-")
+            ole_str = f"{ole:,.0f}" if isinstance(ole, float) else "-"
             trade_rows += f"""
               <tr>
                 <td>{s_str}</td><td class="stop">{s_p_str}</td>
                 <td>{e_str}</td><td>{x_str}</td>
                 <td class="stop">{ol_str}</td>
+                <td class="limit-entry">{ole_str}</td>
                 <td class="loss">{osl_str}</td>
                 <td class="profit">{otg_str}</td>
                 <td>{t['entry_p']:,.0f}</td><td>{t['exit_p']:,.0f}</td>
@@ -412,7 +415,7 @@ def build_html(all_items: list[dict], show_days: int,
           <thead><tr>
             <th>シグナル日</th><th>シグナル時株価</th>
             <th>エントリー</th><th>エグジット</th>
-            <th>逆指値</th><th>損切り</th><th>目標価格</th>
+            <th>逆指値</th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標価格</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
             <th>保有日数</th><th>約定日数</th><th>理由</th>
