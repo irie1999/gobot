@@ -350,6 +350,12 @@ def build_html(all_items: list[dict], show_days: int,
             x_str   = t["exit_dt"].strftime("%Y-%m-%d")  if hasattr(t["exit_dt"],  "strftime") else str(t["exit_dt"])
             sig_dt  = t.get("signal_dt")
             s_str   = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else (str(sig_dt) if sig_dt else "-")
+            # 最大決済日: シグナル日 + ENTRY_EXPIRE + MAX_HOLD 営業日
+            if sig_dt is not None:
+                _max_exit = pd.bdate_range(start=pd.to_datetime(sig_dt), periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+                max_exit_str = _max_exit.strftime("%Y-%m-%d")
+            else:
+                max_exit_str = "-"
             s_p     = t.get("signal_price", "-")
             s_p_str = f"{s_p:,.0f}" if isinstance(s_p, float) else str(s_p)
             dtf     = t.get("days_to_fill", "-")
@@ -376,6 +382,7 @@ def build_html(all_items: list[dict], show_days: int,
                 <td class="{pnl_cls}">{t['pct']:+.2f}%</td>
                 <td>{t['hold_days']}日</td>
                 <td class="stop">{dtf}日</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
                 <td>{t['reason']}</td>
               </tr>"""
         strat     = item["strategy"]
@@ -421,7 +428,7 @@ def build_html(all_items: list[dict], show_days: int,
             <th>逆指値</th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標価格</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
-            <th>保有日数</th><th>約定日数</th><th>理由</th>
+            <th>保有日数</th><th>約定日数</th><th>最大決済日</th><th>理由</th>
           </tr></thead>
           <tbody>{trade_rows}</tbody>
         </table>
