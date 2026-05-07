@@ -2,7 +2,8 @@
 run_signals.py  ―  逆指値シグナル統合レポート
 ==================================================
 check_signals_stop.py（MACD / A7 / RSI2 逆指値B） +
-check_signals_breakout.py（DON / VOL / MOM ブレイクアウト）
+check_signals_breakout.py（DON / VOL / MOM ブレイクアウト） +
+check_signals_short.py（MACD_S / A7_S / RSI2_S ショート逆指値）
 を1コマンドで実行し、タブ付きHTMLに統合する。
 
 【使い方】
@@ -35,6 +36,7 @@ elif "--conservative" in sys.argv:
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
+import check_signals_short    as _short
 
 JST = timezone(timedelta(hours=9))
 
@@ -73,17 +75,20 @@ def _extract_style(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_combined_html(stop_html: str, brk_html: str) -> str:
+def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
+    srt_css   = _extract_style(srt_html)
     stop_body = _extract_body(stop_html)
     brk_body  = _extract_body(brk_html)
+    srt_body  = _extract_body(srt_html)
 
-    # ブレイクアウト固有のタグ色（stop_css には含まれない）だけ追加
+    # 各モジュール固有のタグ色を追加（stop_css には含まれないもの）
     extra_css = "\n".join(
-        line for line in brk_css.splitlines()
-        if any(k in line for k in ("tag-don", "tag-vol", "tag-mom"))
+        line for line in (brk_css + "\n" + srt_css).splitlines()
+        if any(k in line for k in ("tag-don", "tag-vol", "tag-mom",
+                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s"))
     )
 
     return f"""<!DOCTYPE html>
@@ -105,12 +110,16 @@ def build_combined_html(stop_html: str, brk_html: str) -> str:
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
+  <button class="tab-btn"        onclick="switchTab(2)">ショート逆指値（MACD_S / A7_S / RSI2_S）</button>
 </div>
 <div id="tc0" class="tab-pane">
 {stop_body}
 </div>
 <div id="tc1" class="tab-pane" style="display:none">
 {brk_body}
+</div>
+<div id="tc2" class="tab-pane" style="display:none">
+{srt_body}
 </div>
 <script>
 function switchTab(n){{
@@ -150,16 +159,18 @@ def main() -> None:
         sig_date = None
 
     date_label = args.date if args.date else "本日"
-    n_total = len(_stop.WATCHLIST) + len(_brk.WATCHLIST)
+    n_total = len(_stop.WATCHLIST) + len(_brk.WATCHLIST) + len(_short.WATCHLIST)
     print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}  モード: {_stop.TRADING_MODE}", flush=True)
-    print(f"  逆指値B: {len(_stop.WATCHLIST)}銘柄  /  ブレイクアウト: {len(_brk.WATCHLIST)}銘柄", flush=True)
+    print(f"  逆指値B: {len(_stop.WATCHLIST)}銘柄  /  ブレイクアウト: {len(_brk.WATCHLIST)}銘柄  /  ショート: {len(_short.WATCHLIST)}銘柄", flush=True)
 
-    # 両グループを並列実行
-    with ThreadPoolExecutor(max_workers=2) as outer:
-        fut_stop = outer.submit(_run_group, _stop, sig_date, args.workers)
-        fut_brk  = outer.submit(_run_group, _brk,  sig_date, args.workers)
-    stop_items = fut_stop.result()
-    brk_items  = fut_brk.result()
+    # 3グループを並列実行
+    with ThreadPoolExecutor(max_workers=3) as outer:
+        fut_stop  = outer.submit(_run_group, _stop,  sig_date, args.workers)
+        fut_brk   = outer.submit(_run_group, _brk,   sig_date, args.workers)
+        fut_short = outer.submit(_run_group, _short,  sig_date, args.workers)
+    stop_items  = fut_stop.result()
+    brk_items   = fut_brk.result()
+    short_items = fut_short.result()
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
@@ -177,6 +188,10 @@ def main() -> None:
         if item["today_sig"]:
             score, rank = _brk.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "BRK"))
+    for item in short_items:
+        if item["today_sig"]:
+            score, rank = _short.calc_recommend_score(item["period_results"])
+            all_sigs.append((item, score, rank, "ショート"))
     all_sigs.sort(key=lambda x: x[1], reverse=True)
 
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
@@ -201,14 +216,15 @@ def main() -> None:
 
     show_days = args.days
     print(f"\nHTMLレポート生成中...", flush=True)
-    stop_html = _stop.build_html(stop_items, show_days, date_label)
-    brk_html  = _brk.build_html(brk_items,  show_days, date_label)
+    stop_html  = _stop.build_html(stop_items,   show_days, date_label)
+    brk_html   = _brk.build_html(brk_items,     show_days, date_label)
+    short_html = _short.build_html(short_items,  show_days, date_label)
 
     date_suffix = args.date if args.date else today
     # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
     mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
     out_path    = Path(f"signals_combined{mode_suffix}_{date_suffix}.html")
-    out_path.write_text(build_combined_html(stop_html, brk_html), encoding="utf-8")
+    out_path.write_text(build_combined_html(stop_html, brk_html, short_html), encoding="utf-8")
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
