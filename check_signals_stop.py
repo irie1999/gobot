@@ -280,6 +280,10 @@ def build_html(all_items: list[dict], show_days: int,
         sig   = item["today_sig"]
         strat = item["strategy"]
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
+        # 最大決済日: シグナル日 + 約定期限(ENTRY_EXPIRE) + 最大保有(MAX_HOLD) 営業日
+        _sig_dt = pd.to_datetime(sig['signal_date'])
+        _max_exit = pd.bdate_range(start=_sig_dt, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+        max_exit_str = _max_exit.strftime("%Y-%m-%d")
         signal_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
@@ -293,9 +297,10 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
           <td style="color:#94a3b8">{MAX_HOLD}日</td>
+          <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="11" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="12" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -488,7 +493,7 @@ def build_html(all_items: list[dict], show_days: int,
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>最大保有日</th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
