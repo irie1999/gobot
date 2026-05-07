@@ -144,9 +144,9 @@ def main() -> None:
     # モード選択 (実際の切替は import 前に sys.argv で行う)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true",
-                            help="積極利確モード (tm=1.5, 目標+4.5%)")
+                            help="積極利確モード (tm=1.5, 目標+4.5%%)")
     mode_group.add_argument("--conservative", action="store_true",
-                            help="標準モード (tm=3.0, 目標+9%, デフォルト)")
+                            help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
     args = parser.parse_args()
 
     if args.date:
