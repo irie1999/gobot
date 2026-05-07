@@ -34,6 +34,7 @@ from backtest_limit_entry import (
     run_limit_backtest,
     fetch_n225_return,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
+    MAX_HOLD, ENTRY_EXPIRE,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -295,9 +296,10 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
+          <td style="color:#94a3b8">{MAX_HOLD}日</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="10" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="11" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -493,7 +495,7 @@ def build_html(all_items: list[dict], show_days: int,
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>最大保有日</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
