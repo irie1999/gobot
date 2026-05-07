@@ -492,6 +492,7 @@ def run_limit_backtest(
                             hold_days=0, days_to_fill=days_to_fill,
                             signal_dt=signal_dt, signal_price=signal_price,
                             order_limit=limit_price, order_stop=stop_price,
+                            order_target=target_price,
                             reason=exit_reason,
                         ))
                     state = "idle"
@@ -547,6 +548,7 @@ def run_limit_backtest(
                     hold_days=hold_days, days_to_fill=days_to_fill,
                     signal_dt=signal_dt, signal_price=signal_price,
                     order_limit=limit_price, order_stop=stop_price,
+                    order_target=target_price,
                     reason=exit_reason,
                 ))
                 state = "idle"
@@ -621,6 +623,7 @@ def run_limit_backtest(
             hold_days=hold_days, days_to_fill=days_to_fill,
             signal_dt=signal_dt, signal_price=signal_price,
             order_limit=limit_price, order_stop=stop_price,
+            order_target=target_price,
             reason="保有中",
         ))
 
