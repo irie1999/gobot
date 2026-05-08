@@ -34,7 +34,7 @@ elif "--conservative" in sys.argv:
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
-from run_signals import _run_group, build_combined_html
+from run_signals import _run_group, build_combined_html, _extract_style, _extract_body
 
 JST = timezone(timedelta(hours=9))
 
@@ -104,6 +104,114 @@ _WF_BRK: list[tuple[str, str, str]] = [
     ("1938.T", "日本リーテック",     "MOM"),
     ("1975.T", "朝日工業社",         "MOM"),
 ]
+
+
+def _build_merged_html(stop_html: str, brk_html: str, srt_html: str,
+                       wf_stop: list, wf_brk: list) -> str:
+    """WF バッジ付きの統合HTML を生成する。既存ファイルは変更しない。"""
+    from datetime import datetime
+    today_str = datetime.now(JST).strftime("%Y-%m-%d")
+
+    stop_css  = _extract_style(stop_html)
+    brk_css   = _extract_style(brk_html)
+    srt_css   = _extract_style(srt_html) if srt_html else ""
+    stop_body = _extract_body(stop_html)
+    brk_body  = _extract_body(brk_html)
+    srt_body  = _extract_body(srt_html) if srt_html else ""
+
+    extra_css = "\n".join(
+        line for line in (brk_css + "\n" + srt_css).splitlines()
+        if any(k in line for k in ("tag-don", "tag-vol", "tag-mom",
+                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s"))
+    )
+
+    # WF シンボルセット (symbol のみで判定 — 戦略は複数ありうる)
+    wf_syms = sorted({s for s, _, _ in (wf_stop + wf_brk)})
+    wf_syms_js = "[" + ",".join(f'"{s}"' for s in wf_syms) + "]"
+
+    srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
+    srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>統合シグナルレポート（既存+WF） — {today_str}</title>
+<style>
+{stop_css}
+{extra_css}
+.tab-nav{{display:flex;gap:0;background:#090b14;padding:10px 16px 0;border-bottom:2px solid #252840;position:sticky;top:0;z-index:200;flex-wrap:wrap}}
+.tab-btn{{background:#16192a;color:#94a3b8;border:1px solid #252840;border-bottom:none;padding:9px 22px;margin-right:4px;border-radius:6px 6px 0 0;cursor:pointer;font-size:13px;font-family:inherit;transition:background .15s,color .15s}}
+.tab-btn:hover{{background:#1e2235;color:#dde1ec}}
+.tab-btn.active{{background:#0f1117;color:#38bdf8;border-color:#38bdf8;border-bottom-color:#0f1117}}
+.tab-pane{{min-height:60vh}}
+.wf-badge{{display:inline-block;background:#7c3aed;color:#fff;font-size:10px;font-weight:700;
+           padding:1px 5px;border-radius:3px;margin-left:5px;vertical-align:middle;letter-spacing:.5px}}
+.wf-row td:first-child{{border-left:3px solid #7c3aed !important}}
+.legend-bar{{background:#0f1117;border:1px solid #252840;border-radius:6px;
+             padding:8px 16px;margin:10px 0 4px;font-size:12px;color:#94a3b8;display:flex;gap:20px;align-items:center}}
+.legend-bar .wf-badge{{font-size:11px}}
+</style>
+</head>
+<body>
+<div class="tab-nav">
+  <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
+  <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
+  {srt_tab_btn}
+</div>
+<div id="tc0" class="tab-pane">
+{stop_body}
+</div>
+<div id="tc1" class="tab-pane" style="display:none">
+{brk_body}
+</div>
+{srt_tab_pane}
+<script>
+var WF_SYMS = {wf_syms_js};
+
+function switchTab(n){{
+  document.querySelectorAll('.tab-btn').forEach(function(b,i){{b.classList.toggle('active',i===n);}});
+  document.querySelectorAll('.tab-pane').forEach(function(t,i){{t.style.display=i===n?'block':'none';}});
+}}
+
+// 全テーブル行をスキャンして WF シンボルを含む行にバッジを付ける
+function markWFRows() {{
+  document.querySelectorAll('table tr').forEach(function(tr) {{
+    var first = tr.cells[0];
+    if (!first) return;
+    var text = first.innerText || first.textContent || '';
+    for (var i = 0; i < WF_SYMS.length; i++) {{
+      if (text.indexOf(WF_SYMS[i]) !== -1) {{
+        tr.classList.add('wf-row');
+        // バッジがまだなければ追加
+        if (!first.querySelector('.wf-badge')) {{
+          var badge = document.createElement('span');
+          badge.className = 'wf-badge';
+          badge.textContent = 'WF';
+          badge.title = 'Walk-forward 選定銘柄';
+          first.appendChild(badge);
+        }}
+        break;
+      }}
+    }}
+  }});
+
+  // 凡例を各タブペインの先頭に挿入
+  document.querySelectorAll('.tab-pane').forEach(function(pane) {{
+    if (pane.querySelector('.legend-bar')) return;
+    var leg = document.createElement('div');
+    leg.className = 'legend-bar';
+    leg.innerHTML = '<span><span class="wf-badge">WF</span> Walk-forward 選定銘柄（新規）</span>'
+                  + '<span style="color:#555">｜</span>'
+                  + '<span>バッジなし = 既存銘柄</span>';
+    pane.insertBefore(leg, pane.firstChild);
+  }});
+}}
+
+document.addEventListener('DOMContentLoaded', markWFRows);
+</script>
+</body>
+</html>"""
 
 
 def _merged_watchlist(existing: list, walkforward: list) -> list:
@@ -238,7 +346,10 @@ def main() -> None:
     mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
     date_suffix = args.date if args.date else today
     out_path    = Path(f"signals_merged{mode_suffix}_{date_suffix}.html")
-    out_path.write_text(build_combined_html(stop_html, brk_html, short_html), encoding="utf-8")
+    out_path.write_text(
+        _build_merged_html(stop_html, brk_html, short_html, _WF_STOP, _WF_BRK),
+        encoding="utf-8"
+    )
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
