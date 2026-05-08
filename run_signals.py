@@ -110,7 +110,7 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
-  <button class="tab-btn"        onclick="switchTab(2)">ショート逆指値（MACD_S / A7_S / RSI2_S）</button>
+  <button class="tab-btn"        onclick="switchTab(2)">ショート逆指値（A7_S）</button>
 </div>
 <div id="tc0" class="tab-pane">
 {stop_body}
