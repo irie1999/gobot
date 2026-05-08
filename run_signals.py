@@ -75,14 +75,14 @@ def _extract_style(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
+def build_combined_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
-    srt_css   = _extract_style(srt_html)
+    srt_css   = _extract_style(srt_html) if srt_html else ""
     stop_body = _extract_body(stop_html)
     brk_body  = _extract_body(brk_html)
-    srt_body  = _extract_body(srt_html)
+    srt_body  = _extract_body(srt_html) if srt_html else ""
 
     # 各モジュール固有のタグ色を追加（stop_css には含まれないもの）
     extra_css = "\n".join(
@@ -90,6 +90,9 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
         if any(k in line for k in ("tag-don", "tag-vol", "tag-mom",
                                    "tag-macd_s", "tag-a7_s", "tag-rsi2_s"))
     )
+
+    srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
+    srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -110,7 +113,7 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
-  <button class="tab-btn"        onclick="switchTab(2)">ショート逆指値（A7_S）</button>
+  {srt_tab_btn}
 </div>
 <div id="tc0" class="tab-pane">
 {stop_body}
@@ -118,9 +121,7 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str) -> str:
 <div id="tc1" class="tab-pane" style="display:none">
 {brk_body}
 </div>
-<div id="tc2" class="tab-pane" style="display:none">
-{srt_body}
-</div>
+{srt_tab_pane}
 <script>
 function switchTab(n){{
   document.querySelectorAll('.tab-btn').forEach(function(b,i){{b.classList.toggle('active',i===n);}});

@@ -278,7 +278,7 @@ def main() -> None:
     out_path    = Path(f"signals_verification{mode_suffix}_{date_suffix}.html")
 
     if stop_html and brk_html:
-        combined = build_combined_html(stop_html, brk_html)
+        combined = build_combined_html(stop_html, brk_html, "")
     elif stop_html:
         combined = stop_html
     elif brk_html:
