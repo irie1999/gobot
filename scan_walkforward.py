@@ -72,6 +72,13 @@ from pathlib import Path
 
 import pandas as pd
 
+# ── TRADING_MODE を import 前に設定 (モジュールトップで env var を読む) ──
+import os as _os_pre
+if "--aggressive" in sys.argv:
+    _os_pre.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    _os_pre.environ["TRADING_MODE"] = "conservative"
+
 from backtest_limit_entry import (
     fetch,
     calc_macd, calc_a7, calc_rsi2,
@@ -356,6 +363,11 @@ def main() -> None:
     parser.add_argument("--budget",  type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄に絞る = --max-price (予算/100). "
                              "--max-price と併用時は --max-price 優先")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5, 目標+4.5%%)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
     args = parser.parse_args()
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
