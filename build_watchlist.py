@@ -143,7 +143,14 @@ def main() -> None:
     parser.add_argument("--input-dir",   type=Path, default=Path("walkforward_results"))
     parser.add_argument("--date",        type=str, default=str(TODAY),
                         help="読み込む CSV の日付 (デフォルト本日)")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="Aggressive モードの CSV を読み込む (_aggressive suffix)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="Conservative モードの CSV を読み込む (suffix なし, デフォルト)")
     args = parser.parse_args()
+
+    mode_suffix = "_aggressive" if args.aggressive else ""
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
     effective_max_price = args.max_price
@@ -173,7 +180,7 @@ def main() -> None:
     total_selected   = 0
 
     for strategy in all_strats:
-        csv_path = args.input_dir / f"walkforward_{strategy}_{args.date}.csv"
+        csv_path = args.input_dir / f"walkforward_{strategy}{mode_suffix}_{args.date}.csv"
         rows = load_csv(csv_path)
         if not rows:
             print(f"[WARN] CSV not found: {csv_path}")
@@ -219,7 +226,7 @@ def main() -> None:
             brk_blocks.append(block)
 
     # ── Python コード出力 ──
-    out_path = Path(f"watchlist_proposal_{args.date}.py")
+    out_path = Path(f"watchlist_proposal{mode_suffix}_{args.date}.py")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write('"""\n')
         f.write(f"新 WATCHLIST 提案 (生成日: {args.date})\n")
