@@ -37,11 +37,11 @@ from run_signals import _extract_style, _extract_body
 # 全6戦略でグリッドサーチした結果 sm=2.0/tm=3.0 が最良 PnL / EV を示した。
 # check_signals_*.py は変更せず、ここだけ monkey-patch。
 for _k, _v in list(_stop.STRATEGY_PARAMS.items()):
-    _stop.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 2.0, 3.0)
+    _stop.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 1.5, 2.0)
 for _k, _v in list(_brk.STRATEGY_PARAMS.items()):
-    _brk.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 2.0, 3.0)
+    _brk.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 1.5, 2.0)
 
-_OPT_LABEL = "sm=2.0 / tm=3.0 (optimize_params 最適値)"
+_OPT_LABEL = "sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)"
 
 JST = timezone(timedelta(hours=9))
 
