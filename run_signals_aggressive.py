@@ -164,6 +164,10 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
     srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
     srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
 
+    # WFシンボルセット (JS埋め込み用)
+    wf_syms = sorted({s for s, _, _ in (STOP_WATCHLIST[:30] + BRK_WATCHLIST[:30])})
+    wf_syms_js = "[" + ",".join(f'"{s}"' for s in wf_syms) + "]"
+
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -178,6 +182,11 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 .tab-btn.active{{background:#0f1117;color:#f59e0b;border-color:#f59e0b;border-bottom-color:#0f1117}}
 .tab-pane{{min-height:60vh}}
 .mode-banner{{background:#78350f;color:#fde68a;padding:6px 16px;font-size:12px;font-weight:700;letter-spacing:.5px}}
+.wf-badge{{display:inline-block;background:#f59e0b;color:#000;font-size:10px;font-weight:700;
+           padding:1px 5px;border-radius:3px;margin-left:5px;vertical-align:middle;letter-spacing:.5px}}
+.wf-row td:first-child{{border-left:3px solid #f59e0b !important}}
+.legend-bar{{background:#0f1117;border:1px solid #252840;border-radius:6px;
+             padding:8px 16px;margin:10px 0 4px;font-size:12px;color:#94a3b8;display:flex;gap:20px;align-items:center}}
 </style>
 </head>
 <body>
@@ -191,10 +200,45 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 <div id="tc1" class="tab-pane" style="display:none">{brk_body}</div>
 {srt_tab_pane}
 <script>
+var WF_SYMS = {wf_syms_js};
+
 function switchTab(n){{
   document.querySelectorAll('.tab-btn').forEach(function(b,i){{b.classList.toggle('active',i===n);}});
   document.querySelectorAll('.tab-pane').forEach(function(t,i){{t.style.display=i===n?'block':'none';}});
 }}
+
+function markWFRows() {{
+  document.querySelectorAll('table tr').forEach(function(tr) {{
+    var first = tr.cells[0];
+    if (!first) return;
+    var text = first.innerText || first.textContent || '';
+    for (var i = 0; i < WF_SYMS.length; i++) {{
+      if (text.indexOf(WF_SYMS[i]) !== -1) {{
+        tr.classList.add('wf-row');
+        if (!first.querySelector('.wf-badge')) {{
+          var badge = document.createElement('span');
+          badge.className = 'wf-badge';
+          badge.textContent = 'WF';
+          badge.title = 'Walk-forward 選定銘柄 (aggressive 2026-05-12)';
+          first.appendChild(badge);
+        }}
+        break;
+      }}
+    }}
+  }});
+
+  document.querySelectorAll('.tab-pane').forEach(function(pane) {{
+    if (pane.querySelector('.legend-bar')) return;
+    var leg = document.createElement('div');
+    leg.className = 'legend-bar';
+    leg.innerHTML = '<span><span class="wf-badge">WF</span> Walk-forward 選定銘柄（新規・aggressive用）</span>'
+                  + '<span style="color:#555">｜</span>'
+                  + '<span>バッジなし = 既存銘柄</span>';
+    pane.insertBefore(leg, pane.firstChild);
+  }});
+}}
+
+document.addEventListener('DOMContentLoaded', markWFRows);
 </script>
 </body>
 </html>"""
