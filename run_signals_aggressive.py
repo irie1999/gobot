@@ -108,6 +108,23 @@ BRK_WATCHLIST: list[tuple[str, str, str]] = [
 ]
 
 
+def _merged(wf: list, existing: list) -> list:
+    """WF銘柄を先頭に、既存銘柄を重複なしで追加する。"""
+    seen = {(s, st) for s, _, st in wf}
+    result = list(wf)
+    for entry in existing:
+        key = (entry[0], entry[2])
+        if key not in seen:
+            seen.add(key)
+            result.append(entry)
+    return result
+
+
+# 既存WATCHLISTと合算（WF銘柄が先頭、既存は後ろに追加）
+STOP_WATCHLIST = _merged(STOP_WATCHLIST, _stop.WATCHLIST)
+BRK_WATCHLIST  = _merged(BRK_WATCHLIST,  _brk.WATCHLIST)
+
+
 def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
     all_items: list[dict] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
