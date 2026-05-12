@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yfinance as yf
 import pandas as pd
 
 from backtest_limit_entry import (
@@ -43,6 +44,19 @@ from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
+
+
+def _fetch_live_price(symbol: str, fallback: float) -> float:
+    """直近の株価を取得（分足）。失敗時はキャッシュ終値にフォールバック。"""
+    try:
+        df = yf.download(symbol, period="1d", interval="1m",
+                         progress=False, auto_adjust=True)
+        if df is not None and not df.empty:
+            p = float(df["Close"].iloc[-1])
+            return p if p > 0 else fallback
+    except Exception:
+        pass
+    return fallback
 
 # ── scan_breakout_entry.py --max-price 5000（緩和パラメータ）スキャン上位銘柄 ──
 # DON:15日高値 / VOL:5日高値+出来高1.5x / MOM:ROC>3%
@@ -163,6 +177,8 @@ def check_signal_on_date(symbol: str, strategy: str,
 
     close_prev = float(prev["close"])
     current_p  = float(next_row["close"])
+    if target_date is None:
+        current_p = _fetch_live_price(symbol, current_p)
 
     # 逆指値: 終値 + ATR×em（em=0.0なら終値ちょうど）
     order_p     = close_prev + atr_v * em

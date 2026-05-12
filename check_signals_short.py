@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 from backtest_limit_entry import (
     fetch,
@@ -47,6 +48,20 @@ from risk_metrics import enrich_backtest_result, calc_hold_stats
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
+
+
+def _fetch_live_price(symbol: str, fallback: float) -> float:
+    """直近の株価を取得（分足）。失敗時はキャッシュ終値にフォールバック。"""
+    try:
+        df = yf.download(symbol, period="1d", interval="1m",
+                         progress=False, auto_adjust=True)
+        if df is not None and not df.empty:
+            p = float(df["Close"].iloc[-1])
+            return p if p > 0 else fallback
+    except Exception:
+        pass
+    return fallback
+
 
 WATCHLIST: list[tuple[str, str, str]] = [
     # ── A7_S: ストキャス反転売り (株価5,000円以下・20銘柄) ──
@@ -212,6 +227,8 @@ def check_signal_on_date(symbol: str, strategy: str,
 
     close_prev = float(prev["close"])
     current_p  = float(df.iloc[prev_idx]["close"])
+    if target_date is None:
+        current_p = _fetch_live_price(symbol, current_p)
 
     # 逆指値売り: 終値 - ATR×em を下抜けたら売る
     order_p = close_prev - atr_v * em
