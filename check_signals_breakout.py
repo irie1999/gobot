@@ -85,11 +85,11 @@ STRATEGY_PARAMS_CONSERVATIVE = {
     "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
     "MOM": (calc_momentum,     0.0, 1.5, 3.0),
 }
-# aggressive: 利確 1.5R で回転率優先
+# aggressive: sm=1.5/tm=2.0 (run_signals_prime.py / scan_walkforward と統一)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "DON": (calc_donchian,     0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3%
-    "VOL": (calc_vol_breakout, 0.0, 1.0, 1.5),
-    "MOM": (calc_momentum,     0.0, 1.0, 1.5),
+    "DON": (calc_donchian,     0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
+    "VOL": (calc_vol_breakout, 0.0, 1.5, 2.0),
+    "MOM": (calc_momentum,     0.0, 1.5, 2.0),
 }
 
 import os as _os

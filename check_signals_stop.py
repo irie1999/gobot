@@ -84,11 +84,11 @@ STRATEGY_PARAMS_CONSERVATIVE = {
     "A7":   (calc_a7,   0.0, 1.5, 3.0),
     "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # 指値版は0.5だったがstopは0.0に統一
 }
-# aggressive: 利確 1R 近辺で積極確定、回転率優先
+# aggressive: sm=1.5/tm=2.0 (run_signals_prime.py / scan_walkforward と統一)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "MACD": (calc_macd, 0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3% (1.5R)
-    "A7":   (calc_a7,   0.0, 1.0, 1.5),
-    "RSI2": (calc_rsi2, 0.0, 1.2, 1.8),   # 目標 +5.4% / 損切 -3.6% (1.5R)
+    "MACD": (calc_macd, 0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
+    "A7":   (calc_a7,   0.0, 1.5, 2.0),
+    "RSI2": (calc_rsi2, 0.0, 1.5, 2.0),
 }
 
 import os as _os

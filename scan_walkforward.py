@@ -153,12 +153,12 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "MOM":  (calc_momentum,    0.0, 1.5, 3.0, "breakout"),
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.0, 1.5, "stop"),
-    "A7":   (calc_a7,          0.0, 1.0, 1.5, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 1.2, 1.8, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.0, 1.5, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.0, 1.5, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.0, 1.5, "breakout"),
+    "MACD": (calc_macd,        0.0, 1.5, 2.0, "stop"),
+    "A7":   (calc_a7,          0.0, 1.5, 2.0, "stop"),
+    "RSI2": (calc_rsi2,        0.0, 1.5, 2.0, "stop"),
+    "DON":  (calc_donchian,    0.0, 1.5, 2.0, "breakout"),
+    "VOL":  (calc_vol_breakout,0.0, 1.5, 2.0, "breakout"),
+    "MOM":  (calc_momentum,    0.0, 1.5, 2.0, "breakout"),
 }
 
 import os as _os
