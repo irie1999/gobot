@@ -190,13 +190,41 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     df = fetch(symbol, max(PERIODS))
     if df is None:
         return None
+
+    full_r = run_limit_backtest(symbol, name, df, calc_fn,
+                                em, sm, tm, max(PERIODS), strategy,
+                                entry_type=ENTRY_TYPE)
+    if not full_r:
+        return None
+
+    today  = datetime.now(JST).date()
     period_results: dict[int, dict] = {}
     for days in PERIODS:
-        r = run_limit_backtest(symbol, name, df, calc_fn,
-                               em, sm, tm, days, strategy,
-                               entry_type=ENTRY_TYPE)
-        if r and r["trades"] >= 1:
-            period_results[days] = r
+        cutoff = today - timedelta(days=days)
+        sub    = [t for t in full_r["trade_log"]
+                  if t["signal_dt"].date() >= cutoff]
+        if not sub:
+            continue
+        filled = len(sub)
+        wins   = sum(1 for t in sub if t["pnl"] > 0)
+        losses = sum(1 for t in sub if t["pnl"] <= 0)
+        gp     = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+        gl     = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        period_results[days] = dict(
+            symbol=symbol, name=name, strategy=strategy,
+            signals=full_r["signals"], filled=filled,
+            trades=filled, wins=wins, losses=losses,
+            win_rate=wins / filled * 100,
+            pf=pf, total_pnl=sum(t["pnl"] for t in sub),
+            total_fee=sum(t.get("fee", 0) for t in sub),
+            slippage_pct=full_r["slippage_pct"],
+            fee_pct_one_way=full_r["fee_pct_one_way"],
+            avg_hold=sum(t["hold_days"] for t in sub) / filled,
+            fill_rate=full_r["fill_rate"],
+            trade_log=sub,
+        )
+
     return dict(symbol=symbol, name=name, strategy=strategy,
                 period_results=period_results, today_sig=None)
 
