@@ -80,9 +80,9 @@ WATCHLIST: list[tuple[str, str, str]] = [
 # TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
 # デフォルトは conservative (現行踏襲)
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "MACD": (calc_macd, 0.0, 1.5, 3.0),
-    "A7":   (calc_a7,   0.0, 1.5, 3.0),
-    "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # 指値版は0.5だったがstopは0.0に統一
+    "MACD": (calc_macd, 0.0, 2.0, 3.0),   # sm 1.5→2.0 (optimize_params最適化)
+    "A7":   (calc_a7,   0.0, 2.0, 3.0),   # sm 1.5→2.0
+    "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # sm 変更なし (元々2.0)
 }
 # aggressive: 利確 1R 近辺で積極確定、回転率優先
 STRATEGY_PARAMS_AGGRESSIVE = {

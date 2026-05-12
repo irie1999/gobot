@@ -81,9 +81,9 @@ WATCHLIST: list[tuple[str, str, str]] = [
 # TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
 # デフォルトは conservative (現行踏襲)
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "DON": (calc_donchian,     0.0, 1.5, 3.0),
-    "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
-    "MOM": (calc_momentum,     0.0, 1.5, 3.0),
+    "DON": (calc_donchian,     0.0, 2.0, 3.0),   # sm 1.5→2.0 (optimize_params最適化)
+    "VOL": (calc_vol_breakout, 0.0, 2.0, 3.0),   # sm 1.5→2.0
+    "MOM": (calc_momentum,     0.0, 2.0, 3.0),   # sm 1.5→2.0
 }
 # aggressive: 利確 1.5R で回転率優先
 STRATEGY_PARAMS_AGGRESSIVE = {
