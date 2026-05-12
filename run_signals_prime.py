@@ -1,8 +1,8 @@
 """
 run_signals_prime.py  ―  プライム全銘柄 Walk-forward 選定版
 ======================================================================
-予算制限なしでプライム全銘柄 (~1800銘柄) を Walk-forward スキャンした
-結果から選定した 60 銘柄を使用。
+2倍レバ・4銘柄同時保有 (1ポジション105万円・上限10,500円/株) 条件で
+プライム全銘柄 (~1551銘柄) を Walk-forward スキャンした結果 60 銘柄を使用。
 パラメータ: sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)
 
 既存の check_signals_*.py / run_signals.py / run_signals_aggressive.py
@@ -43,78 +43,78 @@ _OPT_LABEL = "sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)"
 
 JST = timezone(timedelta(hours=9))
 
-# ── Walk-forward 選定 WATCHLIST (2026-05-12, プライム全銘柄・予算制限なし) ─────
-# ※ 210万円超の銘柄: 古河電気工業(44,910円)・堀場製作所(23,895円)・メイコー(32,350円)
+# ── Walk-forward 選定 WATCHLIST (2026-05-12, budget=105万・上限10,500円/株) ────
+# 2倍レバ・4銘柄同時保有 (1ポジション105万円) 条件。全銘柄が予算内。
 STOP_WATCHLIST: list[tuple[str, str, str]] = [
     # ── MACD (逆指値B) ──
-    ("6269.T", "三井海洋開発",                   "MACD"),  # 13,200円 folds=2 PnL=+903,804
-    ("5805.T", "ＳＷＣＣ",                       "MACD"),  # 17,580円 folds=3 PnL=+599,522
-    ("6875.T", "メガチップス",                   "MACD"),  # 11,930円 folds=3 PnL=+317,700
-    ("6368.T", "オルガノ",                       "MACD"),  # 18,320円 folds=3 PnL=+514,597
-    ("1762.T", "高松コンストラクショングループ", "MACD"),  #  3,625円 folds=2 PnL=+119,648
-    ("6976.T", "太陽誘電",                       "MACD"),  #  6,739円 folds=3 PnL=+264,392
-    ("4062.T", "イビデン",                       "MACD"),  # 17,200円 folds=2 PnL=+376,685
-    ("5802.T", "住友電気工業",                   "MACD"),  # 11,725円 folds=2 PnL=+286,415
-    ("1766.T", "東建コーポレーション",           "MACD"),  # 12,800円 folds=2 PnL=+228,755
-    ("6284.T", "日精エー・エス・ビー機械",       "MACD"),  #  8,240円 folds=3 PnL=+175,165
+    ("1762.T", "高松コンストラクショングループ", "MACD"),  # 3,625円 folds=2 PnL=+119,648 PF=10.0 WR=100%
+    ("6976.T", "太陽誘電",                       "MACD"),  # 6,739円 folds=3 PnL=+264,392 PF=5.69 WR=83%
+    ("6284.T", "日精エー・エス・ビー機械",       "MACD"),  # 8,240円 folds=3 PnL=+175,165 PF=5.19 WR=83%
+    ("1515.T", "日鉄鉱業",                       "MACD"),  # 2,605円 folds=3 PnL=+149,035 PF=7.21 WR=87%
+    ("4680.T", "ラウンドワン",                   "MACD"),  #   863円 folds=2 PnL=+36,869  PF=10.0 WR=100%
+    ("6101.T", "ツガミ",                         "MACD"),  # 6,020円 folds=2 PnL=+194,354 PF=4.71 WR=75%
+    ("6508.T", "明電舎",                         "MACD"),  # 9,450円 folds=2 PnL=+208,440 PF=3.40 WR=71%
+    ("9024.T", "西武ホールディングス",           "MACD"),  # 3,791円 folds=3 PnL=+149,609 PF=7.50 WR=91%
+    ("6141.T", "ＤＭＧ森精機",                   "MACD"),  # 3,782円 folds=2 PnL=+145,767 PF=4.81 WR=82%
+    ("6301.T", "小松製作所",                     "MACD"),  # 6,663円 folds=2 PnL=+140,647 PF=4.81 WR=82%
     # ── A7 (逆指値B) ──
-    ("6856.T", "堀場製作所",                     "A7"),    # 23,895円 folds=2 PnL=+391,517 ※210万超
-    ("6508.T", "明電舎",                         "A7"),    #  9,450円 folds=2 PnL=+278,865
-    ("2737.T", "トーメンデバイス",               "A7"),    # 16,540円 folds=2 PnL=+366,027
-    ("9602.T", "東宝",                           "A7"),    #  1,388円 folds=2 PnL=+48,658
-    ("8061.T", "西華産業",                       "A7"),    #  3,065円 folds=2 PnL=+112,064
-    ("6875.T", "メガチップス",                   "A7"),    # 11,930円 folds=3 PnL=+201,853
-    ("6269.T", "三井海洋開発",                   "A7"),    # 13,200円 folds=2 PnL=+269,699
-    ("5105.T", "ＴＯＹＯ ＴＩＲＥ",             "A7"),    #  3,759円 folds=2 PnL=+89,036
-    ("3046.T", "ジンズホールディングス",         "A7"),    #  7,770円 folds=2 PnL=+150,260
-    ("6268.T", "ナブテスコ",                     "A7"),    #  5,757円 folds=2 PnL=+112,459
+    ("6508.T", "明電舎",                         "A7"),    # 9,450円 folds=2 PnL=+278,865 PF=5.82 WR=86%
+    ("9602.T", "東宝",                           "A7"),    # 1,388円 folds=2 PnL=+48,658  PF=6.67 WR=67%
+    ("8061.T", "西華産業",                       "A7"),    # 3,065円 folds=2 PnL=+112,064 PF=10.0 WR=94%
+    ("5105.T", "ＴＯＹＯ ＴＩＲＥ",             "A7"),    # 3,759円 folds=2 PnL=+89,036  PF=7.79 WR=93%
+    ("3046.T", "ジンズホールディングス",         "A7"),    # 7,770円 folds=2 PnL=+150,260 PF=4.02 WR=56%
+    ("6268.T", "ナブテスコ",                     "A7"),    # 5,757円 folds=2 PnL=+112,459 PF=6.47 WR=84%
+    ("1964.T", "中外炉工業",                     "A7"),    # 4,655円 folds=2 PnL=+99,813  PF=7.23 WR=81%
+    ("6101.T", "ツガミ",                         "A7"),    # 6,020円 folds=2 PnL=+128,700 PF=6.73 WR=86%
+    ("8227.T", "しまむら",                       "A7"),    # 3,144円 folds=2 PnL=+129,861 PF=5.24 WR=85%
+    ("3186.T", "ネクステージ",                   "A7"),    # 3,465円 folds=2 PnL=+115,261 PF=5.29 WR=83%
     # ── RSI2 (逆指値B) ──
-    ("5801.T", "古河電気工業",                   "RSI2"),  # 44,910円 folds=3 PnL=+897,686 ※210万超
-    ("7003.T", "三井Ｅ＆Ｓ",                     "RSI2"),  #  5,526円 folds=2 PnL=+300,669
-    ("1942.T", "関電工",                         "RSI2"),  #  7,366円 folds=2 PnL=+106,337
-    ("4733.T", "オービックビジネスコンサルタント","RSI2"),  #  6,068円 folds=2 PnL=+179,071
-    ("6507.T", "シンフォニアテクノロジー",       "RSI2"),  # 14,870円 folds=2 PnL=+353,082
-    ("9869.T", "加藤産業",                       "RSI2"),  #  5,940円 folds=2 PnL=+158,203
-    ("9697.T", "カプコン",                       "RSI2"),  #  3,415円 folds=2 PnL=+140,591
-    ("5631.T", "日本製鋼所",                     "RSI2"),  #  8,895円 folds=3 PnL=+264,333
-    ("9305.T", "ヤマタネ",                       "RSI2"),  #  2,024円 folds=2 PnL=+62,306
-    ("9068.T", "丸全昭和運輸",                   "RSI2"),  #  7,780円 folds=3 PnL=+125,427
+    ("7003.T", "三井Ｅ＆Ｓ",                     "RSI2"),  # 5,526円 folds=2 PnL=+300,669 PF=7.96 WR=92%
+    ("1942.T", "関電工",                         "RSI2"),  # 7,366円 folds=2 PnL=+106,337 PF=10.0 WR=100%
+    ("4733.T", "オービックビジネスコンサルタント","RSI2"),  # 6,068円 folds=2 PnL=+179,071 PF=7.42 WR=72%
+    ("9869.T", "加藤産業",                       "RSI2"),  # 5,940円 folds=2 PnL=+158,203 PF=7.66 WR=93%
+    ("9697.T", "カプコン",                       "RSI2"),  # 3,415円 folds=2 PnL=+140,591 PF=4.37 WR=58%
+    ("5631.T", "日本製鋼所",                     "RSI2"),  # 8,895円 folds=3 PnL=+264,333 PF=2.79 WR=64%
+    ("9305.T", "ヤマタネ",                       "RSI2"),  # 2,024円 folds=2 PnL=+62,306  PF=6.67 WR=67%
+    ("9068.T", "丸全昭和運輸",                   "RSI2"),  # 7,780円 folds=3 PnL=+125,427 PF=4.97 WR=81%
+    ("4931.T", "新日本製薬",                     "RSI2"),  # 1,997円 folds=2 PnL=+41,091  PF=6.67 WR=67%
+    ("3104.T", "富士紡ホールディングス",         "RSI2"),  # 4,215円 folds=2 PnL=+100,977 PF=4.56 WR=72%
 ]
 
 BRK_WATCHLIST: list[tuple[str, str, str]] = [
     # ── DON (ブレイクアウト) ──
-    ("6787.T", "メイコー",                       "DON"),   # 32,350円 folds=2 PnL=+1,446,023 ※210万超
-    ("5805.T", "ＳＷＣＣ",                       "DON"),   # 17,580円 folds=2 PnL=+643,230
-    ("6508.T", "明電舎",                         "DON"),   #  9,450円 folds=2 PnL=+212,556
-    ("6875.T", "メガチップス",                   "DON"),   # 11,930円 folds=2 PnL=+254,576
-    ("8377.T", "ほくほくフィナンシャルグループ", "DON"),   #  6,376円 folds=2 PnL=+192,072
-    ("6268.T", "ナブテスコ",                     "DON"),   #  5,757円 folds=2 PnL=+180,525
-    ("5393.T", "ニチアス",                       "DON"),   #  3,796円 folds=2 PnL=+99,582
-    ("1975.T", "朝日工業社",                     "DON"),   #  3,855円 folds=2 PnL=+128,270
-    ("9024.T", "西武ホールディングス",           "DON"),   #  3,791円 folds=2 PnL=+140,739
-    ("6474.T", "不二越",                         "DON"),   #  5,570円 folds=2 PnL=+133,140
+    ("6508.T", "明電舎",                         "DON"),   # 9,450円 folds=2 PnL=+212,556 PF=4.57 WR=76%
+    ("8377.T", "ほくほくフィナンシャルグループ", "DON"),   # 6,376円 folds=2 PnL=+192,072 PF=3.91 WR=81%
+    ("6268.T", "ナブテスコ",                     "DON"),   # 5,757円 folds=2 PnL=+180,525 PF=4.38 WR=75%
+    ("5393.T", "ニチアス",                       "DON"),   # 3,796円 folds=2 PnL=+99,582  PF=8.38 WR=93%
+    ("1975.T", "朝日工業社",                     "DON"),   # 3,855円 folds=2 PnL=+128,270 PF=5.93 WR=86%
+    ("9024.T", "西武ホールディングス",           "DON"),   # 3,791円 folds=2 PnL=+140,739 PF=3.56 WR=55%
+    ("6474.T", "不二越",                         "DON"),   # 5,570円 folds=2 PnL=+133,140 PF=3.28 WR=80%
+    ("9984.T", "ソフトバンクグループ",           "DON"),   # 5,932円 folds=3 PnL=+176,910 PF=4.62 WR=80%
+    ("5535.T", "ミガロホールディングス",         "DON"),   #   300円 folds=2 PnL=+72,168  PF=6.67 WR=63%
+    ("3994.T", "マネーフォワード",               "DON"),   # 4,218円 folds=2 PnL=+134,934 PF=2.84 WR=67%
     # ── VOL (ブレイクアウト) ──
-    ("4062.T", "イビデン",                       "VOL"),   # 17,200円 folds=2 PnL=+427,175
-    ("6268.T", "ナブテスコ",                     "VOL"),   #  5,757円 folds=2 PnL=+174,873
-    ("5838.T", "楽天銀行",                       "VOL"),   #  6,247円 folds=3 PnL=+229,167
-    ("8050.T", "セイコーグループ",               "VOL"),   #  6,280円 folds=2 PnL=+158,663
-    ("6254.T", "野村マイクロ・サイエンス",       "VOL"),   #  4,450円 folds=2 PnL=+137,282
-    ("6532.T", "ベイカレント",                   "VOL"),   #  5,082円 folds=2 PnL=+150,399
-    ("8059.T", "第一実業",                       "VOL"),   #  3,185円 folds=2 PnL=+72,156
-    ("7721.T", "東京計器",                       "VOL"),   #  7,330円 folds=3 PnL=+161,775
-    ("1515.T", "日鉄鉱業",                       "VOL"),   #  2,605円 folds=3 PnL=+105,525
-    ("6264.T", "マルマエ",                       "VOL"),   #  2,323円 folds=2 PnL=+71,436
+    ("6268.T", "ナブテスコ",                     "VOL"),   # 5,757円 folds=2 PnL=+174,873 PF=10.0 WR=100%
+    ("5838.T", "楽天銀行",                       "VOL"),   # 6,247円 folds=3 PnL=+229,167 PF=5.72 WR=80%
+    ("8050.T", "セイコーグループ",               "VOL"),   # 6,280円 folds=2 PnL=+158,663 PF=7.30 WR=87%
+    ("6254.T", "野村マイクロ・サイエンス",       "VOL"),   # 4,450円 folds=2 PnL=+137,282 PF=3.57 WR=73%
+    ("6532.T", "ベイカレント",                   "VOL"),   # 5,082円 folds=2 PnL=+150,399 PF=3.76 WR=53%
+    ("8059.T", "第一実業",                       "VOL"),   # 3,185円 folds=2 PnL=+72,156  PF=7.47 WR=92%
+    ("7721.T", "東京計器",                       "VOL"),   # 7,330円 folds=3 PnL=+161,775 PF=2.48 WR=71%
+    ("1515.T", "日鉄鉱業",                       "VOL"),   # 2,605円 folds=3 PnL=+105,525 PF=5.76 WR=86%
+    ("6264.T", "マルマエ",                       "VOL"),   # 2,323円 folds=2 PnL=+71,436  PF=4.46 WR=78%
+    ("4047.T", "関東電化工業",                   "VOL"),   # 1,981円 folds=2 PnL=+61,591  PF=4.63 WR=77%
     # ── MOM (ブレイクアウト) ──
-    ("6269.T", "三井海洋開発",                   "MOM"),   # 13,200円 folds=2 PnL=+620,606
-    ("1515.T", "日鉄鉱業",                       "MOM"),   #  2,605円 folds=2 PnL=+262,189
-    ("7003.T", "三井Ｅ＆Ｓ",                     "MOM"),   #  5,526円 folds=2 PnL=+326,732
-    ("6875.T", "メガチップス",                   "MOM"),   # 11,930円 folds=3 PnL=+224,003
-    ("8360.T", "山梨中央銀行",                   "MOM"),   #  5,460円 folds=2 PnL=+173,468
-    ("7013.T", "ＩＨＩ",                         "MOM"),   #  2,814円 folds=3 PnL=+137,648
-    ("1975.T", "朝日工業社",                     "MOM"),   #  3,855円 folds=3 PnL=+114,345
-    ("6752.T", "パナソニック ホールディングス",  "MOM"),   #  3,440円 folds=3 PnL=+104,023
-    ("1812.T", "鹿島建設",                       "MOM"),   #  6,237円 folds=2 PnL=+112,756
-    ("8037.T", "カメイ",                         "MOM"),   #  3,385円 folds=2 PnL=+67,361
+    ("1515.T", "日鉄鉱業",                       "MOM"),   # 2,605円 folds=2 PnL=+262,189 PF=8.60 WR=92%
+    ("7003.T", "三井Ｅ＆Ｓ",                     "MOM"),   # 5,526円 folds=2 PnL=+326,732 PF=2.52 WR=70%
+    ("8360.T", "山梨中央銀行",                   "MOM"),   # 5,460円 folds=2 PnL=+173,468 PF=3.79 WR=76%
+    ("7013.T", "ＩＨＩ",                         "MOM"),   # 2,814円 folds=3 PnL=+137,648 PF=3.54 WR=74%
+    ("1975.T", "朝日工業社",                     "MOM"),   # 3,855円 folds=3 PnL=+114,345 PF=4.07 WR=78%
+    ("6752.T", "パナソニック ホールディングス",  "MOM"),   # 3,440円 folds=3 PnL=+104,023 PF=3.28 WR=75%
+    ("1812.T", "鹿島建設",                       "MOM"),   # 6,237円 folds=2 PnL=+112,756 PF=2.77 WR=76%
+    ("8037.T", "カメイ",                         "MOM"),   # 3,385円 folds=2 PnL=+67,361  PF=8.12 WR=85%
+    ("9412.T", "スカパーＪＳＡＴ",               "MOM"),   # 3,935円 folds=2 PnL=+95,038  PF=3.16 WR=74%
+    ("8522.T", "名古屋銀行",                     "MOM"),   # 5,860円 folds=2 PnL=+83,726  PF=3.12 WR=78%
 ]
 
 # WFバッジ用シンボルセット (60銘柄すべて)
@@ -179,15 +179,10 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 .wf-badge{{display:inline-block;background:#34d399;color:#000;font-size:10px;font-weight:700;
            padding:1px 5px;border-radius:3px;margin-left:5px;vertical-align:middle;letter-spacing:.5px}}
 .wf-row td:first-child{{border-left:3px solid #34d399 !important}}
-.over-budget{{display:inline-block;background:#ef4444;color:#fff;font-size:9px;font-weight:700;
-              padding:1px 4px;border-radius:3px;margin-left:3px;vertical-align:middle}}
 </style>
 </head>
 <body>
-<div class="mode-banner">🌿 PRIME WF — {_OPT_LABEL} / プライム全銘柄 Walk-forward 選定 2026-05-12</div>
-<div class="mode-banner" style="background:#7f1d1d;color:#fca5a5;font-size:11px;font-weight:400">
-  ⚠️ 210万超の銘柄 3件: 古河電気工業(44,910円) / 堀場製作所(23,895円) / メイコー(32,350円) — シグナルが出ても購入不可の場合はスキップ
-</div>
+<div class="mode-banner">🌿 PRIME WF — {_OPT_LABEL} / 2倍レバ・4銘柄同時保有 (上限10,500円/株) Walk-forward 選定 2026-05-12</div>
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
@@ -198,7 +193,6 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 {srt_tab_pane}
 <script>
 var WF_SYMS = {wf_syms_js};
-var OVER_BUDGET = ["5801.T","6856.T","6787.T"];
 
 function switchTab(n){{
   document.querySelectorAll('.tab-btn').forEach(function(b,i){{b.classList.toggle('active',i===n);}});
@@ -218,18 +212,6 @@ function markRows() {{
           badge.className = 'wf-badge';
           badge.textContent = 'WF';
           first.appendChild(badge);
-        }}
-        break;
-      }}
-    }}
-    for (var j = 0; j < OVER_BUDGET.length; j++) {{
-      if (text.indexOf(OVER_BUDGET[j]) !== -1) {{
-        if (!first.querySelector('.over-budget')) {{
-          var ob = document.createElement('span');
-          ob.className = 'over-budget';
-          ob.textContent = '210万超';
-          ob.title = '100株購入費が210万円を超えるため購入不可の場合があります';
-          first.appendChild(ob);
         }}
         break;
       }}
@@ -265,7 +247,7 @@ def main() -> None:
     print(f"Prime WF シグナル 開始  パラメータ: {_OPT_LABEL}")
     print(f"  逆指値B : {len(STOP_WATCHLIST)}銘柄")
     print(f"  BRK    : {len(BRK_WATCHLIST)}銘柄")
-    print(f"  ※210万超: 古河電気工業 / 堀場製作所 / メイコー", flush=True)
+    print(f"  上限10,500円/株 (2倍レバ・4銘柄同時 105万円/ポジション)", flush=True)
 
     with ThreadPoolExecutor(max_workers=3) as outer:
         fut_stop  = outer.submit(_run_group_with_list, _stop,  STOP_WATCHLIST,    sig_date, args.workers)
@@ -303,12 +285,11 @@ def main() -> None:
         print("  " + "-" * 130)
         for item, score, rank, kind in all_sigs:
             sig = item["today_sig"]
-            over = " ⚠️210万超" if item["symbol"] in ("5801.T", "6856.T", "6787.T") else ""
             print(f"  {item['symbol']:<12} {item['name']:<28} {item['strategy']:<6} {kind:<8}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>8,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
-                  f"  {rank}{score}点{over}")
+                  f"  {rank}{score}点")
     else:
         print("  (なし)")
 
