@@ -32,6 +32,17 @@ import check_signals_breakout as _brk
 import check_signals_short    as _short
 from run_signals import _extract_style, _extract_body
 
+# ── パラメータ上書き (optimize_params.py 最適化結果: sm=2.0 / tm=3.0) ────────
+# aggressive のデフォルト (sm=1.0/tm=1.5) は損切が早く損失過多。
+# 全6戦略でグリッドサーチした結果 sm=2.0/tm=3.0 が最良 PnL / EV を示した。
+# check_signals_*.py は変更せず、ここだけ monkey-patch。
+for _k, _v in list(_stop.STRATEGY_PARAMS.items()):
+    _stop.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 2.0, 3.0)
+for _k, _v in list(_brk.STRATEGY_PARAMS.items()):
+    _brk.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 2.0, 3.0)
+
+_OPT_LABEL = "sm=2.0 / tm=3.0 (optimize_params 最適値)"
+
 JST = timezone(timedelta(hours=9))
 
 # ── Walk-forward 選定 WATCHLIST (2026-05-12, aggressive, budget=50万) ────────
@@ -190,7 +201,7 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 </style>
 </head>
 <body>
-<div class="mode-banner">⚡ AGGRESSIVE MODE — 目標+4.5% / 損切-3% / Walk-forward 選定 2026-05-12</div>
+<div class="mode-banner">⚡ AGGRESSIVE MODE — {_OPT_LABEL} / Walk-forward 選定 2026-05-12</div>
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
