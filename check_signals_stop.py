@@ -42,9 +42,9 @@ PERIODS = [30, 90, 180, 365]
 
 
 def _fetch_live_price(symbol: str, fallback: float) -> float:
-    """直近の株価を取得（分足）。失敗時はキャッシュ終値にフォールバック。"""
+    """最新の日足終値をキャッシュを使わず直接取得。失敗時はフォールバック。"""
     try:
-        df = yf.download(symbol, period="1d", interval="1m",
+        df = yf.download(symbol, period="5d", interval="1d",
                          progress=False, auto_adjust=True)
         if df is not None and not df.empty:
             p = float(df["Close"].iloc[-1])
