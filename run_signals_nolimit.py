@@ -2,9 +2,9 @@
 run_signals_nolimit.py  ―  プライム全銘柄 Walk-forward 選定版（株価制限なし）
 ======================================================================
 プライム全銘柄 (~1800銘柄) を株価制限なしで Walk-forward スキャンした結果
-60 銘柄を使用。高株価銘柄（堀場/メイコー/古河電工等）を含む。
+戦略あたり最大15候補を使用。バックテスト後に365日PnL≤0の銘柄を自動除外。
 パラメータ: sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)
-フィルター: Sharpe >= 1.5 / 戦略あたり10銘柄
+フィルター: min-trades 10 / max-avg-hold 7.0 / Sharpe >= 0.0
 
 【使い方】
   python run_signals_nolimit.py                   # 全期間(365日) HTMLレポート
@@ -41,84 +41,111 @@ _OPT_LABEL = "sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)"
 
 JST = timezone(timedelta(hours=9))
 
-# ── Walk-forward 選定 WATCHLIST (2026-05-13, 株価制限なし) ──────────────────────
-# sm=1.5/tm=2.0, --min-trades 10 --max-avg-hold 7.0 --per-strategy 10
-# プライム全銘柄(1551銘柄) スキャン結果
-STOP_WATCHLIST: list[tuple[str, str, str]] = [
-    # ── MACD (逆指値B) ── 73銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("6387.T", "サムコ",                         "MACD"),  # 13,170円 folds=2 trades=18 PnL=+835,301   PF=4.94 WR=75.2%
-    ("6278.T", "ユニオンツール",                 "MACD"),  # 18,360円 folds=2 trades=14 PnL=+719,254   PF=4.79 WR=71.9%
-    ("4062.T", "イビデン",                       "MACD"),  # 17,060円 folds=2 trades=14 PnL=+622,837   PF=5.89 WR=80.0%
-    ("6101.T", "ツガミ",                         "MACD"),  #  6,260円 folds=2 trades=16 PnL=+343,916   PF=8.81 WR=95.2%
-    ("7236.T", "ティラド",                       "MACD"),  # 14,800円 folds=2 trades=16 PnL=+409,965   PF=3.94 WR=75.0%
-    ("6525.T", "ＫＯＫＵＳＡＩ　ＥＬＥＣＴＲＩＣ",  "MACD"),  #  6,170円 folds=2 trades=14 PnL=+371,792   PF=3.36 WR=71.7%
-    ("6875.T", "メガチップス",                   "MACD"),  # 11,790円 folds=2 trades=13 PnL=+301,425   PF=5.55 WR=75.6%
-    ("7013.T", "ＩＨＩ",                         "MACD"),  #  2,832円 folds=2 trades=11 PnL=+205,306   PF=7.26 WR=83.3%
-    ("6941.T", "山一電機",                       "MACD"),  # 11,180円 folds=2 trades=14 PnL=+372,115   PF=2.99 WR=71.0%
-    ("3741.T", "セック",                         "MACD"),  #  3,755円 folds=2 trades=15 PnL=+222,375   PF=7.58 WR=82.2%
-    # ── A7 (逆指値B) ── 49銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("6101.T", "ツガミ",                         "A7"),    #  6,260円 folds=2 trades=14 PnL=+312,914   PF=8.16 WR=88.9%
-    ("7003.T", "三井Ｅ＆Ｓ",                     "A7"),    #  5,560円 folds=2 trades=13 PnL=+385,295   PF=5.33 WR=80.6%
-    ("2692.T", "伊藤忠食品",                     "A7"),    # 12,920円 folds=2 trades=16 PnL=+412,858   PF=4.76 WR=62.2%
-    ("6103.T", "オークマ",                       "A7"),    #  4,760円 folds=2 trades=11 PnL=+209,298   PF=7.58 WR=93.3%
-    ("7173.T", "東京きらぼしフィナンシャルグループ","A7"),  # 10,550円 folds=2 trades=17 PnL=+367,438   PF=2.84 WR=65.8%
-    ("8361.T", "大垣共立銀行",                   "A7"),    #  7,370円 folds=2 trades=12 PnL=+215,440   PF=7.30 WR=78.3%
-    ("8360.T", "山梨中央銀行",                   "A7"),    #  5,740円 folds=2 trades=14 PnL=+242,540   PF=3.85 WR=78.3%
-    ("8061.T", "西華産業",                       "A7"),    #  3,250円 folds=2 trades=12 PnL=+157,704   PF=7.12 WR=76.7%
-    ("1814.T", "大末建設",                       "A7"),    #  3,390円 folds=2 trades=13 PnL=+133,978   PF=8.62 WR=83.3%
-    ("2737.T", "トーメンデバイス",               "A7"),    # 15,640円 folds=2 trades=11 PnL=+260,994   PF=2.61 WR=72.2%
-    # ── RSI2 (逆指値B) ── 12銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("5801.T", "古河電気工業",                   "RSI2"),  # 58,130円 folds=2 trades=10 PnL=+1,161,433 PF=7.22 WR=88.9%
-    ("9869.T", "加藤産業",                       "RSI2"),  #  5,980円 folds=2 trades=12 PnL=+272,813   PF=5.85 WR=82.2%
-    ("8877.T", "エスリード",                     "RSI2"),  #  5,620円 folds=3 trades=12 PnL=+256,071   PF=7.12 WR=83.3%
-    ("7003.T", "三井Ｅ＆Ｓ",                     "RSI2"),  #  5,560円 folds=2 trades=10 PnL=+269,037   PF=5.06 WR=69.4%
-    ("7011.T", "三菱重工業",                     "RSI2"),  #  4,406円 folds=2 trades=12 PnL=+187,381   PF=5.32 WR=83.3%
-    ("7012.T", "川崎重工業",                     "RSI2"),  #  3,417円 folds=3 trades=13 PnL=+162,918   PF=4.89 WR=78.3%
-    ("8551.T", "北日本銀行",                     "RSI2"),  #  4,975円 folds=2 trades=10 PnL=+154,308   PF=4.81 WR=69.4%
-    ("6644.T", "大崎電気工業",                   "RSI2"),  #  1,755円 folds=2 trades=11 PnL=+74,020    PF=7.59 WR=82.2%
-    ("3496.T", "アズーム",                       "RSI2"),  #  4,230円 folds=2 trades=12 PnL=+120,365   PF=4.46 WR=63.9%
-    ("7936.T", "アシックス",                     "RSI2"),  #  4,600円 folds=3 trades=12 PnL=+116,315   PF=3.25 WR=58.9%
+# ── Walk-forward 候補 CANDIDATES (2026-05-13, 株価制限なし) ─────────────────────
+# build_watchlist.py --min-trades 10 --max-avg-hold 7.0 --per-strategy 15
+# バックテスト後に365日PnL≤0の銘柄を自動除外するため、多めに候補を用意
+STOP_CANDIDATES: list[tuple[str, str, str]] = [
+    # ── MACD (逆指値B) ── 73銘柄通過 上位15
+    ("6387.T", "サムコ",                         "MACD"),  # folds=2 trades=18 PnL=+835,301   PF=4.94 WR=75.2%
+    ("6278.T", "ユニオンツール",                 "MACD"),  # folds=2 trades=14 PnL=+719,254   PF=4.79 WR=71.9%
+    ("4062.T", "イビデン",                       "MACD"),  # folds=2 trades=14 PnL=+622,837   PF=5.89 WR=80.0%
+    ("6101.T", "ツガミ",                         "MACD"),  # folds=2 trades=16 PnL=+343,916   PF=8.81 WR=95.2%
+    ("7236.T", "ティラド",                       "MACD"),  # folds=2 trades=16 PnL=+409,965   PF=3.94 WR=75.0%
+    ("6525.T", "ＫＯＫＵＳＡＩ　ＥＬＥＣＴＲＩＣ",  "MACD"),  # folds=2 trades=14 PnL=+371,792   PF=3.36 WR=71.7%
+    ("6875.T", "メガチップス",                   "MACD"),  # folds=2 trades=13 PnL=+301,425   PF=5.55 WR=75.6%
+    ("7013.T", "ＩＨＩ",                         "MACD"),  # folds=2 trades=11 PnL=+205,306   PF=7.26 WR=83.3%
+    ("6941.T", "山一電機",                       "MACD"),  # folds=2 trades=14 PnL=+372,115   PF=2.99 WR=71.0%
+    ("3741.T", "セック",                         "MACD"),  # folds=2 trades=15 PnL=+222,375   PF=7.58 WR=82.2%
+    ("5334.T", "日本特殊陶業",                   "MACD"),  # folds=2 trades=12 PnL=+225,224   PF=4.66 WR=72.2%
+    ("8050.T", "セイコーグループ",               "MACD"),  # folds=2 trades=10 PnL=+197,198   PF=7.17 WR=72.2%
+    ("6284.T", "日精エー・エス・ビー機械",         "MACD"),  # folds=3 trades=10 PnL=+206,364   PF=3.79 WR=69.4%
+    ("6976.T", "太陽誘電",                       "MACD"),  # folds=3 trades=16 PnL=+249,813   PF=3.32 WR=70.0%
+    ("1812.T", "鹿島建設",                       "MACD"),  # folds=2 trades=14 PnL=+193,037   PF=4.84 WR=72.4%
+    # ── A7 (逆指値B) ── 49銘柄通過 上位15
+    ("6101.T", "ツガミ",                         "A7"),    # folds=2 trades=14 PnL=+312,914   PF=8.16 WR=88.9%
+    ("7003.T", "三井Ｅ＆Ｓ",                     "A7"),    # folds=2 trades=13 PnL=+385,295   PF=5.33 WR=80.6%
+    ("2692.T", "伊藤忠食品",                     "A7"),    # folds=2 trades=16 PnL=+412,858   PF=4.76 WR=62.2%
+    ("6103.T", "オークマ",                       "A7"),    # folds=2 trades=11 PnL=+209,298   PF=7.58 WR=93.3%
+    ("7173.T", "東京きらぼしフィナンシャルグループ","A7"),  # folds=2 trades=17 PnL=+367,438   PF=2.84 WR=65.8%
+    ("8361.T", "大垣共立銀行",                   "A7"),    # folds=2 trades=12 PnL=+215,440   PF=7.30 WR=78.3%
+    ("8360.T", "山梨中央銀行",                   "A7"),    # folds=2 trades=14 PnL=+242,540   PF=3.85 WR=78.3%
+    ("8061.T", "西華産業",                       "A7"),    # folds=2 trades=12 PnL=+157,704   PF=7.12 WR=76.7%
+    ("1814.T", "大末建設",                       "A7"),    # folds=2 trades=13 PnL=+133,978   PF=8.62 WR=83.3%
+    ("2737.T", "トーメンデバイス",               "A7"),    # folds=2 trades=11 PnL=+260,994   PF=2.61 WR=72.2%
+    ("5803.T", "フジクラ",                       "A7"),    # folds=3 trades=13 PnL=+167,919   PF=5.27 WR=73.3%
+    ("4216.T", "旭有機材",                       "A7"),    # folds=2 trades=12 PnL=+140,849   PF=4.86 WR=82.2%
+    ("4091.T", "日本酸素ホールディングス",         "A7"),    # folds=2 trades=10 PnL=+165,370   PF=3.63 WR=69.4%
+    ("5831.T", "しずおかフィナンシャルグループ",   "A7"),    # folds=2 trades=10 PnL=+79,904    PF=8.02 WR=93.3%
+    ("2540.T", "養命酒製造",                     "A7"),    # folds=2 trades=12 PnL=+111,046   PF=5.41 WR=70.0%
+    # ── RSI2 (逆指値B) ── 12銘柄通過 全12
+    ("5801.T", "古河電気工業",                   "RSI2"),  # folds=2 trades=10 PnL=+1,161,433 PF=7.22 WR=88.9%
+    ("9869.T", "加藤産業",                       "RSI2"),  # folds=2 trades=12 PnL=+272,813   PF=5.85 WR=82.2%
+    ("8877.T", "エスリード",                     "RSI2"),  # folds=3 trades=12 PnL=+256,071   PF=7.12 WR=83.3%
+    ("7003.T", "三井Ｅ＆Ｓ",                     "RSI2"),  # folds=2 trades=10 PnL=+269,037   PF=5.06 WR=69.4%
+    ("7011.T", "三菱重工業",                     "RSI2"),  # folds=2 trades=12 PnL=+187,381   PF=5.32 WR=83.3%
+    ("7012.T", "川崎重工業",                     "RSI2"),  # folds=3 trades=13 PnL=+162,918   PF=4.89 WR=78.3%
+    ("8551.T", "北日本銀行",                     "RSI2"),  # folds=2 trades=10 PnL=+154,308   PF=4.81 WR=69.4%
+    ("6644.T", "大崎電気工業",                   "RSI2"),  # folds=2 trades=11 PnL=+74,020    PF=7.59 WR=82.2%
+    ("3496.T", "アズーム",                       "RSI2"),  # folds=2 trades=12 PnL=+120,365   PF=4.46 WR=63.9%
+    ("7936.T", "アシックス",                     "RSI2"),  # folds=3 trades=12 PnL=+116,315   PF=3.25 WR=58.9%
+    ("5262.T", "日本ヒューム",                   "RSI2"),  # folds=2 trades=13 PnL=+55,117    PF=1.90 WR=58.3%
+    ("6745.T", "ホーチキ",                       "RSI2"),  # folds=2 trades=10 PnL=+20,278    PF=4.51 WR=80.6%
 ]
 
-BRK_WATCHLIST: list[tuple[str, str, str]] = [
-    # ── DON (ブレイクアウト) ── 43銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("4062.T", "イビデン",                       "DON"),   # 17,060円 folds=2 trades=19 PnL=+721,256   PF=5.88 WR=75.6%
-    ("5715.T", "古河機械金属",                   "DON"),   #  4,075円 folds=2 trades=13 PnL=+288,899   PF=7.79 WR=85.0%
-    ("8360.T", "山梨中央銀行",                   "DON"),   #  5,740円 folds=3 trades=18 PnL=+304,402   PF=7.05 WR=77.5%
-    ("5535.T", "ミガロホールディングス",           "DON"),   #    291円 folds=2 trades=11 PnL=+149,141   PF=4.21 WR=45.8%
-    ("2579.T", "コカ・コーラ ボトラーズジャパン", "DON"),   #  3,362円 folds=2 trades=11 PnL=+114,148   PF=4.34 WR=72.2%
-    ("2802.T", "味の素",                         "DON"),   #  5,483円 folds=3 trades=14 PnL=+148,598   PF=3.46 WR=71.1%
-    ("1938.T", "日本リーテック",                 "DON"),   #  3,055円 folds=2 trades=14 PnL=+116,917   PF=5.43 WR=80.6%
-    ("8386.T", "百十四銀行",                     "DON"),   #  2,500円 folds=3 trades=18 PnL=+95,880    PF=5.81 WR=88.6%
-    ("1815.T", "鉄建建設",                       "DON"),   #  4,955円 folds=2 trades=17 PnL=+138,865   PF=3.03 WR=70.0%
-    ("6284.T", "日精エー・エス・ビー機械",         "DON"),   #  8,190円 folds=2 trades=10 PnL=+144,459   PF=4.88 WR=75.0%
-    # ── VOL (ブレイクアウト) ── 23銘柄通過 上位10 (build_watchlist.py 2026-05-13)
-    # ── VOL (ブレイクアウト) ── 13銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("5802.T", "住友電気工業",                   "VOL"),   # 12,775円 folds=3 trades=12 PnL=+543,686   PF=6.14 WR=80.6%
-    ("4062.T", "イビデン",                       "VOL"),   # 17,060円 folds=3 trades=11 PnL=+520,446   PF=8.10 WR=88.9%
-    ("1515.T", "日鉄鉱業",                       "VOL"),   #  2,516円 folds=2 trades=13 PnL=+185,014   PF=5.92 WR=83.3%
-    ("6268.T", "ナブテスコ",                     "VOL"),   #  5,737円 folds=2 trades=10 PnL=+157,963   PF=6.36 WR=77.8%
-    ("3741.T", "セック",                         "VOL"),   #  3,755円 folds=2 trades=12 PnL=+165,275   PF=5.52 WR=75.0%
-    ("5715.T", "古河機械金属",                   "VOL"),   #  4,075円 folds=2 trades=10 PnL=+154,774   PF=7.35 WR=91.7%
-    ("3946.T", "トーモク",                       "VOL"),   #  3,940円 folds=2 trades=10 PnL=+81,084    PF=7.31 WR=80.6%
-    ("1975.T", "朝日工業社",                     "VOL"),   #  3,885円 folds=3 trades=10 PnL=+107,423   PF=5.04 WR=80.6%
-    ("1942.T", "関電工",                         "VOL"),   #  7,267円 folds=2 trades=10 PnL=+122,212   PF=4.97 WR=83.3%
-    ("6323.T", "ローツェ",                       "VOL"),   #  3,946円 folds=2 trades=11 PnL=+109,444   PF=4.46 WR=75.6%
-    # ── MOM (ブレイクアウト) ── 14銘柄通過 上位10 (build_watchlist.py 2026-05-13 --min-trades 10 --max-avg-hold 7)
-    ("6101.T", "ツガミ",                         "MOM"),   #  6,260円 folds=2 trades=15 PnL=+329,185   PF=7.39 WR=88.9%
-    ("1515.T", "日鉄鉱業",                       "MOM"),   #  2,516円 folds=2 trades=16 PnL=+302,592   PF=7.61 WR=86.7%
-    ("9412.T", "スカパーＪＳＡＴ",               "MOM"),   #  4,205円 folds=2 trades=16 PnL=+157,454   PF=3.41 WR=75.5%
-    ("8387.T", "四国銀行",                       "MOM"),   #  2,661円 folds=2 trades=14 PnL=+95,988    PF=5.81 WR=83.3%
-    ("8522.T", "名古屋銀行",                     "MOM"),   #  5,870円 folds=2 trades=14 PnL=+133,652   PF=2.75 WR=70.0%
-    ("8360.T", "山梨中央銀行",                   "MOM"),   #  5,740円 folds=2 trades=19 PnL=+131,975   PF=4.62 WR=74.6%
-    ("8237.T", "松屋",                           "MOM"),   #  1,548円 folds=3 trades=16 PnL=+92,578    PF=2.70 WR=73.8%
-    ("1961.T", "三機工業",                       "MOM"),   #  2,596円 folds=2 trades=15 PnL=+76,378    PF=4.39 WR=72.2%
-    ("7453.T", "良品計画",                       "MOM"),   #  3,492円 folds=2 trades=12 PnL=+87,491    PF=2.60 WR=63.3%
-    ("9305.T", "ヤマタネ",                       "MOM"),   #  1,930円 folds=2 trades=11 PnL=+72,261    PF=1.57 WR=42.2%
+BRK_CANDIDATES: list[tuple[str, str, str]] = [
+    # ── DON (ブレイクアウト) ── 43銘柄通過 上位15
+    ("4062.T", "イビデン",                       "DON"),   # folds=2 trades=19 PnL=+721,256   PF=5.88 WR=75.6%
+    ("5715.T", "古河機械金属",                   "DON"),   # folds=2 trades=13 PnL=+288,899   PF=7.79 WR=85.0%
+    ("8360.T", "山梨中央銀行",                   "DON"),   # folds=3 trades=18 PnL=+304,402   PF=7.05 WR=77.5%
+    ("5535.T", "ミガロホールディングス",           "DON"),   # folds=2 trades=11 PnL=+149,141   PF=4.21 WR=45.8%
+    ("2579.T", "コカ・コーラ ボトラーズジャパン", "DON"),   # folds=2 trades=11 PnL=+114,148   PF=4.34 WR=72.2%
+    ("2802.T", "味の素",                         "DON"),   # folds=3 trades=14 PnL=+148,598   PF=3.46 WR=71.1%
+    ("1938.T", "日本リーテック",                 "DON"),   # folds=2 trades=14 PnL=+116,917   PF=5.43 WR=80.6%
+    ("8386.T", "百十四銀行",                     "DON"),   # folds=3 trades=18 PnL=+95,880    PF=5.81 WR=88.6%
+    ("1815.T", "鉄建建設",                       "DON"),   # folds=2 trades=17 PnL=+138,865   PF=3.03 WR=70.0%
+    ("6284.T", "日精エー・エス・ビー機械",         "DON"),   # folds=2 trades=10 PnL=+144,459   PF=4.88 WR=75.0%
+    ("6268.T", "ナブテスコ",                     "DON"),   # folds=2 trades=15 PnL=+133,022   PF=2.78 WR=66.7%
+    ("1893.T", "五洋建設",                       "DON"),   # folds=2 trades=18 PnL=+92,132    PF=5.35 WR=76.3%
+    ("4506.T", "住友ファーマ",                   "DON"),   # folds=2 trades=15 PnL=+108,758   PF=2.63 WR=67.2%
+    ("1871.T", "ピーエス・コンストラクション",     "DON"),   # folds=2 trades=13 PnL=+87,334    PF=5.25 WR=75.6%
+    ("5482.T", "愛知製鋼",                       "DON"),   # folds=2 trades=14 PnL=+90,828    PF=4.55 WR=66.7%
+    # ── VOL (ブレイクアウト) ── 13銘柄通過 全13
+    ("5802.T", "住友電気工業",                   "VOL"),   # folds=3 trades=12 PnL=+543,686   PF=6.14 WR=80.6%
+    ("4062.T", "イビデン",                       "VOL"),   # folds=3 trades=11 PnL=+520,446   PF=8.10 WR=88.9%
+    ("1515.T", "日鉄鉱業",                       "VOL"),   # folds=2 trades=13 PnL=+185,014   PF=5.92 WR=83.3%
+    ("6268.T", "ナブテスコ",                     "VOL"),   # folds=2 trades=10 PnL=+157,963   PF=6.36 WR=77.8%
+    ("3741.T", "セック",                         "VOL"),   # folds=2 trades=12 PnL=+165,275   PF=5.52 WR=75.0%
+    ("5715.T", "古河機械金属",                   "VOL"),   # folds=2 trades=10 PnL=+154,774   PF=7.35 WR=91.7%
+    ("3946.T", "トーモク",                       "VOL"),   # folds=2 trades=10 PnL=+81,084    PF=7.31 WR=80.6%
+    ("1975.T", "朝日工業社",                     "VOL"),   # folds=3 trades=10 PnL=+107,423   PF=5.04 WR=80.6%
+    ("1942.T", "関電工",                         "VOL"),   # folds=2 trades=10 PnL=+122,212   PF=4.97 WR=83.3%
+    ("6323.T", "ローツェ",                       "VOL"),   # folds=2 trades=11 PnL=+109,444   PF=4.46 WR=75.6%
+    ("3099.T", "三越伊勢丹ホールディングス",       "VOL"),   # folds=2 trades=10 PnL=+75,858    PF=2.81 WR=69.4%
+    ("8237.T", "松屋",                           "VOL"),   # folds=2 trades=10 PnL=+62,597    PF=4.41 WR=72.2%
+    ("7231.T", "トピー工業",                     "VOL"),   # folds=2 trades=10 PnL=+57,537    PF=2.86 WR=69.4%
+    # ── MOM (ブレイクアウト) ── 14銘柄通過 全14
+    ("6101.T", "ツガミ",                         "MOM"),   # folds=2 trades=15 PnL=+329,185   PF=7.39 WR=88.9%
+    ("1515.T", "日鉄鉱業",                       "MOM"),   # folds=2 trades=16 PnL=+302,592   PF=7.61 WR=86.7%
+    ("9412.T", "スカパーＪＳＡＴ",               "MOM"),   # folds=2 trades=16 PnL=+157,454   PF=3.41 WR=75.5%
+    ("8387.T", "四国銀行",                       "MOM"),   # folds=2 trades=14 PnL=+95,988    PF=5.81 WR=83.3%
+    ("8522.T", "名古屋銀行",                     "MOM"),   # folds=2 trades=14 PnL=+133,652   PF=2.75 WR=70.0%
+    ("8360.T", "山梨中央銀行",                   "MOM"),   # folds=2 trades=19 PnL=+131,975   PF=4.62 WR=74.6%
+    ("8237.T", "松屋",                           "MOM"),   # folds=3 trades=16 PnL=+92,578    PF=2.70 WR=73.8%
+    ("1961.T", "三機工業",                       "MOM"),   # folds=2 trades=15 PnL=+76,378    PF=4.39 WR=72.2%
+    ("7453.T", "良品計画",                       "MOM"),   # folds=2 trades=12 PnL=+87,491    PF=2.60 WR=63.3%
+    ("9305.T", "ヤマタネ",                       "MOM"),   # folds=2 trades=11 PnL=+72,261    PF=1.57 WR=42.2%
+    ("7389.T", "あいちフィナンシャルグループ",     "MOM"),   # folds=2 trades=15 PnL=+48,770    PF=3.80 WR=77.5%
+    ("5901.T", "東洋製罐グループホールディングス", "MOM"),   # folds=2 trades=11 PnL=+50,011    PF=1.99 WR=61.1%
+    ("9991.T", "ジェコス",                       "MOM"),   # folds=2 trades=14 PnL=+32,501    PF=2.14 WR=64.4%
+    ("8016.T", "オンワードホールディングス",       "MOM"),   # folds=2 trades=11 PnL=+14,588    PF=4.84 WR=80.6%
 ]
 
-# WFバッジ用シンボルセット (60銘柄すべて)
-_WF_SYMS = sorted({s for s, _, _ in (STOP_WATCHLIST + BRK_WATCHLIST)})
+# 後方互換: build_html等が参照する旧変数名
+STOP_WATCHLIST = STOP_CANDIDATES
+BRK_WATCHLIST  = BRK_CANDIDATES
+
+# WFバッジ用シンボルセット (候補銘柄すべて)
+_WF_SYMS = sorted({s for s, _, _ in (STOP_CANDIDATES + BRK_CANDIDATES)})
 
 
 def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
@@ -133,6 +160,12 @@ def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
                     all_items.append(r)
             except Exception:
                 pass
+
+    # 365日バックテストでPnL≤0の銘柄を自動除外
+    all_items = [
+        item for item in all_items
+        if (item.get("period_results") or {}).get(365, {}).get("total_pnl", 0) > 0
+    ]
 
     order = {(s, st): i for i, (s, _, st) in enumerate(watchlist)}
     all_items.sort(key=lambda x: order.get((x["symbol"], x["strategy"]), 999))
