@@ -161,10 +161,11 @@ def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
             except Exception:
                 pass
 
-    # 365日バックテストでPnL≤0の銘柄を自動除外
+    # 365日バックテストでPnL≤0 または取引回数<5の銘柄を自動除外
     all_items = [
         item for item in all_items
         if (item.get("period_results") or {}).get(365, {}).get("total_pnl", 0) > 0
+        and (item.get("period_results") or {}).get(365, {}).get("trades", 0) >= 5
     ]
 
     order = {(s, st): i for i, (s, _, st) in enumerate(watchlist)}
