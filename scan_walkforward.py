@@ -311,6 +311,13 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
         total_test_pnl += r.get("total_pnl", 0.0)
         total_test_tr  += r.get("trades", 0)
 
+    # 平均保有日数 (約定済みトレードのみ)
+    filled_trades = [t for t in all_test_trades if t.get("hold_days", 0) > 0]
+    avg_hold_days = (
+        round(sum(t["hold_days"] for t in filled_trades) / len(filled_trades), 1)
+        if filled_trades else 0.0
+    )
+
     # 結合トレードログからリスク指標
     agg = enrich_backtest_result({"trade_log": all_test_trades}, INITIAL_CASH)
 
@@ -334,6 +341,7 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
         latest_price=round(latest_price, 0),
         folds_passed=folds_passed,
         total_test_trades=total_test_tr,
+        avg_hold_days=avg_hold_days,
         total_test_pnl=round(total_test_pnl, 0),
         total_train_pnl=round(train_pnl_sum, 0),
         avg_test_pf=round(avg_test_pf, 2),
@@ -458,7 +466,7 @@ def main() -> None:
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
             "folds_passed",
-            "total_test_trades", "total_test_pnl", "total_train_pnl",
+            "total_test_trades", "avg_hold_days", "total_test_pnl", "total_train_pnl",
             "avg_test_pf", "avg_test_wr",
             "max_drawdown_pct", "max_consecutive_losses", "sharpe",
             "recovery_factor", "train_to_test_degradation_pct",

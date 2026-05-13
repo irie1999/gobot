@@ -71,7 +71,9 @@ def apply_filters(rows: list[dict],
                   max_dd_pct: float,
                   max_consec_losses: int,
                   min_sharpe: float,
-                  max_price: float = 0.0) -> list[dict]:
+                  max_price: float = 0.0,
+                  min_trades: int = 0,
+                  max_avg_hold: float = 0.0) -> list[dict]:
     """フィルターを適用した行のみ返す。"""
     survivors = []
     for r in rows:
@@ -85,6 +87,14 @@ def apply_filters(rows: list[dict],
             continue
         if _float(r.get("total_test_pnl", 0)) <= 0:
             continue
+        # 取引回数フィルター
+        if min_trades > 0 and _int(r.get("total_test_trades", 0)) < min_trades:
+            continue
+        # 平均保有日数フィルター (CSV に avg_hold_days がある場合のみ有効)
+        if max_avg_hold > 0:
+            hold = _float(r.get("avg_hold_days", 0))
+            if hold > 0 and hold > max_avg_hold:
+                continue
         # 価格フィルター: latest_price > max_price の銘柄を除外
         # (CSV に latest_price が無い古いファイルはスキップしない)
         if max_price > 0:
@@ -134,7 +144,12 @@ def main() -> None:
     parser.add_argument("--max-dd",      type=float, default=15.0,
                         help="MaxDD 上限 (%%) デフォルト15")
     parser.add_argument("--max-consec-losses", type=int, default=5)
-    parser.add_argument("--min-sharpe",  type=float, default=0.0)
+    parser.add_argument("--min-sharpe",    type=float, default=0.0)
+    parser.add_argument("--min-trades",    type=int,   default=0,
+                        help="TEST 期間の最低取引回数 (0=制限なし)")
+    parser.add_argument("--max-avg-hold",  type=float, default=0.0,
+                        help="TEST 期間の平均保有日数 上限 (0=制限なし). "
+                             "scan_walkforward.py を再実行して avg_hold_days カラムが必要")
     parser.add_argument("--max-price",   type=float, default=0.0,
                         help="最新終値の上限 (円/株). 0=制限なし")
     parser.add_argument("--budget",      type=float, default=0.0,
@@ -167,6 +182,10 @@ def main() -> None:
           f"MaxDD<={args.max_dd}%  "
           f"連敗<={args.max_consec_losses}  "
           f"Sharpe>={args.min_sharpe}")
+    if args.min_trades > 0:
+        print(f"  取引回数  : TEST期間 {args.min_trades}回以上")
+    if args.max_avg_hold > 0:
+        print(f"  保有日数  : 平均 {args.max_avg_hold}日以下")
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
@@ -193,6 +212,8 @@ def main() -> None:
             max_consec_losses=args.max_consec_losses,
             min_sharpe=args.min_sharpe,
             max_price=effective_max_price,
+            min_trades=args.min_trades,
+            max_avg_hold=args.max_avg_hold,
         )
         filtered.sort(key=composite_score, reverse=True)
         top = filtered[: args.per_strategy]
@@ -201,20 +222,25 @@ def main() -> None:
         print(f"  全候補={len(rows)}  フィルター通過={len(filtered)}  選定={len(top)}")
 
         if top:
+            has_hold = any(r.get("avg_hold_days") for r in top)
+            hold_hdr = f"{'保有日':>7}" if has_hold else ""
             print(f"  {'銘柄':<10}{'名前':<22}{'株価':>8}{'100株':>10}"
-                  f"{'fld':>5}{'PnL':>12}"
-                  f"{'PF':>7}{'WR':>8}{'DD%':>8}{'連敗':>6}{'Shrp':>7}")
-            print("  " + "-" * 108)
+                  f"{'fld':>5}{'取引':>6}{'PnL':>12}"
+                  f"{'PF':>7}{'WR':>8}{'DD%':>8}{'連敗':>6}{'Shrp':>7}{hold_hdr}")
+            print("  " + "-" * (108 + (7 if has_hold else 0)))
             for r in top:
                 price = _float(r.get("latest_price", 0))
                 cost  = price * 100
+                hold_val = (f"{_float(r.get('avg_hold_days',0)):>7.1f}"
+                            if has_hold else "")
                 print(f"  {r['symbol']:<10}{r['name'][:20]:<22}"
                       f"{price:>8,.0f}{cost:>10,.0f}"
-                      f"{r['folds_passed']:>5}{_float(r['total_test_pnl']):>+12,.0f}"
+                      f"{r['folds_passed']:>5}{_int(r.get('total_test_trades',0)):>6}"
+                      f"{_float(r['total_test_pnl']):>+12,.0f}"
                       f"{r['avg_test_pf']:>7}{r['avg_test_wr']:>7}%"
                       f"{r['max_drawdown_pct']:>8}"
                       f"{r['max_consecutive_losses']:>6}"
-                      f"{r['sharpe']:>7}")
+                      f"{r['sharpe']:>7}{hold_val}")
 
         total_candidates += len(rows)
         total_selected   += len(top)
