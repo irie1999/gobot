@@ -44,7 +44,8 @@ PERIODS = [30, 90, 180, 365]
 def _fetch_live_price(symbol: str, fallback: float) -> float:
     """最新の日足終値をキャッシュを使わず直接取得。失敗時はフォールバック。"""
     try:
-        df = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
+        df = yf.Ticker(symbol).history(period="5d", interval="1d",
+                                       auto_adjust=False, actions=False)
         if df is not None and not df.empty:
             p = float(df["Close"].iloc[-1])
             return p if p > 0 else fallback
