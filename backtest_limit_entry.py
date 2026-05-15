@@ -427,6 +427,61 @@ def run_limit_backtest(
         if pd.isna(atr_prev) or atr_prev <= 0:
             continue
 
+        # ── idle: シグナル判定 ─────────────────────────────────────
+        # 注意: idle を先に処理することで、シグナル翌日（当日 bar）も
+        # 即座に pending チェックへ落ちて約定できる。
+        # 実運用セマンティクス: シグナル日 T の引け後に逆指値注文を置き、
+        # T+1 の始値から発動可能 → バックテストも同じ T+1 の hi/lo で判定。
+        if state == "idle":
+            entry_sig = bool(prev.get("entry_sig", False))
+            if not entry_sig:
+                continue
+            if pd.isna(atr_prev) or atr_prev <= 0:
+                continue
+
+            close_prev = float(prev["close"])
+
+            # データ異常・低価格株・高価格異常を除外
+            if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
+                continue
+            if atr_prev / close_prev > MAX_ATR_RATIO:
+                continue
+
+            if entry_type == "stop":
+                # 逆指値（買い）：終値 + ATR×mult を上抜けたら買う
+                lp = close_prev + atr_prev * entry_atr_mult
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
+            elif entry_type == "stop_sell":
+                # 逆指値（売り）：終値 - ATR×mult を下抜けたら売る
+                lp = close_prev - atr_prev * entry_atr_mult
+                sp = lp + atr_prev * stop_atr_mult   # 損切り (ABOVE entry)
+                tp = lp - atr_prev * target_atr_mult  # 目標   (BELOW entry)
+                if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
+                    continue
+            else:
+                # 指値：終値 - ATR×mult まで下がれば買う
+                lp = close_prev - atr_prev * entry_atr_mult
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
+
+            signals += 1
+
+            limit_price   = lp
+            stop_price    = sp
+            target_price  = tp
+            expire_idx    = i + ENTRY_EXPIRE
+            signal_idx    = i
+            days_to_fill  = 0
+            signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
+            signal_price  = close_prev         # その日の終値
+            state         = "pending"
+            # fall through to pending check below (same bar = T+1)
+
         # ── pending: 注文の約定チェック ──────────────────────────
         if state == "pending":
             if i > expire_idx:
@@ -553,56 +608,6 @@ def run_limit_backtest(
                 ))
                 state = "idle"
             continue
-
-        # ── idle: シグナル判定 ─────────────────────────────────────
-        if state == "idle":
-            entry_sig = bool(prev.get("entry_sig", False))
-            if not entry_sig:
-                continue
-            if pd.isna(atr_prev) or atr_prev <= 0:
-                continue
-
-            close_prev = float(prev["close"])
-
-            # データ異常・低価格株・高価格異常を除外
-            if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
-                continue
-            if atr_prev / close_prev > MAX_ATR_RATIO:
-                continue
-
-            if entry_type == "stop":
-                # 逆指値（買い）：終値 + ATR×mult を上抜けたら買う
-                lp = close_prev + atr_prev * entry_atr_mult
-                sp = lp - atr_prev * stop_atr_mult
-                tp = lp + atr_prev * target_atr_mult
-                if lp <= 0 or sp <= 0 or tp <= lp:
-                    continue
-            elif entry_type == "stop_sell":
-                # 逆指値（売り）：終値 - ATR×mult を下抜けたら売る
-                lp = close_prev - atr_prev * entry_atr_mult
-                sp = lp + atr_prev * stop_atr_mult   # 損切り (ABOVE entry)
-                tp = lp - atr_prev * target_atr_mult  # 目標   (BELOW entry)
-                if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
-                    continue
-            else:
-                # 指値：終値 - ATR×mult まで下がれば買う
-                lp = close_prev - atr_prev * entry_atr_mult
-                sp = lp - atr_prev * stop_atr_mult
-                tp = lp + atr_prev * target_atr_mult
-                if lp <= 0 or sp <= 0 or tp <= lp:
-                    continue
-
-            signals += 1
-
-            limit_price   = lp
-            stop_price    = sp
-            target_price  = tp
-            expire_idx    = i + ENTRY_EXPIRE
-            signal_idx    = i
-            days_to_fill  = 0
-            signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
-            signal_price  = close_prev         # その日の終値
-            state         = "pending"
 
     # 未決済ポジション
     if state == "in_pos" and entry_dt is not None:
