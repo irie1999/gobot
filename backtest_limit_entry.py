@@ -439,33 +439,49 @@ def run_limit_backtest(
             if pd.isna(atr_prev) or atr_prev <= 0:
                 continue
 
-            close_prev = float(prev["close"])
+            # 連続シグナルの場合は最初の発生日を起点にする（ENTRY_EXPIRE 日前まで遡る）
+            sig_row     = prev
+            sig_row_idx = i - 1
+            for _lb in range(1, ENTRY_EXPIRE + 1):
+                _ei = i - 1 - _lb
+                if _ei < 0:
+                    break
+                if bool(df.iloc[_ei].get("entry_sig", False)):
+                    sig_row     = df.iloc[_ei]
+                    sig_row_idx = _ei
+                else:
+                    break
+
+            close_prev  = float(sig_row["close"])
+            atr_for_sig = float(sig_row.get("atr", np.nan))
+            if pd.isna(atr_for_sig) or atr_for_sig <= 0:
+                continue
 
             # データ異常・低価格株・高価格異常を除外
             if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
                 continue
-            if atr_prev / close_prev > MAX_ATR_RATIO:
+            if atr_for_sig / close_prev > MAX_ATR_RATIO:
                 continue
 
             if entry_type == "stop":
                 # 逆指値（買い）：終値 + ATR×mult を上抜けたら買う
-                lp = close_prev + atr_prev * entry_atr_mult
-                sp = lp - atr_prev * stop_atr_mult
-                tp = lp + atr_prev * target_atr_mult
+                lp = close_prev + atr_for_sig * entry_atr_mult
+                sp = lp - atr_for_sig * stop_atr_mult
+                tp = lp + atr_for_sig * target_atr_mult
                 if lp <= 0 or sp <= 0 or tp <= lp:
                     continue
             elif entry_type == "stop_sell":
                 # 逆指値（売り）：終値 - ATR×mult を下抜けたら売る
-                lp = close_prev - atr_prev * entry_atr_mult
-                sp = lp + atr_prev * stop_atr_mult   # 損切り (ABOVE entry)
-                tp = lp - atr_prev * target_atr_mult  # 目標   (BELOW entry)
+                lp = close_prev - atr_for_sig * entry_atr_mult
+                sp = lp + atr_for_sig * stop_atr_mult   # 損切り (ABOVE entry)
+                tp = lp - atr_for_sig * target_atr_mult  # 目標   (BELOW entry)
                 if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
                     continue
             else:
                 # 指値：終値 - ATR×mult まで下がれば買う
-                lp = close_prev - atr_prev * entry_atr_mult
-                sp = lp - atr_prev * stop_atr_mult
-                tp = lp + atr_prev * target_atr_mult
+                lp = close_prev - atr_for_sig * entry_atr_mult
+                sp = lp - atr_for_sig * stop_atr_mult
+                tp = lp + atr_for_sig * target_atr_mult
                 if lp <= 0 or sp <= 0 or tp <= lp:
                     continue
 
@@ -477,8 +493,8 @@ def run_limit_backtest(
             expire_idx    = i + ENTRY_EXPIRE
             signal_idx    = i
             days_to_fill  = 0
-            signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
-            signal_price  = close_prev         # その日の終値
+            signal_dt     = df.index[sig_row_idx]  # 連続シグナルの最初の発生日
+            signal_price  = close_prev              # その日の終値
             state         = "pending"
             # fall through to pending check below (same bar = T+1)
 
