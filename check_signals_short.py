@@ -34,7 +34,7 @@ from backtest_limit_entry import (
     fetch,
     run_limit_backtest,
     fetch_n225_return,
-    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, ENTRY_EXPIRE,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
@@ -211,7 +211,16 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     if target_date is None:
+        # 連続シグナルの場合は最初の発生日を起点にする（ENTRY_EXPIRE 日分遡る）
         prev_idx = -1
+        for lookback in range(1, ENTRY_EXPIRE + 1):
+            earlier = -(lookback + 1)
+            if abs(earlier) > len(df):
+                break
+            if bool(df.iloc[earlier].get("entry_sig", False)):
+                prev_idx = earlier
+            else:
+                break
     else:
         ts    = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
@@ -226,7 +235,7 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     close_prev = float(prev["close"])
-    current_p  = float(df.iloc[prev_idx]["close"])
+    current_p  = float(df.iloc[-1]["close"])
     if target_date is None:
         current_p = _fetch_live_price(symbol, current_p)
 

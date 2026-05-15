@@ -159,7 +159,19 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     if target_date is None:
-        prev_idx, next_idx = -1, -1
+        next_idx = -1
+        # 連続シグナルの場合は最初の発生日を起点にする。
+        # 例: 05/13・05/14 の両日にシグナルが立っていれば 05/13 の終値を使う。
+        # これにより「すでに発注済みの注文価格」と一致した情報が表示される。
+        prev_idx = -1
+        for lookback in range(1, ENTRY_EXPIRE + 1):
+            earlier = -(lookback + 1)
+            if abs(earlier) > len(df):
+                break
+            if bool(df.iloc[earlier].get("entry_sig", False)):
+                prev_idx = earlier
+            else:
+                break
     else:
         ts = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
