@@ -60,6 +60,22 @@ MIN_PRICE     = 100.0       # 最低株価（データ異常排除）
 MAX_PRICE     = 100_000.0   # 最高株価（日本株最大~7万円、100万超はデータ異常）
 MAX_ATR_RATIO = 0.20        # ATR/終値の上限（20%超は異常ボラ・データ異常として除外）
 
+# ── 実運用コストモデル (Phase B) ─────────────────────────────────
+# 逆指値 (stop buy) はギャップアップで不利な約定になりやすい前提。
+# バックテストでは注文価格ちょうどで約定する仮定だったため、
+# 実運用との乖離を埋めるための定数。
+SLIPPAGE_STOP_PCT = 0.005   # 逆指値約定時の不利スリッページ (買い +0.5%, 売り -0.5%)
+SLIPPAGE_LIMIT_PCT = 0.0    # 指値は注文価格で約定する前提 (または有利なら良化)
+FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
+                            # (SBI/楽天の現物格安プラン想定。信用取引はもっと低い)
+
+# ── 逆指値→指値注文 の指値上限マージン (kabu発注用) ─────────────
+# 逆指値→成行 の代替として 逆指値→指値 を使う場合、トリガー価格からどの程度
+# 上までを指値として許容するか。ギャップアップが +MARGIN 以下なら約定、
+# それ以上なら不約定となる。
+# 0.01 (1%) は典型的な朝ギャップの 70% 程度をカバーする実用的な値。
+LIMIT_ENTRY_MARGIN_PCT = 0.01
+
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
 MACD_SLOW         = 17
@@ -83,23 +99,100 @@ ATR_PERIOD_RSI2   = 14
 
 
 # ── データ取得 ──────────────────────────────────────────────────
+# ── ベンチマーク (日経平均) リターン ────────────────────────────
+_N225_CACHE: dict[int, float] = {}
+
+
+def fetch_n225_return(days: int) -> float:
+    """
+    日経平均 (^N225) の直近 days 日間のリターン (%) を返す。
+    プロセス内でキャッシュ。失敗時は 0.0。
+    """
+    if days in _N225_CACHE:
+        return _N225_CACHE[days]
+    try:
+        # 直近 days 営業日のデータを取得 (買い注文マージン込みで +20)
+        buf = max(int(days * 1.5) + 20, 40)
+        now_jst  = datetime.now(JST)
+        dl_start = (now_jst - timedelta(days=buf)).strftime("%Y-%m-%d")
+        dl_end   = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
+        raw = yf.Ticker("^N225").history(
+            start=dl_start, end=dl_end,
+            interval="1d", auto_adjust=False, actions=False
+        )
+        if len(raw) < 2:
+            _N225_CACHE[days] = 0.0
+            return 0.0
+        # days 営業日前以降のデータで計算
+        cutoff = now_jst - timedelta(days=days)
+        subset = raw[raw.index >= pd.Timestamp(cutoff, tz=raw.index.tz)] \
+                 if raw.index.tz else raw[raw.index >= pd.Timestamp(cutoff)]
+        if len(subset) < 2:
+            subset = raw
+        start_p = float(subset["Close"].iloc[0])
+        end_p   = float(subset["Close"].iloc[-1])
+        ret = (end_p - start_p) / start_p * 100.0
+        _N225_CACHE[days] = ret
+        return ret
+    except Exception:
+        _N225_CACHE[days] = 0.0
+        return 0.0
+
+
+def _expected_latest_bar_date():
+    """
+    現在時刻から「期待される最新の取引日」を返す。
+      - 平日 15:00 JST 以降 → 今日 (引け済み)
+      - 平日 15:00 JST より前 → 前営業日
+      - 土曜日             → 金曜日
+      - 日曜日             → 金曜日
+      - 月曜日 15時前      → 前金曜日
+    祝日は考慮しない (祝日でデータが無い場合は yfinance が前営業日を返すので
+    結果オーライ)。
+    """
+    now    = datetime.now(JST)
+    today  = now.date()
+    wd     = today.weekday()  # 0=Mon ... 6=Sun
+
+    if wd == 5:  # 土
+        return today - timedelta(days=1)
+    if wd == 6:  # 日
+        return today - timedelta(days=2)
+
+    # 平日
+    if now.hour >= 15:
+        return today  # 引け後 → 今日
+    # 引け前 → 前営業日
+    if wd == 0:  # 月
+        return today - timedelta(days=3)  # 前金曜
+    return today - timedelta(days=1)
+
+
 def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
-    """永続キャッシュ優先・フォールバックでダウンロード。"""
+    """永続キャッシュ優先・フォールバックでダウンロード。
+
+    キャッシュ判定:
+      - キャッシュ内 df の最新バー日付 >= _expected_latest_bar_date() なら有効
+      - そうでなければ再取得 (引け前作成 → 引け後実行 のパターンも自動更新)
+    """
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
-            mtime = datetime.fromtimestamp(persistent.stat().st_mtime, tz=JST)
-            if mtime.date() == datetime.now(JST).date():
-                with open(persistent, "rb") as f:
-                    df = pickle.load(f)
+            with open(persistent, "rb") as f:
+                df = pickle.load(f)
+            if len(df) >= 210:
+                latest_bar = df.index[-1]
+                latest_date = latest_bar.date() if hasattr(latest_bar, "date") else latest_bar
+                expected    = _expected_latest_bar_date()
                 price_range = float(df["close"].max() - df["close"].min())
-                valid = price_range > 0.01 * float(df["close"].mean())
-                if len(df) >= 210 and valid:
+                valid_range = price_range > 0.01 * float(df["close"].mean())
+                if latest_date >= expected and valid_range:
                     # 株価異常値を除去
                     pct_chg = df["close"].pct_change().abs()
                     df = df[pct_chg <= 0.5].copy()
                     if len(df) >= 210:
                         return df
+                # 古いキャッシュ → fall through で再取得
         except Exception:
             pass
 
@@ -265,6 +358,226 @@ def calc_rsi2(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── ショート用インジケーター計算 ─────────────────────────────────
+
+def calc_macd_short(df: pd.DataFrame) -> pd.DataFrame:
+    """MACDベアリッシュ × 出来高急増 × 下降トレンドフィルター（空売り用）。"""
+    df = df.copy()
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=ATR_PERIOD_MACD, adjust=False).mean()
+
+    ema_fast    = c.ewm(span=MACD_FAST,   adjust=False).mean()
+    ema_slow    = c.ewm(span=MACD_SLOW,   adjust=False).mean()
+    macd_line   = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    histogram   = macd_line - signal_line
+
+    vol_ma = v.rolling(VOL_MA_PERIOD).mean()
+    ma10   = c.rolling(MA_TREND_PERIOD).mean()
+
+    prev_hist  = histogram.shift(1)
+    prev2_hist = histogram.shift(2)
+
+    vol_ok       = v > vol_ma * VOL_SPIKE_MULT
+    trend_down   = c < ma10
+
+    # ヒストグラムがゼロをベアリッシュクロス、または負方向に加速
+    zero_cross_down = (histogram < 0) & (prev_hist >= 0)
+    hist_decel      = (histogram < 0) & (histogram < prev_hist) & (prev_hist < prev2_hist)
+
+    df["atr"]       = atr
+    df["entry_sig"] = (zero_cross_down | hist_decel) & vol_ok & trend_down
+
+    return df
+
+
+def calc_a7_short(df: pd.DataFrame) -> pd.DataFrame:
+    """ストキャスティクスデスクロス × MA75下降フィルター（空売り用）。
+
+    強化条件 (2026-05-03):
+      旧: slow_k > 30 (売られすぎ除外のみ)
+      新: slow_k > 50 (中立〜高値圏限定) + MA25 < MA75 (短期下降トレンド確認)
+      → 売られすぎ直前の「戻り売り」シグナルを除外し、精度向上
+    """
+    df = df.copy()
+    h = df["high"]
+    l = df["low"]
+    c = df["close"]
+
+    lowest_low   = l.rolling(STOCH_K_PERIOD).min()
+    highest_high = h.rolling(STOCH_K_PERIOD).max()
+    denom        = highest_high - lowest_low
+    fast_k = (c - lowest_low) / denom.replace(0, np.nan) * 100
+    slow_k = fast_k.rolling(STOCH_SMOOTH).mean()
+    slow_d = slow_k.rolling(STOCH_D_PERIOD).mean()
+
+    ma25 = c.rolling(25).mean()
+    ma75 = c.rolling(MA_TREND_PERIOD_A7).mean()
+
+    prev_k = slow_k.shift(1)
+    prev_d = slow_d.shift(1)
+    death_cross = (slow_k < slow_d) & (prev_k >= prev_d)
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=ATR_PERIOD_A7, adjust=False).mean()
+
+    df["stoch_k"]   = slow_k
+    df["stoch_d"]   = slow_d
+    df["ma25"]      = ma25
+    df["ma75"]      = ma75
+    df["atr"]       = atr
+    # デスクロス + 中立〜高値圏 (>50) + 短期下降トレンド (MA25<MA75) + MA75下方
+    df["entry_sig"] = death_cross & (slow_k > 50) & (ma25 < ma75) & (c < ma75)
+
+    return df
+
+
+def calc_rsi2_short(df: pd.DataFrame) -> pd.DataFrame:
+    """RSI(2) 買われすぎ × MA200下降フィルター × IBS高（空売り用）。"""
+    df = df.copy()
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+
+    delta = c.diff()
+    gain  = delta.clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
+    loss  = (-delta).clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
+    rsi2  = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
+    ma200 = c.rolling(200).mean()
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=ATR_PERIOD_RSI2, adjust=False).mean()
+
+    bar_range = h - l
+    ibs = np.where(bar_range > 0, (c - l) / bar_range, 0.5)
+
+    RSI2_SHORT_ENTRY = 90.0   # 買われすぎ閾値（ロング版は10以下）
+    IBS_HIGH         = 0.65   # 高値圏で引けた
+
+    df["rsi2"]      = rsi2
+    df["ma200"]     = ma200
+    df["atr"]       = atr
+    df["ibs"]       = ibs
+    df["entry_sig"] = (rsi2 >= RSI2_SHORT_ENTRY) & (c < ma200) & (pd.Series(ibs, index=c.index) > IBS_HIGH)
+
+    return df
+
+
+def calc_donchian_short(df: pd.DataFrame) -> pd.DataFrame:
+    """ドンチャン安値ブレイクダウン × MA50下方フィルター（空売り用）。
+    ロング版 calc_donchian の鏡: 終値 < 15日安値(前日) AND 終値 < MA50
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    low15 = l.rolling(15).min().shift(1)   # 前日時点の15日安値
+    ma50  = c.rolling(50).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (c < low15) & (c < ma50)
+    return df
+
+
+def calc_vol_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """出来高急増ブレイクダウン × 安値更新（空売り用）。
+    ロング版 calc_vol_breakout の鏡: 終値 < 5日安値(前日) AND 出来高 > 20日平均×1.5
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    low5   = l.rolling(5).min().shift(1)   # 前日時点の5日安値
+    vol_ma = v.rolling(20).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (c < low5) & (v > vol_ma * 1.5)
+    return df
+
+
+def calc_momentum_short(df: pd.DataFrame) -> pd.DataFrame:
+    """モメンタム下落 × トレンド下降フィルター（空売り用）。
+    ROC(10) < -2% AND MA25 < MA75 AND MA50 < MA200
+    出来高条件は除外（シグナル頻度を確保するため）
+    """
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    roc  = c.pct_change(10) * 100
+    ma25 = c.rolling(25).mean()
+    ma50 = c.rolling(50).mean()
+    ma75 = c.rolling(75).mean()
+    ma200= c.rolling(200).mean()
+
+    df["atr"]       = atr
+    df["entry_sig"] = (roc < -2.0) & (ma25 < ma75) & (ma50 < ma200)
+    return df
+
+
+def calc_bb_reversal_short(df: pd.DataFrame) -> pd.DataFrame:
+    """ボリンジャーバンド上限タッチ + 陰線反転 ショートシグナル（MOM_S代替）。
+
+    ベアマーケット不要。個別株の局所的な過熱リバーサルを捉える。
+    条件:
+      - 前日終値 >= BB上限 (20日MA + 2σ) → 過熱
+      - 当日終値 < 前日終値 → 反転の兆し（陰線）
+      - RSI(14) >= 65 → 依然として買われすぎ圏
+      - 出来高 > 20日平均 × 1.2 → 確認
+    """
+    df = df.copy()
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+
+    ma20  = c.rolling(20).mean()
+    std20 = c.rolling(20).std(ddof=1)
+    upper = ma20 + 2.0 * std20
+
+    delta = c.diff()
+    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+    rsi14 = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
+    vol_ma = v.rolling(20).mean()
+
+    prev_above_bb = prev_c >= upper.shift(1)   # 前日終値がBBアッパー以上
+    today_down    = c < prev_c                  # 当日下落
+    rsi_high      = rsi14 >= 65
+    vol_ok        = v > vol_ma * 1.2
+
+    df["atr"]       = atr
+    df["entry_sig"] = prev_above_bb & today_down & rsi_high & vol_ok
+    return df
+
+
 # ── 指値エントリー バックテスト ─────────────────────────────────
 def run_limit_backtest(
     symbol: str,
@@ -339,7 +652,14 @@ def run_limit_backtest(
             elif (entry_type == "stop" and hi >= limit_price) or \
                  (entry_type != "stop" and lo <= limit_price):
                 # 約定
-                entry_p       = limit_price
+                if entry_type == "stop":
+                    # 逆指値買い: 不利な方向（高め）に約定
+                    entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
+                elif entry_type == "short_stop":
+                    # 逆指値売り: 不利な方向（安め）に約定
+                    entry_p = limit_price * (1.0 - SLIPPAGE_STOP_PCT)
+                else:
+                    entry_p = limit_price * (1.0 + SLIPPAGE_LIMIT_PCT)
                 entry_dt      = dt
                 hold_start    = i
                 days_to_fill  = i - signal_idx   # シグナルから約定までの営業日数
@@ -347,32 +667,63 @@ def run_limit_backtest(
                 state         = "in_pos"
 
                 # 約定と同日に決済が発生するか確認
-                if hi >= target_price and lo <= stop_price:
-                    # 両方ヒット → 目標達成優先（有利な方）
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif hi >= target_price:
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif lo <= stop_price:
-                    exit_p      = stop_price
-                    exit_reason = "損切り"
+                if entry_type == "short_stop":
+                    # ショート: 目標=lo<=target（下落） / 損切=hi>=stop（上昇）
+                    if lo <= target_price and hi >= stop_price:
+                        exit_p = target_price; exit_reason = "目標達成"
+                    elif lo <= target_price:
+                        exit_p = target_price; exit_reason = "目標達成"
+                    elif hi >= stop_price:
+                        exit_p = stop_price;   exit_reason = "損切り"
+                    else:
+                        exit_p = None;         exit_reason = None
                 else:
-                    exit_p = None
-                    exit_reason = None
+                    # ロング: 目標=hi>=target / 損切=lo<=stop
+                    if hi >= target_price and lo <= stop_price:
+                        exit_p = target_price; exit_reason = "目標達成"
+                    elif hi >= target_price:
+                        exit_p = target_price; exit_reason = "目標達成"
+                    elif lo <= stop_price:
+                        exit_p = stop_price;   exit_reason = "損切り"
+                    else:
+                        exit_p = None;         exit_reason = None
 
                 if exit_p is not None:
-                    if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
-                        pnl = (exit_p - entry_p) * qty
-                        trades.append(dict(
-                            entry_dt=entry_dt, exit_dt=dt,
-                            entry_p=entry_p, exit_p=exit_p, qty=qty,
-                            pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                            hold_days=0, days_to_fill=days_to_fill,
-                            signal_dt=signal_dt, signal_price=signal_price,
-                            order_limit=limit_price, order_stop=stop_price,
-                            reason=exit_reason,
-                        ))
+                    if entry_type == "short_stop":
+                        # 損切り（買い戻し）は不利な方向（高め）
+                        if exit_reason == "損切り":
+                            exit_p = exit_p * (1.0 + SLIPPAGE_STOP_PCT)
+                        if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
+                            fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                            pnl = (entry_p - exit_p) * qty - fee
+                            trades.append(dict(
+                                entry_dt=entry_dt, exit_dt=dt,
+                                entry_p=entry_p, exit_p=exit_p, qty=qty,
+                                pnl=pnl, pct=(entry_p - exit_p) / entry_p * 100,
+                                fee=round(fee, 0),
+                                hold_days=0, days_to_fill=days_to_fill,
+                                signal_dt=signal_dt, signal_price=signal_price,
+                                order_limit=limit_price, order_stop=stop_price,
+                                reason=exit_reason,
+                            ))
+                    else:
+                        # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
+                        if exit_reason == "損切り":
+                            exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                        if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
+                            # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                            fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                            pnl = (exit_p - entry_p) * qty - fee
+                            trades.append(dict(
+                                entry_dt=entry_dt, exit_dt=dt,
+                                entry_p=entry_p, exit_p=exit_p, qty=qty,
+                                pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                                fee=round(fee, 0),
+                                hold_days=0, days_to_fill=days_to_fill,
+                                signal_dt=signal_dt, signal_price=signal_price,
+                                order_limit=limit_price, order_stop=stop_price,
+                                reason=exit_reason,
+                            ))
                     state = "idle"
                 continue
 
@@ -382,35 +733,65 @@ def run_limit_backtest(
             exit_p    = None
             exit_reason = None
 
-            if hi >= target_price and lo <= stop_price:
-                # 両方ヒット → 目標達成優先（有利な方）
-                exit_p      = target_price
-                exit_reason = "目標達成"
-            elif hi >= target_price:
-                exit_p      = target_price
-                exit_reason = "目標達成"
-            elif lo <= stop_price:
-                exit_p      = stop_price
-                exit_reason = "損切り"
-            elif hold_days >= MAX_HOLD:
-                exit_p      = cl
-                exit_reason = "タイムカット"
+            if entry_type == "short_stop":
+                # ショート: 目標=lo<=target（下落） / 損切=hi>=stop（上昇）
+                if lo <= target_price and hi >= stop_price:
+                    exit_p = target_price; exit_reason = "目標達成"
+                elif lo <= target_price:
+                    exit_p = target_price; exit_reason = "目標達成"
+                elif hi >= stop_price:
+                    exit_p = stop_price;   exit_reason = "損切り"
+                elif hold_days >= MAX_HOLD:
+                    exit_p = cl;           exit_reason = "タイムカット"
+            else:
+                # ロング: 目標=hi>=target / 損切=lo<=stop
+                if hi >= target_price and lo <= stop_price:
+                    exit_p = target_price; exit_reason = "目標達成"
+                elif hi >= target_price:
+                    exit_p = target_price; exit_reason = "目標達成"
+                elif lo <= stop_price:
+                    exit_p = stop_price;   exit_reason = "損切り"
+                elif hold_days >= MAX_HOLD:
+                    exit_p = cl;           exit_reason = "タイムカット"
 
             if exit_p is not None:
-                # 異常価格ガード: exit_p が entry_p の 0.1〜10倍の範囲外はスキップ
+                # 異常価格ガード
                 if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):
                     state = "idle"
                     continue
-                pnl = (exit_p - entry_p) * qty
-                trades.append(dict(
-                    entry_dt=entry_dt, exit_dt=dt,
-                    entry_p=entry_p, exit_p=exit_p, qty=qty,
-                    pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
-                    hold_days=hold_days, days_to_fill=days_to_fill,
-                    signal_dt=signal_dt, signal_price=signal_price,
-                    order_limit=limit_price, order_stop=stop_price,
-                    reason=exit_reason,
-                ))
+                if entry_type == "short_stop":
+                    # 損切り（買い戻し）は不利な方向（高め）
+                    if exit_reason == "損切り":
+                        exit_p = exit_p * (1.0 + SLIPPAGE_STOP_PCT)
+                    fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                    pnl = (entry_p - exit_p) * qty - fee
+                    trades.append(dict(
+                        entry_dt=entry_dt, exit_dt=dt,
+                        entry_p=entry_p, exit_p=exit_p, qty=qty,
+                        pnl=pnl, pct=(entry_p - exit_p) / entry_p * 100,
+                        fee=round(fee, 0),
+                        hold_days=hold_days, days_to_fill=days_to_fill,
+                        signal_dt=signal_dt, signal_price=signal_price,
+                        order_limit=limit_price, order_stop=stop_price,
+                        reason=exit_reason,
+                    ))
+                else:
+                    # スリッページ: 損切り売り (逆指値売り) は不利な方向に -X%
+                    if exit_reason == "損切り":
+                        exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                    # 手数料: 往復 = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                    fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                    pnl = (exit_p - entry_p) * qty - fee
+                    trades.append(dict(
+                        entry_dt=entry_dt, exit_dt=dt,
+                        entry_p=entry_p, exit_p=exit_p, qty=qty,
+                        pnl=pnl, pct=(exit_p - entry_p) / entry_p * 100,
+                        fee=round(fee, 0),
+                        hold_days=hold_days, days_to_fill=days_to_fill,
+                        signal_dt=signal_dt, signal_price=signal_price,
+                        order_limit=limit_price, order_stop=stop_price,
+                        reason=exit_reason,
+                    ))
                 state = "idle"
             continue
 
@@ -430,18 +811,27 @@ def run_limit_backtest(
             if atr_prev / close_prev > MAX_ATR_RATIO:
                 continue
 
-            if entry_type == "stop":
-                # 逆指値：終値 + ATR×mult を上抜けたら買う
+            if entry_type == "short_stop":
+                # 逆指値売り：終値 - ATR×mult を下抜けたら空売り
+                lp = close_prev - atr_prev * entry_atr_mult
+                sp = lp + atr_prev * stop_atr_mult   # 損切り（買い戻し：上）
+                tp = lp - atr_prev * target_atr_mult  # 目標（買い戻し：下）
+                if lp <= 0 or tp <= 0 or sp <= lp or tp >= lp:
+                    continue
+            elif entry_type == "stop":
+                # 逆指値買い：終値 + ATR×mult を上抜けたら買う
                 lp = close_prev + atr_prev * entry_atr_mult
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
             else:
                 # 指値：終値 - ATR×mult まで下がれば買う
                 lp = close_prev - atr_prev * entry_atr_mult
-
-            sp = lp - atr_prev * stop_atr_mult
-            tp = lp + atr_prev * target_atr_mult
-
-            if lp <= 0 or sp <= 0 or tp <= lp:
-                continue
+                sp = lp - atr_prev * stop_atr_mult
+                tp = lp + atr_prev * target_atr_mult
+                if lp <= 0 or sp <= 0 or tp <= lp:
+                    continue
 
             signals += 1
 
@@ -459,11 +849,18 @@ def run_limit_backtest(
     if state == "in_pos" and entry_dt is not None:
         cl_last = float(df.iloc[-1]["close"])
         hold_days = len(df) - 1 - hold_start
-        pnl = (cl_last - entry_p) * qty
+        fee = (entry_p + cl_last) * qty * FEE_PCT_ONE_WAY
+        if entry_type == "short_stop":
+            pnl = (entry_p - cl_last) * qty - fee
+            pct = (entry_p - cl_last) / entry_p * 100
+        else:
+            pnl = (cl_last - entry_p) * qty - fee
+            pct = (cl_last - entry_p) / entry_p * 100
         trades.append(dict(
             entry_dt=entry_dt, exit_dt=df.index[-1],
             entry_p=entry_p, exit_p=cl_last, qty=qty,
-            pnl=pnl, pct=(cl_last - entry_p) / entry_p * 100,
+            pnl=pnl, pct=pct,
+            fee=round(fee, 0),
             hold_days=hold_days, days_to_fill=days_to_fill,
             signal_dt=signal_dt, signal_price=signal_price,
             order_limit=limit_price, order_stop=stop_price,
@@ -487,6 +884,7 @@ def run_limit_backtest(
     gross_loss   = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
     pf           = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
     total_pnl    = sum(t["pnl"] for t in trades)
+    total_fee    = sum(t.get("fee", 0) for t in trades)
     avg_hold     = sum(t["hold_days"] for t in trades) / filled if filled > 0 else 0.0
     fill_rate    = filled / signals * 100 if signals > 0 else 0.0
 
@@ -495,6 +893,8 @@ def run_limit_backtest(
         signals=signals, filled=filled,
         trades=filled, wins=wins, losses=losses,
         win_rate=win_rate, pf=pf, total_pnl=total_pnl,
+        total_fee=total_fee,
+        slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=avg_hold, fill_rate=fill_rate,
         trade_log=trades,
     )
@@ -505,6 +905,8 @@ def _empty_result(symbol: str, name: str, strategy: str) -> dict:
         symbol=symbol, name=name, strategy=strategy,
         signals=0, filled=0, trades=0, wins=0, losses=0,
         win_rate=0.0, pf=0.0, total_pnl=0.0,
+        total_fee=0.0,
+        slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=0.0, fill_rate=0.0, trade_log=[],
     )
 

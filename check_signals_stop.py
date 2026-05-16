@@ -28,8 +28,12 @@ from backtest_limit_entry import (
     fetch,
     calc_macd, calc_a7, calc_rsi2,
     run_limit_backtest,
+    fetch_n225_return,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
+    INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
+from risk_metrics import enrich_backtest_result, calc_hold_stats
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
@@ -71,12 +75,30 @@ WATCHLIST: list[tuple[str, str, str]] = [
     ("4631.T", "DIC",                    "RSI2"),   # 180+365d 80-100%  5回
 ]
 
-# ── 逆指値版パラメータ（entry_atr_mult=0.0 で終値以上なら約定）──
-STRATEGY_PARAMS = {
+# ── 逆指値版パラメータ (プリセット切替) ───────────────────────
+# TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
+# デフォルトは conservative (現行踏襲)
+STRATEGY_PARAMS_CONSERVATIVE = {
     "MACD": (calc_macd, 0.0, 1.5, 3.0),
     "A7":   (calc_a7,   0.0, 1.5, 3.0),
     "RSI2": (calc_rsi2, 0.0, 2.0, 4.0),   # 指値版は0.5だったがstopは0.0に統一
 }
+# aggressive: 利確 1R 近辺で積極確定、回転率優先
+STRATEGY_PARAMS_AGGRESSIVE = {
+    "MACD": (calc_macd, 0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3% (1.5R)
+    "A7":   (calc_a7,   0.0, 1.0, 1.5),
+    "RSI2": (calc_rsi2, 0.0, 1.2, 1.8),   # 目標 +5.4% / 損切 -3.6% (1.5R)
+}
+
+import os as _os
+# デフォルトは conservative (標準)。--aggressive で積極利確。
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
+    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
+else:
+    STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
+    TRADING_MODE = "conservative"   # 正規化
+
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
 
 
@@ -141,15 +163,18 @@ def check_signal_on_date(symbol: str, strategy: str,
     current_p  = float(next_row["close"])
 
     # 逆指値: 終値 + ATR×em（emが0.0なら終値ちょうど）
-    order_p = close_prev + atr_v * em
-    sl      = order_p - atr_v * sm   # 損切り
-    tp      = order_p + atr_v * tm   # 目標
+    order_p     = close_prev + atr_v * em
+    sl          = order_p - atr_v * sm   # 損切り
+    tp          = order_p + atr_v * tm   # 目標
+    # 逆指値→指値注文の指値上限 (kabu 発注時 AfterHitPrice 用)
+    limit_entry = order_p * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
-        order_price=round(order_p, 0),   # 逆指値注文価格
+        order_price=round(order_p, 0),         # 逆指値トリガー価格
+        limit_entry_price=round(limit_entry, 0),  # 逆指値→指値 の指値上限 (+1%)
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,
@@ -182,12 +207,13 @@ def build_html(all_items: list[dict], show_days: int,
                date_label: str = "本日") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
-    # サマリー
+    # サマリー (戦略別に trade_log を結合してリスク指標計算)
     strategy_summary: dict[str, dict] = {}
     for item in all_items:
         strat = item["strategy"]
         if strat not in strategy_summary:
-            strategy_summary[strat] = dict(trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0)
+            strategy_summary[strat] = dict(
+                trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
         pr = item["period_results"].get(show_days) or {}
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
@@ -198,18 +224,49 @@ def build_html(all_items: list[dict], show_days: int,
                     strategy_summary[strat]["gp"] += t["pnl"]
                 else:
                     strategy_summary[strat]["gl"] += abs(t["pnl"])
+            strategy_summary[strat]["trade_log"].extend(pr.get("trade_log", []))
+
+    # ベンチマーク (日経平均) リターン
+    n225_ret = fetch_n225_return(show_days)
 
     summary_rows = ""
     for strat, s in strategy_summary.items():
         wr  = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
         pf  = s["gp"] / s["gl"] if s["gl"] > 0 else (float("inf") if s["gp"] > 0 else 0)
         cls = "profit" if s["pnl"] >= 0 else "loss"
+        # リスク指標
+        enriched = enrich_backtest_result({"trade_log": s["trade_log"]}, _INITIAL_CASH)
+        max_dd_pct = enriched.get("max_drawdown_pct", 0.0)
+        max_cl     = enriched.get("max_consecutive_losses", 0)
+        sharpe     = enriched.get("sharpe", 0.0)
+        hs         = enriched.get("hold_stats", {})
+        # ベンチマーク相対 α (戦略リターン - 日経リターン, INITIAL_CASH 基準)
+        strat_ret_pct = s["pnl"] / _INITIAL_CASH * 100 if _INITIAL_CASH > 0 else 0
+        alpha         = strat_ret_pct - n225_ret
+        alpha_cls     = "profit" if alpha >= 0 else "loss"
+        dd_cls        = "profit" if max_dd_pct < 10 else ("loss" if max_dd_pct > 20 else "")
+        # 平均保有日数の表示 (メイン + 理由別内訳)
+        hold_break    = []
+        if hs.get("target_n", 0):
+            hold_break.append(f"目標{hs['target_avg']:.1f}({hs['target_n']})")
+        if hs.get("stop_n", 0):
+            hold_break.append(f"損切{hs['stop_avg']:.1f}({hs['stop_n']})")
+        if hs.get("tc_n", 0):
+            hold_break.append(f"TC{hs['tc_avg']:.0f}({hs['tc_n']})")
+        if hs.get("same_day_n", 0):
+            hold_break.append(f"同日({hs['same_day_n']})")
+        hold_break_str = " / ".join(hold_break) if hold_break else ""
         summary_rows += f"""
         <tr>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
           <td>{s['trades']}</td><td>{s['wins']}</td>
           <td>{wr:.1f}%</td><td>{_pf_str(pf)}</td>
           <td class="{cls}">{s['pnl']:+,.0f}円</td>
+          <td class="{dd_cls}">{max_dd_pct:.1f}%</td>
+          <td>{max_cl}</td>
+          <td>{sharpe:.2f}</td>
+          <td class="{alpha_cls}">{alpha:+.1f}%</td>
+          <td>{hs.get('avg', 0):.1f}日<br><small class="hold-break">{hold_break_str}</small></td>
         </tr>"""
 
     # シグナル行（スコア降順で表示）
@@ -231,11 +288,12 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
           <td class="stop">{sig['order_price']:,.0f}</td>
+          <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
           <td class="loss">{sig['stop_price']:,.0f}</td>
           <td class="profit">{sig['target_price']:,.0f}</td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="9" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="10" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -257,12 +315,17 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{r['win_rate']:.0f}%</td>"
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
+            # show_days 期間の平均保有日数
+            pr_show   = item["period_results"].get(show_days) or {}
+            hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
+            hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
             mark = "🔔" if item["today_sig"] else ""
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
           {cells}
+          <td>{hold_cell}</td>
         </tr>"""
 
     # 個別トレード
@@ -312,6 +375,23 @@ def build_html(all_items: list[dict], show_days: int,
             fill_stat = f'<p class="fill-stat">約定日数 — 平均:{avg_f:.1f}日 最短:{min(fill_days_list)}日 最長:{max(fill_days_list)}日 | 分布: {dist_str}</p>'
         else:
             fill_stat = ""
+        # 保有日数統計 (理由別内訳付き)
+        hs_sec = calc_hold_stats(logs)
+        hold_stat = ""
+        if hs_sec["count"] > 0:
+            hold_break = []
+            if hs_sec["target_n"]:
+                hold_break.append(f"目標{hs_sec['target_avg']:.1f}日({hs_sec['target_n']})")
+            if hs_sec["stop_n"]:
+                hold_break.append(f"損切{hs_sec['stop_avg']:.1f}日({hs_sec['stop_n']})")
+            if hs_sec["tc_n"]:
+                hold_break.append(f"TC{hs_sec['tc_avg']:.0f}日({hs_sec['tc_n']})")
+            if hs_sec["same_day_n"]:
+                hold_break.append(f"同日({hs_sec['same_day_n']})")
+            if hs_sec["held_n"]:
+                hold_break.append(f"保有中{hs_sec['held_avg']:.1f}日({hs_sec['held_n']})")
+            brk = " / ".join(hold_break)
+            hold_stat = f'<p class="hold-stat">保有日数 — 平均:{hs_sec["avg"]:.1f}日 | 内訳: {brk}</p>'
         trade_sections += f"""
       <div class="trade-section">
         <h3>{item['symbol']} {item['name']}
@@ -320,6 +400,7 @@ def build_html(all_items: list[dict], show_days: int,
           <small>（{show_days}日）</small>
         </h3>
         {fill_stat}
+        {hold_stat}
         <table>
           <thead><tr>
             <th>シグナル日</th><th>シグナル時株価</th>
@@ -353,6 +434,7 @@ def build_html(all_items: list[dict], show_days: int,
   .profit {{ color:#4ade80; }}
   .loss   {{ color:#f87171; }}
   .stop   {{ color:#38bdf8; }}
+  .limit-entry {{ color:#fb923c; }}
   .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
   .tag-macd {{ background:#1d4ed8; color:#bfdbfe; }}
   .tag-a7   {{ background:#065f46; color:#a7f3d0; }}
@@ -360,6 +442,8 @@ def build_html(all_items: list[dict], show_days: int,
   .signal-badge {{ background:#38bdf8; color:#000; padding:2px 8px; border-radius:4px; font-size:0.8rem; }}
   .trade-section {{ margin-bottom:20px; }}
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
+  .hold-stat {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
+  .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
@@ -370,26 +454,33 @@ def build_html(all_items: list[dict], show_days: int,
 <body>
 <h1>監視銘柄 逆指値エントリー バックテスト</h1>
 <p class="subtitle">
-  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日<br>
-  エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）
+  生成日: {today_str} ／ シグナル確認日: {date_label} ／ 表示期間: {show_days}日 ／
+  <span style="color:#fbbf24">モード: <strong>{TRADING_MODE}</strong></span><br>
+  エントリー: <strong>逆指値</strong>（高値 ≥ 前日終値 で約定 ＝ 上がれば買う）<br>
+  コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong>（逆指値買い+/損切り売り-）／
+  手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong>（往復 {FEE_PCT_ONE_WAY*200:.2f}%）／
+  ベンチマーク: 日経平均 ({show_days}日) <strong>{n225_ret:+.1f}%</strong>
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>
 <table>
   <thead><tr>
     <th>戦略</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益合計</th>
+    <th>MaxDD%</th><th>連敗</th><th>Sharpe</th><th>α vs 日経</th>
+    <th>平均保有<br><small style="font-weight:normal">日数（内訳：件数）</small></th>
   </tr></thead>
   <tbody>{summary_rows}</tbody>
 </table>
 
 <h2>シグナル ({date_label}) <span class="signal-badge">要確認</span></h2>
 <p style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px">
-  ※ 逆指値注文（青色）= 翌日高値がこの価格以上になれば約定
+  ※ 逆指値注文（青色）= 翌日高値がこの価格以上になれば発動<br>
+  ※ 指値上限（橙色, +{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%）= 逆指値→指値発注時の指値。寄付ギャップがこれ以下なら約定、超えたら不約定
 </p>
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値（エントリー）</th><th>損切り</th><th>目標</th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
@@ -400,6 +491,7 @@ def build_html(all_items: list[dict], show_days: int,
     <tr>
       <th rowspan="2">銘柄</th><th rowspan="2">戦略</th>
       {period_headers}
+      <th rowspan="2">平均<br>保有<br><small>({show_days}日)</small></th>
     </tr>
     <tr>{period_subheads}</tr>
   </thead>

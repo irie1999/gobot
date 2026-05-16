@@ -6,22 +6,32 @@ check_signals_breakout.py（DON / VOL / MOM ブレイクアウト）
 を1コマンドで実行し、タブ付きHTMLに統合する。
 
 【使い方】
-  python run_signals.py                    # 全期間(365日) HTMLレポート
+  python run_signals.py                    # 全期間(365日) HTMLレポート (conservative)
   python run_signals.py --days 90          # 直近90日
   python run_signals.py --date 2026-04-08  # 任意日シグナル確認
   python run_signals.py --signal-only      # シグナルのみ表示
   python run_signals.py --no-browser       # HTML生成のみ（ブラウザ起動しない）
+  python run_signals.py --aggressive       # 積極利確モード (tm=1.5 目標+4.5%)
+
+※ デフォルトは conservative モード (tm=3.0 目標+9%)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ── TRADING_MODE を import 前に設定 (check_signals_* が読み取る) ──
+if "--aggressive" in sys.argv:
+    os.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    os.environ["TRADING_MODE"] = "conservative"
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
@@ -122,6 +132,12 @@ def main() -> None:
     parser.add_argument("--signal-only", action="store_true",
                         help="シグナルのみ表示（HTML生成をスキップ）")
     parser.add_argument("--workers",     type=int, default=_stop._DEFAULT_WORKERS)
+    # モード選択 (実際の切替は import 前に sys.argv で行う)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5, 目標+4.5%)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (tm=3.0, 目標+9%, デフォルト)")
     args = parser.parse_args()
 
     if args.date:
@@ -135,7 +151,7 @@ def main() -> None:
 
     date_label = args.date if args.date else "本日"
     n_total = len(_stop.WATCHLIST) + len(_brk.WATCHLIST)
-    print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}...", flush=True)
+    print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}  モード: {_stop.TRADING_MODE}", flush=True)
     print(f"  逆指値B: {len(_stop.WATCHLIST)}銘柄  /  ブレイクアウト: {len(_brk.WATCHLIST)}銘柄", flush=True)
 
     # 両グループを並列実行
@@ -166,13 +182,15 @@ def main() -> None:
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
     if all_sigs:
         print(f"  {'銘柄':<12} {'名前':<24} {'戦略':<6} {'種別':<8} {'シグナル日':<12} "
-              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'損切り':>8} {'目標':>8} スコア")
-        print("  " + "-" * 124)
+              f"{'信号株価':>8} {'現在値':>8} {'逆指値':>8} {'指値上限':>8} {'損切り':>8} {'目標':>8} スコア")
+        print("  " + "-" * 134)
         for item, score, rank, kind in all_sigs:
             sig = item["today_sig"]
+            limit_entry = sig.get("limit_entry_price", sig["order_price"])
             print(f"  {item['symbol']:<12} {item['name']:<24} {item['strategy']:<6} {kind:<8}"
                   f" {sig['signal_date']:<12} {sig['signal_price']:>8,.0f}"
                   f" {sig['current_price']:>8,.0f} {sig['order_price']:>8,.0f}"
+                  f" {limit_entry:>8,.0f}"
                   f" {sig['stop_price']:>8,.0f} {sig['target_price']:>8,.0f}"
                   f"  {rank}{score}点")
     else:
@@ -187,7 +205,9 @@ def main() -> None:
     brk_html  = _brk.build_html(brk_items,  show_days, date_label)
 
     date_suffix = args.date if args.date else today
-    out_path    = Path(f"signals_combined_{date_suffix}.html")
+    # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
+    mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
+    out_path    = Path(f"signals_combined{mode_suffix}_{date_suffix}.html")
     out_path.write_text(build_combined_html(stop_html, brk_html), encoding="utf-8")
     print(f"HTMLレポート: {out_path.resolve()}")
 
