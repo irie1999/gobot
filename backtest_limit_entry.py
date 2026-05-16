@@ -249,6 +249,47 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | Non
         return None
 
 
+
+def compute_period_result(item: dict, days: int) -> dict:
+    """period_results から指定日数の結果を返す。PERIODS 外の日数は最大期間から動的計算。"""
+    pr = item.get("period_results", {}).get(days)
+    if pr is not None:
+        return pr
+    # days が PERIODS にない場合、最大期間の trade_log からスライスして計算
+    all_days = [d for d in item.get("period_results", {}) if isinstance(d, int)]
+    if not all_days:
+        return {}
+    max_d = max(all_days)
+    if max_d < days:
+        return {}
+    base = item["period_results"][max_d]
+    full_log = base.get("trade_log", [])
+    today_d = datetime.now(JST).date()
+    cutoff = today_d - timedelta(days=days)
+    sub = [t for t in full_log if t["signal_dt"].date() >= cutoff]
+    if not sub:
+        return {}
+    wins = sum(1 for t in sub if t["pnl"] > 0)
+    gp   = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+    gl   = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+    pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    n    = len(sub)
+    return dict(
+        symbol=item.get("symbol"), name=item.get("name"), strategy=item.get("strategy"),
+        signals=base.get("signals", 0),
+        filled=n, trades=n, wins=wins, losses=n - wins,
+        win_rate=wins / n * 100,
+        pf=pf,
+        total_pnl=sum(t["pnl"] for t in sub),
+        total_fee=sum(t.get("fee", 0) for t in sub),
+        slippage_pct=base.get("slippage_pct", SLIPPAGE_STOP_PCT),
+        fee_pct_one_way=base.get("fee_pct_one_way", FEE_PCT_ONE_WAY),
+        avg_hold=sum(t["hold_days"] for t in sub) / n,
+        fill_rate=base.get("fill_rate", 0),
+        trade_log=sub,
+    )
+
+
 # ── MACD インジケーター計算 ──────────────────────────────────────
 def calc_macd(df: pd.DataFrame) -> pd.DataFrame:
     """MACDブレイクアウト × 出来高急増 × トレンドフィルター。"""

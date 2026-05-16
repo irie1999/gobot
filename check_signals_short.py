@@ -37,6 +37,7 @@ from backtest_limit_entry import (
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, ENTRY_EXPIRE,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
+    compute_period_result,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     VOL_MA_PERIOD, VOL_SPIKE_MULT, MA_TREND_PERIOD,
     ATR_PERIOD_MACD,
@@ -306,7 +307,7 @@ def build_html(all_items: list[dict], show_days: int,
         strat = item["strategy"]
         if strat not in strategy_summary:
             strategy_summary[strat] = dict(trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
-        pr = item["period_results"].get(show_days) or {}
+        pr = compute_period_result(item, show_days)
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
             strategy_summary[strat]["wins"]   += pr["wins"]
@@ -378,7 +379,7 @@ def build_html(all_items: list[dict], show_days: int,
     stock_rows = ""
     for strat in ["A7_S"]:
         items = [i for i in all_items if i["strategy"] == strat]
-        items.sort(key=lambda x: (x["period_results"].get(show_days) or {}).get("total_pnl", -999999), reverse=True)
+        items.sort(key=lambda x: (compute_period_result(x, show_days)).get("total_pnl", -999999), reverse=True)
         for item in items:
             cells = ""
             for p in PERIODS:
@@ -391,7 +392,7 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{r['win_rate']:.0f}%</td>"
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
-            pr_show  = item["period_results"].get(show_days) or {}
+            pr_show  = compute_period_result(item, show_days)
             hs_item  = calc_hold_stats(pr_show.get("trade_log", []))
             hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
             mark = "🔔" if item["today_sig"] else ""
@@ -405,7 +406,7 @@ def build_html(all_items: list[dict], show_days: int,
 
     trade_sections = ""
     for item in all_items:
-        pr   = item["period_results"].get(show_days) or {}
+        pr   = compute_period_result(item, show_days)
         logs = pr.get("trade_log") or []
         if not logs:
             continue

@@ -34,6 +34,7 @@ from backtest_limit_entry import (
     MAX_HOLD, ENTRY_EXPIRE,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
+    compute_period_result,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
 
@@ -264,7 +265,7 @@ def build_html(all_items: list[dict], show_days: int,
         if strat not in strategy_summary:
             strategy_summary[strat] = dict(
                 trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
-        pr = item["period_results"].get(show_days) or {}
+        pr = compute_period_result(item, show_days)
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
             strategy_summary[strat]["wins"]   += pr["wins"]
@@ -358,7 +359,7 @@ def build_html(all_items: list[dict], show_days: int,
     stock_rows = ""
     for strat in ["MACD", "A7", "RSI2"]:
         items = [i for i in all_items if i["strategy"] == strat]
-        items.sort(key=lambda x: (x["period_results"].get(show_days) or {}).get("total_pnl", -999999), reverse=True)
+        items.sort(key=lambda x: (compute_period_result(x, show_days)).get("total_pnl", -999999), reverse=True)
         for item in items:
             cells = ""
             for p in PERIODS:
@@ -372,7 +373,7 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
             # show_days 期間の平均保有日数
-            pr_show   = item["period_results"].get(show_days) or {}
+            pr_show   = compute_period_result(item, show_days)
             hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
             hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
             mark = "🔔" if item["today_sig"] else ""
@@ -387,7 +388,7 @@ def build_html(all_items: list[dict], show_days: int,
     # 個別トレード
     trade_sections = ""
     for item in all_items:
-        pr   = item["period_results"].get(show_days) or {}
+        pr   = compute_period_result(item, show_days)
         logs = pr.get("trade_log") or []
         if not logs:
             continue
@@ -654,7 +655,7 @@ def main() -> None:
     print("  " + "-" * 70)
     for strat in ["MACD", "A7", "RSI2"]:
         for item in [i for i in all_items if i["strategy"] == strat]:
-            r = item["period_results"].get(show_days)
+            r = compute_period_result(item, show_days)
             if not r:
                 print(f"  {item['symbol']:<12} {item['name']:<20} {strat:<6} データなし")
                 continue
