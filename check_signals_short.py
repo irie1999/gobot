@@ -211,16 +211,7 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     if target_date is None:
-        # 連続シグナルの場合は最初の発生日を起点にする（ENTRY_EXPIRE 日分遡る）
-        prev_idx = -1
-        for lookback in range(1, ENTRY_EXPIRE + 1):
-            earlier = -(lookback + 1)
-            if abs(earlier) > len(df):
-                break
-            if bool(df.iloc[earlier].get("entry_sig", False)):
-                prev_idx = earlier
-            else:
-                break
+        prev_idx = -1   # 最新足のみ判定（連続シグナルでも当日分だけ表示）
     else:
         ts    = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
