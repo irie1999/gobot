@@ -414,6 +414,14 @@ def run_limit_backtest(
     entry_dt: pd.Timestamp | None = None
     qty           = 0
 
+    # in_pos中に発生した最初のシグナルをキューイング（exit後に使用）
+    queued_lp         = None
+    queued_sp         = None
+    queued_tp         = None
+    queued_sig_dt     = None
+    queued_sig_px     = None
+    queued_expire_idx = 0
+
     for i in range(1, len(df)):
         row  = df.iloc[i]
         prev = df.iloc[i - 1]
@@ -433,70 +441,72 @@ def run_limit_backtest(
         # 実運用セマンティクス: シグナル日 T の引け後に逆指値注文を置き、
         # T+1 の始値から発動可能 → バックテストも同じ T+1 の hi/lo で判定。
         if state == "idle":
-            entry_sig = bool(prev.get("entry_sig", False))
-            if not entry_sig:
-                continue
-            if pd.isna(atr_prev) or atr_prev <= 0:
-                continue
-
-            # 連続シグナルの場合は最初の発生日を起点にする（ENTRY_EXPIRE 日前まで遡る）
-            sig_row     = prev
-            sig_row_idx = i - 1
-            for _lb in range(1, ENTRY_EXPIRE + 1):
-                _ei = i - 1 - _lb
-                if _ei < 0:
-                    break
-                if bool(df.iloc[_ei].get("entry_sig", False)):
-                    sig_row     = df.iloc[_ei]
-                    sig_row_idx = _ei
+            # ① 保有中にキューイングしたシグナルを優先チェック
+            if queued_lp is not None:
+                if i <= queued_expire_idx:
+                    limit_price   = queued_lp
+                    stop_price    = queued_sp
+                    target_price  = queued_tp
+                    expire_idx    = queued_expire_idx
+                    signal_idx    = i
+                    days_to_fill  = 0
+                    signal_dt     = queued_sig_dt
+                    signal_price  = queued_sig_px
+                    signals      += 1
+                    state         = "pending"
+                    queued_lp = queued_sp = queued_tp = queued_sig_dt = queued_sig_px = None
+                    # fall through to pending check below
                 else:
-                    break
+                    # 期限切れ → 破棄して通常シグナル判定へ
+                    queued_lp = queued_sp = queued_tp = queued_sig_dt = queued_sig_px = None
 
-            close_prev  = float(sig_row["close"])
-            atr_for_sig = float(sig_row.get("atr", np.nan))
-            if pd.isna(atr_for_sig) or atr_for_sig <= 0:
-                continue
-
-            # データ異常・低価格株・高価格異常を除外
-            if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
-                continue
-            if atr_for_sig / close_prev > MAX_ATR_RATIO:
-                continue
-
-            if entry_type == "stop":
-                # 逆指値（買い）：終値 + ATR×mult を上抜けたら買う
-                lp = close_prev + atr_for_sig * entry_atr_mult
-                sp = lp - atr_for_sig * stop_atr_mult
-                tp = lp + atr_for_sig * target_atr_mult
-                if lp <= 0 or sp <= 0 or tp <= lp:
+            # ② キュー未使用の場合は prev のシグナルを判定
+            if state == "idle":
+                entry_sig = bool(prev.get("entry_sig", False))
+                if not entry_sig:
                     continue
-            elif entry_type == "stop_sell":
-                # 逆指値（売り）：終値 - ATR×mult を下抜けたら売る
-                lp = close_prev - atr_for_sig * entry_atr_mult
-                sp = lp + atr_for_sig * stop_atr_mult   # 損切り (ABOVE entry)
-                tp = lp - atr_for_sig * target_atr_mult  # 目標   (BELOW entry)
-                if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
-                    continue
-            else:
-                # 指値：終値 - ATR×mult まで下がれば買う
-                lp = close_prev - atr_for_sig * entry_atr_mult
-                sp = lp - atr_for_sig * stop_atr_mult
-                tp = lp + atr_for_sig * target_atr_mult
-                if lp <= 0 or sp <= 0 or tp <= lp:
+                if pd.isna(atr_prev) or atr_prev <= 0:
                     continue
 
-            signals += 1
+                close_prev = float(prev["close"])
 
-            limit_price   = lp
-            stop_price    = sp
-            target_price  = tp
-            expire_idx    = i + ENTRY_EXPIRE
-            signal_idx    = i
-            days_to_fill  = 0
-            signal_dt     = df.index[sig_row_idx]  # 連続シグナルの最初の発生日
-            signal_price  = close_prev              # その日の終値
-            state         = "pending"
-            # fall through to pending check below (same bar = T+1)
+                # データ異常・低価格株・高価格異常を除外
+                if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
+                    continue
+                if atr_prev / close_prev > MAX_ATR_RATIO:
+                    continue
+
+                if entry_type == "stop":
+                    lp = close_prev + atr_prev * entry_atr_mult
+                    sp = lp - atr_prev * stop_atr_mult
+                    tp = lp + atr_prev * target_atr_mult
+                    if lp <= 0 or sp <= 0 or tp <= lp:
+                        continue
+                elif entry_type == "stop_sell":
+                    lp = close_prev - atr_prev * entry_atr_mult
+                    sp = lp + atr_prev * stop_atr_mult
+                    tp = lp - atr_prev * target_atr_mult
+                    if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
+                        continue
+                else:
+                    lp = close_prev - atr_prev * entry_atr_mult
+                    sp = lp - atr_prev * stop_atr_mult
+                    tp = lp + atr_prev * target_atr_mult
+                    if lp <= 0 or sp <= 0 or tp <= lp:
+                        continue
+
+                signals += 1
+
+                limit_price   = lp
+                stop_price    = sp
+                target_price  = tp
+                expire_idx    = i + ENTRY_EXPIRE
+                signal_idx    = i
+                days_to_fill  = 0
+                signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
+                signal_price  = close_prev
+                state         = "pending"
+                # fall through to pending check below (same bar = T+1)
 
         # ── pending: 注文の約定チェック ──────────────────────────
         if state == "pending":
@@ -571,6 +581,41 @@ def run_limit_backtest(
 
         # ── in_pos: OCO決済チェック ───────────────────────────────
         if state == "in_pos":
+            # 保有中に新しいシグナルが発生した場合、最初のものだけキューイング
+            # （exit後に次の取引として処理することで、連続シグナルを記録できる）
+            if queued_lp is None and bool(prev.get("entry_sig", False)):
+                _atr = float(prev.get("atr", np.nan))
+                if not pd.isna(_atr) and _atr > 0:
+                    _cl = float(prev["close"])
+                    if MIN_PRICE <= _cl <= MAX_PRICE and _atr / _cl <= MAX_ATR_RATIO:
+                        if entry_type == "stop":
+                            _lp = _cl + _atr * entry_atr_mult
+                            _sp = _lp - _atr * stop_atr_mult
+                            _tp = _lp + _atr * target_atr_mult
+                            if _lp > 0 and _sp > 0 and _tp > _lp:
+                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
+                                queued_sig_dt     = df.index[i - 1]
+                                queued_sig_px     = _cl
+                                queued_expire_idx = i + ENTRY_EXPIRE
+                        elif entry_type == "stop_sell":
+                            _lp = _cl - _atr * entry_atr_mult
+                            _sp = _lp + _atr * stop_atr_mult
+                            _tp = _lp - _atr * target_atr_mult
+                            if _lp > 0 and _tp > 0 and _tp < _lp and _sp > _lp:
+                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
+                                queued_sig_dt     = df.index[i - 1]
+                                queued_sig_px     = _cl
+                                queued_expire_idx = i + ENTRY_EXPIRE
+                        else:
+                            _lp = _cl - _atr * entry_atr_mult
+                            _sp = _lp - _atr * stop_atr_mult
+                            _tp = _lp + _atr * target_atr_mult
+                            if _lp > 0 and _sp > 0 and _tp > _lp:
+                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
+                                queued_sig_dt     = df.index[i - 1]
+                                queued_sig_px     = _cl
+                                queued_expire_idx = i + ENTRY_EXPIRE
+
             hold_days = i - hold_start
             exit_p    = None
             exit_reason = None
