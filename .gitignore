@@ -7,6 +7,8 @@ watchlist_*.html
 candidates_*.csv
 report_combined_*.html
 signals_combined_*.html
+signals_combined_aggressive_*.html
+signals_nolimit_*.html
 signals_verification_*.html
 result_summary_*.txt
 daytrade_*_*.html
