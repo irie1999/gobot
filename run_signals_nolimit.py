@@ -267,38 +267,70 @@ def _fund_html(fund_rows: list[dict], show_days: int) -> str:
     </details>""" if closed else ""
 
     peak_dt_str = str(peak_dt) if peak_dt else "—"
+    holding_label = f"保有中 {len(holding)}件 &nbsp;／&nbsp; 合計 {now_tied:,.0f}円" if holding else f"保有中 0件"
+    closed_label  = f"決済済み {len(closed)}件 &nbsp;／&nbsp; 合計 {sum(r['required'] for r in closed):,.0f}円" if closed else f"決済済み 0件"
     return f"""
-<div class="funds-box" style="
-  margin:12px 16px 0;padding:16px 20px;
+<details class="funds-box" style="
+  margin:12px 16px 0;
   background:#0f1117;border:1px solid #f59e0b;border-radius:8px">
-  <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-bottom:8px">
-    <span style="color:#f59e0b;font-size:15px;font-weight:700">
+  <summary style="
+    padding:14px 20px;cursor:pointer;list-style:none;
+    display:flex;align-items:center;flex-wrap:wrap;gap:32px">
+    <span style="color:#f59e0b;font-size:15px;font-weight:700;white-space:nowrap">
       💰 必要資金集計（{show_days}日間）
     </span>
-  </div>
-  <div style="display:flex;gap:40px;flex-wrap:wrap;margin-bottom:14px;align-items:flex-end">
-    <div>
-      <div style="color:#64748b;font-size:11px;margin-bottom:2px">★ 最低必要資金（ピーク同時保有）</div>
-      <span style="color:#f59e0b;font-size:24px;font-weight:800">{peak:,.0f}円</span>
-      <span style="color:#94a3b8;font-size:14px;margin-left:8px">（{peak/10000:.0f}万円）</span>
-      <span style="color:#64748b;font-size:11px;margin-left:12px">ピーク日: {peak_dt_str}</span>
+    <span style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-end">
+      <span>
+        <span style="color:#64748b;font-size:11px;display:block;margin-bottom:2px">★ 最低必要資金（ピーク同時保有）</span>
+        <span style="color:#f59e0b;font-size:24px;font-weight:800">{peak:,.0f}円</span>
+        <span style="color:#94a3b8;font-size:14px;margin-left:8px">（{peak/10000:.0f}万円）</span>
+        <span style="color:#64748b;font-size:11px;margin-left:12px">ピーク日: {peak_dt_str}</span>
+      </span>
+      <span>
+        <span style="color:#64748b;font-size:11px;display:block;margin-bottom:2px">現在の拘束資金（保有中）</span>
+        <span style="color:#dde1ec;font-size:18px;font-weight:700">{now_tied:,.0f}円</span>
+      </span>
+      <span style="font-size:12px;color:#64748b">
+        全{len(fund_rows)}件 &nbsp;／&nbsp;
+        保有中 {len(holding)}件 ／ 決済済み {len(closed)}件
+      </span>
+    </span>
+    <span style="color:#64748b;font-size:12px;margin-left:auto">▶ クリックで詳細展開</span>
+  </summary>
+  <div style="padding:0 20px 16px">
+    <div style="font-size:11px;color:#475569;margin-bottom:14px;border-top:1px solid #1e2235;padding-top:10px">
+      ※ 売却で資金は復活するため、合計額ではなくピーク同時保有額が最低限必要な資金です &nbsp;／&nbsp;
+      必要資金 = 約定株価 × {FIXED_QTY}株
     </div>
-    <div>
-      <div style="color:#64748b;font-size:11px;margin-bottom:2px">現在の拘束資金（保有中）</div>
-      <span style="color:#dde1ec;font-size:18px;font-weight:700">{now_tied:,.0f}円</span>
-    </div>
-    <div style="font-size:12px;color:#64748b">
-      全{len(fund_rows)}件<br>
-      保有中 {len(holding)}件 ／ 決済済み {len(closed)}件
-    </div>
+    <details style="margin-bottom:12px" {"open" if holding else ""}>
+      <summary style="cursor:pointer;color:#f59e0b;font-weight:700;font-size:14px;margin-bottom:8px">
+        {holding_label} ▶クリックで展開
+      </summary>
+      <table style="width:auto;min-width:500px;margin-top:8px">
+        <thead><tr>
+          <th>シグナル日</th><th>銘柄</th><th>戦略</th>
+          <th style="text-align:right">株価</th>
+          <th style="text-align:right">必要資金</th>
+        </tr></thead>
+        <tbody>{holding_rows_html}</tbody>
+      </table>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#94a3b8;font-size:13px">
+        {closed_label} ▶クリックで展開
+      </summary>
+      <table style="width:auto;min-width:640px;margin-top:8px">
+        <thead><tr>
+          <th>シグナル日</th><th>銘柄</th><th>戦略</th>
+          <th style="text-align:right">株価</th>
+          <th style="text-align:right">必要資金</th>
+          <th>結果</th><th>損益</th>
+        </tr></thead>
+        <tbody>{closed_rows_html}</tbody>
+      </table>
+    </details>
   </div>
-  <div style="font-size:11px;color:#475569;margin-bottom:14px;border-top:1px solid #1e2235;padding-top:8px">
-    ※ 売却で資金は復活するため、合計額ではなくピーク同時保有額が最低限必要な資金です &nbsp;／&nbsp;
-    必要資金 = 約定株価 × {FIXED_QTY}株
-  </div>
-  {holding_section}
-  {closed_section}
-</div>"""
+</details>"""
 
 
 def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
