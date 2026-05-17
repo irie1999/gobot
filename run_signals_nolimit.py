@@ -238,7 +238,7 @@ def _fund_html(fund_rows: list[dict], show_days: int) -> str:
     <div style="margin-bottom:16px">
       <div style="color:#f59e0b;font-weight:700;margin-bottom:6px">
         保有中 {len(holding)}件 &nbsp;／&nbsp; 合計
-        <span style="font-size:1.1em">{h_total:,.0f}円</span>
+        <span style="font-size:1.1em">{now_tied:,.0f}円</span>
       </div>
       <table style="width:auto;min-width:500px">
         <thead><tr>
@@ -253,7 +253,7 @@ def _fund_html(fund_rows: list[dict], show_days: int) -> str:
     closed_section = f"""
     <details style="margin-top:8px">
       <summary style="cursor:pointer;color:#94a3b8;font-size:13px">
-        決済済み {len(closed)}件 （合計 {c_total:,.0f}円） ▶クリックで展開
+        決済済み {len(closed)}件 （合計 {sum(r["required"] for r in closed):,.0f}円） ▶クリックで展開
       </summary>
       <table style="width:auto;min-width:640px;margin-top:8px">
         <thead><tr>
