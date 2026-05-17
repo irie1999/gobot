@@ -30,6 +30,7 @@ import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
 from run_signals import _extract_style, _extract_body
+from backtest_limit_entry import compute_period_result, FIXED_QTY
 
 # ── パラメータ上書き (sm=1.5 / tm=2.0 / 高回転) ──────────────────────────────
 for _k, _v in list(_stop.STRATEGY_PARAMS.items()):
@@ -266,6 +267,8 @@ def main() -> None:
     parser.add_argument("--no-browser",  action="store_true")
     parser.add_argument("--signal-only", action="store_true")
     parser.add_argument("--workers",     type=int, default=_stop._DEFAULT_WORKERS)
+    parser.add_argument("--funds",       action="store_true",
+                        help="指定期間のシグナル銘柄すべてに投資する場合の必要資金を表示")
     args = parser.parse_args()
 
     if args.date:
@@ -329,6 +332,71 @@ def main() -> None:
 
     if args.signal_only:
         return
+
+    # ── --funds: 指定期間のシグナル銘柄・必要資金集計 ──────────────────
+    if args.funds:
+        fund_rows = []
+        seen_fund = set()
+        for item_list in (stop_items, brk_items, short_items):
+            for item in item_list:
+                pr = compute_period_result(item, args.days)
+                for t in pr.get("trade_log", []):
+                    key = (item["symbol"], item["strategy"], t["signal_dt"].date())
+                    if key not in seen_fund:
+                        seen_fund.add(key)
+                        fund_rows.append({
+                            "symbol":       item["symbol"],
+                            "name":         item["name"],
+                            "strategy":     item["strategy"],
+                            "signal_dt":    t["signal_dt"].date(),
+                            "signal_price": t["signal_price"],
+                            "required":     t["signal_price"] * FIXED_QTY,
+                            "reason":       t.get("reason") or "保有中",
+                            "pnl":          t.get("pnl", 0),
+                        })
+
+        fund_rows.sort(key=lambda x: x["signal_dt"])
+        holding = [r for r in fund_rows if r["reason"] == "保有中"]
+        closed  = [r for r in fund_rows if r["reason"] != "保有中"]
+        total   = sum(r["required"] for r in fund_rows)
+
+        print()
+        print("=" * 80)
+        print(f"  必要資金集計（{args.days}日間・全シグナル銘柄に投資した場合）")
+        print("=" * 80)
+        print(f"  シグナル件数  : {len(fund_rows)}件"
+              f"  （保有中: {len(holding)}件  /  決済済み: {len(closed)}件）")
+        print(f"  必要資金合計  : {total:>12,.0f}円  （{total/10000:.0f}万円）")
+        if fund_rows:
+            print(f"  1件あたり平均 : {total/len(fund_rows):>12,.0f}円")
+        print()
+
+        if holding:
+            h_total = sum(r["required"] for r in holding)
+            print(f"【保有中】{len(holding)}件  合計 {h_total:,.0f}円")
+            print(f"  {'シグナル日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'必要資金':>10}")
+            print("  " + "-" * 65)
+            for r in holding:
+                print(f"  {str(r['signal_dt']):<12} {r['name']:<22} {r['strategy']:<6}"
+                      f" {r['signal_price']:>8,.0f}円  {r['required']:>9,.0f}円")
+            print()
+
+        if closed:
+            c_total = sum(r["required"] for r in closed)
+            print(f"【決済済み】{len(closed)}件  合計 {c_total:,.0f}円")
+            print(f"  {'シグナル日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'必要資金':>10}  {'結果':<8}  {'損益'}")
+            print("  " + "-" * 80)
+            for r in closed:
+                pnl_str = f"{r['pnl']:+,.0f}円" if r["pnl"] != 0 else ""
+                print(f"  {str(r['signal_dt']):<12} {r['name']:<22} {r['strategy']:<6}"
+                      f" {r['signal_price']:>8,.0f}円  {r['required']:>9,.0f}円"
+                      f"  {r['reason']:<8}  {pnl_str}")
+
+        print()
+        print(f"  ※ 必要資金 = シグナル時株価 × {FIXED_QTY}株")
+        print(f"  ※ 同時保有なら合計額、順番に入るなら最大1件分が目安")
+        print("=" * 80)
+        print()
 
     print(f"\nHTMLレポート生成中...", flush=True)
     stop_html  = _stop.build_html(stop_items,   args.days, date_label)
