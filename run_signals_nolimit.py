@@ -182,11 +182,23 @@ def _fund_html(fund_rows: list[dict], show_days: int) -> str:
     """資金集計セクションのHTML生成。"""
     if not fund_rows:
         return ""
-    holding = [r for r in fund_rows if r["reason"] == "保有中"]
-    closed  = [r for r in fund_rows if r["reason"] != "保有中"]
-    total   = sum(r["required"] for r in fund_rows)
-    h_total = sum(r["required"] for r in holding)
-    c_total = sum(r["required"] for r in closed)
+    holding  = [r for r in fund_rows if r["reason"] == "保有中"]
+    closed   = [r for r in fund_rows if r["reason"] != "保有中"]
+    now_tied = sum(r["required"] for r in holding)
+
+    # ピーク同時保有額（時系列シミュレーション）
+    events = []
+    _today_d = datetime.now(JST).date()
+    for r in fund_rows:
+        events.append((r.get("entry_dt", r["signal_dt"]), +r["required"]))
+        events.append((r.get("exit_dt",  _today_d),       -r["required"]))
+    events.sort(key=lambda e: e[0])
+    running = peak = 0
+    peak_dt = None
+    for ev_dt, delta in events:
+        running += delta
+        if running > peak:
+            peak, peak_dt = running, ev_dt
 
     def reason_cls(reason):
         if reason == "目標達成": return "profit"
@@ -254,27 +266,35 @@ def _fund_html(fund_rows: list[dict], show_days: int) -> str:
       </table>
     </details>""" if closed else ""
 
+    peak_dt_str = str(peak_dt) if peak_dt else "—"
     return f"""
 <div class="funds-box" style="
   margin:12px 16px 0;padding:16px 20px;
   background:#0f1117;border:1px solid #f59e0b;border-radius:8px">
-  <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-bottom:12px">
+  <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-bottom:8px">
     <span style="color:#f59e0b;font-size:15px;font-weight:700">
       💰 必要資金集計（{show_days}日間）
     </span>
-    <span style="color:#dde1ec;font-size:22px;font-weight:800">{total:,.0f}円</span>
-    <span style="color:#94a3b8;font-size:14px">（{total/10000:.0f}万円）</span>
-    <span style="color:#64748b;font-size:12px">
-      全{len(fund_rows)}件 ／ 1件平均 {total/len(fund_rows):,.0f}円
-    </span>
   </div>
-  <div style="display:flex;gap:32px;flex-wrap:wrap;font-size:12px;color:#64748b;margin-bottom:14px">
-    <span>保有中: <strong style="color:#f59e0b">{h_total:,.0f}円</strong></span>
-    <span>決済済み: {c_total:,.0f}円</span>
-    <span style="border-top:1px solid #252840;padding-top:4px;width:100%">
-      ※ 必要資金 = シグナル時株価 × {FIXED_QTY}株 &nbsp;／&nbsp;
-      同時保有なら合計額、順番に入るなら最大1件分が目安
-    </span>
+  <div style="display:flex;gap:40px;flex-wrap:wrap;margin-bottom:14px;align-items:flex-end">
+    <div>
+      <div style="color:#64748b;font-size:11px;margin-bottom:2px">★ 最低必要資金（ピーク同時保有）</div>
+      <span style="color:#f59e0b;font-size:24px;font-weight:800">{peak:,.0f}円</span>
+      <span style="color:#94a3b8;font-size:14px;margin-left:8px">（{peak/10000:.0f}万円）</span>
+      <span style="color:#64748b;font-size:11px;margin-left:12px">ピーク日: {peak_dt_str}</span>
+    </div>
+    <div>
+      <div style="color:#64748b;font-size:11px;margin-bottom:2px">現在の拘束資金（保有中）</div>
+      <span style="color:#dde1ec;font-size:18px;font-weight:700">{now_tied:,.0f}円</span>
+    </div>
+    <div style="font-size:12px;color:#64748b">
+      全{len(fund_rows)}件<br>
+      保有中 {len(holding)}件 ／ 決済済み {len(closed)}件
+    </div>
+  </div>
+  <div style="font-size:11px;color:#475569;margin-bottom:14px;border-top:1px solid #1e2235;padding-top:8px">
+    ※ 売却で資金は復活するため、合計額ではなくピーク同時保有額が最低限必要な資金です &nbsp;／&nbsp;
+    必要資金 = 約定株価 × {FIXED_QTY}株
   </div>
   {holding_section}
   {closed_section}
@@ -443,6 +463,7 @@ def main() -> None:
     if args.funds:
         fund_rows = []
         seen_fund = set()
+        _today_d  = datetime.now(JST).date()
         for item_list in (stop_items, brk_items, short_items):
             for item in item_list:
                 pr = compute_period_result(item, args.days)
@@ -450,57 +471,80 @@ def main() -> None:
                     key = (item["symbol"], item["strategy"], t["signal_dt"].date())
                     if key not in seen_fund:
                         seen_fund.add(key)
+                        reason   = t.get("reason") or "保有中"
+                        entry_dt = t["entry_dt"].date() if t.get("entry_dt") else t["signal_dt"].date()
+                        exit_dt  = t["exit_dt"].date()  if t.get("exit_dt")  else _today_d
+                        # 保有中は今日まで資金拘束
+                        if reason == "保有中":
+                            exit_dt = _today_d
                         fund_rows.append({
                             "symbol":       item["symbol"],
                             "name":         item["name"],
                             "strategy":     item["strategy"],
                             "signal_dt":    t["signal_dt"].date(),
+                            "entry_dt":     entry_dt,
+                            "exit_dt":      exit_dt,
                             "signal_price": t["signal_price"],
                             "required":     t["signal_price"] * FIXED_QTY,
-                            "reason":       t.get("reason") or "保有中",
+                            "reason":       reason,
                             "pnl":          t.get("pnl", 0),
                         })
 
-        fund_rows.sort(key=lambda x: x["signal_dt"])
+        fund_rows.sort(key=lambda x: x["entry_dt"])
+
+        # ── ピーク同時保有額を計算（時系列シミュレーション）──
+        # 買い: +required, 売り: -required のイベントを時系列で処理し
+        # 最大残高（= 最低限必要な資金）を求める
+        events = []
+        for r in fund_rows:
+            events.append((r["entry_dt"], +r["required"], r))
+            events.append((r["exit_dt"],  -r["required"], r))
+        events.sort(key=lambda e: e[0])
+
+        running = 0
+        peak    = 0
+        peak_dt = None
+        for ev_dt, delta, _ in events:
+            running += delta
+            if running > peak:
+                peak    = running
+                peak_dt = ev_dt
         holding = [r for r in fund_rows if r["reason"] == "保有中"]
         closed  = [r for r in fund_rows if r["reason"] != "保有中"]
-        total   = sum(r["required"] for r in fund_rows)
+        now_tied = sum(r["required"] for r in holding)
 
         print()
         print("=" * 80)
-        print(f"  必要資金集計（{args.days}日間・全シグナル銘柄に投資した場合）")
+        print(f"  必要資金集計（{args.days}日間・全シグナルを順番に投資した場合）")
         print("=" * 80)
-        print(f"  シグナル件数  : {len(fund_rows)}件"
+        print(f"  シグナル件数      : {len(fund_rows)}件"
               f"  （保有中: {len(holding)}件  /  決済済み: {len(closed)}件）")
-        print(f"  必要資金合計  : {total:>12,.0f}円  （{total/10000:.0f}万円）")
-        if fund_rows:
-            print(f"  1件あたり平均 : {total/len(fund_rows):>12,.0f}円")
+        print(f"  ★ 最低必要資金   : {peak:>12,.0f}円  （{peak/10000:.0f}万円）"
+              f"  ← ピーク同時保有日: {peak_dt}")
+        print(f"  現在の拘束資金    : {now_tied:>12,.0f}円  （保有中分）")
         print()
 
         if holding:
-            h_total = sum(r["required"] for r in holding)
-            print(f"【保有中】{len(holding)}件  合計 {h_total:,.0f}円")
-            print(f"  {'シグナル日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'必要資金':>10}")
+            print(f"【保有中】{len(holding)}件  拘束資金 {now_tied:,.0f}円")
+            print(f"  {'約定日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'拘束額':>10}")
             print("  " + "-" * 65)
             for r in holding:
-                print(f"  {str(r['signal_dt']):<12} {r['name']:<22} {r['strategy']:<6}"
+                print(f"  {str(r['entry_dt']):<12} {r['name']:<22} {r['strategy']:<6}"
                       f" {r['signal_price']:>8,.0f}円  {r['required']:>9,.0f}円")
             print()
 
         if closed:
-            c_total = sum(r["required"] for r in closed)
-            print(f"【決済済み】{len(closed)}件  合計 {c_total:,.0f}円")
-            print(f"  {'シグナル日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'必要資金':>10}  {'結果':<8}  {'損益'}")
-            print("  " + "-" * 80)
+            print(f"【決済済み】{len(closed)}件（売却で資金は復活）")
+            print(f"  {'約定日':<12} {'売却日':<12} {'銘柄':<22} {'戦略':<6} {'株価':>8}  {'結果':<8}  {'損益'}")
+            print("  " + "-" * 85)
             for r in closed:
                 pnl_str = f"{r['pnl']:+,.0f}円" if r["pnl"] != 0 else ""
-                print(f"  {str(r['signal_dt']):<12} {r['name']:<22} {r['strategy']:<6}"
-                      f" {r['signal_price']:>8,.0f}円  {r['required']:>9,.0f}円"
-                      f"  {r['reason']:<8}  {pnl_str}")
+                print(f"  {str(r['entry_dt']):<12} {str(r['exit_dt']):<12} {r['name']:<22}"
+                      f" {r['strategy']:<6} {r['signal_price']:>8,.0f}円  {r['reason']:<8}  {pnl_str}")
 
         print()
-        print(f"  ※ 必要資金 = シグナル時株価 × {FIXED_QTY}株")
-        print(f"  ※ 同時保有なら合計額、順番に入るなら最大1件分が目安")
+        print(f"  ※ 必要資金 = 約定価格 × {FIXED_QTY}株")
+        print(f"  ※ 売却後は資金が戻るため、ピーク同時保有額が最低限必要な資金")
         print("=" * 80)
         print()
 
