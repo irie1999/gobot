@@ -178,7 +178,111 @@ def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
     return all_items
 
 
-def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
+def _fund_html(fund_rows: list[dict], show_days: int) -> str:
+    """資金集計セクションのHTML生成。"""
+    if not fund_rows:
+        return ""
+    holding = [r for r in fund_rows if r["reason"] == "保有中"]
+    closed  = [r for r in fund_rows if r["reason"] != "保有中"]
+    total   = sum(r["required"] for r in fund_rows)
+    h_total = sum(r["required"] for r in holding)
+    c_total = sum(r["required"] for r in closed)
+
+    def reason_cls(reason):
+        if reason == "目標達成": return "profit"
+        if reason == "損切り":   return "loss"
+        if reason == "保有中":   return "holding"
+        return ""
+
+    holding_rows_html = "".join(
+        f'<tr>'
+        f'<td>{r["signal_dt"]}</td>'
+        f'<td>{r["name"]}<br><small style="color:#94a3b8">{r["symbol"]}</small></td>'
+        f'<td><span class="tag-{r["strategy"].lower()}">{r["strategy"]}</span></td>'
+        f'<td style="text-align:right">{r["signal_price"]:,.0f}円</td>'
+        f'<td style="text-align:right;color:#f59e0b;font-weight:600">{r["required"]:,.0f}円</td>'
+        f'</tr>'
+        for r in holding
+    )
+    def _pnl_cell(r):
+        pnl_cls = "profit" if r["pnl"] > 0 else "loss" if r["pnl"] < 0 else ""
+        pnl_txt = f'{r["pnl"]:+,.0f}円' if r["pnl"] != 0 else ""
+        return (f'<td class="{reason_cls(r["reason"])}">{r["reason"]}</td>'
+                f'<td class="{pnl_cls}">{pnl_txt}</td>')
+
+    closed_rows_html = "".join(
+        f'<tr>'
+        f'<td>{r["signal_dt"]}</td>'
+        f'<td>{r["name"]}<br><small style="color:#94a3b8">{r["symbol"]}</small></td>'
+        f'<td><span class="tag-{r["strategy"].lower()}">{r["strategy"]}</span></td>'
+        f'<td style="text-align:right">{r["signal_price"]:,.0f}円</td>'
+        f'<td style="text-align:right">{r["required"]:,.0f}円</td>'
+        + _pnl_cell(r) +
+        '</tr>'
+        for r in closed
+    )
+
+    holding_section = f"""
+    <div style="margin-bottom:16px">
+      <div style="color:#f59e0b;font-weight:700;margin-bottom:6px">
+        保有中 {len(holding)}件 &nbsp;／&nbsp; 合計
+        <span style="font-size:1.1em">{h_total:,.0f}円</span>
+      </div>
+      <table style="width:auto;min-width:500px">
+        <thead><tr>
+          <th>シグナル日</th><th>銘柄</th><th>戦略</th>
+          <th style="text-align:right">株価</th>
+          <th style="text-align:right">必要資金</th>
+        </tr></thead>
+        <tbody>{holding_rows_html}</tbody>
+      </table>
+    </div>""" if holding else ""
+
+    closed_section = f"""
+    <details style="margin-top:8px">
+      <summary style="cursor:pointer;color:#94a3b8;font-size:13px">
+        決済済み {len(closed)}件 （合計 {c_total:,.0f}円） ▶クリックで展開
+      </summary>
+      <table style="width:auto;min-width:640px;margin-top:8px">
+        <thead><tr>
+          <th>シグナル日</th><th>銘柄</th><th>戦略</th>
+          <th style="text-align:right">株価</th>
+          <th style="text-align:right">必要資金</th>
+          <th>結果</th><th>損益</th>
+        </tr></thead>
+        <tbody>{closed_rows_html}</tbody>
+      </table>
+    </details>""" if closed else ""
+
+    return f"""
+<div class="funds-box" style="
+  margin:12px 16px 0;padding:16px 20px;
+  background:#0f1117;border:1px solid #f59e0b;border-radius:8px">
+  <div style="display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-bottom:12px">
+    <span style="color:#f59e0b;font-size:15px;font-weight:700">
+      💰 必要資金集計（{show_days}日間）
+    </span>
+    <span style="color:#dde1ec;font-size:22px;font-weight:800">{total:,.0f}円</span>
+    <span style="color:#94a3b8;font-size:14px">（{total/10000:.0f}万円）</span>
+    <span style="color:#64748b;font-size:12px">
+      全{len(fund_rows)}件 ／ 1件平均 {total/len(fund_rows):,.0f}円
+    </span>
+  </div>
+  <div style="display:flex;gap:32px;flex-wrap:wrap;font-size:12px;color:#64748b;margin-bottom:14px">
+    <span>保有中: <strong style="color:#f59e0b">{h_total:,.0f}円</strong></span>
+    <span>決済済み: {c_total:,.0f}円</span>
+    <span style="border-top:1px solid #252840;padding-top:4px;width:100%">
+      ※ 必要資金 = シグナル時株価 × {FIXED_QTY}株 &nbsp;／&nbsp;
+      同時保有なら合計額、順番に入るなら最大1件分が目安
+    </span>
+  </div>
+  {holding_section}
+  {closed_section}
+</div>"""
+
+
+def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
+                fund_rows: list | None = None, show_days: int = 365) -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
@@ -195,7 +299,8 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
     srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
     srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
 
-    wf_syms_js = "[" + ",".join(f'"{s}"' for s in _WF_SYMS) + "]"
+    wf_syms_js  = "[" + ",".join(f'"{s}"' for s in _WF_SYMS) + "]"
+    funds_block = _fund_html(fund_rows or [], show_days)
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -218,6 +323,7 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 </head>
 <body>
 <div class="mode-banner">🔓 NOLIMIT WF — {_OPT_LABEL} / 株価制限なし・プライム全銘柄 Walk-forward 選定 2026-05-12</div>
+{funds_block}
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
@@ -403,9 +509,16 @@ def main() -> None:
     brk_html   = _brk.build_html(brk_items,     args.days, date_label)
     short_html = _short.build_html(short_items,  args.days, date_label)
 
+    # --funds 指定時は HTML にも資金集計を埋め込む
+    html_fund_rows = fund_rows if args.funds else None
+
     date_suffix = args.date if args.date else today
     out_path    = Path(f"signals_nolimit_{date_suffix}.html")
-    out_path.write_text(_build_html(stop_html, brk_html, short_html), encoding="utf-8")
+    out_path.write_text(
+        _build_html(stop_html, brk_html, short_html,
+                    fund_rows=html_fund_rows, show_days=args.days),
+        encoding="utf-8"
+    )
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
