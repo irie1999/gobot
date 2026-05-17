@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -45,17 +46,39 @@ def run_worker(script_name: str, budget: float, days: int, workers: int) -> dict
         "--days",    str(days),
         "--workers", str(workers),
     ]
+    # Windows (cp932) 対策: サブプロセスを UTF-8 で強制
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"]       = "1"   # Python 3.7+ UTF-8 mode
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+            env=env,
+        )
         if r.returncode != 0:
-            print(f"  [ERROR] {script_name}: {r.stderr[-300:]}", file=sys.stderr)
+            print(f"  [ERROR] {script_name}:\n{r.stderr[-400:]}", file=sys.stderr)
             return None
-        return json.loads(r.stdout)
+        stdout = (r.stdout or "").strip()
+        if not stdout:
+            print(f"  [ERROR] {script_name}: 出力なし (stderr={r.stderr[-200:]})",
+                  file=sys.stderr)
+            return None
+        # JSON は最終行（stderr ログがまざっても安全に取り出す）
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+        print(f"  [JSON ERROR] {script_name}: JSON 行なし", file=sys.stderr)
+        return None
     except subprocess.TimeoutExpired:
         print(f"  [TIMEOUT] {script_name}", file=sys.stderr)
         return None
     except json.JSONDecodeError as e:
-        print(f"  [JSON ERROR] {script_name}: {e}\n  stdout={r.stdout[:200]}", file=sys.stderr)
+        print(f"  [JSON ERROR] {script_name}: {e}", file=sys.stderr)
         return None
 
 

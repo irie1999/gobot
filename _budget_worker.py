@@ -5,11 +5,18 @@ _budget_worker.py ― budget_sim.py のサブプロセスワーカー
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+
+# Windows (cp932) 対策: stdout/stderr を UTF-8 に強制
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 JST = timezone(timedelta(hours=9))
 
