@@ -37,6 +37,7 @@ elif "--conservative" in sys.argv:
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
+from _signal_funds import collect_fund_rows, fund_html as _fund_html
 
 JST = timezone(timedelta(hours=9))
 
@@ -75,7 +76,8 @@ def _extract_style(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_combined_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
+def build_combined_html(stop_html: str, brk_html: str, srt_html: str = "",
+                        fund_html_block: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
@@ -110,6 +112,7 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str = "") -> st
 </style>
 </head>
 <body>
+{fund_html_block}
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
@@ -148,6 +151,8 @@ def main() -> None:
                             help="積極利確モード (tm=1.5, 目標+4.5%%)")
     mode_group.add_argument("--conservative", action="store_true",
                             help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
+    parser.add_argument("--funds", action="store_true",
+                        help="指定期間のシグナル銘柄・必要資金集計をHTMLに表示")
     args = parser.parse_args()
 
     if args.date:
@@ -216,16 +221,24 @@ def main() -> None:
         return
 
     show_days = args.days
+    fund_rows: list[dict] = []
+    if args.funds:
+        fund_rows = collect_fund_rows([stop_items, brk_items, short_items], show_days)
+
     print(f"\nHTMLレポート生成中...", flush=True)
     stop_html  = _stop.build_html(stop_items,   show_days, date_label)
     brk_html   = _brk.build_html(brk_items,     show_days, date_label)
     short_html = _short.build_html(short_items,  show_days, date_label)
 
+    funds_block = _fund_html(fund_rows, show_days) if fund_rows else ""
     date_suffix = args.date if args.date else today
     # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
     mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
     out_path    = Path(f"signals_combined{mode_suffix}_{date_suffix}.html")
-    out_path.write_text(build_combined_html(stop_html, brk_html, short_html), encoding="utf-8")
+    out_path.write_text(
+        build_combined_html(stop_html, brk_html, short_html, fund_html_block=funds_block),
+        encoding="utf-8"
+    )
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:

@@ -31,6 +31,7 @@ import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
 from run_signals import _extract_style, _extract_body
+from _signal_funds import collect_fund_rows, fund_html as _fund_html
 
 # ── パラメータ上書き (optimize_params.py 最適化結果: sm=2.0 / tm=3.0) ────────
 # aggressive のデフォルト (sm=1.0/tm=1.5) は損切が早く損失過多。
@@ -158,7 +159,8 @@ def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
     return all_items
 
 
-def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
+def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
+                fund_html_block: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
@@ -201,6 +203,7 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "") -> str:
 </style>
 </head>
 <body>
+{fund_html_block}
 <div class="mode-banner">⚡ AGGRESSIVE MODE — {_OPT_LABEL} / Walk-forward 選定 2026-05-12</div>
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
@@ -262,6 +265,8 @@ def main() -> None:
     parser.add_argument("--no-browser",  action="store_true")
     parser.add_argument("--signal-only", action="store_true")
     parser.add_argument("--workers",     type=int, default=_stop._DEFAULT_WORKERS)
+    parser.add_argument("--funds", action="store_true",
+                        help="指定期間のシグナル銘柄・必要資金集計をHTMLに表示")
     args = parser.parse_args()
 
     if args.date:
@@ -327,14 +332,22 @@ def main() -> None:
     if args.signal_only:
         return
 
+    fund_rows: list[dict] = []
+    if args.funds:
+        fund_rows = collect_fund_rows([stop_items, brk_items, short_items], args.days)
+
     print(f"\nHTMLレポート生成中...", flush=True)
     stop_html  = _stop.build_html(stop_items,   args.days, date_label)
     brk_html   = _brk.build_html(brk_items,     args.days, date_label)
     short_html = _short.build_html(short_items,  args.days, date_label)
 
+    funds_block = _fund_html(fund_rows, args.days) if fund_rows else ""
     date_suffix = args.date if args.date else today
     out_path    = Path(f"signals_aggressive_{date_suffix}.html")
-    out_path.write_text(_build_html(stop_html, brk_html, short_html), encoding="utf-8")
+    out_path.write_text(
+        _build_html(stop_html, brk_html, short_html, fund_html_block=funds_block),
+        encoding="utf-8"
+    )
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
