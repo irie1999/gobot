@@ -35,7 +35,7 @@ import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
 from run_signals import _run_group, build_combined_html, _extract_style, _extract_body
-from _signal_funds import collect_fund_rows, fund_html as _fund_html
+from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_items
 
 JST = timezone(timedelta(hours=9))
 
@@ -296,9 +296,9 @@ def main() -> None:
         fut_stop  = outer.submit(_run_group_with_list, _stop,  merged_stop,        sig_date, args.workers)
         fut_brk   = outer.submit(_run_group_with_list, _brk,   merged_brk,         sig_date, args.workers)
         fut_short = outer.submit(_run_group,           _short,                      sig_date, args.workers)
-    stop_items  = fut_stop.result()
-    brk_items   = fut_brk.result()
-    short_items = fut_short.result()
+    stop_items  = filter_items(fut_stop.result())
+    brk_items   = filter_items(fut_brk.result())
+    short_items = filter_items(fut_short.result())
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
