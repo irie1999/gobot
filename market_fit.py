@@ -225,11 +225,13 @@ def _win_stats(trades: list[dict], start: date, end: date) -> dict:
             "pnl": pnl, "per_trade": pnl/n}
 
 def calc_rolling(trades_map: dict[str, list[dict]], today: date) -> dict:
-    # W1: 直近7日, W2: 前7日, W3: さらに前14日
+    # W1: 直近7日 (today-7 〜 today)  ← recent_pnl.py --days 7 と同じ範囲
+    # W2: 前7日  (today-14 〜 today-8)
+    # W3: 2〜4週前 (today-28 〜 today-15)
     periods = {
-        "W1": (today - timedelta(days=6),  today),
-        "W2": (today - timedelta(days=13), today - timedelta(days=7)),
-        "W3": (today - timedelta(days=27), today - timedelta(days=14)),
+        "W1": (today - timedelta(days=7),  today),
+        "W2": (today - timedelta(days=14), today - timedelta(days=8)),
+        "W3": (today - timedelta(days=28), today - timedelta(days=15)),
     }
     return {
         label: {k: _win_stats(trades, s, e) for k, (s, e) in periods.items()}
@@ -449,12 +451,12 @@ def _ranking_table(scores: list[tuple], cfg_map: dict) -> str:
     return "\n".join(rows)
 
 def _rolling_table(scores: list[tuple], cfg_map: dict, today: date) -> str:
-    w1s = (today - timedelta(days=6)).strftime("%m/%d")
+    w1s = (today - timedelta(days=7)).strftime("%m/%d")
     w1e = today.strftime("%m/%d")
-    w2s = (today - timedelta(days=13)).strftime("%m/%d")
-    w2e = (today - timedelta(days=7)).strftime("%m/%d")
-    w3s = (today - timedelta(days=27)).strftime("%m/%d")
-    w3e = (today - timedelta(days=14)).strftime("%m/%d")
+    w2s = (today - timedelta(days=14)).strftime("%m/%d")
+    w2e = (today - timedelta(days=8)).strftime("%m/%d")
+    w3s = (today - timedelta(days=28)).strftime("%m/%d")
+    w3e = (today - timedelta(days=15)).strftime("%m/%d")
 
     header = f"""<tr>
   <th style="text-align:left">スクリプト</th>
@@ -619,8 +621,8 @@ def main() -> None:
         items  = _run_config(cfg, args.workers)
         trades = _extract_trades(items, label, cfg["color"])
         trades_map[label] = trades
-        w1 = _win_stats(trades, today - timedelta(days=6), today)
-        print(f" 直近1週: {w1['n']}件 {w1['pnl']:+,.0f}円")
+        w1 = _win_stats(trades, today - timedelta(days=7), today)
+        print(f" 全{len(trades)}件 / 直近1週: {w1['n']}件 {w1['pnl']:+,.0f}円")
 
     # 3. ローリング分析
     rolling = calc_rolling(trades_map, today)
