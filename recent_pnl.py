@@ -85,6 +85,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals.py",
         "label":    "既存版",
         "sublabel": "conservative / デフォルト",
+        "cmd":      "python run_signals.py",
         "color":    "#3498db",
         "mode":     "conservative",
         "sm_tm":    None,
@@ -95,6 +96,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals_wf.py --aggressive",
         "label":    "WF 2026-05-19",
         "sublabel": "aggressive / WF選定 59銘柄",
+        "cmd":      "python run_signals_wf.py --aggressive",
         "color":    "#e74c3c",
         "mode":     "aggressive",
         "sm_tm":    None,
@@ -105,6 +107,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals_prime.py",
         "label":    "プライム全銘柄",
         "sublabel": "aggressive / sm=1.5 tm=2.0",
+        "cmd":      "python run_signals_prime.py",
         "color":    "#9b59b6",
         "mode":     "aggressive",
         "sm_tm":    (1.5, 2.0),
@@ -115,6 +118,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals_nolimit.py",
         "label":    "株価制限なし",
         "sublabel": "aggressive / sm=1.5 tm=2.0",
+        "cmd":      "python run_signals_nolimit.py",
         "color":    "#f39c12",
         "mode":     "aggressive",
         "sm_tm":    (1.5, 2.0),
@@ -125,6 +129,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals_aggressive.py",
         "label":    "WF 2026-05-12 積極",
         "sublabel": "aggressive / sm=1.5 tm=2.0",
+        "cmd":      "python run_signals_aggressive.py",
         "color":    "#e67e22",
         "mode":     "aggressive",
         "sm_tm":    (1.5, 2.0),
@@ -135,6 +140,7 @@ CONFIGS: list[dict] = [
         "script":   "run_signals_merged.py",
         "label":    "WF+既存統合",
         "sublabel": "conservative / 統合WATCHLIST",
+        "cmd":      "python run_signals_merged.py",
         "color":    "#27ae60",
         "mode":     "conservative",
         "sm_tm":    None,
@@ -257,9 +263,11 @@ def _summary_rows(all_trades: list[dict]) -> str:
         pf_str = "∞" if pf == float("inf") else f"{pf:.2f}"
         pnl_cls = "profit" if pnl >= 0 else "loss"
         dot = f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
+        cmd_html = f'<code style="background:#0f172a;padding:1px 7px;border-radius:4px;color:#38bdf8;font-size:0.78rem">{cfg["cmd"]}</code>'
         rows_html += f"""
         <tr>
           <td class="sym">{dot}{label}<br><span style="color:#64748b;font-size:0.75rem;font-weight:400">{cfg["sublabel"]}</span></td>
+          <td style="text-align:left">{cmd_html}</td>
           <td>{n}</td><td>{wins}</td>
           <td>{"—" if n == 0 else f"{wr:.1f}%"}</td>
           <td>{"—" if n == 0 else pf_str}</td>
@@ -407,6 +415,7 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
 <table>
   <thead><tr>
     <th style="text-align:left">スクリプト</th>
+    <th style="text-align:left">実行コマンド</th>
     <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益</th>
   </tr></thead>
   <tbody>{summary_rows}</tbody>

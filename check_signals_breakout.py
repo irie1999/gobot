@@ -252,7 +252,7 @@ def _pf_str(pf: float) -> str:
 
 
 def build_html(all_items: list[dict], show_days: int,
-               date_label: str = "本日") -> str:
+               date_label: str = "本日", run_cmd: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
     # サマリー (戦略別に trade_log を結合してリスク指標計算)
@@ -533,6 +533,7 @@ def build_html(all_items: list[dict], show_days: int,
   <span style="color:#cffafe">DON: ドンチャン高値ブレイク</span> ／
   <span style="color:#fef3c7">VOL: 出来高急増ブレイク</span> ／
   <span style="color:#ecfccb">MOM: モメンタムブレイク</span>
+  {f'<br>▶ 実行: <code style="background:#0f172a;padding:2px 8px;border-radius:4px;color:#38bdf8;font-size:0.88rem">{run_cmd}</code>' if run_cmd else ""}
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>

@@ -298,7 +298,7 @@ def _pf_str(pf: float) -> str:
 
 
 def build_html(all_items: list[dict], show_days: int,
-               date_label: str = "本日") -> str:
+               date_label: str = "本日", run_cmd: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     n225_ret  = fetch_n225_return(show_days)
 
@@ -506,6 +506,7 @@ def build_html(all_items: list[dict], show_days: int,
   コストモデル: スリッページ <strong>{SLIPPAGE_STOP_PCT*100:.2f}%</strong> ／
   手数料 <strong>片道 {FEE_PCT_ONE_WAY*100:.2f}%</strong> ／
   ベンチマーク: 日経平均 ({show_days}日) <strong>{n225_ret:+.1f}%</strong>
+  {f'<br>▶ 実行: <code style="background:#0f172a;padding:2px 8px;border-radius:4px;color:#38bdf8;font-size:0.88rem">{run_cmd}</code>' if run_cmd else ""}
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>

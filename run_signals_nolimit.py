@@ -345,9 +345,10 @@ def main() -> None:
         print_fund_summary(fund_rows, args.days)
 
     print(f"\nHTMLレポート生成中...", flush=True)
-    stop_html  = _stop.build_html(stop_items,   args.days, date_label)
-    brk_html   = _brk.build_html(brk_items,     args.days, date_label)
-    short_html = _short.build_html(short_items,  args.days, date_label)
+    _cmd = "python run_signals_nolimit.py"
+    stop_html  = _stop.build_html(stop_items,   args.days, date_label, run_cmd=_cmd)
+    brk_html   = _brk.build_html(brk_items,     args.days, date_label, run_cmd=_cmd)
+    short_html = _short.build_html(short_items,  args.days, date_label, run_cmd=_cmd)
 
     html_fund_rows = fund_rows if args.funds else None
 

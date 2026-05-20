@@ -182,8 +182,9 @@ def main() -> None:
         rows = collect_fund_rows([stop_items, brk_items], args.days)
         fund_block = _fund_html(rows, args.days)
 
-    stop_html = _stop.build_html(stop_items, args.days, date_label)
-    brk_html  = _brk.build_html(brk_items,  args.days, date_label)
+    _cmd = "python run_signals_wf.py --aggressive"
+    stop_html = _stop.build_html(stop_items, args.days, date_label, run_cmd=_cmd)
+    brk_html  = _brk.build_html(brk_items,  args.days, date_label, run_cmd=_cmd)
     combined  = build_combined_html(stop_html, brk_html, fund_html_block=fund_block)
 
     mode_suffix = "_aggressive" if mode == "aggressive" else ""

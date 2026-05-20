@@ -226,9 +226,10 @@ def main() -> None:
         fund_rows = collect_fund_rows([stop_items, brk_items, short_items], show_days)
 
     print(f"\nHTMLレポート生成中...", flush=True)
-    stop_html  = _stop.build_html(stop_items,   show_days, date_label)
-    brk_html   = _brk.build_html(brk_items,     show_days, date_label)
-    short_html = _short.build_html(short_items,  show_days, date_label)
+    _cmd = "python run_signals.py"
+    stop_html  = _stop.build_html(stop_items,   show_days, date_label, run_cmd=_cmd)
+    brk_html   = _brk.build_html(brk_items,     show_days, date_label, run_cmd=_cmd)
+    short_html = _short.build_html(short_items,  show_days, date_label, run_cmd=_cmd)
 
     funds_block = _fund_html(fund_rows, show_days) if fund_rows else ""
     date_suffix = args.date if args.date else today
