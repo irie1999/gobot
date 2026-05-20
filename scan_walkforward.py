@@ -1,8 +1,9 @@
 """
 scan_walkforward.py  ―  Walk-forward 方式による銘柄スキャン
 =================================================================
-ユニバース (デフォルト=プライム市場 ~1800銘柄) × 6戦略
-  (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト)
+ユニバース (デフォルト=プライム市場 ~1800銘柄) × 10戦略
+  (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト
+   + A7_S/DON_S/MOM_S/GAP_S 空売り)
 に対し、非重複の 3 fold Walk-forward バックテストを実行し、
 TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽出する。
 
@@ -35,9 +36,12 @@ TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽�
   python fetch_listed_symbols.py --market prime
 
   # 本番スキャン
-  python scan_walkforward.py                      # 全戦略 (6つ)
+  python scan_walkforward.py                      # 全長戦略 (6つ, --family both)
+  python scan_walkforward.py --family all         # 全10戦略 (空売り含む)
   python scan_walkforward.py --family stop        # 逆指値Bのみ
   python scan_walkforward.py --family breakout    # ブレイクアウトのみ
+  python scan_walkforward.py --family short       # 空売りA7_Sのみ
+  python scan_walkforward.py --family short_brk   # 空売りブレイクアウトのみ
   python scan_walkforward.py --workers 8
   python scan_walkforward.py --top 50             # 表示する上位N
   python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
@@ -87,6 +91,10 @@ from backtest_limit_entry import (
 )
 from scan_breakout_entry import (
     calc_donchian, calc_vol_breakout, calc_momentum,
+)
+from check_signals_short import calc_a7_short
+from check_signals_short_breakout import (
+    calc_donchian_short, calc_momentum_short, calc_gap_short,
 )
 from risk_metrics import enrich_backtest_result
 
@@ -142,23 +150,31 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 
 
 # ── 戦略定義 (プリセット切替) ─────────────────────────────────
-# (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family)
+# (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family, entry_type)
 # TRADING_MODE=aggressive のとき積極利確プリセットを使う
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.5, 3.0, "stop"),
-    "A7":   (calc_a7,          0.0, 1.5, 3.0, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 2.0, 4.0, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.5, 3.0, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.5, 3.0, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.5, 3.0, "breakout"),
+    "MACD":  (calc_macd,          0.0, 1.5, 3.0, "stop",      "stop"),
+    "A7":    (calc_a7,            0.0, 1.5, 3.0, "stop",      "stop"),
+    "RSI2":  (calc_rsi2,          0.0, 2.0, 4.0, "stop",      "stop"),
+    "DON":   (calc_donchian,      0.0, 1.5, 3.0, "breakout",  "stop"),
+    "VOL":   (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout",  "stop"),
+    "MOM":   (calc_momentum,      0.0, 1.5, 3.0, "breakout",  "stop"),
+    "A7_S":  (calc_a7_short,      0.0, 1.5, 3.0, "short",     "stop_sell"),
+    "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
+    "MOM_S": (calc_momentum_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 1.5, 3.0, "short_brk", "stop_sell"),
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.5, 2.0, "stop"),
-    "A7":   (calc_a7,          0.0, 1.5, 2.0, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 1.5, 2.0, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.5, 2.0, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.5, 2.0, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.5, 2.0, "breakout"),
+    "MACD":  (calc_macd,          0.0, 1.5, 2.0, "stop",      "stop"),
+    "A7":    (calc_a7,            0.0, 1.5, 2.0, "stop",      "stop"),
+    "RSI2":  (calc_rsi2,          0.0, 1.5, 2.0, "stop",      "stop"),
+    "DON":   (calc_donchian,      0.0, 1.5, 2.0, "breakout",  "stop"),
+    "VOL":   (calc_vol_breakout,  0.0, 1.5, 2.0, "breakout",  "stop"),
+    "MOM":   (calc_momentum,      0.0, 1.5, 2.0, "breakout",  "stop"),
+    "A7_S":  (calc_a7_short,      0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "DON_S": (calc_donchian_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
+    "MOM_S": (calc_momentum_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 1.5, 2.0, "short_brk", "stop_sell"),
 }
 
 import os as _os
@@ -248,7 +264,7 @@ def _passes_test(r: dict | None) -> bool:
 # ── 1 銘柄 × 1 戦略 × 3 fold ─────────────────────────────────────
 def walkforward_one(symbol: str, name: str, strategy_name: str,
                     max_price: float = 0.0) -> dict | None:
-    calc_fn, em, sm, tm, family = STRATEGY_DEFS[strategy_name]
+    calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy_name]
 
     full_df = fetch(symbol, 800)   # Walk-forward には ~2年のデータが必要
     if full_df is None or len(full_df) < 400:
@@ -273,9 +289,9 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 
     for fold_name, ts, te, vs, ve in FOLDS:
         train_r = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              ts, te, strategy_name)
+                              ts, te, strategy_name, entry_type=entry_type)
         test_r  = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              vs, ve, strategy_name)
+                              vs, ve, strategy_name, entry_type=entry_type)
 
         pass_train = _passes_train(train_r)
         pass_test  = _passes_test(test_r)
@@ -357,7 +373,7 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 # ── メイン ───────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-forward 銘柄スキャナー")
-    parser.add_argument("--family",  choices=["stop", "breakout", "both"], default="both")
+    parser.add_argument("--family",  choices=["stop", "breakout", "short", "short_brk", "all", "both"], default="both")
     parser.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
     parser.add_argument("--top",     type=int, default=30,
                         help="表示する上位N (CSVは全件保存)")
@@ -383,12 +399,16 @@ def main() -> None:
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    if args.family == "stop":
-        strategies = ["MACD", "A7", "RSI2"]
-    elif args.family == "breakout":
-        strategies = ["DON", "VOL", "MOM"]
-    else:
-        strategies = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+    _FAMILY_STRATS = {
+        "stop":      ["MACD", "A7", "RSI2"],
+        "breakout":  ["DON", "VOL", "MOM"],
+        "short":     ["A7_S"],
+        "short_brk": ["DON_S", "MOM_S", "GAP_S"],
+        "both":      ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"],
+        "all":       ["MACD", "A7", "RSI2", "DON", "VOL", "MOM",
+                      "A7_S", "DON_S", "MOM_S", "GAP_S"],
+    }
+    strategies = _FAMILY_STRATS[args.family]
 
     # ユニバース読み込み
     try:

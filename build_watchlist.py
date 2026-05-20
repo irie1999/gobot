@@ -172,9 +172,14 @@ def main() -> None:
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    strategies_stop = ["MACD", "A7", "RSI2"]
-    strategies_brk  = ["DON", "VOL", "MOM"]
-    all_strats      = strategies_stop + strategies_brk
+    strategies_stop      = {"MACD", "A7", "RSI2"}
+    strategies_brk       = {"DON", "VOL", "MOM"}
+    strategies_short     = {"A7_S"}
+    strategies_short_brk = {"DON_S", "MOM_S", "GAP_S"}
+    all_strats = (
+        list(strategies_stop) + list(strategies_brk)
+        + list(strategies_short) + list(strategies_short_brk)
+    )
 
     print("=" * 78)
     print(f"WATCHLIST 構築  基準日: {args.date}")
@@ -192,8 +197,10 @@ def main() -> None:
     print(f"  選定数    : 戦略あたり {args.per_strategy} 銘柄")
     print("=" * 78)
 
-    stop_blocks: list[str] = []
-    brk_blocks:  list[str] = []
+    stop_blocks:      list[str] = []
+    brk_blocks:       list[str] = []
+    short_blocks:     list[str] = []
+    short_brk_blocks: list[str] = []
 
     total_candidates = 0
     total_selected   = 0
@@ -248,8 +255,12 @@ def main() -> None:
         block = format_watchlist_block(top, f"{strategy} Walk-forward 上位 {len(top)}")
         if strategy in strategies_stop:
             stop_blocks.append(block)
-        else:
+        elif strategy in strategies_brk:
             brk_blocks.append(block)
+        elif strategy in strategies_short:
+            short_blocks.append(block)
+        elif strategy in strategies_short_brk:
+            short_brk_blocks.append(block)
 
     # ── Python コード出力 ──
     out_path = Path(f"watchlist_proposal{mode_suffix}_{args.date}.py")
@@ -278,6 +289,20 @@ def main() -> None:
         f.write("# ============================================================\n")
         f.write("BRK_WATCHLIST: list[tuple[str, str, str]] = [\n")
         f.write("\n".join(brk_blocks))
+        f.write("\n]\n\n")
+
+        f.write("# ============================================================\n")
+        f.write("# check_signals_short.py の WATCHLIST に貼り付け (ショート逆指値)\n")
+        f.write("# ============================================================\n")
+        f.write("SHORT_WATCHLIST: list[tuple[str, str, str]] = [\n")
+        f.write("\n".join(short_blocks))
+        f.write("\n]\n\n")
+
+        f.write("# ============================================================\n")
+        f.write("# check_signals_short_breakout.py の WATCHLIST に貼り付け (ショートBRK)\n")
+        f.write("# ============================================================\n")
+        f.write("SHORT_BRK_WATCHLIST: list[tuple[str, str, str]] = [\n")
+        f.write("\n".join(short_brk_blocks))
         f.write("\n]\n")
 
     print(f"\n" + "=" * 78)
@@ -288,6 +313,8 @@ def main() -> None:
     print(f"  1. {out_path.name} を開き、STOP_WATCHLIST / BRK_WATCHLIST を確認")
     print(f"  2. check_signals_stop.py の WATCHLIST を置き換え")
     print(f"  3. check_signals_breakout.py の WATCHLIST を置き換え")
+    print(f"  3b. check_signals_short.py の WATCHLIST を SHORT_WATCHLIST で置き換え")
+    print(f"  3c. check_signals_short_breakout.py の WATCHLIST を SHORT_BRK_WATCHLIST で置き換え")
     print(f"  4. python run_signals.py --days 365 で比較検証")
 
 
