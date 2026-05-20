@@ -186,7 +186,7 @@ def _run_config(cfg: dict, workers: int) -> list[dict]:
     return all_items
 
 
-def _collect_trades(items: list[dict], since: date, label: str, color: str) -> list[dict]:
+def _collect_trades(items: list[dict], since: date, until: date, label: str, color: str) -> list[dict]:
     rows = []
     for it in items:
         sym   = it.get("symbol", "")
@@ -206,7 +206,7 @@ def _collect_trades(items: list[dict], since: date, label: str, color: str) -> l
             if exit_dt is None:
                 continue
             exit_d = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
-            if exit_d < since:
+            if exit_d < since or exit_d > until:
                 continue
             entry_dt = t.get("entry_dt")
             key = (sym, strat, entry_dt, exit_dt)
@@ -350,13 +350,14 @@ def _tab_detail_section(all_trades: list[dict], recent_days: int) -> str:
     return nav + panes
 
 
-def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
+def build_html(all_trades: list[dict], recent_days: int, today_str: str, period_label: str = "") -> str:
     n_total = len(all_trades)
     n_win   = sum(1 for t in all_trades if t["pnl"] > 0)
     pnl_sum = sum(t["pnl"] for t in all_trades)
     wr      = n_win / n_total * 100 if n_total else 0.0
     pnl_cls = "profit" if pnl_sum >= 0 else "loss"
 
+    display_label = period_label if period_label else f"直近{recent_days}日"
     summary_rows    = _summary_rows(all_trades)
     tab_detail_html = _tab_detail_section(all_trades, recent_days)
 
@@ -364,7 +365,7 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>直近{recent_days}日 取引損益レポート — {today_str}</title>
+<title>{display_label} 取引損益レポート — {today_str}</title>
 <style>
   * {{ box-sizing:border-box; margin:0; padding:0; }}
   body {{ font-family:"Segoe UI","Hiragino Sans",sans-serif; background:#0f172a; color:#e2e8f0; padding:20px; }}
@@ -401,7 +402,7 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
 </style>
 </head>
 <body>
-<h1>直近{recent_days}日 取引損益レポート</h1>
+<h1>{display_label} 取引損益レポート</h1>
 <p class="subtitle">生成日: {today_str} ／ 対象: 全シグナルスクリプト ({len(CONFIGS)}本)</p>
 
 <div class="kpi-bar">
@@ -411,7 +412,7 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
   <div class="kpi"><div class="kpi-label">勝ち / 負け</div><div class="kpi-value">{n_win}W / {n_total - n_win}L</div></div>
 </div>
 
-<h2>スクリプト別サマリー（直近{recent_days}日）</h2>
+<h2>スクリプト別サマリー（{display_label}）</h2>
 <table>
   <thead><tr>
     <th style="text-align:left">スクリプト</th>
@@ -438,31 +439,45 @@ function switchTab(btn, id) {{
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="直近N日 取引損益レポート")
-    parser.add_argument("--days",       type=int, default=7,  help="集計する直近日数 (デフォルト: 7)")
+    parser.add_argument("--days",       type=int, default=7,
+                        help="集計する日数 (デフォルト: 7)")
+    parser.add_argument("--until",      type=str, default=None,
+                        help="集計終了日 YYYY-MM-DD (省略時=本日)。過去期間指定に使用")
     parser.add_argument("--workers",    type=int, default=_DEF_WORKERS)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    today     = datetime.now(JST).date()
-    since     = today - timedelta(days=args.days)
-    today_str = today.strftime("%Y-%m-%d")
+    today = datetime.now(JST).date()
+    if args.until:
+        try:
+            until = datetime.strptime(args.until, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"[ERROR] --until 形式エラー: {args.until}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        until = today
 
-    print(f"直近{args.days}日 取引損益レポート (集計開始: {since})", flush=True)
+    since     = until - timedelta(days=args.days)
+    today_str = today.strftime("%Y-%m-%d")
+    period_label = f"{since} 〜 {until}" if args.until else f"直近{args.days}日"
+
+    print(f"取引損益レポート ({period_label})", flush=True)
     print(f"並列数: {args.workers}", flush=True)
 
     all_trades: list[dict] = []
     for cfg in CONFIGS:
         print(f"  処理中: {cfg['script']} ...", end="", flush=True)
         items  = _run_config(cfg, args.workers)
-        trades = _collect_trades(items, since, cfg["label"], cfg["color"])
+        trades = _collect_trades(items, since, until, cfg["label"], cfg["color"])
         all_trades.extend(trades)
         pnl = sum(t["pnl"] for t in trades)
         print(f" {len(trades)}取引  {pnl:+,.0f}円", flush=True)
 
     print(f"\n合計: {len(all_trades)}取引  損益: {sum(t['pnl'] for t in all_trades):+,.0f}円")
 
-    html = build_html(all_trades, args.days, today_str)
-    out  = Path(f"recent_pnl_{today_str}.html")
+    html = build_html(all_trades, args.days, today_str, period_label=period_label)
+    suffix = f"_{args.until}" if args.until else ""
+    out  = Path(f"recent_pnl{suffix}_{today_str}.html")
     out.write_text(html, encoding="utf-8")
     print(f"HTML: {out}", flush=True)
 
