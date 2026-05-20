@@ -36,7 +36,7 @@ elif "--conservative" in sys.argv:
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
-from run_signals import _run_group, build_combined_html
+from run_signals import _run_group, build_combined_html, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_items
 
 JST = timezone(timedelta(hours=9))
@@ -131,6 +131,7 @@ def main() -> None:
     parser.add_argument("--funds", action="store_true",
                         help="必要資金集計をHTMLに表示")
     args = parser.parse_args()
+    _auto_update_regime_cache(args.workers)
 
     if args.date:
         try:

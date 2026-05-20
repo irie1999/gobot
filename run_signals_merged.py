@@ -34,7 +34,7 @@ elif "--conservative" in sys.argv:
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
-from run_signals import _run_group, build_combined_html, _extract_style, _extract_body
+from run_signals import _run_group, build_combined_html, _extract_style, _extract_body, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_items
 
 JST = timezone(timedelta(hours=9))
@@ -267,6 +267,7 @@ def main() -> None:
     parser.add_argument("--funds", action="store_true",
                         help="指定期間のシグナル銘柄・必要資金集計をHTMLに表示")
     args = parser.parse_args()
+    _auto_update_regime_cache(args.workers)
 
     if args.date:
         try:

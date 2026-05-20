@@ -127,6 +127,30 @@ def _extract_body(html: str) -> str:
     return m.group(1).strip() if m else html
 
 
+def _auto_update_regime_cache(workers: int = 4) -> None:
+    """regime_cache.json が今日付でなければ regime_verify.py を自動実行する。"""
+    import json
+    import subprocess
+    cache_path = Path(__file__).with_name("regime_cache.json")
+    today_str  = datetime.now(JST).strftime("%Y-%m-%d")
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache.get("updated") == today_str:
+            return   # 今日付のキャッシュがある → スキップ
+    except Exception:
+        pass
+
+    print(f"[相場環境] キャッシュが古いため regime_verify.py を実行します...", flush=True)
+    rv_path = Path(__file__).with_name("regime_verify.py")
+    result  = subprocess.run(
+        [sys.executable, str(rv_path), "--no-browser", f"--workers={workers}"],
+        text=True,
+    )
+    if result.returncode != 0:
+        print("[WARN] regime_verify.py の実行に失敗しました（バナーは理論値のみ表示）", flush=True)
+    print(flush=True)
+
+
 def get_regime_html() -> str:
     """現在の相場環境と適合戦略をHTMLバナーとして返す（シグナルHTML先頭に挿入）"""
     import json
@@ -319,6 +343,8 @@ def main() -> None:
     parser.add_argument("--regime-filter", action="store_true",
                         help="今の相場環境に適した戦略のみ表示 (N225自動検出)")
     args = parser.parse_args()
+
+    _auto_update_regime_cache(args.workers)
 
     if args.regime_filter:
         msg = _detect_and_filter_by_regime()

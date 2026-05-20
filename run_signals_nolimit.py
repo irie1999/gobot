@@ -29,7 +29,7 @@ os.environ["TRADING_MODE"] = "aggressive"
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
-from run_signals import _extract_style, _extract_body, get_regime_html
+from run_signals import _extract_style, _extract_body, get_regime_html, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, print_fund_summary, filter_items
 
 # ── パラメータ上書き (sm=1.5 / tm=2.0 / 高回転) ──────────────────────────────
@@ -276,6 +276,7 @@ def main() -> None:
     parser.add_argument("--funds",       action="store_true",
                         help="指定期間のシグナル銘柄すべてに投資する場合の必要資金を表示")
     args = parser.parse_args()
+    _auto_update_regime_cache(args.workers)
 
     if args.date:
         try:
