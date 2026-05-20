@@ -127,16 +127,22 @@ def _run_config(cfg: dict, workers: int) -> list[dict]:
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs: dict = {}
         for sym, name, strat in cfg["stop_wl"]:
-            futs[ex.submit(_stop.backtest_one, sym, name, strat)] = None
+            futs[ex.submit(_stop.backtest_one, sym, name, strat)] = (sym, strat)
         for sym, name, strat in cfg["brk_wl"]:
-            futs[ex.submit(_brk.backtest_one, sym, name, strat)] = None
+            futs[ex.submit(_brk.backtest_one, sym, name, strat)] = (sym, strat)
+        n_err = 0
         for fut in as_completed(futs):
             try:
                 r = fut.result()
                 if r:
                     items.append(r)
-            except Exception:
-                pass
+            except Exception as e:
+                n_err += 1
+                if n_err <= 2:
+                    sym, strat = futs[fut]
+                    print(f"\n    [ERR {sym}/{strat}] {type(e).__name__}: {e}", flush=True)
+        if n_err:
+            print(f"\n    [{n_err}件のエラー発生]", flush=True)
     return items
 
 def _extract_trades(items: list[dict], label: str, color: str) -> list[dict]:
@@ -594,7 +600,32 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="相場適合度レポート")
     parser.add_argument("--workers",    type=int, default=_DEF_WORKERS)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--debug",      action="store_true",
+                        help="backtest_one を1銘柄だけテスト実行してデバッグ")
     args = parser.parse_args()
+
+    if args.debug:
+        print("[DEBUG] 既存版1銘柄をテスト実行...", flush=True)
+        _set_params("conservative", None)
+        cfg0 = CONFIGS[0]
+        sym, name, strat = cfg0["stop_wl"][0]
+        print(f"  {sym} {name} {strat}", flush=True)
+        try:
+            r = _stop.backtest_one(sym, name, strat)
+            if r:
+                pr = r.get("period_results", {})
+                mx = max(pr.keys()) if pr else None
+                tlog = pr[mx].get("trade_log", []) if mx else []
+                print(f"  結果: period_results keys={list(pr.keys())} "
+                      f"trade_log件数={len(tlog)}")
+                if tlog:
+                    print(f"  最新取引: {tlog[-1]}")
+            else:
+                print(f"  結果: None (バックテスト失敗)")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+        return
 
     today     = datetime.now(JST).date()
     today_str = today.strftime("%Y-%m-%d")
