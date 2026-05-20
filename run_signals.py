@@ -26,6 +26,62 @@ import sys
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+
+# ── 相場環境フィルター用マッピング ────────────────────────────────────────────
+_REGIME_STRATEGY_MAP: dict[tuple, set] = {
+    ("up",       "high"):     {"DON", "VOL", "MACD"},
+    ("up",       "mid"):      {"MACD", "DON", "VOL", "MOM", "A7"},
+    ("up",       "low"):      {"MACD", "MOM", "A7"},
+    ("sideways", "high"):     {"RSI2", "A7"},
+    ("sideways", "mid"):      {"MACD", "A7", "RSI2"},
+    ("sideways", "low"):      {"MACD", "A7", "MOM"},
+    ("down",     "high"):     {"RSI2"},
+    ("down",     "mid"):      {"RSI2", "A7"},
+    ("down",     "low"):      {"RSI2", "A7"},
+}
+
+def _detect_and_filter_by_regime() -> str:
+    """相場環境を検出してWATCHLISTを適合戦略のみに絞り込む。説明文字列を返す。"""
+    try:
+        import pandas as pd
+        import yfinance as yf
+        df = yf.download("^N225", period="2mo", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty or len(df) < 25:
+            return "相場データ取得失敗 (フィルターなし)"
+        close = df["Close"].squeeze()
+        if hasattr(close, "columns"):
+            close = close.iloc[:, 0]
+        vol   = float(close.pct_change().tail(14).std() * 100)
+        ma10  = float(close.rolling(10).mean().iloc[-1])
+        ma25  = float(close.rolling(25).mean().iloc[-1])
+        cur   = float(close.iloc[-1])
+        vol_level = "high" if vol > 1.5 else ("mid" if vol > 0.8 else "low")
+        vol_label = {"high": "高ボラ", "mid": "中ボラ", "low": "低ボラ"}[vol_level]
+        if cur > ma10 and ma10 > ma25:
+            trend, trend_label = "up", "上昇"
+        elif cur < ma10 and ma10 < ma25:
+            trend, trend_label = "down", "下落"
+        else:
+            trend, trend_label = "sideways", "レンジ"
+    except Exception as e:
+        return f"相場データ取得失敗: {e}"
+
+    allowed = _REGIME_STRATEGY_MAP.get((trend, vol_level), set())
+    if not allowed:
+        return f"相場環境: {vol_label}/{trend_label} (対応マッピングなし)"
+
+    before_stop = len(_stop.WATCHLIST)
+    before_brk  = len(_brk.WATCHLIST)
+    before_srt  = len(_short.WATCHLIST)
+    _stop.WATCHLIST  = [(s, n, st) for s, n, st in _stop.WATCHLIST  if st in allowed]
+    _brk.WATCHLIST   = [(s, n, st) for s, n, st in _brk.WATCHLIST   if st in allowed]
+    _short.WATCHLIST = [(s, n, st) for s, n, st in _short.WATCHLIST if st in allowed]
+    after = len(_stop.WATCHLIST) + len(_brk.WATCHLIST) + len(_short.WATCHLIST)
+    total_before = before_stop + before_brk + before_srt
+    strats_str = " / ".join(sorted(allowed))
+    return (f"相場環境: {vol_label}/{trend_label} → 適合戦略: {strats_str} "
+            f"({total_before}→{after}銘柄)")
 from pathlib import Path
 
 # ── TRADING_MODE を import 前に設定 (check_signals_* が読み取る) ──
@@ -153,7 +209,13 @@ def main() -> None:
                             help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
     parser.add_argument("--funds", action="store_true",
                         help="指定期間のシグナル銘柄・必要資金集計をHTMLに表示")
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="今の相場環境に適した戦略のみ表示 (N225自動検出)")
     args = parser.parse_args()
+
+    if args.regime_filter:
+        msg = _detect_and_filter_by_regime()
+        print(f"[相場フィルター] {msg}", flush=True)
 
     if args.date:
         try:
