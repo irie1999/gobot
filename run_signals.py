@@ -127,6 +127,112 @@ def _extract_body(html: str) -> str:
     return m.group(1).strip() if m else html
 
 
+def get_regime_html() -> str:
+    """現在の相場環境と適合戦略をHTMLバナーとして返す（シグナルHTML先頭に挿入）"""
+    import json
+    _STRATS  = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+    _THEORY  = {
+        "up_high":       {"DON", "VOL", "MACD"},
+        "up_mid":        {"MACD", "DON", "VOL", "MOM", "A7"},
+        "up_low":        {"MACD", "MOM", "A7"},
+        "sideways_high": {"RSI2", "A7"},
+        "sideways_mid":  {"MACD", "A7", "RSI2"},
+        "sideways_low":  {"MACD", "A7", "MOM"},
+        "down_high":     {"RSI2"},
+        "down_mid":      {"RSI2", "A7"},
+        "down_low":      {"RSI2", "A7"},
+    }
+    try:
+        import yfinance as yf
+        df = yf.download("^N225", period="2mo", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty or len(df) < 25:
+            return ""
+        close = df["Close"].squeeze()
+        if hasattr(close, "columns"):
+            close = close.iloc[:, 0]
+        vol   = float(close.pct_change().tail(14).std() * 100)
+        ma10  = float(close.rolling(10).mean().iloc[-1])
+        ma25  = float(close.rolling(25).mean().iloc[-1])
+        cur   = float(close.iloc[-1])
+        mom5  = (cur / float(close.iloc[-6]) - 1) * 100
+        vol_lv = "high" if vol > 1.5 else ("mid" if vol > 0.8 else "low")
+        if cur > ma10 and ma10 > ma25:
+            trend, t_lbl = "up",       "上昇"
+        elif cur < ma10 and ma10 < ma25:
+            trend, t_lbl = "down",     "下落"
+        else:
+            trend, t_lbl = "sideways", "レンジ"
+    except Exception:
+        return ""
+
+    t_col  = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[trend]
+    v_col  = {"high": "#f87171", "mid": "#fbbf24", "low": "#4ade80"}[vol_lv]
+    v_lbl  = {"high": "高ボラ",  "mid": "中ボラ",  "low": "低ボラ"}[vol_lv]
+    m_col  = "#4ade80" if mom5 >= 0 else "#f87171"
+    rkey   = f"{trend}_{vol_lv}"
+    good   = _THEORY.get(rkey, set())
+
+    # キャッシュから実績PF取得
+    strat_html = ""
+    cache_note = ""
+    try:
+        cache = json.loads(Path(__file__).with_name("regime_cache.json").read_text(encoding="utf-8"))
+        rd    = cache.get("regimes", {}).get(rkey, {})
+        parts = []
+        for s in _STRATS:
+            d = rd.get(s)
+            if not d or d["n"] < 3:
+                continue
+            pf_v   = d["pf"]
+            pf_s   = f"{pf_v:.2f}" if pf_v < 99 else "∞"
+            is_good = s in good
+            if is_good and pf_v >= 1.2:
+                ic, badge = "#4ade80", "✅"
+            elif is_good and pf_v < 1.0:
+                ic, badge = "#f87171", "⚠️"
+            elif not is_good and pf_v < 0.8:
+                ic, badge = "#f87171", "❌"
+            else:
+                ic, badge = "#94a3b8", "　"
+            parts.append(
+                f'<span style="margin-right:14px;white-space:nowrap">'
+                f'{badge} <b style="color:{ic}">{s}</b> '
+                f'<span style="color:#64748b;font-size:0.78em">'
+                f'勝率{d["wr"]:.0f}% PF{pf_s}</span></span>')
+        strat_html = f'<div style="margin-top:7px">{"".join(parts)}</div>'
+        cache_note = (f'<div style="font-size:0.7rem;color:#334155;margin-top:4px">'
+                      f'実績: regime_cache.json ({cache.get("updated","")}) — '
+                      f'更新: <code style="color:#38bdf8">python regime_verify.py</code></div>')
+    except Exception:
+        if good:
+            g_s = " / ".join(f'<b style="color:#4ade80">{s}</b>' for s in _STRATS if s in good)
+            b_s = " / ".join(f'<span style="color:#64748b">{s}</span>' for s in _STRATS if s not in good)
+            strat_html = (f'<div style="margin-top:7px">'
+                          f'✅ 推奨: {g_s} &nbsp;&nbsp; ⚠️ 注意: {b_s}</div>')
+            cache_note = (f'<div style="font-size:0.7rem;color:#334155;margin-top:4px">'
+                          f'実績データなし — '
+                          f'<code style="color:#38bdf8">python regime_verify.py</code> を実行してください</div>')
+
+    return (
+        f'<div style="background:#0d1424;border:1px solid #1e3a5f;'
+        f'border-left:4px solid #38bdf8;border-radius:8px;'
+        f'padding:12px 16px;margin:12px 16px 0;font-family:inherit">'
+        f'<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+        f'<span style="font-weight:700;color:#38bdf8">📊 現在の相場環境</span>'
+        f'<span><b style="color:{v_col}">{v_lbl}</b>'
+        f' <span style="color:#334155">/</span> '
+        f'<b style="color:{t_col}">{t_lbl}</b></span>'
+        f'<span style="font-size:0.82rem;color:#475569">'
+        f'日経225: {cur:,.0f}円 &nbsp;'
+        f'5日騰落: <span style="color:{m_col}">{mom5:+.2f}%</span></span>'
+        f'</div>'
+        f'{strat_html}'
+        f'{cache_note}'
+        f'</div>'
+    )
+
+
 def _extract_style(html: str) -> str:
     m = re.search(r'<style[^>]*>(.*?)</style>', html, re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
@@ -168,6 +274,7 @@ def build_combined_html(stop_html: str, brk_html: str, srt_html: str = "",
 </style>
 </head>
 <body>
+{get_regime_html()}
 {fund_html_block}
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>

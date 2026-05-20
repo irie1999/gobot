@@ -29,7 +29,7 @@ os.environ["TRADING_MODE"] = "aggressive"
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
-from run_signals import _extract_style, _extract_body
+from run_signals import _extract_style, _extract_body, get_regime_html
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, print_fund_summary, filter_items
 
 # ── パラメータ上書き (sm=1.5 / tm=2.0 / 高回転) ──────────────────────────────
@@ -221,6 +221,7 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
 </style>
 </head>
 <body>
+{get_regime_html()}
 <div class="mode-banner">🔓 NOLIMIT WF — {_OPT_LABEL} / 株価制限なし・プライム全銘柄 Walk-forward 選定 2026-05-12</div>
 {funds_block}
 <div class="tab-nav">

@@ -487,6 +487,26 @@ def main() -> None:
             print(f"  {label:<18} {strat:<6} {s['n']:>5} {w:>5.1f}% {p_str:>6}  {theory_mark}")
         print()
 
+    # ── キャッシュ保存 (シグナルHTMLバナー用) ─────────────────────────────
+    import json
+    cache: dict = {"updated": today_str, "regimes": {}}
+    for regime in REGIME_ORDER:
+        trend, vol = regime
+        key_str = f"{trend}_{vol}"
+        cache["regimes"][key_str] = {}
+        for strat in STRATEGIES:
+            s = stats.get((trend, vol, strat), {"n": 0})
+            if s["n"] > 0:
+                cache["regimes"][key_str][strat] = {
+                    "n":      s["n"],
+                    "wr":     round(wr(s), 1),
+                    "pf":     round(min(pf(s), 99.0), 2),
+                    "theory": strat in THEORY.get(regime, set()),
+                }
+    Path("regime_cache.json").write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"キャッシュ保存: regime_cache.json ({today_str})", flush=True)
+
     print("HTML生成中...", flush=True)
     out = Path(f"regime_verify_{today_str}.html")
     out.write_text(build_html(stats, dist, today_str, len(trades)), encoding="utf-8")
