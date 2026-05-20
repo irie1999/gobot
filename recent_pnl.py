@@ -159,12 +159,25 @@ def _set_params(mode: str, sm_tm: tuple | None) -> None:
             _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
 
 
-def _run_config(cfg: dict, backtest_days: int, workers: int) -> list[dict]:
+def _run_config(cfg: dict, workers: int) -> list[dict]:
+    """backtest_one パターンで各watchlistを並列バックテスト"""
     _set_params(cfg["mode"], cfg["sm_tm"])
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_s = pool.submit(run_limit_backtest, cfg["stop_wl"], backtest_days, workers)
-        f_b = pool.submit(run_limit_backtest, cfg["brk_wl"],  backtest_days, workers)
-        return f_s.result() + f_b.result()
+    all_items: list[dict] = []
+    futs = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for sym, name, strat in cfg["stop_wl"]:
+            futs[ex.submit(_stop.backtest_one, sym, name, strat)] = None
+        for sym, name, strat in cfg["brk_wl"]:
+            futs[ex.submit(_brk.backtest_one, sym, name, strat)] = None
+        from concurrent.futures import as_completed
+        for fut in as_completed(futs):
+            try:
+                r = fut.result()
+                if r:
+                    all_items.append(r)
+            except Exception:
+                pass
+    return all_items
 
 
 def _collect_trades(items: list[dict], since: date, label: str, color: str) -> list[dict]:
@@ -351,15 +364,14 @@ def main() -> None:
     today     = datetime.now(JST).date()
     since     = today - timedelta(days=args.days)
     today_str = today.strftime("%Y-%m-%d")
-    backtest_days = max(args.days * 3, 30)  # 十分なバックテスト期間
 
     print(f"直近{args.days}日 取引損益レポート (集計開始: {since})", flush=True)
-    print(f"バックテスト期間: {backtest_days}日  並列数: {args.workers}", flush=True)
+    print(f"並列数: {args.workers}", flush=True)
 
     all_trades: list[dict] = []
     for cfg in CONFIGS:
         print(f"  処理中: {cfg['script']} ...", end="", flush=True)
-        items  = _run_config(cfg, backtest_days, args.workers)
+        items  = _run_config(cfg, args.workers)
         trades = _collect_trades(items, since, cfg["label"], cfg["color"])
         all_trades.extend(trades)
         pnl = sum(t["pnl"] for t in trades)
