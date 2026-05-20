@@ -242,7 +242,7 @@ def _pf_str(pf: float) -> str:
 
 
 def build_html(all_items: list[dict], show_days: int,
-               date_label: str = "本日") -> str:
+               date_label: str = "本日", run_cmd: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     n225_ret  = fetch_n225_return(show_days)
 

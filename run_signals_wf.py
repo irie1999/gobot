@@ -34,8 +34,10 @@ if "--aggressive" in sys.argv:
 elif "--conservative" in sys.argv:
     os.environ["TRADING_MODE"] = "conservative"
 
-import check_signals_stop     as _stop
-import check_signals_breakout as _brk
+import check_signals_stop            as _stop
+import check_signals_breakout        as _brk
+import check_signals_short           as _short
+import check_signals_short_breakout  as _sbrk
 from run_signals import _run_group, build_combined_html, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_items
 
@@ -147,24 +149,34 @@ def main() -> None:
     _brk.WATCHLIST  = _BRK_WATCHLIST
 
     date_label = args.date if args.date else "本日"
-    n_total = len(_STOP_WATCHLIST) + len(_BRK_WATCHLIST)
+    n_total = len(_STOP_WATCHLIST) + len(_BRK_WATCHLIST) + len(_short.WATCHLIST) + len(_sbrk.WATCHLIST)
     mode = _stop.TRADING_MODE
     print(f"WF版シグナル統合 開始 ({n_total}銘柄) 確認日: {date_label}  モード: {mode}", flush=True)
+    print(f"  逆指値B: {len(_STOP_WATCHLIST)}銘柄  /  ブレイクアウト: {len(_BRK_WATCHLIST)}銘柄"
+          f"  /  ショート: {len(_short.WATCHLIST)}銘柄  /  ショートBRK: {len(_sbrk.WATCHLIST)}銘柄", flush=True)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_stop = pool.submit(_run_group, _stop, sig_date, args.workers)
-        fut_brk  = pool.submit(_run_group, _brk,  sig_date, args.workers)
-        stop_items = filter_items(fut_stop.result())
-        brk_items  = filter_items(fut_brk.result())
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fut_stop  = pool.submit(_run_group, _stop,  sig_date, args.workers)
+        fut_brk   = pool.submit(_run_group, _brk,   sig_date, args.workers)
+        fut_short = pool.submit(_run_group, _short, sig_date, args.workers)
+        fut_sbrk  = pool.submit(_run_group, _sbrk,  sig_date, args.workers)
+        stop_items  = filter_items(fut_stop.result())
+        brk_items   = filter_items(fut_brk.result())
+        short_items = filter_items(fut_short.result())
+        sbrk_items  = filter_items(fut_sbrk.result())
 
     # シグナル表示
-    all_sigs = [
-        (it["today_sig"], it["symbol"], it["name"], it["strategy"],
-         it.get("score", 0), it.get("rank", "-"))
-        for it in stop_items + brk_items
-        if it.get("today_sig")
-    ]
+    all_sigs = []
+    for it in stop_items + brk_items + short_items + sbrk_items:
+        sig = it.get("today_sig")
+        if not sig:
+            continue
+        mod = _short if it["strategy"] in ("MACD_S", "A7_S", "RSI2_S") else \
+              _sbrk  if it["strategy"] in ("DON_S", "MOM_S", "GAP_S") else \
+              _brk   if it["strategy"] in ("DON", "VOL", "MOM") else _stop
+        score, rank = mod.calc_recommend_score(it["period_results"])
+        all_sigs.append((sig, it["symbol"], it["name"], it["strategy"], score, rank))
     all_sigs.sort(key=lambda x: x[4], reverse=True)
 
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
@@ -180,13 +192,15 @@ def main() -> None:
     # HTML生成
     fund_block = ""
     if args.funds:
-        rows = collect_fund_rows([stop_items, brk_items], args.days)
+        rows = collect_fund_rows([stop_items, brk_items, short_items, sbrk_items], args.days)
         fund_block = _fund_html(rows, args.days)
 
     _cmd = "python run_signals_wf.py --aggressive"
-    stop_html = _stop.build_html(stop_items, args.days, date_label, run_cmd=_cmd)
-    brk_html  = _brk.build_html(brk_items,  args.days, date_label, run_cmd=_cmd)
-    combined  = build_combined_html(stop_html, brk_html, fund_html_block=fund_block)
+    stop_html  = _stop.build_html(stop_items,   args.days, date_label, run_cmd=_cmd)
+    brk_html   = _brk.build_html(brk_items,     args.days, date_label, run_cmd=_cmd)
+    short_html = _short.build_html(short_items,  args.days, date_label, run_cmd=_cmd)
+    sbrk_html  = _sbrk.build_html(sbrk_items,   args.days, date_label, run_cmd=_cmd)
+    combined   = build_combined_html(stop_html, brk_html, short_html, sbrk_html, fund_html_block=fund_block)
 
     mode_suffix = "_aggressive" if mode == "aggressive" else ""
     out = Path(f"signals_wf{mode_suffix}_{today_str}.html")

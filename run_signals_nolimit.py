@@ -29,6 +29,7 @@ os.environ["TRADING_MODE"] = "aggressive"
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 import check_signals_short    as _short
+import check_signals_short_breakout as _sbrk
 from run_signals import _extract_style, _extract_body, get_regime_html, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, print_fund_summary, filter_items
 
@@ -181,22 +182,28 @@ def _run_group_with_list(mod, watchlist, sig_date, workers: int) -> list[dict]:
 
 
 def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
+                sbrk_html: str = "",
                 fund_rows: list | None = None, show_days: int = 365) -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
     srt_css   = _extract_style(srt_html) if srt_html else ""
+    sbrk_css  = _extract_style(sbrk_html) if sbrk_html else ""
     stop_body = _extract_body(stop_html)
     brk_body  = _extract_body(brk_html)
     srt_body  = _extract_body(srt_html) if srt_html else ""
+    sbrk_body = _extract_body(sbrk_html) if sbrk_html else ""
 
     extra_css = "\n".join(
-        line for line in (brk_css + "\n" + srt_css).splitlines()
+        line for line in (brk_css + "\n" + srt_css + "\n" + sbrk_css).splitlines()
         if any(k in line for k in ("tag-don", "tag-vol", "tag-mom",
-                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s"))
+                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s",
+                                   "tag-don_s", "tag-mom_s", "tag-gap_s"))
     )
     srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
     srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
+    sbrk_tab_btn  = '<button class="tab-btn" onclick="switchTab(3)">ショートBRK（DON_S/MOM_S/GAP_S）</button>' if sbrk_html else ""
+    sbrk_tab_pane = f'<div id="tc3" class="tab-pane" style="display:none">\n{sbrk_body}\n</div>' if sbrk_html else ""
 
     wf_syms_js  = "[" + ",".join(f'"{s}"' for s in _WF_SYMS) + "]"
     funds_block = _fund_html(fund_rows or [], show_days)
@@ -228,10 +235,12 @@ def _build_html(stop_html: str, brk_html: str, srt_html: str = "",
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
   {srt_tab_btn}
+  {sbrk_tab_btn}
 </div>
 <div id="tc0" class="tab-pane">{stop_body}</div>
 <div id="tc1" class="tab-pane" style="display:none">{brk_body}</div>
 {srt_tab_pane}
+{sbrk_tab_pane}
 <script>
 var WF_SYMS = {wf_syms_js};
 
@@ -293,13 +302,15 @@ def main() -> None:
     print(f"  BRK    : {len(BRK_WATCHLIST)}銘柄")
     print(f"  株価制限なし・プライム全銘柄 Walk-forward 選定 60銘柄", flush=True)
 
-    with ThreadPoolExecutor(max_workers=3) as outer:
+    with ThreadPoolExecutor(max_workers=4) as outer:
         fut_stop  = outer.submit(_run_group_with_list, _stop,  STOP_WATCHLIST,    sig_date, args.workers)
         fut_brk   = outer.submit(_run_group_with_list, _brk,   BRK_WATCHLIST,     sig_date, args.workers)
         fut_short = outer.submit(_run_group_with_list, _short, _short.WATCHLIST,  sig_date, args.workers)
+        fut_sbrk  = outer.submit(_run_group_with_list, _sbrk,  _sbrk.WATCHLIST,   sig_date, args.workers)
     stop_items  = filter_items(fut_stop.result())
     brk_items   = filter_items(fut_brk.result())
     short_items = filter_items(fut_short.result())
+    sbrk_items  = filter_items(fut_sbrk.result())
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
@@ -320,6 +331,10 @@ def main() -> None:
         if item["today_sig"]:
             score, rank = _short.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショート"))
+    for item in sbrk_items:
+        if item["today_sig"]:
+            score, rank = _sbrk.calc_recommend_score(item["period_results"])
+            all_sigs.append((item, score, rank, "ショートBRK"))
     all_sigs.sort(key=lambda x: x[1], reverse=True)
 
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
@@ -343,7 +358,7 @@ def main() -> None:
     # ── --funds: 指定期間のシグナル銘柄・必要資金集計 ──────────────────
     fund_rows: list[dict] = []
     if args.funds:
-        fund_rows = collect_fund_rows([stop_items, brk_items, short_items], args.days)
+        fund_rows = collect_fund_rows([stop_items, brk_items, short_items, sbrk_items], args.days)
         print_fund_summary(fund_rows, args.days)
 
     print(f"\nHTMLレポート生成中...", flush=True)
@@ -351,13 +366,14 @@ def main() -> None:
     stop_html  = _stop.build_html(stop_items,   args.days, date_label, run_cmd=_cmd)
     brk_html   = _brk.build_html(brk_items,     args.days, date_label, run_cmd=_cmd)
     short_html = _short.build_html(short_items,  args.days, date_label, run_cmd=_cmd)
+    sbrk_html  = _sbrk.build_html(sbrk_items,   args.days, date_label, run_cmd=_cmd)
 
     html_fund_rows = fund_rows if args.funds else None
 
     date_suffix = args.date if args.date else today
     out_path    = Path(f"signals_nolimit_{date_suffix}.html")
     out_path.write_text(
-        _build_html(stop_html, brk_html, short_html,
+        _build_html(stop_html, brk_html, short_html, sbrk_html,
                     fund_rows=html_fund_rows, show_days=args.days),
         encoding="utf-8"
     )

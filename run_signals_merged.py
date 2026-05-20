@@ -33,7 +33,8 @@ elif "--conservative" in sys.argv:
 
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
-import check_signals_short    as _short
+import check_signals_short           as _short
+import check_signals_short_breakout  as _sbrk
 from run_signals import _run_group, build_combined_html, _extract_style, _extract_body, _auto_update_regime_cache
 from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_items
 
@@ -109,6 +110,7 @@ _WF_BRK: list[tuple[str, str, str]] = [
 
 def _build_merged_html(stop_html: str, brk_html: str, srt_html: str,
                        wf_stop: list, wf_brk: list,
+                       sbrk_html: str = "",
                        fund_html_block: str = "") -> str:
     """WF バッジ付きの統合HTML を生成する。既存ファイルは変更しない。"""
     from datetime import datetime
@@ -116,23 +118,28 @@ def _build_merged_html(stop_html: str, brk_html: str, srt_html: str,
 
     stop_css  = _extract_style(stop_html)
     brk_css   = _extract_style(brk_html)
-    srt_css   = _extract_style(srt_html) if srt_html else ""
+    srt_css   = _extract_style(srt_html)  if srt_html  else ""
+    sbrk_css  = _extract_style(sbrk_html) if sbrk_html else ""
     stop_body = _extract_body(stop_html)
     brk_body  = _extract_body(brk_html)
-    srt_body  = _extract_body(srt_html) if srt_html else ""
+    srt_body  = _extract_body(srt_html)   if srt_html  else ""
+    sbrk_body = _extract_body(sbrk_html)  if sbrk_html else ""
 
     extra_css = "\n".join(
-        line for line in (brk_css + "\n" + srt_css).splitlines()
+        line for line in (brk_css + "\n" + srt_css + "\n" + sbrk_css).splitlines()
         if any(k in line for k in ("tag-don", "tag-vol", "tag-mom",
-                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s"))
+                                   "tag-macd_s", "tag-a7_s", "tag-rsi2_s",
+                                   "tag-don_s", "tag-mom_s", "tag-gap_s"))
     )
 
     # WF シンボルセット (symbol のみで判定 — 戦略は複数ありうる)
     wf_syms = sorted({s for s, _, _ in (wf_stop + wf_brk)})
     wf_syms_js = "[" + ",".join(f'"{s}"' for s in wf_syms) + "]"
 
-    srt_tab_btn  = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>' if srt_html else ""
-    srt_tab_pane = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>' if srt_html else ""
+    srt_tab_btn   = '<button class="tab-btn" onclick="switchTab(2)">ショート逆指値（A7_S）</button>'       if srt_html  else ""
+    srt_tab_pane  = f'<div id="tc2" class="tab-pane" style="display:none">\n{srt_body}\n</div>'           if srt_html  else ""
+    sbrk_tab_btn  = '<button class="tab-btn" onclick="switchTab(3)">ショートBRK（DON_S/MOM_S/GAP_S）</button>' if sbrk_html else ""
+    sbrk_tab_pane = f'<div id="tc3" class="tab-pane" style="display:none">\n{sbrk_body}\n</div>'          if sbrk_html else ""
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -161,6 +168,7 @@ def _build_merged_html(stop_html: str, brk_html: str, srt_html: str,
   <button class="tab-btn active" onclick="switchTab(0)">逆指値B（MACD / A7 / RSI2）</button>
   <button class="tab-btn"        onclick="switchTab(1)">ブレイクアウト（DON / VOL / MOM）</button>
   {srt_tab_btn}
+  {sbrk_tab_btn}
 </div>
 <div id="tc0" class="tab-pane">
 {stop_body}
@@ -169,6 +177,7 @@ def _build_merged_html(stop_html: str, brk_html: str, srt_html: str,
 {brk_body}
 </div>
 {srt_tab_pane}
+{sbrk_tab_pane}
 <script>
 var WF_SYMS = {wf_syms_js};
 
@@ -287,19 +296,22 @@ def main() -> None:
     n_stop = len(merged_stop)
     n_brk  = len(merged_brk)
     n_srt  = len(_short.WATCHLIST)
+    n_sbrk = len(_sbrk.WATCHLIST)
     print(f"統合シグナル 開始  モード: {_stop.TRADING_MODE}")
     print(f"  逆指値B : {n_stop}銘柄 (既存{len(_stop.WATCHLIST)} + WF{len(_WF_STOP)} - 重複)")
     print(f"  BRK    : {n_brk}銘柄 (既存{len(_brk.WATCHLIST)} + WF{len(_WF_BRK)} - 重複)")
-    print(f"  ショート: {n_srt}銘柄", flush=True)
+    print(f"  ショート: {n_srt}銘柄  /  ショートBRK: {n_sbrk}銘柄", flush=True)
 
-    # 3グループを並列実行
-    with ThreadPoolExecutor(max_workers=3) as outer:
-        fut_stop  = outer.submit(_run_group_with_list, _stop,  merged_stop,        sig_date, args.workers)
-        fut_brk   = outer.submit(_run_group_with_list, _brk,   merged_brk,         sig_date, args.workers)
-        fut_short = outer.submit(_run_group,           _short,                      sig_date, args.workers)
+    # 4グループを並列実行
+    with ThreadPoolExecutor(max_workers=4) as outer:
+        fut_stop  = outer.submit(_run_group_with_list, _stop,  merged_stop, sig_date, args.workers)
+        fut_brk   = outer.submit(_run_group_with_list, _brk,   merged_brk,  sig_date, args.workers)
+        fut_short = outer.submit(_run_group,           _short,               sig_date, args.workers)
+        fut_sbrk  = outer.submit(_run_group,           _sbrk,                sig_date, args.workers)
     stop_items  = filter_items(fut_stop.result())
     brk_items   = filter_items(fut_brk.result())
     short_items = filter_items(fut_short.result())
+    sbrk_items  = filter_items(fut_sbrk.result())
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()
@@ -320,6 +332,10 @@ def main() -> None:
         if item["today_sig"]:
             score, rank = _short.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショート"))
+    for item in sbrk_items:
+        if item["today_sig"]:
+            score, rank = _sbrk.calc_recommend_score(item["period_results"])
+            all_sigs.append((item, score, rank, "ショートBRK"))
     all_sigs.sort(key=lambda x: x[1], reverse=True)
 
     print(f"\n【シグナル ({date_label})】 {len(all_sigs)}件")
@@ -346,13 +362,14 @@ def main() -> None:
 
     fund_rows: list[dict] = []
     if args.funds:
-        fund_rows = collect_fund_rows([stop_items, brk_items, short_items], args.days)
+        fund_rows = collect_fund_rows([stop_items, brk_items, short_items, sbrk_items], args.days)
 
     print(f"\nHTMLレポート生成中...", flush=True)
     _cmd = "python run_signals_merged.py"
     stop_html  = _stop.build_html(stop_items,   args.days, date_label, run_cmd=_cmd)
     brk_html   = _brk.build_html(brk_items,     args.days, date_label, run_cmd=_cmd)
     short_html = _short.build_html(short_items,  args.days, date_label, run_cmd=_cmd)
+    sbrk_html  = _sbrk.build_html(sbrk_items,   args.days, date_label, run_cmd=_cmd)
 
     funds_block = _fund_html(fund_rows, args.days) if fund_rows else ""
     mode_suffix = f"_{_stop.TRADING_MODE}" if _stop.TRADING_MODE != "conservative" else ""
@@ -360,7 +377,7 @@ def main() -> None:
     out_path    = Path(f"signals_merged{mode_suffix}_{date_suffix}.html")
     out_path.write_text(
         _build_merged_html(stop_html, brk_html, short_html, _WF_STOP, _WF_BRK,
-                           fund_html_block=funds_block),
+                           sbrk_html=sbrk_html, fund_html_block=funds_block),
         encoding="utf-8"
     )
     print(f"HTMLレポート: {out_path.resolve()}")
