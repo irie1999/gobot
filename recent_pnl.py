@@ -268,15 +268,15 @@ def _summary_rows(all_trades: list[dict]) -> str:
     return rows_html
 
 
-def _detail_rows(all_trades: list[dict]) -> str:
-    rows_html = ""
-    for t in sorted(all_trades, key=lambda x: x["exit_d_raw"], reverse=True):
+def _trade_table(trades: list[dict], colspan: int = 9) -> str:
+    if not trades:
+        return f'<tr><td colspan="{colspan}" style="text-align:center;color:#64748b;padding:16px">該当取引なし</td></tr>'
+    rows = ""
+    for t in sorted(trades, key=lambda x: x["exit_d_raw"], reverse=True):
         pnl_cls = "profit" if t["pnl"] > 0 else "loss"
-        dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{t["color"]};margin-right:4px;vertical-align:middle"></span>'
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
-        rows_html += f"""
+        rows += f"""
         <tr>
-          <td class="sym">{dot}{t["label"]}</td>
           <td>{t["exit_dt"]}</td>
           <td class="sym">{t["symbol"]}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
           <td>{tag}</td>
@@ -287,7 +287,59 @@ def _detail_rows(all_trades: list[dict]) -> str:
           <td>{_reason_cell(t["reason"])}</td>
           <td style="color:#94a3b8">{t["entry_dt"]}</td>
         </tr>"""
-    return rows_html
+    return rows
+
+
+def _tab_detail_section(all_trades: list[dict], recent_days: int) -> str:
+    from collections import defaultdict
+    by_label: dict[str, list] = defaultdict(list)
+    for t in all_trades:
+        by_label[t["label"]].append(t)
+
+    thead = """<thead><tr>
+      <th>決済日</th>
+      <th style="text-align:left">銘柄</th>
+      <th>戦略</th>
+      <th>約定値</th><th>決済値</th><th>保有</th><th>損益</th><th>理由</th><th>エントリー</th>
+    </tr></thead>"""
+
+    # タブナビ
+    nav = '<div class="tab-nav">'
+    nav += '<button class="tab-btn active" onclick="switchTab(this,\'tab-all\')">全体</button>'
+    for cfg in CONFIGS:
+        tid   = f"tab-{cfg['label'].replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace('.', '_')}"
+        label = cfg["label"]
+        trades = by_label.get(label, [])
+        n      = len(trades)
+        pnl    = sum(t["pnl"] for t in trades)
+        pnl_cls = "profit" if pnl >= 0 else "loss"
+        badge  = f'<span style="margin-left:6px;font-size:0.72rem;color:#94a3b8">{n}件</span>'
+        badge += f' <span style="font-size:0.72rem" class="{pnl_cls}">{"—" if n==0 else f"{pnl:+,.0f}"}</span>'
+        dot    = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{cfg["color"]};margin-right:5px;vertical-align:middle"></span>'
+        nav += f'<button class="tab-btn" onclick="switchTab(this,\'{tid}\')">{dot}{label}{badge}</button>'
+    nav += '</div>'
+
+    # 全体タブ
+    panes = f'<div id="tab-all" class="tab-pane active"><table>{thead}<tbody>{_trade_table(all_trades)}</tbody></table></div>'
+
+    # スクリプト別タブ
+    for cfg in CONFIGS:
+        tid    = f"tab-{cfg['label'].replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace('.', '_')}"
+        trades = by_label.get(cfg["label"], [])
+        n      = len(trades)
+        wins   = sum(1 for t in trades if t["pnl"] > 0)
+        pnl    = sum(t["pnl"] for t in trades)
+        pnl_cls = "profit" if pnl >= 0 else "loss"
+        gp     = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+        gl     = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_str = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wr     = wins / n * 100 if n else 0.0
+        stat   = (f'<div class="fill-stat">{n}取引 ／ 勝率 {wr:.1f}% ／ PF {pf_str} ／ '
+                  f'損益 <span class="{pnl_cls}">{"—" if n==0 else f"{pnl:+,.0f}円"}</span></div>')
+        panes += f'<div id="{tid}" class="tab-pane">{stat}<table>{thead}<tbody>{_trade_table(trades)}</tbody></table></div>'
+
+    return nav + panes
 
 
 def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
@@ -297,10 +349,8 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
     wr      = n_win / n_total * 100 if n_total else 0.0
     pnl_cls = "profit" if pnl_sum >= 0 else "loss"
 
-    summary_rows = _summary_rows(all_trades)
-    detail_rows  = _detail_rows(all_trades)
-
-    no_trade_msg = f'<tr><td colspan="10" style="text-align:center;color:#64748b;padding:20px">直近{recent_days}日間に決済された取引はありません</td></tr>'
+    summary_rows    = _summary_rows(all_trades)
+    tab_detail_html = _tab_detail_section(all_trades, recent_days)
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -332,6 +382,14 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
   .kpi {{ background:#1e293b; border:1px solid #334155; border-radius:10px; padding:14px 22px; min-width:140px; }}
   .kpi-label {{ font-size:0.75rem; color:#94a3b8; margin-bottom:4px; }}
   .kpi-value {{ font-size:1.5rem; font-weight:700; color:#e2e8f0; }}
+  .tab-nav {{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px; border-bottom:1px solid #334155; padding-bottom:10px; }}
+  .tab-btn {{ background:#1e293b; color:#94a3b8; border:1px solid #334155; border-radius:6px; padding:5px 14px;
+              cursor:pointer; font-size:0.82rem; transition:all .15s; white-space:nowrap; }}
+  .tab-btn:hover {{ background:#273549; color:#e2e8f0; }}
+  .tab-btn.active {{ background:#1d4ed8; color:#fff; border-color:#1d4ed8; }}
+  .tab-pane {{ display:none; }}
+  .tab-pane.active {{ display:block; }}
+  .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:8px; }}
 </style>
 </head>
 <body>
@@ -355,16 +413,16 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
 </table>
 
 <h2>取引明細（決済日降順）</h2>
-<table>
-  <thead><tr>
-    <th style="text-align:left">スクリプト</th>
-    <th>決済日</th>
-    <th style="text-align:left">銘柄</th>
-    <th>戦略</th>
-    <th>約定値</th><th>決済値</th><th>保有</th><th>損益</th><th>理由</th><th>エントリー</th>
-  </tr></thead>
-  <tbody>{detail_rows if all_trades else no_trade_msg}</tbody>
-</table>
+{tab_detail_html}
+
+<script>
+function switchTab(btn, id) {{
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}}
+</script>
 </body>
 </html>"""
 
