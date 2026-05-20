@@ -10,9 +10,13 @@ regime_verify.py  ―  相場環境 × 戦略パフォーマンス検証
 を実データで検証する。
 
 使い方:
-  python regime_verify.py
+  python regime_verify.py              # 全スクリプト統合（デフォルト）
   python regime_verify.py --workers 8
   python regime_verify.py --no-browser
+
+対象ウォッチリスト: 以下6スクリプトの銘柄を (sym, strat) でユニーク統合
+  run_signals.py / run_signals_wf.py / run_signals_prime.py /
+  run_signals_nolimit.py / run_signals_aggressive.py / run_signals_merged.py
 
 出力: regime_verify_YYYY-MM-DD.html
 """
@@ -32,6 +36,51 @@ import check_signals_stop     as _stop
 import check_signals_breakout as _brk
 
 from backtest_limit_entry import WORKERS as _DEF_WORKERS
+
+# ── 全スクリプトのウォッチリストを読み込む ──────────────────────────────────
+import run_signals_wf as _wf_mod
+_WF_STOP = list(_wf_mod._STOP_WATCHLIST)
+_WF_BRK  = list(_wf_mod._BRK_WATCHLIST)
+
+import run_signals_prime as _prime_mod
+_PRIME_STOP = list(_prime_mod.STOP_WATCHLIST)
+_PRIME_BRK  = list(_prime_mod.BRK_WATCHLIST)
+
+import run_signals_nolimit as _nolimit_mod
+_NOLIMIT_STOP = list(_nolimit_mod.STOP_WATCHLIST)
+_NOLIMIT_BRK  = list(_nolimit_mod.BRK_WATCHLIST)
+
+import run_signals_aggressive as _agg_mod
+_AGG_STOP = list(_agg_mod.STOP_WATCHLIST)
+_AGG_BRK  = list(_agg_mod.BRK_WATCHLIST)
+
+import run_signals_merged as _merged_mod
+_MERGED_WF_STOP = list(_merged_mod._WF_STOP)
+_MERGED_WF_BRK  = list(_merged_mod._WF_BRK)
+
+# conservative に戻す
+_stop.STRATEGY_PARAMS.update({k: v for k, v in _stop.STRATEGY_PARAMS.items()})
+
+def _all_unique(lists: list[list]) -> list[tuple]:
+    """複数リストを結合し (sym, strat) でユニーク化（名前は最初に現れたものを使用）"""
+    seen: set[tuple] = set()
+    result: list[tuple] = []
+    for lst in lists:
+        for item in lst:
+            key = (item[0], item[2])   # (sym, strat)
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+    return result
+
+ALL_STOP_WL = _all_unique([
+    list(_stop.WATCHLIST),
+    _WF_STOP, _PRIME_STOP, _NOLIMIT_STOP, _AGG_STOP, _MERGED_WF_STOP,
+])
+ALL_BRK_WL = _all_unique([
+    list(_brk.WATCHLIST),
+    _WF_BRK, _PRIME_BRK, _NOLIMIT_BRK, _AGG_BRK, _MERGED_WF_BRK,
+])
 
 # ── 理論マッピング: (trend, vol_level) → 相性が良い戦略セット ────────────────
 THEORY: dict[tuple, set] = {
@@ -109,10 +158,10 @@ def build_regime_calendar(days: int) -> dict[date, tuple]:
 
 # ── バックテスト実行 & 取引抽出 ──────────────────────────────────────────────
 def collect_trades(workers: int) -> list[dict]:
-    # 既存版 WATCHLIST の全ユニーク銘柄×戦略 (conservative)
-    stop_items: set[tuple] = set(_stop.WATCHLIST)
-    brk_items:  set[tuple] = set(_brk.WATCHLIST)
-    print(f"  stop: {len(stop_items)}件 / brk: {len(brk_items)}件", flush=True)
+    # 全スクリプトのウォッチリストを統合（ユニーク済み）、conservative モードで統一
+    stop_items = ALL_STOP_WL
+    brk_items  = ALL_BRK_WL
+    print(f"  stop: {len(stop_items)}件 / brk: {len(brk_items)}件 (全スクリプト統合)", flush=True)
 
     trades: list[dict] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -353,7 +402,7 @@ def build_html(stats: dict, dist: dict[tuple, int],
 <h1>相場環境 × 戦略 パフォーマンス検証</h1>
 <p class="subtitle">
   生成日: {today_str} ／ 分析取引数: {total_trades:,}件 ／
-  対象: 既存版 WATCHLIST (conservative)
+  対象: 全6スクリプト統合ウォッチリスト stop{len(ALL_STOP_WL)}件+brk{len(ALL_BRK_WL)}件 (conservative)
 </p>
 
 <h2>理論検証サマリー</h2>
