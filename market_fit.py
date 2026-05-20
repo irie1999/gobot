@@ -153,13 +153,10 @@ def _extract_trades(items: list[dict], label: str, color: str) -> list[dict]:
             continue
         tlog = pr[max(pr.keys())].get("trade_log", [])
         for tr in tlog:
-            ds = tr.get("exit_date", "")
-            if not ds:
+            exit_ts = tr.get("exit_dt")          # Timestamp
+            if exit_ts is None:
                 continue
-            try:
-                exit_d = datetime.strptime(ds, "%Y-%m-%d").date()
-            except ValueError:
-                continue
+            exit_d = exit_ts.date() if hasattr(exit_ts, "date") else exit_ts
             trades.append({
                 "label":    label,
                 "color":    color,
@@ -168,7 +165,7 @@ def _extract_trades(items: list[dict], label: str, color: str) -> list[dict]:
                 "strategy": it.get("strategy", ""),
                 "exit_d":   exit_d,
                 "pnl":      tr.get("pnl", 0),
-                "result":   tr.get("result", ""),
+                "result":   tr.get("reason", ""),
             })
     return trades
 
