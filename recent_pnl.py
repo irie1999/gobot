@@ -186,7 +186,16 @@ def _collect_trades(items: list[dict], since: date, label: str, color: str) -> l
         sym   = it.get("symbol", "")
         name  = it.get("name", "")
         strat = it.get("strategy", "")
-        for t in it.get("trade_log", []):
+        # backtest_one は period_results[days]["trade_log"] に格納
+        period_results = it.get("period_results", {})
+        if not period_results:
+            continue
+        # 最長期間のtrade_logを使って exit_dt でフィルター
+        max_period = max(period_results.keys())
+        trade_log  = period_results[max_period].get("trade_log", [])
+
+        seen = set()  # 同一取引の重複排除
+        for t in trade_log:
             exit_dt = t.get("exit_dt")
             if exit_dt is None:
                 continue
@@ -194,6 +203,10 @@ def _collect_trades(items: list[dict], since: date, label: str, color: str) -> l
             if exit_d < since:
                 continue
             entry_dt = t.get("entry_dt")
+            key = (sym, strat, entry_dt, exit_dt)
+            if key in seen:
+                continue
+            seen.add(key)
             rows.append({
                 "label":      label,
                 "color":      color,
@@ -207,7 +220,7 @@ def _collect_trades(items: list[dict], since: date, label: str, color: str) -> l
                 "exit_p":     t.get("exit_p", 0),
                 "pnl":        t.get("pnl", 0),
                 "hold_days":  t.get("hold_days", 0),
-                "reason":     t.get("reason", ""),
+                "reason":     t.get("reason", "") or "保有中",
             })
     return rows
 
