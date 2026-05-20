@@ -227,10 +227,14 @@ def _collect_trades(items: list[dict], since: date, label: str, color: str) -> l
 
 # ─── HTML生成 ─────────────────────────────────────────────────────────────────
 
-def _reason_badge(reason: str) -> str:
-    badges = {"目標達成": ("✅", "#27ae60"), "損切り": ("🔴", "#e74c3c"), "タイムカット": ("⏱", "#95a5a6")}
-    icon, col = badges.get(reason, ("?", "#999"))
-    return f'<span style="color:{col};font-weight:bold">{icon} {reason}</span>'
+def _reason_cell(reason: str) -> str:
+    if reason == "目標達成":
+        return '<span style="color:#4ade80;font-weight:600">目標達成</span>'
+    if reason == "損切り":
+        return '<span style="color:#f87171;font-weight:600">損切り</span>'
+    if reason == "タイムカット":
+        return '<span style="color:#94a3b8">タイムカット</span>'
+    return f'<span style="color:#fbbf24">{reason}</span>'
 
 
 def _summary_rows(all_trades: list[dict]) -> str:
@@ -241,7 +245,7 @@ def _summary_rows(all_trades: list[dict]) -> str:
 
     rows_html = ""
     for cfg in CONFIGS:
-        label = cfg["label"]
+        label  = cfg["label"]
         trades = by_label.get(label, [])
         n      = len(trades)
         wins   = sum(1 for t in trades if t["pnl"] > 0)
@@ -250,17 +254,16 @@ def _summary_rows(all_trades: list[dict]) -> str:
         gp     = sum(t["pnl"] for t in trades if t["pnl"] > 0)
         gl     = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
         pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-        pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
+        pf_str = "∞" if pf == float("inf") else f"{pf:.2f}"
         pnl_cls = "profit" if pnl >= 0 else "loss"
-        dot = f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{cfg["color"]};margin-right:6px"></span>'
+        dot = f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
         rows_html += f"""
         <tr>
-          <td>{dot}{label}<br><small style="color:#888">{cfg["sublabel"]}</small></td>
-          <td style="text-align:center">{n}</td>
-          <td style="text-align:center">{wins}勝 {n-wins}敗</td>
-          <td style="text-align:center">{wr:.1f}%</td>
-          <td style="text-align:center">{pf_str}</td>
-          <td style="text-align:right" class="{pnl_cls}">{pnl:+,.0f}円</td>
+          <td class="sym">{dot}{label}<br><span style="color:#64748b;font-size:0.75rem;font-weight:400">{cfg["sublabel"]}</span></td>
+          <td>{n}</td><td>{wins}</td>
+          <td>{"—" if n == 0 else f"{wr:.1f}%"}</td>
+          <td>{"—" if n == 0 else pf_str}</td>
+          <td class="{pnl_cls}">{"—" if n == 0 else f"{pnl:+,.0f}円"}</td>
         </tr>"""
     return rows_html
 
@@ -269,100 +272,99 @@ def _detail_rows(all_trades: list[dict]) -> str:
     rows_html = ""
     for t in sorted(all_trades, key=lambda x: x["exit_d_raw"], reverse=True):
         pnl_cls = "profit" if t["pnl"] > 0 else "loss"
-        dot = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{t["color"]};margin-right:4px;vertical-align:middle"></span>'
+        dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{t["color"]};margin-right:4px;vertical-align:middle"></span>'
+        tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
         rows_html += f"""
         <tr>
-          <td>{dot}<small>{t["label"]}</small></td>
+          <td class="sym">{dot}{t["label"]}</td>
           <td>{t["exit_dt"]}</td>
-          <td>{t["symbol"]}<br><small>{t["name"]}</small></td>
-          <td><span class="tag tag-{t['strategy'].lower()}">{t["strategy"]}</span></td>
-          <td style="text-align:right">{t["entry_p"]:,.0f}</td>
-          <td style="text-align:right">{t["exit_p"]:,.0f}</td>
-          <td style="text-align:center">{t["hold_days"]}日</td>
-          <td style="text-align:right" class="{pnl_cls}">{t["pnl"]:+,.0f}円</td>
-          <td>{_reason_badge(t["reason"])}</td>
-          <td><small>{t["entry_dt"]}</small></td>
+          <td class="sym">{t["symbol"]}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
+          <td>{tag}</td>
+          <td>{t["entry_p"]:,.0f}</td>
+          <td>{t["exit_p"]:,.0f}</td>
+          <td>{t["hold_days"]}日</td>
+          <td class="{pnl_cls}">{t["pnl"]:+,.0f}円</td>
+          <td>{_reason_cell(t["reason"])}</td>
+          <td style="color:#94a3b8">{t["entry_dt"]}</td>
         </tr>"""
     return rows_html
 
 
 def build_html(all_trades: list[dict], recent_days: int, today_str: str) -> str:
-    n_total  = len(all_trades)
-    n_win    = sum(1 for t in all_trades if t["pnl"] > 0)
-    pnl_sum  = sum(t["pnl"] for t in all_trades)
-    wr       = n_win / n_total * 100 if n_total else 0.0
-    pnl_cls  = "profit" if pnl_sum >= 0 else "loss"
+    n_total = len(all_trades)
+    n_win   = sum(1 for t in all_trades if t["pnl"] > 0)
+    pnl_sum = sum(t["pnl"] for t in all_trades)
+    wr      = n_win / n_total * 100 if n_total else 0.0
+    pnl_cls = "profit" if pnl_sum >= 0 else "loss"
 
     summary_rows = _summary_rows(all_trades)
     detail_rows  = _detail_rows(all_trades)
 
+    no_trade_msg = f'<tr><td colspan="10" style="text-align:center;color:#64748b;padding:20px">直近{recent_days}日間に決済された取引はありません</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>直近{recent_days}日 取引損益レポート {today_str}</title>
+<meta charset="UTF-8">
+<title>直近{recent_days}日 取引損益レポート — {today_str}</title>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: 'Helvetica Neue', Arial, sans-serif; background: #f0f2f5; color: #333; padding: 20px; }}
-  h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
-  .subtitle {{ color: #888; font-size: 0.85rem; margin-bottom: 20px; }}
-  .kpi-bar {{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
-  .kpi {{ background: #fff; border-radius: 10px; padding: 14px 22px; box-shadow: 0 1px 4px rgba(0,0,0,.08); min-width: 140px; }}
-  .kpi-label {{ font-size: 0.75rem; color: #888; margin-bottom: 4px; }}
-  .kpi-value {{ font-size: 1.5rem; font-weight: 700; }}
-  .profit {{ color: #e74c3c; }}
-  .loss   {{ color: #3498db; }}
-  .card {{ background: #fff; border-radius: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.08); padding: 20px; margin-bottom: 24px; }}
-  h2 {{ font-size: 1rem; font-weight: 700; margin-bottom: 14px; border-left: 4px solid #3498db; padding-left: 10px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
-  th {{ background: #f7f8fa; padding: 9px 10px; text-align: left; font-weight: 600; border-bottom: 2px solid #eee; white-space: nowrap; }}
-  td {{ padding: 8px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }}
-  tr:hover td {{ background: #fafbfc; }}
-  .tag {{ display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }}
-  .tag-macd {{ background: #3498db; }}
-  .tag-a7   {{ background: #9b59b6; }}
-  .tag-rsi2 {{ background: #e67e22; }}
-  .tag-don  {{ background: #27ae60; }}
-  .tag-vol  {{ background: #16a085; }}
-  .tag-mom  {{ background: #c0392b; }}
-  .tag-short{{ background: #7f8c8d; }}
-  small {{ color: #888; }}
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ font-family:"Segoe UI","Hiragino Sans",sans-serif; background:#0f172a; color:#e2e8f0; padding:20px; }}
+  h1 {{ color:#60a5fa; margin-bottom:4px; font-size:1.6rem; }}
+  .subtitle {{ color:#94a3b8; margin-bottom:24px; font-size:0.9rem; }}
+  h2 {{ color:#60a5fa; margin:28px 0 12px; font-size:1.2rem; border-left:3px solid #60a5fa; padding-left:10px; }}
+  table {{ width:100%; border-collapse:collapse; margin-bottom:16px; font-size:0.82rem; }}
+  th {{ background:#1e293b; color:#94a3b8; padding:6px 8px; text-align:center; border:1px solid #334155; white-space:nowrap; }}
+  td {{ padding:5px 8px; border:1px solid #1e293b; text-align:right; white-space:nowrap; }}
+  tr:hover td {{ background:#1e293b; }}
+  .sym  {{ text-align:left; font-weight:600; }}
+  .profit {{ color:#4ade80; }}
+  .loss   {{ color:#f87171; }}
+  .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
+  .tag-macd  {{ background:#1d4ed8; color:#bfdbfe; }}
+  .tag-a7    {{ background:#065f46; color:#a7f3d0; }}
+  .tag-rsi2  {{ background:#7c3aed; color:#ddd6fe; }}
+  .tag-don   {{ background:#0f766e; color:#99f6e4; }}
+  .tag-vol   {{ background:#b45309; color:#fde68a; }}
+  .tag-mom   {{ background:#be185d; color:#fbcfe8; }}
+  .tag-short {{ background:#374151; color:#d1d5db; }}
+  .kpi-bar {{ display:flex; gap:16px; margin-bottom:28px; flex-wrap:wrap; }}
+  .kpi {{ background:#1e293b; border:1px solid #334155; border-radius:10px; padding:14px 22px; min-width:140px; }}
+  .kpi-label {{ font-size:0.75rem; color:#94a3b8; margin-bottom:4px; }}
+  .kpi-value {{ font-size:1.5rem; font-weight:700; color:#e2e8f0; }}
 </style>
 </head>
 <body>
-<h1>📊 直近{recent_days}日 取引損益レポート</h1>
+<h1>直近{recent_days}日 取引損益レポート</h1>
 <p class="subtitle">生成日: {today_str} ／ 対象: 全シグナルスクリプト ({len(CONFIGS)}本)</p>
 
 <div class="kpi-bar">
   <div class="kpi"><div class="kpi-label">総取引数</div><div class="kpi-value">{n_total}件</div></div>
-  <div class="kpi"><div class="kpi-label">勝率</div><div class="kpi-value">{wr:.1f}%</div></div>
-  <div class="kpi"><div class="kpi-label">合計損益</div><div class="kpi-value {pnl_cls}">{pnl_sum:+,.0f}円</div></div>
+  <div class="kpi"><div class="kpi-label">勝率</div><div class="kpi-value">{"—" if n_total==0 else f"{wr:.1f}%"}</div></div>
+  <div class="kpi"><div class="kpi-label">合計損益</div><div class="kpi-value {pnl_cls}">{"—" if n_total==0 else f"{pnl_sum:+,.0f}円"}</div></div>
   <div class="kpi"><div class="kpi-label">勝ち / 負け</div><div class="kpi-value">{n_win}W / {n_total - n_win}L</div></div>
 </div>
 
-<div class="card">
-  <h2>スクリプト別サマリー</h2>
-  <table>
-    <thead><tr>
-      <th>スクリプト</th><th>取引数</th><th>勝敗</th><th>勝率</th><th>PF</th><th>損益</th>
-    </tr></thead>
-    <tbody>{summary_rows}</tbody>
-  </table>
-</div>
+<h2>スクリプト別サマリー（直近{recent_days}日）</h2>
+<table>
+  <thead><tr>
+    <th style="text-align:left">スクリプト</th>
+    <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益</th>
+  </tr></thead>
+  <tbody>{summary_rows}</tbody>
+</table>
 
-<div class="card">
-  <h2>取引明細（決済日降順）</h2>
-  {'<p style="color:#888;padding:10px 0">直近' + str(recent_days) + '日間に決済された取引はありません。</p>' if not all_trades else f'''
-  <table>
-    <thead><tr>
-      <th>スクリプト</th><th>決済日</th><th>銘柄</th><th>戦略</th>
-      <th style="text-align:right">約定値</th><th style="text-align:right">決済値</th>
-      <th style="text-align:center">保有</th><th style="text-align:right">損益</th>
-      <th>理由</th><th>エントリー</th>
-    </tr></thead>
-    <tbody>{detail_rows}</tbody>
-  </table>'''}
-</div>
+<h2>取引明細（決済日降順）</h2>
+<table>
+  <thead><tr>
+    <th style="text-align:left">スクリプト</th>
+    <th>決済日</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>約定値</th><th>決済値</th><th>保有</th><th>損益</th><th>理由</th><th>エントリー</th>
+  </tr></thead>
+  <tbody>{detail_rows if all_trades else no_trade_msg}</tbody>
+</table>
 </body>
 </html>"""
 
