@@ -319,9 +319,12 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{hs.get('avg', 0):.1f}日<br><small class="hold-break">{hold_break_str}</small></td>
         </tr>"""
 
-    # シグナル行（スコア降順で表示）
+    # シグナル行（当日新規のみ。ルックバック継続/保有中は除外）
     signal_items = [(item, calc_recommend_score(item["period_results"]))
-                    for item in all_items if item["today_sig"]]
+                    for item in all_items
+                    if item["today_sig"]
+                    and not item["today_sig"].get("_pending_lookback")
+                    and not item["today_sig"].get("_filled_holding")]
     signal_items.sort(key=lambda x: x[1][0], reverse=True)
 
     signal_rows = ""
@@ -375,7 +378,11 @@ def build_html(all_items: list[dict], show_days: int,
             pr_show   = compute_period_result(item, show_days)
             hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
             hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
-            mark = "🔔" if item["today_sig"] else ""
+            sig_m = item["today_sig"]
+            mark = ("🔔" if sig_m
+                         and not sig_m.get("_pending_lookback")
+                         and not sig_m.get("_filled_holding")
+                    else "")
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
@@ -434,7 +441,7 @@ def build_html(all_items: list[dict], show_days: int,
                 <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
                 <td>{t['reason']}</td>
               </tr>"""
-        # 未約定シグナルを取引詳細の末尾に追記
+        # 未約定/保有中シグナルを取引詳細の末尾に追記
         if item.get("today_sig"):
             sig = item["today_sig"]
             _sig_dt_p   = pd.to_datetime(sig["signal_date"])
@@ -442,8 +449,17 @@ def build_html(all_items: list[dict], show_days: int,
             max_exit_pending = _max_exit_p.strftime("%Y-%m-%d")
             ol_p  = sig["order_price"]
             ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
+            if sig.get("_filled_holding"):
+                row_bg    = "background:rgba(34,197,94,0.12)"
+                reason_td = '<td style="color:#4ade80">✅ 保有中（約定済み）</td>'
+            elif sig.get("_pending_lookback"):
+                row_bg    = "background:rgba(245,158,11,0.12)"
+                reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
+            else:
+                row_bg    = "background:rgba(245,158,11,0.12)"
+                reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
             trade_rows += f"""
-              <tr style="background:rgba(245,158,11,0.12)">
+              <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
                 <td>-</td><td>-</td>
                 <td class="stop">{ol_p:,.0f}</td>
@@ -452,7 +468,7 @@ def build_html(all_items: list[dict], show_days: int,
                 <td class="profit">{sig['target_price']:,.0f}</td>
                 <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
                 <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
-                <td style="color:#f59e0b">{"⏳ 未約定（継続中）" if sig.get("_pending_lookback") else "⏳ 未約定"}</td>
+                {reason_td}
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)

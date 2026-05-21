@@ -123,9 +123,10 @@ def _run_group(mod, sig_date, workers: int) -> list[dict]:
             item["symbol"], item["strategy"], sig_date)
 
         # 今日シグナルなし かつ 本日モード のとき:
-        # ENTRY_EXPIRE 日分遡って未約定シグナルを探す（注文有効期間内の記録表示用）
+        # ENTRY_EXPIRE 日分遡って未約定/保有中シグナルを探す（取引詳細の記録表示用）
         if not item["today_sig"] and sig_date is None:
             import pandas as _pd
+            from backtest_limit_entry import fetch as _fetch_bt
             today_d = datetime.now(JST).date()
             bdays = _pd.bdate_range(
                 end=_pd.Timestamp(today_d), periods=_stop.ENTRY_EXPIRE + 1
@@ -133,10 +134,27 @@ def _run_group(mod, sig_date, workers: int) -> list[dict]:
             for bday in reversed(bdays):
                 past_sig = mod.check_signal_on_date(
                     item["symbol"], item["strategy"], bday.date())
-                if past_sig:
-                    past_sig["_pending_lookback"] = True
-                    item["today_sig"] = past_sig
-                    break
+                if not past_sig:
+                    continue
+                # 逆指値が約定済みか判定: シグナル日以降の高値/安値を確認
+                is_short = item["strategy"].endswith("_S")
+                order_p  = past_sig["order_price"]
+                sig_ts   = _pd.Timestamp(past_sig["signal_date"])
+                df_recent = _fetch_bt(item["symbol"], 30)
+                filled = False
+                if df_recent is not None:
+                    future_bars = df_recent[df_recent.index > sig_ts]
+                    if len(future_bars) > 0:
+                        filled = (future_bars["low"].min()  <= order_p if is_short
+                                  else future_bars["high"].max() >= order_p)
+                    # 最新終値を current_price に更新
+                    past_sig["current_price"] = float(df_recent.iloc[-1]["close"])
+                if filled:
+                    past_sig["_filled_holding"] = True   # 約定済み・保有中
+                else:
+                    past_sig["_pending_lookback"] = True  # 未約定・継続中
+                item["today_sig"] = past_sig
+                break
 
     return all_items
 
@@ -409,22 +427,29 @@ def main() -> None:
     print(f"  逆指値シグナル統合  {today}  ({args.days}日表示)  シグナル確認日: {date_label}")
     print("=" * 92)
 
-    # 全シグナルをスコア降順でまとめて表示
+    def _is_new_signal(item: dict) -> bool:
+        """ルックバック（継続中/保有中）を除いた当日新規シグナルのみ True"""
+        sig = item.get("today_sig")
+        return bool(sig
+                    and not sig.get("_pending_lookback")
+                    and not sig.get("_filled_holding"))
+
+    # 全シグナルをスコア降順でまとめて表示（当日新規のみ）
     all_sigs: list[tuple] = []
     for item in stop_items:
-        if item["today_sig"]:
+        if _is_new_signal(item):
             score, rank = _stop.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "逆指値B"))
     for item in brk_items:
-        if item["today_sig"]:
+        if _is_new_signal(item):
             score, rank = _brk.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "BRK"))
     for item in short_items:
-        if item["today_sig"]:
+        if _is_new_signal(item):
             score, rank = _short.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショート"))
     for item in sbrk_items:
-        if item["today_sig"]:
+        if _is_new_signal(item):
             score, rank = _sbrk.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショートBRK"))
     all_sigs.sort(key=lambda x: x[1], reverse=True)

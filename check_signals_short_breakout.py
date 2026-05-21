@@ -286,7 +286,10 @@ def build_html(all_items: list[dict], show_days: int,
         </tr>"""
 
     signal_items = [(item, calc_recommend_score(item["period_results"]))
-                    for item in all_items if item["today_sig"]]
+                    for item in all_items
+                    if item["today_sig"]
+                    and not item["today_sig"].get("_pending_lookback")
+                    and not item["today_sig"].get("_filled_holding")]
     signal_items.sort(key=lambda x: x[1][0], reverse=True)
 
     signal_rows = ""
@@ -331,7 +334,11 @@ def build_html(all_items: list[dict], show_days: int,
             pr_show   = item["period_results"].get(show_days) or {}
             hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
             hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
-            mark = "🔔" if item["today_sig"] else ""
+            sig_m = item["today_sig"]
+            mark = ("🔔" if sig_m
+                         and not sig_m.get("_pending_lookback")
+                         and not sig_m.get("_filled_holding")
+                    else "")
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
@@ -365,15 +372,24 @@ def build_html(all_items: list[dict], show_days: int,
                 <td>{t['hold_days']}日</td>
                 <td>{t['reason']}</td>
               </tr>"""
-        # 未約定シグナルを取引詳細の末尾に追記
+        # 未約定/保有中シグナルを取引詳細の末尾に追記
         if item.get("today_sig"):
             sig = item["today_sig"]
+            if sig.get("_filled_holding"):
+                row_bg    = "background:rgba(34,197,94,0.12)"
+                reason_td = '<td style="color:#4ade80">✅ 保有中（約定済み）</td>'
+            elif sig.get("_pending_lookback"):
+                row_bg    = "background:rgba(245,158,11,0.12)"
+                reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
+            else:
+                row_bg    = "background:rgba(245,158,11,0.12)"
+                reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
             trade_rows += f"""
-              <tr style="background:rgba(245,158,11,0.12)">
+              <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td>{sig['signal_price']:,.0f}</td>
                 <td>-</td><td>-</td>
                 <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
-                <td style="color:#f59e0b">{"⏳ 未約定（継続中）" if sig.get("_pending_lookback") else "⏳ 未約定"}</td>
+                {reason_td}
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
