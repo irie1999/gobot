@@ -344,7 +344,7 @@ def build_html(all_items: list[dict], show_days: int,
     for item in all_items:
         pr   = item["period_results"].get(show_days) or {}
         logs = pr.get("trade_log") or []
-        if not logs:
+        if not logs and not item.get("today_sig"):
             continue
         trade_rows = ""
         for t in logs:
@@ -364,6 +364,16 @@ def build_html(all_items: list[dict], show_days: int,
                 <td class="{pnl_cls}">{t['pct']:+.2f}%</td>
                 <td>{t['hold_days']}日</td>
                 <td>{t['reason']}</td>
+              </tr>"""
+        # 未約定シグナルを取引詳細の末尾に追記
+        if item.get("today_sig"):
+            sig = item["today_sig"]
+            trade_rows += f"""
+              <tr style="background:rgba(245,158,11,0.12)">
+                <td>{sig['signal_date']}</td><td>{sig['signal_price']:,.0f}</td>
+                <td>-</td><td>-</td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                <td style="color:#f59e0b">⏳ 未約定</td>
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)

@@ -389,7 +389,7 @@ def build_html(all_items: list[dict], show_days: int,
     for item in all_items:
         pr   = compute_period_result(item, show_days)
         logs = pr.get("trade_log") or []
-        if not logs:
+        if not logs and not item.get("today_sig"):
             continue
         trade_rows     = ""
         fill_days_list = []
@@ -433,6 +433,26 @@ def build_html(all_items: list[dict], show_days: int,
                 <td class="stop">{dtf}日</td>
                 <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
                 <td>{t['reason']}</td>
+              </tr>"""
+        # 未約定シグナルを取引詳細の末尾に追記
+        if item.get("today_sig"):
+            sig = item["today_sig"]
+            _sig_dt_p   = pd.to_datetime(sig["signal_date"])
+            _max_exit_p = pd.bdate_range(start=_sig_dt_p, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+            max_exit_pending = _max_exit_p.strftime("%Y-%m-%d")
+            ol_p  = sig["order_price"]
+            ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
+            trade_rows += f"""
+              <tr style="background:rgba(245,158,11,0.12)">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>-</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                <td style="color:#f59e0b">⏳ 未約定</td>
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
