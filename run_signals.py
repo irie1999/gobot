@@ -121,6 +121,23 @@ def _run_group(mod, sig_date, workers: int) -> list[dict]:
     for item in all_items:
         item["today_sig"] = mod.check_signal_on_date(
             item["symbol"], item["strategy"], sig_date)
+
+        # 今日シグナルなし かつ 本日モード のとき:
+        # ENTRY_EXPIRE 日分遡って未約定シグナルを探す（注文有効期間内の記録表示用）
+        if not item["today_sig"] and sig_date is None:
+            import pandas as _pd
+            today_d = datetime.now(JST).date()
+            bdays = _pd.bdate_range(
+                end=_pd.Timestamp(today_d), periods=_stop.ENTRY_EXPIRE + 1
+            )[:-1]  # 今日を除く直近 ENTRY_EXPIRE 営業日
+            for bday in reversed(bdays):
+                past_sig = mod.check_signal_on_date(
+                    item["symbol"], item["strategy"], bday.date())
+                if past_sig:
+                    past_sig["_pending_lookback"] = True
+                    item["today_sig"] = past_sig
+                    break
+
     return all_items
 
 

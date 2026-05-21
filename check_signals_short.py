@@ -424,7 +424,7 @@ def build_html(all_items: list[dict], show_days: int,
                 <td>-</td>
                 <td class="profit">{sig['stop_price']:,.0f}</td>
                 <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
-                <td style="color:#f59e0b">⏳ 未約定</td>
+                <td style="color:#f59e0b">{"⏳ 未約定（継続中）" if sig.get("_pending_lookback") else "⏳ 未約定"}</td>
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
