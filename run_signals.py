@@ -150,7 +150,40 @@ def _run_group(mod, sig_date, workers: int) -> list[dict]:
                     # 最新終値を current_price に更新
                     past_sig["current_price"] = float(df_recent.iloc[-1]["close"])
                 if filled:
-                    past_sig["_filled_holding"] = True   # 約定済み・保有中
+                    # フィル日・エントリー価格・含み損益を計算して渡す
+                    from backtest_limit_entry import (
+                        SLIPPAGE_STOP_PCT as _slip, FIXED_QTY as _qty)
+                    entry_p = round(order_p * (1 + _slip if not is_short else 1 - _slip), 0)
+                    current_latest = float(df_recent.iloc[-1]["close"]) if df_recent is not None else order_p
+                    unreal_pnl = ((entry_p - current_latest) if is_short
+                                  else (current_latest - entry_p)) * _qty
+                    unreal_pct = (((entry_p - current_latest) / entry_p)
+                                  if is_short
+                                  else ((current_latest - entry_p) / entry_p)) * 100
+                    fill_idx = None
+                    if df_recent is not None:
+                        for idx, row in future_bars.iterrows():
+                            if (row["low"] <= order_p if is_short
+                                    else row["high"] >= order_p):
+                                fill_idx = idx
+                                break
+                    fill_date_str = fill_idx.strftime("%Y-%m-%d") if fill_idx is not None else "-"
+                    today_ts = _pd.Timestamp(today_d)
+                    hold_days = (len(_pd.bdate_range(start=fill_idx, end=today_ts)) - 1
+                                 if fill_idx is not None else 0)
+                    fill_days = (len(_pd.bdate_range(start=sig_ts,   end=fill_idx)) - 1
+                                 if fill_idx is not None else 0)
+                    past_sig.update({
+                        "_filled_holding":      True,
+                        "_fill_date":           fill_date_str,
+                        "_entry_price":         entry_p,
+                        "_current_latest":      current_latest,
+                        "_unreal_pnl":          unreal_pnl,
+                        "_unreal_pct":          unreal_pct,
+                        "_hold_days":           hold_days,
+                        "_fill_days":           fill_days,
+                        "_qty":                 _qty,
+                    })
                 else:
                     past_sig["_pending_lookback"] = True  # 未約定・継続中
                 item["today_sig"] = past_sig

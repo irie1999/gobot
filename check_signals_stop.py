@@ -451,14 +451,51 @@ def build_html(all_items: list[dict], show_days: int,
             ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
             if sig.get("_filled_holding"):
                 row_bg    = "background:rgba(34,197,94,0.12)"
-                reason_td = '<td style="color:#4ade80">✅ 保有中（約定済み）</td>'
+                ep        = sig.get("_entry_price", ol_p)
+                cp        = sig.get("_current_latest", sig["current_price"])
+                upnl      = sig.get("_unreal_pnl", 0)
+                upct      = sig.get("_unreal_pct", 0)
+                hd        = sig.get("_hold_days", 0)
+                fd        = sig.get("_fill_days", "-")
+                qty       = sig.get("_qty", 100)
+                fill_dt   = sig.get("_fill_date", "-")
+                pnl_cls   = "profit" if upnl >= 0 else "loss"
+                reason_td = '<td style="color:#4ade80">保有中</td>'
+                trade_rows += f"""
+              <tr style="{row_bg}">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>{fill_dt}</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>{ep:,.0f}</td><td>{cp:,.0f}</td>
+                <td>{qty}</td>
+                <td class="{pnl_cls}">{upnl:+,.0f}</td>
+                <td class="{pnl_cls}">{upct:+.2f}%</td>
+                <td>{hd}日</td><td>{fd}日</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                {reason_td}
+              </tr>"""
             elif sig.get("_pending_lookback"):
                 row_bg    = "background:rgba(245,158,11,0.12)"
                 reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
+                trade_rows += f"""
+              <tr style="{row_bg}">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>-</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                {reason_td}
+              </tr>"""
             else:
                 row_bg    = "background:rgba(245,158,11,0.12)"
                 reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
-            trade_rows += f"""
+                trade_rows += f"""
               <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
                 <td>-</td><td>-</td>
