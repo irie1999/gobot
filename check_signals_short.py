@@ -424,10 +424,18 @@ def build_html(all_items: list[dict], show_days: int,
         # 未約定/保有中シグナルを取引詳細の末尾に追記
         if item.get("today_sig"):
             sig = item["today_sig"]
-            if sig.get("_filled_holding"):
+            _sig_date_str = sig["signal_date"]
+            _already = any(
+                t.get("signal_dt") is not None
+                and t["signal_dt"].strftime("%Y-%m-%d") == _sig_date_str
+                for t in logs
+            )
+            if _already:
+                sig = None  # skip
+            if sig and sig.get("_filled_holding"):
                 row_bg    = "background:rgba(34,197,94,0.12)"
                 reason_td = '<td style="color:#4ade80">✅ 保有中（約定済み）</td>'
-            elif sig.get("_pending_lookback"):
+            elif sig and sig.get("_pending_lookback"):
                 row_bg    = "background:rgba(245,158,11,0.12)"
                 reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
             else:

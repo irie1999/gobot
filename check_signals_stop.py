@@ -444,11 +444,10 @@ def build_html(all_items: list[dict], show_days: int,
         # 未約定/保有中シグナルを取引詳細の末尾に追記
         if item.get("today_sig"):
             sig = item["today_sig"]
-            # バックテスト trade_log に同シグナル日の「保有中」行が既存なら重複しない
+            # バックテスト trade_log に同シグナル日のトレードが既存なら重複しない
             _sig_date_str = sig["signal_date"]
             _already = any(
-                t.get("reason") == "保有中"
-                and t.get("signal_dt") is not None
+                t.get("signal_dt") is not None
                 and t["signal_dt"].strftime("%Y-%m-%d") == _sig_date_str
                 for t in logs
             )
