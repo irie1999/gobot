@@ -444,24 +444,35 @@ def build_html(all_items: list[dict], show_days: int,
         # 未約定/保有中シグナルを取引詳細の末尾に追記
         if item.get("today_sig"):
             sig = item["today_sig"]
-            _sig_dt_p   = pd.to_datetime(sig["signal_date"])
-            _max_exit_p = pd.bdate_range(start=_sig_dt_p, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
-            max_exit_pending = _max_exit_p.strftime("%Y-%m-%d")
-            ol_p  = sig["order_price"]
-            ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
-            if sig.get("_filled_holding"):
-                row_bg    = "background:rgba(34,197,94,0.12)"
-                ep        = sig.get("_entry_price", ol_p)
-                cp        = sig.get("_current_latest", sig["current_price"])
-                upnl      = sig.get("_unreal_pnl", 0)
-                upct      = sig.get("_unreal_pct", 0)
-                hd        = sig.get("_hold_days", 0)
-                fd        = sig.get("_fill_days", "-")
-                qty       = sig.get("_qty", 100)
-                fill_dt   = sig.get("_fill_date", "-")
-                pnl_cls   = "profit" if upnl >= 0 else "loss"
-                reason_td = '<td style="color:#4ade80">保有中</td>'
-                trade_rows += f"""
+            # バックテスト trade_log に同シグナル日の「保有中」行が既存なら重複しない
+            _sig_date_str = sig["signal_date"]
+            _already = any(
+                t.get("reason") == "保有中"
+                and t.get("signal_dt") is not None
+                and t["signal_dt"].strftime("%Y-%m-%d") == _sig_date_str
+                for t in logs
+            )
+            if _already:
+                pass  # バックテスト行で既に表示済み
+            else:
+                _sig_dt_p   = pd.to_datetime(sig["signal_date"])
+                _max_exit_p = pd.bdate_range(start=_sig_dt_p, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+                max_exit_pending = _max_exit_p.strftime("%Y-%m-%d")
+                ol_p  = sig["order_price"]
+                ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
+                if sig.get("_filled_holding"):
+                    row_bg    = "background:rgba(34,197,94,0.12)"
+                    ep        = sig.get("_entry_price", ol_p)
+                    cp        = sig.get("_current_latest", sig["current_price"])
+                    upnl      = sig.get("_unreal_pnl", 0)
+                    upct      = sig.get("_unreal_pct", 0)
+                    hd        = sig.get("_hold_days", 0)
+                    fd        = sig.get("_fill_days", "-")
+                    qty       = sig.get("_qty", 100)
+                    fill_dt   = sig.get("_fill_date", "-")
+                    pnl_cls   = "profit" if upnl >= 0 else "loss"
+                    reason_td = '<td style="color:#4ade80">保有中</td>'
+                    trade_rows += f"""
               <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
                 <td>{fill_dt}</td><td>-</td>
@@ -477,10 +488,10 @@ def build_html(all_items: list[dict], show_days: int,
                 <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
                 {reason_td}
               </tr>"""
-            elif sig.get("_pending_lookback"):
-                row_bg    = "background:rgba(245,158,11,0.12)"
-                reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
-                trade_rows += f"""
+                elif sig.get("_pending_lookback"):
+                    row_bg    = "background:rgba(245,158,11,0.12)"
+                    reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
+                    trade_rows += f"""
               <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
                 <td>-</td><td>-</td>
@@ -492,10 +503,10 @@ def build_html(all_items: list[dict], show_days: int,
                 <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
                 {reason_td}
               </tr>"""
-            else:
-                row_bg    = "background:rgba(245,158,11,0.12)"
-                reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
-                trade_rows += f"""
+                else:
+                    row_bg    = "background:rgba(245,158,11,0.12)"
+                    reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
+                    trade_rows += f"""
               <tr style="{row_bg}">
                 <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
                 <td>-</td><td>-</td>
