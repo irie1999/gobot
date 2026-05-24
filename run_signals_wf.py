@@ -196,6 +196,57 @@ _STOP_WATCHLIST = _STOP_WATCHLIST_AGGRESSIVE if _WF_MODE == "aggressive" else _S
 _BRK_WATCHLIST  = _BRK_WATCHLIST_AGGRESSIVE  if _WF_MODE == "aggressive" else _BRK_WATCHLIST_CONSERVATIVE
 
 
+def _merge_items(con_items: list, agg_items: list) -> list:
+    """
+    マージルール:
+      - 共通銘柄でシグナルが両方 → aggressive を採用
+      - 共通銘柄でシグナルが片方 → そのモードを採用
+      - 片方のみの銘柄        → そのモードを採用
+    """
+    con_map = {(it["symbol"], it["strategy"]): it for it in con_items}
+    agg_map = {(it["symbol"], it["strategy"]): it for it in agg_items}
+    result = []
+    for key in set(con_map) | set(agg_map):
+        con_it = con_map.get(key)
+        agg_it = agg_map.get(key)
+        if con_it and agg_it:
+            # 共通銘柄: aggressive優先、ただしaggシグナルなし&conシグナルあり → con採用
+            if not agg_it.get("today_sig") and con_it.get("today_sig"):
+                result.append(con_it)
+            else:
+                result.append(agg_it)
+        elif con_it:
+            result.append(con_it)
+        else:
+            result.append(agg_it)
+    return result
+
+
+def _run_both(sig_date, workers):
+    """Conservative と Aggressive を順番に実行してアイテムリストを返す。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    # --- Conservative ---
+    _stop.STRATEGY_PARAMS = _stop.STRATEGY_PARAMS_CONSERVATIVE
+    _brk.STRATEGY_PARAMS  = _brk.STRATEGY_PARAMS_CONSERVATIVE
+    _stop.WATCHLIST = _STOP_WATCHLIST_CONSERVATIVE
+    _brk.WATCHLIST  = _BRK_WATCHLIST_CONSERVATIVE
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        con_stop = filter_items(pool.submit(_run_group, _stop, sig_date, workers).result())
+        con_brk  = filter_items(pool.submit(_run_group, _brk,  sig_date, workers).result())
+
+    # --- Aggressive ---
+    _stop.STRATEGY_PARAMS = _stop.STRATEGY_PARAMS_AGGRESSIVE
+    _brk.STRATEGY_PARAMS  = _brk.STRATEGY_PARAMS_AGGRESSIVE
+    _stop.WATCHLIST = _STOP_WATCHLIST_AGGRESSIVE
+    _brk.WATCHLIST  = _BRK_WATCHLIST_AGGRESSIVE
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        agg_stop = filter_items(pool.submit(_run_group, _stop, sig_date, workers).result())
+        agg_brk  = filter_items(pool.submit(_run_group, _brk,  sig_date, workers).result())
+
+    return _merge_items(con_stop, agg_stop), _merge_items(con_brk, agg_brk)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-forward選定銘柄 シグナルレポート")
     parser.add_argument("--days",        type=int, default=365)
@@ -207,6 +258,8 @@ def main() -> None:
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true")
     mode_group.add_argument("--conservative", action="store_true")
+    mode_group.add_argument("--merged",       action="store_true",
+                            help="conservative+aggressiveを統合（共通銘柄は両方シグナル→agg、片方→そのモード）")
     parser.add_argument("--funds", action="store_true",
                         help="必要資金集計をHTMLに表示")
     args = parser.parse_args()
@@ -221,27 +274,30 @@ def main() -> None:
     else:
         sig_date = None
 
-    # ── monkey-patch: このプロセス内でのみ新WATCHLISTを使用 ──
-    _stop.WATCHLIST = _STOP_WATCHLIST
-    _brk.WATCHLIST  = _BRK_WATCHLIST
-
     date_label = args.date if args.date else "本日"
-    n_total = len(_STOP_WATCHLIST) + len(_BRK_WATCHLIST) + len(_short.WATCHLIST) + len(_sbrk.WATCHLIST)
-    mode = _stop.TRADING_MODE
-    print(f"WF版シグナル統合 開始 ({n_total}銘柄) 確認日: {date_label}  モード: {mode}", flush=True)
-    print(f"  逆指値B: {len(_STOP_WATCHLIST)}銘柄  /  ブレイクアウト: {len(_BRK_WATCHLIST)}銘柄"
-          f"  /  ショート: {len(_short.WATCHLIST)}銘柄  /  ショートBRK: {len(_sbrk.WATCHLIST)}銘柄", flush=True)
+    from concurrent.futures import ThreadPoolExecutor
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        fut_stop  = pool.submit(_run_group, _stop,  sig_date, args.workers)
-        fut_brk   = pool.submit(_run_group, _brk,   sig_date, args.workers)
-        fut_short = pool.submit(_run_group, _short, sig_date, args.workers)
-        fut_sbrk  = pool.submit(_run_group, _sbrk,  sig_date, args.workers)
-        stop_items  = filter_items(fut_stop.result())
-        brk_items   = filter_items(fut_brk.result())
-        short_items = filter_items(fut_short.result())
-        sbrk_items  = filter_items(fut_sbrk.result())
+    if args.merged:
+        mode = "merged"
+        print(f"WF版シグナル統合 開始 (merged) 確認日: {date_label}", flush=True)
+        print(f"  Conservative ({len(_STOP_WATCHLIST_CONSERVATIVE)+len(_BRK_WATCHLIST_CONSERVATIVE)}銘柄) +"
+              f" Aggressive ({len(_STOP_WATCHLIST_AGGRESSIVE)+len(_BRK_WATCHLIST_AGGRESSIVE)}銘柄)", flush=True)
+        stop_items, brk_items = _run_both(sig_date, args.workers)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            short_items = filter_items(pool.submit(_run_group, _short, sig_date, args.workers).result())
+            sbrk_items  = filter_items(pool.submit(_run_group, _sbrk,  sig_date, args.workers).result())
+    else:
+        # ── monkey-patch: このプロセス内でのみ新WATCHLISTを使用 ──
+        _stop.WATCHLIST = _STOP_WATCHLIST
+        _brk.WATCHLIST  = _BRK_WATCHLIST
+        mode = _stop.TRADING_MODE
+        n_total = len(_STOP_WATCHLIST) + len(_BRK_WATCHLIST) + len(_short.WATCHLIST) + len(_sbrk.WATCHLIST)
+        print(f"WF版シグナル統合 開始 ({n_total}銘柄) 確認日: {date_label}  モード: {mode}", flush=True)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            stop_items  = filter_items(pool.submit(_run_group, _stop,  sig_date, args.workers).result())
+            brk_items   = filter_items(pool.submit(_run_group, _brk,   sig_date, args.workers).result())
+            short_items = filter_items(pool.submit(_run_group, _short, sig_date, args.workers).result())
+            sbrk_items  = filter_items(pool.submit(_run_group, _sbrk,  sig_date, args.workers).result())
 
     # シグナル表示
     all_sigs = []
@@ -279,7 +335,7 @@ def main() -> None:
     sbrk_html  = _sbrk.build_html(sbrk_items,   args.days, date_label, run_cmd=_cmd)
     combined   = build_combined_html(stop_html, brk_html, short_html, sbrk_html, fund_html_block=fund_block)
 
-    mode_suffix = "_aggressive" if mode == "aggressive" else ""
+    mode_suffix = f"_{mode}" if mode != "conservative" else ""
     out = Path(f"signals_wf{mode_suffix}_{today_str}.html")
     out.write_text(combined, encoding="utf-8")
     print(f"\nHTML: {out}", flush=True)
