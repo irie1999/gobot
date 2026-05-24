@@ -272,7 +272,7 @@ def main() -> None:
         rows = collect_fund_rows([stop_items, brk_items, short_items, sbrk_items], args.days)
         fund_block = _fund_html(rows, args.days)
 
-    _cmd = "python run_signals_wf.py --aggressive"
+    _cmd = f"python run_signals_wf.py --{mode}"
     stop_html  = _stop.build_html(stop_items,   args.days, date_label, run_cmd=_cmd)
     brk_html   = _brk.build_html(brk_items,     args.days, date_label, run_cmd=_cmd)
     short_html = _short.build_html(short_items,  args.days, date_label, run_cmd=_cmd)
