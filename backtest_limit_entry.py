@@ -609,9 +609,11 @@ def run_limit_backtest(
                 if exit_p is not None:
                     if exit_reason == "損切り":
                         if is_short:
-                            exit_p = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                            # ギャップアップで損切りトリガー: 始値で損切り
+                            exit_p = op if op >= stop_price else stop_price * (1.0 + SLIPPAGE_STOP_PCT)
                         else:
-                            exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                            # ギャップダウンで損切りトリガー: 始値で損切り
+                            exit_p = op if op <= stop_price else stop_price * (1.0 - SLIPPAGE_STOP_PCT)
                     if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
                         fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
                         if is_short:
@@ -701,9 +703,11 @@ def run_limit_backtest(
                     continue
                 if exit_reason == "損切り":
                     if is_short:
-                        exit_p = stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                        # ギャップアップで損切りトリガー: 始値で損切り
+                        exit_p = op if op >= stop_price else stop_price * (1.0 + SLIPPAGE_STOP_PCT)
                     else:
-                        exit_p = exit_p * (1.0 - SLIPPAGE_STOP_PCT)
+                        # ギャップダウンで損切りトリガー: 始値で損切り
+                        exit_p = op if op <= stop_price else stop_price * (1.0 - SLIPPAGE_STOP_PCT)
                 fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
                 if is_short:
                     pnl = (entry_p - exit_p) * qty - fee
