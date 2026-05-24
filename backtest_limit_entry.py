@@ -72,9 +72,10 @@ FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
 # ── 逆指値→指値注文 の指値上限マージン (kabu発注用) ─────────────
 # 逆指値→成行 の代替として 逆指値→指値 を使う場合、トリガー価格からどの程度
 # 上までを指値として許容するか。ギャップアップが +MARGIN 以下なら約定、
-# それ以上なら不約定となる。
-# 0.01 (1%) は典型的な朝ギャップの 70% 程度をカバーする実用的な値。
-LIMIT_ENTRY_MARGIN_PCT = 0.01
+# それ以上なら不約定となる。バックテストにも同じ条件を適用して実運用と整合。
+# 0.03 (3%) は典型的な朝ギャップの 80% 程度をカバーしつつ、
+# 5% 超の急騰(高値掴みリスク大)は除外できる実用的な値。
+LIMIT_ENTRY_MARGIN_PCT = 0.03
 
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
@@ -468,6 +469,7 @@ def run_limit_backtest(
         prev = df.iloc[i - 1]
         dt   = df.index[i]
 
+        op = float(row["open"])
         hi = float(row["high"])
         lo = float(row["low"])
         cl = float(row["close"])
@@ -560,7 +562,19 @@ def run_limit_backtest(
                  (entry_type == "limit"     and lo <= limit_price):
                 # 約定
                 if entry_type == "stop":
-                    entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
+                    limit_upper = limit_price * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
+                    if op >= limit_price:
+                        # 寄り付きギャップアップ: 始値がトリガー価格以上
+                        if op > limit_upper:
+                            # 指値上限超え → 約定しない（実運用の逆指値→指値と同じ）
+                            state = "idle"
+                            continue
+                        else:
+                            # 始値が上限以内 → 始値で約定
+                            entry_p = op
+                    else:
+                        # 場中にトリガー → スリッページ込みで約定
+                        entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
                 elif entry_type == "stop_sell":
                     entry_p = limit_price * (1.0 - SLIPPAGE_STOP_PCT)
                 else:

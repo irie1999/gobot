@@ -190,7 +190,7 @@ def check_signal_on_date(symbol: str, strategy: str,
 
     return dict(
         order_price=round(order_p, 0),         # 逆指値トリガー価格
-        limit_entry_price=round(limit_entry, 0),  # 逆指値→指値 の指値上限 (+1%)
+        limit_entry_price=round(limit_entry, 0),  # 逆指値→指値 の指値上限
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,
