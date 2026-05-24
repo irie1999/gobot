@@ -28,7 +28,7 @@ from check_signals_breakout import WATCHLIST as BRK_WL,  STRATEGY_PARAMS as BRK_
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--margin", type=float, default=1.0,
-                        help="指値上限マージン % (default=1.0)")
+                        help="指値上限マージン %% (default=1.0)")
     parser.add_argument("--aggressive", action="store_true")
     args = parser.parse_args()
 
