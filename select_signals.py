@@ -270,10 +270,8 @@ def _loss_risk_warning(r: dict | None) -> None:
     risks = []
     if r["max_1d_drop"] < -3.0:
         risks.append(f"過去30日に {r['max_1d_drop']:+.1f}% の急落あり → 複数ポジションが同時損切りリスク")
-    if r["trend"] == "up" and r["vol_level"] == "high" and r["mom5"] > 5:
-        risks.append(f"急騰後の高ボラ ({r['mom5']:+.1f}%) → 利益確定売りで急反落しやすい")
     if not r["above_ma200"]:
-        risks.append(f"日経 < MA200 → 長期トレンドが下落。逆指値が全滅するリスク")
+        risks.append(f"日経 < MA200 → 長期下落トレンド。逆指値が連続損切りするリスク")
     if risks:
         print(f"\n{YLW}【⚠️ 株価制限なし 大損リスク要因】{RESET}")
         for rk in risks:
@@ -387,8 +385,6 @@ def _risk_warning_html(r: dict | None) -> str:
     risks = []
     if r["max_1d_drop"] < -3.0:
         risks.append(f"過去30日に <strong>{r['max_1d_drop']:+.1f}%</strong> の急落あり → 複数ポジションが同時損切りリスク")
-    if r["trend"] == "up" and r["vol_level"] == "high" and r["mom5"] > 5:
-        risks.append(f"急騰後の高ボラ ({r['mom5']:+.1f}%) → 利益確定売りで急反落しやすい局面")
     if not r["above_ma200"]:
         risks.append("日経 &lt; MA200 → 長期下落トレンド。逆指値が連続損切りするリスク大")
     if not risks:
