@@ -2,7 +2,7 @@
 analyze_nikkei_trend.py  ―  日経平均トレンド期間分析
 
 MA10 / MA25 のクロスを使ってトレンド転換を検出し、
-上昇・下落それぞれの期間の長さ・騰落率を集計する。
+上昇・下落それぞれの期間の長さ・騰落率を集計する。HTMLレポートを生成。
 
 select_signals.py と同じ判定基準:
   上昇 = 終値 > MA10 かつ MA10 > MA25
@@ -10,12 +10,15 @@ select_signals.py と同じ判定基準:
   横ばい = それ以外
 
 Usage:
-    python analyze_nikkei_trend.py          # 過去5年
+    python analyze_nikkei_trend.py              # 過去5年 HTMLレポート
     python analyze_nikkei_trend.py --years 10
+    python analyze_nikkei_trend.py --no-browser # HTML生成のみ
 """
 from __future__ import annotations
 import argparse
-from datetime import datetime, timedelta, timezone
+import webbrowser
+from datetime import timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -92,107 +95,237 @@ def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
     return periods
 
 
-def print_stats(label: str, periods: list[dict]) -> None:
+def calc_stats(periods: list[dict]) -> dict:
     if not periods:
-        print(f"  {label}: データなし")
-        return
+        return {}
     days_list = [p["days"] for p in periods]
     pct_list  = [p["pct"]  for p in periods]
-    avg_days  = sum(days_list) / len(days_list)
-    med_days  = sorted(days_list)[len(days_list) // 2]
-    max_days  = max(days_list)
-    min_days  = min(days_list)
-    avg_pct   = sum(pct_list) / len(pct_list)
-    print(f"  {label}: {len(periods)}回")
-    print(f"    期間: 平均 {avg_days:.0f}日 / 中央値 {med_days}日 / 最短 {min_days}日 / 最長 {max_days}日")
-    print(f"    騰落: 平均 {avg_pct:+.1f}%")
+    return {
+        "count":    len(periods),
+        "avg_days": sum(days_list) / len(days_list),
+        "med_days": sorted(days_list)[len(days_list) // 2],
+        "max_days": max(days_list),
+        "min_days": min(days_list),
+        "avg_pct":  sum(pct_list) / len(pct_list),
+        "days_list": days_list,
+    }
 
-    # 分布
+
+def print_stats(label: str, periods: list[dict]) -> None:
+    s = calc_stats(periods)
+    if not s:
+        print(f"  {label}: データなし")
+        return
+    print(f"  {label}: {s['count']}回")
+    print(f"    期間: 平均 {s['avg_days']:.0f}日 / 中央値 {s['med_days']}日 / 最短 {s['min_days']}日 / 最長 {s['max_days']}日")
+    print(f"    騰落: 平均 {s['avg_pct']:+.1f}%")
     buckets = [(0,10),(10,20),(20,30),(30,60),(60,90),(90,180),(180,9999)]
     dist = []
     for lo, hi in buckets:
-        cnt = sum(1 for d in days_list if lo <= d < hi)
+        cnt = sum(1 for d in s["days_list"] if lo <= d < hi)
         if cnt:
             lbl = f"{lo}〜{hi-1}日" if hi < 9999 else f"{lo}日以上"
             dist.append(f"{lbl}:{cnt}回")
     print(f"    分布: {' / '.join(dist)}")
 
 
+def build_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int) -> str:
+    up_periods   = [p for p in periods if p["trend"] == "up"]
+    down_periods = [p for p in periods if p["trend"] == "down"]
+    su = calc_stats(up_periods)
+    sd = calc_stats(down_periods)
+    today_str   = str(close.index[-1].date())
+    cur_price   = float(close.iloc[-1])
+    cur_trend   = trend.iloc[-1]
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[cur_trend]
+    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[cur_trend]
+
+    # ── 現在トレンド継続状況 ──────────────────────────────────────────────────
+    last = periods[-1] if periods else None
+    current_block = ""
+    if last:
+        ref_stats = su if last["trend"] == "up" else sd
+        med = ref_stats.get("med_days", 0)
+        avg = ref_stats.get("avg_days", 0)
+        remaining = med - last["days"]
+        remain_str = (f"中央値まであと <strong>{remaining}日</strong>（参考値）"
+                      if remaining > 0
+                      else f"中央値({med}日)を超過中 → 転換注意（参考値）")
+        pct_c = "#4ade80" if last["pct"] >= 0 else "#f87171"
+        last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
+        current_block = f"""
+<div class="current-box" style="border-color:{'#166534' if last['trend']=='up' else '#991b1b'}">
+  <div style="font-size:1.1rem;font-weight:700;margin-bottom:10px;color:{trend_color}">
+    現在: {last_ja}トレンド継続中
+  </div>
+  <div class="stat-grid">
+    <div class="stat-item"><span class="stat-label">開始日</span><span class="stat-val">{last['start']}</span></div>
+    <div class="stat-item"><span class="stat-label">継続日数</span><span class="stat-val">{last['days']}日</span></div>
+    <div class="stat-item"><span class="stat-label">開始値</span><span class="stat-val">{last['start_price']:,.0f}円</span></div>
+    <div class="stat-item"><span class="stat-label">現在値</span><span class="stat-val">{cur_price:,.0f}円</span></div>
+    <div class="stat-item"><span class="stat-label">騰落率</span>
+      <span class="stat-val" style="color:{pct_c}">{last['pct']:+.1f}%</span></div>
+    <div class="stat-item"><span class="stat-label">平均期間</span><span class="stat-val">{avg:.0f}日</span></div>
+    <div class="stat-item"><span class="stat-label">中央値期間</span><span class="stat-val">{med}日</span></div>
+  </div>
+  <div style="margin-top:12px;padding:10px;background:#0f172a;border-radius:6px;font-size:0.88rem;color:#fbbf24">
+    📊 {remain_str}
+  </div>
+</div>"""
+
+    # ── 統計カード ─────────────────────────────────────────────────────────────
+    def stat_card(title: str, s: dict, color: str, bg: str) -> str:
+        if not s:
+            return ""
+        buckets = [(0,10),(10,20),(20,30),(30,60),(60,90),(90,180),(180,9999)]
+        bar_rows = ""
+        max_cnt = 1
+        dist_data = []
+        for lo, hi in buckets:
+            cnt = sum(1 for d in s["days_list"] if lo <= d < hi)
+            if cnt:
+                lbl = f"{lo}〜{hi-1}日" if hi < 9999 else f"{lo}日以上"
+                dist_data.append((lbl, cnt))
+                max_cnt = max(max_cnt, cnt)
+        for lbl, cnt in dist_data:
+            w = int(cnt / max_cnt * 100)
+            bar_rows += f"""
+<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:0.82rem">
+  <span style="width:80px;color:#94a3b8;flex-shrink:0">{lbl}</span>
+  <div style="flex:1;background:#1e293b;border-radius:3px;height:14px">
+    <div style="width:{w}%;background:{color};height:100%;border-radius:3px"></div>
+  </div>
+  <span style="width:30px;text-align:right;color:#e2e8f0">{cnt}回</span>
+</div>"""
+        return f"""
+<div style="background:{bg};border:1px solid {color}44;border-radius:10px;padding:18px;flex:1;min-width:280px">
+  <div style="color:{color};font-weight:700;font-size:1.05rem;margin-bottom:12px">{title}</div>
+  <div class="stat-grid" style="margin-bottom:14px">
+    <div class="stat-item"><span class="stat-label">回数</span><span class="stat-val">{s['count']}回</span></div>
+    <div class="stat-item"><span class="stat-label">平均期間</span><span class="stat-val">{s['avg_days']:.0f}日</span></div>
+    <div class="stat-item"><span class="stat-label">中央値</span><span class="stat-val">{s['med_days']}日</span></div>
+    <div class="stat-item"><span class="stat-label">最短</span><span class="stat-val">{s['min_days']}日</span></div>
+    <div class="stat-item"><span class="stat-label">最長</span><span class="stat-val">{s['max_days']}日</span></div>
+    <div class="stat-item"><span class="stat-label">平均騰落</span>
+      <span class="stat-val" style="color:{color}">{s['avg_pct']:+.1f}%</span></div>
+  </div>
+  <div style="font-size:0.78rem;color:#64748b;margin-bottom:6px">期間分布</div>
+  {bar_rows}
+</div>"""
+
+    up_card   = stat_card("上昇トレンド ▲", su, "#4ade80", "#052e16")
+    down_card = stat_card("下落トレンド ▼", sd, "#f87171", "#2d0a0a")
+
+    # ── 全期間テーブル ─────────────────────────────────────────────────────────
+    rows = ""
+    for p in reversed(periods):
+        is_up    = p["trend"] == "up"
+        is_last  = (p is periods[-1])
+        tc       = "#4ade80" if is_up else "#f87171"
+        mark     = "▲ 上昇" if is_up else "▼ 下落"
+        bg       = "background:#052e1620;" if is_up else "background:#2d0a0a20;"
+        border   = "border-left:3px solid #4ade80;" if is_up else "border-left:3px solid #f87171;"
+        active   = "font-weight:700;" if is_last else ""
+        rows += f"""<tr style="{bg}{active}">
+  <td style="color:{tc};{border}padding-left:10px">{mark}</td>
+  <td>{p['start']}</td>
+  <td>{p['end']}{'　▶現在' if is_last else ''}</td>
+  <td style="text-align:right">{p['days']}日</td>
+  <td style="text-align:right;color:{tc}">{p['pct']:+.1f}%</td>
+  <td style="text-align:right">{p['start_price']:,.0f}</td>
+  <td style="text-align:right">{p['end_price']:,.0f}</td>
+</tr>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日経平均トレンド期間分析 — {today_str}</title>
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ font-family:"Segoe UI","Hiragino Sans",sans-serif;
+          background:#0f172a; color:#e2e8f0; padding:24px; max-width:1000px; margin:0 auto; }}
+  h1 {{ color:#60a5fa; font-size:1.6rem; margin-bottom:4px; }}
+  h2 {{ color:#60a5fa; font-size:1.1rem; margin:28px 0 12px;
+        border-left:3px solid #60a5fa; padding-left:10px; }}
+  .subtitle {{ color:#94a3b8; font-size:0.9rem; margin-bottom:24px; }}
+  .stat-grid {{ display:flex; flex-wrap:wrap; gap:10px; }}
+  .stat-item {{ display:flex; flex-direction:column; min-width:100px; }}
+  .stat-label {{ font-size:0.72rem; color:#64748b; }}
+  .stat-val   {{ font-size:1rem; font-weight:600; }}
+  .current-box {{ border:1px solid; border-radius:10px; padding:18px; margin-bottom:16px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.83rem; }}
+  th {{ background:#1e293b; color:#94a3b8; padding:7px 10px;
+        border:1px solid #334155; text-align:center; white-space:nowrap; }}
+  td {{ padding:5px 10px; border:1px solid #1e293b; }}
+  tr:hover td {{ filter:brightness(1.15); }}
+</style>
+</head>
+<body>
+<h1>日経平均 トレンド期間分析</h1>
+<p class="subtitle">
+  生成日: {today_str} ／ 分析期間: {close.index[0].date()} 〜 {today_str} (過去{years}年) ／
+  現在: <strong style="color:{trend_color}">{trend_ja} {cur_price:,.0f}円</strong>
+</p>
+
+<h2>現在のトレンド状況</h2>
+{current_block}
+
+<h2>トレンド統計</h2>
+<div style="display:flex;flex-wrap:wrap;gap:16px">
+  {up_card}
+  {down_card}
+</div>
+
+<h2>全トレンド期間一覧（新しい順）</h2>
+<table>
+<thead><tr>
+  <th>種別</th><th>開始日</th><th>終了日</th>
+  <th>日数</th><th>騰落率</th><th>開始値(円)</th><th>終了値(円)</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+
+<p style="color:#334155;font-size:0.75rem;margin-top:24px">
+  ※ 判定: 終値&gt;MA10&gt;MA25=上昇 ／ 終値&lt;MA10&lt;MA25=下落 ／ それ以外=横ばい（表から除外）<br>
+  ※ 「中央値まであと〇日」は過去の統計であり、将来のトレンド継続を保証しません。
+</p>
+</body>
+</html>"""
+
+
 def main():
     parser = argparse.ArgumentParser(description="日経平均トレンド期間分析")
-    parser.add_argument("--years", type=int, default=5)
+    parser.add_argument("--years",      type=int, default=5)
+    parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    print(f"日経平均トレンド期間分析 (過去{args.years}年)", flush=True)
-    close  = fetch_n225(args.years)
-    trend  = label_trend(close)
+    print(f"日経平均トレンド期間分析 (過去{args.years}年)...", flush=True)
+    close   = fetch_n225(args.years)
+    trend   = label_trend(close)
     periods = extract_periods(close, trend)
 
     up_periods   = [p for p in periods if p["trend"] == "up"]
     down_periods = [p for p in periods if p["trend"] == "down"]
 
-    W = 72
-    print("=" * W)
-    print(f"  分析期間: {close.index[0].date()} 〜 {close.index[-1].date()}  ({len(close)}営業日)")
-    print(f"  現在の日経: {float(close.iloc[-1]):,.0f}円")
-    print(f"  現在のトレンド: {trend.iloc[-1]}")
-    print("=" * W)
-
-    print()
-    print("【統計サマリー】")
+    # ── コンソール出力 ─────────────────────────────────────────────────────────
     print_stats("上昇トレンド", up_periods)
-    print()
     print_stats("下落トレンド", down_periods)
 
-    # ── 全期間リスト ──────────────────────────────────────────────────────────
-    print()
-    print("=" * W)
-    print("【全トレンド期間一覧】")
-    print("=" * W)
-    header = f"  {'種別':6} {'開始':12} {'終了':12} {'日数':>6} {'騰落':>8} {'開始値':>9} {'終了値':>9}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
-    for p in periods:
-        mark = "▲" if p["trend"] == "up" else "▼"
-        color_open  = "+" if p["pct"] >= 0 else ""
-        print(f"  {mark} {p['trend']:4} {str(p['start']):12} {str(p['end']):12} "
-              f"{p['days']:>6}日 {color_open}{p['pct']:>6.1f}% "
-              f"{p['start_price']:>9,.0f} {p['end_price']:>9,.0f}")
-
-    # ── 現在のトレンド継続日数 ────────────────────────────────────────────────
     if periods:
         last = periods[-1]
-        print()
-        print("=" * W)
-        trend_ja = "上昇" if last["trend"] == "up" else ("下落" if last["trend"] == "down" else "横ばい")
-        print(f"【現在のトレンド状況】")
-        print(f"  トレンド  : {trend_ja}")
-        print(f"  開始日    : {last['start']} ({last['days']}日継続中)")
-        print(f"  開始値    : {last['start_price']:,.0f}円 → 現在 {float(close.iloc[-1]):,.0f}円 "
-              f"({last['pct']:+.1f}%)")
+        trend_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
+        print(f"\n現在: {trend_ja} {last['days']}日継続中 ({last['pct']:+.1f}%)")
 
-        if last["trend"] == "up":
-            avg = sum(p["days"] for p in up_periods) / len(up_periods) if up_periods else 0
-            med = sorted(p["days"] for p in up_periods)[len(up_periods)//2] if up_periods else 0
-            print(f"  上昇の平均期間: {avg:.0f}日 / 中央値: {med}日")
-            remaining = med - last["days"]
-            if remaining > 0:
-                print(f"  中央値まであと: {remaining}日（参考値・保証なし）")
-            else:
-                print(f"  中央値({med}日)をすでに超過 → 転換注意（参考値・保証なし）")
-        elif last["trend"] == "down":
-            avg = sum(p["days"] for p in down_periods) / len(down_periods) if down_periods else 0
-            med = sorted(p["days"] for p in down_periods)[len(down_periods)//2] if down_periods else 0
-            print(f"  下落の平均期間: {avg:.0f}日 / 中央値: {med}日")
-            remaining = med - last["days"]
-            if remaining > 0:
-                print(f"  中央値まであと: {remaining}日（参考値・保証なし）")
-            else:
-                print(f"  中央値({med}日)をすでに超過 → 反転の可能性（参考値・保証なし）")
+    # ── HTML生成 ───────────────────────────────────────────────────────────────
+    today_str = str(close.index[-1].date())
+    html_path = Path(f"nikkei_trend_{today_str}.html")
+    html_path.write_text(build_html(close, trend, periods, args.years), encoding="utf-8")
+    print(f"生成: {html_path}")
 
-    print()
-    print("※ トレンド判定: 終値>MA10>MA25=上昇 / 終値<MA10<MA25=下落 / それ以外=横ばい")
-    print("※ 過去の統計は将来を保証しません")
+    if not args.no_browser:
+        webbrowser.open(html_path.resolve().as_uri())
 
 
 if __name__ == "__main__":
