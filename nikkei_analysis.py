@@ -315,6 +315,93 @@ STATUS_META = {
 RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
 
 
+def _priority_score(cmd: str, r: dict, status: str) -> int:
+    """おすすめスコア 0〜100"""
+    if status == "❌ 停止":
+        return 0
+    base = 30 if status == "⚠️ 注意" else 55
+
+    trend = r["trend"]
+    mom5  = r["mom5"]
+    mom20 = r["mom20"]
+
+    # Walk-forward選定: バックテスト信頼性が高い
+    if "wf" in cmd:
+        base += 20
+
+    # aggressive × 上昇トレンド
+    if "--aggressive" in cmd and trend == "up":
+        base += 15
+
+    # 強い上昇相場（5日+2%以上 / 20日+3%以上）では aggressive/nolimit を優遇
+    if mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]:
+        if "--aggressive" in cmd or "nolimit" in cmd:
+            base += 8
+
+    # 株価制限なし: 全条件揃っている時のみ追加ボーナス
+    if "nolimit" in cmd and mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]:
+        base += 5
+
+    # プライム全銘柄: 株価制限なしと対象が重複する
+    if "prime" in cmd:
+        base -= 15
+
+    # 統合版: 個別管理と重複し運用が複雑になる
+    if "merged" in cmd:
+        base -= 12
+
+    # 下落相場でのペナルティ
+    if trend == "down" and ("--aggressive" in cmd or "nolimit" in cmd or "prime" in cmd):
+        base -= 20
+
+    return min(100, max(0, base))
+
+
+def _priority_reason(cmd: str, r: dict, score: int) -> str:
+    """おすすめ度の短い理由"""
+    trend = r["trend"]
+    mom5  = r["mom5"]
+    mom20 = r["mom20"]
+    if "wf" in cmd and "--aggressive" in cmd:
+        return "WF選定×aggressive — 信頼性と収益性のバランスが最良"
+    if "nolimit" in cmd:
+        nolimit_ok = mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]
+        if nolimit_ok:
+            return f"5日{mom5:+.1f}%/20日{mom20:+.1f}% — 全条件が揃った稀なタイミング"
+        return "条件が一部未達 — 使用は慎重に"
+    if "wf" in cmd and "--conservative" in cmd:
+        return "WF選定×conservative — 全相場で安定。サブ枠に最適"
+    if "run_signals.py" in cmd and "wf" not in cmd and "nolimit" not in cmd and "merged" not in cmd:
+        return "全相場のベースライン — 常時稼働用"
+    if "prime" in cmd:
+        return "株価制限なしと対象重複 — 両方使うなら不要"
+    if "merged" in cmd:
+        return "WF+既存の個別実行と重複 — 管理が複雑になる"
+    return ""
+
+
+def _stars_html(score: int, rank: int | None) -> str:
+    """★バー + 順位バッジを返す"""
+    if score == 0:
+        return '<span style="color:#334155;font-size:0.8rem">— 停止中</span>'
+    filled = round(score / 20)          # 0-100 → 0-5 stars
+    filled = max(1, min(5, filled))
+    stars  = '★' * filled + '<span style="color:#1e293b">★</span>' * (5 - filled)
+    star_color = "#fbbf24" if score >= 70 else ("#94a3b8" if score >= 45 else "#475569")
+
+    rank_html = ""
+    if rank == 1:
+        rank_html = '<span style="background:#b45309;color:#fef3c7;padding:1px 8px;border-radius:4px;font-size:0.72rem;font-weight:700">1位</span>'
+    elif rank == 2:
+        rank_html = '<span style="background:#475569;color:#e2e8f0;padding:1px 8px;border-radius:4px;font-size:0.72rem;font-weight:700">2位</span>'
+    elif rank == 3:
+        rank_html = '<span style="background:#7c2d12;color:#fed7aa;padding:1px 8px;border-radius:4px;font-size:0.72rem;font-weight:700">3位</span>'
+    elif rank is not None:
+        rank_html = f'<span style="color:#475569;font-size:0.72rem">{rank}位</span>'
+
+    return f'<span style="color:{star_color};font-size:1.05rem;letter-spacing:1px">{stars}</span> {rank_html}'
+
+
 def _tab1_signal_html(r: dict, ref_date) -> str:
     """タブ1: シグナル判定"""
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
@@ -361,15 +448,30 @@ def _tab1_signal_html(r: dict, ref_date) -> str:
   </div>
 </div>"""
 
-    # スクリプトカード
+    # スクリプトカード — スコア事前計算 → ランク付け → 描画
+    judged = [(s, *judge(s, r)) for s in SCRIPTS]            # (s, status, reason, advice)
+    scored = [(s, st, rs, adv, _priority_score(s["cmd"], r, st))
+              for s, st, rs, adv in judged]                   # +score
+
+    # 推奨の中だけでランク付け
+    rec_scores = sorted(
+        [(i, sc[4]) for i, sc in enumerate(scored) if sc[1] == "✅ 推奨"],
+        key=lambda x: -x[1]
+    )
+    rank_map = {idx: rank + 1 for rank, (idx, _) in enumerate(rec_scores)}
+
     recommended = []
     cards_html = ""
-    for s in SCRIPTS:
-        status, reason, advice = judge(s, r)
+    for i, (s, status, reason, advice, score) in enumerate(scored):
         lbl_ja, fg, bg, border = STATUS_META[status]
-        rc = RISK_COLOR.get(s["risk"], "#94a3b8")
+        rc       = RISK_COLOR.get(s["risk"], "#94a3b8")
+        rank     = rank_map.get(i)
+        stars    = _stars_html(score, rank)
+        p_reason = _priority_reason(s["cmd"], r, score)
         adv_html = (f'<div style="color:#94a3b8;font-size:0.8rem;margin-top:4px">→ {advice}</div>'
                     if advice else "")
+        p_reason_html = (f'<span style="color:#94a3b8;font-size:0.78rem;margin-left:8px">{p_reason}</span>'
+                         if p_reason else "")
         cards_html += f"""
 <div class="script-card" style="border-color:{border};background:{bg}">
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -379,6 +481,10 @@ def _tab1_signal_html(r: dict, ref_date) -> str:
     <span style="margin-left:auto;font-size:0.78rem;color:{rc}">リスク: {s['risk']}</span>
   </div>
   <code class="cmd-box">{s['cmd']}</code>
+  <div style="display:flex;align-items:center;gap:6px;margin-top:8px">
+    <span style="font-size:0.72rem;color:#64748b;white-space:nowrap">おすすめ度</span>
+    {stars}{p_reason_html}
+  </div>
   <div style="color:#94a3b8;font-size:0.82rem;margin-top:6px">{reason}</div>
   {adv_html}
   <div style="color:#64748b;font-size:0.78rem;margin-top:4px">{s['note']}</div>
