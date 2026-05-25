@@ -49,7 +49,7 @@ def label_trend(close: pd.Series) -> pd.Series:
 
 
 def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
-    """連続するトレンド区間を抽出"""
+    """連続するトレンド区間を抽出（横ばい含む）"""
     periods = []
     cur_trend = None
     start_idx = None
@@ -57,7 +57,7 @@ def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
     for i in range(len(trend)):
         t = trend.iloc[i]
         if t != cur_trend:
-            if cur_trend is not None and cur_trend != "sideways":
+            if cur_trend is not None:
                 end_idx = i - 1
                 start_price = float(close.iloc[start_idx])
                 end_price   = float(close.iloc[end_idx])
@@ -78,7 +78,7 @@ def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
             start_idx  = i
 
     # 最後の区間
-    if cur_trend is not None and cur_trend != "sideways" and start_idx is not None:
+    if cur_trend is not None and start_idx is not None:
         end_idx     = len(trend) - 1
         start_price = float(close.iloc[start_idx])
         end_price   = float(close.iloc[end_idx])
@@ -219,13 +219,15 @@ def build_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: i
     # ── 全期間テーブル ─────────────────────────────────────────────────────────
     rows = ""
     for p in reversed(periods):
-        is_up    = p["trend"] == "up"
+        t        = p["trend"]
         is_last  = (p is periods[-1])
-        tc       = "#4ade80" if is_up else "#f87171"
-        mark     = "▲ 上昇" if is_up else "▼ 下落"
-        bg       = "background:#052e1620;" if is_up else "background:#2d0a0a20;"
-        border   = "border-left:3px solid #4ade80;" if is_up else "border-left:3px solid #f87171;"
-        active   = "font-weight:700;" if is_last else ""
+        if t == "up":
+            tc, mark, bg, border = "#4ade80", "▲ 上昇", "background:#052e1620;", "border-left:3px solid #4ade80;"
+        elif t == "down":
+            tc, mark, bg, border = "#f87171", "▼ 下落", "background:#2d0a0a20;", "border-left:3px solid #f87171;"
+        else:
+            tc, mark, bg, border = "#fbbf24", "→ 横ばい", "background:#2d1f0020;", "border-left:3px solid #fbbf24;"
+        active = "font-weight:700;" if is_last else ""
         rows += f"""<tr style="{bg}{active}">
   <td style="color:{tc};{border}padding-left:10px">{mark}</td>
   <td>{p['start']}</td>
@@ -288,7 +290,7 @@ def build_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: i
 </table>
 
 <p style="color:#334155;font-size:0.75rem;margin-top:24px">
-  ※ 判定: 終値&gt;MA10&gt;MA25=上昇 ／ 終値&lt;MA10&lt;MA25=下落 ／ それ以外=横ばい（表から除外）<br>
+  ※ 判定: 終値&gt;MA10&gt;MA25=上昇(▲) ／ 終値&lt;MA10&lt;MA25=下落(▼) ／ それ以外=横ばい(→ MAが交差中の移行期間)<br>
   ※ 「中央値まであと〇日」は過去の統計であり、将来のトレンド継続を保証しません。
 </p>
 </body>
