@@ -39,6 +39,7 @@ from backtest_limit_entry import (
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
     compute_period_result,
+    round_to_tick,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
 from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
@@ -199,10 +200,10 @@ def check_signal_on_date(symbol: str, strategy: str,
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
-        order_price=round(order_p, 0),
-        limit_entry_price=round(limit_entry, 0),
-        stop_price=round(sl, 0),
-        target_price=round(tp, 0),
+        order_price=round_to_tick(order_p),
+        limit_entry_price=round_to_tick(limit_entry),
+        stop_price=round_to_tick(sl),
+        target_price=round_to_tick(tp),
         current_price=current_p,
         signal_date=sig_date,
         signal_price=round(close_prev, 0),

@@ -77,6 +77,34 @@ FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
 # 5% 超の急騰(高値掴みリスク大)は除外できる実用的な値。
 LIMIT_ENTRY_MARGIN_PCT = 0.03
 
+
+# ── TSE 呼値 (tick size) 丸め ────────────────────────────────────
+# 東証の呼値単位: https://www.jpx.co.jp/rules-participants/rules/tick-size/
+_TICK_TABLE = [
+    (3_000,     1),
+    (5_000,     5),
+    (30_000,   10),
+    (50_000,   50),
+    (300_000, 100),
+    (500_000, 500),
+    (3_000_000,   1_000),
+    (5_000_000,   5_000),
+    (float("inf"), 10_000),
+]
+
+def tick_size(price: float) -> int:
+    """価格に対応する呼値単位を返す"""
+    for threshold, tick in _TICK_TABLE:
+        if price < threshold:
+            return tick
+    return 10_000
+
+def round_to_tick(price: float) -> int:
+    """TSE呼値単位に合わせて最近接値に丸める（発注価格エラー防止）"""
+    t = tick_size(float(price))
+    return int(round(price / t) * t)
+
+
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
 MACD_SLOW         = 17
