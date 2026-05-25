@@ -9,9 +9,10 @@ select_signals.py / analyze_nikkei_trend.py / analyze_trend_timing.py を1本に
   タブ3: エントリー分析  — 上昇何日目に入ると良いか / 生存確率
 
 Usage:
-    python nikkei_analysis.py              # 過去5年 HTML生成 & ブラウザ表示
-    python nikkei_analysis.py --years 10
-    python nikkei_analysis.py --no-browser # HTML生成のみ
+    python nikkei_analysis.py                       # 過去5年 HTML生成 & ブラウザ表示
+    python nikkei_analysis.py --years 10            # 過去10年
+    python nikkei_analysis.py --date 2024-01-15     # 指定日時点の分析
+    python nikkei_analysis.py --no-browser          # HTML生成のみ
 """
 from __future__ import annotations
 import argparse
@@ -29,9 +30,16 @@ _TODAY = datetime.now(JST).date()
 # データ取得 & トレンド判定
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def fetch_n225(years: int) -> pd.Series:
-    df = yf.download("^N225", period=f"{years * 365 + 60}d", interval="1d",
-                     progress=False, auto_adjust=True)
+def fetch_n225(years: int, end_date=None) -> pd.Series:
+    """日経225の日足終値を取得。end_date 指定時はその日までのデータを返す。"""
+    if end_date is not None:
+        start = pd.Timestamp(end_date) - pd.Timedelta(days=years * 365 + 60)
+        end   = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        df = yf.download("^N225", start=start, end=end, interval="1d",
+                         progress=False, auto_adjust=True)
+    else:
+        df = yf.download("^N225", period=f"{years * 365 + 60}d", interval="1d",
+                         progress=False, auto_adjust=True)
     if df is None or df.empty:
         raise RuntimeError("日経データ取得失敗")
     close = df["Close"].squeeze()
@@ -156,7 +164,7 @@ def judge(script: dict, r: dict) -> tuple[str, str, str]:
 # トレンド期間抽出 (analyze_nikkei_trend.py 相当)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
+def extract_periods(close: pd.Series, trend: pd.Series, ref_date) -> list[dict]:
     periods = []
     cur_trend = None
     start_idx = None
@@ -165,7 +173,7 @@ def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
         sp = float(close.iloc[start_idx])
         ep = float(close.iloc[end_idx])
         sd = close.index[start_idx].date()
-        ed = _TODAY if is_current else close.index[end_idx].date()
+        ed = ref_date if is_current else close.index[end_idx].date()
         seg = close.iloc[start_idx:end_idx + 1]
         return {
             "trend": cur_trend, "start": sd, "end": ed,
@@ -210,7 +218,7 @@ def calc_stats(periods: list[dict]) -> dict:
 # エントリータイミング分析 (analyze_trend_timing.py 相当)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def extract_up_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
+def extract_up_periods(close: pd.Series, trend: pd.Series, ref_date) -> list[dict]:
     periods = []
     cur_trend = None
     start_idx = None
@@ -219,19 +227,19 @@ def extract_up_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
         t = trend.iloc[i]
         if t != cur_trend:
             if cur_trend == "up" and start_idx is not None:
-                _append_up(close, start_idx, i - 1, periods)
+                _append_up(close, start_idx, i - 1, periods, ref_date=ref_date)
             cur_trend = t
             start_idx = i
     if cur_trend == "up" and start_idx is not None:
-        _append_up(close, start_idx, n - 1, periods, is_current=True)
+        _append_up(close, start_idx, n - 1, periods, is_current=True, ref_date=ref_date)
     return periods
 
 
-def _append_up(close, start_idx, end_idx, periods, is_current=False):
+def _append_up(close, start_idx, end_idx, periods, is_current=False, ref_date=None):
     sp = float(close.iloc[start_idx])
     ep = float(close.iloc[end_idx])
     sd = close.index[start_idx].date()
-    ed = _TODAY if is_current else close.index[end_idx].date()
+    ed = (ref_date if ref_date else _TODAY) if is_current else close.index[end_idx].date()
 
     look_back    = max(0, start_idx - 30)
     pre_seg      = close.iloc[look_back:start_idx + 1]
@@ -307,7 +315,7 @@ STATUS_META = {
 RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
 
 
-def _tab1_signal_html(r: dict) -> str:
+def _tab1_signal_html(r: dict, ref_date) -> str:
     """タブ1: シグナル判定"""
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
@@ -408,14 +416,14 @@ def _tab1_signal_html(r: dict) -> str:
 </div>"""
 
     return f"""
-<h2>現在の相場環境（日経225）</h2>
+<h2>{ref_date} 時点の相場環境（日経225）</h2>
 <div class="regime-panel">{regime_html}</div>
 {warn_html}
 
 <h2>スクリプト判定</h2>
 {cards_html}
 
-<h2>本日の推奨コマンド</h2>
+<h2>{ref_date} 時点の推奨コマンド</h2>
 {rec_html}
 {nolimit_block}
 
@@ -819,12 +827,17 @@ function switchTab(id) {
 
 
 def build_html(close: pd.Series, trend: pd.Series, r: dict,
-               periods: list[dict], up_periods: list[dict], years: int) -> str:
-    today_str   = str(_TODAY)
+               periods: list[dict], up_periods: list[dict],
+               years: int, ref_date) -> str:
+    ref_str     = str(ref_date)
+    is_past     = (ref_date != _TODAY)
+    past_badge  = (f' <span style="background:#7c3aed;color:#fff;padding:2px 10px;'
+                   f'border-radius:6px;font-size:0.78rem;vertical-align:middle">'
+                   f'過去日付: {ref_str}</span>') if is_past else ""
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
 
-    tab1 = _tab1_signal_html(r)
+    tab1 = _tab1_signal_html(r, ref_date)
     tab2 = _tab2_trend_html(close, trend, periods, years)
 
     all_stats = {
@@ -838,14 +851,14 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>日経平均 総合分析 — {today_str}</title>
+<title>日経平均 総合分析 — {ref_str}</title>
 <style>{CSS}</style>
 </head>
 <body>
-<h1>日経平均 総合分析レポート</h1>
+<h1>日経平均 総合分析レポート{past_badge}</h1>
 <p class="subtitle">
-  生成日: {today_str} ／ 分析期間: {close.index[0].date()} 〜 {today_str} (過去{years}年) ／
-  現在: <strong style="color:{trend_color}">{trend_ja} {r['cur']:,.0f}円</strong>
+  基準日: {ref_str} ／ 分析期間: {close.index[0].date()} 〜 {ref_str} (過去{years}年) ／
+  {ref_str}時点: <strong style="color:{trend_color}">{trend_ja} {r['cur']:,.0f}円</strong>
 </p>
 
 <div class="tab-nav">
@@ -869,21 +882,43 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
 
 def main():
     parser = argparse.ArgumentParser(description="日経平均 総合分析レポート")
-    parser.add_argument("--years",      type=int, default=5, help="分析期間（年）")
-    parser.add_argument("--no-browser", action="store_true",  help="HTML生成のみ")
+    parser.add_argument("--years",      type=int, default=5,   help="分析期間（年）")
+    parser.add_argument("--date",       type=str, default=None, help="基準日 YYYY-MM-DD (省略時=今日)")
+    parser.add_argument("--no-browser", action="store_true",    help="HTML生成のみ")
     args = parser.parse_args()
 
-    print(f"日経平均 総合分析 (過去{args.years}年)...", flush=True)
+    # 基準日を決定
+    if args.date:
+        try:
+            from datetime import date as date_type
+            ref_date = date_type.fromisoformat(args.date)
+        except ValueError:
+            print(f"[ERROR] --date の形式が不正です: {args.date}  (例: 2024-01-15)")
+            return
+        if ref_date > _TODAY:
+            print(f"[ERROR] --date に未来の日付は指定できません: {ref_date}")
+            return
+        print(f"日経平均 総合分析 (基準日: {ref_date} / 過去{args.years}年)...", flush=True)
+    else:
+        ref_date = _TODAY
+        print(f"日経平均 総合分析 (過去{args.years}年)...", flush=True)
 
-    close  = fetch_n225(args.years)
-    trend  = label_trend(close)
-    r      = get_regime(close)
-    periods   = extract_periods(close, trend)
-    up_timing = extract_up_periods(close, trend)
+    close = fetch_n225(args.years, end_date=ref_date if args.date else None)
+    # --date 指定時: データが基準日以降まで含まれる場合は切り捨て
+    if args.date:
+        close = close[close.index <= pd.Timestamp(ref_date)]
+    if close.empty:
+        print(f"[ERROR] {ref_date} 時点のデータが取得できませんでした")
+        return
+
+    trend     = label_trend(close)
+    r         = get_regime(close)
+    periods   = extract_periods(close, trend, ref_date)
+    up_timing = extract_up_periods(close, trend, ref_date)
 
     # コンソールサマリー
     trend_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
-    print(f"現在: {trend_ja} / 日経 {r['cur']:,.0f}円 / 5日 {r['mom5']:+.1f}% / 20日 {r['mom20']:+.1f}%")
+    print(f"{ref_date}: {trend_ja} / 日経 {r['cur']:,.0f}円 / 5日 {r['mom5']:+.1f}% / 20日 {r['mom20']:+.1f}%")
 
     up_p   = [p for p in periods if p["trend"] == "up"]
     down_p = [p for p in periods if p["trend"] == "down"]
@@ -894,11 +929,12 @@ def main():
     if sd:
         print(f"下落: {sd['count']}回 / 平均{sd['avg_days']:.0f}日 / 中央値{sd['med_days']}日")
     last = periods[-1]
-    print(f"現在トレンド継続: {last['days']}日 ({last['pct']:+.1f}%)")
+    last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
+    print(f"{last_ja}トレンド継続: {last['days']}日 ({last['pct']:+.1f}%)")
 
-    html_path = Path(f"nikkei_analysis_{_TODAY}.html")
+    html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(
-        build_html(close, trend, r, periods, up_timing, args.years),
+        build_html(close, trend, r, periods, up_timing, args.years, ref_date),
         encoding="utf-8"
     )
     print(f"生成: {html_path}")
