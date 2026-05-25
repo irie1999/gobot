@@ -2,7 +2,7 @@
 select_signals.py  ―  日経平均分析 → 使用シグナル自動判定
 
 日経225の現在の相場環境を分析して、今日使うべきシグナルスクリプトを
-推奨・警告・停止の3段階で表示する。
+推奨・警告・停止の3段階でHTML表示する。
 
 判定ルール（analyze_nolimit_regime.py の実績データから導出）:
 
@@ -13,7 +13,8 @@ select_signals.py  ―  日経平均分析 → 使用シグナル自動判定
   下落相場時: 既存版 conservative のみ
 
 Usage:
-    python select_signals.py              # 判定表示のみ
+    python select_signals.py              # HTML生成 & ブラウザ表示
+    python select_signals.py --no-browser # HTML生成のみ
     python select_signals.py --run        # 推奨スクリプトを順次実行
     python select_signals.py --run --days 90  # 期間指定で実行
     python select_signals.py --signal-only    # --signal-only 付きで実行
@@ -21,7 +22,8 @@ Usage:
 from __future__ import annotations
 import argparse
 import subprocess
-import sys
+import webbrowser
+from pathlib import Path
 from datetime import timedelta, timezone, datetime
 
 try:
@@ -345,17 +347,224 @@ def _add_args(cmd: str, days: int | None, signal_only: bool, no_browser: bool) -
     return cmd + (" " + " ".join(extra) if extra else "")
 
 
+# ── HTML生成 ─────────────────────────────────────────────────────────────────
+
+def _regime_html(r: dict | None) -> str:
+    if r is None:
+        return '<p style="color:#fbbf24;padding:12px">⚠️ 相場データ取得失敗（yfinance接続不可）。保守的ルールで判定しています。</p>'
+
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
+    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
+    vol_color   = {"high": "#f87171", "mid": "#fbbf24", "low": "#4ade80"}[r["vol_level"]]
+    vol_ja      = {"high": "高ボラ", "mid": "中ボラ", "low": "低ボラ"}[r["vol_level"]]
+    ma200_str   = f"{r['ma200']:,.0f}" if r.get("ma200") else "N/A"
+    ma200_color = "#4ade80" if r["above_ma200"] else "#f87171"
+    ma200_pos   = f'<span style="color:{ma200_color}">{"▲ 上" if r["above_ma200"] else "▼ 下"}</span>'
+    mom5_c  = "#4ade80" if r["mom5"]  >= 0 else "#f87171"
+    mom20_c = "#4ade80" if r["mom20"] >= 0 else "#f87171"
+    drop_c  = "#f87171" if r["max_1d_drop"] < -3 else "#94a3b8"
+
+    items = [
+        ("日経225",        f'<strong style="font-size:1.2rem">{r["cur"]:,.0f}円</strong>'),
+        ("トレンド",       f'<span style="color:{trend_color};font-weight:700">{trend_ja}</span>'),
+        ("ボラ (14日)",    f'<span style="color:{vol_color}">{vol_ja} ({r["vol"]:.2f}%)</span>'),
+        ("5日騰落",        f'<span style="color:{mom5_c};font-weight:600">{r["mom5"]:+.2f}%</span>'),
+        ("20日騰落",       f'<span style="color:{mom20_c};font-weight:600">{r["mom20"]:+.2f}%</span>'),
+        ("MA200",          f'{ma200_str}円 → {ma200_pos}'),
+        ("過去30日最大下落", f'<span style="color:{drop_c}">{r["max_1d_drop"]:+.2f}%</span>'),
+    ]
+    cells = "".join(
+        f'<div class="regime-item"><span class="regime-label">{lbl}</span>'
+        f'<span class="regime-val">{val}</span></div>'
+        for lbl, val in items
+    )
+    return f'<div class="regime-panel">{cells}</div>'
+
+
+def _risk_warning_html(r: dict | None) -> str:
+    if r is None:
+        return ""
+    risks = []
+    if r["max_1d_drop"] < -3.0:
+        risks.append(f"過去30日に <strong>{r['max_1d_drop']:+.1f}%</strong> の急落あり → 複数ポジションが同時損切りリスク")
+    if r["trend"] == "up" and r["vol_level"] == "high" and r["mom5"] > 5:
+        risks.append(f"急騰後の高ボラ ({r['mom5']:+.1f}%) → 利益確定売りで急反落しやすい局面")
+    if not r["above_ma200"]:
+        risks.append("日経 &lt; MA200 → 長期下落トレンド。逆指値が連続損切りするリスク大")
+    if not risks:
+        return ""
+    li = "".join(f"<li>{rk}</li>" for rk in risks)
+    return f"""
+<div class="warn-box">
+  <div style="font-weight:700;margin-bottom:8px">⚠️ 株価制限なし 大損リスク要因</div>
+  <ul style="padding-left:1.4em;line-height:1.9">{li}</ul>
+  <div style="margin-top:10px;color:#94a3b8;font-size:0.82rem">
+    損失目安: ATR × 1.5 × 100株 / 銘柄<br>
+    例) 5,000円株・ATR200円 → 損切り −30,000円/銘柄 &nbsp;|&nbsp;
+        10,000円株・ATR400円 → 損切り −60,000円/銘柄
+  </div>
+</div>"""
+
+
+STATUS_META = {
+    "✅ 推奨": ("推奨",  "#4ade80", "#052e16", "#166534"),
+    "⚠️ 注意": ("注意",  "#fbbf24", "#2d1f00", "#92400e"),
+    "❌ 停止": ("停止",  "#f87171", "#2d0a0a", "#991b1b"),
+}
+
+RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
+
+
+def _script_cards_html(r: dict | None) -> str:
+    recommended_cmds = []
+    cards = []
+    for s in SCRIPTS:
+        status, reason, advice = judge(s, r)
+        label_ja, fg, bg, border = STATUS_META[status]
+        risk_c = RISK_COLOR.get(s["risk"], "#94a3b8")
+        advice_html = f'<div style="color:#94a3b8;font-size:0.8rem;margin-top:4px">→ {advice}</div>' if advice else ""
+        cards.append(f"""
+<div class="script-card" style="border-color:{border};background:{bg}">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span class="status-badge" style="background:{border};color:{fg}">{label_ja}</span>
+    <span style="font-weight:700;font-size:1.05rem">{s['label']}</span>
+    <span style="color:#64748b;font-size:0.8rem">{s['sublabel']}</span>
+    <span style="margin-left:auto;font-size:0.78rem;color:{risk_c}">リスク: {s['risk']}</span>
+  </div>
+  <code class="cmd-box">{s['cmd']}</code>
+  <div style="color:#94a3b8;font-size:0.82rem;margin-top:6px">{reason}</div>
+  {advice_html}
+</div>""")
+        if status == "✅ 推奨":
+            recommended_cmds.append(s["cmd"])
+    return "\n".join(cards), recommended_cmds
+
+
+def _recommended_section_html(recommended_cmds: list[str]) -> str:
+    if not recommended_cmds:
+        return '<div class="warn-box" style="border-color:#991b1b">❌ 全スクリプト停止推奨。相場が回復するまで様子見を。</div>'
+    rows = "".join(
+        f'<div style="margin:6px 0"><code class="cmd-box" style="display:inline-block">{c}</code></div>'
+        for c in recommended_cmds
+    )
+    return f'<div style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:16px">{rows}</div>'
+
+
+def build_html(r: dict | None) -> str:
+    today_str = str(_TODAY)
+    trend_label = "N/A"
+    vol_label   = "N/A"
+    if r:
+        trend_label = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
+        vol_label   = {"high": "高ボラ", "mid": "中ボラ", "low": "低ボラ"}[r["vol_level"]]
+    subtitle = f"相場環境: {trend_label} / {vol_label}" if r else "相場データ取得失敗"
+
+    regime_html     = _regime_html(r)
+    warn_html       = _risk_warning_html(r)
+    cards_html, recommended_cmds = _script_cards_html(r)
+    rec_section     = _recommended_section_html(recommended_cmds)
+
+    # 株価制限なし停止理由
+    nolimit_s, nolimit_r, _ = judge(SCRIPTS[0], r)
+    nolimit_block = ""
+    if nolimit_s != "✅ 推奨" and r:
+        _trend_ja  = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
+        _ma200_pos = "上" if r["above_ma200"] else "下"
+        nolimit_block = f"""
+<h2>株価制限なし が推奨外の理由</h2>
+<div class="warn-box">
+  <div><strong>{nolimit_r}</strong></div>
+  <div style="margin-top:8px;color:#94a3b8;font-size:0.85rem">
+    使用条件: 5日騰落 ≥ +2% ／ 20日騰落 ≥ +3% ／ 上昇トレンド ／ 日経 &gt; MA200<br>
+    現　　状: 5日 <strong>{r['mom5']:+.1f}%</strong> ／
+              20日 <strong>{r['mom20']:+.1f}%</strong> ／
+              {_trend_ja} ／ MA200{_ma200_pos}<br>
+    根　　拠: 直近30日利益の95%が「日経急騰局面」に集中。それ以外の期間は1件あたり平均+782円。
+  </div>
+</div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>シグナル選択レポート — {today_str}</title>
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ font-family:"Segoe UI","Hiragino Sans",sans-serif;
+          background:#0f172a; color:#e2e8f0; padding:24px; max-width:900px; margin:0 auto; }}
+  h1 {{ color:#60a5fa; font-size:1.6rem; margin-bottom:4px; }}
+  h2 {{ color:#60a5fa; font-size:1.1rem; margin:28px 0 12px;
+        border-left:3px solid #60a5fa; padding-left:10px; }}
+  .subtitle {{ color:#94a3b8; font-size:0.9rem; margin-bottom:24px; }}
+
+  /* 相場環境パネル */
+  .regime-panel {{ display:flex; flex-wrap:wrap; gap:14px;
+                   background:#0d1424; border:1px solid #1e3a5f;
+                   border-radius:10px; padding:18px; margin-bottom:16px; }}
+  .regime-item  {{ display:flex; flex-direction:column; min-width:110px; }}
+  .regime-label {{ font-size:0.72rem; color:#64748b; margin-bottom:3px; }}
+  .regime-val   {{ font-size:0.95rem; font-weight:600; }}
+
+  /* 警告ボックス */
+  .warn-box {{ background:#2d1f00; border:1px solid #92400e;
+               border-radius:8px; padding:14px 18px; margin-bottom:16px;
+               color:#fde68a; font-size:0.88rem; line-height:1.7; }}
+
+  /* スクリプトカード */
+  .script-card {{ border:1px solid; border-radius:10px; padding:14px 18px;
+                  margin-bottom:10px; transition:filter .15s; }}
+  .script-card:hover {{ filter:brightness(1.1); }}
+  .status-badge {{ display:inline-block; padding:2px 10px; border-radius:99px;
+                   font-size:0.78rem; font-weight:700; }}
+  .cmd-box {{ display:block; margin-top:8px; background:#0f172a;
+              padding:6px 12px; border-radius:6px; color:#38bdf8;
+              font-size:0.85rem; font-family:monospace; }}
+</style>
+</head>
+<body>
+<h1>シグナル選択レポート</h1>
+<p class="subtitle">生成日: {today_str} ／ {subtitle}</p>
+
+<h2>現在の相場環境（日経225）</h2>
+{regime_html}
+{warn_html}
+
+<h2>スクリプト判定</h2>
+{cards_html}
+
+<h2>本日の推奨コマンド</h2>
+{rec_section}
+{nolimit_block}
+
+<p style="color:#334155;font-size:0.75rem;margin-top:32px">
+  ※ 判定ルールは analyze_nolimit_regime.py の過去バックテスト実績から導出。将来を保証しません。<br>
+  ※ 株価制限なし条件: 5日騰落≥+2% / 20日騰落≥+3% / 上昇トレンド / 日経&gt;MA200
+</p>
+</body>
+</html>"""
+
+
 def main():
     parser = argparse.ArgumentParser(description="日経平均分析 → 使用シグナル自動判定")
     parser.add_argument("--run",          action="store_true", help="推奨スクリプトを順次実行")
     parser.add_argument("--days",         type=int,            help="--days N を各スクリプトに渡す")
     parser.add_argument("--signal-only",  action="store_true", help="--signal-only を各スクリプトに渡す")
     parser.add_argument("--no-browser",   action="store_true", help="--no-browser を各スクリプトに渡す")
-    parser.add_argument("--all",          action="store_true", help="判定に関わらず全スクリプトを表示")
     args = parser.parse_args()
 
     regime = get_regime()
-    recommended = print_recommendation(regime)
+
+    # ── HTML生成 & ブラウザ表示 ───────────────────────────────────────────────
+    html_path = Path(f"select_signals_{_TODAY}.html")
+    html_path.write_text(build_html(regime), encoding="utf-8")
+    print(f"生成: {html_path}")
+
+    if not args.no_browser:
+        webbrowser.open(html_path.resolve().as_uri())
+
+    # ── コンソール出力（サマリーのみ）────────────────────────────────────────
+    print_recommendation(regime)
 
     if not args.run:
         print(f"{GRY}  ヒント: --run を付けると推奨スクリプトを順次実行します{RESET}")
@@ -363,16 +572,16 @@ def main():
         print()
         return
 
-    if not recommended:
+    _, recommended_cmds = _script_cards_html(regime)
+    if not recommended_cmds:
         print(f"{RED}推奨スクリプトなし。実行をスキップします。{RESET}")
         return
 
     print(f"{BOLD}【実行開始】{RESET}")
-    for s in recommended:
-        cmd = _add_args(s["cmd"], args.days, args.signal_only, args.no_browser)
+    for cmd_base in recommended_cmds:
+        cmd = _add_args(cmd_base, args.days, args.signal_only, args.no_browser)
         print()
         print(f"{GRN}▶ {cmd}{RESET}")
-        print(f"  ({s['label']} / リスク: {s['risk']})")
         print("-" * 60)
         result = subprocess.run(cmd, shell=True)
         if result.returncode != 0:
