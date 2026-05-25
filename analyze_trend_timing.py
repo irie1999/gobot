@@ -15,13 +15,14 @@ Usage:
 from __future__ import annotations
 import argparse
 import webbrowser
-from datetime import timedelta, timezone
+from datetime import timedelta, timezone, datetime
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
 
-JST = timezone(timedelta(hours=9))
+JST    = timezone(timedelta(hours=9))
+_TODAY = datetime.now(JST).date()
 
 
 def fetch_n225(years: int) -> pd.Series:
@@ -72,7 +73,9 @@ def _append_up(close, trend, start_idx, end_idx, periods, is_current=False):
     seg        = close.iloc[start_idx:end_idx + 1]
     start_p    = float(close.iloc[start_idx])
     end_p      = float(close.iloc[end_idx])
-    days       = (close.index[end_idx] - close.index[start_idx]).days
+    start_date = close.index[start_idx].date()
+    end_date   = _TODAY if is_current else close.index[end_idx].date()
+    days       = (end_date - start_date).days
     total_pct  = (end_p / start_p - 1) * 100
 
     # 確認ラグ: シグナル開始前のローカル底値
@@ -172,7 +175,7 @@ def downtrend_risk(periods: list[dict], all_trend: pd.Series) -> dict[int, float
 
 
 def build_html(close, periods, years):
-    today_str = str(close.index[-1].date())
+    today_str = str(_TODAY)
     surv      = survival_curve(periods)
     entry_s   = entry_stats(periods)
     d_risk    = downtrend_risk(periods, None)
@@ -370,7 +373,7 @@ def main():
             if n in surv:
                 print(f"  {n:2}日目でまだ上昇: {surv[n]:.0f}%")
 
-    today_str = str(close.index[-1].date())
+    today_str = str(_TODAY)
     html_path = Path(f"trend_timing_{today_str}.html")
     html_path.write_text(build_html(close, periods, args.years), encoding="utf-8")
     print(f"生成: {html_path}")
