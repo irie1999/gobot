@@ -49,48 +49,41 @@ def label_trend(close: pd.Series) -> pd.Series:
 
 
 def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
-    """連続するトレンド区間を抽出（横ばい含む）"""
+    """連続するトレンド区間を抽出（横ばい含む）。期間内の最安値・最大下落幅も記録。"""
     periods = []
     cur_trend = None
     start_idx = None
 
-    for i in range(len(trend)):
-        t = trend.iloc[i]
-        if t != cur_trend:
-            if cur_trend is not None:
-                end_idx = i - 1
-                start_price = float(close.iloc[start_idx])
-                end_price   = float(close.iloc[end_idx])
-                start_date  = close.index[start_idx].date()
-                end_date    = close.index[end_idx].date()
-                days        = (end_date - start_date).days
-                pct         = (end_price / start_price - 1) * 100
-                periods.append({
-                    "trend":       cur_trend,
-                    "start":       start_date,
-                    "end":         end_date,
-                    "days":        days,
-                    "pct":         pct,
-                    "start_price": start_price,
-                    "end_price":   end_price,
-                })
-            cur_trend  = t
-            start_idx  = i
-
-    # 最後の区間
-    if cur_trend is not None and start_idx is not None:
-        end_idx     = len(trend) - 1
+    def _make(cur_trend, start_idx, end_idx):
         start_price = float(close.iloc[start_idx])
         end_price   = float(close.iloc[end_idx])
         start_date  = close.index[start_idx].date()
         end_date    = close.index[end_idx].date()
         days        = (end_date - start_date).days
         pct         = (end_price / start_price - 1) * 100
-        periods.append({
+        seg         = close.iloc[start_idx:end_idx + 1]
+        min_price   = float(seg.min())
+        max_price   = float(seg.max())
+        max_drop    = (min_price / start_price - 1) * 100   # 開始値からの最大下落率
+        max_rise    = (max_price / start_price - 1) * 100   # 開始値からの最大上昇率
+        return {
             "trend": cur_trend, "start": start_date, "end": end_date,
             "days": days, "pct": pct,
             "start_price": start_price, "end_price": end_price,
-        })
+            "min_price": min_price, "max_price": max_price,
+            "max_drop": max_drop, "max_rise": max_rise,
+        }
+
+    for i in range(len(trend)):
+        t = trend.iloc[i]
+        if t != cur_trend:
+            if cur_trend is not None:
+                periods.append(_make(cur_trend, start_idx, i - 1))
+            cur_trend = t
+            start_idx = i
+
+    if cur_trend is not None and start_idx is not None:
+        periods.append(_make(cur_trend, start_idx, len(trend) - 1))
 
     return periods
 
@@ -227,14 +220,23 @@ def build_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: i
             tc, mark, bg, border = "#f87171", "▼ 下落", "background:#2d0a0a20;", "border-left:3px solid #f87171;"
         else:
             tc, mark, bg, border = "#fbbf24", "→ 横ばい", "background:#2d1f0020;", "border-left:3px solid #fbbf24;"
-        active = "font-weight:700;" if is_last else ""
+        active   = "font-weight:700;" if is_last else ""
+        drop_val = p.get("max_drop", 0.0)
+        drop_str = f"{drop_val:+.1f}%" if drop_val else "—"
+        drop_c   = "#f87171" if drop_val < -2 else "#94a3b8"
+        # 横ばいで大きな下落があった場合に注記
+        note = ""
+        if t == "sideways" and drop_val < -3:
+            note = f'<span style="color:#f87171;font-size:0.75rem"> ⚠️V字{drop_val:.0f}%</span>'
         rows += f"""<tr style="{bg}{active}">
-  <td style="color:{tc};{border}padding-left:10px">{mark}</td>
+  <td style="color:{tc};{border}padding-left:10px">{mark}{note}</td>
   <td>{p['start']}</td>
   <td>{p['end']}{'　▶現在' if is_last else ''}</td>
   <td style="text-align:right">{p['days']}日</td>
   <td style="text-align:right;color:{tc}">{p['pct']:+.1f}%</td>
+  <td style="text-align:right;color:{drop_c}">{drop_str}</td>
   <td style="text-align:right">{p['start_price']:,.0f}</td>
+  <td style="text-align:right">{p['min_price']:,.0f}</td>
   <td style="text-align:right">{p['end_price']:,.0f}</td>
 </tr>"""
 
@@ -284,7 +286,7 @@ def build_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: i
 <table>
 <thead><tr>
   <th>種別</th><th>開始日</th><th>終了日</th>
-  <th>日数</th><th>騰落率</th><th>開始値(円)</th><th>終了値(円)</th>
+  <th>日数</th><th>騰落率</th><th>最大下落</th><th>開始値(円)</th><th>最安値(円)</th><th>終了値(円)</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
