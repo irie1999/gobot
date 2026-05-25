@@ -1,0 +1,911 @@
+"""
+nikkei_analysis.py  ―  日経平均 総合分析レポート
+
+select_signals.py / analyze_nikkei_trend.py / analyze_trend_timing.py を1本に統合。
+日経データを1回だけ取得し、タブ付きHTMLで以下3セクションを生成する。
+
+  タブ1: シグナル判定    — 相場環境 + 今日使うべきスクリプト
+  タブ2: トレンド期間    — 上昇/下落/横ばい期間の統計と一覧
+  タブ3: エントリー分析  — 上昇何日目に入ると良いか / 生存確率
+
+Usage:
+    python nikkei_analysis.py              # 過去5年 HTML生成 & ブラウザ表示
+    python nikkei_analysis.py --years 10
+    python nikkei_analysis.py --no-browser # HTML生成のみ
+"""
+from __future__ import annotations
+import argparse
+import webbrowser
+from datetime import timedelta, timezone, datetime
+from pathlib import Path
+
+import pandas as pd
+import yfinance as yf
+
+JST    = timezone(timedelta(hours=9))
+_TODAY = datetime.now(JST).date()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# データ取得 & トレンド判定
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_n225(years: int) -> pd.Series:
+    df = yf.download("^N225", period=f"{years * 365 + 60}d", interval="1d",
+                     progress=False, auto_adjust=True)
+    if df is None or df.empty:
+        raise RuntimeError("日経データ取得失敗")
+    close = df["Close"].squeeze()
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+    close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
+    return close.dropna().sort_index()
+
+
+def label_trend(close: pd.Series) -> pd.Series:
+    """MA10/MA25 クロスでトレンドラベル付け: 'up' / 'down' / 'sideways'"""
+    ma10 = close.rolling(10).mean()
+    ma25 = close.rolling(25).mean()
+    trend = pd.Series("sideways", index=close.index)
+    trend[(close > ma10) & (ma10 > ma25)] = "up"
+    trend[(close < ma10) & (ma10 < ma25)] = "down"
+    return trend
+
+
+def get_regime(close: pd.Series) -> dict:
+    """現在の相場環境を計算して返す"""
+    rets    = close.pct_change().dropna()
+    cur     = float(close.iloc[-1])
+    ma10    = float(close.rolling(10).mean().iloc[-1])
+    ma25    = float(close.rolling(25).mean().iloc[-1])
+    ma200   = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    vol14   = float(rets.tail(14).std() * 100)
+    mom5    = (cur / float(close.iloc[-6])  - 1) * 100
+    mom20   = (cur / float(close.iloc[-21]) - 1) * 100
+    max_1d_drop = float(rets.tail(30).min() * 100)
+
+    if cur > ma10 and ma10 > ma25:
+        trend = "up"
+    elif cur < ma10 and ma10 < ma25:
+        trend = "down"
+    else:
+        trend = "sideways"
+
+    vol_level   = "high" if vol14 > 1.5 else ("mid" if vol14 > 0.8 else "low")
+    above_ma200 = (cur >= ma200) if ma200 else True
+
+    return {
+        "cur": cur, "ma10": ma10, "ma25": ma25, "ma200": ma200,
+        "vol": vol14, "vol_level": vol_level, "trend": trend,
+        "mom5": mom5, "mom20": mom20,
+        "above_ma200": above_ma200, "max_1d_drop": max_1d_drop,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# シグナル判定ルール (select_signals.py 相当)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SCRIPTS = [
+    {"cmd": "python run_signals_nolimit.py",       "label": "株価制限なし",
+     "sublabel": "aggressive / 84銘柄",            "risk": "高",
+     "note": "上昇相場専用。高株価銘柄は急落時の損失も大きい。"},
+    {"cmd": "python run_signals_prime.py",          "label": "プライム全銘柄",
+     "sublabel": "aggressive / 84銘柄",            "risk": "中高",
+     "note": "上昇・横ばい高ボラで有効。"},
+    {"cmd": "python run_signals_wf.py --aggressive","label": "WF aggressive",
+     "sublabel": "aggressive / WF選定 59銘柄",     "risk": "中",
+     "note": "上昇相場で最も効率が良い（30日PF 3.24）。"},
+    {"cmd": "python run_signals_wf.py --conservative","label": "WF conservative",
+     "sublabel": "conservative / WF選定",          "risk": "低中",
+     "note": "横ばい相場でも安定。逆指値Bが中心。"},
+    {"cmd": "python run_signals.py",                "label": "既存版 conservative",
+     "sublabel": "conservative / デフォルト 55銘柄","risk": "低",
+     "note": "全相場で使用可能なベースライン。"},
+    {"cmd": "python run_signals_merged.py",         "label": "WF+既存統合",
+     "sublabel": "conservative / 統合WATCHLIST",   "risk": "低中",
+     "note": "上昇・横ばいで有効。WFと既存のマージ。"},
+]
+
+
+def judge(script: dict, r: dict) -> tuple[str, str, str]:
+    """(status, reason, advice)  status= ✅推奨 / ⚠️注意 / ❌停止"""
+    trend = r["trend"]
+    vol   = r["vol_level"]
+    mom5  = r["mom5"]
+    mom20 = r["mom20"]
+    above = r["above_ma200"]
+    drop  = r["max_1d_drop"]
+    cmd   = script["cmd"]
+    crash = drop < -3.0
+
+    if "nolimit" in cmd:
+        if trend == "down":
+            return "❌ 停止", f"トレンド下落 (MA10<MA25)", "相場回復まで使用停止"
+        if not above:
+            return "❌ 停止", f"日経 < MA200 (長期下落トレンド)", "既存版のみに絞る"
+        if mom5 < -2.0:
+            return "❌ 停止", f"5日騰落 {mom5:+.1f}% (急落中)", "反発確認後に再開"
+        if mom5 >= 2.0 and mom20 >= 3.0 and trend == "up":
+            return "✅ 推奨", f"5日 {mom5:+.1f}% / 20日 {mom20:+.1f}% / 上昇トレンド", "条件を全て満たす"
+        if mom5 >= 0.0 and trend == "up":
+            return "⚠️ 注意", f"5日 {mom5:+.1f}% (上昇弱い)", "半数に絞るか WF に切替"
+        return "⚠️ 注意", f"5日 {mom5:+.1f}% / 20日 {mom20:+.1f}%", "条件未達。プライムを優先"
+
+    if "prime" in cmd:
+        if trend == "down" and vol == "high":
+            return "❌ 停止", "下落×高ボラ (急落相場)", "損切り連発のリスク大"
+        if trend == "down":
+            return "⚠️ 注意", "下落トレンド", "WF conservative に切り替え推奨"
+        if trend == "up" or (trend == "sideways" and vol in ("mid", "high")):
+            return "✅ 推奨", f"トレンド={trend} / ボラ={vol}", "相場環境と合致"
+        return "⚠️ 注意", "低ボラ横ばい", "シグナルが少ない可能性"
+
+    if "--aggressive" in cmd:
+        if trend == "down" and vol == "high":
+            return "❌ 停止", "下落×高ボラ", "DON戦略の損失が拡大しやすい"
+        if trend == "down":
+            return "⚠️ 注意", "下落トレンド", "conservative に切り替え"
+        return "✅ 推奨", f"トレンド={trend}", "上昇・横ばいで有効"
+
+    if trend == "down" and vol == "high" and crash:
+        return "⚠️ 注意", f"下落×高ボラ×急落リスク (過去30日最大1日 {drop:+.1f}%)", "シグナルを精査して選択的に発注"
+    return "✅ 推奨", f"トレンド={trend} / ボラ={vol}", "安定した相場適合"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# トレンド期間抽出 (analyze_nikkei_trend.py 相当)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
+    periods = []
+    cur_trend = None
+    start_idx = None
+
+    def _make(cur_trend, start_idx, end_idx, is_current=False):
+        sp = float(close.iloc[start_idx])
+        ep = float(close.iloc[end_idx])
+        sd = close.index[start_idx].date()
+        ed = _TODAY if is_current else close.index[end_idx].date()
+        seg = close.iloc[start_idx:end_idx + 1]
+        return {
+            "trend": cur_trend, "start": sd, "end": ed,
+            "days": (ed - sd).days,
+            "pct": (ep / sp - 1) * 100,
+            "start_price": sp, "end_price": ep,
+            "min_price": float(seg.min()), "max_price": float(seg.max()),
+            "max_drop": (float(seg.min()) / sp - 1) * 100,
+            "is_current": is_current,
+        }
+
+    for i in range(len(trend)):
+        t = trend.iloc[i]
+        if t != cur_trend:
+            if cur_trend is not None:
+                periods.append(_make(cur_trend, start_idx, i - 1))
+            cur_trend = t
+            start_idx = i
+
+    if cur_trend is not None and start_idx is not None:
+        periods.append(_make(cur_trend, start_idx, len(trend) - 1, is_current=True))
+
+    return periods
+
+
+def calc_stats(periods: list[dict]) -> dict:
+    if not periods:
+        return {}
+    days = [p["days"] for p in periods]
+    pcts = [p["pct"]  for p in periods]
+    return {
+        "count": len(periods),
+        "avg_days": sum(days) / len(days),
+        "med_days": sorted(days)[len(days) // 2],
+        "max_days": max(days), "min_days": min(days),
+        "avg_pct": sum(pcts) / len(pcts),
+        "days_list": days,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# エントリータイミング分析 (analyze_trend_timing.py 相当)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_up_periods(close: pd.Series, trend: pd.Series) -> list[dict]:
+    periods = []
+    cur_trend = None
+    start_idx = None
+    n = len(trend)
+    for i in range(n):
+        t = trend.iloc[i]
+        if t != cur_trend:
+            if cur_trend == "up" and start_idx is not None:
+                _append_up(close, start_idx, i - 1, periods)
+            cur_trend = t
+            start_idx = i
+    if cur_trend == "up" and start_idx is not None:
+        _append_up(close, start_idx, n - 1, periods, is_current=True)
+    return periods
+
+
+def _append_up(close, start_idx, end_idx, periods, is_current=False):
+    sp = float(close.iloc[start_idx])
+    ep = float(close.iloc[end_idx])
+    sd = close.index[start_idx].date()
+    ed = _TODAY if is_current else close.index[end_idx].date()
+
+    look_back    = max(0, start_idx - 30)
+    pre_seg      = close.iloc[look_back:start_idx + 1]
+    tl_idx       = int(pre_seg.values.argmin())
+    true_low_p   = float(pre_seg.iloc[tl_idx])
+    lag_bars     = start_idx - (look_back + tl_idx)
+    lag_pct      = (sp / true_low_p - 1) * 100
+
+    daily_rets = {}
+    for n_days in [1, 3, 5, 10, 15, 20, 30]:
+        idx = start_idx + n_days
+        daily_rets[n_days] = (float(close.iloc[idx]) / sp - 1) * 100 if idx <= end_idx else None
+
+    periods.append({
+        "start_date": sd, "end_date": ed,
+        "start_p": sp, "end_p": ep,
+        "days": (ed - sd).days,
+        "total_pct": (ep / sp - 1) * 100,
+        "true_low_p": true_low_p,
+        "lag_bars": lag_bars, "lag_pct": lag_pct,
+        "daily_rets": daily_rets,
+        "is_current": is_current,
+        "n_bars": end_idx - start_idx + 1,
+    })
+
+
+def survival_curve(periods: list[dict]) -> dict[int, float]:
+    done = [p for p in periods if not p["is_current"]]
+    if not done:
+        return {}
+    return {n: sum(1 for p in done if p["n_bars"] > n) / len(done) * 100
+            for n in range(1, 51)}
+
+
+def entry_stats(periods: list[dict]) -> dict[int, dict]:
+    done = [p for p in periods if not p["is_current"]]
+    result = {}
+    for n in [1, 3, 5, 10, 15, 20, 30]:
+        valid = [p for p in done if p["daily_rets"].get(n) is not None]
+        if not valid:
+            continue
+        rets = [(p["end_p"] / (p["start_p"] * (1 + p["daily_rets"][n] / 100)) - 1) * 100
+                for p in valid]
+        result[n] = {
+            "count": len(rets),
+            "avg_ret": sum(rets) / len(rets),
+            "win_rate": sum(1 for r in rets if r > 0) / len(rets) * 100,
+            "med_ret": sorted(rets)[len(rets) // 2],
+        }
+    return result
+
+
+def downtrend_risk(periods: list[dict]) -> dict[int, float]:
+    done = [p for p in periods if not p["is_current"]]
+    risk = {}
+    for n in [1, 3, 5, 10, 15, 20, 30]:
+        total = sum(1 for p in done if p["n_bars"] > n)
+        fell  = sum(1 for p in done if p["n_bars"] > n and p["n_bars"] <= n + 5)
+        if total > 0:
+            risk[n] = fell / total * 100
+    return risk
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTML パーツ生成
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STATUS_META = {
+    "✅ 推奨": ("推奨", "#4ade80", "#052e16", "#166534"),
+    "⚠️ 注意": ("注意", "#fbbf24", "#2d1f00", "#92400e"),
+    "❌ 停止": ("停止", "#f87171", "#2d0a0a", "#991b1b"),
+}
+RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
+
+
+def _tab1_signal_html(r: dict) -> str:
+    """タブ1: シグナル判定"""
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
+    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
+    vol_color   = {"high": "#f87171", "mid": "#fbbf24", "low": "#4ade80"}[r["vol_level"]]
+    vol_ja      = {"high": "高ボラ", "mid": "中ボラ", "low": "低ボラ"}[r["vol_level"]]
+    ma200_str   = f"{r['ma200']:,.0f}" if r.get("ma200") else "N/A"
+    ma200_color = "#4ade80" if r["above_ma200"] else "#f87171"
+    ma200_pos   = f'<span style="color:{ma200_color}">{"▲ 上" if r["above_ma200"] else "▼ 下"}</span>'
+    mom5_c  = "#4ade80" if r["mom5"]  >= 0 else "#f87171"
+    mom20_c = "#4ade80" if r["mom20"] >= 0 else "#f87171"
+    drop_c  = "#f87171" if r["max_1d_drop"] < -3 else "#94a3b8"
+
+    regime_items = [
+        ("日経225",     f'<strong style="font-size:1.25rem">{r["cur"]:,.0f}円</strong>'),
+        ("トレンド",    f'<span style="color:{trend_color};font-weight:700;font-size:1.05rem">{trend_ja}</span>'),
+        ("ボラ (14日)", f'<span style="color:{vol_color}">{vol_ja} ({r["vol"]:.2f}%)</span>'),
+        ("5日騰落",     f'<span style="color:{mom5_c};font-weight:600">{r["mom5"]:+.2f}%</span>'),
+        ("20日騰落",    f'<span style="color:{mom20_c};font-weight:600">{r["mom20"]:+.2f}%</span>'),
+        ("MA200",       f'{ma200_str}円 → {ma200_pos}'),
+        ("過去30日最大下落", f'<span style="color:{drop_c}">{r["max_1d_drop"]:+.2f}%</span>'),
+    ]
+    regime_html = "".join(
+        f'<div class="regime-item"><span class="ri-label">{lbl}</span>'
+        f'<span class="ri-val">{val}</span></div>'
+        for lbl, val in regime_items
+    )
+
+    # リスク警告
+    warn_html = ""
+    risks = []
+    if r["max_1d_drop"] < -3.0:
+        risks.append(f"過去30日に <strong>{r['max_1d_drop']:+.1f}%</strong> の急落あり → 複数ポジションの同時損切りリスク")
+    if not r["above_ma200"]:
+        risks.append("日経 &lt; MA200 → 長期下落トレンド。逆指値が連続損切りするリスク大")
+    if risks:
+        li = "".join(f"<li>{rk}</li>" for rk in risks)
+        warn_html = f"""
+<div class="warn-box">
+  <div style="font-weight:700;margin-bottom:8px">⚠️ 株価制限なし 大損リスク要因</div>
+  <ul style="padding-left:1.4em;line-height:1.9">{li}</ul>
+  <div style="margin-top:8px;color:#94a3b8;font-size:0.82rem">
+    損失目安: ATR×1.5×100株/銘柄 &nbsp;例) 5,000円株・ATR200円 → −30,000円/銘柄
+  </div>
+</div>"""
+
+    # スクリプトカード
+    recommended = []
+    cards_html = ""
+    for s in SCRIPTS:
+        status, reason, advice = judge(s, r)
+        lbl_ja, fg, bg, border = STATUS_META[status]
+        rc = RISK_COLOR.get(s["risk"], "#94a3b8")
+        adv_html = (f'<div style="color:#94a3b8;font-size:0.8rem;margin-top:4px">→ {advice}</div>'
+                    if advice else "")
+        cards_html += f"""
+<div class="script-card" style="border-color:{border};background:{bg}">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span class="badge" style="background:{border};color:{fg}">{lbl_ja}</span>
+    <span style="font-weight:700;font-size:1.05rem">{s['label']}</span>
+    <span style="color:#64748b;font-size:0.8rem">{s['sublabel']}</span>
+    <span style="margin-left:auto;font-size:0.78rem;color:{rc}">リスク: {s['risk']}</span>
+  </div>
+  <code class="cmd-box">{s['cmd']}</code>
+  <div style="color:#94a3b8;font-size:0.82rem;margin-top:6px">{reason}</div>
+  {adv_html}
+  <div style="color:#64748b;font-size:0.78rem;margin-top:4px">{s['note']}</div>
+</div>"""
+        if status == "✅ 推奨":
+            recommended.append(s["cmd"])
+
+    # 推奨コマンド
+    if recommended:
+        rec_rows = "".join(
+            f'<div style="margin:5px 0"><code class="cmd-box" style="display:inline-block">{c}</code></div>'
+            for c in recommended
+        )
+        rec_html = f'<div style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:16px">{rec_rows}</div>'
+    else:
+        rec_html = '<div class="warn-box" style="border-color:#991b1b">❌ 全スクリプト停止推奨。相場が回復するまで様子見を。</div>'
+
+    # 株価制限なし 停止理由
+    nolimit_s, nolimit_r, _ = judge(SCRIPTS[0], r)
+    nolimit_block = ""
+    if nolimit_s != "✅ 推奨":
+        _tj  = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
+        _mp  = "上" if r["above_ma200"] else "下"
+        nolimit_block = f"""
+<h2>株価制限なし が推奨外の理由</h2>
+<div class="warn-box">
+  <div><strong>{nolimit_r}</strong></div>
+  <div style="margin-top:8px;color:#94a3b8;font-size:0.85rem">
+    使用条件: 5日騰落 ≥ +2% ／ 20日騰落 ≥ +3% ／ 上昇トレンド ／ 日経 &gt; MA200<br>
+    現　　状: 5日 <strong>{r['mom5']:+.1f}%</strong> ／
+              20日 <strong>{r['mom20']:+.1f}%</strong> ／
+              {_tj} ／ MA200{_mp}<br>
+    根　　拠: 直近30日利益の95%が「日経急騰局面」に集中。条件外では1件あたり平均+782円。
+  </div>
+</div>"""
+
+    return f"""
+<h2>現在の相場環境（日経225）</h2>
+<div class="regime-panel">{regime_html}</div>
+{warn_html}
+
+<h2>スクリプト判定</h2>
+{cards_html}
+
+<h2>本日の推奨コマンド</h2>
+{rec_html}
+{nolimit_block}
+
+<p class="footnote">
+  ※ 判定ルールは過去バックテスト実績から導出。株価制限なし条件: 5日≥+2% / 20日≥+3% / 上昇 / 日経&gt;MA200
+</p>"""
+
+
+def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int) -> str:
+    """タブ2: トレンド期間分析"""
+    up_p   = [p for p in periods if p["trend"] == "up"]
+    down_p = [p for p in periods if p["trend"] == "down"]
+    su = calc_stats(up_p)
+    sd = calc_stats(down_p)
+    cur_trend   = trend.iloc[-1]
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[cur_trend]
+    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[cur_trend]
+    cur_price   = float(close.iloc[-1])
+
+    # 現在トレンドボックス
+    last = periods[-1]
+    ref_s = su if last["trend"] == "up" else sd
+    med = ref_s.get("med_days", 0)
+    avg = ref_s.get("avg_days", 0)
+    remaining = med - last["days"]
+    remain_str = (f"中央値まであと <strong>{remaining}日</strong>（参考値）"
+                  if remaining > 0
+                  else f"中央値({med}日)を超過中 → 転換注意")
+    pct_c   = "#4ade80" if last["pct"] >= 0 else "#f87171"
+    last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
+    box_border = "#166534" if last["trend"] == "up" else "#991b1b"
+    current_box = f"""
+<div class="current-box" style="border-color:{box_border}">
+  <div style="font-size:1.1rem;font-weight:700;margin-bottom:10px;color:{trend_color}">
+    現在: {last_ja}トレンド継続中
+  </div>
+  <div class="sg">
+    <div class="si"><span class="sl">開始日</span><span class="sv">{last['start']}</span></div>
+    <div class="si"><span class="sl">継続日数</span><span class="sv">{last['days']}日</span></div>
+    <div class="si"><span class="sl">開始値</span><span class="sv">{last['start_price']:,.0f}円</span></div>
+    <div class="si"><span class="sl">現在値</span><span class="sv">{cur_price:,.0f}円</span></div>
+    <div class="si"><span class="sl">騰落率</span><span class="sv" style="color:{pct_c}">{last['pct']:+.1f}%</span></div>
+    <div class="si"><span class="sl">平均期間</span><span class="sv">{avg:.0f}日</span></div>
+    <div class="si"><span class="sl">中央値期間</span><span class="sv">{med}日</span></div>
+  </div>
+  <div style="margin-top:12px;padding:10px;background:#0f172a;border-radius:6px;font-size:0.88rem;color:#fbbf24">
+    📊 {remain_str}
+  </div>
+</div>"""
+
+    # 統計カード
+    def stat_card(title, s, color, bg):
+        if not s:
+            return ""
+        buckets = [(0,10),(10,20),(20,30),(30,60),(60,90),(90,180),(180,9999)]
+        bars = ""
+        dist = []
+        mx = 1
+        for lo, hi in buckets:
+            cnt = sum(1 for d in s["days_list"] if lo <= d < hi)
+            if cnt:
+                lbl = f"{lo}〜{hi-1}日" if hi < 9999 else f"{lo}日以上"
+                dist.append((lbl, cnt))
+                mx = max(mx, cnt)
+        for lbl, cnt in dist:
+            w = int(cnt / mx * 100)
+            bars += f"""<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:0.8rem">
+  <span style="width:76px;color:#94a3b8;flex-shrink:0">{lbl}</span>
+  <div style="flex:1;background:#1e293b;border-radius:3px;height:13px">
+    <div style="width:{w}%;background:{color};height:100%;border-radius:3px"></div>
+  </div>
+  <span style="width:28px;text-align:right;color:#e2e8f0">{cnt}</span>
+</div>"""
+        return f"""
+<div style="background:{bg};border:1px solid {color}44;border-radius:10px;padding:18px;flex:1;min-width:270px">
+  <div style="color:{color};font-weight:700;font-size:1rem;margin-bottom:12px">{title}</div>
+  <div class="sg" style="margin-bottom:12px">
+    <div class="si"><span class="sl">回数</span><span class="sv">{s['count']}回</span></div>
+    <div class="si"><span class="sl">平均期間</span><span class="sv">{s['avg_days']:.0f}日</span></div>
+    <div class="si"><span class="sl">中央値</span><span class="sv">{s['med_days']}日</span></div>
+    <div class="si"><span class="sl">最短</span><span class="sv">{s['min_days']}日</span></div>
+    <div class="si"><span class="sl">最長</span><span class="sv">{s['max_days']}日</span></div>
+    <div class="si"><span class="sl">平均騰落</span><span class="sv" style="color:{color}">{s['avg_pct']:+.1f}%</span></div>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b;margin-bottom:5px">期間分布</div>
+  {bars}
+</div>"""
+
+    up_card   = stat_card("上昇トレンド ▲", su, "#4ade80", "#052e16")
+    down_card = stat_card("下落トレンド ▼", sd, "#f87171", "#2d0a0a")
+
+    # 全期間テーブル
+    rows = ""
+    for p in reversed(periods):
+        t = p["trend"]
+        is_c = p.get("is_current", False)
+        if t == "up":
+            tc, mark, bg_r, bl = "#4ade80", "▲ 上昇", "background:#052e1620;", "border-left:3px solid #4ade80;"
+        elif t == "down":
+            tc, mark, bg_r, bl = "#f87171", "▼ 下落", "background:#2d0a0a20;", "border-left:3px solid #f87171;"
+        else:
+            tc, mark, bg_r, bl = "#fbbf24", "→ 横ばい", "background:#2d1f0020;", "border-left:3px solid #fbbf24;"
+        bold   = "font-weight:700;" if is_c else ""
+        drop   = p.get("max_drop", 0.0)
+        drop_s = f"{drop:+.1f}%" if drop else "—"
+        drop_c = "#f87171" if drop < -2 else "#94a3b8"
+        note   = ""
+        if t == "sideways" and drop < -3:
+            note = f'<span style="color:#f87171;font-size:0.75rem"> ⚠️V字{drop:.0f}%</span>'
+        rows += f"""<tr style="{bg_r}{bold}">
+  <td style="color:{tc};{bl}padding-left:10px">{mark}{note}</td>
+  <td>{p['start']}</td>
+  <td>{p['end']}{'　▶現在' if is_c else ''}</td>
+  <td style="text-align:right">{p['days']}日</td>
+  <td style="text-align:right;color:{tc}">{p['pct']:+.1f}%</td>
+  <td style="text-align:right;color:{drop_c}">{drop_s}</td>
+  <td style="text-align:right">{p['start_price']:,.0f}</td>
+  <td style="text-align:right">{p['min_price']:,.0f}</td>
+  <td style="text-align:right">{p['end_price']:,.0f}</td>
+</tr>"""
+
+    return f"""
+<h2>現在のトレンド状況</h2>
+{current_box}
+
+<h2>トレンド統計（過去{years}年）</h2>
+<div style="display:flex;flex-wrap:wrap;gap:16px">
+  {up_card}
+  {down_card}
+</div>
+
+<h2>全トレンド期間一覧（新しい順）</h2>
+<table>
+<thead><tr>
+  <th>種別</th><th>開始日</th><th>終了日</th>
+  <th>日数</th><th>騰落率</th><th>最大下落</th>
+  <th>開始値(円)</th><th>最安値(円)</th><th>終了値(円)</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<p class="footnote">
+  ※ 判定: 終値&gt;MA10&gt;MA25=上昇(▲) ／ 終値&lt;MA10&lt;MA25=下落(▼) ／ それ以外=横ばい(→)<br>
+  ※ 横ばいでも ⚠️V字 は3%超の下落があったV字回復を示す
+</p>"""
+
+
+def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict) -> str:
+    """タブ3: エントリータイミング分析"""
+    surv    = survival_curve(up_periods)
+    entry_s = entry_stats(up_periods)
+    d_risk  = downtrend_risk(up_periods)
+    done    = [p for p in up_periods if not p["is_current"]]
+
+    lags      = [p["lag_bars"] for p in done if p["lag_bars"] >= 0]
+    lag_pcts  = [p["lag_pct"]  for p in done if p["lag_pct"]  >= 0]
+    avg_lag   = sum(lags) / len(lags)       if lags     else 0
+    avg_lagp  = sum(lag_pcts) / len(lag_pcts) if lag_pcts else 0
+    avg_days  = sum(p["days"] for p in done) / len(done) if done else 0
+    avg_pct   = sum(p["total_pct"] for p in done) / len(done) if done else 0
+
+    safe_end = next((n for n in sorted(d_risk) if d_risk[n] > 25), 30)
+    su       = all_stats.get("up", {})
+
+    # 現在の上昇トレンド状況
+    cur_up = next((p for p in reversed(up_periods) if p["is_current"]), None)
+    cur_up_html = ""
+    if cur_up:
+        cd     = cur_up["days"]
+        sv     = surv.get(cd, None)
+        dr_key = min(cd, max(d_risk.keys())) if d_risk else 30
+        dr     = d_risk.get(dr_key, 0)
+        sv_str = f"{sv:.0f}%" if sv is not None else "—"
+        sv_c   = "#4ade80" if (sv or 0) > 60 else ("#fbbf24" if (sv or 0) > 30 else "#f87171")
+        dr_c   = "#f87171" if dr > 30 else ("#fbbf24" if dr > 15 else "#4ade80")
+        status = (f'<span style="color:#4ade80">✅ 推奨ウィンドウ内（〜{safe_end}日目）</span>'
+                  if cd <= safe_end
+                  else f'<span style="color:#f87171">⚠️ {safe_end}日目超過 — 新規エントリーは慎重に</span>')
+        cur_up_html = f"""
+<div class="info-box" style="border-color:#166534">
+  <div style="font-weight:700;color:#4ade80;margin-bottom:10px">📈 現在の上昇トレンド（エントリータイミング）</div>
+  <div class="sg">
+    <div class="si"><span class="sl">開始日</span><span class="sv">{cur_up['start_date']}</span></div>
+    <div class="si"><span class="sl">経過日数</span><span class="sv">{cd}日</span></div>
+    <div class="si"><span class="sl">開始値</span><span class="sv">{cur_up['start_p']:,.0f}円</span></div>
+    <div class="si"><span class="sl">確認ラグ</span><span class="sv">{cur_up['lag_bars']}営業日</span></div>
+    <div class="si"><span class="sl">乗り遅れ幅</span><span class="sv" style="color:#fbbf24">+{cur_up['lag_pct']:.1f}%</span></div>
+    <div class="si"><span class="sl">まだ継続確率</span><span class="sv" style="color:{sv_c}">{sv_str}</span></div>
+    <div class="si"><span class="sl">5日内転換リスク</span><span class="sv" style="color:{dr_c}">{dr:.0f}%</span></div>
+  </div>
+  <div style="margin-top:10px;padding:8px 12px;background:#0f172a;border-radius:6px;font-size:0.88rem">
+    {status}
+  </div>
+</div>"""
+
+    # KPI
+    kpi_html = f"""
+<div class="kpi-grid">
+  <div class="kpi"><div class="kpi-l">平均ラグ（営業日）</div>
+    <div class="kpi-v" style="color:#fbbf24">{avg_lag:.1f}日</div></div>
+  <div class="kpi"><div class="kpi-l">平均乗り遅れ幅</div>
+    <div class="kpi-v" style="color:#f87171">+{avg_lagp:.1f}%</div></div>
+  <div class="kpi"><div class="kpi-l">上昇トレンド平均期間</div>
+    <div class="kpi-v">{avg_days:.0f}日</div></div>
+  <div class="kpi"><div class="kpi-l">上昇トレンド平均騰落</div>
+    <div class="kpi-v" style="color:#4ade80">+{avg_pct:.1f}%</div></div>
+  <div class="kpi"><div class="kpi-l">完結トレンド数</div>
+    <div class="kpi-v">{len(done)}回</div></div>
+</div>"""
+
+    # エントリーテーブル
+    entry_rows = ""
+    for n, s in sorted(entry_s.items()):
+        rc = "#4ade80" if s["avg_ret"] > 0 else "#f87171"
+        wc = "#4ade80" if s["win_rate"] >= 50 else "#f87171"
+        dr = d_risk.get(n, 0)
+        dc = "#f87171" if dr > 30 else ("#fbbf24" if dr > 15 else "#4ade80")
+        entry_rows += f"""<tr>
+  <td style="text-align:center;font-weight:600">{n}日目</td>
+  <td style="text-align:right">{s['count']}回</td>
+  <td style="text-align:right;color:{wc}">{s['win_rate']:.0f}%</td>
+  <td style="text-align:right;color:{rc}">{s['avg_ret']:+.1f}%</td>
+  <td style="text-align:right;color:{rc}">{s['med_ret']:+.1f}%</td>
+  <td style="text-align:right;color:{dc}">{dr:.0f}%</td>
+</tr>"""
+
+    # 生存曲線
+    surv_rows = ""
+    for n in [1,2,3,4,5,6,7,8,9,10,12,15,20,25,30,35,40,50]:
+        if n not in surv:
+            continue
+        pct = surv[n]
+        bw  = int(pct)
+        bc  = "#4ade80" if pct > 60 else ("#fbbf24" if pct > 30 else "#f87171")
+        surv_rows += f"""<tr>
+  <td style="text-align:center">{n}日目</td>
+  <td>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:180px;background:#1e293b;border-radius:3px;height:13px">
+        <div style="width:{bw}%;background:{bc};height:100%;border-radius:3px"></div>
+      </div>
+      <span style="color:{bc};font-weight:600">{pct:.0f}%</span>
+    </div>
+  </td>
+</tr>"""
+
+    # 全上昇区間テーブル
+    p_rows = ""
+    for p in reversed(up_periods):
+        is_c  = p["is_current"]
+        bold  = "font-weight:700;" if is_c else ""
+        lc    = "#4ade80" if p["total_pct"] >= 0 else "#f87171"
+        lag_c = "#f87171" if p["lag_pct"] > 3 else "#94a3b8"
+        p_rows += f"""<tr style="{bold}">
+  <td>{p['start_date']}</td>
+  <td>{p['end_date']}{'　▶現在' if is_c else ''}</td>
+  <td style="text-align:right">{p['days']}日</td>
+  <td style="text-align:right;color:{lc}">{p['total_pct']:+.1f}%</td>
+  <td style="text-align:right">{p['start_p']:,.0f}</td>
+  <td style="text-align:right;color:{lag_c}">{p['lag_bars']}営業日 / {p['lag_pct']:+.1f}%</td>
+</tr>"""
+
+    return f"""
+<h2>シグナル確認ラグ（底値からMAクロスまで）</h2>
+<div class="info-box">
+  <p style="color:#94a3b8;font-size:0.88rem;margin-bottom:12px">
+    MA10がMA25を上抜けた時点（シグナル確認日）は実際の底値より遅れます。<br>
+    この乗り遅れ分を差し引いても上昇トレンドの残りリターンが取れるかが判断基準です。
+  </p>
+  {kpi_html}
+</div>
+
+{cur_up_html}
+
+<h2>推奨エントリーウィンドウ</h2>
+<div class="rec-box">
+  <div style="font-size:1.05rem;font-weight:700;color:#4ade80;margin-bottom:10px">
+    ✅ シグナル確認後 1〜{safe_end}日目 が最も効率的
+  </div>
+  <ul style="color:#94a3b8;font-size:0.88rem;line-height:2;padding-left:1.4em">
+    <li>シグナル確認直後（1〜3日目）: 乗り遅れ幅が小さく残りリターンが最大</li>
+    <li>{safe_end}日目以降: 5日内に下落転換する確率が25%を超え始める</li>
+    <li>トレンド開始から中央値（{su.get('med_days', 0)}日）を超えたら新規エントリーは慎重に</li>
+  </ul>
+</div>
+
+<h2>エントリー日別 期待リターン（シグナル確認後 N 日目 → トレンド終了まで保有）</h2>
+<table>
+<thead><tr>
+  <th>エントリー</th><th>サンプル数</th><th>勝率</th>
+  <th>平均リターン</th><th>中央値リターン</th><th>5日内転換リスク</th>
+</tr></thead>
+<tbody>{entry_rows}</tbody>
+</table>
+<p style="color:#475569;font-size:0.78rem;margin-top:4px">
+  ※ リターン = N日目の終値でエントリー → トレンド終了日終値まで保有した場合の騰落率
+</p>
+
+<h2>生存確率（上昇 N 日目でまだトレンドが続いている確率）</h2>
+<table style="max-width:440px">
+<thead><tr><th>経過日数</th><th>まだ上昇トレンド中の確率</th></tr></thead>
+<tbody>{surv_rows}</tbody>
+</table>
+
+<h2>全上昇トレンド区間 一覧（確認ラグ付き）</h2>
+<table>
+<thead><tr>
+  <th>開始日</th><th>終了日</th><th>期間</th><th>騰落率</th>
+  <th>開始値(円)</th><th>確認ラグ（底値→シグナル）</th>
+</tr></thead>
+<tbody>{p_rows}</tbody>
+</table>
+<p class="footnote">
+  ※ 確認ラグ = MA10がMA25を上抜けた日 − 直前30日間の最安値の日（営業日数）<br>
+  ※ 乗り遅れ幅3%超（赤表示）は、シグナル時点で底値から既に大きく上昇済みのケース
+</p>"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# メイン HTML 組み立て
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CSS = """
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:"Segoe UI","Hiragino Sans",sans-serif;
+       background:#0f172a; color:#e2e8f0; padding:24px; max-width:1080px; margin:0 auto; }
+h1 { color:#60a5fa; font-size:1.55rem; margin-bottom:4px; }
+h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
+     border-left:3px solid #60a5fa; padding-left:10px; }
+.subtitle { color:#94a3b8; font-size:0.9rem; margin-bottom:22px; }
+.footnote { color:#334155; font-size:0.75rem; margin-top:20px; line-height:1.7; }
+
+/* タブ */
+.tab-nav { display:flex; gap:6px; margin-bottom:24px; border-bottom:2px solid #1e293b; padding-bottom:0; }
+.tab-btn { padding:9px 22px; background:#1e293b; border:none; border-radius:6px 6px 0 0;
+           color:#94a3b8; cursor:pointer; font-size:0.92rem; font-family:inherit;
+           border-bottom:2px solid transparent; margin-bottom:-2px; }
+.tab-btn.active { background:#0f172a; color:#60a5fa; border-bottom:2px solid #60a5fa; font-weight:700; }
+.tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.tab-pane { display:none; }
+.tab-pane.active { display:block; }
+
+/* 相場環境パネル */
+.regime-panel { display:flex; flex-wrap:wrap; gap:14px;
+                background:#0d1424; border:1px solid #1e3a5f;
+                border-radius:10px; padding:18px; margin-bottom:16px; }
+.regime-item  { display:flex; flex-direction:column; min-width:110px; }
+.ri-label { font-size:0.71rem; color:#64748b; margin-bottom:3px; }
+.ri-val   { font-size:0.95rem; font-weight:600; }
+
+/* 警告ボックス */
+.warn-box { background:#2d1f00; border:1px solid #92400e;
+            border-radius:8px; padding:14px 18px; margin-bottom:16px;
+            color:#fde68a; font-size:0.88rem; line-height:1.7; }
+
+/* スクリプトカード */
+.script-card { border:1px solid; border-radius:10px; padding:14px 18px;
+               margin-bottom:10px; }
+.script-card:hover { filter:brightness(1.08); }
+.badge { display:inline-block; padding:2px 10px; border-radius:99px;
+         font-size:0.78rem; font-weight:700; }
+.cmd-box { display:block; margin-top:8px; background:#0f172a;
+           padding:6px 12px; border-radius:6px; color:#38bdf8;
+           font-size:0.85rem; font-family:monospace; }
+
+/* 現在トレンドボックス */
+.current-box { border:1px solid; border-radius:10px; padding:18px; margin-bottom:16px; }
+.info-box { background:#0d1424; border:1px solid #1e3a5f;
+            border-radius:10px; padding:16px 20px; margin-bottom:16px; }
+.rec-box  { background:#052e16; border:1px solid #166534;
+            border-radius:8px; padding:16px 20px; margin-bottom:16px; }
+
+/* stat grid */
+.sg { display:flex; flex-wrap:wrap; gap:10px; }
+.si { display:flex; flex-direction:column; min-width:100px; }
+.sl { font-size:0.71rem; color:#64748b; }
+.sv { font-size:1rem; font-weight:600; }
+
+/* KPI */
+.kpi-grid { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:16px; }
+.kpi { background:#111827; border:1px solid #1e293b; border-radius:8px;
+       padding:13px 16px; min-width:150px; flex:1; }
+.kpi-l { font-size:0.74rem; color:#64748b; margin-bottom:4px; }
+.kpi-v { font-size:1.25rem; font-weight:700; }
+
+/* テーブル */
+table { width:100%; border-collapse:collapse; font-size:0.83rem; margin-bottom:8px; }
+th { background:#1e293b; color:#94a3b8; padding:7px 10px;
+     border:1px solid #334155; text-align:center; white-space:nowrap; }
+td { padding:5px 10px; border:1px solid #1e293b; }
+tr:hover td { filter:brightness(1.15); }
+"""
+
+JS = """
+function switchTab(id) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-tab="'+id+'"]').classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+"""
+
+
+def build_html(close: pd.Series, trend: pd.Series, r: dict,
+               periods: list[dict], up_periods: list[dict], years: int) -> str:
+    today_str   = str(_TODAY)
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
+    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
+
+    tab1 = _tab1_signal_html(r)
+    tab2 = _tab2_trend_html(close, trend, periods, years)
+
+    all_stats = {
+        "up":   calc_stats([p for p in periods if p["trend"] == "up"]),
+        "down": calc_stats([p for p in periods if p["trend"] == "down"]),
+    }
+    tab3 = _tab3_timing_html(close, up_periods, all_stats)
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日経平均 総合分析 — {today_str}</title>
+<style>{CSS}</style>
+</head>
+<body>
+<h1>日経平均 総合分析レポート</h1>
+<p class="subtitle">
+  生成日: {today_str} ／ 分析期間: {close.index[0].date()} 〜 {today_str} (過去{years}年) ／
+  現在: <strong style="color:{trend_color}">{trend_ja} {r['cur']:,.0f}円</strong>
+</p>
+
+<div class="tab-nav">
+  <button class="tab-btn active" data-tab="t1" onclick="switchTab('t1')">📊 シグナル判定</button>
+  <button class="tab-btn"        data-tab="t2" onclick="switchTab('t2')">📈 トレンド期間</button>
+  <button class="tab-btn"        data-tab="t3" onclick="switchTab('t3')">⏱ エントリー分析</button>
+</div>
+
+<div id="t1" class="tab-pane active">{tab1}</div>
+<div id="t2" class="tab-pane">{tab2}</div>
+<div id="t3" class="tab-pane">{tab3}</div>
+
+<script>{JS}</script>
+</body>
+</html>"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# エントリーポイント
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(description="日経平均 総合分析レポート")
+    parser.add_argument("--years",      type=int, default=5, help="分析期間（年）")
+    parser.add_argument("--no-browser", action="store_true",  help="HTML生成のみ")
+    args = parser.parse_args()
+
+    print(f"日経平均 総合分析 (過去{args.years}年)...", flush=True)
+
+    close  = fetch_n225(args.years)
+    trend  = label_trend(close)
+    r      = get_regime(close)
+    periods   = extract_periods(close, trend)
+    up_timing = extract_up_periods(close, trend)
+
+    # コンソールサマリー
+    trend_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
+    print(f"現在: {trend_ja} / 日経 {r['cur']:,.0f}円 / 5日 {r['mom5']:+.1f}% / 20日 {r['mom20']:+.1f}%")
+
+    up_p   = [p for p in periods if p["trend"] == "up"]
+    down_p = [p for p in periods if p["trend"] == "down"]
+    su = calc_stats(up_p)
+    sd = calc_stats(down_p)
+    if su:
+        print(f"上昇: {su['count']}回 / 平均{su['avg_days']:.0f}日 / 中央値{su['med_days']}日")
+    if sd:
+        print(f"下落: {sd['count']}回 / 平均{sd['avg_days']:.0f}日 / 中央値{sd['med_days']}日")
+    last = periods[-1]
+    print(f"現在トレンド継続: {last['days']}日 ({last['pct']:+.1f}%)")
+
+    html_path = Path(f"nikkei_analysis_{_TODAY}.html")
+    html_path.write_text(
+        build_html(close, trend, r, periods, up_timing, args.years),
+        encoding="utf-8"
+    )
+    print(f"生成: {html_path}")
+
+    if not args.no_browser:
+        webbrowser.open(html_path.resolve().as_uri())
+
+
+if __name__ == "__main__":
+    main()
