@@ -8,20 +8,24 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
 
 【使い方】
   1. SBI証券の保有株/信用建玉ページをコピーして sbi_paste.txt に貼り付ける
-  2. python line_alert.py を実行
+  2. python line_alert.py --watch を実行（起動したままにしておく）
 
-  python line_alert.py                    # 含み益+3%以上で通知（デフォルト）
+  python line_alert.py --watch            # 時間帯自動調整で監視（推奨）
+  python line_alert.py                    # 1回だけチェック
   python line_alert.py --profit 5         # 含み益+5%以上に変更
   python line_alert.py --test             # テスト送信
   python line_alert.py --dry-run          # 通知せず結果だけ表示
   python line_alert.py --show             # 現在の保有状況だけ表示
 
+【--watch モードのチェック間隔】
+  08:45〜11:30  5分ごと   （前場・寄り付き前後）
+  11:30〜12:30  待機       （昼休み）
+  12:30〜15:30  15分ごと  （後場）
+  15:30以降     終了
+
 【通知タイミング】
   エントリー価格から +3% / +5% / +8% / +10% / +15% / +20% を超えるたびに1回通知。
   損からの回復も同じ条件で判定（+3%到達で通知）。
-
-【定期実行（cron）例】
-  0 15 * * 1-5 cd /home/user/gobot && python line_alert.py >> line_alert.log 2>&1
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ import json
 import os
 import re
 import sys
+import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -210,11 +215,29 @@ def load_holdings_from_paste(path: Path = PASTE_FILE) -> list[dict]:
 # 株価取得
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_market_hours(now: datetime) -> bool:
+    """東証の取引時間内かどうか（前場 9:00-11:30 / 後場 12:30-15:30）"""
+    t = now.time()
+    from datetime import time as time_type
+    return (time_type(9, 0) <= t <= time_type(11, 30) or
+            time_type(12, 30) <= t <= time_type(15, 30))
+
+
 def fetch_current_price(symbol: str) -> float | None:
+    """
+    取引時間中は1分足の最新値、それ以外は日足終値を取得。
+    """
     ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
+    now    = datetime.now(JST)
     try:
-        df = yf.download(ticker, period="2d", interval="1d",
-                         progress=False, auto_adjust=True)
+        if _is_market_hours(now):
+            # 取引時間中: 1分足で最新値
+            df = yf.download(ticker, period="1d", interval="1m",
+                             progress=False, auto_adjust=True)
+        else:
+            # 取引時間外: 日足終値
+            df = yf.download(ticker, period="2d", interval="1d",
+                             progress=False, auto_adjust=True)
         if df is None or df.empty:
             return None
         close = df["Close"].squeeze()
@@ -224,6 +247,56 @@ def fetch_current_price(symbol: str) -> float | None:
         return float(close.iloc[-1]) if len(close) >= 1 else None
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 監視スケジュール
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _watch_interval_sec(now: datetime) -> int | None:
+    """
+    現在時刻に応じたチェック間隔（秒）を返す。
+    取引時間外は None（待機 or 終了）。
+    """
+    from datetime import time as time_type
+    t = now.time()
+    if time_type(8, 45) <= t < time_type(11, 30):
+        return 5 * 60       # 前場: 5分
+    if time_type(11, 30) <= t < time_type(12, 30):
+        return None         # 昼休み: 待機
+    if time_type(12, 30) <= t <= time_type(15, 30):
+        return 15 * 60      # 後場: 15分
+    return None             # 時間外
+
+
+def _sleep_until_next(now: datetime) -> bool:
+    """
+    次のチェック開始時刻まで待機する。
+    15:30を過ぎていたら False を返して終了させる。
+    """
+    from datetime import time as time_type
+    t = now.time()
+
+    if t < time_type(8, 45):
+        # 開始前: 8:45まで待つ
+        target = now.replace(hour=8, minute=45, second=0, microsecond=0)
+        wait   = (target - now).total_seconds()
+        print(f"  市場オープン待機中... 8:45まであと {int(wait//60)}分", flush=True)
+        time.sleep(wait)
+        return True
+
+    if time_type(11, 30) <= t < time_type(12, 30):
+        # 昼休み: 12:30まで待つ
+        target = now.replace(hour=12, minute=30, second=0, microsecond=0)
+        wait   = (target - now).total_seconds()
+        print(f"  昼休み待機中... 12:30まであと {int(wait//60)}分", flush=True)
+        time.sleep(wait)
+        return True
+
+    if t > time_type(15, 30):
+        return False    # 引け後: 終了
+
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -248,12 +321,63 @@ def triggered_steps(profit_pct: float, threshold: float,
 # メイン
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_once(holdings: list[dict], token: str, user_id: str,
+              threshold: float, dedup: dict, dry_run: bool, show: bool) -> bool:
+    """1回チェックして通知。通知があればTrueを返す。"""
+    sent_any = False
+    now_str  = datetime.now(JST).strftime("%H:%M")
+    print(f"[{now_str}] チェック中 ({len(holdings)}銘柄)...", flush=True)
+
+    for h in holdings:
+        symbol      = h["symbol"]
+        name        = h["name"]
+        entry_price = h["entry_price"]
+        qty         = h["qty"]
+        type_       = h["type"]
+
+        current = fetch_current_price(symbol)
+        if current is None:
+            print(f"  {symbol} {name}  ← 価格取得失敗", flush=True)
+            continue
+
+        profit_pct = (current / entry_price - 1) * 100
+        pnl_yen    = (current - entry_price) * qty
+        print(f"  {symbol} {name} [{type_}]  "
+              f"建値 {entry_price:,.0f}→現在 {current:,.0f}円  "
+              f"{profit_pct:+.1f}%  {pnl_yen:+,.0f}円", flush=True)
+
+        if show:
+            continue
+
+        steps = triggered_steps(profit_pct, threshold, dedup, symbol)
+        for step in steps:
+            msg = (
+                f"{'💰' if profit_pct >= 5 else '📈'} 含み益アラート +{step}%達成\n"
+                f"銘柄: {name}（{symbol}）[{type_}]\n"
+                f"建値: {entry_price:,.0f}円 → 現在: {current:,.0f}円\n"
+                f"含み益: {profit_pct:+.1f}%  {pnl_yen:+,.0f}円\n"
+                f"({qty}株 保有)"
+            )
+            ok = send_line(token, user_id, msg, dry_run=dry_run)
+            if ok:
+                dedup[_dedup_key(symbol, step)] = str(datetime.now(JST))
+                sent_any = True
+                print(f"    → +{step}% アラート送信 ✓", flush=True)
+            else:
+                print(f"    → +{step}% 送信失敗 ✗", flush=True)
+
+    _save_dedup(dedup)
+    return sent_any
+
+
 def main():
     parser = argparse.ArgumentParser(description="保有銘柄の含み益をLINE通知")
     parser.add_argument("--profit",   type=float, default=3.0,
                         help="何%%以上の含み益で通知 (デフォルト: 3.0)")
     parser.add_argument("--paste",    type=str,   default=str(PASTE_FILE),
                         help=f"SBIペーストファイルのパス (デフォルト: {PASTE_FILE})")
+    parser.add_argument("--watch",    action="store_true",
+                        help="時間帯自動調整で繰り返し監視（前場5分/後場15分）")
     parser.add_argument("--test",     action="store_true", help="テスト送信")
     parser.add_argument("--dry-run",  action="store_true", help="送信せず結果だけ表示")
     parser.add_argument("--show",     action="store_true", help="保有状況だけ表示（送信なし）")
@@ -288,60 +412,52 @@ def main():
         return
 
     print(f"保有銘柄: {len(holdings)}件  (含み益 ≥{args.profit}% で通知)")
-    print()
-
-    dedup    = _load_dedup()
-    sent_any = False
-
     for h in holdings:
-        symbol      = h["symbol"]
-        name        = h["name"]
-        entry_price = h["entry_price"]
-        qty         = h["qty"]
-        type_       = h["type"]
-
-        current = fetch_current_price(symbol)
-        if current is None:
-            print(f"  {symbol} {name}  ← 価格取得失敗")
-            continue
-
-        profit_pct = (current / entry_price - 1) * 100
-        pnl_yen    = (current - entry_price) * qty
-        status     = f"{profit_pct:+.1f}%  {pnl_yen:+,.0f}円"
-
-        print(f"  {symbol} {name} [{type_}]  "
-              f"建値 {entry_price:,.0f}円 → 現在 {current:,.0f}円  {status}")
-
-        if args.show:
-            continue
-
-        # 通知すべきステップを確認
-        steps = triggered_steps(profit_pct, args.profit, dedup, symbol)
-        for step in steps:
-            entry_display = f"{entry_price:,.0f}"
-            current_display = f"{current:,.0f}"
-            pnl_display = f"{pnl_yen:+,.0f}"
-            msg = (
-                f"{'💰' if profit_pct >= 5 else '📈'} 含み益アラート +{step}%達成\n"
-                f"銘柄: {name}（{symbol}）[{type_}]\n"
-                f"建値: {entry_display}円 → 現在: {current_display}円\n"
-                f"含み益: {profit_pct:+.1f}%  {pnl_display}円\n"
-                f"({qty}株 保有)"
-            )
-            ok = send_line(token, user_id, msg, dry_run=args.dry_run)
-            if ok:
-                dedup[_dedup_key(symbol, step)] = str(datetime.now(JST))
-                sent_any = True
-                print(f"    → +{step}% アラート送信 ✓")
-            else:
-                print(f"    → +{step}% 送信失敗 ✗")
-
-    _save_dedup(dedup)
+        print(f"  {h['symbol']} {h['name']} [{h['type']}]  建値 {h['entry_price']:,.0f}円")
     print()
 
-    if not args.show and not sent_any:
-        print(f"通知なし（含み益 ≥{args.profit}% の銘柄なし / 本日送信済み）")
-    print("完了")
+    if args.watch:
+        # ───── 監視ループ ─────
+        interval_label = {"前場": "5分", "後場": "15分"}
+        print("監視開始 (Ctrl+C で停止)", flush=True)
+        print("  前場 8:45〜11:30: 5分間隔", flush=True)
+        print("  後場 12:30〜15:30: 15分間隔", flush=True)
+        print()
+        try:
+            while True:
+                now = datetime.now(JST)
+                interval = _watch_interval_sec(now)
+
+                if interval is None:
+                    # 時間外: 次の開始時刻まで待つか終了
+                    if not _sleep_until_next(now):
+                        print("15:30 引け。監視終了。", flush=True)
+                        break
+                    continue
+
+                session = "前場" if now.hour < 12 else "後場"
+                dedup = _load_dedup()
+                _run_once(holdings, token, user_id,
+                          args.profit, dedup, args.dry_run, args.show)
+
+                # 次のチェックまで待機
+                next_check = datetime.now(JST) + timedelta(seconds=interval)
+                print(f"  次回: {next_check.strftime('%H:%M')} ({session} {interval//60}分後)\n",
+                      flush=True)
+                time.sleep(interval)
+
+        except KeyboardInterrupt:
+            print("\n監視停止。")
+
+    else:
+        # ───── 1回だけ実行 ─────
+        dedup = _load_dedup()
+        sent  = _run_once(holdings, token, user_id,
+                          args.profit, dedup, args.dry_run, args.show)
+        print()
+        if not args.show and not sent:
+            print(f"通知なし（含み益 ≥{args.profit}% の銘柄なし / 本日送信済み）")
+        print("完了")
 
 
 if __name__ == "__main__":
