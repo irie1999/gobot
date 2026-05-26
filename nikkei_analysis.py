@@ -59,6 +59,75 @@ def label_trend(close: pd.Series) -> pd.Series:
     return trend
 
 
+MARKET_DEFS = [
+    {"ticker": "1306.T", "label": "TOPIX",           "unit": "pt",  "fmt": ",.1f",
+     "note": "東証全体の動き。日経と同方向なら信頼性↑"},
+    {"ticker": "JPY=X",  "label": "USD/JPY",          "unit": "円", "fmt": ".2f",
+     "note": ">150円: 円安 → 輸出株↑, <140円: 円高 → 輸出株↓"},
+    {"ticker": "^GSPC",  "label": "S&P500",           "unit": "pt",  "fmt": ",.0f",
+     "note": "米株上昇 → 翌日の日本株に追い風"},
+    {"ticker": "^VIX",   "label": "VIX (恐怖指数)",   "unit": "",    "fmt": ".1f",
+     "note": "<20: 平静, 20-30: 警戒, >30: 恐怖 → 逆指値損切り多発"},
+    {"ticker": "^TNX",   "label": "米10年国債",        "unit": "%",   "fmt": ".2f",
+     "note": "急上昇: 株→債券への資金移動リスク"},
+]
+
+
+def fetch_market_indicators(years: int = 1, end_date=None) -> dict:
+    """各市場指標の日足終値を取得。ticker→pd.Series の辞書を返す。失敗した指標はスキップ。"""
+    result = {}
+    period_days = years * 365 + 60
+    tickers = [d["ticker"] for d in MARKET_DEFS]
+    try:
+        if end_date is not None:
+            start = pd.Timestamp(end_date) - pd.Timedelta(days=period_days)
+            end   = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+            raw = yf.download(tickers, start=start, end=end, interval="1d",
+                              progress=False, auto_adjust=True, group_by="ticker")
+        else:
+            raw = yf.download(tickers, period=f"{period_days}d", interval="1d",
+                              progress=False, auto_adjust=True, group_by="ticker")
+    except Exception:
+        return result
+
+    for ticker in tickers:
+        try:
+            if ticker in raw.columns.get_level_values(0):
+                s = raw[ticker]["Close"]
+            elif "Close" in raw.columns:
+                s = raw["Close"]
+            else:
+                continue
+            s = s.squeeze()
+            s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+            s = s.dropna().sort_index()
+            if end_date is not None:
+                s = s[s.index <= pd.Timestamp(end_date)]
+            if not s.empty:
+                result[ticker] = s
+        except Exception:
+            pass
+    return result
+
+
+def get_indicator_regime(series: pd.Series) -> dict:
+    """指標の現在状態（トレンド・騰落）を計算"""
+    if len(series) < 2:
+        return {}
+    cur = float(series.iloc[-1])
+    ma10 = float(series.rolling(10).mean().iloc[-1]) if len(series) >= 10 else cur
+    ma25 = float(series.rolling(25).mean().iloc[-1]) if len(series) >= 25 else cur
+    if cur > ma10 and ma10 > ma25:
+        trend = "up"
+    elif cur < ma10 and ma10 < ma25:
+        trend = "down"
+    else:
+        trend = "sideways"
+    mom5  = (cur / float(series.iloc[-6])  - 1) * 100 if len(series) >= 6  else 0.0
+    mom20 = (cur / float(series.iloc[-21]) - 1) * 100 if len(series) >= 21 else 0.0
+    return {"cur": cur, "trend": trend, "mom5": mom5, "mom20": mom20}
+
+
 def get_regime(close: pd.Series) -> dict:
     """現在の相場環境を計算して返す"""
     rets    = close.pct_change().dropna()
@@ -402,7 +471,75 @@ def _stars_html(score: int, rank: int | None) -> str:
     return f'<span style="color:{star_color};font-size:1.05rem;letter-spacing:1px">{stars}</span> {rank_html}'
 
 
-def _tab1_signal_html(r: dict, ref_date) -> str:
+def _market_overview_html(indicators: dict) -> str:
+    """マーケット概況グリッド HTML (各市場指標カード)"""
+    if not indicators:
+        return ""
+
+    trend_arrow = {"up": "▲", "down": "▼", "sideways": "→"}
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}
+
+    cards = []
+    for mdef in MARKET_DEFS:
+        series = indicators.get(mdef["ticker"])
+        if series is None or series.empty:
+            cards.append(f"""
+<div class="mkt-card">
+  <div class="mkt-label">{mdef['label']}</div>
+  <div class="mkt-val" style="color:#475569">取得失敗</div>
+</div>""")
+            continue
+
+        reg   = get_indicator_regime(series)
+        cur   = reg["cur"]
+        tc    = trend_color[reg["trend"]]
+        arr   = trend_arrow[reg["trend"]]
+        m5c   = "#4ade80" if reg["mom5"]  >= 0 else "#f87171"
+        m20c  = "#4ade80" if reg["mom20"] >= 0 else "#f87171"
+        fmt   = mdef["fmt"]
+        unit  = mdef["unit"]
+        val_str = f"{cur:{fmt}}{unit}"
+
+        # VIX 特別表示
+        vix_badge = ""
+        if mdef["ticker"] == "^VIX":
+            if cur >= 30:
+                vix_badge = '<span style="background:#991b1b;color:#fca5a5;padding:1px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;margin-left:6px">恐怖</span>'
+            elif cur >= 20:
+                vix_badge = '<span style="background:#92400e;color:#fde68a;padding:1px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;margin-left:6px">警戒</span>'
+            else:
+                vix_badge = '<span style="background:#14532d;color:#86efac;padding:1px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;margin-left:6px">平静</span>'
+
+        # USD/JPY 特別表示
+        usdjpy_badge = ""
+        if mdef["ticker"] == "JPY=X":
+            if cur >= 150:
+                usdjpy_badge = '<span style="background:#1e3a5f;color:#93c5fd;padding:1px 7px;border-radius:4px;font-size:0.7rem;margin-left:6px">円安</span>'
+            elif cur < 140:
+                usdjpy_badge = '<span style="background:#164e63;color:#a5f3fc;padding:1px 7px;border-radius:4px;font-size:0.7rem;margin-left:6px">円高</span>'
+
+        cards.append(f"""
+<div class="mkt-card">
+  <div class="mkt-label">{mdef['label']}</div>
+  <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
+    <span class="mkt-val">{val_str}</span>
+    <span style="color:{tc};font-size:0.95rem;font-weight:700">{arr}</span>
+    {vix_badge}{usdjpy_badge}
+  </div>
+  <div class="mkt-chg">
+    <span style="color:{m5c}">5日: {reg['mom5']:+.1f}%</span>
+    &nbsp;/&nbsp;
+    <span style="color:{m20c}">20日: {reg['mom20']:+.1f}%</span>
+  </div>
+  <div class="mkt-note">{mdef['note']}</div>
+</div>""")
+
+    return f"""
+<h2>マーケット概況（参考指標）</h2>
+<div class="mkt-grid">{''.join(cards)}</div>"""
+
+
+def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None) -> str:
     """タブ1: シグナル判定"""
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
@@ -521,10 +658,13 @@ def _tab1_signal_html(r: dict, ref_date) -> str:
   </div>
 </div>"""
 
+    mkt_html = _market_overview_html(indicators or {})
+
     return f"""
 <h2>{ref_date} 時点の相場環境（日経225）</h2>
 <div class="regime-panel">{regime_html}</div>
 {warn_html}
+{mkt_html}
 
 <h2>スクリプト判定</h2>
 {cards_html}
@@ -921,6 +1061,15 @@ th { background:#1e293b; color:#94a3b8; padding:7px 10px;
      border:1px solid #334155; text-align:center; white-space:nowrap; }
 td { padding:5px 10px; border:1px solid #1e293b; }
 tr:hover td { filter:brightness(1.15); }
+
+/* マーケット概況グリッド */
+.mkt-grid { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:16px; }
+.mkt-card { background:#0d1424; border:1px solid #1e3a5f; border-radius:10px;
+            padding:14px 18px; min-width:160px; flex:1; }
+.mkt-label { font-size:0.72rem; color:#64748b; margin-bottom:5px; }
+.mkt-val   { font-size:1.15rem; font-weight:700; color:#e2e8f0; }
+.mkt-chg   { font-size:0.8rem; margin-top:5px; }
+.mkt-note  { font-size:0.72rem; color:#475569; margin-top:5px; line-height:1.5; }
 """
 
 JS = """
@@ -935,7 +1084,7 @@ function switchTab(id) {
 
 def build_html(close: pd.Series, trend: pd.Series, r: dict,
                periods: list[dict], up_periods: list[dict],
-               years: int, ref_date) -> str:
+               years: int, ref_date, indicators: dict | None = None) -> str:
     ref_str     = str(ref_date)
     is_past     = (ref_date != _TODAY)
     past_badge  = (f' <span style="background:#7c3aed;color:#fff;padding:2px 10px;'
@@ -944,7 +1093,7 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
 
-    tab1 = _tab1_signal_html(r, ref_date)
+    tab1 = _tab1_signal_html(r, ref_date, indicators=indicators)
     tab2 = _tab2_trend_html(close, trend, periods, years)
 
     all_stats = {
@@ -1018,6 +1167,18 @@ def main():
         print(f"[ERROR] {ref_date} 時点のデータが取得できませんでした")
         return
 
+    print("参考指標を取得中...", flush=True)
+    indicators = fetch_market_indicators(years=1, end_date=ref_date if args.date else None)
+    for mdef in MARKET_DEFS:
+        s = indicators.get(mdef["ticker"])
+        if s is not None and not s.empty:
+            reg = get_indicator_regime(s)
+            arr = {"up": "▲", "down": "▼", "sideways": "→"}[reg["trend"]]
+            print(f"  {mdef['label']}: {reg['cur']:{mdef['fmt']}}{mdef['unit']} {arr}  "
+                  f"5日{reg['mom5']:+.1f}% / 20日{reg['mom20']:+.1f}%")
+        else:
+            print(f"  {mdef['label']}: 取得失敗")
+
     trend     = label_trend(close)
     r         = get_regime(close)
     periods   = extract_periods(close, trend, ref_date)
@@ -1041,7 +1202,8 @@ def main():
 
     html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(
-        build_html(close, trend, r, periods, up_timing, args.years, ref_date),
+        build_html(close, trend, r, periods, up_timing, args.years, ref_date,
+                   indicators=indicators),
         encoding="utf-8"
     )
     print(f"生成: {html_path}")
