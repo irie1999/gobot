@@ -612,7 +612,57 @@ def run_limit_backtest(
                 days_to_fill  = i - signal_idx
                 qty           = FIXED_QTY
                 state         = "in_pos"
-                # エントリー当日は保有中扱い。翌日以降の in_pos ブロックで OCO 判定する。
+
+                # 約定と同日に決済が発生するか確認
+                if is_short:
+                    hit_tgt = lo <= target_price
+                    hit_stp = hi >= stop_price
+                else:
+                    hit_tgt = hi >= target_price
+                    hit_stp = lo <= stop_price
+
+                if hit_tgt and hit_stp:
+                    exit_p      = target_price
+                    exit_reason = "目標達成"
+                elif hit_tgt:
+                    exit_p      = target_price
+                    exit_reason = "目標達成"
+                elif hit_stp:
+                    exit_p      = stop_price
+                    exit_reason = "損切り"
+                else:
+                    exit_p = None
+                    exit_reason = None
+
+                if exit_p is not None:
+                    if exit_reason == "損切り":
+                        if is_short:
+                            # ギャップアップで損切りトリガー: 始値で損切り
+                            exit_p = op if op >= stop_price else stop_price * (1.0 + SLIPPAGE_STOP_PCT)
+                        else:
+                            # ギャップダウンで損切りトリガー: 始値で損切り
+                            exit_p = op if op <= stop_price else stop_price * (1.0 - SLIPPAGE_STOP_PCT)
+                    if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
+                        fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+                        if is_short:
+                            pnl = (entry_p - exit_p) * qty - fee
+                            pct = (entry_p - exit_p) / entry_p * 100
+                        else:
+                            pnl = (exit_p - entry_p) * qty - fee
+                            pct = (exit_p - entry_p) / entry_p * 100
+                        trades.append(dict(
+                            entry_dt=entry_dt, exit_dt=dt,
+                            entry_p=entry_p, exit_p=exit_p, qty=qty,
+                            pnl=pnl, pct=pct,
+                            fee=round(fee, 0),
+                            hold_days=0, days_to_fill=days_to_fill,
+                            signal_dt=signal_dt, signal_price=signal_price,
+                            order_limit=limit_price, order_stop=stop_price,
+                            order_target=target_price,
+                            reason=exit_reason,
+                        ))
+                    state = "idle"
+                continue
 
         # ── in_pos: OCO決済チェック ───────────────────────────────
         if state == "in_pos":
@@ -655,26 +705,25 @@ def run_limit_backtest(
             exit_p    = None
             exit_reason = None
 
-            if hold_days > 0:  # エントリー当日は決済しない（翌日以降に OCO 判定）
-                if is_short:
-                    hit_tgt = lo <= target_price
-                    hit_stp = hi >= stop_price
-                else:
-                    hit_tgt = hi >= target_price
-                    hit_stp = lo <= stop_price
+            if is_short:
+                hit_tgt = lo <= target_price
+                hit_stp = hi >= stop_price
+            else:
+                hit_tgt = hi >= target_price
+                hit_stp = lo <= stop_price
 
-                if hit_tgt and hit_stp:
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif hit_tgt:
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif hit_stp:
-                    exit_p      = stop_price
-                    exit_reason = "損切り"
-                elif hold_days >= MAX_HOLD:
-                    exit_p      = cl
-                    exit_reason = "タイムカット"
+            if hit_tgt and hit_stp:
+                exit_p      = target_price
+                exit_reason = "目標達成"
+            elif hit_tgt:
+                exit_p      = target_price
+                exit_reason = "目標達成"
+            elif hit_stp:
+                exit_p      = stop_price
+                exit_reason = "損切り"
+            elif hold_days >= MAX_HOLD:
+                exit_p      = cl
+                exit_reason = "タイムカット"
 
             if exit_p is not None:
                 if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):

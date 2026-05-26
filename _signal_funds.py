@@ -6,17 +6,21 @@ from backtest_limit_entry import compute_period_result, FIXED_QTY
 JST = timezone(timedelta(hours=9))
 
 
-_MIN_TRADES_365 = 1   # 365日間の最低取引回数（データ皆無のみ除外）
+_MIN_TRADES_365 = 5   # 365日間の最低取引回数（これ未満は除外）
 
 
 def filter_items(items: list[dict], min_trades: int = _MIN_TRADES_365) -> list[dict]:
-    """Remove items with no 365-day trades (data missing). PnL filter removed — WF selection already ensures quality."""
+    """Remove items with non-positive 365-day PnL or too few 365-day trades."""
     kept, removed = [], []
     for item in items:
         pr365 = (item.get("period_results") or {}).get(365) or {}
-        if pr365.get("trades", 0) < min_trades:
-            removed.append((item["symbol"], item["name"], item["strategy"],
-                            f"365d 取引={pr365.get('trades',0)}回"))
+        reason = None
+        if pr365.get("total_pnl", 0) <= 0:
+            reason = f"365d PnL={pr365.get('total_pnl',0):+,.0f}円"
+        elif pr365.get("trades", 0) < min_trades:
+            reason = f"365d 取引={pr365.get('trades',0)}回"
+        if reason:
+            removed.append((item["symbol"], item["name"], item["strategy"], reason))
         else:
             kept.append(item)
     if removed:
