@@ -136,6 +136,7 @@ def parse_sbi_paste(text: str) -> list[dict]:
     - 複数ポジションがある場合は加重平均
     """
     margin_pos = text.find("信用建玉一覧")
+    spot_pos   = text.find("保有証券一覧")   # 現物セクション開始位置
     lines      = text.split("\n")
     code_re    = re.compile(r"(\d{4})\s+メールアラート")
 
@@ -165,8 +166,10 @@ def parse_sbi_paste(text: str) -> list[dict]:
         block = "\n".join(lines[li:end])
 
         # 現物/信用 判定
+        # 「保有証券一覧」以降に出てくるコードは現物、それ以前で信用建玉一覧以降は信用
         char_pos  = sum(len(l) + 1 for l in lines[:li])
-        is_margin = (margin_pos >= 0 and char_pos > margin_pos)
+        in_spot   = (spot_pos >= 0 and char_pos > spot_pos)
+        is_margin = (not in_spot) and (margin_pos >= 0 and char_pos > margin_pos)
         type_     = "信用" if is_margin else "現物"
 
         # 取得/建単価: "(100)\t価格" パターン
