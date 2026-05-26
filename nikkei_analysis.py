@@ -373,6 +373,159 @@ def downtrend_risk(periods: list[dict]) -> dict[int, float]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# トレンド継続予測 (条件付き生存分析)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def calc_trend_prediction(periods: list[dict], current_trend: str, current_days: int) -> dict:
+    """
+    条件付き生存分析: すでに current_days 日続いているトレンドが
+    あと何日続くかを過去データから推計する。
+    """
+    done = [p for p in periods if p["trend"] == current_trend and not p["is_current"]]
+    survived = [p for p in done if p["days"] >= current_days]
+
+    if len(survived) < 3:
+        return {"insufficient": True, "total_count": len(done),
+                "survived_count": len(survived), "current_days": current_days}
+
+    remaining = sorted(p["days"] - current_days for p in survived)
+    thresholds = [3, 5, 10, 15, 20, 30]
+    probs = {t: sum(1 for r in remaining if r >= t) / len(remaining) * 100
+             for t in thresholds}
+
+    return {
+        "insufficient": False,
+        "total_count": len(done),
+        "survived_count": len(survived),
+        "remaining": remaining,
+        "mean_remaining": sum(remaining) / len(remaining),
+        "median_remaining": remaining[len(remaining) // 2],
+        "max_remaining": max(remaining),
+        "probs": probs,
+        "current_days": current_days,
+    }
+
+
+def _trend_prediction_html(pred: dict, current_trend: str) -> str:
+    """トレンド継続予測ボックス HTML"""
+    trend_ja   = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[current_trend]
+    trend_icon = {"up": "📈", "down": "📉", "sideways": "➡️"}[current_trend]
+    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[current_trend]
+    cd = pred["current_days"]
+
+    if pred["insufficient"]:
+        n = pred["survived_count"]
+        total = pred["total_count"]
+        return f"""
+<div style="background:#0d1424;border:1px solid #1e3a5f;border-radius:10px;
+            padding:16px 20px;margin-bottom:16px">
+  <div style="font-size:0.95rem;font-weight:700;color:#60a5fa;margin-bottom:8px">
+    {trend_icon} {trend_ja}トレンド継続予測 — 現在 {cd}日目
+  </div>
+  <div style="color:#64748b;font-size:0.85rem">
+    過去に{cd}日以上続いた{trend_ja}トレンドは {total}回中 {n}回のみ。
+    サンプル不足のため統計的な予測が困難です。<br>
+    現在のトレンドは過去データの中では稀なほど長続きしています。転換に注意してください。
+  </div>
+</div>"""
+
+    survived_pct = pred["survived_count"] / pred["total_count"] * 100
+    med = pred["median_remaining"]
+    avg = pred["mean_remaining"]
+    mx  = pred["max_remaining"]
+    probs = pred["probs"]
+
+    # 確率バー
+    bar_rows = ""
+    for days, prob in probs.items():
+        bar_color = "#4ade80" if prob >= 60 else ("#fbbf24" if prob >= 30 else "#f87171")
+        bar_w = max(2, round(prob))
+        bar_rows += f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+  <span style="width:80px;font-size:0.78rem;color:#94a3b8;text-align:right;flex-shrink:0">あと{days}日以上</span>
+  <div style="flex:1;background:#1e293b;border-radius:4px;height:18px;position:relative">
+    <div style="width:{bar_w}%;background:{bar_color};height:100%;border-radius:4px;
+                transition:width 0.3s"></div>
+    <span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);
+                 font-size:0.75rem;font-weight:700;color:#0f172a">{prob:.0f}%</span>
+  </div>
+</div>"""
+
+    # 分布ヒストグラム (10日ごとのバケット)
+    buckets: dict[int, int] = {}
+    for r in pred["remaining"]:
+        b = (r // 10) * 10
+        buckets[b] = buckets.get(b, 0) + 1
+    hist_max = max(buckets.values()) if buckets else 1
+    hist_rows = ""
+    for b in sorted(buckets):
+        cnt  = buckets[b]
+        w    = round(cnt / hist_max * 100)
+        hist_rows += (f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+                      f'<span style="width:60px;font-size:0.72rem;color:#64748b;text-align:right'
+                      f';flex-shrink:0">{b}〜{b+9}日</span>'
+                      f'<div style="width:{w}%;background:#334155;height:14px;border-radius:3px'
+                      f';min-width:2px"></div>'
+                      f'<span style="font-size:0.72rem;color:#475569">{cnt}回</span></div>')
+
+    return f"""
+<div style="background:#0d1424;border:1px solid #1e3a5f;border-radius:10px;
+            padding:16px 20px;margin-bottom:16px">
+  <div style="font-weight:700;font-size:0.98rem;color:#60a5fa;margin-bottom:12px">
+    {trend_icon} {trend_ja}トレンド継続予測 — 現在
+    <span style="color:{trend_color};font-size:1.1rem">{cd}日目</span>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:14px">
+    <div style="background:#111827;border-radius:8px;padding:10px 16px;text-align:center">
+      <div style="font-size:0.7rem;color:#64748b;margin-bottom:3px">過去の同トレンド</div>
+      <div style="font-size:1.1rem;font-weight:700">{pred['total_count']}回</div>
+    </div>
+    <div style="background:#111827;border-radius:8px;padding:10px 16px;text-align:center">
+      <div style="font-size:0.7rem;color:#64748b;margin-bottom:3px">{cd}日以上続いた</div>
+      <div style="font-size:1.1rem;font-weight:700">
+        {pred['survived_count']}回
+        <span style="font-size:0.78rem;color:#64748b">({survived_pct:.0f}%)</span>
+      </div>
+    </div>
+    <div style="background:#111827;border-radius:8px;padding:10px 16px;text-align:center">
+      <div style="font-size:0.7rem;color:#64748b;margin-bottom:3px">残り中央値</div>
+      <div style="font-size:1.1rem;font-weight:700;color:{trend_color}">{med:.0f}日</div>
+    </div>
+    <div style="background:#111827;border-radius:8px;padding:10px 16px;text-align:center">
+      <div style="font-size:0.7rem;color:#64748b;margin-bottom:3px">残り平均</div>
+      <div style="font-size:1.1rem;font-weight:700">{avg:.0f}日</div>
+    </div>
+    <div style="background:#111827;border-radius:8px;padding:10px 16px;text-align:center">
+      <div style="font-size:0.7rem;color:#64748b;margin-bottom:3px">過去最長残り</div>
+      <div style="font-size:1.1rem;font-weight:700">{mx:.0f}日</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:24px">
+    <div style="flex:1;min-width:220px">
+      <div style="font-size:0.78rem;color:#94a3b8;margin-bottom:8px;font-weight:600">
+        ▶ 継続確率（条件付き）
+      </div>
+      {bar_rows}
+    </div>
+    <div style="flex:1;min-width:200px">
+      <div style="font-size:0.78rem;color:#94a3b8;margin-bottom:8px;font-weight:600">
+        ▶ 残り日数の分布
+      </div>
+      {hist_rows}
+    </div>
+  </div>
+
+  <div style="font-size:0.72rem;color:#334155;margin-top:12px;line-height:1.6">
+    ※ 過去{pred['total_count']}回の{trend_ja}トレンドのうち、{cd}日以上続いた
+    {pred['survived_count']}回を対象に集計。確率はあくまで過去の傾向であり、
+    将来を保証するものではありません。
+  </div>
+</div>"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HTML パーツ生成
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -539,7 +692,8 @@ def _market_overview_html(indicators: dict) -> str:
 <div class="mkt-grid">{''.join(cards)}</div>"""
 
 
-def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None) -> str:
+def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
+                      periods: list | None = None) -> str:
     """タブ1: シグナル判定"""
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
@@ -660,10 +814,18 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None) -> str:
 
     mkt_html = _market_overview_html(indicators or {})
 
+    # トレンド継続予測
+    pred_html = ""
+    if periods:
+        cur_p   = periods[-1]
+        pred    = calc_trend_prediction(periods, cur_p["trend"], cur_p["days"])
+        pred_html = _trend_prediction_html(pred, cur_p["trend"])
+
     return f"""
 <h2>{ref_date} 時点の相場環境（日経225）</h2>
 <div class="regime-panel">{regime_html}</div>
 {warn_html}
+{pred_html}
 {mkt_html}
 
 <h2>スクリプト判定</h2>
@@ -1093,7 +1255,7 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
     trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
     trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
 
-    tab1 = _tab1_signal_html(r, ref_date, indicators=indicators)
+    tab1 = _tab1_signal_html(r, ref_date, indicators=indicators, periods=periods)
     tab2 = _tab2_trend_html(close, trend, periods, years)
 
     all_stats = {
