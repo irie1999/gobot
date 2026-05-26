@@ -11,6 +11,7 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
   2. python line_alert.py --watch を実行（起動したままにしておく）
 
   python line_alert.py --watch            # 時間帯自動調整で監視（推奨）
+
   python line_alert.py                    # 1回だけチェック
   python line_alert.py --profit 5         # 含み益+5%以上に変更
   python line_alert.py --test             # テスト送信
@@ -20,7 +21,7 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
 【--watch モードのチェック間隔】
   08:45〜11:30  5分ごと   （前場・寄り付き前後）
   11:30〜12:30  待機       （昼休み）
-  12:30〜15:30  15分ごと  （後場）
+  12:30〜15:30  10分ごと  （後場）
   15:30以降     終了
 
 【通知タイミング】
@@ -265,7 +266,7 @@ def _watch_interval_sec(now: datetime) -> int | None:
     if time_type(11, 30) <= t < time_type(12, 30):
         return None         # 昼休み: 待機
     if time_type(12, 30) <= t <= time_type(15, 30):
-        return 15 * 60      # 後場: 15分
+        return 10 * 60      # 後場: 10分
     return None             # 時間外
 
 
@@ -421,7 +422,7 @@ def main():
         interval_label = {"前場": "5分", "後場": "15分"}
         print("監視開始 (Ctrl+C で停止)", flush=True)
         print("  前場 8:45〜11:30: 5分間隔", flush=True)
-        print("  後場 12:30〜15:30: 15分間隔", flush=True)
+        print("  後場 12:30〜15:30: 10分間隔", flush=True)
         print()
         try:
             while True:
