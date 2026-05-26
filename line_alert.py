@@ -1,37 +1,36 @@
 """
-line_alert.py — 保有銘柄の急上昇・目標価格接近をLINE通知
+line_alert.py — 保有銘柄の含み益アラートをLINE通知
 
 【事前設定】
-  以下の環境変数を ~/.bashrc または .env に追加:
-    export LINE_CHANNEL_TOKEN="your_channel_access_token"
-    export LINE_USER_ID="your_line_user_id"
-
-  LINE Messaging API チャンネル作成手順:
-    1. https://developers.line.biz/ でチャンネル作成 (Messaging API)
-    2. チャンネルアクセストークン (長期) を発行 → LINE_CHANNEL_TOKEN
-    3. ボットと友達追加し、User ID を取得 → LINE_USER_ID
-       (取得方法: https://api.line.me/v2/profile にGETリクエスト)
+  /home/user/gobot/.env に以下を記載:
+    LINE_CHANNEL_TOKEN=your_channel_access_token
+    LINE_USER_ID=your_line_user_id
 
 【使い方】
-  python line_alert.py                    # 前日比+5%以上 または 目標価格90%到達で通知
-  python line_alert.py --threshold 3      # 前日比+3%以上に変更
-  python line_alert.py --near-target 95   # 目標価格95%到達で通知
-  python line_alert.py --from-entry 10    # エントリー比+10%以上でも通知
-  python line_alert.py --log aggressive   # aggressive版ログを使用
-  python line_alert.py --test             # テスト送信（保有銘柄チェックなし）
-  python line_alert.py --dry-run          # 通知せず結果のみ表示
+  1. SBI証券の保有株/信用建玉ページをコピーして sbi_paste.txt に貼り付ける
+  2. python line_alert.py を実行
 
-【定期実行（cron）の例】
-  # 平日15時（引け後）に毎日実行
+  python line_alert.py                    # 含み益+3%以上で通知（デフォルト）
+  python line_alert.py --profit 5         # 含み益+5%以上に変更
+  python line_alert.py --test             # テスト送信
+  python line_alert.py --dry-run          # 通知せず結果だけ表示
+  python line_alert.py --show             # 現在の保有状況だけ表示
+
+【通知タイミング】
+  エントリー価格から +3% / +5% / +8% / +10% / +15% / +20% を超えるたびに1回通知。
+  損からの回復も同じ条件で判定（+3%到達で通知）。
+
+【定期実行（cron）例】
   0 15 * * 1-5 cd /home/user/gobot && python line_alert.py >> line_alert.log 2>&1
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
+import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,17 +38,21 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-JST = timezone(timedelta(hours=9))
-_TODAY = datetime.now(JST).date()
-
+JST          = timezone(timedelta(hours=9))
+_TODAY       = datetime.now(JST).date()
 LINE_API_URL = "https://api.line.me/v2/bot/message/push"
-DEDUP_FILE   = Path(".line_alert_sent.json")   # 同日重複送信防止ファイル
+PASTE_FILE   = Path(__file__).parent / "sbi_paste.txt"
+DEDUP_FILE   = Path(__file__).parent / ".line_alert_sent.json"
 
-FIXED_QTY = 100  # forward_test と同じ
+# 通知する含み益ステップ（%）— これらを超えた段階で1回ずつ通知
+PROFIT_STEPS = [3, 5, 8, 10, 15, 20]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# .env 読み込み
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _load_dotenv() -> None:
-    """.env ファイルが存在すれば環境変数として読み込む（python-dotenv 不要）"""
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         return
@@ -60,9 +63,8 @@ def _load_dotenv() -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         val = val.strip().strip('"').strip("'")
-        if key and key not in os.environ:   # 既存の環境変数は上書きしない
+        if key and key not in os.environ:
             os.environ[key] = val
-
 
 _load_dotenv()
 
@@ -73,13 +75,10 @@ _load_dotenv()
 
 def send_line(token: str, user_id: str, text: str, dry_run: bool = False) -> bool:
     if dry_run:
-        print(f"[DRY-RUN] LINE送信:\n{text}\n")
+        print(f"[DRY-RUN] LINE送信:\n{text}\n{'─'*40}")
         return True
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
-    }
-    body = {"to": user_id, "messages": [{"type": "text", "text": text}]}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body    = {"to": user_id, "messages": [{"type": "text", "text": text}]}
     try:
         resp = requests.post(LINE_API_URL, headers=headers, json=body, timeout=10)
         if resp.status_code == 200:
@@ -99,149 +98,150 @@ def _load_dedup() -> dict:
     if DEDUP_FILE.exists():
         try:
             data = json.loads(DEDUP_FILE.read_text())
-            # 今日以外のキーは削除してファイルを軽量化
             today_str = str(_TODAY)
             return {k: v for k, v in data.items() if k.startswith(today_str)}
         except Exception:
             pass
     return {}
 
-
 def _save_dedup(data: dict) -> None:
     DEDUP_FILE.write_text(json.dumps(data, ensure_ascii=False))
 
-
-def _dedup_key(symbol: str, strategy: str, reason: str) -> str:
-    return f"{_TODAY}|{symbol}|{strategy}|{reason}"
+def _dedup_key(symbol: str, step: int) -> str:
+    return f"{_TODAY}|{symbol}|+{step}%"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 保有銘柄の読み込み
+# SBI ペーストテキスト解析
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_holdings(log_path: str) -> list[dict]:
-    """forward_test_log.csv から status=holding のポジションを取得"""
-    path = Path(log_path)
+def _normalize(s: str) -> str:
+    """全角英数字を半角に変換"""
+    return unicodedata.normalize("NFKC", s).strip()
+
+
+def parse_sbi_paste(text: str) -> list[dict]:
+    """
+    SBI証券の保有株/信用建玉ページのコピーテキストから保有情報を抽出する。
+
+    抽出ロジック:
+    - 4桁の銘柄コード + "メールアラート" で各銘柄ブロックの開始を検出
+    - "(株数)\t単価" パターン（例: "(100)\t4,065"）で取得/建単価を取得
+    - 複数ポジションがある場合は加重平均
+    """
+    margin_pos = text.find("信用建玉一覧")
+    lines      = text.split("\n")
+    code_re    = re.compile(r"(\d{4})\s+メールアラート")
+
+    # 各銘柄コードの行インデックスを収集
+    code_lines: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        m = code_re.search(line)
+        if m:
+            code_lines.append((i, m.group(1)))
+
+    holdings: dict[str, dict] = {}
+
+    for idx, (li, code) in enumerate(code_lines):
+        # 名前: コード行の1行前（空行・ヘッダー行を除く）
+        name = code
+        for j in range(li - 1, max(-1, li - 4), -1):
+            cand = _normalize(lines[j])
+            if cand and not re.search(
+                r"メールアラート|評価|取引|銘柄|保有|取得|建玉|一覧|ページ|表示|ダウンロード|株式|信用|預り|担保",
+                cand
+            ):
+                name = cand
+                break
+
+        # ブロック末尾: 次の銘柄コード行 or 20行以内
+        end = code_lines[idx + 1][0] if idx + 1 < len(code_lines) else li + 20
+        block = "\n".join(lines[li:end])
+
+        # 現物/信用 判定
+        char_pos  = sum(len(l) + 1 for l in lines[:li])
+        is_margin = (margin_pos >= 0 and char_pos > margin_pos)
+        type_     = "信用" if is_margin else "現物"
+
+        # 取得/建単価: "(100)\t価格" パターン
+        # ※ (31％) のような括弧は \d+ に % が含まれるのでマッチしない
+        entry_prices = [
+            float(p.replace(",", ""))
+            for p in re.findall(r"\(\d+\)\t([\d,]+)", block)
+        ]
+        if not entry_prices:
+            continue
+
+        # 株数: ブロック内の (100) 直前の数値、または行数 × 100
+        qty_per_pos = 100
+        qty_m = re.search(r"メールアラート[^\n]*\t(\d+)", lines[li])
+        if qty_m:
+            qty_per_pos = int(qty_m.group(1))
+
+        total_qty = qty_per_pos * len(entry_prices)
+        avg_price = sum(entry_prices) / len(entry_prices)
+
+        if code not in holdings:
+            holdings[code] = {
+                "symbol":      code,
+                "name":        name,
+                "qty":         total_qty,
+                "entry_price": round(avg_price, 1),
+                "type":        type_,
+            }
+        else:
+            # 同一コードが複数セクションにある場合は上書き（信用優先）
+            if is_margin:
+                holdings[code]["type"]        = "信用"
+                holdings[code]["entry_price"] = round(avg_price, 1)
+                holdings[code]["qty"]         = total_qty
+
+    return list(holdings.values())
+
+
+def load_holdings_from_paste(path: Path = PASTE_FILE) -> list[dict]:
     if not path.exists():
-        print(f"[WARN] ログファイルが見つかりません: {path}")
         return []
-    holdings = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("status") == "holding":
-                holdings.append(row)
-    return holdings
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return parse_sbi_paste(text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 株価取得
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_price_info(symbol: str) -> dict | None:
-    """直近2日の日足から現在値・前日比を取得"""
+def fetch_current_price(symbol: str) -> float | None:
     ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
     try:
-        df = yf.download(ticker, period="5d", interval="1d",
+        df = yf.download(ticker, period="2d", interval="1d",
                          progress=False, auto_adjust=True)
         if df is None or df.empty:
             return None
         close = df["Close"].squeeze()
-        high  = df["High"].squeeze()
         if hasattr(close, "columns"):
             close = close.iloc[:, 0]
-            high  = high.iloc[:, 0]
         close = close.dropna()
-        high  = high.dropna()
-        if len(close) < 2:
-            return None
-        cur       = float(close.iloc[-1])
-        prev      = float(close.iloc[-2])
-        today_hi  = float(high.iloc[-1])
-        daily_pct = (cur / prev - 1) * 100
-        return {
-            "close":     cur,
-            "prev":      prev,
-            "today_hi":  today_hi,
-            "daily_pct": daily_pct,
-            "date":      close.index[-1].date(),
-        }
-    except Exception as e:
-        print(f"[WARN] {symbol} 価格取得失敗: {e}", file=sys.stderr)
+        return float(close.iloc[-1]) if len(close) >= 1 else None
+    except Exception:
         return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# アラート判定
+# 含み益ステップ判定
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_alerts(row: dict, price: dict, *,
-                 threshold_pct: float,
-                 near_target_pct: float | None,
-                 from_entry_pct: float | None) -> list[dict]:
+def triggered_steps(profit_pct: float, threshold: float,
+                    dedup: dict, symbol: str) -> list[int]:
     """
-    アラート条件を判定し、該当するアラートのリストを返す。
-    各アラートは {"reason": str, "message": str} の形式。
+    通知すべき含み益ステップのリストを返す。
+    - profit_pct >= threshold かつ まだ本日通知していないステップのみ
     """
-    alerts = []
-    symbol   = row["symbol"]
-    name     = row.get("name", symbol)
-    strategy = row.get("strategy", "")
-    entry_p  = float(row.get("fill_price") or row.get("order_price") or 0)
-    target_p = float(row.get("target_price") or 0)
-    stop_p   = float(row.get("stop_price") or 0)
-    cur      = price["close"]
-    hi       = price["today_hi"]
-    daily    = price["daily_pct"]
-
-    # 前日比で急上昇
-    if daily >= threshold_pct:
-        pnl = (cur - entry_p) * FIXED_QTY if entry_p else 0
-        alerts.append({
-            "reason": "spike",
-            "message": (
-                f"📈 急上昇アラート\n"
-                f"銘柄: {name}（{symbol}）[{strategy}]\n"
-                f"前日比: +{daily:.1f}%\n"
-                f"現在値: {cur:,.0f}円  前日終値: {price['prev']:,.0f}円\n"
-                f"エントリー: {entry_p:,.0f}円  含み益: {pnl:+,.0f}円\n"
-                f"目標価格: {target_p:,.0f}円  損切価格: {stop_p:,.0f}円"
-            ),
-        })
-
-    # エントリーからの上昇率
-    if from_entry_pct is not None and entry_p > 0:
-        gain = (cur / entry_p - 1) * 100
-        if gain >= from_entry_pct:
-            pnl = (cur - entry_p) * FIXED_QTY
-            alerts.append({
-                "reason": "from_entry",
-                "message": (
-                    f"💰 含み益アラート（エントリー比+{gain:.1f}%）\n"
-                    f"銘柄: {name}（{symbol}）[{strategy}]\n"
-                    f"エントリー: {entry_p:,.0f}円 → 現在: {cur:,.0f}円\n"
-                    f"含み益: {pnl:+,.0f}円\n"
-                    f"目標価格: {target_p:,.0f}円"
-                ),
-            })
-
-    # 目標価格への接近
-    if near_target_pct is not None and target_p > 0 and entry_p > 0:
-        reach = (cur / target_p) * 100
-        reach_hi = (hi / target_p) * 100
-        if reach_hi >= near_target_pct:
-            dist_pct = (target_p - cur) / cur * 100
-            pnl = (cur - entry_p) * FIXED_QTY
-            alerts.append({
-                "reason": "near_target",
-                "message": (
-                    f"🎯 目標価格接近アラート（{reach_hi:.0f}%到達）\n"
-                    f"銘柄: {name}（{symbol}）[{strategy}]\n"
-                    f"目標: {target_p:,.0f}円  現在: {cur:,.0f}円  あと{dist_pct:.1f}%\n"
-                    f"エントリー: {entry_p:,.0f}円  含み益: {pnl:+,.0f}円"
-                ),
-            })
-
-    return alerts
+    steps = [s for s in PROFIT_STEPS if s >= threshold]
+    result = []
+    for step in steps:
+        if profit_pct >= step and _dedup_key(symbol, step) not in dedup:
+            result.append(step)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,32 +249,25 @@ def check_alerts(row: dict, price: dict, *,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="保有銘柄の急上昇をLINE通知")
-    parser.add_argument("--threshold",   type=float, default=5.0,
-                        help="前日比何%%以上で通知 (デフォルト: 5.0)")
-    parser.add_argument("--near-target", type=float, default=90.0, metavar="PCT",
-                        help="目標価格の何%%到達で通知 (デフォルト: 90.0, 0で無効)")
-    parser.add_argument("--from-entry",  type=float, default=None, metavar="PCT",
-                        help="エントリー比何%%上昇で通知 (デフォルト: 無効)")
-    parser.add_argument("--log",         type=str, default="forward_test_log.csv",
-                        help="ログファイルパス")
-    parser.add_argument("--test",        action="store_true",
-                        help="テスト通知を送信（銘柄チェックなし）")
-    parser.add_argument("--dry-run",     action="store_true",
-                        help="通知せず結果のみ表示")
+    parser = argparse.ArgumentParser(description="保有銘柄の含み益をLINE通知")
+    parser.add_argument("--profit",   type=float, default=3.0,
+                        help="何%%以上の含み益で通知 (デフォルト: 3.0)")
+    parser.add_argument("--paste",    type=str,   default=str(PASTE_FILE),
+                        help=f"SBIペーストファイルのパス (デフォルト: {PASTE_FILE})")
+    parser.add_argument("--test",     action="store_true", help="テスト送信")
+    parser.add_argument("--dry-run",  action="store_true", help="送信せず結果だけ表示")
+    parser.add_argument("--show",     action="store_true", help="保有状況だけ表示（送信なし）")
     args = parser.parse_args()
 
     token   = os.environ.get("LINE_CHANNEL_TOKEN", "")
     user_id = os.environ.get("LINE_USER_ID", "")
 
-    if not args.dry_run:
+    if not args.dry_run and not args.show and not args.test:
         if not token or not user_id:
             print("【設定が必要です】")
-            print("以下の環境変数を設定してから実行してください:\n")
-            print("  export LINE_CHANNEL_TOKEN='your_channel_access_token'")
-            print("  export LINE_USER_ID='your_line_user_id'\n")
-            print("LINE Developers (https://developers.line.biz/) でチャンネルを作成し、")
-            print("チャンネルアクセストークン(長期)を発行してください。")
+            print(".env ファイルに以下を設定してください:\n")
+            print("  LINE_CHANNEL_TOKEN=your_channel_access_token")
+            print("  LINE_USER_ID=your_line_user_id")
             sys.exit(1)
 
     # テスト送信
@@ -286,53 +279,68 @@ def main():
         print("テスト送信 " + ("成功" if ok else "失敗"))
         return
 
-    near_target = args.near_target if args.near_target > 0 else None
-
     # 保有銘柄を読み込む
-    holdings = load_holdings(args.log)
+    paste_path = Path(args.paste)
+    holdings   = load_holdings_from_paste(paste_path)
+
     if not holdings:
-        print(f"保有銘柄なし（{args.log}）")
+        print(f"保有銘柄が見つかりません。{paste_path} にSBIの保有株/建玉ページをペーストしてください。")
         return
-    print(f"保有銘柄: {len(holdings)}件")
+
+    print(f"保有銘柄: {len(holdings)}件  (含み益 ≥{args.profit}% で通知)")
+    print()
 
     dedup    = _load_dedup()
     sent_any = False
 
-    for row in holdings:
-        symbol = row.get("symbol", "")
-        if not symbol:
-            continue
-        print(f"  {symbol} {row.get('name','')} [{row.get('strategy','')}] 価格確認中...", end=" ")
-        price = fetch_price_info(symbol)
-        if price is None:
-            print("取得失敗")
-            continue
-        print(f"{price['close']:,.0f}円 (前日比 {price['daily_pct']:+.1f}%)")
+    for h in holdings:
+        symbol      = h["symbol"]
+        name        = h["name"]
+        entry_price = h["entry_price"]
+        qty         = h["qty"]
+        type_       = h["type"]
 
-        alerts = check_alerts(
-            row, price,
-            threshold_pct=args.threshold,
-            near_target_pct=near_target,
-            from_entry_pct=args.from_entry,
-        )
+        current = fetch_current_price(symbol)
+        if current is None:
+            print(f"  {symbol} {name}  ← 価格取得失敗")
+            continue
 
-        for alert in alerts:
-            key = _dedup_key(symbol, row.get("strategy", ""), alert["reason"])
-            if key in dedup:
-                print(f"    → [{alert['reason']}] 本日送信済みのためスキップ")
-                continue
-            ok = send_line(token, user_id, alert["message"], dry_run=args.dry_run)
+        profit_pct = (current / entry_price - 1) * 100
+        pnl_yen    = (current - entry_price) * qty
+        status     = f"{profit_pct:+.1f}%  {pnl_yen:+,.0f}円"
+
+        print(f"  {symbol} {name} [{type_}]  "
+              f"建値 {entry_price:,.0f}円 → 現在 {current:,.0f}円  {status}")
+
+        if args.show:
+            continue
+
+        # 通知すべきステップを確認
+        steps = triggered_steps(profit_pct, args.profit, dedup, symbol)
+        for step in steps:
+            entry_display = f"{entry_price:,.0f}"
+            current_display = f"{current:,.0f}"
+            pnl_display = f"{pnl_yen:+,.0f}"
+            msg = (
+                f"{'💰' if profit_pct >= 5 else '📈'} 含み益アラート +{step}%達成\n"
+                f"銘柄: {name}（{symbol}）[{type_}]\n"
+                f"建値: {entry_display}円 → 現在: {current_display}円\n"
+                f"含み益: {profit_pct:+.1f}%  {pnl_display}円\n"
+                f"({qty}株 保有)"
+            )
+            ok = send_line(token, user_id, msg, dry_run=args.dry_run)
             if ok:
-                dedup[key] = str(datetime.now(JST))
+                dedup[_dedup_key(symbol, step)] = str(datetime.now(JST))
                 sent_any = True
-                print(f"    → [{alert['reason']}] LINE送信 ✓")
+                print(f"    → +{step}% アラート送信 ✓")
             else:
-                print(f"    → [{alert['reason']}] LINE送信 ✗")
+                print(f"    → +{step}% 送信失敗 ✗")
 
     _save_dedup(dedup)
+    print()
 
-    if not sent_any:
-        print(f"\n本日の通知なし（前日比 ≥{args.threshold}% の急上昇なし）")
+    if not args.show and not sent_any:
+        print(f"通知なし（含み益 ≥{args.profit}% の銘柄なし / 本日送信済み）")
     print("完了")
 
 
