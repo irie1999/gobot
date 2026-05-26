@@ -569,7 +569,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   <div class="sg">
     <div class="si"><span class="sl">開始日</span><span class="sv">{last['start']}</span></div>
     <div class="si"><span class="sl">継続日数</span><span class="sv">{last['days']}日</span></div>
-    <div class="si"><span class="sl">開始値</span><span class="sv">{last['start_price']:,.0f}円</span></div>
+    <div class="si"><span class="sl">開始日終値</span><span class="sv">{last['start_price']:,.0f}円</span></div>
     <div class="si"><span class="sl">現在値</span><span class="sv">{cur_price:,.0f}円</span></div>
     <div class="si"><span class="sl">騰落率</span><span class="sv" style="color:{pct_c}">{last['pct']:+.1f}%</span></div>
     <div class="si"><span class="sl">平均期間</span><span class="sv">{avg:.0f}日</span></div>
@@ -666,11 +666,12 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
 <thead><tr>
   <th>種別</th><th>開始日</th><th>終了日</th>
   <th>日数</th><th>騰落率</th><th>最大下落</th>
-  <th>開始値(円)</th><th>最安値(円)</th><th>終了値(円)</th>
+  <th>開始日終値(円)</th><th>最安値(円)</th><th>終了日終値(円)</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
 <p class="footnote">
+  ※ 価格はすべて <strong>終値</strong>（始値・高値・安値は使用していません）<br>
   ※ 判定: 終値&gt;MA10&gt;MA25=上昇(▲) ／ 終値&lt;MA10&lt;MA25=下落(▼) ／ それ以外=横ばい(→)<br>
   ※ 横ばいでも ⚠️V字 は3%超の下落があったV字回復を示す
 </p>"""
@@ -713,7 +714,7 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
   <div class="sg">
     <div class="si"><span class="sl">開始日</span><span class="sv">{cur_up['start_date']}</span></div>
     <div class="si"><span class="sl">経過日数</span><span class="sv">{cd}日</span></div>
-    <div class="si"><span class="sl">開始値</span><span class="sv">{cur_up['start_p']:,.0f}円</span></div>
+    <div class="si"><span class="sl">開始日終値</span><span class="sv">{cur_up['start_p']:,.0f}円</span></div>
     <div class="si"><span class="sl">確認ラグ</span><span class="sv">{cur_up['lag_bars']}営業日</span></div>
     <div class="si"><span class="sl">乗り遅れ幅</span><span class="sv" style="color:#fbbf24">+{cur_up['lag_pct']:.1f}%</span></div>
     <div class="si"><span class="sl">まだ継続確率</span><span class="sv" style="color:{sv_c}">{sv_str}</span></div>
@@ -837,7 +838,7 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
 <table>
 <thead><tr>
   <th>開始日</th><th>終了日</th><th>期間</th><th>騰落率</th>
-  <th>開始値(円)</th><th>確認ラグ（底値→シグナル）</th>
+  <th>開始日終値(円)</th><th>確認ラグ（底値→シグナル）</th>
 </tr></thead>
 <tbody>{p_rows}</tbody>
 </table>
