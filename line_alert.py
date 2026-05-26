@@ -48,6 +48,25 @@ DEDUP_FILE   = Path(".line_alert_sent.json")   # 同日重複送信防止ファ�
 FIXED_QTY = 100  # forward_test と同じ
 
 
+def _load_dotenv() -> None:
+    """.env ファイルが存在すれば環境変数として読み込む（python-dotenv 不要）"""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:   # 既存の環境変数は上書きしない
+            os.environ[key] = val
+
+
+_load_dotenv()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LINE 送信
 # ─────────────────────────────────────────────────────────────────────────────
