@@ -71,10 +71,26 @@ PROFIT_STEPS = [5, 8, 10, 15, 20]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_dotenv() -> None:
+    """
+    .env ファイルを読み込んで環境変数に設定する。
+    UTF-8 BOM / UTF-16 / Windows改行(\r\n) に対応。
+    """
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+
+    # 複数エンコーディングを順に試す
+    raw = None
+    for enc in ("utf-8-sig", "utf-16", "utf-8", "cp932"):
+        try:
+            raw = env_path.read_text(encoding=enc)
+            break
+        except Exception:
+            continue
+    if raw is None:
+        return
+
+    for line in raw.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
