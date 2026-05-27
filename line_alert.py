@@ -40,9 +40,16 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import logging
+import warnings
+
 import pandas as pd
 import requests
 import yfinance as yf
+
+# yfinance の不要なログ・警告を抑制
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+warnings.filterwarnings("ignore")
 
 JST          = timezone(timedelta(hours=9))
 _TODAY       = datetime.now(JST).date()
@@ -229,28 +236,34 @@ def _is_market_hours(now: datetime) -> bool:
 
 def fetch_current_price(symbol: str) -> float | None:
     """
-    取引時間中は1分足の最新値、それ以外は日足終値を取得。
+    取引時間中は5分足→1分足→日足の順で試行。取得できた最新値を返す。
     """
     ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
-    now    = datetime.now(JST)
-    try:
-        if _is_market_hours(now):
-            # 取引時間中: 1分足で最新値
-            df = yf.download(ticker, period="1d", interval="1m",
-                             progress=False, auto_adjust=True)
-        else:
-            # 取引時間外: 日足終値
-            df = yf.download(ticker, period="2d", interval="1d",
-                             progress=False, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        close = df["Close"].squeeze()
-        if hasattr(close, "columns"):
-            close = close.iloc[:, 0]
-        close = close.dropna()
-        return float(close.iloc[-1]) if len(close) >= 1 else None
-    except Exception:
-        return None
+    # 取引時間中は短い足から試す、それ以外は日足のみ
+    now = datetime.now(JST)
+    if _is_market_hours(now):
+        intervals = [("5m", "1d"), ("1m", "1d"), ("1d", "5d")]
+    else:
+        intervals = [("1d", "5d")]
+
+    for interval, period in intervals:
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df = yf.download(ticker, period=period, interval=interval,
+                                 progress=False, auto_adjust=True)
+            if df is None or df.empty:
+                continue
+            close = df["Close"].squeeze()
+            if hasattr(close, "columns"):
+                close = close.iloc[:, 0]
+            close = close.dropna()
+            if len(close) >= 1:
+                return float(close.iloc[-1])
+        except Exception:
+            continue
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
