@@ -15,6 +15,7 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
   python line_alert.py --watch            # 時間帯自動調整で監視（推奨）
   python line_alert.py                    # 1回だけチェック
   python line_alert.py --profit 5         # 含み益+5%以上に変更
+  python line_alert.py --trail 2          # ピークから2%下落で利確タイミング通知
   python line_alert.py --test             # テスト送信
   python line_alert.py --dry-run          # 通知せず結果だけ表示
   python line_alert.py --show             # 現在の保有状況だけ表示
@@ -30,8 +31,9 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
   15:30以降     終了
 
 【通知タイミング】
-  エントリー価格から +3% / +5% / +8% / +10% / +15% / +20% を超えるたびに1回通知。
-  損からの回復も同じ条件で判定（+3%到達で通知）。
+  ① 含み益ステップ通知: +5% / +8% / +10% / +15% / +20% を超えるたびに1回通知。
+  ② トレーリングストップ通知: 当日ピークから --trail % 以上下落したら「利確タイミング」通知。
+     （デフォルト 2%。0 を指定すると無効化）
 """
 from __future__ import annotations
 
@@ -61,6 +63,7 @@ _TODAY       = datetime.now(JST).date()
 LINE_API_URL = "https://api.line.me/v2/bot/message/push"
 PASTE_FILE   = Path(__file__).parent / "sbi_paste.txt"
 DEDUP_FILE   = Path(__file__).parent / ".line_alert_sent.json"
+PEAKS_FILE   = Path(__file__).parent / ".line_alert_peaks.json"
 
 # 通知する含み益ステップ（%）— これらを超えた段階で1回ずつ通知
 PROFIT_STEPS = [5, 8, 10, 15, 20]
@@ -143,6 +146,30 @@ def _save_dedup(data: dict) -> None:
 
 def _dedup_key(symbol: str, step: int) -> str:
     return f"{_TODAY}|{symbol}|+{step}%"
+
+def _trail_dedup_key(symbol: str, peak_floor: int) -> str:
+    """ピークが peak_floor % 台のときのトレーリング警告キー（1段階1回）"""
+    return f"{_TODAY}|{symbol}|trail|peak{peak_floor}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 当日ピーク価格の追跡
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_peaks() -> dict:
+    """今日の各銘柄ピーク価格を読み込む（日付が変わったらリセット）"""
+    if PEAKS_FILE.exists():
+        try:
+            data = json.loads(PEAKS_FILE.read_text())
+            if data.get("date") == str(_TODAY):
+                return data.get("peaks", {})
+        except Exception:
+            pass
+    return {}
+
+def _save_peaks(peaks: dict) -> None:
+    PEAKS_FILE.write_text(json.dumps({"date": str(_TODAY), "peaks": peaks},
+                                     ensure_ascii=False))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,11 +447,13 @@ def triggered_steps(profit_pct: float, threshold: float,
 
 def _run_once(holdings: list[dict], token: str, user_id: str,
               threshold: float, dedup: dict, dry_run: bool, show: bool,
-              verbose: bool = False) -> bool:
+              verbose: bool = False, trail: float = 2.0) -> bool:
     """1回チェックして通知。通知があればTrueを返す。"""
     sent_any = False
     now_str  = datetime.now(JST).strftime("%H:%M")
     print(f"[{now_str}] チェック中 ({len(holdings)}銘柄)...", flush=True)
+
+    peaks = _load_peaks()
 
     for h in holdings:
         symbol      = h["symbol"]
@@ -440,13 +469,29 @@ def _run_once(holdings: list[dict], token: str, user_id: str,
 
         profit_pct = (current / entry_price - 1) * 100
         pnl_yen    = (current - entry_price) * qty
+
+        # ピーク更新
+        prev_peak = peaks.get(symbol, current)
+        if current > prev_peak:
+            peaks[symbol] = current
+            prev_peak = current
+        elif symbol not in peaks:
+            peaks[symbol] = current
+
+        peak_profit_pct = (prev_peak / entry_price - 1) * 100
+        drop_from_peak  = peak_profit_pct - profit_pct
+
+        # 表示（ピーク情報付き）
+        peak_str = (f"  ↑ ピーク {prev_peak:,.0f}円 (+{peak_profit_pct:.1f}%)"
+                    if prev_peak > current else "")
         print(f"  {symbol} {name} [{type_}]  "
               f"建値 {entry_price:,.0f}→現在 {current:,.0f}円  "
-              f"{profit_pct:+.1f}%  {pnl_yen:+,.0f}円", flush=True)
+              f"{profit_pct:+.1f}%  {pnl_yen:+,.0f}円{peak_str}", flush=True)
 
         if show:
             continue
 
+        # ① 含み益ステップ通知
         steps = triggered_steps(profit_pct, threshold, dedup, symbol)
         for step in steps:
             msg = (
@@ -464,6 +509,30 @@ def _run_once(holdings: list[dict], token: str, user_id: str,
             else:
                 print(f"    → +{step}% 送信失敗 ✗", flush=True)
 
+        # ② トレーリングストップ通知（ピークから trail% 以上下落）
+        if trail > 0 and peak_profit_pct >= trail and drop_from_peak >= trail:
+            peak_floor = int(peak_profit_pct // trail) * int(trail)
+            tkey = _trail_dedup_key(symbol, peak_floor)
+            if tkey not in dedup:
+                pnl_at_peak = (prev_peak - entry_price) * qty
+                emoji = "⚠️" if profit_pct < 0 else "🔔"
+                msg = (
+                    f"{emoji} 利確タイミング通知\n"
+                    f"銘柄: {name}（{symbol}）[{type_}]\n"
+                    f"本日ピーク: {prev_peak:,.0f}円 (+{peak_profit_pct:.1f}%)  "
+                    f"{pnl_at_peak:+,.0f}円\n"
+                    f"現在: {current:,.0f}円 ({profit_pct:+.1f}%)  {pnl_yen:+,.0f}円\n"
+                    f"ピークから {drop_from_peak:.1f}%下落 → 利確を検討してください"
+                )
+                ok = send_line(token, user_id, msg, dry_run=dry_run)
+                if ok:
+                    dedup[tkey] = str(datetime.now(JST))
+                    sent_any = True
+                    print(f"    → 利確タイミング通知送信 ✓ (ピーク{peak_profit_pct:.1f}%→現在{profit_pct:.1f}%)", flush=True)
+                else:
+                    print(f"    → 利確タイミング通知送信失敗 ✗", flush=True)
+
+    _save_peaks(peaks)
     _save_dedup(dedup)
     return sent_any
 
@@ -472,10 +541,12 @@ def main():
     parser = argparse.ArgumentParser(description="保有銘柄の含み益をLINE通知")
     parser.add_argument("--profit",   type=float, default=5.0,
                         help="何%%以上の含み益で通知 (デフォルト: 5.0)")
+    parser.add_argument("--trail",    type=float, default=2.0,
+                        help="ピークから何%%下落で利確タイミング通知 (デフォルト: 2.0 / 0で無効)")
     parser.add_argument("--paste",    type=str,   default=str(PASTE_FILE),
                         help=f"SBIペーストファイルのパス (デフォルト: {PASTE_FILE})")
     parser.add_argument("--watch",    action="store_true",
-                        help="時間帯自動調整で繰り返し監視（前場5分/後場15分）")
+                        help="時間帯自動調整で繰り返し監視（前場5分/後場10分）")
     parser.add_argument("--test",     action="store_true", help="テスト送信")
     parser.add_argument("--dry-run",  action="store_true", help="送信せず結果だけ表示")
     parser.add_argument("--show",     action="store_true", help="保有状況だけ表示（送信なし）")
@@ -510,14 +581,15 @@ def main():
         print(f"保有銘柄が見つかりません。{paste_path} にSBIの保有株/建玉ページをペーストしてください。")
         return
 
+    trail_msg = f"  トレーリングストップ: ピークから{args.trail}%下落で利確通知" if args.trail > 0 else "  トレーリングストップ: 無効"
     print(f"保有銘柄: {len(holdings)}件  (含み益 ≥{args.profit}% で通知)")
+    print(trail_msg)
     for h in holdings:
         print(f"  {h['symbol']} {h['name']} [{h['type']}]  建値 {h['entry_price']:,.0f}円")
     print()
 
     if args.watch:
         # ───── 監視ループ ─────
-        interval_label = {"前場": "5分", "後場": "15分"}
         print("監視開始 (Ctrl+C で停止)", flush=True)
         print("  前場 8:45〜11:30: 5分間隔", flush=True)
         print("  後場 12:30〜15:30: 10分間隔", flush=True)
@@ -537,7 +609,8 @@ def main():
                 session = "前場" if now.hour < 12 else "後場"
                 dedup = _load_dedup()
                 _run_once(holdings, token, user_id,
-                          args.profit, dedup, args.dry_run, args.show)
+                          args.profit, dedup, args.dry_run, args.show,
+                          trail=args.trail)
 
                 # 次のチェックまで待機
                 next_check = datetime.now(JST) + timedelta(seconds=interval)
@@ -553,7 +626,7 @@ def main():
         dedup = _load_dedup()
         sent  = _run_once(holdings, token, user_id,
                           args.profit, dedup, args.dry_run, args.show,
-                          verbose=args.debug)
+                          verbose=args.debug, trail=args.trail)
         print()
         if not args.show and not sent:
             print(f"通知なし（含み益 ≥{args.profit}% の銘柄なし / 本日送信済み）")
