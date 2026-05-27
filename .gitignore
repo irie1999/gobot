@@ -29,3 +29,11 @@ select_signals_*.html
 nikkei_trend_*.html
 trend_timing_*.html
 nikkei_analysis_*.html
+
+# line_alert runtime state (daily, auto-generated)
+.line_alert_sent.json
+.line_alert_peaks.json
+.jpx_listed_cache.pkl
+walkforward_results/
+forward_test_log*.csv
+watchlist_proposal_*.py
