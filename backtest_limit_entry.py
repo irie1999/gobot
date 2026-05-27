@@ -81,7 +81,7 @@ LIMIT_ENTRY_MARGIN_PCT = 0.03
 # ── TSE 呼値 (tick size) 丸め ────────────────────────────────────
 # 東証の呼値単位: https://www.jpx.co.jp/rules-participants/rules/tick-size/
 _TICK_TABLE = [
-    (3_000,     1),
+    (3_000,     5),
     (5_000,     5),
     (30_000,   10),
     (50_000,   50),

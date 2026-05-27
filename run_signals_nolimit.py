@@ -46,6 +46,7 @@ _OPT_LABEL = f"sm=1.5 / tm=2.0 / 目標上限+{MAX_TARGET_PCT*100:.0f}% (損切-
 
 def _cap_target(items: list[dict]) -> list[dict]:
     """today_sig の target_price をエントリー価格 +MAX_TARGET_PCT 以内に丸める（ロング用）"""
+    from backtest_limit_entry import round_to_tick
     for item in items:
         sig = item.get("today_sig")
         if not sig:
@@ -55,7 +56,7 @@ def _cap_target(items: list[dict]) -> list[dict]:
             continue
         cap = entry * (1 + MAX_TARGET_PCT)
         if sig.get("target_price", 0) > cap:
-            sig["target_price"] = int(cap)   # 円単位で切り捨て
+            sig["target_price"] = round_to_tick(cap)
     return items
 
 JST = timezone(timedelta(hours=9))
