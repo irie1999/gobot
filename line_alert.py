@@ -63,7 +63,7 @@ PASTE_FILE   = Path(__file__).parent / "sbi_paste.txt"
 DEDUP_FILE   = Path(__file__).parent / ".line_alert_sent.json"
 
 # 通知する含み益ステップ（%）— これらを超えた段階で1回ずつ通知
-PROFIT_STEPS = [3, 5, 8, 10, 15, 20]
+PROFIT_STEPS = [5, 8, 10, 15, 20]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,8 +454,8 @@ def _run_once(holdings: list[dict], token: str, user_id: str,
 
 def main():
     parser = argparse.ArgumentParser(description="保有銘柄の含み益をLINE通知")
-    parser.add_argument("--profit",   type=float, default=3.0,
-                        help="何%%以上の含み益で通知 (デフォルト: 3.0)")
+    parser.add_argument("--profit",   type=float, default=5.0,
+                        help="何%%以上の含み益で通知 (デフォルト: 5.0)")
     parser.add_argument("--paste",    type=str,   default=str(PASTE_FILE),
                         help=f"SBIペーストファイルのパス (デフォルト: {PASTE_FILE})")
     parser.add_argument("--watch",    action="store_true",
