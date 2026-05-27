@@ -5,18 +5,23 @@ line_alert.py — 保有銘柄の含み益アラートをLINE通知
   /home/user/gobot/.env に以下を記載:
     LINE_CHANNEL_TOKEN=your_channel_access_token
     LINE_USER_ID=your_line_user_id
+    KABU_PASSWORD=your_kabustation_api_password   # リアルタイム価格用（任意）
+    KABU_BASE_URL=http://localhost:18080           # 本番18080 / デモ18081
 
 【使い方】
   1. SBI証券の保有株/信用建玉ページをコピーして sbi_paste.txt に貼り付ける
   2. python line_alert.py --watch を実行（起動したままにしておく）
 
   python line_alert.py --watch            # 時間帯自動調整で監視（推奨）
-
   python line_alert.py                    # 1回だけチェック
   python line_alert.py --profit 5         # 含み益+5%以上に変更
   python line_alert.py --test             # テスト送信
   python line_alert.py --dry-run          # 通知せず結果だけ表示
   python line_alert.py --show             # 現在の保有状況だけ表示
+
+【価格取得の優先順位】
+  1. kabu STATION API（リアルタイム）← KABU_PASSWORD設定時
+  2. yfinance（15〜20分遅延）← フォールバック
 
 【--watch モードのチェック間隔】
   08:45〜11:30  5分ごと   （前場・寄り付き前後）
@@ -223,7 +228,60 @@ def load_holdings_from_paste(path: Path = PASTE_FILE) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 株価取得
+# kabu STATION API（リアルタイム価格）
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kabu_token: str | None = None
+_kabu_token_ts: datetime | None = None
+
+
+def _get_kabu_token() -> str | None:
+    """kabu STATION APIトークンを取得（1時間キャッシュ）"""
+    global _kabu_token, _kabu_token_ts
+    password = os.environ.get("KABU_PASSWORD", "")
+    base_url = os.environ.get("KABU_BASE_URL", "http://localhost:18080")
+    if not password:
+        return None
+    now = datetime.now(JST)
+    if (_kabu_token and _kabu_token_ts and
+            (now - _kabu_token_ts).total_seconds() < 3600):
+        return _kabu_token
+    try:
+        resp = requests.post(
+            f"{base_url}/kabusapi/token",
+            headers={"Content-Type": "application/json"},
+            json={"APIPassword": password},
+            timeout=5,
+        )
+        token = resp.json().get("Token")
+        if token:
+            _kabu_token    = token
+            _kabu_token_ts = now
+            return token
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_kabu_price(symbol: str, token: str) -> float | None:
+    """kabu STATION の board APIで現在値を取得（東証=1固定）"""
+    base_url = os.environ.get("KABU_BASE_URL", "http://localhost:18080")
+    try:
+        resp = requests.get(
+            f"{base_url}/kabusapi/board/{symbol}@1",
+            headers={"X-API-KEY": token},
+            timeout=5,
+        )
+        data = resp.json()
+        # CurrentPrice が取れる場合はそれ、なければ CalcPrice
+        price = data.get("CurrentPrice") or data.get("CalcPrice")
+        return float(price) if price else None
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 株価取得（kabu STATION優先 → yfinanceフォールバック）
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_market_hours(now: datetime) -> bool:
@@ -236,23 +294,23 @@ def _is_market_hours(now: datetime) -> bool:
 
 def fetch_current_price(symbol: str) -> float | None:
     """
-    取引時間中は5分足→1分足→日足の順で試行。取得できた最新値を返す。
+    kabu STATION（リアルタイム）→ yfinance（遅延）の順で取得。
     """
-    ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
-    # 取引時間中は短い足から試す、それ以外は日足のみ
-    now = datetime.now(JST)
-    if _is_market_hours(now):
-        intervals = [("5m", "1d"), ("1m", "1d"), ("1d", "5d")]
-    else:
-        intervals = [("1d", "5d")]
+    # 1. kabu STATION（設定済みの場合）
+    token = _get_kabu_token()
+    if token:
+        price = _fetch_kabu_price(symbol, token)
+        if price:
+            return price
 
+    # 2. yfinance フォールバック（15〜20分遅延）
+    ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
+    now    = datetime.now(JST)
+    intervals = [("5m", "1d"), ("1d", "5d")] if _is_market_hours(now) else [("1d", "5d")]
     for interval, period in intervals:
         try:
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                df = yf.download(ticker, period=period, interval=interval,
-                                 progress=False, auto_adjust=True)
+            df = yf.download(ticker, period=period, interval=interval,
+                             progress=False, auto_adjust=True)
             if df is None or df.empty:
                 continue
             close = df["Close"].squeeze()
