@@ -292,7 +292,7 @@ def _is_market_hours(now: datetime) -> bool:
             time_type(12, 30) <= t <= time_type(15, 30))
 
 
-def fetch_current_price(symbol: str) -> float | None:
+def fetch_current_price(symbol: str, verbose: bool = False) -> float | None:
     """
     kabu STATION（リアルタイム）→ yfinance（遅延）の順で取得。
     """
@@ -301,7 +301,13 @@ def fetch_current_price(symbol: str) -> float | None:
     if token:
         price = _fetch_kabu_price(symbol, token)
         if price:
+            if verbose:
+                print(f"    [kabu STATION] {symbol}: {price:,.0f}円", flush=True)
             return price
+        if verbose:
+            print(f"    [kabu STATION] {symbol}: 取得失敗 → yfinanceへ", flush=True)
+    elif verbose:
+        print(f"    [yfinance] {symbol}: kabu未設定", flush=True)
 
     # 2. yfinance フォールバック（15〜20分遅延）
     ticker = symbol if symbol.endswith(".T") else f"{symbol}.T"
@@ -397,7 +403,8 @@ def triggered_steps(profit_pct: float, threshold: float,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_once(holdings: list[dict], token: str, user_id: str,
-              threshold: float, dedup: dict, dry_run: bool, show: bool) -> bool:
+              threshold: float, dedup: dict, dry_run: bool, show: bool,
+              verbose: bool = False) -> bool:
     """1回チェックして通知。通知があればTrueを返す。"""
     sent_any = False
     now_str  = datetime.now(JST).strftime("%H:%M")
@@ -410,7 +417,7 @@ def _run_once(holdings: list[dict], token: str, user_id: str,
         qty         = h["qty"]
         type_       = h["type"]
 
-        current = fetch_current_price(symbol)
+        current = fetch_current_price(symbol, verbose=verbose)
         if current is None:
             print(f"  {symbol} {name}  ← 価格取得失敗", flush=True)
             continue
@@ -456,6 +463,7 @@ def main():
     parser.add_argument("--test",     action="store_true", help="テスト送信")
     parser.add_argument("--dry-run",  action="store_true", help="送信せず結果だけ表示")
     parser.add_argument("--show",     action="store_true", help="保有状況だけ表示（送信なし）")
+    parser.add_argument("--debug",    action="store_true", help="価格取得元（kabu/yfinance）を表示")
     args = parser.parse_args()
 
     token   = os.environ.get("LINE_CHANNEL_TOKEN", "")
@@ -528,7 +536,8 @@ def main():
         # ───── 1回だけ実行 ─────
         dedup = _load_dedup()
         sent  = _run_once(holdings, token, user_id,
-                          args.profit, dedup, args.dry_run, args.show)
+                          args.profit, dedup, args.dry_run, args.show,
+                          verbose=args.debug)
         print()
         if not args.show and not sent:
             print(f"通知なし（含み益 ≥{args.profit}% の銘柄なし / 本日送信済み）")
