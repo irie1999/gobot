@@ -39,7 +39,24 @@ for _k, _v in list(_stop.STRATEGY_PARAMS.items()):
 for _k, _v in list(_brk.STRATEGY_PARAMS.items()):
     _brk.STRATEGY_PARAMS[_k] = (_v[0], _v[1], 1.5, 2.0)
 
-_OPT_LABEL = "sm=1.5 / tm=2.0 (損切-4.5% / 目標+6% / 高回転)"
+MAX_TARGET_PCT = 0.05   # 目標価格の上限キャップ: エントリー価格 +5%
+
+_OPT_LABEL = f"sm=1.5 / tm=2.0 / 目標上限+{MAX_TARGET_PCT*100:.0f}% (損切-4.5% / 高回転)"
+
+
+def _cap_target(items: list[dict]) -> list[dict]:
+    """today_sig の target_price をエントリー価格 +MAX_TARGET_PCT 以内に丸める（ロング用）"""
+    for item in items:
+        sig = item.get("today_sig")
+        if not sig:
+            continue
+        entry = sig.get("order_price", 0)
+        if entry <= 0:
+            continue
+        cap = entry * (1 + MAX_TARGET_PCT)
+        if sig.get("target_price", 0) > cap:
+            sig["target_price"] = int(cap)   # 円単位で切り捨て
+    return items
 
 JST = timezone(timedelta(hours=9))
 
@@ -307,9 +324,9 @@ def main() -> None:
         fut_brk   = outer.submit(_run_group_with_list, _brk,   BRK_WATCHLIST,     sig_date, args.workers)
         fut_short = outer.submit(_run_group_with_list, _short, _short.WATCHLIST,  sig_date, args.workers)
         fut_sbrk  = outer.submit(_run_group_with_list, _sbrk,  _sbrk.WATCHLIST,   sig_date, args.workers)
-    stop_items  = filter_items(fut_stop.result())
-    brk_items   = filter_items(fut_brk.result())
-    short_items = filter_items(fut_short.result())
+    stop_items  = _cap_target(filter_items(fut_stop.result()))
+    brk_items   = _cap_target(filter_items(fut_brk.result()))
+    short_items = filter_items(fut_short.result())   # ショートは逆方向なのでキャップ不要
     sbrk_items  = filter_items(fut_sbrk.result())
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
