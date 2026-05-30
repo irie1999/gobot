@@ -8,7 +8,7 @@ REM 2. kabu STATIONの起動を最大3分待機
 REM 3. API接続テスト (失敗時はリトライ)
 REM 4. bot をドライラン起動
 REM 5. bot 内部で9:00まで自動待機 → 15:00自動終了
-REM 6. bot終了後、5分足データを日次更新 (1800+銘柄、約30-60分)
+REM 6. bot終了後、yfinanceから5分足データを日次更新 (prime約1800銘柄、約20-40分)
 REM
 REM 【セットアップ】
 REM 1. Win+R → shell:startup → スタートアップフォルダ
@@ -74,16 +74,16 @@ echo. >> "%logfile%"
 
 python kabu_donchian_bot.py --dry-run --margin --max-concurrent 2 --max-risk 1000 --budget 200000 --poll 30 >> "%logfile%" 2>&1
 
-REM bot終了後、5分足データの日次更新 (1800+銘柄、並列5、約30-60分)
+REM bot終了後、yfinanceから5分足データ日次更新 (primeのみ、並列5、約20-40分)
 echo. >> "%logfile%"
 echo ============================================== >> "%logfile%"
-echo [4/4] 5分足データ日次更新開始: %date% %time% >> "%logfile%"
+echo [4/4] yfinance 5分足データ更新開始: %date% %time% >> "%logfile%"
 echo ============================================== >> "%logfile%"
 echo.
-echo [4/4] 5分足データ日次更新中... (1800+銘柄、約30-60分)
-python daily_fetch_minute.py --workers 5 >> "%logfile%" 2>&1
-echo [4/4] ✓ 5分足データ日次更新完了: %date% %time% >> "%logfile%"
-echo [4/4] ✓ 5分足データ日次更新完了
+echo [4/4] yfinance 5分足データ更新中... (prime約1800銘柄、約20-40分)
+python yfinance_update.py --days 60 --prime-only --workers 5 >> "%logfile%" 2>&1
+echo [4/4] ✓ yfinance 5分足データ更新完了: %date% %time% >> "%logfile%"
+echo [4/4] ✓ yfinance 5分足データ更新完了
 
 REM 終了メッセージ
 echo. >> "%logfile%"
