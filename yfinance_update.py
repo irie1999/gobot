@@ -190,6 +190,8 @@ def main():
                         help="処理銘柄数の上限 (テスト用)")
     parser.add_argument("--daytrade-only", action="store_true",
                         help="winners銘柄のみ更新")
+    parser.add_argument("--prime-only", action="store_true",
+                        help="東証プライム銘柄 (約1800) のみ更新")
     parser.add_argument("--check-only", action="store_true",
                         help="最終日確認のみ (取得しない)")
     args = parser.parse_args()
@@ -212,6 +214,19 @@ def main():
             print(f"winners対象: {len(pkl_files)}銘柄")
         except ImportError:
             print("[error] daytrade_donchian_winners.py がありません")
+            sys.exit(1)
+    elif args.prime_only:
+        try:
+            from symbols_listed_all import SYMBOLS
+            target_codes = [s.replace(".T", "") + "0" for s, _ in SYMBOLS]
+            pkl_files = [DATA_DIR / f"{c}.pkl" for c in target_codes
+                         if (DATA_DIR / f"{c}.pkl").exists()]
+            missing = len(target_codes) - len(pkl_files)
+            print(f"prime対象: {len(pkl_files)}/{len(target_codes)}銘柄"
+                  f" (pkl未存在: {missing})")
+        except ImportError:
+            print("[error] symbols_listed_all.py がありません。"
+                  "先に download_tse_symbols.py --market prime を実行")
             sys.exit(1)
     else:
         pkl_files = sorted(DATA_DIR.glob("*.pkl"))
