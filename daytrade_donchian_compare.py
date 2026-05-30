@@ -379,17 +379,21 @@ def build_html(preset_results, total_days, days, budget, source, universe):
                 hold = f"{int(delta.total_seconds() // 60)}分"
             except Exception:
                 hold = "-"
-            rows += f"""<tr>
-              <td class="sym">{t['name']}<br><small class="code">{t['symbol']}.T</small></td>
-              <td>{ed}</td><td>{xd}</td><td>{hold}</td>
-              <td>{t['entry_p']:,.1f}</td>
-              <td class="loss">{t['stop_p']:,.1f}</td>
-              <td class="profit">{t['target_p']:,.1f}</td>
-              <td>{t['exit_p']:,.1f}</td>
-              <td>{t['qty']:,}</td>
-              <td class="{pc}">{t['pnl']:+,.0f}</td>
-              <td class="{pc}">{t['pct']:+.2f}%</td>
-              <td>{t['reason']}</td></tr>"""
+            try:
+                sym_short = str(t.get('symbol', '')).replace('.T', '')
+                rows += f"""<tr>
+                  <td class="sym">{t.get('name', '?')}<br><small class="code">{sym_short}.T</small></td>
+                  <td>{ed}</td><td>{xd}</td><td>{hold}</td>
+                  <td>{t.get('entry_p', 0):,.1f}</td>
+                  <td class="loss">{t.get('stop_p', 0):,.1f}</td>
+                  <td class="profit">{t.get('target_p', 0):,.1f}</td>
+                  <td>{t.get('exit_p', 0):,.1f}</td>
+                  <td>{t.get('qty', 0):,}</td>
+                  <td class="{pc}">{t.get('pnl', 0):+,.0f}</td>
+                  <td class="{pc}">{t.get('pct', 0):+.2f}%</td>
+                  <td>{t.get('reason', '?')}</td></tr>"""
+            except Exception:
+                continue
 
         trade_html += f"""
         <details>
@@ -469,6 +473,8 @@ def main():
                         help=f"1取引あたり最大損失 (デフォルト: {MAX_RISK}, "
                              "実botと合わせる場合は1000)")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-html", action="store_true",
+                        help="HTMLレポート生成をスキップ (大量取引時の高速化)")
     args = parser.parse_args()
 
     # プリセット選択
@@ -562,15 +568,20 @@ def main():
             print(f"使用例: python daytrade_donchian_compare.py "
                   f"--universe winners --presets {args.target_preset}")
 
-    # HTML
-    stamp = datetime.now(JST).strftime('%Y%m%d')
-    out = Path(f"daytrade_donchian_compare_{args.universe}_{stamp}.html")
-    out.write_text(build_html(preset_results, total_days, args.days,
-                              args.budget, args.source, args.universe),
-                   encoding="utf-8")
-    print(f"\nHTML: {out.resolve()}")
-    if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+    # HTML (--no-html でスキップ可、大量取引時の高速化)
+    if not args.no_html:
+        stamp = datetime.now(JST).strftime('%Y%m%d')
+        out = Path(f"daytrade_donchian_compare_{args.universe}_{stamp}.html")
+        try:
+            out.write_text(build_html(preset_results, total_days, args.days,
+                                      args.budget, args.source, args.universe),
+                           encoding="utf-8")
+            print(f"\nHTML: {out.resolve()}")
+            if not args.no_browser:
+                webbrowser.open(out.resolve().as_uri())
+        except Exception as e:
+            print(f"\n[warn] HTML生成失敗: {type(e).__name__}: {e}")
+            print(f"       --no-html でスキップ推奨")
 
 
 if __name__ == "__main__":
