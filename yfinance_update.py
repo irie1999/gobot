@@ -206,6 +206,8 @@ def main():
                         help="winners銘柄のみ更新")
     parser.add_argument("--prime-only", action="store_true",
                         help="東証プライム銘柄 (約1800) のみ更新")
+    parser.add_argument("--stale-days", type=int, default=0,
+                        help="最終日が N 日以上前の銘柄のみ更新 (0=全て)")
     parser.add_argument("--check-only", action="store_true",
                         help="最終日確認のみ (取得しない)")
     args = parser.parse_args()
@@ -245,6 +247,20 @@ def main():
     else:
         pkl_files = sorted(DATA_DIR.glob("*.pkl"))
         print(f"全銘柄対象: {len(pkl_files)}銘柄")
+
+    # stale-days フィルタ: 最終日が N 日以上前の銘柄のみ
+    if args.stale_days > 0:
+        today_dt = datetime.now(JST).date()
+        cutoff = today_dt - timedelta(days=args.stale_days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+        print(f"stale-days {args.stale_days}: 最終日 < {cutoff_str} のみ対象")
+        filtered = []
+        for pkl in pkl_files:
+            last = get_last_date(pkl)
+            if last is None or last < cutoff_str:
+                filtered.append(pkl)
+        print(f"  → {len(filtered)}/{len(pkl_files)}銘柄が対象")
+        pkl_files = filtered
 
     if args.limit > 0:
         pkl_files = pkl_files[:args.limit]
