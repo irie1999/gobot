@@ -34,8 +34,11 @@ import daytrade_gap_reversal_bi as gap_bi
 
 def _load_universe(name):
     if name == "winners":
-        from daytrade_donchian_winners import SYMBOLS
-        return SYMBOLS
+        try:
+            from daytrade_donchian_winners import SYMBOLS
+            return SYMBOLS
+        except ImportError:
+            return None  # 未生成
     if name == "prime":
         from symbols_listed_all import SYMBOLS
         return SYMBOLS
@@ -44,6 +47,8 @@ def _load_universe(name):
 
 def run_donchian(universe, days, budget, max_risk):
     targets = _load_universe(universe)
+    if targets is None:
+        raise RuntimeError(f"{universe} ユニバースが未生成")
     symbols = [s for s, _ in targets]
     fetched = load_intraday_batch(symbols, days, source="local")
     max_price = budget / 100
@@ -63,6 +68,8 @@ def run_donchian(universe, days, budget, max_risk):
 
 def run_gap_bi(universe, days, side, budget, max_risk):
     targets = _load_universe(universe)
+    if targets is None:
+        raise RuntimeError(f"{universe} ユニバースが未生成")
     symbols = [s for s, _ in targets]
     fetched = load_intraday_batch(symbols, days, source="local")
     max_price = budget / 100
