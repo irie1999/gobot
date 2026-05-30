@@ -60,9 +60,13 @@ def yf_df_to_jquants(df: pd.DataFrame, code5: str) -> pd.DataFrame:
 
     out = df.copy()
 
-    # MultiIndexカラム対応
+    # MultiIndexカラム対応 (yfinance 0.2.x で単一ティッカーでも MultiIndex)
     if isinstance(out.columns, pd.MultiIndex):
         out.columns = [c[0] if isinstance(c, tuple) else c for c in out.columns]
+
+    # 重複カラム除去 (concat後やMultiIndex flatten で発生しうる)
+    if out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated()]
 
     # tz統一 (Asia/Tokyo に変換、tz-naive 化)
     if out.index.tz is not None:
@@ -149,6 +153,9 @@ def update_one(pkl_path: Path, days: int) -> tuple:
             df_old = pickle.loads(pkl_path.read_bytes())
             if not isinstance(df_old, pd.DataFrame):
                 df_old = pd.DataFrame()
+            # 既存pklに重複カラムがあれば除去
+            if not df_old.empty and df_old.columns.duplicated().any():
+                df_old = df_old.loc[:, ~df_old.columns.duplicated()]
         except Exception:
             df_old = pd.DataFrame()
 
@@ -159,6 +166,9 @@ def update_one(pkl_path: Path, days: int) -> tuple:
             if common_cols:
                 df_new = df_new[common_cols]
             df_combined = pd.concat([df_old, df_new], ignore_index=True)
+            # concat 後の重複カラムも除去
+            if df_combined.columns.duplicated().any():
+                df_combined = df_combined.loc[:, ~df_combined.columns.duplicated()]
         else:
             df_combined = df_new
 
@@ -176,7 +186,11 @@ def update_one(pkl_path: Path, days: int) -> tuple:
         pkl_path.write_bytes(pickle.dumps(df_combined))
         return ("ok", len(df_new), code5, "")
     except Exception as e:
-        return ("err", 0, code5, str(e)[:80])
+        import traceback
+        tb = traceback.format_exc().splitlines()
+        # 最後の3行 (実際にエラー出した場所) を返す
+        loc = " | ".join(tb[-3:]) if len(tb) >= 3 else str(e)
+        return ("err", 0, code5, f"{type(e).__name__}: {str(e)[:60]} @ {loc[:200]}")
 
 
 def main():
