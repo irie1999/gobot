@@ -8,64 +8,62 @@ import pandas as pd
 JST = timezone(timedelta(hours=9))
 DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
-# トヨタ (7203) で診断
-test_code = "72030"
-pkl_path = DATA_DIR / f"{test_code}.pkl"
-print(f"=== 診断: {pkl_path} ===")
-print(f"存在: {pkl_path.exists()}")
+print(f"=== DATA_DIR: {DATA_DIR} ===")
+all_pkls = sorted(DATA_DIR.glob("*.pkl"))
+print(f"pklファイル数: {len(all_pkls)}")
+print(f"先頭10件: {[p.name for p in all_pkls[:10]]}")
+print(f"末尾10件: {[p.name for p in all_pkls[-10:]]}")
 
-if not pkl_path.exists():
-    print("ERROR: ファイルなし"); exit(1)
+# ファイル名の長さ分布
+from collections import Counter
+name_len = Counter(len(p.stem) for p in all_pkls)
+print(f"ファイル名(拡張子なし)の長さ分布: {dict(name_len)}")
 
-# 1. 生pkl読み込み
-raw = pickle.loads(pkl_path.read_bytes())
-print(f"\n[1] 生pkl:")
-print(f"  type: {type(raw).__name__}")
-print(f"  shape: {raw.shape if hasattr(raw, 'shape') else 'N/A'}")
-print(f"  columns: {list(raw.columns) if hasattr(raw, 'columns') else 'N/A'}")
-print(f"  columns重複: {raw.columns.duplicated().any() if hasattr(raw, 'columns') else 'N/A'}")
-print(f"  index type: {type(raw.index).__name__}")
-print(f"  head:\n{raw.head(3)}")
+# Toyota系列を探す
+toyota_candidates = [p for p in all_pkls if "7203" in p.stem]
+print(f"\n7203 関連ファイル: {[p.name for p in toyota_candidates]}")
 
-# 2. normalize
-from daytrade_data import normalize_minute_df, resample_to_5m, _load_local
-print(f"\n[2] normalize_minute_df:")
-try:
-    df = normalize_minute_df(raw)
-    print(f"  → type: {type(df).__name__}")
-    print(f"  → shape: {df.shape}")
-    print(f"  → index type: {type(df.index).__name__}")
-    print(f"  → index head: {list(df.index[:3])}")
-    print(f"  → columns: {list(df.columns)}")
-except Exception as e:
-    print(f"  ✗ ERROR: {type(e).__name__}: {e}")
-    import traceback; traceback.print_exc()
+# 最初の1ファイルで診断
+if all_pkls:
+    test_pkl = all_pkls[0]
+    print(f"\n=== 診断対象: {test_pkl.name} ===")
+    raw = pickle.loads(test_pkl.read_bytes())
+    print(f"[1] 生pkl:")
+    print(f"  type: {type(raw).__name__}")
+    print(f"  shape: {raw.shape if hasattr(raw, 'shape') else 'N/A'}")
+    print(f"  columns: {list(raw.columns) if hasattr(raw, 'columns') else 'N/A'}")
+    if hasattr(raw, 'columns'):
+        print(f"  columns重複: {raw.columns.duplicated().any()}")
+    print(f"  index type: {type(raw.index).__name__}")
+    print(f"  head:\n{raw.head(3)}")
 
-# 3. resample
-print(f"\n[3] resample_to_5m:")
-try:
-    df2 = resample_to_5m(df)
-    print(f"  → shape: {df2.shape}")
-    print(f"  → index type: {type(df2.index).__name__}")
-except Exception as e:
-    print(f"  ✗ ERROR: {type(e).__name__}: {e}")
+    # normalize 経由で確認
+    from daytrade_data import normalize_minute_df, resample_to_5m, _load_local, yf_to_jquants
 
-# 4. 期間フィルタ
-print(f"\n[4] 期間フィルタ:")
-try:
-    cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=60))
-    print(f"  cutoff: {cutoff} ({type(cutoff).__name__})")
-    print(f"  index[0]: {df2.index[0]} ({type(df2.index[0]).__name__})")
-    print(f"  index[-1]: {df2.index[-1]}")
-    df3 = df2[df2.index >= cutoff]
-    print(f"  → filtered shape: {df3.shape}")
-except Exception as e:
-    print(f"  ✗ ERROR: {type(e).__name__}: {e}")
-    import traceback; traceback.print_exc()
+    # ファイル名から yfinance code を逆引き (72030 → 7203.T)
+    stem = test_pkl.stem
+    if len(stem) == 5 and stem.endswith("0") and stem[:4].isdigit():
+        yf_code = stem[:4] + ".T"
+    elif len(stem) == 4 and stem.isdigit():
+        yf_code = stem + ".T"
+    else:
+        yf_code = stem + ".T"
+    print(f"\n  逆引き yf_code: {yf_code}")
+    print(f"  yf_to_jquants({yf_code}): {yf_to_jquants(yf_code)}")
 
-# 5. _load_local全体
-print(f"\n[5] _load_local 全体:")
-result = _load_local("7203.T", 60)
-print(f"  → result: {type(result).__name__ if result is not None else 'None'}")
-if result is not None:
-    print(f"  → shape: {result.shape}")
+    print(f"\n[2] normalize:")
+    try:
+        df = normalize_minute_df(raw)
+        print(f"  shape: {df.shape}, index type: {type(df.index).__name__}")
+        if len(df) > 0:
+            print(f"  index range: {df.index[0]} 〜 {df.index[-1]}")
+    except Exception as e:
+        import traceback
+        print(f"  ✗ {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+    print(f"\n[3] _load_local({yf_code}, 60):")
+    r = _load_local(yf_code, 60)
+    print(f"  result: {type(r).__name__ if r is not None else 'None'}")
+    if r is not None:
+        print(f"  shape: {r.shape}")
