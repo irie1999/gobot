@@ -71,8 +71,9 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
     if "DateTime" in df.columns:
         dt_series = pd.to_datetime(df["DateTime"])
     elif "Date" in df.columns and "Time" in df.columns:
-        # Date が Timestamp や "YYYY-MM-DD HH:MM:SS" の場合に備え、日付部分だけ抽出
-        date_part = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        # Date が Timestamp / "YYYY-MM-DD" / "YYYY-MM-DD HH:MM:SS" の混在に対応
+        # astype(str) で文字列化 → 先頭10文字 (YYYY-MM-DD) のみ抽出
+        date_part = df["Date"].astype(str).str[:10]
         dt_series = pd.to_datetime(
             date_part + " " + df["Time"].astype(str),
             format="%Y-%m-%d %H:%M",
