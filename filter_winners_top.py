@@ -39,6 +39,9 @@ def main():
                         help="ランキング用の backtest 期間")
     parser.add_argument("--budget", type=int, default=200_000)
     parser.add_argument("--max-risk", type=int, default=1_000)
+    parser.add_argument("--max-price", type=int, default=0,
+                        help="この価格以下の銘柄のみ対象 (0=無制限、"
+                             "例: 5000 → 5,000円以下のみ。50万円資金で100株買える銘柄)")
     parser.add_argument("--output", default=None,
                         help="出力ファイル名 (省略時はレジーム別)")
     parser.add_argument("--current", action="store_true",
@@ -73,6 +76,13 @@ def process_one(regime, args):
     print(f"\n{len(targets)}銘柄を {args.days}日 backtest 中...", flush=True)
     symbols = [s for s, _ in targets]
     fetched = load_intraday_batch(symbols, args.days, source="local")
+    # 価格フィルタ
+    before_filter = len(fetched)
+    if args.max_price > 0:
+        fetched = {s: df for s, df in fetched.items()
+                   if float(df.iloc[-1]["close"]) <= args.max_price}
+        print(f"  価格フィルタ (≤{args.max_price:,}円): "
+              f"{before_filter}→{len(fetched)}銘柄", flush=True)
     targets = [(s, n) for s, n in targets if s in fetched]
 
     t0 = time.time()
