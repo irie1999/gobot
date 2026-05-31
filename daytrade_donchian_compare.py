@@ -224,13 +224,21 @@ def apply_concurrent_limit(result, max_concurrent, budget):
 
 def run_preset(preset_name, params, fetched, targets, budget, max_risk):
     items = []
-    for sym, sname in targets:
+    total = len(targets)
+    import time as _t
+    t_start = _t.time()
+    for i, (sym, sname) in enumerate(targets, 1):
         if sym not in fetched:
             continue
         r = backtest_symbol(sym, sname, fetched[sym], budget, max_risk,
                            params=params)
         if r:
             items.append(r)
+        if i % 50 == 0 or i == total:
+            elapsed = _t.time() - t_start
+            eta = elapsed / i * (total - i) if i > 0 else 0
+            print(f"    {i}/{total} 処理済み  "
+                  f"({elapsed:.1f}s 経過, 残り約{eta:.0f}s)", flush=True)
     all_trades = sorted([t for it in items for t in it["trades"]],
                         key=lambda x: str(x.get("entry_dt", "")))
     stats = calc_stats(all_trades, budget)
