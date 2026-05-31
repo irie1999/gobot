@@ -343,19 +343,19 @@ def _summary_rows(all_trades: list[dict]) -> str:
     return rows_html
 
 
-def _trade_table(trades: list[dict], colspan: int = 10) -> str:
+def _trade_table(trades: list[dict], colspan: int = 9) -> str:
     if not trades:
         return f'<tr><td colspan="{colspan}" style="text-align:center;color:#64748b;padding:16px">該当取引なし</td></tr>'
     rows = ""
     for t in sorted(trades, key=lambda x: x["exit_d_raw"], reverse=True):
         pnl_cls = "profit" if t["pnl"] > 0 else "loss"
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
+        score_badge = _score_cell(t.get("score"), t.get("rank"))
         rows += f"""
         <tr>
           <td>{t["exit_dt"]}</td>
-          <td class="sym">{t["symbol"]}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
+          <td class="sym">{t["symbol"]} {score_badge}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
           <td>{tag}</td>
-          <td>{_score_cell(t.get("score"), t.get("rank"))}</td>
           <td>{t["entry_p"]:,.0f}</td>
           <td>{t["exit_p"]:,.0f}</td>
           <td>{t["hold_days"]}日</td>
@@ -376,7 +376,6 @@ def _tab_detail_section(all_trades: list[dict], recent_days: int) -> str:
       <th>決済日</th>
       <th style="text-align:left">銘柄</th>
       <th>戦略</th>
-      <th>スコア</th>
       <th>約定値</th><th>決済値</th><th>保有</th><th>損益</th><th>理由</th><th>エントリー</th>
     </tr></thead>"""
 
