@@ -52,14 +52,6 @@ _WF_BRK      = list(_wf_mod._BRK_WATCHLIST_AGGRESSIVE)
 _WF_CON_STOP = list(_wf_mod._STOP_WATCHLIST_CONSERVATIVE)
 _WF_CON_BRK  = list(_wf_mod._BRK_WATCHLIST_CONSERVATIVE)
 
-import run_signals_prime as _prime_mod        # sets TRADING_MODE=aggressive + sm/tm override
-_PRIME_STOP = list(_prime_mod.STOP_WATCHLIST)
-_PRIME_BRK  = list(_prime_mod.BRK_WATCHLIST)
-
-import run_signals_aggressive as _agg_mod     # sets TRADING_MODE=aggressive + sm/tm override
-_AGGSCRIPT_STOP = list(_agg_mod.STOP_WATCHLIST)
-_AGGSCRIPT_BRK  = list(_agg_mod.BRK_WATCHLIST)
-
 import run_signals_nolimit as _nolimit_mod    # sets TRADING_MODE=aggressive + sm/tm override
 _NOLIMIT_STOP = list(_nolimit_mod.STOP_WATCHLIST)
 _NOLIMIT_BRK  = list(_nolimit_mod.BRK_WATCHLIST)
@@ -118,17 +110,6 @@ CONFIGS: list[dict] = [
         "brk_wl":   _WF_CON_BRK,
     },
     {
-        "script":   "run_signals_prime.py",
-        "label":    "プライム全銘柄",
-        "sublabel": "aggressive / sm=1.5 tm=2.0",
-        "cmd":      "python run_signals_prime.py",
-        "color":    "#9b59b6",
-        "mode":     "aggressive",
-        "sm_tm":    (1.5, 2.0),
-        "stop_wl":  _PRIME_STOP,
-        "brk_wl":   _PRIME_BRK,
-    },
-    {
         "script":   "run_signals_nolimit.py",
         "label":    "株価制限なし",
         "sublabel": "aggressive / sm=1.5 tm=2.0",
@@ -138,17 +119,6 @@ CONFIGS: list[dict] = [
         "sm_tm":    (1.5, 2.0),
         "stop_wl":  _NOLIMIT_STOP,
         "brk_wl":   _NOLIMIT_BRK,
-    },
-    {
-        "script":   "run_signals_aggressive.py",
-        "label":    "WF 2026-05-12 積極",
-        "sublabel": "aggressive / sm=1.5 tm=2.0",
-        "cmd":      "python run_signals_aggressive.py",
-        "color":    "#e67e22",
-        "mode":     "aggressive",
-        "sm_tm":    (1.5, 2.0),
-        "stop_wl":  _AGGSCRIPT_STOP,
-        "brk_wl":   _AGGSCRIPT_BRK,
     },
     {
         "script":   "run_signals_merged.py",
