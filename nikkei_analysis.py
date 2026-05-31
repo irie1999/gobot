@@ -71,15 +71,30 @@ try:
     except Exception:
         _NL_STOP = []
         _NL_BRK  = []
+    try:
+        import run_signals_merged as _mg_mod
+        def _dedup(a, b):
+            seen = set(); out = []
+            for e in a + b:
+                k = (e[0], e[2])
+                if k not in seen: seen.add(k); out.append(e)
+            return out
+        _MG_STOP = _dedup(_BASE_STOP, list(_mg_mod._WF_STOP))
+        _MG_BRK  = _dedup(_BASE_BRK,  list(_mg_mod._WF_BRK))
+    except Exception:
+        _MG_STOP = []
+        _MG_BRK  = []
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
     _PNL_CONFIGS = [
-        {"label": "既存版 conservative", "color": "#3498db", "mode": "conservative", "sm_tm": None, "stop_wl": _BASE_STOP,    "brk_wl": _BASE_BRK},
-        {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP,    "brk_wl": _BASE_BRK},
-        {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP,  "brk_wl": _WF_CON_BRK},
-        {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP,  "brk_wl": _WF_AGG_BRK},
-        *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": None, "stop_wl": _NL_STOP,      "brk_wl": _NL_BRK}]
+        {"label": "既存版 conservative", "color": "#3498db", "mode": "conservative", "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
+        {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
+        {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP, "brk_wl": _WF_CON_BRK},
+        {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP, "brk_wl": _WF_AGG_BRK},
+        *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": None, "stop_wl": _NL_STOP,    "brk_wl": _NL_BRK}]
           if _NL_STOP or _NL_BRK else []),
+        *([{"label": "WF+既存統合",     "color": "#10b981", "mode": "conservative", "sm_tm": None, "stop_wl": _MG_STOP,    "brk_wl": _MG_BRK}]
+          if _MG_STOP or _MG_BRK else []),
     ]
     _SIGNALS_AVAILABLE = True
 except Exception:
