@@ -1316,13 +1316,28 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
             sig = mod.check_signal_on_date(sym, strat, None)
             if not sig:
                 return None
+            import pandas as _pd
+            from backtest_limit_entry import ENTRY_EXPIRE as _EXP, MAX_HOLD as _MH
+            order_p = sig.get("order_price", 0)
+            limit_p = sig.get("limit_entry_price", round(order_p * 1.03) if order_p else 0)
+            sig_dt  = sig.get("signal_date")
+            try:
+                _max_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
+                                            periods=_EXP + _MH + 1)[-1].date()
+            except Exception:
+                _max_exit = None
             return {
                 "symbol": sym, "name": name, "strategy": strat,
                 "score": score, "rank": rank,
-                "order_p":  sig.get("order_price", 0),
-                "stop_p":   sig.get("stop_price",  0),
-                "target_p": sig.get("target_price", 0),
-                "sources":  source_map.get((sym, strat), []),
+                "signal_date":  sig_dt,
+                "signal_price": sig.get("signal_price", 0),
+                "order_p":      order_p,
+                "limit_p":      limit_p,
+                "stop_p":       sig.get("stop_price",  0),
+                "target_p":     sig.get("target_price", 0),
+                "max_hold":     _MH,
+                "max_exit":     _max_exit,
+                "sources":      source_map.get((sym, strat), []),
             }
 
         with _TPE(max_workers=workers) as ex:
@@ -1355,6 +1370,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
             f'<code style="background:#1e293b;color:#94a3b8;font-size:0.7rem;padding:1px 5px;border-radius:4px">python {sc}</code>'
             for sc in s.get("sources", [])
         )
+        lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
+        max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -1362,9 +1379,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
     <span style="line-height:1.8">{src_html}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center"><span style="color:{col};font-weight:700">{s["rank"]}&nbsp;{s["score"]}</span></td>
-  <td style="text-align:right">{s["order_p"]:,.0f}円</td>
+  <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
+  <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
+  <td style="text-align:right;color:#f59e0b">+{lim_pct:.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span></td>
+  <td style="text-align:center;color:#94a3b8">{s.get("max_hold","—")}日</td>
+  <td style="text-align:center;color:#f59e0b">{max_exit}</td>
 </tr>"""
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
@@ -1373,16 +1394,24 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から本日のエントリーシグナルを抽出。スコアが高い順に並んでいます。
 </p>
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">
+  ※ 逆指値注文（青）= 翌日高値がこの価格以上になれば発動<br>
+  ※ 指値上限（橙）= 逆指値→指値発注時の上限。寄付ギャップがこれ以下なら約定、超えたら不約定
+</p>
 <table>
   <thead><tr>
     <th>順位</th>
     <th style="text-align:left">銘柄 / スクリプト</th>
     <th>戦略</th><th>スコア</th>
-    <th>注文価格</th><th>損切り(-)</th><th>目標(+)</th>
+    <th>シグナル日<br>時株価</th>
+    <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
+    <th style="color:#f59e0b">指値上限<br>(+3%)</th>
+    <th>損切り(-)</th><th>目標(+)</th>
+    <th>最大保有</th><th>最大決済日</th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
-<p class="footnote">※ conservative モード (sm=1.5/2.0, tm=3.0/4.0) で計算。注文価格=前日終値+ATR×em (em=0.0)</p>"""
+<p class="footnote">※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日</p>"""
 
 
 def _tab5_pnl_html(days: int, workers: int) -> str:
