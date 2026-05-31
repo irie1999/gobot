@@ -32,7 +32,7 @@ REGIME_FILES = {
 def main():
     parser = argparse.ArgumentParser(description="winnersから上位N銘柄抽出")
     parser.add_argument("--regime", required=True,
-                        choices=["bull", "sideways", "bear", "default"])
+                        choices=["bull", "sideways", "bear", "default", "all"])
     parser.add_argument("--top", type=int, default=30,
                         help="上位何銘柄を取るか (デフォルト30)")
     parser.add_argument("--days", type=int, default=730,
@@ -40,19 +40,34 @@ def main():
     parser.add_argument("--budget", type=int, default=200_000)
     parser.add_argument("--max-risk", type=int, default=1_000)
     parser.add_argument("--output", default=None,
-                        help="出力ファイル (デフォルト: daytrade_donchian_winners.py)")
+                        help="出力ファイル名 (省略時はレジーム別)")
+    parser.add_argument("--current", action="store_true",
+                        help="現在使用中のwinnersにも上書き保存 "
+                             "(daytrade_donchian_winners.py)")
     parser.add_argument("--sort-by", choices=["pnl", "pf"], default="pnl",
                         help="ソートキー: pnl=損益順, pf=PF順 (デフォルト: pnl)")
     args = parser.parse_args()
 
+    # --regime all で3レジーム全部処理
+    regimes = ["bull", "sideways", "bear"] if args.regime == "all" else [args.regime]
+    for regime in regimes:
+        process_one(regime, args)
+
+
+def process_one(regime, args):
     # ソース読み込み
-    src_path = REGIME_FILES[args.regime]
+    src_path = REGIME_FILES[regime]
+    if not Path(src_path).exists():
+        print(f"[skip] {src_path} が存在しません")
+        return
     import importlib.util
-    spec = importlib.util.spec_from_file_location("src", src_path)
+    spec = importlib.util.spec_from_file_location(f"src_{regime}", src_path)
     src = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(src)
     targets = src.SYMBOLS
-    print(f"ソース: {src_path} ({len(targets)}銘柄)")
+    print(f"\n{'='*80}")
+    print(f"  [{regime.upper()}] ソース: {src_path} ({len(targets)}銘柄)")
+    print('='*80)
 
     # backtest して損益順にソート
     print(f"\n{len(targets)}銘柄を {args.days}日 backtest 中...", flush=True)
@@ -79,12 +94,13 @@ def main():
     # 上位N
     top = ranked[:args.top]
 
-    # 出力
-    out_path = Path(args.output or "daytrade_donchian_winners.py")
+    # 出力 (規定: レジーム別ファイル, --current で現用にも上書き)
+    out_path = Path(args.output or
+                    f"daytrade_donchian_winners_{regime}_top{args.top}.py")
     lines = [
         '"""',
-        f"Donchian winners ({args.regime} top {args.top})",
-        f"生成: filter_winners_top.py --regime {args.regime} --top {args.top}",
+        f"Donchian winners ({regime} top {args.top})",
+        f"生成: filter_winners_top.py --regime {regime} --top {args.top}",
         f"ソート: {args.sort_by}",
         f"対象: {len(top)}銘柄",
         '"""',
@@ -97,11 +113,13 @@ def main():
     lines.append("]")
     lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
+    if args.current:
+        current_path = Path("daytrade_donchian_winners.py")
+        current_path.write_text("\n".join(lines), encoding="utf-8")
 
     print()
-    print("=" * 80)
-    print(f"  Top {args.top} 銘柄 (ソート: {args.sort_by})")
-    print("=" * 80)
+    print(f"  {regime.upper()} Top {args.top} 銘柄 (ソート: {args.sort_by})")
+    print("-" * 80)
     print(f"{'順':>3} {'銘柄':<22} {'コード':<10} {'取引':>4} {'勝率':>5} "
           f"{'PF':>5} {'損益':>11} {'DD':>6}")
     print("-" * 80)
@@ -111,8 +129,9 @@ def main():
         print(f"{i:>3} {disp:<22} {sym:<10} {stats['n']:>4} "
               f"{stats['win_rate']:>4.0f}% {pf:>5} "
               f"{stats['total_pnl']:>+11,.0f} {stats['max_dd']:>+5.1f}%")
-    print()
-    print(f"出力: {out_path.resolve()}")
+    print(f"  出力: {out_path.resolve()}")
+    if args.current:
+        print(f"  現用にも反映: daytrade_donchian_winners.py")
 
 
 if __name__ == "__main__":
