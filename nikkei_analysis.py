@@ -7,16 +7,25 @@ select_signals.py / analyze_nikkei_trend.py / analyze_trend_timing.py を1本に
   タブ1: シグナル判定    — 相場環境 + 今日使うべきスクリプト
   タブ2: トレンド期間    — 上昇/下落/横ばい期間の統計と一覧
   タブ3: エントリー分析  — 上昇何日目に入ると良いか / 生存確率
+  タブ4: シグナル一覧    — 全WATCHLISTの今日のシグナルをスコア降順表示 (--with-signals)
+  タブ5: 損益レポート    — 直近N日取引損益 (--with-pnl)
 
 Usage:
     python nikkei_analysis.py                       # 過去5年 HTML生成 & ブラウザ表示
     python nikkei_analysis.py --years 10            # 過去10年
     python nikkei_analysis.py --date 2024-01-15     # 指定日時点の分析
     python nikkei_analysis.py --no-browser          # HTML生成のみ
+    python nikkei_analysis.py --with-signals --with-pnl   # 全5タブ
+    python nikkei_analysis.py --with-signals --min-score 60  # ★★以上のみ
+    python nikkei_analysis.py --with-pnl --days 30        # 直近30日損益
 """
 from __future__ import annotations
 import argparse
+import os
+import copy as _copy
+import importlib as _importlib
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
 from datetime import timedelta, timezone, datetime
 from pathlib import Path
 
@@ -25,6 +34,46 @@ import yfinance as yf
 
 JST    = timezone(timedelta(hours=9))
 _TODAY = datetime.now(JST).date()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# シグナル / 損益モジュール (オプション)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SIGNALS_AVAILABLE = False
+_DEF_WORKERS = 4
+_PNL_CONFIGS: list[dict] = []
+try:
+    os.environ.setdefault("TRADING_MODE", "conservative")
+    import check_signals_stop     as _stop
+    import check_signals_breakout as _brk
+    from backtest_limit_entry import WORKERS as _DEF_WORKERS
+    _CON_STOP = _copy.deepcopy(_stop.STRATEGY_PARAMS)
+    _CON_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
+    os.environ["TRADING_MODE"] = "aggressive"
+    _importlib.reload(_stop); _importlib.reload(_brk)
+    _AGG_STOP = _copy.deepcopy(_stop.STRATEGY_PARAMS)
+    _AGG_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
+    os.environ["TRADING_MODE"] = "conservative"
+    _importlib.reload(_stop); _importlib.reload(_brk)
+    import run_signals_wf as _wf_mod
+    _WF_AGG_STOP = list(_wf_mod._STOP_WATCHLIST_AGGRESSIVE)
+    _WF_AGG_BRK  = list(_wf_mod._BRK_WATCHLIST_AGGRESSIVE)
+    _WF_CON_STOP = list(_wf_mod._STOP_WATCHLIST_CONSERVATIVE)
+    _WF_CON_BRK  = list(_wf_mod._BRK_WATCHLIST_CONSERVATIVE)
+    _BASE_STOP   = list(_stop.WATCHLIST)
+    _BASE_BRK    = list(_brk.WATCHLIST)
+    _stop.STRATEGY_PARAMS.update(_CON_STOP)
+    _brk.STRATEGY_PARAMS.update(_CON_BRK)
+    _PNL_CONFIGS = [
+        {"label": "既存版 conservative", "color": "#3498db", "mode": "conservative", "sm_tm": None, "stop_wl": _BASE_STOP,    "brk_wl": _BASE_BRK},
+        {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP,    "brk_wl": _BASE_BRK},
+        {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP,  "brk_wl": _WF_CON_BRK},
+        {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP,  "brk_wl": _WF_AGG_BRK},
+    ]
+    _SIGNALS_AVAILABLE = True
+except Exception:
+    pass
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # データ取得 & トレンド判定
@@ -1154,6 +1203,323 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
 # メイン HTML 組み立て
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _set_sig_params(mode: str, sm_tm=None) -> None:
+    if mode == "conservative":
+        _stop.STRATEGY_PARAMS.update(_CON_STOP)
+        _brk.STRATEGY_PARAMS.update(_CON_BRK)
+    else:
+        _stop.STRATEGY_PARAMS.update(_AGG_STOP)
+        _brk.STRATEGY_PARAMS.update(_AGG_BRK)
+    if sm_tm:
+        sm, tm = sm_tm
+        for k, v in list(_stop.STRATEGY_PARAMS.items()):
+            _stop.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
+        for k, v in list(_brk.STRATEGY_PARAMS.items()):
+            _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
+
+
+def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
+    """タブ4: 全WATCHLISTの今日シグナルをスコア降順表示"""
+    if not _SIGNALS_AVAILABLE:
+        return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
+
+    # 全configから重複排除した (sym, name, strat, is_stop) リストを作成
+    seen: set = set()
+    all_items: list = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg["stop_wl"]:
+            if (sym, strat, True) not in seen:
+                seen.add((sym, strat, True))
+                all_items.append((sym, name, strat, True))
+        for sym, name, strat in cfg["brk_wl"]:
+            if (sym, strat, False) not in seen:
+                seen.add((sym, strat, False))
+                all_items.append((sym, name, strat, False))
+
+    _set_sig_params("conservative")
+
+    def _check_one(item):
+        sym, name, strat, is_stop = item
+        mod = _stop if is_stop else _brk
+        bt = mod.backtest_one(sym, name, strat)
+        if not bt:
+            return None
+        score, rank = _stop.calc_recommend_score(bt["period_results"])
+        if score < min_score:
+            return None
+        sig = mod.check_signal_on_date(sym, strat, None)
+        if not sig:
+            return None
+        return {
+            "symbol": sym, "name": name, "strategy": strat,
+            "score": score, "rank": rank,
+            "order_p":  sig.get("order_price", 0),
+            "stop_p":   sig.get("stop_price",  0),
+            "target_p": sig.get("target_price", 0),
+        }
+
+    signals: list[dict] = []
+    with _TPE(max_workers=workers) as ex:
+        futs = {ex.submit(_check_one, item): item for item in all_items}
+        for fut in _asc(futs):
+            try:
+                r = fut.result()
+                if r:
+                    signals.append(r)
+            except Exception:
+                pass
+
+    signals.sort(key=lambda x: -x["score"])
+
+    if not signals:
+        note = f"（スコア{min_score}点以上）" if min_score > 0 else ""
+        return f'<div style="color:#64748b;padding:30px;text-align:center">本日 {_TODAY} のシグナルなし {note}</div>'
+
+    col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
+    rows = ""
+    for i, s in enumerate(signals, 1):
+        col      = col_map.get(s["rank"], "#94a3b8")
+        stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
+        tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
+        tag      = f'<span class="tag tag-{s["strategy"].lower()}">{s["strategy"]}</span>'
+        rows += f"""<tr>
+  <td style="text-align:center;font-weight:700">{i}</td>
+  <td class="sym" style="text-align:left">{s["symbol"]}<br><span style="color:#64748b;font-size:0.75rem">{s["name"]}</span></td>
+  <td style="text-align:center">{tag}</td>
+  <td style="text-align:center"><span style="color:{col};font-weight:700">{s["rank"]}&nbsp;{s["score"]}</span></td>
+  <td style="text-align:right">{s["order_p"]:,.0f}円</td>
+  <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span></td>
+  <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span></td>
+</tr>"""
+
+    min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
+    return f"""
+<h2>本日のシグナル一覧 — スコア降順 {min_note}</h2>
+<p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
+  全WATCHLIST {len(all_items)}件から本日のエントリーシグナルを抽出。スコアが高い順に並んでいます。
+</p>
+<table>
+  <thead><tr>
+    <th>順位</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th><th>スコア</th>
+    <th>注文価格</th><th>損切り(-)</th><th>目標(+)</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+<p class="footnote">※ conservative モード (sm=1.5/2.0, tm=3.0/4.0) で計算。注文価格=前日終値+ATR×em (em=0.0)</p>"""
+
+
+def _tab5_pnl_html(days: int, workers: int) -> str:
+    """タブ5: 直近N日 取引損益レポート"""
+    if not _SIGNALS_AVAILABLE:
+        return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
+
+    from collections import defaultdict
+    until = _TODAY
+    since = until - timedelta(days=days)
+
+    all_trades: list[dict] = []
+    full_year_trades: list[dict] = []
+
+    for cfg in _PNL_CONFIGS:
+        _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
+        items: list[dict] = []
+        with _TPE(max_workers=workers) as ex:
+            futs = {}
+            for sym, name, strat in cfg["stop_wl"]:
+                futs[ex.submit(_stop.backtest_one, sym, name, strat)] = None
+            for sym, name, strat in cfg["brk_wl"]:
+                futs[ex.submit(_brk.backtest_one, sym, name, strat)] = None
+            for fut in _asc(futs):
+                try:
+                    r = fut.result()
+                    if r:
+                        items.append(r)
+                except Exception:
+                    pass
+
+        for it in items:
+            sym  = it.get("symbol", "")
+            name = it.get("name", "")
+            strat = it.get("strategy", "")
+            period_results = it.get("period_results", {})
+            if not period_results:
+                continue
+            score, rank   = _stop.calc_recommend_score(period_results)
+            max_period    = max(period_results.keys())
+            trade_log     = period_results[max_period].get("trade_log", [])
+            seen: set     = set()
+            for t in trade_log:
+                exit_dt = t.get("exit_dt")
+                if exit_dt is None:
+                    continue
+                exit_d   = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
+                entry_dt = t.get("entry_dt")
+                key = (sym, strat, entry_dt, exit_dt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                base = {"label": cfg["label"], "color": cfg["color"],
+                        "symbol": sym, "name": name, "strategy": strat,
+                        "score": score, "rank": rank,
+                        "exit_d_raw": exit_d, "pnl": t.get("pnl", 0)}
+                full_year_trades.append(base)
+                if since <= exit_d <= until:
+                    all_trades.append({**base,
+                        "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
+                        "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
+                        "entry_p":   t.get("entry_p", 0),
+                        "exit_p":    t.get("exit_p", 0),
+                        "hold_days": t.get("hold_days", 0),
+                        "reason":    t.get("reason", "") or "保有中",
+                    })
+
+    # reset to conservative
+    _stop.STRATEGY_PARAMS.update(_CON_STOP)
+    _brk.STRATEGY_PARAMS.update(_CON_BRK)
+
+    # ── KPI ──
+    n_total = len(all_trades)
+    n_win   = sum(1 for t in all_trades if t["pnl"] > 0)
+    pnl_sum = sum(t["pnl"] for t in all_trades)
+    wr      = n_win / n_total * 100 if n_total else 0.0
+    pc      = "profit" if pnl_sum >= 0 else "loss"
+    kpi_html = f"""
+<div class="kpi-grid" style="margin-bottom:20px">
+  <div class="kpi"><div class="kpi-l">総取引数</div><div class="kpi-v">{n_total}件</div></div>
+  <div class="kpi"><div class="kpi-l">勝率</div><div class="kpi-v">{"—" if not n_total else f"{wr:.1f}%"}</div></div>
+  <div class="kpi"><div class="kpi-l">合計損益</div><div class="kpi-v {pc}">{"—" if not n_total else f"{pnl_sum:+,.0f}円"}</div></div>
+  <div class="kpi"><div class="kpi-l">勝ち/負け</div><div class="kpi-v">{n_win}W / {n_total - n_win}L</div></div>
+</div>"""
+
+    # ── サマリーテーブル ──
+    by_label: dict = defaultdict(list)
+    for t in all_trades:
+        by_label[t["label"]].append(t)
+    sum_rows = ""
+    for cfg in _PNL_CONFIGS:
+        lbl    = cfg["label"]
+        trades = by_label.get(lbl, [])
+        n      = len(trades)
+        wins   = sum(1 for t in trades if t["pnl"] > 0)
+        pnl    = sum(t["pnl"] for t in trades)
+        wr_l   = wins / n * 100 if n else 0.0
+        gp     = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+        gl     = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
+        lpc    = "profit" if pnl >= 0 else "loss"
+        dot    = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
+        sum_rows += f"""<tr>
+  <td class="sym" style="text-align:left">{dot}{lbl}</td>
+  <td>{n}</td><td>{wins}</td>
+  <td>{"—" if not n else f"{wr_l:.1f}%"}</td>
+  <td>{"—" if not n else pf_s}</td>
+  <td class="{lpc}">{"—" if not n else f"{pnl:+,.0f}円"}</td>
+</tr>"""
+
+    # ── スコア細粒度分析 ──
+    score_buckets = [
+        (90,100,"90-100","#4ade80"),(80,90,"80-89","#86efac"),
+        (70,80,"70-79","#60a5fa"),(60,70,"60-69","#93c5fd"),
+        (50,60,"50-59","#fbbf24"),(40,50,"40-49","#fcd34d"),
+        (30,40,"30-39","#f87171"),(0,30,"0-29","#94a3b8"),
+    ]
+    dates = [t["exit_d_raw"] for t in full_year_trades if t.get("exit_d_raw")]
+    period_note = ""
+    if dates:
+        d_min, d_max = min(dates), max(dates)
+        period_note = f"{d_min} 〜 {d_max} / {len(full_year_trades)}取引"
+    fine_rows = ""
+    for lo, hi, lbl_s, col in score_buckets:
+        tr = [t for t in full_year_trades if t.get("score") is not None and lo <= t["score"] < hi]
+        n  = len(tr)
+        if not n:
+            continue
+        wins   = sum(1 for t in tr if t["pnl"] > 0)
+        pnl    = sum(t["pnl"] for t in tr)
+        avg    = pnl / n
+        wr_s   = wins / n * 100
+        gp     = sum(t["pnl"] for t in tr if t["pnl"] > 0)
+        gl     = abs(sum(t["pnl"] for t in tr if t["pnl"] < 0))
+        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
+        lpc    = "profit" if pnl >= 0 else "loss"
+        apc    = "profit" if avg >= 0 else "loss"
+        border = ' style="border-top:2px solid #334155"' if lo in (40,60,80) else ""
+        fine_rows += f"""<tr{border}>
+  <td style="color:{col};font-weight:600;text-align:left">{lbl_s}</td>
+  <td>{n}</td><td>{wr_s:.1f}%</td><td>{pf_s}</td>
+  <td class="{lpc}">{pnl:+,.0f}円</td>
+  <td class="{apc}">{avg:+,.0f}円</td>
+</tr>"""
+
+    # ── 取引明細テーブル ──
+    col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
+    def _rhtml(reason):
+        if reason == "目標達成": return '<span style="color:#4ade80;font-weight:600">目標達成</span>'
+        if reason == "損切り":   return '<span style="color:#f87171;font-weight:600">損切り</span>'
+        if reason == "タイムカット": return '<span style="color:#94a3b8">タイムカット</span>'
+        return f'<span style="color:#fbbf24">{reason}</span>'
+
+    trade_rows = ""
+    for t in sorted(all_trades, key=lambda x: x["exit_d_raw"], reverse=True):
+        tpc = "profit" if t["pnl"] > 0 else "loss"
+        tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
+        sc  = t.get("score"); rk = t.get("rank")
+        sc_html = (f'<span style="color:{col_map.get(rk,"#94a3b8")};font-weight:600">{rk}&nbsp;{sc}</span>'
+                   if sc is not None and rk and rk != "-" else "")
+        trade_rows += f"""<tr>
+  <td>{t["exit_dt"]}</td>
+  <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
+  <td style="text-align:center">{tag}</td>
+  <td style="text-align:right">{t["entry_p"]:,.0f}</td>
+  <td style="text-align:right">{t["exit_p"]:,.0f}</td>
+  <td style="text-align:right">{t["hold_days"]}日</td>
+  <td class="{tpc}" style="text-align:right">{t["pnl"]:+,.0f}円</td>
+  <td>{_rhtml(t["reason"])}</td>
+  <td style="color:#94a3b8">{t["entry_dt"]}</td>
+</tr>"""
+    if not trade_rows:
+        trade_rows = f'<tr><td colspan="9" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+
+    return f"""
+<h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
+{kpi_html}
+
+<h2>スクリプト別サマリー</h2>
+<table>
+  <thead><tr>
+    <th style="text-align:left">スクリプト</th>
+    <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益</th>
+  </tr></thead>
+  <tbody>{sum_rows}</tbody>
+</table>
+
+<h2>スコア別実績（365日全取引 / {period_note}）</h2>
+<table style="max-width:580px">
+  <thead><tr>
+    <th style="text-align:left">スコア帯</th>
+    <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{fine_rows}</tbody>
+</table>
+<p class="footnote">境界線 = ランク区切り（△/★/★★/★★★）</p>
+
+<h2>取引明細（決済日降順）</h2>
+<table>
+  <thead><tr>
+    <th>決済日</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>約定値</th><th>決済値</th><th>保有</th>
+    <th>損益</th><th>理由</th><th>エントリー</th>
+  </tr></thead>
+  <tbody>{trade_rows}</tbody>
+</table>"""
+
+
 CSS = """
 * { box-sizing:border-box; margin:0; padding:0; }
 body { font-family:"Segoe UI","Hiragino Sans",sans-serif;
@@ -1232,6 +1598,17 @@ tr:hover td { filter:brightness(1.15); }
 .mkt-val   { font-size:1.15rem; font-weight:700; color:#e2e8f0; }
 .mkt-chg   { font-size:0.8rem; margin-top:5px; }
 .mkt-note  { font-size:0.72rem; color:#475569; margin-top:5px; line-height:1.5; }
+
+/* P&L / Signal tabs */
+.profit { color:#4ade80; }
+.loss   { color:#f87171; }
+.tag { display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }
+.tag-macd { background:#1d4ed8; color:#bfdbfe; }
+.tag-a7   { background:#065f46; color:#a7f3d0; }
+.tag-rsi2 { background:#7c3aed; color:#ddd6fe; }
+.tag-don  { background:#0f766e; color:#99f6e4; }
+.tag-vol  { background:#b45309; color:#fde68a; }
+.tag-mom  { background:#be185d; color:#fbcfe8; }
 """
 
 JS = """
@@ -1246,7 +1623,8 @@ function switchTab(id) {
 
 def build_html(close: pd.Series, trend: pd.Series, r: dict,
                periods: list[dict], up_periods: list[dict],
-               years: int, ref_date, indicators: dict | None = None) -> str:
+               years: int, ref_date, indicators: dict | None = None,
+               tab4_html: str = "", tab5_html: str = "") -> str:
     ref_str     = str(ref_date)
     is_past     = (ref_date != _TODAY)
     past_badge  = (f' <span style="background:#7c3aed;color:#fff;padding:2px 10px;'
@@ -1263,6 +1641,15 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
         "down": calc_stats([p for p in periods if p["trend"] == "down"]),
     }
     tab3 = _tab3_timing_html(close, up_periods, all_stats)
+
+    extra_btns = ""
+    extra_panes = ""
+    if tab4_html:
+        extra_btns  += '\n  <button class="tab-btn" data-tab="t4" onclick="switchTab(\'t4\')">📋 シグナル</button>'
+        extra_panes += f'\n<div id="t4" class="tab-pane">{tab4_html}</div>'
+    if tab5_html:
+        extra_btns  += '\n  <button class="tab-btn" data-tab="t5" onclick="switchTab(\'t5\')">💹 損益</button>'
+        extra_panes += f'\n<div id="t5" class="tab-pane">{tab5_html}</div>'
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -1282,12 +1669,12 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
 <div class="tab-nav">
   <button class="tab-btn active" data-tab="t1" onclick="switchTab('t1')">📊 シグナル判定</button>
   <button class="tab-btn"        data-tab="t2" onclick="switchTab('t2')">📈 トレンド期間</button>
-  <button class="tab-btn"        data-tab="t3" onclick="switchTab('t3')">⏱ エントリー分析</button>
+  <button class="tab-btn"        data-tab="t3" onclick="switchTab('t3')">⏱ エントリー分析</button>{extra_btns}
 </div>
 
 <div id="t1" class="tab-pane active">{tab1}</div>
 <div id="t2" class="tab-pane">{tab2}</div>
-<div id="t3" class="tab-pane">{tab3}</div>
+<div id="t3" class="tab-pane">{tab3}</div>{extra_panes}
 
 <script>{JS}</script>
 </body>
@@ -1300,9 +1687,14 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
 
 def main():
     parser = argparse.ArgumentParser(description="日経平均 総合分析レポート")
-    parser.add_argument("--years",      type=int, default=5,   help="分析期間（年）")
-    parser.add_argument("--date",       type=str, default=None, help="基準日 YYYY-MM-DD (省略時=今日)")
-    parser.add_argument("--no-browser", action="store_true",    help="HTML生成のみ")
+    parser.add_argument("--years",        type=int, default=5,   help="分析期間（年）")
+    parser.add_argument("--date",         type=str, default=None, help="基準日 YYYY-MM-DD (省略時=今日)")
+    parser.add_argument("--no-browser",   action="store_true",    help="HTML生成のみ")
+    parser.add_argument("--with-signals", action="store_true",    help="タブ4: 今日のシグナル一覧を追加")
+    parser.add_argument("--with-pnl",     action="store_true",    help="タブ5: 直近N日損益を追加")
+    parser.add_argument("--days",         type=int, default=7,    help="損益集計日数 (--with-pnl 使用時)")
+    parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア (--with-signals 使用時)")
+    parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
     args = parser.parse_args()
 
     # 基準日を決定
@@ -1362,10 +1754,19 @@ def main():
     last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
     print(f"{last_ja}トレンド継続: {last['days']}日 ({last['pct']:+.1f}%)")
 
+    tab4_html = ""
+    tab5_html = ""
+    if args.with_signals and _SIGNALS_AVAILABLE:
+        print("シグナル収集中...", flush=True)
+        tab4_html = _tab4_signals_html(args.workers, args.min_score)
+    if args.with_pnl and _SIGNALS_AVAILABLE:
+        print(f"損益集計中 (直近{args.days}日)...", flush=True)
+        tab5_html = _tab5_pnl_html(args.days, args.workers)
+
     html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(
         build_html(close, trend, r, periods, up_timing, args.years, ref_date,
-                   indicators=indicators),
+                   indicators=indicators, tab4_html=tab4_html, tab5_html=tab5_html),
         encoding="utf-8"
     )
     print(f"生成: {html_path}")
