@@ -75,28 +75,39 @@ _stop.STRATEGY_PARAMS.update(_CON_STOP_PARAMS)
 _brk.STRATEGY_PARAMS.update(_CON_BRK_PARAMS)
 
 # ── 設定定義 ──────────────────────────────────────────────────────────────────
+_BASE_STOP = list(_stop.WATCHLIST)
+_BASE_BRK  = list(_brk.WATCHLIST)
+
+# ── 重複銘柄の注記 ─────────────────────────────────────────────────────────────
+# ※ 同一WATCHLISTでモードだけ異なるペアは同じ銘柄に同時エントリーする場合がある
+#   [既存版 conservative] と [既存版 aggressive] → 全く同一の銘柄リスト (sm/tm のみ違う)
+#   [WF conservative]    と [WF aggressive]     → 全く同一の銘柄リスト (sm/tm のみ違う)
+#   さらに既存版WATCHLISTとWF WATCHLISTの間にも一部重複銘柄が存在する可能性あり
+
 CONFIGS: list[dict] = [
     {
-        "script":   "run_signals.py",
-        "label":    "既存版",
-        "sublabel": "conservative / デフォルト",
-        "cmd":      "python run_signals.py",
+        "script":   "run_signals.py --conservative",
+        "label":    "既存版 conservative",
+        "sublabel": "conservative / 既存WATCHLIST",
+        "cmd":      "python run_signals.py --conservative",
         "color":    "#3498db",
         "mode":     "conservative",
         "sm_tm":    None,
-        "stop_wl":  list(_stop.WATCHLIST),
-        "brk_wl":   list(_brk.WATCHLIST),
+        "stop_wl":  _BASE_STOP,
+        "brk_wl":   _BASE_BRK,
+        "note":     "※ 既存版 aggressive と銘柄リスト同一（sm/tm のみ異なる）",
     },
     {
-        "script":   "run_signals_wf.py --aggressive",
-        "label":    "WF 2026-05-19",
-        "sublabel": "aggressive / WF選定 59銘柄",
-        "cmd":      "python run_signals_wf.py --aggressive",
+        "script":   "run_signals.py --aggressive",
+        "label":    "既存版 aggressive",
+        "sublabel": "aggressive / 既存WATCHLIST",
+        "cmd":      "python run_signals.py --aggressive",
         "color":    "#e74c3c",
         "mode":     "aggressive",
         "sm_tm":    None,
-        "stop_wl":  _WF_STOP,
-        "brk_wl":   _WF_BRK,
+        "stop_wl":  _BASE_STOP,
+        "brk_wl":   _BASE_BRK,
+        "note":     "※ 既存版 conservative と銘柄リスト同一（sm/tm のみ異なる）",
     },
     {
         "script":   "run_signals_wf.py --conservative",
@@ -108,6 +119,19 @@ CONFIGS: list[dict] = [
         "sm_tm":    None,
         "stop_wl":  _WF_CON_STOP,
         "brk_wl":   _WF_CON_BRK,
+        "note":     "※ WF aggressive と銘柄リスト同一（sm/tm のみ異なる）",
+    },
+    {
+        "script":   "run_signals_wf.py --aggressive",
+        "label":    "WF aggressive",
+        "sublabel": "aggressive / WF選定",
+        "cmd":      "python run_signals_wf.py --aggressive",
+        "color":    "#f39c12",
+        "mode":     "aggressive",
+        "sm_tm":    None,
+        "stop_wl":  _WF_STOP,
+        "brk_wl":   _WF_BRK,
+        "note":     "※ WF conservative と銘柄リスト同一（sm/tm のみ異なる）",
     },
     {
         "script":   "run_signals_nolimit.py",
@@ -248,9 +272,12 @@ def _summary_rows(all_trades: list[dict]) -> str:
         pnl_cls = "profit" if pnl >= 0 else "loss"
         dot = f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
         cmd_html = f'<code style="background:#0f172a;padding:1px 7px;border-radius:4px;color:#38bdf8;font-size:0.78rem">{cfg["cmd"]}</code>'
+        note_html = ""
+        if cfg.get("note"):
+            note_html = f'<br><span style="color:#f59e0b;font-size:0.72rem">{cfg["note"]}</span>'
         rows_html += f"""
         <tr>
-          <td class="sym">{dot}{label}<br><span style="color:#64748b;font-size:0.75rem;font-weight:400">{cfg["sublabel"]}</span></td>
+          <td class="sym">{dot}{label}<br><span style="color:#64748b;font-size:0.75rem;font-weight:400">{cfg["sublabel"]}</span>{note_html}</td>
           <td style="text-align:left">{cmd_html}</td>
           <td>{n}</td><td>{wins}</td>
           <td>{"—" if n == 0 else f"{wr:.1f}%"}</td>
