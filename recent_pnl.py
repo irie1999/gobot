@@ -194,6 +194,44 @@ def _run_config(cfg: dict, workers: int) -> list[dict]:
     return all_items
 
 
+def _collect_all_trades(items: list[dict], label: str, color: str) -> list[dict]:
+    """スコア分析用: 日付フィルターなしで最大期間の全取引を収集"""
+    rows = []
+    for it in items:
+        sym   = it.get("symbol", "")
+        name  = it.get("name", "")
+        strat = it.get("strategy", "")
+        period_results = it.get("period_results", {})
+        if not period_results:
+            continue
+        score, rank    = _stop.calc_recommend_score(period_results)
+        max_period     = max(period_results.keys())
+        trade_log      = period_results[max_period].get("trade_log", [])
+        seen: set      = set()
+        for t in trade_log:
+            exit_dt = t.get("exit_dt")
+            if exit_dt is None:
+                continue
+            entry_dt = t.get("entry_dt")
+            key = (sym, strat, entry_dt, exit_dt)
+            if key in seen:
+                continue
+            seen.add(key)
+            exit_d = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
+            rows.append({
+                "label":      label,
+                "color":      color,
+                "symbol":     sym,
+                "name":       name,
+                "strategy":   strat,
+                "score":      score,
+                "rank":       rank,
+                "exit_d_raw": exit_d,
+                "pnl":        t.get("pnl", 0),
+            })
+    return rows
+
+
 def _collect_trades(items: list[dict], since: date, until: date, label: str, color: str) -> list[dict]:
     rows = []
     for it in items:
@@ -381,20 +419,32 @@ def _tab_detail_section(all_trades: list[dict], recent_days: int) -> str:
     return nav + panes
 
 
-def _score_analysis_section(all_trades: list[dict]) -> str:
-    """スコア別実績分析: ランク別テーブル + フィルター比較テーブル"""
+def _score_analysis_section(full_year_trades: list[dict]) -> str:
+    """スコア別実績分析: バックテスト365日分の全取引でランク別・フィルター別を集計"""
+    if not full_year_trades:
+        return ""
+
+    from collections import defaultdict
+
+    # データ期間を算出
+    dates = [t["exit_d_raw"] for t in full_year_trades if t.get("exit_d_raw")]
+    period_note = ""
+    if dates:
+        d_min, d_max = min(dates), max(dates)
+        days_span    = (d_max - d_min).days + 1
+        period_note  = f"{d_min} 〜 {d_max}（{days_span}日間 / {len(full_year_trades)}取引）"
+
     # ── ランク別集計 ──
     rank_order = ["★★★", "★★", "★", "△", "-"]
-    from collections import defaultdict
+    col_map    = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171", "-": "#64748b"}
     by_rank: dict[str, list] = defaultdict(list)
-    for t in all_trades:
-        r = t.get("rank") or "-"
-        by_rank[r].append(t)
+    for t in full_year_trades:
+        by_rank[t.get("rank") or "-"].append(t)
 
     rank_rows = ""
     for rank in rank_order:
-        trades = by_rank.get(rank, [])
-        n = len(trades)
+        trades  = by_rank.get(rank, [])
+        n       = len(trades)
         if n == 0:
             continue
         wins    = sum(1 for t in trades if t["pnl"] > 0)
@@ -403,8 +453,7 @@ def _score_analysis_section(all_trades: list[dict]) -> str:
         wr      = wins / n * 100
         pnl_cls = "profit" if pnl >= 0 else "loss"
         avg_cls = "profit" if avg_pnl >= 0 else "loss"
-        col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171", "-": "#64748b"}
-        col = col_map.get(rank, "#94a3b8")
+        col     = col_map.get(rank, "#94a3b8")
         rank_rows += f"""
         <tr>
           <td class="sym" style="color:{col};font-size:1.0rem">{rank}</td>
@@ -414,7 +463,7 @@ def _score_analysis_section(all_trades: list[dict]) -> str:
           <td class="{avg_cls}">{avg_pnl:+,.0f}円</td>
         </tr>"""
 
-    # ── フィルター別集計 ──
+    # ── フィルター別比較 ──
     thresholds = [
         ("フィルターなし",       {"★★★", "★★", "★", "△", "-"}),
         ("★以上 (40点+)",       {"★★★", "★★", "★"}),
@@ -422,8 +471,8 @@ def _score_analysis_section(all_trades: list[dict]) -> str:
         ("★★★のみ (80点+)",    {"★★★"}),
     ]
     thresh_rows = ""
-    for label, allowed in thresholds:
-        trades  = [t for t in all_trades if (t.get("rank") or "-") in allowed]
+    for lbl, allowed in thresholds:
+        trades  = [t for t in full_year_trades if (t.get("rank") or "-") in allowed]
         n       = len(trades)
         wins    = sum(1 for t in trades if t["pnl"] > 0)
         pnl     = sum(t["pnl"] for t in trades)
@@ -433,21 +482,42 @@ def _score_analysis_section(all_trades: list[dict]) -> str:
         avg_cls = "profit" if avg_pnl >= 0 else "loss"
         thresh_rows += f"""
         <tr>
-          <td style="text-align:left">{label}</td>
+          <td style="text-align:left">{lbl}</td>
           <td>{n}</td>
           <td>{"—" if n == 0 else f"{wr:.1f}%"}</td>
           <td class="{pnl_cls}">{"—" if n == 0 else f"{pnl:+,.0f}円"}</td>
           <td class="{avg_cls}">{"—" if n == 0 else f"{avg_pnl:+,.0f}円"}</td>
         </tr>"""
 
-    if not rank_rows:
-        return ""
+    # ── スクリプト×ランク クロス集計 ──
+    by_label_rank: dict[tuple, list] = defaultdict(list)
+    labels = list(dict.fromkeys(t["label"] for t in full_year_trades))
+    for t in full_year_trades:
+        by_label_rank[(t["label"], t.get("rank") or "-")].append(t)
+
+    cross_head = "".join(f'<th>{r}</th>' for r in rank_order)
+    cross_rows = ""
+    for lbl in labels:
+        cfg_color = next((c["color"] for c in CONFIGS if c["label"] == lbl), "#94a3b8")
+        dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{cfg_color};margin-right:5px;vertical-align:middle"></span>'
+        cells = ""
+        for rank in rank_order:
+            trades  = by_label_rank.get((lbl, rank), [])
+            n       = len(trades)
+            if n == 0:
+                cells += "<td>—</td>"
+                continue
+            wins    = sum(1 for t in trades if t["pnl"] > 0)
+            pnl     = sum(t["pnl"] for t in trades)
+            wr      = wins / n * 100
+            pnl_cls = "profit" if pnl >= 0 else "loss"
+            col     = col_map.get(rank, "#94a3b8")
+            cells += f'<td style="font-size:0.78rem"><span style="color:{col}">{wr:.0f}%</span><br><span class="{pnl_cls}" style="font-size:0.72rem">{pnl:+,.0f}</span><br><span style="color:#64748b;font-size:0.68rem">{n}件</span></td>'
+        cross_rows += f'<tr><td class="sym" style="font-size:0.78rem">{dot}{lbl}</td>{cells}</tr>'
 
     return f"""
-<h2>スコア別実績分析</h2>
-<p style="color:#94a3b8;font-size:0.82rem;margin-bottom:16px">
-  バックテストスコア (0–100) と実際の取引損益の相関。スコアでフィルターした場合の効果を確認できます。
-</p>
+<h2>スコア別実績分析 <span style="font-size:0.75rem;color:#64748b;font-weight:400">（バックテスト365日 全取引ベース）</span></h2>
+<p style="color:#64748b;font-size:0.78rem;margin-bottom:16px">対象期間: {period_note}</p>
 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:24px">
   <div style="flex:1;min-width:300px">
     <div style="color:#64748b;font-size:0.78rem;margin-bottom:6px">ランク別実績</div>
@@ -469,10 +539,18 @@ def _score_analysis_section(all_trades: list[dict]) -> str:
       <tbody>{thresh_rows}</tbody>
     </table>
   </div>
+</div>
+<div style="margin-bottom:24px">
+  <div style="color:#64748b;font-size:0.78rem;margin-bottom:6px">スクリプト × ランク クロス集計（勝率 / 損益合計 / 取引数）</div>
+  <table>
+    <thead><tr><th style="text-align:left">スクリプト</th>{cross_head}</tr></thead>
+    <tbody>{cross_rows}</tbody>
+  </table>
 </div>"""
 
 
-def build_html(all_trades: list[dict], recent_days: int, today_str: str, period_label: str = "") -> str:
+def build_html(all_trades: list[dict], full_year_trades: list[dict],
+               recent_days: int, today_str: str, period_label: str = "") -> str:
     n_total = len(all_trades)
     n_win   = sum(1 for t in all_trades if t["pnl"] > 0)
     pnl_sum = sum(t["pnl"] for t in all_trades)
@@ -481,7 +559,7 @@ def build_html(all_trades: list[dict], recent_days: int, today_str: str, period_
 
     display_label       = period_label if period_label else f"直近{recent_days}日"
     summary_rows        = _summary_rows(all_trades)
-    score_analysis_html = _score_analysis_section(all_trades)
+    score_analysis_html = _score_analysis_section(full_year_trades)
     tab_detail_html     = _tab_detail_section(all_trades, recent_days)
 
     return f"""<!DOCTYPE html>
@@ -589,18 +667,22 @@ def main() -> None:
     print(f"取引損益レポート ({period_label})", flush=True)
     print(f"並列数: {args.workers}", flush=True)
 
-    all_trades: list[dict] = []
+    all_trades:       list[dict] = []
+    full_year_trades: list[dict] = []
     for cfg in CONFIGS:
         print(f"  処理中: {cfg['script']} ...", end="", flush=True)
         items  = _run_config(cfg, args.workers)
         trades = _collect_trades(items, since, until, cfg["label"], cfg["color"])
+        fy     = _collect_all_trades(items, cfg["label"], cfg["color"])
         all_trades.extend(trades)
+        full_year_trades.extend(fy)
         pnl = sum(t["pnl"] for t in trades)
-        print(f" {len(trades)}取引  {pnl:+,.0f}円", flush=True)
+        print(f" {len(trades)}取引  {pnl:+,.0f}円  (全期間:{len(fy)}取引)", flush=True)
 
     print(f"\n合計: {len(all_trades)}取引  損益: {sum(t['pnl'] for t in all_trades):+,.0f}円")
+    print(f"スコア分析対象: {len(full_year_trades)}取引 (バックテスト365日全件)")
 
-    html = build_html(all_trades, args.days, today_str, period_label=period_label)
+    html = build_html(all_trades, full_year_trades, args.days, today_str, period_label=period_label)
     suffix = f"_{args.until}" if args.until else ""
     out  = Path(f"recent_pnl{suffix}_{today_str}.html")
     out.write_text(html, encoding="utf-8")
