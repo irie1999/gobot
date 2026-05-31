@@ -113,6 +113,9 @@ def main():
                         help="backtest期間 (デフォルト: 730日)")
     parser.add_argument("--budget", type=int, default=200_000)
     parser.add_argument("--max-risk", type=int, default=1_000)
+    parser.add_argument("--max-price", type=int, default=10_000,
+                        help="この価格以下の銘柄のみ対象 (デフォルト: 10,000円。"
+                             "予算とは独立して銘柄候補を広く取る)")
     parser.add_argument("--min-pf", type=float, default=1.3,
                         help="抽出: 最低PF (デフォルト: 1.3)")
     parser.add_argument("--min-trades", type=int, default=20,
@@ -135,11 +138,14 @@ def main():
     targets = _load_universe()
     symbols = [s for s, _ in targets]
     fetched = load_intraday_batch(symbols, args.days, source="local")
-    max_price = args.budget / 100
+    max_price = args.max_price
+    before = len(fetched)
     fetched = {s: df for s, df in fetched.items()
                if float(df.iloc[-1]["close"]) <= max_price}
     targets = [(s, n) for s, n in targets if s in fetched]
-    print(f"  対象: {len(targets)}銘柄", flush=True)
+    print(f"  対象: {len(targets)}銘柄  "
+          f"(価格フィルタ ≤{max_price:,}円: {before}→{len(fetched)})",
+          flush=True)
 
     print(f"\n[Step 3/4] 全銘柄 backtest 実行中...", flush=True)
     t0 = time.time()
