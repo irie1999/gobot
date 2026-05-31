@@ -47,8 +47,10 @@ from backtest_limit_entry import run_limit_backtest, WORKERS as _DEF_WORKERS
 # ── 各スクリプトの watchlist を読み込む (import による STRATEGY_PARAMS 上書きは後で修正) ──
 import run_signals_wf as _wf_mod
 # _STOP_WATCHLIST は TRADING_MODE に依存して切り替わるため、静的定数を直接参照する
-_WF_STOP = list(_wf_mod._STOP_WATCHLIST_AGGRESSIVE)
-_WF_BRK  = list(_wf_mod._BRK_WATCHLIST_AGGRESSIVE)
+_WF_STOP     = list(_wf_mod._STOP_WATCHLIST_AGGRESSIVE)
+_WF_BRK      = list(_wf_mod._BRK_WATCHLIST_AGGRESSIVE)
+_WF_CON_STOP = list(_wf_mod._STOP_WATCHLIST_CONSERVATIVE)
+_WF_CON_BRK  = list(_wf_mod._BRK_WATCHLIST_CONSERVATIVE)
 
 import run_signals_prime as _prime_mod        # sets TRADING_MODE=aggressive + sm/tm override
 _PRIME_STOP = list(_prime_mod.STOP_WATCHLIST)
@@ -103,6 +105,17 @@ CONFIGS: list[dict] = [
         "sm_tm":    None,
         "stop_wl":  _WF_STOP,
         "brk_wl":   _WF_BRK,
+    },
+    {
+        "script":   "run_signals_wf.py --conservative",
+        "label":    "WF conservative",
+        "sublabel": "conservative / WF選定",
+        "cmd":      "python run_signals_wf.py --conservative",
+        "color":    "#06b6d4",
+        "mode":     "conservative",
+        "sm_tm":    None,
+        "stop_wl":  _WF_CON_STOP,
+        "brk_wl":   _WF_CON_BRK,
     },
     {
         "script":   "run_signals_prime.py",
