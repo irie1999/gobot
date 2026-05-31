@@ -162,71 +162,92 @@ def get_regime(close: pd.Series) -> dict:
 # シグナル判定ルール (select_signals.py 相当)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SCRIPTS = [
-    {"cmd": "python run_signals_nolimit.py",       "label": "株価制限なし",
-     "sublabel": "aggressive / 84銘柄",            "risk": "高",
-     "note": "上昇相場専用。高株価銘柄は急落時の損失も大きい。"},
-    {"cmd": "python run_signals_prime.py",          "label": "プライム全銘柄",
-     "sublabel": "aggressive / 84銘柄",            "risk": "中高",
-     "note": "上昇・横ばい高ボラで有効。"},
-    {"cmd": "python run_signals_wf.py --aggressive","label": "WF aggressive",
-     "sublabel": "aggressive / WF選定 59銘柄",     "risk": "中",
-     "note": "上昇相場で最も効率が良い（30日PF 3.24）。"},
-    {"cmd": "python run_signals_wf.py --conservative","label": "WF conservative",
-     "sublabel": "conservative / WF選定",          "risk": "低中",
-     "note": "横ばい相場でも安定。逆指値Bが中心。"},
-    {"cmd": "python run_signals.py",                "label": "既存版 conservative",
-     "sublabel": "conservative / デフォルト 55銘柄","risk": "低",
-     "note": "全相場で使用可能なベースライン。"},
-    {"cmd": "python run_signals_merged.py",         "label": "WF+既存統合",
-     "sublabel": "conservative / 統合WATCHLIST",   "risk": "低中",
-     "note": "上昇・横ばいで有効。WFと既存のマージ。"},
-]
+def _load_winners_files() -> list[dict]:
+    """レジーム別 winners ファイルをロード (SCRIPTS互換形式)。
+
+    winners_by_regime.py で生成された3ファイル + 汎用版を読み込み。
+    各エントリは {cmd, label, regime, symbols, count, risk, note, sublabel}。
+    """
+    import importlib.util
+    base = Path(__file__).resolve().parent
+    file_info = [
+        ("daytrade_donchian_winners_bull.py",     "Bull (上昇相場用)",     "up",       "中"),
+        ("daytrade_donchian_winners_sideways.py", "Sideways (横ばい相場用)", "sideways", "低中"),
+        ("daytrade_donchian_winners_bear.py",     "Bear (下落相場用)",     "down",     "中高"),
+        ("daytrade_donchian_winners.py",          "Default (汎用・現用)",  "any",      "中"),
+    ]
+    items = []
+    for fname, label, regime, risk in file_info:
+        path = base / fname
+        if not path.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(fname[:-3], path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            syms = getattr(mod, "SYMBOLS", [])
+        except Exception:
+            continue
+        sample = ", ".join(n for _, n in syms[:5])
+        if len(syms) > 5:
+            sample += f"... 他{len(syms)-5}"
+        items.append({
+            "cmd": f"# 監視: {fname}  （bot に SYMBOLS を読み込ませる）",
+            "label": label,
+            "regime": regime,
+            "symbols": syms,
+            "count": len(syms),
+            "sublabel": f"{len(syms)}銘柄",
+            "risk": risk,
+            "note": f"対象銘柄(先頭): {sample}",
+        })
+    return items
+
+
+SCRIPTS = _load_winners_files()
 
 
 def judge(script: dict, r: dict) -> tuple[str, str, str]:
-    """(status, reason, advice)  status= ✅推奨 / ⚠️注意 / ❌停止"""
-    trend = r["trend"]
-    vol   = r["vol_level"]
-    mom5  = r["mom5"]
-    mom20 = r["mom20"]
-    above = r["above_ma200"]
-    drop  = r["max_1d_drop"]
-    cmd   = script["cmd"]
-    crash = drop < -3.0
+    """(status, reason, advice)  status= ✅推奨 / ⚠️注意 / ❌停止
 
-    if "nolimit" in cmd:
-        if trend == "down":
-            return "❌ 停止", f"トレンド下落 (MA10<MA25)", "相場回復まで使用停止"
-        if not above:
-            return "❌ 停止", f"日経 < MA200 (長期下落トレンド)", "既存版のみに絞る"
-        if mom5 < -2.0:
-            return "❌ 停止", f"5日騰落 {mom5:+.1f}% (急落中)", "反発確認後に再開"
-        if mom5 >= 2.0 and mom20 >= 3.0 and trend == "up":
-            return "✅ 推奨", f"5日 {mom5:+.1f}% / 20日 {mom20:+.1f}% / 上昇トレンド", "条件を全て満たす"
-        if mom5 >= 0.0 and trend == "up":
-            return "⚠️ 注意", f"5日 {mom5:+.1f}% (上昇弱い)", "半数に絞るか WF に切替"
-        return "⚠️ 注意", f"5日 {mom5:+.1f}% / 20日 {mom20:+.1f}%", "条件未達。プライムを優先"
+    レジーム別 winners 用の判定:
+      - winners の regime と現在のトレンドが一致 → ✅推奨
+      - 'any' (汎用) → 常に⚠️注意 (専用版を使う方が良い)
+      - 一致しない → ❌停止
+    """
+    regime = script.get("regime", "any")
+    trend  = r["trend"]
+    vol    = r["vol_level"]
+    mom5   = r["mom5"]
+    above  = r["above_ma200"]
+    drop   = r["max_1d_drop"]
+    crash  = drop < -3.0
 
-    if "prime" in cmd:
+    # 全レジーム共通: 急落リスクで全部 ❌
+    if crash and not above:
+        return "❌ 停止", f"日経<MA200 + 過去30日最大{drop:+.1f}%急落", "相場安定まで取引停止"
+
+    # 汎用 (any) は専用版未生成時のフォールバック
+    if regime == "any":
         if trend == "down" and vol == "high":
-            return "❌ 停止", "下落×高ボラ (急落相場)", "損切り連発のリスク大"
-        if trend == "down":
-            return "⚠️ 注意", "下落トレンド", "WF conservative に切り替え推奨"
-        if trend == "up" or (trend == "sideways" and vol in ("mid", "high")):
-            return "✅ 推奨", f"トレンド={trend} / ボラ={vol}", "相場環境と合致"
-        return "⚠️ 注意", "低ボラ横ばい", "シグナルが少ない可能性"
+            return "⚠️ 注意", "下落×高ボラ", "Bear専用 winners 生成 (winners_by_regime.py) 推奨"
+        return "⚠️ 注意", "全相場対応 (汎用)", "レジーム別winners生成で精度UP"
 
-    if "--aggressive" in cmd:
-        if trend == "down" and vol == "high":
-            return "❌ 停止", "下落×高ボラ", "DON戦略の損失が拡大しやすい"
-        if trend == "down":
-            return "⚠️ 注意", "下落トレンド", "conservative に切り替え"
-        return "✅ 推奨", f"トレンド={trend}", "上昇・横ばいで有効"
+    # レジームマッチング
+    if regime == trend:
+        return "✅ 推奨", f"トレンド={trend} と一致", "このwinnersをbotに設定"
 
-    if trend == "down" and vol == "high" and crash:
-        return "⚠️ 注意", f"下落×高ボラ×急落リスク (過去30日最大1日 {drop:+.1f}%)", "シグナルを精査して選択的に発注"
-    return "✅ 推奨", f"トレンド={trend} / ボラ={vol}", "安定した相場適合"
+    # 不一致
+    if regime == "up" and trend == "sideways":
+        return "⚠️ 注意", "上昇用winnersを横ばい相場で使用", "シグナル少なめ・慎重に"
+    if regime == "sideways" and trend == "up":
+        return "⚠️ 注意", "横ばい用winnersを上昇相場で使用", "Bull版を優先"
+    if regime == "bear" and trend != "down":
+        return "❌ 停止", f"下落用winnersを{trend}相場で使用", "別winnersに切替"
+    if regime == "up" and trend == "down":
+        return "❌ 停止", "上昇用winnersを下落相場で使用", "Bear版に切替 or 取引停止"
+
+    return "⚠️ 注意", f"regime={regime} ≠ trend={trend}", "適合winnersを使用"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -537,69 +558,40 @@ STATUS_META = {
 RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
 
 
-def _priority_score(cmd: str, r: dict, status: str) -> int:
-    """おすすめスコア 0〜100"""
+def _priority_score(cmd: str, r: dict, status: str, regime: str = "any") -> int:
+    """おすすめスコア 0〜100 (レジーム適合度ベース)"""
     if status == "❌ 停止":
         return 0
-    base = 30 if status == "⚠️ 注意" else 55
+    base = 30 if status == "⚠️ 注意" else 65
 
     trend = r["trend"]
     mom5  = r["mom5"]
-    mom20 = r["mom20"]
 
-    # Walk-forward選定: バックテスト信頼性が高い
-    if "wf" in cmd:
-        base += 20
-
-    # aggressive × 上昇トレンド
-    if "--aggressive" in cmd and trend == "up":
-        base += 15
-
-    # 強い上昇相場（5日+2%以上 / 20日+3%以上）では aggressive/nolimit を優遇
-    if mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]:
-        if "--aggressive" in cmd or "nolimit" in cmd:
-            base += 8
-
-    # 株価制限なし: 全条件揃っている時のみ追加ボーナス
-    if "nolimit" in cmd and mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]:
-        base += 5
-
-    # プライム全銘柄: 株価制限なしと対象が重複する
-    if "prime" in cmd:
-        base -= 15
-
-    # 統合版: 個別管理と重複し運用が複雑になる
-    if "merged" in cmd:
-        base -= 12
-
-    # 下落相場でのペナルティ
-    if trend == "down" and ("--aggressive" in cmd or "nolimit" in cmd or "prime" in cmd):
-        base -= 20
+    # レジーム完全一致 → 最高評価
+    if regime == trend:
+        base += 25
+        # さらに強いトレンドならボーナス
+        if regime == "up" and mom5 >= 2.0 and r["above_ma200"]:
+            base += 10
+        if regime == "down" and mom5 <= -2.0:
+            base += 10
+    # 汎用 (any) は使えるが専用版が優先
+    elif regime == "any":
+        base -= 10
 
     return min(100, max(0, base))
 
 
-def _priority_reason(cmd: str, r: dict, score: int) -> str:
+def _priority_reason(cmd: str, r: dict, score: int, regime: str = "any") -> str:
     """おすすめ度の短い理由"""
     trend = r["trend"]
-    mom5  = r["mom5"]
-    mom20 = r["mom20"]
-    if "wf" in cmd and "--aggressive" in cmd:
-        return "WF選定×aggressive — 信頼性と収益性のバランスが最良"
-    if "nolimit" in cmd:
-        nolimit_ok = mom5 >= 2.0 and mom20 >= 3.0 and trend == "up" and r["above_ma200"]
-        if nolimit_ok:
-            return f"5日{mom5:+.1f}%/20日{mom20:+.1f}% — 全条件が揃った稀なタイミング"
-        return "条件が一部未達 — 使用は慎重に"
-    if "wf" in cmd and "--conservative" in cmd:
-        return "WF選定×conservative — 全相場で安定。サブ枠に最適"
-    if "run_signals.py" in cmd and "wf" not in cmd and "nolimit" not in cmd and "merged" not in cmd:
-        return "全相場のベースライン — 常時稼働用"
-    if "prime" in cmd:
-        return "株価制限なしと対象重複 — 両方使うなら不要"
-    if "merged" in cmd:
-        return "WF+既存の個別実行と重複 — 管理が複雑になる"
-    return ""
+    label = {"up": "Bull (上昇)", "down": "Bear (下落)",
+             "sideways": "Sideways (横ばい)", "any": "汎用"}.get(regime, regime)
+    if regime == trend:
+        return f"{label}winners × トレンド{trend} 一致 — 最適"
+    if regime == "any":
+        return "汎用版 — 専用winners生成で精度UP可"
+    return f"{label}winners × トレンド{trend} 不一致"
 
 
 def _stars_html(score: int, rank: int | None) -> str:
@@ -741,7 +733,7 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
 
     # スクリプトカード — スコア事前計算 → ランク付け → 描画
     judged = [(s, *judge(s, r)) for s in SCRIPTS]            # (s, status, reason, advice)
-    scored = [(s, st, rs, adv, _priority_score(s["cmd"], r, st))
+    scored = [(s, st, rs, adv, _priority_score(s["cmd"], r, st, s.get("regime", "any")))
               for s, st, rs, adv in judged]                   # +score
 
     # 推奨の中だけでランク付け
@@ -758,7 +750,7 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
         rc       = RISK_COLOR.get(s["risk"], "#94a3b8")
         rank     = rank_map.get(i)
         stars    = _stars_html(score, rank)
-        p_reason = _priority_reason(s["cmd"], r, score)
+        p_reason = _priority_reason(s["cmd"], r, score, s.get("regime", "any"))
         adv_html = (f'<div style="color:#94a3b8;font-size:0.8rem;margin-top:4px">→ {advice}</div>'
                     if advice else "")
         p_reason_html = (f'<span style="color:#94a3b8;font-size:0.78rem;margin-left:8px">{p_reason}</span>'
@@ -783,34 +775,27 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
         if status == "✅ 推奨":
             recommended.append(s["cmd"])
 
-    # 推奨コマンド
+    # 推奨winners (今日使うべき銘柄リスト)
     if recommended:
-        rec_rows = "".join(
-            f'<div style="margin:5px 0"><code class="cmd-box" style="display:inline-block">{c}</code></div>'
-            for c in recommended
-        )
-        rec_html = f'<div style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:16px">{rec_rows}</div>'
+        rec_html = '<div style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:16px;color:#86efac">'
+        for s in SCRIPTS:
+            if judge(s, r)[0] != "✅ 推奨":
+                continue
+            sym_list = ", ".join(f"{n}({c.replace('.T','')})" for c, n in s["symbols"][:10])
+            if len(s["symbols"]) > 10:
+                sym_list += f" ... 他{len(s['symbols'])-10}銘柄"
+            rec_html += f'''
+<div style="margin:8px 0">
+  <div style="font-weight:700;color:#4ade80">{s["label"]} ({s["count"]}銘柄)</div>
+  <div style="font-size:0.82rem;color:#86efac;margin-top:4px">{sym_list}</div>
+</div>'''
+        rec_html += '</div>'
+    elif not SCRIPTS:
+        rec_html = '<div class="warn-box" style="border-color:#991b1b">⚠ winners ファイルが見つかりません。<br>winners_by_regime.py を実行してレジーム別 winners を生成してください:<br><code class="cmd-box" style="display:inline-block;margin-top:8px">python winners_by_regime.py</code></div>'
     else:
-        rec_html = '<div class="warn-box" style="border-color:#991b1b">❌ 全スクリプト停止推奨。相場が回復するまで様子見を。</div>'
+        rec_html = '<div class="warn-box" style="border-color:#991b1b">❌ 全winners停止推奨。相場が回復するまで様子見を。</div>'
 
-    # 株価制限なし 停止理由
-    nolimit_s, nolimit_r, _ = judge(SCRIPTS[0], r)
     nolimit_block = ""
-    if nolimit_s != "✅ 推奨":
-        _tj  = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[r["trend"]]
-        _mp  = "上" if r["above_ma200"] else "下"
-        nolimit_block = f"""
-<h2>株価制限なし が推奨外の理由</h2>
-<div class="warn-box">
-  <div><strong>{nolimit_r}</strong></div>
-  <div style="margin-top:8px;color:#94a3b8;font-size:0.85rem">
-    使用条件: 5日騰落 ≥ +2% ／ 20日騰落 ≥ +3% ／ 上昇トレンド ／ 日経 &gt; MA200<br>
-    現　　状: 5日 <strong>{r['mom5']:+.1f}%</strong> ／
-              20日 <strong>{r['mom20']:+.1f}%</strong> ／
-              {_tj} ／ MA200{_mp}<br>
-    根　　拠: 直近30日利益の95%が「日経急騰局面」に集中。条件外では1件あたり平均+782円。
-  </div>
-</div>"""
 
     mkt_html = _market_overview_html(indicators or {})
 
@@ -828,10 +813,10 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
 {pred_html}
 {mkt_html}
 
-<h2>スクリプト判定</h2>
+<h2>レジーム別 Donchian winners 判定</h2>
 {cards_html}
 
-<h2>{ref_date} 時点の推奨コマンド</h2>
+<h2>{ref_date} 時点の推奨銘柄</h2>
 {rec_html}
 {nolimit_block}
 
