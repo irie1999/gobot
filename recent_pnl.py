@@ -514,6 +514,49 @@ def _score_analysis_section(full_year_trades: list[dict]) -> str:
             cells += f'<td style="font-size:0.78rem"><span style="color:{col}">{wr:.0f}%</span><br><span class="{pnl_cls}" style="font-size:0.72rem">{pnl:+,.0f}</span><br><span style="color:#64748b;font-size:0.68rem">{n}件</span></td>'
         cross_rows += f'<tr><td class="sym" style="font-size:0.78rem">{dot}{lbl}</td>{cells}</tr>'
 
+    # ── 10点刻み 細粒度集計 ──
+    score_buckets = [
+        (90, 100, "90-100", "#4ade80"),
+        (80,  90, "80-89",  "#86efac"),
+        (70,  80, "70-79",  "#60a5fa"),
+        (60,  70, "60-69",  "#93c5fd"),
+        (50,  60, "50-59",  "#fbbf24"),
+        (40,  50, "40-49",  "#fcd34d"),
+        (30,  40, "30-39",  "#f87171"),
+        (20,  30, "20-29",  "#fca5a5"),
+        ( 0,  20, "0-19",   "#94a3b8"),
+    ]
+    fine_rows = ""
+    for lo, hi, label_s, col in score_buckets:
+        trades  = [t for t in full_year_trades
+                   if t.get("score") is not None and lo <= t["score"] < hi]
+        n       = len(trades)
+        if n == 0:
+            continue
+        wins    = sum(1 for t in trades if t["pnl"] > 0)
+        pnl     = sum(t["pnl"] for t in trades)
+        avg_pnl = pnl / n
+        wr      = wins / n * 100
+        gp      = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+        gl      = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+        pf      = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_str  = "∞" if pf == float("inf") else f"{pf:.2f}"
+        pnl_cls = "profit" if pnl >= 0 else "loss"
+        avg_cls = "profit" if avg_pnl >= 0 else "loss"
+        # ランク境界に罫線
+        border = ""
+        if lo in (40, 60, 80):
+            border = ' style="border-top:2px solid #334155"'
+        fine_rows += f"""
+        <tr{border}>
+          <td style="color:{col};font-weight:600;text-align:left">{label_s}</td>
+          <td>{n}</td>
+          <td>{wr:.1f}%</td>
+          <td>{pf_str}</td>
+          <td class="{pnl_cls}">{pnl:+,.0f}円</td>
+          <td class="{avg_cls}">{avg_pnl:+,.0f}円</td>
+        </tr>"""
+
     return f"""
 <h2>スコア別実績分析 <span style="font-size:0.75rem;color:#64748b;font-weight:400">（バックテスト365日 全取引ベース）</span></h2>
 <p style="color:#64748b;font-size:0.78rem;margin-bottom:16px">対象期間: {period_note}</p>
@@ -538,6 +581,17 @@ def _score_analysis_section(full_year_trades: list[dict]) -> str:
       <tbody>{thresh_rows}</tbody>
     </table>
   </div>
+</div>
+<div style="margin-bottom:24px">
+  <div style="color:#64748b;font-size:0.78rem;margin-bottom:6px">10点刻み 細粒度分析（★1の中でも差があるか確認）</div>
+  <table>
+    <thead><tr>
+      <th style="text-align:left">スコア帯</th>
+      <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
+    </tr></thead>
+    <tbody>{fine_rows}</tbody>
+  </table>
+  <p style="color:#475569;font-size:0.72rem;margin-top:6px">境界線 = ランク区切り（△/★/★★/★★★）</p>
 </div>
 <div style="margin-bottom:24px">
   <div style="color:#64748b;font-size:0.78rem;margin-bottom:6px">スクリプト × ランク クロス集計（勝率 / 損益合計 / 取引数）</div>
