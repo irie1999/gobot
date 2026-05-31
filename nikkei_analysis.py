@@ -15,9 +15,11 @@ Usage:
     python nikkei_analysis.py --years 10            # 過去10年
     python nikkei_analysis.py --date 2024-01-15     # 指定日時点の分析
     python nikkei_analysis.py --no-browser          # HTML生成のみ
-    python nikkei_analysis.py --with-signals --with-pnl   # 全5タブ
-    python nikkei_analysis.py --with-signals --min-score 60  # ★★以上のみ
-    python nikkei_analysis.py --with-pnl --days 30        # 直近30日損益
+    python nikkei_analysis.py                    # 全5タブ（デフォルト）
+    python nikkei_analysis.py --no-signals       # シグナルタブなし
+    python nikkei_analysis.py --no-pnl           # 損益タブなし
+    python nikkei_analysis.py --min-score 60     # ★★以上シグナルのみ
+    python nikkei_analysis.py --days 30          # 直近30日損益
 """
 from __future__ import annotations
 import argparse
@@ -1690,8 +1692,8 @@ def main():
     parser.add_argument("--years",        type=int, default=5,   help="分析期間（年）")
     parser.add_argument("--date",         type=str, default=None, help="基準日 YYYY-MM-DD (省略時=今日)")
     parser.add_argument("--no-browser",   action="store_true",    help="HTML生成のみ")
-    parser.add_argument("--with-signals", action="store_true",    help="タブ4: 今日のシグナル一覧を追加")
-    parser.add_argument("--with-pnl",     action="store_true",    help="タブ5: 直近N日損益を追加")
+    parser.add_argument("--no-signals",   action="store_true",    help="タブ4: シグナル一覧を非表示")
+    parser.add_argument("--no-pnl",       action="store_true",    help="タブ5: 損益レポートを非表示")
     parser.add_argument("--days",         type=int, default=7,    help="損益集計日数 (--with-pnl 使用時)")
     parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア (--with-signals 使用時)")
     parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
@@ -1756,10 +1758,10 @@ def main():
 
     tab4_html = ""
     tab5_html = ""
-    if args.with_signals and _SIGNALS_AVAILABLE:
+    if not args.no_signals and _SIGNALS_AVAILABLE:
         print("シグナル収集中...", flush=True)
         tab4_html = _tab4_signals_html(args.workers, args.min_score)
-    if args.with_pnl and _SIGNALS_AVAILABLE:
+    if not args.no_pnl and _SIGNALS_AVAILABLE:
         print(f"損益集計中 (直近{args.days}日)...", flush=True)
         tab5_html = _tab5_pnl_html(args.days, args.workers)
 
