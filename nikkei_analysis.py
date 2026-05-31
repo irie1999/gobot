@@ -91,7 +91,7 @@ try:
         {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
         {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP, "brk_wl": _WF_CON_BRK},
         {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP, "brk_wl": _WF_AGG_BRK},
-        *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": None, "stop_wl": _NL_STOP,    "brk_wl": _NL_BRK}]
+        *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": (1.5, 2.0), "stop_wl": _NL_STOP, "brk_wl": _NL_BRK}]
           if _NL_STOP or _NL_BRK else []),
         *([{"label": "WF+既存統合",     "color": "#10b981", "mode": "conservative", "sm_tm": None, "stop_wl": _MG_STOP,    "brk_wl": _MG_BRK}]
           if _MG_STOP or _MG_BRK else []),
@@ -1261,59 +1261,82 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
 
     # 全configから重複排除した (sym, name, strat, is_stop) リストを作成
     # 各 (sym, strat) がどのスクリプトに含まれるかも記録
+    # (sym, strat) → 出典スクリプト名リスト / 主configインデックス
+    source_map: dict = {}   # (sym, strat) -> [script_name, ...]
+    primary_cfg: dict = {}  # (sym, strat, is_stop) -> cfg
     seen: set = set()
     all_items: list = []
-    source_map: dict = {}  # (sym, strat) -> list[script_name]
     for cfg in _PNL_CONFIGS:
         script = _SCRIPT_NAME.get(cfg["label"], cfg["label"])
         for sym, name, strat in cfg["stop_wl"]:
-            source_map.setdefault((sym, strat), [])
-            if script not in source_map[(sym, strat)]:
-                source_map[(sym, strat)].append(script)
-            if (sym, strat, True) not in seen:
-                seen.add((sym, strat, True))
-                all_items.append((sym, name, strat, True))
+            k = (sym, strat)
+            source_map.setdefault(k, [])
+            if script not in source_map[k]:
+                source_map[k].append(script)
+            ki = (sym, strat, True)
+            if ki not in seen:
+                seen.add(ki); all_items.append((sym, name, strat, True)); primary_cfg[ki] = cfg
         for sym, name, strat in cfg["brk_wl"]:
-            source_map.setdefault((sym, strat), [])
-            if script not in source_map[(sym, strat)]:
-                source_map[(sym, strat)].append(script)
-            if (sym, strat, False) not in seen:
-                seen.add((sym, strat, False))
-                all_items.append((sym, name, strat, False))
+            k = (sym, strat)
+            source_map.setdefault(k, [])
+            if script not in source_map[k]:
+                source_map[k].append(script)
+            ki = (sym, strat, False)
+            if ki not in seen:
+                seen.add(ki); all_items.append((sym, name, strat, False)); primary_cfg[ki] = cfg
+
+    # configごとにパラメータを設定して並列実行（パラメータ競合を避けるため順次処理）
+    signals: list[dict] = []
+    seen_sig: set = set()
+    from itertools import groupby as _groupby
+
+    # primary_cfgのlabelでグループ化
+    cfg_labels = list({cfg["label"]: cfg for cfg in _PNL_CONFIGS}.keys())
+    items_by_cfg: dict = {lbl: [] for lbl in cfg_labels}
+    for item in all_items:
+        sym, name, strat, is_stop = item
+        lbl = primary_cfg[(sym, strat, is_stop)]["label"]
+        items_by_cfg[lbl].append(item)
+
+    for cfg in _PNL_CONFIGS:
+        group = items_by_cfg.get(cfg["label"], [])
+        if not group:
+            continue
+        _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
+
+        def _check_one(item):
+            sym, name, strat, is_stop = item
+            mod = _stop if is_stop else _brk
+            bt = mod.backtest_one(sym, name, strat)
+            if not bt:
+                return None
+            score, rank = _stop.calc_recommend_score(bt["period_results"])
+            if score < min_score:
+                return None
+            sig = mod.check_signal_on_date(sym, strat, None)
+            if not sig:
+                return None
+            return {
+                "symbol": sym, "name": name, "strategy": strat,
+                "score": score, "rank": rank,
+                "order_p":  sig.get("order_price", 0),
+                "stop_p":   sig.get("stop_price",  0),
+                "target_p": sig.get("target_price", 0),
+                "sources":  source_map.get((sym, strat), []),
+            }
+
+        with _TPE(max_workers=workers) as ex:
+            futs = {ex.submit(_check_one, item): item for item in group}
+            for fut in _asc(futs):
+                try:
+                    r = fut.result()
+                    if r and (r["symbol"], r["strategy"]) not in seen_sig:
+                        seen_sig.add((r["symbol"], r["strategy"]))
+                        signals.append(r)
+                except Exception:
+                    pass
 
     _set_sig_params("conservative")
-
-    def _check_one(item):
-        sym, name, strat, is_stop = item
-        mod = _stop if is_stop else _brk
-        bt = mod.backtest_one(sym, name, strat)
-        if not bt:
-            return None
-        score, rank = _stop.calc_recommend_score(bt["period_results"])
-        if score < min_score:
-            return None
-        sig = mod.check_signal_on_date(sym, strat, None)
-        if not sig:
-            return None
-        return {
-            "symbol": sym, "name": name, "strategy": strat,
-            "score": score, "rank": rank,
-            "order_p":  sig.get("order_price", 0),
-            "stop_p":   sig.get("stop_price",  0),
-            "target_p": sig.get("target_price", 0),
-            "sources":  source_map.get((sym, strat), []),
-        }
-
-    signals: list[dict] = []
-    with _TPE(max_workers=workers) as ex:
-        futs = {ex.submit(_check_one, item): item for item in all_items}
-        for fut in _asc(futs):
-            try:
-                r = fut.result()
-                if r:
-                    signals.append(r)
-            except Exception:
-                pass
 
     signals.sort(key=lambda x: -x["score"])
 
