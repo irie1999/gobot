@@ -1249,15 +1249,34 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
 
+    # config label → スクリプト名マッピング
+    _SCRIPT_NAME = {
+        "既存版 conservative": "run_signals.py --conservative",
+        "既存版 aggressive":   "run_signals.py --aggressive",
+        "WF conservative":    "run_signals_wf.py --conservative",
+        "WF aggressive":      "run_signals_wf.py --aggressive",
+        "NOLIMIT WF":         "run_signals_nolimit.py",
+        "WF+既存統合":        "run_signals_merged.py",
+    }
+
     # 全configから重複排除した (sym, name, strat, is_stop) リストを作成
+    # 各 (sym, strat) がどのスクリプトに含まれるかも記録
     seen: set = set()
     all_items: list = []
+    source_map: dict = {}  # (sym, strat) -> list[script_name]
     for cfg in _PNL_CONFIGS:
+        script = _SCRIPT_NAME.get(cfg["label"], cfg["label"])
         for sym, name, strat in cfg["stop_wl"]:
+            source_map.setdefault((sym, strat), [])
+            if script not in source_map[(sym, strat)]:
+                source_map[(sym, strat)].append(script)
             if (sym, strat, True) not in seen:
                 seen.add((sym, strat, True))
                 all_items.append((sym, name, strat, True))
         for sym, name, strat in cfg["brk_wl"]:
+            source_map.setdefault((sym, strat), [])
+            if script not in source_map[(sym, strat)]:
+                source_map[(sym, strat)].append(script)
             if (sym, strat, False) not in seen:
                 seen.add((sym, strat, False))
                 all_items.append((sym, name, strat, False))
@@ -1282,6 +1301,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
             "order_p":  sig.get("order_price", 0),
             "stop_p":   sig.get("stop_price",  0),
             "target_p": sig.get("target_price", 0),
+            "sources":  source_map.get((sym, strat), []),
         }
 
     signals: list[dict] = []
@@ -1308,9 +1328,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         tag      = f'<span class="tag tag-{s["strategy"].lower()}">{s["strategy"]}</span>'
+        src_html = " ".join(
+            f'<code style="background:#1e293b;color:#94a3b8;font-size:0.7rem;padding:1px 5px;border-radius:4px">python {sc}</code>'
+            for sc in s.get("sources", [])
+        )
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
-  <td class="sym" style="text-align:left">{s["symbol"]}<br><span style="color:#64748b;font-size:0.75rem">{s["name"]}</span></td>
+  <td class="sym" style="text-align:left">{s["symbol"]}<br>
+    <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span><br>
+    <span style="line-height:1.8">{src_html}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center"><span style="color:{col};font-weight:700">{s["rank"]}&nbsp;{s["score"]}</span></td>
   <td style="text-align:right">{s["order_p"]:,.0f}円</td>
@@ -1327,7 +1353,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
 <table>
   <thead><tr>
     <th>順位</th>
-    <th style="text-align:left">銘柄</th>
+    <th style="text-align:left">銘柄 / スクリプト</th>
     <th>戦略</th><th>スコア</th>
     <th>注文価格</th><th>損切り(-)</th><th>目標(+)</th>
   </tr></thead>
