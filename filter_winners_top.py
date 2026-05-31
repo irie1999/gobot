@@ -28,6 +28,31 @@ REGIME_FILES = {
     "default": "daytrade_donchian_winners.py",
 }
 
+REGIME_TO_NIKKEI = {
+    "bull": "up",
+    "sideways": "sideways",
+    "bear": "down",
+    "default": None,  # 全期間
+}
+
+
+def filter_trades_by_regime(trades, regime_map, target_regime):
+    """ターゲットレジームのトレードだけ抽出。"""
+    if target_regime is None or regime_map is None:
+        return trades
+    import pandas as pd
+    result = []
+    for t in trades:
+        dt = t.get("entry_dt")
+        if not hasattr(dt, "date"):
+            continue
+        d = pd.Timestamp(dt.date()).normalize()
+        if d not in regime_map.index:
+            continue
+        if regime_map[d] == target_regime:
+            result.append(t)
+    return result
+
 
 def main():
     parser = argparse.ArgumentParser(description="winnersから上位N銘柄抽出")
@@ -53,11 +78,19 @@ def main():
 
     # --regime all で3レジーム全部処理
     regimes = ["bull", "sideways", "bear"] if args.regime == "all" else [args.regime]
+
+    # 日経レジームマップ読み込み (1回だけ)
+    regime_map = None
+    if any(r != "default" for r in regimes):
+        from winners_by_regime import fetch_nikkei_regimes
+        years = max(1, args.days // 365 + 1)
+        regime_map = fetch_nikkei_regimes(years)
+
     for regime in regimes:
-        process_one(regime, args)
+        process_one(regime, args, regime_map)
 
 
-def process_one(regime, args):
+def process_one(regime, args, regime_map=None):
     # ソース読み込み
     src_path = REGIME_FILES[regime]
     if not Path(src_path).exists():
@@ -87,10 +120,16 @@ def process_one(regime, args):
 
     t0 = time.time()
     ranked = []
+    target_nikkei = REGIME_TO_NIKKEI.get(regime)
     for i, (sym, name) in enumerate(targets, 1):
         r = backtest_symbol(sym, name, fetched[sym], args.budget, args.max_risk)
         if r and r["trades"]:
-            stats = calc_stats(r["trades"], args.budget)
+            # レジームでフィルタ
+            trades_in_regime = filter_trades_by_regime(
+                r["trades"], regime_map, target_nikkei)
+            if not trades_in_regime:
+                continue
+            stats = calc_stats(trades_in_regime, args.budget)
             ranked.append((sym, name, stats))
         if i % 100 == 0:
             print(f"  {i}/{len(targets)} ({time.time()-t0:.1f}s)", flush=True)
