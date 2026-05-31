@@ -78,27 +78,32 @@ def yf_df_to_jquants(df: pd.DataFrame, code5: str) -> pd.DataFrame:
     out["Time"] = out.index.strftime("%H:%M")
     out["Code"] = code5
 
-    # OHLCV カラム名を J-Quants 形式に
+    # OHLCV カラム名を J-Quants V2 短縮形式 (O/H/L/C/Vo) に統一
+    # 既存pkl が J-Quants 由来の場合に concat 時のカラム不一致を防ぐ
     rename = {}
-    for src, dst in [("Open", "Open"), ("High", "High"), ("Low", "Low"),
-                     ("Close", "Close"), ("Volume", "Volume")]:
+    for src, dst in [("Open", "O"), ("High", "H"), ("Low", "L"),
+                     ("Close", "C"), ("Volume", "Vo")]:
         if src in out.columns:
             rename[src] = dst
         elif src.lower() in out.columns:
             rename[src.lower()] = dst
     out = out.rename(columns=rename)
+    # Va (売買代金) を作成: J-Quants 形式互換
+    if "O" in out.columns and "Vo" in out.columns and "Va" not in out.columns:
+        out["Va"] = pd.to_numeric(out["O"], errors="coerce") * \
+                    pd.to_numeric(out["Vo"], errors="coerce")
 
     # 必要列を絞る
-    cols = ["DateTime", "Date", "Time", "Code", "Open", "High", "Low",
-            "Close", "Volume"]
+    cols = ["DateTime", "Date", "Time", "Code", "O", "H", "L", "C", "Vo", "Va"]
     cols = [c for c in cols if c in out.columns]
     out = out[cols].reset_index(drop=True)
 
     # 数値変換
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
+    for c in ["O", "H", "L", "C", "Vo", "Va"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
-    out = out.dropna(subset=["Close"])
+    if "C" in out.columns:
+        out = out.dropna(subset=["C"])
 
     return out
 
