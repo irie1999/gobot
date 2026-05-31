@@ -64,6 +64,13 @@ try:
     _WF_CON_BRK  = list(_wf_mod._BRK_WATCHLIST_CONSERVATIVE)
     _BASE_STOP   = list(_stop.WATCHLIST)
     _BASE_BRK    = list(_brk.WATCHLIST)
+    try:
+        import run_signals_nolimit as _nl_mod
+        _NL_STOP = list(_nl_mod.STOP_WATCHLIST)
+        _NL_BRK  = list(_nl_mod.BRK_WATCHLIST)
+    except Exception:
+        _NL_STOP = []
+        _NL_BRK  = []
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
     _PNL_CONFIGS = [
@@ -71,6 +78,8 @@ try:
         {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP,    "brk_wl": _BASE_BRK},
         {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP,  "brk_wl": _WF_CON_BRK},
         {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP,  "brk_wl": _WF_AGG_BRK},
+        *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": None, "stop_wl": _NL_STOP,      "brk_wl": _NL_BRK}]
+          if _NL_STOP or _NL_BRK else []),
     ]
     _SIGNALS_AVAILABLE = True
 except Exception:
