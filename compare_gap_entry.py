@@ -67,6 +67,8 @@ def _parse():
     p.add_argument("--no-browser",      action="store_true")
     p.add_argument("--all-watchlists",  action="store_true",
                    help="全WATCHLISTを統合して検証 (stop/brk × conservative/aggressive × WF)")
+    p.add_argument("--by-signal",       action="store_true",
+                   help="シグナル設定別（既存版/WF/NOLIMIT/統合）でCAP比較")
     return p.parse_args()
 
 
@@ -208,6 +210,165 @@ def _pf_str(pf):
 
 def _cap_label(cap: float) -> str:
     return "成行" if cap >= 9.0 else f"+{cap*100:.0f}%"
+
+
+# ── シグナル設定定義 (--by-signal 用) ─────────────────────────────────
+def _build_signal_configs(days: int) -> list[dict]:
+    """6シグナル設定のタスクリストを構築。"""
+
+    def _dedup(wl: list) -> list:
+        seen: set[tuple] = set()
+        out = []
+        for item in wl:
+            key = (item[0], item[2])
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out
+
+    def _merge(existing: list, wf: list) -> list:
+        ex_keys = {(sym, strat) for sym, _, strat in existing}
+        merged = list(existing)
+        for item in wf:
+            if (item[0], item[2]) not in ex_keys:
+                merged.append(item)
+        return merged
+
+    def _make_tasks(stop_wl, brk_wl, sp, bp):
+        tasks = []
+        for sym, name, strat in stop_wl:
+            if strat in sp:
+                fn, em, sm, tm = sp[strat]
+                tasks.append((sym, name, strat, days, fn, em, sm, tm))
+        for sym, name, strat in brk_wl:
+            if strat in bp:
+                fn, em, sm, tm = bp[strat]
+                tasks.append((sym, name, strat, days, fn, em, sm, tm))
+        return tasks
+
+    try:
+        import run_signals_wf as _wf
+        wf_sc = _wf._STOP_WATCHLIST_CONSERVATIVE
+        wf_sa = _wf._STOP_WATCHLIST_AGGRESSIVE
+        wf_bc = _wf._BRK_WATCHLIST_CONSERVATIVE
+        wf_ba = _wf._BRK_WATCHLIST_AGGRESSIVE
+    except ImportError:
+        wf_sc = wf_sa = wf_bc = wf_ba = []
+
+    try:
+        import run_signals_nolimit as _nl
+        nl_s, nl_b = _nl.STOP_CANDIDATES, _nl.BRK_CANDIDATES
+    except ImportError:
+        nl_s = nl_b = []
+
+    try:
+        import run_signals_merged as _mg
+        mg_s = _merge(_stop.WATCHLIST, _mg._WF_STOP)
+        mg_b = _merge(_brk.WATCHLIST,  _mg._WF_BRK)
+    except ImportError:
+        mg_s = _stop.WATCHLIST
+        mg_b = _brk.WATCHLIST
+
+    con_sp = _stop.STRATEGY_PARAMS_CONSERVATIVE
+    agg_sp = _stop.STRATEGY_PARAMS_AGGRESSIVE
+    con_bp = _brk.STRATEGY_PARAMS_CONSERVATIVE
+    agg_bp = _brk.STRATEGY_PARAMS_AGGRESSIVE
+
+    configs = [
+        {"label": "既存版 conservative", "short": "既存 con",
+         "tasks": _dedup(_make_tasks(_stop.WATCHLIST, _brk.WATCHLIST, con_sp, con_bp))},
+        {"label": "既存版 aggressive",   "short": "既存 agg",
+         "tasks": _dedup(_make_tasks(_stop.WATCHLIST, _brk.WATCHLIST, agg_sp, agg_bp))},
+        {"label": "WF conservative",     "short": "WF con",
+         "tasks": _dedup(_make_tasks(wf_sc, wf_bc, con_sp, con_bp))},
+        {"label": "WF aggressive",       "short": "WF agg",
+         "tasks": _dedup(_make_tasks(wf_sa, wf_ba, agg_sp, agg_bp))},
+        {"label": "NOLIMIT WF",          "short": "NOLIMIT",
+         "tasks": _dedup(_make_tasks(nl_s, nl_b, con_sp, con_bp))},
+        {"label": "WF+既存統合",         "short": "統合",
+         "tasks": _dedup(_make_tasks(mg_s, mg_b, con_sp, con_bp))},
+    ]
+    return configs
+
+
+def _build_by_signal_html(
+    sig_data: list[dict],   # [{label, short, cap_results: {cap: agg}}]
+    caps: list[float],
+    days: int,
+) -> str:
+    today = date.today().isoformat()
+    labels = [_cap_label(c) for c in caps]
+    cur_cap = 0.03
+
+    def _th(c, lbl):
+        style = ' style="background:#1a3050"' if c == cur_cap else ""
+        note  = '<br><small style="color:#aaa">(現行)</small>' if c == cur_cap else ""
+        return f"<th{style}>{lbl}{note}</th>"
+
+    sections = ""
+    for cfg in sig_data:
+        cap_res = cfg["cap_results"]   # {cap: agg_dict}
+        best_c  = max(caps, key=lambda c: cap_res.get(c, {}).get("total_pnl", 0))
+        n_sym   = cfg["n_sym"]
+
+        rows = ""
+        for c in caps:
+            a   = cap_res.get(c, {})
+            t   = a.get("trades", 0)
+            w   = a.get("wins", 0)
+            wr  = a.get("win_rate", 0.0)
+            pf  = a.get("pf", 0.0)
+            pn  = a.get("total_pnl", 0.0)
+            pf_s = _pf_str(pf)
+            lbl = _cap_label(c)
+
+            cur_mark = "<br><small style='color:#aaa'>(現行)</small>" if c == cur_cap else ""
+            if c == cur_cap:
+                row_style = ' style="background:#1a3050"'
+            elif c == best_c:
+                row_style = ' style="background:#0a3020"'
+            else:
+                row_style = ""
+            pnl_cls = "pos" if pn > 0 else "neg"
+            pf_cls  = "pos" if pf >= 1.5 else ("neg" if pf < 1.0 else "")
+
+            if t == 0:
+                rows += (f"<tr{row_style}><td><b>{lbl}</b>{cur_mark}</td>"
+                         f'<td class="dim" colspan="5">データなし</td></tr>\n')
+            else:
+                rows += (f"<tr{row_style}>"
+                         f"<td><b>{lbl}</b>{cur_mark}</td>"
+                         f"<td>{t}</td><td>{w}</td>"
+                         f"<td>{wr:.1f}%</td>"
+                         f'<td class="{pf_cls}">{pf_s}</td>'
+                         f'<td class="{pnl_cls}">{pn:+,.0f}円</td>'
+                         f"</tr>\n")
+
+        sections += f"""
+<h3>{cfg['label']} <small style="color:#7090b0;font-weight:normal">({n_sym}銘柄)</small></h3>
+<table>
+<tr><th>指値上限</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>総損益</th></tr>
+{rows}</table>
+"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>シグナル別 CAP比較 {today}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<h1>シグナル設定別 指値上限 比較バックテスト</h1>
+<div class="info">
+  期間: 直近 {days}日 ｜ モード: {_MODE} ｜ 生成日: {today}<br>
+  比較パターン: {" / ".join(labels)}<br>
+  緑セル = 各設定で最も総損益が高い設定　青セル = 現行(+3%)
+</div>
+<h2>シグナル設定別 詳細比較</h2>
+{sections}
+</body>
+</html>"""
 
 
 # ── HTML 出力 ─────────────────────────────────────────────────────────
@@ -643,12 +804,34 @@ def main():
     print(f"比較パターン: {[_cap_label(c) for c in caps]}")
     print()
 
-    all_results: dict[float, list] = {}
-    for cap in caps:
-        label = _cap_label(cap)
-        print(f"▶ [{label}] バックテスト中…")
-        res = _run_all(tasks, cap=cap, workers=args.workers, label=label)
-        all_results[cap] = res
+    # ── --by-signal: 6設定ごとにCAP比較 ──────────────────────────────
+    sig_data_list: list[dict] = []
+    if getattr(args, "by_signal", False):
+        signal_configs = _build_signal_configs(args.days)
+        for cfg in signal_configs:
+            cfg_tasks = cfg["tasks"]
+            if not cfg_tasks:
+                print(f"  [{cfg['short']}] スキップ (銘柄なし)")
+                sig_data_list.append({**cfg, "cap_results": {}, "n_sym": 0})
+                continue
+            print(f"▶ [{cfg['short']}] {len(cfg_tasks)}銘柄 × {len(caps)}パターン")
+            cap_results: dict[float, dict] = {}
+            for cap in caps:
+                lbl = f"{cfg['short']} {_cap_label(cap)}"
+                res = _run_all(cfg_tasks, cap=cap, workers=args.workers, label=lbl)
+                cap_results[cap] = _aggregate(res)
+            sig_data_list.append({**cfg, "cap_results": cap_results, "n_sym": len(cfg_tasks)})
+        # --by-signal 時は all_results も tasks ベースで計算（print_summary 用）
+        all_results: dict[float, list] = {}
+        for cap in caps:
+            all_results[cap] = []   # skip individual symbol-level detail
+    else:
+        all_results: dict[float, list] = {}
+        for cap in caps:
+            label = _cap_label(cap)
+            print(f"▶ [{label}] バックテスト中…")
+            res = _run_all(tasks, cap=cap, workers=args.workers, label=label)
+            all_results[cap] = res
 
     if all(len(v) == 0 for v in all_results.values()):
         print("データが取得できませんでした (ネットワーク接続を確認してください)")
@@ -660,9 +843,13 @@ def main():
     print_summary(all_agg, caps, args.days)
 
     if args.html:
-        html = _build_html(all_agg, all_strat, caps, args.days, all_results)
+        if getattr(args, "by_signal", False):
+            html = _build_by_signal_html(sig_data_list, caps, args.days)
+        else:
+            html = _build_html(all_agg, all_strat, caps, args.days, all_results)
         suffix = "_aggressive" if _MODE == "aggressive" else ""
-        fname = f"compare_gap_entry{suffix}_{date.today().isoformat()}.html"
+        mode_sfx = "_by_signal" if getattr(args, "by_signal", False) else ""
+        fname = f"compare_gap_entry{suffix}{mode_sfx}_{date.today().isoformat()}.html"
         with open(fname, "w", encoding="utf-8") as f:
             f.write(html)
         print(f"\nHTML出力: {fname}")
