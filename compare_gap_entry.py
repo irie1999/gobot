@@ -189,6 +189,91 @@ def _aggregate(results: list[dict]) -> dict:
     )
 
 
+def _aggregate_trades(trades: list[dict]) -> dict:
+    """trade_logエントリのリストを直接集計。"""
+    n = len(trades)
+    if n == 0:
+        return dict(trades=0, wins=0, win_rate=0.0, pf=0.0, total_pnl=0.0,
+                    avg_win=0.0, avg_loss=0.0, reasons={})
+    wins   = sum(1 for t in trades if t.get("pnl", 0) > 0)
+    pnl_w  = [t["pnl"] for t in trades if t.get("pnl", 0) > 0]
+    pnl_l  = [t["pnl"] for t in trades if t.get("pnl", 0) < 0]
+    gp     = sum(pnl_w) if pnl_w else 0.0
+    gl     = sum(abs(v) for v in pnl_l) if pnl_l else 0.0
+    reasons: dict[str, int] = defaultdict(int)
+    for t in trades:
+        reasons[t.get("reason", "?")] += 1
+    return dict(
+        trades=n, wins=wins,
+        win_rate=wins / n * 100,
+        pf=gp / gl if gl > 0 else float("inf"),
+        total_pnl=sum(t.get("pnl", 0) for t in trades),
+        avg_win=gp / len(pnl_w) if pnl_w else 0.0,
+        avg_loss=sum(pnl_l) / len(pnl_l) if pnl_l else 0.0,
+        reasons=dict(reasons),
+    )
+
+
+def _incremental_analysis(
+    all_results: dict[float, list],
+    caps: list[float],
+) -> tuple[list[dict], list[dict]]:
+    """
+    各CAP の未約定数と、連続するCAP間の追加約定損益を分析。
+
+    Returns:
+        cap_infos: [{cap, label, signals, trades, missed, missed_pct}]
+        pairs:     [{label, n_added, agg}]  (追加約定分)
+    """
+    def _key_map(results):
+        m: dict = {}
+        for r in results:
+            k = (r.get("symbol"), r.get("strategy") or r.get("strategy_name", ""))
+            m[k] = r
+        return m
+
+    # ── 未約定数 ──
+    cap_infos = []
+    ref_signals = None
+    for cap in caps:
+        results = all_results.get(cap, [])
+        sigs  = sum(r.get("signals", 0) for r in results)
+        fills = sum(r.get("trades",  0) for r in results)
+        if ref_signals is None:
+            ref_signals = sigs
+        missed = ref_signals - fills
+        cap_infos.append(dict(
+            cap=cap, label=_cap_label(cap),
+            signals=ref_signals, trades=fills,
+            missed=missed,
+            missed_pct=missed / ref_signals * 100 if ref_signals else 0.0,
+        ))
+
+    # ── 追加約定分析 ──
+    pairs = []
+    for i in range(len(caps) - 1):
+        cap_A, cap_B = caps[i], caps[i + 1]
+        map_A = _key_map(all_results.get(cap_A, []))
+        map_B = _key_map(all_results.get(cap_B, []))
+
+        added: list[dict] = []
+        for key in set(map_A) | set(map_B):
+            r_A = map_A.get(key, {})
+            r_B = map_B.get(key, {})
+            dates_A = {t.get("entry_dt") for t in r_A.get("trade_log", [])}
+            for t in r_B.get("trade_log", []):
+                if t.get("entry_dt") not in dates_A:
+                    added.append(t)
+
+        pairs.append(dict(
+            label=f"{_cap_label(cap_A)} → {_cap_label(cap_B)}",
+            cap_A=cap_A, cap_B=cap_B,
+            agg=_aggregate_trades(added),
+        ))
+
+    return cap_infos, pairs
+
+
 def _strategy_breakdown(results: list[dict]) -> dict[str, dict]:
     by_strat: dict[str, list] = defaultdict(list)
     for r in results:
@@ -405,6 +490,77 @@ def _build_by_signal_html(
                 rows_reason += f'<td class="{extra}">{n}件 ({n/t*100:.1f}%)</td>'
             rows_reason += "</tr>\n"
 
+        # ── 未約定・追加約定分析 ──
+        cap_raw = cfg.get("cap_raw", {})
+        missed_html = ""
+        incremental_html = ""
+        if cap_raw:
+            cap_infos, pairs = _incremental_analysis(cap_raw, caps)
+
+            # 未約定テーブル
+            missed_rows = ""
+            for ci in cap_infos:
+                cur_mark = "<br><small style='color:#aaa'>(現行)</small>" if ci["cap"] == cur_cap else ""
+                row_s = ' style="background:#1a3050"' if ci["cap"] == cur_cap else ""
+                missed_cls = "neg" if ci["missed_pct"] > 30 else ("" if ci["missed_pct"] > 15 else "pos")
+                missed_rows += (
+                    f"<tr{row_s}>"
+                    f"<td><b>{ci['label']}</b>{cur_mark}</td>"
+                    f"<td>{ci['signals']}</td>"
+                    f"<td>{ci['trades']}</td>"
+                    f'<td class="{missed_cls}">{ci["missed"]}</td>'
+                    f'<td class="{missed_cls}">{ci["missed_pct"]:.1f}%</td>'
+                    f"</tr>\n"
+                )
+            missed_html = f"""
+<h3 style="margin-top:20px">未約定シグナル数（スキップ）</h3>
+<table>
+<tr><th>指値上限</th><th>シグナル数</th><th>約定数</th><th>未約定数</th><th>未約定率</th></tr>
+{missed_rows}</table>"""
+
+            # 追加約定テーブル
+            inc_rows = ""
+            for p in pairs:
+                a = p["agg"]
+                t, wr, pf_, pn, aw, al = (
+                    a["trades"], a["win_rate"], a["pf"],
+                    a["total_pnl"], a["avg_win"], a["avg_loss"],
+                )
+                if t == 0:
+                    inc_rows += (
+                        f"<tr><td>{p['label']}</td>"
+                        f'<td class="dim" colspan="6">追加約定なし</td></tr>\n'
+                    )
+                    continue
+                pnl_cls = "pos" if pn > 0 else "neg"
+                pf_cls  = "pos" if pf_ >= 1.5 else ("neg" if pf_ < 1.0 else "")
+                # 決済理由
+                tgt = a["reasons"].get("目標達成", 0)
+                stp = a["reasons"].get("損切り",   0)
+                inc_rows += (
+                    f"<tr>"
+                    f"<td>{p['label']}</td>"
+                    f"<td>{t}</td>"
+                    f"<td>{wr:.1f}%</td>"
+                    f'<td class="{pf_cls}">{_pf_str(pf_)}</td>'
+                    f'<td class="{pnl_cls}">{pn:+,.0f}円</td>'
+                    f"<td>{aw:+,.0f}円</td>"
+                    f"<td>{al:+,.0f}円</td>"
+                    f"<td>{tgt}件 / {stp}件</td>"
+                    f"</tr>\n"
+                )
+            incremental_html = f"""
+<h3 style="margin-top:16px">指値上限を広げた場合の追加約定分析</h3>
+<p style="font-size:.82em;color:#7090b0;margin:4px 0 8px">
+  例:「+3%→+5%」= +3%では約定しなかったが+5%なら約定した取引だけ抜き出した成績
+</p>
+<table>
+<tr>
+  <th>上限拡大</th><th>追加約定数</th><th>勝率</th><th>PF</th>
+  <th>追加損益</th><th>平均利益/勝</th><th>平均損失/負</th><th>目標達成/損切り</th>
+</tr>
+{inc_rows}</table>"""
+
         sections += f"""
 <h2>{cfg['label']} <small style="color:#7090b0;font-weight:normal;font-size:.75em">({n_sym}銘柄)</small></h2>
 <table>
@@ -414,6 +570,9 @@ def _build_by_signal_html(
 <table>
 <tr><th>決済理由</th>{header_cells}</tr>
 {rows_reason}</table>
+{missed_html}
+{incremental_html}
+<hr style="border:none;border-top:1px solid #2a3a5c;margin:32px 0">
 """
 
     return f"""<!DOCTYPE html>
@@ -476,6 +635,78 @@ tr:hover { background:#1e2d4a; }
 .hi   { color:#f1c40f; font-weight:bold; }
 .dim  { color:#6080a0; }
 """
+
+def _build_incremental_section(
+    all_results: dict[float, list],
+    caps: list[float],
+    cur_cap: float,
+    header_cells: str,
+) -> str:
+    """未約定テーブル + 追加約定分析テーブルのHTMLを生成。"""
+    cap_infos, pairs = _incremental_analysis(all_results, caps)
+
+    # ── 未約定テーブル ──
+    missed_rows = ""
+    for ci in cap_infos:
+        row_s    = ' style="background:#1a3050"' if ci["cap"] == cur_cap else ""
+        cur_mark = "<br><small style='color:#aaa'>(現行)</small>" if ci["cap"] == cur_cap else ""
+        mc       = "neg" if ci["missed_pct"] > 30 else ("" if ci["missed_pct"] > 15 else "pos")
+        missed_rows += (
+            f"<tr{row_s}><td><b>{ci['label']}</b>{cur_mark}</td>"
+            f"<td>{ci['signals']}</td>"
+            f"<td>{ci['trades']}</td>"
+            f'<td class="{mc}">{ci["missed"]}</td>'
+            f'<td class="{mc}">{ci["missed_pct"]:.1f}%</td>'
+            f"</tr>\n"
+        )
+
+    # ── 追加約定テーブル ──
+    inc_rows = ""
+    for p in pairs:
+        a = p["agg"]
+        t, wr, pf_, pn, aw, al = (
+            a["trades"], a["win_rate"], a["pf"],
+            a["total_pnl"], a["avg_win"], a["avg_loss"],
+        )
+        if t == 0:
+            inc_rows += (f"<tr><td>{p['label']}</td>"
+                         f'<td class="dim" colspan="7">追加約定なし</td></tr>\n')
+            continue
+        pnl_cls = "pos" if pn > 0 else "neg"
+        pf_cls  = "pos" if pf_ >= 1.5 else ("neg" if pf_ < 1.0 else "")
+        tgt = a["reasons"].get("目標達成", 0)
+        stp = a["reasons"].get("損切り",   0)
+        inc_rows += (
+            f"<tr>"
+            f"<td>{p['label']}</td>"
+            f"<td>{t}</td>"
+            f"<td>{wr:.1f}%</td>"
+            f'<td class="{pf_cls}">{_pf_str(pf_)}</td>'
+            f'<td class="{pnl_cls}">{pn:+,.0f}円</td>'
+            f"<td>{aw:+,.0f}円</td>"
+            f"<td>{al:+,.0f}円</td>"
+            f"<td>{tgt}件 / {stp}件</td>"
+            f"</tr>\n"
+        )
+
+    return f"""
+<h2>未約定シグナル数</h2>
+<table>
+<tr><th>指値上限</th><th>シグナル数</th><th>約定数</th><th>未約定数</th><th>未約定率</th></tr>
+{missed_rows}</table>
+
+<h2>指値上限を広げた場合の追加約定分析</h2>
+<p style="font-size:.85em;color:#7090b0;margin-top:4px">
+  「A→B」= Aでは約定しなかったが、BのCAPまで広げると約定した取引の成績だけを抜き出した結果。<br>
+  これがプラスなら上限を広げるメリットあり。マイナスなら「約定数は増えるが割に合わない」。
+</p>
+<table>
+<tr>
+  <th>上限拡大</th><th>追加約定数</th><th>勝率</th><th>PF</th>
+  <th>追加損益</th><th>平均利益/勝</th><th>平均損失/負</th><th>目標達成/損切り</th>
+</tr>
+{inc_rows}</table>"""
+
 
 def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
                 caps: list[float], days: int,
@@ -763,6 +994,8 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 {rows_reason}
 </table>
 
+{_build_incremental_section(all_results, caps, cur_cap, header_cells) if all_results else ""}
+
 <h2>戦略別 詳細比較</h2>
 <p style="font-size:.85em;color:#7090b0;margin-top:4px">
   黄色セル = 各戦略で最も総損益が高いCAP値　青色セル = 現行設定(+3%)
@@ -880,11 +1113,14 @@ def main():
                 continue
             print(f"▶ [{cfg['short']}] {len(cfg_tasks)}銘柄 × {len(caps)}パターン")
             cap_results: dict[float, dict] = {}
+            cap_raw: dict[float, list]    = {}
             for cap in caps:
                 lbl = f"{cfg['short']} {_cap_label(cap)}"
                 res = _run_all(cfg_tasks, cap=cap, workers=args.workers, label=lbl)
                 cap_results[cap] = _aggregate(res)
-            sig_data_list.append({**cfg, "cap_results": cap_results, "n_sym": len(cfg_tasks)})
+                cap_raw[cap]     = res
+            sig_data_list.append({**cfg, "cap_results": cap_results,
+                                   "cap_raw": cap_raw, "n_sym": len(cfg_tasks)})
         # --by-signal 時は all_results も tasks ベースで計算（print_summary 用）
         all_results: dict[float, list] = {}
         for cap in caps:
