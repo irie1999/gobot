@@ -292,12 +292,12 @@ def _build_signal_configs(days: int) -> list[dict]:
 
 
 def _build_by_signal_html(
-    sig_data: list[dict],   # [{label, short, cap_results: {cap: agg}}]
+    sig_data: list[dict],   # [{label, short, cap_results: {cap: agg}, n_sym}]
     caps: list[float],
     days: int,
 ) -> str:
-    today = date.today().isoformat()
-    labels = [_cap_label(c) for c in caps]
+    today   = date.today().isoformat()
+    labels  = [_cap_label(c) for c in caps]
     cur_cap = 0.03
 
     def _th(c, lbl):
@@ -305,50 +305,115 @@ def _build_by_signal_html(
         note  = '<br><small style="color:#aaa">(現行)</small>' if c == cur_cap else ""
         return f"<th{style}>{lbl}{note}</th>"
 
+    def _cell(val, cap, best_c, cls=""):
+        extra = " best" if cap == best_c else (" cur" if cap == cur_cap else "")
+        return f'<td class="{cls}{extra}">{val}</td>'
+
+    def _pnl_cell(v, cap, best_c):
+        cls   = "pos" if v > 0 else "neg"
+        extra = " best" if cap == best_c else (" cur" if cap == cur_cap else "")
+        return f'<td class="{cls}{extra}">{v:+,.0f}円</td>'
+
+    def _risk_cell(val, cap, best_c, cls="neg"):
+        extra = " best" if cap == best_c else (" cur" if cap == cur_cap else "")
+        return f'<td class="{cls} {extra}">{val}</td>'
+
     sections = ""
     for cfg in sig_data:
         cap_res = cfg["cap_results"]   # {cap: agg_dict}
-        best_c  = max(caps, key=lambda c: cap_res.get(c, {}).get("total_pnl", 0))
         n_sym   = cfg["n_sym"]
 
+        best_pnl  = max(caps, key=lambda c: cap_res.get(c, {}).get("total_pnl", 0))
+        best_dd   = min(caps, key=lambda c: cap_res.get(c, {}).get("max_drawdown", 1e12))
+        best_cons = min(caps, key=lambda c: cap_res.get(c, {}).get("max_consec_losses", 999))
+        best_loss = max(caps, key=lambda c: cap_res.get(c, {}).get("avg_loss", -1e12))
+
+        header_cells = "".join(_th(c, lbl) for c, lbl in zip(caps, labels))
+
         rows = ""
+        # ── 利益系 ──
+        for metric, key, fmt in [
+            ("約定数",         "trades",    lambda v: f"{v:,}"),
+            ("ギャップ約定数", "gap_trades", lambda v: f"{v:,}"),
+            ("約定率",         "fill_rate",  lambda v: f"{v:.1f}%"),
+            ("勝率",           "win_rate",   lambda v: f"{v:.1f}%"),
+        ]:
+            best_c = max(caps, key=lambda c: cap_res.get(c, {}).get(key, 0))
+            rows += f"<tr><td>{metric}</td>"
+            rows += "".join(_cell(fmt(cap_res.get(c, {}).get(key, 0)), c, best_c) for c in caps)
+            rows += "</tr>\n"
+
+        # PF
+        best_c = max(caps, key=lambda c: cap_res.get(c, {}).get("pf", 0))
+        rows += "<tr><td>PF</td>"
         for c in caps:
-            a   = cap_res.get(c, {})
-            t   = a.get("trades", 0)
-            w   = a.get("wins", 0)
-            wr  = a.get("win_rate", 0.0)
-            pf  = a.get("pf", 0.0)
-            pn  = a.get("total_pnl", 0.0)
-            pf_s = _pf_str(pf)
-            lbl = _cap_label(c)
+            v = cap_res.get(c, {}).get("pf", 0.0)
+            cls = "pos" if v >= 1.5 else ("neg" if v < 1.0 else "")
+            extra = " best" if c == best_c else (" cur" if c == cur_cap else "")
+            rows += f'<td class="{cls}{extra}">{_pf_str(v)}</td>'
+        rows += "</tr>\n"
 
-            cur_mark = "<br><small style='color:#aaa'>(現行)</small>" if c == cur_cap else ""
-            if c == cur_cap:
-                row_style = ' style="background:#1a3050"'
-            elif c == best_c:
-                row_style = ' style="background:#0a3020"'
-            else:
-                row_style = ""
-            pnl_cls = "pos" if pn > 0 else "neg"
-            pf_cls  = "pos" if pf >= 1.5 else ("neg" if pf < 1.0 else "")
+        # 総損益
+        rows += "<tr><td><b>総損益</b></td>"
+        rows += "".join(_pnl_cell(cap_res.get(c, {}).get("total_pnl", 0), c, best_pnl) for c in caps)
+        rows += "</tr>\n"
 
-            if t == 0:
-                rows += (f"<tr{row_style}><td><b>{lbl}</b>{cur_mark}</td>"
-                         f'<td class="dim" colspan="5">データなし</td></tr>\n')
-            else:
-                rows += (f"<tr{row_style}>"
-                         f"<td><b>{lbl}</b>{cur_mark}</td>"
-                         f"<td>{t}</td><td>{w}</td>"
-                         f"<td>{wr:.1f}%</td>"
-                         f'<td class="{pf_cls}">{pf_s}</td>'
-                         f'<td class="{pnl_cls}">{pn:+,.0f}円</td>'
-                         f"</tr>\n")
+        rows += "<tr><td>平均利益/勝ち取引</td>"
+        best_c = max(caps, key=lambda c: cap_res.get(c, {}).get("avg_win", 0))
+        rows += "".join(_pnl_cell(cap_res.get(c, {}).get("avg_win", 0), c, best_c) for c in caps)
+        rows += "</tr>\n"
+
+        # ── リスク指標 ──
+        rows += '<tr><td colspan="99" style="background:#2a1010;color:#e07070;font-size:.8em;padding:4px 14px">▼ リスク指標（小さいほど良い）</td></tr>\n'
+
+        rows += "<tr><td>平均損失/負け取引</td>"
+        for c in caps:
+            v = cap_res.get(c, {}).get("avg_loss", 0.0)
+            extra = " best" if c == best_loss else (" cur" if c == cur_cap else "")
+            rows += f'<td class="neg {extra}">{v:+,.0f}円</td>'
+        rows += "</tr>\n"
+
+        rows += "<tr><td>損益レシオ (W/L)</td>"
+        best_c = max(caps, key=lambda c: cap_res.get(c, {}).get("rr_ratio", 0))
+        rows += "".join(_cell(f"{cap_res.get(c,{}).get('rr_ratio',0):.2f}", c, best_c) for c in caps)
+        rows += "</tr>\n"
+
+        rows += "<tr><td>最大ドローダウン</td>"
+        for c in caps:
+            v = cap_res.get(c, {}).get("max_drawdown", 0.0)
+            extra = " best" if c == best_dd else (" cur" if c == cur_cap else "")
+            rows += f'<td class="neg {extra}">{v:,.0f}円</td>'
+        rows += "</tr>\n"
+
+        rows += "<tr><td>最大連続損切り</td>"
+        for c in caps:
+            v = cap_res.get(c, {}).get("max_consec_losses", 0)
+            extra = " best" if c == best_cons else (" cur" if c == cur_cap else "")
+            rows += f'<td class="neg {extra}">{v}連敗</td>'
+        rows += "</tr>\n"
+
+        # ── 決済理由 ──
+        rows_reason = ""
+        for reason in ["目標達成", "損切り", "タイムカット"]:
+            best_c = max(caps, key=lambda c: cap_res.get(c, {}).get("reasons", {}).get(reason, 0))
+            rows_reason += f"<tr><td>{reason}</td>"
+            for c in caps:
+                a  = cap_res.get(c, {})
+                n  = a.get("reasons", {}).get(reason, 0)
+                t  = a.get("trades") or 1
+                extra = " best" if c == best_c else (" cur" if c == cur_cap else "")
+                rows_reason += f'<td class="{extra}">{n}件 ({n/t*100:.1f}%)</td>'
+            rows_reason += "</tr>\n"
 
         sections += f"""
-<h3>{cfg['label']} <small style="color:#7090b0;font-weight:normal">({n_sym}銘柄)</small></h3>
+<h2>{cfg['label']} <small style="color:#7090b0;font-weight:normal;font-size:.75em">({n_sym}銘柄)</small></h2>
 <table>
-<tr><th>指値上限</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>総損益</th></tr>
+<tr><th>項目</th>{header_cells}</tr>
 {rows}</table>
+<h3 style="margin-top:12px">決済理由内訳</h3>
+<table>
+<tr><th>決済理由</th>{header_cells}</tr>
+{rows_reason}</table>
 """
 
     return f"""<!DOCTYPE html>
@@ -363,9 +428,8 @@ def _build_by_signal_html(
 <div class="info">
   期間: 直近 {days}日 ｜ モード: {_MODE} ｜ 生成日: {today}<br>
   比較パターン: {" / ".join(labels)}<br>
-  緑セル = 各設定で最も総損益が高い設定　青セル = 現行(+3%)
+  黄色ハイライト: 各指標で最良のCAP値 ／ 青色: 現行設定(+3%) ／ リスク指標は値が小さい行が黄色
 </div>
-<h2>シグナル設定別 詳細比較</h2>
 {sections}
 </body>
 </html>"""
