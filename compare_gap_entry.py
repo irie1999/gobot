@@ -25,6 +25,7 @@ Usage:
   python compare_gap_entry.py --caps 0.01 0.03 0.05 0.10 --html
   python compare_gap_entry.py --aggressive --html
   python compare_gap_entry.py --days 180 --html
+  python compare_gap_entry.py --all-watchlists --html     # 全WATCHLIST統合(~150銘柄)
 """
 from __future__ import annotations
 
@@ -61,9 +62,11 @@ def _parse():
     p.add_argument("--caps",    type=float, nargs="+", default=DEFAULT_CAPS,
                    metavar="CAP",
                    help="指値上限のリスト (例: 0.01 0.03 0.05 9.99)。9.99=成行")
-    p.add_argument("--aggressive", action="store_true")
-    p.add_argument("--html",       action="store_true")
-    p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--aggressive",      action="store_true")
+    p.add_argument("--html",            action="store_true")
+    p.add_argument("--no-browser",      action="store_true")
+    p.add_argument("--all-watchlists",  action="store_true",
+                   help="全WATCHLISTを統合して検証 (stop/brk × conservative/aggressive × WF)")
     return p.parse_args()
 
 
@@ -569,15 +572,61 @@ def main():
     args = _parse()
     caps = sorted(set(args.caps))
 
-    tasks = []
-    for sym, name, strat in _stop.WATCHLIST:
-        fn, em, sm, tm = _stop.STRATEGY_PARAMS[strat]
-        tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
-    for sym, name, strat in _brk.WATCHLIST:
-        fn, em, sm, tm = _brk.STRATEGY_PARAMS[strat]
-        tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
+    # ── タスクリスト構築 ──────────────────────────────────────────────
+    if getattr(args, "all_watchlists", False):
+        # 全WATCHLIST(stop/brk × base + WF conservative + WF aggressive)を統合・重複除去
+        try:
+            import run_signals_wf as _wf
+            wf_stop_lists = [
+                _wf._STOP_WATCHLIST_CONSERVATIVE,
+                _wf._STOP_WATCHLIST_AGGRESSIVE,
+            ]
+            wf_brk_lists = [
+                _wf._BRK_WATCHLIST_CONSERVATIVE,
+                _wf._BRK_WATCHLIST_AGGRESSIVE,
+            ]
+        except ImportError:
+            wf_stop_lists = []
+            wf_brk_lists  = []
 
-    print(f"モード: {_MODE}  期間: {args.days}日  銘柄数: {len(tasks)}")
+        seen: set[tuple[str, str]] = set()
+        raw_tasks: list[tuple] = []
+
+        def _add_stop(wlist):
+            for sym, name, strat in wlist:
+                key = (sym, strat)
+                if key not in seen:
+                    seen.add(key)
+                    fn, em, sm, tm = _stop.STRATEGY_PARAMS[strat]
+                    raw_tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
+
+        def _add_brk(wlist):
+            for sym, name, strat in wlist:
+                key = (sym, strat)
+                if key not in seen:
+                    seen.add(key)
+                    fn, em, sm, tm = _brk.STRATEGY_PARAMS[strat]
+                    raw_tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
+
+        _add_stop(_stop.WATCHLIST)
+        for wl in wf_stop_lists:
+            _add_stop(wl)
+        _add_brk(_brk.WATCHLIST)
+        for wl in wf_brk_lists:
+            _add_brk(wl)
+
+        tasks = raw_tasks
+        print(f"モード: {_MODE}  期間: {args.days}日  銘柄数: {len(tasks)} (全WATCHLIST統合)")
+    else:
+        tasks = []
+        for sym, name, strat in _stop.WATCHLIST:
+            fn, em, sm, tm = _stop.STRATEGY_PARAMS[strat]
+            tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
+        for sym, name, strat in _brk.WATCHLIST:
+            fn, em, sm, tm = _brk.STRATEGY_PARAMS[strat]
+            tasks.append((sym, name, strat, args.days, fn, em, sm, tm))
+
+        print(f"モード: {_MODE}  期間: {args.days}日  銘柄数: {len(tasks)}")
     print(f"比較パターン: {[_cap_label(c) for c in caps]}")
     print()
 
