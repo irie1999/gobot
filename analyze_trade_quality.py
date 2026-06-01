@@ -373,7 +373,7 @@ def build_html(analysis, runs, days, mode) -> str:
         pf  = gp / gl if gl > 0 else float("inf")
         pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
         avg = sum(d["all_pnl"]) / total
-        color = "#27ae60" if wr >= 70 else "#f39c12" if wr >= 55 else "#e74c3c"
+        color = "#2ecc71" if wr >= 70 else "#f39c12" if wr >= 55 else "#e74c3c"
         rows_fine += f"""
 <tr>
   <td>{lo}–{hi}点</td>
@@ -419,20 +419,25 @@ def build_html(analysis, runs, days, mode) -> str:
 <meta charset="utf-8">
 <title>トレード品質分析 {today}</title>
 <style>
-body {{ font-family: 'Helvetica Neue', sans-serif; margin: 20px; background: #f8f9fa; color: #222; }}
-h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 8px; }}
-h2 {{ color: #2c3e50; margin-top: 40px; border-left: 4px solid #3498db; padding-left: 10px; }}
-h3 {{ color: #555; margin-top: 24px; }}
-.info {{ background: #fff; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px;
-         border: 1px solid #ddd; font-size: 0.9em; }}
-table {{ border-collapse: collapse; width: 100%; margin-top: 12px; background: #fff;
-         border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
-th {{ background: #2c3e50; color: #fff; padding: 8px 12px; text-align: center; font-size: .85em; }}
-td {{ padding: 7px 12px; border-bottom: 1px solid #eee; text-align: right; font-size: .88em; }}
+body {{ font-family: 'Helvetica Neue', sans-serif; margin: 24px 32px;
+        background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ color: #e0e0e0; border-bottom: 3px solid #3498db; padding-bottom: 8px; }}
+h2 {{ color: #e0e0e0; margin-top: 40px; border-left: 4px solid #3498db;
+      padding-left: 10px; font-size: 1.1em; }}
+h3 {{ color: #a0b8d0; margin-top: 24px; font-size: 1em; }}
+.info {{ background: #16213e; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px;
+         border: 1px solid #2a3a5c; font-size: .9em; color: #b0b8c8; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 12px; background: #16213e;
+         border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.4); }}
+th {{ background: #0f3460; color: #e0e0e0; padding: 8px 14px; text-align: center;
+      font-size: .83em; white-space: nowrap; }}
+td {{ padding: 7px 14px; border-bottom: 1px solid #2a3a5c; text-align: right;
+      font-size: .86em; color: #d0d8e8; white-space: nowrap; }}
 td:first-child {{ text-align: left; }}
-tr:hover {{ background: #f0f8ff; }}
-.pos {{ color: #27ae60; font-weight: bold; }}
+tr:hover {{ background: #1e2d4a; }}
+.pos {{ color: #2ecc71; font-weight: bold; }}
 .neg {{ color: #e74c3c; font-weight: bold; }}
+p {{ color: #7090b0; font-size: .9em; }}
 </style>
 </head>
 <body>
