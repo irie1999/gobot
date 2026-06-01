@@ -104,10 +104,46 @@ def _run_all(tasks, cap: float, workers: int, label: str) -> list[dict]:
 
 
 # ── 集計 ──────────────────────────────────────────────────────────────
+def _calc_max_drawdown(trade_log: list[dict]) -> float:
+    """全トレードを決済日順に並べて最大ドローダウン(円)を計算。"""
+    if not trade_log:
+        return 0.0
+    logs = sorted(trade_log, key=lambda t: t.get("exit_dt") or date.min)
+    peak = cum = 0.0
+    max_dd = 0.0
+    for t in logs:
+        cum += t["pnl"]
+        if cum > peak:
+            peak = cum
+        dd = peak - cum
+        if dd > max_dd:
+            max_dd = dd
+    return max_dd
+
+
+def _calc_max_consec_losses(trade_log: list[dict]) -> int:
+    """最大連続損切り数。"""
+    if not trade_log:
+        return 0
+    logs = sorted(trade_log, key=lambda t: t.get("exit_dt") or date.min)
+    max_streak = cur = 0
+    for t in logs:
+        if t["pnl"] < 0:
+            cur += 1
+            max_streak = max(max_streak, cur)
+        else:
+            cur = 0
+    return max_streak
+
+
 def _aggregate(results: list[dict]) -> dict:
     trades = signals = wins = 0
     gross_p = gross_l = total_pnl = total_fee = 0.0
     reasons: dict[str, int] = defaultdict(int)
+    all_logs: list[dict] = []
+    pnl_wins:  list[float] = []
+    pnl_losses: list[float] = []
+
     for r in results:
         signals   += r.get("signals", 0)
         trades    += r.get("trades", 0)
@@ -115,20 +151,35 @@ def _aggregate(results: list[dict]) -> dict:
         total_pnl += r.get("total_pnl", 0)
         total_fee += r.get("total_fee", 0)
         for t in r.get("trade_log", []):
+            all_logs.append(t)
             if t["pnl"] > 0:
                 gross_p += t["pnl"]
+                pnl_wins.append(t["pnl"])
             else:
                 gross_l += abs(t["pnl"])
+                pnl_losses.append(t["pnl"])
             reasons[t.get("reason", "?")] += 1
 
     pf       = gross_p / gross_l if gross_l > 0 else float("inf")
     win_rate = wins / trades * 100 if trades > 0 else 0.0
     fill_r   = trades / signals * 100 if signals > 0 else 0.0
+    avg_win  = sum(pnl_wins)  / len(pnl_wins)  if pnl_wins  else 0.0
+    avg_loss = sum(pnl_losses) / len(pnl_losses) if pnl_losses else 0.0
+    rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
+    max_dd   = _calc_max_drawdown(all_logs)
+    max_cons = _calc_max_consec_losses(all_logs)
+    # ギャップ約定トレード数 (entry_p > order_limit の近似: entry_p > limit_price * 1.001)
+    gap_trades = sum(1 for t in all_logs
+                     if t.get("entry_p", 0) > t.get("order_limit", 0) * 1.001)
+
     return dict(
         signals=signals, trades=trades, wins=wins,
         win_rate=win_rate, pf=pf,
         total_pnl=total_pnl, total_fee=total_fee,
         fill_rate=fill_r,
+        avg_win=avg_win, avg_loss=avg_loss, rr_ratio=rr_ratio,
+        max_drawdown=max_dd, max_consec_losses=max_cons,
+        gap_trades=gap_trades,
         reasons=dict(reasons),
     )
 
@@ -204,12 +255,23 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
         return f"<th{style}>{lbl}{note}</th>"
     header_cells = "".join(_th(c, lbl) for c, lbl in zip(caps, labels))
 
+    # 損失系は値が小さい方が良い → best_cap を逆転
+    best_cap_dd   = min(all_agg, key=lambda c: all_agg[c]["max_drawdown"])
+    best_cap_cons = min(all_agg, key=lambda c: all_agg[c]["max_consec_losses"])
+    best_cap_loss = max(all_agg, key=lambda c: all_agg[c]["avg_loss"])  # avg_loss は負値、大きい方が損失小
+
+    def cell_risk(val, cap, best_c):
+        extra = " best" if cap == best_c else (" cur" if cap == cur_cap else "")
+        return f'<td class="{extra}">{val}</td>'
+
     rows_summary = ""
+    # ── 利益系 ──
     for metric, fmt_fn in [
-        ("約定数",  lambda c: f"{all_agg[c]['trades']:,}"),
-        ("約定率",  lambda c: f"{all_agg[c]['fill_rate']:.1f}%"),
-        ("勝率",    lambda c: f"{all_agg[c]['win_rate']:.1f}%"),
-        ("PF",      lambda c: _pf_str(all_agg[c]['pf'])),
+        ("約定数",           lambda c: f"{all_agg[c]['trades']:,}"),
+        ("ギャップ約定数",   lambda c: f"{all_agg[c]['gap_trades']:,}"),
+        ("約定率",           lambda c: f"{all_agg[c]['fill_rate']:.1f}%"),
+        ("勝率",             lambda c: f"{all_agg[c]['win_rate']:.1f}%"),
+        ("PF",               lambda c: _pf_str(all_agg[c]['pf'])),
     ]:
         rows_summary += f"<tr><td>{metric}</td>"
         rows_summary += "".join(cell(fmt_fn(c), c) for c in caps)
@@ -217,6 +279,38 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 
     rows_summary += "<tr><td><b>総損益</b></td>"
     rows_summary += "".join(pnl_cell(all_agg[c]["total_pnl"], c) for c in caps)
+    rows_summary += "</tr>\n"
+
+    rows_summary += "<tr><td>平均利益/勝ち取引</td>"
+    rows_summary += "".join(pnl_cell(all_agg[c]["avg_win"], c) for c in caps)
+    rows_summary += "</tr>\n"
+
+    # ── 損失系 (セクション区切り) ──
+    rows_summary += '<tr><td colspan="99" style="background:#2a1010;color:#e07070;font-size:.8em;padding:4px 14px">▼ リスク指標（小さいほど良い）</td></tr>\n'
+
+    rows_summary += "<tr><td>平均損失/負け取引</td>"
+    for c in caps:
+        v = all_agg[c]["avg_loss"]
+        extra = " best" if c == best_cap_loss else (" cur" if c == cur_cap else "")
+        rows_summary += f'<td class="neg{" " + extra if extra else ""}">{v:+,.0f}円</td>'
+    rows_summary += "</tr>\n"
+
+    rows_summary += "<tr><td>損益レシオ (W/L)</td>"
+    rows_summary += "".join(cell(f"{all_agg[c]['rr_ratio']:.2f}", c) for c in caps)
+    rows_summary += "</tr>\n"
+
+    rows_summary += "<tr><td>最大ドローダウン</td>"
+    for c in caps:
+        v = all_agg[c]["max_drawdown"]
+        extra = " best" if c == best_cap_dd else (" cur" if c == cur_cap else "")
+        rows_summary += f'<td class="neg{" " + extra if extra else ""}">{v:,.0f}円</td>'
+    rows_summary += "</tr>\n"
+
+    rows_summary += "<tr><td>最大連続損切り</td>"
+    for c in caps:
+        v = all_agg[c]["max_consec_losses"]
+        extra = " best" if c == best_cap_cons else (" cur" if c == cur_cap else "")
+        rows_summary += f'<td class="neg{" " + extra if extra else ""}">{v}連敗</td>'
     rows_summary += "</tr>\n"
 
     # ── 決済理由テーブル ──
@@ -270,12 +364,13 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 &nbsp;&nbsp;指値上限 +5%  = <code>24,150円</code> → 始値が24,150円以下なら約定<br>
 &nbsp;&nbsp;成行(上限なし) = 始値がいくらでも約定（今日はこれが有利だった）<br><br>
 
-<b>ギャップアップ時の動き:</b><br>
-&nbsp;&nbsp;• 始値がギャップアップして指値上限を超える → 現行(+3%)はスキップ、成行は約定<br>
-&nbsp;&nbsp;• ギャップ後に上昇続くなら成行が有利、逆に反落するなら指値の方が有利<br>
-&nbsp;&nbsp;• このレポートは「どの上限設定が1年トータルで最も利益が出たか」を示します<br><br>
+<b>ギャップアップ時の損益への影響:</b><br>
+&nbsp;&nbsp;• ギャップ約定すると損切りラインまでの距離が縮まる（＝リスクが増える）<br>
+&nbsp;&nbsp;&nbsp;&nbsp;例) +5%ギャップ約定 → 損切りまでが実質 -9% でなく -4% になる<br>
+&nbsp;&nbsp;• そのため総損益だけでなく <b>最大ドローダウン・最大連続損切り</b> も重要な比較指標<br>
+&nbsp;&nbsp;• 成行が「利益は多いが損失も大きい」か「リスク込みで有利」かをこのレポートで確認できます<br><br>
 
-<b>黄色ハイライト</b>: 各指標で最も成績の良いCAP値  ／  <b>青色</b>: 現行設定(+3%)
+<b>黄色ハイライト</b>: 各指標で最良のCAP値  ／  <b>青色</b>: 現行設定(+3%)  ／  リスク指標は値が小さい行が黄色
 </div>
 """
 
