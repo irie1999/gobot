@@ -347,29 +347,48 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
             rows_reason += f'<td class="{extra}">{n}件 ({n/t*100:.1f}%)</td>'
         rows_reason += "</tr>\n"
 
-    # ── 戦略別テーブル (総損益のみ) ──
-    all_strats = sorted({s for strat_map in all_strat.values() for s in strat_map})
-    rows_strat = ""
-    for strat in all_strats:
-        rows_strat += f"<tr><td>{strat}</td>"
-        for c in caps:
-            v = all_strat[c].get(strat, {}).get("total_pnl", 0)
-            # この戦略で最大の cap
-            best_for_strat = max(caps, key=lambda x: all_strat[x].get(strat, {}).get("total_pnl", 0))
-            cls = "pos" if v > 0 else "neg"
-            extra = " best" if c == best_for_strat else (" cur" if c == cur_cap else "")
-            rows_strat += f'<td class="{cls}{extra}">{v:+,.0f}円</td>'
-        rows_strat += "</tr>\n"
+    # ── 戦略別 詳細テーブル（行=CAP, 列=指標, 1戦略ごとに1テーブル）──
+    strat_order = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+    all_strats = sorted(
+        {s for strat_map in all_strat.values() for s in strat_map},
+        key=lambda s: strat_order.index(s) if s in strat_order else 99,
+    )
 
-    # 戦略 PF 行
-    rows_pf = ""
-    for strat in all_strats:
-        rows_pf += f"<tr><td>{strat}</td>"
+    def _strat_detail_table(strat: str) -> str:
+        best_c = max(caps, key=lambda c: all_strat[c].get(strat, {}).get("total_pnl", 0))
+        rows = ""
         for c in caps:
-            v = _pf_str(all_strat[c].get(strat, {}).get("pf", 0))
-            extra = " cur" if c == cur_cap else ""
-            rows_pf += f'<td class="{extra}">{v}</td>'
-        rows_pf += "</tr>\n"
+            a    = all_strat[c].get(strat, {})
+            lbl  = _cap_label(c)
+            t    = a.get("trades", 0)
+            w    = a.get("wins", 0)
+            wr   = a.get("win_rate", 0.0)
+            pf   = a.get("pf", 0.0)
+            pn   = a.get("total_pnl", 0.0)
+            pf_s = _pf_str(pf)
+            cur_mark = "<br><small style='color:#aaa'>(現行)</small>" if c == cur_cap else ""
+            row_cls  = ' style="background:#1a3050"' if c == cur_cap else \
+                       (' style="background:#0a3020"' if c == best_c else "")
+            pnl_cls  = "pos" if pn > 0 else "neg"
+            pf_cls   = "pos" if pf >= 1.5 else ("neg" if pf < 1.0 else "")
+            if t == 0:
+                rows += (f"<tr{row_cls}>"
+                         f"<td><b>{lbl}</b>{cur_mark}</td>"
+                         f'<td class="dim" colspan="5">データなし</td></tr>\n')
+            else:
+                rows += (f"<tr{row_cls}>"
+                         f"<td><b>{lbl}</b>{cur_mark}</td>"
+                         f"<td>{t}</td>"
+                         f"<td>{w}</td>"
+                         f"<td>{wr:.1f}%</td>"
+                         f'<td class="{pf_cls}">{pf_s}</td>'
+                         f'<td class="{pnl_cls}">{pn:+,.0f}円</td>'
+                         f"</tr>\n")
+        tag_cls = f"tag-{strat.lower()}"
+        return (f'<h3><span class="tag {tag_cls}" style="font-size:1em;padding:4px 12px">{strat}</span></h3>\n'
+                f"<table>\n"
+                f"<tr><th>指値上限</th><th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>総損益</th></tr>\n"
+                f"{rows}</table>\n")
 
     # ── 銘柄別最適CAP テーブル（戦略別セクション）──
     all_sym_keys = sorted({k for c in caps for k in _symbol_breakdown(all_results[c])})
@@ -519,17 +538,11 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 {rows_reason}
 </table>
 
-<h2>戦略別 総損益</h2>
-<table>
-<tr><th>戦略</th>{header_cells}</tr>
-{rows_strat}
-</table>
-
-<h2>戦略別 PF</h2>
-<table>
-<tr><th>戦略</th>{header_cells}</tr>
-{rows_pf}
-</table>
+<h2>戦略別 詳細比較</h2>
+<p style="font-size:.85em;color:#7090b0;margin-top:4px">
+  黄色セル = 各戦略で最も総損益が高いCAP値　青色セル = 現行設定(+3%)
+</p>
+{"".join(_strat_detail_table(s) for s in all_strats)}
 
 <h2>銘柄別 最適指値上限（戦略別）</h2>
 <p style="font-size:.85em;color:#7090b0;margin-top:4px">
