@@ -593,9 +593,9 @@ def run(args):
 
             if reason:
                 pnl = (price - pos.entry_p) * pos.qty
-                log.info("★ 決済 [%s] %s %s  %.0f→%.0f  qty=%d  %+,.0f円",
-                         reason, pos.symbol, pos.name,
-                         pos.entry_p, price, pos.qty, pnl)
+                log.info(f"★ 決済 [{reason}] {pos.symbol} {pos.name}  "
+                         f"{pos.entry_p:.0f}→{price:.0f}  qty={pos.qty}  "
+                         f"{pnl:+,.0f}円")
                 if not dry:
                     try:
                         res = client.sell(pos.symbol, pos.qty, margin=margin)
