@@ -191,6 +191,15 @@ def _strategy_breakdown(results: list[dict]) -> dict[str, dict]:
     return {s: _aggregate(rs) for s, rs in sorted(by_strat.items())}
 
 
+def _symbol_breakdown(results: list[dict]) -> dict[tuple, dict]:
+    """(symbol, name, strategy) ごとに集計。"""
+    by_sym: dict[tuple, list] = defaultdict(list)
+    for r in results:
+        key = (r["symbol"], r["name"], r["strategy"])
+        by_sym[key].append(r)
+    return {k: _aggregate(rs) for k, rs in sorted(by_sym.items())}
+
+
 def _pf_str(pf):
     return f"{pf:.2f}" if pf != float("inf") else "∞"
 
@@ -226,12 +235,23 @@ tr:hover { background:#1e2d4a; }
 .cur  { background:#1a2a3a; }
 .pos  { color:#2ecc71; font-weight:bold; }
 .neg  { color:#e74c3c; font-weight:bold; }
+.hi   { color:#f1c40f; font-weight:bold; background:#1a2800 !important; }
+.dim  { color:#4a6080; }
+.tag  { display:inline-block; padding:2px 8px; border-radius:4px; font-size:.8em;
+        font-weight:bold; color:#fff; }
+.tag-macd { background:#2980b9; }
+.tag-a7   { background:#8e44ad; }
+.tag-rsi2 { background:#16a085; }
+.tag-don  { background:#d35400; }
+.tag-vol  { background:#c0392b; }
+.tag-mom  { background:#27ae60; }
 .hi   { color:#f1c40f; font-weight:bold; }
 .dim  { color:#6080a0; }
 """
 
 def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
-                caps: list[float], days: int) -> str:
+                caps: list[float], days: int,
+                all_results: dict[float, list] | None = None) -> str:
     today = date.today().isoformat()
     labels = [_cap_label(c) for c in caps]
     cur_cap = 0.03  # 現行設定
@@ -348,6 +368,39 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
             rows_pf += f'<td class="{extra}">{v}</td>'
         rows_pf += "</tr>\n"
 
+    # ── 銘柄別最適CAP テーブル ──
+    # 全CAP の (symbol,name,strategy) キー一覧
+    all_sym_keys = sorted({k for c in caps for k in _symbol_breakdown(all_results[c])})
+    rows_sym = ""
+    for sym, name, strat in all_sym_keys:
+        pnls = {}
+        for c in caps:
+            sb = _symbol_breakdown(all_results[c])
+            pnls[c] = sb.get((sym, name, strat), {}).get("total_pnl", None)
+
+        valid = {c: v for c, v in pnls.items() if v is not None}
+        if not valid:
+            continue
+        best_c = max(valid, key=lambda c: valid[c])
+        best_pnl = valid[best_c]
+
+        rows_sym += f"<tr>"
+        rows_sym += f'<td>{sym}</td><td>{name}</td>'
+        rows_sym += f'<td style="text-align:center"><span class="tag tag-{strat.lower()}">{strat}</span></td>'
+        rows_sym += f'<td style="color:#f1c40f;font-weight:bold">{_cap_label(best_c)}</td>'
+        rows_sym += f'<td class="{"pos" if best_pnl > 0 else "neg"}">{best_pnl:+,.0f}円</td>'
+        # 各CAPの損益
+        for c in caps:
+            v = pnls.get(c)
+            if v is None:
+                rows_sym += '<td class="dim">─</td>'
+            else:
+                cls  = "pos" if v > 0 else "neg"
+                hi   = " hi" if c == best_c else ""
+                cur  = " cur" if c == cur_cap else ""
+                rows_sym += f'<td class="{cls}{hi}{cur}">{v:+,.0f}</td>'
+        rows_sym += "</tr>\n"
+
     # ── 仕組み解説 ──
     explain = f"""
 <div class="explain">
@@ -414,6 +467,20 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 {rows_pf}
 </table>
 
+<h2>銘柄別 最適指値上限</h2>
+<p style="font-size:.85em;color:#7090b0;margin-top:4px">
+  黄色 = その銘柄で最も総損益が高いCAP値　青 = 現行(+3%)　数値単位: 円
+</p>
+<table>
+<tr>
+  <th>コード</th><th>銘柄名</th><th>戦略</th>
+  <th style="color:#f1c40f">最適CAP</th>
+  <th style="color:#f1c40f">最大損益</th>
+  {"".join(f"<th>{lbl}</th>" for lbl in labels)}
+</tr>
+{rows_sym if all_results else '<tr><td colspan="99" class="dim">銘柄別データなし</td></tr>'}
+</table>
+
 </body>
 </html>"""
 
@@ -474,7 +541,7 @@ def main():
     print_summary(all_agg, caps, args.days)
 
     if args.html:
-        html = _build_html(all_agg, all_strat, caps, args.days)
+        html = _build_html(all_agg, all_strat, caps, args.days, all_results)
         suffix = "_aggressive" if _MODE == "aggressive" else ""
         fname = f"compare_gap_entry{suffix}_{date.today().isoformat()}.html"
         with open(fname, "w", encoding="utf-8") as f:
