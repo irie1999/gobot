@@ -368,48 +368,99 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
             rows_pf += f'<td class="{extra}">{v}</td>'
         rows_pf += "</tr>\n"
 
-    # ── 銘柄別最適CAP テーブル ──
+    # ── 銘柄別最適CAP テーブル（戦略別セクション）──
     all_sym_keys = sorted({k for c in caps for k in _symbol_breakdown(all_results[c])})
-    # cap=cur_cap の取引回数を基準に表示
-    sym_sb_cur = _symbol_breakdown(all_results.get(cur_cap, all_results[caps[0]]))
 
-    rows_sym = ""
-    for sym, name, strat in all_sym_keys:
-        pnls   = {}
+    # 戦略の表示順
+    strat_order = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+    all_strats_sym = sorted({k[2] for k in all_sym_keys},
+                            key=lambda s: strat_order.index(s) if s in strat_order else 99)
+
+    def _sym_row(sym, name, strat):
+        pnls = {}
         trades_by_cap = {}
         for c in caps:
             sb = _symbol_breakdown(all_results[c])
             d  = sb.get((sym, name, strat), {})
             pnls[c]          = d.get("total_pnl", None)
             trades_by_cap[c] = d.get("trades", 0)
-
         valid = {c: v for c, v in pnls.items() if v is not None}
         if not valid:
-            continue
+            return ""
         best_c   = max(valid, key=lambda c: valid[c])
         best_pnl = valid[best_c]
-        # 現行CAPでの取引数（信頼性の目安）
-        n_cur = trades_by_cap.get(cur_cap, 0)
-        reliability = "⚠️ 少" if n_cur <= 3 else ("△" if n_cur <= 6 else "")
-        rel_color   = "#e74c3c" if n_cur <= 3 else ("#f39c12" if n_cur <= 6 else "#2ecc71")
+        n_cur    = trades_by_cap.get(cur_cap, 0)
+        rel_color = "#e74c3c" if n_cur <= 3 else ("#f39c12" if n_cur <= 6 else "#2ecc71")
+        rel_mark  = " ⚠️" if n_cur <= 3 else (" △" if n_cur <= 6 else "")
 
-        rows_sym += f"<tr>"
-        rows_sym += f'<td>{sym}</td><td>{name}</td>'
-        rows_sym += f'<td style="text-align:center"><span class="tag tag-{strat.lower()}">{strat}</span></td>'
-        rows_sym += f'<td style="color:{rel_color};font-weight:bold;text-align:center">{n_cur}回 {reliability}</td>'
-        rows_sym += f'<td style="color:#f1c40f;font-weight:bold;text-align:center">{_cap_label(best_c)}</td>'
-        rows_sym += f'<td class="{"pos" if best_pnl > 0 else "neg"}">{best_pnl:+,.0f}円</td>'
+        row  = "<tr>"
+        row += f'<td>{sym}</td><td>{name}</td>'
+        row += f'<td style="color:{rel_color};font-weight:bold;text-align:center">{n_cur}回{rel_mark}</td>'
+        row += f'<td style="color:#f1c40f;font-weight:bold;text-align:center">{_cap_label(best_c)}</td>'
+        row += f'<td class="{"pos" if best_pnl > 0 else "neg"}">{best_pnl:+,.0f}円</td>'
         for c in caps:
             v = pnls.get(c)
             n = trades_by_cap.get(c, 0)
             if v is None:
-                rows_sym += '<td class="dim">─</td>'
+                row += '<td class="dim">─</td>'
             else:
-                cls = "pos" if v > 0 else "neg"
-                hi  = " hi"  if c == best_c  else ""
+                cls  = "pos" if v > 0 else "neg"
+                hi   = " hi"  if c == best_c  else ""
                 cur2 = " cur" if c == cur_cap else ""
-                rows_sym += f'<td class="{cls}{hi}{cur2}" title="{n}回取引">{v:+,.0f}<br><span style="font-size:.75em;color:#7090b0">{n}回</span></td>'
-        rows_sym += "</tr>\n"
+                row += (f'<td class="{cls}{hi}{cur2}" title="{n}回取引">'
+                        f'{v:+,.0f}<br>'
+                        f'<span style="font-size:.75em;color:#7090b0">{n}回</span></td>')
+        row += "</tr>\n"
+        return row
+
+    def _strat_subtotal(strat):
+        """戦略の合計行。"""
+        total_pnl = {c: 0.0 for c in caps}
+        total_n   = {c: 0   for c in caps}
+        keys = [k for k in all_sym_keys if k[2] == strat]
+        for sym, name, s in keys:
+            for c in caps:
+                sb = _symbol_breakdown(all_results[c])
+                d  = sb.get((sym, name, s), {})
+                total_pnl[c] += d.get("total_pnl", 0)
+                total_n[c]   += d.get("trades", 0)
+        best_c = max(caps, key=lambda c: total_pnl[c])
+        row  = '<tr style="background:#0f2030;font-weight:bold;">'
+        row += f'<td colspan="2" style="color:#7fb3d3">合計 ({len(keys)}銘柄)</td>'
+        row += f'<td style="text-align:center;color:#7090b0">{total_n.get(cur_cap,0)}回</td>'
+        row += f'<td style="color:#f1c40f;text-align:center">{_cap_label(best_c)}</td>'
+        best_pnl = total_pnl[best_c]
+        row += f'<td class="{"pos" if best_pnl>0 else "neg"}">{best_pnl:+,.0f}円</td>'
+        for c in caps:
+            v    = total_pnl[c]
+            cls  = "pos" if v > 0 else "neg"
+            hi   = " hi"  if c == best_c  else ""
+            cur2 = " cur" if c == cur_cap else ""
+            row += f'<td class="{cls}{hi}{cur2}">{v:+,.0f}<br><span style="font-size:.75em;color:#7090b0">{total_n[c]}回</span></td>'
+        row += "</tr>\n"
+        return row
+
+    # 戦略別セクションごとに HTML を構築
+    sym_sections = ""
+    for strat in all_strats_sym:
+        tag_cls  = f"tag-{strat.lower()}"
+        keys_s   = sorted([k for k in all_sym_keys if k[2] == strat])
+        body_rows = "".join(_sym_row(*k) for k in keys_s)
+        if not body_rows:
+            continue
+        sym_sections += f"""
+<h3><span class="tag {tag_cls}" style="font-size:1em;padding:4px 12px">{strat}</span></h3>
+<table>
+<tr>
+  <th>コード</th><th>銘柄名</th>
+  <th>取引回数<br><small style="color:#aaa">(+3%基準)</small></th>
+  <th style="color:#f1c40f">最適CAP</th>
+  <th style="color:#f1c40f">最大損益</th>
+  {"".join(f'<th>{lbl}<br><small style="color:#aaa">損益/回数</small></th>' for lbl in labels)}
+</tr>
+{body_rows}{_strat_subtotal(strat)}
+</table>
+"""
 
     # ── 仕組み解説 ──
     explain = f"""
@@ -477,23 +528,15 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 {rows_pf}
 </table>
 
-<h2>銘柄別 最適指値上限</h2>
+<h2>銘柄別 最適指値上限（戦略別）</h2>
 <p style="font-size:.85em;color:#7090b0;margin-top:4px">
   黄色 = その銘柄で最も総損益が高いCAP値　青 = 現行(+3%)　数値単位: 円<br>
   ⚠️ <span style="color:#e74c3c">赤=取引3回以下</span>（少ない取引数での最適CAPは偶然の可能性が高い）
   　△ <span style="color:#f39c12">橙=取引4〜6回</span>（参考値）
   　<span style="color:#2ecc71">緑=7回以上</span>（信頼度高）
+  　合計行 = その戦略全銘柄の集計
 </p>
-<table>
-<tr>
-  <th>コード</th><th>銘柄名</th><th>戦略</th>
-  <th>取引回数<br><small style="color:#aaa">(+3%基準)</small></th>
-  <th style="color:#f1c40f">最適CAP</th>
-  <th style="color:#f1c40f">最大損益</th>
-  {"".join(f"<th>{lbl}<br><small style='color:#aaa'>損益/回数</small></th>" for lbl in labels)}
-</tr>
-{rows_sym if all_results else '<tr><td colspan="99" class="dim">銘柄別データなし</td></tr>'}
-</table>
+{sym_sections if all_results else '<p class="dim">銘柄別データなし</p>'}
 
 </body>
 </html>"""
