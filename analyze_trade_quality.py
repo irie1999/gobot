@@ -38,8 +38,9 @@ import check_signals_stop as _stop
 import check_signals_breakout as _brk
 from backtest_limit_entry import (
     fetch, run_limit_backtest,
-    WORKERS, MAX_HOLD, ENTRY_EXPIRE,
+    WORKERS, MAX_HOLD, ENTRY_EXPIRE, JST,
 )
+from datetime import timedelta
 
 
 # ── CLI ────────────────────────────────────────────────────────────
@@ -54,34 +55,57 @@ def _parse_args():
 
 
 # ── 全 WATCHLIST をバックテストして trade_log を収集 ──────────────
+_PERIODS = [30, 90, 180, 365]
+
+
+def _build_period_results(full_result: dict) -> dict:
+    """run_limit_backtest の flat 結果から period_results を構築。"""
+    today = datetime.now(JST).date()
+    period_results: dict[int, dict] = {}
+    for p in _PERIODS:
+        cutoff = today - timedelta(days=p)
+        sub = [t for t in full_result["trade_log"]
+               if t["signal_dt"].date() >= cutoff]
+        if not sub:
+            continue
+        wins = sum(1 for t in sub if t["pnl"] > 0)
+        gp   = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+        gl   = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        period_results[p] = dict(
+            trades=len(sub), wins=wins,
+            win_rate=wins / len(sub) * 100,
+            pf=pf,
+            total_pnl=sum(t["pnl"] for t in sub),
+        )
+    return period_results
+
+
 def _run_one(sym, name, strategy, days, calc_fn, em, sm, tm):
     """1 銘柄分のバックテスト。エラー時は None。"""
     try:
         df_raw = fetch(sym, days + 60)
         if df_raw is None or len(df_raw) < 10:
             return None
-        df = calc_fn(df_raw.copy())
         result = run_limit_backtest(
-            df, symbol=sym, name=name, strategy=strategy,
+            sym, name, df_raw, calc_fn,
+            em, sm, tm, days, strategy,
             entry_type=_stop.ENTRY_TYPE,
-            entry_atr_mult=em, stop_atr_mult=sm, target_atr_mult=tm,
-            backtest_days=days,
         )
-        if result is None:
+        if not result or not result.get("trade_log"):
             return None
         # スコア計算
         from check_signals_stop import calc_recommend_score
-        period_results = {d: result.get(f"d{d}") for d in [30, 90, 180, 365]}
+        period_results = _build_period_results(result)
         score, rank = calc_recommend_score(period_results)
 
-        # 全期間 trade_log を取得
-        log = result.get("trade_log", [])
         return dict(
             symbol=sym, name=name, strategy=strategy,
             score=score, rank=rank,
-            trades=log,
+            trades=result["trade_log"],
         )
     except Exception as e:
+        print(f"\n  [ERROR] {sym} {strategy}: {e}")
         return None
 
 
