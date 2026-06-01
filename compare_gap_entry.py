@@ -369,36 +369,46 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
         rows_pf += "</tr>\n"
 
     # ── 銘柄別最適CAP テーブル ──
-    # 全CAP の (symbol,name,strategy) キー一覧
     all_sym_keys = sorted({k for c in caps for k in _symbol_breakdown(all_results[c])})
+    # cap=cur_cap の取引回数を基準に表示
+    sym_sb_cur = _symbol_breakdown(all_results.get(cur_cap, all_results[caps[0]]))
+
     rows_sym = ""
     for sym, name, strat in all_sym_keys:
-        pnls = {}
+        pnls   = {}
+        trades_by_cap = {}
         for c in caps:
             sb = _symbol_breakdown(all_results[c])
-            pnls[c] = sb.get((sym, name, strat), {}).get("total_pnl", None)
+            d  = sb.get((sym, name, strat), {})
+            pnls[c]          = d.get("total_pnl", None)
+            trades_by_cap[c] = d.get("trades", 0)
 
         valid = {c: v for c, v in pnls.items() if v is not None}
         if not valid:
             continue
-        best_c = max(valid, key=lambda c: valid[c])
+        best_c   = max(valid, key=lambda c: valid[c])
         best_pnl = valid[best_c]
+        # 現行CAPでの取引数（信頼性の目安）
+        n_cur = trades_by_cap.get(cur_cap, 0)
+        reliability = "⚠️ 少" if n_cur <= 3 else ("△" if n_cur <= 6 else "")
+        rel_color   = "#e74c3c" if n_cur <= 3 else ("#f39c12" if n_cur <= 6 else "#2ecc71")
 
         rows_sym += f"<tr>"
         rows_sym += f'<td>{sym}</td><td>{name}</td>'
         rows_sym += f'<td style="text-align:center"><span class="tag tag-{strat.lower()}">{strat}</span></td>'
-        rows_sym += f'<td style="color:#f1c40f;font-weight:bold">{_cap_label(best_c)}</td>'
+        rows_sym += f'<td style="color:{rel_color};font-weight:bold;text-align:center">{n_cur}回 {reliability}</td>'
+        rows_sym += f'<td style="color:#f1c40f;font-weight:bold;text-align:center">{_cap_label(best_c)}</td>'
         rows_sym += f'<td class="{"pos" if best_pnl > 0 else "neg"}">{best_pnl:+,.0f}円</td>'
-        # 各CAPの損益
         for c in caps:
             v = pnls.get(c)
+            n = trades_by_cap.get(c, 0)
             if v is None:
                 rows_sym += '<td class="dim">─</td>'
             else:
-                cls  = "pos" if v > 0 else "neg"
-                hi   = " hi" if c == best_c else ""
-                cur  = " cur" if c == cur_cap else ""
-                rows_sym += f'<td class="{cls}{hi}{cur}">{v:+,.0f}</td>'
+                cls = "pos" if v > 0 else "neg"
+                hi  = " hi"  if c == best_c  else ""
+                cur2 = " cur" if c == cur_cap else ""
+                rows_sym += f'<td class="{cls}{hi}{cur2}" title="{n}回取引">{v:+,.0f}<br><span style="font-size:.75em;color:#7090b0">{n}回</span></td>'
         rows_sym += "</tr>\n"
 
     # ── 仕組み解説 ──
@@ -469,14 +479,18 @@ def _build_html(all_agg: dict[float, dict], all_strat: dict[float, dict],
 
 <h2>銘柄別 最適指値上限</h2>
 <p style="font-size:.85em;color:#7090b0;margin-top:4px">
-  黄色 = その銘柄で最も総損益が高いCAP値　青 = 現行(+3%)　数値単位: 円
+  黄色 = その銘柄で最も総損益が高いCAP値　青 = 現行(+3%)　数値単位: 円<br>
+  ⚠️ <span style="color:#e74c3c">赤=取引3回以下</span>（少ない取引数での最適CAPは偶然の可能性が高い）
+  　△ <span style="color:#f39c12">橙=取引4〜6回</span>（参考値）
+  　<span style="color:#2ecc71">緑=7回以上</span>（信頼度高）
 </p>
 <table>
 <tr>
   <th>コード</th><th>銘柄名</th><th>戦略</th>
+  <th>取引回数<br><small style="color:#aaa">(+3%基準)</small></th>
   <th style="color:#f1c40f">最適CAP</th>
   <th style="color:#f1c40f">最大損益</th>
-  {"".join(f"<th>{lbl}</th>" for lbl in labels)}
+  {"".join(f"<th>{lbl}<br><small style='color:#aaa'>損益/回数</small></th>" for lbl in labels)}
 </tr>
 {rows_sym if all_results else '<tr><td colspan="99" class="dim">銘柄別データなし</td></tr>'}
 </table>
