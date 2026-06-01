@@ -63,15 +63,14 @@ def _run_one(sym, name, strat, days, calc_fn, em, sm, tm, cap: float):
         df_raw = fetch(sym, days + 60)
         if df_raw is None or len(df_raw) < 10:
             return None
-        df = calc_fn(df_raw.copy())
         result = run_limit_backtest(
-            df, symbol=sym, name=name, strategy=strat,
+            sym, name, df_raw, calc_fn,
+            em, sm, tm, days, strat,
             entry_type="stop",
-            entry_atr_mult=em, stop_atr_mult=sm, target_atr_mult=tm,
-            backtest_days=days,
         )
         return result
-    except Exception:
+    except Exception as e:
+        print(f"\n  [ERROR] {sym} {strat}: {e}")
         return None
 
 
