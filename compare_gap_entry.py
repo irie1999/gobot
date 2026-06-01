@@ -833,14 +833,24 @@ def main():
             res = _run_all(tasks, cap=cap, workers=args.workers, label=label)
             all_results[cap] = res
 
-    if all(len(v) == 0 for v in all_results.values()):
+    if getattr(args, "by_signal", False):
+        no_data = all(
+            all(a.get("trades", 0) == 0 for a in cfg["cap_results"].values())
+            for cfg in sig_data_list
+        )
+    else:
+        no_data = all(len(v) == 0 for v in all_results.values())
+    if no_data:
         print("データが取得できませんでした (ネットワーク接続を確認してください)")
         return
 
-    all_agg   = {c: _aggregate(r) for c, r in all_results.items()}
-    all_strat = {c: _strategy_breakdown(r) for c, r in all_results.items()}
-
-    print_summary(all_agg, caps, args.days)
+    if not getattr(args, "by_signal", False):
+        all_agg   = {c: _aggregate(r) for c, r in all_results.items()}
+        all_strat = {c: _strategy_breakdown(r) for c, r in all_results.items()}
+        print_summary(all_agg, caps, args.days)
+    else:
+        all_agg   = {}
+        all_strat = {}
 
     if args.html:
         if getattr(args, "by_signal", False):
