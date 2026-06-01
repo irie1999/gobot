@@ -331,6 +331,13 @@ def _build_signal_configs(days: int) -> list[dict]:
                 tasks.append((sym, name, strat, days, fn, em, sm, tm))
         return tasks
 
+    # run_signals_nolimit は module-level で STRATEGY_PARAMS を in-place 上書きするため、
+    # lazy import より前にコピーを取っておく。
+    con_sp = dict(_stop.STRATEGY_PARAMS_CONSERVATIVE)
+    agg_sp = dict(_stop.STRATEGY_PARAMS_AGGRESSIVE)
+    con_bp = dict(_brk.STRATEGY_PARAMS_CONSERVATIVE)
+    agg_bp = dict(_brk.STRATEGY_PARAMS_AGGRESSIVE)
+
     try:
         import run_signals_wf as _wf
         wf_sc = _wf._STOP_WATCHLIST_CONSERVATIVE
@@ -353,11 +360,6 @@ def _build_signal_configs(days: int) -> list[dict]:
     except ImportError:
         mg_s = _stop.WATCHLIST
         mg_b = _brk.WATCHLIST
-
-    con_sp = _stop.STRATEGY_PARAMS_CONSERVATIVE
-    agg_sp = _stop.STRATEGY_PARAMS_AGGRESSIVE
-    con_bp = _brk.STRATEGY_PARAMS_CONSERVATIVE
-    agg_bp = _brk.STRATEGY_PARAMS_AGGRESSIVE
 
     configs = [
         {"label": "既存版 conservative", "short": "既存 con",
