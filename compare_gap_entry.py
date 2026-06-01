@@ -288,24 +288,24 @@ def _build_html(s_agg, n_agg, s_results, n_results, cap, days) -> str:
 <meta charset="utf-8">
 <title>指値 vs 成行 比較 {today}</title>
 <style>
-body {{ font-family: 'Helvetica Neue', sans-serif; margin: 24px; background: #f8f9fa; color: #222; }}
-h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 8px; }}
-h2 {{ color: #2c3e50; margin-top: 36px; border-left: 4px solid #3498db; padding-left: 10px; }}
-.info {{ background:#fff; padding:12px 20px; border-radius:8px; margin-bottom:20px;
-         border:1px solid #ddd; font-size:.9em; }}
-.diff-box {{ background:#fff; border-radius:10px; padding:20px 28px; margin:20px 0;
+body {{ font-family: 'Helvetica Neue', sans-serif; margin: 24px; background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ color: #e0e0e0; border-bottom: 3px solid #3498db; padding-bottom: 8px; }}
+h2 {{ color: #e0e0e0; margin-top: 36px; border-left: 4px solid #3498db; padding-left: 10px; }}
+.info {{ background:#16213e; padding:12px 20px; border-radius:8px; margin-bottom:20px;
+         border:1px solid #2a3a5c; font-size:.9em; color:#b0b8c8; }}
+.diff-box {{ background:#16213e; border-radius:10px; padding:20px 28px; margin:20px 0;
              border:2px solid {diff_color}; display:inline-block; }}
 .diff-box .num {{ font-size:2em; font-weight:bold; color:{diff_color}; }}
-table {{ border-collapse:collapse; width:100%; margin-top:12px; background:#fff;
-         border-radius:8px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,.08); }}
-th {{ background:#2c3e50; color:#fff; padding:8px 14px; text-align:center; font-size:.85em; }}
-td {{ padding:7px 14px; border-bottom:1px solid #eee; text-align:right; font-size:.88em; }}
+table {{ border-collapse:collapse; width:100%; margin-top:12px; background:#16213e;
+         border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.4); }}
+th {{ background:#0f3460; color:#e0e0e0; padding:8px 14px; text-align:center; font-size:.85em; }}
+td {{ padding:7px 14px; border-bottom:1px solid #2a3a5c; text-align:right; font-size:.88em; color:#d0d8e8; }}
 td:first-child {{ text-align:left; }}
-tr:hover {{ background:#f0f8ff; }}
-.pos {{ color:#27ae60; font-weight:bold; }}
+tr:hover {{ background:#1e2d4a; }}
+.pos {{ color:#2ecc71; font-weight:bold; }}
 .neg {{ color:#e74c3c; font-weight:bold; }}
-.sashine {{ background:#ebf5fb; }}
-.nariyuki {{ background:#fef9e7; }}
+.sashine {{ background:#1a2a3a; }}
+.nariyuki {{ background:#2a2010; }}
 </style>
 </head>
 <body>
