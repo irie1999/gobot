@@ -51,6 +51,8 @@ def _parse_args():
     p.add_argument("--aggressive", action="store_true")
     p.add_argument("--html",       action="store_true")
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--by-signal",  action="store_true",
+                   help="シグナル設定別（既存/WF/NOLIMIT/統合）に分けて分析")
     return p.parse_args()
 
 
@@ -109,18 +111,8 @@ def _run_one(sym, name, strategy, days, calc_fn, em, sm, tm):
         return None
 
 
-def collect_all_trades(days: int, workers: int) -> list[dict]:
-    """全WATCHLIST × 全戦略のトレードを収集して返す。"""
-    tasks = []
-    # stop 系
-    for sym, name, strat in _stop.WATCHLIST:
-        fn, em, sm, tm = _stop.STRATEGY_PARAMS[strat]
-        tasks.append((sym, name, strat, days, fn, em, sm, tm))
-    # breakout 系
-    for sym, name, strat in _brk.WATCHLIST:
-        fn, em, sm, tm = _brk.STRATEGY_PARAMS[strat]
-        tasks.append((sym, name, strat, days, fn, em, sm, tm))
-
+def _run_tasks(tasks: list, workers: int, label: str = "") -> list[dict]:
+    """タスクリストをバックテストして結果を返す。"""
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_run_one, *t): t for t in tasks}
@@ -128,9 +120,40 @@ def collect_all_trades(days: int, workers: int) -> list[dict]:
             r = fut.result()
             if r:
                 results.append(r)
-            print(f"\r  バックテスト中 {i}/{len(tasks)} ...", end="", flush=True)
+            pfx = f"[{label}] " if label else ""
+            print(f"\r  {pfx}{i}/{len(tasks)} ...", end="", flush=True)
     print()
     return results
+
+
+def collect_all_trades(days: int, workers: int) -> list[dict]:
+    """既存WATCHLIST（57銘柄）のトレードを収集。"""
+    tasks = []
+    for sym, name, strat in _stop.WATCHLIST:
+        fn, em, sm, tm = _stop.STRATEGY_PARAMS[strat]
+        tasks.append((sym, name, strat, days, fn, em, sm, tm))
+    for sym, name, strat in _brk.WATCHLIST:
+        fn, em, sm, tm = _brk.STRATEGY_PARAMS[strat]
+        tasks.append((sym, name, strat, days, fn, em, sm, tm))
+    return _run_tasks(tasks, workers)
+
+
+def collect_by_signal(days: int, workers: int) -> list[dict]:
+    """シグナル設定別に全タスクを収集。[{label, short, n_sym, results}] を返す。"""
+    from compare_gap_entry import _build_signal_configs
+    configs = _build_signal_configs(days)
+    sig_data = []
+    for cfg in configs:
+        tasks = cfg["tasks"]
+        print(f"  [{cfg['short']}] {len(tasks)}銘柄ペア バックテスト中…")
+        results = _run_tasks(tasks, workers, cfg["short"])
+        sig_data.append(dict(
+            label=cfg["label"],
+            short=cfg["short"],
+            n_sym=len(tasks),
+            results=results,
+        ))
+    return sig_data
 
 
 # ── 分析1: スコア帯別 損益内訳 ─────────────────────────────────────
@@ -324,9 +347,10 @@ def print_consecutive_analysis(runs: list[list[dict]]):
 
 
 # ── HTML 出力 ─────────────────────────────────────────────────────
-def build_html(analysis, runs, days, mode) -> str:
-    bins  = analysis["bins"]
-    fine  = analysis["fine"]
+def _score_tables_html(analysis: dict) -> str:
+    """スコア帯別テーブル2つ（ランク別・10点刻み）のHTMLを返す。"""
+    bins = analysis["bins"]
+    fine = analysis["fine"]
 
     rows_bin = ""
     for _, _, label in SCORE_BINS:
@@ -342,18 +366,13 @@ def build_html(analysis, runs, days, mode) -> str:
         gl  = abs(sum(x for x in d["all_pnl"] if x < 0))
         pf  = gp / gl if gl > 0 else float("inf")
         pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
-        avg = sum(d["all_pnl"]) / total
+        avg  = sum(d["all_pnl"]) / total
         avg_w = sum(d.get("目標達成", [])) / tgt if tgt else 0
         avg_s = sum(d.get("損切り",   [])) / stp if stp else 0
-        rows_bin += f"""
-<tr>
-  <td>{label}</td>
-  <td>{total:,}</td>
-  <td>{wr:.1f}%</td>
-  <td>{pf_s}</td>
+        rows_bin += f"""<tr>
+  <td>{label}</td><td>{total:,}</td><td>{wr:.1f}%</td><td>{pf_s}</td>
   <td class="{'pos' if avg > 0 else 'neg'}">{avg:+,.0f}</td>
-  <td>{tgt:,} ({tgt/total*100:.1f}%)</td>
-  <td>{stp:,} ({stp/total*100:.1f}%)</td>
+  <td>{tgt:,} ({tgt/total*100:.1f}%)</td><td>{stp:,} ({stp/total*100:.1f}%)</td>
   <td>{tc:,} ({tc/total*100:.1f}%)</td>
   <td class="{'pos' if avg_w > 0 else 'neg'}">{avg_w:+,.0f}</td>
   <td class="neg">{avg_s:+,.0f}</td>
@@ -372,38 +391,136 @@ def build_html(analysis, runs, days, mode) -> str:
         gl  = abs(sum(x for x in d["all_pnl"] if x < 0))
         pf  = gp / gl if gl > 0 else float("inf")
         pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
-        avg = sum(d["all_pnl"]) / total
+        avg  = sum(d["all_pnl"]) / total
         color = "#2ecc71" if wr >= 70 else "#f39c12" if wr >= 55 else "#e74c3c"
-        rows_fine += f"""
-<tr>
-  <td>{lo}–{hi}点</td>
-  <td>{total:,}</td>
+        rows_fine += f"""<tr>
+  <td>{lo}–{hi}点</td><td>{total:,}</td>
   <td style="color:{color};font-weight:bold">{wr:.1f}%</td>
   <td>{pf_s}</td>
   <td class="{'pos' if avg > 0 else 'neg'}">{avg:+,.0f}</td>
   <td>{stp:,} ({stp/total*100:.1f}%)</td>
 </tr>"""
 
-    # 連敗テーブル
-    rows_runs = ""
-    if runs:
-        for i, run in enumerate(runs[:20], 1):
-            start = run[0]["exit_dt"]
-            end   = run[-1]["exit_dt"]
-            tl    = sum(t["pnl"] for t in run)
-            avg_s = sum(t["score"] for t in run) / len(run)
-            details = " / ".join(f"{t['symbol']}[{t['strategy']}]" for t in run)
-            rows_runs += f"""
+    return f"""
+<h3>ランク別</h3>
+<table>
 <tr>
-  <td>{i}</td>
-  <td>{len(run)}</td>
-  <td>{start}</td>
-  <td>{end}</td>
-  <td class="neg">{tl:+,.0f}</td>
-  <td>{avg_s:.0f}</td>
+  <th>ランク</th><th>取引数</th><th>勝率</th><th>PF</th><th>平均損益</th>
+  <th>目標達成</th><th>損切り</th><th>タイムカット</th>
+  <th>平均利益</th><th>平均損失</th>
+</tr>
+{rows_bin}
+</table>
+<h3>スコア10点刻み</h3>
+<table>
+<tr>
+  <th>スコア帯</th><th>取引数</th><th>勝率</th><th>PF</th><th>平均損益</th><th>損切り件数</th>
+</tr>
+{rows_fine}
+</table>"""
+
+
+def build_html_by_signal(sig_data: list[dict], days: int, mode: str) -> str:
+    """シグナル設定別スコア分析HTML。"""
+    today = date.today().isoformat()
+    sections = ""
+    for cfg in sig_data:
+        results = cfg["results"]
+        n_trades = sum(len(r["trades"]) for r in results)
+        if n_trades == 0:
+            sections += f'<h2>{cfg["label"]} <small style="color:#7090b0">({cfg["n_sym"]}ペア) — データなし</small></h2>\n'
+            continue
+        analysis = analyze_score_vs_reason(results)
+        runs = analyze_consecutive_stops(results)
+
+        # 連敗分布
+        dist_rows = ""
+        rows_runs = ""
+        if runs:
+            dist = defaultdict(int)
+            for r in runs:
+                dist[len(r)] += 1
+            for n in sorted(dist.keys(), reverse=True):
+                dist_rows += f"<tr><td>{n}連敗</td><td>{dist[n]}回</td></tr>"
+            for i, run in enumerate(runs[:10], 1):
+                start = run[0]["exit_dt"]
+                end   = run[-1]["exit_dt"]
+                tl    = sum(t["pnl"] for t in run)
+                avg_s = sum(t["score"] for t in run) / len(run)
+                details = " / ".join(f"{t['symbol']}[{t['strategy']}]" for t in run)
+                rows_runs += f"""<tr>
+  <td>{i}</td><td>{len(run)}</td><td>{start}</td><td>{end}</td>
+  <td class="neg">{tl:+,.0f}</td><td>{avg_s:.0f}</td>
   <td style="font-size:0.85em">{details}</td>
 </tr>"""
 
+        score_html = _score_tables_html(analysis)
+        n_syms_actual = len(results)
+        sections += f"""
+<h2>{cfg['label']}
+  <small style="color:#7090b0;font-weight:normal;font-size:.75em">
+    ({n_syms_actual}銘柄ペア / {n_trades:,}取引)
+  </small>
+</h2>
+<h3 style="color:#a0b8d0;margin-top:10px">スコア帯別 損益内訳</h3>
+{score_html}
+<h3 style="margin-top:28px">損切り連続期間 (3連続以上)</h3>
+<table style="width:300px">
+<tr><th>連敗長</th><th>発生回数</th></tr>
+{dist_rows or '<tr><td colspan="2">3連敗以上なし</td></tr>'}
+</table>
+<h3>上位10件の詳細</h3>
+<table>
+<tr>
+  <th>#</th><th>連敗数</th><th>開始日</th><th>終了日</th>
+  <th>合計損失</th><th>平均スコア</th><th>銘柄/戦略</th>
+</tr>
+{rows_runs or '<tr><td colspan="7">3連敗以上なし</td></tr>'}
+</table>
+<hr style="border:none;border-top:1px solid #2a3a5c;margin:36px 0">
+"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スコア×損益品質分析 (シグナル別) {today}</title>
+<style>
+body {{ font-family: 'Helvetica Neue', sans-serif; margin: 24px 32px;
+        background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ color: #e0e0e0; border-bottom: 3px solid #3498db; padding-bottom: 8px; }}
+h2 {{ color: #e0e0e0; margin-top: 40px; border-left: 4px solid #3498db;
+      padding-left: 10px; font-size: 1.1em; }}
+h3 {{ color: #a0b8d0; margin-top: 24px; font-size: 1em; }}
+.info {{ background: #16213e; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px;
+         border: 1px solid #2a3a5c; font-size: .9em; color: #b0b8c8; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 12px; background: #16213e;
+         border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.4); }}
+th {{ background: #0f3460; color: #e0e0e0; padding: 8px 14px; text-align: center;
+      font-size: .83em; white-space: nowrap; }}
+td {{ padding: 7px 14px; border-bottom: 1px solid #2a3a5c; text-align: right;
+      font-size: .86em; color: #d0d8e8; white-space: nowrap; }}
+td:first-child {{ text-align: left; }}
+tr:hover {{ background: #1e2d4a; }}
+.pos {{ color: #2ecc71; font-weight: bold; }}
+.neg {{ color: #e74c3c; font-weight: bold; }}
+p {{ color: #7090b0; font-size: .9em; }}
+</style>
+</head>
+<body>
+<h1>スコア × 損益品質分析 (シグナル別)</h1>
+<div class="info">
+  期間: 直近 {days}日 ｜ モード: {mode} ｜ 生成日: {today}
+</div>
+{sections}
+</body>
+</html>"""
+
+
+def build_html(analysis, runs, days, mode) -> str:
+    score_html = _score_tables_html(analysis)
+
+    rows_runs = ""
     dist_rows = ""
     if runs:
         dist = defaultdict(int)
@@ -411,6 +528,17 @@ def build_html(analysis, runs, days, mode) -> str:
             dist[len(r)] += 1
         for n in sorted(dist.keys(), reverse=True):
             dist_rows += f"<tr><td>{n}連敗</td><td>{dist[n]}回</td></tr>"
+        for i, run in enumerate(runs[:20], 1):
+            start = run[0]["exit_dt"]
+            end   = run[-1]["exit_dt"]
+            tl    = sum(t["pnl"] for t in run)
+            avg_s = sum(t["score"] for t in run) / len(run)
+            details = " / ".join(f"{t['symbol']}[{t['strategy']}]" for t in run)
+            rows_runs += f"""<tr>
+  <td>{i}</td><td>{len(run)}</td><td>{start}</td><td>{end}</td>
+  <td class="neg">{tl:+,.0f}</td><td>{avg_s:.0f}</td>
+  <td style="font-size:0.85em">{details}</td>
+</tr>"""
 
     today = date.today().isoformat()
     return f"""<!DOCTYPE html>
@@ -443,40 +571,16 @@ p {{ color: #7090b0; font-size: .9em; }}
 <body>
 <h1>トレード品質分析</h1>
 <div class="info">
-  期間: 直近 {days} 日  |  モード: {mode}  |  生成日: {today}
+  期間: 直近 {days}日 ｜ モード: {mode} ｜ 生成日: {today}
 </div>
-
 <h2>1. スコア帯別 損益内訳</h2>
-<h3>ランク別</h3>
-<table>
-<tr>
-  <th>ランク</th><th>取引数</th><th>勝率</th><th>PF</th><th>平均損益</th>
-  <th>目標達成</th><th>損切り</th><th>タイムカット</th>
-  <th>平均利益</th><th>平均損失</th>
-</tr>
-{rows_bin}
-</table>
-
-<h3>スコア10点刻み</h3>
-<table>
-<tr>
-  <th>スコア帯</th><th>取引数</th><th>勝率</th><th>PF</th><th>平均損益</th><th>損切り件数</th>
-</tr>
-{rows_fine}
-</table>
-
+{score_html}
 <h2>2. 損切り連続期間 (全銘柄合算, 3連続以上)</h2>
-<p style="font-size:.9em;color:#666">
-  ※全銘柄のトレードを決済日順に並べ、損切りが連続している期間を抽出。<br>
-  　複数銘柄が同日に損切りになった場合、その日付の内部順序は未定義。
-</p>
-
 <h3>連敗長の分布</h3>
 <table style="width:300px">
 <tr><th>連敗長</th><th>発生回数</th></tr>
 {dist_rows or '<tr><td colspan="2">3連敗以上なし</td></tr>'}
 </table>
-
 <h3>上位20件の詳細</h3>
 <table>
 <tr>
@@ -485,7 +589,6 @@ p {{ color: #7090b0; font-size: .9em; }}
 </tr>
 {rows_runs or '<tr><td colspan="7">3連敗以上なし</td></tr>'}
 </table>
-
 </body>
 </html>"""
 
@@ -493,33 +596,59 @@ p {{ color: #7090b0; font-size: .9em; }}
 # ── メイン ────────────────────────────────────────────────────────
 def main():
     args = _parse_args()
+    suffix = "_aggressive" if _MODE == "aggressive" else ""
     print(f"モード: {_MODE}  期間: {args.days}日  workers: {args.workers}")
-    print("全 WATCHLIST バックテスト中…")
 
-    all_results = collect_all_trades(args.days, args.workers)
-    n_trades = sum(len(r["trades"]) for r in all_results)
-    print(f"  → {len(all_results)}銘柄  総取引数: {n_trades:,}")
-
-    if n_trades == 0:
-        print("取引データがありません (yfinance にアクセスできないか、WATCHLIST が空)")
-        return
-
-    analysis = analyze_score_vs_reason(all_results)
-    runs = analyze_consecutive_stops(all_results)
-
-    print_score_analysis(analysis)
-    print_consecutive_analysis(runs)
-
-    if args.html:
-        html = build_html(analysis, runs, args.days, _MODE)
-        suffix = "_aggressive" if _MODE == "aggressive" else ""
-        fname = f"trade_quality_analysis{suffix}_{date.today().isoformat()}.html"
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write(html)
-        print(f"\nHTMLを出力: {fname}")
-        if not args.no_browser:
-            import webbrowser
-            webbrowser.open(f"file://{os.path.abspath(fname)}")
+    if getattr(args, "by_signal", False):
+        # ── シグナル設定別モード ──
+        print("シグナル設定別バックテスト中…")
+        sig_data = collect_by_signal(args.days, args.workers)
+        total_trades = sum(
+            sum(len(r["trades"]) for r in cfg["results"])
+            for cfg in sig_data
+        )
+        print(f"  → 総取引数: {total_trades:,}")
+        if total_trades == 0:
+            print("取引データがありません")
+            return
+        for cfg in sig_data:
+            n = sum(len(r["trades"]) for r in cfg["results"])
+            print(f"\n{'='*55}\n【{cfg['label']}】 {len(cfg['results'])}銘柄  {n}取引")
+            if n == 0:
+                continue
+            analysis = analyze_score_vs_reason(cfg["results"])
+            print_score_analysis(analysis)
+        if args.html:
+            html = build_html_by_signal(sig_data, args.days, _MODE)
+            fname = f"trade_quality_by_signal{suffix}_{date.today().isoformat()}.html"
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"\nHTMLを出力: {fname}")
+            if not args.no_browser:
+                import webbrowser
+                webbrowser.open(f"file://{os.path.abspath(fname)}")
+    else:
+        # ── 既存モード (WATCHLIST 57銘柄) ──
+        print("全 WATCHLIST バックテスト中…")
+        all_results = collect_all_trades(args.days, args.workers)
+        n_trades = sum(len(r["trades"]) for r in all_results)
+        print(f"  → {len(all_results)}銘柄  総取引数: {n_trades:,}")
+        if n_trades == 0:
+            print("取引データがありません (yfinance にアクセスできないか、WATCHLIST が空)")
+            return
+        analysis = analyze_score_vs_reason(all_results)
+        runs = analyze_consecutive_stops(all_results)
+        print_score_analysis(analysis)
+        print_consecutive_analysis(runs)
+        if args.html:
+            html = build_html(analysis, runs, args.days, _MODE)
+            fname = f"trade_quality_analysis{suffix}_{date.today().isoformat()}.html"
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"\nHTMLを出力: {fname}")
+            if not args.no_browser:
+                import webbrowser
+                webbrowser.open(f"file://{os.path.abspath(fname)}")
 
 
 if __name__ == "__main__":
