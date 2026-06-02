@@ -1290,15 +1290,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     # configごとにパラメータを設定して並列実行（パラメータ競合を避けるため順次処理）
     signals: list[dict] = []
     seen_sig: set = set()
-    all_trade_infos: list[dict] = []   # スコア別勝率計算用（全銘柄）
+    all_trade_infos: list[dict] = []   # スコア別勝率計算用（全銘柄×全config）
 
-    # primary_cfgのlabelでグループ化
-    cfg_labels = list({cfg["label"]: cfg for cfg in _PNL_CONFIGS}.keys())
-    items_by_cfg: dict = {lbl: [] for lbl in cfg_labels}
-    for item in all_items:
-        sym, name, strat, is_stop = item
-        lbl = primary_cfg[(sym, strat, is_stop)]["label"]
-        items_by_cfg[lbl].append(item)
+    # all_trade_infos は全config × 全銘柄で集計（重複排除しない）
+    # → 同一銘柄が conservative/aggressive 両方に存在する場合、両方のスコアを収集
+    # シグナル確認は primary_cfg の銘柄のみ（重複排除済み）
+    items_by_cfg: dict = {cfg["label"]: [] for cfg in _PNL_CONFIGS}
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg["stop_wl"]:
+            items_by_cfg[cfg["label"]].append((sym, name, strat, True))
+        for sym, name, strat in cfg["brk_wl"]:
+            items_by_cfg[cfg["label"]].append((sym, name, strat, False))
 
     import pandas as _pd
     from backtest_limit_entry import ENTRY_EXPIRE as _EXP, MAX_HOLD as _MH
@@ -1309,7 +1311,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             continue
         _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
 
-        def _check_one(item, _td=target_date, _ms=min_score, _sm=source_map):
+        def _check_one(item, _td=target_date, _ms=min_score, _sm=source_map,
+                       _cfg_label=cfg["label"]):
             sym, name, strat, is_stop = item
             mod = _stop if is_stop else _brk
             bt = mod.backtest_one(sym, name, strat)
@@ -1323,7 +1326,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             bt_info = {"score": score, "trades": trade_log,
                        "sym": sym, "name": name, "strat": strat}
 
-            if score < _ms:
+            # シグナル確認はプライマリconfigの銘柄のみ（重複シグナル防止）
+            ki = (sym, strat, is_stop)
+            is_primary = primary_cfg.get(ki, {}).get("label") == _cfg_label
+            if not is_primary or score < _ms:
                 return {"_bt": bt_info}
 
             sig = mod.check_signal_on_date(sym, strat, _td)
