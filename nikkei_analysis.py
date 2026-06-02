@@ -1244,8 +1244,10 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
             _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
 
 
-def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> str:
-    """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。"""
+def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
+                       score_filter: int | None = None) -> str:
+    """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。
+    score_filter 指定時: そのスコアだけの成績フォーカスカードを表示。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
 
@@ -1372,64 +1374,174 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
 
     signals.sort(key=lambda x: -x["score"])
 
-    # ── スコア別勝率テーブル ──────────────────────────────────────────────────
-    _score_buckets = [
-        (90, 100, "90-100", "#4ade80"),
-        (80,  90, "80-89",  "#86efac"),
-        (70,  80, "70-79",  "#60a5fa"),
-        (60,  70, "60-69",  "#93c5fd"),
-        (50,  60, "50-59",  "#fbbf24"),
-        (40,  50, "40-49",  "#fcd34d"),
-        (30,  40, "30-39",  "#f87171"),
-        ( 0,  30, "0-29",   "#94a3b8"),
-    ]
-    score_rows = ""
-    total_n = total_w = total_pnl = 0
-    for lo, hi, lbl_s, col in _score_buckets:
-        bucket_trades = [
-            t for info in all_trade_infos
-            if lo <= info["score"] < hi
-            for t in info["trades"]
-            if t.get("exit_dt") is not None
-        ]
-        n = len(bucket_trades)
+    # ── スコア別集計ヘルパー ──────────────────────────────────────────────────
+    def _score_stats(trades_list):
+        """決済済みトレードのリストから (n, wins, pnl, gp, gl) を返す"""
+        ts  = [t for t in trades_list if t.get("exit_dt") is not None]
+        n   = len(ts)
         if not n:
-            continue
-        wins = sum(1 for t in bucket_trades if t.get("pnl", 0) > 0)
-        pnl  = sum(t.get("pnl", 0) for t in bucket_trades)
-        gp   = sum(t.get("pnl", 0) for t in bucket_trades if t.get("pnl", 0) > 0)
-        gl   = abs(sum(t.get("pnl", 0) for t in bucket_trades if t.get("pnl", 0) < 0))
-        wr_v = wins / n * 100
-        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
-        avg  = pnl / n
-        wrc  = "#4ade80" if wr_v >= 55 else ("#fbbf24" if wr_v >= 45 else "#f87171")
-        pfc  = "#4ade80" if pf >= 1.5  else ("#fbbf24" if pf >= 1.0  else "#f87171")
-        avcc = "#4ade80" if avg >= 0   else "#f87171"
-        # min_score指定時は対象スコア帯をハイライト
-        hl_style = ' style="background:#1e3a2f;"' if min_score > 0 and lo >= min_score else ""
-        score_rows += f"""<tr{hl_style}>
+            return None
+        wins = sum(1 for t in ts if t.get("pnl", 0) > 0)
+        pnl  = sum(t.get("pnl", 0) for t in ts)
+        gp   = sum(t.get("pnl", 0) for t in ts if t.get("pnl", 0) > 0)
+        gl   = abs(sum(t.get("pnl", 0) for t in ts if t.get("pnl", 0) < 0))
+        return {"n": n, "wins": wins, "pnl": pnl, "gp": gp, "gl": gl}
+
+    def _stat_html(st, label, color="#e2e8f0"):
+        if not st or st["n"] == 0:
+            return ""
+        wr  = st["wins"] / st["n"] * 100
+        pf  = st["gp"] / st["gl"] if st["gl"] > 0 else (float("inf") if st["gp"] > 0 else 0.0)
+        avg = st["pnl"] / st["n"]
+        pf_s  = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wrc   = "#4ade80" if wr >= 55  else ("#fbbf24" if wr >= 45  else "#f87171")
+        pfc   = "#4ade80" if pf >= 1.5 else ("#fbbf24" if pf >= 1.0 else "#f87171")
+        loss_ts = [t for info in all_trade_infos
+                   if info["score"] == (score_filter if score_filter is not None else -1)
+                   for t in info["trades"] if t.get("pnl", 0) < 0 and t.get("exit_dt") is not None]
+        max_loss = min((t["pnl"] for t in loss_ts), default=0)
+        win_ts   = [t for info in all_trade_infos
+                    if info["score"] == (score_filter if score_filter is not None else -1)
+                    for t in info["trades"] if t.get("pnl", 0) > 0 and t.get("exit_dt") is not None]
+        max_win  = max((t["pnl"] for t in win_ts), default=0)
+        items = [
+            ("取引数",       f'{st["n"]}件',                            "#e2e8f0"),
+            ("勝率",         f'{wr:.1f}%',                              wrc),
+            ("PF",           pf_s,                                      pfc),
+            ("合計損益",     f'{st["pnl"]:+,.0f}円',                   "#4ade80" if st["pnl"]>=0 else "#f87171"),
+            ("平均損益",     f'{avg:+,.0f}円',                          "#4ade80" if avg>=0 else "#f87171"),
+            ("最大利益",     f'{max_win:+,.0f}円' if max_win else "—",  "#4ade80"),
+            ("最大損失",     f'{max_loss:+,.0f}円' if max_loss else "—","#f87171"),
+        ]
+        kpis = "".join(
+            f'<div style="background:#111827;border:1px solid #1e293b;border-radius:8px;'
+            f'padding:10px 14px;text-align:center;min-width:110px;flex:1">'
+            f'<div style="font-size:0.7rem;color:#64748b;margin-bottom:4px">{k}</div>'
+            f'<div style="font-size:1.1rem;font-weight:700;color:{c}">{v}</div></div>'
+            for k, v, c in items
+        )
+        return f"""
+<div style="background:#0d1424;border:2px solid {color};border-radius:12px;
+            padding:18px 20px;margin-bottom:16px">
+  <div style="font-size:1rem;font-weight:700;color:{color};margin-bottom:14px">
+    {label}
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:10px">{kpis}</div>
+</div>"""
+
+    # ── score_filter 指定時: そのスコア単体フォーカス ─────────────────────
+    score_section = ""
+    if score_filter is not None:
+        sf_trades = [
+            t for info in all_trade_infos
+            if info["score"] == score_filter
+            for t in info["trades"]
+        ]
+        st = _score_stats(sf_trades)
+        n_stocks = len({id(info) for info in all_trade_infos if info["score"] == score_filter})
+        focus_html = ""
+        if st:
+            color = "#4ade80" if st["wins"]/st["n"]*100 >= 55 else ("#fbbf24" if st["wins"]/st["n"]*100 >= 45 else "#f87171")
+            focus_html = _stat_html(st, f"スコア {score_filter} の成績（直近365日 / {n_stocks}銘柄)", color)
+        else:
+            focus_html = f'<div style="color:#64748b;padding:16px">スコア {score_filter} の取引データがありません</div>'
+
+        # スコア±10の隣接スコアテーブル
+        lo_range = max(0, score_filter - 10)
+        hi_range = min(100, score_filter + 10)
+        by_score: dict[int, list] = {}
+        for info in all_trade_infos:
+            s = info["score"]
+            if lo_range <= s <= hi_range:
+                by_score.setdefault(s, []).extend(info["trades"])
+
+        adj_rows = ""
+        for s in sorted(by_score.keys(), reverse=True):
+            st2 = _score_stats(by_score[s])
+            if not st2:
+                continue
+            wr2   = st2["wins"] / st2["n"] * 100
+            pf2   = st2["gp"] / st2["gl"] if st2["gl"] > 0 else (float("inf") if st2["gp"] > 0 else 0.0)
+            pf2_s = "∞" if pf2 == float("inf") else f"{pf2:.2f}"
+            avg2  = st2["pnl"] / st2["n"]
+            wrc2  = "#4ade80" if wr2 >= 55 else ("#fbbf24" if wr2 >= 45 else "#f87171")
+            pfc2  = "#4ade80" if pf2 >= 1.5 else ("#fbbf24" if pf2 >= 1.0 else "#f87171")
+            hl    = ' style="background:#1e3a2f;font-weight:700;"' if s == score_filter else ""
+            mark  = " ◀" if s == score_filter else ""
+            adj_rows += f"""<tr{hl}>
+  <td style="text-align:center;color:#60a5fa">{s}{mark}</td>
+  <td style="text-align:right">{st2['n']}</td>
+  <td style="text-align:right;color:{wrc2}">{wr2:.1f}%</td>
+  <td style="text-align:right;color:{pfc2}">{pf2_s}</td>
+  <td style="text-align:right;color:{'#4ade80' if st2['pnl']>=0 else '#f87171'}">{st2['pnl']:+,.0f}円</td>
+  <td style="text-align:right;color:{'#4ade80' if avg2>=0 else '#f87171'}">{avg2:+,.0f}円</td>
+</tr>"""
+
+        adj_table = ""
+        if adj_rows:
+            adj_table = f"""
+<h2>スコア {lo_range}〜{hi_range} の詳細（◀ = 指定スコア）</h2>
+<table style="max-width:600px">
+  <thead><tr>
+    <th>スコア</th><th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益</th>
+  </tr></thead>
+  <tbody>{adj_rows}</tbody>
+</table>
+<p class="footnote">全WATCHLIST / 直近365日バックテスト</p>"""
+
+        score_section = focus_html + adj_table
+
+    else:
+        # ── score_filter なし: バンド別テーブル ──────────────────────────
+        _score_buckets = [
+            (90, 100, "90-100", "#4ade80"),
+            (80,  90, "80-89",  "#86efac"),
+            (70,  80, "70-79",  "#60a5fa"),
+            (60,  70, "60-69",  "#93c5fd"),
+            (50,  60, "50-59",  "#fbbf24"),
+            (40,  50, "40-49",  "#fcd34d"),
+            (30,  40, "30-39",  "#f87171"),
+            ( 0,  30, "0-29",   "#94a3b8"),
+        ]
+        band_rows = ""
+        total_n = total_w = total_pnl = 0
+        for lo, hi, lbl_s, col in _score_buckets:
+            bucket = [t for info in all_trade_infos if lo <= info["score"] < hi
+                      for t in info["trades"]]
+            st = _score_stats(bucket)
+            if not st:
+                continue
+            wr_v = st["wins"] / st["n"] * 100
+            pf   = st["gp"] / st["gl"] if st["gl"] > 0 else (float("inf") if st["gp"] > 0 else 0.0)
+            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+            avg  = st["pnl"] / st["n"]
+            wrc  = "#4ade80" if wr_v >= 55 else ("#fbbf24" if wr_v >= 45 else "#f87171")
+            pfc  = "#4ade80" if pf >= 1.5  else ("#fbbf24" if pf >= 1.0  else "#f87171")
+            hl   = ' style="background:#1e3a2f;"' if min_score > 0 and lo >= min_score else ""
+            band_rows += f"""<tr{hl}>
   <td style="color:{col};font-weight:600;text-align:left">{lbl_s}</td>
-  <td style="text-align:right">{n}</td>
+  <td style="text-align:right">{st['n']}</td>
   <td style="text-align:right;color:{wrc};font-weight:700">{wr_v:.1f}%</td>
   <td style="text-align:right;color:{pfc}">{pf_s}</td>
-  <td style="text-align:right;color:{'#4ade80' if pnl>=0 else '#f87171'}">{pnl:+,.0f}円</td>
-  <td style="text-align:right;color:{avcc}">{avg:+,.0f}円</td>
+  <td style="text-align:right;color:{'#4ade80' if st['pnl']>=0 else '#f87171'}">{st['pnl']:+,.0f}円</td>
+  <td style="text-align:right;color:{'#4ade80' if avg>=0 else '#f87171'}">{avg:+,.0f}円</td>
 </tr>"""
-        total_n += n; total_w += wins; total_pnl += pnl
+            total_n += st["n"]; total_w += st["wins"]; total_pnl += st["pnl"]
 
-    score_section = ""
-    if score_rows:
-        total_wr  = total_w / total_n * 100 if total_n else 0
-        hl_note   = f'（ハイライト = スコア{min_score}点以上）' if min_score > 0 else ""
-        score_section = f"""
-<h2>スコア別 バックテスト勝率（全WATCHLIST / 直近365日） {hl_note}</h2>
+        if band_rows:
+            total_wr = total_w / total_n * 100 if total_n else 0
+            hl_note  = f'（ハイライト = スコア{min_score}点以上）' if min_score > 0 else ""
+            score_section = f"""
+<h2>スコア帯別 バックテスト勝率（全WATCHLIST / 直近365日） {hl_note}</h2>
+<p style="color:#64748b;font-size:0.8rem;margin-bottom:8px">
+  スコアを絞って詳細を見るには: <code style="color:#38bdf8">python nikkei_analysis.py --score 80</code>
+</p>
 <table style="max-width:620px">
   <thead><tr>
     <th style="text-align:left">スコア帯</th>
     <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
   </tr></thead>
-  <tbody>{score_rows}</tbody>
+  <tbody>{band_rows}</tbody>
   <tfoot><tr style="border-top:2px solid #334155;font-weight:700">
     <td style="text-align:left;color:#94a3b8">合計</td>
     <td style="text-align:right">{total_n}</td>
@@ -1884,7 +1996,8 @@ def main():
     parser.add_argument("--no-signals",   action="store_true",    help="タブ4: シグナル一覧を非表示")
     parser.add_argument("--no-pnl",       action="store_true",    help="タブ5: 損益レポートを非表示")
     parser.add_argument("--days",         type=int, default=7,    help="損益集計日数 (--with-pnl 使用時)")
-    parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア (--with-signals 使用時)")
+    parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア")
+    parser.add_argument("--score",        type=int, default=None, help="スコア単体の詳細成績を表示 (例: --score 80)")
     parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
     args = parser.parse_args()
 
@@ -1951,7 +2064,8 @@ def main():
     if not args.no_signals and _SIGNALS_AVAILABLE:
         date_label = str(ref_date) if args.date else "今日"
         print(f"シグナル収集中 ({date_label})...", flush=True)
-        tab4_html = _tab4_signals_html(args.workers, args.min_score, target_date=sig_target)
+        tab4_html = _tab4_signals_html(args.workers, args.min_score,
+                                       target_date=sig_target, score_filter=args.score)
     if not args.no_pnl and _SIGNALS_AVAILABLE:
         print(f"損益集計中 (直近{args.days}日)...", flush=True)
         tab5_html = _tab5_pnl_html(args.days, args.workers)
