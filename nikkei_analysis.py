@@ -1244,8 +1244,8 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
             _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
 
 
-def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
-    """タブ4: 全WATCHLISTの今日シグナルをスコア降順表示"""
+def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> str:
+    """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
 
@@ -1313,7 +1313,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
             score, rank = _stop.calc_recommend_score(bt["period_results"])
             if score < min_score:
                 return None
-            sig = mod.check_signal_on_date(sym, strat, None)
+            sig = mod.check_signal_on_date(sym, strat, target_date)
             if not sig:
                 return None
             import pandas as _pd
@@ -1355,9 +1355,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
 
     signals.sort(key=lambda x: -x["score"])
 
+    sig_label = str(target_date) if target_date else str(_TODAY)
     if not signals:
         note = f"（スコア{min_score}点以上）" if min_score > 0 else ""
-        return f'<div style="color:#64748b;padding:30px;text-align:center">本日 {_TODAY} のシグナルなし {note}</div>'
+        return f'<div style="color:#64748b;padding:30px;text-align:center">{sig_label} のシグナルなし {note}</div>'
 
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     rows = ""
@@ -1390,9 +1391,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0) -> str:
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
     return f"""
-<h2>本日のシグナル一覧 — スコア降順 {min_note}</h2>
+<h2>{sig_label} のシグナル一覧 — スコア降順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
-  全WATCHLIST {len(all_items)}件から本日のエントリーシグナルを抽出。スコアが高い順に並んでいます。
+  全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。スコアが高い順に並んでいます。
 </p>
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">
   ※ 逆指値注文（青）= 翌日高値がこの価格以上になれば発動<br>
@@ -1860,9 +1861,11 @@ def main():
 
     tab4_html = ""
     tab5_html = ""
+    sig_target = ref_date if args.date else None
     if not args.no_signals and _SIGNALS_AVAILABLE:
-        print("シグナル収集中...", flush=True)
-        tab4_html = _tab4_signals_html(args.workers, args.min_score)
+        date_label = str(ref_date) if args.date else "今日"
+        print(f"シグナル収集中 ({date_label})...", flush=True)
+        tab4_html = _tab4_signals_html(args.workers, args.min_score, target_date=sig_target)
     if not args.no_pnl and _SIGNALS_AVAILABLE:
         print(f"損益集計中 (直近{args.days}日)...", flush=True)
         tab5_html = _tab5_pnl_html(args.days, args.workers)
