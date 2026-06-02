@@ -1288,7 +1288,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
     # configごとにパラメータを設定して並列実行（パラメータ競合を避けるため順次処理）
     signals: list[dict] = []
     seen_sig: set = set()
-    from itertools import groupby as _groupby
+    all_trade_infos: list[dict] = []   # スコア別勝率計算用（全銘柄）
 
     # primary_cfgのlabelでグループ化
     cfg_labels = list({cfg["label"]: cfg for cfg in _PNL_CONFIGS}.keys())
@@ -1298,26 +1298,35 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
         lbl = primary_cfg[(sym, strat, is_stop)]["label"]
         items_by_cfg[lbl].append(item)
 
+    import pandas as _pd
+    from backtest_limit_entry import ENTRY_EXPIRE as _EXP, MAX_HOLD as _MH
+
     for cfg in _PNL_CONFIGS:
         group = items_by_cfg.get(cfg["label"], [])
         if not group:
             continue
         _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
 
-        def _check_one(item):
+        def _check_one(item, _td=target_date, _ms=min_score, _sm=source_map):
             sym, name, strat, is_stop = item
             mod = _stop if is_stop else _brk
             bt = mod.backtest_one(sym, name, strat)
             if not bt:
                 return None
             score, rank = _stop.calc_recommend_score(bt["period_results"])
-            if score < min_score:
-                return None
-            sig = mod.check_signal_on_date(sym, strat, target_date)
+
+            # 全銘柄のトレード履歴を収集（スコア別勝率のため）
+            max_period = max(bt["period_results"].keys())
+            trade_log  = bt["period_results"][max_period].get("trade_log", [])
+            bt_info = {"score": score, "trades": trade_log}
+
+            if score < _ms:
+                return {"_bt": bt_info}
+
+            sig = mod.check_signal_on_date(sym, strat, _td)
             if not sig:
-                return None
-            import pandas as _pd
-            from backtest_limit_entry import ENTRY_EXPIRE as _EXP, MAX_HOLD as _MH
+                return {"_bt": bt_info}
+
             order_p = sig.get("order_price", 0)
             limit_p = sig.get("limit_entry_price", round(order_p * 1.03) if order_p else 0)
             sig_dt  = sig.get("signal_date")
@@ -1327,17 +1336,20 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
             except Exception:
                 _max_exit = None
             return {
-                "symbol": sym, "name": name, "strategy": strat,
-                "score": score, "rank": rank,
-                "signal_date":  sig_dt,
-                "signal_price": sig.get("signal_price", 0),
-                "order_p":      order_p,
-                "limit_p":      limit_p,
-                "stop_p":       sig.get("stop_price",  0),
-                "target_p":     sig.get("target_price", 0),
-                "max_hold":     _MH,
-                "max_exit":     _max_exit,
-                "sources":      source_map.get((sym, strat), []),
+                "_bt": bt_info,
+                "_sig": {
+                    "symbol": sym, "name": name, "strategy": strat,
+                    "score": score, "rank": rank,
+                    "signal_date":  sig_dt,
+                    "signal_price": sig.get("signal_price", 0),
+                    "order_p":      order_p,
+                    "limit_p":      limit_p,
+                    "stop_p":       sig.get("stop_price",  0),
+                    "target_p":     sig.get("target_price", 0),
+                    "max_hold":     _MH,
+                    "max_exit":     _max_exit,
+                    "sources":      _sm.get((sym, strat), []),
+                },
             }
 
         with _TPE(max_workers=workers) as ex:
@@ -1345,9 +1357,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
             for fut in _asc(futs):
                 try:
                     r = fut.result()
-                    if r and (r["symbol"], r["strategy"]) not in seen_sig:
-                        seen_sig.add((r["symbol"], r["strategy"]))
-                        signals.append(r)
+                    if not r:
+                        continue
+                    if r.get("_bt"):
+                        all_trade_infos.append(r["_bt"])
+                    sig_r = r.get("_sig")
+                    if sig_r and (sig_r["symbol"], sig_r["strategy"]) not in seen_sig:
+                        seen_sig.add((sig_r["symbol"], sig_r["strategy"]))
+                        signals.append(sig_r)
                 except Exception:
                     pass
 
@@ -1355,10 +1372,79 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
 
     signals.sort(key=lambda x: -x["score"])
 
+    # ── スコア別勝率テーブル ──────────────────────────────────────────────────
+    _score_buckets = [
+        (90, 100, "90-100", "#4ade80"),
+        (80,  90, "80-89",  "#86efac"),
+        (70,  80, "70-79",  "#60a5fa"),
+        (60,  70, "60-69",  "#93c5fd"),
+        (50,  60, "50-59",  "#fbbf24"),
+        (40,  50, "40-49",  "#fcd34d"),
+        (30,  40, "30-39",  "#f87171"),
+        ( 0,  30, "0-29",   "#94a3b8"),
+    ]
+    score_rows = ""
+    total_n = total_w = total_pnl = 0
+    for lo, hi, lbl_s, col in _score_buckets:
+        bucket_trades = [
+            t for info in all_trade_infos
+            if lo <= info["score"] < hi
+            for t in info["trades"]
+            if t.get("exit_dt") is not None
+        ]
+        n = len(bucket_trades)
+        if not n:
+            continue
+        wins = sum(1 for t in bucket_trades if t.get("pnl", 0) > 0)
+        pnl  = sum(t.get("pnl", 0) for t in bucket_trades)
+        gp   = sum(t.get("pnl", 0) for t in bucket_trades if t.get("pnl", 0) > 0)
+        gl   = abs(sum(t.get("pnl", 0) for t in bucket_trades if t.get("pnl", 0) < 0))
+        wr_v = wins / n * 100
+        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+        avg  = pnl / n
+        wrc  = "#4ade80" if wr_v >= 55 else ("#fbbf24" if wr_v >= 45 else "#f87171")
+        pfc  = "#4ade80" if pf >= 1.5  else ("#fbbf24" if pf >= 1.0  else "#f87171")
+        avcc = "#4ade80" if avg >= 0   else "#f87171"
+        # min_score指定時は対象スコア帯をハイライト
+        hl_style = ' style="background:#1e3a2f;"' if min_score > 0 and lo >= min_score else ""
+        score_rows += f"""<tr{hl_style}>
+  <td style="color:{col};font-weight:600;text-align:left">{lbl_s}</td>
+  <td style="text-align:right">{n}</td>
+  <td style="text-align:right;color:{wrc};font-weight:700">{wr_v:.1f}%</td>
+  <td style="text-align:right;color:{pfc}">{pf_s}</td>
+  <td style="text-align:right;color:{'#4ade80' if pnl>=0 else '#f87171'}">{pnl:+,.0f}円</td>
+  <td style="text-align:right;color:{avcc}">{avg:+,.0f}円</td>
+</tr>"""
+        total_n += n; total_w += wins; total_pnl += pnl
+
+    score_section = ""
+    if score_rows:
+        total_wr  = total_w / total_n * 100 if total_n else 0
+        hl_note   = f'（ハイライト = スコア{min_score}点以上）' if min_score > 0 else ""
+        score_section = f"""
+<h2>スコア別 バックテスト勝率（全WATCHLIST / 直近365日） {hl_note}</h2>
+<table style="max-width:620px">
+  <thead><tr>
+    <th style="text-align:left">スコア帯</th>
+    <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{score_rows}</tbody>
+  <tfoot><tr style="border-top:2px solid #334155;font-weight:700">
+    <td style="text-align:left;color:#94a3b8">合計</td>
+    <td style="text-align:right">{total_n}</td>
+    <td style="text-align:right;color:{'#4ade80' if total_wr>=55 else '#fbbf24'}">{total_wr:.1f}%</td>
+    <td></td>
+    <td style="text-align:right;color:{'#4ade80' if total_pnl>=0 else '#f87171'}">{total_pnl:+,.0f}円</td>
+    <td></td>
+  </tr></tfoot>
+</table>"""
+
     sig_label = str(target_date) if target_date else str(_TODAY)
     if not signals:
         note = f"（スコア{min_score}点以上）" if min_score > 0 else ""
-        return f'<div style="color:#64748b;padding:30px;text-align:center">{sig_label} のシグナルなし {note}</div>'
+        return (score_section +
+                f'<div style="color:#64748b;padding:30px;text-align:center">{sig_label} のシグナルなし {note}</div>')
 
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     rows = ""
@@ -1390,7 +1476,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None) -> st
 </tr>"""
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
-    return f"""
+    return score_section + f"""
 <h2>{sig_label} のシグナル一覧 — スコア降順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。スコアが高い順に並んでいます。
