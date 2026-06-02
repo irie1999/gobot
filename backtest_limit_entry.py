@@ -466,31 +466,12 @@ def run_limit_backtest(
         return _empty_result(symbol, name, strategy_name)
 
     trades: list[dict] = []
-    signals = 0
+    signals  = 0
     is_short = (entry_type == "stop_sell")
 
-    # 状態変数
-    state         = "idle"    # idle / pending / in_pos
-    limit_price   = 0.0
-    stop_price    = 0.0
-    target_price  = 0.0
-    expire_idx    = 0
-    signal_idx    = 0         # シグナル発生バー番号（約定日数計算用）
-    signal_dt     = None      # シグナル発生日
-    signal_price  = 0.0       # シグナル発生時の終値
-    days_to_fill  = 0
-    hold_start    = 0
-    entry_p       = 0.0
-    entry_dt: pd.Timestamp | None = None
-    qty           = 0
-
-    # in_pos中に発生した最初のシグナルをキューイング（exit後に使用）
-    queued_lp         = None
-    queued_sp         = None
-    queued_tp         = None
-    queued_sig_dt     = None
-    queued_sig_px     = None
-    queued_expire_idx = 0
+    # 複数ポジション並行対応: pending / active をリストで管理
+    pending_orders:   list[dict] = []   # 発注待ち
+    active_positions: list[dict] = []   # 保有中
 
     for i in range(1, len(df)):
         row  = df.iloc[i]
@@ -506,277 +487,191 @@ def run_limit_backtest(
         if pd.isna(atr_prev) or atr_prev <= 0:
             continue
 
-        # ── idle: シグナル判定 ─────────────────────────────────────
-        # 注意: idle を先に処理することで、シグナル翌日（当日 bar）も
-        # 即座に pending チェックへ落ちて約定できる。
+        # ── 1. 新シグナル → pending に追加 (既存ポジション数に依存しない) ──
         # 実運用セマンティクス: シグナル日 T の引け後に逆指値注文を置き、
         # T+1 の始値から発動可能 → バックテストも同じ T+1 の hi/lo で判定。
-        if state == "idle":
-            # ① 保有中にキューイングしたシグナルを優先チェック
-            if queued_lp is not None:
-                if i <= queued_expire_idx:
-                    limit_price   = queued_lp
-                    stop_price    = queued_sp
-                    target_price  = queued_tp
-                    expire_idx    = queued_expire_idx
-                    signal_idx    = i
-                    days_to_fill  = 0
-                    signal_dt     = queued_sig_dt
-                    signal_price  = queued_sig_px
-                    signals      += 1
-                    state         = "pending"
-                    queued_lp = queued_sp = queued_tp = queued_sig_dt = queued_sig_px = None
-                    # fall through to pending check below
-                else:
-                    # 期限切れ → 破棄して通常シグナル判定へ
-                    queued_lp = queued_sp = queued_tp = queued_sig_dt = queued_sig_px = None
-
-            # ② キュー未使用の場合は prev のシグナルを判定
-            if state == "idle":
-                entry_sig = bool(prev.get("entry_sig", False))
-                if not entry_sig:
-                    continue
-                if pd.isna(atr_prev) or atr_prev <= 0:
-                    continue
-
-                close_prev = float(prev["close"])
-
-                # データ異常・低価格株・高価格異常を除外
-                if close_prev < MIN_PRICE or close_prev > MAX_PRICE:
-                    continue
-                if atr_prev / close_prev > MAX_ATR_RATIO:
-                    continue
-
+        entry_sig = bool(prev.get("entry_sig", False))
+        if entry_sig:
+            close_prev = float(prev["close"])
+            if MIN_PRICE <= close_prev <= MAX_PRICE and atr_prev / close_prev <= MAX_ATR_RATIO:
                 if entry_type == "stop":
                     lp = close_prev + atr_prev * entry_atr_mult
                     sp = lp - atr_prev * stop_atr_mult
                     tp = lp + atr_prev * target_atr_mult
-                    if lp <= 0 or sp <= 0 or tp <= lp:
-                        continue
+                    valid = lp > 0 and sp > 0 and tp > lp
                 elif entry_type == "stop_sell":
                     lp = close_prev - atr_prev * entry_atr_mult
                     sp = lp + atr_prev * stop_atr_mult
                     tp = lp - atr_prev * target_atr_mult
-                    if lp <= 0 or tp <= 0 or tp >= lp or sp <= lp:
-                        continue
+                    valid = lp > 0 and tp > 0 and tp < lp and sp > lp
                 else:
                     lp = close_prev - atr_prev * entry_atr_mult
                     sp = lp - atr_prev * stop_atr_mult
                     tp = lp + atr_prev * target_atr_mult
-                    if lp <= 0 or sp <= 0 or tp <= lp:
-                        continue
+                    valid = lp > 0 and sp > 0 and tp > lp
+                if valid:
+                    signals += 1
+                    pending_orders.append({
+                        "lp": lp, "sp": sp, "tp": tp,
+                        "expire_idx":   i + ENTRY_EXPIRE,
+                        "signal_idx":   i,
+                        "signal_dt":    df.index[i - 1],
+                        "signal_price": close_prev,
+                    })
 
-                signals += 1
+        # ── 2. pending orders: 約定チェック (新規追加分も同バーで判定) ──
+        remaining_pending: list[dict] = []
+        new_active:        list[dict] = []
 
-                limit_price   = lp
-                stop_price    = sp
-                target_price  = tp
-                expire_idx    = i + ENTRY_EXPIRE
-                signal_idx    = i
-                days_to_fill  = 0
-                signal_dt     = df.index[i - 1]   # entry_sig が立った足（prev）の日付
-                signal_price  = close_prev
-                state         = "pending"
-                # fall through to pending check below (same bar = T+1)
+        for po in pending_orders:
+            if i > po["expire_idx"]:
+                continue  # 期限切れ → 破棄
 
-        # ── pending: 注文の約定チェック ──────────────────────────
-        if state == "pending":
-            if i > expire_idx:
-                # 有効期限切れ → キャンセル
-                state = "idle"
-
-            elif (entry_type == "stop"      and hi >= limit_price) or \
-                 (entry_type == "stop_sell" and lo <= limit_price) or \
-                 (entry_type == "limit"     and lo <= limit_price):
-                # 約定
-                if entry_type == "stop":
-                    limit_upper = limit_price * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
-                    if op >= limit_price:
-                        # 寄り付きギャップアップ: 始値がトリガー価格以上
-                        if op > limit_upper:
-                            # 指値上限超え → 約定しない（実運用の逆指値→指値と同じ）
-                            state = "idle"
-                            continue
-                        else:
-                            # 始値が上限以内 → 始値で約定
-                            entry_p = op
-                    else:
-                        # 場中にトリガー → スリッページ込みで約定
-                        entry_p = limit_price * (1.0 + SLIPPAGE_STOP_PCT)
-                elif entry_type == "stop_sell":
-                    entry_p = limit_price * (1.0 - SLIPPAGE_STOP_PCT)
-                else:
-                    entry_p = limit_price * (1.0 + SLIPPAGE_LIMIT_PCT)
-                entry_dt      = dt
-                hold_start    = i
-                days_to_fill  = i - signal_idx
-                qty           = FIXED_QTY
-                state         = "in_pos"
-
-                # 約定と同日に決済が発生するか確認
-                if is_short:
-                    hit_tgt = lo <= target_price
-                    hit_stp = hi >= stop_price
-                else:
-                    hit_tgt = hi >= target_price
-                    hit_stp = lo <= stop_price
-
-                if hit_tgt and hit_stp:
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif hit_tgt:
-                    exit_p      = target_price
-                    exit_reason = "目標達成"
-                elif hit_stp:
-                    exit_p      = stop_price
-                    exit_reason = "損切り"
-                else:
-                    exit_p = None
-                    exit_reason = None
-
-                if exit_p is not None:
-                    if exit_reason == "損切り":
-                        if is_short:
-                            # ギャップアップで損切りトリガー: 始値で損切り
-                            exit_p = op if op >= stop_price else stop_price * (1.0 + SLIPPAGE_STOP_PCT)
-                        else:
-                            # ギャップダウンで損切りトリガー: 始値で損切り
-                            exit_p = op if op <= stop_price else stop_price * (1.0 - SLIPPAGE_STOP_PCT)
-                    if entry_p * 0.1 <= exit_p <= entry_p * 10.0:
-                        fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
-                        if is_short:
-                            pnl = (entry_p - exit_p) * qty - fee
-                            pct = (entry_p - exit_p) / entry_p * 100
-                        else:
-                            pnl = (exit_p - entry_p) * qty - fee
-                            pct = (exit_p - entry_p) / entry_p * 100
-                        trades.append(dict(
-                            entry_dt=entry_dt, exit_dt=dt,
-                            entry_p=entry_p, exit_p=exit_p, qty=qty,
-                            pnl=pnl, pct=pct,
-                            fee=round(fee, 0),
-                            hold_days=0, days_to_fill=days_to_fill,
-                            signal_dt=signal_dt, signal_price=signal_price,
-                            order_limit=limit_price, order_stop=stop_price,
-                            order_target=target_price,
-                            reason=exit_reason,
-                        ))
-                    state = "idle"
+            triggered = (
+                (entry_type == "stop"      and hi >= po["lp"]) or
+                (entry_type == "stop_sell" and lo <= po["lp"]) or
+                (entry_type == "limit"     and lo <= po["lp"])
+            )
+            if not triggered:
+                remaining_pending.append(po)
                 continue
 
-        # ── in_pos: OCO決済チェック ───────────────────────────────
-        if state == "in_pos":
-            # 保有中に新しいシグナルが発生した場合、最初のものだけキューイング
-            # （exit後に次の取引として処理することで、連続シグナルを記録できる）
-            if queued_lp is None and bool(prev.get("entry_sig", False)):
-                _atr = float(prev.get("atr", np.nan))
-                if not pd.isna(_atr) and _atr > 0:
-                    _cl = float(prev["close"])
-                    if MIN_PRICE <= _cl <= MAX_PRICE and _atr / _cl <= MAX_ATR_RATIO:
-                        if entry_type == "stop":
-                            _lp = _cl + _atr * entry_atr_mult
-                            _sp = _lp - _atr * stop_atr_mult
-                            _tp = _lp + _atr * target_atr_mult
-                            if _lp > 0 and _sp > 0 and _tp > _lp:
-                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
-                                queued_sig_dt     = df.index[i - 1]
-                                queued_sig_px     = _cl
-                                queued_expire_idx = i + ENTRY_EXPIRE
-                        elif entry_type == "stop_sell":
-                            _lp = _cl - _atr * entry_atr_mult
-                            _sp = _lp + _atr * stop_atr_mult
-                            _tp = _lp - _atr * target_atr_mult
-                            if _lp > 0 and _tp > 0 and _tp < _lp and _sp > _lp:
-                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
-                                queued_sig_dt     = df.index[i - 1]
-                                queued_sig_px     = _cl
-                                queued_expire_idx = i + ENTRY_EXPIRE
-                        else:
-                            _lp = _cl - _atr * entry_atr_mult
-                            _sp = _lp - _atr * stop_atr_mult
-                            _tp = _lp + _atr * target_atr_mult
-                            if _lp > 0 and _sp > 0 and _tp > _lp:
-                                queued_lp, queued_sp, queued_tp = _lp, _sp, _tp
-                                queued_sig_dt     = df.index[i - 1]
-                                queued_sig_px     = _cl
-                                queued_expire_idx = i + ENTRY_EXPIRE
-
-            hold_days = i - hold_start
-            exit_p    = None
-            exit_reason = None
-
-            if is_short:
-                hit_tgt = lo <= target_price
-                hit_stp = hi >= stop_price
+            # 約定価格計算
+            if entry_type == "stop":
+                limit_upper = po["lp"] * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
+                if op >= po["lp"]:
+                    if op > limit_upper:
+                        continue  # ギャップアップ超過 → 不約定
+                    ep = op
+                else:
+                    ep = po["lp"] * (1.0 + SLIPPAGE_STOP_PCT)
+            elif entry_type == "stop_sell":
+                ep = po["lp"] * (1.0 - SLIPPAGE_STOP_PCT)
             else:
-                hit_tgt = hi >= target_price
-                hit_stp = lo <= stop_price
+                ep = po["lp"] * (1.0 + SLIPPAGE_LIMIT_PCT)
+
+            dtf = i - po["signal_idx"]
+
+            # 約定と同日の決済チェック
+            hit_tgt = (hi >= po["tp"]) if not is_short else (lo <= po["tp"])
+            hit_stp = (lo <= po["sp"]) if not is_short else (hi >= po["sp"])
+
+            if hit_tgt or hit_stp:
+                xp      = po["tp"] if hit_tgt else po["sp"]
+                xreason = "目標達成" if hit_tgt else "損切り"
+                if xreason == "損切り":
+                    if is_short:
+                        xp = op if op >= po["sp"] else po["sp"] * (1.0 + SLIPPAGE_STOP_PCT)
+                    else:
+                        xp = op if op <= po["sp"] else po["sp"] * (1.0 - SLIPPAGE_STOP_PCT)
+                if ep * 0.1 <= xp <= ep * 10.0:
+                    fee = (ep + xp) * FIXED_QTY * FEE_PCT_ONE_WAY
+                    if is_short:
+                        pnl = (ep - xp) * FIXED_QTY - fee
+                        pct = (ep - xp) / ep * 100
+                    else:
+                        pnl = (xp - ep) * FIXED_QTY - fee
+                        pct = (xp - ep) / ep * 100
+                    trades.append(dict(
+                        entry_dt=dt, exit_dt=dt,
+                        entry_p=ep, exit_p=xp, qty=FIXED_QTY,
+                        pnl=pnl, pct=pct, fee=round(fee, 0),
+                        hold_days=0, days_to_fill=dtf,
+                        signal_dt=po["signal_dt"], signal_price=po["signal_price"],
+                        order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
+                        reason=xreason,
+                    ))
+                # 同日決済: active に入れない
+            else:
+                # 当日決済なし → active に追加
+                new_active.append({
+                    "entry_dt": dt, "entry_p": ep,
+                    "sp": po["sp"], "tp": po["tp"],
+                    "hold_start": i, "days_to_fill": dtf,
+                    "signal_dt":    po["signal_dt"],
+                    "signal_price": po["signal_price"],
+                    "order_limit":  po["lp"],
+                    "order_stop":   po["sp"],
+                    "order_target": po["tp"],
+                })
+
+        pending_orders = remaining_pending
+        active_positions.extend(new_active)
+
+        # ── 3. active positions: OCO決済チェック ──
+        still_active: list[dict] = []
+        for pos in active_positions:
+            ep        = pos["entry_p"]
+            hold_days = i - pos["hold_start"]
+
+            hit_tgt = (hi >= pos["tp"]) if not is_short else (lo <= pos["tp"])
+            hit_stp = (lo <= pos["sp"]) if not is_short else (hi >= pos["sp"])
+
+            exit_p_pos    = None
+            exit_reason_pos = None
 
             if hit_tgt and hit_stp:
-                exit_p      = target_price
-                exit_reason = "目標達成"
+                exit_p_pos = pos["tp"]; exit_reason_pos = "目標達成"
             elif hit_tgt:
-                exit_p      = target_price
-                exit_reason = "目標達成"
+                exit_p_pos = pos["tp"]; exit_reason_pos = "目標達成"
             elif hit_stp:
-                exit_p      = stop_price
-                exit_reason = "損切り"
+                exit_p_pos = pos["sp"]; exit_reason_pos = "損切り"
             elif hold_days >= MAX_HOLD:
-                exit_p      = cl
-                exit_reason = "タイムカット"
+                exit_p_pos = cl;        exit_reason_pos = "タイムカット"
 
-            if exit_p is not None:
-                if not (entry_p * 0.1 <= exit_p <= entry_p * 10.0):
-                    state = "idle"
-                    continue
-                if exit_reason == "損切り":
-                    if is_short:
-                        # ギャップアップで損切りトリガー: 始値で損切り
-                        exit_p = op if op >= stop_price else stop_price * (1.0 + SLIPPAGE_STOP_PCT)
-                    else:
-                        # ギャップダウンで損切りトリガー: 始値で損切り
-                        exit_p = op if op <= stop_price else stop_price * (1.0 - SLIPPAGE_STOP_PCT)
-                fee = (entry_p + exit_p) * qty * FEE_PCT_ONE_WAY
+            if exit_p_pos is None:
+                still_active.append(pos)
+                continue
+
+            if not (ep * 0.1 <= exit_p_pos <= ep * 10.0):
+                continue  # 異常価格 → ポジション破棄
+
+            if exit_reason_pos == "損切り":
                 if is_short:
-                    pnl = (entry_p - exit_p) * qty - fee
-                    pct = (entry_p - exit_p) / entry_p * 100
+                    exit_p_pos = op if op >= pos["sp"] else pos["sp"] * (1.0 + SLIPPAGE_STOP_PCT)
                 else:
-                    pnl = (exit_p - entry_p) * qty - fee
-                    pct = (exit_p - entry_p) / entry_p * 100
-                trades.append(dict(
-                    entry_dt=entry_dt, exit_dt=dt,
-                    entry_p=entry_p, exit_p=exit_p, qty=qty,
-                    pnl=pnl, pct=pct,
-                    fee=round(fee, 0),
-                    hold_days=hold_days, days_to_fill=days_to_fill,
-                    signal_dt=signal_dt, signal_price=signal_price,
-                    order_limit=limit_price, order_stop=stop_price,
-                    order_target=target_price,
-                    reason=exit_reason,
-                ))
-                state = "idle"
-            continue
+                    exit_p_pos = op if op <= pos["sp"] else pos["sp"] * (1.0 - SLIPPAGE_STOP_PCT)
 
-    # 未決済ポジション
-    if state == "in_pos" and entry_dt is not None:
-        cl_last = float(df.iloc[-1]["close"])
-        hold_days = len(df) - 1 - hold_start
-        fee = (entry_p + cl_last) * qty * FEE_PCT_ONE_WAY
+            fee = (ep + exit_p_pos) * FIXED_QTY * FEE_PCT_ONE_WAY
+            if is_short:
+                pnl = (ep - exit_p_pos) * FIXED_QTY - fee
+                pct = (ep - exit_p_pos) / ep * 100
+            else:
+                pnl = (exit_p_pos - ep) * FIXED_QTY - fee
+                pct = (exit_p_pos - ep) / ep * 100
+            trades.append(dict(
+                entry_dt=pos["entry_dt"], exit_dt=dt,
+                entry_p=ep, exit_p=exit_p_pos, qty=FIXED_QTY,
+                pnl=pnl, pct=pct, fee=round(fee, 0),
+                hold_days=hold_days, days_to_fill=pos["days_to_fill"],
+                signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
+                order_limit=pos["order_limit"], order_stop=pos["order_stop"],
+                order_target=pos["order_target"],
+                reason=exit_reason_pos,
+            ))
+
+        active_positions = still_active
+
+    # 未決済ポジションを「保有中」として記録
+    cl_last = float(df.iloc[-1]["close"])
+    for pos in active_positions:
+        ep        = pos["entry_p"]
+        hold_days = len(df) - 1 - pos["hold_start"]
+        fee = (ep + cl_last) * FIXED_QTY * FEE_PCT_ONE_WAY
         if is_short:
-            pnl = (entry_p - cl_last) * qty - fee
-            pct = (entry_p - cl_last) / entry_p * 100
+            pnl = (ep - cl_last) * FIXED_QTY - fee
+            pct = (ep - cl_last) / ep * 100
         else:
-            pnl = (cl_last - entry_p) * qty - fee
-            pct = (cl_last - entry_p) / entry_p * 100
+            pnl = (cl_last - ep) * FIXED_QTY - fee
+            pct = (cl_last - ep) / ep * 100
         trades.append(dict(
-            entry_dt=entry_dt, exit_dt=df.index[-1],
-            entry_p=entry_p, exit_p=cl_last, qty=qty,
-            pnl=pnl, pct=pct,
-            fee=round(fee, 0),
-            hold_days=hold_days, days_to_fill=days_to_fill,
-            signal_dt=signal_dt, signal_price=signal_price,
-            order_limit=limit_price, order_stop=stop_price,
-            order_target=target_price,
+            entry_dt=pos["entry_dt"], exit_dt=df.index[-1],
+            entry_p=ep, exit_p=cl_last, qty=FIXED_QTY,
+            pnl=pnl, pct=pct, fee=round(fee, 0),
+            hold_days=hold_days, days_to_fill=pos["days_to_fill"],
+            signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
+            order_limit=pos["order_limit"], order_stop=pos["order_stop"],
+            order_target=pos["order_target"],
             reason="保有中",
         ))
 
