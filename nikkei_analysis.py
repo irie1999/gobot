@@ -1320,7 +1320,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             # 全銘柄のトレード履歴を収集（スコア別勝率のため）
             max_period = max(bt["period_results"].keys())
             trade_log  = bt["period_results"][max_period].get("trade_log", [])
-            bt_info = {"score": score, "trades": trade_log}
+            bt_info = {"score": score, "trades": trade_log,
+                       "sym": sym, "name": name, "strat": strat}
 
             if score < _ms:
                 return {"_bt": bt_info}
@@ -1489,7 +1490,68 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 </table>
 <p class="footnote">全WATCHLIST / 直近365日バックテスト</p>"""
 
-        score_section = focus_html + adj_table
+        # ── スコア単体の取引明細テーブル ─────────────────────────────────
+        def _rhtml(reason):
+            if reason == "目標達成":   return '<span style="color:#4ade80;font-weight:600">目標達成</span>'
+            if reason == "損切り":     return '<span style="color:#f87171;font-weight:600">損切り</span>'
+            if reason == "タイムカット": return '<span style="color:#94a3b8">タイムカット</span>'
+            return f'<span style="color:#fbbf24">{reason}</span>'
+
+        detail_trades = []
+        for info in all_trade_infos:
+            if info["score"] != score_filter:
+                continue
+            for t in info["trades"]:
+                if t.get("exit_dt") is None:
+                    continue
+                exit_d = t["exit_dt"].date() if hasattr(t["exit_dt"], "date") else t["exit_dt"]
+                entry_d = t["entry_dt"].date() if hasattr(t.get("entry_dt"), "date") else t.get("entry_dt")
+                detail_trades.append({
+                    "sym":      info["sym"],
+                    "name":     info["name"],
+                    "strat":    info["strat"],
+                    "exit_d":   exit_d,
+                    "entry_d":  entry_d,
+                    "entry_p":  t.get("entry_p", 0),
+                    "exit_p":   t.get("exit_p", 0),
+                    "hold":     t.get("hold_days", 0),
+                    "pnl":      t.get("pnl", 0),
+                    "reason":   t.get("reason", "") or "—",
+                })
+        detail_trades.sort(key=lambda x: x["exit_d"], reverse=True)
+
+        detail_html = ""
+        if detail_trades:
+            det_rows = ""
+            for dt in detail_trades:
+                tpc = "profit" if dt["pnl"] > 0 else "loss"
+                tag = f'<span class="tag tag-{dt["strat"].lower()}">{dt["strat"]}</span>'
+                det_rows += f"""<tr>
+  <td style="color:#94a3b8">{dt['exit_d']}</td>
+  <td class="sym" style="text-align:left">{dt['sym']}<br>
+    <span style="color:#64748b;font-size:0.75rem">{dt['name']}</span></td>
+  <td style="text-align:center">{tag}</td>
+  <td style="text-align:right">{dt['entry_p']:,.0f}</td>
+  <td style="text-align:right">{dt['exit_p']:,.0f}</td>
+  <td style="text-align:right">{dt['hold']}日</td>
+  <td class="{tpc}" style="text-align:right;font-weight:600">{dt['pnl']:+,.0f}円</td>
+  <td>{_rhtml(dt['reason'])}</td>
+  <td style="color:#64748b;font-size:0.78rem">{dt['entry_d']}</td>
+</tr>"""
+            detail_html = f"""
+<h2>スコア {score_filter} の取引明細（決済日降順 / {len(detail_trades)}件）</h2>
+<table>
+  <thead><tr>
+    <th>決済日</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>約定値</th><th>決済値</th><th>保有</th>
+    <th>損益</th><th>理由</th><th>エントリー日</th>
+  </tr></thead>
+  <tbody>{det_rows}</tbody>
+</table>"""
+
+        score_section = focus_html + adj_table + detail_html
 
     else:
         # ── score_filter なし: バンド別テーブル ──────────────────────────
