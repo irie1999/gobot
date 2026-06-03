@@ -541,8 +541,13 @@ def run_limit_backtest(
                 limit_upper = po["lp"] * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
                 if op >= po["lp"]:
                     if op > limit_upper:
-                        continue  # ギャップアップ超過 → 不約定
-                    ep = op
+                        # ギャップアップ超過: 日中に指値上限以下に戻れば指値上限で約定
+                        if lo <= limit_upper:
+                            ep = limit_upper  # 戻り約定
+                        else:
+                            continue  # 終日 limit_upper を下回らず → 不約定
+                    else:
+                        ep = op
                 else:
                     ep = po["lp"] * (1.0 + SLIPPAGE_STOP_PCT)
             elif entry_type == "stop_sell":
