@@ -1403,13 +1403,25 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         pf_s  = "∞" if pf == float("inf") else f"{pf:.2f}"
         wrc   = "#4ade80" if wr >= 55  else ("#fbbf24" if wr >= 45  else "#f87171")
         pfc   = "#4ade80" if pf >= 1.5 else ("#fbbf24" if pf >= 1.0 else "#f87171")
-        loss_ts = [t for info in all_trade_infos
-                   if info["score"] == (score_filter if score_filter is not None else -1)
-                   for t in info["trades"] if t.get("pnl", 0) < 0 and t.get("exit_dt") is not None]
+        _target_score = score_filter if score_filter is not None else -1
+        _mxseen: set = set()
+        loss_ts = []
+        win_ts  = []
+        for info in all_trade_infos:
+            if info["score"] != _target_score:
+                continue
+            for t in info["trades"]:
+                if t.get("exit_dt") is None:
+                    continue
+                _mk = (info["sym"], info["strat"], t.get("signal_dt"))
+                if _mk in _mxseen:
+                    continue
+                _mxseen.add(_mk)
+                if t.get("pnl", 0) < 0:
+                    loss_ts.append(t)
+                elif t.get("pnl", 0) > 0:
+                    win_ts.append(t)
         max_loss = min((t["pnl"] for t in loss_ts), default=0)
-        win_ts   = [t for info in all_trade_infos
-                    if info["score"] == (score_filter if score_filter is not None else -1)
-                    for t in info["trades"] if t.get("pnl", 0) > 0 and t.get("exit_dt") is not None]
         max_win  = max((t["pnl"] for t in win_ts), default=0)
         items = [
             ("取引数",       f'{st["n"]}件',                            "#e2e8f0"),
@@ -1588,8 +1600,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         band_rows = ""
         total_n = total_w = total_pnl = 0
         for lo, hi, lbl_s, col in _score_buckets:
-            bucket = [t for info in all_trade_infos if lo <= info["score"] < hi
-                      for t in info["trades"]]
+            _bseen: set = set()
+            bucket = []
+            for info in all_trade_infos:
+                if not (lo <= info["score"] < hi):
+                    continue
+                for t in info["trades"]:
+                    _bk = (info["sym"], info["strat"], t.get("signal_dt"))
+                    if _bk in _bseen:
+                        continue
+                    _bseen.add(_bk)
+                    bucket.append(t)
             st = _score_stats(bucket)
             if not st:
                 continue
