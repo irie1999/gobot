@@ -1692,6 +1692,8 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
 
     all_trades: list[dict] = []
     full_year_trades: list[dict] = []
+    # config横断の重複除外: 同一 (sym, strat, signal_dt) は最初のconfig分だけ表示
+    seen_global: set = set()
 
     for cfg in _PNL_CONFIGS:
         _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
@@ -1727,6 +1729,12 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                     continue
                 exit_d   = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
                 entry_dt = t.get("entry_dt")
+                signal_dt = t.get("signal_dt")
+                # 同一銘柄×戦略×シグナル日は最初のconfig分だけ表示（config重複排除）
+                gkey = (sym, strat, signal_dt)
+                if gkey in seen_global:
+                    continue
+                seen_global.add(gkey)
                 key = (sym, strat, entry_dt, exit_dt)
                 if key in seen:
                     continue
