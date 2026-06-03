@@ -220,7 +220,8 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     for days in PERIODS:
         cutoff = today - timedelta(days=days)
         sub    = [t for t in full_r["trade_log"]
-                  if t["signal_dt"].date() >= cutoff]
+                  if t["signal_dt"].date() >= cutoff
+                  and t.get("reason") != "発注中"]
         if not sub:
             continue
         filled = len(sub)
