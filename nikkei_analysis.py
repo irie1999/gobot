@@ -1439,13 +1439,21 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     # ── score_filter 指定時: そのスコア単体フォーカス ─────────────────────
     score_section = ""
     if score_filter is not None:
-        sf_trades = [
-            t for info in all_trade_infos
-            if info["score"] == score_filter
-            for t in info["trades"]
-        ]
+        # 同一シグナルが複数configから重複しないよう signal_dt でデデュップ
+        _sf_seen: set = set()
+        sf_trades = []
+        for info in all_trade_infos:
+            if info["score"] != score_filter:
+                continue
+            for t in info["trades"]:
+                _k = (info["sym"], info["strat"], t.get("signal_dt"))
+                if _k in _sf_seen:
+                    continue
+                _sf_seen.add(_k)
+                sf_trades.append(t)
         st = _score_stats(sf_trades)
-        n_stocks = len({id(info) for info in all_trade_infos if info["score"] == score_filter})
+        n_stocks = len({(info["sym"], info["strat"])
+                        for info in all_trade_infos if info["score"] == score_filter})
         focus_html = ""
         if st:
             color = "#4ade80" if st["wins"]/st["n"]*100 >= 55 else ("#fbbf24" if st["wins"]/st["n"]*100 >= 45 else "#f87171")
@@ -1504,12 +1512,18 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             return f'<span style="color:#fbbf24">{reason}</span>'
 
         detail_trades = []
+        seen_detail: set = set()
         for info in all_trade_infos:
             if info["score"] != score_filter:
                 continue
             for t in info["trades"]:
                 if t.get("exit_dt") is None:
                     continue
+                sig_dt = t.get("signal_dt")
+                dk = (info["sym"], info["strat"], sig_dt)
+                if dk in seen_detail:
+                    continue
+                seen_detail.add(dk)
                 exit_d = t["exit_dt"].date() if hasattr(t["exit_dt"], "date") else t["exit_dt"]
                 entry_d = t["entry_dt"].date() if hasattr(t.get("entry_dt"), "date") else t.get("entry_dt")
                 detail_trades.append({
