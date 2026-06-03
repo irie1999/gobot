@@ -1767,6 +1767,7 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 exit_d   = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
                 entry_dt = t.get("entry_dt")
                 signal_dt = t.get("signal_dt")
+                reason = t.get("reason", "") or "保有中"
                 key = (sym, strat, entry_dt, exit_dt)
                 if key in seen:
                     continue
@@ -1774,41 +1775,40 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": score, "rank": rank,
-                        "exit_d_raw": exit_d, "pnl": t.get("pnl", 0)}
-                # サマリー用: config独立でカウント（他configとの重複は除外しない）
-                if since <= exit_d <= until:
-                    cfg_trades_map[cfg["label"]].append({**base,
-                        "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
-                        "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
-                        "entry_p":   t.get("entry_p", 0),
-                        "exit_p":    t.get("exit_p", 0),
-                        "hold_days": t.get("hold_days", 0),
-                        "reason":    t.get("reason", "") or "保有中",
-                    })
+                        "exit_d_raw": exit_d, "pnl": t.get("pnl", 0),
+                        "reason": reason}
+                extra = {
+                    "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
+                    "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
+                    "entry_p":   t.get("entry_p", 0),
+                    "exit_p":    t.get("exit_p", 0),
+                    "hold_days": t.get("hold_days", 0),
+                    "reason":    reason,
+                }
+                # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
+                if reason != "発注中" and since <= exit_d <= until:
+                    cfg_trades_map[cfg["label"]].append({**base, **extra})
                 # 取引リスト・総KPI用: 同一シグナルは最初のconfig分だけ
                 gkey = (sym, strat, signal_dt)
                 if gkey in seen_global:
                     continue
                 seen_global.add(gkey)
-                full_year_trades.append(base)
+                # 発注中はスコア帯統計から除外 (未約定のためpnl=0で歪む)
+                if reason != "発注中":
+                    full_year_trades.append(base)
+                # 取引明細テーブルには発注中も表示
                 if since <= exit_d <= until:
-                    all_trades.append({**base,
-                        "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
-                        "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
-                        "entry_p":   t.get("entry_p", 0),
-                        "exit_p":    t.get("exit_p", 0),
-                        "hold_days": t.get("hold_days", 0),
-                        "reason":    t.get("reason", "") or "保有中",
-                    })
+                    all_trades.append({**base, **extra})
 
     # reset to conservative
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
 
-    # ── KPI ──
-    n_total = len(all_trades)
-    n_win   = sum(1 for t in all_trades if t["pnl"] > 0)
-    pnl_sum = sum(t["pnl"] for t in all_trades)
+    # ── KPI (発注中=未約定は除外) ──
+    kpi_trades = [t for t in all_trades if t.get("reason") != "発注中"]
+    n_total = len(kpi_trades)
+    n_win   = sum(1 for t in kpi_trades if t["pnl"] > 0)
+    pnl_sum = sum(t["pnl"] for t in kpi_trades)
     wr      = n_win / n_total * 100 if n_total else 0.0
     pc      = "profit" if pnl_sum >= 0 else "loss"
     kpi_html = f"""
@@ -1886,21 +1886,29 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
         if reason == "タイムカット": return '<span style="color:#94a3b8">タイムカット</span>'
         return f'<span style="color:#fbbf24">{reason}</span>'
 
+    # 発注中を先頭に、それ以外は決済日降順
+    pending_trades = [t for t in all_trades if t.get("reason") == "発注中"]
+    done_trades    = [t for t in all_trades if t.get("reason") != "発注中"]
+    sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
+
     trade_rows = ""
-    for t in sorted(all_trades, key=lambda x: x["exit_d_raw"], reverse=True):
-        tpc = "profit" if t["pnl"] > 0 else "loss"
+    for t in sorted_trades:
+        is_pending = t.get("reason") == "発注中"
+        tpc = "profit" if t["pnl"] > 0 else ("" if is_pending else "loss")
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
         sc  = t.get("score"); rk = t.get("rank")
         sc_html = (f'<span style="color:{col_map.get(rk,"#94a3b8")};font-weight:600">{rk}&nbsp;{sc}</span>'
                    if sc is not None and rk and rk != "-" else "")
-        trade_rows += f"""<tr>
+        row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"' if is_pending else ""
+        pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
+        trade_rows += f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:right">{t["entry_p"]:,.0f}</td>
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
-  <td class="{tpc}" style="text-align:right">{t["pnl"]:+,.0f}円</td>
+  <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""

@@ -657,6 +657,39 @@ def run_limit_backtest(
 
         active_positions = still_active
 
+    # ループ終端: 最終バーのシグナルは次バー(T+1)が存在しないため未処理→ pending に追加
+    if len(df) >= 1:
+        last_bar = df.iloc[-1]
+        last_entry_sig = bool(last_bar.get("entry_sig", False))
+        last_atr = float(last_bar.get("atr", np.nan))
+        last_cl  = float(last_bar["close"])
+        if last_entry_sig and not pd.isna(last_atr) and last_atr > 0:
+            if MIN_PRICE <= last_cl <= MAX_PRICE and last_atr / last_cl <= MAX_ATR_RATIO:
+                if entry_type == "stop":
+                    lp = last_cl + last_atr * entry_atr_mult
+                    sp = lp - last_atr * stop_atr_mult
+                    tp = lp + last_atr * target_atr_mult
+                    valid = lp > 0 and sp > 0 and tp > lp
+                elif entry_type == "stop_sell":
+                    lp = last_cl - last_atr * entry_atr_mult
+                    sp = lp + last_atr * stop_atr_mult
+                    tp = lp - last_atr * target_atr_mult
+                    valid = lp > 0 and tp > 0 and tp < lp and sp > lp
+                else:
+                    lp = last_cl - last_atr * entry_atr_mult
+                    sp = lp - last_atr * stop_atr_mult
+                    tp = lp + last_atr * target_atr_mult
+                    valid = lp > 0 and sp > 0 and tp > lp
+                if valid:
+                    signals += 1
+                    pending_orders.append({
+                        "lp": lp, "sp": sp, "tp": tp,
+                        "expire_idx":   len(df) + ENTRY_EXPIRE,
+                        "signal_idx":   len(df),
+                        "signal_dt":    df.index[-1],
+                        "signal_price": last_cl,
+                    })
+
     # 未決済ポジションを「保有中」として記録
     cl_last = float(df.iloc[-1]["close"])
     for pos in active_positions:
@@ -680,6 +713,18 @@ def run_limit_backtest(
             reason="保有中",
         ))
 
+    # 未発動 pending_orders を「発注中」として記録 (損益・勝率計算は除外)
+    for po in pending_orders:
+        trades.append(dict(
+            entry_dt=df.index[-1], exit_dt=df.index[-1],
+            entry_p=po["lp"], exit_p=cl_last, qty=FIXED_QTY,
+            pnl=0.0, pct=0.0, fee=0.0,
+            hold_days=0, days_to_fill=0,
+            signal_dt=po["signal_dt"], signal_price=po["signal_price"],
+            order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
+            reason="発注中",
+        ))
+
     # 異常トレードをデバッグ出力
     for t in trades:
         if abs(t["pnl"]) > 500_000:
@@ -688,17 +733,18 @@ def run_limit_backtest(
                   f"qty={t['qty']} pnl={t['pnl']:+,.0f} reason={t['reason']} "
                   f"entry_dt={t['entry_dt']} exit_dt={t['exit_dt']}", file=sys.stderr)
 
-    # 統計計算
-    filled  = len(trades)
-    wins    = sum(1 for t in trades if t["pnl"] > 0)
-    losses  = sum(1 for t in trades if t["pnl"] <= 0)
+    # 統計計算 (発注中は除外)
+    stat_trades = [t for t in trades if t.get("reason") != "発注中"]
+    filled  = len(stat_trades)
+    wins    = sum(1 for t in stat_trades if t["pnl"] > 0)
+    losses  = sum(1 for t in stat_trades if t["pnl"] <= 0)
     win_rate = wins / filled * 100 if filled > 0 else 0.0
-    gross_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
-    gross_loss   = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+    gross_profit = sum(t["pnl"] for t in stat_trades if t["pnl"] > 0)
+    gross_loss   = abs(sum(t["pnl"] for t in stat_trades if t["pnl"] < 0))
     pf           = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
-    total_pnl    = sum(t["pnl"] for t in trades)
-    total_fee    = sum(t.get("fee", 0) for t in trades)
-    avg_hold     = sum(t["hold_days"] for t in trades) / filled if filled > 0 else 0.0
+    total_pnl    = sum(t["pnl"] for t in stat_trades)
+    total_fee    = sum(t.get("fee", 0) for t in stat_trades)
+    avg_hold     = sum(t["hold_days"] for t in stat_trades) / filled if filled > 0 else 0.0
     fill_rate    = filled / signals * 100 if signals > 0 else 0.0
 
     return dict(
