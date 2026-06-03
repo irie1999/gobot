@@ -536,24 +536,24 @@ def run_limit_backtest(
                 remaining_pending.append(po)
                 continue
 
-            # 約定価格計算
+            # 約定価格計算 (整数円に丸める: 表示と計算の一致)
             if entry_type == "stop":
                 limit_upper = po["lp"] * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
                 if op >= po["lp"]:
                     if op > limit_upper:
                         # ギャップアップ超過: 日中に指値上限以下に戻れば指値上限で約定
                         if lo <= limit_upper:
-                            ep = limit_upper  # 戻り約定
+                            ep = round(limit_upper)  # 戻り約定
                         else:
                             continue  # 終日 limit_upper を下回らず → 不約定
                     else:
-                        ep = op
+                        ep = round(op)
                 else:
-                    ep = po["lp"] * (1.0 + SLIPPAGE_STOP_PCT)
+                    ep = round(po["lp"] * (1.0 + SLIPPAGE_STOP_PCT))
             elif entry_type == "stop_sell":
-                ep = po["lp"] * (1.0 - SLIPPAGE_STOP_PCT)
+                ep = round(po["lp"] * (1.0 - SLIPPAGE_STOP_PCT))
             else:
-                ep = po["lp"] * (1.0 + SLIPPAGE_LIMIT_PCT)
+                ep = round(po["lp"] * (1.0 + SLIPPAGE_LIMIT_PCT))
 
             dtf = i - po["signal_idx"]
 
@@ -690,22 +690,21 @@ def run_limit_backtest(
                         "signal_price": last_cl,
                     })
 
-    # 未決済ポジションを「保有中」として記録
+    # 未決済ポジションを「保有中」として記録 (手数料は含めない: 未実現損益なので)
     cl_last = float(df.iloc[-1]["close"])
     for pos in active_positions:
         ep        = pos["entry_p"]
         hold_days = len(df) - 1 - pos["hold_start"]
-        fee = (ep + cl_last) * FIXED_QTY * FEE_PCT_ONE_WAY
         if is_short:
-            pnl = (ep - cl_last) * FIXED_QTY - fee
+            pnl = (ep - cl_last) * FIXED_QTY
             pct = (ep - cl_last) / ep * 100
         else:
-            pnl = (cl_last - ep) * FIXED_QTY - fee
+            pnl = (cl_last - ep) * FIXED_QTY
             pct = (cl_last - ep) / ep * 100
         trades.append(dict(
             entry_dt=pos["entry_dt"], exit_dt=df.index[-1],
             entry_p=ep, exit_p=cl_last, qty=FIXED_QTY,
-            pnl=pnl, pct=pct, fee=round(fee, 0),
+            pnl=pnl, pct=pct, fee=0.0,
             hold_days=hold_days, days_to_fill=pos["days_to_fill"],
             signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
             order_limit=pos["order_limit"], order_stop=pos["order_stop"],
