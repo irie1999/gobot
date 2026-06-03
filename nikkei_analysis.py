@@ -1725,9 +1725,10 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
     until = _TODAY
     since = until - timedelta(days=days)
 
-    all_trades: list[dict] = []
-    full_year_trades: list[dict] = []
-    # config横断の重複除外: 同一 (sym, strat, signal_dt) は最初のconfig分だけ表示
+    all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
+    full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
+    cfg_trades_map: dict = {}          # config別取引（サマリーテーブル用・デデュップなし）
+    # 取引リスト表示用: 同一 (sym, strat, signal_dt) は最初のconfig分だけ表示
     seen_global: set = set()
 
     for cfg in _PNL_CONFIGS:
@@ -1747,6 +1748,7 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 except Exception:
                     pass
 
+        cfg_trades_map[cfg["label"]] = []  # このconfigの取引（重複なし=同一configでの重複のみ除外）
         for it in items:
             sym  = it.get("symbol", "")
             name = it.get("name", "")
@@ -1765,11 +1767,6 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 exit_d   = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
                 entry_dt = t.get("entry_dt")
                 signal_dt = t.get("signal_dt")
-                # 同一銘柄×戦略×シグナル日は最初のconfig分だけ表示（config重複排除）
-                gkey = (sym, strat, signal_dt)
-                if gkey in seen_global:
-                    continue
-                seen_global.add(gkey)
                 key = (sym, strat, entry_dt, exit_dt)
                 if key in seen:
                     continue
@@ -1778,6 +1775,21 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": score, "rank": rank,
                         "exit_d_raw": exit_d, "pnl": t.get("pnl", 0)}
+                # サマリー用: config独立でカウント（他configとの重複は除外しない）
+                if since <= exit_d <= until:
+                    cfg_trades_map[cfg["label"]].append({**base,
+                        "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
+                        "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
+                        "entry_p":   t.get("entry_p", 0),
+                        "exit_p":    t.get("exit_p", 0),
+                        "hold_days": t.get("hold_days", 0),
+                        "reason":    t.get("reason", "") or "保有中",
+                    })
+                # 取引リスト・総KPI用: 同一シグナルは最初のconfig分だけ
+                gkey = (sym, strat, signal_dt)
+                if gkey in seen_global:
+                    continue
+                seen_global.add(gkey)
                 full_year_trades.append(base)
                 if since <= exit_d <= until:
                     all_trades.append({**base,
@@ -1807,14 +1819,11 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
   <div class="kpi"><div class="kpi-l">勝ち/負け</div><div class="kpi-v">{n_win}W / {n_total - n_win}L</div></div>
 </div>"""
 
-    # ── サマリーテーブル ──
-    by_label: dict = defaultdict(list)
-    for t in all_trades:
-        by_label[t["label"]].append(t)
+    # ── サマリーテーブル（各configの独立実績、cross-config重複なし）──
     sum_rows = ""
     for cfg in _PNL_CONFIGS:
         lbl    = cfg["label"]
-        trades = by_label.get(lbl, [])
+        trades = cfg_trades_map.get(lbl, [])
         n      = len(trades)
         wins   = sum(1 for t in trades if t["pnl"] > 0)
         pnl    = sum(t["pnl"] for t in trades)
