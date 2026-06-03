@@ -38,9 +38,26 @@ from backtest_limit_entry import (
     round_to_tick,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
+from compute_wf_scores import build_wf_scores, calc_wf_score, wf_rank
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
+
+# WFスコア辞書: wf_scores.json があれば読み込み、なければCSVから生成
+import json as _json
+_WF_SCORES_PATH = Path("wf_scores.json")
+if _WF_SCORES_PATH.exists():
+    with open(_WF_SCORES_PATH, encoding="utf-8") as _f:
+        _WF_SCORES: dict = _json.load(_f)
+else:
+    _WF_SCORES: dict = build_wf_scores()
+
+def get_wf_score(symbol: str, strategy: str) -> tuple[int, str] | None:
+    """WFスコアとランクを返す。データなしの場合はNone。"""
+    v = _WF_SCORES.get(f"{symbol}_{strategy}")
+    if v is None:
+        return None
+    return v["score"], v["rank"]
 
 
 def _fetch_live_price(symbol: str, fallback: float) -> float:
@@ -319,27 +336,47 @@ def build_html(all_items: list[dict], show_days: int,
         </tr>"""
 
     # シグナル行（当日新規のみ。ルックバック継続/保有中は除外）
-    signal_items = [(item, calc_recommend_score(item["period_results"]))
-                    for item in all_items
+    def _signal_sort_key(item):
+        wf = get_wf_score(item["symbol"], item["strategy"])
+        return wf[0] if wf else calc_recommend_score(item["period_results"])[0]
+
+    signal_items = [item for item in all_items
                     if item["today_sig"]
                     and not item["today_sig"].get("_pending_lookback")
                     and not item["today_sig"].get("_filled_holding")]
-    signal_items.sort(key=lambda x: x[1][0], reverse=True)
+    signal_items.sort(key=_signal_sort_key, reverse=True)
 
     signal_rows = ""
-    for item, (score, rank) in signal_items:
+    for item in signal_items:
         sig   = item["today_sig"]
         strat = item["strategy"]
+        # WFスコアを優先表示、なければin-sampleスコア
+        wf = get_wf_score(item["symbol"], strat)
+        if wf:
+            score, rank = wf
+            score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
+        else:
+            score, rank = calc_recommend_score(item["period_results"])
+            score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
+        # スコア帯に応じた行の強調
+        if wf and score >= 70:
+            row_style = "border-left:3px solid #22c55e"
+        elif wf and score >= 55:
+            row_style = "border-left:3px solid #f59e0b"
+        elif wf:
+            row_style = "border-left:3px solid #ef4444"
+        else:
+            row_style = ""
         # 最大決済日: シグナル日 + 約定期限(ENTRY_EXPIRE) + 最大保有(MAX_HOLD) 営業日
         _sig_dt = pd.to_datetime(sig['signal_date'])
         _max_exit = pd.bdate_range(start=_sig_dt, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
         max_exit_str = _max_exit.strftime("%Y-%m-%d")
         signal_rows += f"""
-        <tr>
+        <tr style="{row_style}">
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
-          <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score}点</td>
+          <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
@@ -382,10 +419,18 @@ def build_html(all_items: list[dict], show_days: int,
                          and not sig_m.get("_pending_lookback")
                          and not sig_m.get("_filled_holding")
                     else "")
+            wf_item = get_wf_score(item["symbol"], strat)
+            if wf_item:
+                wf_s, wf_r = wf_item
+                wf_cls  = "profit" if wf_s >= 70 else ("" if wf_s >= 55 else "loss")
+                wf_cell = f'<span class="{wf_cls}">{wf_r} {wf_s}</span>'
+            else:
+                wf_cell = '<span style="color:#64748b">-</span>'
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td class="score-cell">{wf_cell}</td>
           {cells}
           <td>{hold_cell}</td>
         </tr>"""
@@ -642,6 +687,7 @@ def build_html(all_items: list[dict], show_days: int,
   <thead>
     <tr>
       <th rowspan="2">銘柄</th><th rowspan="2">戦略</th>
+      <th rowspan="2" title="Walk-forwardスコア: out-of-sampleデータで評価した将来勝率の指標">WF<br>スコア</th>
       {period_headers}
       <th rowspan="2">平均<br>保有<br><small>({show_days}日)</small></th>
     </tr>
