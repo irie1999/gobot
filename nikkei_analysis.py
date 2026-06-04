@@ -1386,6 +1386,23 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
             _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
 
 
+def _fmt_score_cell(s: dict, col: str) -> str:
+    """シグナルテーブルのスコアセルHTML。WFスコアとおすすめスコアを両表示。"""
+    rank = s["rank"]
+    if s.get("is_wf") and s.get("wf_score") is not None:
+        rec = s.get("rec_score", "—")
+        return (
+            f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["wf_score"]}</span>'
+            f'<br><span style="font-size:0.68rem;color:#94a3b8">WF</span>'
+            f'<span style="font-size:0.68rem;color:#64748b"> / おすすめ:{rec}</span>'
+        )
+    else:
+        return (
+            f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["score"]}</span>'
+            f'<br><span style="font-size:0.68rem;color:#f59e0b">参考</span>'
+        )
+
+
 def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                        score_filter: int | None = None) -> str:
     """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。
@@ -1460,21 +1477,26 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             bt = mod.backtest_one(sym, name, strat)
             if not bt:
                 return None
-            # WFスコアを優先（out-of-sample）、なければin-sampleスコア
+            # おすすめスコアは常に計算
+            rec_score, rec_rank = _stop.calc_recommend_score(bt["period_results"])
+            # WFスコア（out-of-sample）があれば優先してソートキーに使う
             _get_wf = getattr(_stop, "get_wf_score", None)
             wf = _get_wf(sym, strat) if _get_wf else None
             if wf:
-                score, rank = wf
+                wf_score, wf_rank_str = wf
+                score, rank = wf_score, wf_rank_str
                 is_wf = True
             else:
-                score, rank = _stop.calc_recommend_score(bt["period_results"])
+                wf_score, wf_rank_str = None, None
+                score, rank = rec_score, rec_rank
                 is_wf = False
 
             # 全銘柄のトレード履歴を収集（スコア別勝率のため）
             max_period = max(bt["period_results"].keys())
             trade_log  = bt["period_results"][max_period].get("trade_log", [])
             bt_info = {"score": score, "trades": trade_log,
-                       "sym": sym, "name": name, "strat": strat, "is_wf": is_wf}
+                       "sym": sym, "name": name, "strat": strat, "is_wf": is_wf,
+                       "wf_score": wf_score, "rec_score": rec_score}
 
             # シグナル確認はプライマリconfigの銘柄のみ（重複シグナル防止）
             ki = (sym, strat, is_stop)
@@ -1499,6 +1521,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 "_sig": {
                     "symbol": sym, "name": name, "strategy": strat,
                     "score": score, "rank": rank, "is_wf": is_wf,
+                    "wf_score": wf_score, "wf_rank_str": wf_rank_str,
+                    "rec_score": rec_score,
                     "signal_date":  sig_dt,
                     "signal_price": sig.get("signal_price", 0),
                     "order_p":      order_p,
@@ -1830,7 +1854,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span><br>
     <span style="line-height:1.8">{src_html}</span></td>
   <td style="text-align:center">{tag}</td>
-  <td style="text-align:center"><span style="color:{col};font-weight:700">{s["rank"]}&nbsp;{s["score"]}</span><br><span style="font-size:0.68rem;color:{'#94a3b8' if s.get('is_wf') else '#f59e0b'}">{'WF' if s.get('is_wf') else '参考'}</span></td>
+  <td style="text-align:center">{ _fmt_score_cell(s, col) }</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
   <td style="text-align:right;color:#f59e0b">+{lim_pct:.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
