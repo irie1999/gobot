@@ -189,13 +189,12 @@ else:
 # ── Walk-forward fold 定義 (days ago from today) ──
 # (name, train_start, train_end, test_start, test_end)  すべて "今日からN日前"
 FOLDS: list[tuple[str, int, int, int, int]] = [
-    ("fold1", 730, 540, 540, 360),
-    ("fold2", 540, 360, 360, 180),
-    ("fold3", 360, 180, 180,   0),
+    ("fold1", 730, 370, 370, 180),  # TRAIN 12M / TEST 6M
+    ("fold2", 550, 180, 180,   0),  # TRAIN 12M / TEST 6M
 ]
 
 # ── 合格閾値 ─────────────────────────────────────────────────────
-TRAIN_MIN_TRADES = 3
+TRAIN_MIN_TRADES = 5   # 12M TRAINに合わせて引き上げ（旧:3）
 TRAIN_MIN_PF     = 1.5
 TRAIN_MIN_WR     = 55.0
 TEST_MIN_TRADES  = 2
