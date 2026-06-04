@@ -102,6 +102,148 @@ except Exception:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# WFスコア再実行チェック
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def check_wf_refresh_needed() -> dict:
+    """WFスコアの再実行要否をチェックして警告情報を返す。
+
+    Returns:
+        level       : "ok" / "info" / "warn" / "critical"
+        warnings    : 表示すべき警告メッセージのリスト
+        latest_date : 最新WF CSVの日付 (date | None)
+        days_elapsed: 最新CSV から今日までの日数 (int | None)
+        next_run_in : 次回推奨実行までの残日数 (int | None)
+    """
+    import csv as _csv_mod
+    from datetime import date as _date
+
+    warnings: list[str] = []
+    level = "ok"
+
+    # ── 1. walkforward_results/ の最新CSV日付 ──────────────────────────────
+    wf_dir = Path("walkforward_results")
+    latest_date: _date | None = None
+    if wf_dir.exists():
+        for f in sorted(wf_dir.glob("walkforward_*_????-??-??.csv")):
+            parts = f.stem.split("_")
+            if len(parts) < 3:
+                continue
+            date_str = parts[-1]
+            try:
+                d = _date.fromisoformat(date_str)
+                if latest_date is None or d > latest_date:
+                    latest_date = d
+            except ValueError:
+                continue
+
+    days_elapsed: int | None = None
+    next_run_in: int | None = None
+
+    if latest_date is None:
+        warnings.append(
+            "⚠️ WFスコアCSVが見つかりません。"
+            "scan_walkforward.py を実行して WFスコアを生成してください。"
+        )
+        level = "warn"
+    else:
+        days_elapsed = (_TODAY - latest_date).days
+        next_run_in  = max(0, 90 - days_elapsed)
+        if days_elapsed >= 180:
+            warnings.append(
+                f"🚨 WFスコアが {days_elapsed}日前 ({latest_date}) のデータです。"
+                f"半年以上経過 — scan_walkforward.py の再実行を強く推奨します。"
+            )
+            level = "critical"
+        elif days_elapsed >= 90:
+            warnings.append(
+                f"⚠️ WFスコアが {days_elapsed}日前 ({latest_date}) のデータです。"
+                f"3ヶ月経過 — scan_walkforward.py の再実行を推奨します。"
+            )
+            level = "warn"
+
+    # ── 2. forward_test_log.csv 直近14日の勝率チェック ──────────────────────
+    from datetime import timedelta as _td
+    fwd_log = Path("forward_test_log.csv")
+    if fwd_log.exists():
+        try:
+            cutoff = _TODAY - _td(days=14)
+            wins = losses = 0
+            with open(fwd_log, newline="", encoding="utf-8") as fp:
+                for row in _csv_mod.DictReader(fp):
+                    try:
+                        rd = _date.fromisoformat(row.get("record_date", ""))
+                        if rd < cutoff:
+                            continue
+                        status = row.get("status", "")
+                        if status == "target":
+                            wins += 1
+                        elif status in ("stop", "timeout"):
+                            losses += 1
+                    except (ValueError, KeyError):
+                        continue
+            total = wins + losses
+            if total >= 5:
+                wr = wins / total * 100
+                if wr < 50:
+                    warnings.append(
+                        f"📉 フォワードテスト直近14日: 勝率 {wr:.0f}% ({wins}勝{losses}敗) — "
+                        f"WATCHLISTの見直しを検討してください。"
+                    )
+                    if level == "ok":
+                        level = "warn"
+        except Exception:
+            pass
+
+    return {
+        "level":        level,
+        "warnings":     warnings,
+        "latest_date":  latest_date,
+        "days_elapsed": days_elapsed,
+        "next_run_in":  next_run_in,
+    }
+
+
+def _wf_refresh_banner_html(status: dict) -> str:
+    """check_wf_refresh_needed() の結果をHTMLバナーに変換。警告なしなら空文字。"""
+    if not status["warnings"]:
+        return ""
+
+    level = status["level"]
+    bg_map = {
+        "critical": ("#7f1d1d", "#fca5a5"),
+        "warn":     ("#451a03", "#fde68a"),
+        "info":     ("#1e3a5f", "#93c5fd"),
+    }
+    bg, fg = bg_map.get(level, ("#374151", "#d1d5db"))
+
+    items = "".join(
+        f'<li style="margin:4px 0">{w}</li>' for w in status["warnings"]
+    )
+
+    next_hint = ""
+    if status["next_run_in"] is not None and status["next_run_in"] > 0:
+        next_hint = (
+            f'<p style="margin:8px 0 0;font-size:0.82rem;opacity:0.85">'
+            f'次回推奨実行まで残り約 <strong>{status["next_run_in"]}日</strong>'
+            f'（目安: {status["latest_date"]} + 90日）</p>'
+        )
+
+    cmd_hint = (
+        '<p style="margin:8px 0 0;font-size:0.82rem;font-family:monospace;opacity:0.85">'
+        'python scan_walkforward.py &amp;&amp; python compute_wf_scores.py</p>'
+    )
+
+    return (
+        f'<div style="background:{bg};color:{fg};border-radius:8px;'
+        f'padding:14px 18px;margin-bottom:16px">'
+        f'<ul style="margin:0;padding-left:1.4em">{items}</ul>'
+        f'{next_hint}{cmd_hint}'
+        f'</div>'
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # データ取得 & トレンド判定
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2068,7 +2210,8 @@ function switchTab(id) {
 def build_html(close: pd.Series, trend: pd.Series, r: dict,
                periods: list[dict], up_periods: list[dict],
                years: int, ref_date, indicators: dict | None = None,
-               tab4_html: str = "", tab5_html: str = "") -> str:
+               tab4_html: str = "", tab5_html: str = "",
+               wf_banner: str = "") -> str:
     ref_str     = str(ref_date)
     is_past     = (ref_date != _TODAY)
     past_badge  = (f' <span style="background:#7c3aed;color:#fff;padding:2px 10px;'
@@ -2104,7 +2247,7 @@ def build_html(close: pd.Series, trend: pd.Series, r: dict,
 <style>{CSS}</style>
 </head>
 <body>
-<h1>日経平均 総合分析レポート{past_badge}</h1>
+{wf_banner}<h1>日経平均 総合分析レポート{past_badge}</h1>
 <p class="subtitle">
   基準日: {ref_str} ／ 分析期間: {close.index[0].date()} 〜 {ref_str} (過去{years}年) ／
   {ref_str}時点: <strong style="color:{trend_color}">{trend_ja} {r['cur']:,.0f}円</strong>
@@ -2199,6 +2342,18 @@ def main():
     last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
     print(f"{last_ja}トレンド継続: {last['days']}日 ({last['pct']:+.1f}%)")
 
+    # ── WFスコア再実行チェック ──────────────────────────────────────────────
+    wf_status = check_wf_refresh_needed()
+    for w in wf_status["warnings"]:
+        print(w, flush=True)
+    if wf_status["level"] == "ok" and wf_status["latest_date"]:
+        print(
+            f"WFスコア: {wf_status['latest_date']} 時点 "
+            f"(経過{wf_status['days_elapsed']}日 / 次回推奨まで約{wf_status['next_run_in']}日)",
+            flush=True,
+        )
+    wf_banner = _wf_refresh_banner_html(wf_status)
+
     tab4_html = ""
     tab5_html = ""
     sig_target = ref_date if args.date else None
@@ -2214,7 +2369,8 @@ def main():
     html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(
         build_html(close, trend, r, periods, up_timing, args.years, ref_date,
-                   indicators=indicators, tab4_html=tab4_html, tab5_html=tab5_html),
+                   indicators=indicators, tab4_html=tab4_html, tab5_html=tab5_html,
+                   wf_banner=wf_banner),
         encoding="utf-8"
     )
     print(f"生成: {html_path}")
