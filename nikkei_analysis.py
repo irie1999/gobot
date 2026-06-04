@@ -1387,19 +1387,18 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
 
 
 def _fmt_score_cell(s: dict, col: str) -> str:
-    """シグナルテーブルのスコアセルHTML。WFスコアとおすすめスコアを両表示。"""
+    """シグナルテーブルのスコアセルHTML。WFスコアとBTスコアを両表示。"""
     rank = s["rank"]
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
         return (
-            f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["wf_score"]}</span>'
-            f'<br><span style="font-size:0.68rem;color:#94a3b8">WF</span>'
-            f'<span style="font-size:0.68rem;color:#64748b"> / おすすめ:{rec}</span>'
+            f'<span style="color:{col};font-weight:700">WF&nbsp;{s["wf_score"]}</span>'
+            f'<span style="font-size:0.68rem;color:#64748b;display:block">{rank} / BT:{rec}</span>'
         )
     else:
         return (
             f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["score"]}</span>'
-            f'<br><span style="font-size:0.68rem;color:#f59e0b">参考</span>'
+            f'<br><span style="font-size:0.68rem;color:#f59e0b">BT(参考)</span>'
         )
 
 
