@@ -180,7 +180,7 @@ def main() -> None:
     new_path = Path(f"nikkei_analysis_v2_{date_str}.html")
 
     if old_path.exists():
-        old_path.rename(new_path)
+        old_path.replace(new_path)
         print(f"\nv2レポート生成完了: {new_path.resolve()}")
         if not _known.no_browser:
             webbrowser.open(new_path.resolve().as_uri())
