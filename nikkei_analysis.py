@@ -1931,10 +1931,15 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 continue
             _get_wf2 = getattr(_stop, "get_wf_score", None)
             wf2 = _get_wf2(sym, strat) if _get_wf2 else None
+            rec_score2, rec_rank2 = _stop.calc_recommend_score(period_results)
             if wf2:
-                score, rank = wf2
+                wf_score2, wf_rank_str2 = wf2
+                score, rank = wf_score2, wf_rank_str2
+                is_wf2 = True
             else:
-                score, rank = _stop.calc_recommend_score(period_results)
+                wf_score2, wf_rank_str2 = None, None
+                score, rank = rec_score2, rec_rank2
+                is_wf2 = False
             max_period    = max(period_results.keys())
             trade_log     = period_results[max_period].get("trade_log", [])
             seen: set     = set()
@@ -1953,6 +1958,7 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": score, "rank": rank,
+                        "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
                         "exit_d_raw": exit_d, "pnl": t.get("pnl", 0),
                         "reason": reason}
                 extra = {
@@ -2075,8 +2081,11 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
         tpc = "profit" if t["pnl"] > 0 else ("" if is_pending else "loss")
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
         sc  = t.get("score"); rk = t.get("rank")
-        sc_html = (f'<span style="color:{col_map.get(rk,"#94a3b8")};font-weight:600">{rk}&nbsp;{sc}</span>'
-                   if sc is not None and rk and rk != "-" else "")
+        if sc is not None and rk and rk != "-":
+            _col = col_map.get(rk, "#94a3b8")
+            sc_html = _fmt_score_cell(t, _col)
+        else:
+            sc_html = ""
         row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"' if is_pending else ""
         pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
         trade_rows += f"""<tr{row_style}>
