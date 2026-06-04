@@ -440,6 +440,7 @@ def run_limit_backtest(
     backtest_days: int,
     strategy_name: str,
     entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う） / "stop_sell"=逆指値売り
+    entry_risk_adjust: bool = False,  # True=ギャップ約定時に sp/tp を ep ベースに再計算 (R:R 維持)
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -449,6 +450,13 @@ def run_limit_backtest(
     entry_type="stop_sell": 安値 <= order_price で約定（逆指値売り・空売り）
                             order_p = close - atr*em, stop (損切り) = order_p + atr*sm (上方)
                             target (利確) = order_p - atr*tm (下方), PnL=(entry-exit)*qty
+
+    entry_risk_adjust=True の場合:
+      逆指値(stop)でギャップアップ約定 (ep > lp) 時、
+      sp / tp を (ep - lp) だけシフトして R:R を維持する。
+      例: lp=1000, ep=1030, sp=850, tp=1300
+        → sp_adj=880, tp_adj=1330 (損切幅・利確幅ともに atr*sm / atr*tm を維持)
+      False(デフォルト)は既存動作と同一。
 
     Returns: per-symbol result dict
     """
@@ -537,6 +545,7 @@ def run_limit_backtest(
                 continue
 
             # 約定価格計算 (整数円に丸める: 表示と計算の一致)
+            fill_type = "normal"
             if entry_type == "stop":
                 limit_upper = po["lp"] * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
                 if op >= po["lp"]:
@@ -544,10 +553,12 @@ def run_limit_backtest(
                         # ギャップアップ超過: 日中に指値上限以下に戻れば指値上限で約定
                         if lo <= limit_upper:
                             ep = round(limit_upper)  # 戻り約定
+                            fill_type = "gap_comeback"
                         else:
                             continue  # 終日 limit_upper を下回らず → 不約定
                     else:
                         ep = round(op)
+                        fill_type = "gap_open"
                 else:
                     ep = round(po["lp"] * (1.0 + SLIPPAGE_STOP_PCT))
             elif entry_type == "stop_sell":
@@ -555,20 +566,28 @@ def run_limit_backtest(
             else:
                 ep = round(po["lp"] * (1.0 + SLIPPAGE_LIMIT_PCT))
 
+            # entry_risk_adjust: ギャップ約定時に sp/tp を ep ベースに再計算して R:R を維持
+            use_sp = po["sp"]
+            use_tp = po["tp"]
+            if entry_risk_adjust and entry_type == "stop" and ep > po["lp"]:
+                delta  = ep - po["lp"]
+                use_sp = po["sp"] + delta
+                use_tp = po["tp"] + delta
+
             dtf = i - po["signal_idx"]
 
             # 約定と同日の決済チェック
-            hit_tgt = (hi >= po["tp"]) if not is_short else (lo <= po["tp"])
-            hit_stp = (lo <= po["sp"]) if not is_short else (hi >= po["sp"])
+            hit_tgt = (hi >= use_tp) if not is_short else (lo <= use_tp)
+            hit_stp = (lo <= use_sp) if not is_short else (hi >= use_sp)
 
             if hit_tgt or hit_stp:
-                xp      = po["tp"] if hit_tgt else po["sp"]
+                xp      = use_tp if hit_tgt else use_sp
                 xreason = "目標達成" if hit_tgt else "損切り"
                 if xreason == "損切り":
                     if is_short:
-                        xp = op if op >= po["sp"] else po["sp"] * (1.0 + SLIPPAGE_STOP_PCT)
+                        xp = op if op >= use_sp else use_sp * (1.0 + SLIPPAGE_STOP_PCT)
                     else:
-                        xp = op if op <= po["sp"] else po["sp"] * (1.0 - SLIPPAGE_STOP_PCT)
+                        xp = op if op <= use_sp else use_sp * (1.0 - SLIPPAGE_STOP_PCT)
                 if ep * 0.1 <= xp <= ep * 10.0:
                     fee = (ep + xp) * FIXED_QTY * FEE_PCT_ONE_WAY
                     if is_short:
@@ -584,14 +603,15 @@ def run_limit_backtest(
                         hold_days=0, days_to_fill=dtf,
                         signal_dt=po["signal_dt"], signal_price=po["signal_price"],
                         order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
-                        reason=xreason,
+                        fill_type=fill_type, reason=xreason,
                     ))
                 # 同日決済: active に入れない
             else:
                 # 当日決済なし → active に追加
                 new_active.append({
                     "entry_dt": dt, "entry_p": ep,
-                    "sp": po["sp"], "tp": po["tp"],
+                    "sp": use_sp, "tp": use_tp,
+                    "fill_type": fill_type,
                     "hold_start": i, "days_to_fill": dtf,
                     "signal_dt":    po["signal_dt"],
                     "signal_price": po["signal_price"],
@@ -652,6 +672,7 @@ def run_limit_backtest(
                 signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
                 order_limit=pos["order_limit"], order_stop=pos["order_stop"],
                 order_target=pos["order_target"],
+                fill_type=pos.get("fill_type", "normal"),
                 reason=exit_reason_pos,
             ))
 
@@ -709,6 +730,7 @@ def run_limit_backtest(
             signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
             order_limit=pos["order_limit"], order_stop=pos["order_stop"],
             order_target=pos["order_target"],
+            fill_type=pos.get("fill_type", "normal"),
             reason="保有中",
         ))
 
