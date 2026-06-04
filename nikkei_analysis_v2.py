@@ -96,32 +96,49 @@ NEW_BRK_WATCHLIST: list[tuple[str, str, str]] = [
     ("6952.T", "カシオ計算機",                           "VOL"),  # folds=2  7取引 WR71% PF3.80 DD1.3%
 ]
 
-# ── 4. WATCHLIST を適用 ───────────────────────────────────────────────────────
-_stop.WATCHLIST = list(NEW_STOP_WATCHLIST)
-_brk.WATCHLIST  = list(NEW_BRK_WATCHLIST)
+# ── 4. v2 用 WF スコアファイルを読み込む ────────────────────────────────────
+#   wf_scores.json     → nikkei_analysis.py 専用 (触らない)
+#   wf_scores_v2.json  → nikkei_analysis_v2.py 専用
+import json as _json
 
-# ── 5. importlib.reload フック (WATCHLIST パッチを reload 後も維持) ──────────
+_WF_V2_PATH = Path("wf_scores_v2.json")
+if _WF_V2_PATH.exists():
+    with open(_WF_V2_PATH, encoding="utf-8") as _f:
+        _WF_V2_SCORES: dict = _json.load(_f)
+else:
+    from compute_wf_scores import build_wf_scores as _bwf
+    _WF_V2_SCORES = _bwf()
+
+# ── 5. WATCHLIST と WF スコアを適用 ─────────────────────────────────────────
+_stop.WATCHLIST  = list(NEW_STOP_WATCHLIST)
+_brk.WATCHLIST   = list(NEW_BRK_WATCHLIST)
+_stop._WF_SCORES = dict(_WF_V2_SCORES)
+_brk._WF_SCORES  = dict(_WF_V2_SCORES)
+
+# ── 6. importlib.reload フック (WATCHLIST と WF スコアを reload 後も維持) ────
 #  nikkei_analysis.py は TRADING_MODE 切替のために _stop/_brk を reload() する。
-#  reload 後も WATCHLIST が新WATCHLISTに戻るよう、フックで再適用する。
+#  reload すると WATCHLIST と _WF_SCORES が元に戻るため、フックで再適用する。
 _orig_reload = _importlib.reload
 
 def _watchlist_preserving_reload(module):
     result = _orig_reload(module)
     if getattr(module, "__name__", "") == "check_signals_stop":
-        result.WATCHLIST = list(NEW_STOP_WATCHLIST)
+        result.WATCHLIST  = list(NEW_STOP_WATCHLIST)
+        result._WF_SCORES = dict(_WF_V2_SCORES)
     elif getattr(module, "__name__", "") == "check_signals_breakout":
-        result.WATCHLIST = list(NEW_BRK_WATCHLIST)
+        result.WATCHLIST  = list(NEW_BRK_WATCHLIST)
+        result._WF_SCORES = dict(_WF_V2_SCORES)
     return result
 
 _importlib.reload = _watchlist_preserving_reload
 
-# ── 6. nikkei_analysis を import (パッチ済み WATCHLIST が使われる) ────────────
+# ── 7. nikkei_analysis を import (パッチ済み WATCHLIST/スコアが使われる) ──────
 import nikkei_analysis as _na  # noqa: E402
 
-# ── 7. reload フックを元に戻す ────────────────────────────────────────────────
+# ── 8. reload フックを元に戻す ────────────────────────────────────────────────
 _importlib.reload = _orig_reload
 
-# ── 8. PNL タブのラベルを v2 用に更新 ────────────────────────────────────────
+# ── 9. PNL タブのラベルを v2 用に更新 ────────────────────────────────────────
 for _cfg in _na._PNL_CONFIGS:
     if _cfg.get("label") == "既存版 conservative":
         _cfg["label"] = "v2新WL conservative"

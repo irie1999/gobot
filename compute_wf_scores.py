@@ -102,11 +102,17 @@ def build_wf_scores() -> dict:
 
 
 if __name__ == "__main__":
+    import argparse as _argparse
+    _p = _argparse.ArgumentParser(description="WFスコアを計算して JSON に保存")
+    _p.add_argument("--output", type=Path, default=Path("wf_scores.json"),
+                    help="出力JSONパス (デフォルト: wf_scores.json)")
+    _args = _p.parse_args()
+
     scores = build_wf_scores()
     if not scores:
         print("⚠️  walkforward_results/ にCSVがありません。先に scan_walkforward.py を実行してください。")
     else:
-        out = Path("wf_scores.json")
+        out = _args.output
         with open(out, "w", encoding="utf-8") as fp:
             json.dump(scores, fp, ensure_ascii=False, indent=2)
         print(f"✅  WFスコアを {len(scores)} 件保存: {out}")
