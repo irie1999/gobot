@@ -33,12 +33,15 @@ from pathlib import Path
 WF_DIR = Path("walkforward_results")
 
 
+MAX_FOLDS = 2  # scan_walkforward.py の FOLDS 数に合わせる
+
+
 def calc_wf_score(wr_pct: float, pf: float, folds: int) -> int:
     """WFスコア (0-100) を計算。"""
     wr_pts   = max(0.0, min(50.0, (wr_pct - 45.0) / 40.0 * 50.0))
     pf_cap   = min(pf if not math.isinf(pf) else 10.0, 10.0)
     pf_pts   = max(0.0, min(30.0, (pf_cap - 1.0) / 4.0 * 30.0))
-    fold_pts = (folds / 3.0) * 20.0
+    fold_pts = (folds / MAX_FOLDS) * 20.0
     return round(wr_pts + pf_pts + fold_pts)
 
 
