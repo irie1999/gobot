@@ -2044,30 +2044,58 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
     if dates:
         d_min, d_max = min(dates), max(dates)
         period_note = f"{d_min} 〜 {d_max} / {len(full_year_trades)}取引"
+    def _band_stats(trades):
+        n    = len(trades)
+        wins = sum(1 for t in trades if t["pnl"] > 0)
+        pnl  = sum(t["pnl"] for t in trades)
+        gp   = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+        gl   = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        avg  = pnl / n if n else 0
+        return n, wins, pnl, gp, gl, pf, avg
+
     fine_rows = ""
     for lo, hi, lbl_s, col in score_buckets:
         tr = [t for t in full_year_trades if t.get("score") is not None and lo <= t["score"] < hi]
         n  = len(tr)
         if not n:
             continue
-        wins   = sum(1 for t in tr if t["pnl"] > 0)
-        pnl    = sum(t["pnl"] for t in tr)
-        avg    = pnl / n
-        wr_s   = wins / n * 100
-        gp     = sum(t["pnl"] for t in tr if t["pnl"] > 0)
-        gl     = abs(sum(t["pnl"] for t in tr if t["pnl"] < 0))
-        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        n, wins, pnl, gp, gl, pf, avg = _band_stats(tr)
         pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wr_s   = wins / n * 100
         lpc    = "profit" if pnl >= 0 else "loss"
         apc    = "profit" if avg >= 0 else "loss"
-        border = ' style="border-top:2px solid #334155"' if lo in (40,60,80) else ""
-        fine_rows += f"""<tr{border}>
-  <td style="color:{col};font-weight:600;text-align:left">{lbl_s}</td>
-  <td>{n}</td><td>{wr_s:.1f}%</td><td>{pf_s}</td>
-  <td class="profit" style="text-align:right">+{gp:,.0f}円</td>
-  <td class="loss"   style="text-align:right">-{gl:,.0f}円</td>
+        border_style = "border-top:2px solid #334155;" if lo in (40,60,80) else ""
+        fine_rows += f"""<tr style="{border_style}">
+  <td style="color:{col};font-weight:700;text-align:left">{lbl_s}</td>
+  <td style="font-weight:700">{n}</td>
+  <td style="font-weight:700">{wr_s:.1f}%</td>
+  <td style="font-weight:700">{pf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{gl:,.0f}円</td>
   <td class="{lpc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
-  <td class="{apc}"  style="text-align:right">{avg:+,.0f}円</td>
+  <td class="{apc}"  style="text-align:right;font-weight:700">{avg:+,.0f}円</td>
+</tr>"""
+        # スクリプト別内訳（cfgの順序で表示）
+        for cfg in _PNL_CONFIGS:
+            sub = [t for t in tr if t.get("label") == cfg["label"]]
+            if not sub:
+                continue
+            sn, sw, sp, sgp, sgl, spf, savg = _band_stats(sub)
+            spf_s = "∞" if spf == float("inf") else f"{spf:.2f}"
+            swr   = sw / sn * 100
+            slpc  = "profit" if sp >= 0 else "loss"
+            sapc  = "profit" if savg >= 0 else "loss"
+            dot   = f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{cfg["color"]};margin-right:5px;vertical-align:middle"></span>'
+            fine_rows += f"""<tr style="background:#0f172a">
+  <td style="text-align:left;padding-left:20px;color:#94a3b8;font-size:0.8rem">{dot}{cfg["label"]}</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{sn}</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{swr:.1f}%</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{spf_s}</td>
+  <td class="profit" style="text-align:right;font-size:0.8rem">+{sgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-size:0.8rem">-{sgl:,.0f}円</td>
+  <td class="{slpc}" style="text-align:right;font-size:0.8rem">{sp:+,.0f}円</td>
+  <td class="{sapc}" style="text-align:right;font-size:0.8rem">{savg:+,.0f}円</td>
 </tr>"""
 
     # ── 取引明細テーブル ──
