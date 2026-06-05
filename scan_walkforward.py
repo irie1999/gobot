@@ -391,7 +391,31 @@ def main() -> None:
                             help="積極利確モード (tm=1.5, 目標+4.5%%)")
     mode_group.add_argument("--conservative", action="store_true",
                             help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
+    holdout_group = parser.add_mutually_exclusive_group()
+    holdout_group.add_argument("--holdout-days", type=int, default=0,
+                               help="直近N日をホールドアウト除外。Fold境界を全て+N日ずらす (例: 65)")
+    holdout_group.add_argument("--holdout-end", type=str, default=None,
+                               help="ホールドアウト終了日 YYYY-MM-DD。その日以降をテスト対象外にする")
     args = parser.parse_args()
+
+    # ── ホールドアウト計算 ──────────────────────────────────────────
+    holdout_days = 0
+    if args.holdout_days > 0:
+        holdout_days = args.holdout_days
+    elif args.holdout_end:
+        holdout_end_date = datetime.strptime(args.holdout_end, "%Y-%m-%d").date()
+        holdout_days = (TODAY - holdout_end_date).days
+        if holdout_days < 0:
+            print(f"[ERROR] --holdout-end {args.holdout_end} は未来日です", file=sys.stderr)
+            sys.exit(1)
+
+    if holdout_days > 0:
+        holdout_end_date = TODAY - timedelta(days=holdout_days)
+        FOLDS[:] = [
+            (n, ts + holdout_days, te + holdout_days,
+                vs + holdout_days, ve + holdout_days)
+            for n, ts, te, vs, ve in FOLDS
+        ]
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
     effective_max_price = args.max_price
@@ -427,6 +451,8 @@ def main() -> None:
     print(f"  Folds     : {len(FOLDS)}")
     print(f"  Workers   : {args.workers}")
     print(f"  モード    : {TRADING_MODE}")
+    if holdout_days > 0:
+        print(f"  ホールドアウト: 直近 {holdout_days} 日 ({holdout_end_date} 以降をテスト対象外)")
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
@@ -481,7 +507,8 @@ def main() -> None:
         # ── CSV 保存 (全候補) ──
         # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
         mode_suffix = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
-        csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}_{TODAY}.csv"
+        holdout_suffix = f"_holdout{holdout_days}d" if holdout_days > 0 else ""
+        csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
             "folds_passed",
