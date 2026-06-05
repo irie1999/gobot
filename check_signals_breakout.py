@@ -170,6 +170,18 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     return score, rank
 
 
+def apply_atr_penalty(score: int, stop_loss_pct: float) -> tuple[int, str]:
+    """
+    損切り幅(ATR幅)が広い時にスコアを減点。
+    基準7%以下: ペナルティなし。7%超: 線形減点、最大50%減(37%超で頭打ち)。
+    Returns: (adjusted_score, atr_note)  atr_noteは "" (ペナルティなし) or "17.8%" 形式
+    """
+    if stop_loss_pct <= 7.0:
+        return score, ""
+    multiplier = max(0.5, 1.0 - (stop_loss_pct - 7.0) / 30.0)
+    return round(score * multiplier), f"{stop_loss_pct:.1f}%"
+
+
 def check_signal_on_date(symbol: str, strategy: str,
                          target_date=None) -> dict | None:
     """target_date の前営業日にシグナルが出ているか確認。"""
@@ -211,6 +223,7 @@ def check_signal_on_date(symbol: str, strategy: str,
     tp          = order_p + atr_v * tm
     # 逆指値→指値注文の指値上限 (kabu 発注時 AfterHitPrice 用)
     limit_entry = order_p * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
+    stop_loss_pct = (order_p - sl) / order_p * 100 if order_p > 0 else 0.0
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
@@ -223,6 +236,7 @@ def check_signal_on_date(symbol: str, strategy: str,
         current_price=current_p,
         signal_date=sig_date,
         signal_price=round(close_prev, 0),
+        stop_loss_pct=round(stop_loss_pct, 1),
     )
 
 
@@ -347,7 +361,10 @@ def build_html(all_items: list[dict], show_days: int,
     # シグナル行（当日新規のみ。ルックバック継続/保有中は除外）
     def _signal_sort_key(item):
         wf = get_wf_score(item["symbol"], item["strategy"])
-        return wf[0] if wf else calc_recommend_score(item["period_results"])[0]
+        base = wf[0] if wf else calc_recommend_score(item["period_results"])[0]
+        stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
+        adj, _ = apply_atr_penalty(base, stop_pct)
+        return adj
 
     signal_items = [item for item in all_items
                     if item["today_sig"]
@@ -357,15 +374,26 @@ def build_html(all_items: list[dict], show_days: int,
 
     signal_rows = ""
     for item in signal_items:
-        sig   = item["today_sig"]
-        strat = item["strategy"]
+        sig      = item["today_sig"]
+        strat    = item["strategy"]
+        stop_pct = sig.get("stop_loss_pct", 0.0)
         wf = get_wf_score(item["symbol"], strat)
         if wf:
-            score, rank = wf
-            score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
+            raw_score, _ = wf
+            score, atr_note = apply_atr_penalty(raw_score, stop_pct)
+            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            if atr_note:
+                score_label = f"{score}点<br><small style='color:#f87171;font-size:10px'>WF(ATR {atr_note})</small>"
+            else:
+                score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
         else:
-            score, rank = calc_recommend_score(item["period_results"])
-            score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
+            raw_score, _ = calc_recommend_score(item["period_results"])
+            score, atr_note = apply_atr_penalty(raw_score, stop_pct)
+            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            if atr_note:
+                score_label = f"{score}点<br><small style='color:#f87171;font-size:10px'>参考(ATR {atr_note})</small>"
+            else:
+                score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
         if wf and score >= 70:
             row_style = "border-left:3px solid #22c55e"
