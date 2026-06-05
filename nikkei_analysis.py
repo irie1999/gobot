@@ -1410,37 +1410,28 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
 
     # config label → スクリプト名マッピング
-    _SCRIPT_NAME = {
-        "既存版 conservative": "run_signals.py --conservative",
-        "既存版 aggressive":   "run_signals.py --aggressive",
-        "WF conservative":    "run_signals_wf.py --conservative",
-        "WF aggressive":      "run_signals_wf.py --aggressive",
-        "NOLIMIT WF":         "run_signals_nolimit.py",
-        "WF+既存統合":        "run_signals_merged.py",
-    }
-
     # 全configから重複排除した (sym, name, strat, is_stop) リストを作成
     # 各 (sym, strat) がどのスクリプトに含まれるかも記録
-    # (sym, strat) → 出典スクリプト名リスト / 主configインデックス
-    source_map: dict = {}   # (sym, strat) -> [script_name, ...]
+    # (sym, strat) → 出典 (label, color) リスト / 主configインデックス
+    source_map: dict = {}   # (sym, strat) -> [(label, color), ...]
     primary_cfg: dict = {}  # (sym, strat, is_stop) -> cfg
     seen: set = set()
     all_items: list = []
     for cfg in _PNL_CONFIGS:
-        script = _SCRIPT_NAME.get(cfg["label"], cfg["label"])
+        entry = (cfg["label"], cfg["color"])
         for sym, name, strat in cfg["stop_wl"]:
             k = (sym, strat)
             source_map.setdefault(k, [])
-            if script not in source_map[k]:
-                source_map[k].append(script)
+            if entry not in source_map[k]:
+                source_map[k].append(entry)
             ki = (sym, strat, True)
             if ki not in seen:
                 seen.add(ki); all_items.append((sym, name, strat, True)); primary_cfg[ki] = cfg
         for sym, name, strat in cfg["brk_wl"]:
             k = (sym, strat)
             source_map.setdefault(k, [])
-            if script not in source_map[k]:
-                source_map[k].append(script)
+            if entry not in source_map[k]:
+                source_map[k].append(entry)
             ki = (sym, strat, False)
             if ki not in seen:
                 seen.add(ki); all_items.append((sym, name, strat, False)); primary_cfg[ki] = cfg
@@ -1849,17 +1840,22 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         tag      = f'<span class="tag tag-{s["strategy"].lower()}">{s["strategy"]}</span>'
-        src_html = " ".join(
-            f'<code style="background:#1e293b;color:#94a3b8;font-size:0.7rem;padding:1px 5px;border-radius:4px">python {sc}</code>'
-            for sc in s.get("sources", [])
-        )
+        src_parts = []
+        for src in s.get("sources", []):
+            lbl, clr = src if isinstance(src, tuple) else (src, "#475569")
+            src_parts.append(
+                f'<span style="background:{clr};color:#0f172a;font-size:0.65rem;'
+                f'font-weight:700;padding:1px 7px;border-radius:3px;white-space:nowrap;'
+                f'display:inline-block;margin:1px 2px">{lbl}</span>'
+            )
+        src_html = "".join(src_parts)
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
     <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span><br>
-    <span style="line-height:1.8">{src_html}</span></td>
+    <span style="display:inline-flex;flex-wrap:wrap;gap:2px;margin-top:3px">{src_html}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{ _fmt_score_cell(s, col) }</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
