@@ -2027,7 +2027,9 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
   <td>{n}</td><td>{wins}</td>
   <td>{"—" if not n else f"{wr_l:.1f}%"}</td>
   <td>{"—" if not n else pf_s}</td>
-  <td class="{lpc}">{"—" if not n else f"{pnl:+,.0f}円"}</td>
+  <td class="profit" style="text-align:right">{"—" if not n else f"+{gp:,.0f}円"}</td>
+  <td class="loss"   style="text-align:right">{"—" if not n else f"-{gl:,.0f}円"}</td>
+  <td class="{lpc}"  style="text-align:right;font-weight:700">{"—" if not n else f"{pnl:+,.0f}円"}</td>
 </tr>"""
 
     # ── スコア細粒度分析 ──
@@ -2118,7 +2120,10 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
 <table>
   <thead><tr>
     <th style="text-align:left">スクリプト</th>
-    <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>損益</th>
+    <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th>
   </tr></thead>
   <tbody>{sum_rows}</tbody>
 </table>
