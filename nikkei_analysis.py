@@ -2064,8 +2064,10 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
         fine_rows += f"""<tr{border}>
   <td style="color:{col};font-weight:600;text-align:left">{lbl_s}</td>
   <td>{n}</td><td>{wr_s:.1f}%</td><td>{pf_s}</td>
-  <td class="{lpc}">{pnl:+,.0f}円</td>
-  <td class="{apc}">{avg:+,.0f}円</td>
+  <td class="profit" style="text-align:right">+{gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right">-{gl:,.0f}円</td>
+  <td class="{lpc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
+  <td class="{apc}"  style="text-align:right">{avg:+,.0f}円</td>
 </tr>"""
 
     # ── 取引明細テーブル ──
@@ -2129,10 +2131,13 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
 </table>
 
 <h2>スコア別実績（365日全取引 / {period_note}）</h2>
-<table style="max-width:580px">
+<table>
   <thead><tr>
     <th style="text-align:left">スコア帯</th>
-    <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th><th>平均損益/取引</th>
   </tr></thead>
   <tbody>{fine_rows}</tbody>
 </table>
