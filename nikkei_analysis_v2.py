@@ -235,9 +235,9 @@ def main() -> None:
                     help="v2新WL conservative のシグナル・損益のみ表示")
     _known, _ = _p.parse_known_args()
 
-    # --v2c は --config 'v2新WL conservative' に展開し、argv から --v2c 自体は除去
+    # --v2c / --aggressive は nikkei_analysis.py が知らないので除去してから渡す
     _orig_argv = list(sys.argv)
-    sys.argv = [a for a in sys.argv if a != "--v2c"]
+    sys.argv = [a for a in sys.argv if a not in ("--v2c", "--aggressive")]
     if _known.v2c and "--config" not in sys.argv:
         sys.argv.append("--config")
         sys.argv.append("v2新WL conservative")
