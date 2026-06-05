@@ -1843,7 +1843,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
-        tag      = f'<span class="tag tag-{s["strategy"].lower()}">{s["strategy"]}</span>'
+        if stop_pct > 15:
+            atr_badge = "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"
+        elif stop_pct > 10:
+            atr_badge = "<span style='background:#f97316;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR高</span>"
+        elif stop_pct > 7:
+            atr_badge = "<span style='background:#eab308;color:#111;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR↑</span>"
+        else:
+            atr_badge = ""
+        tag      = f'<span class="tag tag-{s["strategy"].lower()}">{s["strategy"]}</span>{atr_badge}'
         src_parts = []
         for src in s.get("sources", []):
             lbl, clr = src if isinstance(src, tuple) else (src, "#475569")
