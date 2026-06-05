@@ -1470,7 +1470,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
 
         def _check_one(item, _td=target_date, _ms=min_score, _sm=source_map,
-                       _cfg_label=cfg["label"]):
+                       _cfg_label=cfg["label"], _cfg_color=cfg["color"]):
             sym, name, strat, is_stop = item
             mod = _stop if is_stop else _brk
             bt = mod.backtest_one(sym, name, strat)
@@ -1495,7 +1495,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             trade_log  = bt["period_results"][max_period].get("trade_log", [])
             bt_info = {"score": score, "trades": trade_log,
                        "sym": sym, "name": name, "strat": strat, "is_wf": is_wf,
-                       "wf_score": wf_score, "rec_score": rec_score}
+                       "wf_score": wf_score, "rec_score": rec_score,
+                       "cfg_label": _cfg_label, "cfg_color": _cfg_color}
 
             # シグナル確認はプライマリconfigの銘柄のみ（重複シグナル防止）
             ki = (sym, strat, is_stop)
@@ -1712,16 +1713,18 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 exit_d = t["exit_dt"].date() if hasattr(t["exit_dt"], "date") else t["exit_dt"]
                 entry_d = t["entry_dt"].date() if hasattr(t.get("entry_dt"), "date") else t.get("entry_dt")
                 detail_trades.append({
-                    "sym":      info["sym"],
-                    "name":     info["name"],
-                    "strat":    info["strat"],
-                    "exit_d":   exit_d,
-                    "entry_d":  entry_d,
-                    "entry_p":  t.get("entry_p", 0),
-                    "exit_p":   t.get("exit_p", 0),
-                    "hold":     t.get("hold_days", 0),
-                    "pnl":      t.get("pnl", 0),
-                    "reason":   t.get("reason", "") or "—",
+                    "sym":       info["sym"],
+                    "name":      info["name"],
+                    "strat":     info["strat"],
+                    "exit_d":    exit_d,
+                    "entry_d":   entry_d,
+                    "entry_p":   t.get("entry_p", 0),
+                    "exit_p":    t.get("exit_p", 0),
+                    "hold":      t.get("hold_days", 0),
+                    "pnl":       t.get("pnl", 0),
+                    "reason":    t.get("reason", "") or "—",
+                    "cfg_label": info.get("cfg_label", ""),
+                    "cfg_color": info.get("cfg_color", "#64748b"),
                 })
         detail_trades.sort(key=lambda x: x["exit_d"], reverse=True)
 
@@ -1731,11 +1734,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             for dt in detail_trades:
                 tpc = "profit" if dt["pnl"] > 0 else "loss"
                 tag = f'<span class="tag tag-{dt["strat"].lower()}">{dt["strat"]}</span>'
+                cfg_c = dt.get("cfg_color", "#64748b")
+                cfg_l = dt.get("cfg_label", "")
+                cfg_badge = f'<span style="background:{cfg_c};color:#0f172a;font-size:0.68rem;font-weight:700;padding:1px 6px;border-radius:3px;white-space:nowrap">{cfg_l}</span>'
                 det_rows += f"""<tr>
   <td style="color:#94a3b8">{dt['exit_d']}</td>
   <td class="sym" style="text-align:left">{dt['sym']}<br>
     <span style="color:#64748b;font-size:0.75rem">{dt['name']}</span></td>
   <td style="text-align:center">{tag}</td>
+  <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{dt['entry_p']:,.0f}</td>
   <td style="text-align:right">{dt['exit_p']:,.0f}</td>
   <td style="text-align:right">{dt['hold']}日</td>
@@ -1750,6 +1757,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th>決済日</th>
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
+    <th>設定</th>
     <th>約定値</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー日</th>
   </tr></thead>
@@ -2088,10 +2096,14 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
             sc_html = ""
         row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"' if is_pending else ""
         pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
+        cfg_color = t.get("color", "#64748b")
+        cfg_label = t.get("label", "")
+        cfg_badge = f'<span style="background:{cfg_color};color:#0f172a;font-size:0.68rem;font-weight:700;padding:1px 6px;border-radius:3px;white-space:nowrap">{cfg_label}</span>'
         trade_rows += f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
   <td style="text-align:center">{tag}</td>
+  <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{t["entry_p"]:,.0f}</td>
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
@@ -2100,7 +2112,7 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="9" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+        trade_rows = f'<tr><td colspan="10" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2131,6 +2143,7 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
     <th>決済日</th>
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
+    <th>設定</th>
     <th>約定値</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
