@@ -352,10 +352,16 @@ def build_html(all_items: list[dict], show_days: int,
     # シグナル行（当日新規のみ。ルックバック継続/保有中は除外）
     def _signal_sort_key(item):
         wf = get_wf_score(item["symbol"], item["strategy"])
-        base = wf[0] if wf else calc_recommend_score(item["period_results"])[0]
-        stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
-        adj, _ = apply_atr_penalty(base, stop_pct)
-        return adj
+        return wf[0] if wf else calc_recommend_score(item["period_results"])[0]
+
+    def _atr_badge(stop_pct: float) -> str:
+        if stop_pct > 15:
+            return "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"
+        if stop_pct > 10:
+            return "<span style='background:#f97316;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR高</span>"
+        if stop_pct > 7:
+            return "<span style='background:#eab308;color:#111;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR↑</span>"
+        return ""
 
     signal_items = [item for item in all_items
                     if item["today_sig"]
@@ -368,24 +374,14 @@ def build_html(all_items: list[dict], show_days: int,
         sig      = item["today_sig"]
         strat    = item["strategy"]
         stop_pct = sig.get("stop_loss_pct", 0.0)
-        # WFスコアを優先表示、なければin-sampleスコア、ATRペナルティを適用
+        # WFスコアを優先表示、なければin-sampleスコア（スコアはATR非依存）
         wf = get_wf_score(item["symbol"], strat)
         if wf:
-            raw_score, _ = wf
-            score, atr_note = apply_atr_penalty(raw_score, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
-            if atr_note:
-                score_label = f"{score}点<br><small style='color:#f87171;font-size:10px'>WF(ATR {atr_note})</small>"
-            else:
-                score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
+            score, rank = wf
+            score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
         else:
-            raw_score, _ = calc_recommend_score(item["period_results"])
-            score, atr_note = apply_atr_penalty(raw_score, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
-            if atr_note:
-                score_label = f"{score}点<br><small style='color:#f87171;font-size:10px'>参考(ATR {atr_note})</small>"
-            else:
-                score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
+            score, rank = calc_recommend_score(item["period_results"])
+            score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
         # スコア帯に応じた行の強調
         if wf and score >= 70:
@@ -403,14 +399,14 @@ def build_html(all_items: list[dict], show_days: int,
         signal_rows += f"""
         <tr style="{row_style}">
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
-          <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td><span class="tag tag-{strat.lower()}">{strat}</span>{_atr_badge(stop_pct)}</td>
           <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
           <td class="stop">{sig['order_price']:,.0f}</td>
           <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
-          <td class="loss">{sig['stop_price']:,.0f}</td>
+          <td class="loss">{sig['stop_price']:,.0f}<br><small style="color:#94a3b8;font-size:10px">-{stop_pct:.1f}%</small></td>
           <td class="profit">{sig['target_price']:,.0f}</td>
           <td style="color:#94a3b8">{MAX_HOLD}日</td>
           <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>

@@ -471,31 +471,19 @@ def main() -> None:
     all_sigs: list[tuple] = []
     for item in stop_items:
         if _is_new_signal(item):
-            raw, rank = _stop.calc_recommend_score(item["period_results"])
-            stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
-            score, _ = _stop.apply_atr_penalty(raw, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            score, rank = _stop.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "逆指値B"))
     for item in brk_items:
         if _is_new_signal(item):
-            raw, rank = _brk.calc_recommend_score(item["period_results"])
-            stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
-            score, _ = _brk.apply_atr_penalty(raw, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            score, rank = _brk.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "BRK"))
     for item in short_items:
         if _is_new_signal(item):
-            raw, rank = _short.calc_recommend_score(item["period_results"])
-            stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
-            score, _ = _short.apply_atr_penalty(raw, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            score, rank = _short.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショート"))
     for item in sbrk_items:
         if _is_new_signal(item):
-            raw, rank = _sbrk.calc_recommend_score(item["period_results"])
-            stop_pct = item["today_sig"].get("stop_loss_pct", 0.0)
-            score, _ = _sbrk.apply_atr_penalty(raw, stop_pct)
-            rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
+            score, rank = _sbrk.calc_recommend_score(item["period_results"])
             all_sigs.append((item, score, rank, "ショートBRK"))
     all_sigs.sort(key=lambda x: x[1], reverse=True)
 
