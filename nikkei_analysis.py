@@ -2004,19 +2004,36 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                             for k, v in cfg_trades_map.items()}
 
     # ── KPI (発注中=未約定は除外) ──
+    # all_trades は (sym, strat, signal_dt) で重複除外済み（同一シグナルは最初のconfigのみ）
     kpi_trades = [t for t in all_trades if t.get("reason") != "発注中"]
     n_total = len(kpi_trades)
     n_win   = sum(1 for t in kpi_trades if t["pnl"] > 0)
     pnl_sum = sum(t["pnl"] for t in kpi_trades)
     wr      = n_win / n_total * 100 if n_total else 0.0
     pc      = "profit" if pnl_sum >= 0 else "loss"
+    # 設定別単純合計（重複あり）を別途計算 → サマリーテーブルのフッターに使う
+    _all_cfg = [t for v in cfg_trades_map.values() for t in v]
+    cfg_n_all   = len(_all_cfg)
+    cfg_win_all = sum(1 for t in _all_cfg if t["pnl"] > 0)
+    cfg_pnl_all = sum(t["pnl"] for t in _all_cfg)
+    cfg_gp_all  = sum(t["pnl"] for t in _all_cfg if t["pnl"] > 0)
+    cfg_gl_all  = abs(sum(t["pnl"] for t in _all_cfg if t["pnl"] < 0))
+    cfg_pf_all  = cfg_gp_all / cfg_gl_all if cfg_gl_all > 0 else (float("inf") if cfg_gp_all > 0 else 0.0)
+    cfg_pf_all_s = "∞" if cfg_pf_all == float("inf") else f"{cfg_pf_all:.2f}"
+    cfg_lpc_all  = "profit" if cfg_pnl_all >= 0 else "loss"
+    # 重複除外合計（= 全体KPIと同じ数値）
+    dedup_gp  = sum(t["pnl"] for t in kpi_trades if t["pnl"] > 0)
+    dedup_gl  = abs(sum(t["pnl"] for t in kpi_trades if t["pnl"] < 0))
+    dedup_pf  = dedup_gp / dedup_gl if dedup_gl > 0 else (float("inf") if dedup_gp > 0 else 0.0)
+    dedup_pf_s = "∞" if dedup_pf == float("inf") else f"{dedup_pf:.2f}"
     kpi_html = f"""
-<div class="kpi-grid" style="margin-bottom:20px">
-  <div class="kpi"><div class="kpi-l">総取引数</div><div class="kpi-v">{n_total}件</div></div>
+<div class="kpi-grid" style="margin-bottom:8px">
+  <div class="kpi"><div class="kpi-l">総取引数 ※</div><div class="kpi-v">{n_total}件</div></div>
   <div class="kpi"><div class="kpi-l">勝率</div><div class="kpi-v">{"—" if not n_total else f"{wr:.1f}%"}</div></div>
   <div class="kpi"><div class="kpi-l">合計損益</div><div class="kpi-v {pc}">{"—" if not n_total else f"{pnl_sum:+,.0f}円"}</div></div>
   <div class="kpi"><div class="kpi-l">勝ち/負け</div><div class="kpi-v">{n_win}W / {n_total - n_win}L</div></div>
-</div>"""
+</div>
+<p class="footnote" style="margin-bottom:18px">※ 同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として集計。設定別サマリーの合計とは異なります。</p>"""
 
     # ── サマリーテーブル（各configの独立実績、cross-config重複なし）──
     sum_rows = ""
@@ -2166,7 +2183,28 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="color:#f87171">損失</th>
     <th>損益合計</th>
   </tr></thead>
-  <tbody>{sum_rows}</tbody>
+  <tbody>{sum_rows}
+<tr style="border-top:1px dashed #475569;background:#1a2435">
+  <td style="text-align:left;color:#94a3b8;font-size:0.82rem;font-style:italic">設定別合計（重複あり）</td>
+  <td style="color:#94a3b8">{cfg_n_all}</td>
+  <td style="color:#94a3b8">{cfg_win_all}</td>
+  <td style="color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_win_all/cfg_n_all*100:.1f}%"}</td>
+  <td style="color:#94a3b8">{cfg_pf_all_s}</td>
+  <td class="profit" style="text-align:right;color:#94a3b8">+{cfg_gp_all:,.0f}円</td>
+  <td class="loss"   style="text-align:right;color:#94a3b8">-{cfg_gl_all:,.0f}円</td>
+  <td class="{cfg_lpc_all}" style="text-align:right;color:#94a3b8">{cfg_pnl_all:+,.0f}円</td>
+</tr>
+<tr style="border-top:2px solid #3b82f6;background:#0d1424">
+  <td style="text-align:left;color:#60a5fa;font-weight:700">▶ 合計（重複除外・実取引ベース）</td>
+  <td style="color:#60a5fa;font-weight:700">{n_total}</td>
+  <td style="color:#60a5fa;font-weight:700">{n_win}</td>
+  <td style="color:#60a5fa;font-weight:700">{"—" if not n_total else f"{n_win/n_total*100:.1f}%"}</td>
+  <td style="color:#60a5fa;font-weight:700">{dedup_pf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{dedup_gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{dedup_gl:,.0f}円</td>
+  <td class="{"profit" if pnl_sum >= 0 else "loss"}" style="text-align:right;font-weight:700">{pnl_sum:+,.0f}円</td>
+</tr>
+</tbody>
 </table>
 
 <h2>スコア別実績（365日全取引 / {period_note}）</h2>

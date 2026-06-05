@@ -13,6 +13,7 @@ scan_walkforward.py --holdout-days N で生成した CSV を読み込み、
   python nikkei_analysis_holdout.py --days 65           # 直近65日の損益表示
   python nikkei_analysis_holdout.py --no-browser        # HTML生成のみ
   python nikkei_analysis_holdout.py --aggressive        # aggressiveモードで実行
+  python nikkei_analysis_holdout.py --holdout-only     # holdout conservative/aggressive の2設定のみ表示
 
 流れ:
   1. walkforward_results/ のホールドアウトCSVを読み込む
@@ -190,6 +191,8 @@ _pre.add_argument("--wf-dir",        type=Path,  default=Path("walkforward_resul
 _pre.add_argument("--no-browser",    action="store_true")
 _pre.add_argument("--date",          type=str,   default=None)
 _pre.add_argument("--aggressive",    action="store_true")
+_pre.add_argument("--holdout-only",  action="store_true",
+                  help="holdout WF の2設定(conservative/aggressive)のみ表示")
 
 # _pre_known: このスクリプト固有の引数
 # _na_argv  : nikkei_analysis.py に渡す残りの引数
@@ -251,15 +254,36 @@ _importlib.reload = _orig_reload
 # ── 9. PNL タブのラベルと watchlist をホールドアウト用に更新 ────────────────────
 _label = f"holdout{_HOLDOUT_N}d" if _HOLDOUT_N > 0 else "holdout"
 
-for _cfg in _na._PNL_CONFIGS:
-    if _cfg.get("label") == "既存版 conservative":
-        _cfg["label"]   = f"{_label} conservative"
-        _cfg["stop_wl"] = list(HOLDOUT_STOP_WL)
-        _cfg["brk_wl"]  = list(HOLDOUT_BRK_WL)
-    elif _cfg.get("label") == "既存版 aggressive":
-        _cfg["label"]   = f"{_label} aggressive"
-        _cfg["stop_wl"] = list(HOLDOUT_STOP_WL)
-        _cfg["brk_wl"]  = list(HOLDOUT_BRK_WL)
+if _pre_known.holdout_only:
+    # holdout の2設定だけを表示 (既存/WF設定は削除)
+    _na._PNL_CONFIGS[:] = [
+        {
+            "label":   f"{_label} conservative",
+            "color":   "#3498db",
+            "mode":    "conservative",
+            "sm_tm":   None,
+            "stop_wl": list(HOLDOUT_STOP_WL),
+            "brk_wl":  list(HOLDOUT_BRK_WL),
+        },
+        {
+            "label":   f"{_label} aggressive",
+            "color":   "#e74c3c",
+            "mode":    "aggressive",
+            "sm_tm":   None,
+            "stop_wl": list(HOLDOUT_STOP_WL),
+            "brk_wl":  list(HOLDOUT_BRK_WL),
+        },
+    ]
+else:
+    for _cfg in _na._PNL_CONFIGS:
+        if _cfg.get("label") == "既存版 conservative":
+            _cfg["label"]   = f"{_label} conservative"
+            _cfg["stop_wl"] = list(HOLDOUT_STOP_WL)
+            _cfg["brk_wl"]  = list(HOLDOUT_BRK_WL)
+        elif _cfg.get("label") == "既存版 aggressive":
+            _cfg["label"]   = f"{_label} aggressive"
+            _cfg["stop_wl"] = list(HOLDOUT_STOP_WL)
+            _cfg["brk_wl"]  = list(HOLDOUT_BRK_WL)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,6 +308,7 @@ def main() -> None:
     print(f"  CSVソース        : {_CSV_DATE} / holdout{_HOLDOUT_N}d")
     print(f"  逆指値B (STOP)   : {len(HOLDOUT_STOP_WL)} 銘柄×戦略")
     print(f"  BRK              : {len(HOLDOUT_BRK_WL)} 銘柄×戦略")
+    print(f"  表示設定         : {'holdout のみ (conservative + aggressive)' if _pre_known.holdout_only else '全設定'}")
     print(f"  モード           : {os.environ.get('TRADING_MODE', 'conservative')}")
     print(f"  フィルター       : MaxDD<={_pre_known.max_dd}%  "
           f"連敗<={_pre_known.max_consec}  Sharpe>={_pre_known.min_sharpe}")
@@ -296,7 +321,10 @@ def main() -> None:
     # ── 出力ファイルをリネーム ──────────────────────────────────────────────
     date_str = _pre_known.date if _pre_known.date else str(TODAY)
     old_path = Path(f"nikkei_analysis_{date_str}.html")
-    new_path = Path(f"nikkei_analysis_holdout{_HOLDOUT_N}d_{date_str}.html")
+    if _pre_known.holdout_only:
+        new_path = Path(f"nikkei_analysis_holdout{_HOLDOUT_N}d_only_{date_str}.html")
+    else:
+        new_path = Path(f"nikkei_analysis_holdout{_HOLDOUT_N}d_{date_str}.html")
 
     if old_path.exists():
         old_path.replace(new_path)
