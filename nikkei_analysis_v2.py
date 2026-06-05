@@ -14,6 +14,9 @@ nikkei_analysis.py と同じ分析を行うが、2026-06-04 WFスキャン (価�
   python nikkei_analysis_v2.py --no-signals      # シグナルタブなし
   python nikkei_analysis_v2.py --no-pnl          # 損益タブなし
   python nikkei_analysis_v2.py --days 30         # 直近30日損益
+  python nikkei_analysis_v2.py --v2only          # v2新WL conservative/aggressive のみ表示
+  python nikkei_analysis_v2.py --v2only --aggressive  # aggressive 込みで v2新WL のみ
+  python nikkei_analysis_v2.py --v2c             # v2新WL conservative のみ表示
 """
 from __future__ import annotations
 
@@ -233,14 +236,24 @@ def main() -> None:
     _p.add_argument("--no-browser", action="store_true")
     _p.add_argument("--v2c",        action="store_true",
                     help="v2新WL conservative のシグナル・損益のみ表示")
+    _p.add_argument("--v2only",     action="store_true",
+                    help="v2新WL conservative + aggressive のみ表示 (他設定を除外)")
     _known, _ = _p.parse_known_args()
 
-    # --v2c / --aggressive は nikkei_analysis.py が知らないので除去してから渡す
+    # --v2c / --v2only / --aggressive は nikkei_analysis.py が知らないので除去してから渡す
     _orig_argv = list(sys.argv)
-    sys.argv = [a for a in sys.argv if a not in ("--v2c", "--aggressive")]
+    sys.argv = [a for a in sys.argv if a not in ("--v2c", "--v2only", "--aggressive")]
+
     if _known.v2c and "--config" not in sys.argv:
         sys.argv.append("--config")
         sys.argv.append("v2新WL conservative")
+
+    # --v2only: _PNL_CONFIGS を v2新WL の2件のみに絞る
+    if _known.v2only:
+        _na._PNL_CONFIGS[:] = [
+            c for c in _na._PNL_CONFIGS
+            if c.get("label", "").startswith("v2新WL")
+        ]
 
     # nikkei_analysis.main() 内でのブラウザ起動を抑制（リネーム後に自分で開く）
     if "--no-browser" not in sys.argv:
@@ -261,7 +274,12 @@ def main() -> None:
     JST      = timezone(timedelta(hours=9))
     date_str = _known.date if _known.date else str(datetime.now(JST).date())
     old_path = Path(f"nikkei_analysis_{date_str}.html")
-    suffix   = "_v2c" if _known.v2c else ""
+    if _known.v2c:
+        suffix = "_v2c"
+    elif _known.v2only:
+        suffix = "_v2only"
+    else:
+        suffix = ""
     new_path = Path(f"nikkei_analysis_v2{suffix}_{date_str}.html")
 
     if old_path.exists():
