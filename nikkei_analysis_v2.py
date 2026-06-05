@@ -96,6 +96,20 @@ NEW_BRK_WATCHLIST: list[tuple[str, str, str]] = [
     ("6952.T", "カシオ計算機",                           "VOL"),  # folds=2  7取引 WR71% PF3.80 DD1.3%
 ]
 
+# ── aggressive 専用 WATCHLIST ────────────────────────────────────────────────
+# 現在は空 → conservative と同じWLで代用（暫定）
+# 更新手順:
+#   python scan_walkforward.py --aggressive --symbols symbols_listed_prime.py
+#   python build_watchlist.py --aggressive
+#   → watchlist_proposal_aggressive_YYYY-MM-DD.py の
+#     STOP_WATCHLIST / BRK_WATCHLIST をそれぞれ下にコピー
+NEW_STOP_WATCHLIST_AGG: list[tuple[str, str, str]] = [
+    # TODO: scan_walkforward.py --aggressive 実行後に貼り付け
+]
+NEW_BRK_WATCHLIST_AGG: list[tuple[str, str, str]] = [
+    # TODO: scan_walkforward.py --aggressive 実行後に貼り付け
+]
+
 # ── 4. v2 用 WF スコアファイルを読み込む ────────────────────────────────────
 #   wf_scores.json     → nikkei_analysis.py 専用 (触らない)
 #   wf_scores_v2.json  → nikkei_analysis_v2.py 専用
@@ -138,12 +152,20 @@ import nikkei_analysis as _na  # noqa: E402
 # ── 8. reload フックを元に戻す ────────────────────────────────────────────────
 _importlib.reload = _orig_reload
 
-# ── 9. PNL タブのラベルを v2 用に更新 ────────────────────────────────────────
+# ── 9. PNL タブのラベルと watchlist を v2 用に更新 ───────────────────────────
+# aggressive 専用 WL が未設定（空）の場合は conservative と同じものを暫定使用
+_stop_agg = NEW_STOP_WATCHLIST_AGG if NEW_STOP_WATCHLIST_AGG else list(NEW_STOP_WATCHLIST)
+_brk_agg  = NEW_BRK_WATCHLIST_AGG  if NEW_BRK_WATCHLIST_AGG  else list(NEW_BRK_WATCHLIST)
+
 for _cfg in _na._PNL_CONFIGS:
     if _cfg.get("label") == "既存版 conservative":
-        _cfg["label"] = "v2新WL conservative"
+        _cfg["label"]   = "v2新WL conservative"
+        _cfg["stop_wl"] = list(NEW_STOP_WATCHLIST)
+        _cfg["brk_wl"]  = list(NEW_BRK_WATCHLIST)
     elif _cfg.get("label") == "既存版 aggressive":
-        _cfg["label"] = "v2新WL aggressive"
+        _cfg["label"]   = "v2新WL aggressive"
+        _cfg["stop_wl"] = _stop_agg
+        _cfg["brk_wl"]  = _brk_agg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
