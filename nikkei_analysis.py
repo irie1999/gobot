@@ -1403,7 +1403,8 @@ def _fmt_score_cell(s: dict, col: str) -> str:
 
 
 def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
-                       score_filter: int | None = None) -> str:
+                       score_filter: int | None = None,
+                       cfg_filter: str | None = None) -> str:
     """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。
     score_filter 指定時: そのスコアだけの成績フォーカスカードを表示。"""
     if not _SIGNALS_AVAILABLE:
@@ -1523,6 +1524,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "max_hold":     _MH,
                     "max_exit":     _max_exit,
                     "sources":      _sm.get((sym, strat), []),
+                    "cfg_label":    _cfg_label,
                 },
             }
 
@@ -1545,6 +1547,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     _set_sig_params("conservative")
 
     signals.sort(key=lambda x: -x["score"])
+    if cfg_filter:
+        signals = [s for s in signals if s.get("cfg_label") == cfg_filter]
 
     # ── スコア別集計ヘルパー ──────────────────────────────────────────────────
     def _score_stats(trades_list):
@@ -1893,8 +1897,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 <p class="footnote">※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日</p>"""
 
 
-def _tab5_pnl_html(days: int, workers: int) -> str:
-    """タブ5: 直近N日 取引損益レポート"""
+def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> str:
+    """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
@@ -1991,6 +1995,13 @@ def _tab5_pnl_html(days: int, workers: int) -> str:
     # reset to conservative
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
+
+    # ── cfg_filter: 対象configのみに絞り込み ──
+    if cfg_filter:
+        all_trades       = [t for t in all_trades       if t.get("label") == cfg_filter]
+        full_year_trades = [t for t in full_year_trades if t.get("label") == cfg_filter]
+        cfg_trades_map   = {k: [t for t in v if t.get("label") == cfg_filter]
+                            for k, v in cfg_trades_map.items()}
 
     # ── KPI (発注中=未約定は除外) ──
     kpi_trades = [t for t in all_trades if t.get("reason") != "発注中"]
@@ -2361,6 +2372,7 @@ def main():
     parser.add_argument("--days",         type=int, default=7,    help="損益集計日数 (--with-pnl 使用時)")
     parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア")
     parser.add_argument("--score",        type=int, default=None, help="スコア単体の詳細成績を表示 (例: --score 80)")
+    parser.add_argument("--config",       type=str, default=None, help="表示するconfigラベルを絞り込み (例: --config 'v2新WL conservative')")
     parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
     args = parser.parse_args()
 
@@ -2440,10 +2452,11 @@ def main():
         date_label = str(ref_date) if args.date else "今日"
         print(f"シグナル収集中 ({date_label})...", flush=True)
         tab4_html = _tab4_signals_html(args.workers, args.min_score,
-                                       target_date=sig_target, score_filter=args.score)
+                                       target_date=sig_target, score_filter=args.score,
+                                       cfg_filter=args.config)
     if not args.no_pnl and _SIGNALS_AVAILABLE:
         print(f"損益集計中 (直近{args.days}日)...", flush=True)
-        tab5_html = _tab5_pnl_html(args.days, args.workers)
+        tab5_html = _tab5_pnl_html(args.days, args.workers, cfg_filter=args.config)
 
     html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(

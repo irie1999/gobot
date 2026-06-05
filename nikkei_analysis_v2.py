@@ -155,10 +155,17 @@ def main() -> None:
     _p = argparse.ArgumentParser(add_help=False)
     _p.add_argument("--date",       type=str,  default=None)
     _p.add_argument("--no-browser", action="store_true")
+    _p.add_argument("--v2c",        action="store_true",
+                    help="v2新WL conservative のシグナル・損益のみ表示")
     _known, _ = _p.parse_known_args()
 
-    # nikkei_analysis.main() 内でのブラウザ起動を抑制（リネーム後に自分で開く）
+    # --v2c は --config 'v2新WL conservative' に展開
     _orig_argv = list(sys.argv)
+    if _known.v2c and "--config" not in sys.argv:
+        sys.argv.append("--config")
+        sys.argv.append("v2新WL conservative")
+
+    # nikkei_analysis.main() 内でのブラウザ起動を抑制（リネーム後に自分で開く）
     if "--no-browser" not in sys.argv:
         sys.argv.append("--no-browser")
 
@@ -177,7 +184,8 @@ def main() -> None:
     JST      = timezone(timedelta(hours=9))
     date_str = _known.date if _known.date else str(datetime.now(JST).date())
     old_path = Path(f"nikkei_analysis_{date_str}.html")
-    new_path = Path(f"nikkei_analysis_v2_{date_str}.html")
+    suffix   = "_v2c" if _known.v2c else ""
+    new_path = Path(f"nikkei_analysis_v2{suffix}_{date_str}.html")
 
     if old_path.exists():
         old_path.replace(new_path)
