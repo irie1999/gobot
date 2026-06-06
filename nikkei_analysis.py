@@ -1884,8 +1884,91 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
 </tr>"""
 
+    # ── 発注優先度ガイド ──────────────────────────────────────────────────────
+    _cfg_labels = [c["label"] for c in _PNL_CONFIGS]
+    _has_5k_con  = any("5k" in l and "conservative" in l.lower() for l in _cfg_labels)
+    _has_v2_con  = any("v2" in l.lower() and "conservative" in l.lower() for l in _cfg_labels)
+    _has_5k_agg  = any("5k" in l and "aggressive" in l.lower() for l in _cfg_labels)
+    _has_v2_agg  = any("v2" in l.lower() and "aggressive" in l.lower() for l in _cfg_labels)
+
+    _script_rows = ""
+    if _has_5k_con or _has_v2_con or _has_5k_agg or _has_v2_agg:
+        _prio_list = []
+        if _has_5k_con:  _prio_list.append(("①", "5k-WL conservative", "PF 4.00  WR ~81%  平均+4万円/取引", "#4ade80", "最優先"))
+        if _has_v2_con:  _prio_list.append(("②", "v2新WL conservative", "平均+3.8万円/取引  WR ~78%",       "#86efac", "優先"))
+        if _has_5k_agg:  _prio_list.append(("③", "5k-WL aggressive",    "PF 4.23  WR 83%  小幅利確向き",   "#60a5fa", "余力あれば"))
+        if _has_v2_agg:  _prio_list.append(("④", "v2新WL aggressive",   "WR 80%  PF 3.63  回転率重視",     "#93c5fd", "余力あれば"))
+        for rank, lbl, note, col, tag in _prio_list:
+            _script_rows += f"""<tr>
+  <td style="text-align:center;font-weight:700;font-size:1rem;color:{col}">{rank}</td>
+  <td style="font-weight:700;color:{col}">{lbl}</td>
+  <td style="color:#94a3b8;font-size:0.82rem">{note}</td>
+  <td style="text-align:center"><span style="background:{col};color:#0f172a;font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:4px">{tag}</span></td>
+</tr>"""
+
+    _band_rows = (
+        ("≥ 80", "★★★",  "最優先発注",  "#4ade80", "PF 6.2〜6.8 / WR 81〜86% / 平均+4.3〜5.4万円/取引"),
+        ("60〜79", "★★", "余力あれば",  "#60a5fa", "PF 3〜4 / WR 70〜81%"),
+        ("40〜59", "★",  "選別して発注", "#fbbf24", "PF 3.3〜3.5 / WR ~75%"),
+        ("< 40",  "△",   "基本スキップ", "#f87171", "PF 2.5〜3.0 / 期待値低い"),
+    )
+    _br_html = ""
+    for band, stars, action, col, stats in _band_rows:
+        _br_html += f"""<tr>
+  <td style="text-align:center;font-weight:700;color:{col}">{band}</td>
+  <td style="text-align:center;color:{col}">{stars}</td>
+  <td style="font-weight:700;color:{col}">{action}</td>
+  <td style="color:#94a3b8;font-size:0.82rem">{stats}</td>
+</tr>"""
+
+    _script_table = f"""
+<table style="max-width:680px;margin-bottom:8px">
+  <thead><tr>
+    <th style="text-align:center;width:32px">順</th>
+    <th style="text-align:left">スクリプト</th>
+    <th style="text-align:left">実績 (365日バックテスト)</th>
+    <th style="text-align:center">優先度</th>
+  </tr></thead>
+  <tbody>{_script_rows}</tbody>
+</table>""" if _script_rows else ""
+
+    _right_col = ""
+    if _script_table:
+        _right_col = f"""
+    <div>
+      <div style="font-size:0.8rem;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">■ スクリプト優先順位</div>
+      {_script_table}
+      <p style="color:#475569;font-size:0.75rem;margin-top:6px;margin-bottom:0">
+        ※ 資金に余裕がある場合のみ③④に発注。<br>
+        ※ 複数シグナルが出た日は①→④の順で優先配分。
+      </p>
+    </div>"""
+
+    _grid_cols = "1fr 1fr" if _right_col else "1fr"
+    priority_panel = f"""
+<div style="background:#0a1628;border:2px solid #1e40af;border-radius:12px;
+            padding:18px 22px;margin-bottom:22px">
+  <div style="font-size:1rem;font-weight:700;color:#93c5fd;margin-bottom:14px">
+    📌 発注優先度ガイド（365日バックテスト実績ベース）
+  </div>
+  <div style="display:grid;grid-template-columns:{_grid_cols};gap:18px">
+    <div>
+      <div style="font-size:0.8rem;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">■ スコア帯 → 発注判断</div>
+      <table style="width:100%;font-size:0.82rem">
+        <thead><tr>
+          <th style="text-align:center;width:60px">スコア</th>
+          <th style="text-align:center;width:40px">ランク</th>
+          <th style="text-align:center;width:80px">判断</th>
+          <th style="text-align:left">目安実績</th>
+        </tr></thead>
+        <tbody>{_br_html}</tbody>
+      </table>
+    </div>{_right_col}
+  </div>
+</div>"""
+
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
-    return score_section + f"""
+    return priority_panel + score_section + f"""
 <h2>{sig_label} のシグナル一覧 — スコア降順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。スコアが高い順に並んでいます。
