@@ -10,10 +10,15 @@ nikkei_analysis_4config.py  ―  4config 統合レポート
 nikkei_analysis.py 本体は一切変更しない。
 
 使い方:
-  python nikkei_analysis_4config.py                    # 過去365日 HTML生成 & ブラウザ表示
-  python nikkei_analysis_4config.py --days 180         # 直近180日
-  python nikkei_analysis_4config.py --no-browser       # HTML生成のみ
-  python nikkei_analysis_4config.py --date 2026-01-01  # 指定日シグナル確認
+  python nikkei_analysis_4config.py                           # 過去365日 HTML生成 & ブラウザ表示
+  python nikkei_analysis_4config.py --days 180                # 直近180日
+  python nikkei_analysis_4config.py --no-browser              # HTML生成のみ
+  python nikkei_analysis_4config.py --date 2026-01-01         # 指定日シグナル確認
+
+  # 銘柄×戦略の個別履歴確認 (HTML生成なし)
+  python nikkei_analysis_4config.py --symbol 8387.T --strategy A7
+  python nikkei_analysis_4config.py --symbol 8387.T --strategy RSI2 --days 180
+  python nikkei_analysis_4config.py --symbol 8387.T --strategy MACD --aggressive
 """
 from __future__ import annotations
 
@@ -288,6 +293,109 @@ _na._PNL_CONFIGS[:] = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 銘柄×戦略 個別履歴確認
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str) -> None:
+    from backtest_limit_entry import fetch, run_limit_backtest, BACKTEST_DAYS  # noqa: F401
+
+    if mode == "aggressive":
+        stop_params = _stop.STRATEGY_PARAMS_AGGRESSIVE
+        brk_params  = _brk.STRATEGY_PARAMS_AGGRESSIVE
+    else:
+        stop_params = _stop.STRATEGY_PARAMS_CONSERVATIVE
+        brk_params  = _brk.STRATEGY_PARAMS_CONSERVATIVE
+    all_params: dict = {**stop_params, **brk_params}
+
+    if strategy not in all_params:
+        print(f"ERROR: 戦略 '{strategy}' は不明です。利用可能: {', '.join(all_params)}")
+        sys.exit(1)
+
+    print(f"\n{'='*60}")
+    print(f"  {symbol}  ×  {strategy}  バックテスト履歴")
+    print(f"  期間: 直近 {days} 日  /  モード: {mode}")
+    print(f"{'='*60}\n")
+
+    print(f"データ取得中: {symbol} ...")
+    df = fetch(symbol, days + 60)
+    if df is None or df.empty:
+        print(f"ERROR: {symbol} のデータを取得できませんでした。")
+        sys.exit(1)
+
+    try:
+        import yfinance as yf
+        info = yf.Ticker(symbol).info
+        name = info.get("longName") or info.get("shortName") or symbol
+    except Exception:
+        name = symbol
+
+    calc_fn, em, sm, tm = all_params[strategy]
+    print("バックテスト実行中...")
+    result = run_limit_backtest(
+        symbol=symbol,
+        name=name,
+        df=df,
+        calc_fn=calc_fn,
+        entry_atr_mult=em,
+        stop_atr_mult=sm,
+        target_atr_mult=tm,
+        backtest_days=days,
+        strategy_name=strategy,
+        entry_type="stop",
+    )
+
+    trade_log = result.get("trade_log", [])
+
+    if not trade_log:
+        print("この期間にトレードはありませんでした。\n")
+        return
+
+    wins      = sum(1 for t in trade_log if t.get("pnl", 0) > 0)
+    losses    = len(trade_log) - wins
+    total_pnl = sum(t.get("pnl", 0) for t in trade_log)
+    gross_p   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) > 0)
+    gross_l   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) <= 0)
+    wr        = wins / len(trade_log) * 100 if trade_log else 0
+    pf        = abs(gross_p / gross_l) if gross_l != 0 else float("inf")
+    avg       = total_pnl / len(trade_log) if trade_log else 0
+    pf_str    = f"{pf:.2f}" if pf != float("inf") else "∞"
+
+    print(f"【サマリー】")
+    print(f"  取引数  : {len(trade_log)} 件  ({wins}勝 / {losses}敗)")
+    print(f"  勝率    : {wr:.1f}%")
+    print(f"  PF      : {pf_str}")
+    print(f"  合計損益: {total_pnl:+,.0f} 円")
+    print(f"  平均損益: {avg:+,.0f} 円/取引")
+    print()
+
+    reasons: dict[str, int] = {}
+    for t in trade_log:
+        r = t.get("reason", "?")
+        reasons[r] = reasons.get(r, 0) + 1
+    reason_str = "  ".join(f"{k}:{v}件" for k, v in sorted(reasons.items()))
+    print(f"  決済理由: {reason_str}\n")
+
+    print(f"{'決済日':<10}  {'約定値':>7}  {'決済値':>7}  {'株数':>6}  {'保有':>4}  {'損益':>10}  決済理由    エントリー日")
+    print("-" * 80)
+
+    for t in sorted(trade_log, key=lambda x: str(x.get("exit_dt", "")), reverse=True):
+        ed   = str(t.get("exit_dt",   "?"))[:10]
+        ep   = t.get("entry_p", 0)
+        xp   = t.get("exit_p",  0)
+        qty  = t.get("qty",     0)
+        hold = t.get("hold_days", 0)
+        pnl  = t.get("pnl",    0)
+        rsn  = t.get("reason", "?")
+        nd   = str(t.get("signal_dt", "?"))[:10]
+        pnl_str = f"{pnl:+,.0f}円"
+        print(f"{ed:<10}  {ep:>7,.0f}  {xp:>7,.0f}  {qty:>5}株  {hold:>3}日  {pnl_str:>10}  {rsn:<10}  {nd}")
+
+    print()
+    print(f"合計: {total_pnl:+,.0f} 円  /  {len(trade_log)} 取引")
+    print()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # エントリーポイント
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -295,7 +403,26 @@ def main() -> None:
     _p = argparse.ArgumentParser(add_help=False)
     _p.add_argument("--date",       type=str,  default=None)
     _p.add_argument("--no-browser", action="store_true")
+    _p.add_argument("--symbol",     type=str,  default=None)
+    _p.add_argument("--strategy",   type=str,  default=None)
+    _p.add_argument("--days",       type=int,  default=365)
+    _p.add_argument("--aggressive", action="store_true")
+    _p.add_argument("--mode",       choices=["conservative", "aggressive"], default=None)
     _known, _ = _p.parse_known_args()
+
+    # 銘柄×戦略の個別履歴確認モード
+    if _known.symbol and _known.strategy:
+        if _known.mode == "aggressive" or _known.aggressive:
+            mode = "aggressive"
+        else:
+            mode = os.environ.get("TRADING_MODE", "conservative")
+        _run_symbol_history(
+            symbol=_known.symbol.upper(),
+            strategy=_known.strategy.upper(),
+            days=_known.days,
+            mode=mode,
+        )
+        return
 
     _orig_argv = list(sys.argv)
 
