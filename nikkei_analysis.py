@@ -2001,7 +2001,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                     continue
                 seen_global.add(gkey)
                 # 発注中はスコア帯統計から除外 (未約定のためpnl=0で歪む)
-                if reason != "発注中":
+                # --days で指定した期間内の取引のみスコア帯に集計
+                if reason != "発注中" and since <= exit_d <= until:
                     full_year_trades.append(base)
                 # 取引明細テーブルには発注中も表示
                 if since <= exit_d <= until:
@@ -2223,7 +2224,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
 </tbody>
 </table>
 
-<h2>スコア別実績（365日全取引 / {period_note}）</h2>
+<h2>スコア別実績（直近{days}日 / {period_note}）</h2>
 <table>
   <thead><tr>
     <th style="text-align:left">スコア帯</th>
