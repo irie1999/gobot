@@ -1715,6 +1715,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "entry_d":   entry_d,
                     "entry_p":   t.get("entry_p", 0),
                     "exit_p":    t.get("exit_p", 0),
+                    "qty":       t.get("qty", 0),
                     "hold":      t.get("hold_days", 0),
                     "pnl":       t.get("pnl", 0),
                     "reason":    t.get("reason", "") or "—",
@@ -1740,6 +1741,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{dt['entry_p']:,.0f}</td>
   <td style="text-align:right">{dt['exit_p']:,.0f}</td>
+  <td style="text-align:right">{dt.get('qty', 0)}株</td>
   <td style="text-align:right">{dt['hold']}日</td>
   <td class="{tpc}" style="text-align:right;font-weight:600">{dt['pnl']:+,.0f}円</td>
   <td>{_rhtml(dt['reason'])}</td>
@@ -1753,7 +1755,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th>決済値</th><th>保有</th>
+    <th>約定値</th><th>決済値</th><th>株数</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー日</th>
   </tr></thead>
   <tbody>{det_rows}</tbody>
@@ -1986,6 +1988,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                     "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
                     "entry_p":   t.get("entry_p", 0),
                     "exit_p":    t.get("exit_p", 0),
+                    "qty":       t.get("qty", 0),
                     "hold_days": t.get("hold_days", 0),
                     "reason":    reason,
                 }
@@ -2174,13 +2177,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{t["entry_p"]:,.0f}</td>
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
+  <td style="text-align:right">{t.get("qty", 0)}株</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="10" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+        trade_rows = f'<tr><td colspan="11" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2239,7 +2243,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th>決済値</th><th>保有</th>
+    <th>約定値</th><th>決済値</th><th>株数</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
