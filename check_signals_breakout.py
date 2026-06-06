@@ -40,6 +40,7 @@ from backtest_limit_entry import (
     WORKERS as _DEFAULT_WORKERS,
     compute_period_result,
     round_to_tick,
+    calc_qty,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
 from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
@@ -228,6 +229,9 @@ def check_signal_on_date(symbol: str, strategy: str,
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
+    qty        = calc_qty(order_p)
+    position_v = round(order_p * qty)
+
     return dict(
         order_price=round_to_tick(order_p),
         limit_entry_price=round_to_tick(limit_entry),
@@ -237,6 +241,8 @@ def check_signal_on_date(symbol: str, strategy: str,
         signal_date=sig_date,
         signal_price=round(close_prev, 0),
         stop_loss_pct=round(stop_loss_pct, 1),
+        qty=qty,
+        position_value=position_v,
     )
 
 
@@ -414,6 +420,7 @@ def build_html(all_items: list[dict], show_days: int,
           <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
           <td class="loss">{sig['stop_price']:,.0f}<br><small style="color:#94a3b8;font-size:10px">-{stop_pct:.1f}%</small></td>
           <td class="profit">{sig['target_price']:,.0f}</td>
+          <td style="color:#e2e8f0;text-align:right">{sig.get('qty', '-')}株<br><small style="color:#94a3b8;font-size:10px">{sig.get('position_value', 0):,.0f}円</small></td>
           <td style="color:#94a3b8">{MAX_HOLD}日</td>
           <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
         </tr>"""
@@ -708,7 +715,7 @@ def build_html(all_items: list[dict], show_days: int,
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>株数<br><small>想定額</small></th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>

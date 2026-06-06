@@ -48,7 +48,7 @@ try:
     os.environ.setdefault("TRADING_MODE", "conservative")
     import check_signals_stop     as _stop
     import check_signals_breakout as _brk
-    from backtest_limit_entry import WORKERS as _DEF_WORKERS
+    from backtest_limit_entry import WORKERS as _DEF_WORKERS, calc_qty as _calc_qty
     _CON_STOP = _copy.deepcopy(_stop.STRATEGY_PARAMS)
     _CON_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
     os.environ["TRADING_MODE"] = "aggressive"
@@ -1843,6 +1843,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
+        qty      = _calc_qty(s["order_p"]) if s["order_p"] else 0
+        pos_val  = round(s["order_p"] * qty)
         if stop_pct > 15:
             atr_badge = "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"
         elif stop_pct > 10:
@@ -1875,6 +1877,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#f59e0b">+{lim_pct:.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span></td>
+  <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span></td>
   <td style="text-align:center;color:#94a3b8">{s.get("max_hold","—")}日</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
 </tr>"""
@@ -1898,6 +1901,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
     <th style="color:#f59e0b">指値上限<br>(+3%)</th>
     <th>損切り(-)</th><th>目標(+)</th>
+    <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th>
   </tr></thead>
   <tbody>{rows}</tbody>

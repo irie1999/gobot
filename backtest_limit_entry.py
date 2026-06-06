@@ -52,7 +52,11 @@ ENTRY_EXPIRE  = 3      # 指値有効日数
 MAX_HOLD      = 15     # 最大保有日数
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
-FIXED_QTY     = 100         # 固定株数（常に100株）
+FIXED_QTY     = 100         # 後方互換用 (廃止予定: calc_qty を使用)
+TARGET_POSITION  = 1_000_000  # 目標ポジションサイズ (円)
+MIN_QTY          = 200        # 最低取引株数
+TRADE_LOT        = 100        # 単元株数
+TRADE_MAX_PRICE  = 5_000.0    # 取引対象の最高株価 (WATCHLIST選定・WFスキャン時に使用)
 BACKTEST_DAYS = 365
 WORKERS       = 4
 MAX_QTY       = 9999        # 最大株数（低価格株の過剰ポジション防止）
@@ -76,6 +80,16 @@ FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
 # 0.03 (3%) は典型的な朝ギャップの 80% 程度をカバーしつつ、
 # 5% 超の急騰(高値掴みリスク大)は除外できる実用的な値。
 LIMIT_ENTRY_MARGIN_PCT = 0.03
+
+
+def calc_qty(order_price: float) -> int:
+    """目標ポジション100万円に近い最大単元株数 (最低MIN_QTY株, 単元TRADE_LOT株単位)。
+    例: 3,610円 → 200株 (722,000円) / 1,000円 → 1,000株 (1,000,000円)
+    """
+    if order_price <= 0:
+        return MIN_QTY
+    qty = int(TARGET_POSITION / order_price / TRADE_LOT) * TRADE_LOT
+    return min(max(MIN_QTY, qty), MAX_QTY)
 
 
 # ── TSE 呼値 (tick size) 丸め ────────────────────────────────────
@@ -521,6 +535,7 @@ def run_limit_backtest(
                     signals += 1
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
+                        "qty": calc_qty(lp),
                         "expire_idx":   i + ENTRY_EXPIRE,
                         "signal_idx":   i,
                         "signal_dt":    df.index[i - 1],
@@ -589,16 +604,17 @@ def run_limit_backtest(
                     else:
                         xp = op if op <= use_sp else use_sp * (1.0 - SLIPPAGE_STOP_PCT)
                 if ep * 0.1 <= xp <= ep * 10.0:
-                    fee = (ep + xp) * FIXED_QTY * FEE_PCT_ONE_WAY
+                    _qty = po["qty"]
+                    fee = (ep + xp) * _qty * FEE_PCT_ONE_WAY
                     if is_short:
-                        pnl = (ep - xp) * FIXED_QTY - fee
+                        pnl = (ep - xp) * _qty - fee
                         pct = (ep - xp) / ep * 100
                     else:
-                        pnl = (xp - ep) * FIXED_QTY - fee
+                        pnl = (xp - ep) * _qty - fee
                         pct = (xp - ep) / ep * 100
                     trades.append(dict(
                         entry_dt=dt, exit_dt=dt,
-                        entry_p=ep, exit_p=xp, qty=FIXED_QTY,
+                        entry_p=ep, exit_p=xp, qty=_qty,
                         pnl=pnl, pct=pct, fee=round(fee, 0),
                         hold_days=0, days_to_fill=dtf,
                         signal_dt=po["signal_dt"], signal_price=po["signal_price"],
@@ -611,6 +627,7 @@ def run_limit_backtest(
                 new_active.append({
                     "entry_dt": dt, "entry_p": ep,
                     "sp": use_sp, "tp": use_tp,
+                    "qty": po["qty"],
                     "fill_type": fill_type,
                     "hold_start": i, "days_to_fill": dtf,
                     "signal_dt":    po["signal_dt"],
@@ -657,16 +674,17 @@ def run_limit_backtest(
                 else:
                     exit_p_pos = op if op <= pos["sp"] else pos["sp"] * (1.0 - SLIPPAGE_STOP_PCT)
 
-            fee = (ep + exit_p_pos) * FIXED_QTY * FEE_PCT_ONE_WAY
+            _qty = pos["qty"]
+            fee = (ep + exit_p_pos) * _qty * FEE_PCT_ONE_WAY
             if is_short:
-                pnl = (ep - exit_p_pos) * FIXED_QTY - fee
+                pnl = (ep - exit_p_pos) * _qty - fee
                 pct = (ep - exit_p_pos) / ep * 100
             else:
-                pnl = (exit_p_pos - ep) * FIXED_QTY - fee
+                pnl = (exit_p_pos - ep) * _qty - fee
                 pct = (exit_p_pos - ep) / ep * 100
             trades.append(dict(
                 entry_dt=pos["entry_dt"], exit_dt=dt,
-                entry_p=ep, exit_p=exit_p_pos, qty=FIXED_QTY,
+                entry_p=ep, exit_p=exit_p_pos, qty=_qty,
                 pnl=pnl, pct=pct, fee=round(fee, 0),
                 hold_days=hold_days, days_to_fill=pos["days_to_fill"],
                 signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
@@ -705,6 +723,7 @@ def run_limit_backtest(
                     signals += 1
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
+                        "qty": calc_qty(lp),
                         "expire_idx":   len(df) + ENTRY_EXPIRE,
                         "signal_idx":   len(df),
                         "signal_dt":    df.index[-1],
@@ -715,16 +734,17 @@ def run_limit_backtest(
     cl_last = float(df.iloc[-1]["close"])
     for pos in active_positions:
         ep        = pos["entry_p"]
+        _qty      = pos["qty"]
         hold_days = len(df) - 1 - pos["hold_start"]
         if is_short:
-            pnl = (ep - cl_last) * FIXED_QTY
+            pnl = (ep - cl_last) * _qty
             pct = (ep - cl_last) / ep * 100
         else:
-            pnl = (cl_last - ep) * FIXED_QTY
+            pnl = (cl_last - ep) * _qty
             pct = (cl_last - ep) / ep * 100
         trades.append(dict(
             entry_dt=pos["entry_dt"], exit_dt=df.index[-1],
-            entry_p=ep, exit_p=cl_last, qty=FIXED_QTY,
+            entry_p=ep, exit_p=cl_last, qty=_qty,
             pnl=pnl, pct=pct, fee=0.0,
             hold_days=hold_days, days_to_fill=pos["days_to_fill"],
             signal_dt=pos["signal_dt"], signal_price=pos["signal_price"],
@@ -738,7 +758,7 @@ def run_limit_backtest(
     for po in pending_orders:
         trades.append(dict(
             entry_dt=df.index[-1], exit_dt=df.index[-1],
-            entry_p=po["lp"], exit_p=cl_last, qty=FIXED_QTY,
+            entry_p=po["lp"], exit_p=cl_last, qty=po["qty"],
             pnl=0.0, pct=0.0, fee=0.0,
             hold_days=0, days_to_fill=0,
             signal_dt=po["signal_dt"], signal_price=po["signal_price"],
