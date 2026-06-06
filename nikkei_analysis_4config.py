@@ -296,8 +296,148 @@ _na._PNL_CONFIGS[:] = [
 # 銘柄×戦略 個別履歴確認
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str) -> None:
-    from backtest_limit_entry import fetch, run_limit_backtest, BACKTEST_DAYS  # noqa: F401
+def _build_history_html(symbol: str, name: str, strategy: str, days: int, mode: str,
+                        trade_log: list) -> str:
+    wins      = sum(1 for t in trade_log if t.get("pnl", 0) > 0)
+    losses    = len(trade_log) - wins
+    total_pnl = sum(t.get("pnl", 0) for t in trade_log)
+    gross_p   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) > 0)
+    gross_l   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) <= 0)
+    wr        = wins / len(trade_log) * 100 if trade_log else 0
+    pf        = abs(gross_p / gross_l) if gross_l != 0 else float("inf")
+    avg       = total_pnl / len(trade_log) if trade_log else 0
+    pf_str    = f"{pf:.2f}" if pf != float("inf") else "∞"
+    pnl_color = "#27ae60" if total_pnl >= 0 else "#e74c3c"
+
+    reasons: dict[str, int] = {}
+    for t in trade_log:
+        r = t.get("reason", "?")
+        reasons[r] = reasons.get(r, 0) + 1
+    reason_chips = "".join(
+        f'<span class="chip">{k}: {v}件</span>'
+        for k, v in sorted(reasons.items())
+    )
+
+    rows = []
+    for t in sorted(trade_log, key=lambda x: str(x.get("exit_dt", "")), reverse=True):
+        pnl  = t.get("pnl", 0)
+        rsn  = t.get("reason", "?")
+        cls  = "win" if pnl > 0 else "loss"
+        rsn_cls = {"target": "tag-target", "stop": "tag-stop", "timeout": "tag-timeout"}.get(rsn, "")
+        rows.append(f"""
+        <tr class="{cls}">
+          <td>{str(t.get("exit_dt","?"))[:10]}</td>
+          <td>{str(t.get("signal_dt","?"))[:10]}</td>
+          <td class="num">{t.get("entry_p",0):,.0f}</td>
+          <td class="num">{t.get("exit_p",0):,.0f}</td>
+          <td class="num">{t.get("qty",0):,}</td>
+          <td class="num">{t.get("hold_days",0)}</td>
+          <td class="num pnl">{pnl:+,.0f}円</td>
+          <td><span class="tag {rsn_cls}">{rsn}</span></td>
+        </tr>""")
+
+    rows_html = "\n".join(rows)
+    mode_badge = "aggressive" if mode == "aggressive" else "conservative"
+    mode_color = "#e74c3c" if mode == "aggressive" else "#3498db"
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>{symbol} × {strategy} バックテスト履歴</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", sans-serif;
+          background: #0f172a; color: #e2e8f0; padding: 24px; }}
+  h1 {{ font-size: 1.5rem; margin-bottom: 4px; }}
+  .subtitle {{ color: #94a3b8; font-size: 0.9rem; margin-bottom: 24px; }}
+  .badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px;
+            font-size: 0.75rem; font-weight: bold; color: #fff;
+            background: {mode_color}; margin-left: 8px; vertical-align: middle; }}
+  .cards {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }}
+  .card {{ background: #1e293b; border-radius: 10px; padding: 16px 24px; min-width: 140px; }}
+  .card .label {{ font-size: 0.75rem; color: #64748b; margin-bottom: 4px; }}
+  .card .value {{ font-size: 1.4rem; font-weight: bold; }}
+  .card .value.pos {{ color: #22c55e; }}
+  .card .value.neg {{ color: #ef4444; }}
+  .chip {{ display: inline-block; background: #334155; border-radius: 6px;
+           padding: 2px 8px; font-size: 0.78rem; margin: 2px; }}
+  .reasons {{ margin-bottom: 20px; color: #94a3b8; font-size: 0.85rem; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; }}
+  th {{ background: #1e293b; padding: 8px 12px; text-align: left;
+        color: #94a3b8; font-weight: 600; border-bottom: 1px solid #334155; position: sticky; top: 0; }}
+  td {{ padding: 7px 12px; border-bottom: 1px solid #1e293b; }}
+  tr.win  td {{ background: #0f2a1a; }}
+  tr.loss td {{ background: #2a0f0f; }}
+  tr:hover td {{ filter: brightness(1.15); }}
+  .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .pnl {{ font-weight: bold; }}
+  tr.win  .pnl {{ color: #22c55e; }}
+  tr.loss .pnl {{ color: #ef4444; }}
+  .tag {{ display: inline-block; padding: 1px 7px; border-radius: 4px;
+          font-size: 0.75rem; font-weight: bold; }}
+  .tag-target  {{ background: #14532d; color: #86efac; }}
+  .tag-stop    {{ background: #450a0a; color: #fca5a5; }}
+  .tag-timeout {{ background: #27272a; color: #a1a1aa; }}
+  .footer {{ margin-top: 20px; color: #64748b; font-size: 0.82rem; text-align: right; }}
+</style>
+</head>
+<body>
+<h1>{name} ({symbol}) × {strategy} <span class="badge">{mode_badge}</span></h1>
+<div class="subtitle">直近 {days} 日間のバックテスト履歴</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">取引数</div>
+    <div class="value">{len(trade_log)} 件</div>
+    <div style="font-size:0.8rem;color:#64748b">{wins}勝 / {losses}敗</div>
+  </div>
+  <div class="card">
+    <div class="label">勝率</div>
+    <div class="value {'pos' if wr >= 50 else 'neg'}">{wr:.1f}%</div>
+  </div>
+  <div class="card">
+    <div class="label">PF</div>
+    <div class="value {'pos' if pf >= 1.0 else 'neg'}">{pf_str}</div>
+  </div>
+  <div class="card">
+    <div class="label">合計損益</div>
+    <div class="value {'pos' if total_pnl >= 0 else 'neg'}">{total_pnl:+,.0f}円</div>
+  </div>
+  <div class="card">
+    <div class="label">平均損益</div>
+    <div class="value {'pos' if avg >= 0 else 'neg'}">{avg:+,.0f}円</div>
+  </div>
+</div>
+
+<div class="reasons">決済理由: {reason_chips}</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>決済日</th>
+      <th>シグナル日</th>
+      <th class="num">約定値</th>
+      <th class="num">決済値</th>
+      <th class="num">株数</th>
+      <th class="num">保有日</th>
+      <th class="num">損益</th>
+      <th>決済理由</th>
+    </tr>
+  </thead>
+  <tbody>
+{rows_html}
+  </tbody>
+</table>
+
+<div class="footer">合計: {total_pnl:+,.0f}円 / {len(trade_log)}取引 &nbsp;|&nbsp; 生成: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+</body>
+</html>"""
+
+
+def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str,
+                        open_browser: bool = True) -> None:
+    from backtest_limit_entry import fetch, run_limit_backtest  # noqa: F401
 
     if mode == "aggressive":
         stop_params = _stop.STRATEGY_PARAMS_AGGRESSIVE
@@ -310,11 +450,6 @@ def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str) -> Non
     if strategy not in all_params:
         print(f"ERROR: 戦略 '{strategy}' は不明です。利用可能: {', '.join(all_params)}")
         sys.exit(1)
-
-    print(f"\n{'='*60}")
-    print(f"  {symbol}  ×  {strategy}  バックテスト履歴")
-    print(f"  期間: 直近 {days} 日  /  モード: {mode}")
-    print(f"{'='*60}\n")
 
     print(f"データ取得中: {symbol} ...")
     df = fetch(symbol, days + 60)
@@ -347,52 +482,19 @@ def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str) -> Non
     trade_log = result.get("trade_log", [])
 
     if not trade_log:
-        print("この期間にトレードはありませんでした。\n")
+        print("この期間にトレードはありませんでした。")
         return
 
-    wins      = sum(1 for t in trade_log if t.get("pnl", 0) > 0)
-    losses    = len(trade_log) - wins
-    total_pnl = sum(t.get("pnl", 0) for t in trade_log)
-    gross_p   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) > 0)
-    gross_l   = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) <= 0)
-    wr        = wins / len(trade_log) * 100 if trade_log else 0
-    pf        = abs(gross_p / gross_l) if gross_l != 0 else float("inf")
-    avg       = total_pnl / len(trade_log) if trade_log else 0
-    pf_str    = f"{pf:.2f}" if pf != float("inf") else "∞"
+    html = _build_history_html(symbol, name, strategy, days, mode, trade_log)
 
-    print(f"【サマリー】")
-    print(f"  取引数  : {len(trade_log)} 件  ({wins}勝 / {losses}敗)")
-    print(f"  勝率    : {wr:.1f}%")
-    print(f"  PF      : {pf_str}")
-    print(f"  合計損益: {total_pnl:+,.0f} 円")
-    print(f"  平均損益: {avg:+,.0f} 円/取引")
-    print()
+    date_str  = datetime.now().strftime("%Y-%m-%d")
+    mode_sfx  = "_aggressive" if mode == "aggressive" else ""
+    out_path  = Path(f"history_{symbol}_{strategy}{mode_sfx}_{date_str}.html")
+    out_path.write_text(html, encoding="utf-8")
+    print(f"HTML生成完了: {out_path.resolve()}")
 
-    reasons: dict[str, int] = {}
-    for t in trade_log:
-        r = t.get("reason", "?")
-        reasons[r] = reasons.get(r, 0) + 1
-    reason_str = "  ".join(f"{k}:{v}件" for k, v in sorted(reasons.items()))
-    print(f"  決済理由: {reason_str}\n")
-
-    print(f"{'決済日':<10}  {'約定値':>7}  {'決済値':>7}  {'株数':>6}  {'保有':>4}  {'損益':>10}  決済理由    エントリー日")
-    print("-" * 80)
-
-    for t in sorted(trade_log, key=lambda x: str(x.get("exit_dt", "")), reverse=True):
-        ed   = str(t.get("exit_dt",   "?"))[:10]
-        ep   = t.get("entry_p", 0)
-        xp   = t.get("exit_p",  0)
-        qty  = t.get("qty",     0)
-        hold = t.get("hold_days", 0)
-        pnl  = t.get("pnl",    0)
-        rsn  = t.get("reason", "?")
-        nd   = str(t.get("signal_dt", "?"))[:10]
-        pnl_str = f"{pnl:+,.0f}円"
-        print(f"{ed:<10}  {ep:>7,.0f}  {xp:>7,.0f}  {qty:>5}株  {hold:>3}日  {pnl_str:>10}  {rsn:<10}  {nd}")
-
-    print()
-    print(f"合計: {total_pnl:+,.0f} 円  /  {len(trade_log)} 取引")
-    print()
+    if open_browser:
+        webbrowser.open(out_path.resolve().as_uri())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -421,6 +523,7 @@ def main() -> None:
             strategy=_known.strategy.upper(),
             days=_known.days,
             mode=mode,
+            open_browser=not _known.no_browser,
         )
         return
 
