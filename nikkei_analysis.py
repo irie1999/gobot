@@ -1910,7 +1910,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center;font-weight:700;font-size:1rem;color:{col}">{rank}</td>
   <td style="font-weight:700;color:{col}">{lbl}</td>
   <td style="color:#94a3b8;font-size:0.82rem">{note}</td>
-  <td style="text-align:center"><span style="background:{col};color:#0f172a;font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:4px">{tag}</span></td>
+  <td style="text-align:center;white-space:nowrap"><span style="background:{col};color:#0f172a;font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:4px;white-space:nowrap">{tag}</span></td>
 </tr>"""
 
     _band_rows = (
