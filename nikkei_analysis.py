@@ -1885,6 +1885,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 </tr>"""
 
     # ── 発注優先度ガイド ──────────────────────────────────────────────────────
+    # _PNL_CONFIGS の color をラベルで引くヘルパー
+    def _cfg_color(label_fragment: str) -> str:
+        for c in _PNL_CONFIGS:
+            if label_fragment.lower() in c["label"].lower():
+                return c["color"]
+        return "#64748b"
+
     _cfg_labels = [c["label"] for c in _PNL_CONFIGS]
     _has_5k_con  = any("5k" in l and "conservative" in l.lower() for l in _cfg_labels)
     _has_v2_con  = any("v2" in l.lower() and "conservative" in l.lower() for l in _cfg_labels)
@@ -1894,10 +1901,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     _script_rows = ""
     if _has_5k_con or _has_v2_con or _has_5k_agg or _has_v2_agg:
         _prio_list = []
-        if _has_5k_con:  _prio_list.append(("①", "5k-WL conservative", "PF 4.00  WR ~81%  平均+4万円/取引", "#4ade80", "最優先"))
-        if _has_v2_con:  _prio_list.append(("②", "v2新WL conservative", "平均+3.8万円/取引  WR ~78%",       "#86efac", "優先"))
-        if _has_5k_agg:  _prio_list.append(("③", "5k-WL aggressive",    "PF 4.23  WR 83%  小幅利確向き",   "#60a5fa", "余力あれば"))
-        if _has_v2_agg:  _prio_list.append(("④", "v2新WL aggressive",   "WR 80%  PF 3.63  回転率重視",     "#93c5fd", "余力あれば"))
+        if _has_5k_con:  _prio_list.append(("①", "5k-WL conservative", "PF 4.00  WR ~81%  平均+4万円/取引", _cfg_color("5k-wl conservative"), "最優先"))
+        if _has_v2_con:  _prio_list.append(("②", "v2新WL conservative", "平均+3.8万円/取引  WR ~78%",        _cfg_color("v2新wl conservative"), "優先"))
+        if _has_5k_agg:  _prio_list.append(("③", "5k-WL aggressive",    "PF 4.23  WR 83%  小幅利確向き",    _cfg_color("5k-wl aggressive"),    "余力あれば"))
+        if _has_v2_agg:  _prio_list.append(("④", "v2新WL aggressive",   "WR 80%  PF 3.63  回転率重視",      _cfg_color("v2新wl aggressive"),   "余力あれば"))
         for rank, lbl, note, col, tag in _prio_list:
             _script_rows += f"""<tr>
   <td style="text-align:center;font-weight:700;font-size:1rem;color:{col}">{rank}</td>
