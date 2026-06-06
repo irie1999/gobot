@@ -20,6 +20,8 @@ Usage:
     python nikkei_analysis.py --no-pnl           # 損益タブなし
     python nikkei_analysis.py --min-score 60     # ★★以上シグナルのみ
     python nikkei_analysis.py --days 30          # 直近30日損益
+    python nikkei_analysis.py --days 365 --base-only   # 現WATCHLIST conservative/aggressive のみ
+    python nikkei_analysis.py --config "現WL"          # 同上 (部分一致フィルター)
 """
 from __future__ import annotations
 import argparse
@@ -87,8 +89,8 @@ try:
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
     _PNL_CONFIGS = [
-        {"label": "既存版 conservative", "color": "#3498db", "mode": "conservative", "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
-        {"label": "既存版 aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
+        {"label": "現WL conservative", "color": "#3498db", "mode": "conservative", "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
+        {"label": "現WL aggressive",   "color": "#e74c3c", "mode": "aggressive",   "sm_tm": None, "stop_wl": _BASE_STOP, "brk_wl": _BASE_BRK},
         {"label": "WF conservative",    "color": "#06b6d4", "mode": "conservative", "sm_tm": None, "stop_wl": _WF_CON_STOP, "brk_wl": _WF_CON_BRK},
         {"label": "WF aggressive",      "color": "#f39c12", "mode": "aggressive",   "sm_tm": None, "stop_wl": _WF_AGG_STOP, "brk_wl": _WF_AGG_BRK},
         *([{"label": "NOLIMIT WF",      "color": "#a855f7", "mode": "aggressive",   "sm_tm": (1.5, 2.0), "stop_wl": _NL_STOP, "brk_wl": _NL_BRK}]
@@ -1548,7 +1550,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 
     signals.sort(key=lambda x: -x["score"])
     if cfg_filter:
-        signals = [s for s in signals if s.get("cfg_label") == cfg_filter]
+        signals = [s for s in signals if cfg_filter in s.get("cfg_label", "")]
 
     # ── スコア別集計ヘルパー ──────────────────────────────────────────────────
     def _score_stats(trades_list):
@@ -2008,11 +2010,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
 
-    # ── cfg_filter: 対象configのみに絞り込み ──
+    # ── cfg_filter: 対象configのみに絞り込み (部分一致) ──
     if cfg_filter:
-        all_trades       = [t for t in all_trades       if t.get("label") == cfg_filter]
-        full_year_trades = [t for t in full_year_trades if t.get("label") == cfg_filter]
-        cfg_trades_map   = {k: [t for t in v if t.get("label") == cfg_filter]
+        all_trades       = [t for t in all_trades       if cfg_filter in t.get("label", "")]
+        full_year_trades = [t for t in full_year_trades if cfg_filter in t.get("label", "")]
+        cfg_trades_map   = {k: [t for t in v if cfg_filter in t.get("label", "")]
                             for k, v in cfg_trades_map.items()}
 
     # ── KPI (発注中=未約定は除外) ──
@@ -2422,9 +2424,12 @@ def main():
     parser.add_argument("--days",         type=int, default=7,    help="損益集計日数 (--with-pnl 使用時)")
     parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア")
     parser.add_argument("--score",        type=int, default=None, help="スコア単体の詳細成績を表示 (例: --score 80)")
-    parser.add_argument("--config",       type=str, default=None, help="表示するconfigラベルを絞り込み (例: --config 'v2新WL conservative')")
+    parser.add_argument("--config",       type=str, default=None, help="表示するconfigラベルを部分一致絞り込み (例: --config '現WL' で conservative+aggressive両方)")
+    parser.add_argument("--base-only",   action="store_true",    help="現WL (conservative + aggressive) のみ表示 (--config '現WL' の短縮形)")
     parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
     args = parser.parse_args()
+    if args.base_only and not args.config:
+        args.config = "現WL"
 
     # 基準日を決定
     if args.date:
