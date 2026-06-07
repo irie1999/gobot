@@ -1909,7 +1909,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 <p class="footnote">※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日</p>"""
 
 
-def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> str:
+def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
+                   symbol_filter: list[str] | None = None) -> str:
     """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
@@ -2018,6 +2019,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         all_trades       = [t for t in all_trades       if t.get("label") == cfg_filter]
         full_year_trades = [t for t in full_year_trades if t.get("label") == cfg_filter]
         cfg_trades_map   = {k: [t for t in v if t.get("label") == cfg_filter]
+                            for k, v in cfg_trades_map.items()}
+
+    # ── symbol_filter: 銘柄コードで絞り込み ──
+    if symbol_filter:
+        syms = {s.upper() for s in symbol_filter}
+        all_trades       = [t for t in all_trades       if t.get("symbol","").upper() in syms]
+        full_year_trades = [t for t in full_year_trades if t.get("symbol","").upper() in syms]
+        cfg_trades_map   = {k: [t for t in v if t.get("symbol","").upper() in syms]
                             for k, v in cfg_trades_map.items()}
 
     # ── 1銘柄1ポジションフィルター ──────────────────────────────────
@@ -2598,6 +2607,7 @@ def main():
     parser.add_argument("--min-score",    type=int, default=0,    help="シグナルフィルター最低スコア")
     parser.add_argument("--score",        type=int, default=None, help="スコア単体の詳細成績を表示 (例: --score 80)")
     parser.add_argument("--config",       type=str, default=None, help="表示するconfigラベルを絞り込み (例: --config 'v2新WL conservative')")
+    parser.add_argument("--symbol",       type=str, default=None, help="銘柄コードで絞り込み (カンマ区切り, 例: --symbol 8061.T または --symbol 8061.T,8173.T)")
     parser.add_argument("--workers",      type=int, default=_DEF_WORKERS, help="並列数")
     args = parser.parse_args()
 
@@ -2681,7 +2691,9 @@ def main():
                                        cfg_filter=args.config)
     if not args.no_pnl and _SIGNALS_AVAILABLE:
         print(f"損益集計中 (直近{args.days}日)...", flush=True)
-        tab5_html = _tab5_pnl_html(args.days, args.workers, cfg_filter=args.config)
+        sym_list = [s.strip() for s in args.symbol.split(",")] if args.symbol else None
+        tab5_html = _tab5_pnl_html(args.days, args.workers, cfg_filter=args.config,
+                                   symbol_filter=sym_list)
 
     html_path = Path(f"nikkei_analysis_{ref_date}.html")
     html_path.write_text(
