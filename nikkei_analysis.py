@@ -1986,6 +1986,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                     "exit_dt":      exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
                     "entry_p":      t.get("entry_p", 0),
                     "exit_p":       t.get("exit_p", 0),
+                    "qty":          t.get("qty", 0),
                     "hold_days":    t.get("hold_days", 0),
                     "reason":       reason,
                     "order_limit":  t.get("order_limit", 0),
@@ -2209,13 +2210,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   {tgt_cell}
   {loc_cell}
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
+  <td style="text-align:right">{t.get("qty",0):,}</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="13" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+        trade_rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2274,7 +2276,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
