@@ -225,6 +225,7 @@ def load_holdout_watchlists(
                 and _int(r.get("max_consecutive_losses", 999))  <= max_consec
                 and _float(r.get("sharpe", 0))                  >= min_sharpe
                 and _float(r.get("total_test_pnl", 0))           > 0
+                and (max_price <= 0 or _float(r.get("latest_price", 0)) <= max_price)
             )]
             filtered.sort(key=_composite_score, reverse=True)
 
