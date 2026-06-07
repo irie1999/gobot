@@ -2187,6 +2187,62 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   <td class="{sapc}" style="text-align:right;font-size:0.8rem">{savg:+,.0f}円</td>
 </tr>"""
 
+    # ── BTスコア帯別集計 ──
+    bt_buckets = [
+        (90,100,"90-100","#4ade80"),(80,90,"80-89","#86efac"),
+        (70,80,"70-79","#60a5fa"),(60,70,"60-69","#93c5fd"),
+        (50,60,"50-59","#fbbf24"),(40,50,"40-49","#fcd34d"),
+        (30,40,"30-39","#f87171"),(0,30,"0-29","#94a3b8"),
+    ]
+    bt_fine_rows = ""
+    for lo, hi, lbl_s, col in bt_buckets:
+        tr = [t for t in full_year_trades
+              if t.get("rec_score") is not None and lo <= t["rec_score"] < hi]
+        n = len(tr)
+        if not n:
+            continue
+        n, wins, pnl, gp, gl, pf, avg, avg_wf, avg_bt = _band_stats(tr)
+        pf_s  = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wr_s  = wins / n * 100
+        lpc   = "profit" if pnl >= 0 else "loss"
+        apc   = "profit" if avg >= 0 else "loss"
+        border_style = "border-top:2px solid #334155;" if lo in (40,60,80) else ""
+        bt_fine_rows += f"""<tr style="{border_style}">
+  <td style="color:{col};font-weight:700;text-align:left">{lbl_s}</td>
+  <td style="font-weight:700">{n}</td>
+  <td style="font-weight:700">{wr_s:.1f}%</td>
+  <td style="font-weight:700">{pf_s}</td>
+  {_wf_cell(avg_wf)}{_bt_cell(avg_bt)}
+  <td class="profit" style="text-align:right;font-weight:700">+{gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{gl:,.0f}円</td>
+  <td class="{lpc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
+  <td class="{apc}"  style="text-align:right;font-weight:700">{avg:+,.0f}円</td>
+</tr>"""
+        for cfg in _PNL_CONFIGS:
+            sub = [t for t in tr if t.get("label") == cfg["label"]]
+            if not sub:
+                continue
+            sn, sw, sp, sgp, sgl, spf, savg, swf, sbt = _band_stats(sub)
+            spf_s = "∞" if spf == float("inf") else f"{spf:.2f}"
+            swr   = sw / sn * 100
+            slpc  = "profit" if sp >= 0 else "loss"
+            sapc  = "profit" if savg >= 0 else "loss"
+            dot   = f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{cfg["color"]};margin-right:5px;vertical-align:middle"></span>'
+            swf_s = str(swf) if swf is not None else "—"
+            sbt_s = str(sbt) if sbt is not None else "—"
+            bt_fine_rows += f"""<tr style="background:#0f172a">
+  <td style="text-align:left;padding-left:20px;color:#94a3b8;font-size:0.8rem">{dot}{cfg["label"]}</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{sn}</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{swr:.1f}%</td>
+  <td style="color:#94a3b8;font-size:0.8rem">{spf_s}</td>
+  <td style="color:#94a3b8;font-size:0.8rem;text-align:center">{swf_s}</td>
+  <td style="color:#94a3b8;font-size:0.8rem;text-align:center">{sbt_s}</td>
+  <td class="profit" style="text-align:right;font-size:0.8rem">+{sgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-size:0.8rem">-{sgl:,.0f}円</td>
+  <td class="{slpc}" style="text-align:right;font-size:0.8rem">{sp:+,.0f}円</td>
+  <td class="{sapc}" style="text-align:right;font-size:0.8rem">{savg:+,.0f}円</td>
+</tr>"""
+
     # ── 取引明細テーブル ──
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     def _rhtml(reason):
@@ -2321,19 +2377,39 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
 </table>
 
 <h2>スコア別実績（直近{days}日 / {period_note}）</h2>
+<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+<div style="flex:1;min-width:480px">
+<h3 style="color:#60a5fa;font-size:0.95rem;margin:0 0 6px">① WFスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">銘柄選定基準で分類</span></h3>
 <table>
   <thead><tr>
     <th style="text-align:left">スコア帯 (WF)</th>
     <th>取引数</th><th>勝率</th><th>PF</th>
-    <th style="color:#60a5fa" title="WFスコア平均 (≥70緑/≥50黄/&lt;50赤)">平均WF</th>
-    <th style="color:#fbbf24" title="BTスコア平均 (≥60緑/≥40黄/&lt;40赤)">平均BT</th>
+    <th style="color:#60a5fa">平均WF</th>
+    <th style="color:#fbbf24">平均BT</th>
     <th style="color:#4ade80">利益</th>
     <th style="color:#f87171">損失</th>
     <th>損益合計</th><th>平均損益/取引</th>
   </tr></thead>
   <tbody>{fine_rows}</tbody>
 </table>
-<p class="footnote">境界線 = ランク区切り（△/★/★★/★★★）／ WF=ウォークフォワードスコア（銘柄選定基準）／ BT=直近バックテストスコア（最近の機能度）</p>
+</div>
+<div style="flex:1;min-width:480px">
+<h3 style="color:#fbbf24;font-size:0.95rem;margin:0 0 6px">② BTスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">直近機能度で分類</span></h3>
+<table>
+  <thead><tr>
+    <th style="text-align:left">スコア帯 (BT)</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#60a5fa">平均WF</th>
+    <th style="color:#fbbf24">平均BT</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{bt_fine_rows}</tbody>
+</table>
+</div>
+</div>
+<p class="footnote">WF=ウォークフォワードスコア（銘柄選定基準・高いほど過去フォールドで安定）／ BT=直近バックテストスコア（最近の機能度・低いと最近機能していない）</p>
 
 <h2>取引明細（決済日降順）</h2>
 <table>
