@@ -2377,9 +2377,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
 </table>
 
 <h2>スコア別実績（直近{days}日 / {period_note}）</h2>
-<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
-<div style="flex:1;min-width:480px">
-<h3 style="color:#60a5fa;font-size:0.95rem;margin:0 0 6px">① WFスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">銘柄選定基準で分類</span></h3>
+<h3 style="color:#60a5fa;font-size:0.95rem;margin:8px 0 4px">① WFスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">銘柄選定基準で分類</span></h3>
 <table>
   <thead><tr>
     <th style="text-align:left">スコア帯 (WF)</th>
@@ -2392,9 +2390,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   </tr></thead>
   <tbody>{fine_rows}</tbody>
 </table>
-</div>
-<div style="flex:1;min-width:480px">
-<h3 style="color:#fbbf24;font-size:0.95rem;margin:0 0 6px">② BTスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">直近機能度で分類</span></h3>
+<h3 style="color:#fbbf24;font-size:0.95rem;margin:20px 0 4px">② BTスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">直近機能度で分類</span></h3>
 <table>
   <thead><tr>
     <th style="text-align:left">スコア帯 (BT)</th>
@@ -2407,8 +2403,6 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   </tr></thead>
   <tbody>{bt_fine_rows}</tbody>
 </table>
-</div>
-</div>
 <p class="footnote">WF=ウォークフォワードスコア（銘柄選定基準・高いほど過去フォールドで安定）／ BT=直近バックテストスコア（最近の機能度・低いと最近機能していない）</p>
 
 <h2>取引明細（決済日降順）</h2>
