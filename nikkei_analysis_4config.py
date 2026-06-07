@@ -30,6 +30,7 @@ import argparse
 import copy as _copy
 import importlib as _importlib
 import os
+import re as _re
 import sys
 import webbrowser
 from collections import defaultdict
@@ -375,33 +376,8 @@ def _add_nikkei_trend(trades_by_cfg: dict[str, list[dict]], nk_trend: pd.Series)
 # HTML 生成（タブ6 + タブ7）
 # ════════════════════════════════════════════════════════════════════════════
 
-def _tab6_signal_judgment_html(r: dict) -> str:
-    trend_color = {"up": "#4ade80", "down": "#f87171", "sideways": "#fbbf24"}[r["trend"]]
-    trend_ja    = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}[r["trend"]]
-    vol_color   = {"high": "#f87171", "mid": "#fbbf24", "low": "#4ade80"}[r["vol_level"]]
-    vol_ja      = {"high": "高ボラ", "mid": "中ボラ", "low": "低ボラ"}[r["vol_level"]]
-    ma200_str   = f"{r['ma200']:,.0f}" if r.get("ma200") else "N/A"
-    ma200_color = "#4ade80" if r["above_ma200"] else "#f87171"
-    ma200_pos   = f'<span style="color:{ma200_color}">{"▲ 上" if r["above_ma200"] else "▼ 下"}</span>'
-    m5c  = "#4ade80" if r["mom5"]  >= 0 else "#f87171"
-    m20c = "#4ade80" if r["mom20"] >= 0 else "#f87171"
-    dc   = "#f87171" if r["max_1d_drop"] < -3 else "#94a3b8"
-
-    items = [
-        ("日経225",          f'<strong style="font-size:1.25rem">{r["cur"]:,.0f}円</strong>'),
-        ("トレンド",         f'<span style="color:{trend_color};font-weight:700;font-size:1.05rem">{trend_ja}</span>'),
-        ("ボラ (14日)",      f'<span style="color:{vol_color}">{vol_ja} ({r["vol"]:.2f}%)</span>'),
-        ("5日騰落",          f'<span style="color:{m5c};font-weight:600">{r["mom5"]:+.2f}%</span>'),
-        ("20日騰落",         f'<span style="color:{m20c};font-weight:600">{r["mom20"]:+.2f}%</span>'),
-        ("MA200",            f'{ma200_str}円 → {ma200_pos}'),
-        ("過去30日最大下落", f'<span style="color:{dc}">{r["max_1d_drop"]:+.2f}%</span>'),
-    ]
-    regime_html = "".join(
-        f'<div class="regime-item"><span class="ri-label">{lb}</span>'
-        f'<span class="ri-val">{vl}</span></div>'
-        for lb, vl in items
-    )
-
+def _4cfg_section_html(r: dict) -> str:
+    """t1タブのスクリプト判定後に挿入する 4設定評価カードセクション。"""
     cards = ""
     for cfg in CONFIGS:
         status, reason, advice = _judge_config(cfg, r)
@@ -425,14 +401,7 @@ def _tab6_signal_judgment_html(r: dict) -> str:
   <div style="color:#64748b;font-size:0.78rem;margin-top:4px">→ {advice}</div>
   <div style="color:#475569;font-size:0.75rem;margin-top:6px;border-top:1px solid #1e293b;padding-top:6px">{note}</div>
 </div>"""
-
-    return f"""
-<div class="regime-box">
-  <h3 style="margin-top:0;color:#e2e8f0">相場環境</h3>
-  <div class="regime-grid">{regime_html}</div>
-</div>
-<h2>4設定シグナル判定</h2>
-{cards}"""
+    return f"\n<h2>4設定シグナル判定</h2>\n{cards}\n"
 
 
 def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
@@ -548,26 +517,37 @@ def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
 {_breakdown_cards()}"""
 
 
-def _inject_tabs(html: str, tab6_html: str, tab7_html: str) -> str:
-    """既存HTML(t1〜t5)に t6・t7 を注入する。"""
-    new_btns = (
-        '\n  <button class="tab-btn" data-tab="t6" onclick="switchTab(\'t6\')">🎯 4設定判定</button>'
-        '\n  <button class="tab-btn" data-tab="t7" onclick="switchTab(\'t7\')">📊 トレンド×相性</button>'
-    )
-    new_panes = (
-        f'\n<div id="t6" class="tab-pane">{tab6_html}</div>'
-        f'\n<div id="t7" class="tab-pane">{tab7_html}</div>'
+def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
+    """t1に4設定セクションを注入、t7(トレンド×相性)タブを追加、タブナビ折り返し修正。"""
+
+    # 1. t1タブ内の「推奨コマンド」見出し直前に 4設定セクションを挿入
+    html = _re.sub(
+        r'(<h2>[^<]*時点の推奨コマンド)',
+        cfg_section_html.replace('\\', '\\\\') + r'\1',
+        html,
+        count=1,
     )
 
-    # タブナビ末尾 </div> の直前に挿入 (tab-navの閉じタグ)
+    # 2. tab-nav に t7 ボタンのみ追加
     TAB_NAV_END = '\n</div>\n\n<div id="t1"'
     if TAB_NAV_END in html:
-        html = html.replace(TAB_NAV_END, new_btns + TAB_NAV_END, 1)
+        new_btn = '\n  <button class="tab-btn" data-tab="t7" onclick="switchTab(\'t7\')">📊 トレンド×相性</button>'
+        html = html.replace(TAB_NAV_END, new_btn + TAB_NAV_END, 1)
 
-    # </body> の直前に新ペインを挿入
+    # 3. t7 ペインを <script> 直前に追加
     SCRIPT_TAG = '\n\n<script>'
     if SCRIPT_TAG in html:
-        html = html.replace(SCRIPT_TAG, new_panes + SCRIPT_TAG, 1)
+        html = html.replace(SCRIPT_TAG,
+                            f'\n<div id="t7" class="tab-pane">{tab7_html}</div>' + SCRIPT_TAG, 1)
+
+    # 4. タブナビが 2 行にならないよう CSS を上書き
+    css_fix = (
+        '\n<style>'
+        '\n.tab-nav { flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch; }'
+        '\n.tab-btn { padding: 7px 13px !important; font-size: 0.8rem !important; white-space: nowrap; }'
+        '\n</style>'
+    )
+    html = html.replace('</head>', css_fix + '\n</head>', 1)
 
     return html
 
@@ -792,14 +772,14 @@ def main() -> None:
     if r is not None:
         trades_by_cfg = _run_backtests(_known.workers)
         _add_nikkei_trend(trades_by_cfg, nk_trend)
-        tab6_html = _tab6_signal_judgment_html(r)
-        tab7_html = _tab7_trend_analysis_html(trades_by_cfg)
+        cfg_section = _4cfg_section_html(r)
+        tab7_html   = _tab7_trend_analysis_html(trades_by_cfg)
     else:
-        tab6_html = "<p style='color:#64748b;padding:20px'>データ取得失敗のためスキップ</p>"
-        tab7_html = "<p style='color:#64748b;padding:20px'>データ取得失敗のためスキップ</p>"
+        cfg_section = ""
+        tab7_html   = "<p style='color:#64748b;padding:20px'>データ取得失敗のためスキップ</p>"
 
-    # ── 新タブを注入 → 新ファイルとして保存 ─────────────────────────────────
-    new_html  = _inject_tabs(base_html, tab6_html, tab7_html)
+    # ── 4設定セクション注入 + t7タブ追加 → 新ファイルとして保存 ─────────────
+    new_html  = _inject_tabs(base_html, cfg_section, tab7_html)
     new_path  = Path(f"nikkei_analysis_4config_{date_str}.html")
     new_path.write_text(new_html, encoding="utf-8")
     print(f"\n4config レポート生成完了: {new_path.resolve()}")
