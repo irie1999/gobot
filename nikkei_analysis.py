@@ -2181,21 +2181,16 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
             tgt_cell  = (f'<td style="text-align:right;white-space:nowrap">{otp:,.0f}'
                          f'<br><span style="font-size:0.73rem;color:#4ade80">{tp_pct:+.1f}%</span></td>')
             olp_sub   = f'<br><span style="font-size:0.71rem;color:#64748b">逆:{olp:,.0f}</span>'
-            # 現在地: 保有中のみ表示（損切り〜目標の範囲内の現在位置）
+            # 現在値: 保有中のみ表示（現在株価・損切りまで・目標まで）
             cur = t.get("exit_p", 0)
-            rng = otp - osp
-            if t.get("reason") == "保有中" and cur > 0 and rng > 0:
-                prog   = max(0.0, min(100.0, (cur - osp) / rng * 100))
-                d_sp   = (cur - osp) / cur * 100
-                d_tp   = (otp - cur) / cur * 100
-                pc     = "#4ade80" if prog >= 66 else ("#fbbf24" if prog >= 33 else "#f87171")
-                bar    = (f'<div style="background:#1e293b;border-radius:3px;height:5px;'
-                          f'margin:3px 0;overflow:hidden">'
-                          f'<div style="background:{pc};height:100%;width:{prog:.0f}%"></div></div>')
-                loc_cell = (f'<td style="text-align:center;white-space:nowrap">'
-                            f'<span style="color:{pc};font-weight:700;font-size:0.82rem">{prog:.0f}%</span>{bar}'
-                            f'<div style="font-size:0.7rem;color:#f87171">↓{d_sp:.1f}%</div>'
-                            f'<div style="font-size:0.7rem;color:#4ade80">↑{d_tp:.1f}%</div>'
+            if t.get("reason") == "保有中" and cur > 0 and osp > 0 and otp > 0:
+                d_sp  = (cur - osp) / cur * 100
+                d_tp  = (otp - cur) / cur * 100
+                sp_c  = "#4ade80" if d_sp >= 5 else ("#fbbf24" if d_sp >= 2 else "#f87171")
+                loc_cell = (f'<td style="text-align:right;white-space:nowrap">'
+                            f'<strong>{cur:,.0f}</strong>'
+                            f'<br><span style="font-size:0.72rem;color:{sp_c}">損切まで{d_sp:+.1f}%</span>'
+                            f'<br><span style="font-size:0.72rem;color:#4ade80">目標まで{d_tp:+.1f}%</span>'
                             f'</td>')
             else:
                 loc_cell = '<td style="color:#475569;text-align:center">—</td>'
@@ -2352,7 +2347,8 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 /* テーブル */
 table { width:100%; border-collapse:collapse; font-size:0.83rem; margin-bottom:8px; }
 th { background:#1e293b; color:#94a3b8; padding:7px 10px;
-     border:1px solid #334155; text-align:center; white-space:nowrap; }
+     border:1px solid #334155; text-align:center; white-space:nowrap;
+     position:sticky; top:0; z-index:1; }
 td { padding:5px 10px; border:1px solid #1e293b; }
 tr:hover td { filter:brightness(1.15); }
 
