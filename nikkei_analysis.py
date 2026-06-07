@@ -2346,9 +2346,10 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 
 /* テーブル */
 table { width:100%; border-collapse:collapse; font-size:0.83rem; margin-bottom:8px; }
-th { background:#1e293b; color:#94a3b8; padding:7px 10px;
-     border:1px solid #334155; text-align:center; white-space:nowrap;
-     position:sticky; top:0; z-index:1; }
+th { background:#0f2040; color:#cbd5e1; padding:9px 10px;
+     border:1px solid #334155; border-bottom:2px solid #3b82f6;
+     text-align:center; white-space:nowrap; font-size:0.82rem; font-weight:700;
+     letter-spacing:0.03em; position:sticky; top:0; z-index:1; }
 td { padding:5px 10px; border:1px solid #1e293b; }
 tr:hover td { filter:brightness(1.15); }
 
