@@ -1,26 +1,29 @@
 """
 nikkei_analysis_holdout.py  ―  ホールドアウトWF選定WATCHLISTで日経分析
 
-scan_walkforward.py --holdout-days N で生成した CSV を読み込み、
-フィルタリング・ランキングした銘柄リストで nikkei_analysis.py と
-同じ分析を実行する (monkey-patch 方式)。
+既存CSVがあればそれを読み込み、なければ自動でWFスキャンを実行する。
 
 使い方:
   python nikkei_analysis_holdout.py                      # 最新のホールドアウトCSVを自動検出
-  python nikkei_analysis_holdout.py --holdout-days 65   # 65日ホールドアウトCSVを使用
+  python nikkei_analysis_holdout.py --holdout-days 30   # 直近30日をホールドアウト (CSVなければ自動スキャン)
+  python nikkei_analysis_holdout.py --holdout-days 65   # 65日ホールドアウト
   python nikkei_analysis_holdout.py --per-strategy 8    # 戦略ごとの選定数 (デフォルト10)
   python nikkei_analysis_holdout.py --max-dd 10         # MaxDD上限10% (デフォルト15)
+  python nikkei_analysis_holdout.py --max-price 5000    # 株価5000円以下のみ
   python nikkei_analysis_holdout.py --days 65           # 直近65日の損益表示
   python nikkei_analysis_holdout.py --no-browser        # HTML生成のみ
   python nikkei_analysis_holdout.py --aggressive        # aggressiveモードで実行
-  python nikkei_analysis_holdout.py --holdout-only     # holdout conservative/aggressive の2設定のみ表示
+  python nikkei_analysis_holdout.py --holdout-only      # holdout conservative/aggressive の2設定のみ表示
+  python nikkei_analysis_holdout.py --workers 8         # スキャン並列数 (自動スキャン時)
+  python nikkei_analysis_holdout.py --no-save-csv       # スキャン結果をCSV保存しない
 
 流れ:
-  1. walkforward_results/ のホールドアウトCSVを読み込む
-  2. フィルタリング (MaxDD / 連敗 / Sharpe / PnL) で銘柄を絞る
-  3. composite_score = total_test_pnl × (1 + sharpe) でランキング
-  4. 上位N銘柄を WATCHLIST に設定して nikkei_analysis.py を実行
-  5. 出力: nikkei_analysis_holdout{N}d_{date}.html
+  1. walkforward_results/ のホールドアウトCSVを探す
+  2. CSVがなければ scan_walkforward の関数を使って自動スキャン実行 → CSV保存
+  3. フィルタリング (MaxDD / 連敗 / Sharpe / PnL) で銘柄を絞る
+  4. composite_score = total_test_pnl × (1 + sharpe) でランキング
+  5. 上位N銘柄を WATCHLIST に設定して nikkei_analysis.py を実行
+  6. 出力: nikkei_analysis_holdout{N}d_{date}.html
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ import importlib as _importlib
 import os
 import sys
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -82,6 +86,96 @@ def _find_holdout_csv(strategy: str, holdout_days: int, wf_dir: Path) -> Path | 
     return candidates[0] if candidates else None
 
 
+def _run_scan_for_strategy(
+    strategy: str,
+    holdout_days: int,
+    max_price: float,
+    workers: int,
+    wf_dir: Path,
+    save_csv: bool = True,
+) -> list[dict]:
+    """
+    scan_walkforward.walkforward_one を直接呼び出してスキャン実行。
+    結果を dict のリストで返し、save_csv=True なら CSV も保存する。
+    """
+    import scan_walkforward as _swf
+
+    # ホールドアウト分だけ fold 境界をずらす (元のリストを汚さない)
+    orig_folds = list(_swf.FOLDS)
+    if holdout_days > 0:
+        _swf.FOLDS[:] = [
+            (n, ts + holdout_days, te + holdout_days,
+             vs + holdout_days, ve + holdout_days)
+            for n, ts, te, vs, ve in orig_folds
+        ]
+
+    try:
+        symbols, universe_name = _swf.load_universe()
+        print(f"  [{strategy}] ユニバース: {universe_name} ({len(symbols)} 銘柄)", flush=True)
+
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {
+                ex.submit(_swf.walkforward_one, sym, name, strategy, max_price): sym
+                for sym, name in symbols
+            }
+            done = 0
+            progress_every = max(len(symbols) // 10, 50)
+            for fut in as_completed(futs):
+                done += 1
+                try:
+                    r = fut.result()
+                    if r:
+                        results.append(r)
+                except Exception:
+                    pass
+                if done % progress_every == 0:
+                    print(f"  [{strategy}] 進捗: {done}/{len(symbols)}  候補: {len(results)}", flush=True)
+
+    finally:
+        _swf.FOLDS[:] = orig_folds  # 必ず元に戻す
+
+    print(f"  [{strategy}] 完了: 候補={len(results)}  2fold以上通過={sum(1 for r in results if r['folds_passed'] >= 2)}")
+
+    if save_csv and results:
+        mode_suffix = f"_{_swf.TRADING_MODE}" if _swf.TRADING_MODE != "conservative" else ""
+        holdout_suffix = f"_holdout{holdout_days}d" if holdout_days > 0 else ""
+        csv_path = wf_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}_{TODAY}.csv"
+        fields = [
+            "symbol", "name", "strategy", "family", "latest_price",
+            "folds_passed",
+            "total_test_trades", "avg_hold_days", "total_test_pnl", "total_train_pnl",
+            "avg_test_pf", "avg_test_wr",
+            "max_drawdown_pct", "max_consecutive_losses", "sharpe",
+            "recovery_factor", "train_to_test_degradation_pct",
+        ]
+        wf_dir.mkdir(exist_ok=True)
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"  [{strategy}] CSV保存: {csv_path}")
+
+    return results
+
+
+def _rows_from_csv(csv_path: Path) -> tuple[list[dict], int, str]:
+    """CSVを読んで (rows, detected_holdout_days, csv_date) を返す。"""
+    stem  = csv_path.stem
+    parts = stem.split("_")
+    csv_date   = parts[-1]
+    detected_n = 0
+    for p in parts:
+        if p.startswith("holdout") and p.endswith("d"):
+            try:
+                detected_n = int(p[7:-1])
+            except ValueError:
+                pass
+    with open(csv_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return rows, detected_n, csv_date
+
+
 def load_holdout_watchlists(
     holdout_days: int,
     per_strategy: int,
@@ -90,9 +184,13 @@ def load_holdout_watchlists(
     min_sharpe: float,
     min_folds: int,
     wf_dir: Path,
+    max_price: float = 0.0,
+    workers: int = 4,
+    save_csv: bool = True,
 ) -> tuple[list[tuple], list[tuple], int, str]:
     """
     ホールドアウトCSVを読み込み、STOP/BRK watchlist を返す。
+    CSVが存在しない場合は自動でWFスキャンを実行してから読み込む。
     Returns: (stop_wl, brk_wl, detected_holdout_days, csv_date_str)
     """
     strategies_stop = ["MACD", "A7", "RSI2"]
@@ -106,38 +204,34 @@ def load_holdout_watchlists(
     for strats, target_list in [(strategies_stop, stop_wl), (strategies_brk, brk_wl)]:
         for strategy in strats:
             csv_path = _find_holdout_csv(strategy, holdout_days, wf_dir)
+
             if csv_path is None:
-                print(f"[WARN] ホールドアウトCSV not found: {strategy} (holdout={holdout_days}d)")
-                continue
+                # CSV なし → 自動スキャン実行
+                print(f"[INFO] CSVが見つかりません ({strategy}, holdout={holdout_days}d) → 自動スキャン開始")
+                scan_results = _run_scan_for_strategy(
+                    strategy, holdout_days, max_price, workers, wf_dir, save_csv
+                )
+                # スキャン結果をそのまま rows として扱う (dict キーは同じ)
+                rows = scan_results
+                csv_date = str(TODAY)
+                detected_n = holdout_days
+            else:
+                rows, detected_n, csv_date = _rows_from_csv(csv_path)
 
-            # ファイル名から holdout日数と日付を抽出
-            stem = csv_path.stem  # e.g. walkforward_MACD_holdout65d_2026-06-05
-            parts = stem.split("_")
-            csv_date = parts[-1]
-            for p in parts:
-                if p.startswith("holdout") and p.endswith("d"):
-                    try:
-                        detected_n = int(p[7:-1])
-                    except ValueError:
-                        pass
-
-            with open(csv_path, encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
-
-            # フィルタリング
+            # フィルタリング (CSV行も scanresult dict も同じキー名)
             filtered = [r for r in rows if (
-                _int(r.get("folds_passed", 0))          >= min_folds
-                and _float(r.get("max_drawdown_pct", 999)) <= max_dd
-                and _int(r.get("max_consecutive_losses", 999)) <= max_consec
-                and _float(r.get("sharpe", 0))           >= min_sharpe
-                and _float(r.get("total_test_pnl", 0))    > 0
+                _int(r.get("folds_passed", 0))                  >= min_folds
+                and _float(r.get("max_drawdown_pct", 999))      <= max_dd
+                and _int(r.get("max_consecutive_losses", 999))  <= max_consec
+                and _float(r.get("sharpe", 0))                  >= min_sharpe
+                and _float(r.get("total_test_pnl", 0))           > 0
             )]
             filtered.sort(key=_composite_score, reverse=True)
 
             for r in filtered[:per_strategy]:
                 sym   = r.get("symbol", "")
                 name  = r.get("name", "")
-                strat = r.get("strategy", "")
+                strat = r.get("strategy", strategy)
                 if sym and strat:
                     target_list.append((sym, name, strat))
 
@@ -193,6 +287,14 @@ _pre.add_argument("--date",          type=str,   default=None)
 _pre.add_argument("--aggressive",    action="store_true")
 _pre.add_argument("--holdout-only",  action="store_true",
                   help="holdout WF の2設定(conservative/aggressive)のみ表示")
+_pre.add_argument("--max-price",     type=float, default=0.0,
+                  help="株価上限 (円/株)。自動スキャン時に有効。0=制限なし")
+_pre.add_argument("--budget",        type=float, default=0.0,
+                  help="予算 (円)。--max-price budget/100 と同義。自動スキャン時に有効")
+_pre.add_argument("--workers",       type=int,   default=4,
+                  help="自動スキャン時の並列数 (デフォルト4)")
+_pre.add_argument("--no-save-csv",   action="store_true",
+                  help="自動スキャン結果をCSV保存しない")
 
 # _pre_known: このスクリプト固有の引数
 # _na_argv  : nikkei_analysis.py に渡す残りの引数
@@ -201,6 +303,11 @@ _wf_dir = _pre_known.wf_dir
 
 
 # ── 5. ホールドアウトWATCHLISTを構築 ──────────────────────────────────────────
+# budget → max_price 換算
+_effective_max_price = _pre_known.max_price
+if _pre_known.budget > 0 and _pre_known.max_price == 0:
+    _effective_max_price = _pre_known.budget / 100.0
+
 HOLDOUT_STOP_WL, HOLDOUT_BRK_WL, _HOLDOUT_N, _CSV_DATE = load_holdout_watchlists(
     holdout_days = _pre_known.holdout_days,
     per_strategy = _pre_known.per_strategy,
@@ -209,11 +316,14 @@ HOLDOUT_STOP_WL, HOLDOUT_BRK_WL, _HOLDOUT_N, _CSV_DATE = load_holdout_watchlists
     min_sharpe   = _pre_known.min_sharpe,
     min_folds    = 2,
     wf_dir       = _wf_dir,
+    max_price    = _effective_max_price,
+    workers      = _pre_known.workers,
+    save_csv     = not _pre_known.no_save_csv,
 )
 
 if not HOLDOUT_STOP_WL and not HOLDOUT_BRK_WL:
-    print("[ERROR] ホールドアウトCSVから銘柄を1件も取得できませんでした。")
-    print("        scan_walkforward.py --holdout-days N を先に実行してください。")
+    print("[ERROR] WFスキャン/CSVから銘柄を1件も取得できませんでした。")
+    print("        フィルター条件を緩めるか (--max-dd 20 --min-sharpe 0 など) 確認してください。")
     sys.exit(1)
 
 _WF_SCORES = build_wf_scores_from_holdout(_HOLDOUT_N, _CSV_DATE, _wf_dir)
@@ -305,13 +415,15 @@ def main() -> None:
     print("=" * 70)
     print(f"nikkei_analysis_holdout: ホールドアウトWF選定 WATCHLIST")
     print(f"  ホールドアウト   : {_holdout_end} 以降を除外 ({_HOLDOUT_N}日)")
-    print(f"  CSVソース        : {_CSV_DATE} / holdout{_HOLDOUT_N}d")
+    print(f"  データソース     : {_CSV_DATE} / holdout{_HOLDOUT_N}d")
     print(f"  逆指値B (STOP)   : {len(HOLDOUT_STOP_WL)} 銘柄×戦略")
     print(f"  BRK              : {len(HOLDOUT_BRK_WL)} 銘柄×戦略")
     print(f"  表示設定         : {'holdout のみ (conservative + aggressive)' if _pre_known.holdout_only else '全設定'}")
     print(f"  モード           : {os.environ.get('TRADING_MODE', 'conservative')}")
     print(f"  フィルター       : MaxDD<={_pre_known.max_dd}%  "
           f"連敗<={_pre_known.max_consec}  Sharpe>={_pre_known.min_sharpe}")
+    if _effective_max_price > 0:
+        print(f"  株価上限         : {_effective_max_price:,.0f}円/株")
     print("=" * 70)
 
     _na.main()
