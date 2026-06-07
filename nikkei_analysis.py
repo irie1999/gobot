@@ -2279,7 +2279,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在地</th><th>決済値</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
