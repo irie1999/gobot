@@ -348,7 +348,21 @@ _WF_SCORES = {**_WF_SCORES_CON, **_WF_SCORES_AGG}
 _label = f"holdout{_HOLDOUT_N}d" if _HOLDOUT_N > 0 else "holdout"
 
 print(f"\n  conservative 逆指値B:{len(STOP_CON)} BRK:{len(BRK_CON)}")
+for sym, name, strat in STOP_CON: print(f"    [CON-STOP] {sym} {name} / {strat}")
+for sym, name, strat in BRK_CON:  print(f"    [CON-BRK]  {sym} {name} / {strat}")
 print(f"  aggressive   逆指値B:{len(STOP_AGG)} BRK:{len(BRK_AGG)}")
+for sym, name, strat in STOP_AGG: print(f"    [AGG-STOP] {sym} {name} / {strat}")
+for sym, name, strat in BRK_AGG:  print(f"    [AGG-BRK]  {sym} {name} / {strat}")
+
+# conservative/aggressive 共通銘柄を表示
+_con_set = {(s, st) for s, _, st in STOP_CON + BRK_CON}
+_agg_set = {(s, st) for s, _, st in STOP_AGG + BRK_AGG}
+_common  = _con_set & _agg_set
+_con_only = _con_set - _agg_set
+_agg_only = _agg_set - _con_set
+print(f"\n  【銘柄比較】共通:{len(_common)}件 / CON専用:{len(_con_only)}件 / AGG専用:{len(_agg_only)}件")
+if _common:
+    for s, st in sorted(_common): print(f"    [共通] {s} / {st}")
 print("=" * 70)
 
 
