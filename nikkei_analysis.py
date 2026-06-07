@@ -1715,7 +1715,6 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "entry_d":   entry_d,
                     "entry_p":   t.get("entry_p", 0),
                     "exit_p":    t.get("exit_p", 0),
-                    "qty":       t.get("qty", 0),
                     "hold":      t.get("hold_days", 0),
                     "pnl":       t.get("pnl", 0),
                     "reason":    t.get("reason", "") or "—",
@@ -1741,7 +1740,6 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{dt['entry_p']:,.0f}</td>
   <td style="text-align:right">{dt['exit_p']:,.0f}</td>
-  <td style="text-align:right">{dt.get('qty', 0)}株</td>
   <td style="text-align:right">{dt['hold']}日</td>
   <td class="{tpc}" style="text-align:right;font-weight:600">{dt['pnl']:+,.0f}円</td>
   <td>{_rhtml(dt['reason'])}</td>
@@ -1755,7 +1753,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>約定値</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー日</th>
   </tr></thead>
   <tbody>{det_rows}</tbody>
@@ -1884,98 +1882,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
 </tr>"""
 
-    # ── 発注優先度ガイド ──────────────────────────────────────────────────────
-    # _PNL_CONFIGS の color をラベルで引くヘルパー
-    def _cfg_color(label_fragment: str) -> str:
-        for c in _PNL_CONFIGS:
-            if label_fragment.lower() in c["label"].lower():
-                return c["color"]
-        return "#64748b"
-
-    _cfg_labels = [c["label"] for c in _PNL_CONFIGS]
-    _has_5k_con  = any("5k" in l and "conservative" in l.lower() for l in _cfg_labels)
-    _has_v2_con  = any("v2" in l.lower() and "conservative" in l.lower() for l in _cfg_labels)
-    _has_5k_agg  = any("5k" in l and "aggressive" in l.lower() for l in _cfg_labels)
-    _has_v2_agg  = any("v2" in l.lower() and "aggressive" in l.lower() for l in _cfg_labels)
-
-    _script_rows = ""
-    if _has_5k_con or _has_v2_con or _has_5k_agg or _has_v2_agg:
-        _prio_list = []
-        if _has_5k_con:  _prio_list.append(("①", "5k-WL conservative", "PF 4.00  WR ~81%  平均+4万円/取引", _cfg_color("5k-wl conservative"), "最優先"))
-        if _has_v2_con:  _prio_list.append(("②", "v2新WL conservative", "平均+3.8万円/取引  WR ~78%",        _cfg_color("v2新wl conservative"), "優先"))
-        if _has_5k_agg:  _prio_list.append(("③", "5k-WL aggressive",    "PF 4.23  WR 83%  小幅利確向き",    _cfg_color("5k-wl aggressive"),    "余力あれば"))
-        if _has_v2_agg:  _prio_list.append(("④", "v2新WL aggressive",   "WR 80%  PF 3.63  回転率重視",      _cfg_color("v2新wl aggressive"),   "余力あれば"))
-        for rank, lbl, note, col, tag in _prio_list:
-            _script_rows += f"""<tr>
-  <td style="text-align:center;font-weight:700;font-size:1rem;color:{col}">{rank}</td>
-  <td style="font-weight:700;color:{col}">{lbl}</td>
-  <td style="color:#94a3b8;font-size:0.82rem">{note}</td>
-  <td style="text-align:center;white-space:nowrap"><span style="background:{col};color:#0f172a;font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:4px;white-space:nowrap">{tag}</span></td>
-</tr>"""
-
-    _band_rows = (
-        ("≥ 80", "★★★",  "最優先発注",  "#4ade80", "PF 6.2〜6.8 / WR 81〜86% / 平均+4.3〜5.4万円/取引"),
-        ("60〜79", "★★", "余力あれば",  "#60a5fa", "PF 3〜4 / WR 70〜81%"),
-        ("40〜59", "★",  "選別して発注", "#fbbf24", "PF 3.3〜3.5 / WR ~75%"),
-        ("< 40",  "△",   "基本スキップ", "#f87171", "PF 2.5〜3.0 / 期待値低い"),
-    )
-    _br_html = ""
-    for band, stars, action, col, stats in _band_rows:
-        _br_html += f"""<tr>
-  <td style="text-align:center;font-weight:700;color:{col}">{band}</td>
-  <td style="text-align:center;color:{col}">{stars}</td>
-  <td style="font-weight:700;color:{col}">{action}</td>
-  <td style="color:#94a3b8;font-size:0.82rem">{stats}</td>
-</tr>"""
-
-    _script_table = f"""
-<table style="max-width:680px;margin-bottom:8px">
-  <thead><tr>
-    <th style="text-align:center;width:32px">順</th>
-    <th style="text-align:left">スクリプト</th>
-    <th style="text-align:left">実績 (365日バックテスト)</th>
-    <th style="text-align:center">優先度</th>
-  </tr></thead>
-  <tbody>{_script_rows}</tbody>
-</table>""" if _script_rows else ""
-
-    _right_col = ""
-    if _script_table:
-        _right_col = f"""
-    <div>
-      <div style="font-size:0.8rem;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">■ スクリプト優先順位</div>
-      {_script_table}
-      <p style="color:#475569;font-size:0.75rem;margin-top:6px;margin-bottom:0">
-        ※ 資金に余裕がある場合のみ③④に発注。<br>
-        ※ 複数シグナルが出た日は①→④の順で優先配分。
-      </p>
-    </div>"""
-
-    _grid_cols = "1fr 1fr" if _right_col else "1fr"
-    priority_panel = f"""
-<div style="background:#0a1628;border:2px solid #1e40af;border-radius:12px;
-            padding:18px 22px;margin-bottom:22px">
-  <div style="font-size:1rem;font-weight:700;color:#93c5fd;margin-bottom:14px">
-    📌 発注優先度ガイド（365日バックテスト実績ベース）
-  </div>
-  <div style="display:grid;grid-template-columns:{_grid_cols};gap:18px">
-    <div>
-      <div style="font-size:0.8rem;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">■ スコア帯 → 発注判断</div>
-      <table style="width:100%;font-size:0.82rem">
-        <thead><tr>
-          <th style="text-align:center;width:60px">スコア</th>
-          <th style="text-align:center;width:40px">ランク</th>
-          <th style="text-align:center;width:80px">判断</th>
-          <th style="text-align:left">目安実績</th>
-        </tr></thead>
-        <tbody>{_br_html}</tbody>
-      </table>
-    </div>{_right_col}
-  </div>
-</div>"""
-
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
-    return priority_panel + score_section + f"""
+    return score_section + f"""
 <h2>{sig_label} のシグナル一覧 — スコア降順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。スコアが高い順に並んでいます。
@@ -2074,13 +1982,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                         "exit_d_raw": exit_d, "pnl": t.get("pnl", 0),
                         "reason": reason}
                 extra = {
-                    "entry_dt":  entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
-                    "exit_dt":   exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
-                    "entry_p":   t.get("entry_p", 0),
-                    "exit_p":    t.get("exit_p", 0),
-                    "qty":       t.get("qty", 0),
-                    "hold_days": t.get("hold_days", 0),
-                    "reason":    reason,
+                    "entry_dt":     entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
+                    "exit_dt":      exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
+                    "entry_p":      t.get("entry_p", 0),
+                    "exit_p":       t.get("exit_p", 0),
+                    "hold_days":    t.get("hold_days", 0),
+                    "reason":       reason,
+                    "order_limit":  t.get("order_limit", 0),
+                    "order_stop":   t.get("order_stop", 0),
+                    "order_target": t.get("order_target", 0),
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
                 if reason != "発注中" and since <= exit_d <= until:
@@ -2091,8 +2001,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                     continue
                 seen_global.add(gkey)
                 # 発注中はスコア帯統計から除外 (未約定のためpnl=0で歪む)
-                # --days で指定した期間内の取引のみスコア帯に集計
-                if reason != "発注中" and since <= exit_d <= until:
+                if reason != "発注中":
                     full_year_trades.append(base)
                 # 取引明細テーブルには発注中も表示
                 if since <= exit_d <= until:
@@ -2261,21 +2170,39 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         cfg_color = t.get("color", "#64748b")
         cfg_label = t.get("label", "")
         cfg_badge = f'<span style="background:{cfg_color};color:#0f172a;font-size:0.68rem;font-weight:700;padding:1px 6px;border-radius:3px;white-space:nowrap">{cfg_label}</span>'
+        olp = t.get("order_limit", 0)
+        osp = t.get("order_stop", 0)
+        otp = t.get("order_target", 0)
+        if olp > 0 and osp > 0 and otp > 0:
+            sp_pct   = (osp - olp) / olp * 100
+            tp_pct   = (otp - olp) / olp * 100
+            stop_cell = (f'<td style="text-align:right;white-space:nowrap">'
+                         f'{osp:,.0f}'
+                         f'<br><span style="font-size:0.73rem;color:#f87171">{sp_pct:+.1f}%</span></td>')
+            tgt_cell  = (f'<td style="text-align:right;white-space:nowrap">'
+                         f'{otp:,.0f}'
+                         f'<br><span style="font-size:0.73rem;color:#4ade80">{tp_pct:+.1f}%</span></td>')
+            olp_sub   = f'<br><span style="font-size:0.71rem;color:#64748b">逆:{olp:,.0f}</span>'
+        else:
+            stop_cell = '<td style="color:#475569;text-align:right">—</td>'
+            tgt_cell  = '<td style="color:#475569;text-align:right">—</td>'
+            olp_sub   = ""
         trade_rows += f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{cfg_badge}</td>
-  <td style="text-align:right">{t["entry_p"]:,.0f}</td>
+  <td style="text-align:right">{t["entry_p"]:,.0f}{olp_sub}</td>
+  {stop_cell}
+  {tgt_cell}
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
-  <td style="text-align:right">{t.get("qty", 0)}株</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="11" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+        trade_rows = f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2314,7 +2241,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
 </tbody>
 </table>
 
-<h2>スコア別実績（直近{days}日 / {period_note}）</h2>
+<h2>スコア別実績（365日全取引 / {period_note}）</h2>
 <table>
   <thead><tr>
     <th style="text-align:left">スコア帯</th>
@@ -2334,7 +2261,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
