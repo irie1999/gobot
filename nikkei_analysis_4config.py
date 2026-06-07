@@ -1,5 +1,5 @@
 """
-nikkei_analysis_4config.py  ―  4config 統合レポート (既存タブ + 4設定タブ拡張)
+nikkei_analysis_4config.py  ―  4config 統合レポート (既存タブ + トレンド×相性タブ拡張)
 
 以下の4configを1枚のHTMLで比較分析する:
   v2新WL conservative  : 2026-06-04 WFスキャン (全価格帯, tm=3.0)
@@ -8,16 +8,15 @@ nikkei_analysis_4config.py  ―  4config 統合レポート (既存タブ + 4設
   5k-WL aggressive     : 2026-06-06 WFスキャン (≤5000円,  tm=2.0)
 
 nikkei_analysis.py の既存5タブ（シグナル判定/トレンド期間/エントリー分析/シグナル/損益）を
-そのまま保持したうえで、新規に以下2タブを追加:
-  タブ6: 4設定シグナル判定 — 相場環境に基づく4設定の推奨/注意/停止判定
-  タブ7: トレンド×設定相性 — 上昇/横ばい/下落別の設定別勝率・PF
+そのまま保持したうえで、t1「シグナル判定」内のスクリプト判定後に4設定カードを注入し、
+新規に「📊 トレンド×相性」タブを追加する。
 
 使い方:
-  python nikkei_analysis_4config.py                           # 過去365日 HTML & ブラウザ表示
-  python nikkei_analysis_4config.py --days 180                # 直近180日
-  python nikkei_analysis_4config.py --no-browser              # HTML生成のみ
-  python nikkei_analysis_4config.py --date 2026-01-01         # 指定日分析
-  python nikkei_analysis_4config.py --years 5                 # 過去5年
+  python nikkei_analysis_4config.py                    # 過去365日 HTML & ブラウザ表示
+  python nikkei_analysis_4config.py --days 180         # 直近180日
+  python nikkei_analysis_4config.py --no-browser       # HTML生成のみ
+  python nikkei_analysis_4config.py --date 2026-01-01  # 指定日分析
+  python nikkei_analysis_4config.py --years 5          # 過去5年
 
   # 銘柄×戦略の個別履歴確認
   python nikkei_analysis_4config.py --symbol 8387.T --strategy A7
@@ -35,13 +34,12 @@ import sys
 import webbrowser
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
-from datetime import datetime, timedelta, timezone, date as _date_type
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
-JST    = timezone(timedelta(hours=9))
-_TODAY = datetime.now(JST).date()
+JST = timezone(timedelta(hours=9))
 
 # ── TRADING_MODE を import 前に設定 ─────────────────────────────────────────
 os.environ.setdefault("TRADING_MODE", "conservative")
@@ -61,7 +59,7 @@ os.environ["TRADING_MODE"] = "conservative"
 _importlib.reload(_stop); _importlib.reload(_brk)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5k-WL conservative  ―  check_signals_stop/breakout の現 WATCHLIST そのまま
+# 5k-WL conservative  ―  check_signals_stop/breakout の現 WATCHLIST
 # ══════════════════════════════════════════════════════════════════════════════
 _5K_STOP_CON: list[tuple[str, str, str]] = list(_stop.WATCHLIST)
 _5K_BRK_CON:  list[tuple[str, str, str]] = list(_brk.WATCHLIST)
@@ -70,7 +68,6 @@ _5K_BRK_CON:  list[tuple[str, str, str]] = list(_brk.WATCHLIST)
 # 5k-WL aggressive  ―  2026-06-06 WFスキャン --aggressive --max-price 5000
 # ══════════════════════════════════════════════════════════════════════════════
 _5K_STOP_AGG: list[tuple[str, str, str]] = [
-    # ── RSI2 ──
     ("8061.T", "西華産業",                           "RSI2"),
     ("2540.T", "養命酒製造",                         "RSI2"),
     ("6770.T", "アルプスアルパイン",                 "RSI2"),
@@ -81,7 +78,6 @@ _5K_STOP_AGG: list[tuple[str, str, str]] = [
     ("6788.T", "日本トリム",                         "RSI2"),
     ("7167.T", "めぶきフィナンシャルグループ",       "RSI2"),
     ("4631.T", "ＤＩＣ",                             "RSI2"),
-    # ── MACD ──
     ("8386.T", "百十四銀行",                         "MACD"),
     ("7322.T", "三十三フィナンシャルグループ",       "MACD"),
     ("1417.T", "ミライト・ワン",                     "MACD"),
@@ -92,7 +88,6 @@ _5K_STOP_AGG: list[tuple[str, str, str]] = [
     ("1975.T", "朝日工業社",                         "MACD"),
     ("4205.T", "日本ゼオン",                         "MACD"),
     ("6914.T", "オプテックスグループ",               "MACD"),
-    # ── A7 ──
     ("7003.T", "三井Ｅ＆Ｓ",                         "A7"),
     ("8173.T", "Ｊｏｓｈｉｎ",                       "A7"),
     ("8061.T", "西華産業",                           "A7"),
@@ -231,7 +226,7 @@ print(f"  5k-WL conservative   逆指値B:{len(_5K_STOP_CON)} BRK:{len(_5K_BRK_C
 print(f"  5k-WL aggressive     逆指値B:{len(_5K_STOP_AGG)} BRK:{len(_5K_BRK_AGG)}")
 print("=" * 70)
 
-# ── reload フック: WATCHLISTを保持 ────────────────────────────────────────────
+# ── reload フック: WATCHLISTを5k-conservative で保持 ─────────────────────────
 _orig_reload = _importlib.reload
 
 def _wl_preserving_reload(module):
@@ -257,16 +252,17 @@ _na._PNL_CONFIGS[:] = [
     {"label": "5k-WL aggressive",    "color": "#e74c3c", "mode": "aggressive",
      "sm_tm": None, "stop_wl": list(_5K_STOP_AGG), "brk_wl": list(_5K_BRK_AGG)},
 ]
+
 try:
     from backtest_limit_entry import WORKERS as _DEF_WORKERS
 except ImportError:
     _DEF_WORKERS = 4
 
-# ════════════════════════════════════════════════════════════════════════════
-# 4設定 シグナル判定 + トレンド×相性 タブ生成
-# ════════════════════════════════════════════════════════════════════════════
+CONFIGS = _na._PNL_CONFIGS
 
-CONFIGS = _na._PNL_CONFIGS  # 同じリストを参照
+# ════════════════════════════════════════════════════════════════════════════
+# 設定評価ヘルパー
+# ════════════════════════════════════════════════════════════════════════════
 
 _RISK = {"v2新WL conservative": "低中", "v2新WL aggressive": "中",
          "5k-WL conservative":  "低",   "5k-WL aggressive": "低中"}
@@ -276,7 +272,7 @@ _NOTE = {
     "5k-WL conservative":  "5000円以下WFスキャン (2026-06-06) × conservative。1取引~100万円。全相場対応。",
     "5k-WL aggressive":    "5000円以下WFスキャン (2026-06-06) × aggressive。上昇相場で高回転。",
 }
-RISK_COLOR = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
+RISK_COLOR  = {"高": "#f87171", "中高": "#fb923c", "中": "#fbbf24", "低中": "#86efac", "低": "#4ade80"}
 STATUS_META = {
     "✅ 推奨": ("推奨", "#4ade80", "#052e16", "#166534"),
     "⚠️ 注意": ("注意", "#fbbf24", "#2d1f00", "#92400e"),
@@ -285,14 +281,10 @@ STATUS_META = {
 
 
 def _judge_config(cfg: dict, r: dict) -> tuple[str, str, str]:
-    trend  = r["trend"]
-    vol    = r["vol_level"]
-    mom5   = r["mom5"]
-    mom20  = r["mom20"]
-    above  = r["above_ma200"]
-    drop   = r["max_1d_drop"]
-    mode   = cfg["mode"]
-    crash  = drop < -3.0
+    trend = r["trend"]; vol = r["vol_level"]
+    mom5  = r["mom5"];  mom20 = r["mom20"]
+    above = r["above_ma200"]; drop = r["max_1d_drop"]
+    mode  = cfg["mode"]; crash = drop < -3.0
 
     if mode == "aggressive":
         if trend == "down" and vol == "high":
@@ -301,7 +293,7 @@ def _judge_config(cfg: dict, r: dict) -> tuple[str, str, str]:
             return "⚠️ 注意", f"下落トレンド (5日{mom5:+.1f}%)", "conservative への切替えを検討"
         if not above:
             return "⚠️ 注意", "日経 < MA200 (長期下落)", "conservative を優先"
-        if trend == "up" and mom5 >= 2.0 and mom20 >= 3.0 and above:
+        if trend == "up" and mom5 >= 2.0 and mom20 >= 3.0:
             return "✅ 推奨", f"上昇×5日{mom5:+.1f}%/20日{mom20:+.1f}%", "最も効率が良い局面"
         if trend == "up":
             return "✅ 推奨", f"上昇トレンド (5日{mom5:+.1f}%)", "上昇継続なら標準運用"
@@ -313,6 +305,35 @@ def _judge_config(cfg: dict, r: dict) -> tuple[str, str, str]:
             return "⚠️ 注意", f"下落×高ボラ (Vol={r['vol']:.2f}%)", "ポジション縮小を検討"
         return "✅ 推奨", f"トレンド={trend} / ボラ={vol}", "全相場で使用可能"
 
+
+def _4cfg_section_html(r: dict) -> str:
+    """t1タブのスクリプト判定後に挿入する4設定評価カードセクション。"""
+    cards = ""
+    for cfg in CONFIGS:
+        status, reason, advice = _judge_config(cfg, r)
+        lbl_ja, fg, bg, border = STATUS_META[status]
+        label  = cfg["label"]; color = cfg["color"]
+        risk   = _RISK.get(label, "中"); note = _NOTE.get(label, "")
+        rc     = RISK_COLOR.get(risk, "#94a3b8")
+        n_stop = len(cfg["stop_wl"]); n_brk = len(cfg["brk_wl"])
+        cards += f"""
+<div class="script-card" style="border-color:{border};background:{bg}">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span class="badge" style="background:{border};color:{fg}">{lbl_ja}</span>
+    <span style="font-weight:700;font-size:1.05rem;color:{color}">{label}</span>
+    <span style="color:#64748b;font-size:0.8rem">{cfg['mode']} / 逆指値B:{n_stop}件 BRK:{n_brk}件</span>
+    <span style="margin-left:auto;font-size:0.78rem;color:{rc}">リスク: {risk}</span>
+  </div>
+  <div style="color:#94a3b8;font-size:0.82rem;margin-top:8px">{reason}</div>
+  <div style="color:#64748b;font-size:0.78rem;margin-top:4px">→ {advice}</div>
+  <div style="color:#475569;font-size:0.75rem;margin-top:6px;border-top:1px solid #1e293b;padding-top:6px">{note}</div>
+</div>"""
+    return f"\n<h2>4設定シグナル判定</h2>\n{cards}\n"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# トレンド×相性バックテスト
+# ════════════════════════════════════════════════════════════════════════════
 
 def _set_params(mode: str) -> None:
     if mode == "conservative":
@@ -329,7 +350,7 @@ def _run_backtests(workers: int) -> dict[str, list[dict]]:
         _set_params(cfg["mode"])
         trades: list[dict] = []
         with _TPE(max_workers=workers) as ex:
-            futs = {}
+            futs: dict = {}
             for sym, name, strat in cfg["stop_wl"]:
                 futs[ex.submit(_stop.backtest_one, sym, name, strat)] = None
             for sym, name, strat in cfg["brk_wl"]:
@@ -350,11 +371,8 @@ def _run_backtests(workers: int) -> dict[str, list[dict]]:
                         if entry_dt is None:
                             continue
                         trades.append({
-                            "symbol":    r.get("symbol", ""),
-                            "entry_dt":  entry_dt,
-                            "exit_dt":   t.get("exit_dt"),
-                            "pnl":       t.get("pnl", 0),
-                            "reason":    t.get("reason", ""),
+                            "entry_dt": entry_dt,
+                            "pnl":      t.get("pnl", 0),
                         })
                 except Exception:
                     pass
@@ -373,36 +391,8 @@ def _add_nikkei_trend(trades_by_cfg: dict[str, list[dict]], nk_trend: pd.Series)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# HTML 生成（タブ6 + タブ7）
+# タブ7: トレンド×相性 HTML
 # ════════════════════════════════════════════════════════════════════════════
-
-def _4cfg_section_html(r: dict) -> str:
-    """t1タブのスクリプト判定後に挿入する 4設定評価カードセクション。"""
-    cards = ""
-    for cfg in CONFIGS:
-        status, reason, advice = _judge_config(cfg, r)
-        lbl_ja, fg, bg, border = STATUS_META[status]
-        label  = cfg["label"]
-        color  = cfg["color"]
-        risk   = _RISK.get(label, "中")
-        note   = _NOTE.get(label, "")
-        rc     = RISK_COLOR.get(risk, "#94a3b8")
-        n_stop = len(cfg["stop_wl"])
-        n_brk  = len(cfg["brk_wl"])
-        cards += f"""
-<div class="script-card" style="border-color:{border};background:{bg}">
-  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span class="badge" style="background:{border};color:{fg}">{lbl_ja}</span>
-    <span style="font-weight:700;font-size:1.05rem;color:{color}">{label}</span>
-    <span style="color:#64748b;font-size:0.8rem">{cfg['mode']} / 逆指値B:{n_stop}件 BRK:{n_brk}件</span>
-    <span style="margin-left:auto;font-size:0.78rem;color:{rc}">リスク: {risk}</span>
-  </div>
-  <div style="color:#94a3b8;font-size:0.82rem;margin-top:8px">{reason}</div>
-  <div style="color:#64748b;font-size:0.78rem;margin-top:4px">→ {advice}</div>
-  <div style="color:#475569;font-size:0.75rem;margin-top:6px;border-top:1px solid #1e293b;padding-top:6px">{note}</div>
-</div>"""
-    return f"\n<h2>4設定シグナル判定</h2>\n{cards}\n"
-
 
 def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
     TREND_LABELS = {"up": "上昇 ▲", "down": "下落 ▼", "sideways": "横ばい →"}
@@ -438,8 +428,7 @@ def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
 
     rows = ""
     for trend in ["up", "sideways", "down"]:
-        tc  = TREND_COLORS[trend]
-        tl  = TREND_LABELS[trend]
+        tc  = TREND_COLORS[trend]; tl = TREND_LABELS[trend]
         row = f'<tr><td style="color:{tc};font-weight:700;white-space:nowrap;padding:8px 12px">{tl}</td>'
         for cfg in CONFIGS:
             t_list = [t for t in trades_by_cfg.get(cfg["label"], []) if t.get("nk_trend") == trend]
@@ -457,7 +446,6 @@ def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
         for cfg in CONFIGS
     )
 
-    # トレンド構成比カード
     def _breakdown_cards():
         TREND_JA = {"up": "上昇", "down": "下落", "sideways": "横ばい"}
         cards = ""
@@ -517,10 +505,14 @@ def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
 {_breakdown_cards()}"""
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# HTML 注入
+# ════════════════════════════════════════════════════════════════════════════
+
 def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
     """t1に4設定セクションを注入、t7(トレンド×相性)タブを追加、タブナビ折り返し修正。"""
 
-    # 1. t1タブ内の「推奨コマンド」見出し直前に 4設定セクションを挿入
+    # 1. t1タブ内の「推奨コマンド」見出し直前に4設定セクションを挿入
     html = _re.sub(
         r'(<h2>[^<]*時点の推奨コマンド)',
         cfg_section_html.replace('\\', '\\\\') + r'\1',
@@ -528,7 +520,7 @@ def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
         count=1,
     )
 
-    # 2. tab-nav に t7 ボタンのみ追加
+    # 2. tab-nav に t7 ボタンを追加
     TAB_NAV_END = '\n</div>\n\n<div id="t1"'
     if TAB_NAV_END in html:
         new_btn = '\n  <button class="tab-btn" data-tab="t7" onclick="switchTab(\'t7\')">📊 トレンド×相性</button>'
@@ -540,7 +532,7 @@ def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
         html = html.replace(SCRIPT_TAG,
                             f'\n<div id="t7" class="tab-pane">{tab7_html}</div>' + SCRIPT_TAG, 1)
 
-    # 4. タブナビが 2 行にならないよう CSS を上書き
+    # 4. タブナビが2行にならないよう CSS を上書き
     css_fix = (
         '\n<style>'
         '\n.tab-nav { flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch; }'
@@ -567,7 +559,6 @@ def _build_history_html(symbol: str, name: str, strategy: str, days: int, mode: 
     pf        = abs(gross_p / gross_l) if gross_l != 0 else float("inf")
     avg       = total_pnl / len(trade_log) if trade_log else 0
     pf_str    = f"{pf:.2f}" if pf != float("inf") else "∞"
-
     reasons: dict[str, int] = {}
     for t in trade_log:
         reasons[t.get("reason", "?")] = reasons.get(t.get("reason", "?"), 0) + 1
@@ -580,7 +571,8 @@ def _build_history_html(symbol: str, name: str, strategy: str, days: int, mode: 
         pnl = t.get("pnl", 0)
         rsn = t.get("reason", "?")
         cls = "win" if pnl > 0 else "loss"
-        rsn_cls = {"target": "tag-target", "stop": "tag-stop", "timeout": "tag-timeout"}.get(rsn, "")
+        rsn_cls = {"target": "tag-target", "stop": "tag-stop",
+                   "timeout": "tag-timeout"}.get(rsn, "")
         rows.append(f"""
         <tr class="{cls}">
           <td>{str(t.get("exit_dt","?"))[:10]}</td>
@@ -658,28 +650,21 @@ def _build_history_html(symbol: str, name: str, strategy: str, days: int, mode: 
 def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str,
                         open_browser: bool = True) -> None:
     from backtest_limit_entry import fetch, run_limit_backtest
-
-    params = {**(_stop.STRATEGY_PARAMS_AGGRESSIVE if mode == "aggressive" else _stop.STRATEGY_PARAMS_CONSERVATIVE),
-              **(_brk.STRATEGY_PARAMS_AGGRESSIVE  if mode == "aggressive" else _brk.STRATEGY_PARAMS_CONSERVATIVE)}
-
-    if strategy not in params:
-        print(f"ERROR: 戦略 '{strategy}' は不明です。利用可能: {', '.join(params)}")
+    all_params = {**_CON_STOP, **_CON_BRK} if mode == "conservative" else {**_AGG_STOP, **_AGG_BRK}
+    if strategy not in all_params:
+        print(f"ERROR: 戦略 '{strategy}' は不明。利用可能: {', '.join(all_params)}")
         sys.exit(1)
-
     print(f"データ取得中: {symbol} ...")
     df = fetch(symbol, days + 60)
     if df is None or df.empty:
-        print(f"ERROR: {symbol} のデータを取得できませんでした。")
-        sys.exit(1)
-
+        print(f"ERROR: {symbol} のデータを取得できませんでした。"); sys.exit(1)
     try:
         import yfinance as yf
         info = yf.Ticker(symbol).info
         name = info.get("longName") or info.get("shortName") or symbol
     except Exception:
         name = symbol
-
-    calc_fn, em, sm, tm = params[strategy]
+    calc_fn, em, sm, tm = all_params[strategy]
     print("バックテスト実行中...")
     result    = run_limit_backtest(
         symbol=symbol, name=name, df=df, calc_fn=calc_fn,
@@ -688,17 +673,15 @@ def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str,
     )
     trade_log = result.get("trade_log", [])
     if not trade_log:
-        print("この期間にトレードはありませんでした。")
-        return
-
-    html      = _build_history_html(symbol, name, strategy, days, mode, trade_log)
-    date_str  = datetime.now().strftime("%Y-%m-%d")
-    mode_sfx  = "_aggressive" if mode == "aggressive" else ""
-    out_path  = Path(f"history_{symbol}_{strategy}{mode_sfx}_{date_str}.html")
-    out_path.write_text(html, encoding="utf-8")
-    print(f"HTML生成完了: {out_path.resolve()}")
+        print("この期間にトレードはありませんでした。"); return
+    html     = _build_history_html(symbol, name, strategy, days, mode, trade_log)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    sfx      = "_aggressive" if mode == "aggressive" else ""
+    out      = Path(f"history_{symbol}_{strategy}{sfx}_{date_str}.html")
+    out.write_text(html, encoding="utf-8")
+    print(f"HTML生成完了: {out.resolve()}")
     if open_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        webbrowser.open(out.resolve().as_uri())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -707,68 +690,55 @@ def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str,
 
 def main() -> None:
     _p = argparse.ArgumentParser(add_help=False)
-    _p.add_argument("--date",       type=str,  default=None)
+    _p.add_argument("--date",       type=str, default=None)
     _p.add_argument("--no-browser", action="store_true")
-    _p.add_argument("--symbol",     type=str,  default=None)
-    _p.add_argument("--strategy",   type=str,  default=None)
-    _p.add_argument("--days",       type=int,  default=365)
-    _p.add_argument("--years",      type=int,  default=5)
-    _p.add_argument("--workers",    type=int,  default=_DEF_WORKERS)
+    _p.add_argument("--symbol",     type=str, default=None)
+    _p.add_argument("--strategy",   type=str, default=None)
+    _p.add_argument("--days",       type=int, default=365)
+    _p.add_argument("--years",      type=int, default=5)
+    _p.add_argument("--workers",    type=int, default=_DEF_WORKERS)
     _p.add_argument("--aggressive", action="store_true")
-    _p.add_argument("--mode",       choices=["conservative", "aggressive"], default=None)
     _known, _ = _p.parse_known_args()
 
     # ── 銘柄×戦略 個別履歴確認モード ──────────────────────────────────────────
     if _known.symbol and _known.strategy:
-        if _known.mode == "aggressive" or _known.aggressive:
-            mode = "aggressive"
-        else:
-            mode = os.environ.get("TRADING_MODE", "conservative")
+        mode = "aggressive" if _known.aggressive else os.environ.get("TRADING_MODE", "conservative")
         _run_symbol_history(
-            symbol=_known.symbol.upper(),
-            strategy=_known.strategy.upper(),
-            days=_known.days,
-            mode=mode,
-            open_browser=not _known.no_browser,
+            symbol=_known.symbol.upper(), strategy=_known.strategy.upper(),
+            days=_known.days, mode=mode, open_browser=not _known.no_browser,
         )
         return
 
     # ── 4config 統合レポートモード ─────────────────────────────────────────────
     _orig_argv = list(sys.argv)
-    # --no-browser を一時的に差し込んで _na.main() がブラウザを開かないようにする
     if "--no-browser" not in sys.argv:
         sys.argv.append("--no-browser")
-    # _na.main() が知らない引数を除去
-    sys.argv = [a for a in sys.argv
-                if a not in ("--aggressive",) and not a.startswith("--workers=")]
+    sys.argv = [a for a in sys.argv if a not in ("--aggressive",)
+                and not a.startswith("--workers=")]
     if _known.workers != _DEF_WORKERS:
         sys.argv.append(f"--workers={_known.workers}")
 
-    _na.main()  # 既存5タブのHTML を nikkei_analysis_{date}.html に生成
+    _na.main()
 
     sys.argv[:] = _orig_argv
 
-    # ── 生成されたHTMLファイルを特定 ──────────────────────────────────────────
-    JST_      = timezone(timedelta(hours=9))
-    date_str  = _known.date if _known.date else str(datetime.now(JST_).date())
+    JST_     = timezone(timedelta(hours=9))
+    date_str = _known.date if _known.date else str(datetime.now(JST_).date())
     base_path = Path(f"nikkei_analysis_{date_str}.html")
     if not base_path.exists():
-        print(f"[WARN] {base_path} が見つかりません")
-        return
+        print(f"[WARN] {base_path} が見つかりません"); return
 
     base_html = base_path.read_text(encoding="utf-8")
 
-    # ── 日経データを取得してトレンドを計算 ───────────────────────────────────
     print(f"4設定バックテスト実行中 (workers={_known.workers})...", flush=True)
     try:
         close    = _na.fetch_n225(_known.years, end_date=None)
         r        = _na.get_regime(close)
         nk_trend = _na.label_trend(close)
     except Exception as e:
-        print(f"[WARN] 日経データ取得失敗 ({e}) — トレンド分析タブはスキップ")
+        print(f"[WARN] 日経データ取得失敗 ({e})")
         close, r, nk_trend = None, None, None
 
-    # ── 4設定バックテスト ────────────────────────────────────────────────────
     if r is not None:
         trades_by_cfg = _run_backtests(_known.workers)
         _add_nikkei_trend(trades_by_cfg, nk_trend)
@@ -778,9 +748,8 @@ def main() -> None:
         cfg_section = ""
         tab7_html   = "<p style='color:#64748b;padding:20px'>データ取得失敗のためスキップ</p>"
 
-    # ── 4設定セクション注入 + t7タブ追加 → 新ファイルとして保存 ─────────────
-    new_html  = _inject_tabs(base_html, cfg_section, tab7_html)
-    new_path  = Path(f"nikkei_analysis_4config_{date_str}.html")
+    new_html = _inject_tabs(base_html, cfg_section, tab7_html)
+    new_path = Path(f"nikkei_analysis_4config_{date_str}.html")
     new_path.write_text(new_html, encoding="utf-8")
     print(f"\n4config レポート生成完了: {new_path.resolve()}")
 

@@ -2176,16 +2176,33 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         if olp > 0 and osp > 0 and otp > 0:
             sp_pct   = (osp - olp) / olp * 100
             tp_pct   = (otp - olp) / olp * 100
-            stop_cell = (f'<td style="text-align:right;white-space:nowrap">'
-                         f'{osp:,.0f}'
+            stop_cell = (f'<td style="text-align:right;white-space:nowrap">{osp:,.0f}'
                          f'<br><span style="font-size:0.73rem;color:#f87171">{sp_pct:+.1f}%</span></td>')
-            tgt_cell  = (f'<td style="text-align:right;white-space:nowrap">'
-                         f'{otp:,.0f}'
+            tgt_cell  = (f'<td style="text-align:right;white-space:nowrap">{otp:,.0f}'
                          f'<br><span style="font-size:0.73rem;color:#4ade80">{tp_pct:+.1f}%</span></td>')
             olp_sub   = f'<br><span style="font-size:0.71rem;color:#64748b">逆:{olp:,.0f}</span>'
+            # 現在地: 保有中のみ表示（損切り〜目標の範囲内の現在位置）
+            cur = t.get("exit_p", 0)
+            rng = otp - osp
+            if t.get("reason") == "保有中" and cur > 0 and rng > 0:
+                prog   = max(0.0, min(100.0, (cur - osp) / rng * 100))
+                d_sp   = (cur - osp) / cur * 100
+                d_tp   = (otp - cur) / cur * 100
+                pc     = "#4ade80" if prog >= 66 else ("#fbbf24" if prog >= 33 else "#f87171")
+                bar    = (f'<div style="background:#1e293b;border-radius:3px;height:5px;'
+                          f'margin:3px 0;overflow:hidden">'
+                          f'<div style="background:{pc};height:100%;width:{prog:.0f}%"></div></div>')
+                loc_cell = (f'<td style="text-align:center;white-space:nowrap">'
+                            f'<span style="color:{pc};font-weight:700;font-size:0.82rem">{prog:.0f}%</span>{bar}'
+                            f'<div style="font-size:0.7rem;color:#f87171">↓{d_sp:.1f}%</div>'
+                            f'<div style="font-size:0.7rem;color:#4ade80">↑{d_tp:.1f}%</div>'
+                            f'</td>')
+            else:
+                loc_cell = '<td style="color:#475569;text-align:center">—</td>'
         else:
             stop_cell = '<td style="color:#475569;text-align:right">—</td>'
             tgt_cell  = '<td style="color:#475569;text-align:right">—</td>'
+            loc_cell  = '<td style="color:#475569;text-align:center">—</td>'
             olp_sub   = ""
         trade_rows += f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
@@ -2195,6 +2212,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   <td style="text-align:right">{t["entry_p"]:,.0f}{olp_sub}</td>
   {stop_cell}
   {tgt_cell}
+  {loc_cell}
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
@@ -2202,7 +2220,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+        trade_rows = f'<tr><td colspan="13" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2261,7 +2279,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>決済値</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在地</th><th>決済値</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows}</tbody>
