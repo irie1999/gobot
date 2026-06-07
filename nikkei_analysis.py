@@ -2124,7 +2124,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         gl   = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
         pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
         avg  = pnl / n if n else 0
-        return n, wins, pnl, gp, gl, pf, avg
+        wf_vals = [t["wf_score"]  for t in trades if t.get("wf_score")  is not None]
+        bt_vals = [t["rec_score"] for t in trades if t.get("rec_score") is not None]
+        avg_wf = round(sum(wf_vals) / len(wf_vals)) if wf_vals else None
+        avg_bt = round(sum(bt_vals) / len(bt_vals)) if bt_vals else None
+        return n, wins, pnl, gp, gl, pf, avg, avg_wf, avg_bt
 
     fine_rows = ""
     for lo, hi, lbl_s, col in score_buckets:
@@ -2132,17 +2136,26 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         n  = len(tr)
         if not n:
             continue
-        n, wins, pnl, gp, gl, pf, avg = _band_stats(tr)
+        n, wins, pnl, gp, gl, pf, avg, avg_wf, avg_bt = _band_stats(tr)
         pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
         wr_s   = wins / n * 100
         lpc    = "profit" if pnl >= 0 else "loss"
         apc    = "profit" if avg >= 0 else "loss"
         border_style = "border-top:2px solid #334155;" if lo in (40,60,80) else ""
+        def _wf_cell(v):
+            if v is None: return '<td style="color:#475569;text-align:center">—</td>'
+            c = "#4ade80" if v >= 70 else ("#fbbf24" if v >= 50 else "#f87171")
+            return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
+        def _bt_cell(v):
+            if v is None: return '<td style="color:#475569;text-align:center">—</td>'
+            c = "#4ade80" if v >= 60 else ("#fbbf24" if v >= 40 else "#f87171")
+            return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
         fine_rows += f"""<tr style="{border_style}">
   <td style="color:{col};font-weight:700;text-align:left">{lbl_s}</td>
   <td style="font-weight:700">{n}</td>
   <td style="font-weight:700">{wr_s:.1f}%</td>
   <td style="font-weight:700">{pf_s}</td>
+  {_wf_cell(avg_wf)}{_bt_cell(avg_bt)}
   <td class="profit" style="text-align:right;font-weight:700">+{gp:,.0f}円</td>
   <td class="loss"   style="text-align:right;font-weight:700">-{gl:,.0f}円</td>
   <td class="{lpc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
@@ -2153,17 +2166,21 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
             sub = [t for t in tr if t.get("label") == cfg["label"]]
             if not sub:
                 continue
-            sn, sw, sp, sgp, sgl, spf, savg = _band_stats(sub)
+            sn, sw, sp, sgp, sgl, spf, savg, swf, sbt = _band_stats(sub)
             spf_s = "∞" if spf == float("inf") else f"{spf:.2f}"
             swr   = sw / sn * 100
             slpc  = "profit" if sp >= 0 else "loss"
             sapc  = "profit" if savg >= 0 else "loss"
             dot   = f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{cfg["color"]};margin-right:5px;vertical-align:middle"></span>'
+            swf_s = str(swf) if swf is not None else "—"
+            sbt_s = str(sbt) if sbt is not None else "—"
             fine_rows += f"""<tr style="background:#0f172a">
   <td style="text-align:left;padding-left:20px;color:#94a3b8;font-size:0.8rem">{dot}{cfg["label"]}</td>
   <td style="color:#94a3b8;font-size:0.8rem">{sn}</td>
   <td style="color:#94a3b8;font-size:0.8rem">{swr:.1f}%</td>
   <td style="color:#94a3b8;font-size:0.8rem">{spf_s}</td>
+  <td style="color:#94a3b8;font-size:0.8rem;text-align:center">{swf_s}</td>
+  <td style="color:#94a3b8;font-size:0.8rem;text-align:center">{sbt_s}</td>
   <td class="profit" style="text-align:right;font-size:0.8rem">+{sgp:,.0f}円</td>
   <td class="loss"   style="text-align:right;font-size:0.8rem">-{sgl:,.0f}円</td>
   <td class="{slpc}" style="text-align:right;font-size:0.8rem">{sp:+,.0f}円</td>
@@ -2287,15 +2304,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
 <h2>スコア別実績（直近{days}日 / {period_note}）</h2>
 <table>
   <thead><tr>
-    <th style="text-align:left">スコア帯</th>
+    <th style="text-align:left">スコア帯 (WF)</th>
     <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#60a5fa" title="WFスコア平均 (≥70緑/≥50黄/&lt;50赤)">平均WF</th>
+    <th style="color:#fbbf24" title="BTスコア平均 (≥60緑/≥40黄/&lt;40赤)">平均BT</th>
     <th style="color:#4ade80">利益</th>
     <th style="color:#f87171">損失</th>
     <th>損益合計</th><th>平均損益/取引</th>
   </tr></thead>
   <tbody>{fine_rows}</tbody>
 </table>
-<p class="footnote">境界線 = ランク区切り（△/★/★★/★★★）</p>
+<p class="footnote">境界線 = ランク区切り（△/★/★★/★★★）／ WF=ウォークフォワードスコア（銘柄選定基準）／ BT=直近バックテストスコア（最近の機能度）</p>
 
 <h2>取引明細（決済日降順）</h2>
 <table>
