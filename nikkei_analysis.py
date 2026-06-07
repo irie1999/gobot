@@ -1975,12 +1975,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
                 if key in seen:
                     continue
                 seen.add(key)
+                entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": score, "rank": rank,
                         "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
-                        "exit_d_raw": exit_d, "pnl": t.get("pnl", 0),
-                        "reason": reason}
+                        "entry_d_raw": entry_d, "exit_d_raw": exit_d,
+                        "pnl": t.get("pnl", 0), "reason": reason}
                 extra = {
                     "entry_dt":     entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
                     "exit_dt":      exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
@@ -2018,6 +2019,33 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         full_year_trades = [t for t in full_year_trades if t.get("label") == cfg_filter]
         cfg_trades_map   = {k: [t for t in v if t.get("label") == cfg_filter]
                             for k, v in cfg_trades_map.items()}
+
+    # ── 1銘柄1ポジションフィルター ──────────────────────────────────
+    # エントリー日昇順・スコア降順でソートし、同一銘柄が既にオープン中の場合はスキップ
+    def _one_pos_filter(trades: list[dict]) -> list[dict]:
+        from datetime import date as _date
+        sorted_t = sorted(
+            trades,
+            key=lambda t: (t.get("entry_d_raw") or _date.min, -(t.get("score") or 0))
+        )
+        open_pos: dict[str, _date] = {}  # sym → exit_d (その日まで保有中)
+        result = []
+        for t in sorted_t:
+            sym     = t.get("symbol", "")
+            entry_d = t.get("entry_d_raw")
+            exit_d  = t.get("exit_d_raw")
+            if not sym or entry_d is None:
+                result.append(t)
+                continue
+            if sym in open_pos and open_pos[sym] >= entry_d:
+                continue  # 既にオープンポジションあり → スキップ
+            open_pos[sym] = exit_d if exit_d else entry_d
+            result.append(t)
+        result.sort(key=lambda t: t.get("exit_d_raw") or _date.min, reverse=True)
+        return result
+
+    all_trades       = _one_pos_filter(all_trades)
+    full_year_trades = _one_pos_filter(full_year_trades)
 
     # ── KPI (発注中=未約定は除外) ──
     # all_trades は (sym, strat, signal_dt) で重複除外済み（同一シグナルは最初のconfigのみ）

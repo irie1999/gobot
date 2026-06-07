@@ -83,13 +83,8 @@ LIMIT_ENTRY_MARGIN_PCT = 0.03
 
 
 def calc_qty(order_price: float) -> int:
-    """目標ポジション100万円に近い最大単元株数 (最低MIN_QTY株, 単元TRADE_LOT株単位)。
-    例: 3,610円 → 200株 (722,000円) / 1,000円 → 1,000株 (1,000,000円)
-    """
-    if order_price <= 0:
-        return MIN_QTY
-    qty = int(TARGET_POSITION / order_price / TRADE_LOT) * TRADE_LOT
-    return min(max(MIN_QTY, qty), MAX_QTY)
+    """100株固定"""
+    return FIXED_QTY
 
 
 # ── TSE 呼値 (tick size) 丸め ────────────────────────────────────
