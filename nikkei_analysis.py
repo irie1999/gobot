@@ -2139,6 +2139,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         avg_bt = round(sum(bt_vals) / len(bt_vals)) if bt_vals else None
         return n, wins, pnl, gp, gl, pf, avg, avg_wf, avg_bt
 
+    def _wf_cell(v):
+        if v is None: return '<td style="color:#475569;text-align:center">—</td>'
+        c = "#4ade80" if v >= 70 else ("#fbbf24" if v >= 50 else "#f87171")
+        return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
+    def _bt_cell(v):
+        if v is None: return '<td style="color:#475569;text-align:center">—</td>'
+        c = "#4ade80" if v >= 60 else ("#fbbf24" if v >= 40 else "#f87171")
+        return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
+
     fine_rows = ""
     for lo, hi, lbl_s, col in score_buckets:
         tr = [t for t in full_year_trades if t.get("score") is not None and lo <= t["score"] < hi]
@@ -2151,14 +2160,6 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         lpc    = "profit" if pnl >= 0 else "loss"
         apc    = "profit" if avg >= 0 else "loss"
         border_style = "border-top:2px solid #334155;" if lo in (40,60,80) else ""
-        def _wf_cell(v):
-            if v is None: return '<td style="color:#475569;text-align:center">—</td>'
-            c = "#4ade80" if v >= 70 else ("#fbbf24" if v >= 50 else "#f87171")
-            return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
-        def _bt_cell(v):
-            if v is None: return '<td style="color:#475569;text-align:center">—</td>'
-            c = "#4ade80" if v >= 60 else ("#fbbf24" if v >= 40 else "#f87171")
-            return f'<td style="color:{c};font-weight:700;text-align:center">{v}</td>'
         fine_rows += f"""<tr style="{border_style}">
   <td style="color:{col};font-weight:700;text-align:left">{lbl_s}</td>
   <td style="font-weight:700">{n}</td>
