@@ -766,14 +766,6 @@ def run_limit_backtest(
             reason="発注中",
         ))
 
-    # 異常トレードをデバッグ出力
-    for t in trades:
-        if abs(t["pnl"]) > 500_000:
-            import sys
-            print(f"[DEBUG] {strategy_name} {symbol}: entry={t['entry_p']:.0f} exit={t['exit_p']:.0f} "
-                  f"qty={t['qty']} pnl={t['pnl']:+,.0f} reason={t['reason']} "
-                  f"entry_dt={t['entry_dt']} exit_dt={t['exit_dt']}", file=sys.stderr)
-
     # 統計計算 (発注中は除外)
     stat_trades = [t for t in trades if t.get("reason") != "発注中"]
     filled  = len(stat_trades)
