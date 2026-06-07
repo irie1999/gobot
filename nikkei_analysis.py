@@ -2195,6 +2195,25 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
         if reason == "タイムカット": return '<span style="color:#94a3b8">タイムカット</span>'
         return f'<span style="color:#fbbf24">{reason}</span>'
 
+    # 直近損切りマップ: symbol -> [exit_date, ...]
+    _recent_stop_map: dict[str, list] = {}
+    for _t in all_trades:
+        if _t.get("reason") == "損切り" and _t.get("exit_d_raw"):
+            _sym = _t.get("symbol", "")
+            if _sym:
+                _recent_stop_map.setdefault(_sym, []).append(_t["exit_d_raw"])
+
+    def _stop_warn(sym: str, entry_d) -> str:
+        if not sym or entry_d is None or sym not in _recent_stop_map:
+            return ""
+        prior = [d for d in _recent_stop_map[sym]
+                 if d < entry_d and (entry_d - d).days <= 30]
+        if not prior:
+            return ""
+        days_ago = (entry_d - max(prior)).days
+        return (f'<br><span style="color:#f87171;font-size:0.68rem;font-weight:600">'
+                f'⚠ {days_ago}日前に損切り</span>')
+
     # 発注中を先頭に、それ以外は決済日降順
     pending_trades = [t for t in all_trades if t.get("reason") == "発注中"]
     done_trades    = [t for t in all_trades if t.get("reason") != "発注中"]
@@ -2247,7 +2266,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None) -> st
             olp_sub   = ""
         trade_rows += f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
-  <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span></td>
+  <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{t["entry_p"]:,.0f}{olp_sub}</td>
