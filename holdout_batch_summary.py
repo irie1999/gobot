@@ -423,4 +423,135 @@ if not args.no_save and valid_periods:
     md_out.write_text("\n".join(rows_md), encoding="utf-8")
     print(f"[MD]  {md_out.resolve()}")
 
+    # ── HTML 生成 ──────────────────────────────────────────────────────────
+    def _cell(s: dict, key_pnl="pnl") -> str:
+        n = s.get("n", 0); pnl = s.get(key_pnl, 0); wr = s.get("wr", 0)
+        pf = s.get("pf", 0)
+        if n == 0:
+            return '<td style="color:#475569;text-align:center">—</td>'
+        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+        col  = "#4ade80" if pnl > 0 else ("#f87171" if pnl < -10000 else "#fbbf24")
+        return (f'<td style="text-align:right">'
+                f'<span style="color:{col};font-weight:700">{pnl:+,.0f}円</span>'
+                f'<br><span style="color:#94a3b8;font-size:0.75rem">'
+                f'{wr:.0f}% / {n}件 / PF{pf_s}</span></td>')
+
+    # 横断表 HTML
+    th_cols = "".join(f'<th>{p}d</th>' for p in valid_periods)
+    cross_rows_html = ""
+    for lo, hi, lbl in BT_BANDS + [(60, 101, "BT60+"), (0, 101, "ALL")]:
+        key = "BT60+" if lo==60 and hi==101 else ("ALL" if lo==0 and hi==101 else lbl)
+        if key in ("BT60+", "ALL"):
+            style = ' style="border-top:2px solid #3b82f6;background:#0d1424"'
+            lbl_html = f'<td style="color:#60a5fa;font-weight:700">▶ {key}</td>'
+        elif lo in (60, 80):
+            style = ' style="border-top:2px solid #334155"'
+            lbl_html = f'<td style="font-weight:700">{lbl}</td>'
+        else:
+            style = ""
+            lbl_html = f'<td>{lbl}</td>'
+        cells = "".join(_cell(all_results[p].get(key, {})) for p in valid_periods)
+        cross_rows_html += f"<tr{style}>{lbl_html}{cells}</tr>\n"
+
+    # 期間別詳細 HTML
+    detail_html = ""
+    for p in valid_periods:
+        r = all_results[p]
+        total = r.get("ALL", {}); n_all=total.get("n",0); pnl_all=total.get("pnl",0)
+        pall_col = "#4ade80" if pnl_all >= 0 else "#f87171"
+        detail_rows = ""
+        for lo, hi, lbl in BT_BANDS:
+            s = r.get(lbl, {}); n=s.get("n",0)
+            if n == 0: continue
+            pnl=s.get("pnl",0); wr=s.get("wr",0); pf=s.get("pf",0)
+            pf_s = "∞" if pf==float("inf") else f"{pf:.2f}"
+            col  = "#4ade80" if pnl>0 else ("#f87171" if pnl<-10000 else "#fbbf24")
+            bdr  = ' style="border-top:2px solid #334155"' if lo in (60,80) else ""
+            detail_rows += (
+                f'<tr{bdr}><td style="font-weight:700">{lbl}</td>'
+                f'<td style="text-align:right">{n}</td>'
+                f'<td style="text-align:right">{wr:.1f}%</td>'
+                f'<td style="text-align:right">{pf_s}</td>'
+                f'<td style="text-align:right;color:{col};font-weight:700">'
+                f'{pnl:+,.0f}円</td></tr>\n'
+            )
+        s60=r.get("BT60+",{}); n60=s60.get("n",0)
+        if n60:
+            p60=s60.get("pnl",0); wr60=s60.get("wr",0); pf60=s60.get("pf",0)
+            pf60_s="∞" if pf60==float("inf") else f"{pf60:.2f}"
+            c60="#4ade80" if p60>=0 else "#f87171"
+            detail_rows += (
+                f'<tr style="border-top:2px solid #3b82f6;background:#0d1424">'
+                f'<td style="color:#60a5fa;font-weight:700">BT60+ 計</td>'
+                f'<td style="text-align:right;color:#60a5fa">{n60}</td>'
+                f'<td style="text-align:right;color:#60a5fa">{wr60:.1f}%</td>'
+                f'<td style="text-align:right;color:#60a5fa">{pf60_s}</td>'
+                f'<td style="text-align:right;color:{c60};font-weight:700">'
+                f'{p60:+,.0f}円</td></tr>\n'
+            )
+        detail_html += f"""
+<h2>{p}日ホールドアウト
+  <span style="font-size:0.85rem;font-weight:400;color:#94a3b8">
+    {n_all}件 /
+    <span style="color:{pall_col}">{pnl_all:+,.0f}円</span>
+  </span>
+</h2>
+<table>
+  <thead><tr><th style="text-align:left">BT帯</th>
+    <th style="text-align:right">件数</th><th style="text-align:right">勝率</th>
+    <th style="text-align:right">PF</th><th style="text-align:right">損益</th>
+  </tr></thead>
+  <tbody>{detail_rows}</tbody>
+</table>"""
+
+    filter_note = ""
+    if effective_max_price > 0:
+        filter_note = f" / 株価上限 {effective_max_price:,.0f}円"
+
+    html_out = Path(f"holdout_batch_results_{TODAY}.html")
+    html_out.write_text(f"""<!DOCTYPE html><html lang="ja"><head>
+<meta charset="utf-8">
+<title>ホールドアウト結果バッチ集計 {TODAY}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:"Segoe UI","Hiragino Sans",sans-serif;
+     background:#0f172a;color:#e2e8f0;padding:24px;max-width:1200px;margin:0 auto}}
+h1{{color:#60a5fa;font-size:1.4rem;margin-bottom:6px}}
+h2{{color:#60a5fa;font-size:1rem;margin:24px 0 10px;
+    border-left:3px solid #60a5fa;padding-left:10px}}
+.sub{{color:#94a3b8;font-size:0.85rem;margin-bottom:20px}}
+table{{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:0.88rem}}
+th{{background:#1e293b;color:#94a3b8;padding:6px 10px;
+    border-bottom:1px solid #334155;font-weight:600;white-space:nowrap}}
+td{{padding:5px 10px;border-bottom:1px solid #1e293b;white-space:nowrap}}
+tr:hover td{{background:#1a2535}}
+</style></head><body>
+<h1>ホールドアウト結果バッチ集計</h1>
+<p class="sub">集計日: {TODAY} / モード: conservative / MaxDD≤{args.max_dd}%{filter_note}</p>
+
+<h2>BT帯別 損益横断表</h2>
+<p style="color:#64748b;font-size:0.8rem;margin-bottom:8px">
+  各セル: 損益 / 勝率 / 件数 / PF。境界線 = BT60(重要閾値) / BT80
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">BT帯</th>{th_cols}
+  </tr></thead>
+  <tbody>{cross_rows_html}</tbody>
+</table>
+
+<h2>期間別詳細</h2>
+{detail_html}
+
+<p style="color:#334155;font-size:0.75rem;margin-top:32px">
+  実運用フィルター基準: BTスコア≥60 が全期間で一貫してプラス。
+  conservative優先。BT0-29は最大損失源のため除外推奨。
+</p>
+</body></html>""", encoding="utf-8")
+    print(f"[HTML] {html_out.resolve()}")
+
+    if not args.no_save:
+        from _open_html import open_html
+        open_html(html_out)
+
 print(f"\n完了。")
