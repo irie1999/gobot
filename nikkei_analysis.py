@@ -2270,7 +2270,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     if t.get("wf_score") is not None and wlo <= t["wf_score"] < whi]
         if not band:
             continue
-        bn, bw, bpnl, bgp, bgl, bpf, bavg = _band_stats(band)
+        bn, bw, bpnl, bgp, bgl, bpf, bavg, _, _ = _band_stats(band)
         bpf_s = "∞" if bpf == float("inf") else f"{bpf:.2f}"
         bpc   = "profit" if bpnl >= 0 else "loss"
         bapc  = "profit" if bavg >= 0 else "loss"
@@ -2287,7 +2287,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
     # BT全体行（BT≥60 合計）
     if bt60_trades:
-        an, aw, apnl, agp, agl, apf, aavg = _band_stats(bt60_trades)
+        an, aw, apnl, agp, agl, apf, aavg, _, _ = _band_stats(bt60_trades)
         apf_s = "∞" if apf == float("inf") else f"{apf:.2f}"
         apc2  = "profit" if apnl >= 0 else "loss"
         cross_rows += f"""<tr style="border-top:2px solid #475569;background:#0d1424">
