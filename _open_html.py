@@ -1,17 +1,17 @@
 """共通ユーティリティ: HTML ファイルをブラウザで開く"""
 from __future__ import annotations
-import os
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
 
 
 def open_html(path: str | Path) -> None:
-    """HTML ファイルをブラウザで開く。ブラウザが見つからない場合はパスを表示する。"""
+    """HTML ファイルを Edge (Windows) またはデフォルトブラウザで開く。"""
     p = Path(path).resolve()
     try:
         if sys.platform == "win32":
-            os.startfile(str(p))
+            subprocess.run(["cmd", "/c", "start", "msedge", str(p)], check=True)
         else:
             opened = webbrowser.open(p.as_uri())
             if not opened:
