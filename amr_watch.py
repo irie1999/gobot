@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import math
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -575,7 +576,7 @@ def main() -> None:
         out.write_text(html, encoding="utf-8")
         print(f"HTML: {out.resolve()}")
         if not no_browser:
-            webbrowser.open(f"file://{out.resolve()}")
+            open_html(f"file://{out.resolve()}")
 
     else:
         # ── シグナルチェックモード ──────────────────────────────────
@@ -612,7 +613,7 @@ def main() -> None:
         out.write_text(html, encoding="utf-8")
         print(f"HTML: {out.resolve()}")
         if not no_browser:
-            webbrowser.open(f"file://{out.resolve()}")
+            open_html(f"file://{out.resolve()}")
 
         print(f"{'='*60}\n")
 

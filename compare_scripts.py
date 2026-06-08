@@ -1,3 +1,4 @@
+from _open_html import open_html
 """
 compare_scripts.py  ─  スクリプト × 戦略 比較バックテスト
 =================================================================
@@ -436,8 +437,7 @@ def main():
             f.write(html)
         print(f"\nHTML出力: {fname}")
         if not args.no_browser:
-            import webbrowser
-            webbrowser.open(f"file://{os.path.abspath(fname)}")
+            open_html(f"file://{os.path.abspath(fname)}")
 
 
 if __name__ == "__main__":

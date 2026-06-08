@@ -1,3 +1,4 @@
+from _open_html import open_html
 """
 regime_verify.py  ―  相場環境 × 戦略パフォーマンス検証
 ==================================================
@@ -513,7 +514,7 @@ def main() -> None:
     print(f"HTML: {out.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 if __name__ == "__main__":

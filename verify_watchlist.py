@@ -44,6 +44,7 @@ import importlib.util
 import os
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -299,7 +300,7 @@ def main() -> None:
 
     # ── ブラウザ起動 ──
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
     print("\n完了。")
     print("  比較したい場合:  python run_signals.py --days {days}  (旧 WATCHLIST)"

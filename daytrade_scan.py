@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
+from _open_html import open_html
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
@@ -373,7 +374,7 @@ def main():
                               args.budget, args.top), encoding="utf-8")
     print(f"\nHTMLレポート: {out.resolve()}")
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 if __name__ == "__main__":

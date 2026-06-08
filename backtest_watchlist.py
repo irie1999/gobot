@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import math
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -595,7 +596,7 @@ def main() -> None:
     print(f"HTML: {outpath.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(f"file://{outpath.resolve()}")
+        open_html(f"file://{outpath.resolve()}")
 
     print(f"{'='*72}\n")
 

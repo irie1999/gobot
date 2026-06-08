@@ -2838,7 +2838,15 @@ def main():
     print(f"生成: {html_path}")
 
     if not args.no_browser:
-        webbrowser.open(html_path.resolve().as_uri())
+        uri = html_path.resolve().as_uri()
+        try:
+            opened = webbrowser.open(uri)
+            if not opened:
+                raise webbrowser.Error("open() returned False")
+        except Exception:
+            print(f"\n⚠️  ブラウザを自動で開けませんでした。")
+            print(f"   以下のファイルをブラウザで開いてください:")
+            print(f"   {html_path.resolve()}")
 
 
 if __name__ == "__main__":

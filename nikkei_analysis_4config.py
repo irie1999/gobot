@@ -32,6 +32,7 @@ import os
 import re as _re
 import sys
 import webbrowser
+from _open_html import open_html
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
 from datetime import datetime, timedelta, timezone
@@ -681,7 +682,7 @@ def _run_symbol_history(symbol: str, strategy: str, days: int, mode: str,
     out.write_text(html, encoding="utf-8")
     print(f"HTML生成完了: {out.resolve()}")
     if open_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -754,7 +755,7 @@ def main() -> None:
     print(f"\n4config レポート生成完了: {new_path.resolve()}")
 
     if not _known.no_browser:
-        webbrowser.open(new_path.resolve().as_uri())
+        open_html(new_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

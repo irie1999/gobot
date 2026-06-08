@@ -1,3 +1,4 @@
+from _open_html import open_html
 """
 compare_gap_entry.py  ─  指値上限 × 複数パターン比較バックテスト
 =================================================================
@@ -1166,8 +1167,7 @@ def main():
             f.write(html)
         print(f"\nHTML出力: {fname}")
         if not getattr(args, "no_browser", False):
-            import webbrowser
-            webbrowser.open(f"file://{os.path.abspath(fname)}")
+            open_html(f"file://{os.path.abspath(fname)}")
 
 
 if __name__ == "__main__":

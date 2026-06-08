@@ -770,7 +770,15 @@ def main() -> None:
 
     print(f"\nレポート生成完了: {new_path.resolve()}")
     if not _pre_known.no_browser:
-        webbrowser.open(new_path.resolve().as_uri())
+        uri = new_path.resolve().as_uri()
+        try:
+            opened = webbrowser.open(uri)
+            if not opened:
+                raise webbrowser.Error("open() returned False")
+        except Exception:
+            print(f"\n⚠️  ブラウザを自動で開けませんでした。")
+            print(f"   以下のファイルをブラウザで開いてください:")
+            print(f"   {new_path.resolve()}")
 
 
 if __name__ == "__main__":

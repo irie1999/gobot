@@ -34,6 +34,7 @@ import socketserver
 import threading
 import urllib.parse
 import webbrowser
+from _open_html import open_html
 from datetime import datetime
 from pathlib import Path
 
@@ -1352,7 +1353,7 @@ def cmd_web(port: int = 7654) -> None:
     print(f"\n  ポートフォリオ Web UI を起動しました → {actual_url}")
     print(f"  終了するには Ctrl+C を押してください。\n")
     with server:
-        threading.Timer(0.5, lambda: webbrowser.open(actual_url)).start()
+        threading.Timer(0.5, lambda: open_html(actual_url)).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:

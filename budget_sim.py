@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import webbrowser
+from _open_html import open_html
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -536,7 +537,7 @@ def main() -> None:
     print(f"\nHTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+from _open_html import open_html
 """
 analyze_trade_quality.py  ─  スコア×損益品質の分析
 =======================================================
@@ -625,8 +626,7 @@ def main():
                 f.write(html)
             print(f"\nHTMLを出力: {fname}")
             if not args.no_browser:
-                import webbrowser
-                webbrowser.open(f"file://{os.path.abspath(fname)}")
+                open_html(f"file://{os.path.abspath(fname)}")
     else:
         # ── 既存モード (WATCHLIST 57銘柄) ──
         print("全 WATCHLIST バックテスト中…")
@@ -647,8 +647,7 @@ def main():
                 f.write(html)
             print(f"\nHTMLを出力: {fname}")
             if not args.no_browser:
-                import webbrowser
-                webbrowser.open(f"file://{os.path.abspath(fname)}")
+                open_html(f"file://{os.path.abspath(fname)}")
 
 
 if __name__ == "__main__":

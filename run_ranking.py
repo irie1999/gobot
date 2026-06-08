@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import webbrowser
+from _open_html import open_html
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -337,7 +338,7 @@ def main() -> None:
     print(f"\n統合HTML: {combined.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(f"file://{combined.resolve()}")
+        open_html(f"file://{combined.resolve()}")
 
     # ── 貼り付け用テキスト出力 ────────────────────────────────────
     if args.paste:

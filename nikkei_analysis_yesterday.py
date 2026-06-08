@@ -27,6 +27,7 @@ import os
 import copy as _copy
 import importlib as _importlib
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
 from datetime import timedelta, timezone, datetime
 from pathlib import Path
@@ -2199,7 +2200,7 @@ def main():
     print(f"生成: {html_path}")
 
     if not args.no_browser:
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

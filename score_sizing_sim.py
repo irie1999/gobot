@@ -19,6 +19,7 @@ import importlib
 import json
 import os
 import webbrowser
+from _open_html import open_html
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta, timezone, datetime
@@ -599,7 +600,7 @@ def main() -> None:
     print(f"→ {fname}")
 
     if not args.no_browser:
-        webbrowser.open(str(Path(fname).resolve()))
+        open_html(str(Path(fname).resolve()))
 
 
 if __name__ == "__main__":

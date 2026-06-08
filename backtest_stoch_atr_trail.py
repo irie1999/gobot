@@ -26,6 +26,7 @@ import io
 import pickle
 import sys
 import webbrowser
+from _open_html import open_html
 
 # Windows cp932 環境で Unicode 罫線文字を出力できるよう UTF-8 に再設定
 if hasattr(sys.stdout, "reconfigure"):
@@ -1090,7 +1091,7 @@ def main() -> None:
 
         html_path = generate_signal_html_a7(sig)
         print(f"  HTMLレポート: {html_path.resolve()}")
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
         print()
         return
 
@@ -1181,7 +1182,7 @@ def main() -> None:
     html_path = generate_html(results, days, period_label,
                               single_sym=args.symbol if args.symbol else None)
     print(f"  HTMLレポート: {html_path.resolve()}")
-    webbrowser.open(html_path.resolve().as_uri())
+    open_html(html_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

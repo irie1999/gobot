@@ -33,6 +33,7 @@ import importlib as _importlib
 import os
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -443,7 +444,7 @@ def main() -> None:
         old_path.replace(new_path)
         print(f"\nレポート生成完了: {new_path.resolve()}")
         if not _pre_known.no_browser:
-            webbrowser.open(new_path.resolve().as_uri())
+            open_html(new_path.resolve().as_uri())
     else:
         print(f"[WARN] {old_path} が見つかりませんでした (--date 指定時は日付を確認)")
 

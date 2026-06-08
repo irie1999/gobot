@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import webbrowser
+from _open_html import open_html
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta, timezone
@@ -588,7 +589,7 @@ def main() -> None:
     print(f"\nHTML: {out}", flush=True)
 
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 if __name__ == "__main__":

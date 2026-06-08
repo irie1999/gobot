@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -531,7 +532,7 @@ def main() -> None:
     print(f"HTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
 
 if __name__ == "__main__":
