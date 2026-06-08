@@ -155,6 +155,34 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     return score, rank
 
 
+_BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", "取引数": "#a855f7"}
+
+def calc_bt_type(period_results: dict) -> str:
+    """BTスコアの支配要素タイプを返す: 安定 / 高WR / 高PF / 取引数"""
+    results = [r for r in period_results.values() if r and r.get("trades", 0) > 0]
+    if not results:
+        return "?"
+    avg_wr   = sum(r["win_rate"] for r in results) / len(results)
+    avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10) for r in results) / len(results)
+    stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
+    t_trades = sum(r["trades"] for r in results)
+    components = {
+        "安定":  stable,
+        "高WR":  avg_wr / 100,
+        "高PF":  avg_pf / 10,
+        "取引数": min(t_trades / 20, 1),
+    }
+    return max(components, key=components.get)
+
+
+def _bt_type_badge(period_results: dict) -> str:
+    """小さなインラインバッジ HTML を返す。"""
+    bt_type = calc_bt_type(period_results)
+    color = _BT_TYPE_COLORS.get(bt_type, "#94a3b8")
+    return (f'<br><small style="background:{color}22;color:{color};'
+            f'padding:1px 5px;border-radius:3px;font-size:10px">{bt_type}</small>')
+
+
 def apply_atr_penalty(score: int, stop_loss_pct: float) -> tuple[int, str]:
     """
     損切り幅(ATR幅)が広い時にスコアを減点。
@@ -380,6 +408,7 @@ def build_html(all_items: list[dict], show_days: int,
         else:
             score, rank = calc_recommend_score(item["period_results"])
             score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
+        score_label += _bt_type_badge(item["period_results"])
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
         if wf and score >= 70:
             row_style = "border-left:3px solid #22c55e"
@@ -447,6 +476,7 @@ def build_html(all_items: list[dict], show_days: int,
                 wf_cell = f'<span class="{wf_cls}">{wf_r} {wf_s}</span>'
             else:
                 wf_cell = '<span style="color:#64748b">-</span>'
+            wf_cell += _bt_type_badge(item["period_results"])
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
