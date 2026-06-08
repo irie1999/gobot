@@ -510,8 +510,9 @@ def _tab7_trend_analysis_html(trades_by_cfg: dict[str, list[dict]]) -> str:
 # HTML 注入
 # ════════════════════════════════════════════════════════════════════════════
 
-def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
-    """t1に4設定セクションを注入、t7(トレンド×相性)タブを追加、タブナビ折り返し修正。"""
+def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str,
+                 tab8_html: str = "") -> str:
+    """t1に4設定セクションを注入、t7(トレンド×相性)・t8(銘柄詳細)タブを追加。"""
 
     # 1. t1タブ内の「推奨コマンド」見出し直前に4設定セクションを挿入
     html = _re.sub(
@@ -521,26 +522,50 @@ def _inject_tabs(html: str, cfg_section_html: str, tab7_html: str) -> str:
         count=1,
     )
 
-    # 2. tab-nav に t7 ボタンを追加
+    # 2. tab-nav に t7・t8 ボタンを追加
     TAB_NAV_END = '\n</div>\n\n<div id="t1"'
     if TAB_NAV_END in html:
-        new_btn = '\n  <button class="tab-btn" data-tab="t7" onclick="switchTab(\'t7\')">📊 トレンド×相性</button>'
-        html = html.replace(TAB_NAV_END, new_btn + TAB_NAV_END, 1)
+        new_btns = '\n  <button class="tab-btn" data-tab="t7" onclick="switchTab(\'t7\')">📊 トレンド×相性</button>'
+        if tab8_html:
+            new_btns += '\n  <button class="tab-btn" data-tab="t8" onclick="switchTab(\'t8\')">🔍 銘柄詳細</button>'
+        html = html.replace(TAB_NAV_END, new_btns + TAB_NAV_END, 1)
 
-    # 3. t7 ペインを <script> 直前に追加
+    # 3. t7・t8 ペインを <script> 直前に追加
     SCRIPT_TAG = '\n\n<script>'
     if SCRIPT_TAG in html:
-        html = html.replace(SCRIPT_TAG,
-                            f'\n<div id="t7" class="tab-pane">{tab7_html}</div>' + SCRIPT_TAG, 1)
+        extra = f'\n<div id="t7" class="tab-pane">{tab7_html}</div>'
+        if tab8_html:
+            extra += f'\n<div id="t8" class="tab-pane">{tab8_html}</div>'
+        html = html.replace(SCRIPT_TAG, extra + SCRIPT_TAG, 1)
 
     # 4. タブナビが2行にならないよう CSS を上書き
     css_fix = (
         '\n<style>'
         '\n.tab-nav { flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch; }'
         '\n.tab-btn { padding: 7px 13px !important; font-size: 0.8rem !important; white-space: nowrap; }'
+        '\n.sym-tab-nav { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 16px;'
+        '\n  padding:10px; background:#0f172a; border-radius:8px; }'
+        '\n.sym-tab-btn { padding:6px 14px; background:#1e293b; border:1px solid #334155;'
+        '\n  color:#e2e8f0; border-radius:6px; cursor:pointer; font-size:0.82rem;'
+        '\n  text-align:center; line-height:1.5; transition:all .2s; min-width:90px; }'
+        '\n.sym-tab-btn:hover { background:#263349; border-color:#64748b; }'
+        '\n.sym-tab-btn.active { background:#1d4ed8; border-color:#3b82f6; }'
+        '\n.sym-tab-pane { display:none; }'
         '\n</style>'
     )
     html = html.replace('</head>', css_fix + '\n</head>', 1)
+
+    # 5. switchSymTab JS を </script> 直前に追加
+    if tab8_html:
+        js_fn = (
+            '\nfunction switchSymTab(tabId) {'
+            '\n  document.querySelectorAll(\'.sym-tab-pane\').forEach(p => p.style.display=\'none\');'
+            '\n  document.querySelectorAll(\'.sym-tab-btn\').forEach(b => b.classList.remove(\'active\'));'
+            '\n  document.getElementById(tabId).style.display=\'block\';'
+            '\n  event.target.classList.add(\'active\');'
+            '\n}'
+        )
+        html = html.replace('</script>', js_fn + '\n</script>', 1)
 
     return html
 
@@ -749,7 +774,45 @@ def main() -> None:
         cfg_section = ""
         tab7_html   = "<p style='color:#64748b;padding:20px'>データ取得失敗のためスキップ</p>"
 
-    new_html = _inject_tabs(base_html, cfg_section, tab7_html)
+    # ── 銘柄詳細タブ: _na.main() が生成した _last_signals から銘柄を取得 ──
+    tab8_html = ""
+    _sig_stocks: list[tuple] = []
+    _seen_s: set = set()
+    for _sg in _na._last_signals:
+        _s = _sg.get("symbol", "")
+        if _s and _s not in _seen_s:
+            _seen_s.add(_s)
+            _sig_stocks.append((_s, _sg.get("name", ""), _sg.get("rec_score") or 0))
+
+    if _sig_stocks:
+        _sym_nav = ""
+        _sym_panes = ""
+        for _i, (_sym, _sname, _bt) in enumerate(_sig_stocks):
+            _tid    = f"sym4_{_sym.replace('.','_')}"
+            _active = "active" if _i == 0 else ""
+            _disp   = "block"  if _i == 0 else "none"
+            _short  = _sname[:8] if len(_sname) > 8 else _sname
+            _sym_nav += (
+                f'<button class="sym-tab-btn {_active}" onclick="switchSymTab(\'{_tid}\')">'
+                f'<span style="font-size:0.8rem;font-weight:700">{_sym}</span>'
+                f'<br><span style="font-size:0.68rem;color:#94a3b8">{_short}</span>'
+                f'<br><span style="font-size:0.7rem;color:#fbbf24">BT:{_bt}</span>'
+                f'</button>\n'
+            )
+            print(f"銘柄詳細生成中: {_sym} {_sname}...", flush=True)
+            _spnl = _na._tab5_pnl_html(365, _known.workers, symbol_filter=[_sym])
+            _sym_panes += (
+                f'<div id="{_tid}" class="sym-tab-pane" style="display:{_disp}">'
+                f'{_spnl}</div>\n'
+            )
+        tab8_html = (
+            f'<p style="color:#94a3b8;font-size:0.82rem;margin:8px 0 0">'
+            f'本日シグナルが出た {len(_sig_stocks)} 銘柄の過去365日取引履歴（BTスコア降順）</p>'
+            f'<div class="sym-tab-nav">{_sym_nav}</div>'
+            f'{_sym_panes}'
+        )
+
+    new_html = _inject_tabs(base_html, cfg_section, tab7_html, tab8_html)
     new_path = Path(f"nikkei_analysis_4config_{date_str}.html")
     new_path.write_text(new_html, encoding="utf-8")
     print(f"\n4config レポート生成完了: {new_path.resolve()}")
