@@ -64,6 +64,13 @@ import check_signals_breakout as _brk
 _CON_STOP = _copy.deepcopy(_stop.STRATEGY_PARAMS)
 _CON_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
 
+os.environ["TRADING_MODE"] = "aggressive"
+_importlib.reload(_stop); _importlib.reload(_brk)
+_AGG_STOP = _copy.deepcopy(_stop.STRATEGY_PARAMS)
+_AGG_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
+os.environ["TRADING_MODE"] = "conservative"
+_importlib.reload(_stop); _importlib.reload(_brk)
+
 
 # ── ヘルパー ─────────────────────────────────────────────────────────────────
 def _float(v, default=0.0) -> float:
@@ -140,9 +147,10 @@ def _run_scan(strategy: str, holdout_days: int,
     return results
 
 
-def _load_watchlist_for_period(holdout_days: int) -> tuple[list, list, str]:
+def _load_watchlist_for_period(holdout_days: int,
+                               mode: str = "conservative") -> tuple[list, list, str]:
     """
-    conservative WATCHLIST をCSVから読み込む。
+    指定モードの WATCHLIST をCSVから読み込む。
     CSVがない場合は --no-scan でなければ自動スキャンを実行する。
     """
     strategies_stop = ["MACD", "A7", "RSI2"]
@@ -151,16 +159,16 @@ def _load_watchlist_for_period(holdout_days: int) -> tuple[list, list, str]:
 
     for strategies, target_wl in [(strategies_stop, stop_wl), (strategies_brk, brk_wl)]:
         for strategy in strategies:
-            csv_path = _find_holdout_csv(strategy, holdout_days, args.wf_dir)
+            csv_path = _find_holdout_csv(strategy, holdout_days, args.wf_dir, mode)
 
             if csv_path is None:
                 if args.no_scan:
-                    print(f"  [SKIP] {strategy} holdout{holdout_days}d CSV なし (--no-scan)")
+                    print(f"  [SKIP] {strategy}/{mode} holdout{holdout_days}d CSV なし (--no-scan)")
                     continue
-                print(f"  [SCAN] {strategy} holdout{holdout_days}d CSV なし → スキャン実行")
+                print(f"  [SCAN] {strategy}/{mode} holdout{holdout_days}d CSV なし → スキャン実行")
                 rows = _run_scan(strategy, holdout_days, effective_max_price,
                                  args.workers, args.wf_dir)
-                csv_path = _find_holdout_csv(strategy, holdout_days, args.wf_dir)
+                csv_path = _find_holdout_csv(strategy, holdout_days, args.wf_dir, mode)
             else:
                 with open(csv_path, encoding="utf-8") as f:
                     rows = list(_csv.DictReader(f))
@@ -233,8 +241,9 @@ def _band_stats(trades: list[dict]) -> dict:
             "pf": pf, "pnl": pnl, "gp": gp, "gl": gl}
 
 
-def _collect_trades(stop_wl: list, brk_wl: list, holdout_days: int) -> list[dict]:
-    """バックテスト実行 → holdout期間内のトレードにBTスコアを付けて返す。"""
+def _collect_trades(stop_wl: list, brk_wl: list,
+                    holdout_days: int, mode: str = "conservative") -> list[dict]:
+    """バックテスト実行 → holdout期間内のトレードにBTスコア・modeを付けて返す。"""
     items: list[dict] = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs: dict = {}
@@ -256,7 +265,7 @@ def _collect_trades(stop_wl: list, brk_wl: list, holdout_days: int) -> list[dict
         sym   = it.get("symbol", ""); strat = it.get("strategy", "")
         pr    = it.get("period_results", {})
         if not pr: continue
-        trade_log  = pr[max(pr.keys())].get("trade_log", [])
+        trade_log    = pr[max(pr.keys())].get("trade_log", [])
         rec_score, _ = _stop.calc_recommend_score(pr)
 
         for t in trade_log:
@@ -269,47 +278,86 @@ def _collect_trades(stop_wl: list, brk_wl: list, holdout_days: int) -> list[dict
             key = (sym, strat, signal_dt)
             if key in seen: continue
             seen.add(key)
-            trades.append({"symbol": sym, "strategy": strat,
-                           "rec_score": rec_score, "pnl": t.get("pnl", 0)})
+            trades.append({"symbol": sym, "strategy": strat, "mode": mode,
+                           "rec_score": rec_score, "pnl": t.get("pnl", 0),
+                           "signal_dt": signal_dt})
     return trades
 
 
 # ── メイン処理 ───────────────────────────────────────────────────────────────
-all_results: dict[int, dict[str, dict]] = {}
+all_results: dict[int, dict] = {}  # all_results[period] = {bands, con_kpi, agg_kpi, combined_kpi}
+
+def _empty_stats() -> dict:
+    return {"n":0,"wins":0,"wr":0,"pf":0,"pnl":0,"gp":0,"gl":0}
 
 for holdout_days in periods:
     print(f"\n{'='*60}")
     print(f"  ホールドアウト {holdout_days}日")
     print(f"{'='*60}")
 
-    stop_wl, brk_wl, csv_date = _load_watchlist_for_period(holdout_days)
+    # conservative
+    stop_con, brk_con, csv_date_con = _load_watchlist_for_period(holdout_days, "conservative")
+    # aggressive
+    stop_agg, brk_agg, csv_date_agg = _load_watchlist_for_period(holdout_days, "aggressive")
 
-    if not stop_wl and not brk_wl:
+    if not stop_con and not brk_con and not stop_agg and not brk_agg:
         print(f"  [SKIP] WATCHLIST が空 → この期間をスキップ")
         all_results[holdout_days] = {}
         continue
 
-    print(f"  WATCHLIST: 逆指値B={len(stop_wl)}件 BRK={len(brk_wl)}件 (CSV: {csv_date})")
+    print(f"  CON WATCHLIST: 逆指値B={len(stop_con)}件 BRK={len(brk_con)}件 (CSV: {csv_date_con})")
+    print(f"  AGG WATCHLIST: 逆指値B={len(stop_agg)}件 BRK={len(brk_agg)}件 (CSV: {csv_date_agg})")
 
-    # WFスコア・STRATEGY_PARAMSを設定
     wf_scores = _build_wf_scores(holdout_days, args.wf_dir)
     _stop._WF_SCORES = dict(wf_scores)
     _brk._WF_SCORES  = dict(wf_scores)
+
+    # conservative バックテスト
+    _stop.STRATEGY_PARAMS.update(_CON_STOP)
+    _brk.STRATEGY_PARAMS.update(_CON_BRK)
+    print(f"  [conservative] バックテスト実行中...", flush=True)
+    con_trades = _collect_trades(stop_con, brk_con, holdout_days, "conservative")
+    print(f"  [conservative] 完了: {len(con_trades)}トレード")
+
+    # aggressive バックテスト
+    _stop.STRATEGY_PARAMS.update(_AGG_STOP)
+    _brk.STRATEGY_PARAMS.update(_AGG_BRK)
+    print(f"  [aggressive]   バックテスト実行中...", flush=True)
+    agg_trades = _collect_trades(stop_agg, brk_agg, holdout_days, "aggressive")
+    print(f"  [aggressive]   完了: {len(agg_trades)}トレード")
+
+    # conservative に戻す
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
 
-    print(f"  バックテスト実行中...", flush=True)
-    trades = _collect_trades(stop_wl, brk_wl, holdout_days)
-    print(f"  完了: {len(trades)}トレード")
+    # 重複除外 combined (同一 symbol+strategy+signal_dt は最初のconfigのみ)
+    seen_combined: set = set()
+    combined_trades: list[dict] = []
+    for t in con_trades + agg_trades:
+        k = (t["symbol"], t["strategy"], t["signal_dt"])
+        if k not in seen_combined:
+            seen_combined.add(k)
+            combined_trades.append(t)
 
+    # BT帯集計 (combinedベース)
     band_results: dict[str, dict] = {}
     for lo, hi, lbl in BT_BANDS:
-        band = [t for t in trades if t.get("rec_score") is not None
+        band = [t for t in combined_trades if t.get("rec_score") is not None
                 and lo <= t["rec_score"] < hi]
-        band_results[lbl] = _band_stats(band) if band else {"n":0,"wins":0,"wr":0,"pf":0,"pnl":0,"gp":0,"gl":0}
-    band_results["BT60+"] = _band_stats([t for t in trades if (t.get("rec_score") or 0) >= 60])
-    band_results["ALL"]   = _band_stats(trades) if trades else {"n":0,"wins":0,"wr":0,"pf":0,"pnl":0,"gp":0,"gl":0}
-    all_results[holdout_days] = band_results
+        band_results[lbl] = _band_stats(band) if band else _empty_stats()
+    band_results["BT60+"] = _band_stats(
+        [t for t in combined_trades if (t.get("rec_score") or 0) >= 60]
+    ) if combined_trades else _empty_stats()
+    band_results["ALL"] = _band_stats(combined_trades) if combined_trades else _empty_stats()
+
+    all_results[holdout_days] = {
+        "bands":    band_results,
+        "con":      _band_stats(con_trades)      if con_trades      else _empty_stats(),
+        "agg":      _band_stats(agg_trades)      if agg_trades      else _empty_stats(),
+        "combined": _band_stats(combined_trades) if combined_trades else _empty_stats(),
+        "con_wl":   (len(stop_con), len(brk_con)),
+        "agg_wl":   (len(stop_agg), len(brk_agg)),
+    }
 
 
 # ── コンソール表示 ─────────────────────────────────────────────────────────────
@@ -318,10 +366,23 @@ def _pf_s(v) -> str: return "∞" if v == float("inf") else f"{v:.2f}"
 valid_periods = [p for p in periods if all_results.get(p)]
 
 print(f"\n\n{'='*80}")
-print(f"  ホールドアウト結果バッチ集計  (conservative / BT帯別)  {TODAY}")
+print(f"  ホールドアウト結果バッチ集計  {TODAY}")
 print(f"{'='*80}")
 
-# 横断表
+# 損益サマリー横断表
+print(f"\n{'期間':<8} {'CON 損益':>14} {'AGG 損益':>14} {'合計(重複除外)':>16} {'件数':>6} {'勝率':>6}")
+print("-" * 70)
+for p in valid_periods:
+    r   = all_results[p]
+    con = r.get("con", {}); agg = r.get("agg", {}); cmb = r.get("combined", {})
+    print(f"  {p:>3}d  "
+          f"  {r['con']['pnl']:>+12,.0f}円"
+          f"  {r['agg']['pnl']:>+12,.0f}円"
+          f"  {r['combined']['pnl']:>+14,.0f}円"
+          f"  {r['combined']['n']:>5}件"
+          f"  {r['combined']['wr']:>5.1f}%")
+
+# BT帯横断表
 col_w = 13
 print(f"\n{'BT帯':<10}", end="")
 for p in valid_periods:
@@ -332,41 +393,38 @@ print("-" * (10 + len(valid_periods) * (col_w + 2)))
 for lo, hi, lbl in BT_BANDS:
     print(f"{lbl:<10}", end="")
     for p in valid_periods:
-        s = all_results[p].get(lbl, {}); pnl = s.get("pnl", 0); n = s.get("n", 0)
+        s = all_results[p].get("bands", {}).get(lbl, {}); pnl=s.get("pnl",0); n=s.get("n",0)
+        cell = f"{pnl:+,.0f}円({n}件)" if n else "—"
+        print(f"  {cell:>{col_w}}", end="")
+    print()
+for key in ("BT60+", "ALL"):
+    print(f"{key:<10}", end="")
+    for p in valid_periods:
+        s = all_results[p].get("bands", {}).get(key, {}); pnl=s.get("pnl",0); n=s.get("n",0)
         cell = f"{pnl:+,.0f}円({n}件)" if n else "—"
         print(f"  {cell:>{col_w}}", end="")
     print()
 
-print(f"{'BT60+':<10}", end="")
-for p in valid_periods:
-    s = all_results[p].get("BT60+", {}); pnl = s.get("pnl", 0); n = s.get("n", 0)
-    cell = f"{pnl:+,.0f}円({n}件)" if n else "—"
-    print(f"  {cell:>{col_w}}", end="")
-print()
-print(f"{'ALL':<10}", end="")
-for p in valid_periods:
-    s = all_results[p].get("ALL", {}); pnl = s.get("pnl", 0); n = s.get("n", 0)
-    cell = f"{pnl:+,.0f}円({n}件)" if n else "—"
-    print(f"  {cell:>{col_w}}", end="")
-print()
-
 # 期間別詳細
 print(f"\n{'='*80}")
 for p in valid_periods:
-    r = all_results[p]
-    total = r.get("ALL", {}); n_all = total.get("n", 0); pnl_all = total.get("pnl", 0)
-    print(f"\n--- {p}日ホールドアウト: {n_all}件 / {pnl_all:+,.0f}円 ---")
+    r   = all_results[p]
+    cmb = r.get("combined", {}); con = r.get("con", {}); agg = r.get("agg", {})
+    print(f"\n--- {p}日ホールドアウト ---")
+    print(f"  conservative : {con['n']:3}件 / 勝率{con['wr']:.1f}% / PF{_pf_s(con['pf'])} / {con['pnl']:+,.0f}円")
+    print(f"  aggressive   : {agg['n']:3}件 / 勝率{agg['wr']:.1f}% / PF{_pf_s(agg['pf'])} / {agg['pnl']:+,.0f}円")
+    print(f"  重複除外合計 : {cmb['n']:3}件 / 勝率{cmb['wr']:.1f}% / PF{_pf_s(cmb['pf'])} / {cmb['pnl']:+,.0f}円")
     print(f"  {'BT帯':<10} {'件数':>4} {'勝率':>6} {'PF':>5} {'損益':>14}")
+    bands = r.get("bands", {})
     for lo, hi, lbl in BT_BANDS:
-        s = r.get(lbl, {}); n = s.get("n", 0)
+        s = bands.get(lbl, {}); n = s.get("n", 0)
         if n == 0: continue
-        wr = s.get("wr", 0); pf = _pf_s(s.get("pf", 0)); pnl = s.get("pnl", 0)
+        pnl = s.get("pnl", 0)
         mark = " ✅" if pnl > 0 else (" ❌" if pnl < -10000 else " △")
-        print(f"  {lbl:<10} {n:>4} {wr:>5.1f}% {pf:>5} {pnl:>+13,.0f}円{mark}")
-    s60 = r.get("BT60+", {}); n60 = s60.get("n", 0)
+        print(f"  {lbl:<10} {n:>4} {s['wr']:>5.1f}% {_pf_s(s['pf']):>5} {pnl:>+13,.0f}円{mark}")
+    s60 = bands.get("BT60+", {}); n60 = s60.get("n", 0)
     if n60:
-        p60 = s60.get("pnl", 0); wr60 = s60.get("wr", 0)
-        print(f"  {'BT60+ 計':<10} {n60:>4} {wr60:>5.1f}% {_pf_s(s60.get('pf',0)):>5} {p60:>+13,.0f}円")
+        print(f"  {'BT60+ 計':<10} {n60:>4} {s60['wr']:>5.1f}% {_pf_s(s60['pf']):>5} {s60['pnl']:>+13,.0f}円")
 
 
 # ── CSV 保存 ────────────────────────────────────────────────────────────────
@@ -379,7 +437,7 @@ if not args.no_save and valid_periods:
                     "pnl", "gp", "gl"])
         for p in valid_periods:
             for lbl in bands_order:
-                s = all_results[p].get(lbl, {})
+                s = all_results[p].get("bands", {}).get(lbl, {})
                 pf_v = s.get("pf", 0)
                 w.writerow([p, lbl, s.get("n",0), s.get("wins",0),
                              round(s.get("wr",0), 1),
@@ -403,7 +461,7 @@ if not args.no_save and valid_periods:
         key = "BT60+" if lo == 60 and hi == 101 else ("ALL" if lo == 0 and hi == 101 else lbl)
         row = [f"**{key}**"]
         for p in valid_periods:
-            s = all_results[p].get(key, {}); n = s.get("n", 0); pnl = s.get("pnl", 0)
+            s = all_results[p].get("bands", {}).get(key, {}); n = s.get("n", 0); pnl = s.get("pnl", 0)
             wr = s.get("wr", 0)
             if n == 0:
                 row.append("—")
@@ -424,19 +482,47 @@ if not args.no_save and valid_periods:
     print(f"[MD]  {md_out.resolve()}")
 
     # ── HTML 生成 ──────────────────────────────────────────────────────────
-    def _cell(s: dict, key_pnl="pnl") -> str:
-        n = s.get("n", 0); pnl = s.get(key_pnl, 0); wr = s.get("wr", 0)
-        pf = s.get("pf", 0)
+    def _cell(s: dict) -> str:
+        n=s.get("n",0); pnl=s.get("pnl",0); wr=s.get("wr",0); pf=s.get("pf",0)
         if n == 0:
             return '<td style="color:#475569;text-align:center">—</td>'
-        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
-        col  = "#4ade80" if pnl > 0 else ("#f87171" if pnl < -10000 else "#fbbf24")
+        pf_s = "∞" if pf==float("inf") else f"{pf:.2f}"
+        col  = "#4ade80" if pnl>0 else ("#f87171" if pnl<-10000 else "#fbbf24")
         return (f'<td style="text-align:right">'
                 f'<span style="color:{col};font-weight:700">{pnl:+,.0f}円</span>'
                 f'<br><span style="color:#94a3b8;font-size:0.75rem">'
                 f'{wr:.0f}% / {n}件 / PF{pf_s}</span></td>')
 
-    # 横断表 HTML
+    def _kpi_cell(s: dict, label: str, color: str) -> str:
+        n=s.get("n",0); pnl=s.get("pnl",0); wr=s.get("wr",0); pf=s.get("pf",0)
+        pf_s = "∞" if pf==float("inf") else f"{pf:.2f}"
+        pc = "#4ade80" if pnl>=0 else "#f87171"
+        return (f'<td style="text-align:right">'
+                f'<span style="color:{color};font-size:0.75rem">{label}</span><br>'
+                f'<span style="color:{pc};font-weight:700">{pnl:+,.0f}円</span>'
+                f'<br><span style="color:#94a3b8;font-size:0.72rem">'
+                f'{wr:.0f}% / {n}件 / PF{pf_s}</span></td>')
+
+    # 損益サマリー横断表
+    summary_rows = ""
+    for p in valid_periods:
+        r = all_results[p]
+        con=r.get("con",{}); agg=r.get("agg",{}); cmb=r.get("combined",{})
+        con_wl=r.get("con_wl",(0,0)); agg_wl=r.get("agg_wl",(0,0))
+        cmb_pc="#4ade80" if cmb.get("pnl",0)>=0 else "#f87171"
+        summary_rows += (
+            f'<tr><td style="font-weight:700;color:#60a5fa">{p}d</td>'
+            f'<td style="color:#94a3b8;font-size:0.78rem">逆B{con_wl[0]}/BRK{con_wl[1]}</td>'
+            + _kpi_cell(con, "conservative", "#3498db")
+            + _kpi_cell(agg, "aggressive",   "#e74c3c")
+            + f'<td style="text-align:right;border-left:2px solid #3b82f6">'
+            f'<span style="color:{cmb_pc};font-weight:700">{cmb.get("pnl",0):+,.0f}円</span>'
+            f'<br><span style="color:#94a3b8;font-size:0.72rem">'
+            f'{cmb.get("wr",0):.0f}% / {cmb.get("n",0)}件 / PF{_pf_s(cmb.get("pf",0))}</span>'
+            f'</td></tr>\n'
+        )
+
+    # BT帯横断表 HTML
     th_cols = "".join(f'<th>{p}d</th>' for p in valid_periods)
     cross_rows_html = ""
     for lo, hi, lbl in BT_BANDS + [(60, 101, "BT60+"), (0, 101, "ALL")]:
@@ -448,54 +534,62 @@ if not args.no_save and valid_periods:
             style = ' style="border-top:2px solid #334155"'
             lbl_html = f'<td style="font-weight:700">{lbl}</td>'
         else:
-            style = ""
-            lbl_html = f'<td>{lbl}</td>'
-        cells = "".join(_cell(all_results[p].get(key, {})) for p in valid_periods)
+            style = ""; lbl_html = f'<td>{lbl}</td>'
+        cells = "".join(_cell(all_results[p].get("bands",{}).get(key, {})) for p in valid_periods)
         cross_rows_html += f"<tr{style}>{lbl_html}{cells}</tr>\n"
 
     # 期間別詳細 HTML
     detail_html = ""
     for p in valid_periods:
-        r = all_results[p]
-        total = r.get("ALL", {}); n_all=total.get("n",0); pnl_all=total.get("pnl",0)
-        pall_col = "#4ade80" if pnl_all >= 0 else "#f87171"
+        r   = all_results[p]
+        cmb = r.get("combined",{}); con=r.get("con",{}); agg=r.get("agg",{})
+        bands = r.get("bands", {})
+        cmb_pc = "#4ade80" if cmb.get("pnl",0)>=0 else "#f87171"
         detail_rows = ""
         for lo, hi, lbl in BT_BANDS:
-            s = r.get(lbl, {}); n=s.get("n",0)
-            if n == 0: continue
+            s=bands.get(lbl,{}); n=s.get("n",0)
+            if n==0: continue
             pnl=s.get("pnl",0); wr=s.get("wr",0); pf=s.get("pf",0)
-            pf_s = "∞" if pf==float("inf") else f"{pf:.2f}"
-            col  = "#4ade80" if pnl>0 else ("#f87171" if pnl<-10000 else "#fbbf24")
-            bdr  = ' style="border-top:2px solid #334155"' if lo in (60,80) else ""
+            pf_s="∞" if pf==float("inf") else f"{pf:.2f}"
+            col="#4ade80" if pnl>0 else ("#f87171" if pnl<-10000 else "#fbbf24")
+            bdr=' style="border-top:2px solid #334155"' if lo in (60,80) else ""
             detail_rows += (
                 f'<tr{bdr}><td style="font-weight:700">{lbl}</td>'
                 f'<td style="text-align:right">{n}</td>'
                 f'<td style="text-align:right">{wr:.1f}%</td>'
                 f'<td style="text-align:right">{pf_s}</td>'
-                f'<td style="text-align:right;color:{col};font-weight:700">'
-                f'{pnl:+,.0f}円</td></tr>\n'
+                f'<td style="text-align:right;color:{col};font-weight:700">{pnl:+,.0f}円</td></tr>\n'
             )
-        s60=r.get("BT60+",{}); n60=s60.get("n",0)
+        s60=bands.get("BT60+",{}); n60=s60.get("n",0)
         if n60:
-            p60=s60.get("pnl",0); wr60=s60.get("wr",0); pf60=s60.get("pf",0)
-            pf60_s="∞" if pf60==float("inf") else f"{pf60:.2f}"
-            c60="#4ade80" if p60>=0 else "#f87171"
+            p60=s60.get("pnl",0); c60="#4ade80" if p60>=0 else "#f87171"
             detail_rows += (
                 f'<tr style="border-top:2px solid #3b82f6;background:#0d1424">'
                 f'<td style="color:#60a5fa;font-weight:700">BT60+ 計</td>'
                 f'<td style="text-align:right;color:#60a5fa">{n60}</td>'
-                f'<td style="text-align:right;color:#60a5fa">{wr60:.1f}%</td>'
-                f'<td style="text-align:right;color:#60a5fa">{pf60_s}</td>'
-                f'<td style="text-align:right;color:{c60};font-weight:700">'
-                f'{p60:+,.0f}円</td></tr>\n'
+                f'<td style="text-align:right;color:#60a5fa">{s60["wr"]:.1f}%</td>'
+                f'<td style="text-align:right;color:#60a5fa">{_pf_s(s60["pf"])}</td>'
+                f'<td style="text-align:right;color:{c60};font-weight:700">{p60:+,.0f}円</td></tr>\n'
             )
         detail_html += f"""
 <h2>{p}日ホールドアウト
   <span style="font-size:0.85rem;font-weight:400;color:#94a3b8">
-    {n_all}件 /
-    <span style="color:{pall_col}">{pnl_all:+,.0f}円</span>
+    重複除外: {cmb.get('n',0)}件 /
+    <span style="color:{cmb_pc}">{cmb.get('pnl',0):+,.0f}円</span>
   </span>
 </h2>
+<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap">
+  <div style="background:#1a2a3a;padding:10px 16px;border-radius:6px;border-left:3px solid #3498db">
+    <div style="color:#94a3b8;font-size:0.78rem">conservative</div>
+    <div style="color:{"#4ade80" if con.get("pnl",0)>=0 else "#f87171"};font-weight:700;font-size:1.05rem">{con.get("pnl",0):+,.0f}円</div>
+    <div style="color:#94a3b8;font-size:0.75rem">{con.get("n",0)}件 / 勝率{con.get("wr",0):.1f}% / PF{_pf_s(con.get("pf",0))}</div>
+  </div>
+  <div style="background:#2a1a1a;padding:10px 16px;border-radius:6px;border-left:3px solid #e74c3c">
+    <div style="color:#94a3b8;font-size:0.78rem">aggressive</div>
+    <div style="color:{"#4ade80" if agg.get("pnl",0)>=0 else "#f87171"};font-weight:700;font-size:1.05rem">{agg.get("pnl",0):+,.0f}円</div>
+    <div style="color:#94a3b8;font-size:0.75rem">{agg.get("n",0)}件 / 勝率{agg.get("wr",0):.1f}% / PF{_pf_s(agg.get("pf",0))}</div>
+  </div>
+</div>
 <table>
   <thead><tr><th style="text-align:left">BT帯</th>
     <th style="text-align:right">件数</th><th style="text-align:right">勝率</th>
@@ -528,6 +622,18 @@ tr:hover td{{background:#1a2535}}
 </style></head><body>
 <h1>ホールドアウト結果バッチ集計</h1>
 <p class="sub">集計日: {TODAY} / モード: conservative / MaxDD≤{args.max_dd}%{filter_note}</p>
+
+<h2>スクリプト別サマリー</h2>
+<table>
+  <thead><tr>
+    <th style="text-align:left">期間</th>
+    <th>WATCHLIST</th>
+    <th>conservative</th>
+    <th>aggressive</th>
+    <th style="border-left:2px solid #3b82f6">重複除外合計</th>
+  </tr></thead>
+  <tbody>{summary_rows}</tbody>
+</table>
 
 <h2>BT帯別 損益横断表</h2>
 <p style="color:#64748b;font-size:0.8rem;margin-bottom:8px">
