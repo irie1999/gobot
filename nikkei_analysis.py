@@ -44,6 +44,7 @@ _TODAY = datetime.now(JST).date()
 _SIGNALS_AVAILABLE = False
 _DEF_WORKERS = 4
 _PNL_CONFIGS: list[dict] = []
+_last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 try:
     os.environ.setdefault("TRADING_MODE", "conservative")
     import check_signals_stop     as _stop
@@ -1560,6 +1561,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     _set_sig_params("conservative")
 
     signals.sort(key=lambda x: -(x.get("rec_score") or 0))
+    _last_signals.clear()
+    _last_signals.extend(signals)
     if cfg_filter:
         signals = [s for s in signals if s.get("cfg_label") == cfg_filter]
 

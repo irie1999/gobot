@@ -216,6 +216,38 @@ for days in _PNL_PERIODS:
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
     _period_pane_htmls[days] = _na._tab5_pnl_html(days, _args.workers)
 
+# ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────
+# _last_signals はシグナルタブ生成時に _na 側で設定される
+_signal_stocks: list[tuple] = []
+_seen_sym: set = set()
+for _sig in _na._last_signals:
+    _s = _sig.get("symbol", "")
+    if _s and _s not in _seen_sym:
+        _seen_sym.add(_s)
+        _signal_stocks.append((_s, _sig.get("name", ""), _sig.get("rec_score") or 0))
+
+_sym_tab_nav   = ""
+_sym_tab_panes = ""
+for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
+    _tid     = f"sym_{_sym.replace('.','_')}"
+    _active  = "active" if _i == 0 else ""
+    _display = "block"  if _i == 0 else "none"
+    _short   = _sname[:8] if len(_sname) > 8 else _sname
+    _sym_tab_nav += (
+        f'<button class="sym-tab-btn {_active}" onclick="switchSymTab(\'{_tid}\')">'
+        f'<span style="font-size:0.8rem;font-weight:700">{_sym}</span>'
+        f'<br><span style="font-size:0.68rem;color:#94a3b8">{_short}</span>'
+        f'<br><span style="font-size:0.7rem;color:#fbbf24">BT:{_bt}</span>'
+        f'</button>\n'
+    )
+    _na._PNL_CONFIGS[:] = _all_configs
+    print(f"銘柄詳細生成中: {_sym} {_sname}...", flush=True)
+    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym])
+    _sym_tab_panes += (
+        f'<div id="{_tid}" class="sym-tab-pane" style="display:{_display}">'
+        f'{_sym_pnl}</div>\n'
+    )
+
 # 後片付け
 _na._PNL_CONFIGS[:] = _all_configs
 
@@ -263,6 +295,21 @@ _extra_css = """
 .ho-period-btn:hover { color:#e2e8f0; border-color:#64748b; }
 .ho-period-btn.active { background:#3b82f6; color:#fff;
   border-color:#3b82f6; font-weight:700; }
+
+/* 銘柄別タブ */
+.sym-tab-nav {
+  display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 16px;
+  padding:10px; background:#0f172a; border-radius:8px;
+}
+.sym-tab-btn {
+  padding:6px 14px; background:#1e293b; border:1px solid #334155;
+  color:#e2e8f0; border-radius:6px; cursor:pointer;
+  font-size:0.82rem; text-align:center; line-height:1.5;
+  transition:all .2s; min-width:90px;
+}
+.sym-tab-btn:hover { background:#263349; border-color:#64748b; }
+.sym-tab-btn.active { background:#1d4ed8; border-color:#3b82f6; }
+.sym-tab-pane { display:none; }
 """
 
 _extra_js = """
@@ -276,6 +323,12 @@ function switchHoPeriod(days) {
   document.querySelectorAll('.ho-period-pane').forEach(p => p.style.display = 'none');
   document.querySelectorAll('.ho-period-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('hd' + days).style.display = 'block';
+  event.target.classList.add('active');
+}
+function switchSymTab(tabId) {
+  document.querySelectorAll('.sym-tab-pane').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.sym-tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(tabId).style.display = 'block';
   event.target.classList.add('active');
 }
 """
@@ -302,6 +355,7 @@ html = f"""<!DOCTYPE html>
 <div class="ho-outer-nav">
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
+  <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -314,6 +368,16 @@ html = f"""<!DOCTYPE html>
     {_period_btns}
   </div>
   {_period_panes}
+</div>
+
+<div id="ho-sym" class="ho-outer-pane">
+  <p style="color:#94a3b8;font-size:0.82rem;margin:8px 0 0">
+    本日シグナルが出た {len(_signal_stocks)} 銘柄の過去365日取引履歴（BTスコア降順）
+  </p>
+  <div class="sym-tab-nav">
+{_sym_tab_nav}
+  </div>
+{_sym_tab_panes}
 </div>
 
 <script>
