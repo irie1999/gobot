@@ -310,19 +310,19 @@ function switchHoTab(tab) {
   document.querySelectorAll('.ho-outer-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.ho-outer-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('ho-' + tab).classList.add('active');
-  event.target.classList.add('active');
+  (event.target.closest('.ho-outer-btn') || event.target).classList.add('active');
 }
 function switchHoPeriod(days) {
   document.querySelectorAll('.ho-period-pane').forEach(p => p.style.display = 'none');
   document.querySelectorAll('.ho-period-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('hd' + days).style.display = 'block';
-  event.target.classList.add('active');
+  (event.target.closest('.ho-period-btn') || event.target).classList.add('active');
 }
 function switchSymTab(tabId) {
   document.querySelectorAll('.sym-tab-pane').forEach(p => p.style.display = 'none');
   document.querySelectorAll('.sym-tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(tabId).style.display = 'block';
-  event.target.classList.add('active');
+  (event.target.closest('.sym-tab-btn') || event.target).classList.add('active');
 }
 """
 
