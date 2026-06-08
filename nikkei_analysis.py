@@ -2353,6 +2353,72 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     if not sym_rows:
         sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
 
+    # ── ⑤ BT60-69 銘柄別成績（conservative限定）──
+    # conservativeラベルを含む設定のみ抽出
+    con_labels = {cfg["label"] for cfg in _PNL_CONFIGS if "conservative" in cfg.get("mode", "").lower() or "conservative" in cfg.get("label", "").lower()}
+    bt6069_con_trades = [
+        t for t in full_year_trades
+        if t.get("rec_score") is not None
+        and 60 <= t["rec_score"] < 70
+        and (t.get("label", "") in con_labels or not con_labels)
+    ]
+    sym6069_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
+                                              "strats":set(),"wf_scores":[],"rec_scores":[]})
+    for t in bt6069_con_trades:
+        k = (t["symbol"], t.get("name",""))
+        d = sym6069_agg[k]
+        d["n"]   += 1
+        d["w"]   += 1 if t["pnl"] > 0 else 0
+        d["pnl"] += t["pnl"]
+        d["gp"]  += t["pnl"] if t["pnl"] > 0 else 0
+        d["gl"]  += abs(t["pnl"]) if t["pnl"] < 0 else 0
+        d["strats"].add(t.get("strategy",""))
+        if t.get("wf_score") is not None:
+            d["wf_scores"].append(t["wf_score"])
+        if t.get("rec_score") is not None:
+            d["rec_scores"].append(t["rec_score"])
+
+    sym6069_sorted = sorted(sym6069_agg.items(), key=lambda x: x[1]["pnl"], reverse=True)
+    sym6069_rows = ""
+    for (sym, name), d in sym6069_sorted:
+        n    = d["n"]; w = d["w"]; pnl = d["pnl"]; gp = d["gp"]; gl = d["gl"]
+        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wr_v = w / n * 100 if n else 0
+        spc  = "profit" if pnl >= 0 else "loss"
+        strat_tags = " ".join(
+            f'<span class="tag tag-{s.lower()}" style="font-size:0.7rem">{s}</span>'
+            for s in sorted(d["strats"])
+        )
+        avg_wf  = round(sum(d["wf_scores"])  / len(d["wf_scores"]))  if d["wf_scores"]  else None
+        avg_rec = round(sum(d["rec_scores"]) / len(d["rec_scores"])) if d["rec_scores"] else None
+        wf_disp  = f'<span style="color:{"#4ade80" if avg_wf and avg_wf>=70 else ("#fbbf24" if avg_wf and avg_wf>=50 else "#f87171")};font-weight:700">{avg_wf}</span>' if avg_wf is not None else '—'
+        rec_disp = f'<span style="color:{"#93c5fd"};font-weight:700">{avg_rec}</span>' if avg_rec is not None else '—'
+        # スキップ候補: 損失-1万超を赤枠、利益+3万超を緑枠
+        if pnl < -10000:
+            row_style = ' style="background:#1a0a0a;border-left:3px solid #f87171"'
+            skip_badge = '<span style="background:#f87171;color:#0f172a;font-size:0.65rem;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px">スキップ候補</span>'
+        elif pnl > 30000:
+            row_style = ' style="background:#0a1a0a;border-left:3px solid #4ade80"'
+            skip_badge = '<span style="background:#4ade80;color:#0f172a;font-size:0.65rem;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px">優先</span>'
+        else:
+            row_style = ""
+            skip_badge = ""
+        sym6069_rows += f"""<tr{row_style}>
+  <td class="sym" style="text-align:left">{sym}{skip_badge}<br><span style="color:#64748b;font-size:0.75rem">{name}</span></td>
+  <td style="text-align:center">{strat_tags}</td>
+  <td style="text-align:center">{rec_disp}</td>
+  <td style="text-align:center">{wf_disp}</td>
+  <td style="font-weight:700">{n}</td>
+  <td style="font-weight:700">{wr_v:.1f}%</td>
+  <td style="font-weight:700">{pf_s}</td>
+  <td class="profit" style="text-align:right">+{gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right">-{gl:,.0f}円</td>
+  <td class="{spc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
+</tr>"""
+    if not sym6069_rows:
+        sym6069_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">BT60-69（conservative）の取引なし</td></tr>'
+
     # ── 取引明細テーブル ──
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     def _rhtml(reason):
@@ -2545,6 +2611,25 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     <th>損益合計</th>
   </tr></thead>
   <tbody>{sym_rows}</tbody>
+</table>
+
+<h2>⑤ BT60-69 銘柄別成績（conservative限定 / 損益降順）</h2>
+<p class="footnote" style="margin-bottom:8px">
+  BT60-69帯はconservativeのみで運用するとプラスになるが、その内訳を銘柄別に表示。<br>
+  <span style="color:#f87171">■</span>スキップ候補（損失-1万超）はWATCHLISTから除外検討。<span style="color:#4ade80">■</span>優先（利益+3万超）は積極的に取る。
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th style="color:#93c5fd">BT</th>
+    <th style="color:#60a5fa">WF</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th>
+  </tr></thead>
+  <tbody>{sym6069_rows}</tbody>
 </table>
 
 <h2>取引明細（決済日降順）</h2>
