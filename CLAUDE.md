@@ -1,14 +1,71 @@
 # gobot 逆指値シグナル運用メモ
 
 このドキュメントは Claude Code が gobot リポジトリを扱う際の前提知識です。
-主軸は **`run_signals.py` (逆指値シグナル統合レポート)** の運用・改修です。
+主軸は **`nikkei_analysis_holdout_2config.py` (ホールドアウト2設定分析レポート)** の運用・改修です。
 今後の修正は原則このファイルを起点に考えてください。
 
 ---
 
-## 1. エントリーポイント
+## 0. メイン分析ツール（最重要）
 
-**`run_signals.py`** = 日々の運用コマンド。以下を1コマンドで実行します。
+### `nikkei_analysis_holdout_2config.py` = バックテスト分析のメインコマンド
+
+ホールドアウト期間（直近N日）を除外したWF選定WATCHLISTで conservative / aggressive の
+2設定を比較分析するHTMLレポートを生成します。
+
+```
+# 標準的な使い方（ホールドアウト180日、直近180日の損益確認）
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180
+
+# 直近30日だけ確認したい場合
+python nikkei_analysis_holdout_2config.py --holdout-days 30 --days 30
+
+# 予算フィルター（60万円で100株買える銘柄のみ）
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --budget 600000
+
+# 株価上限指定
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --max-price 5000
+
+# ブラウザを開かず HTML だけ生成
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --no-browser
+
+# 並列数を増やして高速化
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --workers 8
+```
+
+**出力**: `nikkei_analysis_holdout2cfg_{N}d_{date}.html`
+
+### レポートのタブ構成
+
+| タブ | 内容 |
+|---|---|
+| タブ1 | シグナル判定（相場環境・今日使うべきスクリプト）|
+| タブ2 | トレンド期間統計 |
+| タブ3 | エントリー分析（上昇何日目に入るか）|
+| タブ5 | 損益レポート — スクリプト別サマリー / スコア別実績 / ③BT×WFクロス分析 / ④高BT銘柄別成績 / 取引明細 |
+| タブ7 | トレンド×相性バックテスト（conservative vs aggressive） |
+
+### タブ5の主要セクション（分析の核心）
+
+- **スコア別実績（② BTスコア軸）**: BTスコア帯ごとの勝率・PF・損益。BT≥60がプラスの境界線
+- **③ BT×WFクロス分析**: BT≥60の中でWFスコア帯別に分割。WFがBT内でさらに識別力を持つか確認
+- **④ 高BT銘柄別成績**: BT≥60の銘柄ごとの損益集計（損益降順）。損失の出ている特定銘柄を特定できる
+  - 赤枠 = 損失-3万超 → スキップ候補
+  - 緑枠 = 利益+5万超 → 優先銘柄
+
+### 実運用でのフィルター基準（ホールドアウト検証で確認済み）
+
+| 基準 | 内容 |
+|---|---|
+| **BTスコア≥60** | 全期間（30〜180日ホールドアウト）で一貫してプラス。最重要フィルター |
+| **conservative優先** | 中長期ではconservativeがaggressive より安定 |
+| **WFスコアは参考程度** | BTスコアの識別力の方が高い。WFのみで選ぶのは危険 |
+
+---
+
+## 1. エントリーポイント（サブコマンド）
+
+**`run_signals.py`** = 今日のシグナル確認コマンド（日々の発注判断用）。
 
 ```
 python run_signals.py                    # 全期間(365日) HTMLレポート
