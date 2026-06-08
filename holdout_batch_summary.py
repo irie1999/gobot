@@ -907,11 +907,145 @@ if not args.no_save and valid_periods:
 
     comp_tab_html = _comp_cross_html()
 
+    # ── ③ BT60-69 銘柄別詳細 HTML ───────────────────────────────────────────
+    def _bt6069_detail_html() -> str:
+        """BT60-69 の (銘柄, 戦略) 別損益表を全期間分生成する。
+        各期間ごとに損益降順で表示し、プラス/マイナスを色分け。
+        """
+        type_colors = {"高WR": "#3b82f6", "高PF": "#f59e0b", "安定": "#10b981", "取引数": "#a855f7"}
+        all_period_html = ""
+
+        for period_key in valid_periods:
+            trades_p = all_results[period_key].get("combined_trades", [])
+            band_trades = [t for t in trades_p if 60 <= (t.get("rec_score") or 0) < 70]
+            if not band_trades:
+                all_period_html += f'<h3 style="color:#94a3b8">{period_key}日 — BT60-69 データなし</h3>\n'
+                continue
+
+            # (symbol, strategy) 単位で集計
+            from collections import defaultdict
+            sym_map: dict = defaultdict(list)
+            for t in band_trades:
+                key = (t["symbol"], t.get("strategy", ""))
+                sym_map[key].append(t)
+
+            rows_data = []
+            for (sym, strat), ts in sym_map.items():
+                s = _band_stats(ts)
+                bt_type = ts[0].get("bt_type", "?")
+                avg_wr_bt = ts[0].get("avg_wr", 0)
+                avg_pf_bt = ts[0].get("avg_pf", 0)
+                stable_pts = ts[0].get("stable_pts", 0)
+                rows_data.append({
+                    "sym": sym, "strat": strat,
+                    "n": s["n"], "wr": s["wr"], "pf": s["pf"], "pnl": s["pnl"],
+                    "bt_type": bt_type,
+                    "avg_wr_bt": avg_wr_bt, "avg_pf_bt": avg_pf_bt,
+                    "stable_pts": stable_pts,
+                    "rec_score": ts[0].get("rec_score", 0),
+                })
+
+            # 損益降順ソート
+            rows_data.sort(key=lambda x: x["pnl"], reverse=True)
+            total = _band_stats(band_trades)
+
+            rows_html = ""
+            for r in rows_data:
+                pc = "#4ade80" if r["pnl"] > 0 else "#f87171"
+                pf_s = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+                mark = "✅" if r["pnl"] > 0 else "❌"
+                tc = type_colors.get(r["bt_type"], "#94a3b8")
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="font-weight:700">{r["sym"]}</td>'
+                    f'<td>{r["strat"]}</td>'
+                    f'<td style="text-align:center">'
+                    f'<span style="background:{tc}22;color:{tc};padding:1px 6px;border-radius:3px;font-size:0.75rem">'
+                    f'{r["bt_type"]}型</span></td>'
+                    f'<td style="text-align:right;color:#94a3b8;font-size:0.8rem">{r["rec_score"]}</td>'
+                    f'<td style="text-align:right;color:#94a3b8;font-size:0.8rem">'
+                    f'BT-WR:{r["avg_wr_bt"]:.0f}% PF:{r["avg_pf_bt"]:.1f}</td>'
+                    f'<td style="text-align:right">{r["n"]}</td>'
+                    f'<td style="text-align:right">{r["wr"]:.0f}%</td>'
+                    f'<td style="text-align:right">{pf_s}</td>'
+                    f'<td style="text-align:right;color:{pc};font-weight:700">{r["pnl"]:+,.0f}円</td>'
+                    f'<td style="text-align:center">{mark}</td>'
+                    f'</tr>\n'
+                )
+
+            # 合計行
+            tp = total["pnl"]; tc2 = "#4ade80" if tp >= 0 else "#f87171"
+            tpf_s = "∞" if total["pf"] == float("inf") else f"{total['pf']:.2f}"
+            rows_html += (
+                f'<tr style="border-top:2px solid #3b82f6;background:#0d1424;font-weight:700">'
+                f'<td colspan="5" style="color:#60a5fa">合計</td>'
+                f'<td style="text-align:right;color:#60a5fa">{total["n"]}</td>'
+                f'<td style="text-align:right;color:#60a5fa">{total["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:#60a5fa">{tpf_s}</td>'
+                f'<td style="text-align:right;color:{tc2};font-weight:700">{tp:+,.0f}円</td>'
+                f'<td></td></tr>\n'
+            )
+
+            # タイプ別小計
+            type_sub = ""
+            for bt_type in BT_TYPES:
+                sub = [t for t in band_trades if t.get("bt_type") == bt_type]
+                if not sub:
+                    continue
+                ss = _band_stats(sub)
+                pc2 = "#4ade80" if ss["pnl"] > 0 else "#f87171"
+                pf_ss = "∞" if ss["pf"] == float("inf") else f"{ss['pf']:.2f}"
+                ttc = type_colors.get(bt_type, "#94a3b8")
+                type_sub += (
+                    f'<span style="display:inline-block;margin-right:16px;font-size:0.82rem">'
+                    f'<span style="color:{ttc};font-weight:700">{bt_type}型</span> '
+                    f'<span style="color:{pc2}">{ss["pnl"]:+,.0f}円</span>'
+                    f' ({ss["n"]}件/{ss["wr"]:.0f}%/PF{pf_ss})</span>'
+                )
+
+            all_period_html += f"""
+<h3 style="margin-top:24px">{period_key}日ホールドアウト — BT60-69 ({len(band_trades)}件)
+  <span style="font-size:0.82rem;font-weight:400;color:{"#4ade80" if total["pnl"]>=0 else "#f87171"}">
+    合計 {total["pnl"]:+,.0f}円
+  </span>
+</h3>
+<div style="margin-bottom:8px">{type_sub}</div>
+<div style="overflow-x:auto">
+<table>
+  <thead><tr>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>タイプ</th>
+    <th style="text-align:right">BTスコア</th>
+    <th style="text-align:right">BT実績</th>
+    <th style="text-align:right">取引数</th>
+    <th style="text-align:right">勝率</th>
+    <th style="text-align:right">PF</th>
+    <th style="text-align:right">損益</th>
+    <th></th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</div>"""
+
+        return f"""
+<h2>③ BT60-69 銘柄別詳細</h2>
+<p class="footnote">
+  BT60-69 のシグナルを銘柄×戦略単位に分解。損益降順ソート。<br>
+  <b>BT実績</b> = バックテスト(365日)での勝率・PF。実際のholdout損益との乖離に注目。<br>
+  ✅ = holdoutでプラス &nbsp; ❌ = holdoutでマイナス
+</p>
+{all_period_html}"""
+
+    bt6069_tab_html = _bt6069_detail_html()
+
     # タブナビゲーション
     tab_btns = '<button class="tab-btn active" data-tab="t_summary" onclick="switchTab(\'t_summary\')">📊 サマリー</button>\n'
     tab_panes = f'<div id="t_summary" class="tab-pane active">{summary_tab_html}</div>\n'
     tab_btns  += '  <button class="tab-btn" data-tab="t_comp" onclick="switchTab(\'t_comp\')">② 構成要素</button>\n'
     tab_panes += f'<div id="t_comp" class="tab-pane">{comp_tab_html}</div>\n'
+    tab_btns  += '  <button class="tab-btn" data-tab="t_6069" onclick="switchTab(\'t_6069\')">③ BT60-69</button>\n'
+    tab_panes += f'<div id="t_6069" class="tab-pane">{bt6069_tab_html}</div>\n'
     for p in valid_periods:
         tab_id = f"t_p{p}"
         tab_btns  += f'  <button class="tab-btn" data-tab="{tab_id}" onclick="switchTab(\'{tab_id}\')">{p}日</button>\n'
