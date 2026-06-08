@@ -7,7 +7,7 @@ select_signals.py / analyze_nikkei_trend.py / analyze_trend_timing.py を1本に
   タブ1: シグナル判定    — 相場環境 + 今日使うべきスクリプト
   タブ2: トレンド期間    — 上昇/下落/横ばい期間の統計と一覧
   タブ3: エントリー分析  — 上昇何日目に入ると良いか / 生存確率
-  タブ4: シグナル一覧    — 全WATCHLISTの今日のシグナルをスコア降順表示 (--with-signals)
+  タブ4: シグナル一覧    — 全WATCHLISTの今日のシグナルをBTスコア昇順表示 (--with-signals)
   タブ5: 損益レポート    — 直近N日取引損益 (--with-pnl)
 
 Usage:
@@ -1416,7 +1416,7 @@ def _fmt_score_cell(s: dict, col: str) -> str:
 def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                        score_filter: int | None = None,
                        cfg_filter: str | None = None) -> str:
-    """タブ4: 全WATCHLISTのシグナルをスコア降順表示。target_date=None で今日。
+    """タブ4: 全WATCHLISTのシグナルをBTスコア昇順表示。target_date=None で今日。
     score_filter 指定時: そのスコアだけの成績フォーカスカードを表示。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません (check_signals_stop.py が必要)</p>'
@@ -1559,7 +1559,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 
     _set_sig_params("conservative")
 
-    signals.sort(key=lambda x: -x["score"])
+    signals.sort(key=lambda x: (x.get("rec_score") or 0))
     if cfg_filter:
         signals = [s for s in signals if s.get("cfg_label") == cfg_filter]
 
@@ -1897,9 +1897,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
     return score_section + f"""
-<h2>{sig_label} のシグナル一覧 — スコア降順 {min_note}</h2>
+<h2>{sig_label} のシグナル一覧 — BTスコア昇順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
-  全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。スコアが高い順に並んでいます。
+  全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが低い順に並んでいます。
 </p>
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">
   ※ 逆指値注文（青）= 翌日高値がこの価格以上になれば発動<br>
