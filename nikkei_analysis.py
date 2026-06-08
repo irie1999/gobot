@@ -2253,6 +2253,106 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <td class="{sapc}" style="text-align:right;font-size:0.8rem">{savg:+,.0f}円</td>
 </tr>"""
 
+    # ── ③ BT×WF クロス分析 (BT≥60内でWFスコア帯別比較) ──
+    bt60_trades = [t for t in full_year_trades if (t.get("rec_score") or 0) >= 60]
+    wf_cross_bands = [
+        (70, 101, "WF70以上",  "#4ade80"),
+        (50,  70, "WF50-69",   "#fbbf24"),
+        (0,   50, "WF0-49",    "#f87171"),
+        (None, None, "WFなし", "#94a3b8"),
+    ]
+    cross_rows = ""
+    for wlo, whi, wlbl, wcol in wf_cross_bands:
+        if wlo is None:
+            band = [t for t in bt60_trades if t.get("wf_score") is None]
+        else:
+            band = [t for t in bt60_trades
+                    if t.get("wf_score") is not None and wlo <= t["wf_score"] < whi]
+        if not band:
+            continue
+        bn, bw, bpnl, bgp, bgl, bpf, bavg = _band_stats(band)
+        bpf_s = "∞" if bpf == float("inf") else f"{bpf:.2f}"
+        bpc   = "profit" if bpnl >= 0 else "loss"
+        bapc  = "profit" if bavg >= 0 else "loss"
+        cross_rows += f"""<tr>
+  <td style="color:{wcol};font-weight:700;text-align:left">{wlbl}</td>
+  <td style="font-weight:700">{bn}</td>
+  <td style="font-weight:700">{bw/bn*100:.1f}%</td>
+  <td style="font-weight:700">{bpf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{bgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{bgl:,.0f}円</td>
+  <td class="{bpc}"  style="text-align:right;font-weight:700">{bpnl:+,.0f}円</td>
+  <td class="{bapc}" style="text-align:right;font-weight:700">{bavg:+,.0f}円</td>
+</tr>"""
+
+    # BT全体行（BT≥60 合計）
+    if bt60_trades:
+        an, aw, apnl, agp, agl, apf, aavg = _band_stats(bt60_trades)
+        apf_s = "∞" if apf == float("inf") else f"{apf:.2f}"
+        apc2  = "profit" if apnl >= 0 else "loss"
+        cross_rows += f"""<tr style="border-top:2px solid #475569;background:#0d1424">
+  <td style="color:#60a5fa;font-weight:700;text-align:left">BT≥60 合計</td>
+  <td style="color:#60a5fa;font-weight:700">{an}</td>
+  <td style="color:#60a5fa;font-weight:700">{aw/an*100:.1f}%</td>
+  <td style="color:#60a5fa;font-weight:700">{apf_s}</td>
+  <td class="profit" style="text-align:right;color:#60a5fa;font-weight:700">+{agp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;color:#60a5fa;font-weight:700">-{agl:,.0f}円</td>
+  <td class="{apc2}" style="text-align:right;color:#60a5fa;font-weight:700">{apnl:+,.0f}円</td>
+  <td style="text-align:right;color:#60a5fa;font-weight:700">{aavg:+,.0f}円</td>
+</tr>"""
+
+    # ── ④ 高BT銘柄別成績 (BT≥60 / rec_scoreで選定・per-symbol) ──
+    sym_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
+                                          "strats":set(),"wf_scores":[],"rec_scores":[]})
+    for t in bt60_trades:
+        k = (t["symbol"], t.get("name",""))
+        d = sym_agg[k]
+        d["n"]   += 1
+        d["w"]   += 1 if t["pnl"] > 0 else 0
+        d["pnl"] += t["pnl"]
+        d["gp"]  += t["pnl"] if t["pnl"] > 0 else 0
+        d["gl"]  += abs(t["pnl"]) if t["pnl"] < 0 else 0
+        d["strats"].add(t.get("strategy",""))
+        if t.get("wf_score") is not None:
+            d["wf_scores"].append(t["wf_score"])
+        if t.get("rec_score") is not None:
+            d["rec_scores"].append(t["rec_score"])
+
+    # 損益降順でソート
+    sym_sorted = sorted(sym_agg.items(), key=lambda x: x[1]["pnl"], reverse=True)
+    sym_rows = ""
+    for (sym, name), d in sym_sorted:
+        n    = d["n"]; w = d["w"]; pnl = d["pnl"]; gp = d["gp"]; gl = d["gl"]
+        pf   = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+        wr_v = w / n * 100 if n else 0
+        spc  = "profit" if pnl >= 0 else "loss"
+        strat_tags = " ".join(
+            f'<span class="tag tag-{s.lower()}" style="font-size:0.7rem">{s}</span>'
+            for s in sorted(d["strats"])
+        )
+        avg_wf  = round(sum(d["wf_scores"])  / len(d["wf_scores"]))  if d["wf_scores"]  else None
+        avg_rec = round(sum(d["rec_scores"]) / len(d["rec_scores"])) if d["rec_scores"] else None
+        wf_disp  = f'<span style="color:{"#4ade80" if avg_wf and avg_wf>=70 else ("#fbbf24" if avg_wf and avg_wf>=50 else "#f87171")};font-weight:700">{avg_wf}</span>' if avg_wf is not None else '—'
+        rec_disp = f'<span style="color:{"#4ade80" if avg_rec and avg_rec>=60 else ("#fbbf24" if avg_rec and avg_rec>=40 else "#f87171")};font-weight:700">{avg_rec}</span>' if avg_rec is not None else '—'
+        # 赤枠: 損失が大きい銘柄を強調
+        row_style = ' style="background:#1a0a0a;border-left:3px solid #f87171"' if pnl < -30000 else (
+                    ' style="background:#0a1a0a;border-left:3px solid #4ade80"' if pnl > 50000 else "")
+        sym_rows += f"""<tr{row_style}>
+  <td class="sym" style="text-align:left">{sym}<br><span style="color:#64748b;font-size:0.75rem">{name}</span></td>
+  <td style="text-align:center">{strat_tags}</td>
+  <td style="text-align:center">{rec_disp}</td>
+  <td style="text-align:center">{wf_disp}</td>
+  <td style="font-weight:700">{n}</td>
+  <td style="font-weight:700">{wr_v:.1f}%</td>
+  <td style="font-weight:700">{pf_s}</td>
+  <td class="profit" style="text-align:right">+{gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right">-{gl:,.0f}円</td>
+  <td class="{spc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
+</tr>"""
+    if not sym_rows:
+        sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
+
     # ── 取引明細テーブル ──
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     def _rhtml(reason):
@@ -2414,6 +2514,38 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{bt_fine_rows}</tbody>
 </table>
 <p class="footnote">WF=ウォークフォワードスコア（銘柄選定基準・高いほど過去フォールドで安定）／ BT=直近バックテストスコア（最近の機能度・低いと最近機能していない）</p>
+
+<h2>③ BT×WF クロス分析（BT≥60内でWFスコア帯別 / 365日全取引）</h2>
+<p class="footnote" style="margin-bottom:8px">BT≥60の銘柄についてWFスコア帯ごとに分割。WFスコアがBT≥60の中で追加の識別力を持つか確認。</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">WFスコア帯</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{"<tr><td colspan='8' style='text-align:center;color:#64748b;padding:12px'>BT≥60の取引なし</td></tr>" if not cross_rows else cross_rows}</tbody>
+</table>
+
+<h2>④ 高BT銘柄別成績（BT≥60 / 損益降順 / 365日全取引）</h2>
+<p class="footnote" style="margin-bottom:8px">
+  BTスコア≥60の銘柄ごとの損益集計。<span style="color:#f87171">■</span> = 損失-3万超、<span style="color:#4ade80">■</span> = 利益+5万超。<br>
+  BT・WFは各取引のスコアの平均値。損失が出ている高BT銘柄を特定し、スキップ候補の検討に使う。
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>BT</th>
+    <th>WF</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th>
+  </tr></thead>
+  <tbody>{sym_rows}</tbody>
+</table>
 
 <h2>取引明細（決済日降順）</h2>
 <table>
