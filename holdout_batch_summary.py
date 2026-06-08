@@ -258,6 +258,51 @@ def _band_stats(trades: list[dict]) -> dict:
             "pf": pf, "pnl": pnl, "gp": gp, "gl": gl}
 
 
+# BTスコア構成要素タイプ (wr_n > pf_n → 高WR型、pf_n > wr_n → 高PF型、tie → 安定/取引数型)
+BT_TYPES = ["高WR", "高PF", "安定", "取引数"]
+
+
+def _decompose_score(pr: dict) -> dict:
+    """BTスコアの4構成要素を計算して返す。
+    戻り値: wr_pts, pf_pts, stable_pts, trades_pts, avg_wr, avg_pf, bt_type
+    """
+    results = [r for r in pr.values() if r and r.get("trades", 0) > 0]
+    if not results:
+        return {"wr_pts": 0, "pf_pts": 0, "stable_pts": 0, "trades_pts": 0,
+                "avg_wr": 0.0, "avg_pf": 0.0, "stable": 0.0, "t_trades": 0,
+                "bt_type": "不明"}
+
+    avg_wr   = sum(r["win_rate"] for r in results) / len(results)
+    avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10)
+                   for r in results) / len(results)
+    stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
+    t_trades = sum(r["trades"] for r in results)
+
+    wr_pts     = avg_wr * 0.4          # max 40pts
+    pf_pts     = (avg_pf / 10) * 30   # max 30pts
+    stable_pts = stable * 20           # max 20pts
+    trades_pts = min(t_trades / 20, 1) * 10  # max 10pts
+
+    # 正規化 (各コンポーネントの最大値で割る)
+    wr_n     = wr_pts / 40
+    pf_n     = pf_pts / 30
+    stable_n = stable_pts / 20
+    trades_n = trades_pts / 10
+
+    # 支配的なコンポーネント = スコアへの「相対的な貢献度」が最大
+    bt_type = max(
+        [("高WR", wr_n), ("高PF", pf_n), ("安定", stable_n), ("取引数", trades_n)],
+        key=lambda x: x[1]
+    )[0]
+
+    return {
+        "wr_pts": wr_pts, "pf_pts": pf_pts, "stable_pts": stable_pts, "trades_pts": trades_pts,
+        "avg_wr": avg_wr, "avg_pf": avg_pf, "stable": stable, "t_trades": t_trades,
+        "wr_n": wr_n, "pf_n": pf_n, "stable_n": stable_n, "trades_n": trades_n,
+        "bt_type": bt_type,
+    }
+
+
 def _collect_trades(stop_wl: list, brk_wl: list,
                     holdout_days: int, mode: str = "conservative") -> list[dict]:
     """バックテスト実行 → holdout期間内のトレードにBTスコア・modeを付けて返す。"""
@@ -284,6 +329,7 @@ def _collect_trades(stop_wl: list, brk_wl: list,
         if not pr: continue
         trade_log    = pr[max(pr.keys())].get("trade_log", [])
         rec_score, _ = _stop.calc_recommend_score(pr)
+        comp         = _decompose_score(pr)
 
         for t in trade_log:
             if t.get("reason") == "発注中": continue
@@ -295,9 +341,18 @@ def _collect_trades(stop_wl: list, brk_wl: list,
             key = (sym, strat, signal_dt)
             if key in seen: continue
             seen.add(key)
-            trades.append({"symbol": sym, "strategy": strat, "mode": mode,
-                           "rec_score": rec_score, "pnl": t.get("pnl", 0),
-                           "signal_dt": signal_dt})
+            trades.append({
+                "symbol": sym, "strategy": strat, "mode": mode,
+                "rec_score": rec_score, "pnl": t.get("pnl", 0),
+                "signal_dt": signal_dt,
+                "bt_type":    comp["bt_type"],
+                "wr_pts":     comp["wr_pts"],
+                "pf_pts":     comp["pf_pts"],
+                "stable_pts": comp["stable_pts"],
+                "trades_pts": comp["trades_pts"],
+                "avg_wr":     comp["avg_wr"],
+                "avg_pf":     comp["avg_pf"],
+            })
     return trades
 
 
@@ -369,12 +424,13 @@ for holdout_days in periods:
     band_results["ALL"] = _band_stats(combined_trades) if combined_trades else _empty_stats()
 
     all_results[holdout_days] = {
-        "bands":    band_results,
-        "con":      _band_stats(con_trades)      if con_trades      else _empty_stats(),
-        "agg":      _band_stats(agg_trades)      if agg_trades      else _empty_stats(),
-        "combined": _band_stats(combined_trades) if combined_trades else _empty_stats(),
-        "con_wl":   (len(stop_con), len(brk_con)),
-        "agg_wl":   (len(stop_agg), len(brk_agg)),
+        "bands":           band_results,
+        "con":             _band_stats(con_trades)      if con_trades      else _empty_stats(),
+        "agg":             _band_stats(agg_trades)      if agg_trades      else _empty_stats(),
+        "combined":        _band_stats(combined_trades) if combined_trades else _empty_stats(),
+        "con_wl":          (len(stop_con), len(brk_con)),
+        "agg_wl":          (len(stop_agg), len(brk_agg)),
+        "combined_trades": list(combined_trades),  # 構成要素分析用
     }
 
     # 損益タブHTML生成 (_na._tab5_pnl_html を使って nikkei_analysis と同じ内容を生成)
@@ -464,6 +520,39 @@ for p in valid_periods:
     s60 = bands.get("BT60+", {}); n60 = s60.get("n", 0)
     if n60:
         print(f"  {'BT60+ 計':<10} {n60:>4} {s60['wr']:>5.1f}% {_pf_s(s60['pf']):>5} {s60['pnl']:>+13,.0f}円")
+
+# ── ② BTスコア構成要素別分析（コンソール）────────────────────────────────────
+print(f"\n\n{'='*80}")
+print("  ② BTスコア構成要素別分析（BT60+ 限定）")
+print(f"{'='*80}")
+type_colors_label = {"高WR": "WR主導", "高PF": "PF主導", "安定": "安定主導", "取引数": "取引主導"}
+col_w2 = 18
+print(f"\n{'タイプ':<10}", end="")
+for p in valid_periods:
+    print(f"  {str(p)+'d':>{col_w2}}", end="")
+print()
+print("-" * (10 + len(valid_periods) * (col_w2 + 2)))
+for bt_type in BT_TYPES:
+    print(f"{bt_type+'型':<10}", end="")
+    for p in valid_periods:
+        trades_p = all_results[p].get("combined_trades", [])
+        subset = [t for t in trades_p
+                  if (t.get("rec_score") or 0) >= 60 and t.get("bt_type") == bt_type]
+        s = _band_stats(subset) if subset else _empty_stats()
+        n = s.get("n", 0)
+        cell = f"{s['pnl']:+,.0f}円({n}件)" if n else "—"
+        print(f"  {cell:>{col_w2}}", end="")
+    print()
+
+print(f"\n--- 高WR型 vs 高PF型 比較（BT60+）---")
+print(f"{'期間':<8}  {'高WR型':>20}  {'高PF型':>20}")
+for p in valid_periods:
+    trades_p = all_results[p].get("combined_trades", [])
+    bt60  = [t for t in trades_p if (t.get("rec_score") or 0) >= 60]
+    wr_g  = _band_stats([t for t in bt60 if (t.get("wr_pts",0)/40) >= (t.get("pf_pts",0)/30)])
+    pf_g  = _band_stats([t for t in bt60 if (t.get("wr_pts",0)/40) <  (t.get("pf_pts",0)/30)])
+    def _s(s): return f"{s['pnl']:+,.0f}円/{s['n']}件/{s['wr']:.0f}%" if s.get("n") else "—"
+    print(f"  {p:>3}d    {_s(wr_g):>20}  {_s(pf_g):>20}")
 
 
 # ── CSV 保存 ────────────────────────────────────────────────────────────────
@@ -677,9 +766,152 @@ if not args.no_save and valid_periods:
   conservative優先。BT0-29は最大損失源のため除外推奨。
 </p>"""
 
+    # ── ② BTスコア構成要素分析 HTML ───────────────────────────────────────────
+    def _comp_cross_html() -> str:
+        """BT帯 × タイプ × 期間 のクロス集計HTML。"""
+        type_colors = {"高WR": "#3b82f6", "高PF": "#f59e0b", "安定": "#10b981", "取引数": "#a855f7"}
+
+        # 全期間を横断して「BT60+ × タイプ別 × 期間」の表を作る
+        # Row = タイプ、Col = 期間
+        type_cross_rows = ""
+        for bt_type in BT_TYPES:
+            col = type_colors.get(bt_type, "#94a3b8")
+            type_cross_rows += f'<tr><td style="color:{col};font-weight:700">{bt_type}型</td>\n'
+            for p in valid_periods:
+                trades_p = all_results[p].get("combined_trades", [])
+                subset = [t for t in trades_p
+                          if (t.get("rec_score") or 0) >= 60 and t.get("bt_type") == bt_type]
+                s = _band_stats(subset) if subset else _empty_stats()
+                n = s.get("n", 0)
+                pnl = s.get("pnl", 0)
+                pf_v = s.get("pf", 0)
+                if n == 0:
+                    type_cross_rows += '<td style="color:#475569;text-align:center">—</td>'
+                else:
+                    pc = "#4ade80" if pnl > 0 else "#f87171"
+                    pf_s = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    type_cross_rows += (
+                        f'<td style="text-align:right">'
+                        f'<span style="color:{pc};font-weight:700">{pnl:+,.0f}円</span>'
+                        f'<br><span style="color:#94a3b8;font-size:0.72rem">{s["wr"]:.0f}%/{n}件/PF{pf_s}</span>'
+                        f'</td>'
+                    )
+            type_cross_rows += "</tr>\n"
+
+        # BT帯 × タイプ の詳細表（最新180d期間）
+        bt_type_detail = ""
+        for period_key in valid_periods:
+            trades_p = all_results[period_key].get("combined_trades", [])
+            if not trades_p:
+                continue
+            bt_type_detail += f'<h3 style="margin-top:20px;color:#94a3b8">{period_key}日ホールドアウト</h3>\n'
+            bt_type_detail += '<table>\n<thead><tr>'
+            bt_type_detail += '<th style="text-align:left">BT帯</th>'
+            for bt_type in BT_TYPES:
+                col = type_colors.get(bt_type, "#94a3b8")
+                bt_type_detail += f'<th style="color:{col}">{bt_type}型</th>'
+            bt_type_detail += '</tr></thead>\n<tbody>\n'
+
+            for lo, hi, lbl in [(60, 70, "60-69"), (70, 80, "70-79"), (80, 101, "80-100"), (60, 101, "BT60+")]:
+                is_summary = (lo == 60 and hi == 101)
+                row_style = ' style="border-top:2px solid #3b82f6;background:#0d1424"' if is_summary else ""
+                lbl_style = 'color:#60a5fa;font-weight:700' if is_summary else 'font-weight:700'
+                bt_type_detail += f'<tr{row_style}><td style="{lbl_style}">{lbl}</td>'
+                band_trades = [t for t in trades_p
+                               if (t.get("rec_score") or 0) >= lo and (t.get("rec_score") or 0) < hi]
+                for bt_type in BT_TYPES:
+                    subset = [t for t in band_trades if t.get("bt_type") == bt_type]
+                    s = _band_stats(subset) if subset else _empty_stats()
+                    n = s.get("n", 0)
+                    if n == 0:
+                        bt_type_detail += '<td style="color:#475569;text-align:center">—</td>'
+                    else:
+                        pnl = s.get("pnl", 0)
+                        pf_v = s.get("pf", 0)
+                        pc = "#4ade80" if pnl > 0 else "#f87171"
+                        pf_s = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                        col = type_colors.get(bt_type, "#94a3b8")
+                        bt_type_detail += (
+                            f'<td style="text-align:right">'
+                            f'<span style="color:{pc};font-weight:700">{pnl:+,.0f}円</span>'
+                            f'<br><span style="color:#94a3b8;font-size:0.72rem">'
+                            f'{s["wr"]:.0f}%/{n}件/PF{pf_s}</span></td>'
+                        )
+                bt_type_detail += '</tr>\n'
+            bt_type_detail += '</tbody></table>\n'
+
+        # WR vs PF 比較（BT60+限定）
+        wr_vs_pf_rows = ""
+        labels = [("高WR型", "WR比率 ≥ PF比率"), ("高PF型", "PF比率 > WR比率")]
+        for period_key in valid_periods:
+            trades_p = all_results[period_key].get("combined_trades", [])
+            bt60 = [t for t in trades_p if (t.get("rec_score") or 0) >= 60]
+            wr_grp  = [t for t in bt60 if (t.get("wr_pts", 0)/40) >= (t.get("pf_pts", 0)/30)]
+            pf_grp  = [t for t in bt60 if (t.get("wr_pts", 0)/40) <  (t.get("pf_pts", 0)/30)]
+            s_wr = _band_stats(wr_grp) if wr_grp else _empty_stats()
+            s_pf = _band_stats(pf_grp) if pf_grp else _empty_stats()
+
+            def _mini(s: dict, c: str) -> str:
+                n = s.get("n", 0)
+                if n == 0: return "—"
+                pc = "#4ade80" if s["pnl"] > 0 else "#f87171"
+                pf_s = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+                return f'<span style="color:{pc};font-weight:700">{s["pnl"]:+,.0f}円</span><br><span style="color:#94a3b8;font-size:0.72rem">{s["wr"]:.0f}%/{n}件/PF{pf_s}</span>'
+
+            wr_vs_pf_rows += (
+                f'<tr><td style="color:#60a5fa;font-weight:700">{period_key}d</td>'
+                f'<td style="text-align:right">{_mini(s_wr, "#3b82f6")}</td>'
+                f'<td style="text-align:right">{_mini(s_pf, "#f59e0b")}</td></tr>\n'
+            )
+
+        th_p = "".join(f'<th>{p}d</th>' for p in valid_periods)
+        return f"""
+<h2>② BTスコア構成要素別分析</h2>
+<p class="footnote">
+  BTスコア = 勝率(max40pt) + PF(max30pt) + 安定性(max20pt) + 取引数(max10pt)。
+  同じスコアでも「勝率主導」か「PF主導」かで実際の損益が異なる可能性を検証。<br>
+  <b>タイプ判定</b>: 各要素を最大値で正規化し、最も高い要素を「支配型」とする。
+  例: wr_pts/40 = 0.8 / pf_pts/30 = 0.5 → 高WR型
+</p>
+
+<h3>BT60+ × タイプ別 損益（全期間横断）</h3>
+<div style="overflow-x:auto">
+<table>
+  <thead><tr>
+    <th style="text-align:left">タイプ</th>{th_p}
+  </tr></thead>
+  <tbody>{type_cross_rows}</tbody>
+</table>
+</div>
+
+<h3>高WR型 vs 高PF型（BT60+ 限定 / WR比率 vs PF比率）</h3>
+<p class="footnote">
+  「高WR型」= wr_pts/40 ≥ pf_pts/30。「高PF型」= pf_pts/30 > wr_pts/40。<br>
+  ユーザーの問い「勝率高め・PF低め vs PF高め・取引数少」に直接対応する分類。
+</p>
+<table>
+  <thead><tr>
+    <th>期間</th>
+    <th style="color:#3b82f6">高WR型</th>
+    <th style="color:#f59e0b">高PF型</th>
+  </tr></thead>
+  <tbody>{wr_vs_pf_rows}</tbody>
+</table>
+
+<h3>BT帯 × タイプ別 詳細（期間別）</h3>
+{bt_type_detail}
+
+<p class="footnote" style="margin-top:16px">
+  ※ 「安定型」= 安定性(全期間プラス率)が最も高い銘柄。「取引数型」= 取引回数が多く安定型・WR/PF型ではない銘柄。
+</p>"""
+
+    comp_tab_html = _comp_cross_html()
+
     # タブナビゲーション
     tab_btns = '<button class="tab-btn active" data-tab="t_summary" onclick="switchTab(\'t_summary\')">📊 サマリー</button>\n'
     tab_panes = f'<div id="t_summary" class="tab-pane active">{summary_tab_html}</div>\n'
+    tab_btns  += '  <button class="tab-btn" data-tab="t_comp" onclick="switchTab(\'t_comp\')">② 構成要素</button>\n'
+    tab_panes += f'<div id="t_comp" class="tab-pane">{comp_tab_html}</div>\n'
     for p in valid_periods:
         tab_id = f"t_p{p}"
         tab_btns  += f'  <button class="tab-btn" data-tab="{tab_id}" onclick="switchTab(\'{tab_id}\')">{p}日</button>\n'
