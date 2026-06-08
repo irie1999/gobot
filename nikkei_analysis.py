@@ -2353,7 +2353,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     if not sym_rows:
         sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
 
-    # ── ⑤ BT60-69 銘柄別成績（conservative限定）──
+    # ── ⑤ BT60-69 × WFクロス + 銘柄別（conservative限定）──
     # conservativeラベルを含む設定のみ抽出
     con_labels = {cfg["label"] for cfg in _PNL_CONFIGS if "conservative" in cfg.get("mode", "").lower() or "conservative" in cfg.get("label", "").lower()}
     bt6069_con_trades = [
@@ -2362,6 +2362,59 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         and 60 <= t["rec_score"] < 70
         and (t.get("label", "") in con_labels or not con_labels)
     ]
+
+    # WFクロス分析 (BT60-69 conservative)
+    wf6069_rows = ""
+    for wlo, whi, wlbl, wcol in [
+        (70, 101, "WF70以上",  "#4ade80"),
+        (50,  70, "WF50-69",   "#fbbf24"),
+        (0,   50, "WF0-49",    "#f87171"),
+        (None, None, "WFなし", "#94a3b8"),
+    ]:
+        if wlo is None:
+            band = [t for t in bt6069_con_trades if t.get("wf_score") is None]
+        else:
+            band = [t for t in bt6069_con_trades
+                    if t.get("wf_score") is not None and wlo <= t["wf_score"] < whi]
+        if not band:
+            continue
+        bn, bw, bpnl, bgp, bgl, bpf, bavg, _, _ = _band_stats(band)
+        bpf_s = "∞" if bpf == float("inf") else f"{bpf:.2f}"
+        bpc   = "profit" if bpnl >= 0 else "loss"
+        bapc  = "profit" if bavg >= 0 else "loss"
+        verdict = (
+            '<span style="background:#4ade80;color:#0f172a;font-size:0.65rem;'
+            'font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px">投資対象</span>'
+            if bpnl >= 0 else
+            '<span style="background:#f87171;color:#0f172a;font-size:0.65rem;'
+            'font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px">スキップ</span>'
+        )
+        wf6069_rows += f"""<tr>
+  <td style="color:{wcol};font-weight:700;text-align:left">{wlbl}{verdict}</td>
+  <td style="font-weight:700">{bn}</td>
+  <td style="font-weight:700">{bw/bn*100:.1f}%</td>
+  <td style="font-weight:700">{bpf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{bgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{bgl:,.0f}円</td>
+  <td class="{bpc}"  style="text-align:right;font-weight:700">{bpnl:+,.0f}円</td>
+  <td class="{bapc}" style="text-align:right;font-weight:700">{bavg:+,.0f}円</td>
+</tr>"""
+    if bt6069_con_trades:
+        tn, tw, tpnl, tgp, tgl, tpf, tavg, _, _ = _band_stats(bt6069_con_trades)
+        tpf_s = "∞" if tpf == float("inf") else f"{tpf:.2f}"
+        tpc   = "profit" if tpnl >= 0 else "loss"
+        wf6069_rows += f"""<tr style="border-top:2px solid #475569;background:#0d1424">
+  <td style="color:#93c5fd;font-weight:700;text-align:left">BT60-69 con 合計</td>
+  <td style="color:#93c5fd;font-weight:700">{tn}</td>
+  <td style="color:#93c5fd;font-weight:700">{tw/tn*100:.1f}%</td>
+  <td style="color:#93c5fd;font-weight:700">{tpf_s}</td>
+  <td class="profit" style="text-align:right;color:#93c5fd;font-weight:700">+{tgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;color:#93c5fd;font-weight:700">-{tgl:,.0f}円</td>
+  <td class="{tpc}"  style="text-align:right;color:#93c5fd;font-weight:700">{tpnl:+,.0f}円</td>
+  <td style="text-align:right;color:#93c5fd;font-weight:700">{tavg:+,.0f}円</td>
+</tr>"""
+    if not wf6069_rows:
+        wf6069_rows = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:12px">BT60-69（conservative）の取引なし</td></tr>'
     sym6069_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
                                               "strats":set(),"wf_scores":[],"rec_scores":[]})
     for t in bt6069_con_trades:
@@ -2613,7 +2666,26 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{sym_rows}</tbody>
 </table>
 
-<h2>⑤ BT60-69 銘柄別成績（conservative限定 / 損益降順）</h2>
+<h2>⑤ BT60-69 × WFクロス分析（conservative限定）</h2>
+<p class="footnote" style="margin-bottom:8px">
+  BT60代はconservativeのみで運用するとプラス。さらにWFスコアで絞り込めるか検証。<br>
+  <span style="background:#4ade80;color:#0f172a;font-size:0.65rem;font-weight:700;padding:1px 6px;border-radius:3px">投資対象</span>
+  = そのWF帯はプラス圏 &nbsp;
+  <span style="background:#f87171;color:#0f172a;font-size:0.65rem;font-weight:700;padding:1px 6px;border-radius:3px">スキップ</span>
+  = そのWF帯はマイナス圏
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">WFスコア帯</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{wf6069_rows}</tbody>
+</table>
+
+<h2 style="margin-top:20px">⑤ BT60-69 銘柄別成績（conservative限定 / 損益降順）</h2>
 <p class="footnote" style="margin-bottom:8px">
   BT60-69帯はconservativeのみで運用するとプラスになるが、その内訳を銘柄別に表示。<br>
   <span style="color:#f87171">■</span>スキップ候補（損失-1万超）はWATCHLISTから除外検討。<span style="color:#4ade80">■</span>優先（利益+3万超）は積極的に取る。
