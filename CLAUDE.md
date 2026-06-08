@@ -720,3 +720,46 @@ python forward_test.py --report --aggressive   # aggressive 実績
 ```
 
 実運用のどちらが優秀かは **バックテストではなく フォワードテストの実績** で判断してください。
+
+---
+
+## 16. BTスコア改修 TODO（未実装・要リマインド）
+
+### 16.1 現状の暫定対応（実装済み）
+
+`score_speed_patch.py` — import するだけで BTスコアに速度ボーナス最大+10点を追加。
+既存コードを変更せずモンキーパッチで適用。
+
+```python
+import score_speed_patch  # check_signals_stop/breakout の calc_recommend_score を差し替える
+```
+
+速度ボーナス = `max(0, 1 - avg_target_days / 15) × 10点`
+
+### 16.2 将来の抜本改修（未実装）
+
+ユーザーの要望: BTスコア・WFスコア・安定型優先・目標達成速度を全て正しく反映した銘柄選定。
+
+**設計方針:**
+1. **BTスコア刷新** — 年率期待値ベースに変更
+   ```
+   年率期待値 = (勝率×平均利益 - 負け率×平均損失) / 平均保有日数 × 250日
+   ```
+   これにより勝率・PF・速さを1本の指標に統合できる。
+
+2. **安定型をフィルター条件化** — スコア加算ではなく選定の前提条件に
+   ```
+   安定性スコア ≥ 閾値 の銘柄のみを選定対象にする（スコア化しない）
+   ```
+
+3. **scan_walkforward.py の composite_score** — 年率期待値ベースに変更
+
+4. **build_watchlist.py** — `--min-stability` オプション追加
+
+**変更ファイル:**
+- `backtest_limit_entry.py` — `avg_target_days`, `avg_win_pnl`, `avg_loss_pnl` を返り値に追加
+- `check_signals_stop.py` / `check_signals_breakout.py` — `calc_recommend_score` 刷新
+- `scan_walkforward.py` — `composite_score` 変更、CSVカラム追加
+- `build_watchlist.py` — `--min-stability` オプション追加
+
+**注意:** 変更後は過去CSVのスコアと直接比較不可。`scan_walkforward.py` の再実行が必要。
