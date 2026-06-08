@@ -71,6 +71,23 @@ _AGG_BRK  = _copy.deepcopy(_brk.STRATEGY_PARAMS)
 os.environ["TRADING_MODE"] = "conservative"
 _importlib.reload(_stop); _importlib.reload(_brk)
 
+# nikkei_analysis をロード (_tab5_pnl_html を再利用するため)
+# WATCHLIST を保持するために reload ガードを設定
+_stop.WATCHLIST = []; _brk.WATCHLIST = []
+_orig_reload_guard = _importlib.reload
+def _guard_reload(module):
+    result = _orig_reload_guard(module)
+    if getattr(module, "__name__", "") == "check_signals_stop":
+        result.WATCHLIST  = list(_stop.WATCHLIST)
+        result._WF_SCORES = dict(getattr(_stop, "_WF_SCORES", {}))
+    elif getattr(module, "__name__", "") == "check_signals_breakout":
+        result.WATCHLIST  = list(_brk.WATCHLIST)
+        result._WF_SCORES = dict(getattr(_brk, "_WF_SCORES", {}))
+    return result
+_importlib.reload = _guard_reload
+import nikkei_analysis as _na  # noqa: E402
+_importlib.reload = _orig_reload_guard
+
 
 # ── ヘルパー ─────────────────────────────────────────────────────────────────
 def _float(v, default=0.0) -> float:
@@ -286,6 +303,7 @@ def _collect_trades(stop_wl: list, brk_wl: list,
 
 # ── メイン処理 ───────────────────────────────────────────────────────────────
 all_results: dict[int, dict] = {}  # all_results[period] = {bands, con_kpi, agg_kpi, combined_kpi}
+pnl_html_per_period: dict[int, str] = {}  # 期間ごとの損益タブHTML
 
 def _empty_stats() -> dict:
     return {"n":0,"wins":0,"wr":0,"pf":0,"pnl":0,"gp":0,"gl":0}
@@ -358,6 +376,27 @@ for holdout_days in periods:
         "con_wl":   (len(stop_con), len(brk_con)),
         "agg_wl":   (len(stop_agg), len(brk_agg)),
     }
+
+    # 損益タブHTML生成 (_na._tab5_pnl_html を使って nikkei_analysis と同じ内容を生成)
+    _label_p = f"holdout{holdout_days}d"
+    _na._PNL_CONFIGS[:] = [
+        {"label": f"{_label_p} conservative", "color": "#3498db",
+         "mode": "conservative", "sm_tm": None,
+         "stop_wl": list(stop_con), "brk_wl": list(brk_con)},
+        {"label": f"{_label_p} aggressive",   "color": "#e74c3c",
+         "mode": "aggressive",   "sm_tm": None,
+         "stop_wl": list(stop_agg), "brk_wl": list(brk_agg)},
+    ]
+    print(f"  [損益タブHTML] holdout{holdout_days}d 生成中 (workers={args.workers})...", flush=True)
+    try:
+        pnl_html_per_period[holdout_days] = _na._tab5_pnl_html(holdout_days, args.workers)
+        print(f"  [損益タブHTML] holdout{holdout_days}d 完了")
+    except Exception as e:
+        print(f"  [損益タブHTML] holdout{holdout_days}d エラー: {e}")
+        pnl_html_per_period[holdout_days] = f'<p style="color:#f87171;padding:20px">HTML生成エラー: {e}</p>'
+    # conservative に戻す
+    _stop.STRATEGY_PARAMS.update(_CON_STOP)
+    _brk.STRATEGY_PARAMS.update(_CON_BRK)
 
 
 # ── コンソール表示 ─────────────────────────────────────────────────────────────
@@ -602,28 +641,10 @@ if not args.no_save and valid_periods:
     if effective_max_price > 0:
         filter_note = f" / 株価上限 {effective_max_price:,.0f}円"
 
-    html_out = Path(f"holdout_batch_results_{TODAY}.html")
-    html_out.write_text(f"""<!DOCTYPE html><html lang="ja"><head>
-<meta charset="utf-8">
-<title>ホールドアウト結果バッチ集計 {TODAY}</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:"Segoe UI","Hiragino Sans",sans-serif;
-     background:#0f172a;color:#e2e8f0;padding:24px;max-width:1200px;margin:0 auto}}
-h1{{color:#60a5fa;font-size:1.4rem;margin-bottom:6px}}
-h2{{color:#60a5fa;font-size:1rem;margin:24px 0 10px;
-    border-left:3px solid #60a5fa;padding-left:10px}}
-.sub{{color:#94a3b8;font-size:0.85rem;margin-bottom:20px}}
-table{{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:0.88rem}}
-th{{background:#1e293b;color:#94a3b8;padding:6px 10px;
-    border-bottom:1px solid #334155;font-weight:600;white-space:nowrap}}
-td{{padding:5px 10px;border-bottom:1px solid #1e293b;white-space:nowrap}}
-tr:hover td{{background:#1a2535}}
-</style></head><body>
-<h1>ホールドアウト結果バッチ集計</h1>
-<p class="sub">集計日: {TODAY} / モード: conservative / MaxDD≤{args.max_dd}%{filter_note}</p>
-
-<h2>スクリプト別サマリー</h2>
+    # ── タブ付きHTML生成 ──────────────────────────────────────────────────────
+    # サマリータブ内容: スクリプト別サマリー + BT帯横断表 + 期間別詳細
+    summary_tab_html = f"""
+<h2>スクリプト別サマリー（全期間）</h2>
 <table>
   <thead><tr>
     <th style="text-align:left">期間</th>
@@ -636,24 +657,61 @@ tr:hover td{{background:#1a2535}}
 </table>
 
 <h2>BT帯別 損益横断表</h2>
-<p style="color:#64748b;font-size:0.8rem;margin-bottom:8px">
+<p class="footnote" style="margin-bottom:8px">
   各セル: 損益 / 勝率 / 件数 / PF。境界線 = BT60(重要閾値) / BT80
 </p>
+<div style="overflow-x:auto">
 <table>
   <thead><tr>
     <th style="text-align:left">BT帯</th>{th_cols}
   </tr></thead>
   <tbody>{cross_rows_html}</tbody>
 </table>
+</div>
 
-<h2>期間別詳細</h2>
+<h2>期間別詳細（BT帯）</h2>
 {detail_html}
 
-<p style="color:#334155;font-size:0.75rem;margin-top:32px">
+<p class="footnote" style="margin-top:24px">
   実運用フィルター基準: BTスコア≥60 が全期間で一貫してプラス。
   conservative優先。BT0-29は最大損失源のため除外推奨。
-</p>
-</body></html>""", encoding="utf-8")
+</p>"""
+
+    # タブナビゲーション
+    tab_btns = '<button class="tab-btn active" data-tab="t_summary" onclick="switchTab(\'t_summary\')">📊 サマリー</button>\n'
+    tab_panes = f'<div id="t_summary" class="tab-pane active">{summary_tab_html}</div>\n'
+    for p in valid_periods:
+        tab_id = f"t_p{p}"
+        tab_btns  += f'  <button class="tab-btn" data-tab="{tab_id}" onclick="switchTab(\'{tab_id}\')">{p}日</button>\n'
+        pane_html = pnl_html_per_period.get(p, '<p style="color:#64748b;padding:20px">データなし</p>')
+        tab_panes += f'<div id="{tab_id}" class="tab-pane">{pane_html}</div>\n'
+
+    html_out = Path(f"holdout_batch_results_{TODAY}.html")
+    html_out.write_text(f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ホールドアウト損益バッチ集計 {TODAY}</title>
+<style>
+{_na.CSS}
+/* タブ横スクロール対応 */
+.tab-nav {{ flex-wrap: nowrap !important; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+.tab-btn {{ padding: 7px 14px !important; font-size: 0.85rem !important; white-space: nowrap; }}
+</style>
+</head>
+<body>
+<h1>ホールドアウト損益バッチ集計</h1>
+<p class="subtitle">集計日: {TODAY} / MaxDD≤{args.max_dd}%{filter_note} / workers={args.workers}</p>
+
+<div class="tab-nav">
+{tab_btns}</div>
+
+{tab_panes}
+
+<script>{_na.JS}</script>
+</body>
+</html>""", encoding="utf-8")
     print(f"[HTML] {html_out.resolve()}")
 
     if not args.no_save:
