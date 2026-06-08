@@ -38,6 +38,8 @@ _pre.add_argument("--auto-scan",  action="store_true")
 _pre.add_argument("--max-price",  type=float, default=10000.0)
 _pre.add_argument("--days",       type=int,   default=180,
                   help="損益タブで最初に表示する期間 (30/60/90/150/180)")
+_pre.add_argument("--symbol",     type=str,   default=None,
+                  help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
 _args, _ = _pre.parse_known_args()
 
 JST   = timezone(timedelta(hours=9))
@@ -251,6 +253,52 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
 # 後片付け
 _na._PNL_CONFIGS[:] = _all_configs
 
+# ── --symbol 指定時: 銘柄別期間別取引詳細タブ ────────────────────────────────
+_sym_detail_tab_btn  = ""
+_sym_detail_tab_pane = ""
+
+if _args.symbol:
+    _sym_arg = _args.symbol.upper()
+    if not _sym_arg.endswith(".T"):
+        _sym_arg += ".T"
+
+    _sp_btns  = ""
+    _sp_panes = ""
+    print(f"指定銘柄 {_sym_arg} の期間別取引詳細生成中...", flush=True)
+    for days in _PNL_PERIODS:
+        cfgs = _period_configs.get(days) or _all_configs
+        _na._PNL_CONFIGS[:] = cfgs
+        active  = "active" if days == _DEFAULT_DAYS else ""
+        display = "block"  if days == _DEFAULT_DAYS else "none"
+        _sp_btns += (
+            f'<button class="sp-period-btn {active}" '
+            f'onclick="switchSpPeriod({days})">{days}日</button>\n'
+        )
+        print(f"  直近{days}日...", flush=True)
+        _sp_html = _na._tab5_pnl_html(days, _args.workers, symbol_filter=[_sym_arg])
+        _sp_panes += (
+            f'<div id="sp{days}" class="sp-period-pane" style="display:{display}">'
+            f'{_sp_html}</div>\n'
+        )
+
+    _na._PNL_CONFIGS[:] = _all_configs
+
+    _sym_detail_tab_btn = (
+        f'\n  <button class="ho-outer-btn" onclick="switchHoTab(\'sym_detail\')">'
+        f'📌 {_sym_arg}</button>'
+    )
+    _sym_detail_tab_pane = f"""
+<div id="ho-sym_detail" class="ho-outer-pane">
+  <p style="color:#94a3b8;font-size:0.82rem;margin:8px 0 12px">
+    <strong style="color:#e2e8f0">{_sym_arg}</strong> の期間別取引詳細
+  </p>
+  <div style="margin:0 0 16px">
+    <span style="color:#94a3b8;font-size:0.8rem;margin-right:8px">分析期間:</span>
+    {_sp_btns}
+  </div>
+  {_sp_panes}
+</div>"""
+
 # ── 期間セレクターのHTML部品 ──────────────────────────────────────────────────
 _period_btns = ""
 _period_panes = ""
@@ -310,6 +358,17 @@ _extra_css = """
 .sym-tab-btn:hover { background:#263349; border-color:#64748b; }
 .sym-tab-btn.active { background:#1d4ed8; border-color:#3b82f6; }
 .sym-tab-pane { display:none; }
+
+/* 指定銘柄 期間セレクター */
+.sp-period-btn {
+  background:#1e293b; border:1px solid #334155; color:#94a3b8;
+  padding:5px 14px; border-radius:4px; cursor:pointer;
+  font-size:0.82rem; margin-right:4px; transition:all .2s;
+}
+.sp-period-btn:hover { color:#e2e8f0; border-color:#64748b; }
+.sp-period-btn.active { background:#3b82f6; color:#fff;
+  border-color:#3b82f6; font-weight:700; }
+.sp-period-pane { display:none; }
 """
 
 _extra_js = """
@@ -330,6 +389,12 @@ function switchSymTab(tabId) {
   document.querySelectorAll('.sym-tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(tabId).style.display = 'block';
   (event.target.closest('.sym-tab-btn') || event.target).classList.add('active');
+}
+function switchSpPeriod(days) {
+  document.querySelectorAll('.sp-period-pane').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.sp-period-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('sp' + days).style.display = 'block';
+  (event.target.closest('.sp-period-btn') || event.target).classList.add('active');
 }
 """
 
@@ -355,7 +420,7 @@ html = f"""<!DOCTYPE html>
 <div class="ho-outer-nav">
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
+  <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>{_sym_detail_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -379,7 +444,7 @@ html = f"""<!DOCTYPE html>
   </div>
 {_sym_tab_panes}
 </div>
-
+{_sym_detail_tab_pane}
 <script>
 {_na.JS}
 {_extra_js}
@@ -387,7 +452,8 @@ html = f"""<!DOCTYPE html>
 </body>
 </html>"""
 
-out_path = Path(f"signals_holdout_all_{date_str}.html")
+_sym_suffix = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
+out_path = Path(f"signals_holdout_all{_sym_suffix}_{date_str}.html")
 out_path.write_text(html, encoding="utf-8")
 print(f"\nレポート生成完了: {out_path.resolve()}")
 
