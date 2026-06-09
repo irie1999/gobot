@@ -106,10 +106,10 @@ def collect_trades(days: int, workers: int) -> list[dict]:
                 vol_rat = vol_recent / (vol_base + 1)
 
                 # ── 結果判定 ──────────────────────────────────────────────
-                reason = t.get("exit_reason", "")
-                if "target" in str(reason):
+                reason = t.get("reason", "")
+                if "目標" in str(reason):
                     outcome = "target"
-                elif "stop" in str(reason):
+                elif "損切" in str(reason):
                     outcome = "stop"
                 else:
                     outcome = "timeout"
