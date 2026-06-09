@@ -659,6 +659,69 @@ def build_html(symbol: str, name: str, res: dict) -> str:
 
 
 # ─── WATCHLIST 一括評価 ──────────────────────────────────────────────────────
+def _collect_holdout_all_items(
+    wf_dir: "Path | None" = None,
+    max_price: float = 10000.0,
+    per_strategy: int = 10,
+) -> list[tuple[str, str, list[str]]]:
+    """run_signals_holdout_all.py と同じ WF-CSV から (symbol, name, strategies) を収集。
+    全ホールドアウト設定 × 全モード × 全戦略を横断して重複なしで返す。"""
+    import csv as _csv
+
+    if wf_dir is None:
+        wf_dir = Path("walkforward_results")
+
+    HOLDOUT_DAYS = [30, 60, 90, 150, 180]
+    STOP_STRATS  = ["MACD", "A7", "RSI2"]
+    BRK_STRATS   = ["DON", "VOL", "MOM"]
+    MODES        = ["conservative", "aggressive"]
+
+    def _float(v, d=0.0):
+        try: return float(v)
+        except: return d
+
+    seen: dict[tuple[str, str], set[str]] = {}
+
+    for holdout_days in HOLDOUT_DAYS:
+        for mode in MODES:
+            msuf = f"_{mode}" if mode != "conservative" else ""
+            for strat in STOP_STRATS + BRK_STRATS:
+                cands = sorted(
+                    wf_dir.glob(f"walkforward_{strat}{msuf}_holdout{holdout_days}d_*.csv"),
+                    reverse=True,
+                )
+                if not cands:
+                    cands = [f for f in sorted(
+                        wf_dir.glob(f"walkforward_{strat}{msuf}_*.csv"), reverse=True
+                    ) if "holdout" not in f.name]
+                if not cands:
+                    continue
+                with open(cands[0], encoding="utf-8") as f:
+                    rows = list(_csv.DictReader(f))
+                filtered = [r for r in rows if (
+                    _float(r.get("total_test_pnl", 0)) > 0
+                    and _float(r.get("max_drawdown_pct", 999)) <= 15.0
+                    and (max_price <= 0 or _float(r.get("latest_price", 0)) <= max_price)
+                )]
+                filtered.sort(
+                    key=lambda r: _float(r.get("total_test_pnl", 0))
+                                  * (1.0 + max(_float(r.get("sharpe", 0)), 0.0)),
+                    reverse=True,
+                )
+                for r in filtered[:per_strategy]:
+                    sym  = r.get("symbol", "").strip()
+                    name = r.get("name",   "").strip()
+                    if sym:
+                        key = (sym, name)
+                        seen.setdefault(key, set()).add(strat)
+
+    if not seen:
+        # CSV なし → 既存 WATCHLIST にフォールバック
+        return _collect_watchlist_items()
+
+    return [(sym, name, sorted(strats)) for (sym, name), strats in seen.items()]
+
+
 def _collect_watchlist_items() -> list[tuple[str, str, list[str]]]:
     """check_signals_stop / breakout の WATCHLIST から (symbol, name, strategies) を収集。
     同一銘柄が複数戦略に出る場合はまとめる。"""
@@ -743,9 +806,11 @@ def _save_cpcv_flags(records: list[dict], mode_suf: str) -> None:
     print(f"CPCVフラグ → {fname}  ({len(flags)} 銘柄に警告)")
 
 
-def _build_summary_html(results: list[dict], mode: str) -> str:
+def _build_summary_html(results: list[dict], mode: str,
+                        src_label: str = "watchlist") -> str:
     """全銘柄 CPCV 結果サマリー HTML。PBO昇順でソート。"""
     rows = sorted(results, key=lambda r: r["pbo"])
+    title = "CPCV holdout_all サマリー" if src_label == "holdout_all" else "CPCV WATCHLIST サマリー"
 
     def _pbo_color(p: float) -> str:
         return "#4ade80" if p <= 0.3 else ("#fbbf24" if p <= 0.5 else "#f87171")
@@ -790,7 +855,7 @@ def _build_summary_html(results: list[dict], mode: str) -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CPCV WATCHLIST サマリー</title>
+<title>{title}</title>
 <style>
 * {{ box-sizing:border-box; margin:0; padding:0; }}
 body {{ background:#0f172a; color:#e2e8f0; font-family:'Segoe UI',system-ui,sans-serif;
@@ -812,7 +877,7 @@ tr:hover td {{ background:#0d1424; }}
 </head>
 <body>
 <div class="container">
-  <h1>CPCV WATCHLIST サマリー</h1>
+  <h1>{title}</h1>
   <div class="subtitle">
     全 {len(rows)} 銘柄 &nbsp;|&nbsp; モード: {mode} &nbsp;|&nbsp; 実行日: {TODAY}
     &nbsp;|&nbsp; PBO昇順
@@ -846,13 +911,24 @@ tr:hover td {{ background:#0d1424; }}
 
 def _run_watchlist(args) -> None:
     """WATCHLIST 全銘柄を一括 CPCV 評価して個別 HTML + サマリー HTML を生成。"""
-    items = _collect_watchlist_items()
+    use_holdout_all = getattr(args, "holdout_all", False)
+
+    if use_holdout_all:
+        wf_dir = getattr(args, "wf_dir", Path("walkforward_results"))
+        items  = _collect_holdout_all_items(wf_dir=wf_dir)
+        src_label = "holdout_all"
+    else:
+        items     = _collect_watchlist_items()
+        src_label = "watchlist"
+
     if not items:
-        print("[ERROR] WATCHLIST が空です。check_signals_stop.py / breakout.py を確認してください。",
+        print("[ERROR] 銘柄リストが空です。WF-CSVまたはWATCHLISTを確認してください。",
               file=sys.stderr)
         sys.exit(1)
 
     mode_suf = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
+    if use_holdout_all:
+        mode_suf = f"_holdout_all{mode_suf}"
     print("=" * 70)
     print(f"CPCV WATCHLIST 一括評価: {len(items)} 銘柄  モード: {TRADING_MODE}")
     print(f"  グループ: {args.n_splits}  テスト: {args.k_test}  エンバーゴ: {args.embargo_days}日")
@@ -904,7 +980,7 @@ def _run_watchlist(args) -> None:
 
     # サマリー HTML
     summary_fname = f"cpcv_watchlist_summary{mode_suf}_{TODAY}.html"
-    summary_html  = _build_summary_html(summary_records, TRADING_MODE)
+    summary_html  = _build_summary_html(summary_records, TRADING_MODE, src_label=src_label)
     Path(summary_fname).write_text(summary_html, encoding="utf-8")
 
     # CPCV 警告フラグ
@@ -940,9 +1016,13 @@ def main() -> None:
         """,
     )
     sym_grp = parser.add_mutually_exclusive_group(required=True)
-    sym_grp.add_argument("--symbol",    help="銘柄コード (例: 7203.T)")
-    sym_grp.add_argument("--watchlist", action="store_true",
-                         help="WATCHLIST全銘柄を一括評価してサマリーHTMLを生成")
+    sym_grp.add_argument("--symbol",      help="銘柄コード (例: 7203.T)")
+    sym_grp.add_argument("--watchlist",   action="store_true",
+                         help="check_signals_stop/breakout の WATCHLIST全銘柄を一括評価")
+    sym_grp.add_argument("--holdout-all", action="store_true",
+                         help="run_signals_holdout_all.py と同じWF-CSVの全銘柄を一括評価")
+    parser.add_argument("--wf-dir",       type=Path, default=Path("walkforward_results"),
+                        help="WF-CSV ディレクトリ (--holdout-all 時のみ有効)")
     parser.add_argument("--name",         default="",    help="銘柄名 (--symbol 時のみ)")
     parser.add_argument("--n-splits",     type=int, default=6)
     parser.add_argument("--k-test",       type=int, default=2)
@@ -955,7 +1035,7 @@ def main() -> None:
     mode_grp.add_argument("--conservative", action="store_true")
     args = parser.parse_args()
 
-    if args.watchlist:
+    if args.watchlist or args.holdout_all:
         _run_watchlist(args)
         return
 
