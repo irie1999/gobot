@@ -63,20 +63,32 @@ def get_wf_score(symbol: str, strategy: str) -> tuple[int, str] | None:
 
 
 def _load_cpcv_flags() -> dict:
-    """cpcv_flags.py を読み込む (なければ空 dict)。"""
+    """cpcv_flags*.py を全て読み込んでマージする (danger > warning 優先)。"""
     import importlib.util as _ilu, os as _os2
-    mode_suf = "_aggressive" if _os2.getenv("TRADING_MODE", "").lower() == "aggressive" else ""
-    for fname in [f"cpcv_flags{mode_suf}.py", "cpcv_flags.py"]:
-        p = Path(fname)
-        if p.exists():
-            try:
-                spec = _ilu.spec_from_file_location("_cpcv_flags_mod", p)
-                mod  = _ilu.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return getattr(mod, "CPCV_FLAGS", {})
-            except Exception:
-                pass
-    return {}
+    _lvl = {"danger": 2, "warning": 1}
+    aggressive = _os2.getenv("TRADING_MODE", "").lower() == "aggressive"
+    merged: dict = {}
+    for p in sorted(Path(".").glob("cpcv_flags*.py")):
+        # モード不一致のファイルはスキップ
+        is_agg = "aggressive" in p.name
+        if aggressive != is_agg and (is_agg or "holdout_all" not in p.name):
+            # conservative モードでは aggressive 専用ファイルを除外
+            # aggressive モードでは非aggressive の通常ファイルのみ除外
+            if is_agg and not aggressive:
+                continue
+            if not is_agg and aggressive and "holdout_all" not in p.name and p.name != "cpcv_flags.py":
+                continue
+        try:
+            spec = _ilu.spec_from_file_location(f"_cpcv_{p.stem}", p)
+            mod  = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            for sym, info in getattr(mod, "CPCV_FLAGS", {}).items():
+                existing = merged.get(sym)
+                if existing is None or _lvl.get(info["level"], 0) > _lvl.get(existing["level"], 0):
+                    merged[sym] = info
+        except Exception:
+            pass
+    return merged
 
 CPCV_FLAGS: dict = _load_cpcv_flags()
 
