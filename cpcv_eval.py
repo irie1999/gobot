@@ -655,6 +655,209 @@ def build_html(symbol: str, name: str, res: dict) -> str:
 </html>"""
 
 
+# ─── WATCHLIST 一括評価 ──────────────────────────────────────────────────────
+def _collect_watchlist_items() -> list[tuple[str, str, list[str]]]:
+    """check_signals_stop / breakout の WATCHLIST から (symbol, name, strategies) を収集。
+    同一銘柄が複数戦略に出る場合はまとめる。"""
+    items: dict[tuple[str, str], list[str]] = {}
+    try:
+        import check_signals_stop as _s
+        for sym, name, strat in _s.WATCHLIST:
+            items.setdefault((sym, name), [])
+            if strat not in items[(sym, name)]:
+                items[(sym, name)].append(strat)
+    except Exception:
+        pass
+    try:
+        import check_signals_breakout as _b
+        for sym, name, strat in _b.WATCHLIST:
+            items.setdefault((sym, name), [])
+            if strat not in items[(sym, name)]:
+                items[(sym, name)].append(strat)
+    except Exception:
+        pass
+    return [(sym, name, strats) for (sym, name), strats in items.items()]
+
+
+def _build_summary_html(results: list[dict], mode: str) -> str:
+    """全銘柄 CPCV 結果サマリー HTML。PBO昇順でソート。"""
+    rows = sorted(results, key=lambda r: r["pbo"])
+
+    def _pbo_color(p: float) -> str:
+        return "#4ade80" if p <= 0.3 else ("#fbbf24" if p <= 0.5 else "#f87171")
+
+    def _pbo_label(p: float) -> str:
+        return "信頼" if p <= 0.3 else ("要注意" if p <= 0.5 else "過学習")
+
+    table_rows = ""
+    for r in rows:
+        pc   = _pbo_color(r["pbo"])
+        pl   = _pbo_label(r["pbo"])
+        wrc  = "#4ade80" if r["oos_wr"] >= 50 else ("#fbbf24" if r["oos_wr"] >= 45 else "#f87171")
+        pfc  = "#4ade80" if r["oos_pf"] >= 1.5 else ("#fbbf24" if r["oos_pf"] >= 1.0 else "#f87171")
+        pnlc = "#4ade80" if r["oos_pnl"] >= 0 else "#f87171"
+        pf_s = "∞" if r["oos_pf"] == float("inf") else f'{r["oos_pf"]:.2f}'
+        lnk  = f'<a href="{r["html_file"]}" style="color:#60a5fa">{r["symbol"]}</a>'
+        strat_tags = " ".join(
+            f'<span style="background:#1e3a5f;color:#60a5fa;padding:1px 5px;'
+            f'border-radius:3px;font-size:.7rem">{s}</span>'
+            for s in r["strategies"]
+        )
+        table_rows += f"""
+<tr>
+  <td>{lnk}<br><span style="color:#64748b;font-size:.8rem">{r["name"]}</span></td>
+  <td style="text-align:center">{strat_tags}</td>
+  <td style="text-align:center;color:{pc};font-weight:700">{r["pbo"]:.1%}<br>
+    <span style="font-size:.7rem">{pl}</span></td>
+  <td style="text-align:center;color:{wrc}">{r["oos_wr"]:.1f}%</td>
+  <td style="text-align:center;color:{pfc}">{pf_s}</td>
+  <td style="text-align:center;color:{pnlc}">{r["oos_pnl"]:+,.0f}</td>
+  <td style="text-align:center;color:#94a3b8">{r["trades"]}</td>
+  <td style="text-align:center;color:#64748b;font-size:.8rem">{r.get("error","")}</td>
+</tr>"""
+
+    n_ok      = sum(1 for r in rows if not r.get("error"))
+    n_trust   = sum(1 for r in rows if r["pbo"] <= 0.3)
+    n_warn    = sum(1 for r in rows if 0.3 < r["pbo"] <= 0.5)
+    n_overfit = sum(1 for r in rows if r["pbo"] > 0.5)
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CPCV WATCHLIST サマリー</title>
+<style>
+* {{ box-sizing:border-box; margin:0; padding:0; }}
+body {{ background:#0f172a; color:#e2e8f0; font-family:'Segoe UI',system-ui,sans-serif;
+       font-size:14px; line-height:1.6; }}
+.container {{ max-width:1100px; margin:0 auto; padding:1.5rem 1rem; }}
+h1 {{ color:#60a5fa; font-size:1.5rem; margin-bottom:.4rem; }}
+.subtitle {{ color:#94a3b8; font-size:.85rem; margin-bottom:1.4rem; }}
+.kpi-grid {{ display:flex; gap:.8rem; flex-wrap:wrap; margin-bottom:1.4rem; }}
+.kpi {{ background:#111827; border:1px solid #1e293b; border-radius:8px;
+        padding:.8rem 1.2rem; text-align:center; min-width:130px; }}
+.kpi-label {{ color:#64748b; font-size:.72rem; text-transform:uppercase; }}
+.kpi-val {{ font-size:1.3rem; font-weight:700; margin-top:.2rem; }}
+table {{ width:100%; border-collapse:collapse; }}
+th {{ background:#1e293b; color:#94a3b8; padding:8px 10px; text-align:left;
+      font-size:.8rem; }}
+td {{ border-bottom:1px solid #1e293b; padding:7px 10px; }}
+tr:hover td {{ background:#0d1424; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>CPCV WATCHLIST サマリー</h1>
+  <div class="subtitle">
+    全 {len(rows)} 銘柄 &nbsp;|&nbsp; モード: {mode} &nbsp;|&nbsp; 実行日: {TODAY}
+    &nbsp;|&nbsp; PBO昇順
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-label">評価完了</div>
+      <div class="kpi-val" style="color:#e2e8f0">{n_ok} / {len(rows)}</div></div>
+    <div class="kpi"><div class="kpi-label">✅ 信頼 PBO≤30%</div>
+      <div class="kpi-val" style="color:#4ade80">{n_trust}</div></div>
+    <div class="kpi"><div class="kpi-label">⚠️ 要注意 30-50%</div>
+      <div class="kpi-val" style="color:#fbbf24">{n_warn}</div></div>
+    <div class="kpi"><div class="kpi-label">❌ 過学習 PBO>50%</div>
+      <div class="kpi-val" style="color:#f87171">{n_overfit}</div></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>銘柄</th><th>戦略</th><th>PBO</th>
+      <th>OOS勝率</th><th>OOS PF</th><th>OOS損益</th>
+      <th>取引数</th><th>備考</th>
+    </tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+  <p style="color:#475569;font-size:.75rem;margin-top:1rem">
+    ※ 銘柄名リンクをクリックすると個別詳細HTMLを開きます。
+    OOS = アウトオブサンプル（未来データ）での成績。
+  </p>
+</div>
+</body>
+</html>"""
+
+
+def _run_watchlist(args) -> None:
+    """WATCHLIST 全銘柄を一括 CPCV 評価して個別 HTML + サマリー HTML を生成。"""
+    items = _collect_watchlist_items()
+    if not items:
+        print("[ERROR] WATCHLIST が空です。check_signals_stop.py / breakout.py を確認してください。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    mode_suf = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
+    print("=" * 70)
+    print(f"CPCV WATCHLIST 一括評価: {len(items)} 銘柄  モード: {TRADING_MODE}")
+    print(f"  グループ: {args.n_splits}  テスト: {args.k_test}  エンバーゴ: {args.embargo_days}日")
+    print("=" * 70)
+
+    summary_records: list[dict] = []
+
+    for i, (symbol, name, strats) in enumerate(items, 1):
+        print(f"\n[{i}/{len(items)}] {symbol} {name}  戦略: {strats}")
+        fname = f"cpcv_{symbol.replace('.', '_')}{mode_suf}_{TODAY}.html"
+        rec: dict = {"symbol": symbol, "name": name, "strategies": strats,
+                     "html_file": fname, "pbo": 1.0, "oos_wr": 0.0,
+                     "oos_pf": 0.0, "oos_pnl": 0.0, "trades": 0, "error": ""}
+        try:
+            res = run_cpcv(
+                symbol, name,
+                n_splits=args.n_splits,
+                k_test=args.k_test,
+                embargo_days=args.embargo_days,
+                strategy_names=strats,
+            )
+            pbo = res["pbo"]["pbo"]
+            lbl = "信頼できる" if pbo <= 0.3 else ("要注意" if pbo <= 0.5 else "過学習疑い")
+            print(f"  PBO={pbo:.1%} ({lbl})")
+
+            # OOS 集計 (全戦略合算)
+            oos_trades = 0; oos_wins = 0; oos_pnl = 0.0; oos_gp = 0.0; oos_gl = 0.0
+            for s in strats:
+                sm = res["strategy_summary"].get(s)
+                if sm:
+                    oos_trades += sm.get("trades", 0)
+                    oos_wins   += sm.get("wins", 0)
+                    oos_pnl    += sm.get("total_pnl", 0.0)
+                    oos_gp     += sm.get("gp", 0.0)
+                    oos_gl     += sm.get("gl", 0.0)
+            oos_wr = oos_wins / oos_trades * 100 if oos_trades else 0.0
+            oos_pf = oos_gp / oos_gl if oos_gl > 0 else (float("inf") if oos_gp > 0 else 0.0)
+            rec.update(pbo=pbo, oos_wr=oos_wr, oos_pf=oos_pf,
+                       oos_pnl=oos_pnl, trades=oos_trades)
+
+            html = build_html(symbol, name, res)
+            Path(fname).write_text(html, encoding="utf-8")
+            print(f"  → {fname}")
+        except Exception as e:
+            rec["error"] = str(e)[:60]
+            print(f"  [SKIP] {e}")
+
+        summary_records.append(rec)
+
+    # サマリー HTML
+    summary_fname = f"cpcv_watchlist_summary{mode_suf}_{TODAY}.html"
+    summary_html  = _build_summary_html(summary_records, TRADING_MODE)
+    Path(summary_fname).write_text(summary_html, encoding="utf-8")
+
+    n_trust   = sum(1 for r in summary_records if r["pbo"] <= 0.3)
+    n_warn    = sum(1 for r in summary_records if 0.3 < r["pbo"] <= 0.5)
+    n_overfit = sum(1 for r in summary_records if r["pbo"] > 0.5)
+    print(f"\n{'='*70}")
+    print(f"完了: {len(items)} 銘柄")
+    print(f"  ✅ 信頼できる (PBO≤30%): {n_trust} 銘柄")
+    print(f"  ⚠️ 要注意    (30-50%): {n_warn} 銘柄")
+    print(f"  ❌ 過学習疑い (>50%):   {n_overfit} 銘柄")
+    print(f"\nサマリー → {Path(summary_fname).resolve()}")
+
+    if not args.no_browser:
+        from _open_html import open_html
+        open_html(Path(summary_fname).resolve().as_uri())
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -665,25 +868,29 @@ def main() -> None:
   python cpcv_eval.py --symbol 7203.T
   python cpcv_eval.py --symbol 7203.T --n-splits 6 --k-test 2 --embargo-days 14
   python cpcv_eval.py --symbol 7203.T --strategies MACD A7 RSI2 --aggressive
-  python cpcv_eval.py --symbol 7203.T --no-browser
+  python cpcv_eval.py --watchlist                # WATCHLIST全銘柄を一括評価
+  python cpcv_eval.py --watchlist --aggressive   # aggressive モードで全銘柄
         """,
     )
-    parser.add_argument("--symbol",       required=True, help="銘柄コード (例: 7203.T)")
-    parser.add_argument("--name",         default="",    help="銘柄名 (省略時は symbol)")
-    parser.add_argument("--n-splits",     type=int, default=6,
-                        help="グループ分割数 (デフォルト: 6)")
-    parser.add_argument("--k-test",       type=int, default=2,
-                        help="テストグループ数 (デフォルト: 2)")
-    parser.add_argument("--embargo-days", type=int, default=7,
-                        help="エンバーゴ日数 (デフォルト: 7)")
+    sym_grp = parser.add_mutually_exclusive_group(required=True)
+    sym_grp.add_argument("--symbol",    help="銘柄コード (例: 7203.T)")
+    sym_grp.add_argument("--watchlist", action="store_true",
+                         help="WATCHLIST全銘柄を一括評価してサマリーHTMLを生成")
+    parser.add_argument("--name",         default="",    help="銘柄名 (--symbol 時のみ)")
+    parser.add_argument("--n-splits",     type=int, default=6)
+    parser.add_argument("--k-test",       type=int, default=2)
+    parser.add_argument("--embargo-days", type=int, default=7)
     parser.add_argument("--strategies",   nargs="*", default=None,
-                        help="評価戦略 (デフォルト: MACD A7 RSI2 DON VOL MOM)")
-    parser.add_argument("--no-browser",   action="store_true",
-                        help="ブラウザ自動起動しない")
+                        help="評価戦略 (--symbol 時のみ有効)")
+    parser.add_argument("--no-browser",   action="store_true")
     mode_grp = parser.add_mutually_exclusive_group()
     mode_grp.add_argument("--aggressive",   action="store_true")
     mode_grp.add_argument("--conservative", action="store_true")
     args = parser.parse_args()
+
+    if args.watchlist:
+        _run_watchlist(args)
+        return
 
     symbol   = args.symbol
     name     = args.name or symbol
@@ -729,7 +936,8 @@ def main() -> None:
     print(f"\nHTML → {out.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        from _open_html import open_html
+        open_html(out.resolve().as_uri())
 
 
 if __name__ == "__main__":
