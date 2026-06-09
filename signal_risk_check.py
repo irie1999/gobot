@@ -30,7 +30,7 @@ JST = timezone(timedelta(hours=9))
 
 # ── 日次キャッシュファイル ────────────────────────────────────────────────────
 # チェック項目を追加・変更したらこの番号を上げると古いキャッシュを自動破棄する
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 _CACHE_DIR = Path(".")
 
@@ -470,6 +470,31 @@ def _check_gap_down(hist) -> dict | None:
     return None
 
 
+def _check_volume_spike(hist) -> dict | None:
+    """
+    直近5日の出来高が過去15日平均の2倍以上 → 警告。
+    分析結果: 3倍超=勝率64%/損切21%, 2-3倍=PF2.18 と有意に悪化。
+    価格方向は問わない（上昇中の群衆参加も危険）。
+    """
+    try:
+        if hist is None or len(hist) < 20:
+            return None
+        recent_vol   = float(hist["Volume"].iloc[-5:].mean())
+        baseline_vol = float(hist["Volume"].iloc[-20:-5].mean())
+        if baseline_vol <= 0:
+            return None
+        ratio = recent_vol / baseline_vol
+        if ratio >= 3.0:
+            return {"level": "danger",  "code": "VOL_SPIKE",
+                    "msg": f"出来高急増 {ratio:.1f}倍 — 群衆参加/損切率↑"}
+        if ratio >= 2.0:
+            return {"level": "warning", "code": "VOL_SPIKE",
+                    "msg": f"出来高増加 {ratio:.1f}倍 — PF低下傾向"}
+    except Exception:
+        pass
+    return None
+
+
 def _check_margin_ratio(symbol: str) -> dict | None:
     """
     信用倍率（信用買い残 ÷ 信用売り残）を株探から取得。
@@ -514,6 +539,7 @@ def _compute_one(symbol: str, name: str, target_date: date | None) -> list[dict]
         lambda: _check_consecutive_decline(hist),
         lambda: _check_ma_death_cross(hist),
         lambda: _check_gap_down(hist),
+        lambda: _check_volume_spike(hist),
         lambda: _check_margin_ratio(symbol),
     ]:
         try:
