@@ -15,6 +15,7 @@ signal_risk_check.py — シグナル銘柄のリスク警告チェック
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -78,66 +79,115 @@ def _check_negative_news(symbol: str, name: str) -> dict | None:
     return None
 
 
+_KABUTAN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+# 株探 HTML から日付を抜く正規表現（複数パターン）
+_DATE_PATTERNS = [
+    # 「次回決算発表予定日」直後のYYYY年MM月DD日 or YYYY/MM/DD
+    r'次回決算[発表]*予定[日]?[^<]{0,60}?(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?',
+    # 「決算発表日」テキストのそば
+    r'決算発表[日]?[^<]{0,40}?(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?',
+    # td の中に単独で YYYY/MM/DD
+    r'<td[^>]*>\s*(\d{4})/(\d{2})/(\d{2})\s*</td>',
+    # YYYY年MM月DD日 の汎用パターン（ページ内で最初に現れる近未来日）
+    r'(\d{4})年(\d{1,2})月(\d{1,2})日',
+]
+
+
+def _parse_date_from_html(html: str, today: date) -> str:
+    """
+    HTML テキストから次回決算日らしい日付を探して YYYY-MM-DD で返す。
+    HTMLタグを除去してから検索するのでタグ境界に強い。
+    """
+    # タグを除去してプレーンテキスト化
+    plain = re.sub(r'<[^>]+>', ' ', html)
+    plain = re.sub(r'\s+', ' ', plain)
+
+    # ── Step1: 「次回決算」キーワード付近の日付を優先 ──
+    # 前後200文字以内にある日付を拾う
+    for kw in ["次回決算発表予定", "次回決算予定", "次回決算", "決算発表予定"]:
+        pos = plain.find(kw)
+        if pos == -1:
+            continue
+        context = plain[pos: pos + 200]
+        m = re.search(r'(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?', context)
+        if m:
+            try:
+                dt = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if dt >= today:
+                    return str(dt)
+            except Exception:
+                pass
+
+    # ── Step2: ページ全体から近未来日付を収集 ──
+    candidates: list[date] = []
+    for m in re.finditer(r'(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?', plain):
+        try:
+            dt = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            # 今日から3か月以内の未来日だけ候補に
+            if today <= dt <= today + timedelta(days=120):
+                candidates.append(dt)
+        except Exception:
+            pass
+
+    if candidates:
+        return str(min(candidates))
+    return ""
+
+
 def _fetch_next_earnings_date(symbol: str, target_date: date | None = None) -> str:
     """
-    yfinance から次回決算発表日を取得して "YYYY-MM-DD" を返す。
+    株探の財務ページから次回決算発表予定日を取得して "YYYY-MM-DD" を返す。
     取得できなければ空文字を返す。
     """
-    try:
-        import yfinance as yf
-        cal = yf.Ticker(symbol).calendar
-        if not cal:
-            return ""
-        ed = cal.get("Earnings Date")
-        if ed is None:
-            return ""
-        today = target_date or datetime.now(JST).date()
-        if isinstance(ed, (list, tuple)):
-            dates = sorted(
-                [d.date() if hasattr(d, "date") else d for d in ed if d is not None]
-            )
-        else:
-            dates = [ed.date() if hasattr(ed, "date") else ed]
-        # 今日以降で最も近い決算日を返す
-        future = [d for d in dates if d >= today]
-        if future:
-            return str(future[0])
-        # 全て過去なら直近の過去日
-        if dates:
-            return str(dates[-1])
-    except Exception:
-        pass
+    code  = symbol.replace(".T", "").replace(".t", "")
+    today = target_date or datetime.now(JST).date()
+
+    # 試すURL: finance ページ → stock トップページ の順
+    urls = [
+        f"https://kabutan.jp/stock/finance?code={code}",
+        f"https://kabutan.jp/stock/?code={code}",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers=_KABUTAN_HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                html = r.read().decode("utf-8", errors="replace")
+            result = _parse_date_from_html(html, today)
+            if result:
+                return result
+        except Exception:
+            pass
     return ""
 
 
 def _check_earnings_proximity(symbol: str, target_date: date | None = None) -> dict | None:
-    """決算発表日が±3営業日以内なら警告"""
+    """
+    株探から決算日を取得し、±7日以内なら警告を返す。
+    EARNINGS_DATES がすでに埋まっている場合はそれを再利用する。
+    """
     try:
-        import yfinance as yf
-        t = yf.Ticker(symbol)
-        cal = t.calendar
-        if not cal:
+        today   = target_date or datetime.now(JST).date()
+        dt_str  = EARNINGS_DATES.get(symbol) or _fetch_next_earnings_date(symbol, today)
+        if not dt_str:
             return None
-
-        # 'Earnings Date' は list or single date
-        ed = cal.get("Earnings Date")
-        if ed is None:
-            return None
-        if isinstance(ed, (list, tuple)):
-            dates = [d if isinstance(d, date) else d.date() for d in ed if d is not None]
-        else:
-            dates = [ed if isinstance(ed, date) else ed.date()]
-
-        today = target_date or datetime.now(JST).date()
-        for d in dates:
-            diff = abs((d - today).days)
-            if diff <= 5:
-                direction = "前" if d >= today else "後"
-                return {
-                    "level": "warning",
-                    "code":  "EARNINGS",
-                    "msg":   f"決算{diff}日{direction} ({d})",
-                }
+        earn_dt = date.fromisoformat(dt_str)
+        diff    = (earn_dt - today).days
+        if abs(diff) <= 7:
+            direction = "前" if diff >= 0 else "後"
+            return {
+                "level": "warning",
+                "code":  "EARNINGS",
+                "msg":   f"決算{abs(diff)}日{direction} ({earn_dt})",
+            }
     except Exception:
         pass
     return None
