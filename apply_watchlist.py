@@ -97,6 +97,10 @@ def _replace_watchlist(file_path: Path, new_block: str,
     print(f"    旧: {old_entries} 行 → 新: {new_block.count(chr(10))} 行  "
           f"({new_entries} 銘柄)")
 
+    if new_entries == 0:
+        print(f"    [SKIP] 新 WATCHLIST が空のため既存リストを保持します")
+        return False
+
     if dry_run:
         print("    [DRY-RUN] 実際の書き込みはスキップ")
         return True
