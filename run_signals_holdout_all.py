@@ -325,6 +325,84 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
 # 後片付け
 _na._PNL_CONFIGS[:] = _all_configs
 
+# ── ニュースモデル スコアテーブル HTML ────────────────────────────────────────
+# news_model.json が存在する場合のみ、シグナル銘柄のニューススコアを表示する
+_news_score_table_html = ""
+if _signal_stocks:
+    try:
+        _model_path = Path("news_model.json")
+        if _model_path.exists():
+            print("ニュースモデル スコア計算中...", flush=True)
+            from fetch_signal_news import load_and_apply_model as _lam
+            from datetime import date as _date_cls
+            _today_date = _date_cls.fromisoformat(str(TODAY))
+            _ns_rows = ""
+            for _ns_sym, _ns_name, _ns_bt in _signal_stocks:
+                try:
+                    _ns_result = _lam(_ns_sym, _ns_name, _today_date, _ns_bt, skip_news=False)
+                    _ns_sent   = _ns_result.get("news_sentiment", 0.0)
+                    _ns_cnt    = _ns_result.get("news_count", 0)
+                    _ns_pred   = _ns_result.get("predicted_win_prob", 0.5)
+                    _ns_score  = _ns_result.get("news_score", 0.0)
+                    # 感情スコアの色
+                    _sent_clr  = "#4ade80" if _ns_sent > 0.1 else "#f87171" if _ns_sent < -0.1 else "#94a3b8"
+                    # 予測勝率の色
+                    _pred_clr  = "#4ade80" if _ns_pred >= 0.65 else "#facc15" if _ns_pred >= 0.50 else "#f87171"
+                    # BTスコアの色
+                    _bt_clr    = "#4ade80" if _ns_bt >= 60 else "#facc15" if _ns_bt >= 40 else "#f87171"
+                    _ns_rows += (
+                        f'<tr>'
+                        f'<td><strong>{_ns_sym}</strong></td>'
+                        f'<td style="color:#cbd5e1">{_ns_name}</td>'
+                        f'<td style="color:{_bt_clr};font-weight:700">{_ns_bt}</td>'
+                        f'<td style="color:{_sent_clr};font-weight:700">{_ns_sent:+.2f}</td>'
+                        f'<td style="color:#94a3b8">{_ns_cnt}</td>'
+                        f'<td style="color:{_pred_clr};font-weight:700">{_ns_pred*100:.1f}%</td>'
+                        f'</tr>\n'
+                    )
+                except Exception as _ns_e:
+                    _ns_rows += (
+                        f'<tr>'
+                        f'<td><strong>{_ns_sym}</strong></td>'
+                        f'<td>{_ns_name}</td>'
+                        f'<td>{_ns_bt}</td>'
+                        f'<td colspan="3" style="color:#64748b">スコア取得失敗: {_ns_e}</td>'
+                        f'</tr>\n'
+                    )
+            _news_score_table_html = f"""
+<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;margin:0 0 20px">
+  <h3 style="color:#93c5fd;font-size:0.95rem;margin:0 0 10px">
+    ニュースモデル スコア付きシグナル
+    <span style="font-size:0.72rem;color:#64748b;font-weight:normal;margin-left:8px">
+      (news_model.json から予測)
+    </span>
+  </h3>
+  <table style="width:100%;border-collapse:collapse;font-size:0.82rem">
+    <thead>
+      <tr style="border-bottom:1px solid #334155">
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">コード</th>
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">銘柄名</th>
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">BTスコア</th>
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">ニュース感情</th>
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">記事数</th>
+        <th style="padding:6px 10px;text-align:left;color:#94a3b8;font-size:0.72rem">予測勝率</th>
+      </tr>
+    </thead>
+    <tbody>{_ns_rows}</tbody>
+  </table>
+  <p style="color:#64748b;font-size:0.72rem;margin-top:8px">
+    予測勝率: モデル訓練済み (news_model.json) のロジスティック回帰による。
+    緑≥65%, 黄≥50%, 赤&lt;50%
+  </p>
+</div>"""
+            print(f"ニュースモデルスコア: {len(_signal_stocks)}銘柄 完了", flush=True)
+    except Exception as _nst_e:
+        print(f"[WARN] ニュースモデルスコア取得失敗: {_nst_e}", flush=True)
+
+# ニュースモデルスコアテーブルをシグナルHTMLの先頭に追加
+if _news_score_table_html:
+    _sig_html = _news_score_table_html + _sig_html
+
 # ── ニュース・情報タブ HTML ────────────────────────────────────────────────────
 try:
     from fetch_signal_news import build_news_html as _build_news_html

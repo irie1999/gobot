@@ -13,9 +13,95 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
 
 JST = timezone(timedelta(hours=9))
+
+# ── センチメントキーワード ────────────────────────────────────────────────────
+POSITIVE_JP = [
+    "増益", "上昇", "買い推奨", "好調", "最高値", "増配", "TOB", "黒字化",
+    "好業績", "急伸", "上方修正", "過去最高", "強気", "買い場", "大幅高",
+    "増収", "目標株価引き上げ", "レーティング引き上げ", "好決算", "自社株買い",
+]
+NEGATIVE_JP = [
+    "減益", "下落", "売り推奨", "赤字", "不正", "急落", "損失", "リストラ",
+    "下方修正", "経営危機", "倒産", "警告", "減収", "目標株価引き下げ",
+    "レーティング引き下げ", "業績悪化", "大幅安", "不祥事", "行政処分",
+]
+POSITIVE_EN = [
+    "beat", "upgrade", "buy", "outperform", "record", "strong", "growth",
+    "raised", "positive", "surge", "rally", "profit",
+]
+NEGATIVE_EN = [
+    "miss", "downgrade", "sell", "underperform", "loss", "weak", "decline",
+    "cut", "warning", "crash", "plunge", "deficit",
+]
+
+
+def sentiment_score(titles: list[str]) -> float:
+    """
+    タイトルリストからセンチメントスコアを計算。
+    -1 (完全ネガティブ) から +1 (完全ポジティブ)。
+    キーワードマッチ数で正規化する。
+    """
+    if not titles:
+        return 0.0
+    pos = 0
+    neg = 0
+    for title in titles:
+        tl = title.lower()
+        for kw in POSITIVE_JP:
+            if kw in title:
+                pos += 1
+        for kw in NEGATIVE_JP:
+            if kw in title:
+                neg += 1
+        for kw in POSITIVE_EN:
+            if kw in tl:
+                pos += 1
+        for kw in NEGATIVE_EN:
+            if kw in tl:
+                neg += 1
+    total = pos + neg
+    if total == 0:
+        return 0.0
+    return (pos - neg) / total
+
+
+def load_and_apply_model(
+    symbol: str,
+    name: str,
+    entry_date,
+    bt_score: int,
+    skip_news: bool = False,
+) -> dict:
+    """
+    news_model.json を読み込み、指定シグナルの予測スコアを返す。
+
+    Args:
+        symbol:     例 "7203.T"
+        name:       例 "トヨタ自動車"
+        entry_date: date オブジェクト または "YYYY-MM-DD" 文字列
+        bt_score:   BTスコア (0-100)
+        skip_news:  True なら Google News 取得をスキップ
+
+    Returns:
+        {
+          "news_score":          float,   # ニューススコア = 感情 × 記事数/10
+          "predicted_win_prob":  float,   # モデル予測勝率 (0-1)
+          "news_count":          int,     # ニュース記事数
+          "news_sentiment":      float,   # センチメントスコア (-1 to +1)
+        }
+    """
+    try:
+        from news_sentiment_model import load_and_apply_model as _lam
+        return _lam(symbol, name, entry_date, bt_score, skip_news=skip_news)
+    except Exception:
+        pass
+    # フォールバック: モデルなし
+    return dict(news_score=0.0, predicted_win_prob=0.5, news_count=0, news_sentiment=0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
