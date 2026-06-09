@@ -30,7 +30,7 @@ JST = timezone(timedelta(hours=9))
 
 # ── 日次キャッシュファイル ────────────────────────────────────────────────────
 # チェック項目を追加・変更したらこの番号を上げると古いキャッシュを自動破棄する
-_CACHE_VERSION = 4
+_CACHE_VERSION = 5
 
 _CACHE_DIR = Path(".")
 
@@ -540,7 +540,6 @@ def _compute_one(symbol: str, name: str, target_date: date | None) -> list[dict]
         lambda: _check_ma_death_cross(hist),
         lambda: _check_gap_down(hist),
         lambda: _check_volume_spike(hist),
-        lambda: _check_margin_ratio(symbol),
     ]:
         try:
             r = fn()
