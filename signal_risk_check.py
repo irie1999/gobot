@@ -281,20 +281,15 @@ def _check_earnings_proximity(symbol: str, target_date: date | None = None) -> d
     return None
 
 
-def _check_volume_price_divergence(symbol: str) -> dict | None:
+def _check_volume_price_divergence(hist) -> dict | None:
     """出来高が増加しているのに価格が下落（機関売り圧力の兆候）"""
     try:
-        import yfinance as yf
-        hist = yf.Ticker(symbol).history(period="1mo", auto_adjust=True)
-        if len(hist) < 10:
+        if hist is None or len(hist) < 10:
             return None
-
-        recent   = hist.tail(5)
-        baseline = hist.iloc[:-5]
-
-        vol_ratio  = recent["Volume"].mean() / (baseline["Volume"].mean() + 1)
-        price_chg  = (recent["Close"].iloc[-1] - recent["Close"].iloc[0]) / (recent["Close"].iloc[0] + 1e-8)
-
+        recent    = hist.tail(5)
+        baseline  = hist.iloc[:-5]
+        vol_ratio = recent["Volume"].mean() / (baseline["Volume"].mean() + 1)
+        price_chg = (recent["Close"].iloc[-1] - recent["Close"].iloc[0]) / (recent["Close"].iloc[0] + 1e-8)
         if vol_ratio >= 1.5 and price_chg <= -0.03:
             return {
                 "level": "danger",
@@ -306,23 +301,19 @@ def _check_volume_price_divergence(symbol: str) -> dict | None:
     return None
 
 
-def _check_atr_spike(symbol: str) -> dict | None:
-    """ATRが直近20日平均の2倍超 → 異常ボラ"""
+def _check_atr_spike(hist) -> dict | None:
+    """ATRが直近3日平均 ÷ 前20日平均 ≥ 2倍 → 異常ボラ"""
     try:
-        import yfinance as yf
-        hist = yf.Ticker(symbol).history(period="3mo", auto_adjust=True)
-        if len(hist) < 25:
+        if hist is None or len(hist) < 25:
             return None
-
-        tr = (hist["High"] - hist["Low"]).abs()
-        atr_recent  = tr.iloc[-3:].mean()
+        tr           = (hist["High"] - hist["Low"]).abs()
+        atr_recent   = tr.iloc[-3:].mean()
         atr_baseline = tr.iloc[-23:-3].mean()
         if atr_baseline > 0 and atr_recent / atr_baseline >= 2.0:
-            ratio = atr_recent / atr_baseline
             return {
                 "level": "warning",
                 "code":  "ATR_SPIKE",
-                "msg":   f"ボラ急騰 ATR {ratio:.1f}倍 (直近3日/前20日)",
+                "msg":   f"ボラ急騰 ATR {atr_recent/atr_baseline:.1f}倍 (直近3日/前20日)",
             }
     except Exception:
         pass
@@ -404,17 +395,116 @@ def _check_earnings_season(target_date: date | None = None) -> dict | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 追加チェック（yfinance データを1回取得してまとめて判定）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_ohlcv(symbol: str, period: str = "6mo"):
+    """yfinance から OHLCV を取得。失敗時は None。"""
+    try:
+        import yfinance as yf
+        return yf.Ticker(symbol).history(period=period, auto_adjust=True)
+    except Exception:
+        return None
+
+
+def _check_consecutive_decline(hist) -> dict | None:
+    """連続陰線: 終値が3日以上連続で前日終値を下回る"""
+    if hist is None or len(hist) < 4:
+        return None
+    closes = hist["Close"].values
+    n = 0
+    for i in range(len(closes) - 1, 0, -1):
+        if closes[i] < closes[i - 1]:
+            n += 1
+        else:
+            break
+    if n >= 5:
+        return {"level": "danger",  "code": "CONSEC_DECLINE",
+                "msg": f"連続陰線 {n}日継続 — 売り圧力持続"}
+    if n >= 3:
+        return {"level": "warning", "code": "CONSEC_DECLINE",
+                "msg": f"連続陰線 {n}日"}
+    return None
+
+
+def _check_ma_death_cross(hist) -> dict | None:
+    """MA25 < MA75 かつ株価が MA25 を下回る（デッドクロス後の下落継続）"""
+    if hist is None or len(hist) < 80:
+        return None
+    closes = hist["Close"]
+    ma25 = float(closes.rolling(25).mean().iloc[-1])
+    ma75 = float(closes.rolling(75).mean().iloc[-1])
+    price = float(closes.iloc[-1])
+    if ma25 < ma75 and price < ma25:
+        pct = (price - ma75) / ma75 * 100
+        return {"level": "warning", "code": "MA_DEATH",
+                "msg": f"デッドクロス(MA25<MA75) / MA75比{pct:+.1f}%"}
+    return None
+
+
+def _check_gap_down(hist) -> dict | None:
+    """直近1営業日の窓開け下落（当日始値 < 前日終値）"""
+    if hist is None or len(hist) < 2:
+        return None
+    prev_close = float(hist["Close"].iloc[-2])
+    today_open = float(hist["Open"].iloc[-1])
+    if prev_close <= 0:
+        return None
+    gap_pct = (today_open - prev_close) / prev_close * 100
+    if gap_pct <= -3.0:
+        return {"level": "danger",  "code": "GAP_DOWN",
+                "msg": f"ギャップダウン {gap_pct:.1f}% (本日始値)"}
+    if gap_pct <= -1.5:
+        return {"level": "warning", "code": "GAP_DOWN",
+                "msg": f"窓開け下落 {gap_pct:.1f}% (本日始値)"}
+    return None
+
+
+def _check_margin_ratio(symbol: str) -> dict | None:
+    """
+    信用倍率（信用買い残 ÷ 信用売り残）を株探から取得。
+    高倍率 + 下落中 → 追証（マージンコール）による強制売りリスク。
+    """
+    code = symbol.replace(".T", "").replace(".t", "")
+    try:
+        html  = _kabutan_get(f"https://kabutan.jp/stock/?code={code}")
+        plain = re.sub(r'<[^>]+>', ' ', html)
+        plain = re.sub(r'\s+', ' ', plain)
+        # 「信用倍率」の直後にある数値を取得
+        m = re.search(r'信用倍率\s*(\d+\.?\d*)', plain)
+        if not m:
+            return None
+        ratio = float(m.group(1))
+        if ratio >= 10.0:
+            return {"level": "danger",  "code": "MARGIN_HIGH",
+                    "msg": f"信用倍率 {ratio:.1f}倍 — 追証リスク高"}
+        if ratio >= 5.0:
+            return {"level": "warning", "code": "MARGIN_HIGH",
+                    "msg": f"信用倍率 {ratio:.1f}倍 — 追証リスク注意"}
+    except Exception:
+        pass
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 一括事前計算
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_one(symbol: str, name: str, target_date: date | None) -> list[dict]:
+    # yfinance データを1回だけ取得（複数チェックで共有）
+    hist = _fetch_ohlcv(symbol, period="6mo")
+
     flags: list[dict] = []
     for fn in [
         lambda: _check_negative_news(symbol, name),
         lambda: _check_earnings_proximity(symbol, target_date),
         lambda: _check_earnings_season(target_date),
-        lambda: _check_volume_price_divergence(symbol),
-        lambda: _check_atr_spike(symbol),
+        lambda: _check_volume_price_divergence(hist),
+        lambda: _check_atr_spike(hist),
+        lambda: _check_consecutive_decline(hist),
+        lambda: _check_ma_death_cross(hist),
+        lambda: _check_gap_down(hist),
+        lambda: _check_margin_ratio(symbol),
     ]:
         try:
             r = fn()
