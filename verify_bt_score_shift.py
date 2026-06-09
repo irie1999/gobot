@@ -26,7 +26,12 @@ parser.add_argument("--symbol",   default="4631.T", help="銘柄コード (デ�
 parser.add_argument("--strategy", default="RSI2",   help="戦略 (MACD/A7/RSI2/DON/VOL/MOM)")
 parser.add_argument("--days",     type=int, default=3,
                     help="境界前後N日のトレードを強調 (デフォルト: 3)")
+parser.add_argument("--mode",     default=None, choices=["conservative", "aggressive"],
+                    help="トレードモード (デフォルト: 環境変数 TRADING_MODE または conservative)")
 args = parser.parse_args()
+
+if args.mode:
+    os.environ["TRADING_MODE"] = args.mode
 
 JST = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
@@ -59,7 +64,9 @@ from backtest_limit_entry import fetch, run_limit_backtest, BACKTEST_DAYS
 calc_fn, em, sm, tm = _mod.STRATEGY_PARAMS[args.strategy]
 ENTRY_TYPE = getattr(_mod, "ENTRY_TYPE", "stop")
 
-print(f"\n戦略パラメータ: em={em}  sm={sm}  tm={tm}  entry_type={ENTRY_TYPE}")
+mode_str = os.environ.get("TRADING_MODE", "conservative")
+print(f"\nトレードモード: {mode_str}")
+print(f"戦略パラメータ: em={em}  sm={sm}  tm={tm}  entry_type={ENTRY_TYPE}")
 print("データ取得・バックテスト実行中...")
 
 df = fetch(args.symbol, BACKTEST_DAYS + 30)  # 余裕を持たせてフェッチ
