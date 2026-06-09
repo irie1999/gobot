@@ -185,6 +185,9 @@ def _compute_metrics(trade_log: list[dict]) -> dict:
     sharpe = float(pnl_s.mean() / std * (20 ** 0.5)) if std > 0 else 0.0
     return {
         "trades":    n,
+        "wins":      len(wins),
+        "gp":        gp,
+        "gl":        gl,
         "win_rate":  len(wins) / n * 100,
         "pf":        min(pf, 10.0),
         "total_pnl": float(pnl_s.sum()),
