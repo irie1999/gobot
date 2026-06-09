@@ -221,7 +221,7 @@ _na._FROZEN_BT_SCORES.clear()
 for (_csym, _cstrat), _info in _cached_latest.items():
     _na._FROZEN_BT_SCORES[(_csym, _cstrat)] = _info["bt_score"]
 
-# ── シグナルタブ HTML ─────────────────────────────────────────────────────────
+# ── target_date 解決 ─────────────────────────────────────────────────────────
 target_date = None
 if _args.date:
     from datetime import date as _date_cls
@@ -231,6 +231,31 @@ if _args.date:
         pass
 
 date_str = _args.date or str(TODAY)
+
+# ── リスク警告・決算日の事前計算（シグナルHTML生成より前に実行） ──────────────
+# _all_configs からウォッチリスト全銘柄を収集して並列チェック
+_pre_symbols: dict[str, str] = {}
+for _cfg in _all_configs:
+    for _sym, _nm, _strat in _cfg.get("stop_wl", []) + _cfg.get("brk_wl", []):
+        if _sym and _sym not in _pre_symbols:
+            _pre_symbols[_sym] = _nm
+
+try:
+    from signal_risk_check import (
+        precompute_all     as _precompute_risks,
+        render_nikkei_banner as _render_nikkei_banner,
+    )
+    _precompute_risks(
+        list(_pre_symbols.items()),
+        workers=_args.workers,
+        target_date=target_date,
+    )
+    _nikkei_banner = _render_nikkei_banner()
+except Exception as _re:
+    print(f"[WARN] リスクチェックスキップ: {_re}", flush=True)
+    _nikkei_banner = ""
+
+# ── シグナルタブ HTML ─────────────────────────────────────────────────────────
 print("シグナル収集中...", flush=True)
 _na._PNL_CONFIGS[:] = _all_configs
 _sig_html = _na._tab4_signals_html(
@@ -398,25 +423,6 @@ if _signal_stocks:
             print(f"ニュースモデルスコア: {len(_signal_stocks)}銘柄 完了", flush=True)
     except Exception as _nst_e:
         print(f"[WARN] ニュースモデルスコア取得失敗: {_nst_e}", flush=True)
-
-# ── リスク警告チェック（シグナルバッジ用） ───────────────────────────────────
-_nikkei_banner = ""
-if _signal_stocks:
-    try:
-        from signal_risk_check import (
-            precompute_all as _precompute_risks,
-            render_nikkei_banner as _render_nikkei_banner,
-        )
-        _precompute_risks(
-            [(s, n) for s, n, _ in _signal_stocks],
-            workers=_args.workers,
-            target_date=target_date,
-        )
-        _nikkei_banner = _render_nikkei_banner()
-        if _nikkei_banner:
-            print("[INFO] 日経警告バナーを表示します", flush=True)
-    except Exception as _re:
-        print(f"[WARN] リスクチェックスキップ: {_re}", flush=True)
 
 # 日経バナー + ニュースモデルスコアをシグナルHTMLの先頭に追加
 if _nikkei_banner or _news_score_table_html:
