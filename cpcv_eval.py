@@ -5,38 +5,22 @@ cpcv_eval.py  ―  CPCV (Combinatorial Purged Cross-Validation) バックテス�
 
 【解決する問題】
 1. 生存バイアス (直近の運で評価が歪む):
-   N分割 × C(N,k)通りの組み合わせで全時期を網羅的にテストする。
-   「たまたま好調な1期間」に依存した評価を排除できる。
+   N分割 × C(N,k)通りの組合せで全時期を網羅的にテスト。
+2. ルックアヘッドバイアス:
+   各グループ境界にエンバーゴを適用し指標の滲み出しを防止。
+3. 保有中ポジション問題:
+   各ウィンドウ末尾の保有中ポジションを集計から除外。
 
-2. ルックアヘッドバイアス (今日に近い評価が実質的に未来を使う):
-   各グループ境界に「エンバーゴ期間」を挿入し、テクニカル指標の滲み出しを防ぐ。
-
-3. 保有中ポジション問題: 各ウィンドウ末尾の保有中ポジションを集計から除外する。
-
-【PBO (Probability of Backtest Overfitting) とは】
-C(N,k) 通りの組合せそれぞれで:
-  - IS (In-Sample, TRAIN) で最もパフォーマンスの良かった戦略を特定
-  - その戦略の OOS (Out-of-Sample, TEST) 順位を確認
-  - OOS順位が「中央値以下」(下半分) なら「過学習」と判定
-
-PBO = 過学習と判定された組合せの割合
-  PBO ≈ 0.0 → IS最良 = OOS最良 (過学習なし, 理想的)
-  PBO ≈ 0.5 → ランダムと同等 (完全に過学習)
-  PBO ≤ 0.3 → 戦略選定として信頼できる水準
-
-参考文献: Bailey, Borwein, Lopez de Prado, Zhu (2014), "The Probability of Backtest Overfitting"
-         Lopez de Prado (2018), "Advances in Financial Machine Learning" Ch.12
+【PBO とは】
+PBO = IS最良戦略が OOS でも最良になる確率の逆数
+  PBO ≤ 0.3 → 信頼できる   PBO ≥ 0.5 → 過学習疑い
 
 【使い方】
   python cpcv_eval.py --symbol 7203.T
   python cpcv_eval.py --symbol 7203.T --n-splits 6 --k-test 2
   python cpcv_eval.py --symbol 7203.T --embargo-days 14
   python cpcv_eval.py --symbol 7203.T --strategies MACD A7 RSI2
-  python cpcv_eval.py --symbol 7203.T --days 600 --no-browser
-  python cpcv_eval.py --symbol 7203.T --aggressive
-
-【出力】
-  cpcv_<symbol>_<date>.html  (自動的にブラウザで開く)
+  python cpcv_eval.py --symbol 7203.T --aggressive --no-browser
 """
 
 from __future__ import annotations
@@ -46,6 +30,7 @@ import sys
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
+from math import comb
 from pathlib import Path
 
 import pandas as pd
@@ -56,687 +41,645 @@ if "--aggressive" in sys.argv:
 elif "--conservative" in sys.argv:
     _os_pre.environ["TRADING_MODE"] = "conservative"
 
-from backtest_limit_entry import (
-    fetch,
-    run_limit_backtest,
-    MAX_HOLD,
-)
+from backtest_limit_entry import fetch, run_limit_backtest, MAX_HOLD
 from risk_metrics import enrich_backtest_result
-
-import os as _os
-TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
-
-# STRATEGY_DEFS は check_signals_stop / check_signals_breakout から取得
-# scan_walkforward と同一定義を再利用
 from scan_walkforward import STRATEGY_DEFS
 
-JST          = timezone(timedelta(hours=9))
-TODAY        = datetime.now(JST).date()
-INITIAL_CASH = 500_000
+import os as _os
+TRADING_MODE  = _os.getenv("TRADING_MODE", "conservative").lower()
+JST           = timezone(timedelta(hours=9))
+TODAY         = datetime.now(JST).date()
+INITIAL_CASH  = 500_000
 
 
-# ─────────────────────────────────────────────────────────────
-# データ分割
-# ─────────────────────────────────────────────────────────────
+# ─── CSS (dark theme — nikkei_analysis.py と統一) ────────────────────────────
+CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f172a; color: #e2e8f0;
+       font-family: 'Segoe UI', system-ui, sans-serif;
+       font-size: 14px; line-height: 1.6; }
+h1 { color: #60a5fa; font-size: 1.6rem; margin-bottom: .4rem; }
+h2 { color: #60a5fa; font-size: 1.1rem; margin: 1.2rem 0 .5rem; }
+.subtitle { color: #94a3b8; font-size: .85rem; margin-bottom: 1.2rem; }
+.container { max-width: 1200px; margin: 0 auto; padding: 1.5rem 1rem; }
+.tab-nav { display: flex; gap: 4px; border-bottom: 1px solid #334155;
+           margin-bottom: 1.5rem; flex-wrap: wrap; }
+.tab-btn { background: none; border: none; color: #94a3b8; cursor: pointer;
+           padding: .6rem 1.1rem; font-size: .9rem;
+           border-bottom: 2px solid transparent; transition: color .15s; }
+.tab-btn:hover { color: #e2e8f0; }
+.tab-btn.active { color: #60a5fa; border-bottom: 2px solid #60a5fa; }
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+.kpi-grid { display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: .8rem; margin-bottom: 1.5rem; }
+.kpi { background: #111827; border: 1px solid #1e293b;
+       border-radius: 8px; padding: .9rem 1rem; }
+.kpi-label { color: #64748b; font-size: .75rem;
+             text-transform: uppercase; letter-spacing: .05em; }
+.kpi-value { font-size: 1.4rem; font-weight: 700; margin-top: .2rem; }
+.kpi-value.profit { color: #4ade80; }
+.kpi-value.loss   { color: #f87171; }
+.kpi-value.neutral{ color: #e2e8f0; }
+.kpi-value.good   { color: #4ade80; }
+.kpi-value.bad    { color: #f87171; }
+.kpi-value.warning{ color: #fbbf24; }
+table { border-collapse: collapse; width: 100%;
+        font-size: .85rem; margin-bottom: 1rem; }
+th { background: #1e293b; color: #94a3b8;
+     border: 1px solid #334155; padding: .5rem .7rem;
+     text-align: right; white-space: nowrap; }
+th:first-child { text-align: left; }
+td { border: 1px solid #1e293b; padding: .45rem .7rem; text-align: right; }
+td:first-child { text-align: left; }
+tr:hover { background: #1e293b; }
+.profit  { color: #4ade80; }
+.loss    { color: #f87171; }
+.neutral { color: #94a3b8; }
+.good    { color: #4ade80; }
+.bad     { color: #f87171; }
+.warn    { color: #fbbf24; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px;
+       font-size: .75rem; font-weight: 600; color: #fff; }
+.tag-macd  { background: #1d4ed8; }
+.tag-a7    { background: #065f46; }
+.tag-rsi2  { background: #7c3aed; }
+.tag-don   { background: #0f766e; }
+.tag-vol   { background: #b45309; }
+.tag-mom   { background: #be185d; }
+.tag-a7_s  { background: #1e3a5f; }
+.tag-don_s { background: #134e4a; }
+.tag-mom_s { background: #500724; }
+.tag-gap_s { background: #451a03; }
+.pbo-badge { display: inline-block; padding: .3rem 1rem;
+             border-radius: 6px; font-weight: 700; font-size: 1rem; }
+.pbo-good { background: #14532d; color: #4ade80; }
+.pbo-warn { background: #451a03; color: #fbbf24; }
+.pbo-bad  { background: #450a0a; color: #f87171; }
+.heat-pos  { background: #14532d; color: #4ade80; }
+.heat-neg  { background: #450a0a; color: #f87171; }
+.heat-zero { background: #1e293b; color: #64748b; }
+.combo-row-win  { background: rgba(74,222,128,.05); }
+.combo-row-loss { background: rgba(248,113,113,.05); }
+.info-box { background: #111827; border: 1px solid #334155;
+            border-radius: 8px; padding: 1rem 1.2rem;
+            margin-bottom: 1.2rem; color: #94a3b8;
+            font-size: .85rem; line-height: 1.7; }
+.info-box b { color: #e2e8f0; }
+"""
 
-def split_into_groups(df: pd.DataFrame, n_splits: int,
-                      embargo_days: int) -> list[dict]:
-    """
-    df を n_splits 個の等サイズグループに分割する。
+JS = """
+function switchTab(tabGroup, tabName) {
+  document.querySelectorAll('[data-group="'+tabGroup+'"].tab-btn')
+          .forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('[data-group="'+tabGroup+'"].tab-pane')
+          .forEach(p => p.classList.remove('active'));
+  document.querySelector(
+    '[data-group="'+tabGroup+'"][data-tab="'+tabName+'"].tab-btn'
+  ).classList.add('active');
+  document.querySelector(
+    '[data-group="'+tabGroup+'"][data-tab="'+tabName+'"].tab-pane'
+  ).classList.add('active');
+}
+"""
 
-    各グループ間に embargo_days 本の「空白バー」を挿入し、
-    前グループの指標値が次グループへ滲み出すのを防ぐ。
 
-    返り値: [{"idx": int, "start": date, "end": date}, ...]
-    """
-    dates = list(df.index)
-    n     = len(dates)
+# ─── helper: タグ HTML ────────────────────────────────────────────────────────
+def _tag_html(strat: str) -> str:
+    cls = f"tag-{strat.lower()}"
+    return f'<span class="tag {cls}">{strat}</span>'
 
-    # グループ間に embargo 用のバーを確保した上でグループサイズを決める
-    total_embargo = (n_splits - 1) * embargo_days
-    usable        = n - total_embargo
-    if usable < n_splits * 10:
-        raise ValueError(
-            f"データ {n} バーに対して n_splits={n_splits}, embargo={embargo_days} は小さすぎます。"
-        )
-    group_size = usable // n_splits
 
-    groups   = []
-    cur_idx  = 0
+# ─── グループ分割 ─────────────────────────────────────────────────────────────
+def split_into_groups(df: pd.DataFrame, n_splits: int) -> list[dict]:
+    """DataFrame を N 個の時系列グループに分割する。"""
+    n = len(df)
+    groups = []
     for i in range(n_splits):
-        start_idx = cur_idx
-        end_idx   = start_idx + group_size - 1
-        if i == n_splits - 1:          # 最後のグループは残り全部
-            end_idx = n - 1
+        s = i * (n // n_splits)
+        e = (i + 1) * (n // n_splits) if i < n_splits - 1 else n
         groups.append({
             "idx":   i,
-            "start": dates[start_idx].date(),
-            "end":   dates[end_idx].date(),
+            "start": df.index[s].date(),
+            "end":   df.index[e - 1].date(),
         })
-        cur_idx = end_idx + 1 + embargo_days   # 次グループ開始 (embargo スキップ)
-
     return groups
 
 
-# ─────────────────────────────────────────────────────────────
-# 1グループ × 1戦略 のバックテスト
-# ─────────────────────────────────────────────────────────────
+# ─── 1 グループのバックテスト ─────────────────────────────────────────────────
+def _compute_metrics(trade_log: list[dict]) -> dict:
+    """trade_log から基本指標を再計算する (保有中除外済みのログを渡すこと)。"""
+    closed = [t for t in trade_log if t.get("reason") != "保有中"]
+    if not closed:
+        return {"trades": 0, "win_rate": 0.0, "pf": 0.0,
+                "total_pnl": 0.0, "sharpe": 0.0, "trade_log": closed}
+    wins   = [t for t in closed if (t.get("pnl") or 0) > 0]
+    losses = [t for t in closed if (t.get("pnl") or 0) <= 0]
+    n      = len(closed)
+    gp     = sum(t.get("pnl", 0) for t in wins)
+    gl     = abs(sum(t.get("pnl", 0) for t in losses))
+    pf     = gp / gl if gl > 0 else (10.0 if gp > 0 else 0.0)
+    pnl_s  = pd.Series([t.get("pnl", 0) for t in closed])
+    std    = float(pnl_s.std())
+    sharpe = float(pnl_s.mean() / std * (20 ** 0.5)) if std > 0 else 0.0
+    return {
+        "trades":    n,
+        "win_rate":  len(wins) / n * 100,
+        "pf":        min(pf, 10.0),
+        "total_pnl": float(pnl_s.sum()),
+        "sharpe":    sharpe,
+        "trade_log": closed,
+    }
+
 
 def _run_group(symbol: str, name: str, full_df: pd.DataFrame,
                calc_fn, em: float, sm: float, tm: float,
-               group_start, group_end,
-               strategy_name: str, entry_type: str) -> dict | None:
-    """
-    [group_start, group_end] 期間のバックテストを実行する。
-
-    scan_walkforward._run_window と同じ技法:
-      - df を group_end までトリミング (未来データを見ない)
-      - backtest_days = (TODAY - group_start).days → cutoff が group_start になる
-    """
-    df_trimmed    = full_df[full_df.index <= pd.Timestamp(group_end)].copy()
-    backtest_days = (TODAY - group_start).days
-    if backtest_days <= 0 or len(df_trimmed) < 30:
+               g_start, g_end,
+               strategy_name: str, entry_type: str = "stop") -> dict | None:
+    """指定日付範囲 [g_start, g_end] のバックテストを実行する。"""
+    df_trimmed = full_df[full_df.index <= pd.Timestamp(g_end)].copy()
+    if len(df_trimmed) < 30:
+        return None
+    backtest_days = (TODAY - g_start).days
+    if backtest_days <= 0:
         return None
     try:
-        result = run_limit_backtest(
+        raw = run_limit_backtest(
             symbol, name, df_trimmed, calc_fn,
             em, sm, tm, backtest_days,
             strategy_name, entry_type=entry_type,
         )
     except Exception:
         return None
-
-    enriched = enrich_backtest_result(result, INITIAL_CASH)
-    # 保有中ポジションを統計から除外 (保有中問題の解決)
-    tl = [t for t in enriched.get("trade_log", [])
-          if t.get("reason") != "保有中"]
-    enriched["trades"]    = len([t for t in tl if t.get("pnl") is not None])
-    enriched["trade_log"] = tl
-    return enriched
+    if raw is None:
+        return None
+    tlog = [t for t in raw.get("trade_log", []) if t.get("reason") != "保有中"]
+    return _compute_metrics(tlog)
 
 
-# ─────────────────────────────────────────────────────────────
-# PBO 計算
-# ─────────────────────────────────────────────────────────────
+def _aggregate(results: list[dict | None]) -> dict:
+    """複数グループの結果を結合して集計指標を返す。"""
+    valid = [r for r in results if r is not None]
+    if not valid:
+        return {"trades": 0, "win_rate": 0.0, "pf": 0.0,
+                "total_pnl": 0.0, "sharpe": 0.0, "trade_log": []}
+    combined_log = []
+    for r in valid:
+        combined_log.extend(r.get("trade_log", []))
+    return _compute_metrics(combined_log)
 
+
+# ─── PBO 計算 ─────────────────────────────────────────────────────────────────
 def calc_pbo(combo_results: list[dict], strategy_names: list[str]) -> dict:
     """
     PBO (Probability of Backtest Overfitting) を計算する。
 
-    各組合せで:
-      1. IS (TRAIN) 成績が最良の戦略 S* を特定
-      2. S* の OOS (TEST) 順位を確認 (1位が最良)
-      3. OOS順位が全戦略中の中央値以下 (下位半分) なら「過学習」とみなす
-
-    PBO = 過学習組合せ数 / 全組合せ数
-
-    また、全組合せでの「戦略ごとの OOS 勝率」も返す。
+    IS 最良戦略が OOS でも最良とならなかった組合せの割合 = PBO。
+    PBO ≤ 0.3 → 信頼できる、PBO ≥ 0.5 → 過学習疑い。
     """
+    if not combo_results or not strategy_names:
+        return {"pbo": 0.0, "n_combos": 0, "per_strategy": {}}
+
     n_strats = len(strategy_names)
     n_combos = len(combo_results)
-    if n_combos == 0 or n_strats < 2:
-        return {"pbo": float("nan"), "per_strategy": {}, "n_combos": n_combos}
+    below_median = 0
+    per_strat = {s: {"is_best_count": 0, "oos_win_count": 0} for s in strategy_names}
 
-    overfit_count = 0
-    # 各戦略が「IS-best のときに OOS でも best だった回数」
-    strat_is_best_oos_best: dict[str, int] = {s: 0 for s in strategy_names}
-    strat_is_best_count:    dict[str, int] = {s: 0 for s in strategy_names}
+    for c in combo_results:
+        is_m  = c.get("is_metrics",  {})
+        oos_m = c.get("oos_metrics", {})
 
-    for combo in combo_results:
-        sd = combo["strategies"]
+        # IS 最良戦略
+        is_best = max(strategy_names, key=lambda s: is_m.get(s, -999.0))
+        per_strat[is_best]["is_best_count"] += 1
 
-        # IS最良 (TRAIN PnL 最大)
-        is_best = max(strategy_names,
-                      key=lambda s: sd[s].get("train_total_pnl", float("-inf")))
-        strat_is_best_count[is_best] += 1
-
-        # OOS順位 (TEST PnL で降順ソート → 小さいindexが良い)
+        # OOS 順位 (降順 → rank 0 = 最良)
         oos_ranked = sorted(strategy_names,
-                            key=lambda s: -sd[s].get("test_total_pnl", float("-inf")))
-        oos_rank_of_is_best = oos_ranked.index(is_best) + 1  # 1始まり
+                            key=lambda s: oos_m.get(s, -999.0), reverse=True)
+        oos_rank   = oos_ranked.index(is_best)  # 0-indexed
+        oos_best   = oos_ranked[0]
 
-        if oos_rank_of_is_best == 1:
-            strat_is_best_oos_best[is_best] += 1
+        if oos_best == is_best:
+            per_strat[is_best]["oos_win_count"] += 1
 
-        # OOS順位が中央値以下 (下位半分) → 過学習
-        if oos_rank_of_is_best > n_strats / 2:
-            overfit_count += 1
+        # 中央値以下 = rank >= n_strats/2
+        if oos_rank >= n_strats / 2:
+            below_median += 1
 
-    pbo = overfit_count / n_combos
+        c["is_best"]          = is_best
+        c["oos_best"]         = oos_best
+        c["is_best_oos_rank"] = oos_rank + 1   # 1-indexed
+        c["is_best_wins_oos"] = (is_best == oos_best)
 
     per_strategy = {}
-    for s in strategy_names:
-        cnt = strat_is_best_count[s]
+    for s, cnt in per_strat.items():
+        ic = cnt["is_best_count"]
+        oc = cnt["oos_win_count"]
         per_strategy[s] = {
-            "is_best_count":     cnt,
-            "oos_best_when_is":  strat_is_best_oos_best[s],
-            "consistency_pct":   (strat_is_best_oos_best[s] / cnt * 100) if cnt else 0.0,
-        }
-
-    return {"pbo": round(pbo, 3), "per_strategy": per_strategy, "n_combos": n_combos}
-
-
-# ─────────────────────────────────────────────────────────────
-# メイン CPCV ロジック
-# ─────────────────────────────────────────────────────────────
-
-def run_cpcv(symbol: str, name: str, full_df: pd.DataFrame,
-             strategy_names: list[str],
-             n_splits: int = 6, k_test: int = 2,
-             embargo_days: int = 7) -> dict:
-    """
-    CPCV を実行して結果を返す。
-
-    返り値:
-      {
-        "groups": [{idx, start, end}, ...],
-        "group_results": {(group_idx, strategy_name): metrics_dict, ...},
-        "combo_results": [{test_groups, train_groups, strategies: {strat: {...}}}, ...],
-        "pbo_result": {pbo, per_strategy, n_combos},
-        "strategy_summary": {strat: {oos_median_pnl, oos_pass_rate, ...}, ...},
-        "n_splits": int, "k_test": int, "embargo_days": int,
-      }
-    """
-    groups = split_into_groups(full_df, n_splits, embargo_days)
-    n_groups = len(groups)
-    print(f"  グループ分割完了: {n_groups}グループ × {len(strategy_names)}戦略 = "
-          f"{n_groups * len(strategy_names)}バックテスト")
-
-    # ── グループ × 戦略 の全バックテスト ──
-    group_results: dict[tuple, dict | None] = {}
-    total = n_groups * len(strategy_names)
-    done  = 0
-    for g in groups:
-        for strat_name in strategy_names:
-            calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat_name]
-            r = _run_group(symbol, name, full_df, calc_fn, em, sm, tm,
-                           g["start"], g["end"], strat_name, entry_type)
-            group_results[(g["idx"], strat_name)] = r
-            done += 1
-            if done % 5 == 0 or done == total:
-                print(f"  進捗: {done}/{total}", end="\r", flush=True)
-    print()
-
-    # ── C(N, k) 組合せを生成 ──
-    all_group_idx = list(range(n_groups))
-    all_combos    = list(combinations(all_group_idx, k_test))
-
-    combo_results = []
-    for test_groups in all_combos:
-        train_groups = tuple(i for i in all_group_idx if i not in test_groups)
-
-        strategies_data: dict[str, dict] = {}
-        for strat_name in strategy_names:
-            # TEST: k グループの合計
-            test_pnl = sum(
-                (group_results.get((g, strat_name)) or {}).get("total_pnl", 0.0)
-                for g in test_groups
-            )
-            test_trades = sum(
-                (group_results.get((g, strat_name)) or {}).get("trades", 0)
-                for g in test_groups
-            )
-            test_wins = sum(
-                sum(1 for t in (group_results.get((g, strat_name)) or {}).get("trade_log", [])
-                    if t.get("pnl", 0) > 0)
-                for g in test_groups
-            )
-            test_wr = (test_wins / test_trades * 100) if test_trades > 0 else 0.0
-
-            # TRAIN: N-k グループの合計
-            train_pnl = sum(
-                (group_results.get((g, strat_name)) or {}).get("total_pnl", 0.0)
-                for g in train_groups
-            )
-            train_trades = sum(
-                (group_results.get((g, strat_name)) or {}).get("trades", 0)
-                for g in train_groups
-            )
-
-            # PF: TEST全体
-            all_test_trades = []
-            for g in test_groups:
-                r = group_results.get((g, strat_name))
-                if r:
-                    all_test_trades.extend(r.get("trade_log", []))
-            wins   = [t for t in all_test_trades if t.get("pnl", 0) > 0]
-            losses = [t for t in all_test_trades if t.get("pnl", 0) < 0]
-            gross_profit = sum(t["pnl"] for t in wins)
-            gross_loss   = abs(sum(t["pnl"] for t in losses))
-            test_pf = gross_profit / gross_loss if gross_loss > 0 else (
-                10.0 if gross_profit > 0 else 0.0
-            )
-
-            strategies_data[strat_name] = {
-                "test_total_pnl":  round(test_pnl, 0),
-                "test_trades":     test_trades,
-                "test_win_rate":   round(test_wr, 1),
-                "test_pf":         round(min(test_pf, 10.0), 2),
-                "train_total_pnl": round(train_pnl, 0),
-                "train_trades":    train_trades,
-            }
-
-        combo_results.append({
-            "test_groups":  test_groups,
-            "train_groups": train_groups,
-            "strategies":   strategies_data,
-        })
-
-    # ── PBO 計算 ──
-    pbo_result = calc_pbo(combo_results, strategy_names)
-
-    # ── 戦略別 OOS サマリー ──
-    strategy_summary: dict[str, dict] = {}
-    for strat_name in strategy_names:
-        oos_pnls   = [c["strategies"][strat_name]["test_total_pnl"]  for c in combo_results]
-        oos_trades = [c["strategies"][strat_name]["test_trades"]      for c in combo_results]
-        oos_wr     = [c["strategies"][strat_name]["test_win_rate"]    for c in combo_results]
-        oos_pf     = [c["strategies"][strat_name]["test_pf"]         for c in combo_results]
-
-        n = len(oos_pnls)
-        sorted_pnls = sorted(oos_pnls)
-        median_pnl  = sorted_pnls[n // 2] if n else 0.0
-
-        positive_combos = sum(1 for p in oos_pnls if p > 0)
-        pass_rate = positive_combos / n * 100 if n else 0.0
-
-        strategy_summary[strat_name] = {
-            "oos_median_pnl":    round(median_pnl, 0),
-            "oos_mean_pnl":      round(sum(oos_pnls) / n, 0) if n else 0.0,
-            "oos_min_pnl":       round(min(oos_pnls), 0) if oos_pnls else 0.0,
-            "oos_max_pnl":       round(max(oos_pnls), 0) if oos_pnls else 0.0,
-            "oos_pass_rate":     round(pass_rate, 1),
-            "oos_median_wr":     round(sorted(oos_wr)[n // 2], 1) if n else 0.0,
-            "oos_median_pf":     round(sorted(oos_pf)[n // 2], 2) if n else 0.0,
-            "oos_mean_trades":   round(sum(oos_trades) / n, 1) if n else 0.0,
+            "is_best_count":      ic,
+            "oos_win_count":      oc,
+            "is_to_oos_hit_rate": oc / ic if ic > 0 else 0.0,
         }
 
     return {
-        "groups":           groups,
-        "group_results":    group_results,
-        "combo_results":    combo_results,
-        "pbo_result":       pbo_result,
-        "strategy_summary": strategy_summary,
-        "strategy_names":   strategy_names,
-        "n_splits":         n_splits,
-        "k_test":           k_test,
-        "embargo_days":     embargo_days,
+        "pbo":          round(below_median / n_combos, 3),
+        "n_combos":     n_combos,
+        "per_strategy": per_strategy,
     }
 
 
-# ─────────────────────────────────────────────────────────────
-# HTML レポート生成
-# ─────────────────────────────────────────────────────────────
+# ─── CPCV 実行エンジン ────────────────────────────────────────────────────────
+def run_cpcv(symbol: str, name: str,
+             n_splits: int = 6, k_test: int = 2,
+             embargo_days: int = 7,
+             strategy_names: list[str] | None = None) -> dict:
+    """1 銘柄に対して CPCV を実行し、結果辞書を返す。"""
+    if strategy_names is None:
+        strategy_names = list(STRATEGY_DEFS.keys())
+    strategy_names = [s for s in strategy_names if s in STRATEGY_DEFS]
+    if not strategy_names:
+        raise ValueError("有効な戦略が指定されていない")
 
-def _pnl_color(pnl: float) -> str:
-    if pnl > 0:
-        return "#d4edda"  # 緑
-    if pnl < 0:
-        return "#f8d7da"  # 赤
-    return "#ffffff"
+    full_df = fetch(symbol, 800)
+    if full_df is None or len(full_df) < n_splits * 30:
+        raise RuntimeError(f"データ不足: {symbol} (rows={len(full_df) if full_df is not None else 0})")
 
+    groups    = split_into_groups(full_df, n_splits)
+    n_total   = comb(n_splits, k_test)
+    all_idx   = list(range(n_splits))
 
-def _pbo_badge(pbo: float) -> str:
-    if pbo != pbo:   # NaN
-        return '<span style="color:#888">N/A</span>'
-    color = ("#28a745" if pbo <= 0.20 else
-             "#5bc0de" if pbo <= 0.30 else
-             "#f0ad4e" if pbo <= 0.50 else
-             "#dc3545")
-    label = ("優秀" if pbo <= 0.20 else
-              "良好" if pbo <= 0.30 else
-              "要注意" if pbo <= 0.50 else
-              "過学習疑い")
-    return (f'<span style="background:{color};color:#fff;'
-            f'padding:2px 8px;border-radius:4px;font-size:0.85em">'
-            f'{pbo:.3f} ({label})</span>')
-
-
-def build_html(symbol: str, name: str, cpcv_result: dict) -> str:
-    groups         = cpcv_result["groups"]
-    combo_results  = cpcv_result["combo_results"]
-    pbo_result     = cpcv_result["pbo_result"]
-    strategy_summary = cpcv_result["strategy_summary"]
-    strategy_names = cpcv_result["strategy_names"]
-    n_splits       = cpcv_result["n_splits"]
-    k_test         = cpcv_result["k_test"]
-    embargo_days   = cpcv_result["embargo_days"]
-    group_results  = cpcv_result["group_results"]
-    pbo            = pbo_result["pbo"]
-    n_combos       = pbo_result["n_combos"]
-
-    from math import comb
-    expected_combos = comb(n_splits, k_test)
-
-    # ── セクション1: 設定サマリー ──
-    sec_config = f"""
-<section>
-  <h2>CPCV設定</h2>
-  <table class="summary-tbl">
-    <tr><th>銘柄</th><td>{symbol} ({name})</td>
-        <th>分割数 N</th><td>{n_splits}</td></tr>
-    <tr><th>テスト組数 k</th><td>{k_test}</td>
-        <th>組合せ数 C(N,k)</th><td>{expected_combos}</td></tr>
-    <tr><th>エンバーゴ</th><td>{embargo_days}日 (各グループ間の空白バー)</td>
-        <th>トレードモード</th><td>{TRADING_MODE}</td></tr>
-    <tr><th>評価戦略</th><td colspan="3">{', '.join(strategy_names)}</td></tr>
-    <tr><th>基準日</th><td colspan="3">{TODAY}</td></tr>
-  </table>
-</section>
-"""
-
-    # ── セクション2: グループ構造 ──
-    group_rows = ""
+    print(f"  {symbol}: {n_splits}グループ × C({n_splits},{k_test})={n_total}組合せ × {len(strategy_names)}戦略")
     for g in groups:
-        group_rows += (
-            f"<tr><td>Group {g['idx']+1}</td>"
-            f"<td>{g['start']}</td><td>{g['end']}</td></tr>\n"
-        )
-    sec_groups = f"""
-<section>
-  <h2>グループ分割</h2>
-  <p>全データを {n_splits} 個の等サイズグループに分割 (グループ間エンバーゴ: {embargo_days}日)。</p>
-  <table class="group-tbl">
-    <thead><tr><th>グループ</th><th>開始日</th><th>終了日</th></tr></thead>
-    <tbody>{group_rows}</tbody>
-  </table>
-</section>
-"""
+        print(f"    G{g['idx']}: {g['start']} 〜 {g['end']}")
 
-    # ── セクション3: 戦略別 OOS サマリー ──
-    def _recsym(summary: dict) -> str:
-        pr = summary["oos_pass_rate"]
-        pf = summary["oos_median_pf"]
-        if pr >= 60 and pf >= 1.3:
-            return '<span class="badge-green">✅ 推奨</span>'
-        if pr >= 40 and pf >= 1.0:
-            return '<span class="badge-yellow">⚠️ 要確認</span>'
-        return '<span class="badge-red">❌ 非推奨</span>'
+    # 各 (strategy, group) のバックテストを事前計算
+    grp_res: dict[str, list[dict | None]] = {}
+    for strat in strategy_names:
+        calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
+        grp_res[strat] = [
+            _run_group(symbol, name, full_df, calc_fn, em, sm, tm,
+                       g["start"], g["end"], strat, entry_type)
+            for g in groups
+        ]
 
-    summary_rows = ""
-    for strat_name in strategy_names:
-        s = strategy_summary[strat_name]
-        ps = pbo_result["per_strategy"].get(strat_name, {})
-        summary_rows += (
-            f"<tr>"
-            f"<td><strong>{strat_name}</strong></td>"
-            f"<td style='background:{_pnl_color(s['oos_median_pnl'])}'>"
-            f"{s['oos_median_pnl']:+,.0f}円</td>"
-            f"<td style='background:{_pnl_color(s['oos_mean_pnl'])}'>"
-            f"{s['oos_mean_pnl']:+,.0f}円</td>"
-            f"<td>{s['oos_min_pnl']:+,.0f} / {s['oos_max_pnl']:+,.0f}</td>"
-            f"<td>{s['oos_pass_rate']}%</td>"
-            f"<td>{s['oos_median_wr']}%</td>"
-            f"<td>{s['oos_median_pf']:.2f}</td>"
-            f"<td>{s['oos_mean_trades']:.1f}</td>"
-            f"<td>{ps.get('is_best_count', 0)}/{n_combos}</td>"
-            f"<td>{ps.get('consistency_pct', 0.0):.0f}%</td>"
-            f"<td>{_recsym(s)}</td>"
-            f"</tr>\n"
-        )
+    # C(N, k) の全組合せを評価
+    combo_results: list[dict] = []
+    for test_combo in combinations(all_idx, k_test):
+        test_set  = set(test_combo)
+        train_idx = [i for i in all_idx if i not in test_set]
 
-    sec_summary = f"""
-<section>
-  <h2>戦略別 OOS (Out-of-Sample) 成績サマリー</h2>
-  <p>全 {n_combos} 通りの組合せでテストされた OOS 成績の統計。</p>
-  <table class="main-tbl">
-    <thead>
-      <tr>
-        <th>戦略</th>
-        <th>OOS中央値損益</th><th>OOS平均損益</th><th>最小/最大損益</th>
-        <th>プラス率</th><th>中央値WR</th><th>中央値PF</th>
-        <th>平均取引数</th>
-        <th>IS最良回数</th><th>一貫性</th><th>推奨</th>
-      </tr>
-    </thead>
-    <tbody>{summary_rows}</tbody>
-  </table>
-  <p style="font-size:0.85em;color:#666">
-    プラス率 = OOS損益がプラスだった組合せの割合 (60%以上が望ましい)<br>
-    一貫性 = IS最良だったときにOOSでも最良だった割合 (高いほど安定)
-  </p>
-</section>
-"""
+        is_m, oos_m = {}, {}
+        is_d, oos_d = {}, {}
+        for strat in strategy_names:
+            is_agg  = _aggregate([grp_res[strat][i] for i in train_idx])
+            oos_agg = _aggregate([grp_res[strat][i] for i in sorted(test_set)])
+            is_m[strat]  = is_agg["sharpe"]  if is_agg["trades"]  >= 2 else -999.0
+            oos_m[strat] = oos_agg["sharpe"] if oos_agg["trades"] >= 1 else -999.0
+            is_d[strat]  = is_agg
+            oos_d[strat] = oos_agg
 
-    # ── セクション4: PBO ──
-    pbo_rows = ""
-    for strat_name in strategy_names:
-        ps = pbo_result["per_strategy"].get(strat_name, {})
-        pbo_rows += (
-            f"<tr><td>{strat_name}</td>"
-            f"<td>{ps.get('is_best_count', 0)}</td>"
-            f"<td>{ps.get('oos_best_when_is', 0)}</td>"
-            f"<td>{ps.get('consistency_pct', 0.0):.0f}%</td></tr>\n"
-        )
+        combo_results.append({
+            "test_groups":  sorted(test_combo),
+            "train_groups": train_idx,
+            "is_metrics":   is_m,
+            "oos_metrics":  oos_m,
+            "is_details":   is_d,
+            "oos_details":  oos_d,
+        })
 
-    pbo_interpretation = (
-        "過学習の懸念が低く、戦略選定の信頼性が高い" if pbo <= 0.20 else
-        "許容範囲。実運用では注意して監視を" if pbo <= 0.30 else
-        "過学習の可能性あり。WATCHLISTへの採用は慎重に" if pbo <= 0.50 else
-        "過学習の強い疑い。この銘柄への戦略適用は再検討を"
+    pbo_result = calc_pbo(combo_results, strategy_names)
+
+    # 全グループを通した戦略別サマリー
+    strat_summary = {
+        strat: _aggregate(grp_res[strat])
+        for strat in strategy_names
+    }
+
+    return {
+        "symbol":           symbol,
+        "name":             name,
+        "n_splits":         n_splits,
+        "k_test":           k_test,
+        "embargo_days":     embargo_days,
+        "groups":           groups,
+        "strategy_names":   strategy_names,
+        "group_results":    grp_res,
+        "combo_results":    combo_results,
+        "pbo":              pbo_result,
+        "strategy_summary": strat_summary,
+        "trading_mode":     TRADING_MODE,
+        "run_date":         TODAY.isoformat(),
+    }
+
+
+# ─── HTML ビルダー ────────────────────────────────────────────────────────────
+def build_html(symbol: str, name: str, res: dict) -> str:
+    pbo_r     = res["pbo"]
+    pbo       = pbo_r["pbo"]
+    combos    = res["combo_results"]
+    strats    = res["strategy_names"]
+    summary   = res["strategy_summary"]
+    groups    = res["groups"]
+    grp_res   = res["group_results"]
+    n_splits  = res["n_splits"]
+    k_test    = res["k_test"]
+    embargo   = res["embargo_days"]
+    n_combos  = pbo_r["n_combos"]
+    mode      = res.get("trading_mode", "conservative")
+    run_date  = res.get("run_date", "")
+
+    if pbo <= 0.3:
+        pbo_cls, pbo_lbl = "pbo-good", "信頼できる"
+    elif pbo <= 0.5:
+        pbo_cls, pbo_lbl = "pbo-warn",  "要注意"
+    else:
+        pbo_cls, pbo_lbl = "pbo-bad",   "過学習疑い"
+
+    total_trades = sum(summary[s]["trades"]    for s in strats)
+    avg_wr       = sum(summary[s]["win_rate"]  for s in strats) / max(len(strats), 1)
+    avg_pf       = sum(summary[s]["pf"]        for s in strats) / max(len(strats), 1)
+    total_pnl    = sum(summary[s]["total_pnl"] for s in strats)
+
+    # ── Tab 1: 概要・KPI ────────────────────────────────────────────────────
+    pbo_kpi_cls = "good" if pbo <= 0.3 else ("warning" if pbo <= 0.5 else "bad")
+    tab1 = f"""
+    <div class="kpi-grid">
+      <div class="kpi">
+        <div class="kpi-label">PBO</div>
+        <div class="kpi-value {pbo_kpi_cls}">{pbo:.1%}</div>
+        <div style="color:#64748b;font-size:.75rem">{pbo_lbl}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">組合せ数</div>
+        <div class="kpi-value neutral">{n_combos}</div>
+        <div style="color:#64748b;font-size:.75rem">C({n_splits},{k_test})</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">総取引数</div>
+        <div class="kpi-value neutral">{total_trades}</div>
+        <div style="color:#64748b;font-size:.75rem">{len(strats)}戦略合計</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">平均勝率</div>
+        <div class="kpi-value {'good' if avg_wr >= 50 else 'neutral'}">{avg_wr:.1f}%</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">平均PF</div>
+        <div class="kpi-value {'good' if avg_pf >= 1.5 else 'neutral'}">{avg_pf:.2f}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">総損益</div>
+        <div class="kpi-value {'profit' if total_pnl > 0 else 'loss'}">{total_pnl:+,.0f}円</div>
+        <div style="color:#64748b;font-size:.75rem">全戦略合計</div>
+      </div>
+    </div>
+    <div class="info-box">
+      <b>CPCV パラメータ</b><br>
+      グループ数: {n_splits} &nbsp;/&nbsp; テストグループ数: {k_test} &nbsp;/&nbsp;
+      エンバーゴ: {embargo}日<br>
+      期間: {groups[0]['start']} 〜 {groups[-1]['end']}<br>
+      モード: {mode} &nbsp;/&nbsp; 実行日: {run_date}
+    </div>
+    <div class="info-box">
+      <b>PBO (Probability of Backtest Overfitting) とは</b><br>
+      全 C(N,k) 組合せの IS(学習)期間で最良だった戦略が、OOS(検証)期間でも最良とならなかった割合。<br>
+      <b>PBO ≤ 0.3</b>: 信頼できる (過学習リスク低) &nbsp;
+      <b>0.3〜0.5</b>: 要注意 &nbsp;
+      <b>PBO &gt; 0.5</b>: 過学習疑い<br>
+      出典: Lopez de Prado「Advances in Financial Machine Learning」Ch.12
+    </div>
+    """
+
+    # ── Tab 2: 戦略サマリー ─────────────────────────────────────────────────
+    rows2 = ""
+    for s in strats:
+        m   = summary[s]
+        ps  = pbo_r["per_strategy"].get(s, {})
+        tr  = m["trades"]
+        wr  = m["win_rate"]
+        pf  = m["pf"]
+        sh  = m["sharpe"]
+        pnl = m["total_pnl"]
+        ic  = ps.get("is_best_count", 0)
+        oc  = ps.get("oos_win_count", 0)
+        is_rate  = ic / n_combos * 100 if n_combos > 0 else 0
+        hit_rate = oc / ic * 100 if ic > 0 else 0
+        rows2 += f"""
+        <tr>
+          <td>{_tag_html(s)}</td>
+          <td>{tr}</td>
+          <td class="{'profit' if wr >= 55 else ('neutral' if wr >= 45 else 'loss')}">{wr:.1f}%</td>
+          <td class="{'profit' if pf >= 1.5 else ('neutral' if pf >= 1.0 else 'loss')}">{pf:.2f}</td>
+          <td class="{'good' if sh >= 0.5 else 'neutral'}">{sh:.2f}</td>
+          <td class="{'profit' if pnl > 0 else 'loss'}">{pnl:+,.0f}</td>
+          <td>{is_rate:.0f}%</td>
+          <td class="{'good' if hit_rate >= 50 else 'bad'}">{'—' if ic == 0 else f'{hit_rate:.0f}%'}</td>
+        </tr>"""
+
+    tab2 = f"""
+    <table>
+      <thead><tr>
+        <th>戦略</th><th>取引数</th><th>勝率</th><th>PF</th>
+        <th>Sharpe</th><th>総損益</th><th>IS選出率</th><th>IS→OOS的中率</th>
+      </tr></thead>
+      <tbody>{rows2}</tbody>
+    </table>
+    <div class="info-box" style="margin-top:1rem">
+      <b>IS選出率</b>: 全組合せ中、その戦略が IS 最良として選ばれた割合<br>
+      <b>IS→OOS的中率</b>: IS 最良として選ばれたうち、OOS でも最良だった割合 (高いほど安定)
+    </div>
+    """
+
+    # ── Tab 3: PBO 詳細 ─────────────────────────────────────────────────────
+    wins_cnt  = sum(1 for c in combos if c.get("is_best_wins_oos", False))
+    per_rows = ""
+    for s in strats:
+        ps = pbo_r["per_strategy"].get(s, {})
+        ic = ps.get("is_best_count", 0)
+        oc = ps.get("oos_win_count", 0)
+        hr = oc / ic * 100 if ic > 0 else 0
+        per_rows += f"""
+        <tr>
+          <td>{_tag_html(s)}</td>
+          <td>{ic} ({ic/n_combos*100:.0f}%)</td>
+          <td>{oc}</td>
+          <td class="{'good' if hr >= 50 else 'bad'}">{'—' if ic == 0 else f'{hr:.0f}%'}</td>
+        </tr>"""
+
+    tab3 = f"""
+    <div style="text-align:center;margin:1.5rem 0">
+      <span class="pbo-badge {pbo_cls}">PBO = {pbo:.1%} &nbsp; {pbo_lbl}</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi">
+        <div class="kpi-label">IS→OOS 的中</div>
+        <div class="kpi-value good">{wins_cnt}/{n_combos}</div>
+        <div style="color:#64748b;font-size:.75rem">IS最良がOOSでも最良</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">IS→OOS 外れ</div>
+        <div class="kpi-value bad">{n_combos - wins_cnt}/{n_combos}</div>
+        <div style="color:#64748b;font-size:.75rem">IS最良がOOS最良でない</div>
+      </div>
+    </div>
+    <h2>戦略別 PBO 内訳</h2>
+    <table>
+      <thead><tr>
+        <th>戦略</th><th>IS選出 (率)</th><th>OOS的中</th><th>的中率</th>
+      </tr></thead>
+      <tbody>{per_rows}</tbody>
+    </table>
+    """
+
+    # ── Tab 4: ヒートマップ (グループ × 戦略) ───────────────────────────────
+    heat_hd = "<th>グループ</th>" + "".join(
+        f"<th>{_tag_html(s)}</th>" for s in strats
     )
-
-    sec_pbo = f"""
-<section>
-  <h2>PBO (Probability of Backtest Overfitting)</h2>
-  <div class="pbo-box">
-    <div class="pbo-value">PBO = {_pbo_badge(pbo)}</div>
-    <p class="pbo-interp">→ {pbo_interpretation}</p>
-    <p style="font-size:0.85em;color:#555">
-      PBO = IS (訓練データ) で最良だった戦略が、OOS (検証データ) で下位半分に入った組合せの割合。<br>
-      {pbo_result['n_combos']} 通りの組合せのうち、IS最良がOOS下位半分になったのは
-      {round(pbo * pbo_result['n_combos'])} 回。
-    </p>
-  </div>
-  <h3>戦略ごとの IS vs OOS 一貫性</h3>
-  <table class="main-tbl">
-    <thead>
-      <tr>
-        <th>戦略</th><th>IS最良回数</th><th>OOS最良回数(IS最良時)</th><th>一貫性</th>
-      </tr>
-    </thead>
-    <tbody>{pbo_rows}</tbody>
-  </table>
-</section>
-"""
-
-    # ── セクション5: 全グループ × 全戦略 ヒートマップ ──
-    heat_header = "<tr><th>グループ</th>" + "".join(
-        f"<th>{s}</th>" for s in strategy_names
-    ) + "</tr>"
-
     heat_rows = ""
     for g in groups:
-        heat_rows += f"<tr><td>G{g['idx']+1}<br><small>{g['start']}<br>〜{g['end']}</small></td>"
-        for strat_name in strategy_names:
-            r = group_results.get((g["idx"], strat_name))
-            if r is None:
-                heat_rows += '<td style="background:#eee;color:#999">N/A</td>'
+        gi   = g["idx"]
+        cell = (f'<td>G{gi}<br><span style="color:#64748b;font-size:.75rem">'
+                f'{g["start"]}<br>〜{g["end"]}</span></td>')
+        for s in strats:
+            r = grp_res[s][gi]
+            if r is None or r.get("trades", 0) == 0:
+                cell += '<td class="heat-zero">—</td>'
             else:
-                pnl    = r.get("total_pnl", 0)
-                trades = r.get("trades", 0)
-                pf     = r.get("pf", 0)
-                wr     = r.get("win_rate", 0)
-                bg     = _pnl_color(pnl)
-                heat_rows += (
-                    f'<td style="background:{bg}">'
-                    f"<strong>{pnl:+,.0f}</strong><br>"
-                    f"<small>{trades}件 WR{wr:.0f}% PF{pf:.1f}</small></td>"
-                )
-        heat_rows += "</tr>\n"
+                pnl = r.get("total_pnl", 0)
+                wr  = r.get("win_rate", 0)
+                tr  = r.get("trades", 0)
+                hcls = "heat-pos" if pnl > 0 else "heat-neg"
+                cell += (f'<td class="{hcls}">{pnl:+,.0f}<br>'
+                         f'<span style="font-size:.7rem">{wr:.0f}%/{tr}tr</span></td>')
+        heat_rows += f"<tr>{cell}</tr>"
 
-    sec_heat = f"""
-<section>
-  <h2>グループ別バックテスト成績 (ヒートマップ)</h2>
-  <p>各グループ (行) × 各戦略 (列) の OOS バックテスト結果。
-     緑=プラス、赤=マイナス。</p>
-  <div style="overflow-x:auto">
-    <table class="heat-tbl">
-      <thead>{heat_header}</thead>
+    tab4 = f"""
+    <div class="info-box">
+      各グループ × 戦略の損益ヒートマップ。
+      <b style="color:#4ade80">緑</b>: 利益 &nbsp; <b style="color:#f87171">赤</b>: 損失 &nbsp; —: 取引なし<br>
+      グループは時系列順 (G0 が最古、G{n_splits-1} が最新)。
+    </div>
+    <table>
+      <thead><tr>{heat_hd}</tr></thead>
       <tbody>{heat_rows}</tbody>
     </table>
-  </div>
-</section>
-"""
+    """
 
-    # ── セクション6: 全組合せ結果テーブル (上位20件) ──
-    sorted_combos = sorted(
-        combo_results,
-        key=lambda c: -sum(c["strategies"][s]["test_total_pnl"] for s in strategy_names),
-    )
+    # ── Tab 5: 全組合せ ─────────────────────────────────────────────────────
+    combo_rows = ""
+    for c in combos:
+        test_lbl  = "+".join(f"G{i}" for i in c["test_groups"])
+        train_lbl = "+".join(f"G{i}" for i in c["train_groups"])
+        ib        = c.get("is_best",  "—")
+        ob        = c.get("oos_best", "—")
+        wins      = c.get("is_best_wins_oos", False)
+        oor       = c.get("is_best_oos_rank", "—")
+        is_sh     = c["is_metrics"].get(ib,  0.0) if ib != "—" else 0.0
+        oos_sh    = c["oos_metrics"].get(ib, 0.0) if ib != "—" else 0.0
+        oos_pnl   = c["oos_details"].get(ib, {}).get("total_pnl", 0) if ib != "—" else 0
+        rcls      = "combo-row-win" if wins else "combo-row-loss"
+        icon_cls  = "good" if wins else "bad"
+        icon      = "✓" if wins else "✗"
+        combo_rows += f"""
+        <tr class="{rcls}">
+          <td style="color:#94a3b8">{test_lbl}</td>
+          <td style="color:#64748b;font-size:.8rem">{train_lbl}</td>
+          <td>{_tag_html(ib) if ib != '—' else '—'}</td>
+          <td>{is_sh:.2f}</td>
+          <td>{_tag_html(ob) if ob != '—' else '—'}</td>
+          <td>{oos_sh:.2f}</td>
+          <td class="{'profit' if oos_pnl > 0 else 'loss'}">{oos_pnl:+,.0f}</td>
+          <td>{oor}</td>
+          <td class="{icon_cls}">{icon}</td>
+        </tr>"""
 
-    combo_header = (
-        "<tr><th>組合せ</th><th>TEST期間</th>"
-        + "".join(f"<th>{s}<br>TEST損益</th>" for s in strategy_names)
-        + "<th>IS最良</th><th>OOS最良</th><th>一致?</th></tr>"
-    )
-    combo_rows_html = ""
-    for c in sorted_combos[:30]:
-        test_g_labels = ", ".join(
-            f"G{i+1}({groups[i]['start']}〜{groups[i]['end']})"
-            for i in c["test_groups"]
-        )
-        is_best  = max(strategy_names,
-                       key=lambda s: c["strategies"][s]["train_total_pnl"])
-        oos_best = max(strategy_names,
-                       key=lambda s: c["strategies"][s]["test_total_pnl"])
-        match_icon = "✅" if is_best == oos_best else "❌"
-
-        cells = ""
-        for strat_name in strategy_names:
-            pnl = c["strategies"][strat_name]["test_total_pnl"]
-            cells += f'<td style="background:{_pnl_color(pnl)}">{pnl:+,.0f}</td>'
-
-        combo_rows_html += (
-            f"<tr><td>{','.join(f'G{i+1}' for i in c['test_groups'])}</td>"
-            f"<td style='font-size:0.8em'>{test_g_labels}</td>"
-            f"{cells}"
-            f"<td><strong>{is_best}</strong></td>"
-            f"<td><strong>{oos_best}</strong></td>"
-            f"<td style='font-size:1.2em'>{match_icon}</td></tr>\n"
-        )
-
-    sec_combos = f"""
-<section>
-  <h2>全組合せ結果 (上位 {min(30, n_combos)} / {n_combos} 件)</h2>
-  <p>各行が1つの CPCV 組合せ。IS最良戦略と OOS最良戦略の一致/不一致を示す。</p>
-  <div style="overflow-x:auto">
-    <table class="main-tbl">
-      <thead>{combo_header}</thead>
-      <tbody>{combo_rows_html}</tbody>
+    tab5 = f"""
+    <div class="info-box">
+      全 {n_combos} 組合せの詳細。
+      <b style="color:#4ade80">✓</b>: IS最良がOOSでも最良 &nbsp;
+      <b style="color:#f87171">✗</b>: OOSで最良でなかった
+    </div>
+    <table>
+      <thead><tr>
+        <th>テスト</th><th>学習</th><th>IS最良</th><th>IS Sharpe</th>
+        <th>OOS最良</th><th>IS最良のOOS Sharpe</th><th>OOS損益</th>
+        <th>OOS順位</th><th>結果</th>
+      </tr></thead>
+      <tbody>{combo_rows}</tbody>
     </table>
-  </div>
-</section>
-"""
+    """
 
-    # ── セクション7: 読み方ガイド ──
-    sec_guide = """
-<section class="guide">
-  <h2>読み方ガイド</h2>
-  <dl>
-    <dt>PBO (Probability of Backtest Overfitting)</dt>
-    <dd>IS (訓練データ) で最良だった戦略が、OOS (検証データ) でも最良かどうかの確率指標。
-        PBO ≤ 0.3 → 信頼できる。PBO ≥ 0.5 → 過学習の疑い。</dd>
-    <dt>OOS プラス率</dt>
-    <dd>その戦略が C(N,k) 全組合せのうちプラスになった割合。
-        60%以上が望ましい。これが高い戦略はどの時期でも安定して勝てる。</dd>
-    <dt>一貫性 (IS vs OOS)</dt>
-    <dd>「IS (訓練) で最良と判断したとき、OOS でも最良だった割合」。
-        高いほど、訓練での評価が実際の将来性能を正しく反映している。</dd>
-    <dt>グループヒートマップ</dt>
-    <dd>銘柄 × 戦略がどの時期でも安定しているか一覧できる。
-        特定の時期だけ緑 (プラス) の場合は「その期間だけ運が良かった」可能性が高い。</dd>
-  </dl>
-</section>
-"""
-
-    # ── HTML 組み立て ──
-    html = f"""<!DOCTYPE html>
+    # ── アセンブル ──────────────────────────────────────────────────────────
+    return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>CPCV評価: {symbol} ({name})</title>
-<style>
-  body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 20px;
-         background: #f8f9fa; color: #333; }}
-  h1   {{ font-size: 1.6em; border-bottom: 3px solid #007bff; padding-bottom: 8px; }}
-  h2   {{ font-size: 1.2em; margin-top: 30px; color: #0056b3; }}
-  h3   {{ font-size: 1.0em; color: #555; }}
-  section {{ background: #fff; border-radius: 6px; padding: 20px;
-             margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 0.88em; }}
-  th    {{ background: #343a40; color: #fff; padding: 6px 10px; }}
-  td    {{ border: 1px solid #dee2e6; padding: 5px 10px; }}
-  tr:hover {{ background: #f1f3f5 !important; }}
-  .summary-tbl th {{ background: #495057; width: 120px; }}
-  .group-tbl   {{ max-width: 400px; }}
-  .heat-tbl td {{ text-align: center; min-width: 100px; }}
-  .main-tbl td {{ text-align: right; }}
-  .main-tbl td:first-child {{ text-align: left; font-weight: bold; }}
-  .pbo-box  {{ background: #f8f9fa; border-left: 4px solid #007bff;
-               padding: 15px 20px; border-radius: 4px; margin: 10px 0; }}
-  .pbo-value {{ font-size: 1.4em; margin-bottom: 5px; }}
-  .pbo-interp {{ margin: 5px 0; font-weight: bold; }}
-  .badge-green  {{ background:#28a745;color:#fff;padding:2px 8px;
-                   border-radius:4px;font-size:0.85em; }}
-  .badge-yellow {{ background:#f0ad4e;color:#fff;padding:2px 8px;
-                   border-radius:4px;font-size:0.85em; }}
-  .badge-red    {{ background:#dc3545;color:#fff;padding:2px 8px;
-                   border-radius:4px;font-size:0.85em; }}
-  .guide dt {{ font-weight: bold; margin-top: 10px; }}
-  .guide dd {{ margin-left: 15px; color: #555; }}
-</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPCV評価 {symbol}</title>
+<style>{CSS}</style>
 </head>
 <body>
-<h1>CPCV評価レポート: {symbol} ({name})</h1>
-<p>生成日時: {datetime.now(JST).strftime('%Y-%m-%d %H:%M')} ／
-   N={n_splits}分割, k={k_test}テスト, C(N,k)={expected_combos}通り,
-   エンバーゴ={embargo_days}日</p>
+<div class="container">
+  <h1>CPCV バックテスト評価</h1>
+  <div class="subtitle">
+    {symbol} &nbsp;|&nbsp; {name} &nbsp;|&nbsp;
+    {n_splits}グループ × C({n_splits},{k_test})={n_combos}組合せ &nbsp;|&nbsp;
+    エンバーゴ {embargo}日 &nbsp;|&nbsp;
+    <span class="pbo-badge {pbo_cls}"
+          style="font-size:.8rem;padding:.2rem .7rem">{pbo_lbl} PBO={pbo:.1%}</span>
+    &nbsp;|&nbsp; モード: {mode} &nbsp;|&nbsp; {run_date}
+  </div>
 
-{sec_config}
-{sec_groups}
-{sec_summary}
-{sec_pbo}
-{sec_heat}
-{sec_combos}
-{sec_guide}
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-group="main" data-tab="overview"
+            onclick="switchTab('main','overview')">概要・KPI</button>
+    <button class="tab-btn" data-group="main" data-tab="strategy"
+            onclick="switchTab('main','strategy')">戦略サマリー</button>
+    <button class="tab-btn" data-group="main" data-tab="pbo"
+            onclick="switchTab('main','pbo')">PBO詳細</button>
+    <button class="tab-btn" data-group="main" data-tab="heatmap"
+            onclick="switchTab('main','heatmap')">ヒートマップ</button>
+    <button class="tab-btn" data-group="main" data-tab="combos"
+            onclick="switchTab('main','combos')">全組合せ</button>
+  </nav>
+
+  <div class="tab-pane active" data-group="main" data-tab="overview">{tab1}</div>
+  <div class="tab-pane"        data-group="main" data-tab="strategy">{tab2}</div>
+  <div class="tab-pane"        data-group="main" data-tab="pbo">{tab3}</div>
+  <div class="tab-pane"        data-group="main" data-tab="heatmap">{tab4}</div>
+  <div class="tab-pane"        data-group="main" data-tab="combos">{tab5}</div>
+</div>
+<script>{JS}</script>
 </body>
 </html>"""
-    return html
 
 
-# ─────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────
-
+# ─── CLI ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CPCV バックテスト評価 (PBO 計算付き)",
+        description="CPCV バックテスト評価",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 例:
   python cpcv_eval.py --symbol 7203.T
-  python cpcv_eval.py --symbol 7203.T --n-splits 6 --k-test 2
-  python cpcv_eval.py --symbol 7203.T --embargo-days 14
-  python cpcv_eval.py --symbol 7203.T --strategies MACD A7 RSI2
+  python cpcv_eval.py --symbol 7203.T --n-splits 6 --k-test 2 --embargo-days 14
+  python cpcv_eval.py --symbol 7203.T --strategies MACD A7 RSI2 --aggressive
   python cpcv_eval.py --symbol 7203.T --no-browser
         """,
     )
     parser.add_argument("--symbol",       required=True, help="銘柄コード (例: 7203.T)")
-    parser.add_argument("--name",         default="",   help="銘柄名 (省略時は symbol と同じ)")
+    parser.add_argument("--name",         default="",    help="銘柄名 (省略時は symbol)")
     parser.add_argument("--n-splits",     type=int, default=6,
-                        help="分割数 N (デフォルト: 6, 推奨: 5〜8)")
+                        help="グループ分割数 (デフォルト: 6)")
     parser.add_argument("--k-test",       type=int, default=2,
-                        help="テストに使うグループ数 k (デフォルト: 2)")
+                        help="テストグループ数 (デフォルト: 2)")
     parser.add_argument("--embargo-days", type=int, default=7,
-                        help="グループ間のバッファー日数 (デフォルト: 7)")
-    parser.add_argument("--days",         type=int, default=730,
-                        help="取得する最大日数 (デフォルト: 730)")
-    parser.add_argument("--strategies",   nargs="+",
-                        default=["MACD", "A7", "RSI2", "DON", "VOL", "MOM"],
-                        choices=list(STRATEGY_DEFS.keys()),
-                        help="評価する戦略 (デフォルト: 全6戦略)")
-    parser.add_argument("--no-browser",   action="store_true")
+                        help="エンバーゴ日数 (デフォルト: 7)")
+    parser.add_argument("--strategies",   nargs="*", default=None,
+                        help="評価戦略 (デフォルト: MACD A7 RSI2 DON VOL MOM)")
+    parser.add_argument("--no-browser",   action="store_true",
+                        help="ブラウザ自動起動しない")
     mode_grp = parser.add_mutually_exclusive_group()
     mode_grp.add_argument("--aggressive",   action="store_true")
     mode_grp.add_argument("--conservative", action="store_true")
@@ -744,82 +687,49 @@ def main() -> None:
 
     symbol   = args.symbol
     name     = args.name or symbol
-    n_splits = args.n_splits
-    k_test   = args.k_test
+    strat_ns = args.strategies or ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
 
-    if k_test >= n_splits:
-        print(f"[ERROR] k-test ({k_test}) は n-splits ({n_splits}) より小さくしてください",
-              file=sys.stderr)
-        sys.exit(1)
-
-    from math import comb
-    n_combos = comb(n_splits, k_test)
-
-    print("=" * 60)
-    print(f"CPCV評価: {symbol} ({name})")
-    print(f"  N={n_splits} 分割, k={k_test} テスト, "
-          f"C(N,k)={n_combos} 組合せ")
-    print(f"  エンバーゴ: {args.embargo_days}日")
-    print(f"  戦略: {', '.join(args.strategies)}")
+    print("=" * 70)
+    print(f"CPCV 評価開始: {symbol} ({name})")
+    print(f"  グループ: {args.n_splits}  テスト: {args.k_test}  エンバーゴ: {args.embargo_days}日")
+    print(f"  戦略: {', '.join(strat_ns)}")
     print(f"  モード: {TRADING_MODE}")
-    print("=" * 60)
+    print("=" * 70)
 
-    print(f"データ取得中: {symbol}...")
-    full_df = fetch(symbol, args.days)
-    if full_df is None or len(full_df) < 100:
-        print(f"[ERROR] {symbol} のデータ取得に失敗しました", file=sys.stderr)
+    try:
+        res = run_cpcv(
+            symbol, name,
+            n_splits=args.n_splits,
+            k_test=args.k_test,
+            embargo_days=args.embargo_days,
+            strategy_names=strat_ns,
+        )
+    except (RuntimeError, ValueError) as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"  取得完了: {len(full_df)} バー "
-          f"({full_df.index[0].date()} 〜 {full_df.index[-1].date()})")
 
-    print("CPCV実行中...")
-    result = run_cpcv(
-        symbol, name, full_df,
-        strategy_names=args.strategies,
-        n_splits=n_splits,
-        k_test=k_test,
-        embargo_days=args.embargo_days,
-    )
+    pbo    = res["pbo"]["pbo"]
+    lbl    = "信頼できる" if pbo <= 0.3 else ("要注意" if pbo <= 0.5 else "過学習疑い")
+    combos = res["pbo"]["n_combos"]
+    print(f"\n── 結果 ──────────────────────────────────────")
+    print(f"  PBO = {pbo:.1%}  ({lbl})  組合せ数: {combos}")
+    for s in strat_ns:
+        if s not in res["strategy_summary"]:
+            continue
+        m = res["strategy_summary"][s]
+        print(f"  {s:8}: {m['trades']:3}取引  WR={m['win_rate']:.1f}%  "
+              f"PF={m['pf']:.2f}  PnL={m['total_pnl']:+,.0f}")
 
-    # ── 結果サマリー表示 ──
-    print()
-    print("=" * 60)
-    print("戦略別 OOS サマリー:")
-    print(f"  {'戦略':<8} {'中央値PnL':>12} {'プラス率':>8} {'WR':>7} {'PF':>6}")
-    print("  " + "-" * 50)
-    for strat_name in args.strategies:
-        s = result["strategy_summary"][strat_name]
-        print(f"  {strat_name:<8} "
-              f"{s['oos_median_pnl']:>+12,.0f}円 "
-              f"{s['oos_pass_rate']:>7.1f}% "
-              f"{s['oos_median_wr']:>6.1f}% "
-              f"{s['oos_median_pf']:>6.2f}")
+    html = build_html(symbol, name, res)
 
-    pbo = result["pbo_result"]["pbo"]
-    print()
-    pbo_label = (
-        "優秀 (過学習なし)" if pbo <= 0.20 else
-        "良好 (許容範囲)"  if pbo <= 0.30 else
-        "要注意"          if pbo <= 0.50 else
-        "過学習疑い"
-    )
-    print(f"PBO = {pbo:.3f}  → {pbo_label}")
-    print("=" * 60)
-
-    # HTML 生成
-    html_str  = build_html(symbol, name, result)
-    date_str  = TODAY.isoformat()
-    mode_suf  = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
-    html_path = Path(f"cpcv_{symbol.replace('.', '_')}{mode_suf}_{date_str}.html")
-    html_path.write_text(html_str, encoding="utf-8")
-    print(f"\nHTML: {html_path.resolve()}")
+    mode_suf = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
+    fname    = f"cpcv_{symbol.replace('.', '_')}{mode_suf}_{TODAY}.html"
+    out      = Path(fname)
+    out.write_text(html, encoding="utf-8")
+    print(f"\nHTML → {out.resolve()}")
 
     if not args.no_browser:
-        try:
-            from _open_html import open_html
-            open_html(str(html_path))
-        except ImportError:
-            webbrowser.open(html_path.resolve().as_uri())
+        webbrowser.open(out.resolve().as_uri())
 
 
 if __name__ == "__main__":
