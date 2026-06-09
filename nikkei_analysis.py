@@ -1865,6 +1865,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 f'<div style="color:#64748b;padding:30px;text-align:center">{sig_label} のシグナルなし {note}</div>')
 
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
+    try:
+        from signal_risk_check import (
+            render_risk_badges   as _rrb_fn,
+            render_earnings_date as _red_fn,
+        )
+    except Exception:
+        def _rrb_fn(sym):         return ""
+        def _red_fn(sym, td=None): return ""
     rows = ""
     for i, s in enumerate(signals, 1):
         col      = col_map.get(s["rank"], "#94a3b8")
@@ -1889,14 +1897,16 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 f'font-weight:700;padding:1px 7px;border-radius:3px;white-space:nowrap;'
                 f'display:inline-block;margin:1px 2px">{lbl}</span>'
             )
-        src_html = "".join(src_parts)
+        src_html  = "".join(src_parts)
+        risk_html = _rrb_fn(s["symbol"])
+        earn_html = _red_fn(s["symbol"], target_date)
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
-    <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span><br>
-    <span style="display:inline-flex;flex-wrap:wrap;gap:2px;margin-top:3px">{src_html}</span></td>
+    <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span>{earn_html}<br>
+    <span style="display:inline-flex;flex-wrap:wrap;gap:2px;margin-top:3px">{src_html}{risk_html}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{ _fmt_score_cell(s, col) }</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
