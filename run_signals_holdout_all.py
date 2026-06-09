@@ -192,6 +192,35 @@ def _make_cached_bt(orig_fn):
 _stop.backtest_one = _make_cached_bt(_stop.backtest_one)
 _brk.backtest_one  = _make_cached_bt(_brk.backtest_one)
 
+# ── シグナルスコアキャッシュ読み込み ─────────────────────────────────────────
+# 初回発信時のBTスコアを保存し、以後の実行でも同じスコアを表示する。
+# キャッシュキー: "{symbol}::{strategy}::{signal_date}"
+import json as _json
+
+_score_cache_path = Path("signal_score_cache.json")
+_score_cache: dict = {}
+if _score_cache_path.exists():
+    try:
+        _score_cache = _json.loads(_score_cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+# キャッシュから (sym, strat) → 最新signal_date & bt_score を取得
+_cached_latest: dict[tuple, dict] = {}
+for _ck, _cv in _score_cache.items():
+    _parts = _ck.split("::")
+    if len(_parts) == 3:
+        _csym, _cstrat, _csigdate = _parts
+        _existing = _cached_latest.get((_csym, _cstrat))
+        if _existing is None or _csigdate > _existing["signal_date"]:
+            _cached_latest[(_csym, _cstrat)] = {"signal_date": _csigdate,
+                                                  "bt_score": _cv.get("bt_score", 0)}
+
+# キャッシュにあるスコアを注入 (signal_date は後で検証)
+_na._FROZEN_BT_SCORES.clear()
+for (_csym, _cstrat), _info in _cached_latest.items():
+    _na._FROZEN_BT_SCORES[(_csym, _cstrat)] = _info["bt_score"]
+
 # ── シグナルタブ HTML ─────────────────────────────────────────────────────────
 target_date = None
 if _args.date:
@@ -209,6 +238,43 @@ _sig_html = _na._tab4_signals_html(
     min_score=_args.min_score,
     target_date=target_date,
 )
+
+# ── キャッシュ更新・signal_date 検証 ─────────────────────────────────────────
+# 新規シグナル保存 & signal_dateが変わった銘柄のスコアを更新
+_needs_regen = False
+for _sig in _na._last_signals:
+    _ssym   = _sig.get("symbol", "")
+    _sstrat = _sig.get("strategy", "")
+    _ssigdt = str(_sig.get("signal_date", ""))
+    _skey   = f"{_ssym}::{_sstrat}::{_ssigdt}"
+    _cached = _cached_latest.get((_ssym, _sstrat))
+
+    if _skey not in _score_cache:
+        # 新規シグナル: 現在のBTスコアで保存
+        _real_bt = _sig.get("rec_score", 0)
+        _score_cache[_skey] = {"bt_score": _real_bt, "first_seen": str(TODAY)}
+        if _cached and _cached["signal_date"] != _ssigdt:
+            # signal_dateが変わった → 古い凍結スコアを使っているので再生成が必要
+            _na._FROZEN_BT_SCORES[(_ssym, _sstrat)] = _real_bt
+            _needs_regen = True
+
+# signal_dateが変わった銘柄があれば HTML を再生成
+if _needs_regen:
+    print("シグナル再生成中 (signal_date更新あり)...", flush=True)
+    _sig_html = _na._tab4_signals_html(
+        workers=_args.workers,
+        min_score=_args.min_score,
+        target_date=target_date,
+    )
+
+# キャッシュ保存
+try:
+    _score_cache_path.write_text(
+        _json.dumps(_score_cache, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"[INFO] シグナルスコアキャッシュ: {len(_score_cache)}件保存", flush=True)
+except Exception as _e:
+    print(f"[WARN] キャッシュ保存失敗: {_e}", flush=True)
 
 # ── 損益タブ HTML: 全設定統合 (180日) + 期間別 ───────────────────────────────
 # 全設定統合: _all_configs で直近180日を一括集計 → デフォルト表示

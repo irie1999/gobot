@@ -45,6 +45,7 @@ _SIGNALS_AVAILABLE = False
 _DEF_WORKERS = 4
 _PNL_CONFIGS: list[dict] = []
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
+_FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 try:
     os.environ.setdefault("TRADING_MODE", "conservative")
     import check_signals_stop     as _stop
@@ -1482,6 +1483,12 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 return None
             # おすすめスコアは常に計算
             rec_score, rec_rank = _stop.calc_recommend_score(bt["period_results"])
+            # 初回発信時スコアが凍結されていればそちらを使用 (BTスコアの日次変動を抑制)
+            _fz = _FROZEN_BT_SCORES.get((sym, strat))
+            if _fz is not None:
+                rec_score = _fz
+                rec_rank  = ("★★★" if _fz >= 80 else "★★" if _fz >= 60
+                             else "★" if _fz >= 40 else "△")
             _bt_type_fn = getattr(_stop, "calc_bt_type", None)
             bt_type = _bt_type_fn(bt["period_results"]) if _bt_type_fn else "?"
             # WFスコア（out-of-sample）があれば優先してソートキーに使う
