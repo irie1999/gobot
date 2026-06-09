@@ -29,7 +29,11 @@ from pathlib import Path
 JST = timezone(timedelta(hours=9))
 
 # ── 日次キャッシュファイル ────────────────────────────────────────────────────
+# チェック項目を追加・変更したらこの番号を上げると古いキャッシュを自動破棄する
+_CACHE_VERSION = 3
+
 _CACHE_DIR = Path(".")
+
 def _daily_cache_path(target_date: date | None = None) -> Path:
     d = target_date or datetime.now(JST).date()
     return _CACHE_DIR / f".risk_check_cache_{d}.json"
@@ -38,7 +42,12 @@ def _load_daily_cache(target_date: date | None = None) -> dict:
     p = _daily_cache_path(target_date)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
+            # バージョン不一致 → キャッシュ無効
+            if data.get("_version") != _CACHE_VERSION:
+                p.unlink(missing_ok=True)
+                return {}
+            return data
         except Exception:
             pass
     return {}
@@ -46,6 +55,7 @@ def _load_daily_cache(target_date: date | None = None) -> dict:
 def _save_daily_cache(data: dict, target_date: date | None = None) -> None:
     p = _daily_cache_path(target_date)
     try:
+        data["_version"] = _CACHE_VERSION
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
