@@ -25,7 +25,8 @@ from pathlib import Path
 JST = timezone(timedelta(hours=9))
 
 # ── モジュールレベルキャッシュ (check_signals_*.py から参照) ──────────────────
-RISK_FLAGS: dict[str, list[dict]] = {}
+RISK_FLAGS:     dict[str, list[dict]] = {}
+EARNINGS_DATES: dict[str, str]        = {}  # symbol → "YYYY-MM-DD" or ""
 
 # ── ネガティブキーワード（回避判断用のみ） ───────────────────────────────────
 _NEG_JP = [
@@ -75,6 +76,38 @@ def _check_negative_news(symbol: str, name: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+def _fetch_next_earnings_date(symbol: str, target_date: date | None = None) -> str:
+    """
+    yfinance から次回決算発表日を取得して "YYYY-MM-DD" を返す。
+    取得できなければ空文字を返す。
+    """
+    try:
+        import yfinance as yf
+        cal = yf.Ticker(symbol).calendar
+        if not cal:
+            return ""
+        ed = cal.get("Earnings Date")
+        if ed is None:
+            return ""
+        today = target_date or datetime.now(JST).date()
+        if isinstance(ed, (list, tuple)):
+            dates = sorted(
+                [d.date() if hasattr(d, "date") else d for d in ed if d is not None]
+            )
+        else:
+            dates = [ed.date() if hasattr(ed, "date") else ed]
+        # 今日以降で最も近い決算日を返す
+        future = [d for d in dates if d >= today]
+        if future:
+            return str(future[0])
+        # 全て過去なら直近の過去日
+        if dates:
+            return str(dates[-1])
+    except Exception:
+        pass
+    return ""
 
 
 def _check_earnings_proximity(symbol: str, target_date: date | None = None) -> dict | None:
@@ -235,28 +268,35 @@ def precompute_all(
         target_date:   判定基準日 (None = 今日)
     """
     RISK_FLAGS.clear()
+    EARNINGS_DATES.clear()
     if not symbols_names:
         return
 
     n = len(symbols_names)
-    print(f"リスクチェック中 ({n}銘柄)...", flush=True)
+    print(f"リスクチェック + 決算日取得中 ({n}銘柄)...", flush=True)
+
+    def _compute_full(sym: str, nm: str) -> tuple[list[dict], str]:
+        flags   = _compute_one(sym, nm, target_date)
+        earn_dt = _fetch_next_earnings_date(sym, target_date)
+        return flags, earn_dt
 
     with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
         futs = {
-            ex.submit(_compute_one, sym, nm, target_date): sym
+            ex.submit(_compute_full, sym, nm): sym
             for sym, nm in symbols_names
         }
-        done = 0
         for fut in as_completed(futs):
-            sym  = futs[fut]
-            done += 1
+            sym = futs[fut]
             try:
-                flags = fut.result()
+                flags, earn_dt = fut.result()
                 if flags:
                     RISK_FLAGS[sym] = flags
+                EARNINGS_DATES[sym] = earn_dt
             except Exception:
-                pass
-        print(f"リスクチェック完了: {sum(len(v) for v in RISK_FLAGS.values())}件の警告", flush=True)
+                EARNINGS_DATES[sym] = ""
+    warn_count = sum(len(v) for v in RISK_FLAGS.values())
+    earn_count = sum(1 for v in EARNINGS_DATES.values() if v)
+    print(f"リスクチェック完了: {warn_count}件の警告 / 決算日取得: {earn_count}銘柄", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,6 +320,41 @@ def render_risk_badges(symbol: str) -> str:
                      f'color:#fbbf24;font-size:10px;font-weight:700">'
                      f'🟡 {f["msg"]}</span>')
     return html
+
+
+def render_earnings_date(symbol: str, target_date: date | None = None) -> str:
+    """
+    次回決算日を小さなテキストで返す。
+    14日以内なら黄色、7日以内なら赤色でハイライト。
+    """
+    dt_str = EARNINGS_DATES.get(symbol, "")
+    if not dt_str:
+        return ""
+    try:
+        earn_dt = date.fromisoformat(dt_str)
+        today   = target_date or datetime.now(JST).date()
+        diff    = (earn_dt - today).days
+        if diff < 0:
+            diff_label = f"{abs(diff)}日前"
+            color = "#64748b"
+        elif diff == 0:
+            diff_label = "本日"
+            color = "#ef4444"
+        elif diff <= 7:
+            diff_label = f"{diff}日後"
+            color = "#ef4444"
+        elif diff <= 14:
+            diff_label = f"{diff}日後"
+            color = "#fbbf24"
+        else:
+            diff_label = f"{diff}日後"
+            color = "#64748b"
+        return (
+            f'<br><span style="color:{color};font-size:10px">'
+            f'📅 決算: {dt_str} ({diff_label})</span>'
+        )
+    except Exception:
+        return f'<br><span style="color:#64748b;font-size:10px">📅 決算: {dt_str}</span>'
 
 
 def render_nikkei_banner() -> str:

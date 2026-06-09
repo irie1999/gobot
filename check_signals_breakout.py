@@ -93,10 +93,15 @@ def _load_cpcv_flags() -> dict:
 CPCV_FLAGS: dict = _load_cpcv_flags()
 
 try:
-    from signal_risk_check import RISK_FLAGS as _RISK_FLAGS, render_risk_badges as _render_risk_badges
+    from signal_risk_check import (
+        RISK_FLAGS as _RISK_FLAGS,
+        render_risk_badges as _render_risk_badges,
+        render_earnings_date as _render_earnings_date,
+    )
 except Exception:
     _RISK_FLAGS = {}
     def _render_risk_badges(_sym): return ""
+    def _render_earnings_date(_sym, _td=None): return ""
 
 
 def _fetch_live_price(symbol: str, fallback: float) -> float:
@@ -471,10 +476,11 @@ def build_html(all_items: list[dict], show_days: int,
                               f'⚠️ CPCV要注意</span>')
         else:
             cpcv_badge = ""
-        risk_badges = _render_risk_badges(item["symbol"])
+        risk_badges    = _render_risk_badges(item["symbol"])
+        earnings_badge = _render_earnings_date(item["symbol"])
         signal_rows += f"""
         <tr style="{row_style}">
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}{risk_badges}</td>
+          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}{risk_badges}{earnings_badge}</td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span>{_atr_badge(stop_pct)}</td>
           <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
