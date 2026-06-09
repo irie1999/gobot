@@ -25,6 +25,28 @@ from pathlib import Path
 
 JST = timezone(timedelta(hours=9))
 
+# ── 日次キャッシュファイル ────────────────────────────────────────────────────
+_CACHE_DIR = Path(".")
+def _daily_cache_path(target_date: date | None = None) -> Path:
+    d = target_date or datetime.now(JST).date()
+    return _CACHE_DIR / f".risk_check_cache_{d}.json"
+
+def _load_daily_cache(target_date: date | None = None) -> dict:
+    p = _daily_cache_path(target_date)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_daily_cache(data: dict, target_date: date | None = None) -> None:
+    p = _daily_cache_path(target_date)
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 # ── モジュールレベルキャッシュ (check_signals_*.py から参照) ──────────────────
 RISK_FLAGS:     dict[str, list[dict]] = {}
 EARNINGS_DATES: dict[str, str]        = {}  # symbol → "YYYY-MM-DD" or ""
@@ -310,40 +332,69 @@ def precompute_all(
     target_date: date | None = None,
 ) -> None:
     """
-    全シグナル銘柄のリスクフラグを並列で計算し RISK_FLAGS に格納する。
+    シグナル銘柄のリスクフラグを並列で計算し RISK_FLAGS に格納する。
+
+    当日キャッシュ (.risk_check_cache_YYYY-MM-DD.json) が存在する場合、
+    既にキャッシュ済みの銘柄はスキップし、未キャッシュ分のみ計算する。
 
     Args:
         symbols_names: [(symbol, name), ...]  例 [("7203.T", "トヨタ"), ...]
         workers:       並列数
         target_date:   判定基準日 (None = 今日)
     """
-    RISK_FLAGS.clear()
-    EARNINGS_DATES.clear()
     if not symbols_names:
         return
 
-    n = len(symbols_names)
-    print(f"リスクチェック + 決算日取得中 ({n}銘柄)...", flush=True)
+    # 日次キャッシュをロード
+    cache = _load_daily_cache(target_date)
+    cached_flags   = cache.get("RISK_FLAGS",     {})
+    cached_earnings = cache.get("EARNINGS_DATES", {})
 
-    def _compute_full(sym: str, nm: str) -> tuple[list[dict], str]:
-        flags   = _compute_one(sym, nm, target_date)
-        earn_dt = _fetch_next_earnings_date(sym, target_date)
-        return flags, earn_dt
+    # キャッシュ済み銘柄はそのまま復元
+    for sym, nm in symbols_names:
+        if sym in cached_earnings:
+            if cached_flags.get(sym):
+                RISK_FLAGS[sym] = cached_flags[sym]
+            EARNINGS_DATES[sym] = cached_earnings[sym]
 
-    with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
-        futs = {
-            ex.submit(_compute_full, sym, nm): sym
-            for sym, nm in symbols_names
+    # 未キャッシュ分のみ計算
+    todo = [(sym, nm) for sym, nm in symbols_names if sym not in cached_earnings]
+    if todo:
+        n = len(todo)
+        total = len(symbols_names)
+        skipped = total - n
+        skip_msg = f" (キャッシュ{skipped}銘柄スキップ)" if skipped else ""
+        print(f"リスクチェック + 決算日取得中 ({n}銘柄){skip_msg}...", flush=True)
+
+        def _compute_full(sym: str, nm: str) -> tuple[list[dict], str]:
+            flags   = _compute_one(sym, nm, target_date)
+            earn_dt = _fetch_next_earnings_date(sym, target_date)
+            return flags, earn_dt
+
+        with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
+            futs = {
+                ex.submit(_compute_full, sym, nm): sym
+                for sym, nm in todo
+            }
+            for fut in as_completed(futs):
+                sym = futs[fut]
+                try:
+                    flags, earn_dt = fut.result()
+                    if flags:
+                        RISK_FLAGS[sym] = flags
+                    EARNINGS_DATES[sym] = earn_dt
+                except Exception:
+                    EARNINGS_DATES[sym] = ""
+
+        # キャッシュに追記して保存
+        merged = {
+            "RISK_FLAGS":     dict(cached_flags,     **{k: v for k, v in RISK_FLAGS.items()     if k in {s for s, _ in todo}}),
+            "EARNINGS_DATES": dict(cached_earnings,  **{k: v for k, v in EARNINGS_DATES.items() if k in {s for s, _ in todo}}),
         }
-        for fut in as_completed(futs):
-            sym = futs[fut]
-            try:
-                flags, earn_dt = fut.result()
-                if flags:
-                    RISK_FLAGS[sym] = flags
-                EARNINGS_DATES[sym] = earn_dt
-            except Exception:
-                EARNINGS_DATES[sym] = ""
+        _save_daily_cache(merged, target_date)
+    else:
+        print(f"リスクチェック: 全{len(symbols_names)}銘柄キャッシュ済みスキップ", flush=True)
+
     warn_count = sum(len(v) for v in RISK_FLAGS.values())
     earn_count = sum(1 for v in EARNINGS_DATES.values() if v)
     print(f"リスクチェック完了: {warn_count}件の警告 / 決算日取得: {earn_count}銘柄", flush=True)

@@ -232,30 +232,19 @@ if _args.date:
 
 date_str = _args.date or str(TODAY)
 
-# ── リスク警告・決算日の事前計算（シグナルHTML生成より前に実行） ──────────────
-# _all_configs からウォッチリスト全銘柄を収集して並列チェック
-_pre_symbols: dict[str, str] = {}
-for _cfg in _all_configs:
-    for _sym, _nm, _strat in _cfg.get("stop_wl", []) + _cfg.get("brk_wl", []):
-        if _sym and _sym not in _pre_symbols:
-            _pre_symbols[_sym] = _nm
-
+# ── 日経バナーは銘柄に依存しないので先に取得 ─────────────────────────────────
 try:
     from signal_risk_check import (
-        precompute_all     as _precompute_risks,
+        precompute_all       as _precompute_risks,
         render_nikkei_banner as _render_nikkei_banner,
-    )
-    _precompute_risks(
-        list(_pre_symbols.items()),
-        workers=_args.workers,
-        target_date=target_date,
     )
     _nikkei_banner = _render_nikkei_banner()
 except Exception as _re:
     print(f"[WARN] リスクチェックスキップ: {_re}", flush=True)
+    _precompute_risks = None
     _nikkei_banner = ""
 
-# ── シグナルタブ HTML ─────────────────────────────────────────────────────────
+# ── シグナルタブ HTML (パス1: バッジなし) ─────────────────────────────────────
 print("シグナル収集中...", flush=True)
 _na._PNL_CONFIGS[:] = _all_configs
 _sig_html = _na._tab4_signals_html(
@@ -283,7 +272,7 @@ for _sig in _na._last_signals:
             _na._FROZEN_BT_SCORES[(_ssym, _sstrat)] = _real_bt
             _needs_regen = True
 
-# signal_dateが変わった銘柄があれば HTML を再生成
+# signal_dateが変わった銘柄があれば HTML を再生成 (スコア更新のみ、まだバッジなし)
 if _needs_regen:
     print("シグナル再生成中 (signal_date更新あり)...", flush=True)
     _sig_html = _na._tab4_signals_html(
@@ -291,6 +280,33 @@ if _needs_regen:
         min_score=_args.min_score,
         target_date=target_date,
     )
+
+# ── リスク警告・決算日: シグナルが出た銘柄のみ事前計算 ────────────────────────
+# _last_signals はここで確定しているので、シグナル銘柄のみに絞り込む
+_sig_sym_map: dict[str, str] = {}
+for _sig in _na._last_signals:
+    _s = _sig.get("symbol", "")
+    _n = _sig.get("name", "")
+    if _s and _s not in _sig_sym_map:
+        _sig_sym_map[_s] = _n
+
+if _precompute_risks and _sig_sym_map:
+    try:
+        _precompute_risks(
+            list(_sig_sym_map.items()),
+            workers=_args.workers,
+            target_date=target_date,
+        )
+        # バッジ付きで再生成
+        _sig_html = _na._tab4_signals_html(
+            workers=_args.workers,
+            min_score=_args.min_score,
+            target_date=target_date,
+        )
+    except Exception as _re2:
+        print(f"[WARN] リスクチェック失敗: {_re2}", flush=True)
+elif not _sig_sym_map:
+    print("[INFO] シグナルなし — リスクチェックスキップ", flush=True)
 
 # キャッシュ保存
 try:
