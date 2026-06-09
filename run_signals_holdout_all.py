@@ -325,6 +325,16 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
 # 後片付け
 _na._PNL_CONFIGS[:] = _all_configs
 
+# ── ニュース・情報タブ HTML ────────────────────────────────────────────────────
+try:
+    from fetch_signal_news import build_news_html as _build_news_html
+    _news_html = _build_news_html(_signal_stocks, workers=_args.workers)
+    _news_tab_ok = True
+except Exception as _e:
+    print(f"[WARN] ニュース取得スキップ: {_e}", flush=True)
+    _news_html  = f'<p style="color:#ef4444;padding:24px">ニュース取得エラー: {_e}</p>'
+    _news_tab_ok = False
+
 # ── --symbol 指定時: 銘柄別期間別取引詳細タブ ────────────────────────────────
 _sym_detail_tab_btn  = ""
 _sym_detail_tab_pane = ""
@@ -496,7 +506,8 @@ html = f"""<!DOCTYPE html>
 <div class="ho-outer-nav">
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>{_sym_detail_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_sym_detail_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -519,6 +530,10 @@ html = f"""<!DOCTYPE html>
 {_sym_tab_nav}
   </div>
 {_sym_tab_panes}
+</div>
+
+<div id="ho-news" class="ho-outer-pane">
+{_news_html}
 </div>
 {_sym_detail_tab_pane}
 <script>
