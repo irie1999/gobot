@@ -165,10 +165,13 @@ def main() -> None:
                             help="Conservative モードの CSV を読み込む (suffix なし, デフォルト)")
     parser.add_argument("--holdout-days", type=int, default=0,
                         help="scan_walkforward.py --holdout-days N で生成した CSV を読み込む")
+    parser.add_argument("--embargo-days", type=int, default=0,
+                        help="scan_walkforward_embargo.py --embargo-days N で生成した CSV を読み込む (0=通常の scan_walkforward CSV)")
     args = parser.parse_args()
 
-    mode_suffix = "_aggressive" if args.aggressive else ""
+    mode_suffix    = "_aggressive" if args.aggressive else ""
     holdout_suffix = f"_holdout{args.holdout_days}d" if args.holdout_days > 0 else ""
+    embargo_suffix = f"_embargo{args.embargo_days}d"  if args.embargo_days > 0 else ""
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
     effective_max_price = args.max_price
@@ -209,7 +212,7 @@ def main() -> None:
     total_selected   = 0
 
     for strategy in all_strats:
-        csv_path = args.input_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}_{args.date}.csv"
+        csv_path = args.input_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}{embargo_suffix}_{args.date}.csv"
         rows = load_csv(csv_path)
         if not rows:
             print(f"[WARN] CSV not found: {csv_path}")
