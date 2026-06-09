@@ -399,9 +399,28 @@ if _signal_stocks:
     except Exception as _nst_e:
         print(f"[WARN] ニュースモデルスコア取得失敗: {_nst_e}", flush=True)
 
-# ニュースモデルスコアテーブルをシグナルHTMLの先頭に追加
-if _news_score_table_html:
-    _sig_html = _news_score_table_html + _sig_html
+# ── リスク警告チェック（シグナルバッジ用） ───────────────────────────────────
+_nikkei_banner = ""
+if _signal_stocks:
+    try:
+        from signal_risk_check import (
+            precompute_all as _precompute_risks,
+            render_nikkei_banner as _render_nikkei_banner,
+        )
+        _precompute_risks(
+            [(s, n) for s, n, _ in _signal_stocks],
+            workers=_args.workers,
+            target_date=target_date,
+        )
+        _nikkei_banner = _render_nikkei_banner()
+        if _nikkei_banner:
+            print("[INFO] 日経警告バナーを表示します", flush=True)
+    except Exception as _re:
+        print(f"[WARN] リスクチェックスキップ: {_re}", flush=True)
+
+# 日経バナー + ニュースモデルスコアをシグナルHTMLの先頭に追加
+if _nikkei_banner or _news_score_table_html:
+    _sig_html = _nikkei_banner + _news_score_table_html + _sig_html
 
 # ── ニュース・情報タブ HTML ────────────────────────────────────────────────────
 try:

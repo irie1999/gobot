@@ -92,6 +92,13 @@ def _load_cpcv_flags() -> dict:
 
 CPCV_FLAGS: dict = _load_cpcv_flags()
 
+# リスク警告フラグ (run_signals_holdout_all 等が precompute_all() で事前計算して注入)
+try:
+    from signal_risk_check import RISK_FLAGS as _RISK_FLAGS, render_risk_badges as _render_risk_badges
+except Exception:
+    _RISK_FLAGS = {}
+    def _render_risk_badges(_sym): return ""
+
 
 def _fetch_live_price(symbol: str, fallback: float) -> float:
     """最新の日足終値をキャッシュを使わず直接取得。失敗時はフォールバック。"""
@@ -478,9 +485,10 @@ def build_html(all_items: list[dict], show_days: int,
                               f'⚠️ CPCV要注意</span>')
         else:
             cpcv_badge = ""
+        risk_badges = _render_risk_badges(item["symbol"])
         signal_rows += f"""
         <tr style="{row_style}">
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}</td>
+          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}{risk_badges}</td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span>{_atr_badge(stop_pct)}</td>
           <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
