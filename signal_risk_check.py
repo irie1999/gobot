@@ -375,11 +375,23 @@ def render_risk_badges(symbol: str) -> str:
 def render_earnings_date(symbol: str, target_date: date | None = None) -> str:
     """
     次回決算日を小さなテキストで返す。
-    14日以内なら黄色、7日以内なら赤色でハイライト。
+    - 取得できた場合: 日付 + 残り日数（7日以内→赤、14日以内→黄、それ以外→グレー）
+    - 取得できなかった場合: 「📅 決算日: 取得不可」をグレーで表示
+    - precompute_all() 未実行の場合: 何も表示しない
     """
-    dt_str = EARNINGS_DATES.get(symbol, "")
-    if not dt_str:
+    # symbol が dict にない = precompute_all() 未実行 → 表示しない
+    if symbol not in EARNINGS_DATES:
         return ""
+
+    dt_str = EARNINGS_DATES[symbol]
+
+    # 取得できなかった場合
+    if not dt_str:
+        return (
+            '<br><span style="color:#475569;font-size:10px">'
+            '📅 決算日: 取得不可</span>'
+        )
+
     try:
         earn_dt = date.fromisoformat(dt_str)
         today   = target_date or datetime.now(JST).date()
@@ -388,23 +400,26 @@ def render_earnings_date(symbol: str, target_date: date | None = None) -> str:
             diff_label = f"{abs(diff)}日前"
             color = "#64748b"
         elif diff == 0:
-            diff_label = "本日"
+            diff_label = "本日！"
             color = "#ef4444"
         elif diff <= 7:
-            diff_label = f"{diff}日後"
+            diff_label = f"あと{diff}日"
             color = "#ef4444"
         elif diff <= 14:
-            diff_label = f"{diff}日後"
+            diff_label = f"あと{diff}日"
             color = "#fbbf24"
         else:
-            diff_label = f"{diff}日後"
+            diff_label = f"あと{diff}日"
             color = "#64748b"
         return (
             f'<br><span style="color:{color};font-size:10px">'
             f'📅 決算: {dt_str} ({diff_label})</span>'
         )
     except Exception:
-        return f'<br><span style="color:#64748b;font-size:10px">📅 決算: {dt_str}</span>'
+        return (
+            f'<br><span style="color:#64748b;font-size:10px">'
+            f'📅 決算: {dt_str}</span>'
+        )
 
 
 def render_nikkei_banner() -> str:
