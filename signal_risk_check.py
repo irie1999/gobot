@@ -14,8 +14,11 @@ signal_risk_check.py — シグナル銘柄のリスク警告チェック
 """
 from __future__ import annotations
 
+import gzip as _gz
+import http.cookiejar
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -171,8 +174,8 @@ def _parse_date_from_html(html: str, today: date) -> str:
     for m in re.finditer(r'(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?', plain):
         try:
             dt = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            # 今日から3か月以内の未来日だけ候補に
-            if today <= dt <= today + timedelta(days=120):
+            # 今日から6か月以内の未来日だけ候補に
+            if today <= dt <= today + timedelta(days=180):
                 candidates.append(dt)
         except Exception:
             pass
@@ -182,42 +185,75 @@ def _parse_date_from_html(html: str, today: date) -> str:
     return ""
 
 
+def _kabutan_get(url: str) -> str:
+    """
+    Cookie セッションを使って kabutan へアクセスする。
+    トップページで Cookie を取得してから目的ページへ GET する。
+    """
+    cj  = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+    # Step1: トップページを取得して Cookie をセット (Bot 判定回避)
+    try:
+        req0 = urllib.request.Request("https://kabutan.jp/", headers=_KABUTAN_HEADERS)
+        with opener.open(req0, timeout=8):
+            pass
+    except Exception:
+        pass
+
+    # Step2: 目的ページを Cookie 付きで取得
+    req = urllib.request.Request(url, headers=_KABUTAN_HEADERS)
+    with opener.open(req, timeout=10) as r:
+        raw = r.read()
+        if r.headers.get("Content-Encoding", "") == "gzip":
+            raw = _gz.decompress(raw)
+        return raw.decode("utf-8", errors="replace")
+
+
 def _fetch_next_earnings_date(symbol: str, target_date: date | None = None) -> str:
     """
     複数ソースから次回決算発表予定日を取得して "YYYY-MM-DD" を返す。
     取得できなければ空文字を返す。
 
     試す順序:
-      1. 株探 finance ページ
-      2. 株探 stock トップページ
+      1. 株探 株価トップページ (/stock/?code=) — 「次回決算発表日」が最も目立つ
+      2. 株探 財務ページ (/stock/finance?code=) — 決算スケジュール欄
       3. irbank.net 決算ページ
     """
-    import gzip as _gzip
     code  = symbol.replace(".T", "").replace(".t", "")
     today = target_date or datetime.now(JST).date()
 
-    candidates: list[tuple[str, dict]] = [
-        (f"https://kabutan.jp/stock/finance?code={code}", _KABUTAN_HEADERS),
-        (f"https://kabutan.jp/stock/?code={code}",        _KABUTAN_HEADERS),
-        (f"https://irbank.net/{code}/kessan",             _IRBANK_HEADERS),
-        (f"https://irbank.net/{code}",                    _IRBANK_HEADERS),
-    ]
-    for url, headers in candidates:
+    # --- 株探 (Cookie セッション付き) ---
+    for path in [f"/stock/?code={code}", f"/stock/finance?code={code}"]:
+        url = f"https://kabutan.jp{path}"
         try:
-            req = urllib.request.Request(url, headers=headers)
+            html   = _kabutan_get(url)
+            result = _parse_date_from_html(html, today)
+            if result:
+                return result
+        except urllib.error.HTTPError as _e:
+            print(f"  [決算日] {symbol} kabutan{path[:16]} → HTTP {_e.code}", flush=True)
+        except Exception as _e:
+            print(f"  [決算日] {symbol} kabutan{path[:16]} → {type(_e).__name__}", flush=True)
+
+    # --- irbank.net (Referer: google 付き) ---
+    for url in [f"https://irbank.net/{code}/kessan",
+                f"https://irbank.net/{code}"]:
+        try:
+            req = urllib.request.Request(url, headers=_IRBANK_HEADERS)
             with urllib.request.urlopen(req, timeout=10) as r:
-                raw  = r.read()
-                # gzip 圧縮対応
-                ct = r.headers.get("Content-Encoding", "")
-                if "gzip" in ct:
-                    raw = _gzip.decompress(raw)
+                raw = r.read()
+                if r.headers.get("Content-Encoding", "") == "gzip":
+                    raw = _gz.decompress(raw)
                 html = raw.decode("utf-8", errors="replace")
             result = _parse_date_from_html(html, today)
             if result:
                 return result
+        except urllib.error.HTTPError as _e:
+            print(f"  [決算日] {symbol} irbank → HTTP {_e.code}", flush=True)
         except Exception as _e:
-            _ecode = getattr(_e, "code", None)
-            print(f"  [決算日] {symbol} {url.split('/')[2]} → {_ecode or type(_e).__name__}", flush=True)
+            print(f"  [決算日] {symbol} irbank → {type(_e).__name__}", flush=True)
+
     return ""
 
 
