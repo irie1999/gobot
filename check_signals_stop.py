@@ -283,10 +283,13 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     period_results: dict[int, dict] = {}
     for days in PERIODS:
         cutoff = today - timedelta(days=days)
-        sub    = [t for t in full_r["trade_log"]
-                  if t["signal_dt"].date() >= cutoff
-                  and t.get("reason") != "発注中"]
-        if not sub:
+        # 表示用: 発注中のみ除外（保有中は取引明細に表示する）
+        sub_display = [t for t in full_r["trade_log"]
+                       if t["signal_dt"].date() >= cutoff
+                       and t.get("reason") != "発注中"]
+        # 統計・スコア計算用: 保有中も除外（未決済ポジションはスコアに影響させない）
+        sub = [t for t in sub_display if t.get("reason") != "保有中"]
+        if not sub_display:
             continue
         filled = len(sub)
         wins   = sum(1 for t in sub if t["pnl"] > 0)
@@ -298,14 +301,14 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
             symbol=symbol, name=name, strategy=strategy,
             signals=full_r["signals"], filled=filled,
             trades=filled, wins=wins, losses=losses,
-            win_rate=wins / filled * 100,
+            win_rate=wins / filled * 100 if filled else 0.0,
             pf=pf, total_pnl=sum(t["pnl"] for t in sub),
             total_fee=sum(t.get("fee", 0) for t in sub),
             slippage_pct=full_r["slippage_pct"],
             fee_pct_one_way=full_r["fee_pct_one_way"],
-            avg_hold=sum(t["hold_days"] for t in sub) / filled,
+            avg_hold=sum(t["hold_days"] for t in sub) / filled if filled else 0.0,
             fill_rate=full_r["fill_rate"],
-            trade_log=sub,
+            trade_log=sub_display,  # 表示用は保有中を含む
         )
 
     return dict(symbol=symbol, name=name, strategy=strategy,
