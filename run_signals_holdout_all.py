@@ -210,7 +210,13 @@ _sig_html = _na._tab4_signals_html(
     target_date=target_date,
 )
 
-# ── 損益タブ HTML (5期間) ─────────────────────────────────────────────────────
+# ── 損益タブ HTML: 全設定統合 (180日) + 期間別 ───────────────────────────────
+# 全設定統合: _all_configs で直近180日を一括集計 → デフォルト表示
+_na._PNL_CONFIGS[:] = _all_configs
+print(f"損益集計中 (全設定統合・直近180日 / {len(_all_configs)}設定)...", flush=True)
+_all_period_html = _na._tab5_pnl_html(180, _args.workers)
+
+# 期間別: 各期間のconfigs（必要時にボタンで切替）
 _period_pane_htmls: dict[int, str] = {}
 for days in _PNL_PERIODS:
     cfgs = _period_configs.get(days) or _all_configs
@@ -300,18 +306,22 @@ if _args.symbol:
 </div>"""
 
 # ── 期間セレクターのHTML部品 ──────────────────────────────────────────────────
-_period_btns = ""
-_period_panes = ""
+# デフォルトは「全設定」ボタン（全10設定の合算）
+_period_btns = (
+    '<button class="ho-period-btn active" data-days="all" '
+    "onclick=\"switchHoPeriod('all')\">全設定 (180日)</button>\n"
+)
+_period_panes = (
+    f'<div id="hdall" class="ho-period-pane" style="display:block">'
+    f'{_all_period_html}</div>\n'
+)
 for days in _PNL_PERIODS:
-    active   = "active" if days == _DEFAULT_DAYS else ""
-    btn_bg   = "#3b82f6" if days == _DEFAULT_DAYS else ""
     _period_btns += (
-        f'<button class="ho-period-btn {active}" '
+        f'<button class="ho-period-btn" '
         f'data-days="{days}" onclick="switchHoPeriod({days})">{days}日</button>\n'
     )
-    display = "block" if days == _DEFAULT_DAYS else "none"
     _period_panes += (
-        f'<div id="hd{days}" class="ho-period-pane" style="display:{display}">'
+        f'<div id="hd{days}" class="ho-period-pane" style="display:none">'
         f'{_period_pane_htmls[days]}</div>\n'
     )
 
