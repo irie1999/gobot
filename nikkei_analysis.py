@@ -1504,8 +1504,12 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 is_wf = False
 
             # 全銘柄のトレード履歴を収集（スコア別勝率のため）
-            max_period = max(bt["period_results"].keys())
-            trade_log  = bt["period_results"][max_period].get("trade_log", [])
+            # period_results が空の場合 (全エントリーが "発注中") は空リストで続行
+            if bt["period_results"]:
+                max_period = max(bt["period_results"].keys())
+                trade_log  = bt["period_results"][max_period].get("trade_log", [])
+            else:
+                trade_log  = []
             bt_info = {"score": score, "trades": trade_log,
                        "sym": sym, "name": name, "strat": strat, "is_wf": is_wf,
                        "wf_score": wf_score, "rec_score": rec_score,
