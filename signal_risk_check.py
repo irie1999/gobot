@@ -372,6 +372,38 @@ def get_nikkei_status(target_date: date | None = None) -> dict | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 決算シーズン判定（3月末決算・日本上場企業の約70%が対象）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (月, 開始日, 終了日, 発表内容ラベル)
+_EARNINGS_SEASONS = [
+    (5,  1, 20, "本決算"),          # 通期 (3月期)
+    (7, 25, 31, "1Q決算"),          # 第1四半期前半
+    (8,  1, 15, "1Q決算"),          # 第1四半期後半
+    (10, 25, 31, "2Q・中間決算"),   # 中間期前半
+    (11,  1, 15, "2Q・中間決算"),   # 中間期後半
+    (1,  25, 31, "3Q決算"),         # 第3四半期前半
+    (2,   1, 15, "3Q決算"),         # 第3四半期後半
+]
+
+
+def _check_earnings_season(target_date: date | None = None) -> dict | None:
+    """
+    3月末決算企業の決算発表集中期間（年4回）に該当する場合に警告を返す。
+    個別銘柄の決算日を調べなくてもシーズン到来を事前に通知できる。
+    """
+    today = target_date or datetime.now(JST).date()
+    for month, d_start, d_end, label in _EARNINGS_SEASONS:
+        if today.month == month and d_start <= today.day <= d_end:
+            return {
+                "level": "warning",
+                "code":  "EARNINGS_SEASON",
+                "msg":   f"決算シーズン中 ({label} / 3月決算企業)",
+            }
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 一括事前計算
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -380,6 +412,7 @@ def _compute_one(symbol: str, name: str, target_date: date | None) -> list[dict]
     for fn in [
         lambda: _check_negative_news(symbol, name),
         lambda: _check_earnings_proximity(symbol, target_date),
+        lambda: _check_earnings_season(target_date),
         lambda: _check_volume_price_divergence(symbol),
         lambda: _check_atr_spike(symbol),
     ]:
