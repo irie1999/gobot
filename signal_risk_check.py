@@ -105,10 +105,27 @@ _KABUTAN_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/125.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "ja,en;q=0.9",
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+    "Cache-Control": "max-age=0",
+}
+_IRBANK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja-JP,ja;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.google.co.jp/",
 }
 
 # 株探 HTML から日付を抜く正規表現（複数パターン）
@@ -167,27 +184,40 @@ def _parse_date_from_html(html: str, today: date) -> str:
 
 def _fetch_next_earnings_date(symbol: str, target_date: date | None = None) -> str:
     """
-    株探の財務ページから次回決算発表予定日を取得して "YYYY-MM-DD" を返す。
+    複数ソースから次回決算発表予定日を取得して "YYYY-MM-DD" を返す。
     取得できなければ空文字を返す。
+
+    試す順序:
+      1. 株探 finance ページ
+      2. 株探 stock トップページ
+      3. irbank.net 決算ページ
     """
+    import gzip as _gzip
     code  = symbol.replace(".T", "").replace(".t", "")
     today = target_date or datetime.now(JST).date()
 
-    # 試すURL: finance ページ → stock トップページ の順
-    urls = [
-        f"https://kabutan.jp/stock/finance?code={code}",
-        f"https://kabutan.jp/stock/?code={code}",
+    candidates: list[tuple[str, dict]] = [
+        (f"https://kabutan.jp/stock/finance?code={code}", _KABUTAN_HEADERS),
+        (f"https://kabutan.jp/stock/?code={code}",        _KABUTAN_HEADERS),
+        (f"https://irbank.net/{code}/kessan",             _IRBANK_HEADERS),
+        (f"https://irbank.net/{code}",                    _IRBANK_HEADERS),
     ]
-    for url in urls:
+    for url, headers in candidates:
         try:
-            req = urllib.request.Request(url, headers=_KABUTAN_HEADERS)
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as r:
-                html = r.read().decode("utf-8", errors="replace")
+                raw  = r.read()
+                # gzip 圧縮対応
+                ct = r.headers.get("Content-Encoding", "")
+                if "gzip" in ct:
+                    raw = _gzip.decompress(raw)
+                html = raw.decode("utf-8", errors="replace")
             result = _parse_date_from_html(html, today)
             if result:
                 return result
-        except Exception:
-            pass
+        except Exception as _e:
+            _ecode = getattr(_e, "code", None)
+            print(f"  [決算日] {symbol} {url.split('/')[2]} → {_ecode or type(_e).__name__}", flush=True)
     return ""
 
 
@@ -436,11 +466,14 @@ def render_earnings_date(symbol: str, target_date: date | None = None) -> str:
 
     dt_str = EARNINGS_DATES[symbol]
 
-    # 取得できなかった場合
+    # 取得できなかった場合 → 株探リンクを表示
     if not dt_str:
+        code = symbol.replace(".T", "").replace(".t", "")
         return (
-            '<br><span style="color:#475569;font-size:10px">'
-            '📅 決算日: 取得不可</span>'
+            f'<br><span style="color:#475569;font-size:10px">'
+            f'📅 決算日: <a href="https://kabutan.jp/stock/finance?code={code}" '
+            f'target="_blank" style="color:#475569;text-decoration:underline">'
+            f'株探で確認</a></span>'
         )
 
     try:
