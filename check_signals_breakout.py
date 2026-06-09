@@ -66,6 +66,25 @@ def get_wf_score(symbol: str, strategy: str) -> tuple[int, str] | None:
     return v["score"], v["rank"]
 
 
+def _load_cpcv_flags() -> dict:
+    """cpcv_flags.py を読み込む (なければ空 dict)。"""
+    import importlib.util as _ilu, os as _os2
+    mode_suf = "_aggressive" if _os2.getenv("TRADING_MODE", "").lower() == "aggressive" else ""
+    for fname in [f"cpcv_flags{mode_suf}.py", "cpcv_flags.py"]:
+        p = Path(fname)
+        if p.exists():
+            try:
+                spec = _ilu.spec_from_file_location("_cpcv_flags_mod", p)
+                mod  = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return getattr(mod, "CPCV_FLAGS", {})
+            except Exception:
+                pass
+    return {}
+
+CPCV_FLAGS: dict = _load_cpcv_flags()
+
+
 def _fetch_live_price(symbol: str, fallback: float) -> float:
     """最新の日足終値をキャッシュを使わず直接取得。失敗時はフォールバック。"""
     try:
@@ -424,9 +443,23 @@ def build_html(all_items: list[dict], show_days: int,
         _sig_dt = pd.to_datetime(sig['signal_date'])
         _max_exit = pd.bdate_range(start=_sig_dt, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
         max_exit_str = _max_exit.strftime("%Y-%m-%d")
+        cpcv_info = CPCV_FLAGS.get(item["symbol"])
+        if cpcv_info:
+            _lvl = cpcv_info["level"]
+            _rsn = cpcv_info["reason"].replace('"', "&quot;")
+            if _lvl == "danger":
+                cpcv_badge = (f'<br><span title="{_rsn}" style="cursor:help;'
+                              f'color:#ef4444;font-size:10px;font-weight:700">'
+                              f'❌ CPCV警告</span>')
+            else:
+                cpcv_badge = (f'<br><span title="{_rsn}" style="cursor:help;'
+                              f'color:#fbbf24;font-size:10px;font-weight:700">'
+                              f'⚠️ CPCV要注意</span>')
+        else:
+            cpcv_badge = ""
         signal_rows += f"""
         <tr style="{row_style}">
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
+          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}</td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span>{_atr_badge(stop_pct)}</td>
           <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
