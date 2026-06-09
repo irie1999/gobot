@@ -87,8 +87,31 @@ def load_proposal(path: Path) -> tuple[list[tuple[str, str, str]],
     return stop_wl, brk_wl
 
 
-def auto_detect_proposal() -> Path | None:
-    """最新の watchlist_proposal_*.py を自動検出。"""
+def auto_detect_proposal(aggressive: bool = False) -> Path | None:
+    """最新の watchlist_proposal_*.py を自動検出。
+    日付 (YYYY-MM-DD) で終わるファイルを優先し、同日付なら aggressive フラグに合わせて選ぶ。
+    """
+    import re
+    date_pat = re.compile(r"(\d{4}-\d{2}-\d{2})\.py$")
+    dated = []
+    for p in Path(".").glob("watchlist_proposal_*.py"):
+        m = date_pat.search(p.name)
+        if m:
+            dated.append((m.group(1), p))
+    if dated:
+        dated.sort(key=lambda x: x[0], reverse=True)
+        latest_date = dated[0][0]
+        same_day = [p for d, p in dated if d == latest_date]
+        if aggressive:
+            agg = [p for p in same_day if "aggressive" in p.name]
+            if agg:
+                return agg[0]
+        else:
+            non_agg = [p for p in same_day if "aggressive" not in p.name]
+            if non_agg:
+                return non_agg[0]
+        return same_day[0]
+    # フォールバック: 日付なしファイルをアルファベット逆順
     candidates = sorted(Path(".").glob("watchlist_proposal_*.py"), reverse=True)
     return candidates[0] if candidates else None
 
@@ -159,7 +182,7 @@ def main() -> None:
 
     # ── 提案ファイル決定 ──
     if args.proposal is None:
-        detected = auto_detect_proposal()
+        detected = auto_detect_proposal(aggressive=args.aggressive)
         if detected is None:
             print("[ERROR] watchlist_proposal_*.py が見つかりません。", file=sys.stderr)
             print("  先に  python build_watchlist.py  を実行してください。",
