@@ -128,8 +128,10 @@ body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;padding:
 h1{color:#38bdf8;font-size:1.4rem}
 h2{color:#94a3b8;font-size:1.05rem;margin-top:2.5rem}
 p.note{color:#64748b;font-size:0.8rem;margin:-0.4rem 0 1rem}
-table{border-collapse:collapse;width:100%;margin-bottom:0.5rem;font-size:0.84rem}
-th{background:#1e293b;color:#94a3b8;padding:8px 12px;text-align:right;white-space:nowrap}
+table{border-collapse:separate;border-spacing:0;width:100%;margin-bottom:0.5rem;font-size:0.84rem}
+thead th{position:sticky;top:0;z-index:10}
+th{background:#1e293b;color:#94a3b8;padding:8px 12px;text-align:right;white-space:nowrap;
+   box-shadow:inset 0 -1px 0 #334155, inset 0 1px 0 #334155}
 th:first-child{text-align:left}
 td{padding:7px 12px;border-bottom:1px solid #1e293b;text-align:right}
 td:first-child{text-align:left;color:#e2e8f0;font-weight:600}
