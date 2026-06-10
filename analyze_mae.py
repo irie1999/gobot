@@ -2,19 +2,25 @@
 analyze_mae.py — 約定後の含み損推移分析 (MAE/MFE)
 
 「目標達成トレードは最初どれだけ含み損を抱えていたか」を可視化する。
+ロング/ショート両対応 (--short)。
 
 MAE (Maximum Adverse Excursion):  保有中の最大含み損率
 MFE (Maximum Favorable Excursion): 保有中の最大含み益率
-days_neg: 終値が約定価格を下回っていた日数
+days_neg (含み損日数): 終値が約定価格より不利だった日数
+  ロング = 終値 < 約定価格 / ショート = 終値 > 約定価格
+  ※ backtest_limit_entry が方向対応で計算するため、ショートでも正しく出る
 
 Usage:
-  python analyze_mae.py
-  python analyze_mae.py --days 365 --workers 8
+  python analyze_mae.py                       # ロング (check_signals_stop/breakout)
+  python analyze_mae.py --short               # ショート (check_signals_short/short_breakout)
+  python analyze_mae.py --short --days 365 --workers 8
+  python analyze_mae.py --short --watchlist watchlist_proposal_2026-06-10.py
   python analyze_mae.py --no-browser
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 import webbrowser
@@ -23,10 +29,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-os.environ.setdefault("TRADING_MODE", "conservative")
+# ── TRADING_MODE は import 前に確定させる ────────────────────────────────────
+if "--aggressive" in sys.argv:
+    os.environ["TRADING_MODE"] = "aggressive"
+else:
+    os.environ.setdefault("TRADING_MODE", "conservative")
+
+_IS_SHORT = "--short" in sys.argv
+
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
+if _IS_SHORT:
+    import check_signals_short          as _sstop
+    import check_signals_short_breakout as _sbrk
 from backtest_limit_entry import fetch, run_limit_backtest, WORKERS, JST
+
+# ロング/ショートでモジュールを切替
+_STOP_MOD = _sstop if _IS_SHORT else _stop
+_BRK_MOD  = _sbrk  if _IS_SHORT else _brk
+
+# watchlist_proposal_*.py の属性名
+_WL_ATTR_STOP = "SHORT_WATCHLIST"     if _IS_SHORT else "STOP_WATCHLIST"
+_WL_ATTR_BRK  = "SHORT_BRK_WATCHLIST" if _IS_SHORT else "BRK_WATCHLIST"
 
 
 def _args():
@@ -34,7 +58,27 @@ def _args():
     p.add_argument("--days",       type=int, default=365)
     p.add_argument("--workers",    type=int, default=WORKERS)
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--short",      action="store_true",
+                   help="ショート戦略 (A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S) を分析")
+    p.add_argument("--aggressive", action="store_true",
+                   help="aggressive プリセットで分析")
+    p.add_argument("--watchlist",  type=str, default=None,
+                   help="watchlist_proposal_*.py からWATCHLISTを読み込む")
     return p.parse_args()
+
+
+def _load_watchlist_proposal(path: str):
+    """watchlist_proposal_*.py から (stop_wl, brk_wl) を返す。"""
+    p = Path(path)
+    if not p.exists():
+        print(f"[ERROR] ファイルが見つかりません: {path}", file=sys.stderr)
+        sys.exit(1)
+    spec = importlib.util.spec_from_file_location(p.stem, p)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    stop_wl = list(getattr(mod, _WL_ATTR_STOP, []) or [])
+    brk_wl  = list(getattr(mod, _WL_ATTR_BRK,  []) or [])
+    return stop_wl, brk_wl
 
 
 def _run_one(sym, name, strat, calc_fn, em, sm, tm, days, entry_type):
@@ -59,14 +103,22 @@ def _fmt_dt(v) -> str:
     return str(v)[:10]
 
 
-def collect_trades(days: int, workers: int) -> list[dict]:
+def collect_trades(days: int, workers: int,
+                   stop_wl=None, brk_wl=None) -> list[dict]:
+    stop_wl = stop_wl if stop_wl is not None else _STOP_MOD.WATCHLIST
+    brk_wl  = brk_wl  if brk_wl  is not None else _BRK_MOD.WATCHLIST
+
     items = []
-    for sym, name, strat in _stop.WATCHLIST:
-        p = _stop.STRATEGY_PARAMS[strat]
-        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _stop.ENTRY_TYPE))
-    for sym, name, strat in _brk.WATCHLIST:
-        p = _brk.STRATEGY_PARAMS[strat]
-        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _brk.ENTRY_TYPE))
+    for sym, name, strat in stop_wl:
+        if strat not in _STOP_MOD.STRATEGY_PARAMS:
+            continue
+        p = _STOP_MOD.STRATEGY_PARAMS[strat]
+        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _STOP_MOD.ENTRY_TYPE))
+    for sym, name, strat in brk_wl:
+        if strat not in _BRK_MOD.STRATEGY_PARAMS:
+            continue
+        p = _BRK_MOD.STRATEGY_PARAMS[strat]
+        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _BRK_MOD.ENTRY_TYPE))
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -383,17 +435,22 @@ def build_html(trades: list[dict], days: int) -> str:
   </div>
 </div>"""
 
+    _side = "ショート" if _IS_SHORT else "ロング"
+    _uw   = ("ショート＝株価が約定価格より<strong>上</strong>にある期間"
+             if _IS_SHORT else
+             "ロング＝株価が約定価格より<strong>下</strong>にある期間")
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
-<title>MAE/MFE分析 — 約定後含み損推移</title>
+<title>MAE/MFE分析（{_side}）— 約定後含み損推移</title>
 <style>{_CSS}</style></head>
 <body>
-<h1>約定後の含み損推移分析（MAE / MFE）</h1>
+<h1>約定後の含み損推移分析（MAE / MFE）— {_side}</h1>
 <p class="note">
   分析期間: 直近{days}日 / 全WATCHLIST /
   目標達成: {n_target}件 / 損切り: {n_stop}件 / タイムカット: {n_timeout}件<br>
   MAE = Maximum Adverse Excursion（保有中の最大含み損率）<br>
-  MFE = Maximum Favorable Excursion（保有中の最大含み益率）
+  MFE = Maximum Favorable Excursion（保有中の最大含み益率）<br>
+  含み損日数 = 含み損を抱えていた日数（{_uw}）
 </p>
 {summary}
 {t1}
@@ -407,10 +464,16 @@ def build_html(trades: list[dict], days: int) -> str:
 
 if __name__ == "__main__":
     args = _args()
-    print(f"MAE/MFE分析: 直近{args.days}日 / workers={args.workers}", flush=True)
-    print("トレードデータ収集中...", flush=True)
+    _side = "ショート" if _IS_SHORT else "ロング"
+    print(f"MAE/MFE分析（{_side}）: 直近{args.days}日 / workers={args.workers}", flush=True)
 
-    trades = collect_trades(args.days, args.workers)
+    stop_wl = brk_wl = None
+    if args.watchlist:
+        stop_wl, brk_wl = _load_watchlist_proposal(args.watchlist)
+        print(f"WATCHLIST: {args.watchlist} (stop={len(stop_wl)} / brk={len(brk_wl)})", flush=True)
+
+    print("トレードデータ収集中...", flush=True)
+    trades = collect_trades(args.days, args.workers, stop_wl, brk_wl)
     print(f"収集完了: {len(trades)}件", flush=True)
 
     if not trades:
@@ -418,7 +481,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     html = build_html(trades, args.days)
-    out  = Path(f"mae_analysis_{datetime.now(JST).date()}.html")
+    _suffix = "_short" if _IS_SHORT else ""
+    out  = Path(f"mae_analysis{_suffix}_{datetime.now(JST).date()}.html")
     out.write_text(html, encoding="utf-8")
     print(f"HTML出力: {out}", flush=True)
     if not args.no_browser:

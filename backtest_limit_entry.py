@@ -616,8 +616,10 @@ def run_limit_backtest(
                         signal_dt=po["signal_dt"], signal_price=po["signal_price"],
                         order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
                         fill_type=fill_type, reason=xreason,
-                        mae_pct=round((lo - ep) / ep * 100, 2),
-                        mfe_pct=round((hi - ep) / ep * 100, 2),
+                        # MAE=最悪含み損 / MFE=最大含み益 を方向対応で計算
+                        # (ショートは株価上昇=含み損なので high/low を反転)
+                        mae_pct=round(((ep - hi) if is_short else (lo - ep)) / ep * 100, 2),
+                        mfe_pct=round(((ep - lo) if is_short else (hi - ep)) / ep * 100, 2),
                         days_neg=0,
                     ))
                 # 同日決済: active に入れない
@@ -664,7 +666,9 @@ def run_limit_backtest(
             if exit_p_pos is None:
                 pos["min_lo"] = min(pos.get("min_lo", lo), lo)
                 pos["max_hi"] = max(pos.get("max_hi", hi), hi)
-                if cl < pos["entry_p"]:
+                # 含み損日数: ロングは終値<約定、ショートは終値>約定で含み損
+                underwater = (cl > pos["entry_p"]) if is_short else (cl < pos["entry_p"])
+                if underwater:
                     pos["days_neg"] = pos.get("days_neg", 0) + 1
                 still_active.append(pos)
                 continue
@@ -698,8 +702,10 @@ def run_limit_backtest(
                 order_target=pos["order_target"],
                 fill_type=pos.get("fill_type", "normal"),
                 reason=exit_reason_pos,
-                mae_pct=round((_fin_min - ep) / ep * 100, 2),
-                mfe_pct=round((_fin_max - ep) / ep * 100, 2),
+                # MAE=最悪含み損 / MFE=最大含み益 を方向対応で計算
+                # (ショートは株価上昇=含み損なので min/max を反転)
+                mae_pct=round(((ep - _fin_max) if is_short else (_fin_min - ep)) / ep * 100, 2),
+                mfe_pct=round(((ep - _fin_min) if is_short else (_fin_max - ep)) / ep * 100, 2),
                 days_neg=pos.get("days_neg", 0),
             ))
 
