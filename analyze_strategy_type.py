@@ -108,6 +108,7 @@ def _stats(trades: list[dict]) -> dict:
     tmo = sum(1 for t in trades if "タイム" in t["reason"])
     return dict(
         n=n, wr=wins / n * 100, pf=pf,
+        gross_profit=gp, gross_loss=gl,
         total_pnl=sum(t["pnl"] for t in trades),
         avg_pnl=sum(t["pnl"] for t in trades) / n,
         avg_pct=sum(t["pct"] for t in trades) / n,
@@ -139,7 +140,7 @@ tr:hover td{background:#1e293b55}
 
 def _cells(s: dict) -> str:
     if not s:
-        return "<td colspan='10' class='gray'>データなし</td>"
+        return "<td colspan='12' class='gray'>データなし</td>"
     wr_c  = "good" if s["wr"] >= 55 else ("warn" if s["wr"] >= 45 else "bad")
     pf_s  = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
     pf_c  = "good" if s["pf"] >= 1.5 else ("warn" if s["pf"] >= 1.0 else "bad")
@@ -149,6 +150,8 @@ def _cells(s: dict) -> str:
         f"<td>{s['n']}</td>"
         f"<td class='{wr_c}'>{s['wr']:.1f}%</td>"
         f"<td class='{pf_c}'>{pf_s}</td>"
+        f"<td class='good'>+{s['gross_profit']:,.0f}円</td>"
+        f"<td class='bad'>-{s['gross_loss']:,.0f}円</td>"
         f"<td class='{pnl_c}'>{s['total_pnl']:+,.0f}円</td>"
         f"<td class='{ap_c}'>{s['avg_pnl']:+,.0f}円</td>"
         f"<td class='{ap_c}'>{s['avg_pct']:+.2f}%</td>"
@@ -163,7 +166,10 @@ _TH = (
     "<tr>"
     "<th style='text-align:left'>区分</th>"
     "<th>取引数</th><th>勝率</th><th>PF</th>"
-    "<th>合計損益</th><th>平均損益</th><th>平均%</th>"
+    "<th>合計利益<br><span style='font-size:0.75em;color:#64748b'>勝ち分のみ</span></th>"
+    "<th>合計損失<br><span style='font-size:0.75em;color:#64748b'>負け分のみ</span></th>"
+    "<th>合計損益<br><span style='font-size:0.75em;color:#64748b'>純益</span></th>"
+    "<th>平均損益</th><th>平均%</th>"
     "<th>平均保有</th>"
     "<th>平均MAE<br><span style='font-size:0.75em;color:#64748b'>最大含み損</span></th>"
     "<th>平均MFE<br><span style='font-size:0.75em;color:#64748b'>最大含み益</span></th>"
