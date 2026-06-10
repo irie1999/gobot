@@ -229,14 +229,49 @@ _na._PNL_CONFIGS[:] = _all_configs
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
 # 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
 # 1プロセス内で結果をメモ化して重複計算を防ぐ。
+# さらにディスクにも永続化し、当日内なら中断・再実行でも再計算しない。
+import pickle as _pickle
+import atexit as _atexit
+import time as _time
+
 _bt_cache: dict[tuple, dict | None] = {}
+
+_bt_cache_dir  = Path(".holdout_bt_cache")
+_bt_cache_dir.mkdir(exist_ok=True)
+_bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_cache_date}.pkl"
+if _bt_cache_file.exists():
+    try:
+        with open(_bt_cache_file, "rb") as _bf:
+            _bt_cache = _pickle.load(_bf)
+        print(f"[BTキャッシュ] {len(_bt_cache)}件をディスクから復元")
+    except Exception:
+        _bt_cache = {}
+
+_bt_cache_dirty = {"n": 0}
+
+def _save_bt_cache():
+    if _bt_cache_dirty["n"] == 0:
+        return
+    try:
+        with open(_bt_cache_file, "wb") as _bf:
+            _pickle.dump(_bt_cache, _bf, protocol=_pickle.HIGHEST_PROTOCOL)
+        print(f"[BTキャッシュ] {len(_bt_cache)}件を保存 ({_bt_cache_file})")
+    except Exception as _e:
+        print(f"[BTキャッシュ] 保存失敗: {_e}")
+
+# 中断(Ctrl-C)・正常終了どちらでも保存し、途中までの計算を次回再利用する
+_atexit.register(_save_bt_cache)
 
 def _make_cached_bt(orig_fn):
     def wrapper(symbol, name, strategy):
         mode = os.environ.get("TRADING_MODE", "conservative")
-        key  = (symbol, strategy, mode)
+        key  = f"{symbol}|{strategy}|{mode}"
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy)
+            _bt_cache_dirty["n"] += 1
+            # 100件ごとに途中保存 (長時間実行の中断対策)
+            if _bt_cache_dirty["n"] % 100 == 0:
+                _save_bt_cache()
         return _bt_cache[key]
     return wrapper
 
@@ -304,6 +339,11 @@ except Exception as _re:
     _precompute_risks = None
     _nikkei_banner = ""
 
+# ── 工程タイミング計測 ────────────────────────────────────────────────────────
+_T0 = _time.time()
+def _phase(msg: str):
+    print(f"  [⏱ {_time.time() - _T0:6.1f}s] {msg}", flush=True)
+
 # ── シグナルタブ HTML (パス1: バッジなし) ─────────────────────────────────────
 print("シグナル収集中...", flush=True)
 _na._PNL_CONFIGS[:] = _all_configs
@@ -312,6 +352,7 @@ _sig_html = _na._tab4_signals_html(
     min_score=_args.min_score,
     target_date=target_date,
 )
+_phase("シグナルタブ完了")
 
 # ── キャッシュ更新・signal_date 検証 ─────────────────────────────────────────
 # 新規シグナル保存 & signal_dateが変わった銘柄のスコアを更新
@@ -382,6 +423,7 @@ except Exception as _e:
 _na._PNL_CONFIGS[:] = _all_configs
 print(f"損益集計中 (全設定統合・直近180日 / {len(_all_configs)}設定)...", flush=True)
 _all_period_html = _na._tab5_pnl_html(180, _args.workers)
+_phase("損益タブ(180/全設定統合)完了")
 
 # 期間別: 各期間のconfigs（必要時にボタンで切替）
 _period_pane_htmls: dict[int, str] = {}
@@ -390,6 +432,7 @@ for days in _PNL_PERIODS:
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
     _period_pane_htmls[days] = _na._tab5_pnl_html(days, _args.workers)
+    _phase(f"損益タブ({days}日)完了")
 
 # ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────
 # _last_signals はシグナルタブ生成時に _na 側で設定される

@@ -1410,6 +1410,9 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _set_sig_params(mode: str, sm_tm=None) -> None:
+    # 現在のモードを環境変数にも反映 (バックテストキャッシュのキー整合のため)。
+    # これが無いと con/agg でキャッシュキーが衝突し結果が混ざる。
+    os.environ["TRADING_MODE"] = "aggressive" if mode != "conservative" else "conservative"
     if mode == "conservative":
         _stop.STRATEGY_PARAMS.update(_CON_STOP)
         _brk.STRATEGY_PARAMS.update(_CON_BRK)
