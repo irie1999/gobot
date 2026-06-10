@@ -227,6 +227,8 @@ _na._SIGNALS_AVAILABLE = True
 _na._PNL_CONFIGS[:] = _all_configs
 
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
+# 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
+# 1プロセス内で結果をメモ化して重複計算を防ぐ。
 _bt_cache: dict[tuple, dict | None] = {}
 
 def _make_cached_bt(orig_fn):
@@ -238,8 +240,17 @@ def _make_cached_bt(orig_fn):
         return _bt_cache[key]
     return wrapper
 
+# ロング側 (check_signals_stop / breakout)
 _stop.backtest_one = _make_cached_bt(_stop.backtest_one)
 _brk.backtest_one  = _make_cached_bt(_brk.backtest_one)
+
+# ショート側 (check_signals_short / short_breakout)。
+# nikkei_analysis の _mod_for() はショート戦略をこれらに振り分けるため、
+# ここをラップしないとショート実行でキャッシュが全く効かず7〜8倍重くなる。
+for _mod_attr in ("_short", "_sbrk"):
+    _m = getattr(_na, _mod_attr, None)
+    if _m is not None and hasattr(_m, "backtest_one"):
+        _m.backtest_one = _make_cached_bt(_m.backtest_one)
 
 # ── シグナルスコアキャッシュ読み込み ─────────────────────────────────────────
 # 初回発信時のBTスコアを保存し、以後の実行でも同じスコアを表示する。
