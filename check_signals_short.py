@@ -158,7 +158,9 @@ def calc_rsi2_short(df: pd.DataFrame) -> pd.DataFrame:
 
 
 STRATEGY_PARAMS = {
-    "A7_S": (calc_a7_short, 0.0, 1.5, 3.0),
+    "A7_S":   (calc_a7_short,   0.0, 1.5, 3.0),
+    "RSI2_S": (calc_rsi2_short, 0.0, 2.0, 4.0),
+    "MACD_S": (calc_macd_short, 0.0, 1.5, 3.0),
 }
 ENTRY_TYPE = "stop_sell"
 

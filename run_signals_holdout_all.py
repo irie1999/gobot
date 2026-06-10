@@ -40,7 +40,17 @@ _pre.add_argument("--days",       type=int,   default=180,
                   help="損益タブで最初に表示する期間 (30/60/90/150/180)")
 _pre.add_argument("--symbol",     type=str,   default=None,
                   help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
+_pre.add_argument("--short",      action="store_true",
+                  help="ショート戦略(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S/VOL_S)で出力")
 _args, _ = _pre.parse_known_args()
+
+# ── ロング/ショートの戦略セット ──────────────────────────────────────────────
+if _args.short:
+    _STOP_STRATS = ["A7_S", "RSI2_S", "MACD_S"]      # ショート逆指値系
+    _BRK_STRATS  = ["DON_S", "MOM_S", "GAP_S"]       # ショートBRK系
+else:
+    _STOP_STRATS = ["MACD", "A7", "RSI2"]
+    _BRK_STRATS  = ["DON", "VOL", "MOM"]
 
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
@@ -111,12 +121,12 @@ for holdout_days, ho_label, col_con, col_agg in HOLDOUT_CONFIGS:
         stop_wl: list[tuple] = []
         brk_wl:  list[tuple] = []
         has_data = False
-        for strat in ["MACD", "A7", "RSI2"]:
+        for strat in _STOP_STRATS:
             p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
             if p:
                 stop_wl.extend(_load_wl_from_csv(p, _args.max_price, strat))
                 has_data = True
-        for strat in ["DON", "VOL", "MOM"]:
+        for strat in _BRK_STRATS:
             p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
             if p:
                 brk_wl.extend(_load_wl_from_csv(p, _args.max_price, strat))
@@ -134,6 +144,12 @@ for holdout_days, ho_label, col_con, col_agg in HOLDOUT_CONFIGS:
 # フォールバック: CSV なし → 現行 WATCHLIST を全期間で共通使用
 import check_signals_stop     as _stop
 import check_signals_breakout as _brk
+if _args.short:
+    import check_signals_short          as _fb_stop_mod
+    import check_signals_short_breakout as _fb_brk_mod
+else:
+    _fb_stop_mod = _stop
+    _fb_brk_mod  = _brk
 
 _using_fallback = all(len(v) == 0 for v in _period_configs.values())
 if _using_fallback:
@@ -143,8 +159,8 @@ if _using_fallback:
         "color":   "#3b82f6",
         "mode":    "conservative",
         "sm_tm":   None,
-        "stop_wl": list(_stop.WATCHLIST),
-        "brk_wl":  list(_brk.WATCHLIST),
+        "stop_wl": list(_fb_stop_mod.WATCHLIST),
+        "brk_wl":  list(_fb_brk_mod.WATCHLIST),
     }
     for days in _PNL_PERIODS:
         _period_configs[days] = [_fb_cfg]
@@ -608,14 +624,14 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ホールドアウト全設定 シグナル・損益 {date_str}</title>
+<title>ホールドアウト全設定 シグナル・損益{'（ショート）' if _args.short else ''} {date_str}</title>
 <style>
 {_na.CSS}
 {_extra_css}
 </style>
 </head>
 <body>
-<h1>ホールドアウト全設定 シグナル・損益レポート</h1>
+<h1>ホールドアウト全設定 シグナル・損益レポート{'（ショート）' if _args.short else ''}</h1>
 <p class="subtitle">
   基準日: {date_str} &nbsp;|&nbsp;
   設定数: {len(_all_configs)}件 &nbsp;|&nbsp;
@@ -662,8 +678,9 @@ html = f"""<!DOCTYPE html>
 </body>
 </html>"""
 
-_sym_suffix = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
-out_path = Path(f"signals_holdout_all{_sym_suffix}_{date_str}.html")
+_sym_suffix   = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
+_short_suffix = "_short" if _args.short else ""
+out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}_{date_str}.html")
 out_path.write_text(html, encoding="utf-8")
 print(f"\nレポート生成完了: {out_path.resolve()}")
 

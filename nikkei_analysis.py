@@ -102,6 +102,42 @@ try:
 except Exception:
     pass
 
+# ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
+# strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
+_short = None
+_sbrk  = None
+_CON_SHORT: dict = {}; _AGG_SHORT: dict = {}
+_CON_SBRK:  dict = {}; _AGG_SBRK:  dict = {}
+try:
+    os.environ["TRADING_MODE"] = "conservative"
+    import check_signals_short           as _short
+    import check_signals_short_breakout  as _sbrk
+    _importlib.reload(_short); _importlib.reload(_sbrk)
+    _CON_SHORT = _copy.deepcopy(_short.STRATEGY_PARAMS)
+    _CON_SBRK  = _copy.deepcopy(_sbrk.STRATEGY_PARAMS)
+    os.environ["TRADING_MODE"] = "aggressive"
+    _importlib.reload(_short); _importlib.reload(_sbrk)
+    _AGG_SHORT = _copy.deepcopy(_short.STRATEGY_PARAMS)
+    _AGG_SBRK  = _copy.deepcopy(_sbrk.STRATEGY_PARAMS)
+    os.environ["TRADING_MODE"] = "conservative"
+    _importlib.reload(_short); _importlib.reload(_sbrk)
+    _short.STRATEGY_PARAMS.update(_CON_SHORT)
+    _sbrk.STRATEGY_PARAMS.update(_CON_SBRK)
+except Exception:
+    _short = None
+    _sbrk  = None
+
+
+def _mod_for(strat: str):
+    """戦略名から対応するシグナルモジュールを返す (ロング/ショート自動判定)。"""
+    if _short is not None and strat in getattr(_short, "STRATEGY_PARAMS", {}):
+        return _short
+    if _sbrk is not None and strat in getattr(_sbrk, "STRATEGY_PARAMS", {}):
+        return _sbrk
+    if strat in getattr(_brk, "STRATEGY_PARAMS", {}):
+        return _brk
+    return _stop
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WFスコア再実行チェック
@@ -1380,12 +1416,24 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
     else:
         _stop.STRATEGY_PARAMS.update(_AGG_STOP)
         _brk.STRATEGY_PARAMS.update(_AGG_BRK)
+    if _short is not None:
+        if mode == "conservative":
+            _short.STRATEGY_PARAMS.update(_CON_SHORT)
+            _sbrk.STRATEGY_PARAMS.update(_CON_SBRK)
+        else:
+            _short.STRATEGY_PARAMS.update(_AGG_SHORT)
+            _sbrk.STRATEGY_PARAMS.update(_AGG_SBRK)
     if sm_tm:
         sm, tm = sm_tm
         for k, v in list(_stop.STRATEGY_PARAMS.items()):
             _stop.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
         for k, v in list(_brk.STRATEGY_PARAMS.items()):
             _brk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
+        if _short is not None:
+            for k, v in list(_short.STRATEGY_PARAMS.items()):
+                _short.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
+            for k, v in list(_sbrk.STRATEGY_PARAMS.items()):
+                _sbrk.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
 
 
 _BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", "取引数": "#a855f7"}
@@ -1477,7 +1525,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         def _check_one(item, _td=target_date, _ms=min_score, _sm=source_map,
                        _cfg_label=cfg["label"], _cfg_color=cfg["color"]):
             sym, name, strat, is_stop = item
-            mod = _stop if is_stop else _brk
+            mod = _mod_for(strat)
             bt = mod.backtest_one(sym, name, strat)
             if not bt:
                 return None
@@ -1968,9 +2016,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         with _TPE(max_workers=workers) as ex:
             futs = {}
             for sym, name, strat in cfg["stop_wl"]:
-                futs[ex.submit(_stop.backtest_one, sym, name, strat)] = None
+                futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
             for sym, name, strat in cfg["brk_wl"]:
-                futs[ex.submit(_brk.backtest_one, sym, name, strat)] = None
+                futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
             for fut in _asc(futs):
                 try:
                     r = fut.result()
@@ -2050,6 +2098,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # reset to conservative
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
     _brk.STRATEGY_PARAMS.update(_CON_BRK)
+    if _short is not None:
+        _short.STRATEGY_PARAMS.update(_CON_SHORT)
+        _sbrk.STRATEGY_PARAMS.update(_CON_SBRK)
 
     # ── cfg_filter: 対象configのみに絞り込み ──
     if cfg_filter:

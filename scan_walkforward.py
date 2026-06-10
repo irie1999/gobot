@@ -92,7 +92,7 @@ from backtest_limit_entry import (
 from scan_breakout_entry import (
     calc_donchian, calc_vol_breakout, calc_momentum,
 )
-from check_signals_short import calc_a7_short
+from check_signals_short import calc_a7_short, calc_rsi2_short, calc_macd_short
 from check_signals_short_breakout import (
     calc_donchian_short, calc_momentum_short, calc_gap_short,
 )
@@ -160,6 +160,8 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "VOL":   (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout",  "stop"),
     "MOM":   (calc_momentum,      0.0, 1.5, 3.0, "breakout",  "stop"),
     "A7_S":  (calc_a7_short,      0.0, 1.5, 3.0, "short",     "stop_sell"),
+    "RSI2_S":(calc_rsi2_short,    0.0, 2.0, 4.0, "short",     "stop_sell"),
+    "MACD_S":(calc_macd_short,    0.0, 1.5, 3.0, "short",     "stop_sell"),
     "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
     "MOM_S": (calc_momentum_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
     "GAP_S": (calc_gap_short,     0.0, 1.5, 3.0, "short_brk", "stop_sell"),
@@ -172,6 +174,8 @@ STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "VOL":   (calc_vol_breakout,  0.0, 1.5, 2.0, "breakout",  "stop"),
     "MOM":   (calc_momentum,      0.0, 1.5, 2.0, "breakout",  "stop"),
     "A7_S":  (calc_a7_short,      0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "MACD_S":(calc_macd_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),
     "DON_S": (calc_donchian_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
     "MOM_S": (calc_momentum_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
     "GAP_S": (calc_gap_short,     0.0, 1.5, 2.0, "short_brk", "stop_sell"),
