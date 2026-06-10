@@ -207,18 +207,44 @@ def _expected_latest_bar_date():
     return today - timedelta(days=1)
 
 
+def _trim_incomplete_bar(df: pd.DataFrame) -> pd.DataFrame:
+    """未確定バーを末尾から除去する。
+
+    yfinance は 15:00 JST より前 (場中) に叩くと「今日の未確定バー」を返すことが
+    ある。その未確定バー (= 場中の暫定終値) をキャッシュに保存すると、引け後に
+    実行しても暫定値が再利用され続けてしまう (現在値が場中の値で固定される)。
+
+    `_expected_latest_bar_date()` より新しい日付のバーは「まだ確定していない」と
+    みなして落とす。これにより:
+      - 引け前実行: 今日の未確定バーを落とし、前営業日の確定終値までを使う
+      - 引け後実行: 今日のバーは確定済みなので残る
+    """
+    if df is None or len(df) == 0:
+        return df
+    expected = _expected_latest_bar_date()
+    idx_dates = df.index.date if hasattr(df.index, "date") else \
+        [ix.date() if hasattr(ix, "date") else ix for ix in df.index]
+    mask = [d <= expected for d in idx_dates]
+    if all(mask):
+        return df
+    return df[mask].copy()
+
+
 def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
     """永続キャッシュ優先・フォールバックでダウンロード。
 
     キャッシュ判定:
       - キャッシュ内 df の最新バー日付 >= _expected_latest_bar_date() なら有効
       - そうでなければ再取得 (引け前作成 → 引け後実行 のパターンも自動更新)
+      - 未確定バー (15:00 JST 前の今日のバー) は読み込み時に除去する
     """
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
         try:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
+            # 未確定バー (場中の今日のバー) を除去 → 前営業日確定終値までで判定
+            df = _trim_incomplete_bar(df)
             if len(df) >= 210:
                 latest_bar = df.index[-1]
                 latest_date = latest_bar.date() if hasattr(latest_bar, "date") else latest_bar
@@ -277,6 +303,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | Non
             "close":  raw["close"].to_numpy(dtype=float),
             "volume": raw["volume"].to_numpy(dtype=float),
         }, index=raw.index)
+        # 未確定バー (場中の今日のバー) はキャッシュに保存しない
+        # → 引け前に実行しても暫定終値が永続化されない
+        df_out = _trim_incomplete_bar(df_out)
+        if len(df_out) < 210:
+            return None
         try:
             _CACHE_DIR.mkdir(exist_ok=True)
             with open(persistent, "wb") as f:
