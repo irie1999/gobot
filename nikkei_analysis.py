@@ -2678,6 +2678,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
 {kpi_html}
 
+<button class="analysis-toggle" onclick="toggleAnalysis({_dseq})" id="analysis_btn_{_dseq}">▶ 詳細分析（スクリプト別・スコア別・銘柄別）を表示</button>
+<div id="analysis_{_dseq}" class="analysis-block" style="display:none">
+
 <h2>スクリプト別サマリー</h2>
 <table>
   <thead><tr>
@@ -2810,13 +2813,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{sym6069_rows}</tbody>
 </table>
 
+</div>
+
 <h2>取引明細（決済日降順）</h2>
-<p style="color:#64748b;font-size:0.8rem;margin:-4px 0 8px">タブをクリックすると明細を表示（もう一度押すと閉じる）</p>
 <div class="detail-tab-nav">
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
 </div>
-<div id="detail_{_dseq}_all" class="detail-tab-pane">
+<div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -2859,6 +2863,15 @@ function switchDetailTab(seq, which) {{
     }});
   }}
 }}
+function toggleAnalysis(seq) {{
+  var blk = document.getElementById('analysis_'+seq);
+  var btn = document.getElementById('analysis_btn_'+seq);
+  if (!blk) return;
+  var show = (blk.style.display === 'none');
+  blk.style.display = show ? 'block' : 'none';
+  if (btn) btn.textContent = (show ? '▼ 詳細分析（スクリプト別・スコア別・銘柄別）を隠す'
+                                   : '▶ 詳細分析（スクリプト別・スコア別・銘柄別）を表示');
+}}
 </script>"""
 
 
@@ -2891,6 +2904,14 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
 .detail-tab-pane.active { display:block; }
+
+/* 詳細分析 折りたたみトグル */
+.analysis-toggle { display:block; width:100%; text-align:left;
+                   padding:10px 16px; margin:16px 0; background:#1e293b;
+                   border:1px solid #334155; border-radius:6px; color:#93c5fd;
+                   cursor:pointer; font-size:0.9rem; font-family:inherit; font-weight:600; }
+.analysis-toggle:hover { background:#263349; color:#e2e8f0; }
+.analysis-block { border-left:2px solid #1e293b; padding-left:4px; margin-bottom:8px; }
 
 /* 相場環境パネル */
 .regime-panel { display:flex; flex-wrap:wrap; gap:14px;
