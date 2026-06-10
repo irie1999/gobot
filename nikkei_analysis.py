@@ -1997,6 +1997,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 <p class="footnote">※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日</p>"""
 
 
+_DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None) -> str:
     """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。"""
@@ -2595,8 +2598,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     done_trades    = [t for t in all_trades if t.get("reason") != "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
-    trade_rows = ""
-    for t in sorted_trades:
+    def _build_trade_row(t) -> str:
         is_pending = t.get("reason") == "発注中"
         tpc = "profit" if t["pnl"] > 0 else ("" if is_pending else "loss")
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
@@ -2640,7 +2642,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             tgt_cell  = '<td style="color:#475569;text-align:right">—</td>'
             loc_cell  = '<td style="color:#475569;text-align:center">—</td>'
             olp_sub   = ""
-        trade_rows += f"""<tr{row_style}>
+        return f"""<tr{row_style}>
   <td>{t["exit_dt"]}</td>
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
   <td style="text-align:center">{tag}</td>
@@ -2656,8 +2658,21 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <td>{_rhtml(t["reason"])}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
-    if not trade_rows:
-        trade_rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">直近{days}日に決済した取引なし</td></tr>'
+
+    def _rows_for(trades, empty_msg) -> str:
+        rows = "".join(_build_trade_row(t) for t in trades)
+        if not rows:
+            rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
+        return rows
+
+    # 全部 / BT70以上 の 2 系統を用意 (発注中は両タブで先頭表示)
+    bt70_trades = [t for t in sorted_trades if (t.get("rec_score") or 0) >= 70]
+    trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
+    trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
+
+    global _DETAIL_TAB_SEQ
+    _DETAIL_TAB_SEQ += 1
+    _dseq = _DETAIL_TAB_SEQ
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -2796,6 +2811,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 
 <h2>取引明細（決済日降順）</h2>
+<div class="detail-tab-nav">
+  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
+</div>
+<div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -2805,8 +2825,37 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
-  <tbody>{trade_rows}</tbody>
-</table>"""
+  <tbody>{trade_rows_all}</tbody>
+</table>
+</div>
+<div id="detail_{_dseq}_bt70" class="detail-tab-pane">
+<table>
+  <thead><tr>
+    <th>決済日</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>設定</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>損益</th><th>理由</th><th>エントリー</th>
+  </tr></thead>
+  <tbody>{trade_rows_bt70}</tbody>
+</table>
+</div>
+<script>
+function switchDetailTab(seq, which) {{
+  ['all','bt70'].forEach(function(w) {{
+    var pane = document.getElementById('detail_'+seq+'_'+w);
+    if (pane) pane.classList.toggle('active', w === which);
+  }});
+  var nav = document.getElementById('detail_'+seq+'_all');
+  if (nav) {{
+    var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
+    btns.forEach(function(b, i) {{
+      b.classList.toggle('active', (which==='all' && i===0) || (which==='bt70' && i===1));
+    }});
+  }}
+}}
+</script>"""
 
 
 CSS = """
@@ -2828,6 +2877,16 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .tab-pane { display:none; }
 .tab-pane.active { display:block; }
+
+/* 取引明細 サブタブ (全部 / BT70以上) */
+.detail-tab-nav { display:flex; gap:6px; margin-bottom:10px; }
+.detail-tab-btn { padding:6px 16px; background:#1e293b; border:1px solid #334155;
+                  border-radius:6px; color:#94a3b8; cursor:pointer;
+                  font-size:0.85rem; font-family:inherit; }
+.detail-tab-btn.active { background:#0d2818; color:#4ade80; border-color:#4ade80; font-weight:700; }
+.detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.detail-tab-pane { display:none; }
+.detail-tab-pane.active { display:block; }
 
 /* 相場環境パネル */
 .regime-panel { display:flex; flex-wrap:wrap; gap:14px;
