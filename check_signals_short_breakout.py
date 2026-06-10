@@ -145,12 +145,12 @@ def calc_gap_short(df: pd.DataFrame) -> pd.DataFrame:
 STRATEGY_PARAMS_CONSERVATIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 3.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 3.0),
-    "GAP_S": (calc_gap_short,       0.0, 1.5, 3.0),
+    "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5 (PF1.30)
 }
 STRATEGY_PARAMS_AGGRESSIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 2.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 2.0),
-    "GAP_S": (calc_gap_short,       0.0, 1.5, 2.0),
+    "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5
 }
 
 import os as _os

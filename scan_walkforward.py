@@ -400,7 +400,35 @@ def main() -> None:
                                help="直近N日をホールドアウト除外。Fold境界を全て+N日ずらす (例: 65)")
     holdout_group.add_argument("--holdout-end", type=str, default=None,
                                help="ホールドアウト終了日 YYYY-MM-DD。その日以降をテスト対象外にする")
+    parser.add_argument("--train-pf", type=float, default=None,
+                        help="TRAIN期間の合格PF閾値 (デフォルト 1.5。空売り系は 1.1 推奨)")
+    parser.add_argument("--test-pf",  type=float, default=None,
+                        help="TEST期間の合格PF閾値 (デフォルト 1.2。空売り系は 1.0 推奨)")
+    parser.add_argument("--train-wr", type=float, default=None,
+                        help="TRAIN期間の合格勝率閾値%% (デフォルト 55。空売り系は 45 推奨)")
+    parser.add_argument("--test-wr",  type=float, default=None,
+                        help="TEST期間の合格勝率閾値%% (デフォルト 45。空売り系は 40 推奨)")
+    parser.add_argument("--relax-short", action="store_true",
+                        help="空売り系 (--family short/short_brk) で閾値を自動緩和 "
+                             "(TRAIN PF≥1.1/WR≥45%%, TEST PF≥1.0/WR≥40%%)")
     args = parser.parse_args()
+
+    # ── 合格閾値の上書き ───────────────────────────────────────────
+    global TRAIN_MIN_PF, TRAIN_MIN_WR, TEST_MIN_PF, TEST_MIN_WR
+    is_short_family = args.family in ("short", "short_brk")
+    if getattr(args, "relax_short", False) and is_short_family:
+        TRAIN_MIN_PF = 1.1
+        TRAIN_MIN_WR = 45.0
+        TEST_MIN_PF  = 1.0
+        TEST_MIN_WR  = 40.0
+    if getattr(args, "train_pf", None) is not None:
+        TRAIN_MIN_PF = args.train_pf
+    if getattr(args, "train_wr", None) is not None:
+        TRAIN_MIN_WR = args.train_wr
+    if getattr(args, "test_pf", None) is not None:
+        TEST_MIN_PF = args.test_pf
+    if getattr(args, "test_wr", None) is not None:
+        TEST_MIN_WR = args.test_wr
 
     # ── ホールドアウト計算 ──────────────────────────────────────────
     holdout_days = 0
@@ -429,11 +457,11 @@ def main() -> None:
     _FAMILY_STRATS = {
         "stop":      ["MACD", "A7", "RSI2"],
         "breakout":  ["DON", "VOL", "MOM"],
-        "short":     ["A7_S"],
+        "short":     ["A7_S", "MACD_S", "RSI2_S"],
         "short_brk": ["DON_S", "MOM_S", "GAP_S"],
         "both":      ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"],
         "all":       ["MACD", "A7", "RSI2", "DON", "VOL", "MOM",
-                      "A7_S", "DON_S", "MOM_S", "GAP_S"],
+                      "A7_S", "MACD_S", "RSI2_S", "DON_S", "MOM_S", "GAP_S"],
     }
     strategies = _FAMILY_STRATS[args.family]
 

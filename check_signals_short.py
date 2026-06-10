@@ -160,12 +160,12 @@ def calc_rsi2_short(df: pd.DataFrame) -> pd.DataFrame:
 # ── プリセット切替 (TRADING_MODE: conservative / aggressive) ──────────────────
 STRATEGY_PARAMS_CONSERVATIVE = {
     "A7_S":   (calc_a7_short,   0.0, 1.5, 3.0),
-    "RSI2_S": (calc_rsi2_short, 0.0, 2.0, 4.0),
+    "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 1.5),  # sweep最適: sm=1.5, tm=1.5 (PF1.20)
     "MACD_S": (calc_macd_short, 0.0, 1.5, 3.0),
 }
 STRATEGY_PARAMS_AGGRESSIVE = {
     "A7_S":   (calc_a7_short,   0.0, 1.5, 2.0),
-    "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 2.0),
+    "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 1.5),  # sweep最適: sm=1.5, tm=1.5
     "MACD_S": (calc_macd_short, 0.0, 1.5, 2.0),
 }
 
