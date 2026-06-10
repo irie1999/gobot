@@ -72,6 +72,7 @@ def apply_filters(rows: list[dict],
                   max_consec_losses: int,
                   min_sharpe: float,
                   max_price: float = 0.0,
+                  min_price: float = 0.0,
                   min_trades: int = 0,
                   max_avg_hold: float = 0.0) -> list[dict]:
     """フィルターを適用した行のみ返す。"""
@@ -100,6 +101,12 @@ def apply_filters(rows: list[dict],
         if max_price > 0:
             price = _float(r.get("latest_price", 0))
             if price > 0 and price > max_price:
+                continue
+        # 最低株価フィルター: latest_price < min_price の銘柄を除外
+        # (低位株のtick・流動性・貸借/逆日歩リスク回避用)
+        if min_price > 0:
+            price = _float(r.get("latest_price", 0))
+            if price > 0 and price < min_price:
                 continue
         survivors.append(r)
     return survivors
@@ -152,6 +159,9 @@ def main() -> None:
                              "scan_walkforward.py を再実行して avg_hold_days カラムが必要")
     parser.add_argument("--max-price",   type=float, default=0.0,
                         help="最新終値の上限 (円/株). 0=制限なし")
+    parser.add_argument("--min-price",   type=float, default=0.0,
+                        help="最新終値の下限 (円/株). 低位株を除外 (例: 1000). "
+                             "tick・流動性・貸借/逆日歩リスク回避用. 再スキャン不要")
     parser.add_argument("--budget",      type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄のみに絞る。"
                              "--max-price と併用時は --max-price 優先")
@@ -200,6 +210,8 @@ def main() -> None:
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
+    if args.min_price > 0:
+        print(f"  価格下限  : {args.min_price:,.0f}円/株 (低位株除外)")
     print(f"  選定数    : 戦略あたり {args.per_strategy} 銘柄")
     print("=" * 78)
 
@@ -225,6 +237,7 @@ def main() -> None:
             max_consec_losses=args.max_consec_losses,
             min_sharpe=args.min_sharpe,
             max_price=effective_max_price,
+            min_price=args.min_price,
             min_trades=args.min_trades,
             max_avg_hold=args.max_avg_hold,
         )
