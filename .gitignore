@@ -37,3 +37,10 @@ nikkei_analysis_*.html
 walkforward_results/
 forward_test_log*.csv
 watchlist_proposal_*.py
+
+# runtime caches / generated reports (auto-generated, never commit)
+signal_score_cache.json
+.holdout_bt_cache/
+.risk_check_cache_*.json
+mae_analysis_*.html
+signals_holdout_all*.html
