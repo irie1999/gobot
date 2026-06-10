@@ -157,11 +157,26 @@ def calc_rsi2_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-STRATEGY_PARAMS = {
+# ── プリセット切替 (TRADING_MODE: conservative / aggressive) ──────────────────
+STRATEGY_PARAMS_CONSERVATIVE = {
     "A7_S":   (calc_a7_short,   0.0, 1.5, 3.0),
     "RSI2_S": (calc_rsi2_short, 0.0, 2.0, 4.0),
     "MACD_S": (calc_macd_short, 0.0, 1.5, 3.0),
 }
+STRATEGY_PARAMS_AGGRESSIVE = {
+    "A7_S":   (calc_a7_short,   0.0, 1.5, 2.0),
+    "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 2.0),
+    "MACD_S": (calc_macd_short, 0.0, 1.5, 2.0),
+}
+
+import os as _os
+TRADING_MODE = _os.getenv("TRADING_MODE", "conservative").lower()
+if TRADING_MODE == "aggressive":
+    STRATEGY_PARAMS = STRATEGY_PARAMS_AGGRESSIVE
+else:
+    STRATEGY_PARAMS = STRATEGY_PARAMS_CONSERVATIVE
+    TRADING_MODE = "conservative"
+
 ENTRY_TYPE = "stop_sell"
 
 
