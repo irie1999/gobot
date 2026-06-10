@@ -36,8 +36,10 @@ _pre.add_argument("--min-score",  type=int,   default=0)
 _pre.add_argument("--wf-dir",     type=Path,  default=Path("walkforward_results"))
 _pre.add_argument("--auto-scan",  action="store_true")
 _pre.add_argument("--max-price",  type=float, default=10000.0)
+_pre.add_argument("--min-price",  type=float, default=0.0,
+                  help="最新終値の下限 (円/株). 低位株除外 (例: 1000)")
 _pre.add_argument("--days",       type=int,   default=180,
-                  help="損益タブで最初に表示する期間 (30/60/90/150/180)")
+                  help="損益タブで最初に表示する期間 (30/60/90/120/150/180)")
 _pre.add_argument("--symbol",     type=str,   default=None,
                   help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
 _pre.add_argument("--short",      action="store_true",
@@ -55,13 +57,14 @@ else:
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
 
-_PNL_PERIODS  = [30, 60, 90, 150, 180]
+_PNL_PERIODS  = [30, 60, 90, 120, 150, 180]
 _DEFAULT_DAYS = _args.days if _args.days in _PNL_PERIODS else 180
 
 HOLDOUT_CONFIGS = [
     (30,  "HO30d",  "#3b82f6", "#60a5fa"),
     (60,  "HO60d",  "#06b6d4", "#67e8f9"),
     (90,  "HO90d",  "#10b981", "#6ee7b7"),
+    (120, "HO120d", "#84cc16", "#bef264"),
     (150, "HO150d", "#f59e0b", "#fcd34d"),
     (180, "HO180d", "#ef4444", "#fca5a5"),
 ]
@@ -90,7 +93,7 @@ def _find_csv(strategy: str, holdout_days: int, wf_dir: Path,
     return None, "none"
 
 def _load_wl_from_csv(csv_path: Path, max_price: float, strategy: str,
-                       per_strategy: int = 10) -> list[tuple]:
+                       per_strategy: int = 10, min_price: float = 0.0) -> list[tuple]:
     with open(csv_path, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -99,6 +102,7 @@ def _load_wl_from_csv(csv_path: Path, max_price: float, strategy: str,
         _float(r.get("total_test_pnl", 0)) > 0
         and _float(r.get("max_drawdown_pct", 999)) <= 15.0
         and (max_price <= 0 or _float(r.get("latest_price", 0)) <= max_price)
+        and (min_price <= 0 or _float(r.get("latest_price", 0)) >= min_price)
     )]
     filtered.sort(key=_composite_score, reverse=True)
     return [(r.get("symbol", ""), r.get("name", ""), strategy)
@@ -124,12 +128,12 @@ for holdout_days, ho_label, col_con, col_agg in HOLDOUT_CONFIGS:
         for strat in _STOP_STRATS:
             p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
             if p:
-                stop_wl.extend(_load_wl_from_csv(p, _args.max_price, strat))
+                stop_wl.extend(_load_wl_from_csv(p, _args.max_price, strat, min_price=_args.min_price))
                 has_data = True
         for strat in _BRK_STRATS:
             p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
             if p:
-                brk_wl.extend(_load_wl_from_csv(p, _args.max_price, strat))
+                brk_wl.extend(_load_wl_from_csv(p, _args.max_price, strat, min_price=_args.min_price))
                 has_data = True
         if stop_wl or brk_wl:   # 実際にアイテムがある場合のみ登録
             _period_configs[holdout_days].append({
