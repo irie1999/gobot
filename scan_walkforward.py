@@ -160,11 +160,11 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "VOL":   (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout",  "stop"),
     "MOM":   (calc_momentum,      0.0, 1.5, 3.0, "breakout",  "stop"),
     "A7_S":  (calc_a7_short,      0.0, 1.5, 3.0, "short",     "stop_sell"),
-    "RSI2_S":(calc_rsi2_short,    0.0, 2.0, 4.0, "short",     "stop_sell"),
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 1.5, "short",     "stop_sell"),  # sweep最適
     "MACD_S":(calc_macd_short,    0.0, 1.5, 3.0, "short",     "stop_sell"),
     "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
     "MOM_S": (calc_momentum_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
-    "GAP_S": (calc_gap_short,     0.0, 1.5, 3.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 2.0, 1.5, "short_brk", "stop_sell"),  # sweep最適
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "MACD":  (calc_macd,          0.0, 1.5, 2.0, "stop",      "stop"),
@@ -174,11 +174,11 @@ STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "VOL":   (calc_vol_breakout,  0.0, 1.5, 2.0, "breakout",  "stop"),
     "MOM":   (calc_momentum,      0.0, 1.5, 2.0, "breakout",  "stop"),
     "A7_S":  (calc_a7_short,      0.0, 1.5, 2.0, "short",     "stop_sell"),
-    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 1.5, "short",     "stop_sell"),  # sweep最適
     "MACD_S":(calc_macd_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),
     "DON_S": (calc_donchian_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
     "MOM_S": (calc_momentum_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
-    "GAP_S": (calc_gap_short,     0.0, 1.5, 2.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 2.0, 1.5, "short_brk", "stop_sell"),  # sweep最適
 }
 
 import os as _os
