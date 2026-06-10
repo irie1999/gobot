@@ -1,0 +1,309 @@
+"""
+analyze_mae.py — 約定後の含み損推移分析 (MAE/MFE)
+
+「目標達成トレードは最初どれだけ含み損を抱えていたか」を可視化する。
+
+MAE (Maximum Adverse Excursion):  保有中の最大含み損率
+MFE (Maximum Favorable Excursion): 保有中の最大含み益率
+days_neg: 終値が約定価格を下回っていた日数
+
+Usage:
+  python analyze_mae.py
+  python analyze_mae.py --days 365 --workers 8
+  python analyze_mae.py --no-browser
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import webbrowser
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+
+os.environ.setdefault("TRADING_MODE", "conservative")
+import check_signals_stop     as _stop
+import check_signals_breakout as _brk
+from backtest_limit_entry import fetch, run_limit_backtest, WORKERS, JST
+
+
+def _args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--days",       type=int, default=365)
+    p.add_argument("--workers",    type=int, default=WORKERS)
+    p.add_argument("--no-browser", action="store_true")
+    return p.parse_args()
+
+
+def _run_one(sym, name, strat, calc_fn, em, sm, tm, days, entry_type):
+    try:
+        df = fetch(sym, days + 120)
+        if df is None or len(df) < 30:
+            return None
+        r = run_limit_backtest(sym, name, df, calc_fn, em, sm, tm, days,
+                               strat, entry_type=entry_type)
+        if not r or not r.get("trade_log"):
+            return None
+        return strat, r["trade_log"]
+    except Exception:
+        return None
+
+
+def collect_trades(days: int, workers: int) -> list[dict]:
+    items = []
+    for sym, name, strat in _stop.WATCHLIST:
+        p = _stop.STRATEGY_PARAMS[strat]
+        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _stop.ENTRY_TYPE))
+    for sym, name, strat in _brk.WATCHLIST:
+        p = _brk.STRATEGY_PARAMS[strat]
+        items.append((sym, name, strat, p[0], p[1], p[2], p[3], days, _brk.ENTRY_TYPE))
+
+    results = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_run_one, *it): it for it in items}
+        for fut in as_completed(futs):
+            r = fut.result()
+            if not r:
+                continue
+            strat, trade_log = r
+            for t in trade_log:
+                if t.get("exit_dt") is None:
+                    continue
+                if "mae_pct" not in t:
+                    continue  # 旧バックテスト結果はスキップ
+                results.append({
+                    "strategy": strat,
+                    "reason":   t["reason"],
+                    "mae_pct":  t["mae_pct"],
+                    "mfe_pct":  t["mfe_pct"],
+                    "days_neg": t["days_neg"],
+                    "hold_days": t.get("hold_days", 0),
+                    "pnl":      t["pnl"],
+                    "pct":      t["pct"],
+                })
+    return results
+
+
+# ── 集計ヘルパー ──────────────────────────────────────────────────────────────
+
+def _mae_bucket(mae: float) -> str:
+    if mae >= 0:       return "① 含み損なし (MAE≥0%)"
+    if mae >= -1:      return "② -1%以内"
+    if mae >= -3:      return "③ -1〜-3%"
+    if mae >= -5:      return "④ -3〜-5%"
+    return                    "⑤ -5%超"
+
+
+def _stats(trades: list[dict]) -> dict:
+    if not trades:
+        return {}
+    n = len(trades)
+    avg_mae     = sum(t["mae_pct"]  for t in trades) / n
+    avg_mfe     = sum(t["mfe_pct"]  for t in trades) / n
+    avg_days_neg = sum(t["days_neg"] for t in trades) / n
+    avg_hold    = sum(t["hold_days"] for t in trades) / n
+    avg_pct     = sum(t["pct"]      for t in trades) / n
+    return dict(n=n, avg_mae=avg_mae, avg_mfe=avg_mfe,
+                avg_days_neg=avg_days_neg, avg_hold=avg_hold, avg_pct=avg_pct)
+
+
+# ── CSS / HTML ────────────────────────────────────────────────────────────────
+
+_CSS = """
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;padding:24px}
+h1{color:#38bdf8;font-size:1.4rem}
+h2{color:#94a3b8;font-size:1.05rem;margin-top:2.5rem}
+p.note{color:#64748b;font-size:0.8rem;margin:-0.4rem 0 1rem}
+table{border-collapse:collapse;width:100%;margin-bottom:0.5rem;font-size:0.84rem}
+th{background:#1e293b;color:#94a3b8;padding:8px 12px;text-align:right;white-space:nowrap}
+th:first-child{text-align:left}
+td{padding:7px 12px;border-bottom:1px solid #1e293b;text-align:right}
+td:first-child{text-align:left;color:#e2e8f0;font-weight:600}
+tr:hover td{background:#1e293b55}
+.good{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}.gray{color:#64748b}
+.bar-wrap{display:flex;align-items:center;gap:6px}
+.bar{height:12px;border-radius:3px;min-width:2px}
+"""
+
+def _bar(pct: float, total: int, color: str) -> str:
+    w = max(2, int(pct / 100 * 200))
+    n = int(pct / 100 * total)
+    return (f'<div class="bar-wrap">'
+            f'<div class="bar" style="width:{w}px;background:{color}"></div>'
+            f'<span>{pct:.1f}% ({n}件)</span></div>')
+
+
+def _row(label: str, s: dict, total: int, color: str = "#60a5fa") -> str:
+    if not s:
+        return f"<tr><td>{label}</td><td colspan='6' class='gray'>データなし</td></tr>"
+    mae_c = "bad" if s["avg_mae"] < -3 else ("warn" if s["avg_mae"] < -1 else "good")
+    pct = s["n"] / total * 100
+    return (f"<tr>"
+            f"<td>{label}</td>"
+            f"<td>{_bar(pct, total, color)}</td>"
+            f"<td class='{mae_c}'>{s['avg_mae']:+.2f}%</td>"
+            f"<td class='good'>{s['avg_mfe']:+.2f}%</td>"
+            f"<td class='warn'>{s['avg_days_neg']:.1f}日</td>"
+            f"<td class='gray'>{s['avg_hold']:.1f}日</td>"
+            f"<td class='good'>{s['avg_pct']:+.2f}%</td>"
+            f"</tr>")
+
+
+def _table_head(title: str, note: str = "") -> str:
+    return (f"<h2>{title}</h2>"
+            + (f"<p class='note'>{note}</p>" if note else "")
+            + "<table><thead><tr>"
+            "<th style='text-align:left'>区分</th>"
+            "<th style='text-align:left'>割合</th>"
+            "<th>平均MAE<br><span style='font-size:0.75em;color:#64748b'>最大含み損</span></th>"
+            "<th>平均MFE<br><span style='font-size:0.75em;color:#64748b'>最大含み益</span></th>"
+            "<th>含み損日数<br><span style='font-size:0.75em;color:#64748b'>平均</span></th>"
+            "<th>保有日数<br><span style='font-size:0.75em;color:#64748b'>平均</span></th>"
+            "<th>最終損益%<br><span style='font-size:0.75em;color:#64748b'>平均</span></th>"
+            "</tr></thead><tbody>")
+
+
+def build_html(trades: list[dict], days: int) -> str:
+    target_trades  = [t for t in trades if "目標" in t["reason"]]
+    stop_trades    = [t for t in trades if "損切" in t["reason"]]
+    timeout_trades = [t for t in trades if "タイム" in t["reason"]]
+
+    # ── テーブル1: 目標達成トレードのMAE分布 ──────────────────────────
+    buckets: dict[str, list] = defaultdict(list)
+    for t in target_trades:
+        buckets[_mae_bucket(t["mae_pct"])].append(t)
+
+    t1_rows = ""
+    for k in sorted(buckets):
+        s = _stats(buckets[k])
+        colors = {"①": "#4ade80", "②": "#86efac", "③": "#fbbf24", "④": "#f97316", "⑤": "#ef4444"}
+        c = colors.get(k[0], "#60a5fa")
+        t1_rows += _row(k, s, len(target_trades), c)
+    t1 = (_table_head(
+        "① 目標達成トレード — 約定後の最大含み損（MAE）分布",
+        "目標達成した取引が、途中でどれだけ含み損を抱えていたか。")
+        + t1_rows + "</tbody></table>")
+
+    # ── テーブル2: 結果別の比較（目標 / 損切り / タイムカット） ──────
+    outcomes = [
+        ("🎯 目標達成",   target_trades,  "#4ade80"),
+        ("🛑 損切り",     stop_trades,    "#ef4444"),
+        ("⏱ タイムカット", timeout_trades, "#94a3b8"),
+    ]
+    t2_rows = ""
+    for label, grp, color in outcomes:
+        s = _stats(grp)
+        t2_rows += _row(label, s, len(trades), color)
+    t2 = (_table_head(
+        "② 結果別 MAE / MFE 比較",
+        "損切りと目標達成で、最大含み損の深さがどう違うか。")
+        + t2_rows + "</tbody></table>")
+
+    # ── テーブル3: 戦略別（目標達成トレードのみ） ───────────────────
+    strat_buckets: dict[str, list] = defaultdict(list)
+    for t in target_trades:
+        strat_buckets[t["strategy"]].append(t)
+
+    t3_rows = ""
+    for strat in sorted(strat_buckets):
+        s = _stats(strat_buckets[strat])
+        t3_rows += _row(strat, s, len(target_trades))
+    t3 = (_table_head(
+        "③ 戦略別 MAE 比較（目標達成トレードのみ）",
+        "RSI2は逆張りのため含み損が大きいはず。DON/MOMは順張りで小さいはず。")
+        + t3_rows + "</tbody></table>")
+
+    # ── テーブル4: 含み損日数別（目標達成トレード） ─────────────────
+    def _day_bucket(d: int) -> str:
+        if d == 0: return "① 0日（一度も含み損なし）"
+        if d <= 2: return "② 1〜2日"
+        if d <= 5: return "③ 3〜5日"
+        if d <= 10: return "④ 6〜10日"
+        return             "⑤ 11日以上"
+
+    day_buckets: dict[str, list] = defaultdict(list)
+    for t in target_trades:
+        day_buckets[_day_bucket(t["days_neg"])].append(t)
+
+    t4_rows = ""
+    for k in sorted(day_buckets):
+        s = _stats(day_buckets[k])
+        t4_rows += _row(k, s, len(target_trades))
+    t4 = (_table_head(
+        "④ 目標達成トレード — 含み損だった日数の分布",
+        "長期間含み損を抱えていても最終的に目標達成するトレードがどれだけあるか。")
+        + t4_rows + "</tbody></table>")
+
+    # ── サマリー数字 ─────────────────────────────────────────────────
+    n_all    = len(trades)
+    n_target = len(target_trades)
+    n_stop   = len(stop_trades)
+    n_timeout = len(timeout_trades)
+    never_neg = sum(1 for t in target_trades if t["mae_pct"] >= 0)
+    pct_never = never_neg / n_target * 100 if n_target else 0
+    avg_mae_t = sum(t["mae_pct"] for t in target_trades) / n_target if n_target else 0
+    avg_mae_s = sum(t["mae_pct"] for t in stop_trades)   / n_stop   if n_stop   else 0
+
+    summary = f"""
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0 24px">
+  <div style="background:#1e293b;border-radius:8px;padding:14px">
+    <div style="color:#94a3b8;font-size:0.78rem">総トレード数</div>
+    <div style="color:#e2e8f0;font-size:1.4rem;font-weight:700">{n_all}件</div>
+  </div>
+  <div style="background:#1e293b;border-radius:8px;padding:14px">
+    <div style="color:#94a3b8;font-size:0.78rem">目標達成中「含み損ゼロ」</div>
+    <div style="color:#4ade80;font-size:1.4rem;font-weight:700">{pct_never:.1f}%</div>
+    <div style="color:#64748b;font-size:0.75rem">({never_neg}/{n_target}件)</div>
+  </div>
+  <div style="background:#1e293b;border-radius:8px;padding:14px">
+    <div style="color:#94a3b8;font-size:0.78rem">目標達成の平均MAE</div>
+    <div style="color:#fbbf24;font-size:1.4rem;font-weight:700">{avg_mae_t:+.2f}%</div>
+    <div style="color:#64748b;font-size:0.75rem">途中の最大含み損</div>
+  </div>
+  <div style="background:#1e293b;border-radius:8px;padding:14px">
+    <div style="color:#94a3b8;font-size:0.78rem">損切りの平均MAE</div>
+    <div style="color:#ef4444;font-size:1.4rem;font-weight:700">{avg_mae_s:+.2f}%</div>
+    <div style="color:#64748b;font-size:0.75rem">途中の最大含み損</div>
+  </div>
+</div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<title>MAE/MFE分析 — 約定後含み損推移</title>
+<style>{_CSS}</style></head>
+<body>
+<h1>約定後の含み損推移分析（MAE / MFE）</h1>
+<p class="note">
+  分析期間: 直近{days}日 / 全WATCHLIST /
+  目標達成: {n_target}件 / 損切り: {n_stop}件 / タイムカット: {n_timeout}件<br>
+  MAE = Maximum Adverse Excursion（保有中の最大含み損率）<br>
+  MFE = Maximum Favorable Excursion（保有中の最大含み益率）
+</p>
+{summary}
+{t1}
+{t2}
+{t3}
+{t4}
+</body></html>"""
+
+
+if __name__ == "__main__":
+    args = _args()
+    print(f"MAE/MFE分析: 直近{args.days}日 / workers={args.workers}", flush=True)
+    print("トレードデータ収集中...", flush=True)
+
+    trades = collect_trades(args.days, args.workers)
+    print(f"収集完了: {len(trades)}件", flush=True)
+
+    if not trades:
+        print("トレードデータなし（backtest_limit_entry.py を更新して再実行してください）")
+        sys.exit(1)
+
+    html = build_html(trades, args.days)
+    out  = Path(f"mae_analysis_{datetime.now(JST).date()}.html")
+    out.write_text(html, encoding="utf-8")
+    print(f"HTML出力: {out}", flush=True)
+    if not args.no_browser:
+        webbrowser.open(out.resolve().as_uri())

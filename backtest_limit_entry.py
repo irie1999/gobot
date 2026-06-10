@@ -616,6 +616,9 @@ def run_limit_backtest(
                         signal_dt=po["signal_dt"], signal_price=po["signal_price"],
                         order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
                         fill_type=fill_type, reason=xreason,
+                        mae_pct=round((lo - ep) / ep * 100, 2),
+                        mfe_pct=round((hi - ep) / ep * 100, 2),
+                        days_neg=0,
                     ))
                 # 同日決済: active に入れない
             else:
@@ -631,6 +634,7 @@ def run_limit_backtest(
                     "order_limit":  po["lp"],
                     "order_stop":   po["sp"],
                     "order_target": po["tp"],
+                    "min_lo": lo, "max_hi": hi, "days_neg": 0,
                 })
 
         pending_orders = remaining_pending
@@ -658,6 +662,10 @@ def run_limit_backtest(
                 exit_p_pos = cl;        exit_reason_pos = "タイムカット"
 
             if exit_p_pos is None:
+                pos["min_lo"] = min(pos.get("min_lo", lo), lo)
+                pos["max_hi"] = max(pos.get("max_hi", hi), hi)
+                if cl < pos["entry_p"]:
+                    pos["days_neg"] = pos.get("days_neg", 0) + 1
                 still_active.append(pos)
                 continue
 
@@ -678,6 +686,8 @@ def run_limit_backtest(
             else:
                 pnl = (exit_p_pos - ep) * _qty - fee
                 pct = (exit_p_pos - ep) / ep * 100
+            _fin_min = min(pos.get("min_lo", lo), lo)
+            _fin_max = max(pos.get("max_hi", hi), hi)
             trades.append(dict(
                 entry_dt=pos["entry_dt"], exit_dt=dt,
                 entry_p=ep, exit_p=exit_p_pos, qty=_qty,
@@ -688,6 +698,9 @@ def run_limit_backtest(
                 order_target=pos["order_target"],
                 fill_type=pos.get("fill_type", "normal"),
                 reason=exit_reason_pos,
+                mae_pct=round((_fin_min - ep) / ep * 100, 2),
+                mfe_pct=round((_fin_max - ep) / ep * 100, 2),
+                days_neg=pos.get("days_neg", 0),
             ))
 
         active_positions = still_active
