@@ -62,13 +62,24 @@ def build_wf_scores() -> dict:
         return {}
 
     # 戦略ごとに最新日付のCSVを選択
+    # ファイル名: walkforward_<STRATEGY>[_aggressive][_holdoutNNd]_<YYYY-MM-DD>.csv
+    # STRATEGY は RSI2_S / MOM_S のようにアンダースコアを含むため、
+    # 末尾(日付)とモード/holdoutトークンを除いた中間部を結合して戦略名とする。
+    import re as _re
     latest: dict[str, tuple[str, Path]] = {}
     for f in sorted(WF_DIR.glob("walkforward_*_????-??-??.csv")):
         parts = f.stem.split("_")
         if len(parts) < 3:
             continue
-        strategy = parts[1]
-        date_str = "_".join(parts[2:])
+        date_str = parts[-1]                       # 末尾は必ず YYYY-MM-DD
+        mid = parts[1:-1]                           # 戦略名 + サフィックス候補
+        # モード/holdout サフィックスを除去 (戦略名のみ残す)
+        mid = [t for t in mid
+               if t != "aggressive"
+               and not _re.fullmatch(r"holdout\d+d", t)]
+        if not mid:
+            continue
+        strategy = "_".join(mid)                    # 例: "RSI2_S", "MOM_S", "A7"
         if strategy not in latest or date_str > latest[strategy][0]:
             latest[strategy] = (date_str, f)
 
