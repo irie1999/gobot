@@ -2811,11 +2811,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 
 <h2>取引明細（決済日降順）</h2>
+<p style="color:#64748b;font-size:0.8rem;margin:-4px 0 8px">タブをクリックすると明細を表示（もう一度押すと閉じる）</p>
 <div class="detail-tab-nav">
-  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
 </div>
-<div id="detail_{_dseq}_all" class="detail-tab-pane active">
+<div id="detail_{_dseq}_all" class="detail-tab-pane">
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -2843,15 +2844,18 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </div>
 <script>
 function switchDetailTab(seq, which) {{
+  var target = document.getElementById('detail_'+seq+'_'+which);
+  // 既に表示中のタブを再クリックしたら閉じる (トグル)
+  var closing = target && target.classList.contains('active');
   ['all','bt70'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
-    if (pane) pane.classList.toggle('active', w === which);
+    if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
     btns.forEach(function(b, i) {{
-      b.classList.toggle('active', (which==='all' && i===0) || (which==='bt70' && i===1));
+      b.classList.toggle('active', (!closing) && ((which==='all' && i===0) || (which==='bt70' && i===1)));
     }});
   }}
 }}
