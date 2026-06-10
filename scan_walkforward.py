@@ -159,10 +159,10 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "DON":   (calc_donchian,      0.0, 1.5, 3.0, "breakout",  "stop"),
     "VOL":   (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout",  "stop"),
     "MOM":   (calc_momentum,      0.0, 1.5, 3.0, "breakout",  "stop"),
-    "A7_S":  (calc_a7_short,      0.0, 1.5, 3.0, "short",     "stop_sell"),
-    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 1.5, "short",     "stop_sell"),  # sweep最適
-    "MACD_S":(calc_macd_short,    0.0, 1.5, 3.0, "short",     "stop_sell"),
-    "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
+    "A7_S":  (calc_a7_short,      0.0, 1.5, 2.5, "short",     "stop_sell"),  # turnover最適 tm=2.5
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 2.5, "short",     "stop_sell"),  # turnover最適 tm=2.5
+    "MACD_S":(calc_macd_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),  # turnover最適 tm=2.0
+    "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),  # turnover最適 tm=3.0 据置
     "MOM_S": (calc_momentum_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
     "GAP_S": (calc_gap_short,     0.0, 2.0, 1.5, "short_brk", "stop_sell"),  # sweep最適
 }
