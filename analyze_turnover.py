@@ -61,6 +61,38 @@ _FAMILY = {
     "short_brk": (_sbrk,  ["DON_S", "MOM_S", "GAP_S"]),
 }
 
+# family → watchlist_proposal の対応する属性名
+_FAMILY_WL_ATTR = {
+    "stop":      "STOP_WATCHLIST",
+    "breakout":  "BRK_WATCHLIST",
+    "short":     "SHORT_WATCHLIST",
+    "short_brk": "SHORT_BRK_WATCHLIST",
+}
+
+
+def _load_watchlist_proposal(path: str, family: str) -> dict[str, list[tuple]]:
+    """
+    watchlist_proposal_*.py を読み込み、{戦略: [(symbol, name), ...]} を返す。
+    family に対応する *_WATCHLIST 属性を使う。
+    """
+    import importlib.util
+    from pathlib import Path as _P
+
+    p = _P(path)
+    spec = importlib.util.spec_from_file_location(p.stem.replace("-", "_"), p)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    attr = _FAMILY_WL_ATTR[family]
+    wl   = getattr(mod, attr, None)
+    if wl is None:
+        raise RuntimeError(f"{path} に {attr} がありません")
+
+    by_strat: dict[str, list[tuple]] = {}
+    for sym, name, strat in wl:
+        by_strat.setdefault(strat, []).append((sym, name))
+    return by_strat
+
 
 def _aggregate(trades: list[dict]) -> dict:
     """取引ログから集計指標を計算する。"""
@@ -121,6 +153,9 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0, help="ユニバース先頭N銘柄に制限")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--symbols", type=str, default=None)
+    p.add_argument("--watchlist", type=str, default=None,
+                   help="watchlist_proposal_*.py を指定すると、選定済み銘柄だけを"
+                        "戦略別に計測する (フル universe ではなく)")
     p.add_argument("--aggressive", action="store_true")
     args = p.parse_args()
 
@@ -133,36 +168,57 @@ def main() -> None:
     if args.budget > 0 and args.max_price == 0:
         eff_max_price = args.budget / 100.0
 
-    symbols, uni_name = load_universe(args.symbols)
-    if args.limit > 0:
-        symbols = symbols[: args.limit]
-
     orig_max_hold = _bt.MAX_HOLD
     orig_expire   = _bt.ENTRY_EXPIRE
 
+    # ── 銘柄ソース確定: watchlist proposal か、universe か ──
+    # strat_symbols[strat] = [(sym, name), ...]
+    strat_symbols: dict[str, list[tuple]] = {}
+    if args.watchlist:
+        by_strat = _load_watchlist_proposal(args.watchlist, args.family)
+        # この family の戦略だけに絞る
+        strategies = [s for s in strategies if by_strat.get(s)]
+        for s in strategies:
+            strat_symbols[s] = by_strat.get(s, [])
+        src_label = f"watchlist: {args.watchlist}"
+        n_total = sum(len(v) for v in strat_symbols.values())
+    else:
+        symbols, uni_name = load_universe(args.symbols)
+        if args.limit > 0:
+            symbols = symbols[: args.limit]
+        # 価格フィルター
+        if eff_max_price > 0:
+            filtered = []
+            for sym, name in symbols:
+                df = fetch(sym, 5)
+                if df is None or len(df) == 0:
+                    continue
+                if float(df.iloc[-1]["close"]) <= eff_max_price:
+                    filtered.append((sym, name))
+            symbols = filtered
+        for s in strategies:
+            strat_symbols[s] = symbols
+        src_label = f"{uni_name} ({len(symbols)} 銘柄)"
+        n_total = len(symbols)
+
     print("=" * 88)
     print(f"回転率パラメータ比較分析")
-    print(f"  ユニバース : {uni_name} ({len(symbols)} 銘柄)")
+    print(f"  銘柄ソース : {src_label}")
     print(f"  family     : {args.family}  戦略: {', '.join(strategies)}")
+    if args.watchlist:
+        for s in strategies:
+            print(f"    {s}: {len(strat_symbols[s])} 銘柄")
     print(f"  期間       : {args.days} 日")
     print(f"  tm         : {'戦略別最適値' if args.tm is None else args.tm}")
     print(f"  MAX_HOLD   : {max_holds}")
     print(f"  ENTRY_EXPIRE: {expires}")
-    if eff_max_price > 0:
+    if eff_max_price > 0 and not args.watchlist:
         print(f"  価格上限   : {eff_max_price:,.0f}円/株")
     print("=" * 88)
 
-    # 価格フィルター込みで対象銘柄を確定 (1回 fetch して最新終値判定)
-    if eff_max_price > 0:
-        filtered = []
-        for sym, name in symbols:
-            df = fetch(sym, 5)
-            if df is None or len(df) == 0:
-                continue
-            if float(df.iloc[-1]["close"]) <= eff_max_price:
-                filtered.append((sym, name))
-        symbols = filtered
-        print(f"  価格フィルター後: {len(symbols)} 銘柄\n")
+    if n_total == 0:
+        print("[ERROR] 対象銘柄が0件です。--watchlist の family 指定を確認してください。")
+        sys.exit(1)
 
     # ── (MAX_HOLD, ENTRY_EXPIRE) × 全戦略でスイープ ──
     period_years = args.days / 365.0
@@ -180,7 +236,7 @@ def main() -> None:
                 with ThreadPoolExecutor(max_workers=args.workers) as pool:
                     futs = [pool.submit(_run_symbol, sym, name, mod, strat,
                                         args.days, args.tm)
-                            for sym, name in symbols]
+                            for sym, name in strat_symbols[strat]]
                     for f in as_completed(futs):
                         strat_trades.extend(f.result())
                 per_strat[strat] = _aggregate(strat_trades)

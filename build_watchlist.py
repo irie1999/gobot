@@ -180,7 +180,7 @@ def main() -> None:
 
     strategies_stop      = {"MACD", "A7", "RSI2"}
     strategies_brk       = {"DON", "VOL", "MOM"}
-    strategies_short     = {"A7_S"}
+    strategies_short     = {"A7_S", "MACD_S", "RSI2_S"}
     strategies_short_brk = {"DON_S", "MOM_S", "GAP_S"}
     all_strats = (
         list(strategies_stop) + list(strategies_brk)
