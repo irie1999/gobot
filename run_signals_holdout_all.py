@@ -14,6 +14,13 @@ WATCHLISTの優先順:
   python run_signals_holdout_all.py --date 2026-06-09
   python run_signals_holdout_all.py --min-score 60
   python run_signals_holdout_all.py --days 180   # 最初に表示する期間 (デフォルト180)
+  python run_signals_holdout_all.py --short --force  # 当日キャッシュを無視して再生成
+
+当日キャッシュ:
+  同一パラメータ(--short/--symbol/--date)の出力HTMLが当日分すでに存在すれば、
+  重いバックテストをスキップしてそのファイルを開いて即終了する。
+  フィルター(--max-price/--min-price/--days 等)を変えた場合や強制再計算したい
+  場合は --force を付ける。
 """
 from __future__ import annotations
 
@@ -44,6 +51,8 @@ _pre.add_argument("--symbol",     type=str,   default=None,
                   help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
 _pre.add_argument("--short",      action="store_true",
                   help="ショート戦略(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S/VOL_S)で出力")
+_pre.add_argument("--force",      action="store_true",
+                  help="当日の生成済みHTMLがあっても無視して再生成する")
 _args, _ = _pre.parse_known_args()
 
 # ── ロング/ショートの戦略セット ──────────────────────────────────────────────
@@ -56,6 +65,26 @@ else:
 
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(JST).date()
+
+# ── 当日キャッシュ: 生成済みHTMLがあれば再計算をスキップ ──────────────────────
+# 重いバックテストに入る前に、同一パラメータの出力ファイルが既に存在すれば
+# それを開いて即終了する。--force で強制再生成。
+_cache_date    = _args.date or str(TODAY)
+_cache_short   = "_short" if _args.short else ""
+_cache_symbol  = ""
+if _args.symbol:
+    _s = _args.symbol.upper()
+    if not _s.endswith(".T"):
+        _s += ".T"
+    _cache_symbol = f"_{_s.replace('.', '')}"
+_cached_out = Path(f"signals_holdout_all{_cache_short}{_cache_symbol}_{_cache_date}.html")
+if _cached_out.exists() and not _args.force:
+    print(f"[CACHE] 当日生成済み: {_cached_out.resolve()}")
+    print(f"        再生成するには --force を付けてください。")
+    if not _args.no_browser:
+        from _open_html import open_html
+        open_html(_cached_out.resolve())
+    sys.exit(0)
 
 _PNL_PERIODS  = [30, 60, 90, 120, 150, 180]
 _DEFAULT_DAYS = _args.days if _args.days in _PNL_PERIODS else 180
