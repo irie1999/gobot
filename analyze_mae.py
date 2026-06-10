@@ -46,9 +46,17 @@ def _run_one(sym, name, strat, calc_fn, em, sm, tm, days, entry_type):
                                strat, entry_type=entry_type)
         if not r or not r.get("trade_log"):
             return None
-        return strat, r["trade_log"]
+        return sym, name, strat, r["trade_log"]
     except Exception:
         return None
+
+
+def _fmt_dt(v) -> str:
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    return str(v)[:10]
 
 
 def collect_trades(days: int, workers: int) -> list[dict]:
@@ -67,15 +75,19 @@ def collect_trades(days: int, workers: int) -> list[dict]:
             r = fut.result()
             if not r:
                 continue
-            strat, trade_log = r
+            sym, name, strat, trade_log = r
             for t in trade_log:
                 if t.get("exit_dt") is None:
                     continue
                 if "mae_pct" not in t:
                     continue  # 旧バックテスト結果はスキップ
                 results.append({
+                    "symbol":   sym,
+                    "name":     name,
                     "strategy": strat,
                     "reason":   t["reason"],
+                    "entry_dt": _fmt_dt(t.get("entry_dt")),
+                    "exit_dt":  _fmt_dt(t.get("exit_dt")),
                     "mae_pct":  t["mae_pct"],
                     "mfe_pct":  t["mfe_pct"],
                     "days_neg": t["days_neg"],
@@ -236,6 +248,106 @@ def build_html(trades: list[dict], days: int) -> str:
         "長期間含み損を抱えていても最終的に目標達成するトレードがどれだけあるか。")
         + t4_rows + "</tbody></table>")
 
+    # ── テーブル5: 銘柄ごとの詳細 ───────────────────────────────────
+    sym_buckets: dict[tuple, list] = defaultdict(list)
+    for t in trades:
+        sym_buckets[(t["symbol"], t["name"], t["strategy"])].append(t)
+
+    sym_rows_data = []
+    for (sym, name, strat), grp in sym_buckets.items():
+        n = len(grp)
+        wins = sum(1 for t in grp if "目標" in t["reason"])
+        stops = sum(1 for t in grp if "損切" in t["reason"])
+        worst_mae = min(t["mae_pct"] for t in grp)
+        avg_mae   = sum(t["mae_pct"] for t in grp) / n
+        best_mfe  = max(t["mfe_pct"] for t in grp)
+        total_pnl = sum(t["pnl"] for t in grp)
+        max_days_neg = max(t["days_neg"] for t in grp)
+        sym_rows_data.append({
+            "sym": sym, "name": name, "strat": strat, "n": n,
+            "wr": wins / n * 100, "stops": stops,
+            "worst_mae": worst_mae, "avg_mae": avg_mae,
+            "best_mfe": best_mfe, "total_pnl": total_pnl,
+            "max_days_neg": max_days_neg,
+        })
+    # 最悪MAE(深い順)でソート
+    sym_rows_data.sort(key=lambda r: r["worst_mae"])
+
+    t5_body = ""
+    for r in sym_rows_data:
+        wr_c  = "good" if r["wr"] >= 55 else ("warn" if r["wr"] >= 45 else "bad")
+        mae_c = "bad" if r["worst_mae"] < -5 else ("warn" if r["worst_mae"] < -3 else "good")
+        pnl_c = "good" if r["total_pnl"] >= 0 else "bad"
+        t5_body += (
+            f"<tr>"
+            f"<td>{r['sym']}<br><span style='color:#64748b;font-size:0.78em'>{r['name']}</span></td>"
+            f"<td class='gray'>{r['strat']}</td>"
+            f"<td>{r['n']}</td>"
+            f"<td class='{wr_c}'>{r['wr']:.0f}%</td>"
+            f"<td class='bad'>{r['worst_mae']:+.1f}%</td>"
+            f"<td class='{mae_c}'>{r['avg_mae']:+.1f}%</td>"
+            f"<td class='good'>{r['best_mfe']:+.1f}%</td>"
+            f"<td class='warn'>{r['max_days_neg']}日</td>"
+            f"<td class='{pnl_c}'>{r['total_pnl']:+,.0f}円</td>"
+            f"</tr>"
+        )
+    t5 = (
+        "<h2>⑤ 銘柄ごとの含み損詳細（最悪MAE 深い順）</h2>"
+        "<p class='note'>銘柄別。最悪MAE = その銘柄の全トレード中で最も深かった含み損。"
+        "深い銘柄ほど精神的にきつい / 損切りに引っかかりやすい。</p>"
+        "<table><thead><tr>"
+        "<th style='text-align:left'>銘柄</th><th style='text-align:left'>戦略</th>"
+        "<th>取引数</th><th>勝率</th>"
+        "<th>最悪MAE<br><span style='font-size:0.75em;color:#64748b'>最深含み損</span></th>"
+        "<th>平均MAE</th>"
+        "<th>最良MFE<br><span style='font-size:0.75em;color:#64748b'>最大含み益</span></th>"
+        "<th>最長含み損<br><span style='font-size:0.75em;color:#64748b'>日数</span></th>"
+        "<th>合計損益</th>"
+        "</tr></thead><tbody>" + t5_body + "</tbody></table>"
+    )
+
+    # ── テーブル6: 個別トレード全明細 ───────────────────────────────
+    detail = sorted(trades, key=lambda t: t["entry_dt"], reverse=True)
+    t6_body = ""
+    for t in detail:
+        if "目標" in t["reason"]:
+            r_icon, r_c = "🎯", "good"
+        elif "損切" in t["reason"]:
+            r_icon, r_c = "🛑", "bad"
+        else:
+            r_icon, r_c = "⏱", "gray"
+        mae_c = "bad" if t["mae_pct"] < -5 else ("warn" if t["mae_pct"] < -3 else "good")
+        pnl_c = "good" if t["pnl"] >= 0 else "bad"
+        t6_body += (
+            f"<tr>"
+            f"<td>{t['symbol']}<br><span style='color:#64748b;font-size:0.78em'>{t['name']}</span></td>"
+            f"<td class='gray'>{t['strategy']}</td>"
+            f"<td class='gray' style='text-align:left'>{t['entry_dt']}<br>"
+            f"<span style='font-size:0.78em'>→ {t['exit_dt']}</span></td>"
+            f"<td class='{r_c}'>{r_icon}</td>"
+            f"<td class='{mae_c}'>{t['mae_pct']:+.1f}%</td>"
+            f"<td class='good'>{t['mfe_pct']:+.1f}%</td>"
+            f"<td class='warn'>{t['days_neg']}日</td>"
+            f"<td class='gray'>{t['hold_days']}日</td>"
+            f"<td class='{pnl_c}'>{t['pct']:+.1f}%</td>"
+            f"<td class='{pnl_c}'>{t['pnl']:+,.0f}円</td>"
+            f"</tr>"
+        )
+    t6 = (
+        f"<h2>⑥ 個別トレード全明細（{len(detail)}件 / エントリー日 新しい順）</h2>"
+        "<p class='note'>1取引ごとの含み損(MAE)・含み益(MFE)・含み損日数・最終結果。"
+        "「目標達成したが途中で深い含み損だった」具体的なトレードを確認できる。</p>"
+        "<table><thead><tr>"
+        "<th style='text-align:left'>銘柄</th><th style='text-align:left'>戦略</th>"
+        "<th style='text-align:left'>エントリー→決済</th><th>結果</th>"
+        "<th>MAE<br><span style='font-size:0.75em;color:#64748b'>最大含み損</span></th>"
+        "<th>MFE<br><span style='font-size:0.75em;color:#64748b'>最大含み益</span></th>"
+        "<th>含み損<br><span style='font-size:0.75em;color:#64748b'>日数</span></th>"
+        "<th>保有<br><span style='font-size:0.75em;color:#64748b'>日数</span></th>"
+        "<th>損益%</th><th>損益</th>"
+        "</tr></thead><tbody>" + t6_body + "</tbody></table>"
+    )
+
     # ── サマリー数字 ─────────────────────────────────────────────────
     n_all    = len(trades)
     n_target = len(target_trades)
@@ -286,6 +398,8 @@ def build_html(trades: list[dict], days: int) -> str:
 {t2}
 {t3}
 {t4}
+{t5}
+{t6}
 </body></html>"""
 
 
