@@ -2132,7 +2132,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
     # ── 1銘柄1ポジションフィルター ──────────────────────────────────
     # エントリー日昇順・スコア降順でソートし、同一銘柄が既にオープン中の場合はスキップ
-    def _one_pos_filter(trades: list[dict]) -> list[dict]:
+    def _one_pos_filter(trades: list[dict], dropped: list | None = None) -> list[dict]:
         from datetime import date as _date
         sorted_t = sorted(
             trades,
@@ -2148,13 +2148,20 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 result.append(t)
                 continue
             if sym in open_pos and open_pos[sym] >= entry_d:
-                continue  # 既にオープンポジションあり → スキップ
+                # 既にオープンポジションあり → 計測には入れずスキップ。
+                # dropped が渡されていれば「重複シグナル」として回収し、
+                # 取引明細に参考表示できるようにする。
+                if dropped is not None:
+                    t["_overlap"] = True
+                    dropped.append(t)
+                continue
             open_pos[sym] = exit_d if exit_d else entry_d
             result.append(t)
         result.sort(key=lambda t: t.get("exit_d_raw") or _date.min, reverse=True)
         return result
 
-    all_trades       = _one_pos_filter(all_trades)
+    _overlap_dropped: list[dict] = []
+    all_trades       = _one_pos_filter(all_trades, dropped=_overlap_dropped)
     full_year_trades = _one_pos_filter(full_year_trades)
 
     # ── KPI (発注中=未約定は除外) ──
@@ -2774,13 +2781,24 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         return (f'<br><span style="color:#f87171;font-size:0.68rem;font-weight:600">'
                 f'⚠ {days_ago}日前に損切り</span>')
 
+    # 取引明細の表示用リスト。1銘柄1ポジションで弾かれた重複シグナルのうち
+    # 「未決済(発注中/保有中)」のものを参考表示する(計測には入れない)。
+    # 例: デジタルアーツが 06/03 から保有中でも、06/10 の新シグナルを表示する。
+    _unsettled_overlaps = [t for t in _overlap_dropped
+                           if t.get("reason") in ("発注中", "保有中")]
+    display_trades = all_trades + _unsettled_overlaps
+
     # 発注中を先頭に、それ以外は決済日降順
-    pending_trades = [t for t in all_trades if t.get("reason") == "発注中"]
-    done_trades    = [t for t in all_trades if t.get("reason") != "発注中"]
+    pending_trades = [t for t in display_trades if t.get("reason") == "発注中"]
+    done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
     def _build_trade_row(t) -> str:
         is_pending = t.get("reason") == "発注中"
+        is_overlap = bool(t.get("_overlap"))
+        overlap_badge = ('<br><span style="background:#7c3aed;color:#fff;font-size:0.66rem;'
+                         'font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap">'
+                         '重複保有・計測外</span>') if is_overlap else ""
         tpc = "profit" if t["pnl"] > 0 else ("" if is_pending else "loss")
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
         sc  = t.get("score"); rk = t.get("rank")
@@ -2789,7 +2807,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             sc_html = _fmt_score_cell(t, _col)
         else:
             sc_html = ""
-        row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"' if is_pending else ""
+        if is_overlap:
+            row_style = ' style="opacity:0.6;border-left:3px solid #7c3aed"'
+        elif is_pending:
+            row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"'
+        else:
+            row_style = ""
         pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
         cfg_color = t.get("color", "#64748b")
         cfg_label = t.get("label", "")
@@ -2836,7 +2859,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <td style="text-align:right">{t.get("qty",0):,}</td>
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
-  <td>{_rhtml(t["reason"])}</td>
+  <td>{_rhtml(t["reason"])}{overlap_badge}</td>
   <td style="color:#94a3b8">{t["entry_dt"]}</td>
 </tr>"""
 
