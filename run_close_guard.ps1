@@ -30,7 +30,11 @@ if (-not $env:KABU_API_PASSWORD_PROD) {
 $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 # Python の出力を UTF-8 に統一(文字化け防止)
+# PYTHONIOENCODING で python 側を UTF-8 出力に、
+# Console.OutputEncoding で PowerShell 側の受け取りも UTF-8 にする。
+# (両方合わせないと UTF-8 を CP932 として読んで文字化けする)
 $env:PYTHONIOENCODING = "utf-8"
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 # dry-run(発注なし)で判定。実発注する場合は末尾に --execute を追加する。
 # 出力を一旦変数に受けて、UTF-8 でログに追記する(読み書きの文字コードを統一)
