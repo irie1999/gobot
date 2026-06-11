@@ -102,6 +102,11 @@ try:
 except Exception:
     pass
 
+# ── ショートモード フラグ ─────────────────────────────────────────────────────
+# run_signals_holdout_all.py が "--short" で起動した場合に True を設定する。
+# _tab5_pnl_html の日経トレンド別成績テーブルでの表示順・凡例切替に使用。
+_IS_SHORT_MODE: bool = False
+
 # ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
 # strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
 _short = None
@@ -2170,14 +2175,31 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _trend_key = _tmap.get(_sdt) if _sdt else None
             _tbuckets[_trend_key].append(_t)
 
+        # ロング: ▲上昇=有利（緑）/ ショート: ▼下落=有利（緑）
+        _is_short = _IS_SHORT_MODE
         _tlabels = {
-            "up":       ("▲ 上昇",   "#4ade80", "#052e16"),
+            "up":       ("▲ 上昇",   "#4ade80" if not _is_short else "#f87171",
+                         "#052e16"  if not _is_short else "#2d0a0a"),
             "sideways": ("→ 横ばい", "#fbbf24", "#2d1f00"),
-            "down":     ("▼ 下落",   "#f87171", "#2d0a0a"),
+            "down":     ("▼ 下落",   "#f87171" if not _is_short else "#4ade80",
+                         "#2d0a0a"  if not _is_short else "#052e16"),
             None:       ("不明",     "#64748b", "#0d1424"),
         }
+        # ショートは ▼→→▲ の順（有利→不利）
+        _order = ["down", "sideways", "up", None] if _is_short else ["up", "sideways", "down", None]
+        # 有利トレンドの期待バッジ
+        _fav_badge = {
+            "up":       ('<span style="font-size:0.7rem;color:#4ade80;margin-left:4px">✓ロング有利</span>'
+                         if not _is_short else
+                         '<span style="font-size:0.7rem;color:#f87171;margin-left:4px">✗ショート不利</span>'),
+            "sideways": '<span style="font-size:0.7rem;color:#fbbf24;margin-left:4px">→中立</span>',
+            "down":     ('<span style="font-size:0.7rem;color:#f87171;margin-left:4px">✗ロング不利</span>'
+                         if not _is_short else
+                         '<span style="font-size:0.7rem;color:#4ade80;margin-left:4px">✓ショート有利</span>'),
+            None:       "",
+        }
         _trows = ""
-        for _tk in ["up", "sideways", "down", None]:
+        for _tk in _order:
             _ts = _tbuckets.get(_tk, [])
             if not _ts:
                 continue
@@ -2192,10 +2214,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _pf_v   = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
             _pf_s   = "∞" if _pf_v == float("inf") else f"{_pf_v:.2f}"
             _lbl, _col, _bg = _tlabels[_tk]
+            _badge  = _fav_badge.get(_tk, "")
             _pc     = "profit" if _tpnl >= 0 else "loss"
             _wr_c   = "#4ade80" if _twr >= 55 else ("#fbbf24" if _twr >= 45 else "#f87171")
             _trows += f"""<tr style="background:{_bg}20">
-  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}{_badge}</td>
   <td style="text-align:right">{len(_ts)}</td>
   <td style="text-align:right;color:{_wr_c};font-weight:600">{_twr:.1f}%</td>
   <td style="text-align:right">{_pf_s}</td>
@@ -2206,11 +2229,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <td style="text-align:right;color:{'#f87171' if _avg_l<0 else '#94a3b8'}">{_avg_l:+,.0f}円</td>
 </tr>"""
 
+        _mode_note = (
+            '<span style="color:#f87171">ショートモード: ▼下落が有利 / ▲上昇は不利</span>'
+            if _is_short else
+            '<span style="color:#4ade80">ロングモード: ▲上昇が有利 / ▼下落は不利</span>'
+        )
         if _trows:
             _trend_breakdown_html = f"""
 <h2>日経トレンド別成績（シグナル発生日基準）</h2>
 <p class="footnote" style="margin-bottom:10px">
-  シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。<br>
+  シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。
+  {_mode_note}<br>
   ▲=終値&gt;MA10&gt;MA25 ／ ▼=終値&lt;MA10&lt;MA25 ／ →=移行期間
 </p>
 <table>

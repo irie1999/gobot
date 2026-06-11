@@ -225,6 +225,8 @@ _brk.WATCHLIST[:]  = _orig_brk_wl
 # nikkei_analysis にホールドアウト設定を注入
 _na._SIGNALS_AVAILABLE = True
 _na._PNL_CONFIGS[:] = _all_configs
+# ショートモード: トレンド別成績テーブルの表示順・凡例を反転
+_na._IS_SHORT_MODE = _args.short
 
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
 # 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
