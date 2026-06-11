@@ -384,6 +384,61 @@ def main():
             print()
         print("  → 前半・後半の両方で『close優位』なら、ルール変更の効果は時期に依存せず頑健")
 
+    # ── 分析4: 推奨ポリシー検証 (close、ただしMOMロングはintraday据え置き) ──
+    print("\n" + "=" * 90)
+    print("【分析4】 推奨ポリシー検証  (close採用、ただし MOM ロングのみ intraday 据え置き)")
+    print("=" * 90)
+
+    def policy_mode(r):
+        if r["strat"] == "MOM" and not r["is_short"]:
+            return "intraday"
+        return "close"
+
+    def stat_sel(rows, selector):
+        done = [(r, selector(r)) for r in rows]
+        done = [(r, m) for r, m in done if r["sims"][m]["reason"] != "保有中"]
+        pnls = [r["sims"][m]["pnl"] for r, m in done]
+        n = len(pnls)
+        wins = sum(1 for p in pnls if p > 0)
+        gp = sum(p for p in pnls if p > 0); gl = abs(sum(p for p in pnls if p < 0))
+        pf = gp / gl if gl > 0 else float("inf")
+        return dict(n=n, wr=wins / n * 100 if n else 0, pf=pf,
+                    pnl=sum(pnls), worst=min(pnls) if pnls else 0.0,
+                    bigloss=sum(1 for p in pnls if p < -20000))
+
+    def report_policy(rows, title):
+        if not rows:
+            return
+        base = stat(rows, "intraday")
+        pol  = stat_sel(rows, policy_mode)
+        d = pol["pnl"] - base["pnl"]
+        print(f"\n[{title}]")
+        print(f"  現行(全intraday) : 件数{base['n']:>4} 勝率{base['wr']:5.1f}% PF{pf_s(base['pf'])} "
+              f"総損益{base['pnl']:>+13,.0f}  最大損失{base['worst']:>+11,.0f} 2万損{base['bigloss']:>3}件")
+        print(f"  推奨ポリシー     : 件数{pol['n']:>4} 勝率{pol['wr']:5.1f}% PF{pf_s(pol['pf'])} "
+              f"総損益{pol['pnl']:>+13,.0f}  最大損失{pol['worst']:>+11,.0f} 2万損{pol['bigloss']:>3}件")
+        print(f"  改善             : {d:>+13,.0f} 円")
+
+    report_policy(all_rows, "全体")
+    report_policy(longs,   "ロング")
+    report_policy(shorts,  "ショート")
+
+    # ポリシーの時期分割
+    if dated:
+        print("\n  ── 推奨ポリシーの時期分割 (前半/後半) ──")
+        for tag, sub in [("全体", dated), ("ロング", longs), ("ショート", shorts)]:
+            for half, lo, hi in [("前半", None, mid), ("後半", mid, None)]:
+                seg = [r for r in sub if r.get("entry_dt") is not None
+                       and (lo is None or r["entry_dt"] >= lo)
+                       and (hi is None or r["entry_dt"] < hi)]
+                b = stat(seg, "intraday"); p = stat_sel(seg, policy_mode)
+                d = p["pnl"] - b["pnl"]
+                mark = "✓改善" if d > 0 else ("─同等" if d == 0 else "✗悪化")
+                print(f"  {tag+' '+half:<14} n={b['n']:<4} "
+                      f"現行 {b['pnl']:>+12,.0f} → ポリシー {p['pnl']:>+12,.0f} "
+                      f"({d:>+11,.0f}) {mark}")
+            print()
+
     # 整合性チェック: intraday 再シミュ総損益 vs 実バックテスト総損益
     real_pnl = sum(r["real_pnl"] for r in all_rows if r["real_reason"] != "保有中")
     resim_pnl = sum(r["sims"]["intraday"]["pnl"] for r in all_rows
