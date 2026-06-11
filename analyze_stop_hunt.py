@@ -60,22 +60,36 @@ GROUPS = [
     (_sbrk,  "ショートBRK"),
 ]
 
+# hybrid モードのザラ場ハード損切り余裕 (損切り価格のさらに外側%)。main で上書き。
+CRASH_PCT = 0.03
+
+MODES = ["intraday", "close", "hybrid"]
+MODE_LABELS = {"intraday": "intraday(現行)", "close": "close(終値)",
+               "hybrid": "hybrid(終値+保険)"}
+
 
 def _is_short_strat(strat: str) -> bool:
     return strat.endswith("_S")
 
 
 # ── 1トレードの出口を指定ルールで再シミュレート ─────────────────────
-def resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, stop_mode):
+def resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, stop_mode,
+               crash_pct=0.03):
     """エントリーを固定し、損切りルール stop_mode で出口を再評価。
     Returns dict(reason, pnl, hold_days, exit_dt) or None。
     target は常に「ザラ場の指値(resting limit)」として hi/lo で判定。
-    stop だけ intraday(安値/高値) か close(終値) を切り替える。
+    stop だけルールを切り替える:
+      intraday: 安値/高値が損切り価格にタッチ (現行エンジンと同一)
+      close   : 終値が損切り価格を超えたときだけ (引け判定)
+      hybrid  : 通常は close 判定。ただし損切り価格の crash_pct 下/上に
+                ザラ場ハード損切り(暴落保険)を併設し、そこに触れたら即約定。
     """
     bars = df[df.index >= entry_dt]
     if len(bars) == 0:
         return None
     last_cl = float(bars.iloc[-1]["close"])
+    # hybrid 用ハード損切り価格 (損切り価格のさらに crash_pct 外側)
+    hard_sp = sp * (1.0 + crash_pct) if is_short else sp * (1.0 - crash_pct)
     for k in range(len(bars)):
         row = bars.iloc[k]
         op = float(row["open"]); hi = float(row["high"])
@@ -83,8 +97,14 @@ def resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, stop_mode):
         hold_days = k
 
         hit_tgt = (hi >= tp) if not is_short else (lo <= tp)
+        # 損切り判定 (mode別)
+        hit_hard = False
         if stop_mode == "close":
             hit_stp = (cl <= sp) if not is_short else (cl >= sp)
+        elif stop_mode == "hybrid":
+            hit_hard = (lo <= hard_sp) if not is_short else (hi >= hard_sp)
+            hit_close = (cl <= sp) if not is_short else (cl >= sp)
+            hit_stp = hit_hard or hit_close
         else:  # intraday (現行エンジンと同一)
             hit_stp = (lo <= sp) if not is_short else (hi >= sp)
 
@@ -93,7 +113,13 @@ def resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, stop_mode):
             exit_p = tp; reason = "目標達成"
         elif hit_stp:
             reason = "損切り"
-            if stop_mode == "close":
+            if stop_mode == "hybrid" and hit_hard:
+                # 暴落保険: ハード損切り価格にザラ場約定 (寄り割れは寄り)
+                if is_short:
+                    exit_p = op if op >= hard_sp else hard_sp * (1.0 + SLIPPAGE_STOP_PCT)
+                else:
+                    exit_p = op if op <= hard_sp else hard_sp * (1.0 - SLIPPAGE_STOP_PCT)
+            elif stop_mode in ("close", "hybrid"):
                 # 引け成行: 終値にスリッページ
                 exit_p = cl * (1.0 + SLIPPAGE_STOP_PCT) if is_short else cl * (1.0 - SLIPPAGE_STOP_PCT)
             else:
@@ -189,9 +215,9 @@ def process_one(mod, label, sym, name, strat):
         qty = t.get("qty")
         if not (entry_dt is not None and entry_p and sp and tp and qty):
             continue
-        actual = resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, "intraday")
-        close  = resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, "close")
-        if actual is None or close is None:
+        sims = {m: resim_exit(df, entry_dt, entry_p, sp, tp, qty, is_short, m,
+                              crash_pct=CRASH_PCT) for m in MODES}
+        if any(v is None for v in sims.values()):
             continue
         hunt = None
         if t.get("reason") == "損切り":
@@ -199,7 +225,7 @@ def process_one(mod, label, sym, name, strat):
         rows.append(dict(
             label=label, sym=sym, name=name, strat=strat, is_short=is_short,
             real_reason=t.get("reason"), real_pnl=t.get("pnl", 0.0),
-            intraday=actual, close=close, hunt=hunt,
+            sims=sims, hunt=hunt,
         ))
     return rows
 
@@ -207,9 +233,14 @@ def process_one(mod, label, sym, name, strat):
 def main():
     ap = argparse.ArgumentParser(description="ストップ狩り実測 & 損切りルールA/B")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--crash-pct", type=float, default=3.0,
+                    help="hybrid: 損切り価格の外側%%にザラ場ハード損切り (デフォルト3%%)")
     ap.add_argument("--aggressive",   action="store_true")
     ap.add_argument("--conservative", action="store_true")
     args = ap.parse_args()
+
+    global CRASH_PCT
+    CRASH_PCT = args.crash_pct / 100.0
 
     print("=" * 90)
     print(f"ストップ狩り実測 & 損切りルール A/B   モード: {_stop.TRADING_MODE}")
@@ -268,56 +299,67 @@ def main():
     report_hunt(longs,   "ロング")
     report_hunt(shorts,  "ショート")
 
-    # ── 分析2: 損切りルール A/B ──
+    # ── 分析2: 損切りルール 3-way 比較 (尾リスク付き) ──
     print("\n" + "=" * 90)
-    print("【分析2】 損切りルール A/B  (intraday=現行 vs close=終値判定)")
+    print(f"【分析2】 損切りルール比較  intraday(現行) / close(終値) / hybrid(終値+{CRASH_PCT*100:.0f}%保険)")
     print("=" * 90)
 
-    def agg(rows):
-        def stat(mode):
-            done = [r for r in rows if r[mode]["reason"] != "保有中"]
-            n = len(done)
-            wins = sum(1 for r in done if r[mode]["pnl"] > 0)
-            gp = sum(r[mode]["pnl"] for r in done if r[mode]["pnl"] > 0)
-            gl = abs(sum(r[mode]["pnl"] for r in done if r[mode]["pnl"] < 0))
-            pf = gp / gl if gl > 0 else float("inf")
-            pnl = sum(r[mode]["pnl"] for r in done)
-            hold = sum(r[mode]["hold_days"] for r in done) / n if n else 0
-            wr = wins / n * 100 if n else 0
-            return n, wr, pf, pnl, hold
-        return stat("intraday"), stat("close")
+    def stat(rows, mode):
+        done = [r for r in rows if r["sims"][mode]["reason"] != "保有中"]
+        n = len(done)
+        pnls = [r["sims"][mode]["pnl"] for r in done]
+        wins = sum(1 for p in pnls if p > 0)
+        gp = sum(p for p in pnls if p > 0)
+        gl = abs(sum(p for p in pnls if p < 0))
+        pf = gp / gl if gl > 0 else float("inf")
+        worst = min(pnls) if pnls else 0.0           # 最大単発損失 (尾リスク)
+        bigloss = sum(1 for p in pnls if p < -20000)  # 2万円超の損失件数
+        hold = sum(r["sims"][mode]["hold_days"] for r in done) / n if n else 0
+        wr = wins / n * 100 if n else 0
+        return dict(n=n, wr=wr, pf=pf, pnl=sum(pnls), hold=hold,
+                    worst=worst, bigloss=bigloss)
 
-    def report_ab(rows, title):
+    pf_s = lambda x: "∞" if x == float("inf") else f"{x:.2f}"
+
+    def report_modes(rows, title):
         if not rows:
             return
-        (ni, wri, pfi, pnli, hdi), (nc, wrc, pfc, pnlc, hdc) = agg(rows)
-        pf_s = lambda x: "∞" if x == float("inf") else f"{x:.2f}"
+        base = stat(rows, "intraday")
         print(f"\n[{title}]  (決済済みトレード)")
-        print(f"  {'ルール':<14}{'件数':>5}{'勝率':>8}{'PF':>7}{'総損益':>14}{'平均保有':>9}")
-        print(f"  {'-'*55}")
-        print(f"  {'intraday(現行)':<14}{ni:>5}{wri:>7.1f}%{pf_s(pfi):>7}{pnli:>+13,.0f}{hdi:>7.1f}日")
-        print(f"  {'close(終値)':<14}{nc:>5}{wrc:>7.1f}%{pf_s(pfc):>7}{pnlc:>+13,.0f}{hdc:>7.1f}日")
-        print(f"  {'差分(close-現行)':<14}{'':>5}{wrc-wri:>+6.1f}pt{'':>7}{pnlc-pnli:>+13,.0f}{hdc-hdi:>+7.1f}日")
+        print(f"  {'ルール':<18}{'件数':>5}{'勝率':>8}{'PF':>7}{'総損益':>14}"
+              f"{'対現行':>12}{'最大損失':>11}{'2万損':>6}{'平均保有':>8}")
+        print(f"  {'-'*89}")
+        for m in MODES:
+            s = stat(rows, m)
+            diff = s["pnl"] - base["pnl"]
+            diff_s = "—" if m == "intraday" else f"{diff:+,.0f}"
+            print(f"  {MODE_LABELS[m]:<18}{s['n']:>5}{s['wr']:>7.1f}%{pf_s(s['pf']):>7}"
+                  f"{s['pnl']:>+13,.0f}{diff_s:>12}{s['worst']:>+11,.0f}"
+                  f"{s['bigloss']:>5}件{s['hold']:>6.1f}日")
 
-    report_ab(all_rows, "全体")
-    report_ab(longs,   "ロング")
-    report_ab(shorts,  "ショート")
+    report_modes(all_rows, "全体")
+    report_modes(longs,   "ロング")
+    report_modes(shorts,  "ショート")
 
-    # 戦略別 A/B
-    print("\n  ── 戦略別 (総損益: 現行 → 終値) ──")
+    # 戦略別 (総損益: 現行 → close → hybrid)
+    print("\n  ── 戦略別 (総損益: 現行 → close → hybrid) ──")
     strats = sorted({r["strat"] for r in all_rows})
     for st in strats:
         rs = [r for r in all_rows if r["strat"] == st]
-        (ni, wri, pfi, pnli, hdi), (nc, wrc, pfc, pnlc, hdc) = agg(rs)
-        print(f"  {st:<8} n={ni:<3} 勝率 {wri:4.0f}%→{wrc:4.0f}%  "
-              f"損益 {pnli:+,.0f} → {pnlc:+,.0f}  ({pnlc-pnli:+,.0f})")
+        si = stat(rs, "intraday"); sc = stat(rs, "close"); sh = stat(rs, "hybrid")
+        print(f"  {st:<8} n={si['n']:<3} 勝率 {si['wr']:3.0f}%→{sc['wr']:3.0f}%→{sh['wr']:3.0f}%  "
+              f"損益 {si['pnl']:+,.0f} → {sc['pnl']:+,.0f} → {sh['pnl']:+,.0f}  "
+              f"(close{sc['pnl']-si['pnl']:+,.0f} / hyb{sh['pnl']-si['pnl']:+,.0f})")
 
     # 整合性チェック: intraday 再シミュ総損益 vs 実バックテスト総損益
     real_pnl = sum(r["real_pnl"] for r in all_rows if r["real_reason"] != "保有中")
-    resim_pnl = sum(r["intraday"]["pnl"] for r in all_rows if r["intraday"]["reason"] != "保有中")
+    resim_pnl = sum(r["sims"]["intraday"]["pnl"] for r in all_rows
+                    if r["sims"]["intraday"]["reason"] != "保有中")
     print("\n" + "-" * 90)
     print(f"[整合性] 実バックテスト総損益 {real_pnl:+,.0f} 円  vs  intraday再シミュ {resim_pnl:+,.0f} 円")
-    print(f"         (近い値なら再シミュは忠実。乖離が大きい場合は同日決済/複数保有の扱い差)")
+    print(f"         (一致なら再シミュは忠実 → close/hybrid の数字も信頼できる)")
+    print(f"\n  ※ 最大損失=単発の最悪損益(尾リスク) / 2万損=2万円超の損失件数")
+    print(f"  ※ hybrid は損切り価格の {CRASH_PCT*100:.0f}% 外側にザラ場ハード損切りを併設 (--crash-pct で変更可)")
 
 
 if __name__ == "__main__":
