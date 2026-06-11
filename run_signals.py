@@ -101,41 +101,6 @@ from _signal_funds import collect_fund_rows, fund_html as _fund_html, filter_ite
 
 JST = timezone(timedelta(hours=9))
 
-# BT (おすすめ) スコアの取引対象しきい値デフォルト。
-# 運用方針: BT≥70 のみを取引対象とする (希望は ≥80)。--min-bt で上書き可。
-DEFAULT_MIN_BT = 70
-
-
-def _effective_score(mod, item: dict) -> int:
-    """その銘柄・戦略の「BTスコア」を返す。WFスコアがあれば優先、なければ in-sample。"""
-    get_wf = getattr(mod, "get_wf_score", None)
-    if get_wf:
-        wf = get_wf(item["symbol"], item["strategy"])
-        if wf:
-            return wf[0]
-    return mod.calc_recommend_score(item["period_results"])[0]
-
-
-def _suppress_low_bt(items: list[dict], mod, min_bt: int) -> list[tuple]:
-    """BTスコアが min_bt 未満の「当日新規シグナル」を取引対象から外す (today_sig をクリア)。
-
-    ルックバック (継続中/保有中) は既存ポジションの追跡なので対象外。
-    返り値: 抑制した (symbol, strategy, score) のリスト (ログ表示用)。
-    """
-    suppressed: list[tuple] = []
-    for item in items:
-        sig = item.get("today_sig")
-        if not sig:
-            continue
-        # 既存ポジション由来のルックバックはフィルターしない
-        if sig.get("_pending_lookback") or sig.get("_filled_holding"):
-            continue
-        score = _effective_score(mod, item)
-        if score < min_bt:
-            item["today_sig"] = None
-            suppressed.append((item["symbol"], item["strategy"], score))
-    return suppressed
-
 
 # ── グループ単位でバックテスト + シグナル確認 ────────────────────────────
 def _run_group(mod, sig_date, workers: int) -> list[dict]:
@@ -456,8 +421,6 @@ def main() -> None:
                         help="指定期間のシグナル銘柄・必要資金集計をHTMLに表示")
     parser.add_argument("--regime-filter", action="store_true",
                         help="今の相場環境に適した戦略のみ表示 (N225自動検出)")
-    parser.add_argument("--min-bt", type=int, default=DEFAULT_MIN_BT,
-                        help=f"取引対象とするBTスコアの下限 (デフォルト {DEFAULT_MIN_BT}。0で無効化)")
     args = parser.parse_args()
 
     _auto_update_regime_cache(args.workers)
@@ -480,8 +443,6 @@ def main() -> None:
     print(f"逆指値シグナル統合 開始 ({n_total}銘柄) シグナル確認日: {date_label}  モード: {_stop.TRADING_MODE}", flush=True)
     print(f"  逆指値B: {len(_stop.WATCHLIST)}銘柄  /  ブレイクアウト: {len(_brk.WATCHLIST)}銘柄"
           f"  /  ショート: {len(_short.WATCHLIST)}銘柄  /  ショートBRK: {len(_sbrk.WATCHLIST)}銘柄", flush=True)
-    if args.min_bt > 0:
-        print(f"  取引対象フィルター: BTスコア ≥ {args.min_bt} のみ (--min-bt 0 で無効化)", flush=True)
 
     # 4グループを並列実行
     with ThreadPoolExecutor(max_workers=4) as outer:
@@ -493,18 +454,6 @@ def main() -> None:
     brk_items   = filter_items(fut_brk.result())
     short_items = filter_items(fut_short.result())
     sbrk_items  = filter_items(fut_sbrk.result())
-
-    # BTスコアによる取引対象フィルター (運用方針: BT≥70 のみ。--min-bt 0 で無効化)
-    if args.min_bt > 0:
-        suppressed = []
-        suppressed += _suppress_low_bt(stop_items,  _stop,  args.min_bt)
-        suppressed += _suppress_low_bt(brk_items,   _brk,   args.min_bt)
-        suppressed += _suppress_low_bt(short_items, _short, args.min_bt)
-        suppressed += _suppress_low_bt(sbrk_items,  _sbrk,  args.min_bt)
-        if suppressed:
-            print(f"  [BTフィルター] BT<{args.min_bt} を取引対象から除外 {len(suppressed)}件:", flush=True)
-            for sym, strat, score in suppressed:
-                print(f"    {sym} [{strat}] — BT={score}", flush=True)
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     print()

@@ -74,8 +74,6 @@ python run_signals.py --date 2026-04-08  # 任意日シグナル確認
 python run_signals.py --signal-only      # HTML生成せずシグナルだけ表示
 python run_signals.py --no-browser       # HTML生成のみ（ブラウザ自動起動なし）
 python run_signals.py --workers 8        # 並列数
-python run_signals.py --min-bt 80        # BT≥80 のみ取引対象 (希望ライン)
-python run_signals.py --min-bt 0         # BTフィルター無効化 (全シグナル表示)
 ```
 
 内部で `check_signals_stop` (逆指値B: MACD/A7/RSI2) と `check_signals_breakout`
@@ -83,21 +81,6 @@ python run_signals.py --min-bt 0         # BTフィルター無効化 (全シグ
 (`run_signals.py:142-146`) し、タブ付き統合HTMLを `signals_combined_<date>.html`
 に出力します。シグナル行は両グループ横断で `calc_recommend_score` 降順ソート
 (`run_signals.py:154-164`)。
-
-### BTスコア取引フィルター (`--min-bt`, デフォルト 70)
-
-**運用方針: BTスコア ≥ 70 の銘柄のみを取引対象とする (希望は ≥80)。**
-`run_signals.py` は当日新規シグナルのうち BT (おすすめ) スコアが
-`--min-bt` 未満のものを **取引対象から除外** (today_sig をクリア) します。
-- 「BTスコア」= WFスコアがあれば優先、なければ in-sample `calc_recommend_score`
-  (`run_signals._effective_score`)
-- 既存ポジション由来のルックバック (継続中/保有中) はフィルター対象外
-- 除外された銘柄はログに `[BTフィルター] BT<70 を取引対象から除外` と表示
-- `--min-bt 0` で無効化 (従来通り全シグナル表示)
-- 実装: `run_signals.py` の `DEFAULT_MIN_BT` / `_suppress_low_bt`
-
-この方針の根拠は §16 (ホールドアウト分析) を参照。BT<40 は全戦略でマイナス収支、
-BT40-59 もトレンド次第でマイナスになるため、安定して勝てる BT≥70 帯に絞り込む。
 
 ---
 
