@@ -763,3 +763,56 @@ import score_speed_patch  # check_signals_stop/breakout の calc_recommend_score
 - `build_watchlist.py` — `--min-stability` オプション追加
 
 **注意:** 変更後は過去CSVのスコアと直接比較不可。`scan_walkforward.py` の再実行が必要。
+
+---
+
+## 16. 損切り評価モード (stop_mode) — close 既定化 (2026-06)
+
+ストップ狩り(ヒゲ刈り)対策として、損切りの評価方式を選べるようにしました。
+実測 (`analyze_stop_hunt.py`) の結果、**終値判定 (close) が既定** です。
+
+### 16.1 定義 (`backtest_limit_entry.py`)
+
+```python
+# default_stop_mode(strategy_name, is_short)
+#   "intraday" = ザラ場の安値/高値が損切り価格にタッチで約定 (ヒゲでも発火) ← 旧既定
+#   "close"    = 終値が損切り価格を超えたときだけ約定 (引け判定・引け成行)  ← 新既定
+```
+
+`run_limit_backtest(..., stop_mode=None)` は未指定時 `default_stop_mode` で自動決定。
+明示指定すれば上書き可 (分析・比較用)。
+
+### 16.2 ポリシー (実測に基づく)
+
+| 戦略 | stop_mode | 理由 |
+|------|-----------|------|
+| **MOM ロング** | `intraday` | close で唯一成績悪化 (-7万円) するため据え置き |
+| 上記以外 全部 (ロング各種 + ショート全部) | `close` | ヒゲ刈り回避で勝率/PF/総損益が改善 |
+
+### 16.3 実測エビデンス (365日, in-sample, analyze_stop_hunt.py)
+
+| 推奨ポリシー改善 | conservative | aggressive |
+|---|---|---|
+| 全体 | +594,751円 | +804,544円 |
+| ロング(MOM除く) | +145,067 | +403,495 |
+| ショート | +449,684 | +401,050 |
+| 時期分割(前半/後半) | 全6区分 ✓改善 | 全6区分 ✓改善 |
+
+- ショートが特に効く(踏み上げの上ヒゲ刈り回避)。conservative ショート PF 1.45→1.62。
+- 代償は最大単発損失が約2万円深くなる程度。2万損件数はむしろ減少。
+- **hybrid(終値+ザラ場ハード損切り)は棄却**: 深いヒゲで勝ちを刈る副作用があり、
+  尾リスクをほとんど低減できなかった。
+
+### 16.4 実運用上の意味 (重要)
+
+- close 損切りは **引け(大引け近辺/MOC)で成行決済** する運用。ザラ場の逆指値据え置き
+  ではない。kabu 発注では「終値が損切り価格を超えたら翌寄りor当日引け成行」で対応。
+- **過去の CSV/HTML 数字は新ルールで上書きされ、旧 intraday の数字とは直接比較不可**
+  (§14.1 と同じ注意)。`scan_walkforward.py` 等は再実行で新 CSV を得ること。
+- 旧挙動に戻したい場合は呼び出しで `stop_mode="intraday"` を明示。
+
+### 16.5 影響範囲
+
+`run_limit_backtest` は唯一の約定ロジックなので、`run_signals.py` /
+`verify_watchlist.py` / `forward_test.py` / `scan_walkforward.py` /
+`nikkei_analysis*.py` すべてに自動反映される。

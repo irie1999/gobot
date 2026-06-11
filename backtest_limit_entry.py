@@ -469,6 +469,18 @@ def calc_rsi2(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── 損切り評価モード ポリシー ───────────────────────────────────
+# "intraday" = ザラ場の安値/高値が損切り価格にタッチで約定 (ヒゲでも発火)
+# "close"    = 終値が損切り価格を超えたときだけ約定 (引け判定・引け成行)
+# 運用方針 (2026-06, ストップ狩り実測 analyze_stop_hunt.py に基づく):
+#   既定は close (ヒゲ刈りを回避し勝率/PF/総損益が改善)。
+#   ただし MOM ロングのみ close で成績悪化するため intraday 据え置き。
+def default_stop_mode(strategy_name: str, is_short: bool) -> str:
+    if strategy_name == "MOM" and not is_short:
+        return "intraday"
+    return "close"
+
+
 # ── 指値エントリー バックテスト ─────────────────────────────────
 def run_limit_backtest(
     symbol: str,
@@ -482,6 +494,7 @@ def run_limit_backtest(
     strategy_name: str,
     entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う） / "stop_sell"=逆指値売り
     entry_risk_adjust: bool = False,  # True=ギャップ約定時に sp/tp を ep ベースに再計算 (R:R 維持)
+    stop_mode: str | None = None,  # "intraday"/"close"。None=default_stop_mode で自動決定
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -517,6 +530,8 @@ def run_limit_backtest(
     trades: list[dict] = []
     signals  = 0
     is_short = (entry_type == "stop_sell")
+    if stop_mode is None:
+        stop_mode = default_stop_mode(strategy_name, is_short)
 
     # 複数ポジション並行対応: pending / active をリストで管理
     pending_orders:   list[dict] = []   # 発注待ち
@@ -618,15 +633,21 @@ def run_limit_backtest(
 
             dtf = i - po["signal_idx"]
 
-            # 約定と同日の決済チェック
+            # 約定と同日の決済チェック (target は常にザラ場指値、stop は stop_mode 依存)
             hit_tgt = (hi >= use_tp) if not is_short else (lo <= use_tp)
-            hit_stp = (lo <= use_sp) if not is_short else (hi >= use_sp)
+            if stop_mode == "close":
+                hit_stp = (cl <= use_sp) if not is_short else (cl >= use_sp)
+            else:
+                hit_stp = (lo <= use_sp) if not is_short else (hi >= use_sp)
 
             if hit_tgt or hit_stp:
                 xp      = use_tp if hit_tgt else use_sp
                 xreason = "目標達成" if hit_tgt else "損切り"
                 if xreason == "損切り":
-                    if is_short:
+                    if stop_mode == "close":
+                        # 引け成行: 終値にスリッページ
+                        xp = cl * (1.0 + SLIPPAGE_STOP_PCT) if is_short else cl * (1.0 - SLIPPAGE_STOP_PCT)
+                    elif is_short:
                         xp = op if op >= use_sp else use_sp * (1.0 + SLIPPAGE_STOP_PCT)
                     else:
                         xp = op if op <= use_sp else use_sp * (1.0 - SLIPPAGE_STOP_PCT)
@@ -680,7 +701,10 @@ def run_limit_backtest(
             hold_days = i - pos["hold_start"]
 
             hit_tgt = (hi >= pos["tp"]) if not is_short else (lo <= pos["tp"])
-            hit_stp = (lo <= pos["sp"]) if not is_short else (hi >= pos["sp"])
+            if stop_mode == "close":
+                hit_stp = (cl <= pos["sp"]) if not is_short else (cl >= pos["sp"])
+            else:
+                hit_stp = (lo <= pos["sp"]) if not is_short else (hi >= pos["sp"])
 
             exit_p_pos    = None
             exit_reason_pos = None
@@ -708,7 +732,10 @@ def run_limit_backtest(
                 continue  # 異常価格 → ポジション破棄
 
             if exit_reason_pos == "損切り":
-                if is_short:
+                if stop_mode == "close":
+                    # 引け成行: 終値にスリッページ
+                    exit_p_pos = cl * (1.0 + SLIPPAGE_STOP_PCT) if is_short else cl * (1.0 - SLIPPAGE_STOP_PCT)
+                elif is_short:
                     exit_p_pos = op if op >= pos["sp"] else pos["sp"] * (1.0 + SLIPPAGE_STOP_PCT)
                 else:
                     exit_p_pos = op if op <= pos["sp"] else pos["sp"] * (1.0 - SLIPPAGE_STOP_PCT)
