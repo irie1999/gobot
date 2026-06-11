@@ -177,7 +177,40 @@ class KabuClient:
         r = requests.get(url, headers=self._headers(),
                          params={"product": product}, timeout=self.timeout)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, list) else []
+
+    def get_margin_positions(self, symbol: int | str | None = None) -> list[dict]:
+        """信用建玉一覧。symbol を指定するとその銘柄のみを返す。"""
+        positions = self.get_positions(product=2)
+        if symbol is not None:
+            positions = [p for p in positions
+                         if str(p.get("Symbol", "")) == str(symbol)]
+        return positions
+
+    def _build_close_positions(self, symbol: int | str, qty: int,
+                                kabu_side: str) -> list[dict]:
+        """信用返済の ClosePositions リストを建玉一覧から自動生成する (FIFO)。
+
+        ロング決済 (kabu_side=SIDE_SELL) → 買い建玉 (Side="2") を使う
+        ショート決済 (kabu_side=SIDE_BUY)  → 売り建玉 (Side="1") を使う
+        """
+        target_side = "2" if kabu_side == SIDE_SELL else "1"
+        candidates = [p for p in self.get_margin_positions(symbol)
+                      if str(p.get("Side", "")) == target_side]
+
+        close_list: list[dict] = []
+        remaining = qty
+        for p in candidates:
+            hold_id = p.get("HoldID", "")
+            leaves = int(p.get("LeavesQty") or 0)
+            use_qty = min(remaining, leaves)
+            if use_qty > 0:
+                close_list.append({"HoldID": hold_id, "Qty": use_qty})
+                remaining -= use_qty
+            if remaining <= 0:
+                break
+        return close_list
 
     def get_cash(self) -> dict:
         """買付余力。"""
@@ -265,15 +298,33 @@ class KabuClient:
         return self._post_order(body, f"損切り逆指値 {symbol} x{qty} @≤{trigger_price:.0f}")
 
     def send_moc(self, symbol: int | str, qty: int, side: str = "sell",
-                 cash_margin: int = CASH_GENBUTSU) -> dict:
+                 cash_margin: int = CASH_GENBUTSU,
+                 close_positions: list[dict] | None = None) -> dict:
         """引け成行 (MOC) 決済。close 方式の損切りで使う。
 
-        side: "sell"=売り決済(ロング決済) / "buy"=買い戻し(ショート決済)。
+        side            : "sell"=売り決済(ロング) / "buy"=買い戻し(ショート)。
+        cash_margin     : CASH_GENBUTSU(1)=現物 / CASH_MARGIN_CLOSE(3)=信用返済。
+        close_positions : 信用返済時の建玉 ID リスト [{"HoldID": ..., "Qty": ...}, ...]。
+                          None なら API から自動取得 (dry-run では疑似値を入れる)。
         """
         kabu_side = SIDE_SELL if side == "sell" else SIDE_BUY
         body = self._base_order(symbol, kabu_side, qty, cash_margin)
         body["FrontOrderType"] = FOT_MOC
         body["Price"] = 0
+
+        if cash_margin == CASH_MARGIN_CLOSE:
+            if close_positions is not None:
+                body["ClosePositions"] = close_positions
+            elif self.dry_run:
+                # dry-run では建玉 API を叩けないので仮値を入れる
+                body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
+            else:
+                cp = self._build_close_positions(symbol, qty, kabu_side)
+                if not cp:
+                    print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
+                    return {"Result": -1, "Message": "建玉なし"}
+                body["ClosePositions"] = cp
+
         return self._post_order(body, f"引け成行 {symbol} x{qty} ({side})")
 
     def cancel_order(self, order_id: str) -> dict:

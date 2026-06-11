@@ -49,7 +49,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # kabuステーション連携は共通クライアントに集約
-from kabu_api import KabuClient
+from kabu_api import KabuClient, CASH_GENBUTSU, CASH_MARGIN_CLOSE
 
 JST = timezone(timedelta(hours=9))
 
@@ -81,6 +81,11 @@ def load_open_positions(log_path: str) -> list[dict]:
             # side 列があれば使う。無ければロング (逆指値買い) とみなす
             side = (row.get("side") or "long").strip().lower()
             is_short = side in ("short", "sell", "s")
+            # cash_margin 列: 1=現物, 3=信用返済。無ければ現物とみなす
+            try:
+                cm = int(row.get("cash_margin") or 1)
+            except ValueError:
+                cm = CASH_GENBUTSU
             open_pos.append({
                 "symbol": row["symbol"].strip(),
                 "name": row.get("name", "").strip(),
@@ -89,6 +94,7 @@ def load_open_positions(log_path: str) -> list[dict]:
                 "is_short": is_short,
                 "qty": int(float(row.get("qty") or 100)),
                 "fill_date": row.get("fill_date", "").strip(),
+                "cash_margin": cm,
             })
     return open_pos
 
@@ -116,10 +122,14 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     """保有ポジションを決済する引け成行 (MOC) 注文を発注する。
 
     ロング (is_short=False) → 売り決済、ショート → 買い戻し。
-    現物の売り決済を想定。信用返済で運用する場合は cash_margin を変える。
+    CSV の cash_margin 列: 1=現物(既定) / 3=信用返済。
+    信用返済 (cash_margin=3) の場合、建玉 ID を API から自動取得して ClosePositions に設定する。
     """
     side = "buy" if pos["is_short"] else "sell"
-    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side)
+    cm = pos.get("cash_margin", CASH_GENBUTSU)
+    label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
+    print(f"    → {label} 引け成行({side}) cash_margin={cm}")
+    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side, cash_margin=cm)
     return res.get("Result") == 0
 
 
