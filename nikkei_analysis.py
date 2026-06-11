@@ -2328,9 +2328,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     except Exception:
         pass
 
-    n_total = len(kpi_trades)
-    n_win   = sum(1 for t in kpi_trades if t["pnl"] > 0)
-    pnl_sum = sum(t["pnl"] for t in kpi_trades)
+    # 上部KPI / 全体合計は「決済済みトレードのみ」で集計する。
+    # 保有中(未決済=含み損益)は勝率・損益を歪めるため計測から除外し、
+    # 取引明細テーブルには引き続き表示する(昨日のシグナル結果の確認用)。
+    # ※ 日経トレンド別・BT×トレンドクロス・スコア帯別は従来どおり kpi_trades /
+    #    full_year_trades を使う(保有中を含む)。
+    settled_trades = [t for t in kpi_trades if t.get("reason") != "保有中"]
+    n_total = len(settled_trades)
+    n_win   = sum(1 for t in settled_trades if t["pnl"] > 0)
+    pnl_sum = sum(t["pnl"] for t in settled_trades)
     wr      = n_win / n_total * 100 if n_total else 0.0
     pc      = "profit" if pnl_sum >= 0 else "loss"
     # 設定別単純合計（重複あり）を別途計算 → サマリーテーブルのフッターに使う
@@ -2343,9 +2349,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     cfg_pf_all  = cfg_gp_all / cfg_gl_all if cfg_gl_all > 0 else (float("inf") if cfg_gp_all > 0 else 0.0)
     cfg_pf_all_s = "∞" if cfg_pf_all == float("inf") else f"{cfg_pf_all:.2f}"
     cfg_lpc_all  = "profit" if cfg_pnl_all >= 0 else "loss"
-    # 重複除外合計（= 全体KPIと同じ数値）
-    dedup_gp  = sum(t["pnl"] for t in kpi_trades if t["pnl"] > 0)
-    dedup_gl  = abs(sum(t["pnl"] for t in kpi_trades if t["pnl"] < 0))
+    # 重複除外合計（= 全体KPIと同じ数値。保有中=未決済は除外して整合させる）
+    dedup_gp  = sum(t["pnl"] for t in settled_trades if t["pnl"] > 0)
+    dedup_gl  = abs(sum(t["pnl"] for t in settled_trades if t["pnl"] < 0))
     dedup_pf  = dedup_gp / dedup_gl if dedup_gl > 0 else (float("inf") if dedup_gp > 0 else 0.0)
     dedup_pf_s = "∞" if dedup_pf == float("inf") else f"{dedup_pf:.2f}"
     kpi_html = f"""
@@ -2355,7 +2361,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <div class="kpi"><div class="kpi-l">合計損益</div><div class="kpi-v {pc}">{"—" if not n_total else f"{pnl_sum:+,.0f}円"}</div></div>
   <div class="kpi"><div class="kpi-l">勝ち/負け</div><div class="kpi-v">{n_win}W / {n_total - n_win}L</div></div>
 </div>
-<p class="footnote" style="margin-bottom:18px">※ 同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として集計。設定別サマリーの合計とは異なります。</p>"""
+<p class="footnote" style="margin-bottom:18px">※ 同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として集計。設定別サマリーの合計とは異なります。<br>※ 保有中（未決済・含み損益）は計測から除外（決済済みトレードのみで勝率・損益を集計）。昨日のシグナル等の保有中は取引明細に表示のみ。</p>"""
 
     # ── サマリーテーブル（各configの独立実績、cross-config重複なし）──
     sum_rows = ""
