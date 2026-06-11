@@ -2234,6 +2234,76 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             if _is_short else
             '<span style="color:#4ade80">ロングモード: ▲上昇が有利 / ▼下落は不利</span>'
         )
+        # ── BT×トレンド クロス分析 ─────────────────────────────────────────────
+        # trade の id → トレンドキー の逆引きマップ
+        _tbuckets_map = {}
+        for _tk2, _tlist in _tbuckets.items():
+            for _t2 in _tlist:
+                _tbuckets_map[id(_t2)] = _tk2
+
+        _bt_trend_rows = ""
+        _bt_cross_buckets = [
+            (80, 101, "BT≥80",  "#4ade80"),
+            (60,  80, "BT60-79","#86efac"),
+            (40,  60, "BT40-59","#fbbf24"),
+            ( 0,  40, "BT<40",  "#f87171"),
+        ]
+        _trend_order_main = ["up", "sideways", "down"]
+        for _blo, _bhi, _blbl, _bcol in _bt_cross_buckets:
+            _band = [_t for _t in kpi_trades
+                     if _t.get("rec_score") is not None
+                     and _blo <= _t["rec_score"] < _bhi]
+            if not _band:
+                continue
+            _cells = ""
+            for _tk in _trend_order_main:
+                _sub = [_t for _t in _band if _tbuckets_map.get(id(_t)) == _tk]
+                if not _sub:
+                    _cells += '<td colspan="3" style="color:#475569;text-align:center">—</td>'
+                    continue
+                _sw = sum(1 for _t in _sub if _t["pnl"] > 0)
+                _swr = _sw / len(_sub) * 100
+                _sgp = sum(_t["pnl"] for _t in _sub if _t["pnl"] > 0)
+                _sgl = abs(sum(_t["pnl"] for _t in _sub if _t["pnl"] < 0))
+                _spf = _sgp / _sgl if _sgl > 0 else (float("inf") if _sgp > 0 else 0.0)
+                _spf_s = "∞" if _spf == float("inf") else f"{_spf:.2f}"
+                _spnl = sum(_t["pnl"] for _t in _sub)
+                _wr_c = "#4ade80" if _swr >= 60 else ("#fbbf24" if _swr >= 50 else "#f87171")
+                _pf_c = "#4ade80" if _spf >= 1.5 else ("#fbbf24" if _spf >= 1.0 else "#f87171")
+                _pnl_c = "profit" if _spnl >= 0 else "loss"
+                _cells += f"""<td style="text-align:right;color:{_wr_c}">{_swr:.0f}%</td>
+<td style="text-align:right;color:{_pf_c}">{_spf_s}</td>
+<td style="text-align:right;font-size:0.75rem" class="{_pnl_c}">{_spnl:+,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_sub)}件)</span></td>"""
+            _bt_trend_rows += f"""<tr>
+  <td style="color:{_bcol};font-weight:700;border-left:3px solid {_bcol};padding-left:8px">{_blbl}</td>
+  {_cells}
+</tr>"""
+
+        _trend_col_headers = ""
+        for _tk in _trend_order_main:
+            _lbl2, _col2, _ = _tlabels[_tk]
+            _trend_col_headers += f'<th colspan="3" style="text-align:center;color:{_col2};border-bottom:2px solid {_col2}">{_lbl2}</th>'
+        _trend_sub_headers = '<th>勝率</th><th>PF</th><th>損益</th>' * 3
+
+        _bt_cross_html = f"""
+<h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
+  BTスコア × 日経トレンド クロス分析
+</h3>
+<p class="footnote" style="margin-bottom:8px">
+  BTスコア帯とトレンド条件の組み合わせで成績を集計。
+  緑=勝率60%以上/PF1.5以上、黄=50-60%/1.0-1.5、赤=50%未満/1.0未満
+</p>
+<table style="font-size:0.85rem">
+  <thead>
+    <tr>
+      <th rowspan="2" style="text-align:left">BTスコア</th>
+      {_trend_col_headers}
+    </tr>
+    <tr>{_trend_sub_headers}</tr>
+  </thead>
+  <tbody>{_bt_trend_rows}</tbody>
+</table>""" if _bt_trend_rows else ""
+
         if _trows:
             _trend_breakdown_html = f"""
 <h2>日経トレンド別成績（シグナル発生日基準）</h2>
@@ -2253,7 +2323,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     <th>負け平均</th>
   </tr></thead>
   <tbody>{_trows}</tbody>
-</table>"""
+</table>
+{_bt_cross_html}"""
     except Exception:
         pass
 
