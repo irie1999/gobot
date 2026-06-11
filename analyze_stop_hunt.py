@@ -224,6 +224,7 @@ def process_one(mod, label, sym, name, strat):
             hunt = measure_stop_hunt(df, t, is_short)
         rows.append(dict(
             label=label, sym=sym, name=name, strat=strat, is_short=is_short,
+            entry_dt=entry_dt,
             real_reason=t.get("reason"), real_pnl=t.get("pnl", 0.0),
             sims=sims, hunt=hunt,
         ))
@@ -350,6 +351,38 @@ def main():
         print(f"  {st:<8} n={si['n']:<3} 勝率 {si['wr']:3.0f}%→{sc['wr']:3.0f}%→{sh['wr']:3.0f}%  "
               f"損益 {si['pnl']:+,.0f} → {sc['pnl']:+,.0f} → {sh['pnl']:+,.0f}  "
               f"(close{sc['pnl']-si['pnl']:+,.0f} / hyb{sh['pnl']-si['pnl']:+,.0f})")
+
+    # ── 分析3: 時期分割の頑健性チェック (前半 vs 後半) ──
+    # ルール変更(close化)の優位が特定時期だけの偶然でないかを確認。
+    print("\n" + "=" * 90)
+    print("【分析3】 時期分割 頑健性チェック (entry日で前半/後半に2分割)")
+    print("=" * 90)
+    dated = [r for r in all_rows if r.get("entry_dt") is not None]
+    if dated:
+        dates = sorted(r["entry_dt"] for r in dated)
+        mid = dates[len(dates) // 2]
+        early = [r for r in dated if r["entry_dt"] < mid]
+        late  = [r for r in dated if r["entry_dt"] >= mid]
+
+        def split_line(rows, tag):
+            si = stat(rows, "intraday"); sc = stat(rows, "close")
+            d = sc["pnl"] - si["pnl"]
+            mark = "✓close優位" if d > 0 else "✗close劣後"
+            print(f"  {tag:<22} n={si['n']:<4} "
+                  f"intraday {si['pnl']:>+12,.0f}  →  close {sc['pnl']:>+12,.0f}  "
+                  f"({d:>+11,.0f})  {mark}")
+
+        def fmt_date(d):
+            return d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        print(f"  分割点(entry日): {fmt_date(mid)}  "
+              f"[前半 {fmt_date(dates[0])}〜 / 後半 〜{fmt_date(dates[-1])}]\n")
+        for tag, sub in [("全体", dated), ("ロング", longs), ("ショート", shorts)]:
+            e = [r for r in sub if r.get("entry_dt") is not None and r["entry_dt"] < mid]
+            l = [r for r in sub if r.get("entry_dt") is not None and r["entry_dt"] >= mid]
+            split_line(e, f"{tag} 前半")
+            split_line(l, f"{tag} 後半")
+            print()
+        print("  → 前半・後半の両方で『close優位』なら、ルール変更の効果は時期に依存せず頑健")
 
     # 整合性チェック: intraday 再シミュ総損益 vs 実バックテスト総損益
     real_pnl = sum(r["real_pnl"] for r in all_rows if r["real_reason"] != "保有中")
