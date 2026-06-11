@@ -81,7 +81,10 @@ class KabuClient:
         dry_run : bool
             True なら発注系メソッドは API を叩かず内容を表示するだけ。
         password : str | None
-            API パスワード。None なら環境変数 KABU_API_PASSWORD を使う。
+            API パスワード。None なら環境変数から取得する:
+              本番(prod=True)  → KABU_API_PASSWORD_PROD
+              デモ(prod=False) → KABU_API_PASSWORD_DEMO
+            上記が無ければ KABU_API_PASSWORD にフォールバック (後方互換)。
         timeout : float
             HTTP タイムアウト秒。
         """
@@ -89,8 +92,14 @@ class KabuClient:
         self.dry_run = dry_run
         self.base_url = PROD_URL if prod else DEMO_URL
         self.timeout = timeout
-        self._password = password or os.environ.get("KABU_API_PASSWORD")
+        self._password = password or self._password_from_env(prod)
         self._token: str | None = None
+
+    @staticmethod
+    def _password_from_env(prod: bool) -> str | None:
+        """本番/デモで環境変数を使い分ける。無ければ共通変数にフォールバック。"""
+        key = "KABU_API_PASSWORD_PROD" if prod else "KABU_API_PASSWORD_DEMO"
+        return os.environ.get(key) or os.environ.get("KABU_API_PASSWORD")
 
     # ── 接続/認証 ────────────────────────────────────────────
     @property
@@ -100,9 +109,11 @@ class KabuClient:
     def connect(self) -> str:
         """トークンを取得して以降のリクエストに使う。"""
         if not self._password:
+            env_key = "KABU_API_PASSWORD_PROD" if self.prod else "KABU_API_PASSWORD_DEMO"
             raise RuntimeError(
-                "API パスワードがありません。環境変数 KABU_API_PASSWORD を設定するか "
-                "KabuClient(password=...) を渡してください。")
+                f"API パスワードがありません。環境変数 {env_key} "
+                "(または KABU_API_PASSWORD) を設定するか KabuClient(password=...) "
+                "を渡してください。")
         url = f"{self.base_url}/kabusapi/token"
         r = requests.post(url, json={"APIPassword": self._password},
                           headers={"Content-Type": "application/json"},
