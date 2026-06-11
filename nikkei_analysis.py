@@ -2074,6 +2074,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
+                _sdt_raw = t.get("signal_dt")
                 extra = {
                     "entry_dt":     entry_dt.strftime("%m/%d") if hasattr(entry_dt, "strftime") else str(entry_dt),
                     "exit_dt":      exit_dt.strftime("%m/%d")  if hasattr(exit_dt,  "strftime") else str(exit_dt),
@@ -2085,6 +2086,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     "order_limit":  t.get("order_limit", 0),
                     "order_stop":   t.get("order_stop", 0),
                     "order_target": t.get("order_target", 0),
+                    "signal_dt_raw": _sdt_raw.date() if hasattr(_sdt_raw, "date") else _sdt_raw,
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
                 if reason != "発注中" and since <= exit_d <= until:
@@ -2153,6 +2155,79 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # ── KPI (発注中=未約定は除外) ──
     # all_trades は (sym, strat, signal_dt) で重複除外済み（同一シグナルは最初のconfigのみ）
     kpi_trades = [t for t in all_trades if t.get("reason") != "発注中"]
+
+    # ── 日経トレンド別成績 ──────────────────────────────────────────────────────
+    _trend_breakdown_html = ""
+    try:
+        _n225_close = fetch_n225(2)
+        _n225_trend = label_trend(_n225_close)
+        _tmap = {dt.date(): tr for dt, tr in zip(_n225_trend.index, _n225_trend)}
+
+        from collections import defaultdict as _ddict
+        _tbuckets: dict = _ddict(list)
+        for _t in kpi_trades:
+            _sdt = _t.get("signal_dt_raw")
+            _trend_key = _tmap.get(_sdt) if _sdt else None
+            _tbuckets[_trend_key].append(_t)
+
+        _tlabels = {
+            "up":       ("▲ 上昇",   "#4ade80", "#052e16"),
+            "sideways": ("→ 横ばい", "#fbbf24", "#2d1f00"),
+            "down":     ("▼ 下落",   "#f87171", "#2d0a0a"),
+            None:       ("不明",     "#64748b", "#0d1424"),
+        }
+        _trows = ""
+        for _tk in ["up", "sideways", "down", None]:
+            _ts = _tbuckets.get(_tk, [])
+            if not _ts:
+                continue
+            _wins   = [_t for _t in _ts if _t["pnl"] > 0]
+            _losses = [_t for _t in _ts if _t["pnl"] <= 0]
+            _tpnl   = sum(_t["pnl"] for _t in _ts)
+            _twr    = len(_wins) / len(_ts) * 100
+            _avg_w  = sum(_t["pnl"] for _t in _wins)  / len(_wins)  if _wins   else 0
+            _avg_l  = sum(_t["pnl"] for _t in _losses) / len(_losses) if _losses else 0
+            _gp     = sum(_t["pnl"] for _t in _wins)
+            _gl     = abs(sum(_t["pnl"] for _t in _losses))
+            _pf_v   = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+            _pf_s   = "∞" if _pf_v == float("inf") else f"{_pf_v:.2f}"
+            _lbl, _col, _bg = _tlabels[_tk]
+            _pc     = "profit" if _tpnl >= 0 else "loss"
+            _wr_c   = "#4ade80" if _twr >= 55 else ("#fbbf24" if _twr >= 45 else "#f87171")
+            _trows += f"""<tr style="background:{_bg}20">
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>
+  <td style="text-align:right">{len(_ts)}</td>
+  <td style="text-align:right;color:{_wr_c};font-weight:600">{_twr:.1f}%</td>
+  <td style="text-align:right">{_pf_s}</td>
+  <td class="profit" style="text-align:right">+{_gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right">-{_gl:,.0f}円</td>
+  <td class="{_pc}" style="text-align:right;font-weight:600">{_tpnl:+,.0f}円</td>
+  <td style="text-align:right;color:{'#4ade80' if _avg_w>0 else '#94a3b8'}">{_avg_w:+,.0f}円</td>
+  <td style="text-align:right;color:{'#f87171' if _avg_l<0 else '#94a3b8'}">{_avg_l:+,.0f}円</td>
+</tr>"""
+
+        if _trows:
+            _trend_breakdown_html = f"""
+<h2>日経トレンド別成績（シグナル発生日基準）</h2>
+<p class="footnote" style="margin-bottom:10px">
+  シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。<br>
+  ▲=終値&gt;MA10&gt;MA25 ／ ▼=終値&lt;MA10&lt;MA25 ／ →=移行期間
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">日経トレンド</th>
+    <th>件数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益計</th>
+    <th style="color:#f87171">損失計</th>
+    <th>損益合計</th>
+    <th>勝ち平均</th>
+    <th>負け平均</th>
+  </tr></thead>
+  <tbody>{_trows}</tbody>
+</table>"""
+    except Exception:
+        pass
+
     n_total = len(kpi_trades)
     n_win   = sum(1 for t in kpi_trades if t["pnl"] > 0)
     pnl_sum = sum(t["pnl"] for t in kpi_trades)
@@ -2814,6 +2889,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 
 </div>
+
+{_trend_breakdown_html}
 
 <h2>取引明細（決済日降順）</h2>
 <div class="detail-tab-nav">
