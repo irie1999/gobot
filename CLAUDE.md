@@ -308,13 +308,75 @@ WATCHLIST を更新するときは:
 
 ---
 
-## 12. 参考: kabu station (別件)
+## 12. kabu station 連携 (発注パイプライン)
 
-`kabu_token.py` は kabuステーション REST API トークン取得用のスタンドアロン
-スクリプト。現状 `run_signals.py` とは **未連携**。将来、逆指値シグナルを
-そのまま kabu API に流し込む場合は、`check_signal_on_date` の返り値
-(`order_price` / `stop_price` / `target_price`) をそのまま `sendorder` に渡せる
-設計になっていることを押さえておいてください。接続先は デモ `18081` / 本番 `18080`。
+逆指値シグナルを kabuステーション REST API に流し込んで自動発注する仕組み。
+
+### 12.1 ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| `kabu_token.py` | トークン取得のみのスタンドアロン (旧)。互換のため残置 |
+| `kabu_api.py` | **連携の中核** `KabuClient`。トークン/時価/建玉/余力/発注/取消を集約 |
+| `kabu_send_signals.py` | 今日の逆指値シグナルを **逆指値買い** で発注 (エントリー入口) |
+| `close_stop_guard.py` | close 方式の損切りを **引け成行(MOC)** で自動決済 (§16 と対) |
+
+### 12.2 KabuClient (kabu_api.py)
+
+```python
+from kabu_api import KabuClient
+cli = KabuClient(prod=False, dry_run=True)  # 既定: デモ(18081) + dry-run
+cli.connect()                                # トークン取得
+cli.get_current_price(7203)                  # 時価
+cli.send_stop_buy(7203, qty=100, trigger_price=3000)   # 逆指値買い(FOT=30,以上)
+cli.send_moc(7203, qty=100, side="sell")               # 引け成行(FOT=16)
+cli.send_stop_sell(7203, qty=100, trigger_price=2850)  # 損切り逆指値(FOT=30,以下)
+```
+
+- **dry_run=True** なら発注系は API を叩かず内容を print するだけ (安全)。
+- 現物 `CashMargin=1` / 信用新規 `=2` / 信用返済 `=3` を引数で切替。
+- `check_signal_on_date` の返り値 (`order_price`/`stop_price`/`target_price`) を
+  そのまま `send_stop_buy` / `send_stop_sell` の trigger_price に渡せる設計。
+
+### 12.3 運用フロー
+
+```
+# エントリー (寄り前 or 引け後): 今日のシグナルを逆指値買いで発注
+python kabu_send_signals.py                  # dry-run
+python kabu_send_signals.py --execute        # デモ口座に発注
+python kabu_send_signals.py --execute --prod # 本番口座 (要明示)
+python kabu_send_signals.py --with-stop      # 損切り逆指値も同時 (intraday運用)
+
+# 損切り (毎営業日 14:50-14:55): close 方式の引け成行ガード
+python close_stop_guard.py                   # dry-run (判定だけ)
+python close_stop_guard.py --execute         # デモ口座に引け成行発注
+python close_stop_guard.py --execute --prod  # 本番口座 (要明示)
+```
+
+### 12.4 安全設計 (誤発注防止)
+
+- **全スクリプト デフォルト dry-run**。`--execute` のときだけ実発注。
+- `--execute` でも接続先は **既定デモ(18081)**。本番(18080)は `--prod` 明示必須。
+- API パスワードは環境変数 `KABU_API_PASSWORD` から読む (コード埋め込みしない)。
+
+### 12.5 close 方式と intraday 方式の発注の違い (重要)
+
+§16 の損切りモードと対応:
+- **close (既定)**: エントリー時は損切り逆指値を出さない (`kabu_send_signals.py`
+  を `--with-stop` なしで実行)。損切りは `close_stop_guard.py` が引け前に判定して
+  引け成行で決済。ヒゲ刈り回避。
+- **intraday**: エントリー時に損切り逆指値も同時に置く (`--with-stop`)。
+  置きっぱなしで放置できるが、ザラ場のヒゲで刈られる。
+
+### 12.6 既知の制約 / TODO
+
+- **保有管理は forward_test_log.csv 依存**: `close_stop_guard.py` は
+  `forward_test.py --record` で蓄積した CSV の filled/holding 行を保有とみなす。
+  kabu の実建玉 (`get_positions`) との突合は未実装 (将来の整合チェック候補)。
+- **信用返済の建玉指定**: `send_moc` の信用返済は `CashMargin=3` だが、
+  返済建玉 (ClosePositions) の明示指定は未対応。現状は現物決済を想定。
+- **スケジュール実行**: cron / タスクスケジューラは別途設定が必要 (スクリプト側は持たない)。
+- **約定確認・リトライ**: 発注後の約定監視や部分約定処理は未実装。
 
 ---
 

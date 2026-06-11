@@ -44,26 +44,14 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import requests
-
-# kabuステーション トークン取得は既存スクリプトを再利用
-from kabu_token import get_token
+# kabuステーション連携は共通クライアントに集約
+from kabu_api import KabuClient
 
 JST = timezone(timedelta(hours=9))
-
-# 引け成行 (MOC) に使う kabu API 定数
-FRONT_ORDER_TYPE_MOC = 16   # 執行条件: 引成 (引け成行)
-SIDE_SELL = "1"             # kabu: 1=売
-SIDE_BUY = "2"             # kabu: 2=買
-EXCHANGE_TOSHO = 1          # 市場: 東証
-
-DEMO_URL = "http://localhost:18081"
-PROD_URL = "http://localhost:18080"
 
 
 # ────────────────────────────────────────────────────────────
@@ -108,20 +96,6 @@ def load_open_positions(log_path: str) -> list[dict]:
 # ────────────────────────────────────────────────────────────
 # 現在値の取得
 # ────────────────────────────────────────────────────────────
-def get_current_price(symbol: str, token: str, base_url: str) -> float | None:
-    """kabu /board から現在値を取得。失敗時は None。"""
-    url = f"{base_url}/kabusapi/board/{symbol}@{EXCHANGE_TOSHO}"
-    headers = {"X-API-KEY": token}
-    try:
-        r = requests.get(url, headers=headers, timeout=5)
-        r.raise_for_status()
-        price = r.json().get("CurrentPrice")
-        return float(price) if price is not None else None
-    except Exception as e:
-        print(f"  ⚠ {symbol}: kabu /board 取得失敗 ({e})")
-        return None
-
-
 def get_current_price_fallback(symbol: str) -> float | None:
     """kabu が使えない (dry-run 等) ときの最新終値フォールバック。"""
     try:
@@ -138,42 +112,15 @@ def get_current_price_fallback(symbol: str) -> float | None:
 # ────────────────────────────────────────────────────────────
 # 引け成行 (MOC) 発注
 # ────────────────────────────────────────────────────────────
-def send_moc_order(pos: dict, token: str, base_url: str, password: str) -> bool:
+def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     """保有ポジションを決済する引け成行 (MOC) 注文を発注する。
 
     ロング (is_short=False) → 売り決済、ショート → 買い戻し。
-    現物の売り決済を想定 (CashMargin=1)。信用返済は §注意 参照。
+    現物の売り決済を想定。信用返済で運用する場合は cash_margin を変える。
     """
-    side = SIDE_BUY if pos["is_short"] else SIDE_SELL
-    url = f"{base_url}/kabusapi/sendorder"
-    headers = {"Content-Type": "application/json", "X-API-KEY": token}
-    body = {
-        "Password": password,
-        "Symbol": pos["symbol"],
-        "Exchange": EXCHANGE_TOSHO,
-        "SecurityType": 1,           # 株式
-        "Side": side,
-        "CashMargin": 1,             # 1=現物 (信用返済は 3 + ClosePositions 指定が必要)
-        "DelivType": 2,              # お預り金
-        "AccountType": 4,            # 特定
-        "Qty": pos["qty"],
-        "FrontOrderType": FRONT_ORDER_TYPE_MOC,  # 引成
-        "Price": 0,                  # 成行なので 0
-        "ExpireDay": 0,              # 当日
-    }
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=10)
-        r.raise_for_status()
-        res = r.json()
-        if res.get("Result") == 0:
-            print(f"  ✓ 発注成功 {pos['symbol']} {pos['name']} "
-                  f"OrderId={res.get('OrderId')}")
-            return True
-        print(f"  ✗ 発注失敗 {pos['symbol']}: {res}")
-        return False
-    except Exception as e:
-        print(f"  ✗ 発注エラー {pos['symbol']}: {e}")
-        return False
+    side = "buy" if pos["is_short"] else "sell"
+    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side)
+    return res.get("Result") == 0
 
 
 # ────────────────────────────────────────────────────────────
@@ -193,7 +140,6 @@ def main() -> int:
     args = ap.parse_args()
 
     log_path = args.log or _default_log_path(args.aggressive)
-    base_url = PROD_URL if args.prod else DEMO_URL
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注★" if args.execute else "dry-run (発注なし)"
 
@@ -209,25 +155,21 @@ def main() -> int:
         return 0
     print(f"保有中ポジション: {len(positions)} 件\n")
 
-    # --execute 時のみトークン取得
-    token = None
-    password = None
+    # kabu クライアント: --execute のときだけ接続して発注する
+    cli: KabuClient | None = None
     if args.execute:
-        password = os.environ.get("KABU_API_PASSWORD")
-        if not password:
-            print("✗ 環境変数 KABU_API_PASSWORD が未設定です。発注できません。")
-            return 1
+        cli = KabuClient(prod=args.prod, dry_run=False)
         try:
-            token = get_token(password, base_url)
+            cli.connect()
         except Exception as e:
-            print(f"✗ トークン取得失敗: {e}")
+            print(f"✗ kabu 接続失敗: {e}")
             return 1
 
     breached: list[dict] = []
     for pos in positions:
-        # 現在値: --execute なら kabu /board、dry-run は終値フォールバック
-        if token:
-            price = get_current_price(pos["symbol"], token, base_url)
+        # 現在値: 接続済みなら kabu /board、未接続(dry-run)は終値フォールバック
+        if cli is not None:
+            price = cli.get_current_price(pos["symbol"])
             if price is None:
                 price = get_current_price_fallback(pos["symbol"])
         else:
@@ -259,7 +201,7 @@ def main() -> int:
     print(f"引け成行 (MOC) を {env_label} に発注します...")
     ok = 0
     for pos in breached:
-        if send_moc_order(pos, token, base_url, password):
+        if send_moc_order(pos, cli):
             ok += 1
     print(f"\n発注完了: {ok}/{len(breached)} 件成功")
     return 0
