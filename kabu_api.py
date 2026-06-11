@@ -94,6 +94,7 @@ class KabuClient:
         self.timeout = timeout
         self._password = password or self._password_from_env(prod)
         self._token: str | None = None
+        self._registered: set[tuple[str, int]] = set()  # /board 用 銘柄登録済み
 
     @staticmethod
     def _password_from_env(prod: bool) -> str | None:
@@ -134,8 +135,28 @@ class KabuClient:
         return h
 
     # ── 情報取得 (GET) ───────────────────────────────────────
+    def register(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
+        """/board で時価を取る前に必要な銘柄登録 (PUT /register)。
+
+        kabu API は登録していない銘柄の /board が空になる仕様。
+        一度登録した銘柄は self._registered にキャッシュして再登録を避ける。
+        """
+        key = (str(symbol), exchange)
+        if key in self._registered:
+            return
+        url = f"{self.base_url}/kabusapi/register"
+        body = {"Symbols": [{"Symbol": str(symbol), "Exchange": exchange}]}
+        try:
+            r = requests.put(url, headers=self._headers(with_content=True),
+                             json=body, timeout=self.timeout)
+            r.raise_for_status()
+            self._registered.add(key)
+        except Exception as e:
+            print(f"  ⚠ {symbol}: 銘柄登録(register)失敗 ({e})")
+
     def get_board(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
-        """時価情報 (CurrentPrice 等) を取得。"""
+        """時価情報 (CurrentPrice 等) を取得。事前に銘柄登録を行う。"""
+        self.register(symbol, exchange)
         url = f"{self.base_url}/kabusapi/board/{symbol}@{exchange}"
         r = requests.get(url, headers=self._headers(), timeout=self.timeout)
         r.raise_for_status()
