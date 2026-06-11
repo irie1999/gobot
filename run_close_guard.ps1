@@ -28,7 +28,12 @@ if (-not $env:KABU_API_PASSWORD_PROD) {
 }
 
 $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Add-Content -Path "close_guard_log.txt" -Value "`n==== $stamp  close_stop_guard 実行 ===="
+
+# Python の出力を UTF-8 に統一(文字化け防止)
+$env:PYTHONIOENCODING = "utf-8"
 
 # dry-run(発注なし)で判定。実発注する場合は末尾に --execute を追加する。
-python close_stop_guard.py --prod --log my_positions.csv *>> close_guard_log.txt
+# 出力を一旦変数に受けて、UTF-8 でログに追記する(読み書きの文字コードを統一)
+$output = python close_stop_guard.py --prod --log my_positions.csv 2>&1 | Out-String
+Add-Content -Path "close_guard_log.txt" -Value "`n==== $stamp  close_stop_guard 実行 ====`n$output" -Encoding UTF8
+
