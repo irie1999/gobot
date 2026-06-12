@@ -53,6 +53,8 @@ _pre.add_argument("--short",      action="store_true",
                   help="ショート戦略(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S/VOL_S)で出力")
 _pre.add_argument("--force",      action="store_true",
                   help="当日の生成済みHTMLがあっても無視して再生成する")
+_pre.add_argument("--entry-days", type=int, default=None,
+                  help="取引明細をエントリー日ベースで絞り込む日数 (例: 7=直近1週間エントリーのみ)")
 _args, _ = _pre.parse_known_args()
 
 # ── ロング/ショートの戦略セット ──────────────────────────────────────────────
@@ -424,7 +426,7 @@ except Exception as _e:
 # 全設定統合: _all_configs で直近180日を一括集計 → デフォルト表示
 _na._PNL_CONFIGS[:] = _all_configs
 print(f"損益集計中 (全設定統合・直近180日 / {len(_all_configs)}設定)...", flush=True)
-_all_period_html = _na._tab5_pnl_html(180, _args.workers)
+_all_period_html = _na._tab5_pnl_html(180, _args.workers, entry_days=_args.entry_days)
 _phase("損益タブ(180/全設定統合)完了")
 
 # 期間別: 各期間のconfigs（必要時にボタンで切替）
@@ -433,7 +435,7 @@ for days in _PNL_PERIODS:
     cfgs = _period_configs.get(days) or _all_configs
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
-    _period_pane_htmls[days] = _na._tab5_pnl_html(days, _args.workers)
+    _period_pane_htmls[days] = _na._tab5_pnl_html(days, _args.workers, entry_days=_args.entry_days)
     _phase(f"損益タブ({days}日)完了")
 
 # ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────

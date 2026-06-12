@@ -2006,8 +2006,10 @@ _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 
 
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
-                   symbol_filter: list[str] | None = None) -> str:
-    """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。"""
+                   symbol_filter: list[str] | None = None,
+                   entry_days: int | None = None) -> str:
+    """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。
+    entry_days 指定時は「エントリー日が直近N日以内」の取引だけを取引明細に表示する。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
@@ -2129,6 +2131,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         full_year_trades = [t for t in full_year_trades if t.get("symbol","").upper() in syms]
         cfg_trades_map   = {k: [t for t in v if t.get("symbol","").upper() in syms]
                             for k, v in cfg_trades_map.items()}
+
+    # ── entry_days: エントリー日ベースで取引明細を絞り込み ──
+    # (スコア統計・サマリーには影響しない。明細テーブルのみ)
+    if entry_days:
+        entry_since = until - timedelta(days=entry_days)
+        all_trades = [t for t in all_trades
+                      if (t.get("entry_d_raw") or until) >= entry_since]
 
     # ── 1銘柄1ポジションフィルター ──────────────────────────────────
     # エントリー日昇順・スコア降順でソートし、同一銘柄が既にオープン中の場合はスキップ
