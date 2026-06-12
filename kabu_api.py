@@ -236,8 +236,16 @@ class KabuClient:
         url = f"{self.base_url}/kabusapi/sendorder"
         r = requests.post(url, headers=self._headers(with_content=True),
                           json=body, timeout=self.timeout)
-        r.raise_for_status()
-        res = r.json()
+        # エラー時も kabu の error code/message を見たいので body を読む
+        try:
+            res = r.json()
+        except Exception:
+            res = {"_raw": r.text}
+        if not r.ok:
+            print(f"  ✗ {label} HTTP {r.status_code}: {res}")
+            print(f"    送信ボディ: {dict(body, Password='***')}")
+            return {"Result": -1, "_http_status": r.status_code, **(
+                res if isinstance(res, dict) else {})}
         if res.get("Result") != 0:
             print(f"  ✗ {label} 発注失敗: {res}")
         else:
@@ -258,9 +266,15 @@ class KabuClient:
             "ExpireDay": 0,           # 当日
         }
         if cash_margin == CASH_GENBUTSU:
-            body["DelivType"] = 2     # 現物買は お預り金
+            if side == SIDE_BUY:
+                body["DelivType"] = 2   # 現物買は お預り金
+                body["FundType"] = "AA"  # 信用代用 (現物買は FundType 必須)
+            else:
+                body["DelivType"] = 0   # 現物売は 指定なし
+                body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
             body["DelivType"] = 0 if cash_margin == CASH_MARGIN_OPEN else 2
+            body["FundType"] = "11"      # 信用取引
             body["MarginTradeType"] = 1  # 制度信用
         return body
 
