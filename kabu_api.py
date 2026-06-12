@@ -334,6 +334,52 @@ class KabuClient:
         kind = "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物"
         return self._post_order(body, f"{label} ({kind})")
 
+    def send_sell(self, symbol: int | str, qty: int, price: float | None = None,
+                  cash_margin: int = CASH_MARGIN_CLOSE,
+                  order_type: str = "market",
+                  close_positions: list[dict] | None = None) -> dict:
+        """普通の売り注文 (現物売り or 信用返済売り)。
+
+        信用ロングの返済売りに使う (send_buy で建てた建玉を決済)。
+        order_type:
+          "market" = 成行 (ザラ場中のみ) / "limit" = 指値 (price 必須) / "moo" = 寄成
+        cash_margin:
+          CASH_MARGIN_CLOSE(3) = 信用返済 (既定) / CASH_GENBUTSU(1) = 現物売
+        close_positions:
+          信用返済の建玉リスト。None なら API から自動取得 (FIFO)。
+        """
+        body = self._base_order(symbol, SIDE_SELL, qty, cash_margin)
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("order_type='limit' には price が必要です。")
+            body["FrontOrderType"] = FOT_LIMIT
+            body["Price"] = round(price)
+            label = f"指値売り {symbol} x{qty} @{round(price)}"
+        elif order_type == "moo":
+            body["FrontOrderType"] = FOT_MOO
+            body["Price"] = 0
+            label = f"寄成売り {symbol} x{qty}"
+        else:  # market
+            body["FrontOrderType"] = FOT_MARKET
+            body["Price"] = 0
+            label = f"成行売り {symbol} x{qty}"
+
+        # 信用返済は返済建玉 (ClosePositions) の指定が必須
+        if cash_margin == CASH_MARGIN_CLOSE:
+            if close_positions is not None:
+                body["ClosePositions"] = close_positions
+            elif self.dry_run:
+                body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
+            else:
+                cp = self._build_close_positions(symbol, qty, SIDE_SELL)
+                if not cp:
+                    print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
+                    return {"Result": -1, "Message": "建玉なし"}
+                body["ClosePositions"] = cp
+
+        kind = "信用返済" if cash_margin == CASH_MARGIN_CLOSE else "現物売"
+        return self._post_order(body, f"{label} ({kind})")
+
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
                        cash_margin: int = CASH_GENBUTSU) -> dict:
         """損切り逆指値 (trigger_price 以下で成行売り)。ザラ場 intraday 損切り用。"""
