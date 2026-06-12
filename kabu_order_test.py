@@ -76,9 +76,16 @@ def main() -> int:
     print("    ※ 現在値よりはるかに高いので即約定しません")
     res = cli.send_stop_buy(args.symbol, qty=args.qty,
                             trigger_price=trigger, cash_margin=cash_margin)
+    # 取引時間外だと発火後=成行が弾かれる(Code 100378)。指値発火でリトライ。
+    if res.get("Result") != 0 and res.get("Code") == 100378:
+        print("  ↻ 成行が市場に拒否されました(時間外?)。発火後=指値で再試行します。")
+        res = cli.send_stop_buy(args.symbol, qty=args.qty, trigger_price=trigger,
+                                cash_margin=cash_margin, after_hit_price=trigger)
     order_id = res.get("OrderId")
     if res.get("Result") != 0:
         print(f"  ✗ 発注失敗: {res}")
+        print("    → 取引時間外の可能性が高いです。ザラ場(9:00-11:30/12:30-15:00)に"
+              "再実行してください。")
         return 1
     print(f"  ✓ 発注OK OrderId={order_id}")
 

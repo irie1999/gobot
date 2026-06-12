@@ -63,6 +63,7 @@ TRIGGER_AFTER_ORDER = 1      # TriggerSec: 1=発注後
 UNDER = 1                    # UnderOver: 1=以下
 OVER = 2                     # UnderOver: 2=以上
 AFTERHIT_MARKET = 1          # AfterHitOrderType: 1=成行
+AFTERHIT_LIMIT = 2           # AfterHitOrderType: 2=指値
 
 DEMO_URL = "http://localhost:18081"
 PROD_URL = "http://localhost:18080"
@@ -279,20 +280,27 @@ class KabuClient:
         return body
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
-                      cash_margin: int = CASH_GENBUTSU) -> dict:
-        """逆指値買いエントリー (trigger_price 以上で成行買い)。
+                      cash_margin: int = CASH_GENBUTSU,
+                      after_hit_price: float | None = None) -> dict:
+        """逆指値買いエントリー (trigger_price 以上で買い)。
 
         逆指値シグナルの order_price をそのまま trigger_price に渡す。
+        after_hit_price=None なら発火後は成行 (実運用の既定)。
+        値を渡すと発火後は指値 (時間外テストなど成行が弾かれる場面で使う)。
         """
         body = self._base_order(symbol, SIDE_BUY, qty, cash_margin)
         body["FrontOrderType"] = FOT_STOP
         body["Price"] = 0
+        if after_hit_price is None:
+            after_type, after_price = AFTERHIT_MARKET, 0
+        else:
+            after_type, after_price = AFTERHIT_LIMIT, round(after_hit_price)
         body["ReverseLimitOrder"] = {
             "TriggerSec": TRIGGER_AFTER_ORDER,
             "TriggerPrice": round(trigger_price),
             "UnderOver": OVER,          # 以上 (ブレイク方向)
-            "AfterHitOrderType": AFTERHIT_MARKET,
-            "AfterHitPrice": 0,
+            "AfterHitOrderType": after_type,
+            "AfterHitPrice": after_price,
         }
         return self._post_order(body, f"逆指値買い {symbol} x{qty} @≥{trigger_price:.0f}")
 
