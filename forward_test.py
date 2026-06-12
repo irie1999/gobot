@@ -106,7 +106,10 @@ def save_log(rows: list[dict]) -> None:
 
 
 # ── メタモデル用特徴量ヘルパー ─────────────────────────────────
-# N225 DataFrame を一度だけ取得してキャッシュする（スレッド起動前に _prefetch_n225() を呼ぶ）
+# 特徴量の定義は meta_features.py に集約 (build_meta_dataset_bt.py と共通)。
+# N225 DataFrame は一度だけ取得してキャッシュ (スレッド起動前に _prefetch_n225()).
+import meta_features as _mf
+
 _n225_df_cache: list = []
 
 
@@ -118,56 +121,16 @@ def _prefetch_n225() -> None:
 
 def _regime_at(signal_date: str) -> str:
     """N225 MA25/MA75 によるシグナル日のレジーム: up / flat / down"""
-    try:
-        import pandas as pd
-        n225 = _n225_df_cache[0] if _n225_df_cache else None
-        if n225 is None or len(n225) < 75:
-            return ""
-        i = int(n225.index.get_indexer([pd.Timestamp(signal_date)], method="pad")[0])
-        if i < 74:
-            return ""
-        ma25 = float(n225["close"].iloc[i - 24:i + 1].mean())
-        ma75 = float(n225["close"].iloc[i - 74:i + 1].mean())
-        if ma25 > ma75 * 1.005:
-            return "up"
-        if ma25 < ma75 * 0.995:
-            return "down"
-        return "flat"
-    except Exception:
-        return ""
+    n225 = _n225_df_cache[0] if _n225_df_cache else None
+    return _mf.compute_regime(n225, signal_date)
 
 
 def _stock_meta_features(symbol: str, signal_date: str) -> tuple[str, str]:
     """シグナル日時点の (atr_ratio, vol_ratio)。取得不能なら ('', '')。"""
-    try:
-        import pandas as pd
-        df = fetch(symbol, 400)
-        if df is None or len(df) < 30:
-            return "", ""
-        i = int(df.index.get_indexer([pd.Timestamp(signal_date)], method="pad")[0])
-        if i < 20:
-            return "", ""
-        close = float(df["close"].iloc[i])
-        if close <= 0:
-            return "", ""
-        # ATR (14日 True Range 平均)
-        if "atr" in df.columns:
-            atr = float(df["atr"].iloc[i])
-        else:
-            h, l, cp = df["high"], df["low"], df["close"].shift(1)
-            tr = pd.concat([(h - l), (h - cp).abs(), (l - cp).abs()], axis=1).max(axis=1)
-            atr = float(tr.iloc[max(0, i - 13):i + 1].mean())
-        atr_ratio = str(round(atr / close, 4)) if atr > 0 else ""
-        # vol_ratio = 当日出来高 / 過去20日平均
-        hist = df["volume"].iloc[max(0, i - 20):i]
-        vol_ratio = ""
-        if len(hist) >= 5:
-            avg = float(hist.mean())
-            if avg > 0:
-                vol_ratio = str(round(float(df["volume"].iloc[i]) / avg, 2))
-        return atr_ratio, vol_ratio
-    except Exception:
-        return "", ""
+    df = fetch(symbol, 400)
+    atr_ratio, vol_ratio = _mf.compute_atr_vol(df, signal_date)
+    return ("" if atr_ratio is None else str(atr_ratio),
+            "" if vol_ratio is None else str(vol_ratio))
 
 
 # ── シグナル収集 (今日時点) ──────────────────────────────────────
