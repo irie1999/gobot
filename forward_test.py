@@ -34,6 +34,10 @@ forward_test.py  ―  シグナルのフォワードテスト (紙トレード) 
   exit_price    : 決済価格 (未決済時は空)
   pnl           : 損益 (円, スリッページ+手数料込み)
   updated_date  : 最終更新日
+  --- メタモデル用特徴量 (§C) ---
+  regime        : シグナル日の N225 レジーム (up / flat / down)
+  atr_ratio     : シグナル日の ATR/終値 (例: 0.0312)
+  vol_ratio     : シグナル日の出来高 / 過去20日平均出来高 (例: 1.45)
 
 【使い方】
   python forward_test.py --record            # 記録 (毎日実行)
@@ -80,6 +84,8 @@ FIELDS = [
     "signal_date", "signal_price", "order_price", "stop_price", "target_price",
     "status", "fill_date", "fill_price", "exit_date", "exit_price",
     "pnl", "updated_date",
+    # メタモデル用特徴量 — 後から build_meta_dataset.py で訓練データに変換する
+    "regime", "atr_ratio", "vol_ratio",
 ]
 
 
@@ -99,9 +105,75 @@ def save_log(rows: list[dict]) -> None:
             writer.writerow({k: r.get(k, "") for k in FIELDS})
 
 
+# ── メタモデル用特徴量ヘルパー ─────────────────────────────────
+# N225 DataFrame を一度だけ取得してキャッシュする（スレッド起動前に _prefetch_n225() を呼ぶ）
+_n225_df_cache: list = []
+
+
+def _prefetch_n225() -> None:
+    """N225 DataFrame をメインスレッドで事前取得。"""
+    if not _n225_df_cache:
+        _n225_df_cache.append(fetch("^N225", 400))
+
+
+def _regime_at(signal_date: str) -> str:
+    """N225 MA25/MA75 によるシグナル日のレジーム: up / flat / down"""
+    try:
+        import pandas as pd
+        n225 = _n225_df_cache[0] if _n225_df_cache else None
+        if n225 is None or len(n225) < 75:
+            return ""
+        i = int(n225.index.get_indexer([pd.Timestamp(signal_date)], method="pad")[0])
+        if i < 74:
+            return ""
+        ma25 = float(n225["close"].iloc[i - 24:i + 1].mean())
+        ma75 = float(n225["close"].iloc[i - 74:i + 1].mean())
+        if ma25 > ma75 * 1.005:
+            return "up"
+        if ma25 < ma75 * 0.995:
+            return "down"
+        return "flat"
+    except Exception:
+        return ""
+
+
+def _stock_meta_features(symbol: str, signal_date: str) -> tuple[str, str]:
+    """シグナル日時点の (atr_ratio, vol_ratio)。取得不能なら ('', '')。"""
+    try:
+        import pandas as pd
+        df = fetch(symbol, 400)
+        if df is None or len(df) < 30:
+            return "", ""
+        i = int(df.index.get_indexer([pd.Timestamp(signal_date)], method="pad")[0])
+        if i < 20:
+            return "", ""
+        close = float(df["close"].iloc[i])
+        if close <= 0:
+            return "", ""
+        # ATR (14日 True Range 平均)
+        if "atr" in df.columns:
+            atr = float(df["atr"].iloc[i])
+        else:
+            h, l, cp = df["high"], df["low"], df["close"].shift(1)
+            tr = pd.concat([(h - l), (h - cp).abs(), (l - cp).abs()], axis=1).max(axis=1)
+            atr = float(tr.iloc[max(0, i - 13):i + 1].mean())
+        atr_ratio = str(round(atr / close, 4)) if atr > 0 else ""
+        # vol_ratio = 当日出来高 / 過去20日平均
+        hist = df["volume"].iloc[max(0, i - 20):i]
+        vol_ratio = ""
+        if len(hist) >= 5:
+            avg = float(hist.mean())
+            if avg > 0:
+                vol_ratio = str(round(float(df["volume"].iloc[i]) / avg, 2))
+        return atr_ratio, vol_ratio
+    except Exception:
+        return "", ""
+
+
 # ── シグナル収集 (今日時点) ──────────────────────────────────────
 def collect_today_signals() -> list[dict]:
     """check_signals_stop / breakout の全 WATCHLIST で今日のシグナルを収集。"""
+    _prefetch_n225()   # メタモデル特徴量用: N225 を先取り
     signals: list[dict] = []
 
     def _scan_group(mod, family: str):
@@ -118,6 +190,7 @@ def collect_today_signals() -> list[dict]:
                     sig = None
                 if not sig:
                     continue
+                atr_ratio, vol_ratio = _stock_meta_features(sym, sig["signal_date"])
                 out.append(dict(
                     record_date=str(TODAY),
                     symbol=sym, name=name, strategy=strat, family=family,
@@ -131,6 +204,9 @@ def collect_today_signals() -> list[dict]:
                     exit_date="", exit_price="",
                     pnl="",
                     updated_date=str(TODAY),
+                    regime=_regime_at(sig["signal_date"]),
+                    atr_ratio=atr_ratio,
+                    vol_ratio=vol_ratio,
                 ))
         return out
 
