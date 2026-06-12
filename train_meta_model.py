@@ -41,21 +41,25 @@ from pathlib import Path
 HOLDOUT_DAYS = [30, 60, 90, 120, 150, 180]
 
 # 特徴量列 (すべて signal_date 時点で確定 → リーク無し)
+# 過学習源の signal_month と、定数で死んでいた rr_ratio/entry_type は除外。
 FEATURE_COLS = [
     "strategy",      # カテゴリ
     "family",        # カテゴリ
     "regime",        # カテゴリ: up/flat/down
-    "entry_type",    # カテゴリ
-    "signal_month",  # 整数 1-12
-    "signal_dow",    # 整数 0-4
-    "atr_ratio",     # 連続値
-    "vol_ratio",     # 連続値
-    "rr_ratio",      # 連続値
-    "stop_pct",      # 連続値
-    "target_pct",    # 連続値
+    "signal_dow",    # 整数 0-4 (曜日)
+    "atr_ratio",     # 連続値: ボラ水準
+    "vol_ratio",     # 連続値: 出来高スパイク
+    "stop_pct",      # 連続値: 損切り幅%
+    "target_pct",    # 連続値: 目標幅%
+    # ── トレーリング成績 (BTスコアの本体) ──
+    "tr_n_prior",    # 過去トレード数
+    "tr_winrate",    # 直近20件の勝率
+    "tr_pf",         # 直近20件のPF
+    "tr_loss_streak",# 現在の連敗数
+    "tr_avg_hold",   # 直近20件の平均保有日数 (速度)
 ]
 
-CAT_COLS = ["strategy", "family", "regime", "entry_type"]
+CAT_COLS = ["strategy", "family", "regime"]
 
 # 最終モデルの保存先
 def _model_path(suffix: str = "") -> Path:
@@ -73,7 +77,8 @@ def load_data(csv_path: Path) -> "pd.DataFrame":
 
     # 数値列を変換 (空欄 → NaN)
     num_cols = ["signal_month", "signal_dow", "atr_ratio", "vol_ratio",
-                "rr_ratio", "stop_pct", "target_pct", "pnl", "hold_days", "days_ago"]
+                "rr_ratio", "stop_pct", "target_pct", "pnl", "hold_days", "days_ago",
+                "tr_n_prior", "tr_winrate", "tr_pf", "tr_loss_streak", "tr_avg_hold"]
     for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")

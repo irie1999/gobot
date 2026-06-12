@@ -74,6 +74,9 @@ SETTLED_REASONS = {"目標達成", "損切り", "タイムカット"}
 # 既定のホールドアウト期間 (擬似フォワード). 30〜180日を一度に出力する。
 DEFAULT_HOLDOUTS = [30, 60, 90, 120, 150, 180]
 
+# トレーリング成績を集計する直近トレード数 (BTスコアの本体)
+_TRAIL_WINDOW = 20
+
 _FAMILY_STRATS = {
     "stop":      ["MACD", "A7", "RSI2"],
     "breakout":  ["DON", "VOL", "MOM"],
@@ -95,6 +98,8 @@ def build_out_fields(holdouts: list[int]) -> list[str]:
         "regime", "atr_ratio", "vol_ratio",
         "rr_ratio", "stop_pct", "target_pct",
         "entry_type",
+        # トレーリング成績 (signal より前に決済済みのトレードから算出 = BTスコア本体)
+        "tr_n_prior", "tr_winrate", "tr_pf", "tr_loss_streak", "tr_avg_hold",
         # メタ情報
         "pnl", "hold_days", "days_ago",
         # 時系列分割ラベル (期間ごと) & ターゲット
@@ -120,6 +125,51 @@ def _ts_to_date(ts) -> str:
         return str(ts)[:10]
 
 
+def _trailing_features(prior: list[dict]) -> dict:
+    """
+    シグナル時点で「既に決済済み」だった過去トレード (prior) から、
+    その銘柄×戦略のトレーリング成績を計算する (= BTスコアの本体)。
+
+    prior は exit 日時の昇順。直近 _TRAIL_WINDOW 件で集計する。
+    リーク防止: prior には呼び出し側で「exit_dt < 今回の signal_dt」を満たす
+    トレードだけを渡すこと。
+    """
+    out = {
+        "tr_n_prior":    len(prior),
+        "tr_winrate":    "",
+        "tr_pf":         "",
+        "tr_loss_streak": "",
+        "tr_avg_hold":   "",
+    }
+    if not prior:
+        return out
+
+    win = prior[-_TRAIL_WINDOW:]
+    n = len(win)
+    wins = sum(1 for p in win if p["pnl"] > 0)
+    gp = sum(p["pnl"] for p in win if p["pnl"] > 0)
+    gl = abs(sum(p["pnl"] for p in win if p["pnl"] < 0))
+
+    out["tr_winrate"] = round(wins / n * 100, 1)
+    if gl > 0:
+        out["tr_pf"] = round(gp / gl, 3)
+    elif gp > 0:
+        out["tr_pf"] = 10.0   # 損失なし → PF=∞ は 10 でキャップ (§7 と同じ扱い)
+    else:
+        out["tr_pf"] = 0.0
+    out["tr_avg_hold"] = round(sum(p["hold_days"] for p in win) / n, 1)
+
+    # 直近の連敗数 (末尾から負けが何件続くか)
+    streak = 0
+    for p in reversed(prior):
+        if p["pnl"] <= 0:
+            streak += 1
+        else:
+            break
+    out["tr_loss_streak"] = streak
+    return out
+
+
 def process_symbol(symbol: str, name: str, strategy: str,
                    backtest_days: int, holdouts: list[int]) -> list[dict]:
     """1 銘柄 × 1 戦略のバックテストを回し、決済済みトレードを特徴量行に変換。"""
@@ -137,18 +187,33 @@ def process_symbol(symbol: str, name: str, strategy: str,
     except Exception:
         return []
 
+    # 決済済みトレードのみを抽出し、シグナル日順に並べる
+    settled = []
+    for t in result.get("trade_log", []):
+        if t.get("reason") not in SETTLED_REASONS:
+            continue
+        if t.get("pnl") is None:
+            continue
+        settled.append(t)
+    settled.sort(key=lambda t: (t.get("signal_dt"), t.get("exit_dt")))
+
     n225 = _get_n225()
     out: list[dict] = []
-    for t in result.get("trade_log", []):
-        reason = t.get("reason")
-        if reason not in SETTLED_REASONS:
-            continue   # 保有中 / 発注中 は y を確定できないので除外
+    for t in settled:
         pnl = t.get("pnl")
-        if pnl is None:
-            continue
-
+        reason = t.get("reason")
         signal_ts = t.get("signal_dt")
         signal_date = _ts_to_date(signal_ts)
+
+        # ── トレーリング成績 (この signal より前に exit 済みのトレードのみ) ──
+        prior = [
+            {"pnl": float(p["pnl"]), "hold_days": p.get("hold_days", 0)}
+            for p in settled
+            if p.get("exit_dt") is not None
+            and signal_ts is not None
+            and p["exit_dt"] < signal_ts
+        ]
+        trail = _trailing_features(prior)
 
         # ── 特徴量 (signal_date 時点) ──
         regime = _mf.compute_regime(n225, signal_ts)
@@ -192,6 +257,12 @@ def process_symbol(symbol: str, name: str, strategy: str,
             "stop_pct":   "" if rr["stop_pct"]   is None else rr["stop_pct"],
             "target_pct": "" if rr["target_pct"] is None else rr["target_pct"],
             "entry_type": entry_type,
+            # トレーリング成績 (BTスコアの本体)
+            "tr_n_prior":     trail["tr_n_prior"],
+            "tr_winrate":     trail["tr_winrate"],
+            "tr_pf":          trail["tr_pf"],
+            "tr_loss_streak": trail["tr_loss_streak"],
+            "tr_avg_hold":    trail["tr_avg_hold"],
             "pnl": round(float(pnl)),
             "hold_days": t.get("hold_days", 0),
             "days_ago": days_ago,
