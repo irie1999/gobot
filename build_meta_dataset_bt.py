@@ -16,9 +16,12 @@ trade_log** から一気にメタモデル用の教師データを作る。
   約定後の値動き (MAE/MFE/exit/hold_days) は特徴量にしない (それは y 側)。
 
   さらにユーザー案の「ホールドアウトをフォワード期間にする」を実装:
-    --holdout-days 90 のとき、シグナル日が直近90日内のトレードを split=test、
-    それ以前を split=train とマークする (時系列分割)。
+    --holdout-days 30,60,90,120,150,180 (既定) のように複数期間を一度に指定でき、
+    各期間ごとに split_<N> 列 (train/test) を出力する。
+    シグナル日が直近 N 日内なら split_<N>=test、それ以前なら train。
     → test は学習に使わず「擬似的な未来」として精度検証に使う。
+    days_ago 列 (シグナルからの経過日数) も出すので、任意の期間で後から
+    分割し直すこともできる (重いバックテストの再実行は不要)。
 
 【ターゲット】
   y = 1  pnl > 0,  y = 0  pnl <= 0
@@ -31,7 +34,8 @@ trade_log** から一気にメタモデル用の教師データを作る。
   python build_meta_dataset_bt.py --universe --workers 8
   python build_meta_dataset_bt.py --universe --limit 200   # 先頭200銘柄 (デバッグ)
   python build_meta_dataset_bt.py --family all             # 空売り含む全12戦略
-  python build_meta_dataset_bt.py --holdout-days 60        # 直近60日を test split に
+  python build_meta_dataset_bt.py --holdout-days 30,60,90,120,150,180  # 複数期間 (既定)
+  python build_meta_dataset_bt.py --holdout-days 120       # 単一期間だけにする
   python build_meta_dataset_bt.py --aggressive             # aggressive プリセット
   python build_meta_dataset_bt.py --backtest-days 1000     # バックテスト期間を伸ばす
   python build_meta_dataset_bt.py --out meta_train_bt.csv
@@ -67,6 +71,9 @@ TODAY = datetime.now(JST).date()
 # 決済済み (= y を確定できる) reason
 SETTLED_REASONS = {"目標達成", "損切り", "タイムカット"}
 
+# 既定のホールドアウト期間 (擬似フォワード). 30〜180日を一度に出力する。
+DEFAULT_HOLDOUTS = [30, 60, 90, 120, 150, 180]
+
 _FAMILY_STRATS = {
     "stop":      ["MACD", "A7", "RSI2"],
     "breakout":  ["DON", "VOL", "MOM"],
@@ -77,20 +84,23 @@ _FAMILY_STRATS = {
                   "A7_S", "MACD_S", "RSI2_S", "DON_S", "MOM_S", "GAP_S"],
 }
 
-OUT_FIELDS = [
-    # 識別子 (訓練には使わないが追跡用)
-    "symbol", "name", "strategy", "family",
-    "signal_date", "entry_date", "exit_date", "reason",
-    # 特徴量 (すべて signal_date 時点で確定)
-    "signal_month", "signal_dow",
-    "regime", "atr_ratio", "vol_ratio",
-    "rr_ratio", "stop_pct", "target_pct",
-    "entry_type",
-    # メタ情報
-    "pnl", "hold_days",
-    # 時系列分割ラベル & ターゲット
-    "split", "y",
-]
+def build_out_fields(holdouts: list[int]) -> list[str]:
+    """ホールドアウト期間に応じて split_<N> 列を含む出力列を生成。"""
+    return [
+        # 識別子 (訓練には使わないが追跡用)
+        "symbol", "name", "strategy", "family",
+        "signal_date", "entry_date", "exit_date", "reason",
+        # 特徴量 (すべて signal_date 時点で確定)
+        "signal_month", "signal_dow",
+        "regime", "atr_ratio", "vol_ratio",
+        "rr_ratio", "stop_pct", "target_pct",
+        "entry_type",
+        # メタ情報
+        "pnl", "hold_days", "days_ago",
+        # 時系列分割ラベル (期間ごと) & ターゲット
+        *[f"split_{n}" for n in holdouts],
+        "y",
+    ]
 
 # N225 をプロセス内で一度だけ取得 (スレッド共有・読み取り専用)
 _N225 = None
@@ -111,7 +121,7 @@ def _ts_to_date(ts) -> str:
 
 
 def process_symbol(symbol: str, name: str, strategy: str,
-                   backtest_days: int, test_cutoff) -> list[dict]:
+                   backtest_days: int, holdouts: list[int]) -> list[dict]:
     """1 銘柄 × 1 戦略のバックテストを回し、決済済みトレードを特徴量行に変換。"""
     calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy]
 
@@ -159,16 +169,15 @@ def process_symbol(symbol: str, name: str, strategy: str,
             pass
 
         # ── 時系列分割 (ホールドアウト = 擬似フォワード) ──
+        # days_ago = 基準日 - シグナル日。各期間 N で days_ago <= N なら test。
         try:
             sd = signal_ts.date() if hasattr(signal_ts, "date") \
                 else datetime.strptime(signal_date, "%Y-%m-%d").date()
         except Exception:
             sd = None
-        split = "train"
-        if test_cutoff is not None and sd is not None and sd >= test_cutoff:
-            split = "test"
+        days_ago = (TODAY - sd).days if sd is not None else ""
 
-        out.append({
+        row = {
             "symbol": symbol, "name": name,
             "strategy": strategy, "family": family,
             "signal_date": signal_date,
@@ -185,9 +194,14 @@ def process_symbol(symbol: str, name: str, strategy: str,
             "entry_type": entry_type,
             "pnl": round(float(pnl)),
             "hold_days": t.get("hold_days", 0),
-            "split": split,
+            "days_ago": days_ago,
             "y": 1 if pnl > 0 else 0,
-        })
+        }
+        for n in holdouts:
+            row[f"split_{n}"] = (
+                "test" if (days_ago != "" and days_ago <= n) else "train"
+            )
+        out.append(row)
     return out
 
 
@@ -201,8 +215,9 @@ def main() -> None:
                     help="対象戦略グループ (既定: both = 6ロング戦略)")
     ap.add_argument("--backtest-days", type=int, default=730,
                     help="バックテスト期間 (日, 既定: 730)")
-    ap.add_argument("--holdout-days", type=int, default=90,
-                    help="直近N日を split=test にする (擬似フォワード, 既定: 90)")
+    ap.add_argument("--holdout-days", type=str, default=None,
+                    help="直近N日を split=test にする (擬似フォワード)。カンマ区切りで"
+                         "複数指定可。既定: 30,60,90,120,150,180")
     ap.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
     ap.add_argument("--limit", type=int, default=0,
                     help="銘柄を先頭N件に制限 (デバッグ用, 0=制限なし)")
@@ -213,8 +228,22 @@ def main() -> None:
     args = ap.parse_args()
 
     strategies = _FAMILY_STRATS[args.family]
-    test_cutoff = (TODAY - timedelta(days=args.holdout_days)
-                   if args.holdout_days > 0 else None)
+
+    # ── ホールドアウト期間 (複数可) ──
+    if args.holdout_days:
+        try:
+            holdouts = sorted({int(x) for x in args.holdout_days.split(",")
+                               if x.strip()})
+        except ValueError:
+            print(f"[ERROR] --holdout-days は整数のカンマ区切りで指定してください: "
+                  f"{args.holdout_days}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        holdouts = list(DEFAULT_HOLDOUTS)
+    if not holdouts:
+        holdouts = list(DEFAULT_HOLDOUTS)
+
+    out_fields = build_out_fields(holdouts)
 
     # ── 銘柄リスト ──
     if args.universe:
@@ -245,8 +274,8 @@ def main() -> None:
     print(f"  ユニバース    : {src} ({len(symbols)} 銘柄)")
     print(f"  戦略          : {', '.join(strategies)}")
     print(f"  バックテスト  : 直近 {args.backtest_days} 日")
-    if test_cutoff:
-        print(f"  test split    : {test_cutoff} 以降のシグナル (直近 {args.holdout_days} 日)")
+    print(f"  test split    : {', '.join(str(n) for n in holdouts)} 日 "
+          f"(各 split_<N> 列を出力)")
     print(f"  モード        : {TRADING_MODE}")
     print(f"  Workers       : {args.workers}")
     print(f"  出力          : {out_path}")
@@ -260,7 +289,7 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(process_symbol, sym, name, strat,
-                          args.backtest_days, test_cutoff): (sym, strat)
+                          args.backtest_days, holdouts): (sym, strat)
                 for sym, name, strat in tasks}
         done = 0
         progress_every = max(len(tasks) // 20, 25)
@@ -282,16 +311,14 @@ def main() -> None:
     all_rows.sort(key=lambda r: (r["signal_date"], r["symbol"], r["strategy"]))
 
     with open(out_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=OUT_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=out_fields)
         writer.writeheader()
         for r in all_rows:
-            writer.writerow({k: r.get(k, "") for k in OUT_FIELDS})
+            writer.writerow({k: r.get(k, "") for k in out_fields})
 
     # ── サマリー ──
     n = len(all_rows)
     n_win = sum(r["y"] for r in all_rows)
-    n_train = sum(1 for r in all_rows if r["split"] == "train")
-    n_test  = n - n_train
     pnl_total = sum(r["pnl"] for r in all_rows)
 
     print(f"\n保存: {out_path.resolve()}  ({n:,} トレード)")
@@ -300,8 +327,20 @@ def main() -> None:
     print(f"  勝ち (y=1)   : {n_win:,}  ({n_win/n*100:.1f}%)")
     print(f"  負け (y=0)   : {n-n_win:,}  ({(n-n_win)/n*100:.1f}%)")
     print(f"  合計損益     : {pnl_total:+,.0f} 円")
-    print(f"  train split  : {n_train:,} 件 ({test_cutoff} より前)")
-    print(f"  test  split  : {n_test:,} 件 (擬似フォワード = 直近 {args.holdout_days} 日)")
+
+    # 期間ごとの train/test 件数 (擬似フォワード)
+    print(f"\n  【期間別 split (擬似フォワード)】")
+    print(f"  {'期間':>6}{'train':>9}{'test':>8}{'test勝率':>10}")
+    print("  " + "-" * 33)
+    n_test = 0
+    for nday in holdouts:
+        col = f"split_{nday}"
+        tr = sum(1 for r in all_rows if r.get(col) == "train")
+        te = sum(1 for r in all_rows if r.get(col) == "test")
+        te_win = sum(r["y"] for r in all_rows if r.get(col) == "test")
+        wr = te_win / te * 100 if te else 0.0
+        print(f"  {nday:>4}日{tr:>9,}{te:>8,}{wr:>9.1f}%")
+        n_test = max(n_test, te)
 
     # regime / カバレッジ
     from collections import Counter
