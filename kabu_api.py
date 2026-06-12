@@ -42,7 +42,11 @@ from typing import Any
 import requests
 
 # ── kabu API 定数 ──────────────────────────────────────────────
-EXCHANGE_TOSHO = 1            # 市場コード: 東証
+EXCHANGE_TOSHO = 1            # 市場コード: 東証 (board/register/positions 等の照会用)
+# 2026/02 最良執行方針対応で、新規発注の Exchange=1(東証) は廃止。
+# 新規注文は 9(SOR) か 27(東証＋) を使う。照会系は従来通り 1 でよい。
+EXCHANGE_SOR = 9             # SOR (スマートオーダールーティング) ← 発注の既定
+EXCHANGE_TOKYO_PLUS = 27     # 東証＋ (Tokyo+)
 
 SIDE_SELL = "1"              # 売
 SIDE_BUY = "2"              # 買
@@ -73,7 +77,8 @@ class KabuClient:
     """kabuステーション REST API クライアント。"""
 
     def __init__(self, prod: bool = False, dry_run: bool = True,
-                 password: str | None = None, timeout: float = 10.0):
+                 password: str | None = None, timeout: float = 10.0,
+                 order_exchange: int = EXCHANGE_SOR):
         """
         Parameters
         ----------
@@ -93,6 +98,7 @@ class KabuClient:
         self.dry_run = dry_run
         self.base_url = PROD_URL if prod else DEMO_URL
         self.timeout = timeout
+        self.order_exchange = order_exchange   # 発注の市場コード (9=SOR / 27=東証＋)
         self._password = password or self._password_from_env(prod)
         self._token: str | None = None
         self._registered: set[tuple[str, int]] = set()  # /board 用 銘柄登録済み
@@ -258,7 +264,7 @@ class KabuClient:
         """発注ボディの共通部分。"""
         body: dict[str, Any] = {
             "Symbol": str(symbol),
-            "Exchange": EXCHANGE_TOSHO,
+            "Exchange": self.order_exchange,   # 9=SOR / 27=東証＋ (1=東証は新規発注で廃止)
             "SecurityType": 1,        # 株式
             "Side": side,
             "CashMargin": cash_margin,

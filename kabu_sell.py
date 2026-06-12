@@ -24,7 +24,8 @@ import argparse
 import sys
 from datetime import datetime, timezone, timedelta
 
-from kabu_api import KabuClient, CASH_GENBUTSU, CASH_MARGIN_CLOSE
+from kabu_api import (KabuClient, CASH_GENBUTSU, CASH_MARGIN_CLOSE,
+                      EXCHANGE_SOR, EXCHANGE_TOKYO_PLUS)
 
 JST = timezone(timedelta(hours=9))
 
@@ -68,6 +69,10 @@ def main() -> int:
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
     ap.add_argument("--execute", action="store_true",
                     help="実際に発注する (未指定なら dry-run)")
+    ap.add_argument("--exchange", type=int, default=EXCHANGE_SOR,
+                    choices=[EXCHANGE_SOR, EXCHANGE_TOKYO_PLUS],
+                    help="発注の市場コード 9=SOR(既定) / 27=東証＋ "
+                         "(1=東証は2026/02で廃止)")
     args = ap.parse_args()
 
     if args.type == "limit" and args.price is None:
@@ -87,10 +92,12 @@ def main() -> int:
     print(f"銘柄: {args.symbol}  {type_label}  {kind}")
     print("=" * 60)
 
-    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    cli = KabuClient(prod=args.prod, dry_run=not args.execute,
+                     order_exchange=args.exchange)
     try:
         cli.connect()
-        print(f"✓ 接続成功 ({cli.env_label})\n")
+        print(f"✓ 接続成功 ({cli.env_label})  発注市場コード={args.exchange}"
+              f"{'(SOR)' if args.exchange == EXCHANGE_SOR else '(東証＋)'}\n")
     except Exception as e:
         print(f"✗ 接続失敗: {e}")
         return 1

@@ -24,7 +24,8 @@ import argparse
 import sys
 from datetime import datetime, timezone, timedelta
 
-from kabu_api import KabuClient, CASH_GENBUTSU, CASH_MARGIN_OPEN
+from kabu_api import (KabuClient, CASH_GENBUTSU, CASH_MARGIN_OPEN,
+                      EXCHANGE_SOR, EXCHANGE_TOKYO_PLUS)
 
 JST = timezone(timedelta(hours=9))
 
@@ -43,6 +44,10 @@ def main() -> int:
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
     ap.add_argument("--execute", action="store_true",
                     help="実際に発注する (未指定なら dry-run)")
+    ap.add_argument("--exchange", type=int, default=EXCHANGE_SOR,
+                    choices=[EXCHANGE_SOR, EXCHANGE_TOKYO_PLUS],
+                    help="発注の市場コード 9=SOR(既定) / 27=東証＋ "
+                         "(1=東証は2026/02で廃止)")
     args = ap.parse_args()
 
     if args.type == "limit" and args.price is None:
@@ -64,10 +69,12 @@ def main() -> int:
         print(f"指値価格: {args.price:,.0f} 円")
     print("=" * 60)
 
-    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    cli = KabuClient(prod=args.prod, dry_run=not args.execute,
+                     order_exchange=args.exchange)
     try:
         cli.connect()
-        print(f"✓ 接続成功 ({cli.env_label})\n")
+        print(f"✓ 接続成功 ({cli.env_label})  発注市場コード={args.exchange}"
+              f"{'(SOR)' if args.exchange == EXCHANGE_SOR else '(東証＋)'}\n")
     except Exception as e:
         print(f"✗ 接続失敗: {e}")
         return 1
@@ -81,13 +88,14 @@ def main() -> int:
         print("⚠ 現在値を取得できませんでした (時間外/銘柄登録待ち等)。続行します。")
     print()
 
-    # 発注
+    # 発注 (SOR 固定。東証＋(27)は手数料がかかるため自動フォールバックしない)
     res = cli.send_buy(args.symbol, qty=args.qty, price=args.price,
                        cash_margin=cash_margin, order_type=args.type)
 
     if res.get("Result") == 0:
         if args.execute:
-            print(f"\n✓ 発注成功 OrderId={res.get('OrderId')}")
+            print(f"\n✓ 発注成功 OrderId={res.get('OrderId')} "
+                  f"(市場コード={cli.order_exchange})")
             print("  注文一覧/建玉は kabuステーション or get_orders()/get_positions() で確認できます。")
         else:
             print("\ndry-run のため実発注していません。--execute で発注します。")
@@ -95,8 +103,8 @@ def main() -> int:
 
     print(f"\n✗ 発注失敗: {res}")
     if res.get("Code") == 100378:
-        print("  → 取引時間外で成行が弾かれています。ザラ場(9:00-11:30/12:30-15:00)に"
-              "再実行するか、--type moo (寄成) を使ってください。")
+        print("  → 市場コード(Exchange)起因の拒否です。SOR(9)で弾かれる場合は"
+              "ザラ場(9:00-11:30/12:30-15:00)に再実行してください。")
     return 1
 
 
