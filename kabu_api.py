@@ -304,6 +304,36 @@ class KabuClient:
         }
         return self._post_order(body, f"逆指値買い {symbol} x{qty} @≥{trigger_price:.0f}")
 
+    def send_buy(self, symbol: int | str, qty: int, price: float | None = None,
+                 cash_margin: int = CASH_MARGIN_OPEN,
+                 order_type: str = "market") -> dict:
+        """普通の買い注文 (逆指値ではない通常エントリー)。
+
+        order_type:
+          "market" = 成行 (ザラ場中のみ。時間外は kabu に弾かれる)
+          "limit"  = 指値 (price 必須。その価格以下で約定)
+          "moo"    = 寄成 (翌寄付きの成行。時間外でも発注できる)
+        cash_margin:
+          CASH_MARGIN_OPEN(2) = 信用新規 (既定) / CASH_GENBUTSU(1) = 現物
+        """
+        body = self._base_order(symbol, SIDE_BUY, qty, cash_margin)
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("order_type='limit' には price が必要です。")
+            body["FrontOrderType"] = FOT_LIMIT
+            body["Price"] = round(price)
+            label = f"指値買い {symbol} x{qty} @{round(price)}"
+        elif order_type == "moo":
+            body["FrontOrderType"] = FOT_MOO
+            body["Price"] = 0
+            label = f"寄成買い {symbol} x{qty}"
+        else:  # market
+            body["FrontOrderType"] = FOT_MARKET
+            body["Price"] = 0
+            label = f"成行買い {symbol} x{qty}"
+        kind = "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物"
+        return self._post_order(body, f"{label} ({kind})")
+
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
                        cash_margin: int = CASH_GENBUTSU) -> dict:
         """損切り逆指値 (trigger_price 以下で成行売り)。ザラ場 intraday 損切り用。"""
