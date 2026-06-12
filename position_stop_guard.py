@@ -133,26 +133,33 @@ def recent_signals(module, symbol_t: str, strategy: str,
 
 
 def match_signal(acq_price: float, signals: list[dict],
-                 tolerance_pct: float) -> dict | None:
-    """取得単価に最も近い order_price のシグナルを返す (許容差内のみ)。
+                 tol_below_pct: float, max_gap_pct: float) -> dict | None:
+    """取得単価に対応するシグナルを **非対称許容差** で探す。
 
-    逆指値買いは order_price 以上で約定するため、取得単価は通常
-    [order_price, limit_entry_price] の帯に入る。許容差 tolerance_pct を
-    両側に見て、最も近いものを採用する。
+    逆指値買いは「order_price 以上」で約定するため、取得単価は基本的に
+    order_price と同じか **上 (ギャップアップ)** になる。下振れは丸め・呼値
+    程度しか起きない。そこで:
+      - 取得単価が order_price より下: tol_below_pct まで許容 (丸め/呼値ノイズ)
+      - 取得単価が order_price より上: max_gap_pct まで許容 (寄りギャップアップ)
+    条件を満たす中で、取得単価に最も近い order_price を採用する。
+
+    返り値には gap_pct (取得が逆指値より何%上か。負なら下) を付ける。
     """
     best = None
-    best_diff = None
+    best_score = None
     for s in signals:
         op = s["order_price"]
         if op <= 0:
             continue
-        diff = abs(acq_price - op) / op * 100.0
-        # 約定帯 [order_price, limit_entry_price] 内なら一致とみなす(差0扱い)
-        in_band = op <= acq_price <= max(op, s["limit_entry_price"])
-        eff_diff = 0.0 if in_band else diff
-        if eff_diff <= tolerance_pct and (best_diff is None or eff_diff < best_diff):
-            best = dict(s, match_diff_pct=round(diff, 2), in_band=in_band)
-            best_diff = eff_diff
+        gap = (acq_price - op) / op * 100.0   # 正=取得が逆指値より上(正常), 負=下
+        if gap < -tol_below_pct:
+            continue                          # 逆指値より下すぎ → stop買いとして不整合
+        if gap > max_gap_pct:
+            continue                          # ギャップが大きすぎ → 別シグナル
+        score = abs(gap)                      # 逆指値に近いほど良い
+        if best_score is None or score < best_score:
+            best = dict(s, gap_pct=round(gap, 2))
+            best_score = score
     return best
 
 
@@ -215,8 +222,15 @@ def main() -> int:
                     help="実際に発注する (未指定なら dry-run 判定のみ)")
     ap.add_argument("--prod", action="store_true",
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
-    ap.add_argument("--tolerance", type=float, default=3.0,
-                    help="取得単価とシグナル逆指値の一致許容差(%%) 既定3.0")
+    ap.add_argument("--tol-below", type=float, default=2.0,
+                    help="取得単価が逆指値より下方向の許容差(%%) 既定2.0 "
+                         "(丸め/呼値ノイズ。逆指値買いは基本下振れしない)")
+    ap.add_argument("--max-gap", type=float, default=8.0,
+                    help="取得単価が逆指値より上方向の許容差(%%) 既定8.0 "
+                         "(寄りギャップアップを許容)")
+    ap.add_argument("--stop-basis", choices=["signal", "entry"], default="signal",
+                    help="損切り価格の基準: signal=シグナル絶対値(既定/BT準拠) / "
+                         "entry=取得単価に損切%%を当てた値(実エントリー基準)")
     ap.add_argument("--lookback", type=int, default=25,
                     help="シグナルを遡って探索する営業日数 既定25 (MAX_HOLD+余裕)")
     ap.add_argument("--product", choices=["all", "cash", "margin"], default="all",
@@ -238,7 +252,9 @@ def main() -> int:
     print("=" * 70)
     print(f"実建玉 close 損切りガード  {now:%Y-%m-%d %H:%M JST}")
     print(f"モード: {mode_label}  /  接続先: {env_label}  /  トレード: {mode}")
-    print(f"一致許容差: {args.tolerance}%  探索: 過去{args.lookback}営業日  "
+    print(f"一致許容: 下{args.tol_below}% / 上{args.max_gap}%  "
+          f"損切基準: {'シグナル絶対値' if args.stop_basis=='signal' else '取得単価基準'}  "
+          f"探索: 過去{args.lookback}営業日  "
           f"決済: {'引け成行' if args.sell_type=='moc' else '成行'}")
     print("=" * 70)
 
@@ -281,11 +297,18 @@ def main() -> int:
                   f"売り判断しません (取得単価={acq:.1f})")
             continue
 
-        matched = match_signal(acq, all_sigs, args.tolerance)
+        matched = match_signal(acq, all_sigs, args.tol_below, args.max_gap)
         if matched is None:
             print(f"  ⚠ {code} {name}: 取得単価={acq:.1f} に一致するシグナルなし "
                   f"(候補 order={[s['order_price'] for s in all_sigs]}) → 売り判断しません")
             continue
+
+        # 損切り価格を2通り算出
+        op = matched["order_price"]
+        sig_stop = matched["stop_price"]                       # シグナル絶対値 (BT準拠)
+        stop_pct = (op - sig_stop) / op if op > 0 else 0.0     # 損切り% (逆指値→stop)
+        entry_stop = round_to_tick(acq * (1 - stop_pct))       # 取得単価基準
+        sp = sig_stop if args.stop_basis == "signal" else entry_stop
 
         # 現在値 (≒引け値) を取得
         price = cli.get_current_price(code)
@@ -293,14 +316,15 @@ def main() -> int:
             print(f"  ? {code} {name}: 現在値取得不可 → スキップ")
             continue
 
-        sp = matched["stop_price"]
         hit = (price >= sp) if pos["is_short"] else (price <= sp)
         side_label = "信用" if pos["is_margin"] else "現物"
         mark = "🔴損切り" if hit else "  保有継続"
-        band = "帯内" if matched["in_band"] else f"差{matched['match_diff_pct']}%"
+        gap = matched["gap_pct"]
+        gap_label = f"gap{'+' if gap >= 0 else ''}{gap}%"
         print(f"  {mark}  {code} {name} [{matched['strategy']}/{side_label}] "
-              f"取得={acq:.1f}↔逆指値={matched['order_price']:.1f}({band}) "
-              f"現在値={price:.1f} 損切り={sp:.1f} "
+              f"取得={acq:.1f}↔逆指値={op:.1f}({gap_label}) "
+              f"現在値={price:.1f} 損切り={sp:.1f}"
+              f"[BT={sig_stop:.1f}/取得基準={entry_stop:.1f}] "
               f"(シグナル{matched['signal_date']})")
         if hit:
             breached.append(dict(pos, name=name, stop_price=sp,
