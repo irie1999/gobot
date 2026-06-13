@@ -117,13 +117,13 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
         strat_lower = s["strategy"].lower().rstrip("_s")
         rows += f"""<tr>
   <td class="sym">{html.escape(s['symbol'])}<br>
-    <small style="color:#555">{html.escape(s['name'])}</small></td>
+    <small>{html.escape(s['name'])}</small></td>
   <td style="text-align:center">
     <span class="tag tag-{strat_lower}">{html.escape(s['strategy'])}</span> {side_badge}</td>
-  <td style="text-align:right;color:#888;font-size:12px">{html.escape(s['signal_date'])}</td>
-  <td style="text-align:right;color:#2563eb;font-weight:bold">{s['order_p']:,.0f}</td>
-  <td style="text-align:right;color:#dc2626">-{stop_pct:.1f}%<br><small>{s['stop_p']:,.0f}</small></td>
-  <td style="text-align:right;color:#16a34a">+{tgt_pct:.1f}%<br><small>{s['target_p']:,.0f}</small></td>
+  <td style="text-align:right;color:#94a3b8;font-size:12px">{html.escape(s['signal_date'])}</td>
+  <td style="text-align:right;color:#38bdf8;font-weight:bold">{s['order_p']:,.0f}</td>
+  <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><small>{s['stop_p']:,.0f}</small></td>
+  <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><small>{s['target_p']:,.0f}</small></td>
   <td style="text-align:right">{s.get('qty',100)}株</td>
   <td>
     <form method="POST" action="/add" style="display:flex;gap:6px;align-items:center">
@@ -166,30 +166,28 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
 <style>
   * {{ box-sizing:border-box; }}
   body {{ font-family:-apple-system,"Hiragino Sans",sans-serif; margin:0;
-         background:#f4f6f9; color:#222; }}
+         background:#0f172a; color:#e2e8f0; }}
   .wrap {{ max-width:980px; margin:0 auto; padding:16px; }}
   h1 {{ font-size:20px; }}
-  .msg {{ background:#e3f5e8; border:1px solid #6ac285; color:#1c7a3c;
+  .msg {{ background:#1e3a2a; border:1px solid #4ade80; color:#4ade80;
           padding:10px 14px; border-radius:8px; margin-bottom:14px; }}
-  .toolbar {{ display:flex; gap:12px; align-items:center; background:#fff;
-              padding:12px 16px; border-radius:10px; margin-bottom:16px;
-              box-shadow:0 1px 4px rgba(0,0,0,.08); }}
-  .toolbar input[type=date] {{ padding:8px; border:1px solid #ccc; border-radius:6px;
-                               font-size:14px; background:#fff; color:#222; }}
+  .toolbar {{ display:flex; gap:12px; align-items:center; background:#1e293b;
+              padding:12px 16px; border-radius:10px; margin-bottom:16px; }}
+  .toolbar input[type=date] {{ padding:8px; border:1px solid #334155; border-radius:6px;
+                               font-size:14px; background:#0f172a; color:#e2e8f0; }}
   .btn {{ border:none; border-radius:6px; padding:9px 16px; font-size:14px;
           cursor:pointer; color:#fff; font-weight:bold; }}
   .btn-primary {{ background:#2d6cdf; }}
   .btn-add {{ background:#16a34a; }}
-  .back {{ color:#2d6cdf; text-decoration:none; font-size:14px; }}
+  .back {{ color:#60a5fa; text-decoration:none; font-size:14px; }}
   .back:hover {{ text-decoration:underline; }}
-  table {{ width:100%; border-collapse:collapse; background:#fff;
-           border-radius:10px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,.08); }}
-  th {{ background:#f0f3f8; color:#555; padding:10px; font-size:12px; text-align:center;
-        border-bottom:1px solid #e2e8f0; }}
-  td {{ padding:8px 10px; border-bottom:1px solid #eee; font-size:13px; vertical-align:middle; }}
-  tr:hover td {{ background:#f7f9fc; }}
+  table {{ width:100%; border-collapse:collapse; background:#1e293b;
+           border-radius:10px; overflow:hidden; }}
+  th {{ background:#0f172a; color:#94a3b8; padding:10px; font-size:12px; text-align:center; }}
+  td {{ padding:8px 10px; border-bottom:1px solid #334155; font-size:13px; vertical-align:middle; }}
+  tr:hover td {{ background:#243045; }}
   .sym {{ min-width:100px; font-weight:600; }}
-  .sym small {{ color:#888; font-weight:normal; }}
+  .sym small {{ color:#94a3b8; font-weight:normal; }}
   .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
   .tag-rsi2  {{ background:#7c3aed; color:#ddd6fe; }}
   .tag-macd  {{ background:#1d4ed8; color:#bfdbfe; }}
@@ -283,45 +281,46 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
 <style>
   * {{ box-sizing: border-box; }}
   body {{ font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0;
-         background: #f4f6f9; color: #222; }}
+         background: #0f172a; color: #e2e8f0; }}
   .wrap {{ max-width: 880px; margin: 0 auto; padding: 16px; }}
   h1 {{ font-size: 20px; }}
   h2 {{ font-size: 16px; margin-top: 28px; border-left: 4px solid #2d6cdf; padding-left: 8px; }}
-  .msg {{ background: #e3f5e8; border: 1px solid #6ac285; color: #1c7a3c;
+  .msg {{ background: #1e3a2a; border: 1px solid #4ade80; color: #4ade80;
           padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; }}
-  .addbox {{ background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 20px;
-             box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+  .addbox {{ background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 20px;
+             box-shadow: 0 1px 4px rgba(0,0,0,.3); }}
   .addbox-prefill {{ border: 2px solid #2d6cdf; }}
-  .addbox label {{ font-size: 12px; color: #666; display: block; margin-bottom: 2px; }}
+  .addbox label {{ font-size: 12px; color: #94a3b8; display: block; margin-bottom: 2px; }}
   .addbox .row {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }}
   .addbox .fld {{ flex: 1; min-width: 90px; }}
-  .addbox input, .addbox select {{ width: 100%; padding: 8px; border: 1px solid #ccc;
-             border-radius: 6px; font-size: 14px; }}
+  .addbox input, .addbox select {{ width: 100%; padding: 8px; border: 1px solid #334155;
+             border-radius: 6px; font-size: 14px; background: #0f172a; color: #e2e8f0; }}
   .btn {{ border: none; border-radius: 6px; padding: 9px 16px; font-size: 14px;
           cursor: pointer; color: #fff; font-weight: bold; }}
   .btn-add {{ background: #2d6cdf; }}
   .btn-tgt {{ background: #29a35a; }}
   .btn-stop {{ background: #d9534f; }}
   .btn-man {{ background: #888; }}
-  .card {{ background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px;
-           box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+  .card {{ background: #1e293b; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px;
+           box-shadow: 0 1px 4px rgba(0,0,0,.3); }}
   .card .head {{ display: flex; justify-content: space-between; align-items: center; }}
   .card .name {{ font-size: 17px; font-weight: bold; }}
-  .card .meta {{ font-size: 12px; color: #777; margin: 4px 0; }}
+  .card .meta {{ font-size: 12px; color: #94a3b8; margin: 4px 0; }}
   .card .prices {{ font-size: 13px; margin: 6px 0; }}
   .card .actions {{ display: flex; gap: 8px; margin-top: 10px; align-items: center; }}
-  .card .actions input {{ width: 90px; padding: 7px; border: 1px solid #ccc; border-radius: 6px; }}
-  .pos {{ color: #1c7a3c; font-weight: bold; }}
-  .neg {{ color: #c1392b; font-weight: bold; }}
+  .card .actions input {{ width: 90px; padding: 7px; border: 1px solid #334155;
+           border-radius: 6px; background: #0f172a; color: #e2e8f0; }}
+  .pos {{ color: #4ade80; font-weight: bold; }}
+  .neg {{ color: #f87171; font-weight: bold; }}
   .big {{ font-size: 18px; }}
   .pill {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
            font-weight: bold; }}
-  .pill-ok {{ background: #e3f5e8; color: #1c7a3c; }}
-  .pill-warn {{ background: #fff3cd; color: #9a6b00; }}
-  .pill-danger {{ background: #fde2e0; color: #c1392b; }}
-  table.closed {{ width: 100%; border-collapse: collapse; font-size: 13px; background:#fff; }}
-  table.closed th, table.closed td {{ padding: 6px 8px; border-bottom: 1px solid #eee; text-align: left; }}
-  .empty {{ color: #999; }}
+  .pill-ok {{ background: #1e3a2a; color: #4ade80; }}
+  .pill-warn {{ background: #3a3320; color: #fbbf24; }}
+  .pill-danger {{ background: #3a2020; color: #f87171; }}
+  table.closed {{ width: 100%; border-collapse: collapse; font-size: 13px; background:#1e293b; }}
+  table.closed th, table.closed td {{ padding: 6px 8px; border-bottom: 1px solid #334155; text-align: left; }}
+  .empty {{ color: #64748b; }}
 </style></head>
 <body><div class="wrap">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
