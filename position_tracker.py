@@ -183,8 +183,8 @@ def cmd_close(args) -> None:
 
     df.at[idx, "status"]       = args.reason or "manual"
     df.at[idx, "exit_date"]    = str(TODAY)
-    df.at[idx, "exit_price"]   = exit_p
-    df.at[idx, "pnl"]          = round(pnl)
+    df.at[idx, "exit_price"]   = str(exit_p)
+    df.at[idx, "pnl"]          = str(round(pnl))
     df.at[idx, "updated_date"] = str(TODAY)
     save(df)
 
