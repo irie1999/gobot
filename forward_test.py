@@ -68,7 +68,7 @@ import check_signals_breakout as _brk
 from backtest_limit_entry import (
     fetch,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
-    ENTRY_EXPIRE, MAX_HOLD, FIXED_QTY, INITIAL_CASH,
+    ENTRY_EXPIRE, MAX_HOLD, default_max_hold, FIXED_QTY, INITIAL_CASH,
 )
 
 JST   = timezone(timedelta(hours=9))
@@ -288,7 +288,7 @@ def evaluate_entry(row: dict) -> dict:
             elif lo <= stop_price:
                 exit_price = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
                 exit_reason = "stop"
-            elif hold_days >= MAX_HOLD:
+            elif hold_days >= default_max_hold(row.get("strategy", "")):
                 exit_price = cl
                 exit_reason = "timeout"
             if exit_reason:

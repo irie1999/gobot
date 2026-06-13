@@ -508,6 +508,28 @@ def default_stop_mode(strategy_name: str, is_short: bool) -> str:
     return "close"
 
 
+# ── 戦略別 最大保有日数 (改善④) ─────────────────────────────────
+# 戦略の性質に応じてタイムカット日数を変える。
+#   RSI2 (売られすぎ反発): 反発は数日で完結 → 短く保有してタイムカット損失を減らす
+#   MOM  (モメンタム継続) : トレンドが伸びる → 長く保有して利を伸ばす
+#   その他               : 現状維持 (MAX_HOLD)
+# 環境変数 MAX_HOLD_OVERRIDE で全戦略一括上書き可 (検証用)。
+_MAX_HOLD_BY_STRATEGY = {
+    "RSI2": 7,
+    "MOM":  20,
+}
+
+
+def default_max_hold(strategy_name: str) -> int:
+    ovr = os.getenv("MAX_HOLD_OVERRIDE")
+    if ovr:
+        try:
+            return int(ovr)
+        except ValueError:
+            pass
+    return _MAX_HOLD_BY_STRATEGY.get((strategy_name or "").upper(), MAX_HOLD)
+
+
 # ── 指値エントリー バックテスト ─────────────────────────────────
 def run_limit_backtest(
     symbol: str,
@@ -522,6 +544,7 @@ def run_limit_backtest(
     entry_type: str = "limit",   # "limit"=指値（下がれば買う） / "stop"=逆指値（上がれば買う） / "stop_sell"=逆指値売り
     entry_risk_adjust: bool = False,  # True=ギャップ約定時に sp/tp を ep ベースに再計算 (R:R 維持)
     stop_mode: str | None = None,  # "intraday"/"close"。None=default_stop_mode で自動決定
+    max_hold: int | None = None,   # 最大保有日数。None=default_max_hold(戦略別)で自動決定
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -559,6 +582,8 @@ def run_limit_backtest(
     is_short = (entry_type == "stop_sell")
     if stop_mode is None:
         stop_mode = default_stop_mode(strategy_name, is_short)
+    if max_hold is None:
+        max_hold = default_max_hold(strategy_name)
 
     # 複数ポジション並行対応: pending / active をリストで管理
     pending_orders:   list[dict] = []   # 発注待ち
@@ -742,7 +767,7 @@ def run_limit_backtest(
                 exit_p_pos = pos["tp"]; exit_reason_pos = "目標達成"
             elif hit_stp:
                 exit_p_pos = pos["sp"]; exit_reason_pos = "損切り"
-            elif hold_days >= MAX_HOLD:
+            elif hold_days >= max_hold:
                 exit_p_pos = cl;        exit_reason_pos = "タイムカット"
 
             if exit_p_pos is None:
