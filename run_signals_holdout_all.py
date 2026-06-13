@@ -73,6 +73,18 @@ TODAY = datetime.now(JST).date()
 # それを開いて即終了する。--force で強制再生成。
 _cache_date    = _args.date or str(TODAY)
 _cache_short   = "_short" if _args.short else ""
+# サイジング/保有日数の設定をキャッシュ名に反映 (設定を変えたら別キャッシュになる)
+# これが無いと VOL_PARITY や MAX_HOLD_OVERRIDE を変えても古い結果を読んでしまう
+def _settings_sig() -> str:
+    parts = []
+    if os.environ.get("VOL_PARITY", "0").lower() in ("1", "true", "yes", "on"):
+        parts.append("vp" + os.environ.get("RISK_PER_TRADE", "20000"))
+    mho = os.environ.get("MAX_HOLD_OVERRIDE")
+    if mho:
+        parts.append("mh" + mho)
+    return ("_" + "_".join(parts)) if parts else ""
+_cache_settings = _settings_sig()
+_cache_short   = _cache_short + _cache_settings
 _cache_symbol  = ""
 if _args.symbol:
     _s = _args.symbol.upper()
@@ -269,7 +281,7 @@ _atexit.register(_save_bt_cache)
 def _make_cached_bt(orig_fn):
     def wrapper(symbol, name, strategy):
         mode = os.environ.get("TRADING_MODE", "conservative")
-        key  = f"{symbol}|{strategy}|{mode}"
+        key  = f"{symbol}|{strategy}|{mode}{_cache_settings}"
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy)
             _bt_cache_dirty["n"] += 1
