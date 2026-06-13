@@ -165,6 +165,10 @@ def main() -> None:
     parser.add_argument("--budget",      type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄のみに絞る。"
                              "--max-price と併用時は --max-price 優先")
+    parser.add_argument("--max-per-sector", type=int, default=0,
+                        help="同一セクターの選定上限 (全戦略横断). 0=制限なし。"
+                             "例: 2 → 金融(銀行)など同セクターは最大2銘柄まで。"
+                             "sector_map.py の証券コード帯分類を使用")
     parser.add_argument("--input-dir",   type=Path, default=Path("walkforward_results"))
     parser.add_argument("--date",        type=str, default=str(TODAY),
                         help="読み込む CSV の日付 (デフォルト本日)")
@@ -222,6 +226,7 @@ def main() -> None:
 
     total_candidates = 0
     total_selected   = 0
+    _sector_count: dict[str, int] = {}   # セクター集中制限用 (全戦略横断カウント)
 
     for strategy in all_strats:
         csv_path = args.input_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}{embargo_suffix}_{args.date}.csv"
@@ -242,7 +247,21 @@ def main() -> None:
             max_avg_hold=args.max_avg_hold,
         )
         filtered.sort(key=composite_score, reverse=True)
-        top = filtered[: args.per_strategy]
+
+        # ── セクター集中制限 (全戦略横断でカウント) ──
+        if args.max_per_sector > 0:
+            from sector_map import get_sector
+            top = []
+            for r in filtered:
+                if len(top) >= args.per_strategy:
+                    break
+                sec = get_sector(r["symbol"])
+                if _sector_count.get(sec, 0) >= args.max_per_sector:
+                    continue  # このセクターは上限到達 → スキップ
+                top.append(r)
+                _sector_count[sec] = _sector_count.get(sec, 0) + 1
+        else:
+            top = filtered[: args.per_strategy]
 
         print(f"\n=== {strategy} ===")
         print(f"  全候補={len(rows)}  フィルター通過={len(filtered)}  選定={len(top)}")
