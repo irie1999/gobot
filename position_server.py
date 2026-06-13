@@ -39,6 +39,14 @@ TODAY = date.today()
 _price_cache: dict[str, float | None] = {}
 
 
+def _last_bday() -> date:
+    """直前の営業日（土日スキップ）"""
+    d = TODAY - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def _f(v) -> float:
     try:
         r = float(v)
@@ -56,6 +64,157 @@ def _get_price(symbol: str) -> float | None:
     if symbol not in _price_cache:
         _price_cache[symbol] = pt.fetch_price(symbol)
     return _price_cache[symbol]
+
+
+# ── シグナルページ ────────────────────────────────────────────────────────────
+
+def _fetch_signals(date_str: str) -> list[dict]:
+    """指定日のシグナルを全WATCHLIST銘柄から並列収集して返す。"""
+    try:
+        import check_signals_stop as _stop
+        import check_signals_breakout as _brk
+    except ImportError:
+        return []
+
+    items: list[tuple] = []
+    for sym, name, strat in _stop.WATCHLIST:
+        items.append((sym, name, strat, _stop.check_signal_on_date))
+    for sym, name, strat in _brk.WATCHLIST:
+        items.append((sym, name, strat, _brk.check_signal_on_date))
+
+    def _check(item):
+        sym, name, strat, fn = item
+        try:
+            sig = fn(sym, strat, target_date=date_str)
+            if not sig or not sig.get("entry_sig"):
+                return None
+            return {
+                "symbol": sym, "name": name, "strategy": strat,
+                "order_p":   sig.get("order_price", 0),
+                "stop_p":    sig.get("stop_price", 0),
+                "target_p":  sig.get("target_price", 0),
+                "signal_date": str(sig.get("signal_date", date_str)),
+                "qty":       sig.get("qty", 100),
+            }
+        except Exception:
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(_check, items))
+    return [r for r in results if r]
+
+
+def render_signals_page(date_str: str = "", message: str = "") -> str:
+    if not date_str:
+        date_str = str(_last_bday())
+
+    signals = _fetch_signals(date_str)
+    msg_html = f"<div class='msg'>{html.escape(message)}</div>" if message else ""
+
+    rows = ""
+    for s in signals:
+        sym_code = s["symbol"].split(".")[0]
+        side     = "short" if str(s["strategy"]).upper().endswith("_S") else "long"
+        side_badge = "🔻" if side == "short" else "🔼"
+        stop_pct = (s["order_p"] - s["stop_p"]) / s["order_p"] * 100 if s["order_p"] else 0
+        tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
+        strat_lower = s["strategy"].lower().rstrip("_s")
+        rows += f"""<tr>
+  <td class="sym">{html.escape(s['symbol'])}<br>
+    <small style="color:#555">{html.escape(s['name'])}</small></td>
+  <td style="text-align:center">
+    <span class="tag tag-{strat_lower}">{html.escape(s['strategy'])}</span> {side_badge}</td>
+  <td style="text-align:right;color:#888;font-size:12px">{html.escape(s['signal_date'])}</td>
+  <td style="text-align:right;color:#2563eb;font-weight:bold">{s['order_p']:,.0f}</td>
+  <td style="text-align:right;color:#dc2626">-{stop_pct:.1f}%<br><small>{s['stop_p']:,.0f}</small></td>
+  <td style="text-align:right;color:#16a34a">+{tgt_pct:.1f}%<br><small>{s['target_p']:,.0f}</small></td>
+  <td style="text-align:right">{s.get('qty',100)}株</td>
+  <td>
+    <form method="POST" action="/add" style="display:flex;gap:6px;align-items:center">
+      <input type="hidden" name="symbol"   value="{html.escape(sym_code)}">
+      <input type="hidden" name="stop"     value="{s['stop_p']:.0f}">
+      <input type="hidden" name="target"   value="{s['target_p']:.0f}">
+      <input type="hidden" name="strategy" value="{html.escape(s['strategy'])}">
+      <input type="hidden" name="qty"      value="{s.get('qty',100)}">
+      <input type="hidden" name="side"     value="{side}">
+      <input type="hidden" name="margin"   value="3">
+      <input type="hidden" name="return_to" value="/signals?date={html.escape(date_str)}">
+      <input name="entry" type="number" step="any" value="{s['order_p']:.0f}"
+             style="width:82px;padding:6px;border:1px solid #ccc;border-radius:4px;font-size:13px"
+             title="実際の約定値に修正してから登録">
+      <button class="btn btn-add" type="submit">📥 登録</button>
+    </form>
+  </td>
+</tr>"""
+
+    if not rows:
+        rows = (f'<tr><td colspan="8" style="text-align:center;color:#999;padding:24px">'
+                f'{html.escape(date_str)} のシグナルなし</td></tr>')
+
+    count_note = f"{len(signals)}件のシグナル" if signals else "シグナルなし"
+
+    return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>シグナル確認 {html.escape(date_str)}</title>
+<style>
+  * {{ box-sizing:border-box; }}
+  body {{ font-family:-apple-system,"Hiragino Sans",sans-serif; margin:0;
+         background:#0f172a; color:#e2e8f0; }}
+  .wrap {{ max-width:980px; margin:0 auto; padding:16px; }}
+  h1 {{ font-size:20px; }}
+  .msg {{ background:#1e3a2a; border:1px solid #4ade80; color:#4ade80;
+          padding:10px 14px; border-radius:8px; margin-bottom:14px; }}
+  .toolbar {{ display:flex; gap:12px; align-items:center; background:#1e293b;
+              padding:12px 16px; border-radius:10px; margin-bottom:16px; }}
+  .toolbar input[type=date] {{ padding:8px; border:1px solid #334155; border-radius:6px;
+                               font-size:14px; background:#0f172a; color:#e2e8f0; }}
+  .btn {{ border:none; border-radius:6px; padding:9px 16px; font-size:14px;
+          cursor:pointer; color:#fff; font-weight:bold; }}
+  .btn-primary {{ background:#2d6cdf; }}
+  .btn-add {{ background:#16a34a; }}
+  .back {{ color:#60a5fa; text-decoration:none; font-size:14px; }}
+  .back:hover {{ text-decoration:underline; }}
+  table {{ width:100%; border-collapse:collapse; background:#1e293b;
+           border-radius:10px; overflow:hidden; }}
+  th {{ background:#0f172a; color:#94a3b8; padding:10px; font-size:12px; text-align:center; }}
+  td {{ padding:8px 10px; border-bottom:1px solid #334155; font-size:13px; vertical-align:middle; }}
+  tr:hover td {{ background:#243045; }}
+  .sym {{ min-width:100px; }}
+  .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
+  .tag-rsi2  {{ background:#7c3aed; color:#ddd6fe; }}
+  .tag-macd  {{ background:#1d4ed8; color:#bfdbfe; }}
+  .tag-a7    {{ background:#065f46; color:#a7f3d0; }}
+  .tag-don   {{ background:#0e7490; color:#cffafe; }}
+  .tag-vol   {{ background:#92400e; color:#fef3c7; }}
+  .tag-mom   {{ background:#4d7c0f; color:#d9f99d; }}
+  .tag-rsi2_s{{ background:#6d28d9; color:#ddd6fe; }}
+  .tag-a7_s  {{ background:#064e3b; color:#a7f3d0; }}
+  .tag-macd_s{{ background:#1e3a8a; color:#bfdbfe; }}
+</style></head>
+<body><div class="wrap">
+  <h1>📋 シグナル確認</h1>
+  {msg_html}
+  <div class="toolbar">
+    <a href="/" class="back">← ポジション管理</a>
+    <form method="GET" action="/signals" style="display:flex;gap:8px;align-items:center">
+      <input type="date" name="date" value="{html.escape(date_str)}">
+      <button class="btn btn-primary" type="submit">確認</button>
+    </form>
+    <span style="color:#64748b;font-size:13px">{count_note}</span>
+  </div>
+  <table>
+    <thead><tr>
+      <th style="text-align:left">銘柄</th><th>戦略</th><th>シグナル日</th>
+      <th>逆指値</th><th>損切り</th><th>目標</th><th>株数</th>
+      <th>約定値 → 登録</th>
+    </tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+  <p style="color:#475569;font-size:11px;margin-top:12px">
+    ※ 約定値欄に実際の約定価格を入力してから「📥 登録」／逆指値ちょうどの場合はそのまま</p>
+</div></body></html>"""
 
 
 # ── HTML 生成 ────────────────────────────────────────────────────────────────
@@ -155,7 +314,12 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
   .empty {{ color: #999; }}
 </style></head>
 <body><div class="wrap">
-  <h1>📊 ポジション管理 <span style="font-size:13px;color:#999">{TODAY}</span></h1>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+    <h1 style="margin:0">📊 ポジション管理 <span style="font-size:13px;color:#999">{TODAY}</span></h1>
+    <a href="/signals" style="display:inline-block;padding:8px 16px;background:#1e293b;
+       color:#60a5fa;border-radius:8px;text-decoration:none;font-size:14px;font-weight:bold;
+       border:1px solid #334155">📋 前日シグナル</a>
+  </div>
   {msg_html}
 
   <div class="addbox{"" if not prefill else " addbox-prefill"}">
@@ -290,19 +454,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _redirect(self, msg: str = ""):
+    def _redirect(self, msg: str = "", to: str = "/"):
         from urllib.parse import quote
+        sep = "&" if "?" in to else "?"
         self.send_response(303)
-        self.send_header("Location", "/?msg=" + quote(msg))
+        self.send_header("Location", to + sep + "msg=" + quote(msg))
         self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        msg = qs.get("msg", [""])[0]
+
+        if parsed.path == "/signals":
+            date_str = qs.get("date", [""])[0]
+            self._send_html(render_signals_page(date_str, msg))
+            return
+
         if parsed.path != "/":
             self._send_html("<h1>404</h1>", 404)
             return
-        qs = parse_qs(parsed.query)
-        msg = qs.get("msg", [""])[0]
+
         prefill: dict = {}
         if qs.get("prefill"):
             for key in ("symbol", "entry", "stop", "target", "strategy", "qty", "side"):
@@ -320,16 +492,17 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/add":
-                msg = self._handle_add(form)
+                msg, return_to = self._handle_add(form)
             elif path == "/close":
-                msg = self._handle_close(form)
+                msg, return_to = self._handle_close(form)
             else:
-                msg = "不明な操作"
+                msg, return_to = "不明な操作", "/"
         except Exception as e:
-            msg = f"エラー: {e}"
-        self._redirect(msg)
+            msg, return_to = f"エラー: {e}", "/"
+        self._redirect(msg, to=return_to)
 
-    def _handle_add(self, form) -> str:
+    def _handle_add(self, form) -> tuple[str, str]:
+        return_to = form.get("return_to", "/")
         df = pt.load()
         symbol = form["symbol"].split(".")[0].strip()
         entry = _f(form.get("entry"))
@@ -343,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
 
         dup = df[(df["symbol"] == symbol) & (df["fill_date"] == fill_date) & (df["status"] == "holding")]
         if not dup.empty:
-            return f"{symbol} は本日分が既に登録済みです"
+            return f"{symbol} は本日分が既に登録済みです", return_to
 
         name = ""
         try:
@@ -364,9 +537,11 @@ class Handler(BaseHTTPRequestHandler):
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         pt.save(df)
         _side_lbl = "ショート" if side == "short" else "ロング"
-        return f"✅ {symbol}({name}) を登録しました（{_side_lbl} / MAX{pt.max_hold(strat)}日）"
+        return (f"✅ {symbol}({name}) を登録しました（{_side_lbl} / MAX{pt.max_hold(strat)}日）",
+                return_to)
 
-    def _handle_close(self, form) -> str:
+    def _handle_close(self, form) -> tuple[str, str]:
+        return_to = form.get("return_to", "/")
         df = pt.load()
         symbol = form["symbol"].split(".")[0].strip()
         fill_date = form.get("fill_date", "")
@@ -374,13 +549,13 @@ class Handler(BaseHTTPRequestHandler):
         reason = form.get("reason", "manual")
 
         if exit_p <= 0:
-            return "決済値を入力してください"
+            return "決済値を入力してください", return_to
 
         mask = (df["symbol"] == symbol) & (df["status"] == "holding")
         if fill_date:
             mask &= (df["fill_date"] == fill_date)
         if mask.sum() == 0:
-            return f"{symbol} の保有が見つかりません"
+            return f"{symbol} の保有が見つかりません", return_to
         idx = df[mask].index[0]
         entry_p = _f(df.at[idx, "fill_price"])
         qty = int(_f(df.at[idx, "qty"]) or 100)
@@ -395,7 +570,8 @@ class Handler(BaseHTTPRequestHandler):
         df.at[idx, "updated_date"] = str(TODAY)
         pt.save(df)
         rmap = {"target": "目標達成", "stop": "損切り", "timeout": "タイムカット", "manual": "手動決済"}
-        return f"✅ {symbol} を決済（{rmap.get(reason, reason)}）損益 {'+' if pnl>=0 else ''}{pnl:,.0f}円"
+        return (f"✅ {symbol} を決済（{rmap.get(reason, reason)}）損益 {'+' if pnl>=0 else ''}{pnl:,.0f}円",
+                return_to)
 
     def log_message(self, *args):
         pass  # ログ抑制
