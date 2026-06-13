@@ -166,27 +166,30 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
 <style>
   * {{ box-sizing:border-box; }}
   body {{ font-family:-apple-system,"Hiragino Sans",sans-serif; margin:0;
-         background:#0f172a; color:#e2e8f0; }}
+         background:#f4f6f9; color:#222; }}
   .wrap {{ max-width:980px; margin:0 auto; padding:16px; }}
   h1 {{ font-size:20px; }}
-  .msg {{ background:#1e3a2a; border:1px solid #4ade80; color:#4ade80;
+  .msg {{ background:#e3f5e8; border:1px solid #6ac285; color:#1c7a3c;
           padding:10px 14px; border-radius:8px; margin-bottom:14px; }}
-  .toolbar {{ display:flex; gap:12px; align-items:center; background:#1e293b;
-              padding:12px 16px; border-radius:10px; margin-bottom:16px; }}
-  .toolbar input[type=date] {{ padding:8px; border:1px solid #334155; border-radius:6px;
-                               font-size:14px; background:#0f172a; color:#e2e8f0; }}
+  .toolbar {{ display:flex; gap:12px; align-items:center; background:#fff;
+              padding:12px 16px; border-radius:10px; margin-bottom:16px;
+              box-shadow:0 1px 4px rgba(0,0,0,.08); }}
+  .toolbar input[type=date] {{ padding:8px; border:1px solid #ccc; border-radius:6px;
+                               font-size:14px; background:#fff; color:#222; }}
   .btn {{ border:none; border-radius:6px; padding:9px 16px; font-size:14px;
           cursor:pointer; color:#fff; font-weight:bold; }}
   .btn-primary {{ background:#2d6cdf; }}
   .btn-add {{ background:#16a34a; }}
-  .back {{ color:#60a5fa; text-decoration:none; font-size:14px; }}
+  .back {{ color:#2d6cdf; text-decoration:none; font-size:14px; }}
   .back:hover {{ text-decoration:underline; }}
-  table {{ width:100%; border-collapse:collapse; background:#1e293b;
-           border-radius:10px; overflow:hidden; }}
-  th {{ background:#0f172a; color:#94a3b8; padding:10px; font-size:12px; text-align:center; }}
-  td {{ padding:8px 10px; border-bottom:1px solid #334155; font-size:13px; vertical-align:middle; }}
-  tr:hover td {{ background:#243045; }}
-  .sym {{ min-width:100px; }}
+  table {{ width:100%; border-collapse:collapse; background:#fff;
+           border-radius:10px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,.08); }}
+  th {{ background:#f0f3f8; color:#555; padding:10px; font-size:12px; text-align:center;
+        border-bottom:1px solid #e2e8f0; }}
+  td {{ padding:8px 10px; border-bottom:1px solid #eee; font-size:13px; vertical-align:middle; }}
+  tr:hover td {{ background:#f7f9fc; }}
+  .sym {{ min-width:100px; font-weight:600; }}
+  .sym small {{ color:#888; font-weight:normal; }}
   .tag {{ display:inline-block; padding:1px 7px; border-radius:99px; font-size:0.75rem; font-weight:600; }}
   .tag-rsi2  {{ background:#7c3aed; color:#ddd6fe; }}
   .tag-macd  {{ background:#1d4ed8; color:#bfdbfe; }}
