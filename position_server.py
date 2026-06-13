@@ -387,6 +387,17 @@ def _render_card(r) -> str:
     hold_d = pt._business_days(fd, TODAY)
     remain = max(0, mh - hold_d)
 
+    # 売却期限 = 約定日 + MAX保有(営業日)。土日をスキップして mh 営業日先を求める。
+    _d = fd
+    _added = 0
+    while _added < mh:
+        _d += timedelta(days=1)
+        if _d.weekday() < 5:
+            _added += 1
+    deadline = _d
+    _wd = "月火水木金土日"[deadline.weekday()]
+    deadline_str = deadline.strftime("%Y-%m-%d") + f"（{_wd}）"
+
     # 残り日数ピル
     if remain == 0:
         rem_pill = "<span class='pill pill-danger'>🔴 タイムカット超過</span>"
@@ -437,6 +448,7 @@ def _render_card(r) -> str:
       </div>
       <div class="meta">戦略 {html.escape(strat or '-')} ／ {margin} {qty}株 ／
         約定 {html.escape(fill_d)} ／ 保有 {hold_d}日 / MAX{mh}日</div>
+      <div class="meta">📅 売却期限 <b style="color:#fbbf24">{deadline_str}</b>（残り{remain}営業日）</div>
       <div class="prices">約定 {fill_p:,.0f}円 ／ 損切 {stop_str} ／ 目標 {tgt_str}</div>
       <div class="prices">{price_line}</div>
       <div class="actions">
