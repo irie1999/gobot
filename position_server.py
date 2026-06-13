@@ -39,14 +39,6 @@ TODAY = date.today()
 _price_cache: dict[str, float | None] = {}
 
 
-def _last_bday() -> date:
-    """直前の営業日（土日スキップ）"""
-    d = TODAY - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
-
-
 def _f(v) -> float:
     try:
         r = float(v)
@@ -68,49 +60,52 @@ def _get_price(symbol: str) -> float | None:
 
 # ── シグナルページ ────────────────────────────────────────────────────────────
 
-def _fetch_signals(date_str: str) -> list[dict]:
-    """指定日のシグナルを全WATCHLIST銘柄から並列収集して返す。"""
-    try:
-        import check_signals_stop as _stop
-        import check_signals_breakout as _brk
-    except ImportError:
-        return []
+import json
 
-    items: list[tuple] = []
-    for sym, name, strat in _stop.WATCHLIST:
-        items.append((sym, name, strat, _stop.check_signal_on_date))
-    for sym, name, strat in _brk.WATCHLIST:
-        items.append((sym, name, strat, _brk.check_signal_on_date))
+SIGNAL_FILES = ["signals_latest.json", "signals_latest_short.json"]
 
-    def _check(item):
-        sym, name, strat, fn = item
+
+def _load_signal_json() -> tuple[list[dict], str]:
+    """run_signals_holdout_all.py が書き出したシグナルJSONを読む。
+    ロング・ショート両方をマージして返す。(signals, generated_at) のタプル。"""
+    merged: list[dict] = []
+    generated = ""
+    for fname in SIGNAL_FILES:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+        if not os.path.exists(p):
+            continue
         try:
-            sig = fn(sym, strat, target_date=date_str)
-            if not sig or not sig.get("entry_sig"):
-                return None
-            return {
-                "symbol": sym, "name": name, "strategy": strat,
-                "order_p":   sig.get("order_price", 0),
-                "stop_p":    sig.get("stop_price", 0),
-                "target_p":  sig.get("target_price", 0),
-                "signal_date": str(sig.get("signal_date", date_str)),
-                "qty":       sig.get("qty", 100),
-            }
+            data = json.loads(open(p, encoding="utf-8").read())
         except Exception:
-            return None
+            continue
+        generated = data.get("generated_at", generated) or generated
+        for s in data.get("signals", []):
+            merged.append(s)
+    return merged, generated
 
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(_check, items))
-    return [r for r in results if r]
+
+def _fetch_signals(date_str: str) -> tuple[list[dict], str]:
+    """シグナルJSONを読み込んで返す。
+    date_str が指定されていれば signal_date で絞り込む。
+    戻り値: (signals, generated_at)"""
+    signals, generated = _load_signal_json()
+    if date_str:
+        signals = [s for s in signals if str(s.get("signal_date", "")).startswith(date_str)]
+    # スコア降順
+    signals.sort(key=lambda s: s.get("score", 0), reverse=True)
+    return signals, generated
 
 
 def render_signals_page(date_str: str = "", message: str = "") -> str:
-    if not date_str:
-        date_str = str(_last_bday())
-
-    signals = _fetch_signals(date_str)
+    # date_str 未指定 = JSONの全シグナルを表示 (絞り込みなし)
+    signals, generated = _fetch_signals(date_str)
     msg_html = f"<div class='msg'>{html.escape(message)}</div>" if message else ""
+
+    # JSONが1つも無い場合は案内を出す
+    json_exists = any(
+        os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), f))
+        for f in SIGNAL_FILES
+    )
 
     rows = ""
     for s in signals:
@@ -149,10 +144,20 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
 </tr>"""
 
     if not rows:
+        if not json_exists:
+            empty = ('シグナルJSONがありません。先に '
+                     '<code style="color:#fbbf24">python run_signals_holdout_all.py --force</code> '
+                     '（ショートは <code style="color:#fbbf24">--short</code>）を実行してください。')
+        elif date_str:
+            empty = f'{html.escape(date_str)} に一致するシグナルなし（日付を空にすると全件表示）'
+        else:
+            empty = 'シグナルなし（最新レポートにエントリーシグナルがありません）'
         rows = (f'<tr><td colspan="8" style="text-align:center;color:#999;padding:24px">'
-                f'{html.escape(date_str)} のシグナルなし</td></tr>')
+                f'{empty}</td></tr>')
 
-    count_note = f"{len(signals)}件のシグナル" if signals else "シグナルなし"
+    gen_note = f"（{html.escape(generated)} 生成）" if generated else ""
+    count_note = (f"{len(signals)}件のシグナル{gen_note}" if signals
+                  else f"シグナルなし{gen_note}")
 
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
@@ -199,9 +204,11 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
   <div class="toolbar">
     <a href="/" class="back">← ポジション管理</a>
     <form method="GET" action="/signals" style="display:flex;gap:8px;align-items:center">
+      <label style="color:#64748b;font-size:12px">日付で絞込</label>
       <input type="date" name="date" value="{html.escape(date_str)}">
-      <button class="btn btn-primary" type="submit">確認</button>
+      <button class="btn btn-primary" type="submit">絞込</button>
     </form>
+    <a href="/signals" class="back" style="font-size:12px">全件</a>
     <span style="color:#64748b;font-size:13px">{count_note}</span>
   </div>
   <table>

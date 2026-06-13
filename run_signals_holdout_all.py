@@ -434,6 +434,40 @@ try:
 except Exception as _e:
     print(f"[WARN] キャッシュ保存失敗: {_e}", flush=True)
 
+# ── シグナルを JSON へエクスポート (position_server の /signals が読む) ─────────
+# ロング → signals_latest.json / ショート → signals_latest_short.json
+# position_server.py からワンクリック登録できるよう、確定シグナルを永続化する。
+try:
+    _sig_export = []
+    for _s in _na._last_signals:
+        try:
+            _qty = _na._calc_qty(_s.get("order_p", 0), _s.get("stop_p", 0)) \
+                   if _s.get("order_p") else 100
+        except Exception:
+            _qty = 100
+        _sig_export.append({
+            "symbol":      _s.get("symbol", ""),
+            "name":        _s.get("name", ""),
+            "strategy":    _s.get("strategy", ""),
+            "order_p":     _s.get("order_p", 0),
+            "stop_p":      _s.get("stop_p", 0),
+            "target_p":    _s.get("target_p", 0),
+            "signal_date": str(_s.get("signal_date", "")),
+            "score":       _s.get("score", 0),
+            "rank":        _s.get("rank", ""),
+            "qty":         _qty,
+        })
+    _sig_out = Path("signals_latest_short.json" if _args.short else "signals_latest.json")
+    _sig_out.write_text(_json.dumps({
+        "generated_at": str(TODAY),
+        "signal_date":  _cache_date,
+        "mode":         "short" if _args.short else "long",
+        "signals":      _sig_export,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} ({len(_sig_export)}件)", flush=True)
+except Exception as _e:
+    print(f"[WARN] シグナルJSON書き出し失敗: {_e}", flush=True)
+
 # ── 損益タブ HTML: 全設定統合 (180日) + 期間別 ───────────────────────────────
 # 全設定統合: _all_configs で直近180日を一括集計 → デフォルト表示
 _na._PNL_CONFIGS[:] = _all_configs
