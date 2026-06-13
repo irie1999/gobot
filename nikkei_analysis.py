@@ -1934,7 +1934,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
-        qty      = _calc_qty(s["order_p"]) if s["order_p"] else 0
+        qty      = _calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0
         pos_val  = round(s["order_p"] * qty)
         if stop_pct > 15:
             atr_badge = "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"

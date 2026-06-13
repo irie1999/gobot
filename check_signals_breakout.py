@@ -279,7 +279,7 @@ def check_signal_on_date(symbol: str, strategy: str,
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
-    qty        = calc_qty(order_p)
+    qty        = calc_qty(order_p, sl)
     position_v = round(order_p * qty)
 
     return dict(

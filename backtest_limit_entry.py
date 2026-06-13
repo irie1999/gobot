@@ -23,6 +23,7 @@
 """
 
 import io
+import os
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -83,9 +84,35 @@ FEE_PCT_ONE_WAY   = 0.001   # 手数料 片道 0.1% → 往復 0.2%
 LIMIT_ENTRY_MARGIN_PCT = 0.03
 
 
-def calc_qty(order_price: float) -> int:
-    """100株固定"""
-    return FIXED_QTY
+# ── ボラ平準化サイジング (env var で切替, 既定は従来の100株固定) ─────
+# VOL_PARITY=1 のとき、stop到達時の損失が RISK_PER_TRADE 円程度になる
+# 単元株数を返す。低ボラ銘柄は株数を増やし、高ボラ銘柄は減らす(下限100株)。
+# 既定(VOL_PARITY未設定)は従来通り FIXED_QTY=100 株固定なので過去CSVと比較可能。
+VOL_PARITY       = os.getenv("VOL_PARITY", "0").lower() in ("1", "true", "yes", "on")
+RISK_PER_TRADE   = float(os.getenv("RISK_PER_TRADE", "20000"))    # 1トレード目標リスク(円)
+MAX_POSITION_YEN = float(os.getenv("MAX_POSITION_YEN", "1000000"))  # 1ポジション投入上限(円)
+
+
+def calc_qty(order_price: float, stop_price: float | None = None) -> int:
+    """株数決定。
+
+    VOL_PARITY 有効かつ stop_price 指定時はボラ平準化:
+      stop 到達時の 1株損失 = |order_price - stop_price| を使い、
+      損失合計が RISK_PER_TRADE 円程度になる単元株数(100株単位)を返す。
+      下限 100株 / 上限 MAX_QTY / 1ポジ投入額 MAX_POSITION_YEN でクリップ。
+    無効時 or stop_price 未指定時は従来の FIXED_QTY (100株固定)。
+    """
+    if not VOL_PARITY or stop_price is None:
+        return FIXED_QTY
+    risk_per_share = abs(order_price - stop_price)
+    if risk_per_share <= 0:
+        return FIXED_QTY
+    qty = int(round((RISK_PER_TRADE / risk_per_share) / TRADE_LOT) * TRADE_LOT)
+    qty = max(TRADE_LOT, min(qty, MAX_QTY))
+    # 予算上限: 1ポジションの投入額が MAX_POSITION_YEN を超えないよう丸める
+    if order_price > 0 and order_price * qty > MAX_POSITION_YEN:
+        qty = max(TRADE_LOT, int(MAX_POSITION_YEN / order_price / TRADE_LOT) * TRADE_LOT)
+    return qty
 
 
 # ── TSE 呼値 (tick size) 丸め ────────────────────────────────────
@@ -577,7 +604,7 @@ def run_limit_backtest(
                     signals += 1
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
-                        "qty": calc_qty(lp),
+                        "qty": calc_qty(lp, sp),
                         "expire_idx":   i + ENTRY_EXPIRE,
                         "signal_idx":   i,
                         "signal_dt":    df.index[i - 1],
@@ -796,7 +823,7 @@ def run_limit_backtest(
                     signals += 1
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
-                        "qty": calc_qty(lp),
+                        "qty": calc_qty(lp, sp),
                         "expire_idx":   len(df) + ENTRY_EXPIRE,
                         "signal_idx":   len(df),
                         "signal_dt":    df.index[-1],
