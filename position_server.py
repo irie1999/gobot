@@ -107,13 +107,14 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
     )
 
     rows = ""
-    for s in signals:
+    for _ri, s in enumerate(signals):
         sym_code = s["symbol"].split(".")[0]
         side     = "short" if str(s["strategy"]).upper().endswith("_S") else "long"
         side_badge = "🔻" if side == "short" else "🔼"
         stop_pct = (s["order_p"] - s["stop_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         strat_lower = s["strategy"].lower().rstrip("_s")
+        qty_val = s.get("qty", 100)
         rows += f"""<tr>
   <td class="sym">{html.escape(s['symbol'])}<br>
     <small>{html.escape(s['name'])}</small></td>
@@ -123,19 +124,23 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
   <td style="text-align:right;color:#38bdf8;font-weight:bold">{s['order_p']:,.0f}</td>
   <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><small>{s['stop_p']:,.0f}</small></td>
   <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><small>{s['target_p']:,.0f}</small></td>
-  <td style="text-align:right">{s.get('qty',100)}株</td>
   <td>
-    <form method="POST" action="/add" style="display:flex;gap:6px;align-items:center">
+    <form method="POST" action="/add" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
       <input type="hidden" name="symbol"   value="{html.escape(sym_code)}">
       <input type="hidden" name="stop"     value="{s['stop_p']:.0f}">
       <input type="hidden" name="target"   value="{s['target_p']:.0f}">
       <input type="hidden" name="strategy" value="{html.escape(s['strategy'])}">
-      <input type="hidden" name="qty"      value="{s.get('qty',100)}">
+      <input type="hidden" name="qty"      id="qty_{_ri}" value="{qty_val}">
       <input type="hidden" name="side"     value="{side}">
       <input type="hidden" name="margin"   value="3">
       <input type="hidden" name="return_to" value="/signals?date={html.escape(date_str)}">
+      <div class="qty-ctrl">
+        <button type="button" class="qty-btn" onclick="adjQty({_ri},-100)">－</button>
+        <span id="qty_d_{_ri}" class="qty-disp">{qty_val}株</span>
+        <button type="button" class="qty-btn" onclick="adjQty({_ri},+100)">＋</button>
+      </div>
       <input name="entry" type="number" step="any" value="{s['order_p']:.0f}"
-             style="width:82px;padding:6px;border:1px solid #ccc;border-radius:4px;font-size:13px"
+             style="width:82px;padding:6px;border:1px solid #334155;border-radius:4px;font-size:13px;background:#0f172a;color:#e2e8f0"
              title="実際の約定値に修正してから登録">
       <button class="btn btn-add" type="submit">📥 登録</button>
     </form>
@@ -151,7 +156,7 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
             empty = f'{html.escape(date_str)} に一致するシグナルなし（日付を空にすると全件表示）'
         else:
             empty = 'シグナルなし（最新レポートにエントリーシグナルがありません）'
-        rows = (f'<tr><td colspan="8" style="text-align:center;color:#999;padding:24px">'
+        rows = (f'<tr><td colspan="7" style="text-align:center;color:#999;padding:24px">'
                 f'{empty}</td></tr>')
 
     gen_note = f"（{html.escape(generated)} 生成）" if generated else ""
@@ -197,7 +202,22 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
   .tag-rsi2_s{{ background:#6d28d9; color:#ddd6fe; }}
   .tag-a7_s  {{ background:#064e3b; color:#a7f3d0; }}
   .tag-macd_s{{ background:#1e3a8a; color:#bfdbfe; }}
-</style></head>
+  .qty-ctrl {{ display:flex; align-items:center; gap:2px; background:#0f172a;
+               border:1px solid #334155; border-radius:6px; padding:2px 4px; }}
+  .qty-btn {{ background:#334155; border:none; color:#e2e8f0; border-radius:4px;
+              width:24px; height:24px; cursor:pointer; font-size:15px; line-height:1;
+              display:flex; align-items:center; justify-content:center; }}
+  .qty-btn:hover {{ background:#475569; }}
+  .qty-disp {{ min-width:42px; text-align:center; font-size:13px; color:#e2e8f0; }}
+</style>
+<script>
+function adjQty(ri, delta) {{
+  var inp = document.getElementById('qty_' + ri);
+  var v = Math.max(100, parseInt(inp.value || '100') + delta);
+  inp.value = v;
+  document.getElementById('qty_d_' + ri).textContent = v + '株';
+}}
+</script></head>
 <body><div class="wrap">
   <h1>📋 シグナル確認</h1>
   {msg_html}
@@ -214,8 +234,8 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
   <table>
     <thead><tr>
       <th style="text-align:left">銘柄</th><th>戦略</th><th>シグナル日</th>
-      <th>逆指値</th><th>損切り</th><th>目標</th><th>株数</th>
-      <th>約定値 → 登録</th>
+      <th>逆指値</th><th>損切り</th><th>目標</th>
+      <th>株数 ／ 約定値 → 登録</th>
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
