@@ -55,14 +55,21 @@ FOLDS = [
 ]
 
 # 合格条件 (デフォルト: 標準モード)
-PASS_TRAIN = dict(trades=5, pf=1.1, win_rate=45, pnl=0)
-PASS_TEST  = dict(trades=3, pf=1.0, win_rate=40, pnl=0)
+# 勝率は緩く (30%+) - トレンドフォロー戦略は勝率低くてもPFが高ければOK
+# 重視するのは PF と損益
+PASS_TRAIN = dict(trades=5, pf=1.2, win_rate=30, pnl=0)
+PASS_TEST  = dict(trades=3, pf=1.0, win_rate=25, pnl=0)
 MIN_FOLDS  = 2  # 3 fold中 2 fold以上で合格
 
-# 緩和モード (--lenient): 5分足は取引機会少ない銘柄もあるため
-PASS_TRAIN_LENIENT = dict(trades=3, pf=1.0, win_rate=40, pnl=0)
-PASS_TEST_LENIENT  = dict(trades=2, pf=0.9, win_rate=35, pnl=0)
+# 緩和モード (--lenient): さらに緩い
+PASS_TRAIN_LENIENT = dict(trades=3, pf=1.0, win_rate=20, pnl=0)
+PASS_TEST_LENIENT  = dict(trades=2, pf=0.9, win_rate=20, pnl=0)
 MIN_FOLDS_LENIENT  = 1  # 1 fold以上で合格
+
+# 厳格モード (--strict): カーブフィット排除重視
+PASS_TRAIN_STRICT = dict(trades=10, pf=1.5, win_rate=35, pnl=0)
+PASS_TEST_STRICT  = dict(trades=5,  pf=1.2, win_rate=30, pnl=0)
+MIN_FOLDS_STRICT  = 3  # 3 fold全部
 
 
 def slice_trades(trades, start_days_ago, end_days_ago, today):
@@ -166,18 +173,29 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--lenient", action="store_true",
-                        help="緩和モード: 取引3+/PF1.0+, 1 fold合格でOK")
+                        help="緩和モード: PF1.0+, 1 fold合格でOK")
+    parser.add_argument("--strict", action="store_true",
+                        help="厳格モード: PF1.5+, 3 fold全部合格")
     parser.add_argument("--diagnostic", action="store_true",
-                        help="診断: 全銘柄の trade数/PF を表示 (合格判定なし)")
+                        help="診断: 全銘柄の trade数/PF を表示")
     args = parser.parse_args()
 
-    # 緩和モード
+    # モード設定
     global PASS_TRAIN, PASS_TEST, MIN_FOLDS
     if args.lenient:
         PASS_TRAIN = PASS_TRAIN_LENIENT
         PASS_TEST = PASS_TEST_LENIENT
         MIN_FOLDS = MIN_FOLDS_LENIENT
         print("[INFO] 緩和モード: TRAIN PF>=1.0, TEST PF>=0.9, 1 fold合格")
+    elif args.strict:
+        PASS_TRAIN = PASS_TRAIN_STRICT
+        PASS_TEST = PASS_TEST_STRICT
+        MIN_FOLDS = MIN_FOLDS_STRICT
+        print("[INFO] 厳格モード: TRAIN PF>=1.5, TEST PF>=1.2, 3 fold全合格")
+    else:
+        print(f"[INFO] 標準モード: TRAIN PF>={PASS_TRAIN['pf']} 勝率>={PASS_TRAIN['win_rate']}%, "
+              f"TEST PF>={PASS_TEST['pf']} 勝率>={PASS_TEST['win_rate']}%, "
+              f"{MIN_FOLDS}/3 fold合格")
 
     # ユニバース
     if args.universe == "prime":
