@@ -1958,6 +1958,21 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         earn_html = _red_fn(s["symbol"], target_date)
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
+        # 📥 登録ボタン: position_server (8765) のフォームを自動入力
+        _side   = "short" if str(s["strategy"]).upper().endswith("_S") else "long"
+        _scode  = str(s["symbol"]).split(".")[0]
+        _reg_url = (f"http://127.0.0.1:8765/?prefill=1"
+                    f"&symbol={_scode}"
+                    f"&entry={s['order_p']:.0f}"
+                    f"&stop={s['stop_p']:.0f}"
+                    f"&target={s['target_p']:.0f}"
+                    f"&strategy={s['strategy']}"
+                    f"&qty={qty}"
+                    f"&side={_side}")
+        _reg_btn = (f'<a href="{_reg_url}" target="_blank" '
+                    f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
+                    f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
+                    f'white-space:nowrap">📥 登録</a>')
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -1973,6 +1988,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span></td>
   <td style="text-align:center;color:#94a3b8">{s.get("max_hold","—")}日</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
+  <td style="text-align:center">{_reg_btn}</td>
 </tr>"""
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
@@ -1995,7 +2011,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th style="color:#f59e0b">指値上限<br>(+3%)</th>
     <th>損切り(-)</th><th>目標(+)</th>
     <th>株数<br><small>想定額</small></th>
-    <th>最大保有</th><th>最大決済日</th>
+    <th>最大保有</th><th>最大決済日</th><th>登録</th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>

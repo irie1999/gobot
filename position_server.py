@@ -172,6 +172,11 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
             {"".join(f'<option {"selected" if prefill.get("strategy","").upper()==s else ""}>{s}</option>' for s in ["MACD","A7","RSI2","DON","VOL","MOM"])}
           </select></div>
         <div class="fld"><label>株数</label><input name="qty" type="number" value="{html.escape(prefill.get('qty','100'))}"></div>
+        <div class="fld"><label>方向</label>
+          <select name="side">
+            <option value="long"{" selected" if prefill.get("side","long")!="short" else ""}>ロング</option>
+            <option value="short"{" selected" if prefill.get("side")=="short" else ""}>ショート</option>
+          </select></div>
         <div class="fld"><label>区分</label>
           <select name="margin"><option value="3">信用</option><option value="1">現物</option></select></div>
         <div><button class="btn btn-add" type="submit">＋ 登録</button></div>
@@ -198,6 +203,9 @@ def _render_card(r) -> str:
     tgt_p = _f(r["target_price"])
     qty = int(_f(r["qty"]) or 100)
     margin = "信用" if _clean(r.get("cash_margin", "1")) == "3" else "現物"
+    side = _clean(r.get("side", "long")) or "long"
+    side_badge = ("<span class='pill pill-danger'>🔻 ショート</span>" if side == "short"
+                  else "<span class='pill pill-ok'>🔼 ロング</span>")
     mh = pt.max_hold(strat)
 
     try:
@@ -217,21 +225,27 @@ def _render_card(r) -> str:
 
     cur_p = _get_price(symbol)
     if cur_p:
-        unreal = (cur_p - fill_p) * qty
-        unreal_pct = (cur_p / fill_p - 1) * 100 if fill_p else 0
+        # ショートは下がると利益
+        if side == "short":
+            unreal = (fill_p - cur_p) * qty
+            unreal_pct = (1 - cur_p / fill_p) * 100 if fill_p else 0
+        else:
+            unreal = (cur_p - fill_p) * qty
+            unreal_pct = (cur_p / fill_p - 1) * 100 if fill_p else 0
         cls = "pos" if unreal >= 0 else "neg"
         price_line = (f"現在値 <b>{cur_p:,.0f}円</b> "
                       f"<span class='{cls}'>含み {'+' if unreal>=0 else ''}{unreal:,.0f}円 "
                       f"({'+' if unreal_pct>=0 else ''}{unreal_pct:.1f}%)</span>")
         alert = ""
         if stop_p:
-            to_stop = (cur_p / stop_p - 1) * 100
+            # ショートは損切りが現在値より上、ロングは下
+            to_stop = (stop_p / cur_p - 1) * 100 if side == "short" else (cur_p / stop_p - 1) * 100
             if to_stop < 2:
                 alert += " <span class='pill pill-danger'>🔴 損切り近接</span>"
             elif to_stop < 5:
                 alert += f" <span class='pill pill-warn'>損切りまで{to_stop:.1f}%</span>"
         if tgt_p:
-            to_tgt = (tgt_p / cur_p - 1) * 100
+            to_tgt = (cur_p / tgt_p - 1) * 100 if side == "short" else (tgt_p / cur_p - 1) * 100
             if to_tgt < 3:
                 alert += " <span class='pill pill-ok'>🎯 目標間近</span>"
         price_line += alert
@@ -247,7 +261,7 @@ def _render_card(r) -> str:
     <div class="card">
       <div class="head">
         <span class="name">[{html.escape(symbol)}] {html.escape(name)}</span>
-        {rem_pill}
+        <span>{side_badge} {rem_pill}</span>
       </div>
       <div class="meta">戦略 {html.escape(strat or '-')} ／ {margin} {qty}株 ／
         約定 {html.escape(fill_d)} ／ 保有 {hold_d}日 / MAX{mh}日</div>
@@ -291,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         msg = qs.get("msg", [""])[0]
         prefill: dict = {}
         if qs.get("prefill"):
-            for key in ("symbol", "entry", "stop", "target", "strategy", "qty"):
+            for key in ("symbol", "entry", "stop", "target", "strategy", "qty", "side"):
                 v = qs.get(key, [""])[0]
                 if v:
                     prefill[key] = v
@@ -324,6 +338,7 @@ class Handler(BaseHTTPRequestHandler):
         strat = (form.get("strategy") or "").upper()
         qty = int(_f(form.get("qty")) or 100)
         margin = form.get("margin", "3")
+        side = "short" if (form.get("side", "long") == "short") else "long"
         fill_date = str(TODAY)
 
         dup = df[(df["symbol"] == symbol) & (df["fill_date"] == fill_date) & (df["status"] == "holding")]
@@ -343,12 +358,13 @@ class Handler(BaseHTTPRequestHandler):
             "strategy": strat, "family": "stop", "signal_date": fill_date,
             "signal_price": entry, "order_price": entry, "stop_price": stop,
             "target_price": target, "status": "holding", "fill_date": fill_date,
-            "fill_price": entry, "updated_date": str(TODAY), "side": "long",
+            "fill_price": entry, "updated_date": str(TODAY), "side": side,
             "qty": qty, "cash_margin": margin,
         })
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         pt.save(df)
-        return f"✅ {symbol}({name}) を登録しました（MAX{pt.max_hold(strat)}日）"
+        _side_lbl = "ショート" if side == "short" else "ロング"
+        return f"✅ {symbol}({name}) を登録しました（{_side_lbl} / MAX{pt.max_hold(strat)}日）"
 
     def _handle_close(self, form) -> str:
         df = pt.load()
@@ -368,7 +384,9 @@ class Handler(BaseHTTPRequestHandler):
         idx = df[mask].index[0]
         entry_p = _f(df.at[idx, "fill_price"])
         qty = int(_f(df.at[idx, "qty"]) or 100)
-        pnl = (exit_p - entry_p) * qty
+        side = _clean(df.at[idx, "side"]) or "long"
+        # ショートは (約定値 - 決済値)、ロングは (決済値 - 約定値)
+        pnl = (entry_p - exit_p) * qty if side == "short" else (exit_p - entry_p) * qty
 
         df.at[idx, "status"] = reason
         df.at[idx, "exit_date"] = str(TODAY)
