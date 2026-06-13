@@ -512,6 +512,79 @@ def main():
                 mode_lines.append("")
             mode_summary_path.write_text("\n".join(mode_lines), encoding="utf-8")
             print(f"  📄 {mname}サマリー: {mode_summary_path.name}")
+
+        # 超コンパクト版 (チャット貼付け用、各モード1ファイル)
+        for mname in ["standard", "lenient", "strict"]:
+            compact_path = out_dir / f"compact_{mname}_{today}.txt"
+            compact_lines = [
+                f"=== {mname.upper()} ({today}) ===",
+                "",
+            ]
+            total_count = 0
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                total_count += len(rs)
+            compact_lines.append(f"合計合格: {total_count}件")
+            compact_lines.append("")
+            # 戦略別 1行サマリ
+            compact_lines.append("【戦略別合格数】")
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                if rs:
+                    rs.sort(key=lambda x: -x["total_pnl"])
+                    pf_v = rs[0].get("total_pf", 0)
+                    pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    compact_lines.append(
+                        f"  {strat:7}: {len(rs):>3}件 "
+                        f"Top: {rs[0].get('name','')[:14]} PF{pf} "
+                        f"{rs[0].get('total_pnl',0):+,.0f}円"
+                    )
+                else:
+                    compact_lines.append(f"  {strat:7}:   0件")
+            compact_lines.append("")
+            # 戦略別 Top 5 (1行ずつ)
+            compact_lines.append("【戦略別 Top 5】")
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                if not rs:
+                    continue
+                compact_lines.append(f"  [{strat}]")
+                for i, r in enumerate(rs[:5], 1):
+                    pf_v = r.get("total_pf", 0)
+                    pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    compact_lines.append(
+                        f"    {i}. {r.get('name','')[:18]:<18} "
+                        f"({r.get('symbol','')}) "
+                        f"PF{pf:<5} 勝{r.get('total_win_rate',0):>3.0f}% "
+                        f"{r.get('total_pnl',0):>+12,.0f}円 "
+                        f"{r.get('pass_folds',0)}/3"
+                    )
+            compact_path.write_text("\n".join(compact_lines), encoding="utf-8")
+            print(f"  📋 コンパクト: {compact_path.name}")
+
+        # 比較表 (3モードを1ファイルで)
+        compare_path = out_dir / f"compare_modes_{today}.txt"
+        compare_lines = [
+            f"=== 3モード比較 ({today}) ===",
+            "",
+            f"{'戦略':>7}  {'standard':>10} {'lenient':>10} {'strict':>10}",
+            "  " + "-" * 50,
+        ]
+        for strat in strategies:
+            ns_s = len(all_modes_results.get("standard", {}).get(strat, []))
+            ns_l = len(all_modes_results.get("lenient", {}).get(strat, []))
+            ns_st = len(all_modes_results.get("strict", {}).get(strat, []))
+            compare_lines.append(
+                f"  {strat:>7}: {ns_s:>10} {ns_l:>10} {ns_st:>10}"
+            )
+        ts = sum(len(all_modes_results.get("standard", {}).get(s, [])) for s in strategies)
+        tl = sum(len(all_modes_results.get("lenient", {}).get(s, [])) for s in strategies)
+        tst = sum(len(all_modes_results.get("strict", {}).get(s, [])) for s in strategies)
+        compare_lines.append("  " + "-" * 50)
+        compare_lines.append(f"  {'合計':>7}: {ts:>10} {tl:>10} {tst:>10}")
+        compare_path.write_text("\n".join(compare_lines), encoding="utf-8")
+        print(f"  📊 比較: {compare_path.name}")
+        print(f"\n  💬 チャット貼付け用: compact_*.txt または compare_modes_*.txt")
         return  # 早期return (個別strat の詳細は既に書出し済み)
 
     for strat in strategies:
