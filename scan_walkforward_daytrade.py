@@ -248,6 +248,27 @@ def main():
     out_dir = Path("walkforward_daytrade_results")
     out_dir.mkdir(exist_ok=True)
 
+    # サマリーログ (全戦略集約)
+    summary_path = out_dir / f"summary_{mode_label}_{today}.md"
+    summary_lines = [
+        f"# scan_walkforward_daytrade サマリー",
+        f"",
+        f"- **モード**: {mode_label}",
+        f"- **生成日**: {today}",
+        f"- **対象**: {len(targets)}銘柄",
+        f"- **戦略**: {', '.join(strategies)}",
+        f"- **TRAIN条件**: trades≥{PASS_TRAIN['trades']}, PF≥{PASS_TRAIN['pf']}, 勝率≥{PASS_TRAIN['win_rate']}%",
+        f"- **TEST条件**: trades≥{PASS_TEST['trades']}, PF≥{PASS_TEST['pf']}, 勝率≥{PASS_TEST['win_rate']}%",
+        f"- **合格基準**: {MIN_FOLDS}/3 fold合格",
+        f"",
+        f"## 戦略別 合格数",
+        f"",
+        f"| 戦略 | 合格数 | Top損益 | Top PF |",
+        f"|---|---|---|---|",
+    ]
+
+    strategy_results = {}  # 各戦略の結果保存
+
     for strat in strategies:
         print(f"\n[戦略 {strat}] スキャン開始 ({len(targets)}銘柄)", flush=True)
         strat_fn = ALL_STRATEGIES[strat]
@@ -270,6 +291,8 @@ def main():
                 if i % 100 == 0 or i == len(targets):
                     print(f"  {i}/{len(targets)} ({_time.time()-t0:.1f}s, "
                           f"合格:{len(results)})", flush=True)
+
+        strategy_results[strat] = results
 
         # CSV出力
         if results:
@@ -297,6 +320,64 @@ def main():
                       f"{r['pass_folds']}/3")
         else:
             print(f"\n  ✗ {strat}: 合格銘柄なし")
+
+    # サマリーログ書出し
+    grand_total = 0
+    for strat in strategies:
+        rs = strategy_results.get(strat, [])
+        grand_total += len(rs)
+        if rs:
+            top_pnl = rs[0]["total_pnl"]
+            top_pf_v = rs[0]["total_pf"]
+            top_pf = "∞" if top_pf_v == float("inf") else f"{top_pf_v:.2f}"
+            summary_lines.append(f"| {strat} | {len(rs)} | {top_pnl:+,.0f}円 | {top_pf} |")
+        else:
+            summary_lines.append(f"| {strat} | **0** | — | — |")
+
+    summary_lines.extend([
+        f"",
+        f"**合計合格パターン数: {grand_total}**",
+        f"",
+        f"---",
+        f"",
+        f"## 戦略別 Top 10 詳細",
+        f"",
+    ])
+
+    for strat in strategies:
+        rs = strategy_results.get(strat, [])
+        summary_lines.append(f"### {strat} ({len(rs)}銘柄合格)")
+        summary_lines.append("")
+        if not rs:
+            summary_lines.append("(合格銘柄なし)")
+            summary_lines.append("")
+            continue
+        summary_lines.append("| # | 銘柄 | コード | 価格 | 取引 | 勝率 | PF | 損益 | DD | Sharpe | fold |")
+        summary_lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate(rs[:10], 1):
+            name = r.get("name", "")[:18]
+            sym = r.get("symbol", "")
+            price = r.get("latest_price", 0)
+            n = r.get("total_trades", 0)
+            wr = r.get("total_win_rate", 0)
+            pf_v = r.get("total_pf", 0)
+            pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+            pnl = r.get("total_pnl", 0)
+            dd = r.get("total_dd", 0)
+            sharpe = r.get("sharpe", 0)
+            folds = r.get("pass_folds", 0)
+            summary_lines.append(
+                f"| {i} | {name} | {sym} | {price:,.0f} | {n} | {wr:.0f}% | "
+                f"{pf} | {pnl:+,.0f} | {dd:+.1f}% | {sharpe:.2f} | {folds}/3 |"
+            )
+        summary_lines.append("")
+
+    summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+    print(f"\n{'='*70}")
+    print(f"  ✅ 完了: 合計 {grand_total} 銘柄 (合格パターン)")
+    print(f"  📄 サマリー: {summary_path}")
+    print(f"  📁 CSV: {out_dir}/")
+    print(f"{'='*70}")
 
 
 if __name__ == "__main__":
