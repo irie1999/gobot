@@ -69,21 +69,29 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
 
     trades = []
     state = "idle"
+    side = "long"   # "long" or "short"
     entry_p = stop_p = target_p = 0.0
     entry_dt = None
     qty = 0
 
     def _finish(exit_p, exit_dt, reason):
-        # スリッページ・手数料反映
-        gross = (exit_p - entry_p) * qty
+        # スリッページ・手数料反映 (Long: 買→売, Short: 売→買戻し)
+        if side == "long":
+            gross = (exit_p - entry_p) * qty
+        else:
+            gross = (entry_p - exit_p) * qty
         fees = _apply_fee(entry_p * qty) + _apply_fee(exit_p * qty)
         pnl = gross - fees
-        pct = (exit_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
+        pct = abs((exit_p - entry_p) / entry_p * 100) if entry_p > 0 else 0
+        if side == "short" and exit_p > entry_p:
+            pct = -pct
+        elif side == "long" and exit_p < entry_p:
+            pct = -pct
         trades.append(dict(
             entry_dt=entry_dt, exit_dt=exit_dt,
             entry_p=entry_p, exit_p=exit_p,
             stop_p=stop_p, target_p=target_p,
-            qty=qty, pnl=pnl, pct=pct,
+            qty=qty, pnl=pnl, pct=pct, side=side,
             strategy=strategy_params.get("name", "?"), reason=reason,
         ))
 
@@ -95,17 +103,30 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             if t >= FORCE_CLOSE:
                 _finish(closes[i], times[i], "引け強制")
                 break
-            # 目標達成優先
-            if highs[i] >= target_p:
-                _finish(target_p, times[i], "目標達成")
-                state = "idle"
-                i += 1
-                continue
-            if lows[i] <= stop_p:
-                _finish(stop_p, times[i], "損切り")
-                state = "idle"
-                i += 1
-                continue
+            if side == "long":
+                # 目標 (上) 達成優先
+                if highs[i] >= target_p:
+                    _finish(target_p, times[i], "目標達成")
+                    state = "idle"
+                    i += 1
+                    continue
+                if lows[i] <= stop_p:
+                    _finish(stop_p, times[i], "損切り")
+                    state = "idle"
+                    i += 1
+                    continue
+            else:  # short
+                # 目標 (下) 達成優先
+                if lows[i] <= target_p:
+                    _finish(target_p, times[i], "目標達成")
+                    state = "idle"
+                    i += 1
+                    continue
+                if highs[i] >= stop_p:
+                    _finish(stop_p, times[i], "損切り")
+                    state = "idle"
+                    i += 1
+                    continue
             i += 1
             continue
 
@@ -126,27 +147,44 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             i += 1
             continue
 
-        _, atr_val, em, sm, tm = sig
+        action, atr_val, em, sm, tm = sig
         if i + 1 >= n:
             break
 
-        # 翌バー寄付で entry (em>0 なら ATR×em 上を逆指値)
+        # 翌バー寄付で entry
         next_open = opens[i + 1]
-        order_p = next_open + atr_val * em
-        # 翌バーの高値が order_p に到達したら約定
-        if highs[i + 1] < order_p:
-            # 未約定 → 次バーに進む
+
+        if action == "entry":
+            # 買い (long): order_p = next_open + ATR*em (em=0で寄付)
+            order_p = next_open + atr_val * em
+            if highs[i + 1] < order_p:
+                i += 1
+                continue
+            entry_p_raw = max(order_p, opens[i + 1])
+            entry_p = _apply_slippage_buy(entry_p_raw)
+            stop_p = entry_p - atr_val * sm
+            target_p = entry_p + atr_val * tm
+            side = "long"
+        elif action == "entry_short":
+            # 空売り (short): order_p = next_open - ATR*em
+            order_p = next_open - atr_val * em
+            if lows[i + 1] > order_p:
+                i += 1
+                continue
+            entry_p_raw = min(order_p, opens[i + 1])
+            # 空売り側のスリッページ (約定価格が不利に下がる)
+            entry_p = entry_p_raw * (1 - SLIPPAGE_STOP_PCT)
+            stop_p = entry_p + atr_val * sm
+            target_p = entry_p - atr_val * tm
+            side = "short"
+        else:
             i += 1
             continue
 
-        # 約定 (スリッページ含む実約定価格)
-        entry_p_raw = max(order_p, opens[i + 1])
-        entry_p = _apply_slippage_buy(entry_p_raw)
         entry_dt = times[i + 1]
-        stop_p = entry_p - atr_val * sm
-        target_p = entry_p + atr_val * tm
 
-        # 株数計算
+        # 株数計算 (long/short どちらも同様)
+        risk_per_share = abs(entry_p - stop_p)
         qty = calc_position_size(entry_p, stop_p, budget, max_risk)
         if qty <= 0:
             i += 1

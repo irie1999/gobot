@@ -40,6 +40,10 @@ import pandas as pd
 from daytrade_data import load_intraday_batch
 from daytrade_engine_5m import backtest_symbol_5m, calc_stats
 from daytrade_strategies_5m import STRATEGIES
+from daytrade_strategies_5m_short import STRATEGIES_SHORT
+
+# 統合戦略マップ
+ALL_STRATEGIES = {**STRATEGIES, **STRATEGIES_SHORT}
 
 JST = timezone(timedelta(hours=9))
 
@@ -145,7 +149,8 @@ def scan_one(sym, name, df, strategy_name, strategy_fn, today, budget, max_risk)
 def main():
     parser = argparse.ArgumentParser(description="デイトレ多戦略WFスキャナ")
     parser.add_argument("--strategy", default="all",
-                        choices=["all", "DON", "MACD", "RSI2", "A7", "VOL", "MOM"])
+                        help="all/long/short/個別戦略名 (DON/MACD/RSI2/A7/VOL/MOM"
+                             "/DON_S/MACD_S/RSI2_S/A7_S/VOL_S/MOM_S)")
     parser.add_argument("--universe", default="prime",
                         choices=["prime", "winners"])
     parser.add_argument("--days", type=int, default=730)
@@ -169,7 +174,14 @@ def main():
         targets = targets[:args.limit]
 
     today = datetime.now(JST).date()
-    strategies = list(STRATEGIES.keys()) if args.strategy == "all" else [args.strategy]
+    if args.strategy == "all":
+        strategies = list(ALL_STRATEGIES.keys())
+    elif args.strategy == "long":
+        strategies = list(STRATEGIES.keys())
+    elif args.strategy == "short":
+        strategies = list(STRATEGIES_SHORT.keys())
+    else:
+        strategies = [args.strategy]
 
     print(f"=" * 70)
     print(f"  デイトレ Walk-Forward スキャン")
@@ -200,7 +212,7 @@ def main():
 
     for strat in strategies:
         print(f"\n[戦略 {strat}] スキャン開始 ({len(targets)}銘柄)", flush=True)
-        strat_fn = STRATEGIES[strat]
+        strat_fn = ALL_STRATEGIES[strat]
         t0 = _time.time()
         results = []
 
