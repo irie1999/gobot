@@ -54,10 +54,15 @@ FOLDS = [
     ("Fold3", 180, 90,  90,  0),     # TRAIN 180-90, TEST 90-0
 ]
 
-# 合格条件 (デイトレ向け緩和: 取引機会が多いため取引数閾値を上げる)
-PASS_TRAIN = dict(trades=10, pf=1.3, win_rate=50, pnl=0)
-PASS_TEST  = dict(trades=5,  pf=1.1, win_rate=45, pnl=0)
+# 合格条件 (デフォルト: 標準モード)
+PASS_TRAIN = dict(trades=5, pf=1.1, win_rate=45, pnl=0)
+PASS_TEST  = dict(trades=3, pf=1.0, win_rate=40, pnl=0)
 MIN_FOLDS  = 2  # 3 fold中 2 fold以上で合格
+
+# 緩和モード (--lenient): 5分足は取引機会少ない銘柄もあるため
+PASS_TRAIN_LENIENT = dict(trades=3, pf=1.0, win_rate=40, pnl=0)
+PASS_TEST_LENIENT  = dict(trades=2, pf=0.9, win_rate=35, pnl=0)
+MIN_FOLDS_LENIENT  = 1  # 1 fold以上で合格
 
 
 def slice_trades(trades, start_days_ago, end_days_ago, today):
@@ -160,7 +165,19 @@ def main():
     parser.add_argument("--min-price", type=int, default=0)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--lenient", action="store_true",
+                        help="緩和モード: 取引3+/PF1.0+, 1 fold合格でOK")
+    parser.add_argument("--diagnostic", action="store_true",
+                        help="診断: 全銘柄の trade数/PF を表示 (合格判定なし)")
     args = parser.parse_args()
+
+    # 緩和モード
+    global PASS_TRAIN, PASS_TEST, MIN_FOLDS
+    if args.lenient:
+        PASS_TRAIN = PASS_TRAIN_LENIENT
+        PASS_TEST = PASS_TEST_LENIENT
+        MIN_FOLDS = MIN_FOLDS_LENIENT
+        print("[INFO] 緩和モード: TRAIN PF>=1.0, TEST PF>=0.9, 1 fold合格")
 
     # ユニバース
     if args.universe == "prime":

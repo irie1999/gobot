@@ -140,10 +140,10 @@ def signal_don(opens, highs, lows, closes, volumes, i, atr_arr,
 
 def signal_macd(opens, highs, lows, closes, volumes, i, atr_arr,
                  macd_fast=8, macd_slow=17, macd_signal=5,
-                 ma_trend=10, vol_ma=20, vol_spike=1.2,
+                 ma_trend=10, vol_ma=10, vol_spike=1.2,
                  em=0.0, sm=1.5, tm=3.0):
-    """MACD クロス + 出来高スパイク + MA10上昇。"""
-    if i < max(macd_slow * 3, vol_ma, ma_trend) + 1:
+    """MACD クロス + 出来高スパイク + MA10上昇 (5分足調整)。"""
+    if i < max(macd_slow + macd_signal, vol_ma, ma_trend) + 1:
         return None
     # MACD
     ema_fast = _ema(closes[:i+1], macd_fast)
@@ -195,10 +195,10 @@ def signal_rsi2(opens, highs, lows, closes, volumes, i, atr_arr,
 
 def signal_a7(opens, highs, lows, closes, volumes, i, atr_arr,
                k_period=14, d_period=3, smooth=3,
-               overbought=70, ma_trend=75,
+               overbought=70, ma_trend=30,
                em=0.0, sm=1.5, tm=3.0):
-    """A7: Stochastic 過売り反発 + MA75上昇トレンド。"""
-    if i < max(k_period * 3, ma_trend) + 1:
+    """A7: Stochastic 過売り反発 + MA30トレンド (5分足デイトレ調整)。"""
+    if i < max(k_period * 2, ma_trend) + 1:
         return None
     k, d = _stoch(highs[:i+1], lows[:i+1], closes[:i+1],
                    k_period, d_period, smooth)
@@ -234,9 +234,9 @@ def signal_vol(opens, highs, lows, closes, volumes, i, atr_arr,
 
 
 def signal_mom(opens, highs, lows, closes, volumes, i, atr_arr,
-                roc_period=10, roc_thr=3.0, ma_fast=25, ma_slow=75,
+                roc_period=10, roc_thr=1.0, ma_fast=10, ma_slow=25,
                 em=0.0, sm=1.5, tm=3.0):
-    """MOM: ROC(N) > 閾値% + MA25 > MA75."""
+    """MOM: ROC(N) > 閾値% + MA10 > MA25 (5分足デイトレ調整)。"""
     if i < max(roc_period, ma_slow) + 1:
         return None
     roc = (closes[i] / closes[i-roc_period] - 1) * 100
