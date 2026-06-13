@@ -180,19 +180,22 @@ def main():
                         help="診断: 全銘柄の trade数/PF を表示")
     args = parser.parse_args()
 
-    # モード設定
+    # モード設定 + ラベル (ファイル名に使う)
     global PASS_TRAIN, PASS_TEST, MIN_FOLDS
     if args.lenient:
         PASS_TRAIN = PASS_TRAIN_LENIENT
         PASS_TEST = PASS_TEST_LENIENT
         MIN_FOLDS = MIN_FOLDS_LENIENT
+        mode_label = "lenient"
         print("[INFO] 緩和モード: TRAIN PF>=1.0, TEST PF>=0.9, 1 fold合格")
     elif args.strict:
         PASS_TRAIN = PASS_TRAIN_STRICT
         PASS_TEST = PASS_TEST_STRICT
         MIN_FOLDS = MIN_FOLDS_STRICT
+        mode_label = "strict"
         print("[INFO] 厳格モード: TRAIN PF>=1.5, TEST PF>=1.2, 3 fold全合格")
     else:
+        mode_label = "standard"
         print(f"[INFO] 標準モード: TRAIN PF>={PASS_TRAIN['pf']} 勝率>={PASS_TRAIN['win_rate']}%, "
               f"TEST PF>={PASS_TEST['pf']} 勝率>={PASS_TEST['win_rate']}%, "
               f"{MIN_FOLDS}/3 fold合格")
@@ -271,7 +274,7 @@ def main():
         # CSV出力
         if results:
             results.sort(key=lambda x: -x["total_pnl"])
-            csv_path = out_dir / f"walkforward_{strat}_{today}.csv"
+            csv_path = out_dir / f"walkforward_{strat}_{mode_label}_{today}.csv"
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 fieldnames = ["symbol", "name", "strategy", "latest_price",
                               "pass_folds", "total_trades", "total_pf",

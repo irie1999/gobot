@@ -40,12 +40,17 @@ def _composite_score(r):
     return pnl * (1.0 + max(sharpe, 0.0))
 
 
-def find_latest_csv(strategy, wf_dir):
-    """最新の walkforward_<strategy>_<date>.csv を取得。"""
-    cands = sorted(
-        wf_dir.glob(f"walkforward_{strategy}_*.csv"),
-        reverse=True
-    )
+def find_latest_csv(strategy, wf_dir, mode=None):
+    """最新の walkforward_<strategy>[_<mode>]_<date>.csv を取得。
+
+    mode を指定すれば そのモードのファイルだけ。
+    指定なしなら 全モード のうち最新ファイルを返す (mode明示推奨)。
+    """
+    if mode:
+        pattern = f"walkforward_{strategy}_{mode}_*.csv"
+    else:
+        pattern = f"walkforward_{strategy}_*.csv"
+    cands = sorted(wf_dir.glob(pattern), reverse=True)
     return cands[0] if cands else None
 
 
@@ -109,6 +114,9 @@ def main():
                         help="all/long/short/個別戦略名 (DON/MACD/...)")
     parser.add_argument("--wf-dir", type=Path,
                         default=Path("walkforward_daytrade_results"))
+    parser.add_argument("--mode", default=None,
+                        choices=[None, "standard", "lenient", "strict"],
+                        help="どのスキャンモードのCSV を使うか (省略時は最新)")
     parser.add_argument("--top", type=int, default=30,
                         help="戦略ごとの上位N銘柄 (デフォルト30)")
     parser.add_argument("--max-price", type=int, default=6000)
@@ -136,7 +144,7 @@ def main():
         all_syms = {}  # symbol → (name, best_score)
         per_strat = {}
         for strat in strategies:
-            csv_path = find_latest_csv(strat, args.wf_dir)
+            csv_path = find_latest_csv(strat, args.wf_dir, args.mode)
             if not csv_path:
                 print(f"[skip] {strat}: CSV なし")
                 continue
@@ -164,7 +172,7 @@ def main():
     else:
         # 戦略ごとに別ファイル
         for strat in strategies:
-            csv_path = find_latest_csv(strat, args.wf_dir)
+            csv_path = find_latest_csv(strat, args.wf_dir, args.mode)
             if not csv_path:
                 print(f"[skip] {strat}: CSV なし")
                 continue
