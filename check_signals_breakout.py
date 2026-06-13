@@ -478,6 +478,15 @@ def build_html(all_items: list[dict], show_days: int,
             cpcv_badge = ""
         risk_badges    = _render_risk_badges(item["symbol"])
         earnings_badge = _render_earnings_date(item["symbol"])
+        _sym_code = item['symbol'].split('.')[0]
+        _reg_qty  = sig.get('qty', 100)
+        _reg_url  = (f"http://127.0.0.1:8765/?prefill=1"
+                     f"&symbol={_sym_code}"
+                     f"&entry={sig['order_price']:.0f}"
+                     f"&stop={sig['stop_price']:.0f}"
+                     f"&target={sig['target_price']:.0f}"
+                     f"&strategy={strat}"
+                     f"&qty={_reg_qty}")
         signal_rows += f"""
         <tr style="{row_style}">
           <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}{risk_badges}{earnings_badge}</td>
@@ -493,9 +502,10 @@ def build_html(all_items: list[dict], show_days: int,
           <td style="color:#e2e8f0;text-align:right">{sig.get('qty', '-')}株<br><small style="color:#94a3b8;font-size:10px">{sig.get('position_value', 0):,.0f}円</small></td>
           <td style="color:#94a3b8">{MAX_HOLD}日</td>
           <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
+          <td><a href="{_reg_url}" target="_blank" class="reg-btn">📥 登録</a></td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="12" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="14" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -746,6 +756,9 @@ def build_html(all_items: list[dict], show_days: int,
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
   .hold-stat {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
   .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
+  .reg-btn {{ display:inline-block; padding:4px 8px; background:#2d6cdf; color:#fff;
+              border-radius:5px; font-size:12px; text-decoration:none; white-space:nowrap; }}
+  .reg-btn:hover {{ background:#1e4fc0; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
@@ -786,7 +799,7 @@ def build_html(all_items: list[dict], show_days: int,
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>株数<br><small>想定額</small></th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>株数<br><small>想定額</small></th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th><th>登録</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>

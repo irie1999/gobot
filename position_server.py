@@ -59,7 +59,8 @@ def _get_price(symbol: str) -> float | None:
 
 
 # ── HTML 生成 ────────────────────────────────────────────────────────────────
-def render_page(message: str = "") -> str:
+def render_page(message: str = "", prefill: dict | None = None) -> str:
+    prefill = prefill or {}
     df = pt.load()
     holding = df[df["status"] == "holding"]
     closed = df[df["status"].isin(["target", "stop", "timeout", "manual", "expired"])]
@@ -121,6 +122,7 @@ def render_page(message: str = "") -> str:
           padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; }}
   .addbox {{ background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 20px;
              box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+  .addbox-prefill {{ border: 2px solid #2d6cdf; }}
   .addbox label {{ font-size: 12px; color: #666; display: block; margin-bottom: 2px; }}
   .addbox .row {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }}
   .addbox .fld {{ flex: 1; min-width: 90px; }}
@@ -156,20 +158,20 @@ def render_page(message: str = "") -> str:
   <h1>📊 ポジション管理 <span style="font-size:13px;color:#999">{TODAY}</span></h1>
   {msg_html}
 
-  <div class="addbox">
+  <div class="addbox{"" if not prefill else " addbox-prefill"}">
+    {"<p style='color:#2d6cdf;font-size:13px;margin:0 0 8px'>📥 シグナルから自動入力しました。約定値を実際の約定価格に修正してから「＋ 登録」を押してください。</p>" if prefill else ""}
     <form method="POST" action="/add">
       <div class="row">
-        <div class="fld"><label>証券コード</label><input name="symbol" required placeholder="4631"></div>
-        <div class="fld"><label>約定値</label><input name="entry" type="number" step="any" required placeholder="4806"></div>
-        <div class="fld"><label>損切値</label><input name="stop" type="number" step="any" placeholder="4486"></div>
-        <div class="fld"><label>目標値</label><input name="target" type="number" step="any" placeholder="5069"></div>
+        <div class="fld"><label>証券コード</label><input name="symbol" required placeholder="4631" value="{html.escape(prefill.get('symbol', ''))}"></div>
+        <div class="fld"><label>約定値</label><input name="entry" type="number" step="any" required placeholder="4806" value="{html.escape(prefill.get('entry', ''))}"></div>
+        <div class="fld"><label>損切値</label><input name="stop" type="number" step="any" placeholder="4486" value="{html.escape(prefill.get('stop', ''))}"></div>
+        <div class="fld"><label>目標値</label><input name="target" type="number" step="any" placeholder="5069" value="{html.escape(prefill.get('target', ''))}"></div>
         <div class="fld"><label>戦略</label>
           <select name="strategy">
             <option value="">-</option>
-            <option>MACD</option><option>A7</option><option>RSI2</option>
-            <option>DON</option><option>VOL</option><option>MOM</option>
+            {"".join(f'<option {"selected" if prefill.get("strategy","").upper()==s else ""}>{s}</option>' for s in ["MACD","A7","RSI2","DON","VOL","MOM"])}
           </select></div>
-        <div class="fld"><label>株数</label><input name="qty" type="number" value="100"></div>
+        <div class="fld"><label>株数</label><input name="qty" type="number" value="{html.escape(prefill.get('qty','100'))}"></div>
         <div class="fld"><label>区分</label>
           <select name="margin"><option value="3">信用</option><option value="1">現物</option></select></div>
         <div><button class="btn btn-add" type="submit">＋ 登録</button></div>
@@ -287,8 +289,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         qs = parse_qs(parsed.query)
         msg = qs.get("msg", [""])[0]
+        prefill: dict = {}
+        if qs.get("prefill"):
+            for key in ("symbol", "entry", "stop", "target", "strategy", "qty"):
+                v = qs.get(key, [""])[0]
+                if v:
+                    prefill[key] = v
         _price_cache.clear()  # 再読込で最新値を取り直す
-        self._send_html(render_page(msg))
+        self._send_html(render_page(msg, prefill))
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
