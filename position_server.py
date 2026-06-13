@@ -22,7 +22,6 @@ from __future__ import annotations
 import html
 import os
 import threading
-import webbrowser
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -591,7 +590,8 @@ def main():
     url = f"http://{HOST}:{PORT}"
     print(f"📊 ポジション管理 Web UI を起動しました → {url}")
     print("   停止するには Ctrl+C")
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    from _open_html import open_html
+    threading.Timer(0.8, lambda: open_html(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
