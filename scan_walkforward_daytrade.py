@@ -57,9 +57,13 @@ FOLDS = [
 # 合格条件 (デフォルト: 標準モード)
 # 勝率は緩く (30%+) - トレンドフォロー戦略は勝率低くてもPFが高ければOK
 # 重視するのは PF と損益
-PASS_TRAIN = dict(trades=5, pf=1.2, win_rate=30, pnl=0)
-PASS_TEST  = dict(trades=3, pf=1.0, win_rate=25, pnl=0)
-MIN_FOLDS  = 2  # 3 fold中 2 fold以上で合格
+PASS_TRAIN_STRICT_DEFAULT = dict(trades=5, pf=1.2, win_rate=30, pnl=0)
+PASS_TEST_STRICT_DEFAULT  = dict(trades=3, pf=1.0, win_rate=25, pnl=0)
+MIN_FOLDS_DEFAULT         = 2
+
+PASS_TRAIN = PASS_TRAIN_STRICT_DEFAULT
+PASS_TEST  = PASS_TEST_STRICT_DEFAULT
+MIN_FOLDS  = MIN_FOLDS_DEFAULT
 
 # 緩和モード (--lenient): さらに緩い
 PASS_TRAIN_LENIENT = dict(trades=3, pf=1.0, win_rate=20, pnl=0)
@@ -103,22 +107,49 @@ def pass_condition(stats, cond):
             and stats["total_pnl"] > cond["pnl"])
 
 
-def scan_one(sym, name, df, strategy_name, strategy_fn, today, budget, max_risk):
-    """1銘柄を全期間でbacktest → 3 fold WF評価。"""
-    r = backtest_symbol_5m(sym, name, df, strategy_fn,
-                            strategy_params={"name": strategy_name},
-                            budget=budget, max_risk=max_risk)
-    if not r or not r["trades"]:
+def scan_one(sym, name, df, strategy_name, strategy_fn, today, budget, max_risk,
+              pass_train=None, pass_test=None, min_folds=None,
+              cache=None):
+    """1銘柄を全期間でbacktest → 3 fold WF評価。
+
+    pass_train/test/min_folds 省略時はグローバル PASS_TRAIN/PASS_TEST/MIN_FOLDS を使用。
+    cache: backtest結果キャッシュ (dict)
+    """
+    if pass_train is None:
+        pass_train = PASS_TRAIN
+    if pass_test is None:
+        pass_test = PASS_TEST
+    if min_folds is None:
+        min_folds = MIN_FOLDS
+
+    # キャッシュチェック
+    cache_key = f"{strategy_name}::{sym}"
+    if cache is not None and cache_key in cache:
+        trades = cache[cache_key]["trades"]
+        all_stats = cache[cache_key]["all_stats"]
+    else:
+        r = backtest_symbol_5m(sym, name, df, strategy_fn,
+                                strategy_params={"name": strategy_name},
+                                budget=budget, max_risk=max_risk)
+        if not r or not r["trades"]:
+            if cache is not None:
+                cache[cache_key] = {"trades": [], "all_stats": None}
+            return None
+        trades = r["trades"]
+        all_stats = calc_stats(trades, budget)
+        if cache is not None:
+            cache[cache_key] = {"trades": trades, "all_stats": all_stats}
+
+    if not trades:
         return None
 
-    trades = r["trades"]
     fold_results = []
     pass_count = 0
     for fold_name, ts, te, vs, ve in FOLDS:
         train_stats, test_stats = evaluate_fold(
             trades, today, ts, te, vs, ve, budget)
-        train_ok = pass_condition(train_stats, PASS_TRAIN)
-        test_ok = pass_condition(test_stats, PASS_TEST)
+        train_ok = pass_condition(train_stats, pass_train)
+        test_ok = pass_condition(test_stats, pass_test)
         if train_ok and test_ok:
             pass_count += 1
         fold_results.append({
@@ -135,12 +166,10 @@ def scan_one(sym, name, df, strategy_name, strategy_fn, today, budget, max_risk)
             "test_pass": test_ok,
         })
 
-    if pass_count < MIN_FOLDS:
+    if pass_count < min_folds:
         return None
 
     latest_price = float(df.iloc[-1]["close"]) if not df.empty else 0
-    # 全期間集計 (情報用)
-    all_stats = calc_stats(trades, budget)
     return {
         "symbol": sym,
         "name": name,
@@ -172,6 +201,12 @@ def main():
     parser.add_argument("--min-price", type=int, default=0)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--cache-dir", default=".cache_scan_daytrade",
+                        help="backtest結果キャッシュディレクトリ")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="キャッシュ無効化")
+    parser.add_argument("--all-modes", action="store_true",
+                        help="標準/緩和/厳格3モード一気に評価 (キャッシュ活用)")
     parser.add_argument("--lenient", action="store_true",
                         help="緩和モード: PF1.0+, 1 fold合格でOK")
     parser.add_argument("--strict", action="store_true",
@@ -248,6 +283,22 @@ def main():
     out_dir = Path("walkforward_daytrade_results")
     out_dir.mkdir(exist_ok=True)
 
+    # キャッシュ
+    cache_dir = Path(args.cache_dir)
+    if not args.no_cache:
+        cache_dir.mkdir(exist_ok=True)
+
+    # --all-modes: 3モード全部評価
+    if args.all_modes:
+        mode_configs = [
+            ("standard", PASS_TRAIN_STRICT_DEFAULT, PASS_TEST_STRICT_DEFAULT,
+             MIN_FOLDS_DEFAULT),
+            ("lenient", PASS_TRAIN_LENIENT, PASS_TEST_LENIENT, MIN_FOLDS_LENIENT),
+            ("strict", PASS_TRAIN_STRICT, PASS_TEST_STRICT, MIN_FOLDS_STRICT),
+        ]
+    else:
+        mode_configs = [(mode_label, PASS_TRAIN, PASS_TEST, MIN_FOLDS)]
+
     # サマリーログ (全戦略集約)
     summary_path = out_dir / f"summary_{mode_label}_{today}.md"
     summary_lines = [
@@ -267,37 +318,82 @@ def main():
         f"|---|---|---|---|",
     ]
 
-    strategy_results = {}  # 各戦略の結果保存
+    strategy_results = {}  # 各戦略の結果保存 (現在モード用)
+    all_modes_results = {m: {} for m, _, _, _ in mode_configs}  # all-modes用
 
     for strat in strategies:
         print(f"\n[戦略 {strat}] スキャン開始 ({len(targets)}銘柄)", flush=True)
         strat_fn = ALL_STRATEGIES[strat]
         t0 = _time.time()
-        results = []
+
+        # 戦略×銘柄 backtest結果キャッシュ
+        bt_cache = {}
+        cache_file = cache_dir / f"bt_{strat}_{today}.pkl"
+        if not args.no_cache and cache_file.exists():
+            try:
+                import pickle as _pickle
+                bt_cache = _pickle.loads(cache_file.read_bytes())
+                print(f"  キャッシュ復元: {len(bt_cache)}件", flush=True)
+            except Exception:
+                bt_cache = {}
+
+        # 1パスでbacktest → 全モード評価
+        results_by_mode = {m: [] for m, _, _, _ in mode_configs}
 
         def _work(sym, name):
             try:
-                return scan_one(sym, name, fetched[sym], strat, strat_fn,
-                                today, args.budget, args.max_risk)
+                # 各モードで scan_one を呼ぶ (キャッシュ共有でbacktestは1回だけ)
+                mode_rs = {}
+                for mname, pt, pst, mf in mode_configs:
+                    r = scan_one(sym, name, fetched[sym], strat, strat_fn,
+                                  today, args.budget, args.max_risk,
+                                  pass_train=pt, pass_test=pst, min_folds=mf,
+                                  cache=bt_cache)
+                    if r:
+                        mode_rs[mname] = r
+                return mode_rs
             except Exception:
-                return None
+                return {}
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futures = {ex.submit(_work, s, n): (s, n) for s, n in targets}
             for i, fut in enumerate(as_completed(futures), 1):
-                r = fut.result()
-                if r:
-                    results.append(r)
+                mode_rs = fut.result()
+                for mname, r in mode_rs.items():
+                    results_by_mode[mname].append(r)
                 if i % 100 == 0 or i == len(targets):
+                    mode_status = " / ".join(
+                        f"{m}:{len(results_by_mode[m])}" for m, _, _, _ in mode_configs
+                    )
                     print(f"  {i}/{len(targets)} ({_time.time()-t0:.1f}s, "
-                          f"合格:{len(results)})", flush=True)
+                          f"{mode_status})", flush=True)
 
+        # キャッシュ保存
+        if not args.no_cache and bt_cache:
+            try:
+                import pickle as _pickle
+                cache_file.write_bytes(_pickle.dumps(bt_cache))
+                print(f"  キャッシュ保存: {len(bt_cache)}件", flush=True)
+            except Exception:
+                pass
+
+        # all_modes 用に結果を保存
+        for mname, _, _, _ in mode_configs:
+            all_modes_results[mname][strat] = results_by_mode[mname]
+
+        # 現在モード (--mode指定) の results を採用
+        results = results_by_mode[mode_label] if mode_label in results_by_mode \
+                  else results_by_mode[mode_configs[0][0]]
         strategy_results[strat] = results
 
-        # CSV出力
-        if results:
-            results.sort(key=lambda x: -x["total_pnl"])
-            csv_path = out_dir / f"walkforward_{strat}_{mode_label}_{today}.csv"
+        # CSV出力 (all-modes なら各モード別)
+        for mname, _, _, _ in mode_configs:
+            rs = results_by_mode.get(mname, [])
+            if not rs:
+                print(f"\n  ✗ {strat}/{mname}: 合格なし")
+                continue
+            rs.sort(key=lambda x: -x["total_pnl"])
+            csv_path = out_dir / f"walkforward_{strat}_{mname}_{today}.csv"
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 fieldnames = ["symbol", "name", "strategy", "latest_price",
                               "pass_folds", "total_trades", "total_pf",
@@ -305,34 +401,44 @@ def main():
                               "sharpe", "max_losing_streak"]
                 w = csv.DictWriter(f, fieldnames=fieldnames)
                 w.writeheader()
-                for r in results:
+                for r in rs:
                     w.writerow({k: r.get(k, "") for k in fieldnames})
-            print(f"\n  ★ {strat}: {len(results)}銘柄合格 → {csv_path}")
-            # Top 10 表示
-            print(f"\n  Top 10 ({strat}):")
-            print(f"  {'銘柄':<22} {'コード':<10} {'PF':>5} {'勝率':>5} "
-                  f"{'損益':>10} {'fold':>5}")
-            for r in results[:10]:
-                disp = r["name"][:20] if len(r["name"]) <= 20 else r["name"][:19] + "…"
-                pf_str = "∞" if r["total_pf"] == float("inf") else f"{r['total_pf']:.2f}"
-                print(f"  {disp:<22} {r['symbol']:<10} {pf_str:>5} "
-                      f"{r['total_win_rate']:>4.0f}% {r['total_pnl']:>+10,.0f} "
-                      f"{r['pass_folds']}/3")
-        else:
-            print(f"\n  ✗ {strat}: 合格銘柄なし")
+            print(f"\n  ★ {strat}/{mname}: {len(rs)}銘柄合格 → {csv_path.name}")
+            if mname == mode_label or args.all_modes:
+                # Top 5 表示
+                print(f"     Top 5:")
+                for r in rs[:5]:
+                    disp = r["name"][:18]
+                    pf_str = "∞" if r["total_pf"] == float("inf") else f"{r['total_pf']:.2f}"
+                    print(f"       {disp:<18} {r['symbol']:<8} PF{pf_str} "
+                          f"勝{r['total_win_rate']:>3.0f}% {r['total_pnl']:>+10,.0f} {r['pass_folds']}/3")
 
-    # サマリーログ書出し
+    # サマリーログ書出し (all-modes なら各モード別サマリ)
+    output_modes = [m for m, _, _, _ in mode_configs] if args.all_modes else [mode_label]
+
     grand_total = 0
-    for strat in strategies:
-        rs = strategy_results.get(strat, [])
-        grand_total += len(rs)
-        if rs:
-            top_pnl = rs[0]["total_pnl"]
-            top_pf_v = rs[0]["total_pf"]
-            top_pf = "∞" if top_pf_v == float("inf") else f"{top_pf_v:.2f}"
-            summary_lines.append(f"| {strat} | {len(rs)} | {top_pnl:+,.0f}円 | {top_pf} |")
-        else:
-            summary_lines.append(f"| {strat} | **0** | — | — |")
+    if args.all_modes:
+        # all-modes: 3列で表示
+        summary_lines[12] = "| 戦略 | standard | lenient | strict |"
+        summary_lines[13] = "|---|---|---|---|"
+        for strat in strategies:
+            ns = []
+            for mname in ["standard", "lenient", "strict"]:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                ns.append(str(len(rs)))
+                grand_total += len(rs)
+            summary_lines.append(f"| {strat} | {ns[0]} | {ns[1]} | {ns[2]} |")
+    else:
+        for strat in strategies:
+            rs = strategy_results.get(strat, [])
+            grand_total += len(rs)
+            if rs:
+                top_pnl = rs[0]["total_pnl"]
+                top_pf_v = rs[0]["total_pf"]
+                top_pf = "∞" if top_pf_v == float("inf") else f"{top_pf_v:.2f}"
+                summary_lines.append(f"| {strat} | {len(rs)} | {top_pnl:+,.0f}円 | {top_pf} |")
+            else:
+                summary_lines.append(f"| {strat} | **0** | — | — |")
 
     summary_lines.extend([
         f"",
@@ -343,6 +449,70 @@ def main():
         f"## 戦略別 Top 10 詳細",
         f"",
     ])
+
+    # all-modes: 各モード毎に詳細
+    if args.all_modes:
+        summary_lines.extend([f"## モード別 Top 5 詳細", ""])
+        for mname in ["standard", "lenient", "strict"]:
+            summary_lines.extend([f"### モード: {mname}", ""])
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                if not rs:
+                    summary_lines.append(f"- **{strat}**: 0銘柄")
+                    continue
+                rs.sort(key=lambda x: -x["total_pnl"])
+                summary_lines.append(f"- **{strat}** ({len(rs)}銘柄合格)")
+                for i, r in enumerate(rs[:5], 1):
+                    pf_v = r.get("total_pf", 0)
+                    pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    summary_lines.append(
+                        f"  {i}. {r.get('name','')} ({r.get('symbol','')}) "
+                        f"PF{pf} 勝{r.get('total_win_rate',0):.0f}% "
+                        f"{r.get('total_pnl',0):+,.0f}円 {r.get('pass_folds',0)}/3"
+                    )
+            summary_lines.append("")
+
+        # 個別モードサマリも出力
+        for mname in ["standard", "lenient", "strict"]:
+            mode_summary_path = out_dir / f"summary_{mname}_{today}.md"
+            mode_lines = [
+                f"# scan_walkforward_daytrade [{mname}]",
+                f"- 生成: {today}", "",
+                f"## 戦略別 合格数", "",
+                f"| 戦略 | 合格 | Top損益 | Top PF |", f"|---|---|---|---|",
+            ]
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                if rs:
+                    rs.sort(key=lambda x: -x["total_pnl"])
+                    pf_v = rs[0].get("total_pf", 0)
+                    pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    mode_lines.append(
+                        f"| {strat} | {len(rs)} | {rs[0].get('total_pnl', 0):+,.0f} | {pf} |"
+                    )
+                else:
+                    mode_lines.append(f"| {strat} | 0 | — | — |")
+            mode_lines.extend(["", f"## 戦略別 Top 10", ""])
+            for strat in strategies:
+                rs = all_modes_results.get(mname, {}).get(strat, [])
+                mode_lines.append(f"### {strat} ({len(rs)}銘柄)")
+                if not rs:
+                    mode_lines.append("(なし)")
+                    continue
+                mode_lines.append("| # | 銘柄 | コード | PF | 勝率 | 損益 | fold |")
+                mode_lines.append("|---|---|---|---|---|---|---|")
+                for i, r in enumerate(rs[:10], 1):
+                    pf_v = r.get("total_pf", 0)
+                    pf = "∞" if pf_v == float("inf") else f"{pf_v:.2f}"
+                    mode_lines.append(
+                        f"| {i} | {r.get('name','')[:18]} | {r.get('symbol','')} | "
+                        f"{pf} | {r.get('total_win_rate',0):.0f}% | "
+                        f"{r.get('total_pnl',0):+,.0f} | {r.get('pass_folds',0)}/3 |"
+                    )
+                mode_lines.append("")
+            mode_summary_path.write_text("\n".join(mode_lines), encoding="utf-8")
+            print(f"  📄 {mname}サマリー: {mode_summary_path.name}")
+        return  # 早期return (個別strat の詳細は既に書出し済み)
 
     for strat in strategies:
         rs = strategy_results.get(strat, [])
