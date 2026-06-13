@@ -34,6 +34,16 @@ from check_signals_daytrade import (
     backtest_one, ALL_STRATEGIES, SIGNAL_PERIODS, _load_watchlist,
 )
 from risk_metrics_5m import enrich_stats, calc_recommend_score
+from bt_score_cache import (
+    load_score_cache, save_score_cache, get_frozen_score,
+    register_signal, BTCache,
+)
+from signal_risk_check_daytrade import (
+    precompute_all as precompute_risks,
+    render_nikkei_banner, render_risk_badges, check_risks,
+)
+from _signal_funds_daytrade import fund_html as render_fund_html
+from _open_html import open_html
 
 JST = timezone(timedelta(hours=9))
 
@@ -64,8 +74,8 @@ def _color_score(score):
     return "#f87171"
 
 
-def build_signal_tab(items):
-    """シグナルタブ HTML。"""
+def build_signal_tab(items, score_cache=None):
+    """シグナルタブ HTML (BTスコア凍結対応)。"""
     if not items:
         return '<p style="color:#64748b;padding:24px">シグナルなし</p>'
 
@@ -79,6 +89,22 @@ def build_signal_tab(items):
         f'</span>' for it in top3
     )
 
+    # BTスコア凍結対応 (signal_date が同じならキャッシュのスコアを使う)
+    if score_cache is not None:
+        for it in items:
+            if not it["recent_signals"]:
+                continue
+            latest_sig_date = str(it["recent_signals"][-1].get("entry_dt", ""))[:10]
+            if latest_sig_date:
+                frozen = get_frozen_score(score_cache,
+                                            it["symbol"], it["strategy"],
+                                            latest_sig_date, current_bt=it["score"])
+                it["frozen_score"] = frozen
+                it["score_frozen"] = (frozen != it["score"])
+            else:
+                it["frozen_score"] = it["score"]
+                it["score_frozen"] = False
+
     summary = f"""
 <div class="box">
   <div class="it"><div class="lb">監視銘柄</div><div class="vl">{len(items)}</div></div>
@@ -90,12 +116,17 @@ def build_signal_tab(items):
 <p style="color:#94a3b8;font-size:0.85rem">Top 3: {top3_html}</p>
 """
 
-    # メインテーブル
+    # メインテーブル (BTスコア凍結 + リスクバッジ)
     rows = ""
     for it in items:
         last_p = it.get("last_price", 0)
         rec_count = len(it["recent_signals"])
         rec_text = f"{rec_count}件" if rec_count > 0 else "—"
+        # 表示スコア (凍結 or 現在)
+        display_score = it.get("frozen_score", it["score"])
+        frozen_mark = "❄️" if it.get("score_frozen") else ""
+        # リスクバッジ
+        risk_badges = render_risk_badges(it["symbol"])
         # 6期間別 PF
         pf_cells = ""
         for days in SIGNAL_PERIODS:
@@ -113,8 +144,9 @@ def build_signal_tab(items):
 
         rows += f"""
 <tr>
-  <td><strong style="color:{_color_score(it['score'])}">{it['rank']}{it['score']}</strong></td>
-  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small></td>
+  <td><strong style="color:{_color_score(display_score)}">{it['rank']}{display_score}</strong>{frozen_mark}</td>
+  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small>
+    {risk_badges}</td>
   <td>{it["strategy"]}</td>
   <td>{last_p:,.0f}</td>
   {pf_cells}
@@ -331,6 +363,80 @@ def build_params_tab():
 """
 
 
+def build_symbol_detail_tab(items):
+    """シグナル銘柄詳細タブ HTML。"""
+    if not items:
+        return '<p style="color:#64748b;padding:24px">銘柄なし</p>'
+
+    # 各銘柄ごとに直近取引明細
+    sorted_items = sorted(items, key=lambda x: -x["score"])
+    nav = ""
+    panes = ""
+    for i, it in enumerate(sorted_items):
+        active = "block" if i == 0 else "none"
+        active_btn = "active" if i == 0 else ""
+        sym_short = it["symbol"].replace(".T", "")
+        score = it.get("frozen_score", it["score"])
+        nav += (f'<button class="sym-btn {active_btn}" '
+                f'onclick="switchSym(\'sym{sym_short}\')">'
+                f'<strong>{it["symbol"]}</strong><br>'
+                f'<small style="color:#94a3b8">{it["name"][:8]}</small><br>'
+                f'<small style="color:#fbbf24">BT:{score}</small></button>')
+
+        # 直近取引
+        trades = sorted(it["trades"][-30:],
+                         key=lambda x: str(x.get("entry_dt", "")),
+                         reverse=True)
+        trade_rows = ""
+        for t in trades:
+            entry_dt = t.get("entry_dt")
+            ed = entry_dt.strftime("%m-%d %H:%M") if hasattr(entry_dt, "strftime") else "?"
+            pnl = t.get("pnl", 0)
+            pc = "profit" if pnl >= 0 else "loss"
+            trade_rows += f"""
+<tr>
+  <td>{ed}</td>
+  <td>{t.get('entry_p',0):,.0f}</td>
+  <td>{t.get('exit_p',0):,.0f}</td>
+  <td class="{pc}">{pnl:+,.0f}</td>
+  <td>{t.get('reason','?')}</td>
+</tr>"""
+
+        # 期間別統計
+        period_summary = ""
+        for days in SIGNAL_PERIODS:
+            s = it["period_stats"].get(days, {})
+            n = s.get("n", 0)
+            if n == 0:
+                continue
+            pf = s.get("pf", 0)
+            pnl = s.get("total_pnl", 0)
+            pc = "profit" if pnl >= 0 else "loss"
+            period_summary += (f'<span style="margin-right:14px">'
+                               f'{days}日: <strong>{n}取引</strong> '
+                               f'PF<strong>{_pf(pf)}</strong> '
+                               f'<span class="{pc}">{pnl:+,.0f}円</span>'
+                               f'</span>')
+
+        panes += f"""
+<div id="sym{sym_short}" class="sym-pane" style="display:{active};padding:12px 0">
+  <h3>{it["name"]} ({it["symbol"]}) — {it["strategy"]} — BTスコア {score} {it["rank"]}</h3>
+  <p style="color:#94a3b8;font-size:0.85rem">{period_summary}</p>
+  <h3>直近30取引</h3>
+  <table>
+    <thead><tr>
+      <th>Entry</th><th>買値</th><th>決済</th><th>損益</th><th>理由</th>
+    </tr></thead>
+    <tbody>{trade_rows}</tbody>
+  </table>
+</div>"""
+
+    return f"""
+<div class="sym-nav">{nav}</div>
+{panes}
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="デイトレ統合シグナル・損益レポート")
@@ -338,6 +444,8 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-risk-check", action="store_true")
+    parser.add_argument("--budget", type=int, default=300_000)
     args = parser.parse_args()
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
@@ -376,6 +484,24 @@ def main():
                 print(f"  {i}/{len(watchlist)}", flush=True)
 
     items.sort(key=lambda x: -x["score"])
+
+    # BTスコアキャッシュ読込
+    score_cache = load_score_cache()
+    # シグナル銘柄のリスク事前計算
+    if not args.no_risk_check:
+        sig_syms = [(it["symbol"], it["name"]) for it in items
+                    if it["recent_signals"]]
+        if sig_syms:
+            print(f"リスクチェック中 ({len(sig_syms)}件)...", flush=True)
+            precompute_risks(sig_syms, workers=args.workers)
+    # シグナル登録
+    for it in items:
+        for sig in it["recent_signals"]:
+            sig_date = str(sig.get("entry_dt", ""))[:10]
+            if sig_date:
+                register_signal(score_cache, it["symbol"], it["strategy"],
+                                sig_date, it["score"])
+    save_score_cache(score_cache)
 
     # HTML
     css = """
@@ -418,6 +544,14 @@ td { padding: 5px 8px; border: 1px solid #1e293b;
 .p-btn.active { background: #3b82f6; color: #fff;
                 border-color: #3b82f6; font-weight: 700; }
 .pnl-pane { display: none; }
+.sym-nav { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px 0 16px;
+           padding: 10px; background: #0f172a; border-radius: 8px; }
+.sym-btn { padding: 6px 12px; background: #1e293b; border: 1px solid #334155;
+           color: #e2e8f0; border-radius: 6px; cursor: pointer;
+           font-size: 0.78rem; min-width: 90px; text-align: center; }
+.sym-btn:hover { background: #263349; border-color: #64748b; }
+.sym-btn.active { background: #1d4ed8; border-color: #3b82f6; }
+.sym-pane { display: none; }
 """
 
     js = """
@@ -433,21 +567,36 @@ function switchPnl(days){
   document.getElementById('pnl'+days).style.display='block';
   (event.target.closest('.p-btn')||event.target).classList.add('active');
 }
+function switchSym(id){
+  document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).style.display='block';
+  (event.target.closest('.sym-btn')||event.target).classList.add('active');
+}
 """
+
+    # 日経バナー
+    banner = render_nikkei_banner() if not args.no_risk_check else ""
+
+    sig_html = build_signal_tab(items, score_cache=score_cache)
+    sig_html = banner + sig_html
 
     html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>デイトレ統合レポート — {today}</title>
 <style>{css}</style></head><body>
 <h1>📊 デイトレ統合シグナル・損益レポート</h1>
-<p class="subtitle">生成: {today} / WATCHLIST: {len(watchlist)}銘柄 / 実成績: {len(items)}銘柄</p>
+<p class="subtitle">生成: {today} / WATCHLIST: {len(watchlist)}銘柄 / 実成績: {len(items)}銘柄 /
+   キャッシュ: {len(score_cache)}件</p>
 <div class="tab-nav">
   <button class="tab-btn active" onclick="switchTab('sig')">📋 シグナル</button>
   <button class="tab-btn" onclick="switchTab('pnl')">💹 損益</button>
+  <button class="tab-btn" onclick="switchTab('sym')">📊 銘柄詳細</button>
   <button class="tab-btn" onclick="switchTab('strat')">🎯 戦略別</button>
   <button class="tab-btn" onclick="switchTab('params')">📰 戦略パラメータ</button>
 </div>
-<div id="t-sig" class="tab-pane active">{build_signal_tab(items)}</div>
+<div id="t-sig" class="tab-pane active">{sig_html}</div>
 <div id="t-pnl" class="tab-pane">{build_pnl_tab(items)}</div>
+<div id="t-sym" class="tab-pane">{build_symbol_detail_tab(items)}</div>
 <div id="t-strat" class="tab-pane">{build_strategy_tab(items)}</div>
 <div id="t-params" class="tab-pane">{build_params_tab()}</div>
 <script>{js}</script>
@@ -456,7 +605,7 @@ function switchPnl(days){
     out.write_text(html, encoding="utf-8")
     print(f"\n生成: {out.resolve()}")
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve())
 
 
 if __name__ == "__main__":
