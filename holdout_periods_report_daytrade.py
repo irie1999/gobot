@@ -340,7 +340,7 @@ def build_period_tab(period_label, train_days, items):
 
 
 def _fmt_dt(dt):
-    return dt.strftime("%m-%d %H:%M") if hasattr(dt, "strftime") else "?"
+    return dt.strftime("%Y-%m-%d %H:%M") if hasattr(dt, "strftime") else "?"
 
 
 def build_detail_tab(period_items):
