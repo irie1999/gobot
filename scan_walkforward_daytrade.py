@@ -227,8 +227,8 @@ def main():
                         help="Fold数 (2=スイング流: 730-370/370-180 + 550-180/180-0, "
                              "3=デイトレ既定: 540-360-180-0)")
     parser.add_argument("--swing-thresholds", action="store_true",
-                        help="スイング閾値: TRAIN取引≥20/PF≥1.5/勝率≥45%, "
-                             "TEST取引≥5/PF≥1.2/勝率≥40% (--folds 2 推奨)")
+                        help="スイング閾値: TRAIN取引≥20/PF≥1.5/勝率≥45%%, "
+                             "TEST取引≥5/PF≥1.2/勝率≥40%% (--folds 2 推奨)")
     parser.add_argument("--diagnostic", action="store_true",
                         help="診断: 全銘柄の trade数/PF を表示")
     args = parser.parse_args()
