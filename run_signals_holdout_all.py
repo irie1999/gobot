@@ -55,7 +55,88 @@ _pre.add_argument("--force",      action="store_true",
                   help="当日の生成済みHTMLがあっても無視して再生成する")
 _pre.add_argument("--entry-days", type=int, default=None,
                   help="取引明細をエントリー日ベースで絞り込む日数 (例: 7=直近1週間エントリーのみ)")
+_pre.add_argument("--both",       action="store_true",
+                  help="ロング+ショート両方を実行して1つのHTMLにまとめる")
 _args, _ = _pre.parse_known_args()
+
+# ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
+if _args.both and not _args.short:
+    import subprocess as _sp
+    _bd   = _args.date or str(datetime.now(timezone(timedelta(hours=9))).date())
+    _bout = Path(f"signals_holdout_all_both_{_bd}.html")
+
+    if _bout.exists() and not _args.force:
+        print(f"[CACHE] 当日生成済み(both): {_bout.resolve()}")
+        print(f"        再生成するには --force を付けてください。")
+        if not _args.no_browser:
+            from _open_html import open_html
+            open_html(_bout.resolve())
+        sys.exit(0)
+
+    # --both / --short / --no-browser は渡さず、--force は伝播
+    _cargs = [a for a in sys.argv[1:] if a not in ("--both", "--short", "--no-browser")]
+    if "--force" not in _cargs:
+        _cargs.append("--force")
+    _cargs.append("--no-browser")
+
+    print("=" * 65)
+    print("=== ロングシグナル生成中 ===")
+    print("=" * 65)
+    _sp.run([sys.executable, __file__] + _cargs)
+
+    print("=" * 65)
+    print("=== ショートシグナル生成中 ===")
+    print("=" * 65)
+    _sp.run([sys.executable, __file__] + _cargs + ["--short"])
+
+    _lf = Path(f"signals_holdout_all_{_bd}.html")
+    _sf = Path(f"signals_holdout_all_short_{_bd}.html")
+    if not _lf.exists() or not _sf.exists():
+        print("[ERROR] ロング/ショートHTMLの生成に失敗しました")
+        sys.exit(1)
+
+    _bout.write_text(f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ホールドアウト全設定 ロング+ショート統合 {_bd}</title>
+<style>
+body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
+.ls-nav{{display:flex;gap:0;border-bottom:2px solid #1e293b;background:#0f172a;
+  position:sticky;top:0;z-index:9999;padding:8px 16px 0}}
+.ls-btn{{padding:11px 40px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
+  color:#94a3b8;cursor:pointer;font-size:1.05rem;font-weight:600;
+  border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
+.ls-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
+.ls-btn.active.lb{{color:#34d399;border-bottom:2px solid #34d399;background:#0f172a}}
+.ls-btn.active.sb{{color:#f87171;border-bottom:2px solid #f87171;background:#0f172a}}
+.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
+.ls-frame.active{{display:block}}
+</style>
+</head>
+<body>
+<div class="ls-nav">
+  <button class="ls-btn lb active" onclick="switchLs('long')">📈 ロング</button>
+  <button class="ls-btn sb" onclick="switchLs('short')">📉 ショート</button>
+</div>
+<iframe id="ls-long"  class="ls-frame active" src="{_lf.name}"></iframe>
+<iframe id="ls-short" class="ls-frame"        src="{_sf.name}"></iframe>
+<script>
+function switchLs(t){{
+  document.querySelectorAll('.ls-frame').forEach(f=>f.classList.remove('active'));
+  document.querySelectorAll('.ls-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('ls-'+t).classList.add('active');
+  event.target.classList.add('active');
+}}
+</script>
+</body>
+</html>""", encoding="utf-8")
+    print(f"\n統合レポート生成完了: {_bout.resolve()}")
+    if not _args.no_browser:
+        from _open_html import open_html
+        open_html(_bout.resolve())
+    sys.exit(0)
 
 # ── ロング/ショートの戦略セット ──────────────────────────────────────────────
 if _args.short:
@@ -342,6 +423,47 @@ if _args.date:
         pass
 
 date_str = _args.date or str(TODAY)
+
+# ── 日経相場環境・トレンド・エントリー分析タブ ─────────────────────────────────
+print("日経平均データ取得中 (市場分析)...", flush=True)
+_market_tab1_html = _market_tab2_html = _market_tab3_html = ""
+try:
+    import pandas as _pd
+    _na_years  = 5
+    _na_end    = target_date if _args.date else None
+    _na_close  = _na.fetch_n225(_na_years, end_date=_na_end)
+    if _args.date:
+        _na_close = _na_close[_na_close.index <= _pd.Timestamp(target_date)]
+    if not _na_close.empty:
+        _na_trend     = _na.label_trend(_na_close)
+        _na_r         = _na.get_regime(_na_close)
+        _na_ref       = target_date or TODAY
+        _na_periods   = _na.extract_periods(_na_close, _na_trend, _na_ref)
+        _na_up_p      = _na.extract_up_periods(_na_close, _na_trend, _na_ref)
+        _na_all_stats = {
+            "up":   _na.calc_stats([p for p in _na_periods if p["trend"] == "up"]),
+            "down": _na.calc_stats([p for p in _na_periods if p["trend"] == "down"]),
+        }
+        print("参考指標取得中...", flush=True)
+        _na_indicators = _na.fetch_market_indicators(years=1, end_date=_na_end)
+        _market_tab1_html = _na._tab1_signal_html(
+            _na_r, _na_ref, indicators=_na_indicators, periods=_na_periods)
+        _market_tab2_html = _na._tab2_trend_html(
+            _na_close, _na_trend, _na_periods, _na_years)
+        _market_tab3_html = _na._tab3_timing_html(
+            _na_close, _na_up_p, _na_all_stats)
+        print("市場分析タブ生成完了", flush=True)
+except Exception as _me:
+    print(f"[WARN] 市場分析スキップ: {_me}", flush=True)
+
+if _market_tab1_html:
+    _market_tab_btns = (
+        "\n  <button class=\"ho-outer-btn\" onclick=\"switchHoTab('mkt1')\">&#x1F4CA; 相場環境</button>"
+        "\n  <button class=\"ho-outer-btn\" onclick=\"switchHoTab('mkt2')\">&#x1F4C8; トレンド期間</button>"
+        "\n  <button class=\"ho-outer-btn\" onclick=\"switchHoTab('mkt3')\">&#x23F1; エントリー分析</button>"
+    )
+else:
+    _market_tab_btns = ""
 
 # ── 日経バナーは銘柄に依存しないので先に取得 ─────────────────────────────────
 try:
@@ -779,7 +901,7 @@ html = f"""<!DOCTYPE html>
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_sym_detail_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -806,6 +928,18 @@ html = f"""<!DOCTYPE html>
 
 <div id="ho-news" class="ho-outer-pane">
 {_news_html}
+</div>
+
+<div id="ho-mkt1" class="ho-outer-pane">
+{_market_tab1_html}
+</div>
+
+<div id="ho-mkt2" class="ho-outer-pane">
+{_market_tab2_html}
+</div>
+
+<div id="ho-mkt3" class="ho-outer-pane">
+{_market_tab3_html}
 </div>
 {_sym_detail_tab_pane}
 <script>
