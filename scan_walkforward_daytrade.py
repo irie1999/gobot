@@ -54,6 +54,12 @@ FOLDS = [
     ("Fold3", 180, 90,  90,  0),     # TRAIN 180-90, TEST 90-0
 ]
 
+# 2-fold モード (--folds 2): スイング scan_walkforward.py と同じ
+FOLDS_SWING = [
+    ("Fold1", 730, 370, 370, 180),   # TRAIN 730-370(12M), TEST 370-180(6M)
+    ("Fold2", 550, 180, 180, 0),     # TRAIN 550-180(12M), TEST 180-0(6M)
+]
+
 # 合格条件 (デフォルト: 標準モード)
 # 勝率は緩く (30%+) - トレンドフォロー戦略は勝率低くてもPFが高ければOK
 # 重視するのは PF と損益
@@ -74,6 +80,12 @@ MIN_FOLDS_LENIENT  = 1  # 1 fold以上で合格
 PASS_TRAIN_STRICT = dict(trades=10, pf=1.5, win_rate=35, pnl=0)
 PASS_TEST_STRICT  = dict(trades=5,  pf=1.2, win_rate=30, pnl=0)
 MIN_FOLDS_STRICT  = 3  # 3 fold全部
+
+# スイング閾値モード (--swing-thresholds): スイング scan_walkforward.py と同じ
+# デイトレは取引多発するので TRAIN 取引数は緩め (5→20) に内部調整
+PASS_TRAIN_SWING = dict(trades=20, pf=1.5, win_rate=45, pnl=0)
+PASS_TEST_SWING  = dict(trades=5,  pf=1.2, win_rate=40, pnl=0)
+MIN_FOLDS_SWING  = 2  # 2-fold モードなら全fold合格
 
 
 def slice_trades(trades, start_days_ago, end_days_ago, today):
@@ -211,13 +223,32 @@ def main():
                         help="緩和モード: PF1.0+, 1 fold合格でOK")
     parser.add_argument("--strict", action="store_true",
                         help="厳格モード: PF1.5+, 3 fold全部合格")
+    parser.add_argument("--folds", type=int, default=3, choices=[2, 3],
+                        help="Fold数 (2=スイング流: 730-370/370-180 + 550-180/180-0, "
+                             "3=デイトレ既定: 540-360-180-0)")
+    parser.add_argument("--swing-thresholds", action="store_true",
+                        help="スイング閾値: TRAIN取引≥20/PF≥1.5/勝率≥45%, "
+                             "TEST取引≥5/PF≥1.2/勝率≥40% (--folds 2 推奨)")
     parser.add_argument("--diagnostic", action="store_true",
                         help="診断: 全銘柄の trade数/PF を表示")
     args = parser.parse_args()
 
+    # --folds 2 のとき FOLDS をスイング流に差し替え
+    global FOLDS
+    if args.folds == 2:
+        FOLDS = FOLDS_SWING
+
     # モード設定 + ラベル (ファイル名に使う)
     global PASS_TRAIN, PASS_TEST, MIN_FOLDS
-    if args.lenient:
+    if args.swing_thresholds:
+        PASS_TRAIN = PASS_TRAIN_SWING
+        PASS_TEST = PASS_TEST_SWING
+        MIN_FOLDS = MIN_FOLDS_SWING if args.folds == 2 else MIN_FOLDS_DEFAULT
+        mode_label = "swing"
+        print(f"[INFO] スイング閾値モード: TRAIN PF≥1.5/勝率≥45%/取引≥20, "
+              f"TEST PF≥1.2/勝率≥40%/取引≥5, "
+              f"{MIN_FOLDS}/{args.folds} fold合格")
+    elif args.lenient:
         PASS_TRAIN = PASS_TRAIN_LENIENT
         PASS_TEST = PASS_TEST_LENIENT
         MIN_FOLDS = MIN_FOLDS_LENIENT
@@ -233,7 +264,7 @@ def main():
         mode_label = "standard"
         print(f"[INFO] 標準モード: TRAIN PF>={PASS_TRAIN['pf']} 勝率>={PASS_TRAIN['win_rate']}%, "
               f"TEST PF>={PASS_TEST['pf']} 勝率>={PASS_TEST['win_rate']}%, "
-              f"{MIN_FOLDS}/3 fold合格")
+              f"{MIN_FOLDS}/{args.folds} fold合格")
 
     # ユニバース
     if args.universe == "prime":
@@ -262,7 +293,8 @@ def main():
     print(f"  ユニバース: {args.universe} ({len(targets)}銘柄)")
     print(f"  戦略: {strategies}")
     print(f"  期間: {args.days}日 / 価格: {args.min_price:,}-{args.max_price:,}円")
-    print(f"  Folds: {len(FOLDS)} / 合格基準: TRAIN+TEST 両方 ≥{MIN_FOLDS} fold")
+    print(f"  Folds: {len(FOLDS)} ({[f[0] for f in FOLDS]}) / "
+          f"合格基準: TRAIN+TEST 両方 ≥{MIN_FOLDS} fold")
 
     # データロード
     print(f"\n[Step 1] データロード", flush=True)

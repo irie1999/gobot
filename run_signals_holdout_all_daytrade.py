@@ -1,11 +1,21 @@
 """
-run_signals_holdout_all_daytrade.py  ―  デイトレ統合シグナル・損益レポート
+run_signals_holdout_all_daytrade.py  ―  デイトレ統合シグナル・損益レポート (lookback)
 ==================================================================
 逆指値ロング (run_signals_holdout_all.py) を5分足デイトレ用に移植。
 
+⚠️ 注意: ファイル名に "holdout" とあるが、本ツールは **lookback 評価** であり
+   真のホールドアウト (TRAIN/TEST 分割) ではありません。
+   - 直近N日 (30/60/90/120/150/180) の窓を切り替えて WATCHLIST の成績を表示
+   - WATCHLIST 自体の銘柄選定は変わらない (= リーク評価)
+
+🆕 真のホールドアウト (TRAIN→TEST 分離) は別ツール:
+   - STEP1 銘柄選定 : python scan_walkforward_daytrade.py --folds 2 --swing-thresholds
+   - STEP2 期間別評価: python holdout_periods_report_daytrade.py --universe csv \\
+                          --from-csv walkforward_*_<date>.csv
+
 【出力タブ】
   📋 シグナル: WATCHLIST 銘柄の総合スコア + 直近シグナル一覧
-  💹 損益: 直近30/60/90/120/150/180日 + 全設定統合
+  💹 損益: 直近30/60/90/120/150/180日 + 全設定統合 (lookback)
   📊 銘柄詳細: シグナル銘柄の取引明細
   🎯 戦略別: 6戦略 × Top10 銘柄
   📰 戦略パラメータ: 各戦略の設定一覧

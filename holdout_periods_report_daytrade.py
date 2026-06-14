@@ -29,8 +29,17 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
+  # 全prime銘柄スキャン (デフォルト)
   python holdout_periods_report_daytrade.py
-  python holdout_periods_report_daytrade.py --universe prime --top 30
+
+  # 既存の3-tuple WATCHLIST (戦略割当済) を使う
+  python holdout_periods_report_daytrade.py --universe winners
+
+  # STEP1 (scan_walkforward_daytrade) のCSVから銘柄+戦略を読み込む
+  # → スイング流の2ステップ運用 (scan → holdout 分離)
+  python holdout_periods_report_daytrade.py --universe csv \\
+      --from-csv walkforward_daytrade_results/walkforward_VOL_standard_2026-06-14.csv
+
   python holdout_periods_report_daytrade.py --train-days 120 --workers 6
   python holdout_periods_report_daytrade.py --force
 """
@@ -137,11 +146,20 @@ def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
 
 # ----------------------------------------------------------------- main scan
 def scan_universe(targets, fetched, strategies, budget, max_risk,
-                  workers, cache):
-    """全銘柄×全戦略をバックテストして trades をキャッシュ。"""
-    print(f"\n[Step 2] バックテスト ({len(targets)}銘柄 × {len(strategies)}戦略)",
-          flush=True)
-    total = len(targets) * len(strategies)
+                  workers, cache, strategy_map=None):
+    """全銘柄×全戦略をバックテストして trades をキャッシュ。
+
+    strategy_map: {sym: strategy_name} 指定時は その銘柄を指定戦略のみで
+        バックテスト (CSV モード = STEP1選定戦略だけで評価)。
+    """
+    if strategy_map:
+        total = len(strategy_map)
+        print(f"\n[Step 2] バックテスト ({total}件: CSV指定の銘柄×戦略)",
+              flush=True)
+    else:
+        total = len(targets) * len(strategies)
+        print(f"\n[Step 2] バックテスト ({len(targets)}銘柄 × {len(strategies)}戦略)",
+              flush=True)
     done = 0
 
     def _work(sym, name, strat):
@@ -155,8 +173,12 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
         for sym, name in targets:
             if sym not in fetched:
                 continue
-            for strat in strategies:
-                futs.append(ex.submit(_work, sym, name, strat))
+            if strategy_map and sym in strategy_map:
+                # CSV モード: 指定戦略だけ
+                futs.append(ex.submit(_work, sym, name, strategy_map[sym]))
+            else:
+                for strat in strategies:
+                    futs.append(ex.submit(_work, sym, name, strat))
         for fut in as_completed(futs):
             sym, name, strat, trades = fut.result()
             results[(sym, strat, name)] = trades
@@ -313,11 +335,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="期間別ホールドアウト・レポート")
     parser.add_argument("--universe", default="prime",
-                        choices=["prime", "winners"],
-                        help="prime=全銘柄 (デフォルト, 期間ごとに違う銘柄選定), "
-                             "winners=既存WATCHLIST")
+                        choices=["prime", "winners", "csv"],
+                        help="prime=全銘柄 (デフォルト), "
+                             "winners=既存WATCHLIST, "
+                             "csv=--from-csv 指定のCSVから銘柄リスト")
     parser.add_argument("--watchlist", default="daytrade_combined_watchlist.py",
                         help="universe=winners 用 WATCHLIST")
+    parser.add_argument("--from-csv", default=None,
+                        help="universe=csv 用、STEP1 walkforward_*.csv のパス。"
+                             "戦略割当もCSVから読込 (scan_walkforward_daytrade 流)")
     parser.add_argument("--top", type=int, default=30,
                         help="各期間の上位N銘柄表示 (デフォルト30)")
     parser.add_argument("--train-days", type=int, default=0,
@@ -346,9 +372,35 @@ def main():
         return
 
     # universe
+    csv_strategy_map = {}  # sym -> strategy (CSV モード時のみ)
     if args.universe == "prime":
         from symbols_listed_all import SYMBOLS as UNIVERSE
         targets = UNIVERSE
+    elif args.universe == "csv":
+        if not args.from_csv:
+            print("[error] --from-csv path を指定してください")
+            return
+        import csv as _csv
+        csv_path = Path(args.from_csv)
+        if not csv_path.exists():
+            print(f"[error] CSV が見つかりません: {csv_path}")
+            return
+        with open(csv_path, encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        targets = []
+        seen = set()
+        for r in rows:
+            sym = r.get("symbol", "").strip()
+            name = r.get("name", "").strip()
+            strat = r.get("strategy", "").strip()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            targets.append((sym, name))
+            if strat:
+                csv_strategy_map[sym] = strat
+        print(f"[CSV] {csv_path.name} から {len(targets)}銘柄 / "
+              f"戦略情報: {len(csv_strategy_map)}件")
     else:
         import importlib.util
         p = Path(args.watchlist)
@@ -420,7 +472,8 @@ def main():
     results = scan_universe(
         [(s, n) for s, n in targets if s in fetched],
         fetched, strategies, args.budget, args.max_risk,
-        args.workers, cache)
+        args.workers, cache,
+        strategy_map=csv_strategy_map if args.universe == "csv" else None)
 
     # キャッシュ保存
     if not args.no_cache:
