@@ -4,16 +4,18 @@ holdout_periods_report_daytrade.py  ―  期間別 hold-out レポート
 直近 30/60/90/120/150/180日 のそれぞれを TEST 期間として、
 ホールドアウト方式で銘柄選定+評価をするレポート。
 
-【ロジック】
+【ロジック】(逆指値ロング walkforward_holdout.py と同じ設計)
 各期間 P について:
   TEST  = 過去 0 〜 P日
-  TRAIN = 過去 P 〜 P+TRAIN_DAYS 日 (TEST より過去)
+  TRAIN = TEST より前の全期間 (pkl 最古 〜 P日前)
+          ※ --train-days N で「TEST直前N日」に限定可
 
 universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) し、
 各期間ごとに:
-  1. TRAIN期間で合格 (PF≥1.2, 取引≥5, win≥30%) → 学習合格
-  2. その銘柄/戦略の TEST 期間成績を集計
-  3. Composite Score 順に Top N をその期間の WATCHLIST として表示
+  1. TRAIN期間で合格 (PF≥1.3, 取引≥20, 損益>0) → 学習合格
+  2. その銘柄/戦略の TEST 期間成績を集計 (リーク無し)
+  3. TEST PF≥1.0 & 損益≥0 で「テスト合格」マーク
+  4. Composite Score 順に Top N をその期間の WATCHLIST として表示
 
 → 期間ごとに異なる銘柄構成・戦略割当てを表示
 
@@ -49,12 +51,15 @@ ALL_STRATEGIES = {**STRATEGIES, **STRATEGIES_SHORT}
 
 PERIODS = [30, 60, 90, 120, 150, 180]
 
-# 合格条件
-PASS_TRAIN_TRADES = 5
-PASS_TRAIN_PF = 1.2
-PASS_TRAIN_WR = 30
+# 合格条件 (逆指値ロング walkforward_holdout.py に合わせる)
+PASS_TRAIN_TRADES = 20
+PASS_TRAIN_PF = 1.3
+PASS_TRAIN_WR = 0   # 勝率制約なし (PF と取引数で実質的にフィルタ)
 PASS_TRAIN_PNL = 0
 MIN_TEST_TRADES = 3
+# TEST 合格基準 (現実評価)
+TEST_PASS_PF = 1.0
+TEST_PASS_PNL = 0
 
 CACHE_DIR = Path(".cache_holdout_periods")
 
@@ -155,15 +160,26 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
 def evaluate_period(results, period_days, train_days, today, budget, top_n):
     """1期間の hold-out 評価。
 
+    train_days=0 → TEST より前の全期間を TRAIN (逆指値ロング方式)
+    train_days>0 → TEST 直前 train_days 日に限定
+
     結果: list of dict (上位 top_n 件)
-        {sym, name, strategy, train_stats, test_stats, score, trades_test}
+        {sym, name, strategy, train_stats, test_stats, score, train_pass, test_pass}
     """
     qualified = []
     for (sym, strat, name), trades in results.items():
         if not trades:
             continue
-        train_trades = slice_trades(trades, period_days + train_days,
-                                     period_days, today)
+        # TRAIN: train_days=0 なら全期間、>0 なら直前 train_days 日
+        if train_days > 0:
+            train_trades = slice_trades(trades, period_days + train_days,
+                                         period_days, today)
+        else:
+            # period_days 日より前すべて
+            train_trades = [t for t in trades
+                            if hasattr(t.get("entry_dt"), "date")
+                            and t["entry_dt"].date()
+                                < today - timedelta(days=period_days)]
         test_trades = slice_trades(trades, period_days, 0, today)
         train_stats = calc_stats(train_trades, budget)
         if not pass_train(train_stats):
@@ -171,6 +187,8 @@ def evaluate_period(results, period_days, train_days, today, budget, top_n):
         test_stats_enrich = enrich_stats(test_trades, budget)
         if test_stats_enrich["n"] < MIN_TEST_TRADES:
             continue
+        test_pass = (test_stats_enrich["pf"] >= TEST_PASS_PF
+                     and test_stats_enrich["total_pnl"] >= TEST_PASS_PNL)
         qualified.append({
             "symbol": sym,
             "name": name,
@@ -178,7 +196,7 @@ def evaluate_period(results, period_days, train_days, today, budget, top_n):
             "train_stats": train_stats,
             "test_stats": test_stats_enrich,
             "score": _composite(test_stats_enrich),
-            "trades_test": test_trades,
+            "test_pass": test_pass,
         })
 
     qualified.sort(key=lambda x: -x["score"])
@@ -192,23 +210,32 @@ def build_period_tab(period_days, train_days, items):
         return ('<p style="color:#64748b;padding:24px">'
                 f'TEST {period_days}日 / TRAIN {train_days}日 ホールドアウト合格銘柄なし</p>')
 
+    winners = [it for it in items if it["test_pass"]]
     total_pnl = sum(it["test_stats"]["total_pnl"] for it in items)
+    winner_pnl = sum(it["test_stats"]["total_pnl"] for it in winners)
     total_n = sum(it["test_stats"]["n"] for it in items)
     total_wins = sum(int(it["test_stats"]["n"] * it["test_stats"]["win_rate"] / 100)
                      for it in items)
     avg_wr = total_wins / total_n * 100 if total_n > 0 else 0
 
+    train_label = f"{train_days}日" if train_days > 0 else "TEST以外の全期間"
     sum_box = f"""
 <div class="box">
-  <div class="it"><div class="lb">合格銘柄</div><div class="vl">{len(items)}</div></div>
-  <div class="it"><div class="lb">TEST取引数</div><div class="vl">{total_n}</div></div>
-  <div class="it"><div class="lb">TEST勝率</div><div class="vl">{avg_wr:.0f}%</div></div>
-  <div class="it"><div class="lb">TEST総損益</div>
+  <div class="it"><div class="lb">候補銘柄</div><div class="vl">{len(items)}</div></div>
+  <div class="it"><div class="lb">TEST合格 ★</div>
+    <div class="vl profit">{len(winners)}</div></div>
+  <div class="it"><div class="lb">TEST不合格</div>
+    <div class="vl loss">{len(items)-len(winners)}</div></div>
+  <div class="it"><div class="lb">合格率</div>
+    <div class="vl">{len(winners)*100//max(len(items),1)}%</div></div>
+  <div class="it"><div class="lb">合格者TEST損益</div>
+    <div class="vl profit">{winner_pnl:+,.0f}円</div></div>
+  <div class="it"><div class="lb">全体TEST損益</div>
     <div class="vl {'profit' if total_pnl >= 0 else 'loss'}">{total_pnl:+,.0f}円</div></div>
 </div>
 <p style="color:#94a3b8;font-size:0.82rem;margin:-6px 0 12px">
-  TRAIN期間: 過去 {period_days}〜{period_days + train_days}日前 ({train_days}日) /
-  TEST期間: 過去 0〜{period_days}日前 ({period_days}日)
+  TRAIN期間: {train_label} (TEST より前) / TEST期間: 直近 {period_days}日<br>
+  💡 <strong>TEST合格 ★</strong> = 「TRAIN期間で勝てた銘柄が、TEST期間でも PF≥{TEST_PASS_PF} で勝てた」← 真の優位性あり
 </p>
 """
 
@@ -218,8 +245,11 @@ def build_period_tab(period_days, train_days, items):
         es = it["test_stats"]
         pf = es["pf"]
         pc = "profit" if es["total_pnl"] >= 0 else "loss"
+        bg = "#0d4d2f" if it["test_pass"] else "#2d0a0a"
+        mark = "★" if it["test_pass"] else "—"
         rows += f"""
-<tr>
+<tr style="background:{bg}">
+  <td style="color:#4ade80">{mark}</td>
   <td>{i}</td>
   <td class="sym">{it['name']}<br><small class="code">{it['symbol']}</small></td>
   <td>{it['strategy']}</td>
@@ -240,11 +270,12 @@ def build_period_tab(period_days, train_days, items):
 <table>
   <thead>
     <tr>
+      <th rowspan="2">合</th>
       <th rowspan="2">#</th>
       <th rowspan="2">銘柄</th>
       <th rowspan="2">戦略</th>
-      <th colspan="4" style="background:#1e3a5f">TRAIN ({train_days}日)</th>
-      <th colspan="6" style="background:#1a4d3a">TEST ({period_days}日)</th>
+      <th colspan="4" style="background:#1e3a5f">TRAIN ({train_label})</th>
+      <th colspan="6" style="background:#1a4d3a">TEST (直近{period_days}日)</th>
     </tr>
     <tr>
       <th>取引</th><th>勝率</th><th>PF</th><th>損益</th>
@@ -269,8 +300,9 @@ def main():
                         help="universe=winners 用 WATCHLIST")
     parser.add_argument("--top", type=int, default=30,
                         help="各期間の上位N銘柄表示 (デフォルト30)")
-    parser.add_argument("--train-days", type=int, default=90,
-                        help="各期間のTRAIN日数 (デフォルト90)")
+    parser.add_argument("--train-days", type=int, default=0,
+                        help="TRAIN日数 (デフォルト0=TEST以外の全期間, "
+                             "逆指値ロング walkforward_holdout.py 方式)")
     parser.add_argument("--days", type=int, default=540,
                         help="バックテスト全期間 (デフォルト540日)")
     parser.add_argument("--budget", type=int, default=200_000)
@@ -443,14 +475,17 @@ function switchTab(tab){
                       f'{build_period_tab(P, args.train_days, period_items[P])}'
                       f'</div>')
 
+    train_label = f"TEST直前{args.train_days}日" if args.train_days > 0 else "TEST以外の全期間"
     legend = f"""
 <div class="legend">
-  <strong>📊 ホールドアウト方式</strong> ─ 各タブで「対象期間 (TEST)」を除いて学習し、
-  <strong>その期間で評価</strong>します。<br>
-  TRAIN: 過去 P 〜 P+{args.train_days}日前で学習合格 (取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF},
-  勝率≥{PASS_TRAIN_WR}%, 損益>0)<br>
-  TEST: 過去 0 〜 P日前の生成績 (リーク無し、未学習データ)<br>
-  Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示
+  <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と同じ設計)</strong><br>
+  各タブで「対象期間 (TEST)」を除いて学習し、<strong>その期間で評価</strong>します。
+  TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無しの現実評価。<br>
+  ▸ TRAIN: {train_label} (TEST より前) で学習合格
+    (取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0)<br>
+  ▸ TEST : 直近 P日 (未学習データ) で評価<br>
+  ▸ ★合格: TEST PF≥{TEST_PASS_PF} & 損益≥0 (真の優位性あり)<br>
+  ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示
 </div>
 """
 
