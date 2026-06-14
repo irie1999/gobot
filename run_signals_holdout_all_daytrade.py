@@ -138,10 +138,11 @@ def build_signal_tab(items, score_cache=None):
                 pf_cells += (f'<td style="color:{c}">{_pf(pf)}</td>'
                              f'<td class="{pc}">{pnl:+,.0f}</td>')
 
+        sym_short = it["symbol"].replace(".T", "")
         rows += f"""
 <tr>
   <td><strong style="color:{_color_score(display_score)}">{it['rank']}{display_score}</strong></td>
-  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small></td>
+  <td class="sym"><span class="sym-link" onclick="jumpToSym('{sym_short}')" title="クリックで取引詳細へ">{it["name"]}<br><small class="code">{it["symbol"]}</small></span></td>
   <td>{it["strategy"]}</td>
   <td>{last_p:,.0f}</td>
   {pf_cells}
@@ -224,9 +225,10 @@ def build_pnl_tab(items):
             total_wins += int(n * s.get("win_rate", 0) / 100)
             pf = s.get("pf", 0)
             pc = "profit" if s.get("total_pnl", 0) >= 0 else "loss"
+            sym_short = it["symbol"].replace(".T", "")
             rows += f"""
 <tr>
-  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small></td>
+  <td class="sym"><span class="sym-link" onclick="jumpToSym('{sym_short}')" title="クリックで取引詳細へ">{it["name"]}<br><small class="code">{it["symbol"]}</small></span></td>
   <td>{it["strategy"]}</td>
   <td>{n}</td>
   <td>{s.get("win_rate", 0):.0f}%</td>
@@ -287,9 +289,10 @@ def build_strategy_tab(items):
             s = it["period_stats"][90]
             pf = s.get("pf", 0)
             pc = "profit" if s.get("total_pnl", 0) >= 0 else "loss"
+            sym_short = it["symbol"].replace(".T", "")
             rows += f"""
 <tr>
-  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small></td>
+  <td class="sym"><span class="sym-link" onclick="jumpToSym('{sym_short}')" title="クリックで取引詳細へ">{it["name"]}<br><small class="code">{it["symbol"]}</small></span></td>
   <td>{s.get("n", 0)}</td>
   <td>{s.get("win_rate", 0):.0f}%</td>
   <td style="color:{_color_pf(pf)}">{_pf(pf)}</td>
@@ -374,6 +377,7 @@ def build_symbol_detail_tab(items):
         sym_short = it["symbol"].replace(".T", "")
         score = it.get("frozen_score", it["score"])
         nav += (f'<button class="sym-btn {active_btn}" '
+                f'data-sym="{sym_short}" '
                 f'onclick="switchSym(\'sym{sym_short}\')">'
                 f'<strong>{it["symbol"]}</strong><br>'
                 f'<small style="color:#94a3b8">{it["name"][:8]}</small><br>'
@@ -386,15 +390,27 @@ def build_symbol_detail_tab(items):
         trade_rows = ""
         for t in trades:
             entry_dt = t.get("entry_dt")
+            exit_dt = t.get("exit_dt")
             ed = entry_dt.strftime("%m-%d %H:%M") if hasattr(entry_dt, "strftime") else "?"
+            xd = exit_dt.strftime("%m-%d %H:%M") if hasattr(exit_dt, "strftime") else "?"
+            try:
+                hold = f"{int((exit_dt - entry_dt).total_seconds() // 60)}分"
+            except Exception:
+                hold = "-"
             pnl = t.get("pnl", 0)
+            pct = t.get("pct", 0)
             pc = "profit" if pnl >= 0 else "loss"
             trade_rows += f"""
 <tr>
   <td>{ed}</td>
+  <td>{xd}</td>
+  <td>{hold}</td>
   <td>{t.get('entry_p',0):,.0f}</td>
+  <td class="loss">{t.get('stop_p',0):,.0f}</td>
+  <td class="profit">{t.get('target_p',0):,.0f}</td>
   <td>{t.get('exit_p',0):,.0f}</td>
   <td class="{pc}">{pnl:+,.0f}</td>
+  <td class="{pc}">{pct:+.2f}%</td>
   <td>{t.get('reason','?')}</td>
 </tr>"""
 
@@ -421,7 +437,9 @@ def build_symbol_detail_tab(items):
   <h3>直近30取引</h3>
   <table>
     <thead><tr>
-      <th>Entry</th><th>買値</th><th>決済</th><th>損益</th><th>理由</th>
+      <th>Entry</th><th>Exit</th><th>保有</th>
+      <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
+      <th>損益</th><th>%</th><th>理由</th>
     </tr></thead>
     <tbody>{trade_rows}</tbody>
   </table>
@@ -548,6 +566,9 @@ td { padding: 5px 8px; border: 1px solid #1e293b;
 .sym-btn:hover { background: #263349; border-color: #64748b; }
 .sym-btn.active { background: #1d4ed8; border-color: #3b82f6; }
 .sym-pane { display: none; }
+.sym-link { cursor: pointer; color: #e2e8f0; text-decoration: none;
+            border-bottom: 1px dashed #475569; }
+.sym-link:hover { color: #60a5fa; border-bottom-color: #60a5fa; }
 """
 
     js = """
@@ -568,6 +589,22 @@ function switchSym(id){
   document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById(id).style.display='block';
   (event.target.closest('.sym-btn')||event.target).classList.add('active');
+}
+function jumpToSym(symShort){
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('t-sym').classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>{
+    if(b.textContent.indexOf('銘柄詳細')!==-1) b.classList.add('active');
+  });
+  document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+  var pane=document.getElementById('sym'+symShort);
+  if(pane) pane.style.display='block';
+  document.querySelectorAll('.sym-btn').forEach(b=>{
+    if(b.dataset.sym===symShort) b.classList.add('active');
+  });
+  if(pane) pane.scrollIntoView({behavior:'smooth',block:'start'});
 }
 """
 
