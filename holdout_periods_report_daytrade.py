@@ -59,6 +59,7 @@ holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 from __future__ import annotations
 
 import argparse
+import os as _os
 import pickle
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -737,7 +738,9 @@ def main():
     cache = None
     if not args.no_cache:
         CACHE_DIR.mkdir(exist_ok=True)
-        cache_file = CACHE_DIR / f"trades_{args.universe}_{today}.pkl"
+        # ENTRY_START を cache key に含める (env var で変えた場合に古い結果を流用しない)
+        _es_label = _os.environ.get("DAYTRADE_ENTRY_START", "0930").replace(":", "")
+        cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{today}.pkl"
         if cache_file.exists():
             try:
                 cache = pickle.loads(cache_file.read_bytes())
