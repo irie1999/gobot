@@ -4,16 +4,16 @@ holdout_periods_report_daytrade.py  ―  期間別 hold-out レポート
 直近 30/60/90/120/150/180日 のそれぞれを TEST 期間として、
 ホールドアウト方式で銘柄選定+評価をするレポート。
 
-【ロジック】(逆指値ロング walkforward_holdout.py と同じ設計、TEST非重複版)
-各タブ P について、TEST 期間は重複しない30日窓:
-  P=30日タブ : TEST = 0〜30日前   (直近30日)
-  P=60日タブ : TEST = 30〜60日前  (その前の30日)
-  P=90日タブ : TEST = 60〜90日前
-  P=120日タブ: TEST = 90〜120日前
-  P=150日タブ: TEST = 120〜150日前
-  P=180日タブ: TEST = 150〜180日前
-  TRAIN = TEST より前の全期間 (pkl 最古 〜 TEST開始日)
-          ※ --train-days N で「TEST直前N日」に限定可
+【ロジック】(逆指値ロング walkforward_holdout.py と完全一致)
+6つの hold-out 期間 (今日から起算、それぞれ独立):
+  30日タブ : TRAIN=過去全期間〜30日前 / TEST=直近30日
+  60日タブ : TRAIN=過去全期間〜60日前 / TEST=直近60日
+  90日タブ : TRAIN=過去全期間〜90日前 / TEST=直近90日
+  120日タブ: TRAIN=過去全期間〜120日前 / TEST=直近120日
+  150日タブ: TRAIN=過去全期間〜150日前 / TEST=直近150日
+  180日タブ: TRAIN=過去全期間〜180日前 / TEST=直近180日
+  ※ TEST は今日から起算なので重複あり (30日窓は60日窓に含まれる)
+     これは「異なる時間スケールでの優位性検証」の意図的設計
 
 universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) し、
 各タブごとに:
@@ -21,7 +21,7 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
   2. その銘柄/戦略の TEST 期間成績を集計 (リーク無し)
   3. TEST PF≥1.0 & 損益≥0 で「テスト合格」マーク
   4. Composite Score 順に Top N をその期間の WATCHLIST として表示
-→ 各タブが独立した時系列窓 → 銘柄選定/評価が完全に分離
+→ 全タブで★合格 = 時系列ロバスト (短期も長期も勝てる本物)
 
 → 期間ごとに異なる銘柄構成・戦略割当てを表示
 
@@ -57,8 +57,8 @@ ALL_STRATEGIES = {**STRATEGIES, **STRATEGIES_SHORT}
 
 PERIODS = [30, 60, 90, 120, 150, 180]
 # 各タブの TEST 窓: (end_days_ago, start_days_ago) ※ start > end (start=より過去)
-# 非重複 30日窓: P日タブ → (P-30) 〜 P 日前
-TEST_WINDOWS = {P: (P - 30, P) for P in PERIODS}
+# 逆指値ロング方式: P日タブ → 0 〜 P 日前 (今日から起算、重複あり)
+TEST_WINDOWS = {P: (0, P) for P in PERIODS}
 
 # 合格条件 (逆指値ロング walkforward_holdout.py に合わせる)
 PASS_TRAIN_TRADES = 20
@@ -219,9 +219,9 @@ def evaluate_period(results, period_label, train_days, today, budget, top_n):
 
 # ----------------------------------------------------------------- HTML
 def build_period_tab(period_label, train_days, items):
-    """1タブ HTML (TEST は非重複30日窓)。"""
+    """1タブ HTML (逆指値ロング walkforward_holdout.py と同じ重複ありTEST)。"""
     test_end, test_start = TEST_WINDOWS[period_label]
-    test_label = f"{test_end}〜{test_start}日前 (30日窓)"
+    test_label = f"直近{test_start}日"
     if not items:
         return ('<p style="color:#64748b;padding:24px">'
                 f'TEST {test_label} ホールドアウト合格銘柄なし</p>')
@@ -237,7 +237,7 @@ def build_period_tab(period_label, train_days, items):
     if train_days > 0:
         train_label = f"TEST直前 {train_days}日 ({test_start}〜{test_start + train_days}日前)"
     else:
-        train_label = f"TEST より前の全期間 (〜{test_start}日前まで)"
+        train_label = f"TEST より前の全期間 ({test_start}日前より過去すべて)"
     sum_box = f"""
 <div class="box">
   <div class="it"><div class="lb">候補銘柄</div><div class="vl">{len(items)}</div></div>
@@ -254,7 +254,7 @@ def build_period_tab(period_label, train_days, items):
 </div>
 <p style="color:#94a3b8;font-size:0.82rem;margin:-6px 0 12px">
   TRAIN期間: {train_label}<br>
-  TEST期間: <strong>{test_label}</strong> (他タブと非重複の独立30日窓)<br>
+  TEST期間: <strong>{test_label}</strong> (今日から起算、逆指値ロング方式)<br>
   💡 <strong>TEST合格 ★</strong> = 「TRAIN期間で勝てた銘柄が、TEST期間でも PF≥{TEST_PASS_PF} で勝てた」← 真の優位性あり
 </p>
 """
@@ -363,11 +363,10 @@ def main():
         targets = [(e[0], e[1]) for e in raw]
 
     print(f"=" * 70)
-    print(f"  期間別ホールドアウト・レポート (TEST 非重複30日窓)")
+    print(f"  期間別ホールドアウト・レポート (逆指値ロング方式)")
     print(f"=" * 70)
     print(f"  universe: {args.universe} ({len(targets)}銘柄)")
-    print(f"  TEST窓: 直近30日 / 30-60日前 / 60-90日前 / 90-120日前 / "
-          f"120-150日前 / 150-180日前")
+    print(f"  TEST: 直近 30/60/90/120/150/180 日 (6期間、今日から起算)")
     print(f"  TRAIN: " +
           (f"TEST直前 {args.train_days}日" if args.train_days > 0
            else "TEST より前の全期間"))
@@ -430,15 +429,14 @@ def main():
         except Exception:
             pass
 
-    # 期間別評価 (非重複30日窓)
-    print(f"\n[Step 3] 期間別ホールドアウト評価 (TEST 非重複30日窓)", flush=True)
+    # 期間別評価 (逆指値ロング walkforward_holdout.py と一致)
+    print(f"\n[Step 3] 6期間ホールドアウト評価 (逆指値ロング方式)", flush=True)
     period_items = {}
     for P in PERIODS:
         items = evaluate_period(results, P, args.train_days, today,
                                   args.budget, args.top)
         period_items[P] = items
-        te, ts = TEST_WINDOWS[P]
-        print(f"  TEST {te:>3}〜{ts:>3}日前 (30日窓): 合格 {len(items)}銘柄")
+        print(f"  直近{P:>3}日 TEST: 合格 {len(items)}銘柄")
 
     # HTML
     css = """
@@ -493,12 +491,8 @@ function switchTab(tab){
         active_btn = "active" if i == 0 else ""
         active_pane = "active" if i == 0 else ""
         n_qual = len(period_items[P])
-        test_end, test_start = TEST_WINDOWS[P]
-        btn_label = (f"直近30日<br><small>({test_end}-{test_start}日前)</small>"
-                     if test_end == 0
-                     else f"{test_end}-{test_start}日前<br><small>30日窓</small>")
         tab_btns += (f'<button class="tab-btn {active_btn}" '
-                     f'onclick="switchTab(\'p{P}\')">{btn_label}<br>'
+                     f'onclick="switchTab(\'p{P}\')">直近{P}日<br>'
                      f'<small style="color:#fbbf24">{n_qual}件</small></button>')
         tab_panes += (f'<div id="t-p{P}" class="tab-pane {active_pane}">'
                       f'{build_period_tab(P, args.train_days, period_items[P])}'
@@ -508,15 +502,17 @@ function switchTab(tab){
                   else "TEST より前の全期間")
     legend = f"""
 <div class="legend">
-  <strong>📊 真のWalk-Forward — 非重複TEST窓 (各タブ独立)</strong><br>
-  各タブで <strong>異なる30日窓を TEST</strong> として使用、TEST より前の期間で学習。
-  タブ間で TEST 期間が一切重複しないため、各タブが独立した時系列スナップショット評価です。<br><br>
-  ▸ <strong>TEST窓 (非重複)</strong>:
-    直近30日 / 30-60日前 / 60-90日前 / 90-120日前 / 120-150日前 / 150-180日前<br>
+  <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と完全一致)</strong><br>
+  6つの hold-out 期間で評価。TEST は「今日から起算」した直近 N日で、
+  異なる時間スケール (短期/中期/長期) での優位性を検証します。
+  TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無し。<br><br>
+  ▸ <strong>6 TEST 期間</strong> (今日から起算、重複あり):
+    直近30 / 60 / 90 / 120 / 150 / 180日<br>
   ▸ <strong>TRAIN</strong>: {train_desc} (TEST 開始日より前)<br>
   ▸ 合格条件 (TRAIN): 取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0<br>
   ▸ <strong>★合格</strong>: TEST PF≥{TEST_PASS_PF} & 損益≥0 (真の優位性あり、未学習データでも勝てた)<br>
-  ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示
+  ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示<br>
+  ▸ <strong>全6タブで★合格 = 短期も長期もロバスト</strong> (最有力候補)
 </div>
 """
 
