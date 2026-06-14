@@ -4,18 +4,24 @@ holdout_periods_report_daytrade.py  ―  期間別 hold-out レポート
 直近 30/60/90/120/150/180日 のそれぞれを TEST 期間として、
 ホールドアウト方式で銘柄選定+評価をするレポート。
 
-【ロジック】(逆指値ロング walkforward_holdout.py と同じ設計)
-各期間 P について:
-  TEST  = 過去 0 〜 P日
-  TRAIN = TEST より前の全期間 (pkl 最古 〜 P日前)
+【ロジック】(逆指値ロング walkforward_holdout.py と同じ設計、TEST非重複版)
+各タブ P について、TEST 期間は重複しない30日窓:
+  P=30日タブ : TEST = 0〜30日前   (直近30日)
+  P=60日タブ : TEST = 30〜60日前  (その前の30日)
+  P=90日タブ : TEST = 60〜90日前
+  P=120日タブ: TEST = 90〜120日前
+  P=150日タブ: TEST = 120〜150日前
+  P=180日タブ: TEST = 150〜180日前
+  TRAIN = TEST より前の全期間 (pkl 最古 〜 TEST開始日)
           ※ --train-days N で「TEST直前N日」に限定可
 
 universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) し、
-各期間ごとに:
+各タブごとに:
   1. TRAIN期間で合格 (PF≥1.3, 取引≥20, 損益>0) → 学習合格
   2. その銘柄/戦略の TEST 期間成績を集計 (リーク無し)
   3. TEST PF≥1.0 & 損益≥0 で「テスト合格」マーク
   4. Composite Score 順に Top N をその期間の WATCHLIST として表示
+→ 各タブが独立した時系列窓 → 銘柄選定/評価が完全に分離
 
 → 期間ごとに異なる銘柄構成・戦略割当てを表示
 
@@ -50,6 +56,9 @@ JST = timezone(timedelta(hours=9))
 ALL_STRATEGIES = {**STRATEGIES, **STRATEGIES_SHORT}
 
 PERIODS = [30, 60, 90, 120, 150, 180]
+# 各タブの TEST 窓: (end_days_ago, start_days_ago) ※ start > end (start=より過去)
+# 非重複 30日窓: P日タブ → (P-30) 〜 P 日前
+TEST_WINDOWS = {P: (P - 30, P) for P in PERIODS}
 
 # 合格条件 (逆指値ロング walkforward_holdout.py に合わせる)
 PASS_TRAIN_TRADES = 20
@@ -157,30 +166,35 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
     return results
 
 
-def evaluate_period(results, period_days, train_days, today, budget, top_n):
-    """1期間の hold-out 評価。
+def evaluate_period(results, period_label, train_days, today, budget, top_n):
+    """1タブの hold-out 評価 (TEST は非重複30日窓)。
 
+    period_label: 30/60/90/120/150/180 のいずれか
+        TEST 窓 = (period_label-30) 〜 period_label 日前 の30日窓
     train_days=0 → TEST より前の全期間を TRAIN (逆指値ロング方式)
     train_days>0 → TEST 直前 train_days 日に限定
 
     結果: list of dict (上位 top_n 件)
-        {sym, name, strategy, train_stats, test_stats, score, train_pass, test_pass}
     """
+    test_end, test_start = TEST_WINDOWS[period_label]  # newer, older
     qualified = []
+    test_cutoff = today - timedelta(days=test_start)
+
     for (sym, strat, name), trades in results.items():
         if not trades:
             continue
-        # TRAIN: train_days=0 なら全期間、>0 なら直前 train_days 日
+        # TRAIN: TEST 開始日より前
         if train_days > 0:
-            train_trades = slice_trades(trades, period_days + train_days,
-                                         period_days, today)
+            # 直前 train_days 日に限定 = test_start 〜 test_start+train_days 日前
+            train_trades = slice_trades(trades, test_start + train_days,
+                                         test_start, today)
         else:
-            # period_days 日より前すべて
+            # TEST 開始より前すべて
             train_trades = [t for t in trades
                             if hasattr(t.get("entry_dt"), "date")
-                            and t["entry_dt"].date()
-                                < today - timedelta(days=period_days)]
-        test_trades = slice_trades(trades, period_days, 0, today)
+                            and t["entry_dt"].date() < test_cutoff]
+        # TEST: test_end 〜 test_start 日前 (30日窓)
+        test_trades = slice_trades(trades, test_start, test_end, today)
         train_stats = calc_stats(train_trades, budget)
         if not pass_train(train_stats):
             continue
@@ -204,11 +218,13 @@ def evaluate_period(results, period_days, train_days, today, budget, top_n):
 
 
 # ----------------------------------------------------------------- HTML
-def build_period_tab(period_days, train_days, items):
-    """1期間タブ HTML。"""
+def build_period_tab(period_label, train_days, items):
+    """1タブ HTML (TEST は非重複30日窓)。"""
+    test_end, test_start = TEST_WINDOWS[period_label]
+    test_label = f"{test_end}〜{test_start}日前 (30日窓)"
     if not items:
         return ('<p style="color:#64748b;padding:24px">'
-                f'TEST {period_days}日 / TRAIN {train_days}日 ホールドアウト合格銘柄なし</p>')
+                f'TEST {test_label} ホールドアウト合格銘柄なし</p>')
 
     winners = [it for it in items if it["test_pass"]]
     total_pnl = sum(it["test_stats"]["total_pnl"] for it in items)
@@ -218,7 +234,10 @@ def build_period_tab(period_days, train_days, items):
                      for it in items)
     avg_wr = total_wins / total_n * 100 if total_n > 0 else 0
 
-    train_label = f"{train_days}日" if train_days > 0 else "TEST以外の全期間"
+    if train_days > 0:
+        train_label = f"TEST直前 {train_days}日 ({test_start}〜{test_start + train_days}日前)"
+    else:
+        train_label = f"TEST より前の全期間 (〜{test_start}日前まで)"
     sum_box = f"""
 <div class="box">
   <div class="it"><div class="lb">候補銘柄</div><div class="vl">{len(items)}</div></div>
@@ -234,7 +253,8 @@ def build_period_tab(period_days, train_days, items):
     <div class="vl {'profit' if total_pnl >= 0 else 'loss'}">{total_pnl:+,.0f}円</div></div>
 </div>
 <p style="color:#94a3b8;font-size:0.82rem;margin:-6px 0 12px">
-  TRAIN期間: {train_label} (TEST より前) / TEST期間: 直近 {period_days}日<br>
+  TRAIN期間: {train_label}<br>
+  TEST期間: <strong>{test_label}</strong> (他タブと非重複の独立30日窓)<br>
   💡 <strong>TEST合格 ★</strong> = 「TRAIN期間で勝てた銘柄が、TEST期間でも PF≥{TEST_PASS_PF} で勝てた」← 真の優位性あり
 </p>
 """
@@ -266,7 +286,7 @@ def build_period_tab(period_days, train_days, items):
 </tr>"""
 
     table = f"""
-<h3>期間 {period_days}日 ホールドアウト Top{len(items)}</h3>
+<h3>TEST {test_label} ホールドアウト Top{len(items)}</h3>
 <table>
   <thead>
     <tr>
@@ -274,8 +294,8 @@ def build_period_tab(period_days, train_days, items):
       <th rowspan="2">#</th>
       <th rowspan="2">銘柄</th>
       <th rowspan="2">戦略</th>
-      <th colspan="4" style="background:#1e3a5f">TRAIN ({train_label})</th>
-      <th colspan="6" style="background:#1a4d3a">TEST (直近{period_days}日)</th>
+      <th colspan="4" style="background:#1e3a5f">TRAIN</th>
+      <th colspan="6" style="background:#1a4d3a">TEST ({test_label})</th>
     </tr>
     <tr>
       <th>取引</th><th>勝率</th><th>PF</th><th>損益</th>
@@ -343,13 +363,15 @@ def main():
         targets = [(e[0], e[1]) for e in raw]
 
     print(f"=" * 70)
-    print(f"  期間別ホールドアウト・レポート")
+    print(f"  期間別ホールドアウト・レポート (TEST 非重複30日窓)")
     print(f"=" * 70)
     print(f"  universe: {args.universe} ({len(targets)}銘柄)")
-    print(f"  期間: {PERIODS}")
-    print(f"  TRAIN日数: {args.train_days}")
-    print(f"  TEST合格条件: 取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, "
-          f"勝率≥{PASS_TRAIN_WR}%, 損益>0")
+    print(f"  TEST窓: 直近30日 / 30-60日前 / 60-90日前 / 90-120日前 / "
+          f"120-150日前 / 150-180日前")
+    print(f"  TRAIN: " +
+          (f"TEST直前 {args.train_days}日" if args.train_days > 0
+           else "TEST より前の全期間"))
+    print(f"  TRAIN合格条件: 取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0")
 
     # 戦略
     if args.strategy == "all":
@@ -408,14 +430,15 @@ def main():
         except Exception:
             pass
 
-    # 期間別評価
-    print(f"\n[Step 3] 期間別ホールドアウト評価", flush=True)
+    # 期間別評価 (非重複30日窓)
+    print(f"\n[Step 3] 期間別ホールドアウト評価 (TEST 非重複30日窓)", flush=True)
     period_items = {}
     for P in PERIODS:
         items = evaluate_period(results, P, args.train_days, today,
                                   args.budget, args.top)
         period_items[P] = items
-        print(f"  {P:>3}日: 合格 {len(items)}銘柄")
+        te, ts = TEST_WINDOWS[P]
+        print(f"  TEST {te:>3}〜{ts:>3}日前 (30日窓): 合格 {len(items)}銘柄")
 
     # HTML
     css = """
@@ -441,10 +464,11 @@ td { padding:5px 8px; border:1px solid #1e293b;
 .box .vl { font-size:1.3rem; font-weight:700; }
 .tab-nav { display:flex; gap:0; margin:16px 0 0;
            border-bottom:2px solid #1e293b; }
-.tab-btn { padding:9px 22px; background:#1e293b; border:none;
+.tab-btn { padding:8px 14px; background:#1e293b; border:none;
            border-radius:6px 6px 0 0; color:#94a3b8; cursor:pointer;
-           font-size:0.9rem; border-bottom:2px solid transparent;
-           margin-bottom:-2px; }
+           font-size:0.82rem; border-bottom:2px solid transparent;
+           margin-bottom:-2px; text-align:center; line-height:1.35; }
+.tab-btn small { font-size:0.7rem; color:#64748b; display:inline-block; }
 .tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .tab-btn.active { background:#0f172a; color:#60a5fa;
                   border-bottom:2px solid #60a5fa; font-weight:700; }
@@ -469,22 +493,29 @@ function switchTab(tab){
         active_btn = "active" if i == 0 else ""
         active_pane = "active" if i == 0 else ""
         n_qual = len(period_items[P])
+        test_end, test_start = TEST_WINDOWS[P]
+        btn_label = (f"直近30日<br><small>({test_end}-{test_start}日前)</small>"
+                     if test_end == 0
+                     else f"{test_end}-{test_start}日前<br><small>30日窓</small>")
         tab_btns += (f'<button class="tab-btn {active_btn}" '
-                     f'onclick="switchTab(\'p{P}\')">{P}日 ({n_qual})</button>')
+                     f'onclick="switchTab(\'p{P}\')">{btn_label}<br>'
+                     f'<small style="color:#fbbf24">{n_qual}件</small></button>')
         tab_panes += (f'<div id="t-p{P}" class="tab-pane {active_pane}">'
                       f'{build_period_tab(P, args.train_days, period_items[P])}'
                       f'</div>')
 
-    train_label = f"TEST直前{args.train_days}日" if args.train_days > 0 else "TEST以外の全期間"
+    train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
+                  else "TEST より前の全期間")
     legend = f"""
 <div class="legend">
-  <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と同じ設計)</strong><br>
-  各タブで「対象期間 (TEST)」を除いて学習し、<strong>その期間で評価</strong>します。
-  TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無しの現実評価。<br>
-  ▸ TRAIN: {train_label} (TEST より前) で学習合格
-    (取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0)<br>
-  ▸ TEST : 直近 P日 (未学習データ) で評価<br>
-  ▸ ★合格: TEST PF≥{TEST_PASS_PF} & 損益≥0 (真の優位性あり)<br>
+  <strong>📊 真のWalk-Forward — 非重複TEST窓 (各タブ独立)</strong><br>
+  各タブで <strong>異なる30日窓を TEST</strong> として使用、TEST より前の期間で学習。
+  タブ間で TEST 期間が一切重複しないため、各タブが独立した時系列スナップショット評価です。<br><br>
+  ▸ <strong>TEST窓 (非重複)</strong>:
+    直近30日 / 30-60日前 / 60-90日前 / 90-120日前 / 120-150日前 / 150-180日前<br>
+  ▸ <strong>TRAIN</strong>: {train_desc} (TEST 開始日より前)<br>
+  ▸ 合格条件 (TRAIN): 取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0<br>
+  ▸ <strong>★合格</strong>: TEST PF≥{TEST_PASS_PF} & 損益≥0 (真の優位性あり、未学習データでも勝てた)<br>
   ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示
 </div>
 """
