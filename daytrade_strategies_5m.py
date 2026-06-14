@@ -23,7 +23,18 @@ import pandas as pd
 
 
 # ── 共通定数 ─────────────────────────────────────────────────
-ENTRY_START   = dtime(9, 30)     # エントリー開始時刻
+# ENTRY_START は環境変数 DAYTRADE_ENTRY_START="HH:MM" で上書き可能
+# (compare_entry_times_daytrade.py で複数パターン検証するために用意)
+import os as _os
+_es_env = _os.environ.get("DAYTRADE_ENTRY_START")
+if _es_env:
+    try:
+        _h, _m = map(int, _es_env.split(":"))
+        ENTRY_START = dtime(_h, _m)
+    except Exception:
+        ENTRY_START = dtime(9, 30)
+else:
+    ENTRY_START = dtime(9, 30)     # エントリー開始時刻 (デフォルト)
 ENTRY_CUTOFF  = dtime(14, 30)    # エントリー期限
 FORCE_CLOSE   = dtime(14, 55)    # 強制決済
 WARMUP_BARS   = 20               # ウォームアップ (バー数)

@@ -134,9 +134,9 @@ def signal_vol_short(opens, highs, lows, closes, volumes, i, atr_arr,
 
 
 def signal_mom_short(opens, highs, lows, closes, volumes, i, atr_arr,
-                     roc_period=10, roc_thr=-1.0, ma_fast=10, ma_slow=25,
+                     roc_period=10, roc_thr=-3.0, ma_fast=10, ma_slow=25,
                      em=0.0, sm=1.5, tm=3.0):
-    """ROC10 < -1% + MA10 < MA25 (5分足調整)。"""
+    """ROC10 < -3% + MA10 < MA25 (5分足調整、ロング MOM と対称化)。"""
     if i < max(roc_period, ma_slow) + 1:
         return None
     roc = (closes[i] / closes[i-roc_period] - 1) * 100
