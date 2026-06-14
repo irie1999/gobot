@@ -29,19 +29,24 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
-  # 全prime銘柄スキャン (デフォルト)
-  python holdout_periods_report_daytrade.py
+  # 最短: STEP1 (--swing-thresholds-relaxed) で出した最新CSVを自動収集
+  python holdout_periods_report_daytrade.py --mode swing_relaxed
 
-  # 既存の3-tuple WATCHLIST (戦略割当済) を使う
+  # 他モードも同様
+  python holdout_periods_report_daytrade.py --mode swing
+  python holdout_periods_report_daytrade.py --mode standard
+
+  # 強制再生成 / ワーカー数
+  python holdout_periods_report_daytrade.py --mode swing_relaxed --force --workers 6
+
+  # CSVパス直接指定 (--from-csv あれば --universe csv 自動)
+  python holdout_periods_report_daytrade.py --from-csv path/to/walkforward_*.csv
+
+  # 既存の3-tuple WATCHLIST を使う
   python holdout_periods_report_daytrade.py --universe winners
 
-  # STEP1 (scan_walkforward_daytrade) のCSVから銘柄+戦略を読み込む
-  # → スイング流の2ステップ運用 (scan → holdout 分離)
-  python holdout_periods_report_daytrade.py --universe csv \\
-      --from-csv walkforward_daytrade_results/walkforward_VOL_standard_2026-06-14.csv
-
-  python holdout_periods_report_daytrade.py --train-days 120 --workers 6
-  python holdout_periods_report_daytrade.py --force
+  # 全prime銘柄スキャン (STEP1スキップ、内部でhold-out評価)
+  python holdout_periods_report_daytrade.py
 """
 
 from __future__ import annotations
@@ -482,9 +487,12 @@ def main():
                         help="universe=winners 用 WATCHLIST")
     parser.add_argument("--from-csv", default=None, nargs="+",
                         help="universe=csv 用、STEP1 walkforward_*.csv のパス。"
-                             "複数指定可 (--from-csv a.csv b.csv) or ワイルドカード可 "
-                             "(--from-csv walkforward_daytrade_results/walkforward_*_swing_relaxed_*.csv)。"
-                             "戦略割当もCSVから読込 (scan_walkforward_daytrade 流)")
+                             "複数指定可 + ワイルドカード対応。"
+                             "--mode を使えば短く書ける")
+    parser.add_argument("--mode", default=None,
+                        help="STEP1のモード名 (swing_relaxed/swing/standard/lenient/strict) "
+                             "から最新CSV群を自動展開。例: --mode swing_relaxed → "
+                             "walkforward_daytrade_results/walkforward_*_swing_relaxed_<最新>.csv")
     parser.add_argument("--top", type=int, default=30,
                         help="各期間の上位N銘柄表示 (デフォルト30)")
     parser.add_argument("--train-days", type=int, default=0,
@@ -511,6 +519,26 @@ def main():
         if not args.no_browser:
             open_html(out.resolve())
         return
+
+    # --mode 自動展開: walkforward_daytrade_results/walkforward_*_<mode>_<最新>.csv
+    if args.mode and not args.from_csv:
+        import glob as _g
+        pattern = f"walkforward_daytrade_results/walkforward_*_{args.mode}_*.csv"
+        cands = _g.glob(pattern)
+        if not cands:
+            print(f"[error] --mode {args.mode} の CSV が見つかりません ({pattern})")
+            return
+        # 最新の日付グループだけ採用
+        by_date = {}
+        for c in cands:
+            date = Path(c).stem.split("_")[-1]
+            by_date.setdefault(date, []).append(c)
+        latest = max(by_date.keys())
+        args.from_csv = by_date[latest]
+        print(f"[auto] --mode {args.mode}: {len(args.from_csv)}件 ({latest})")
+    # --from-csv あれば universe を csv に自動切替
+    if args.from_csv and args.universe != "csv":
+        args.universe = "csv"
 
     # universe
     csv_strategy_map = {}  # sym -> strategy (CSV モード時のみ)
