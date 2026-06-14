@@ -149,12 +149,12 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
                   workers, cache, strategy_map=None):
     """全銘柄×全戦略をバックテストして trades をキャッシュ。
 
-    strategy_map: {sym: strategy_name} 指定時は その銘柄を指定戦略のみで
-        バックテスト (CSV モード = STEP1選定戦略だけで評価)。
+    strategy_map: {sym: [strategy_name, ...]} 指定時は その銘柄を指定戦略リスト
+        だけでバックテスト (CSV モード = STEP1選定戦略の組合せで評価)。
     """
     if strategy_map:
-        total = len(strategy_map)
-        print(f"\n[Step 2] バックテスト ({total}件: CSV指定の銘柄×戦略)",
+        total = sum(len(v) for v in strategy_map.values())
+        print(f"\n[Step 2] バックテスト ({total}件: CSV指定の銘柄×戦略ペア)",
               flush=True)
     else:
         total = len(targets) * len(strategies)
@@ -174,8 +174,9 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
             if sym not in fetched:
                 continue
             if strategy_map and sym in strategy_map:
-                # CSV モード: 指定戦略だけ
-                futs.append(ex.submit(_work, sym, name, strategy_map[sym]))
+                # CSV モード: 指定戦略 (複数可) だけ
+                for strat in strategy_map[sym]:
+                    futs.append(ex.submit(_work, sym, name, strat))
             else:
                 for strat in strategies:
                     futs.append(ex.submit(_work, sym, name, strat))
@@ -341,8 +342,10 @@ def main():
                              "csv=--from-csv 指定のCSVから銘柄リスト")
     parser.add_argument("--watchlist", default="daytrade_combined_watchlist.py",
                         help="universe=winners 用 WATCHLIST")
-    parser.add_argument("--from-csv", default=None,
+    parser.add_argument("--from-csv", default=None, nargs="+",
                         help="universe=csv 用、STEP1 walkforward_*.csv のパス。"
+                             "複数指定可 (--from-csv a.csv b.csv) or ワイルドカード可 "
+                             "(--from-csv walkforward_daytrade_results/walkforward_*_swing_relaxed_*.csv)。"
                              "戦略割当もCSVから読込 (scan_walkforward_daytrade 流)")
     parser.add_argument("--top", type=int, default=30,
                         help="各期間の上位N銘柄表示 (デフォルト30)")
@@ -381,26 +384,45 @@ def main():
             print("[error] --from-csv path を指定してください")
             return
         import csv as _csv
-        csv_path = Path(args.from_csv)
-        if not csv_path.exists():
-            print(f"[error] CSV が見つかりません: {csv_path}")
-            return
-        with open(csv_path, encoding="utf-8") as f:
-            rows = list(_csv.DictReader(f))
-        targets = []
-        seen = set()
-        for r in rows:
-            sym = r.get("symbol", "").strip()
-            name = r.get("name", "").strip()
-            strat = r.get("strategy", "").strip()
-            if not sym or sym in seen:
+        import glob as _glob
+        # 複数CSVをマージ (ワイルドカード展開も対応)
+        csv_paths = []
+        for raw in args.from_csv:
+            expanded = _glob.glob(raw) or [raw]
+            csv_paths.extend(expanded)
+        csv_paths = [Path(p) for p in csv_paths]
+        # csv_strategy_map: sym -> list of strategies (戦略間で重複ありOK)
+        csv_strategy_map = {}
+        sym_name = {}  # sym -> name
+        per_strat_count = {}
+        for csv_path in csv_paths:
+            if not csv_path.exists():
+                print(f"[warn] CSV 不在をスキップ: {csv_path}")
                 continue
-            seen.add(sym)
-            targets.append((sym, name))
-            if strat:
-                csv_strategy_map[sym] = strat
-        print(f"[CSV] {csv_path.name} から {len(targets)}銘柄 / "
-              f"戦略情報: {len(csv_strategy_map)}件")
+            with open(csv_path, encoding="utf-8") as f:
+                rows = list(_csv.DictReader(f))
+            n_added = 0
+            for r in rows:
+                sym = r.get("symbol", "").strip()
+                name = r.get("name", "").strip()
+                strat = r.get("strategy", "").strip()
+                if not sym:
+                    continue
+                strats = csv_strategy_map.setdefault(sym, [])
+                if strat and strat not in strats:
+                    strats.append(strat)
+                    per_strat_count[strat] = per_strat_count.get(strat, 0) + 1
+                    n_added += 1
+                if name:
+                    sym_name[sym] = name
+            print(f"[CSV] {csv_path.name}: {n_added}件追加")
+        targets = [(s, sym_name.get(s, "")) for s in csv_strategy_map]
+        total_pairs = sum(len(v) for v in csv_strategy_map.values())
+        print(f"[CSV] 銘柄数 {len(targets)} / (銘柄×戦略)ペア数 {total_pairs}")
+        if per_strat_count:
+            print(f"[CSV] 戦略内訳: " +
+                  ", ".join(f"{s}:{n}" for s, n in
+                            sorted(per_strat_count.items(), key=lambda x: -x[1])))
     else:
         import importlib.util
         p = Path(args.watchlist)
