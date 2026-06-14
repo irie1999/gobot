@@ -350,6 +350,132 @@ def _fmt_dt(dt):
     return dt.strftime("%Y-%m-%d %H:%M") if hasattr(dt, "strftime") else "?"
 
 
+def _analyze_patterns(trades):
+    """勝敗パターンを次元別に集計。
+
+    返り値: {hour:{}, hold:{}, dow:{}, reason:{}}
+        各値は {bucket_name: {win, loss, pnl}}
+    """
+    def _add(d, key, t):
+        b = d.setdefault(key, {"win": 0, "loss": 0, "pnl": 0.0})
+        if t["pnl"] > 0:
+            b["win"] += 1
+        else:
+            b["loss"] += 1
+        b["pnl"] += t["pnl"]
+
+    by_hour = {}
+    by_hold = {}
+    by_dow = {}
+    by_reason = {}
+    hold_buckets = [
+        ("<15分", lambda m: m < 15),
+        ("15-30分", lambda m: 15 <= m < 30),
+        ("30-60分", lambda m: 30 <= m < 60),
+        ("60-120分", lambda m: 60 <= m < 120),
+        (">=120分", lambda m: m >= 120),
+    ]
+    for t in trades:
+        edt = t.get("entry_dt")
+        if hasattr(edt, "hour"):
+            _add(by_hour, f"{edt.hour:02d}:00台", t)
+        if hasattr(edt, "weekday"):
+            dow_names = ["月", "火", "水", "木", "金", "土", "日"]
+            _add(by_dow, dow_names[edt.weekday()], t)
+        try:
+            mins = (t["exit_dt"] - t["entry_dt"]).total_seconds() // 60
+            for name, fn in hold_buckets:
+                if fn(mins):
+                    _add(by_hold, name, t)
+                    break
+        except Exception:
+            pass
+        _add(by_reason, t.get("reason", "?"), t)
+
+    return {"hour": by_hour, "hold": by_hold,
+            "dow": by_dow, "reason": by_reason}
+
+
+def _build_pattern_table(label, data, order=None):
+    """1次元の勝敗パターンを HTML テーブル化。"""
+    if not data:
+        return f"<h4>{label}</h4><p style='color:#64748b'>データなし</p>"
+    keys = order if order else sorted(data.keys())
+    keys = [k for k in keys if k in data]
+    rows = ""
+    for k in keys:
+        b = data[k]
+        n = b["win"] + b["loss"]
+        if n == 0:
+            continue
+        wr = b["win"] / n * 100
+        avg = b["pnl"] / n
+        # 勝率に色付け
+        if wr >= 60:
+            wr_color = "#4ade80"
+        elif wr >= 40:
+            wr_color = "#facc15"
+        else:
+            wr_color = "#f87171"
+        pnl_cls = "profit" if b["pnl"] >= 0 else "loss"
+        avg_cls = "profit" if avg >= 0 else "loss"
+        # バーチャート (勝率)
+        bar_w = int(wr)
+        bar = (f'<div style="display:inline-block;width:80px;background:#334155;'
+               f'height:8px;border-radius:4px;overflow:hidden;vertical-align:middle">'
+               f'<div style="width:{bar_w}%;background:{wr_color};height:100%"></div>'
+               f'</div>')
+        rows += (f'<tr><td>{k}</td><td>{n}</td>'
+                 f'<td><span style="color:{wr_color};font-weight:700">{wr:.0f}%</span> {bar} '
+                 f'<small style="color:#94a3b8">({b["win"]}勝{b["loss"]}敗)</small></td>'
+                 f'<td class="{pnl_cls}">{b["pnl"]:+,.0f}</td>'
+                 f'<td class="{avg_cls}">{avg:+,.0f}</td></tr>')
+    return f"""
+<h4 style="color:#60a5fa;margin:8px 0 4px;font-size:0.9rem">{label}</h4>
+<table style="font-size:0.78rem">
+  <thead><tr>
+    <th>区分</th><th>件数</th><th style="min-width:200px">勝率</th>
+    <th>合計PnL</th><th>平均/取引</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+"""
+
+
+def _build_patterns_section(all_test_trades):
+    """銘柄詳細用、勝敗パターンの統合HTML。"""
+    if not all_test_trades:
+        return ""
+    p = _analyze_patterns(all_test_trades)
+    # 時刻バケットの順序
+    hour_order = [f"{h:02d}:00台" for h in range(9, 16)]
+    dow_order = ["月", "火", "水", "木", "金"]
+    hold_order = ["<15分", "15-30分", "30-60分", "60-120分", ">=120分"]
+    reason_order = ["目標達成", "損切り", "引け強制"]
+
+    tables = [
+        _build_pattern_table("⏰ Entry時刻別 (寄付き〜引け)", p["hour"], hour_order),
+        _build_pattern_table("⏳ 保有時間別 (損切は短時間、勝ちは長め)", p["hold"], hold_order),
+        _build_pattern_table("📅 曜日別", p["dow"], dow_order),
+        _build_pattern_table("🎯 決済理由別", p["reason"], reason_order),
+    ]
+    return f"""
+<h3>📊 勝敗パターン分析</h3>
+<p style="color:#94a3b8;font-size:0.8rem;margin:-4px 0 8px">
+  どの<strong>時間</strong>・<strong>保有時間</strong>・<strong>曜日</strong>で勝ちやすいか/負けやすいかを集計。
+  勝率バー: <span style="color:#4ade80">緑=60%+</span> /
+  <span style="color:#facc15">黄=40-60%</span> /
+  <span style="color:#f87171">赤=&lt;40%</span>
+</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+  <div>{tables[0]}</div>
+  <div>{tables[1]}</div>
+  <div>{tables[2]}</div>
+  <div>{tables[3]}</div>
+</div>
+"""
+
+
 def build_detail_tab(period_items):
     """銘柄詳細タブ HTML。
 
@@ -465,6 +591,7 @@ def build_detail_tab(period_items):
 <div id="sym{sid}" class="sym-pane" style="display:{active};padding:12px 0">
   <h3>{entry["name"]} ({entry["symbol"]}) — {entry["strategy"]} — ★{n_star}/6合格</h3>
   <p style="color:#94a3b8;font-size:0.85rem">{period_summary}</p>
+  {_build_patterns_section(all_test_trades)}
   <h3>TEST期間 取引明細 (直近{min(len(all_test_trades),30)}件)</h3>
   <table>
     <thead><tr>
