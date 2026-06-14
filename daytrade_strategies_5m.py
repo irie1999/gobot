@@ -85,12 +85,9 @@ def _sma(values: np.ndarray, period: int) -> np.ndarray:
 
 
 # ── 指標キャッシュ ────────────────────────────────────────
-# 戦略が closes[:i+1] のスライスで毎バー呼ぶと O(N²) になる。
-# numpy スライスの .base を見て「同じ元配列のスライスなら計算済の結果を
-# 切り出して返す」高速化。EMA/SMA/RSI/Stoch すべて causal なので
-# f(values[:i+1])[k] == f(values)[k] (k <= i) が成立して安全。
-#
-# スレッドローカルにして並列実行時の他スレッドとの衝突を回避。
+# 注: バグが再発したため、安全策としてキャッシュを「素通し」(直接計算) に変更。
+# 速度は遅くなるが、結果の正確性を優先。後日、ユニットテスト整備後に
+# 再度キャッシュ最適化を試みる。
 import threading as _threading
 _INDICATOR_CACHE_TLS = _threading.local()
 
@@ -106,53 +103,17 @@ def _cache_clear():
     _get_cache().clear()
 
 
-def _ema_impl(values, period):
+# 「素通し」実装 - キャッシュなしで直接計算 (正確性優先)
+def _ema_cached(values: np.ndarray, period: int) -> np.ndarray:
     return _ema(values, period)
 
 
-def _sma_impl(values, period):
+def _sma_cached(values: np.ndarray, period: int) -> np.ndarray:
     return _sma(values, period)
 
 
-def _rsi_impl(values, period):
-    return _rsi(values, period)
-
-
-def _ema_cached(values: np.ndarray, period: int) -> np.ndarray:
-    base = values.base if values.base is not None else values
-    n_slice = len(values)
-    # key に base の最初と最後の値も含めて id 再利用バグを排除
-    sig = (float(base[0]) if len(base) else 0.0,
-           float(base[-1]) if len(base) else 0.0)
-    key = ("ema", id(base), period, len(base), sig)
-    cache = _get_cache()
-    if key not in cache:
-        cache[key] = _ema_impl(base, period)
-    return cache[key][:n_slice]
-
-
-def _sma_cached(values: np.ndarray, period: int) -> np.ndarray:
-    base = values.base if values.base is not None else values
-    n_slice = len(values)
-    sig = (float(base[0]) if len(base) else 0.0,
-           float(base[-1]) if len(base) else 0.0)
-    key = ("sma", id(base), period, len(base), sig)
-    cache = _get_cache()
-    if key not in cache:
-        cache[key] = _sma_impl(base, period)
-    return cache[key][:n_slice]
-
-
 def _rsi_cached(closes: np.ndarray, period: int = 14) -> np.ndarray:
-    base = closes.base if closes.base is not None else closes
-    n_slice = len(closes)
-    sig = (float(base[0]) if len(base) else 0.0,
-           float(base[-1]) if len(base) else 0.0)
-    key = ("rsi", id(base), period, len(base), sig)
-    cache = _get_cache()
-    if key not in cache:
-        cache[key] = _rsi_impl(base, period)
-    return cache[key][:n_slice]
+    return _rsi(closes, period)
 
 
 def _rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
@@ -200,19 +161,8 @@ def _stoch(highs, lows, closes, k_period=14, d_period=3, smooth=3):
 
 
 def _stoch_cached(highs, lows, closes, k_period=14, d_period=3, smooth=3):
-    """Stoch を3つの配列でキャッシュ (全部同じ base)。"""
-    base = closes.base if closes.base is not None else closes
-    n_slice = len(closes)
-    sig = (float(base[0]) if len(base) else 0.0,
-           float(base[-1]) if len(base) else 0.0)
-    key = ("stoch", id(base), k_period, d_period, smooth, len(base), sig)
-    cache = _get_cache()
-    if key not in cache:
-        b_h = highs.base if highs.base is not None else highs
-        b_l = lows.base if lows.base is not None else lows
-        cache[key] = _stoch(b_h, b_l, base, k_period, d_period, smooth)
-    k_full, d_full = cache[key]
-    return k_full[:n_slice], d_full[:n_slice]
+    """素通し実装 (キャッシュなし)。"""
+    return _stoch(highs, lows, closes, k_period, d_period, smooth)
 
 
 # ─────────────────────────────────────────────────────────────
