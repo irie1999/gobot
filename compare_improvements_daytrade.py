@@ -42,28 +42,33 @@ from pathlib import Path
 
 JST = timezone(timedelta(hours=9))
 
+_STRAT_TIMES = (
+    "MOM:0930-1030,MOM_S:0930-1030,"
+    "RSI2:1000-1300,RSI2_S:1000-1300,"
+    "MACD:0930-1400,MACD_S:0930-1400,"
+    "A7:1030-1400,A7_S:1030-1400"
+)
+
 # 改善設定 (label, env_dict)
 IMPROVEMENTS = [
     ("baseline", {}),
     ("A_slow_stop", {"DAYTRADE_STOP_CONFIRM": "1"}),
     ("B_daily_lock", {"DAYTRADE_MAX_STOPS": "2"}),
     ("C_trail_be", {"DAYTRADE_TRAIL_BE": "1"}),
-    ("D_strat_times", {
-        "DAYTRADE_STRAT_TIMES":
-        "MOM:0930-1030,MOM_S:0930-1030,"
-        "RSI2:1000-1300,RSI2_S:1000-1300,"
-        "MACD:0930-1400,MACD_S:0930-1400,"
-        "A7:1030-1400,A7_S:1030-1400"
-    }),
-    ("ABCD_all", {
+    ("D_strat_times", {"DAYTRADE_STRAT_TIMES": _STRAT_TIMES}),
+    ("E_vol_boost", {"DAYTRADE_MIN_VOL_RATIO": "1.5"}),
+    ("F_atr_range", {"DAYTRADE_MIN_ATR_PCT": "0.5", "DAYTRADE_MAX_ATR_PCT": "3.0"}),
+    ("G_pause_losses", {"DAYTRADE_PAUSE_LOSSES": "3", "DAYTRADE_PAUSE_DAYS": "5"}),
+    ("ABCDEFG_all", {
         "DAYTRADE_STOP_CONFIRM": "1",
         "DAYTRADE_MAX_STOPS": "2",
         "DAYTRADE_TRAIL_BE": "1",
-        "DAYTRADE_STRAT_TIMES":
-        "MOM:0930-1030,MOM_S:0930-1030,"
-        "RSI2:1000-1300,RSI2_S:1000-1300,"
-        "MACD:0930-1400,MACD_S:0930-1400,"
-        "A7:1030-1400,A7_S:1030-1400"
+        "DAYTRADE_STRAT_TIMES": _STRAT_TIMES,
+        "DAYTRADE_MIN_VOL_RATIO": "1.5",
+        "DAYTRADE_MIN_ATR_PCT": "0.5",
+        "DAYTRADE_MAX_ATR_PCT": "3.0",
+        "DAYTRADE_PAUSE_LOSSES": "3",
+        "DAYTRADE_PAUSE_DAYS": "5",
     }),
 ]
 
@@ -73,7 +78,10 @@ def run_once(label, env_overrides, extra_args):
     env = os.environ.copy()
     # 既存の改善ENVをクリアしてから上書き
     for k in ("DAYTRADE_STOP_CONFIRM", "DAYTRADE_MAX_STOPS",
-              "DAYTRADE_TRAIL_BE", "DAYTRADE_STRAT_TIMES"):
+              "DAYTRADE_TRAIL_BE", "DAYTRADE_STRAT_TIMES",
+              "DAYTRADE_MIN_VOL_RATIO", "DAYTRADE_MIN_ATR_PCT",
+              "DAYTRADE_MAX_ATR_PCT", "DAYTRADE_PAUSE_LOSSES",
+              "DAYTRADE_PAUSE_DAYS"):
         env.pop(k, None)
     env.update(env_overrides)
     today = datetime.now(JST).strftime("%Y-%m-%d")
@@ -250,14 +258,14 @@ td.na { color:#475569; }
 
 <div class="legend">
   <strong>📋 検証する改善</strong><br>
-  ▸ <strong>A. Slow Stop</strong>: stopタッチ後1バー (5分) 待って再判定。即死を防ぐ
-    <code>STOP_CONFIRM=1</code><br>
-  ▸ <strong>B. 同日損切ロック</strong>: 1日2回損切したら以降エントリー無効
-    <code>MAX_STOPS=2</code><br>
-  ▸ <strong>C. BEトレール</strong>: +1×ATR乗ったら stop を建値に移動
-    <code>TRAIL_BE=1</code><br>
+  ▸ <strong>A. Slow Stop</strong>: stopタッチ後1バー (5分) 待って再判定。即死を防ぐ<br>
+  ▸ <strong>B. 同日損切ロック</strong>: 1日2回損切したら以降エントリー無効<br>
+  ▸ <strong>C. BEトレール</strong>: +1×ATR乗ったら stop を建値に移動<br>
   ▸ <strong>D. 戦略別時刻フィルタ</strong>: MOM_S 9:30-10:30 / RSI2_S 10:00-13:00 etc<br>
-  ▸ <strong>ABCD</strong>: 全部入り
+  ▸ <strong>E. 出来高ブースト</strong>: 20本平均×1.5倍以上の出来高がある時のみエントリー<br>
+  ▸ <strong>F. ATR%レンジ</strong>: ATR が 0.5%〜3.0% のときのみ取引 (低ボラ/過ボラ除外)<br>
+  ▸ <strong>G. 連敗一時停止</strong>: 3連敗で5日間その銘柄/戦略を休止<br>
+  ▸ <strong>ABCDEFG</strong>: 全部入り
 </div>
 
 {conclusion}

@@ -876,6 +876,14 @@ def main():
             _imp_parts.append("tb")
         if _os.environ.get("DAYTRADE_STRAT_TIMES", ""):
             _imp_parts.append("st")
+        if _os.environ.get("DAYTRADE_MIN_VOL_RATIO", "0") not in ("0", "0.0"):
+            _imp_parts.append(f"vr{_os.environ['DAYTRADE_MIN_VOL_RATIO']}")
+        if _os.environ.get("DAYTRADE_MIN_ATR_PCT", "0") not in ("0", "0.0"):
+            _imp_parts.append(f"a{_os.environ['DAYTRADE_MIN_ATR_PCT']}")
+        if _os.environ.get("DAYTRADE_MAX_ATR_PCT", "0") not in ("0", "0.0"):
+            _imp_parts.append(f"A{_os.environ['DAYTRADE_MAX_ATR_PCT']}")
+        if _os.environ.get("DAYTRADE_PAUSE_LOSSES", "0") != "0":
+            _imp_parts.append(f"pl{_os.environ['DAYTRADE_PAUSE_LOSSES']}")
         _imp_label = "_".join(_imp_parts) or "base"
         cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{_imp_label}_{today}.pkl"
         if cache_file.exists():

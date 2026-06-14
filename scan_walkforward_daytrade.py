@@ -217,6 +217,9 @@ def main():
     parser.add_argument("--max-risk", type=int, default=1_000)
     parser.add_argument("--max-price", type=int, default=10_000)
     parser.add_argument("--min-price", type=int, default=0)
+    parser.add_argument("--min-avg-volume", type=int, default=0,
+                        help="平均日出来高フィルタ (株/日, 0=無効)。"
+                             "例: 100000=流動性高い銘柄に絞る → universe縮小で高速化")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--cache-dir", default=".cache_scan_daytrade",
@@ -326,6 +329,15 @@ def main():
         fetched = {s: df for s, df in fetched.items()
                    if float(df.iloc[-1]["close"]) >= args.min_price}
     print(f"  ロード: {before}銘柄 → 価格フィルタ後: {len(fetched)}銘柄")
+
+    # 出来高フィルタ (--min-avg-volume) で universe を絞る = 高速化
+    if args.min_avg_volume > 0:
+        before_vol = len(fetched)
+        fetched = {s: df for s, df in fetched.items()
+                   if "volume" in df.columns
+                   and df["volume"].tail(30).mean() >= args.min_avg_volume}
+        print(f"  出来高フィルタ (≥{args.min_avg_volume:,}株/日): "
+              f"{before_vol}→{len(fetched)}銘柄")
 
     # データサニティチェック (異常な ATR/ジャンプ銘柄を除外)
     print(f"  サニティチェック中...", flush=True)

@@ -23,7 +23,7 @@ daytrade_engine_5m.py  ―  5分足デイトレ共通バックテストエンジ
 
 from __future__ import annotations
 
-from datetime import time as dtime
+from datetime import time as dtime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -63,6 +63,17 @@ if _strat_filter_env:
                     dtime(int(e[:2]), int(e[2:])),
                 )
 
+# 5. 出来高ブースト要求 (例: 1.5 で 20本平均の1.5倍以上の出来高が必要)
+MIN_VOL_RATIO = float(_os.environ.get("DAYTRADE_MIN_VOL_RATIO", "0"))
+# 6. ATR % レンジ (低ボラ/高ボラ 排除)
+MIN_ATR_PCT = float(_os.environ.get("DAYTRADE_MIN_ATR_PCT", "0"))
+MAX_ATR_PCT = float(_os.environ.get("DAYTRADE_MAX_ATR_PCT", "0"))  # 0=無制限
+# 7. 連敗停止: 連続損切N回で当該銘柄を pause_days 日休止
+PAUSE_AFTER_LOSSES = int(_os.environ.get("DAYTRADE_PAUSE_LOSSES", "0"))
+PAUSE_DAYS = int(_os.environ.get("DAYTRADE_PAUSE_DAYS", "3"))
+# 8. リスクリワード(RR)最低基準 (sm < RR_MIN なら そもそも入らない)
+MIN_RR = float(_os.environ.get("DAYTRADE_MIN_RR", "0"))
+
 
 def _apply_slippage_buy(price):
     """買い約定時の不利スリッページ。"""
@@ -83,7 +94,8 @@ PREV_TAIL_BARS = 60
 def backtest_day_strategy(day_df, strategy_fn, strategy_params,
                             budget, max_risk,
                             atr_period=14,
-                            prev_tail_df=None):
+                            prev_tail_df=None,
+                            persist_state=None):
     """1日分の5分足DFで指定戦略をbacktest。
 
     prev_tail_df: 前日末尾の数十バー (warmup用)。指定時、指標は連結データで
@@ -147,6 +159,16 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             qty=qty, pnl=pnl, pct=pct, side=side,
             strategy=strategy_params.get("name", "?"), reason=reason,
         ))
+        # 改善7: 連敗カウントと pause 判定 (persist_state 経由で銘柄跨ぎ管理)
+        if PAUSE_AFTER_LOSSES > 0 and persist_state is not None:
+            if pnl <= 0:
+                persist_state["consec_losses"] = persist_state.get("consec_losses", 0) + 1
+                if persist_state["consec_losses"] >= PAUSE_AFTER_LOSSES:
+                    persist_state["pause_until"] = (exit_dt.date()
+                                                     + timedelta(days=PAUSE_DAYS))
+                    persist_state["consec_losses"] = 0
+            else:
+                persist_state["consec_losses"] = 0
 
     # 改善2: 同日損切カウント
     day_stop_count = 0
@@ -268,6 +290,28 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
         if MAX_DAILY_STOPS > 0 and day_stop_count >= MAX_DAILY_STOPS:
             i += 1
             continue
+        # 改善6: ATR % が範囲外なら入らない (低ボラ/高ボラ除外)
+        if MIN_ATR_PCT > 0 or MAX_ATR_PCT > 0:
+            cp = closes[i]
+            atr_pct = (atr_arr[i] / cp * 100) if cp > 0 else 0
+            if MIN_ATR_PCT > 0 and atr_pct < MIN_ATR_PCT:
+                i += 1
+                continue
+            if MAX_ATR_PCT > 0 and atr_pct > MAX_ATR_PCT:
+                i += 1
+                continue
+        # 改善5: 出来高ブースト要求
+        if MIN_VOL_RATIO > 0:
+            v_avg = volumes[max(0, i-20):i].mean()
+            if v_avg > 0 and volumes[i] < v_avg * MIN_VOL_RATIO:
+                i += 1
+                continue
+        # 改善7: pause_until 日まで休止
+        if (persist_state is not None
+                and persist_state.get("pause_until")
+                and cur_date < persist_state["pause_until"]):
+            i += 1
+            continue
 
         # シグナル判定
         try:
@@ -357,11 +401,14 @@ def backtest_symbol_5m(sym, name, df, strategy_fn, strategy_params=None,
 
     trades = []
     prev_tail = None  # 前日末尾の PREV_TAIL_BARS バー
+    # 改善7: 銘柄単位の連敗状態 (日跨ぎ管理)
+    persist_state = {"consec_losses": 0, "pause_until": None}
     for d in dates:
         day_df = daily[d]
         day_trades = backtest_day_strategy(day_df, strategy_fn,
                                             strategy_params, budget, max_risk,
-                                            prev_tail_df=prev_tail)
+                                            prev_tail_df=prev_tail,
+                                            persist_state=persist_state)
         trades.extend(day_trades)
         # 次の日の warmup 用に末尾を保存
         prev_tail = day_df.tail(PREV_TAIL_BARS)
