@@ -165,6 +165,43 @@ def _stoch_cached(highs, lows, closes, k_period=14, d_period=3, smooth=3):
     return _stoch(highs, lows, closes, k_period, d_period, smooth)
 
 
+def precompute_for_strategy(strat_name, opens, highs, lows, closes, volumes):
+    """重い指標 (Stoch, EMA, SMA) を全長で1回だけ計算。
+
+    戦略のシグナル関数が _precomp 引数で受け取り、ループ内の再計算を回避。
+    A7/A7_S が最大の恩恵 (Stoch計算は O(N*k_period))。
+    """
+    out = {}
+    if strat_name in ("A7", "A7_S"):
+        # A7/A7_S: Stoch(14,3,3) + MA30
+        k, d = _stoch(highs, lows, closes, 14, 3, 3)
+        ma = _sma(closes, 30)
+        out["stoch_k"] = k
+        out["stoch_d"] = d
+        out["ma_a7"] = ma
+    elif strat_name in ("MACD", "MACD_S"):
+        # MACD(8,17,5) + MA10
+        ema_fast = _ema(closes, 8)
+        ema_slow = _ema(closes, 17)
+        macd_line = ema_fast - ema_slow
+        sig_line = _ema(macd_line, 5)
+        ma = _sma(closes, 10)
+        out["macd_line"] = macd_line
+        out["sig_line"] = sig_line
+        out["ma_macd"] = ma
+    elif strat_name in ("RSI2", "RSI2_S"):
+        rsi2 = _rsi(closes, 2)
+        ma = _sma(closes, 20)
+        out["rsi2"] = rsi2
+        out["ma_rsi2"] = ma
+    elif strat_name in ("MOM", "MOM_S"):
+        ma_fast = _sma(closes, 10)
+        ma_slow = _sma(closes, 25)
+        out["ma_fast_mom"] = ma_fast
+        out["ma_slow_mom"] = ma_slow
+    return out
+
+
 # ─────────────────────────────────────────────────────────────
 # 戦略シグナル関数 (各バー時点で「次バー寄付買い」のシグナルを判定)
 # 引数: bar インデックス i (i は現在バー、i+1 で寄付買い)
@@ -244,17 +281,25 @@ def signal_rsi2(opens, highs, lows, closes, volumes, i, atr_arr,
 def signal_a7(opens, highs, lows, closes, volumes, i, atr_arr,
                k_period=14, d_period=3, smooth=3,
                overbought=70, ma_trend=30,
-               em=0.0, sm=1.5, tm=3.0):
-    """A7: Stochastic 過売り反発 + MA30トレンド (5分足デイトレ調整)。"""
+               em=0.0, sm=1.5, tm=3.0,
+               _precomp=None):
+    """A7: Stochastic 過売り反発 + MA30トレンド (5分足デイトレ調整)。
+
+    _precomp が渡された場合は事前計算済みの k/d/ma を使用 (高速化)。
+    """
     if i < max(k_period * 2, ma_trend) + 1:
         return None
-    k, d = _stoch_cached(highs[:i+1], lows[:i+1], closes[:i+1],
-                   k_period, d_period, smooth)
+    if _precomp is not None and "stoch_k" in _precomp:
+        k = _precomp["stoch_k"]
+        ma = _precomp["ma_a7"]
+    else:
+        k, _ = _stoch(highs[:i+1], lows[:i+1], closes[:i+1],
+                       k_period, d_period, smooth)
+        ma = _sma(closes[:i+1], ma_trend)
     # %K が過売り域 (<30) から反発 (前バーより上昇)
     if not (k[i-1] < 30 and k[i] > k[i-1]):
         return None
-    # トレンドフィルタ MA75 上
-    ma = _sma_cached(closes[:i+1], ma_trend)
+    # トレンドフィルタ MA上
     if not (closes[i] > ma[i]):
         return None
     a = atr_arr[i]

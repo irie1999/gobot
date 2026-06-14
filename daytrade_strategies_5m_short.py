@@ -99,15 +99,23 @@ def signal_rsi2_short(opens, highs, lows, closes, volumes, i, atr_arr,
 def signal_a7_short(opens, highs, lows, closes, volumes, i, atr_arr,
                     k_period=14, d_period=3, smooth=3,
                     ma_trend=30,
-                    em=0.0, sm=1.5, tm=3.0):
-    """Stochastic 過買い反落 + MA30下トレンド (5分足調整)。"""
+                    em=0.0, sm=1.5, tm=3.0,
+                    _precomp=None):
+    """Stochastic 過買い反落 + MA30下トレンド (5分足調整)。
+
+    _precomp が渡された場合は事前計算済みの k/d/ma を使用 (高速化)。
+    """
     if i < max(k_period * 2, ma_trend) + 1:
         return None
-    k, d = _stoch_cached(highs[:i+1], lows[:i+1], closes[:i+1],
-                   k_period, d_period, smooth)
+    if _precomp is not None and "stoch_k" in _precomp:
+        k = _precomp["stoch_k"]
+        ma = _precomp["ma_a7"]
+    else:
+        k, _ = _stoch(highs[:i+1], lows[:i+1], closes[:i+1],
+                       k_period, d_period, smooth)
+        ma = _sma(closes[:i+1], ma_trend)
     if not (k[i-1] > 70 and k[i] < k[i-1]):
         return None
-    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] < ma[i]):
         return None
     a = atr_arr[i]

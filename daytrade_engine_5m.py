@@ -33,6 +33,7 @@ from daytrade_strategies_5m import (
     ENTRY_START, ENTRY_CUTOFF, FORCE_CLOSE, WARMUP_BARS,
     atr_from_bars,
     _cache_clear as _indicator_cache_clear,
+    precompute_for_strategy as _precompute_for_strategy,
 )
 
 # ── 実運用コスト ─────────────────────────────────────────────
@@ -130,6 +131,12 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
 
     # 指標キャッシュを日ごとにクリア (id 再利用による日跨ぎ衝突を回避)
     _indicator_cache_clear()
+
+    # 重い指標 (Stoch/EMA/SMA) を1日1回事前計算 → A7等が劇的に高速化
+    strat_name = strategy_params.get("name", "")
+    precomp = _precompute_for_strategy(strat_name, opens, highs, lows, closes, volumes)
+    if not precomp:
+        precomp = None  # 戦略が想定外なら None で素通し
 
     trades = []
     state = "idle"
@@ -319,9 +326,12 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
 
         # シグナル判定
         try:
+            # _precomp は今のところ A7/A7_S のみ対応 (高速化が最も必要な戦略)
+            extra_kwargs = {k: v for k, v in strategy_params.items() if k != "name"}
+            if precomp is not None and strat_name in ("A7", "A7_S"):
+                extra_kwargs["_precomp"] = precomp
             sig = strategy_fn(opens, highs, lows, closes, volumes,
-                              i, atr_arr, **{k: v for k, v in
-                              strategy_params.items() if k != "name"})
+                              i, atr_arr, **extra_kwargs)
         except Exception:
             sig = None
 
