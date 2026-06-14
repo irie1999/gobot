@@ -234,6 +234,7 @@ def evaluate_period(results, period_label, train_days, today, budget, top_n):
             "test_stats": test_stats_enrich,
             "score": _composite(test_stats_enrich),
             "test_pass": test_pass,
+            "test_trades": test_trades,
         })
 
     qualified.sort(key=lambda x: -x["score"])
@@ -290,11 +291,12 @@ def build_period_tab(period_label, train_days, items):
         pc = "profit" if es["total_pnl"] >= 0 else "loss"
         bg = "#0d4d2f" if it["test_pass"] else "#2d0a0a"
         mark = "★" if it["test_pass"] else "—"
+        sid = f"{it['symbol'].replace('.T','')}_{it['strategy']}"
         rows += f"""
 <tr style="background:{bg}">
   <td style="color:#4ade80">{mark}</td>
   <td>{i}</td>
-  <td class="sym">{it['name']}<br><small class="code">{it['symbol']}</small></td>
+  <td class="sym"><span class="sym-link" onclick="jumpToSym('{sid}')" title="クリックで取引明細へ">{it['name']}<br><small class="code">{it['symbol']}</small></span></td>
   <td>{it['strategy']}</td>
   <td>{ts['n']}</td>
   <td>{ts['win_rate']:.0f}%</td>
@@ -329,6 +331,142 @@ def build_period_tab(period_label, train_days, items):
 </table>
 """
     return sum_box + table
+
+
+def _fmt_dt(dt):
+    return dt.strftime("%m-%d %H:%M") if hasattr(dt, "strftime") else "?"
+
+
+def build_detail_tab(period_items):
+    """銘柄詳細タブ HTML。
+
+    全期間タブで登場した (sym, strategy) ペアを集約して、
+    各ペアの TEST 取引明細 (どの期間で出たか + 直近の取引) を表示。
+    """
+    # (sym, strategy) -> {best_item, periods_appeared}
+    agg = {}
+    for P, items in period_items.items():
+        for it in items:
+            key = (it["symbol"], it["strategy"])
+            if key not in agg:
+                agg[key] = {
+                    "symbol": it["symbol"],
+                    "name": it["name"],
+                    "strategy": it["strategy"],
+                    "periods": {},   # P -> {test_pass, test_stats, test_trades}
+                }
+            agg[key]["periods"][P] = {
+                "test_pass": it["test_pass"],
+                "test_stats": it["test_stats"],
+                "test_trades": it["test_trades"],
+                "train_stats": it["train_stats"],
+            }
+
+    if not agg:
+        return '<p style="color:#64748b;padding:24px">銘柄なし</p>'
+
+    # 並び順: 全期間★合格数 多い順 → 取引明細リッチ順
+    def _rank(entry):
+        n_star = sum(1 for p in entry["periods"].values() if p["test_pass"])
+        max_pnl = max((p["test_stats"]["total_pnl"]
+                       for p in entry["periods"].values()), default=0)
+        return (-n_star, -max_pnl)
+    ordered = sorted(agg.values(), key=_rank)
+
+    nav = ""
+    panes = ""
+    for i, entry in enumerate(ordered):
+        active = "block" if i == 0 else "none"
+        active_btn = "active" if i == 0 else ""
+        sym_short = entry["symbol"].replace(".T", "")
+        # ボタンID: 戦略違いを区別 (例: sym5821_MACD)
+        sid = f"{sym_short}_{entry['strategy']}"
+        # ★数バッジ
+        n_star = sum(1 for p in entry["periods"].values() if p["test_pass"])
+        star_color = "#4ade80" if n_star >= 3 else "#fbbf24" if n_star >= 1 else "#64748b"
+        nav += (f'<button class="sym-btn {active_btn}" data-sym="{sid}" '
+                f'onclick="switchSym(\'sym{sid}\')">'
+                f'<strong>{entry["symbol"]}</strong><br>'
+                f'<small style="color:#94a3b8">{entry["name"][:8]}</small><br>'
+                f'<small style="color:#60a5fa">{entry["strategy"]}</small><br>'
+                f'<small style="color:{star_color}">★{n_star}/6</small></button>')
+
+        # 期間別サマリ行
+        period_summary = ""
+        for P in PERIODS:
+            p = entry["periods"].get(P)
+            if not p:
+                period_summary += (f'<span style="margin-right:14px;color:#475569">'
+                                   f'直近{P}日: 候補外</span>')
+                continue
+            es = p["test_stats"]
+            pc = "profit" if es["total_pnl"] >= 0 else "loss"
+            mark = "★" if p["test_pass"] else "—"
+            mc = "#4ade80" if p["test_pass"] else "#64748b"
+            period_summary += (f'<span style="margin-right:14px">'
+                               f'<span style="color:{mc}">{mark}</span> '
+                               f'直近{P}日: {es["n"]}取引 PF<strong>{_pf(es["pf"])}</strong> '
+                               f'<span class="{pc}">{es["total_pnl"]:+,.0f}円</span>'
+                               f'</span>')
+
+        # 全期間共通 TRAIN 統計 (180日タブのもの = もっとも過去のTRAIN)
+        # 取引明細は最も古いTESTを基準にすべての取引を統合表示
+        all_test_trades = []
+        seen_dt = set()
+        for P in sorted(entry["periods"].keys(), reverse=True):
+            for t in entry["periods"][P]["test_trades"]:
+                edt = t.get("entry_dt")
+                edt_key = str(edt)
+                if edt_key in seen_dt:
+                    continue
+                seen_dt.add(edt_key)
+                all_test_trades.append(t)
+        all_test_trades.sort(key=lambda t: str(t.get("entry_dt", "")), reverse=True)
+
+        trade_rows = ""
+        for t in all_test_trades[:30]:
+            ed = _fmt_dt(t.get("entry_dt"))
+            xd = _fmt_dt(t.get("exit_dt"))
+            try:
+                hold = f"{int((t['exit_dt'] - t['entry_dt']).total_seconds() // 60)}分"
+            except Exception:
+                hold = "-"
+            pnl = t.get("pnl", 0)
+            pct = t.get("pct", 0)
+            pc = "profit" if pnl >= 0 else "loss"
+            trade_rows += f"""
+<tr>
+  <td>{ed}</td>
+  <td>{xd}</td>
+  <td>{hold}</td>
+  <td>{t.get('entry_p',0):,.0f}</td>
+  <td class="loss">{t.get('stop_p',0):,.0f}</td>
+  <td class="profit">{t.get('target_p',0):,.0f}</td>
+  <td>{t.get('exit_p',0):,.0f}</td>
+  <td class="{pc}">{pnl:+,.0f}</td>
+  <td class="{pc}">{pct:+.2f}%</td>
+  <td>{t.get('reason','?')}</td>
+</tr>"""
+
+        panes += f"""
+<div id="sym{sid}" class="sym-pane" style="display:{active};padding:12px 0">
+  <h3>{entry["name"]} ({entry["symbol"]}) — {entry["strategy"]} — ★{n_star}/6合格</h3>
+  <p style="color:#94a3b8;font-size:0.85rem">{period_summary}</p>
+  <h3>TEST期間 取引明細 (直近{min(len(all_test_trades),30)}件)</h3>
+  <table>
+    <thead><tr>
+      <th>Entry</th><th>Exit</th><th>保有</th>
+      <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
+      <th>損益</th><th>%</th><th>理由</th>
+    </tr></thead>
+    <tbody>{trade_rows}</tbody>
+  </table>
+</div>"""
+
+    return f"""
+<div class="sym-nav">{nav}</div>
+{panes}
+"""
 
 
 # ----------------------------------------------------------------- main
@@ -550,6 +688,17 @@ td { padding:5px 8px; border:1px solid #1e293b;
 .legend { color:#94a3b8; font-size:0.78rem; margin:8px 0 16px;
           padding:10px; background:#1e293b; border-radius:6px; }
 .legend strong { color:#e2e8f0; }
+.sym-nav { display:flex; flex-wrap:wrap; gap:4px; margin:12px 0 16px;
+           padding:10px; background:#0f172a; border-radius:8px; }
+.sym-btn { padding:6px 10px; background:#1e293b; border:1px solid #334155;
+           color:#e2e8f0; border-radius:6px; cursor:pointer;
+           font-size:0.75rem; min-width:96px; text-align:center; line-height:1.3; }
+.sym-btn:hover { background:#263349; border-color:#64748b; }
+.sym-btn.active { background:#1d4ed8; border-color:#3b82f6; }
+.sym-pane { display:none; }
+.sym-link { cursor:pointer; color:#e2e8f0; text-decoration:none;
+            border-bottom:1px dashed #475569; }
+.sym-link:hover { color:#60a5fa; border-bottom-color:#60a5fa; }
 """
     js = """
 function switchTab(tab){
@@ -557,6 +706,30 @@ function switchTab(tab){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('t-'+tab).classList.add('active');
   (event.target.closest('.tab-btn')||event.target).classList.add('active');
+}
+function switchSym(id){
+  document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+  var pane=document.getElementById(id);
+  if(pane) pane.style.display='block';
+  (event.target.closest('.sym-btn')||event.target).classList.add('active');
+}
+function jumpToSym(sid){
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  var detailTab=document.getElementById('t-detail');
+  if(detailTab) detailTab.classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>{
+    if(b.textContent.indexOf('銘柄詳細')!==-1) b.classList.add('active');
+  });
+  document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+  var pane=document.getElementById('sym'+sid);
+  if(pane) pane.style.display='block';
+  document.querySelectorAll('.sym-btn').forEach(b=>{
+    if(b.dataset.sym===sid) b.classList.add('active');
+  });
+  if(pane) pane.scrollIntoView({behavior:'smooth',block:'start'});
 }
 """
 
@@ -572,6 +745,14 @@ function switchTab(tab){
         tab_panes += (f'<div id="t-p{P}" class="tab-pane {active_pane}">'
                       f'{build_period_tab(P, args.train_days, period_items[P])}'
                       f'</div>')
+
+    # 銘柄詳細タブ (全期間に登場した銘柄を集約)
+    unique_syms = {(it["symbol"], it["strategy"])
+                   for P in PERIODS for it in period_items[P]}
+    tab_btns += (f'<button class="tab-btn" onclick="switchTab(\'detail\')">'
+                 f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(unique_syms)}件</small></button>')
+    tab_panes += (f'<div id="t-detail" class="tab-pane">'
+                  f'{build_detail_tab(period_items)}</div>')
 
     train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
                   else "TEST より前の全期間")
