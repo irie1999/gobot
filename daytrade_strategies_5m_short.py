@@ -27,6 +27,7 @@ import numpy as np
 
 from daytrade_strategies_5m import (
     _atr, _ema, _sma, _rsi, _stoch,
+    _ema_cached, _sma_cached, _rsi_cached, _stoch_cached,
     atr_from_bars,
 )
 
@@ -52,14 +53,14 @@ def signal_macd_short(opens, highs, lows, closes, volumes, i, atr_arr,
     """MACD デッドクロス + 出来高 + MA10下。"""
     if i < max(macd_slow + macd_signal, vol_ma, ma_trend) + 1:
         return None
-    ema_fast = _ema(closes[:i+1], macd_fast)
-    ema_slow = _ema(closes[:i+1], macd_slow)
+    ema_fast = _ema_cached(closes[:i+1], macd_fast)
+    ema_slow = _ema_cached(closes[:i+1], macd_slow)
     macd_line = ema_fast - ema_slow
     sig_line = _ema(macd_line, macd_signal)
     # デッドクロス
     if not (macd_line[i-1] >= sig_line[i-1] and macd_line[i] < sig_line[i]):
         return None
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] < ma[i]):
         return None
     avg_vol = volumes[max(0, i-vol_ma):i].mean()
@@ -77,10 +78,10 @@ def signal_rsi2_short(opens, highs, lows, closes, volumes, i, atr_arr,
     """RSI(2)>90 + MA20下 + IBS>0.65 (戻り売り)。"""
     if i < max(ma_trend, 3) + 1:
         return None
-    rsi2 = _rsi(closes[:i+1], 2)
+    rsi2 = _rsi_cached(closes[:i+1], 2)
     if rsi2[i] <= rsi2_entry:
         return None
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] < ma[i]):
         return None
     rng = highs[i] - lows[i]
@@ -102,11 +103,11 @@ def signal_a7_short(opens, highs, lows, closes, volumes, i, atr_arr,
     """Stochastic 過買い反落 + MA30下トレンド (5分足調整)。"""
     if i < max(k_period * 2, ma_trend) + 1:
         return None
-    k, d = _stoch(highs[:i+1], lows[:i+1], closes[:i+1],
+    k, d = _stoch_cached(highs[:i+1], lows[:i+1], closes[:i+1],
                    k_period, d_period, smooth)
     if not (k[i-1] > 70 and k[i] < k[i-1]):
         return None
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] < ma[i]):
         return None
     a = atr_arr[i]
@@ -142,8 +143,8 @@ def signal_mom_short(opens, highs, lows, closes, volumes, i, atr_arr,
     roc = (closes[i] / closes[i-roc_period] - 1) * 100
     if roc >= roc_thr:
         return None
-    ma_f = _sma(closes[:i+1], ma_fast)
-    ma_s = _sma(closes[:i+1], ma_slow)
+    ma_f = _sma_cached(closes[:i+1], ma_fast)
+    ma_s = _sma_cached(closes[:i+1], ma_slow)
     if not (ma_f[i] < ma_s[i]):
         return None
     a = atr_arr[i]

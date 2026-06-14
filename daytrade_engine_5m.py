@@ -32,6 +32,7 @@ from daytrade_data import split_by_day, calc_position_size
 from daytrade_strategies_5m import (
     ENTRY_START, ENTRY_CUTOFF, FORCE_CLOSE, WARMUP_BARS,
     atr_from_bars,
+    _cache_clear as _indicator_cache_clear,
 )
 
 # ── 実運用コスト ─────────────────────────────────────────────
@@ -398,6 +399,9 @@ def backtest_symbol_5m(sym, name, df, strategy_fn, strategy_params=None,
     dates = sorted(daily.keys())
     if len(dates) < 2:
         return None
+
+    # 指標キャッシュを銘柄ごとにクリア (前銘柄のメモリ解放)
+    _indicator_cache_clear()
 
     trades = []
     prev_tail = None  # 前日末尾の PREV_TAIL_BARS バー

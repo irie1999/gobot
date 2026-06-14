@@ -84,6 +84,58 @@ def _sma(values: np.ndarray, period: int) -> np.ndarray:
     return sma
 
 
+# ── 指標キャッシュ ────────────────────────────────────────
+# 戦略が closes[:i+1] のスライスで毎バー呼ぶと O(N²) になる。
+# numpy スライスの .base を見て「同じ元配列のスライスなら計算済の結果を
+# 切り出して返す」高速化。EMA/SMA/RSI/Stoch すべて causal なので
+# f(values[:i+1])[k] == f(values)[k] (k <= i) が成立して安全。
+_INDICATOR_CACHE = {}
+
+
+def _cache_clear():
+    """銘柄ごとにキャッシュをクリア (engine から呼ぶ)。"""
+    _INDICATOR_CACHE.clear()
+
+
+def _ema_impl(values, period):
+    return _ema(values, period)
+
+
+def _sma_impl(values, period):
+    return _sma(values, period)
+
+
+def _rsi_impl(values, period):
+    return _rsi(values, period)
+
+
+def _ema_cached(values: np.ndarray, period: int) -> np.ndarray:
+    base = values.base if values.base is not None else values
+    n_slice = len(values)
+    key = ("ema", id(base), period, len(base))
+    if key not in _INDICATOR_CACHE:
+        _INDICATOR_CACHE[key] = _ema_impl(base, period)
+    return _INDICATOR_CACHE[key][:n_slice]
+
+
+def _sma_cached(values: np.ndarray, period: int) -> np.ndarray:
+    base = values.base if values.base is not None else values
+    n_slice = len(values)
+    key = ("sma", id(base), period, len(base))
+    if key not in _INDICATOR_CACHE:
+        _INDICATOR_CACHE[key] = _sma_impl(base, period)
+    return _INDICATOR_CACHE[key][:n_slice]
+
+
+def _rsi_cached(closes: np.ndarray, period: int = 14) -> np.ndarray:
+    base = closes.base if closes.base is not None else closes
+    n_slice = len(closes)
+    key = ("rsi", id(base), period, len(base))
+    if key not in _INDICATOR_CACHE:
+        _INDICATOR_CACHE[key] = _rsi_impl(base, period)
+    return _INDICATOR_CACHE[key][:n_slice]
+
+
 def _rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
     """RSI を計算。"""
     n = len(closes)
@@ -128,6 +180,19 @@ def _stoch(highs, lows, closes, k_period=14, d_period=3, smooth=3):
     return k_smooth, d
 
 
+def _stoch_cached(highs, lows, closes, k_period=14, d_period=3, smooth=3):
+    """Stoch を3つの配列でキャッシュ (全部同じ base)。"""
+    base = closes.base if closes.base is not None else closes
+    n_slice = len(closes)
+    key = ("stoch", id(base), k_period, d_period, smooth, len(base))
+    if key not in _INDICATOR_CACHE:
+        b_h = highs.base if highs.base is not None else highs
+        b_l = lows.base if lows.base is not None else lows
+        _INDICATOR_CACHE[key] = _stoch(b_h, b_l, base, k_period, d_period, smooth)
+    k_full, d_full = _INDICATOR_CACHE[key]
+    return k_full[:n_slice], d_full[:n_slice]
+
+
 # ─────────────────────────────────────────────────────────────
 # 戦略シグナル関数 (各バー時点で「次バー寄付買い」のシグナルを判定)
 # 引数: bar インデックス i (i は現在バー、i+1 で寄付買い)
@@ -157,15 +222,15 @@ def signal_macd(opens, highs, lows, closes, volumes, i, atr_arr,
     if i < max(macd_slow + macd_signal, vol_ma, ma_trend) + 1:
         return None
     # MACD
-    ema_fast = _ema(closes[:i+1], macd_fast)
-    ema_slow = _ema(closes[:i+1], macd_slow)
+    ema_fast = _ema_cached(closes[:i+1], macd_fast)
+    ema_slow = _ema_cached(closes[:i+1], macd_slow)
     macd_line = ema_fast - ema_slow
     sig_line = _ema(macd_line, macd_signal)
     # ゴールデンクロス (前バー: 下, 現バー: 上)
     if not (macd_line[i-1] <= sig_line[i-1] and macd_line[i] > sig_line[i]):
         return None
     # MA10 上昇トレンド
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] > ma[i]):
         return None
     # 出来高スパイク
@@ -184,11 +249,11 @@ def signal_rsi2(opens, highs, lows, closes, volumes, i, atr_arr,
     """RSI(2) 過売り + MA20 上 + IBS<0.35 (押し目反発)。"""
     if i < max(ma_trend, 3) + 1:
         return None
-    rsi2 = _rsi(closes[:i+1], 2)
+    rsi2 = _rsi_cached(closes[:i+1], 2)
     if rsi2[i] >= rsi2_entry:
         return None
     # MA20 上の押し目
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] > ma[i]):
         return None
     # IBS (Internal Bar Strength)
@@ -211,13 +276,13 @@ def signal_a7(opens, highs, lows, closes, volumes, i, atr_arr,
     """A7: Stochastic 過売り反発 + MA30トレンド (5分足デイトレ調整)。"""
     if i < max(k_period * 2, ma_trend) + 1:
         return None
-    k, d = _stoch(highs[:i+1], lows[:i+1], closes[:i+1],
+    k, d = _stoch_cached(highs[:i+1], lows[:i+1], closes[:i+1],
                    k_period, d_period, smooth)
     # %K が過売り域 (<30) から反発 (前バーより上昇)
     if not (k[i-1] < 30 and k[i] > k[i-1]):
         return None
     # トレンドフィルタ MA75 上
-    ma = _sma(closes[:i+1], ma_trend)
+    ma = _sma_cached(closes[:i+1], ma_trend)
     if not (closes[i] > ma[i]):
         return None
     a = atr_arr[i]
@@ -253,8 +318,8 @@ def signal_mom(opens, highs, lows, closes, volumes, i, atr_arr,
     roc = (closes[i] / closes[i-roc_period] - 1) * 100
     if roc <= roc_thr:
         return None
-    ma_f = _sma(closes[:i+1], ma_fast)
-    ma_s = _sma(closes[:i+1], ma_slow)
+    ma_f = _sma_cached(closes[:i+1], ma_fast)
+    ma_s = _sma_cached(closes[:i+1], ma_slow)
     if not (ma_f[i] > ma_s[i]):
         return None
     a = atr_arr[i]
