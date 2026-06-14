@@ -29,24 +29,25 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
-  # 最短: STEP1 (--swing-thresholds-relaxed) で出した最新CSVを自動収集
-  python holdout_periods_report_daytrade.py --mode swing_relaxed
+  # 最短: 何も指定しないと最新CSVを自動検出
+  # (walkforward_daytrade_results/ から最新日付 + 優先modeを自動採用)
+  python holdout_periods_report_daytrade.py
 
-  # 他モードも同様
+  # 強制再生成
+  python holdout_periods_report_daytrade.py --force
+
+  # 特定 mode を指定
   python holdout_periods_report_daytrade.py --mode swing
   python holdout_periods_report_daytrade.py --mode standard
 
-  # 強制再生成 / ワーカー数
-  python holdout_periods_report_daytrade.py --mode swing_relaxed --force --workers 6
-
-  # CSVパス直接指定 (--from-csv あれば --universe csv 自動)
+  # CSVパス直接指定
   python holdout_periods_report_daytrade.py --from-csv path/to/walkforward_*.csv
 
   # 既存の3-tuple WATCHLIST を使う
   python holdout_periods_report_daytrade.py --universe winners
 
-  # 全prime銘柄スキャン (STEP1スキップ、内部でhold-out評価)
-  python holdout_periods_report_daytrade.py
+  # 強制prime全銘柄スキャン (CSVあっても無視)
+  python holdout_periods_report_daytrade.py --universe prime --force --no-auto
 """
 
 from __future__ import annotations
@@ -493,6 +494,8 @@ def main():
                         help="STEP1のモード名 (swing_relaxed/swing/standard/lenient/strict) "
                              "から最新CSV群を自動展開。例: --mode swing_relaxed → "
                              "walkforward_daytrade_results/walkforward_*_swing_relaxed_<最新>.csv")
+    parser.add_argument("--no-auto", action="store_true",
+                        help="CSV自動検出を無効化 (universe=prime のまま全銘柄スキャン)")
     parser.add_argument("--top", type=int, default=30,
                         help="各期間の上位N銘柄表示 (デフォルト30)")
     parser.add_argument("--train-days", type=int, default=0,
@@ -520,6 +523,47 @@ def main():
             open_html(out.resolve())
         return
 
+    # --mode/--from-csv 未指定 & universe デフォルトのとき → 最新CSVを自動検出
+    if not args.from_csv and args.universe == "prime" and not args.mode and not args.no_auto:
+        import glob as _g
+        all_csvs = _g.glob("walkforward_daytrade_results/walkforward_*_*.csv")
+        if all_csvs:
+            # 最新日付グループ + その中で最頻出mode
+            by_date = {}
+            for c in all_csvs:
+                date = Path(c).stem.split("_")[-1]
+                by_date.setdefault(date, []).append(c)
+            latest_date = max(by_date.keys())
+            # 同日の中で mode別に分類 (戦略名は可変なので mode はファイル名から推定)
+            mode_files = {}
+            for c in by_date[latest_date]:
+                # walkforward_<strat>_<mode>_<date>.csv
+                # ※ mode が "swing_relaxed" だと _ 区切りで複数parts
+                stem = Path(c).stem
+                # 末尾 _<date> を除去、先頭 walkforward_<strat>_ を除去
+                m = stem[len("walkforward_"):-len(latest_date)-1]
+                # m = "<strat>_<mode>" の形式 → strat を先頭部分とみなす
+                # 戦略一覧と照合して mode を切り出す
+                detected_mode = None
+                for known in ["standard", "lenient", "strict", "swing", "swing_relaxed"]:
+                    if m.endswith("_" + known):
+                        detected_mode = known
+                        break
+                detected_mode = detected_mode or "unknown"
+                mode_files.setdefault(detected_mode, []).append(c)
+            # 最多mode (swing_relaxed > swing > standard などの優先順)
+            priority = ["swing_relaxed", "swing", "standard", "strict", "lenient"]
+            chosen = None
+            for p in priority:
+                if p in mode_files:
+                    chosen = p
+                    break
+            if not chosen:
+                chosen = max(mode_files, key=lambda k: len(mode_files[k]))
+            args.mode = chosen
+            args.from_csv = mode_files[chosen]
+            print(f"[auto] 最新CSV検出: mode={chosen} / "
+                  f"{len(args.from_csv)}件 / 日付={latest_date}")
     # --mode 自動展開: walkforward_daytrade_results/walkforward_*_<mode>_<最新>.csv
     if args.mode and not args.from_csv:
         import glob as _g
@@ -528,7 +572,6 @@ def main():
         if not cands:
             print(f"[error] --mode {args.mode} の CSV が見つかりません ({pattern})")
             return
-        # 最新の日付グループだけ採用
         by_date = {}
         for c in cands:
             date = Path(c).stem.split("_")[-1]
