@@ -69,7 +69,8 @@ def run_once(entry_start, extra_args):
         return None
 
     dst = Path(f"holdout_periods{variant}_{hhmm}_{today}.html")
-    src.rename(dst)
+    # Windows では rename は既存ファイルがあると FileExistsError になるため replace
+    src.replace(dst)
     print(f"  → {dst}")
     return dst
 
