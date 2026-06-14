@@ -87,6 +87,12 @@ PASS_TRAIN_SWING = dict(trades=20, pf=1.5, win_rate=45, pnl=0)
 PASS_TEST_SWING  = dict(trades=5,  pf=1.2, win_rate=40, pnl=0)
 MIN_FOLDS_SWING  = 2  # 2-fold モードなら全fold合格
 
+# スイング緩和モード (--swing-thresholds-relaxed): デイトレ向け中間
+# スイング思想 (PF優先) でデイトレの実態 (低勝率) に合わせる
+PASS_TRAIN_SWING_RELAXED = dict(trades=15, pf=1.3, win_rate=35, pnl=0)
+PASS_TEST_SWING_RELAXED  = dict(trades=3,  pf=1.0, win_rate=30, pnl=0)
+MIN_FOLDS_SWING_RELAXED  = 2
+
 
 def slice_trades(trades, start_days_ago, end_days_ago, today):
     """トレードを start-end 日数前の期間でフィルタ。"""
@@ -228,7 +234,10 @@ def main():
                              "3=デイトレ既定: 540-360-180-0)")
     parser.add_argument("--swing-thresholds", action="store_true",
                         help="スイング閾値: TRAIN取引≥20/PF≥1.5/勝率≥45%%, "
-                             "TEST取引≥5/PF≥1.2/勝率≥40%% (--folds 2 推奨)")
+                             "TEST取引≥5/PF≥1.2/勝率≥40%% (--folds 2 推奨, 厳しめ)")
+    parser.add_argument("--swing-thresholds-relaxed", action="store_true",
+                        help="スイング緩和: TRAIN取引≥15/PF≥1.3/勝率≥35%%, "
+                             "TEST取引≥3/PF≥1.0/勝率≥30%% (--folds 2 推奨, 中間)")
     parser.add_argument("--diagnostic", action="store_true",
                         help="診断: 全銘柄の trade数/PF を表示")
     args = parser.parse_args()
@@ -247,6 +256,14 @@ def main():
         mode_label = "swing"
         print(f"[INFO] スイング閾値モード: TRAIN PF≥1.5/勝率≥45%/取引≥20, "
               f"TEST PF≥1.2/勝率≥40%/取引≥5, "
+              f"{MIN_FOLDS}/{args.folds} fold合格")
+    elif args.swing_thresholds_relaxed:
+        PASS_TRAIN = PASS_TRAIN_SWING_RELAXED
+        PASS_TEST = PASS_TEST_SWING_RELAXED
+        MIN_FOLDS = MIN_FOLDS_SWING_RELAXED if args.folds == 2 else MIN_FOLDS_DEFAULT
+        mode_label = "swing_relaxed"
+        print(f"[INFO] スイング緩和モード: TRAIN PF≥1.3/勝率≥35%/取引≥15, "
+              f"TEST PF≥1.0/勝率≥30%/取引≥3, "
               f"{MIN_FOLDS}/{args.folds} fold合格")
     elif args.lenient:
         PASS_TRAIN = PASS_TRAIN_LENIENT
@@ -359,7 +376,7 @@ def main():
         f"- **戦略**: {', '.join(strategies)}",
         f"- **TRAIN条件**: trades≥{PASS_TRAIN['trades']}, PF≥{PASS_TRAIN['pf']}, 勝率≥{PASS_TRAIN['win_rate']}%",
         f"- **TEST条件**: trades≥{PASS_TEST['trades']}, PF≥{PASS_TEST['pf']}, 勝率≥{PASS_TEST['win_rate']}%",
-        f"- **合格基準**: {MIN_FOLDS}/3 fold合格",
+        f"- **合格基準**: {MIN_FOLDS}/{len(FOLDS)} fold合格",
         f"",
         f"## 戦略別 合格数",
         f"",
@@ -460,7 +477,7 @@ def main():
                     disp = r["name"][:18]
                     pf_str = "∞" if r["total_pf"] == float("inf") else f"{r['total_pf']:.2f}"
                     print(f"       {disp:<18} {r['symbol']:<8} PF{pf_str} "
-                          f"勝{r['total_win_rate']:>3.0f}% {r['total_pnl']:>+10,.0f} {r['pass_folds']}/3")
+                          f"勝{r['total_win_rate']:>3.0f}% {r['total_pnl']:>+10,.0f} {r['pass_folds']}/{len(FOLDS)}")
 
     # サマリーログ書出し (all-modes なら各モード別サマリ)
     output_modes = [m for m, _, _, _ in mode_configs] if args.all_modes else [mode_label]
@@ -517,7 +534,7 @@ def main():
                     summary_lines.append(
                         f"  {i}. {r.get('name','')} ({r.get('symbol','')}) "
                         f"PF{pf} 勝{r.get('total_win_rate',0):.0f}% "
-                        f"{r.get('total_pnl',0):+,.0f}円 {r.get('pass_folds',0)}/3"
+                        f"{r.get('total_pnl',0):+,.0f}円 {r.get('pass_folds',0)}/{len(FOLDS)}"
                     )
             summary_lines.append("")
 
@@ -556,7 +573,7 @@ def main():
                     mode_lines.append(
                         f"| {i} | {r.get('name','')[:18]} | {r.get('symbol','')} | "
                         f"{pf} | {r.get('total_win_rate',0):.0f}% | "
-                        f"{r.get('total_pnl',0):+,.0f} | {r.get('pass_folds',0)}/3 |"
+                        f"{r.get('total_pnl',0):+,.0f} | {r.get('pass_folds',0)}/{len(FOLDS)} |"
                     )
                 mode_lines.append("")
             mode_summary_path.write_text("\n".join(mode_lines), encoding="utf-8")
@@ -606,7 +623,7 @@ def main():
                         f"({r.get('symbol','')}) "
                         f"PF{pf:<5} 勝{r.get('total_win_rate',0):>3.0f}% "
                         f"{r.get('total_pnl',0):>+12,.0f}円 "
-                        f"{r.get('pass_folds',0)}/3"
+                        f"{r.get('pass_folds',0)}/{len(FOLDS)}"
                     )
             compact_path.write_text("\n".join(compact_lines), encoding="utf-8")
             print(f"  📋 コンパクト: {compact_path.name}")
@@ -660,7 +677,7 @@ def main():
             folds = r.get("pass_folds", 0)
             summary_lines.append(
                 f"| {i} | {name} | {sym} | {price:,.0f} | {n} | {wr:.0f}% | "
-                f"{pf} | {pnl:+,.0f} | {dd:+.1f}% | {sharpe:.2f} | {folds}/3 |"
+                f"{pf} | {pnl:+,.0f} | {dd:+.1f}% | {sharpe:.2f} | {folds}/{len(FOLDS)} |"
             )
         summary_lines.append("")
 
