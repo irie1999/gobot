@@ -48,6 +48,12 @@ holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
   # 強制prime全銘柄スキャン (CSVあっても無視)
   python holdout_periods_report_daytrade.py --universe prime --force --no-auto
+
+  # ショート戦略のみ (逆指値 run_signals_holdout_all.py --short と同じ役割)
+  python holdout_periods_report_daytrade.py --short --max-price 6000 --min-price 1000
+
+  # ロング戦略のみ
+  python holdout_periods_report_daytrade.py --long-only
 """
 
 from __future__ import annotations
@@ -510,13 +516,33 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--strategy", default="all",
                         help="all/long/short/個別戦略")
+    parser.add_argument("--short", action="store_true",
+                        help="ショート戦略 (DON_S/MACD_S/RSI2_S/A7_S/VOL_S/MOM_S) のみで評価。"
+                             "逆指値ロング run_signals_holdout_all.py --short と同じ役割。"
+                             "出力ファイル名も holdout_periods_short_<日付>.html に切替")
+    parser.add_argument("--long-only", action="store_true",
+                        help="ロング戦略 (DON/MACD/RSI2/A7/VOL/MOM) のみで評価")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
+    # --short と --long-only の整合チェック + 戦略フィルタ
+    if args.short and args.long_only:
+        print("[error] --short と --long-only は同時指定できません")
+        return
+    if args.short:
+        args.strategy = "short"
+        variant_label = "short"
+    elif args.long_only:
+        args.strategy = "long"
+        variant_label = "long"
+    else:
+        variant_label = ""
+
     today = datetime.now(JST).date()
-    out = Path(f"holdout_periods_{today}.html")
+    out_suffix = f"_{variant_label}" if variant_label else ""
+    out = Path(f"holdout_periods{out_suffix}_{today}.html")
     if out.exists() and not args.force:
         print(f"[CACHE] 当日生成済み: {out.resolve()}")
         if not args.no_browser:
@@ -625,6 +651,26 @@ def main():
                 if name:
                     sym_name[sym] = name
             print(f"[CSV] {csv_path.name}: {n_added}件追加")
+        # --short/--long-only による戦略フィルタ
+        if args.strategy in ("short", "long"):
+            allowed = (set(STRATEGIES_SHORT.keys()) if args.strategy == "short"
+                       else set(STRATEGIES.keys()))
+            before_syms = len(csv_strategy_map)
+            before_pairs = sum(len(v) for v in csv_strategy_map.values())
+            filtered = {}
+            filtered_count = {}
+            for s, strats in csv_strategy_map.items():
+                ks = [x for x in strats if x in allowed]
+                if ks:
+                    filtered[s] = ks
+                    for k in ks:
+                        filtered_count[k] = filtered_count.get(k, 0) + 1
+            csv_strategy_map = filtered
+            after_syms = len(csv_strategy_map)
+            after_pairs = sum(len(v) for v in csv_strategy_map.values())
+            print(f"[フィルタ] --{args.strategy}: 銘柄 {before_syms}→{after_syms}, "
+                  f"ペア {before_pairs}→{after_pairs}")
+            per_strat_count = filtered_count
         targets = [(s, sym_name.get(s, "")) for s in csv_strategy_map]
         total_pairs = sum(len(v) for v in csv_strategy_map.values())
         print(f"[CSV] 銘柄数 {len(targets)} / (銘柄×戦略)ペア数 {total_pairs}")
@@ -646,7 +692,9 @@ def main():
         targets = [(e[0], e[1]) for e in raw]
 
     print(f"=" * 70)
-    print(f"  期間別ホールドアウト・レポート (逆指値ロング方式)")
+    variant_disp = ({"short": "ショート", "long": "ロング"}
+                    .get(variant_label, "ロング+ショート"))
+    print(f"  期間別ホールドアウト・レポート [{variant_disp}] (逆指値ロング方式)")
     print(f"=" * 70)
     print(f"  universe: {args.universe} ({len(targets)}銘柄)")
     print(f"  TEST: 直近 30/60/90/120/150/180 日 (6期間、今日から起算)")
@@ -846,9 +894,9 @@ function jumpToSym(sid){
     html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>期間別ホールドアウト ― {today}</title>
 <style>{css}</style></head><body>
-<h1>📊 期間別ホールドアウト・レポート</h1>
+<h1>📊 期間別ホールドアウト・レポート [{variant_disp}]</h1>
 <p class="subtitle">生成: {today} / universe: {args.universe} ({len(fetched)}銘柄) /
-   戦略: {len(strategies)} / TRAIN期間: {args.train_days}日</p>
+   戦略: {len(strategies)} ({variant_disp}) / TRAIN期間: {args.train_days}日</p>
 {legend}
 <div class="tab-nav">{tab_btns}</div>
 {tab_panes}
