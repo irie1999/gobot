@@ -77,6 +77,11 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
     qty = 0
 
     def _finish(exit_p, exit_dt, reason):
+        # 異常値ガード: entry/exit の比率が ±30% 超なら無効化 (株式分割等のデータ破損)
+        if entry_p > 0:
+            ratio = exit_p / entry_p
+            if ratio < 0.7 or ratio > 1.3:
+                return  # 異常値はトレード記録しない
         # スリッページ・手数料反映 (Long: 買→売, Short: 売→買戻し)
         if side == "long":
             gross = (exit_p - entry_p) * qty

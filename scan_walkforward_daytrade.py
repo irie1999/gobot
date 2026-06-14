@@ -277,6 +277,23 @@ def main():
         fetched = {s: df for s, df in fetched.items()
                    if float(df.iloc[-1]["close"]) >= args.min_price}
     print(f"  ロード: {before}銘柄 → 価格フィルタ後: {len(fetched)}銘柄")
+
+    # データサニティチェック (異常な ATR/ジャンプ銘柄を除外)
+    print(f"  サニティチェック中...", flush=True)
+    from data_sanity_check import check_one
+    sane_count = 0
+    insane_syms = []
+    for s, df in list(fetched.items()):
+        r = check_one(s, df, max_atr_pct=5.0, max_gap_pct=30.0)
+        if not r["sane"]:
+            insane_syms.append((s, r["atr_pct"], r["issues"]))
+            del fetched[s]
+        else:
+            sane_count += 1
+    print(f"  正常: {sane_count}銘柄 / 異常除外: {len(insane_syms)}銘柄")
+    if insane_syms[:5]:
+        print(f"  異常例: {[(s, f'ATR{a:.0f}%') for s, a, _ in insane_syms[:5]]}")
+
     targets = [(s, n) for s, n in targets if s in fetched]
 
     # 各戦略でスキャン
