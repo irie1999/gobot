@@ -296,6 +296,9 @@ def main():
     parser.add_argument("--min-price", type=int, default=0)
     parser.add_argument("--patterns", default=None,
                         help="カンマ区切り (例: baseline,A_slow_stop,ABCD_all)")
+    parser.add_argument("--from-csv", default=None, nargs="+",
+                        help="STEP1 CSV のパス (複数指定可、ワイルドカード対応)。"
+                             "holdout_periods_report_daytrade.py に渡される")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -310,6 +313,9 @@ def main():
         extra_args.append("--long-only")
     extra_args.extend(["--max-price", str(args.max_price),
                         "--min-price", str(args.min_price)])
+    if args.from_csv:
+        extra_args.append("--from-csv")
+        extra_args.extend(args.from_csv)
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
     variant_label = "short" if args.short else "long" if args.long_only else ""
