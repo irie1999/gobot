@@ -128,6 +128,9 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
     # ATR を連結データで計算
     atr_arr = atr_from_bars(highs, lows, closes, atr_period)
 
+    # 指標キャッシュを日ごとにクリア (id 再利用による日跨ぎ衝突を回避)
+    _indicator_cache_clear()
+
     trades = []
     state = "idle"
     side = "long"   # "long" or "short"
