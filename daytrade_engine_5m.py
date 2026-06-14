@@ -51,22 +51,45 @@ def _apply_fee(amount):
     return amount * FEE_PCT_ONE_WAY
 
 
+# 案A: 前日末尾を当日 warmup に流用するためのバー数
+# 各戦略の最大ルックバック (A7 MA30=150min, MACD 17+5=110min) +余裕
+# 60バー (300分=5時間) あれば全戦略カバー
+PREV_TAIL_BARS = 60
+
+
 def backtest_day_strategy(day_df, strategy_fn, strategy_params,
                             budget, max_risk,
-                            atr_period=14):
-    """1日分の5分足DFで指定戦略をbacktest。"""
-    opens   = day_df["open"].to_numpy(dtype=float)
-    highs   = day_df["high"].to_numpy(dtype=float)
-    lows    = day_df["low"].to_numpy(dtype=float)
-    closes  = day_df["close"].to_numpy(dtype=float)
-    volumes = day_df["volume"].to_numpy(dtype=float)
-    times   = day_df.index
-    n = len(day_df)
+                            atr_period=14,
+                            prev_tail_df=None):
+    """1日分の5分足DFで指定戦略をbacktest。
 
-    if n < WARMUP_BARS + 2:
+    prev_tail_df: 前日末尾の数十バー (warmup用)。指定時、指標は連結データで
+                  計算し当日0バー目から発火可能。エントリーは当日のみ。
+    """
+    # 前日末尾と連結 (warmup 用)
+    if prev_tail_df is not None and len(prev_tail_df) > 0:
+        ext_df = pd.concat([prev_tail_df, day_df])
+        day_start = len(prev_tail_df)
+    else:
+        ext_df = day_df
+        day_start = 0
+
+    opens   = ext_df["open"].to_numpy(dtype=float)
+    highs   = ext_df["high"].to_numpy(dtype=float)
+    lows    = ext_df["low"].to_numpy(dtype=float)
+    closes  = ext_df["close"].to_numpy(dtype=float)
+    volumes = ext_df["volume"].to_numpy(dtype=float)
+    times   = ext_df.index
+    n = len(ext_df)
+
+    # 当日が短すぎる場合スキップ
+    if (n - day_start) < 3:
+        return []
+    # 前日無し + 当日のみで warmup 不足
+    if day_start == 0 and n < WARMUP_BARS + 2:
         return []
 
-    # ATR を1日分で計算
+    # ATR を連結データで計算
     atr_arr = atr_from_bars(highs, lows, closes, atr_period)
 
     trades = []
@@ -102,7 +125,8 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             strategy=strategy_params.get("name", "?"), reason=reason,
         ))
 
-    i = WARMUP_BARS
+    # prev_tail があれば当日 0 バー目から、無ければ WARMUP_BARS バー目から
+    i = day_start if day_start > 0 else WARMUP_BARS
     while i < n:
         t = times[i].time()
 
@@ -208,7 +232,11 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
 
 def backtest_symbol_5m(sym, name, df, strategy_fn, strategy_params=None,
                        budget=200_000, max_risk=1_000):
-    """全期間を1日単位で backtest。"""
+    """全期間を1日単位で backtest。
+
+    案A: 前日末尾を翌日 warmup に流用 → 寄付き直後 (9:00 など) から
+    指標を計算可能にし、ENTRY_START を早めても実エントリーが発生する。
+    """
     if strategy_params is None:
         strategy_params = {}
     if "name" not in strategy_params:
@@ -220,10 +248,15 @@ def backtest_symbol_5m(sym, name, df, strategy_fn, strategy_params=None,
         return None
 
     trades = []
+    prev_tail = None  # 前日末尾の PREV_TAIL_BARS バー
     for d in dates:
-        day_trades = backtest_day_strategy(daily[d], strategy_fn,
-                                            strategy_params, budget, max_risk)
+        day_df = daily[d]
+        day_trades = backtest_day_strategy(day_df, strategy_fn,
+                                            strategy_params, budget, max_risk,
+                                            prev_tail_df=prev_tail)
         trades.extend(day_trades)
+        # 次の日の warmup 用に末尾を保存
+        prev_tail = day_df.tail(PREV_TAIL_BARS)
 
     return dict(symbol=sym, name=name, trades=trades)
 
