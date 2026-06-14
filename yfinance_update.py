@@ -137,7 +137,7 @@ def fetch_yfinance(code5: str, days: int) -> pd.DataFrame:
     ticker = jquants_code_to_yf(code5)
     df = yf.download(
         ticker, period=f"{days}d", interval="5m",
-        auto_adjust=False, progress=False, threads=False,
+        auto_adjust=True, progress=False, threads=False,  # 株式分割等を自動調整
     )
     if df is None or df.empty:
         return pd.DataFrame()

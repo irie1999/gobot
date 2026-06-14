@@ -90,7 +90,7 @@ def fetch_one(yf_code, days):
     pkl_path = DATA_DIR / f"{code5}.pkl"
     try:
         df = yf.download(yf_code, period=f"{days}d", interval="5m",
-                         progress=False, threads=False, auto_adjust=False)
+                         progress=False, threads=False, auto_adjust=True)  # 株式分割対応
         if df is None or df.empty:
             return ("err", 0, yf_code, "yfinance empty")
         conv = yf_df_to_jquants(df, code5)
