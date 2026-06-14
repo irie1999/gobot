@@ -84,7 +84,7 @@ def backtest_one(symbol, name, strategy):
 
     # データロード
     fetched = load_intraday_batch([symbol], DEFAULT_BACKTEST_DAYS,
-                                    source="local")
+                                    source="local", quiet=True)
     df = fetched.get(symbol)
     if df is None or df.empty:
         return None

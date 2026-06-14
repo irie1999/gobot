@@ -277,7 +277,8 @@ def load_intraday(symbol: str, days: int = 60,
 
 
 def load_intraday_batch(symbols: list[str], days: int = 60,
-                        source: str = "auto") -> dict[str, pd.DataFrame]:
+                        source: str = "auto",
+                        quiet: bool = False) -> dict[str, pd.DataFrame]:
     """
     複数銘柄の5分足を取得。
 
@@ -296,12 +297,12 @@ def load_intraday_batch(symbols: list[str], days: int = 60,
             else:
                 remaining.append(sym)
 
-        if result:
+        if result and not quiet:
             print(f"  ローカル: {len(result)}/{len(symbols)}銘柄ロード済み",
                   flush=True)
 
         if source == "local":
-            if remaining:
+            if remaining and not quiet:
                 print(f"  [warn] {len(remaining)}銘柄がローカルに見つかりません",
                       flush=True)
             return result
@@ -309,12 +310,13 @@ def load_intraday_batch(symbols: list[str], days: int = 60,
         remaining = list(symbols)
 
     if remaining and source in ("auto", "yfinance"):
-        print(f"  yfinance: {len(remaining)}銘柄を取得中...", flush=True)
+        if not quiet:
+            print(f"  yfinance: {len(remaining)}銘柄を取得中...", flush=True)
         yf_result = _load_yfinance_batch(remaining, days)
         result.update(yf_result)
         found = len(yf_result)
         missed = len(remaining) - found
-        if missed > 0:
+        if missed > 0 and not quiet:
             print(f"  [warn] {missed}銘柄がyfinanceでも取得失敗", flush=True)
 
     return result
