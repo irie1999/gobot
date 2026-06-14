@@ -82,8 +82,12 @@ def load_csv(csv_path, max_price, min_price, min_pf, min_trades):
     return out
 
 
-def write_watchlist(rows, out_path, strategy_label, top=None):
-    """WATCHLIST を Python ファイルとして出力。"""
+def write_watchlist(rows, out_path, strategy_label, top=None,
+                    include_strategy=False):
+    """WATCHLIST を Python ファイルとして出力。
+
+    include_strategy=True なら (symbol, name, strategy) の3要素タプル形式。
+    """
     if top:
         rows = rows[:top]
     today = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
@@ -95,14 +99,23 @@ def write_watchlist(rows, out_path, strategy_label, top=None):
         f"対象: {len(rows)}銘柄",
         '"""',
         "",
-        "SYMBOLS: list[tuple[str, str]] = [",
+        "SYMBOLS: list[tuple[str, str, str]] = [" if include_strategy
+        else "SYMBOLS: list[tuple[str, str]] = [",
     ]
     for r in rows:
         sym = r.get("symbol", "")
         name = r.get("name", "").replace('"', '\\"')
-        if sym:
-            lines.append(f'    ("{sym}", "{name}"),  # PF={r.get("total_pf","")}'
-                         f' 損益={r.get("total_pnl","")}')
+        if not sym:
+            continue
+        if include_strategy:
+            strat = r.get("_via", r.get("strategy", "DON"))
+            lines.append(f'    ("{sym}", "{name}", "{strat}"),  '
+                         f'# PF={r.get("total_pf","")} '
+                         f'損益={r.get("total_pnl","")}')
+        else:
+            lines.append(f'    ("{sym}", "{name}"),  '
+                         f'# PF={r.get("total_pf","")} '
+                         f'損益={r.get("total_pnl","")}')
     lines.append("]")
     lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
@@ -167,8 +180,16 @@ def main():
             r["_via"] = strat
             rows_out.append(r)
         write_watchlist(rows_out, out_path, f"統合 ({len(strategies)}戦略)",
-                        top=args.top)
+                        top=args.top, include_strategy=True)
         print(f"\n統合 WATCHLIST: {len(rows_out[:args.top])}銘柄 → {out_path}")
+        # 戦略別 内訳表示
+        strat_count = {}
+        for r in rows_out[:args.top]:
+            s = r.get("_via", "?")
+            strat_count[s] = strat_count.get(s, 0) + 1
+        print(f"  戦略内訳: " + ", ".join(
+            f"{s}:{n}" for s, n in sorted(strat_count.items(),
+                                            key=lambda x: -x[1])))
     else:
         # 戦略ごとに別ファイル
         for strat in strategies:
