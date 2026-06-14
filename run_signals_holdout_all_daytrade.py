@@ -116,37 +116,32 @@ def build_signal_tab(items, score_cache=None):
 <p style="color:#94a3b8;font-size:0.85rem">Top 3: {top3_html}</p>
 """
 
-    # メインテーブル (BTスコア凍結 + リスクバッジ)
+    # メインテーブル (コンパクト版: 重要情報のみ)
     rows = ""
     for it in items:
         last_p = it.get("last_price", 0)
         rec_count = len(it["recent_signals"])
-        rec_text = f"{rec_count}件" if rec_count > 0 else "—"
-        # 表示スコア (凍結 or 現在)
+        rec_text = str(rec_count) if rec_count > 0 else "—"
         display_score = it.get("frozen_score", it["score"])
-        frozen_mark = "❄️" if it.get("score_frozen") else ""
-        # リスクバッジ
-        risk_badges = render_risk_badges(it["symbol"])
-        # 6期間別 PF
+        # 3期間別 PF + 損益 (30日, 90日, 180日)
         pf_cells = ""
-        for days in SIGNAL_PERIODS:
+        for days in [30, 90, 180]:
             s = it["period_stats"].get(days, {})
             pf = s.get("pf", 0)
             pnl = s.get("total_pnl", 0)
             n = s.get("n", 0)
             if n == 0:
-                pf_cells += '<td style="color:#475569">—</td>'
+                pf_cells += '<td>—</td><td>—</td>'
             else:
                 c = _color_pf(pf)
-                pf_cells += (f'<td style="color:{c}" '
-                             f'title="{n}取引 損益{pnl:+,.0f}">'
-                             f'{_pf(pf)}</td>')
+                pc = "profit" if pnl >= 0 else "loss"
+                pf_cells += (f'<td style="color:{c}">{_pf(pf)}</td>'
+                             f'<td class="{pc}">{pnl:+,.0f}</td>')
 
         rows += f"""
 <tr>
-  <td><strong style="color:{_color_score(display_score)}">{it['rank']}{display_score}</strong>{frozen_mark}</td>
-  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small>
-    {risk_badges}</td>
+  <td><strong style="color:{_color_score(display_score)}">{it['rank']}{display_score}</strong></td>
+  <td class="sym">{it["name"]}<br><small class="code">{it["symbol"]}</small></td>
   <td>{it["strategy"]}</td>
   <td>{last_p:,.0f}</td>
   {pf_cells}
@@ -154,12 +149,13 @@ def build_signal_tab(items, score_cache=None):
 </tr>"""
 
     table = f"""
-<h3>WATCHLIST 銘柄 (スコア順)</h3>
+<h3>WATCHLIST 銘柄 (スコア順) — 30/90/180日 PF+損益</h3>
 <table>
   <thead><tr>
     <th>スコア</th><th>銘柄</th><th>戦略</th><th>現値</th>
-    <th>30日PF</th><th>60日PF</th><th>90日PF</th>
-    <th>120日PF</th><th>150日PF</th><th>180日PF</th>
+    <th>30日PF</th><th>30日損益</th>
+    <th>90日PF</th><th>90日損益</th>
+    <th>180日PF</th><th>180日損益</th>
     <th>直近7日</th>
   </tr></thead>
   <tbody>{rows}</tbody>
