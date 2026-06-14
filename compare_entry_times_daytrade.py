@@ -32,7 +32,10 @@ from pathlib import Path
 
 JST = timezone(timedelta(hours=9))
 
-DEFAULT_TIMES = ["09:00", "09:15", "09:30", "09:45"]
+DEFAULT_TIMES = ["10:45", "11:00", "12:30", "13:00"]
+# 補足: 9:00-10:30 はほとんどの戦略のウォームアップ期間内 (各戦略100分前後の
+# 当日データが必要) のため、その時刻範囲でENTRY_STARTを変えても結果は同じ。
+# 意味のある検証範囲は「ウォームアップ完了後 ~ 後場開始」を中心に。
 
 
 def run_once(entry_start, extra_args):
@@ -255,10 +258,13 @@ a:hover { text-decoration:underline; }
 <div class="legend">
   <strong>📖 解釈ガイド</strong><br>
   <ul>
-    <li><strong>9:00 が勝った</strong> = 寄付きボラを取りに行く戦略が機能 (スリッページに耐えた)</li>
-    <li><strong>9:15 が勝った</strong> = 寄付き直後の最大ノイズを避ければ最適</li>
-    <li><strong>9:30 が勝った</strong> = 保守的な現行設定が妥当 (寄付きノイズが想像以上に酷い)</li>
-    <li><strong>9:45 が勝った</strong> = 流動性が確保されるまで待つほうが良い (低ボラ戦略向け)</li>
+    <li><strong>注意</strong>: 戦略のウォームアップが 100分前後あるため、9:00-10:30 の範囲で
+        ENTRY_START を変えても結果は同じになります (実エントリーが10:40以降にしか発生しないため)。
+        意味のある検証は <strong>ウォームアップ完了後〜後場開始</strong> の時間帯で。</li>
+    <li><strong>10:45 が勝った</strong> = 早い時間帯のシグナルが優位 (寄付き後ボラの恩恵)</li>
+    <li><strong>11:00 が勝った</strong> = 前場中盤が安定 (寄付きノイズ収束後)</li>
+    <li><strong>12:30 が勝った</strong> = 後場開始の動きを捉える戦略が有効</li>
+    <li><strong>13:00 が勝った</strong> = 後場ある程度落ち着いてからのエントリーが有利</li>
   </ul>
 </div>
 
