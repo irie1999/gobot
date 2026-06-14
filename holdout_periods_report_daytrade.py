@@ -865,9 +865,19 @@ def main():
     cache = None
     if not args.no_cache:
         CACHE_DIR.mkdir(exist_ok=True)
-        # ENTRY_START を cache key に含める (env var で変えた場合に古い結果を流用しない)
+        # ENTRY_START と 改善ENV を cache key に含める (env変えると結果が変わるため)
         _es_label = _os.environ.get("DAYTRADE_ENTRY_START", "0930").replace(":", "")
-        cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{today}.pkl"
+        _imp_parts = []
+        if _os.environ.get("DAYTRADE_STOP_CONFIRM", "0") != "0":
+            _imp_parts.append(f"sc{_os.environ['DAYTRADE_STOP_CONFIRM']}")
+        if _os.environ.get("DAYTRADE_MAX_STOPS", "0") != "0":
+            _imp_parts.append(f"ms{_os.environ['DAYTRADE_MAX_STOPS']}")
+        if _os.environ.get("DAYTRADE_TRAIL_BE", "0") != "0":
+            _imp_parts.append("tb")
+        if _os.environ.get("DAYTRADE_STRAT_TIMES", ""):
+            _imp_parts.append("st")
+        _imp_label = "_".join(_imp_parts) or "base"
+        cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{_imp_label}_{today}.pkl"
         if cache_file.exists():
             try:
                 cache = pickle.loads(cache_file.read_bytes())

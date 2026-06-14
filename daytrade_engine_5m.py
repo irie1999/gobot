@@ -40,6 +40,29 @@ from daytrade_strategies_5m import (
 SLIPPAGE_STOP_PCT = 0.001   # 0.1% (5分足デイトレ・高流動性想定)
 FEE_PCT_ONE_WAY   = 0.0     # 信用デイトレは手数料無料 (現物は 0.001)
 
+# ── 改善オプション (ENV VAR で制御) ──────────────────────────
+# 全て 0=無効 / 1=有効 (or 整数値)
+import os as _os
+# 1. Slow Stop: stop到達からN本連続で stop の外にある場合のみ決済 (0=即決済)
+STOP_CONFIRM_BARS = int(_os.environ.get("DAYTRADE_STOP_CONFIRM", "0"))
+# 2. 同日損切上限: その日 N 回 stop に当たったら、以降のシグナルを無視 (0=無制限)
+MAX_DAILY_STOPS = int(_os.environ.get("DAYTRADE_MAX_STOPS", "0"))
+# 3. ブレークイーブントレール: +1×ATR 利益乗ったら stop を建値に移動 (0=無効, 1=有効)
+TRAIL_TO_BREAKEVEN = int(_os.environ.get("DAYTRADE_TRAIL_BE", "0"))
+# 4. 戦略別エントリー時刻フィルタ (ENV: "MOM_S:0930-1030,RSI2_S:1000-1300")
+_strat_filter_env = _os.environ.get("DAYTRADE_STRAT_TIMES", "")
+STRATEGY_TIME_FILTERS = {}
+if _strat_filter_env:
+    for part in _strat_filter_env.split(","):
+        if ":" in part:
+            n, r = part.split(":", 1)
+            if "-" in r:
+                s, e = r.split("-")
+                STRATEGY_TIME_FILTERS[n.strip()] = (
+                    dtime(int(s[:2]), int(s[2:])),
+                    dtime(int(e[:2]), int(e[2:])),
+                )
+
 
 def _apply_slippage_buy(price):
     """買い約定時の不利スリッページ。"""
@@ -125,44 +148,124 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             strategy=strategy_params.get("name", "?"), reason=reason,
         ))
 
+    # 改善2: 同日損切カウント
+    day_stop_count = 0
+    last_date = None
+    # 改善1: Slow Stop 用
+    stop_hit_bars = 0
+    # 改善3: BEトレール用
+    trailed_to_be = False
+    # 改善4: 戦略別時刻フィルタ
+    strat_window = STRATEGY_TIME_FILTERS.get(strategy_params.get("name", ""))
+    # entry時のATR (建値トレールに必要)
+    entry_atr = 0.0
+    entry_sm = 0.0
+
     # prev_tail があれば当日 0 バー目から、無ければ WARMUP_BARS バー目から
     i = day_start if day_start > 0 else WARMUP_BARS
     while i < n:
         t = times[i].time()
+        # 日付変更で daily カウンタリセット
+        cur_date = times[i].date()
+        if cur_date != last_date:
+            day_stop_count = 0
+            last_date = cur_date
 
         if state == "in_pos":
             if t >= FORCE_CLOSE:
                 _finish(closes[i], times[i], "引け強制")
                 break
+            # 改善3: +1×ATR 利益乗ったら stop を建値に移動
+            if TRAIL_TO_BREAKEVEN and not trailed_to_be and entry_atr > 0:
+                if side == "long" and highs[i] >= entry_p + entry_atr:
+                    stop_p = entry_p   # 建値へ移動 (損切ゼロ)
+                    trailed_to_be = True
+                elif side == "short" and lows[i] <= entry_p - entry_atr:
+                    stop_p = entry_p
+                    trailed_to_be = True
+
             if side == "long":
                 # 目標 (上) 達成優先
                 if highs[i] >= target_p:
                     _finish(target_p, times[i], "目標達成")
                     state = "idle"
+                    stop_hit_bars = 0
+                    trailed_to_be = False
                     i += 1
                     continue
+                # 改善1: Slow Stop - stop超えバーが連続したら決済
                 if lows[i] <= stop_p:
-                    _finish(stop_p, times[i], "損切り")
-                    state = "idle"
-                    i += 1
-                    continue
+                    if STOP_CONFIRM_BARS > 0:
+                        # close が stop の外にある場合のみカウント
+                        if closes[i] <= stop_p:
+                            stop_hit_bars += 1
+                            if stop_hit_bars >= STOP_CONFIRM_BARS:
+                                _finish(stop_p, times[i], "損切り")
+                                day_stop_count += 1
+                                state = "idle"
+                                stop_hit_bars = 0
+                                trailed_to_be = False
+                                i += 1
+                                continue
+                        # close が建値方向に戻った場合はカウントリセット
+                        else:
+                            stop_hit_bars = 0
+                    else:
+                        _finish(stop_p, times[i], "損切り")
+                        day_stop_count += 1
+                        state = "idle"
+                        trailed_to_be = False
+                        i += 1
+                        continue
+                else:
+                    # stop を再び抜けた = カウントリセット
+                    stop_hit_bars = 0
             else:  # short
-                # 目標 (下) 達成優先
                 if lows[i] <= target_p:
                     _finish(target_p, times[i], "目標達成")
                     state = "idle"
+                    stop_hit_bars = 0
+                    trailed_to_be = False
                     i += 1
                     continue
                 if highs[i] >= stop_p:
-                    _finish(stop_p, times[i], "損切り")
-                    state = "idle"
-                    i += 1
-                    continue
+                    if STOP_CONFIRM_BARS > 0:
+                        if closes[i] >= stop_p:
+                            stop_hit_bars += 1
+                            if stop_hit_bars >= STOP_CONFIRM_BARS:
+                                _finish(stop_p, times[i], "損切り")
+                                day_stop_count += 1
+                                state = "idle"
+                                stop_hit_bars = 0
+                                trailed_to_be = False
+                                i += 1
+                                continue
+                        else:
+                            stop_hit_bars = 0
+                    else:
+                        _finish(stop_p, times[i], "損切り")
+                        day_stop_count += 1
+                        state = "idle"
+                        trailed_to_be = False
+                        i += 1
+                        continue
+                else:
+                    stop_hit_bars = 0
             i += 1
             continue
 
-        # idle: 時刻フィルタ
+        # idle: 時刻フィルタ (グローバル)
         if t < ENTRY_START or t >= ENTRY_CUTOFF:
+            i += 1
+            continue
+        # 改善4: 戦略別時刻フィルタ
+        if strat_window is not None:
+            ws, we = strat_window
+            if t < ws or t >= we:
+                i += 1
+                continue
+        # 改善2: 同日損切上限を超えたら以降エントリーしない
+        if MAX_DAILY_STOPS > 0 and day_stop_count >= MAX_DAILY_STOPS:
             i += 1
             continue
 
@@ -222,6 +325,11 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
             continue
 
         state = "in_pos"
+        # 改善1/3用: エントリー時のATRと sm を保存
+        entry_atr = atr_val
+        entry_sm = sm
+        stop_hit_bars = 0
+        trailed_to_be = False
         i += 2
 
     if state == "in_pos":
