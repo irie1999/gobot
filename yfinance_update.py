@@ -211,6 +211,10 @@ def main():
                         help="winners銘柄のみ更新")
     parser.add_argument("--prime-only", action="store_true",
                         help="東証プライム銘柄 (約1800) のみ更新")
+    parser.add_argument("--watchlist-file", default=None,
+                        help="指定モジュールの SYMBOLS リストのみ更新 "
+                             "(例: daytrade_combined_watchlist.py)。"
+                             "--daytrade-only / --prime-only より優先")
     parser.add_argument("--stale-days", type=int, default=0,
                         help="最終日が N 日以上前の銘柄のみ更新 (0=全て)")
     parser.add_argument("--check-only", action="store_true",
@@ -226,7 +230,25 @@ def main():
         sys.exit(1)
 
     # 対象pkl決定
-    if args.daytrade_only:
+    if args.watchlist_file:
+        try:
+            import importlib.util
+            p = Path(args.watchlist_file)
+            if not p.exists():
+                print(f"[error] {args.watchlist_file} がありません")
+                sys.exit(1)
+            spec = importlib.util.spec_from_file_location("wl", p)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            SYMBOLS = getattr(mod, "SYMBOLS", [])
+            target_codes = [e[0].replace(".T", "") + "0" for e in SYMBOLS]
+            pkl_files = [DATA_DIR / f"{c}.pkl" for c in target_codes
+                         if (DATA_DIR / f"{c}.pkl").exists()]
+            print(f"WATCHLIST ({p.name}): {len(pkl_files)}/{len(target_codes)}銘柄")
+        except Exception as e:
+            print(f"[error] WATCHLIST 読み込み失敗: {e}")
+            sys.exit(1)
+    elif args.daytrade_only:
         try:
             from daytrade_donchian_winners import SYMBOLS
             target_codes = [s.replace(".T", "") + "0" for s, _ in SYMBOLS]

@@ -29,20 +29,11 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
-  # 🌅 朝の運用: 監視対象 WATCHLIST 限定で「今日デイトレすべき銘柄」を参照
-  python holdout_periods_report_daytrade.py --morning
-  # 出力: holdout_periods_morning_<日付>.html
-
-  # 🌙 引け後の運用: 監視対象の「今日の実績」を確認
-  python holdout_periods_report_daytrade.py --evening
-  # 出力: holdout_periods_evening_<日付>.html
-  # 設定は --morning と同じ (WATCHLIST 限定 + 今日のデータ)
-  # ファイル名だけ違うので 朝の見立て vs 夜の実績 が同日内で比較可能
-
-  # 🚀 夜の運用 (全銘柄レビュー): 毎日同じコマンドで OK
+  # 🔔 運用 (推奨): 朝も引け後もこれ1コマンドで OK
   python holdout_periods_report_daytrade.py --daily
-  # = --both --update-data --force --max-price 6000 --min-price 1000
-  # 今日のデータも yfinance から取得 + ロング/ショート両方を強制再生成
+  # = WATCHLIST 限定 / 今日のデータ取得 (WATCHLIST 銘柄のみ更新)
+  # / ロング+ショート両方 / 強制再生成 / 価格1000-6000
+  # 出力: holdout_periods_both_<日付>.html
 
   # 最短: 何も指定しないと最新CSVを自動検出
   # (walkforward_daytrade_results/ から最新日付 + 優先modeを自動採用)
@@ -1413,10 +1404,12 @@ def build_all_trades_tab(period_items):
 """
 
 
-def _check_data_freshness(min_age_days=4, auto_update=True, force_update=False):
+def _check_data_freshness(min_age_days=4, auto_update=True,
+                            force_update=False, watchlist_file=None):
     """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
 
     force_update=True で年齢に関係なく yfinance_update.py を実行 (--update-data 用)。
+    watchlist_file 指定時は WATCHLIST 銘柄のみ更新 (--daily 用)。
     実行時間の節約のためサンプル30銘柄で判定。
 
     戻り値: 中央値の最新データ日 (date) or None
@@ -1483,9 +1476,10 @@ def _check_data_freshness(min_age_days=4, auto_update=True, force_update=False):
             print(f"[データ鮮度] 最新 {median_latest} ({age}日前) → 古いので自動更新します")
         if auto_update:
             try:
-                result = subprocess.run(
-                    [_sys.executable, "yfinance_update.py"],
-                    timeout=1800)
+                cmd = [_sys.executable, "yfinance_update.py"]
+                if watchlist_file:
+                    cmd += ["--watchlist-file", watchlist_file]
+                result = subprocess.run(cmd, timeout=1800)
                 if result.returncode == 0:
                     print(f"[データ鮮度] 更新完了")
                     new_latest, _ = _scan_latest()
@@ -1558,58 +1552,43 @@ def main():
                         help="yfinance_update.py を強制実行して今日のデータも取得 "
                              "(市場閉場後の実行で今日の取引を集計したい時)")
     parser.add_argument("--daily", action="store_true",
-                        help="運用デフォルトを一括有効化: --both --update-data --force "
-                             "+ --max-price 6000 --min-price 1000 を内部設定。"
-                             "毎日同じコマンドで運用したい時の推奨フラグ。"
-                             "個別フラグで上書き可能 (例: --daily --max-price 5000)")
-    parser.add_argument("--morning", action="store_true",
-                        help="🌅 朝運用モード: --daily + --universe winners "
-                             "(監視対象 WATCHLIST 限定)。"
-                             "毎朝同じコマンドで「今日デイトレすべき監視対象」の参考にする用途。"
-                             "出力は holdout_periods_morning_<日付>.html")
-    parser.add_argument("--evening", action="store_true",
-                        help="🌙 引け後モード: --morning と同等の設定 "
-                             "(WATCHLIST 限定 + 今日のデータ取得)。"
-                             "毎日引け後に「今日の実績」を確認する用途。"
-                             "出力は holdout_periods_evening_<日付>.html "
-                             "(朝の見立てと夜の実績を別ファイルで比較可)")
+                        help="🔔 運用モード: 監視対象 WATCHLIST 限定で "
+                             "今日のデータも取得して検証。"
+                             "内部設定: --universe winners --both --update-data --force "
+                             "--max-price 6000 --min-price 1000。"
+                             "朝も引け後もこの1コマンドで OK。"
+                             "個別フラグで上書き可 (例: --daily --max-price 5000)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--refresh-bt-scores", action="store_true",
                         help="BTスコア凍結キャッシュを破棄して全再計算 "
                              "(通常は実行日が変わってもスコアは固定される)")
     args = parser.parse_args()
 
-    # --morning / --evening: WATCHLIST 限定モード (出力ファイル名だけ違う)
-    if args.evening:
-        args.morning = True  # 設定は morning と同じ (--daily + WATCHLIST)
-        print("[--evening] 🌙 引け後モード: WATCHLIST 限定 + 今日のデータで実績確認")
-    elif args.morning:
-        print("[--morning] 🌅 朝運用モード: WATCHLIST 限定 + 今日のデータ取得")
-    if args.morning:
-        args.daily = True
-        args.universe = "winners"
-        args.no_auto = True  # CSV 自動検出を無効化 (WATCHLIST を維持)
-
-    # --daily: 運用デフォルトを一括適用 (個別フラグが未指定の場合のみ)
+    # --daily: 運用モード = WATCHLIST 限定 + 今日のデータ取得
     if args.daily:
+        args.universe = "winners"  # WATCHLIST のみ
+        args.no_auto = True        # CSV 自動検出を無効化
         if not args.both and not args.short and not args.long_only:
             args.both = True
         args.update_data = True
         args.force = True
-        # 価格フィルタは未指定 (= デフォルト値) のときだけ上書き
-        if args.max_price == 10_000:  # default
+        if args.max_price == 10_000:
             args.max_price = 6_000
-        if args.min_price == 0:        # default
+        if args.min_price == 0:
             args.min_price = 1_000
-        print("[--daily] 運用モード: --both --update-data --force "
-              "--max-price 6000 --min-price 1000")
+        print("[--daily] 🔔 運用モード: WATCHLIST 限定 / 今日のデータ取得 / "
+              "ロング/ショート両建て")
 
     # データ鮮度チェック + 自動更新 (--update-data 時は強制)
+    # WATCHLIST モード時は更新も WATCHLIST のみに限定
     data_latest = None
     if not args.no_fresh_check:
+        wl_file = (args.watchlist
+                   if args.universe == "winners" else None)
         data_latest = _check_data_freshness(
             auto_update=not args.no_auto_update,
-            force_update=args.update_data)
+            force_update=args.update_data,
+            watchlist_file=wl_file)
 
     # --short と --long-only の整合チェック + 戦略フィルタ
     if args.short and args.long_only:
@@ -1630,13 +1609,7 @@ def main():
 
     today = datetime.now(JST).date()
     out_suffix = f"_{variant_label}" if variant_label else ""
-    if args.evening:
-        # 引け後: 朝の予想と別ファイルで保存
-        out = Path(f"holdout_periods_evening_{today}.html")
-    elif args.morning:
-        out = Path(f"holdout_periods_morning_{today}.html")
-    else:
-        out = Path(f"holdout_periods{out_suffix}_{today}.html")
+    out = Path(f"holdout_periods{out_suffix}_{today}.html")
     if out.exists() and not args.force:
         print(f"[CACHE] 当日生成済み: {out.resolve()}")
         if not args.no_browser:
