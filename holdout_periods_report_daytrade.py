@@ -1511,6 +1511,111 @@ def build_all_trades_tab(period_items):
   <td class="{pc}"><strong>{tot:+,.0f}</strong></td>
 </tr>"""
 
+    # ── BT × Q 4段階ティア別シミュレーション ──
+    # S/A/B/C 級の組み合わせ条件で取引を絞った場合の実績
+    tier_defs = [
+        ("🟢 S級", 55, 75, 1.00, "フルポジ"),
+        ("🟢 A級", 50, 70, 0.75, "3/4 ポジ"),
+        ("🟡 B級", 50, 65, 0.50, "1/2 ポジ"),
+        ("⚪ C級", 45, 60, 0.25, "1/4 ポジ"),
+    ]
+    tier_rows_html = ""
+    used_idx = set()  # 上位ティアで採用済の (entry_dt, sym, strat) を除外
+    combined = {"n": 0, "gp": 0.0, "gl": 0.0, "weighted_pnl": 0.0,
+                "wins": 0, "losses": 0}
+    for label, bt_min, q_min, weight, posdesc in tier_defs:
+        sub = []
+        for i, r in enumerate(all_rows):
+            if i in used_idx:
+                continue
+            if r.get("bt_score", 0) >= bt_min and r.get("q_score", 0) >= q_min:
+                sub.append((i, r))
+        if not sub:
+            tier_rows_html += (f'<tr><td><strong>{label}</strong><br>'
+                                f'<small>BT≥{bt_min} & Q≥{q_min}</small></td>'
+                                f'<td>{posdesc}</td>'
+                                f'<td colspan="6" style="color:#475569">該当なし</td>'
+                                f'</tr>')
+            continue
+        for i, _ in sub:
+            used_idx.add(i)
+        rows = [r for _, r in sub]
+        wins = sum(1 for r in rows if r["pnl"] > 0)
+        losses = sum(1 for r in rows if r["pnl"] <= 0)
+        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
+        tot = gp - gl
+        wr = wins / len(rows) * 100
+        pf_v = gp / gl if gl > 0 else float("inf")
+        weighted = tot * weight
+        # 累計
+        combined["n"] += len(rows)
+        combined["gp"] += gp * weight
+        combined["gl"] += gl * weight
+        combined["weighted_pnl"] += weighted
+        combined["wins"] += wins
+        combined["losses"] += losses
+        pc = "profit" if tot >= 0 else "loss"
+        wpc = "profit" if weighted >= 0 else "loss"
+        tier_rows_html += f"""
+<tr>
+  <td><strong>{label}</strong><br><small>BT≥{bt_min} & Q≥{q_min}</small></td>
+  <td>{posdesc}<br><small style="color:#94a3b8">×{weight:.2f}</small></td>
+  <td>{len(rows):,}</td>
+  <td>{wr:.0f}%</td>
+  <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td class="profit"><small>+{gp:,.0f}</small></td>
+  <td class="loss"><small>-{gl:,.0f}</small></td>
+  <td class="{pc}">{tot:+,.0f}</td>
+  <td class="{wpc}" style="border-left:2px solid #334155"><strong>{weighted:+,.0f}</strong></td>
+</tr>"""
+    # 全合算行
+    comb_pf = combined["gp"] / combined["gl"] if combined["gl"] > 0 else float("inf")
+    comb_wr = (combined["wins"] / (combined["wins"] + combined["losses"]) * 100
+               if (combined["wins"] + combined["losses"]) > 0 else 0)
+    comb_pc = "profit" if combined["weighted_pnl"] >= 0 else "loss"
+    tier_rows_html += f"""
+<tr style="background:#0d1424;border-top:2px solid #fbbf24">
+  <td colspan="2"><strong>📊 全ティア合算 (重み付き)</strong></td>
+  <td><strong>{combined['n']:,}</strong></td>
+  <td><strong>{comb_wr:.0f}%</strong></td>
+  <td style="color:{_color_pf(comb_pf)}"><strong>{_pf(comb_pf)}</strong></td>
+  <td class="profit"><small>+{combined['gp']:,.0f}</small></td>
+  <td class="loss"><small>-{combined['gl']:,.0f}</small></td>
+  <td colspan="1"></td>
+  <td class="{comb_pc}" style="border-left:2px solid #fbbf24">
+    <strong>{combined['weighted_pnl']:+,.0f}</strong></td>
+</tr>"""
+
+    tier_filter_box = f"""
+<h3 style="margin-top:14px">🎯 BT × Q 4段階ティア別シミュレーション
+  <small style="color:#94a3b8;font-weight:normal">— 推奨運用ルール</small></h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>ティア<br>(基準)</th>
+    <th>ポジション<br>サイズ</th>
+    <th>取引数</th>
+    <th>勝率</th>
+    <th>PF</th>
+    <th>勝ち合計</th>
+    <th>負け合計</th>
+    <th>素損益<br><small>(等倍)</small></th>
+    <th style="border-left:2px solid #334155">重み損益<br><small>(ポジ比例)</small></th>
+  </tr></thead>
+  <tbody>{tier_rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>4段階ティア</strong> = BTスコアとQスコアの組み合わせで採用シグナルを階層分け。
+  上位ティアで採用済の取引は下位ティアでは除外 (重複カウント防止)。<br>
+  &nbsp;&nbsp;🟢 <strong>S級</strong>: 最高品質 (フルポジで攻める) /
+  🟢 <strong>A級</strong>: 高品質 (3/4 で標準運用) /
+  🟡 <strong>B級</strong>: 中品質 (1/2 で慎重) /
+  ⚪ <strong>C級</strong>: 標準 (1/4 で打診)<br>
+  📐 <strong>重み損益</strong> = 各ティアの素損益 × ポジションサイズ倍率の合計。
+  実運用に近い「資金効率」を表現。
+</p>
+"""
+
     q_filter_box = f"""
 <h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ — 利益・損 分解</h3>
 <table style="font-size:0.82rem">
@@ -1602,6 +1707,7 @@ def build_all_trades_tab(period_items):
 {bt_filter_box}
 {finer_filter_box}
 {q_filter_box}
+{tier_filter_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
   💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
