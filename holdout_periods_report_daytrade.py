@@ -1504,12 +1504,18 @@ def build_date_tab(period_items, id_prefix=""):
         active = "active" if i == 0 else ""
         display = "block" if i == 0 else "none"
         pc = "profit" if s["total"] >= 0 else "loss"
+        # 損益をK単位(千円)で表示 (見やすさ優先)
+        total_val = s["total"]
+        if abs(total_val) >= 10_000:
+            total_disp = f"{total_val/1000:+,.0f}K"
+        else:
+            total_disp = f"{total_val:+,.0f}"
         nav_btns += (
             f'<button class="date-btn {active}" '
             f'onclick="switchDate(\'{sid}\')">'
             f'<strong>{d.strftime("%m/%d")}</strong><br>'
             f'<small>{s["n"]}件 {s["wr"]:.0f}%</small><br>'
-            f'<small class="{pc}">{s["total"]:+,}</small>'
+            f'<small class="{pc}" style="font-weight:600">{total_disp}</small>'
             f'</button>')
 
         # 取引明細
