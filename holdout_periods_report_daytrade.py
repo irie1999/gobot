@@ -1640,6 +1640,16 @@ def build_date_tab(period_items, id_prefix=""):
     if not by_date:
         return '<p style="color:#64748b;padding:24px">取引なし</p>'
 
+    # Q スコア計算 (時系列順)
+    compute_quality_scores(all_rows)
+    # by_date を再構築 (Q が付与された後)
+    by_date = {}
+    for r in all_rows:
+        dt = r.get("entry_dt")
+        if not hasattr(dt, "date"):
+            continue
+        by_date.setdefault(dt.date(), []).append(r)
+
     dates_sorted = sorted(by_date.keys(), reverse=True)
 
     # 日付別サマリ
@@ -1652,9 +1662,20 @@ def build_date_tab(period_items, id_prefix=""):
         gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
         gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
         pf = gp / gl if gl > 0 else float("inf")
+        # Q≥70 のみの集計 (推奨閾値での損益)
+        rows_q70 = [r for r in rows if r.get("q_score", 0) >= 70]
+        q70_n = len(rows_q70)
+        q70_gp = sum(r["pnl"] for r in rows_q70 if r["pnl"] > 0)
+        q70_gl = abs(sum(r["pnl"] for r in rows_q70 if r["pnl"] <= 0))
+        q70_total = q70_gp - q70_gl
+        q70_wins = sum(1 for r in rows_q70 if r["pnl"] > 0)
+        q70_wr = q70_wins / q70_n * 100 if q70_n > 0 else 0
+        q70_pf = q70_gp / q70_gl if q70_gl > 0 else float("inf")
         date_stats.append({
             "date": d, "n": n, "wr": wr,
             "gp": gp, "gl": gl, "pf": pf, "total": gp - gl,
+            "q70_n": q70_n, "q70_wr": q70_wr, "q70_pf": q70_pf,
+            "q70_total": q70_total,
         })
 
     # サマリテーブル (全日表示、降順、クリックで詳細へ)
@@ -1662,6 +1683,10 @@ def build_date_tab(period_items, id_prefix=""):
     for s in date_stats:
         sid = f"{id_prefix}date{s['date'].strftime('%Y%m%d')}"
         pc = "profit" if s["total"] >= 0 else "loss"
+        q_pc = "profit" if s["q70_total"] >= 0 else "loss"
+        q_total_disp = (f'{s["q70_total"]:+,.0f}'
+                        if s["q70_n"] > 0 else '-')
+        q_pf_disp = (_pf(s["q70_pf"]) if s["q70_n"] > 0 else '-')
         summary_rows += f"""
 <tr onclick="switchDate('{sid}')" style="cursor:pointer">
   <td><strong>{s['date']}</strong></td>
@@ -1671,6 +1696,9 @@ def build_date_tab(period_items, id_prefix=""):
   <td class="profit">+{s['gp']:,.0f}</td>
   <td class="loss">-{s['gl']:,.0f}</td>
   <td class="{pc}"><strong>{s['total']:+,.0f}</strong></td>
+  <td style="border-left:2px solid #334155">{s['q70_n']}</td>
+  <td style="color:{_color_pf(s['q70_pf']) if s['q70_n'] else '#64748b'}">{q_pf_disp}</td>
+  <td class="{q_pc}"><strong>{q_total_disp}</strong></td>
 </tr>"""
 
     # 日付ボタン + 各日詳細ペイン (直近30日まで、それ以前はサマリのみ)
@@ -1710,9 +1738,13 @@ def build_date_tab(period_items, id_prefix=""):
             pct = r["pct"]
             pc2 = "profit" if pnl >= 0 else "loss"
             bt_col = _rank_color(r["bt_rank"])
+            q = r.get("q_score", 0)
+            q_col = _q_color(q)
+            q_ico = _q_icon(q)
             rows_html += f"""
-<tr>
+<tr data-q-score="{q}">
   <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
+  <td style="color:{q_col};font-weight:bold;text-align:center">{q_ico}<br><small>{q:.0f}</small></td>
   <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
   <td>{r['strat']}</td>
   <td>{ed}</td><td>{xd}</td><td>{hold}</td>
@@ -1740,13 +1772,39 @@ def build_date_tab(period_items, id_prefix=""):
     <div class="vl {pc}">{s['total']:+,.0f}円</div></div>
 </div>"""
 
+        # Q≥70 推奨フィルタ サマリ (緑系背景)
+        q70_pc = "profit" if s["q70_total"] >= 0 else "loss"
+        if s["q70_n"] > 0:
+            q70_box = f"""
+<div class="box" style="background:#0d3d2f;border:1px solid #166534">
+  <div class="it"><div class="lb">🟡 Q≥70 取引</div>
+    <div class="vl">{s['q70_n']}</div></div>
+  <div class="it"><div class="lb">勝率</div>
+    <div class="vl">{s['q70_wr']:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(s['q70_pf'])}</div></div>
+  <div class="it"><div class="lb">損益 (Q≥70)</div>
+    <div class="vl {q70_pc}">{s['q70_total']:+,.0f}円</div></div>
+  <div class="it"><div class="lb">削減</div>
+    <div class="vl" style="color:#94a3b8;font-size:0.95rem">
+      -{s['n']-s['q70_n']}件 ({(1-s['q70_n']/s['n'])*100:.0f}%削減)</div></div>
+</div>"""
+        else:
+            q70_box = """
+<div class="box" style="background:#1e293b;border:1px solid #475569">
+  <div style="color:#94a3b8;padding:8px">
+    🟡 Q≥70 のシグナルなし (この日はエントリー見送り推奨)
+  </div>
+</div>"""
+
         panes += f"""
 <div id="{sid}" class="date-pane" style="display:{display}">
   <h3>📅 {d} の取引</h3>
   {sum_box}
+  {q70_box}
   <table style="font-size:0.78rem">
     <thead><tr>
-      <th>BT</th><th>銘柄</th><th>戦略</th>
+      <th>BT</th><th>Q</th><th>銘柄</th><th>戦略</th>
       <th>Entry</th><th>Exit</th><th>保有</th>
       <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
       <th>損益</th><th>%</th><th>理由</th>
@@ -1761,6 +1819,11 @@ def build_date_tab(period_items, id_prefix=""):
     total_gp = sum(s["gp"] for s in date_stats)
     total_gl = sum(s["gl"] for s in date_stats)
     overall_pc = "profit" if total_pnl >= 0 else "loss"
+    # Q≥70 全期間集計
+    total_q70_n = sum(s["q70_n"] for s in date_stats)
+    total_q70 = sum(s["q70_total"] for s in date_stats)
+    q70_overall_pc = "profit" if total_q70 >= 0 else "loss"
+    reduction = (1 - total_q70_n/total_n)*100 if total_n > 0 else 0
 
     return f"""
 <div class="box">
@@ -1772,6 +1835,17 @@ def build_date_tab(period_items, id_prefix=""):
     <div class="vl loss">-{total_gl:,.0f}</div></div>
   <div class="it"><div class="lb">損益</div>
     <div class="vl {overall_pc}">{total_pnl:+,.0f}円</div></div>
+</div>
+
+<div class="box" style="background:#0d3d2f;border:1px solid #166534">
+  <div class="it"><div class="lb">🟡 Q≥70 全期間</div>
+    <div class="vl">{total_q70_n:,}件</div></div>
+  <div class="it"><div class="lb">削減率</div>
+    <div class="vl" style="color:#94a3b8;font-size:1rem">-{reduction:.0f}%</div></div>
+  <div class="it"><div class="lb">Q≥70 損益</div>
+    <div class="vl {q70_overall_pc}">{total_q70:+,.0f}円</div></div>
+  <div class="it"><div class="lb">削減後/総額比</div>
+    <div class="vl" style="font-size:1rem">{(total_q70/total_pnl*100 if total_pnl else 0):.0f}%</div></div>
 </div>
 
 <h3>📅 日付ボタン (クリックで詳細表示、直近{min(len(date_stats), detail_limit)}日)</h3>
@@ -1786,13 +1860,20 @@ def build_date_tab(period_items, id_prefix=""):
 <h3 style="margin-top:18px">📋 日別損益サマリ (全{len(date_stats)}日、降順、行クリックで詳細)</h3>
 <table style="font-size:0.82rem">
   <thead><tr>
-    <th>日付</th><th>取引数</th><th>勝率</th><th>PF</th>
-    <th>利益<br><small>(勝ち合計)</small></th>
-    <th>損<br><small>(負け合計)</small></th>
-    <th>損益<br><small>(差引)</small></th>
+    <th rowspan="2">日付</th>
+    <th colspan="6">全シグナル</th>
+    <th colspan="3" style="border-left:2px solid #334155">🟡 Q≥70 推奨フィルタ</th>
+  </tr><tr>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th>利益</th><th>損</th><th>損益</th>
+    <th>取引数</th><th>PF</th><th>損益</th>
   </tr></thead>
   <tbody>{summary_rows}</tbody>
 </table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>🟡 Q≥70 推奨フィルタ</strong>: シグナル品質スコアが 70 以上 (高品質) の取引のみに絞った場合の結果。
+  全体損益と比較して、品質フィルタによる「機会損失 vs 損失回避」のトレードオフを確認できます。
+</p>
 """
 
 
