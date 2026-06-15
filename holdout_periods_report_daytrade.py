@@ -1475,14 +1475,20 @@ def build_all_trades_tab(period_items):
         sub = [r for r in all_rows if r.get("q_score", 0) >= thr]
         if not sub:
             q_rows_html += (f'<tr><td>{label}</td>'
-                             f'<td colspan="6" style="color:#475569">該当なし</td>'
+                             f'<td colspan="10" style="color:#475569">該当なし</td>'
                              f'</tr>')
             continue
-        gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
-        gl = abs(sum(r["pnl"] for r in sub if r["pnl"] <= 0))
+        win_rows = [r["pnl"] for r in sub if r["pnl"] > 0]
+        loss_rows = [r["pnl"] for r in sub if r["pnl"] <= 0]
+        win_n = len(win_rows)
+        loss_n = len(loss_rows)
+        gp = sum(win_rows)
+        gl = abs(sum(loss_rows))
+        avg_win = gp / win_n if win_n > 0 else 0
+        avg_loss = gl / loss_n if loss_n > 0 else 0
+        rr = avg_win / avg_loss if avg_loss > 0 else float("inf")
         tot = gp - gl
-        wins = sum(1 for r in sub if r["pnl"] > 0)
-        wr = wins / len(sub) * 100
+        wr = win_n / len(sub) * 100
         pf_v = gp / gl if gl > 0 else float("inf")
         pc = "profit" if tot >= 0 else "loss"
         # ハイライト: 推奨閾値 (65)
@@ -1494,20 +1500,31 @@ def build_all_trades_tab(period_items):
   <td>{crown}<strong>{label}</strong></td>
   <td>{len(sub):,}</td>
   <td>{wr:.0f}%</td>
-  <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td class="profit" style="border-left:2px solid #166534">{win_n}</td>
   <td class="profit">+{gp:,.0f}</td>
+  <td class="profit"><small>+{avg_win:,.0f}</small></td>
+  <td class="loss" style="border-left:2px solid #7c2d12">{loss_n}</td>
   <td class="loss">-{gl:,.0f}</td>
+  <td class="loss"><small>-{avg_loss:,.0f}</small></td>
+  <td style="border-left:2px solid #334155;color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td style="color:#fbbf24"><small>{rr:.2f}</small></td>
   <td class="{pc}"><strong>{tot:+,.0f}</strong></td>
 </tr>"""
 
     q_filter_box = f"""
-<h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ</h3>
+<h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ — 利益・損 分解</h3>
 <table style="font-size:0.82rem">
   <thead><tr>
-    <th>Q スコア閾値</th><th>取引数</th><th>勝率</th><th>PF</th>
-    <th>利益<br><small>(勝ち合計)</small></th>
-    <th>損<br><small>(負け合計)</small></th>
-    <th>損益<br><small>(差引)</small></th>
+    <th rowspan="2">Q スコア閾値</th>
+    <th rowspan="2">取引数</th>
+    <th rowspan="2">勝率</th>
+    <th colspan="3" style="background:#0d3d2f;border-left:2px solid #166534">🟢 勝ちトレード</th>
+    <th colspan="3" style="background:#3d0d0d;border-left:2px solid #7c2d12">🔴 負けトレード</th>
+    <th colspan="3" style="border-left:2px solid #334155">差引</th>
+  </tr><tr>
+    <th style="border-left:2px solid #166534">件数</th><th>勝ち合計</th><th>平均利益</th>
+    <th style="border-left:2px solid #7c2d12">件数</th><th>負け合計</th><th>平均損失</th>
+    <th style="border-left:2px solid #334155">PF</th><th>RR<br><small>(平均勝/負)</small></th><th>損益</th>
   </tr></thead>
   <tbody>{q_rows_html}</tbody>
 </table>
@@ -1521,6 +1538,7 @@ def build_all_trades_tab(period_items):
   🟡 <strong>65-74</strong>: 慎重エントリー (ハーフポジ) /
   ⚪ <strong>55-64</strong>: 待機 /
   🔴 <strong>&lt;55</strong>: スキップ<br>
+  📐 <strong>RR (リスクリワード)</strong> = 平均利益 ÷ 平均損失。1.0 より高いほど、1回の勝ちで複数の負けをカバーできる<br>
   ⭐ <strong>Q≥65</strong> = 推奨運用閾値。look-ahead bias なし (シグナル発生時点の情報のみ)
 </p>
 """
