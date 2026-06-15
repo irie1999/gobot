@@ -29,10 +29,15 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
-  # 🌅 朝の運用 (推奨): 監視対象 WATCHLIST 限定で「今日デイトレすべき銘柄」を参照
+  # 🌅 朝の運用: 監視対象 WATCHLIST 限定で「今日デイトレすべき銘柄」を参照
   python holdout_periods_report_daytrade.py --morning
-  # = --daily + --universe winners (daytrade_combined_watchlist.py)
   # 出力: holdout_periods_morning_<日付>.html
+
+  # 🌙 引け後の運用: 監視対象の「今日の実績」を確認
+  python holdout_periods_report_daytrade.py --evening
+  # 出力: holdout_periods_evening_<日付>.html
+  # 設定は --morning と同じ (WATCHLIST 限定 + 今日のデータ)
+  # ファイル名だけ違うので 朝の見立て vs 夜の実績 が同日内で比較可能
 
   # 🚀 夜の運用 (全銘柄レビュー): 毎日同じコマンドで OK
   python holdout_periods_report_daytrade.py --daily
@@ -1562,18 +1567,28 @@ def main():
                              "(監視対象 WATCHLIST 限定)。"
                              "毎朝同じコマンドで「今日デイトレすべき監視対象」の参考にする用途。"
                              "出力は holdout_periods_morning_<日付>.html")
+    parser.add_argument("--evening", action="store_true",
+                        help="🌙 引け後モード: --morning と同等の設定 "
+                             "(WATCHLIST 限定 + 今日のデータ取得)。"
+                             "毎日引け後に「今日の実績」を確認する用途。"
+                             "出力は holdout_periods_evening_<日付>.html "
+                             "(朝の見立てと夜の実績を別ファイルで比較可)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--refresh-bt-scores", action="store_true",
                         help="BTスコア凍結キャッシュを破棄して全再計算 "
                              "(通常は実行日が変わってもスコアは固定される)")
     args = parser.parse_args()
 
-    # --morning: 朝運用モード = --daily + WATCHLIST のみ
+    # --morning / --evening: WATCHLIST 限定モード (出力ファイル名だけ違う)
+    if args.evening:
+        args.morning = True  # 設定は morning と同じ (--daily + WATCHLIST)
+        print("[--evening] 🌙 引け後モード: WATCHLIST 限定 + 今日のデータで実績確認")
+    elif args.morning:
+        print("[--morning] 🌅 朝運用モード: WATCHLIST 限定 + 今日のデータ取得")
     if args.morning:
         args.daily = True
         args.universe = "winners"
         args.no_auto = True  # CSV 自動検出を無効化 (WATCHLIST を維持)
-        print("[--morning] 🌅 朝運用モード: WATCHLIST 限定 + 今日のデータ取得")
 
     # --daily: 運用デフォルトを一括適用 (個別フラグが未指定の場合のみ)
     if args.daily:
@@ -1615,8 +1630,10 @@ def main():
 
     today = datetime.now(JST).date()
     out_suffix = f"_{variant_label}" if variant_label else ""
-    if args.morning:
-        # 朝運用は専用ファイル名 (夜の --daily と共存させて朝/夜を比較できる)
+    if args.evening:
+        # 引け後: 朝の予想と別ファイルで保存
+        out = Path(f"holdout_periods_evening_{today}.html")
+    elif args.morning:
         out = Path(f"holdout_periods_morning_{today}.html")
     else:
         out = Path(f"holdout_periods{out_suffix}_{today}.html")
