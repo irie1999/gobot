@@ -2898,25 +2898,32 @@ function jumpToSym(sid){
                    "下表のフィルタ影響分析を参照</li>")
 
     legend = f"""
-<div class="legend">
-  <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と完全一致)</strong><br>
-  6つの hold-out 期間で評価。TEST は「今日から起算」した直近 N日で、
-  異なる時間スケール (短期/中期/長期) での優位性を検証します。
-  TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無し。<br><br>
-  ▸ <strong>6 TEST 期間</strong> (今日から起算、重複あり):
-    直近30 / 60 / 90 / 120 / 150 / 180日<br>
-  ▸ <strong>各タブで構成銘柄が変わります</strong>: TRAIN期間が違うので選定銘柄も期間ごとに変動<br>
-  ▸ TRAIN: {train_desc} で取引≥{PASS_TRAIN_TRADES}/PF≥{PASS_TRAIN_PF}/損益>0 を満たす銘柄を選定<br>
-  ▸ <strong>★合格</strong>: 選定銘柄が TEST期間でも PF≥{TEST_PASS_PF} & 損益≥0 で勝てた (真の優位性あり)<br>
-  ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示<br>
-  ▸ <strong>全6タブで★合格 = 短期も長期もロバスト</strong> (最有力候補)
-  <br><br>
-  <strong>🛡️ 損失削減フィルタ (適用順)</strong>
-  <ul style="margin:4px 0 0 18px;padding:0;font-size:0.78rem;color:#cbd5e1">
-    {filter_html}
-  </ul>
-</div>
-{filter_impact_table}
+<details style="margin:8px 0">
+  <summary style="cursor:pointer;padding:8px 12px;background:#0d1424;
+                  border:1px solid #1e3a5f;border-radius:6px;
+                  color:#94a3b8;font-size:0.85rem;user-select:none">
+    📖 仕様・フィルタ・影響分析 (クリックで展開)
+  </summary>
+  <div class="legend" style="margin-top:8px">
+    <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と完全一致)</strong><br>
+    6つの hold-out 期間で評価。TEST は「今日から起算」した直近 N日で、
+    異なる時間スケール (短期/中期/長期) での優位性を検証します。
+    TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無し。<br><br>
+    ▸ <strong>6 TEST 期間</strong> (今日から起算、重複あり):
+      直近30 / 60 / 90 / 120 / 150 / 180日<br>
+    ▸ <strong>各タブで構成銘柄が変わります</strong>: TRAIN期間が違うので選定銘柄も期間ごとに変動<br>
+    ▸ TRAIN: {train_desc} で取引≥{PASS_TRAIN_TRADES}/PF≥{PASS_TRAIN_PF}/損益>0 を満たす銘柄を選定<br>
+    ▸ <strong>★合格</strong>: 選定銘柄が TEST期間でも PF≥{TEST_PASS_PF} & 損益≥0 で勝てた (真の優位性あり)<br>
+    ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示<br>
+    ▸ <strong>全6タブで★合格 = 短期も長期もロバスト</strong> (最有力候補)
+    <br><br>
+    <strong>🛡️ 損失削減フィルタ (適用順)</strong>
+    <ul style="margin:4px 0 0 18px;padding:0;font-size:0.78rem;color:#cbd5e1">
+      {filter_html}
+    </ul>
+  </div>
+  {filter_impact_table}
+</details>
 """
 
     # body 構成
