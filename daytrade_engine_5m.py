@@ -233,7 +233,9 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
                         if closes[i] <= stop_p:
                             stop_hit_bars += 1
                             if stop_hit_bars >= STOP_CONFIRM_BARS:
-                                _finish(stop_p, times[i], "損切り")
+                                # 修正: 実際の市場価格 (closes[i]) で決済
+                                # stop_p で決済するのは非現実的 (既にN本以上下回っている)
+                                _finish(closes[i], times[i], "損切り(slow)")
                                 day_stop_count += 1
                                 state = "idle"
                                 stop_hit_bars = 0
@@ -266,7 +268,8 @@ def backtest_day_strategy(day_df, strategy_fn, strategy_params,
                         if closes[i] >= stop_p:
                             stop_hit_bars += 1
                             if stop_hit_bars >= STOP_CONFIRM_BARS:
-                                _finish(stop_p, times[i], "損切り")
+                                # 修正: short の slow stop も実価格で決済
+                                _finish(closes[i], times[i], "損切り(slow)")
                                 day_stop_count += 1
                                 state = "idle"
                                 stop_hit_bars = 0
