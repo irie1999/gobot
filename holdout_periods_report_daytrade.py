@@ -666,19 +666,23 @@ def scan_universe(targets, fetched, strategies, budget, max_risk,
     return results
 
 
-def evaluate_period(results, period_label, train_days, today, budget, top_n):
+def evaluate_period(results, period_label, train_days, today, budget, top_n,
+                     skip_train=False, min_test_trades=None):
     """1タブの hold-out 評価 (TEST は非重複30日窓)。
 
     period_label: 30/60/90/120/150/180 のいずれか
         TEST 窓 = (period_label-30) 〜 period_label 日前 の30日窓
     train_days=0 → TEST より前の全期間を TRAIN (逆指値ロング方式)
     train_days>0 → TEST 直前 train_days 日に限定
+    skip_train=True → TRAIN 合格判定をスキップ (WATCHLIST 固定モード用)
+    min_test_trades → MIN_TEST_TRADES 上書き (WATCHLIST 用に緩和したい時)
 
     結果: list of dict (上位 top_n 件)
     """
     test_end, test_start = TEST_WINDOWS[period_label]  # newer, older
     qualified = []
     test_cutoff = today - timedelta(days=test_start)
+    min_tt = min_test_trades if min_test_trades is not None else MIN_TEST_TRADES
 
     for (sym, strat, name), trades in results.items():
         if not trades:
@@ -696,10 +700,10 @@ def evaluate_period(results, period_label, train_days, today, budget, top_n):
         # TEST: test_end 〜 test_start 日前 (30日窓)
         test_trades = slice_trades(trades, test_start, test_end, today)
         train_stats = calc_stats(train_trades, budget)
-        if not pass_train(train_stats):
+        if not skip_train and not pass_train(train_stats):
             continue
         test_stats_enrich = enrich_stats(test_trades, budget)
-        if test_stats_enrich["n"] < MIN_TEST_TRADES:
+        if test_stats_enrich["n"] < min_tt:
             continue
         test_pass = (test_stats_enrich["pf"] >= TEST_PASS_PF
                      and test_stats_enrich["total_pnl"] >= TEST_PASS_PNL)
@@ -1779,9 +1783,19 @@ def main():
         spec = importlib.util.spec_from_file_location("wl", p)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        # 3-tuple か 2-tuple か
+        # 3-tuple ((sym, name, strategy)) なら strategy を保持 → 固定戦略マップに
         raw = getattr(mod, "SYMBOLS", [])
         targets = [(e[0], e[1]) for e in raw]
+        for e in raw:
+            if len(e) >= 3:
+                sym, _name, strat = e[:3]
+                strats = csv_strategy_map.setdefault(sym, [])
+                if strat and strat not in strats:
+                    strats.append(strat)
+        if csv_strategy_map:
+            n_pairs = sum(len(v) for v in csv_strategy_map.values())
+            print(f"[WATCHLIST] 固定 戦略マップ: {len(csv_strategy_map)}銘柄 / "
+                  f"{n_pairs}(銘柄×戦略)ペア")
 
     print(f"=" * 70)
     variant_disp = ({"short": "ショート", "long": "ロング",
@@ -1873,11 +1887,15 @@ def main():
             cache = {}
 
     # スキャン
+    # winners (WATCHLIST) も csv と同様に strategy_map で固定戦略のみ評価
+    use_strategy_map = (csv_strategy_map
+                        if (args.universe in ("csv", "winners")
+                            and csv_strategy_map) else None)
     results = scan_universe(
         [(s, n) for s, n in targets if s in fetched],
         fetched, strategies, args.budget, args.max_risk,
         args.workers, cache,
-        strategy_map=csv_strategy_map if args.universe == "csv" else None)
+        strategy_map=use_strategy_map)
 
     # キャッシュ保存
     if not args.no_cache:
@@ -1993,6 +2011,13 @@ def main():
             it["bt_rank"] = rk
         return items
 
+    # WATCHLIST 固定モード: TRAIN 合格判定をスキップ + MIN_TEST_TRADES 緩和 (1)
+    # → 監視対象に入れた銘柄は再評価で外れず、必ずレポートに登場する
+    skip_train = (args.universe == "winners")
+    eval_min_tt = 1 if skip_train else None
+    if skip_train:
+        print(f"  [WATCHLIST 固定] TRAIN 合格判定スキップ + MIN_TEST_TRADES=1")
+
     if args.both:
         # --both: ロング/ショートを分離して2セット作成
         long_results = {k: v for k, v in results.items() if k[1] in long_strats}
@@ -2003,9 +2028,11 @@ def main():
         period_items_short = {}
         for P in PERIODS:
             items_l = _attach_scores(evaluate_period(
-                long_results, P, args.train_days, today, args.budget, args.top))
+                long_results, P, args.train_days, today, args.budget, args.top,
+                skip_train=skip_train, min_test_trades=eval_min_tt))
             items_s = _attach_scores(evaluate_period(
-                short_results, P, args.train_days, today, args.budget, args.top))
+                short_results, P, args.train_days, today, args.budget, args.top,
+                skip_train=skip_train, min_test_trades=eval_min_tt))
             period_items_long[P] = items_l
             period_items_short[P] = items_s
             print(f"  直近{P:>3}日 TEST: ロング {len(items_l)} / "
@@ -2015,7 +2042,8 @@ def main():
         period_items = {}
         for P in PERIODS:
             items = _attach_scores(evaluate_period(
-                results, P, args.train_days, today, args.budget, args.top))
+                results, P, args.train_days, today, args.budget, args.top,
+                skip_train=skip_train, min_test_trades=eval_min_tt))
             period_items[P] = items
             print(f"  直近{P:>3}日 TEST: 合格 {len(items)}銘柄")
 
