@@ -281,7 +281,7 @@ def evaluate_period(results, period_label, train_days, today, budget, top_n):
 
 
 # ----------------------------------------------------------------- HTML
-def build_period_tab(period_label, train_days, items):
+def build_period_tab(period_label, train_days, items, id_prefix=""):
     """1タブ HTML (逆指値ロング walkforward_holdout.py と同じ重複ありTEST)。"""
     test_end, test_start = TEST_WINDOWS[period_label]
     test_label = f"直近{test_start}日"
@@ -330,7 +330,7 @@ def build_period_tab(period_label, train_days, items):
         pc = "profit" if es["total_pnl"] >= 0 else "loss"
         bg = "#0d4d2f" if it["test_pass"] else "#2d0a0a"
         mark = "★" if it["test_pass"] else "—"
-        sid = f"{it['symbol'].replace('.T','')}_{it['strategy']}"
+        sid = f"{id_prefix}{it['symbol'].replace('.T','')}_{it['strategy']}"
         rows += f"""
 <tr style="background:{bg}">
   <td style="color:#4ade80">{mark}</td>
@@ -502,11 +502,13 @@ def _build_patterns_section(all_test_trades):
 """
 
 
-def build_detail_tab(period_items):
+def build_detail_tab(period_items, id_prefix=""):
     """銘柄詳細タブ HTML。
 
     全期間タブで登場した (sym, strategy) ペアを集約して、
     各ペアの TEST 取引明細 (どの期間で出たか + 直近の取引) を表示。
+
+    id_prefix: --both モード時の ID 衝突回避用 ('L_' or 'S_')
     """
     # (sym, strategy) -> {best_item, periods_appeared}
     agg = {}
@@ -545,7 +547,7 @@ def build_detail_tab(period_items):
         active_btn = "active" if i == 0 else ""
         sym_short = entry["symbol"].replace(".T", "")
         # ボタンID: 戦略違いを区別 (例: sym5821_MACD)
-        sid = f"{sym_short}_{entry['strategy']}"
+        sid = f"{id_prefix}{sym_short}_{entry['strategy']}"
         # ★数バッジ
         n_star = sum(1 for p in entry["periods"].values() if p["test_pass"])
         star_color = "#4ade80" if n_star >= 3 else "#fbbf24" if n_star >= 1 else "#64748b"
@@ -755,6 +757,8 @@ def main():
                              "出力ファイル名も holdout_periods_short_<日付>.html に切替")
     parser.add_argument("--long-only", action="store_true",
                         help="ロング戦略 (DON/MACD/RSI2/A7/VOL/MOM) のみで評価")
+    parser.add_argument("--both", action="store_true",
+                        help="ロング/ショート両方を上タブで切替表示 (1HTML、推奨)")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-fresh-check", action="store_true",
@@ -778,6 +782,10 @@ def main():
     elif args.long_only:
         args.strategy = "long"
         variant_label = "long"
+    elif args.both:
+        # 両方分離表示: 銘柄は両戦略でバックテストするので strategy=all
+        args.strategy = "all"
+        variant_label = "both"
     else:
         variant_label = ""
 
@@ -933,7 +941,8 @@ def main():
         targets = [(e[0], e[1]) for e in raw]
 
     print(f"=" * 70)
-    variant_disp = ({"short": "ショート", "long": "ロング"}
+    variant_disp = ({"short": "ショート", "long": "ロング",
+                     "both": "ロング/ショート分離"}
                     .get(variant_label, "ロング+ショート"))
     print(f"  期間別ホールドアウト・レポート [{variant_disp}] (逆指値ロング方式)")
     print(f"=" * 70)
@@ -1041,12 +1050,34 @@ def main():
 
     # 期間別評価 (逆指値ロング walkforward_holdout.py と一致)
     print(f"\n[Step 3] 6期間ホールドアウト評価 (逆指値ロング方式)", flush=True)
-    period_items = {}
-    for P in PERIODS:
-        items = evaluate_period(results, P, args.train_days, today,
-                                  args.budget, args.top)
-        period_items[P] = items
-        print(f"  直近{P:>3}日 TEST: 合格 {len(items)}銘柄")
+    long_strats = set(STRATEGIES.keys())
+    short_strats = set(STRATEGIES_SHORT.keys())
+
+    if args.both:
+        # --both: ロング/ショートを分離して2セット作成
+        long_results = {k: v for k, v in results.items() if k[1] in long_strats}
+        short_results = {k: v for k, v in results.items() if k[1] in short_strats}
+        print(f"  [両方モード] ロング: {len(long_results)}ペア, "
+              f"ショート: {len(short_results)}ペア")
+        period_items_long = {}
+        period_items_short = {}
+        for P in PERIODS:
+            items_l = evaluate_period(long_results, P, args.train_days, today,
+                                       args.budget, args.top)
+            items_s = evaluate_period(short_results, P, args.train_days, today,
+                                       args.budget, args.top)
+            period_items_long[P] = items_l
+            period_items_short[P] = items_s
+            print(f"  直近{P:>3}日 TEST: ロング {len(items_l)} / "
+                  f"ショート {len(items_s)} 合格")
+        period_items = period_items_long  # 後方互換 (使われなければ無視)
+    else:
+        period_items = {}
+        for P in PERIODS:
+            items = evaluate_period(results, P, args.train_days, today,
+                                      args.budget, args.top)
+            period_items[P] = items
+            print(f"  直近{P:>3}日 TEST: 合格 {len(items)}銘柄")
 
     # HTML
     css = """
@@ -1096,13 +1127,35 @@ td { padding:5px 8px; border:1px solid #1e293b;
 .sym-link { cursor:pointer; color:#e2e8f0; text-decoration:none;
             border-bottom:1px dashed #475569; }
 .sym-link:hover { color:#60a5fa; border-bottom-color:#60a5fa; }
+.side-nav { display:flex; gap:8px; margin:12px 0 16px;
+            border-bottom:2px solid #1e293b; padding-bottom:0; }
+.side-btn { padding:10px 28px; background:#1e293b; border:2px solid #334155;
+            border-bottom:none; border-radius:8px 8px 0 0;
+            color:#94a3b8; cursor:pointer; font-size:1rem;
+            font-weight:600; margin-bottom:-2px; }
+.side-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.side-btn.active { background:#0f172a; color:#60a5fa;
+                   border-color:#60a5fa; border-bottom:2px solid #0f172a; }
+.side-container { padding-top:8px; }
 """
     js = """
+function switchSide(side){
+  document.querySelectorAll('.side-container').forEach(d=>d.style.display='none');
+  document.querySelectorAll('.side-btn').forEach(b=>b.classList.remove('active'));
+  var el=document.getElementById('side-'+side);
+  if(el) el.style.display='block';
+  (event.target.closest('.side-btn')||event.target).classList.add('active');
+}
 function switchTab(tab){
-  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  document.getElementById('t-'+tab).classList.add('active');
-  (event.target.closest('.tab-btn')||event.target).classList.add('active');
+  // 同一side-container内のタブだけ切替 (--both モード対応)
+  var btn = event.target.closest('.tab-btn');
+  var container = btn ? btn.closest('.side-container') : null;
+  var scope = container || document;
+  scope.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  scope.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  var pane = document.getElementById('t-'+tab);
+  if(pane) pane.classList.add('active');
+  if(btn) btn.classList.add('active');
 }
 function switchSym(id){
   document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
@@ -1130,26 +1183,63 @@ function jumpToSym(sid){
 }
 """
 
-    tab_btns = ""
-    tab_panes = ""
-    for i, P in enumerate(PERIODS):
-        active_btn = "active" if i == 0 else ""
-        active_pane = "active" if i == 0 else ""
-        n_qual = len(period_items[P])
-        tab_btns += (f'<button class="tab-btn {active_btn}" '
-                     f'onclick="switchTab(\'p{P}\')">直近{P}日<br>'
+    def _build_side(items_by_period, side_pref):
+        """1side のタブ+ペインHTMLを返す (ID prefix で衝突回避)。"""
+        btns = ""
+        panes = ""
+        for i, P in enumerate(PERIODS):
+            ab = "active" if i == 0 else ""
+            n_qual = len(items_by_period[P])
+            pid = f"{side_pref}p{P}"
+            btns += (f'<button class="tab-btn {ab}" '
+                     f'onclick="switchTab(\'{pid}\')">直近{P}日<br>'
                      f'<small style="color:#fbbf24">{n_qual}件</small></button>')
-        tab_panes += (f'<div id="t-p{P}" class="tab-pane {active_pane}">'
-                      f'{build_period_tab(P, args.train_days, period_items[P])}'
+            panes += (f'<div id="t-{pid}" class="tab-pane {ab}">'
+                      f'{build_period_tab(P, args.train_days, items_by_period[P], id_prefix=side_pref)}'
                       f'</div>')
+        # 銘柄詳細
+        uniq = {(it["symbol"], it["strategy"])
+                for P in PERIODS for it in items_by_period[P]}
+        did = f"{side_pref}detail"
+        btns += (f'<button class="tab-btn" onclick="switchTab(\'{did}\')">'
+                 f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(uniq)}件</small></button>')
+        panes += (f'<div id="t-{did}" class="tab-pane">'
+                  f'{build_detail_tab(items_by_period, id_prefix=side_pref)}</div>')
+        return f'<div class="tab-nav">{btns}</div>{panes}'
 
-    # 銘柄詳細タブ (全期間に登場した銘柄を集約)
-    unique_syms = {(it["symbol"], it["strategy"])
-                   for P in PERIODS for it in period_items[P]}
-    tab_btns += (f'<button class="tab-btn" onclick="switchTab(\'detail\')">'
-                 f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(unique_syms)}件</small></button>')
-    tab_panes += (f'<div id="t-detail" class="tab-pane">'
-                  f'{build_detail_tab(period_items)}</div>')
+    if args.both:
+        long_html = _build_side(period_items_long, "L_")
+        short_html = _build_side(period_items_short, "S_")
+        side_section = f"""
+<div class="side-nav">
+  <button class="side-btn active" onclick="switchSide('long')">📈 ロング</button>
+  <button class="side-btn" onclick="switchSide('short')">📉 ショート</button>
+</div>
+<div id="side-long" class="side-container" style="display:block">{long_html}</div>
+<div id="side-short" class="side-container" style="display:none">{short_html}</div>
+"""
+        tab_btns = ""  # 個別タブナビは side_section 内
+        tab_panes = ""
+    else:
+        side_section = ""
+        tab_btns = ""
+        tab_panes = ""
+        for i, P in enumerate(PERIODS):
+            active_btn = "active" if i == 0 else ""
+            active_pane = "active" if i == 0 else ""
+            n_qual = len(period_items[P])
+            tab_btns += (f'<button class="tab-btn {active_btn}" '
+                         f'onclick="switchTab(\'p{P}\')">直近{P}日<br>'
+                         f'<small style="color:#fbbf24">{n_qual}件</small></button>')
+            tab_panes += (f'<div id="t-p{P}" class="tab-pane {active_pane}">'
+                          f'{build_period_tab(P, args.train_days, period_items[P])}'
+                          f'</div>')
+        unique_syms = {(it["symbol"], it["strategy"])
+                       for P in PERIODS for it in period_items[P]}
+        tab_btns += (f'<button class="tab-btn" onclick="switchTab(\'detail\')">'
+                     f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(unique_syms)}件</small></button>')
+        tab_panes += (f'<div id="t-detail" class="tab-pane">'
+                      f'{build_detail_tab(period_items)}</div>')
 
     train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
                   else "TEST より前の全期間")
@@ -1169,6 +1259,12 @@ function jumpToSym(sid){
 </div>
 """
 
+    # body 構成
+    if args.both:
+        body_main = side_section
+    else:
+        body_main = f'<div class="tab-nav">{tab_btns}</div>{tab_panes}'
+
     html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>期間別ホールドアウト ― {today}</title>
 <style>{css}</style></head><body>
@@ -1176,8 +1272,7 @@ function jumpToSym(sid){
 <p class="subtitle">生成: {today} / universe: {args.universe} ({len(fetched)}銘柄) /
    戦略: {len(strategies)} ({variant_disp}) / TRAIN期間: {args.train_days}日</p>
 {legend}
-<div class="tab-nav">{tab_btns}</div>
-{tab_panes}
+{body_main}
 <script>{js}</script>
 </body></html>"""
 
