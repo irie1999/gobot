@@ -1783,19 +1783,10 @@ def main():
         spec = importlib.util.spec_from_file_location("wl", p)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        # 3-tuple ((sym, name, strategy)) なら strategy を保持 → 固定戦略マップに
+        # WATCHLIST は銘柄のみ固定。戦略は12種すべてでテストする
+        # (固定戦略にすると 1銘柄=1ペアになり、BTスコアの幅広い分布が取れない)
         raw = getattr(mod, "SYMBOLS", [])
         targets = [(e[0], e[1]) for e in raw]
-        for e in raw:
-            if len(e) >= 3:
-                sym, _name, strat = e[:3]
-                strats = csv_strategy_map.setdefault(sym, [])
-                if strat and strat not in strats:
-                    strats.append(strat)
-        if csv_strategy_map:
-            n_pairs = sum(len(v) for v in csv_strategy_map.values())
-            print(f"[WATCHLIST] 固定 戦略マップ: {len(csv_strategy_map)}銘柄 / "
-                  f"{n_pairs}(銘柄×戦略)ペア")
 
     print(f"=" * 70)
     variant_disp = ({"short": "ショート", "long": "ロング",
@@ -1887,15 +1878,13 @@ def main():
             cache = {}
 
     # スキャン
-    # winners (WATCHLIST) も csv と同様に strategy_map で固定戦略のみ評価
-    use_strategy_map = (csv_strategy_map
-                        if (args.universe in ("csv", "winners")
-                            and csv_strategy_map) else None)
+    # strategy_map は CSV モードでのみ (sym,strat)を絞る用途
+    # winners モードは「銘柄固定 × 12戦略すべて」で評価する
     results = scan_universe(
         [(s, n) for s, n in targets if s in fetched],
         fetched, strategies, args.budget, args.max_risk,
         args.workers, cache,
-        strategy_map=use_strategy_map)
+        strategy_map=csv_strategy_map if args.universe == "csv" else None)
 
     # キャッシュ保存
     if not args.no_cache:
