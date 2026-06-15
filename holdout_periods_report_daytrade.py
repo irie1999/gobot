@@ -1417,6 +1417,200 @@ def build_all_trades_tab(period_items):
 """
 
 
+def build_date_tab(period_items, id_prefix=""):
+    """日付別 取引タブ HTML。
+
+    各日の取引集計 (利益/損/損益/勝率/PF) を表に表示。
+    日付ボタンクリックで該当日の取引明細に切替。
+    """
+    # 集約 (build_all_trades_tab と同じパターン)
+    agg = {}
+    for P, items in period_items.items():
+        for it in items:
+            key = (it["symbol"], it["strategy"])
+            if key not in agg:
+                agg[key] = {"name": it["name"], "periods": {},
+                            "bt_score": it.get("bt_score", 0),
+                            "bt_rank": it.get("bt_rank", "△")}
+            agg[key]["periods"][P] = it.get("test_trades", [])
+
+    all_rows = []
+    for (sym, strat), entry in agg.items():
+        if not entry["periods"]:
+            continue
+        max_P = max(entry["periods"].keys())
+        for t in entry["periods"][max_P]:
+            all_rows.append({
+                "sym": sym, "name": entry["name"], "strat": strat,
+                "bt_score": entry["bt_score"], "bt_rank": entry["bt_rank"],
+                "entry_dt": t.get("entry_dt"), "exit_dt": t.get("exit_dt"),
+                "entry_p": t.get("entry_p", 0), "stop_p": t.get("stop_p", 0),
+                "target_p": t.get("target_p", 0), "exit_p": t.get("exit_p", 0),
+                "pnl": t.get("pnl", 0), "pct": t.get("pct", 0),
+                "reason": t.get("reason", "?"),
+            })
+
+    # 日付別グルーピング
+    by_date = {}
+    for r in all_rows:
+        dt = r.get("entry_dt")
+        if not hasattr(dt, "date"):
+            continue
+        by_date.setdefault(dt.date(), []).append(r)
+
+    if not by_date:
+        return '<p style="color:#64748b;padding:24px">取引なし</p>'
+
+    dates_sorted = sorted(by_date.keys(), reverse=True)
+
+    # 日付別サマリ
+    date_stats = []
+    for d in dates_sorted:
+        rows = by_date[d]
+        n = len(rows)
+        wins = sum(1 for r in rows if r["pnl"] > 0)
+        wr = wins / n * 100 if n > 0 else 0
+        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
+        pf = gp / gl if gl > 0 else float("inf")
+        date_stats.append({
+            "date": d, "n": n, "wr": wr,
+            "gp": gp, "gl": gl, "pf": pf, "total": gp - gl,
+        })
+
+    # サマリテーブル (全日表示、降順、クリックで詳細へ)
+    summary_rows = ""
+    for s in date_stats:
+        sid = f"{id_prefix}date{s['date'].strftime('%Y%m%d')}"
+        pc = "profit" if s["total"] >= 0 else "loss"
+        summary_rows += f"""
+<tr onclick="switchDate('{sid}')" style="cursor:pointer">
+  <td><strong>{s['date']}</strong></td>
+  <td>{s['n']}</td>
+  <td>{s['wr']:.0f}%</td>
+  <td style="color:{_color_pf(s['pf'])}">{_pf(s['pf'])}</td>
+  <td class="profit">+{s['gp']:,.0f}</td>
+  <td class="loss">-{s['gl']:,.0f}</td>
+  <td class="{pc}"><strong>{s['total']:+,.0f}</strong></td>
+</tr>"""
+
+    # 日付ボタン + 各日詳細ペイン (直近30日まで、それ以前はサマリのみ)
+    nav_btns = ""
+    panes = ""
+    detail_limit = 60  # 最大60日分の詳細ペインを生成
+    for i, s in enumerate(date_stats[:detail_limit]):
+        d = s["date"]
+        sid = f"{id_prefix}date{d.strftime('%Y%m%d')}"
+        active = "active" if i == 0 else ""
+        display = "block" if i == 0 else "none"
+        pc = "profit" if s["total"] >= 0 else "loss"
+        nav_btns += (
+            f'<button class="date-btn {active}" '
+            f'onclick="switchDate(\'{sid}\')">'
+            f'<strong>{d.strftime("%m/%d")}</strong><br>'
+            f'<small>{s["n"]}件 {s["wr"]:.0f}%</small><br>'
+            f'<small class="{pc}">{s["total"]:+,}</small>'
+            f'</button>')
+
+        # 取引明細
+        rows_html = ""
+        for r in sorted(by_date[d], key=lambda x: str(x.get("entry_dt", ""))):
+            ed = _fmt_dt(r.get("entry_dt"))
+            xd = _fmt_dt(r.get("exit_dt"))
+            try:
+                hold = f"{int((r['exit_dt'] - r['entry_dt']).total_seconds() // 60)}分"
+            except Exception:
+                hold = "-"
+            pnl = r["pnl"]
+            pct = r["pct"]
+            pc2 = "profit" if pnl >= 0 else "loss"
+            bt_col = _rank_color(r["bt_rank"])
+            rows_html += f"""
+<tr>
+  <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
+  <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
+  <td>{r['strat']}</td>
+  <td>{ed}</td><td>{xd}</td><td>{hold}</td>
+  <td>{r['entry_p']:,.0f}</td>
+  <td class="loss">{r['stop_p']:,.0f}</td>
+  <td class="profit">{r['target_p']:,.0f}</td>
+  <td>{r['exit_p']:,.0f}</td>
+  <td class="{pc2}">{pnl:+,.0f}</td>
+  <td class="{pc2}">{pct:+.2f}%</td>
+  <td>{r['reason']}</td>
+</tr>"""
+
+        # 日サマリボックス
+        sum_box = f"""
+<div class="box">
+  <div class="it"><div class="lb">取引数</div><div class="vl">{s['n']}</div></div>
+  <div class="it"><div class="lb">勝率</div><div class="vl">{s['wr']:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(s['pf'])}</div></div>
+  <div class="it"><div class="lb">利益</div>
+    <div class="vl profit">+{s['gp']:,.0f}</div></div>
+  <div class="it"><div class="lb">損</div>
+    <div class="vl loss">-{s['gl']:,.0f}</div></div>
+  <div class="it"><div class="lb">損益</div>
+    <div class="vl {pc}">{s['total']:+,.0f}円</div></div>
+</div>"""
+
+        panes += f"""
+<div id="{sid}" class="date-pane" style="display:{display}">
+  <h3>📅 {d} の取引</h3>
+  {sum_box}
+  <table style="font-size:0.78rem">
+    <thead><tr>
+      <th>BT</th><th>銘柄</th><th>戦略</th>
+      <th>Entry</th><th>Exit</th><th>保有</th>
+      <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
+      <th>損益</th><th>%</th><th>理由</th>
+    </tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+</div>"""
+
+    # 全体損益
+    total_pnl = sum(s["total"] for s in date_stats)
+    total_n = sum(s["n"] for s in date_stats)
+    total_gp = sum(s["gp"] for s in date_stats)
+    total_gl = sum(s["gl"] for s in date_stats)
+    overall_pc = "profit" if total_pnl >= 0 else "loss"
+
+    return f"""
+<div class="box">
+  <div class="it"><div class="lb">取引日数</div><div class="vl">{len(date_stats)}</div></div>
+  <div class="it"><div class="lb">総取引数</div><div class="vl">{total_n:,}</div></div>
+  <div class="it"><div class="lb">利益</div>
+    <div class="vl profit">+{total_gp:,.0f}</div></div>
+  <div class="it"><div class="lb">損</div>
+    <div class="vl loss">-{total_gl:,.0f}</div></div>
+  <div class="it"><div class="lb">損益</div>
+    <div class="vl {overall_pc}">{total_pnl:+,.0f}円</div></div>
+</div>
+
+<h3>📅 日付ボタン (クリックで詳細表示、直近{min(len(date_stats), detail_limit)}日)</h3>
+<div class="date-nav" style="display:flex;flex-wrap:wrap;gap:4px;
+                              margin:12px 0;padding:10px;background:#0f172a;
+                              border-radius:8px;max-height:280px;overflow-y:auto">
+  {nav_btns}
+</div>
+
+{panes}
+
+<h3 style="margin-top:18px">📋 日別損益サマリ (全{len(date_stats)}日、降順、行クリックで詳細)</h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>日付</th><th>取引数</th><th>勝率</th><th>PF</th>
+    <th>利益<br><small>(勝ち合計)</small></th>
+    <th>損<br><small>(負け合計)</small></th>
+    <th>損益<br><small>(差引)</small></th>
+  </tr></thead>
+  <tbody>{summary_rows}</tbody>
+</table>
+"""
+
+
 def _check_data_freshness(min_age_days=4, auto_update=True,
                             force_update=False, watchlist_file=None):
     """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
@@ -2094,6 +2288,13 @@ td { padding:5px 8px; border:1px solid #1e293b;
 .side-btn.active { background:#0f172a; color:#60a5fa;
                    border-color:#60a5fa; border-bottom:2px solid #0f172a; }
 .side-container { padding-top:8px; }
+.date-btn { padding:5px 7px; background:#1e293b; border:1px solid #334155;
+            color:#e2e8f0; border-radius:5px; cursor:pointer;
+            font-size:0.7rem; min-width:78px; text-align:center;
+            line-height:1.25; }
+.date-btn:hover { background:#263349; border-color:#64748b; }
+.date-btn.active { background:#1d4ed8; border-color:#3b82f6; }
+.date-pane { display:none; }
 """
     js = """
 function switchSide(side){
@@ -2137,6 +2338,17 @@ function switchSym(id){
   var pane=document.getElementById(id);
   if(pane) pane.style.display='block';
   (event.target.closest('.sym-btn')||event.target).classList.add('active');
+}
+function switchDate(id){
+  // 同タブ内 (= 同 side-container 内) の date-pane だけ切替
+  var btn = event ? (event.target.closest('.date-btn') || event.target) : null;
+  var pane = document.getElementById(id);
+  var scope = pane ? pane.closest('.tab-pane') : document;
+  scope.querySelectorAll('.date-pane').forEach(p=>p.style.display='none');
+  scope.querySelectorAll('.date-btn').forEach(b=>b.classList.remove('active'));
+  if(pane) pane.style.display='block';
+  if(btn && btn.classList) btn.classList.add('active');
+  if(pane) pane.scrollIntoView({behavior:'smooth', block:'start'});
 }
 function jumpToSym(sid){
   // sid は "L_5715_DON" や "S_5715_MOM_S" のような prefix付き
@@ -2203,6 +2415,12 @@ function jumpToSym(sid){
                  f'📋 全取引一覧<br><small style="color:#fbbf24">貼付用</small></button>')
         panes += (f'<div id="t-{aid}" class="tab-pane">'
                   f'{build_all_trades_tab(items_by_period)}</div>')
+        # 📅 日付別 (日付ごとの利益/損)
+        date_id = f"{side_pref}date"
+        btns += (f'<button class="tab-btn" onclick="switchTab(\'{date_id}\')">'
+                 f'📅 日付別<br><small style="color:#fbbf24">日別損益</small></button>')
+        panes += (f'<div id="t-{date_id}" class="tab-pane">'
+                  f'{build_date_tab(items_by_period, id_prefix=side_pref)}</div>')
         return f'<div class="tab-nav">{btns}</div>{panes}'
 
     if args.both:
@@ -2243,6 +2461,11 @@ function jumpToSym(sid){
                      f'📋 全取引一覧<br><small style="color:#fbbf24">貼付用</small></button>')
         tab_panes += (f'<div id="t-all" class="tab-pane">'
                       f'{build_all_trades_tab(period_items)}</div>')
+        # 📅 日付別
+        tab_btns += (f'<button class="tab-btn" onclick="switchTab(\'date\')">'
+                     f'📅 日付別<br><small style="color:#fbbf24">日別損益</small></button>')
+        tab_panes += (f'<div id="t-date" class="tab-pane">'
+                      f'{build_date_tab(period_items)}</div>')
 
     train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
                   else "TEST より前の全期間")
