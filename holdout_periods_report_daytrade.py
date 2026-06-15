@@ -1146,6 +1146,112 @@ def build_detail_tab(period_items, id_prefix=""):
 """
 
 
+def compute_quality_scores(all_rows):
+    """各トレードにシグナル品質スコア Q (0-100) を付与する。
+
+    Q = BTスコア(基礎) + 時間帯 + 同日カウント + 連敗ペナルティ + 当日PnL状況
+
+    時系列順に処理して "そのシグナル発生時点で知り得た情報" のみを使う。
+    look-ahead bias なし。
+    """
+    # entry_dt 昇順でソート (時系列)
+    def _sort_key(r):
+        dt = r.get("entry_dt")
+        return (dt if dt else "")
+    sorted_rows = sorted(all_rows, key=_sort_key)
+
+    prior_by_sym_date = {}  # (date, sym) -> [pnl, ...]
+    daily_pnl = {}          # date -> running pnl
+
+    for r in sorted_rows:
+        dt = r.get("entry_dt")
+        if not hasattr(dt, "date"):
+            r["q_score"] = 0
+            continue
+        d = dt.date()
+        bt = r.get("bt_score", 0) or 0
+
+        # ① BT スコア基礎 (0-60点、BT100 → 60点)
+        Q = min(bt, 100) * 0.6
+
+        # ② 時間帯ボーナス/減点
+        mins = (dt.hour - 9) * 60 + dt.minute
+        if mins < 10:           # 寄付10分
+            Q -= 10
+            time_tag = "寄付"
+        elif mins > 330:        # 14:30以降
+            Q -= 10
+            time_tag = "引け前"
+        else:
+            Q += 5
+            time_tag = "通常"
+
+        # ③ 同日同銘柄カウント (前のエントリー数)
+        key = (d, r["sym"])
+        prior = prior_by_sym_date.get(key, [])
+        cnt = len(prior)
+        if cnt == 0:
+            Q += 10
+            cnt_tag = "初"
+        elif cnt == 1:
+            Q += 0
+            cnt_tag = "2回目"
+        else:
+            Q -= 15
+            cnt_tag = f"{cnt+1}回目"
+
+        # ④ 同銘柄当日損切歴ペナルティ
+        losses = sum(1 for p in prior if p <= 0)
+        if losses >= 1:
+            Q -= 15
+            loss_tag = f"既損切{losses}"
+        else:
+            loss_tag = ""
+
+        # ⑤ 当日累積PnLによる調整
+        cur_daily = daily_pnl.get(d, 0)
+        if cur_daily >= 10_000:
+            Q += 5
+            pnl_tag = "好調"
+        elif cur_daily <= -10_000:
+            Q -= 10
+            pnl_tag = "低調"
+        else:
+            pnl_tag = ""
+
+        r["q_score"] = round(Q, 1)
+        r["q_tags"] = [t for t in (time_tag, cnt_tag, loss_tag, pnl_tag) if t]
+
+        # 状態更新 (このトレードを履歴に追加)
+        prior_by_sym_date.setdefault(key, []).append(r.get("pnl", 0))
+        daily_pnl[d] = cur_daily + r.get("pnl", 0)
+
+    return all_rows
+
+
+def _q_color(q):
+    """Q スコアの色 (高い=緑、中=黄、低=赤)。"""
+    if q >= 80:
+        return "#4ade80"
+    if q >= 70:
+        return "#86efac"
+    if q >= 60:
+        return "#facc15"
+    if q >= 50:
+        return "#fb923c"
+    return "#f87171"
+
+
+def _q_icon(q):
+    if q >= 80:
+        return "🟢"
+    if q >= 70:
+        return "🟡"
+    if q >= 60:
+        return "⚪"
+    return "🔴"
+
+
 def build_all_trades_tab(period_items):
     """全銘柄・全期間の取引明細を1テーブルにまとめる。
 
@@ -1188,11 +1294,12 @@ def build_all_trades_tab(period_items):
                 "reason": t.get("reason", "?"),
             })
 
-    # 日付降順
-    all_rows.sort(key=lambda r: str(r.get("entry_dt", "")), reverse=True)
-
     if not all_rows:
         return '<p style="color:#64748b;padding:24px">取引なし</p>'
+
+    # Q スコア計算 (時系列順、計算後に降順表示)
+    compute_quality_scores(all_rows)
+    all_rows.sort(key=lambda r: str(r.get("entry_dt", "")), reverse=True)
 
     # 集計
     total_pnl = sum(r["pnl"] for r in all_rows)
@@ -1345,6 +1452,72 @@ def build_all_trades_tab(period_items):
 </p>
 """
 
+    # ── Q スコア閾値別フィルタ (シグナル品質で厳選する用) ──
+    q_thresholds = [
+        (85, "🟢 最優秀 (85+)"),
+        (80, "🟢 優秀 (80+)"),
+        (75, "🟡 高品質 (75+)"),
+        (70, "🟡 良品質 (70+)"),
+        (65, "⚪ 中品質 (65+)"),
+        (60, "⚪ 標準 (60+)"),
+        (50, "🔴 全件超ノイズ (50+)"),
+        (0,  "全件"),
+    ]
+    q_rows_html = ""
+    for thr, label in q_thresholds:
+        sub = [r for r in all_rows if r.get("q_score", 0) >= thr]
+        if not sub:
+            q_rows_html += (f'<tr><td>{label}</td>'
+                             f'<td colspan="6" style="color:#475569">該当なし</td>'
+                             f'</tr>')
+            continue
+        gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in sub if r["pnl"] <= 0))
+        tot = gp - gl
+        wins = sum(1 for r in sub if r["pnl"] > 0)
+        wr = wins / len(sub) * 100
+        pf_v = gp / gl if gl > 0 else float("inf")
+        pc = "profit" if tot >= 0 else "loss"
+        # ハイライト: 推奨閾値 (75)
+        is_recommended = (thr == 75)
+        bg = " style='background:#0d3d2f'" if is_recommended else ""
+        crown = "⭐ " if is_recommended else ""
+        q_rows_html += f"""
+<tr{bg}>
+  <td>{crown}<strong>{label}</strong></td>
+  <td>{len(sub):,}</td>
+  <td>{wr:.0f}%</td>
+  <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td class="profit">+{gp:,.0f}</td>
+  <td class="loss">-{gl:,.0f}</td>
+  <td class="{pc}"><strong>{tot:+,.0f}</strong></td>
+</tr>"""
+
+    q_filter_box = f"""
+<h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ</h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>Q スコア閾値</th><th>取引数</th><th>勝率</th><th>PF</th>
+    <th>利益<br><small>(勝ち合計)</small></th>
+    <th>損<br><small>(負け合計)</small></th>
+    <th>損益<br><small>(差引)</small></th>
+  </tr></thead>
+  <tbody>{q_rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>Q スコア</strong> = シグナル発生時点の "品質予測" (0-100):<br>
+  &nbsp;&nbsp;BTスコア (×0.6) + 時間帯 (寄付/引け前=-10, 通常=+5)
+  + 同日同銘柄 (初=+10, 2回目=0, 3回目以上=-15)
+  + 同銘柄当日損切歴 (1回以上=-15)
+  + 当日累積PnL (+10K以上=+5, -10K以下=-10)<br>
+  🟢 <strong>80+</strong>: 確実エントリー (フルポジ) /
+  🟡 <strong>70-79</strong>: 慎重エントリー (ハーフポジ) /
+  ⚪ <strong>60-69</strong>: 待機 /
+  🔴 <strong>&lt;60</strong>: スキップ<br>
+  ⭐ <strong>Q≥75</strong> = 推奨運用閾値。look-ahead bias なし (シグナル発生時点の情報のみ)
+</p>
+"""
+
     bt_filter_box = f"""
 <h3 style="margin-top:8px">📊 BTランク別 取引フィルタ (閾値で絞った場合の損益)</h3>
 <table style="font-size:0.82rem">
@@ -1378,9 +1551,13 @@ def build_all_trades_tab(period_items):
         pct = r["pct"]
         pc = "profit" if pnl >= 0 else "loss"
         bt_col = _rank_color(r["bt_rank"])
+        q = r.get("q_score", 0)
+        q_col = _q_color(q)
+        q_ico = _q_icon(q)
         rows_html += f"""
-<tr data-bt-score="{r['bt_score']}" data-bt-rank="{r['bt_rank']}">
+<tr data-bt-score="{r['bt_score']}" data-bt-rank="{r['bt_rank']}" data-q-score="{q}">
   <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
+  <td style="color:{q_col};font-weight:bold;text-align:center">{q_ico}<br><small>{q:.0f}</small></td>
   <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
   <td>{r['strat']}</td>
   <td>{ed}</td>
@@ -1399,14 +1576,16 @@ def build_all_trades_tab(period_items):
 {sum_box}
 {bt_filter_box}
 {finer_filter_box}
+{q_filter_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
   💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
-  💡 BT列の★ランクで各取引の事前評価が一目でわかります
+  💡 BT列= 過去実績ランク、Q列= シグナル発生時点の品質スコア (0-100)
 </p>
 <table id="all-trades-table" style="font-size:0.72rem">
   <thead><tr>
     <th>BT<br><small>★/100</small></th>
+    <th>Q<br><small>品質/100</small></th>
     <th>銘柄</th><th>戦略</th>
     <th>Entry</th><th>Exit</th><th>保有</th>
     <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
