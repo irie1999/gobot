@@ -1,26 +1,20 @@
 """
-compare_improvements_daytrade.py  ―  改善案A/B/C/D 比較
+compare_improvements_daytrade.py  ―  損失削減 改善案比較
 ==================================================================
-holdout_periods_report_daytrade.py を以下の改善案で連続実行し、
+holdout_periods_report_daytrade.py を複数の改善案で連続実行し、
 ベースラインとの差分を比較する。
 
-【検証する改善】
-  A. Slow Stop (STOP_CONFIRM_BARS=1)
-     stopタッチ後 1バー (5分) 待ち、それでも回復しなければ決済
-  B. 同日損切ロック (MAX_DAILY_STOPS=2)
-     1日2回 stop引かれたら以降のシグナル無視
-  C. ブレークイーブントレール (TRAIL_TO_BREAKEVEN=1)
-     +1×ATR 利益乗ったら stop を建値に移動
-  D. 戦略別時刻フィルタ
-     MOM_S:09:30-10:30, RSI2_S:10:00-13:00, MACD_S:09:30-14:00, A7_S:10:30-14:00
+【損失削減 改善案 (2026-06 追加)】
+  H. 朝の即死回避 (ENTRY_START=10:30)
+     09:00-10:30 の高ボラ早朝帯をエントリー対象から除外
+  I. 同日同銘柄ロック (SAME_DAY_LOCK=1)
+     同日同銘柄に複数戦略がエントリーした場合、最初のものだけ残す
+  J. 高ATR銘柄除外 (MAX_ATR_PCT=2.5)
+     ATR>2.5% の高ボラ銘柄を取引から除外
+  HIJ. H+I+J 全部入り (損失削減セット)
 
-【パターン】
-  baseline: なし
-  +A
-  +B
-  +C
-  +D
-  +ABCD (全部入り)
+【既存の改善 (Slow Stop 系)】
+  A-G + ABCDEFG: 旧トラッキング (参考)
 
 【出力】
   holdout_periods_<variant>_<改善>_<日付>.html
@@ -52,6 +46,16 @@ _STRAT_TIMES = (
 # 改善設定 (label, env_dict)
 IMPROVEMENTS = [
     ("baseline", {}),
+    # 損失削減系 (2026-06 追加)
+    ("H_late_entry", {"DAYTRADE_ENTRY_START": "10:30"}),
+    ("I_same_day_lock", {"DAYTRADE_SAME_DAY_LOCK": "1"}),
+    ("J_max_atr", {"DAYTRADE_MAX_ATR_PCT": "2.5"}),
+    ("HIJ_all", {
+        "DAYTRADE_ENTRY_START": "10:30",
+        "DAYTRADE_SAME_DAY_LOCK": "1",
+        "DAYTRADE_MAX_ATR_PCT": "2.5",
+    }),
+    # 旧トラッキング (参考保持)
     ("A_slow_stop", {"DAYTRADE_STOP_CONFIRM": "1"}),
     ("B_daily_lock", {"DAYTRADE_MAX_STOPS": "2"}),
     ("C_trail_be", {"DAYTRADE_TRAIL_BE": "1"}),
@@ -72,6 +76,11 @@ IMPROVEMENTS = [
     }),
 ]
 
+# デフォルトで実行する損失削減フォーカス・パターン
+LOSS_REDUCTION_PATTERNS = (
+    "baseline,H_late_entry,I_same_day_lock,J_max_atr,HIJ_all"
+)
+
 
 def run_once(label, env_overrides, extra_args):
     """1パターン実行 → HTMLパス返す。"""
@@ -81,7 +90,8 @@ def run_once(label, env_overrides, extra_args):
               "DAYTRADE_TRAIL_BE", "DAYTRADE_STRAT_TIMES",
               "DAYTRADE_MIN_VOL_RATIO", "DAYTRADE_MIN_ATR_PCT",
               "DAYTRADE_MAX_ATR_PCT", "DAYTRADE_PAUSE_LOSSES",
-              "DAYTRADE_PAUSE_DAYS"):
+              "DAYTRADE_PAUSE_DAYS",
+              "DAYTRADE_ENTRY_START", "DAYTRADE_SAME_DAY_LOCK"):
         env.pop(k, None)
     env.update(env_overrides)
     today = datetime.now(JST).strftime("%Y-%m-%d")
@@ -253,19 +263,19 @@ td.na { color:#475569; }
     return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>改善案比較 — {today}</title>
 <style>{css}</style></head><body>
-<h1>🔬 改善案 A/B/C/D 比較 [{var_disp}]</h1>
+<h1>🔬 損失削減 改善案比較 [{var_disp}]</h1>
 <p class="subtitle">生成: {today} / パターン: {len(labels)}個</p>
 
 <div class="legend">
-  <strong>📋 検証する改善</strong><br>
-  ▸ <strong>A. Slow Stop</strong>: stopタッチ後1バー (5分) 待って再判定。即死を防ぐ<br>
-  ▸ <strong>B. 同日損切ロック</strong>: 1日2回損切したら以降エントリー無効<br>
-  ▸ <strong>C. BEトレール</strong>: +1×ATR乗ったら stop を建値に移動<br>
-  ▸ <strong>D. 戦略別時刻フィルタ</strong>: MOM_S 9:30-10:30 / RSI2_S 10:00-13:00 etc<br>
-  ▸ <strong>E. 出来高ブースト</strong>: 20本平均×1.5倍以上の出来高がある時のみエントリー<br>
-  ▸ <strong>F. ATR%レンジ</strong>: ATR が 0.5%〜3.0% のときのみ取引 (低ボラ/過ボラ除外)<br>
-  ▸ <strong>G. 連敗一時停止</strong>: 3連敗で5日間その銘柄/戦略を休止<br>
-  ▸ <strong>ABCDEFG</strong>: 全部入り
+  <strong>📋 損失削減 改善 (2026-06)</strong><br>
+  ▸ <strong>H. 朝の即死回避</strong> (ENTRY_START=10:30): 09:00-10:30 高ボラ早朝帯を除外<br>
+  ▸ <strong>I. 同日同銘柄ロック</strong> (SAME_DAY_LOCK=1): 同銘柄複数戦略の重複entry排除<br>
+  ▸ <strong>J. 高ATR銘柄除外</strong> (MAX_ATR_PCT=2.5): ATR 2.5%超の高ボラ銘柄は取引せず<br>
+  ▸ <strong>HIJ</strong>: H+I+J 全部入り (損失削減セット)<br>
+  <br>
+  <strong>📋 旧トラッキング (参考)</strong><br>
+  ▸ A. Slow Stop / B. 同日損切ロック / C. BEトレール / D. 戦略別時刻 /
+  E. 出来高ブースト / F. ATR%レンジ / G. 連敗一時停止 / ABCDEFG. 全部入り
 </div>
 
 {conclusion}
@@ -295,7 +305,9 @@ def main():
     parser.add_argument("--max-price", type=int, default=10_000)
     parser.add_argument("--min-price", type=int, default=0)
     parser.add_argument("--patterns", default=None,
-                        help="カンマ区切り (例: baseline,A_slow_stop,ABCD_all)")
+                        help="カンマ区切り (例: baseline,H_late_entry,HIJ_all). "
+                             "省略時は損失削減フォーカス5パターン (baseline + H/I/J/HIJ)。"
+                             "'all' で全パターン (旧A-G含む)")
     parser.add_argument("--from-csv", default=None, nargs="+",
                         help="STEP1 CSV のパス (複数指定可、ワイルドカード対応)。"
                              "holdout_periods_report_daytrade.py に渡される")
@@ -321,11 +333,12 @@ def main():
     variant_label = "short" if args.short else "long" if args.long_only else ""
 
     # パターン選択
-    if args.patterns:
-        selected_labels = [s.strip() for s in args.patterns.split(",")]
-        patterns = [(lab, env) for lab, env in IMPROVEMENTS if lab in selected_labels]
-    else:
+    if args.patterns == "all":
         patterns = IMPROVEMENTS
+    else:
+        pat_str = args.patterns or LOSS_REDUCTION_PATTERNS
+        selected_labels = [s.strip() for s in pat_str.split(",")]
+        patterns = [(lab, env) for lab, env in IMPROVEMENTS if lab in selected_labels]
 
     print(f"改善案比較")
     print(f"  パターン: {[p[0] for p in patterns]}")

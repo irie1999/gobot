@@ -151,6 +151,39 @@ def _pkl_signature(sym):
     return (0.0, 0)
 
 
+def apply_same_day_lock(results):
+    """同日同銘柄に複数戦略がエントリーした場合、最も早い entry_dt の
+    戦略のみ残す (DAYTRADE_SAME_DAY_LOCK=1 時のみ呼ぶこと)。
+
+    results: {(sym, strat, name): [trade,...]}
+    戻り: 同形式 (deduplicate 済み)
+    """
+    earliest = {}  # (sym, day) -> (entry_dt, strat)
+    for (sym, strat, _name), trades in results.items():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            d = dt.date()
+            key = (sym, d)
+            cur = earliest.get(key)
+            if cur is None or dt < cur[0] or (dt == cur[0] and strat < cur[1]):
+                earliest[key] = (dt, strat)
+    new_results = {}
+    for (sym, strat, name), trades in results.items():
+        kept = []
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            key = (sym, dt.date())
+            sel = earliest.get(key)
+            if sel and sel[1] == strat:
+                kept.append(t)
+        new_results[(sym, strat, name)] = kept
+    return new_results
+
+
 def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
                        cache):
     """1銘柄×1戦略の全期間 backtest (永続キャッシュ対応)。
@@ -1164,6 +1197,19 @@ def main():
     print(f"\n[Step 3] 6期間ホールドアウト評価 (逆指値ロング方式)", flush=True)
     long_strats = set(STRATEGIES.keys())
     short_strats = set(STRATEGIES_SHORT.keys())
+
+    # 同日同銘柄ロック (DAYTRADE_SAME_DAY_LOCK=1 時)
+    # ロング側とショート側でそれぞれ独立に適用 (両建ては妨げない)
+    if _os.environ.get("DAYTRADE_SAME_DAY_LOCK", "0") == "1":
+        before = sum(len(v) for v in results.values())
+        long_part = {k: v for k, v in results.items() if k[1] in long_strats}
+        short_part = {k: v for k, v in results.items() if k[1] in short_strats}
+        long_part = apply_same_day_lock(long_part)
+        short_part = apply_same_day_lock(short_part)
+        results = {**long_part, **short_part}
+        after = sum(len(v) for v in results.values())
+        print(f"  [SAME_DAY_LOCK] 取引数 {before:,} → {after:,} "
+              f"({before-after:,}件 重複排除)")
 
     if args.both:
         # --both: ロング/ショートを分離して2セット作成
