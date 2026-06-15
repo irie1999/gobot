@@ -1154,10 +1154,27 @@ function switchTab(tab){
   var btn = event.target.closest('.tab-btn');
   var container = btn ? btn.closest('.side-container') : null;
   var scope = container || document;
-  scope.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  scope.querySelectorAll('.tab-pane').forEach(p=>{
+    p.classList.remove('active');
+    p.style.display='none';
+  });
   scope.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   var pane = document.getElementById('t-'+tab);
-  if(pane) pane.classList.add('active');
+  if(pane){
+    pane.classList.add('active');
+    pane.style.display='block';
+    // 銘柄詳細タブの中の最初の sym-pane を確実に表示
+    var firstSymPane = pane.querySelector('.sym-pane');
+    if(firstSymPane){
+      // すべての sym-pane を一旦非表示
+      pane.querySelectorAll('.sym-pane').forEach(sp=>sp.style.display='none');
+      firstSymPane.style.display='block';
+      // 最初の sym-btn を active に
+      var firstBtn = pane.querySelector('.sym-btn');
+      pane.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+      if(firstBtn) firstBtn.classList.add('active');
+    }
+  }
   if(btn) btn.classList.add('active');
 }
 function switchSym(id){
@@ -1168,21 +1185,39 @@ function switchSym(id){
   (event.target.closest('.sym-btn')||event.target).classList.add('active');
 }
 function jumpToSym(sid){
-  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  var detailTab=document.getElementById('t-detail');
-  if(detailTab) detailTab.classList.add('active');
-  document.querySelectorAll('.tab-btn').forEach(b=>{
-    if(b.textContent.indexOf('銘柄詳細')!==-1) b.classList.add('active');
+  // sid は "L_5715_DON" や "S_5715_MOM_S" のような prefix付き
+  // 銘柄詳細タブの id を判定 (L_detail or S_detail)
+  var pref = '';
+  if(sid.indexOf('L_')===0) pref='L_';
+  else if(sid.indexOf('S_')===0) pref='S_';
+  var detailId = pref+'detail';
+  var detailPane = document.getElementById('t-'+detailId);
+  // 該当 side-container の他タブを全部閉じる
+  var container = detailPane ? detailPane.closest('.side-container') : document;
+  container.querySelectorAll('.tab-pane').forEach(p=>{
+    p.classList.remove('active');
+    p.style.display='none';
   });
-  document.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
-  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
-  var pane=document.getElementById('sym'+sid);
-  if(pane) pane.style.display='block';
-  document.querySelectorAll('.sym-btn').forEach(b=>{
-    if(b.dataset.sym===sid) b.classList.add('active');
-  });
-  if(pane) pane.scrollIntoView({behavior:'smooth',block:'start'});
+  container.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  if(detailPane){
+    detailPane.classList.add('active');
+    detailPane.style.display='block';
+    // 該当銘柄ペインだけ表示
+    detailPane.querySelectorAll('.sym-pane').forEach(p=>p.style.display='none');
+    detailPane.querySelectorAll('.sym-btn').forEach(b=>b.classList.remove('active'));
+    var pane=document.getElementById('sym'+sid);
+    if(pane){
+      pane.style.display='block';
+      pane.scrollIntoView({behavior:'smooth',block:'start'});
+    }
+    detailPane.querySelectorAll('.sym-btn').forEach(b=>{
+      if(b.dataset.sym===sid) b.classList.add('active');
+    });
+    // 銘柄詳細タブの button を active に
+    container.querySelectorAll('.tab-btn').forEach(b=>{
+      if(b.textContent.indexOf('銘柄詳細')!==-1) b.classList.add('active');
+    });
+  }
 }
 """
 
