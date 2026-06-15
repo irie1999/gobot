@@ -151,29 +151,144 @@ def _pkl_signature(sym):
     return (0.0, 0)
 
 
-def compute_bt_scores(results, today, budget):
-    """各 (sym, strat) について 6期間の TEST stats を集めて
-    calc_recommend_score で BTスコア (0-100点+★ランク) を計算。
+def _bt_rank(score):
+    """スコアからランクを判定 (スイング CLAUDE.md と同じ)。"""
+    if score >= 80:
+        return "★★★"
+    if score >= 60:
+        return "★★"
+    if score >= 40:
+        return "★"
+    return "△"
+
+
+def _apply_atr_penalty(score, trades_365):
+    """ATRペナルティ (スイング CLAUDE.md式)。
+
+    平均損切り幅 (entry→stop の絶対値%) > 7% で減点:
+      penalty = max(0.5, 1 - (avg_width - 7) / 30)
+      score = round(score × penalty)
+
+    37%超で半減 (= 0.5にキャップ) する設計。
+    """
+    widths = []
+    for t in trades_365:
+        ep = t.get("entry_p", 0)
+        sp = t.get("stop_p", 0)
+        if ep > 0 and sp > 0:
+            widths.append(abs(sp - ep) / ep * 100)
+    if not widths:
+        return score
+    avg_w = sum(widths) / len(widths)
+    if avg_w <= 7:
+        return score
+    penalty = max(0.5, 1 - (avg_w - 7) / 30)
+    return round(score * penalty)
+
+
+BT_SCORE_CACHE_PATH = Path("bt_score_holdout_daytrade.json")
+
+
+def _load_bt_score_cache():
+    """BTスコア凍結キャッシュを読み込み。"""
+    if not BT_SCORE_CACHE_PATH.exists():
+        return {}
+    try:
+        import json
+        return json.loads(BT_SCORE_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_bt_score_cache(cache):
+    """BTスコア凍結キャッシュを書き込み。"""
+    try:
+        import json
+        BT_SCORE_CACHE_PATH.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def compute_bt_scores(results, today, budget, refresh=False):
+    """各 (sym, strat) について BTスコアを算出 (スイング仕様準拠)。
+
+    【スイング CLAUDE.md と完全同期】
+    - 実行日から **直近365日** の trades のみ使用
+    - 6期間 (30/60/90/120/150/180日) のスライスで stats 計算
+    - calc_recommend_score の平均式 (勝率×0.4 + PF/10×30 + 安定×20 + 取引数×10)
+    - **ATRペナルティ** (平均損切り幅>7%で減点)
+
+    【凍結キャッシュ】
+    - 一度算出した (sym, strat) のスコアは bt_score_holdout_daytrade.json に保存
+    - 実行日が変わっても凍結値を返す (取引判断が安定)
+    - refresh=True または新規 (sym, strat) では再計算
 
     戻り値: {(sym, strat): (score, rank)}
     """
+    cache = {} if refresh else _load_bt_score_cache()
+    cutoff_365 = today - timedelta(days=365)
     scores = {}
+    new_entries = 0
+    frozen_used = 0
+
     for (sym, strat, _name), trades in results.items():
+        key = f"{sym}::{strat}"
+
+        # 凍結スコア使用
+        if key in cache:
+            entry = cache[key]
+            scores[(sym, strat)] = (entry["bt_score"], entry["rank"])
+            frozen_used += 1
+            continue
+
         if not trades:
             scores[(sym, strat)] = (0, "△")
             continue
+
+        # 直近365日に限定
+        trades_365 = [t for t in trades
+                      if hasattr(t.get("entry_dt"), "date")
+                      and t["entry_dt"].date() >= cutoff_365]
+        if not trades_365:
+            scores[(sym, strat)] = (0, "△")
+            continue
+
+        # 6期間スライス stats
         stats_list = []
         for P in PERIODS:
             test_end, test_start = TEST_WINDOWS[P]
-            period_trades = slice_trades(trades, test_start, test_end, today)
+            period_trades = slice_trades(trades_365, test_start, test_end, today)
             if not period_trades:
                 continue
             stats_list.append(enrich_stats(period_trades, budget))
         if not stats_list:
             scores[(sym, strat)] = (0, "△")
             continue
-        score, rank = calc_recommend_score(stats_list, total_periods=len(PERIODS))
+
+        # 基本スコア
+        score, _ = calc_recommend_score(stats_list, total_periods=len(PERIODS))
+        # ATRペナルティ
+        score = _apply_atr_penalty(score, trades_365)
+        rank = _bt_rank(score)
+
+        # 凍結保存
+        cache[key] = {
+            "bt_score": score,
+            "rank": rank,
+            "first_seen": str(today),
+        }
+        new_entries += 1
         scores[(sym, strat)] = (score, rank)
+
+    if not refresh:
+        _save_bt_score_cache(cache)
+
+    if new_entries or frozen_used:
+        print(f"  [BTスコア] 新規算出: {new_entries}件 / "
+              f"凍結値使用: {frozen_used}件 "
+              f"(cache: {BT_SCORE_CACHE_PATH})")
     return scores
 
 
@@ -471,8 +586,12 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
   <tbody>{bt_rank_rows}</tbody>
 </table>
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
-  💡 ★★★ だけ採用 = 高スコアシグナルだけに絞った場合の擬似損益。
-  全期間で安定した銘柄が ★★★ になります。
+  💡 ★★★ だけ採用 = 高スコアシグナルだけに絞った場合の擬似損益。<br>
+  🔒 <strong>BTスコア凍結中</strong>: 直近365日のbacktestから算出した値を初回固定。
+  実行日が変わっても変動しません (再計算は <code>--refresh-bt-scores</code>)。<br>
+  ⚠️ <strong>In-sample bias</strong>: BTスコアは TRAIN+TEST 両方を含む365日から算出するため
+  bias あり。OOS純度の高い検証は <strong>180日タブの損益</strong> を参照してください
+  (スイング CLAUDE.md §17.4 と同じ判断基準)。
 </p>
 """
 
@@ -1102,6 +1221,9 @@ def main():
     parser.add_argument("--no-auto-update", action="store_true",
                         help="鮮度チェックは行うが yfinance 自動更新はしない")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--refresh-bt-scores", action="store_true",
+                        help="BTスコア凍結キャッシュを破棄して全再計算 "
+                             "(通常は実行日が変わってもスコアは固定される)")
     args = parser.parse_args()
 
     # データ鮮度チェック + 自動更新
@@ -1404,7 +1526,8 @@ def main():
               f"({before-after:,}件 重複排除)")
 
     # BTスコア計算 (6期間横断、calc_recommend_score)
-    bt_scores = compute_bt_scores(results, today, args.budget)
+    bt_scores = compute_bt_scores(results, today, args.budget,
+                                    refresh=args.refresh_bt_scores)
     star3 = sum(1 for s, r in bt_scores.values() if r == "★★★")
     star2 = sum(1 for s, r in bt_scores.values() if r == "★★")
     print(f"  [BTスコア] {len(bt_scores)}ペア中 ★★★={star3} ★★={star2}")
