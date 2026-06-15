@@ -138,12 +138,36 @@ def pass_train(stats):
 
 
 # ----------------------------------------------------------------- backtest
+def _pkl_signature(sym):
+    """対象pklのmtime+sizeを返す (整合性チェック用)。"""
+    try:
+        from daytrade_data import DATA_DIR, yf_to_jquants
+        pkl = DATA_DIR / f"{yf_to_jquants(sym)}.pkl"
+        if pkl.exists():
+            st = pkl.stat()
+            return (st.st_mtime, st.st_size)
+    except Exception:
+        pass
+    return (0.0, 0)
+
+
 def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
                        cache):
-    """1銘柄×1戦略の全期間 backtest (キャッシュ対応)。"""
+    """1銘柄×1戦略の全期間 backtest (永続キャッシュ対応)。
+
+    cache 内のエントリーは {trades, pkl_mtime, pkl_size} の dict。
+    pkl が更新されている場合のみ再 backtest して整合性を保つ。
+    """
     key = f"{strat_name}::{sym}"
+    cur_sig = _pkl_signature(sym)
     if cache is not None and key in cache:
-        return cache[key]
+        entry = cache[key]
+        # 旧形式 (list) との互換: list なら無視して再計算
+        if isinstance(entry, dict):
+            cached_sig = (entry.get("pkl_mtime", 0.0),
+                          entry.get("pkl_size", 0))
+            if cached_sig == cur_sig and cached_sig != (0.0, 0):
+                return entry.get("trades", [])
     fn = ALL_STRATEGIES[strat_name]
     try:
         r = backtest_symbol_5m(sym, name, df, fn,
@@ -153,7 +177,9 @@ def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
     except Exception:
         trades = []
     if cache is not None:
-        cache[key] = trades
+        cache[key] = {"trades": trades,
+                       "pkl_mtime": cur_sig[0],
+                       "pkl_size": cur_sig[1]}
     return trades
 
 
@@ -972,11 +998,23 @@ def main():
         if _os.environ.get("DAYTRADE_PAUSE_LOSSES", "0") != "0":
             _imp_parts.append(f"pl{_os.environ['DAYTRADE_PAUSE_LOSSES']}")
         _imp_label = "_".join(_imp_parts) or "base"
-        cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{_imp_label}_{today}.pkl"
+        # 永続キャッシュ: 日付なし。各エントリーが pkl_mtime/size で整合性確認
+        # (旧キャッシュ trades_..._{date}.pkl は engine_version で実質無効化済)
+        cache_file = CACHE_DIR / f"trades_{args.universe}_{_es_label}_{_imp_label}.pkl"
+        # エンジンロジック変更時はキャッシュ無効化したいため、wrapperでversion確認
+        engine_version = "v2_persistent_2026-06-15"
         if cache_file.exists():
             try:
-                cache = pickle.loads(cache_file.read_bytes())
-                print(f"  キャッシュ復元: {len(cache)}件 trades")
+                raw = pickle.loads(cache_file.read_bytes())
+                # 新形式 (engine_version 付き) のみ受け入れる
+                if (isinstance(raw, dict) and
+                        raw.get("engine_version") == engine_version and
+                        isinstance(raw.get("entries"), dict)):
+                    cache = raw["entries"]
+                    print(f"  永続キャッシュ復元: {len(cache)}件 (engine={engine_version})")
+                else:
+                    print(f"  [warn] キャッシュ形式不一致 → 破棄して新規作成")
+                    cache = {}
             except Exception:
                 cache = {}
         else:
@@ -992,7 +1030,12 @@ def main():
     # キャッシュ保存
     if not args.no_cache:
         try:
-            cache_file.write_bytes(pickle.dumps(cache))
+            # 永続キャッシュ形式で保存 (engine_version + entries)
+            payload = {"engine_version": engine_version, "entries": cache}
+            cache_file.write_bytes(pickle.dumps(payload))
+            hits = sum(1 for v in cache.values()
+                       if isinstance(v, dict) and v.get("pkl_mtime", 0) > 0)
+            print(f"  永続キャッシュ保存: {hits}件 (次回は pkl 更新銘柄のみ再計算)")
         except Exception:
             pass
 
