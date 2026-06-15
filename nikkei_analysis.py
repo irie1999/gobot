@@ -506,7 +506,7 @@ def extract_periods(close: pd.Series, trend: pd.Series, ref_date) -> list[dict]:
         seg = close.iloc[start_idx:end_idx + 1]
         return {
             "trend": cur_trend, "start": sd, "end": ed,
-            "days": (ed - sd).days,
+            "days": end_idx - start_idx,   # 営業日数（土日祝を除く）
             "pct": (ep / sp - 1) * 100,
             "start_price": sp, "end_price": ep,
             "min_price": float(seg.min()), "max_price": float(seg.max()),
@@ -585,7 +585,7 @@ def _append_up(close, start_idx, end_idx, periods, is_current=False, ref_date=No
     periods.append({
         "start_date": sd, "end_date": ed,
         "start_p": sp, "end_p": ep,
-        "days": (ed - sd).days,
+        "days": end_idx - start_idx,   # 営業日数（土日祝を除く）
         "total_pct": (ep / sp - 1) * 100,
         "true_low_p": true_low_p,
         "lag_bars": lag_bars, "lag_pct": lag_pct,
@@ -680,10 +680,10 @@ def _trend_prediction_html(pred: dict, current_trend: str) -> str:
 <div style="background:#0d1424;border:1px solid #1e3a5f;border-radius:10px;
             padding:16px 20px;margin-bottom:16px">
   <div style="font-size:0.95rem;font-weight:700;color:#60a5fa;margin-bottom:8px">
-    {trend_icon} {trend_ja}トレンド継続予測 — 現在 {cd}日目
+    {trend_icon} {trend_ja}トレンド継続予測 — 現在 {cd}営業日目
   </div>
   <div style="color:#64748b;font-size:0.85rem">
-    過去に{cd}日以上続いた{trend_ja}トレンドは {total}回中 {n}回のみ。
+    過去に{cd}営業日以上続いた{trend_ja}トレンドは {total}回中 {n}回のみ。
     サンプル不足のため統計的な予測が困難です。<br>
     現在のトレンドは過去データの中では稀なほど長続きしています。転換に注意してください。
   </div>
@@ -702,7 +702,7 @@ def _trend_prediction_html(pred: dict, current_trend: str) -> str:
         bar_w = max(2, round(prob))
         bar_rows += f"""
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-  <span style="width:80px;font-size:0.78rem;color:#94a3b8;text-align:right;flex-shrink:0">あと{days}日以上</span>
+  <span style="width:80px;font-size:0.78rem;color:#94a3b8;text-align:right;flex-shrink:0">あと{days}営業日以上</span>
   <div style="flex:1;background:#1e293b;border-radius:4px;height:18px;position:relative">
     <div style="width:{bar_w}%;background:{bar_color};height:100%;border-radius:4px;
                 transition:width 0.3s"></div>
@@ -733,7 +733,7 @@ def _trend_prediction_html(pred: dict, current_trend: str) -> str:
             padding:16px 20px;margin-bottom:16px">
   <div style="font-weight:700;font-size:0.98rem;color:#60a5fa;margin-bottom:12px">
     {trend_icon} {trend_ja}トレンド継続予測 — 現在
-    <span style="color:{trend_color};font-size:1.1rem">{cd}日目</span>
+    <span style="color:{trend_color};font-size:1.1rem">{cd}営業日目</span>
   </div>
 
   <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:14px">
@@ -778,7 +778,7 @@ def _trend_prediction_html(pred: dict, current_trend: str) -> str:
   </div>
 
   <div style="font-size:0.72rem;color:#334155;margin-top:12px;line-height:1.6">
-    ※ 過去{pred['total_count']}回の{trend_ja}トレンドのうち、{cd}日以上続いた
+    ※ 過去{pred['total_count']}回の{trend_ja}トレンドのうち、{cd}営業日以上続いた
     {pred['survived_count']}回を対象に集計。確率はあくまで過去の傾向であり、
     将来を保証するものではありません。
   </div>
@@ -1117,9 +1117,9 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
     med = ref_s.get("med_days", 0)
     avg = ref_s.get("avg_days", 0)
     remaining = med - last["days"]
-    remain_str = (f"中央値まであと <strong>{remaining}日</strong>（参考値）"
+    remain_str = (f"中央値まであと <strong>{remaining}営業日</strong>（参考値）"
                   if remaining > 0
-                  else f"中央値({med}日)を超過中 → 転換注意")
+                  else f"中央値({med}営業日)を超過中 → 転換注意")
     pct_c   = "#4ade80" if last["pct"] >= 0 else "#f87171"
     last_ja = {"up": "上昇", "down": "下落", "sideways": "横ばい"}[last["trend"]]
     box_border = "#166534" if last["trend"] == "up" else "#991b1b"
@@ -1130,12 +1130,12 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   </div>
   <div class="sg">
     <div class="si"><span class="sl">開始日</span><span class="sv">{last['start']}</span></div>
-    <div class="si"><span class="sl">継続日数</span><span class="sv">{last['days']}日</span></div>
+    <div class="si"><span class="sl">継続日数</span><span class="sv">{last['days']}営業日</span></div>
     <div class="si"><span class="sl">開始日終値</span><span class="sv">{last['start_price']:,.0f}円</span></div>
     <div class="si"><span class="sl">現在値</span><span class="sv">{cur_price:,.0f}円</span></div>
     <div class="si"><span class="sl">騰落率</span><span class="sv" style="color:{pct_c}">{last['pct']:+.1f}%</span></div>
-    <div class="si"><span class="sl">平均期間</span><span class="sv">{avg:.0f}日</span></div>
-    <div class="si"><span class="sl">中央値期間</span><span class="sv">{med}日</span></div>
+    <div class="si"><span class="sl">平均期間</span><span class="sv">{avg:.0f}営業日</span></div>
+    <div class="si"><span class="sl">中央値期間</span><span class="sv">{med}営業日</span></div>
   </div>
   <div style="margin-top:12px;padding:10px;background:#0f172a;border-radius:6px;font-size:0.88rem;color:#fbbf24">
     📊 {remain_str}
@@ -1170,10 +1170,10 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   <div style="color:{color};font-weight:700;font-size:1rem;margin-bottom:12px">{title}</div>
   <div class="sg" style="margin-bottom:12px">
     <div class="si"><span class="sl">回数</span><span class="sv">{s['count']}回</span></div>
-    <div class="si"><span class="sl">平均期間</span><span class="sv">{s['avg_days']:.0f}日</span></div>
-    <div class="si"><span class="sl">中央値</span><span class="sv">{s['med_days']}日</span></div>
-    <div class="si"><span class="sl">最短</span><span class="sv">{s['min_days']}日</span></div>
-    <div class="si"><span class="sl">最長</span><span class="sv">{s['max_days']}日</span></div>
+    <div class="si"><span class="sl">平均期間</span><span class="sv">{s['avg_days']:.0f}営業日</span></div>
+    <div class="si"><span class="sl">中央値</span><span class="sv">{s['med_days']}営業日</span></div>
+    <div class="si"><span class="sl">最短</span><span class="sv">{s['min_days']}営業日</span></div>
+    <div class="si"><span class="sl">最長</span><span class="sv">{s['max_days']}営業日</span></div>
     <div class="si"><span class="sl">平均騰落</span><span class="sv" style="color:{color}">{s['avg_pct']:+.1f}%</span></div>
   </div>
   <div style="font-size:0.75rem;color:#64748b;margin-bottom:5px">期間分布</div>
@@ -1205,7 +1205,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   <td style="color:{tc};{bl}padding-left:10px">{mark}{note}</td>
   <td>{p['start']}</td>
   <td>{p['end']}{'　▶現在' if is_c else ''}</td>
-  <td style="text-align:right">{p['days']}日</td>
+  <td style="text-align:right">{p['days']}営業日</td>
   <td style="text-align:right;color:{tc}">{p['pct']:+.1f}%</td>
   <td style="text-align:right;color:{drop_c}">{drop_s}</td>
   <td style="text-align:right">{p['start_price']:,.0f}</td>
@@ -1267,15 +1267,15 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
         sv_str = f"{sv:.0f}%" if sv is not None else "—"
         sv_c   = "#4ade80" if (sv or 0) > 60 else ("#fbbf24" if (sv or 0) > 30 else "#f87171")
         dr_c   = "#f87171" if dr > 30 else ("#fbbf24" if dr > 15 else "#4ade80")
-        status = (f'<span style="color:#4ade80">✅ 推奨ウィンドウ内（〜{safe_end}日目）</span>'
+        status = (f'<span style="color:#4ade80">✅ 推奨ウィンドウ内（〜{safe_end}営業日目）</span>'
                   if cd <= safe_end
-                  else f'<span style="color:#f87171">⚠️ {safe_end}日目超過 — 新規エントリーは慎重に</span>')
+                  else f'<span style="color:#f87171">⚠️ {safe_end}営業日目超過 — 新規エントリーは慎重に</span>')
         cur_up_html = f"""
 <div class="info-box" style="border-color:#166534">
   <div style="font-weight:700;color:#4ade80;margin-bottom:10px">📈 現在の上昇トレンド（エントリータイミング）</div>
   <div class="sg">
     <div class="si"><span class="sl">開始日</span><span class="sv">{cur_up['start_date']}</span></div>
-    <div class="si"><span class="sl">経過日数</span><span class="sv">{cd}日</span></div>
+    <div class="si"><span class="sl">経過日数</span><span class="sv">{cd}営業日</span></div>
     <div class="si"><span class="sl">開始日終値</span><span class="sv">{cur_up['start_p']:,.0f}円</span></div>
     <div class="si"><span class="sl">確認ラグ</span><span class="sv">{cur_up['lag_bars']}営業日</span></div>
     <div class="si"><span class="sl">乗り遅れ幅</span><span class="sv" style="color:#fbbf24">+{cur_up['lag_pct']:.1f}%</span></div>
@@ -1348,7 +1348,7 @@ def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict)
         p_rows += f"""<tr style="{bold}">
   <td>{p['start_date']}</td>
   <td>{p['end_date']}{'　▶現在' if is_c else ''}</td>
-  <td style="text-align:right">{p['days']}日</td>
+  <td style="text-align:right">{p['days']}営業日</td>
   <td style="text-align:right;color:{lc}">{p['total_pct']:+.1f}%</td>
   <td style="text-align:right">{p['start_p']:,.0f}</td>
   <td style="text-align:right;color:{lag_c}">{p['lag_bars']}営業日 / {p['lag_pct']:+.1f}%</td>
