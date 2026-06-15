@@ -162,30 +162,6 @@ def _bt_rank(score):
     return "△"
 
 
-def _apply_atr_penalty(score, trades_365):
-    """ATRペナルティ (スイング CLAUDE.md式)。
-
-    平均損切り幅 (entry→stop の絶対値%) > 7% で減点:
-      penalty = max(0.5, 1 - (avg_width - 7) / 30)
-      score = round(score × penalty)
-
-    37%超で半減 (= 0.5にキャップ) する設計。
-    """
-    widths = []
-    for t in trades_365:
-        ep = t.get("entry_p", 0)
-        sp = t.get("stop_p", 0)
-        if ep > 0 and sp > 0:
-            widths.append(abs(sp - ep) / ep * 100)
-    if not widths:
-        return score
-    avg_w = sum(widths) / len(widths)
-    if avg_w <= 7:
-        return score
-    penalty = max(0.5, 1 - (avg_w - 7) / 30)
-    return round(score * penalty)
-
-
 BT_SCORE_CACHE_PATH = Path("bt_score_holdout_daytrade.json")
 
 
@@ -212,13 +188,13 @@ def _save_bt_score_cache(cache):
 
 
 def compute_bt_scores(results, today, budget, refresh=False):
-    """各 (sym, strat) について BTスコアを算出 (スイング仕様準拠)。
+    """各 (sym, strat) について BTスコアを算出 (デイトレ運用版)。
 
-    【スイング CLAUDE.md と完全同期】
-    - 実行日から **直近365日** の trades のみ使用
+    【計算ロジック】
+    - 実行日から **直近365日** の trades のみ使用 (スイング仕様準拠)
     - 6期間 (30/60/90/120/150/180日) のスライスで stats 計算
     - calc_recommend_score の平均式 (勝率×0.4 + PF/10×30 + 安定×20 + 取引数×10)
-    - **ATRペナルティ** (平均損切り幅>7%で減点)
+    - **ATRペナルティは適用しない** (デイトレでは高ATR銘柄も収益源のため)
 
     【凍結キャッシュ】
     - 一度算出した (sym, strat) のスコアは bt_score_holdout_daytrade.json に保存
@@ -267,10 +243,8 @@ def compute_bt_scores(results, today, budget, refresh=False):
             scores[(sym, strat)] = (0, "△")
             continue
 
-        # 基本スコア
+        # スコア算出 (ATRペナルティなし)
         score, _ = calc_recommend_score(stats_list, total_periods=len(PERIODS))
-        # ATRペナルティ
-        score = _apply_atr_penalty(score, trades_365)
         rank = _bt_rank(score)
 
         # 凍結保存
@@ -591,7 +565,9 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
   実行日が変わっても変動しません (再計算は <code>--refresh-bt-scores</code>)。<br>
   ⚠️ <strong>In-sample bias</strong>: BTスコアは TRAIN+TEST 両方を含む365日から算出するため
   bias あり。OOS純度の高い検証は <strong>180日タブの損益</strong> を参照してください
-  (スイング CLAUDE.md §17.4 と同じ判断基準)。
+  (スイング CLAUDE.md §17.4 と同じ判断基準)。<br>
+  💡 <strong>ATRペナルティは不採用</strong>: 検証で高ATR銘柄も収益源と判明したため、
+  スイング式のATRペナルティは適用していません (価格帯フィルタで十分)。
 </p>
 """
 
