@@ -1418,7 +1418,7 @@ def _check_data_freshness(min_age_days=4, auto_update=True,
     """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
 
     force_update=True で年齢に関係なく yfinance_update.py を実行 (--update-data 用)。
-    watchlist_file 指定時は WATCHLIST 銘柄のみ更新 (--daily 用)。
+    watchlist_file 指定時は WATCHLIST 銘柄のみ更新 + 鮮度判定も WATCHLIST で実施。
     実行時間の節約のためサンプル30銘柄で判定。
 
     戻り値: 中央値の最新データ日 (date) or None
@@ -1430,13 +1430,29 @@ def _check_data_freshness(min_age_days=4, auto_update=True,
     except Exception:
         print("[warn] daytrade_data からのインポート失敗、鮮度チェックスキップ")
         return None
-    # サンプル銘柄 (prime先頭30銘柄)
-    try:
-        from symbols_listed_all import SYMBOLS
-        sample = [s for s, _ in SYMBOLS[:30]]
-    except Exception:
-        print("[warn] symbols_listed_all なし、鮮度チェックスキップ")
-        return None
+    # サンプル銘柄: WATCHLIST 指定時はその銘柄、それ以外は prime 先頭30
+    sample = None
+    if watchlist_file:
+        try:
+            import importlib.util
+            p = Path(watchlist_file)
+            if p.exists():
+                spec = importlib.util.spec_from_file_location("wl", p)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                sample = [e[0] for e in getattr(mod, "SYMBOLS", [])]
+                print(f"[データ鮮度] WATCHLIST {p.name} を対象に判定 "
+                      f"({len(sample)}銘柄)")
+        except Exception as e:
+            print(f"[warn] WATCHLIST 読み込み失敗 ({e})、prime サンプルへフォールバック")
+            sample = None
+    if not sample:
+        try:
+            from symbols_listed_all import SYMBOLS
+            sample = [s for s, _ in SYMBOLS[:30]]
+        except Exception:
+            print("[warn] symbols_listed_all なし、鮮度チェックスキップ")
+            return None
 
     def _scan_latest():
         today = datetime.now(JST).date()
@@ -2293,13 +2309,16 @@ function jumpToSym(sid){
     is_today = (display_date == today)
     banner_label = "📈 今日の取引" if is_today else f"📈 最新取引日 ({display_date}) の取引"
 
-    data_status_color = "#4ade80" if data_latest == today else "#fbbf24"
-    data_status = (f"<strong>{data_latest}</strong>"
-                   if data_latest else "(チェック未実施)")
-    if data_latest is not None and data_latest < today:
+    # 表示用「データ最新」は実際の取引データの最新日を優先
+    # (鮮度チェックの median は古い場合があるため)
+    effective_latest = actual_latest or data_latest
+    data_status_color = "#4ade80" if effective_latest == today else "#fbbf24"
+    data_status = (f"<strong>{effective_latest}</strong>"
+                   if effective_latest else "(不明)")
+    if effective_latest is not None and effective_latest < today:
         data_warning = (f' <span style="color:#f87171">'
-                        f'⚠️ 今日 ({today}) のバーが未取得。yfinance に当日データが'
-                        f'未提供 (引け後しばらく時間が必要) か、市場休業日の可能性</span>')
+                        f'⚠️ 今日 ({today}) のバー未取得。yfinance に当日データが'
+                        f'未提供 (引け後 1〜2 時間遅延) か、市場休業日の可能性</span>')
     else:
         data_warning = ""
 
