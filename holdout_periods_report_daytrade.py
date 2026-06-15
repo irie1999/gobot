@@ -2067,6 +2067,19 @@ def build_date_tab(period_items, id_prefix=""):
     overall_tier_box = build_tier_filter_box(
         all_rows, heading="🎯 BT × Q 4段階ティア別シミュレーション (全期間)")
 
+    # 直近 detail_limit 日 (= 日付ボタンに表示される範囲) の主力集計
+    recent = date_stats[:detail_limit]
+    recent_n = sum(s["n"] for s in recent)
+    recent_gp = sum(s["gp"] for s in recent)
+    recent_gl = sum(s["gl"] for s in recent)
+    recent_pnl = recent_gp - recent_gl
+    recent_weighted = sum(s["weighted"] for s in recent)
+    recent_wins_est = sum(s["wr"] / 100 * s["n"] for s in recent)
+    recent_wr = recent_wins_est / recent_n * 100 if recent_n > 0 else 0
+    recent_pf = recent_gp / recent_gl if recent_gl > 0 else float("inf")
+    recent_pc = "profit" if recent_pnl >= 0 else "loss"
+    recent_wpc = "profit" if recent_weighted >= 0 else "loss"
+
     return f"""
 <div class="box" style="background:#0d2818;border:1px solid #4ade80">
   <div class="it"><div class="lb">取引日数</div>
@@ -2099,7 +2112,23 @@ def build_date_tab(period_items, id_prefix=""):
 
 {overall_tier_box}
 
-<h3>📅 日付ボタン (クリックで詳細表示、直近{min(len(date_stats), detail_limit)}日)</h3>
+<h3 style="margin-bottom:4px">📅 日付ボタン (クリックで詳細表示、直近{min(len(date_stats), detail_limit)}日)</h3>
+<div class="box" style="background:#0d2818;border:1px solid #4ade80;margin:4px 0 8px">
+  <div class="it"><div class="lb">📌 主力 (S+A+B) 取引数<br><small>直近{min(len(date_stats), detail_limit)}日</small></div>
+    <div class="vl">{recent_n:,}件</div></div>
+  <div class="it"><div class="lb">勝率</div>
+    <div class="vl">{recent_wr:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(recent_pf)}</div></div>
+  <div class="it"><div class="lb">利益</div>
+    <div class="vl profit">+{recent_gp:,.0f}</div></div>
+  <div class="it"><div class="lb">損</div>
+    <div class="vl loss">-{recent_gl:,.0f}</div></div>
+  <div class="it"><div class="lb">素損益</div>
+    <div class="vl {recent_pc}">{recent_pnl:+,.0f}円</div></div>
+  <div class="it"><div class="lb">重み損益<br><small>(ポジ比例)</small></div>
+    <div class="vl {recent_wpc}">{recent_weighted:+,.0f}円</div></div>
+</div>
 <div class="date-nav" style="display:flex;flex-wrap:wrap;gap:4px;
                               margin:12px 0;padding:10px;background:#0f172a;
                               border-radius:8px;max-height:280px;overflow-y:auto">
