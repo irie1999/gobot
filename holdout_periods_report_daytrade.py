@@ -635,6 +635,120 @@ def build_detail_tab(period_items, id_prefix=""):
 """
 
 
+def build_all_trades_tab(period_items):
+    """全銘柄・全期間の取引明細を1テーブルにまとめる。
+
+    各 (sym, strategy) ペアの max_P (最長期間) の test_trades を採用。
+    日付降順に並べて1つの大テーブルに出力。
+    コピー&貼付けで他ツール (Excel/Notion等) に移行可能。
+    """
+    # 集約
+    agg = {}
+    for P, items in period_items.items():
+        for it in items:
+            key = (it["symbol"], it["strategy"])
+            if key not in agg:
+                agg[key] = {"name": it["name"], "periods": {}}
+            agg[key]["periods"][P] = it.get("test_trades", [])
+
+    # 全取引展開
+    all_rows = []
+    for (sym, strat), entry in agg.items():
+        if not entry["periods"]:
+            continue
+        max_P = max(entry["periods"].keys())
+        for t in entry["periods"][max_P]:
+            all_rows.append({
+                "sym": sym,
+                "name": entry["name"],
+                "strat": strat,
+                "entry_dt": t.get("entry_dt"),
+                "exit_dt": t.get("exit_dt"),
+                "entry_p": t.get("entry_p", 0),
+                "stop_p": t.get("stop_p", 0),
+                "target_p": t.get("target_p", 0),
+                "exit_p": t.get("exit_p", 0),
+                "pnl": t.get("pnl", 0),
+                "pct": t.get("pct", 0),
+                "reason": t.get("reason", "?"),
+            })
+
+    # 日付降順
+    all_rows.sort(key=lambda r: str(r.get("entry_dt", "")), reverse=True)
+
+    if not all_rows:
+        return '<p style="color:#64748b;padding:24px">取引なし</p>'
+
+    # 集計
+    total_pnl = sum(r["pnl"] for r in all_rows)
+    wins = sum(1 for r in all_rows if r["pnl"] > 0)
+    win_rate = wins / len(all_rows) * 100
+    gross_profit = sum(r["pnl"] for r in all_rows if r["pnl"] > 0)
+    gross_loss = abs(sum(r["pnl"] for r in all_rows if r["pnl"] <= 0))
+    pf = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
+    # サマリ
+    sum_box = f"""
+<div class="box">
+  <div class="it"><div class="lb">総取引数</div><div class="vl">{len(all_rows):,}</div></div>
+  <div class="it"><div class="lb">勝率</div><div class="vl">{win_rate:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(pf)}</div></div>
+  <div class="it"><div class="lb">利益</div>
+    <div class="vl profit">+{gross_profit:,.0f}</div></div>
+  <div class="it"><div class="lb">損</div>
+    <div class="vl loss">-{gross_loss:,.0f}</div></div>
+  <div class="it"><div class="lb">損益</div>
+    <div class="vl {'profit' if total_pnl >= 0 else 'loss'}">{total_pnl:+,.0f}円</div></div>
+</div>
+"""
+
+    # 全取引テーブル行
+    rows_html = ""
+    for r in all_rows:
+        ed = _fmt_dt(r.get("entry_dt"))
+        xd = _fmt_dt(r.get("exit_dt"))
+        try:
+            hold = f"{int((r['exit_dt'] - r['entry_dt']).total_seconds() // 60)}分"
+        except Exception:
+            hold = "-"
+        pnl = r["pnl"]
+        pct = r["pct"]
+        pc = "profit" if pnl >= 0 else "loss"
+        rows_html += f"""
+<tr>
+  <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
+  <td>{r['strat']}</td>
+  <td>{ed}</td>
+  <td>{xd}</td>
+  <td>{hold}</td>
+  <td>{r['entry_p']:,.0f}</td>
+  <td class="loss">{r['stop_p']:,.0f}</td>
+  <td class="profit">{r['target_p']:,.0f}</td>
+  <td>{r['exit_p']:,.0f}</td>
+  <td class="{pc}">{pnl:+,.0f}</td>
+  <td class="{pc}">{pct:+.2f}%</td>
+  <td>{r['reason']}</td>
+</tr>"""
+
+    return f"""
+{sum_box}
+<p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
+  📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
+  💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能
+</p>
+<table id="all-trades-table" style="font-size:0.72rem">
+  <thead><tr>
+    <th>銘柄</th><th>戦略</th>
+    <th>Entry</th><th>Exit</th><th>保有</th>
+    <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
+    <th>損益</th><th>%</th><th>理由</th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+"""
+
+
 def _check_data_freshness(min_age_days=4, auto_update=True):
     """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
 
@@ -1238,6 +1352,12 @@ function jumpToSym(sid){
                  f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(uniq)}件</small></button>')
         panes += (f'<div id="t-{did}" class="tab-pane">'
                   f'{build_detail_tab(items_by_period, id_prefix=side_pref)}</div>')
+        # 全取引一覧 (コピー&貼付け用)
+        aid = f"{side_pref}all"
+        btns += (f'<button class="tab-btn" onclick="switchTab(\'{aid}\')">'
+                 f'📋 全取引一覧<br><small style="color:#fbbf24">貼付用</small></button>')
+        panes += (f'<div id="t-{aid}" class="tab-pane">'
+                  f'{build_all_trades_tab(items_by_period)}</div>')
         return f'<div class="tab-nav">{btns}</div>{panes}'
 
     if args.both:
@@ -1273,6 +1393,11 @@ function jumpToSym(sid){
                      f'📊 銘柄詳細<br><small style="color:#fbbf24">{len(unique_syms)}件</small></button>')
         tab_panes += (f'<div id="t-detail" class="tab-pane">'
                       f'{build_detail_tab(period_items)}</div>')
+        # 全取引一覧 (コピー&貼付け用)
+        tab_btns += (f'<button class="tab-btn" onclick="switchTab(\'all\')">'
+                     f'📋 全取引一覧<br><small style="color:#fbbf24">貼付用</small></button>')
+        tab_panes += (f'<div id="t-all" class="tab-pane">'
+                      f'{build_all_trades_tab(period_items)}</div>')
 
     train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
                   else "TEST より前の全期間")
