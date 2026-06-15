@@ -1308,8 +1308,8 @@ def _extract_main_trades(period_items):
             continue
         max_P = max(entry["periods"].keys())
         for t in entry["periods"][max_P]:
-            out.append({**t, "_sym": sym, "_strat": strat,
-                        "_bt_score": entry["bt_score"]})
+            out.append({**t, "sym": sym, "strat": strat,
+                        "bt_score": entry["bt_score"]})
     return out
 
 
@@ -1333,7 +1333,7 @@ def _compute_concurrent_capital(trades, weighted=True):
     events = []  # (datetime, delta_value)
     n_main = 0
     for t in trades:
-        bt = t.get("_bt_score", t.get("bt_score", 0))
+        bt = t.get("bt_score", 0)
         q = t.get("q_score", 0)
         if not _is_main_tier(bt, q):
             continue
