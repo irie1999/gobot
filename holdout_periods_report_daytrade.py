@@ -1013,7 +1013,7 @@ def build_all_trades_tab(period_items):
         sub = [r for r in all_rows if r["bt_score"] >= thr]
         if not sub:
             finer_rows_html += (f'<tr><td>{label}</td>'
-                                 f'<td colspan="4" style="color:#475569">該当なし</td>'
+                                 f'<td colspan="6" style="color:#475569">該当なし</td>'
                                  f'</tr>')
             continue
         gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
@@ -1033,6 +1033,8 @@ def build_all_trades_tab(period_items):
   <td>{len(sub):,}</td>
   <td>{wr:.0f}%</td>
   <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td class="profit">+{gp:,.0f}</td>
+  <td class="loss">-{gl:,.0f}</td>
   <td class="{pc}"><strong>{tot:+,.0f}</strong></td>
 </tr>"""
 
@@ -1040,7 +1042,10 @@ def build_all_trades_tab(period_items):
 <h3 style="margin-top:14px">🎯 スコア閾値別 細分化フィルタ (★の中でさらに厳選)</h3>
 <table style="font-size:0.82rem">
   <thead><tr>
-    <th>BTスコア閾値</th><th>取引数</th><th>勝率</th><th>PF</th><th>損益</th>
+    <th>BTスコア閾値</th><th>取引数</th><th>勝率</th><th>PF</th>
+    <th>利益<br><small>(勝ち合計)</small></th>
+    <th>損<br><small>(負け合計)</small></th>
+    <th>損益<br><small>(差引)</small></th>
   </tr></thead>
   <tbody>{finer_rows_html}</tbody>
 </table>
