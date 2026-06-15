@@ -1235,6 +1235,242 @@ def compute_quality_scores(all_rows):
     return all_rows
 
 
+def compute_q_plus_scores(all_rows):
+    """Q+ 拡張品質スコアを計算 (look-ahead bias なし)。
+
+    既存の Q スコアに以下の補正を加算:
+    ① (sym, strat) ペア固有勝率 (過去20取引、最大 ±15点)
+    ② 損切り幅プロファイル (0.4-0.8% = +5、<0.3% = -8)
+    ③ 市場ストレス連動 (同日主力PnL>+5K = +5、損切3回 = -15)
+
+    時系列順に処理し、各トレード発生時点までの履歴のみ使用。
+    """
+    # 時系列順 (古い順) にソート
+    sorted_rows = sorted(all_rows,
+                          key=lambda r: str(r.get("entry_dt", "")))
+
+    pair_history = {}   # (sym, strat) -> [pnl, pnl, ...] (時系列)
+    daily_main_pnl = {}    # date -> 累積 PnL (主力のみ)
+    daily_main_losses = {} # date -> 損切り回数 (主力のみ)
+
+    for r in sorted_rows:
+        bt = r.get("bt_score", 0)
+        q = r.get("q_score", 0)
+        entry_dt = r.get("entry_dt")
+        pnl = r.get("pnl", 0)
+
+        q_plus = q  # ベース = 既存 Q
+
+        if entry_dt is None or not hasattr(entry_dt, "date"):
+            r["q_plus"] = q_plus
+            r["q_plus_adj"] = {}
+            continue
+
+        d = entry_dt.date()
+        sym = r.get("sym")
+        strat = r.get("strat")
+        pair_key = (sym, strat)
+
+        adj = {}  # 内訳記録
+
+        # ① ペア固有勝率 (過去20取引)
+        prior_pnls = pair_history.get(pair_key, [])
+        if len(prior_pnls) >= 10:
+            n = min(20, len(prior_pnls))
+            recent = prior_pnls[-n:]
+            wr = sum(1 for p in recent if p > 0) / n
+            # wr 0.45 を基準に ±15点
+            pair_adj = max(-15, min(15, (wr - 0.45) * 40))
+            q_plus += pair_adj
+            adj["pair_wr"] = (round(wr * 100, 0), round(pair_adj, 1))
+
+        # ② 損切り幅プロファイル
+        entry_p = r.get("entry_p", 0)
+        stop_p = r.get("stop_p", 0)
+        if entry_p > 0 and stop_p > 0:
+            stop_pct = abs(stop_p - entry_p) / entry_p * 100
+            stop_adj = 0
+            if 0.4 <= stop_pct <= 0.8:
+                stop_adj = 5
+            elif stop_pct < 0.3:
+                stop_adj = -8
+            elif stop_pct > 1.5:
+                stop_adj = -3
+            if stop_adj != 0:
+                q_plus += stop_adj
+                adj["stop_pct"] = (round(stop_pct, 2), stop_adj)
+
+        # ③ 市場ストレス連動
+        today_pnl = daily_main_pnl.get(d, 0)
+        today_losses = daily_main_losses.get(d, 0)
+        mkt_adj = 0
+        if today_pnl > 5000:
+            mkt_adj += 5
+        elif today_pnl < -5000:
+            mkt_adj -= 5
+        if today_losses >= 3:
+            mkt_adj -= 15
+        elif today_losses >= 2:
+            mkt_adj -= 5
+        if mkt_adj != 0:
+            q_plus += mkt_adj
+            adj["mkt"] = (today_pnl, today_losses, mkt_adj)
+
+        # 0-100 にクランプ
+        q_plus = max(0, min(100, q_plus))
+        r["q_plus"] = round(q_plus, 1)
+        r["q_plus_adj"] = adj
+
+        # 履歴更新
+        pair_history.setdefault(pair_key, []).append(pnl)
+        # 主力 (S+A+B) のみ daily 集計
+        if _is_main_tier(bt, q):
+            daily_main_pnl[d] = today_pnl + pnl
+            if pnl <= 0:
+                daily_main_losses[d] = today_losses + 1
+
+    return all_rows
+
+
+def build_q_plus_simulation_box(all_rows,
+                                 heading="🔬 Q+ シミュレーション分析 — 「C級内の隠れB級」抽出"):
+    """Q+ スコア閾値別シミュレーション (フェーズC: 分析のみ、取引ロジック変更なし)。
+
+    現状の主力 (S+A+B) に Q+ ≥ 閾値 の C級取引を「隠れB級」として
+    追加した場合の損益シミュレーション。
+    """
+    if not all_rows:
+        return ""
+
+    compute_q_plus_scores(all_rows)
+
+    # 主力 (S+A+B) と C級 を分離
+    main_rows = [r for r in all_rows
+                  if _is_main_tier(r.get("bt_score", 0), r.get("q_score", 0))]
+    c_rows = [r for r in all_rows
+              if not _is_main_tier(r.get("bt_score", 0), r.get("q_score", 0))]
+
+    def _stats(rows, weight_each=None):
+        """rows の集計。weight_each: 行ごとの重み配列、None なら 1.0。"""
+        if not rows:
+            return None
+        if weight_each is None:
+            weight_each = [1.0] * len(rows)
+        n = len(rows)
+        wins = sum(1 for r in rows if r["pnl"] > 0)
+        wr = wins / n * 100
+        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
+        pf = gp / gl if gl > 0 else float("inf")
+        tot = gp - gl
+        weighted = sum(r["pnl"] * w for r, w in zip(rows, weight_each))
+        return {"n": n, "wr": wr, "gp": gp, "gl": gl,
+                "pf": pf, "tot": tot, "weighted": weighted}
+
+    # 主力の重み (S=1.0, A=0.75, B=0.5)
+    main_weights = [_tier_weight(r.get("bt_score", 0), r.get("q_score", 0))
+                    for r in main_rows]
+    base = _stats(main_rows, main_weights)
+
+    # Q+ 閾値別シミュレーション
+    thresholds = [80, 75, 70, 65, 60]
+    rows_html = ""
+
+    # ベースライン行 (現状の主力)
+    if base:
+        rows_html += f"""
+<tr style="background:#0d1424;border-bottom:2px solid #475569">
+  <td><strong>📌 ベースライン (主力 S+A+B)</strong><br>
+    <small style="color:#94a3b8">変更なし</small></td>
+  <td>—</td>
+  <td>{base['n']:,}</td>
+  <td>{base['wr']:.0f}%</td>
+  <td style="color:{_color_pf(base['pf'])}">{_pf(base['pf'])}</td>
+  <td class="profit"><small>+{base['gp']:,.0f}</small></td>
+  <td class="loss"><small>-{base['gl']:,.0f}</small></td>
+  <td class="{'profit' if base['tot'] >= 0 else 'loss'}">{base['tot']:+,.0f}</td>
+  <td class="{'profit' if base['weighted'] >= 0 else 'loss'}" style="border-left:2px solid #334155"><strong>{base['weighted']:+,.0f}</strong></td>
+</tr>"""
+
+    for thr in thresholds:
+        hidden_b = [r for r in c_rows if r.get("q_plus", 0) >= thr]
+        if not hidden_b:
+            continue
+        # 隠れB級の単体集計 (重み 0.5 = B級扱い)
+        hb_weights = [0.5] * len(hidden_b)
+        hb = _stats(hidden_b, hb_weights)
+        # 主力 + 隠れB級の合算
+        combined = main_rows + hidden_b
+        combined_weights = main_weights + hb_weights
+        comb = _stats(combined, combined_weights)
+        # 主力との差分
+        d_n = comb["n"] - base["n"]
+        d_w = comb["weighted"] - base["weighted"]
+        d_pc = "profit" if d_w >= 0 else "loss"
+        is_recommended = (thr == 70)
+        bg = " style='background:#0d3d2f'" if is_recommended else ""
+        crown = "⭐ " if is_recommended else ""
+        rows_html += f"""
+<tr{bg}>
+  <td>{crown}<strong>+ 隠れB級 (Q+≥{thr})</strong><br>
+    <small style="color:#86efac">主力 + C級内 {len(hidden_b)}件</small></td>
+  <td><small>追加 {d_n}件<br>勝率 {hb['wr']:.0f}%</small></td>
+  <td><strong>{comb['n']:,}</strong></td>
+  <td>{comb['wr']:.0f}%</td>
+  <td style="color:{_color_pf(comb['pf'])}">{_pf(comb['pf'])}</td>
+  <td class="profit"><small>+{comb['gp']:,.0f}</small></td>
+  <td class="loss"><small>-{comb['gl']:,.0f}</small></td>
+  <td class="{'profit' if comb['tot'] >= 0 else 'loss'}">{comb['tot']:+,.0f}</td>
+  <td class="{'profit' if comb['weighted'] >= 0 else 'loss'}" style="border-left:2px solid #334155">
+    <strong>{comb['weighted']:+,.0f}</strong><br>
+    <small class="{d_pc}">({d_w:+,.0f})</small></td>
+</tr>"""
+
+    # C級全体 (比較参考)
+    c_weights = [0.25] * len(c_rows)
+    c_all = _stats(c_rows, c_weights)
+    if c_all:
+        rows_html += f"""
+<tr style="opacity:0.5;border-top:2px solid #475569">
+  <td><small><strong>(参考) C級全体</strong> 1/4ポジ運用</small></td>
+  <td><small>—</small></td>
+  <td><small>{c_all['n']:,}</small></td>
+  <td><small>{c_all['wr']:.0f}%</small></td>
+  <td><small>{_pf(c_all['pf'])}</small></td>
+  <td><small>+{c_all['gp']:,.0f}</small></td>
+  <td><small>-{c_all['gl']:,.0f}</small></td>
+  <td><small>{c_all['tot']:+,.0f}</small></td>
+  <td><small>{c_all['weighted']:+,.0f}</small></td>
+</tr>"""
+
+    return f"""
+<h3 style="margin-top:14px">{heading}
+  <small style="color:#94a3b8;font-weight:normal">— フェーズC (分析のみ、取引ロジック変更なし)</small></h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>シナリオ</th>
+    <th>追加 / 隠れB級<br>単体勝率</th>
+    <th>合計件数</th>
+    <th>勝率</th>
+    <th>PF</th>
+    <th>勝ち合計</th>
+    <th>負け合計</th>
+    <th>素損益</th>
+    <th style="border-left:2px solid #334155">重み損益<br><small>(差分vs ベース)</small></th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>Q+ スコア</strong> = 既存 Q + 以下の補正 (look-ahead bias なし):<br>
+  &nbsp;&nbsp;① <strong>ペア固有勝率</strong>: (銘柄×戦略) 過去20取引の勝率に応じて ±15点<br>
+  &nbsp;&nbsp;② <strong>損切り幅プロファイル</strong>: 0.4-0.8%=+5 / &lt;0.3%=-8 / &gt;1.5%=-3<br>
+  &nbsp;&nbsp;③ <strong>市場ストレス連動</strong>: 同日主力PnL+5K以上=+5 / 損切3回=-15<br>
+  ⭐ <strong>Q+≥70</strong> = 推奨想定閾値 (実装時の初期値候補)。<br>
+  💰 <strong>隠れB級は B級と同じ 1/2 ポジ</strong>で集計。重み損益の差分 (主力ベースとの増減) で実装効果を判断。
+</p>
+"""
+
+
 def _q_color(q):
     """Q スコアの色 (高い=緑、中=黄、低=赤)。"""
     if q >= 80:
@@ -1788,6 +2024,8 @@ def build_all_trades_tab(period_items):
 
     tier_filter_box = build_tier_filter_box(all_rows)
 
+    q_plus_sim_box = build_q_plus_simulation_box(all_rows)
+
     q_filter_box = f"""
 <h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ — 利益・損 分解</h3>
 <table style="font-size:0.82rem">
@@ -1879,6 +2117,7 @@ def build_all_trades_tab(period_items):
 {finer_filter_box}
 {q_filter_box}
 {tier_filter_box}
+{q_plus_sim_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
   💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
