@@ -1198,9 +1198,10 @@ def main():
     long_strats = set(STRATEGIES.keys())
     short_strats = set(STRATEGIES_SHORT.keys())
 
-    # 同日同銘柄ロック (DAYTRADE_SAME_DAY_LOCK=1 時)
+    # 同日同銘柄ロック (DAYTRADE_SAME_DAY_LOCK=0 で無効化、デフォルト有効)
+    # 2026-06 検証で +3.5% 改善確認 → デフォルト ON 化
     # ロング側とショート側でそれぞれ独立に適用 (両建ては妨げない)
-    if _os.environ.get("DAYTRADE_SAME_DAY_LOCK", "0") == "1":
+    if _os.environ.get("DAYTRADE_SAME_DAY_LOCK", "1") == "1":
         before = sum(len(v) for v in results.values())
         long_part = {k: v for k, v in results.items() if k[1] in long_strats}
         short_part = {k: v for k, v in results.items() if k[1] in short_strats}
