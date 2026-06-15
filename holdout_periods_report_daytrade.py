@@ -3110,10 +3110,38 @@ def main():
         spec = importlib.util.spec_from_file_location("wl", p)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        # WATCHLIST は銘柄のみ固定。戦略は12種すべてでテストする
-        # (固定戦略にすると 1銘柄=1ペアになり、BTスコアの幅広い分布が取れない)
         raw = getattr(mod, "SYMBOLS", [])
-        targets = [(e[0], e[1]) for e in raw]
+        # 3-tuple (sym, name, strategy) なら銘柄×戦略の限定セット
+        # 2-tuple (sym, name) なら全戦略 (従来挙動)
+        is_3tuple = bool(raw) and len(raw[0]) >= 3
+        if is_3tuple:
+            # 3-tuple: (sym, name, strat) → strategy_map で限定実行
+            sym_name = {}
+            for e in raw:
+                sym, name, strat = e[0], e[1], e[2]
+                sym_name[sym] = name
+                csv_strategy_map.setdefault(sym, [])
+                if strat and strat not in csv_strategy_map[sym]:
+                    csv_strategy_map[sym].append(strat)
+            # --short/--long-only フィルタ
+            if args.strategy in ("short", "long"):
+                allowed = (set(STRATEGIES_SHORT.keys()) if args.strategy == "short"
+                           else set(STRATEGIES.keys()))
+                filtered = {}
+                for s, strats in csv_strategy_map.items():
+                    ks = [x for x in strats if x in allowed]
+                    if ks:
+                        filtered[s] = ks
+                csv_strategy_map = filtered
+            targets = [(s, sym_name.get(s, "")) for s in csv_strategy_map]
+            # universe を csv 相当に切替 (scan_universe で strategy_map を使うため)
+            args.universe = "csv"
+            total_pairs = sum(len(v) for v in csv_strategy_map.values())
+            print(f"[WATCHLIST] 3-tuple 検出: {len(targets)}銘柄 / "
+                  f"{total_pairs}ペア (銘柄選定戦略のみ実行)")
+        else:
+            # 2-tuple (従来): 銘柄のみ固定。戦略は12種すべてでテスト
+            targets = [(e[0], e[1]) for e in raw]
 
     print(f"=" * 70)
     variant_disp = ({"short": "ショート", "long": "ロング",
