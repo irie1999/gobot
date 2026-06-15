@@ -29,6 +29,11 @@ universe を 12戦略 × 全銘柄でバックテスト (キャッシュあり) 
 holdout_periods_<YYYY-MM-DD>.html (6タブ、期間ごとに別銘柄)
 
 【使い方】
+  # 🚀 運用 (推奨): 毎日同じコマンドで OK
+  python holdout_periods_report_daytrade.py --daily
+  # = --both --update-data --force --max-price 6000 --min-price 1000
+  # 今日のデータも yfinance から取得 + ロング/ショート両方を強制再生成
+
   # 最短: 何も指定しないと最新CSVを自動検出
   # (walkforward_daytrade_results/ から最新日付 + 優先modeを自動採用)
   python holdout_periods_report_daytrade.py
@@ -1542,11 +1547,30 @@ def main():
     parser.add_argument("--update-data", action="store_true",
                         help="yfinance_update.py を強制実行して今日のデータも取得 "
                              "(市場閉場後の実行で今日の取引を集計したい時)")
+    parser.add_argument("--daily", action="store_true",
+                        help="運用デフォルトを一括有効化: --both --update-data --force "
+                             "+ --max-price 6000 --min-price 1000 を内部設定。"
+                             "毎日同じコマンドで運用したい時の推奨フラグ。"
+                             "個別フラグで上書き可能 (例: --daily --max-price 5000)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--refresh-bt-scores", action="store_true",
                         help="BTスコア凍結キャッシュを破棄して全再計算 "
                              "(通常は実行日が変わってもスコアは固定される)")
     args = parser.parse_args()
+
+    # --daily: 運用デフォルトを一括適用 (個別フラグが未指定の場合のみ)
+    if args.daily:
+        if not args.both and not args.short and not args.long_only:
+            args.both = True
+        args.update_data = True
+        args.force = True
+        # 価格フィルタは未指定 (= デフォルト値) のときだけ上書き
+        if args.max_price == 10_000:  # default
+            args.max_price = 6_000
+        if args.min_price == 0:        # default
+            args.min_price = 1_000
+        print("[--daily] 運用モード: --both --update-data --force "
+              "--max-price 6000 --min-price 1000")
 
     # データ鮮度チェック + 自動更新 (--update-data 時は強制)
     data_latest = None
