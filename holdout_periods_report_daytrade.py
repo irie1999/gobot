@@ -1831,7 +1831,10 @@ def main():
         print(f"  [SAME_DAY_LOCK] 取引数 {before:,} → {after:,} "
               f"({before-after:,}件 重複排除)")
 
-    # ── 損失削減フィルタ群 (デフォルト全有効、ENV で個別 OFF 可) ──
+    # ── 損失削減フィルタ群 (デフォルト全 OFF、ENV で個別 ON) ──
+    # 検証結果: 3フィルタ (時刻/同日キャップ/市場) は PF も損益も低下、
+    #          連敗ストップは PF 改善するが取引87%削減。
+    # BTスコアでの絞り込みが実態としてより効果的なため、デフォルト OFF。
     # ベースライン (SAME_DAY_LOCK 適用後、損失削減フィルタ適用前) を保持
     import copy as _copy
     results_baseline = _copy.deepcopy(results)
@@ -1842,7 +1845,7 @@ def main():
     max_losses = int(_os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3"))
     market_thr = float(_os.environ.get("DAYTRADE_MARKET_THRESHOLD", "2.0"))
 
-    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "0") == "1":
         before = sum(len(v) for v in results.values())
         results, removed = apply_entry_time_filter(
             results, skip_open_min=skip_open, skip_close_min=skip_close)
@@ -1850,14 +1853,14 @@ def main():
         print(f"  [時刻フィルタ] 寄付{skip_open}分+引け{skip_close}分前除外: "
               f"{before:,} → {after:,} (-{removed:,}件)")
 
-    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "0") == "1":
         before = sum(len(v) for v in results.values())
         results, removed = apply_per_day_cap(results, cap=per_day_cap)
         after = sum(len(v) for v in results.values())
         print(f"  [同日キャップ] 1(銘柄×戦略)/日 最大{per_day_cap}件: "
               f"{before:,} → {after:,} (-{removed:,}件)")
 
-    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "0") == "1":
         before = sum(len(v) for v in results.values())
         results, removed = apply_portfolio_loss_stop(
             results, max_losses=max_losses)
@@ -1865,7 +1868,7 @@ def main():
         print(f"  [連敗ストップ] サイド別{max_losses}連敗で当日打ち切り: "
               f"{before:,} → {after:,} (-{removed:,}件)")
 
-    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "0") == "1":
         before = sum(len(v) for v in results.values())
         results, removed = apply_market_regime_filter(
             results, today, threshold_pct=market_thr)
@@ -1873,7 +1876,7 @@ def main():
         print(f"  [市場フィルタ] 前日比±{market_thr}%超で逆方向除外: "
               f"{before:,} → {after:,} (-{removed:,}件)")
 
-    # ── フィルタ影響分析 (B案: marginal + cumulative) ──
+    # ── フィルタ影響分析 (検証用、常に表示) ──
     filter_impact_table = _build_filter_impact_table(
         results_baseline, results, today,
         skip_open=skip_open, skip_close=skip_close,
@@ -1884,13 +1887,13 @@ def main():
     # フィルタ ON 時は別キャッシュ (フィルタで取引集合が変わるため)
     # signature にはフィルタ値も含めて、値変更時もキャッシュが分離される
     filter_sig_parts = []
-    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "0") == "1":
         filter_sig_parts.append(f"t{skip_open}-{skip_close}")
-    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "0") == "1":
         filter_sig_parts.append(f"c{per_day_cap}")
-    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "0") == "1":
         filter_sig_parts.append(f"l{max_losses}")
-    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "0") == "1":
         filter_sig_parts.append(f"m{market_thr}")
     if filter_sig_parts:
         bt_cache_path = Path(
@@ -2150,26 +2153,28 @@ function jumpToSym(sid){
 
     # 損失削減フィルタの稼働状況
     filter_status = []
-    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "0") == "1":
         sk_o = _os.environ.get("DAYTRADE_SKIP_OPEN_MIN", "10")
         sk_c = _os.environ.get("DAYTRADE_SKIP_CLOSE_MIN", "30")
         filter_status.append(
             f"⏰ 時刻フィルタ (寄付{sk_o}分・引け{sk_c}分前 除外)")
-    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
-        cap = _os.environ.get("DAYTRADE_PER_DAY_CAP", "1")
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "0") == "1":
+        cap = _os.environ.get("DAYTRADE_PER_DAY_CAP", "2")
         filter_status.append(
             f"🔢 同日キャップ (1(銘柄×戦略)/日 最大{cap}件)")
-    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "0") == "1":
         n = _os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3")
         filter_status.append(
             f"🛑 連敗ストップ (サイド別{n}連敗で当日打ち切り)")
-    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
-        thr = _os.environ.get("DAYTRADE_MARKET_THRESHOLD", "1.5")
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "0") == "1":
+        thr = _os.environ.get("DAYTRADE_MARKET_THRESHOLD", "2.0")
         filter_status.append(
             f"📈 市場フィルタ (日経前日比±{thr}%超で逆方向除外)")
     filter_html = ("".join(f"<li>{f}</li>" for f in filter_status)
                    if filter_status else
-                   "<li style='color:#94a3b8'>(全フィルタ無効)</li>")
+                   "<li style='color:#94a3b8'>デフォルト無効 "
+                   "(検証で PF/損益とも低下したため)。"
+                   "下表のフィルタ影響分析を参照</li>")
 
     legend = f"""
 <div class="legend">
