@@ -504,9 +504,14 @@ def extract_periods(close: pd.Series, trend: pd.Series, ref_date) -> list[dict]:
         sd = close.index[start_idx].date()
         ed = ref_date if is_current else close.index[end_idx].date()
         seg = close.iloc[start_idx:end_idx + 1]
+        if is_current:
+            import numpy as np
+            days = int(np.busday_count(sd, ed))
+        else:
+            days = end_idx - start_idx
         return {
             "trend": cur_trend, "start": sd, "end": ed,
-            "days": end_idx - start_idx,   # 営業日数（土日祝を除く）
+            "days": days,
             "pct": (ep / sp - 1) * 100,
             "start_price": sp, "end_price": ep,
             "min_price": float(seg.min()), "max_price": float(seg.max()),
@@ -582,10 +587,15 @@ def _append_up(close, start_idx, end_idx, periods, is_current=False, ref_date=No
         idx = start_idx + n_days
         daily_rets[n_days] = (float(close.iloc[idx]) / sp - 1) * 100 if idx <= end_idx else None
 
+    if is_current:
+        import numpy as np
+        days = int(np.busday_count(sd, ed))
+    else:
+        days = end_idx - start_idx
     periods.append({
         "start_date": sd, "end_date": ed,
         "start_p": sp, "end_p": ep,
-        "days": end_idx - start_idx,   # 営業日数（土日祝を除く）
+        "days": days,
         "total_pct": (ep / sp - 1) * 100,
         "true_low_p": true_low_p,
         "lag_bars": lag_bars, "lag_pct": lag_pct,
