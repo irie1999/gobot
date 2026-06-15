@@ -1398,10 +1398,13 @@ def build_all_trades_tab(period_items):
 """
 
 
-def _check_data_freshness(min_age_days=4, auto_update=True):
+def _check_data_freshness(min_age_days=4, auto_update=True, force_update=False):
     """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
 
+    force_update=True で年齢に関係なく yfinance_update.py を実行 (--update-data 用)。
     実行時間の節約のためサンプル30銘柄で判定。
+
+    戻り値: 中央値の最新データ日 (date) or None
     """
     import subprocess
     import sys as _sys
@@ -1409,44 +1412,46 @@ def _check_data_freshness(min_age_days=4, auto_update=True):
         from daytrade_data import DATA_DIR, yf_to_jquants
     except Exception:
         print("[warn] daytrade_data からのインポート失敗、鮮度チェックスキップ")
-        return
+        return None
     # サンプル銘柄 (prime先頭30銘柄)
     try:
         from symbols_listed_all import SYMBOLS
         sample = [s for s, _ in SYMBOLS[:30]]
     except Exception:
         print("[warn] symbols_listed_all なし、鮮度チェックスキップ")
-        return
+        return None
 
-    today = datetime.now(JST).date()
-    latest_dates = []
-    for sym in sample:
-        code5 = yf_to_jquants(sym)
-        pkl = DATA_DIR / f"{code5}.pkl"
-        if not pkl.exists():
-            continue
-        try:
-            import pandas as pd
-            df = pickle.loads(pkl.read_bytes())
-            if "DateTime" in df.columns:
-                last_dt = pd.to_datetime(df["DateTime"].iloc[-1])
-            elif "Date" in df.columns:
-                last_dt = pd.to_datetime(df["Date"].iloc[-1])
-            else:
+    def _scan_latest():
+        today = datetime.now(JST).date()
+        dates = []
+        for sym in sample:
+            code5 = yf_to_jquants(sym)
+            pkl = DATA_DIR / f"{code5}.pkl"
+            if not pkl.exists():
                 continue
-            latest_dates.append(last_dt.date())
-        except Exception:
-            continue
+            try:
+                df = pickle.loads(pkl.read_bytes())
+                if "DateTime" in df.columns:
+                    last_dt = pd.to_datetime(df["DateTime"].iloc[-1])
+                elif "Date" in df.columns:
+                    last_dt = pd.to_datetime(df["Date"].iloc[-1])
+                else:
+                    continue
+                dates.append(last_dt.date())
+            except Exception:
+                continue
+        if not dates:
+            return None, today
+        dates.sort()
+        return dates[len(dates) // 2], today
 
-    if not latest_dates:
+    import pandas as pd  # 関数内 import (既存 pattern と整合)
+    median_latest, today = _scan_latest()
+    if median_latest is None:
         print("[データ鮮度] 判定不能、続行")
-        return
+        return None
 
-    # 中央値で判定 (一部の壊れたpklに引っ張られない)
-    latest_dates.sort()
-    median_latest = latest_dates[len(latest_dates) // 2]
     age = (today - median_latest).days
-    # 週末オフセット (土日は更新無し)
     weekday = today.weekday()
     if weekday == 0:    # 月曜なら金曜=3日前まで許容
         adj_age = max(0, age - 2)
@@ -1455,16 +1460,23 @@ def _check_data_freshness(min_age_days=4, auto_update=True):
     else:
         adj_age = age
 
-    if adj_age > min_age_days:
-        print(f"[データ鮮度] 最新 {median_latest} ({age}日前) → 古いので自動更新します")
+    need_update = force_update or adj_age > min_age_days
+    if need_update:
+        if force_update:
+            print(f"[データ鮮度] 最新 {median_latest} ({age}日前) → --update-data で強制更新")
+        else:
+            print(f"[データ鮮度] 最新 {median_latest} ({age}日前) → 古いので自動更新します")
         if auto_update:
             try:
                 result = subprocess.run(
                     [_sys.executable, "yfinance_update.py"],
-                    timeout=1800  # 30分タイムアウト
-                )
+                    timeout=1800)
                 if result.returncode == 0:
                     print(f"[データ鮮度] 更新完了")
+                    new_latest, _ = _scan_latest()
+                    if new_latest is not None:
+                        print(f"[データ鮮度] 更新後 最新 {new_latest}")
+                        median_latest = new_latest
                 else:
                     print(f"[warn] yfinance_update.py 終了コード {result.returncode}, 続行")
             except subprocess.TimeoutExpired:
@@ -1475,6 +1487,7 @@ def _check_data_freshness(min_age_days=4, auto_update=True):
             print(f"[info] 自動更新無効、続行")
     else:
         print(f"[データ鮮度] 最新 {median_latest} ({age}日前) ✓")
+    return median_latest
 
 
 # ----------------------------------------------------------------- main
@@ -1526,15 +1539,21 @@ def main():
                         help="データ鮮度チェック+自動更新をスキップ")
     parser.add_argument("--no-auto-update", action="store_true",
                         help="鮮度チェックは行うが yfinance 自動更新はしない")
+    parser.add_argument("--update-data", action="store_true",
+                        help="yfinance_update.py を強制実行して今日のデータも取得 "
+                             "(市場閉場後の実行で今日の取引を集計したい時)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--refresh-bt-scores", action="store_true",
                         help="BTスコア凍結キャッシュを破棄して全再計算 "
                              "(通常は実行日が変わってもスコアは固定される)")
     args = parser.parse_args()
 
-    # データ鮮度チェック + 自動更新
+    # データ鮮度チェック + 自動更新 (--update-data 時は強制)
+    data_latest = None
     if not args.no_fresh_check:
-        _check_data_freshness(auto_update=not args.no_auto_update)
+        data_latest = _check_data_freshness(
+            auto_update=not args.no_auto_update,
+            force_update=args.update_data)
 
     # --short と --long-only の整合チェック + 戦略フィルタ
     if args.short and args.long_only:
@@ -2204,12 +2223,66 @@ function jumpToSym(sid){
     else:
         body_main = f'<div class="tab-nav">{tab_btns}</div>{tab_panes}'
 
+    # 今日のトレード集計 (データに含まれていれば)
+    today_trades = []
+    for trades in results.values():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if hasattr(dt, "date") and dt.date() == today:
+                today_trades.append(t)
+    today_n = len(today_trades)
+    today_pnl = sum(t.get("pnl", 0) for t in today_trades)
+    today_wins = sum(1 for t in today_trades if t.get("pnl", 0) > 0)
+    today_wr = today_wins / today_n * 100 if today_n > 0 else 0
+
+    data_status_color = "#4ade80" if data_latest == today else "#fbbf24"
+    data_status = (f"<strong>{data_latest}</strong>"
+                   if data_latest else "(チェック未実施)")
+    if data_latest is not None and data_latest < today:
+        data_warning = (f' <span style="color:#f87171">'
+                        f'⚠️ 今日 ({today}) のバーが未取得。'
+                        f'<code>--update-data</code> で取得してください</span>')
+    else:
+        data_warning = ""
+
+    today_banner = f"""
+<div style="background:#0d1424;border:1px solid {data_status_color};
+            border-radius:8px;padding:12px 16px;margin:12px 0 16px;
+            display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+  <div>
+    <div style="font-size:0.72rem;color:#94a3b8">📅 実行日</div>
+    <div style="font-size:1rem;font-weight:700">{today}</div>
+  </div>
+  <div>
+    <div style="font-size:0.72rem;color:#94a3b8">💾 データ最新</div>
+    <div style="font-size:1rem;font-weight:700;color:{data_status_color}">
+      {data_status}{data_warning}
+    </div>
+  </div>
+  <div>
+    <div style="font-size:0.72rem;color:#94a3b8">📈 今日の取引</div>
+    <div style="font-size:1rem;font-weight:700">{today_n}件</div>
+  </div>
+  <div>
+    <div style="font-size:0.72rem;color:#94a3b8">勝率</div>
+    <div style="font-size:1rem;font-weight:700">{today_wr:.0f}%</div>
+  </div>
+  <div>
+    <div style="font-size:0.72rem;color:#94a3b8">損益</div>
+    <div style="font-size:1rem;font-weight:700;
+                color:{'#4ade80' if today_pnl >= 0 else '#f87171'}">
+      {today_pnl:+,.0f}円
+    </div>
+  </div>
+</div>"""
+
     html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">
 <title>期間別ホールドアウト ― {today}</title>
 <style>{css}</style></head><body>
 <h1>📊 期間別ホールドアウト・レポート [{variant_disp}]</h1>
 <p class="subtitle">生成: {today} / universe: {args.universe} ({len(fetched)}銘柄) /
    戦略: {len(strategies)} ({variant_disp}) / TRAIN期間: {args.train_days}日</p>
+{today_banner}
 {legend}
 {body_main}
 <script>{js}</script>
