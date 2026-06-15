@@ -1286,16 +1286,18 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
     if not all_rows:
         return ""
     tier_defs = [
-        ("🟢 S級", "BT≥55 & Q≥75", 55, 75, 1.00, "フルポジ"),
-        ("🟢 A級", "BT≥50 & Q≥70", 50, 70, 0.75, "3/4 ポジ"),
-        ("🟡 B級", "BT≥50 & Q≥65", 50, 65, 0.50, "1/2 ポジ"),
-        ("⚪ C級", "上記以外 (全残り)", 0, 0, 0.25, "1/4 ポジ"),
+        ("🟢 S級", "BT≥55 & Q≥75", 55, 75, 1.00, "フルポジ", "main"),
+        ("🟢 A級", "BT≥50 & Q≥70", 50, 70, 0.75, "3/4 ポジ", "main"),
+        ("🟡 B級", "BT≥50 & Q≥65", 50, 65, 0.50, "1/2 ポジ", "main"),
+        ("⚪ C級", "上記以外 (全残り)", 0, 0, 0.25, "1/4 ポジ (参考)", "ref"),
     ]
-    tier_rows_html = ""
     used_idx = set()
+    main_agg = {"n": 0, "gp": 0.0, "gl": 0.0, "weighted_pnl": 0.0,
+                "wins": 0, "losses": 0}
     combined = {"n": 0, "gp": 0.0, "gl": 0.0, "weighted_pnl": 0.0,
                 "wins": 0, "losses": 0}
-    for label, crit, bt_min, q_min, weight, posdesc in tier_defs:
+    tier_stats = []
+    for label, crit, bt_min, q_min, weight, posdesc, kind in tier_defs:
         sub = []
         for i, r in enumerate(all_rows):
             if i in used_idx:
@@ -1303,11 +1305,8 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
             if r.get("bt_score", 0) >= bt_min and r.get("q_score", 0) >= q_min:
                 sub.append((i, r))
         if not sub:
-            tier_rows_html += (f'<tr><td><strong>{label}</strong><br>'
-                                f'<small>{crit}</small></td>'
-                                f'<td>{posdesc}</td>'
-                                f'<td colspan="7" style="color:#475569">該当なし</td>'
-                                f'</tr>')
+            tier_stats.append({"label": label, "crit": crit, "posdesc": posdesc,
+                                "weight": weight, "kind": kind, "empty": True})
             continue
         for i, _ in sub:
             used_idx.add(i)
@@ -1317,36 +1316,84 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
         gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
         gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
         tot = gp - gl
-        wr = wins / len(rows) * 100
-        pf_v = gp / gl if gl > 0 else float("inf")
         weighted = tot * weight
+        if kind == "main":
+            main_agg["n"] += len(rows)
+            main_agg["gp"] += gp * weight
+            main_agg["gl"] += gl * weight
+            main_agg["weighted_pnl"] += weighted
+            main_agg["wins"] += wins
+            main_agg["losses"] += losses
         combined["n"] += len(rows)
         combined["gp"] += gp * weight
         combined["gl"] += gl * weight
         combined["weighted_pnl"] += weighted
         combined["wins"] += wins
         combined["losses"] += losses
-        pc = "profit" if tot >= 0 else "loss"
-        wpc = "profit" if weighted >= 0 else "loss"
-        tier_rows_html += f"""
-<tr>
-  <td><strong>{label}</strong><br><small>{crit}</small></td>
-  <td>{posdesc}<br><small style="color:#94a3b8">×{weight:.2f}</small></td>
-  <td>{len(rows):,}</td>
-  <td>{wr:.0f}%</td>
-  <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
-  <td class="profit"><small>+{gp:,.0f}</small></td>
-  <td class="loss"><small>-{gl:,.0f}</small></td>
-  <td class="{pc}">{tot:+,.0f}</td>
-  <td class="{wpc}" style="border-left:2px solid #334155"><strong>{weighted:+,.0f}</strong></td>
+        tier_stats.append({
+            "label": label, "crit": crit, "posdesc": posdesc,
+            "weight": weight, "kind": kind, "empty": False,
+            "n": len(rows), "wins": wins, "losses": losses,
+            "gp": gp, "gl": gl, "tot": tot,
+            "wr": wins / len(rows) * 100,
+            "pf_v": gp / gl if gl > 0 else float("inf"),
+            "weighted": weighted,
+        })
+
+    def _render_tier_row(s):
+        if s.get("empty"):
+            bg = " style='opacity:0.6'" if s["kind"] == "ref" else ""
+            return (f'<tr{bg}><td><strong>{s["label"]}</strong><br>'
+                    f'<small>{s["crit"]}</small></td>'
+                    f'<td>{s["posdesc"]}</td>'
+                    f'<td colspan="7" style="color:#475569">該当なし</td></tr>')
+        pc = "profit" if s["tot"] >= 0 else "loss"
+        wpc = "profit" if s["weighted"] >= 0 else "loss"
+        bg = " style='opacity:0.65'" if s["kind"] == "ref" else ""
+        return f"""
+<tr{bg}>
+  <td><strong>{s['label']}</strong><br><small>{s['crit']}</small></td>
+  <td>{s['posdesc']}<br><small style="color:#94a3b8">×{s['weight']:.2f}</small></td>
+  <td>{s['n']:,}</td>
+  <td>{s['wr']:.0f}%</td>
+  <td style="color:{_color_pf(s['pf_v'])}">{_pf(s['pf_v'])}</td>
+  <td class="profit"><small>+{s['gp']:,.0f}</small></td>
+  <td class="loss"><small>-{s['gl']:,.0f}</small></td>
+  <td class="{pc}">{s['tot']:+,.0f}</td>
+  <td class="{wpc}" style="border-left:2px solid #334155"><strong>{s['weighted']:+,.0f}</strong></td>
 </tr>"""
+
+    tier_rows_html = ""
+    # S/A/B → 主力小計 → C → 全合算 の順に組み立て
+    for s in tier_stats:
+        if s["kind"] == "ref":
+            # 主力小計を C級 の直前に挿入
+            main_pf = main_agg["gp"] / main_agg["gl"] if main_agg["gl"] > 0 else float("inf")
+            main_wr = (main_agg["wins"] / (main_agg["wins"] + main_agg["losses"]) * 100
+                       if (main_agg["wins"] + main_agg["losses"]) > 0 else 0)
+            main_pc = "profit" if main_agg["weighted_pnl"] >= 0 else "loss"
+            tier_rows_html += f"""
+<tr style="background:#0d2818;border-top:2px solid #4ade80">
+  <td colspan="2"><strong>📌 主力 (S+A+B) 合算</strong>
+    <br><small style="color:#86efac">実際の取引対象</small></td>
+  <td><strong>{main_agg['n']:,}</strong></td>
+  <td><strong>{main_wr:.0f}%</strong></td>
+  <td style="color:{_color_pf(main_pf)}"><strong>{_pf(main_pf)}</strong></td>
+  <td class="profit"><small>+{main_agg['gp']:,.0f}</small></td>
+  <td class="loss"><small>-{main_agg['gl']:,.0f}</small></td>
+  <td></td>
+  <td class="{main_pc}" style="border-left:2px solid #4ade80">
+    <strong>{main_agg['weighted_pnl']:+,.0f}</strong></td>
+</tr>"""
+        tier_rows_html += _render_tier_row(s)
+
     comb_pf = combined["gp"] / combined["gl"] if combined["gl"] > 0 else float("inf")
     comb_wr = (combined["wins"] / (combined["wins"] + combined["losses"]) * 100
                if (combined["wins"] + combined["losses"]) > 0 else 0)
     comb_pc = "profit" if combined["weighted_pnl"] >= 0 else "loss"
     tier_rows_html += f"""
-<tr style="background:#0d1424;border-top:2px solid #fbbf24">
-  <td colspan="2"><strong>📊 全ティア合算 (重み付き)</strong></td>
+<tr style="background:#0d1424;border-top:2px solid #fbbf24;opacity:0.85">
+  <td colspan="2"><strong>📊 全ティア合算 (C含む・参考)</strong></td>
   <td><strong>{combined['n']:,}</strong></td>
   <td><strong>{comb_wr:.0f}%</strong></td>
   <td style="color:{_color_pf(comb_pf)}"><strong>{_pf(comb_pf)}</strong></td>
@@ -1375,14 +1422,13 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
   <tbody>{tier_rows_html}</tbody>
 </table>
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
-  💡 <strong>4段階ティア</strong> = BTスコアとQスコアの組み合わせで採用シグナルを階層分け。
-  上位ティアで採用済の取引は下位ティアでは除外 (重複カウント防止)。
-  <strong>C級は「上位3ティアに該当しなかった残り全て」</strong>を吸収する打診枠なので、
-  全ティア合算 = その期間の全取引 になる。<br>
+  💡 <strong>取引対象 = 主力 (S/A/B)</strong>。C級は同時資金拘束を避けるため
+  <strong style="color:#fbbf24">参考扱い (取引非推奨)</strong>。<br>
   &nbsp;&nbsp;🟢 <strong>S級</strong>: 最高品質 (フルポジで攻める) /
   🟢 <strong>A級</strong>: 高品質 (3/4 で標準運用) /
   🟡 <strong>B級</strong>: 中品質 (1/2 で慎重) /
-  ⚪ <strong>C級</strong>: 残り全て (1/4 で打診)<br>
+  <span style="opacity:0.7">⚪ <strong>C級</strong>: 残り全て (1/4) — 参考表示</span><br>
+  📌 <strong>主力 (S+A+B) 合算</strong> = 実際の取引対象だけで運用した場合の成績。<br>
   📐 <strong>重み損益</strong> = 各ティアの素損益 × ポジションサイズ倍率の合計。
   実運用に近い「資金効率」を表現。
 </p>
