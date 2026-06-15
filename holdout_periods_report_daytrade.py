@@ -1471,6 +1471,149 @@ def build_q_plus_simulation_box(all_rows,
 """
 
 
+def build_hidden_b_detail_box(all_rows, threshold=70):
+    """C級内で Q+≥threshold の「隠れB級」取引を詳細リスト表示。
+
+    フェーズB の主要機能: 各取引の Q+ 補正内訳を可視化して、
+    「なぜ隠れB級と判定されたか」を透明化する。
+    """
+    if not all_rows:
+        return ""
+
+    # Q+ 計算 (未計算なら)
+    if "q_plus" not in all_rows[0]:
+        compute_q_plus_scores(all_rows)
+
+    candidates = [r for r in all_rows
+                  if not _is_main_tier(r.get("bt_score", 0),
+                                         r.get("q_score", 0))
+                  and r.get("q_plus", 0) >= threshold]
+
+    if not candidates:
+        return f"""
+<h3 style="margin-top:14px">🔍 C級内の「隠れB級」詳細 (Q+≥{threshold})</h3>
+<p style="color:#94a3b8;padding:8px">該当なし — Q+ 閾値を下げると候補が出ます。</p>
+"""
+
+    # Q+ 降順
+    candidates.sort(key=lambda r: -r.get("q_plus", 0))
+
+    # 集計
+    n = len(candidates)
+    wins = sum(1 for r in candidates if r["pnl"] > 0)
+    wr = wins / n * 100
+    gp = sum(r["pnl"] for r in candidates if r["pnl"] > 0)
+    gl = abs(sum(r["pnl"] for r in candidates if r["pnl"] <= 0))
+    pf = gp / gl if gl > 0 else float("inf")
+    total = gp - gl
+    weighted = total * 0.5  # B級扱い
+
+    # 補正タイプ別ヒット数 (どの補正が効いたか分析用)
+    pair_hits = sum(1 for r in candidates
+                    if "pair_wr" in r.get("q_plus_adj", {}))
+    stop_hits = sum(1 for r in candidates
+                    if "stop_pct" in r.get("q_plus_adj", {}))
+    mkt_hits = sum(1 for r in candidates
+                   if "mkt" in r.get("q_plus_adj", {}))
+
+    rows_html = ""
+    for r in candidates:
+        ed = _fmt_dt(r.get("entry_dt"))
+        pnl = r["pnl"]
+        pc = "profit" if pnl >= 0 else "loss"
+        adj = r.get("q_plus_adj", {})
+
+        # 補正内訳をカラフルに表示
+        adj_parts = []
+        if "pair_wr" in adj:
+            wr_val, wr_adj = adj["pair_wr"]
+            col = "#4ade80" if wr_adj > 0 else "#f87171"
+            adj_parts.append(
+                f'<span style="color:{col}">ペア{int(wr_val)}%({wr_adj:+.0f})</span>')
+        if "stop_pct" in adj:
+            pct_val, pct_adj = adj["stop_pct"]
+            col = "#4ade80" if pct_adj > 0 else "#f87171"
+            adj_parts.append(
+                f'<span style="color:{col}">損切{pct_val:.2f}%({pct_adj:+.0f})</span>')
+        if "mkt" in adj:
+            _, _, mkt_adj = adj["mkt"]
+            col = "#4ade80" if mkt_adj > 0 else "#f87171"
+            adj_parts.append(
+                f'<span style="color:{col}">市場({mkt_adj:+.0f})</span>')
+        adj_str = (" / ".join(adj_parts) if adj_parts
+                   else '<span style="color:#475569">—</span>')
+
+        bt = r.get("bt_score", 0)
+        q = r.get("q_score", 0)
+        q_plus = r.get("q_plus", 0)
+        delta = q_plus - q
+
+        rows_html += f"""
+<tr>
+  <td style="text-align:center;font-weight:bold;color:#86efac">
+    {q_plus:.0f}<br>
+    <small style="color:#94a3b8;font-weight:normal">Q:{q:.0f} (+{delta:.0f})</small>
+  </td>
+  <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
+  <td>{r['strat']}</td>
+  <td>{ed}</td>
+  <td style="text-align:center">{bt}</td>
+  <td style="font-size:0.72rem">{adj_str}</td>
+  <td class="{pc}">{pnl:+,.0f}</td>
+  <td>{r.get('reason', '?')}</td>
+</tr>"""
+
+    tot_pc = "profit" if total >= 0 else "loss"
+    w_pc = "profit" if weighted >= 0 else "loss"
+
+    return f"""
+<h3 style="margin-top:14px">🔍 C級内の「隠れB級」詳細 (Q+≥{threshold})
+  <small style="color:#94a3b8;font-weight:normal">— フェーズB</small></h3>
+<div class="box" style="background:#0d2818;border:1px solid #4ade80">
+  <div class="it"><div class="lb">隠れB級<br>件数</div>
+    <div class="vl">{n}</div></div>
+  <div class="it"><div class="lb">勝率</div>
+    <div class="vl">{wr:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(pf)}</div></div>
+  <div class="it"><div class="lb">利益</div>
+    <div class="vl profit">+{gp:,.0f}</div></div>
+  <div class="it"><div class="lb">損</div>
+    <div class="vl loss">-{gl:,.0f}</div></div>
+  <div class="it"><div class="lb">素損益</div>
+    <div class="vl {tot_pc}">{total:+,.0f}円</div></div>
+  <div class="it"><div class="lb">重み損益<br><small>(×0.5)</small></div>
+    <div class="vl {w_pc}">{weighted:+,.0f}円</div></div>
+</div>
+<p style="color:#94a3b8;font-size:0.78rem;margin:4px 0 8px">
+  📊 <strong>補正効果分析</strong>:
+  ペア勝率補正適用 <strong>{pair_hits}件</strong> /
+  損切り幅補正 <strong>{stop_hits}件</strong> /
+  市場ストレス補正 <strong>{mkt_hits}件</strong>
+</p>
+<table style="font-size:0.78rem">
+  <thead><tr>
+    <th>Q+<br><small>(Q→補正)</small></th>
+    <th>銘柄</th>
+    <th>戦略</th>
+    <th>Entry</th>
+    <th>BT</th>
+    <th>Q+ 補正内訳<br><small>(緑=加点 / 赤=減点)</small></th>
+    <th>損益</th>
+    <th>理由</th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>隠れB級</strong> = C級判定 (BT&lt;50 or Q&lt;65) だが Q+ スコアが {threshold} 以上 = 実質B級相当の品質と判定された取引。<br>
+  📐 補正内訳: <strong>ペア勝率</strong>=(銘柄×戦略)過去20取引勝率, <strong>損切</strong>=stop幅%プロファイル, <strong>市場</strong>=同日累積PnL/連敗状況。<br>
+  🎯 <strong>運用提案</strong>: B級と同じ 1/2 ポジで採用すれば
+    <strong style="color:#4ade80">{weighted:+,.0f}円</strong> (重み損益) の上乗せが見込める。<br>
+  📋 全 {n}件を Q+ 降順で表示。Ctrl/⌘+A で選択 → Excel/Notion 等に貼り付け可能。
+</p>
+"""
+
+
 def _q_color(q):
     """Q スコアの色 (高い=緑、中=黄、低=赤)。"""
     if q >= 80:
@@ -2025,6 +2168,7 @@ def build_all_trades_tab(period_items):
     tier_filter_box = build_tier_filter_box(all_rows)
 
     q_plus_sim_box = build_q_plus_simulation_box(all_rows)
+    hidden_b_box = build_hidden_b_detail_box(all_rows, threshold=70)
 
     q_filter_box = f"""
 <h3 style="margin-top:14px">🎯 Q スコア (シグナル品質) 閾値別フィルタ — 利益・損 分解</h3>
@@ -2118,6 +2262,7 @@ def build_all_trades_tab(period_items):
 {q_filter_box}
 {tier_filter_box}
 {q_plus_sim_box}
+{hidden_b_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
   💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
