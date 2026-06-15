@@ -1258,6 +1258,20 @@ def _q_icon(q):
     return "🔴"
 
 
+def _tier_info(bt_score, q_score):
+    """BT × Q 4段階ティア判定 → (label, icon, color)。
+
+    build_tier_filter_box の tier_defs と完全一致させる。
+    """
+    if bt_score >= 55 and q_score >= 75:
+        return ("S", "🟢", "#4ade80")
+    if bt_score >= 50 and q_score >= 70:
+        return ("A", "🟢", "#86efac")
+    if bt_score >= 50 and q_score >= 65:
+        return ("B", "🟡", "#facc15")
+    return ("C", "⚪", "#94a3b8")
+
+
 def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シミュレーション"):
     """BT × Q の4段階ティア別シミュレーション表を生成。
 
@@ -1696,12 +1710,11 @@ def build_all_trades_tab(period_items):
         pc = "profit" if pnl >= 0 else "loss"
         bt_col = _rank_color(r["bt_rank"])
         q = r.get("q_score", 0)
-        q_col = _q_color(q)
-        q_ico = _q_icon(q)
+        tier_lbl, tier_ico, tier_col = _tier_info(r["bt_score"], q)
         rows_html += f"""
-<tr data-bt-score="{r['bt_score']}" data-bt-rank="{r['bt_rank']}" data-q-score="{q}">
+<tr data-bt-score="{r['bt_score']}" data-bt-rank="{r['bt_rank']}" data-q-score="{q}" data-tier="{tier_lbl}">
   <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
-  <td style="color:{q_col};font-weight:bold;text-align:center">{q_ico}<br><small>{q:.0f}</small></td>
+  <td style="color:{tier_col};font-weight:bold;text-align:center">{tier_ico}{tier_lbl}<br><small>Q:{q:.0f}</small></td>
   <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
   <td>{r['strat']}</td>
   <td>{ed}</td>
@@ -1730,7 +1743,7 @@ def build_all_trades_tab(period_items):
 <table id="all-trades-table" style="font-size:0.72rem">
   <thead><tr>
     <th>BT<br><small>★/100</small></th>
-    <th>Q<br><small>品質/100</small></th>
+    <th>ティア<br><small>/Q</small></th>
     <th>銘柄</th><th>戦略</th>
     <th>Entry</th><th>Exit</th><th>保有</th>
     <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
@@ -1884,12 +1897,11 @@ def build_date_tab(period_items, id_prefix=""):
             pc2 = "profit" if pnl >= 0 else "loss"
             bt_col = _rank_color(r["bt_rank"])
             q = r.get("q_score", 0)
-            q_col = _q_color(q)
-            q_ico = _q_icon(q)
+            tier_lbl, tier_ico, tier_col = _tier_info(r["bt_score"], q)
             rows_html += f"""
-<tr data-q-score="{q}">
+<tr data-q-score="{q}" data-tier="{tier_lbl}">
   <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
-  <td style="color:{q_col};font-weight:bold;text-align:center">{q_ico}<br><small>{q:.0f}</small></td>
+  <td style="color:{tier_col};font-weight:bold;text-align:center">{tier_ico}{tier_lbl}<br><small>Q:{q:.0f}</small></td>
   <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
   <td>{r['strat']}</td>
   <td>{ed}</td><td>{xd}</td><td>{hold}</td>
@@ -1954,7 +1966,7 @@ def build_date_tab(period_items, id_prefix=""):
   {day_tier_box}
   <table style="font-size:0.78rem">
     <thead><tr>
-      <th>BT</th><th>Q</th><th>銘柄</th><th>戦略</th>
+      <th>BT</th><th>ティア/Q</th><th>銘柄</th><th>戦略</th>
       <th>Entry</th><th>Exit</th><th>保有</th>
       <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
       <th>損益</th><th>%</th><th>理由</th>
