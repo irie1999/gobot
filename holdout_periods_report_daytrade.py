@@ -324,46 +324,49 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
 
     rows = ""
     for i, it in enumerate(items, 1):
-        ts = it["train_stats"]
         es = it["test_stats"]
         pf = es["pf"]
         pc = "profit" if es["total_pnl"] >= 0 else "loss"
         bg = "#0d4d2f" if it["test_pass"] else "#2d0a0a"
         mark = "★" if it["test_pass"] else "—"
         sid = f"{id_prefix}{it['symbol'].replace('.T','')}_{it['strategy']}"
+        # 利益と損を実取引から分離計算
+        test_trades = it.get("test_trades", [])
+        gross_profit = sum(t["pnl"] for t in test_trades if t["pnl"] > 0)
+        gross_loss = abs(sum(t["pnl"] for t in test_trades if t["pnl"] <= 0))
         rows += f"""
 <tr style="background:{bg}">
   <td style="color:#4ade80">{mark}</td>
   <td>{i}</td>
   <td class="sym"><span class="sym-link" onclick="jumpToSym('{sid}')" title="クリックで取引明細へ">{it['name']}<br><small class="code">{it['symbol']}</small></span></td>
   <td>{it['strategy']}</td>
-  <td>{ts['n']}</td>
-  <td>{ts['win_rate']:.0f}%</td>
-  <td style="color:{_color_pf(ts['pf'])}">{_pf(ts['pf'])}</td>
-  <td class="{'profit' if ts['total_pnl'] >= 0 else 'loss'}">{ts['total_pnl']:+,.0f}</td>
   <td>{es['n']}</td>
   <td>{es['win_rate']:.0f}%</td>
   <td style="color:{_color_pf(pf)}">{_pf(pf)}</td>
+  <td class="profit">+{gross_profit:,.0f}</td>
+  <td class="loss">-{gross_loss:,.0f}</td>
   <td class="{pc}">{es['total_pnl']:+,.0f}</td>
   <td class="loss">{es['max_dd']:+.1f}%</td>
   <td>{es['sharpe']:.2f}</td>
 </tr>"""
 
     table = f"""
-<h3>TEST {test_label} ホールドアウト Top{len(items)}</h3>
+<h3>TEST {test_label} 取引結果 (構成銘柄 {len(items)}件)</h3>
 <table>
   <thead>
     <tr>
-      <th rowspan="2">合</th>
-      <th rowspan="2">#</th>
-      <th rowspan="2">銘柄</th>
-      <th rowspan="2">戦略</th>
-      <th colspan="4" style="background:#1e3a5f">TRAIN</th>
-      <th colspan="6" style="background:#1a4d3a">TEST ({test_label})</th>
-    </tr>
-    <tr>
-      <th>取引</th><th>勝率</th><th>PF</th><th>損益</th>
-      <th>取引</th><th>勝率</th><th>PF</th><th>損益</th><th>DD</th><th>Sharpe</th>
+      <th>合</th>
+      <th>#</th>
+      <th>銘柄</th>
+      <th>戦略</th>
+      <th>取引数</th>
+      <th>勝率</th>
+      <th>PF</th>
+      <th>利益<br><small>(勝ち合計)</small></th>
+      <th>損<br><small>(負け合計)</small></th>
+      <th>損益<br><small>(差引)</small></th>
+      <th>DD</th>
+      <th>Sharpe</th>
     </tr>
   </thead>
   <tbody>{rows}</tbody>
@@ -1251,9 +1254,9 @@ function jumpToSym(sid){
   TEST期間のデータは銘柄選定に使用しないので、カーブフィット排除・リーク無し。<br><br>
   ▸ <strong>6 TEST 期間</strong> (今日から起算、重複あり):
     直近30 / 60 / 90 / 120 / 150 / 180日<br>
-  ▸ <strong>TRAIN</strong>: {train_desc} (TEST 開始日より前)<br>
-  ▸ 合格条件 (TRAIN): 取引≥{PASS_TRAIN_TRADES}, PF≥{PASS_TRAIN_PF}, 損益>0<br>
-  ▸ <strong>★合格</strong>: TEST PF≥{TEST_PASS_PF} & 損益≥0 (真の優位性あり、未学習データでも勝てた)<br>
+  ▸ <strong>各タブで構成銘柄が変わります</strong>: TRAIN期間が違うので選定銘柄も期間ごとに変動<br>
+  ▸ TRAIN: {train_desc} で取引≥{PASS_TRAIN_TRADES}/PF≥{PASS_TRAIN_PF}/損益>0 を満たす銘柄を選定<br>
+  ▸ <strong>★合格</strong>: 選定銘柄が TEST期間でも PF≥{TEST_PASS_PF} & 損益≥0 で勝てた (真の優位性あり)<br>
   ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示<br>
   ▸ <strong>全6タブで★合格 = 短期も長期もロバスト</strong> (最有力候補)
 </div>
