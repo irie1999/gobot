@@ -451,6 +451,129 @@ def apply_market_regime_filter(results, today, threshold_pct=1.5):
     return new_results, n_before - n_after
 
 
+def _stage_stats(stage_results, today, ref_days=180):
+    """指定 results の直近 ref_days 内 全取引集計。"""
+    cutoff = today - timedelta(days=ref_days)
+    n = 0
+    wins = 0
+    gp = 0.0
+    gl = 0.0
+    for trades in stage_results.values():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date") or dt.date() < cutoff:
+                continue
+            n += 1
+            p = t.get("pnl", 0)
+            if p > 0:
+                gp += p
+                wins += 1
+            else:
+                gl += abs(p)
+    pf = gp / gl if gl > 0 else float("inf")
+    wr = wins / n * 100 if n > 0 else 0
+    return {"n": n, "win_rate": wr, "pf": pf,
+            "gp": gp, "gl": gl, "total": gp - gl}
+
+
+def _build_filter_impact_table(results_baseline, results_final, today,
+                                skip_open, skip_close, per_day_cap,
+                                max_losses, market_thr, ref_days=180):
+    """フィルタ影響分析テーブル HTML を生成。
+
+    - Marginal: ベースラインに各フィルタ「単独」で適用した場合
+    - Cumulative: 全フィルタ累積適用 (現状)
+    """
+    base_stats = _stage_stats(results_baseline, today, ref_days)
+
+    # Marginal: 各フィルタを単独適用
+    marginal = []
+    r_t, _ = apply_entry_time_filter(
+        results_baseline, skip_open_min=skip_open, skip_close_min=skip_close)
+    marginal.append(("⏰ 時刻のみ", _stage_stats(r_t, today, ref_days),
+                     f"寄付{skip_open}分+引け{skip_close}分前 除外"))
+
+    r_c, _ = apply_per_day_cap(results_baseline, cap=per_day_cap)
+    marginal.append(("🔢 同日キャップのみ", _stage_stats(r_c, today, ref_days),
+                     f"1(銘柄×戦略)/日 最大{per_day_cap}件"))
+
+    r_l, _ = apply_portfolio_loss_stop(
+        results_baseline, max_losses=max_losses)
+    marginal.append(("🛑 連敗ストップのみ", _stage_stats(r_l, today, ref_days),
+                     f"サイド別{max_losses}連敗で当日打ち切り"))
+
+    r_m, _ = apply_market_regime_filter(
+        results_baseline, today, threshold_pct=market_thr)
+    marginal.append(("📈 市場フィルタのみ", _stage_stats(r_m, today, ref_days),
+                     f"日経前日比±{market_thr}%超 逆方向除外"))
+
+    final_stats = _stage_stats(results_final, today, ref_days)
+
+    def _row(label, s, note=""):
+        if s["n"] == 0:
+            return (f'<tr><td>{label}</td>'
+                    f'<td colspan="6" style="color:#475569">取引なし</td></tr>')
+        delta_n = s["n"] - base_stats["n"]
+        delta_total = s["total"] - base_stats["total"]
+        delta_n_pct = (delta_n / base_stats["n"] * 100
+                       if base_stats["n"] > 0 else 0)
+        pf_col = _color_pf(s["pf"])
+        pc = "profit" if s["total"] >= 0 else "loss"
+        dnc = "profit" if delta_n >= 0 else "loss"
+        dtc = "profit" if delta_total >= 0 else "loss"
+        return f"""
+<tr>
+  <td style="text-align:left">{label}<br><small style="color:#94a3b8">{note}</small></td>
+  <td>{s['n']:,}<br><small class="{dnc}">{delta_n:+,}</small></td>
+  <td>{s['win_rate']:.0f}%</td>
+  <td style="color:{pf_col}">{_pf(s['pf'])}</td>
+  <td class="profit">+{s['gp']:,.0f}</td>
+  <td class="loss">-{s['gl']:,.0f}</td>
+  <td class="{pc}"><strong>{s['total']:+,.0f}</strong><br>
+      <small class="{dtc}">{delta_total:+,.0f}</small></td>
+</tr>"""
+
+    rows = _row("⚪ ベースライン (SAME_DAY_LOCK のみ)", base_stats,
+                "損失削減フィルタ全 OFF")
+    for label, s, note in marginal:
+        rows += _row(label, s, note)
+    rows += _row("✅ <strong>全フィルタ累積 (現在)</strong>", final_stats,
+                 "時刻+キャップ+連敗+市場 すべて適用")
+
+    delta_total = final_stats["total"] - base_stats["total"]
+    delta_n = final_stats["n"] - base_stats["n"]
+    delta_pf = final_stats["pf"] - base_stats["pf"]
+
+    return f"""
+<h3 style="margin-top:18px">🔬 フィルタ影響分析 (直近{ref_days}日)</h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>フィルタ構成</th>
+    <th>取引数<br><small>(差分)</small></th>
+    <th>勝率</th><th>PF</th>
+    <th>利益</th><th>損</th>
+    <th>損益<br><small>(差分)</small></th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>Marginal (単独適用)</strong>: 各フィルタを <em>ベースライン</em> に
+    単独で適用した場合の効果。1つだけ ON にしたい時の比較。<br>
+  💡 <strong>累積</strong>: 4種すべて適用 (現在の設定)。<br>
+  📊 取引数が大きく減って PF があまり伸びないフィルタは「過剰な削り」。
+    取引数の減少が小さく PF/損益が伸びるフィルタが「効果的な削り」。<br>
+  🎛️ ENV で個別 OFF / 数値変更可:<br>
+  &nbsp;&nbsp;<code>DAYTRADE_FILTER_TIME=0</code> /
+  <code>DAYTRADE_FILTER_DAYCAP=0</code> /
+  <code>DAYTRADE_FILTER_LOSSSTOP=0</code> /
+  <code>DAYTRADE_FILTER_MARKET=0</code><br>
+  &nbsp;&nbsp;<code>DAYTRADE_PER_DAY_CAP=N</code> (現在 {per_day_cap}) /
+  <code>DAYTRADE_MARKET_THRESHOLD=X.X</code> (現在 {market_thr}%) /
+  <code>DAYTRADE_MAX_DAILY_LOSSES=N</code> (現在 {max_losses})
+</p>
+"""
+
+
 def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
                        cache):
     """1銘柄×1戦略の全期間 backtest (永続キャッシュ対応)。
@@ -1709,9 +1832,17 @@ def main():
               f"({before-after:,}件 重複排除)")
 
     # ── 損失削減フィルタ群 (デフォルト全有効、ENV で個別 OFF 可) ──
+    # ベースライン (SAME_DAY_LOCK 適用後、損失削減フィルタ適用前) を保持
+    import copy as _copy
+    results_baseline = _copy.deepcopy(results)
+
+    skip_open = int(_os.environ.get("DAYTRADE_SKIP_OPEN_MIN", "10"))
+    skip_close = int(_os.environ.get("DAYTRADE_SKIP_CLOSE_MIN", "30"))
+    per_day_cap = int(_os.environ.get("DAYTRADE_PER_DAY_CAP", "2"))
+    max_losses = int(_os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3"))
+    market_thr = float(_os.environ.get("DAYTRADE_MARKET_THRESHOLD", "2.0"))
+
     if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
-        skip_open = int(_os.environ.get("DAYTRADE_SKIP_OPEN_MIN", "10"))
-        skip_close = int(_os.environ.get("DAYTRADE_SKIP_CLOSE_MIN", "30"))
         before = sum(len(v) for v in results.values())
         results, removed = apply_entry_time_filter(
             results, skip_open_min=skip_open, skip_close_min=skip_close)
@@ -1720,15 +1851,13 @@ def main():
               f"{before:,} → {after:,} (-{removed:,}件)")
 
     if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
-        cap = int(_os.environ.get("DAYTRADE_PER_DAY_CAP", "1"))
         before = sum(len(v) for v in results.values())
-        results, removed = apply_per_day_cap(results, cap=cap)
+        results, removed = apply_per_day_cap(results, cap=per_day_cap)
         after = sum(len(v) for v in results.values())
-        print(f"  [同日キャップ] 1(銘柄×戦略)/日 最大{cap}件: "
+        print(f"  [同日キャップ] 1(銘柄×戦略)/日 最大{per_day_cap}件: "
               f"{before:,} → {after:,} (-{removed:,}件)")
 
     if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
-        max_losses = int(_os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3"))
         before = sum(len(v) for v in results.values())
         results, removed = apply_portfolio_loss_stop(
             results, max_losses=max_losses)
@@ -1737,28 +1866,35 @@ def main():
               f"{before:,} → {after:,} (-{removed:,}件)")
 
     if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
-        thr = float(_os.environ.get("DAYTRADE_MARKET_THRESHOLD", "1.5"))
         before = sum(len(v) for v in results.values())
         results, removed = apply_market_regime_filter(
-            results, today, threshold_pct=thr)
+            results, today, threshold_pct=market_thr)
         after = sum(len(v) for v in results.values())
-        print(f"  [市場フィルタ] 前日比±{thr}%超で逆方向除外: "
+        print(f"  [市場フィルタ] 前日比±{market_thr}%超で逆方向除外: "
               f"{before:,} → {after:,} (-{removed:,}件)")
+
+    # ── フィルタ影響分析 (B案: marginal + cumulative) ──
+    filter_impact_table = _build_filter_impact_table(
+        results_baseline, results, today,
+        skip_open=skip_open, skip_close=skip_close,
+        per_day_cap=per_day_cap, max_losses=max_losses,
+        market_thr=market_thr)
 
     # BTスコア計算 (6期間横断、calc_recommend_score)
     # フィルタ ON 時は別キャッシュ (フィルタで取引集合が変わるため)
+    # signature にはフィルタ値も含めて、値変更時もキャッシュが分離される
     filter_sig_parts = []
-    for env_k, abbr in [
-        ("DAYTRADE_FILTER_TIME", "t"),
-        ("DAYTRADE_FILTER_DAYCAP", "c"),
-        ("DAYTRADE_FILTER_LOSSSTOP", "l"),
-        ("DAYTRADE_FILTER_MARKET", "m"),
-    ]:
-        if _os.environ.get(env_k, "1") == "1":
-            filter_sig_parts.append(abbr)
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+        filter_sig_parts.append(f"t{skip_open}-{skip_close}")
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
+        filter_sig_parts.append(f"c{per_day_cap}")
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+        filter_sig_parts.append(f"l{max_losses}")
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
+        filter_sig_parts.append(f"m{market_thr}")
     if filter_sig_parts:
         bt_cache_path = Path(
-            f"bt_score_holdout_daytrade_{''.join(filter_sig_parts)}.json")
+            f"bt_score_holdout_daytrade_{'_'.join(filter_sig_parts)}.json")
     else:
         bt_cache_path = BT_SCORE_CACHE_PATH
     bt_scores = compute_bt_scores(results, today, args.budget,
@@ -2053,13 +2189,8 @@ function jumpToSym(sid){
   <ul style="margin:4px 0 0 18px;padding:0;font-size:0.78rem;color:#cbd5e1">
     {filter_html}
   </ul>
-  <p style="margin:6px 0 0;font-size:0.74rem;color:#94a3b8">
-    各フィルタは ENV で OFF 可: <code>DAYTRADE_FILTER_TIME=0</code> /
-    <code>DAYTRADE_FILTER_DAYCAP=0</code> /
-    <code>DAYTRADE_FILTER_LOSSSTOP=0</code> /
-    <code>DAYTRADE_FILTER_MARKET=0</code>
-  </p>
 </div>
+{filter_impact_table}
 """
 
     # body 構成
