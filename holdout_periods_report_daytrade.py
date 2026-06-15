@@ -609,6 +609,85 @@ def build_detail_tab(period_items):
 """
 
 
+def _check_data_freshness(min_age_days=4, auto_update=True):
+    """pkl データが最新か確認。古ければ yfinance_update.py を自動実行。
+
+    実行時間の節約のためサンプル30銘柄で判定。
+    """
+    import subprocess
+    import sys as _sys
+    try:
+        from daytrade_data import DATA_DIR, yf_to_jquants
+    except Exception:
+        print("[warn] daytrade_data からのインポート失敗、鮮度チェックスキップ")
+        return
+    # サンプル銘柄 (prime先頭30銘柄)
+    try:
+        from symbols_listed_all import SYMBOLS
+        sample = [s for s, _ in SYMBOLS[:30]]
+    except Exception:
+        print("[warn] symbols_listed_all なし、鮮度チェックスキップ")
+        return
+
+    today = datetime.now(JST).date()
+    latest_dates = []
+    for sym in sample:
+        code5 = yf_to_jquants(sym)
+        pkl = DATA_DIR / f"{code5}.pkl"
+        if not pkl.exists():
+            continue
+        try:
+            import pandas as pd
+            df = pickle.loads(pkl.read_bytes())
+            if "DateTime" in df.columns:
+                last_dt = pd.to_datetime(df["DateTime"].iloc[-1])
+            elif "Date" in df.columns:
+                last_dt = pd.to_datetime(df["Date"].iloc[-1])
+            else:
+                continue
+            latest_dates.append(last_dt.date())
+        except Exception:
+            continue
+
+    if not latest_dates:
+        print("[データ鮮度] 判定不能、続行")
+        return
+
+    # 中央値で判定 (一部の壊れたpklに引っ張られない)
+    latest_dates.sort()
+    median_latest = latest_dates[len(latest_dates) // 2]
+    age = (today - median_latest).days
+    # 週末オフセット (土日は更新無し)
+    weekday = today.weekday()
+    if weekday == 0:    # 月曜なら金曜=3日前まで許容
+        adj_age = max(0, age - 2)
+    elif weekday == 6:  # 日曜=金曜=2日前まで許容
+        adj_age = max(0, age - 1)
+    else:
+        adj_age = age
+
+    if adj_age > min_age_days:
+        print(f"[データ鮮度] 最新 {median_latest} ({age}日前) → 古いので自動更新します")
+        if auto_update:
+            try:
+                result = subprocess.run(
+                    [_sys.executable, "yfinance_update.py"],
+                    timeout=1800  # 30分タイムアウト
+                )
+                if result.returncode == 0:
+                    print(f"[データ鮮度] 更新完了")
+                else:
+                    print(f"[warn] yfinance_update.py 終了コード {result.returncode}, 続行")
+            except subprocess.TimeoutExpired:
+                print(f"[warn] yfinance_update.py タイムアウト、続行")
+            except Exception as e:
+                print(f"[warn] yfinance_update.py 失敗: {e} (続行)")
+        else:
+            print(f"[info] 自動更新無効、続行")
+    else:
+        print(f"[データ鮮度] 最新 {median_latest} ({age}日前) ✓")
+
+
 # ----------------------------------------------------------------- main
 def main():
     parser = argparse.ArgumentParser(
@@ -652,8 +731,16 @@ def main():
                         help="ロング戦略 (DON/MACD/RSI2/A7/VOL/MOM) のみで評価")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-fresh-check", action="store_true",
+                        help="データ鮮度チェック+自動更新をスキップ")
+    parser.add_argument("--no-auto-update", action="store_true",
+                        help="鮮度チェックは行うが yfinance 自動更新はしない")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
+    # データ鮮度チェック + 自動更新
+    if not args.no_fresh_check:
+        _check_data_freshness(auto_update=not args.no_auto_update)
 
     # --short と --long-only の整合チェック + 戦略フィルタ
     if args.short and args.long_only:

@@ -243,7 +243,20 @@ def main():
                              "TEST取引≥3/PF≥1.0/勝率≥30%% (--folds 2 推奨, 中間)")
     parser.add_argument("--diagnostic", action="store_true",
                         help="診断: 全銘柄の trade数/PF を表示")
+    parser.add_argument("--no-fresh-check", action="store_true",
+                        help="データ鮮度チェック+自動更新をスキップ")
+    parser.add_argument("--no-auto-update", action="store_true",
+                        help="鮮度チェックは行うが yfinance 自動更新はしない")
     args = parser.parse_args()
+
+    # データ鮮度チェック + 自動更新
+    if not args.no_fresh_check:
+        # holdout_periods_report_daytrade の関数を借用
+        try:
+            from holdout_periods_report_daytrade import _check_data_freshness
+            _check_data_freshness(auto_update=not args.no_auto_update)
+        except Exception as e:
+            print(f"[warn] 鮮度チェック失敗: {e} (続行)")
 
     # --folds 2 のとき FOLDS をスイング流に差し替え
     global FOLDS
