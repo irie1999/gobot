@@ -1171,22 +1171,22 @@ def compute_quality_scores(all_rows):
         d = dt.date()
         bt = r.get("bt_score", 0) or 0
 
-        # ① BT スコア基礎 (0-60点、BT100 → 60点)
-        Q = min(bt, 100) * 0.6
+        # ① BT スコア基礎 (BTそのまま、最大100)
+        Q = min(bt, 100) * 1.0
 
-        # ② 時間帯ボーナス/減点
+        # ② 時間帯ボーナス/減点 (軽め)
         mins = (dt.hour - 9) * 60 + dt.minute
         if mins < 10:           # 寄付10分
-            Q -= 10
+            Q -= 5
             time_tag = "寄付"
         elif mins > 330:        # 14:30以降
-            Q -= 10
+            Q -= 5
             time_tag = "引け前"
         else:
             Q += 5
             time_tag = "通常"
 
-        # ③ 同日同銘柄カウント (前のエントリー数)
+        # ③ 同日同銘柄カウント (2回目までは中立、3回目から減点)
         key = (d, r["sym"])
         prior = prior_by_sym_date.get(key, [])
         cnt = len(prior)
@@ -1196,28 +1196,34 @@ def compute_quality_scores(all_rows):
         elif cnt == 1:
             Q += 0
             cnt_tag = "2回目"
+        elif cnt == 2:
+            Q -= 10
+            cnt_tag = "3回目"
         else:
             Q -= 15
             cnt_tag = f"{cnt+1}回目"
 
-        # ④ 同銘柄当日損切歴ペナルティ
+        # ④ 同銘柄当日損切歴ペナルティ (軽減)
         losses = sum(1 for p in prior if p <= 0)
         if losses >= 1:
-            Q -= 15
+            Q -= 10
             loss_tag = f"既損切{losses}"
         else:
             loss_tag = ""
 
-        # ⑤ 当日累積PnLによる調整
+        # ⑤ 当日累積PnLによる調整 (軽減)
         cur_daily = daily_pnl.get(d, 0)
         if cur_daily >= 10_000:
             Q += 5
             pnl_tag = "好調"
         elif cur_daily <= -10_000:
-            Q -= 10
+            Q -= 5
             pnl_tag = "低調"
         else:
             pnl_tag = ""
+
+        # Q を 0-100 にクランプ
+        Q = max(0, min(100, Q))
 
         r["q_score"] = round(Q, 1)
         r["q_tags"] = [t for t in (time_tag, cnt_tag, loss_tag, pnl_tag) if t]
@@ -1460,7 +1466,8 @@ def build_all_trades_tab(period_items):
         (70, "🟡 良品質 (70+)"),
         (65, "⚪ 中品質 (65+)"),
         (60, "⚪ 標準 (60+)"),
-        (50, "🔴 全件超ノイズ (50+)"),
+        (55, "🔴 中の上 (55+)"),
+        (50, "🔴 中 (50+)"),
         (0,  "全件"),
     ]
     q_rows_html = ""
@@ -1478,8 +1485,8 @@ def build_all_trades_tab(period_items):
         wr = wins / len(sub) * 100
         pf_v = gp / gl if gl > 0 else float("inf")
         pc = "profit" if tot >= 0 else "loss"
-        # ハイライト: 推奨閾値 (75)
-        is_recommended = (thr == 75)
+        # ハイライト: 推奨閾値 (65)
+        is_recommended = (thr == 65)
         bg = " style='background:#0d3d2f'" if is_recommended else ""
         crown = "⭐ " if is_recommended else ""
         q_rows_html += f"""
@@ -1506,15 +1513,15 @@ def build_all_trades_tab(period_items):
 </table>
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
   💡 <strong>Q スコア</strong> = シグナル発生時点の "品質予測" (0-100):<br>
-  &nbsp;&nbsp;BTスコア (×0.6) + 時間帯 (寄付/引け前=-10, 通常=+5)
-  + 同日同銘柄 (初=+10, 2回目=0, 3回目以上=-15)
-  + 同銘柄当日損切歴 (1回以上=-15)
-  + 当日累積PnL (+10K以上=+5, -10K以下=-10)<br>
-  🟢 <strong>80+</strong>: 確実エントリー (フルポジ) /
-  🟡 <strong>70-79</strong>: 慎重エントリー (ハーフポジ) /
-  ⚪ <strong>60-69</strong>: 待機 /
-  🔴 <strong>&lt;60</strong>: スキップ<br>
-  ⭐ <strong>Q≥75</strong> = 推奨運用閾値。look-ahead bias なし (シグナル発生時点の情報のみ)
+  &nbsp;&nbsp;BTスコア (基礎) + 時間帯 (寄付/引け前=-5, 通常=+5)
+  + 同日同銘柄 (初=+10, 2回目=0, 3回目=-10, 4回目以上=-15)
+  + 同銘柄当日損切歴 (1回以上=-10)
+  + 当日累積PnL (+10K以上=+5, -10K以下=-5)<br>
+  🟢 <strong>75+</strong>: 確実エントリー (フルポジ) /
+  🟡 <strong>65-74</strong>: 慎重エントリー (ハーフポジ) /
+  ⚪ <strong>55-64</strong>: 待機 /
+  🔴 <strong>&lt;55</strong>: スキップ<br>
+  ⭐ <strong>Q≥65</strong> = 推奨運用閾値。look-ahead bias なし (シグナル発生時点の情報のみ)
 </p>
 """
 
@@ -1662,8 +1669,8 @@ def build_date_tab(period_items, id_prefix=""):
         gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
         gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
         pf = gp / gl if gl > 0 else float("inf")
-        # Q≥70 のみの集計 (推奨閾値での損益)
-        rows_q70 = [r for r in rows if r.get("q_score", 0) >= 70]
+        # Q≥65 のみの集計 (推奨閾値での損益)
+        rows_q70 = [r for r in rows if r.get("q_score", 0) >= 65]
         q70_n = len(rows_q70)
         q70_gp = sum(r["pnl"] for r in rows_q70 if r["pnl"] > 0)
         q70_gl = abs(sum(r["pnl"] for r in rows_q70 if r["pnl"] <= 0))
@@ -1772,18 +1779,18 @@ def build_date_tab(period_items, id_prefix=""):
     <div class="vl {pc}">{s['total']:+,.0f}円</div></div>
 </div>"""
 
-        # Q≥70 推奨フィルタ サマリ (緑系背景)
+        # Q≥65 推奨フィルタ サマリ (緑系背景)
         q70_pc = "profit" if s["q70_total"] >= 0 else "loss"
         if s["q70_n"] > 0:
             q70_box = f"""
 <div class="box" style="background:#0d3d2f;border:1px solid #166534">
-  <div class="it"><div class="lb">🟡 Q≥70 取引</div>
+  <div class="it"><div class="lb">🟡 Q≥65 取引</div>
     <div class="vl">{s['q70_n']}</div></div>
   <div class="it"><div class="lb">勝率</div>
     <div class="vl">{s['q70_wr']:.0f}%</div></div>
   <div class="it"><div class="lb">PF</div>
     <div class="vl">{_pf(s['q70_pf'])}</div></div>
-  <div class="it"><div class="lb">損益 (Q≥70)</div>
+  <div class="it"><div class="lb">損益 (Q≥65)</div>
     <div class="vl {q70_pc}">{s['q70_total']:+,.0f}円</div></div>
   <div class="it"><div class="lb">削減</div>
     <div class="vl" style="color:#94a3b8;font-size:0.95rem">
@@ -1793,7 +1800,7 @@ def build_date_tab(period_items, id_prefix=""):
             q70_box = """
 <div class="box" style="background:#1e293b;border:1px solid #475569">
   <div style="color:#94a3b8;padding:8px">
-    🟡 Q≥70 のシグナルなし (この日はエントリー見送り推奨)
+    🟡 Q≥65 のシグナルなし (この日はエントリー見送り推奨)
   </div>
 </div>"""
 
@@ -1819,7 +1826,7 @@ def build_date_tab(period_items, id_prefix=""):
     total_gp = sum(s["gp"] for s in date_stats)
     total_gl = sum(s["gl"] for s in date_stats)
     overall_pc = "profit" if total_pnl >= 0 else "loss"
-    # Q≥70 全期間集計
+    # Q≥65 全期間集計
     total_q70_n = sum(s["q70_n"] for s in date_stats)
     total_q70 = sum(s["q70_total"] for s in date_stats)
     q70_overall_pc = "profit" if total_q70 >= 0 else "loss"
@@ -1838,11 +1845,11 @@ def build_date_tab(period_items, id_prefix=""):
 </div>
 
 <div class="box" style="background:#0d3d2f;border:1px solid #166534">
-  <div class="it"><div class="lb">🟡 Q≥70 全期間</div>
+  <div class="it"><div class="lb">🟡 Q≥65 全期間</div>
     <div class="vl">{total_q70_n:,}件</div></div>
   <div class="it"><div class="lb">削減率</div>
     <div class="vl" style="color:#94a3b8;font-size:1rem">-{reduction:.0f}%</div></div>
-  <div class="it"><div class="lb">Q≥70 損益</div>
+  <div class="it"><div class="lb">Q≥65 損益</div>
     <div class="vl {q70_overall_pc}">{total_q70:+,.0f}円</div></div>
   <div class="it"><div class="lb">削減後/総額比</div>
     <div class="vl" style="font-size:1rem">{(total_q70/total_pnl*100 if total_pnl else 0):.0f}%</div></div>
@@ -1862,7 +1869,7 @@ def build_date_tab(period_items, id_prefix=""):
   <thead><tr>
     <th rowspan="2">日付</th>
     <th colspan="6">全シグナル</th>
-    <th colspan="3" style="border-left:2px solid #334155">🟡 Q≥70 推奨フィルタ</th>
+    <th colspan="3" style="border-left:2px solid #334155">🟡 Q≥65 推奨フィルタ</th>
   </tr><tr>
     <th>取引数</th><th>勝率</th><th>PF</th>
     <th>利益</th><th>損</th><th>損益</th>
@@ -1871,7 +1878,7 @@ def build_date_tab(period_items, id_prefix=""):
   <tbody>{summary_rows}</tbody>
 </table>
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
-  💡 <strong>🟡 Q≥70 推奨フィルタ</strong>: シグナル品質スコアが 70 以上 (高品質) の取引のみに絞った場合の結果。
+  💡 <strong>🟡 Q≥65 推奨フィルタ</strong>: シグナル品質スコアが 65 以上 (高品質) の取引のみに絞った場合の結果。
   全体損益と比較して、品質フィルタによる「機会損失 vs 損失回避」のトレードオフを確認できます。
 </p>
 """
