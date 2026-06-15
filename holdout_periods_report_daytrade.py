@@ -997,6 +997,60 @@ def build_all_trades_tab(period_items):
   <td class="{cum_pc}"><strong>{row["cum_total"]:+,.0f}</strong></td>
 </tr>"""
 
+    # ── スコア閾値別 細分化 (★の中でさらに絞る用) ──
+    # 80 = ★★★, 60 = ★★, 40 = ★, 0 = △
+    thresholds = [
+        (80, "★★★ (80+)"),
+        (60, "★★以上 (60+)"),
+        (55, "★高 (55+)"),
+        (50, "★中 (50+)"),
+        (45, "★低+ (45+)"),
+        (40, "★以上 (40+)"),
+        (0,  "全件 (△含む)"),
+    ]
+    finer_rows_html = ""
+    for thr, label in thresholds:
+        sub = [r for r in all_rows if r["bt_score"] >= thr]
+        if not sub:
+            finer_rows_html += (f'<tr><td>{label}</td>'
+                                 f'<td colspan="4" style="color:#475569">該当なし</td>'
+                                 f'</tr>')
+            continue
+        gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in sub if r["pnl"] <= 0))
+        tot = gp - gl
+        wins = sum(1 for r in sub if r["pnl"] > 0)
+        wr = wins / len(sub) * 100
+        pf_v = gp / gl if gl > 0 else float("inf")
+        pc = "profit" if tot >= 0 else "loss"
+        # ハイライト: 全件比で大きく差がない最大スコア閾値
+        is_recommended = (thr == 50)
+        bg = " style='background:#0d3d2f'" if is_recommended else ""
+        crown = "⭐ " if is_recommended else ""
+        finer_rows_html += f"""
+<tr{bg}>
+  <td>{crown}<strong>{label}</strong></td>
+  <td>{len(sub):,}</td>
+  <td>{wr:.0f}%</td>
+  <td style="color:{_color_pf(pf_v)}">{_pf(pf_v)}</td>
+  <td class="{pc}"><strong>{tot:+,.0f}</strong></td>
+</tr>"""
+
+    finer_filter_box = f"""
+<h3 style="margin-top:14px">🎯 スコア閾値別 細分化フィルタ (★の中でさらに厳選)</h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th>BTスコア閾値</th><th>取引数</th><th>勝率</th><th>PF</th><th>損益</th>
+  </tr></thead>
+  <tbody>{finer_rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>★★以上 (60+)</strong> = 絶対エントリー (高品質)<br>
+  ⭐ <strong>★中 (50+)</strong> = 推奨閾値。★の中の上位だけを採用してリスクを抑える<br>
+  📊 全件比で損益がほぼ同等な最大閾値が「最適な厳選レベル」になります
+</p>
+"""
+
     bt_filter_box = f"""
 <h3 style="margin-top:8px">📊 BTランク別 取引フィルタ (閾値で絞った場合の損益)</h3>
 <table style="font-size:0.82rem">
@@ -1050,6 +1104,7 @@ def build_all_trades_tab(period_items):
     return f"""
 {sum_box}
 {bt_filter_box}
+{finer_filter_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
   💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
