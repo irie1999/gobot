@@ -2146,9 +2146,6 @@ def build_date_tab(period_items, id_prefix=""):
     total_pnl_all = sum(s["total_all"] for s in date_stats)
     all_pc = "profit" if total_pnl_all >= 0 else "loss"
 
-    overall_tier_box = build_tier_filter_box(
-        all_rows, heading="🎯 BT × Q 4段階ティア別シミュレーション (全期間)")
-
     # 直近 detail_limit 日 (= 日付ボタンに表示される範囲) の主力集計
     recent = date_stats[:detail_limit]
     recent_n = sum(s["n"] for s in recent)
@@ -2191,8 +2188,6 @@ def build_date_tab(period_items, id_prefix=""):
     <div class="vl" style="font-size:1rem">
       {(total_n/total_n_all*100 if total_n_all else 0):.0f}%</div></div>
 </div>
-
-{overall_tier_box}
 
 <h3 style="margin-bottom:4px">📅 日付ボタン (クリックで詳細表示、直近{min(len(date_stats), detail_limit)}日)</h3>
 <div class="box" style="background:#0d2818;border:1px solid #4ade80;margin:4px 0 8px">
@@ -3164,13 +3159,26 @@ function jumpToSym(sid){
         # 各サイドで Q を計算済みの状態にする (extract 後に compute)
         compute_quality_scores(long_main_trades)
         compute_quality_scores(short_main_trades)
-        l_cap_w = _compute_concurrent_capital(long_main_trades, weighted=True)
-        l_cap_e = _compute_concurrent_capital(long_main_trades, weighted=False)
-        s_cap_w = _compute_concurrent_capital(short_main_trades, weighted=True)
-        s_cap_e = _compute_concurrent_capital(short_main_trades, weighted=False)
-        combined_main = long_main_trades + short_main_trades
-        c_cap_w = _compute_concurrent_capital(combined_main, weighted=True)
-        c_cap_e = _compute_concurrent_capital(combined_main, weighted=False)
+
+        # 直近 60 日に絞り込み
+        cutoff = today - timedelta(days=60)
+
+        def _recent(trades):
+            return [t for t in trades
+                    if hasattr(t.get("entry_dt"), "date")
+                    and t["entry_dt"].date() >= cutoff]
+
+        long_recent = _recent(long_main_trades)
+        short_recent = _recent(short_main_trades)
+
+        l_cap_w = _compute_concurrent_capital(long_recent, weighted=True)
+        l_cap_e = _compute_concurrent_capital(long_recent, weighted=False)
+        s_cap_w = _compute_concurrent_capital(short_recent, weighted=True)
+        s_cap_e = _compute_concurrent_capital(short_recent, weighted=False)
+        c_cap_w = _compute_concurrent_capital(
+            long_recent + short_recent, weighted=True)
+        c_cap_e = _compute_concurrent_capital(
+            long_recent + short_recent, weighted=False)
 
         def _avg(daily):
             return sum(daily.values()) / len(daily) if daily else 0
@@ -3179,18 +3187,18 @@ function jumpToSym(sid){
             return f"{v/10_000:,.0f} 万円"
 
         capital_box = f"""
-<details open style="margin:10px 0">
+<details style="margin:10px 0">
   <summary style="cursor:pointer;padding:10px 14px;background:#0d2818;
                   border:1px solid #4ade80;border-radius:6px;
                   color:#86efac;font-size:0.95rem;font-weight:700;user-select:none">
-    💰 同時資金拘束 (主力 S+A+B シグナル、LONG+SHORT 合算)
+    💰 同時資金拘束 (主力 S+A+B シグナル、LONG+SHORT 合算 — 直近60日)
   </summary>
   <div style="margin-top:8px;padding:12px 16px;background:#0f172a;
               border:1px solid #1e3a5f;border-radius:8px">
     <table style="font-size:0.85rem;margin-bottom:8px">
       <thead><tr>
         <th>区分</th>
-        <th>主力件数</th>
+        <th>主力件数<br><small>(直近60日)</small></th>
         <th>最大ピーク<br><small>(等倍)</small></th>
         <th>最大ピーク<br><small>(重み付き)</small></th>
         <th>平均日次ピーク<br><small>(重み付き)</small></th>
@@ -3220,6 +3228,7 @@ function jumpToSym(sid){
       </tbody>
     </table>
     <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 0">
+      💡 <strong>集計対象</strong> = 直近60日間に発生した主力 (S+A+B) シグナル。<br>
       💡 <strong>等倍</strong> = 全銘柄フルサイズ建玉 (S/A/B 区別なし) /
       <strong>重み付き</strong> = S級×1.0 + A級×0.75 + B級×0.5 のポジ比例。<br>
       📐 LONG は現物想定、SHORT は信用売り。
