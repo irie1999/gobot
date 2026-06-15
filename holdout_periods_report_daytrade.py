@@ -1272,16 +1272,16 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
     if not all_rows:
         return ""
     tier_defs = [
-        ("🟢 S級", 55, 75, 1.00, "フルポジ"),
-        ("🟢 A級", 50, 70, 0.75, "3/4 ポジ"),
-        ("🟡 B級", 50, 65, 0.50, "1/2 ポジ"),
-        ("⚪ C級", 45, 60, 0.25, "1/4 ポジ"),
+        ("🟢 S級", "BT≥55 & Q≥75", 55, 75, 1.00, "フルポジ"),
+        ("🟢 A級", "BT≥50 & Q≥70", 50, 70, 0.75, "3/4 ポジ"),
+        ("🟡 B級", "BT≥50 & Q≥65", 50, 65, 0.50, "1/2 ポジ"),
+        ("⚪ C級", "上記以外 (全残り)", 0, 0, 0.25, "1/4 ポジ"),
     ]
     tier_rows_html = ""
     used_idx = set()
     combined = {"n": 0, "gp": 0.0, "gl": 0.0, "weighted_pnl": 0.0,
                 "wins": 0, "losses": 0}
-    for label, bt_min, q_min, weight, posdesc in tier_defs:
+    for label, crit, bt_min, q_min, weight, posdesc in tier_defs:
         sub = []
         for i, r in enumerate(all_rows):
             if i in used_idx:
@@ -1290,7 +1290,7 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
                 sub.append((i, r))
         if not sub:
             tier_rows_html += (f'<tr><td><strong>{label}</strong><br>'
-                                f'<small>BT≥{bt_min} & Q≥{q_min}</small></td>'
+                                f'<small>{crit}</small></td>'
                                 f'<td>{posdesc}</td>'
                                 f'<td colspan="7" style="color:#475569">該当なし</td>'
                                 f'</tr>')
@@ -1316,7 +1316,7 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
         wpc = "profit" if weighted >= 0 else "loss"
         tier_rows_html += f"""
 <tr>
-  <td><strong>{label}</strong><br><small>BT≥{bt_min} & Q≥{q_min}</small></td>
+  <td><strong>{label}</strong><br><small>{crit}</small></td>
   <td>{posdesc}<br><small style="color:#94a3b8">×{weight:.2f}</small></td>
   <td>{len(rows):,}</td>
   <td>{wr:.0f}%</td>
@@ -1362,11 +1362,13 @@ def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シ
 </table>
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
   💡 <strong>4段階ティア</strong> = BTスコアとQスコアの組み合わせで採用シグナルを階層分け。
-  上位ティアで採用済の取引は下位ティアでは除外 (重複カウント防止)。<br>
+  上位ティアで採用済の取引は下位ティアでは除外 (重複カウント防止)。
+  <strong>C級は「上位3ティアに該当しなかった残り全て」</strong>を吸収する打診枠なので、
+  全ティア合算 = その期間の全取引 になる。<br>
   &nbsp;&nbsp;🟢 <strong>S級</strong>: 最高品質 (フルポジで攻める) /
   🟢 <strong>A級</strong>: 高品質 (3/4 で標準運用) /
   🟡 <strong>B級</strong>: 中品質 (1/2 で慎重) /
-  ⚪ <strong>C級</strong>: 標準 (1/4 で打診)<br>
+  ⚪ <strong>C級</strong>: 残り全て (1/4 で打診)<br>
   📐 <strong>重み損益</strong> = 各ティアの素損益 × ポジションサイズ倍率の合計。
   実運用に近い「資金効率」を表現。
 </p>
