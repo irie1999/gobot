@@ -878,3 +878,87 @@ import score_speed_patch  # check_signals_stop/breakout の calc_recommend_score
 `run_limit_backtest` は唯一の約定ロジックなので、`run_signals.py` /
 `verify_watchlist.py` / `forward_test.py` / `scan_walkforward.py` /
 `nikkei_analysis*.py` すべてに自動反映される。
+
+---
+
+## 17. BTスコア・WFテスト・In-sample/OOSの関係（重要）
+
+### 17.1 日次運用コマンド（最重要）
+
+```bash
+# ロング+ショート統合（1コマンド）
+python run_signals_holdout_all.py --both --max-price 6000 --min-price 1000 --force --days 365
+```
+
+出力: `signals_holdout_all_both_YYYY-MM-DD.html`（ロング/ショートタブ切替）
+
+個別実行:
+```bash
+python run_signals_holdout_all.py --max-price 6000 --min-price 1000 --force --days 365
+python run_signals_holdout_all.py --short --max-price 6000 --min-price 1000 --force --days 365
+```
+
+### 17.2 BTスコアの計算方法
+
+**BTスコアは WATCHLIST内の銘柄×戦略ごとに1つ**（ホールドアウト設定とは独立）。
+
+`check_signals_stop.calc_recommend_score` / `check_signals_breakout.calc_recommend_score`
+（2ファイルに同一実装）
+
+```
+BTスコア (0〜100) =
+  直近365日バックテストを 30/60/90/120/150/180日 の6期間にスライス
+  ↓ 全期間の平均で以下を算出
+  平均勝率        × 0.4   → 最大40点
+  平均PF ÷ 10    × 30   → 最大30点 (PF=10以上でキャップ、∞は10扱い)
+  期間安定性      × 20   → 最大20点 (プラス期間数 / 有効期間数)
+  取引回数補正    × 10   → 最大10点 (合計20取引で満点)
+
+ランク: ★★★≥80, ★★≥60, ★≥40, △<40
+```
+
+ATRペナルティ (`apply_atr_penalty`):
+- 損切り幅≤7%: ペナルティなし
+- 損切り幅>7%: スコア × max(0.5, 1 - (損切り幅-7%) / 30)
+- 損切り幅≥37%: スコア × 0.5（最大50%減）
+
+### 17.3 WalkForward の銘柄選定とIn-sample/OOSの関係
+
+```
+時間軸（過去 → 今日）
+
+│←── WF訓練+テスト期間（銘柄選定に使用）────→│←ホールドアウト N日→│ 今日
+│  Fold1: [TRAIN 12M][TEST 6M]              │                   │
+│          Fold2: [TRAIN 12M][TEST 6M]      │                   │
+│                                           │                   │
+│ ← scan_walkforward.py がここで銘柄選定 →  │←── OOS検証領域 ───│
+└───────────────────────────────────────────────────────────────┘
+```
+
+**6ホールドアウト設定（HO30d〜HO180d）それぞれが異なる銘柄セット（WATCHLIST）を持つ**：
+- HO30d: 直近30日を除いた期間でスキャン → 直近30日がOOS
+- HO180d: 直近180日を除いた期間でスキャン → 直近180日がOOS
+
+### 17.4 BTスコアのIn-sample biasに注意
+
+BTスコアは直近365日（= WF訓練期間 + ホールドアウト期間）を全部使って計算される。
+**つまりBTスコアには銘柄選定に使ったIn-sample期間も含まれており、Biasがある。**
+
+| 区分 | WF銘柄選定 | BTスコアに含まれるか |
+|------|-----------|---------------------|
+| WF訓練+テスト期間 | 使った（In-sample） | **含まれる ← Bias** |
+| ホールドアウト期間 | 使っていない（OOS） | 含まれる（純粋OOS部分）|
+
+**実運用での解釈指針**:
+- BTスコアは「直近1年の実績」の参考値として使う（銘柄選定の根拠にはしない）
+- 銘柄選定の信頼性は WF テスト期間の成績（scan_walkforward CSV の `total_test_pnl`）で判断
+- **損益タブ**（ホールドアウト設定別のPnL）が最も信頼できるOOS検証。HO180dで安定してプラスなら本物
+- BTスコア≥60 は「直近1年で機能していた」という意味であり、「これからも機能する」保証ではない
+
+### 17.5 トレンド継続日数の計算（2026-06-15改修済み）
+
+`nikkei_analysis.py` の `extract_periods` / `_append_up`:
+- **旧**: `(end_date - start_date).days` → 土日祝を含む暦日数
+- **新**: `end_idx - start_idx` → yfinanceデータのバー数 = 土日祝を除く営業日数
+
+表示ラベルは「日」（「営業日」ではない）。統計・分布・継続予測はすべて営業日ベースで再計算済み。
