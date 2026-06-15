@@ -1775,12 +1775,12 @@ def main():
                         help="yfinance_update.py を強制実行して今日のデータも取得 "
                              "(市場閉場後の実行で今日の取引を集計したい時)")
     parser.add_argument("--daily", action="store_true",
-                        help="🔔 運用モード: 監視対象 WATCHLIST 限定で "
-                             "今日のデータも取得して検証。"
-                             "内部設定: --universe winners --both --update-data --force "
-                             "--max-price 6000 --min-price 1000。"
+                        help="🔔 運用モード: 監視対象 WATCHLIST 限定で運用。"
+                             "内部設定: --universe winners --both --force "
+                             "--max-price 6000 --min-price 1000 + 賢い鮮度判定 "
+                             "(データが今日付でなければ更新、今日付なら高速スキップ)。"
                              "朝も引け後もこの1コマンドで OK。"
-                             "個別フラグで上書き可 (例: --daily --max-price 5000)")
+                             "場中の最新バーを強制再取得したい時は --daily --update-data。")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--refresh-bt-scores", action="store_true",
                         help="BTスコア凍結キャッシュを破棄して全再計算 "
@@ -1793,22 +1793,27 @@ def main():
         args.no_auto = True        # CSV 自動検出を無効化
         if not args.both and not args.short and not args.long_only:
             args.both = True
-        args.update_data = True
+        # update_data はデフォルト False のまま (鮮度判定の threshold=0 で
+        # データが今日付ならスキップ、古ければ更新の "賢い" 動作)
+        # 場中の最新バーを強制取得したい時は明示的に --update-data
         args.force = True
         if args.max_price == 10_000:
             args.max_price = 6_000
         if args.min_price == 0:
             args.min_price = 1_000
-        print("[--daily] 🔔 運用モード: WATCHLIST 限定 / 今日のデータ取得 / "
-              "ロング/ショート両建て")
+        print("[--daily] 🔔 運用モード: WATCHLIST 限定 / "
+              "データが今日付でなければ更新 / ロング/ショート両建て")
 
     # データ鮮度チェック + 自動更新 (--update-data 時は強制)
     # WATCHLIST モード時は更新も WATCHLIST のみに限定
+    # --daily 時は threshold=0 (今日付でなければ更新、今日付なら高速スキップ)
     data_latest = None
     if not args.no_fresh_check:
         wl_file = (args.watchlist
                    if args.universe == "winners" else None)
+        threshold = 0 if args.daily else 4
         data_latest = _check_data_freshness(
+            min_age_days=threshold,
             auto_update=not args.no_auto_update,
             force_update=args.update_data,
             watchlist_file=wl_file)
