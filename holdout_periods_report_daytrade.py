@@ -1288,6 +1288,88 @@ def _is_main_tier(bt_score, q_score):
     return bt_score >= 50 and q_score >= 65
 
 
+def _extract_main_trades(period_items):
+    """period_items から主力 (S+A+B) の取引を重複なく抽出。
+
+    各 (sym, strategy) ペアは max_P (最長期間) の test_trades を採用、
+    build_date_tab と同じ集約ルール。
+    """
+    agg = {}
+    for P, items in period_items.items():
+        for it in items:
+            key = (it["symbol"], it["strategy"])
+            if key not in agg:
+                agg[key] = {"periods": {},
+                            "bt_score": it.get("bt_score", 0)}
+            agg[key]["periods"][P] = it.get("test_trades", [])
+    out = []
+    for (sym, strat), entry in agg.items():
+        if not entry["periods"]:
+            continue
+        max_P = max(entry["periods"].keys())
+        for t in entry["periods"][max_P]:
+            out.append({**t, "_sym": sym, "_strat": strat,
+                        "_bt_score": entry["bt_score"]})
+    return out
+
+
+def _compute_concurrent_capital(trades, weighted=True):
+    """同時建玉資金 (peak/avg) を計算。
+
+    trades: 取引リスト。Q スコア算出済みであること。
+    weighted=True なら S=1.0/A=0.75/B=0.5 のポジション倍率を適用、
+    False なら等倍で集計。
+    戻り値: {"peak": int, "daily_peaks": {date: int}, "n_main": int}
+    """
+    try:
+        from daytrade_data import calc_position_size
+    except Exception:
+        calc_position_size = None
+
+    # Q スコアが付いていない場合は仮計算
+    if trades and "q_score" not in trades[0]:
+        compute_quality_scores(trades)
+
+    events = []  # (datetime, delta_value)
+    n_main = 0
+    for t in trades:
+        bt = t.get("_bt_score", t.get("bt_score", 0))
+        q = t.get("q_score", 0)
+        if not _is_main_tier(bt, q):
+            continue
+        n_main += 1
+        edt = t.get("entry_dt")
+        xdt = t.get("exit_dt")
+        if edt is None or xdt is None:
+            continue
+        entry_p = t.get("entry_p", 0)
+        qty = t.get("qty", 0)
+        if (not qty or qty <= 0) and calc_position_size and entry_p > 0:
+            qty = calc_position_size(entry_p, t.get("stop_p", 0),
+                                       600_000, 6_000)
+        value = entry_p * qty
+        if weighted:
+            value *= _tier_weight(bt, q)
+        if value <= 0:
+            continue
+        events.append((edt, +value))
+        events.append((xdt, -value))
+
+    events.sort(key=lambda e: (e[0], e[1]))  # exit (負) を先に処理 → 過大評価を防ぐ
+    cur = 0.0
+    peak = 0.0
+    daily_peaks = {}
+    for ts, delta in events:
+        cur += delta
+        if cur > peak:
+            peak = cur
+        if hasattr(ts, "date"):
+            d = ts.date()
+            if cur > daily_peaks.get(d, 0):
+                daily_peaks[d] = cur
+    return {"peak": int(peak), "daily_peaks": daily_peaks, "n_main": n_main}
+
+
 def build_tier_filter_box(all_rows, heading="🎯 BT × Q 4段階ティア別シミュレーション"):
     """BT × Q の4段階ティア別シミュレーション表を生成。
 
@@ -3075,9 +3157,86 @@ function jumpToSym(sid){
 </details>
 """
 
+    # ── 💰 同時資金拘束 (B+ シグナル LONG+SHORT 合算) ──
+    if args.both:
+        long_main_trades = _extract_main_trades(period_items_long)
+        short_main_trades = _extract_main_trades(period_items_short)
+        # 各サイドで Q を計算済みの状態にする (extract 後に compute)
+        compute_quality_scores(long_main_trades)
+        compute_quality_scores(short_main_trades)
+        l_cap_w = _compute_concurrent_capital(long_main_trades, weighted=True)
+        l_cap_e = _compute_concurrent_capital(long_main_trades, weighted=False)
+        s_cap_w = _compute_concurrent_capital(short_main_trades, weighted=True)
+        s_cap_e = _compute_concurrent_capital(short_main_trades, weighted=False)
+        combined_main = long_main_trades + short_main_trades
+        c_cap_w = _compute_concurrent_capital(combined_main, weighted=True)
+        c_cap_e = _compute_concurrent_capital(combined_main, weighted=False)
+
+        def _avg(daily):
+            return sum(daily.values()) / len(daily) if daily else 0
+
+        def _y(v):  # 万円表示
+            return f"{v/10_000:,.0f} 万円"
+
+        capital_box = f"""
+<details open style="margin:10px 0">
+  <summary style="cursor:pointer;padding:10px 14px;background:#0d2818;
+                  border:1px solid #4ade80;border-radius:6px;
+                  color:#86efac;font-size:0.95rem;font-weight:700;user-select:none">
+    💰 同時資金拘束 (主力 S+A+B シグナル、LONG+SHORT 合算)
+  </summary>
+  <div style="margin-top:8px;padding:12px 16px;background:#0f172a;
+              border:1px solid #1e3a5f;border-radius:8px">
+    <table style="font-size:0.85rem;margin-bottom:8px">
+      <thead><tr>
+        <th>区分</th>
+        <th>主力件数</th>
+        <th>最大ピーク<br><small>(等倍)</small></th>
+        <th>最大ピーク<br><small>(重み付き)</small></th>
+        <th>平均日次ピーク<br><small>(重み付き)</small></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>📈 LONG (現物相当)</strong></td>
+          <td>{l_cap_w['n_main']:,}</td>
+          <td>{_y(l_cap_e['peak'])}</td>
+          <td style="color:#4ade80">{_y(l_cap_w['peak'])}</td>
+          <td>{_y(_avg(l_cap_w['daily_peaks']))}</td>
+        </tr>
+        <tr>
+          <td><strong>📉 SHORT (信用)</strong></td>
+          <td>{s_cap_w['n_main']:,}</td>
+          <td>{_y(s_cap_e['peak'])}</td>
+          <td style="color:#4ade80">{_y(s_cap_w['peak'])}</td>
+          <td>{_y(_avg(s_cap_w['daily_peaks']))}</td>
+        </tr>
+        <tr style="background:#0d2818;border-top:2px solid #4ade80">
+          <td><strong>💰 合算 (LONG+SHORT)</strong></td>
+          <td><strong>{c_cap_w['n_main']:,}</strong></td>
+          <td><strong>{_y(c_cap_e['peak'])}</strong></td>
+          <td style="color:#4ade80"><strong>{_y(c_cap_w['peak'])}</strong></td>
+          <td><strong>{_y(_avg(c_cap_w['daily_peaks']))}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 0">
+      💡 <strong>等倍</strong> = 全銘柄フルサイズ建玉 (S/A/B 区別なし) /
+      <strong>重み付き</strong> = S級×1.0 + A級×0.75 + B級×0.5 のポジ比例。<br>
+      📐 LONG は現物想定、SHORT は信用売り。
+      実必要資金は SHORT 部分について信用取引なら表示値の <strong>約 1/3</strong> (委託保証金率 33%)。<br>
+      ⚠️ ポジサイズは BUDGET=60万円 / MAX_RISK=6千円 のリスク逆算式 (
+        <code>calc_position_size</code>)。
+      実運用で建玉サイズを変える場合は比例で換算可。
+    </p>
+  </div>
+</details>
+"""
+    else:
+        capital_box = ""
+
     # body 構成
     if args.both:
-        body_main = side_section
+        body_main = capital_box + side_section
     else:
         body_main = f'<div class="tab-nav">{tab_btns}</div>{tab_panes}'
 
