@@ -579,18 +579,13 @@ def build_detail_tab(period_items, id_prefix=""):
                                f'<span class="{pc}">{es["total_pnl"]:+,.0f}円</span>'
                                f'</span>')
 
-        # 全期間共通 TRAIN 統計 (180日タブのもの = もっとも過去のTRAIN)
-        # 取引明細は最も古いTESTを基準にすべての取引を統合表示
+        # 取引明細は「最も長い期間」の trades を使う (重複バグ回避)
+        # 例: 60日タブの trades = 30日タブの trades の super set なので
+        #     最長期間 (max P) を採用すれば全取引網羅
         all_test_trades = []
-        seen_dt = set()
-        for P in sorted(entry["periods"].keys(), reverse=True):
-            for t in entry["periods"][P]["test_trades"]:
-                edt = t.get("entry_dt")
-                edt_key = str(edt)
-                if edt_key in seen_dt:
-                    continue
-                seen_dt.add(edt_key)
-                all_test_trades.append(t)
+        if entry["periods"]:
+            max_P = max(entry["periods"].keys())
+            all_test_trades = list(entry["periods"][max_P]["test_trades"])
         all_test_trades.sort(key=lambda t: str(t.get("entry_dt", "")), reverse=True)
 
         trade_rows = ""
