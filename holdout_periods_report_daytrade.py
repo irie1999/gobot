@@ -1294,6 +1294,8 @@ def compute_q_plus_scores(all_rows):
                 stop_adj = 5
             elif stop_pct < 0.3:
                 stop_adj = -8
+            elif stop_pct > 2.0:      # 強化: 極端広stop (ウイン・パートナーズ A7 等)
+                stop_adj = -10
             elif stop_pct > 1.5:
                 stop_adj = -3
             if stop_adj != 0:
@@ -1463,10 +1465,89 @@ def build_q_plus_simulation_box(all_rows,
 <p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
   💡 <strong>Q+ スコア</strong> = 既存 Q + 以下の補正 (look-ahead bias なし):<br>
   &nbsp;&nbsp;① <strong>ペア固有勝率</strong>: (銘柄×戦略) 過去20取引の勝率に応じて ±15点<br>
-  &nbsp;&nbsp;② <strong>損切り幅プロファイル</strong>: 0.4-0.8%=+5 / &lt;0.3%=-8 / &gt;1.5%=-3<br>
+  &nbsp;&nbsp;② <strong>損切り幅プロファイル</strong>: 0.4-0.8%=+5 / &lt;0.3%=-8 / &gt;1.5%=-3 / <strong>&gt;2.0%=-10 (強化)</strong><br>
   &nbsp;&nbsp;③ <strong>市場ストレス連動</strong>: 同日主力PnL+5K以上=+5 / 損切3回=-15<br>
   ⭐ <strong>Q+≥70</strong> = 推奨想定閾値 (実装時の初期値候補)。<br>
   💰 <strong>隠れB級は B級と同じ 1/2 ポジ</strong>で集計。重み損益の差分 (主力ベースとの増減) で実装効果を判断。
+</p>
+"""
+
+
+def build_production_summary_box(all_rows):
+    """✨ 本番運用ターゲット (主力 + SHORT 隠れB級) サマリ。
+
+    SHORT 戦略で Q+≥70 のC級取引をB級扱いに昇格 = 実取引対象に追加。
+    本番組み込み (フェーズB) の効果を可視化。
+    """
+    if not all_rows:
+        return ""
+
+    # Q+ 計算 (未計算なら)
+    if "q_plus" not in all_rows[0]:
+        compute_q_plus_scores(all_rows)
+
+    hidden = [r for r in all_rows if _is_hidden_b_short(r)]
+    if not hidden:
+        return ""  # LONG 側 = 該当なし → 非表示
+
+    main_only = [r for r in all_rows
+                 if _is_main_tier(r.get("bt_score", 0),
+                                    r.get("q_score", 0))]
+    actual = [r for r in all_rows if _is_actually_traded(r)]
+
+    def _stats(rows, weight_fn):
+        if not rows:
+            return {"n": 0, "wr": 0, "pf": 0, "gp": 0, "gl": 0,
+                    "total": 0, "weighted": 0}
+        n = len(rows)
+        wins = sum(1 for r in rows if r["pnl"] > 0)
+        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] <= 0))
+        return {
+            "n": n,
+            "wr": wins / n * 100,
+            "pf": gp / gl if gl > 0 else float("inf"),
+            "gp": gp, "gl": gl,
+            "total": gp - gl,
+            "weighted": sum(r["pnl"] * weight_fn(r) for r in rows),
+        }
+
+    base = _stats(main_only,
+                   lambda r: _tier_weight(r["bt_score"], r["q_score"]))
+    prod = _stats(actual, _effective_tier_weight)
+    hidden_stats = _stats(hidden, lambda r: 0.5)
+
+    delta_w = prod["weighted"] - base["weighted"]
+    delta_pc = "profit" if delta_w >= 0 else "loss"
+    prod_pc = "profit" if prod["weighted"] >= 0 else "loss"
+    total_pc = "profit" if prod["total"] >= 0 else "loss"
+
+    return f"""
+<h3 style="margin-top:14px">✨ 本番運用ターゲット (主力 + SHORT 隠れB級)
+  <small style="color:#94a3b8;font-weight:normal">— Q+≥70 で C級から昇格</small></h3>
+<div class="box" style="background:#0d2818;border:2px solid #4ade80">
+  <div class="it"><div class="lb">本番取引<br>件数</div>
+    <div class="vl">{prod['n']}</div></div>
+  <div class="it"><div class="lb">主力<br><small>(従来)</small></div>
+    <div class="vl" style="color:#86efac">{base['n']}</div></div>
+  <div class="it"><div class="lb">隠れB追加</div>
+    <div class="vl" style="color:#fbbf24">+{hidden_stats['n']}</div></div>
+  <div class="it"><div class="lb">勝率</div>
+    <div class="vl">{prod['wr']:.0f}%</div></div>
+  <div class="it"><div class="lb">PF</div>
+    <div class="vl">{_pf(prod['pf'])}</div></div>
+  <div class="it"><div class="lb">素損益</div>
+    <div class="vl {total_pc}">{prod['total']:+,.0f}円</div></div>
+  <div class="it"><div class="lb">重み損益<br><small>(ポジ比例)</small></div>
+    <div class="vl {prod_pc}">{prod['weighted']:+,.0f}円</div></div>
+  <div class="it"><div class="lb">主力比<br>増分</div>
+    <div class="vl {delta_pc}">{delta_w:+,.0f}円</div></div>
+</div>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 <strong>本番運用ターゲット</strong> = 主力 (S+A+B) + SHORT限定の隠れB級 (C級内で Q+≥70 の高品質取引)。<br>
+  🎯 SHORT 側のみ採用。LONG はベース主力のまま (Q+効果が薄く別途検討要)。<br>
+  📐 隠れB級はB級と同じ <strong>×0.5 ポジサイズ</strong>で運用想定。<br>
+  📊 <strong>隠れB単体</strong>: {hidden_stats['n']}件 / 勝率{hidden_stats['wr']:.0f}% / PF {_pf(hidden_stats['pf'])} / 重み損益 {hidden_stats['weighted']:+,.0f}円
 </p>
 """
 
@@ -1665,6 +1746,37 @@ def _tier_weight(bt_score, q_score):
 def _is_main_tier(bt_score, q_score):
     """主力 (S+A+B = 実際の取引対象) かどうか。"""
     return bt_score >= 50 and q_score >= 65
+
+
+def _is_short_trade(strat):
+    """SHORT 戦略かどうか (_S サフィックス)。"""
+    return isinstance(strat, str) and strat.endswith("_S")
+
+
+def _is_hidden_b_short(r):
+    """SHORT 限定の隠れB級。Q+ 計算済みが前提。
+
+    元はC級だが Q+≥70 で B級と同等品質と判定された SHORT 取引。
+    本番運用ではB級扱い (×0.5 ポジ) で実取引対象に追加。
+    """
+    if not _is_short_trade(r.get("strat", "")):
+        return False
+    if _is_main_tier(r.get("bt_score", 0), r.get("q_score", 0)):
+        return False
+    return r.get("q_plus", 0) >= 70
+
+
+def _is_actually_traded(r):
+    """本番運用の実取引対象。主力(S+A+B) + SHORT隠れB級。"""
+    return (_is_main_tier(r.get("bt_score", 0), r.get("q_score", 0))
+            or _is_hidden_b_short(r))
+
+
+def _effective_tier_weight(r):
+    """本番運用時のポジションサイズ重み。隠れB級はB級扱い(×0.5)。"""
+    if _is_hidden_b_short(r):
+        return 0.5
+    return _tier_weight(r.get("bt_score", 0), r.get("q_score", 0))
 
 
 def _extract_main_trades(period_items):
@@ -2167,6 +2279,9 @@ def build_all_trades_tab(period_items):
 
     tier_filter_box = build_tier_filter_box(all_rows)
 
+    # Q+ 早期計算 → 本番ターゲット集計で利用
+    compute_q_plus_scores(all_rows)
+    production_box = build_production_summary_box(all_rows)
     q_plus_sim_box = build_q_plus_simulation_box(all_rows)
     hidden_b_box = build_hidden_b_detail_box(all_rows, threshold=70)
 
@@ -2261,6 +2376,7 @@ def build_all_trades_tab(period_items):
 {finer_filter_box}
 {q_filter_box}
 {tier_filter_box}
+{production_box}
 {q_plus_sim_box}
 {hidden_b_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
@@ -2338,14 +2454,15 @@ def build_date_tab(period_items, id_prefix=""):
 
     dates_sorted = sorted(by_date.keys(), reverse=True)
 
-    # 日付別サマリ — PRIMARY = 主力 (S+A+B) / 全体は参考
+    # Q+ 計算 → 本番取引対象 (主力 + SHORT 隠れB級) を集計に組み込み
+    compute_q_plus_scores(all_rows)
+
+    # 日付別サマリ — PRIMARY = 本番取引対象 (主力 + SHORT 隠れB) / 全体は参考
     date_stats = []
     for d in dates_sorted:
         rows_all = by_date[d]
-        rows_main = [r for r in rows_all
-                     if _is_main_tier(r.get("bt_score", 0),
-                                       r.get("q_score", 0))]
-        # 主力 (S+A+B) サマリ
+        rows_main = [r for r in rows_all if _is_actually_traded(r)]
+        # 本番取引対象サマリ
         n = len(rows_main)
         wins = sum(1 for r in rows_main if r["pnl"] > 0)
         wr = wins / n * 100 if n > 0 else 0
@@ -2353,16 +2470,16 @@ def build_date_tab(period_items, id_prefix=""):
         gl = abs(sum(r["pnl"] for r in rows_main if r["pnl"] <= 0))
         pf = gp / gl if gl > 0 else float("inf")
         total = gp - gl
-        weighted = sum(r["pnl"] * _tier_weight(r.get("bt_score", 0),
-                                                r.get("q_score", 0))
+        weighted = sum(r["pnl"] * _effective_tier_weight(r)
                        for r in rows_main)
+        hidden_n = sum(1 for r in rows_main if _is_hidden_b_short(r))
         # 全体 (C含む参考)
         n_all = len(rows_all)
         total_all = sum(r["pnl"] for r in rows_all)
         date_stats.append({
             "date": d, "n": n, "wr": wr,
             "gp": gp, "gl": gl, "pf": pf, "total": total,
-            "weighted": weighted,
+            "weighted": weighted, "hidden_n": hidden_n,
             "n_all": n_all, "total_all": total_all,
         })
 
@@ -2458,10 +2575,14 @@ def build_date_tab(period_items, id_prefix=""):
         # 日サマリボックス (主力 = S+A+B を primary、全体は参考)
         wpc = "profit" if s["weighted"] >= 0 else "loss"
         all_pc = "profit" if s["total_all"] >= 0 else "loss"
+        hidden_n = s.get("hidden_n", 0)
+        label = ("📌 本番取引対象<br><small style=\"color:#86efac\">"
+                 f"(主力 + 隠れB {hidden_n})</small>"
+                 if hidden_n > 0 else "📌 主力 (S+A+B)")
         if s["n"] > 0:
             sum_box = f"""
 <div class="box" style="background:#0d2818;border:1px solid #4ade80">
-  <div class="it"><div class="lb">📌 主力 (S+A+B)</div>
+  <div class="it"><div class="lb">{label}</div>
     <div class="vl">{s['n']}件</div></div>
   <div class="it"><div class="lb">勝率</div>
     <div class="vl">{s['wr']:.0f}%</div></div>
@@ -2480,7 +2601,7 @@ def build_date_tab(period_items, id_prefix=""):
             sum_box = """
 <div class="box" style="background:#1e293b;border:1px solid #475569">
   <div style="color:#94a3b8;padding:8px">
-    📌 主力 (S+A+B) シグナルなし (この日はエントリー見送り)
+    📌 本番取引対象シグナルなし (この日はエントリー見送り)
   </div>
 </div>"""
 
