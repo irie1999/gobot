@@ -70,7 +70,7 @@ from daytrade_data import load_intraday_batch
 from daytrade_engine_5m import backtest_symbol_5m, calc_stats
 from daytrade_strategies_5m import STRATEGIES
 from daytrade_strategies_5m_short import STRATEGIES_SHORT
-from risk_metrics_5m import enrich_stats
+from risk_metrics_5m import enrich_stats, calc_recommend_score
 from data_sanity_check import check_one
 from _open_html import open_html
 
@@ -149,6 +149,37 @@ def _pkl_signature(sym):
     except Exception:
         pass
     return (0.0, 0)
+
+
+def compute_bt_scores(results, today, budget):
+    """各 (sym, strat) について 6期間の TEST stats を集めて
+    calc_recommend_score で BTスコア (0-100点+★ランク) を計算。
+
+    戻り値: {(sym, strat): (score, rank)}
+    """
+    scores = {}
+    for (sym, strat, _name), trades in results.items():
+        if not trades:
+            scores[(sym, strat)] = (0, "△")
+            continue
+        stats_list = []
+        for P in PERIODS:
+            test_end, test_start = TEST_WINDOWS[P]
+            period_trades = slice_trades(trades, test_start, test_end, today)
+            if not period_trades:
+                continue
+            stats_list.append(enrich_stats(period_trades, budget))
+        if not stats_list:
+            scores[(sym, strat)] = (0, "△")
+            continue
+        score, rank = calc_recommend_score(stats_list, total_periods=len(PERIODS))
+        scores[(sym, strat)] = (score, rank)
+    return scores
+
+
+def _rank_color(rank):
+    return {"★★★": "#4ade80", "★★": "#facc15",
+            "★": "#fb923c", "△": "#94a3b8"}.get(rank, "#94a3b8")
 
 
 def apply_same_day_lock(results):
@@ -367,10 +398,14 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
         test_trades = it.get("test_trades", [])
         gross_profit = sum(t["pnl"] for t in test_trades if t["pnl"] > 0)
         gross_loss = abs(sum(t["pnl"] for t in test_trades if t["pnl"] <= 0))
+        bt_sc = it.get("bt_score", 0)
+        bt_rk = it.get("bt_rank", "△")
+        bt_col = _rank_color(bt_rk)
         rows += f"""
-<tr style="background:{bg}">
+<tr style="background:{bg}" data-bt-score="{bt_sc}" data-bt-rank="{bt_rk}">
   <td style="color:#4ade80">{mark}</td>
   <td>{i}</td>
+  <td style="color:{bt_col};font-weight:bold">{bt_rk}<br><small>{bt_sc}</small></td>
   <td class="sym"><span class="sym-link" onclick="jumpToSym('{sid}')" title="クリックで取引明細へ">{it['name']}<br><small class="code">{it['symbol']}</small></span></td>
   <td>{it['strategy']}</td>
   <td>{es['n']}</td>
@@ -383,6 +418,64 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
   <td>{es['sharpe']:.2f}</td>
 </tr>"""
 
+    # BTランク別集計 (★★★だけ採用したら? を可視化)
+    rank_aggs = {}
+    for rk in ("★★★", "★★", "★", "△"):
+        sub_items = [it for it in items if it.get("bt_rank") == rk]
+        if not sub_items:
+            rank_aggs[rk] = None
+            continue
+        sub_trades = []
+        for it in sub_items:
+            sub_trades.extend(it.get("test_trades", []))
+        gp = sum(t["pnl"] for t in sub_trades if t["pnl"] > 0)
+        gl = abs(sum(t["pnl"] for t in sub_trades if t["pnl"] <= 0))
+        tot = gp - gl
+        n = len(sub_trades)
+        wins = sum(1 for t in sub_trades if t["pnl"] > 0)
+        wr = wins / n * 100 if n > 0 else 0
+        pf_v = gp / gl if gl > 0 else float("inf")
+        rank_aggs[rk] = {"n_items": len(sub_items), "n_trades": n,
+                         "win_rate": wr, "pf": pf_v,
+                         "gp": gp, "gl": gl, "total": tot}
+
+    bt_rank_rows = ""
+    for rk in ("★★★", "★★", "★", "△"):
+        a = rank_aggs[rk]
+        col = _rank_color(rk)
+        if not a:
+            bt_rank_rows += (f'<tr><td style="color:{col}">{rk}</td>'
+                              f'<td colspan="7" style="color:#475569">該当なし</td></tr>')
+            continue
+        pc = "profit" if a["total"] >= 0 else "loss"
+        bt_rank_rows += f"""
+<tr>
+  <td style="color:{col};font-weight:bold;font-size:1rem">{rk}</td>
+  <td>{a['n_items']}件</td>
+  <td>{a['n_trades']}</td>
+  <td>{a['win_rate']:.0f}%</td>
+  <td style="color:{_color_pf(a['pf'])}">{_pf(a['pf'])}</td>
+  <td class="profit">+{a['gp']:,.0f}</td>
+  <td class="loss">-{a['gl']:,.0f}</td>
+  <td class="{pc}"><strong>{a['total']:+,.0f}</strong></td>
+</tr>"""
+
+    bt_aggregate_box = f"""
+<h3 style="margin-top:18px">📊 BTランク別 損益 (この構成銘柄を BTスコア で絞ったらどうなるか)</h3>
+<table style="font-size:0.85rem">
+  <thead><tr>
+    <th>BTランク</th><th>構成銘柄数</th><th>取引数</th>
+    <th>勝率</th><th>PF</th>
+    <th>利益</th><th>損</th><th>損益</th>
+  </tr></thead>
+  <tbody>{bt_rank_rows}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 ★★★ だけ採用 = 高スコアシグナルだけに絞った場合の擬似損益。
+  全期間で安定した銘柄が ★★★ になります。
+</p>
+"""
+
     table = f"""
 <h3>TEST {test_label} 取引結果 (構成銘柄 {len(items)}件)</h3>
 <table>
@@ -390,6 +483,7 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
     <tr>
       <th>合</th>
       <th>#</th>
+      <th>BT<br><small>★/100</small></th>
       <th>銘柄</th>
       <th>戦略</th>
       <th>取引数</th>
@@ -405,7 +499,7 @@ def build_period_tab(period_label, train_days, items, id_prefix=""):
   <tbody>{rows}</tbody>
 </table>
 """
-    return sum_box + table
+    return sum_box + bt_aggregate_box + table
 
 
 def _fmt_dt(dt):
@@ -681,7 +775,9 @@ def build_all_trades_tab(period_items):
         for it in items:
             key = (it["symbol"], it["strategy"])
             if key not in agg:
-                agg[key] = {"name": it["name"], "periods": {}}
+                agg[key] = {"name": it["name"], "periods": {},
+                            "bt_score": it.get("bt_score", 0),
+                            "bt_rank": it.get("bt_rank", "△")}
             agg[key]["periods"][P] = it.get("test_trades", [])
 
     # 全取引展開
@@ -695,6 +791,8 @@ def build_all_trades_tab(period_items):
                 "sym": sym,
                 "name": entry["name"],
                 "strat": strat,
+                "bt_score": entry["bt_score"],
+                "bt_rank": entry["bt_rank"],
                 "entry_dt": t.get("entry_dt"),
                 "exit_dt": t.get("exit_dt"),
                 "entry_p": t.get("entry_p", 0),
@@ -736,6 +834,94 @@ def build_all_trades_tab(period_items):
 </div>
 """
 
+    # BTランク別フィルタ集計
+    rank_aggs = {}
+    for rk in ("★★★", "★★", "★", "△"):
+        sub = [r for r in all_rows if r["bt_rank"] == rk]
+        if not sub:
+            rank_aggs[rk] = None
+            continue
+        gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
+        gl = abs(sum(r["pnl"] for r in sub if r["pnl"] <= 0))
+        tot = gp - gl
+        wins = sum(1 for r in sub if r["pnl"] > 0)
+        wr = wins / len(sub) * 100
+        pf_v = gp / gl if gl > 0 else float("inf")
+        rank_aggs[rk] = {"n_trades": len(sub), "win_rate": wr,
+                         "pf": pf_v, "gp": gp, "gl": gl, "total": tot}
+
+    rank_rows_html = ""
+    cum_n = 0
+    cum_gp = 0
+    cum_gl = 0
+    # 累積行 (★★★ → ★★以上 → ★以上 の順で「閾値で絞ったら」を可視化)
+    cum_aggs = []
+    for rk in ("★★★", "★★", "★", "△"):
+        a = rank_aggs[rk]
+        if a:
+            cum_n += a["n_trades"]
+            cum_gp += a["gp"]
+            cum_gl += a["gl"]
+        cum_aggs.append({
+            "label_only": rk,
+            "label_cum": "★★★以上" if rk == "★★★" else
+                          "★★以上" if rk == "★★" else
+                          "★以上" if rk == "★" else
+                          "全件 (△含む)",
+            "only": a,
+            "cum_n": cum_n,
+            "cum_gp": cum_gp,
+            "cum_gl": cum_gl,
+            "cum_total": cum_gp - cum_gl,
+        })
+
+    for row in cum_aggs:
+        rk = row["label_only"]
+        col = _rank_color(rk)
+        a = row["only"]
+        # 単体
+        if a:
+            pc_only = "profit" if a["total"] >= 0 else "loss"
+            only_cells = (f'<td>{a["n_trades"]}</td>'
+                           f'<td>{a["win_rate"]:.0f}%</td>'
+                           f'<td style="color:{_color_pf(a["pf"])}">{_pf(a["pf"])}</td>'
+                           f'<td class="{pc_only}">{a["total"]:+,.0f}</td>')
+        else:
+            only_cells = '<td colspan="4" style="color:#475569">該当なし</td>'
+        # 累積
+        cum_pf = (row["cum_gp"] / row["cum_gl"]
+                  if row["cum_gl"] > 0 else float("inf"))
+        cum_pc = "profit" if row["cum_total"] >= 0 else "loss"
+        rank_rows_html += f"""
+<tr>
+  <td style="color:{col};font-weight:bold;font-size:1rem">{rk}</td>
+  {only_cells}
+  <td style="border-left:2px solid #334155">{row["label_cum"]}</td>
+  <td>{row["cum_n"]}</td>
+  <td style="color:{_color_pf(cum_pf)}">{_pf(cum_pf)}</td>
+  <td class="{cum_pc}"><strong>{row["cum_total"]:+,.0f}</strong></td>
+</tr>"""
+
+    bt_filter_box = f"""
+<h3 style="margin-top:8px">📊 BTランク別 取引フィルタ (閾値で絞った場合の損益)</h3>
+<table style="font-size:0.82rem">
+  <thead><tr>
+    <th rowspan="2">BT<br>ランク</th>
+    <th colspan="4">そのランクのみ</th>
+    <th rowspan="2" style="border-left:2px solid #334155">閾値<br>(以上)</th>
+    <th colspan="3">累積 (閾値以上で絞った場合)</th>
+  </tr><tr>
+    <th>取引数</th><th>勝率</th><th>PF</th><th>損益</th>
+    <th>取引数</th><th>PF</th><th>損益</th>
+  </tr></thead>
+  <tbody>{rank_rows_html}</tbody>
+</table>
+<p style="color:#94a3b8;font-size:0.78rem;margin:6px 0 14px">
+  💡 「★★★以上」= 高スコアシグナルだけ採用した場合の擬似損益。
+  PFが高く損益も伸びれば、その閾値でフィルタする戦略が有効。
+</p>
+"""
+
     # 全取引テーブル行
     rows_html = ""
     for r in all_rows:
@@ -748,8 +934,10 @@ def build_all_trades_tab(period_items):
         pnl = r["pnl"]
         pct = r["pct"]
         pc = "profit" if pnl >= 0 else "loss"
+        bt_col = _rank_color(r["bt_rank"])
         rows_html += f"""
-<tr>
+<tr data-bt-score="{r['bt_score']}" data-bt-rank="{r['bt_rank']}">
+  <td style="color:{bt_col};font-weight:bold;text-align:center">{r['bt_rank']}<br><small>{r['bt_score']}</small></td>
   <td class="sym">{r['name']}<br><small class="code">{r['sym']}</small></td>
   <td>{r['strat']}</td>
   <td>{ed}</td>
@@ -766,12 +954,15 @@ def build_all_trades_tab(period_items):
 
     return f"""
 {sum_box}
+{bt_filter_box}
 <p style="color:#94a3b8;font-size:0.85rem;margin:-6px 0 8px">
   📋 <strong>全銘柄・全期間 取引明細</strong> ({len(all_rows):,}件 / 日付降順)<br>
-  💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能
+  💡 テーブル全選択 ({"Ctrl+A".replace("Ctrl","Ctrl/⌘")}) → コピーで Excel/Notion 等に貼り付け可能<br>
+  💡 BT列の★ランクで各取引の事前評価が一目でわかります
 </p>
 <table id="all-trades-table" style="font-size:0.72rem">
   <thead><tr>
+    <th>BT<br><small>★/100</small></th>
     <th>銘柄</th><th>戦略</th>
     <th>Entry</th><th>Exit</th><th>保有</th>
     <th>買値</th><th>損切</th><th>目標</th><th>決済</th>
@@ -1212,6 +1403,19 @@ def main():
         print(f"  [SAME_DAY_LOCK] 取引数 {before:,} → {after:,} "
               f"({before-after:,}件 重複排除)")
 
+    # BTスコア計算 (6期間横断、calc_recommend_score)
+    bt_scores = compute_bt_scores(results, today, args.budget)
+    star3 = sum(1 for s, r in bt_scores.values() if r == "★★★")
+    star2 = sum(1 for s, r in bt_scores.values() if r == "★★")
+    print(f"  [BTスコア] {len(bt_scores)}ペア中 ★★★={star3} ★★={star2}")
+
+    def _attach_scores(items):
+        for it in items:
+            sc, rk = bt_scores.get((it["symbol"], it["strategy"]), (0, "△"))
+            it["bt_score"] = sc
+            it["bt_rank"] = rk
+        return items
+
     if args.both:
         # --both: ロング/ショートを分離して2セット作成
         long_results = {k: v for k, v in results.items() if k[1] in long_strats}
@@ -1221,10 +1425,10 @@ def main():
         period_items_long = {}
         period_items_short = {}
         for P in PERIODS:
-            items_l = evaluate_period(long_results, P, args.train_days, today,
-                                       args.budget, args.top)
-            items_s = evaluate_period(short_results, P, args.train_days, today,
-                                       args.budget, args.top)
+            items_l = _attach_scores(evaluate_period(
+                long_results, P, args.train_days, today, args.budget, args.top))
+            items_s = _attach_scores(evaluate_period(
+                short_results, P, args.train_days, today, args.budget, args.top))
             period_items_long[P] = items_l
             period_items_short[P] = items_s
             print(f"  直近{P:>3}日 TEST: ロング {len(items_l)} / "
@@ -1233,8 +1437,8 @@ def main():
     else:
         period_items = {}
         for P in PERIODS:
-            items = evaluate_period(results, P, args.train_days, today,
-                                      args.budget, args.top)
+            items = _attach_scores(evaluate_period(
+                results, P, args.train_days, today, args.budget, args.top))
             period_items[P] = items
             print(f"  直近{P:>3}日 TEST: 合格 {len(items)}銘柄")
 
