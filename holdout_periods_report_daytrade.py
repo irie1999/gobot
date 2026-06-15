@@ -122,17 +122,26 @@ def _composite(stats):
 
 
 def slice_trades(trades, start_days_ago, end_days_ago, today):
-    """end_days_ago < days_ago <= start_days_ago の取引を返す。"""
+    """end_days_ago < days_ago <= start_days_ago の取引を返す。
+
+    end_days_ago=0 (今日まで) の場合は今日を含む (start <= d <= end)。
+    end_days_ago>0 の場合は境界日は新しい窓に含める (start <= d < end)。
+    """
     start = today - timedelta(days=start_days_ago)
     end = today - timedelta(days=end_days_ago)
+    inclusive_end = (end_days_ago == 0)
     out = []
     for t in trades:
         dt = t.get("entry_dt")
         if not hasattr(dt, "date"):
             continue
         d = dt.date()
-        if start <= d < end:
-            out.append(t)
+        if inclusive_end:
+            if start <= d <= end:
+                out.append(t)
+        else:
+            if start <= d < end:
+                out.append(t)
     return out
 
 
@@ -2258,25 +2267,39 @@ function jumpToSym(sid){
     else:
         body_main = f'<div class="tab-nav">{tab_btns}</div>{tab_panes}'
 
-    # 今日のトレード集計 (データに含まれていれば)
+    # 実際の最新取引日を results から算出 (TEST 窓に出ない日も含む)
+    actual_latest = None
+    for trades in results.values():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if hasattr(dt, "date"):
+                d = dt.date()
+                if actual_latest is None or d > actual_latest:
+                    actual_latest = d
+
+    # 「最新取引日」のトレード集計 (data_latest が今日と異なる場合は実際の最新日)
+    display_date = actual_latest or today
     today_trades = []
     for trades in results.values():
         for t in trades:
             dt = t.get("entry_dt")
-            if hasattr(dt, "date") and dt.date() == today:
+            if hasattr(dt, "date") and dt.date() == display_date:
                 today_trades.append(t)
     today_n = len(today_trades)
     today_pnl = sum(t.get("pnl", 0) for t in today_trades)
     today_wins = sum(1 for t in today_trades if t.get("pnl", 0) > 0)
     today_wr = today_wins / today_n * 100 if today_n > 0 else 0
 
+    is_today = (display_date == today)
+    banner_label = "📈 今日の取引" if is_today else f"📈 最新取引日 ({display_date}) の取引"
+
     data_status_color = "#4ade80" if data_latest == today else "#fbbf24"
     data_status = (f"<strong>{data_latest}</strong>"
                    if data_latest else "(チェック未実施)")
     if data_latest is not None and data_latest < today:
         data_warning = (f' <span style="color:#f87171">'
-                        f'⚠️ 今日 ({today}) のバーが未取得。'
-                        f'<code>--update-data</code> で取得してください</span>')
+                        f'⚠️ 今日 ({today}) のバーが未取得。yfinance に当日データが'
+                        f'未提供 (引け後しばらく時間が必要) か、市場休業日の可能性</span>')
     else:
         data_warning = ""
 
@@ -2295,7 +2318,7 @@ function jumpToSym(sid){
     </div>
   </div>
   <div>
-    <div style="font-size:0.72rem;color:#94a3b8">📈 今日の取引</div>
+    <div style="font-size:0.72rem;color:#94a3b8">{banner_label}</div>
     <div style="font-size:1rem;font-weight:700">{today_n}件</div>
   </div>
   <div>
