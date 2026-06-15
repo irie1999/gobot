@@ -29,10 +29,16 @@ nikkei_filter_daytrade.py  ―  デイトレ用 相場局面別 戦略フィル�
 
 from __future__ import annotations
 
+import pickle
 from datetime import timedelta, timezone
+from pathlib import Path
+
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
+
+_NIKKEI_HIST_CACHE = None
+_NIKKEI_HIST_PATH = Path(".cache_nikkei_history.pkl")
 
 
 # 局面 → 推奨戦略マップ
@@ -115,6 +121,74 @@ def detect_regime():
         }
     except Exception as e:
         return _unknown_regime(str(e))
+
+
+def load_history(today=None, period="2y"):
+    """日経225の日次データを取得・キャッシュ (バックテスト判定用)。
+
+    戻り値: {date: {"prev_close_change_pct": float, "trend": "up"/"down"/"sideways"}}
+        prev_close_change_pct = 当該日 d の判定材料 = 前営業日終値の変化率
+            (実運用では寄付き前に確定している情報のみ使用 = look-ahead bias なし)
+    """
+    global _NIKKEI_HIST_CACHE
+    if _NIKKEI_HIST_CACHE is not None:
+        return _NIKKEI_HIST_CACHE
+    today_key = str(today) if today else "today"
+    if _NIKKEI_HIST_PATH.exists():
+        try:
+            payload = pickle.loads(_NIKKEI_HIST_PATH.read_bytes())
+            if payload.get("today") == today_key:
+                _NIKKEI_HIST_CACHE = payload["data"]
+                return _NIKKEI_HIST_CACHE
+        except Exception:
+            pass
+    try:
+        import yfinance as yf
+        df = yf.download("^N225", period=period, interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            _NIKKEI_HIST_CACHE = {}
+            return {}
+        close = df["Close"].squeeze()
+        if hasattr(close, "columns"):
+            close = close.iloc[:, 0]
+        # 当日 d の判定 = d-1 (前営業日) の終値変化率を使う (寄付き前に確定)
+        prev_change = (close.pct_change() * 100).shift(1)
+        ma10 = close.rolling(10).mean().shift(1)
+        ma25 = close.rolling(25).mean().shift(1)
+        prev_close = close.shift(1)
+        data = {}
+        for d in close.index:
+            try:
+                day = d.date()
+            except Exception:
+                continue
+            pc = float(prev_change.get(d, 0.0))
+            if pd.isna(pc):
+                pc = 0.0
+            m10 = prev_close.get(d)
+            ma10v = ma10.get(d)
+            ma25v = ma25.get(d)
+            if pd.notna(ma10v) and pd.notna(ma25v) and pd.notna(m10):
+                if m10 > ma10v > ma25v:
+                    trend = "up"
+                elif m10 < ma10v < ma25v:
+                    trend = "down"
+                else:
+                    trend = "sideways"
+            else:
+                trend = "sideways"
+            data[day] = {"prev_close_change_pct": pc, "trend": trend}
+        _NIKKEI_HIST_CACHE = data
+        try:
+            _NIKKEI_HIST_PATH.write_bytes(
+                pickle.dumps({"today": today_key, "data": data}))
+        except Exception:
+            pass
+        return data
+    except Exception:
+        _NIKKEI_HIST_CACHE = {}
+        return {}
 
 
 def _unknown_regime(reason):

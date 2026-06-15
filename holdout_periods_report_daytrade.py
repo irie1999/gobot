@@ -165,29 +165,31 @@ def _bt_rank(score):
 BT_SCORE_CACHE_PATH = Path("bt_score_holdout_daytrade.json")
 
 
-def _load_bt_score_cache():
+def _load_bt_score_cache(path=None):
     """BTスコア凍結キャッシュを読み込み。"""
-    if not BT_SCORE_CACHE_PATH.exists():
+    p = Path(path or BT_SCORE_CACHE_PATH)
+    if not p.exists():
         return {}
     try:
         import json
-        return json.loads(BT_SCORE_CACHE_PATH.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def _save_bt_score_cache(cache):
+def _save_bt_score_cache(cache, path=None):
     """BTスコア凍結キャッシュを書き込み。"""
+    p = Path(path or BT_SCORE_CACHE_PATH)
     try:
         import json
-        BT_SCORE_CACHE_PATH.write_text(
+        p.write_text(
             json.dumps(cache, ensure_ascii=False, indent=2),
             encoding="utf-8")
     except Exception:
         pass
 
 
-def compute_bt_scores(results, today, budget, refresh=False):
+def compute_bt_scores(results, today, budget, refresh=False, cache_path=None):
     """各 (sym, strat) について BTスコアを算出 (デイトレ運用版)。
 
     【計算ロジック】
@@ -203,7 +205,8 @@ def compute_bt_scores(results, today, budget, refresh=False):
 
     戻り値: {(sym, strat): (score, rank)}
     """
-    cache = {} if refresh else _load_bt_score_cache()
+    cache_p = Path(cache_path or BT_SCORE_CACHE_PATH)
+    cache = {} if refresh else _load_bt_score_cache(cache_p)
     cutoff_365 = today - timedelta(days=365)
     scores = {}
     new_entries = 0
@@ -257,12 +260,12 @@ def compute_bt_scores(results, today, budget, refresh=False):
         scores[(sym, strat)] = (score, rank)
 
     if not refresh:
-        _save_bt_score_cache(cache)
+        _save_bt_score_cache(cache, cache_p)
 
     if new_entries or frozen_used:
         print(f"  [BTスコア] 新規算出: {new_entries}件 / "
               f"凍結値使用: {frozen_used}件 "
-              f"(cache: {BT_SCORE_CACHE_PATH})")
+              f"(cache: {cache_p})")
     return scores
 
 
@@ -302,6 +305,150 @@ def apply_same_day_lock(results):
                 kept.append(t)
         new_results[(sym, strat, name)] = kept
     return new_results
+
+
+# ── 損失削減フィルタ群 ─────────────────────────────────────
+# 観察: 即時損切り・引け強制負け・連敗・地合い負け が主な損失源。
+# 4種のフィルタで取引前に弾く (バックテスト trades dict の post-process)。
+LONG_STRATS_SET = set(STRATEGIES.keys())
+SHORT_STRATS_SET = set(STRATEGIES_SHORT.keys())
+
+
+def apply_entry_time_filter(results, skip_open_min=10, skip_close_min=30):
+    """寄付き N分 + 引け前 M分 のエントリーを除外。
+
+    - 寄付き直後: フェイクシグナル・ヒゲ損切り多発
+    - 引け前: 引け強制 で損失確定のリスク大
+    """
+    n_before = sum(len(v) for v in results.values())
+    close_min = (15 - 9) * 60  # 9:00 起点で 15:00 = 360分
+    new_results = {}
+    for key, trades in results.items():
+        kept = []
+        for t in trades:
+            edt = t.get("entry_dt")
+            if not hasattr(edt, "hour"):
+                kept.append(t)
+                continue
+            mins = (edt.hour - 9) * 60 + edt.minute
+            if mins < skip_open_min:
+                continue
+            if mins > close_min - skip_close_min:
+                continue
+            kept.append(t)
+        new_results[key] = kept
+    n_after = sum(len(v) for v in new_results.values())
+    return new_results, n_before - n_after
+
+
+def apply_per_day_cap(results, cap=1):
+    """同一 (銘柄, 戦略, 日) で entry_dt 順に先頭 cap 件のみ残す。
+
+    同じ銘柄で同日に複数回シグナルが出るケースを抑制 (連敗の根本原因)。
+    """
+    n_before = sum(len(v) for v in results.values())
+    new_results = {}
+    for key, trades in results.items():
+        by_day = {}
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            by_day.setdefault(dt.date(), []).append(t)
+        kept = []
+        for ts in by_day.values():
+            ts.sort(key=lambda x: x.get("entry_dt"))
+            kept.extend(ts[:cap])
+        new_results[key] = kept
+    n_after = sum(len(v) for v in new_results.values())
+    return new_results, n_before - n_after
+
+
+def apply_portfolio_loss_stop(results, max_losses=3):
+    """ロング/ショート別に「1日 N連敗で当日以降の同サイド取引を打ち切り」。
+
+    全銘柄横断のポートフォリオレベル損失ストップ。
+    悪い日 (地合い悪日) に被害を午前で打ち切る効果。
+    """
+    rows = []
+    for key, trades in results.items():
+        _sym, strat, _name = key
+        side = ("long" if strat in LONG_STRATS_SET
+                else "short" if strat in SHORT_STRATS_SET else "?")
+        for i, t in enumerate(trades):
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            rows.append((dt.date(), dt, side, key, i, t.get("pnl", 0)))
+    rows.sort(key=lambda r: (r[0], r[1]))
+
+    to_skip = set()
+    cur_day = None
+    cur_losses = {"long": 0, "short": 0}
+    stopped = {"long": False, "short": False}
+    for date, _dt, side, key, idx, pnl in rows:
+        if date != cur_day:
+            cur_day = date
+            cur_losses = {"long": 0, "short": 0}
+            stopped = {"long": False, "short": False}
+        if side not in cur_losses:
+            continue
+        if stopped[side]:
+            to_skip.add((key, idx))
+            continue
+        if pnl <= 0:
+            cur_losses[side] += 1
+            if cur_losses[side] >= max_losses:
+                stopped[side] = True
+        else:
+            cur_losses[side] = 0
+
+    n_before = sum(len(v) for v in results.values())
+    new_results = {}
+    for key, trades in results.items():
+        kept = [t for i, t in enumerate(trades) if (key, i) not in to_skip]
+        new_results[key] = kept
+    n_after = sum(len(v) for v in new_results.values())
+    return new_results, n_before - n_after
+
+
+def apply_market_regime_filter(results, today, threshold_pct=1.5):
+    """日経225の前日比トレンドに基づく方向フィルタ。
+
+    - 前日終値変化率 <= -threshold_pct : 当日 ロング禁止 (下落地合い)
+    - 前日終値変化率 >= +threshold_pct : 当日 ショート禁止 (上昇地合い)
+
+    寄付き前に確定している情報のみ使用 → look-ahead bias なし。
+    """
+    from nikkei_filter_daytrade import load_history
+    nikkei = load_history(today=today)
+    if not nikkei:
+        return results, 0
+    n_before = sum(len(v) for v in results.values())
+    new_results = {}
+    for key, trades in results.items():
+        _sym, strat, _name = key
+        is_long = strat in LONG_STRATS_SET
+        is_short = strat in SHORT_STRATS_SET
+        kept = []
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                kept.append(t)
+                continue
+            info = nikkei.get(dt.date())
+            if info is None:
+                kept.append(t)
+                continue
+            pc = info.get("prev_close_change_pct", 0.0)
+            if is_long and pc <= -threshold_pct:
+                continue
+            if is_short and pc >= threshold_pct:
+                continue
+            kept.append(t)
+        new_results[key] = kept
+    n_after = sum(len(v) for v in new_results.values())
+    return new_results, n_before - n_after
 
 
 def backtest_sym_strat(sym, name, df, strat_name, budget, max_risk,
@@ -1561,9 +1708,62 @@ def main():
         print(f"  [SAME_DAY_LOCK] 取引数 {before:,} → {after:,} "
               f"({before-after:,}件 重複排除)")
 
+    # ── 損失削減フィルタ群 (デフォルト全有効、ENV で個別 OFF 可) ──
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+        skip_open = int(_os.environ.get("DAYTRADE_SKIP_OPEN_MIN", "10"))
+        skip_close = int(_os.environ.get("DAYTRADE_SKIP_CLOSE_MIN", "30"))
+        before = sum(len(v) for v in results.values())
+        results, removed = apply_entry_time_filter(
+            results, skip_open_min=skip_open, skip_close_min=skip_close)
+        after = sum(len(v) for v in results.values())
+        print(f"  [時刻フィルタ] 寄付{skip_open}分+引け{skip_close}分前除外: "
+              f"{before:,} → {after:,} (-{removed:,}件)")
+
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
+        cap = int(_os.environ.get("DAYTRADE_PER_DAY_CAP", "1"))
+        before = sum(len(v) for v in results.values())
+        results, removed = apply_per_day_cap(results, cap=cap)
+        after = sum(len(v) for v in results.values())
+        print(f"  [同日キャップ] 1(銘柄×戦略)/日 最大{cap}件: "
+              f"{before:,} → {after:,} (-{removed:,}件)")
+
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+        max_losses = int(_os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3"))
+        before = sum(len(v) for v in results.values())
+        results, removed = apply_portfolio_loss_stop(
+            results, max_losses=max_losses)
+        after = sum(len(v) for v in results.values())
+        print(f"  [連敗ストップ] サイド別{max_losses}連敗で当日打ち切り: "
+              f"{before:,} → {after:,} (-{removed:,}件)")
+
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
+        thr = float(_os.environ.get("DAYTRADE_MARKET_THRESHOLD", "1.5"))
+        before = sum(len(v) for v in results.values())
+        results, removed = apply_market_regime_filter(
+            results, today, threshold_pct=thr)
+        after = sum(len(v) for v in results.values())
+        print(f"  [市場フィルタ] 前日比±{thr}%超で逆方向除外: "
+              f"{before:,} → {after:,} (-{removed:,}件)")
+
     # BTスコア計算 (6期間横断、calc_recommend_score)
+    # フィルタ ON 時は別キャッシュ (フィルタで取引集合が変わるため)
+    filter_sig_parts = []
+    for env_k, abbr in [
+        ("DAYTRADE_FILTER_TIME", "t"),
+        ("DAYTRADE_FILTER_DAYCAP", "c"),
+        ("DAYTRADE_FILTER_LOSSSTOP", "l"),
+        ("DAYTRADE_FILTER_MARKET", "m"),
+    ]:
+        if _os.environ.get(env_k, "1") == "1":
+            filter_sig_parts.append(abbr)
+    if filter_sig_parts:
+        bt_cache_path = Path(
+            f"bt_score_holdout_daytrade_{''.join(filter_sig_parts)}.json")
+    else:
+        bt_cache_path = BT_SCORE_CACHE_PATH
     bt_scores = compute_bt_scores(results, today, args.budget,
-                                    refresh=args.refresh_bt_scores)
+                                    refresh=args.refresh_bt_scores,
+                                    cache_path=bt_cache_path)
     star3 = sum(1 for s, r in bt_scores.values() if r == "★★★")
     star2 = sum(1 for s, r in bt_scores.values() if r == "★★")
     print(f"  [BTスコア] {len(bt_scores)}ペア中 ★★★={star3} ★★={star2}")
@@ -1811,6 +2011,30 @@ function jumpToSym(sid){
 
     train_desc = (f"TEST直前 {args.train_days}日" if args.train_days > 0
                   else "TEST より前の全期間")
+
+    # 損失削減フィルタの稼働状況
+    filter_status = []
+    if _os.environ.get("DAYTRADE_FILTER_TIME", "1") == "1":
+        sk_o = _os.environ.get("DAYTRADE_SKIP_OPEN_MIN", "10")
+        sk_c = _os.environ.get("DAYTRADE_SKIP_CLOSE_MIN", "30")
+        filter_status.append(
+            f"⏰ 時刻フィルタ (寄付{sk_o}分・引け{sk_c}分前 除外)")
+    if _os.environ.get("DAYTRADE_FILTER_DAYCAP", "1") == "1":
+        cap = _os.environ.get("DAYTRADE_PER_DAY_CAP", "1")
+        filter_status.append(
+            f"🔢 同日キャップ (1(銘柄×戦略)/日 最大{cap}件)")
+    if _os.environ.get("DAYTRADE_FILTER_LOSSSTOP", "1") == "1":
+        n = _os.environ.get("DAYTRADE_MAX_DAILY_LOSSES", "3")
+        filter_status.append(
+            f"🛑 連敗ストップ (サイド別{n}連敗で当日打ち切り)")
+    if _os.environ.get("DAYTRADE_FILTER_MARKET", "1") == "1":
+        thr = _os.environ.get("DAYTRADE_MARKET_THRESHOLD", "1.5")
+        filter_status.append(
+            f"📈 市場フィルタ (日経前日比±{thr}%超で逆方向除外)")
+    filter_html = ("".join(f"<li>{f}</li>" for f in filter_status)
+                   if filter_status else
+                   "<li style='color:#94a3b8'>(全フィルタ無効)</li>")
+
     legend = f"""
 <div class="legend">
   <strong>📊 真のWalk-Forward (逆指値ロング walkforward_holdout.py と完全一致)</strong><br>
@@ -1824,6 +2048,17 @@ function jumpToSym(sid){
   ▸ <strong>★合格</strong>: 選定銘柄が TEST期間でも PF≥{TEST_PASS_PF} & 損益≥0 で勝てた (真の優位性あり)<br>
   ▸ Composite Score = TEST損益 × (1 + max(Sharpe,0)) 順に Top{args.top} 表示<br>
   ▸ <strong>全6タブで★合格 = 短期も長期もロバスト</strong> (最有力候補)
+  <br><br>
+  <strong>🛡️ 損失削減フィルタ (適用順)</strong>
+  <ul style="margin:4px 0 0 18px;padding:0;font-size:0.78rem;color:#cbd5e1">
+    {filter_html}
+  </ul>
+  <p style="margin:6px 0 0;font-size:0.74rem;color:#94a3b8">
+    各フィルタは ENV で OFF 可: <code>DAYTRADE_FILTER_TIME=0</code> /
+    <code>DAYTRADE_FILTER_DAYCAP=0</code> /
+    <code>DAYTRADE_FILTER_LOSSSTOP=0</code> /
+    <code>DAYTRADE_FILTER_MARKET=0</code>
+  </p>
 </div>
 """
 
