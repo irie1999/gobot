@@ -192,6 +192,34 @@ def dedup_same_time_same_symbol(trades: list) -> list:
     return out
 
 
+def apply_same_day_lock(pair_trades: dict) -> dict:
+    """同日同銘柄に複数戦略がエントリーした場合、最も早い entry_dt の戦略のみ残す。
+    ロング側/ショート側で独立に適用する。"""
+    earliest: dict = {}
+    for (sym, strat), trades in pair_trades.items():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            key = (sym, dt.date())
+            cur = earliest.get(key)
+            if cur is None or dt < cur[0] or (dt == cur[0] and strat < cur[1]):
+                earliest[key] = (dt, strat)
+    new_pt: dict = {}
+    for (sym, strat), trades in pair_trades.items():
+        kept = []
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                kept.append(t)
+                continue
+            sel = earliest.get((sym, dt.date()))
+            if sel and sel[1] == strat:
+                kept.append(t)
+        new_pt[(sym, strat)] = kept
+    return new_pt
+
+
 def build_pair_selection(all_specs_by_shift: dict) -> dict:
     """(sym, strat) → そのペアを選んだ shift 集合."""
     sel = defaultdict(set)
@@ -1173,6 +1201,18 @@ def main():
 
     # 各 (sym, strat) の取引に「直前連敗数」を注釈
     annotate_streaks(pair_trades)
+
+    # SAME_DAY_LOCK: 同日同銘柄で複数戦略が発火した場合、最初の entry_dt の戦略のみ残す
+    # ロング側/ショート側で独立に適用
+    long_pt = {k: v for k, v in pair_trades.items() if k[1] in LONG_STRATS}
+    short_pt = {k: v for k, v in pair_trades.items() if k[1] in SHORT_STRATS}
+    before_lock = sum(len(v) for v in pair_trades.values())
+    long_pt = apply_same_day_lock(long_pt)
+    short_pt = apply_same_day_lock(short_pt)
+    pair_trades = {**long_pt, **short_pt}
+    after_lock = sum(len(v) for v in pair_trades.values())
+    print(f"  [SAME_DAY_LOCK] {before_lock:,} → {after_lock:,} "
+          f"(-{before_lock - after_lock:,}件 重複排除)", flush=True)
 
     today = datetime.now(JST).date()
     shift_trades_by_side = defaultdict(list)
