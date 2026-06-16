@@ -354,8 +354,16 @@ def render_pair_table(pair_scores: dict, side: str,
 
     n_pass = sum(1 for _, sc in items if pair_passes_filter(sc))
     H = []
-    H.append(f"<h3>🏆 ペア別スコア ({n_pass}/{len(items)} 採用 / 高スコア順)</h3>")
-    H.append("<p class='note'>"
+    H.append(
+        f"<details style='margin:0.8em 0;'>"
+        f"<summary style='cursor:pointer;font-size:1.05em;font-weight:bold;"
+        f"padding:0.4em 0.6em;border-radius:4px;"
+        f"background:#1e293b;list-style:none;display:flex;align-items:center;gap:0.5em;'>"
+        f"<span style='font-size:0.85em;color:#94a3b8;'>▶</span>"
+        f"ペア別スコア ({n_pass}/{len(items)} 採用 / 高スコア順)"
+        f"</summary>"
+    )
+    H.append("<p class='note' style='margin-top:0.5em;'>"
               "スコア = 100 × robustness × OOS PF × OOS 勝率 × サンプル数. "
               "各 shift が除外していた直近 N日 (= OOS) の成績で評価. "
               "同一 (銘柄, 戦略) は shift をまたいで 1スコアに集約. "
@@ -404,6 +412,7 @@ def render_pair_table(pair_scores: dict, side: str,
             f"</tr>"
         )
     H.append("</tbody></table>")
+    H.append("</details>")
     return "\n".join(H)
 
 
@@ -910,6 +919,11 @@ def render_html(*, shift_trades_by_side: dict, date_label: str,
   .score-btn{padding:4px 10px;background:#334155;color:#cbd5e1;border:none;
               cursor:pointer;font-size:11px;border-radius:4px;}
   .score-btn.active{background:#10b981;color:#fff;}
+
+  /* ペア別スコア折りたたみ */
+  details summary::-webkit-details-marker{display:none;}
+  details[open] summary span:first-child{transform:rotate(90deg);}
+  details summary span:first-child{display:inline-block;transition:transform 0.15s;}
 </style>
 <script>
 function showSide(side){
