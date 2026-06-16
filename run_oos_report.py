@@ -23,10 +23,7 @@ from datetime import datetime, timedelta, timezone
 JST = timezone(timedelta(hours=9))
 
 # ─── レポート引数 (必要に応じて変更) ────────────────────────────────
-REPORT_ARGS = [
-    "--min-robustness", "2",
-    "--min-oos-pf", "1.0",
-]
+REPORT_ARGS = []
 # ────────────────────────────────────────────────────────────────────
 
 

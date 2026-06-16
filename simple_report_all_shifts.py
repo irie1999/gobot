@@ -309,8 +309,8 @@ def compute_pair_score(trades_full: list, selecting_shifts: set,
 
 # ユニバース厳選フィルタ (案A)
 # robustness ≥ N/6 AND 平均OOS PF ≥ PF AND OOS損益 > 0 を満たすペアのみ採用
-PAIR_FILTER_MIN_ROBUSTNESS = 3 / 6
-PAIR_FILTER_MIN_PF = 1.3
+PAIR_FILTER_MIN_ROBUSTNESS = 2 / 6
+PAIR_FILTER_MIN_PF = 1.0
 PAIR_FILTER_MIN_PNL = 0.0
 
 MARKET_FILTER_THR = 1.5  # 前日日経変化率の閾値 (%): 超えた逆方向取引を除外
