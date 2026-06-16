@@ -2936,7 +2936,7 @@ function toggleTrendBreakdown() {{
 
     # ── エントリー日別グリッド HTML ──────────────────────────────────
     from collections import defaultdict as _dd
-    _ENTRY_GRID_DAYS = 60  # グリッド表示は直近60日分
+    _ENTRY_GRID_DAYS = 90  # グリッド表示は直近90日分
 
     def _build_entry_grid(trades_list, prefix):
         """trades_list をエントリー日でグループ化して (by_date, sorted_dates) を返す。"""
