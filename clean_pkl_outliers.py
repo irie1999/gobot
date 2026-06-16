@@ -289,13 +289,13 @@ def main():
     else:
         clean_mode = f"日中央値 ±{args.deviation_pct}%"
     print(f"対象: {len(paths)}ファイル / モード: {mode_str} / "
-          f"判定: {clean_mode}")
-    print()
+          f"判定: {clean_mode}", flush=True)
+    print(flush=True)
 
     total_before = 0
     total_after = 0
     n_affected = 0
-    for path, ticker in paths:
+    for i, (path, ticker) in enumerate(paths, 1):
         result = clean_one(
             path, args.deviation_pct,
             dry_run=not args.apply,
@@ -305,8 +305,10 @@ def main():
             yf_tolerance_pct=args.yf_tolerance_pct,
             range_ratio=args.range_ratio,
         )
+        prefix = f"  [{i:>4}/{len(paths)}]"
         if "error" in result:
-            print(f"  [skip] {path.name}: {result['error']}")
+            print(f"{prefix} [skip] {path.name}: {result['error']}",
+                  flush=True)
             continue
         total_before += result["before"]
         total_after += result["after"]
@@ -314,22 +316,24 @@ def main():
         if result["removed"] > 0:
             marker = " ⚠️"
             n_affected += 1
-        print(f"  {path.name}: {result['before']:>6,} → "
+        print(f"{prefix} {path.name}: {result['before']:>6,} → "
               f"{result['after']:>6,} "
               f"(-{result['removed']:>5,} / {result['removed_pct']:5.1f}%)"
-              f"{marker}")
+              f"{marker}", flush=True)
         if args.show_affected and result["affected_dates"]:
             for item in result["affected_dates"]:
                 if args.use_yfinance_daily:
                     d, n, c_min, c_max, y_low, y_high = item
                     print(f"      {d}: {n}件除外, "
                           f"pkl範囲 {c_min:.0f}〜{c_max:.0f} / "
-                          f"yf範囲 {y_low:.0f}〜{y_high:.0f}")
+                          f"yf範囲 {y_low:.0f}〜{y_high:.0f}",
+                          flush=True)
                 else:
                     d, n, c_min, c_max, med = item
                     print(f"      {d}: {n}件除外, "
                           f"範囲 {c_min:.0f}〜{c_max:.0f} "
-                          f"(中央値 {med:.0f})")
+                          f"(中央値 {med:.0f})",
+                          flush=True)
 
     print()
     print(f"合計: {total_before:,} → {total_after:,} "
