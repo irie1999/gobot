@@ -172,6 +172,26 @@ def _hold_min(t):
         return 0
 
 
+def dedup_same_time_same_symbol(trades: list) -> list:
+    """同じ時刻に同じ銘柄の取引を1つに集約。
+
+    entry_dt + symbol が同じなら、エンジンが複数戦略で同じシグナルを
+    出している = 実運用では1ポジションしか持てない。
+    決定論的に最初のもの (戦略名アルファベット順) を残す。
+    """
+    seen = set()
+    out = []
+    for t in sorted(trades, key=lambda x: (x["entry_dt"],
+                                             x["symbol"],
+                                             x["strategy"])):
+        key = (t["symbol"], t["entry_dt"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def aggregate_daily(trades):
     by_date = defaultdict(list)
     for t in trades:
@@ -402,9 +422,11 @@ function showShift(side, shift){
                      f"id='shift-content-{side}-{s}'>")
             trades = shift_trades_by_side.get((s, side), [])
             if s == SHIFT_ALL:
-                desc = f"全 6 shift 銘柄 union / {side_label} / 全取引履歴"
+                desc = (f"全 6 shift 銘柄 union / {side_label} / 全期間 / "
+                        f"同時刻同銘柄の重複除外済み")
             else:
-                desc = f"shift={s}日 / {side_label} / OOS 直近{s}日"
+                desc = (f"全 6 shift 銘柄 union / {side_label} / 直近{s}日 / "
+                        f"同時刻同銘柄の重複除外済み")
             H.append(f"<p style='color:#94a3b8;font-size:12px;'>{desc}</p>")
             H.append(render_section(trades, lbl))
             H.append("</div>")
@@ -558,38 +580,49 @@ def main():
         print(f"\n[Step 2] バックテスト全スキップ "
               f"(全ペアがキャッシュ済み)", flush=True)
 
-    # shift 別 + side 別に集計
     today = datetime.now(JST).date()
     shift_trades_by_side = defaultdict(list)
+
+    # 全 6 shift の union ペア
+    union_pairs = set()
+    for s in SHIFTS:
+        for sym, name, strat in all_specs_by_shift.get(s, []):
+            union_pairs.add((sym, strat))
+    n_union_pairs = len(union_pairs)
+    print(f"  union ペア: {n_union_pairs} "
+          f"(long={sum(1 for _,st in union_pairs if st in LONG_STRATS)}, "
+          f"short={sum(1 for _,st in union_pairs if st in SHORT_STRATS)})",
+          flush=True)
+
+    # 全体タブ: union 銘柄 × 全期間
+    for sym, strat in union_pairs:
+        trades = pair_trades.get((sym, strat), [])
+        side = "short" if strat in SHORT_STRATS else "long"
+        shift_trades_by_side[(SHIFT_ALL, side)].extend(trades)
+
+    # shift 別タブ: union 銘柄 × 直近 N日 にフィルタ
     for s in SHIFTS:
         cutoff = today - timedelta(days=s)
-        pairs = all_specs_by_shift.get(s, [])
-        for sym, name, strat in pairs:
+        for sym, strat in union_pairs:
             trades = pair_trades.get((sym, strat), [])
-            # 直近 s 日にフィルタ
+            side = "short" if strat in SHORT_STRATS else "long"
             for t in trades:
                 if not hasattr(t.get("entry_dt"), "date"):
                     continue
                 if t["entry_dt"].date() < cutoff:
                     continue
-                side = "short" if strat in SHORT_STRATS else "long"
                 shift_trades_by_side[(s, side)].append(t)
 
-    # 全体タブ: 6 shift watchlist の union を全期間 (フィルタなし) で表示
-    union_pairs = set()
-    for s in SHIFTS:
-        for sym, name, strat in all_specs_by_shift.get(s, []):
-            union_pairs.add((sym, strat))
-    for sym, strat in union_pairs:
-        trades = pair_trades.get((sym, strat), [])
-        for t in trades:
-            side = "short" if strat in SHORT_STRATS else "long"
-            shift_trades_by_side[(SHIFT_ALL, side)].append(t)
-    n_union_pairs = len(union_pairs)
-    print(f"  全体タブ: {n_union_pairs} ペア union "
-          f"(long={sum(1 for _,s in union_pairs if s in LONG_STRATS)}, "
-          f"short={sum(1 for _,s in union_pairs if s in SHORT_STRATS)})",
-          flush=True)
+    # 同じ時刻に同じ銘柄の重複除外を全タブに適用
+    print(f"  同時刻同銘柄の重複除外を適用中...", flush=True)
+    for key in list(shift_trades_by_side.keys()):
+        before = len(shift_trades_by_side[key])
+        shift_trades_by_side[key] = dedup_same_time_same_symbol(
+            shift_trades_by_side[key])
+        after = len(shift_trades_by_side[key])
+        if before > after:
+            print(f"    {key}: {before} → {after} "
+                  f"(-{before - after} 重複)", flush=True)
 
     # HTML 出力
     out = args.output or f"simple_report_all_shifts_{date_label}.html"
