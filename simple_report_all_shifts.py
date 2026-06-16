@@ -313,6 +313,8 @@ PAIR_FILTER_MIN_ROBUSTNESS = 3 / 6
 PAIR_FILTER_MIN_PF = 1.3
 PAIR_FILTER_MIN_PNL = 0.0
 
+MARKET_FILTER_THR = 1.5  # 前日日経変化率の閾値 (%): 超えた逆方向取引を除外
+
 
 def pair_passes_filter(sc: dict) -> bool:
     """ユニバース厳選: 複数 shift でロバストかつ OOS で勝てているペアのみ."""
@@ -646,11 +648,13 @@ def aggregate_daily(trades):
     return out
 
 
-def render_section(trades, label, pair_scores=None, tab_uid=""):
+def render_section(trades, label, pair_scores=None, tab_uid="",
+                   nikkei_data=None):
     """1セクション分: サマリ + 日付別損益 + 全取引.
 
-    pair_scores: {(sym, strat): score_info_dict} - 各ペアのスコア情報
-    tab_uid:     スコアフィルタボタンの JS で使う一意 ID prefix
+    pair_scores:  {(sym, strat): score_info_dict} - 各ペアのスコア情報
+    tab_uid:      スコアフィルタボタンの JS で使う一意 ID prefix
+    nikkei_data:  nikkei_filter_daytrade.load_history() の戻り値
     """
     overall = calc_stats(trades)
     pf = overall["pf"]
@@ -744,6 +748,63 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                      f"{hq_st['max_dd']:.1f}%</div></div>")
             H.append("</div>")
 
+    # 地合いフィルタ (前日日経トレンドで方向フィルタ)
+    if nikkei_data and trades:
+        side0 = trades[0].get("side", "long")
+        mf = []
+        for _t in trades:
+            _dt = _t.get("entry_dt")
+            if not hasattr(_dt, "date"):
+                mf.append(_t)
+                continue
+            _info = nikkei_data.get(_dt.date())
+            if _info is None:
+                mf.append(_t)
+                continue
+            _pc = _info.get("prev_close_change_pct", 0.0)
+            if side0 == "short" and _pc >= MARKET_FILTER_THR:
+                continue  # 上昇地合い日のショートを除外
+            if side0 == "long" and _pc <= -MARKET_FILTER_THR:
+                continue  # 下落地合い日のロングを除外
+            mf.append(_t)
+        if mf:
+            mf_st = calc_stats(mf)
+            mf_pf = mf_st["pf"]
+            mf_pf_s = "∞" if mf_pf == float("inf") else f"{mf_pf:.2f}"
+            mf_profit = sum(_t["pnl"] for _t in mf if _t["pnl"] > 0)
+            mf_loss = -sum(_t["pnl"] for _t in mf if _t["pnl"] < 0)
+            mf_pnl_cls = "pos" if mf_st["total_pnl"] >= 0 else "neg"
+            mf_pf_color = ("#4ade80" if mf_pf >= 1.5
+                            else ("#facc15" if mf_pf >= 1.0 else "#f87171"))
+            excluded = len(trades) - len(mf)
+            direction = "上昇地合い除外" if side0 == "short" else "下落地合い除外"
+            H.append(
+                f"<h3 style='color:#60a5fa;'>地合いフィルタあり "
+                f"({direction}: 前日日経±{MARKET_FILTER_THR}%超)</h3>"
+            )
+            H.append("<div class='summary'>")
+            H.append(f"<div class='card'><div class='lbl'>取引</div>"
+                     f"<div class='val'>{mf_st['n']:,}"
+                     f"<span class='small'> / {overall['n']:,}</span>"
+                     f"</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>除外</div>"
+                     f"<div class='val neg'>{excluded:,}件</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>勝率</div>"
+                     f"<div class='val'>{mf_st['win_rate']:.0f}%</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>PF</div>"
+                     f"<div class='val' style='color:{mf_pf_color}'>"
+                     f"{mf_pf_s}</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総利益</div>"
+                     f"<div class='val pos'>+{mf_profit:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総損失</div>"
+                     f"<div class='val neg'>-{mf_loss:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>差引損益</div>"
+                     f"<div class='val {mf_pnl_cls}'>"
+                     f"{mf_st['total_pnl']:+,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>最大DD</div>"
+                     f"<div class='val neg'>{mf_st['max_dd']:.1f}%</div></div>")
+            H.append("</div>")
+
     if not trades:
         H.append("<p style='color:#94a3b8'>取引なし</p>")
         return "\n".join(H)
@@ -753,10 +814,14 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
     for t in trades_sorted:
         trades_by_date[t["entry_dt"].date()].append(t)
 
+    nk_col = bool(nikkei_data)
+    ncols = 8 if nk_col else 7
+    nk_header = "<th class='right small'>日経前日比</th>" if nk_col else ""
+
     # 日付別損益 (クリックで詳細展開)
     H.append("<h3>日付別損益 (行クリックで取引詳細)</h3>")
     H.append("<table><thead><tr>")
-    H.append("<th>日付</th><th class='right'>取引</th>"
+    H.append(f"<th>日付</th>{nk_header}<th class='right'>取引</th>"
              "<th class='right'>勝率</th>"
              "<th class='right pos'>利益</th>"
              "<th class='right neg'>損失</th>"
@@ -767,10 +832,21 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         cum_c = "pos" if d["cumulative"] >= 0 else "neg"
         date_key = str(d["date"]).replace("-", "")
         detail_id = f"{tab_uid}-day-{date_key}" if tab_uid else f"day-{date_key}"
+        if nk_col:
+            _nki = nikkei_data.get(d["date"])
+            _nkp = _nki.get("prev_close_change_pct", 0.0) if _nki else None
+            if _nkp is not None:
+                _nkc = "pos" if _nkp >= 0 else "neg"
+                nk_td = f"<td class='right small {_nkc}'>{_nkp:+.1f}%</td>"
+            else:
+                nk_td = "<td class='right small'>-</td>"
+        else:
+            nk_td = ""
         H.append(
             f"<tr onclick=\"toggleDay('{detail_id}',this)\" style='cursor:pointer;'>"
             f"<td><span data-tri style='font-size:9px;color:#64748b;"
             f"display:inline-block;margin-right:4px;'>+</span>{d['date']}</td>"
+            f"{nk_td}"
             f"<td class='right'>{d['n']}</td>"
             f"<td class='right'>{d['win_rate']:.0f}%</td>"
             f"<td class='right pos'>+{d['profit']:,.0f}</td>"
@@ -783,7 +859,7 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         day_trades = trades_by_date.get(d["date"], [])
         H.append(
             f"<tr id='{detail_id}' style='display:none;'>"
-            f"<td colspan='7' style='padding:0 0 0 24px;background:#0f172a;'>"
+            f"<td colspan='{ncols}' style='padding:0 0 0 24px;background:#0f172a;'>"
         )
         H.append("<table style='margin:4px 0 4px;width:calc(100% - 24px);'>"
                  "<thead><tr>"
@@ -923,7 +999,8 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
 def render_html(*, shift_trades_by_side: dict, date_label: str,
                 source: str, watchlist_summary: dict,
                 pair_scores: dict | None = None,
-                sym_name_map: dict | None = None) -> str:
+                sym_name_map: dict | None = None,
+                nikkei_data: dict | None = None) -> str:
     """完全な HTML 生成 (Long/Short タブ + shift サブタブ)."""
     H = []
     H.append("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
@@ -1107,7 +1184,8 @@ function toggleDay(id, row){
             )
             H.append(render_section(trades, lbl,
                                       pair_scores=pair_scores,
-                                      tab_uid=tab_uid))
+                                      tab_uid=tab_uid,
+                                      nikkei_data=nikkei_data))
             H.append("</div>")
 
         H.append("</div>")
@@ -1292,6 +1370,17 @@ def main():
           f"(-{before_lock - after_lock:,}件 重複排除)", flush=True)
 
     today = datetime.now(JST).date()
+
+    # 日経225 前日比データ (地合いフィルタ用)
+    try:
+        from nikkei_filter_daytrade import load_history as _load_nk
+        nikkei_data = _load_nk(today=today)
+        print(f"  日経データ: {len(nikkei_data)}日分読込", flush=True)
+    except Exception as _e:
+        print(f"  [warn] 日経データ取得失敗 ({_e}) → 地合いフィルタ無効",
+              flush=True)
+        nikkei_data = {}
+
     shift_trades_by_side = defaultdict(list)
 
     # 全 6 shift の union ペア
@@ -1384,6 +1473,7 @@ def main():
         watchlist_summary=watchlist_summary,
         pair_scores=pair_scores,
         sym_name_map=sym_name_map,
+        nikkei_data=nikkei_data,
     )
     Path(out).write_text(html_text, encoding="utf-8")
     print(f"\n[OK] 出力: {Path(out).resolve()}", flush=True)
