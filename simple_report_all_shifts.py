@@ -279,6 +279,20 @@ def compute_pair_score(trades_full: list, selecting_shifts: set,
     return info
 
 
+# ユニバース厳選フィルタ (案A)
+# robustness ≥ N/6 AND 平均OOS PF ≥ PF AND OOS損益 > 0 を満たすペアのみ採用
+PAIR_FILTER_MIN_ROBUSTNESS = 3 / 6
+PAIR_FILTER_MIN_PF = 1.3
+PAIR_FILTER_MIN_PNL = 0.0
+
+
+def pair_passes_filter(sc: dict) -> bool:
+    """ユニバース厳選: 複数 shift でロバストかつ OOS で勝てているペアのみ."""
+    return (sc.get("robustness", 0) >= PAIR_FILTER_MIN_ROBUSTNESS
+             and sc.get("avg_oos_pf", 0) >= PAIR_FILTER_MIN_PF
+             and sc.get("oos_pnl", 0) > PAIR_FILTER_MIN_PNL)
+
+
 def _score_color(score: float) -> str:
     if score >= 50:
         return "#4ade80"
@@ -287,6 +301,16 @@ def _score_color(score: float) -> str:
     if score >= 10:
         return "#94a3b8"
     return "#64748b"
+
+
+def _q_color(q: float) -> str:
+    if q >= 75:
+        return "#10b981"
+    if q >= 65:
+        return "#4ade80"
+    if q >= 55:
+        return "#facc15"
+    return "#f87171"
 
 
 def render_pair_table(pair_scores: dict, side: str,
@@ -300,15 +324,20 @@ def render_pair_table(pair_scores: dict, side: str,
                   if k[1] in SHORT_STRATS]
     items.sort(key=lambda x: (-x[1]["score"], -x[1]["oos_pnl"]))
 
+    n_pass = sum(1 for _, sc in items if pair_passes_filter(sc))
     H = []
-    H.append(f"<h3>🏆 ペア別スコア ({len(items)}件 / 高スコア順)</h3>")
+    H.append(f"<h3>🏆 ペア別スコア ({n_pass}/{len(items)} 採用 / 高スコア順)</h3>")
     H.append("<p class='note'>"
               "スコア = 100 × robustness × OOS PF × OOS 勝率 × サンプル数. "
               "各 shift が除外していた直近 N日 (= OOS) の成績で評価. "
-              "同一 (銘柄, 戦略) は shift をまたいで 1スコアに集約."
+              "同一 (銘柄, 戦略) は shift をまたいで 1スコアに集約. "
+              f"採用条件: robustness ≥ "
+              f"{PAIR_FILTER_MIN_ROBUSTNESS*6:.0f}/6 AND "
+              f"OOS PF ≥ {PAIR_FILTER_MIN_PF:.1f} AND OOS 損益 > 0."
               "</p>")
     H.append("<table><thead><tr>")
-    H.append("<th>銘柄</th><th>戦略</th>"
+    H.append("<th class='center'>採用</th>"
+              "<th>銘柄</th><th>戦略</th>"
               "<th class='right'>選定 shift</th>"
               "<th class='right'>OOS 取引</th>"
               "<th class='right'>OOS PF</th>"
@@ -324,8 +353,14 @@ def render_pair_table(pair_scores: dict, side: str,
         color = _score_color(score)
         pnl_c = "pos" if sc["oos_pnl"] >= 0 else "neg"
         name = sym_name_map.get(sym, sym) if sym_name_map else sym
+        passed = pair_passes_filter(sc)
+        mark = "✓" if passed else "✗"
+        mark_color = "#10b981" if passed else "#64748b"
+        row_style = "" if passed else "opacity:0.55;"
         H.append(
-            f"<tr>"
+            f"<tr style='{row_style}'>"
+            f"<td class='center' "
+            f"style='color:{mark_color};font-weight:bold;'>{mark}</td>"
             f"<td>{html.escape(name)}</td>"
             f"<td>{html.escape(strat)}</td>"
             f"<td class='right'>{shifts_lbl}</td>"
@@ -435,6 +470,121 @@ def compute_trade_quality(t, pair_score: float) -> dict:
     }
 
 
+def annotate_q_state(pair_trades: dict) -> None:
+    """採用ユニバース全体の取引を日付ごとに時系列で並べ、
+    各取引のエントリー直前までの look-ahead-free な日中状態を注釈.
+
+    - same_day_n:        その日その銘柄で何回目のエントリーか (1始まり)
+    - same_day_loss_prior: その日その銘柄で既に損切が出ているか
+    - daily_pnl_prior:   全銘柄合算の当日累積 PnL (このエントリー直前まで)
+
+    同時刻ペア (同じ銘柄を同じ時刻に複数戦略で拾うケース) は
+    same_day_n を 1 回として扱う.
+    """
+    all_trades = []
+    for trades in pair_trades.values():
+        all_trades.extend(trades)
+    by_day = defaultdict(list)
+    for t in all_trades:
+        if hasattr(t.get("entry_dt"), "date"):
+            by_day[t["entry_dt"].date()].append(t)
+    for day_trades in by_day.values():
+        day_trades.sort(key=lambda x: x["entry_dt"])
+        sym_count = defaultdict(int)
+        sym_had_loss = defaultdict(bool)
+        sym_last_entry_dt = {}
+        cum_pnl = 0
+        for t in day_trades:
+            sym = t["symbol"]
+            # 同時刻同銘柄は 1 回と数える
+            if sym_last_entry_dt.get(sym) == t["entry_dt"]:
+                t["same_day_n"] = sym_count[sym]
+            else:
+                sym_count[sym] += 1
+                t["same_day_n"] = sym_count[sym]
+                sym_last_entry_dt[sym] = t["entry_dt"]
+            t["same_day_loss_prior"] = sym_had_loss[sym]
+            t["daily_pnl_prior"] = cum_pnl
+            if t["pnl"] < 0:
+                sym_had_loss[sym] = True
+            cum_pnl += t["pnl"]
+
+
+def _q_time_adj(dt) -> int:
+    """時間帯による Q 補正. 寄付直後/大引け前は減点."""
+    try:
+        m = dt.hour * 60 + dt.minute
+    except Exception:
+        return 0
+    if m < 9 * 60 + 35 or m >= 14 * 60 + 30:
+        return -5
+    return 5
+
+
+def _q_same_day_count_adj(n: int) -> int:
+    """同日同銘柄エントリー回数による Q 補正."""
+    if n <= 1:
+        return 10
+    if n == 2:
+        return 0
+    if n == 3:
+        return -10
+    return -15
+
+
+def compute_q_score(t, pair_score: float) -> dict:
+    """1取引の Q スコア (look-ahead-free シグナル品質).
+
+    Q = pair_score + 時間帯 + 同日同銘柄回数 + 同銘柄当日損切歴
+        + 当日累積PnL
+
+    朝の Q スコア (BT + 同日同銘柄/損切歴/累積PnL/時間帯) を踏襲.
+    """
+    time_adj = _q_time_adj(t["entry_dt"])
+    n = t.get("same_day_n", 1)
+    count_adj = _q_same_day_count_adj(n)
+    loss_adj = -10 if t.get("same_day_loss_prior") else 0
+    pnl_prior = t.get("daily_pnl_prior", 0)
+    if pnl_prior >= 10_000:
+        pnl_adj = 5
+    elif pnl_prior <= -10_000:
+        pnl_adj = -5
+    else:
+        pnl_adj = 0
+    q = max(0.0, min(100.0,
+                       pair_score + time_adj + count_adj + loss_adj + pnl_adj))
+    sp = _stop_pct(t["entry_p"], t["stop_p"])
+    return {
+        "q_score": q,
+        "pair_score": pair_score,
+        "time_adj": time_adj,
+        "count_adj": count_adj,
+        "loss_adj": loss_adj,
+        "pnl_adj": pnl_adj,
+        "same_day_n": n,
+        "same_day_loss_prior": t.get("same_day_loss_prior", False),
+        "daily_pnl_prior": pnl_prior,
+        "stop_pct": sp,
+        "prev_losses": t.get("prev_losses", 0),
+    }
+
+
+def trade_tier(pair_score: float, q_score: float) -> str:
+    """朝レポート相当の S/A/B/C ティア分類. 閾値は本システムのスケールに合わせ調整."""
+    if pair_score >= 35 and q_score >= 50:
+        return "S"
+    if pair_score >= 25 and q_score >= 45:
+        return "A"
+    if pair_score >= 15 and q_score >= 40:
+        return "B"
+    return "C"
+
+
+def _tier_color(tier: str) -> str:
+    return {"S": "#10b981", "A": "#4ade80",
+             "B": "#facc15", "C": "#64748b"}.get(tier, "#94a3b8")
+
+
 def aggregate_daily(trades):
     by_date = defaultdict(list)
     for t in trades:
@@ -480,14 +630,14 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         sc = pair_scores.get((t["symbol"], t["strategy"]), {})
         return sc.get("score", 0.0)
 
-    def _quality(t):
-        return compute_trade_quality(t, _pair_score(t))
+    def _q(t):
+        return compute_q_score(t, _pair_score(t))
 
-    # トレードスコア降順 → 日時降順
+    # Q スコア降順 → 日時降順
     if pair_scores is not None:
         trades_sorted = sorted(
             trades,
-            key=lambda x: (-_quality(x)["trade_score"], x["entry_dt"]),
+            key=lambda x: (-_q(x)["q_score"], x["entry_dt"]),
         )
     else:
         trades_sorted = sorted(trades, key=lambda x: x["entry_dt"],
@@ -517,10 +667,14 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
              f"<div class='val neg'>{overall['max_dd']:.1f}%</div></div>")
     H.append("</div>")
 
-    # 高品質フィルタ後のサマリ (trade_score ≥ 30)
+    # Q スコア閾値別フィルタサマリ
     if pair_scores is not None and trades:
-        hq = [t for t in trades if _quality(t)["trade_score"] >= 30]
-        if hq:
+        for threshold, label_cls in [(65, "🟢 推奨 (Q≥65)"),
+                                       (55, "🟡 標準 (Q≥55)"),
+                                       (45, "⚪ 緩 (Q≥45)")]:
+            hq = [t for t in trades if _q(t)["q_score"] >= threshold]
+            if not hq:
+                continue
             hq_st = calc_stats(hq)
             hq_pf = hq_st["pf"]
             hq_pf_s = ("∞" if hq_pf == float("inf") else f"{hq_pf:.2f}")
@@ -529,8 +683,7 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
             hq_pnl_cls = "pos" if hq_st["total_pnl"] >= 0 else "neg"
             hq_pf_color = ("#4ade80" if hq_pf >= 1.5
                             else ("#facc15" if hq_pf >= 1.0 else "#f87171"))
-            H.append("<h3 style='color:#10b981;'>"
-                      "✨ 高品質フィルタ後 (trade_score ≥ 30)</h3>")
+            H.append(f"<h3 style='color:#10b981;'>{label_cls}</h3>")
             H.append("<div class='summary'>")
             H.append(f"<div class='card'><div class='lbl'>取引</div>"
                      f"<div class='val'>{hq_st['n']:,}"
@@ -580,21 +733,23 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                  f"</tr>")
     H.append("</tbody></table>")
 
-    # スコアフィルタ
+    # Q スコアフィルタ
     if pair_scores is not None and tab_uid:
         H.append(f"<h3>📋 全取引 (<span id='{tab_uid}-cnt'>"
                   f"{len(trades_sorted):,}</span>件)</h3>")
         H.append(f"<div class='score-filters'>"
                   f"<span style='color:#94a3b8;font-size:11px;margin-right:8px;'>"
-                  f"トレードスコアフィルタ:</span>"
+                  f"Q スコアフィルタ:</span>"
                   f"<button class='score-btn active' "
                   f"onclick=\"filterScore('{tab_uid}', 0, this)\">全件</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 20, this)\">≥20</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 45, this)\">≥45</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 30, this)\">≥30</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 55, this)\">≥55</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 50, this)\">≥50</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 65, this)\">≥65</button>"
+                  f"<button class='score-btn' "
+                  f"onclick=\"filterScore('{tab_uid}', 75, this)\">≥75</button>"
                   f"</div>")
         H.append(f"<table id='{tab_uid}-tbl'><thead><tr>")
     else:
@@ -602,11 +757,13 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         H.append("<table><thead><tr>")
 
     H.append("<th>銘柄</th><th>戦略</th>"
-              "<th class='right'>銘柄スコア</th>"
-              "<th class='right'>トレードスコア</th>"
+              "<th class='right'>銘柄</th>"
+              "<th class='right'>Q</th>"
+              "<th class='center'>ティア</th>"
               "<th class='center'>時刻</th>"
-              "<th class='center'>幅</th>"
-              "<th class='center'>連敗</th>"
+              "<th class='center'>同日</th>"
+              "<th class='center'>損切歴</th>"
+              "<th class='center'>累積</th>"
               "<th class='center'>Side</th>"
               "<th>Entry</th><th>Exit</th><th class='right'>保有</th>"
               "<th class='right'>買値</th><th class='right'>損切</th>"
@@ -617,31 +774,42 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         pnl_c = "pos" if t["pnl"] >= 0 else "neg"
         held = _hold_min(t)
         side_s = "L" if t["side"] == "long" else "S"
-        q = _quality(t) if pair_scores is not None else {
-            "trade_score": 0.0, "pair_score": 0.0,
-            "time_factor": 0.0, "stop_factor": 0.0, "streak_factor": 0.0,
-            "stop_pct": 0.0, "prev_losses": 0,
-        }
-        ts = q["trade_score"]
+        if pair_scores is not None:
+            q = _q(t)
+        else:
+            q = {"q_score": 0.0, "pair_score": 0.0,
+                  "time_adj": 0, "count_adj": 0, "loss_adj": 0, "pnl_adj": 0,
+                  "same_day_n": 1, "same_day_loss_prior": False,
+                  "daily_pnl_prior": 0, "stop_pct": 0.0, "prev_losses": 0}
         ps = q["pair_score"]
-        ts_color = _score_color(ts)
+        qs = q["q_score"]
+        tier = trade_tier(ps, qs)
+        qs_color = _q_color(qs)
         ps_color = _score_color(ps)
-        tip = (f"pair={ps:.1f} × time={q['time_factor']:.2f} "
-                f"× stop={q['stop_factor']:.2f} "
-                f"(幅 {q['stop_pct']:.2f}%) "
-                f"× streak={q['streak_factor']:.2f} "
-                f"(直前 {q['prev_losses']}連敗)")
+        tier_color = _tier_color(tier)
+        loss_mark = "✗" if q["same_day_loss_prior"] else "—"
+        pnl_prior = q["daily_pnl_prior"]
+        pnl_prior_lbl = f"{pnl_prior/1000:+.0f}K"
+        tip = (f"Q = pair({ps:.0f}) "
+                f"+ 時刻({q['time_adj']:+d}) "
+                f"+ 同日{q['same_day_n']}回目({q['count_adj']:+d}) "
+                f"+ 当日損切歴({q['loss_adj']:+d}) "
+                f"+ 累積{pnl_prior_lbl}({q['pnl_adj']:+d}) "
+                f"= {qs:.0f} / 損切幅 {q['stop_pct']:.2f}%")
         H.append(
-            f"<tr class='trade-row' data-score='{ts:.2f}'>"
+            f"<tr class='trade-row' data-score='{qs:.2f}'>"
             f"<td>{html.escape(t['name'])}</td>"
             f"<td>{html.escape(t['strategy'])}</td>"
             f"<td class='right' "
-            f"style='color:{ps_color};'>{ps:.1f}</td>"
+            f"style='color:{ps_color};'>{ps:.0f}</td>"
             f"<td class='right' title='{html.escape(tip)}' "
-            f"style='color:{ts_color};font-weight:bold;'>{ts:.1f}</td>"
-            f"<td class='center small'>{q['time_factor']:.2f}</td>"
-            f"<td class='center small'>{q['stop_pct']:.2f}%</td>"
-            f"<td class='center small'>{q['prev_losses']}</td>"
+            f"style='color:{qs_color};font-weight:bold;'>{qs:.0f}</td>"
+            f"<td class='center' "
+            f"style='color:{tier_color};font-weight:bold;'>{tier}</td>"
+            f"<td class='center small'>{q['time_adj']:+d}</td>"
+            f"<td class='center small'>{q['same_day_n']}回</td>"
+            f"<td class='center small'>{loss_mark}</td>"
+            f"<td class='center small'>{pnl_prior_lbl}</td>"
             f"<td class='center'>{side_s}</td>"
             f"<td>{_fmt_dt(t['entry_dt'])}</td>"
             f"<td>{_fmt_dt(t['exit_dt'])}</td>"
@@ -824,11 +992,12 @@ function filterScore(tabUid, minScore, btn){
             tab_uid = f"sec-{side}-{s}"
             H.append(
                 "<p class='note'>"
-                "トレードスコア = 銘柄スコア × 時刻係数 × 損切幅係数 × 連敗係数. "
-                "時刻: 10:30-13:30 = 1.0 (中盤), 9:35-9:45 = 0.5 (騙し), "
-                "14:30+ = 0.4 (大引け前). "
-                "損切幅: &lt;0.7% = 1.0, 1.5-2.5% = 0.5, &gt;2.5% = 0.2. "
-                "連敗: 0=1.0, 1=0.85, 2=0.65, 3+=0.4."
+                "Q スコア = 銘柄スコア + 時間帯 (寄付/引け前=-5, 通常=+5) "
+                "+ 同日同銘柄回数 (初=+10, 2回目=0, 3回目=-10, 4回目以上=-15) "
+                "+ 同銘柄当日損切歴 (1回以上=-10) "
+                "+ 当日累積PnL (+10K以上=+5, -10K以下=-5). "
+                "S級=銘柄≥35 & Q≥50, A級=銘柄≥25 & Q≥45, "
+                "B級=銘柄≥15 & Q≥40, それ以外=C級."
                 "</p>"
             )
             H.append(render_section(trades, lbl,
@@ -1002,16 +1171,56 @@ def main():
           f"short={sum(1 for _,st in union_pairs if st in SHORT_STRATS)})",
           flush=True)
 
-    # 全体タブ: union 銘柄 × 全期間
+    # ペアスコア計算 (各 shift が除外していた直近 N日 = OOS の成績)
+    print(f"\n[Step 4] ペアスコア計算 ({len(union_pairs)}ペア)", flush=True)
+    pair_selection = build_pair_selection(all_specs_by_shift)
+    # 銘柄コード → 銘柄名のマップ
+    sym_name_map = {}
+    for s, pairs in all_specs_by_shift.items():
+        for sym, name, _strat in pairs:
+            if name:
+                sym_name_map[sym] = name
+    pair_scores = {}
     for sym, strat in union_pairs:
+        trades_full = pair_trades.get((sym, strat), [])
+        selecting = pair_selection.get((sym, strat), set())
+        pair_scores[(sym, strat)] = compute_pair_score(
+            trades_full, selecting, today)
+
+    # ユニバース厳選 (案A): pass フィルタを通ったペアのみ採用
+    filtered_pairs = {p for p, sc in pair_scores.items()
+                       if pair_passes_filter(sc)}
+    print(f"\n[Step 5] ユニバース厳選 "
+          f"(robustness≥{PAIR_FILTER_MIN_ROBUSTNESS*6:.0f}/6 & "
+          f"PF≥{PAIR_FILTER_MIN_PF:.1f} & PnL>0)",
+          flush=True)
+    print(f"  採用: {len(filtered_pairs)}/{len(union_pairs)} ペア",
+          flush=True)
+    for p in sorted(filtered_pairs, key=lambda x: -pair_scores[x]["score"]):
+        sc = pair_scores[p]
+        name = sym_name_map.get(p[0], p[0])
+        shifts_lbl = "/".join(str(s) for s in sc["selecting_shifts"])
+        print(f"    ✓ {name[:14]:<14}/{p[1]:<8} "
+              f"score={sc['score']:5.1f} shifts=[{shifts_lbl}] "
+              f"PF={sc['avg_oos_pf']:.2f} "
+              f"勝率={sc['avg_oos_winrate']*100:.0f}% "
+              f"PnL={sc['oos_pnl']:+,.0f}", flush=True)
+
+    # 採用ペアのみで pair_trades を絞り、Q スコアの look-ahead-free 状態を注釈
+    filtered_pair_trades = {p: pair_trades.get(p, [])
+                              for p in filtered_pairs}
+    annotate_q_state(filtered_pair_trades)
+
+    # 全体タブ: 採用ペア × 全期間
+    for sym, strat in filtered_pairs:
         trades = pair_trades.get((sym, strat), [])
         side = "short" if strat in SHORT_STRATS else "long"
         shift_trades_by_side[(SHIFT_ALL, side)].extend(trades)
 
-    # shift 別タブ: union 銘柄 × 直近 N日 にフィルタ
+    # shift 別タブ: 採用ペア × 直近 N日 にフィルタ
     for s in SHIFTS:
         cutoff = today - timedelta(days=s)
-        for sym, strat in union_pairs:
+        for sym, strat in filtered_pairs:
             trades = pair_trades.get((sym, strat), [])
             side = "short" if strat in SHORT_STRATS else "long"
             for t in trades:
@@ -1031,41 +1240,6 @@ def main():
         if before > after:
             print(f"    {key}: {before} → {after} "
                   f"(-{before - after} 重複)", flush=True)
-
-    # ペアスコア計算 (各 shift が除外していた直近 N日 = OOS の成績)
-    print(f"\n[Step 4] ペアスコア計算 ({len(union_pairs)}ペア)", flush=True)
-    pair_selection = build_pair_selection(all_specs_by_shift)
-    # 銘柄コード → 銘柄名のマップ
-    sym_name_map = {}
-    for s, pairs in all_specs_by_shift.items():
-        for sym, name, _strat in pairs:
-            if name:
-                sym_name_map[sym] = name
-    pair_scores = {}
-    for sym, strat in union_pairs:
-        trades_full = pair_trades.get((sym, strat), [])
-        selecting = pair_selection.get((sym, strat), set())
-        pair_scores[(sym, strat)] = compute_pair_score(
-            trades_full, selecting, today)
-    # 上位サマリ表示
-    ranked = sorted(pair_scores.items(), key=lambda x: -x[1]["score"])
-    print(f"  Top 5:", flush=True)
-    for (sym, strat), sc in ranked[:5]:
-        shifts_lbl = "/".join(str(s) for s in sc["selecting_shifts"])
-        name = sym_name_map.get(sym, sym)
-        print(f"    {name[:14]:<14}/{strat:<6} score={sc['score']:5.1f} "
-              f"shifts=[{shifts_lbl}] "
-              f"OOS PF={sc['avg_oos_pf']:.2f} "
-              f"勝率={sc['avg_oos_winrate']*100:.0f}% "
-              f"取引={sc['oos_trades']} "
-              f"利益=+{sc['oos_profit']:,.0f} "
-              f"損失=-{sc['oos_loss']:,.0f}", flush=True)
-    n_high = sum(1 for _, sc in pair_scores.items() if sc["score"] >= 50)
-    n_mid = sum(1 for _, sc in pair_scores.items()
-                 if 30 <= sc["score"] < 50)
-    n_low = sum(1 for _, sc in pair_scores.items() if sc["score"] < 30)
-    print(f"  スコア分布: ≥50={n_high}, 30-50={n_mid}, <30={n_low}",
-          flush=True)
 
     # HTML 出力
     out = args.output or f"simple_report_all_shifts_{date_label}.html"
