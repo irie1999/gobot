@@ -3042,6 +3042,10 @@ function toggleTrendBreakdown() {{
 </table>
 </div>"""
 
+    global _DETAIL_TAB_SEQ
+    _DETAIL_TAB_SEQ += 1
+    _dseq = _DETAIL_TAB_SEQ
+
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
 {kpi_html}
