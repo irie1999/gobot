@@ -648,6 +648,30 @@ def aggregate_daily(trades):
     return out
 
 
+def simulate_sizing(qualified_trades_with_q, daily_budget=3_000_000, shares=100):
+    """Q フィルタ済み取引を 100株固定・300万/日 上限でシミュレーション.
+
+    qualified_trades_with_q: [(trade_dict, q_score), ...]
+    戻り値: pnl を 100株換算に置き換えたトレードリスト (スキップ分は含まない)
+    """
+    by_day = defaultdict(list)
+    for t, q in qualified_trades_with_q:
+        if hasattr(t.get("entry_dt"), "date"):
+            by_day[t["entry_dt"].date()].append((t, q))
+    result = []
+    for d in sorted(by_day.keys()):
+        day_list = sorted(by_day[d], key=lambda x: (-x[1], x[0]["entry_dt"]))
+        daily_used = 0
+        for t, _q in day_list:
+            capital = shares * t["entry_p"]
+            if daily_used + capital > daily_budget:
+                continue
+            pnl_sim = shares * t["entry_p"] * t["pct"] / 100.0
+            result.append({**t, "pnl": pnl_sim})
+            daily_used += capital
+    return result
+
+
 def render_section(trades, label, pair_scores=None, tab_uid="",
                    nikkei_data=None):
     """1セクション分: サマリ + 日付別損益 + 全取引.
@@ -803,6 +827,56 @@ def render_section(trades, label, pair_scores=None, tab_uid="",
                      f"{mf_st['total_pnl']:+,.0f}円</div></div>")
             H.append(f"<div class='card'><div class='lbl'>最大DD</div>"
                      f"<div class='val neg'>{mf_st['max_dd']:.1f}%</div></div>")
+            H.append("</div>")
+
+    # 100株・300万/日 シミュレーション (Q フィルタあり)
+    if pair_scores is not None and trades:
+        trades_with_q = [(t, _q(t)["q_score"]) for t in trades]
+        for q_thr, q_lbl in [(45, "推奨 Q>=45"), (35, "標準 Q>=35")]:
+            qf = [(t, q) for t, q in trades_with_q if q >= q_thr]
+            if not qf:
+                continue
+            sim = simulate_sizing(qf, daily_budget=3_000_000, shares=100)
+            if not sim:
+                continue
+            sim_st = calc_stats(sim)
+            sim_pf = sim_st["pf"]
+            sim_pf_s = "∞" if sim_pf == float("inf") else f"{sim_pf:.2f}"
+            sim_profit = sum(t["pnl"] for t in sim if t["pnl"] > 0)
+            sim_loss = -sum(t["pnl"] for t in sim if t["pnl"] < 0)
+            sim_pnl_cls = "pos" if sim_st["total_pnl"] >= 0 else "neg"
+            sim_pf_color = ("#4ade80" if sim_pf >= 1.5
+                             else ("#facc15" if sim_pf >= 1.0 else "#f87171"))
+            skipped = len(qf) - len(sim)
+            H.append(
+                f"<h3 style='color:#fb923c;'>"
+                f"100株・300万/日 シミュレーション ({q_lbl})</h3>"
+            )
+            H.append("<p class='note'>Q閾値以上の取引を対象に100株固定で試算。"
+                     "1日の投入資本 = 100 × 買値の合計が300万円を超えた分はスキップ。"
+                     "Q降順で優先採用。損益 = 100 × 買値 × 損益率。</p>")
+            H.append("<div class='summary'>")
+            H.append(f"<div class='card'><div class='lbl'>取引</div>"
+                     f"<div class='val'>{sim_st['n']:,}"
+                     f"<span class='small'> / {len(qf):,}</span>"
+                     f"</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>スキップ</div>"
+                     f"<div class='val neg'>{skipped:,}件</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>勝率</div>"
+                     f"<div class='val'>{sim_st['win_rate']:.0f}%</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>PF</div>"
+                     f"<div class='val' style='color:{sim_pf_color}'>"
+                     f"{sim_pf_s}</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総利益</div>"
+                     f"<div class='val pos'>+{sim_profit:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総損失</div>"
+                     f"<div class='val neg'>-{sim_loss:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>差引損益</div>"
+                     f"<div class='val {sim_pnl_cls}'>"
+                     f"{sim_st['total_pnl']:+,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>最大DD</div>"
+                     f"<div class='val neg'>"
+                     f"{sim_st['max_dd']:.1f}%</div></div>")
             H.append("</div>")
 
     if not trades:
