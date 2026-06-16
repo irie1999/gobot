@@ -3002,13 +3002,14 @@ function toggleTrendBreakdown() {{
 </table>
 </div>"""
 
-    def _month_summary_html(by_date, sorted_dates):
-        """月別サマリーバーを生成する。"""
+    def _month_summary_html(trades_list):
+        """月別サマリーバーを生成する（全期間）。"""
         from collections import defaultdict as _dd2
         by_month: dict = _dd2(list)
-        for dk in sorted_dates:
-            ym = dk[:7]  # YYYY-MM
-            by_month[ym].extend(by_date[dk])
+        for _t in trades_list:
+            _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+            if len(_dk) >= 7:
+                by_month[_dk[:7]].append(_t)
         rows = ""
         for ym in sorted(by_month.keys(), reverse=True):
             trades_m = by_month[ym]
@@ -3224,7 +3225,7 @@ function toggleTrendBreakdown() {{
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_summary_html(_entry_by_date, _sorted_entry_dates)}
+{_month_summary_html(entry_sorted_trades)}
 <div class="edate-grid">
 {"".join(_entry_date_btn(dk, _dseq, _entry_by_date, "e") for dk in _sorted_entry_dates)}
 </div>
@@ -3232,7 +3233,7 @@ function toggleTrendBreakdown() {{
 </div>
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_summary_html(_bt70_entry_by_date, _sorted_bt70_entry_dates)}
+{_month_summary_html(_bt70_entry_sorted)}
 <div class="edate-grid">
 {"".join(_entry_date_btn(dk, _dseq, _bt70_entry_by_date, "b") for dk in _sorted_bt70_entry_dates)}
 </div>
