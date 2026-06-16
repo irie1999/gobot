@@ -2828,7 +2828,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
-    def _build_trade_row(t) -> str:
+    def _build_trade_row(t, entry_first=False) -> str:
         is_pending = t.get("reason") == "発注中"
         is_overlap = bool(t.get("_overlap"))
         overlap_badge = ('<br><span style="background:#7c3aed;color:#fff;font-size:0.66rem;'
@@ -2881,8 +2881,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             tgt_cell  = '<td style="color:#475569;text-align:right">—</td>'
             loc_cell  = '<td style="color:#475569;text-align:center">—</td>'
             olp_sub   = ""
+        first_col = (f'<td style="color:#94a3b8">{t["entry_dt"]}</td>'
+                     if entry_first else f'<td>{t["exit_dt"]}</td>')
+        last_col  = (f'<td>{t["exit_dt"]}</td>'
+                     if entry_first else f'<td style="color:#94a3b8">{t["entry_dt"]}</td>')
         return f"""<tr{row_style}>
-  <td>{t["exit_dt"]}</td>
+  {first_col}
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{cfg_badge}</td>
@@ -2895,19 +2899,26 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <td style="text-align:right">{t["hold_days"]}日</td>
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}{overlap_badge}</td>
-  <td style="color:#94a3b8">{t["entry_dt"]}</td>
+  {last_col}
 </tr>"""
 
-    def _rows_for(trades, empty_msg) -> str:
-        rows = "".join(_build_trade_row(t) for t in trades)
+    def _rows_for(trades, empty_msg, entry_first=False) -> str:
+        rows = "".join(_build_trade_row(t, entry_first=entry_first) for t in trades)
         if not rows:
             rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
         return rows
 
-    # 全部 / BT70以上 の 2 系統を用意 (発注中は両タブで先頭表示)
+    # 全部 / BT70以上 / エントリー日順 の 3 系統を用意
     bt70_trades = [t for t in sorted_trades if (t.get("rec_score") or 0) >= 70]
-    trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
-    trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
+    # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
+    entry_sorted_trades = pending_trades + sorted(
+        done_trades,
+        key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
+        reverse=True
+    )
+    trade_rows_all   = _rows_for(sorted_trades,       f"直近{days}日に決済した取引なし")
+    trade_rows_bt70  = _rows_for(bt70_trades,         "BT70以上の取引なし")
+    trade_rows_entry = _rows_for(entry_sorted_trades, f"直近{days}日に決済した取引なし", entry_first=True)
 
     global _DETAIL_TAB_SEQ
     _DETAIL_TAB_SEQ += 1
@@ -3056,10 +3067,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
 {_trend_breakdown_html}
 
-<h2>取引明細（決済日降順）</h2>
+<h2>取引明細</h2>
 <div class="detail-tab-nav">
-  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部 <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日順 <span style="font-size:0.72rem;color:#94a3b8">({len(entry_sorted_trades)})</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
@@ -3087,12 +3099,25 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{trade_rows_bt70}</tbody>
 </table>
 </div>
+<div id="detail_{_dseq}_entry" class="detail-tab-pane">
+<table>
+  <thead><tr>
+    <th>エントリー</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>設定</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>損益</th><th>理由</th><th>決済日</th>
+  </tr></thead>
+  <tbody>{trade_rows_entry}</tbody>
+</table>
+</div>
 <script>
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   // 既に表示中のタブを再クリックしたら閉じる (トグル)
   var closing = target && target.classList.contains('active');
-  ['all','bt70'].forEach(function(w) {{
+  ['all','bt70','entry'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
@@ -3100,7 +3125,9 @@ function switchDetailTab(seq, which) {{
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
     btns.forEach(function(b, i) {{
-      b.classList.toggle('active', (!closing) && ((which==='all' && i===0) || (which==='bt70' && i===1)));
+      b.classList.toggle('active', (!closing) && (
+        (which==='all' && i===0) || (which==='bt70' && i===1) || (which==='entry' && i===2)
+      ));
     }});
   }}
 }}
