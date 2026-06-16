@@ -45,6 +45,30 @@ LONG_STRATS = set(STRATEGIES.keys())
 SHORT_STRATS = set(STRATEGIES_SHORT.keys())
 
 SHIFTS = [30, 60, 90, 120, 150, 180]
+# 全体タブ用のキー (union of all shifts)
+SHIFT_ALL = "all"  # 全体タブ識別子
+
+
+def _open_in_edge(path: Path) -> None:
+    """Microsoft Edge で HTML を開く。失敗時はデフォルトブラウザ."""
+    url = f"file:///{str(path).replace(chr(92), '/')}"
+    candidates = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for exe in candidates:
+        if Path(exe).exists():
+            try:
+                import subprocess
+                subprocess.Popen([exe, url])
+                return
+            except Exception:
+                continue
+    # フォールバック: webbrowser
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
 
 
 def load_watchlist(path: Path) -> list[tuple[str, str, str]]:
@@ -316,30 +340,37 @@ function showShift(side, shift){
              "onclick=\"showSide('short')\">📉 ショート</button>")
     H.append("</div>")
 
+    # サブタブの順番: 全体 → 直近30 → 60 → 90 → 120 → 150 → 180
+    sub_tabs = [(SHIFT_ALL, "全体")] + [(s, f"直近{s}日") for s in SHIFTS]
+
     for side in ("long", "short"):
         active_cls = "active" if side == "long" else ""
         side_label = "ロング" if side == "long" else "ショート"
         H.append(f"<div class='tab-content side-content {active_cls}' "
                  f"id='side-content-{side}'>")
 
-        # サブタブ: shift 30/60/90/120/150/180
+        # サブタブ
         H.append("<div class='sub-tabs'>")
-        for i, s in enumerate(SHIFTS):
+        for i, (s, lbl) in enumerate(sub_tabs):
             ac = "active" if i == 0 else ""
             H.append(f"<button class='sub-tab shift-tab-{side} {ac}' "
                      f"id='shift-tab-{side}-{s}' "
-                     f"onclick=\"showShift('{side}', {s})\">"
-                     f"直近{s}日</button>")
+                     f"onclick=\"showShift('{side}', '{s}')\">"
+                     f"{lbl}</button>")
         H.append("</div>")
 
-        # 各 shift の内容
-        for i, s in enumerate(SHIFTS):
+        # 各サブタブの内容
+        for i, (s, lbl) in enumerate(sub_tabs):
             ac = "active" if i == 0 else ""
             H.append(f"<div class='sub-content shift-content-{side} {ac}' "
                      f"id='shift-content-{side}-{s}'>")
             trades = shift_trades_by_side.get((s, side), [])
-            label = f"shift={s}日 / {side_label} / OOS 直近{s}日"
-            H.append(render_section(trades, label))
+            if s == SHIFT_ALL:
+                desc = f"全 6 shift 銘柄 union / {side_label} / 全取引履歴"
+            else:
+                desc = f"shift={s}日 / {side_label} / OOS 直近{s}日"
+            H.append(f"<p style='color:#94a3b8;font-size:12px;'>{desc}</p>")
+            H.append(render_section(trades, lbl))
             H.append("</div>")
 
         H.append("</div>")
@@ -449,6 +480,22 @@ def main():
                 side = "short" if strat in SHORT_STRATS else "long"
                 shift_trades_by_side[(s, side)].append(t)
 
+    # 全体タブ: 6 shift watchlist の union を全期間 (フィルタなし) で表示
+    union_pairs = set()
+    for s in SHIFTS:
+        for sym, name, strat in all_specs_by_shift.get(s, []):
+            union_pairs.add((sym, strat))
+    for sym, strat in union_pairs:
+        trades = pair_trades.get((sym, strat), [])
+        for t in trades:
+            side = "short" if strat in SHORT_STRATS else "long"
+            shift_trades_by_side[(SHIFT_ALL, side)].append(t)
+    n_union_pairs = len(union_pairs)
+    print(f"  全体タブ: {n_union_pairs} ペア union "
+          f"(long={sum(1 for _,s in union_pairs if s in LONG_STRATS)}, "
+          f"short={sum(1 for _,s in union_pairs if s in SHORT_STRATS)})",
+          flush=True)
+
     # HTML 出力
     out = args.output or f"simple_report_all_shifts_{date_label}.html"
     html_text = render_html(
@@ -460,10 +507,7 @@ def main():
     Path(out).write_text(html_text, encoding="utf-8")
     print(f"\n[OK] 出力: {Path(out).resolve()}", flush=True)
     if not args.no_open:
-        try:
-            webbrowser.open(f"file://{Path(out).resolve()}")
-        except Exception:
-            pass
+        _open_in_edge(Path(out).resolve())
 
 
 if __name__ == "__main__":
