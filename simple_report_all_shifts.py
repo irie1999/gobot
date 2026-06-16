@@ -238,6 +238,8 @@ def compute_pair_score(trades_full: list, selecting_shifts: set,
                 and t["entry_dt"].date() >= cutoff_max]
     info["oos_trades"] = len(oos_max)
     info["oos_pnl"] = sum(t["pnl"] for t in oos_max)
+    info["oos_profit"] = sum(t["pnl"] for t in oos_max if t["pnl"] > 0)
+    info["oos_loss"] = -sum(t["pnl"] for t in oos_max if t["pnl"] < 0)
     info["robustness"] = len(selecting_shifts) / 6
 
     per_pf = []
@@ -287,7 +289,8 @@ def _score_color(score: float) -> str:
     return "#64748b"
 
 
-def render_pair_table(pair_scores: dict, side: str) -> str:
+def render_pair_table(pair_scores: dict, side: str,
+                       sym_name_map: dict | None = None) -> str:
     """ペア別スコアランキング (1 side 分)."""
     if side == "long":
         items = [(k, v) for k, v in pair_scores.items()
@@ -310,6 +313,8 @@ def render_pair_table(pair_scores: dict, side: str) -> str:
               "<th class='right'>OOS 取引</th>"
               "<th class='right'>OOS PF</th>"
               "<th class='right'>OOS 勝率</th>"
+              "<th class='right pos'>OOS 利益</th>"
+              "<th class='right neg'>OOS 損失</th>"
               "<th class='right'>OOS 損益</th>"
               "<th class='right'>スコア</th>"
               "</tr></thead><tbody>")
@@ -318,14 +323,17 @@ def render_pair_table(pair_scores: dict, side: str) -> str:
         score = sc["score"]
         color = _score_color(score)
         pnl_c = "pos" if sc["oos_pnl"] >= 0 else "neg"
+        name = sym_name_map.get(sym, sym) if sym_name_map else sym
         H.append(
             f"<tr>"
-            f"<td>{html.escape(sym)}</td>"
+            f"<td>{html.escape(name)}</td>"
             f"<td>{html.escape(strat)}</td>"
             f"<td class='right'>{shifts_lbl}</td>"
             f"<td class='right'>{sc['oos_trades']}</td>"
             f"<td class='right'>{sc['avg_oos_pf']:.2f}</td>"
             f"<td class='right'>{sc['avg_oos_winrate']*100:.0f}%</td>"
+            f"<td class='right pos'>+{sc['oos_profit']:,.0f}</td>"
+            f"<td class='right neg'>-{sc['oos_loss']:,.0f}</td>"
             f"<td class='right {pnl_c}'>{sc['oos_pnl']:+,.0f}</td>"
             f"<td class='right' "
             f"style='color:{color};font-weight:bold;'>"
@@ -346,12 +354,15 @@ def aggregate_daily(trades):
     for d in sorted(by_date.keys()):
         days = by_date[d]
         pnl = sum(t["pnl"] for t in days)
+        profit = sum(t["pnl"] for t in days if t["pnl"] > 0)
+        loss = -sum(t["pnl"] for t in days if t["pnl"] < 0)
         wins = sum(1 for t in days if t["pnl"] > 0)
         cumulative += pnl
         out.append({
             "date": d, "n": len(days), "wins": wins,
             "win_rate": wins / len(days) * 100,
-            "pnl": pnl, "cumulative": cumulative,
+            "pnl": pnl, "profit": profit, "loss": loss,
+            "cumulative": cumulative,
         })
     return out
 
@@ -369,6 +380,8 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                                               else "#f87171")
     daily = aggregate_daily(trades)
     daily_sorted = list(reversed(daily))
+    gross_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gross_loss = -sum(t["pnl"] for t in trades if t["pnl"] < 0)
 
     def _trade_score(t):
         if pair_scores is None:
@@ -395,8 +408,12 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
              f"<div class='val'>{overall['win_rate']:.0f}%</div></div>")
     H.append(f"<div class='card'><div class='lbl'>PF</div>"
              f"<div class='val' style='color:{pf_color}'>{pf_str}</div></div>")
+    H.append(f"<div class='card'><div class='lbl'>総利益</div>"
+             f"<div class='val pos'>+{gross_profit:,.0f}円</div></div>")
+    H.append(f"<div class='card'><div class='lbl'>総損失</div>"
+             f"<div class='val neg'>-{gross_loss:,.0f}円</div></div>")
     pnl_cls = "pos" if overall["total_pnl"] >= 0 else "neg"
-    H.append(f"<div class='card'><div class='lbl'>損益</div>"
+    H.append(f"<div class='card'><div class='lbl'>差引損益</div>"
              f"<div class='val {pnl_cls}'>{overall['total_pnl']:+,.0f}円</div></div>")
     H.append(f"<div class='card'><div class='lbl'>平均利益</div>"
              f"<div class='val pos'>{overall['avg_win']:+,.0f}</div></div>")
@@ -414,7 +431,10 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
     H.append("<h3>📅 日付別損益</h3>")
     H.append("<table><thead><tr>")
     H.append("<th>日付</th><th class='right'>取引</th>"
-             "<th class='right'>勝率</th><th class='right'>損益</th>"
+             "<th class='right'>勝率</th>"
+             "<th class='right pos'>利益</th>"
+             "<th class='right neg'>損失</th>"
+             "<th class='right'>差引</th>"
              "<th class='right'>累積</th></tr></thead><tbody>")
     for d in daily_sorted:
         pnl_c = "pos" if d["pnl"] >= 0 else "neg"
@@ -423,6 +443,8 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                  f"<td>{d['date']}</td>"
                  f"<td class='right'>{d['n']}</td>"
                  f"<td class='right'>{d['win_rate']:.0f}%</td>"
+                 f"<td class='right pos'>+{d['profit']:,.0f}</td>"
+                 f"<td class='right neg'>-{d['loss']:,.0f}</td>"
                  f"<td class='right {pnl_c}'>{d['pnl']:+,.0f}</td>"
                  f"<td class='right {cum_c}'>{d['cumulative']:+,.0f}</td>"
                  f"</tr>")
@@ -465,8 +487,7 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         sc_color = _score_color(score)
         H.append(
             f"<tr class='trade-row' data-score='{score:.2f}'>"
-            f"<td>{html.escape(t['name'][:14])}<br>"
-            f"<span class='small'>{html.escape(t['symbol'])}</span></td>"
+            f"<td>{html.escape(t['name'])}</td>"
             f"<td>{html.escape(t['strategy'])}</td>"
             f"<td class='right' "
             f"style='color:{sc_color};font-weight:bold;'>{score:.1f}</td>"
@@ -489,7 +510,8 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
 
 def render_html(*, shift_trades_by_side: dict, date_label: str,
                 source: str, watchlist_summary: dict,
-                pair_scores: dict | None = None) -> str:
+                pair_scores: dict | None = None,
+                sym_name_map: dict | None = None) -> str:
     """完全な HTML 生成 (Long/Short タブ + shift サブタブ)."""
     H = []
     H.append("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
@@ -622,7 +644,8 @@ function filterScore(tabUid, minScore, btn){
 
         # ペア別スコアランキング
         if pair_scores is not None:
-            H.append(render_pair_table(pair_scores, side))
+            H.append(render_pair_table(pair_scores, side,
+                                          sym_name_map=sym_name_map))
 
         # サブタブ
         H.append("<div class='sub-tabs'>")
@@ -849,6 +872,12 @@ def main():
     # ペアスコア計算 (各 shift が除外していた直近 N日 = OOS の成績)
     print(f"\n[Step 4] ペアスコア計算 ({len(union_pairs)}ペア)", flush=True)
     pair_selection = build_pair_selection(all_specs_by_shift)
+    # 銘柄コード → 銘柄名のマップ
+    sym_name_map = {}
+    for s, pairs in all_specs_by_shift.items():
+        for sym, name, _strat in pairs:
+            if name:
+                sym_name_map[sym] = name
     pair_scores = {}
     for sym, strat in union_pairs:
         trades_full = pair_trades.get((sym, strat), [])
@@ -860,12 +889,14 @@ def main():
     print(f"  Top 5:", flush=True)
     for (sym, strat), sc in ranked[:5]:
         shifts_lbl = "/".join(str(s) for s in sc["selecting_shifts"])
-        print(f"    {sym}/{strat:<6} score={sc['score']:5.1f} "
+        name = sym_name_map.get(sym, sym)
+        print(f"    {name[:14]:<14}/{strat:<6} score={sc['score']:5.1f} "
               f"shifts=[{shifts_lbl}] "
               f"OOS PF={sc['avg_oos_pf']:.2f} "
               f"勝率={sc['avg_oos_winrate']*100:.0f}% "
               f"取引={sc['oos_trades']} "
-              f"PnL={sc['oos_pnl']:+,.0f}", flush=True)
+              f"利益=+{sc['oos_profit']:,.0f} "
+              f"損失=-{sc['oos_loss']:,.0f}", flush=True)
     n_high = sum(1 for _, sc in pair_scores.items() if sc["score"] >= 50)
     n_mid = sum(1 for _, sc in pair_scores.items()
                  if 30 <= sc["score"] < 50)
@@ -881,6 +912,7 @@ def main():
         source=args.source,
         watchlist_summary=watchlist_summary,
         pair_scores=pair_scores,
+        sym_name_map=sym_name_map,
     )
     Path(out).write_text(html_text, encoding="utf-8")
     print(f"\n[OK] 出力: {Path(out).resolve()}", flush=True)
