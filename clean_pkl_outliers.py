@@ -1,0 +1,218 @@
+"""
+clean_pkl_outliers.py - pkl ファイルの外れ値バーを除去
+========================================================
+
+各日の中央値から ±5% を超えるバーを除外する。
+
+【発見されたバグ】
+yfinance_update.py が `auto_adjust=True` で yfinance を呼ぶため、
+back-adjusted (株式分割/配当調整済み) 価格が取得される。これを既存の
+J-Quants 由来の生 (unadjusted) 価格データと concat マージすると、
+同じ日の 5 分バー内に二系列が混在する。
+
+【発見された具体例】
+2910 (ロック・フィールド) の 2026-06-09:
+  - 1,260 系列 (実際の取引価格)
+  - 1,485 系列 (back-adjusted 前の古値)
+  5分刻みで交互に出現 → バックテストで誤シグナル発生
+
+【使い方】
+  # 1銘柄を dry-run で確認
+  python clean_pkl_outliers.py data/minute_5m/29100.pkl
+
+  # 全 watchlist 銘柄を dry-run でスキャン
+  python clean_pkl_outliers.py --from-watchlist daytrade_winners_2026-06-16.py
+
+  # 実際に書き込み (.bak は自動作成)
+  python clean_pkl_outliers.py data/minute_5m/29100.pkl --apply
+
+  # 偏差閾値を変える (デフォルト 5%)
+  python clean_pkl_outliers.py --from-watchlist daytrade_winners_2026-06-16.py --deviation-pct 3.0
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import pickle
+import shutil
+from pathlib import Path
+
+import pandas as pd
+
+
+def clean_one(path: Path, deviation_pct: float = 5.0,
+              dry_run: bool = True, backup: bool = True) -> dict:
+    """1個の pkl をクリーンアップ。"""
+    try:
+        df = pickle.loads(path.read_bytes())
+    except Exception as e:
+        return {"path": str(path), "error": f"read fail: {e}"}
+
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {"path": str(path), "error": "empty"}
+
+    if "Date" not in df.columns or "C" not in df.columns:
+        return {"path": str(path), "error": "missing Date/C"}
+
+    df = df.copy()
+    df["_DateStr"] = df["Date"].astype(str).str[:10]
+
+    before = len(df)
+
+    def keep_bars(group):
+        med = group["C"].median()
+        if pd.isna(med) or med == 0:
+            return group
+        deviation = (group["C"] - med).abs() / med
+        return group[deviation <= deviation_pct / 100.0]
+
+    cleaned = df.groupby("_DateStr", group_keys=False).apply(keep_bars)
+    cleaned = cleaned.drop(columns=["_DateStr"])
+    after = len(cleaned)
+    removed = before - after
+
+    # 影響を受けた日のリスト
+    df["_kept"] = cleaned.index.isin(df.index) if False else True
+    # 簡易: 除外されたバーがあった日を特定
+    affected_dates = []
+    for d, g in df.groupby("_DateStr"):
+        med = g["C"].median()
+        if pd.isna(med) or med == 0:
+            continue
+        n_bad = ((g["C"] - med).abs() / med > deviation_pct / 100.0).sum()
+        if n_bad > 0:
+            affected_dates.append((d, n_bad, g["C"].min(), g["C"].max(), med))
+
+    result = {
+        "path": str(path),
+        "before": before,
+        "after": after,
+        "removed": removed,
+        "removed_pct": removed / before * 100 if before > 0 else 0,
+        "affected_dates": affected_dates,
+    }
+
+    if not dry_run and removed > 0:
+        if backup:
+            backup_path = path.with_suffix(path.suffix + ".bak")
+            if not backup_path.exists():
+                shutil.copy2(path, backup_path)
+                result["backup"] = str(backup_path)
+        path.write_bytes(pickle.dumps(cleaned))
+        result["saved"] = True
+
+    return result
+
+
+def load_watchlist_symbols(wl_path: Path) -> list[str]:
+    """daytrade_winners_*.py から SYMBOLS を読み込み、銘柄コードのみ返す。"""
+    spec = importlib.util.spec_from_file_location("wl", wl_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    raw = getattr(mod, "SYMBOLS", [])
+    syms = set()
+    for e in raw:
+        if isinstance(e, tuple) and len(e) >= 1:
+            syms.add(e[0])
+    return sorted(syms)
+
+
+def yf_to_jquants(yf_code: str) -> str:
+    """7203.T → 72030"""
+    code = yf_code.strip().upper().replace(".T", "")
+    if len(code) == 4 and code.isdigit():
+        return code + "0"
+    return code
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("paths", nargs="*", help="pkl ファイル or ディレクトリ")
+    p.add_argument("--from-watchlist", default=None,
+                   help="watchlist .py を読み、SYMBOLS の pkl を対象にする")
+    p.add_argument("--pkl-dir", default="data/minute_5m",
+                   help="pkl 格納ディレクトリ (--from-watchlist 用)")
+    p.add_argument("--deviation-pct", type=float, default=5.0,
+                   help="日中央値からの許容偏差 (デフォルト 5.0)")
+    p.add_argument("--apply", action="store_true",
+                   help="実際に書き込み (デフォルト dry-run)")
+    p.add_argument("--no-backup", action="store_true",
+                   help=".bak ファイルを作らない")
+    p.add_argument("--show-affected", action="store_true",
+                   help="影響を受けた日付の詳細を表示")
+    args = p.parse_args()
+
+    paths: list[Path] = []
+    if args.from_watchlist:
+        wl_path = Path(args.from_watchlist)
+        if not wl_path.exists():
+            print(f"[error] watchlist 不在: {wl_path}")
+            return
+        syms = load_watchlist_symbols(wl_path)
+        print(f"[INFO] watchlist {wl_path.name}: {len(syms)}銘柄")
+        pkl_dir = Path(args.pkl_dir)
+        for sym in syms:
+            code5 = yf_to_jquants(sym)
+            pkl = pkl_dir / f"{code5}.pkl"
+            if pkl.exists():
+                paths.append(pkl)
+            else:
+                print(f"  [skip] {sym}: pkl 不在 ({pkl})")
+
+    for raw in args.paths:
+        path = Path(raw)
+        if path.is_dir():
+            paths.extend(sorted(path.glob("*.pkl")))
+        elif path.exists():
+            paths.append(path)
+        else:
+            print(f"  [warn] 不在: {raw}")
+
+    if not paths:
+        print("[error] 対象 pkl が見つかりません")
+        return
+
+    mode = "実書込み (--apply)" if args.apply else "DRY-RUN (--apply で実書込み)"
+    print(f"対象: {len(paths)}ファイル / モード: {mode} / "
+          f"許容偏差: ±{args.deviation_pct}%")
+    print()
+
+    total_before = 0
+    total_after = 0
+    n_affected = 0
+    for path in paths:
+        result = clean_one(path, args.deviation_pct,
+                            dry_run=not args.apply,
+                            backup=not args.no_backup)
+        if "error" in result:
+            print(f"  [skip] {path.name}: {result['error']}")
+            continue
+        total_before += result["before"]
+        total_after += result["after"]
+        marker = ""
+        if result["removed"] > 0:
+            marker = " ⚠️"
+            n_affected += 1
+        print(f"  {path.name}: {result['before']:>6,} → "
+              f"{result['after']:>6,} "
+              f"(-{result['removed']:>5,} / {result['removed_pct']:5.1f}%)"
+              f"{marker}")
+        if args.show_affected and result["affected_dates"]:
+            for d, n, c_min, c_max, med in result["affected_dates"]:
+                print(f"      {d}: {n}件除外, "
+                      f"範囲 {c_min:.0f}〜{c_max:.0f} (中央値 {med:.0f})")
+
+    print()
+    print(f"合計: {total_before:,} → {total_after:,} "
+          f"(-{total_before - total_after:,}) / "
+          f"破損あり: {n_affected}/{len(paths)} ファイル")
+    if not args.apply and total_before > total_after:
+        print()
+        print("【次のステップ】 実際に書き込むには --apply を付けて再実行してください")
+        print("                 (元ファイルは自動で .bak バックアップが作られます)")
+
+
+if __name__ == "__main__":
+    main()

@@ -135,9 +135,13 @@ def fetch_yfinance(code5: str, days: int) -> pd.DataFrame:
         raise RuntimeError("yfinance未インストール: pip install yfinance")
 
     ticker = jquants_code_to_yf(code5)
+    # 重要: auto_adjust=False で raw price を取得。
+    # auto_adjust=True だと back-adjusted (株式分割/配当調整済) 価格を返し、
+    # 既存 pkl の J-Quants 由来の生値とマージ時に系列混在を起こす
+    # (例: 2910 ロック・フィールド で 1,260系列と1,485系列が交互混在した)。
     df = yf.download(
         ticker, period=f"{days}d", interval="5m",
-        auto_adjust=True, progress=False, threads=False,  # 株式分割等を自動調整
+        auto_adjust=False, progress=False, threads=False,
     )
     if df is None or df.empty:
         return pd.DataFrame()
