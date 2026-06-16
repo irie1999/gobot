@@ -259,6 +259,12 @@ def main():
                         help="データソース。'yfinance' で pkl をバイパスして直接取得 "
                              "(60日制限、auto_adjust=False)。pkl 破損を回避できる。"
                              "60日モードでは Fold 構造も自動短縮 (FOLDS_60D)")
+    parser.add_argument("--snapshot-date", default=None,
+                        help="--source yfinance 用。指定日のスナップショット "
+                             "(data/yfinance_snapshots/<date>/) を使う。"
+                             "省略時は今日 (JST)。同じ日に再実行しても同じ結果")
+    parser.add_argument("--refresh-snapshot", action="store_true",
+                        help="--source yfinance のスナップショットを強制再取得")
     args = parser.parse_args()
 
     # yfinance モード: 鮮度チェック不要 (毎回 fresh fetch)
@@ -359,7 +365,11 @@ def main():
     print(f"\n[Step 1] データロード", flush=True)
     symbols = [s for s, _ in targets]
     print(f"  source={args.source} / days={args.days}", flush=True)
-    fetched = load_intraday_batch(symbols, args.days, source=args.source)
+    fetched = load_intraday_batch(
+        symbols, args.days, source=args.source,
+        snapshot_date=args.snapshot_date,
+        refresh_snapshot=args.refresh_snapshot,
+    )
     # 価格フィルタ
     before = len(fetched)
     if args.max_price > 0:

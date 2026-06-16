@@ -38,6 +38,12 @@ JST = timezone(timedelta(hours=9))
 # ── ローカルデータのパス ────────────────────────────────────
 DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
+# ── yfinance スナップショット保存先 ─────────────────────────
+# 同じ日に何度実行しても同じ結果を返すための機構。
+# 翌日は新しい日付のディレクトリに保存され、過去日付のスナップショットは
+# 温存される。
+YF_SNAPSHOT_DIR = Path(__file__).resolve().parent / "data" / "yfinance_snapshots"
+
 
 # ─────────────────────────────────────────────────────────────
 # 銘柄コード変換
@@ -276,16 +282,92 @@ def load_intraday(symbol: str, days: int = 60,
     return None
 
 
+def _load_yfinance_snapshot(symbols: list[str], days: int,
+                              snapshot_date: str,
+                              refresh: bool = False,
+                              quiet: bool = False
+                              ) -> dict[str, pd.DataFrame]:
+    """
+    yfinance データをスナップショット経由でロード。
+
+    `data/yfinance_snapshots/<snapshot_date>/<symbol>.pkl` に保存・読込。
+    一度取得したら同じ日に再取得しない (翌日に過去結果が変わらない仕組み)。
+
+    refresh=True で強制再取得 (キャッシュ無視)。
+    """
+    snap_dir = YF_SNAPSHOT_DIR / snapshot_date
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    result: dict[str, pd.DataFrame] = {}
+    remaining: list[str] = []
+
+    if not refresh:
+        for sym in symbols:
+            snap_path = snap_dir / f"{sym}.pkl"
+            if snap_path.exists():
+                try:
+                    df = pickle.loads(snap_path.read_bytes())
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        result[sym] = df
+                        continue
+                except Exception:
+                    pass
+            remaining.append(sym)
+        if result and not quiet:
+            print(f"  yfinance snapshot 復元: {len(result)}/{len(symbols)}銘柄 "
+                  f"(date={snapshot_date})", flush=True)
+    else:
+        remaining = list(symbols)
+
+    if remaining:
+        if not quiet:
+            print(f"  yfinance: {len(remaining)}銘柄を新規取得中... "
+                  f"(snapshot_date={snapshot_date})", flush=True)
+        fetched = _load_yfinance_batch(remaining, days)
+        for sym, df in fetched.items():
+            if df is None or df.empty:
+                continue
+            try:
+                (snap_dir / f"{sym}.pkl").write_bytes(pickle.dumps(df))
+            except Exception as e:
+                if not quiet:
+                    print(f"  [warn] snapshot 保存失敗 {sym}: {e}",
+                          file=sys.stderr)
+            result[sym] = df
+        if not quiet:
+            print(f"  yfinance snapshot 保存: {len(fetched)}銘柄 "
+                  f"→ {snap_dir}/", flush=True)
+
+    return result
+
+
 def load_intraday_batch(symbols: list[str], days: int = 60,
                         source: str = "auto",
-                        quiet: bool = False) -> dict[str, pd.DataFrame]:
+                        quiet: bool = False,
+                        snapshot_date: str | None = None,
+                        refresh_snapshot: bool = False
+                        ) -> dict[str, pd.DataFrame]:
     """
     複数銘柄の5分足を取得。
 
     source="auto" の場合:
       1. まずローカルから全銘柄ロード試行
       2. ローカルにない銘柄のみ yfinance で取得
+
+    source="yfinance" の場合:
+      日付別スナップショットを使用。snapshot_date 省略時は今日 (JST)。
+      同じ日に再実行しても同じデータを返す → 翌日に過去結果が変わらない。
+      refresh_snapshot=True で強制再取得。
     """
+    # yfinance ソースは スナップショット機構を経由
+    if source == "yfinance":
+        if snapshot_date is None:
+            snapshot_date = datetime.now(JST).date().isoformat()
+        return _load_yfinance_snapshot(
+            symbols, days, snapshot_date,
+            refresh=refresh_snapshot, quiet=quiet,
+        )
+
     result: dict[str, pd.DataFrame] = {}
     remaining: list[str] = []
 

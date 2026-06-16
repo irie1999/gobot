@@ -2890,6 +2890,12 @@ def main():
                         help="データソース。'yfinance' で pkl を使わず yfinance "
                              "から直接取得 (最大60日制限、auto_adjust=False)。"
                              "破損 pkl を避けたいときに使用")
+    parser.add_argument("--snapshot-date", default=None,
+                        help="--source yfinance 用。指定日のスナップショット "
+                             "(data/yfinance_snapshots/<date>/) を使う。"
+                             "省略時は今日 (JST)。過去日付指定で過去結果を再現可能")
+    parser.add_argument("--refresh-snapshot", action="store_true",
+                        help="--source yfinance のスナップショットを強制再取得")
     parser.add_argument("--strategy", default="all",
                         help="all/long/short/個別戦略")
     parser.add_argument("--short", action="store_true",
@@ -3183,7 +3189,11 @@ def main():
               f"(yfinance 5分足の上限)")
         load_days = 60
     print(f"  source={args.source} / days={load_days}")
-    fetched = load_intraday_batch(symbols, load_days, source=args.source)
+    fetched = load_intraday_batch(
+        symbols, load_days, source=args.source,
+        snapshot_date=args.snapshot_date,
+        refresh_snapshot=args.refresh_snapshot,
+    )
     # --data-end-date: 指定日 23:59:59 以前のバーのみ残す
     if args.data_end_date:
         import pandas as _pd
