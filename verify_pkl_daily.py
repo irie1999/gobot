@@ -215,10 +215,11 @@ def main():
     major = []     # 99% 未満
     errors = []
 
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers, 1):
         r = compare_one(ticker, pkl_dir, args.tolerance_pct)
         if "error" in r:
-            print(f"  [ERR] {ticker}: {r['error']}")
+            print(f"  [{i:>4}/{len(tickers)}] [ERR] {ticker}: {r['error']}",
+                  flush=True)
             errors.append(r)
             continue
 
@@ -231,9 +232,11 @@ def main():
         else:
             major.append(r)
 
-        print(f"  {mark} {ticker}: 共通 {r['common_days']:>4}日中 "
+        print(f"  [{i:>4}/{len(tickers)}] {mark} {ticker}: "
+              f"共通 {r['common_days']:>4}日中 "
               f"破損 {r['bad_days_count']:>3}日 "
-              f"({r['match_pct']:5.1f}% 一致)")
+              f"({r['match_pct']:5.1f}% 一致)",
+              flush=True)
 
         if args.verbose and r["bad_days"]:
             for bd in r["bad_days"][:args.max_bad_shown]:
@@ -242,9 +245,11 @@ def main():
                       f"C={bd['pkl']['C']:.0f}]  "
                       f"yf[H={bd['yf']['H']:.0f} L={bd['yf']['L']:.0f} "
                       f"C={bd['yf']['C']:.0f}]  "
-                      f"diff(H={bd['high_diff']:+.0f} L={bd['low_diff']:+.0f})")
+                      f"diff(H={bd['high_diff']:+.0f} L={bd['low_diff']:+.0f})",
+                      flush=True)
             if len(r["bad_days"]) > args.max_bad_shown:
-                print(f"      ... 他 {len(r['bad_days']) - args.max_bad_shown}日")
+                print(f"      ... 他 {len(r['bad_days']) - args.max_bad_shown}日",
+                      flush=True)
 
     print()
     print(f"━━━ 結果サマリ ━━━")
