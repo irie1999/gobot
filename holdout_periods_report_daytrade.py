@@ -2891,8 +2891,7 @@ def main():
                              "から直接取得 (最大60日制限、auto_adjust=False)。"
                              "破損 pkl を避けたいときに使用")
     parser.add_argument("--snapshot-date", default=None,
-                        help="--source yfinance 用。指定日のスナップショット "
-                             "(data/yfinance_snapshots/<date>/) を使う。"
+                        help="--source yfinance 用。指定日のスナップショットを使う。"
                              "省略時は今日 (JST)。過去日付指定で過去結果を再現可能")
     parser.add_argument("--refresh-snapshot", action="store_true",
                         help="--source yfinance のスナップショットを強制再取得")

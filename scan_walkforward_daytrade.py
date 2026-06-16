@@ -260,8 +260,7 @@ def main():
                              "(60日制限、auto_adjust=False)。pkl 破損を回避できる。"
                              "60日モードでは Fold 構造も自動短縮 (FOLDS_60D)")
     parser.add_argument("--snapshot-date", default=None,
-                        help="--source yfinance 用。指定日のスナップショット "
-                             "(data/yfinance_snapshots/<date>/) を使う。"
+                        help="--source yfinance 用。指定日のスナップショットを使う。"
                              "省略時は今日 (JST)。同じ日に再実行しても同じ結果")
     parser.add_argument("--refresh-snapshot", action="store_true",
                         help="--source yfinance のスナップショットを強制再取得")
@@ -290,7 +289,8 @@ def main():
         # 60日データなので短い fold (2段) を採用
         FOLDS = FOLDS_60D
         print(f"[yfinance モード] Fold 構造: FOLDS_60D "
-              f"(Fold1: 60-40/40-20, Fold2: 40-20/20-0)")
+              f"(Fold1 TRAIN 60-40 TEST 40-20, "
+              f"Fold2 TRAIN 40-20 TEST 20-0)")
     elif args.folds == 2:
         # --folds 2 のとき FOLDS をスイング流に差し替え
         FOLDS = FOLDS_SWING

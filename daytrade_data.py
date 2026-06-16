@@ -290,7 +290,7 @@ def _load_yfinance_snapshot(symbols: list[str], days: int,
     """
     yfinance データをスナップショット経由でロード。
 
-    `data/yfinance_snapshots/<snapshot_date>/<symbol>.pkl` に保存・読込。
+    YF_SNAPSHOT_DIR 配下に日付別ディレクトリで保存・読込。
     一度取得したら同じ日に再取得しない (翌日に過去結果が変わらない仕組み)。
 
     refresh=True で強制再取得 (キャッシュ無視)。
@@ -336,7 +336,7 @@ def _load_yfinance_snapshot(symbols: list[str], days: int,
             result[sym] = df
         if not quiet:
             print(f"  yfinance snapshot 保存: {len(fetched)}銘柄 "
-                  f"→ {snap_dir}/", flush=True)
+                  f"→ {snap_dir}", flush=True)
 
     return result
 
