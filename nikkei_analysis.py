@@ -2348,6 +2348,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
         if _trows:
             _trend_breakdown_html = f"""
+<button class="analysis-toggle" onclick="toggleTrendBreakdown()" id="trend_breakdown_btn">▶ 日経トレンド別成績・クロス分析を表示</button>
+<div id="trend_breakdown_block" class="analysis-block" style="display:none">
 <h2>日経トレンド別成績（シグナル発生日基準）</h2>
 <p class="footnote" style="margin-bottom:10px">
   シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。
@@ -2366,7 +2368,20 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   </tr></thead>
   <tbody>{_trows}</tbody>
 </table>
-{_bt_cross_html}"""
+{_bt_cross_html}
+</div>
+<script>
+function toggleTrendBreakdown() {{
+  var blk = document.getElementById('trend_breakdown_block');
+  var btn = document.getElementById('trend_breakdown_btn');
+  if (!blk) return;
+  var show = (blk.style.display === 'none');
+  blk.style.display = show ? 'block' : 'none';
+  if (btn) btn.textContent = show
+    ? '▼ 日経トレンド別成績・クロス分析を隠す'
+    : '▶ 日経トレンド別成績・クロス分析を表示';
+}}
+</script>"""
     except Exception:
         pass
 
