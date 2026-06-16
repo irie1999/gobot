@@ -1,8 +1,6 @@
 record_date,symbol,name,strategy,family,signal_date,signal_price,order_price,stop_price,target_price,status,fill_date,fill_price,exit_date,exit_price,pnl,updated_date,side,qty,cash_margin
-2026-06-09,4631,ＤＩＣ,RSI2,stop,2026-06-09,4806,4736,4486,5069,holding,2026-06-09,4806,,,,2026-06-09,long,100,3
 2026-06-05,3563,Ｆ＆ＬＣ,,,,,,,,holding,2026-06-05,9849,,,,2026-06-05,long,100,3
 2026-06-08,8050,セイコーＧ,,,,,,,,holding,2026-06-08,6790,,,,2026-06-08,long,100,3
 2026-06-05,8061,西華産,,,,,,,,holding,2026-06-05,2990,,,,2026-06-05,long,200,3
-2026-06-08,8387,四国銀,,,,,,,,holding,2026-06-08,2756,,,,2026-06-08,long,300,3
 2026-06-16,4626,太陽ＨＤ,,,,,,,,holding,2026-06-16,5366,,,,2026-06-16,long,100,3
 2026-06-16,6264,マルマエ,,,,,,,,holding,2026-06-16,2547.7,,,,2026-06-16,long,100,3
