@@ -60,6 +60,13 @@ FOLDS_SWING = [
     ("Fold2", 550, 180, 180, 0),     # TRAIN 550-180(12M), TEST 180-0(6M)
 ]
 
+# 60日データモード (--source yfinance 時の自動切替): 短い fold で 2 段
+# TRAIN/TEST 各 20日 → デイトレ評価には十分な取引数
+FOLDS_60D = [
+    ("Fold1", 60, 40, 40, 20),       # TRAIN 60-40, TEST 40-20
+    ("Fold2", 40, 20, 20, 0),        # TRAIN 40-20, TEST 20-0
+]
+
 # 合格条件 (デフォルト: 標準モード)
 # 勝率は緩く (30%+) - トレンドフォロー戦略は勝率低くてもPFが高ければOK
 # 重視するのは PF と損益
@@ -247,7 +254,20 @@ def main():
                         help="データ鮮度チェック+自動更新をスキップ")
     parser.add_argument("--no-auto-update", action="store_true",
                         help="鮮度チェックは行うが yfinance 自動更新はしない")
+    parser.add_argument("--source", default="local",
+                        choices=["auto", "local", "yfinance"],
+                        help="データソース。'yfinance' で pkl をバイパスして直接取得 "
+                             "(60日制限、auto_adjust=False)。pkl 破損を回避できる。"
+                             "60日モードでは Fold 構造も自動短縮 (FOLDS_60D)")
     args = parser.parse_args()
+
+    # yfinance モード: 鮮度チェック不要 (毎回 fresh fetch)
+    if args.source == "yfinance":
+        args.no_fresh_check = True
+        if args.days > 60:
+            print(f"[yfinance モード] --days {args.days} → 60 にキャップ "
+                  f"(yfinance 5分足の上限)")
+            args.days = 60
 
     # データ鮮度チェック + 自動更新
     if not args.no_fresh_check:
@@ -258,9 +278,15 @@ def main():
         except Exception as e:
             print(f"[warn] 鮮度チェック失敗: {e} (続行)")
 
-    # --folds 2 のとき FOLDS をスイング流に差し替え
+    # Fold 構造の決定
     global FOLDS
-    if args.folds == 2:
+    if args.source == "yfinance":
+        # 60日データなので短い fold (2段) を採用
+        FOLDS = FOLDS_60D
+        print(f"[yfinance モード] Fold 構造: FOLDS_60D "
+              f"(Fold1: 60-40/40-20, Fold2: 40-20/20-0)")
+    elif args.folds == 2:
+        # --folds 2 のとき FOLDS をスイング流に差し替え
         FOLDS = FOLDS_SWING
 
     # モード設定 + ラベル (ファイル名に使う)
@@ -332,7 +358,8 @@ def main():
     # データロード
     print(f"\n[Step 1] データロード", flush=True)
     symbols = [s for s, _ in targets]
-    fetched = load_intraday_batch(symbols, args.days, source="local")
+    print(f"  source={args.source} / days={args.days}", flush=True)
+    fetched = load_intraday_batch(symbols, args.days, source=args.source)
     # 価格フィルタ
     before = len(fetched)
     if args.max_price > 0:
