@@ -21,6 +21,7 @@ import argparse
 import glob
 import html
 import importlib.util
+import pickle
 import sys
 import webbrowser
 from collections import defaultdict
@@ -47,6 +48,41 @@ SHORT_STRATS = set(STRATEGIES_SHORT.keys())
 SHIFTS = [30, 60, 90, 120, 150, 180]
 # 全体タブ用のキー (union of all shifts)
 SHIFT_ALL = "all"  # 全体タブ識別子
+
+CACHE_FILE = Path(".cache_simple_report.pkl")
+YF_SNAP_DIR = Path("data/yfinance_snapshots")
+
+
+def detect_latest_snapshot_date() -> str | None:
+    """data/yfinance_snapshots 配下の最新日付ディレクトリを返す."""
+    if not YF_SNAP_DIR.exists():
+        return None
+    dates = []
+    for d in YF_SNAP_DIR.iterdir():
+        if d.is_dir():
+            try:
+                datetime.strptime(d.name, "%Y-%m-%d")
+                dates.append(d.name)
+            except Exception:
+                pass
+    return max(dates) if dates else None
+
+
+def load_backtest_cache() -> dict:
+    """バックテスト結果キャッシュをロード."""
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        return pickle.loads(CACHE_FILE.read_bytes())
+    except Exception:
+        return {}
+
+
+def save_backtest_cache(cache: dict) -> None:
+    try:
+        CACHE_FILE.write_bytes(pickle.dumps(cache))
+    except Exception as e:
+        print(f"  [warn] キャッシュ保存失敗: {e}", file=sys.stderr)
 
 
 def _open_in_edge(path: Path) -> None:
@@ -387,11 +423,28 @@ def main():
                    choices=["auto", "local", "yfinance", "hybrid"],
                    help="データソース (デフォルト hybrid)")
     p.add_argument("--days", type=int, default=540)
-    p.add_argument("--snapshot-date", default=None)
+    p.add_argument("--snapshot-date", default=None,
+                   help="使用するスナップショット日 (YYYY-MM-DD)。"
+                        "省略時は最新の既存スナップショットを自動採用 "
+                        "(翌日実行しても結果が変わらない)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--output", default=None)
     p.add_argument("--no-open", action="store_true")
+    p.add_argument("--refresh-cache", action="store_true",
+                   help="バックテストキャッシュを破棄して全て再計算")
     args = p.parse_args()
+
+    # snapshot_date: 省略時は最新の既存スナップショットを採用
+    if args.snapshot_date is None:
+        latest_snap = detect_latest_snapshot_date()
+        if latest_snap:
+            args.snapshot_date = latest_snap
+            print(f"  snapshot_date 自動検出: {latest_snap} "
+                  f"(最新の既存スナップショット)", flush=True)
+        else:
+            args.snapshot_date = datetime.now(JST).date().isoformat()
+            print(f"  snapshot_date デフォルト: {args.snapshot_date} "
+                  f"(既存スナップショットなし、新規作成)", flush=True)
 
     date_label = args.date or detect_latest_date()
     if not date_label:
@@ -427,41 +480,83 @@ def main():
     print(f"検出日付: {date_label}")
     print(f"ユニーク銘柄 (全 shift 合計): {len(all_syms)}", flush=True)
 
-    # データロード (全銘柄を一度に)
-    print(f"\n[Step 1] データロード (source={args.source})", flush=True)
-    fetched = load_intraday_batch(
-        sorted(all_syms), args.days, source=args.source,
-        snapshot_date=args.snapshot_date,
-    )
-    print(f"  ロード: {len(fetched)}/{len(all_syms)}銘柄", flush=True)
-
-    # バックテスト (全 shift の全ペアを一度に評価; 同じ pair は1回だけ)
-    # 重複排除
-    unique_pairs = set()
+    # 候補ペア (data load 前)
+    candidate_pairs = set()
     for s, pairs in all_specs_by_shift.items():
         for sym, name, strat in pairs:
-            if sym in fetched:
-                unique_pairs.add((sym, name, strat))
+            candidate_pairs.add((sym, name, strat))
 
-    print(f"\n[Step 2] バックテスト ({len(unique_pairs)}ペア "
-          f"ユニーク)", flush=True)
-    pair_trades = {}  # (sym, strat) -> trades list
-    specs = [(sym, name, strat, fetched[sym])
-             for sym, name, strat in unique_pairs]
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_run_one, *spec): spec for spec in specs}
-        done = 0
-        for fut in as_completed(futs):
-            done += 1
-            try:
-                strat_key, sym, trades = fut.result()
-            except Exception as e:
-                spec = futs[fut]
-                print(f"  [error] {spec[0]}/{spec[2]}: {e}")
-                continue
-            pair_trades[(sym, strat_key)] = trades
-            if done % 20 == 0 or done == len(specs):
-                print(f"  {done}/{len(specs)} 完了", flush=True)
+    # バックテストキャッシュチェック
+    cache_full = {} if args.refresh_cache else load_backtest_cache()
+    cache_key_prefix = f"{args.snapshot_date}::{args.source}"
+
+    print(f"\n[Step 1] キャッシュ確認 ({len(candidate_pairs)}候補ペア)",
+          flush=True)
+    if args.refresh_cache:
+        print(f"  [--refresh-cache] キャッシュ破棄", flush=True)
+    print(f"  既存キャッシュ: {len(cache_full)}件 "
+          f"(key prefix: {cache_key_prefix})", flush=True)
+
+    pair_trades = {}
+    pairs_needing_backtest = []
+    for sym, name, strat in candidate_pairs:
+        cache_key = f"{cache_key_prefix}::{sym}::{strat}"
+        if cache_key in cache_full:
+            pair_trades[(sym, strat)] = cache_full[cache_key]
+        else:
+            pairs_needing_backtest.append((sym, name, strat))
+
+    n_hits = len(pair_trades)
+    n_miss = len(pairs_needing_backtest)
+    print(f"  ヒット: {n_hits}/{len(candidate_pairs)} → "
+          f"再計算必要: {n_miss}ペア", flush=True)
+
+    # データロード (キャッシュミスがある場合のみ)
+    if pairs_needing_backtest:
+        syms_to_load = sorted(set(p[0] for p in pairs_needing_backtest))
+        print(f"\n[Step 2] データロード ({len(syms_to_load)}銘柄, "
+              f"source={args.source})", flush=True)
+        fetched = load_intraday_batch(
+            syms_to_load, args.days, source=args.source,
+            snapshot_date=args.snapshot_date,
+        )
+        print(f"  ロード: {len(fetched)}/{len(syms_to_load)}銘柄",
+              flush=True)
+
+        # バックテスト
+        print(f"\n[Step 3] バックテスト ({len(pairs_needing_backtest)}ペア)",
+              flush=True)
+        specs = [(sym, name, strat, fetched[sym])
+                 for sym, name, strat in pairs_needing_backtest
+                 if sym in fetched]
+        if len(specs) < len(pairs_needing_backtest):
+            missing = len(pairs_needing_backtest) - len(specs)
+            print(f"  [warn] {missing}ペアはデータなしでスキップ",
+                  flush=True)
+
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_run_one, *s): s for s in specs}
+            done = 0
+            for fut in as_completed(futs):
+                done += 1
+                try:
+                    strat_key, sym, trades = fut.result()
+                except Exception as e:
+                    spec = futs[fut]
+                    print(f"  [error] {spec[0]}/{spec[2]}: {e}")
+                    continue
+                pair_trades[(sym, strat_key)] = trades
+                cache_key = f"{cache_key_prefix}::{sym}::{strat_key}"
+                cache_full[cache_key] = trades
+                if done % 20 == 0 or done == len(specs):
+                    print(f"  {done}/{len(specs)} 完了", flush=True)
+
+        save_backtest_cache(cache_full)
+        print(f"  キャッシュ保存: {len(cache_full)}件 → {CACHE_FILE}",
+              flush=True)
+    else:
+        print(f"\n[Step 2] バックテスト全スキップ "
+              f"(全ペアがキャッシュ済み)", flush=True)
 
     # shift 別 + side 別に集計
     today = datetime.now(JST).date()
