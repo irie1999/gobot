@@ -2921,33 +2921,47 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
     # ── エントリー日別グリッド HTML ──────────────────────────────────
     from collections import defaultdict as _dd
-    _entry_by_date: dict = _dd(list)
-    for _t in entry_sorted_trades:
-        _dk = str(_t.get("entry_d_raw") or _t["exit_d_raw"])
-        _entry_by_date[_dk].append(_t)
-    _sorted_entry_dates = sorted(_entry_by_date.keys(), reverse=True)
+    _ENTRY_GRID_DAYS = 30  # グリッド表示は直近30日分
 
-    def _entry_date_btn(dk, dseq):
-        trades_d = _entry_by_date[dk]
-        done_d   = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
-        wins_d   = sum(1 for t in done_d if t["pnl"] > 0)
-        wr_d     = wins_d / len(done_d) * 100 if done_d else 0
-        pnl_d    = sum(t["pnl"] for t in done_d)
-        n_pend   = sum(1 for t in trades_d if t.get("reason") == "発注中")
-        pnl_col  = "#4ade80" if pnl_d >= 0 else "#f87171"
-        mm_dd    = dk[5:7] + "/" + dk[8:10]
+    def _build_entry_grid(trades_list, prefix):
+        """trades_list をエントリー日でグループ化して (by_date, sorted_dates) を返す。"""
+        by_date: dict = _dd(list)
+        cutoff_d = until - timedelta(days=_ENTRY_GRID_DAYS)
+        for _t in trades_list:
+            _dk = str(_t.get("entry_d_raw") or _t["exit_d_raw"])
+            if _dk >= str(cutoff_d):
+                by_date[_dk].append(_t)
+        return by_date, sorted(by_date.keys(), reverse=True)
+
+    _entry_by_date, _sorted_entry_dates = _build_entry_grid(entry_sorted_trades, "e")
+    _bt70_entry_sorted = pending_trades + sorted(
+        [t for t in done_trades if (t.get("rec_score") or 0) >= 70],
+        key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
+        reverse=True
+    )
+    _bt70_entry_by_date, _sorted_bt70_entry_dates = _build_entry_grid(_bt70_entry_sorted, "b")
+
+    def _entry_date_btn(dk, dseq, by_date, pfx):
+        trades_d  = by_date[dk]
+        done_d    = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
+        wins_d    = sum(1 for t in done_d if t["pnl"] > 0)
+        wr_d      = wins_d / len(done_d) * 100 if done_d else 0
+        pnl_d     = sum(t["pnl"] for t in done_d)
+        n_pend    = sum(1 for t in trades_d if t.get("reason") == "発注中")
+        pnl_col   = "#4ade80" if pnl_d >= 0 else "#f87171"
+        mm_dd     = dk[5:7] + "/" + dk[8:10]
         pend_span = (f'<span style="color:#fbbf24;font-size:0.66rem">発注中{n_pend}</span>'
                      if n_pend else "")
         dk_key = dk.replace("-", "")
-        return (f'<button class="edate-btn" id="edate_btn_{dseq}_{dk_key}" '
-                f'onclick="showEntryDate({dseq},\'{dk_key}\')">'
+        return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
+                f'onclick="showEntryDate{pfx.upper()}({dseq},\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
                 f'{pend_span}</button>')
 
-    def _entry_date_detail(dk, dseq, show):
-        trades_d = _entry_by_date[dk]
+    def _entry_date_detail(dk, dseq, show, by_date, pfx):
+        trades_d = by_date[dk]
         done_d   = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
         wins_d   = sum(1 for t in done_d if t["pnl"] > 0)
         wr_d     = wins_d / len(done_d) * 100 if done_d else 0
@@ -2956,7 +2970,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         rows_d   = "".join(_build_trade_row(t, entry_first=True) for t in trades_d)
         dk_key   = dk.replace("-", "")
         disp     = "block" if show else "none"
-        return f"""<div id="edate_detail_{dseq}_{dk_key}" style="display:{disp}">
+        return f"""<div id="{pfx}date_detail_{dseq}_{dk_key}" style="display:{disp}">
 <div style="padding:8px 0 12px;margin-bottom:8px;border-bottom:1px solid #1e293b;display:flex;align-items:center;gap:16px">
   <span style="font-size:0.9rem;font-weight:700;color:#60a5fa">{dk} のエントリー</span>
   <span style="font-size:0.8rem;color:#94a3b8">{len(done_d)}件決済 &nbsp;勝率{wr_d:.0f}%
@@ -3124,7 +3138,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">({len(_sorted_entry_dates)}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
@@ -3153,43 +3168,53 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
-<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示</p>
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 <div class="edate-grid">
-{"".join(_entry_date_btn(dk, _dseq) for dk in _sorted_entry_dates)}
+{"".join(_entry_date_btn(dk, _dseq, _entry_by_date, "e") for dk in _sorted_entry_dates)}
 </div>
-{"".join(_entry_date_detail(dk, _dseq, i==0) for i, dk in enumerate(_sorted_entry_dates))}
+{"".join(_entry_date_detail(dk, _dseq, i==0, _entry_by_date, "e") for i, dk in enumerate(_sorted_entry_dates))}
+</div>
+<div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+<div class="edate-grid">
+{"".join(_entry_date_btn(dk, _dseq, _bt70_entry_by_date, "b") for dk in _sorted_bt70_entry_dates)}
+</div>
+{"".join(_entry_date_detail(dk, _dseq, i==0, _bt70_entry_by_date, "b") for i, dk in enumerate(_sorted_bt70_entry_dates))}
 </div>
 <script>
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt70','entry'].forEach(function(w) {{
+  ['all','bt70','entry','bt70entry'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
+    var order = ['all','bt70','entry','bt70entry'];
     btns.forEach(function(b, i) {{
-      b.classList.toggle('active', (!closing) && (
-        (which==='all' && i===0) || (which==='bt70' && i===1) || (which==='entry' && i===2)
-      ));
+      b.classList.toggle('active', (!closing) && order[i] === which);
     }});
   }}
 }}
-function showEntryDate(seq, dk) {{
-  var con = document.getElementById('detail_'+seq+'_entry');
+function _showEntryDateGrid(seq, dk, pfx) {{
+  var con = document.getElementById('detail_'+seq+'_'+(pfx==='e'?'entry':'bt70entry'));
   if (!con) return;
-  var curBtn = document.getElementById('edate_btn_'+seq+'_'+dk);
+  var btnId  = pfx+'date_btn_'+seq+'_'+dk;
+  var detId  = pfx+'date_detail_'+seq+'_'+dk;
+  var curBtn = document.getElementById(btnId);
   var isActive = curBtn && curBtn.classList.contains('edate-active');
-  con.querySelectorAll('[id^="edate_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
+  con.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
   con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
   if (!isActive) {{
-    var det = document.getElementById('edate_detail_'+seq+'_'+dk);
+    var det = document.getElementById(detId);
     if (det) det.style.display = 'block';
     if (curBtn) curBtn.classList.add('edate-active');
   }}
 }}
+function showEntryDateE(seq, dk) {{ _showEntryDateGrid(seq, dk, 'e'); }}
+function showEntryDateB(seq, dk) {{ _showEntryDateGrid(seq, dk, 'b'); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
