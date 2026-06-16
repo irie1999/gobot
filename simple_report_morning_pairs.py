@@ -125,6 +125,20 @@ def save_backtest_cache(cache: dict) -> None:
         print(f"  [warn] キャッシュ保存失敗: {e}", file=sys.stderr)
 
 
+def dedup_same_time_same_symbol(trades: list) -> list:
+    """同一エントリー時刻・同一銘柄の重複取引を除去する。
+    バックテストエンジンが引け強制決済を 2 件生成する場合の対処。"""
+    seen: set = set()
+    out = []
+    for t in sorted(trades, key=lambda x: (x["entry_dt"], x["symbol"], x["strategy"])):
+        key = (t["symbol"], t["entry_dt"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def slice_trades(trades, start_days_ago, end_days_ago, today):
     """end_days_ago 〜 start_days_ago 前の取引を返す。"""
     start = today - timedelta(days=start_days_ago)
@@ -819,6 +833,10 @@ def main():
 
         save_backtest_cache(cache_full)
         print(f"  キャッシュ保存: {len(cache_full)}件", flush=True)
+
+    # 重複取引排除 (引け強制決済が 2 件生成される場合の対処)
+    for key in list(pair_trades.keys()):
+        pair_trades[key] = dedup_same_time_same_symbol(pair_trades[key])
 
     # ペアスコア計算
     today = datetime.now(JST).date()
