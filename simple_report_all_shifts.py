@@ -344,6 +344,97 @@ def render_pair_table(pair_scores: dict, side: str,
     return "\n".join(H)
 
 
+def annotate_streaks(pair_trades: dict) -> None:
+    """各 (sym, strat) の取引を時系列で並べ、エントリー直前までの
+    連敗数を t['prev_losses'] に書き込む.
+
+    連敗ストリークは同一 (銘柄, 戦略) の損失取引が連続したカウントで、
+    勝ち取引が出るとリセット.
+    """
+    for trades in pair_trades.values():
+        sorted_t = sorted(trades, key=lambda x: x["entry_dt"])
+        streak = 0
+        for t in sorted_t:
+            t["prev_losses"] = streak
+            if t["pnl"] < 0:
+                streak += 1
+            else:
+                streak = 0
+
+
+def _time_factor(dt) -> float:
+    """エントリー時刻による品質係数. 中盤 (10:30-13:30) を最良とする."""
+    try:
+        t = dt.hour * 60 + dt.minute
+    except Exception:
+        return 0.8
+    if 9 * 60 <= t < 9 * 60 + 35:
+        return 0.7
+    if 9 * 60 + 35 <= t < 9 * 60 + 45:
+        return 0.5
+    if 9 * 60 + 45 <= t < 10 * 60 + 30:
+        return 0.8
+    if 10 * 60 + 30 <= t < 13 * 60 + 30:
+        return 1.0
+    if 13 * 60 + 30 <= t < 14 * 60 + 30:
+        return 0.8
+    return 0.4
+
+
+def _stop_pct(entry_p: float, stop_p: float) -> float:
+    try:
+        return abs(entry_p - stop_p) / entry_p * 100
+    except Exception:
+        return 99.0
+
+
+def _stop_factor(entry_p: float, stop_p: float) -> float:
+    """ストップまでの距離 (%) による品質係数. 0.7%以内が最良."""
+    dist = _stop_pct(entry_p, stop_p)
+    if dist < 0.7:
+        return 1.0
+    if dist < 1.5:
+        return 0.85
+    if dist < 2.5:
+        return 0.5
+    return 0.2
+
+
+def _streak_factor(prev_losses: int) -> float:
+    """直前連敗数による品質係数. 連敗後は新規エントリーを抑制."""
+    if prev_losses <= 0:
+        return 1.0
+    if prev_losses == 1:
+        return 0.85
+    if prev_losses == 2:
+        return 0.65
+    return 0.4
+
+
+def compute_trade_quality(t, pair_score: float) -> dict:
+    """1取引のエントリー品質を多要素で評価.
+
+    trade_score = pair_score × time × stop × streak
+
+    - time:   エントリー時刻 (中盤が最良)
+    - stop:   ストップ距離 (狭いほど良)
+    - streak: 直前の連敗 (連敗中は減点)
+    """
+    tf = _time_factor(t["entry_dt"])
+    sf = _stop_factor(t["entry_p"], t["stop_p"])
+    rf = _streak_factor(t.get("prev_losses", 0))
+    sp = _stop_pct(t["entry_p"], t["stop_p"])
+    return {
+        "trade_score": pair_score * tf * sf * rf,
+        "pair_score": pair_score,
+        "time_factor": tf,
+        "stop_factor": sf,
+        "streak_factor": rf,
+        "stop_pct": sp,
+        "prev_losses": t.get("prev_losses", 0),
+    }
+
+
 def aggregate_daily(trades):
     by_date = defaultdict(list)
     for t in trades:
@@ -383,19 +474,22 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
     gross_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
     gross_loss = -sum(t["pnl"] for t in trades if t["pnl"] < 0)
 
-    def _trade_score(t):
+    def _pair_score(t):
         if pair_scores is None:
             return 0.0
         sc = pair_scores.get((t["symbol"], t["strategy"]), {})
         return sc.get("score", 0.0)
 
-    # スコア降順 → 日時降順
-    trades_sorted = sorted(
-        trades,
-        key=lambda x: (-_trade_score(x), x["entry_dt"]),
-        reverse=False if pair_scores else False,
-    )
-    if pair_scores is None:
+    def _quality(t):
+        return compute_trade_quality(t, _pair_score(t))
+
+    # トレードスコア降順 → 日時降順
+    if pair_scores is not None:
+        trades_sorted = sorted(
+            trades,
+            key=lambda x: (-_quality(x)["trade_score"], x["entry_dt"]),
+        )
+    else:
         trades_sorted = sorted(trades, key=lambda x: x["entry_dt"],
                                 reverse=True)
 
@@ -422,6 +516,42 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
     H.append(f"<div class='card'><div class='lbl'>最大DD</div>"
              f"<div class='val neg'>{overall['max_dd']:.1f}%</div></div>")
     H.append("</div>")
+
+    # 高品質フィルタ後のサマリ (trade_score ≥ 30)
+    if pair_scores is not None and trades:
+        hq = [t for t in trades if _quality(t)["trade_score"] >= 30]
+        if hq:
+            hq_st = calc_stats(hq)
+            hq_pf = hq_st["pf"]
+            hq_pf_s = ("∞" if hq_pf == float("inf") else f"{hq_pf:.2f}")
+            hq_profit = sum(t["pnl"] for t in hq if t["pnl"] > 0)
+            hq_loss = -sum(t["pnl"] for t in hq if t["pnl"] < 0)
+            hq_pnl_cls = "pos" if hq_st["total_pnl"] >= 0 else "neg"
+            hq_pf_color = ("#4ade80" if hq_pf >= 1.5
+                            else ("#facc15" if hq_pf >= 1.0 else "#f87171"))
+            H.append("<h3 style='color:#10b981;'>"
+                      "✨ 高品質フィルタ後 (trade_score ≥ 30)</h3>")
+            H.append("<div class='summary'>")
+            H.append(f"<div class='card'><div class='lbl'>取引</div>"
+                     f"<div class='val'>{hq_st['n']:,}"
+                     f"<span class='small'> / {overall['n']:,}</span>"
+                     f"</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>勝率</div>"
+                     f"<div class='val'>{hq_st['win_rate']:.0f}%</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>PF</div>"
+                     f"<div class='val' style='color:{hq_pf_color}'>"
+                     f"{hq_pf_s}</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総利益</div>"
+                     f"<div class='val pos'>+{hq_profit:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>総損失</div>"
+                     f"<div class='val neg'>-{hq_loss:,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>差引損益</div>"
+                     f"<div class='val {hq_pnl_cls}'>"
+                     f"{hq_st['total_pnl']:+,.0f}円</div></div>")
+            H.append(f"<div class='card'><div class='lbl'>最大DD</div>"
+                     f"<div class='val neg'>"
+                     f"{hq_st['max_dd']:.1f}%</div></div>")
+            H.append("</div>")
 
     if not trades:
         H.append("<p style='color:#94a3b8'>取引なし</p>")
@@ -456,15 +586,15 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                   f"{len(trades_sorted):,}</span>件)</h3>")
         H.append(f"<div class='score-filters'>"
                   f"<span style='color:#94a3b8;font-size:11px;margin-right:8px;'>"
-                  f"スコアフィルタ:</span>"
+                  f"トレードスコアフィルタ:</span>"
                   f"<button class='score-btn active' "
                   f"onclick=\"filterScore('{tab_uid}', 0, this)\">全件</button>"
+                  f"<button class='score-btn' "
+                  f"onclick=\"filterScore('{tab_uid}', 20, this)\">≥20</button>"
                   f"<button class='score-btn' "
                   f"onclick=\"filterScore('{tab_uid}', 30, this)\">≥30</button>"
                   f"<button class='score-btn' "
                   f"onclick=\"filterScore('{tab_uid}', 50, this)\">≥50</button>"
-                  f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 70, this)\">≥70</button>"
                   f"</div>")
         H.append(f"<table id='{tab_uid}-tbl'><thead><tr>")
     else:
@@ -472,7 +602,11 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         H.append("<table><thead><tr>")
 
     H.append("<th>銘柄</th><th>戦略</th>"
-              "<th class='right'>スコア</th>"
+              "<th class='right'>銘柄スコア</th>"
+              "<th class='right'>トレードスコア</th>"
+              "<th class='center'>時刻</th>"
+              "<th class='center'>幅</th>"
+              "<th class='center'>連敗</th>"
               "<th class='center'>Side</th>"
               "<th>Entry</th><th>Exit</th><th class='right'>保有</th>"
               "<th class='right'>買値</th><th class='right'>損切</th>"
@@ -483,14 +617,31 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         pnl_c = "pos" if t["pnl"] >= 0 else "neg"
         held = _hold_min(t)
         side_s = "L" if t["side"] == "long" else "S"
-        score = _trade_score(t)
-        sc_color = _score_color(score)
+        q = _quality(t) if pair_scores is not None else {
+            "trade_score": 0.0, "pair_score": 0.0,
+            "time_factor": 0.0, "stop_factor": 0.0, "streak_factor": 0.0,
+            "stop_pct": 0.0, "prev_losses": 0,
+        }
+        ts = q["trade_score"]
+        ps = q["pair_score"]
+        ts_color = _score_color(ts)
+        ps_color = _score_color(ps)
+        tip = (f"pair={ps:.1f} × time={q['time_factor']:.2f} "
+                f"× stop={q['stop_factor']:.2f} "
+                f"(幅 {q['stop_pct']:.2f}%) "
+                f"× streak={q['streak_factor']:.2f} "
+                f"(直前 {q['prev_losses']}連敗)")
         H.append(
-            f"<tr class='trade-row' data-score='{score:.2f}'>"
+            f"<tr class='trade-row' data-score='{ts:.2f}'>"
             f"<td>{html.escape(t['name'])}</td>"
             f"<td>{html.escape(t['strategy'])}</td>"
             f"<td class='right' "
-            f"style='color:{sc_color};font-weight:bold;'>{score:.1f}</td>"
+            f"style='color:{ps_color};'>{ps:.1f}</td>"
+            f"<td class='right' title='{html.escape(tip)}' "
+            f"style='color:{ts_color};font-weight:bold;'>{ts:.1f}</td>"
+            f"<td class='center small'>{q['time_factor']:.2f}</td>"
+            f"<td class='center small'>{q['stop_pct']:.2f}%</td>"
+            f"<td class='center small'>{q['prev_losses']}</td>"
             f"<td class='center'>{side_s}</td>"
             f"<td>{_fmt_dt(t['entry_dt'])}</td>"
             f"<td>{_fmt_dt(t['exit_dt'])}</td>"
@@ -671,6 +822,15 @@ function filterScore(tabUid, minScore, btn){
                         f"同時刻同銘柄の重複除外済み")
             H.append(f"<p style='color:#94a3b8;font-size:12px;'>{desc}</p>")
             tab_uid = f"sec-{side}-{s}"
+            H.append(
+                "<p class='note'>"
+                "トレードスコア = 銘柄スコア × 時刻係数 × 損切幅係数 × 連敗係数. "
+                "時刻: 10:30-13:30 = 1.0 (中盤), 9:35-9:45 = 0.5 (騙し), "
+                "14:30+ = 0.4 (大引け前). "
+                "損切幅: &lt;0.7% = 1.0, 1.5-2.5% = 0.5, &gt;2.5% = 0.2. "
+                "連敗: 0=1.0, 1=0.85, 2=0.65, 3+=0.4."
+                "</p>"
+            )
             H.append(render_section(trades, lbl,
                                       pair_scores=pair_scores,
                                       tab_uid=tab_uid))
@@ -824,6 +984,9 @@ def main():
     else:
         print(f"\n[Step 2] バックテスト全スキップ "
               f"(全ペアがキャッシュ済み)", flush=True)
+
+    # 各 (sym, strat) の取引に「直前連敗数」を注釈
+    annotate_streaks(pair_trades)
 
     today = datetime.now(JST).date()
     shift_trades_by_side = defaultdict(list)
