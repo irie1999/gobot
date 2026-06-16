@@ -192,6 +192,150 @@ def dedup_same_time_same_symbol(trades: list) -> list:
     return out
 
 
+def build_pair_selection(all_specs_by_shift: dict) -> dict:
+    """(sym, strat) → そのペアを選んだ shift 集合."""
+    sel = defaultdict(set)
+    for s, pairs in all_specs_by_shift.items():
+        for sym, _name, strat in pairs:
+            sel[(sym, strat)].add(s)
+    return sel
+
+
+def compute_pair_score(trades_full: list, selecting_shifts: set,
+                        today) -> dict:
+    """各 shift が除外していた直近 N日 (= OOS) の成績で
+    (sym, strategy) ペアをスコアリング.
+
+    score = 100 × robustness × oos_pf × oos_wr × sample
+
+    - robustness: 選ばれた shift 数 / 6
+    - oos_pf:     各選定 shift の直近 N日の PF を平均し正規化
+    - oos_wr:     各選定 shift の直近 N日の勝率を平均し正規化
+    - sample:     最長 shift の OOS 取引数 / 30 (信頼度)
+
+    考察: 同じ (sym, strat) が複数 shift で選ばれた場合、
+    各 shift の直近 N日成績を「独立した OOS 評価」として
+    平均し、選定 shift 数で robustness を加算する.
+    すなわち同一ペアは shift をまたいで 1つのスコアに集約.
+    """
+    info = {
+        "score": 0.0, "robustness": 0.0,
+        "avg_oos_pf": 0.0, "avg_oos_winrate": 0.0,
+        "oos_trades": 0, "oos_pnl": 0.0,
+        "selecting_shifts": sorted(selecting_shifts),
+        "n_shifts": len(selecting_shifts),
+        "per_shift_pf": {},
+        "per_shift_pnl": {},
+    }
+    if not selecting_shifts:
+        return info
+
+    # 最長 shift = 最大 OOS 窓 (取引総数と総 PnL に使用)
+    max_shift = max(selecting_shifts)
+    cutoff_max = today - timedelta(days=max_shift)
+    oos_max = [t for t in trades_full
+                if hasattr(t.get("entry_dt"), "date")
+                and t["entry_dt"].date() >= cutoff_max]
+    info["oos_trades"] = len(oos_max)
+    info["oos_pnl"] = sum(t["pnl"] for t in oos_max)
+    info["robustness"] = len(selecting_shifts) / 6
+
+    per_pf = []
+    per_wr = []
+    for s in sorted(selecting_shifts):
+        cutoff = today - timedelta(days=s)
+        oos = [t for t in trades_full
+                if hasattr(t.get("entry_dt"), "date")
+                and t["entry_dt"].date() >= cutoff]
+        if not oos:
+            info["per_shift_pf"][s] = 0.0
+            info["per_shift_pnl"][s] = 0.0
+            continue
+        wins = sum(t["pnl"] for t in oos if t["pnl"] > 0)
+        losses = -sum(t["pnl"] for t in oos if t["pnl"] < 0)
+        pf = wins / losses if losses > 0 else (3.0 if wins > 0 else 0.0)
+        winrate = sum(1 for t in oos if t["pnl"] > 0) / len(oos)
+        per_pf.append(pf)
+        per_wr.append(winrate)
+        info["per_shift_pf"][s] = pf
+        info["per_shift_pnl"][s] = sum(t["pnl"] for t in oos)
+
+    if not per_pf:
+        return info
+
+    avg_pf = sum(per_pf) / len(per_pf)
+    avg_wr = sum(per_wr) / len(per_wr)
+    info["avg_oos_pf"] = avg_pf
+    info["avg_oos_winrate"] = avg_wr
+
+    pf_factor = max(0.0, min(1.0, (avg_pf - 0.8) / 1.5))
+    wr_factor = max(0.0, min(1.0, avg_wr / 0.6))
+    sample_factor = min(1.0, info["oos_trades"] / 30)
+
+    info["score"] = (100 * info["robustness"]
+                      * pf_factor * wr_factor * sample_factor)
+    return info
+
+
+def _score_color(score: float) -> str:
+    if score >= 50:
+        return "#4ade80"
+    if score >= 30:
+        return "#facc15"
+    if score >= 10:
+        return "#94a3b8"
+    return "#64748b"
+
+
+def render_pair_table(pair_scores: dict, side: str) -> str:
+    """ペア別スコアランキング (1 side 分)."""
+    if side == "long":
+        items = [(k, v) for k, v in pair_scores.items()
+                  if k[1] in LONG_STRATS]
+    else:
+        items = [(k, v) for k, v in pair_scores.items()
+                  if k[1] in SHORT_STRATS]
+    items.sort(key=lambda x: (-x[1]["score"], -x[1]["oos_pnl"]))
+
+    H = []
+    H.append(f"<h3>🏆 ペア別スコア ({len(items)}件 / 高スコア順)</h3>")
+    H.append("<p class='note'>"
+              "スコア = 100 × robustness × OOS PF × OOS 勝率 × サンプル数. "
+              "各 shift が除外していた直近 N日 (= OOS) の成績で評価. "
+              "同一 (銘柄, 戦略) は shift をまたいで 1スコアに集約."
+              "</p>")
+    H.append("<table><thead><tr>")
+    H.append("<th>銘柄</th><th>戦略</th>"
+              "<th class='right'>選定 shift</th>"
+              "<th class='right'>OOS 取引</th>"
+              "<th class='right'>OOS PF</th>"
+              "<th class='right'>OOS 勝率</th>"
+              "<th class='right'>OOS 損益</th>"
+              "<th class='right'>スコア</th>"
+              "</tr></thead><tbody>")
+    for (sym, strat), sc in items:
+        shifts_lbl = "/".join(str(s) for s in sc["selecting_shifts"])
+        score = sc["score"]
+        color = _score_color(score)
+        pnl_c = "pos" if sc["oos_pnl"] >= 0 else "neg"
+        H.append(
+            f"<tr>"
+            f"<td>{html.escape(sym)}</td>"
+            f"<td>{html.escape(strat)}</td>"
+            f"<td class='right'>{shifts_lbl}</td>"
+            f"<td class='right'>{sc['oos_trades']}</td>"
+            f"<td class='right'>{sc['avg_oos_pf']:.2f}</td>"
+            f"<td class='right'>{sc['avg_oos_winrate']*100:.0f}%</td>"
+            f"<td class='right {pnl_c}'>{sc['oos_pnl']:+,.0f}</td>"
+            f"<td class='right' "
+            f"style='color:{color};font-weight:bold;'>"
+            f"{score:.1f}</td>"
+            f"</tr>"
+        )
+    H.append("</tbody></table>")
+    return "\n".join(H)
+
+
 def aggregate_daily(trades):
     by_date = defaultdict(list)
     for t in trades:
@@ -212,8 +356,12 @@ def aggregate_daily(trades):
     return out
 
 
-def render_section(trades, label):
-    """1セクション分: サマリ + 日付別損益 + 全取引."""
+def render_section(trades, label, pair_scores=None, tab_uid=""):
+    """1セクション分: サマリ + 日付別損益 + 全取引.
+
+    pair_scores: {(sym, strat): score_info_dict} - 各ペアのスコア情報
+    tab_uid:     スコアフィルタボタンの JS で使う一意 ID prefix
+    """
     overall = calc_stats(trades)
     pf = overall["pf"]
     pf_str = "∞" if pf == float("inf") else f"{pf:.2f}"
@@ -221,7 +369,22 @@ def render_section(trades, label):
                                               else "#f87171")
     daily = aggregate_daily(trades)
     daily_sorted = list(reversed(daily))
-    trades_sorted = sorted(trades, key=lambda x: x["entry_dt"], reverse=True)
+
+    def _trade_score(t):
+        if pair_scores is None:
+            return 0.0
+        sc = pair_scores.get((t["symbol"], t["strategy"]), {})
+        return sc.get("score", 0.0)
+
+    # スコア降順 → 日時降順
+    trades_sorted = sorted(
+        trades,
+        key=lambda x: (-_trade_score(x), x["entry_dt"]),
+        reverse=False if pair_scores else False,
+    )
+    if pair_scores is None:
+        trades_sorted = sorted(trades, key=lambda x: x["entry_dt"],
+                                reverse=True)
 
     H = []
     # サマリーカード
@@ -265,24 +428,48 @@ def render_section(trades, label):
                  f"</tr>")
     H.append("</tbody></table>")
 
-    # 全取引一覧
-    H.append(f"<h3>📋 全取引 ({len(trades_sorted):,}件)</h3>")
-    H.append("<table><thead><tr>")
-    H.append("<th>銘柄</th><th>戦略</th><th class='center'>Side</th>"
-             "<th>Entry</th><th>Exit</th><th class='right'>保有</th>"
-             "<th class='right'>買値</th><th class='right'>損切</th>"
-             "<th class='right'>目標</th><th class='right'>決済</th>"
-             "<th class='right'>損益</th><th class='right'>%</th>"
-             "<th>理由</th></tr></thead><tbody>")
+    # スコアフィルタ
+    if pair_scores is not None and tab_uid:
+        H.append(f"<h3>📋 全取引 (<span id='{tab_uid}-cnt'>"
+                  f"{len(trades_sorted):,}</span>件)</h3>")
+        H.append(f"<div class='score-filters'>"
+                  f"<span style='color:#94a3b8;font-size:11px;margin-right:8px;'>"
+                  f"スコアフィルタ:</span>"
+                  f"<button class='score-btn active' "
+                  f"onclick=\"filterScore('{tab_uid}', 0, this)\">全件</button>"
+                  f"<button class='score-btn' "
+                  f"onclick=\"filterScore('{tab_uid}', 30, this)\">≥30</button>"
+                  f"<button class='score-btn' "
+                  f"onclick=\"filterScore('{tab_uid}', 50, this)\">≥50</button>"
+                  f"<button class='score-btn' "
+                  f"onclick=\"filterScore('{tab_uid}', 70, this)\">≥70</button>"
+                  f"</div>")
+        H.append(f"<table id='{tab_uid}-tbl'><thead><tr>")
+    else:
+        H.append(f"<h3>📋 全取引 ({len(trades_sorted):,}件)</h3>")
+        H.append("<table><thead><tr>")
+
+    H.append("<th>銘柄</th><th>戦略</th>"
+              "<th class='right'>スコア</th>"
+              "<th class='center'>Side</th>"
+              "<th>Entry</th><th>Exit</th><th class='right'>保有</th>"
+              "<th class='right'>買値</th><th class='right'>損切</th>"
+              "<th class='right'>目標</th><th class='right'>決済</th>"
+              "<th class='right'>損益</th><th class='right'>%</th>"
+              "<th>理由</th></tr></thead><tbody>")
     for t in trades_sorted:
         pnl_c = "pos" if t["pnl"] >= 0 else "neg"
         held = _hold_min(t)
         side_s = "L" if t["side"] == "long" else "S"
+        score = _trade_score(t)
+        sc_color = _score_color(score)
         H.append(
-            f"<tr>"
+            f"<tr class='trade-row' data-score='{score:.2f}'>"
             f"<td>{html.escape(t['name'][:14])}<br>"
             f"<span class='small'>{html.escape(t['symbol'])}</span></td>"
             f"<td>{html.escape(t['strategy'])}</td>"
+            f"<td class='right' "
+            f"style='color:{sc_color};font-weight:bold;'>{score:.1f}</td>"
             f"<td class='center'>{side_s}</td>"
             f"<td>{_fmt_dt(t['entry_dt'])}</td>"
             f"<td>{_fmt_dt(t['exit_dt'])}</td>"
@@ -301,7 +488,8 @@ def render_section(trades, label):
 
 
 def render_html(*, shift_trades_by_side: dict, date_label: str,
-                source: str, watchlist_summary: dict) -> str:
+                source: str, watchlist_summary: dict,
+                pair_scores: dict | None = None) -> str:
     """完全な HTML 生成 (Long/Short タブ + shift サブタブ)."""
     H = []
     H.append("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
@@ -345,6 +533,14 @@ def render_html(*, shift_trades_by_side: dict, date_label: str,
   .sub-tab.active{background:#0ea5e9;color:#fff;}
   .sub-content{display:none;}
   .sub-content.active{display:block;}
+  .note{color:#94a3b8;font-size:11px;margin:4px 0 8px;}
+
+  /* スコアフィルタ */
+  .score-filters{margin:6px 0 10px;display:flex;gap:4px;align-items:center;
+                  flex-wrap:wrap;}
+  .score-btn{padding:4px 10px;background:#334155;color:#cbd5e1;border:none;
+              cursor:pointer;font-size:11px;border-radius:4px;}
+  .score-btn.active{background:#10b981;color:#fff;}
 </style>
 <script>
 function showSide(side){
@@ -358,6 +554,25 @@ function showShift(side, shift){
   document.querySelectorAll('.shift-content-'+side).forEach(c=>c.classList.remove('active'));
   document.getElementById('shift-tab-'+side+'-'+shift).classList.add('active');
   document.getElementById('shift-content-'+side+'-'+shift).classList.add('active');
+}
+function filterScore(tabUid, minScore, btn){
+  const tbl = document.getElementById(tabUid + '-tbl');
+  if(!tbl) return;
+  const rows = tbl.querySelectorAll('tbody tr.trade-row');
+  let visible = 0;
+  rows.forEach(r => {
+    const s = parseFloat(r.dataset.score || '0');
+    if(s >= minScore){ r.style.display = ''; visible++; }
+    else{ r.style.display = 'none'; }
+  });
+  const cnt = document.getElementById(tabUid + '-cnt');
+  if(cnt) cnt.textContent = visible.toLocaleString();
+  // ボタン active 切替
+  if(btn){
+    const parent = btn.parentElement;
+    parent.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
 }
 </script>""")
     H.append("</head><body>")
@@ -405,6 +620,10 @@ function showShift(side, shift){
         H.append(f"<div class='tab-content side-content {active_cls}' "
                  f"id='side-content-{side}'>")
 
+        # ペア別スコアランキング
+        if pair_scores is not None:
+            H.append(render_pair_table(pair_scores, side))
+
         # サブタブ
         H.append("<div class='sub-tabs'>")
         for i, (s, lbl) in enumerate(sub_tabs):
@@ -428,7 +647,10 @@ function showShift(side, shift){
                 desc = (f"全 6 shift 銘柄 union / {side_label} / 直近{s}日 / "
                         f"同時刻同銘柄の重複除外済み")
             H.append(f"<p style='color:#94a3b8;font-size:12px;'>{desc}</p>")
-            H.append(render_section(trades, lbl))
+            tab_uid = f"sec-{side}-{s}"
+            H.append(render_section(trades, lbl,
+                                      pair_scores=pair_scores,
+                                      tab_uid=tab_uid))
             H.append("</div>")
 
         H.append("</div>")
@@ -624,6 +846,33 @@ def main():
             print(f"    {key}: {before} → {after} "
                   f"(-{before - after} 重複)", flush=True)
 
+    # ペアスコア計算 (各 shift が除外していた直近 N日 = OOS の成績)
+    print(f"\n[Step 4] ペアスコア計算 ({len(union_pairs)}ペア)", flush=True)
+    pair_selection = build_pair_selection(all_specs_by_shift)
+    pair_scores = {}
+    for sym, strat in union_pairs:
+        trades_full = pair_trades.get((sym, strat), [])
+        selecting = pair_selection.get((sym, strat), set())
+        pair_scores[(sym, strat)] = compute_pair_score(
+            trades_full, selecting, today)
+    # 上位サマリ表示
+    ranked = sorted(pair_scores.items(), key=lambda x: -x[1]["score"])
+    print(f"  Top 5:", flush=True)
+    for (sym, strat), sc in ranked[:5]:
+        shifts_lbl = "/".join(str(s) for s in sc["selecting_shifts"])
+        print(f"    {sym}/{strat:<6} score={sc['score']:5.1f} "
+              f"shifts=[{shifts_lbl}] "
+              f"OOS PF={sc['avg_oos_pf']:.2f} "
+              f"勝率={sc['avg_oos_winrate']*100:.0f}% "
+              f"取引={sc['oos_trades']} "
+              f"PnL={sc['oos_pnl']:+,.0f}", flush=True)
+    n_high = sum(1 for _, sc in pair_scores.items() if sc["score"] >= 50)
+    n_mid = sum(1 for _, sc in pair_scores.items()
+                 if 30 <= sc["score"] < 50)
+    n_low = sum(1 for _, sc in pair_scores.items() if sc["score"] < 30)
+    print(f"  スコア分布: ≥50={n_high}, 30-50={n_mid}, <30={n_low}",
+          flush=True)
+
     # HTML 出力
     out = args.output or f"simple_report_all_shifts_{date_label}.html"
     html_text = render_html(
@@ -631,6 +880,7 @@ def main():
         date_label=date_label,
         source=args.source,
         watchlist_summary=watchlist_summary,
+        pair_scores=pair_scores,
     )
     Path(out).write_text(html_text, encoding="utf-8")
     print(f"\n[OK] 出力: {Path(out).resolve()}", flush=True)
