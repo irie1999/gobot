@@ -1028,7 +1028,24 @@ def main():
     p.add_argument("--no-open", action="store_true")
     p.add_argument("--refresh-cache", action="store_true",
                    help="バックテストキャッシュを破棄して全て再計算")
+    p.add_argument("--min-robustness", type=int, default=None,
+                   metavar="N",
+                   help="OOS フィルタ: 何 shift 以上で選ばれたか (1-6, デフォルト 3)")
+    p.add_argument("--min-oos-pf", type=float, default=None,
+                   metavar="PF",
+                   help="OOS フィルタ: 平均 OOS PF の下限 (デフォルト 1.3)")
+    p.add_argument("--min-oos-pnl", type=float, default=None,
+                   metavar="PNL",
+                   help="OOS フィルタ: OOS 損益の下限円 (デフォルト 0)")
     args = p.parse_args()
+
+    global PAIR_FILTER_MIN_ROBUSTNESS, PAIR_FILTER_MIN_PF, PAIR_FILTER_MIN_PNL
+    if args.min_robustness is not None:
+        PAIR_FILTER_MIN_ROBUSTNESS = args.min_robustness / 6
+    if args.min_oos_pf is not None:
+        PAIR_FILTER_MIN_PF = args.min_oos_pf
+    if args.min_oos_pnl is not None:
+        PAIR_FILTER_MIN_PNL = args.min_oos_pnl
 
     # snapshot_date: 省略時は最新の既存スナップショットを採用
     if args.snapshot_date is None:
