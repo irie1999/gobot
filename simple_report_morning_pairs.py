@@ -139,6 +139,48 @@ def dedup_same_time_same_symbol(trades: list) -> list:
     return out
 
 
+def apply_same_day_lock(pair_trades: dict) -> dict:
+    """同日同銘柄に複数戦略がエントリーした場合、最も早い entry_dt の戦略のみ残す。
+    holdout_periods_report_daytrade.py と同じロジック (DAYTRADE_SAME_DAY_LOCK=1)。"""
+    earliest: dict = {}
+    for (sym, strat), trades in pair_trades.items():
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                continue
+            key = (sym, dt.date())
+            cur = earliest.get(key)
+            if cur is None or dt < cur[0] or (dt == cur[0] and strat < cur[1]):
+                earliest[key] = (dt, strat)
+    new_pt: dict = {}
+    for (sym, strat), trades in pair_trades.items():
+        kept = []
+        for t in trades:
+            dt = t.get("entry_dt")
+            if not hasattr(dt, "date"):
+                kept.append(t)
+                continue
+            sel = earliest.get((sym, dt.date()))
+            if sel and sel[1] == strat:
+                kept.append(t)
+        new_pt[(sym, strat)] = kept
+    return new_pt
+
+
+# TRAIN 合格条件 (holdout_periods_report_daytrade.py と同じ)
+PASS_TRAIN_TRADES = 20
+PASS_TRAIN_PF = 1.3
+
+
+def _pass_train(trades: list) -> bool:
+    if not trades:
+        return False
+    st = calc_stats(trades)
+    return (st["n"] >= PASS_TRAIN_TRADES
+            and st["pf"] >= PASS_TRAIN_PF
+            and st["total_pnl"] > 0)
+
+
 def slice_trades(trades, start_days_ago, end_days_ago, today):
     """end_days_ago 〜 start_days_ago 前の取引を返す。"""
     start = today - timedelta(days=start_days_ago)
@@ -838,6 +880,17 @@ def main():
     for key in list(pair_trades.keys()):
         pair_trades[key] = dedup_same_time_same_symbol(pair_trades[key])
 
+    # SAME_DAY_LOCK: 同日同銘柄で複数戦略が発火した場合、最初の entry_dt の戦略のみ残す
+    # holdout_periods_report_daytrade.py と同じ (ロング側/ショート側で独立に適用)
+    long_pt = {k: v for k, v in pair_trades.items() if k[1] in LONG_STRATS}
+    short_pt = {k: v for k, v in pair_trades.items() if k[1] in SHORT_STRATS}
+    before_lock = sum(len(v) for v in pair_trades.values())
+    long_pt = apply_same_day_lock(long_pt)
+    short_pt = apply_same_day_lock(short_pt)
+    pair_trades = {**long_pt, **short_pt}
+    after_lock = sum(len(v) for v in pair_trades.values())
+    print(f"  [SAME_DAY_LOCK] {before_lock:,} → {after_lock:,} (-{before_lock - after_lock:,}件 重複排除)", flush=True)
+
     # ペアスコア計算
     today = datetime.now(JST).date()
     print(f"\n[Step 3] ペアスコア計算", flush=True)
@@ -849,17 +902,33 @@ def main():
     # Q state 注釈 (全取引に対して一括)
     annotate_q_state(pair_trades)
 
-    # 期間別 × side 別に取引を振り分け
-    print(f"\n[Step 4] 期間別集計", flush=True)
+    # 期間別 × side 別に取引を振り分け (TRAIN ゲート付き)
+    # holdout_periods_report_daytrade.py と同じ:
+    #   各期間 P で TRAIN (P日より前の全取引) が PF>=1.3 & 取引>=20 & 損益>0 を
+    #   満たすペアのみ TEST (直近 P 日) の取引をカウントする
+    print(f"\n[Step 4] 期間別集計 (TRAIN ゲート付き)", flush=True)
     period_trades_by_side: dict[tuple, list] = defaultdict(list)
 
     for (sym, strat), trades in pair_trades.items():
         if not trades:
             continue
         side = "long" if strat in LONG_STRATS else "short"
-        all_in_180 = slice_trades(trades, 180, 0, today)
-        period_trades_by_side[("all", side)].extend(all_in_180)
+
+        # "all" (180日) タブ: TRAIN = 180日より前
+        train_180 = [t for t in trades
+                     if hasattr(t.get("entry_dt"), "date")
+                     and t["entry_dt"].date() < today - timedelta(days=180)]
+        if _pass_train(train_180):
+            all_in_180 = slice_trades(trades, 180, 0, today)
+            period_trades_by_side[("all", side)].extend(all_in_180)
+
         for P in PERIODS:
+            test_cutoff = today - timedelta(days=P)
+            train_trades = [t for t in trades
+                            if hasattr(t.get("entry_dt"), "date")
+                            and t["entry_dt"].date() < test_cutoff]
+            if not _pass_train(train_trades):
+                continue
             sl = slice_trades(trades, P, 0, today)
             period_trades_by_side[(str(P), side)].extend(sl)
 
