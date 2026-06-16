@@ -2885,6 +2885,11 @@ def main():
                         help="バックテスト対象データを指定日 (YYYY-MM-DD) 以前にカット。"
                              "例: 朝の状態を再現するには '2026-06-14' を指定")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--source", default="local",
+                        choices=["auto", "local", "yfinance"],
+                        help="データソース。'yfinance' で pkl を使わず yfinance "
+                             "から直接取得 (最大60日制限、auto_adjust=False)。"
+                             "破損 pkl を避けたいときに使用")
     parser.add_argument("--strategy", default="all",
                         help="all/long/short/個別戦略")
     parser.add_argument("--short", action="store_true",
@@ -3172,7 +3177,13 @@ def main():
     # データロード
     print(f"\n[Step 1] データロード", flush=True)
     symbols = [s for s, _ in targets]
-    fetched = load_intraday_batch(symbols, args.days, source="local")
+    load_days = args.days
+    if args.source == "yfinance" and load_days > 60:
+        print(f"  [yfinance モード] --days {load_days} → 60 にキャップ "
+              f"(yfinance 5分足の上限)")
+        load_days = 60
+    print(f"  source={args.source} / days={load_days}")
+    fetched = load_intraday_batch(symbols, load_days, source=args.source)
     # --data-end-date: 指定日 23:59:59 以前のバーのみ残す
     if args.data_end_date:
         import pandas as _pd
