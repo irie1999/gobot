@@ -3002,9 +3002,45 @@ function toggleTrendBreakdown() {{
 </table>
 </div>"""
 
-    global _DETAIL_TAB_SEQ
-    _DETAIL_TAB_SEQ += 1
-    _dseq = _DETAIL_TAB_SEQ
+    def _month_summary_html(by_date, sorted_dates):
+        """月別サマリーバーを生成する。"""
+        from collections import defaultdict as _dd2
+        by_month: dict = _dd2(list)
+        for dk in sorted_dates:
+            ym = dk[:7]  # YYYY-MM
+            by_month[ym].extend(by_date[dk])
+        rows = ""
+        for ym in sorted(by_month.keys(), reverse=True):
+            trades_m = by_month[ym]
+            done_m   = [t for t in trades_m if t.get("reason") not in ("発注中", "保有中")]
+            wins_m   = sum(1 for t in done_m if t["pnl"] > 0)
+            wr_m     = wins_m / len(done_m) * 100 if done_m else 0
+            pnl_m    = sum(t["pnl"] for t in done_m)
+            pnl_col  = "#4ade80" if pnl_m >= 0 else "#f87171"
+            bar_w    = min(abs(pnl_m) / 300000 * 100, 100)  # 30万円で100%
+            bar_col  = "rgba(74,222,128,0.25)" if pnl_m >= 0 else "rgba(248,113,113,0.25)"
+            mm       = ym[5:7] + "月"
+            rows += (f'<tr>'
+                     f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}</td>'
+                     f'<td style="text-align:right;color:#94a3b8">{len(done_m)}件</td>'
+                     f'<td style="text-align:right;color:#94a3b8">{wr_m:.0f}%</td>'
+                     f'<td style="width:160px;position:relative;padding:4px 8px">'
+                     f'<div style="position:absolute;top:4px;bottom:4px;left:{"50%" if pnl_m>=0 else f"calc(50% - {bar_w/2:.1f}%)"};'
+                     f'width:{bar_w/2:.1f}%;background:{bar_col};border-radius:2px"></div>'
+                     f'<span style="position:relative;font-weight:700;color:{pnl_col}">{pnl_m:+,.0f}円</span>'
+                     f'</td>'
+                     f'</tr>')
+        return f"""<div style="margin-bottom:14px">
+<table style="border-collapse:collapse;width:auto">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 8px">月</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">件数</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">勝率</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;text-align:center">損益</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+</div>"""
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -3184,6 +3220,7 @@ function toggleTrendBreakdown() {{
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_summary_html(_entry_by_date, _sorted_entry_dates)}
 <div class="edate-grid">
 {"".join(_entry_date_btn(dk, _dseq, _entry_by_date, "e") for dk in _sorted_entry_dates)}
 </div>
@@ -3191,6 +3228,7 @@ function toggleTrendBreakdown() {{
 </div>
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_summary_html(_bt70_entry_by_date, _sorted_bt70_entry_dates)}
 <div class="edate-grid">
 {"".join(_entry_date_btn(dk, _dseq, _bt70_entry_by_date, "b") for dk in _sorted_bt70_entry_dates)}
 </div>
