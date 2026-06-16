@@ -56,7 +56,8 @@ def clean_one(path: Path, deviation_pct: float = 5.0,
               dry_run: bool = True, backup: bool = True,
               use_yfinance_daily: bool = False,
               ticker: str | None = None,
-              yf_tolerance_pct: float = 0.5) -> dict:
+              yf_tolerance_pct: float = 0.5,
+              range_ratio: float = 2.0) -> dict:
     """1個の pkl をクリーンアップ。
 
     use_yfinance_daily=True 時: yfinance 日足の Low〜High を真の範囲として
@@ -90,7 +91,11 @@ def clean_one(path: Path, deviation_pct: float = 5.0,
         if yf_daily is None or yf_daily.empty:
             return {"path": str(path), "error": "yfinance 日足取得失敗"}
 
-        # 各日について、yfinance 日足の Low/High 範囲外のバーを除外
+        # 各日について判定:
+        # - intra-day 不一致 (Type A): pkl_range > yf_range * range_ratio
+        #   → yfinance Low-High 範囲外のバーを除外
+        # - 一貫オフセット (Type B): pkl_range ≈ yf_range だが値域が違う
+        #   → corporate action と判定して触らない
         keep_mask = pd.Series(True, index=df.index)
         for date_str, group in df.groupby("_DateStr"):
             try:
@@ -98,11 +103,28 @@ def clean_one(path: Path, deviation_pct: float = 5.0,
             except Exception:
                 continue
             if date_obj not in yf_daily.index:
-                # yfinance に該当日なし → そのまま保持
                 continue
             row = yf_daily.loc[date_obj]
             y_low = float(row["low"])
             y_high = float(row["high"])
+            y_range = y_high - y_low
+
+            pkl_high = float(group["C"].max())
+            pkl_low = float(group["C"].min())
+            pkl_range = pkl_high - pkl_low
+
+            # Type A 判定: pkl 日内レンジが yf の range_ratio 倍超
+            # かつ pkl レンジが絶対的にも大きい (yf range の絶対値が極小だと誤判定するため)
+            is_type_a = (
+                y_range > 0
+                and pkl_range > y_range * range_ratio
+                and pkl_range > float(row["close"]) * 0.02  # 2% 以上の幅
+            )
+
+            if not is_type_a:
+                # Type B (consistent offset) or 正常日 → 触らない
+                continue
+
             tol = float(row["close"]) * yf_tolerance_pct / 100.0
             valid_min = y_low - tol
             valid_max = y_high + tol
@@ -114,7 +136,7 @@ def clean_one(path: Path, deviation_pct: float = 5.0,
                 keep_mask.loc[bad_indices] = False
                 affected_dates.append((
                     date_str, n_bad,
-                    float(group["C"].min()), float(group["C"].max()),
+                    pkl_low, pkl_high,
                     y_low, y_high,
                 ))
 
@@ -204,6 +226,10 @@ def main():
                         "その外側のバーのみ除外 (5%%以内の正常変動は保持)")
     p.add_argument("--yf-tolerance-pct", type=float, default=0.5,
                    help="yfinance モード時の許容差 (パーセント、デフォルト 0.5)")
+    p.add_argument("--range-ratio", type=float, default=2.0,
+                   help="Type A 判定: pkl 日内レンジが yfinance 日内レンジの "
+                        "何倍を超えたら corruption とみなすか (デフォルト 2.0)。"
+                        "Type B (corporate action による一貫オフセット) を保護")
     p.add_argument("--apply", action="store_true",
                    help="実際に書き込み (デフォルト dry-run)")
     p.add_argument("--no-backup", action="store_true",
@@ -268,6 +294,7 @@ def main():
             use_yfinance_daily=args.use_yfinance_daily,
             ticker=ticker,
             yf_tolerance_pct=args.yf_tolerance_pct,
+            range_ratio=args.range_ratio,
         )
         if "error" in result:
             print(f"  [skip] {path.name}: {result['error']}")
