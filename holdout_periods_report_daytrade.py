@@ -2883,10 +2883,10 @@ def main():
     parser.add_argument("--max-price", type=int, default=10_000)
     parser.add_argument("--min-price", type=int, default=0)
     parser.add_argument("--max-atr-pct", type=float, default=5.0,
-                        help="サニティチェック: ATR% 上限 (デフォルト 5.0)。"
+                        help="サニティチェック: ATR%% 上限 (デフォルト 5.0)。"
                              "緩めると 4180/4410/5757 などボラ高銘柄が除外されにくくなる")
     parser.add_argument("--max-gap-pct", type=float, default=30.0,
-                        help="サニティチェック: gap% 上限 (デフォルト 30.0)")
+                        help="サニティチェック: gap%% 上限 (デフォルト 30.0)")
     parser.add_argument("--no-sanity", action="store_true",
                         help="サニティチェックを完全スキップ (watchlist 全銘柄採用)")
     parser.add_argument("--workers", type=int, default=4)
