@@ -607,12 +607,13 @@ def compute_q_score(t, pair_score: float) -> dict:
 
 
 def trade_tier(pair_score: float, q_score: float) -> str:
-    """朝レポート相当の S/A/B/C ティア分類. 閾値は本システムのスケールに合わせ調整."""
-    if pair_score >= 35 and q_score >= 50:
+    """朝レポート相当の S/A/B/C ティア分類. 閾値は本システムのスケールに合わせ調整.
+    pair_score が 0-40 範囲なので Q 閾値は朝レポートより 20 低く設定."""
+    if pair_score >= 35 and q_score >= 30:
         return "S"
-    if pair_score >= 25 and q_score >= 45:
+    if pair_score >= 25 and q_score >= 25:
         return "A"
-    if pair_score >= 15 and q_score >= 40:
+    if pair_score >= 15 and q_score >= 20:
         return "B"
     return "C"
 
@@ -706,9 +707,9 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
 
     # Q スコア閾値別フィルタサマリ
     if pair_scores is not None and trades:
-        for threshold, label_cls in [(65, "🟢 推奨 (Q≥65)"),
-                                       (55, "🟡 標準 (Q≥55)"),
-                                       (45, "⚪ 緩 (Q≥45)")]:
+        for threshold, label_cls in [(45, "推奨 (Q>=45)"),
+                                       (35, "標準 (Q>=35)"),
+                                       (25, "緩 (Q>=25)")]:
             hq = [t for t in trades if _q(t)["q_score"] >= threshold]
             if not hq:
                 continue
@@ -747,8 +748,13 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
         H.append("<p style='color:#94a3b8'>取引なし</p>")
         return "\n".join(H)
 
-    # 日付別損益
-    H.append("<h3>📅 日付別損益</h3>")
+    # 日付 → 取引リスト (詳細展開用)
+    trades_by_date: dict = defaultdict(list)
+    for t in trades_sorted:
+        trades_by_date[t["entry_dt"].date()].append(t)
+
+    # 日付別損益 (クリックで詳細展開)
+    H.append("<h3>日付別損益 (行クリックで取引詳細)</h3>")
     H.append("<table><thead><tr>")
     H.append("<th>日付</th><th class='right'>取引</th>"
              "<th class='right'>勝率</th>"
@@ -759,15 +765,65 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
     for d in daily_sorted:
         pnl_c = "pos" if d["pnl"] >= 0 else "neg"
         cum_c = "pos" if d["cumulative"] >= 0 else "neg"
-        H.append(f"<tr>"
-                 f"<td>{d['date']}</td>"
-                 f"<td class='right'>{d['n']}</td>"
-                 f"<td class='right'>{d['win_rate']:.0f}%</td>"
-                 f"<td class='right pos'>+{d['profit']:,.0f}</td>"
-                 f"<td class='right neg'>-{d['loss']:,.0f}</td>"
-                 f"<td class='right {pnl_c}'>{d['pnl']:+,.0f}</td>"
-                 f"<td class='right {cum_c}'>{d['cumulative']:+,.0f}</td>"
-                 f"</tr>")
+        date_key = str(d["date"]).replace("-", "")
+        detail_id = f"{tab_uid}-day-{date_key}" if tab_uid else f"day-{date_key}"
+        H.append(
+            f"<tr onclick=\"toggleDay('{detail_id}',this)\" style='cursor:pointer;'>"
+            f"<td><span data-tri style='font-size:9px;color:#64748b;"
+            f"display:inline-block;margin-right:4px;'>+</span>{d['date']}</td>"
+            f"<td class='right'>{d['n']}</td>"
+            f"<td class='right'>{d['win_rate']:.0f}%</td>"
+            f"<td class='right pos'>+{d['profit']:,.0f}</td>"
+            f"<td class='right neg'>-{d['loss']:,.0f}</td>"
+            f"<td class='right {pnl_c}'>{d['pnl']:+,.0f}</td>"
+            f"<td class='right {cum_c}'>{d['cumulative']:+,.0f}</td>"
+            f"</tr>"
+        )
+        # 詳細サブ行
+        day_trades = trades_by_date.get(d["date"], [])
+        H.append(
+            f"<tr id='{detail_id}' style='display:none;'>"
+            f"<td colspan='7' style='padding:0 0 0 24px;background:#0f172a;'>"
+        )
+        H.append("<table style='margin:4px 0 4px;width:calc(100% - 24px);'>"
+                 "<thead><tr>"
+                 "<th>銘柄</th><th>戦略</th>"
+                 "<th class='right'>Q</th>"
+                 "<th class='center'>T</th>"
+                 "<th class='center'>entry</th>"
+                 "<th class='right'>保有</th>"
+                 "<th class='right'>損益</th>"
+                 "<th class='right'>%</th>"
+                 "<th>理由</th>"
+                 "</tr></thead><tbody>")
+        for t in day_trades:
+            pnl_c2 = "pos" if t["pnl"] >= 0 else "neg"
+            if pair_scores is not None:
+                q2 = _q(t)
+                qs2 = q2["q_score"]
+                ps2 = q2["pair_score"]
+                tier2 = trade_tier(ps2, qs2)
+            else:
+                qs2 = 0.0
+                tier2 = "C"
+            tier_c2 = _tier_color(tier2)
+            qs_c2 = _q_color(qs2)
+            H.append(
+                f"<tr>"
+                f"<td>{html.escape(t['name'])}</td>"
+                f"<td>{html.escape(t['strategy'])}</td>"
+                f"<td class='right' style='color:{qs_c2};font-weight:bold;'>"
+                f"{qs2:.0f}</td>"
+                f"<td class='center' style='color:{tier_c2};font-weight:bold;'>"
+                f"{tier2}</td>"
+                f"<td class='center small'>{_fmt_dt(t['entry_dt'])}</td>"
+                f"<td class='right'>{_hold_min(t)}分</td>"
+                f"<td class='right {pnl_c2}'>{t['pnl']:+,.0f}</td>"
+                f"<td class='right {pnl_c2}'>{t['pct']:+.2f}%</td>"
+                f"<td>{html.escape(t['reason'])}</td>"
+                f"</tr>"
+            )
+        H.append("</tbody></table></td></tr>")
     H.append("</tbody></table>")
 
     # Q スコアフィルタ
@@ -776,17 +832,17 @@ def render_section(trades, label, pair_scores=None, tab_uid=""):
                   f"{len(trades_sorted):,}</span>件)</h3>")
         H.append(f"<div class='score-filters'>"
                   f"<span style='color:#94a3b8;font-size:11px;margin-right:8px;'>"
-                  f"Q スコアフィルタ:</span>"
+                  f"Q フィルタ:</span>"
                   f"<button class='score-btn active' "
                   f"onclick=\"filterScore('{tab_uid}', 0, this)\">全件</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 45, this)\">≥45</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 25, this)\">&gt;=25</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 55, this)\">≥55</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 35, this)\">&gt;=35</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 65, this)\">≥65</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 45, this)\">&gt;=45</button>"
                   f"<button class='score-btn' "
-                  f"onclick=\"filterScore('{tab_uid}', 75, this)\">≥75</button>"
+                  f"onclick=\"filterScore('{tab_uid}', 55, this)\">&gt;=55</button>"
                   f"</div>")
         H.append(f"<table id='{tab_uid}-tbl'><thead><tr>")
     else:
@@ -950,12 +1006,19 @@ function filterScore(tabUid, minScore, btn){
   });
   const cnt = document.getElementById(tabUid + '-cnt');
   if(cnt) cnt.textContent = visible.toLocaleString();
-  // ボタン active 切替
   if(btn){
     const parent = btn.parentElement;
     parent.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   }
+}
+function toggleDay(id, row){
+  const detail = document.getElementById(id);
+  if(!detail) return;
+  const open = detail.style.display !== 'none';
+  detail.style.display = open ? 'none' : '';
+  const tri = row && row.querySelector('[data-tri]');
+  if(tri) tri.textContent = open ? '+' : '-';
 }
 </script>""")
     H.append("</head><body>")
@@ -1038,8 +1101,8 @@ function filterScore(tabUid, minScore, btn){
                 "+ 同日同銘柄回数 (初=+10, 2回目=0, 3回目=-10, 4回目以上=-15) "
                 "+ 同銘柄当日損切歴 (1回以上=-10) "
                 "+ 当日累積PnL (+10K以上=+5, -10K以下=-5). "
-                "S級=銘柄≥35 & Q≥50, A級=銘柄≥25 & Q≥45, "
-                "B級=銘柄≥15 & Q≥40, それ以外=C級."
+                "S級=銘柄>=35 & Q>=30, A級=銘柄>=25 & Q>=25, "
+                "B級=銘柄>=15 & Q>=20, それ以外=C級."
                 "</p>"
             )
             H.append(render_section(trades, lbl,
