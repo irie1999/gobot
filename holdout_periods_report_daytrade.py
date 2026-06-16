@@ -77,7 +77,6 @@ from daytrade_engine_5m import backtest_symbol_5m, calc_stats
 from daytrade_strategies_5m import STRATEGIES
 from daytrade_strategies_5m_short import STRATEGIES_SHORT
 from risk_metrics_5m import enrich_stats, calc_recommend_score
-from data_sanity_check import check_one
 from _open_html import open_html
 
 JST = timezone(timedelta(hours=9))
@@ -2882,13 +2881,6 @@ def main():
     parser.add_argument("--max-risk", type=int, default=1_000)
     parser.add_argument("--max-price", type=int, default=10_000)
     parser.add_argument("--min-price", type=int, default=0)
-    parser.add_argument("--max-atr-pct", type=float, default=5.0,
-                        help="サニティチェック: ATR%% 上限 (デフォルト 5.0)。"
-                             "緩めると 4180/4410/5757 などボラ高銘柄が除外されにくくなる")
-    parser.add_argument("--max-gap-pct", type=float, default=30.0,
-                        help="サニティチェック: gap%% 上限 (デフォルト 30.0)")
-    parser.add_argument("--no-sanity", action="store_true",
-                        help="サニティチェックを完全スキップ (watchlist 全銘柄採用)")
     parser.add_argument("--data-end-date", default=None,
                         help="バックテスト対象データを指定日 (YYYY-MM-DD) 以前にカット。"
                              "例: 朝の状態を再現するには '2026-06-14' を指定")
@@ -3212,24 +3204,8 @@ def main():
     if args.min_price > 0:
         fetched = {s: df for s, df in fetched.items()
                    if float(df.iloc[-1]["close"]) >= args.min_price}
-    # サニティチェック
-    if args.no_sanity:
-        print(f"  ロード: {len(fetched)}銘柄 (--no-sanity 指定によりチェックスキップ)")
-    else:
-        insane = []
-        for s, df in list(fetched.items()):
-            r = check_one(s, df,
-                          max_atr_pct=args.max_atr_pct,
-                          max_gap_pct=args.max_gap_pct)
-            if not r["sane"]:
-                insane.append(s)
-                del fetched[s]
-        print(f"  ロード: {len(fetched)}銘柄 "
-              f"(異常除外: {len(insane)}, ATR%>{args.max_atr_pct} or "
-              f"gap%>{args.max_gap_pct})")
-        if insane:
-            print(f"  除外詳細: {insane[:10]}"
-                  f"{'…' if len(insane) > 10 else ''}")
+    # サニティチェック廃止: watchlist で選定済みの銘柄をそのまま採用
+    print(f"  ロード: {len(fetched)}銘柄 (サニティチェック廃止 / watchlist そのまま採用)")
 
     # キャッシュ
     cache = None
