@@ -2908,7 +2908,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
         return rows
 
-    # 全部 / BT70以上 / エントリー日順 の 3 系統を用意
+    # 全部 / BT70以上 / エントリー日別グリッド の 3 系統を用意
     bt70_trades = [t for t in sorted_trades if (t.get("rec_score") or 0) >= 70]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
@@ -2916,9 +2916,62 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
-    trade_rows_all   = _rows_for(sorted_trades,       f"直近{days}日に決済した取引なし")
-    trade_rows_bt70  = _rows_for(bt70_trades,         "BT70以上の取引なし")
-    trade_rows_entry = _rows_for(entry_sorted_trades, f"直近{days}日に決済した取引なし", entry_first=True)
+    trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
+    trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
+
+    # ── エントリー日別グリッド HTML ──────────────────────────────────
+    from collections import defaultdict as _dd
+    _entry_by_date: dict = _dd(list)
+    for _t in entry_sorted_trades:
+        _dk = str(_t.get("entry_d_raw") or _t["exit_d_raw"])
+        _entry_by_date[_dk].append(_t)
+    _sorted_entry_dates = sorted(_entry_by_date.keys(), reverse=True)
+
+    def _entry_date_btn(dk, dseq):
+        trades_d = _entry_by_date[dk]
+        done_d   = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
+        wins_d   = sum(1 for t in done_d if t["pnl"] > 0)
+        wr_d     = wins_d / len(done_d) * 100 if done_d else 0
+        pnl_d    = sum(t["pnl"] for t in done_d)
+        n_pend   = sum(1 for t in trades_d if t.get("reason") == "発注中")
+        pnl_col  = "#4ade80" if pnl_d >= 0 else "#f87171"
+        mm_dd    = dk[5:7] + "/" + dk[8:10]
+        pend_span = (f'<span style="color:#fbbf24;font-size:0.66rem">発注中{n_pend}</span>'
+                     if n_pend else "")
+        dk_key = dk.replace("-", "")
+        return (f'<button class="edate-btn" id="edate_btn_{dseq}_{dk_key}" '
+                f'onclick="showEntryDate({dseq},\'{dk_key}\')">'
+                f'<span class="edate-mm">{mm_dd}</span>'
+                f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
+                f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
+                f'{pend_span}</button>')
+
+    def _entry_date_detail(dk, dseq, show):
+        trades_d = _entry_by_date[dk]
+        done_d   = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
+        wins_d   = sum(1 for t in done_d if t["pnl"] > 0)
+        wr_d     = wins_d / len(done_d) * 100 if done_d else 0
+        pnl_d    = sum(t["pnl"] for t in done_d)
+        pnl_col  = "#4ade80" if pnl_d >= 0 else "#f87171"
+        rows_d   = "".join(_build_trade_row(t, entry_first=True) for t in trades_d)
+        dk_key   = dk.replace("-", "")
+        disp     = "block" if show else "none"
+        return f"""<div id="edate_detail_{dseq}_{dk_key}" style="display:{disp}">
+<div style="padding:8px 0 12px;margin-bottom:8px;border-bottom:1px solid #1e293b;display:flex;align-items:center;gap:16px">
+  <span style="font-size:0.9rem;font-weight:700;color:#60a5fa">{dk} のエントリー</span>
+  <span style="font-size:0.8rem;color:#94a3b8">{len(done_d)}件決済 &nbsp;勝率{wr_d:.0f}%
+    &nbsp;損益<span style="color:{pnl_col};font-weight:700">{pnl_d:+,.0f}円</span></span>
+</div>
+<table>
+  <thead><tr>
+    <th>エントリー</th><th style="text-align:left">銘柄</th><th>戦略</th><th>設定</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th>
+    <th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>損益</th><th>理由</th><th>決済日</th>
+  </tr></thead>
+  <tbody>{rows_d}</tbody>
+</table>
+</div>"""
 
     global _DETAIL_TAB_SEQ
     _DETAIL_TAB_SEQ += 1
@@ -3071,7 +3124,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日順 <span style="font-size:0.72rem;color:#94a3b8">({len(entry_sorted_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">({len(_sorted_entry_dates)}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
@@ -3100,22 +3153,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
-<table>
-  <thead><tr>
-    <th>エントリー</th>
-    <th style="text-align:left">銘柄</th>
-    <th>戦略</th>
-    <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
-    <th>損益</th><th>理由</th><th>決済日</th>
-  </tr></thead>
-  <tbody>{trade_rows_entry}</tbody>
-</table>
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示</p>
+<div class="edate-grid">
+{"".join(_entry_date_btn(dk, _dseq) for dk in _sorted_entry_dates)}
+</div>
+{"".join(_entry_date_detail(dk, _dseq, i==0) for i, dk in enumerate(_sorted_entry_dates))}
 </div>
 <script>
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
-  // 既に表示中のタブを再クリックしたら閉じる (トグル)
   var closing = target && target.classList.contains('active');
   ['all','bt70','entry'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
@@ -3129,6 +3175,19 @@ function switchDetailTab(seq, which) {{
         (which==='all' && i===0) || (which==='bt70' && i===1) || (which==='entry' && i===2)
       ));
     }});
+  }}
+}}
+function showEntryDate(seq, dk) {{
+  var con = document.getElementById('detail_'+seq+'_entry');
+  if (!con) return;
+  var curBtn = document.getElementById('edate_btn_'+seq+'_'+dk);
+  var isActive = curBtn && curBtn.classList.contains('edate-active');
+  con.querySelectorAll('[id^="edate_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
+  con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
+  if (!isActive) {{
+    var det = document.getElementById('edate_detail_'+seq+'_'+dk);
+    if (det) det.style.display = 'block';
+    if (curBtn) curBtn.classList.add('edate-active');
   }}
 }}
 function toggleAnalysis(seq) {{
@@ -3163,7 +3222,7 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .tab-pane { display:none; }
 .tab-pane.active { display:block; }
 
-/* 取引明細 サブタブ (全部 / BT70以上) */
+/* 取引明細 サブタブ (全部 / BT70以上 / エントリー日別) */
 .detail-tab-nav { display:flex; gap:6px; margin-bottom:10px; }
 .detail-tab-btn { padding:6px 16px; background:#1e293b; border:1px solid #334155;
                   border-radius:6px; color:#94a3b8; cursor:pointer;
@@ -3172,6 +3231,17 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
 .detail-tab-pane.active { display:block; }
+
+/* エントリー日別グリッド */
+.edate-grid { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+.edate-btn { display:flex; flex-direction:column; align-items:center; gap:2px;
+             padding:6px 10px; background:#1e293b; border:1px solid #334155;
+             border-radius:6px; cursor:pointer; font-family:inherit; min-width:72px; }
+.edate-btn:hover { background:#263349; border-color:#60a5fa; }
+.edate-btn.edate-active { background:#0c1f3a; border-color:#60a5fa; border-width:2px; }
+.edate-mm  { font-size:0.85rem; font-weight:700; color:#e2e8f0; }
+.edate-stat { font-size:0.68rem; color:#94a3b8; }
+.edate-pnl  { font-size:0.72rem; font-weight:600; }
 
 /* 詳細分析 折りたたみトグル */
 .analysis-toggle { display:block; width:100%; text-align:left;
