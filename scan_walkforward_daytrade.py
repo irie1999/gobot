@@ -266,6 +266,14 @@ def main():
                              "省略時は今日 (JST)。同じ日に再実行しても同じ結果")
     parser.add_argument("--refresh-snapshot", action="store_true",
                         help="--source yfinance のスナップショットを強制再取得")
+    parser.add_argument("--shift-days", type=int, default=0,
+                        help="WF Fold 全体を N日前にシフト。"
+                             "例: --shift-days 180 → 直近180日を選定に使わない "
+                             "(その期間は holdout 評価用に温存)")
+    parser.add_argument("--all-periods", action="store_true",
+                        help="6パターン (shift=30/60/90/120/150/180) を一気に実行。"
+                             "バックテスト結果は共通なので高速。各シフトごとに "
+                             "CSVを出力 (ファイル名に _shift<N>d 付加)")
     args = parser.parse_args()
 
     # yfinance モード: 鮮度チェック不要 (毎回 fresh fetch)
@@ -285,6 +293,35 @@ def main():
         except Exception as e:
             print(f"[warn] 鮮度チェック失敗: {e} (続行)")
 
+    # --all-periods: 6パターン (shift=30/60/90/120/150/180) を順次実行
+    # 各イテレーションでバックテスト結果を共有 (キャッシュ)
+    if args.all_periods:
+        periods = [30, 60, 90, 120, 150, 180]
+        print(f"[--all-periods] 6パターン実行: shift_days = {periods}",
+              flush=True)
+        # 元の shift_days を保存して順次変更しながら実行
+        # 各実行は別関数化が望ましいが、簡易には main を再起する形が無難
+        import sys
+        original_argv = sys.argv[:]
+        for p in periods:
+            # --all-periods を外して --shift-days N を追加
+            new_argv = [a for a in original_argv
+                        if a not in ("--all-periods",)]
+            # 既存の --shift-days を削除
+            new_argv = [a for i, a in enumerate(new_argv)
+                        if a != "--shift-days"
+                        and not (i > 0 and new_argv[i-1] == "--shift-days")]
+            new_argv += ["--shift-days", str(p)]
+            sys.argv = new_argv
+            print(f"\n{'='*70}\n[--all-periods] shift_days={p} 実行開始"
+                  f"\n{'='*70}", flush=True)
+            try:
+                main()
+            except SystemExit:
+                pass
+        sys.argv = original_argv
+        return
+
     # Fold 構造の決定
     global FOLDS
     if args.source == "yfinance":
@@ -296,6 +333,15 @@ def main():
     elif args.folds == 2:
         # --folds 2 のとき FOLDS をスイング流に差し替え
         FOLDS = FOLDS_SWING
+
+    # shift_days: FOLDS を全体的に N日前にシフト
+    # 例: shift=180 → 直近180日を選定に使わない (out-of-sample 用)
+    if args.shift_days > 0:
+        sd = args.shift_days
+        FOLDS = [(name, ts + sd, te + sd, vs + sd, ve + sd)
+                 for name, ts, te, vs, ve in FOLDS]
+        print(f"[--shift-days {sd}] FOLDS をシフト: "
+              f"{[(n, ts, te, vs, ve) for n, ts, te, vs, ve in FOLDS]}")
 
     # モード設定 + ラベル (ファイル名に使う)
     global PASS_TRAIN, PASS_TEST, MIN_FOLDS
@@ -430,7 +476,8 @@ def main():
         mode_configs = [(mode_label, PASS_TRAIN, PASS_TEST, MIN_FOLDS)]
 
     # サマリーログ (全戦略集約)
-    summary_path = out_dir / f"summary_{mode_label}_{today}.md"
+    _ss = f"_shift{args.shift_days}d" if args.shift_days > 0 else ""
+    summary_path = out_dir / f"summary_{mode_label}_{today}{_ss}.md"
     summary_lines = [
         f"# scan_walkforward_daytrade サマリー",
         f"",
@@ -523,7 +570,10 @@ def main():
                 print(f"\n  ✗ {strat}/{mname}: 合格なし")
                 continue
             rs.sort(key=lambda x: -x["total_pnl"])
-            csv_path = out_dir / f"walkforward_{strat}_{mname}_{today}.csv"
+            shift_suffix = (f"_shift{args.shift_days}d"
+                            if args.shift_days > 0 else "")
+            csv_path = out_dir / (f"walkforward_{strat}_{mname}_{today}"
+                                  f"{shift_suffix}.csv")
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 fieldnames = ["symbol", "name", "strategy", "latest_price",
                               "pass_folds", "total_trades", "total_pf",
@@ -604,7 +654,7 @@ def main():
 
         # 個別モードサマリも出力
         for mname in ["standard", "lenient", "strict"]:
-            mode_summary_path = out_dir / f"summary_{mname}_{today}.md"
+            mode_summary_path = out_dir / f"summary_{mname}_{today}{_ss}.md"
             mode_lines = [
                 f"# scan_walkforward_daytrade [{mname}]",
                 f"- 生成: {today}", "",
@@ -645,7 +695,7 @@ def main():
 
         # 超コンパクト版 (チャット貼付け用、各モード1ファイル)
         for mname in ["standard", "lenient", "strict"]:
-            compact_path = out_dir / f"compact_{mname}_{today}.txt"
+            compact_path = out_dir / f"compact_{mname}_{today}{_ss}.txt"
             compact_lines = [
                 f"=== {mname.upper()} ({today}) ===",
                 "",
@@ -693,7 +743,7 @@ def main():
             print(f"  📋 コンパクト: {compact_path.name}")
 
         # 比較表 (3モードを1ファイルで)
-        compare_path = out_dir / f"compare_modes_{today}.txt"
+        compare_path = out_dir / f"compare_modes_{today}{_ss}.txt"
         compare_lines = [
             f"=== 3モード比較 ({today}) ===",
             "",

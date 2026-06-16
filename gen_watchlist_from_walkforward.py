@@ -37,20 +37,38 @@ WF_DIR = Path("walkforward_daytrade_results")
 KNOWN_MODES = ["standard", "lenient", "strict", "swing_relaxed", "swing"]
 
 
-def find_latest_files(mode_filter: str | None = None):
-    """walkforward CSV の中から最新日付グループを抽出。"""
+def find_latest_files(mode_filter: str | None = None,
+                       shift_days: int = 0):
+    """walkforward CSV の中から最新日付グループを抽出。
+
+    shift_days > 0 のとき、ファイル名末尾 _shift<N>d が一致するものを使う。
+    shift_days = 0 のとき、_shift がついていないファイルを使う。
+    """
     if not WF_DIR.exists():
         return None, []
 
-    pattern = str(WF_DIR / "walkforward_*_*.csv")
+    if shift_days > 0:
+        pattern = str(WF_DIR / f"walkforward_*_*_shift{shift_days}d.csv")
+    else:
+        pattern = str(WF_DIR / "walkforward_*_*.csv")
     files = glob.glob(pattern)
+    if shift_days == 0:
+        # shift=0 のときは _shift がついたファイルを除外
+        files = [f for f in files if "_shift" not in Path(f).stem]
     if not files:
         return None, []
 
     parsed = []
     for fp in files:
-        stem = Path(fp).stem  # walkforward_<strat>_<mode>_<YYYY-MM-DD>
-        parts = stem.split("_")
+        stem = Path(fp).stem  # walkforward_<strat>_<mode>_<YYYY-MM-DD>[_shift<N>d]
+        # 末尾 _shift<N>d を取り除いてから処理
+        if stem.endswith("d") and "_shift" in stem:
+            # 末尾の _shift<N>d を削る
+            shift_pos = stem.rfind("_shift")
+            stem_base = stem[:shift_pos]
+        else:
+            stem_base = stem
+        parts = stem_base.split("_")
         if len(parts) < 4:
             continue
         date_str = parts[-1]
@@ -120,9 +138,10 @@ def load_winners(csv_path: str, min_pf: float, min_trades: int):
 
 
 def generate_watchlist(mode=None, min_pf=1.3, min_trades=20,
-                       output=None, verbose=True):
+                       output=None, verbose=True, shift_days=0):
     """3-tuple WATCHLIST を生成して .py ファイルに書き出す。"""
-    latest_date, files = find_latest_files(mode_filter=mode)
+    latest_date, files = find_latest_files(
+        mode_filter=mode, shift_days=shift_days)
     if not files:
         print(f"[error] walkforward CSV が見つかりません ({WF_DIR}/)")
         if mode:
@@ -167,7 +186,8 @@ def generate_watchlist(mode=None, min_pf=1.3, min_trades=20,
 
     # 出力先決定
     if output is None:
-        output = f"daytrade_winners_{latest_date}.py"
+        shift_suffix = f"_shift{shift_days}d" if shift_days > 0 else ""
+        output = f"daytrade_winners_{latest_date}{shift_suffix}.py"
     output_path = Path(output)
 
     # 戦略別グループ化 (見やすさ + 集計)
@@ -245,13 +265,31 @@ def main():
                         help="最低 取引数 (デフォルト 20)")
     parser.add_argument("--output", default=None,
                         help="出力ファイル名 (省略時 daytrade_winners_<date>.py)")
+    parser.add_argument("--shift-days", type=int, default=0,
+                        help="scan の shift_days と対応。"
+                             "出力ファイル名に _shift<N>d 付加")
+    parser.add_argument("--all-periods", action="store_true",
+                        help="6パターン (shift=30/60/90/120/150/180) を一気に生成")
     args = parser.parse_args()
+
+    if args.all_periods:
+        for p in [30, 60, 90, 120, 150, 180]:
+            print(f"\n=== shift_days={p} watchlist 生成 ===")
+            generate_watchlist(
+                mode=args.mode,
+                min_pf=args.min_pf,
+                min_trades=args.min_trades,
+                output=None,
+                shift_days=p,
+            )
+        return
 
     generate_watchlist(
         mode=args.mode,
         min_pf=args.min_pf,
         min_trades=args.min_trades,
         output=args.output,
+        shift_days=args.shift_days,
     )
 
 
