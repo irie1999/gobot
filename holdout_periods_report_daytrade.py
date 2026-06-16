@@ -2889,6 +2889,9 @@ def main():
                         help="サニティチェック: gap%% 上限 (デフォルト 30.0)")
     parser.add_argument("--no-sanity", action="store_true",
                         help="サニティチェックを完全スキップ (watchlist 全銘柄採用)")
+    parser.add_argument("--data-end-date", default=None,
+                        help="バックテスト対象データを指定日 (YYYY-MM-DD) 以前にカット。"
+                             "例: 朝の状態を再現するには '2026-06-14' を指定")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--strategy", default="all",
                         help="all/long/short/個別戦略")
@@ -3178,6 +3181,31 @@ def main():
     print(f"\n[Step 1] データロード", flush=True)
     symbols = [s for s, _ in targets]
     fetched = load_intraday_batch(symbols, args.days, source="local")
+    # --data-end-date: 指定日 23:59:59 以前のバーのみ残す
+    if args.data_end_date:
+        import pandas as _pd
+        try:
+            cutoff = _pd.Timestamp(args.data_end_date + " 23:59:59",
+                                    tz="Asia/Tokyo")
+        except Exception:
+            cutoff = _pd.Timestamp(args.data_end_date + " 23:59:59")
+        before_syms = len(fetched)
+        truncated = {}
+        for s, df in fetched.items():
+            idx = df.index
+            if hasattr(idx, "tz") and idx.tz is None and cutoff.tz is not None:
+                cutoff_local = cutoff.tz_localize(None)
+            elif hasattr(idx, "tz") and idx.tz is not None and cutoff.tz is None:
+                cutoff_local = cutoff.tz_localize("Asia/Tokyo")
+            else:
+                cutoff_local = cutoff
+            sub = df[idx <= cutoff_local]
+            if not sub.empty:
+                truncated[s] = sub
+        fetched = truncated
+        print(f"  [--data-end-date {args.data_end_date}] "
+              f"{before_syms} → {len(fetched)}銘柄 "
+              f"(各銘柄のバーを {args.data_end_date} 末尾までに切り詰め)")
     if args.max_price > 0:
         fetched = {s: df for s, df in fetched.items()
                    if float(df.iloc[-1]["close"]) <= args.max_price}
