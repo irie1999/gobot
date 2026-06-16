@@ -341,11 +341,97 @@ def _load_yfinance_snapshot(symbols: list[str], days: int,
     return result
 
 
+def _load_hybrid_batch(symbols: list[str], days: int,
+                        snapshot_date: str,
+                        refresh_snapshot: bool = False,
+                        hybrid_cutoff_days: int = 60,
+                        quiet: bool = False
+                        ) -> dict[str, pd.DataFrame]:
+    """
+    Hybrid モード: 60日前 = pkl, 直近60日 = yfinance スナップショット。
+
+    pkl (J-Quants) は 60日以上前の歴史的データに信頼できるが、直近 60日は
+    corporate action や yfinance_update.py の干渉で混在することがある。
+    yfinance auto_adjust=False は直近60日の生値を返せるので、その期間は
+    yfinance に置き換えることで一貫性を確保する。
+
+    hybrid_cutoff_days: 何日前で分割するか (デフォルト 60)
+    """
+    result: dict[str, pd.DataFrame] = {}
+
+    # Step 1: pkl から各銘柄のデータをロード
+    pkl_data: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        df = _load_local(sym, days)
+        if df is not None and not df.empty:
+            pkl_data[sym] = df
+
+    if not quiet:
+        print(f"  hybrid pkl ロード: {len(pkl_data)}/{len(symbols)}銘柄",
+              flush=True)
+
+    # Step 2: yfinance スナップショット (直近60日)
+    yf_data = _load_yfinance_snapshot(
+        symbols, min(hybrid_cutoff_days, 60), snapshot_date,
+        refresh=refresh_snapshot, quiet=quiet,
+    )
+
+    # Step 3: マージ - cutoff より前は pkl、cutoff 以降は yfinance
+    cutoff_dt = pd.Timestamp(
+        datetime.now(JST).date() - timedelta(days=hybrid_cutoff_days))
+
+    for sym in set(symbols):
+        pkl_df = pkl_data.get(sym)
+        yf_df = yf_data.get(sym)
+
+        if pkl_df is None and yf_df is None:
+            continue
+        if pkl_df is None:
+            result[sym] = yf_df
+            continue
+        if yf_df is None:
+            # yfinance データなし → pkl をそのまま (古いまま)
+            result[sym] = pkl_df
+            continue
+
+        # pkl の bars を cutoff より前に限定
+        # pkl index は tz-naive 想定
+        pkl_idx = pkl_df.index
+        if hasattr(pkl_idx, "tz") and pkl_idx.tz is not None:
+            cutoff_for_pkl = cutoff_dt.tz_localize("Asia/Tokyo")
+        else:
+            cutoff_for_pkl = cutoff_dt
+        pkl_old = pkl_df[pkl_idx < cutoff_for_pkl]
+
+        # yfinance の bars を cutoff 以降に限定
+        yf_idx = yf_df.index
+        if hasattr(yf_idx, "tz") and yf_idx.tz is not None:
+            cutoff_for_yf = cutoff_dt.tz_localize("Asia/Tokyo")
+        else:
+            cutoff_for_yf = cutoff_dt
+        yf_recent = yf_df[yf_idx >= cutoff_for_yf]
+
+        # 結合 + 重複排除 (yfinance を優先)
+        combined = pd.concat([pkl_old, yf_recent]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+        result[sym] = combined
+
+    if not quiet:
+        n_total = len(result)
+        print(f"  hybrid マージ完了: {n_total}銘柄 "
+              f"(cutoff: {hybrid_cutoff_days}日前 = "
+              f"{cutoff_dt.date()})",
+              flush=True)
+
+    return result
+
+
 def load_intraday_batch(symbols: list[str], days: int = 60,
                         source: str = "auto",
                         quiet: bool = False,
                         snapshot_date: str | None = None,
-                        refresh_snapshot: bool = False
+                        refresh_snapshot: bool = False,
+                        hybrid_cutoff_days: int = 60
                         ) -> dict[str, pd.DataFrame]:
     """
     複数銘柄の5分足を取得。
@@ -358,6 +444,10 @@ def load_intraday_batch(symbols: list[str], days: int = 60,
       日付別スナップショットを使用。snapshot_date 省略時は今日 (JST)。
       同じ日に再実行しても同じデータを返す → 翌日に過去結果が変わらない。
       refresh_snapshot=True で強制再取得。
+
+    source="hybrid" の場合:
+      hybrid_cutoff_days (デフォルト 60) より古い = pkl (J-Quants)、
+      新しい = yfinance スナップショット。pkl の信頼性低下期間を yfinance で補完。
     """
     # yfinance ソースは スナップショット機構を経由
     if source == "yfinance":
@@ -366,6 +456,17 @@ def load_intraday_batch(symbols: list[str], days: int = 60,
         return _load_yfinance_snapshot(
             symbols, days, snapshot_date,
             refresh=refresh_snapshot, quiet=quiet,
+        )
+
+    # hybrid: pkl + yfinance スナップショット
+    if source == "hybrid":
+        if snapshot_date is None:
+            snapshot_date = datetime.now(JST).date().isoformat()
+        return _load_hybrid_batch(
+            symbols, days, snapshot_date,
+            refresh_snapshot=refresh_snapshot,
+            hybrid_cutoff_days=hybrid_cutoff_days,
+            quiet=quiet,
         )
 
     result: dict[str, pd.DataFrame] = {}

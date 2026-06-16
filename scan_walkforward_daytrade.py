@@ -255,9 +255,11 @@ def main():
     parser.add_argument("--no-auto-update", action="store_true",
                         help="鮮度チェックは行うが yfinance 自動更新はしない")
     parser.add_argument("--source", default="local",
-                        choices=["auto", "local", "yfinance"],
-                        help="データソース。'yfinance' で pkl をバイパスして直接取得 "
-                             "(60日制限、auto_adjust=False)。pkl 破損を回避できる。"
+                        choices=["auto", "local", "yfinance", "hybrid"],
+                        help="データソース。"
+                             "'yfinance' で pkl バイパス直接取得 (60日制限)。"
+                             "'hybrid' で 60日前=pkl, 直近60日=yfinance "
+                             "に分割マージ (pkl 信頼性低下期間を補完)。"
                              "60日モードでは Fold 構造も自動短縮 (FOLDS_60D)")
     parser.add_argument("--snapshot-date", default=None,
                         help="--source yfinance 用。指定日のスナップショットを使う。"

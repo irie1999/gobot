@@ -2886,10 +2886,11 @@ def main():
                              "例: 朝の状態を再現するには '2026-06-14' を指定")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--source", default="local",
-                        choices=["auto", "local", "yfinance"],
-                        help="データソース。'yfinance' で pkl を使わず yfinance "
-                             "から直接取得 (最大60日制限、auto_adjust=False)。"
-                             "破損 pkl を避けたいときに使用")
+                        choices=["auto", "local", "yfinance", "hybrid"],
+                        help="データソース。"
+                             "'yfinance' で pkl 不使用 (60日制限)。"
+                             "'hybrid' で 60日前=pkl, 直近60日=yfinance "
+                             "に分割マージ (推奨: pkl の信頼性低下期間を補完)")
     parser.add_argument("--snapshot-date", default=None,
                         help="--source yfinance 用。指定日のスナップショットを使う。"
                              "省略時は今日 (JST)。過去日付指定で過去結果を再現可能")
