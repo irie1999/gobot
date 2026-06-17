@@ -104,11 +104,22 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 
 # ── 戦略定義 ────────────────────────────────────────────────────
 # (entry_atr_mult, stop_atr_mult, target_atr_mult)
+# entry_atr_mult の意味は戦略によって異なる:
+#   PREV_CLOSE_BREAK: order_p = prev_close + atr × em
+#   GAP_UP          : ギャップ最小幅 = atr × em (0.0 = 任意ギャップ)
+#   ORB30           : 未使用
+#   PREV_HIGH_BREAK : 未使用
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple[float, float, float]] = {
     "PREV_CLOSE_BREAK": (0.0, 1.5, 3.0),
+    "GAP_UP":           (0.0, 1.5, 3.0),  # ギャップアップ日限定 (選別的)
+    "ORB30":            (0.0, 1.5, 3.0),  # 30分Opening Range Breakout
+    "PREV_HIGH_BREAK":  (0.0, 1.5, 3.0),  # 前日高値ブレイク
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple[float, float, float]] = {
     "PREV_CLOSE_BREAK": (0.0, 1.5, 2.0),
+    "GAP_UP":           (0.0, 1.5, 2.0),
+    "ORB30":            (0.0, 1.5, 2.0),
+    "PREV_HIGH_BREAK":  (0.0, 1.5, 2.0),
 }
 
 import os as _os
@@ -136,12 +147,13 @@ FOLDS_SHORT: list[tuple[str, int, int, int, int]] = [
 FOLDS = FOLDS_NORMAL
 
 # ── 合格閾値 ─────────────────────────────────────────────────────
+# デイトレは1日1トレード上限 + 強制決済があるため、スイング版より閾値を緩和
 TRAIN_MIN_TRADES = 5
-TRAIN_MIN_PF     = 1.3
-TRAIN_MIN_WR     = 50.0
+TRAIN_MIN_PF     = 1.1    # スイング版 1.3 → デイトレ緩和
+TRAIN_MIN_WR     = 45.0   # スイング版 50% → デイトレ緩和
 TEST_MIN_TRADES  = 3
-TEST_MIN_PF      = 1.1
-TEST_MIN_WR      = 45.0
+TEST_MIN_PF      = 1.0    # スイング版 1.1 → デイトレ緩和
+TEST_MIN_WR      = 40.0   # スイング版 45% → デイトレ緩和
 
 # 2 fold 中に TRAIN+TEST 合格が必要な最低数
 FOLDS_PASS_REQUIRED = 2   # 両方クリアが必須
@@ -343,8 +355,8 @@ def main() -> None:
         description="デイトレ版 Walk-forward 銘柄スキャナー"
     )
     parser.add_argument("--strategy", default=None,
-                        choices=list(STRATEGY_DEFS_CONSERVATIVE.keys()),
-                        help="戦略名 (省略時は全戦略)")
+                        choices=list(STRATEGY_DEFS_CONSERVATIVE.keys()) + ["ALL"],
+                        help="戦略名 (省略時は全戦略). ALL=全戦略")
     parser.add_argument("--source",   default="local",
                         choices=["local", "auto", "yfinance"],
                         help="データソース (デフォルト: local)")

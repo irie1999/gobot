@@ -86,10 +86,10 @@ def calc_atr_5m(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
 
 def _get_daily_groups(
     df_5m: pd.DataFrame,
-) -> list[tuple[date, float, float, pd.DataFrame]]:
+) -> list[tuple[date, float, float, float, pd.DataFrame]]:
     """
     5分足 DataFrame を日付でグループ化し、各日について
-    (日付, 前日終値, 前日末ATR, その日の立会時間5分足 DataFrame) を返す。
+    (日付, 前日終値, 前日高値, 前日末ATR, その日の立会時間5分足 DataFrame) を返す。
 
     最初の取引日はprev_closeがないためスキップ。
     """
@@ -105,6 +105,7 @@ def _get_daily_groups(
             continue
 
         prev_close = float(prev_bars["close"].iloc[-1])
+        prev_high  = float(prev_bars["high"].max())
         prev_atr   = float(prev_bars["atr"].iloc[-1])
 
         if pd.isna(prev_close) or pd.isna(prev_atr) or prev_atr <= 0:
@@ -116,7 +117,7 @@ def _get_daily_groups(
         if len(day_df) < 3:
             continue
 
-        result.append((d, prev_close, prev_atr, day_df))
+        result.append((d, prev_close, prev_high, prev_atr, day_df))
     return result
 
 
@@ -311,23 +312,19 @@ def run_intraday_backtest(
     strategy_name: str = "PREV_CLOSE_BREAK",
 ) -> dict:
     """
-    5分足を使ったデイトレバックテスト (前日終値ブレイク戦略)。
+    5分足を使ったデイトレバックテスト。
 
-    Args:
-        symbol          : 銘柄コード (例: "7203.T")
-        name            : 銘柄名
-        df_5m           : 5分足 DataFrame (normalize_minute_df 済みの形式)
-        entry_atr_mult  : エントリー価格 = prev_close + atr × em (em=0.0 → prev_close)
-        stop_atr_mult   : 損切り幅 = atr × sm
-        target_atr_mult : 目標幅   = atr × tm
-        backtest_days   : バックテスト期間 (暦日)
-        strategy_name   : 戦略名 (出力に使用)
+    strategy_name:
+      PREV_CLOSE_BREAK : 前日終値ブレイク (毎日エントリー)
+      GAP_UP           : ギャップアップ日のみ (始値 > 前日終値 + ATR×em)
+      ORB30            : Opening Range Breakout (最初の30分高値ブレイク)
+      PREV_HIGH_BREAK  : 前日高値ブレイク (PREV_CLOSE_BREAKより高い閾値)
 
-    Returns:
-        dict with keys:
-          symbol, name, strategy,
-          period_results: {days: {trades, wins, losses, win_rate, pf, total_pnl, trade_log}},
-          all_trades: list of trade dicts
+    entry_atr_mult:
+      PREV_CLOSE_BREAK: order_p = prev_close + atr × em
+      GAP_UP          : ギャップ最小幅 = atr × em (0.0 → 任意ギャップ)
+      ORB30           : 未使用 (常に30分高値)
+      PREV_HIGH_BREAK : 未使用 (常に前日高値)
     """
     if df_5m is None or df_5m.empty:
         return _empty_result(symbol, name, strategy_name)
@@ -346,7 +343,7 @@ def run_intraday_backtest(
 
     trades: list[dict] = []
 
-    for d, prev_close, atr, day_df in daily_groups:
+    for d, prev_close, prev_high, atr, day_df in daily_groups:
         # バックテスト期間内のみ
         if d < today - timedelta(days=backtest_days):
             continue
@@ -354,9 +351,41 @@ def run_intraday_backtest(
         if prev_close < MIN_PRICE or prev_close > MAX_PRICE:
             continue
 
-        order_p = prev_close + atr * entry_atr_mult
+        # ── 戦略別エントリー条件 ──────────────────────────────
+        if strategy_name == "PREV_CLOSE_BREAK":
+            order_p = prev_close + atr * entry_atr_mult
+            sim_df  = day_df
 
-        trade = _simulate_day(day_df, order_p, atr, stop_atr_mult, target_atr_mult)
+        elif strategy_name == "GAP_UP":
+            # 始値が前日終値 + ATR×em を上回るギャップアップ日のみ
+            day_open = float(day_df.iloc[0]["open"])
+            if day_open <= prev_close + atr * entry_atr_mult:
+                continue
+            # order_p = prev_close にすることで 1本目から即エントリー
+            order_p = prev_close
+            sim_df  = day_df
+
+        elif strategy_name == "ORB30":
+            # 最初の30分 (6本 × 5min) の高値をブレイクしたらエントリー
+            orb_bars = day_df.iloc[:6]
+            if len(orb_bars) < 3:
+                continue
+            order_p = float(orb_bars["high"].max())
+            # ORB期間後のバーでシミュレーション
+            sim_df = day_df.iloc[6:]
+            if len(sim_df) < 2:
+                continue
+
+        elif strategy_name == "PREV_HIGH_BREAK":
+            # 前日高値ブレイク (PREV_CLOSE_BREAKより選別的)
+            order_p = prev_high
+            sim_df  = day_df
+
+        else:
+            order_p = prev_close + atr * entry_atr_mult
+            sim_df  = day_df
+
+        trade = _simulate_day(sim_df, order_p, atr, stop_atr_mult, target_atr_mult)
         if trade is None:
             continue
 
@@ -428,9 +457,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="デイトレ バックテストエンジン テスト")
     parser.add_argument("symbols", nargs="*", default=["7203.T"], help="銘柄コード")
-    parser.add_argument("--days",   type=int,   default=180,   help="バックテスト期間 (暦日)")
-    parser.add_argument("--sm",     type=float, default=1.5,   help="損切り倍率 (stop_atr_mult)")
-    parser.add_argument("--tm",     type=float, default=3.0,   help="目標倍率  (target_atr_mult)")
+    parser.add_argument("--days",     type=int,   default=180,   help="バックテスト期間 (暦日)")
+    parser.add_argument("--sm",       type=float, default=1.5,   help="損切り倍率 (stop_atr_mult)")
+    parser.add_argument("--tm",       type=float, default=3.0,   help="目標倍率  (target_atr_mult)")
+    parser.add_argument("--strategy", default="PREV_CLOSE_BREAK",
+                        choices=["PREV_CLOSE_BREAK", "GAP_UP", "ORB30", "PREV_HIGH_BREAK"],
+                        help="戦略名")
     parser.add_argument("--source", default="auto",
                         choices=["auto", "local", "yfinance"],
                         help="データソース")
@@ -450,7 +482,7 @@ if __name__ == "__main__":
         result = run_intraday_backtest(
             sym, sym, df,
             entry_atr_mult=0.0, stop_atr_mult=args.sm, target_atr_mult=args.tm,
-            backtest_days=args.days,
+            backtest_days=args.days, strategy_name=args.strategy,
         )
         score, rank = calc_recommend_score(result["period_results"])
         print(f"\n  {sym}  BTスコア={score} ({rank})")
