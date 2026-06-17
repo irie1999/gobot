@@ -120,16 +120,16 @@ STRATEGY_DEFS = (STRATEGY_DEFS_AGGRESSIVE if _trading_mode == "aggressive"
 TRADING_MODE = _trading_mode
 
 # ── Walk-forward fold 定義 ───────────────────────────────────────
-# 通常 (ローカルデータ前提, 365日以上のデータがある前提)
+# 通常 (quarantine_5m の2年データ前提, スイング版と同一設計)
 FOLDS_NORMAL: list[tuple[str, int, int, int, int]] = [
-    ("fold1", 365, 180, 180, 90),   # TRAIN 6M / TEST 3M
-    ("fold2", 270,  90,  90,  0),   # TRAIN 6M / TEST 3M
+    ("fold1", 730, 370, 370, 180),  # TRAIN 12M / TEST 6M
+    ("fold2", 550, 180, 180,   0),  # TRAIN 12M / TEST 6M
 ]
 
-# 短縮版 (yfinance 60日制限用)
+# 短縮版 (ローカルデータが1年未満 or yfinance 60日制限用)
 FOLDS_SHORT: list[tuple[str, int, int, int, int]] = [
-    ("fold1", 90, 45, 45, 20),      # TRAIN 45日 / TEST 25日
-    ("fold2", 60, 20, 20,  0),      # TRAIN 40日 / TEST 20日
+    ("fold1", 365, 180, 180, 90),   # TRAIN 6M / TEST 3M
+    ("fold2", 270,  90,  90,  0),   # TRAIN 6M / TEST 3M
 ]
 
 # デフォルト
@@ -360,8 +360,8 @@ def main() -> None:
                         help="総予算 (円). FIXED_QTY=100株換算で --max-price と同義")
     parser.add_argument("--folds-short", action="store_true",
                         help="短縮fold設計 (yfinance 60日制限対応)")
-    parser.add_argument("--data-days", type=int, default=400,
-                        help="1銘柄あたりのデータ取得期間 (暦日, デフォルト400)")
+    parser.add_argument("--data-days", type=int, default=800,
+                        help="1銘柄あたりのデータ取得期間 (暦日, デフォルト800=約2年)")
     parser.add_argument("--train-pf", type=float, default=None)
     parser.add_argument("--train-wr", type=float, default=None)
     parser.add_argument("--test-pf",  type=float, default=None)

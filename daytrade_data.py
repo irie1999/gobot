@@ -36,7 +36,11 @@ import pandas as pd
 JST = timezone(timedelta(hours=9))
 
 # ── ローカルデータのパス ────────────────────────────────────
-DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+# minute_5m   : 直近データ (日次更新, ~3ヶ月)  → 日次シグナル確認に使用
+# quarantine_5m: 長期データ (蓄積済, ~2年)     → WalkForward銘柄選定に使用
+# _load_local は両フォルダをマージして返す (重複は新しい方を優先)
+DATA_DIR       = Path(__file__).resolve().parent / "data" / "minute_5m"
+QUARANTINE_DIR = Path(__file__).resolve().parent / "data" / "quarantine_5m"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -141,10 +145,8 @@ def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
 # ソース1: ローカル保存データ (data/minute_5m/*.pkl)
 # ─────────────────────────────────────────────────────────────
 
-def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
-    """ローカル pickle から読み込み → 正規化 → 期間フィルタ。"""
-    jq_code = yf_to_jquants(symbol)
-    pkl_path = DATA_DIR / f"{jq_code}.pkl"
+def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
+    """pkl ファイルを読み込んで正規化・5分足化して返す。"""
     if not pkl_path.exists():
         return None
     try:
@@ -153,12 +155,36 @@ def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
         return None
     if not isinstance(raw, pd.DataFrame) or raw.empty:
         return None
-
     df = normalize_minute_df(raw)
     if df.empty:
         return None
+    return resample_to_5m(df)
 
-    df = resample_to_5m(df)
+
+def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
+    """
+    ローカル pickle から読み込み → 正規化 → 期間フィルタ。
+
+    minute_5m (直近) と quarantine_5m (長期) の両方を読み込んで
+    マージする。重複インデックスは新しいデータ (minute_5m) を優先。
+    """
+    jq_code = yf_to_jquants(symbol)
+
+    df_recent = _load_pkl(DATA_DIR / f"{jq_code}.pkl")
+    df_long   = _load_pkl(QUARANTINE_DIR / f"{jq_code}.pkl")
+
+    if df_recent is None and df_long is None:
+        return None
+
+    if df_recent is not None and df_long is not None:
+        # マージ: quarantine (長期) をベースに recent (直近) で上書き
+        combined = pd.concat([df_long, df_recent])
+        combined = combined[~combined.index.duplicated(keep="last")]
+        df = combined.sort_index()
+    elif df_recent is not None:
+        df = df_recent
+    else:
+        df = df_long
 
     # 期間フィルタ
     cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))
@@ -340,10 +366,13 @@ def split_by_day(df: pd.DataFrame) -> dict:
 
 
 def available_local_symbols() -> list[str]:
-    """ローカルに保存されている銘柄コード一覧。"""
-    if not DATA_DIR.exists():
-        return []
-    return sorted(f.stem for f in DATA_DIR.glob("*.pkl"))
+    """ローカルに保存されている銘柄コード一覧 (両フォルダの和集合)。"""
+    codes: set[str] = set()
+    if DATA_DIR.exists():
+        codes.update(f.stem for f in DATA_DIR.glob("*.pkl"))
+    if QUARANTINE_DIR.exists():
+        codes.update(f.stem for f in QUARANTINE_DIR.glob("*.pkl"))
+    return sorted(codes)
 
 
 # ─────────────────────────────────────────────────────────────
