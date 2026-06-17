@@ -3159,6 +3159,193 @@ function toggleTrendBreakdown() {{
 
     _speed_html = _speed_analysis_html(done_trades)
 
+    # ── ⑦ 損切りパターン分析（BT70以上）────────────────────────────────────
+    def _stop_pattern_html(trades_list):
+        """BT70以上の損切りトレードについて、損切り日のOHLC vs 損切り価格を分析する。
+        ①終値割れ（close < stop）vs ②ヒゲのみ（low < stop ≤ close）を分類。
+        close モードでは②は発生しない（回避済み）ことを確認する用途も兼ねる。
+        """
+        try:
+            from backtest_limit_entry import fetch as _fetch_ohlc
+        except ImportError:
+            return ""
+
+        bt70_stops = sorted(
+            [t for t in trades_list
+             if t.get("reason") == "損切り" and (t.get("rec_score") or 0) >= 70],
+            key=lambda x: x.get("exit_d_raw") or _date.min, reverse=True
+        )
+        if len(bt70_stops) < 2:
+            return ""
+
+        # 損切り日OHLCを取得して分類
+        analyzed = []
+        for t in bt70_stops[:50]:  # 最新50件
+            sym    = t.get("symbol", "")
+            stop_p = t.get("order_stop", 0)
+            exit_d = t.get("exit_d_raw")
+            if not stop_p or not exit_d:
+                analyzed.append({**t, "day_low": None, "day_close": None,
+                                  "pattern": "?", "close_gap": None, "low_gap": None})
+                continue
+            try:
+                df = _fetch_ohlc(sym, 400)
+                if df is None or df.empty:
+                    raise ValueError("no data")
+                df.index = pd.to_datetime(df.index)
+                mask = [idx.date() == exit_d for idx in df.index]
+                if not any(mask):
+                    raise ValueError("date not found")
+                row_idx = next(i for i, m in enumerate(mask) if m)
+                row = df.iloc[row_idx]
+                day_low   = float(row["low"])
+                day_close = float(row["close"])
+                # close < stop → ① 終値割れ（closeモードの損切り条件そのもの）
+                # low < stop ≤ close → ② ヒゲのみ（closeモードでは理論上発生しない）
+                if day_close < stop_p:
+                    pattern = "①終値割れ"
+                elif day_low < stop_p:
+                    pattern = "②ヒゲのみ"
+                else:
+                    pattern = "参照不一致"
+                close_gap = (day_close / stop_p - 1) * 100
+                low_gap   = (day_low   / stop_p - 1) * 100
+                analyzed.append({**t, "day_low": day_low, "day_close": day_close,
+                                  "pattern": pattern, "close_gap": close_gap,
+                                  "low_gap": low_gap})
+            except Exception:
+                analyzed.append({**t, "day_low": None, "day_close": None,
+                                  "pattern": "?", "close_gap": None, "low_gap": None})
+
+        if not analyzed:
+            return ""
+
+        n1 = sum(1 for a in analyzed if a["pattern"] == "①終値割れ")
+        n2 = sum(1 for a in analyzed if a["pattern"] == "②ヒゲのみ")
+        nq = sum(1 for a in analyzed if a["pattern"] in ("?", "参照不一致"))
+
+        # 深さ分布（①終値割れのみ）
+        gaps = [a["close_gap"] for a in analyzed if a["close_gap"] is not None and a["pattern"] == "①終値割れ"]
+        depth_html = ""
+        if gaps:
+            buckets = [
+                ("ギリギリ割れ（−1%以内）",  [g for g in gaps if g >= -1.0]),
+                ("小幅割れ（−1〜−3%）",      [g for g in gaps if -3.0 <= g < -1.0]),
+                ("中幅割れ（−3〜−6%）",      [g for g in gaps if -6.0 <= g < -3.0]),
+                ("大幅割れ（−6%超）",         [g for g in gaps if g < -6.0]),
+            ]
+            depth_rows = ""
+            for label, lst in buckets:
+                if not lst:
+                    continue
+                pct = len(lst) / len(gaps) * 100
+                bar_w = max(4, int(pct * 1.5))
+                avg_g = sum(lst) / len(lst)
+                depth_rows += (
+                    f'<tr>'
+                    f'<td style="text-align:left;color:#e2e8f0;padding:3px 10px">{label}</td>'
+                    f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{len(lst)}件</td>'
+                    f'<td style="text-align:right;color:#f87171;padding:3px 10px">{avg_g:+.1f}%</td>'
+                    f'<td style="padding:3px 10px"><div style="width:{bar_w}px;height:10px;background:#f87171;border-radius:2px;display:inline-block"></div></td>'
+                    f'</tr>'
+                )
+            depth_html = f"""
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">①終値割れの深さ分布（終値 vs 損切り価格）</p>
+<table style="border-collapse:collapse">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">カテゴリ</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">平均乖離</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px"></th>
+  </tr></thead>
+  <tbody>{depth_rows}</tbody>
+</table>
+</div>"""
+
+        # 明細テーブル（直近20件）
+        detail_rows = ""
+        for a in analyzed[:20]:
+            sym_disp  = str(a.get("symbol","")).split(".")[0]
+            name_disp = a.get("name","")[:8]
+            strat     = a.get("strategy","")
+            exit_dt   = a.get("exit_dt","")
+            stop_p    = a.get("order_stop", 0)
+            pnl       = a.get("pnl", 0)
+            pnl_col   = "#f87171"
+            pat       = a["pattern"]
+
+            if a["close_gap"] is not None:
+                close_str = f'{a["day_close"]:,.0f}（{a["close_gap"]:+.1f}%）'
+                low_str   = f'{a["day_low"]:,.0f}（{a["low_gap"]:+.1f}%）'
+            else:
+                close_str = "—"
+                low_str   = "—"
+
+            if pat == "①終値割れ":
+                pat_html = '<span style="color:#f87171;font-weight:700">①終値割れ</span>'
+            elif pat == "②ヒゲのみ":
+                pat_html = '<span style="color:#4ade80;font-weight:700">②ヒゲのみ</span>'
+            else:
+                pat_html = f'<span style="color:#64748b">{pat}</span>'
+
+            detail_rows += (
+                f'<tr>'
+                f'<td style="text-align:left;padding:3px 8px;color:#e2e8f0">{exit_dt}</td>'
+                f'<td style="text-align:left;padding:3px 8px;color:#e2e8f0">{sym_disp} {name_disp}</td>'
+                f'<td style="padding:3px 8px;color:#94a3b8">{strat}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{stop_p:,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{low_str}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{close_str}</td>'
+                f'<td style="padding:3px 8px">{pat_html}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:{pnl_col}">{pnl:+,.0f}円</td>'
+                f'</tr>'
+            )
+
+        n2_note = (f'<p style="color:#4ade80;font-size:0.82rem;margin:8px 0 0">'
+                   f'✅ ②ヒゲのみ: {n2}件 — closeモードが回避済み（終値は損切りライン上）</p>'
+                   if n2 > 0 else
+                   f'<p style="color:#94a3b8;font-size:0.82rem;margin:8px 0 0">'
+                   f'✅ ②ヒゲのみ: 0件（closeモードにより全てのヒゲ刈りを回避）</p>')
+
+        return f"""<h2 style="margin-top:24px">⑦ BT70以上 損切りパターン分析（{len(analyzed)}件）</h2>
+<p class="footnote">closeモードでは終値が損切りラインを超えた場合のみ決済。①のみが発生し、②（ヒゲのみ）はcloseモードで回避済み。</p>
+<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:#f87171;font-size:1.4rem;font-weight:700">{n1}</div>
+    <div style="color:#94a3b8;font-size:0.78rem">①終値割れ</div>
+  </div>
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:#4ade80;font-size:1.4rem;font-weight:700">{n2}</div>
+    <div style="color:#94a3b8;font-size:0.78rem">②ヒゲのみ</div>
+  </div>
+  {f'<div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center"><div style="color:#64748b;font-size:1.4rem;font-weight:700">{nq}</div><div style="color:#94a3b8;font-size:0.78rem">データ取得不可</div></div>' if nq else ''}
+</div>
+{n2_note}
+<div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:16px">
+{depth_html}
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">損切り明細（直近20件、損切り日終値との比較）</p>
+<div style="overflow-x:auto">
+<table style="border-collapse:collapse;font-size:0.82rem">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.75rem;padding:3px 8px">決済日</th>
+    <th style="text-align:left;color:#94a3b8;font-size:0.75rem;padding:3px 8px">銘柄</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">戦略</th>
+    <th style="color:#f87171;font-size:0.75rem;padding:3px 8px">損切り価格</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">当日安値</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">当日終値</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">パターン</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">損益</th>
+  </tr></thead>
+  <tbody>{detail_rows}</tbody>
+</table>
+</div>
+</div>
+</div>"""
+
+    _stop_pattern_html_str = _stop_pattern_html(done_trades)
+
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
@@ -3302,6 +3489,8 @@ function toggleTrendBreakdown() {{
 </table>
 
 {_speed_html}
+
+{_stop_pattern_html_str}
 
 </div>
 
