@@ -3485,6 +3485,16 @@ function toggleTrendBreakdown() {{
 <button class="analysis-toggle" onclick="toggleAnalysis({_dseq})" id="analysis_btn_{_dseq}">▶ 詳細分析（スクリプト別・スコア別・銘柄別）を表示</button>
 <div id="analysis_{_dseq}" class="analysis-block" style="display:none">
 
+<div class="analysis-tab-nav">
+  <button class="analysis-tab-btn active" onclick="switchAnalysisTab({_dseq},'summary')">スクリプト別</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'score')">① ② スコア別実績</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'cross')">③ ④ BT×WF・高BT銘柄</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ ⑧ 損切り・追加</button>
+</div>
+
+<div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
 <h2>スクリプト別サマリー</h2>
 <table>
   <thead><tr>
@@ -3517,7 +3527,9 @@ function toggleTrendBreakdown() {{
 </tr>
 </tbody>
 </table>
+</div>
 
+<div id="analtab_{_dseq}_score" class="analysis-tab-pane">
 <h2>スコア別実績（直近{days}日 / {period_note}）</h2>
 <h3 style="color:#60a5fa;font-size:0.95rem;margin:8px 0 4px">① WFスコア軸 <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">銘柄選定基準で分類</span></h3>
 <table>
@@ -3546,7 +3558,9 @@ function toggleTrendBreakdown() {{
   <tbody>{bt_fine_rows}</tbody>
 </table>
 <p class="footnote">WF=ウォークフォワードスコア（銘柄選定基準・高いほど過去フォールドで安定）／ BT=直近バックテストスコア（最近の機能度・低いと最近機能していない）</p>
+</div>
 
+<div id="analtab_{_dseq}_cross" class="analysis-tab-pane">
 <h2>③ BT×WF クロス分析（BT≥60内でWFスコア帯別 / 365日全取引）</h2>
 <p class="footnote" style="margin-bottom:8px">BT≥60の銘柄についてWFスコア帯ごとに分割。WFスコアがBT≥60の中で追加の識別力を持つか確認。</p>
 <table>
@@ -3560,7 +3574,7 @@ function toggleTrendBreakdown() {{
   <tbody>{"<tr><td colspan='8' style='text-align:center;color:#64748b;padding:12px'>BT≥60の取引なし</td></tr>" if not cross_rows else cross_rows}</tbody>
 </table>
 
-<h2>④ 高BT銘柄別成績（BT≥60 / 損益降順 / 365日全取引）</h2>
+<h2 style="margin-top:24px">④ 高BT銘柄別成績（BT≥60 / 損益降順 / 365日全取引）</h2>
 <p class="footnote" style="margin-bottom:8px">
   BTスコア≥60の銘柄ごとの損益集計。<span style="color:#f87171">■</span> = 損失-3万超、<span style="color:#4ade80">■</span> = 利益+5万超。<br>
   BT・WFは各取引のスコアの平均値。損失が出ている高BT銘柄を特定し、スキップ候補の検討に使う。
@@ -3578,7 +3592,9 @@ function toggleTrendBreakdown() {{
   </tr></thead>
   <tbody>{sym_rows}</tbody>
 </table>
+</div>
 
+<div id="analtab_{_dseq}_bt6069" class="analysis-tab-pane">
 <h2>⑤ BT60-69 × WFクロス分析（conservative限定）</h2>
 <p class="footnote" style="margin-bottom:8px">
   BT60代はconservativeのみで運用するとプラス。さらにWFスコアで絞り込めるか検証。<br>
@@ -3616,12 +3632,16 @@ function toggleTrendBreakdown() {{
   </tr></thead>
   <tbody>{sym6069_rows}</tbody>
 </table>
+</div>
 
+<div id="analtab_{_dseq}_speed" class="analysis-tab-pane">
 {_speed_html}
+</div>
 
+<div id="analtab_{_dseq}_extra" class="analysis-tab-pane">
 {_stop_pattern_html_str}
-
 {_overlap_html}
+</div>
 
 </div>
 
@@ -3677,6 +3697,19 @@ function toggleTrendBreakdown() {{
 {"".join(_entry_date_detail(dk, _dseq, i==0, _bt70_entry_by_date, "b") for i, dk in enumerate(_sorted_bt70_entry_dates))}
 </div>
 <script>
+function switchAnalysisTab(seq, which) {{
+  var tabs = ['summary','score','cross','bt6069','speed','extra'];
+  tabs.forEach(function(t) {{
+    var pane = document.getElementById('analtab_'+seq+'_'+t);
+    if (pane) pane.classList.toggle('active', t === which);
+  }});
+  var nav = document.querySelector('#analysis_'+seq+' .analysis-tab-nav');
+  if (nav) {{
+    nav.querySelectorAll('.analysis-tab-btn').forEach(function(b, i) {{
+      b.classList.toggle('active', tabs[i] === which);
+    }});
+  }}
+}}
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
@@ -3751,6 +3784,16 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
 .detail-tab-pane.active { display:block; }
+
+/* 詳細分析ブロック 内部タブ */
+.analysis-tab-nav { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+.analysis-tab-btn { padding:6px 14px; background:#1e293b; border:1px solid #334155;
+                   border-radius:6px; color:#94a3b8; cursor:pointer;
+                   font-size:0.85rem; font-family:inherit; }
+.analysis-tab-btn.active { background:#0c1f3a; color:#93c5fd; border-color:#60a5fa; font-weight:700; }
+.analysis-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.analysis-tab-pane { display:none; }
+.analysis-tab-pane.active { display:block; }
 
 /* エントリー日別グリッド */
 .edate-grid { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
