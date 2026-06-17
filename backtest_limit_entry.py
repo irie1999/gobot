@@ -671,7 +671,20 @@ def run_limit_backtest(
                 else:
                     ep = round(po["lp"] * (1.0 + SLIPPAGE_STOP_PCT))
             elif entry_type == "stop_sell":
-                ep = round(po["lp"] * (1.0 - SLIPPAGE_STOP_PCT))
+                limit_lower = po["lp"] * (1.0 - LIMIT_ENTRY_MARGIN_PCT)
+                if op <= po["lp"]:  # ギャップダウン（寄り付きがトリガー以下）
+                    if op < limit_lower:
+                        # ギャップダウン超過: 日中に指値下限以上に戻れば指値下限で約定
+                        if hi >= limit_lower:
+                            ep = round(limit_lower)
+                            fill_type = "gap_comeback"
+                        else:
+                            continue  # 終日 limit_lower を上回らず → 不約定
+                    else:
+                        ep = round(op)
+                        fill_type = "gap_open"
+                else:
+                    ep = round(po["lp"] * (1.0 - SLIPPAGE_STOP_PCT))
             else:
                 ep = round(po["lp"] * (1.0 + SLIPPAGE_LIMIT_PCT))
 
@@ -682,6 +695,10 @@ def run_limit_backtest(
                 delta  = ep - po["lp"]
                 use_sp = po["sp"] + delta
                 use_tp = po["tp"] + delta
+            elif entry_risk_adjust and entry_type == "stop_sell" and ep < po["lp"]:
+                delta  = po["lp"] - ep
+                use_sp = po["sp"] - delta
+                use_tp = po["tp"] - delta
 
             dtf = i - po["signal_idx"]
 

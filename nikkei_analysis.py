@@ -1592,7 +1592,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 return {"_bt": bt_info}
 
             order_p = sig.get("order_price", 0)
-            limit_p = sig.get("limit_entry_price", round(order_p * 1.03) if order_p else 0)
+            _is_short_sig = str(strat).upper().endswith("_S")
+            _lim_mult = (1.0 - 0.03) if _is_short_sig else (1.0 + 0.03)
+            limit_p = sig.get("limit_entry_price", round(order_p * _lim_mult) if order_p else 0)
             sig_dt  = sig.get("signal_date")
             try:
                 _max_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
@@ -1966,6 +1968,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         src_html  = "".join(src_parts)
         risk_html = _rrb_fn(s["symbol"])
         earn_html = _red_fn(s["symbol"], target_date)
+        _sig_is_short = str(s["strategy"]).upper().endswith("_S")
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         # 📥 登録ボタン: position_server (8765) のフォームを自動入力
@@ -1992,7 +1995,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center">{ _fmt_score_cell(s, col) }</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
-  <td style="text-align:right;color:#f59e0b">+{lim_pct:.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
+  <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span></td>
@@ -2008,8 +2011,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが高い順に並んでいます。
 </p>
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">
-  ※ 逆指値注文（青）= 翌日高値がこの価格以上になれば発動<br>
-  ※ 指値上限（橙）= 逆指値→指値発注時の上限。寄付ギャップがこれ以下なら約定、超えたら不約定
+  ※ 逆指値注文（青）= ロング:翌日高値がこの価格以上で発動 / ショート:翌日安値がこの価格以下で発動<br>
+  ※ 指値（橙）= ロング:上限(+3%) ギャップアップが大きすぎたらキャンセル / ショート:下限(-3%) ギャップダウンが大きすぎたらキャンセル
 </p>
 <table>
   <thead><tr>
@@ -2018,7 +2021,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <th>戦略</th><th>スコア</th>
     <th>シグナル日<br>時株価</th>
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
-    <th style="color:#f59e0b">指値上限<br>(+3%)</th>
+    <th style="color:#f59e0b">指値上限/下限<br>(±3%)</th>
     <th>損切り(-)</th><th>目標(+)</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>

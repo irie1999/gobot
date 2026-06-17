@@ -37,7 +37,7 @@ from backtest_limit_entry import (
     fetch,
     run_limit_backtest,
     fetch_n225_return,
-    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -213,15 +213,17 @@ def check_signal_on_date(symbol: str, strategy: str,
     close_prev = float(prev["close"])
     current_p  = float(df.iloc[prev_idx]["close"])
 
-    order_p = close_prev - atr_v * em
-    sl      = order_p + atr_v * sm   # 損切り (ABOVE)
-    tp      = order_p - atr_v * tm   # 目標   (BELOW)
+    order_p     = close_prev - atr_v * em
+    sl          = order_p + atr_v * sm   # 損切り (ABOVE)
+    tp          = order_p - atr_v * tm   # 目標   (BELOW)
+    limit_entry = order_p * (1.0 - LIMIT_ENTRY_MARGIN_PCT)  # 指値下限 (-3%)
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
         order_price=round(order_p, 0),
+        limit_entry_price=round(limit_entry, 0),  # 指値下限 (-3%)
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,

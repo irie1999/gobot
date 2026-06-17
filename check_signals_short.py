@@ -35,7 +35,7 @@ from backtest_limit_entry import (
     fetch,
     run_limit_backtest,
     fetch_n225_return,
-    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, ENTRY_EXPIRE,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, ENTRY_EXPIRE, LIMIT_ENTRY_MARGIN_PCT,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
     compute_period_result,
@@ -232,15 +232,17 @@ def check_signal_on_date(symbol: str, strategy: str,
         current_p = _fetch_live_price(symbol, current_p)
 
     # 逆指値売り: 終値 - ATR×em を下抜けたら売る
-    order_p = close_prev - atr_v * em
-    sl      = order_p + atr_v * sm   # 損切り (ABOVE entry)
-    tp      = order_p - atr_v * tm   # 目標   (BELOW entry)
+    order_p     = close_prev - atr_v * em
+    sl          = order_p + atr_v * sm   # 損切り (ABOVE entry)
+    tp          = order_p - atr_v * tm   # 目標   (BELOW entry)
+    limit_entry = order_p * (1.0 - LIMIT_ENTRY_MARGIN_PCT)  # 指値下限: ギャップダウン超過時のキャンセル基準
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
         order_price=round(order_p, 0),
+        limit_entry_price=round(limit_entry, 0),  # 指値下限 (-3%)
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,
