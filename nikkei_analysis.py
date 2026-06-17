@@ -3367,10 +3367,49 @@ function toggleTrendBreakdown() {{
         pnl_col   = "#4ade80" if total_pnl >= 0 else "#f87171"
         wr_col    = "#4ade80" if win_rate >= 55 else ("#facc15" if win_rate >= 45 else "#f87171")
 
-        # 戦略別集計
+        # BT70以上フィルター
+        bt70_settled = [t for t in settled if (t.get("rec_score") or 0) >= 70]
+        def _band_kpi(lst):
+            if not lst:
+                return 0.0, "∞", 0, 0, 0
+            w = [t for t in lst if (t.get("pnl") or 0) > 0]
+            l = [t for t in lst if (t.get("pnl") or 0) <= 0]
+            wr = len(w) / len(lst) * 100
+            gp = sum(t.get("pnl", 0) for t in w)
+            gl = abs(sum(t.get("pnl", 0) for t in l))
+            pf = gp / gl if gl > 0 else 9.99
+            pf_s = f"{pf:.2f}" if pf < 9.99 else "∞"
+            return wr, pf_s, sum(t.get("pnl", 0) for t in lst), len(w), len(l)
+
+        bt70_wr, bt70_pf, bt70_pnl, bt70_w, bt70_l = _band_kpi(bt70_settled)
+
+        # BT帯別集計
+        def _bt_band_row(label, lst, hl_color=None):
+            if not lst:
+                return f'<tr><td style="color:#94a3b8;padding:3px 10px">{label}</td><td colspan="4" style="color:#475569;padding:3px 10px">-</td></tr>'
+            wr, pf_s, pnl, w, l = _band_kpi(lst)
+            wc  = "#4ade80" if wr >= 60 else ("#facc15" if wr >= 50 else "#f87171")
+            pc  = "#4ade80" if pnl >= 0 else "#f87171"
+            nm  = hl_color or "#e2e8f0"
+            return (f'<tr>'
+                    f'<td style="color:{nm};padding:3px 10px;font-weight:{"700" if hl_color else "400"}">{label}</td>'
+                    f'<td style="text-align:right;color:{wc};padding:3px 10px">{wr:.0f}%</td>'
+                    f'<td style="text-align:right;color:#e2e8f0;padding:3px 10px">{pf_s}</td>'
+                    f'<td style="text-align:right;color:{pc};padding:3px 10px">{pnl:+,.0f}円</td>'
+                    f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{w+l}件</td>'
+                    f'</tr>')
+
+        bt_band_rows = (
+            _bt_band_row("BT80以上",  [t for t in settled if (t.get("rec_score") or 0) >= 80], "#4ade80")
+          + _bt_band_row("BT70-79",   [t for t in settled if 70 <= (t.get("rec_score") or 0) < 80], "#86efac")
+          + _bt_band_row("BT60-69",   [t for t in settled if 60 <= (t.get("rec_score") or 0) < 70])
+          + _bt_band_row("BT60未満",  [t for t in settled if (t.get("rec_score") or 0) < 60])
+        )
+
+        # 戦略別集計（BT70以上）
         from collections import defaultdict as _dd8
         by_strat = _dd8(list)
-        for t in settled:
+        for t in bt70_settled:
             by_strat[t.get("strategy","?")].append(t)
         strat_rows = ""
         for s, lst in sorted(by_strat.items(), key=lambda x: -sum(t.get("pnl",0) for t in x[1])):
@@ -3386,9 +3425,9 @@ function toggleTrendBreakdown() {{
                            f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{len(lst)}件</td>'
                            f'</tr>')
 
-        # 明細テーブル（直近25件、決済済みのみ）
+        # 明細テーブル（BT70以上 直近25件）
         detail_rows = ""
-        for t in sorted(settled, key=lambda x: x.get("exit_d_raw") or _date2.min, reverse=True)[:25]:
+        for t in sorted(bt70_settled, key=lambda x: x.get("exit_d_raw") or _date2.min, reverse=True)[:25]:
             sym   = str(t.get("symbol","")).split(".")[0]
             name  = t.get("name","")[:8]
             strat = t.get("strategy","")
@@ -3421,30 +3460,65 @@ function toggleTrendBreakdown() {{
                 f'</tr>'
             )
 
+        bt70_wr_col  = "#4ade80" if bt70_wr >= 55 else ("#facc15" if bt70_wr >= 45 else "#f87171")
+        bt70_pnl_col = "#4ade80" if bt70_pnl >= 0 else "#f87171"
         return f"""<h2 style="margin-top:24px">⑧ 保有中の2回目以降シグナル成績（{len(settled)}件）</h2>
 <p class="footnote">1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」を仮発注した場合の成績。<br>
 計測外だが参考として: 勝率・損益が1回目と同程度なら追加エントリーの根拠になる。</p>
-<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
-    <div style="color:{wr_col};font-size:1.4rem;font-weight:700">{win_rate:.1f}%</div>
-    <div style="color:#94a3b8;font-size:0.78rem">勝率 ({len(wins)}W/{len(losses)}L)</div>
+
+<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-start">
+<div>
+<p style="color:#94a3b8;font-size:0.75rem;margin:0 0 6px">全体（{len(settled)}件）</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:{wr_col};font-size:1.3rem;font-weight:700">{win_rate:.1f}%</div>
+    <div style="color:#94a3b8;font-size:0.72rem">勝率 ({len(wins)}W/{len(losses)}L)</div>
   </div>
-  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
-    <div style="color:#e2e8f0;font-size:1.4rem;font-weight:700">{pf_str}</div>
-    <div style="color:#94a3b8;font-size:0.78rem">PF</div>
+  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:#e2e8f0;font-size:1.3rem;font-weight:700">{pf_str}</div>
+    <div style="color:#94a3b8;font-size:0.72rem">PF</div>
   </div>
-  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
-    <div style="color:{pnl_col};font-size:1.4rem;font-weight:700">{total_pnl:+,.0f}円</div>
-    <div style="color:#94a3b8;font-size:0.78rem">合計損益</div>
-  </div>
-  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
-    <div style="color:#e2e8f0;font-size:1.4rem;font-weight:700">{len(settled)}件</div>
-    <div style="color:#94a3b8;font-size:0.78rem">取引数</div>
+  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:{pnl_col};font-size:1.3rem;font-weight:700">{total_pnl:+,.0f}円</div>
+    <div style="color:#94a3b8;font-size:0.72rem">合計損益</div>
   </div>
 </div>
-<div style="display:flex;gap:32px;flex-wrap:wrap">
+</div>
 <div>
-<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">戦略別</p>
+<p style="color:#4ade80;font-size:0.75rem;margin:0 0 6px">★ BT70以上のみ（{len(bt70_settled)}件）</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:{bt70_wr_col};font-size:1.3rem;font-weight:700">{bt70_wr:.1f}%</div>
+    <div style="color:#94a3b8;font-size:0.72rem">勝率 ({bt70_w}W/{bt70_l}L)</div>
+  </div>
+  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:#e2e8f0;font-size:1.3rem;font-weight:700">{bt70_pf}</div>
+    <div style="color:#94a3b8;font-size:0.72rem">PF</div>
+  </div>
+  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
+    <div style="color:{bt70_pnl_col};font-size:1.3rem;font-weight:700">{bt70_pnl:+,.0f}円</div>
+    <div style="color:#94a3b8;font-size:0.72rem">合計損益</div>
+  </div>
+</div>
+</div>
+</div>
+
+<div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:16px">
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">BT帯別集計</p>
+<table style="border-collapse:collapse">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">BT帯</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">勝率</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">PF</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">損益</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
+  </tr></thead>
+  <tbody>{bt_band_rows}</tbody>
+</table>
+</div>
+<div>
+<p style="color:#4ade80;font-size:0.78rem;margin-bottom:6px">戦略別（BT70以上）</p>
 <table style="border-collapse:collapse">
   <thead><tr>
     <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">戦略</th>
@@ -3456,7 +3530,7 @@ function toggleTrendBreakdown() {{
 </table>
 </div>
 <div style="overflow-x:auto">
-<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">明細（直近25件）</p>
+<p style="color:#4ade80;font-size:0.78rem;margin-bottom:6px">明細（BT70以上 直近25件）</p>
 <table style="border-collapse:collapse;font-size:0.82rem">
   <thead><tr>
     <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">決済日</th>
