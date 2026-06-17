@@ -384,6 +384,8 @@ def main() -> None:
     parser.add_argument("--test-wr",  type=float, default=None)
     parser.add_argument("--folds-pass-required", type=int, default=None,
                         help="合格に必要なfold数 (デフォルト: 2=全fold通過)")
+    parser.add_argument("--debug-symbol", type=str, default=None,
+                        help="指定銘柄の診断 (例: 7203.T). fold別の実際のWR/PFを表示")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true")
     mode_group.add_argument("--conservative", action="store_true")
@@ -409,8 +411,44 @@ def main() -> None:
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    strategies = ([args.strategy] if args.strategy
+    strategies = ([args.strategy] if args.strategy and args.strategy != "ALL"
                   else list(STRATEGY_DEFS.keys()))
+
+    # ── デバッグモード: 指定銘柄の fold 別詳細表示 ────────────────
+    if args.debug_symbol:
+        sym = args.debug_symbol
+        print(f"\n=== 診断モード: {sym} ===")
+        print(f"  合格閾値: TRAIN WR>={TRAIN_MIN_WR}% PF>={TRAIN_MIN_PF}  "
+              f"TEST WR>={TEST_MIN_WR}% PF>={TEST_MIN_PF}")
+        df_all = load_intraday(sym, days=args.data_days, source=args.source)
+        if df_all is None or df_all.empty:
+            print(f"  [ERROR] データなし ({sym})")
+            return
+        print(f"  データ: {len(df_all)}本  "
+              f"{df_all.index[0].date()} 〜 {df_all.index[-1].date()}")
+
+        def _fmt(r: dict | None) -> str:
+            if not r or r.get("trades", 0) == 0:
+                return "データ不足/0取引"
+            pf_str = f"{r['pf']:.2f}" if r["pf"] != float("inf") else "∞"
+            return (f"trades={r['trades']:3d}  WR={r['win_rate']:5.1f}%  "
+                    f"PF={pf_str}  PnL={r['total_pnl']:+,.0f}円")
+
+        for strat in strategies:
+            em, sm, tm = STRATEGY_DEFS[strat]
+            print(f"\n  【{strat}】 em={em} sm={sm} tm={tm}")
+            for fold_name, ts, te, vs, ve in FOLDS:
+                train_r = _run_window(sym, sym, df_all, em, sm, tm, ts, te, strat)
+                test_r  = _run_window(sym, sym, df_all, em, sm, tm, vs, ve, strat)
+                ts_d = (TODAY - timedelta(days=ts)).isoformat()
+                te_d = (TODAY - timedelta(days=te)).isoformat()
+                vs_d = (TODAY - timedelta(days=vs)).isoformat()
+                ve_d = (TODAY - timedelta(days=ve)).isoformat() if ve > 0 else TODAY.isoformat()
+                ok_t = "✓" if _passes_train(train_r) else "✗"
+                ok_v = "✓" if _passes_test(test_r)  else "✗"
+                print(f"    {fold_name} TRAIN{ok_t} [{ts_d}〜{te_d}]: {_fmt(train_r)}")
+                print(f"    {fold_name} TEST {ok_v} [{vs_d}〜{ve_d}]: {_fmt(test_r)}")
+        return
 
     # ユニバース読み込み
     try:
