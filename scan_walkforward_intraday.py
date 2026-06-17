@@ -228,8 +228,8 @@ def _passes_test(r: dict | None) -> bool:
 
 def walkforward_one(
     symbol: str, name: str, strategy_name: str,
-    max_price: float = 0.0, source: str = "local",
-    data_days: int = 400,
+    max_price: float = 0.0, min_price: float = 0.0,
+    source: str = "local", data_days: int = 800,
 ) -> dict | None:
     """
     1銘柄 × 1戦略の Walk-forward を実行。
@@ -250,6 +250,8 @@ def walkforward_one(
     if latest_price <= 0:
         return None
     if max_price > 0 and latest_price > max_price:
+        return None
+    if min_price > 0 and latest_price < min_price:
         return None
 
     folds_passed  = 0
@@ -354,9 +356,11 @@ def main() -> None:
                         help="ユニバースファイル (省略時は自動検出)")
     parser.add_argument("--limit",    type=int, default=0,
                         help="ユニバースを先頭N件に制限 (デバッグ用)")
-    parser.add_argument("--max-price",type=float, default=0.0,
+    parser.add_argument("--max-price", type=float, default=0.0,
                         help="最新終値の上限 (円/株)")
-    parser.add_argument("--budget",   type=float, default=0.0,
+    parser.add_argument("--min-price", type=float, default=0.0,
+                        help="最新終値の下限 (円/株). 低位株除外 (例: 1000)")
+    parser.add_argument("--budget",    type=float, default=0.0,
                         help="総予算 (円). FIXED_QTY=100株換算で --max-price と同義")
     parser.add_argument("--folds-short", action="store_true",
                         help="短縮fold設計 (yfinance 60日制限対応)")
@@ -429,6 +433,8 @@ def main() -> None:
     print(f"  合格必要fold数: {FOLDS_PASS_REQUIRED}/{len(FOLDS)}")
     if effective_max_price > 0:
         print(f"  価格上限  : {effective_max_price:,.0f}円/株")
+    if args.min_price > 0:
+        print(f"  価格下限  : {args.min_price:,.0f}円/株")
     print("=" * 78)
     print("Fold 構造:")
     for name, ts, te, vs, ve in FOLDS:
@@ -455,7 +461,8 @@ def main() -> None:
             futs = {
                 ex.submit(
                     walkforward_one, sym, sym_name, strategy,
-                    effective_max_price, args.source, args.data_days,
+                    effective_max_price, args.min_price,
+                    args.source, args.data_days,
                 ): sym
                 for sym, sym_name in symbols
             }
