@@ -3346,6 +3346,135 @@ function toggleTrendBreakdown() {{
 
     _stop_pattern_html_str = _stop_pattern_html(done_trades)
 
+    # ── ⑧ 保有中の2回目以降シグナル成績分析 ────────────────────────────────
+    def _overlap_analysis_html(overlap_dropped):
+        """保有中に同一銘柄で発生した2回目以降のシグナルの成績分析。"""
+        from datetime import date as _date2
+        settled = [t for t in overlap_dropped
+                   if t.get("reason") not in ("発注中", "保有中", None)
+                   and t.get("pnl") is not None]
+        if len(settled) < 3:
+            return ""
+
+        wins   = [t for t in settled if (t.get("pnl") or 0) > 0]
+        losses = [t for t in settled if (t.get("pnl") or 0) <= 0]
+        total_pnl = sum(t.get("pnl", 0) for t in settled)
+        win_rate  = len(wins) / len(settled) * 100
+        win_pnl   = sum(t.get("pnl", 0) for t in wins)
+        loss_pnl  = abs(sum(t.get("pnl", 0) for t in losses))
+        pf_val    = win_pnl / loss_pnl if loss_pnl > 0 else 9.99
+        pf_str    = f"{pf_val:.2f}" if pf_val < 9.99 else "∞"
+        pnl_col   = "#4ade80" if total_pnl >= 0 else "#f87171"
+        wr_col    = "#4ade80" if win_rate >= 55 else ("#facc15" if win_rate >= 45 else "#f87171")
+
+        # 戦略別集計
+        from collections import defaultdict as _dd8
+        by_strat = _dd8(list)
+        for t in settled:
+            by_strat[t.get("strategy","?")].append(t)
+        strat_rows = ""
+        for s, lst in sorted(by_strat.items(), key=lambda x: -sum(t.get("pnl",0) for t in x[1])):
+            w = sum(1 for t in lst if (t.get("pnl") or 0) > 0)
+            wr = w / len(lst) * 100
+            pnl = sum(t.get("pnl", 0) for t in lst)
+            pc = "#4ade80" if pnl >= 0 else "#f87171"
+            wc = "#4ade80" if wr >= 55 else ("#facc15" if wr >= 45 else "#f87171")
+            strat_rows += (f'<tr>'
+                           f'<td style="text-align:left;color:#e2e8f0;padding:3px 10px">{s}</td>'
+                           f'<td style="text-align:right;color:{wc};padding:3px 10px">{wr:.0f}%</td>'
+                           f'<td style="text-align:right;color:{pc};padding:3px 10px">{pnl:+,.0f}円</td>'
+                           f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{len(lst)}件</td>'
+                           f'</tr>')
+
+        # 明細テーブル（直近25件、決済済みのみ）
+        detail_rows = ""
+        for t in sorted(settled, key=lambda x: x.get("exit_d_raw") or _date2.min, reverse=True)[:25]:
+            sym   = str(t.get("symbol","")).split(".")[0]
+            name  = t.get("name","")[:8]
+            strat = t.get("strategy","")
+            pnl   = t.get("pnl", 0)
+            reas  = t.get("reason","")
+            pc    = "#4ade80" if pnl > 0 else "#f87171"
+            if reas == "目標達成":
+                rc = '<span style="color:#4ade80">目標達成</span>'
+            elif reas == "損切り":
+                rc = '<span style="color:#f87171">損切り</span>'
+            elif reas == "タイムカット":
+                rc = f'<span style="color:{"#4ade80" if pnl > 0 else "#f87171"}">タイムカット</span>'
+            else:
+                rc = f'<span style="color:#94a3b8">{reas}</span>'
+            ep   = t.get("entry_p", 0)
+            xp   = t.get("exit_p", 0)
+            hold = t.get("hold_days", 0)
+            bt   = t.get("rec_score") or 0
+            bt_c = "#4ade80" if bt >= 70 else ("#facc15" if bt >= 60 else "#94a3b8")
+            detail_rows += (
+                f'<tr>'
+                f'<td style="color:#94a3b8;padding:3px 8px">{t.get("exit_dt","")}</td>'
+                f'<td style="text-align:left;padding:3px 8px;color:#e2e8f0">{sym} {name}</td>'
+                f'<td style="padding:3px 8px;color:#94a3b8">{strat}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:{bt_c}">BT:{bt}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{ep:,.0f}→{xp:,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{hold}日</td>'
+                f'<td style="padding:3px 8px">{rc}</td>'
+                f'<td style="text-align:right;padding:3px 8px;color:{pc}">{pnl:+,.0f}円</td>'
+                f'</tr>'
+            )
+
+        return f"""<h2 style="margin-top:24px">⑧ 保有中の2回目以降シグナル成績（{len(settled)}件）</h2>
+<p class="footnote">1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」を仮発注した場合の成績。<br>
+計測外だが参考として: 勝率・損益が1回目と同程度なら追加エントリーの根拠になる。</p>
+<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:{wr_col};font-size:1.4rem;font-weight:700">{win_rate:.1f}%</div>
+    <div style="color:#94a3b8;font-size:0.78rem">勝率 ({len(wins)}W/{len(losses)}L)</div>
+  </div>
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:#e2e8f0;font-size:1.4rem;font-weight:700">{pf_str}</div>
+    <div style="color:#94a3b8;font-size:0.78rem">PF</div>
+  </div>
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:{pnl_col};font-size:1.4rem;font-weight:700">{total_pnl:+,.0f}円</div>
+    <div style="color:#94a3b8;font-size:0.78rem">合計損益</div>
+  </div>
+  <div style="background:#1e293b;padding:10px 20px;border-radius:6px;text-align:center">
+    <div style="color:#e2e8f0;font-size:1.4rem;font-weight:700">{len(settled)}件</div>
+    <div style="color:#94a3b8;font-size:0.78rem">取引数</div>
+  </div>
+</div>
+<div style="display:flex;gap:32px;flex-wrap:wrap">
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">戦略別</p>
+<table style="border-collapse:collapse">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">戦略</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">勝率</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">損益</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
+  </tr></thead>
+  <tbody>{strat_rows}</tbody>
+</table>
+</div>
+<div style="overflow-x:auto">
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">明細（直近25件）</p>
+<table style="border-collapse:collapse;font-size:0.82rem">
+  <thead><tr>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">決済日</th>
+    <th style="text-align:left;color:#94a3b8;font-size:0.75rem;padding:3px 8px">銘柄</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">戦略</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">BT</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">約定→決済</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">保有</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">理由</th>
+    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">損益</th>
+  </tr></thead>
+  <tbody>{detail_rows}</tbody>
+</table>
+</div>
+</div>"""
+
+    _overlap_html = _overlap_analysis_html(_overlap_dropped)
+
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
@@ -3491,6 +3620,8 @@ function toggleTrendBreakdown() {{
 {_speed_html}
 
 {_stop_pattern_html_str}
+
+{_overlap_html}
 
 </div>
 
