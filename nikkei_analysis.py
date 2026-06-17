@@ -3044,6 +3044,117 @@ function toggleTrendBreakdown() {{
 </div>"""
 
     global _DETAIL_TAB_SEQ
+    # ── 目標達成速度分析 ──────────────────────────────────────────
+    def _speed_analysis_html(trades_list):
+        """戦略×con/agg別 目標達成速度テーブルを生成。"""
+        from collections import defaultdict as _dd3
+        target_trades = [t for t in trades_list if t.get("reason") == "目標達成"]
+        if len(target_trades) < 5:
+            return ""
+
+        # 戦略×mode でグループ化
+        by_strat: dict = _dd3(list)
+        for _t in target_trades:
+            _strat = _t.get("strategy", "?")
+            _cfg   = _t.get("cfg_label", "")
+            _mode  = "agg" if "/agg" in _cfg else "con"
+            by_strat[(_strat, _mode)].append(_t.get("hold_days", 0))
+
+        # BT帯別
+        by_bt: dict = _dd3(list)
+        for _t in target_trades:
+            _bt = _t.get("rec_score") or 0
+            _band = "BT80+" if _bt >= 80 else ("BT70-79" if _bt >= 70 else ("BT60-69" if _bt >= 60 else "BT<60"))
+            by_bt[_band].append(_t.get("hold_days", 0))
+
+        def _med(lst):
+            s = sorted(lst)
+            n = len(s)
+            return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+        def _spd_color(m):
+            if m <= 3:   return "#4ade80"
+            if m <= 7:   return "#facc15"
+            return "#f87171"
+
+        # 戦略テーブル（中央値昇順）
+        strat_rows = ""
+        strat_order = ["VOL", "DON", "MOM", "MACD", "A7", "RSI2"]
+        rows_data = []
+        for (_s, _m), days_list in sorted(by_strat.items(),
+                                           key=lambda x: _med(x[1])):
+            med = _med(days_list)
+            avg = sum(days_list) / len(days_list)
+            rows_data.append((_s, _m, med, avg, len(days_list)))
+
+        rows_data.sort(key=lambda x: (x[2], x[3]))
+        for (_s, _m, med, avg, cnt) in rows_data:
+            col = _spd_color(med)
+            mode_badge = (f'<span style="background:#334155;color:#94a3b8;font-size:0.7rem;'
+                          f'padding:1px 5px;border-radius:3px">{_m}</span>')
+            strat_rows += (f'<tr>'
+                           f'<td style="text-align:left;font-weight:700;color:#e2e8f0">{_s} {mode_badge}</td>'
+                           f'<td style="text-align:right;color:{col};font-weight:700">{med:.0f}日</td>'
+                           f'<td style="text-align:right;color:#94a3b8">{avg:.1f}日</td>'
+                           f'<td style="text-align:right;color:#94a3b8">{cnt}件</td>'
+                           f'</tr>')
+
+        # BT帯テーブル
+        bt_rows = ""
+        for band in ["BT80+", "BT70-79", "BT60-69", "BT<60"]:
+            if band not in by_bt:
+                continue
+            dl = by_bt[band]
+            med = _med(dl)
+            avg = sum(dl) / len(dl)
+            col = _spd_color(med)
+            bt_rows += (f'<tr>'
+                        f'<td style="text-align:left;font-weight:700;color:#e2e8f0">{band}</td>'
+                        f'<td style="text-align:right;color:{col};font-weight:700">{med:.0f}日</td>'
+                        f'<td style="text-align:right;color:#94a3b8">{avg:.1f}日</td>'
+                        f'<td style="text-align:right;color:#94a3b8">{len(dl)}件</td>'
+                        f'</tr>')
+
+        # 速達ヒント（中央値3日以下のコンボ）
+        fast_combos = [(s, m) for (s, m, med, avg, cnt) in rows_data if med <= 3 and cnt >= 3]
+        hint = ""
+        if fast_combos:
+            combo_str = "、".join(f"{s}/{m}" for s, m in fast_combos[:6])
+            hint = (f'<p style="margin:8px 0 0;color:#4ade80;font-size:0.82rem">'
+                    f'⚡ 中央値3日以内の組合せ: <strong>{combo_str}</strong>（複数シグナルがある場合に優先）</p>')
+
+        return f"""<h2 style="margin-top:24px">⑥ 目標達成速度分析（目標達成トレードのみ・{len(target_trades)}件）</h2>
+<p class="footnote">複数シグナルから選ぶ際の参考指標。中央値が短い戦略・設定を優先すると回転率が上がる。</p>
+{hint}
+<div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:12px">
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">戦略×設定別（中央値昇順）</p>
+<table style="border-collapse:collapse">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">戦略/設定</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">中央値</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">平均</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
+  </tr></thead>
+  <tbody>{strat_rows}</tbody>
+</table>
+</div>
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">BTスコア帯別</p>
+<table style="border-collapse:collapse">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">BT帯</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">中央値</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">平均</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
+  </tr></thead>
+  <tbody>{bt_rows}</tbody>
+</table>
+</div>
+</div>"""
+
+    _speed_html = _speed_analysis_html(done_trades)
+
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
@@ -3185,6 +3296,8 @@ function toggleTrendBreakdown() {{
   </tr></thead>
   <tbody>{sym6069_rows}</tbody>
 </table>
+
+{_speed_html}
 
 </div>
 
