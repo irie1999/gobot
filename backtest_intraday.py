@@ -129,6 +129,7 @@ def _simulate_day(
     atr: float,
     stop_atr_mult: float,
     target_atr_mult: float,
+    target_price_override: float | None = None,
 ) -> dict | None:
     """
     1日分の日中バックテストシミュレーション。
@@ -210,8 +211,11 @@ def _simulate_day(
         state    = "in_pos"
 
         # stop/target をエントリー実価格から計算 (ギャップアップ対応)
-        stop_p   = entry_p - atr * stop_atr_mult
-        target_p = entry_p + atr * target_atr_mult
+        stop_p = entry_p - atr * stop_atr_mult
+        if target_price_override is not None and target_price_override > entry_p:
+            target_p = target_price_override
+        else:
+            target_p = entry_p + atr * target_atr_mult
 
         # 約定と同バーで決済チェック
         hit_stp = lo <= stop_p
@@ -317,6 +321,8 @@ def run_intraday_backtest(
     strategy_name:
       PREV_CLOSE_BREAK : 前日終値ブレイク (毎日エントリー)
       GAP_UP           : ギャップアップ日のみ (始値 > 前日終値 + ATR×em)
+      GAP_DOWN         : ギャップダウン日限定 mean-reversion (始値 < 前日終値 - ATR×em)
+                         エントリー=始値, 目標=前日終値 (ギャップフィル), 損切り=始値-ATR×sm
       ORB30            : Opening Range Breakout (最初の30分高値ブレイク)
       PREV_HIGH_BREAK  : 前日高値ブレイク (PREV_CLOSE_BREAKより高い閾値)
 
@@ -352,6 +358,8 @@ def run_intraday_backtest(
             continue
 
         # ── 戦略別エントリー条件 ──────────────────────────────
+        target_override: float | None = None
+
         if strategy_name == "PREV_CLOSE_BREAK":
             order_p = prev_close + atr * entry_atr_mult
             sim_df  = day_df
@@ -364,6 +372,17 @@ def run_intraday_backtest(
             # order_p = prev_close にすることで 1本目から即エントリー
             order_p = prev_close
             sim_df  = day_df
+
+        elif strategy_name == "GAP_DOWN":
+            # 始値が前日終値 - ATR×em を下回るギャップダウン日のみ (mean reversion)
+            day_open = float(day_df.iloc[0]["open"])
+            if day_open >= prev_close - atr * entry_atr_mult:
+                continue
+            # order_p = day_open にすることで 1本目から即エントリー
+            order_p = day_open
+            sim_df  = day_df
+            # 目標 = 前日終値 (ギャップフィル)
+            target_override = prev_close
 
         elif strategy_name == "ORB30":
             # 最初の30分 (6本 × 5min) の高値をブレイクしたらエントリー
@@ -385,7 +404,8 @@ def run_intraday_backtest(
             order_p = prev_close + atr * entry_atr_mult
             sim_df  = day_df
 
-        trade = _simulate_day(sim_df, order_p, atr, stop_atr_mult, target_atr_mult)
+        trade = _simulate_day(sim_df, order_p, atr, stop_atr_mult, target_atr_mult,
+                              target_price_override=target_override)
         if trade is None:
             continue
 
@@ -461,7 +481,7 @@ if __name__ == "__main__":
     parser.add_argument("--sm",       type=float, default=1.5,   help="損切り倍率 (stop_atr_mult)")
     parser.add_argument("--tm",       type=float, default=3.0,   help="目標倍率  (target_atr_mult)")
     parser.add_argument("--strategy", default="PREV_CLOSE_BREAK",
-                        choices=["PREV_CLOSE_BREAK", "GAP_UP", "ORB30", "PREV_HIGH_BREAK"],
+                        choices=["PREV_CLOSE_BREAK", "GAP_UP", "GAP_DOWN", "ORB30", "PREV_HIGH_BREAK"],
                         help="戦略名")
     parser.add_argument("--source", default="auto",
                         choices=["auto", "local", "yfinance"],

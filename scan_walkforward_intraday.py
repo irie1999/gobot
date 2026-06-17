@@ -64,7 +64,7 @@ from backtest_intraday import (
     run_intraday_backtest,
     BACKTEST_DAYS,
 )
-from daytrade_data import load_intraday, DATA_DIR
+from daytrade_data import load_intraday, DATA_DIR, quarantine_symbols
 from risk_metrics import enrich_backtest_result
 
 JST   = timezone(timedelta(hours=9))
@@ -112,12 +112,14 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple[float, float, float]] = {
     "PREV_CLOSE_BREAK": (0.0, 1.5, 3.0),
     "GAP_UP":           (0.0, 1.5, 3.0),  # ギャップアップ日限定 (選別的)
+    "GAP_DOWN":         (0.0, 1.5, 3.0),  # ギャップダウン日限定 mean-reversion (目標=ギャップフィル)
     "ORB30":            (0.0, 1.5, 3.0),  # 30分Opening Range Breakout
     "PREV_HIGH_BREAK":  (0.0, 1.5, 3.0),  # 前日高値ブレイク
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple[float, float, float]] = {
     "PREV_CLOSE_BREAK": (0.0, 1.5, 2.0),
     "GAP_UP":           (0.0, 1.5, 2.0),
+    "GAP_DOWN":         (0.0, 1.5, 2.0),
     "ORB30":            (0.0, 1.5, 2.0),
     "PREV_HIGH_BREAK":  (0.0, 1.5, 2.0),
 }
@@ -366,6 +368,8 @@ def main() -> None:
                         help="表示する上位N (CSVは全件保存)")
     parser.add_argument("--symbols",  type=str, default=None,
                         help="ユニバースファイル (省略時は自動検出)")
+    parser.add_argument("--symbols-from-data", action="store_true",
+                        help="ユニバースをローカルデータ (quarantine_5m + minute_5m) から自動生成")
     parser.add_argument("--limit",    type=int, default=0,
                         help="ユニバースを先頭N件に制限 (デバッグ用)")
     parser.add_argument("--max-price", type=float, default=0.0,
@@ -451,11 +455,22 @@ def main() -> None:
         return
 
     # ユニバース読み込み
-    try:
-        symbols, universe_name = load_universe(args.symbols)
-    except RuntimeError as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        sys.exit(1)
+    if args.symbols_from_data:
+        from daytrade_data import available_local_symbols
+        raw_codes = available_local_symbols()  # JQuants形式 (例: 72030)
+        # quarantine_symbols() で yfinance 形式に変換済みの分 + available_local のマージ
+        q_syms = set(quarantine_symbols())
+        a_syms = set(f"{c[:4]}.T" for c in raw_codes if len(c) == 5 and c.isdigit())
+        all_syms = sorted(q_syms | a_syms)
+        symbols = [(s, s) for s in all_syms]
+        universe_name = "local_data (quarantine_5m + minute_5m)"
+        print(f"[INFO] --symbols-from-data: {len(symbols)}銘柄 (ローカルデータから自動生成)")
+    else:
+        try:
+            symbols, universe_name = load_universe(args.symbols)
+        except RuntimeError as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            sys.exit(1)
 
     if args.limit > 0:
         symbols = symbols[:args.limit]

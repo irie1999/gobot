@@ -55,6 +55,21 @@ def yf_to_jquants(yf_code: str) -> str:
     return code
 
 
+def jq_to_yf(jq_code: str) -> str:
+    """72030 → 7203.T"""
+    code = str(jq_code).strip()
+    if len(code) == 5 and code.isdigit():
+        return code[:4] + ".T"
+    return code
+
+
+def quarantine_symbols() -> list[str]:
+    """quarantine_5m フォルダに存在する銘柄コード一覧 (yfinance形式)。"""
+    if not QUARANTINE_DIR.exists():
+        return []
+    return sorted(jq_to_yf(f.stem) for f in QUARANTINE_DIR.glob("*.pkl"))
+
+
 # ─────────────────────────────────────────────────────────────
 # 正規化: J-Quants / yfinance → 共通形式
 # ─────────────────────────────────────────────────────────────
