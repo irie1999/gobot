@@ -3048,7 +3048,11 @@ function toggleTrendBreakdown() {{
     def _speed_analysis_html(trades_list):
         """戦略×con/agg別 目標達成速度テーブルを生成。"""
         from collections import defaultdict as _dd3
-        target_trades = [t for t in trades_list if t.get("reason") == "目標達成"]
+        target_trades = [t for t in trades_list
+                         if t.get("reason") == "目標達成"
+                         or (t.get("reason") == "タイムカット" and (t.get("pnl") or 0) > 0)]
+        n_tgt  = sum(1 for t in target_trades if t.get("reason") == "目標達成")
+        n_tcut = len(target_trades) - n_tgt
         if len(target_trades) < 5:
             return ""
 
@@ -3123,7 +3127,7 @@ function toggleTrendBreakdown() {{
             hint = (f'<p style="margin:8px 0 0;color:#4ade80;font-size:0.82rem">'
                     f'⚡ 中央値3日以内の組合せ: <strong>{combo_str}</strong>（複数シグナルがある場合に優先）</p>')
 
-        return f"""<h2 style="margin-top:24px">⑥ 目標達成速度分析（目標達成トレードのみ・{len(target_trades)}件）</h2>
+        return f"""<h2 style="margin-top:24px">⑥ 目標達成速度分析（目標達成 {n_tgt}件 ＋ プラスタイムカット {n_tcut}件 = {len(target_trades)}件）</h2>
 <p class="footnote">複数シグナルから選ぶ際の参考指標。中央値が短い戦略・設定を優先すると回転率が上がる。</p>
 {hint}
 <div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:12px">
