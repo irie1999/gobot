@@ -14,8 +14,8 @@ backtest_intraday.py  ―  デイトレ バックテストエンジン
   - シグナル: 毎営業日 (バックテスト期間の全取引日)
   - エントリー: 当日の5分足 high >= order_p で逆指値発動
   - order_p  = prev_close + atr × em  (em=0.0 → prev_close そのまま)
-  - stop_p   = order_p  - atr × sm
-  - target_p = order_p  + atr × tm
+  - stop_p   = entry_p  - atr × sm  (エントリー実価格基準)
+  - target_p = entry_p  + atr × tm  (エントリー実価格基準)
   - 強制決済: 15:25 の最初のバー終値
 
 【使い方 (ライブラリとして)】
@@ -125,13 +125,15 @@ def _get_daily_groups(
 def _simulate_day(
     day_df: pd.DataFrame,
     order_p: float,
-    stop_p: float,
-    target_p: float,
+    atr: float,
+    stop_atr_mult: float,
+    target_atr_mult: float,
 ) -> dict | None:
     """
     1日分の日中バックテストシミュレーション。
 
     エントリー条件: high >= order_p (逆指値買い)
+    stop/target はエントリー実価格から計算 (ギャップアップ対応)。
     決済優先順位:
       1. 損切り/目標が同バーで両方ヒット → 損切り優先 (保守的)
       2. 目標達成 → target_p で決済
@@ -142,6 +144,8 @@ def _simulate_day(
     """
     state    = "idle"
     entry_p  = 0.0
+    stop_p   = 0.0
+    target_p = 0.0
     entry_dt: pd.Timestamp | None = None
 
     bars = list(day_df.itertuples())
@@ -203,6 +207,10 @@ def _simulate_day(
         entry_p  = ep
         entry_dt = ts
         state    = "in_pos"
+
+        # stop/target をエントリー実価格から計算 (ギャップアップ対応)
+        stop_p   = entry_p - atr * stop_atr_mult
+        target_p = entry_p + atr * target_atr_mult
 
         # 約定と同バーで決済チェック
         hit_stp = lo <= stop_p
@@ -346,21 +354,17 @@ def run_intraday_backtest(
         if prev_close < MIN_PRICE or prev_close > MAX_PRICE:
             continue
 
-        order_p  = prev_close + atr * entry_atr_mult
-        stop_p   = order_p   - atr * stop_atr_mult
-        target_p = order_p   + atr * target_atr_mult
+        order_p = prev_close + atr * entry_atr_mult
 
-        if stop_p <= 0 or target_p <= order_p:
-            continue
-
-        trade = _simulate_day(day_df, order_p, stop_p, target_p)
+        trade = _simulate_day(day_df, order_p, atr, stop_atr_mult, target_atr_mult)
         if trade is None:
             continue
 
+        ep = trade["entry_p"]
         trade["signal_dt"]     = pd.Timestamp(d)
         trade["prev_close"]    = prev_close
         trade["atr_5m"]        = round(atr, 2)
-        trade["stop_loss_pct"] = round((order_p - stop_p) / order_p * 100, 2)
+        trade["stop_loss_pct"] = round(atr * stop_atr_mult / ep * 100, 2) if ep > 0 else 0.0
         trades.append(trade)
 
     period_results = {d: _period_stats(trades, d) for d in PERIODS}
