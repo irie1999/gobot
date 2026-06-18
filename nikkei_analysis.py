@@ -1764,6 +1764,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right">{st2['n']}</td>
   <td style="text-align:right;color:{wrc2}">{wr2:.1f}%</td>
   <td style="text-align:right;color:{pfc2}">{pf2_s}</td>
+  <td style="text-align:right;color:#4ade80">+{st2['gp']:,.0f}円</td>
+  <td style="text-align:right;color:#f87171">-{st2['gl']:,.0f}円</td>
   <td style="text-align:right;color:{'#4ade80' if st2['pnl']>=0 else '#f87171'}">{st2['pnl']:+,.0f}円</td>
   <td style="text-align:right;color:{'#4ade80' if avg2>=0 else '#f87171'}">{avg2:+,.0f}円</td>
 </tr>"""
@@ -1774,7 +1776,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 <h2>スコア {lo_range}〜{hi_range} の詳細（◀ = 指定スコア）</h2>
 <table style="max-width:600px">
   <thead><tr>
-    <th>スコア</th><th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益</th>
+    <th>スコア</th><th>取引数</th><th>勝率</th><th>PF</th><th style="color:#4ade80">利益</th><th style="color:#f87171">損失</th><th>合計損益</th><th>平均損益</th>
   </tr></thead>
   <tbody>{adj_rows}</tbody>
 </table>
@@ -1869,7 +1871,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             ( 0,  30, "0-29",   "#94a3b8"),
         ]
         band_rows = ""
-        total_n = total_w = total_pnl = 0
+        total_n = total_w = total_pnl = total_gp = total_gl = 0
         for lo, hi, lbl_s, col in _score_buckets:
             _bseen: set = set()
             bucket = []
@@ -1897,10 +1899,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right">{st['n']}</td>
   <td style="text-align:right;color:{wrc};font-weight:700">{wr_v:.1f}%</td>
   <td style="text-align:right;color:{pfc}">{pf_s}</td>
+  <td style="text-align:right;color:#4ade80">+{st['gp']:,.0f}円</td>
+  <td style="text-align:right;color:#f87171">-{st['gl']:,.0f}円</td>
   <td style="text-align:right;color:{'#4ade80' if st['pnl']>=0 else '#f87171'}">{st['pnl']:+,.0f}円</td>
   <td style="text-align:right;color:{'#4ade80' if avg>=0 else '#f87171'}">{avg:+,.0f}円</td>
 </tr>"""
             total_n += st["n"]; total_w += st["wins"]; total_pnl += st["pnl"]
+            total_gp += st["gp"]; total_gl += st["gl"]
 
         if band_rows:
             total_wr = total_w / total_n * 100 if total_n else 0
@@ -1913,7 +1918,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 <table style="max-width:620px">
   <thead><tr>
     <th style="text-align:left">スコア帯</th>
-    <th>取引数</th><th>勝率</th><th>PF</th><th>合計損益</th><th>平均損益/取引</th>
+    <th>取引数</th><th>勝率</th><th>PF</th><th style="color:#4ade80">利益</th><th style="color:#f87171">損失</th><th>合計損益</th><th>平均損益/取引</th>
   </tr></thead>
   <tbody>{band_rows}</tbody>
   <tfoot><tr style="border-top:2px solid #334155;font-weight:700">
@@ -1921,6 +1926,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <td style="text-align:right">{total_n}</td>
     <td style="text-align:right;color:{'#4ade80' if total_wr>=55 else '#fbbf24'}">{total_wr:.1f}%</td>
     <td></td>
+    <td style="text-align:right;color:#4ade80">+{total_gp:,.0f}円</td>
+    <td style="text-align:right;color:#f87171">-{total_gl:,.0f}円</td>
     <td style="text-align:right;color:{'#4ade80' if total_pnl>=0 else '#f87171'}">{total_pnl:+,.0f}円</td>
     <td></td>
   </tr></tfoot>
@@ -3019,6 +3026,8 @@ function toggleTrendBreakdown() {{
             done_m   = [t for t in trades_m if t.get("reason") not in ("発注中", "保有中")]
             wins_m   = sum(1 for t in done_m if t["pnl"] > 0)
             wr_m     = wins_m / len(done_m) * 100 if done_m else 0
+            gp_m     = sum(t["pnl"] for t in done_m if t["pnl"] > 0)
+            gl_m     = abs(sum(t["pnl"] for t in done_m if t["pnl"] <= 0))
             pnl_m    = sum(t["pnl"] for t in done_m)
             pnl_col  = "#4ade80" if pnl_m >= 0 else "#f87171"
             bar_w    = min(abs(pnl_m) / 300000 * 100, 100)  # 30万円で100%
@@ -3028,6 +3037,8 @@ function toggleTrendBreakdown() {{
                      f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}</td>'
                      f'<td style="text-align:right;color:#94a3b8">{len(done_m)}件</td>'
                      f'<td style="text-align:right;color:#94a3b8">{wr_m:.0f}%</td>'
+                     f'<td style="text-align:right;color:#4ade80">+{gp_m:,.0f}円</td>'
+                     f'<td style="text-align:right;color:#f87171">-{gl_m:,.0f}円</td>'
                      f'<td style="width:160px;position:relative;padding:4px 8px">'
                      f'<div style="position:absolute;top:4px;bottom:4px;left:{"50%" if pnl_m>=0 else f"calc(50% - {bar_w/2:.1f}%)"};'
                      f'width:{bar_w/2:.1f}%;background:{bar_col};border-radius:2px"></div>'
@@ -3040,7 +3051,9 @@ function toggleTrendBreakdown() {{
     <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 8px">月</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">件数</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">勝率</th>
-    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;text-align:center">損益</th>
+    <th style="color:#4ade80;font-size:0.78rem;padding:3px 8px">利益</th>
+    <th style="color:#f87171;font-size:0.78rem;padding:3px 8px">損失</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;text-align:center">損益合計</th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
@@ -3374,7 +3387,7 @@ function toggleTrendBreakdown() {{
         bt70_settled = [t for t in settled if (t.get("rec_score") or 0) >= 70]
         def _band_kpi(lst):
             if not lst:
-                return 0.0, "∞", 0, 0, 0
+                return 0.0, "∞", 0, 0, 0, 0, 0
             w = [t for t in lst if (t.get("pnl") or 0) > 0]
             l = [t for t in lst if (t.get("pnl") or 0) <= 0]
             wr = len(w) / len(lst) * 100
@@ -3382,15 +3395,15 @@ function toggleTrendBreakdown() {{
             gl = abs(sum(t.get("pnl", 0) for t in l))
             pf = gp / gl if gl > 0 else 9.99
             pf_s = f"{pf:.2f}" if pf < 9.99 else "∞"
-            return wr, pf_s, sum(t.get("pnl", 0) for t in lst), len(w), len(l)
+            return wr, pf_s, gp - gl, len(w), len(l), gp, gl
 
-        bt70_wr, bt70_pf, bt70_pnl, bt70_w, bt70_l = _band_kpi(bt70_settled)
+        bt70_wr, bt70_pf, bt70_pnl, bt70_w, bt70_l, _bt70_gp, _bt70_gl = _band_kpi(bt70_settled)
 
         # BT帯別集計
         def _bt_band_row(label, lst, hl_color=None):
             if not lst:
-                return f'<tr><td style="color:#94a3b8;padding:3px 10px">{label}</td><td colspan="4" style="color:#475569;padding:3px 10px">-</td></tr>'
-            wr, pf_s, pnl, w, l = _band_kpi(lst)
+                return f'<tr><td style="color:#94a3b8;padding:3px 10px">{label}</td><td colspan="6" style="color:#475569;padding:3px 10px">-</td></tr>'
+            wr, pf_s, pnl, w, l, gp, gl = _band_kpi(lst)
             wc  = "#4ade80" if wr >= 60 else ("#facc15" if wr >= 50 else "#f87171")
             pc  = "#4ade80" if pnl >= 0 else "#f87171"
             nm  = hl_color or "#e2e8f0"
@@ -3398,6 +3411,8 @@ function toggleTrendBreakdown() {{
                     f'<td style="color:{nm};padding:3px 10px;font-weight:{"700" if hl_color else "400"}">{label}</td>'
                     f'<td style="text-align:right;color:{wc};padding:3px 10px">{wr:.0f}%</td>'
                     f'<td style="text-align:right;color:#e2e8f0;padding:3px 10px">{pf_s}</td>'
+                    f'<td style="text-align:right;color:#4ade80;padding:3px 10px">+{gp:,.0f}円</td>'
+                    f'<td style="text-align:right;color:#f87171;padding:3px 10px">-{gl:,.0f}円</td>'
                     f'<td style="text-align:right;color:{pc};padding:3px 10px">{pnl:+,.0f}円</td>'
                     f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{w+l}件</td>'
                     f'</tr>')
@@ -3418,12 +3433,16 @@ function toggleTrendBreakdown() {{
         for s, lst in sorted(by_strat.items(), key=lambda x: -sum(t.get("pnl",0) for t in x[1])):
             w = sum(1 for t in lst if (t.get("pnl") or 0) > 0)
             wr = w / len(lst) * 100
-            pnl = sum(t.get("pnl", 0) for t in lst)
+            gp = sum(t.get("pnl", 0) for t in lst if (t.get("pnl") or 0) > 0)
+            gl = abs(sum(t.get("pnl", 0) for t in lst if (t.get("pnl") or 0) <= 0))
+            pnl = gp - gl
             pc = "#4ade80" if pnl >= 0 else "#f87171"
             wc = "#4ade80" if wr >= 55 else ("#facc15" if wr >= 45 else "#f87171")
             strat_rows += (f'<tr>'
                            f'<td style="text-align:left;color:#e2e8f0;padding:3px 10px">{s}</td>'
                            f'<td style="text-align:right;color:{wc};padding:3px 10px">{wr:.0f}%</td>'
+                           f'<td style="text-align:right;color:#4ade80;padding:3px 10px">+{gp:,.0f}円</td>'
+                           f'<td style="text-align:right;color:#f87171;padding:3px 10px">-{gl:,.0f}円</td>'
                            f'<td style="text-align:right;color:{pc};padding:3px 10px">{pnl:+,.0f}円</td>'
                            f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{len(lst)}件</td>'
                            f'</tr>')
@@ -3514,6 +3533,8 @@ function toggleTrendBreakdown() {{
     <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">BT帯</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">勝率</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">PF</th>
+    <th style="color:#4ade80;font-size:0.78rem;padding:3px 10px">利益</th>
+    <th style="color:#f87171;font-size:0.78rem;padding:3px 10px">損失</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">損益</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
   </tr></thead>
@@ -3526,6 +3547,8 @@ function toggleTrendBreakdown() {{
   <thead><tr>
     <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 10px">戦略</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">勝率</th>
+    <th style="color:#4ade80;font-size:0.78rem;padding:3px 10px">利益</th>
+    <th style="color:#f87171;font-size:0.78rem;padding:3px 10px">損失</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">損益</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 10px">件数</th>
   </tr></thead>
