@@ -95,42 +95,25 @@ if _args.both and not _args.short:
         print("[ERROR] ロング/ショートHTMLの生成に失敗しました")
         sys.exit(1)
 
-    # ── エントリー日別グリッドから最低・最高日次P&Lを抽出 ──────────────────────
-    import re as _re
-    def _extract_daily_pnl_range(html_path: Path) -> tuple[int | None, int | None]:
-        """エントリー日別ボタンの edate-pnl 値を全て抽出してmin/maxを返す。"""
-        try:
-            _txt = html_path.read_text(encoding="utf-8")
-            # <span class="edate-pnl" style="...">+141,868</span> を抽出
-            _matches = _re.findall(r'class="edate-pnl"[^>]*>([\+\-][\d,]+)<', _txt)
-            if not _matches:
-                return None, None
-            _vals = [int(m.replace(",", "")) for m in _matches]
-            return min(_vals), max(_vals)
-        except Exception:
-            return None, None
-
-    _s_min, _s_max = _extract_daily_pnl_range(_sf)
-    _l_min, _l_max = _extract_daily_pnl_range(_lf)
-
-    def _pnl_badge(val: int | None, suffix: str = "") -> str:
-        if val is None:
-            return ""
-        col = "#4ade80" if val >= 0 else "#f87171"
-        return f'<span style="color:{col};font-size:0.72rem;font-weight:700">{val:+,}{suffix}</span>'
-
-    _short_range_html = ""
-    if _s_min is not None and _s_max is not None:
-        _short_range_html = (
-            f' <span style="font-size:0.68rem;color:#94a3b8;margin-left:6px">'
-            f'最低 {_pnl_badge(_s_min)} / 最高 {_pnl_badge(_s_max)}'
-            f'</span>'
-        )
-    _long_range_html = ""
-    if _l_min is not None and _l_max is not None:
-        _long_range_html = (
-            f' <span style="font-size:0.68rem;color:#94a3b8;margin-left:6px">'
-            f'最低 {_pnl_badge(_l_min)} / 最高 {_pnl_badge(_l_max)}'
+    # ── 株価フィルター範囲を表示バッジとして用意 ──────────────────────────────
+    _min_p = int(_args.min_price) if _args.min_price and _args.min_price > 0 else None
+    _max_p = int(_args.max_price) if _args.max_price and _args.max_price < 100000 else None
+    _price_range_parts = []
+    if _min_p:
+        _price_range_parts.append(f"{_min_p:,}円〜")
+    if _max_p:
+        if _price_range_parts:
+            _price_range_parts.append(f"{_max_p:,}円")
+        else:
+            _price_range_parts.append(f"〜{_max_p:,}円")
+    _price_badge = ""
+    if _price_range_parts:
+        _price_label = "".join(_price_range_parts)
+        _price_badge = (
+            f' <span style="font-size:0.68rem;font-weight:600;color:#fbbf24;'
+            f'background:#292418;border:1px solid #854d0e;border-radius:4px;'
+            f'padding:1px 6px;margin-left:6px;vertical-align:middle">'
+            f'株価 {_price_label}'
             f'</span>'
         )
 
@@ -142,7 +125,7 @@ if _args.both and not _args.short:
 <title>ホールドアウト全設定 ロング+ショート統合 {_bd}</title>
 <style>
 body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
-.ls-nav{{display:flex;gap:0;border-bottom:2px solid #1e293b;background:#0f172a;
+.ls-nav{{display:flex;gap:0;align-items:flex-end;border-bottom:2px solid #1e293b;background:#0f172a;
   position:sticky;top:0;z-index:9999;padding:8px 16px 0}}
 .ls-btn{{padding:11px 28px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
   color:#94a3b8;cursor:pointer;font-size:1.05rem;font-weight:600;
@@ -156,8 +139,8 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 </head>
 <body>
 <div class="ls-nav">
-  <button class="ls-btn lb active" onclick="switchLs('long')">📈 ロング{_long_range_html}</button>
-  <button class="ls-btn sb" onclick="switchLs('short')">📉 ショート{_short_range_html}</button>
+  <button class="ls-btn lb active" onclick="switchLs('long')">📈 ロング</button>
+  <button class="ls-btn sb" onclick="switchLs('short')">📉 ショート</button>{_price_badge}
 </div>
 <iframe id="ls-long"  class="ls-frame active" src="{_lf.name}"></iframe>
 <iframe id="ls-short" class="ls-frame"        src="{_sf.name}"></iframe>
