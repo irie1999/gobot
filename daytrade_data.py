@@ -141,7 +141,60 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_index()
 
 
-def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
+def inspect_pkl(symbol: str) -> None:
+    """
+    quarantine_5m / minute_5m の pkl ファイルを直接検査してデバッグ情報を表示。
+    データが読み込めない原因を特定するためのユーティリティ。
+    """
+    import pickle as _pickle
+
+    jq_code = yf_to_jquants(symbol)
+
+    for label, dir_path in [("minute_5m", DATA_DIR), ("quarantine_5m", QUARANTINE_DIR)]:
+        pkl_path = dir_path / f"{jq_code}.pkl"
+        print(f"\n  [{label}] {pkl_path}")
+        if not pkl_path.exists():
+            print(f"    ファイルなし")
+            continue
+
+        try:
+            raw = _pickle.loads(pkl_path.read_bytes())
+        except Exception as e:
+            print(f"    読み込み失敗: {e}")
+            continue
+
+        if not isinstance(raw, pd.DataFrame):
+            print(f"    DataFrame でない: type={type(raw)}")
+            continue
+
+        print(f"    shape: {raw.shape}")
+        print(f"    index type: {type(raw.index).__name__}")
+        print(f"    columns: {list(raw.columns)[:8]}")
+        if len(raw) >= 2:
+            print(f"    index[0]:  {raw.index[0]}")
+            print(f"    index[-1]: {raw.index[-1]}")
+            avg_gap = (raw.index[-1] - raw.index[0]).total_seconds() / (len(raw) - 1)
+            print(f"    avg bar gap: {avg_gap:.0f}s ({avg_gap/60:.1f}min)")
+        print(f"    head(1):\n{raw.head(1).to_string()}")
+
+        # normalize 試行
+        df_norm = normalize_minute_df(raw)
+        if df_norm.empty:
+            print(f"    ★ normalize_minute_df → EMPTY (読み込み失敗!)")
+            # 原因調査
+            has_dt = any(c in raw.columns for c in ("DateTime","Date","datetime"))
+            has_idx_dt = isinstance(raw.index, pd.DatetimeIndex)
+            has_ohlcv_adj = all(c in raw.columns for c in ("AdjustmentOpen","AdjustmentClose"))
+            has_ohlcv_cap = all(c in raw.columns for c in ("Open","Close"))
+            has_ohlcv_low = all(c in raw.columns for c in ("open","close"))
+            print(f"    DateTime列: {has_dt}  DatetimeIndex: {has_idx_dt}")
+            print(f"    AdjustmentOHLC: {has_ohlcv_adj}  OHLC(大文字): {has_ohlcv_cap}  ohlc(小文字): {has_ohlcv_low}")
+        else:
+            print(f"    ✓ normalize_minute_df → {len(df_norm)}行 "
+                  f"{df_norm.index[0]} 〜 {df_norm.index[-1]}")
+
+
+
     """1分足 → 5分足。既に5分足なら不要。"""
     if df.empty:
         return df
@@ -404,7 +457,18 @@ if __name__ == "__main__":
                         default="auto")
     parser.add_argument("--list-local", action="store_true",
                         help="ローカルに保存済みの銘柄一覧を表示")
+    parser.add_argument("--inspect", action="store_true",
+                        help="pkl ファイルを直接検査 (データ読み込み問題の診断)")
     args = parser.parse_args()
+
+    if args.inspect:
+        targets = args.symbols if args.symbols else quarantine_symbols()[:3]
+        for sym in targets:
+            print(f"\n{'='*60}")
+            print(f"  検査: {sym}")
+            print(f"{'='*60}")
+            inspect_pkl(sym)
+        sys.exit(0)
 
     if args.list_local:
         codes = available_local_symbols()
