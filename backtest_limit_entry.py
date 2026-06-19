@@ -631,7 +631,7 @@ def run_limit_backtest(
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
                         "qty": calc_qty(lp, sp),
-                        "expire_idx":   i + ENTRY_EXPIRE,
+                        "expire_idx":   i + ENTRY_EXPIRE + entry_delay,
                         "fill_start_idx": i + entry_delay,
                         "signal_idx":   i,
                         "signal_dt":    df.index[i - 1],
