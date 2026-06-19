@@ -2416,22 +2416,22 @@ function toggleTrendBreakdown() {{
     cfg_pf_all  = cfg_gp_all / cfg_gl_all if cfg_gl_all > 0 else (float("inf") if cfg_gp_all > 0 else 0.0)
     cfg_pf_all_s = "∞" if cfg_pf_all == float("inf") else f"{cfg_pf_all:.2f}"
     cfg_lpc_all  = "profit" if cfg_pnl_all >= 0 else "loss"
-    _all_cfg_loss = [t for t in _all_cfg if t["pnl"] < 0]
-    cfg_avg_hold      = sum(t.get("hold_days", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
-    cfg_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _all_cfg_loss) / len(_all_cfg_loss)
-                         if _all_cfg_loss else 0.0)
-    cfg_avg_delay     = sum(t.get("days_to_fill", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
+    _all_cfg_win = [t for t in _all_cfg if t["pnl"] > 0]
+    cfg_avg_hold     = sum(t.get("hold_days", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
+    cfg_avg_neg_days = (sum(t.get("days_neg", 0) for t in _all_cfg_win) / len(_all_cfg_win)
+                        if _all_cfg_win else 0.0)
+    cfg_avg_delay    = sum(t.get("days_to_fill", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
     # 重複除外合計（= 全体KPIと同じ数値。保有中=未決済は除外して整合させる）
     dedup_gp  = sum(t["pnl"] for t in settled_trades if t["pnl"] > 0)
     dedup_gl  = abs(sum(t["pnl"] for t in settled_trades if t["pnl"] < 0))
     dedup_pf  = dedup_gp / dedup_gl if dedup_gl > 0 else (float("inf") if dedup_gp > 0 else 0.0)
     dedup_pf_s = "∞" if dedup_pf == float("inf") else f"{dedup_pf:.2f}"
-    _dedup_loss = [t for t in settled_trades if t["pnl"] < 0]
-    dedup_avg_hold      = sum(t.get("hold_days", 0) for t in settled_trades) / len(settled_trades) if settled_trades else 0.0
-    dedup_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _dedup_loss) / len(_dedup_loss)
-                           if _dedup_loss else 0.0)
-    dedup_avg_delay     = (sum(t.get("days_to_fill", 0) for t in settled_trades) / len(settled_trades)
-                           if settled_trades else 0.0)
+    _dedup_win = [t for t in settled_trades if t["pnl"] > 0]
+    dedup_avg_hold     = sum(t.get("hold_days", 0) for t in settled_trades) / len(settled_trades) if settled_trades else 0.0
+    dedup_avg_neg_days = (sum(t.get("days_neg", 0) for t in _dedup_win) / len(_dedup_win)
+                          if _dedup_win else 0.0)
+    dedup_avg_delay    = (sum(t.get("days_to_fill", 0) for t in settled_trades) / len(settled_trades)
+                          if settled_trades else 0.0)
     kpi_html = f"""
 <div class="kpi-grid" style="margin-bottom:8px">
   <div class="kpi"><div class="kpi-l">総取引数 ※</div><div class="kpi-v">{n_total}件</div></div>
@@ -2457,9 +2457,9 @@ function toggleTrendBreakdown() {{
             pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
             pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
             lpc    = "profit" if pnl >= 0 else "loss"
-            loss_t = [t for t in trades if t["pnl"] < 0]
+            win_t  = [t for t in trades if t["pnl"] > 0]
             avg_hold      = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
-            avg_loss_hold = sum(t.get("hold_days", 0) for t in loss_t) / len(loss_t) if loss_t else 0.0
+            avg_neg_days  = sum(t.get("days_neg", 0) for t in win_t) / len(win_t) if win_t else 0.0
             avg_delay     = sum(t.get("days_to_fill", 0) for t in trades) / n if n else 0.0
             dot = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
             rows += f"""<tr>
@@ -2468,7 +2468,7 @@ function toggleTrendBreakdown() {{
   <td>{"—" if not n else f"{wr_l:.1f}%"}</td>
   <td>{"—" if not n else pf_s}</td>
   <td style="text-align:right">{"—" if not n else f"{avg_hold:.1f}日"}</td>
-  <td style="text-align:right;color:#f87171">{"—" if not loss_t else f"{avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#f87171">{"—" if not win_t else f"{avg_neg_days:.1f}日"}</td>
   <td style="text-align:right;color:#fbbf24">{"—" if not n else f"{avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right">{"—" if not n else f"+{gp:,.0f}円"}</td>
   <td class="loss"   style="text-align:right">{"—" if not n else f"-{gl:,.0f}円"}</td>
@@ -2481,7 +2481,6 @@ function toggleTrendBreakdown() {{
 
     # BT70フィルター合計行用
     _bt70_cfg = [t for t in _all_cfg if t.get("score", 0) >= 70]
-    _bt70_cfg_loss = [t for t in _bt70_cfg if t["pnl"] < 0]
     bt70_n   = len(_bt70_cfg); bt70_win = sum(1 for t in _bt70_cfg if t["pnl"] > 0)
     bt70_pnl = sum(t["pnl"] for t in _bt70_cfg)
     bt70_gp  = sum(t["pnl"] for t in _bt70_cfg if t["pnl"] > 0)
@@ -2489,12 +2488,13 @@ function toggleTrendBreakdown() {{
     bt70_pf  = bt70_gp / bt70_gl if bt70_gl > 0 else (float("inf") if bt70_gp > 0 else 0.0)
     bt70_pf_s = "∞" if bt70_pf == float("inf") else f"{bt70_pf:.2f}"
     bt70_lpc = "profit" if bt70_pnl >= 0 else "loss"
-    bt70_avg_hold      = sum(t.get("hold_days", 0) for t in _bt70_cfg) / bt70_n if bt70_n else 0.0
-    bt70_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _bt70_cfg_loss) / len(_bt70_cfg_loss)
-                          if _bt70_cfg_loss else 0.0)
+    _bt70_cfg_win = [t for t in _bt70_cfg if t["pnl"] > 0]
+    bt70_avg_hold     = sum(t.get("hold_days", 0) for t in _bt70_cfg) / bt70_n if bt70_n else 0.0
+    bt70_avg_neg_days = (sum(t.get("days_neg", 0) for t in _bt70_cfg_win) / len(_bt70_cfg_win)
+                         if _bt70_cfg_win else 0.0)
     bt70_avg_delay = sum(t.get("days_to_fill", 0) for t in _bt70_cfg) / bt70_n if bt70_n else 0.0
     _bt70_ded  = [t for t in settled_trades if t.get("score", 0) >= 70]
-    _bt70_ded_loss = [t for t in _bt70_ded if t["pnl"] < 0]
+    _bt70_ded_win = [t for t in _bt70_ded if t["pnl"] > 0]
     bt70d_n   = len(_bt70_ded); bt70d_win = sum(1 for t in _bt70_ded if t["pnl"] > 0)
     bt70d_pnl = sum(t["pnl"] for t in _bt70_ded)
     bt70d_gp  = sum(t["pnl"] for t in _bt70_ded if t["pnl"] > 0)
@@ -2502,9 +2502,9 @@ function toggleTrendBreakdown() {{
     bt70d_pf  = bt70d_gp / bt70d_gl if bt70d_gl > 0 else (float("inf") if bt70d_gp > 0 else 0.0)
     bt70d_pf_s = "∞" if bt70d_pf == float("inf") else f"{bt70d_pf:.2f}"
     bt70d_lpc = "profit" if bt70d_pnl >= 0 else "loss"
-    bt70d_avg_hold = sum(t.get("hold_days", 0) for t in _bt70_ded) / bt70d_n if bt70d_n else 0.0
-    bt70d_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _bt70_ded_loss) / len(_bt70_ded_loss)
-                           if _bt70_ded_loss else 0.0)
+    bt70d_avg_hold     = sum(t.get("hold_days", 0) for t in _bt70_ded) / bt70d_n if bt70d_n else 0.0
+    bt70d_avg_neg_days = (sum(t.get("days_neg", 0) for t in _bt70_ded_win) / len(_bt70_ded_win)
+                          if _bt70_ded_win else 0.0)
     bt70d_avg_delay = sum(t.get("days_to_fill", 0) for t in _bt70_ded) / bt70d_n if bt70d_n else 0.0
 
     # ── スコア細粒度分析 ──
@@ -3684,7 +3684,7 @@ function toggleTrendBreakdown() {{
   <td style="color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_win_all/cfg_n_all*100:.1f}%"}</td>
   <td style="color:#94a3b8">{cfg_pf_all_s}</td>
   <td style="text-align:right;color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_avg_hold:.1f}日"}</td>
-  <td style="text-align:right;color:#94a3b8">{"—" if not _all_cfg_loss else f"{cfg_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not _all_cfg_win else f"{cfg_avg_neg_days:.1f}日"}</td>
   <td style="text-align:right;color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;color:#94a3b8">+{cfg_gp_all:,.0f}円</td>
   <td class="loss"   style="text-align:right;color:#94a3b8">-{cfg_gl_all:,.0f}円</td>
@@ -3697,7 +3697,7 @@ function toggleTrendBreakdown() {{
   <td style="color:#60a5fa;font-weight:700">{"—" if not n_total else f"{n_win/n_total*100:.1f}%"}</td>
   <td style="color:#60a5fa;font-weight:700">{dedup_pf_s}</td>
   <td style="text-align:right;font-weight:700">{"—" if not settled_trades else f"{dedup_avg_hold:.1f}日"}</td>
-  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _dedup_loss else f"{dedup_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _dedup_win else f"{dedup_avg_neg_days:.1f}日"}</td>
   <td style="text-align:right;font-weight:700;color:#fbbf24">{"—" if not settled_trades else f"{dedup_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;font-weight:700">+{dedup_gp:,.0f}円</td>
   <td class="loss"   style="text-align:right;font-weight:700">-{dedup_gl:,.0f}円</td>
@@ -3726,7 +3726,7 @@ function toggleTrendBreakdown() {{
   <td style="color:#94a3b8">{"—" if not bt70_n else f"{bt70_win/bt70_n*100:.1f}%"}</td>
   <td style="color:#94a3b8">{bt70_pf_s}</td>
   <td style="text-align:right;color:#94a3b8">{"—" if not bt70_n else f"{bt70_avg_hold:.1f}日"}</td>
-  <td style="text-align:right;color:#94a3b8">{"—" if not _bt70_cfg_loss else f"{bt70_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not _bt70_cfg_win else f"{bt70_avg_neg_days:.1f}日"}</td>
   <td style="text-align:right;color:#94a3b8">{"—" if not bt70_n else f"{bt70_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;color:#94a3b8">+{bt70_gp:,.0f}円</td>
   <td class="loss"   style="text-align:right;color:#94a3b8">-{bt70_gl:,.0f}円</td>
@@ -3739,7 +3739,7 @@ function toggleTrendBreakdown() {{
   <td style="color:#60a5fa;font-weight:700">{"—" if not bt70d_n else f"{bt70d_win/bt70d_n*100:.1f}%"}</td>
   <td style="color:#60a5fa;font-weight:700">{bt70d_pf_s}</td>
   <td style="text-align:right;font-weight:700">{"—" if not _bt70_ded else f"{bt70d_avg_hold:.1f}日"}</td>
-  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _bt70_ded_loss else f"{bt70d_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _bt70_ded_win else f"{bt70d_avg_neg_days:.1f}日"}</td>
   <td style="text-align:right;font-weight:700;color:#fbbf24">{"—" if not _bt70_ded else f"{bt70d_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;font-weight:700">+{bt70d_gp:,.0f}円</td>
   <td class="loss"   style="text-align:right;font-weight:700">-{bt70d_gl:,.0f}円</td>
