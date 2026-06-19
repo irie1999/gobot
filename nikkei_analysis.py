@@ -2358,6 +2358,61 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_bt_trend_rows}</tbody>
 </table>""" if _bt_trend_rows else ""
 
+        # ── 日経トレンド × 含み損分析 ────────────────────────────────────────
+        _trend_neg_rows = ""
+        for _tk in _order:
+            _ts = _tbuckets.get(_tk, [])
+            if not _ts:
+                continue
+            _wins_t  = [_t for _t in _ts if _t.get("pnl", 0) > 0]
+            _stops_t = [_t for _t in _ts if "損切" in _t.get("reason", "")]
+            _any_neg = sum(1 for _t in _wins_t if _t.get("days_neg", 0) > 0)
+            _avg_neg = (sum(_t.get("days_neg", 0) for _t in _wins_t) / len(_wins_t)
+                        if _wins_t else 0.0)
+            _avg_mae = (sum(abs(_t.get("mae_pct", 0)) for _t in _wins_t) / len(_wins_t)
+                        if _wins_t else 0.0)
+            _avg_sh  = (sum(_t.get("hold_days", 0) for _t in _stops_t) / len(_stops_t)
+                        if _stops_t else 0.0)
+            _neg_rate = _any_neg / len(_wins_t) * 100 if _wins_t else 0.0
+            _lbl, _col, _bg = _tlabels[_tk]
+            _neg_c   = "#f87171" if _avg_neg > 3 else ("#fbbf24" if _avg_neg > 1 else "#94a3b8")
+            _trend_neg_rows += f"""<tr style="background:{_bg}20">
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>
+  <td style="text-align:right">{len(_ts)}</td>
+  <td style="text-align:right">{len(_wins_t)}</td>
+  <td style="text-align:right;color:{_neg_c}">{_avg_neg:.1f}日</td>
+  <td style="text-align:right;color:#94a3b8">{_neg_rate:.0f}%</td>
+  <td style="text-align:right;color:#f87171">{_avg_mae:.1f}%</td>
+  <td style="text-align:right;color:#fb923c">{_avg_sh:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_stops_t)}件)</span></td>
+</tr>"""
+
+        # ── 戦略別 × 含み損分析 ───────────────────────────────────────────────
+        _strat_neg_rows = ""
+        _strats_all = sorted({_t.get("strategy", "?") for _t in kpi_trades})
+        for _strat in _strats_all:
+            _ss = [_t for _t in kpi_trades if _t.get("strategy") == _strat]
+            _wins_s  = [_t for _t in _ss if _t.get("pnl", 0) > 0]
+            _stops_s = [_t for _t in _ss if "損切" in _t.get("reason", "")]
+            _avg_neg_s = (sum(_t.get("days_neg", 0) for _t in _wins_s) / len(_wins_s)
+                          if _wins_s else 0.0)
+            _any_neg_s = sum(1 for _t in _wins_s if _t.get("days_neg", 0) > 0)
+            _neg_rate_s = _any_neg_s / len(_wins_s) * 100 if _wins_s else 0.0
+            _avg_mae_s = (sum(abs(_t.get("mae_pct", 0)) for _t in _wins_s) / len(_wins_s)
+                          if _wins_s else 0.0)
+            _avg_sh_s  = (sum(_t.get("hold_days", 0) for _t in _stops_s) / len(_stops_s)
+                          if _stops_s else 0.0)
+            _wr_s = len(_wins_s) / len(_ss) * 100 if _ss else 0.0
+            _neg_c_s = "#f87171" if _avg_neg_s > 3 else ("#fbbf24" if _avg_neg_s > 1 else "#94a3b8")
+            _strat_neg_rows += f"""<tr>
+  <td style="font-weight:600">{_strat}</td>
+  <td style="text-align:right">{len(_ss)}</td>
+  <td style="text-align:right;color:{'#4ade80' if _wr_s>=55 else ('#fbbf24' if _wr_s>=45 else '#f87171')}">{_wr_s:.1f}%</td>
+  <td style="text-align:right;color:{_neg_c_s}">{_avg_neg_s:.1f}日</td>
+  <td style="text-align:right;color:#94a3b8">{_neg_rate_s:.0f}%</td>
+  <td style="text-align:right;color:#f87171">{_avg_mae_s:.1f}%</td>
+  <td style="text-align:right;color:#fb923c">{_avg_sh_s:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_stops_s)}件)</span></td>
+</tr>"""
+
         if _trows:
             _trend_breakdown_html = f"""
 <button class="analysis-toggle" onclick="toggleTrendBreakdown()" id="trend_breakdown_btn">▶ 日経トレンド別成績・クロス分析を表示</button>
@@ -2381,6 +2436,45 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_trows}</tbody>
 </table>
 {_bt_cross_html}
+
+<h2 style="margin-top:2rem">含み損の原因分析</h2>
+<p class="footnote" style="margin-bottom:6px">
+  含み損保有 = 勝ちトレードが一時的に含み損だった日数の平均（days_neg）｜
+  発生率 = 勝ちトレードのうち1日以上含み損だった割合｜
+  MAE = 勝ちトレードの最大含み損率の平均｜
+  損切保有 = 損切りトレードの平均保有日数
+</p>
+<div style="display:flex;gap:2rem;flex-wrap:wrap">
+<div style="flex:1;min-width:420px">
+<h3 style="color:#94a3b8;font-size:0.95rem;margin-bottom:6px">▌ 日経トレンド別</h3>
+<table>
+  <thead><tr>
+    <th style="text-align:left">日経トレンド</th>
+    <th>全取引</th><th>勝ち</th>
+    <th style="color:#f87171">含み損保有</th>
+    <th style="color:#94a3b8">発生率</th>
+    <th style="color:#f87171">MAE%</th>
+    <th style="color:#fb923c">損切保有</th>
+  </tr></thead>
+  <tbody>{_trend_neg_rows}</tbody>
+</table>
+</div>
+<div style="flex:1;min-width:420px">
+<h3 style="color:#94a3b8;font-size:0.95rem;margin-bottom:6px">▌ 戦略別</h3>
+<table>
+  <thead><tr>
+    <th style="text-align:left">戦略</th>
+    <th>全取引</th><th>勝率</th>
+    <th style="color:#f87171">含み損保有</th>
+    <th style="color:#94a3b8">発生率</th>
+    <th style="color:#f87171">MAE%</th>
+    <th style="color:#fb923c">損切保有</th>
+  </tr></thead>
+  <tbody>{_strat_neg_rows}</tbody>
+</table>
+</div>
+</div>
+
 </div>
 <script>
 function toggleTrendBreakdown() {{
