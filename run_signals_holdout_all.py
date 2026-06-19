@@ -272,7 +272,7 @@ if _args.symbol:
         _s += ".T"
     _cache_symbol = f"_{_s.replace('.', '')}"
 _out_suffix_arg = _args.output_suffix if _args.output_suffix else ""
-_cached_out = Path(f"signals_holdout_all{_cache_short}{_cache_symbol}{_out_suffix_arg}_{_cache_date}.html")
+_cached_out = Path(f"signals_holdout_all{_cache_short}{_cache_symbol}_{_cache_date}{_out_suffix_arg}.html")
 if _cached_out.exists() and not _args.force:
     print(f"[CACHE] 当日生成済み: {_cached_out.resolve()}")
     print(f"        再生成するには --force を付けてください。")
@@ -1059,7 +1059,7 @@ html = f"""<!DOCTYPE html>
 _sym_suffix    = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
 _short_suffix  = "_short" if _args.short else ""
 _output_suffix = _args.output_suffix if _args.output_suffix else ""
-out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}{_output_suffix}_{date_str}.html")
+out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}_{date_str}{_output_suffix}.html")
 out_path.write_text(html, encoding="utf-8")
 print(f"\nレポート生成完了: {out_path.resolve()}")
 
