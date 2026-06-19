@@ -140,23 +140,32 @@ if _args.both and not _args.short:
         return "".join(parts)
 
     # ── ナビゲーションHTML生成 ────────────────────────────────────────────
-    _ls_btns = ""
-    _pr_btns = ""
+    _nav_btns = ""
     _frames   = ""
 
+    # ロング/ショートボタン
     for _dir, _lbl_prefix, _dir_cls in [("long", "📈 ロング", "lb"), ("short", "📉 ショート", "sb")]:
-        _ls_btns += (
-            f'  <button class="ls-btn {_dir_cls}{"  active" if _dir=="long" else ""}" '
+        _is_active = _dir == "long"
+        _nav_btns += (
+            f'  <button class="ls-btn {_dir_cls}{" active" if _is_active else ""}" '
             f'onclick="switchLs(\'{_dir}\')">{_lbl_prefix}</button>\n'
         )
 
+    # 価格帯ボタン（複数の場合のみ、セパレータを挟んで同じ行に追加）
     if _multi_price:
+        _nav_btns += '  <span class="nav-sep"></span>\n'
         for _i, _mp in enumerate(_price_list):
-            _active_pr = " active" if _i == 0 else ""
-            _pr_btns += (
-                f'  <button class="pr-btn{_active_pr}" data-price="{_mp}" '
+            _nav_btns += (
+                f'  <button class="pr-btn{" active" if _i==0 else ""}" data-price="{_mp}" '
                 f'onclick="switchPr({_mp})">{_price_label(_mp)}</button>\n'
             )
+    else:
+        _nav_btns += (
+            f'  <span style="font-size:0.68rem;font-weight:600;color:#fbbf24;'
+            f'background:#292418;border:1px solid #854d0e;border-radius:4px;'
+            f'padding:1px 6px;margin-left:8px;align-self:center">'
+            f'株価 {_price_label(_price_list[0])}</span>\n'
+        )
 
     for _dir in ("long", "short"):
         for _i, _mp in enumerate(_price_list):
@@ -164,22 +173,6 @@ if _args.both and not _args.short:
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
             _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}"></iframe>\n'
-
-    _nav_height = "82px" if _multi_price else "54px"
-    _price_badge_single = ""
-    if not _multi_price:
-        _price_badge_single = (
-            f' <span style="font-size:0.68rem;font-weight:600;color:#fbbf24;'
-            f'background:#292418;border:1px solid #854d0e;border-radius:4px;'
-            f'padding:1px 6px;margin-left:8px;vertical-align:middle">'
-            f'株価 {_price_label(_price_list[0])}</span>'
-        )
-
-    _pr_nav_html = ""
-    if _multi_price:
-        _pr_nav_html = f"""
-<div class="pr-nav">
-{_pr_btns}</div>"""
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
@@ -191,25 +184,25 @@ if _args.both and not _args.short:
 body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 .ls-nav{{display:flex;gap:0;align-items:flex-end;border-bottom:2px solid #1e293b;background:#0f172a;
   position:sticky;top:0;z-index:9999;padding:8px 16px 0}}
-.pr-nav{{display:flex;gap:4px;align-items:center;background:#0f172a;
-  position:sticky;top:54px;z-index:9998;padding:4px 16px 4px;border-bottom:1px solid #1e293b}}
 .ls-btn{{padding:11px 28px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
   color:#94a3b8;cursor:pointer;font-size:1.05rem;font-weight:600;
   border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
 .ls-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .ls-btn.active.lb{{color:#34d399;border-bottom:2px solid #34d399;background:#0f172a}}
 .ls-btn.active.sb{{color:#f87171;border-bottom:2px solid #f87171;background:#0f172a}}
-.pr-btn{{padding:4px 14px;background:#1e293b;border:1px solid #334155;border-radius:4px;
-  color:#94a3b8;cursor:pointer;font-size:0.82rem;font-weight:600;transition:all .15s}}
+.pr-btn{{padding:9px 20px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
+  color:#94a3b8;cursor:pointer;font-size:0.92rem;font-weight:600;
+  border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
 .pr-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
-.pr-btn.active{{background:#292418;border-color:#854d0e;color:#fbbf24}}
-.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - {_nav_height})}}
+.pr-btn.active{{background:#0f172a;border-bottom:2px solid #fbbf24;color:#fbbf24}}
+.nav-sep{{width:1px;background:#334155;margin:8px 8px 4px;align-self:stretch}}
+.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
 .ls-frame.active{{display:block}}
 </style>
 </head>
 <body>
 <div class="ls-nav">
-{_ls_btns}{_price_badge_single}</div>{_pr_nav_html}
+{_nav_btns}</div>
 {_frames}
 <script>
 var _curDir = 'long';
