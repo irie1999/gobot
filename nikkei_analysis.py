@@ -2466,8 +2466,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   MAE = 勝ちトレードの最大含み損率の平均｜
   損切保有 = 損切りトレードの平均保有日数
 </p>
-<div style="display:flex;gap:2rem;flex-wrap:wrap">
-<div style="flex:1;min-width:480px">
+<div style="display:flex;flex-direction:column;gap:2rem">
+<div>
 <h3 style="color:#94a3b8;font-size:0.95rem;margin-bottom:6px">▌ 日経トレンド別</h3>
 <table>
   <thead><tr>
@@ -2482,7 +2482,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_trend_neg_rows}</tbody>
 </table>
 </div>
-<div style="flex:1;min-width:480px">
+<div>
 <h3 style="color:#94a3b8;font-size:0.95rem;margin-bottom:6px">▌ 戦略別</h3>
 <table>
   <thead><tr>
