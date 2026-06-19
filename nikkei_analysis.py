@@ -2442,25 +2442,27 @@ function toggleTrendBreakdown() {{
 <p class="footnote" style="margin-bottom:18px">※ 同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として集計。設定別サマリーの合計とは異なります。<br>※ 保有中（未決済・含み損益）は計測から除外（決済済みトレードのみで勝率・損益を集計）。昨日のシグナル等の保有中は取引明細に表示のみ。</p>"""
 
     # ── サマリーテーブル（各configの独立実績、cross-config重複なし）──
-    sum_rows = ""
-    for cfg in _PNL_CONFIGS:
-        lbl    = cfg["label"]
-        trades = cfg_trades_map.get(lbl, [])
-        n      = len(trades)
-        wins   = sum(1 for t in trades if t["pnl"] > 0)
-        pnl    = sum(t["pnl"] for t in trades)
-        wr_l   = wins / n * 100 if n else 0.0
-        gp     = sum(t["pnl"] for t in trades if t["pnl"] > 0)
-        gl     = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
-        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-        pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
-        lpc    = "profit" if pnl >= 0 else "loss"
-        loss_t = [t for t in trades if t["pnl"] < 0]
-        avg_hold      = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
-        avg_loss_hold = sum(t.get("hold_days", 0) for t in loss_t) / len(loss_t) if loss_t else 0.0
-        avg_delay     = sum(t.get("days_to_fill", 0) for t in trades) / n if n else 0.0
-        dot    = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
-        sum_rows += f"""<tr>
+    def _sum_rows_for(min_bt: int) -> str:
+        rows = ""
+        for cfg in _PNL_CONFIGS:
+            lbl    = cfg["label"]
+            trades = [t for t in cfg_trades_map.get(lbl, [])
+                      if t.get("score", 0) >= min_bt]
+            n      = len(trades)
+            wins   = sum(1 for t in trades if t["pnl"] > 0)
+            pnl    = sum(t["pnl"] for t in trades)
+            wr_l   = wins / n * 100 if n else 0.0
+            gp     = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+            gl     = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+            pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
+            lpc    = "profit" if pnl >= 0 else "loss"
+            loss_t = [t for t in trades if t["pnl"] < 0]
+            avg_hold      = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
+            avg_loss_hold = sum(t.get("hold_days", 0) for t in loss_t) / len(loss_t) if loss_t else 0.0
+            avg_delay     = sum(t.get("days_to_fill", 0) for t in trades) / n if n else 0.0
+            dot = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
+            rows += f"""<tr>
   <td class="sym" style="text-align:left">{dot}{lbl}</td>
   <td>{n}</td><td>{wins}</td>
   <td>{"—" if not n else f"{wr_l:.1f}%"}</td>
@@ -2472,6 +2474,38 @@ function toggleTrendBreakdown() {{
   <td class="loss"   style="text-align:right">{"—" if not n else f"-{gl:,.0f}円"}</td>
   <td class="{lpc}"  style="text-align:right;font-weight:700">{"—" if not n else f"{pnl:+,.0f}円"}</td>
 </tr>"""
+        return rows
+
+    sum_rows      = _sum_rows_for(0)
+    sum_rows_bt70 = _sum_rows_for(70)
+
+    # BT70フィルター合計行用
+    _bt70_cfg = [t for t in _all_cfg if t.get("score", 0) >= 70]
+    _bt70_cfg_loss = [t for t in _bt70_cfg if t["pnl"] < 0]
+    bt70_n   = len(_bt70_cfg); bt70_win = sum(1 for t in _bt70_cfg if t["pnl"] > 0)
+    bt70_pnl = sum(t["pnl"] for t in _bt70_cfg)
+    bt70_gp  = sum(t["pnl"] for t in _bt70_cfg if t["pnl"] > 0)
+    bt70_gl  = abs(sum(t["pnl"] for t in _bt70_cfg if t["pnl"] < 0))
+    bt70_pf  = bt70_gp / bt70_gl if bt70_gl > 0 else (float("inf") if bt70_gp > 0 else 0.0)
+    bt70_pf_s = "∞" if bt70_pf == float("inf") else f"{bt70_pf:.2f}"
+    bt70_lpc = "profit" if bt70_pnl >= 0 else "loss"
+    bt70_avg_hold      = sum(t.get("hold_days", 0) for t in _bt70_cfg) / bt70_n if bt70_n else 0.0
+    bt70_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _bt70_cfg_loss) / len(_bt70_cfg_loss)
+                          if _bt70_cfg_loss else 0.0)
+    bt70_avg_delay = sum(t.get("days_to_fill", 0) for t in _bt70_cfg) / bt70_n if bt70_n else 0.0
+    _bt70_ded  = [t for t in settled_trades if t.get("score", 0) >= 70]
+    _bt70_ded_loss = [t for t in _bt70_ded if t["pnl"] < 0]
+    bt70d_n   = len(_bt70_ded); bt70d_win = sum(1 for t in _bt70_ded if t["pnl"] > 0)
+    bt70d_pnl = sum(t["pnl"] for t in _bt70_ded)
+    bt70d_gp  = sum(t["pnl"] for t in _bt70_ded if t["pnl"] > 0)
+    bt70d_gl  = abs(sum(t["pnl"] for t in _bt70_ded if t["pnl"] < 0))
+    bt70d_pf  = bt70d_gp / bt70d_gl if bt70d_gl > 0 else (float("inf") if bt70d_gp > 0 else 0.0)
+    bt70d_pf_s = "∞" if bt70d_pf == float("inf") else f"{bt70d_pf:.2f}"
+    bt70d_lpc = "profit" if bt70d_pnl >= 0 else "loss"
+    bt70d_avg_hold = sum(t.get("hold_days", 0) for t in _bt70_ded) / bt70d_n if bt70d_n else 0.0
+    bt70d_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _bt70_ded_loss) / len(_bt70_ded_loss)
+                           if _bt70_ded_loss else 0.0)
+    bt70d_avg_delay = sum(t.get("days_to_fill", 0) for t in _bt70_ded) / bt70d_n if bt70d_n else 0.0
 
     # ── スコア細粒度分析 ──
     score_buckets = [
@@ -3623,6 +3657,14 @@ function toggleTrendBreakdown() {{
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
 <h2>スクリプト別サマリー</h2>
+<p style="font-size:0.75rem;color:#64748b;margin-bottom:10px">
+  ※ 含み損保有 = 損失で終わったトレードの平均保有日数（最終PnL &lt; 0 の取引のみ対象）
+</p>
+<div style="margin-bottom:10px">
+  <button onclick="switchSumFilter({_dseq},'all')"  id="sumf_{_dseq}_all"  style="background:#3b82f6;color:#fff;border:none;padding:4px 14px;border-radius:4px;cursor:pointer;margin-right:6px;font-size:0.82rem">全件</button>
+  <button onclick="switchSumFilter({_dseq},'bt70')" id="sumf_{_dseq}_bt70" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:4px 14px;border-radius:4px;cursor:pointer;font-size:0.82rem">BT70以上</button>
+</div>
+<div id="sumt_{_dseq}_all">
 <table>
   <thead><tr>
     <th style="text-align:left">スクリプト</th>
@@ -3663,6 +3705,49 @@ function toggleTrendBreakdown() {{
 </tr>
 </tbody>
 </table>
+</div>
+<div id="sumt_{_dseq}_bt70" style="display:none">
+<table>
+  <thead><tr>
+    <th style="text-align:left">スクリプト</th>
+    <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th>
+    <th>平均保有</th>
+    <th style="color:#f87171">含み損保有</th>
+    <th style="color:#fbbf24">平均遅延</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th>
+  </tr></thead>
+  <tbody>{sum_rows_bt70}
+<tr style="border-top:1px dashed #475569;background:#1a2435">
+  <td style="text-align:left;color:#94a3b8;font-size:0.82rem;font-style:italic">設定別合計（重複あり・BT70以上）</td>
+  <td style="color:#94a3b8">{bt70_n}</td>
+  <td style="color:#94a3b8">{bt70_win}</td>
+  <td style="color:#94a3b8">{"—" if not bt70_n else f"{bt70_win/bt70_n*100:.1f}%"}</td>
+  <td style="color:#94a3b8">{bt70_pf_s}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not bt70_n else f"{bt70_avg_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not _bt70_cfg_loss else f"{bt70_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not bt70_n else f"{bt70_avg_delay:.1f}日"}</td>
+  <td class="profit" style="text-align:right;color:#94a3b8">+{bt70_gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;color:#94a3b8">-{bt70_gl:,.0f}円</td>
+  <td class="{bt70_lpc}" style="text-align:right;color:#94a3b8">{bt70_pnl:+,.0f}円</td>
+</tr>
+<tr style="border-top:2px solid #3b82f6;background:#0d1424">
+  <td style="text-align:left;color:#60a5fa;font-weight:700">▶ 合計（重複除外・BT70以上）</td>
+  <td style="color:#60a5fa;font-weight:700">{bt70d_n}</td>
+  <td style="color:#60a5fa;font-weight:700">{bt70d_win}</td>
+  <td style="color:#60a5fa;font-weight:700">{"—" if not bt70d_n else f"{bt70d_win/bt70d_n*100:.1f}%"}</td>
+  <td style="color:#60a5fa;font-weight:700">{bt70d_pf_s}</td>
+  <td style="text-align:right;font-weight:700">{"—" if not _bt70_ded else f"{bt70d_avg_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _bt70_ded_loss else f"{bt70d_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#fbbf24">{"—" if not _bt70_ded else f"{bt70d_avg_delay:.1f}日"}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{bt70d_gp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{bt70d_gl:,.0f}円</td>
+  <td class="{bt70d_lpc}" style="text-align:right;font-weight:700">{bt70d_pnl:+,.0f}円</td>
+</tr>
+</tbody>
+</table>
+</div>
 </div>
 
 <div id="analtab_{_dseq}_score" class="analysis-tab-pane">
@@ -3845,6 +3930,18 @@ function switchAnalysisTab(seq, which) {{
       b.classList.toggle('active', tabs[i] === which);
     }});
   }}
+}}
+function switchSumFilter(seq, mode) {{
+  var allDiv  = document.getElementById('sumt_'+seq+'_all');
+  var bt70Div = document.getElementById('sumt_'+seq+'_bt70');
+  var allBtn  = document.getElementById('sumf_'+seq+'_all');
+  var bt70Btn = document.getElementById('sumf_'+seq+'_bt70');
+  if (!allDiv || !bt70Div) return;
+  var isAll = (mode === 'all');
+  allDiv.style.display  = isAll ? '' : 'none';
+  bt70Div.style.display = isAll ? 'none' : '';
+  if (allBtn)  {{ allBtn.style.background  = isAll ? '#3b82f6' : '#1e293b'; allBtn.style.color  = isAll ? '#fff' : '#94a3b8'; allBtn.style.border  = isAll ? 'none' : '1px solid #334155'; }}
+  if (bt70Btn) {{ bt70Btn.style.background = isAll ? '#1e293b' : '#3b82f6'; bt70Btn.style.color = isAll ? '#94a3b8' : '#fff'; bt70Btn.style.border = isAll ? '1px solid #334155' : 'none'; }}
 }}
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
