@@ -2414,10 +2414,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </tr>"""
 
         if _trows:
+            _tbd_id = f"tbd_{_dseq}"
             _trend_breakdown_html = f"""
-<button class="analysis-toggle" onclick="toggleTrendBreakdown()" id="trend_breakdown_btn">▶ 日経トレンド別成績・クロス分析を表示</button>
-<div id="trend_breakdown_block" class="analysis-block" style="display:none">
-<h2>日経トレンド別成績（シグナル発生日基準）</h2>
+<button class="analysis-toggle" onclick="toggleTrendBreakdown('{_tbd_id}')" id="{_tbd_id}_btn">▶ 日経トレンド別成績・クロス分析を表示</button>
+<div id="{_tbd_id}_block" class="analysis-block" style="display:none">
+<nav style="display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid #334155;padding-bottom:6px">
+  <button id="{_tbd_id}_tab_trend"  class="detail-tab-btn active" onclick="switchTbd('{_tbd_id}','trend')">トレンド別成績</button>
+  <button id="{_tbd_id}_tab_cross"  class="detail-tab-btn"        onclick="switchTbd('{_tbd_id}','cross')">BT×トレンド クロス</button>
+  <button id="{_tbd_id}_tab_neg"    class="detail-tab-btn"        onclick="switchTbd('{_tbd_id}','neg')">含み損の原因</button>
+</nav>
+
+<div id="{_tbd_id}_pane_trend">
 <p class="footnote" style="margin-bottom:10px">
   シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。
   {_mode_note}<br>
@@ -2435,9 +2442,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   </tr></thead>
   <tbody>{_trows}</tbody>
 </table>
-{_bt_cross_html}
+</div>
 
-<h2 style="margin-top:2rem">含み損の原因分析</h2>
+<div id="{_tbd_id}_pane_cross" style="display:none">
+{_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
+</div>
+
+<div id="{_tbd_id}_pane_neg" style="display:none">
 <p class="footnote" style="margin-bottom:6px">
   含み損保有 = 勝ちトレードが一時的に含み損だった日数の平均（days_neg）｜
   発生率 = 勝ちトレードのうち1日以上含み損だった割合｜
@@ -2474,18 +2485,28 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </table>
 </div>
 </div>
+</div>
 
 </div>
 <script>
-function toggleTrendBreakdown() {{
-  var blk = document.getElementById('trend_breakdown_block');
-  var btn = document.getElementById('trend_breakdown_btn');
+function toggleTrendBreakdown(id) {{
+  var blk = document.getElementById(id+'_block');
+  var btn = document.getElementById(id+'_btn');
   if (!blk) return;
   var show = (blk.style.display === 'none');
   blk.style.display = show ? 'block' : 'none';
   if (btn) btn.textContent = show
     ? '▼ 日経トレンド別成績・クロス分析を隠す'
     : '▶ 日経トレンド別成績・クロス分析を表示';
+}}
+function switchTbd(id, tab) {{
+  var tabs = ['trend','cross','neg'];
+  tabs.forEach(function(t) {{
+    var pane = document.getElementById(id+'_pane_'+t);
+    var btn  = document.getElementById(id+'_tab_'+t);
+    if (pane) pane.style.display = (t===tab) ? '' : 'none';
+    if (btn)  btn.classList.toggle('active', t===tab);
+  }});
 }}
 </script>"""
     except Exception:
