@@ -57,6 +57,8 @@ _pre.add_argument("--entry-days", type=int, default=None,
                   help="取引明細をエントリー日ベースで絞り込む日数 (例: 7=直近1週間エントリーのみ)")
 _pre.add_argument("--both",       action="store_true",
                   help="ロング+ショート両方を実行して1つのHTMLにまとめる")
+_pre.add_argument("--price-ranges", type=str, default=None,
+                  help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _args, _ = _pre.parse_known_args()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
@@ -73,49 +75,111 @@ if _args.both and not _args.short:
             open_html(_bout.resolve())
         sys.exit(0)
 
-    # --both / --short / --no-browser は渡さず、--force は伝播
-    _cargs = [a for a in sys.argv[1:] if a not in ("--both", "--short", "--no-browser")]
-    if "--force" not in _cargs:
-        _cargs.append("--force")
-    _cargs.append("--no-browser")
+    # 株価範囲リストを構築
+    _min_p_val = _args.min_price if _args.min_price and _args.min_price > 0 else 0.0
+    if _args.price_ranges:
+        _price_list = [int(x.strip()) for x in _args.price_ranges.split(",") if x.strip()]
+    else:
+        _price_list = [int(_args.max_price) if _args.max_price < 100000 else 10000]
+    _multi_price = len(_price_list) > 1
 
-    print("=" * 65)
-    print("=== ロングシグナル生成中 ===")
-    print("=" * 65)
-    _sp.run([sys.executable, __file__] + _cargs)
+    # --both / --short / --no-browser / --price-ranges は渡さず、--force は伝播
+    _base_cargs = [a for a in sys.argv[1:]
+                   if a not in ("--both", "--short", "--no-browser", "--price-ranges")
+                   and not a.startswith("--price-ranges=")]
+    # --max-price も除去（後で各ループで付け直す）
+    _base_cargs_no_price = []
+    _skip_next = False
+    for _a in _base_cargs:
+        if _skip_next:
+            _skip_next = False
+            continue
+        if _a == "--max-price":
+            _skip_next = True
+            continue
+        if _a.startswith("--max-price="):
+            continue
+        _base_cargs_no_price.append(_a)
+    if "--force" not in _base_cargs_no_price:
+        _base_cargs_no_price.append("--force")
+    _base_cargs_no_price.append("--no-browser")
 
-    print("=" * 65)
-    print("=== ショートシグナル生成中 ===")
-    print("=" * 65)
-    _sp.run([sys.executable, __file__] + _cargs + ["--short"])
+    # 各価格範囲 × ロング/ショートを生成
+    _generated: dict = {}  # (direction, max_p) -> Path
+    for _mp in _price_list:
+        _mp_suffix = f"_p{_mp}" if _multi_price else ""
+        _lf = Path(f"signals_holdout_all_{_bd}{_mp_suffix}.html")
+        _sf = Path(f"signals_holdout_all_short_{_bd}{_mp_suffix}.html")
+        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp)]
 
-    _lf = Path(f"signals_holdout_all_{_bd}.html")
-    _sf = Path(f"signals_holdout_all_short_{_bd}.html")
-    if not _lf.exists() or not _sf.exists():
-        print("[ERROR] ロング/ショートHTMLの生成に失敗しました")
-        sys.exit(1)
+        print("=" * 65)
+        print(f"=== ロングシグナル生成中 (〜{_mp:,}円) ===")
+        print("=" * 65)
+        _sp.run([sys.executable, __file__] + _cargs_mp)
 
-    # ── 株価フィルター範囲を表示バッジとして用意 ──────────────────────────────
-    _min_p = int(_args.min_price) if _args.min_price and _args.min_price > 0 else None
-    _max_p = int(_args.max_price) if _args.max_price and _args.max_price < 100000 else None
-    _price_range_parts = []
-    if _min_p:
-        _price_range_parts.append(f"{_min_p:,}円〜")
-    if _max_p:
-        if _price_range_parts:
-            _price_range_parts.append(f"{_max_p:,}円")
-        else:
-            _price_range_parts.append(f"〜{_max_p:,}円")
-    _price_badge = ""
-    if _price_range_parts:
-        _price_label = "".join(_price_range_parts)
-        _price_badge = (
+        print("=" * 65)
+        print(f"=== ショートシグナル生成中 (〜{_mp:,}円) ===")
+        print("=" * 65)
+        _sp.run([sys.executable, __file__] + _cargs_mp + ["--short"])
+
+        if not _lf.exists() or not _sf.exists():
+            print(f"[ERROR] ロング/ショートHTMLの生成に失敗しました (max-price={_mp})")
+            sys.exit(1)
+        _generated[("long",  _mp)] = _lf
+        _generated[("short", _mp)] = _sf
+
+    # ── 最初の価格範囲をデフォルト表示 ──────────────────────────────────────
+    _first_mp   = _price_list[0]
+    _min_p_disp = int(_min_p_val) if _min_p_val > 0 else None
+
+    def _price_label(mp: int) -> str:
+        parts = []
+        if _min_p_disp:
+            parts.append(f"{_min_p_disp:,}〜")
+        parts.append(f"{mp:,}円")
+        return "".join(parts)
+
+    # ── ナビゲーションHTML生成 ────────────────────────────────────────────
+    _ls_btns = ""
+    _pr_btns = ""
+    _frames   = ""
+
+    for _dir, _lbl_prefix, _dir_cls in [("long", "📈 ロング", "lb"), ("short", "📉 ショート", "sb")]:
+        _ls_btns += (
+            f'  <button class="ls-btn {_dir_cls}{"  active" if _dir=="long" else ""}" '
+            f'onclick="switchLs(\'{_dir}\')">{_lbl_prefix}</button>\n'
+        )
+
+    if _multi_price:
+        for _i, _mp in enumerate(_price_list):
+            _active_pr = " active" if _i == 0 else ""
+            _pr_btns += (
+                f'  <button class="pr-btn{_active_pr}" data-price="{_mp}" '
+                f'onclick="switchPr({_mp})">{_price_label(_mp)}</button>\n'
+            )
+
+    for _dir in ("long", "short"):
+        for _i, _mp in enumerate(_price_list):
+            _frame_id = f"ls-{_dir}-{_mp}"
+            _active_fr = " active" if _dir == "long" and _i == 0 else ""
+            _src = _generated[(_dir, _mp)].name
+            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}"></iframe>\n'
+
+    _nav_height = "82px" if _multi_price else "54px"
+    _price_badge_single = ""
+    if not _multi_price:
+        _price_badge_single = (
             f' <span style="font-size:0.68rem;font-weight:600;color:#fbbf24;'
             f'background:#292418;border:1px solid #854d0e;border-radius:4px;'
-            f'padding:1px 6px;margin-left:6px;vertical-align:middle">'
-            f'株価 {_price_label}'
-            f'</span>'
+            f'padding:1px 6px;margin-left:8px;vertical-align:middle">'
+            f'株価 {_price_label(_price_list[0])}</span>'
         )
+
+    _pr_nav_html = ""
+    if _multi_price:
+        _pr_nav_html = f"""
+<div class="pr-nav">
+{_pr_btns}</div>"""
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
@@ -127,29 +191,45 @@ if _args.both and not _args.short:
 body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 .ls-nav{{display:flex;gap:0;align-items:flex-end;border-bottom:2px solid #1e293b;background:#0f172a;
   position:sticky;top:0;z-index:9999;padding:8px 16px 0}}
+.pr-nav{{display:flex;gap:4px;align-items:center;background:#0f172a;
+  position:sticky;top:54px;z-index:9998;padding:4px 16px 4px;border-bottom:1px solid #1e293b}}
 .ls-btn{{padding:11px 28px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
   color:#94a3b8;cursor:pointer;font-size:1.05rem;font-weight:600;
   border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
 .ls-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .ls-btn.active.lb{{color:#34d399;border-bottom:2px solid #34d399;background:#0f172a}}
 .ls-btn.active.sb{{color:#f87171;border-bottom:2px solid #f87171;background:#0f172a}}
-.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
+.pr-btn{{padding:4px 14px;background:#1e293b;border:1px solid #334155;border-radius:4px;
+  color:#94a3b8;cursor:pointer;font-size:0.82rem;font-weight:600;transition:all .15s}}
+.pr-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
+.pr-btn.active{{background:#292418;border-color:#854d0e;color:#fbbf24}}
+.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - {_nav_height})}}
 .ls-frame.active{{display:block}}
 </style>
 </head>
 <body>
 <div class="ls-nav">
-  <button class="ls-btn lb active" onclick="switchLs('long')">📈 ロング</button>
-  <button class="ls-btn sb" onclick="switchLs('short')">📉 ショート</button>{_price_badge}
-</div>
-<iframe id="ls-long"  class="ls-frame active" src="{_lf.name}"></iframe>
-<iframe id="ls-short" class="ls-frame"        src="{_sf.name}"></iframe>
+{_ls_btns}{_price_badge_single}</div>{_pr_nav_html}
+{_frames}
 <script>
-function switchLs(t){{
-  document.querySelectorAll('.ls-frame').forEach(f=>f.classList.remove('active'));
-  document.querySelectorAll('.ls-btn').forEach(b=>b.classList.remove('active'));
-  document.getElementById('ls-'+t).classList.add('active');
+var _curDir = 'long';
+var _curPr  = {_first_mp};
+function _showFrame() {{
+  document.querySelectorAll('.ls-frame').forEach(f => f.classList.remove('active'));
+  var f = document.getElementById('ls-' + _curDir + '-' + _curPr);
+  if (f) f.classList.add('active');
+}}
+function switchLs(dir) {{
+  _curDir = dir;
+  document.querySelectorAll('.ls-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
+  _showFrame();
+}}
+function switchPr(pr) {{
+  _curPr = pr;
+  document.querySelectorAll('.pr-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  _showFrame();
 }}
 </script>
 </body>
