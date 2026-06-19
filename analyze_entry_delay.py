@@ -1,40 +1,147 @@
 """
 analyze_entry_delay.py  ―  エントリー遅延（entry_delay）効果分析
 =================================================================
-シグナル発生から何日後に注文を受け付けるか（entry_delay=0,1,2,3）を
-WATCHLIST全銘柄×全戦略で比較分析し、HTMLレポートを出力する。
+シグナル発生から何日後に注文を受け付けるか（entry_delay=0〜10）を
+WATCHLISTの全銘柄×全戦略で比較分析し、HTMLレポートを出力する。
+
+WATCHLISTの優先順 (run_signals_holdout_all と同じロジック):
+  1. ホールドアウト専用CSV  walkforward_{strat}_holdout{N}d_*.csv
+  2. 標準WF CSV            walkforward_{strat}_*.csv  (holdoutなし)
+  3. フォールバック         check_signals_stop/breakout の WATCHLIST
 
 【使い方】
-  python analyze_entry_delay.py                     # 全戦略365日
-  python analyze_entry_delay.py --days 180          # 直近180日
-  python analyze_entry_delay.py --workers 8         # 並列数
-  python analyze_entry_delay.py --strategies MACD,A7,RSI2
+  python analyze_entry_delay.py                          # ロング365日
+  python analyze_entry_delay.py --short                  # ショート
+  python analyze_entry_delay.py --days 180               # 直近180日
+  python analyze_entry_delay.py --max-price 6000 --min-price 1000
+  python analyze_entry_delay.py --workers 8
   python analyze_entry_delay.py --no-browser
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import sys
+import csv
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from backtest_limit_entry import (
     fetch,
     run_limit_backtest,
     WORKERS as _DEFAULT_WORKERS,
 )
-from check_signals_stop import WATCHLIST as STOP_WL, STRATEGY_PARAMS as STOP_PARAMS
-from check_signals_breakout import WATCHLIST as BRK_WL, STRATEGY_PARAMS as BRK_PARAMS
 
 JST = timezone(timedelta(hours=9))
 DELAYS = list(range(11))  # 0〜10日後
+
+HOLDOUT_CONFIGS = [30, 60, 90, 120, 150, 180]
+
+
+# ──────────────────────────────────────────────
+# WATCHLIST ローダー (run_signals_holdout_all と同じロジック)
+# ──────────────────────────────────────────────
+
+def _float(v, default=0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _composite_score(r: dict) -> float:
+    return _float(r.get("total_test_pnl", 0)) * (1.0 + max(_float(r.get("sharpe", 0)), 0.0))
+
+
+def _find_csv(strategy: str, holdout_days: int, wf_dir: Path,
+              mode: str = "conservative") -> Path | None:
+    mode_suffix = f"_{mode}" if mode != "conservative" else ""
+    cands = sorted(wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_holdout{holdout_days}d_*.csv"), reverse=True)
+    if cands:
+        return cands[0]
+    fallback = [f for f in sorted(wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_*.csv"), reverse=True)
+                if "holdout" not in f.name]
+    return fallback[0] if fallback else None
+
+
+def _load_wl_from_csv(csv_path: Path, strategy: str,
+                       max_price: float = 0.0, min_price: float = 0.0,
+                       per_strategy: int = 10) -> list[tuple]:
+    with open(csv_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return []
+    filtered = [r for r in rows if (
+        _float(r.get("total_test_pnl", 0)) > 0
+        and _float(r.get("max_drawdown_pct", 999)) <= 15.0
+        and (max_price <= 0 or _float(r.get("latest_price", 0)) <= max_price)
+        and (min_price <= 0 or _float(r.get("latest_price", 0)) >= min_price)
+    )]
+    filtered.sort(key=_composite_score, reverse=True)
+    return [(r.get("symbol", ""), r.get("name", ""), strategy)
+            for r in filtered[:per_strategy] if r.get("symbol")]
+
+
+def build_tasks(is_short: bool, max_price: float, min_price: float,
+                strategies_filter: list[str] | None,
+                wf_dir: Path) -> list[tuple]:
+    """銘柄×戦略タスクリストを構築。ホールドアウトCSVから読み込み、なければフォールバック。"""
+
+    if is_short:
+        stop_strats = ["A7_S", "RSI2_S", "MACD_S"]
+        brk_strats  = ["DON_S", "MOM_S", "GAP_S"]
+        import check_signals_short          as _stop_mod
+        import check_signals_short_breakout as _brk_mod
+    else:
+        stop_strats = ["MACD", "A7", "RSI2"]
+        brk_strats  = ["DON", "VOL", "MOM"]
+        import check_signals_stop     as _stop_mod
+        import check_signals_breakout as _brk_mod
+
+    entry_type = "stop_sell" if is_short else "stop"
+
+    # ── holdout CSV からロード (全ホールドアウト期間 × 両モードを結合・重複排除) ──
+    seen: set[tuple[str, str]] = set()
+    combined_wl: list[tuple] = []
+    has_csv = False
+
+    for ho_days in HOLDOUT_CONFIGS:
+        for mode in ("conservative", "aggressive"):
+            for strat in stop_strats + brk_strats:
+                if strategies_filter and strat not in strategies_filter:
+                    continue
+                p = _find_csv(strat, ho_days, wf_dir, mode)
+                if p:
+                    has_csv = True
+                    for sym, nm, st in _load_wl_from_csv(p, strat, max_price, min_price):
+                        if (sym, st) not in seen:
+                            seen.add((sym, st))
+                            combined_wl.append((sym, nm, st))
+
+    # ── フォールバック: CSV なし or 全て空 → 標準 WATCHLIST ──
+    if not combined_wl:
+        print("[INFO] WFスキャンCSVなし → 標準WATCHLISTを使用")
+        for sym, nm, strat in list(_stop_mod.WATCHLIST) + list(_brk_mod.WATCHLIST):
+            if strategies_filter and strat not in strategies_filter:
+                continue
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                combined_wl.append((sym, nm, strat))
+
+    # ── calc_fn をアタッチしてタスク化 ──
+    stop_params = _stop_mod.STRATEGY_PARAMS
+    brk_params  = _brk_mod.STRATEGY_PARAMS
+    all_params  = {**stop_params, **brk_params}
+
+    tasks = []
+    for sym, nm, strat in combined_wl:
+        if strat not in all_params:
+            continue
+        calc_fn, em, sm, tm = all_params[strat]
+        tasks.append((sym, nm, strat, calc_fn, em, sm, tm, entry_type))
+    return tasks
 
 
 # ──────────────────────────────────────────────
@@ -49,17 +156,15 @@ def _run_one(
     em: float,
     sm: float,
     tm: float,
+    entry_type: str,
     days: int,
 ) -> dict[str, Any]:
-    """1銘柄×戦略について delay=0,1,2,3 のバックテストを実行して結果を返す。"""
+    """1銘柄×戦略について delay=0〜10 のバックテストを実行して結果を返す。"""
     try:
-        df = fetch(symbol, days + 60)  # バッファ込みで fetch
+        df = fetch(symbol, days + 60)
     except Exception as e:
-        return {
-            "symbol": symbol, "name": name, "strategy": strategy,
-            "error": str(e),
-            "delays": {},
-        }
+        return {"symbol": symbol, "name": name, "strategy": strategy,
+                "error": str(e), "delays": {}}
 
     results: dict[int, dict] = {}
     for d in DELAYS:
@@ -74,22 +179,17 @@ def _run_one(
                 target_atr_mult=tm,
                 backtest_days=days,
                 strategy_name=strategy,
-                entry_type="stop",
+                entry_type=entry_type,
                 stop_mode=None,
                 max_hold=None,
                 entry_delay=d,
-                entry_expire=1,  # 各delayで1日のみ有効（当日 or 指定日だけ）
+                entry_expire=1,  # 各delayで1日のみ有効
             )
         except Exception as e:
             r = {"error": str(e)}
         results[d] = r
 
-    return {
-        "symbol": symbol,
-        "name": name,
-        "strategy": strategy,
-        "delays": results,
-    }
+    return {"symbol": symbol, "name": name, "strategy": strategy, "delays": results}
 
 
 # ──────────────────────────────────────────────
@@ -97,16 +197,16 @@ def _run_one(
 # ──────────────────────────────────────────────
 
 def _extract_metrics(r: dict) -> tuple[int, float, float, float, float]:
-    """(trades, win_rate, pf, total_pnl, avg_hold) を返す。失敗時は (0, 0, 0, 0, 0)。"""
+    """(trades, win_rate[0-1], pf, total_pnl, avg_hold)"""
     if not r or "error" in r:
         return 0, 0.0, 0.0, 0.0, 0.0
     trades = r.get("trades", 0)
     if trades == 0:
         return 0, 0.0, 0.0, 0.0, 0.0
-    win_rate = r.get("win_rate", 0.0) / 100.0  # backtest returns 0-100; normalize to 0-1
-    pf = r.get("profit_factor", 0.0)
+    win_rate = r.get("win_rate", 0.0) / 100.0  # 0-100 → 0-1
+    pf       = r.get("profit_factor", 0.0)
     total_pnl = r.get("total_pnl", 0.0)
-    avg_hold = r.get("avg_hold", 0.0)
+    avg_hold  = r.get("avg_hold", 0.0)
     return trades, win_rate, pf, total_pnl, avg_hold
 
 
@@ -137,14 +237,14 @@ th {
     text-align: right;
     border-bottom: 1px solid #334155;
 }
-th:first-child, th:nth-child(2) { text-align: left; }
+th:first-child { text-align: left; }
 td {
     padding: 7px 12px;
     border-bottom: 1px solid #1e293b;
     text-align: right;
     color: #cbd5e1;
 }
-td:first-child, td:nth-child(2) { text-align: left; }
+td:first-child { text-align: left; }
 tr:hover td { background: #1e293b; }
 .pos  { color: #4ade80; }
 .neg  { color: #f87171; }
@@ -160,47 +260,37 @@ def _fmt_pnl(v: float) -> str:
 
 
 def _fmt_pct(v: float) -> str:
-    s = f"{v*100:.1f}%"
-    return s
-
-
-def _fmt_pf(v: float) -> str:
-    if v == 0:
-        return "—"
-    return f"{v:.2f}"
+    return f"{v*100:.1f}%"
 
 
 def build_html(
     all_results: list[dict],
     days: int,
+    is_short: bool,
+    max_price: float,
+    min_price: float,
     strategies_filter: list[str] | None,
     run_dt: str,
 ) -> str:
 
-    # ── サマリー集計 (delay別) ──
     summary: dict[int, dict] = {
-        d: {"trades": 0, "wins": 0, "gross_win": 0.0, "gross_loss": 0.0,
-            "total_pnl": 0.0, "hold_sum": 0.0, "hold_cnt": 0}
+        d: {"trades": 0, "wins": 0, "total_pnl": 0.0, "hold_sum": 0.0, "hold_cnt": 0}
         for d in DELAYS
     }
-
-    # ── 銘柄別テーブル行 ──
     item_rows: list[dict] = []
 
     for item in all_results:
-        sym = item["symbol"]
-        nm  = item["name"]
+        sym   = item["symbol"]
+        nm    = item["name"]
         strat = item["strategy"]
         if strategies_filter and strat not in strategies_filter:
             continue
         if "error" in item:
             continue
 
-        row: dict[str, Any] = {
-            "symbol": sym, "name": nm, "strategy": strat,
-        }
+        row: dict[str, Any] = {"symbol": sym, "name": nm, "strategy": strat}
         best_pnl = None
-        best_d = None
+        best_d   = None
         for d in DELAYS:
             r = item["delays"].get(d, {})
             trades, wr, pf, pnl, ah = _extract_metrics(r)
@@ -208,19 +298,14 @@ def build_html(
             row[f"d{d}_wr"]     = wr
             row[f"d{d}_pf"]     = pf
             row[f"d{d}_pnl"]    = pnl
-            row[f"d{d}_hold"]   = ah
 
-            # summary accumulate
             s = summary[d]
             s["trades"]    += trades
             s["total_pnl"] += pnl
             if trades > 0:
-                wins = round(trades * wr)
-                s["wins"]       += wins
-                # gross_win / gross_loss はバックテスト結果に直接ないので pnl で近似
-                if ah > 0:
-                    s["hold_sum"] += ah * trades
-                    s["hold_cnt"] += trades
+                s["wins"]     += round(trades * wr)
+                s["hold_sum"] += ah * trades
+                s["hold_cnt"] += trades
 
             if best_pnl is None or pnl > best_pnl:
                 best_pnl = pnl
@@ -229,71 +314,52 @@ def build_html(
         row["best_d"] = best_d
         item_rows.append(row)
 
-    # ── サマリーテーブル HTML ──
     def _summary_table() -> str:
         rows_html = ""
         for d in DELAYS:
-            s = summary[d]
+            s      = summary[d]
             trades = s["trades"]
-            total_pnl = s["total_pnl"]
-            if trades > 0:
-                wr = s["wins"] / trades
-                avg_hold = s["hold_sum"] / s["hold_cnt"] if s["hold_cnt"] > 0 else 0.0
-            else:
-                wr = 0.0
-                avg_hold = 0.0
-
-            label = f"<span class='delay-header'>{d}日後</span>"
-            pnl_html = _fmt_pnl(total_pnl)
+            pnl    = s["total_pnl"]
+            wr     = s["wins"] / trades if trades > 0 else 0.0
+            ah     = s["hold_sum"] / s["hold_cnt"] if s["hold_cnt"] > 0 else 0.0
             rows_html += f"""
             <tr>
-              <td>{label}</td>
+              <td><span class='delay-header'>{d}日後</span></td>
               <td>{trades:,}</td>
               <td>{_fmt_pct(wr)}</td>
-              <td>{avg_hold:.1f}日</td>
-              <td>{pnl_html}</td>
+              <td>{ah:.1f}日</td>
+              <td>{_fmt_pnl(pnl)}</td>
             </tr>"""
-
         return f"""
         <table>
-          <thead>
-            <tr>
-              <th>entry_delay</th>
-              <th>件数</th>
-              <th>勝率</th>
-              <th>平均保有日数</th>
-              <th>損益合計</th>
-            </tr>
-          </thead>
-          <tbody>{rows_html}
-          </tbody>
+          <thead><tr>
+            <th>entry_delay</th><th>件数</th><th>勝率</th><th>平均保有日数</th><th>損益合計</th>
+          </tr></thead>
+          <tbody>{rows_html}</tbody>
         </table>"""
 
-    # ── 銘柄別テーブル HTML ──
     def _detail_table() -> str:
-        # 戦略ごとにグループ化
         strats_in_data = sorted({r["strategy"] for r in item_rows})
         html = ""
         for strat in strats_in_data:
-            rows = [r for r in item_rows if r["strategy"] == strat]
-            # delay=0 の損益でソート（降順）
-            rows.sort(key=lambda x: x.get("d0_pnl", 0), reverse=True)
-
+            rows = sorted(
+                [r for r in item_rows if r["strategy"] == strat],
+                key=lambda x: x.get("d0_pnl", 0), reverse=True
+            )
             d_headers = "".join(
                 f'<th class="delay-header">{d}日後 PnL</th><th>{d}日後 取引</th><th>{d}日後 勝率</th>'
                 for d in DELAYS
             )
             rows_html = ""
             for r in rows:
-                best_d = r.get("best_d")
+                best_d   = r.get("best_d")
                 sym_cell = f"{r['symbol']}<br><small style='color:#64748b'>{r['name']}</small>"
-                cells = f"<td>{sym_cell}</td>"
+                cells    = f"<td>{sym_cell}</td>"
                 for d in DELAYS:
-                    pnl   = r.get(f"d{d}_pnl", 0.0)
-                    trd   = r.get(f"d{d}_trades", 0)
-                    wr    = r.get(f"d{d}_wr", 0.0)
-                    is_best = (d == best_d)
-                    cls = " class='best'" if is_best else ""
+                    pnl     = r.get(f"d{d}_pnl", 0.0)
+                    trd     = r.get(f"d{d}_trades", 0)
+                    wr      = r.get(f"d{d}_wr", 0.0)
+                    cls     = " class='best'" if d == best_d else ""
                     cells += (
                         f"<td{cls}>{_fmt_pnl(pnl)}</td>"
                         f"<td{cls}>{trd}</td>"
@@ -304,20 +370,20 @@ def build_html(
             html += f"""
             <h2>戦略: {strat}</h2>
             <table>
-              <thead>
-                <tr>
-                  <th>銘柄</th>
-                  {d_headers}
-                </tr>
-              </thead>
+              <thead><tr><th>銘柄</th>{d_headers}</tr></thead>
               <tbody>{rows_html}</tbody>
             </table>"""
         return html
 
-    summary_html = _summary_table()
-    detail_html  = _detail_table()
+    mode_label  = "ショート" if is_short else "ロング"
+    price_label = ""
+    if min_price > 0 and max_price > 0:
+        price_label = f" ／ 株価 {int(min_price):,}〜{int(max_price):,}円"
+    elif max_price > 0:
+        price_label = f" ／ 株価 〜{int(max_price):,}円"
+    elif min_price > 0:
+        price_label = f" ／ 株価 {int(min_price):,}円〜"
 
-    total_items = len(item_rows)
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -326,16 +392,16 @@ def build_html(
 <style>{_DARK_CSS}</style>
 </head>
 <body>
-<h1>Entry Delay 分析</h1>
+<h1>Entry Delay 分析 [{mode_label}]</h1>
 <p class="subtitle">
-  対象期間: 直近 {days} 日 ／ 銘柄×戦略数: {total_items} ／ 生成: {run_dt}
+  対象期間: 直近 {days} 日 ／ 銘柄×戦略数: {len(item_rows)}{price_label} ／ 生成: {run_dt}
 </p>
 
 <h2>全体サマリー（delay 別）</h2>
-{summary_html}
+{_summary_table()}
 
 <h2>銘柄別最適遅延テーブル（緑背景 = 各行の最高損益 delay）</h2>
-{detail_html}
+{_detail_table()}
 
 </body>
 </html>"""
@@ -347,76 +413,59 @@ def build_html(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Entry delay analysis")
-    parser.add_argument("--days",       type=int, default=365, help="バックテスト日数（デフォルト365）")
-    parser.add_argument("--workers",    type=int, default=_DEFAULT_WORKERS, help="並列数")
-    parser.add_argument("--strategies", type=str, default="", help="カンマ区切り戦略名 (例: MACD,RSI2)")
-    parser.add_argument("--no-browser", action="store_true", help="HTMLをブラウザで開かない")
+    parser.add_argument("--days",       type=int,   default=365)
+    parser.add_argument("--workers",    type=int,   default=_DEFAULT_WORKERS)
+    parser.add_argument("--short",      action="store_true", help="ショート戦略で分析")
+    parser.add_argument("--max-price",  type=float, default=0.0, help="株価上限 (例: 6000)")
+    parser.add_argument("--min-price",  type=float, default=0.0, help="株価下限 (例: 1000)")
+    parser.add_argument("--wf-dir",     type=Path,  default=Path("walkforward_results"))
+    parser.add_argument("--strategies", type=str,   default="")
+    parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    days    = args.days
-    workers = args.workers
     strategies_filter: list[str] | None = (
         [s.strip().upper() for s in args.strategies.split(",") if s.strip()]
         if args.strategies else None
     )
 
-    # ── タスクリスト作成 ──
-    tasks: list[tuple[str, str, str, Any, float, float, float]] = []
+    tasks = build_tasks(
+        is_short=args.short,
+        max_price=args.max_price,
+        min_price=args.min_price,
+        strategies_filter=strategies_filter,
+        wf_dir=args.wf_dir,
+    )
 
-    # STOP WATCHLIST
-    seen_stop = set()
-    for sym, nm, strat in STOP_WL:
-        if strat not in STOP_PARAMS:
-            continue
-        if strategies_filter and strat not in strategies_filter:
-            continue
-        key = (sym, strat)
-        if key in seen_stop:
-            continue
-        seen_stop.add(key)
-        calc_fn, em, sm, tm = STOP_PARAMS[strat]
-        tasks.append((sym, nm, strat, calc_fn, em, sm, tm))
-
-    # BREAKOUT WATCHLIST
-    seen_brk = set()
-    for sym, nm, strat in BRK_WL:
-        if strat not in BRK_PARAMS:
-            continue
-        if strategies_filter and strat not in strategies_filter:
-            continue
-        key = (sym, strat)
-        if key in seen_brk:
-            continue
-        seen_brk.add(key)
-        calc_fn, em, sm, tm = BRK_PARAMS[strat]
-        tasks.append((sym, nm, strat, calc_fn, em, sm, tm))
-
-    print(f"Entry delay 分析開始: {len(tasks)} タスク, {days}日, workers={workers}", flush=True)
+    print(f"Entry delay 分析開始: {len(tasks)} タスク, {args.days}日, workers={args.workers}", flush=True)
 
     all_results: list[dict] = []
     done = 0
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(_run_one, sym, nm, strat, calc_fn, em, sm, tm, days): (sym, strat)
-            for sym, nm, strat, calc_fn, em, sm, tm in tasks
+            ex.submit(_run_one, sym, nm, strat, calc_fn, em, sm, tm, et, args.days): (sym, strat)
+            for sym, nm, strat, calc_fn, em, sm, tm, et in tasks
         }
         for fut in as_completed(futures):
             sym, strat = futures[fut]
             done += 1
             try:
-                result = fut.result()
-                all_results.append(result)
+                all_results.append(fut.result())
             except Exception as e:
                 print(f"  ERROR {sym} {strat}: {e}", flush=True)
             if done % 10 == 0 or done == len(tasks):
                 print(f"  {done}/{len(tasks)} 完了", flush=True)
 
-    run_dt = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+    run_dt    = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
     today_str = date.today().strftime("%Y-%m-%d")
-    out_path = Path(f"entry_delay_analysis_{today_str}.html")
+    suffix    = "_short" if args.short else ""
+    out_path  = Path(f"entry_delay_analysis{suffix}_{today_str}.html")
 
-    html = build_html(all_results, days, strategies_filter, run_dt)
+    html = build_html(
+        all_results, args.days, args.short,
+        args.max_price, args.min_price,
+        strategies_filter, run_dt,
+    )
     out_path.write_text(html, encoding="utf-8")
     print(f"出力: {out_path.resolve()}", flush=True)
 
@@ -425,6 +474,7 @@ def main() -> None:
             from _open_html import open_html
             open_html(str(out_path.resolve()))
         except ImportError:
+            import webbrowser
             webbrowser.open(out_path.resolve().as_uri())
 
 
