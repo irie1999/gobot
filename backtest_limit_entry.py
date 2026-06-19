@@ -545,6 +545,7 @@ def run_limit_backtest(
     entry_risk_adjust: bool = False,  # True=ギャップ約定時に sp/tp を ep ベースに再計算 (R:R 維持)
     stop_mode: str | None = None,  # "intraday"/"close"。None=default_stop_mode で自動決定
     max_hold: int | None = None,   # 最大保有日数。None=default_max_hold(戦略別)で自動決定
+    entry_delay: int = 0,          # シグナル発生から何日後から注文を受け付けるか
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -631,6 +632,7 @@ def run_limit_backtest(
                         "lp": lp, "sp": sp, "tp": tp,
                         "qty": calc_qty(lp, sp),
                         "expire_idx":   i + ENTRY_EXPIRE,
+                        "fill_start_idx": i + entry_delay,
                         "signal_idx":   i,
                         "signal_dt":    df.index[i - 1],
                         "signal_price": close_prev,
@@ -643,6 +645,9 @@ def run_limit_backtest(
         for po in pending_orders:
             if i > po["expire_idx"]:
                 continue  # 期限切れ → 破棄
+            if i < po.get("fill_start_idx", 0):  # 遅延期間中はスキップ
+                remaining_pending.append(po)
+                continue
 
             triggered = (
                 (entry_type == "stop"      and hi >= po["lp"]) or
