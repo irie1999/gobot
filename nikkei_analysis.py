@@ -2367,27 +2367,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _wins_t   = [_t for _t in _ts if _t.get("pnl", 0) > 0]
             _tgt_t    = [_t for _t in _ts if "目標達成" in _t.get("reason", "")]
             _stops_t  = [_t for _t in _ts if "損切" in _t.get("reason", "")]
-            _any_neg  = sum(1 for _t in _wins_t if _t.get("days_neg", 0) > 0)
-            _avg_neg  = (sum(_t.get("days_neg", 0) for _t in _wins_t) / len(_wins_t)
-                         if _wins_t else 0.0)
             _avg_neg_tgt = (sum(_t.get("days_neg", 0) for _t in _tgt_t) / len(_tgt_t)
                             if _tgt_t else 0.0)
-            _avg_mae  = (sum(abs(_t.get("mae_pct", 0)) for _t in _wins_t) / len(_wins_t)
-                         if _wins_t else 0.0)
             _avg_sh   = (sum(_t.get("hold_days", 0) for _t in _stops_t) / len(_stops_t)
                          if _stops_t else 0.0)
-            _neg_rate = _any_neg / len(_wins_t) * 100 if _wins_t else 0.0
             _lbl, _col, _bg = _tlabels[_tk]
-            _neg_c    = "#f87171" if _avg_neg > 3 else ("#fbbf24" if _avg_neg > 1 else "#94a3b8")
             _neg_c_t  = "#f87171" if _avg_neg_tgt > 3 else ("#fbbf24" if _avg_neg_tgt > 1 else "#94a3b8")
             _trend_neg_rows += f"""<tr style="background:{_bg}20">
   <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>
   <td style="text-align:right">{len(_ts)}</td>
   <td style="text-align:right">{len(_wins_t)}</td>
-  <td style="text-align:right;color:{_neg_c}">{_avg_neg:.1f}日</td>
   <td style="text-align:right;color:{_neg_c_t}">{_avg_neg_tgt:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_tgt_t)}件)</span></td>
-  <td style="text-align:right;color:#94a3b8">{_neg_rate:.0f}%</td>
-  <td style="text-align:right;color:#f87171">{_avg_mae:.1f}%</td>
   <td style="text-align:right;color:#fb923c">{_avg_sh:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_stops_t)}件)</span></td>
 </tr>"""
 
@@ -2399,27 +2389,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _wins_s  = [_t for _t in _ss if _t.get("pnl", 0) > 0]
             _tgt_s   = [_t for _t in _ss if "目標達成" in _t.get("reason", "")]
             _stops_s = [_t for _t in _ss if "損切" in _t.get("reason", "")]
-            _avg_neg_s = (sum(_t.get("days_neg", 0) for _t in _wins_s) / len(_wins_s)
-                          if _wins_s else 0.0)
             _avg_neg_tgt_s = (sum(_t.get("days_neg", 0) for _t in _tgt_s) / len(_tgt_s)
                               if _tgt_s else 0.0)
-            _any_neg_s  = sum(1 for _t in _wins_s if _t.get("days_neg", 0) > 0)
-            _neg_rate_s = _any_neg_s / len(_wins_s) * 100 if _wins_s else 0.0
-            _avg_mae_s  = (sum(abs(_t.get("mae_pct", 0)) for _t in _wins_s) / len(_wins_s)
-                           if _wins_s else 0.0)
             _avg_sh_s   = (sum(_t.get("hold_days", 0) for _t in _stops_s) / len(_stops_s)
                            if _stops_s else 0.0)
             _wr_s     = len(_wins_s) / len(_ss) * 100 if _ss else 0.0
-            _neg_c_s  = "#f87171" if _avg_neg_s > 3 else ("#fbbf24" if _avg_neg_s > 1 else "#94a3b8")
             _neg_c_ts = "#f87171" if _avg_neg_tgt_s > 3 else ("#fbbf24" if _avg_neg_tgt_s > 1 else "#94a3b8")
             _strat_neg_rows += f"""<tr>
   <td style="font-weight:600">{_strat}</td>
   <td style="text-align:right">{len(_ss)}</td>
   <td style="text-align:right;color:{'#4ade80' if _wr_s>=55 else ('#fbbf24' if _wr_s>=45 else '#f87171')}">{_wr_s:.1f}%</td>
-  <td style="text-align:right;color:{_neg_c_s}">{_avg_neg_s:.1f}日</td>
   <td style="text-align:right;color:{_neg_c_ts}">{_avg_neg_tgt_s:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_tgt_s)}件)</span></td>
-  <td style="text-align:right;color:#94a3b8">{_neg_rate_s:.0f}%</td>
-  <td style="text-align:right;color:#f87171">{_avg_mae_s:.1f}%</td>
   <td style="text-align:right;color:#fb923c">{_avg_sh_s:.1f}日 <span style="color:#64748b;font-size:0.75rem">({len(_stops_s)}件)</span></td>
 </tr>"""
 
@@ -2460,10 +2440,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
 <div id="{_tbd_id}_pane_neg" style="display:none">
 <p class="footnote" style="margin-bottom:6px">
-  含み損保有(勝ち) = 勝ちトレードが一時的に含み損だった日数の平均（days_neg）｜
-  含み損保有(目標) = 目標達成トレードのみの同指標｜
-  発生率 = 勝ちトレードのうち1日以上含み損だった割合｜
-  MAE = 勝ちトレードの最大含み損率の平均｜
+  含み損保有(目標) = 目標達成トレードが途中で含み損だった日数の平均（days_neg）｜
   損切保有 = 損切りトレードの平均保有日数
 </p>
 <div style="display:flex;flex-direction:column;gap:2rem">
@@ -2473,10 +2450,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <thead><tr>
     <th style="text-align:left">日経トレンド</th>
     <th>全取引</th><th>勝ち</th>
-    <th style="color:#f87171">含み損保有(勝ち)</th>
     <th style="color:#fbbf24">含み損保有(目標)</th>
-    <th style="color:#94a3b8">発生率</th>
-    <th style="color:#f87171">MAE%</th>
     <th style="color:#fb923c">損切保有</th>
   </tr></thead>
   <tbody>{_trend_neg_rows}</tbody>
@@ -2488,10 +2462,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <thead><tr>
     <th style="text-align:left">戦略</th>
     <th>全取引</th><th>勝率</th>
-    <th style="color:#f87171">含み損保有(勝ち)</th>
     <th style="color:#fbbf24">含み損保有(目標)</th>
-    <th style="color:#94a3b8">発生率</th>
-    <th style="color:#f87171">MAE%</th>
     <th style="color:#fb923c">損切保有</th>
   </tr></thead>
   <tbody>{_strat_neg_rows}</tbody>
