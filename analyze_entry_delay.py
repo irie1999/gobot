@@ -78,6 +78,7 @@ def _run_one(
                 stop_mode=None,
                 max_hold=None,
                 entry_delay=d,
+                entry_expire=1,  # 各delayで1日のみ有効（当日 or 指定日だけ）
             )
         except Exception as e:
             r = {"error": str(e)}

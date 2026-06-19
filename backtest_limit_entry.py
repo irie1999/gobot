@@ -546,6 +546,7 @@ def run_limit_backtest(
     stop_mode: str | None = None,  # "intraday"/"close"。None=default_stop_mode で自動決定
     max_hold: int | None = None,   # 最大保有日数。None=default_max_hold(戦略別)で自動決定
     entry_delay: int = 0,          # シグナル発生から何日後から注文を受け付けるか
+    entry_expire: int | None = None,  # 注文有効日数。None=ENTRY_EXPIRE。entry_delayと独立
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -631,7 +632,7 @@ def run_limit_backtest(
                     pending_orders.append({
                         "lp": lp, "sp": sp, "tp": tp,
                         "qty": calc_qty(lp, sp),
-                        "expire_idx":   i + ENTRY_EXPIRE + entry_delay,
+                        "expire_idx":   i + entry_delay + (entry_expire if entry_expire is not None else ENTRY_EXPIRE),
                         "fill_start_idx": i + entry_delay,
                         "signal_idx":   i,
                         "signal_dt":    df.index[i - 1],
