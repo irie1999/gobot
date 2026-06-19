@@ -34,7 +34,7 @@ from check_signals_stop import WATCHLIST as STOP_WL, STRATEGY_PARAMS as STOP_PAR
 from check_signals_breakout import WATCHLIST as BRK_WL, STRATEGY_PARAMS as BRK_PARAMS
 
 JST = timezone(timedelta(hours=9))
-DELAYS = [0, 1, 2, 3]
+DELAYS = list(range(11))  # 0〜10日後
 
 
 # ──────────────────────────────────────────────
