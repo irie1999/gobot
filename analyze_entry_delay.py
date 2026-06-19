@@ -209,7 +209,8 @@ def _run_one(
 
 def _extract_metrics(r: dict) -> tuple:
     """(trades, win_rate[0-1], pf, total_pnl, avg_hold, gross_win, gross_loss,
-        avg_loss_hold, stop_cnt, timeout_cnt)"""
+        avg_neg_days, stop_cnt, timeout_cnt)
+    avg_neg_days = 目標達成トレードが途中で含み損だった日数の平均 (days_neg of pnl>0 trades)"""
     if not r or "error" in r:
         return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0
     trades = r.get("trades", 0)
@@ -222,12 +223,12 @@ def _extract_metrics(r: dict) -> tuple:
     trade_log = r.get("trade_log", [])
     gross_win  = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) > 0)
     gross_loss = abs(sum(t["pnl"] for t in trade_log if t.get("pnl", 0) < 0))
-    loss_trades = [t for t in trade_log if t.get("pnl", 0) < 0]
-    avg_loss_hold = (sum(t.get("hold_days", 0) for t in loss_trades) / len(loss_trades)
-                     if loss_trades else 0.0)
+    win_trades = [t for t in trade_log if t.get("pnl", 0) > 0]
+    avg_neg_days = (sum(t.get("days_neg", 0) for t in win_trades) / len(win_trades)
+                    if win_trades else 0.0)
     stop_cnt    = sum(1 for t in trade_log if "損切" in t.get("reason", ""))
     timeout_cnt = sum(1 for t in trade_log if "タイムカット" in t.get("reason", ""))
-    return trades, win_rate, pf, total_pnl, avg_hold, gross_win, gross_loss, avg_loss_hold, stop_cnt, timeout_cnt
+    return trades, win_rate, pf, total_pnl, avg_hold, gross_win, gross_loss, avg_neg_days, stop_cnt, timeout_cnt
 
 
 # ──────────────────────────────────────────────
@@ -291,7 +292,7 @@ def build_html(
         d: {"trades": 0, "wins": 0, "total_pnl": 0.0,
             "gross_win": 0.0, "gross_loss": 0.0,
             "hold_sum": 0.0, "hold_cnt": 0,
-            "loss_hold_sum": 0.0, "loss_cnt": 0,
+            "neg_days_sum": 0.0, "win_cnt": 0,
             "stop_cnt": 0, "timeout_cnt": 0}
         for d in DELAYS
     }
@@ -334,13 +335,12 @@ def build_html(
             s["stop_cnt"]   += sc
             s["timeout_cnt"] += tc
             if trades > 0:
-                s["wins"]          += round(trades * wr)
-                s["hold_sum"]      += ah * trades
-                s["hold_cnt"]      += trades
-            if alh > 0:
-                loss_cnt = round(trades * (1 - wr))
-                s["loss_hold_sum"] += alh * loss_cnt
-                s["loss_cnt"]      += loss_cnt
+                win_cnt = round(trades * wr)
+                s["wins"]         += win_cnt
+                s["hold_sum"]     += ah * trades
+                s["hold_cnt"]     += trades
+                s["neg_days_sum"] += alh * win_cnt
+                s["win_cnt"]      += win_cnt
 
             if best_pnl is None or pnl > best_pnl:
                 best_pnl = pnl
@@ -360,7 +360,7 @@ def build_html(
             gl     = s["gross_loss"]
             wr     = s["wins"] / trades if trades > 0 else 0.0
             ah     = s["hold_sum"] / s["hold_cnt"] if s["hold_cnt"] > 0 else 0.0
-            alh    = s["loss_hold_sum"] / s["loss_cnt"] if s["loss_cnt"] > 0 else 0.0
+            alh    = s["neg_days_sum"] / s["win_cnt"] if s["win_cnt"] > 0 else 0.0
             sc     = s["stop_cnt"]
             tc     = s["timeout_cnt"]
             loss_n = trades - s["wins"]
@@ -379,12 +379,12 @@ def build_html(
             </tr>"""
         return f"""
         <p style="color:#64748b; font-size:11px; margin-bottom:8px;">
-          ※ 含み損保有 = 損失トレードの平均保有日数　｜　損切/タイムカット = 損失トレードの決済理由別件数
+          ※ 含み損保有 = 目標達成トレードが途中で含み損だった日数の平均（勝ちトレードのみ対象）　｜　損切/タイムカット = 決済理由別件数
         </p>
         <table>
           <thead><tr>
             <th>entry_delay</th><th>件数</th><th>勝率</th><th>平均保有(全)</th>
-            <th>含み損保有(損失トレード)</th><th>損切/タイムカット</th>
+            <th>含み損保有(勝ちトレード)</th><th>損切/タイムカット</th>
             <th>利益合計</th><th>損失合計</th><th>損益合計</th>
           </tr></thead>
           <tbody>{rows_html}</tbody>
