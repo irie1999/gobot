@@ -2874,6 +2874,14 @@ function toggleTrendBreakdown() {{
         else:
             row_style = ""
         pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
+        dtf = t.get("days_to_fill", 0)
+        delay_cell = (f'<td style="text-align:right;color:#94a3b8">当日</td>'
+                      if dtf == 0 else
+                      f'<td style="text-align:right;color:#fbbf24">{dtf}日後</td>')
+        is_loss = not is_pending and t.get("pnl", 0) < 0
+        hold_sub = ('<br><span style="font-size:0.7rem;color:#f87171">含み損</span>'
+                    if is_loss else "")
+        hold_cell = f'<td style="text-align:right">{t["hold_days"]}日{hold_sub}</td>'
         cfg_color = t.get("color", "#64748b")
         cfg_label = t.get("label", "")
         cfg_badge = f'<span style="background:{cfg_color};color:#0f172a;font-size:0.68rem;font-weight:700;padding:1px 6px;border-radius:3px;white-space:nowrap">{cfg_label}</span>'
@@ -2921,7 +2929,8 @@ function toggleTrendBreakdown() {{
   {loc_cell}
   <td style="text-align:right">{t["exit_p"]:,.0f}</td>
   <td style="text-align:right">{t.get("qty",0):,}</td>
-  <td style="text-align:right">{t["hold_days"]}日</td>
+  {hold_cell}
+  {delay_cell}
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
   <td>{_rhtml(t["reason"])}{overlap_badge}</td>
   {last_col}
@@ -2930,7 +2939,7 @@ function toggleTrendBreakdown() {{
     def _rows_for(trades, empty_msg, entry_first=False) -> str:
         rows = "".join(_build_trade_row(t, entry_first=entry_first) for t in trades)
         if not rows:
-            rows = f'<tr><td colspan="14" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
+            rows = f'<tr><td colspan="15" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
         return rows
 
     # 全部 / BT70以上 / エントリー日別グリッド の 3 系統を用意
@@ -3005,7 +3014,7 @@ function toggleTrendBreakdown() {{
   <thead><tr>
     <th>エントリー</th><th style="text-align:left">銘柄</th><th>戦略</th><th>設定</th>
     <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th>
-    <th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>決済日</th>
   </tr></thead>
   <tbody>{rows_d}</tbody>
@@ -3761,7 +3770,7 @@ function toggleTrendBreakdown() {{
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows_all}</tbody>
@@ -3774,7 +3783,7 @@ function toggleTrendBreakdown() {{
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th>
+    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows_bt70}</tbody>
