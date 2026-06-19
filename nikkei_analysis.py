@@ -2414,7 +2414,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </tr>"""
 
         if _trows:
-            _tbd_id = f"tbd_{_dseq}"
+            _tbd_id = f"tbd_{days}_{id(cfg_trades_map) % 100000}"
             _trend_breakdown_html = f"""
 <button class="analysis-toggle" onclick="toggleTrendBreakdown('{_tbd_id}')" id="{_tbd_id}_btn">▶ 日経トレンド別成績・クロス分析を表示</button>
 <div id="{_tbd_id}_block" class="analysis-block" style="display:none">
