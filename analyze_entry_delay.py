@@ -102,7 +102,7 @@ def _extract_metrics(r: dict) -> tuple[int, float, float, float, float]:
     trades = r.get("trades", 0)
     if trades == 0:
         return 0, 0.0, 0.0, 0.0, 0.0
-    win_rate = r.get("win_rate", 0.0)
+    win_rate = r.get("win_rate", 0.0) / 100.0  # backtest returns 0-100; normalize to 0-1
     pf = r.get("profit_factor", 0.0)
     total_pnl = r.get("total_pnl", 0.0)
     avg_hold = r.get("avg_hold", 0.0)
