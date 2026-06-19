@@ -2416,11 +2416,22 @@ function toggleTrendBreakdown() {{
     cfg_pf_all  = cfg_gp_all / cfg_gl_all if cfg_gl_all > 0 else (float("inf") if cfg_gp_all > 0 else 0.0)
     cfg_pf_all_s = "∞" if cfg_pf_all == float("inf") else f"{cfg_pf_all:.2f}"
     cfg_lpc_all  = "profit" if cfg_pnl_all >= 0 else "loss"
+    _all_cfg_loss = [t for t in _all_cfg if t["pnl"] < 0]
+    cfg_avg_hold      = sum(t.get("hold_days", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
+    cfg_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _all_cfg_loss) / len(_all_cfg_loss)
+                         if _all_cfg_loss else 0.0)
+    cfg_avg_delay     = sum(t.get("days_to_fill", 0) for t in _all_cfg) / cfg_n_all if cfg_n_all else 0.0
     # 重複除外合計（= 全体KPIと同じ数値。保有中=未決済は除外して整合させる）
     dedup_gp  = sum(t["pnl"] for t in settled_trades if t["pnl"] > 0)
     dedup_gl  = abs(sum(t["pnl"] for t in settled_trades if t["pnl"] < 0))
     dedup_pf  = dedup_gp / dedup_gl if dedup_gl > 0 else (float("inf") if dedup_gp > 0 else 0.0)
     dedup_pf_s = "∞" if dedup_pf == float("inf") else f"{dedup_pf:.2f}"
+    _dedup_loss = [t for t in settled_trades if t["pnl"] < 0]
+    dedup_avg_hold      = sum(t.get("hold_days", 0) for t in settled_trades) / len(settled_trades) if settled_trades else 0.0
+    dedup_avg_loss_hold = (sum(t.get("hold_days", 0) for t in _dedup_loss) / len(_dedup_loss)
+                           if _dedup_loss else 0.0)
+    dedup_avg_delay     = (sum(t.get("days_to_fill", 0) for t in settled_trades) / len(settled_trades)
+                           if settled_trades else 0.0)
     kpi_html = f"""
 <div class="kpi-grid" style="margin-bottom:8px">
   <div class="kpi"><div class="kpi-l">総取引数 ※</div><div class="kpi-v">{n_total}件</div></div>
@@ -2444,12 +2455,19 @@ function toggleTrendBreakdown() {{
         pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
         pf_s   = "∞" if pf == float("inf") else f"{pf:.2f}"
         lpc    = "profit" if pnl >= 0 else "loss"
+        loss_t = [t for t in trades if t["pnl"] < 0]
+        avg_hold      = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
+        avg_loss_hold = sum(t.get("hold_days", 0) for t in loss_t) / len(loss_t) if loss_t else 0.0
+        avg_delay     = sum(t.get("days_to_fill", 0) for t in trades) / n if n else 0.0
         dot    = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{cfg["color"]};margin-right:6px;vertical-align:middle"></span>'
         sum_rows += f"""<tr>
   <td class="sym" style="text-align:left">{dot}{lbl}</td>
   <td>{n}</td><td>{wins}</td>
   <td>{"—" if not n else f"{wr_l:.1f}%"}</td>
   <td>{"—" if not n else pf_s}</td>
+  <td style="text-align:right">{"—" if not n else f"{avg_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#f87171">{"—" if not loss_t else f"{avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#fbbf24">{"—" if not n else f"{avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right">{"—" if not n else f"+{gp:,.0f}円"}</td>
   <td class="loss"   style="text-align:right">{"—" if not n else f"-{gl:,.0f}円"}</td>
   <td class="{lpc}"  style="text-align:right;font-weight:700">{"—" if not n else f"{pnl:+,.0f}円"}</td>
@@ -3609,6 +3627,9 @@ function toggleTrendBreakdown() {{
   <thead><tr>
     <th style="text-align:left">スクリプト</th>
     <th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th>
+    <th>平均保有</th>
+    <th style="color:#f87171">含み損保有</th>
+    <th style="color:#fbbf24">平均遅延</th>
     <th style="color:#4ade80">利益</th>
     <th style="color:#f87171">損失</th>
     <th>損益合計</th>
@@ -3620,6 +3641,9 @@ function toggleTrendBreakdown() {{
   <td style="color:#94a3b8">{cfg_win_all}</td>
   <td style="color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_win_all/cfg_n_all*100:.1f}%"}</td>
   <td style="color:#94a3b8">{cfg_pf_all_s}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_avg_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not _all_cfg_loss else f"{cfg_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;color:#94a3b8">{"—" if not cfg_n_all else f"{cfg_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;color:#94a3b8">+{cfg_gp_all:,.0f}円</td>
   <td class="loss"   style="text-align:right;color:#94a3b8">-{cfg_gl_all:,.0f}円</td>
   <td class="{cfg_lpc_all}" style="text-align:right;color:#94a3b8">{cfg_pnl_all:+,.0f}円</td>
@@ -3630,6 +3654,9 @@ function toggleTrendBreakdown() {{
   <td style="color:#60a5fa;font-weight:700">{n_win}</td>
   <td style="color:#60a5fa;font-weight:700">{"—" if not n_total else f"{n_win/n_total*100:.1f}%"}</td>
   <td style="color:#60a5fa;font-weight:700">{dedup_pf_s}</td>
+  <td style="text-align:right;font-weight:700">{"—" if not settled_trades else f"{dedup_avg_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#f87171">{"—" if not _dedup_loss else f"{dedup_avg_loss_hold:.1f}日"}</td>
+  <td style="text-align:right;font-weight:700;color:#fbbf24">{"—" if not settled_trades else f"{dedup_avg_delay:.1f}日"}</td>
   <td class="profit" style="text-align:right;font-weight:700">+{dedup_gp:,.0f}円</td>
   <td class="loss"   style="text-align:right;font-weight:700">-{dedup_gl:,.0f}円</td>
   <td class="{"profit" if pnl_sum >= 0 else "loss"}" style="text-align:right;font-weight:700">{pnl_sum:+,.0f}円</td>
