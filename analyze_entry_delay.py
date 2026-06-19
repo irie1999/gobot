@@ -178,6 +178,9 @@ def _run_one(
     except Exception as e:
         return {"symbol": symbol, "name": name, "strategy": strategy,
                 "error": str(e), "delays": {}, "bt_score": 0.0}
+    if df is None:
+        return {"symbol": symbol, "name": name, "strategy": strategy,
+                "error": "データ取得失敗", "delays": {}, "bt_score": 0.0}
 
     # BTスコア計算（6期間スライス）
     bt_score = _compute_bt_score(symbol, name, strategy, calc_fn, em, sm, tm, entry_type, df)
@@ -286,14 +289,16 @@ def build_html(
     }
     item_rows: list[dict] = []
     skipped_bt = 0
+    error_cnt  = 0
 
     for item in all_results:
         if "error" in item:
+            error_cnt += 1
             continue
         if strategies_filter and item["strategy"] not in strategies_filter:
             continue
         bt = item.get("bt_score", 0.0)
-        if bt < min_bt_score:
+        if min_bt_score > 0 and bt < min_bt_score:
             skipped_bt += 1
             continue
 
@@ -434,8 +439,26 @@ def build_html(
     elif min_price > 0:
         price_label = f" ／ 株価 {int(min_price):,}円〜"
 
-    bt_label = f" ／ BTスコア≥{int(min_bt_score)}" if min_bt_score > 0 else ""
-    skip_note = f" （BTフィルターで{skipped_bt}件除外）" if skipped_bt else ""
+    bt_label   = f" ／ BTスコア≥{int(min_bt_score)}" if min_bt_score > 0 else ""
+    skip_note  = f" （BTフィルターで{skipped_bt}件除外）" if skipped_bt else ""
+    error_note = f" （データ取得失敗 {error_cnt}件）" if error_cnt else ""
+
+    no_data_msg = ""
+    if not item_rows:
+        if error_cnt > 0:
+            no_data_msg = f"""
+<p style="color:#f87171; font-size:14px; padding: 20px 0;">
+  ⚠️ データ取得に失敗しました ({error_cnt}件)。<br>
+  ネットワーク接続を確認するか、ローカル環境で実行してください。
+</p>"""
+        elif skipped_bt > 0:
+            no_data_msg = f"""
+<p style="color:#fbbf24; font-size:14px; padding: 20px 0;">
+  ℹ️ BTスコア≥{int(min_bt_score)} の銘柄が見つかりませんでした（{skipped_bt}件除外）。<br>
+  --min-bt-score を下げるか、指定なしで実行してください。
+</p>"""
+        else:
+            no_data_msg = '<p style="color:#94a3b8; padding:20px 0;">結果なし</p>'
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -447,9 +470,9 @@ def build_html(
 <body>
 <h1>Entry Delay 分析 [{mode_label}]</h1>
 <p class="subtitle">
-  対象期間: 直近 {days} 日 ／ 銘柄×戦略数: {len(item_rows)}{price_label}{bt_label}{skip_note} ／ 生成: {run_dt}
+  対象期間: 直近 {days} 日 ／ 銘柄×戦略数: {len(item_rows)}{price_label}{bt_label}{skip_note}{error_note} ／ 生成: {run_dt}
 </p>
-
+{no_data_msg}
 <h2>全体サマリー（delay 別）</h2>
 {_summary_table()}
 
@@ -508,6 +531,11 @@ def main() -> None:
                 print(f"  ERROR {sym} {strat}: {e}", flush=True)
             if done % 10 == 0 or done == len(tasks):
                 print(f"  {done}/{len(tasks)} 完了", flush=True)
+
+    errors = [r for r in all_results if "error" in r]
+    if errors:
+        print(f"  [警告] データ取得失敗: {len(errors)}/{len(tasks)} 件 "
+              f"(例: {errors[0]['symbol']} - {errors[0]['error']})", flush=True)
 
     run_dt    = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
     today_str = date.today().strftime("%Y-%m-%d")
