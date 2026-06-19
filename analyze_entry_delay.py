@@ -207,13 +207,14 @@ def _run_one(
 # 集計ヘルパー
 # ──────────────────────────────────────────────
 
-def _extract_metrics(r: dict) -> tuple[int, float, float, float, float, float, float]:
-    """(trades, win_rate[0-1], pf, total_pnl, avg_hold, gross_win, gross_loss)"""
+def _extract_metrics(r: dict) -> tuple:
+    """(trades, win_rate[0-1], pf, total_pnl, avg_hold, gross_win, gross_loss,
+        avg_loss_hold, stop_cnt, timeout_cnt)"""
     if not r or "error" in r:
-        return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0
     trades = r.get("trades", 0)
     if trades == 0:
-        return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0
     win_rate  = r.get("win_rate", 0.0) / 100.0
     pf        = r.get("pf", 0.0)
     total_pnl = r.get("total_pnl", 0.0)
@@ -221,7 +222,12 @@ def _extract_metrics(r: dict) -> tuple[int, float, float, float, float, float, f
     trade_log = r.get("trade_log", [])
     gross_win  = sum(t["pnl"] for t in trade_log if t.get("pnl", 0) > 0)
     gross_loss = abs(sum(t["pnl"] for t in trade_log if t.get("pnl", 0) < 0))
-    return trades, win_rate, pf, total_pnl, avg_hold, gross_win, gross_loss
+    loss_trades = [t for t in trade_log if t.get("pnl", 0) < 0]
+    avg_loss_hold = (sum(t.get("hold_days", 0) for t in loss_trades) / len(loss_trades)
+                     if loss_trades else 0.0)
+    stop_cnt    = sum(1 for t in trade_log if "損切" in t.get("reason", ""))
+    timeout_cnt = sum(1 for t in trade_log if "タイムカット" in t.get("reason", ""))
+    return trades, win_rate, pf, total_pnl, avg_hold, gross_win, gross_loss, avg_loss_hold, stop_cnt, timeout_cnt
 
 
 # ──────────────────────────────────────────────
@@ -284,7 +290,9 @@ def build_html(
     summary: dict[int, dict] = {
         d: {"trades": 0, "wins": 0, "total_pnl": 0.0,
             "gross_win": 0.0, "gross_loss": 0.0,
-            "hold_sum": 0.0, "hold_cnt": 0}
+            "hold_sum": 0.0, "hold_cnt": 0,
+            "loss_hold_sum": 0.0, "loss_cnt": 0,
+            "stop_cnt": 0, "timeout_cnt": 0}
         for d in DELAYS
     }
     item_rows: list[dict] = []
@@ -310,7 +318,7 @@ def build_html(
         best_d   = None
         for d in DELAYS:
             r = item["delays"].get(d, {})
-            trades, wr, pf, pnl, ah, gw, gl = _extract_metrics(r)
+            trades, wr, pf, pnl, ah, gw, gl, alh, sc, tc = _extract_metrics(r)
             row[f"d{d}_trades"] = trades
             row[f"d{d}_wr"]     = wr
             row[f"d{d}_pf"]     = pf
@@ -323,10 +331,16 @@ def build_html(
             s["total_pnl"]  += pnl
             s["gross_win"]  += gw
             s["gross_loss"] += gl
+            s["stop_cnt"]   += sc
+            s["timeout_cnt"] += tc
             if trades > 0:
-                s["wins"]     += round(trades * wr)
-                s["hold_sum"] += ah * trades
-                s["hold_cnt"] += trades
+                s["wins"]          += round(trades * wr)
+                s["hold_sum"]      += ah * trades
+                s["hold_cnt"]      += trades
+            if alh > 0:
+                loss_cnt = round(trades * (1 - wr))
+                s["loss_hold_sum"] += alh * loss_cnt
+                s["loss_cnt"]      += loss_cnt
 
             if best_pnl is None or pnl > best_pnl:
                 best_pnl = pnl
@@ -346,20 +360,31 @@ def build_html(
             gl     = s["gross_loss"]
             wr     = s["wins"] / trades if trades > 0 else 0.0
             ah     = s["hold_sum"] / s["hold_cnt"] if s["hold_cnt"] > 0 else 0.0
+            alh    = s["loss_hold_sum"] / s["loss_cnt"] if s["loss_cnt"] > 0 else 0.0
+            sc     = s["stop_cnt"]
+            tc     = s["timeout_cnt"]
+            loss_n = trades - s["wins"]
+            alh_cell = f'<span class="neg">{alh:.1f}日</span>' if alh > 0 else "—"
             rows_html += f"""
             <tr>
               <td><span class='delay-header'>{d}日後</span></td>
               <td>{trades:,}</td>
               <td>{_fmt_pct(wr)}</td>
               <td>{ah:.1f}日</td>
+              <td>{alh_cell}</td>
+              <td><span class="neg">{sc}</span> / <span style="color:#94a3b8">{tc}</span></td>
               <td><span class="pos">+{gw:,.0f}</span></td>
               <td><span class="neg">-{gl:,.0f}</span></td>
               <td>{_fmt_pnl(pnl)}</td>
             </tr>"""
         return f"""
+        <p style="color:#64748b; font-size:11px; margin-bottom:8px;">
+          ※ 含み損保有 = 損失トレードの平均保有日数　｜　損切/タイムカット = 損失トレードの決済理由別件数
+        </p>
         <table>
           <thead><tr>
-            <th>entry_delay</th><th>件数</th><th>勝率</th><th>平均保有</th>
+            <th>entry_delay</th><th>件数</th><th>勝率</th><th>平均保有(全)</th>
+            <th>含み損保有(損失トレード)</th><th>損切/タイムカット</th>
             <th>利益合計</th><th>損失合計</th><th>損益合計</th>
           </tr></thead>
           <tbody>{rows_html}</tbody>
