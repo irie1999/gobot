@@ -149,7 +149,7 @@ def _compute_bt_score(symbol, name, strategy, calc_fn, em, sm, tm, entry_type, d
 
     n = len(period_results)
     avg_wr  = sum(r["win_rate"] for r in period_results) / n  # 0-100スケール
-    pf_vals = [min(r.get("profit_factor", 0) or 0, 10) if r.get("profit_factor") != float("inf")
+    pf_vals = [min(r.get("pf", 0) or 0, 10) if r.get("pf") != float("inf")
                else 10 for r in period_results]
     avg_pf  = sum(pf_vals) / n
     stable  = sum(1 for r in period_results if r["total_pnl"] > 0) / n
@@ -215,7 +215,7 @@ def _extract_metrics(r: dict) -> tuple[int, float, float, float, float, float, f
     if trades == 0:
         return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     win_rate  = r.get("win_rate", 0.0) / 100.0
-    pf        = r.get("profit_factor", 0.0)
+    pf        = r.get("pf", 0.0)
     total_pnl = r.get("total_pnl", 0.0)
     avg_hold  = r.get("avg_hold", 0.0)
     trade_log = r.get("trade_log", [])
