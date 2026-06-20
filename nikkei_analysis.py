@@ -2085,11 +2085,14 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
     print(f"[WF歴史検証] ユニバース: {_univ_name} ({len(universe_syms)}銘柄) × {len(_all_strats)}戦略 = {len(all_tasks)}タスク", flush=True)
 
-    # ── WF結果キャッシュ（同じ wf_until_date & ユニバース & 価格フィルタなら再スキャン不要）──
+    # ── WF結果キャッシュ（wf_until_date / ユニバース / 価格フィルタ / fold設計が同一なら再スキャン不要）──
     _wfh_cache_dir = _PL(".wfh_cache")
     _wfh_cache_dir.mkdir(exist_ok=True)
-    _cache_key  = f"{wf_until_date}_{_univ_name}_max{max_price}_min{min_price}"
     import hashlib as _hl
+    # fold設計変更でキャッシュが無効化されるよう FOLDS_HISTORICAL をキーに含める
+    _fold_sig = str(_HIST_FOLDS)
+    _strats_sig = ",".join(_all_strats)
+    _cache_key  = f"{wf_until_date}_{_univ_name}_max{max_price}_min{min_price}_{_fold_sig}_{_strats_sig}"
     _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
 
