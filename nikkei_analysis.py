@@ -3780,6 +3780,112 @@ function switchTbd(id, tab) {{
 
     _overlap_html = _overlap_analysis_html(_overlap_dropped)
 
+    # ── ⑨ エントリータイミング比較（翌日のみ vs 3日有効）────────────────────
+    def _entry_timing_cmp_html(trades_list):
+        """翌日のみ(days_to_fill=0) vs 2日目以降 vs 全件を比較するHTML。"""
+        done = [t for t in trades_list if t.get("reason") not in ("発注中", "保有中")]
+        d0   = [t for t in done if (t.get("days_to_fill") or 0) == 0]
+        d1p  = [t for t in done if (t.get("days_to_fill") or 0) >= 1]
+
+        def _st(ts):
+            if not ts:
+                return {"n":0,"wr":0,"pf":0,"pnl":0,"avg":0,"gw":0,"gl":0}
+            wins = [t for t in ts if t["pnl"] > 0]
+            gw   = sum(t["pnl"] for t in wins)
+            gl   = abs(sum(t["pnl"] for t in ts if t["pnl"] <= 0))
+            pnl  = sum(t["pnl"] for t in ts)
+            return {"n":len(ts),"wr":len(wins)/len(ts)*100,
+                    "pf": gw/gl if gl else float("inf"),
+                    "pnl":pnl,"avg":pnl/len(ts),"gw":gw,"gl":gl}
+
+        s_all = _st(done)
+        s_d0  = _st(d0)
+        s_d1p = _st(d1p)
+
+        def _pf_str(v):
+            return "∞" if v == float("inf") else f"{v:.2f}"
+
+        def _row(label, s, highlight=False):
+            bg   = "background:#0c1f3a;" if highlight else ""
+            pcol = "#4ade80" if s["pnl"] >= 0 else "#f87171"
+            wcol = "#4ade80" if s["wr"] >= 55 else ("#fbbf24" if s["wr"] >= 45 else "#f87171")
+            pfc  = "#4ade80" if s["pf"] >= 1.5 else ("#fbbf24" if s["pf"] >= 1.0 else "#f87171")
+            return (f'<tr style="{bg}">'
+                    f'<td style="font-weight:700;color:#e2e8f0;padding:8px 12px">{label}</td>'
+                    f'<td style="text-align:right;color:#94a3b8">{s["n"]}件</td>'
+                    f'<td style="text-align:right;color:{wcol};font-weight:700">{s["wr"]:.1f}%</td>'
+                    f'<td style="text-align:right;color:{pfc};font-weight:700">{_pf_str(s["pf"])}</td>'
+                    f'<td style="text-align:right;color:#4ade80">+{s["gw"]:,.0f}円</td>'
+                    f'<td style="text-align:right;color:#f87171">-{s["gl"]:,.0f}円</td>'
+                    f'<td style="text-align:right;color:{pcol};font-weight:700">{s["pnl"]:+,.0f}円</td>'
+                    f'<td style="text-align:right;color:{pcol}">{s["avg"]:+,.0f}円</td>'
+                    f'</tr>')
+
+        # 月別比較
+        from collections import defaultdict as _dd9
+        by_ym_d0  = _dd9(list)
+        by_ym_d1p = _dd9(list)
+        for t in done:
+            ym = str(t.get("entry_d_raw") or t.get("exit_d_raw") or "")[:7]
+            if not ym: continue
+            if (t.get("days_to_fill") or 0) == 0:
+                by_ym_d0[ym].append(t)
+            else:
+                by_ym_d1p[ym].append(t)
+
+        all_ym = sorted(set(list(by_ym_d0) + list(by_ym_d1p)), reverse=True)
+        month_rows = ""
+        for ym in all_ym:
+            sd0  = _st(by_ym_d0[ym])
+            sd1p = _st(by_ym_d1p[ym])
+            pc0  = "#4ade80" if sd0["pnl"] >= 0 else "#f87171"
+            pc1p = "#4ade80" if sd1p["pnl"] >= 0 else "#f87171"
+            month_rows += (
+                f'<tr>'
+                f'<td style="font-weight:700;color:#e2e8f0;padding:6px 10px">{ym[:4]}/{ym[5:7]}月</td>'
+                f'<td style="text-align:right;color:#94a3b8">{sd0["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{sd0["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{pc0};font-weight:700">{sd0["pnl"]:+,.0f}円</td>'
+                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8;padding:6px 10px">{sd1p["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{sd1p["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{pc1p};font-weight:700">{sd1p["pnl"]:+,.0f}円</td>'
+                f'</tr>'
+            )
+
+        return f"""<h2>⑨ エントリータイミング比較（翌日のみ vs 2日目以降）</h2>
+<p class="footnote">翌日のみ = days_to_fill=0（シグナル翌日に逆指値が発動した取引）。2日目以降 = ENTRY_EXPIRE=3の追加分。</p>
+<table style="width:auto;min-width:600px;margin-bottom:20px">
+  <thead><tr>
+    <th style="text-align:left">区分</th>
+    <th>件数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">総利益</th>
+    <th style="color:#f87171">総損失</th>
+    <th>損益合計</th><th>平均損益</th>
+  </tr></thead>
+  <tbody>
+    {_row("翌日のみ（delay=0）", s_d0, highlight=True)}
+    {_row("2日目以降（delay≥1）", s_d1p)}
+    {_row("全件（現行ENTRY_EXPIRE=3）", s_all)}
+  </tbody>
+</table>
+<details style="margin-bottom:16px">
+  <summary style="cursor:pointer;color:#60a5fa;font-size:0.85rem;padding:4px 0">月別内訳を表示</summary>
+  <table style="width:auto;min-width:500px;margin-top:8px">
+    <thead><tr>
+      <th style="text-align:left">月</th>
+      <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">翌日のみ</th>
+      <th colspan="3" style="color:#fbbf24;border-left:1px solid #334155;border-bottom:2px solid #fbbf24">2日目以降</th>
+    </tr><tr>
+      <th></th>
+      <th>件数</th><th>勝率</th><th>損益</th>
+      <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
+    </tr></thead>
+    <tbody>{month_rows}</tbody>
+  </table>
+</details>"""
+
+    _timing_html = _entry_timing_cmp_html(kpi_trades)
+
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
@@ -3797,6 +3903,7 @@ function switchTbd(id, tab) {{
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ ⑧ 損切り・追加</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -4008,6 +4115,10 @@ function switchTbd(id, tab) {{
 {_overlap_html}
 </div>
 
+<div id="analtab_{_dseq}_timing" class="analysis-tab-pane">
+{_timing_html}
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -4057,7 +4168,7 @@ function switchTbd(id, tab) {{
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','timing'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
