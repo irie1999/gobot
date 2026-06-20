@@ -3780,12 +3780,20 @@ function switchTbd(id, tab) {{
 
     _overlap_html = _overlap_analysis_html(_overlap_dropped)
 
-    # ── ⑨ エントリータイミング比較（翌日のみ vs 3日有効）────────────────────
+    # ── ⑨ エントリータイミング比較（2軸：注文保持期間 / エントリー遅延）────────
     def _entry_timing_cmp_html(trades_list):
-        """翌日のみ(days_to_fill=0) vs 2日目以降 vs 全件を比較するHTML。"""
+        """
+        2軸に分けて比較:
+        A) 注文保持期間 (ENTRY_EXPIRE): 注文を出した後、何日間有効にするか
+           EXPIRE=1: days_to_fill=0 のみ（翌日約定しなければキャンセル）
+           EXPIRE=2: days_to_fill<=1 （2日間有効）
+           EXPIRE=3: days_to_fill<=2 （3日間有効 = 現状）
+        B) エントリー遅延 (Delay): シグナルが出てから何日後に注文を出すか
+           delay=0: 全件（翌日から注文 = 現状）
+           delay=1: days_to_fill>=1 のみ（シグナル2日後から注文した場合の相当）
+           delay=2: days_to_fill>=2 のみ（シグナル3日後から注文した場合の相当）
+        """
         done = [t for t in trades_list if t.get("reason") not in ("発注中", "保有中")]
-        d0   = [t for t in done if (t.get("days_to_fill") or 0) == 0]
-        d1p  = [t for t in done if (t.get("days_to_fill") or 0) >= 1]
 
         def _st(ts):
             if not ts:
@@ -3798,21 +3806,19 @@ function switchTbd(id, tab) {{
                     "pf": gw/gl if gl else float("inf"),
                     "pnl":pnl,"avg":pnl/len(ts),"gw":gw,"gl":gl}
 
-        s_all = _st(done)
-        s_d0  = _st(d0)
-        s_d1p = _st(d1p)
-
         def _pf_str(v):
             return "∞" if v == float("inf") else f"{v:.2f}"
 
-        def _row(label, s, highlight=False):
+        def _row(label, s, highlight=False, note=""):
             bg   = "background:#0c1f3a;" if highlight else ""
             pcol = "#4ade80" if s["pnl"] >= 0 else "#f87171"
             wcol = "#4ade80" if s["wr"] >= 55 else ("#fbbf24" if s["wr"] >= 45 else "#f87171")
             pfc  = "#4ade80" if s["pf"] >= 1.5 else ("#fbbf24" if s["pf"] >= 1.0 else "#f87171")
+            note_td = f'<td style="color:#64748b;font-size:0.75rem">{note}</td>' if note is not None else ""
             return (f'<tr style="{bg}">'
                     f'<td style="font-weight:700;color:#e2e8f0;padding:8px 12px">{label}</td>'
-                    f'<td style="text-align:right;color:#94a3b8">{s["n"]}件</td>'
+                    + (note_td if note is not None else "")
+                    + f'<td style="text-align:right;color:#94a3b8">{s["n"]}件</td>'
                     f'<td style="text-align:right;color:{wcol};font-weight:700">{s["wr"]:.1f}%</td>'
                     f'<td style="text-align:right;color:{pfc};font-weight:700">{_pf_str(s["pf"])}</td>'
                     f'<td style="text-align:right;color:#4ade80">+{s["gw"]:,.0f}円</td>'
@@ -3821,66 +3827,160 @@ function switchTbd(id, tab) {{
                     f'<td style="text-align:right;color:{pcol}">{s["avg"]:+,.0f}円</td>'
                     f'</tr>')
 
-        # 月別比較
-        from collections import defaultdict as _dd9
-        by_ym_d0  = _dd9(list)
-        by_ym_d1p = _dd9(list)
-        for t in done:
-            ym = str(t.get("entry_d_raw") or t.get("exit_d_raw") or "")[:7]
-            if not ym: continue
-            if (t.get("days_to_fill") or 0) == 0:
-                by_ym_d0[ym].append(t)
-            else:
-                by_ym_d1p[ym].append(t)
+        # ── A: 注文保持期間（ENTRY_EXPIRE）分析 ──
+        expire1 = [t for t in done if (t.get("days_to_fill") or 0) == 0]
+        expire2 = [t for t in done if (t.get("days_to_fill") or 0) <= 1]
+        expire3 = done  # 全件 = 現状のENTRY_EXPIRE=3
 
-        all_ym = sorted(set(list(by_ym_d0) + list(by_ym_d1p)), reverse=True)
-        month_rows = ""
+        s_exp1 = _st(expire1)
+        s_exp2 = _st(expire2)
+        s_exp3 = _st(expire3)
+
+        expire_th = '<th style="text-align:left">区分（ENTRY_EXPIRE）</th><th style="color:#64748b;font-size:0.8rem;text-align:left">説明</th>'
+        expire_rows = (
+            _row("EXPIRE=1（翌日のみ有効）", s_exp1, note="翌日に約定しなければキャンセル")
+            + _row("EXPIRE=2（2日間有効）",   s_exp2, note="翌日・翌々日の約定を含む")
+            + _row("EXPIRE=3（3日間有効）★現状", s_exp3, highlight=True, note="現行設定")
+        )
+
+        # ── B: エントリー遅延（Delay）分析 ──
+        delay0 = done                                                           # 全件（翌日入り）
+        delay1 = [t for t in done if (t.get("days_to_fill") or 0) >= 1]       # 2日後から入り
+        delay2 = [t for t in done if (t.get("days_to_fill") or 0) >= 2]       # 3日後から入り
+
+        s_del0 = _st(delay0)
+        s_del1 = _st(delay1)
+        s_del2 = _st(delay2)
+
+        delay_th = '<th style="text-align:left">区分（Delay）</th><th style="color:#64748b;font-size:0.8rem;text-align:left">説明</th>'
+        delay_rows = (
+            _row("delay=0（翌日から注文）★現状", s_del0, highlight=True, note="シグナル翌日に逆指値注文を出す（現行）")
+            + _row("delay=1（2日後から注文）",   s_del1, note="シグナル翌日を見送り、2日後に注文")
+            + _row("delay=2（3日後から注文）",   s_del2, note="シグナルから2日見送り、3日後に注文")
+        )
+
+        common_th_tail = '<th>件数</th><th>勝率</th><th>PF</th><th style="color:#4ade80">総利益</th><th style="color:#f87171">総損失</th><th>損益合計</th><th>平均損益</th>'
+
+        # ── 月別: 注文保持期間 ──
+        from collections import defaultdict as _dd9
+        by_ym_exp = {1: _dd9(list), 2: _dd9(list), 3: _dd9(list)}
+        for t in done:
+            ym  = str(t.get("entry_d_raw") or t.get("exit_d_raw") or "")[:7]
+            dtf = t.get("days_to_fill") or 0
+            if not ym: continue
+            by_ym_exp[3][ym].append(t)
+            if dtf <= 1: by_ym_exp[2][ym].append(t)
+            if dtf == 0: by_ym_exp[1][ym].append(t)
+
+        all_ym = sorted(set(by_ym_exp[3].keys()), reverse=True)
+        expire_month_rows = ""
         for ym in all_ym:
-            sd0  = _st(by_ym_d0[ym])
-            sd1p = _st(by_ym_d1p[ym])
-            pc0  = "#4ade80" if sd0["pnl"] >= 0 else "#f87171"
-            pc1p = "#4ade80" if sd1p["pnl"] >= 0 else "#f87171"
-            month_rows += (
-                f'<tr>'
-                f'<td style="font-weight:700;color:#e2e8f0;padding:6px 10px">{ym[:4]}/{ym[5:7]}月</td>'
-                f'<td style="text-align:right;color:#94a3b8">{sd0["n"]}件</td>'
-                f'<td style="text-align:right;color:#94a3b8">{sd0["wr"]:.0f}%</td>'
-                f'<td style="text-align:right;color:{pc0};font-weight:700">{sd0["pnl"]:+,.0f}円</td>'
-                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8;padding:6px 10px">{sd1p["n"]}件</td>'
-                f'<td style="text-align:right;color:#94a3b8">{sd1p["wr"]:.0f}%</td>'
-                f'<td style="text-align:right;color:{pc1p};font-weight:700">{sd1p["pnl"]:+,.0f}円</td>'
+            s1 = _st(by_ym_exp[1][ym])
+            s2 = _st(by_ym_exp[2][ym])
+            s3 = _st(by_ym_exp[3][ym])
+            def _pc(s): return "#4ade80" if s["pnl"] >= 0 else "#f87171"
+            expire_month_rows += (
+                f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">{ym[:4]}/{ym[5:7]}月</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s1["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s1["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s1)};font-weight:700">{s1["pnl"]:+,.0f}円</td>'
+                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8">{s2["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s2["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s2)};font-weight:700">{s2["pnl"]:+,.0f}円</td>'
+                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8">{s3["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s3["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s3)};font-weight:700">{s3["pnl"]:+,.0f}円</td>'
                 f'</tr>'
             )
 
-        return f"""<h2>⑨ エントリータイミング比較（翌日のみ vs 2日目以降）</h2>
-<p class="footnote">翌日のみ = days_to_fill=0（シグナル翌日に逆指値が発動した取引）。2日目以降 = ENTRY_EXPIRE=3の追加分。</p>
-<table style="width:auto;min-width:600px;margin-bottom:20px">
-  <thead><tr>
-    <th style="text-align:left">区分</th>
-    <th>件数</th><th>勝率</th><th>PF</th>
-    <th style="color:#4ade80">総利益</th>
-    <th style="color:#f87171">総損失</th>
-    <th>損益合計</th><th>平均損益</th>
-  </tr></thead>
-  <tbody>
-    {_row("翌日のみ（delay=0）", s_d0, highlight=True)}
-    {_row("2日目以降（delay≥1）", s_d1p)}
-    {_row("全件（現行ENTRY_EXPIRE=3）", s_all)}
-  </tbody>
+        # ── 月別: エントリー遅延 ──
+        by_ym_del = {0: _dd9(list), 1: _dd9(list), 2: _dd9(list)}
+        for t in done:
+            ym  = str(t.get("entry_d_raw") or t.get("exit_d_raw") or "")[:7]
+            dtf = t.get("days_to_fill") or 0
+            if not ym: continue
+            by_ym_del[0][ym].append(t)
+            if dtf >= 1: by_ym_del[1][ym].append(t)
+            if dtf >= 2: by_ym_del[2][ym].append(t)
+
+        delay_month_rows = ""
+        for ym in all_ym:
+            s0 = _st(by_ym_del[0][ym])
+            s1 = _st(by_ym_del[1][ym])
+            s2 = _st(by_ym_del[2][ym])
+            def _pc(s): return "#4ade80" if s["pnl"] >= 0 else "#f87171"
+            delay_month_rows += (
+                f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">{ym[:4]}/{ym[5:7]}月</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s0["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s0["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s0)};font-weight:700">{s0["pnl"]:+,.0f}円</td>'
+                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8">{s1["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s1["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s1)};font-weight:700">{s1["pnl"]:+,.0f}円</td>'
+                f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8">{s2["n"]}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{s2["wr"]:.0f}%</td>'
+                f'<td style="text-align:right;color:{_pc(s2)};font-weight:700">{s2["pnl"]:+,.0f}円</td>'
+                f'</tr>'
+            )
+
+        return f"""<h2>⑨ エントリータイミング比較</h2>
+<div style="background:#1a2744;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:0.82rem;color:#94a3b8;line-height:1.7">
+  <b style="color:#e2e8f0">2つの独立した軸で比較します：</b><br>
+  <b style="color:#60a5fa">A. 注文保持期間（ENTRY_EXPIRE）</b>：注文を出した後、何日間有効にするか。
+  翌日に約定しなければ3日間保持するか即キャンセルするかの比較。<br>
+  <b style="color:#fbbf24">B. エントリー遅延（Delay）</b>：シグナルが出てから何日後に注文を出すか。
+  翌日すぐ出すか、1〜2日見送ってから出すかの比較。
+</div>
+
+<h3 style="color:#60a5fa;margin:0 0 6px">A. 注文保持期間（ENTRY_EXPIRE）</h3>
+<p class="footnote">days_to_fill=0が翌日約定。EXPIRE=1は翌日に約定しなければキャンセル、EXPIRE=3は現行設定（3日間有効）。</p>
+<table style="width:auto;min-width:650px;margin-bottom:12px">
+  <thead><tr>{expire_th}{common_th_tail}</tr></thead>
+  <tbody>{expire_rows}</tbody>
+</table>
+<details style="margin-bottom:20px">
+  <summary style="cursor:pointer;color:#60a5fa;font-size:0.85rem;padding:4px 0">月別内訳（注文保持期間）を表示</summary>
+  <table style="width:auto;min-width:560px;margin-top:8px">
+    <thead>
+      <tr>
+        <th style="text-align:left">月</th>
+        <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">EXPIRE=1（翌日のみ）</th>
+        <th colspan="3" style="color:#fbbf24;border-left:1px solid #334155;border-bottom:2px solid #fbbf24">EXPIRE=2（2日間）</th>
+        <th colspan="3" style="color:#e2e8f0;border-left:1px solid #334155;border-bottom:2px solid #475569">EXPIRE=3（現状）</th>
+      </tr><tr>
+        <th></th>
+        <th>件数</th><th>勝率</th><th>損益</th>
+        <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
+        <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
+      </tr>
+    </thead>
+    <tbody>{expire_month_rows}</tbody>
+  </table>
+</details>
+
+<h3 style="color:#fbbf24;margin:0 0 6px">B. エントリー遅延（Delay）</h3>
+<p class="footnote">delay=0が現状（翌日に注文）。delay=1は「シグナル翌日を見送り2日後に注文」相当、delay=2は「3日後から注文」相当。件数は累積でなく各delay時点で初めて注文を出した場合に含まれる取引。</p>
+<table style="width:auto;min-width:650px;margin-bottom:12px">
+  <thead><tr>{delay_th}{common_th_tail}</tr></thead>
+  <tbody>{delay_rows}</tbody>
 </table>
 <details style="margin-bottom:16px">
-  <summary style="cursor:pointer;color:#60a5fa;font-size:0.85rem;padding:4px 0">月別内訳を表示</summary>
-  <table style="width:auto;min-width:500px;margin-top:8px">
-    <thead><tr>
-      <th style="text-align:left">月</th>
-      <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">翌日のみ</th>
-      <th colspan="3" style="color:#fbbf24;border-left:1px solid #334155;border-bottom:2px solid #fbbf24">2日目以降</th>
-    </tr><tr>
-      <th></th>
-      <th>件数</th><th>勝率</th><th>損益</th>
-      <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
-    </tr></thead>
-    <tbody>{month_rows}</tbody>
+  <summary style="cursor:pointer;color:#fbbf24;font-size:0.85rem;padding:4px 0">月別内訳（エントリー遅延）を表示</summary>
+  <table style="width:auto;min-width:560px;margin-top:8px">
+    <thead>
+      <tr>
+        <th style="text-align:left">月</th>
+        <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">delay=0（翌日入り・現状）</th>
+        <th colspan="3" style="color:#fbbf24;border-left:1px solid #334155;border-bottom:2px solid #fbbf24">delay=1（2日後から）</th>
+        <th colspan="3" style="color:#e2e8f0;border-left:1px solid #334155;border-bottom:2px solid #475569">delay=2（3日後から）</th>
+      </tr><tr>
+        <th></th>
+        <th>件数</th><th>勝率</th><th>損益</th>
+        <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
+        <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
+      </tr>
+    </thead>
+    <tbody>{delay_month_rows}</tbody>
   </table>
 </details>"""
 
