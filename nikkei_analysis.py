@@ -4069,6 +4069,167 @@ function switchTbd(id, tab) {{
   </table>
 </details>"""
 
+        # ── D: entry_atr_mult 比較（em=0.0/0.3/0.5/1.0 を並列バックテスト）──
+        _em_cmp_section = ""
+        if _rbt is not None and _fetch9 is not None:
+            _EM_VALS = [0.0, 0.3, 0.5, 1.0]
+            # 固有 (symbol, strategy) → name を収集（Section C と同じセット）
+            _sym_strat_em: dict = {}
+            for _tem in done:
+                _kem = (_tem.get("symbol"), _tem.get("strategy"))
+                if _kem[0] and _kem[1] and _kem not in _sym_strat_em:
+                    _sym_strat_em[_kem] = _tem.get("name", _kem[0])
+
+            def _get_params_em(strat_em):
+                for _mem, _ete in [(_stop, "stop"), (_brk, "stop")]:
+                    if hasattr(_mem, "STRATEGY_PARAMS") and strat_em in _mem.STRATEGY_PARAMS:
+                        _cf_em, _em_em, _sm_em, _tm_em = _mem.STRATEGY_PARAMS[strat_em]
+                        return _cf_em, _em_em, _sm_em, _tm_em, _ete
+                for _mne in ["check_signals_short", "check_signals_short_breakout"]:
+                    try:
+                        import importlib as _ile
+                        _mode = _ile.import_module(_mne)
+                        if strat_em in _mode.STRATEGY_PARAMS:
+                            _cf_em, _em_em, _sm_em, _tm_em = _mode.STRATEGY_PARAMS[strat_em]
+                            return _cf_em, _em_em, _sm_em, _tm_em, "stop_sell"
+                    except Exception:
+                        pass
+                return None
+
+            def _run_one_em(args_em):
+                (_se, _ste), _nme, _em_val = args_em
+                _pe = _get_params_em(_ste)
+                if not _pe:
+                    return _em_val, []
+                _cfe, _eme, _sme, _tme, _ete = _pe
+                _dfe = _fetch9(_se, days + 60)
+                if _dfe is None:
+                    return _em_val, []
+                try:
+                    _re = _rbt(_se, _nme, _dfe, _cfe, _em_val, _sme, _tme, days, _ste,
+                               entry_type=_ete)
+                    return _em_val, (_re.get("trade_log", []) if _re else [])
+                except Exception:
+                    return _em_val, []
+
+            from concurrent.futures import ThreadPoolExecutor as _TPEM
+            _trades_by_em: dict = {em: [] for em in _EM_VALS}
+            _all_jobs_em = [
+                (item_em, _em_v)
+                for item_em in _sym_strat_em.items()
+                for _em_v in _EM_VALS
+            ]
+            _n_jobs_em = len(_sym_strat_em) * len(_EM_VALS)
+            print(f"[⑨ em比較] {len(_sym_strat_em)}銘柄×戦略 × {len(_EM_VALS)}パターン = {_n_jobs_em}件 バックテスト中…")
+            with _TPEM(max_workers=workers) as _exe:
+                _futs_em = {}
+                for (_sym_em, _nm_em), _em_v in _all_jobs_em:
+                    _futs_em[_exe.submit(_run_one_em, (tuple(_sym_em), _nm_em, _em_v))] = None
+                for _fe in _futs_em:
+                    try:
+                        _em_res, _tlog_em = _fe.result()
+                        _trades_by_em[_em_res].extend(_tlog_em)
+                    except Exception:
+                        pass
+            print(f"[⑨ em比較] 完了: " + " / ".join(f"em={e}: {len(_trades_by_em[e])}件" for e in _EM_VALS))
+
+            def _done_em(tl): return [t for t in tl if t.get("reason") not in ("発注中", "保有中")]
+            _s_em = {e: _st(_done_em(_trades_by_em[e])) for e in _EM_VALS}
+
+            def _cmp_row_em(label, s, highlight=False):
+                bg   = "background:#0c1f3a;" if highlight else ""
+                pcol = "#4ade80" if s["pnl"] >= 0 else "#f87171"
+                wcol = "#4ade80" if s["wr"] >= 55 else ("#fbbf24" if s["wr"] >= 45 else "#f87171")
+                pfc  = "#4ade80" if s["pf"] >= 1.5 else ("#fbbf24" if s["pf"] >= 1.0 else "#f87171")
+                pfs  = "∞" if s["pf"] == float("inf") else f'{s["pf"]:.2f}'
+                return (f'<tr style="{bg}">'
+                        f'<td style="font-weight:700;color:#e2e8f0;padding:8px 12px">{label}</td>'
+                        f'<td style="text-align:right;color:#94a3b8">{s["n"]}件</td>'
+                        f'<td style="text-align:right;color:{wcol};font-weight:700">{s["wr"]:.1f}%</td>'
+                        f'<td style="text-align:right;color:{pfc};font-weight:700">{pfs}</td>'
+                        f'<td style="text-align:right;color:#4ade80">+{s["gw"]:,.0f}円</td>'
+                        f'<td style="text-align:right;color:#f87171">-{s["gl"]:,.0f}円</td>'
+                        f'<td style="text-align:right;color:{pcol};font-weight:700">{s["pnl"]:+,.0f}円</td>'
+                        f'<td style="text-align:right;color:{pcol}">{s["avg"]:+,.0f}円</td>'
+                        f'</tr>')
+
+            # 現状のem（全戦略0.0で統一）を現状フラグに使う
+            _cur_em = 0.0
+            _em_labels = {0.0: "em=0.0（終値ちょうど・現状）", 0.3: "em=0.3（ATR×0.3上）", 0.5: "em=0.5（ATR×0.5上）", 1.0: "em=1.0（ATR×1.0上）"}
+            _em_rows_html = ""
+            for _ev in _EM_VALS:
+                _lbl = _em_labels.get(_ev, f"em={_ev}")
+                if _ev == _cur_em:
+                    _lbl += " ★現状"
+                _em_rows_html += _cmp_row_em(_lbl, _s_em[_ev], highlight=(_ev == _cur_em))
+
+            # 月別比較
+            from collections import defaultdict as _dd_em
+            _by_ym_em = {e: _dd_em(list) for e in _EM_VALS}
+            for _eve in _EM_VALS:
+                for _tem2 in _done_em(_trades_by_em[_eve]):
+                    _sd_em = _tem2.get("signal_dt")
+                    _ym_em = str(_sd_em)[:7] if _sd_em else ""
+                    if _ym_em:
+                        _by_ym_em[_eve][_ym_em].append(_tem2)
+            _all_ym_em = sorted(set().union(*[set(_by_ym_em[e].keys()) for e in _EM_VALS]), reverse=True)
+            _em_col_colors = {0.0: "#60a5fa", 0.3: "#34d399", 0.5: "#fbbf24", 1.0: "#f87171"}
+            _em_month_rows = ""
+            for _ymv in _all_ym_em:
+                _sm_em_m = {e: _st(_by_ym_em[e][_ymv]) for e in _EM_VALS}
+                _cells_em = ""
+                for _i_em, _evv in enumerate(_EM_VALS):
+                    _sep_em = ' style="border-left:1px solid #334155"' if _i_em > 0 else ""
+                    _pce = "#4ade80" if _sm_em_m[_evv]["pnl"] >= 0 else "#f87171"
+                    _cells_em += (
+                        f'<td{_sep_em}><span style="color:#94a3b8">{_sm_em_m[_evv]["n"]}件</span></td>'
+                        f'<td style="text-align:right;color:#94a3b8">{_sm_em_m[_evv]["wr"]:.0f}%</td>'
+                        f'<td style="text-align:right;color:{_pce};font-weight:700">{_sm_em_m[_evv]["pnl"]:+,.0f}円</td>'
+                    )
+                _em_month_rows += (
+                    f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">{_ymv[:4]}/{_ymv[5:7]}月</td>'
+                    + _cells_em + "</tr>"
+                )
+
+            _em_th_cols = ""
+            for _i_e, _ev3 in enumerate(_EM_VALS):
+                _sep3 = 'border-left:1px solid #334155;' if _i_e > 0 else ''
+                _c3 = _em_col_colors[_ev3]
+                _em_th_cols += f'<th colspan="3" style="{_sep3}color:{_c3};border-bottom:2px solid {_c3}">em={_ev3}</th>'
+            _em_th_sub = ""
+            for _i_e2, _ev4 in enumerate(_EM_VALS):
+                _sep4 = ' style="border-left:1px solid #334155"' if _i_e2 > 0 else ""
+                _em_th_sub += f'<th{_sep4}>件数</th><th>勝率</th><th>損益</th>'
+
+            _em_cmp_section = f"""
+<h3 style="color:#f97316;margin:20px 0 6px">D. エントリー閾値（entry_atr_mult）比較（em=0.0 / 0.3 / 0.5 / 1.0 並列バックテスト）</h3>
+<p class="footnote">em=0.0 は終値ちょうどで逆指値（翌日少しでも上がれば約定）。em=0.5 なら前日ATR×0.5 上を超えないと約定しない（ブレイクアウト確認）。
+sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通設定（em=0.0）。</p>
+<table style="width:auto;min-width:700px;margin-bottom:12px">
+  <thead><tr>
+    <th style="text-align:left">設定</th>
+    <th>件数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">総利益</th><th style="color:#f87171">総損失</th>
+    <th>損益合計</th><th>平均損益</th>
+  </tr></thead>
+  <tbody>{_em_rows_html}</tbody>
+</table>
+<details style="margin-bottom:16px">
+  <summary style="cursor:pointer;color:#f97316;font-size:0.85rem;padding:4px 0">月別内訳（em=0.0/0.3/0.5/1.0）を表示</summary>
+  <table style="width:auto;min-width:700px;margin-top:8px">
+    <thead>
+      <tr>
+        <th style="text-align:left">月</th>
+        {_em_th_cols}
+      </tr><tr>
+        <th></th>
+        {_em_th_sub}
+      </tr>
+    </thead>
+    <tbody>{_em_month_rows}</tbody>
+  </table>
+</details>"""
+
         _rolling_badge = (
             f'<span style="background:#7c3aed;color:#fff;border-radius:4px;padding:2px 8px;font-size:0.78rem;margin-left:8px">ローリング有効（最大{_RE}回更新）</span>'
             if _RE > 0 else
@@ -4140,7 +4301,8 @@ function switchTbd(id, tab) {{
     <tbody>{delay_month_rows}</tbody>
   </table>
 </details>
-{_rolling_cmp_section}"""
+{_rolling_cmp_section}
+{_em_cmp_section}"""
 
     _timing_html = _entry_timing_cmp_html(kpi_trades)
 
