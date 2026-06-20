@@ -258,13 +258,15 @@ def _trim_incomplete_bar(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].copy()
 
 
-def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | None:
+def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
+          min_start_date=None) -> pd.DataFrame | None:
     """永続キャッシュ優先・フォールバックでダウンロード。
 
     キャッシュ判定:
       - キャッシュ内 df の最新バー日付 >= _expected_latest_bar_date() なら有効
       - そうでなければ再取得 (引け前作成 → 引け後実行 のパターンも自動更新)
       - 未確定バー (15:00 JST 前の今日のバー) は読み込み時に除去する
+      - min_start_date 指定時: キャッシュの最古バーがその日より新しければ再取得
     """
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists():
@@ -280,17 +282,34 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS) -> pd.DataFrame | Non
                 price_range = float(df["close"].max() - df["close"].min())
                 valid_range = price_range > 0.01 * float(df["close"].mean())
                 if latest_date >= expected and valid_range:
-                    # 株価異常値を除去
-                    pct_chg = df["close"].pct_change().abs()
-                    df = df[pct_chg <= 0.5].copy()
-                    if len(df) >= 210:
-                        return df
+                    # min_start_date チェック: キャッシュが十分遡っているか確認
+                    if min_start_date is not None:
+                        oldest_bar  = df.index[0]
+                        oldest_date = oldest_bar.date() if hasattr(oldest_bar, "date") else oldest_bar
+                        if oldest_date > min_start_date:
+                            pass  # キャッシュが足りない → fall through で再取得
+                        else:
+                            # 株価異常値を除去
+                            pct_chg = df["close"].pct_change().abs()
+                            df = df[pct_chg <= 0.5].copy()
+                            if len(df) >= 210:
+                                return df
+                    else:
+                        # 株価異常値を除去
+                        pct_chg = df["close"].pct_change().abs()
+                        df = df[pct_chg <= 0.5].copy()
+                        if len(df) >= 210:
+                            return df
                 # 古いキャッシュ → fall through で再取得
         except Exception:
             pass
 
     buf_days  = 200 + 30
     total_cal = int((backtest_days + buf_days) * 1.5)
+    # min_start_date 指定時: 必要なカレンダー日数まで拡張（OOS用5年データ対応）
+    if min_start_date is not None:
+        days_needed = (datetime.now(JST).date() - min_start_date).days + buf_days + 60
+        total_cal = max(total_cal, days_needed)
     now_jst   = datetime.now(JST)
     dl_start  = (now_jst - timedelta(days=total_cal)).strftime("%Y-%m-%d")
     dl_end    = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")

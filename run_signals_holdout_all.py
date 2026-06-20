@@ -63,6 +63,10 @@ _pre.add_argument("--output-suffix", type=str, default="",
                   help="出力HTMLファイル名にサフィックスを付ける (内部用・--bothから自動設定)")
 _pre.add_argument("--rolling", type=int, default=0,
                   help="ローリング逆指値: 未約定時に終値で注文価格を更新する最大回数 (例: --rolling 2)")
+_pre.add_argument("--oos-until", type=str, default=None,
+                  help="OOS検証終了日 (YYYY-MM-DD). 指定時のみOOS検証HTMLを生成する")
+_pre.add_argument("--oos-days",  type=int, default=365,
+                  help="OOS検証期間（日数）. デフォルト365日")
 _args, _ = _pre.parse_known_args()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
@@ -1074,3 +1078,52 @@ print(f"\nレポート生成完了: {out_path.resolve()}")
 if not _args.no_browser:
     from _open_html import open_html
     open_html(out_path.resolve())
+
+# ── OOS検証 (--oos-until 指定時のみ) ──────────────────────────────────────────
+if _args.oos_until:
+    from datetime import date as _date_cls
+    try:
+        _oos_until_date = _date_cls.fromisoformat(_args.oos_until)
+    except ValueError:
+        print(f"[ERROR] --oos-until の日付形式が不正です: {_args.oos_until} (YYYY-MM-DD形式で指定してください)")
+        _oos_until_date = None
+
+    if _oos_until_date is not None:
+        print(f"\nOOS検証開始: 訓練前データ {_oos_until_date - timedelta(days=_args.oos_days)} 〜 {_oos_until_date} ({_args.oos_days}日間)")
+        _na._PNL_CONFIGS[:] = _all_configs
+        try:
+            _oos_html_body = _na._oos_pnl_html(_oos_until_date, _args.oos_days, _args.workers)
+        except Exception as _oos_e:
+            print(f"[WARN] OOS検証エラー: {_oos_e}")
+            _oos_html_body = f'<p style="color:#f87171;padding:20px">OOS検証エラー: {_oos_e}</p>'
+
+        _oos_html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OOS検証 {_oos_until_date} ({_args.oos_days}日)</title>
+<style>
+{_na.CSS}
+body {{ background:#0f172a; color:#e2e8f0; }}
+table td, table th {{ border:1px solid #1e293b; padding:6px 10px; }}
+</style>
+</head>
+<body>
+<h1 style="color:#38bdf8">OOS検証レポート（訓練前データ検証）</h1>
+<p style="color:#64748b">
+  検証終了日: {_oos_until_date} &nbsp;|&nbsp;
+  検証期間: {_args.oos_days}日 &nbsp;|&nbsp;
+  workers={_args.workers}
+</p>
+{_oos_html_body}
+</body>
+</html>"""
+
+        _oos_out = Path(f"oos_analysis_{_oos_until_date}_{_args.oos_days}d_{_cache_date}.html")
+        _oos_out.write_text(_oos_html, encoding="utf-8")
+        print(f"OOS検証レポート生成完了: {_oos_out.resolve()}")
+
+        if not _args.no_browser:
+            from _open_html import open_html
+            open_html(_oos_out.resolve())

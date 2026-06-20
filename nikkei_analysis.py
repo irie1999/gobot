@@ -2041,6 +2041,251 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 
 
+def _oos_pnl_html(until_date, days: int, workers: int) -> str:
+    """OOS（訓練前データ）バックテスト検証HTML。
+
+    until_date: 検証終了日 (date オブジェクト)
+    days:       検証期間（日数）
+    workers:    並列数
+
+    WATCHLIST × 全戦略 を until_date より前の days 日間でバックテストし、
+    訓練前データでの戦略性能を検証する。
+    """
+    if not _SIGNALS_AVAILABLE:
+        return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
+
+    from backtest_limit_entry import (
+        fetch as _oos_fetch,
+        run_limit_backtest as _oos_rbt,
+        _TODAY as _oos_today,
+    )
+    from collections import defaultdict
+
+    since = until_date - timedelta(days=days)
+    backtest_days_adj = (_oos_today - since).days
+
+    # 全configの全 (sym, strat) ペアを収集（デデュップ）
+    all_tasks: list[tuple] = []  # (sym, name, strat, entry_type)
+    seen_tasks: set = set()
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg["stop_wl"]:
+            key = (sym, strat)
+            if key not in seen_tasks:
+                seen_tasks.add(key)
+                is_short = strat.endswith("_S")
+                etype = "stop_sell" if is_short else "stop"
+                all_tasks.append((sym, name, strat, etype))
+        for sym, name, strat in cfg["brk_wl"]:
+            key = (sym, strat)
+            if key not in seen_tasks:
+                seen_tasks.add(key)
+                is_short = strat.endswith("_S")
+                etype = "stop_sell" if is_short else "stop"
+                all_tasks.append((sym, name, strat, etype))
+
+    def _run_one(sym: str, name: str, strat: str, etype: str) -> list[dict]:
+        """1銘柄×1戦略のOOSバックテストを実行して trade_log を返す。"""
+        try:
+            mod = _mod_for(strat)
+            params = mod.STRATEGY_PARAMS.get(strat)
+            if params is None:
+                return []
+            calc_fn, em, sm, tm = params
+            # min_start_date を指定して5年分のデータを取得
+            df_full = _oos_fetch(sym, backtest_days_adj + 60, min_start_date=since)
+            if df_full is None or df_full.empty:
+                return []
+            # until_date より後のデータを除去（未来データ漏洩防止）
+            df_oos = df_full[df_full.index <= pd.Timestamp(until_date)].copy()
+            if df_oos.empty or len(df_oos) < 30:
+                return []
+            result = _oos_rbt(
+                sym, name, df_oos, calc_fn, em, sm, tm,
+                backtest_days_adj, strat,
+                entry_type=etype,
+            )
+            if result is None:
+                return []
+            period_results = result.get("period_results", {})
+            if not period_results:
+                return []
+            max_period = max(period_results.keys())
+            trade_log  = period_results[max_period].get("trade_log", [])
+            # 未決済行を除外
+            finished = [
+                t for t in trade_log
+                if t.get("reason") not in ("発注中", "保有中")
+                and t.get("exit_dt") is not None
+            ]
+            # signal_dt でのデデュップ（同一シグナルの重複排除）
+            seen_sig: set = set()
+            deduped = []
+            for t in finished:
+                sdt = t.get("signal_dt")
+                sk = (sym, strat, sdt)
+                if sk not in seen_sig:
+                    seen_sig.add(sk)
+                    deduped.append({**t, "symbol": sym, "name": name, "strategy": strat})
+            return deduped
+        except Exception:
+            return []
+
+    # 並列実行
+    all_trades: list[dict] = []
+    with _TPE(max_workers=workers) as ex:
+        futs = {ex.submit(_run_one, sym, name, strat, etype): None
+                for sym, name, strat, etype in all_tasks}
+        for fut in _asc(futs):
+            try:
+                all_trades.extend(fut.result())
+            except Exception:
+                pass
+
+    # ── 戦略別サマリー集計 ─────────────────────────────────────────────────
+    strat_stats: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0,
+                                                          "win_pnl": 0.0, "loss_pnl": 0.0})
+    monthly: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+
+    for t in all_trades:
+        strat  = t.get("strategy", "")
+        pnl    = float(t.get("pnl", 0.0))
+        reason = t.get("reason", "")
+        is_win = pnl > 0
+        s = strat_stats[strat]
+        s["pnl"] += pnl
+        if is_win:
+            s["wins"]    += 1
+            s["win_pnl"] += pnl
+        else:
+            s["losses"]    += 1
+            s["loss_pnl"]  += pnl
+
+        sdt = t.get("signal_dt")
+        if sdt is not None:
+            mon = str(sdt)[:7] if isinstance(sdt, str) else sdt.strftime("%Y-%m")
+            m = monthly[mon]
+            m["pnl"] += pnl
+            if is_win:
+                m["wins"] += 1
+            else:
+                m["losses"] += 1
+
+    # ── 戦略別サマリー HTML ────────────────────────────────────────────────
+    def _pf(wins: int, win_pnl: float, losses: int, loss_pnl: float) -> str:
+        if losses == 0 or loss_pnl == 0:
+            return "∞" if win_pnl > 0 else "0"
+        pf_val = win_pnl / abs(loss_pnl)
+        return f"{pf_val:.2f}"
+
+    def _wr(wins: int, total: int) -> str:
+        if total == 0:
+            return "-"
+        return f"{wins / total * 100:.1f}%"
+
+    def _pnl_c(v: float) -> str:
+        return "#4ade80" if v > 0 else ("#f87171" if v < 0 else "#94a3b8")
+
+    strat_rows = ""
+    total_n = total_wins = 0
+    total_pnl = total_win_pnl = total_loss_pnl = 0.0
+    total_losses_cnt = 0
+
+    for strat in sorted(strat_stats.keys()):
+        s     = strat_stats[strat]
+        n     = s["wins"] + s["losses"]
+        pnl   = s["pnl"]
+        w     = s["wins"]
+        l     = s["losses"]
+        wc    = "#4ade80" if pnl > 0 else "#f87171"
+        avg   = pnl / n if n > 0 else 0.0
+        strat_rows += (
+            f'<tr>'
+            f'<td style="color:#e2e8f0">{strat}</td>'
+            f'<td style="color:#e2e8f0;text-align:center">{n}</td>'
+            f'<td style="text-align:center;color:#4ade80">{w}</td>'
+            f'<td style="text-align:center;color:#f87171">{l}</td>'
+            f'<td style="text-align:center">{_wr(w, n)}</td>'
+            f'<td style="text-align:center">{_pf(w, s["win_pnl"], l, s["loss_pnl"])}</td>'
+            f'<td style="text-align:right;color:{wc}">{pnl:+,.0f}円</td>'
+            f'<td style="text-align:right;color:{_pnl_c(avg)}">{avg:+,.0f}円</td>'
+            f'</tr>\n'
+        )
+        total_n += n; total_wins += w; total_losses_cnt += l
+        total_pnl += pnl; total_win_pnl += s["win_pnl"]; total_loss_pnl += s["loss_pnl"]
+
+    total_avg = total_pnl / total_n if total_n > 0 else 0.0
+    total_c   = "#4ade80" if total_pnl > 0 else "#f87171"
+    strat_rows += (
+        f'<tr style="border-top:2px solid #334155;font-weight:bold">'
+        f'<td style="color:#e2e8f0">合計</td>'
+        f'<td style="color:#e2e8f0;text-align:center">{total_n}</td>'
+        f'<td style="text-align:center;color:#4ade80">{total_wins}</td>'
+        f'<td style="text-align:center;color:#f87171">{total_losses_cnt}</td>'
+        f'<td style="text-align:center">{_wr(total_wins, total_n)}</td>'
+        f'<td style="text-align:center">{_pf(total_wins, total_win_pnl, total_losses_cnt, total_loss_pnl)}</td>'
+        f'<td style="text-align:right;color:{total_c}">{total_pnl:+,.0f}円</td>'
+        f'<td style="text-align:right;color:{_pnl_c(total_avg)}">{total_avg:+,.0f}円</td>'
+        f'</tr>\n'
+    )
+
+    # ── 月次内訳 HTML ──────────────────────────────────────────────────────
+    mon_rows = ""
+    for mon in sorted(monthly.keys()):
+        m   = monthly[mon]
+        n   = m["wins"] + m["losses"]
+        pnl = m["pnl"]
+        mc  = "#4ade80" if pnl > 0 else "#f87171"
+        mon_rows += (
+            f'<tr>'
+            f'<td style="color:#e2e8f0">{mon}</td>'
+            f'<td style="text-align:center;color:#4ade80">{m["wins"]}</td>'
+            f'<td style="text-align:center;color:#f87171">{m["losses"]}</td>'
+            f'<td style="text-align:center">{_wr(m["wins"], n)}</td>'
+            f'<td style="text-align:right;color:{mc}">{pnl:+,.0f}円</td>'
+            f'</tr>\n'
+        )
+
+    td = "border:1px solid #1e293b;padding:6px 10px"
+    th = f"{td};background:#1e293b;color:#94a3b8;text-align:center"
+
+    html = f"""
+<div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
+  <h3 style="color:#38bdf8;margin:0 0 4px">OOS検証（訓練前データ: {since} 〜 {until_date}）</h3>
+  <p style="color:#64748b;font-size:0.82rem;margin:0 0 16px">
+    WF訓練開始前データでの検証 — 銘柄選定に一切使用していない期間
+    ({days}日間 / 取引数: {total_n}件)
+  </p>
+
+  <h4 style="color:#94a3b8;margin:0 0 8px">戦略別サマリー</h4>
+  <table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-bottom:20px">
+    <thead><tr>
+      <th style="{th}">戦略</th>
+      <th style="{th}">取引数</th>
+      <th style="{th}">勝</th>
+      <th style="{th}">負</th>
+      <th style="{th}">勝率</th>
+      <th style="{th}">PF</th>
+      <th style="{th}">損益合計</th>
+      <th style="{th}">平均損益</th>
+    </tr></thead>
+    <tbody>{strat_rows}</tbody>
+  </table>
+
+  <h4 style="color:#94a3b8;margin:0 0 8px">月次内訳</h4>
+  <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+    <thead><tr>
+      <th style="{th}">月</th>
+      <th style="{th}">勝</th>
+      <th style="{th}">負</th>
+      <th style="{th}">勝率</th>
+      <th style="{th}">損益</th>
+    </tr></thead>
+    <tbody>{mon_rows if mon_rows else f'<tr><td colspan="5" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'}</tbody>
+  </table>
+</div>"""
+    return html
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None) -> str:
