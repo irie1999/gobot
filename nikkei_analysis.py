@@ -2106,11 +2106,7 @@ def _oos_pnl_html(until_date, days: int, workers: int) -> str:
             )
             if result is None:
                 return []
-            period_results = result.get("period_results", {})
-            if not period_results:
-                return []
-            max_period = max(period_results.keys())
-            trade_log  = period_results[max_period].get("trade_log", [])
+            trade_log = result.get("trade_log", [])
             # 未決済行を除外
             finished = [
                 t for t in trade_log
