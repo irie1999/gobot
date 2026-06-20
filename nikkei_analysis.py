@@ -2041,6 +2041,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 
 _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_html
+_pnl_bt_cache: dict = {}   # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
 
 
 def _wf_history_html(wf_until_date, workers: int) -> str:
@@ -3079,9 +3080,52 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
+    import gc
     from collections import defaultdict
     until = _TODAY
     since = until - timedelta(days=days)
+
+    # ── バックテスト結果キャッシュ ─────────────────────────────────────────────
+    # 同一セッション内で複数の days で呼ばれる場合、バックテスト自体は1回だけ実行する。
+    # days の違いは後段のフィルタで対応するため再実行は不要。
+    _sym_filter_key = tuple(sorted(symbol_filter)) if symbol_filter else None
+    _cfg_cache_key = (
+        tuple((c["label"], c["mode"], str(c.get("sm_tm")),
+               tuple(c.get("stop_wl", [])), tuple(c.get("brk_wl", []))) for c in _PNL_CONFIGS),
+        _sym_filter_key,
+    )
+
+    if _cfg_cache_key not in _pnl_bt_cache:
+        # バックテスト実行（初回のみ）
+        _cached_items_per_cfg: dict[str, list] = {}
+        for cfg in _PNL_CONFIGS:
+            _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
+            _wl_stop = cfg["stop_wl"]
+            _wl_brk  = cfg["brk_wl"]
+            if symbol_filter:
+                _wl_stop = [(s, n, st) for s, n, st in _wl_stop if s in symbol_filter]
+                _wl_brk  = [(s, n, st) for s, n, st in _wl_brk  if s in symbol_filter]
+            items: list[dict] = []
+            with _TPE(max_workers=workers) as ex:
+                futs = {}
+                for sym, name, strat in _wl_stop:
+                    futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
+                for sym, name, strat in _wl_brk:
+                    futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
+                for fut in _asc(futs):
+                    try:
+                        r = fut.result()
+                        if r:
+                            items.append(r)
+                    except Exception:
+                        pass
+            _cached_items_per_cfg[cfg["label"]] = items
+        _pnl_bt_cache[_cfg_cache_key] = _cached_items_per_cfg
+        gc.collect()
+        print(f"  [cache] バックテスト結果をキャッシュ済み (key={len(_pnl_bt_cache)}件)", flush=True)
+    else:
+        _cached_items_per_cfg = _pnl_bt_cache[_cfg_cache_key]
+        print(f"  [cache] バックテスト結果を再利用 (days={days})", flush=True)
 
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
@@ -3090,21 +3134,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     seen_global: set = set()
 
     for cfg in _PNL_CONFIGS:
-        _set_sig_params(cfg["mode"], cfg.get("sm_tm"))
-        items: list[dict] = []
-        with _TPE(max_workers=workers) as ex:
-            futs = {}
-            for sym, name, strat in cfg["stop_wl"]:
-                futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
-            for sym, name, strat in cfg["brk_wl"]:
-                futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
-            for fut in _asc(futs):
-                try:
-                    r = fut.result()
-                    if r:
-                        items.append(r)
-                except Exception:
-                    pass
+        items = _cached_items_per_cfg.get(cfg["label"], [])
 
         cfg_trades_map[cfg["label"]] = []  # このconfigの取引（重複なし=同一configでの重複のみ除外）
         for it in items:

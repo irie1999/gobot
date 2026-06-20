@@ -36,7 +36,7 @@ from pathlib import Path
 
 # ── 引数先読み ────────────────────────────────────────────────────────────────
 _pre = argparse.ArgumentParser(add_help=False)
-_pre.add_argument("--workers",    type=int,   default=4)
+_pre.add_argument("--workers",    type=int,   default=2)
 _pre.add_argument("--no-browser", action="store_true")
 _pre.add_argument("--date",       type=str,   default=None)
 _pre.add_argument("--min-score",  type=int,   default=0)
@@ -115,7 +115,7 @@ if _args.both and not _args.short:
         _base_cargs_no_price.append("--force")
     _base_cargs_no_price.append("--no-browser")
 
-    # 各価格範囲 × ロング/ショートを生成
+    # 各価格範囲 × ロング/ショートを生成（逐次実行でメモリ使用を抑える）
     _generated: dict = {}  # (direction, max_p) -> Path
     for _mp in _price_list:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
