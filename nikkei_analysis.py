@@ -4304,7 +4304,7 @@ function switchTbd(id, tab) {{
                 _tid9 = f"em9month_{_uid_em}_{_bi}"
                 _active_btn = "font-weight:700;border-bottom:2px solid" if _bi == 0 else "border-bottom:2px solid transparent"
                 _month_tabs_btns += (
-                    f'<button onclick="switchEm9Month(this,\'{_tid9}\')" '
+                    f'<button onclick="switchEm9_{_uid_em}(this,\'{_tid9}\')" '
                     f'style="background:none;border:none;cursor:pointer;padding:4px 10px;'
                     f'color:{_bcol9};font-size:0.82rem;{_active_btn} {_bcol9}">'
                     f'{_blbl9}</button>'
@@ -4347,9 +4347,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <summary style="cursor:pointer;color:#f97316;font-size:0.85rem;padding:4px 0">月別内訳（em=0.0/0.3/0.5/1.0）を表示</summary>
   <div style="margin:6px 0 4px;border-bottom:1px solid #334155;padding-bottom:4px">{_month_tabs_btns}</div>
   <script>
-  function switchEm9Month(btn, tid) {{
+  function switchEm9_{_uid_em}(btn, tid) {{
     var parent = btn.parentNode.parentNode;
-    var panes = parent.querySelectorAll('[id^="em9month_{_uid_em}_"]');
+    var panes = parent.querySelectorAll('div[id]');
     panes.forEach(function(p) {{ p.style.display = 'none'; }});
     document.getElementById(tid).style.display = 'block';
     var btns = btn.parentNode.querySelectorAll('button');
