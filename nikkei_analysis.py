@@ -4243,33 +4243,43 @@ function switchTbd(id, tab) {{
                         _lbl += " ★"
                     _em_bt_rows += _cmp_row_em(f"  {_lbl}", _bs, highlight=(_ev == _cur_em))
 
-            # 月別比較
+            # 月別比較（BT帯フィルター付き）
             from collections import defaultdict as _dd_em
-            _by_ym_em = {e: _dd_em(list) for e in _EM_VALS}
-            for _eve in _EM_VALS:
-                for _tem2 in _done_em(_trades_by_em[_eve]):
-                    _sd_em = _tem2.get("signal_dt")
-                    _ym_em = str(_sd_em)[:7] if _sd_em else ""
-                    if _ym_em:
-                        _by_ym_em[_eve][_ym_em].append(_tem2)
-            _all_ym_em = sorted(set().union(*[set(_by_ym_em[e].keys()) for e in _EM_VALS]), reverse=True)
             _em_col_colors = {0.0: "#60a5fa", 0.3: "#34d399", 0.5: "#fbbf24", 1.0: "#f87171"}
-            _em_month_rows = ""
-            for _ymv in _all_ym_em:
-                _sm_em_m = {e: _st(_by_ym_em[e][_ymv]) for e in _EM_VALS}
-                _cells_em = ""
-                for _i_em, _evv in enumerate(_EM_VALS):
-                    _sep_em = ' style="border-left:1px solid #334155"' if _i_em > 0 else ""
-                    _pce = "#4ade80" if _sm_em_m[_evv]["pnl"] >= 0 else "#f87171"
-                    _cells_em += (
-                        f'<td{_sep_em}><span style="color:#94a3b8">{_sm_em_m[_evv]["n"]}件</span></td>'
-                        f'<td style="text-align:right;color:#94a3b8">{_sm_em_m[_evv]["wr"]:.0f}%</td>'
-                        f'<td style="text-align:right;color:{_pce};font-weight:700">{_sm_em_m[_evv]["pnl"]:+,.0f}円</td>'
-                    )
-                _em_month_rows += (
-                    f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">{_ymv[:4]}/{_ymv[5:7]}月</td>'
-                    + _cells_em + "</tr>"
-                )
+
+            # BT帯ごとの月別テーブルを生成
+            _ALL_BANDS_FOR_MONTH = [
+                (0, 101, "全体", "#e2e8f0"),
+            ] + [(lo, hi, lbl, col) for lo, hi, lbl, col in _BT_BANDS]
+
+            def _make_month_table(blo9, bhi9):
+                _by_ym = {e: _dd_em(list) for e in _EM_VALS}
+                for _eve in _EM_VALS:
+                    for _tem2 in _tag_bt(_done_em(_trades_by_em[_eve])):
+                        if _tem2.get("_bt") is None and (blo9 > 0 or bhi9 < 101):
+                            continue  # BTスコアなしは全体以外から除外
+                        if not (blo9 <= (_tem2.get("_bt") or 0) < bhi9) and not (blo9 == 0 and bhi9 == 101):
+                            continue
+                        _sd = _tem2.get("signal_dt")
+                        _ym = str(_sd)[:7] if _sd else ""
+                        if _ym:
+                            _by_ym[_eve][_ym].append(_tem2)
+                _all_ym = sorted(set().union(*[set(_by_ym[e].keys()) for e in _EM_VALS]), reverse=True)
+                rows = ""
+                for _ymv in _all_ym:
+                    _sm_m = {e: _st(_by_ym[e][_ymv]) for e in _EM_VALS}
+                    _cells = ""
+                    for _i, _evv in enumerate(_EM_VALS):
+                        _sep = ' style="border-left:1px solid #334155"' if _i > 0 else ""
+                        _pce = "#4ade80" if _sm_m[_evv]["pnl"] >= 0 else "#f87171"
+                        _cells += (
+                            f'<td{_sep}><span style="color:#94a3b8">{_sm_m[_evv]["n"]}件</span></td>'
+                            f'<td style="text-align:right;color:#94a3b8">{_sm_m[_evv]["wr"]:.0f}%</td>'
+                            f'<td style="text-align:right;color:{_pce};font-weight:700">{_sm_m[_evv]["pnl"]:+,.0f}円</td>'
+                        )
+                    rows += (f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">'
+                             f'{_ymv[:4]}/{_ymv[5:7]}月</td>' + _cells + "</tr>")
+                return rows
 
             _em_th_cols = ""
             for _i_e, _ev3 in enumerate(_EM_VALS):
@@ -4280,6 +4290,32 @@ function switchTbd(id, tab) {{
             for _i_e2, _ev4 in enumerate(_EM_VALS):
                 _sep4 = ' style="border-left:1px solid #334155"' if _i_e2 > 0 else ""
                 _em_th_sub += f'<th{_sep4}>件数</th><th>勝率</th><th>損益</th>'
+
+            _thead_html = f"""<thead>
+      <tr><th style="text-align:left">月</th>{_em_th_cols}</tr>
+      <tr><th></th>{_em_th_sub}</tr>
+    </thead>"""
+
+            # 各BT帯のテーブルHTMLを生成
+            _uid_em = abs(id(done)) % 999999  # ユニークID（複数タブ衝突回避）
+            _month_tabs_btns = ""
+            _month_tabs_panes = ""
+            for _bi, (_blo9, _bhi9, _blbl9, _bcol9) in enumerate(_ALL_BANDS_FOR_MONTH):
+                _tid9 = f"em9month_{_uid_em}_{_bi}"
+                _active_btn = "font-weight:700;border-bottom:2px solid" if _bi == 0 else "border-bottom:2px solid transparent"
+                _month_tabs_btns += (
+                    f'<button onclick="switchEm9Month(this,\'{_tid9}\')" '
+                    f'style="background:none;border:none;cursor:pointer;padding:4px 10px;'
+                    f'color:{_bcol9};font-size:0.82rem;{_active_btn} {_bcol9}">'
+                    f'{_blbl9}</button>'
+                )
+                _rows9 = _make_month_table(_blo9, _bhi9)
+                _display9 = "block" if _bi == 0 else "none"
+                _month_tabs_panes += (
+                    f'<div id="{_tid9}" style="display:{_display9}">'
+                    f'<table style="width:auto;min-width:700px;margin-top:4px">'
+                    f'{_thead_html}<tbody>{_rows9}</tbody></table></div>'
+                )
 
             _em_cmp_section = f"""
 <h3 style="color:#f97316;margin:20px 0 6px">D. エントリー閾値（entry_atr_mult）比較（em=0.0 / 0.3 / 0.5 / 1.0 並列バックテスト）</h3>
@@ -4309,18 +4345,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </details>
 <details style="margin-bottom:16px">
   <summary style="cursor:pointer;color:#f97316;font-size:0.85rem;padding:4px 0">月別内訳（em=0.0/0.3/0.5/1.0）を表示</summary>
-  <table style="width:auto;min-width:700px;margin-top:8px">
-    <thead>
-      <tr>
-        <th style="text-align:left">月</th>
-        {_em_th_cols}
-      </tr><tr>
-        <th></th>
-        {_em_th_sub}
-      </tr>
-    </thead>
-    <tbody>{_em_month_rows}</tbody>
-  </table>
+  <div style="margin:6px 0 4px;border-bottom:1px solid #334155;padding-bottom:4px">{_month_tabs_btns}</div>
+  <script>
+  function switchEm9Month(btn, tid) {{
+    var parent = btn.parentNode.parentNode;
+    var panes = parent.querySelectorAll('[id^="em9month_{_uid_em}_"]');
+    panes.forEach(function(p) {{ p.style.display = 'none'; }});
+    document.getElementById(tid).style.display = 'block';
+    var btns = btn.parentNode.querySelectorAll('button');
+    btns.forEach(function(b) {{ b.style.borderBottom = '2px solid transparent'; b.style.fontWeight = 'normal'; }});
+    btn.style.borderBottom = '2px solid currentColor'; btn.style.fontWeight = '700';
+  }}
+  </script>
+  {_month_tabs_panes}
 </details>"""
 
         _rolling_badge = (
