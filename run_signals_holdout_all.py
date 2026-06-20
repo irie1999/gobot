@@ -281,7 +281,7 @@ if _cached_out.exists() and not _args.force:
         open_html(_cached_out.resolve())
     sys.exit(0)
 
-_PNL_PERIODS  = [30, 60, 90, 120, 150, 180]
+_PNL_PERIODS  = [30, 60, 90, 120, 150, 180, 270, 365]
 _DEFAULT_DAYS = _args.days if _args.days in _PNL_PERIODS else 180
 
 HOLDOUT_CONFIGS = [
@@ -697,12 +697,12 @@ try:
 except Exception as _e:
     print(f"[WARN] シグナルJSON書き出し失敗: {_e}", flush=True)
 
-# ── 損益タブ HTML: 全設定統合 (180日) + 期間別 ───────────────────────────────
-# 全設定統合: _all_configs で直近180日を一括集計 → デフォルト表示
+# ── 損益タブ HTML: 全設定統合 (_DEFAULT_DAYS) + 期間別 ──────────────────────
+# 全設定統合: _all_configs でデフォルト期間を一括集計 → デフォルト表示
 _na._PNL_CONFIGS[:] = _all_configs
-print(f"損益集計中 (全設定統合・直近180日 / {len(_all_configs)}設定)...", flush=True)
-_all_period_html = _na._tab5_pnl_html(180, _args.workers, entry_days=_args.entry_days)
-_phase("損益タブ(180/全設定統合)完了")
+print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_configs)}設定)...", flush=True)
+_all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days)
+_phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
 # 期間別: 各期間のconfigs（必要時にボタンで切替）
 _period_pane_htmls: dict[int, str] = {}
