@@ -2044,13 +2044,14 @@ _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_h
 _pnl_bt_cache: dict = {}   # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
 
 
-def _wf_history_html(wf_until_date, workers: int) -> str:
-    """WF歴史検証HTML。
+def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
+                     min_price: float = 0.0, universe_path: str | None = None) -> str:
+    """WF歴史検証HTML（ユニバース全体からの新規銘柄選定版）。
 
     wf_until_date 時点のデータのみで FOLDS_HISTORICAL（3fold/TRAIN2年/TEST1年）を使い
-    現行 _PNL_CONFIGS の全銘柄×戦略を WF 選定。
-    ≥2fold 通過銘柄の wf_until_date〜今日 OOS 成績も表示。
-    現行 WATCHLIST/FOLDS には一切影響しない。
+    ユニバース全体をスキャンして WF 基準に合格した銘柄を新規選定。
+    ≥1fold 通過銘柄の wf_until_date〜今日 OOS 成績を表示。
+    現行 WATCHLIST/FOLDS/シグナルには一切影響しない。
     WF結果は .wfh_cache/ に日付別でキャッシュされ、2回目以降は即座に表示。
     """
     import pickle as _pkl
@@ -2060,8 +2061,11 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
     try:
-        from scan_walkforward import walkforward_one_asof as _wf_asof, FOLDS_HISTORICAL as _HIST_FOLDS
-        from scan_walkforward import _HIST_MAX_LOOKBACK as _HML
+        from scan_walkforward import (walkforward_one_asof as _wf_asof,
+                                      FOLDS_HISTORICAL as _HIST_FOLDS,
+                                      _HIST_MAX_LOOKBACK as _HML,
+                                      load_universe as _load_univ,
+                                      STRATEGY_DEFS as _SDEFS_WFH)
     except ImportError as _ie:
         return f'<p style="color:#f87171;padding:20px">scan_walkforward インポートエラー: {_ie}</p>'
 
@@ -2069,19 +2073,22 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     from collections import defaultdict
     from datetime import timedelta as _td
 
-    # ── 現行 _PNL_CONFIGS から (sym, name, strat) を収集（デデュップ）──────────
-    all_tasks: list[tuple] = []
-    seen_tasks: set = set()
-    for _cfg in _PNL_CONFIGS:
-        for _sym, _nm, _st in _cfg["stop_wl"] + _cfg["brk_wl"]:
-            if (_sym, _st) not in seen_tasks:
-                seen_tasks.add((_sym, _st))
-                all_tasks.append((_sym, _nm, _st))
+    # ── ユニバース読み込み × 全戦略でタスク生成（現行WATCHLISTとは独立）──────────
+    try:
+        universe_syms, _univ_name = _load_univ(universe_path)
+    except RuntimeError as _ue:
+        return (f'<p style="color:#f87171;padding:20px">ユニバースファイルが見つかりません: {_ue}<br>'
+                f'<code>python fetch_listed_symbols.py --market prime</code> を実行してください</p>')
 
-    # ── WF結果キャッシュ（同じ wf_until_date & 同じ銘柄リストなら再スキャン不要）──
+    _all_strats = list(_SDEFS_WFH.keys())
+    all_tasks: list[tuple] = [(_s, _n, _st) for (_s, _n) in universe_syms for _st in _all_strats]
+
+    print(f"[WF歴史検証] ユニバース: {_univ_name} ({len(universe_syms)}銘柄) × {len(_all_strats)}戦略 = {len(all_tasks)}タスク", flush=True)
+
+    # ── WF結果キャッシュ（同じ wf_until_date & ユニバース & 価格フィルタなら再スキャン不要）──
     _wfh_cache_dir = _PL(".wfh_cache")
     _wfh_cache_dir.mkdir(exist_ok=True)
-    _cache_key  = str(wf_until_date) + "_" + str(sorted(seen_tasks))
+    _cache_key  = f"{wf_until_date}_{_univ_name}_max{max_price}_min{min_price}"
     import hashlib as _hl
     _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
@@ -2118,7 +2125,12 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
         def _run_wf_hist(args):
             _s, _n, _st = args
             try:
-                return _wf_asof(_s, _n, _st, wf_until_date)
+                r = _wf_asof(_s, _n, _st, wf_until_date, max_price=max_price)
+                if r is None:
+                    return None
+                if min_price > 0 and r.get("latest_price", 0) < min_price:
+                    return None
+                return r
             except Exception:
                 return None
 
@@ -2149,12 +2161,10 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     def _run_wf_oos(args):
         _s, _n, _st = args
         try:
-            _mod = _mod_for(_st)
-            _params = _mod.STRATEGY_PARAMS.get(_st)
-            if not _params:
+            _sdef = _SDEFS_WFH.get(_st)
+            if not _sdef:
                 return []
-            _cf, _em, _sm, _tm = _params
-            _etype = "stop_sell" if _st.endswith("_S") else "stop"
+            _cf, _em, _sm, _tm, _family, _etype = _sdef
             _df = _wfh_fetch(_s, _oos_backtest_days + 60)
             if _df is None or _df.empty:
                 return []
@@ -2446,11 +2456,14 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
   <h3 style="color:#38bdf8;margin:0 0 4px">
-    WF歴史検証（{wf_until_date} 時点で選定 → 以降 {(_wfh_today - wf_until_date).days}日間 OOS）
+    WF歴史検証（{wf_until_date} 時点で新規選定 → 以降 {(_wfh_today - wf_until_date).days}日間 OOS）
   </h3>
   <p style="color:#64748b;font-size:0.82rem;margin:0 0 16px">
-    現行WATCHLISTの銘柄×戦略を <strong style="color:#fbbf24">{wf_until_date}</strong> 以前のデータのみで
-    3fold WF（TRAIN2年/TEST1年、時系列順・非重複）選定。現行WATCHLIST選定には影響なし。
+    <strong style="color:#fbbf24">ユニバース {_univ_name}（{len(universe_syms)}銘柄）</strong> × 全{len(_all_strats)}戦略を
+    <strong style="color:#fbbf24">{wf_until_date}</strong> 以前のデータのみで
+    3fold WF（TRAIN2年/TEST1年、時系列順・非重複）スキャンして新規銘柄選定。
+    現行WATCHLIST・シグナルには一切影響なし。
+    {'株価フィルタ: ' + (f'¥{min_price:,.0f}〜' if min_price > 0 else '') + (f'¥{max_price:,.0f}' if max_price > 0 else '上限なし') + ' / 100株' if max_price > 0 or min_price > 0 else ''}
   </p>
 
   <!-- ① fold設計 -->
