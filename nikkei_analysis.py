@@ -3945,14 +3945,16 @@ function switchTbd(id, tab) {{
             )
 
         # ── C: ローリング逆指値 効果比較（rolling=0/1/2 を並列バックテスト）──
+        # 集計レポート（複数銘柄）のみ実行。銘柄詳細タブ（1銘柄だけ）はスキップ
         _rolling_cmp_section = ""
-        if _rbt is not None and _fetch9 is not None:
-            # 固有 (symbol, strategy) → name を収集
-            _sym_strat9: dict = {}
-            for _t9 in done:
-                _k9 = (_t9.get("symbol"), _t9.get("strategy"))
-                if _k9[0] and _k9[1] and _k9 not in _sym_strat9:
-                    _sym_strat9[_k9] = _t9.get("name", _k9[0])
+        # 固有 (symbol, strategy) → name を先に収集して件数チェック
+        _sym_strat9: dict = {}
+        for _t9 in done:
+            _k9 = (_t9.get("symbol"), _t9.get("strategy"))
+            if _k9[0] and _k9[1] and _k9 not in _sym_strat9:
+                _sym_strat9[_k9] = _t9.get("name", _k9[0])
+        _MIN_SYMS_FOR_CMP = 3  # 3銘柄未満ならC/Dをスキップ
+        if _rbt is not None and _fetch9 is not None and len(_sym_strat9) >= _MIN_SYMS_FOR_CMP:
 
             def _get_params9(strat9):
                 for _m9, _et9 in [(_stop, "stop"), (_brk, "stop")]:
@@ -4102,18 +4104,17 @@ function switchTbd(id, tab) {{
 </details>"""
 
         # ── D: entry_atr_mult 比較（em=0.0/0.3/0.5/1.0 を並列バックテスト）──
+        # C と同じく集計レポートのみ（3銘柄未満はスキップ）
         _em_cmp_section = ""
-        if _rbt is not None and _fetch9 is not None:
+        if _rbt is not None and _fetch9 is not None and len(_sym_strat9) >= _MIN_SYMS_FOR_CMP:
             _EM_VALS = [0.0, 0.3, 0.5, 1.0]
-            # 固有 (symbol, strategy) → name を収集（Section C と同じセット）
-            _sym_strat_em: dict = {}
+            # C と同じ sym_strat セットを再利用
+            _sym_strat_em: dict = _sym_strat9
             # BTスコアルックアップ: (symbol, strategy) → rec_score (from original done trades)
             _bt_score_lut: dict = {}
             for _tem in done:
                 _kem = (_tem.get("symbol"), _tem.get("strategy"))
                 if _kem[0] and _kem[1]:
-                    if _kem not in _sym_strat_em:
-                        _sym_strat_em[_kem] = _tem.get("name", _kem[0])
                     _sc = _tem.get("rec_score")
                     if _sc is not None:
                         _bt_score_lut[_kem] = _sc
