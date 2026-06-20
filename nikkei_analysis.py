@@ -4071,7 +4071,10 @@ function _showEntryDateGrid(seq, dk, pfx) {{
   con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
   if (!isActive) {{
     var det = document.getElementById(detId);
-    if (det) det.style.display = 'block';
+    if (det) {{
+      det.style.display = 'block';
+      setTimeout(function() {{ det.scrollIntoView({{behavior:'smooth', block:'nearest'}}); }}, 50);
+    }}
     if (curBtn) curBtn.classList.add('edate-active');
   }}
 }}
