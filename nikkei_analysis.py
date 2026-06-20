@@ -4170,7 +4170,7 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .detail-tab-btn.active { background:#0d2818; color:#4ade80; border-color:#4ade80; font-weight:700; }
 .detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
-.detail-tab-pane.active { display:block; }
+.detail-tab-pane.active { display:block; overflow-x:auto; }
 
 /* 詳細分析ブロック 内部タブ */
 .analysis-tab-nav { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
@@ -4256,7 +4256,7 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .kpi-v { font-size:1.25rem; font-weight:700; }
 
 /* テーブル */
-table { width:100%; border-collapse:collapse; font-size:0.83rem; margin-bottom:8px; }
+table { width:100%; min-width:900px; border-collapse:collapse; font-size:0.83rem; margin-bottom:8px; }
 th { background:#0f2040; color:#cbd5e1; padding:9px 10px;
      border:1px solid #334155; border-bottom:2px solid #3b82f6;
      text-align:center; white-space:nowrap; font-size:0.82rem; font-weight:700;
