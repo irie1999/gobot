@@ -3791,6 +3791,31 @@ function switchTbd(id, tab) {{
             _RE, _EE, _rbt, _fetch9 = 0, 1, None, None
         done = [t for t in trades_list if t.get("reason") not in ("発注中", "保有中")]
 
+        # ── ⑨ キャッシュ（Rolling/em比較は重いので日付×daysでキャッシュ）──
+        import pickle as _pk9c
+        from pathlib import Path as _P9c
+        import datetime as _dt9c
+        _9c_cache_dir = _P9c(".holdout_bt_cache")
+        _9c_cache_dir.mkdir(exist_ok=True)
+        _9c_today = _dt9c.date.today().isoformat()
+        _9c_cache_file = _9c_cache_dir / f"timing9cmp_{days}d_{_9c_today}.pkl"
+        _9c_cache: dict = {}
+        if _9c_cache_file.exists():
+            try:
+                with open(_9c_cache_file, "rb") as _f9c:
+                    _9c_cache = _pk9c.load(_f9c)
+                print(f"[⑨ キャッシュ] ロード: {_9c_cache_file} ({len(_9c_cache)}件)")
+            except Exception:
+                _9c_cache = {}
+
+        def _9c_save():
+            try:
+                with open(_9c_cache_file, "wb") as _f9c:
+                    _pk9c.dump(_9c_cache, _f9c, protocol=_pk9c.HIGHEST_PROTOCOL)
+                print(f"[⑨ キャッシュ] 保存: {_9c_cache_file}")
+            except Exception as _e9c:
+                print(f"[⑨ キャッシュ] 保存失敗: {_e9c}")
+
         def _st(ts):
             if not ts:
                 return {"n":0,"wr":0,"pf":0,"pnl":0,"avg":0,"gw":0,"gl":0}
@@ -3945,44 +3970,51 @@ function switchTbd(id, tab) {{
                         pass
                 return None
 
-            # rolling=0/1/2 それぞれで1回ずつバックテスト実行（1銘柄×3rolling を並列）
-            def _run_one9(args9):
-                (_s9, _st9), _nm9, _roll9 = args9
-                _p9 = _get_params9(_st9)
-                if not _p9:
-                    return _roll9, []
-                _cf9, _em9, _sm9, _tm9, _et9 = _p9
-                _df9 = _fetch9(_s9, days + 60)
-                if _df9 is None:
-                    return _roll9, []
-                try:
-                    _r9 = _rbt(_s9, _nm9, _df9, _cf9, _em9, _sm9, _tm9, days, _st9,
-                               entry_type=_et9, rolling_entry=_roll9)
-                    return _roll9, (_r9.get("trade_log", []) if _r9 else [])
-                except Exception:
-                    return _roll9, []
-
-            from concurrent.futures import ThreadPoolExecutor as _TPE9
-            _trades_by_roll: dict = {0: [], 1: [], 2: []}
-            _all_jobs9 = [
-                (item9, _rn9)
-                for item9 in _sym_strat9.items()
-                for _rn9 in (0, 1, 2)
-            ]
-            _n_jobs9 = len(_sym_strat9) * 3
-            print(f"[⑨ Rolling比較] {len(_sym_strat9)}銘柄×戦略 × 3パターン = {_n_jobs9}件 バックテスト中…")
-            with _TPE9(max_workers=workers) as _ex9:
-                _futs9 = {}
-                for (_sym_key9, _nm9), _rn9 in _all_jobs9:
-                    # _run_one9 expects ((_s9, _st9), _nm9, _roll9)
-                    _futs9[_ex9.submit(_run_one9, (tuple(_sym_key9), _nm9, _rn9))] = None
-                for _f9 in _futs9:
+            # キャッシュキー: ("rolling", frozenset(sym_strat pairs))
+            _roll_cache_key = ("rolling", frozenset(_sym_strat9.keys()))
+            if _roll_cache_key in _9c_cache:
+                _trades_by_roll = _9c_cache[_roll_cache_key]
+                print(f"[⑨ Rolling比較] キャッシュ使用: " + " / ".join(f"rolling={r}: {len(_trades_by_roll[r])}件" for r in (0,1,2)))
+            else:
+                # rolling=0/1/2 それぞれで1回ずつバックテスト実行（1銘柄×3rolling を並列）
+                def _run_one9(args9):
+                    (_s9, _st9), _nm9, _roll9 = args9
+                    _p9 = _get_params9(_st9)
+                    if not _p9:
+                        return _roll9, []
+                    _cf9, _em9, _sm9, _tm9, _et9 = _p9
+                    _df9 = _fetch9(_s9, days + 60)
+                    if _df9 is None:
+                        return _roll9, []
                     try:
-                        _rn9_res, _tlog9 = _f9.result()
-                        _trades_by_roll[_rn9_res].extend(_tlog9)
+                        _r9 = _rbt(_s9, _nm9, _df9, _cf9, _em9, _sm9, _tm9, days, _st9,
+                                   entry_type=_et9, rolling_entry=_roll9)
+                        return _roll9, (_r9.get("trade_log", []) if _r9 else [])
                     except Exception:
-                        pass
-            print(f"[⑨ Rolling比較] 完了: " + " / ".join(f"rolling={r}: {len(_trades_by_roll[r])}件" for r in (0,1,2)))
+                        return _roll9, []
+
+                from concurrent.futures import ThreadPoolExecutor as _TPE9
+                _trades_by_roll: dict = {0: [], 1: [], 2: []}
+                _all_jobs9 = [
+                    (item9, _rn9)
+                    for item9 in _sym_strat9.items()
+                    for _rn9 in (0, 1, 2)
+                ]
+                _n_jobs9 = len(_sym_strat9) * 3
+                print(f"[⑨ Rolling比較] {len(_sym_strat9)}銘柄×戦略 × 3パターン = {_n_jobs9}件 バックテスト中…")
+                with _TPE9(max_workers=workers) as _ex9:
+                    _futs9 = {}
+                    for (_sym_key9, _nm9), _rn9 in _all_jobs9:
+                        _futs9[_ex9.submit(_run_one9, (tuple(_sym_key9), _nm9, _rn9))] = None
+                    for _f9 in _futs9:
+                        try:
+                            _rn9_res, _tlog9 = _f9.result()
+                            _trades_by_roll[_rn9_res].extend(_tlog9)
+                        except Exception:
+                            pass
+                print(f"[⑨ Rolling比較] 完了: " + " / ".join(f"rolling={r}: {len(_trades_by_roll[r])}件" for r in (0,1,2)))
+                _9c_cache[_roll_cache_key] = _trades_by_roll
+                _9c_save()
 
             def _done9(tl): return [t for t in tl if t.get("reason") not in ("発注中", "保有中")]
             _s9 = {r: _st(_done9(_trades_by_roll[r])) for r in (0, 1, 2)}
@@ -4075,10 +4107,16 @@ function switchTbd(id, tab) {{
             _EM_VALS = [0.0, 0.3, 0.5, 1.0]
             # 固有 (symbol, strategy) → name を収集（Section C と同じセット）
             _sym_strat_em: dict = {}
+            # BTスコアルックアップ: (symbol, strategy) → rec_score (from original done trades)
+            _bt_score_lut: dict = {}
             for _tem in done:
                 _kem = (_tem.get("symbol"), _tem.get("strategy"))
-                if _kem[0] and _kem[1] and _kem not in _sym_strat_em:
-                    _sym_strat_em[_kem] = _tem.get("name", _kem[0])
+                if _kem[0] and _kem[1]:
+                    if _kem not in _sym_strat_em:
+                        _sym_strat_em[_kem] = _tem.get("name", _kem[0])
+                    _sc = _tem.get("rec_score")
+                    if _sc is not None:
+                        _bt_score_lut[_kem] = _sc
 
             def _get_params_em(strat_em):
                 for _mem, _ete in [(_stop, "stop"), (_brk, "stop")]:
@@ -4096,42 +4134,50 @@ function switchTbd(id, tab) {{
                         pass
                 return None
 
-            def _run_one_em(args_em):
-                (_se, _ste), _nme, _em_val = args_em
-                _pe = _get_params_em(_ste)
-                if not _pe:
-                    return _em_val, []
-                _cfe, _eme, _sme, _tme, _ete = _pe
-                _dfe = _fetch9(_se, days + 60)
-                if _dfe is None:
-                    return _em_val, []
-                try:
-                    _re = _rbt(_se, _nme, _dfe, _cfe, _em_val, _sme, _tme, days, _ste,
-                               entry_type=_ete)
-                    return _em_val, (_re.get("trade_log", []) if _re else [])
-                except Exception:
-                    return _em_val, []
-
-            from concurrent.futures import ThreadPoolExecutor as _TPEM
-            _trades_by_em: dict = {em: [] for em in _EM_VALS}
-            _all_jobs_em = [
-                (item_em, _em_v)
-                for item_em in _sym_strat_em.items()
-                for _em_v in _EM_VALS
-            ]
-            _n_jobs_em = len(_sym_strat_em) * len(_EM_VALS)
-            print(f"[⑨ em比較] {len(_sym_strat_em)}銘柄×戦略 × {len(_EM_VALS)}パターン = {_n_jobs_em}件 バックテスト中…")
-            with _TPEM(max_workers=workers) as _exe:
-                _futs_em = {}
-                for (_sym_em, _nm_em), _em_v in _all_jobs_em:
-                    _futs_em[_exe.submit(_run_one_em, (tuple(_sym_em), _nm_em, _em_v))] = None
-                for _fe in _futs_em:
+            # キャッシュキー: ("em", frozenset(sym_strat pairs))
+            _em_cache_key = ("em", frozenset(_sym_strat_em.keys()))
+            if _em_cache_key in _9c_cache:
+                _trades_by_em = _9c_cache[_em_cache_key]
+                print(f"[⑨ em比較] キャッシュ使用: " + " / ".join(f"em={e}: {len(_trades_by_em[e])}件" for e in _EM_VALS))
+            else:
+                def _run_one_em(args_em):
+                    (_se, _ste), _nme, _em_val = args_em
+                    _pe = _get_params_em(_ste)
+                    if not _pe:
+                        return _em_val, []
+                    _cfe, _eme, _sme, _tme, _ete = _pe
+                    _dfe = _fetch9(_se, days + 60)
+                    if _dfe is None:
+                        return _em_val, []
                     try:
-                        _em_res, _tlog_em = _fe.result()
-                        _trades_by_em[_em_res].extend(_tlog_em)
+                        _re = _rbt(_se, _nme, _dfe, _cfe, _em_val, _sme, _tme, days, _ste,
+                                   entry_type=_ete)
+                        return _em_val, (_re.get("trade_log", []) if _re else [])
                     except Exception:
-                        pass
-            print(f"[⑨ em比較] 完了: " + " / ".join(f"em={e}: {len(_trades_by_em[e])}件" for e in _EM_VALS))
+                        return _em_val, []
+
+                from concurrent.futures import ThreadPoolExecutor as _TPEM
+                _trades_by_em: dict = {em: [] for em in _EM_VALS}
+                _all_jobs_em = [
+                    (item_em, _em_v)
+                    for item_em in _sym_strat_em.items()
+                    for _em_v in _EM_VALS
+                ]
+                _n_jobs_em = len(_sym_strat_em) * len(_EM_VALS)
+                print(f"[⑨ em比較] {len(_sym_strat_em)}銘柄×戦略 × {len(_EM_VALS)}パターン = {_n_jobs_em}件 バックテスト中…")
+                with _TPEM(max_workers=workers) as _exe:
+                    _futs_em = {}
+                    for (_sym_em, _nm_em), _em_v in _all_jobs_em:
+                        _futs_em[_exe.submit(_run_one_em, (tuple(_sym_em), _nm_em, _em_v))] = None
+                    for _fe in _futs_em:
+                        try:
+                            _em_res, _tlog_em = _fe.result()
+                            _trades_by_em[_em_res].extend(_tlog_em)
+                        except Exception:
+                            pass
+                print(f"[⑨ em比較] 完了: " + " / ".join(f"em={e}: {len(_trades_by_em[e])}件" for e in _EM_VALS))
+                _9c_cache[_em_cache_key] = _trades_by_em
+                _9c_save()
 
             def _done_em(tl): return [t for t in tl if t.get("reason") not in ("発注中", "保有中")]
             _s_em = {e: _st(_done_em(_trades_by_em[e])) for e in _EM_VALS}
@@ -4162,6 +4208,37 @@ function switchTbd(id, tab) {{
                 if _ev == _cur_em:
                     _lbl += " ★現状"
                 _em_rows_html += _cmp_row_em(_lbl, _s_em[_ev], highlight=(_ev == _cur_em))
+
+            # BT帯別比較（★★★≥80 / ★★60-79 / ★40-59 / △<40）
+            _BT_BANDS = [
+                (80, 101, "★★★ BT≥80", "#4ade80"),
+                (60,  80, "★★  BT60-79", "#60a5fa"),
+                (40,  60, "★   BT40-59", "#fbbf24"),
+                ( 0,  40, "△   BT<40",   "#f87171"),
+            ]
+            # BTスコアをトレードに付与（(symbol,strategy)→rec_score のルックアップ）
+            def _tag_bt(tl):
+                out = []
+                for _t in tl:
+                    _k = (_t.get("symbol"), _t.get("strategy"))
+                    _sc = _bt_score_lut.get(_k)
+                    out.append(dict(_t, _bt=_sc))
+                return out
+
+            _em_bt_rows = ""
+            for _blo, _bhi, _blbl, _bcol in _BT_BANDS:
+                _em_bt_rows += (
+                    f'<tr><td colspan="9" style="padding:4px 8px;font-weight:700;'
+                    f'color:{_bcol};border-top:1px solid #334155">{_blbl}</td></tr>'
+                )
+                for _ev in _EM_VALS:
+                    _tagged = _tag_bt(_done_em(_trades_by_em[_ev]))
+                    _band_t = [t for t in _tagged if t.get("_bt") is not None and _blo <= t["_bt"] < _bhi]
+                    _bs = _st(_band_t)
+                    _lbl = _em_labels.get(_ev, f"em={_ev}")
+                    if _ev == _cur_em:
+                        _lbl += " ★"
+                    _em_bt_rows += _cmp_row_em(f"  {_lbl}", _bs, highlight=(_ev == _cur_em))
 
             # 月別比較
             from collections import defaultdict as _dd_em
@@ -4204,7 +4281,7 @@ function switchTbd(id, tab) {{
             _em_cmp_section = f"""
 <h3 style="color:#f97316;margin:20px 0 6px">D. エントリー閾値（entry_atr_mult）比較（em=0.0 / 0.3 / 0.5 / 1.0 並列バックテスト）</h3>
 <p class="footnote">em=0.0 は終値ちょうどで逆指値（翌日少しでも上がれば約定）。em=0.5 なら前日ATR×0.5 上を超えないと約定しない（ブレイクアウト確認）。
-sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通設定（em=0.0）。</p>
+sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通設定（em=0.0）。⑨キャッシュ有効（同日2回目以降はスキップ）。</p>
 <table style="width:auto;min-width:700px;margin-bottom:12px">
   <thead><tr>
     <th style="text-align:left">設定</th>
@@ -4214,6 +4291,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   </tr></thead>
   <tbody>{_em_rows_html}</tbody>
 </table>
+<details style="margin-bottom:16px">
+  <summary style="cursor:pointer;color:#f97316;font-size:0.85rem;padding:4px 0">BT帯別内訳（★★★/★★/★/△ × em値）を表示</summary>
+  <p style="font-size:0.8rem;color:#94a3b8;margin:6px 0">BTスコアはシグナル元の銘柄×戦略のスコアをルックアップ。re-runトレード数とBTスコアなし件数は除外されることがあります。</p>
+  <table style="width:auto;min-width:700px;margin-top:4px">
+    <thead><tr>
+      <th style="text-align:left">BT帯 / em設定</th>
+      <th>件数</th><th>勝率</th><th>PF</th>
+      <th style="color:#4ade80">総利益</th><th style="color:#f87171">総損失</th>
+      <th>損益合計</th><th>平均損益</th>
+    </tr></thead>
+    <tbody>{_em_bt_rows}</tbody>
+  </table>
+</details>
 <details style="margin-bottom:16px">
   <summary style="cursor:pointer;color:#f97316;font-size:0.85rem;padding:4px 0">月別内訳（em=0.0/0.3/0.5/1.0）を表示</summary>
   <table style="width:auto;min-width:700px;margin-top:8px">
