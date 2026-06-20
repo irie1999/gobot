@@ -2097,17 +2097,24 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
 
     wf_results: list[dict] = []
+    _already_done: set = set()
     if _cache_path.exists():
         try:
             with open(_cache_path, "rb") as _f:
                 wf_results = _pkl.load(_f)
+            _already_done = {(r["symbol"], r["strategy"]) for r in wf_results}
             print(f"[WF歴史検証] キャッシュ読込: {len(wf_results)}件 ({_cache_path.name})", flush=True)
         except Exception:
             wf_results = []
 
-    if not wf_results:
+    # 未処理タスクのみ実行（中断再開対応）
+    _remaining_tasks = [t for t in all_tasks if (t[0], t[2]) not in _already_done]
+    if not _remaining_tasks and _already_done:
+        print(f"[WF歴史検証] 全{len(all_tasks)}件キャッシュ済み → スキャンをスキップ", flush=True)
+
+    if _remaining_tasks:
         # ── 銘柄データを先にpre-fetch（同一銘柄の重複ダウンロード排除）──────────
-        unique_syms = list({(_sym, _nm) for _sym, _nm, _ in all_tasks})
+        unique_syms = list({(_sym, _nm) for _sym, _nm, _ in _remaining_tasks})
         _since = wf_until_date - _td(days=_HML + 200)
         _fetch_days = int((_wfh_today - _since).days * 1.1) + 60
 
@@ -2123,7 +2130,8 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         with _TPE(max_workers=min(workers, 8)) as _ex_pf:
             list(_ex_pf.map(_pre_fetch, unique_syms))
 
-        print(f"[WF歴史検証] {len(all_tasks)}件 WFスキャン中 (as_of={wf_until_date})…", flush=True)
+        print(f"[WF歴史検証] {len(_remaining_tasks)}件 WFスキャン中 (as_of={wf_until_date}"
+              f"{f' / 残り({len(_remaining_tasks)}/{len(all_tasks)})' if _already_done else ''})…", flush=True)
 
         def _run_wf_hist(args):
             _s, _n, _st = args
@@ -2137,14 +2145,25 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             except Exception:
                 return None
 
+        _total_for_pct = len(all_tasks)
         with _TPE(max_workers=workers) as _ex:
-            _futs = {_ex.submit(_run_wf_hist, t): t for t in all_tasks}
-            for _fut in _asc(_futs):
+            _futs = {_ex.submit(_run_wf_hist, t): t for t in _remaining_tasks}
+            for _i, _fut in enumerate(_asc(_futs)):
                 _r = _fut.result()
                 if _r is not None:
                     wf_results.append(_r)
+                # 200件ごとに中間保存（クラッシュ対策・中断再開対応）
+                if (_i + 1) % 200 == 0:
+                    try:
+                        with open(_cache_path, "wb") as _f:
+                            _pkl.dump(wf_results, _f)
+                        _done_total = len(_already_done) // len(_all_strats) * len(_all_strats) + _i + 1
+                        _pct = _done_total / _total_for_pct * 100
+                        print(f"[WF歴史検証] 中間保存: {_i+1}/{len(_remaining_tasks)}件 ({_pct:.0f}%) / 通過:{len(wf_results)}件", flush=True)
+                    except Exception:
+                        pass
 
-        # キャッシュ保存
+        # 最終キャッシュ保存
         try:
             with open(_cache_path, "wb") as _f:
                 _pkl.dump(wf_results, _f)
