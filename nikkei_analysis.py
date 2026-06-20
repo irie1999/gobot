@@ -2326,13 +2326,35 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     )
     _fold_subhdr = (f'<th style="{_th}">訓練</th><th style="{_th}">検証</th>') * len(_HIST_FOLDS)
 
-    def _wf_detail_rows(min_fp):
+    # 各フィルタレベルのデータを計算
+    oos_by_fp = {
+        1: [t for t in oos_trades if t.get("folds_passed", 0) >= 1],
+        2: [t for t in oos_trades if t.get("folds_passed", 0) >= 2],
+        3: [t for t in oos_trades if t.get("folds_passed", 0) >= 3],
+    }
+    _s1 = _oos_stats(oos_by_fp[1])
+    _def_s = _oos_stats(oos_by_fp[2])
+    _s3 = _oos_stats(oos_by_fp[3])
+    _def_pc = _pnl_color(_def_s["pnl"])
+
+    # OOSテーブル HTML（3バージョン）- JS文字列ではなく直接HTMLに埋め込む
+    _strat1 = _strategy_rows(oos_by_fp[1])
+    _strat2 = _strategy_rows(oos_by_fp[2])
+    _strat3 = _strategy_rows(oos_by_fp[3])
+    _sym1   = _sym_strat_rows(oos_by_fp[1])
+    _sym2   = _sym_strat_rows(oos_by_fp[2])
+    _sym3   = _sym_strat_rows(oos_by_fp[3])
+    _mon1   = _monthly_rows(oos_by_fp[1])
+    _mon2   = _monthly_rows(oos_by_fp[2])
+    _mon3   = _monthly_rows(oos_by_fp[3])
+
+    # WF選定詳細：全行を data-wffp 属性付きで一度だけ生成（JS切り替え不要）
+    def _wf_detail_rows_all():
         rows = ""
         for r in sorted(wf_results, key=lambda x: (-x["folds_passed"], -x.get("total_test_pnl", 0))):
             fp = r["folds_passed"]
-            if fp < min_fp:
-                continue
             fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#f87171")
+            _hidden = ' style="display:none"' if fp < 2 else ""
             _cells = ""
             for fd in r.get("fold_detail", []):
                 _cells += (
@@ -2343,7 +2365,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
                 )
             _pnl = r.get("total_test_pnl", 0)
             rows += (
-                f'<tr data-wffp="{fp}" class="wfhdet-row">'
+                f'<tr data-wffp="{fp}"{_hidden}>'
                 f'<td style="{_td};color:#e2e8f0">{r["symbol"]}</td>'
                 f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["name"]}</td>'
                 f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["strategy"]}</td>'
@@ -2357,34 +2379,59 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
             )
         return rows or f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">結果なし</td></tr>'
 
-    # デフォルト（≥2fold）の各テーブルを事前計算
-    oos_by_fp = {
-        1: [t for t in oos_trades if t.get("folds_passed", 0) >= 1],
-        2: [t for t in oos_trades if t.get("folds_passed", 0) >= 2],
-        3: [t for t in oos_trades if t.get("folds_passed", 0) >= 3],
-    }
-    _def_trades = oos_by_fp[2]
-    _def_s = _oos_stats(_def_trades)
-    _def_pc = _pnl_color(_def_s["pnl"])
+    _det_all = _wf_detail_rows_all()
 
-    # pre-compute all table HTMLs for JS embedding
-    _strat1 = _strategy_rows(oos_by_fp[1])
-    _strat2 = _strategy_rows(oos_by_fp[2])
-    _strat3 = _strategy_rows(oos_by_fp[3])
-    _sym1   = _sym_strat_rows(oos_by_fp[1])
-    _sym2   = _sym_strat_rows(oos_by_fp[2])
-    _sym3   = _sym_strat_rows(oos_by_fp[3])
-    _mon1   = _monthly_rows(oos_by_fp[1])
-    _mon2   = _monthly_rows(oos_by_fp[2])
-    _mon3   = _monthly_rows(oos_by_fp[3])
-    _s1     = _oos_stats(oos_by_fp[1])
-    _s3     = _oos_stats(oos_by_fp[3])
-    _det2   = _wf_detail_rows(2)
-    _det1   = _wf_detail_rows(1)
-    _det0   = _wf_detail_rows(0)
+    # OOSテーブル共通ヘッダ HTML
+    def _oos_strat_table(body_html):
+        return (
+            f'<div style="overflow-x:auto;margin-bottom:16px">'
+            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:600px">'
+            f'<thead><tr>'
+            f'<th style="{_th}">戦略</th><th style="{_th}">取引</th>'
+            f'<th style="{_th}">勝率</th><th style="{_th}">PF</th>'
+            f'<th style="{_th}">利益計</th><th style="{_th}">損失計</th>'
+            f'<th style="{_th}">損益</th></tr></thead>'
+            f'<tbody>{body_html}</tbody></table></div>'
+        )
 
-    def _js_safe(s):
-        return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    def _oos_sym_table(body_html):
+        return (
+            f'<div style="overflow-x:auto;margin-bottom:16px">'
+            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:700px">'
+            f'<thead><tr>'
+            f'<th style="{_th}">fold数</th><th style="{_th}">コード</th>'
+            f'<th style="{_th}">銘柄</th><th style="{_th}">戦略</th>'
+            f'<th style="{_th}">取引</th><th style="{_th}">勝率</th>'
+            f'<th style="{_th}">PF</th><th style="{_th}">損益</th>'
+            f'</tr></thead><tbody>{body_html}</tbody></table></div>'
+        )
+
+    def _oos_mon_table(body_html):
+        return (
+            f'<div style="overflow-x:auto;margin-bottom:20px">'
+            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:400px">'
+            f'<thead><tr>'
+            f'<th style="{_th}">年月</th><th style="{_th}">取引</th>'
+            f'<th style="{_th}">勝率</th><th style="{_th}">PF</th>'
+            f'<th style="{_th}">損益</th>'
+            f'</tr></thead><tbody>{body_html}</tbody></table></div>'
+        )
+
+    def _oos_container(fp_lvl, body1, body2, body3, s, visible):
+        _tables = (
+            f'<h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">戦略別成績</h5>'
+            + _oos_strat_table(body1)
+            + f'<h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">銘柄×戦略別成績（損益降順 top30）</h5>'
+            + _oos_sym_table(body2)
+            + f'<h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">月次内訳</h5>'
+            + _oos_mon_table(body3)
+        )
+        _disp = "" if visible else ' style="display:none"'
+        return f'<div id="wfhoos-container-{fp_lvl}"{_disp}>{_tables}</div>'
+
+    _container1 = _oos_container(1, _strat1, _sym1, _mon1, _s1, False)
+    _container2 = _oos_container(2, _strat2, _sym2, _mon2, _def_s, True)
+    _container3 = _oos_container(3, _strat3, _sym3, _mon3, _s3, False)
 
     return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
@@ -2420,7 +2467,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
       style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
       ≥1fold ({n_1}件)
     </button>
-    <button id="wfhoos-btn-2" onclick="wfhoosFilter(2)" data-active="1"
+    <button id="wfhoos-btn-2" onclick="wfhoosFilter(2)"
       style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem;font-weight:bold">
       ≥2fold ({n_2}件) ★デフォルト
     </button>
@@ -2430,7 +2477,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     </button>
   </div>
 
-  <!-- サマリー行 -->
+  <!-- サマリー行（JS で更新） -->
   <div id="wfhoos-summary" style="background:#1e293b;border-radius:6px;padding:14px 20px;margin-bottom:16px;display:inline-block;min-width:500px">
     <table style="font-size:0.9rem;border-collapse:collapse">
       <tr>
@@ -2448,55 +2495,10 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     </table>
   </div>
 
-  <!-- 戦略別成績テーブル -->
-  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">戦略別成績</h5>
-  <div style="overflow-x:auto;margin-bottom:16px">
-  <table style="border-collapse:collapse;font-size:0.82rem;min-width:600px">
-    <thead><tr>
-      <th style="{_th}">戦略</th>
-      <th style="{_th}">取引</th>
-      <th style="{_th}">勝率</th>
-      <th style="{_th}">PF</th>
-      <th style="{_th}">利益計</th>
-      <th style="{_th}">損失計</th>
-      <th style="{_th}">損益</th>
-    </tr></thead>
-    <tbody id="wfhoos-strat-body">{_strat2}</tbody>
-  </table>
-  </div>
-
-  <!-- 銘柄×戦略別成績 -->
-  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">銘柄×戦略別成績（損益降順 top30）</h5>
-  <div style="overflow-x:auto;margin-bottom:16px">
-  <table style="border-collapse:collapse;font-size:0.82rem;min-width:700px">
-    <thead><tr>
-      <th style="{_th}">fold数</th>
-      <th style="{_th}">コード</th>
-      <th style="{_th}">銘柄</th>
-      <th style="{_th}">戦略</th>
-      <th style="{_th}">取引</th>
-      <th style="{_th}">勝率</th>
-      <th style="{_th}">PF</th>
-      <th style="{_th}">損益</th>
-    </tr></thead>
-    <tbody id="wfhoos-sym-body">{_sym2}</tbody>
-  </table>
-  </div>
-
-  <!-- 月次内訳 -->
-  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">月次内訳</h5>
-  <div style="overflow-x:auto;margin-bottom:20px">
-  <table style="border-collapse:collapse;font-size:0.82rem;min-width:400px">
-    <thead><tr>
-      <th style="{_th}">年月</th>
-      <th style="{_th}">取引</th>
-      <th style="{_th}">勝率</th>
-      <th style="{_th}">PF</th>
-      <th style="{_th}">損益</th>
-    </tr></thead>
-    <tbody id="wfhoos-mon-body">{_mon2}</tbody>
-  </table>
-  </div>
+  <!-- OOSテーブル 3コンテナ（CSS display:none で切り替え） -->
+  {_container1}
+  {_container2}
+  {_container3}
 
   <!-- ③ WF選定詳細（折りたたみ） -->
   <details style="margin-top:8px">
@@ -2506,7 +2508,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     <div style="margin-top:10px">
       <div style="margin-bottom:8px">
         <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">表示フィルタ:</span>
-        <button onclick="wfhdetFilter(2)" id="wfhdet-btn-2" data-active="1"
+        <button onclick="wfhdetFilter(2)" id="wfhdet-btn-2"
           style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:3px 10px;margin-right:4px;cursor:pointer;font-size:0.78rem;font-weight:bold">
           ≥2fold
         </button>
@@ -2534,7 +2536,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
           </tr>
           <tr>{_fold_subhdr}</tr>
         </thead>
-        <tbody id="wfhdet-body">{_det2}</tbody>
+        <tbody id="wfhdet-body">{_det_all}</tbody>
       </table>
       </div>
     </div>
@@ -2543,96 +2545,54 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
 
 <script>
 (function() {{
-  var _wfhoos_data = {{
-    1: {{
-      n: {_s1["n"]},
-      wins: {_s1["wins"]},
-      wr: {_s1["wr"]:.1f},
-      pf: "{_pf_str_fn(_s1["pf"])}",
-      pnl: {_s1["pnl"]:.0f},
-      pnlColor: "{_pnl_color(_s1["pnl"])}",
-      strat: `{_js_safe(_strat1)}`,
-      sym: `{_js_safe(_sym1)}`,
-      mon: `{_js_safe(_mon1)}`
-    }},
-    2: {{
-      n: {_def_s["n"]},
-      wins: {_def_s["wins"]},
-      wr: {_def_s["wr"]:.1f},
-      pf: "{_pf_str_fn(_def_s["pf"])}",
-      pnl: {_def_s["pnl"]:.0f},
-      pnlColor: "{_def_pc}",
-      strat: `{_js_safe(_strat2)}`,
-      sym: `{_js_safe(_sym2)}`,
-      mon: `{_js_safe(_mon2)}`
-    }},
-    3: {{
-      n: {_s3["n"]},
-      wins: {_s3["wins"]},
-      wr: {_s3["wr"]:.1f},
-      pf: "{_pf_str_fn(_s3["pf"])}",
-      pnl: {_s3["pnl"]:.0f},
-      pnlColor: "{_pnl_color(_s3["pnl"])}",
-      strat: `{_js_safe(_strat3)}`,
-      sym: `{_js_safe(_sym3)}`,
-      mon: `{_js_safe(_mon3)}`
-    }}
+  var _wfhoos_stats = {{
+    1: {{ n: {_s1["n"]}, wins: {_s1["wins"]}, wr: {_s1["wr"]:.1f}, pf: "{_pf_str_fn(_s1["pf"])}", pnl: {_s1["pnl"]:.0f}, pnlColor: "{_pnl_color(_s1["pnl"])}" }},
+    2: {{ n: {_def_s["n"]}, wins: {_def_s["wins"]}, wr: {_def_s["wr"]:.1f}, pf: "{_pf_str_fn(_def_s["pf"])}", pnl: {_def_s["pnl"]:.0f}, pnlColor: "{_def_pc}" }},
+    3: {{ n: {_s3["n"]}, wins: {_s3["wins"]}, wr: {_s3["wr"]:.1f}, pf: "{_pf_str_fn(_s3["pf"])}", pnl: {_s3["pnl"]:.0f}, pnlColor: "{_pnl_color(_s3["pnl"])}" }}
   }};
 
   window.wfhoosFilter = function(minFp) {{
-    var d = _wfhoos_data[minFp];
+    var d = _wfhoos_stats[minFp];
     if (!d) return;
+    // サマリー更新
     var losses = d.n - d.wins;
     document.getElementById("wfhoos-sum-n").textContent = d.n + "件";
     document.getElementById("wfhoos-sum-wr").textContent = d.wr.toFixed(1) + "% (" + d.wins + "勝" + losses + "負)";
     document.getElementById("wfhoos-sum-pf").textContent = d.pf;
     var pnlEl = document.getElementById("wfhoos-sum-pnl");
-    var pnlSign = d.pnl >= 0 ? "+" : "";
-    pnlEl.textContent = pnlSign + Math.round(d.pnl).toLocaleString() + "円";
+    pnlEl.textContent = (d.pnl >= 0 ? "+" : "") + Math.round(d.pnl).toLocaleString() + "円";
     pnlEl.style.color = d.pnlColor;
-    document.getElementById("wfhoos-strat-body").innerHTML = d.strat;
-    document.getElementById("wfhoos-sym-body").innerHTML = d.sym;
-    document.getElementById("wfhoos-mon-body").innerHTML = d.mon;
+    // コンテナ表示切替
     [1,2,3].forEach(function(f) {{
+      var c = document.getElementById("wfhoos-container-" + f);
+      if (c) c.style.display = f === minFp ? "" : "none";
       var btn = document.getElementById("wfhoos-btn-" + f);
       if (!btn) return;
       if (f === minFp) {{
-        btn.style.background = "#1e40af";
-        btn.style.color = "#e2e8f0";
-        btn.style.borderColor = "#38bdf8";
-        btn.style.fontWeight = "bold";
+        btn.style.background = "#1e40af"; btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
       }} else {{
-        btn.style.background = "#1e293b";
-        btn.style.color = "#94a3b8";
-        btn.style.borderColor = "#334155";
-        btn.style.fontWeight = "normal";
+        btn.style.background = "#1e293b"; btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
       }}
     }});
   }};
 
-  var _wfhdet_data = {{
-    2: `{_js_safe(_det2)}`,
-    1: `{_js_safe(_det1)}`,
-    0: `{_js_safe(_det0)}`
-  }};
-
   window.wfhdetFilter = function(minFp) {{
-    var body = document.getElementById("wfhdet-body");
-    if (!body) return;
-    body.innerHTML = _wfhdet_data[minFp] || _wfhdet_data[2];
+    // data-wffp 属性で行の表示/非表示を切替（innerHTML 置換なし）
+    var rows = document.querySelectorAll('#wfhdet-body tr[data-wffp]');
+    rows.forEach(function(r) {{
+      r.style.display = parseInt(r.dataset.wffp) >= minFp ? "" : "none";
+    }});
     [0,1,2].forEach(function(f) {{
       var btn = document.getElementById("wfhdet-btn-" + f);
       if (!btn) return;
       if (f === minFp) {{
-        btn.style.background = "#1e40af";
-        btn.style.color = "#e2e8f0";
-        btn.style.borderColor = "#38bdf8";
-        btn.style.fontWeight = "bold";
+        btn.style.background = "#1e40af"; btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
       }} else {{
-        btn.style.background = "#1e293b";
-        btn.style.color = "#94a3b8";
-        btn.style.borderColor = "#334155";
-        btn.style.fontWeight = "normal";
+        btn.style.background = "#1e293b"; btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
       }}
     }});
   }};
