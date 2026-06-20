@@ -4153,7 +4153,9 @@ function switchTbd(id, tab) {{
                     try:
                         _re = _rbt(_se, _nme, _dfe, _cfe, _em_val, _sme, _tme, days, _ste,
                                    entry_type=_ete)
-                        return _em_val, (_re.get("trade_log", []) if _re else [])
+                        _tlog = _re.get("trade_log", []) if _re else []
+                        # symbol/strategy をトレードに付与（BT帯別ルックアップに必要）
+                        return _em_val, [{**_t, "symbol": _se, "strategy": _ste} for _t in _tlog]
                     except Exception:
                         return _em_val, []
 
