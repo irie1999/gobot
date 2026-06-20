@@ -914,6 +914,39 @@ for days in _PNL_PERIODS:
         f'{_period_pane_htmls[days]}</div>\n'
     )
 
+# ── OOS検証タブ (--oos-until 指定時のみ) ─────────────────────────────────────
+_oos_tab_btn  = ""
+_oos_tab_pane = ""
+if _args.oos_until:
+    from datetime import date as _date_cls
+    try:
+        _oos_until_date = _date_cls.fromisoformat(_args.oos_until)
+    except ValueError:
+        print(f"[ERROR] --oos-until の日付形式が不正です: {_args.oos_until} (YYYY-MM-DD形式で指定してください)")
+        _oos_until_date = None
+
+    if _oos_until_date is not None:
+        _oos_since = _oos_until_date - timedelta(days=_args.oos_days)
+        print(f"\nOOS検証開始: 訓練前データ {_oos_since} 〜 {_oos_until_date} ({_args.oos_days}日間)")
+        _na._PNL_CONFIGS[:] = _all_configs
+        try:
+            _oos_html_body = _na._oos_pnl_html(_oos_until_date, _args.oos_days, _args.workers)
+        except Exception as _oos_e:
+            print(f"[WARN] OOS検証エラー: {_oos_e}")
+            _oos_html_body = f'<p style="color:#f87171;padding:20px">OOS検証エラー: {_oos_e}</p>'
+
+        _oos_tab_btn = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'oos\')">🔬 OOS検証</button>'
+        _oos_tab_pane = f"""
+<div id="ho-oos" class="ho-outer-pane">
+  <p style="color:#64748b;font-size:0.82rem;margin:8px 0 16px">
+    <strong style="color:#38bdf8">OOS検証（訓練前データ）</strong>
+    &nbsp;|&nbsp; 期間: {_oos_since} 〜 {_oos_until_date}（{_args.oos_days}日間）
+    &nbsp;|&nbsp; WF訓練開始日より前の純粋OOSデータで検証
+  </p>
+  {_oos_html_body}
+</div>"""
+        print("OOS検証タブ生成完了")
+
 # ── フル HTML ─────────────────────────────────────────────────────────────────
 _extra_css = """
 /* run_signals_holdout_all: outer tab overrides */
@@ -1020,7 +1053,7 @@ html = f"""<!DOCTYPE html>
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_oos_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -1061,6 +1094,7 @@ html = f"""<!DOCTYPE html>
 {_market_tab3_html}
 </div>
 {_sym_detail_tab_pane}
+{_oos_tab_pane}
 <script>
 {_na.JS}
 {_extra_js}
@@ -1079,51 +1113,3 @@ if not _args.no_browser:
     from _open_html import open_html
     open_html(out_path.resolve())
 
-# ── OOS検証 (--oos-until 指定時のみ) ──────────────────────────────────────────
-if _args.oos_until:
-    from datetime import date as _date_cls
-    try:
-        _oos_until_date = _date_cls.fromisoformat(_args.oos_until)
-    except ValueError:
-        print(f"[ERROR] --oos-until の日付形式が不正です: {_args.oos_until} (YYYY-MM-DD形式で指定してください)")
-        _oos_until_date = None
-
-    if _oos_until_date is not None:
-        print(f"\nOOS検証開始: 訓練前データ {_oos_until_date - timedelta(days=_args.oos_days)} 〜 {_oos_until_date} ({_args.oos_days}日間)")
-        _na._PNL_CONFIGS[:] = _all_configs
-        try:
-            _oos_html_body = _na._oos_pnl_html(_oos_until_date, _args.oos_days, _args.workers)
-        except Exception as _oos_e:
-            print(f"[WARN] OOS検証エラー: {_oos_e}")
-            _oos_html_body = f'<p style="color:#f87171;padding:20px">OOS検証エラー: {_oos_e}</p>'
-
-        _oos_html = f"""<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OOS検証 {_oos_until_date} ({_args.oos_days}日)</title>
-<style>
-{_na.CSS}
-body {{ background:#0f172a; color:#e2e8f0; }}
-table td, table th {{ border:1px solid #1e293b; padding:6px 10px; }}
-</style>
-</head>
-<body>
-<h1 style="color:#38bdf8">OOS検証レポート（訓練前データ検証）</h1>
-<p style="color:#64748b">
-  検証終了日: {_oos_until_date} &nbsp;|&nbsp;
-  検証期間: {_args.oos_days}日 &nbsp;|&nbsp;
-  workers={_args.workers}
-</p>
-{_oos_html_body}
-</body>
-</html>"""
-
-        _oos_out = Path(f"oos_analysis_{_oos_until_date}_{_args.oos_days}d_{_cache_date}.html")
-        _oos_out.write_text(_oos_html, encoding="utf-8")
-        print(f"OOS検証レポート生成完了: {_oos_out.resolve()}")
-
-        if not _args.no_browser:
-            from _open_html import open_html
-            open_html(_oos_out.resolve())
