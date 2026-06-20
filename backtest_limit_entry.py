@@ -50,7 +50,7 @@ JST           = timezone(timedelta(hours=9))
 _TODAY        = datetime.now(JST).date()
 _CACHE_DIR    = Path(".rsi2_cache")
 
-ENTRY_EXPIRE  = 3      # 指値有効日数
+ENTRY_EXPIRE  = 1      # 指値有効日数（翌日のみ有効）
 MAX_HOLD      = 15     # 最大保有日数
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
