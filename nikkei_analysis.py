@@ -3919,14 +3919,9 @@ function switchTbd(id, tab) {{
                 f'</tr>'
             )
 
-        # ── C: ローリング逆指値 効果比較（バックテスト再実行）──
+        # ── C: ローリング逆指値 効果比較（rolling=0/1/2 を並列バックテスト）──
         _rolling_cmp_section = ""
         if _rbt is not None and _fetch9 is not None:
-            # 現在のモード表示用に逆のローリング値でバックテスト再実行
-            _cmp_rolling_n = 0 if _RE > 0 else 2   # 現在無効なら rolling=2 で比較、現在有効なら rolling=0 で比較
-            _cmp_label_cur  = f"現状（EXPIRE={_EE}, ローリング{'有効×'+str(_RE)+'回' if _RE>0 else '無効'}）"
-            _cmp_label_alt  = f"ローリング{'無効（EXPIRE=1）' if _RE > 0 else '有効（最大2回更新）'}"
-
             # 固有 (symbol, strategy) → name を収集
             _sym_strat9: dict = {}
             for _t9 in done:
@@ -3950,37 +3945,50 @@ function switchTbd(id, tab) {{
                         pass
                 return None
 
-            def _run_one9(item9):
-                (_s9, _st9), _nm9 = item9
+            # rolling=0/1/2 それぞれで1回ずつバックテスト実行（1銘柄×3rolling を並列）
+            def _run_one9(args9):
+                (_s9, _st9), _nm9, _roll9 = args9
                 _p9 = _get_params9(_st9)
                 if not _p9:
-                    return []
+                    return _roll9, []
                 _cf9, _em9, _sm9, _tm9, _et9 = _p9
                 _df9 = _fetch9(_s9, days + 60)
                 if _df9 is None:
-                    return []
+                    return _roll9, []
                 try:
                     _r9 = _rbt(_s9, _nm9, _df9, _cf9, _em9, _sm9, _tm9, days, _st9,
-                               entry_type=_et9, rolling_entry=_cmp_rolling_n)
-                    return _r9.get("trade_log", []) if _r9 else []
+                               entry_type=_et9, rolling_entry=_roll9)
+                    return _roll9, (_r9.get("trade_log", []) if _r9 else [])
                 except Exception:
-                    return []
+                    return _roll9, []
 
             from concurrent.futures import ThreadPoolExecutor as _TPE9
-            _alt_trades: list = []
-            print(f"[⑨ Rolling比較] {len(_sym_strat9)}件の銘柄×戦略を再バックテスト中 (rolling={_cmp_rolling_n})…")
+            _trades_by_roll: dict = {0: [], 1: [], 2: []}
+            _all_jobs9 = [
+                (item9, _rn9)
+                for item9 in _sym_strat9.items()
+                for _rn9 in (0, 1, 2)
+            ]
+            print(f"[⑨ Rolling比較] {len(_sym_strat9)}銘柄×戦略 × 3パターン = {len(_all_jobs9)}件 バックテスト中…")
             with _TPE9(max_workers=workers) as _ex9:
-                _futs9 = {_ex9.submit(_run_one9, item9): None for item9 in _sym_strat9.items()}
+                _futs9 = {_ex9.submit(_run_one9, (item9[0], item9[1], rn9)): None
+                          for item9, rn9 in [((_k, _v), _rn) for (_k, _v), _rn in
+                                             [((item9[0], item9[1]), rn9) for item9, rn9 in _all_jobs9]]}
+                # rebuild cleanly
+                _futs9 = {}
+                for (_sym_item9, _rn9) in _all_jobs9:
+                    _key9, _val9 = _sym_item9
+                    _futs9[_ex9.submit(_run_one9, ((_key9, _val9), _sym_strat9[(_key9, _val9)], _rn9))] = None
                 for _f9 in _futs9:
                     try:
-                        _alt_trades.extend(_f9.result())
+                        _rn9_res, _tlog9 = _f9.result()
+                        _trades_by_roll[_rn9_res].extend(_tlog9)
                     except Exception:
                         pass
-            print(f"[⑨ Rolling比較] 完了: {len(_alt_trades)}件の取引ログ取得")
+            print(f"[⑨ Rolling比較] 完了: " + " / ".join(f"rolling={r}: {len(_trades_by_roll[r])}件" for r in (0,1,2)))
 
-            _alt_done = [t for t in _alt_trades if t.get("reason") not in ("発注中", "保有中")]
-            _s_cur9  = _st(done)
-            _s_alt9  = _st(_alt_done)
+            def _done9(tl): return [t for t in tl if t.get("reason") not in ("発注中", "保有中")]
+            _s9 = {r: _st(_done9(_trades_by_roll[r])) for r in (0, 1, 2)}
 
             def _cmp_row9(label, s, highlight=False):
                 bg   = "background:#0c1f3a;" if highlight else ""
@@ -3999,65 +4007,64 @@ function switchTbd(id, tab) {{
                         f'<td style="text-align:right;color:{pcol}">{s["avg"]:+,.0f}円</td>'
                         f'</tr>')
 
-            # 月別比較
+            _cur_hi = {0: _RE == 0, 1: _RE == 1, 2: _RE == 2}
+            _row_r0 = _cmp_row9(f"rolling=0（翌日のみ・EXPIRE=1）{'★現状' if _RE==0 else ''}", _s9[0], highlight=_cur_hi[0])
+            _row_r1 = _cmp_row9(f"rolling=1（最大1回更新）{'★現状' if _RE==1 else ''}",         _s9[1], highlight=_cur_hi[1])
+            _row_r2 = _cmp_row9(f"rolling=2（最大2回更新）{'★現状' if _RE==2 else ''}",         _s9[2], highlight=_cur_hi[2])
+
+            # 月別比較（3列）
             from collections import defaultdict as _dd9c
-            _by_ym_cur9  = _dd9c(list)
-            _by_ym_alt9  = _dd9c(list)
-            for _t9c in done:
-                _ym9c = str(_t9c.get("entry_d_raw") or _t9c.get("exit_d_raw") or "")[:7]
-                if _ym9c:
-                    _by_ym_cur9[_ym9c].append(_t9c)
-            for _t9a in _alt_done:
-                _ym9a = str(_t9a.get("signal_dt", "") or "")[:7]
-                if not _ym9a:
-                    _sd9 = _t9a.get("signal_dt")
-                    _ym9a = str(_sd9)[:7] if _sd9 else ""
-                if _ym9a:
-                    _by_ym_alt9[_ym9a].append(_t9a)
-            _all_ym9 = sorted(set(list(_by_ym_cur9) + list(_by_ym_alt9)), reverse=True)
+            _by_ym9 = {r: _dd9c(list) for r in (0, 1, 2)}
+            for _r9m in (0, 1, 2):
+                for _t9m in _done9(_trades_by_roll[_r9m]):
+                    _sd9m = _t9m.get("signal_dt")
+                    _ym9m = str(_sd9m)[:7] if _sd9m else ""
+                    if _ym9m:
+                        _by_ym9[_r9m][_ym9m].append(_t9m)
+            _all_ym9 = sorted(set().union(*[set(_by_ym9[r].keys()) for r in (0,1,2)]), reverse=True)
             _cmp_month_rows9 = ""
             for _ym9 in _all_ym9:
-                _sc9  = _st(_by_ym_cur9[_ym9])
-                _sa9  = _st(_by_ym_alt9[_ym9])
+                _sm9 = {r: _st(_by_ym9[r][_ym9]) for r in (0, 1, 2)}
                 def _pc9(s): return "#4ade80" if s["pnl"] >= 0 else "#f87171"
+                _cells9 = ""
+                for _rr in (0, 1, 2):
+                    _sep9 = ' style="border-left:1px solid #334155"' if _rr > 0 else ""
+                    _cells9 += (
+                        f'<td{_sep9}><span style="color:#94a3b8">{_sm9[_rr]["n"]}件</span></td>'
+                        f'<td style="text-align:right;color:#94a3b8">{_sm9[_rr]["wr"]:.0f}%</td>'
+                        f'<td style="text-align:right;color:{_pc9(_sm9[_rr])};font-weight:700">{_sm9[_rr]["pnl"]:+,.0f}円</td>'
+                    )
                 _cmp_month_rows9 += (
                     f'<tr><td style="font-weight:700;color:#e2e8f0;padding:5px 10px">{_ym9[:4]}/{_ym9[5:7]}月</td>'
-                    f'<td style="text-align:right;color:#94a3b8">{_sc9["n"]}件</td>'
-                    f'<td style="text-align:right;color:#94a3b8">{_sc9["wr"]:.0f}%</td>'
-                    f'<td style="text-align:right;color:{_pc9(_sc9)};font-weight:700">{_sc9["pnl"]:+,.0f}円</td>'
-                    f'<td style="border-left:1px solid #334155;text-align:right;color:#94a3b8">{_sa9["n"]}件</td>'
-                    f'<td style="text-align:right;color:#94a3b8">{_sa9["wr"]:.0f}%</td>'
-                    f'<td style="text-align:right;color:{_pc9(_sa9)};font-weight:700">{_sa9["pnl"]:+,.0f}円</td>'
-                    f'</tr>'
+                    + _cells9 + "</tr>"
                 )
 
             _rolling_cmp_section = f"""
-<h3 style="color:#7c3aed;margin:20px 0 6px">C. ローリング逆指値 効果比較（同一銘柄×戦略でバックテスト再実行）</h3>
-<p class="footnote">同じ銘柄×戦略リストに対してローリング設定を変えてバックテストを再実行し、成績を比較。
-取引の重複除外はしていないため件数はA/Bタブの合計と異なります。</p>
-<table style="width:auto;min-width:650px;margin-bottom:12px">
+<h3 style="color:#7c3aed;margin:20px 0 6px">C. ローリング逆指値 効果比較（rolling=0 / 1 / 2 並列バックテスト）</h3>
+<p class="footnote">同一銘柄×戦略リストに対してローリング回数 0/1/2 でバックテストを再実行。★現状 = 現在の設定。
+取引の重複除外はしていないため件数はA/Bタブと異なります。</p>
+<table style="width:auto;min-width:700px;margin-bottom:12px">
   <thead><tr>
     <th style="text-align:left">設定</th>
     <th>件数</th><th>勝率</th><th>PF</th>
     <th style="color:#4ade80">総利益</th><th style="color:#f87171">総損失</th>
     <th>損益合計</th><th>平均損益</th>
   </tr></thead>
-  <tbody>
-    {_cmp_row9(_cmp_label_cur, _s_cur9, highlight=True)}
-    {_cmp_row9(_cmp_label_alt, _s_alt9)}
-  </tbody>
+  <tbody>{_row_r0}{_row_r1}{_row_r2}</tbody>
 </table>
 <details style="margin-bottom:16px">
-  <summary style="cursor:pointer;color:#7c3aed;font-size:0.85rem;padding:4px 0">月別内訳（ローリング比較）を表示</summary>
-  <table style="width:auto;min-width:500px;margin-top:8px">
+  <summary style="cursor:pointer;color:#7c3aed;font-size:0.85rem;padding:4px 0">月別内訳（rolling 0/1/2）を表示</summary>
+  <table style="width:auto;min-width:600px;margin-top:8px">
     <thead>
       <tr>
         <th style="text-align:left">月</th>
-        <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">{_cmp_label_cur}</th>
-        <th colspan="3" style="color:#7c3aed;border-left:1px solid #334155;border-bottom:2px solid #7c3aed">{_cmp_label_alt}</th>
+        <th colspan="3" style="color:#60a5fa;border-bottom:2px solid #60a5fa">rolling=0（翌日のみ）</th>
+        <th colspan="3" style="color:#fbbf24;border-left:1px solid #334155;border-bottom:2px solid #fbbf24">rolling=1（1回更新）</th>
+        <th colspan="3" style="color:#7c3aed;border-left:1px solid #334155;border-bottom:2px solid #7c3aed">rolling=2（2回更新）</th>
       </tr><tr>
         <th></th>
         <th>件数</th><th>勝率</th><th>損益</th>
+        <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
         <th style="border-left:1px solid #334155">件数</th><th>勝率</th><th>損益</th>
       </tr>
     </thead>
