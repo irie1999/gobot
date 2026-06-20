@@ -64,7 +64,7 @@ _pre.add_argument("--output-suffix", type=str, default="",
 _pre.add_argument("--rolling", type=int, default=0,
                   help="ローリング逆指値: 未約定時に終値で注文価格を更新する最大回数 (例: --rolling 2)")
 _pre.add_argument("--wf-until", type=str, default=None,
-                  help="WF歴史検証の基準日 (YYYY-MM-DD). その日以前のデータで4fold WF選定し以降OOS検証タブを追加")
+                  help="WF歴史検証の基準日 (YYYY-MM-DD). その日以前のデータで3fold WF選定し以降OOS検証タブを追加")
 _pre.add_argument("--oos-until", type=str, default=None,
                   help="OOS検証終了日 (YYYY-MM-DD). 指定時のみOOS検証HTMLを生成する")
 _pre.add_argument("--oos-days",  type=int, default=365,
@@ -929,7 +929,7 @@ if _args.wf_until:
         _wfh_until_date = None
     if _wfh_until_date is not None:
         _na._PNL_CONFIGS[:] = _all_configs
-        print(f"\nWF歴史検証開始: {_wfh_until_date} 時点で4fold選定 → 以降OOS検証", flush=True)
+        print(f"\nWF歴史検証開始: {_wfh_until_date} 時点で3fold選定（時系列順）→ 以降OOS検証", flush=True)
         try:
             _wfh_body = _na._wf_history_html(_wfh_until_date, _args.workers)
         except Exception as _wfh_e:

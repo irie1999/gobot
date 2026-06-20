@@ -2196,15 +2196,24 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
                 else '<span style="color:#f87171">✗</span>')
 
     # fold期間の日付計算（表示用）
-    _fold_env = ["COVID暴落・回復", "利上げ・ベア", "回復・上昇", "強気相場"]
+    # fold環境ラベル: TEST期間を基に動的に生成（新fold設計に対応）
+    def _fold_env_label(test_start, test_end):
+        yr = test_start.year
+        if yr <= 2020: return "COVID暴落・回復"
+        if yr <= 2021: return "上昇・調整期"
+        if yr <= 2022: return "利上げ・ベア"
+        if yr <= 2023: return "回復・上昇"
+        return "強気相場"
     fold_periods = []
-    for (fn, ts, te, vs, ve), env in zip(_HIST_FOLDS, _fold_env):
+    for fn, ts, te, vs, ve in _HIST_FOLDS:
+        _vs_date = wf_until_date - timedelta(days=vs)
+        _ve_date = wf_until_date - timedelta(days=ve)
         fold_periods.append((fn,
                              wf_until_date - timedelta(days=ts),
                              wf_until_date - timedelta(days=te),
-                             wf_until_date - timedelta(days=vs),
-                             wf_until_date - timedelta(days=ve),
-                             env))
+                             _vs_date,
+                             _ve_date,
+                             _fold_env_label(_vs_date, _ve_date)))
 
     n_4 = sum(1 for r in wf_results if r["folds_passed"] == 4)
     n_3 = sum(1 for r in wf_results if r["folds_passed"] >= 3)
@@ -2441,7 +2450,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
   </h3>
   <p style="color:#64748b;font-size:0.82rem;margin:0 0 16px">
     現行WATCHLISTの銘柄×戦略を <strong style="color:#fbbf24">{wf_until_date}</strong> 以前のデータのみで
-    4fold WF（TRAIN3年/TEST1年）選定。現行WATCHLIST選定には影響なし。
+    3fold WF（TRAIN2年/TEST1年、時系列順・非重複）選定。現行WATCHLIST選定には影響なし。
   </p>
 
   <!-- ① fold設計 -->
@@ -2449,7 +2458,7 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
   <table style="font-size:0.8rem;border-collapse:collapse;margin-bottom:20px">
     <thead><tr>
       <th style="{_th}">fold</th>
-      <th style="{_th}">TRAIN期間（3年）</th>
+      <th style="{_th}">TRAIN期間（2年）</th>
       <th style="{_th}">TEST期間（1年）</th>
       <th style="{_th}">テスト環境</th>
     </tr></thead>
