@@ -4547,14 +4547,14 @@ function switchTbd(id, tab) {{
             _RE, _EE, _rbt, _fetch9 = 0, 1, None, None
         done = [t for t in trades_list if t.get("reason") not in ("発注中", "保有中")]
 
-        # ── ⑨ キャッシュ（Rolling/em比較は重いので日付×daysでキャッシュ）──
+        # ── ⑨ キャッシュ（Rolling/em比較は重いので銘柄セット単位でキャッシュ）──
+        # 日付ではなく days 単位のファイルを使い、銘柄/戦略セットが変わらない限り再利用
         import pickle as _pk9c
         from pathlib import Path as _P9c
         import datetime as _dt9c
         _9c_cache_dir = _P9c(".holdout_bt_cache")
         _9c_cache_dir.mkdir(exist_ok=True)
-        _9c_today = _dt9c.date.today().isoformat()
-        _9c_cache_file = _9c_cache_dir / f"timing9cmp_{days}d_{_9c_today}.pkl"
+        _9c_cache_file = _9c_cache_dir / f"timing9cmp_{days}d.pkl"
         _9c_cache: dict = {}
         if _9c_cache_file.exists():
             try:
