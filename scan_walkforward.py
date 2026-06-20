@@ -197,15 +197,15 @@ FOLDS: list[tuple[str, int, int, int, int]] = [
     ("fold2", 550, 180, 180,   0),  # TRAIN 12M / TEST 6M
 ]
 
-# ── 歴史WF用 Fold 定義（as_of_date 基準 / TRAIN 3年 / TEST 1年 × 4fold）──────
+# ── 歴史WF用 Fold 定義（as_of_date 基準 / TRAIN 2年 / TEST 1年 × 3fold）──────
 # 現行 FOLDS とは完全独立。--wf-until 使用時のみ参照。現行WATCHLISTに影響なし。
+# TRAIN 2yr×3fold: 最大遡及 1825日（5年分）。TRAIN 3yr×4fold から削減してデータ取得を軽量化。
 FOLDS_HISTORICAL: list[tuple[str, int, int, int, int]] = [
-    ("fold1", 2555, 1460, 1460, 1095),  # TRAIN 3yr / TEST 1yr (3〜4年前 from as_of)
-    ("fold2", 2190, 1095, 1095,  730),  # TRAIN 3yr / TEST 1yr (2〜3年前 from as_of)
-    ("fold3", 1825,  730,  730,  365),  # TRAIN 3yr / TEST 1yr (1〜2年前 from as_of)
-    ("fold4", 1460,  365,  365,    0),  # TRAIN 3yr / TEST 1yr (0〜1年前 from as_of)
+    ("fold1", 1825,  730,  730,  365),  # TRAIN 2yr / TEST 1yr (1〜2年前 from as_of)
+    ("fold2", 1460,  365,  365,    0),  # TRAIN 2yr / TEST 1yr (0〜1年前 from as_of)
+    ("fold3", 2190, 1095, 1095,  730),  # TRAIN 2yr / TEST 1yr (2〜3年前 from as_of)
 ]
-_HIST_MAX_LOOKBACK = 2555  # FOLDS_HISTORICAL の最大遡及日数（as_of_date からの日数）
+_HIST_MAX_LOOKBACK = 2190  # FOLDS_HISTORICAL の最大遡及日数（as_of_date からの日数）
 
 # ── 合格閾値 ─────────────────────────────────────────────────────
 TRAIN_MIN_TRADES = 5   # 12M TRAINに合わせて引き上げ

@@ -2046,21 +2046,27 @@ _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_h
 def _wf_history_html(wf_until_date, workers: int) -> str:
     """WF歴史検証HTML。
 
-    wf_until_date 時点のデータのみで FOLDS_HISTORICAL（4fold/TRAIN3年/TEST1年）を使い
+    wf_until_date 時点のデータのみで FOLDS_HISTORICAL（3fold/TRAIN2年/TEST1年）を使い
     現行 _PNL_CONFIGS の全銘柄×戦略を WF 選定。
     ≥2fold 通過銘柄の wf_until_date〜今日 OOS 成績も表示。
     現行 WATCHLIST/FOLDS には一切影響しない。
+    WF結果は .wfh_cache/ に日付別でキャッシュされ、2回目以降は即座に表示。
     """
+    import pickle as _pkl
+    from pathlib import Path as _PL
+
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
     try:
         from scan_walkforward import walkforward_one_asof as _wf_asof, FOLDS_HISTORICAL as _HIST_FOLDS
+        from scan_walkforward import _HIST_MAX_LOOKBACK as _HML
     except ImportError as _ie:
         return f'<p style="color:#f87171;padding:20px">scan_walkforward インポートエラー: {_ie}</p>'
 
     from backtest_limit_entry import fetch as _wfh_fetch, run_limit_backtest as _wfh_rbt, _TODAY as _wfh_today
     from collections import defaultdict
+    from datetime import timedelta as _td
 
     # ── 現行 _PNL_CONFIGS から (sym, name, strat) を収集（デデュップ）──────────
     all_tasks: list[tuple] = []
@@ -2071,22 +2077,63 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
                 seen_tasks.add((_sym, _st))
                 all_tasks.append((_sym, _nm, _st))
 
-    print(f"[WF歴史検証] {len(all_tasks)}件 WFスキャン中 (as_of={wf_until_date})…", flush=True)
-
-    def _run_wf_hist(args):
-        _s, _n, _st = args
-        try:
-            return _wf_asof(_s, _n, _st, wf_until_date)
-        except Exception:
-            return None
+    # ── WF結果キャッシュ（同じ wf_until_date & 同じ銘柄リストなら再スキャン不要）──
+    _wfh_cache_dir = _PL(".wfh_cache")
+    _wfh_cache_dir.mkdir(exist_ok=True)
+    _cache_key  = str(wf_until_date) + "_" + str(sorted(seen_tasks))
+    import hashlib as _hl
+    _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
+    _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
 
     wf_results: list[dict] = []
-    with _TPE(max_workers=workers) as _ex:
-        _futs = {_ex.submit(_run_wf_hist, t): t for t in all_tasks}
-        for _fut in _asc(_futs):
-            _r = _fut.result()
-            if _r is not None:
-                wf_results.append(_r)
+    if _cache_path.exists():
+        try:
+            with open(_cache_path, "rb") as _f:
+                wf_results = _pkl.load(_f)
+            print(f"[WF歴史検証] キャッシュ読込: {len(wf_results)}件 ({_cache_path.name})", flush=True)
+        except Exception:
+            wf_results = []
+
+    if not wf_results:
+        # ── 銘柄データを先にpre-fetch（同一銘柄の重複ダウンロード排除）──────────
+        unique_syms = list({(_sym, _nm) for _sym, _nm, _ in all_tasks})
+        _since = wf_until_date - _td(days=_HML + 200)
+        _fetch_days = int((_wfh_today - _since).days * 1.1) + 60
+
+        print(f"[WF歴史検証] {len(unique_syms)}銘柄の長期データ取得中 ({_since}〜)…", flush=True)
+
+        def _pre_fetch(sym_nm):
+            _s, _n = sym_nm
+            try:
+                _wfh_fetch(_s, _fetch_days, min_start_date=_since)
+            except Exception:
+                pass
+
+        with _TPE(max_workers=min(workers, 8)) as _ex_pf:
+            list(_ex_pf.map(_pre_fetch, unique_syms))
+
+        print(f"[WF歴史検証] {len(all_tasks)}件 WFスキャン中 (as_of={wf_until_date})…", flush=True)
+
+        def _run_wf_hist(args):
+            _s, _n, _st = args
+            try:
+                return _wf_asof(_s, _n, _st, wf_until_date)
+            except Exception:
+                return None
+
+        with _TPE(max_workers=workers) as _ex:
+            _futs = {_ex.submit(_run_wf_hist, t): t for t in all_tasks}
+            for _fut in _asc(_futs):
+                _r = _fut.result()
+                if _r is not None:
+                    wf_results.append(_r)
+
+        # キャッシュ保存
+        try:
+            with open(_cache_path, "wb") as _f:
+                _pkl.dump(wf_results, _f)
+        except Exception:
+            pass
 
     print(f"[WF歴史検証] WFスキャン完了: {len(wf_results)}件", flush=True)
 
