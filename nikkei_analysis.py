@@ -3969,16 +3969,13 @@ function switchTbd(id, tab) {{
                 for item9 in _sym_strat9.items()
                 for _rn9 in (0, 1, 2)
             ]
-            print(f"[⑨ Rolling比較] {len(_sym_strat9)}銘柄×戦略 × 3パターン = {len(_all_jobs9)}件 バックテスト中…")
+            _n_jobs9 = len(_sym_strat9) * 3
+            print(f"[⑨ Rolling比較] {len(_sym_strat9)}銘柄×戦略 × 3パターン = {_n_jobs9}件 バックテスト中…")
             with _TPE9(max_workers=workers) as _ex9:
-                _futs9 = {_ex9.submit(_run_one9, (item9[0], item9[1], rn9)): None
-                          for item9, rn9 in [((_k, _v), _rn) for (_k, _v), _rn in
-                                             [((item9[0], item9[1]), rn9) for item9, rn9 in _all_jobs9]]}
-                # rebuild cleanly
                 _futs9 = {}
-                for (_sym_item9, _rn9) in _all_jobs9:
-                    _key9, _val9 = _sym_item9
-                    _futs9[_ex9.submit(_run_one9, ((_key9, _val9), _sym_strat9[(_key9, _val9)], _rn9))] = None
+                for (_sym_key9, _nm9), _rn9 in _all_jobs9:
+                    # _run_one9 expects ((_s9, _st9), _nm9, _roll9)
+                    _futs9[_ex9.submit(_run_one9, (tuple(_sym_key9), _nm9, _rn9))] = None
                 for _f9 in _futs9:
                     try:
                         _rn9_res, _tlog9 = _f9.result()
