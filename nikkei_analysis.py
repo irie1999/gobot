@@ -2046,259 +2046,236 @@ _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_h
 def _wf_history_html(wf_until_date, workers: int) -> str:
     """WF歴史検証HTML。
 
-    wf_until_date 時点のデータのみで FOLDS_HISTORICAL（4fold / TRAIN3年 / TEST1年）を使い
-    現行 _PNL_CONFIGS 内の全銘柄×戦略を WF 選定。
-    次に wf_until_date〜今日のOOS成績も表示。
+    wf_until_date 時点のデータのみで FOLDS_HISTORICAL（4fold/TRAIN3年/TEST1年）を使い
+    現行 _PNL_CONFIGS の全銘柄×戦略を WF 選定。
+    ≥2fold 通過銘柄の wf_until_date〜今日 OOS 成績も表示。
     現行 WATCHLIST/FOLDS には一切影響しない。
     """
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
     try:
-        from scan_walkforward import (
-            walkforward_one_asof as _wf_asof,
-            FOLDS_HISTORICAL as _HIST_FOLDS,
-        )
-    except ImportError as e:
-        return f'<p style="color:#f87171;padding:20px">scan_walkforward インポートエラー: {e}</p>'
+        from scan_walkforward import walkforward_one_asof as _wf_asof, FOLDS_HISTORICAL as _HIST_FOLDS
+    except ImportError as _ie:
+        return f'<p style="color:#f87171;padding:20px">scan_walkforward インポートエラー: {_ie}</p>'
 
-    from backtest_limit_entry import (
-        fetch as _wfh_fetch,
-        run_limit_backtest as _wfh_rbt,
-        _TODAY as _wfh_today,
-    )
+    from backtest_limit_entry import fetch as _wfh_fetch, run_limit_backtest as _wfh_rbt, _TODAY as _wfh_today
     from collections import defaultdict
 
     # ── 現行 _PNL_CONFIGS から (sym, name, strat) を収集（デデュップ）──────────
     all_tasks: list[tuple] = []
     seen_tasks: set = set()
-    for cfg in _PNL_CONFIGS:
-        for sym, name, strat in cfg["stop_wl"] + cfg["brk_wl"]:
-            if (sym, strat) not in seen_tasks:
-                seen_tasks.add((sym, strat))
-                all_tasks.append((sym, name, strat))
+    for _cfg in _PNL_CONFIGS:
+        for _sym, _nm, _st in _cfg["stop_wl"] + _cfg["brk_wl"]:
+            if (_sym, _st) not in seen_tasks:
+                seen_tasks.add((_sym, _st))
+                all_tasks.append((_sym, _nm, _st))
 
-    # ── 並列 WF バックテスト（as_of_date = wf_until_date）────────────────────
     print(f"[WF歴史検証] {len(all_tasks)}件 WFスキャン中 (as_of={wf_until_date})…", flush=True)
 
-    def _run_wf(args):
-        sym, name, strat = args
+    def _run_wf_hist(args):
+        _s, _n, _st = args
         try:
-            return _wf_asof(sym, name, strat, wf_until_date)
+            return _wf_asof(_s, _n, _st, wf_until_date)
         except Exception:
             return None
 
     wf_results: list[dict] = []
-    with _TPE(max_workers=workers) as ex:
-        futs = {ex.submit(_run_wf, t): t for t in all_tasks}
-        for fut in _asc(futs):
-            r = fut.result()
-            if r is not None:
-                wf_results.append(r)
+    with _TPE(max_workers=workers) as _ex:
+        _futs = {_ex.submit(_run_wf_hist, t): t for t in all_tasks}
+        for _fut in _asc(_futs):
+            _r = _fut.result()
+            if _r is not None:
+                wf_results.append(_r)
 
     print(f"[WF歴史検証] WFスキャン完了: {len(wf_results)}件", flush=True)
 
-    # ── WF 通過銘柄のOOS成績（wf_until_date〜今日）──────────────────────────
-    oos_since = wf_until_date
-    oos_backtest_days = (_wfh_today - oos_since).days
-    passed_tasks = [(r["symbol"], r["name"], r["strategy"]) for r in wf_results if r["folds_passed"] >= 2]
+    # ── ≥2fold 通過銘柄の OOS 成績（wf_until_date〜今日）───────────────────────
+    _oos_backtest_days = (_wfh_today - wf_until_date).days
+    passed_tasks = [(r["symbol"], r["name"], r["strategy"])
+                    for r in wf_results if r["folds_passed"] >= 2]
 
-    def _run_oos(args):
-        sym, name, strat = args
+    def _run_wf_oos(args):
+        _s, _n, _st = args
         try:
-            mod = _mod_for(strat)
-            params = mod.STRATEGY_PARAMS.get(strat)
-            if not params:
+            _mod = _mod_for(_st)
+            _params = _mod.STRATEGY_PARAMS.get(_st)
+            if not _params:
                 return []
-            calc_fn, em, sm, tm = params
-            is_short = strat.endswith("_S")
-            etype = "stop_sell" if is_short else "stop"
-            df_full = _wfh_fetch(sym, oos_backtest_days + 60)
-            if df_full is None or df_full.empty:
+            _cf, _em, _sm, _tm = _params
+            _etype = "stop_sell" if _st.endswith("_S") else "stop"
+            _df = _wfh_fetch(_s, _oos_backtest_days + 60)
+            if _df is None or _df.empty:
                 return []
-            result = _wfh_rbt(sym, name, df_full, calc_fn, em, sm, tm,
-                              oos_backtest_days, strat, entry_type=etype)
-            if not result:
+            _res = _wfh_rbt(_s, _n, _df, _cf, _em, _sm, _tm, _oos_backtest_days, _st, entry_type=_etype)
+            if not _res:
                 return []
-            tlog = result.get("trade_log", [])
-            finished = [t for t in tlog
-                        if t.get("reason") not in ("発注中", "保有中")
-                        and t.get("exit_dt") is not None]
-            seen_sig: set = set()
-            out = []
-            for t in finished:
-                k = (sym, strat, t.get("signal_dt"))
-                if k not in seen_sig:
-                    seen_sig.add(k)
-                    out.append({**t, "symbol": sym, "name": name, "strategy": strat})
-            return out
+            _tlog = _res.get("trade_log", [])
+            _seen: set = set()
+            _out = []
+            for _t in _tlog:
+                if _t.get("reason") in ("発注中", "保有中") or _t.get("exit_dt") is None:
+                    continue
+                _k = (_s, _st, _t.get("signal_dt"))
+                if _k not in _seen:
+                    _seen.add(_k)
+                    _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st})
+            return _out
         except Exception:
             return []
 
     oos_trades: list[dict] = []
     if passed_tasks:
-        with _TPE(max_workers=workers) as ex:
-            futs2 = {ex.submit(_run_oos, t): t for t in passed_tasks}
-            for fut in _asc(futs2):
+        with _TPE(max_workers=workers) as _ex2:
+            _futs2 = {_ex2.submit(_run_wf_oos, t): t for t in passed_tasks}
+            for _fut in _asc(_futs2):
                 try:
-                    oos_trades.extend(fut.result())
+                    oos_trades.extend(_fut.result())
                 except Exception:
                     pass
 
     # ── HTML 生成 ─────────────────────────────────────────────────────────────
-    td  = "border:1px solid #1e293b;padding:6px 10px"
-    th  = f"{td};background:#1e293b;color:#94a3b8;text-align:center;font-size:0.78rem"
-    tdc = f"{td};text-align:center"
+    _td  = "border:1px solid #1e293b;padding:6px 10px"
+    _th  = f"{_td};background:#1e293b;color:#94a3b8;text-align:center;font-size:0.78rem"
+    _tdc = f"{_td};text-align:center"
 
     def _ok(v: bool) -> str:
         return ('<span style="color:#4ade80;font-weight:bold">✓</span>' if v
                 else '<span style="color:#f87171">✗</span>')
 
-    def _pfmt(v: float) -> str:
-        return "∞" if v == 0 and v != v else f"{v:.2f}"  # placeholder
-
     # fold期間の日付計算（表示用）
+    _fold_env = ["COVID暴落・回復", "利上げ・ベア", "回復・上昇", "強気相場"]
     fold_periods = []
-    for fold_name, ts, te, vs, ve in _HIST_FOLDS:
-        t_start = wf_until_date - timedelta(days=ts)
-        t_end   = wf_until_date - timedelta(days=te)
-        v_start = wf_until_date - timedelta(days=vs)
-        v_end   = wf_until_date - timedelta(days=ve)
-        fold_periods.append((fold_name, t_start, t_end, v_start, v_end))
+    for (fn, ts, te, vs, ve), env in zip(_HIST_FOLDS, _fold_env):
+        fold_periods.append((fn,
+                             wf_until_date - timedelta(days=ts),
+                             wf_until_date - timedelta(days=te),
+                             wf_until_date - timedelta(days=vs),
+                             wf_until_date - timedelta(days=ve),
+                             env))
 
-    fold_header = "".join(
-        f'<th style="{th}" colspan="2">{fn}<br>'
+    _fold_header = "".join(
+        f'<th style="{_th}" colspan="2">{fn}<br>'
         f'<span style="font-size:0.7rem;color:#64748b">TEST:{vs.strftime("%Y/%m")}〜{ve.strftime("%Y/%m")}</span></th>'
-        for fn, _, _, vs, ve in fold_periods
+        for fn, _, _, vs, ve, _ in fold_periods
     )
-    fold_subheader = '<th style="{0}">訓練</th><th style="{0}">検証</th>'.format(th) * len(_HIST_FOLDS)
+    _fold_subhdr = (f'<th style="{_th}">訓練</th><th style="{_th}">検証</th>') * len(_HIST_FOLDS)
 
-    # WF結果テーブル行
-    n_passed_4 = sum(1 for r in wf_results if r["folds_passed"] == 4)
-    n_passed_3 = sum(1 for r in wf_results if r["folds_passed"] >= 3)
-    n_passed_2 = sum(1 for r in wf_results if r["folds_passed"] >= 2)
-    n_total    = len(wf_results)
+    n_4 = sum(1 for r in wf_results if r["folds_passed"] == 4)
+    n_3 = sum(1 for r in wf_results if r["folds_passed"] >= 3)
+    n_2 = sum(1 for r in wf_results if r["folds_passed"] >= 2)
+    n_t = len(wf_results)
 
     wf_rows = ""
-    for r in sorted(wf_results, key=lambda x: -x["folds_passed"]):
+    for r in sorted(wf_results, key=lambda x: (-x["folds_passed"], -x.get("total_test_pnl", 0))):
         fp = r["folds_passed"]
-        fp_color = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#f87171")
-        fold_cells = ""
+        fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#f87171")
+        _cells = ""
         for fd in r.get("fold_detail", []):
-            fold_cells += (
-                f'<td style="{tdc}">{_ok(fd["pass_train"])}'
-                f'<br><span style="font-size:0.72rem;color:#94a3b8">'
-                f'PF{fd["train_pf"]}</span></td>'
-                f'<td style="{tdc}">{_ok(fd["pass_test"])}'
-                f'<br><span style="font-size:0.72rem;color:#94a3b8">'
-                f'PF{fd["test_pf"]}</span></td>'
+            _cells += (
+                f'<td style="{_tdc}">{_ok(fd["pass_train"])}'
+                f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["train_pf"]}</span></td>'
+                f'<td style="{_tdc}">{_ok(fd["pass_test"])}'
+                f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["test_pf"]}</span></td>'
             )
-        pnl = r.get("total_test_pnl", 0)
+        _pnl = r.get("total_test_pnl", 0)
         wf_rows += (
             f'<tr>'
-            f'<td style="{td};color:#e2e8f0">{r["symbol"]}</td>'
-            f'<td style="{td};color:#94a3b8;font-size:0.8rem">{r["name"]}</td>'
-            f'<td style="{td};color:#94a3b8;font-size:0.8rem">{r["strategy"]}</td>'
-            f'<td style="{tdc};color:{fp_color};font-weight:bold">{fp}/4</td>'
-            f'{fold_cells}'
-            f'<td style="{tdc}">{r.get("avg_test_wr", 0):.1f}%</td>'
-            f'<td style="{tdc}">{r.get("avg_test_pf", 0):.2f}</td>'
-            f'<td style="{td};text-align:right;color:{"#4ade80" if pnl>0 else "#f87171"}">'
-            f'{pnl:+,.0f}円</td>'
+            f'<td style="{_td};color:#e2e8f0">{r["symbol"]}</td>'
+            f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["name"]}</td>'
+            f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["strategy"]}</td>'
+            f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}/4</td>'
+            f'{_cells}'
+            f'<td style="{_tdc}">{r.get("avg_test_wr", 0):.1f}%</td>'
+            f'<td style="{_tdc}">{r.get("avg_test_pf", 0):.2f}</td>'
+            f'<td style="{_td};text-align:right;color:{"#4ade80" if _pnl>0 else "#f87171"}">'
+            f'{_pnl:+,.0f}円</td>'
             f'</tr>\n'
         )
 
-    # OOS集計（≥2fold通過銘柄のみ）
-    oos_wins = sum(1 for t in oos_trades if float(t.get("pnl", 0)) > 0)
-    oos_n    = len(oos_trades)
-    oos_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades)
-    win_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) > 0)
-    loss_pnl = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) <= 0)
-    oos_pf   = (win_pnl / abs(loss_pnl)) if loss_pnl != 0 else float("inf")
-    oos_wr   = (oos_wins / oos_n * 100) if oos_n > 0 else 0.0
-    pnl_color = "#4ade80" if oos_pnl > 0 else "#f87171"
+    # OOS 集計
+    _oos_wins = sum(1 for t in oos_trades if float(t.get("pnl", 0)) > 0)
+    _oos_n    = len(oos_trades)
+    _oos_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades)
+    _win_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) > 0)
+    _loss_pnl = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) <= 0)
+    _oos_pf   = (_win_pnl / abs(_loss_pnl)) if _loss_pnl != 0 else float("inf")
+    _oos_wr   = (_oos_wins / _oos_n * 100) if _oos_n > 0 else 0.0
+    _pnl_c    = "#4ade80" if _oos_pnl > 0 else "#f87171"
+    _pf_str   = "∞" if _oos_pf == float("inf") else f"{_oos_pf:.2f}"
 
-    html = f"""
+    _fold_design_rows = "".join(
+        f'<tr>'
+        f'<td style="{_td};color:#e2e8f0">{fn}</td>'
+        f'<td style="{_tdc};color:#94a3b8">{ts.strftime("%Y/%m")}〜{te.strftime("%Y/%m")}</td>'
+        f'<td style="{_tdc};color:#fbbf24">{vs.strftime("%Y/%m")}〜{ve.strftime("%Y/%m")}</td>'
+        f'<td style="{_td};color:#64748b;font-size:0.75rem">{env}</td>'
+        f'</tr>'
+        for fn, ts, te, vs, ve, env in fold_periods
+    )
+
+    return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
-  <h3 style="color:#38bdf8;margin:0 0 4px">WF歴史検証（{wf_until_date} 時点で選定 → 以降{(_wfh_today - wf_until_date).days}日間でOOS）</h3>
+  <h3 style="color:#38bdf8;margin:0 0 4px">
+    WF歴史検証（{wf_until_date} 時点で選定 → 以降 {(_wfh_today - wf_until_date).days}日間 OOS）
+  </h3>
   <p style="color:#64748b;font-size:0.82rem;margin:0 0 16px">
     現行WATCHLISTの銘柄×戦略を <strong style="color:#fbbf24">{wf_until_date}</strong> 以前のデータのみで
-    4fold WF（TRAIN3年/TEST1年）選定し、その後の実績を検証。現行WATCHLIST選定には影響なし。
+    4fold WF（TRAIN3年/TEST1年）選定。現行WATCHLIST選定には影響なし。
   </p>
 
-  <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">① fold 設計（{wf_until_date}基準）</h4>
+  <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">① fold 設計（{wf_until_date} 基準）</h4>
   <table style="font-size:0.8rem;border-collapse:collapse;margin-bottom:16px">
     <thead><tr>
-      <th style="{th}">fold</th>
-      <th style="{th}">TRAIN期間（3年）</th>
-      <th style="{th}">TEST期間（1年）</th>
-      <th style="{th}">テスト環境</th>
+      <th style="{_th}">fold</th>
+      <th style="{_th}">TRAIN期間（3年）</th>
+      <th style="{_th}">TEST期間（1年）</th>
+      <th style="{_th}">テスト環境</th>
     </tr></thead>
-    <tbody>
-      {''.join(
-          f'<tr>'
-          f'<td style="{td};color:#e2e8f0">{fn}</td>'
-          f'<td style="{tdc};color:#94a3b8">{ts.strftime("%Y/%m")}〜{te.strftime("%Y/%m")}</td>'
-          f'<td style="{tdc};color:#fbbf24">{vs.strftime("%Y/%m")}〜{ve.strftime("%Y/%m")}</td>'
-          f'<td style="{td};color:#94a3b8;font-size:0.75rem">'
-          f'{"COVID暴落・回復" if fn=="fold1" else "利上げ・ベア" if fn=="fold2" else "回復・上昇" if fn=="fold3" else "強気相場"}'
-          f'</td></tr>'
-          for fn, ts, te, vs, ve in fold_periods
-      )}
-    </tbody>
+    <tbody>{_fold_design_rows}</tbody>
   </table>
 
   <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">
-    ② WF結果（全{n_total}件 / 4fold全通過: {n_passed_4}件 / ≥3fold: {n_passed_3}件 / ≥2fold: {n_passed_2}件）
+    ② WF結果（全{n_t}件 / 4fold全通過:{n_4}件 / ≥3fold:{n_3}件 / ≥2fold:{n_2}件）
   </h4>
   <div style="overflow-x:auto;margin-bottom:16px">
   <table style="width:100%;border-collapse:collapse;font-size:0.82rem;min-width:800px">
     <thead>
       <tr>
-        <th style="{th}" rowspan="2">コード</th>
-        <th style="{th}" rowspan="2">銘柄名</th>
-        <th style="{th}" rowspan="2">戦略</th>
-        <th style="{th}" rowspan="2">合格</th>
-        {fold_header}
-        <th style="{th}" rowspan="2">平均勝率</th>
-        <th style="{th}" rowspan="2">平均PF</th>
-        <th style="{th}" rowspan="2">WF内<br>TEST損益計</th>
+        <th style="{_th}" rowspan="2">コード</th>
+        <th style="{_th}" rowspan="2">銘柄名</th>
+        <th style="{_th}" rowspan="2">戦略</th>
+        <th style="{_th}" rowspan="2">合格</th>
+        {_fold_header}
+        <th style="{_th}" rowspan="2">平均勝率</th>
+        <th style="{_th}" rowspan="2">平均PF</th>
+        <th style="{_th}" rowspan="2">WF内TEST損益</th>
       </tr>
-      <tr>{fold_subheader}</tr>
+      <tr>{_fold_subhdr}</tr>
     </thead>
-    <tbody>{wf_rows if wf_rows else f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">結果なし（データ不足の可能性）</td></tr>'}</tbody>
+    <tbody>{wf_rows or f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">結果なし（データ不足の可能性）</td></tr>'}</tbody>
   </table>
   </div>
 
   <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">
-    ③ OOS成績（≥2fold通過 {n_passed_2}件 / {wf_until_date}〜{_wfh_today}）
+    ③ OOS成績（≥2fold通過 {n_2}件 / {wf_until_date}〜{_wfh_today}）
   </h4>
-  <div style="background:#1e293b;border-radius:6px;padding:12px 16px;display:inline-block;min-width:400px">
+  <div style="background:#1e293b;border-radius:6px;padding:12px 16px;display:inline-block;min-width:400px;margin-bottom:8px">
     <table style="font-size:0.85rem;border-collapse:collapse">
-      <tr>
-        <td style="color:#94a3b8;padding:4px 16px 4px 0">取引数</td>
-        <td style="color:#e2e8f0;font-weight:bold">{oos_n}件</td>
-      </tr>
-      <tr>
-        <td style="color:#94a3b8;padding:4px 16px 4px 0">勝率</td>
-        <td style="color:#e2e8f0;font-weight:bold">{oos_wr:.1f}% ({oos_wins}勝{oos_n-oos_wins}負)</td>
-      </tr>
-      <tr>
-        <td style="color:#94a3b8;padding:4px 16px 4px 0">PF</td>
-        <td style="color:#e2e8f0;font-weight:bold">{"∞" if oos_pf == float("inf") else f"{oos_pf:.2f}"}</td>
-      </tr>
-      <tr>
-        <td style="color:#94a3b8;padding:4px 16px 4px 0">損益合計</td>
-        <td style="color:{pnl_color};font-weight:bold;font-size:1.1rem">{oos_pnl:+,.0f}円</td>
-      </tr>
+      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">取引数</td>
+          <td style="color:#e2e8f0;font-weight:bold">{_oos_n}件</td></tr>
+      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">勝率</td>
+          <td style="color:#e2e8f0;font-weight:bold">{_oos_wr:.1f}% ({_oos_wins}勝{_oos_n-_oos_wins}負)</td></tr>
+      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">PF</td>
+          <td style="color:#e2e8f0;font-weight:bold">{_pf_str}</td></tr>
+      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">損益合計</td>
+          <td style="color:{_pnl_c};font-weight:bold;font-size:1.1rem">{_oos_pnl:+,.0f}円</td></tr>
     </table>
     <p style="color:#64748b;font-size:0.75rem;margin:8px 0 0">
-      ≥2fold 通過銘柄のOOS（{wf_until_date}〜現在）。
-      WF通過 ≠ OOS成功の保証。あくまで参考値。
+      ≥2fold通過銘柄の {wf_until_date}〜{_wfh_today} OOS成績。
     </p>
   </div>
 </div>"""
-    return html
 
 
 def _oos_pnl_html(until_date, days: int, workers: int) -> str:

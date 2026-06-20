@@ -197,15 +197,15 @@ FOLDS: list[tuple[str, int, int, int, int]] = [
     ("fold2", 550, 180, 180,   0),  # TRAIN 12M / TEST 6M
 ]
 
-# ── 歴史WF用 Fold 定義（as_of_date 基準、TRAIN 3年 / TEST 1年 × 4fold）──────
-# 現行 FOLDS とは独立。scan_until オプション使用時のみ参照。
+# ── 歴史WF用 Fold 定義（as_of_date 基準 / TRAIN 3年 / TEST 1年 × 4fold）──────
+# 現行 FOLDS とは完全独立。--wf-until 使用時のみ参照。現行WATCHLISTに影響なし。
 FOLDS_HISTORICAL: list[tuple[str, int, int, int, int]] = [
     ("fold1", 2555, 1460, 1460, 1095),  # TRAIN 3yr / TEST 1yr (3〜4年前 from as_of)
     ("fold2", 2190, 1095, 1095,  730),  # TRAIN 3yr / TEST 1yr (2〜3年前 from as_of)
     ("fold3", 1825,  730,  730,  365),  # TRAIN 3yr / TEST 1yr (1〜2年前 from as_of)
     ("fold4", 1460,  365,  365,    0),  # TRAIN 3yr / TEST 1yr (0〜1年前 from as_of)
 ]
-_HIST_MAX_LOOKBACK = 2555  # FOLDS_HISTORICAL の最大遡及日数
+_HIST_MAX_LOOKBACK = 2555  # FOLDS_HISTORICAL の最大遡及日数（as_of_date からの日数）
 
 # ── 合格閾値 ─────────────────────────────────────────────────────
 TRAIN_MIN_TRADES = 5   # 12M TRAINに合わせて引き上げ
@@ -259,11 +259,11 @@ def _run_window_abs(symbol: str, name: str, full_df,
                     calc_fn, em: float, sm: float, tm: float,
                     window_start, window_end,
                     strategy_name: str, entry_type: str = "stop") -> dict | None:
-    """絶対日付でウィンドウを指定する _run_window の変形。
+    """絶対日付でウィンドウを指定する _run_window の変形（歴史WF用）。
 
-    run_limit_backtest は内部で `cutoff = _TODAY - backtest_days` を使うので、
-    `backtest_days = (TODAY - window_start).days` に設定すれば
-    cutoff = window_start になる。df を window_end でトリム済みにすること。
+    _TODAY を変更せず、df を window_end でトリムし、
+    backtest_days = (TODAY - window_start).days にすることで
+    run_limit_backtest 内の cutoff = _TODAY - backtest_days = window_start が成立する。
     """
     df_trimmed = full_df[full_df.index <= pd.Timestamp(window_end)].copy()
     if len(df_trimmed) < 60:
@@ -285,24 +285,22 @@ def _run_window_abs(symbol: str, name: str, full_df,
 def walkforward_one_asof(symbol: str, name: str, strategy_name: str,
                          as_of_date,
                          max_price: float = 0.0) -> dict | None:
-    """as_of_date を基準に FOLDS_HISTORICAL で WF バックテストを実行。
+    """as_of_date 基準の FOLDS_HISTORICAL（4fold/TRAIN3年/TEST1年）で WF バックテスト。
 
     現行の FOLDS / WATCHLIST / walkforward_one には一切影響しない。
-    _TODAY を変更せず、df を各ウィンドウ終了日でトリムして実現。
+    _TODAY を変更せず df トリムで実現（スレッドセーフ）。
     """
     if strategy_name not in STRATEGY_DEFS:
         return None
     calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy_name]
 
-    # as_of_date から最大遡及日数 + バッファでデータ取得
-    from datetime import date as _date_cls
     since = as_of_date - timedelta(days=_HIST_MAX_LOOKBACK + 200)
     df_full = fetch(symbol, int((TODAY - since).days * 1.1) + 60,
                     min_start_date=since)
     if df_full is None or len(df_full) < 400:
         return None
 
-    # as_of_date 以降のデータは使わない（未来データ漏洩防止）
+    # as_of_date 以降は使わない（未来データ漏洩防止）
     df_full = df_full[df_full.index <= pd.Timestamp(as_of_date)].copy()
     if len(df_full) < 200:
         return None
@@ -311,9 +309,7 @@ def walkforward_one_asof(symbol: str, name: str, strategy_name: str,
         latest_price = float(df_full.iloc[-1]["close"])
     except Exception:
         return None
-    if latest_price <= 0:
-        return None
-    if max_price > 0 and latest_price > max_price:
+    if latest_price <= 0 or (max_price > 0 and latest_price > max_price):
         return None
 
     folds_passed = 0
@@ -347,28 +343,22 @@ def walkforward_one_asof(symbol: str, name: str, strategy_name: str,
         fold_detail.append(dict(
             fold=fold_name, pass_train=pass_train, pass_test=pass_test,
             train_trades=train_r["trades"] if train_r else 0,
-            train_pf=round(train_r["pf"], 2) if train_r else 0,
-            train_wr=round(train_r["win_rate"], 1) if train_r else 0,
-            train_pnl=train_r["total_pnl"] if train_r else 0,
+            train_pf=round(train_r["pf"], 2) if train_r else 0.0,
+            train_wr=round(train_r["win_rate"], 1) if train_r else 0.0,
+            train_pnl=train_r["total_pnl"] if train_r else 0.0,
             test_trades=test_r["trades"] if test_r else 0,
-            test_pf=round(test_r["pf"], 2) if test_r else 0,
-            test_wr=round(test_r["win_rate"], 1) if test_r else 0,
-            test_pnl=test_r["total_pnl"] if test_r else 0,
+            test_pf=round(test_r["pf"], 2) if test_r else 0.0,
+            test_wr=round(test_r["win_rate"], 1) if test_r else 0.0,
+            test_pnl=test_r["total_pnl"] if test_r else 0.0,
         ))
 
     if not test_results:
         return None
 
-    all_test_trades: list[dict] = []
-    total_test_pnl  = 0.0
-    total_test_tr   = 0
-    for r in test_results:
-        all_test_trades.extend(r.get("trade_log", []))
-        total_test_pnl += r.get("total_pnl", 0.0)
-        total_test_tr  += r.get("trades", 0)
-
-    avg_test_pf = sum(r.get("pf", 0) for r in test_results) / len(test_results)
-    avg_test_wr = sum(r.get("win_rate", 0) for r in test_results) / len(test_results)
+    total_test_pnl = sum(r.get("total_pnl", 0.0) for r in test_results)
+    total_test_tr  = sum(r.get("trades", 0) for r in test_results)
+    avg_test_pf    = sum(r.get("pf", 0) for r in test_results) / len(test_results)
+    avg_test_wr    = sum(r.get("win_rate", 0) for r in test_results) / len(test_results)
 
     return dict(
         symbol=symbol, name=name, strategy=strategy_name,
