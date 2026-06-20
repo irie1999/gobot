@@ -3128,6 +3128,49 @@ function switchTbd(id, tab) {{
     )
     _bt70_entry_by_date, _sorted_bt70_entry_dates = _build_entry_grid(_bt70_entry_sorted, "b")
 
+    def _group_by_month(sorted_dates):
+        """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
+        from collections import OrderedDict
+        result = OrderedDict()
+        for dk in sorted_dates:
+            ym = dk[:7]
+            if ym not in result:
+                result[ym] = []
+            result[ym].append(dk)
+        return result
+
+    def _month_accordion_html(by_date, sorted_dates, dseq, pfx, expand_months=2):
+        """月折りたたみアコーディオン＋インライン詳細HTML生成。"""
+        by_month = _group_by_month(sorted_dates)
+        html = ""
+        for i, (ym, dks) in enumerate(by_month.items()):
+            is_open   = (i < expand_months)
+            ym_key    = ym.replace("-", "")
+            all_t     = [t for dk in dks for t in by_date[dk]]
+            done_m    = [t for t in all_t if t.get("reason") not in ("発注中", "保有中")]
+            wins_m    = sum(1 for t in done_m if t["pnl"] > 0)
+            wr_m      = wins_m / len(done_m) * 100 if done_m else 0
+            pnl_m     = sum(t["pnl"] for t in done_m)
+            pnl_col   = "#4ade80" if pnl_m >= 0 else "#f87171"
+            arrow     = "▼" if is_open else "▶"
+            body_disp = "block" if is_open else "none"
+            btns_html = "".join(_entry_date_btn(dk, dseq, by_date, pfx) for dk in dks)
+            dets_html = "".join(_entry_date_detail(dk, dseq, False, by_date, pfx) for dk in dks)
+            html += (
+                f'<div class="mg-block">'
+                f'<div class="mg-header" onclick="toggleMG(\'{pfx}\',{dseq},\'{ym_key}\')">'
+                f'<span class="mg-arrow" id="mg_arr_{pfx}{dseq}_{ym_key}">{arrow}</span>'
+                f'<span class="mg-ym">{ym[:4]}/{ym[5:7]}月</span>'
+                f'<span class="mg-stats">{len(done_m)}件&nbsp;{wr_m:.0f}%&nbsp;'
+                f'<span style="color:{pnl_col};font-weight:700">{pnl_m:+,.0f}円</span></span>'
+                f'</div>'
+                f'<div class="mg-body" id="mgb_{pfx}{dseq}_{ym_key}" style="display:{body_disp}">'
+                f'<div class="edate-grid">{btns_html}</div>'
+                f'<div class="mg-detail" id="mgd_{pfx}{dseq}_{ym_key}">{dets_html}</div>'
+                f'</div></div>\n'
+            )
+        return html
+
     def _entry_date_btn(dk, dseq, by_date, pfx):
         trades_d  = by_date[dk]
         done_d    = [t for t in trades_d if t.get("reason") not in ("発注中", "保有中")]
@@ -4005,18 +4048,12 @@ function switchTbd(id, tab) {{
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(entry_sorted_trades)}
-<div class="edate-grid">
-{"".join(_entry_date_btn(dk, _dseq, _entry_by_date, "e") for dk in _sorted_entry_dates)}
-</div>
-{"".join(_entry_date_detail(dk, _dseq, i==0, _entry_by_date, "e") for i, dk in enumerate(_sorted_entry_dates))}
+{_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
 </div>
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt70_entry_sorted)}
-<div class="edate-grid">
-{"".join(_entry_date_btn(dk, _dseq, _bt70_entry_by_date, "b") for dk in _sorted_bt70_entry_dates)}
-</div>
-{"".join(_entry_date_detail(dk, _dseq, i==0, _bt70_entry_by_date, "b") for i, dk in enumerate(_sorted_bt70_entry_dates))}
+{_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
@@ -4060,15 +4097,28 @@ function switchDetailTab(seq, which) {{
     }});
   }}
 }}
+function toggleMG(pfx, seq, ym) {{
+  var body = document.getElementById('mgb_'+pfx+seq+'_'+ym);
+  var arr  = document.getElementById('mg_arr_'+pfx+seq+'_'+ym);
+  if (!body) return;
+  var isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  if (arr) arr.textContent = isOpen ? '▶' : '▼';
+}}
 function _showEntryDateGrid(seq, dk, pfx) {{
-  var con = document.getElementById('detail_'+seq+'_'+(pfx==='e'?'entry':'bt70entry'));
-  if (!con) return;
+  var ym     = dk.substr(0,6);
   var btnId  = pfx+'date_btn_'+seq+'_'+dk;
   var detId  = pfx+'date_detail_'+seq+'_'+dk;
   var curBtn = document.getElementById(btnId);
   var isActive = curBtn && curBtn.classList.contains('edate-active');
-  con.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
-  con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
+  // この月の詳細エリアだけ閉じる
+  var detArea = document.getElementById('mgd_'+pfx+seq+'_'+ym);
+  if (detArea) {{
+    detArea.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
+  }}
+  // アクティブボタンをリセット（全体）
+  var con = document.getElementById('detail_'+seq+'_'+(pfx==='e'?'entry':'bt70entry'));
+  if (con) con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
   if (!isActive) {{
     var det = document.getElementById(detId);
     if (det) {{
@@ -4142,6 +4192,17 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .edate-mm  { font-size:0.85rem; font-weight:700; color:#e2e8f0; }
 .edate-stat { font-size:0.68rem; color:#94a3b8; }
 .edate-pnl  { font-size:0.72rem; font-weight:600; }
+
+/* 月アコーディオン */
+.mg-block  { border:1px solid #1e293b; border-radius:6px; margin-bottom:6px; overflow:hidden; }
+.mg-header { display:flex; align-items:center; gap:10px; padding:7px 12px;
+             background:#1a2744; cursor:pointer; user-select:none; }
+.mg-header:hover { background:#263349; }
+.mg-arrow  { color:#60a5fa; font-size:0.75rem; width:12px; flex-shrink:0; }
+.mg-ym     { font-weight:700; color:#e2e8f0; font-size:0.88rem; min-width:65px; }
+.mg-stats  { color:#94a3b8; font-size:0.78rem; }
+.mg-body   { padding:10px 8px 4px; }
+.mg-detail { min-height:0; }
 
 /* 詳細分析 折りたたみトグル */
 .analysis-toggle { display:block; width:100%; text-align:left;
