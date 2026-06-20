@@ -718,13 +718,14 @@ print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
-# 期間別: 各期間のconfigs（必要時にボタンで切替）
+# 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 _period_pane_htmls: dict[int, str] = {}
 for days in _PNL_PERIODS:
     cfgs = _period_configs.get(days) or _all_configs
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
-    _period_pane_htmls[days] = _na._tab5_pnl_html(days, _args.workers, entry_days=_args.entry_days)
+    _period_pane_htmls[days] = _na._tab5_pnl_html(
+        days, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
     _phase(f"損益タブ({days}日)完了")
 
 # ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────
@@ -753,7 +754,7 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
     )
     _na._PNL_CONFIGS[:] = _all_configs
     print(f"銘柄詳細生成中: {_sym} {_sname}...", flush=True)
-    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym])
+    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym], skip_timing9=True)
     _sym_tab_panes += (
         f'<div id="{_tid}" class="sym-tab-pane" style="display:{_display}">'
         f'{_sym_pnl}</div>\n'
@@ -872,7 +873,7 @@ if _args.symbol:
             f'onclick="switchSpPeriod({days})">{days}日</button>\n'
         )
         print(f"  直近{days}日...", flush=True)
-        _sp_html = _na._tab5_pnl_html(days, _args.workers, symbol_filter=[_sym_arg])
+        _sp_html = _na._tab5_pnl_html(days, _args.workers, symbol_filter=[_sym_arg], skip_timing9=True)
         _sp_panes += (
             f'<div id="sp{days}" class="sp-period-pane" style="display:{display}">'
             f'{_sp_html}</div>\n'

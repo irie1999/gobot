@@ -3074,9 +3074,11 @@ function switchOosMon_{_uid}(idx) {{
 
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
-                   entry_days: int | None = None) -> str:
+                   entry_days: int | None = None,
+                   skip_timing9: bool = False) -> str:
     """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。
-    entry_days 指定時は「エントリー日が直近N日以内」の取引だけを取引明細に表示する。"""
+    entry_days 指定時は「エントリー日が直近N日以内」の取引だけを取引明細に表示する。
+    skip_timing9=True なら⑨Rolling/em比較をスキップ（期間フィルタタブ用に軽量化）。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
@@ -5495,7 +5497,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_rolling_cmp_section}
 {_em_cmp_section}"""
 
-    _timing_html = _entry_timing_cmp_html(kpi_trades)
+    _timing_html = "" if skip_timing9 else _entry_timing_cmp_html(kpi_trades)
 
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
