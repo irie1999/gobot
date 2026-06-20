@@ -67,6 +67,8 @@ _pre.add_argument("--oos-until", type=str, default=None,
                   help="OOS検証終了日 (YYYY-MM-DD). 指定時のみOOS検証HTMLを生成する")
 _pre.add_argument("--oos-days",  type=int, default=365,
                   help="OOS検証期間（日数）. デフォルト365日")
+_pre.add_argument("--wf-until", type=str, default=None,
+                  help="WF歴史検証の基準日 (YYYY-MM-DD). 指定時: その日以前のデータで4fold WF選定し以降のOOS成績を新タブに表示")
 _args, _ = _pre.parse_known_args()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
@@ -914,6 +916,28 @@ for days in _PNL_PERIODS:
         f'{_period_pane_htmls[days]}</div>\n'
     )
 
+# ── WF歴史検証タブ (--wf-until 指定時のみ) ──────────────────────────────────
+_wfh_tab_btn  = ""
+_wfh_tab_pane = ""
+if _args.wf_until:
+    from datetime import date as _date_cls
+    try:
+        _wfh_until_date = _date_cls.fromisoformat(_args.wf_until)
+    except ValueError:
+        print(f"[ERROR] --wf-until の日付形式が不正です: {_args.wf_until}")
+        _wfh_until_date = None
+    if _wfh_until_date is not None:
+        _na._PNL_CONFIGS[:] = _all_configs
+        print(f"\nWF歴史検証開始: {_wfh_until_date} 時点で4fold選定 → 以降OOS", flush=True)
+        try:
+            _wfh_body = _na._wf_history_html(_wfh_until_date, _args.workers)
+        except Exception as _wfh_e:
+            print(f"[WARN] WF歴史検証エラー: {_wfh_e}")
+            _wfh_body = f'<p style="color:#f87171;padding:20px">WF歴史検証エラー: {_wfh_e}</p>'
+        _wfh_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'wfh\')">📊 WF歴史検証</button>'
+        _wfh_tab_pane = f'\n<div id="ho-wfh" class="ho-outer-pane">\n{_wfh_body}\n</div>'
+        print("WF歴史検証タブ生成完了")
+
 # ── OOS検証タブ (--oos-until 指定時のみ) ─────────────────────────────────────
 _oos_tab_btn  = ""
 _oos_tab_pane = ""
@@ -1053,7 +1077,7 @@ html = f"""<!DOCTYPE html>
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_oos_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_wfh_tab_btn}{_oos_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -1094,6 +1118,7 @@ html = f"""<!DOCTYPE html>
 {_market_tab3_html}
 </div>
 {_sym_detail_tab_pane}
+{_wfh_tab_pane}
 {_oos_tab_pane}
 <script>
 {_na.JS}
