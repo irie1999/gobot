@@ -61,6 +61,8 @@ _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
                   help="出力HTMLファイル名にサフィックスを付ける (内部用・--bothから自動設定)")
+_pre.add_argument("--rolling", type=int, default=0,
+                  help="ローリング逆指値: 未約定時に終値で注文価格を更新する最大回数 (例: --rolling 2)")
 _args, _ = _pre.parse_known_args()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
@@ -404,6 +406,12 @@ for cfgs in _period_configs.values():
 
 n_items_total = sum(len(c["stop_wl"]) + len(c["brk_wl"]) for c in _all_configs)
 print(f"設定数: {len(_all_configs)}件 / アイテム合計: {n_items_total}件")
+
+# ── ローリング逆指値: バックテストエンジンにモジュール定数を注入 ──────────────
+import backtest_limit_entry as _bte
+if _args.rolling > 0:
+    _bte.ROLLING_ENTRY = _args.rolling
+    print(f"[ROLLING] ローリング逆指値 有効: 最大{_args.rolling}回更新")
 
 # ── nikkei_analysis をインポートして PNL_CONFIGS を注入 ───────────────────────
 # nikkei_analysis は import 時に _stop/_brk を reload する。

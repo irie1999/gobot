@@ -51,6 +51,7 @@ _TODAY        = datetime.now(JST).date()
 _CACHE_DIR    = Path(".rsi2_cache")
 
 ENTRY_EXPIRE  = 1      # 指値有効日数（翌日のみ有効）
+ROLLING_ENTRY = 0      # ローリング逆指値: 0=無効, N=最大更新回数（未約定時に終値で価格を更新）
 MAX_HOLD      = 15     # 最大保有日数
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
@@ -547,6 +548,7 @@ def run_limit_backtest(
     max_hold: int | None = None,   # 最大保有日数。None=default_max_hold(戦略別)で自動決定
     entry_delay: int = 0,          # シグナル発生から何日後から注文を受け付けるか
     entry_expire: int | None = None,  # 注文有効日数。None=ENTRY_EXPIRE。entry_delayと独立
+    rolling_entry: int | None = None, # ローリング更新回数。None=ROLLING_ENTRY。0=無効。
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -586,6 +588,7 @@ def run_limit_backtest(
         stop_mode = default_stop_mode(strategy_name, is_short)
     if max_hold is None:
         max_hold = default_max_hold(strategy_name)
+    _rolling = rolling_entry if rolling_entry is not None else ROLLING_ENTRY
 
     # 複数ポジション並行対応: pending / active をリストで管理
     pending_orders:   list[dict] = []   # 発注待ち
@@ -656,6 +659,37 @@ def run_limit_backtest(
                 (entry_type == "limit"     and lo <= po["lp"])
             )
             if not triggered:
+                # ローリング逆指値: 期限切れバーで終値を新しい注文価格に更新して1日延長
+                if _rolling > 0 and i == po["expire_idx"]:
+                    _rc = po.get("_roll_count", 0)
+                    if _rc < _rolling:
+                        _cur_atr = float(row.get("atr", np.nan))
+                        if pd.isna(_cur_atr) or _cur_atr <= 0:
+                            _cur_atr = atr_prev
+                        if entry_type == "stop":
+                            _nlp = cl + _cur_atr * entry_atr_mult
+                            _nsp = _nlp - _cur_atr * stop_atr_mult
+                            _ntp = _nlp + _cur_atr * target_atr_mult
+                            _nok = _nlp > 0 and _nsp > 0 and _ntp > _nlp
+                        elif entry_type == "stop_sell":
+                            _nlp = cl - _cur_atr * entry_atr_mult
+                            _nsp = _nlp + _cur_atr * stop_atr_mult
+                            _ntp = _nlp - _cur_atr * target_atr_mult
+                            _nok = _nlp > 0 and _ntp > 0 and _ntp < _nlp and _nsp > _nlp
+                        else:
+                            _nlp = cl - _cur_atr * entry_atr_mult
+                            _nsp = _nlp - _cur_atr * stop_atr_mult
+                            _ntp = _nlp + _cur_atr * target_atr_mult
+                            _nok = _nlp > 0 and _nsp > 0 and _ntp > _nlp
+                        if _nok and MIN_PRICE <= cl <= MAX_PRICE:
+                            po = dict(po)
+                            po["lp"]          = _nlp
+                            po["sp"]          = _nsp
+                            po["tp"]          = _ntp
+                            po["expire_idx"]  = i + 1
+                            po["_roll_count"] = _rc + 1
+                            remaining_pending.append(po)
+                            continue
                 remaining_pending.append(po)
                 continue
 

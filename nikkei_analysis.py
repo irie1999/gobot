@@ -3782,17 +3782,10 @@ function switchTbd(id, tab) {{
 
     # ── ⑨ エントリータイミング比較（2軸：注文保持期間 / エントリー遅延）────────
     def _entry_timing_cmp_html(trades_list):
-        """
-        2軸に分けて比較:
-        A) 注文保持期間 (ENTRY_EXPIRE): 注文を出した後、何日間有効にするか
-           EXPIRE=1: days_to_fill=0 のみ（翌日約定しなければキャンセル）
-           EXPIRE=2: days_to_fill<=1 （2日間有効）
-           EXPIRE=3: days_to_fill<=2 （3日間有効 = 現状）
-        B) エントリー遅延 (Delay): シグナルが出てから何日後に注文を出すか
-           delay=0: 全件（翌日から注文 = 現状）
-           delay=1: days_to_fill>=1 のみ（シグナル2日後から注文した場合の相当）
-           delay=2: days_to_fill>=2 のみ（シグナル3日後から注文した場合の相当）
-        """
+        try:
+            from backtest_limit_entry import ROLLING_ENTRY as _RE, ENTRY_EXPIRE as _EE
+        except Exception:
+            _RE, _EE = 0, 1
         done = [t for t in trades_list if t.get("reason") not in ("発注中", "保有中")]
 
         def _st(ts):
@@ -3923,13 +3916,24 @@ function switchTbd(id, tab) {{
                 f'</tr>'
             )
 
-        return f"""<h2>⑨ エントリータイミング比較</h2>
+        _rolling_badge = (
+            f'<span style="background:#7c3aed;color:#fff;border-radius:4px;padding:2px 8px;font-size:0.78rem;margin-left:8px">ローリング有効（最大{_RE}回更新）</span>'
+            if _RE > 0 else
+            '<span style="background:#334155;color:#94a3b8;border-radius:4px;padding:2px 8px;font-size:0.78rem;margin-left:8px">ローリング無効（--rolling N で有効化）</span>'
+        )
+        _expire_note = (
+            f"現在 ENTRY_EXPIRE={_EE}、ROLLING_ENTRY={_RE}。"
+            + (" ローリング有効時は days_to_fill≥1 の取引も毎日終値で価格を更新して入っています。" if _RE > 0 else
+               " ローリング無効時は days_to_fill=0（翌日一発で入った取引）のみが EXPIRE=1 相当です。")
+        )
+        return f"""<h2>⑨ エントリータイミング比較 {_rolling_badge}</h2>
 <div style="background:#1a2744;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:0.82rem;color:#94a3b8;line-height:1.7">
   <b style="color:#e2e8f0">2つの独立した軸で比較します：</b><br>
   <b style="color:#60a5fa">A. 注文保持期間（ENTRY_EXPIRE）</b>：注文を出した後、何日間有効にするか。
-  翌日に約定しなければ3日間保持するか即キャンセルするかの比較。<br>
+  翌日に約定しなければ保持するか即キャンセルするかの比較。{_expire_note}<br>
   <b style="color:#fbbf24">B. エントリー遅延（Delay）</b>：シグナルが出てから何日後に注文を出すか。
   翌日すぐ出すか、1〜2日見送ってから出すかの比較。
+  ローリング有効時は比較に意味があります（翌日見送った場合の成績 = 2日目以降の取引品質）。
 </div>
 
 <h3 style="color:#60a5fa;margin:0 0 6px">A. 注文保持期間（ENTRY_EXPIRE）</h3>
