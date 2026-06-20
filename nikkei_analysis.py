@@ -2137,10 +2137,13 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
 
     print(f"[WF歴史検証] WFスキャン完了: {len(wf_results)}件", flush=True)
 
-    # ── ≥2fold 通過銘柄の OOS 成績（wf_until_date〜今日）───────────────────────
+    # ── folds_passed lookup (for adding to OOS trades) ───────────────────────
+    _fp_lookup = {(r["symbol"], r["strategy"]): r["folds_passed"] for r in wf_results}
+
+    # ── ≥1fold 通過銘柄の OOS 成績（wf_until_date〜今日）──────────────────────
     _oos_backtest_days = (_wfh_today - wf_until_date).days
     passed_tasks = [(r["symbol"], r["name"], r["strategy"])
-                    for r in wf_results if r["folds_passed"] >= 2]
+                    for r in wf_results if r["folds_passed"] >= 1]
 
     def _run_wf_oos(args):
         _s, _n, _st = args
@@ -2160,13 +2163,14 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
             _tlog = _res.get("trade_log", [])
             _seen: set = set()
             _out = []
+            _fp = _fp_lookup.get((_s, _st), 0)
             for _t in _tlog:
                 if _t.get("reason") in ("発注中", "保有中") or _t.get("exit_dt") is None:
                     continue
                 _k = (_s, _st, _t.get("signal_dt"))
                 if _k not in _seen:
                     _seen.add(_k)
-                    _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st})
+                    _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st, "folds_passed": _fp})
             return _out
         except Exception:
             return []
@@ -2201,56 +2205,13 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
                              wf_until_date - timedelta(days=ve),
                              env))
 
-    _fold_header = "".join(
-        f'<th style="{_th}" colspan="2">{fn}<br>'
-        f'<span style="font-size:0.7rem;color:#64748b">TEST:{vs.strftime("%Y/%m")}〜{ve.strftime("%Y/%m")}</span></th>'
-        for fn, _, _, vs, ve, _ in fold_periods
-    )
-    _fold_subhdr = (f'<th style="{_th}">訓練</th><th style="{_th}">検証</th>') * len(_HIST_FOLDS)
-
     n_4 = sum(1 for r in wf_results if r["folds_passed"] == 4)
     n_3 = sum(1 for r in wf_results if r["folds_passed"] >= 3)
     n_2 = sum(1 for r in wf_results if r["folds_passed"] >= 2)
+    n_1 = sum(1 for r in wf_results if r["folds_passed"] >= 1)
     n_t = len(wf_results)
 
-    wf_rows = ""
-    for r in sorted(wf_results, key=lambda x: (-x["folds_passed"], -x.get("total_test_pnl", 0))):
-        fp = r["folds_passed"]
-        fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#f87171")
-        _cells = ""
-        for fd in r.get("fold_detail", []):
-            _cells += (
-                f'<td style="{_tdc}">{_ok(fd["pass_train"])}'
-                f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["train_pf"]}</span></td>'
-                f'<td style="{_tdc}">{_ok(fd["pass_test"])}'
-                f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["test_pf"]}</span></td>'
-            )
-        _pnl = r.get("total_test_pnl", 0)
-        wf_rows += (
-            f'<tr>'
-            f'<td style="{_td};color:#e2e8f0">{r["symbol"]}</td>'
-            f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["name"]}</td>'
-            f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["strategy"]}</td>'
-            f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}/4</td>'
-            f'{_cells}'
-            f'<td style="{_tdc}">{r.get("avg_test_wr", 0):.1f}%</td>'
-            f'<td style="{_tdc}">{r.get("avg_test_pf", 0):.2f}</td>'
-            f'<td style="{_td};text-align:right;color:{"#4ade80" if _pnl>0 else "#f87171"}">'
-            f'{_pnl:+,.0f}円</td>'
-            f'</tr>\n'
-        )
-
-    # OOS 集計
-    _oos_wins = sum(1 for t in oos_trades if float(t.get("pnl", 0)) > 0)
-    _oos_n    = len(oos_trades)
-    _oos_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades)
-    _win_pnl  = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) > 0)
-    _loss_pnl = sum(float(t.get("pnl", 0)) for t in oos_trades if float(t.get("pnl", 0)) <= 0)
-    _oos_pf   = (_win_pnl / abs(_loss_pnl)) if _loss_pnl != 0 else float("inf")
-    _oos_wr   = (_oos_wins / _oos_n * 100) if _oos_n > 0 else 0.0
-    _pnl_c    = "#4ade80" if _oos_pnl > 0 else "#f87171"
-    _pf_str   = "∞" if _oos_pf == float("inf") else f"{_oos_pf:.2f}"
-
+    # ── ① fold設計テーブル ────────────────────────────────────────────────────
     _fold_design_rows = "".join(
         f'<tr>'
         f'<td style="{_td};color:#e2e8f0">{fn}</td>'
@@ -2260,6 +2221,170 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
         f'</tr>'
         for fn, ts, te, vs, ve, env in fold_periods
     )
+
+    # ── ② OOS成績（主役）──────────────────────────────────────────────────────
+    # OOS統計ヘルパー
+    def _oos_stats(trades):
+        n = len(trades)
+        if n == 0:
+            return dict(n=0, wins=0, wr=0.0, pnl=0.0, win_pnl=0.0, loss_pnl=0.0, pf=0.0)
+        wins = sum(1 for t in trades if float(t.get("pnl", 0)) > 0)
+        pnl = sum(float(t.get("pnl", 0)) for t in trades)
+        win_pnl = sum(float(t.get("pnl", 0)) for t in trades if float(t.get("pnl", 0)) > 0)
+        loss_pnl = sum(float(t.get("pnl", 0)) for t in trades if float(t.get("pnl", 0)) <= 0)
+        pf = (win_pnl / abs(loss_pnl)) if loss_pnl != 0 else float("inf")
+        wr = wins / n * 100
+        return dict(n=n, wins=wins, wr=wr, pnl=pnl, win_pnl=win_pnl, loss_pnl=loss_pnl, pf=pf)
+
+    def _pf_str_fn(pf):
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _pnl_color(v):
+        return "#4ade80" if v > 0 else ("#f87171" if v < 0 else "#94a3b8")
+
+    # 戦略別集計
+    def _strategy_rows(trades):
+        from collections import defaultdict as _dd
+        by_st = _dd(list)
+        for t in trades:
+            by_st[t["strategy"]].append(t)
+        rows = ""
+        for st in sorted(by_st):
+            s = _oos_stats(by_st[st])
+            pc = _pnl_color(s["pnl"])
+            rows += (
+                f'<tr>'
+                f'<td style="{_td};color:#e2e8f0">{st}</td>'
+                f'<td style="{_tdc}">{s["n"]}</td>'
+                f'<td style="{_tdc}">{s["wr"]:.1f}%</td>'
+                f'<td style="{_tdc}">{_pf_str_fn(s["pf"])}</td>'
+                f'<td style="{_tdc};color:#4ade80">{s["win_pnl"]:+,.0f}</td>'
+                f'<td style="{_tdc};color:#f87171">{s["loss_pnl"]:+,.0f}</td>'
+                f'<td style="{_tdc};color:{pc};font-weight:bold">{s["pnl"]:+,.0f}円</td>'
+                f'</tr>\n'
+            )
+        return rows or f'<tr><td colspan="7" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
+
+    # 銘柄×戦略別集計（損益降順 top30）
+    def _sym_strat_rows(trades):
+        from collections import defaultdict as _dd
+        by_ss = _dd(list)
+        for t in trades:
+            by_ss[(t["symbol"], t["name"], t["strategy"], t.get("folds_passed", 0))].append(t)
+        ranked = sorted(by_ss.items(), key=lambda kv: -sum(float(x.get("pnl", 0)) for x in kv[1]))[:30]
+        rows = ""
+        for (sym, nm, st, fp), tlist in ranked:
+            s = _oos_stats(tlist)
+            pc = _pnl_color(s["pnl"])
+            fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#94a3b8")
+            rows += (
+                f'<tr data-fp="{fp}" class="wfhoos-row">'
+                f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}</td>'
+                f'<td style="{_td};color:#e2e8f0">{sym}</td>'
+                f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{nm}</td>'
+                f'<td style="{_td};color:#94a3b8">{st}</td>'
+                f'<td style="{_tdc}">{s["n"]}</td>'
+                f'<td style="{_tdc}">{s["wr"]:.1f}%</td>'
+                f'<td style="{_tdc}">{_pf_str_fn(s["pf"])}</td>'
+                f'<td style="{_tdc};color:{pc};font-weight:bold">{s["pnl"]:+,.0f}円</td>'
+                f'</tr>\n'
+            )
+        return rows or f'<tr><td colspan="8" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
+
+    # 月次内訳
+    def _monthly_rows(trades):
+        from collections import defaultdict as _dd
+        by_ym = _dd(list)
+        for t in trades:
+            _dt = t.get("exit_dt") or t.get("signal_dt")
+            if _dt:
+                try:
+                    _ym = str(_dt)[:7]
+                    by_ym[_ym].append(t)
+                except Exception:
+                    pass
+        rows = ""
+        for ym in sorted(by_ym.keys()):
+            s = _oos_stats(by_ym[ym])
+            pc = _pnl_color(s["pnl"])
+            rows += (
+                f'<tr>'
+                f'<td style="{_td};color:#e2e8f0">{ym}</td>'
+                f'<td style="{_tdc}">{s["n"]}</td>'
+                f'<td style="{_tdc}">{s["wr"]:.1f}%</td>'
+                f'<td style="{_tdc}">{_pf_str_fn(s["pf"])}</td>'
+                f'<td style="{_tdc};color:{pc};font-weight:bold">{s["pnl"]:+,.0f}円</td>'
+                f'</tr>\n'
+            )
+        return rows or f'<tr><td colspan="5" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
+
+    # ③ WF選定詳細テーブル（折りたたみ）
+    _fold_header = "".join(
+        f'<th style="{_th}" colspan="2">{fn}<br>'
+        f'<span style="font-size:0.7rem;color:#64748b">TEST:{vs.strftime("%Y/%m")}〜{ve.strftime("%Y/%m")}</span></th>'
+        for fn, _, _, vs, ve, _ in fold_periods
+    )
+    _fold_subhdr = (f'<th style="{_th}">訓練</th><th style="{_th}">検証</th>') * len(_HIST_FOLDS)
+
+    def _wf_detail_rows(min_fp):
+        rows = ""
+        for r in sorted(wf_results, key=lambda x: (-x["folds_passed"], -x.get("total_test_pnl", 0))):
+            fp = r["folds_passed"]
+            if fp < min_fp:
+                continue
+            fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#f87171")
+            _cells = ""
+            for fd in r.get("fold_detail", []):
+                _cells += (
+                    f'<td style="{_tdc}">{_ok(fd["pass_train"])}'
+                    f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["train_pf"]}</span></td>'
+                    f'<td style="{_tdc}">{_ok(fd["pass_test"])}'
+                    f'<br><span style="font-size:0.7rem;color:#94a3b8">PF{fd["test_pf"]}</span></td>'
+                )
+            _pnl = r.get("total_test_pnl", 0)
+            rows += (
+                f'<tr data-wffp="{fp}" class="wfhdet-row">'
+                f'<td style="{_td};color:#e2e8f0">{r["symbol"]}</td>'
+                f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["name"]}</td>'
+                f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{r["strategy"]}</td>'
+                f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}/4</td>'
+                f'{_cells}'
+                f'<td style="{_tdc}">{r.get("avg_test_wr", 0):.1f}%</td>'
+                f'<td style="{_tdc}">{r.get("avg_test_pf", 0):.2f}</td>'
+                f'<td style="{_td};text-align:right;color:{"#4ade80" if _pnl>0 else "#f87171"}">'
+                f'{_pnl:+,.0f}円</td>'
+                f'</tr>\n'
+            )
+        return rows or f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">結果なし</td></tr>'
+
+    # デフォルト（≥2fold）の各テーブルを事前計算
+    oos_by_fp = {
+        1: [t for t in oos_trades if t.get("folds_passed", 0) >= 1],
+        2: [t for t in oos_trades if t.get("folds_passed", 0) >= 2],
+        3: [t for t in oos_trades if t.get("folds_passed", 0) >= 3],
+    }
+    _def_trades = oos_by_fp[2]
+    _def_s = _oos_stats(_def_trades)
+    _def_pc = _pnl_color(_def_s["pnl"])
+
+    # pre-compute all table HTMLs for JS embedding
+    _strat1 = _strategy_rows(oos_by_fp[1])
+    _strat2 = _strategy_rows(oos_by_fp[2])
+    _strat3 = _strategy_rows(oos_by_fp[3])
+    _sym1   = _sym_strat_rows(oos_by_fp[1])
+    _sym2   = _sym_strat_rows(oos_by_fp[2])
+    _sym3   = _sym_strat_rows(oos_by_fp[3])
+    _mon1   = _monthly_rows(oos_by_fp[1])
+    _mon2   = _monthly_rows(oos_by_fp[2])
+    _mon3   = _monthly_rows(oos_by_fp[3])
+    _s1     = _oos_stats(oos_by_fp[1])
+    _s3     = _oos_stats(oos_by_fp[3])
+    _det2   = _wf_detail_rows(2)
+    _det1   = _wf_detail_rows(1)
+    _det0   = _wf_detail_rows(0)
+
+    def _js_safe(s):
+        return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
     return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
@@ -2271,8 +2396,9 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     4fold WF（TRAIN3年/TEST1年）選定。現行WATCHLIST選定には影響なし。
   </p>
 
+  <!-- ① fold設計 -->
   <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">① fold 設計（{wf_until_date} 基準）</h4>
-  <table style="font-size:0.8rem;border-collapse:collapse;margin-bottom:16px">
+  <table style="font-size:0.8rem;border-collapse:collapse;margin-bottom:20px">
     <thead><tr>
       <th style="{_th}">fold</th>
       <th style="{_th}">TRAIN期間（3年）</th>
@@ -2282,47 +2408,236 @@ def _wf_history_html(wf_until_date, workers: int) -> str:
     <tbody>{_fold_design_rows}</tbody>
   </table>
 
-  <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">
-    ② WF結果（全{n_t}件 / 4fold全通過:{n_4}件 / ≥3fold:{n_3}件 / ≥2fold:{n_2}件）
+  <!-- ② OOS成績（主役） -->
+  <h4 style="color:#38bdf8;margin:0 0 10px;font-size:1rem">
+    ② OOS成績（{wf_until_date}〜{_wfh_today} / 全{len(oos_trades)}取引）
   </h4>
-  <div style="overflow-x:auto;margin-bottom:16px">
-  <table style="width:100%;border-collapse:collapse;font-size:0.82rem;min-width:800px">
-    <thead>
+
+  <!-- fold別フィルタボタン -->
+  <div style="margin-bottom:12px">
+    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">fold通過数フィルタ:</span>
+    <button id="wfhoos-btn-1" onclick="wfhoosFilter(1)"
+      style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ≥1fold ({n_1}件)
+    </button>
+    <button id="wfhoos-btn-2" onclick="wfhoosFilter(2)" data-active="1"
+      style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem;font-weight:bold">
+      ≥2fold ({n_2}件) ★デフォルト
+    </button>
+    <button id="wfhoos-btn-3" onclick="wfhoosFilter(3)"
+      style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.82rem">
+      ≥3fold ({n_3}件)
+    </button>
+  </div>
+
+  <!-- サマリー行 -->
+  <div id="wfhoos-summary" style="background:#1e293b;border-radius:6px;padding:14px 20px;margin-bottom:16px;display:inline-block;min-width:500px">
+    <table style="font-size:0.9rem;border-collapse:collapse">
       <tr>
-        <th style="{_th}" rowspan="2">コード</th>
-        <th style="{_th}" rowspan="2">銘柄名</th>
-        <th style="{_th}" rowspan="2">戦略</th>
-        <th style="{_th}" rowspan="2">合格</th>
-        {_fold_header}
-        <th style="{_th}" rowspan="2">平均勝率</th>
-        <th style="{_th}" rowspan="2">平均PF</th>
-        <th style="{_th}" rowspan="2">WF内TEST損益</th>
+        <td style="color:#94a3b8;padding:4px 20px 4px 0">取引数</td>
+        <td id="wfhoos-sum-n" style="color:#e2e8f0;font-weight:bold">{_def_s["n"]}件</td>
+        <td style="color:#94a3b8;padding:4px 20px 4px 20px">勝率</td>
+        <td id="wfhoos-sum-wr" style="color:#e2e8f0;font-weight:bold">{_def_s["wr"]:.1f}% ({_def_s["wins"]}勝{_def_s["n"]-_def_s["wins"]}負)</td>
       </tr>
-      <tr>{_fold_subhdr}</tr>
-    </thead>
-    <tbody>{wf_rows or f'<tr><td colspan="12" style="text-align:center;color:#64748b;padding:16px">結果なし（データ不足の可能性）</td></tr>'}</tbody>
+      <tr>
+        <td style="color:#94a3b8;padding:4px 20px 4px 0">PF</td>
+        <td id="wfhoos-sum-pf" style="color:#e2e8f0;font-weight:bold">{_pf_str_fn(_def_s["pf"])}</td>
+        <td style="color:#94a3b8;padding:4px 20px 4px 20px">損益合計</td>
+        <td id="wfhoos-sum-pnl" style="color:{_def_pc};font-weight:bold;font-size:1.1rem">{_def_s["pnl"]:+,.0f}円</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- 戦略別成績テーブル -->
+  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">戦略別成績</h5>
+  <div style="overflow-x:auto;margin-bottom:16px">
+  <table style="border-collapse:collapse;font-size:0.82rem;min-width:600px">
+    <thead><tr>
+      <th style="{_th}">戦略</th>
+      <th style="{_th}">取引</th>
+      <th style="{_th}">勝率</th>
+      <th style="{_th}">PF</th>
+      <th style="{_th}">利益計</th>
+      <th style="{_th}">損失計</th>
+      <th style="{_th}">損益</th>
+    </tr></thead>
+    <tbody id="wfhoos-strat-body">{_strat2}</tbody>
   </table>
   </div>
 
-  <h4 style="color:#94a3b8;margin:0 0 6px;font-size:0.9rem">
-    ③ OOS成績（≥2fold通過 {n_2}件 / {wf_until_date}〜{_wfh_today}）
-  </h4>
-  <div style="background:#1e293b;border-radius:6px;padding:12px 16px;display:inline-block;min-width:400px;margin-bottom:8px">
-    <table style="font-size:0.85rem;border-collapse:collapse">
-      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">取引数</td>
-          <td style="color:#e2e8f0;font-weight:bold">{_oos_n}件</td></tr>
-      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">勝率</td>
-          <td style="color:#e2e8f0;font-weight:bold">{_oos_wr:.1f}% ({_oos_wins}勝{_oos_n-_oos_wins}負)</td></tr>
-      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">PF</td>
-          <td style="color:#e2e8f0;font-weight:bold">{_pf_str}</td></tr>
-      <tr><td style="color:#94a3b8;padding:4px 16px 4px 0">損益合計</td>
-          <td style="color:{_pnl_c};font-weight:bold;font-size:1.1rem">{_oos_pnl:+,.0f}円</td></tr>
-    </table>
-    <p style="color:#64748b;font-size:0.75rem;margin:8px 0 0">
-      ≥2fold通過銘柄の {wf_until_date}〜{_wfh_today} OOS成績。
-    </p>
+  <!-- 銘柄×戦略別成績 -->
+  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">銘柄×戦略別成績（損益降順 top30）</h5>
+  <div style="overflow-x:auto;margin-bottom:16px">
+  <table style="border-collapse:collapse;font-size:0.82rem;min-width:700px">
+    <thead><tr>
+      <th style="{_th}">fold数</th>
+      <th style="{_th}">コード</th>
+      <th style="{_th}">銘柄</th>
+      <th style="{_th}">戦略</th>
+      <th style="{_th}">取引</th>
+      <th style="{_th}">勝率</th>
+      <th style="{_th}">PF</th>
+      <th style="{_th}">損益</th>
+    </tr></thead>
+    <tbody id="wfhoos-sym-body">{_sym2}</tbody>
+  </table>
   </div>
-</div>"""
+
+  <!-- 月次内訳 -->
+  <h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">月次内訳</h5>
+  <div style="overflow-x:auto;margin-bottom:20px">
+  <table style="border-collapse:collapse;font-size:0.82rem;min-width:400px">
+    <thead><tr>
+      <th style="{_th}">年月</th>
+      <th style="{_th}">取引</th>
+      <th style="{_th}">勝率</th>
+      <th style="{_th}">PF</th>
+      <th style="{_th}">損益</th>
+    </tr></thead>
+    <tbody id="wfhoos-mon-body">{_mon2}</tbody>
+  </table>
+  </div>
+
+  <!-- ③ WF選定詳細（折りたたみ） -->
+  <details style="margin-top:8px">
+    <summary style="color:#94a3b8;cursor:pointer;font-size:0.9rem;padding:6px 0">
+      ③ WF選定詳細（全{n_t}件 / 4fold:{n_4}件 / ≥3fold:{n_3}件 / ≥2fold:{n_2}件 / ≥1fold:{n_1}件）
+    </summary>
+    <div style="margin-top:10px">
+      <div style="margin-bottom:8px">
+        <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">表示フィルタ:</span>
+        <button onclick="wfhdetFilter(2)" id="wfhdet-btn-2" data-active="1"
+          style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:3px 10px;margin-right:4px;cursor:pointer;font-size:0.78rem;font-weight:bold">
+          ≥2fold
+        </button>
+        <button onclick="wfhdetFilter(1)" id="wfhdet-btn-1"
+          style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:3px 10px;margin-right:4px;cursor:pointer;font-size:0.78rem">
+          ≥1fold
+        </button>
+        <button onclick="wfhdetFilter(0)" id="wfhdet-btn-0"
+          style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.78rem">
+          全件
+        </button>
+      </div>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:0.78rem;min-width:900px">
+        <thead>
+          <tr>
+            <th style="{_th}" rowspan="2">コード</th>
+            <th style="{_th}" rowspan="2">銘柄名</th>
+            <th style="{_th}" rowspan="2">戦略</th>
+            <th style="{_th}" rowspan="2">合格</th>
+            {_fold_header}
+            <th style="{_th}" rowspan="2">平均勝率</th>
+            <th style="{_th}" rowspan="2">平均PF</th>
+            <th style="{_th}" rowspan="2">WF内TEST損益</th>
+          </tr>
+          <tr>{_fold_subhdr}</tr>
+        </thead>
+        <tbody id="wfhdet-body">{_det2}</tbody>
+      </table>
+      </div>
+    </div>
+  </details>
+</div>
+
+<script>
+(function() {{
+  var _wfhoos_data = {{
+    1: {{
+      n: {_s1["n"]},
+      wins: {_s1["wins"]},
+      wr: {_s1["wr"]:.1f},
+      pf: "{_pf_str_fn(_s1["pf"])}",
+      pnl: {_s1["pnl"]:.0f},
+      pnlColor: "{_pnl_color(_s1["pnl"])}",
+      strat: `{_js_safe(_strat1)}`,
+      sym: `{_js_safe(_sym1)}`,
+      mon: `{_js_safe(_mon1)}`
+    }},
+    2: {{
+      n: {_def_s["n"]},
+      wins: {_def_s["wins"]},
+      wr: {_def_s["wr"]:.1f},
+      pf: "{_pf_str_fn(_def_s["pf"])}",
+      pnl: {_def_s["pnl"]:.0f},
+      pnlColor: "{_def_pc}",
+      strat: `{_js_safe(_strat2)}`,
+      sym: `{_js_safe(_sym2)}`,
+      mon: `{_js_safe(_mon2)}`
+    }},
+    3: {{
+      n: {_s3["n"]},
+      wins: {_s3["wins"]},
+      wr: {_s3["wr"]:.1f},
+      pf: "{_pf_str_fn(_s3["pf"])}",
+      pnl: {_s3["pnl"]:.0f},
+      pnlColor: "{_pnl_color(_s3["pnl"])}",
+      strat: `{_js_safe(_strat3)}`,
+      sym: `{_js_safe(_sym3)}`,
+      mon: `{_js_safe(_mon3)}`
+    }}
+  }};
+
+  window.wfhoosFilter = function(minFp) {{
+    var d = _wfhoos_data[minFp];
+    if (!d) return;
+    var losses = d.n - d.wins;
+    document.getElementById("wfhoos-sum-n").textContent = d.n + "件";
+    document.getElementById("wfhoos-sum-wr").textContent = d.wr.toFixed(1) + "% (" + d.wins + "勝" + losses + "負)";
+    document.getElementById("wfhoos-sum-pf").textContent = d.pf;
+    var pnlEl = document.getElementById("wfhoos-sum-pnl");
+    var pnlSign = d.pnl >= 0 ? "+" : "";
+    pnlEl.textContent = pnlSign + Math.round(d.pnl).toLocaleString() + "円";
+    pnlEl.style.color = d.pnlColor;
+    document.getElementById("wfhoos-strat-body").innerHTML = d.strat;
+    document.getElementById("wfhoos-sym-body").innerHTML = d.sym;
+    document.getElementById("wfhoos-mon-body").innerHTML = d.mon;
+    [1,2,3].forEach(function(f) {{
+      var btn = document.getElementById("wfhoos-btn-" + f);
+      if (!btn) return;
+      if (f === minFp) {{
+        btn.style.background = "#1e40af";
+        btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8";
+        btn.style.fontWeight = "bold";
+      }} else {{
+        btn.style.background = "#1e293b";
+        btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155";
+        btn.style.fontWeight = "normal";
+      }}
+    }});
+  }};
+
+  var _wfhdet_data = {{
+    2: `{_js_safe(_det2)}`,
+    1: `{_js_safe(_det1)}`,
+    0: `{_js_safe(_det0)}`
+  }};
+
+  window.wfhdetFilter = function(minFp) {{
+    var body = document.getElementById("wfhdet-body");
+    if (!body) return;
+    body.innerHTML = _wfhdet_data[minFp] || _wfhdet_data[2];
+    [0,1,2].forEach(function(f) {{
+      var btn = document.getElementById("wfhdet-btn-" + f);
+      if (!btn) return;
+      if (f === minFp) {{
+        btn.style.background = "#1e40af";
+        btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8";
+        btn.style.fontWeight = "bold";
+      }} else {{
+        btn.style.background = "#1e293b";
+        btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155";
+        btn.style.fontWeight = "normal";
+      }}
+    }});
+  }};
+}})();
+</script>"""
 
 
 def _oos_pnl_html(until_date, days: int, workers: int) -> str:
