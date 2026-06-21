@@ -2419,10 +2419,13 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             _fam = "short" if st.endswith("_S") else "long"
             _wf_sc = _wf_score_lookup.get((sym, st), 0)
             _sc_c = "#4ade80" if _wf_sc >= 60 else ("#fbbf24" if _wf_sc >= 40 else "#94a3b8")
+            _bt_pre = _bt_preoos_lookup.get((sym, st), 0)
+            _bt_c = "#4ade80" if _bt_pre >= 60 else ("#fbbf24" if _bt_pre >= 40 else "#94a3b8")
             rows += (
                 f'<tr data-fp="{fp}" data-family="{_fam}" data-wfscore="{_wf_sc}" class="wfhoos-row">'
                 f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}</td>'
                 f'<td style="{_tdc};color:{_sc_c};font-weight:bold">{_wf_sc}</td>'
+                f'<td style="{_tdc};color:{_bt_c};font-weight:bold">{_bt_pre}</td>'
                 f'<td style="{_td};color:#e2e8f0">{sym}</td>'
                 f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{nm}</td>'
                 f'<td style="{_td};color:#94a3b8">{st}</td>'
@@ -2432,7 +2435,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                 f'<td style="{_tdc};color:{pc};font-weight:bold">{s["pnl"]:+,.0f}円</td>'
                 f'</tr>\n'
             )
-        return rows or f'<tr><td colspan="9" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
+        return rows or f'<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
 
     # 月次内訳
     def _monthly_rows(trades):
@@ -2540,10 +2543,11 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     def _oos_sym_table(body_html):
         return (
             f'<div style="overflow-x:auto;margin-bottom:16px">'
-            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:750px">'
+            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:850px">'
             f'<thead><tr>'
             f'<th style="{_th}">fold数</th>'
             f'<th style="{_th}" title="WFテスト期間の成績ベーススコア（訓練データ評価）">WFスコア</th>'
+            f'<th style="{_th}" title="OOS期間開始前のBTスコア（バイアスなし）">OOS前BT</th>'
             f'<th style="{_th}">コード</th>'
             f'<th style="{_th}">銘柄</th><th style="{_th}">戦略</th>'
             f'<th style="{_th}">取引</th><th style="{_th}">勝率</th>'
@@ -2593,10 +2597,18 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _last_fold_test_end = wf_until_date - timedelta(days=_HIST_FOLDS[-1][4])  # ve of last fold
     _unused_days = (_wfh_today - _last_fold_test_end).days
 
-    # ── 36パターン統計+月次テーブルデータ (fold×family×wfscore_threshold) ──────
+    # ── 36→144パターン統計+月次テーブルデータ (fold×family×wfscore_threshold×bt_preoos_threshold) ──────
     _score_thresholds = [0, 40, 60, 80]
+    _bt_thresholds = [0, 40, 60, 80]
     _stats_36: dict = {}
     _monthly_36: dict = {}  # {key: [[ym, n, wr, pf, win_pnl, loss_pnl, pnl], ...]}
+
+    # OOS前BTスコアのルックアップ（シンボル×戦略 → bt_score_preoos）
+    _bt_preoos_lookup: dict = {}
+    for _t in oos_trades:
+        _k = (_t["symbol"], _t["strategy"])
+        if _k not in _bt_preoos_lookup:
+            _bt_preoos_lookup[_k] = _t.get("bt_score_preoos", 0)
 
     from collections import defaultdict as _ddm
     def _calc_monthly_rows(trades):
@@ -2615,14 +2627,17 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     for _fp9 in [1, 2, 3]:
         for _fam9, _pool9 in [("all", oos_trades), ("long", _long_trades), ("short", _short_trades)]:
             for _sc9 in _score_thresholds:
-                _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
-                if _sc9 > 0:
-                    _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
-                _key9 = f"{_fp9}_{_fam9}_{_sc9}"
-                _stats_36[_key9] = _oos_stats(_base9)
-                _monthly_36[_key9] = _calc_monthly_rows(_base9)
+                for _bts9 in _bt_thresholds:
+                    _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
+                    if _sc9 > 0:
+                        _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
+                    if _bts9 > 0:
+                        _base9 = [t for t in _base9 if t.get("bt_score_preoos", 0) >= _bts9]
+                    _key9 = f"{_fp9}_{_fam9}_{_sc9}_{_bts9}"
+                    _stats_36[_key9] = _oos_stats(_base9)
+                    _monthly_36[_key9] = _calc_monthly_rows(_base9)
 
-    # ── N225フィルター適用版 36パターン（ロング：MA75以上の日のみ）──────────────
+    # ── N225フィルター適用版 144パターン（ロング：MA75以上の日のみ）──────────────
     _n225_long_trades = [t for t in _long_trades if t.get("n225_above", True)]
     _n225_all_trades  = _n225_long_trades + _short_trades
     _stats_36_n225: dict = {}
@@ -2630,12 +2645,15 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     for _fp9 in [1, 2, 3]:
         for _fam9, _pool9 in [("all", _n225_all_trades), ("long", _n225_long_trades), ("short", _short_trades)]:
             for _sc9 in _score_thresholds:
-                _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
-                if _sc9 > 0:
-                    _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
-                _key9 = f"{_fp9}_{_fam9}_{_sc9}"
-                _stats_36_n225[_key9] = _oos_stats(_base9)
-                _monthly_36_n225[_key9] = _calc_monthly_rows(_base9)
+                for _bts9 in _bt_thresholds:
+                    _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
+                    if _sc9 > 0:
+                        _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
+                    if _bts9 > 0:
+                        _base9 = [t for t in _base9 if t.get("bt_score_preoos", 0) >= _bts9]
+                    _key9 = f"{_fp9}_{_fam9}_{_sc9}_{_bts9}"
+                    _stats_36_n225[_key9] = _oos_stats(_base9)
+                    _monthly_36_n225[_key9] = _calc_monthly_rows(_base9)
 
     import json as _json
     _monthly_36_js = _json.dumps(_monthly_36, ensure_ascii=False)
@@ -2735,6 +2753,26 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
       ★★★≥80
     </button>
   </div>
+  <!-- OOS前BTスコアフィルタボタン -->
+  <div style="margin-bottom:12px">
+    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">OOS前BTスコア（バイアスなし）:</span>
+    <button id="wfhbt-btn-0" onclick="wfhoosBtFilter(0)"
+      style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem;font-weight:bold">
+      すべて
+    </button>
+    <button id="wfhbt-btn-40" onclick="wfhoosBtFilter(40)"
+      style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ★≥40
+    </button>
+    <button id="wfhbt-btn-60" onclick="wfhoosBtFilter(60)"
+      style="background:#1e293b;color:#fbbf24;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ★★≥60
+    </button>
+    <button id="wfhbt-btn-80" onclick="wfhoosBtFilter(80)"
+      style="background:#1e293b;color:#fbbf24;border:1px solid #334155;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.82rem">
+      ★★★≥80
+    </button>
+  </div>
 
   <!-- N225 MA75フィルター -->
   <div style="margin-bottom:14px;padding:10px 14px;background:#1c2c1c;border:1px solid #365636;border-radius:6px;display:inline-block">
@@ -2828,12 +2866,13 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
 <script>
 (function() {{
-  var _wfhCurrentFp    = 2;
-  var _wfhCurrentFam   = "all";
-  var _wfhCurrentScore = 0;
-  var _wfhN225On       = false;
+  var _wfhCurrentFp      = 2;
+  var _wfhCurrentFam     = "all";
+  var _wfhCurrentScore   = 0;
+  var _wfhCurrentBtScore = 0;
+  var _wfhN225On         = false;
 
-  // 36パターン統計 (fold×family×wfscore_threshold) — N225フィルターなし
+  // 144パターン統計 (fold×family×wfscore_threshold×bt_preoos_threshold) — N225フィルターなし
   var _wfhMonthly36 = {_monthly_36_js};
   var _wfhStats36 = {{
     {", ".join(
@@ -2859,7 +2898,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   }};
 
   function _updateSummary() {{
-    var key = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
+    var key = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore + "_" + _wfhCurrentBtScore;
     var d = (_wfhN225On ? _wfhStats36N225 : _wfhStats36)[key];
     if (!d) return;
     var losses = d.n - d.wins;
@@ -2872,7 +2911,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   }}
 
   function _updateMonthlyTable() {{
-    var key  = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
+    var key  = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore + "_" + _wfhCurrentBtScore;
     var rows = (_wfhN225On ? _wfhMonthly36N225 : _wfhMonthly36)[key] || [];
     var tbody = document.getElementById("wfhmon-tbody");
     if (!tbody) return;
@@ -2994,6 +3033,25 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     }});
   }};
 
+  window.wfhoosBtFilter = function(minBt) {{
+    _wfhCurrentBtScore = minBt;
+    _updateSummary();
+    _updateMonthlyTable();
+
+    [0,40,60,80].forEach(function(s) {{
+      var btn = document.getElementById("wfhbt-btn-" + s);
+      if (!btn) return;
+      if (s === minBt) {{
+        btn.style.background = "#1e40af"; btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
+      }} else {{
+        btn.style.background = "#1e293b";
+        btn.style.color = s >= 60 ? "#fbbf24" : "#94a3b8";
+        btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
+      }}
+    }});
+  }};
+
   window.wfhdetFilter = function(minFp) {{
     var rows = document.querySelectorAll('#wfhdet-body tr[data-wffp]');
     rows.forEach(function(r) {{
@@ -3023,6 +3081,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     for _old, _new in [
         ("wfhoosFamilyFilter", f"{_uid}FamilyFilter"),
         ("wfhoosScoreFilter",  f"{_uid}ScFilter"),
+        ("wfhoosBtFilter",     f"{_uid}BtFilter"),
         ("wfhoosFilter",       f"{_uid}Filter"),
         ("wfhdetFilter",       f"{_uid}DetFilter"),
         ("wfhShowTab",         f"{_uid}ShowTab"),
@@ -3030,6 +3089,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         ('"wfhoos-',           f'"{_uid}oos-'),
         ('"wfhfam-',           f'"{_uid}fam-'),
         ('"wfhsc-',            f'"{_uid}sc-'),
+        ('"wfhbt-',            f'"{_uid}bt-'),
         ('"wfhdet-',           f'"{_uid}det-'),
         ('"wfhmon-tbody"',     f'"{_uid}mon-tbody"'),
         ('"wfhtab-',           f'"{_uid}tab-'),
@@ -3104,9 +3164,9 @@ def _wf_multi_history_html(dates, workers: int, max_price: float = 0.0,
             all_positive = False
             continue
         any_data = True
-        s  = stats.get("2_all_0",   {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
-        sl = stats.get("2_long_0",  {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
-        ss = stats.get("2_short_0", {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        s  = stats.get("2_all_0_0",   {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        sl = stats.get("2_long_0_0",  {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        ss = stats.get("2_short_0_0", {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
         pnl = s["pnl"]
         pc  = _color(pnl)
         if pnl <= 0:
