@@ -2106,6 +2106,23 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
 
+    # ── 旧形式キャッシュの自動移行（max_price/min_priceがキーに入っていた旧バージョン）──
+    # 旧ファイル名: wfh_{date}_{旧hash}.pkl → 同じ日付の別ハッシュを探して移行
+    if not _cache_path.exists():
+        _old_candidates = sorted(_wfh_cache_dir.glob(f"wfh_{wf_until_date}_*.pkl"))
+        _old_candidates = [p for p in _old_candidates if p != _cache_path]
+        if _old_candidates:
+            _old_path = _old_candidates[-1]  # 最新の旧キャッシュ
+            try:
+                with open(_old_path, "rb") as _f:
+                    _migrated = _pkl.load(_f)
+                # 旧キャッシュを新キーで保存（移行完了）
+                with open(_cache_path, "wb") as _f:
+                    _pkl.dump(_migrated, _f)
+                print(f"[WF歴史検証] 旧キャッシュを移行: {_old_path.name} → {_cache_path.name} ({len(_migrated)}件)", flush=True)
+            except Exception as _me:
+                print(f"[WF歴史検証] 旧キャッシュ移行失敗: {_me}", flush=True)
+
     if cache_only and not _cache_path.exists():
         return None, {}
 
