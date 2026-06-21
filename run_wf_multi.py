@@ -25,7 +25,7 @@ parser.add_argument("--wf-dates",
 parser.add_argument("--periods", type=int, default=4,
                     help="自動生成する期間数・6ヶ月間隔 (デフォルト: 4)")
 parser.add_argument("--min-price", type=float, default=1000.0)
-parser.add_argument("--max-price", type=float, default=6000.0)
+parser.add_argument("--max-price", type=float, default=10000.0)
 parser.add_argument("--workers", type=int, default=1)
 parser.add_argument("--universe", type=str, default=None)
 parser.add_argument("--no-browser", action="store_true")

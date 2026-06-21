@@ -943,6 +943,11 @@ for _ in range(_wfh_periods):
     _d = _d - _td_wfh(days=183)
 
 _wfh_max_price = getattr(_args, "max_price", 0.0) or 0.0
+# --price-ranges 指定時はその最大値を WF検証の上限に使う
+if getattr(_args, "price_ranges", None):
+    _pr_vals = [float(x.strip()) for x in _args.price_ranges.split(",") if x.strip()]
+    if _pr_vals:
+        _wfh_max_price = max(_pr_vals)
 _wfh_min_price = getattr(_args, "min_price", 0.0) or 0.0
 _wfh_universe  = getattr(_args, "wf_universe", None)
 
