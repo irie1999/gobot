@@ -953,6 +953,7 @@ try:
         max_price=_wfh_max_price,
         min_price=_wfh_min_price,
         universe_path=_wfh_universe,
+        force=bool(_args.force),
     )
 except Exception as _wfh_e:
     print(f"[WARN] WF歴史検証エラー: {_wfh_e}")

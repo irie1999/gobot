@@ -2046,7 +2046,8 @@ _pnl_bt_cache: dict = {}   # cfg_key -> items_per_cfg (バックテスト結果�
 
 def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                      min_price: float = 0.0, universe_path: str | None = None,
-                     cache_only: bool = False, _uid: str = "") -> tuple:
+                     cache_only: bool = False, _uid: str = "",
+                     force: bool = False) -> tuple:
     """WF歴史検証HTML（ユニバース全体からの新規銘柄選定版）。
 
     wf_until_date 時点のデータのみで FOLDS_HISTORICAL（3fold/TRAIN2年/TEST1年）を使い
@@ -2279,6 +2280,13 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     # ── OOS取引キャッシュ（当日内は再計算不要・翌日は自動更新）─────────────────
     _oos_cache_dir  = _PL(".wfh_cache")
     _oos_cache_file = _oos_cache_dir / f"oos_{wf_until_date}_{_wfh_today}.pkl"
+
+    if force and _oos_cache_file.exists():
+        try:
+            _oos_cache_file.unlink()
+            print(f"[WF歴史検証] OOSキャッシュ削除（--force）: {_oos_cache_file.name}", flush=True)
+        except Exception:
+            pass
 
     oos_trades: list[dict] = []
     if _oos_cache_file.exists():
@@ -3124,12 +3132,14 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
 
 def _wf_multi_history_html(dates, workers: int, max_price: float = 0.0,
-                            min_price: float = 0.0, universe_path: str | None = None) -> str:
+                            min_price: float = 0.0, universe_path: str | None = None,
+                            force: bool = False) -> str:
     """複数基準日WF歴史検証の比較HTML。
 
     各基準日でキャッシュがあれば即座にOOS成績を集計し、クロス期間比較テーブルを生成。
     キャッシュがない日付は「未実行」として表示（スキャンはしない）。
     最も新しい基準日の詳細インタラクティブHTMLも下部に埋め込む。
+    force=True のとき: OOSトレードキャッシュを削除して再計算する。
     """
     from datetime import date as _d
 
@@ -3155,7 +3165,7 @@ def _wf_multi_history_html(dates, workers: int, max_price: float = 0.0,
             wf_date, workers=workers,
             max_price=max_price, min_price=min_price,
             universe_path=universe_path,
-            cache_only=True, _uid=_uid,
+            cache_only=True, _uid=_uid, force=force,
         )
         if html is None:
             uncached.append(wf_date)
