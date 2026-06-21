@@ -2339,7 +2339,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             _wf_sc = _wf_score_lookup.get((sym, st), 0)
             _sc_c = "#4ade80" if _wf_sc >= 60 else ("#fbbf24" if _wf_sc >= 40 else "#94a3b8")
             rows += (
-                f'<tr data-fp="{fp}" data-family="{_fam}" class="wfhoos-row">'
+                f'<tr data-fp="{fp}" data-family="{_fam}" data-wfscore="{_wf_sc}" class="wfhoos-row">'
                 f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}</td>'
                 f'<td style="{_tdc};color:{_sc_c};font-weight:bold">{_wf_sc}</td>'
                 f'<td style="{_td};color:#e2e8f0">{sym}</td>'
@@ -2510,6 +2510,33 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _last_fold_test_end = wf_until_date - timedelta(days=_HIST_FOLDS[-1][4])  # ve of last fold
     _unused_days = (_wfh_today - _last_fold_test_end).days
 
+    # ── 月次チャートデータ事前計算（9パターン）────────────────────────────────
+    from collections import defaultdict as _ddc
+    def _calc_monthly_data(trades):
+        by_ym = _ddc(float)
+        for t in trades:
+            _dt = t.get("exit_dt") or t.get("signal_dt")
+            if _dt:
+                by_ym[str(_dt)[:7]] += float(t.get("pnl", 0))
+        return [[ym, round(pnl)] for ym, pnl in sorted(by_ym.items())]
+
+    # 36パターン統計+月次チャート (fold×family×wfscore_threshold)
+    _score_thresholds = [0, 40, 60, 80]
+    _stats_36: dict = {}
+    _monthly_chart_36: dict = {}
+    for _fp9 in [1, 2, 3]:
+        for _fam9, _pool9 in [("all", oos_trades), ("long", _long_trades), ("short", _short_trades)]:
+            for _sc9 in _score_thresholds:
+                _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
+                if _sc9 > 0:
+                    _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
+                _stats_36[f"{_fp9}_{_fam9}_{_sc9}"] = _oos_stats(_base9)
+                _monthly_chart_36[f"{_fp9}_{_fam9}_{_sc9}"] = _calc_monthly_data(_base9)
+
+    # JS用に月次チャートデータをJSON文字列化
+    import json as _json
+    _monthly_chart_36_js = _json.dumps(_monthly_chart_36, ensure_ascii=False)
+
     return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
   <h3 style="color:#38bdf8;margin:0 0 4px">
@@ -2584,6 +2611,26 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
       ショートのみ
     </button>
   </div>
+  <!-- WFスコアフィルタボタン -->
+  <div style="margin-bottom:12px">
+    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">WFスコア:</span>
+    <button id="wfhsc-btn-0" onclick="wfhoosScoreFilter(0)"
+      style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem;font-weight:bold">
+      すべて
+    </button>
+    <button id="wfhsc-btn-40" onclick="wfhoosScoreFilter(40)"
+      style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ★≥40
+    </button>
+    <button id="wfhsc-btn-60" onclick="wfhoosScoreFilter(60)"
+      style="background:#1e293b;color:#fbbf24;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ★★≥60
+    </button>
+    <button id="wfhsc-btn-80" onclick="wfhoosScoreFilter(80)"
+      style="background:#1e293b;color:#fbbf24;border:1px solid #334155;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.82rem">
+      ★★★≥80
+    </button>
+  </div>
 
   <!-- サマリー行（JS で更新） -->
   <div id="wfhoos-summary" style="background:#1e293b;border-radius:6px;padding:14px 20px;margin-bottom:16px;display:inline-block;min-width:500px">
@@ -2607,6 +2654,14 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   {_container1}
   {_container2}
   {_container3}
+
+  <!-- 月次損益バーチャート -->
+  <div style="background:#1e293b;border-radius:6px;padding:12px 16px;margin-bottom:20px">
+    <h5 style="color:#94a3b8;margin:0 0 8px;font-size:0.85rem">月次損益バーチャート</h5>
+    <div id="wfh-chart-area" style="display:flex;align-items:flex-end;gap:1px;min-height:120px;overflow-x:auto;padding-bottom:4px">
+      <span style="color:#64748b;font-size:0.8rem">...</span>
+    </div>
+  </div>
 
   <!-- ③ WF選定詳細（折りたたみ） -->
   <details style="margin-top:8px">
@@ -2653,20 +2708,24 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
 <script>
 (function() {{
-  var _wfhCurrentFp  = 2;
-  var _wfhCurrentFam = "all";
+  var _wfhCurrentFp    = 2;
+  var _wfhCurrentFam   = "all";
+  var _wfhCurrentScore = 0;
 
-  // 9パターン統計 (fold×family)
-  var _wfhStats = {{
+  // 36パターン統計 (fold×family×wfscore_threshold)
+  var _wfhStats36 = {{
     {", ".join(
       f'"{k}": {{ n: {v["n"]}, wins: {v["wins"]}, wr: {v["wr"]:.1f}, pf: "{_pf_str_fn(v["pf"])}", pnl: {v["pnl"]:.0f}, pnlColor: "{_pnl_color(v["pnl"])}" }}'
-      for k, v in _stats_9.items()
+      for k, v in _stats_36.items()
     )}
   }};
 
+  // 月次チャートデータ (36パターン)
+  var _monthlyChartData = {_monthly_chart_36_js};
+
   function _updateSummary() {{
-    var key = _wfhCurrentFp + "_" + _wfhCurrentFam;
-    var d = _wfhStats[key];
+    var key = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
+    var d = _wfhStats36[key];
     if (!d) return;
     var losses = d.n - d.wins;
     document.getElementById("wfhoos-sum-n").textContent = d.n + "件";
@@ -2677,19 +2736,48 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     pnlEl.style.color = d.pnlColor;
   }}
 
-  function _applyFamilyFilter() {{
-    // 現在表示中のコンテナ内の data-family 行をフィルタ
+  function _applyFilters() {{
     var c = document.getElementById("wfhoos-container-" + _wfhCurrentFp);
     if (!c) return;
     c.querySelectorAll("tr[data-family]").forEach(function(r) {{
       var fam = r.dataset.family || "long";
-      r.style.display = (_wfhCurrentFam === "all" || fam === _wfhCurrentFam) ? "" : "none";
+      var sc  = parseInt(r.dataset.wfscore || "0");
+      var famOk   = (_wfhCurrentFam === "all" || fam === _wfhCurrentFam);
+      var scoreOk = (sc >= _wfhCurrentScore);
+      r.style.display = (famOk && scoreOk) ? "" : "none";
     }});
+  }}
+
+  function _updateMonthlyChart() {{
+    var key  = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
+    var data = _monthlyChartData[key] || [];
+    var area = document.getElementById("wfh-chart-area");
+    if (!area) return;
+    if (data.length === 0) {{
+      area.innerHTML = '<span style="color:#64748b;font-size:0.8rem;line-height:120px">データなし</span>';
+      return;
+    }}
+    var maxAbs = 0;
+    data.forEach(function(d) {{ if (Math.abs(d[1]) > maxAbs) maxAbs = Math.abs(d[1]); }});
+    if (maxAbs === 0) maxAbs = 1;
+    var BAR_H  = 100;
+    var barW   = Math.max(16, Math.min(60, Math.floor(680 / data.length)));
+    var html   = '';
+    data.forEach(function(d) {{
+      var pct    = Math.abs(d[1]) / maxAbs;
+      var h      = Math.max(2, Math.round(pct * BAR_H));
+      var color  = d[1] >= 0 ? '#4ade80' : '#f87171';
+      var pnlStr = (d[1] >= 0 ? '+' : '') + Math.round(d[1]).toLocaleString() + '円';
+      html += '<div style="display:inline-flex;flex-direction:column;align-items:center;width:' + barW + 'px;height:120px;justify-content:flex-end;flex-shrink:0">';
+      html += '<div title="' + d[0] + ': ' + pnlStr + '" style="width:' + (barW - 2) + 'px;height:' + h + 'px;background:' + color + ';border-radius:1px 1px 0 0"></div>';
+      html += '<div style="font-size:0.55rem;color:#64748b;text-align:center;margin-top:2px;white-space:nowrap">' + d[0].slice(2) + '</div>';
+      html += '</div>';
+    }});
+    area.innerHTML = html;
   }}
 
   window.wfhoosFilter = function(minFp) {{
     _wfhCurrentFp = minFp;
-    // コンテナ表示切替
     [1,2,3].forEach(function(f) {{
       var c = document.getElementById("wfhoos-container-" + f);
       if (c) c.style.display = f === minFp ? "" : "none";
@@ -2703,14 +2791,16 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
       }}
     }});
-    _applyFamilyFilter();
+    _applyFilters();
     _updateSummary();
+    _updateMonthlyChart();
   }};
 
   window.wfhoosFamilyFilter = function(fam) {{
     _wfhCurrentFam = fam;
-    _applyFamilyFilter();
+    _applyFilters();
     _updateSummary();
+    _updateMonthlyChart();
     ["all","long","short"].forEach(function(f) {{
       var btn = document.getElementById("wfhfam-btn-" + f);
       if (!btn) return;
@@ -2727,8 +2817,26 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     }});
   }};
 
+  window.wfhoosScoreFilter = function(minScore) {{
+    _wfhCurrentScore = minScore;
+    _applyFilters();
+    _updateSummary();
+    _updateMonthlyChart();
+    [0,40,60,80].forEach(function(s) {{
+      var btn = document.getElementById("wfhsc-btn-" + s);
+      if (!btn) return;
+      if (s === minScore) {{
+        btn.style.background = "#1e40af"; btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
+      }} else {{
+        btn.style.background = "#1e293b";
+        btn.style.color = s >= 60 ? "#fbbf24" : "#94a3b8";
+        btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
+      }}
+    }});
+  }};
+
   window.wfhdetFilter = function(minFp) {{
-    // data-wffp 属性で行の表示/非表示を切替（innerHTML 置換なし）
     var rows = document.querySelectorAll('#wfhdet-body tr[data-wffp]');
     rows.forEach(function(r) {{
       r.style.display = parseInt(r.dataset.wffp) >= minFp ? "" : "none";
@@ -2745,6 +2853,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
       }}
     }});
   }};
+
+  // ページロード時にチャートを初期描画
+  _updateMonthlyChart();
 }})();
 </script>"""
 
