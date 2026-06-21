@@ -391,6 +391,8 @@ def _eval_oos_html(
 # HTML 結合
 # ────────────────────────────────────────────────────────────
 def _build_combined_html(periods: list[dict]) -> str:
+    import nikkei_analysis as _na
+
     tab_btns  = []
     tab_panes = []
 
@@ -399,97 +401,126 @@ def _build_combined_html(periods: list[dict]) -> str:
         oos_days = (TODAY - as_of).days
         tid      = f"asof_{as_of}"
         active   = "active" if i == 0 else ""
-        display  = "block"  if i == 0 else "none"
 
-        ho_summary = " / ".join(
-            f"{lbl}: S{len(c['stop_wl'])}+B{len(c['brk_wl'])}"
-            for lbl, c in p["ho_results"].items()
-        )
         tab_btns.append(
-            f'<button id="btn_{tid}" class="hist-tab-btn {active}" '
-            f'onclick="switchHistTab(\'{tid}\')">'
-            f'<strong>{as_of.year}年起点</strong><br>'
-            f'<small>OOS {oos_days}日 ({oos_days//365}年{(oos_days%365)//30}ヶ月)</small>'
-            f'</button>'
+            f'<button class="ho-outer-btn {active}" onclick="switchHoTab(\'{tid}\')">'
+            f'{as_of.year}年起点'
+            f'<span class="subtitle" style="display:block;font-size:0.75em;opacity:0.8">'
+            f'OOS {oos_days}日 ({oos_days//365}年{(oos_days%365)//30}ヶ月)'
+            f'</span></button>'
         )
 
         # 選定概要テーブル
         rows_html = "".join(
-            f'<tr><td style="color:{c["color"]};font-weight:bold">{lbl}</td>'
-            f'<td>{len(c["stop_wl"])}</td><td>{len(c["brk_wl"])}</td>'
-            f'<td>{as_of - timedelta(days=ho_d)} 〜 {as_of}</td></tr>'
+            f'<tr>'
+            f'<td style="color:{c["color"]};font-weight:bold;padding:4px 10px">{lbl}</td>'
+            f'<td style="padding:4px 10px">{len(c["stop_wl"])}</td>'
+            f'<td style="padding:4px 10px">{len(c["brk_wl"])}</td>'
+            f'<td style="padding:4px 10px;color:#94a3b8;font-size:0.85em">'
+            f'{as_of - timedelta(days=ho_d)} 〜 {as_of - timedelta(days=0)}</td>'
+            f'</tr>'
             for (ho_d, lbl, color), c in zip(
                 HOLDOUT_CONFIGS, [p["ho_results"][lbl] for _, lbl, _ in HOLDOUT_CONFIGS]
             )
         )
         summary_html = (
-            f'<div class="wl-info">'
-            f'<b>OOS 評価期間:</b> {as_of} 〜 {TODAY}（{oos_days}日）<br><br>'
-            f'<table style="border-collapse:collapse;font-size:.85em">'
-            f'<tr><th>HO設定</th><th>Stop銘柄</th><th>Breakout銘柄</th><th>選定に使ったデータ期間</th></tr>'
+            f'<p class="subtitle" style="margin-bottom:12px">'
+            f'OOS 評価期間: {as_of} 〜 {TODAY}（{oos_days}日）</p>'
+            f'<table style="border-collapse:collapse;margin-bottom:20px;font-size:0.85em">'
+            f'<tr style="border-bottom:1px solid #334155">'
+            f'<th style="padding:4px 10px;text-align:left;color:#94a3b8">HO設定</th>'
+            f'<th style="padding:4px 10px;color:#94a3b8">Stop銘柄数</th>'
+            f'<th style="padding:4px 10px;color:#94a3b8">Breakout銘柄数</th>'
+            f'<th style="padding:4px 10px;color:#94a3b8;text-align:left">WF選定データ期間</th>'
+            f'</tr>'
             f'{rows_html}'
-            f'</table></div>'
+            f'</table>'
         )
 
-        inner = p.get("oos_html", "<p>評価結果なし</p>")
+        inner = p.get("oos_html", "<p class='subtitle'>評価結果なし（選定銘柄 0 件）</p>")
+        pane_display = "block" if i == 0 else "none"
         tab_panes.append(
-            f'<div id="pane_{tid}" class="hist-tab-pane" style="display:{display}">'
+            f'<div id="ho-{tid}" class="ho-outer-pane" style="display:{pane_display}">'
+            f'<h2>{as_of.year}年1月1日 起点 — 歴史 WF 選定 × OOS 損益</h2>'
             f'{summary_html}'
             f'{inner}'
             f'</div>'
         )
 
-    all_ids    = [f"asof_{p['as_of']}" for p in periods]
-    pane_ids_js = "[" + ",".join(f"'pane_{t}'" for t in all_ids) + "]"
-    btn_ids_js  = "[" + ",".join(f"'btn_{t}'"  for t in all_ids) + "]"
+    # 現行 run_signals_holdout_all.py と同じ追加 CSS
+    extra_css = """
+.ho-outer-nav {
+  display:flex; flex-wrap:wrap; gap:6px;
+  margin-bottom:24px; border-bottom:2px solid #1e293b; padding-bottom:0;
+}
+.ho-outer-btn {
+  padding:9px 22px; background:#1e293b; border:none; border-radius:6px 6px 0 0;
+  color:#94a3b8; cursor:pointer; font-size:0.92rem; font-family:inherit;
+  border-bottom:2px solid transparent; margin-bottom:-2px;
+}
+.ho-outer-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.ho-outer-btn.active { background:#0f172a; color:#60a5fa;
+  border-bottom:2px solid #60a5fa; font-weight:700; }
+.ho-outer-pane { display:none; padding:12px 0; }
+.ho-outer-pane.active { display:block; }
+.ho-period-btn {
+  background:#1e293b; border:1px solid #334155; color:#94a3b8;
+  padding:5px 14px; border-radius:4px; cursor:pointer;
+  font-size:0.82rem; margin-right:4px; transition:all .2s;
+}
+.ho-period-btn:hover { color:#e2e8f0; border-color:#64748b; }
+.ho-period-btn.active { background:#3b82f6; color:#fff;
+  border-color:#3b82f6; font-weight:700; }
+"""
+
+    extra_js = """
+function switchHoTab(tab) {
+  document.querySelectorAll('.ho-outer-pane').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.ho-outer-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('ho-' + tab).style.display = 'block';
+  (event.target.closest('.ho-outer-btn') || event.target).classList.add('active');
+}
+function switchHoPeriod(days) {
+  document.querySelectorAll('.ho-period-pane').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.ho-period-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('hd' + days).style.display = 'block';
+  (event.target.closest('.ho-period-btn') || event.target).classList.add('active');
+}
+"""
+
+    n_configs = sum(
+        len(c["stop_wl"]) + len(c["brk_wl"])
+        for p in periods for c in p["ho_results"].values()
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>歴史WF検証レポート {TODAY}</title>
 <style>
-* {{ box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-       margin: 0; background: #f0f2f5; color: #222; }}
-.page-header {{ background: linear-gradient(135deg,#1a237e,#283593);
-               color: #fff; padding: 18px 24px; }}
-.page-header h1 {{ margin: 0; font-size: 1.35em; }}
-.page-header p  {{ margin: 6px 0 0; font-size: .88em; opacity: .82; }}
-.hist-tab-nav {{ display: flex; flex-wrap: wrap; gap: 6px;
-                padding: 12px 16px; background: #e8eaf6;
-                border-bottom: 2px solid #3949ab; }}
-.hist-tab-btn {{ padding: 8px 16px; border: 2px solid #3949ab; border-radius: 8px;
-                background: #fff; cursor: pointer; font-size: .85em; text-align: center;
-                line-height: 1.4; transition: background .15s; }}
-.hist-tab-btn.active {{ background: #3949ab; color: #fff; }}
-.hist-tab-btn:hover:not(.active) {{ background: #e8eaf6; }}
-.wl-info {{ background: #fff; border: 1px solid #c5cae9; border-radius: 6px;
-            margin: 12px 16px 0; padding: 12px 16px; font-size: .9em; line-height: 1.7; }}
-.wl-info table th, .wl-info table td {{ padding: 4px 12px; border: 1px solid #ddd; }}
-.wl-info table th {{ background: #f5f5f5; }}
+{_na.CSS}
+{extra_css}
 </style>
 </head>
 <body>
-<div class="page-header">
-  <h1>📊 歴史 WF 銘柄選定 × OOS 検証レポート</h1>
-  <p>生成日: {TODAY} ／ 各年1月1日を起点に HO30d〜HO180d × 6設定で銘柄選定 → 起点〜今日の OOS 損益を検証</p>
+<h1>歴史 WF 銘柄選定 × OOS 検証レポート</h1>
+<p class="subtitle">
+  基準日: {TODAY} &nbsp;|&nbsp;
+  各年1月1日を起点に HO30d〜HO180d × 6設定で WF 銘柄選定 → 起点〜今日の OOS 損益を検証 &nbsp;|&nbsp;
+  {len(periods)} 起点 × 6 HO設定 = {len(periods)*6} スキャン &nbsp;|&nbsp;
+  銘柄延べ {n_configs} 件
+</p>
+<div class="ho-outer-nav">
+{"".join(tab_btns)}
 </div>
-<div class="hist-tab-nav">{"".join(tab_btns)}</div>
 {"".join(tab_panes)}
 <script>
-(function(){{
-  var panes={pane_ids_js}, btns={btn_ids_js};
-  window.switchHistTab=function(id){{
-    panes.forEach(function(p){{document.getElementById(p).style.display='none';}});
-    btns.forEach(function(b){{document.getElementById(b).classList.remove('active');}});
-    document.getElementById('pane_'+id).style.display='block';
-    document.getElementById('btn_'+id).classList.add('active');
-  }};
-}})();
+{extra_js}
 </script>
 </body>
+</html>"""
 </html>"""
 
 
