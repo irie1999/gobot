@@ -215,16 +215,16 @@ def get_current_price_fallback(symbol: str) -> float | None:
 # ────────────────────────────────────────────────────────────
 # 未約定の売り注文（利確逆指値など）をキャンセル
 # ────────────────────────────────────────────────────────────
-def cancel_open_sell_orders(symbol: str, cli: KabuClient) -> int:
+def cancel_open_sell_orders(symbol: str, cli: KabuClient) -> bool:
     """指定銘柄の未約定売り注文をすべてキャンセルする。
     ロング損切り時に利確逆指値が残っていると二重決済になるため呼ぶ。
-    返り値: キャンセルした件数。
+    返り値: True=全件キャンセル成功（または対象なし）/ False=1件でも失敗
     """
     try:
         orders = cli.get_orders()
     except Exception as e:
-        print(f"    ⚠ 注文一覧取得失敗 ({e}) — キャンセルをスキップ")
-        return 0
+        print(f"    ✗ 注文一覧取得失敗 ({e}) — 損切り発注を中断します")
+        return False
 
     # 未約定 (RecvStatus が "1"=受付済 or "2"=注文中) の同銘柄売り注文を対象にする
     # Side: "1"=売 / "2"=買
@@ -236,31 +236,32 @@ def cancel_open_sell_orders(symbol: str, cli: KabuClient) -> int:
         and str(o.get("RecvStatus", "")) in ACTIVE
     ]
     if not targets:
-        return 0
+        return True
 
-    cancelled = 0
+    all_ok = True
     for o in targets:
         oid = o.get("OrderId", "")
         detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
         print(f"    → 売り注文キャンセル: {detail}")
         res = cli.cancel_order(oid)
         if res.get("Result") == 0:
-            cancelled += 1
+            print(f"      ✓ キャンセル完了")
         else:
-            print(f"      ⚠ キャンセル失敗: {res}")
-    return cancelled
+            print(f"      ✗ キャンセル失敗: {res} — 損切り発注を中断します")
+            all_ok = False
+    return all_ok
 
 
-def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> int:
+def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> bool:
     """指定銘柄の未約定買い注文をすべてキャンセルする。
     ショート損切り（買い戻し）時に、既存の買い戻し注文が残っている場合に呼ぶ。
-    返り値: キャンセルした件数。
+    返り値: True=全件キャンセル成功（または対象なし）/ False=1件でも失敗
     """
     try:
         orders = cli.get_orders()
     except Exception as e:
-        print(f"    ⚠ 注文一覧取得失敗 ({e}) — キャンセルをスキップ")
-        return 0
+        print(f"    ✗ 注文一覧取得失敗 ({e}) — 損切り発注を中断します")
+        return False
 
     ACTIVE = {"1", "2"}
     targets = [
@@ -270,19 +271,20 @@ def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> int:
         and str(o.get("RecvStatus", "")) in ACTIVE
     ]
     if not targets:
-        return 0
+        return True
 
-    cancelled = 0
+    all_ok = True
     for o in targets:
         oid = o.get("OrderId", "")
         detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
         print(f"    → 買い注文キャンセル: {detail}")
         res = cli.cancel_order(oid)
         if res.get("Result") == 0:
-            cancelled += 1
+            print(f"      ✓ キャンセル完了")
         else:
-            print(f"      ⚠ キャンセル失敗: {res}")
-    return cancelled
+            print(f"      ✗ キャンセル失敗: {res} — 損切り発注を中断します")
+            all_ok = False
+    return all_ok
 
 
 # ────────────────────────────────────────────────────────────
@@ -296,12 +298,14 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     cash_margin: 1=現物 / 3=信用返済
     """
     # 損切り前に残っている反対側の注文をキャンセルする
+    # キャンセル失敗時は空売りになるため発注しない
     if pos["is_short"]:
-        n = cancel_open_buy_orders(pos["symbol"], cli)
+        ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
-        n = cancel_open_sell_orders(pos["symbol"], cli)
-    if n:
-        print(f"    → {n} 件の注文をキャンセルしました")
+        ok = cancel_open_sell_orders(pos["symbol"], cli)
+    if not ok:
+        print(f"    ✗ {pos['symbol']}: 既存注文のキャンセルに失敗したため損切り発注をスキップします。手動で対応してください。")
+        return False
 
     side = "buy" if pos["is_short"] else "sell"
     cm = pos.get("cash_margin", CASH_GENBUTSU)
@@ -320,12 +324,14 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
     """
     from kabu_api import CASH_GENBUTSU, CASH_MARGIN_CLOSE
     # 損切り前に残っている反対側の注文をキャンセルする
+    # キャンセル失敗時は空売りになるため発注しない
     if pos["is_short"]:
-        n = cancel_open_buy_orders(pos["symbol"], cli)
+        ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
-        n = cancel_open_sell_orders(pos["symbol"], cli)
-    if n:
-        print(f"    → {n} 件の注文をキャンセルしました")
+        ok = cancel_open_sell_orders(pos["symbol"], cli)
+    if not ok:
+        print(f"    ✗ {pos['symbol']}: 既存注文のキャンセルに失敗したため損切り発注をスキップします。手動で対応してください。")
+        return False
 
     side = pos["is_short"]
     cm = pos.get("cash_margin", CASH_GENBUTSU)
