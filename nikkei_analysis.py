@@ -2288,13 +2288,8 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _closed_cache    = _oos_cache_dir / f"oos_{wf_until_date}_closed.pkl"
     _recent_cache    = _oos_cache_dir / f"oos_{wf_until_date}_{_wfh_today}_recent.pkl"
 
-    # --force: 直近キャッシュのみ削除（決済済みキャッシュは保持）
-    if force and _recent_cache.exists():
-        try:
-            _recent_cache.unlink()
-            print(f"[WF歴史検証] OOS直近キャッシュ削除（--force）: {_recent_cache.name}", flush=True)
-        except Exception:
-            pass
+    # --force はHTML再生成のみ。OOSキャッシュは削除しない。
+    # （翌日になると _recent_cache のファイル名が変わり自動的に再計算される）
 
     # 決済済みキャッシュ読込
     _closed_trades: list[dict] = []
