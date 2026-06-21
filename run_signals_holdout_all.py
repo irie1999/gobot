@@ -936,7 +936,7 @@ if _args.wf_until:
         _wfh_universe  = getattr(_args, "wf_universe", None)
         print(f"\nWF歴史検証開始: {_wfh_until_date} 時点でユニバーススキャン（新規銘柄選定）→ 以降OOS検証", flush=True)
         try:
-            _wfh_body = _na._wf_history_html(
+            _wfh_body, _ = _na._wf_history_html(
                 _wfh_until_date, _args.workers,
                 max_price=_wfh_max_price,
                 min_price=_wfh_min_price,

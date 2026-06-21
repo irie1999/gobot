@@ -2857,7 +2857,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   // ページロード時にチャートを初期描画
   _updateMonthlyChart();
 }})();
-</script>"""
+</script>""", _stats_36
 
 
 def _oos_pnl_html(until_date, days: int, workers: int) -> str:

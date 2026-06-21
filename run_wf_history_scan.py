@@ -38,7 +38,7 @@ print(flush=True)
 
 import nikkei_analysis as _na
 
-html_body = _na._wf_history_html(
+html_body, _ = _na._wf_history_html(
     wf_until_date,
     workers=args.workers,
     max_price=args.max_price,
