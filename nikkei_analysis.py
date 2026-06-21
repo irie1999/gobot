@@ -2093,30 +2093,32 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
     print(f"[WF歴史検証] ユニバース: {_univ_name} ({len(universe_syms)}銘柄) × {len(_all_strats)}戦略 = {len(all_tasks)}タスク", flush=True)
 
-    # ── WF結果キャッシュ（wf_until_date / ユニバース / 価格フィルタ / fold設計が同一なら再スキャン不要）──
+    # ── WF結果キャッシュ（価格フィルタはキャッシュキーに含めない → ロード後に適用）──
+    # 理由: max_price/min_price をキーに含めると、価格範囲を変えるたびに全再スキャンが必要になる。
+    # 代わりに全銘柄（価格フィルタなし）でスキャン・キャッシュし、ロード後に絞り込む。
+    # これにより同一基準日なら価格範囲変更が即座（再スキャン不要）。
     _wfh_cache_dir = _PL(".wfh_cache")
     _wfh_cache_dir.mkdir(exist_ok=True)
     import hashlib as _hl
-    # fold設計変更でキャッシュが無効化されるよう FOLDS_HISTORICAL をキーに含める
     _fold_sig = str(_HIST_FOLDS)
     _strats_sig = ",".join(_all_strats)
-    _cache_key  = f"{wf_until_date}_{_univ_name}_max{max_price}_min{min_price}_{_fold_sig}_{_strats_sig}"
+    _cache_key  = f"{wf_until_date}_{_univ_name}_{_fold_sig}_{_strats_sig}"
     _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
 
     if cache_only and not _cache_path.exists():
         return None, {}
 
-    wf_results: list[dict] = []
+    wf_results_all: list[dict] = []
     _already_done: set = set()
     if _cache_path.exists():
         try:
             with open(_cache_path, "rb") as _f:
-                wf_results = _pkl.load(_f)
-            _already_done = {(r["symbol"], r["strategy"]) for r in wf_results}
-            print(f"[WF歴史検証] キャッシュ読込: {len(wf_results)}件 ({_cache_path.name})", flush=True)
+                wf_results_all = _pkl.load(_f)
+            _already_done = {(r["symbol"], r["strategy"]) for r in wf_results_all}
+            print(f"[WF歴史検証] キャッシュ読込: {len(wf_results_all)}件 ({_cache_path.name})", flush=True)
         except Exception:
-            wf_results = []
+            wf_results_all = []
 
     # 未処理タスクのみ実行（中断再開対応）
     _remaining_tasks = [t for t in all_tasks if (t[0], t[2]) not in _already_done]
@@ -2147,12 +2149,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         def _run_wf_hist(args):
             _s, _n, _st = args
             try:
-                r = _wf_asof(_s, _n, _st, wf_until_date, max_price=max_price)
-                if r is None:
-                    return None
-                if min_price > 0 and r.get("latest_price", 0) < min_price:
-                    return None
-                return r
+                # 価格フィルタなしでスキャン（キャッシュを価格非依存にするため）
+                r = _wf_asof(_s, _n, _st, wf_until_date, max_price=0)
+                return r  # None も含めてそのまま返す（None は latest_price 取得失敗）
             except Exception:
                 return None
 
@@ -2162,26 +2161,36 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             for _i, _fut in enumerate(_asc(_futs)):
                 _r = _fut.result()
                 if _r is not None:
-                    wf_results.append(_r)
+                    wf_results_all.append(_r)
                 # 200件ごとに中間保存（クラッシュ対策・中断再開対応）
                 if (_i + 1) % 200 == 0:
                     try:
                         with open(_cache_path, "wb") as _f:
-                            _pkl.dump(wf_results, _f)
+                            _pkl.dump(wf_results_all, _f)
                         _done_total = len(_already_done) // len(_all_strats) * len(_all_strats) + _i + 1
                         _pct = _done_total / _total_for_pct * 100
-                        print(f"[WF歴史検証] 中間保存: {_i+1}/{len(_remaining_tasks)}件 ({_pct:.0f}%) / 通過:{len(wf_results)}件", flush=True)
+                        print(f"[WF歴史検証] 中間保存: {_i+1}/{len(_remaining_tasks)}件 ({_pct:.0f}%) / 通過:{len(wf_results_all)}件", flush=True)
                     except Exception:
                         pass
 
-        # 最終キャッシュ保存
+        # 最終キャッシュ保存（全銘柄・価格フィルタなし）
         try:
             with open(_cache_path, "wb") as _f:
-                _pkl.dump(wf_results, _f)
+                _pkl.dump(wf_results_all, _f)
         except Exception:
             pass
 
-    print(f"[WF歴史検証] WFスキャン完了: {len(wf_results)}件", flush=True)
+    print(f"[WF歴史検証] WFスキャン完了: {len(wf_results_all)}件（価格フィルタ前）", flush=True)
+
+    # ── 価格フィルタ（キャッシュとは独立して適用）────────────────────────────
+    wf_results = wf_results_all
+    if max_price > 0:
+        wf_results = [r for r in wf_results if r.get("latest_price", 0) <= max_price]
+    if min_price > 0:
+        wf_results = [r for r in wf_results if r.get("latest_price", 0) >= min_price]
+    print(f"[WF歴史検証] 価格フィルタ後: {len(wf_results)}件"
+          f"（{f'≤{max_price:,.0f}円' if max_price else ''}{'・' if max_price and min_price else ''}{f'≥{min_price:,.0f}円' if min_price else ''}）",
+          flush=True)
 
     # ── folds_passed lookup (for adding to OOS trades) ───────────────────────
     _fp_lookup = {(r["symbol"], r["strategy"]): r["folds_passed"] for r in wf_results}
