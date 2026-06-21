@@ -2203,7 +2203,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                 _k = (_s, _st, _t.get("signal_dt"))
                 if _k not in _seen:
                     _seen.add(_k)
-                    _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st, "folds_passed": _fp})
+                    _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st,
+                                 "folds_passed": _fp,
+                                 "family": "short" if _st.endswith("_S") else "long"})
             return _out
         except Exception:
             return []
@@ -2284,6 +2286,19 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     def _pnl_color(v):
         return "#4ade80" if v > 0 else ("#f87171" if v < 0 else "#94a3b8")
 
+    # WFテスト期間からBTスコア相当を計算（訓練データ評価）
+    def _calc_wf_bt_score(r):
+        folds = [fd for fd in r.get("fold_detail", []) if fd.get("test_trades", 0) >= 1]
+        if not folds:
+            return 0
+        avg_wr  = sum(fd["test_wr"] for fd in folds) / len(folds) / 100
+        avg_pf  = sum(min(fd["test_pf"] if fd["test_pf"] != float("inf") else 10, 10) for fd in folds) / len(folds)
+        stable  = sum(1 for fd in folds if fd.get("test_pnl", 0) > 0) / len(folds)
+        tot_tr  = sum(fd.get("test_trades", 0) for fd in folds)
+        return min(round(avg_wr * 40 + (avg_pf / 10) * 30 + stable * 20 + min(tot_tr / 20, 1) * 10), 100)
+
+    _wf_score_lookup = {(r["symbol"], r["strategy"]): _calc_wf_bt_score(r) for r in wf_results}
+
     # 戦略別集計
     def _strategy_rows(trades):
         from collections import defaultdict as _dd
@@ -2294,8 +2309,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         for st in sorted(by_st):
             s = _oos_stats(by_st[st])
             pc = _pnl_color(s["pnl"])
+            _fam = "short" if st.endswith("_S") else "long"
             rows += (
-                f'<tr>'
+                f'<tr data-family="{_fam}">'
                 f'<td style="{_td};color:#e2e8f0">{st}</td>'
                 f'<td style="{_tdc}">{s["n"]}</td>'
                 f'<td style="{_tdc}">{s["wr"]:.1f}%</td>'
@@ -2319,9 +2335,13 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             s = _oos_stats(tlist)
             pc = _pnl_color(s["pnl"])
             fp_c = "#4ade80" if fp >= 3 else ("#fbbf24" if fp == 2 else "#94a3b8")
+            _fam = "short" if st.endswith("_S") else "long"
+            _wf_sc = _wf_score_lookup.get((sym, st), 0)
+            _sc_c = "#4ade80" if _wf_sc >= 60 else ("#fbbf24" if _wf_sc >= 40 else "#94a3b8")
             rows += (
-                f'<tr data-fp="{fp}" class="wfhoos-row">'
+                f'<tr data-fp="{fp}" data-family="{_fam}" class="wfhoos-row">'
                 f'<td style="{_tdc};color:{fp_c};font-weight:bold">{fp}</td>'
+                f'<td style="{_tdc};color:{_sc_c};font-weight:bold">{_wf_sc}</td>'
                 f'<td style="{_td};color:#e2e8f0">{sym}</td>'
                 f'<td style="{_td};color:#94a3b8;font-size:0.8rem">{nm}</td>'
                 f'<td style="{_td};color:#94a3b8">{st}</td>'
@@ -2331,7 +2351,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                 f'<td style="{_tdc};color:{pc};font-weight:bold">{s["pnl"]:+,.0f}円</td>'
                 f'</tr>\n'
             )
-        return rows or f'<tr><td colspan="8" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
+        return rows or f'<tr><td colspan="9" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>'
 
     # 月次内訳
     def _monthly_rows(trades):
@@ -2439,9 +2459,11 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     def _oos_sym_table(body_html):
         return (
             f'<div style="overflow-x:auto;margin-bottom:16px">'
-            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:700px">'
+            f'<table style="border-collapse:collapse;font-size:0.82rem;min-width:750px">'
             f'<thead><tr>'
-            f'<th style="{_th}">fold数</th><th style="{_th}">コード</th>'
+            f'<th style="{_th}">fold数</th>'
+            f'<th style="{_th}" title="WFテスト期間の成績ベーススコア（訓練データ評価）">WFスコア</th>'
+            f'<th style="{_th}">コード</th>'
             f'<th style="{_th}">銘柄</th><th style="{_th}">戦略</th>'
             f'<th style="{_th}">取引</th><th style="{_th}">勝率</th>'
             f'<th style="{_th}">PF</th><th style="{_th}">損益</th>'
@@ -2475,6 +2497,19 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _container2 = _oos_container(2, _strat2, _sym2, _mon2, _def_s, True)
     _container3 = _oos_container(3, _strat3, _sym3, _mon3, _s3, False)
 
+    # ── ロング/ショート分離の事前計算（9パターン: fold×family）──────────────────
+    _long_trades  = [t for t in oos_trades if t.get("family") == "long"]
+    _short_trades = [t for t in oos_trades if t.get("family") == "short"]
+    _stats_9: dict = {}
+    for _fp9 in [1, 2, 3]:
+        for _fam9, _pool9 in [("all", oos_trades), ("long", _long_trades), ("short", _short_trades)]:
+            _s9 = _oos_stats([t for t in _pool9 if t.get("folds_passed", 0) >= _fp9])
+            _stats_9[f"{_fp9}_{_fam9}"] = _s9
+
+    # fold3のTEST終了日 = 選定に使ったデータの最終日
+    _last_fold_test_end = wf_until_date - timedelta(days=_HIST_FOLDS[-1][4])  # ve of last fold
+    _unused_days = (_wfh_today - _last_fold_test_end).days
+
     return f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
   <h3 style="color:#38bdf8;margin:0 0 4px">
@@ -2500,14 +2535,26 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     <tbody>{_fold_design_rows}</tbody>
   </table>
 
+  <!-- データ期間説明 -->
+  <div style="background:#1e293b;border-left:3px solid #38bdf8;padding:10px 16px;margin-bottom:20px;font-size:0.82rem">
+    <span style="color:#94a3b8">訓練データ最終日:</span>
+    <strong style="color:#fbbf24">{_last_fold_test_end}</strong>
+    <span style="color:#64748b;margin:0 12px">|</span>
+    <span style="color:#94a3b8">選定に使っていない期間:</span>
+    <strong style="color:#f87171">{_last_fold_test_end} 〜 今日（{_unused_days}日間）</strong>
+    <span style="color:#64748b;margin:0 12px">|</span>
+    <span style="color:#94a3b8">OOS:</span>
+    <strong style="color:#4ade80">{wf_until_date} 〜 今日</strong>
+  </div>
+
   <!-- ② OOS成績（主役） -->
   <h4 style="color:#38bdf8;margin:0 0 10px;font-size:1rem">
     ② OOS成績（{wf_until_date}〜{_wfh_today} / 全{len(oos_trades)}取引）
   </h4>
 
   <!-- fold別フィルタボタン -->
-  <div style="margin-bottom:12px">
-    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">fold通過数フィルタ:</span>
+  <div style="margin-bottom:8px">
+    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">fold通過数:</span>
     <button id="wfhoos-btn-1" onclick="wfhoosFilter(1)"
       style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
       ≥1fold ({n_1}件)
@@ -2519,6 +2566,22 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     <button id="wfhoos-btn-3" onclick="wfhoosFilter(3)"
       style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.82rem">
       ≥3fold ({n_3}件)
+    </button>
+  </div>
+  <!-- ロング/ショートフィルタボタン -->
+  <div style="margin-bottom:12px">
+    <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">戦略ファミリー:</span>
+    <button id="wfhfam-btn-all" onclick="wfhoosFamilyFilter('all')"
+      style="background:#1e40af;color:#e2e8f0;border:1px solid #38bdf8;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem;font-weight:bold">
+      全て
+    </button>
+    <button id="wfhfam-btn-long" onclick="wfhoosFamilyFilter('long')"
+      style="background:#1e293b;color:#4ade80;border:1px solid #334155;border-radius:4px;padding:4px 12px;margin-right:6px;cursor:pointer;font-size:0.82rem">
+      ロングのみ
+    </button>
+    <button id="wfhfam-btn-short" onclick="wfhoosFamilyFilter('short')"
+      style="background:#1e293b;color:#f87171;border:1px solid #334155;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:0.82rem">
+      ショートのみ
     </button>
   </div>
 
@@ -2590,16 +2653,21 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
 <script>
 (function() {{
-  var _wfhoos_stats = {{
-    1: {{ n: {_s1["n"]}, wins: {_s1["wins"]}, wr: {_s1["wr"]:.1f}, pf: "{_pf_str_fn(_s1["pf"])}", pnl: {_s1["pnl"]:.0f}, pnlColor: "{_pnl_color(_s1["pnl"])}" }},
-    2: {{ n: {_def_s["n"]}, wins: {_def_s["wins"]}, wr: {_def_s["wr"]:.1f}, pf: "{_pf_str_fn(_def_s["pf"])}", pnl: {_def_s["pnl"]:.0f}, pnlColor: "{_def_pc}" }},
-    3: {{ n: {_s3["n"]}, wins: {_s3["wins"]}, wr: {_s3["wr"]:.1f}, pf: "{_pf_str_fn(_s3["pf"])}", pnl: {_s3["pnl"]:.0f}, pnlColor: "{_pnl_color(_s3["pnl"])}" }}
+  var _wfhCurrentFp  = 2;
+  var _wfhCurrentFam = "all";
+
+  // 9パターン統計 (fold×family)
+  var _wfhStats = {{
+    {", ".join(
+      f'"{k}": {{ n: {v["n"]}, wins: {v["wins"]}, wr: {v["wr"]:.1f}, pf: "{_pf_str_fn(v["pf"])}", pnl: {v["pnl"]:.0f}, pnlColor: "{_pnl_color(v["pnl"])}" }}'
+      for k, v in _stats_9.items()
+    )}
   }};
 
-  window.wfhoosFilter = function(minFp) {{
-    var d = _wfhoos_stats[minFp];
+  function _updateSummary() {{
+    var key = _wfhCurrentFp + "_" + _wfhCurrentFam;
+    var d = _wfhStats[key];
     if (!d) return;
-    // サマリー更新
     var losses = d.n - d.wins;
     document.getElementById("wfhoos-sum-n").textContent = d.n + "件";
     document.getElementById("wfhoos-sum-wr").textContent = d.wr.toFixed(1) + "% (" + d.wins + "勝" + losses + "負)";
@@ -2607,6 +2675,20 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     var pnlEl = document.getElementById("wfhoos-sum-pnl");
     pnlEl.textContent = (d.pnl >= 0 ? "+" : "") + Math.round(d.pnl).toLocaleString() + "円";
     pnlEl.style.color = d.pnlColor;
+  }}
+
+  function _applyFamilyFilter() {{
+    // 現在表示中のコンテナ内の data-family 行をフィルタ
+    var c = document.getElementById("wfhoos-container-" + _wfhCurrentFp);
+    if (!c) return;
+    c.querySelectorAll("tr[data-family]").forEach(function(r) {{
+      var fam = r.dataset.family || "long";
+      r.style.display = (_wfhCurrentFam === "all" || fam === _wfhCurrentFam) ? "" : "none";
+    }});
+  }}
+
+  window.wfhoosFilter = function(minFp) {{
+    _wfhCurrentFp = minFp;
     // コンテナ表示切替
     [1,2,3].forEach(function(f) {{
       var c = document.getElementById("wfhoos-container-" + f);
@@ -2618,6 +2700,28 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
       }} else {{
         btn.style.background = "#1e293b"; btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
+      }}
+    }});
+    _applyFamilyFilter();
+    _updateSummary();
+  }};
+
+  window.wfhoosFamilyFilter = function(fam) {{
+    _wfhCurrentFam = fam;
+    _applyFamilyFilter();
+    _updateSummary();
+    ["all","long","short"].forEach(function(f) {{
+      var btn = document.getElementById("wfhfam-btn-" + f);
+      if (!btn) return;
+      var isLong = f === "long", isShort = f === "short";
+      if (f === fam) {{
+        btn.style.background = "#1e40af";
+        btn.style.color = isLong ? "#4ade80" : isShort ? "#f87171" : "#e2e8f0";
+        btn.style.borderColor = "#38bdf8"; btn.style.fontWeight = "bold";
+      }} else {{
+        btn.style.background = "#1e293b";
+        btn.style.color = isLong ? "#4ade80" : isShort ? "#f87171" : "#94a3b8";
         btn.style.borderColor = "#334155"; btn.style.fontWeight = "normal";
       }}
     }});
