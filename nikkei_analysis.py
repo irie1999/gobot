@@ -2041,7 +2041,60 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 
 _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_html
-_pnl_bt_cache: dict = {}   # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
+_pnl_bt_cache: dict = {}         # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
+_preoos_tab5_score_cache: dict = {}  # (sym, strat, cutoff_days) -> score
+
+
+def _calc_preoos_bt_score_for_tab5(sym: str, strat: str, cutoff_days: int) -> int:
+    """cutoff_date=today-cutoff_days 以前のデータのみでBTスコアを計算（バイアスフリー）。
+    メイン損益タブのOOS前BTスコアフィルタ用。計算結果はモジュール内キャッシュに保持。"""
+    key = (sym, strat, cutoff_days)
+    if key in _preoos_tab5_score_cache:
+        return _preoos_tab5_score_cache[key]
+    try:
+        _mod = _mod_for(strat)
+        calc_fn, em, sm, tm = _mod.STRATEGY_PARAMS[strat]
+        total_fetch = cutoff_days + 365 + 60
+        df_full = _mod.fetch(sym, total_fetch)
+        if df_full is None or df_full.empty:
+            _preoos_tab5_score_cache[key] = 0
+            return 0
+        from backtest_limit_entry import _TODAY as _blt_today, run_limit_backtest as _rbt
+        cutoff_dt = _blt_today - timedelta(days=cutoff_days)
+        df_pre = df_full[df_full.index <= pd.Timestamp(cutoff_dt)].copy()
+        if len(df_pre) < 30:
+            _preoos_tab5_score_cache[key] = 0
+            return 0
+        bt_days = cutoff_days + 365
+        full_r = _rbt(sym, "", df_pre, calc_fn, em, sm, tm, bt_days, strat,
+                      entry_type=_mod.ENTRY_TYPE)
+        if not full_r or not full_r.get("trade_log"):
+            _preoos_tab5_score_cache[key] = 0
+            return 0
+        _SLICE_PERIODS = [30, 60, 90, 120, 150, 180]
+        period_results: dict = {}
+        for p in _SLICE_PERIODS:
+            slice_since = cutoff_dt - timedelta(days=p)
+            sub = [t for t in full_r["trade_log"]
+                   if t.get("signal_dt") and t["signal_dt"].date() >= slice_since
+                   and t.get("reason") not in ("発注中", "保有中")]
+            if not sub:
+                continue
+            wins = sum(1 for t in sub if t["pnl"] > 0)
+            gp = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+            gl = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            period_results[p] = {
+                "trades": len(sub), "wins": wins,
+                "win_rate": wins / len(sub) * 100,
+                "pf": pf, "total_pnl": sum(t["pnl"] for t in sub),
+            }
+        score, _ = _stop.calc_recommend_score(period_results)
+        _preoos_tab5_score_cache[key] = score
+        return score
+    except Exception:
+        _preoos_tab5_score_cache[key] = 0
+        return 0
 
 
 def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
@@ -3881,10 +3934,13 @@ function switchOosMon_{_uid}(idx) {{
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
-                   skip_timing9: bool = False) -> str:
+                   skip_timing9: bool = False,
+                   preoos_cutoff_days: int | None = None) -> str:
     """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。
     entry_days 指定時は「エントリー日が直近N日以内」の取引だけを取引明細に表示する。
-    skip_timing9=True なら⑨Rolling/em比較をスキップ（期間フィルタタブ用に軽量化）。"""
+    skip_timing9=True なら⑨Rolling/em比較をスキップ（期間フィルタタブ用に軽量化）。
+    preoos_cutoff_days 指定時は「today-N日以前のデータのみ」でBTスコアを再計算し
+    OOS前BTスコア別成績タブを追加（メインBTスコアは変更しない）。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
@@ -3935,6 +3991,32 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
         _cached_items_per_cfg = _pnl_bt_cache[_cfg_cache_key]
         print(f"  [cache] バックテスト結果を再利用 (days={days})", flush=True)
 
+    # ── OOS前BTスコア計算（preoos_cutoff_days 指定時のみ）──────────────────────
+    # today - preoos_cutoff_days 以前のデータだけでBTスコアを計算し、
+    # 各取引に preoos_score を付与する。メインのBTスコア（rec_score）は変更しない。
+    _preoos_score_map: dict = {}
+    if preoos_cutoff_days:
+        _all_sym_strats: set = set()
+        for _cfg in _PNL_CONFIGS:
+            for _it in _cached_items_per_cfg.get(_cfg["label"], []):
+                _s2, _st2 = _it.get("symbol", ""), _it.get("strategy", "")
+                if _s2 and _st2:
+                    _all_sym_strats.add((_s2, _st2))
+        if _all_sym_strats:
+            print(f"  [preoos] OOS前BTスコア計算中 ({len(_all_sym_strats)}件, cutoff={preoos_cutoff_days}日前)...", flush=True)
+            with _TPE(max_workers=workers) as _pex:
+                _pfuts = {
+                    _pex.submit(_calc_preoos_bt_score_for_tab5, _s2, _st2, preoos_cutoff_days): (_s2, _st2)
+                    for _s2, _st2 in _all_sym_strats
+                }
+                for _pf in _asc(_pfuts):
+                    _ps, _pst = _pfuts[_pf]
+                    try:
+                        _preoos_score_map[(_ps, _pst)] = _pf.result()
+                    except Exception:
+                        _preoos_score_map[(_ps, _pst)] = 0
+            print(f"  [preoos] 完了 (cached={len(_preoos_tab5_score_cache)}件)", flush=True)
+
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
     cfg_trades_map: dict = {}          # config別取引（サマリーテーブル用・デデュップなし）
@@ -3980,10 +4062,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     continue
                 seen.add(key)
                 entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
+                _preoos_sc = _preoos_score_map.get((sym, strat)) if _preoos_score_map else None
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": score, "rank": rank,
                         "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
+                        "preoos_score": _preoos_sc,
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
                 _sdt_raw = t.get("signal_dt")
@@ -6305,8 +6389,148 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
     _timing_html = "" if skip_timing9 else _entry_timing_cmp_html(kpi_trades)
 
+    # ── OOS前BTスコア別成績セクション（preoos_cutoff_days 指定時のみ生成）──────
+    _preoos_section_html = ""
+    if preoos_cutoff_days and _preoos_score_map:
+        _poo_cutoff_label = f"today - {preoos_cutoff_days}日"
+        _poo_buckets = [
+            (80, 101, "★★★≥80", "#4ade80"),
+            (60,  80, "★★60-79", "#86efac"),
+            (40,  60, "★40-59",  "#fbbf24"),
+            ( 0,  40, "△<40",    "#f87171"),
+        ]
+        _poo_rows = ""
+        for _plo, _phi, _plbl, _pcol in _poo_buckets:
+            _ptr = [t for t in full_year_trades
+                    if t.get("preoos_score") is not None and _plo <= t["preoos_score"] < _phi]
+            _pn = len(_ptr)
+            if not _pn:
+                continue
+            _pw  = sum(1 for t in _ptr if t["pnl"] > 0)
+            _ppnl = sum(t["pnl"] for t in _ptr)
+            _pgp  = sum(t["pnl"] for t in _ptr if t["pnl"] > 0)
+            _pgl  = abs(sum(t["pnl"] for t in _ptr if t["pnl"] < 0))
+            _ppf  = _pgp / _pgl if _pgl > 0 else (float("inf") if _pgp > 0 else 0.0)
+            _ppf_s = "∞" if _ppf == float("inf") else f"{_ppf:.2f}"
+            _pwr  = _pw / _pn * 100
+            _pppc = "profit" if _ppnl >= 0 else "loss"
+            _pavg = _ppnl / _pn
+            _papc = "profit" if _pavg >= 0 else "loss"
+            _poo_rows += f"""<tr>
+  <td style="color:{_pcol};font-weight:700;text-align:left;border-left:3px solid {_pcol};padding-left:8px">{_plbl}</td>
+  <td style="font-weight:700">{_pn}</td>
+  <td style="font-weight:700;color:{'#4ade80' if _pwr>=55 else ('#fbbf24' if _pwr>=45 else '#f87171')}">{_pwr:.1f}%</td>
+  <td style="font-weight:700">{_ppf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{_pgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{_pgl:,.0f}円</td>
+  <td class="{_pppc}" style="text-align:right;font-weight:700">{_ppnl:+,.0f}円</td>
+  <td class="{_papc}" style="text-align:right;font-weight:700">{_pavg:+,.0f}円</td>
+</tr>"""
+        # 銘柄別: OOS前BTスコア≥60の銘柄
+        _poo60_trades = [t for t in full_year_trades if (t.get("preoos_score") or 0) >= 60]
+        _poo_sym_agg: dict = {}
+        for _pt in _poo60_trades:
+            _pk = (_pt["symbol"], _pt.get("name", ""))
+            if _pk not in _poo_sym_agg:
+                _poo_sym_agg[_pk] = {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,"strats":set(),
+                                      "preoos_scores":[],"rec_scores":[]}
+            _pd = _poo_sym_agg[_pk]
+            _pd["n"]   += 1
+            _pd["w"]   += 1 if _pt["pnl"] > 0 else 0
+            _pd["pnl"] += _pt["pnl"]
+            _pd["gp"]  += _pt["pnl"] if _pt["pnl"] > 0 else 0
+            _pd["gl"]  += abs(_pt["pnl"]) if _pt["pnl"] < 0 else 0
+            _pd["strats"].add(_pt.get("strategy", ""))
+            if _pt.get("preoos_score") is not None:
+                _pd["preoos_scores"].append(_pt["preoos_score"])
+            if _pt.get("rec_score") is not None:
+                _pd["rec_scores"].append(_pt["rec_score"])
+        _poo_sym_rows = ""
+        for (_psym, _pname), _pd in sorted(_poo_sym_agg.items(),
+                                           key=lambda x: x[1]["pnl"], reverse=True):
+            _pn2 = _pd["n"]; _pw2 = _pd["w"]
+            _ppnl2 = _pd["pnl"]; _pgp2 = _pd["gp"]; _pgl2 = _pd["gl"]
+            _ppf2  = _pgp2 / _pgl2 if _pgl2 > 0 else (float("inf") if _pgp2 > 0 else 0.0)
+            _ppf2s = "∞" if _ppf2 == float("inf") else f"{_ppf2:.2f}"
+            _pwr2  = _pw2 / _pn2 * 100 if _pn2 else 0
+            _pspc  = "profit" if _ppnl2 >= 0 else "loss"
+            _avg_poo = round(sum(_pd["preoos_scores"]) / len(_pd["preoos_scores"])) if _pd["preoos_scores"] else None
+            _avg_bt2 = round(sum(_pd["rec_scores"]) / len(_pd["rec_scores"])) if _pd["rec_scores"] else None
+            _poo_disp  = (f'<span style="color:{"#4ade80" if _avg_poo and _avg_poo>=60 else ("#fbbf24" if _avg_poo and _avg_poo>=40 else "#f87171")};font-weight:700">{_avg_poo}</span>'
+                          if _avg_poo is not None else "—")
+            _bt2_disp  = (f'<span style="color:{"#4ade80" if _avg_bt2 and _avg_bt2>=60 else ("#fbbf24" if _avg_bt2 and _avg_bt2>=40 else "#f87171")};font-weight:700">{_avg_bt2}</span>'
+                          if _avg_bt2 is not None else "—")
+            _stag = " ".join(f'<span class="tag tag-{_s.lower()}" style="font-size:0.7rem">{_s}</span>'
+                             for _s in sorted(_pd["strats"]))
+            _prow_style = (' style="background:#1a0a0a;border-left:3px solid #f87171"' if _ppnl2 < -30000
+                           else (' style="background:#0a1a0a;border-left:3px solid #4ade80"' if _ppnl2 > 50000
+                                 else ""))
+            _poo_sym_rows += f"""<tr{_prow_style}>
+  <td class="sym" style="text-align:left">{_psym}<br><span style="color:#64748b;font-size:0.75rem">{_pname}</span></td>
+  <td style="text-align:center">{_stag}</td>
+  <td style="text-align:center">{_poo_disp}</td>
+  <td style="text-align:center">{_bt2_disp}</td>
+  <td style="font-weight:700">{_pn2}</td>
+  <td style="font-weight:700">{_pwr2:.1f}%</td>
+  <td style="font-weight:700">{_ppf2s}</td>
+  <td class="profit" style="text-align:right">+{_pgp2:,.0f}円</td>
+  <td class="loss"   style="text-align:right">-{_pgl2:,.0f}円</td>
+  <td class="{_pspc}" style="text-align:right;font-weight:700">{_ppnl2:+,.0f}円</td>
+</tr>"""
+        if not _poo_sym_rows:
+            _poo_sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">OOS前BT≥60の取引なし</td></tr>'
+        if not _poo_rows:
+            _poo_rows = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:12px">データなし</td></tr>'
+        _preoos_section_html = f"""
+<h2>⑩ OOS前BTスコア別成績
+  <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">
+    バイアスなし / {_poo_cutoff_label} 以前のデータでBTスコア計算
+  </span>
+</h2>
+<p class="footnote" style="margin-bottom:8px">
+  「OOS前BTスコア」= <strong>{_poo_cutoff_label}</strong> 以前のデータのみで計算したBTスコア。
+  現在表示しているOOS期間のトレードにバイアスがない純粋な事前評価スコアです。
+  メインのBTスコア（② 欄に表示）は変更されません。<br>
+  ★★★≥80が最も信頼性高。このスコアが高い銘柄のOOS成績を確認してください。
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">OOS前BTスコア帯</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{_poo_rows}</tbody>
+</table>
+
+<h2 style="margin-top:20px">OOS前BT≥60 銘柄別成績</h2>
+<p class="footnote" style="margin-bottom:8px">
+  OOS前BTスコア≥60の銘柄ごとの損益集計。
+  <strong>OOS前BT</strong> = バイアスなしスコア / <strong>BT</strong> = 現行スコア（参考）。
+  <span style="color:#f87171">■</span> = 損失-3万超、<span style="color:#4ade80">■</span> = 利益+5万超。
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th style="color:#10b981">OOS前BT</th>
+    <th style="color:#fbbf24">BT(現行)</th>
+    <th>取引数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80">利益</th>
+    <th style="color:#f87171">損失</th>
+    <th>損益合計</th>
+  </tr></thead>
+  <tbody>{_poo_sym_rows}</tbody>
+</table>"""
+
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
+
+    _preoos_tab_btn = (
+        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ OOS前BTスコア</button>'
+        if preoos_cutoff_days and _preoos_score_map else ""
+    )
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -6323,6 +6547,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ ⑧ 損切り・追加</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
+{_preoos_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -6538,6 +6763,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_timing_html}
 </div>
 
+<div id="analtab_{_dseq}_preoos" class="analysis-tab-pane">
+{_preoos_section_html if _preoos_section_html else '<p style="color:#64748b;padding:20px">preoos_cutoff_days 未指定のため表示なし</p>'}
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -6587,7 +6816,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','timing'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

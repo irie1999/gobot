@@ -718,13 +718,15 @@ _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
+# preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
 for days in _PNL_PERIODS:
     cfgs = _period_configs.get(days) or _all_configs
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
     _period_pane_htmls[days] = _na._tab5_pnl_html(
-        days, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
+        days, _args.workers, entry_days=_args.entry_days, skip_timing9=True,
+        preoos_cutoff_days=days)
     _phase(f"損益タブ({days}日)完了")
 
 # ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────
