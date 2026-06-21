@@ -454,13 +454,8 @@ _bt_cache: dict[tuple, dict | None] = {}
 _bt_cache_dir  = Path(".holdout_bt_cache")
 _bt_cache_dir.mkdir(exist_ok=True)
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_cache_date}.pkl"
-if _bt_cache_file.exists() and _args.force:
-    # --force 時はバックテストキャッシュも削除して価格を再取得させる
-    try:
-        _bt_cache_file.unlink()
-        print(f"[BTキャッシュ] --force により削除: {_bt_cache_file}")
-    except Exception:
-        pass
+# BTキャッシュはキーが日付付き（bt_YYYY-MM-DD.pkl）のため同日内は常に有効。
+# --force はHTML再生成のみを強制し、BTキャッシュは削除しない。
 if _bt_cache_file.exists():
     try:
         with open(_bt_cache_file, "rb") as _bf:
