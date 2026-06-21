@@ -2394,6 +2394,14 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     def _pnl_color(v):
         return "#4ade80" if v > 0 else ("#f87171" if v < 0 else "#94a3b8")
 
+    # OOS前BTスコアのルックアップ（シンボル×戦略 → bt_score_preoos）
+    # _sym_strat_rows 内で参照するため、ここで先に計算する
+    _bt_preoos_lookup: dict = {}
+    for _t in oos_trades:
+        _k = (_t["symbol"], _t["strategy"])
+        if _k not in _bt_preoos_lookup:
+            _bt_preoos_lookup[_k] = _t.get("bt_score_preoos", 0)
+
     # WFテスト期間からBTスコア相当を計算（訓練データ評価）
     def _calc_wf_bt_score(r):
         folds = [fd for fd in r.get("fold_detail", []) if fd.get("test_trades", 0) >= 1]
@@ -2629,13 +2637,6 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _bt_thresholds = [0, 40, 60, 80]
     _stats_36: dict = {}
     _monthly_36: dict = {}  # {key: [[ym, n, wr, pf, win_pnl, loss_pnl, pnl], ...]}
-
-    # OOS前BTスコアのルックアップ（シンボル×戦略 → bt_score_preoos）
-    _bt_preoos_lookup: dict = {}
-    for _t in oos_trades:
-        _k = (_t["symbol"], _t["strategy"])
-        if _k not in _bt_preoos_lookup:
-            _bt_preoos_lookup[_k] = _t.get("bt_score_preoos", 0)
 
     from collections import defaultdict as _ddm
     def _calc_monthly_rows(trades):
