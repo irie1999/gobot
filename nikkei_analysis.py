@@ -2257,6 +2257,21 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                 except Exception:
                     pass
 
+    # ── N225 MA75フィルター用フラグをロングトレードに付与 ────────────────────────
+    try:
+        from backtest_limit_entry import get_n225_ma75_above as _get_n225_above
+        _n225_dict = _get_n225_above()
+    except Exception:
+        _n225_dict = {}
+    for _t in oos_trades:
+        if _t.get("family") == "long":
+            _sig_dt = _t.get("signal_dt")
+            _ds = (_sig_dt.strftime("%Y-%m-%d") if hasattr(_sig_dt, "strftime")
+                   else str(_sig_dt)[:10]) if _sig_dt else ""
+            _t["n225_above"] = _n225_dict.get(_ds, True)
+        else:
+            _t["n225_above"] = True  # ショートは常に通す
+
     # ── HTML 生成 ─────────────────────────────────────────────────────────────
     _td  = "border:1px solid #1e293b;padding:6px 10px"
     _th  = f"{_td};background:#1e293b;color:#94a3b8;text-align:center;font-size:0.78rem"
@@ -2578,8 +2593,24 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                 _stats_36[_key9] = _oos_stats(_base9)
                 _monthly_36[_key9] = _calc_monthly_rows(_base9)
 
+    # ── N225フィルター適用版 36パターン（ロング：MA75以上の日のみ）──────────────
+    _n225_long_trades = [t for t in _long_trades if t.get("n225_above", True)]
+    _n225_all_trades  = _n225_long_trades + _short_trades
+    _stats_36_n225: dict = {}
+    _monthly_36_n225: dict = {}
+    for _fp9 in [1, 2, 3]:
+        for _fam9, _pool9 in [("all", _n225_all_trades), ("long", _n225_long_trades), ("short", _short_trades)]:
+            for _sc9 in _score_thresholds:
+                _base9 = [t for t in _pool9 if t.get("folds_passed", 0) >= _fp9]
+                if _sc9 > 0:
+                    _base9 = [t for t in _base9 if _wf_score_lookup.get((t["symbol"], t["strategy"]), 0) >= _sc9]
+                _key9 = f"{_fp9}_{_fam9}_{_sc9}"
+                _stats_36_n225[_key9] = _oos_stats(_base9)
+                _monthly_36_n225[_key9] = _calc_monthly_rows(_base9)
+
     import json as _json
     _monthly_36_js = _json.dumps(_monthly_36, ensure_ascii=False)
+    _monthly_36_n225_js = _json.dumps(_monthly_36_n225, ensure_ascii=False)
 
     _html = f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
@@ -2676,6 +2707,16 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     </button>
   </div>
 
+  <!-- N225 MA75フィルター -->
+  <div style="margin-bottom:14px;padding:10px 14px;background:#1c2c1c;border:1px solid #365636;border-radius:6px;display:inline-block">
+    <label style="color:#4ade80;font-size:0.85rem;cursor:pointer;display:inline-flex;align-items:center;gap:8px">
+      <input type="checkbox" id="wfh-n225-filter" onchange="wfhoosN225Toggle()"
+             style="width:15px;height:15px;accent-color:#4ade80;cursor:pointer">
+      <strong>日経MA75フィルター</strong>
+      <span style="color:#86efac;font-size:0.78rem">ロング：日経平均がMA75以上の日のみエントリー（3月のような急落相場を回避）</span>
+    </label>
+  </div>
+
   <!-- サマリー行（JS で更新） -->
   <div id="wfhoos-summary" style="background:#1e293b;border-radius:6px;padding:14px 20px;margin-bottom:16px;display:inline-block;min-width:500px">
     <table style="font-size:0.9rem;border-collapse:collapse">
@@ -2761,8 +2802,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   var _wfhCurrentFp    = 2;
   var _wfhCurrentFam   = "all";
   var _wfhCurrentScore = 0;
+  var _wfhN225On       = false;
 
-  // 36パターン統計 (fold×family×wfscore_threshold)
+  // 36パターン統計 (fold×family×wfscore_threshold) — N225フィルターなし
   var _wfhMonthly36 = {_monthly_36_js};
   var _wfhStats36 = {{
     {", ".join(
@@ -2771,9 +2813,25 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     )}
   }};
 
+  // N225 MA75フィルターあり版（ロング：MA75以上の日のみ）
+  var _wfhMonthly36N225 = {_monthly_36_n225_js};
+  var _wfhStats36N225 = {{
+    {", ".join(
+      f'"{k}": {{ n: {v["n"]}, wins: {v["wins"]}, wr: {v["wr"]:.1f}, pf: "{_pf_str_fn(v["pf"])}", pnl: {v["pnl"]:.0f}, pnlColor: "{_pnl_color(v["pnl"])}" }}'
+      for k, v in _stats_36_n225.items()
+    )}
+  }};
+
+  window.wfhoosN225Toggle = function() {{
+    var cb = document.getElementById("wfh-n225-filter");
+    _wfhN225On = cb ? cb.checked : false;
+    _updateSummary();
+    _updateMonthlyTable();
+  }};
+
   function _updateSummary() {{
     var key = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
-    var d = _wfhStats36[key];
+    var d = (_wfhN225On ? _wfhStats36N225 : _wfhStats36)[key];
     if (!d) return;
     var losses = d.n - d.wins;
     document.getElementById("wfhoos-sum-n").textContent = d.n + "件";
@@ -2786,7 +2844,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
 
   function _updateMonthlyTable() {{
     var key  = _wfhCurrentFp + "_" + _wfhCurrentFam + "_" + _wfhCurrentScore;
-    var rows = _wfhMonthly36[key] || [];
+    var rows = (_wfhN225On ? _wfhMonthly36N225 : _wfhMonthly36)[key] || [];
     var tbody = document.getElementById("wfhmon-tbody");
     if (!tbody) return;
     if (rows.length === 0) {{
@@ -2947,6 +3005,8 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         ('"wfhmon-tbody"',     f'"{_uid}mon-tbody"'),
         ('"wfhtab-',           f'"{_uid}tab-'),
         ('"wfhpane-',          f'"{_uid}pane-'),
+        ('"wfh-n225-filter"',  f'"{_uid}n225-filter"'),
+        ("wfhoosN225Toggle",   f"{_uid}N225Toggle"),
         # querySelectorAll のシングルクォート+ハッシュ
         ("'#wfhdet-body",      f"'#{_uid}det-body"),
     ]:

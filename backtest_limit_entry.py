@@ -206,6 +206,42 @@ def fetch_n225_return(days: int) -> float:
         return 0.0
 
 
+_N225_MA75_ABOVE: dict | None = None
+
+
+def get_n225_ma75_above() -> dict:
+    """
+    日付文字列 (YYYY-MM-DD) → N225がMA75以上かどうかの辞書を返す。
+    プロセス内キャッシュ。データ取得失敗時は空辞書（フィルタ無効と同等）。
+    """
+    global _N225_MA75_ABOVE
+    if _N225_MA75_ABOVE is not None:
+        return _N225_MA75_ABOVE
+    try:
+        now_jst = datetime.now(JST)
+        dl_start = (now_jst - timedelta(days=365 * 7)).strftime("%Y-%m-%d")
+        dl_end   = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
+        raw = yf.Ticker("^N225").history(
+            start=dl_start, end=dl_end,
+            interval="1d", auto_adjust=False, actions=False,
+        )
+        if len(raw) < 80:
+            _N225_MA75_ABOVE = {}
+            return _N225_MA75_ABOVE
+        cl   = raw["Close"]
+        ma75 = cl.rolling(75).mean()
+        result: dict = {}
+        for dt, c, m in zip(raw.index, cl.values, ma75.values):
+            ds = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
+            if m == m:  # not NaN
+                result[ds] = float(c) >= float(m)
+        _N225_MA75_ABOVE = result
+        return result
+    except Exception:
+        _N225_MA75_ABOVE = {}
+        return {}
+
+
 def _expected_latest_bar_date():
     """
     現在時刻から「期待される最新の取引日」を返す。
