@@ -213,6 +213,79 @@ def get_current_price_fallback(symbol: str) -> float | None:
 
 
 # ────────────────────────────────────────────────────────────
+# 未約定の売り注文（利確逆指値など）をキャンセル
+# ────────────────────────────────────────────────────────────
+def cancel_open_sell_orders(symbol: str, cli: KabuClient) -> int:
+    """指定銘柄の未約定売り注文をすべてキャンセルする。
+    ロング損切り時に利確逆指値が残っていると二重決済になるため呼ぶ。
+    返り値: キャンセルした件数。
+    """
+    try:
+        orders = cli.get_orders()
+    except Exception as e:
+        print(f"    ⚠ 注文一覧取得失敗 ({e}) — キャンセルをスキップ")
+        return 0
+
+    # 未約定 (RecvStatus が "1"=受付済 or "2"=注文中) の同銘柄売り注文を対象にする
+    # Side: "1"=売 / "2"=買
+    ACTIVE = {"1", "2"}
+    targets = [
+        o for o in orders
+        if str(o.get("Symbol", "")).strip() == str(symbol).strip()
+        and str(o.get("Side", "")) == "1"  # 売り注文
+        and str(o.get("RecvStatus", "")) in ACTIVE
+    ]
+    if not targets:
+        return 0
+
+    cancelled = 0
+    for o in targets:
+        oid = o.get("OrderId", "")
+        detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
+        print(f"    → 売り注文キャンセル: {detail}")
+        res = cli.cancel_order(oid)
+        if res.get("Result") == 0:
+            cancelled += 1
+        else:
+            print(f"      ⚠ キャンセル失敗: {res}")
+    return cancelled
+
+
+def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> int:
+    """指定銘柄の未約定買い注文をすべてキャンセルする。
+    ショート損切り（買い戻し）時に、既存の買い戻し注文が残っている場合に呼ぶ。
+    返り値: キャンセルした件数。
+    """
+    try:
+        orders = cli.get_orders()
+    except Exception as e:
+        print(f"    ⚠ 注文一覧取得失敗 ({e}) — キャンセルをスキップ")
+        return 0
+
+    ACTIVE = {"1", "2"}
+    targets = [
+        o for o in orders
+        if str(o.get("Symbol", "")).strip() == str(symbol).strip()
+        and str(o.get("Side", "")) == "2"  # 買い注文
+        and str(o.get("RecvStatus", "")) in ACTIVE
+    ]
+    if not targets:
+        return 0
+
+    cancelled = 0
+    for o in targets:
+        oid = o.get("OrderId", "")
+        detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
+        print(f"    → 買い注文キャンセル: {detail}")
+        res = cli.cancel_order(oid)
+        if res.get("Result") == 0:
+            cancelled += 1
+        else:
+            print(f"      ⚠ キャンセル失敗: {res}")
+    return cancelled
+
+
+# ────────────────────────────────────────────────────────────
 # 引け成行 (MOC) または翌日寄成 (MOO) 発注
 # ────────────────────────────────────────────────────────────
 def send_moc_order(pos: dict, cli: KabuClient) -> bool:
@@ -222,6 +295,14 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     ショート → 買い戻し (side="buy")
     cash_margin: 1=現物 / 3=信用返済
     """
+    # 損切り前に残っている反対側の注文をキャンセルする
+    if pos["is_short"]:
+        n = cancel_open_buy_orders(pos["symbol"], cli)
+    else:
+        n = cancel_open_sell_orders(pos["symbol"], cli)
+    if n:
+        print(f"    → {n} 件の注文をキャンセルしました")
+
     side = "buy" if pos["is_short"] else "sell"
     cm = pos.get("cash_margin", CASH_GENBUTSU)
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
@@ -238,6 +319,14 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
     ショート → 買い戻し (send_buy order_type="moo")
     """
     from kabu_api import CASH_GENBUTSU, CASH_MARGIN_CLOSE
+    # 損切り前に残っている反対側の注文をキャンセルする
+    if pos["is_short"]:
+        n = cancel_open_buy_orders(pos["symbol"], cli)
+    else:
+        n = cancel_open_sell_orders(pos["symbol"], cli)
+    if n:
+        print(f"    → {n} 件の注文をキャンセルしました")
+
     side = pos["is_short"]
     cm = pos.get("cash_margin", CASH_GENBUTSU)
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
