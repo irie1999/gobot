@@ -64,7 +64,9 @@ _pre.add_argument("--output-suffix", type=str, default="",
 _pre.add_argument("--rolling", type=int, default=0,
                   help="ローリング逆指値: 未約定時に終値で注文価格を更新する最大回数 (例: --rolling 2)")
 _pre.add_argument("--wf-until", type=str, default=None,
-                  help="WF歴史検証の基準日 (YYYY-MM-DD). その日以前のデータで3fold WF選定し以降OOS検証タブを追加")
+                  help="WF歴史検証の最新基準日 (YYYY-MM-DD). 省略時は6ヶ月前を自動設定")
+_pre.add_argument("--wf-periods", type=int, default=4,
+                  help="WF歴史検証の期間数・6ヶ月間隔 (デフォルト: 4期間 = 約2年分)")
 _pre.add_argument("--wf-universe", type=str, default=None,
                   help="WF歴史検証で使うユニバースファイル (例: symbols_all.py=N225, symbols_listed_prime.py=プライム全体). デフォルト: 自動検出")
 _pre.add_argument("--oos-until", type=str, default=None,
@@ -919,36 +921,47 @@ for days in _PNL_PERIODS:
         f'{_period_pane_htmls[days]}</div>\n'
     )
 
-# ── WF歴史検証タブ (--wf-until 指定時のみ) ──────────────────────────────────
-_wfh_tab_btn  = ""
-_wfh_tab_pane = ""
+# ── WF歴史検証タブ（常時表示・複数基準日自動生成）────────────────────────────
+from datetime import date as _date_cls, timedelta as _td_wfh
+
+# 最新基準日: --wf-until 指定 or 自動（6ヶ月前）
 if _args.wf_until:
-    from datetime import date as _date_cls
     try:
-        _wfh_until_date = _date_cls.fromisoformat(_args.wf_until)
+        _wfh_latest = _date_cls.fromisoformat(_args.wf_until)
     except ValueError:
-        print(f"[ERROR] --wf-until の日付形式が不正です: {_args.wf_until} (YYYY-MM-DD形式で指定してください)")
-        _wfh_until_date = None
-    if _wfh_until_date is not None:
-        _na._PNL_CONFIGS[:] = _all_configs
-        _wfh_max_price = getattr(_args, "max_price", 0.0) or 0.0
-        _wfh_min_price = getattr(_args, "min_price", 0.0) or 0.0
-        _wfh_universe  = getattr(_args, "wf_universe", None)
-        print(f"\nWF歴史検証開始: {_wfh_until_date} 時点でユニバーススキャン（新規銘柄選定）→ 以降OOS検証", flush=True)
-        try:
-            _wfh_body, _ = _na._wf_history_html(
-                _wfh_until_date, _args.workers,
-                max_price=_wfh_max_price,
-                min_price=_wfh_min_price,
-                universe_path=_wfh_universe,
-            )
-        except Exception as _wfh_e:
-            print(f"[WARN] WF歴史検証エラー: {_wfh_e}")
-            import traceback; traceback.print_exc()
-            _wfh_body = f'<p style="color:#f87171;padding:20px">WF歴史検証エラー: {_wfh_e}</p>'
-        _wfh_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'wfh\')">📊 WF歴史検証</button>'
-        _wfh_tab_pane = f'\n<div id="ho-wfh" class="ho-outer-pane">\n{_wfh_body}\n</div>'
-        print("WF歴史検証タブ生成完了", flush=True)
+        print(f"[WARN] --wf-until の日付形式が不正: {_args.wf_until} → 6ヶ月前を使用")
+        _wfh_latest = _date_cls.today() - _td_wfh(days=183)
+else:
+    _wfh_latest = _date_cls.today() - _td_wfh(days=183)
+
+# 6ヶ月間隔で N 期間さかのぼる
+_wfh_periods = max(1, getattr(_args, "wf_periods", 4))
+_wfh_dates = []
+_d = _wfh_latest
+for _ in range(_wfh_periods):
+    _wfh_dates.insert(0, _d)
+    _d = _d - _td_wfh(days=183)
+
+_wfh_max_price = getattr(_args, "max_price", 0.0) or 0.0
+_wfh_min_price = getattr(_args, "min_price", 0.0) or 0.0
+_wfh_universe  = getattr(_args, "wf_universe", None)
+
+print(f"\nWF歴史検証（クロス期間）: {[str(d) for d in _wfh_dates]}", flush=True)
+try:
+    _wfh_body = _na._wf_multi_history_html(
+        _wfh_dates, workers=_args.workers,
+        max_price=_wfh_max_price,
+        min_price=_wfh_min_price,
+        universe_path=_wfh_universe,
+    )
+except Exception as _wfh_e:
+    print(f"[WARN] WF歴史検証エラー: {_wfh_e}")
+    import traceback; traceback.print_exc()
+    _wfh_body = f'<p style="color:#f87171;padding:20px">WF歴史検証エラー: {_wfh_e}</p>'
+
+_wfh_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'wfh\')">📊 WF歴史検証</button>'
+_wfh_tab_pane = f'\n<div id="ho-wfh" class="ho-outer-pane">\n{_wfh_body}\n</div>'
+print("WF歴史検証タブ生成完了", flush=True)
 
 # ── OOS検証タブ (--oos-until 指定時のみ) ─────────────────────────────────────
 _oos_tab_btn  = ""

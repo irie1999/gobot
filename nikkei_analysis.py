@@ -2045,7 +2045,8 @@ _pnl_bt_cache: dict = {}   # cfg_key -> items_per_cfg (バックテスト結果�
 
 
 def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
-                     min_price: float = 0.0, universe_path: str | None = None) -> str:
+                     min_price: float = 0.0, universe_path: str | None = None,
+                     cache_only: bool = False, _uid: str = "") -> tuple:
     """WF歴史検証HTML（ユニバース全体からの新規銘柄選定版）。
 
     wf_until_date 時点のデータのみで FOLDS_HISTORICAL（3fold/TRAIN2年/TEST1年）を使い
@@ -2053,12 +2054,19 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     ≥1fold 通過銘柄の wf_until_date〜今日 OOS 成績を表示。
     現行 WATCHLIST/FOLDS/シグナルには一切影響しない。
     WF結果は .wfh_cache/ に日付別でキャッシュされ、2回目以降は即座に表示。
+
+    cache_only=True のとき: キャッシュがなければ (None, {}) を返す（スキャンしない）。
+    _uid: HTML要素IDのプレフィックス。複数インスタンスを1ページに埋め込む際に指定。
     """
     import pickle as _pkl
     from pathlib import Path as _PL
 
+    if not _uid:
+        import random as _rnd
+        _uid = f"w{_rnd.randint(100000, 999999)}"
+
     if not _SIGNALS_AVAILABLE:
-        return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
+        return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>', {}
 
     try:
         from scan_walkforward import (walkforward_one_asof as _wf_asof,
@@ -2095,6 +2103,9 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     _cache_key  = f"{wf_until_date}_{_univ_name}_max{max_price}_min{min_price}_{_fold_sig}_{_strats_sig}"
     _cache_hash = _hl.md5(_cache_key.encode()).hexdigest()[:12]
     _cache_path = _wfh_cache_dir / f"wfh_{wf_until_date}_{_cache_hash}.pkl"
+
+    if cache_only and not _cache_path.exists():
+        return None, {}
 
     wf_results: list[dict] = []
     _already_done: set = set()
@@ -2537,7 +2548,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     import json as _json
     _monthly_chart_36_js = _json.dumps(_monthly_chart_36, ensure_ascii=False)
 
-    return f"""
+    _html = f"""
 <div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
   <h3 style="color:#38bdf8;margin:0 0 4px">
     WF歴史検証（{wf_until_date} 時点で新規選定 → 以降 {(_wfh_today - wf_until_date).days}日間 OOS）
@@ -2857,7 +2868,241 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   // ページロード時にチャートを初期描画
   _updateMonthlyChart();
 }})();
-</script>""", _stats_36
+</script>"""
+
+    # ── ID プレフィックス適用（複数インスタンスを同一ページに埋め込む際の衝突防止）──
+    # 関数名（長いものを先に）
+    for _old, _new in [
+        ("wfhoosFamilyFilter", f"{_uid}FamilyFilter"),
+        ("wfhoosScoreFilter",  f"{_uid}ScFilter"),
+        ("wfhoosFilter",       f"{_uid}Filter"),
+        ("wfhdetFilter",       f"{_uid}DetFilter"),
+        # HTML id= / JS 文字列リテラル（ダブルクォート付き）
+        ('"wfhoos-',           f'"{_uid}oos-'),
+        ('"wfhfam-',           f'"{_uid}fam-'),
+        ('"wfhsc-',            f'"{_uid}sc-'),
+        ('"wfhdet-',           f'"{_uid}det-'),
+        ('"wfh-chart-area"',   f'"{_uid}chart"'),
+        # querySelectorAll のシングルクォート+ハッシュ
+        ("'#wfhdet-body",      f"'#{_uid}det-body"),
+    ]:
+        _html = _html.replace(_old, _new)
+
+    return _html, _stats_36
+
+
+def _wf_multi_history_html(dates, workers: int, max_price: float = 0.0,
+                            min_price: float = 0.0, universe_path: str | None = None) -> str:
+    """複数基準日WF歴史検証の比較HTML。
+
+    各基準日でキャッシュがあれば即座にOOS成績を集計し、クロス期間比較テーブルを生成。
+    キャッシュがない日付は「未実行」として表示（スキャンはしない）。
+    最も新しい基準日の詳細インタラクティブHTMLも下部に埋め込む。
+    """
+    from datetime import date as _d
+
+    _today = _d.today()
+
+    def _pf_str(pf):
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _color(v):
+        return "#4ade80" if v > 0 else "#f87171"
+
+    _th = ("background:#1e293b;color:#94a3b8;padding:8px 14px;text-align:center;"
+           "border:1px solid #334155;font-size:0.82rem")
+    _td = "padding:8px 14px;border:1px solid #1e293b;text-align:right;font-size:0.85rem"
+    _tdl = "padding:8px 14px;border:1px solid #1e293b;text-align:left;font-size:0.85rem"
+
+    results = []       # (wf_date, stats_36, detail_html, uid)
+    uncached = []      # dates without cache
+
+    for i, wf_date in enumerate(sorted(dates)):
+        _uid = f"wfhd{i}"
+        html, stats = _wf_history_html(
+            wf_date, workers=workers,
+            max_price=max_price, min_price=min_price,
+            universe_path=universe_path,
+            cache_only=True, _uid=_uid,
+        )
+        if html is None:
+            uncached.append(wf_date)
+            results.append((wf_date, None, None, _uid))
+        else:
+            results.append((wf_date, stats, html, _uid))
+
+    # ── 比較サマリーテーブル ────────────────────────────────────────────────
+    summary_rows = ""
+    all_positive = True
+    any_data = False
+    for wf_date, stats, _, uid in results:
+        oos_days = (_today - wf_date).days
+        if stats is None:
+            summary_rows += (
+                f'<tr>'
+                f'<td style="{_tdl}">{wf_date}</td>'
+                f'<td style="{_td}">{oos_days}日</td>'
+                f'<td colspan="7" style="{_td};color:#64748b;text-align:center">'
+                f'キャッシュなし — '
+                f'<code style="font-size:0.78rem">python run_wf_history_scan.py --wf-until {wf_date}</code>'
+                f' を事前実行してください</td>'
+                f'</tr>\n'
+            )
+            all_positive = False
+            continue
+        any_data = True
+        s  = stats.get("2_all_0",   {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        sl = stats.get("2_long_0",  {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        ss = stats.get("2_short_0", {"n": 0, "wins": 0, "wr": 0, "pf": 0, "pnl": 0})
+        pnl = s["pnl"]
+        pc  = _color(pnl)
+        if pnl <= 0:
+            all_positive = False
+        verd = ('✓' if pnl > 0 and s["pf"] >= 1.0
+                else '△' if pnl > 0
+                else '✗')
+        vc   = "#4ade80" if verd == "✓" else ("#fbbf24" if verd == "△" else "#f87171")
+        summary_rows += (
+            f'<tr>'
+            f'<td style="{_tdl}">'
+            f'<a href="#{uid}-anchor" onclick="wfhShowDate(\'{uid}\')" '
+            f'style="color:#38bdf8">{wf_date}</a></td>'
+            f'<td style="{_td}">{oos_days}日<br>'
+            f'<span style="color:#64748b;font-size:0.75rem">({oos_days//30}ヶ月)</span></td>'
+            f'<td style="{_td}">{s["n"]}件</td>'
+            f'<td style="{_td}">{s["wr"]:.1f}%</td>'
+            f'<td style="{_td}">{_pf_str(s["pf"])}</td>'
+            f'<td style="{_td};color:{pc};font-weight:bold">{pnl:+,.0f}円</td>'
+            f'<td style="{_td};color:{_color(sl["pnl"])}">{sl["pnl"]:+,.0f}円</td>'
+            f'<td style="{_td};color:{_color(ss["pnl"])}">{ss["pnl"]:+,.0f}円</td>'
+            f'<td style="{_td};text-align:center;color:{vc};font-size:1.1rem">{verd}</td>'
+            f'</tr>\n'
+        )
+
+    if all_positive and any_data:
+        verdict_bar = ('<div style="background:#1e293b;border-left:4px solid #4ade80;'
+                       'padding:10px 18px;margin-bottom:20px;border-radius:0 6px 6px 0">'
+                       '<span style="color:#4ade80;font-weight:bold">✓ 全期間プラス — '
+                       'シグナルに複数期間での再現性あり</span></div>')
+    elif any_data:
+        verdict_bar = ('<div style="background:#1e293b;border-left:4px solid #fbbf24;'
+                       'padding:10px 18px;margin-bottom:20px;border-radius:0 6px 6px 0">'
+                       '<span style="color:#fbbf24;font-weight:bold">△ 一部マイナス期間あり — '
+                       '継続検証を推奨</span></div>')
+    else:
+        verdict_bar = ('<div style="background:#1e293b;border-left:4px solid #64748b;'
+                       'padding:10px 18px;margin-bottom:20px;border-radius:0 6px 6px 0">'
+                       '<span style="color:#64748b">キャッシュなし — '
+                       '<code>run_wf_history_scan.py</code> または '
+                       '<code>run_wf_multi.py</code> を先に実行してください</span></div>')
+
+    uncached_note = ""
+    if uncached:
+        cmds = " ".join(f"python run_wf_history_scan.py --wf-until {d} --min-price {min_price:.0f} "
+                        f"--max-price {max_price:.0f} --no-browser" for d in uncached)
+        uncached_note = (
+            f'<details style="margin-bottom:16px">'
+            f'<summary style="color:#fbbf24;cursor:pointer;font-size:0.82rem">'
+            f'⚠ {len(uncached)}件 キャッシュ未作成の基準日 — クリックでコマンド表示</summary>'
+            f'<pre style="background:#1e293b;padding:12px;border-radius:4px;'
+            f'font-size:0.75rem;color:#94a3b8;margin-top:8px;overflow-x:auto">'
+            f'{cmds}</pre></details>'
+        )
+
+    summary_table = f"""
+<div style="overflow-x:auto;margin-bottom:20px">
+<table style="border-collapse:collapse;min-width:780px;width:100%">
+  <thead><tr>
+    <th style="{_th}">基準日</th>
+    <th style="{_th}">OOS期間</th>
+    <th style="{_th}">取引数<br><span style="font-size:0.72rem;color:#64748b">≥2fold</span></th>
+    <th style="{_th}">勝率</th>
+    <th style="{_th}">PF</th>
+    <th style="{_th}">損益（全体）</th>
+    <th style="{_th}">損益（ロング）</th>
+    <th style="{_th}">損益（ショート）</th>
+    <th style="{_th}">判定</th>
+  </tr></thead>
+  <tbody>{summary_rows}</tbody>
+</table>
+</div>"""
+
+    # ── 日付セレクタ + 各日付の詳細セクション ──────────────────────────────────
+    date_tabs = ""
+    detail_sections = ""
+    first_with_data = None
+
+    for i, (wf_date, stats, detail_html, uid) in enumerate(results):
+        if stats is None:
+            continue
+        is_first = (first_with_data is None)
+        if is_first:
+            first_with_data = uid
+        disp = "block" if is_first else "none"
+        active_style = (
+            "background:#1e40af;color:#e2e8f0;border-color:#38bdf8;font-weight:bold"
+            if is_first else
+            "background:#1e293b;color:#94a3b8;border-color:#334155"
+        )
+        date_tabs += (
+            f'<button id="wfhdt-btn-{uid}" onclick="wfhShowDate(\'{uid}\')" '
+            f'style="border:1px solid;border-radius:4px;padding:5px 14px;'
+            f'margin-right:6px;cursor:pointer;font-size:0.82rem;{active_style}">'
+            f'{wf_date}</button>'
+        )
+        detail_sections += (
+            f'<div id="{uid}-anchor"></div>'
+            f'<div id="wfhdt-pane-{uid}" style="display:{disp}">'
+            f'{detail_html}'
+            f'</div>\n'
+        )
+
+    tab_row = ""
+    if date_tabs:
+        tab_row = (
+            f'<div style="margin-bottom:16px">'
+            f'<span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">基準日を選択:</span>'
+            f'{date_tabs}</div>'
+        )
+
+    switch_js = ""
+    if first_with_data:
+        all_uids_js = "[" + ",".join(f'"{uid}"' for _, _, html, uid in results if html) + "]"
+        switch_js = f"""
+<script>
+(function() {{
+  var _allUids = {all_uids_js};
+  window.wfhShowDate = function(uid) {{
+    _allUids.forEach(function(u) {{
+      var p = document.getElementById("wfhdt-pane-" + u);
+      var b = document.getElementById("wfhdt-btn-" + u);
+      if (!p || !b) return;
+      var active = u === uid;
+      p.style.display = active ? "block" : "none";
+      b.style.background = active ? "#1e40af" : "#1e293b";
+      b.style.color = active ? "#e2e8f0" : "#94a3b8";
+      b.style.borderColor = active ? "#38bdf8" : "#334155";
+      b.style.fontWeight = active ? "bold" : "normal";
+    }});
+  }};
+}})();
+</script>"""
+
+    return f"""
+<div style="background:#0f172a;color:#e2e8f0;padding:20px;border-radius:8px;margin:12px 0">
+  <h3 style="color:#38bdf8;margin:0 0 4px">クロス期間検証（複数基準日WF歴史検証）</h3>
+  <p style="color:#64748b;font-size:0.82rem;margin:0 0 16px">
+    複数の独立した時間軸でシグナルの再現性を検証。
+    全期間プラス = フォワードテストを複数回やったのと等価の証拠。
+    ≥2fold通過・WFスコアフィルタなし（すべて）の集計。
+  </p>
+  {verdict_bar}
+  {uncached_note}
+  {summary_table}
+  {tab_row}
+  {detail_sections}
+  {switch_js}
+</div>"""
 
 
 def _oos_pnl_html(until_date, days: int, workers: int) -> str:
