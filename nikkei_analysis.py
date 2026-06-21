@@ -2276,8 +2276,20 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         except Exception:
             return []
 
+    # ── OOS取引キャッシュ（当日内は再計算不要・翌日は自動更新）─────────────────
+    _oos_cache_dir  = _PL(".wfh_cache")
+    _oos_cache_file = _oos_cache_dir / f"oos_{wf_until_date}_{_wfh_today}.pkl"
+
     oos_trades: list[dict] = []
-    if passed_tasks:
+    if _oos_cache_file.exists():
+        try:
+            with open(_oos_cache_file, "rb") as _f:
+                oos_trades = _pkl.load(_f)
+            print(f"[WF歴史検証] OOSキャッシュ読込: {len(oos_trades)}件 ({wf_until_date})", flush=True)
+        except Exception:
+            oos_trades = []
+
+    if not oos_trades and passed_tasks:
         with _TPE(max_workers=workers) as _ex2:
             _futs2 = {_ex2.submit(_run_wf_oos, t): t for t in passed_tasks}
             for _fut in _asc(_futs2):
@@ -2285,6 +2297,13 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                     oos_trades.extend(_fut.result())
                 except Exception:
                     pass
+        # 当日キャッシュ保存（翌日分は別ファイルになるので自動的に古いキャッシュは使われない）
+        try:
+            with open(_oos_cache_file, "wb") as _f:
+                _pkl.dump(oos_trades, _f)
+            print(f"[WF歴史検証] OOSキャッシュ保存: {len(oos_trades)}件 ({_oos_cache_file.name})", flush=True)
+        except Exception:
+            pass
 
     # ── N225 MA75フィルター用フラグをロングトレードに付与 ────────────────────────
     try:
