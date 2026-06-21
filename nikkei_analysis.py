@@ -2242,21 +2242,25 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         _tot_tr  = sum(r["trades"] for r in _vals)
         return min(round(_avg_wr * 0.4 + (_avg_pf / 10) * 30 + _stable * 20 + min(_tot_tr / 20, 1) * 10), 100)
 
-    def _run_wf_oos(args):
+    # MAX_HOLD(15) + ENTRY_EXPIRE(3) + バッファ(3) = 21日以内のシグナルは未決済の可能性あり
+    _RECOMPUTE_DAYS = 21
+
+    def _run_wf_oos(args, override_days=None):
         _s, _n, _st = args
         try:
             _sdef = _SDEFS_WFH.get(_st)
             if not _sdef:
                 return []
             _cf, _em, _sm, _tm, _family, _etype = _sdef
-            _df = _wfh_fetch(_s, _oos_backtest_days + 60)
+            _bt_days = override_days or _oos_backtest_days
+            _df = _wfh_fetch(_s, _bt_days + 60)
             if _df is None or _df.empty:
                 return []
-            # OOS前BTスコア：wf_until_date以前のデータのみで計算（OSSバイアスなし）
+            # OOS前BTスコア：wf_until_date以前のデータのみで計算（バイアスなし）
             import pandas as _pd_oos
             _df_pre = _df[_df.index <= _pd_oos.Timestamp(wf_until_date)].copy()
             _bt_pre = _calc_preoos_bt_score(_df_pre, _cf, _em, _sm, _tm, _st, _etype)
-            _res = _wfh_rbt(_s, _n, _df, _cf, _em, _sm, _tm, _oos_backtest_days, _st, entry_type=_etype)
+            _res = _wfh_rbt(_s, _n, _df, _cf, _em, _sm, _tm, _bt_days, _st, entry_type=_etype)
             if not _res:
                 return []
             _tlog = _res.get("trade_log", [])
@@ -2277,39 +2281,99 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         except Exception:
             return []
 
-    # ── OOS取引キャッシュ（当日内は再計算不要・翌日は自動更新）─────────────────
-    _oos_cache_dir  = _PL(".wfh_cache")
-    _oos_cache_file = _oos_cache_dir / f"oos_{wf_until_date}_{_wfh_today}.pkl"
+    # ── OOS取引キャッシュ（2段階: 決済済み永久保存 + 直近21日当日キャッシュ）────
+    # 決済済み: signal_dt が今日から21日以上前 → 結果確定・永久保存
+    # 直近21日: 毎日再計算（未決済トレードが含まれる可能性）
+    _oos_cache_dir   = _PL(".wfh_cache")
+    _closed_cache    = _oos_cache_dir / f"oos_{wf_until_date}_closed.pkl"
+    _recent_cache    = _oos_cache_dir / f"oos_{wf_until_date}_{_wfh_today}_recent.pkl"
 
-    if force and _oos_cache_file.exists():
+    # --force: 直近キャッシュのみ削除（決済済みキャッシュは保持）
+    if force and _recent_cache.exists():
         try:
-            _oos_cache_file.unlink()
-            print(f"[WF歴史検証] OOSキャッシュ削除（--force）: {_oos_cache_file.name}", flush=True)
+            _recent_cache.unlink()
+            print(f"[WF歴史検証] OOS直近キャッシュ削除（--force）: {_recent_cache.name}", flush=True)
         except Exception:
             pass
 
-    oos_trades: list[dict] = []
-    if _oos_cache_file.exists():
+    # 決済済みキャッシュ読込
+    _closed_trades: list[dict] = []
+    if _closed_cache.exists():
         try:
-            with open(_oos_cache_file, "rb") as _f:
-                oos_trades = _pkl.load(_f)
-            print(f"[WF歴史検証] OOSキャッシュ読込: {len(oos_trades)}件 ({wf_until_date})", flush=True)
+            with open(_closed_cache, "rb") as _f:
+                _closed_trades = _pkl.load(_f)
+            print(f"[WF歴史検証] 決済済みキャッシュ読込: {len(_closed_trades)}件 ({wf_until_date})", flush=True)
         except Exception:
-            oos_trades = []
+            _closed_trades = []
 
-    if not oos_trades and passed_tasks:
-        with _TPE(max_workers=workers) as _ex2:
-            _futs2 = {_ex2.submit(_run_wf_oos, t): t for t in passed_tasks}
-            for _fut in _asc(_futs2):
-                try:
-                    oos_trades.extend(_fut.result())
-                except Exception:
-                    pass
-        # 当日キャッシュ保存（翌日分は別ファイルになるので自動的に古いキャッシュは使われない）
+    # 直近キャッシュ読込または計算
+    _recent_trades: list[dict] = []
+    if _recent_cache.exists():
         try:
-            with open(_oos_cache_file, "wb") as _f:
-                _pkl.dump(oos_trades, _f)
-            print(f"[WF歴史検証] OOSキャッシュ保存: {len(oos_trades)}件 ({_oos_cache_file.name})", flush=True)
+            with open(_recent_cache, "rb") as _f:
+                _recent_trades = _pkl.load(_f)
+            print(f"[WF歴史検証] OOS直近キャッシュ読込: {len(_recent_trades)}件 ({wf_until_date})", flush=True)
+        except Exception:
+            _recent_trades = []
+
+    if not _recent_trades and passed_tasks:
+        if _closed_trades:
+            # 増分モード: 直近21日のみ計算（高速）
+            print(f"[WF歴史検証] OOS直近{_RECOMPUTE_DAYS}日を計算中 ({wf_until_date})…", flush=True)
+            from functools import partial as _partial
+            _run_recent = _partial(_run_wf_oos, override_days=_RECOMPUTE_DAYS)
+            with _TPE(max_workers=workers) as _ex2:
+                _futs2 = {_ex2.submit(_run_recent, t): t for t in passed_tasks}
+                for _fut in _asc(_futs2):
+                    try:
+                        _recent_trades.extend(_fut.result())
+                    except Exception:
+                        pass
+        else:
+            # 初回: 全OOS期間を計算（決済済みキャッシュがない場合）
+            print(f"[WF歴史検証] OOS全期間を計算中（初回） ({wf_until_date})…", flush=True)
+            with _TPE(max_workers=workers) as _ex2:
+                _futs2 = {_ex2.submit(_run_wf_oos, t): t for t in passed_tasks}
+                for _fut in _asc(_futs2):
+                    try:
+                        _recent_trades.extend(_fut.result())
+                    except Exception:
+                        pass
+            # 初回は全結果を決済済み+直近に分割して保存
+            _cutoff = _wfh_today - _td(days=_RECOMPUTE_DAYS)
+            def _sig_date(t):
+                _d = t.get("signal_dt")
+                return _d.date() if hasattr(_d, "date") else (_d if _d else _wfh_today)
+            _closed_trades = [t for t in _recent_trades if _sig_date(t) < _cutoff]
+            _recent_trades = [t for t in _recent_trades if _sig_date(t) >= _cutoff]
+            try:
+                with open(_closed_cache, "wb") as _f:
+                    _pkl.dump(_closed_trades, _f)
+                print(f"[WF歴史検証] 決済済みキャッシュ保存（初回）: {len(_closed_trades)}件", flush=True)
+            except Exception:
+                pass
+
+        try:
+            with open(_recent_cache, "wb") as _f:
+                _pkl.dump(_recent_trades, _f)
+            print(f"[WF歴史検証] OOS直近キャッシュ保存: {len(_recent_trades)}件", flush=True)
+        except Exception:
+            pass
+
+    # マージ: 決済済み + 直近
+    oos_trades: list[dict] = _closed_trades + _recent_trades
+
+    # 決済済みキャッシュの更新（直近トレードの中で確定済みのものを追加）
+    _cutoff = _wfh_today - _td(days=_RECOMPUTE_DAYS)
+    def _sig_date(t):
+        _d = t.get("signal_dt")
+        return _d.date() if hasattr(_d, "date") else (_d if _d else _wfh_today)
+    _new_closed = [t for t in oos_trades if _sig_date(t) < _cutoff]
+    if len(_new_closed) > len(_closed_trades):
+        try:
+            with open(_closed_cache, "wb") as _f:
+                _pkl.dump(_new_closed, _f)
+            print(f"[WF歴史検証] 決済済みキャッシュ更新: {len(_new_closed)}件 (+{len(_new_closed)-len(_closed_trades)}件)", flush=True)
         except Exception:
             pass
 
