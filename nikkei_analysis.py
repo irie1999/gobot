@@ -2519,14 +2519,18 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         )
 
     def _oos_container(fp_lvl, body1, body2, s, visible):
-        _tables = (
-            f'<h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">戦略別成績</h5>'
-            + _oos_strat_table(body1)
-            + f'<h5 style="color:#94a3b8;margin:0 0 6px;font-size:0.85rem">銘柄×戦略別成績（損益降順 top30）</h5>'
-            + _oos_sym_table(body2)
+        _tab_btn = (
+            f'<div style="display:flex;gap:4px;margin-bottom:8px">'
+            f'<button id="wfhtab-{fp_lvl}-strat" onclick="wfhShowTab({fp_lvl},\'strat\')" '
+            f'style="padding:4px 12px;border-radius:4px;border:1px solid #38bdf8;background:#1e40af;color:#e2e8f0;font-size:0.8rem;cursor:pointer">戦略別</button>'
+            f'<button id="wfhtab-{fp_lvl}-sym" onclick="wfhShowTab({fp_lvl},\'sym\')" '
+            f'style="padding:4px 12px;border-radius:4px;border:1px solid #334155;background:#1e293b;color:#94a3b8;font-size:0.8rem;cursor:pointer">銘柄別</button>'
+            f'</div>'
         )
+        _pane_strat = f'<div id="wfhpane-{fp_lvl}-strat">' + _oos_strat_table(body1) + '</div>'
+        _pane_sym   = f'<div id="wfhpane-{fp_lvl}-sym" style="display:none">' + _oos_sym_table(body2) + '</div>'
         _disp = "" if visible else ' style="display:none"'
-        return f'<div id="wfhoos-container-{fp_lvl}"{_disp}>{_tables}</div>'
+        return f'<div id="wfhoos-container-{fp_lvl}"{_disp}>{_tab_btn}{_pane_strat}{_pane_sym}</div>'
 
     _container1 = _oos_container(1, _strat1, _sym1, _s1, False)
     _container2 = _oos_container(2, _strat2, _sym2, _def_s, True)
@@ -2548,7 +2552,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     # ── 36パターン統計+月次テーブルデータ (fold×family×wfscore_threshold) ──────
     _score_thresholds = [0, 40, 60, 80]
     _stats_36: dict = {}
-    _monthly_36: dict = {}  # {key: [[ym, n, wr, pf, pnl], ...]}
+    _monthly_36: dict = {}  # {key: [[ym, n, wr, pf, win_pnl, loss_pnl, pnl], ...]}
 
     from collections import defaultdict as _ddm
     def _calc_monthly_rows(trades):
@@ -2560,7 +2564,8 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         result = []
         for ym in sorted(by_ym.keys()):
             s = _oos_stats(by_ym[ym])
-            result.append([ym, s["n"], round(s["wr"], 1), round(s["pf"], 2), round(s["pnl"])])
+            result.append([ym, s["n"], round(s["wr"], 1), round(s["pf"], 2),
+                           round(s["win_pnl"]), round(s["loss_pnl"]), round(s["pnl"])])
         return result
 
     for _fp9 in [1, 2, 3]:
@@ -2697,13 +2702,14 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
   <!-- 月次内訳（フィルタ連動・動的更新） -->
   <h5 style="color:#94a3b8;margin:16px 0 6px;font-size:0.85rem">月次内訳</h5>
   <div style="overflow-x:auto;margin-bottom:20px">
-  <table style="border-collapse:collapse;font-size:0.82rem;min-width:400px">
+  <table style="border-collapse:collapse;font-size:0.82rem;min-width:500px">
     <thead><tr>
       <th style="{_th}">年月</th><th style="{_th}">取引</th>
       <th style="{_th}">勝率</th><th style="{_th}">PF</th>
+      <th style="{_th}">利益計</th><th style="{_th}">損失計</th>
       <th style="{_th}">損益</th>
     </tr></thead>
-    <tbody id="wfhmon-tbody"><tr><td colspan="5" style="text-align:center;color:#64748b;padding:12px">...</td></tr></tbody>
+    <tbody id="wfhmon-tbody"><tr><td colspan="7" style="text-align:center;color:#64748b;padding:12px">...</td></tr></tbody>
   </table>
   </div>
 
@@ -2784,22 +2790,26 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     var tbody = document.getElementById("wfhmon-tbody");
     if (!tbody) return;
     if (rows.length === 0) {{
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:12px">取引なし</td></tr>';
       return;
     }}
     var tdS  = "padding:6px 12px;border:1px solid #1e293b;text-align:right;font-size:0.82rem";
     var tdSL = "padding:6px 12px;border:1px solid #1e293b;text-align:left;font-size:0.82rem;color:#e2e8f0";
     var html = "";
     rows.forEach(function(r) {{
-      var ym = r[0], n = r[1], wr = r[2], pf = r[3], pnl = r[4];
-      var pc = pnl >= 0 ? "#4ade80" : "#f87171";
-      var pfStr = pf === null ? "∞" : pf.toFixed(2);
-      var pnlStr = (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + "円";
+      var ym = r[0], n = r[1], wr = r[2], pf = r[3], winP = r[4], lossP = r[5], pnl = r[6];
+      var pc  = pnl >= 0 ? "#4ade80" : "#f87171";
+      var pfStr   = (pf === null || pf >= 9999) ? "∞" : pf.toFixed(2);
+      var winStr  = "+" + Math.round(winP).toLocaleString() + "円";
+      var lossStr = Math.round(lossP).toLocaleString() + "円";
+      var pnlStr  = (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString() + "円";
       html += "<tr>";
       html += '<td style="' + tdSL + '">' + ym + "</td>";
       html += '<td style="' + tdS + '">' + n + "</td>";
       html += '<td style="' + tdS + '">' + wr.toFixed(1) + "%</td>";
       html += '<td style="' + tdS + '">' + pfStr + "</td>";
+      html += '<td style="' + tdS + ';color:#4ade80">' + winStr + "</td>";
+      html += '<td style="' + tdS + ';color:#f87171">' + lossStr + "</td>";
       html += '<td style="' + tdS + ';color:' + pc + ';font-weight:bold">' + pnlStr + "</td>";
       html += "</tr>";
     }});
@@ -2817,6 +2827,22 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
       r.style.display = (famOk && scoreOk) ? "" : "none";
     }});
   }}
+
+  window.wfhShowTab = function(fp, tab) {{
+    ["strat","sym"].forEach(function(t) {{
+      var pane = document.getElementById("wfhpane-" + fp + "-" + t);
+      if (pane) pane.style.display = t === tab ? "" : "none";
+      var btn = document.getElementById("wfhtab-" + fp + "-" + t);
+      if (!btn) return;
+      if (t === tab) {{
+        btn.style.background = "#1e40af"; btn.style.color = "#e2e8f0";
+        btn.style.borderColor = "#38bdf8";
+      }} else {{
+        btn.style.background = "#1e293b"; btn.style.color = "#94a3b8";
+        btn.style.borderColor = "#334155";
+      }}
+    }});
+  }};
 
   window.wfhoosFilter = function(minFp) {{
     _wfhCurrentFp = minFp;
@@ -2912,12 +2938,15 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
         ("wfhoosScoreFilter",  f"{_uid}ScFilter"),
         ("wfhoosFilter",       f"{_uid}Filter"),
         ("wfhdetFilter",       f"{_uid}DetFilter"),
+        ("wfhShowTab",         f"{_uid}ShowTab"),
         # HTML id= / JS 文字列リテラル（ダブルクォート付き）
         ('"wfhoos-',           f'"{_uid}oos-'),
         ('"wfhfam-',           f'"{_uid}fam-'),
         ('"wfhsc-',            f'"{_uid}sc-'),
         ('"wfhdet-',           f'"{_uid}det-'),
         ('"wfhmon-tbody"',     f'"{_uid}mon-tbody"'),
+        ('"wfhtab-',           f'"{_uid}tab-'),
+        ('"wfhpane-',          f'"{_uid}pane-'),
         # querySelectorAll のシングルクォート+ハッシュ
         ("'#wfhdet-body",      f"'#{_uid}det-body"),
     ]:
