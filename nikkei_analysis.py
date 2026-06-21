@@ -2217,6 +2217,30 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
     passed_tasks = [(r["symbol"], r["name"], r["strategy"])
                     for r in wf_results if r["folds_passed"] >= 1]
 
+    # OOS前365日のBTスコア計算ヘルパー（calc_recommend_scoreと同一式）
+    _BT_SLICE_DAYS = [180, 150, 120, 90, 60, 30]
+
+    def _calc_preoos_bt_score(df_pre, cf, em, sm, tm, st, etype):
+        """wf_until_date以前のデータだけで算出したBTスコア（OSSバイアスなし）"""
+        if df_pre is None or len(df_pre) < 35:
+            return 0
+        period_res = {}
+        for _d in _BT_SLICE_DAYS:
+            try:
+                _r = _wfh_rbt(None, "", df_pre, cf, em, sm, tm, _d, st, entry_type=etype)
+                if _r and _r.get("trades", 0) > 0:
+                    period_res[_d] = _r
+            except Exception:
+                pass
+        if not period_res:
+            return 0
+        _vals = list(period_res.values())
+        _avg_wr  = sum(r["win_rate"] for r in _vals) / len(_vals)
+        _avg_pf  = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10) for r in _vals) / len(_vals)
+        _stable  = sum(1 for r in _vals if r["total_pnl"] > 0) / len(_vals)
+        _tot_tr  = sum(r["trades"] for r in _vals)
+        return min(round(_avg_wr * 0.4 + (_avg_pf / 10) * 30 + _stable * 20 + min(_tot_tr / 20, 1) * 10), 100)
+
     def _run_wf_oos(args):
         _s, _n, _st = args
         try:
@@ -2227,6 +2251,10 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
             _df = _wfh_fetch(_s, _oos_backtest_days + 60)
             if _df is None or _df.empty:
                 return []
+            # OOS前BTスコア：wf_until_date以前のデータのみで計算（OSSバイアスなし）
+            import pandas as _pd_oos
+            _df_pre = _df[_df.index <= _pd_oos.Timestamp(wf_until_date)].copy()
+            _bt_pre = _calc_preoos_bt_score(_df_pre, _cf, _em, _sm, _tm, _st, _etype)
             _res = _wfh_rbt(_s, _n, _df, _cf, _em, _sm, _tm, _oos_backtest_days, _st, entry_type=_etype)
             if not _res:
                 return []
@@ -2242,6 +2270,7 @@ def _wf_history_html(wf_until_date, workers: int, max_price: float = 0.0,
                     _seen.add(_k)
                     _out.append({**_t, "symbol": _s, "name": _n, "strategy": _st,
                                  "folds_passed": _fp,
+                                 "bt_score_preoos": _bt_pre,
                                  "family": "short" if _st.endswith("_S") else "long"})
             return _out
         except Exception:
