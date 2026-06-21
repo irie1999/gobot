@@ -29,7 +29,7 @@ cmd = [
     "--both",
     "--min-price", "1000",
     "--price-ranges", "6000,10000",
-    "--wf-periods", "8",
+    "--no-wf-history",
 ] + force + sys.argv[1:]
 
 print(f"[run_daily] 実行: {' '.join(cmd)}\n")

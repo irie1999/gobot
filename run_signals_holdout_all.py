@@ -66,7 +66,9 @@ _pre.add_argument("--rolling", type=int, default=0,
 _pre.add_argument("--wf-until", type=str, default=None,
                   help="WF歴史検証の最新基準日 (YYYY-MM-DD). 省略時は6ヶ月前を自動設定")
 _pre.add_argument("--wf-periods", type=int, default=4,
-                  help="WF歴史検証の期間数・6ヶ月間隔 (デフォルト: 4期間 = 約2年分)")
+                  help="WF歴史検証の期間数・6ヶ月間隔 (デフォルト: 4期間 = 約2年分). 0を指定するとスキップ")
+_pre.add_argument("--no-wf-history", action="store_true",
+                  help="WF歴史検証タブをスキップ（高速化）")
 _pre.add_argument("--wf-universe", type=str, default=None,
                   help="WF歴史検証で使うユニバースファイル (例: symbols_all.py=N225, symbols_listed_prime.py=プライム全体). デフォルト: 自動検出")
 _pre.add_argument("--oos-until", type=str, default=None,
@@ -932,6 +934,7 @@ else:
     _wfh_latest = _date_cls.today() - _td_wfh(days=183)
 
 # 6ヶ月間隔で N 期間さかのぼる
+_skip_wf_history = getattr(_args, "no_wf_history", False) or getattr(_args, "wf_periods", 4) == 0
 _wfh_periods = max(1, getattr(_args, "wf_periods", 4))
 _wfh_dates = []
 _d = _wfh_latest
@@ -948,23 +951,27 @@ if getattr(_args, "price_ranges", None):
 _wfh_min_price = getattr(_args, "min_price", 0.0) or 0.0
 _wfh_universe  = getattr(_args, "wf_universe", None)
 
-print(f"\nWF歴史検証（クロス期間）: {[str(d) for d in _wfh_dates]}", flush=True)
-try:
-    _wfh_body = _na._wf_multi_history_html(
-        _wfh_dates, workers=_args.workers,
-        max_price=_wfh_max_price,
-        min_price=_wfh_min_price,
-        universe_path=_wfh_universe,
-        force=bool(_args.force),
-    )
-except Exception as _wfh_e:
-    print(f"[WARN] WF歴史検証エラー: {_wfh_e}")
-    import traceback; traceback.print_exc()
-    _wfh_body = f'<p style="color:#f87171;padding:20px">WF歴史検証エラー: {_wfh_e}</p>'
-
-_wfh_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'wfh\')">📊 WF歴史検証</button>'
-_wfh_tab_pane = f'\n<div id="ho-wfh" class="ho-outer-pane">\n{_wfh_body}\n</div>'
-print("WF歴史検証タブ生成完了", flush=True)
+if _skip_wf_history:
+    print("\nWF歴史検証: スキップ (--no-wf-history または --wf-periods 0)", flush=True)
+    _wfh_tab_btn  = ""
+    _wfh_tab_pane = ""
+else:
+    print(f"\nWF歴史検証（クロス期間）: {[str(d) for d in _wfh_dates]}", flush=True)
+    try:
+        _wfh_body = _na._wf_multi_history_html(
+            _wfh_dates, workers=_args.workers,
+            max_price=_wfh_max_price,
+            min_price=_wfh_min_price,
+            universe_path=_wfh_universe,
+            force=bool(_args.force),
+        )
+    except Exception as _wfh_e:
+        print(f"[WARN] WF歴史検証エラー: {_wfh_e}")
+        import traceback; traceback.print_exc()
+        _wfh_body = f'<p style="color:#f87171;padding:20px">WF歴史検証エラー: {_wfh_e}</p>'
+    _wfh_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'wfh\')">📊 WF歴史検証</button>'
+    _wfh_tab_pane = f'\n<div id="ho-wfh" class="ho-outer-pane">\n{_wfh_body}\n</div>'
+    print("WF歴史検証タブ生成完了", flush=True)
 
 # ── OOS検証タブ (--oos-until 指定時のみ) ─────────────────────────────────────
 _oos_tab_btn  = ""
