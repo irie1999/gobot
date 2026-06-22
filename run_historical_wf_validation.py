@@ -410,55 +410,42 @@ def _compute_bt_score_at(sym: str, name: str, df: "pd.DataFrame", strat: str) ->
     return round(avg_wr * 0.4 + (avg_pf / 10) * 30 + stable * 20 + min(t_trades / 20, 1) * 10)
 
 
-# OOSタブ（backtest_one）と同じバックテスト期間
-_YEARLY_BACKTEST_DAYS = 365  # check_signals_stop/breakout の max(PERIODS) と同一
-
-
 # ────────────────────────────────────────────────────────────
 # 年次 P&L 計算
 # ────────────────────────────────────────────────────────────
 def _compute_yearly_pnl_multi(
     ho_pnl_configs: list[dict],
+    as_of: date,
     workers: int,
     thresholds: list[int] = (0, 70),
 ) -> dict[int, dict[int, dict]]:
-    """OOSタブと同一計算（365日・config単位deduпなし）で年次P&Lを集計。
+    """全OOS期間（as_of〜今日）をシグナル日dedup付きで年次集計。
 
-    OOSタブ（nikkei_analysis._tab5_pnl_html）は：
-      - backtest_one が max(PERIODS)=365日 固定で走る
-      - 各HO configを独立処理（同一銘柄が複数configにあれば複数回カウント）
-    この関数も同じ方式にすることでOOSタブの合計と一致させる。
+    OOSタブの注釈「同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として計算」
+    と同じ方式。これにより年次合計 ≈ OOSタブの合計になり、全起点年分の年次推移も得られる。
 
     返り値: {threshold: {year: {pnl, trades, wins}}}
     """
     import threading
 
-    oos_start  = TODAY - timedelta(days=_YEARLY_BACKTEST_DAYS)
-    years      = list(range(oos_start.year, TODAY.year + 1))
+    years      = list(range(as_of.year, TODAY.year + 1))
     years_set  = set(years)
-    since_date = oos_start - timedelta(days=90)
-    fetch_days = _YEARLY_BACKTEST_DAYS + 120
+    since_date = as_of - timedelta(days=90)
+    fetch_days = (TODAY - since_date).days + 60
 
     empty = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
              for t in thresholds}
 
-    # 全configから全アイテムを収集（cross-configのdedup なし）
-    all_items_flat: list[tuple[str, str, str]] = []
-    for cfg in ho_pnl_configs:
-        for sym, nm, strat in cfg.get("stop_wl", []):
-            all_items_flat.append((sym, nm, strat))
-        for sym, nm, strat in cfg.get("brk_wl", []):
-            all_items_flat.append((sym, nm, strat))
-
-    if not all_items_flat:
+    # ユニーク (sym, strat) のみでバックテスト実行（計算は1回）
+    unique_pairs: list[tuple[str, str, str]] = list({
+        (sym, nm, strat)
+        for cfg in ho_pnl_configs
+        for sym, nm, strat in list(cfg.get("stop_wl", [])) + list(cfg.get("brk_wl", []))
+    })
+    if not unique_pairs:
         return empty
 
-    # バックテストは (sym, strat) 単位で1回だけ実行（計算の重複排除）
-    unique_pairs: list[tuple[str, str, str]] = list(
-        {(sym, nm, strat) for sym, nm, strat in all_items_flat}
-    )
     need_bt = any(t > 0 for t in thresholds)
-
     bt_scores:  dict[tuple, int]  = {}
     trade_logs: dict[tuple, list] = {}
     lock = threading.Lock()
@@ -474,19 +461,20 @@ def _compute_yearly_pnl_multi(
         if df is None or len(df) < 10:
             return
 
-        # BTスコア（現在のデータで計算 — OOSタブの backtest_one と同じ）
+        # BTスコア（as_of 時点でトリム — 起点年時点の情報のみ使用）
         bt_score = 0
         if need_bt:
             try:
-                bt_score = _compute_bt_score_at(sym, nm, df, strat)
+                df_at_asof = df[df.index <= pd.Timestamp(as_of)]
+                bt_score = _compute_bt_score_at(sym, nm, df_at_asof, strat)
             except Exception:
                 pass
 
-        # 365日バックテスト（OOSタブの backtest_one と同じ期間）
+        # 全OOS期間バックテスト（as_of〜TODAY）
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
         try:
             r = _run_window_abs(sym, nm, df, calc_fn, em, sm, tm,
-                                oos_start, TODAY, strat, entry_type=entry_type)
+                                as_of, TODAY, strat, entry_type=entry_type)
         except Exception:
             return
         tlog = r.get("trade_log", []) if r else []
@@ -498,32 +486,44 @@ def _compute_yearly_pnl_multi(
     with ThreadPoolExecutor(max_workers=workers) as exe:
         list(exe.map(_run_one, unique_pairs))
 
-    # 集計: all_items_flat（cross-configのdedup なし）で集計
-    # → OOSタブと同様に同一銘柄が複数configにあれば複数回カウント
+    # 集計: シグナル日dedup（OOSタブと同じ注釈方式）
+    # 同一 (sym, strat, signal_dt) は複数HO configにまたがっても1件
     result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
               for t in thresholds}
 
-    for sym, nm, strat in all_items_flat:
-        bt_score = bt_scores.get((sym, strat), 0)
-        active_t = [t for t in thresholds if t == 0 or bt_score >= t]
-        if not active_t:
-            continue
-        for trade in trade_logs.get((sym, strat), []):
-            exit_dt = trade.get("exit_dt")
-            if exit_dt is None:
-                continue
-            try:
-                year = pd.Timestamp(exit_dt).year
-            except Exception:
-                continue
-            if year not in years_set:
-                continue
-            pnl = trade.get("pnl", 0.0)
-            win = 1 if pnl > 0 else 0
-            for t in active_t:
-                result[t][year]["pnl"]    += pnl
-                result[t][year]["trades"] += 1
-                result[t][year]["wins"]   += win
+    for t in thresholds:
+        seen: set[tuple] = set()
+        for cfg in ho_pnl_configs:
+            for sym, nm, strat in list(cfg.get("stop_wl", [])) + list(cfg.get("brk_wl", [])):
+                bt_score = bt_scores.get((sym, strat), 0)
+                if t > 0 and bt_score < t:
+                    continue
+                for trade in trade_logs.get((sym, strat), []):
+                    sig_dt = trade.get("signal_dt")
+                    if sig_dt is None:
+                        continue
+                    try:
+                        sig_key = (sym, strat, pd.Timestamp(sig_dt).date())
+                    except Exception:
+                        continue
+                    if sig_key in seen:
+                        continue
+                    seen.add(sig_key)
+
+                    exit_dt = trade.get("exit_dt")
+                    if exit_dt is None:
+                        continue
+                    try:
+                        year = pd.Timestamp(exit_dt).year
+                    except Exception:
+                        continue
+                    if year not in years_set:
+                        continue
+                    pnl = trade.get("pnl", 0.0)
+                    result[t][year]["pnl"]    += pnl
+                    result[t][year]["trades"] += 1
+                    if pnl > 0:
+                        result[t][year]["wins"] += 1
 
     return result
 
@@ -655,7 +655,7 @@ def _yearly_analysis_html(periods: list[dict]) -> str:
 
     return (
         f'<h2>起点年別 年次成績推移</h2>'
-        f'<p class="subtitle">各起点年のHO設定別 WATCHLIST（重複あり）で、直近{_YEARLY_BACKTEST_DAYS}日のトレードを年ごとに集計。OOSタブと同一計算（backtest_one 365日）。</p>'
+        f'<p class="subtitle">各起点年の全OOS期間（起点〜今日）を年ごとに集計。同一シグナル（銘柄+戦略+シグナル日）は重複除外 — OOSタブと同じ集計方式。</p>'
         f'<div style="margin-bottom:16px">'
         f'<button class="ho-period-btn ytab-btn active" onclick="switchYTab(\'all\',this)">全銘柄</button>'
         f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt70\',this)">BT≥70</button>'
@@ -953,19 +953,22 @@ def main() -> None:
         elif not has_any:
             print("  ⚠ 全 HO 設定で選定銘柄 0 件のため OOS 評価をスキップ")
 
-        # ── 年次 P&L 計算（OOSタブと同一: HO config単位・dedup なし・365日）──
+        # ── 年次 P&L 計算（全OOS期間・シグナル日dedup）──
         has_any_wl = any(c["stop_wl"] or c["brk_wl"] for c in ho_results.values())
         if not args.scan_only and has_any_wl:
-            n_items = sum(
-                len(c["stop_wl"]) + len(c["brk_wl"]) for c in ho_results.values()
-            )
+            n_items = len(unique_pairs) if 'unique_pairs' in dir() else "?"
+            n_uniq = len({
+                (sym, nm, strat)
+                for cfg in ho_pnl_configs
+                for sym, nm, strat in list(cfg.get("stop_wl", [])) + list(cfg.get("brk_wl", []))
+            })
             print(
-                f"  年次成績計算中（OOSタブ同一方式: 直近{_YEARLY_BACKTEST_DAYS}日 / 延べ{n_items}件）...",
+                f"  年次成績計算中（全OOS期間 {oos_days}日 / ユニーク{n_uniq}銘柄戦略・シグナル日dedup）...",
                 flush=True,
             )
             try:
                 multi = _compute_yearly_pnl_multi(
-                    ho_pnl_configs, args.workers,
+                    ho_pnl_configs, as_of, args.workers,
                     thresholds=[0, 70],
                 )
                 period["yearly_pnl_all"] = multi[0]
