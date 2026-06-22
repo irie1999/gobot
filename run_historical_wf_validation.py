@@ -335,7 +335,7 @@ def _build_watchlist(
     per_strategy: int,
     min_price: float,
     max_price: float,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
     stop_seen: dict[tuple, float] = {}
     brk_seen:  dict[tuple, float] = {}
 
@@ -354,14 +354,14 @@ def _build_watchlist(
             reverse=True,
         )
         for r in filtered[:per_strategy]:
-            pair  = (str(r["symbol"]), str(r.get("name", "")))
-            score = _flt(r.get("total_test_pnl", 0))
+            triple = (str(r["symbol"]), str(r.get("name", "")), strat)
+            score  = _flt(r.get("total_test_pnl", 0))
             if strat in STOP_STRATS:
-                if score > stop_seen.get(pair, -1e9):
-                    stop_seen[pair] = score
+                if score > stop_seen.get(triple, -1e9):
+                    stop_seen[triple] = score
             else:
-                if score > brk_seen.get(pair, -1e9):
-                    brk_seen[pair] = score
+                if score > brk_seen.get(triple, -1e9):
+                    brk_seen[triple] = score
 
     return sorted(stop_seen), sorted(brk_seen)
 
