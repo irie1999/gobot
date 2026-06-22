@@ -407,83 +407,108 @@ def _compute_bt_score_at(sym: str, name: str, df: "pd.DataFrame", strat: str) ->
 # ────────────────────────────────────────────────────────────
 # 年次 P&L 計算
 # ────────────────────────────────────────────────────────────
-def _compute_yearly_pnl(
+def _compute_yearly_pnl_multi(
     stop_wl: list[tuple[str, str, str]],
     brk_wl:  list[tuple[str, str, str]],
     as_of: date,
     workers: int,
-    bt_threshold: int = 0,
-) -> dict[int, dict]:
-    """年ごとの P&L を計算。返り値: {year: {pnl, trades, wins}}"""
-    years = list(range(as_of.year, TODAY.year + 1))
-    acc: dict[int, dict] = {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
-
+    thresholds: list[int] = (0, 60, 80),
+) -> dict[int, dict[int, dict]]:
+    """1回のパスで複数BTスコア閾値の年次P&Lを計算。
+    返り値: {threshold: {year: {pnl, trades, wins}}}
+    """
+    years     = list(range(as_of.year, TODAY.year + 1))
     all_items = list(stop_wl) + list(brk_wl)
+    empty     = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
+                 for t in thresholds}
     if not all_items:
-        return acc
+        return empty
 
-    # ユニークシンボルを先にまとめてフェッチ（キャッシュ活用、順次実行）
-    unique_syms: dict[str, object] = {}
+    # 1. df を銘柄ごとに1回だけフェッチ（キャッシュ活用、順次）
     since_date = date(as_of.year, 1, 1) - timedelta(days=90)
+    sym_df: dict[str, object] = {}
     for sym, nm, strat in all_items:
-        if sym not in unique_syms:
+        if sym not in sym_df:
             try:
-                df = fetch(sym, (TODAY - since_date).days + 60, min_start_date=since_date)
+                sym_df[sym] = fetch(sym, (TODAY - since_date).days + 60,
+                                    min_start_date=since_date)
             except Exception:
-                df = None
-            unique_syms[sym] = df
+                sym_df[sym] = None
 
-    # BT スコアフィルター（bt_threshold > 0 の場合のみ適用）
-    filtered_items = []
-    for sym, nm, strat in all_items:
-        df = unique_syms.get(sym)
-        if df is None:
-            continue
-        if bt_threshold > 0:
-            try:
-                score = _compute_bt_score_at(sym, nm, df, strat)
-            except Exception:
-                score = 0
-            if score < bt_threshold:
-                continue
-        filtered_items.append((sym, nm, strat))
+    # 2. BTスコアを (sym, strat) ごとに1回だけ計算
+    need_bt = any(t > 0 for t in thresholds)
+    bt_scores: dict[tuple, int] = {}
+    if need_bt:
+        for sym, nm, strat in all_items:
+            key = (sym, strat)
+            if key not in bt_scores:
+                df = sym_df.get(sym)
+                if df is None:
+                    bt_scores[key] = 0
+                    continue
+                try:
+                    bt_scores[key] = _compute_bt_score_at(sym, nm, df, strat)
+                except Exception:
+                    bt_scores[key] = 0
 
-    if not filtered_items:
-        return acc
+    # 3. 閾値ごとのフィルター済みアイテムセットを事前構築
+    filtered: dict[int, list] = {}
+    for t in thresholds:
+        filtered[t] = [
+            (sym, nm, strat) for sym, nm, strat in all_items
+            if sym_df.get(sym) is not None
+            and (t == 0 or bt_scores.get((sym, strat), 0) >= t)
+        ]
 
-    def _run_item_year(args_tuple):
-        sym, nm, strat, year = args_tuple
-        df_full = unique_syms.get(sym)
-        if df_full is None or len(df_full) < 10:
-            return year, 0.0, 0, 0
-        if strat not in STRATEGY_DEFS:
-            return year, 0.0, 0, 0
+    # 4. 年次バックテストを (sym, strat, year) ごとに1回だけ実行
+    all_pairs = list({(sym, nm, strat) for sym, nm, strat in all_items
+                      if sym_df.get(sym) is not None})
+
+    def _run_one(sym_nm_strat_year):
+        sym, nm, strat, year = sym_nm_strat_year
+        df = sym_df.get(sym)
+        if df is None or len(df) < 10 or strat not in STRATEGY_DEFS:
+            return (sym, strat, year), 0.0, 0, 0
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
         y_start = max(date(year, 1, 1), as_of)
         y_end   = min(date(year, 12, 31), TODAY)
         if y_start >= y_end:
-            return year, 0.0, 0, 0
+            return (sym, strat, year), 0.0, 0, 0
         try:
-            r = _run_window_abs(sym, nm, df_full, calc_fn, em, sm, tm,
+            r = _run_window_abs(sym, nm, df, calc_fn, em, sm, tm,
                                 y_start, y_end, strat, entry_type=entry_type)
         except Exception:
-            return year, 0.0, 0, 0
+            return (sym, strat, year), 0.0, 0, 0
         if not r:
-            return year, 0.0, 0, 0
+            return (sym, strat, year), 0.0, 0, 0
         pnl    = r.get("total_pnl", 0.0)
         trades = r.get("trades", 0)
         wins   = sum(1 for t in r.get("trade_log", []) if t.get("pnl", 0) > 0)
-        return year, pnl, trades, wins
+        return (sym, strat, year), pnl, trades, wins
 
-    tasks = [(sym, nm, strat, year) for sym, nm, strat in filtered_items for year in years]
+    tasks = [(sym, nm, strat, year) for sym, nm, strat in all_pairs for year in years]
 
+    # 結果を (sym, strat, year) → (pnl, trades, wins) で保存
+    raw: dict[tuple, tuple] = {}
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        for year, pnl, trades, wins in exe.map(_run_item_year, tasks):
-            acc[year]["pnl"]    += pnl
-            acc[year]["trades"] += trades
-            acc[year]["wins"]   += wins
+        for key, pnl, trades, wins in exe.map(_run_one, tasks):
+            raw[key] = (pnl, trades, wins)
 
-    return acc
+    # 5. 閾値ごとに集計
+    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
+              for t in thresholds}
+    for t, items in filtered.items():
+        for sym, nm, strat in items:
+            for year in years:
+                key = (sym, strat, year)
+                if key not in raw:
+                    continue
+                pnl, trades, wins = raw[key]
+                result[t][year]["pnl"]    += pnl
+                result[t][year]["trades"] += trades
+                result[t][year]["wins"]   += wins
+
+    return result
 
 
 # ────────────────────────────────────────────────────────────
@@ -927,15 +952,13 @@ def main() -> None:
                 flush=True,
             )
             try:
-                period["yearly_pnl_all"] = _compute_yearly_pnl(
-                    stop_wl_180, brk_wl_180, as_of, args.workers, 0
+                multi = _compute_yearly_pnl_multi(
+                    stop_wl_180, brk_wl_180, as_of, args.workers,
+                    thresholds=[0, 60, 80],
                 )
-                period["yearly_pnl_60"]  = _compute_yearly_pnl(
-                    stop_wl_180, brk_wl_180, as_of, args.workers, 60
-                )
-                period["yearly_pnl_80"]  = _compute_yearly_pnl(
-                    stop_wl_180, brk_wl_180, as_of, args.workers, 80
-                )
+                period["yearly_pnl_all"] = multi[0]
+                period["yearly_pnl_60"]  = multi[60]
+                period["yearly_pnl_80"]  = multi[80]
             except Exception as e:
                 print(f"  [WARN] 年次 P&L 計算失敗: {e}")
 
