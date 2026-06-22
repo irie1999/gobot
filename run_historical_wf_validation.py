@@ -641,7 +641,7 @@ def _yearly_analysis_html(periods: list[dict]) -> str:
 
     return (
         f'<h2>起点年別 年次成績推移</h2>'
-        f'<p class="subtitle">各起点年の HO180d 選定 WATCHLIST で、毎年の OOS P&L を集計</p>'
+        f'<p class="subtitle">各起点年の全HO設定（HO30d〜HO180d）合算 WATCHLIST で、毎年の OOS P&L を集計</p>'
         f'<div style="margin-bottom:16px">'
         f'<button class="ho-period-btn ytab-btn active" onclick="switchYTab(\'all\',this)">全銘柄</button>'
         f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt60\',this)">BT≥60</button>'
@@ -942,20 +942,27 @@ def main() -> None:
         elif not has_any:
             print("  ⚠ 全 HO 設定で選定銘柄 0 件のため OOS 評価をスキップ")
 
-        # ── 年次 P&L 計算（HO180d WATCHLIST を使用）────────────────
-        ho180_data  = ho_results.get("HO180d", {})
-        stop_wl_180 = ho180_data.get("stop_wl", [])
-        brk_wl_180  = ho180_data.get("brk_wl",  [])
-        if not args.scan_only and (stop_wl_180 or brk_wl_180):
-            n_stop = len(stop_wl_180)
-            n_brk  = len(brk_wl_180)
+        # ── 年次 P&L 計算（全 HO 設定の WATCHLIST を合算・重複排除）──
+        all_stop_set: dict[tuple, None] = {}
+        all_brk_set:  dict[tuple, None] = {}
+        for c in ho_results.values():
+            for t in c.get("stop_wl", []):
+                all_stop_set[t] = None
+            for t in c.get("brk_wl", []):
+                all_brk_set[t] = None
+        all_stop_wl = list(all_stop_set)
+        all_brk_wl  = list(all_brk_set)
+
+        if not args.scan_only and (all_stop_wl or all_brk_wl):
+            n_stop = len(all_stop_wl)
+            n_brk  = len(all_brk_wl)
             print(
-                f"  年次成績計算中（HO180d: Stop {n_stop}銘柄 / Breakout {n_brk}銘柄）...",
+                f"  年次成績計算中（全HO設定合算: Stop {n_stop}銘柄 / Breakout {n_brk}銘柄）...",
                 flush=True,
             )
             try:
                 multi = _compute_yearly_pnl_multi(
-                    stop_wl_180, brk_wl_180, as_of, args.workers,
+                    all_stop_wl, all_brk_wl, as_of, args.workers,
                     thresholds=[0, 60, 80],
                 )
                 period["yearly_pnl_all"] = multi[0]
