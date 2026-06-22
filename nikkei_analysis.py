@@ -4020,75 +4020,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
     # ── シグナル時点BTスコア計算（月次バケット化、既存 trade_log 流用）──────────
     # 各取引の signal_dt の月初時点のBTスコアを事前計算する。
-    # 既存 trade_log をフィルタして計算するため追加バックテスト不要。
-    _sig_time_score_map: dict = {}  # (sym, strat, signal_date) → score
-
-    # (sym, strat) ごとに trade_log を収集（最初のconfigだけ使う）
-    _stbt_tlog_by_sym: dict = {}
-    for _stcfg in _PNL_CONFIGS:
-        for _stit in _cached_items_per_cfg.get(_stcfg["label"], []):
-            _stkey = (_stit.get("symbol", ""), _stit.get("strategy", ""))
-            if _stkey in _stbt_tlog_by_sym:
-                continue
-            _pr = _stit.get("period_results", {})
-            if not _pr:
-                continue
-            _max_p = max(_pr.keys())
-            _stbt_tlog_by_sym[_stkey] = _pr[_max_p].get("trade_log", [])
-
-    _SLICE_PERIODS_BT = [30, 60, 90, 120, 150, 180]
-
-    def _compute_sig_time_bt(sym: str, strat: str, tlog: list) -> dict:
-        """trade_log から各シグナル日のBTスコアを計算して {signal_date: score} を返す。
-        月次バケットではなく正確なシグナル日を使用（--date での再現性を担保）。"""
-        from datetime import date as _dt_cls2
-        dates_needed: set = set()
-        _sig_time_cutoff = _TODAY - timedelta(days=270)  # 直近9ヶ月のみ計算
-        for _t in tlog:
-            _sdt = _t.get("signal_dt")
-            if _sdt:
-                _sd = _sdt.date() if hasattr(_sdt, "date") else _sdt
-                if _sd >= _sig_time_cutoff:
-                    dates_needed.add(_sd)
-        result: dict = {}
-        # 完了済み取引リストを事前作成（日付フィルタで繰り返し使うため）
-        _completed = [_t for _t in tlog
-                      if _t.get("signal_dt") and
-                      _t.get("reason") not in ("発注中", "保有中", None)
-                      and _t.get("pnl") is not None]
-        for eval_dt in dates_needed:
-            # eval_dt より前に signal した完了済み取引のみ（自身のトレードを除外）
-            closed = [_t for _t in _completed
-                      if (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) < eval_dt]
-            period_results_m: dict = {}
-            for _p in _SLICE_PERIODS_BT:
-                slice_since = eval_dt - timedelta(days=_p)
-                sub = [_t for _t in closed
-                       if (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) >= slice_since]
-                if not sub:
-                    continue
-                wins_m = sum(1 for _t in sub if _t["pnl"] > 0)
-                gp_m = sum(_t["pnl"] for _t in sub if _t["pnl"] > 0)
-                gl_m = abs(sum(_t["pnl"] for _t in sub if _t["pnl"] < 0))
-                pf_m = gp_m / gl_m if gl_m > 0 else (float("inf") if gp_m > 0 else 0.0)
-                period_results_m[_p] = {
-                    "trades": len(sub), "wins": wins_m,
-                    "win_rate": wins_m / len(sub) * 100,
-                    "pf": pf_m, "total_pnl": sum(_t["pnl"] for _t in sub),
-                }
-            if period_results_m:
-                sc_m, _ = _stop.calc_recommend_score(period_results_m)
-                result[eval_dt] = sc_m
-            else:
-                result[eval_dt] = 0
-        return result
-
-    print(f"  [signal-BT] シグナル時点BTスコア計算中 ({len(_stbt_tlog_by_sym)}銘柄戦略)...", flush=True)
-    for (_stbt_sym, _stbt_strat), _stbt_tlog in _stbt_tlog_by_sym.items():
-        _date_scores = _compute_sig_time_bt(_stbt_sym, _stbt_strat, _stbt_tlog)
-        for _eval_dt, _sc in _date_scores.items():
-            _sig_time_score_map[(_stbt_sym, _stbt_strat, _eval_dt)] = _sc
-    print(f"  [signal-BT] 完了 ({len(_sig_time_score_map)}日次エントリー)", flush=True)
+    # _SIGNAL_DATE_BT_SCORES: run_signals_holdout_all.py から注入される
+    # (sym, strat, signal_date_str) → シグナル発生時のBTスコア
+    # キャッシュにない場合は rec_score2（今日のスコア）をフォールバックとして使用
 
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
@@ -4136,18 +4070,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 seen.add(key)
                 entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
                 _preoos_sc = _preoos_score_map.get((sym, strat)) if _preoos_score_map else None
-                # シグナル時点BTスコア（優先順: ①キャッシュ済み発生時スコア → ②trade_log再計算 → ③今日のスコア）
+                # シグナル時点BTスコア（優先順: ①キャッシュ済み発生時スコア → ②今日のスコア）
+                # signal_score_cache.json にある場合は発生時スコア固定、なければ今日のスコア
                 _sdt_for_key = t.get("signal_dt")
                 _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
                 _cache_key = (sym, strat, str(_sd_for_key)) if _sd_for_key else None
                 if _cache_key and _cache_key in _SIGNAL_DATE_BT_SCORES:
-                    # ① signal_score_cache.json に保存された発生時スコアを優先
                     _sig_sc = _SIGNAL_DATE_BT_SCORES[_cache_key]
-                elif _sd_for_key and _sig_time_score_map:
-                    # ② trade_log から再計算したスコア
-                    _sig_sc = _sig_time_score_map.get((sym, strat, _sd_for_key), rec_score2)
                 else:
-                    # ③ 今日のスコア（フォールバック）
                     _sig_sc = rec_score2
                 # signal_score からランクを決定
                 if _sig_sc >= 80: _sig_rank = "★★★"
