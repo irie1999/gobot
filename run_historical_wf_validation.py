@@ -500,11 +500,24 @@ def _compute_yearly_pnl_multi(
     with ThreadPoolExecutor(max_workers=workers) as exe:
         list(exe.map(_run_one, unique_pairs))
 
+    # 月次キー一覧（as_of.year/1 〜 TODAY.year/TODAY.month）
+    months: list[tuple[int,int]] = []
+    y, m = as_of.year, 1
+    while (y, m) <= (TODAY.year, TODAY.month):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1; y += 1
+    months_set = set(months)
+
+    def _empty_cell() -> dict:
+        return {"pnl": 0.0, "trades": 0, "wins": 0, "win_pnl": 0.0, "loss_pnl": 0.0}
+
     # 集計: シグナル日dedup（OOSタブと同じ注釈方式）
     # 同一 (sym, strat, signal_dt) は複数HO configにまたがっても1件
-    # BTフィルターはトレードが属する年のBTスコアで判定（ローリング）
-    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0, "win_pnl": 0.0, "loss_pnl": 0.0} for y in years}
-              for t in thresholds}
+    # BTフィルターはシグナル日時点のBTスコアで判定（日次精度ローリング）
+    result_y = {t: {y: _empty_cell() for y in years}   for t in thresholds}
+    result_m = {t: {ym: _empty_cell() for ym in months} for t in thresholds}
 
     for t in thresholds:
         seen: set[tuple] = set()
@@ -528,7 +541,9 @@ def _compute_yearly_pnl_multi(
                     if exit_dt is None:
                         continue
                     try:
-                        year = pd.Timestamp(exit_dt).year
+                        ex_ts = pd.Timestamp(exit_dt)
+                        year  = ex_ts.year
+                        ym    = (ex_ts.year, ex_ts.month)
                     except Exception:
                         continue
                     if year not in years_set:
@@ -541,15 +556,18 @@ def _compute_yearly_pnl_multi(
                             continue
 
                     pnl = trade.get("pnl", 0.0)
-                    result[t][year]["pnl"]    += pnl
-                    result[t][year]["trades"] += 1
-                    if pnl > 0:
-                        result[t][year]["wins"]    += 1
-                        result[t][year]["win_pnl"] += pnl
-                    else:
-                        result[t][year]["loss_pnl"] += pnl
+                    for bucket in (result_y[t][year], result_m[t].get(ym)):
+                        if bucket is None:
+                            continue
+                        bucket["pnl"]    += pnl
+                        bucket["trades"] += 1
+                        if pnl > 0:
+                            bucket["wins"]    += 1
+                            bucket["win_pnl"] += pnl
+                        else:
+                            bucket["loss_pnl"] += pnl
 
-    return result
+    return {"yearly": result_y, "monthly": result_m, "months": months}
 
 
 # ────────────────────────────────────────────────────────────
@@ -795,6 +813,50 @@ def _yearly_inline_html(period: dict) -> str:
     row_80  += _cell(tot_80,  bg="#1e3a5f")
     row_90  += _cell(tot_90,  bg="#1e3a5f")
 
+    # 月次テーブル（BT≥70 / BT≥80 / 全銘柄）
+    monthly_all = period.get("monthly_pnl_all", {})
+    monthly_70  = period.get("monthly_pnl_70",  {})
+    monthly_80  = period.get("monthly_pnl_80",  {})
+    oos_months  = period.get("oos_months", [])
+
+    def _mcell(d: dict) -> str:
+        pnl      = d.get("pnl", 0.0)
+        trades   = d.get("trades", 0)
+        wins     = d.get("wins", 0)
+        win_pnl  = d.get("win_pnl", 0.0)
+        loss_pnl = d.get("loss_pnl", 0.0)
+        if trades == 0:
+            return '<td style="padding:3px 8px;text-align:right;color:#334155">—</td>'
+        wr    = wins / trades * 100
+        color = "#4ade80" if pnl >= 0 else "#f87171"
+        sign  = "+" if pnl >= 0 else ""
+        return (
+            f'<td style="padding:3px 8px;text-align:right">'
+            f'<span style="color:{color};font-weight:bold">{sign}{pnl/10000:.1f}万</span>'
+            f'<br><span style="color:#4ade80;font-size:0.72em">+{win_pnl/10000:.1f}</span>'
+            f'<span style="color:#94a3b8;font-size:0.72em">/</span>'
+            f'<span style="color:#f87171;font-size:0.72em">{loss_pnl/10000:.1f}</span>'
+            f'<br><span style="color:#64748b;font-size:0.7em">{trades}件 {wr:.0f}%</span>'
+            f'</td>'
+        )
+
+    monthly_rows = ""
+    for ym in oos_months:
+        y_val, m_val = ym
+        label = f"{y_val}/{m_val:02d}"
+        d_all = monthly_all.get(ym, {})
+        d_70  = monthly_70.get(ym, {})
+        d_80  = monthly_80.get(ym, {})
+        # 全銘柄の損益で行の背景色を決める
+        row_pnl = d_all.get("pnl", 0.0)
+        bg = "background:#0a1a0a" if row_pnl > 0 else ("background:#1a0a0a" if row_pnl < 0 else "")
+        monthly_rows += (
+            f'<tr style="border-top:1px solid #1e293b;{bg}">'
+            f'<td style="padding:3px 10px;color:#94a3b8;white-space:nowrap;font-size:0.85em">{label}</td>'
+            f'{_mcell(d_all)}{_mcell(d_70)}{_mcell(d_80)}'
+            f'</tr>'
+        )
+
     return f"""
 <div style="margin:16px 0 24px 0;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px">
   <h3 style="margin:0 0 8px 0;font-size:0.95em;color:#60a5fa">年次 P&amp;L 内訳
@@ -835,6 +897,27 @@ def _yearly_inline_html(period: dict) -> str:
       </tbody>
     </table>
   </div>
+
+  <details style="margin-top:16px">
+    <summary style="cursor:pointer;color:#60a5fa;font-size:0.9em;padding:4px 0">
+      ▶ 月次 P&amp;L 内訳（全OOS期間・シグナル日時点BTスコア）
+    </summary>
+    <div style="overflow-x:auto;margin-top:8px;max-height:480px;overflow-y:auto">
+      <table style="border-collapse:collapse;font-size:0.84em;width:auto">
+        <thead>
+          <tr>
+            <th style="padding:4px 10px;text-align:left;color:#94a3b8;border-bottom:1px solid #334155;position:sticky;top:0;background:#0f172a">月</th>
+            <th style="padding:4px 8px;text-align:right;color:#94a3b8;border-bottom:1px solid #334155;position:sticky;top:0;background:#0f172a">全銘柄</th>
+            <th style="padding:4px 8px;text-align:right;color:#94a3b8;border-bottom:1px solid #334155;position:sticky;top:0;background:#0f172a">BT≥70</th>
+            <th style="padding:4px 8px;text-align:right;color:#94a3b8;border-bottom:1px solid #334155;position:sticky;top:0;background:#0f172a">BT≥80</th>
+          </tr>
+        </thead>
+        <tbody>
+          {monthly_rows}
+        </tbody>
+      </table>
+    </div>
+  </details>
 </div>
 """
 
@@ -1091,13 +1174,18 @@ def main() -> None:
             })
 
         period: dict = {
-            "as_of":           as_of,
-            "ho_results":      ho_results,
-            "oos_html":        "",
-            "yearly_pnl_all":  {},
-            "yearly_pnl_70":   {},
-            "yearly_pnl_80":   {},
-            "yearly_pnl_90":   {},
+            "as_of":            as_of,
+            "ho_results":       ho_results,
+            "oos_html":         "",
+            "yearly_pnl_all":   {},
+            "yearly_pnl_70":    {},
+            "yearly_pnl_80":    {},
+            "yearly_pnl_90":    {},
+            "monthly_pnl_all":  {},
+            "monthly_pnl_70":   {},
+            "monthly_pnl_80":   {},
+            "monthly_pnl_90":   {},
+            "oos_months":       [],
         }
 
         # ── OOS 評価（6 HO 設定を一括）─────────────────────────────
@@ -1128,10 +1216,15 @@ def main() -> None:
                     ho_pnl_configs, as_of, args.workers,
                     thresholds=[0, 70, 80, 90],
                 )
-                period["yearly_pnl_all"] = multi[0]
-                period["yearly_pnl_70"]  = multi[70]
-                period["yearly_pnl_80"]  = multi[80]
-                period["yearly_pnl_90"]  = multi[90]
+                period["yearly_pnl_all"]  = multi["yearly"][0]
+                period["yearly_pnl_70"]   = multi["yearly"][70]
+                period["yearly_pnl_80"]   = multi["yearly"][80]
+                period["yearly_pnl_90"]   = multi["yearly"][90]
+                period["monthly_pnl_all"] = multi["monthly"][0]
+                period["monthly_pnl_70"]  = multi["monthly"][70]
+                period["monthly_pnl_80"]  = multi["monthly"][80]
+                period["monthly_pnl_90"]  = multi["monthly"][90]
+                period["oos_months"]      = multi["months"]
             except Exception as e:
                 print(f"  [WARN] 年次 P&L 計算失敗: {e}")
 
