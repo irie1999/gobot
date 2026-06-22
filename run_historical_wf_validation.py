@@ -475,23 +475,34 @@ def _compute_yearly_pnl_multi(
             return
         tlog = r.get("trade_log", []) if r else []
 
-        # シグナル日ごとのBTスコアを計算（dfはメモリ上にあるのでI/Oコストなし）
+        # シグナル日→BTスコアのマッピングを構築
+        # 月単位でバケット化: 同月内のシグナルはBTスコアがほぼ同一のため
+        # 「その月の1日時点」のスコアを計算して共有する（日次より~10x高速）
         sig_scores: dict = {}
         if need_bt:
-            unique_sig_dates: set = set()
+            unique_months: set = set()
+            sig_dates_list = []
             for trade in tlog:
                 sig_dt = trade.get("signal_dt")
                 if sig_dt is not None:
                     try:
-                        unique_sig_dates.add(pd.Timestamp(sig_dt).date())
+                        sd = pd.Timestamp(sig_dt).date()
+                        sig_dates_list.append(sd)
+                        unique_months.add((sd.year, sd.month))
                     except Exception:
                         pass
-            for sig_date in unique_sig_dates:
+            # 月ごとに1回だけBTスコアを計算（その月の1日 or as_ofの遅い方）
+            month_scores: dict = {}
+            for y_m, m_val in sorted(unique_months):
+                eval_dt = max(date(y_m, m_val, 1), as_of)
                 try:
-                    df_at = df[df.index <= pd.Timestamp(sig_date)]
-                    sig_scores[sig_date] = _compute_bt_score_at(sym, nm, df_at, strat) if len(df_at) >= 10 else 0
+                    df_at = df[df.index <= pd.Timestamp(eval_dt)]
+                    month_scores[(y_m, m_val)] = _compute_bt_score_at(sym, nm, df_at, strat) if len(df_at) >= 10 else 0
                 except Exception:
-                    sig_scores[sig_date] = 0
+                    month_scores[(y_m, m_val)] = 0
+            # シグナル日→月スコアにマッピング
+            for sd in sig_dates_list:
+                sig_scores[sd] = month_scores.get((sd.year, sd.month), 0)
 
         with lock:
             bt_scores_by_sig[(sym, strat)] = sig_scores
@@ -866,7 +877,7 @@ def _yearly_inline_html(period: dict) -> str:
   </h3>
   <p style="color:#f59e0b;font-size:0.8em;margin:0 0 12px 0">
     ⚠ 下の「直近{oos_days}日 取引損益」は内部制限により直近365日分のみの集計です。上の年次内訳が全OOS期間の正確な数値です。<br>
-    📊 BT≥70/80/90 フィルターはシグナル発生日時点のBTスコアで判定しています（日次精度ローリング）。
+    📊 BT≥70/80/90 フィルターはシグナル発生月の月初時点のBTスコアで判定しています（月次精度ローリング）。
   </p>
   <div style="overflow-x:auto">
     <table style="border-collapse:collapse;font-size:0.88em;width:auto">
