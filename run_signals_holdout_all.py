@@ -69,6 +69,8 @@ _pre.add_argument("--wf-periods", type=int, default=4,
                   help="WF歴史検証の期間数・6ヶ月間隔 (デフォルト: 4期間 = 約2年分). 0を指定するとスキップ")
 _pre.add_argument("--no-wf-history", action="store_true",
                   help="WF歴史検証タブをスキップ（高速化）")
+_pre.add_argument("--no-preoos", action="store_true",
+                  help="OOS前BTスコア計算をスキップ（高速化）")
 _pre.add_argument("--wf-universe", type=str, default=None,
                   help="WF歴史検証で使うユニバースファイル (例: symbols_all.py=N225, symbols_listed_prime.py=プライム全体). デフォルト: 自動検出")
 _pre.add_argument("--oos-until", type=str, default=None,
@@ -726,9 +728,10 @@ for days in _PNL_PERIODS:
     cfgs = _period_configs.get(days) or _all_configs
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
+    _skip_preoos = getattr(_args, "no_preoos", False)
     _period_pane_htmls[days] = _na._tab5_pnl_html(
         days, _args.workers, entry_days=_args.entry_days, skip_timing9=True,
-        preoos_cutoff_days=days)
+        preoos_cutoff_days=None if _skip_preoos else days)
     _phase(f"損益タブ({days}日)完了")
 
 # ── 銘柄詳細タブ HTML (シグナル銘柄ごと) ──────────────────────────────────────
