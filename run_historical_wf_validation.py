@@ -36,6 +36,7 @@ import csv
 import os
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -646,7 +647,7 @@ def main() -> None:
 
     print(f"\n出力: {out_path}")
     if not args.no_browser:
-        webbrowser.open(str(Path(out_path).resolve()))
+        open_html(out_path)
 
 
 if __name__ == "__main__":
