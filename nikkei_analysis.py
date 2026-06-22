@@ -4047,8 +4047,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 _sd = _sdt.date() if hasattr(_sdt, "date") else _sdt
                 months_needed.add((_sd.year, _sd.month))
         result: dict = {}
+        _sig_time_cutoff = _TODAY - timedelta(days=270)  # 直近9ヶ月のみ計算
         for yr, mo in months_needed:
             eval_dt = _dt_cls2(yr, mo, 1)
+            # 9ヶ月より古いシグナルはデータ不足のためスキップ（今日のスコアをフォールバックに使う）
+            if eval_dt < _sig_time_cutoff:
+                continue
             # eval_dt 以前に signal した完了済み取引のみ
             closed = [_t for _t in tlog
                       if _t.get("signal_dt") and
