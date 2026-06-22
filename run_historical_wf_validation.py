@@ -690,74 +690,97 @@ def _eval_oos_html(
 # 各起点年タブ内の年次内訳テーブル
 # ────────────────────────────────────────────────────────────
 def _yearly_inline_html(period: dict) -> str:
-    """起点年タブの中に表示する年次P&L内訳（全銘柄 / BT≥70）"""
-    as_of = period["as_of"]
+    """起点年タブの中に表示する年次P&L内訳 + 全OOS期間合計サマリー"""
+    as_of    = period["as_of"]
+    oos_days = (TODAY - as_of).days
 
-    def _make_row(pnl_key: str) -> str:
-        yearly = period.get(pnl_key, {})
-        if not yearly:
-            return '<tr><td colspan="4" style="color:#475569;padding:6px 12px">データなし</td></tr>'
-        years = sorted(y for y in yearly if y >= as_of.year)
-        if not years:
-            return '<tr><td colspan="4" style="color:#475569;padding:6px 12px">データなし</td></tr>'
-        cells = ""
-        for y in years:
-            d      = yearly.get(y, {})
-            pnl    = d.get("pnl", 0.0)
-            trades = d.get("trades", 0)
-            wins   = d.get("wins", 0)
-            if trades == 0:
-                cells += f'<td style="padding:6px 16px;text-align:center;color:#475569">—</td>'
-                continue
-            wr      = wins / trades * 100
-            man_yen = pnl / 10000
-            color   = "#4ade80" if pnl >= 0 else "#f87171"
-            sign    = "+" if pnl >= 0 else ""
-            cells += (
-                f'<td style="padding:6px 16px;text-align:center">'
-                f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
-                f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
-                f'</td>'
-            )
-        return f'<tr>{"".join(cells)}</tr>'
+    def _cell(d: dict, bg: str = "") -> str:
+        pnl    = d.get("pnl", 0.0)
+        trades = d.get("trades", 0)
+        wins   = d.get("wins", 0)
+        if trades == 0:
+            return f'<td style="padding:6px 16px;text-align:center;color:#475569{";background:"+bg if bg else ""}">—</td>'
+        wr      = wins / trades * 100
+        man_yen = pnl / 10000
+        color   = "#4ade80" if pnl >= 0 else "#f87171"
+        sign    = "+" if pnl >= 0 else ""
+        return (
+            f'<td style="padding:6px 16px;text-align:center{";background:"+bg if bg else ""}">'
+            f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
+            f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
+            f'</td>'
+        )
 
     yearly_all = period.get("yearly_pnl_all", {})
-    years = sorted(y for y in yearly_all if y >= as_of.year)
+    yearly_70  = period.get("yearly_pnl_70",  {})
+    years      = sorted(y for y in yearly_all if y >= as_of.year)
     if not years:
         return ""
+
+    # 全OOS期間の合計（年次内訳の合算）
+    def _total(yearly: dict) -> dict:
+        return {
+            "pnl":    sum(v.get("pnl", 0.0) for v in yearly.values()),
+            "trades": sum(v.get("trades", 0) for v in yearly.values()),
+            "wins":   sum(v.get("wins", 0) for v in yearly.values()),
+        }
+
+    tot_all = _total(yearly_all)
+    tot_70  = _total(yearly_70)
+
+    def _summary_card(label: str, d: dict, color: str) -> str:
+        pnl    = d.get("pnl", 0.0)
+        trades = d.get("trades", 0)
+        wins   = d.get("wins", 0)
+        wr     = wins / trades * 100 if trades else 0
+        sign   = "+" if pnl >= 0 else ""
+        c      = "#4ade80" if pnl >= 0 else "#f87171"
+        return (
+            f'<div style="background:#1e293b;border-radius:6px;padding:10px 16px;min-width:130px">'
+            f'<div style="color:#94a3b8;font-size:0.78em;margin-bottom:4px">{label}</div>'
+            f'<div style="color:{c};font-size:1.1em;font-weight:bold">{sign}{pnl/10000:.1f}万</div>'
+            f'<div style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</div>'
+            f'</div>'
+        )
 
     header = "".join(
         f'<th style="padding:6px 16px;text-align:center;color:#94a3b8;'
         f'border-bottom:1px solid #334155">{y}年</th>'
         for y in years
     )
-
-    row_all  = _make_row("yearly_pnl_all")
-    row_bt70 = _make_row("yearly_pnl_70")
+    row_all = "".join(_cell(yearly_all.get(y, {})) for y in years)
+    row_70  = "".join(_cell(yearly_70.get(y, {})) for y in years)
+    # 合計列
+    row_all += _cell(tot_all, bg="#1e3a5f")
+    row_70  += _cell(tot_70,  bg="#1e3a5f")
 
     return f"""
 <div style="margin:16px 0 24px 0;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px">
-  <h3 style="margin:0 0 12px 0;font-size:0.95em;color:#60a5fa">年次 P&amp;L 内訳
+  <h3 style="margin:0 0 8px 0;font-size:0.95em;color:#60a5fa">年次 P&amp;L 内訳
     <span style="font-size:0.8em;color:#94a3b8;font-weight:normal;margin-left:8px">
-      （同一シグナル重複除外 / 全OOS期間）
+      全OOS期間 {oos_days}日（{as_of} 〜 {TODAY}）/ 同一シグナル重複除外
     </span>
   </h3>
+  <p style="color:#f59e0b;font-size:0.8em;margin:0 0 12px 0">
+    ⚠ 下の「直近{oos_days}日 取引損益」は内部制限により直近365日分のみの集計です。上の年次内訳が全OOS期間の正確な数値です。
+  </p>
   <div style="overflow-x:auto">
-    <table style="border-collapse:collapse;font-size:0.88em;width:100%">
+    <table style="border-collapse:collapse;font-size:0.88em;width:auto">
       <thead>
         <tr>
           <th style="padding:6px 16px;text-align:left;color:#94a3b8;border-bottom:1px solid #334155;white-space:nowrap">フィルター</th>
           {header}
+          <th style="padding:6px 16px;text-align:center;color:#fbbf24;border-bottom:1px solid #334155;background:#1e3a5f">合計</th>
         </tr>
       </thead>
       <tbody>
         <tr>
           <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">全銘柄</td>
-          {_make_row("yearly_pnl_all").replace("<tr>","").replace("</tr>","")}
+          {row_all}
         </tr>
         <tr>
           <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">BT≥70</td>
-          {_make_row("yearly_pnl_70").replace("<tr>","").replace("</tr>","")}
+          {row_70}
         </tr>
       </tbody>
     </table>
