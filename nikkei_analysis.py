@@ -4020,7 +4020,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # ── シグナル時点BTスコア計算（月次バケット化、既存 trade_log 流用）──────────
     # 各取引の signal_dt の月初時点のBTスコアを事前計算する。
     # 既存 trade_log をフィルタして計算するため追加バックテスト不要。
-    _sig_time_score_map: dict = {}  # (sym, strat, year, month) → score
+    _sig_time_score_map: dict = {}  # (sym, strat, signal_date) → score
 
     # (sym, strat) ごとに trade_log を収集（最初のconfigだけ使う）
     _stbt_tlog_by_sym: dict = {}
@@ -4038,27 +4038,27 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     _SLICE_PERIODS_BT = [30, 60, 90, 120, 150, 180]
 
     def _compute_sig_time_bt(sym: str, strat: str, tlog: list) -> dict:
-        """trade_log から各シグナル月のBTスコアを計算して {(year, month): score} を返す"""
+        """trade_log から各シグナル日のBTスコアを計算して {signal_date: score} を返す。
+        月次バケットではなく正確なシグナル日を使用（--date での再現性を担保）。"""
         from datetime import date as _dt_cls2
-        months_needed: set = set()
+        dates_needed: set = set()
+        _sig_time_cutoff = _TODAY - timedelta(days=270)  # 直近9ヶ月のみ計算
         for _t in tlog:
             _sdt = _t.get("signal_dt")
             if _sdt:
                 _sd = _sdt.date() if hasattr(_sdt, "date") else _sdt
-                months_needed.add((_sd.year, _sd.month))
+                if _sd >= _sig_time_cutoff:
+                    dates_needed.add(_sd)
         result: dict = {}
-        _sig_time_cutoff = _TODAY - timedelta(days=270)  # 直近9ヶ月のみ計算
-        for yr, mo in months_needed:
-            eval_dt = _dt_cls2(yr, mo, 1)
-            # 9ヶ月より古いシグナルはデータ不足のためスキップ（今日のスコアをフォールバックに使う）
-            if eval_dt < _sig_time_cutoff:
-                continue
-            # eval_dt 以前に signal した完了済み取引のみ
-            closed = [_t for _t in tlog
+        # 完了済み取引リストを事前作成（日付フィルタで繰り返し使うため）
+        _completed = [_t for _t in tlog
                       if _t.get("signal_dt") and
-                      (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) < eval_dt
-                      and _t.get("reason") not in ("発注中", "保有中", None)
+                      _t.get("reason") not in ("発注中", "保有中", None)
                       and _t.get("pnl") is not None]
+        for eval_dt in dates_needed:
+            # eval_dt より前に signal した完了済み取引のみ（自身のトレードを除外）
+            closed = [_t for _t in _completed
+                      if (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) < eval_dt]
             period_results_m: dict = {}
             for _p in _SLICE_PERIODS_BT:
                 slice_since = eval_dt - timedelta(days=_p)
@@ -4077,17 +4077,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 }
             if period_results_m:
                 sc_m, _ = _stop.calc_recommend_score(period_results_m)
-                result[(yr, mo)] = sc_m
+                result[eval_dt] = sc_m
             else:
-                result[(yr, mo)] = 0
+                result[eval_dt] = 0
         return result
 
     print(f"  [signal-BT] シグナル時点BTスコア計算中 ({len(_stbt_tlog_by_sym)}銘柄戦略)...", flush=True)
     for (_stbt_sym, _stbt_strat), _stbt_tlog in _stbt_tlog_by_sym.items():
-        _monthly_scores = _compute_sig_time_bt(_stbt_sym, _stbt_strat, _stbt_tlog)
-        for (_yr, _mo), _sc in _monthly_scores.items():
-            _sig_time_score_map[(_stbt_sym, _stbt_strat, _yr, _mo)] = _sc
-    print(f"  [signal-BT] 完了 ({len(_sig_time_score_map)}月次エントリー)", flush=True)
+        _date_scores = _compute_sig_time_bt(_stbt_sym, _stbt_strat, _stbt_tlog)
+        for _eval_dt, _sc in _date_scores.items():
+            _sig_time_score_map[(_stbt_sym, _stbt_strat, _eval_dt)] = _sc
+    print(f"  [signal-BT] 完了 ({len(_sig_time_score_map)}日次エントリー)", flush=True)
 
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
@@ -4135,11 +4135,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 seen.add(key)
                 entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
                 _preoos_sc = _preoos_score_map.get((sym, strat)) if _preoos_score_map else None
-                # シグナル時点BTスコア（月次バケット）
+                # シグナル時点BTスコア（シグナル日ベース）
                 _sdt_for_key = t.get("signal_dt")
                 _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
                 if _sd_for_key and _sig_time_score_map:
-                    _sig_sc = _sig_time_score_map.get((sym, strat, _sd_for_key.year, _sd_for_key.month), rec_score2)
+                    _sig_sc = _sig_time_score_map.get((sym, strat, _sd_for_key), rec_score2)
                 else:
                     _sig_sc = rec_score2
                 # signal_score からランクを決定
