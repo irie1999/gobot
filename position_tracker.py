@@ -46,7 +46,7 @@ COLS = [
     "stop_price", "target_price",
     "status", "fill_date", "fill_price",
     "exit_date", "exit_price", "pnl",
-    "updated_date", "side", "qty", "cash_margin",
+    "updated_date", "side", "qty", "cash_margin", "bt_score",
 ]
 
 

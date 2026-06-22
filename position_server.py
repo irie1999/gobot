@@ -115,6 +115,8 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         strat_lower = s["strategy"].lower().rstrip("_s")
         qty_val = s.get("qty", 100)
+        sig_score = s.get("score", s.get("bt_score", ""))
+        sig_score_str = str(int(sig_score)) if sig_score != "" and sig_score == sig_score else ""
         rows += f"""<tr>
   <td class="sym">{html.escape(s['symbol'])}<br>
     <small>{html.escape(s['name'])}</small></td>
@@ -133,6 +135,7 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
       <input type="hidden" name="qty"      id="qty_{_ri}" value="{qty_val}">
       <input type="hidden" name="side"     value="{side}">
       <input type="hidden" name="margin"   value="3">
+      <input type="hidden" name="bt_score" value="{html.escape(sig_score_str)}">
       <input type="hidden" name="return_to" value="/signals?date={html.escape(date_str)}">
       <div class="qty-ctrl">
         <button type="button" class="qty-btn" onclick="adjQty({_ri},-100)">－</button>
@@ -371,6 +374,7 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
           </select></div>
         <div class="fld"><label>区分</label>
           <select name="margin"><option value="3">信用</option><option value="1">現物</option></select></div>
+        <div class="fld"><label>BTスコア</label><input name="bt_score" type="number" min="0" max="100" placeholder="0-100" value="{html.escape(prefill.get('bt_score', ''))}"></div>
         <div><button class="btn btn-add" type="submit">＋ 登録</button></div>
       </div>
     </form>
@@ -460,11 +464,26 @@ def _render_card(r) -> str:
     stop_str = f"{stop_p:,.0f}円" if stop_p else "未設定"
     tgt_str = f"{tgt_p:,.0f}円" if tgt_p else "未設定"
 
+    bt_raw = _clean(r.get("bt_score", ""))
+    if bt_raw and bt_raw.isdigit():
+        bt_val = int(bt_raw)
+        if bt_val >= 80:
+            bt_rank, bt_cls = "★★★", "pill-ok"
+        elif bt_val >= 60:
+            bt_rank, bt_cls = "★★", "pill-ok"
+        elif bt_val >= 40:
+            bt_rank, bt_cls = "★", "pill-warn"
+        else:
+            bt_rank, bt_cls = "△", "pill-danger"
+        bt_pill = f"<span class='pill {bt_cls}'>BT:{bt_val} {bt_rank}</span>"
+    else:
+        bt_pill = ""
+
     return f"""
     <div class="card">
       <div class="head">
         <span class="name">[{html.escape(symbol)}] {html.escape(name)}</span>
-        <span>{side_badge} {rem_pill}</span>
+        <span>{side_badge} {bt_pill} {rem_pill}</span>
       </div>
       <div class="meta">戦略 {html.escape(strat or '-')} ／ {margin} {qty}株 ／
         約定 {html.escape(fill_d)} ／ 保有 {hold_d}日 / MAX{mh}日</div>
@@ -565,6 +584,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        bt_score_raw = form.get("bt_score", "").strip()
         row = {c: "" for c in pt.COLS}
         row.update({
             "record_date": str(TODAY), "symbol": symbol, "name": name,
@@ -572,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
             "signal_price": entry, "order_price": entry, "stop_price": stop,
             "target_price": target, "status": "holding", "fill_date": fill_date,
             "fill_price": entry, "updated_date": str(TODAY), "side": side,
-            "qty": qty, "cash_margin": margin,
+            "qty": qty, "cash_margin": margin, "bt_score": bt_score_raw,
         })
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         pt.save(df)
