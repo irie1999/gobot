@@ -37,6 +37,116 @@ TODAY = date.today()
 # 現在値を1回のページ表示中だけキャッシュ（同じ銘柄を何度も叩かない）
 _price_cache: dict[str, float | None] = {}
 
+# BTスコアキャッシュ（バックグラウンドで算出）
+_bt_cache: dict[str, int] = {}  # "symbol::strategy" → score
+_bt_cache_lock = threading.Lock()
+
+
+def _find_signal_and_bt(symbol: str, fill_price: float, fill_date: str,
+                         strategy: str = "") -> tuple[int | None, str, float, float]:
+    """fill_price に一致するシグナルを全戦略で探し (BT, strat, stop_p, target_p) を返す。
+    シグナル日 = fill_date の直前3営業日を検索。order_price と fill_price が ±5% 以内で一致。"""
+    try:
+        import check_signals_stop as _stop
+        import check_signals_breakout as _brk
+        from datetime import datetime as _dt, timedelta as _td
+
+        sym_t = symbol + ".T"
+        fd = _dt.strptime(fill_date, "%Y-%m-%d").date()
+
+        # fill_date の直前 3 営業日を候補シグナル日とする
+        sig_dates = []
+        d = fd
+        for _ in range(6):  # 最大6暦日さかのぼって3営業日を探す
+            d -= _td(days=1)
+            if d.weekday() < 5:
+                sig_dates.append(d)
+            if len(sig_dates) >= 3:
+                break
+
+        # 試す戦略
+        strat_upper = (strategy or "").upper()
+        candidates: list[tuple] = []
+        if strat_upper in _stop.STRATEGY_PARAMS:
+            candidates = [(_stop, strat_upper)]
+        elif strat_upper in _brk.STRATEGY_PARAMS:
+            candidates = [(_brk, strat_upper)]
+        else:
+            for s in _stop.STRATEGY_PARAMS:
+                candidates.append((_stop, s))
+            for s in _brk.STRATEGY_PARAMS:
+                candidates.append((_brk, s))
+
+        for sig_d in sig_dates:
+            for mod, strat in candidates:
+                try:
+                    sig = mod.check_signal_on_date(sym_t, strat, sig_d)
+                    if not sig:
+                        continue
+                    order_p = float(sig.get("order_p", 0) or 0)
+                    if order_p <= 0:
+                        continue
+                    # fill_price が order_p の ±5% 以内ならシグナル一致
+                    if abs(order_p - fill_price) / order_p > 0.05:
+                        continue
+                    # 一致 → BTスコア取得
+                    key = f"{symbol}::{strat}"
+                    with _bt_cache_lock:
+                        if key in _bt_cache:
+                            return (_bt_cache[key], strat,
+                                    float(sig.get("stop_p", 0) or 0),
+                                    float(sig.get("target_p", 0) or 0))
+                    item = mod.backtest_one(sym_t, sig.get("name", ""), strat)
+                    if item:
+                        score, _ = mod.calc_recommend_score(item["period_results"])
+                        with _bt_cache_lock:
+                            _bt_cache[key] = score
+                        return (score, strat,
+                                float(sig.get("stop_p", 0) or 0),
+                                float(sig.get("target_p", 0) or 0))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return None, "", 0.0, 0.0
+
+
+def _bg_fill_bt_scores() -> None:
+    """保有中ポジションのBTスコア・戦略・損切・目標をバックグラウンドで補完してCSVに保存する。"""
+    try:
+        df = pt.load()
+        holding = df[df["status"] == "holding"]
+        changed = False
+        for idx, r in holding.iterrows():
+            has_bt = _clean(r.get("bt_score", ""))
+            has_stop = _f(r.get("stop_price", 0))
+            has_tgt = _f(r.get("target_price", 0))
+            if has_bt and has_stop and has_tgt:
+                continue  # 全部あればスキップ
+            sym = str(r["symbol"]).split(".")[0]
+            strat = _clean(r.get("strategy", ""))
+            fill_p = _f(r.get("fill_price", 0))
+            fill_d = _clean(r.get("fill_date", ""))
+            if not fill_p or not fill_d:
+                continue
+            score, matched_strat, stop_p, tgt_p = _find_signal_and_bt(sym, fill_p, fill_d, strat)
+            if score is not None and not has_bt:
+                df.at[idx, "bt_score"] = str(score)
+                changed = True
+            if matched_strat and not _clean(r.get("strategy", "")):
+                df.at[idx, "strategy"] = matched_strat
+                changed = True
+            if stop_p and not has_stop:
+                df.at[idx, "stop_price"] = str(stop_p)
+                changed = True
+            if tgt_p and not has_tgt:
+                df.at[idx, "target_price"] = str(tgt_p)
+                changed = True
+        if changed:
+            pt.save(df)
+    except Exception:
+        pass
+
 
 def _f(v) -> float:
     try:
@@ -53,7 +163,9 @@ def _clean(v) -> str:
 
 def _get_price(symbol: str) -> float | None:
     if symbol not in _price_cache:
-        _price_cache[symbol] = pt.fetch_price(symbol)
+        v = pt.fetch_price(symbol)
+        # NaN ガード: float('nan') は None 扱いにする
+        _price_cache[symbol] = None if (v is None or v != v) else v
     return _price_cache[symbol]
 
 
@@ -253,6 +365,15 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
     df = pt.load()
     holding = df[df["status"] == "holding"]
     closed = df[df["status"].isin(["target", "stop", "timeout", "manual", "expired"])]
+
+    # BTスコア・戦略・損切・目標が未設定のポジションをバックグラウンドで補完
+    needs_bt = holding[
+        holding["bt_score"].fillna("").str.strip().eq("") |
+        holding["stop_price"].fillna("").str.strip().eq("") |
+        holding["target_price"].fillna("").str.strip().eq("")
+    ]
+    if not needs_bt.empty:
+        threading.Thread(target=_bg_fill_bt_scores, daemon=True).start()
 
     # 現在値をまとめて取得（並列）
     from concurrent.futures import ThreadPoolExecutor
@@ -465,7 +586,13 @@ def _render_card(r) -> str:
     tgt_str = f"{tgt_p:,.0f}円" if tgt_p else "未設定"
 
     bt_raw = _clean(r.get("bt_score", ""))
-    if bt_raw and bt_raw.isdigit():
+    # キャッシュから取得済みであればそちらを使う
+    if not bt_raw:
+        strat_key = _clean(r.get("strategy", ""))
+        _cached = _bt_cache.get(f"{symbol}::{strat_key}", _bt_cache.get(f"{symbol}::"))
+        if _cached is not None:
+            bt_raw = str(_cached)
+    if bt_raw and str(bt_raw).strip().isdigit():
         bt_val = int(bt_raw)
         if bt_val >= 80:
             bt_rank, bt_cls = "★★★", "pill-ok"
@@ -477,7 +604,7 @@ def _render_card(r) -> str:
             bt_rank, bt_cls = "△", "pill-danger"
         bt_pill = f"<span class='pill {bt_cls}'>BT:{bt_val} {bt_rank}</span>"
     else:
-        bt_pill = ""
+        bt_pill = "<span class='pill' style='background:#1e293b;color:#64748b;font-size:11px'>BT計算中…</span>"
 
     return f"""
     <div class="card">
