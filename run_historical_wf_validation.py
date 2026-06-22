@@ -421,8 +421,11 @@ def _compute_yearly_pnl_multi(
 ) -> dict[int, dict[int, dict]]:
     """全OOS期間（as_of〜今日）をシグナル日dedup付きで年次集計。
 
-    OOSタブの注釈「同一シグナル（銘柄+戦略+シグナル日が同一）は重複除外し1件として計算」
-    と同じ方式。これにより年次合計 ≈ OOSタブの合計になり、全起点年分の年次推移も得られる。
+    BTスコアはローリング方式: 各年のシグナルに対し、その年の1月1日時点のBTスコアを使用。
+    - 2021年のシグナル → 2021-01-01 時点のBTスコアで判定
+    - 2022年のシグナル → 2022-01-01 時点のBTスコアで判定
+    - 2023年のシグナル → 2023-01-01 時点のBTスコアで判定
+    これにより「その時点で高スコアだった銘柄」を年ごとに評価できる。
 
     返り値: {threshold: {year: {pnl, trades, wins}}}
     """
@@ -446,9 +449,17 @@ def _compute_yearly_pnl_multi(
         return empty
 
     need_bt = any(t > 0 for t in thresholds)
-    bt_scores:  dict[tuple, int]  = {}
+    # ローリング: {(sym, strat): {year: bt_score}}
+    # 各年の1月1日時点（as_of 以降）のBTスコアを保持
+    bt_scores_rolling: dict[tuple, dict[int, int]] = {}
     trade_logs: dict[tuple, list] = {}
     lock = threading.Lock()
+
+    # 各年のBTスコア計算基準日（as_of 以降の各年1月1日）
+    year_eval_dates = {
+        y: max(date(y, 1, 1), as_of)
+        for y in years
+    }
 
     def _run_one(sym_nm_strat):
         sym, nm, strat = sym_nm_strat
@@ -461,14 +472,15 @@ def _compute_yearly_pnl_multi(
         if df is None or len(df) < 10:
             return
 
-        # BTスコア（as_of 時点でトリム — 起点年時点の情報のみ使用）
-        bt_score = 0
+        # ローリングBTスコア: 各年1月1日時点のスコアを計算
+        scores_by_year: dict[int, int] = {}
         if need_bt:
-            try:
-                df_at_asof = df[df.index <= pd.Timestamp(as_of)]
-                bt_score = _compute_bt_score_at(sym, nm, df_at_asof, strat)
-            except Exception:
-                pass
+            for y, eval_dt in year_eval_dates.items():
+                try:
+                    df_at = df[df.index <= pd.Timestamp(eval_dt)]
+                    scores_by_year[y] = _compute_bt_score_at(sym, nm, df_at, strat) if len(df_at) >= 10 else 0
+                except Exception:
+                    scores_by_year[y] = 0
 
         # 全OOS期間バックテスト（as_of〜TODAY）
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
@@ -480,7 +492,7 @@ def _compute_yearly_pnl_multi(
         tlog = r.get("trade_log", []) if r else []
 
         with lock:
-            bt_scores[(sym, strat)]  = bt_score
+            bt_scores_rolling[(sym, strat)] = scores_by_year
             trade_logs[(sym, strat)] = tlog
 
     with ThreadPoolExecutor(max_workers=workers) as exe:
@@ -488,6 +500,7 @@ def _compute_yearly_pnl_multi(
 
     # 集計: シグナル日dedup（OOSタブと同じ注釈方式）
     # 同一 (sym, strat, signal_dt) は複数HO configにまたがっても1件
+    # BTフィルターはトレードが属する年のBTスコアで判定（ローリング）
     result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
               for t in thresholds}
 
@@ -495,9 +508,7 @@ def _compute_yearly_pnl_multi(
         seen: set[tuple] = set()
         for cfg in ho_pnl_configs:
             for sym, nm, strat in list(cfg.get("stop_wl", [])) + list(cfg.get("brk_wl", [])):
-                bt_score = bt_scores.get((sym, strat), 0)
-                if t > 0 and bt_score < t:
-                    continue
+                yr_scores = bt_scores_rolling.get((sym, strat), {})
                 for trade in trade_logs.get((sym, strat), []):
                     sig_dt = trade.get("signal_dt")
                     if sig_dt is None:
@@ -519,6 +530,13 @@ def _compute_yearly_pnl_multi(
                         continue
                     if year not in years_set:
                         continue
+
+                    # ローリングBTフィルター: その年のBTスコアで判定
+                    if t > 0:
+                        bt_score = yr_scores.get(year, 0)
+                        if bt_score < t:
+                            continue
+
                     pnl = trade.get("pnl", 0.0)
                     result[t][year]["pnl"]    += pnl
                     result[t][year]["trades"] += 1
@@ -762,7 +780,8 @@ def _yearly_inline_html(period: dict) -> str:
     </span>
   </h3>
   <p style="color:#f59e0b;font-size:0.8em;margin:0 0 12px 0">
-    ⚠ 下の「直近{oos_days}日 取引損益」は内部制限により直近365日分のみの集計です。上の年次内訳が全OOS期間の正確な数値です。
+    ⚠ 下の「直近{oos_days}日 取引損益」は内部制限により直近365日分のみの集計です。上の年次内訳が全OOS期間の正確な数値です。<br>
+    📊 BT≥70 フィルターはローリング方式（各年1月1日時点のBTスコア）で適用しています。
   </p>
   <div style="overflow-x:auto">
     <table style="border-collapse:collapse;font-size:0.88em;width:auto">
@@ -779,7 +798,7 @@ def _yearly_inline_html(period: dict) -> str:
           {row_all}
         </tr>
         <tr>
-          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">BT≥70</td>
+          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">BT≥70<br><span style="font-size:0.75em;color:#64748b">各年1月1日時点</span></td>
           {row_70}
         </tr>
       </tbody>
