@@ -436,6 +436,7 @@ def _compute_yearly_pnl_multi(
                 sym_df[sym] = None
 
     # 2. BTスコアを (sym, strat) ごとに1回だけ計算
+    #    df を as_of 時点でトリムして計算（起点年の直近365日が正しい範囲）
     need_bt = any(t > 0 for t in thresholds)
     bt_scores: dict[tuple, int] = {}
     if need_bt:
@@ -447,7 +448,8 @@ def _compute_yearly_pnl_multi(
                     bt_scores[key] = 0
                     continue
                 try:
-                    bt_scores[key] = _compute_bt_score_at(sym, nm, df, strat)
+                    df_at_asof = df[df.index <= pd.Timestamp(as_of)]
+                    bt_scores[key] = _compute_bt_score_at(sym, nm, df_at_asof, strat)
                 except Exception:
                     bt_scores[key] = 0
 
