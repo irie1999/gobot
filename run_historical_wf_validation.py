@@ -634,22 +634,19 @@ def _make_yearly_table(periods: list[dict], pnl_key: str) -> str:
 
 
 def _yearly_analysis_html(periods: list[dict]) -> str:
-    """年次成績推移（BT スコアフィルター 3 サブタブ）の HTML を生成"""
+    """年次成績推移（BT スコアフィルター 2 サブタブ）の HTML を生成"""
     table_all  = _make_yearly_table(periods, "yearly_pnl_all")
-    table_bt60 = _make_yearly_table(periods, "yearly_pnl_60")
-    table_bt80 = _make_yearly_table(periods, "yearly_pnl_80")
+    table_bt70 = _make_yearly_table(periods, "yearly_pnl_70")
 
     return (
         f'<h2>起点年別 年次成績推移</h2>'
-        f'<p class="subtitle">各起点年の全HO設定（HO30d〜HO180d）合算 WATCHLIST で、毎年の OOS P&L を集計</p>'
+        f'<p class="subtitle">各起点年の全HO設定（HO30d〜HO180d）合算 WATCHLIST で、毎年の OOS P&L を集計。BTスコアは各起点年時点で計算。</p>'
         f'<div style="margin-bottom:16px">'
         f'<button class="ho-period-btn ytab-btn active" onclick="switchYTab(\'all\',this)">全銘柄</button>'
-        f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt60\',this)">BT≥60</button>'
-        f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt80\',this)">BT≥80</button>'
+        f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt70\',this)">BT≥70</button>'
         f'</div>'
         f'<div id="ytab-all" style="display:block">{table_all}</div>'
-        f'<div id="ytab-bt60" style="display:none">{table_bt60}</div>'
-        f'<div id="ytab-bt80" style="display:none">{table_bt80}</div>'
+        f'<div id="ytab-bt70" style="display:none">{table_bt70}</div>'
     )
 
 
@@ -787,7 +784,7 @@ function switchHoPeriod(days) {
   (event.target.closest('.ho-period-btn') || event.target).classList.add('active');
 }
 function switchYTab(name, btn) {
-  ['all','bt60','bt80'].forEach(function(n) {
+  ['all','bt70'].forEach(function(n) {
     var el = document.getElementById('ytab-' + n);
     if (el) el.style.display = (n === name) ? 'block' : 'none';
   });
@@ -928,8 +925,7 @@ def main() -> None:
             "ho_results":      ho_results,
             "oos_html":        "",
             "yearly_pnl_all":  {},
-            "yearly_pnl_60":   {},
-            "yearly_pnl_80":   {},
+            "yearly_pnl_70":   {},
         }
 
         # ── OOS 評価（6 HO 設定を一括）─────────────────────────────
@@ -963,11 +959,10 @@ def main() -> None:
             try:
                 multi = _compute_yearly_pnl_multi(
                     all_stop_wl, all_brk_wl, as_of, args.workers,
-                    thresholds=[0, 60, 80],
+                    thresholds=[0, 70],
                 )
                 period["yearly_pnl_all"] = multi[0]
-                period["yearly_pnl_60"]  = multi[60]
-                period["yearly_pnl_80"]  = multi[80]
+                period["yearly_pnl_70"]  = multi[70]
             except Exception as e:
                 print(f"  [WARN] 年次 P&L 計算失敗: {e}")
 
