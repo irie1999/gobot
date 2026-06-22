@@ -537,6 +537,15 @@ _na._FROZEN_BT_SCORES.clear()
 for (_csym, _cstrat), _info in _cached_latest.items():
     _na._FROZEN_BT_SCORES[(_csym, _cstrat)] = _info["bt_score"]
 
+# シグナル発生時BTスコアを (sym, strat, signal_date_str) → score で注入
+# P&Lタブで「シグナル発生時のBTスコア」を正確に表示するために使用
+_na._SIGNAL_DATE_BT_SCORES.clear()
+for _ck, _cv in _score_cache.items():
+    _ck_parts = _ck.split("::")
+    if len(_ck_parts) == 3:
+        _csym2, _cstrat2, _csigdate2 = _ck_parts
+        _na._SIGNAL_DATE_BT_SCORES[(_csym2, _cstrat2, _csigdate2)] = _cv.get("bt_score", 0)
+
 # ── target_date 解決 ─────────────────────────────────────────────────────────
 target_date = None
 if _args.date:

@@ -46,6 +46,7 @@ _DEF_WORKERS = 4
 _PNL_CONFIGS: list[dict] = []
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
+_SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
 try:
     os.environ.setdefault("TRADING_MODE", "conservative")
     import check_signals_stop     as _stop
@@ -4135,12 +4136,18 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 seen.add(key)
                 entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
                 _preoos_sc = _preoos_score_map.get((sym, strat)) if _preoos_score_map else None
-                # シグナル時点BTスコア（シグナル日ベース）
+                # シグナル時点BTスコア（優先順: ①キャッシュ済み発生時スコア → ②trade_log再計算 → ③今日のスコア）
                 _sdt_for_key = t.get("signal_dt")
                 _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
-                if _sd_for_key and _sig_time_score_map:
+                _cache_key = (sym, strat, str(_sd_for_key)) if _sd_for_key else None
+                if _cache_key and _cache_key in _SIGNAL_DATE_BT_SCORES:
+                    # ① signal_score_cache.json に保存された発生時スコアを優先
+                    _sig_sc = _SIGNAL_DATE_BT_SCORES[_cache_key]
+                elif _sd_for_key and _sig_time_score_map:
+                    # ② trade_log から再計算したスコア
                     _sig_sc = _sig_time_score_map.get((sym, strat, _sd_for_key), rec_score2)
                 else:
+                    # ③ 今日のスコア（フォールバック）
                     _sig_sc = rec_score2
                 # signal_score からランクを決定
                 if _sig_sc >= 80: _sig_rank = "★★★"
