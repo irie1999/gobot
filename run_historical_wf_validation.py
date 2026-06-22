@@ -687,6 +687,86 @@ def _eval_oos_html(
 
 
 # ────────────────────────────────────────────────────────────
+# 各起点年タブ内の年次内訳テーブル
+# ────────────────────────────────────────────────────────────
+def _yearly_inline_html(period: dict) -> str:
+    """起点年タブの中に表示する年次P&L内訳（全銘柄 / BT≥70）"""
+    as_of = period["as_of"]
+
+    def _make_row(pnl_key: str) -> str:
+        yearly = period.get(pnl_key, {})
+        if not yearly:
+            return '<tr><td colspan="4" style="color:#475569;padding:6px 12px">データなし</td></tr>'
+        years = sorted(y for y in yearly if y >= as_of.year)
+        if not years:
+            return '<tr><td colspan="4" style="color:#475569;padding:6px 12px">データなし</td></tr>'
+        cells = ""
+        for y in years:
+            d      = yearly.get(y, {})
+            pnl    = d.get("pnl", 0.0)
+            trades = d.get("trades", 0)
+            wins   = d.get("wins", 0)
+            if trades == 0:
+                cells += f'<td style="padding:6px 16px;text-align:center;color:#475569">—</td>'
+                continue
+            wr      = wins / trades * 100
+            man_yen = pnl / 10000
+            color   = "#4ade80" if pnl >= 0 else "#f87171"
+            sign    = "+" if pnl >= 0 else ""
+            cells += (
+                f'<td style="padding:6px 16px;text-align:center">'
+                f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
+                f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
+                f'</td>'
+            )
+        return f'<tr>{"".join(cells)}</tr>'
+
+    yearly_all = period.get("yearly_pnl_all", {})
+    years = sorted(y for y in yearly_all if y >= as_of.year)
+    if not years:
+        return ""
+
+    header = "".join(
+        f'<th style="padding:6px 16px;text-align:center;color:#94a3b8;'
+        f'border-bottom:1px solid #334155">{y}年</th>'
+        for y in years
+    )
+
+    row_all  = _make_row("yearly_pnl_all")
+    row_bt70 = _make_row("yearly_pnl_70")
+
+    return f"""
+<div style="margin:16px 0 24px 0;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px">
+  <h3 style="margin:0 0 12px 0;font-size:0.95em;color:#60a5fa">年次 P&amp;L 内訳
+    <span style="font-size:0.8em;color:#94a3b8;font-weight:normal;margin-left:8px">
+      （同一シグナル重複除外 / 全OOS期間）
+    </span>
+  </h3>
+  <div style="overflow-x:auto">
+    <table style="border-collapse:collapse;font-size:0.88em;width:100%">
+      <thead>
+        <tr>
+          <th style="padding:6px 16px;text-align:left;color:#94a3b8;border-bottom:1px solid #334155;white-space:nowrap">フィルター</th>
+          {header}
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">全銘柄</td>
+          {_make_row("yearly_pnl_all").replace("<tr>","").replace("</tr>","")}
+        </tr>
+        <tr>
+          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">BT≥70</td>
+          {_make_row("yearly_pnl_70").replace("<tr>","").replace("</tr>","")}
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+"""
+
+
+# ────────────────────────────────────────────────────────────
 # HTML 結合
 # ────────────────────────────────────────────────────────────
 def _build_combined_html(periods: list[dict]) -> str:
@@ -737,11 +817,13 @@ def _build_combined_html(periods: list[dict]) -> str:
         )
 
         inner = p.get("oos_html", "<p class='subtitle'>評価結果なし（選定銘柄 0 件）</p>")
+        yearly_inline = _yearly_inline_html(p)
         pane_display = "block" if i == 0 else "none"
         tab_panes.append(
             f'<div id="ho-{tid}" class="ho-outer-pane" style="display:{pane_display}">'
             f'<h2>{as_of.year}年1月1日 起点 — 歴史 WF 選定 × OOS 損益</h2>'
             f'{summary_html}'
+            f'{yearly_inline}'
             f'{inner}'
             f'</div>'
         )
