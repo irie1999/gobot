@@ -521,7 +521,6 @@ function switchHoPeriod(days) {
 </script>
 </body>
 </html>"""
-</html>"""
 
 
 # ────────────────────────────────────────────────────────────
