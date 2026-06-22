@@ -501,7 +501,7 @@ def _compute_yearly_pnl_multi(
     # 集計: シグナル日dedup（OOSタブと同じ注釈方式）
     # 同一 (sym, strat, signal_dt) は複数HO configにまたがっても1件
     # BTフィルターはトレードが属する年のBTスコアで判定（ローリング）
-    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
+    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0, "win_pnl": 0.0, "loss_pnl": 0.0} for y in years}
               for t in thresholds}
 
     for t in thresholds:
@@ -541,7 +541,10 @@ def _compute_yearly_pnl_multi(
                     result[t][year]["pnl"]    += pnl
                     result[t][year]["trades"] += 1
                     if pnl > 0:
-                        result[t][year]["wins"] += 1
+                        result[t][year]["wins"]    += 1
+                        result[t][year]["win_pnl"] += pnl
+                    else:
+                        result[t][year]["loss_pnl"] += pnl
 
     return result
 
@@ -713,24 +716,33 @@ def _yearly_inline_html(period: dict) -> str:
     oos_days = (TODAY - as_of).days
 
     def _cell(d: dict, bg: str = "") -> str:
-        pnl    = d.get("pnl", 0.0)
-        trades = d.get("trades", 0)
-        wins   = d.get("wins", 0)
+        pnl      = d.get("pnl", 0.0)
+        trades   = d.get("trades", 0)
+        wins     = d.get("wins", 0)
+        win_pnl  = d.get("win_pnl", 0.0)
+        loss_pnl = d.get("loss_pnl", 0.0)
         if trades == 0:
-            return f'<td style="padding:6px 16px;text-align:center;color:#475569{";background:"+bg if bg else ""}">—</td>'
-        wr      = wins / trades * 100
-        man_yen = pnl / 10000
-        color   = "#4ade80" if pnl >= 0 else "#f87171"
-        sign    = "+" if pnl >= 0 else ""
+            return f'<td style="padding:6px 12px;text-align:center;color:#475569{";background:"+bg if bg else ""}">—</td>'
+        wr       = wins / trades * 100
+        net_man  = pnl / 10000
+        win_man  = win_pnl / 10000
+        loss_man = loss_pnl / 10000
+        net_color = "#4ade80" if pnl >= 0 else "#f87171"
+        net_sign  = "+" if pnl >= 0 else ""
         return (
-            f'<td style="padding:6px 16px;text-align:center{";background:"+bg if bg else ""}">'
-            f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
-            f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
+            f'<td style="padding:6px 12px;text-align:center{";background:"+bg if bg else ""}">'
+            f'<span style="color:{net_color};font-weight:bold;font-size:0.95em">{net_sign}{net_man:.1f}万</span>'
+            f'<br><span style="color:#4ade80;font-size:0.75em">+{win_man:.1f}万</span>'
+            f'<span style="color:#94a3b8;font-size:0.75em"> / </span>'
+            f'<span style="color:#f87171;font-size:0.75em">{loss_man:.1f}万</span>'
+            f'<br><span style="color:#94a3b8;font-size:0.72em">{trades}件 {wr:.0f}%</span>'
             f'</td>'
         )
 
     yearly_all = period.get("yearly_pnl_all", {})
     yearly_70  = period.get("yearly_pnl_70",  {})
+    yearly_80  = period.get("yearly_pnl_80",  {})
+    yearly_90  = period.get("yearly_pnl_90",  {})
     years      = sorted(y for y in yearly_all if y >= as_of.year)
     if not years:
         return ""
@@ -738,13 +750,17 @@ def _yearly_inline_html(period: dict) -> str:
     # 全OOS期間の合計（年次内訳の合算）
     def _total(yearly: dict) -> dict:
         return {
-            "pnl":    sum(v.get("pnl", 0.0) for v in yearly.values()),
-            "trades": sum(v.get("trades", 0) for v in yearly.values()),
-            "wins":   sum(v.get("wins", 0) for v in yearly.values()),
+            "pnl":      sum(v.get("pnl", 0.0)      for v in yearly.values()),
+            "trades":   sum(v.get("trades", 0)      for v in yearly.values()),
+            "wins":     sum(v.get("wins", 0)        for v in yearly.values()),
+            "win_pnl":  sum(v.get("win_pnl", 0.0)  for v in yearly.values()),
+            "loss_pnl": sum(v.get("loss_pnl", 0.0) for v in yearly.values()),
         }
 
     tot_all = _total(yearly_all)
     tot_70  = _total(yearly_70)
+    tot_80  = _total(yearly_80)
+    tot_90  = _total(yearly_90)
 
     def _summary_card(label: str, d: dict, color: str) -> str:
         pnl    = d.get("pnl", 0.0)
@@ -762,15 +778,19 @@ def _yearly_inline_html(period: dict) -> str:
         )
 
     header = "".join(
-        f'<th style="padding:6px 16px;text-align:center;color:#94a3b8;'
+        f'<th style="padding:6px 12px;text-align:center;color:#94a3b8;'
         f'border-bottom:1px solid #334155">{y}年</th>'
         for y in years
     )
     row_all = "".join(_cell(yearly_all.get(y, {})) for y in years)
-    row_70  = "".join(_cell(yearly_70.get(y, {})) for y in years)
+    row_70  = "".join(_cell(yearly_70.get(y, {}))  for y in years)
+    row_80  = "".join(_cell(yearly_80.get(y, {}))  for y in years)
+    row_90  = "".join(_cell(yearly_90.get(y, {}))  for y in years)
     # 合計列
     row_all += _cell(tot_all, bg="#1e3a5f")
     row_70  += _cell(tot_70,  bg="#1e3a5f")
+    row_80  += _cell(tot_80,  bg="#1e3a5f")
+    row_90  += _cell(tot_90,  bg="#1e3a5f")
 
     return f"""
 <div style="margin:16px 0 24px 0;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px">
@@ -794,12 +814,20 @@ def _yearly_inline_html(period: dict) -> str:
       </thead>
       <tbody>
         <tr>
-          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">全銘柄</td>
+          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">全銘柄</td>
           {row_all}
         </tr>
-        <tr>
-          <td style="padding:6px 16px;color:#94a3b8;white-space:nowrap">BT≥70<br><span style="font-size:0.75em;color:#64748b">各年1月1日時点</span></td>
+        <tr style="border-top:1px solid #1e293b">
+          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥70<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
           {row_70}
+        </tr>
+        <tr style="border-top:1px solid #1e293b">
+          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥80<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
+          {row_80}
+        </tr>
+        <tr style="border-top:1px solid #1e293b">
+          <td style="padding:6px 12px;color:#fbbf24;white-space:nowrap">BT≥90<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
+          {row_90}
         </tr>
       </tbody>
     </table>
@@ -1065,6 +1093,8 @@ def main() -> None:
             "oos_html":        "",
             "yearly_pnl_all":  {},
             "yearly_pnl_70":   {},
+            "yearly_pnl_80":   {},
+            "yearly_pnl_90":   {},
         }
 
         # ── OOS 評価（6 HO 設定を一括）─────────────────────────────
@@ -1093,10 +1123,12 @@ def main() -> None:
             try:
                 multi = _compute_yearly_pnl_multi(
                     ho_pnl_configs, as_of, args.workers,
-                    thresholds=[0, 70],
+                    thresholds=[0, 70, 80, 90],
                 )
                 period["yearly_pnl_all"] = multi[0]
                 period["yearly_pnl_70"]  = multi[70]
+                period["yearly_pnl_80"]  = multi[80]
+                period["yearly_pnl_90"]  = multi[90]
             except Exception as e:
                 print(f"  [WARN] 年次 P&L 計算失敗: {e}")
 
