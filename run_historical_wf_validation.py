@@ -415,8 +415,12 @@ def _compute_yearly_pnl_multi(
     thresholds: list[int] = (0, 70),
 ) -> dict[int, dict[int, dict]]:
     """OOS全期間バックテストのtrade_logをexit年で集計（OOSタブと同一計算）。
+
+    メモリ効率化: 1銘柄×1戦略ずつ処理し結果を即座に集計（全dfを同時保持しない）。
     返り値: {threshold: {year: {pnl, trades, wins}}}
     """
+    import threading
+
     years     = list(range(as_of.year, TODAY.year + 1))
     all_items = list(stop_wl) + list(brk_wl)
     empty     = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
@@ -424,91 +428,91 @@ def _compute_yearly_pnl_multi(
     if not all_items:
         return empty
 
-    # 1. df を銘柄ごとに1回だけフェッチ（キャッシュ活用、順次）
+    # (sym, strat) の重複を排除（複数HOの合算で同一ペアが複数入る可能性）
+    all_pairs: list[tuple[str, str, str]] = list(
+        {(sym, nm, strat) for sym, nm, strat in all_items}
+    )
+    need_bt   = any(t > 0 for t in thresholds)
     since_date = as_of - timedelta(days=90)
-    sym_df: dict[str, object] = {}
-    for sym, nm, strat in all_items:
-        if sym not in sym_df:
-            try:
-                sym_df[sym] = fetch(sym, (TODAY - since_date).days + 60,
-                                    min_start_date=since_date)
-            except Exception:
-                sym_df[sym] = None
+    fetch_days = (TODAY - since_date).days + 60
 
-    # 2. BTスコアを (sym, strat) ごとに1回だけ計算
-    #    df を as_of 時点でトリムして計算（起点年の直近365日が正しい範囲）
-    need_bt = any(t > 0 for t in thresholds)
-    bt_scores: dict[tuple, int] = {}
-    if need_bt:
-        for sym, nm, strat in all_items:
-            key = (sym, strat)
-            if key not in bt_scores:
-                df = sym_df.get(sym)
-                if df is None:
-                    bt_scores[key] = 0
-                    continue
-                try:
-                    df_at_asof = df[df.index <= pd.Timestamp(as_of)]
-                    bt_scores[key] = _compute_bt_score_at(sym, nm, df_at_asof, strat)
-                except Exception:
-                    bt_scores[key] = 0
-
-    # 3. 閾値ごとのフィルター済みアイテムセットを事前構築
-    filtered: dict[int, list] = {}
-    for t in thresholds:
-        filtered[t] = [
-            (sym, nm, strat) for sym, nm, strat in all_items
-            if sym_df.get(sym) is not None
-            and (t == 0 or bt_scores.get((sym, strat), 0) >= t)
-        ]
-
-    # 4. OOS全期間バックテストを (sym, strat) ごとに1回だけ実行し trade_log を取得
-    #    OOSタブと同じ as_of〜TODAY の1本バックテスト → 年またぎトレードも正確に集計
-    all_pairs = list({(sym, nm, strat) for sym, nm, strat in all_items
-                      if sym_df.get(sym) is not None})
+    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
+              for t in thresholds}
+    lock = threading.Lock()
 
     def _run_one(sym_nm_strat):
+        """1銘柄×1戦略のOOS全期間バックテストを実行し、年次集計を result に加算する。"""
         sym, nm, strat = sym_nm_strat
-        df = sym_df.get(sym)
-        if df is None or len(df) < 10 or strat not in STRATEGY_DEFS:
-            return (sym, strat), []
+        if strat not in STRATEGY_DEFS:
+            return
+        try:
+            df = fetch(sym, fetch_days, min_start_date=since_date)
+        except Exception:
+            return
+        if df is None or len(df) < 10:
+            return
+
+        # BTスコア（as_of 時点でトリム）
+        bt_score = 0
+        if need_bt:
+            try:
+                df_at_asof = df[df.index <= pd.Timestamp(as_of)]
+                bt_score = _compute_bt_score_at(sym, nm, df_at_asof, strat)
+            except Exception:
+                pass
+
+        # どの閾値にも引っかからなければスキップ
+        active_thresholds = [t for t in thresholds if t == 0 or bt_score >= t]
+        if not active_thresholds:
+            return
+
+        # OOS全期間バックテスト（as_of〜TODAY の1本）
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
         try:
             r = _run_window_abs(sym, nm, df, calc_fn, em, sm, tm,
                                 as_of, TODAY, strat, entry_type=entry_type)
         except Exception:
-            return (sym, strat), []
+            return
         if not r:
-            return (sym, strat), []
-        return (sym, strat), r.get("trade_log", [])
+            return
 
-    # 結果を (sym, strat) → trade_log で保存
-    raw: dict[tuple, list] = {}
+        trade_log = r.get("trade_log", [])
+        if not trade_log:
+            return
+
+        # trade_log を exit_dt 年で集計してロック内で result に加算
+        year_buf: dict[int, dict[int, tuple]] = {}  # threshold → {year: (pnl, cnt, wins)}
+        for t in active_thresholds:
+            year_buf[t] = {}
+
+        for trade in trade_log:
+            exit_dt = trade.get("exit_dt")
+            if exit_dt is None:
+                continue
+            try:
+                year = pd.Timestamp(exit_dt).year
+            except Exception:
+                continue
+            if year not in {y for y in years}:
+                continue
+            pnl = trade.get("pnl", 0.0)
+            win = 1 if pnl > 0 else 0
+            for t in active_thresholds:
+                if year not in year_buf[t]:
+                    year_buf[t][year] = [0.0, 0, 0]
+                year_buf[t][year][0] += pnl
+                year_buf[t][year][1] += 1
+                year_buf[t][year][2] += win
+
+        with lock:
+            for t, ybuf in year_buf.items():
+                for year, (pnl, cnt, wins) in ybuf.items():
+                    result[t][year]["pnl"]    += pnl
+                    result[t][year]["trades"] += cnt
+                    result[t][year]["wins"]   += wins
+
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        for key, trade_log in exe.map(_run_one, all_pairs):
-            raw[key] = trade_log
-
-    # 5. 閾値ごとに集計（trade_logを exit_dt 年で分類）
-    result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
-              for t in thresholds}
-    for t, items in filtered.items():
-        for sym, nm, strat in items:
-            key = (sym, strat)
-            for trade in raw.get(key, []):
-                exit_dt = trade.get("exit_dt")
-                if exit_dt is None:
-                    continue
-                try:
-                    year = pd.Timestamp(exit_dt).year
-                except Exception:
-                    continue
-                if year not in result[t]:
-                    continue
-                pnl = trade.get("pnl", 0.0)
-                result[t][year]["pnl"]    += pnl
-                result[t][year]["trades"] += 1
-                if pnl > 0:
-                    result[t][year]["wins"] += 1
+        list(exe.map(_run_one, all_pairs))
 
     return result
 
