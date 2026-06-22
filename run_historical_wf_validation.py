@@ -412,9 +412,9 @@ def _compute_yearly_pnl_multi(
     brk_wl:  list[tuple[str, str, str]],
     as_of: date,
     workers: int,
-    thresholds: list[int] = (0, 60, 80),
+    thresholds: list[int] = (0, 70),
 ) -> dict[int, dict[int, dict]]:
-    """1回のパスで複数BTスコア閾値の年次P&Lを計算。
+    """OOS全期間バックテストのtrade_logをexit年で集計（OOSタブと同一計算）。
     返り値: {threshold: {year: {pnl, trades, wins}}}
     """
     years     = list(range(as_of.year, TODAY.year + 1))
@@ -425,7 +425,7 @@ def _compute_yearly_pnl_multi(
         return empty
 
     # 1. df を銘柄ごとに1回だけフェッチ（キャッシュ活用、順次）
-    since_date = date(as_of.year, 1, 1) - timedelta(days=90)
+    since_date = as_of - timedelta(days=90)
     sym_df: dict[str, object] = {}
     for sym, nm, strat in all_items:
         if sym not in sym_df:
@@ -462,53 +462,53 @@ def _compute_yearly_pnl_multi(
             and (t == 0 or bt_scores.get((sym, strat), 0) >= t)
         ]
 
-    # 4. 年次バックテストを (sym, strat, year) ごとに1回だけ実行
+    # 4. OOS全期間バックテストを (sym, strat) ごとに1回だけ実行し trade_log を取得
+    #    OOSタブと同じ as_of〜TODAY の1本バックテスト → 年またぎトレードも正確に集計
     all_pairs = list({(sym, nm, strat) for sym, nm, strat in all_items
                       if sym_df.get(sym) is not None})
 
-    def _run_one(sym_nm_strat_year):
-        sym, nm, strat, year = sym_nm_strat_year
+    def _run_one(sym_nm_strat):
+        sym, nm, strat = sym_nm_strat
         df = sym_df.get(sym)
         if df is None or len(df) < 10 or strat not in STRATEGY_DEFS:
-            return (sym, strat, year), 0.0, 0, 0
+            return (sym, strat), []
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
-        y_start = max(date(year, 1, 1), as_of)
-        y_end   = min(date(year, 12, 31), TODAY)
-        if y_start >= y_end:
-            return (sym, strat, year), 0.0, 0, 0
         try:
             r = _run_window_abs(sym, nm, df, calc_fn, em, sm, tm,
-                                y_start, y_end, strat, entry_type=entry_type)
+                                as_of, TODAY, strat, entry_type=entry_type)
         except Exception:
-            return (sym, strat, year), 0.0, 0, 0
+            return (sym, strat), []
         if not r:
-            return (sym, strat, year), 0.0, 0, 0
-        pnl    = r.get("total_pnl", 0.0)
-        trades = r.get("trades", 0)
-        wins   = sum(1 for t in r.get("trade_log", []) if t.get("pnl", 0) > 0)
-        return (sym, strat, year), pnl, trades, wins
+            return (sym, strat), []
+        return (sym, strat), r.get("trade_log", [])
 
-    tasks = [(sym, nm, strat, year) for sym, nm, strat in all_pairs for year in years]
-
-    # 結果を (sym, strat, year) → (pnl, trades, wins) で保存
-    raw: dict[tuple, tuple] = {}
+    # 結果を (sym, strat) → trade_log で保存
+    raw: dict[tuple, list] = {}
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        for key, pnl, trades, wins in exe.map(_run_one, tasks):
-            raw[key] = (pnl, trades, wins)
+        for key, trade_log in exe.map(_run_one, all_pairs):
+            raw[key] = trade_log
 
-    # 5. 閾値ごとに集計
+    # 5. 閾値ごとに集計（trade_logを exit_dt 年で分類）
     result = {t: {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
               for t in thresholds}
     for t, items in filtered.items():
         for sym, nm, strat in items:
-            for year in years:
-                key = (sym, strat, year)
-                if key not in raw:
+            key = (sym, strat)
+            for trade in raw.get(key, []):
+                exit_dt = trade.get("exit_dt")
+                if exit_dt is None:
                     continue
-                pnl, trades, wins = raw[key]
+                try:
+                    year = pd.Timestamp(exit_dt).year
+                except Exception:
+                    continue
+                if year not in result[t]:
+                    continue
+                pnl = trade.get("pnl", 0.0)
                 result[t][year]["pnl"]    += pnl
-                result[t][year]["trades"] += trades
-                result[t][year]["wins"]   += wins
+                result[t][year]["trades"] += 1
+                if pnl > 0:
+                    result[t][year]["wins"] += 1
 
     return result
 
