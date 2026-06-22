@@ -4017,6 +4017,74 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         _preoos_score_map[(_ps, _pst)] = 0
             print(f"  [preoos] 完了 (cached={len(_preoos_tab5_score_cache)}件)", flush=True)
 
+    # ── シグナル時点BTスコア計算（月次バケット化、既存 trade_log 流用）──────────
+    # 各取引の signal_dt の月初時点のBTスコアを事前計算する。
+    # 既存 trade_log をフィルタして計算するため追加バックテスト不要。
+    _sig_time_score_map: dict = {}  # (sym, strat, year, month) → score
+
+    # (sym, strat) ごとに trade_log を収集（最初のconfigだけ使う）
+    _stbt_tlog_by_sym: dict = {}
+    for _stcfg in _PNL_CONFIGS:
+        for _stit in _cached_items_per_cfg.get(_stcfg["label"], []):
+            _stkey = (_stit.get("symbol", ""), _stit.get("strategy", ""))
+            if _stkey in _stbt_tlog_by_sym:
+                continue
+            _pr = _stit.get("period_results", {})
+            if not _pr:
+                continue
+            _max_p = max(_pr.keys())
+            _stbt_tlog_by_sym[_stkey] = _pr[_max_p].get("trade_log", [])
+
+    _SLICE_PERIODS_BT = [30, 60, 90, 120, 150, 180]
+
+    def _compute_sig_time_bt(sym: str, strat: str, tlog: list) -> dict:
+        """trade_log から各シグナル月のBTスコアを計算して {(year, month): score} を返す"""
+        from datetime import date as _dt_cls2
+        months_needed: set = set()
+        for _t in tlog:
+            _sdt = _t.get("signal_dt")
+            if _sdt:
+                _sd = _sdt.date() if hasattr(_sdt, "date") else _sdt
+                months_needed.add((_sd.year, _sd.month))
+        result: dict = {}
+        for yr, mo in months_needed:
+            eval_dt = _dt_cls2(yr, mo, 1)
+            # eval_dt 以前に signal した完了済み取引のみ
+            closed = [_t for _t in tlog
+                      if _t.get("signal_dt") and
+                      (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) < eval_dt
+                      and _t.get("reason") not in ("発注中", "保有中", None)
+                      and _t.get("pnl") is not None]
+            period_results_m: dict = {}
+            for _p in _SLICE_PERIODS_BT:
+                slice_since = eval_dt - timedelta(days=_p)
+                sub = [_t for _t in closed
+                       if (_t["signal_dt"].date() if hasattr(_t["signal_dt"], "date") else _t["signal_dt"]) >= slice_since]
+                if not sub:
+                    continue
+                wins_m = sum(1 for _t in sub if _t["pnl"] > 0)
+                gp_m = sum(_t["pnl"] for _t in sub if _t["pnl"] > 0)
+                gl_m = abs(sum(_t["pnl"] for _t in sub if _t["pnl"] < 0))
+                pf_m = gp_m / gl_m if gl_m > 0 else (float("inf") if gp_m > 0 else 0.0)
+                period_results_m[_p] = {
+                    "trades": len(sub), "wins": wins_m,
+                    "win_rate": wins_m / len(sub) * 100,
+                    "pf": pf_m, "total_pnl": sum(_t["pnl"] for _t in sub),
+                }
+            if period_results_m:
+                sc_m, _ = _stop.calc_recommend_score(period_results_m)
+                result[(yr, mo)] = sc_m
+            else:
+                result[(yr, mo)] = 0
+        return result
+
+    print(f"  [signal-BT] シグナル時点BTスコア計算中 ({len(_stbt_tlog_by_sym)}銘柄戦略)...", flush=True)
+    for (_stbt_sym, _stbt_strat), _stbt_tlog in _stbt_tlog_by_sym.items():
+        _monthly_scores = _compute_sig_time_bt(_stbt_sym, _stbt_strat, _stbt_tlog)
+        for (_yr, _mo), _sc in _monthly_scores.items():
+            _sig_time_score_map[(_stbt_sym, _stbt_strat, _yr, _mo)] = _sc
+    print(f"  [signal-BT] 完了 ({len(_sig_time_score_map)}月次エントリー)", flush=True)
+
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
     cfg_trades_map: dict = {}          # config別取引（サマリーテーブル用・デデュップなし）
@@ -4063,11 +4131,23 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 seen.add(key)
                 entry_d = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
                 _preoos_sc = _preoos_score_map.get((sym, strat)) if _preoos_score_map else None
+                # シグナル時点BTスコア（月次バケット）
+                _sdt_for_key = t.get("signal_dt")
+                _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
+                if _sd_for_key and _sig_time_score_map:
+                    _sig_sc = _sig_time_score_map.get((sym, strat, _sd_for_key.year, _sd_for_key.month), rec_score2)
+                else:
+                    _sig_sc = rec_score2
+                # signal_score からランクを決定
+                if _sig_sc >= 80: _sig_rank = "★★★"
+                elif _sig_sc >= 60: _sig_rank = "★★"
+                elif _sig_sc >= 40: _sig_rank = "★"
+                else: _sig_rank = "△"
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
-                        "score": score, "rank": rank,
+                        "score": _sig_sc, "rank": _sig_rank,
                         "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
-                        "preoos_score": _preoos_sc,
+                        "preoos_score": _sig_sc,
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
                 _sdt_raw = t.get("signal_dt")
@@ -4655,7 +4735,7 @@ function switchTbd(id, tab) {{
     bt_fine_rows = ""
     for lo, hi, lbl_s, col in bt_buckets:
         tr = [t for t in full_year_trades
-              if t.get("rec_score") is not None and lo <= t["rec_score"] < hi]
+              if t.get("score") is not None and lo <= t["score"] < hi]
         n = len(tr)
         if not n:
             continue
@@ -4702,7 +4782,7 @@ function switchTbd(id, tab) {{
 </tr>"""
 
     # ── ③ BT×WF クロス分析 (BT≥60内でWFスコア帯別比較) ──
-    bt60_trades = [t for t in full_year_trades if (t.get("rec_score") or 0) >= 60]
+    bt60_trades = [t for t in full_year_trades if (t.get("score") or 0) >= 60]
     wf_cross_bands = [
         (70, 101, "WF70以上",  "#4ade80"),
         (50,  70, "WF50-69",   "#fbbf24"),
@@ -6389,10 +6469,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
     _timing_html = "" if skip_timing9 else _entry_timing_cmp_html(kpi_trades)
 
-    # ── OOS前BTスコア別成績セクション（preoos_cutoff_days 指定時のみ生成）──────
+    # ── シグナル時点BTスコア別成績セクション（常に生成）──────
     _preoos_section_html = ""
-    if preoos_cutoff_days and _preoos_score_map:
-        _poo_cutoff_label = f"today - {preoos_cutoff_days}日"
+    if True:
+        _poo_cutoff_label = "シグナル発生月時点（月次）"
         _poo_buckets = [
             (80, 101, "★★★≥80", "#4ade80"),
             (60,  80, "★★60-79", "#86efac"),
@@ -6402,7 +6482,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _poo_rows = ""
         for _plo, _phi, _plbl, _pcol in _poo_buckets:
             _ptr = [t for t in full_year_trades
-                    if t.get("preoos_score") is not None and _plo <= t["preoos_score"] < _phi]
+                    if t.get("score") is not None and _plo <= t["score"] < _phi]
             _pn = len(_ptr)
             if not _pn:
                 continue
@@ -6426,14 +6506,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <td class="{_pppc}" style="text-align:right;font-weight:700">{_ppnl:+,.0f}円</td>
   <td class="{_papc}" style="text-align:right;font-weight:700">{_pavg:+,.0f}円</td>
 </tr>"""
-        # 銘柄別: OOS前BTスコア≥60の銘柄
-        _poo60_trades = [t for t in full_year_trades if (t.get("preoos_score") or 0) >= 60]
+        # 銘柄別: シグナル時点BTスコア≥60の銘柄
+        _poo60_trades = [t for t in full_year_trades if (t.get("score") or 0) >= 60]
         _poo_sym_agg: dict = {}
         for _pt in _poo60_trades:
             _pk = (_pt["symbol"], _pt.get("name", ""))
             if _pk not in _poo_sym_agg:
                 _poo_sym_agg[_pk] = {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,"strats":set(),
-                                      "preoos_scores":[],"rec_scores":[]}
+                                      "sig_time_scores":[],"rec_scores":[]}
             _pd = _poo_sym_agg[_pk]
             _pd["n"]   += 1
             _pd["w"]   += 1 if _pt["pnl"] > 0 else 0
@@ -6441,8 +6521,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _pd["gp"]  += _pt["pnl"] if _pt["pnl"] > 0 else 0
             _pd["gl"]  += abs(_pt["pnl"]) if _pt["pnl"] < 0 else 0
             _pd["strats"].add(_pt.get("strategy", ""))
-            if _pt.get("preoos_score") is not None:
-                _pd["preoos_scores"].append(_pt["preoos_score"])
+            if _pt.get("score") is not None:
+                _pd["sig_time_scores"].append(_pt["score"])
             if _pt.get("rec_score") is not None:
                 _pd["rec_scores"].append(_pt["rec_score"])
         _poo_sym_rows = ""
@@ -6454,7 +6534,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _ppf2s = "∞" if _ppf2 == float("inf") else f"{_ppf2:.2f}"
             _pwr2  = _pw2 / _pn2 * 100 if _pn2 else 0
             _pspc  = "profit" if _ppnl2 >= 0 else "loss"
-            _avg_poo = round(sum(_pd["preoos_scores"]) / len(_pd["preoos_scores"])) if _pd["preoos_scores"] else None
+            _avg_poo = round(sum(_pd["sig_time_scores"]) / len(_pd["sig_time_scores"])) if _pd["sig_time_scores"] else None
             _avg_bt2 = round(sum(_pd["rec_scores"]) / len(_pd["rec_scores"])) if _pd["rec_scores"] else None
             _poo_disp  = (f'<span style="color:{"#4ade80" if _avg_poo and _avg_poo>=60 else ("#fbbf24" if _avg_poo and _avg_poo>=40 else "#f87171")};font-weight:700">{_avg_poo}</span>'
                           if _avg_poo is not None else "—")
@@ -6478,24 +6558,24 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <td class="{_pspc}" style="text-align:right;font-weight:700">{_ppnl2:+,.0f}円</td>
 </tr>"""
         if not _poo_sym_rows:
-            _poo_sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">OOS前BT≥60の取引なし</td></tr>'
+            _poo_sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">シグナル時点BT≥60の取引なし</td></tr>'
         if not _poo_rows:
             _poo_rows = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:12px">データなし</td></tr>'
         _preoos_section_html = f"""
-<h2>⑩ OOS前BTスコア別成績
+<h2>⑩ シグナル時点BTスコア別成績
   <span style="color:#94a3b8;font-size:0.8rem;font-weight:400">
-    バイアスなし / {_poo_cutoff_label} 以前のデータでBTスコア計算
+    {_poo_cutoff_label}
   </span>
 </h2>
 <p class="footnote" style="margin-bottom:8px">
-  「OOS前BTスコア」= <strong>{_poo_cutoff_label}</strong> 以前のデータのみで計算したBTスコア。
-  現在表示しているOOS期間のトレードにバイアスがない純粋な事前評価スコアです。
+  「シグナル時点BTスコア」= シグナル発生月の月初時点（その月より前の完了済み取引のみ）でBTスコアを計算。
+  今日のスコアではなく、シグナルが出た時点での評価スコアです（月次バケット化）。
   メインのBTスコア（② 欄に表示）は変更されません。<br>
   ★★★≥80が最も信頼性高。このスコアが高い銘柄のOOS成績を確認してください。
 </p>
 <table>
   <thead><tr>
-    <th style="text-align:left">OOS前BTスコア帯</th>
+    <th style="text-align:left">シグナル時点BTスコア帯</th>
     <th>取引数</th><th>勝率</th><th>PF</th>
     <th style="color:#4ade80">利益</th>
     <th style="color:#f87171">損失</th>
@@ -6504,17 +6584,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <tbody>{_poo_rows}</tbody>
 </table>
 
-<h2 style="margin-top:20px">OOS前BT≥60 銘柄別成績</h2>
+<h2 style="margin-top:20px">シグナル時点BT≥60 銘柄別成績</h2>
 <p class="footnote" style="margin-bottom:8px">
-  OOS前BTスコア≥60の銘柄ごとの損益集計。
-  <strong>OOS前BT</strong> = バイアスなしスコア / <strong>BT</strong> = 現行スコア（参考）。
+  シグナル時点BTスコア≥60の銘柄ごとの損益集計。
+  <strong>シグナル時点BT</strong> = シグナル発生月時点のスコア / <strong>BT(現行)</strong> = 今日のスコア（参考）。
   <span style="color:#f87171">■</span> = 損失-3万超、<span style="color:#4ade80">■</span> = 利益+5万超。
 </p>
 <table>
   <thead><tr>
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
-    <th style="color:#10b981">OOS前BT</th>
+    <th style="color:#10b981">シグナル時点BT</th>
     <th style="color:#fbbf24">BT(現行)</th>
     <th>取引数</th><th>勝率</th><th>PF</th>
     <th style="color:#4ade80">利益</th>
@@ -6527,10 +6607,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
-    _preoos_tab_btn = (
-        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ OOS前BTスコア</button>'
-        if preoos_cutoff_days and _preoos_score_map else ""
-    )
+    _preoos_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ シグナル時点BTスコア</button>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
