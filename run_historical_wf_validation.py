@@ -44,6 +44,12 @@ from pathlib import Path
 if "--aggressive" in sys.argv:
     os.environ["TRADING_MODE"] = "aggressive"
 
+# OpenBLAS/MKL が ThreadPoolExecutor の各ワーカー内でさらにスレッドを起動しないよう制限。
+# これを pandas/numpy より前に設定しないと効果がない。
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import pandas as pd
 
 from backtest_limit_entry import (
