@@ -4087,7 +4087,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 base = {"label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "score": _sig_sc, "rank": _sig_rank,
-                        "is_wf": is_wf2, "wf_score": wf_score2, "rec_score": rec_score2,
+                        "is_wf": is_wf2, "wf_score": wf_score2,
+                        "rec_score": _sig_sc,   # BT表示・フィルタも発生時スコアで統一
                         "preoos_score": _sig_sc,
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
