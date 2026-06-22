@@ -368,6 +368,43 @@ def _build_watchlist(
 
 
 # ────────────────────────────────────────────────────────────
+# BT スコア計算（as_of でトリム済みの df を使用）
+# ────────────────────────────────────────────────────────────
+def _compute_bt_score_at(sym: str, name: str, df: "pd.DataFrame", strat: str) -> int:
+    """df を as_of でトリム済みとして BT スコアを計算（calc_recommend_score と同一式）"""
+    if strat not in STRATEGY_DEFS:
+        return 0
+    calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
+    PERIODS = [30, 60, 90, 120, 150, 180]
+    as_of_date = df.index[-1].date() if len(df) > 0 else TODAY
+
+    pf_list, wr_list, pnl_list, trade_list = [], [], [], []
+    for days in PERIODS:
+        ws = as_of_date - timedelta(days=days)
+        we = as_of_date
+        try:
+            r = _run_window_abs(sym, name, df, calc_fn, em, sm, tm,
+                                ws, we, strat, entry_type=entry_type)
+        except Exception:
+            continue
+        if r and r.get("trades", 0) > 0:
+            raw_pf = r.get("pf", 0)
+            capped  = 10.0 if raw_pf == float("inf") else min(raw_pf, 10.0)
+            pf_list.append(capped)
+            wr_list.append(r.get("win_rate", 0))
+            pnl_list.append(r.get("total_pnl", 0))
+            trade_list.append(r.get("trades", 0))
+
+    if not pf_list:
+        return 0
+    avg_pf  = sum(pf_list) / len(pf_list)
+    avg_wr  = sum(wr_list) / len(wr_list)
+    t_trades = sum(trade_list)
+    stable  = sum(1 for p in pnl_list if p > 0) / len(pnl_list)
+    return round(avg_wr * 0.4 + (avg_pf / 10) * 30 + stable * 20 + min(t_trades / 20, 1) * 10)
+
+
+# ────────────────────────────────────────────────────────────
 # 年次 P&L 計算
 # ────────────────────────────────────────────────────────────
 def _compute_yearly_pnl(
@@ -375,6 +412,7 @@ def _compute_yearly_pnl(
     brk_wl:  list[tuple[str, str, str]],
     as_of: date,
     workers: int,
+    bt_threshold: int = 0,
 ) -> dict[int, dict]:
     """年ごとの P&L を計算。返り値: {year: {pnl, trades, wins}}"""
     years = list(range(as_of.year, TODAY.year + 1))
@@ -394,6 +432,24 @@ def _compute_yearly_pnl(
             except Exception:
                 df = None
             unique_syms[sym] = df
+
+    # BT スコアフィルター（bt_threshold > 0 の場合のみ適用）
+    filtered_items = []
+    for sym, nm, strat in all_items:
+        df = unique_syms.get(sym)
+        if df is None:
+            continue
+        if bt_threshold > 0:
+            try:
+                score = _compute_bt_score_at(sym, nm, df, strat)
+            except Exception:
+                score = 0
+            if score < bt_threshold:
+                continue
+        filtered_items.append((sym, nm, strat))
+
+    if not filtered_items:
+        return acc
 
     def _run_item_year(args_tuple):
         sym, nm, strat, year = args_tuple
@@ -419,7 +475,7 @@ def _compute_yearly_pnl(
         wins   = sum(1 for t in r.get("trade_log", []) if t.get("pnl", 0) > 0)
         return year, pnl, trades, wins
 
-    tasks = [(sym, nm, strat, year) for sym, nm, strat in all_items for year in years]
+    tasks = [(sym, nm, strat, year) for sym, nm, strat in filtered_items for year in years]
 
     with ThreadPoolExecutor(max_workers=workers) as exe:
         for year, pnl, trades, wins in exe.map(_run_item_year, tasks):
@@ -433,12 +489,12 @@ def _compute_yearly_pnl(
 # ────────────────────────────────────────────────────────────
 # 年次成績推移 HTML
 # ────────────────────────────────────────────────────────────
-def _yearly_analysis_html(periods: list[dict]) -> str:
-    """年次成績推移マトリックステーブルの HTML を生成"""
+def _make_yearly_table(periods: list[dict], pnl_key: str) -> str:
+    """年次成績マトリックステーブルの HTML を生成（pnl_key でデータキーを指定）"""
     all_years = sorted({
         year
         for p in periods
-        for year in p.get("yearly_pnl", {}).keys()
+        for year in p.get(pnl_key, {}).keys()
     })
     if not all_years:
         return "<p class='subtitle'>データなし</p>"
@@ -455,7 +511,7 @@ def _yearly_analysis_html(periods: list[dict]) -> str:
     for i, p in enumerate(periods):
         as_of     = p["as_of"]
         oos_days  = (TODAY - as_of).days
-        yearly    = p.get("yearly_pnl", {})
+        yearly    = p.get(pnl_key, {})
         bg        = "#1e293b" if i % 2 == 0 else "#0f172a"
 
         oos_label = f"OOS {oos_days // 365}年{(oos_days % 365) // 30}ヶ月"
@@ -534,8 +590,6 @@ def _yearly_analysis_html(periods: list[dict]) -> str:
     )
 
     return (
-        f'<h2>起点年別 年次成績推移</h2>'
-        f'<p class="subtitle">各起点年の HO180d 選定 WATCHLIST で、毎年の OOS P&L を集計</p>'
         f'<div style="overflow-x:auto">'
         f'<table style="border-collapse:collapse;width:100%;font-size:0.88em">'
         f'<thead><tr>'
@@ -549,6 +603,26 @@ def _yearly_analysis_html(periods: list[dict]) -> str:
         f'</tbody>'
         f'</table>'
         f'</div>'
+    )
+
+
+def _yearly_analysis_html(periods: list[dict]) -> str:
+    """年次成績推移（BT スコアフィルター 3 サブタブ）の HTML を生成"""
+    table_all  = _make_yearly_table(periods, "yearly_pnl_all")
+    table_bt60 = _make_yearly_table(periods, "yearly_pnl_60")
+    table_bt80 = _make_yearly_table(periods, "yearly_pnl_80")
+
+    return (
+        f'<h2>起点年別 年次成績推移</h2>'
+        f'<p class="subtitle">各起点年の HO180d 選定 WATCHLIST で、毎年の OOS P&L を集計</p>'
+        f'<div style="margin-bottom:16px">'
+        f'<button class="ho-period-btn ytab-btn active" onclick="switchYTab(\'all\',this)">全銘柄</button>'
+        f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt60\',this)">BT≥60</button>'
+        f'<button class="ho-period-btn ytab-btn" onclick="switchYTab(\'bt80\',this)">BT≥80</button>'
+        f'</div>'
+        f'<div id="ytab-all" style="display:block">{table_all}</div>'
+        f'<div id="ytab-bt60" style="display:none">{table_bt60}</div>'
+        f'<div id="ytab-bt80" style="display:none">{table_bt80}</div>'
     )
 
 
@@ -685,6 +759,14 @@ function switchHoPeriod(days) {
   document.getElementById('hd' + days).style.display = 'block';
   (event.target.closest('.ho-period-btn') || event.target).classList.add('active');
 }
+function switchYTab(name, btn) {
+  ['all','bt60','bt80'].forEach(function(n) {
+    var el = document.getElementById('ytab-' + n);
+    if (el) el.style.display = (n === name) ? 'block' : 'none';
+  });
+  document.querySelectorAll('.ytab-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+}
 """
 
     n_configs = sum(
@@ -815,10 +897,12 @@ def main() -> None:
             })
 
         period: dict = {
-            "as_of":       as_of,
-            "ho_results":  ho_results,
-            "oos_html":    "",
-            "yearly_pnl":  {},
+            "as_of":           as_of,
+            "ho_results":      ho_results,
+            "oos_html":        "",
+            "yearly_pnl_all":  {},
+            "yearly_pnl_60":   {},
+            "yearly_pnl_80":   {},
         }
 
         # ── OOS 評価（6 HO 設定を一括）─────────────────────────────
@@ -836,14 +920,21 @@ def main() -> None:
         stop_wl_180 = ho180_data.get("stop_wl", [])
         brk_wl_180  = ho180_data.get("brk_wl",  [])
         if not args.scan_only and (stop_wl_180 or brk_wl_180):
+            n_stop = len(stop_wl_180)
+            n_brk  = len(brk_wl_180)
             print(
-                f"  年次成績計算中（HO180d: Stop {len(stop_wl_180)}銘柄"
-                f" / Breakout {len(brk_wl_180)}銘柄）...",
+                f"  年次成績計算中（HO180d: Stop {n_stop}銘柄 / Breakout {n_brk}銘柄）...",
                 flush=True,
             )
             try:
-                period["yearly_pnl"] = _compute_yearly_pnl(
-                    stop_wl_180, brk_wl_180, as_of, args.workers
+                period["yearly_pnl_all"] = _compute_yearly_pnl(
+                    stop_wl_180, brk_wl_180, as_of, args.workers, 0
+                )
+                period["yearly_pnl_60"]  = _compute_yearly_pnl(
+                    stop_wl_180, brk_wl_180, as_of, args.workers, 60
+                )
+                period["yearly_pnl_80"]  = _compute_yearly_pnl(
+                    stop_wl_180, brk_wl_180, as_of, args.workers, 80
                 )
             except Exception as e:
                 print(f"  [WARN] 年次 P&L 計算失敗: {e}")
