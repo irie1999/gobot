@@ -368,6 +368,191 @@ def _build_watchlist(
 
 
 # ────────────────────────────────────────────────────────────
+# 年次 P&L 計算
+# ────────────────────────────────────────────────────────────
+def _compute_yearly_pnl(
+    stop_wl: list[tuple[str, str, str]],
+    brk_wl:  list[tuple[str, str, str]],
+    as_of: date,
+    workers: int,
+) -> dict[int, dict]:
+    """年ごとの P&L を計算。返り値: {year: {pnl, trades, wins}}"""
+    years = list(range(as_of.year, TODAY.year + 1))
+    acc: dict[int, dict] = {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in years}
+
+    all_items = list(stop_wl) + list(brk_wl)
+    if not all_items:
+        return acc
+
+    # ユニークシンボルを先にまとめてフェッチ（キャッシュ活用、順次実行）
+    unique_syms: dict[str, object] = {}
+    since_date = date(as_of.year, 1, 1) - timedelta(days=90)
+    for sym, nm, strat in all_items:
+        if sym not in unique_syms:
+            try:
+                df = fetch(sym, (TODAY - since_date).days + 60, min_start_date=since_date)
+            except Exception:
+                df = None
+            unique_syms[sym] = df
+
+    def _run_item_year(args_tuple):
+        sym, nm, strat, year = args_tuple
+        df_full = unique_syms.get(sym)
+        if df_full is None or len(df_full) < 10:
+            return year, 0.0, 0, 0
+        if strat not in STRATEGY_DEFS:
+            return year, 0.0, 0, 0
+        calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
+        y_start = max(date(year, 1, 1), as_of)
+        y_end   = min(date(year, 12, 31), TODAY)
+        if y_start >= y_end:
+            return year, 0.0, 0, 0
+        try:
+            r = _run_window_abs(sym, nm, df_full, calc_fn, em, sm, tm,
+                                y_start, y_end, strat, entry_type=entry_type)
+        except Exception:
+            return year, 0.0, 0, 0
+        if not r:
+            return year, 0.0, 0, 0
+        pnl    = r.get("total_pnl", 0.0)
+        trades = r.get("trades", 0)
+        wins   = sum(1 for t in r.get("trade_log", []) if t.get("pnl", 0) > 0)
+        return year, pnl, trades, wins
+
+    tasks = [(sym, nm, strat, year) for sym, nm, strat in all_items for year in years]
+
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        for year, pnl, trades, wins in exe.map(_run_item_year, tasks):
+            acc[year]["pnl"]    += pnl
+            acc[year]["trades"] += trades
+            acc[year]["wins"]   += wins
+
+    return acc
+
+
+# ────────────────────────────────────────────────────────────
+# 年次成績推移 HTML
+# ────────────────────────────────────────────────────────────
+def _yearly_analysis_html(periods: list[dict]) -> str:
+    """年次成績推移マトリックステーブルの HTML を生成"""
+    all_years = sorted({
+        year
+        for p in periods
+        for year in p.get("yearly_pnl", {}).keys()
+    })
+    if not all_years:
+        return "<p class='subtitle'>データなし</p>"
+
+    header_cells = "".join(
+        f'<th style="padding:8px 14px;text-align:center;color:#94a3b8;'
+        f'border-bottom:1px solid #334155">{y}年</th>'
+        for y in all_years
+    )
+
+    rows_html = ""
+    col_totals: dict[int, dict] = {y: {"pnl": 0.0, "trades": 0, "wins": 0} for y in all_years}
+
+    for i, p in enumerate(periods):
+        as_of     = p["as_of"]
+        oos_days  = (TODAY - as_of).days
+        yearly    = p.get("yearly_pnl", {})
+        bg        = "#1e293b" if i % 2 == 0 else "#0f172a"
+
+        oos_label = f"OOS {oos_days // 365}年{(oos_days % 365) // 30}ヶ月"
+        row_hdr = (
+            f'<td style="padding:8px 14px;color:#60a5fa;font-weight:bold;'
+            f'white-space:nowrap;background:{bg}">'
+            f'{as_of.year}年起点'
+            f'<span style="display:block;font-size:0.75em;color:#94a3b8;font-weight:normal">'
+            f'{oos_label}</span></td>'
+        )
+
+        cells = ""
+        for y in all_years:
+            if y < as_of.year:
+                cells += (
+                    f'<td style="text-align:center;color:#475569;'
+                    f'padding:8px 14px;background:{bg}">—</td>'
+                )
+                continue
+            data = yearly.get(y, {})
+            pnl    = data.get("pnl", 0.0)
+            trades = data.get("trades", 0)
+            wins   = data.get("wins", 0)
+            if trades == 0:
+                cells += (
+                    f'<td style="text-align:center;color:#475569;'
+                    f'padding:8px 14px;background:{bg}">—</td>'
+                )
+                continue
+            col_totals[y]["pnl"]    += pnl
+            col_totals[y]["trades"] += trades
+            col_totals[y]["wins"]   += wins
+            wr = wins / trades * 100 if trades > 0 else 0.0
+            man_yen = pnl / 10000
+            color   = "#4ade80" if pnl >= 0 else "#f87171"
+            sign    = "+" if pnl >= 0 else ""
+            cells += (
+                f'<td style="text-align:center;padding:8px 14px;background:{bg}">'
+                f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
+                f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
+                f'</td>'
+            )
+
+        rows_html += f'<tr>{row_hdr}{cells}</tr>\n'
+
+    # 累計合計行
+    total_cells = ""
+    for y in all_years:
+        d      = col_totals[y]
+        pnl    = d["pnl"]
+        trades = d["trades"]
+        wins   = d["wins"]
+        if trades == 0:
+            total_cells += (
+                '<td style="text-align:center;color:#475569;'
+                'padding:8px 14px;background:#1e3a5f">—</td>'
+            )
+        else:
+            wr      = wins / trades * 100
+            man_yen = pnl / 10000
+            color   = "#4ade80" if pnl >= 0 else "#f87171"
+            sign    = "+" if pnl >= 0 else ""
+            total_cells += (
+                f'<td style="text-align:center;padding:8px 14px;background:#1e3a5f">'
+                f'<span style="color:{color};font-weight:bold">{sign}{man_yen:.1f}万</span>'
+                f'<br><span style="color:#94a3b8;font-size:0.78em">{trades}件 {wr:.0f}%</span>'
+                f'</td>'
+            )
+
+    total_row = (
+        f'<tr>'
+        f'<td style="padding:8px 14px;color:#fbbf24;font-weight:bold;background:#1e3a5f">'
+        f'累計合計</td>'
+        f'{total_cells}'
+        f'</tr>'
+    )
+
+    return (
+        f'<h2>起点年別 年次成績推移</h2>'
+        f'<p class="subtitle">各起点年の HO180d 選定 WATCHLIST で、毎年の OOS P&L を集計</p>'
+        f'<div style="overflow-x:auto">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:0.88em">'
+        f'<thead><tr>'
+        f'<th style="padding:8px 14px;text-align:left;color:#94a3b8;border-bottom:1px solid #334155">'
+        f'起点年</th>'
+        f'{header_cells}'
+        f'</tr></thead>'
+        f'<tbody>'
+        f'{rows_html}'
+        f'{total_row}'
+        f'</tbody>'
+        f'</table>'
+        f'</div>'
+    )
+
+
+# ────────────────────────────────────────────────────────────
 # OOS 損益 HTML 生成（1 as_of × 6 HO configs を一括評価）
 # ────────────────────────────────────────────────────────────
 def _eval_oos_html(
@@ -447,6 +632,19 @@ def _build_combined_html(periods: list[dict]) -> str:
             f'{inner}'
             f'</div>'
         )
+
+    # 年次成績推移タブ
+    tab_btns.append(
+        '<button class="ho-outer-btn" onclick="switchHoTab(\'yearly\')">'
+        '年次成績推移'
+        '<span class="subtitle" style="display:block;font-size:0.75em;opacity:0.8">起点年別 年次P&L</span>'
+        '</button>'
+    )
+    tab_panes.append(
+        f'<div id="ho-yearly" class="ho-outer-pane" style="display:none">'
+        f'{_yearly_analysis_html(periods)}'
+        f'</div>'
+    )
 
     # 現行 run_signals_holdout_all.py と同じ追加 CSS
     extra_css = """
@@ -617,9 +815,10 @@ def main() -> None:
             })
 
         period: dict = {
-            "as_of":      as_of,
-            "ho_results": ho_results,
-            "oos_html":   "",
+            "as_of":       as_of,
+            "ho_results":  ho_results,
+            "oos_html":    "",
+            "yearly_pnl":  {},
         }
 
         # ── OOS 評価（6 HO 設定を一括）─────────────────────────────
@@ -631,6 +830,23 @@ def main() -> None:
             period["oos_html"] = _eval_oos_html(as_of, ho_pnl_configs, args.workers)
         elif not has_any:
             print("  ⚠ 全 HO 設定で選定銘柄 0 件のため OOS 評価をスキップ")
+
+        # ── 年次 P&L 計算（HO180d WATCHLIST を使用）────────────────
+        ho180_data  = ho_results.get("HO180d", {})
+        stop_wl_180 = ho180_data.get("stop_wl", [])
+        brk_wl_180  = ho180_data.get("brk_wl",  [])
+        if not args.scan_only and (stop_wl_180 or brk_wl_180):
+            print(
+                f"  年次成績計算中（HO180d: Stop {len(stop_wl_180)}銘柄"
+                f" / Breakout {len(brk_wl_180)}銘柄）...",
+                flush=True,
+            )
+            try:
+                period["yearly_pnl"] = _compute_yearly_pnl(
+                    stop_wl_180, brk_wl_180, as_of, args.workers
+                )
+            except Exception as e:
+                print(f"  [WARN] 年次 P&L 計算失敗: {e}")
 
         periods.append(period)
         print()
