@@ -449,17 +449,11 @@ def _compute_yearly_pnl_multi(
         return empty
 
     need_bt = any(t > 0 for t in thresholds)
-    # ローリング: {(sym, strat): {year: bt_score}}
-    # 各年の1月1日時点（as_of 以降）のBTスコアを保持
-    bt_scores_rolling: dict[tuple, dict[int, int]] = {}
+    # シグナル日単位: {(sym, strat): {signal_date: bt_score}}
+    # 各シグナル発生日時点のデータでBTスコアを計算（ローリング・日次精度）
+    bt_scores_by_sig: dict[tuple, dict] = {}
     trade_logs: dict[tuple, list] = {}
     lock = threading.Lock()
-
-    # 各年のBTスコア計算基準日（as_of 以降の各年1月1日）
-    year_eval_dates = {
-        y: max(date(y, 1, 1), as_of)
-        for y in years
-    }
 
     def _run_one(sym_nm_strat):
         sym, nm, strat = sym_nm_strat
@@ -472,17 +466,7 @@ def _compute_yearly_pnl_multi(
         if df is None or len(df) < 10:
             return
 
-        # ローリングBTスコア: 各年1月1日時点のスコアを計算
-        scores_by_year: dict[int, int] = {}
-        if need_bt:
-            for y, eval_dt in year_eval_dates.items():
-                try:
-                    df_at = df[df.index <= pd.Timestamp(eval_dt)]
-                    scores_by_year[y] = _compute_bt_score_at(sym, nm, df_at, strat) if len(df_at) >= 10 else 0
-                except Exception:
-                    scores_by_year[y] = 0
-
-        # 全OOS期間バックテスト（as_of〜TODAY）
+        # 全OOS期間バックテスト（as_of〜TODAY）— 先に実行してシグナル日を収集
         calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strat]
         try:
             r = _run_window_abs(sym, nm, df, calc_fn, em, sm, tm,
@@ -491,8 +475,26 @@ def _compute_yearly_pnl_multi(
             return
         tlog = r.get("trade_log", []) if r else []
 
+        # シグナル日ごとのBTスコアを計算（dfはメモリ上にあるのでI/Oコストなし）
+        sig_scores: dict = {}
+        if need_bt:
+            unique_sig_dates: set = set()
+            for trade in tlog:
+                sig_dt = trade.get("signal_dt")
+                if sig_dt is not None:
+                    try:
+                        unique_sig_dates.add(pd.Timestamp(sig_dt).date())
+                    except Exception:
+                        pass
+            for sig_date in unique_sig_dates:
+                try:
+                    df_at = df[df.index <= pd.Timestamp(sig_date)]
+                    sig_scores[sig_date] = _compute_bt_score_at(sym, nm, df_at, strat) if len(df_at) >= 10 else 0
+                except Exception:
+                    sig_scores[sig_date] = 0
+
         with lock:
-            bt_scores_rolling[(sym, strat)] = scores_by_year
+            bt_scores_by_sig[(sym, strat)] = sig_scores
             trade_logs[(sym, strat)] = tlog
 
     with ThreadPoolExecutor(max_workers=workers) as exe:
@@ -508,13 +510,14 @@ def _compute_yearly_pnl_multi(
         seen: set[tuple] = set()
         for cfg in ho_pnl_configs:
             for sym, nm, strat in list(cfg.get("stop_wl", [])) + list(cfg.get("brk_wl", [])):
-                yr_scores = bt_scores_rolling.get((sym, strat), {})
+                sig_scores = bt_scores_by_sig.get((sym, strat), {})
                 for trade in trade_logs.get((sym, strat), []):
                     sig_dt = trade.get("signal_dt")
                     if sig_dt is None:
                         continue
                     try:
-                        sig_key = (sym, strat, pd.Timestamp(sig_dt).date())
+                        sig_date = pd.Timestamp(sig_dt).date()
+                        sig_key  = (sym, strat, sig_date)
                     except Exception:
                         continue
                     if sig_key in seen:
@@ -531,9 +534,9 @@ def _compute_yearly_pnl_multi(
                     if year not in years_set:
                         continue
 
-                    # ローリングBTフィルター: その年のBTスコアで判定
+                    # シグナル日時点のBTスコアで判定（日次精度ローリング）
                     if t > 0:
-                        bt_score = yr_scores.get(year, 0)
+                        bt_score = sig_scores.get(sig_date, 0)
                         if bt_score < t:
                             continue
 
@@ -801,7 +804,7 @@ def _yearly_inline_html(period: dict) -> str:
   </h3>
   <p style="color:#f59e0b;font-size:0.8em;margin:0 0 12px 0">
     ⚠ 下の「直近{oos_days}日 取引損益」は内部制限により直近365日分のみの集計です。上の年次内訳が全OOS期間の正確な数値です。<br>
-    📊 BT≥70 フィルターはローリング方式（各年1月1日時点のBTスコア）で適用しています。
+    📊 BT≥70/80/90 フィルターはシグナル発生日時点のBTスコアで判定しています（日次精度ローリング）。
   </p>
   <div style="overflow-x:auto">
     <table style="border-collapse:collapse;font-size:0.88em;width:auto">
@@ -818,15 +821,15 @@ def _yearly_inline_html(period: dict) -> str:
           {row_all}
         </tr>
         <tr style="border-top:1px solid #1e293b">
-          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥70<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
+          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥70<br><span style="font-size:0.72em;color:#64748b">シグナル日時点</span></td>
           {row_70}
         </tr>
         <tr style="border-top:1px solid #1e293b">
-          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥80<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
+          <td style="padding:6px 12px;color:#94a3b8;white-space:nowrap">BT≥80<br><span style="font-size:0.72em;color:#64748b">シグナル日時点</span></td>
           {row_80}
         </tr>
         <tr style="border-top:1px solid #1e293b">
-          <td style="padding:6px 12px;color:#fbbf24;white-space:nowrap">BT≥90<br><span style="font-size:0.72em;color:#64748b">各年1月1日時点</span></td>
+          <td style="padding:6px 12px;color:#fbbf24;white-space:nowrap">BT≥90<br><span style="font-size:0.72em;color:#64748b">シグナル日時点</span></td>
           {row_90}
         </tr>
       </tbody>
