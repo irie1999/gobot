@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 import time
 from datetime import date, timedelta
@@ -43,6 +44,26 @@ import pandas as pd
 TEST_CSV = "test_positions.csv"
 TEST_QTY = 100
 CASH_MARGIN = 3   # 3=信用返済（テストポジションは信用想定）
+CTX_FILE  = ".test_ctx.json"   # S1 の結果を保存してプロセス間で共有
+
+
+# ── ctx の保存・読み込み ──────────────────────────────────────────────────────
+
+def _save_ctx(ctx: dict) -> None:
+    Path(CTX_FILE).write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_ctx(symbol: str) -> dict | None:
+    p = Path(CTX_FILE)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if data.get("symbol") == symbol:
+            return data
+    except Exception:
+        pass
+    return None
 
 
 # ── ユーティリティ ────────────────────────────────────────────────────────────
@@ -131,13 +152,16 @@ def s1_connect(symbol: str, execute: bool) -> dict:
     print(f"    損切り逆指値（損切り）:   @≤ {stop_p:,} 円  (現在値の-{(1-stop_p/price)*100:.1f}%)")
     print(f"    利確指値（目標）:         @ {target_p:,} 円  (現在値の+{(target_p/price-1)*100:.1f}%)")
 
-    return {
+    ctx = {
         "symbol": symbol,
         "price": price,
         "order_p": order_p,
         "stop_p": stop_p,
         "target_p": target_p,
     }
+    _save_ctx(ctx)
+    _ok(f"ctx を {CTX_FILE} に保存しました（次回 S2〜S9 実行時に自動読み込み）")
+    return ctx
 
 
 def s2_entry(ctx: dict, execute: bool) -> None:
@@ -196,13 +220,13 @@ def s2_entry(ctx: dict, execute: bool) -> None:
         print(f"\n  dry-run のため S3 では手動で holding に更新してシミュレートします")
 
 
-def s3_sync(ctx: dict, execute: bool) -> None:
+def s3_sync(ctx: dict, execute: bool, force_holding: bool = False) -> None:
     """S3: 約定確認 → test_positions.csv に反映"""
     _header("S3: 約定確認 → test_positions.csv 反映")
 
     sym = ctx["symbol"]
 
-    if execute:
+    if execute and not force_holding:
         import subprocess
         cmd = [sys.executable, "kabu_position_sync.py", "--log", TEST_CSV, "--execute"]
         subprocess.run(cmd)
@@ -212,21 +236,29 @@ def s3_sync(ctx: dict, execute: bool) -> None:
             _ok(f"holding に更新された銘柄: {[r['symbol'] for r in holding]}")
         else:
             _warn("まだ pending のまま（約定していないか照合できなかった）")
-            print("  → kabu 注文一覧で状態を確認してください")
-    else:
-        # dry-run: pending → holding に手動でシミュレート
+            print("  → テストを続けるには --force-holding を付けて S3 を再実行してください:")
+            print(f"     python run_scenario_test.py --scenario 3 --execute --force-holding --symbol {sym}")
+    elif force_holding:
+        # kabu照合なしで強制的にholding化（テスト継続用）
         today = str(date.today())
         yesterday = str(date.today() - timedelta(days=1))
         rows = _read_test_csv()
+        updated = 0
         for r in rows:
             if r.get("symbol") == sym and r.get("status") == "pending":
-                r["status"]     = "holding"
-                r["fill_date"]  = yesterday
-                r["fill_price"] = str(ctx["price"])
+                r["status"]       = "holding"
+                r["fill_date"]    = yesterday
+                r["fill_price"]   = str(ctx["price"])
                 r["updated_date"] = today
+                updated += 1
         _write_test_csv(rows)
-        _ok(f"[dry-run] {sym} を pending → holding にシミュレート "
-            f"(fill_date={yesterday}, fill_price={ctx['price']:.1f})")
+        mode = "" if execute else "[dry-run] "
+        _ok(f"{mode}{sym} を pending → holding に強制更新 "
+            f"(fill_date={yesterday}, fill_price={ctx['price']:.1f}) {updated}件")
+        if execute:
+            _warn("注意: kabu の実際の約定価格ではなく S1 の価格を使っています")
+    else:
+        print(f"\n  dry-run のため S3 では手動で holding に更新してシミュレートします")
 
 
 def s4_stop_orders(ctx: dict, execute: bool) -> None:
@@ -251,6 +283,21 @@ def s5_profit_orders(ctx: dict, execute: bool) -> None:
     subprocess.run(cmd)
 
 
+def _get_real_price(sym: str, fallback: float, execute: bool) -> float:
+    """execute モードなら kabu から現在値を取得。失敗したら fallback を返す。"""
+    if not execute:
+        return fallback
+    try:
+        cli = _make_cli(prod=False, dry_run=False)
+        p = cli.get_current_price(sym)
+        if p and p > 0:
+            return p
+    except Exception:
+        pass
+    _warn(f"{sym}: kabu から現在値を取得できませんでした。S1 の価格 {fallback:.1f} を使います")
+    return fallback
+
+
 def s6_stop_loss_moc(ctx: dict, execute: bool) -> None:
     """S6: 損切りライン抵触 → 引け成行（MOC）確認
     テスト用に stop_price を現在値より高く設定してシミュレート
@@ -258,7 +305,7 @@ def s6_stop_loss_moc(ctx: dict, execute: bool) -> None:
     _header("S6: 損切りライン抵触 → 引け成行（MOC）確認")
 
     sym   = ctx["symbol"]
-    price = ctx["price"]
+    price = _get_real_price(sym, ctx["price"], execute)
 
     # stop_price を現在値より高く設定（わざと損切りラインを突破させる）
     fake_stop = round(price * 1.10)  # 現在値+10% → 必ず「割った」状態
@@ -297,23 +344,25 @@ def s7_profit_moc(ctx: dict, execute: bool) -> None:
     _header("S7: 利確ライン到達 → 引け成行（MOC）確認")
 
     sym   = ctx["symbol"]
-    price = ctx["price"]
+    price = _get_real_price(sym, ctx["price"], execute)
 
     # target_price を現在値より低く設定（「超えた」状態にする）
-    fake_target = round(price * 0.90)  # 現在値-10% → 必ず「到達」
+    # ただし stop_price より高く設定して損切りより利確が先に判定されるようにする
+    fake_stop   = round(price * 0.50)  # 損切りは現在値の半値以下（絶対に発火しない）
+    fake_target = round(price * 0.90)  # 利確は現在値の-10%（必ず到達済み）
     print(f"  テスト: {sym} の target_price を {fake_target:,}円（現在値-10%）に設定")
-    print(f"  （現在値={price:.1f}円 > target_price={fake_target:,}円 → 利確到達）")
+    print(f"  （現在値={price:.1f}円 >= target_price={fake_target:,}円 → 利確到達）")
 
     rows = _read_test_csv()
     for r in rows:
         if r.get("symbol") == sym:
             r["target_price"] = fake_target
-            r["stop_price"] = ctx["stop_p"]
-            r["status"] = "holding"
-            r["fill_date"] = str(date.today() - timedelta(days=1))
-            r["fill_price"] = str(price)
+            r["stop_price"]   = fake_stop
+            r["status"]       = "holding"
+            r["fill_date"]    = str(date.today() - timedelta(days=1))
+            r["fill_price"]   = str(price)
     _write_test_csv(rows)
-    _ok(f"{TEST_CSV} の target_price を {fake_target:,} 円に更新")
+    _ok(f"{TEST_CSV} の target_price を {fake_target:,} 円・stop_price を {fake_stop:,} 円に更新")
 
     import subprocess
     cmd = [sys.executable, "close_stop_guard.py", "--log", TEST_CSV]
@@ -336,6 +385,7 @@ def s8_timecut_moc(ctx: dict, execute: bool) -> None:
 
     from backtest_limit_entry import default_max_hold
     sym      = ctx["symbol"]
+    price    = _get_real_price(sym, ctx["price"], execute)
     strat    = "TEST"
     max_hold = default_max_hold(strat)  # 15日
 
@@ -344,14 +394,18 @@ def s8_timecut_moc(ctx: dict, execute: bool) -> None:
     print(f"  テスト: {sym} の fill_date を {old_date} に設定")
     print(f"  （MAX_HOLD={max_hold}日 → 確実にタイムカット対象）")
 
+    # 損切り・利確を現在値から外れた場所に設定して、タイムカットより先に発火しないようにする
+    safe_stop   = round(price * 0.50)   # 現在値の半値以下（絶対に発火しない）
+    safe_target = round(price * 2.00)   # 現在値の2倍以上（絶対に発火しない）
+
     rows = _read_test_csv()
     for r in rows:
         if r.get("symbol") == sym:
             r["fill_date"]    = old_date
-            r["fill_price"]   = str(ctx["price"])
+            r["fill_price"]   = str(price)
             r["status"]       = "holding"
-            r["stop_price"]   = ctx["stop_p"]
-            r["target_price"] = ctx["target_p"]
+            r["stop_price"]   = safe_stop
+            r["target_price"] = safe_target
     _write_test_csv(rows)
     _ok(f"{TEST_CSV} の fill_date を {old_date} に更新")
 
@@ -412,20 +466,35 @@ def main() -> None:
                     help="実際に kabu へ発注/照会する（省略時は dry-run）")
     ap.add_argument("--symbol", default="7203",
                     help="テスト銘柄コード（デフォルト: 7203 トヨタ）")
+    ap.add_argument("--force-holding", action="store_true",
+                    help="S3 で kabu 照合なしに強制 holding 更新（注文が約定前でもテスト続行）")
+    ap.add_argument("--reset-ctx", action="store_true",
+                    help=f"{CTX_FILE} を削除してコンテキストをリセット")
     ap.add_argument("--list", action="store_true", help="シナリオ一覧を表示して終了")
     args = ap.parse_args()
 
-    if args.list or not (args.scenario or args.all):
+    if args.list or not (args.scenario or args.all or args.reset_ctx):
         print("\nシナリオ一覧:")
         for n, (title, _, needs_kabu) in SCENARIOS.items():
             needs = "（kabu接続必須）" if needs_kabu else ""
             print(f"  S{n}: {title} {needs}")
         print(f"\n使い方:")
-        print(f"  python {Path(__file__).name} --scenario 1          # S1 だけ")
-        print(f"  python {Path(__file__).name} --all                  # S1〜S9 全部")
-        print(f"  python {Path(__file__).name} --all --execute        # 実発注あり")
-        print(f"  python {Path(__file__).name} --scenario 6 7 8      # 決済シナリオのみ")
+        print(f"  python {Path(__file__).name} --scenario 1 --execute    # S1 だけ（kabu接続）")
+        print(f"  python {Path(__file__).name} --scenario 3 --execute --force-holding  # 強制holding")
+        print(f"  python {Path(__file__).name} --all --execute            # S1〜S9 全部")
+        print(f"  python {Path(__file__).name} --scenario 6 7 8 --execute # 決済シナリオのみ")
+        print(f"  python {Path(__file__).name} --reset-ctx                # コンテキストをリセット")
         return
+
+    if args.reset_ctx:
+        p = Path(CTX_FILE)
+        if p.exists():
+            p.unlink()
+            print(f"✓ {CTX_FILE} を削除しました")
+        else:
+            print(f"ℹ {CTX_FILE} は存在しません")
+        if not (args.scenario or args.all):
+            return
 
     targets = list(range(1, 10)) if args.all else sorted(set(args.scenario))
     invalid = [n for n in targets if n not in SCENARIOS]
@@ -437,22 +506,24 @@ def main() -> None:
         print("\n[DRY-RUN モード] kabu への実発注・CSV更新はしません")
         print("実際に動かすには --execute を付けてください\n")
 
-    # S1 は必ず最初に実行してコンテキストを作る
-    # S1 が targets に含まれない場合は dry-run のダミー値で初期化する
+    # ctx の初期化: ファイルから読む → なければダミー値
     dummy_price = 3000.0
-    ctx: dict = {
-        "symbol":   args.symbol,
-        "price":    dummy_price,
-        "order_p":  round(dummy_price * 1.01),
-        "stop_p":   round(dummy_price * 0.94),
-        "target_p": round(dummy_price * 1.09),
-    }
-
-    if 1 not in targets:
-        if not args.execute:
-            print(f"\n[DRY-RUN] S1 をスキップして仮の価格を使います")
-            print(f"  仮価格: {ctx['price']:,.0f} → 逆指値={ctx['order_p']:,} "
-                  f"損切={ctx['stop_p']:,} 利確={ctx['target_p']:,}")
+    saved_ctx = _load_ctx(args.symbol)
+    if saved_ctx:
+        ctx = saved_ctx
+        if 1 not in targets:
+            print(f"  前回の S1 価格を読み込みました: {ctx['price']:,.1f}円 ({CTX_FILE})")
+    else:
+        ctx = {
+            "symbol":   args.symbol,
+            "price":    dummy_price,
+            "order_p":  round(dummy_price * 1.01),
+            "stop_p":   round(dummy_price * 0.94),
+            "target_p": round(dummy_price * 1.09),
+        }
+        if 1 not in targets:
+            print(f"  [注意] {CTX_FILE} がありません。先に --scenario 1 --execute を実行してください")
+            print(f"  仮価格 {dummy_price:,.0f}円 を使います（S6/S7/S8 は kabu から実価格を取得）")
 
     for n in targets:
         title, fn, needs_kabu = SCENARIOS[n]
@@ -462,20 +533,19 @@ def main() -> None:
                 if args.execute:
                     ctx = fn(args.symbol, args.execute)
                 else:
-                    # dry-run: S1 は接続なしでダミー値を設定
-                    print(f"\n[DRY-RUN] S1 をスキップして仮の価格を使います")
-                    ctx = {
-                        "symbol":   args.symbol,
-                        "price":    dummy_price,
-                        "order_p":  round(dummy_price * 1.01),
-                        "stop_p":   round(dummy_price * 0.94),
-                        "target_p": round(dummy_price * 1.09),
-                    }
+                    print(f"\n[dry-run] S1: kabu 未接続のためダミー価格を使います")
                     print(f"  仮価格: {ctx['price']:,} → 逆指値={ctx['order_p']:,} "
                           f"損切={ctx['stop_p']:,} 利確={ctx['target_p']:,}")
             except Exception as e:
                 print(f"  ✗ S1 失敗: {e}")
                 sys.exit(1)
+        elif n == 3:
+            try:
+                fn(ctx, args.execute, force_holding=args.force_holding)
+            except Exception as e:
+                print(f"\n  ✗ S{n} 失敗: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             try:
                 fn(ctx, args.execute)
