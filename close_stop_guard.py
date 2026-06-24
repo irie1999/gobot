@@ -68,26 +68,39 @@ JST = timezone(timedelta(hours=9))
 # ────────────────────────────────────────────────────────────
 # 保有ポジションの読み込み
 # ────────────────────────────────────────────────────────────
+_MY_POS_CSV = "my_positions.csv"
+
+
 def _default_log_path(aggressive: bool) -> str:
+    # my_positions.csv が存在すればそちらを優先（kabu station 運用）
+    if not aggressive and Path(_MY_POS_CSV).exists():
+        return _MY_POS_CSV
     return "forward_test_log_aggressive.csv" if aggressive else "forward_test_log.csv"
 
 
 def load_open_positions(log_path: str) -> list[dict]:
-    """forward_test_log.csv から保有中 (filled / holding) のポジションを返す。"""
+    """my_positions.csv または forward_test_log.csv から保有中ポジションを返す。"""
     p = Path(log_path)
     if not p.exists():
         print(f"⚠ ログが見つかりません: {log_path}")
         return []
 
     open_pos: list[dict] = []
+    no_stop: list[str] = []
     with p.open(encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if row.get("status") not in ("filled", "holding"):
                 continue
+            sym = row.get("symbol", "").strip()
+            name = row.get("name", "").strip()
+            sp_raw = row.get("stop_price", "").strip()
             try:
-                stop_price = float(row["stop_price"])
-            except (KeyError, ValueError):
+                stop_price = float(sp_raw) if sp_raw else None
+            except ValueError:
+                stop_price = None
+            if stop_price is None:
+                no_stop.append(f"{sym} {name}")
                 continue
             side = (row.get("side") or "long").strip().lower()
             is_short = side in ("short", "sell", "s")
@@ -97,11 +110,11 @@ def load_open_positions(log_path: str) -> list[dict]:
                 cm = CASH_GENBUTSU
             # ショートは必ず信用建て。CSV が現物(1)になっていたら補正する。
             if is_short and cm == CASH_GENBUTSU:
-                print(f"  ⚠ {row['symbol'].strip()}: ショートなのに cash_margin=1 (現物) → 3 (信用返済) に補正")
+                print(f"  ⚠ {sym}: ショートなのに cash_margin=1 (現物) → 3 (信用返済) に補正")
                 cm = CASH_MARGIN_CLOSE
             open_pos.append({
-                "symbol": row["symbol"].strip(),
-                "name": row.get("name", "").strip(),
+                "symbol": sym,
+                "name": name,
                 "strategy": row.get("strategy", "").strip(),
                 "stop_price": stop_price,
                 "is_short": is_short,
@@ -110,6 +123,9 @@ def load_open_positions(log_path: str) -> list[dict]:
                 "cash_margin": cm,
                 "source": "csv",
             })
+    if no_stop:
+        print(f"  ⚠ 損切り価格未設定のためスキップ ({len(no_stop)}件): {', '.join(no_stop)}")
+        print(f"     → position_server で損切り価格を登録してください")
     return open_pos
 
 
