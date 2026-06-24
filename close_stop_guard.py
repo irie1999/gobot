@@ -94,14 +94,29 @@ def load_open_positions(log_path: str) -> list[dict]:
                 continue
             sym = row.get("symbol", "").strip()
             name = row.get("name", "").strip()
+            strat = row.get("strategy", "").strip()
             sp_raw = row.get("stop_price", "").strip()
             try:
                 stop_price = float(sp_raw) if sp_raw else None
             except ValueError:
                 stop_price = None
+
+            # stop_price 未設定 → ATR から自動算出
             if stop_price is None:
-                no_stop.append(f"{sym} {name}")
-                continue
+                side_tmp = (row.get("side") or "long").strip().lower()
+                is_short_tmp = side_tmp in ("short", "sell", "s")
+                fp_raw = row.get("fill_price", "").strip()
+                try:
+                    fp = float(fp_raw) if fp_raw else 0.0
+                except ValueError:
+                    fp = 0.0
+                if fp > 0:
+                    stop_price = calc_atr_stop(sym, fp, is_short_tmp, strat)
+                if stop_price is not None:
+                    no_stop.append(f"{sym} {name}(ATR推定={stop_price:.0f})")
+                else:
+                    no_stop.append(f"{sym} {name}(推定不可→スキップ)")
+                    continue
             side = (row.get("side") or "long").strip().lower()
             is_short = side in ("short", "sell", "s")
             try:
@@ -124,8 +139,10 @@ def load_open_positions(log_path: str) -> list[dict]:
                 "source": "csv",
             })
     if no_stop:
-        print(f"  ⚠ 損切り価格未設定のためスキップ ({len(no_stop)}件): {', '.join(no_stop)}")
-        print(f"     → position_server で損切り価格を登録してください")
+        print(f"  ⚠ 損切り価格が未設定だったポジション ({len(no_stop)}件):")
+        for s in no_stop:
+            print(f"     {s}")
+        print(f"     ※ ATR推定値で判定継続。正確な値は position_server で登録してください")
     return open_pos
 
 
@@ -225,6 +242,25 @@ def get_current_price_fallback(symbol: str) -> float | None:
         return float(df.iloc[-1]["close"])
     except Exception as e:
         print(f"  ⚠ {symbol}: 終値フォールバック失敗 ({e})")
+        return None
+
+
+def calc_atr_stop(symbol: str, fill_price: float, is_short: bool,
+                  strategy: str = "") -> float | None:
+    """stop_price 未設定時のフォールバック: ATR × sm から損切り価格を推定する。
+    戦略が RSI2 なら sm=2.0、それ以外は sm=1.5 を使用。"""
+    try:
+        from backtest_limit_entry import fetch
+        df = fetch(f"{symbol}.T", 30)
+        if df is None or df.empty:
+            return None
+        atr = float(df.iloc[-1].get("atr", 0))
+        if atr <= 0:
+            return None
+        sm = 2.0 if (strategy or "").upper() == "RSI2" else 1.5
+        stop = fill_price + atr * sm if is_short else fill_price - atr * sm
+        return round(stop, 1)
+    except Exception:
         return None
 
 

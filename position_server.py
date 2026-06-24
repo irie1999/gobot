@@ -618,6 +618,18 @@ def _render_card(r) -> str:
       <div class="prices">約定 {fill_p:,.0f}円 ／ 損切 {stop_str} ／ 目標 {tgt_str}</div>
       <div class="prices">{price_line}</div>
       <div class="actions">
+        <form method="POST" action="/update" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+          <input type="hidden" name="symbol"    value="{html.escape(symbol)}">
+          <input type="hidden" name="fill_date" value="{html.escape(fill_d)}">
+          <input name="stop_price"   type="number" step="any" placeholder="損切値"
+                 value="{stop_p if stop_p else ''}"
+                 style="width:82px;padding:6px;border:1px solid {'#ef4444' if not stop_p else '#334155'};border-radius:4px;font-size:13px;background:#0f172a;color:#e2e8f0"
+                 title="損切り価格（必須）">
+          <input name="target_price" type="number" step="any" placeholder="目標値"
+                 value="{tgt_p if tgt_p else ''}"
+                 style="width:82px;padding:6px;border:1px solid #334155;border-radius:4px;font-size:13px;background:#0f172a;color:#e2e8f0">
+          <button class="btn" style="background:#475569;padding:6px 10px;font-size:12px" type="submit">💾 更新</button>
+        </form>
         <form method="POST" action="/close" style="display:flex;gap:6px;align-items:center">
           <input type="hidden" name="symbol" value="{html.escape(symbol)}">
           <input type="hidden" name="fill_date" value="{html.escape(fill_d)}">
@@ -681,6 +693,8 @@ class Handler(BaseHTTPRequestHandler):
                 msg, return_to = self._handle_add(form)
             elif path == "/close":
                 msg, return_to = self._handle_close(form)
+            elif path == "/update":
+                msg, return_to = self._handle_update(form)
             else:
                 msg, return_to = "不明な操作", "/"
         except Exception as e:
@@ -726,6 +740,35 @@ class Handler(BaseHTTPRequestHandler):
         _side_lbl = "ショート" if side == "short" else "ロング"
         return (f"✅ {symbol}({name}) を登録しました（{_side_lbl} / MAX{pt.max_hold(strat)}日）",
                 return_to)
+
+    def _handle_update(self, form) -> tuple[str, str]:
+        """損切り価格・目標価格を更新する。"""
+        df = pt.load()
+        symbol = form["symbol"].split(".")[0].strip()
+        fill_date = form.get("fill_date", "")
+        stop_raw = form.get("stop_price", "").strip()
+        tgt_raw  = form.get("target_price", "").strip()
+
+        mask = (df["symbol"] == symbol) & (df["status"] == "holding")
+        if fill_date:
+            mask &= (df["fill_date"] == fill_date)
+        if mask.sum() == 0:
+            return f"{symbol} の保有が見つかりません", "/"
+        idx = df[mask].index[0]
+
+        updated = []
+        if stop_raw:
+            df.at[idx, "stop_price"] = stop_raw
+            updated.append(f"損切={float(stop_raw):,.0f}円")
+        if tgt_raw:
+            df.at[idx, "target_price"] = tgt_raw
+            updated.append(f"目標={float(tgt_raw):,.0f}円")
+
+        if not updated:
+            return "変更なし", "/"
+        df.at[idx, "updated_date"] = str(TODAY)
+        pt.save(df)
+        return f"✅ {symbol} を更新しました（{'／'.join(updated)}）", "/"
 
     def _handle_close(self, form) -> tuple[str, str]:
         return_to = form.get("return_to", "/")
