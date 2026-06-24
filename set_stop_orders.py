@@ -151,15 +151,8 @@ def load_positions_from_kabu(cli: KabuClient, csv_path: str) -> list[dict]:
             except Exception:
                 pass
 
-        # ③ パーセンテージ推定
-        if stop_p <= 0 and fill_p > 0:
-            pct    = 0.060 if strategy == "RSI2" else 0.045
-            stop_p = round(fill_p * (1 + pct) if side == "short"
-                           else fill_p * (1 - pct), 0)
-            print(f"  ⚠ {sym} {name}: stop_price 未設定 → ATR推定 {stop_p:,.0f}円")
-
         if stop_p <= 0:
-            print(f"  ✗ {sym} {name}: 損切価格を特定できず → スキップ")
+            print(f"  ✗ {sym} {name}: 損切価格が見つかりません → スキップ")
             continue
 
         if sym not in csv_map:
@@ -211,16 +204,8 @@ def load_positions(csv_path: str) -> list[dict]:
                     pass
 
             if stop_p <= 0:
-                fill_p = _fv("fill_price")
-                if fill_p > 0:
-                    strat = str(row.get("strategy", "")).upper()
-                    pct   = 0.060 if strat == "RSI2" else 0.045
-                    stop_p = round(fill_p * (1 + pct) if side == "short"
-                                   else fill_p * (1 - pct), 0)
-                    print(f"  ⚠ {sym} {name}: stop_price 未設定 → ATR推定 {stop_p:,.0f}円 (-{pct*100:.1f}%)")
-                else:
-                    print(f"  ✗ {sym} {name}: stop_price も fill_price も未設定 → スキップ")
-                    continue
+                print(f"  ✗ {sym} {name}: 損切価格が見つかりません → スキップ")
+                continue
 
             positions.append({
                 "symbol":      sym,
