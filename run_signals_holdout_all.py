@@ -713,13 +713,29 @@ try:
             "qty":         _qty,
         })
     _sig_out = Path("signals_latest_short.json" if _args.short else "signals_latest.json")
+
+    # 同日に複数の価格レンジで実行した場合はマージ（symbol+strategy でデdup）
+    _existing: list[dict] = []
+    if _sig_out.exists():
+        try:
+            _prev = _json.loads(_sig_out.read_text(encoding="utf-8"))
+            if str(_prev.get("signal_date", "")) == str(_cache_date):
+                _existing = _prev.get("signals", [])
+        except Exception:
+            pass
+    # 既存シグナルに今回の分を追加（symbol+strategy が重複しないよう優先: 今回分）
+    _existing_keys = {(s["symbol"], s["strategy"]) for s in _sig_export}
+    _merged = _sig_export + [s for s in _existing
+                              if (s["symbol"], s["strategy"]) not in _existing_keys]
+    _merged.sort(key=lambda s: s.get("score", 0), reverse=True)
+
     _sig_out.write_text(_json.dumps({
         "generated_at": str(TODAY),
         "signal_date":  _cache_date,
         "mode":         "short" if _args.short else "long",
-        "signals":      _sig_export,
+        "signals":      _merged,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} ({len(_sig_export)}件)", flush=True)
+    print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} ({len(_merged)}件, うち今回{len(_sig_export)}件)", flush=True)
 except Exception as _e:
     print(f"[WARN] シグナルJSON書き出し失敗: {_e}", flush=True)
 

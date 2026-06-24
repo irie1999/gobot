@@ -112,36 +112,76 @@ def _find_signal_and_bt(symbol: str, fill_price: float, fill_date: str,
 
 
 def _bg_fill_bt_scores() -> None:
-    """保有中ポジションのBTスコア・戦略・損切・目標をバックグラウンドで補完してCSVに保存する。"""
+    """保有中ポジションのBTスコア・戦略・損切・目標をバックグラウンドで補完してCSVに保存する。
+    優先順: ①signals_latest.json のマッチ → ②check_signal_on_date逆算 → ③ATR推定"""
     try:
         df = pt.load()
         holding = df[df["status"] == "holding"]
         changed = False
+
+        # signals_latest.json から symbol → シグナル情報のマップを作成
+        _sig_map: dict[str, dict] = {}
+        for fname in SIGNAL_FILES:
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+            if not os.path.exists(p):
+                continue
+            try:
+                data = json.loads(open(p, encoding="utf-8").read())
+                for s in data.get("signals", []):
+                    sym = str(s.get("symbol", "")).split(".")[0]
+                    if sym and sym not in _sig_map:
+                        _sig_map[sym] = s
+            except Exception:
+                pass
+
         for idx, r in holding.iterrows():
-            has_bt = _clean(r.get("bt_score", ""))
+            has_bt   = _clean(r.get("bt_score", ""))
             has_stop = _f(r.get("stop_price", 0))
-            has_tgt = _f(r.get("target_price", 0))
+            has_tgt  = _f(r.get("target_price", 0))
             if has_bt and has_stop and has_tgt:
-                continue  # 全部あればスキップ
-            sym = str(r["symbol"]).split(".")[0]
-            strat = _clean(r.get("strategy", ""))
+                continue
+
+            sym    = str(r["symbol"]).split(".")[0]
+            strat  = _clean(r.get("strategy", ""))
             fill_p = _f(r.get("fill_price", 0))
             fill_d = _clean(r.get("fill_date", ""))
-            if not fill_p or not fill_d:
-                continue
-            score, matched_strat, stop_p, tgt_p = _find_signal_and_bt(sym, fill_p, fill_d, strat)
-            if score is not None and not has_bt:
-                df.at[idx, "bt_score"] = str(score)
-                changed = True
-            if matched_strat and not _clean(r.get("strategy", "")):
-                df.at[idx, "strategy"] = matched_strat
-                changed = True
-            if stop_p and not has_stop:
-                df.at[idx, "stop_price"] = str(stop_p)
-                changed = True
-            if tgt_p and not has_tgt:
-                df.at[idx, "target_price"] = str(tgt_p)
-                changed = True
+
+            # ① signals_latest.json にあればそこから取得（価格が近い場合のみ）
+            sig = _sig_map.get(sym)
+            if sig and fill_p > 0:
+                op = float(sig.get("order_p", 0) or 0)
+                if op > 0 and abs(op - fill_p) / op <= 0.05:
+                    if not has_stop and sig.get("stop_p"):
+                        df.at[idx, "stop_price"] = str(sig["stop_p"])
+                        changed = True
+                    if not has_tgt and sig.get("target_p"):
+                        df.at[idx, "target_price"] = str(sig["target_p"])
+                        changed = True
+                    if not has_bt and sig.get("score"):
+                        df.at[idx, "bt_score"] = str(int(sig["score"]))
+                        changed = True
+                    if not strat and sig.get("strategy"):
+                        df.at[idx, "strategy"] = sig["strategy"]
+                        changed = True
+                    continue
+
+            # ② check_signal_on_date でシグナル逆算（yfinance が使えるローカル環境のみ有効）
+            if fill_p and fill_d:
+                score, matched_strat, stop_p, tgt_p = _find_signal_and_bt(
+                    sym, fill_p, fill_d, strat)
+                if score is not None and not has_bt:
+                    df.at[idx, "bt_score"] = str(score)
+                    changed = True
+                if matched_strat and not _clean(r.get("strategy", "")):
+                    df.at[idx, "strategy"] = matched_strat
+                    changed = True
+                if stop_p and not has_stop:
+                    df.at[idx, "stop_price"] = str(stop_p)
+                    changed = True
+                if tgt_p and not has_tgt:
+                    df.at[idx, "target_price"] = str(tgt_p)
+                    changed = True
+
         if changed:
             pt.save(df)
     except Exception:
