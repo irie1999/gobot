@@ -182,6 +182,26 @@ def _bg_fill_bt_scores() -> None:
                     df.at[idx, "target_price"] = str(tgt_p)
                     changed = True
 
+            # ③' ATR推定不可の場合はパーセンテージベースのフォールバック（近似値）
+            # RSI2: sm=2.0×ATR(≈3%) → -6% / tm=4.0×ATR → +12%
+            # その他: sm=1.5×ATR(≈3%) → -4.5% / tm=3.0×ATR → +9%
+            if fill_p > 0 and (not _f(df.at[idx, "stop_price"]) or not _f(df.at[idx, "target_price"])):
+                strat_now = _clean(df.at[idx, "strategy"])
+                is_rsi2 = strat_now.upper() == "RSI2"
+                sm_pct = 0.060 if is_rsi2 else 0.045
+                tm_pct = 0.120 if is_rsi2 else 0.090
+                side_val = _clean(r.get("side", "long")) or "long"
+                if not _f(df.at[idx, "stop_price"]):
+                    est_stop = (round(fill_p * (1 + sm_pct), 0) if side_val == "short"
+                                else round(fill_p * (1 - sm_pct), 0))
+                    df.at[idx, "stop_price"] = str(int(est_stop))
+                    changed = True
+                if not _f(df.at[idx, "target_price"]):
+                    est_tgt = (round(fill_p * (1 - tm_pct), 0) if side_val == "short"
+                               else round(fill_p * (1 + tm_pct), 0))
+                    df.at[idx, "target_price"] = str(int(est_tgt))
+                    changed = True
+
         if changed:
             pt.save(df)
     except Exception:
@@ -622,8 +642,14 @@ def _render_card(r) -> str:
         price_line = "現在値 取得中… (再読込で表示)"
         cur_val = ""
 
-    stop_str = f"{stop_p:,.0f}円" if stop_p else "未設定"
-    tgt_str = f"{tgt_p:,.0f}円" if tgt_p else "未設定"
+    # order_price が未設定のとき stop/target はパーセンテージ推定値
+    order_p = _f(r.get("order_price", 0))
+    is_estimated = (order_p == 0)
+    est_mark = " <small style='color:#94a3b8'>(推定)</small>" if is_estimated else ""
+    stop_str = (f"{stop_p:,.0f}円{est_mark}" if stop_p else
+                "<span style='color:#ef4444'>未設定</span>")
+    tgt_str  = (f"{tgt_p:,.0f}円{est_mark}" if tgt_p else
+                "<span style='color:#94a3b8'>未設定</span>")
 
     bt_raw = _clean(r.get("bt_score", ""))
     # キャッシュから取得済みであればそちらを使う
