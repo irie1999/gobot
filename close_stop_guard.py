@@ -57,8 +57,10 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
+
+import pandas as pd
 
 from kabu_api import KabuClient, CASH_GENBUTSU, CASH_MARGIN_CLOSE
 
@@ -475,9 +477,37 @@ def main() -> int:
             return price
         return get_current_price_fallback(symbol)
 
+    # MAX_HOLD は戦略別 (RSI2=7, MOM=20, other=15)
+    from backtest_limit_entry import default_max_hold
+
+    today_bdate = pd.Timestamp(now.date())
+
     breached: list[dict] = []
     for pos in positions:
         sp = pos.get("stop_price")
+        side_label = "ショート" if pos["is_short"] else "ロング"
+        src_label = f"[{pos['source']}]" if pos.get("source") != "csv" else ""
+        strat = pos.get("strategy", "")
+
+        # ── MAX_HOLD タイムカット判定 ──
+        timecut = False
+        fill_date_str = pos.get("fill_date", "").strip()
+        if fill_date_str:
+            try:
+                fill_bdate = pd.Timestamp(fill_date_str)
+                hold_days = len(pd.bdate_range(fill_bdate, today_bdate)) - 1
+                max_hold = default_max_hold(strat)
+                if hold_days >= max_hold:
+                    timecut = True
+                    print(f"  ⏰タイムカット {pos['symbol']} {pos['name']} "
+                          f"[{strat}/{side_label}]{src_label} "
+                          f"保有{hold_days}日 ≥ MAX_HOLD={max_hold}日")
+                    pos = dict(pos, exit_reason="タイムカット")
+                    breached.append(pos)
+                    continue
+            except Exception:
+                pass
+
         if sp is None:
             print(f"  ? {pos['symbol']} {pos['name']}: 損切り価格不明 → スキップ")
             continue
@@ -488,22 +518,23 @@ def main() -> int:
             continue
 
         hit = (price >= sp) if pos["is_short"] else (price <= sp)
-        side_label = "ショート" if pos["is_short"] else "ロング"
-        src_label = f"[{pos['source']}]" if pos.get("source") != "csv" else ""
         mark = "🔴損切り" if hit else "  保有継続"
         price_label = "終値" if args.post_close else "現在値"
         print(f"  {mark}  {pos['symbol']} {pos['name']} "
-              f"[{pos['strategy']}/{side_label}]{src_label} "
+              f"[{strat}/{side_label}]{src_label} "
               f"{price_label}={price:.1f} 損切り={sp:.1f}")
         if hit:
+            pos = dict(pos, exit_reason="損切り")
             breached.append(pos)
 
     print()
     if not breached:
-        print("損切りライン抵触なし。発注なし。")
+        print("損切り・タイムカット抵触なし。発注なし。")
         return 0
 
-    print(f"損切り抵触: {len(breached)} 件")
+    stop_count = sum(1 for p in breached if p.get("exit_reason") == "損切り")
+    tc_count   = sum(1 for p in breached if p.get("exit_reason") == "タイムカット")
+    print(f"損切り抵触: {stop_count}件 / タイムカット: {tc_count}件 (合計: {len(breached)}件)")
     if not args.execute:
         order_type = "MOO (翌日寄成)" if args.post_close else "MOC (引け成行)"
         print(f"dry-run のため発注しません ({order_type})。実発注するには --execute を付けてください。")
