@@ -729,13 +729,17 @@ try:
                               if (s["symbol"], s["strategy"]) not in _existing_keys]
     _merged.sort(key=lambda s: s.get("score", 0), reverse=True)
 
-    _sig_out.write_text(_json.dumps({
+    _sig_payload = _json.dumps({
         "generated_at": str(TODAY),
         "signal_date":  _cache_date,
         "mode":         "short" if _args.short else "long",
         "signals":      _merged,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} ({len(_merged)}件, うち今回{len(_sig_export)}件)", flush=True)
+    }, ensure_ascii=False, indent=2)
+    _sig_out.write_text(_sig_payload, encoding="utf-8")
+    # 日付付きバックアップも保存（翌日の約定登録時に参照できるよう）
+    _sig_dated = Path(f"signals_{_cache_date}{'_short' if _args.short else ''}.json")
+    _sig_dated.write_text(_sig_payload, encoding="utf-8")
+    print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} + {_sig_dated.name} ({len(_merged)}件, うち今回{len(_sig_export)}件)", flush=True)
 except Exception as _e:
     print(f"[WARN] シグナルJSON書き出し失敗: {_e}", flush=True)
 

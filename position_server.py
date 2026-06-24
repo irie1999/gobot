@@ -112,11 +112,12 @@ def _find_signal_and_bt(symbol: str, fill_price: float, fill_date: str,
 
 
 def _lookup_signal(symbol: str) -> dict:
-    """signals_latest.json から symbol に一致するシグナル情報を返す。
-    戻り値: {stop, target, strategy, bt_score, order_p, name} — 見つからなければ空dict。"""
+    """signals_latest.json + 直近3日分の日付付きファイルから symbol に一致するシグナルを返す。
+    戻り値: {stop, target, strategy, bt_score, order_p, name, signal_date} — 見つからなければ空dict。"""
     sym = str(symbol).split(".")[0].strip()
-    for fname in SIGNAL_FILES:
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+    base = os.path.dirname(os.path.abspath(__file__))
+    for fname in _signal_file_candidates():
+        p = os.path.join(base, fname)
         if not os.path.exists(p):
             continue
         try:
@@ -125,13 +126,14 @@ def _lookup_signal(symbol: str) -> dict:
                 s_sym = str(s.get("symbol", "")).split(".")[0]
                 if s_sym == sym:
                     return {
-                        "stop":     s.get("stop_p") or "",
-                        "target":   s.get("target_p") or "",
-                        "strategy": s.get("strategy") or "",
-                        "bt_score": int(s["score"]) if s.get("score") else "",
-                        "order_p":  s.get("order_p") or "",
-                        "name":     s.get("name") or "",
-                        "side":     s.get("side") or "long",
+                        "stop":        s.get("stop_p") or "",
+                        "target":      s.get("target_p") or "",
+                        "strategy":    s.get("strategy") or "",
+                        "bt_score":    int(s["score"]) if s.get("score") else "",
+                        "order_p":     s.get("order_p") or "",
+                        "name":        s.get("name") or "",
+                        "side":        s.get("side") or "long",
+                        "signal_date": data.get("signal_date") or "",
                     }
         except Exception:
             continue
@@ -146,10 +148,11 @@ def _bg_fill_bt_scores() -> None:
         holding = df[df["status"] == "holding"]
         changed = False
 
-        # signals_latest.json から symbol → シグナル情報のマップを作成
+        # signals_latest.json + 直近3日分の日付付きファイルから symbol → シグナル情報マップを作成
         _sig_map: dict[str, dict] = {}
-        for fname in SIGNAL_FILES:
-            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+        base = os.path.dirname(os.path.abspath(__file__))
+        for fname in _signal_file_candidates():
+            p = os.path.join(base, fname)
             if not os.path.exists(p):
                 continue
             try:
@@ -261,6 +264,22 @@ def _get_price(symbol: str) -> float | None:
 import json
 
 SIGNAL_FILES = ["signals_latest.json", "signals_latest_short.json"]
+
+
+def _signal_file_candidates() -> list[str]:
+    """signals_latest.json + 直近3営業日分の日付付きファイルを返す。"""
+    files = list(SIGNAL_FILES)
+    d = TODAY
+    for _ in range(6):  # 最大6暦日さかのぼって3営業日分を探す
+        d -= timedelta(days=1)
+        if d.weekday() >= 5:
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        files.append(f"signals_{ds}.json")
+        files.append(f"signals_{ds}_short.json")
+        if len(files) >= 10:
+            break
+    return files
 
 
 def _load_signal_json() -> tuple[list[dict], str]:
@@ -626,7 +645,8 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
             }}
           }}
           if (filled.length > 0) {{
-            msg.textContent = '📥 シグナルから自動入力: ' + filled.join('・') + '（変更可能）';
+            var dt = d.signal_date ? ' [' + d.signal_date + 'シグナル]' : '';
+            msg.textContent = '📥 シグナルから自動入力: ' + filled.join('・') + dt + '（変更可能）';
             msg.style.display = 'block';
           }}
         }}).catch(function(){{}});
