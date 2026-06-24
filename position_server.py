@@ -111,6 +111,33 @@ def _find_signal_and_bt(symbol: str, fill_price: float, fill_date: str,
     return None, "", 0.0, 0.0
 
 
+def _lookup_signal(symbol: str) -> dict:
+    """signals_latest.json から symbol に一致するシグナル情報を返す。
+    戻り値: {stop, target, strategy, bt_score, order_p, name} — 見つからなければ空dict。"""
+    sym = str(symbol).split(".")[0].strip()
+    for fname in SIGNAL_FILES:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+        if not os.path.exists(p):
+            continue
+        try:
+            data = json.loads(open(p, encoding="utf-8").read())
+            for s in data.get("signals", []):
+                s_sym = str(s.get("symbol", "")).split(".")[0]
+                if s_sym == sym:
+                    return {
+                        "stop":     s.get("stop_p") or "",
+                        "target":   s.get("target_p") or "",
+                        "strategy": s.get("strategy") or "",
+                        "bt_score": int(s["score"]) if s.get("score") else "",
+                        "order_p":  s.get("order_p") or "",
+                        "name":     s.get("name") or "",
+                        "side":     s.get("side") or "long",
+                    }
+        except Exception:
+            continue
+    return {}
+
+
 def _bg_fill_bt_scores() -> None:
     """保有中ポジションのBTスコア・戦略・損切・目標をバックグラウンドで補完してCSVに保存する。
     優先順: ①signals_latest.json のマッチ → ②check_signal_on_date逆算 → ③ATR推定"""
@@ -534,32 +561,81 @@ def render_page(message: str = "", prefill: dict | None = None) -> str:
   </div>
   {msg_html}
 
-  <div class="addbox{"" if not prefill else " addbox-prefill"}">
+  <div class="addbox{"" if not prefill else " addbox-prefill"}" id="addbox">
     {"<p style='color:#2d6cdf;font-size:13px;margin:0 0 8px'>📥 シグナルから自動入力しました。約定値を実際の約定価格に修正してから「＋ 登録」を押してください。</p>" if prefill else ""}
+    <div id="autofill-msg" style="display:none;color:#60a5fa;font-size:12px;margin-bottom:6px"></div>
     <form method="POST" action="/add">
       <div class="row">
-        <div class="fld"><label>証券コード</label><input name="symbol" required placeholder="4631" value="{html.escape(prefill.get('symbol', ''))}"></div>
-        <div class="fld"><label>約定値</label><input name="entry" type="number" step="any" required placeholder="4806" value="{html.escape(prefill.get('entry', ''))}"></div>
-        <div class="fld"><label>損切値</label><input name="stop" type="number" step="any" placeholder="4486" value="{html.escape(prefill.get('stop', ''))}"></div>
-        <div class="fld"><label>目標値</label><input name="target" type="number" step="any" placeholder="5069" value="{html.escape(prefill.get('target', ''))}"></div>
+        <div class="fld"><label>証券コード</label><input name="symbol" id="f-symbol" required placeholder="4631" value="{html.escape(prefill.get('symbol', ''))}"></div>
+        <div class="fld"><label>約定値</label><input name="entry" id="f-entry" type="number" step="any" required placeholder="4806" value="{html.escape(prefill.get('entry', ''))}"></div>
+        <div class="fld"><label>損切値</label><input name="stop" id="f-stop" type="number" step="any" placeholder="自動" value="{html.escape(prefill.get('stop', ''))}"></div>
+        <div class="fld"><label>目標値</label><input name="target" id="f-target" type="number" step="any" placeholder="自動" value="{html.escape(prefill.get('target', ''))}"></div>
         <div class="fld"><label>戦略</label>
-          <select name="strategy">
+          <select name="strategy" id="f-strategy">
             <option value="">-</option>
             {"".join(f'<option {"selected" if prefill.get("strategy","").upper()==s else ""}>{s}</option>' for s in ["MACD","A7","RSI2","DON","VOL","MOM"])}
           </select></div>
         <div class="fld"><label>株数</label><input name="qty" type="number" value="{html.escape(prefill.get('qty','100'))}"></div>
         <div class="fld"><label>方向</label>
-          <select name="side">
+          <select name="side" id="f-side">
             <option value="long"{" selected" if prefill.get("side","long")!="short" else ""}>ロング</option>
             <option value="short"{" selected" if prefill.get("side")=="short" else ""}>ショート</option>
           </select></div>
         <div class="fld"><label>区分</label>
           <select name="margin"><option value="3">信用</option><option value="1">現物</option></select></div>
-        <div class="fld"><label>BTスコア</label><input name="bt_score" type="number" min="0" max="100" placeholder="0-100" value="{html.escape(prefill.get('bt_score', ''))}"></div>
+        <div class="fld"><label>BTスコア</label><input name="bt_score" id="f-bt" type="number" min="0" max="100" placeholder="自動" value="{html.escape(prefill.get('bt_score', ''))}"></div>
         <div><button class="btn btn-add" type="submit">＋ 登録</button></div>
       </div>
     </form>
   </div>
+  <script>
+  (function(){{
+    var sym = document.getElementById('f-symbol');
+    if (!sym) return;
+    function autofill() {{
+      var s = sym.value.trim();
+      if (!s) return;
+      var msg = document.getElementById('autofill-msg');
+      fetch('/api/signal?symbol=' + encodeURIComponent(s))
+        .then(function(r){{ return r.json(); }})
+        .then(function(d){{
+          var filled = [];
+          if (d.stop && !document.getElementById('f-stop').value) {{
+            document.getElementById('f-stop').value = d.stop; filled.push('損切');
+          }}
+          if (d.target && !document.getElementById('f-target').value) {{
+            document.getElementById('f-target').value = d.target; filled.push('目標');
+          }}
+          if (d.strategy) {{
+            var sel = document.getElementById('f-strategy');
+            for (var i=0;i<sel.options.length;i++) {{
+              if (sel.options[i].value === d.strategy) {{ sel.selectedIndex=i; break; }}
+            }}
+            filled.push('戦略');
+          }}
+          if (d.bt_score !== '' && !document.getElementById('f-bt').value) {{
+            document.getElementById('f-bt').value = d.bt_score; filled.push('BT');
+          }}
+          if (d.order_p && !document.getElementById('f-entry').value) {{
+            document.getElementById('f-entry').value = d.order_p;
+          }}
+          if (d.side) {{
+            var ss = document.getElementById('f-side');
+            for (var i=0;i<ss.options.length;i++) {{
+              if (ss.options[i].value === d.side) {{ ss.selectedIndex=i; break; }}
+            }}
+          }}
+          if (filled.length > 0) {{
+            msg.textContent = '📥 シグナルから自動入力: ' + filled.join('・') + '（変更可能）';
+            msg.style.display = 'block';
+          }}
+        }}).catch(function(){{}});
+    }}
+    sym.addEventListener('blur', autofill);
+    sym.addEventListener('change', autofill);
+    if (sym.value) autofill();
+  }})();
+  </script>
 
   <h2>🟢 保有中（{len(holding)}件）</h2>
   {cards_html}
@@ -735,6 +811,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(render_signals_page(date_str, msg))
             return
 
+        # /api/signal?symbol=XXXX — シグナルJSONから銘柄情報を返す
+        if parsed.path == "/api/signal":
+            sym = qs.get("symbol", [""])[0].split(".")[0].strip()
+            data = _lookup_signal(sym)
+            import json as _j
+            body = _j.dumps(data, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if parsed.path != "/":
             self._send_html("<h1>404</h1>", 404)
             return
@@ -792,12 +881,36 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
         bt_score_raw = form.get("bt_score", "").strip()
+
+        # signals_latest.json で未入力の値を補完（サーバー側フォールバック）
+        sig = _lookup_signal(symbol)
+        if sig:
+            if not stop and sig.get("stop"):
+                stop = _f(sig["stop"])
+            if not target and sig.get("target"):
+                target = _f(sig["target"])
+            if not strat and sig.get("strategy"):
+                strat = str(sig["strategy"]).upper()
+            if not bt_score_raw and sig.get("bt_score"):
+                bt_score_raw = str(sig["bt_score"])
+            if not name and sig.get("name"):
+                name = str(sig["name"])[:10]
+
+        # signals にもなく stop/target が空なら ATR 推定フォールバック
+        if entry > 0 and not stop:
+            is_rsi2 = strat == "RSI2"
+            sm_pct = 0.060 if is_rsi2 else 0.045
+            tm_pct = 0.120 if is_rsi2 else 0.090
+            stop   = round(entry * (1 + sm_pct) if side == "short" else entry * (1 - sm_pct), 0)
+            target = round(entry * (1 - tm_pct) if side == "short" else entry * (1 + tm_pct), 0)
+
         row = {c: "" for c in pt.COLS}
         row.update({
             "record_date": str(TODAY), "symbol": symbol, "name": name,
             "strategy": strat, "family": "stop", "signal_date": fill_date,
-            "signal_price": entry, "order_price": entry, "stop_price": stop,
-            "target_price": target, "status": "holding", "fill_date": fill_date,
+            "signal_price": entry, "order_price": entry if sig else "",
+            "stop_price": stop, "target_price": target,
+            "status": "holding", "fill_date": fill_date,
             "fill_price": entry, "updated_date": str(TODAY), "side": side,
             "qty": qty, "cash_margin": margin, "bt_score": bt_score_raw,
         })
