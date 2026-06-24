@@ -103,6 +103,12 @@ def load_open_positions(log_path: str) -> list[dict]:
             except ValueError:
                 stop_price = None
 
+            tp_raw = row.get("target_price", "").strip()
+            try:
+                target_price: float | None = float(tp_raw) if tp_raw else None
+            except ValueError:
+                target_price = None
+
             # stop_price 未設定 → ATR から自動算出
             if stop_price is None:
                 side_tmp = (row.get("side") or "long").strip().lower()
@@ -134,6 +140,7 @@ def load_open_positions(log_path: str) -> list[dict]:
                 "name": name,
                 "strategy": row.get("strategy", "").strip(),
                 "stop_price": stop_price,
+                "target_price": target_price,
                 "is_short": is_short,
                 "qty": int(float(row.get("qty") or 100)),
                 "fill_date": row.get("fill_date", "").strip(),
@@ -221,6 +228,7 @@ def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict
                 "name": "",
                 "strategy": "?",
                 "stop_price": None,
+                "target_price": None,
                 "is_short": is_short,
                 "qty": leaves,
                 "fill_date": "",
@@ -508,21 +516,36 @@ def main() -> int:
             except Exception:
                 pass
 
-        if sp is None:
-            print(f"  ? {pos['symbol']} {pos['name']}: 損切り価格不明 → スキップ")
-            continue
-
         price = _get_price(pos["symbol"])
         if price is None:
             print(f"  ? {pos['symbol']} {pos['name']}: 現在値取得不可 → スキップ")
             continue
 
+        # ── 利確判定 (target_price) ──
+        tp = pos.get("target_price")
+        if tp and tp > 0:
+            profit_hit = (price <= tp) if pos["is_short"] else (price >= tp)
+            if profit_hit:
+                price_label = "終値" if args.post_close else "現在値"
+                print(f"  💰利確  {pos['symbol']} {pos['name']} "
+                      f"[{strat}/{side_label}]{src_label} "
+                      f"{price_label}={price:.1f} 目標={tp:.1f}")
+                breached.append(dict(pos, exit_reason="利確"))
+                continue
+
+        if sp is None:
+            print(f"  ? {pos['symbol']} {pos['name']}: 損切り価格不明 → 保有継続")
+            price_label = "終値" if args.post_close else "現在値"
+            print(f"     {price_label}={price:.1f}")
+            continue
+
         hit = (price >= sp) if pos["is_short"] else (price <= sp)
         mark = "🔴損切り" if hit else "  保有継続"
         price_label = "終値" if args.post_close else "現在値"
+        tp_str = f" 目標={tp:.1f}" if tp else ""
         print(f"  {mark}  {pos['symbol']} {pos['name']} "
               f"[{strat}/{side_label}]{src_label} "
-              f"{price_label}={price:.1f} 損切り={sp:.1f}")
+              f"{price_label}={price:.1f} 損切り={sp:.1f}{tp_str}")
         if hit:
             pos = dict(pos, exit_reason="損切り")
             breached.append(pos)
@@ -532,9 +555,10 @@ def main() -> int:
         print("損切り・タイムカット抵触なし。発注なし。")
         return 0
 
-    stop_count = sum(1 for p in breached if p.get("exit_reason") == "損切り")
-    tc_count   = sum(1 for p in breached if p.get("exit_reason") == "タイムカット")
-    print(f"損切り抵触: {stop_count}件 / タイムカット: {tc_count}件 (合計: {len(breached)}件)")
+    stop_count   = sum(1 for p in breached if p.get("exit_reason") == "損切り")
+    tc_count     = sum(1 for p in breached if p.get("exit_reason") == "タイムカット")
+    profit_count = sum(1 for p in breached if p.get("exit_reason") == "利確")
+    print(f"損切り: {stop_count}件 / 利確: {profit_count}件 / タイムカット: {tc_count}件 (合計: {len(breached)}件)")
     if not args.execute:
         order_type = "MOO (翌日寄成)" if args.post_close else "MOC (引け成行)"
         print(f"dry-run のため発注しません ({order_type})。実発注するには --execute を付けてください。")
