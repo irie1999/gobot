@@ -284,9 +284,13 @@ def s5_profit_orders(ctx: dict, execute: bool) -> None:
 
 
 def _get_real_price(sym: str, fallback: float, execute: bool) -> float:
-    """execute モードなら kabu から現在値を取得。失敗したら fallback を返す。"""
+    """execute モードなら kabu board → yfinance の順で現在値を取得。失敗したら fallback を返す。
+    close_stop_guard._get_price() と同じフォールバック順序にすることで
+    fake_stop / fake_target を実際の判定価格に対して正しく設定できる。
+    """
     if not execute:
         return fallback
+    # 1. kabu board API
     try:
         cli = _make_cli(prod=False, dry_run=False)
         p = cli.get_current_price(sym)
@@ -294,7 +298,18 @@ def _get_real_price(sym: str, fallback: float, execute: bool) -> float:
             return p
     except Exception:
         pass
-    _warn(f"{sym}: kabu から現在値を取得できませんでした。S1 の価格 {fallback:.1f} を使います")
+    # 2. yfinance フォールバック（close_stop_guard と同じ経路）
+    try:
+        from backtest_limit_entry import fetch
+        df = fetch(f"{sym}.T")
+        if df is not None and not df.empty:
+            p = float(df.iloc[-1]["close"])
+            if p > 0:
+                _warn(f"{sym}: kabu API 未応答のため yfinance 終値 {p:.1f} を使います")
+                return p
+    except Exception:
+        pass
+    _warn(f"{sym}: 現在値取得に失敗。S1 の価格 {fallback:.1f} を使います")
     return fallback
 
 
