@@ -86,6 +86,97 @@ def _load_signal_map() -> dict[str, dict]:
     return sig_map
 
 
+def load_positions_from_kabu(cli: KabuClient, csv_path: str) -> list[dict]:
+    """kabu の実建玉を取得し、CSV・シグナルJSONから損切り価格を紐付けて返す。
+
+    優先順:
+      ① my_positions.csv の stop_price（手動 or 自動補完済み）
+      ② signals_YYYY-MM-DD.json の stop_p
+      ③ 約定価格 × パーセンテージ推定
+    """
+    sig_map = _load_signal_map()
+
+    # CSV の symbol → stop_price / strategy のマップを作成
+    csv_map: dict[str, dict] = {}
+    if Path(csv_path).exists():
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("status") != "holding":
+                    continue
+                sym = str(row.get("symbol", "")).strip()
+                def _fv(k, r=row):
+                    try:
+                        v = float(r.get(k) or 0)
+                        return 0.0 if v != v else v
+                    except Exception:
+                        return 0.0
+                csv_map[sym] = {
+                    "stop_price": _fv("stop_price"),
+                    "strategy":   str(row.get("strategy", "")).upper(),
+                    "side":       str(row.get("side", "long")).lower(),
+                }
+
+    # kabu から実建玉を取得
+    print("  kabu 建玉一覧を取得中…")
+    raw_positions = cli.get_positions(product=0)  # 0=すべて
+    if not raw_positions:
+        print("  ⚠ kabu 建玉なし（デモ口座または未接続）")
+        return []
+
+    positions = []
+    for p in raw_positions:
+        sym      = str(p.get("Symbol", "")).split(".")[0].strip()
+        name     = str(p.get("SymbolName", ""))[:10]
+        leaves   = int(p.get("LeavesQty") or 0)
+        if leaves <= 0:
+            continue
+        fill_p   = float(p.get("Price") or 0)
+        kabu_side = str(p.get("Side", ""))   # "1"=売建(ショート) "2"=買建(ロング)
+        side     = "short" if kabu_side == "1" else "long"
+        cm_raw   = int(p.get("MarginType") or 0)
+        # MarginType: 0=現物, 1=一般信用, 2=制度信用 → cash_margin: 1=現物, 3=信用返済
+        cm       = CASH_MARGIN_CLOSE if cm_raw in (1, 2) else CASH_GENBUTSU
+
+        # ① CSV の stop_price
+        csv_info = csv_map.get(sym, {})
+        stop_p   = csv_info.get("stop_price", 0.0)
+        strategy = csv_info.get("strategy", "")
+        if csv_info.get("side"):
+            side = csv_info["side"]
+
+        # ② シグナルJSON
+        if stop_p <= 0 and sym in sig_map:
+            try:
+                stop_p = float(sig_map[sym].get("stop_p") or 0)
+            except Exception:
+                pass
+
+        # ③ パーセンテージ推定
+        if stop_p <= 0 and fill_p > 0:
+            pct    = 0.060 if strategy == "RSI2" else 0.045
+            stop_p = round(fill_p * (1 + pct) if side == "short"
+                           else fill_p * (1 - pct), 0)
+            print(f"  ⚠ {sym} {name}: stop_price 未設定 → ATR推定 {stop_p:,.0f}円")
+
+        if stop_p <= 0:
+            print(f"  ✗ {sym} {name}: 損切価格を特定できず → スキップ")
+            continue
+
+        if sym not in csv_map:
+            print(f"  ℹ {sym} {name}: CSV に未登録（kabu建玉のみ）")
+
+        positions.append({
+            "symbol":      sym,
+            "name":        name,
+            "stop_price":  stop_p,
+            "qty":         leaves,
+            "side":        side,
+            "cash_margin": cm,
+        })
+
+    return positions
+
+
 def load_positions(csv_path: str) -> list[dict]:
     """保有中ポジションを CSV から読む。stop_price が未設定の場合シグナルで補完。"""
     sig_map = _load_signal_map()
@@ -172,21 +263,12 @@ def get_active_stop_orders(orders: list[dict]) -> dict[str, dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="保有銘柄の損切り逆指値を自動設定")
-    ap.add_argument("--execute",  action="store_true", help="実際に発注する（デフォルト: dry-run）")
-    ap.add_argument("--prod",     action="store_true", help="本番口座(18080)を使う")
-    ap.add_argument("--refresh",  action="store_true", help="既存の逆指値を取消して再設定")
-    ap.add_argument("--log",      default="my_positions.csv", help="CSVパス")
+    ap.add_argument("--execute",       action="store_true", help="実際に発注する（デフォルト: dry-run）")
+    ap.add_argument("--prod",          action="store_true", help="本番口座(18080)を使う")
+    ap.add_argument("--refresh",       action="store_true", help="既存の逆指値を取消して再設定")
+    ap.add_argument("--use-kabu-pos",  action="store_true", help="kabu 実建玉を取得して照合（CSV と併用）")
+    ap.add_argument("--log",           default="my_positions.csv", help="CSVパス")
     args = ap.parse_args()
-
-    csv_path = Path(args.log)
-    if not csv_path.exists():
-        print(f"✗ ファイルが見つかりません: {csv_path}")
-        sys.exit(1)
-
-    positions = load_positions(str(csv_path))
-    if not positions:
-        print("保有中ポジションなし（または全銘柄 stop_price 未設定）")
-        return
 
     dry_run = not args.execute
     cli = KabuClient(prod=args.prod, dry_run=dry_run)
@@ -197,6 +279,18 @@ def main() -> None:
     except Exception as e:
         print(f"✗ 接続失敗: {e}")
         sys.exit(1)
+
+    # ポジション取得: kabu建玉 or CSV
+    if args.use_kabu_pos:
+        print("  [kabu建玉モード] 実建玉から取得 + CSV/シグナルで損切価格を補完")
+        positions = load_positions_from_kabu(cli, args.log)
+    else:
+        csv_path = Path(args.log)
+        if not csv_path.exists():
+            print(f"✗ ファイルが見つかりません: {csv_path}")
+            sys.exit(1)
+        positions = load_positions(str(csv_path))
+
 
     # 既存の有効な逆指値注文を取得
     active_stops: dict[str, dict] = {}
