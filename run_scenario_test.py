@@ -308,19 +308,22 @@ def s6_stop_loss_moc(ctx: dict, execute: bool) -> None:
     price = _get_real_price(sym, ctx["price"], execute)
 
     # stop_price を現在値より高く設定（わざと損切りラインを突破させる）
-    fake_stop = round(price * 1.10)  # 現在値+10% → 必ず「割った」状態
+    # target_price は現在値の2倍以上に設定して利確が先に発火しないようにする
+    fake_stop   = round(price * 1.10)  # 現在値+10% → 必ず「割った」状態
+    fake_target = round(price * 2.00)  # 現在値×2 → 到達不可
     print(f"  テスト: {sym} の stop_price を {fake_stop:,}円（現在値+10%）に設定")
     print(f"  （現在値={price:.1f}円 < stop_price={fake_stop:,}円 → 損切り抵触）")
 
     rows = _read_test_csv()
     for r in rows:
         if r.get("symbol") == sym:
-            r["stop_price"] = fake_stop
-            r["status"] = "holding"
-            r["fill_date"] = str(date.today() - timedelta(days=1))
-            r["fill_price"] = str(price)
+            r["stop_price"]   = fake_stop
+            r["target_price"] = fake_target
+            r["status"]       = "holding"
+            r["fill_date"]    = str(date.today() - timedelta(days=1))
+            r["fill_price"]   = str(price)
     _write_test_csv(rows)
-    _ok(f"{TEST_CSV} の stop_price を {fake_stop:,} 円に更新")
+    _ok(f"{TEST_CSV} の stop_price を {fake_stop:,} 円・target_price を {fake_target:,} 円に更新")
 
     import subprocess
     cmd = [sys.executable, "close_stop_guard.py", "--log", TEST_CSV]
@@ -328,13 +331,14 @@ def s6_stop_loss_moc(ctx: dict, execute: bool) -> None:
         cmd.append("--execute")
     subprocess.run(cmd)
 
-    # テスト後に元の stop_price に戻す
+    # テスト後に元の値に戻す
     rows = _read_test_csv()
     for r in rows:
         if r.get("symbol") == sym:
-            r["stop_price"] = ctx["stop_p"]
+            r["stop_price"]   = ctx["stop_p"]
+            r["target_price"] = ctx["target_p"]
     _write_test_csv(rows)
-    _ok("stop_price を元の値に戻しました")
+    _ok("stop_price / target_price を元の値に戻しました")
 
 
 def s7_profit_moc(ctx: dict, execute: bool) -> None:
