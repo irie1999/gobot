@@ -257,13 +257,16 @@ def main() -> None:
 
     dry_run = not args.execute
     cli = KabuClient(prod=args.prod, dry_run=dry_run)
-    print(f"\n{'[DRY-RUN] ' if dry_run else ''}kabu接続中 ({cli.env_label})…")
+    env_label = "本番(18080)" if args.prod else "デモ(18081)"
+    need_connect = args.execute or args.use_kabu_pos
+    print(f"\n{'[DRY-RUN] ' if dry_run else ''}{'kabu接続中' if need_connect else 'kabu未接続'} ({env_label})…")
 
-    try:
-        cli.connect()
-    except Exception as e:
-        print(f"✗ 接続失敗: {e}")
-        sys.exit(1)
+    if need_connect:
+        try:
+            cli.connect()
+        except Exception as e:
+            print(f"✗ 接続失敗: {e}")
+            sys.exit(1)
 
     # ポジション取得: kabu建玉 or CSV
     if args.use_kabu_pos:
@@ -277,14 +280,17 @@ def main() -> None:
         positions = load_positions(str(csv_path))
 
 
-    # 既存の有効な逆指値注文を取得
+    # 既存の有効な逆指値注文を取得（execute 時のみ）
     active_stops: dict[str, dict] = {}
-    try:
-        orders = cli.get_orders()
-        active_stops = get_active_stop_orders(orders)
-        print(f"既存の有効逆指値注文: {len(active_stops)}件\n")
-    except Exception as e:
-        print(f"⚠ 注文一覧取得失敗: {e}（重複チェックなしで進みます）\n")
+    if args.execute:
+        try:
+            orders = cli.get_orders()
+            active_stops = get_active_stop_orders(orders)
+            print(f"既存の有効逆指値注文: {len(active_stops)}件\n")
+        except Exception as e:
+            print(f"⚠ 注文一覧取得失敗: {e}（重複チェックなしで進みます）\n")
+    else:
+        print("dry-run のため既存注文チェックをスキップ\n")
 
     set_count = 0
     skip_count = 0
