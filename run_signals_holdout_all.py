@@ -207,12 +207,14 @@ if _args.both and not _args.short:
             f'株価 {_price_label(_price_list[0])}</span>\n'
         )
 
+    import time as _time_mod
+    _cache_bust = int(_time_mod.time())
     for _dir in ("long", "short"):
         for _i, _mp in enumerate(_price_list):
             _frame_id = f"ls-{_dir}-{_mp}"
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
-            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}"></iframe>\n'
+            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}?v={_cache_bust}"></iframe>\n'
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
