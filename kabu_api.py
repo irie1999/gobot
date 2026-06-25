@@ -286,8 +286,10 @@ class KabuClient:
                 body["DelivType"] = 0   # 現物売は 指定なし
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
-            body["DelivType"] = 0 if cash_margin == CASH_MARGIN_OPEN else 2
-            body["FundType"] = "11"      # 信用取引
+            # 信用新規(2): DelivType=0, FundType="11"
+            # 信用返済(3): DelivType=0, FundType="  " (スペース2つ)
+            body["DelivType"] = 0
+            body["FundType"] = "11" if cash_margin == CASH_MARGIN_OPEN else "  "
             body["MarginTradeType"] = 1  # 制度信用
         return body
 
