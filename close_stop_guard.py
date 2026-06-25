@@ -10,21 +10,21 @@ close は「引けの瞬間の値段で判定」が本質なので、broker に�
 
 【運用の流れ】
 
-  ▼ pre-close モード（既定）: 毎営業日 14:50〜14:55 JST に実行
+  ▼ 通常運用: 毎営業日 14:50〜15:25 JST に実行（市場クローズ前）
     python close_stop_guard.py                      # dry-run
-    python close_stop_guard.py --execute            # デモ口座に引け成行を発注
+    python close_stop_guard.py --execute            # デモ口座に成行発注
     python close_stop_guard.py --execute --prod     # 本番口座 ※明示必須
 
-  ▼ post-close モード（引け後検証）: 毎営業日 15:30 以降に実行
+  ▼ post-close モード（引け後確認）: 毎営業日 15:30 以降に実行
     python close_stop_guard.py --post-close                  # dry-run
-    python close_stop_guard.py --post-close --execute        # デモ口座に翌日寄成を発注
+    python close_stop_guard.py --post-close --execute        # デモ口座に成行発注
     python close_stop_guard.py --post-close --execute --prod # 本番口座
 
 【pre-close と post-close の違い】
-  pre-close  : 14:50 の現在値で判定 → MOC (引け成行) を今日のうちに発注
-               バックテストの close 損切りに最も近い運用。
-  post-close : 15:30 以降に yfinance 終値で判定 → MOO (翌日寄成) を発注
-               実際の終値で判定できる。当日は決済できないが判定が正確。
+  pre-close  : kabu 現在値で損切り判定 → 成行 (FrontOrderType=10) を即時発注。
+               市場が開いているため即時約定。
+  post-close : yfinance 終値で損切り判定 → 成行発注 (翌朝まで受付待ちになる場合あり)。
+               15:30 以降は自動的にこのモードへ切替わる。
 
 【ポジション管理の優先順位】
   既定 (--use-csv)   : forward_test_log.csv の filled/holding 行を使用
@@ -43,8 +43,8 @@ close は「引けの瞬間の値段で判定」が本質なので、broker に�
 
 使い方:
   python close_stop_guard.py                          # dry-run (pre-close)
-  python close_stop_guard.py --execute                # デモ口座に MOC 発注
-  python close_stop_guard.py --execute --prod         # 本番口座に MOC 発注
+  python close_stop_guard.py --execute                # デモ口座に成行発注
+  python close_stop_guard.py --execute --prod         # 本番口座に成行発注
   python close_stop_guard.py --post-close             # dry-run (post-close)
   python close_stop_guard.py --post-close --execute   # デモ口座に MOO 発注
   python close_stop_guard.py --use-kabu-pos --execute # kabu 建玉と照合して発注
@@ -433,15 +433,16 @@ def main() -> int:
 
     now = datetime.now(JST)
 
-    # 15:25 以降は MOC 受付終了のため post-close へ自動切替
-    MOC_CUTOFF_HOUR, MOC_CUTOFF_MIN = 15, 25
+    # 15:30 以降は市場外のため post-close フラグを自動設定
+    # (価格ソースを yfinance 終値に切替える。発注は常に成行。)
+    MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 15, 30
     if not args.post_close:
-        after_cutoff = (now.hour, now.minute) >= (MOC_CUTOFF_HOUR, MOC_CUTOFF_MIN)
-        if after_cutoff:
-            print(f"  ⚠ {now:%H:%M} JST: MOC受付終了(15:25)のため post-close モードに自動切替")
+        after_close = (now.hour, now.minute) >= (MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN)
+        if after_close:
+            print(f"  ⚠ {now:%H:%M} JST: 市場終了後のため post-close モードに自動切替")
             args.post_close = True
 
-    timing_label = "post-close (yfinance終値→翌日MOO)" if args.post_close else "pre-close (現在値→当日MOC)"
+    timing_label = "post-close (yfinance終値)" if args.post_close else "pre-close (現在値)"
     print("=" * 65)
     print(f"close 損切りガード  {now:%Y-%m-%d %H:%M JST}")
     print(f"モード  : {mode_label}")
@@ -565,24 +566,15 @@ def main() -> int:
     profit_count = sum(1 for p in breached if p.get("exit_reason") == "利確")
     print(f"損切り: {stop_count}件 / 利確: {profit_count}件 / タイムカット: {tc_count}件 (合計: {len(breached)}件)")
     if not args.execute:
-        order_type = "MOO (翌日寄成)" if args.post_close else "MOC (引け成行)"
-        print(f"dry-run のため発注しません ({order_type})。実発注するには --execute を付けてください。")
+        print(f"dry-run のため発注しません (成行)。実発注するには --execute を付けてください。")
         return 0
 
-    if args.post_close:
-        print(f"翌日寄成 (MOO) を {env_label} に発注します...")
-        ok = 0
-        for pos in breached:
-            if send_moo_order(pos, cli):
-                ok += 1
-        print(f"\n発注完了: {ok}/{len(breached)} 件成功 (翌日寄成)")
-    else:
-        print(f"引け成行 (MOC) を {env_label} に発注します...")
-        ok = 0
-        for pos in breached:
-            if send_moc_order(pos, cli):
-                ok += 1
-        print(f"\n発注完了: {ok}/{len(breached)} 件成功 (引け成行)")
+    print(f"成行 を {env_label} に発注します...")
+    ok = 0
+    for pos in breached:
+        if send_moo_order(pos, cli):
+            ok += 1
+    print(f"\n発注完了: {ok}/{len(breached)} 件成功 (成行)")
     return 0
 
 
