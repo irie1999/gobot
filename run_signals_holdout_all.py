@@ -487,11 +487,12 @@ def _save_bt_cache():
 _atexit.register(_save_bt_cache)
 
 def _make_cached_bt(orig_fn):
-    def wrapper(symbol, name, strategy):
+    def wrapper(symbol, name, strategy, max_hold=None):
         mode = os.environ.get("TRADING_MODE", "conservative")
-        key  = f"{symbol}|{strategy}|{mode}{_cache_settings}"
+        mh_key = f"|mh{max_hold}" if max_hold is not None else ""
+        key  = f"{symbol}|{strategy}|{mode}{_cache_settings}{mh_key}"
         if key not in _bt_cache:
-            _bt_cache[key] = orig_fn(symbol, name, strategy)
+            _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
             _bt_cache_dirty["n"] += 1
             # 100件ごとに途中保存 (長時間実行の中断対策)
             if _bt_cache_dirty["n"] % 100 == 0:
