@@ -34,6 +34,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+_JST_TZ = timezone(timedelta(hours=9))
+
+def _report_date():
+    """レポート基準日: 15時以降なら当日、それ以前なら前営業日（深夜実行時に翌日付けになるのを防ぐ）"""
+    now   = datetime.now(_JST_TZ)
+    today = now.date()
+    wd    = today.weekday()  # 0=Mon...6=Sun
+    if wd == 5:  # 土
+        return today - timedelta(days=1)
+    if wd == 6:  # 日
+        return today - timedelta(days=2)
+    if now.hour >= 15:
+        return today  # 引け後 → 当日
+    if wd == 0:  # 月
+        return today - timedelta(days=3)  # 前金曜
+    return today - timedelta(days=1)
+
 # ── 引数先読み ────────────────────────────────────────────────────────────────
 _pre = argparse.ArgumentParser(add_help=False)
 _pre.add_argument("--workers",    type=int,   default=2)
@@ -264,24 +281,7 @@ else:
     _STOP_STRATS = ["MACD", "A7", "RSI2"]
     _BRK_STRATS  = ["DON", "VOL", "MOM"]
 
-JST   = timezone(timedelta(hours=9))
-
-def _report_date() -> "date":
-    """レポート基準日: 15時以降なら当日、それ以前なら前営業日（市場が開いていない時間帯に翌日付けになるのを防ぐ）"""
-    now   = datetime.now(JST)
-    today = now.date()
-    wd    = today.weekday()  # 0=Mon...6=Sun
-    if wd == 5:  # 土
-        return today - timedelta(days=1)
-    if wd == 6:  # 日
-        return today - timedelta(days=2)
-    if now.hour >= 15:
-        return today  # 引け後 → 当日
-    # 引け前（市場開始前含む） → 前営業日
-    if wd == 0:  # 月
-        return today - timedelta(days=3)  # 前金曜
-    return today - timedelta(days=1)
-
+JST   = _JST_TZ
 TODAY = _report_date()
 
 # ── 当日キャッシュ: 生成済みHTMLがあれば再計算をスキップ ──────────────────────
