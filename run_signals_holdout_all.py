@@ -77,6 +77,8 @@ _pre.add_argument("--oos-until", type=str, default=None,
                   help="OOS検証終了日 (YYYY-MM-DD). 指定時のみOOS検証HTMLを生成する")
 _pre.add_argument("--oos-days",  type=int, default=365,
                   help="OOS検証期間（日数）. デフォルト365日")
+_pre.add_argument("--max-holds", type=str, default=None,
+                  help="比較する最大保有日数をカンマ区切りで指定 (例: 7,15,20). --bothと組み合わせて使用")
 _args, _ = _pre.parse_known_args()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
@@ -101,11 +103,19 @@ if _args.both and not _args.short:
         _price_list = [int(_args.max_price) if _args.max_price < 100000 else 10000]
     _multi_price = len(_price_list) > 1
 
-    # --both / --short / --no-browser / --price-ranges / --output-suffix は渡さず、--force は伝播
+    # 最大保有日数リストを構築
+    if getattr(_args, "max_holds", None):
+        _hold_list = [int(x.strip()) for x in _args.max_holds.split(",") if x.strip()]
+    else:
+        _hold_list = [None]  # None = デフォルト (MAX_HOLD_OVERRIDE なし)
+    _multi_hold = len(_hold_list) > 1 or (_hold_list[0] is not None)
+
+    # --both / --short / --no-browser / --price-ranges / --output-suffix / --max-holds は渡さず、--force は伝播
     _base_cargs = [a for a in sys.argv[1:]
-                   if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix")
+                   if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix", "--max-holds")
                    and not a.startswith("--price-ranges=")
-                   and not a.startswith("--output-suffix=")]
+                   and not a.startswith("--output-suffix=")
+                   and not a.startswith("--max-holds=")]
     # --max-price も除去（後で各ループで付け直す）
     _base_cargs_no_price = []
     _skip_next = False
@@ -123,33 +133,40 @@ if _args.both and not _args.short:
         _base_cargs_no_price.append("--force")
     _base_cargs_no_price.append("--no-browser")
 
-    # 各価格範囲 × ロング/ショートを生成（逐次実行でメモリ使用を抑える）
-    _generated: dict = {}  # (direction, max_p) -> Path
-    for _mp in _price_list:
-        _mp_suffix = f"_p{_mp}" if _multi_price else ""
-        _lf = Path(f"signals_holdout_all_{_bd}{_mp_suffix}.html")
-        _sf = Path(f"signals_holdout_all_short_{_bd}{_mp_suffix}.html")
-        # --output-suffix でサブプロセスの出力ファイル名を制御
-        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp), "--output-suffix", _mp_suffix]
+    # 各価格範囲 × 最大保有日数 × ロング/ショートを生成（逐次実行でメモリ使用を抑える）
+    _generated: dict = {}  # (direction, max_p, mh) -> Path
+    for _mh in _hold_list:
+        _mh_suffix = f"_mh{_mh}" if _mh is not None else ""
+        _mh_env = {**os.environ, "MAX_HOLD_OVERRIDE": str(_mh)} if _mh is not None else None
+        for _mp in _price_list:
+            _mp_suffix = f"_p{_mp}" if _multi_price else ""
+            _suffix = f"{_mp_suffix}{_mh_suffix}"
+            _lf = Path(f"signals_holdout_all_{_bd}{_suffix}.html")
+            _sf = Path(f"signals_holdout_all_short_{_bd}{_suffix}.html")
+            _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp), "--output-suffix", _suffix]
 
-        print("=" * 65)
-        print(f"=== ロングシグナル生成中 (〜{_mp:,}円) ===")
-        print("=" * 65)
-        _sp.run([sys.executable, __file__] + _cargs_mp)
+            _mh_label = f"MAX_HOLD={_mh}日 " if _mh is not None else ""
+            print("=" * 65)
+            print(f"=== ロングシグナル生成中 ({_mh_label}〜{_mp:,}円) ===")
+            print("=" * 65)
+            _sp.run([sys.executable, __file__] + _cargs_mp,
+                    env=_mh_env if _mh_env else None)
 
-        print("=" * 65)
-        print(f"=== ショートシグナル生成中 (〜{_mp:,}円) ===")
-        print("=" * 65)
-        _sp.run([sys.executable, __file__] + _cargs_mp + ["--short"])
+            print("=" * 65)
+            print(f"=== ショートシグナル生成中 ({_mh_label}〜{_mp:,}円) ===")
+            print("=" * 65)
+            _sp.run([sys.executable, __file__] + _cargs_mp + ["--short"],
+                    env=_mh_env if _mh_env else None)
 
-        if not _lf.exists() or not _sf.exists():
-            print(f"[ERROR] ロング/ショートHTMLの生成に失敗しました (max-price={_mp})")
-            sys.exit(1)
-        _generated[("long",  _mp)] = _lf
-        _generated[("short", _mp)] = _sf
+            if not _lf.exists() or not _sf.exists():
+                print(f"[ERROR] ロング/ショートHTMLの生成に失敗しました (max-price={_mp}, max-hold={_mh})")
+                sys.exit(1)
+            _generated[("long",  _mp, _mh)] = _lf
+            _generated[("short", _mp, _mh)] = _sf
 
-    # ── 最初の価格範囲をデフォルト表示 ──────────────────────────────────────
+    # ── 最初の価格範囲・保有日数をデフォルト表示 ─────────────────────────────
     _first_mp   = _price_list[0]
+    _first_mh   = _hold_list[0]  # None or int
     _min_p_disp = int(_min_p_val) if _min_p_val > 0 else None
 
     def _price_label(mp: int) -> str:
@@ -158,6 +175,12 @@ if _args.both and not _args.short:
             parts.append(f"{_min_p_disp:,}〜")
         parts.append(f"{mp:,}円")
         return "".join(parts)
+
+    def _mh_key(mh) -> str:
+        return str(mh) if mh is not None else "default"
+
+    def _mh_label(mh) -> str:
+        return f"最大{mh}日" if mh is not None else "標準"
 
     # ── ナビゲーションHTML生成 ────────────────────────────────────────────
     _nav_btns = ""
@@ -171,7 +194,7 @@ if _args.both and not _args.short:
             f'onclick="switchLs(\'{_dir}\')">{_lbl_prefix}</button>\n'
         )
 
-    # 価格帯ボタン（複数の場合のみ、セパレータを挟んで同じ行に追加）
+    # 価格帯ボタン（複数の場合のみ）
     if _multi_price:
         _nav_btns += '  <span class="nav-sep"></span>\n'
         for _i, _mp in enumerate(_price_list):
@@ -187,13 +210,32 @@ if _args.both and not _args.short:
             f'株価 {_price_label(_price_list[0])}</span>\n'
         )
 
-    for _dir in ("long", "short"):
-        for _i, _mp in enumerate(_price_list):
-            _frame_id = f"ls-{_dir}-{_mp}"
-            _active_fr = " active" if _dir == "long" and _i == 0 else ""
-            _src = _generated[(_dir, _mp)].name
-            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}"></iframe>\n'
+    # 最大保有日数ボタン（複数の場合のみ）
+    _show_mh_btns = len(_hold_list) > 1
+    if _show_mh_btns:
+        _nav_btns += '  <span class="nav-sep"></span>\n'
+        for _i, _mh in enumerate(_hold_list):
+            _nav_btns += (
+                f'  <button class="mh-btn{" active" if _i==0 else ""}" data-mh="{_mh_key(_mh)}" '
+                f'onclick="switchMh(\'{_mh_key(_mh)}\')">{_mh_label(_mh)}</button>\n'
+            )
+    elif _first_mh is not None:
+        _nav_btns += (
+            f'  <span style="font-size:0.68rem;font-weight:600;color:#a78bfa;'
+            f'background:#1e1b38;border:1px solid #4c1d95;border-radius:4px;'
+            f'padding:1px 6px;margin-left:8px;align-self:center">'
+            f'保有上限 {_first_mh}日</span>\n'
+        )
 
+    for _dir in ("long", "short"):
+        for _mh in _hold_list:
+            for _i, _mp in enumerate(_price_list):
+                _frame_id = f"ls-{_dir}-{_mp}-{_mh_key(_mh)}"
+                _active_fr = " active" if _dir == "long" and _i == 0 and _mh == _first_mh else ""
+                _src = _generated[(_dir, _mp, _mh)].name
+                _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}"></iframe>\n'
+
+    _first_mh_js = f"'{_mh_key(_first_mh)}'"
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -215,6 +257,11 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
   border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
 .pr-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .pr-btn.active{{background:#0f172a;border-bottom:2px solid #fbbf24;color:#fbbf24}}
+.mh-btn{{padding:9px 18px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
+  color:#94a3b8;cursor:pointer;font-size:0.88rem;font-weight:600;
+  border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
+.mh-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
+.mh-btn.active{{background:#0f172a;border-bottom:2px solid #a78bfa;color:#a78bfa}}
 .nav-sep{{width:1px;background:#334155;margin:8px 8px 4px;align-self:stretch}}
 .ls-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
 .ls-frame.active{{display:block}}
@@ -227,9 +274,10 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 <script>
 var _curDir = 'long';
 var _curPr  = {_first_mp};
+var _curMh  = {_first_mh_js};
 function _showFrame() {{
   document.querySelectorAll('.ls-frame').forEach(f => f.classList.remove('active'));
-  var f = document.getElementById('ls-' + _curDir + '-' + _curPr);
+  var f = document.getElementById('ls-' + _curDir + '-' + _curPr + '-' + _curMh);
   if (f) f.classList.add('active');
 }}
 function switchLs(dir) {{
@@ -241,6 +289,12 @@ function switchLs(dir) {{
 function switchPr(pr) {{
   _curPr = pr;
   document.querySelectorAll('.pr-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  _showFrame();
+}}
+function switchMh(mh) {{
+  _curMh = mh;
+  document.querySelectorAll('.mh-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   _showFrame();
 }}
