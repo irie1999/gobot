@@ -45,6 +45,7 @@ TEST_CSV = "test_positions.csv"
 TEST_QTY = 100
 CASH_MARGIN = 3   # 3=信用返済（テストポジションは信用想定）
 CTX_FILE  = ".test_ctx.json"   # S1 の結果を保存してプロセス間で共有
+_PROD     = False               # --prod で True になる（本番口座 18080 を使用）
 
 
 # ── ctx の保存・読み込み ──────────────────────────────────────────────────────
@@ -90,8 +91,10 @@ def _pause(msg: str = "確認したら Enter を押して次へ進みます…")
     input(f"\n  [{msg}] ")
 
 
-def _make_cli(prod: bool = False, dry_run: bool = True):
+def _make_cli(prod: bool | None = None, dry_run: bool = True):
     from kabu_api import KabuClient
+    if prod is None:
+        prod = _PROD
     cli = KabuClient(prod=prod, dry_run=dry_run)
     cli.connect()
     return cli
@@ -130,8 +133,9 @@ def s1_connect(symbol: str, execute: bool) -> dict:
     """S1: 接続・銘柄価格確認"""
     _header("S1: 接続・銘柄価格確認")
 
-    cli = _make_cli(prod=False, dry_run=False)
-    _ok(f"kabu デモ接続成功 ({cli.env_label})")
+    cli = _make_cli(dry_run=False)
+    env = "本番(18080)" if _PROD else "デモ(18081)"
+    _ok(f"kabu 接続成功 ({env})")
 
     price = cli.get_current_price(symbol)
     if price is None:
@@ -178,7 +182,7 @@ def s2_entry(ctx: dict, execute: bool) -> None:
 
     if execute:
         from kabu_api import KabuClient, CASH_MARGIN_OPEN
-        cli = _make_cli(prod=False, dry_run=False)
+        cli = _make_cli(dry_run=False)
         _step(f"{sym} 逆指値買い @≥{order_p:,}円 x{TEST_QTY}株 (信用新規)")
         res = cli.send_stop_buy(sym, qty=TEST_QTY, trigger_price=order_p,
                                 cash_margin=CASH_MARGIN_OPEN)
@@ -229,6 +233,8 @@ def s3_sync(ctx: dict, execute: bool, force_holding: bool = False) -> None:
     if execute and not force_holding:
         import subprocess
         cmd = [sys.executable, "kabu_position_sync.py", "--log", TEST_CSV, "--execute"]
+        if _PROD:
+            cmd.append("--prod")
         subprocess.run(cmd)
         rows = _read_test_csv()
         holding = [r for r in rows if r.get("status") == "holding"]
@@ -269,6 +275,8 @@ def s4_stop_orders(ctx: dict, execute: bool) -> None:
     cmd = [sys.executable, "set_stop_orders.py", "--log", TEST_CSV]
     if execute:
         cmd.append("--execute")
+    if _PROD:
+        cmd.append("--prod")
     subprocess.run(cmd)
 
 
@@ -280,6 +288,8 @@ def s5_profit_orders(ctx: dict, execute: bool) -> None:
     cmd = [sys.executable, "set_profit_orders.py", "--log", TEST_CSV]
     if execute:
         cmd.append("--execute")
+    if _PROD:
+        cmd.append("--prod")
     subprocess.run(cmd)
 
 
@@ -344,6 +354,8 @@ def s6_stop_loss_moc(ctx: dict, execute: bool) -> None:
     cmd = [sys.executable, "close_stop_guard.py", "--log", TEST_CSV]
     if execute:
         cmd.append("--execute")
+    if _PROD:
+        cmd.append("--prod")
     subprocess.run(cmd)
 
     # テスト後に元の値に戻す
@@ -387,6 +399,8 @@ def s7_profit_moc(ctx: dict, execute: bool) -> None:
     cmd = [sys.executable, "close_stop_guard.py", "--log", TEST_CSV]
     if execute:
         cmd.append("--execute")
+    if _PROD:
+        cmd.append("--prod")
     subprocess.run(cmd)
 
     # テスト後に元の target_price に戻す
@@ -432,6 +446,8 @@ def s8_timecut_moc(ctx: dict, execute: bool) -> None:
     cmd = [sys.executable, "close_stop_guard.py", "--log", TEST_CSV]
     if execute:
         cmd.append("--execute")
+    if _PROD:
+        cmd.append("--prod")
     subprocess.run(cmd)
 
     # テスト後に fill_date を今日に戻す
@@ -483,6 +499,8 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="全シナリオを順番に実行")
     ap.add_argument("--execute", action="store_true",
                     help="実際に kabu へ発注/照会する（省略時は dry-run）")
+    ap.add_argument("--prod", action="store_true",
+                    help="本番口座(18080)を使う（省略時はデモ(18081)）")
     ap.add_argument("--symbol", default="7203",
                     help="テスト銘柄コード（デフォルト: 7203 トヨタ）")
     ap.add_argument("--force-holding", action="store_true",
@@ -491,6 +509,9 @@ def main() -> None:
                     help=f"{CTX_FILE} を削除してコンテキストをリセット")
     ap.add_argument("--list", action="store_true", help="シナリオ一覧を表示して終了")
     args = ap.parse_args()
+
+    global _PROD
+    _PROD = args.prod
 
     if args.list or not (args.scenario or args.all or args.reset_ctx):
         print("\nシナリオ一覧:")
