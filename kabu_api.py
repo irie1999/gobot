@@ -203,7 +203,11 @@ class KabuClient:
         ショート決済 (kabu_side=SIDE_BUY)  → 売り建玉 (Side="1") を使う
         """
         target_side = "2" if kabu_side == SIDE_SELL else "1"
-        candidates = [p for p in self.get_margin_positions(symbol)
+        margin_positions = self.get_margin_positions(symbol)
+        import json as _json
+        print(f"  [DEBUG] get_margin_positions({symbol}) = "
+              f"{_json.dumps(margin_positions, ensure_ascii=False)}")
+        candidates = [p for p in margin_positions
                       if str(p.get("Side", "")) == target_side]
 
         close_list: list[dict] = []
@@ -213,7 +217,6 @@ class KabuClient:
             hold_id = (p.get("HoldID") or p.get("ExecutionID") or
                        p.get("PositionID") or "")
             if not hold_id:
-                import json as _json
                 print(f"  ⚠ {symbol}: 建玉に HoldID が見つかりません。"
                       f"生データ: {_json.dumps(p, ensure_ascii=False)}")
             leaves = int(p.get("LeavesQty") or 0)
