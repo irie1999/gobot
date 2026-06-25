@@ -93,7 +93,9 @@ def get_kabu_positions(prod: bool) -> list[dict]:
         qty   = int(p.get("LeavesQty") or p.get("Qty") or 0)
         avg   = p.get("AveragePrice") or p.get("Price") or 0
         cur   = p.get("CurrentPrice") or 0
-        cm    = int(p.get("CashMargin") or 1)  # 1=現物 2=信用新規 → 返済は3
+        # MarginTradeType: 1=制度信用, 2=一般信用 → 信用返済(3)
+        # MarginTradeType が無い or 0 → 現物(1)
+        margin_type = int(p.get("MarginTradeType") or 0)
         name  = (p.get("SymbolName") or "")[:12]
         pnl   = p.get("Profit") or p.get("ProfitLoss") or 0
         result.append({
@@ -103,7 +105,7 @@ def get_kabu_positions(prod: bool) -> list[dict]:
             "qty":         qty,
             "fill_price":  float(avg),
             "current_price": float(cur),
-            "cash_margin": 3 if cm == 2 else 1,  # 信用新規(2)→返済(3) 現物(1)→1
+            "cash_margin": 3 if margin_type >= 1 else 1,  # 信用→返済(3) 現物→1
             "pnl":         float(pnl),
         })
     return result
