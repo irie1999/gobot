@@ -487,9 +487,19 @@ def _save_bt_cache():
 _atexit.register(_save_bt_cache)
 
 def _make_cached_bt(orig_fn):
+    _mod_globals = orig_fn.__globals__  # 対象モジュールのグローバル名前空間
     def wrapper(symbol, name, strategy, max_hold=None):
         mode = os.environ.get("TRADING_MODE", "conservative")
-        mh_key = f"|mh{max_hold}" if max_hold is not None else ""
+        mh_key = ""
+        if max_hold is not None:
+            mh_key = f"|mh{max_hold}"
+            # sm/tm をキーに含めることで、mode切替後に古いキャッシュが返るのを防ぐ
+            try:
+                params = _mod_globals.get("STRATEGY_PARAMS", {}).get(strategy)
+                if params and len(params) >= 4:
+                    mh_key += f"|{params[2]:.2f}_{params[3]:.2f}"
+            except Exception:
+                pass
         key  = f"{symbol}|{strategy}|{mode}{_cache_settings}{mh_key}"
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
