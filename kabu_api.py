@@ -219,7 +219,7 @@ class KabuClient:
             leaves = int(p.get("LeavesQty") or 0)
             use_qty = min(remaining, leaves)
             if use_qty > 0:
-                close_list.append({"HoldID": hold_id, "Qty": use_qty})
+                close_list.append({"HoldID": hold_id, "Qty": float(use_qty)})
                 remaining -= use_qty
             if remaining <= 0:
                 break
@@ -287,10 +287,11 @@ class KabuClient:
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
             body["DelivType"] = 0
-            body["MarginTradeType"] = 1  # 制度信用
             if cash_margin == CASH_MARGIN_OPEN:
-                body["FundType"] = "11"  # 信用新規のみ FundType 必要
-            # 信用返済(CashMargin=3)は FundType を含めない
+                body["FundType"] = "11"       # 信用新規のみ FundType 必要
+                body["MarginTradeType"] = 1   # 信用新規のみ MarginTradeType 必要
+            # 信用返済(CashMargin=3)は FundType・MarginTradeType ともに含めない
+            # (HoldID で建玉が特定されるため)
         return body
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
