@@ -594,10 +594,9 @@ _market_tab1_html = _market_tab2_html = _market_tab3_html = ""
 try:
     import pandas as _pd
     _na_years  = 5
-    _na_end    = target_date if _args.date else None
+    _na_end    = target_date if _args.date else TODAY  # 基準日でN225データを揃える
     _na_close  = _na.fetch_n225(_na_years, end_date=_na_end)
-    if _args.date:
-        _na_close = _na_close[_na_close.index <= _pd.Timestamp(target_date)]
+    _na_close  = _na_close[_na_close.index <= _pd.Timestamp(_na_end)]
     if not _na_close.empty:
         _na_trend     = _na.label_trend(_na_close)
         _na_r         = _na.get_regime(_na_close)
@@ -778,32 +777,8 @@ except Exception as _e:
 # 全設定統合: _all_configs でデフォルト期間を一括集計 → デフォルト表示
 _na._PNL_CONFIGS[:] = _all_configs
 print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_configs)}設定)...", flush=True)
-_all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days)
+_all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
-
-# 最大保有日数比較セクションを詳細分析タブ(⑪⑫)に挿入
-# --max-holds 未指定時はデフォルト値 [7, 10, 15, 20] で常に表示
-_max_holds_raw = getattr(_args, "max_holds", None)
-_hold_list = (
-    [int(x.strip()) for x in _max_holds_raw.split(",") if x.strip()]
-    if _max_holds_raw
-    else [7, 10, 15, 20]
-)
-if len(_hold_list) > 1:
-    _na._PNL_CONFIGS[:] = _all_configs
-    # ⑪: conservative のみ（単純比較）
-    print(f"最大保有日数比較中 ({_hold_list}, conservative)...", flush=True)
-    _mh_html = _na.build_max_hold_comparison_html(
-        _hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=False)
-    if _mh_html:
-        _all_period_html = _all_period_html.replace("<!-- MAXHOLD_SLOT -->", _mh_html, 1)
-    # ⑫: conservative vs aggressive 比較
-    print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
-    _mh_cmp_html = _na.build_max_hold_comparison_html(
-        _hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True)
-    if _mh_cmp_html:
-        _all_period_html = _all_period_html.replace("<!-- MAXHOLD_CMP_SLOT -->", _mh_cmp_html, 1)
-    _phase("最大保有日数比較完了")
 
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
