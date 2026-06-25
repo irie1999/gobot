@@ -3932,6 +3932,131 @@ function switchOosMon_{_uid}(idx) {{
     return html
 
 
+def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int) -> str:
+    """MAX_HOLD別の損益比較セクションを生成して損益タブに挿入する。
+
+    hold_list: 比較する最大保有日数 (例: [7, 15, 20])
+    days: 集計対象期間 (_tab5_pnl_html の days と揃える)
+    workers: 並列数
+    """
+    if not _SIGNALS_AVAILABLE or not hold_list:
+        return ""
+
+    import os as _os
+
+    # 全 WATCHLIST を収集（重複除去）
+    seen: set = set()
+    unique_items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                unique_items.append((sym, name, strat))
+    if not unique_items:
+        return ""
+
+    since = _TODAY - timedelta(days=days)
+
+    def _collect(mh: int) -> dict:
+        orig = _os.environ.get("MAX_HOLD_OVERRIDE")
+        _os.environ["MAX_HOLD_OVERRIDE"] = str(mh)
+        try:
+            trades: list[dict] = []
+            with _TPE(max_workers=workers) as ex:
+                futs = {ex.submit(_mod_for(strat).backtest_one, sym, name, strat): None
+                        for sym, name, strat in unique_items}
+                for fut in _asc(futs):
+                    try:
+                        r = fut.result()
+                        if not r:
+                            continue
+                        pr = r.get("period_results", {})
+                        max_p = max(pr.keys()) if pr else None
+                        if max_p is None:
+                            continue
+                        for t in pr[max_p].get("trade_log", []):
+                            sig = t.get("signal_dt")
+                            if not sig:
+                                continue
+                            sig_date = sig.date() if hasattr(sig, "date") else sig
+                            if (sig_date >= since
+                                    and t.get("reason") not in ("発注中", "保有中")):
+                                trades.append(t)
+                    except Exception:
+                        pass
+        finally:
+            if orig is not None:
+                _os.environ["MAX_HOLD_OVERRIDE"] = orig
+            else:
+                _os.environ.pop("MAX_HOLD_OVERRIDE", None)
+
+        n = len(trades)
+        wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        gp = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
+        gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        timecuts = sum(1 for t in trades if t.get("reason") == "タイムカット")
+        avg_hold = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
+        return {
+            "trades": n,
+            "wins": wins,
+            "win_rate": wins / n * 100 if n else 0.0,
+            "total_pnl": sum(t.get("pnl", 0) for t in trades),
+            "pf": pf,
+            "avg_hold": avg_hold,
+            "timecuts": timecuts,
+        }
+
+    results: dict[int, dict] = {}
+    for mh in hold_list:
+        print(f"  [max_hold比較] MAX_HOLD={mh}日 集計中...", flush=True)
+        results[mh] = _collect(mh)
+
+    best_mh = max(hold_list, key=lambda m: results[m]["total_pnl"])
+
+    rows = ""
+    for mh in hold_list:
+        r = results[mh]
+        pnl = r["total_pnl"]
+        pnl_str = f"+{pnl:,.0f}" if pnl > 0 else f"{pnl:,.0f}"
+        pnl_color = "#4ade80" if pnl > 0 else "#f87171" if pnl < 0 else "#94a3b8"
+        pf_str = f"{r['pf']:.2f}" if r["pf"] != float("inf") else "∞"
+        bg = "background:#172032;" if mh == best_mh else ""
+        badge = (' <span style="font-size:0.6rem;background:#4ade80;color:#052e16;'
+                 'padding:1px 4px;border-radius:3px;vertical-align:middle">最良</span>'
+                 if mh == best_mh else "")
+        rows += (
+            f'<tr style="{bg}">'
+            f'<td style="padding:6px 10px;font-weight:700;color:#e2e8f0">最大{mh}日{badge}</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["trades"]:,}</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["win_rate"]:.1f}%</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:#93c5fd">{pf_str}</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["avg_hold"]:.1f}日</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:#fbbf24">{r["timecuts"]:,}</td>'
+            f'<td style="padding:6px 10px;text-align:right;font-weight:700;color:{pnl_color}">{pnl_str}円</td>'
+            f'</tr>\n'
+        )
+
+    return (
+        f'<div style="margin:0 0 24px;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #a78bfa">'
+        f'<h4 style="margin:0 0 12px;color:#a78bfa;font-size:0.95rem">'
+        f'⏱ 最大保有日数 比較（直近{days}日）</h4>'
+        f'<table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
+        f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.78rem">'
+        f'<th style="padding:5px 10px;text-align:left">最大保有</th>'
+        f'<th style="padding:5px 10px;text-align:right">件数</th>'
+        f'<th style="padding:5px 10px;text-align:right">勝率</th>'
+        f'<th style="padding:5px 10px;text-align:right">PF</th>'
+        f'<th style="padding:5px 10px;text-align:right">平均保有日</th>'
+        f'<th style="padding:5px 10px;text-align:right">タイムカット</th>'
+        f'<th style="padding:5px 10px;text-align:right">損益合計</th>'
+        f'</tr></thead>'
+        f'<tbody>{rows}</tbody>'
+        f'</table></div>'
+    )
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
