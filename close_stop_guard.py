@@ -156,6 +156,76 @@ def load_open_positions(log_path: str) -> list[dict]:
 
 
 # ────────────────────────────────────────────────────────────
+# シグナルから損切り価格を逆引き
+# ────────────────────────────────────────────────────────────
+def lookup_stop_from_signal(symbol: str, fill_price: float, is_short: bool
+                             ) -> tuple[float | None, float | None, str]:
+    """check_signal_on_date を使って損切り価格を逆引きする。
+
+    直近 30 営業日を全戦略で検索し、order_price ≈ fill_price のシグナルを照合。
+    ロングなら stop_price < fill_price、ショートなら stop_price > fill_price を確認。
+    戻り値: (stop_price, target_price, strategy_name) — 見つからなければ (None, None, "")
+    """
+    try:
+        import check_signals_stop as _stop
+        import check_signals_breakout as _brk
+        from datetime import timedelta as _td
+
+        sym_t = symbol + ".T"
+        today = date.today()
+
+        # 直近 30 営業日を生成
+        sig_dates: list[date] = []
+        d = today
+        for _ in range(50):
+            d -= _td(days=1)
+            if d.weekday() < 5:
+                sig_dates.append(d)
+            if len(sig_dates) >= 30:
+                break
+
+        # 試す戦略一覧
+        candidates: list[tuple] = []
+        for s in _stop.STRATEGY_PARAMS:
+            candidates.append((_stop, s))
+        for s in _brk.STRATEGY_PARAMS:
+            candidates.append((_brk, s))
+
+        best: tuple | None = None  # (stop_p, target_p, strategy, diff_pct)
+        for sig_d in sig_dates:
+            for mod, strat in candidates:
+                try:
+                    sig = mod.check_signal_on_date(sym_t, strat, sig_d)
+                    if not sig:
+                        continue
+                    order_p = float(sig.get("order_price", 0) or 0)
+                    if order_p <= 0:
+                        continue
+                    diff_pct = abs(order_p - fill_price) / order_p
+                    if diff_pct > 0.08:   # ±8% 以内
+                        continue
+                    stop_p = float(sig.get("stop_price", 0) or 0)
+                    tgt_p  = float(sig.get("target_price", 0) or 0)
+                    if stop_p <= 0:
+                        continue
+                    # 方向チェック: ロングは stop < fill, ショートは stop > fill
+                    if not is_short and stop_p >= fill_price:
+                        continue
+                    if is_short and stop_p <= fill_price:
+                        continue
+                    if best is None or diff_pct < best[3]:
+                        best = (stop_p, tgt_p, strat, diff_pct)
+                except Exception:
+                    continue
+
+        if best is not None:
+            return best[0], best[1], best[2]
+    except Exception as e:
+        print(f"  ⚠ {symbol}: シグナル逆引き失敗 ({e})")
+    return None, None, ""
+
+
+# ────────────────────────────────────────────────────────────
 # kabu 建玉との照合（--use-kabu-pos）
 # ────────────────────────────────────────────────────────────
 def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict]:
@@ -164,8 +234,9 @@ def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict
     照合ルール:
       - CSV にあって kabu にもある  → kabu の qty を採用（CSV の stop_price を維持）
       - CSV にあって kabu にない    → 警告してスキップ（kabu が正なので）
-      - kabu にあって CSV にない    → 警告して含める（stop_price は不明 → None）
-                                       stop_price が None のものは損切り判定をスキップ
+      - kabu にあって CSV にない    → シグナル逆引きで stop_price を取得して追加。
+                                       逆引き失敗時は ATR 推定。両方失敗なら損切り判定スキップ。
+    csv_positions が空でも kabu 建玉のみで動作する。
     """
     try:
         kabu_pos_raw = cli.get_positions(product=0)
@@ -221,18 +292,43 @@ def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict
             if leaves == 0:
                 continue
             side_label = "売建(ショート)" if is_short else "買建(ロング)"
-            print(f"  ⚠ {sym}: kabu に {side_label} {leaves}株 の建玉があるが CSV にない → 損切り価格不明のため損切り判定スキップ")
-            # stop_price=None → 後でスキップ処理
+            name = (kp.get("SymbolName") or "")[:12]
+            # kabu 建玉の取得価格 (信用: Price / 現物: Price)
+            fill_p = float(kp.get("AveragePrice") or kp.get("Price") or 0)
+            margin_type = int(kp.get("MarginTradeType") or 0)
+            cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
+
+            # シグナル逆引きで損切り価格を取得
+            stop_p = tgt_p = strat = None
+            if fill_p > 0:
+                print(f"  🔍 {sym} {name}: シグナル逆引き中 (fill_price={fill_p:.0f})...")
+                stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
+
+            if stop_p is not None:
+                print(f"  ✓ {sym} {name}: {side_label} {leaves}株 "
+                      f"[{strat}] stop={stop_p:.0f} target={tgt_p:.0f} (シグナル逆引き)")
+            else:
+                # フォールバック: ATR 推定
+                if fill_p > 0:
+                    stop_p = calc_atr_stop(sym, fill_p, is_short)
+                if stop_p is not None:
+                    print(f"  ⚠ {sym} {name}: {side_label} {leaves}株 "
+                          f"stop={stop_p:.0f} (ATR推定) ← シグナル未一致")
+                else:
+                    print(f"  ✗ {sym} {name}: {side_label} {leaves}株 "
+                          f"損切り価格取得失敗 → 損切り判定スキップ")
+
             reconciled.append({
                 "symbol": sym,
-                "name": "",
-                "strategy": "?",
-                "stop_price": None,
-                "target_price": None,
+                "name": name,
+                "strategy": strat or "?",
+                "stop_price": stop_p,
+                "target_price": tgt_p,
                 "is_short": is_short,
                 "qty": leaves,
+                "fill_price": fill_p,
                 "fill_date": "",
-                "cash_margin": CASH_MARGIN_CLOSE if is_short else CASH_GENBUTSU,
+                "cash_margin": cm,
                 "source": "kabu_only",
             })
 
@@ -449,14 +545,18 @@ def main() -> int:
     print(f"タイミング: {timing_label}")
     print(f"接続先  : {env_label}  /  ログ: {log_path}")
     if args.use_kabu_pos:
-        print("建玉照合: kabu 実建玉と CSV を照合します")
+        print("建玉照合: kabu 実建玉を優先します (CSV なしでも動作)")
     print("=" * 65)
 
+    # --use-kabu-pos 時は kabu 実建玉を主ソースにするため CSV は任意
     positions = load_open_positions(log_path)
-    if not positions:
+    if not positions and not args.use_kabu_pos:
         print("保有中ポジションなし。終了します。")
         return 0
-    print(f"CSV 保有中ポジション: {len(positions)} 件\n")
+    if positions:
+        print(f"CSV 保有中ポジション: {len(positions)} 件\n")
+    else:
+        print("CSV にポジションなし — kabu 実建玉から取得します\n")
 
     # kabu クライアント
     cli: KabuClient | None = None
@@ -468,14 +568,16 @@ def main() -> int:
             print(f"kabu 接続成功 ({cli.env_label})\n")
         except Exception as e:
             print(f"✗ kabu 接続失敗: {e}")
-            if args.execute:
+            if args.execute or args.use_kabu_pos:
                 return 1
-            # use-kabu-pos だが execute でない場合は続行 (照合スキップ)
             cli = None
 
     # kabu 建玉との照合
     if args.use_kabu_pos and cli is not None:
         positions = reconcile_with_kabu(positions, cli)
+        if not positions:
+            print("kabu 実建玉なし。終了します。")
+            return 0
         print(f"照合後ポジション: {len(positions)} 件\n")
 
     # 価格取得の方針
