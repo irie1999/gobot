@@ -780,6 +780,44 @@ print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
+# ── 最大保有日数比較セクション（⑪⑫タブ）日付キャッシュ付き ──────────────────
+import pickle as _mhpk
+from pathlib import Path as _MHP
+_mh_cache_dir  = _MHP(".holdout_bt_cache")
+_mh_cache_dir.mkdir(exist_ok=True)
+_mh_cache_file = _mh_cache_dir / f"maxhold_cmp_{TODAY}.pkl"
+_mh_force      = getattr(_args, "force", False)
+
+if _mh_cache_file.exists() and not _mh_force:
+    try:
+        _mh_cached = _mhpk.loads(_mh_cache_file.read_bytes())
+        _mh_html     = _mh_cached.get("conservative", "")
+        _mh_cmp_html = _mh_cached.get("con_agg", "")
+        print(f"[最大保有日数比較] キャッシュ使用: {_mh_cache_file.name}", flush=True)
+    except Exception:
+        _mh_html = _mh_cmp_html = None
+else:
+    _mh_html = _mh_cmp_html = None
+
+if _mh_html is None:
+    _hold_list = [7, 10, 15, 20]
+    _na._PNL_CONFIGS[:] = _all_configs
+    print(f"最大保有日数比較中 ({_hold_list}, conservative)...", flush=True)
+    _mh_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=False) or ""
+    print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
+    _mh_cmp_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True) or ""
+    try:
+        _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
+        print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)
+    except Exception as _mhe:
+        print(f"[最大保有日数比較] キャッシュ保存失敗: {_mhe}", flush=True)
+
+if _mh_html:
+    _all_period_html = _all_period_html.replace("<!-- MAXHOLD_SLOT -->", _mh_html, 1)
+if _mh_cmp_html:
+    _all_period_html = _all_period_html.replace("<!-- MAXHOLD_CMP_SLOT -->", _mh_cmp_html, 1)
+_phase("最大保有日数比較完了")
+
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
