@@ -395,7 +395,8 @@ def _passes_test(r: dict | None) -> bool:
 
 # ── 1 銘柄 × 1 戦略 × 3 fold ─────────────────────────────────────
 def walkforward_one(symbol: str, name: str, strategy_name: str,
-                    max_price: float = 0.0) -> dict | None:
+                    max_price: float = 0.0,
+                    min_price: float = 0.0) -> dict | None:
     calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy_name]
 
     full_df = fetch(symbol, 800)   # Walk-forward には ~2年のデータが必要
@@ -410,8 +411,10 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
     if latest_price <= 0:
         return None
 
-    # 価格フィルター: max_price > 0 のとき最新終値 > max_price の銘柄は除外
+    # 価格フィルター
     if max_price > 0 and latest_price > max_price:
+        return None
+    if min_price > 0 and latest_price < min_price:
         return None
 
     folds_passed  = 0
@@ -516,6 +519,8 @@ def main() -> None:
                         help="ユニバースを先頭 N 件に制限 (デバッグ用, 0=制限なし)")
     parser.add_argument("--max-price", type=float, default=0.0,
                         help="最新終値の上限 (円/株). 0=制限なし")
+    parser.add_argument("--min-price", type=float, default=0.0,
+                        help="最新終値の下限 (円/株). 0=制限なし")
     parser.add_argument("--budget",  type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄に絞る = --max-price (予算/100). "
                              "--max-price と併用時は --max-price 優先")
@@ -582,6 +587,7 @@ def main() -> None:
     effective_max_price = args.max_price
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
+    effective_min_price = args.min_price
 
     _FAMILY_STRATS = {
         "stop":      ["MACD", "A7", "RSI2"],
@@ -619,6 +625,8 @@ def main() -> None:
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
     else:
         print(f"  価格上限  : なし")
+    if effective_min_price > 0:
+        print(f"  価格下限  : {effective_min_price:,.0f}円/株")
     print("=" * 78)
     print("Fold 構造:")
     for name, ts, te, vs, ve in FOLDS:
@@ -644,7 +652,7 @@ def main() -> None:
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(walkforward_one, sym, name, strategy,
-                              effective_max_price): sym
+                              effective_max_price, effective_min_price): sym
                     for sym, name in symbols}
             done = 0
             progress_every = max(len(symbols) // 20, 25)
