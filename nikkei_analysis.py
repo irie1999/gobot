@@ -293,11 +293,25 @@ def _wf_refresh_banner_html(status: dict) -> str:
 
 def fetch_n225(years: int, end_date=None) -> pd.Series:
     """日経225の日足終値を取得。end_date 指定時はその日までのデータを返す。"""
-    # Ticker.history() を使う（download() よりキャッシュの影響を受けにくい）
+    import os as _os
+    from pathlib import Path as _P
+    # yfinanceのSQLiteキャッシュを削除して常に最新データを取得
+    for _cd in [
+        _P(_os.environ.get("APPDATA", "")) / "py-yfinance",
+        _P.home() / ".cache" / "py-yfinance",
+        _P.home() / "AppData" / "Roaming" / "py-yfinance",
+    ]:
+        if _cd.exists():
+            for _f in list(_cd.glob("*.db")) + list(_cd.glob("*.sqlite")):
+                try:
+                    _f.unlink()
+                except Exception:
+                    pass
+
     ticker = yf.Ticker("^N225")
     if end_date is not None:
         start = pd.Timestamp(end_date) - pd.Timedelta(days=years * 365 + 60)
-        end   = pd.Timestamp(end_date) + pd.Timedelta(days=2)  # 余裕を持たせる
+        end   = pd.Timestamp(end_date) + pd.Timedelta(days=2)
         df = ticker.history(start=start, end=end, interval="1d", auto_adjust=True)
     else:
         df = ticker.history(period=f"{years * 365 + 60}d", interval="1d", auto_adjust=True)
