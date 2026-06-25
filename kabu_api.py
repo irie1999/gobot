@@ -411,16 +411,21 @@ class KabuClient:
 
     def send_moc(self, symbol: int | str, qty: int, side: str = "sell",
                  cash_margin: int = CASH_GENBUTSU,
-                 close_positions: list[dict] | None = None) -> dict:
+                 close_positions: list[dict] | None = None,
+                 exchange: int | None = None) -> dict:
         """引け成行 (MOC) 決済。close 方式の損切りで使う。
 
         side            : "sell"=売り決済(ロング) / "buy"=買い戻し(ショート)。
         cash_margin     : CASH_GENBUTSU(1)=現物 / CASH_MARGIN_CLOSE(3)=信用返済。
         close_positions : 信用返済時の建玉 ID リスト [{"HoldID": ..., "Qty": ...}, ...]。
                           None なら API から自動取得 (dry-run では疑似値を入れる)。
+        exchange        : 取引所コード。MOC は SOR(9) 非対応なので東証＋(27)を既定にする。
         """
         kabu_side = SIDE_SELL if side == "sell" else SIDE_BUY
+        # MOC は SOR(9) 非対応。東証＋(27) を既定とし self.order_exchange を無視する。
+        moc_exchange = exchange if exchange is not None else EXCHANGE_TOKYO_PLUS
         body = self._base_order(symbol, kabu_side, qty, cash_margin)
+        body["Exchange"] = moc_exchange
         body["FrontOrderType"] = FOT_MOC
         body["Price"] = 0
 
