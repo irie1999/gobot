@@ -3957,10 +3957,12 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
 
     def _collect(mh: int) -> dict:
         trades: list[dict] = []
+        _errors = 0
         with _TPE(max_workers=workers) as ex:
-            futs = {ex.submit(_mod_for(strat).backtest_one, sym, name, strat, mh): None
+            futs = {ex.submit(_mod_for(strat).backtest_one, sym, name, strat, mh): (sym, strat)
                     for sym, name, strat in unique_items}
             for fut in _asc(futs):
+                sym_st = futs[fut]
                 try:
                     r = fut.result()
                     if not r:
@@ -3977,8 +3979,11 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
                         if (sig_date >= since
                                 and t.get("reason") not in ("発注中", "保有中")):
                             trades.append(t)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    _errors += 1
+                    if _errors <= 3:
+                        print(f"  [max_hold比較] エラー {sym_st}: {_e}", flush=True)
+        print(f"  [max_hold比較] MAX_HOLD={mh}: unique={len(unique_items)} trades={len(trades)} errors={_errors}", flush=True)
 
         n = len(trades)
         wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
