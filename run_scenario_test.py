@@ -531,6 +531,8 @@ def main() -> None:
                     help="kabu の保有建玉一覧を表示して終了")
     ap.add_argument("--orders", action="store_true",
                     help="kabu の注文状況一覧を表示して終了")
+    ap.add_argument("--debug", action="store_true",
+                    help="デバッグ: 生JSONデータを表示")
     args = ap.parse_args()
 
     global _PROD
@@ -557,9 +559,15 @@ def main() -> None:
                 price_p = p.get("CurrentPrice") or p.get("Price") or "?"
                 avg_p   = p.get("AveragePrice") or ""
                 pnl_p   = p.get("Profit") or p.get("ProfitLoss") or ""
-                avg_str = f"  平均={avg_p:,.1f}円" if isinstance(avg_p, float) else ""
-                pnl_str = f"  損益={pnl_p:+,.0f}円" if isinstance(pnl_p, (int, float)) else ""
-                print(f"  {sym_p} {name_p} [{side_p}] {qty_p}株 現在値={price_p}{avg_str}{pnl_str}")
+                hold_id = p.get("HoldID") or p.get("ID") or ""
+                avg_str  = f"  平均={avg_p:,.1f}円" if isinstance(avg_p, float) else ""
+                pnl_str  = f"  損益={pnl_p:+,.0f}円" if isinstance(pnl_p, (int, float)) else ""
+                hold_str = f"  HoldID={hold_id}" if hold_id else "  HoldID=なし"
+                print(f"  {sym_p} {name_p} [{side_p}] {qty_p}株 現在値={price_p}{avg_str}{pnl_str}{hold_str}")
+            if args.debug:
+                print("\n  [DEBUG] 生データ:")
+                import json
+                print(json.dumps(positions, ensure_ascii=False, indent=2))
         return
 
     if args.orders:

@@ -209,7 +209,13 @@ class KabuClient:
         close_list: list[dict] = []
         remaining = qty
         for p in candidates:
-            hold_id = p.get("HoldID", "")
+            # HoldID が無い場合は ExecutionID 等の代替フィールドを試す
+            hold_id = (p.get("HoldID") or p.get("ExecutionID") or
+                       p.get("PositionID") or "")
+            if not hold_id:
+                import json as _json
+                print(f"  ⚠ {symbol}: 建玉に HoldID が見つかりません。"
+                      f"生データ: {_json.dumps(p, ensure_ascii=False)}")
             leaves = int(p.get("LeavesQty") or 0)
             use_qty = min(remaining, leaves)
             if use_qty > 0:
