@@ -378,30 +378,13 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     return res.get("Result") == 0
 
 
-def _get_floor_price(symbol: str, cli: KabuClient) -> int | None:
-    """信用建玉の現在値の 80% をフロア価格として返す。取得失敗時は None。"""
-    try:
-        margin_pos = cli.get_margin_positions(symbol)
-        for p in margin_pos:
-            cp = float(p.get("CurrentPrice") or 0)
-            if cp > 0:
-                return int(cp * 0.80)
-    except Exception:
-        pass
-    price = get_current_price_fallback(symbol)
-    if price and price > 0:
-        return int(price * 0.80)
-    return None
-
-
 def send_moo_order(pos: dict, cli: KabuClient) -> bool:
-    """保有ポジションを翌日 MOO または指値フロアで決済する。post-close モードで使用。
+    """保有ポジションを成行で決済する。post-close モードで使用。
 
-    信用返済ロング: FrontOrderType=13(MOO) は REST API 未対応のため
-      指値(現在値×80%フロア, ExpireDay=翌営業日) で代替する。
-    ショート / 現物: MOO をそのまま使用。
+    信用返済ロング/ショートともに成行 (FrontOrderType=10) を使用。
+    MOO (FrontOrderType=13) は 信用返済で 4001005 になるため使わない。
     """
-    from kabu_api import CASH_GENBUTSU, CASH_MARGIN_CLOSE, _next_trading_day_int
+    from kabu_api import CASH_GENBUTSU, CASH_MARGIN_CLOSE
     if pos["is_short"]:
         ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
@@ -413,28 +396,14 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
     cm = pos.get("cash_margin", CASH_GENBUTSU)
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
 
-    if pos["is_short"]:  # ショート → 買い戻し (MOO)
-        print(f"    → {label} 翌日寄成(買い戻し) cash_margin={cm}")
+    if pos["is_short"]:  # ショート → 成行買い戻し
+        print(f"    → {label} 成行(買い戻し) cash_margin={cm}")
         res = cli.send_buy(pos["symbol"], qty=pos["qty"],
-                           cash_margin=cm, order_type="moo")
-    elif cm == CASH_MARGIN_CLOSE:
-        # 信用返済ロング: MOO (FrontOrderType=13) は 4001005 のため
-        # 指値(フロア価格)で翌営業日を指定して代替
-        floor = _get_floor_price(pos["symbol"], cli)
-        next_day = _next_trading_day_int()
-        if floor:
-            print(f"    → {label} 翌日指値売り(フロア={floor}円, 翌営業日{next_day}まで有効)")
-            res = cli.send_sell(pos["symbol"], qty=pos["qty"],
-                                cash_margin=cm, order_type="limit",
-                                price=float(floor), expire_day=next_day)
-        else:
-            print(f"    → {label} 翌日寄成(売り決済) cash_margin={cm} [フロア価格取得失敗→MOOで試行]")
-            res = cli.send_sell(pos["symbol"], qty=pos["qty"],
-                                cash_margin=cm, order_type="moo")
-    else:  # 現物ロング → MOO
-        print(f"    → {label} 翌日寄成(売り決済) cash_margin={cm}")
+                           cash_margin=cm, order_type="market")
+    else:  # ロング → 成行売り決済
+        print(f"    → {label} 成行(売り決済) cash_margin={cm}")
         res = cli.send_sell(pos["symbol"], qty=pos["qty"],
-                            cash_margin=cm, order_type="moo")
+                            cash_margin=cm, order_type="market")
     return res.get("Result") == 0
 
 
