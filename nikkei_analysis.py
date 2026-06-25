@@ -6703,7 +6703,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _dseq = _DETAIL_TAB_SEQ
 
     _preoos_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ シグナル時点BTスコア</button>'
-    _maxhold_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold\')">⑫ 保有日数比較</button>'
+    _maxhold_tab_btn = (
+        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold\')">⑪ 保有日数比較</button>\n'
+        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold_cmp\')">⑫ con/agg比較</button>'
+    )
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -6943,6 +6946,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
 <div id="analtab_{_dseq}_maxhold" class="analysis-tab-pane">
 <!-- MAXHOLD_SLOT -->
+</div>
+
+<div id="analtab_{_dseq}_maxhold_cmp" class="analysis-tab-pane">
+<!-- MAXHOLD_CMP_SLOT -->
 </div>
 
 </div>

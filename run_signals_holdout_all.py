@@ -754,7 +754,7 @@ print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
-# 最大保有日数比較セクションを詳細分析タブ(⑪)に挿入（conservative/aggressive両モード比較）
+# 最大保有日数比較セクションを詳細分析タブ(⑪⑫)に挿入
 # --max-holds 未指定時はデフォルト値 [7, 10, 15, 20] で常に表示
 _max_holds_raw = getattr(_args, "max_holds", None)
 _hold_list = (
@@ -763,14 +763,19 @@ _hold_list = (
     else [7, 10, 15, 20]
 )
 if len(_hold_list) > 1:
-    print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
     _na._PNL_CONFIGS[:] = _all_configs
+    # ⑪: conservative のみ（単純比較）
+    print(f"最大保有日数比較中 ({_hold_list}, conservative)...", flush=True)
     _mh_html = _na.build_max_hold_comparison_html(
-        _hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True)
-    # <!-- MAXHOLD_SLOT --> プレースホルダーをコンテンツで置換
+        _hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=False)
     if _mh_html:
-        _all_period_html = _all_period_html.replace(
-            "<!-- MAXHOLD_SLOT -->", _mh_html, 1)
+        _all_period_html = _all_period_html.replace("<!-- MAXHOLD_SLOT -->", _mh_html, 1)
+    # ⑫: conservative vs aggressive 比較
+    print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
+    _mh_cmp_html = _na.build_max_hold_comparison_html(
+        _hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True)
+    if _mh_cmp_html:
+        _all_period_html = _all_period_html.replace("<!-- MAXHOLD_CMP_SLOT -->", _mh_cmp_html, 1)
     _phase("最大保有日数比較完了")
 
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
