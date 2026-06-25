@@ -434,9 +434,18 @@ def main() -> int:
     log_path = args.log or _default_log_path(args.aggressive)
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注★" if args.execute else "dry-run (発注なし)"
-    timing_label = "post-close (yfinance終値→翌日MOO)" if args.post_close else "pre-close (現在値→当日MOC)"
 
     now = datetime.now(JST)
+
+    # 15:25 以降は MOC 受付終了のため post-close へ自動切替
+    MOC_CUTOFF_HOUR, MOC_CUTOFF_MIN = 15, 25
+    if not args.post_close:
+        after_cutoff = (now.hour, now.minute) >= (MOC_CUTOFF_HOUR, MOC_CUTOFF_MIN)
+        if after_cutoff:
+            print(f"  ⚠ {now:%H:%M} JST: MOC受付終了(15:25)のため post-close モードに自動切替")
+            args.post_close = True
+
+    timing_label = "post-close (yfinance終値→翌日MOO)" if args.post_close else "pre-close (現在値→当日MOC)"
     print("=" * 65)
     print(f"close 損切りガード  {now:%Y-%m-%d %H:%M JST}")
     print(f"モード  : {mode_label}")
