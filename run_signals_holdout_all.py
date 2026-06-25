@@ -58,7 +58,7 @@ def _report_date():
 
 # ── 引数先読み ────────────────────────────────────────────────────────────────
 _pre = argparse.ArgumentParser(add_help=False)
-_pre.add_argument("--workers",    type=int,   default=2)
+_pre.add_argument("--workers",    type=int,   default=1)
 _pre.add_argument("--no-browser", action="store_true")
 _pre.add_argument("--date",       type=str,   default=None)
 _pre.add_argument("--min-score",  type=int,   default=0)
