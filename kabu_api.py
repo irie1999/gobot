@@ -195,33 +195,6 @@ class KabuClient:
                          if str(p.get("Symbol", "")) == str(symbol)]
         return positions
 
-    def _get_hold_id_from_orders(self, symbol: int | str,
-                                  execution_id: str) -> str:
-        """GET /orders の約定詳細から建玉番号(HoldID)を逆引きする。
-
-        kabu positions API の ExecutionID (例: "E20260625027GC") は
-        ClosePositions の HoldID としては使えない。
-        orders API の Details[].ExecutionID と突合して Details[].ID
-        (例: "20260625E02N09614229") を取得する。これが正式な建玉番号。
-        """
-        try:
-            orders = self.get_orders()
-        except Exception as e:
-            print(f"  ⚠ get_orders 失敗: {e}")
-            return ""
-        for order in orders:
-            if str(order.get("Symbol", "")) != str(symbol):
-                continue
-            # 信用新規の買い注文だけを対象にする
-            if order.get("CashMargin") != CASH_MARGIN_OPEN:
-                continue
-            for detail in order.get("Details", []):
-                if detail.get("ExecutionID") == execution_id:
-                    hold_id = detail.get("ID", "")
-                    if hold_id:
-                        return hold_id
-        return ""
-
     def _build_close_positions(self, symbol: int | str, qty: int,
                                 kabu_side: str) -> list[dict]:
         """信用返済の ClosePositions リストを建玉一覧から自動生成する (FIFO)。
@@ -229,8 +202,8 @@ class KabuClient:
         ロング決済 (kabu_side=SIDE_SELL) → 買い建玉 (Side="2") を使う
         ショート決済 (kabu_side=SIDE_BUY)  → 売り建玉 (Side="1") を使う
 
-        positions API の ExecutionID は HoldID として使えないため、
-        orders API から正式な建玉番号 (Detail.ID) を逆引きする。
+        ClosePositions.HoldID には positions API の ExecutionID をそのまま使う。
+        事前に cancel_open_close_orders() で建玉の拘束を解除してから呼ぶこと。
         """
         target_side = "2" if kabu_side == SIDE_SELL else "1"
         margin_positions = self.get_margin_positions(symbol)
@@ -240,12 +213,9 @@ class KabuClient:
         close_list: list[dict] = []
         remaining = qty
         for p in candidates:
-            execution_id = p.get("ExecutionID", "")
-            # orders API から正式な建玉番号を取得
-            hold_id = self._get_hold_id_from_orders(symbol, execution_id) if execution_id else ""
+            hold_id = p.get("ExecutionID", "")
             if not hold_id:
-                print(f"  ⚠ {symbol}: 建玉番号(HoldID)を取得できませんでした "
-                      f"(ExecutionID={execution_id!r})")
+                print(f"  ⚠ {symbol}: 建玉に ExecutionID が見つかりません。")
                 continue
             leaves = int(p.get("LeavesQty") or 0)
             use_qty = min(remaining, leaves)
