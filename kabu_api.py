@@ -398,12 +398,14 @@ class KabuClient:
                   cash_margin: int = CASH_MARGIN_CLOSE,
                   order_type: str = "market",
                   close_positions: list[dict] | None = None,
-                  expire_day: int | None = None) -> dict:
+                  expire_day: int | None = None,
+                  omit_close_positions: bool = False) -> dict:
         """普通の売り注文 (現物売り or 信用返済売り)。
 
         order_type:
           "market" = 成行 / "limit" = 指値 (price 必須) / "moo" = 寄成
         expire_day: 0=当日 / YYYYMMDD=指定日 / None=デフォルト(0)
+        omit_close_positions: True にすると ClosePositions を送らず API の自動割当てに任せる
         """
         body = self._base_order(symbol, SIDE_SELL, qty, cash_margin)
         if expire_day is not None:
@@ -425,8 +427,8 @@ class KabuClient:
             body["Price"] = 0
             label = f"成行売り {symbol} x{qty}"
 
-        # 信用返済は返済建玉 (ClosePositions) の指定が必須
-        if cash_margin == CASH_MARGIN_CLOSE:
+        # 信用返済の ClosePositions (省略時は API の自動割当て)
+        if cash_margin == CASH_MARGIN_CLOSE and not omit_close_positions:
             if close_positions is not None:
                 body["ClosePositions"] = close_positions
             elif self.dry_run:
