@@ -30,6 +30,11 @@ import csv
 import importlib as _importlib
 import os
 import sys
+
+# OpenBLAS/MKLのスレッド数を1に制限（メモリ不足エラー回避）
+# importより前に設定する必要がある
+for _blas_env in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_blas_env, "1")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
