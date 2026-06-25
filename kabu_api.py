@@ -330,13 +330,13 @@ class KabuClient:
                 body["DelivType"] = 0   # 現物売は 指定なし
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
-            body["DelivType"] = 0
+            # 信用新規(2) / 信用返済(3) 共通
+            body["MarginTradeType"] = 1   # 制度信用
             if cash_margin == CASH_MARGIN_OPEN:
-                body["MarginTradeType"] = 1   # 信用新規のみ必要
-                body["FundType"] = "11"       # 信用新規のみ
+                body["DelivType"] = 0     # 信用新規: 指定なし
+                body["FundType"] = "11"   # 信用新規のみ FundType 必要
             else:
-                # 信用返済(CashMargin=3): FundType は現物売と同じ半角スペース2つ
-                body["FundType"] = "  "
+                body["DelivType"] = 2     # 信用返済: お預り金 (公式サンプル準拠)
         return body
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
