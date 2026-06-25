@@ -229,6 +229,8 @@ def main() -> None:
     ap.add_argument("--days-back",     type=int, default=5,  help="シグナルを遡る日数（デフォルト: 5）")
     ap.add_argument("--show-positions", action="store_true", help="建玉一覧を表示して終了")
     ap.add_argument("--no-guard",      action="store_true", help="CSV 更新のみ・close_stop_guard は実行しない")
+    ap.add_argument("--force-sell",    metavar="SYMBOL",
+                    help="指定銘柄の stop_price を強制的に現在値より高く設定して MOC 売りをテスト発動")
     args = ap.parse_args()
 
     dry_run   = not args.execute
@@ -294,5 +296,60 @@ def main() -> None:
         print("\ndry-run です。実際に発注するには --execute を付けてください。")
 
 
+def _force_sell_test(symbol: str, csv_path: str, prod: bool, execute: bool) -> None:
+    """--force-sell: 指定銘柄の stop_price を一時的に引き上げて MOC テスト発動。"""
+    rows = _read_csv(csv_path)
+    target_row = None
+    for r in rows:
+        if r.get("symbol") == symbol and r.get("status") in ("holding", "filled"):
+            target_row = r
+            break
+
+    if target_row is None:
+        print(f"✗ {symbol} の holding 行が {csv_path} に見つかりません")
+        sys.exit(1)
+
+    orig_stop = target_row.get("stop_price", "")
+    # 損切りラインを 99999 に設定（現在値がどんな値でも必ず「損切りライン割れ」になる）
+    target_row["stop_price"] = "99999"
+    # 利確ラインはタイムカットより先に発火しないよう十分高く設定
+    orig_target = target_row.get("target_price", "")
+    target_row["target_price"] = "999999"
+
+    _write_csv(csv_path, rows)
+    print(f"  テスト設定: {symbol} stop_price: {orig_stop} → 99999（必ず損切り抵触）")
+    print(f"  テスト設定: {symbol} target_price: {orig_target} → 999999（利確は発火しない）\n")
+
+    cmd = [sys.executable, "close_stop_guard.py", "--log", csv_path]
+    if execute:
+        cmd.append("--execute")
+    if prod:
+        cmd.append("--prod")
+    subprocess.run(cmd)
+
+    # 元の値に戻す（ポジションが決済された場合は関係ないが念のため）
+    rows2 = _read_csv(csv_path)
+    for r in rows2:
+        if r.get("symbol") == symbol:
+            r["stop_price"]   = orig_stop
+            r["target_price"] = orig_target
+    _write_csv(csv_path, rows2)
+    print(f"\n  stop_price / target_price を元の値に戻しました ({orig_stop} / {orig_target})")
+
+
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    # --force-sell は main() の前に処理
+    if "--force-sell" in _sys.argv:
+        _ap = argparse.ArgumentParser(add_help=False)
+        _ap.add_argument("--force-sell", metavar="SYMBOL")
+        _ap.add_argument("--log",     default="my_positions.csv")
+        _ap.add_argument("--prod",    action="store_true")
+        _ap.add_argument("--execute", action="store_true")
+        _known, _ = _ap.parse_known_args()
+        global _PROD
+        _PROD = _known.prod
+        print(f"\n{'[DRY-RUN] ' if not _known.execute else ''}--force-sell {_known.force_sell} テスト開始")
+        _force_sell_test(_known.force_sell, _known.log, _known.prod, _known.execute)
+    else:
+        main()
