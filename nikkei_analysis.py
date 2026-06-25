@@ -7001,15 +7001,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos','maxhold','maxhold_cmp'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
   }});
   var nav = document.querySelector('#analysis_'+seq+' .analysis-tab-nav');
   if (nav) {{
-    nav.querySelectorAll('.analysis-tab-btn').forEach(function(b, i) {{
-      b.classList.toggle('active', tabs[i] === which);
+    nav.querySelectorAll('.analysis-tab-btn').forEach(function(b) {{
+      var onclick = b.getAttribute('onclick') || '';
+      var m = onclick.match(/switchAnalysisTab\(\d+,'([^']+)'\)/);
+      if (m) b.classList.toggle('active', m[1] === which);
     }});
   }}
 }}
