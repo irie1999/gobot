@@ -372,6 +372,7 @@ class KabuClient:
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
             body["Price"] = 0
+            body["Exchange"] = EXCHANGE_TOKYO_PLUS  # MOO は SOR(9) 非対応
             label = f"寄成買い {symbol} x{qty}"
         else:  # market
             body["FrontOrderType"] = FOT_MARKET
@@ -404,6 +405,7 @@ class KabuClient:
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
             body["Price"] = 0
+            body["Exchange"] = EXCHANGE_TOKYO_PLUS  # MOO は SOR(9) 非対応
             label = f"寄成売り {symbol} x{qty}"
         else:  # market
             body["FrontOrderType"] = FOT_MARKET
