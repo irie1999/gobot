@@ -529,6 +529,8 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="シナリオ一覧を表示して終了")
     ap.add_argument("--positions", action="store_true",
                     help="kabu の保有建玉一覧を表示して終了")
+    ap.add_argument("--orders", action="store_true",
+                    help="kabu の注文状況一覧を表示して終了")
     args = ap.parse_args()
 
     global _PROD
@@ -558,6 +560,53 @@ def main() -> None:
                 avg_str = f"  平均={avg_p:,.1f}円" if isinstance(avg_p, float) else ""
                 pnl_str = f"  損益={pnl_p:+,.0f}円" if isinstance(pnl_p, (int, float)) else ""
                 print(f"  {sym_p} {name_p} [{side_p}] {qty_p}株 現在値={price_p}{avg_str}{pnl_str}")
+        return
+
+    if args.orders:
+        env = "本番(18080)" if _PROD else "デモ(18081)"
+        print(f"\nkabu 注文状況を取得中 ({env})…")
+        try:
+            cli = _make_cli(dry_run=False)
+            orders = cli.get_orders()
+        except Exception as e:
+            print(f"✗ 接続失敗: {e}")
+            sys.exit(1)
+        STATE_LABEL = {1: "待機中", 2: "処理中", 3: "処理済", 4: "訂正取消中", 5: "約定済", 6: "取消済"}
+        SIDE_LABEL  = {"1": "売", "2": "買"}
+        ORDER_TYPE  = {20: "指値", 30: "逆指値", 16: "引け成行"}
+        if not orders:
+            print("  注文なし")
+        else:
+            active   = [o for o in orders if o.get("OrderState") in (1, 2, 4)]
+            inactive = [o for o in orders if o.get("OrderState") not in (1, 2, 4)]
+            if active:
+                print(f"  有効注文 {len(active)}件:")
+                for o in active:
+                    oid    = o.get("ID") or o.get("OrderId", "?")
+                    sym_o  = o.get("Symbol", "?")
+                    name_o = (o.get("SymbolName") or "")[:10]
+                    side_o = SIDE_LABEL.get(str(o.get("Side", "")), "?")
+                    otype  = ORDER_TYPE.get(o.get("FrontOrderType"), str(o.get("FrontOrderType", "?")))
+                    qty_o  = o.get("OrderQty", "?")
+                    price_o = o.get("Price") or "成行"
+                    state_o = STATE_LABEL.get(o.get("OrderState"), str(o.get("OrderState", "?")))
+                    # 逆指値の場合はトリガー価格も表示
+                    rl = o.get("ReverseLimitOrder") or {}
+                    trigger = rl.get("TriggerPrice")
+                    trigger_str = f" トリガー={trigger:,}" if trigger else ""
+                    print(f"    {sym_o} {name_o} [{side_o}/{otype}]{trigger_str} {qty_o}株 @{price_o}  [{state_o}] ID={oid}")
+            if inactive:
+                print(f"\n  過去の注文 {len(inactive)}件 (約定済/取消済):")
+                for o in inactive[:5]:  # 最新5件のみ
+                    oid    = o.get("ID") or o.get("OrderId", "?")
+                    sym_o  = o.get("Symbol", "?")
+                    side_o = SIDE_LABEL.get(str(o.get("Side", "")), "?")
+                    otype  = ORDER_TYPE.get(o.get("FrontOrderType"), str(o.get("FrontOrderType", "?")))
+                    state_o = STATE_LABEL.get(o.get("OrderState"), str(o.get("OrderState", "?")))
+                    qty_o  = o.get("OrderQty", "?")
+                    print(f"    {sym_o} [{side_o}/{otype}] {qty_o}株  [{state_o}] ID={oid}")
+                if len(inactive) > 5:
+                    print(f"    … 他 {len(inactive)-5} 件")
         return
 
     if args.list or not (args.scenario or args.all or args.reset_ctx):
