@@ -52,7 +52,7 @@ _CACHE_DIR    = Path(".rsi2_cache")
 
 ENTRY_EXPIRE  = 1      # 指値有効日数（翌日のみ有効）
 ROLLING_ENTRY = 0      # ローリング逆指値: 0=無効, N=最大更新回数（未約定時に終値で価格を更新）
-MAX_HOLD      = 15     # 最大保有日数
+MAX_HOLD      = 7      # 最大保有日数
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
 FIXED_QTY     = 100         # 後方互換用 (廃止予定: calc_qty を使用)
