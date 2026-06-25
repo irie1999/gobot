@@ -36,10 +36,19 @@ kabuステーション API に流し込むための共通クライアント。
 
 from __future__ import annotations
 
+import datetime
 import os
 from typing import Any
 
 import requests
+
+
+def _next_trading_day_int() -> int:
+    """次の営業日を YYYYMMDD の int で返す (祝日考慮なし)。MOO の ExpireDay に使う。"""
+    d = datetime.date.today() + datetime.timedelta(days=1)
+    while d.weekday() >= 5:  # 5=土, 6=日
+        d += datetime.timedelta(days=1)
+    return int(d.strftime("%Y%m%d"))
 
 # ── kabu API 定数 ──────────────────────────────────────────────
 EXCHANGE_TOSHO = 1            # 市場コード: 東証 (board/register/positions 等の照会用)
@@ -322,10 +331,10 @@ class KabuClient:
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
             body["DelivType"] = 0
-            body["MarginTradeType"] = 1   # 信用新規・返済ともに必要
             if cash_margin == CASH_MARGIN_OPEN:
-                body["FundType"] = "11"   # 信用新規のみ FundType 必要
-            # 信用返済(CashMargin=3)は FundType を含めない
+                body["MarginTradeType"] = 1   # 信用新規のみ必要
+                body["FundType"] = "11"       # 信用新規のみ FundType 必要
+            # 信用返済(CashMargin=3)は MarginTradeType / FundType を含めない
         return body
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
@@ -376,6 +385,7 @@ class KabuClient:
             body["FrontOrderType"] = FOT_MOO
             body["Price"] = 0
             body["Exchange"] = EXCHANGE_TOKYO_PLUS  # MOO は SOR(9) 非対応
+            body["ExpireDay"] = _next_trading_day_int()  # MOO は翌営業日を指定
             label = f"寄成買い {symbol} x{qty}"
         else:  # market
             body["FrontOrderType"] = FOT_MARKET
@@ -409,6 +419,7 @@ class KabuClient:
             body["FrontOrderType"] = FOT_MOO
             body["Price"] = 0
             body["Exchange"] = EXCHANGE_TOKYO_PLUS  # MOO は SOR(9) 非対応
+            body["ExpireDay"] = _next_trading_day_int()  # MOO は翌営業日を指定 (0=当日は無効)
             label = f"寄成売り {symbol} x{qty}"
         else:  # market
             body["FrontOrderType"] = FOT_MARKET
