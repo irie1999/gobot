@@ -753,16 +753,20 @@ print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
-# --max-holds 指定時: 最大保有日数比較セクションを損益タブ先頭に挿入
+# 最大保有日数比較セクションを損益タブ先頭に挿入
+# --max-holds 未指定時はデフォルト値 [7, 10, 15, 20] で常に表示
 _max_holds_raw = getattr(_args, "max_holds", None)
-if _max_holds_raw:
-    _hold_list = [int(x.strip()) for x in _max_holds_raw.split(",") if x.strip()]
-    if len(_hold_list) > 1:
-        print(f"最大保有日数比較中 ({_hold_list})...", flush=True)
-        _mh_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers)
-        if _mh_html:
-            _all_period_html = _mh_html + _all_period_html
-        _phase("最大保有日数比較完了")
+_hold_list = (
+    [int(x.strip()) for x in _max_holds_raw.split(",") if x.strip()]
+    if _max_holds_raw
+    else [7, 10, 15, 20]
+)
+if len(_hold_list) > 1:
+    print(f"最大保有日数比較中 ({_hold_list})...", flush=True)
+    _mh_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers)
+    if _mh_html:
+        _all_period_html = _mh_html + _all_period_html
+    _phase("最大保有日数比較完了")
 
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
