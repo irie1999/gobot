@@ -397,18 +397,17 @@ class KabuClient:
     def send_sell(self, symbol: int | str, qty: int, price: float | None = None,
                   cash_margin: int = CASH_MARGIN_CLOSE,
                   order_type: str = "market",
-                  close_positions: list[dict] | None = None) -> dict:
+                  close_positions: list[dict] | None = None,
+                  expire_day: int | None = None) -> dict:
         """普通の売り注文 (現物売り or 信用返済売り)。
 
-        信用ロングの返済売りに使う (send_buy で建てた建玉を決済)。
         order_type:
-          "market" = 成行 (ザラ場中のみ) / "limit" = 指値 (price 必須) / "moo" = 寄成
-        cash_margin:
-          CASH_MARGIN_CLOSE(3) = 信用返済 (既定) / CASH_GENBUTSU(1) = 現物売
-        close_positions:
-          信用返済の建玉リスト。None なら API から自動取得 (FIFO)。
+          "market" = 成行 / "limit" = 指値 (price 必須) / "moo" = 寄成
+        expire_day: 0=当日 / YYYYMMDD=指定日 / None=デフォルト(0)
         """
         body = self._base_order(symbol, SIDE_SELL, qty, cash_margin)
+        if expire_day is not None:
+            body["ExpireDay"] = expire_day
         if order_type == "limit":
             if price is None:
                 raise ValueError("order_type='limit' には price が必要です。")
