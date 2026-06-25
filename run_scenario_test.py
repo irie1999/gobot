@@ -527,10 +527,38 @@ def main() -> None:
     ap.add_argument("--reset-ctx", action="store_true",
                     help=f"{CTX_FILE} を削除してコンテキストをリセット")
     ap.add_argument("--list", action="store_true", help="シナリオ一覧を表示して終了")
+    ap.add_argument("--positions", action="store_true",
+                    help="kabu の保有建玉一覧を表示して終了")
     args = ap.parse_args()
 
     global _PROD
     _PROD = args.prod
+
+    if args.positions:
+        env = "本番(18080)" if _PROD else "デモ(18081)"
+        print(f"\nkabu 保有建玉を取得中 ({env})…")
+        try:
+            cli = _make_cli(dry_run=False)
+            positions = cli.get_positions(product=0)
+        except Exception as e:
+            print(f"✗ 接続失敗: {e}")
+            sys.exit(1)
+        if not positions:
+            print("  保有建玉なし")
+        else:
+            print(f"  保有建玉 {len(positions)}件:\n")
+            for p in positions:
+                sym_p   = p.get("Symbol", "?")
+                name_p  = (p.get("SymbolName") or "")[:12]
+                side_p  = "売建(ショート)" if str(p.get("Side","")) == "1" else "買建(ロング)"
+                qty_p   = p.get("LeavesQty") or p.get("Qty") or "?"
+                price_p = p.get("CurrentPrice") or p.get("Price") or "?"
+                avg_p   = p.get("AveragePrice") or ""
+                pnl_p   = p.get("Profit") or p.get("ProfitLoss") or ""
+                avg_str = f"  平均={avg_p:,.1f}円" if isinstance(avg_p, float) else ""
+                pnl_str = f"  損益={pnl_p:+,.0f}円" if isinstance(pnl_p, (int, float)) else ""
+                print(f"  {sym_p} {name_p} [{side_p}] {qty_p}株 現在値={price_p}{avg_str}{pnl_str}")
+        return
 
     if args.list or not (args.scenario or args.all or args.reset_ctx):
         print("\nシナリオ一覧:")
