@@ -293,6 +293,12 @@ def _wf_refresh_banner_html(status: dict) -> str:
 
 def fetch_n225(years: int, end_date=None) -> pd.Series:
     """日経225の日足終値を取得。end_date 指定時はその日までのデータを返す。"""
+    # yfinance の内部キャッシュを無効化（市場閉場後の最新データを確実に取得するため）
+    try:
+        import requests_cache as _rc
+        _rc.clear()
+    except Exception:
+        pass
     if end_date is not None:
         start = pd.Timestamp(end_date) - pd.Timedelta(days=years * 365 + 60)
         end   = pd.Timestamp(end_date) + pd.Timedelta(days=1)
