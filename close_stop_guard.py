@@ -288,21 +288,21 @@ def cancel_open_sell_orders(symbol: str, cli: KabuClient) -> bool:
         print(f"    ✗ 注文一覧取得失敗 ({e}) — 損切り発注を中断します")
         return False
 
-    # 未約定 (RecvStatus が "1"=受付済 or "2"=注文中) の同銘柄売り注文を対象にする
+    # 未約定 (OrderState 1〜4) の同銘柄売り注文を対象にする
     # Side: "1"=売 / "2"=買
-    ACTIVE = {"1", "2"}
+    ACTIVE_STATES = {1, 2, 3, 4}
     targets = [
         o for o in orders
         if str(o.get("Symbol", "")).strip() == str(symbol).strip()
         and str(o.get("Side", "")) == "1"  # 売り注文
-        and str(o.get("RecvStatus", "")) in ACTIVE
+        and int(o.get("OrderState") or o.get("State") or 0) in ACTIVE_STATES
     ]
     if not targets:
         return True
 
     all_ok = True
     for o in targets:
-        oid = o.get("OrderId", "")
+        oid = o.get("ID", "")
         detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
         print(f"    → 売り注文キャンセル: {detail}")
         res = cli.cancel_order(oid)
@@ -325,19 +325,19 @@ def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> bool:
         print(f"    ✗ 注文一覧取得失敗 ({e}) — 損切り発注を中断します")
         return False
 
-    ACTIVE = {"1", "2"}
+    ACTIVE_STATES = {1, 2, 3, 4}
     targets = [
         o for o in orders
         if str(o.get("Symbol", "")).strip() == str(symbol).strip()
         and str(o.get("Side", "")) == "2"  # 買い注文
-        and str(o.get("RecvStatus", "")) in ACTIVE
+        and int(o.get("OrderState") or o.get("State") or 0) in ACTIVE_STATES
     ]
     if not targets:
         return True
 
     all_ok = True
     for o in targets:
-        oid = o.get("OrderId", "")
+        oid = o.get("ID", "")
         detail = f"注文ID={oid} 価格={o.get('Price', '?')} 数量={o.get('OrderQty', '?')}"
         print(f"    → 買い注文キャンセル: {detail}")
         res = cli.cancel_order(oid)
