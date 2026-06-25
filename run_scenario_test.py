@@ -137,6 +137,25 @@ def s1_connect(symbol: str, execute: bool) -> dict:
     env = "本番(18080)" if _PROD else "デモ(18081)"
     _ok(f"kabu 接続成功 ({env})")
 
+    # 保有建玉一覧を表示
+    try:
+        positions = cli.get_positions(product=0)
+        if positions:
+            print(f"\n  保有建玉 ({len(positions)}件):")
+            for p in positions:
+                sym_p  = p.get("Symbol", "?")
+                name_p = p.get("SymbolName", "")[:10]
+                side_p = "売建(ショート)" if str(p.get("Side","")) == "1" else "買建(ロング)"
+                qty_p  = p.get("LeavesQty") or p.get("Qty") or "?"
+                price_p = p.get("CurrentPrice") or p.get("Price") or "?"
+                pnl_p  = p.get("Profit") or p.get("ProfitLoss") or ""
+                pnl_str = f"  損益={pnl_p:+,.0f}円" if isinstance(pnl_p, (int, float)) else ""
+                print(f"    {sym_p} {name_p} [{side_p}] {qty_p}株 @{price_p}{pnl_str}")
+        else:
+            _warn("kabu に保有建玉がありません")
+    except Exception as e:
+        _warn(f"保有建玉取得失敗: {e}")
+
     price = cli.get_current_price(symbol)
     if price is None:
         board = cli.get_board(symbol)
