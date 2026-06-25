@@ -307,7 +307,8 @@ def check_signal_on_date(symbol: str, strategy: str,
     )
 
 
-def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
+def backtest_one(symbol: str, name: str, strategy: str,
+                 max_hold: int | None = None) -> dict | None:
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, max(PERIODS))
     if df is None:
@@ -318,7 +319,8 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     # 同じ取引ログに見えない損益が混入する問題を回避する。
     full_r = run_limit_backtest(symbol, name, df, calc_fn,
                                 em, sm, tm, max(PERIODS), strategy,
-                                entry_type=ENTRY_TYPE)
+                                entry_type=ENTRY_TYPE,
+                                max_hold=max_hold)
     if not full_r:
         return None
 

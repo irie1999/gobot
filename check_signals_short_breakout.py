@@ -232,7 +232,8 @@ def check_signal_on_date(symbol: str, strategy: str,
     )
 
 
-def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
+def backtest_one(symbol: str, name: str, strategy: str,
+                 max_hold: int | None = None) -> dict | None:
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, max(PERIODS))
     if df is None:
@@ -241,7 +242,8 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     for days in PERIODS:
         r = run_limit_backtest(symbol, name, df, calc_fn,
                                em, sm, tm, days, strategy,
-                               entry_type=ENTRY_TYPE)
+                               entry_type=ENTRY_TYPE,
+                               max_hold=max_hold)
         if r and r["trades"] >= 1:
             period_results[days] = r
     return dict(symbol=symbol, name=name, strategy=strategy,

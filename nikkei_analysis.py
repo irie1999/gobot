@@ -3942,8 +3942,6 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
     if not _SIGNALS_AVAILABLE or not hold_list:
         return ""
 
-    import os as _os
-
     # 全 WATCHLIST を収集（重複除去）
     seen: set = set()
     unique_items: list[tuple] = []
@@ -3958,37 +3956,29 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
     since = _TODAY - timedelta(days=days)
 
     def _collect(mh: int) -> dict:
-        orig = _os.environ.get("MAX_HOLD_OVERRIDE")
-        _os.environ["MAX_HOLD_OVERRIDE"] = str(mh)
-        try:
-            trades: list[dict] = []
-            with _TPE(max_workers=workers) as ex:
-                futs = {ex.submit(_mod_for(strat).backtest_one, sym, name, strat): None
-                        for sym, name, strat in unique_items}
-                for fut in _asc(futs):
-                    try:
-                        r = fut.result()
-                        if not r:
+        trades: list[dict] = []
+        with _TPE(max_workers=workers) as ex:
+            futs = {ex.submit(_mod_for(strat).backtest_one, sym, name, strat, mh): None
+                    for sym, name, strat in unique_items}
+            for fut in _asc(futs):
+                try:
+                    r = fut.result()
+                    if not r:
+                        continue
+                    pr = r.get("period_results", {})
+                    max_p = max(pr.keys()) if pr else None
+                    if max_p is None:
+                        continue
+                    for t in pr[max_p].get("trade_log", []):
+                        sig = t.get("signal_dt")
+                        if not sig:
                             continue
-                        pr = r.get("period_results", {})
-                        max_p = max(pr.keys()) if pr else None
-                        if max_p is None:
-                            continue
-                        for t in pr[max_p].get("trade_log", []):
-                            sig = t.get("signal_dt")
-                            if not sig:
-                                continue
-                            sig_date = sig.date() if hasattr(sig, "date") else sig
-                            if (sig_date >= since
-                                    and t.get("reason") not in ("発注中", "保有中")):
-                                trades.append(t)
-                    except Exception:
-                        pass
-        finally:
-            if orig is not None:
-                _os.environ["MAX_HOLD_OVERRIDE"] = orig
-            else:
-                _os.environ.pop("MAX_HOLD_OVERRIDE", None)
+                        sig_date = sig.date() if hasattr(sig, "date") else sig
+                        if (sig_date >= since
+                                and t.get("reason") not in ("発注中", "保有中")):
+                            trades.append(t)
+                except Exception:
+                    pass
 
         n = len(trades)
         wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
