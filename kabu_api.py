@@ -256,6 +256,39 @@ class KabuClient:
                 break
         return close_list
 
+    def cancel_open_close_orders(self, symbol: int | str,
+                                  side: str = SIDE_SELL) -> list[str]:
+        """同一銘柄の未約定 信用返済注文を一括取消して建玉を解放する。
+
+        send_moc / send_sell が 信用返済(CashMargin=3) を発注する前に呼ぶ。
+        建玉が別の返済注文に拘束されていると 4001005 になるため。
+        """
+        ACTIVE_STATES = {1, 2, 3, 4}  # 受付/待機/発注中/一部約定
+        cancelled: list[str] = []
+        try:
+            orders = self.get_orders()
+        except Exception as e:
+            print(f"  ⚠ get_orders 失敗 (既存注文取消スキップ): {e}")
+            return cancelled
+        for order in orders:
+            if str(order.get("Symbol", "")) != str(symbol):
+                continue
+            if order.get("CashMargin") != CASH_MARGIN_CLOSE:
+                continue
+            if order.get("Side") != side:
+                continue
+            state = int(order.get("OrderState") or order.get("State") or 0)
+            if state not in ACTIVE_STATES:
+                continue
+            order_id = order.get("ID", "")
+            if not order_id:
+                continue
+            print(f"  ↩ 既存返済注文を取消: {order_id} (State={state})")
+            res = self.cancel_order(order_id)
+            if res.get("Result") == 0 or res.get("_dry_run"):
+                cancelled.append(order_id)
+        return cancelled
+
     def get_cash(self) -> dict:
         """買付余力。"""
         url = f"{self.base_url}/kabusapi/wallet/cash"
@@ -419,6 +452,8 @@ class KabuClient:
             elif self.dry_run:
                 body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
             else:
+                # 既存の返済注文を取消して建玉を解放してから発注する
+                self.cancel_open_close_orders(symbol, SIDE_SELL)
                 cp = self._build_close_positions(symbol, qty, SIDE_SELL)
                 if not cp:
                     print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
@@ -470,6 +505,8 @@ class KabuClient:
                 # dry-run では建玉 API を叩けないので仮値を入れる
                 body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
             else:
+                # 既存の返済注文を取消して建玉を解放してから発注する
+                self.cancel_open_close_orders(symbol, kabu_side)
                 cp = self._build_close_positions(symbol, qty, kabu_side)
                 if not cp:
                     print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
