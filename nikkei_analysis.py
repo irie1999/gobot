@@ -3932,12 +3932,14 @@ function switchOosMon_{_uid}(idx) {{
     return html
 
 
-def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int) -> str:
-    """MAX_HOLD別の損益比較セクションを生成して損益タブに挿入する。
+def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int,
+                                    compare_modes: bool = False) -> str:
+    """MAX_HOLD別の損益比較セクションを生成（詳細分析タブ用）。
 
-    hold_list: 比較する最大保有日数 (例: [7, 15, 20])
-    days: 集計対象期間 (_tab5_pnl_html の days と揃える)
+    hold_list: 比較する最大保有日数 (例: [7, 10, 15, 20])
+    days: 集計対象期間
     workers: 並列数
+    compare_modes: True=conservative/aggressive 両方を比較表示
     """
     if not _SIGNALS_AVAILABLE or not hold_list:
         return ""
@@ -3983,7 +3985,8 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
                     _errors += 1
                     if _errors <= 3:
                         print(f"  [max_hold比較] エラー {sym_st}: {_e}", flush=True)
-        print(f"  [max_hold比較] MAX_HOLD={mh}: unique={len(unique_items)} trades={len(trades)} errors={_errors}", flush=True)
+        if _errors:
+            print(f"  [max_hold比較] MAX_HOLD={mh}: {len(trades)}件 (エラー{_errors}件)", flush=True)
 
         n = len(trades)
         wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
@@ -3993,63 +3996,93 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
         timecuts = sum(1 for t in trades if t.get("reason") == "タイムカット")
         avg_hold = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
         return {
-            "trades": n,
-            "wins": wins,
+            "trades": n, "wins": wins,
             "win_rate": wins / n * 100 if n else 0.0,
             "total_pnl": sum(t.get("pnl", 0) for t in trades),
-            "pf": pf,
-            "avg_hold": avg_hold,
-            "timecuts": timecuts,
+            "pf": pf, "avg_hold": avg_hold, "timecuts": timecuts,
         }
 
-    results: dict[int, dict] = {}
-    for mh in hold_list:
-        print(f"  [max_hold比較] MAX_HOLD={mh}日 集計中...", flush=True)
-        results[mh] = _collect(mh)
-
-    best_mh = max(hold_list, key=lambda m: results[m]["total_pnl"])
-
-    rows = ""
-    for mh in hold_list:
-        r = results[mh]
-        pnl = r["total_pnl"]
-        pnl_str = f"+{pnl:,.0f}" if pnl > 0 else f"{pnl:,.0f}"
-        pnl_color = "#4ade80" if pnl > 0 else "#f87171" if pnl < 0 else "#94a3b8"
-        pf_str = f"{r['pf']:.2f}" if r["pf"] != float("inf") else "∞"
-        bg = "background:#172032;" if mh == best_mh else ""
-        badge = (' <span style="font-size:0.6rem;background:#4ade80;color:#052e16;'
-                 'padding:1px 4px;border-radius:3px;vertical-align:middle">最良</span>'
-                 if mh == best_mh else "")
-        rows += (
-            f'<tr style="{bg}">'
-            f'<td style="padding:6px 10px;font-weight:700;color:#e2e8f0">最大{mh}日{badge}</td>'
-            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["trades"]:,}</td>'
-            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["win_rate"]:.1f}%</td>'
-            f'<td style="padding:6px 10px;text-align:right;color:#93c5fd">{pf_str}</td>'
-            f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["avg_hold"]:.1f}日</td>'
-            f'<td style="padding:6px 10px;text-align:right;color:#fbbf24">{r["timecuts"]:,}</td>'
-            f'<td style="padding:6px 10px;text-align:right;font-weight:700;color:{pnl_color}">{pnl_str}円</td>'
-            f'</tr>\n'
+    def _build_table(results: dict) -> str:
+        best_mh = max(hold_list, key=lambda m: results[m]["total_pnl"])
+        rows = ""
+        for mh in hold_list:
+            r = results[mh]
+            pnl = r["total_pnl"]
+            pnl_str = f"+{pnl:,.0f}" if pnl > 0 else f"{pnl:,.0f}"
+            pnl_color = "#4ade80" if pnl > 0 else "#f87171" if pnl < 0 else "#94a3b8"
+            pf_str = f"{r['pf']:.2f}" if r["pf"] != float("inf") else "∞"
+            bg = "background:#172032;" if mh == best_mh else ""
+            badge = (' <span style="font-size:0.6rem;background:#4ade80;color:#052e16;'
+                     'padding:1px 4px;border-radius:3px;vertical-align:middle">最良</span>'
+                     if mh == best_mh else "")
+            rows += (
+                f'<tr style="{bg}">'
+                f'<td style="padding:6px 10px;font-weight:700;color:#e2e8f0">最大{mh}日{badge}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["trades"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["win_rate"]:.1f}%</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#93c5fd">{pf_str}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["avg_hold"]:.1f}日</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#fbbf24">{r["timecuts"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;font-weight:700;color:{pnl_color}">{pnl_str}円</td>'
+                f'</tr>\n'
+            )
+        return (
+            f'<table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
+            f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.78rem">'
+            f'<th style="padding:5px 10px;text-align:left">最大保有</th>'
+            f'<th style="padding:5px 10px;text-align:right">件数</th>'
+            f'<th style="padding:5px 10px;text-align:right">勝率</th>'
+            f'<th style="padding:5px 10px;text-align:right">PF</th>'
+            f'<th style="padding:5px 10px;text-align:right">平均保有日</th>'
+            f'<th style="padding:5px 10px;text-align:right">タイムカット</th>'
+            f'<th style="padding:5px 10px;text-align:right">損益合計</th>'
+            f'</tr></thead>'
+            f'<tbody>{rows}</tbody>'
+            f'</table>'
         )
 
-    return (
-        f'<div style="margin:0 0 24px;padding:16px 20px;background:#1e293b;'
-        f'border-radius:8px;border-left:3px solid #a78bfa">'
-        f'<h4 style="margin:0 0 12px;color:#a78bfa;font-size:0.95rem">'
-        f'⏱ 最大保有日数 比較（直近{days}日）</h4>'
-        f'<table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
-        f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.78rem">'
-        f'<th style="padding:5px 10px;text-align:left">最大保有</th>'
-        f'<th style="padding:5px 10px;text-align:right">件数</th>'
-        f'<th style="padding:5px 10px;text-align:right">勝率</th>'
-        f'<th style="padding:5px 10px;text-align:right">PF</th>'
-        f'<th style="padding:5px 10px;text-align:right">平均保有日</th>'
-        f'<th style="padding:5px 10px;text-align:right">タイムカット</th>'
-        f'<th style="padding:5px 10px;text-align:right">損益合計</th>'
-        f'</tr></thead>'
-        f'<tbody>{rows}</tbody>'
-        f'</table></div>'
-    )
+    if compare_modes:
+        # Conservative
+        print(f"  [max_hold比較] conservative 集計中...", flush=True)
+        _set_sig_params("conservative")
+        con_results: dict[int, dict] = {}
+        for mh in hold_list:
+            print(f"    MAX_HOLD={mh}日...", flush=True)
+            con_results[mh] = _collect(mh)
+        # Aggressive
+        print(f"  [max_hold比較] aggressive 集計中...", flush=True)
+        _set_sig_params("aggressive")
+        agg_results: dict[int, dict] = {}
+        for mh in hold_list:
+            print(f"    MAX_HOLD={mh}日...", flush=True)
+            agg_results[mh] = _collect(mh)
+        # Restore conservative
+        _set_sig_params("conservative")
+
+        con_table = _build_table(con_results)
+        agg_table = _build_table(agg_results)
+        return (
+            f'<div style="margin:0 0 16px;padding:16px 20px;background:#1e293b;'
+            f'border-radius:8px;border-left:3px solid #60a5fa">'
+            f'<h4 style="margin:0 0 10px;color:#60a5fa;font-size:0.9rem">Conservative（目標3R・損切り1.5ATR）</h4>'
+            f'{con_table}</div>'
+            f'<div style="padding:16px 20px;background:#1e293b;'
+            f'border-radius:8px;border-left:3px solid #f97316">'
+            f'<h4 style="margin:0 0 10px;color:#f97316;font-size:0.9rem">Aggressive（目標1.5R・損切り1ATR）</h4>'
+            f'{agg_table}</div>'
+        )
+    else:
+        results: dict[int, dict] = {}
+        for mh in hold_list:
+            print(f"  [max_hold比較] MAX_HOLD={mh}日 集計中...", flush=True)
+            results[mh] = _collect(mh)
+        return (
+            f'<div style="margin:0 0 24px;padding:16px 20px;background:#1e293b;'
+            f'border-radius:8px;border-left:3px solid #a78bfa">'
+            f'<h4 style="margin:0 0 12px;color:#a78bfa;font-size:0.95rem">'
+            f'⏱ 最大保有日数 比較（直近{days}日）</h4>'
+            f'{_build_table(results)}</div>'
+        )
 
 
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
@@ -6670,6 +6703,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _dseq = _DETAIL_TAB_SEQ
 
     _preoos_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ シグナル時点BTスコア</button>'
+    _maxhold_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold\')">⑪ 保有日数比較</button>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -6687,6 +6721,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ ⑧ 損切り・追加</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 {_preoos_tab_btn}
+{_maxhold_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -6904,6 +6939,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
 <div id="analtab_{_dseq}_preoos" class="analysis-tab-pane">
 {_preoos_section_html if _preoos_section_html else '<p style="color:#64748b;padding:20px">preoos_cutoff_days 未指定のため表示なし</p>'}
+</div>
+
+<div id="analtab_{_dseq}_maxhold" class="analysis-tab-pane">
+<!-- MAXHOLD_SLOT -->
 </div>
 
 </div>
