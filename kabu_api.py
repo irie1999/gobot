@@ -219,7 +219,7 @@ class KabuClient:
             leaves = int(p.get("LeavesQty") or 0)
             use_qty = min(remaining, leaves)
             if use_qty > 0:
-                close_list.append({"HoldID": hold_id, "Qty": float(use_qty)})
+                close_list.append({"HoldID": hold_id, "Qty": use_qty})
                 remaining -= use_qty
             if remaining <= 0:
                 break
@@ -256,7 +256,28 @@ class KabuClient:
             res = {"_raw": r.text}
         if not r.ok:
             print(f"  ✗ {label} HTTP {r.status_code}: {res}")
-            print(f"    送信ボディ: {dict(body, Password='***')}")
+            body_display = dict(body, Password="***")
+            print(f"    送信ボディ: {body_display}")
+            # 4001005 パラメータ変換エラー で ClosePositions がある場合は除いて再試行
+            if (res.get("Code") == 4001005 and "ClosePositions" in body
+                    and body.get("CashMargin") == CASH_MARGIN_CLOSE):
+                body2 = {k: v for k, v in body.items() if k != "ClosePositions"}
+                print(f"  ↩ ClosePositions を除いて再試行 (HoldID形式デバッグ)...")
+                r2 = requests.post(url, headers=self._headers(with_content=True),
+                                   json=body2, timeout=self.timeout)
+                try:
+                    res2 = r2.json()
+                except Exception:
+                    res2 = {"_raw": r2.text}
+                if r2.ok:
+                    print(f"  ✓ ClosePositions なし で成功 → HoldID形式が原因でした")
+                    if res2.get("Result") != 0:
+                        print(f"    発注結果: {res2}")
+                    else:
+                        print(f"    発注成功 OrderId={res2.get('OrderId')}")
+                    return res2
+                else:
+                    print(f"  ✗ ClosePositions なし でも失敗 HTTP {r2.status_code}: {res2}")
             return {"Result": -1, "_http_status": r.status_code, **(
                 res if isinstance(res, dict) else {})}
         if res.get("Result") != 0:
@@ -287,11 +308,10 @@ class KabuClient:
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
             body["DelivType"] = 0
+            body["MarginTradeType"] = 1   # 信用新規・返済ともに必要
             if cash_margin == CASH_MARGIN_OPEN:
-                body["FundType"] = "11"       # 信用新規のみ FundType 必要
-                body["MarginTradeType"] = 1   # 信用新規のみ MarginTradeType 必要
-            # 信用返済(CashMargin=3)は FundType・MarginTradeType ともに含めない
-            # (HoldID で建玉が特定されるため)
+                body["FundType"] = "11"   # 信用新規のみ FundType 必要
+            # 信用返済(CashMargin=3)は FundType を含めない
         return body
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
