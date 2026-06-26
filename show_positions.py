@@ -2,57 +2,61 @@
 show_positions.py — kabu station 保有建玉 + 損切り/利確 表示
 =============================================================
 
-kabu station API から実建玉を取得し、my_positions.csv の損切り・利確価格と
-照合して現在状況をコンソールに表示します。
+kabu station API から実建玉を取得し、signals_latest.json（または
+signals_{date}.json）の stop_p / target_p と照合して表示します。
 
 使い方:
-  python show_positions.py           # デモ口座 (18081)
-  python show_positions.py --prod    # 本番口座 (18080)
+  python show_positions.py                    # デモ口座 (18081)
+  python show_positions.py --prod             # 本番口座 (18080)
+  python show_positions.py --json signals_2026-06-25.json  # 日付指定
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import glob
+import json
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from kabu_api import KabuClient
 
-_POS_CSV = "my_positions.csv"
+JST = timezone(timedelta(hours=9))
 
 
-def load_csv_positions(csv_path: str) -> dict:
-    """my_positions.csv から symbol → {stop_price, target_price, ...} を返す。"""
-    result: dict = {}
-    p = Path(csv_path)
-    if not p.exists():
-        return result
-    with open(p, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("status") not in ("holding", "filled"):
-                continue
-            sym = str(row.get("symbol", "")).strip()
-            if not sym:
-                continue
-            try:
-                stop   = float(row["stop_price"])   if row.get("stop_price")   else None
-                target = float(row["target_price"]) if row.get("target_price") else None
-                fill   = float(row["fill_price"])   if row.get("fill_price")   else None
-                qty    = int(row["qty"])             if row.get("qty")          else None
-            except (ValueError, KeyError):
-                stop = target = fill = qty = None
-            result[sym] = {
-                "stop":     stop,
-                "target":   target,
-                "fill":     fill,
-                "qty":      qty,
-                "strategy": row.get("strategy", ""),
-                "name":     row.get("name", ""),
-                "side":     row.get("side", "long"),
-                "record_date": row.get("record_date", ""),
-            }
-    return result
+def _load_signals(json_path: str | None) -> dict[str, list[dict]]:
+    """シグナルJSONを読み込み symbol → [signal, ...] の辞書を返す。"""
+
+    def _try_load(path: str) -> list[dict]:
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            sigs = data.get("signals", []) if isinstance(data, dict) else data
+            return [s for s in sigs if s.get("symbol")]
+        except Exception:
+            return []
+
+    # 読み込み対象ファイルを決定
+    if json_path:
+        candidates = [json_path]
+    else:
+        # signals_latest.json → 日付付き降順 の順で探す
+        dated = sorted(glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json"),
+                       reverse=True)
+        candidates = ["signals_latest.json"] + dated
+
+    for path in candidates:
+        sigs = _try_load(path)
+        if sigs:
+            print(f"[シグナル] {path} を使用 ({len(sigs)} 件)")
+            result: dict[str, list[dict]] = {}
+            for s in sigs:
+                sym = str(s["symbol"])
+                result.setdefault(sym, []).append(s)
+            return result
+
+    print("[WARN] シグナルJSONが見つかりません。--json でファイルを指定してください。")
+    return {}
 
 
 def _pct(price: float, ref: float) -> str:
@@ -61,21 +65,30 @@ def _pct(price: float, ref: float) -> str:
     return "—"
 
 
-def _pnl_str(current: float | None, fill: float | None, qty: int | None, side: str) -> str:
-    if current is None or fill is None or qty is None:
-        return "—"
-    diff = (current - fill) if side == "long" else (fill - current)
-    pnl = diff * qty
-    sign = "+" if pnl >= 0 else ""
-    return f"{sign}{pnl:,.0f}円"
+def _bar(pct_val: float, width: int = 20) -> str:
+    """簡易バー表示: -20%〜+20% の範囲を可視化"""
+    clamped = max(-20.0, min(20.0, pct_val))
+    center  = width // 2
+    pos     = int(center + clamped / 20.0 * center)
+    bar     = [" "] * width
+    bar[center] = "|"
+    if pos != center:
+        step = 1 if pos > center else -1
+        for i in range(center + step, pos + step, step):
+            bar[i] = "█"
+    bar[pos] = "◆"
+    return "".join(bar)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="kabu station 保有建玉 + 損切り/利確 表示")
-    ap.add_argument("--prod",    action="store_true", help="本番口座 (18080) を使用")
-    ap.add_argument("--csv",     default=_POS_CSV,    help=f"CSVパス (default: {_POS_CSV})")
-    ap.add_argument("--product", type=int, default=2, help="product: 0=全部 1=現物 2=信用 (default:2)")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prod",    action="store_true", help="本番口座 (18080)")
+    ap.add_argument("--json",    default=None,        help="使用するシグナルJSONパス")
+    ap.add_argument("--product", type=int, default=2, help="0=全 1=現物 2=信用 (default:2)")
     args = ap.parse_args()
+
+    # シグナルデータ読み込み
+    sig_map = _load_signals(args.json)
 
     # kabu station 接続
     cli = KabuClient(prod=args.prod, dry_run=True)
@@ -97,86 +110,115 @@ def main():
         print("現在の保有建玉はありません。")
         return
 
-    # CSV の損切り/利確データ
-    csv_data = load_csv_positions(args.csv)
-
-    # 現在値取得 & 表示
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
     print()
-    print("=" * 80)
-    print("  kabu station 保有建玉  損切り・利確 一覧")
-    print("=" * 80)
+    print("=" * 72)
+    print(f"  kabu station 保有建玉  損切り・利確 一覧   ({now_str})")
+    print("=" * 72)
 
     total_pnl = 0.0
-    has_pnl   = False
+    has_total  = False
 
     for pos in positions:
-        sym  = str(pos.get("Symbol", ""))
-        name = pos.get("SymbolName") or pos.get("Name") or csv_data.get(sym, {}).get("name", "")
-        side_code = pos.get("Side", "")          # "2"=買(ロング) "1"=売(ショート)
-        side_str  = "ロング" if side_code == "2" else "ショート"
+        sym       = str(pos.get("Symbol", ""))
+        name      = pos.get("SymbolName") or pos.get("Name") or sym
+        side_code = pos.get("Side", "")          # "1"=売 "2"=買
+        is_long   = side_code == "2"
+        side_str  = "ロング ▲" if is_long else "ショート ▼"
         qty       = pos.get("LeavesQty") or pos.get("Qty") or 0
-        avg_price = pos.get("AveragePrice") or pos.get("Price") or 0.0
-        profit    = pos.get("Profit")            # 評価損益 (kabu が計算済みの場合)
-        current   = pos.get("CurrentPrice")      # 現在値 (kabu board 取得済みの場合)
+        avg_price = float(pos.get("AveragePrice") or pos.get("Price") or 0)
+        profit    = pos.get("Profit")            # kabu計算の評価損益
 
-        # 現在値がなければ取得
+        # 現在値取得
+        current: float | None = pos.get("CurrentPrice")
         if current is None:
             try:
                 current = cli.get_current_price(sym)
             except Exception:
                 current = None
 
-        cv = csv_data.get(sym, {})
-        stop   = cv.get("stop")
-        target = cv.get("target")
-        fill   = cv.get("fill") or avg_price or None
-        strategy = cv.get("strategy", "")
-        record_date = cv.get("record_date", "")
+        # シグナルデータを symbol でマッチ（スコア最高を優先）
+        sig_list = sig_map.get(sym, [])
+        sig = max(sig_list, key=lambda s: s.get("score", 0)) if sig_list else None
+
+        stop_p   = float(sig["stop_p"])   if sig and sig.get("stop_p")   else None
+        target_p = float(sig["target_p"]) if sig and sig.get("target_p") else None
+        order_p  = float(sig["order_p"])  if sig and sig.get("order_p")  else avg_price
+        strategy = sig["strategy"]        if sig else "—"
+        sig_date = sig.get("signal_date", "") if sig else ""
+
+        # 評価損益
+        if profit is not None:
+            pnl_val = float(profit)
+        elif current and avg_price:
+            diff    = (current - avg_price) if is_long else (avg_price - current)
+            pnl_val = diff * qty
+        else:
+            pnl_val = None
+
+        pnl_str = ""
+        if pnl_val is not None:
+            sign     = "+" if pnl_val >= 0 else ""
+            pnl_str  = f"  {sign}{pnl_val:>9,.0f} 円"
+            total_pnl += pnl_val
+            has_total  = True
 
         print()
-        print(f"  {sym}  {name}  [{side_str}]  {strategy or '—'}")
-        print(f"  ─────────────────────────────────────────────")
-        print(f"  約定値   : {fill:>9,.1f} 円   ({record_date})" if fill else "  約定値   : —")
+        print(f"  ┌─ {sym}  {name}  [{side_str}]  戦略: {strategy}  シグナル日: {sig_date}")
+        print(f"  │  約定値   : {avg_price:>9,.1f} 円")
         if current is not None:
-            pct_now = _pct(current, fill) if fill else "—"
-            print(f"  現在値   : {current:>9,.1f} 円   ({pct_now})")
+            pct_now = _pct(current, avg_price)
+            print(f"  │  現在値   : {current:>9,.1f} 円   ({pct_now})")
         else:
-            print(f"  現在値   : 取得失敗")
-        if stop is not None:
-            dist_stop = _pct(stop, fill) if fill else "—"
-            print(f"  損切り   : {stop:>9,.1f} 円   (約定比 {dist_stop})")
-        else:
-            print(f"  損切り   : 未設定  ← my_positions.csv に stop_price を入力してください")
-        if target is not None:
-            dist_tgt = _pct(target, fill) if fill else "—"
-            print(f"  利確目標 : {target:>9,.1f} 円   (約定比 {dist_tgt})")
-        else:
-            print(f"  利確目標 : 未設定")
+            print(f"  │  現在値   : 取得失敗")
 
-        # 損益
-        if profit is not None:
-            total_pnl += float(profit)
-            has_pnl    = True
-            sign = "+" if float(profit) >= 0 else ""
-            print(f"  評価損益 : {sign}{profit:,.0f} 円  (×{qty}株)")
-        elif current is not None and fill:
-            side_long = (side_code == "2")
-            diff = (current - fill) if side_long else (fill - current)
-            pnl_est = diff * qty
-            total_pnl += pnl_est
-            has_pnl    = True
-            sign = "+" if pnl_est >= 0 else ""
-            print(f"  評価損益 : {sign}{pnl_est:,.0f} 円  (×{qty}株, 推定)")
+        if stop_p is not None:
+            d = _pct(stop_p, avg_price)
+            remaining_stop = ""
+            if current is not None:
+                rem = abs(current - stop_p)
+                remaining_stop = f"  ←残り {rem:,.0f}円"
+            print(f"  │  損切り   : {stop_p:>9,.1f} 円   (約定比 {d}){remaining_stop}")
+        else:
+            print(f"  │  損切り   : シグナルJSON に見つかりません")
+
+        if target_p is not None:
+            d = _pct(target_p, avg_price)
+            remaining_tgt = ""
+            if current is not None:
+                rem = abs(target_p - current)
+                remaining_tgt = f"  ←残り {rem:,.0f}円"
+            print(f"  │  利確目標 : {target_p:>9,.1f} 円   (約定比 {d}){remaining_tgt}")
+        else:
+            print(f"  │  利確目標 : シグナルJSON に見つかりません")
+
+        # 進捗バー: 損切り〜現在〜利確 の位置を表示
+        if stop_p and target_p and current is not None:
+            rng = target_p - stop_p
+            if rng > 0:
+                pct_pos = (current - stop_p) / rng * 100
+                bar_w   = 40
+                filled  = int(pct_pos / 100 * bar_w)
+                filled  = max(0, min(bar_w, filled))
+                bar     = "─" * filled + "◆" + "─" * (bar_w - filled)
+                print(f"  │  進捗     : [損切{bar}利確]  {pct_pos:.0f}%")
+
+        if pnl_str:
+            marker = "▲" if pnl_val >= 0 else "▼"
+            print(f"  └  評価損益 :{pnl_str}  {marker}  (×{qty}株)")
+        else:
+            print(f"  └  評価損益 : 計算不可  (×{qty}株)")
 
     print()
-    print("=" * 80)
-    if has_pnl:
+    print("=" * 72)
+    if has_total:
         sign = "+" if total_pnl >= 0 else ""
-        print(f"  合計評価損益: {sign}{total_pnl:,.0f} 円")
-    print("=" * 80)
+        marker = "▲ 含み益" if total_pnl >= 0 else "▼ 含み損"
+        print(f"  合計評価損益: {sign}{total_pnl:>10,.0f} 円   {marker}")
+    print("=" * 72)
     print()
-    print("  ※ 損切り・利確価格は my_positions.csv の stop_price / target_price を参照。")
-    print("  ※ 損切りチェック: python close_stop_guard.py")
+    print("  ※ 損切り・利確は signals_latest.json の stop_p / target_p を参照")
+    print("  ※ 引け前損切りチェック: python close_stop_guard.py")
     print()
 
 
