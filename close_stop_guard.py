@@ -849,4 +849,36 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import io as _io
+
+    # タスクスケジューラ経由の実行ではコンソールが見えないため、
+    # 標準出力をログファイルにも同時書き出しする
+    _log_dir  = Path(__file__).parent / "logs"
+    _log_dir.mkdir(exist_ok=True)
+    _log_file = _log_dir / f"close_stop_guard_{datetime.now(JST).strftime('%Y-%m-%d')}.log"
+
+    class _Tee:
+        def __init__(self, *streams):
+            self._s = streams
+        def write(self, data):
+            for s in self._s:
+                try: s.write(data)
+                except Exception: pass
+        def flush(self):
+            for s in self._s:
+                try: s.flush()
+                except Exception: pass
+
+    _log_fh = open(_log_file, "a", encoding="utf-8")
+    _log_fh.write(f"\n{'='*60}\n{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S JST')}\n{'='*60}\n")
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
+    sys.stderr = _Tee(sys.__stderr__, _log_fh)
+
+    try:
+        _rc = main()
+    finally:
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        _log_fh.close()
+
+    sys.exit(_rc)
