@@ -5522,6 +5522,157 @@ function switchTbd(id, tab) {{
 
     _speed_html = _speed_analysis_html(done_trades)
 
+    # ── ⑥-2 保有期限深堀り：決済理由別×戦略別分析 ──────────────────────────
+    def _exit_reason_analysis_html(trades_list) -> str:
+        """決済理由（目標達成/損切り/タイムカット）を戦略別・全体で集計して表示。"""
+        from collections import defaultdict as _dd4
+        import backtest_limit_entry as _bte4
+        settled = [t for t in trades_list
+                   if t.get("reason") not in ("発注中", "保有中")]
+        if len(settled) < 5:
+            return ""
+
+        max_hold = _bte4.MAX_HOLD
+        REASONS = ["目標達成", "損切り", "タイムカット"]
+        COLOR   = {"目標達成": "#4ade80", "損切り": "#f87171", "タイムカット": "#fbbf24"}
+
+        # ── 全体サマリー ──
+        total = len(settled)
+        overall: dict[str, list] = {r: [] for r in REASONS}
+        for t in settled:
+            r = t.get("reason", "")
+            if r in overall:
+                overall[r].append(t)
+
+        def _pf(trades):
+            gp = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
+            gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
+            return gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+
+        def _pf_str(v):
+            return "∞" if v == float("inf") else f"{v:.2f}"
+
+        def _avg_hold(trades):
+            return sum(t.get("hold_days", 0) for t in trades) / len(trades) if trades else 0.0
+
+        overall_rows = ""
+        for r in REASONS:
+            ts = overall[r]
+            n  = len(ts)
+            pct = n / total * 100 if total else 0.0
+            pnl = sum(t.get("pnl", 0) for t in ts)
+            pnl_col = "#4ade80" if pnl > 0 else "#f87171" if pnl < 0 else "#94a3b8"
+            wins = sum(1 for t in ts if t.get("pnl", 0) > 0)
+            wr   = wins / n * 100 if n else 0.0
+            avg_h = _avg_hold(ts)
+            pf_v = _pf(ts)
+            bar_w = int(pct / 100 * 120)
+            col = COLOR[r]
+            overall_rows += f"""<tr>
+  <td style="color:{col};font-weight:600;white-space:nowrap">{r}</td>
+  <td style="text-align:right">{n}件</td>
+  <td style="text-align:right">{pct:.0f}%
+    <div style="height:6px;background:{col};width:{bar_w}px;margin-top:2px;border-radius:3px"></div></td>
+  <td style="text-align:right">{wr:.0f}%</td>
+  <td style="text-align:right;color:{pnl_col};font-weight:700">{pnl:+,.0f}円</td>
+  <td style="text-align:right">{_pf_str(pf_v)}</td>
+  <td style="text-align:right">{avg_h:.1f}日</td>
+</tr>"""
+
+        # タイムカット詳細（プラス vs マイナス）
+        tcuts = overall["タイムカット"]
+        tcut_plus  = [t for t in tcuts if t.get("pnl", 0) > 0]
+        tcut_minus = [t for t in tcuts if t.get("pnl", 0) <= 0]
+        tcut_detail = ""
+        if tcuts:
+            tp_pnl = sum(t["pnl"] for t in tcut_plus)
+            tm_pnl = sum(t["pnl"] for t in tcut_minus)
+            tcut_detail = f"""<p style="color:#fbbf24;font-size:0.8rem;margin:10px 0 4px">
+  タイムカット内訳 (MAX_HOLD={max_hold}日):</p>
+<table style="border-collapse:collapse;font-size:0.82rem">
+  <tr><td style="padding:2px 10px;color:#4ade80">含み益で終了</td>
+      <td style="padding:2px 10px;text-align:right">{len(tcut_plus)}件</td>
+      <td style="padding:2px 10px;text-align:right;color:#4ade80">{tp_pnl:+,.0f}円</td></tr>
+  <tr><td style="padding:2px 10px;color:#f87171">含み損で終了</td>
+      <td style="padding:2px 10px;text-align:right">{len(tcut_minus)}件</td>
+      <td style="padding:2px 10px;text-align:right;color:#f87171">{tm_pnl:+,.0f}円</td></tr>
+</table>"""
+
+        # ── 戦略別内訳 ──
+        by_strat: dict = _dd4(list)
+        for t in settled:
+            by_strat[t.get("strategy", "?")].append(t)
+
+        strat_rows = ""
+        for strat, ts in sorted(by_strat.items(), key=lambda x: -len(x[1])):
+            n = len(ts)
+            pnl = sum(t.get("pnl", 0) for t in ts)
+            pnl_col = "#4ade80" if pnl > 0 else "#f87171"
+            wins = sum(1 for t in ts if t.get("pnl", 0) > 0)
+            wr = wins / n * 100 if n else 0.0
+            avg_h = _avg_hold(ts)
+            reason_counts = {r: sum(1 for t in ts if t.get("reason") == r) for r in REASONS}
+            reason_cells = ""
+            for r in REASONS:
+                rc = reason_counts[r]
+                rp = rc / n * 100 if n else 0.0
+                col = COLOR[r]
+                reason_cells += f'<td style="text-align:right;color:{col}">{rc}件 <span style="color:#64748b">({rp:.0f}%)</span></td>'
+            strat_rows += f"""<tr>
+  <td style="color:#e2e8f0;font-weight:600;white-space:nowrap">{strat}</td>
+  <td style="text-align:right">{n}</td>
+  <td style="text-align:right">{wr:.0f}%</td>
+  {reason_cells}
+  <td style="text-align:right">{avg_h:.1f}日</td>
+  <td style="text-align:right;color:{pnl_col};font-weight:700">{pnl:+,.0f}円</td>
+</tr>"""
+
+        return f"""<div style="margin:20px 0">
+<h3 style="color:#e2e8f0;font-size:1rem;margin-bottom:12px">
+  保有期限 MAX_HOLD={max_hold}日 — 決済理由分析
+  <span style="font-size:0.78rem;color:#64748b;font-weight:400;margin-left:8px">
+    決済済み{total}件 (保有中・発注中除外)</span>
+</h3>
+
+<div style="display:flex;gap:30px;flex-wrap:wrap">
+<div>
+<p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">全体</p>
+<table style="border-collapse:collapse;font-size:0.82rem">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;padding:3px 10px">理由</th>
+    <th style="color:#94a3b8;padding:3px 10px">件数</th>
+    <th style="color:#94a3b8;padding:3px 10px">割合</th>
+    <th style="color:#94a3b8;padding:3px 10px">勝率</th>
+    <th style="color:#94a3b8;padding:3px 10px">損益</th>
+    <th style="color:#94a3b8;padding:3px 10px">PF</th>
+    <th style="color:#94a3b8;padding:3px 10px">平均保有</th>
+  </tr></thead>
+  <tbody>{overall_rows}</tbody>
+</table>
+{tcut_detail}
+</div>
+</div>
+
+<p style="color:#94a3b8;font-size:0.78rem;margin:14px 0 6px">戦略別</p>
+<table style="border-collapse:collapse;font-size:0.82rem">
+  <thead><tr>
+    <th style="text-align:left;color:#94a3b8;padding:3px 10px">戦略</th>
+    <th style="color:#94a3b8;padding:3px 10px">件数</th>
+    <th style="color:#94a3b8;padding:3px 10px">勝率</th>
+    <th style="color:#4ade80;padding:3px 10px">目標達成</th>
+    <th style="color:#f87171;padding:3px 10px">損切り</th>
+    <th style="color:#fbbf24;padding:3px 10px">タイムカット</th>
+    <th style="color:#94a3b8;padding:3px 10px">平均保有</th>
+    <th style="color:#94a3b8;padding:3px 10px">損益</th>
+  </tr></thead>
+  <tbody>{strat_rows}</tbody>
+</table>
+</div>"""
+
+    _exit_reason_html = _exit_reason_analysis_html(done_trades)
+    if _exit_reason_html:
+        _speed_html = (_speed_html or "") + _exit_reason_html
+
     # ── ⑦ 損切りパターン分析（BT70以上）────────────────────────────────────
     def _stop_pattern_html(trades_list):
         """BT70以上の損切りトレードについて、損切り日のOHLC vs 損切り価格を分析する。
