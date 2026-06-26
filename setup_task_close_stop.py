@@ -12,10 +12,9 @@ import sys
 from pathlib import Path
 
 
-TASK_NAME    = "close_stop_guard"
-RUN_HOUR     = 14
-RUN_MINUTE   = 50
-WINDOW_WAIT  = 60   # 実行後に画面を閉じるまでの秒数
+TASK_NAME  = "close_stop_guard"
+RUN_HOUR   = 14
+RUN_MINUTE = 50
 
 
 def main() -> int:
@@ -30,7 +29,7 @@ def main() -> int:
     print(f"  作業Dir   : {script_dir}")
     print(f"  実行時刻  : 毎日 {RUN_HOUR:02d}:{RUN_MINUTE:02d}")
     print(f"  コマンド  : close_stop_guard.py --kabu --execute --prod")
-    print(f"  ウィンドウ: 実行後 {WINDOW_WAIT} 秒で自動クローズ")
+    print(f"  ウィンドウ: キー入力で閉じる")
     print("=" * 60)
 
     # ── Step1: .bat ファイルを生成（コンソール画面を表示するため） ──
@@ -41,8 +40,8 @@ echo  close_stop_guard  %date% %time%
 echo ============================================================
 "{python_exe}" close_stop_guard.py --kabu --execute --prod
 echo.
-echo 終了しました。{WINDOW_WAIT}秒後に自動で閉じます...
-timeout /t {WINDOW_WAIT}
+echo 終了しました。何かキーを押すと閉じます...
+pause >nul
 """
     bat_path.write_text(bat_content, encoding="shift-jis")
     print(f"✓ バッチファイル作成: {bat_path.name}")
