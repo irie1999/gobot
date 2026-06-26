@@ -839,12 +839,17 @@ def main() -> int:
         print(f"dry-run のため発注しません (成行)。実発注するには --execute を付けてください。")
         return 0
 
-    print(f"成行 を {env_label} に発注します...")
+    order_label = "成行(翌朝)" if args.post_close else "引け成行(MOC)"
+    print(f"{order_label} を {env_label} に発注します...")
     ok = 0
     for pos in breached:
-        if send_moo_order(pos, cli):
-            ok += 1
-    print(f"\n発注完了: {ok}/{len(breached)} 件成功 (成行)")
+        if args.post_close:
+            if send_moo_order(pos, cli):
+                ok += 1
+        else:
+            if send_moc_order(pos, cli):
+                ok += 1
+    print(f"\n発注完了: {ok}/{len(breached)} 件成功 ({order_label})")
     return 0
 
 

@@ -5673,6 +5673,161 @@ function switchTbd(id, tab) {{
     if _exit_reason_html:
         _speed_html = (_speed_html or "") + _exit_reason_html
 
+    # ── タイムカット 寄り付き vs 引け 比較 ──────────────────────────────────
+    def _timecut_open_vs_close_html(trades_list) -> str:
+        """タイムカットトレードについて、引け決済 vs 翌日寄り付き決済を比較する。"""
+        try:
+            from backtest_limit_entry import fetch as _fetch_tc
+        except ImportError:
+            return ""
+
+        tc_trades = [t for t in trades_list if t.get("reason") == "タイムカット"]
+        if len(tc_trades) < 5:
+            return ""
+
+        # symbol ごとにキャッシュからOHLC取得
+        import pandas as _pd_tc
+        _df_cache: dict = {}
+
+        def _get_next_open(symbol, exit_dt):
+            if symbol not in _df_cache:
+                try:
+                    _df_cache[symbol] = _fetch_tc(symbol)
+                except Exception:
+                    _df_cache[symbol] = None
+            df_s = _df_cache[symbol]
+            if df_s is None or df_s.empty:
+                return None
+            future = df_s[df_s.index > exit_dt]
+            if future.empty:
+                return None
+            return float(future.iloc[0]["open"])
+
+        rows_data = []
+        for t in tc_trades:
+            exit_dt = _pd_tc.Timestamp(t["exit_dt"]) if not isinstance(t["exit_dt"], _pd_tc.Timestamp) else t["exit_dt"]
+            symbol  = t.get("symbol", "")
+            is_short = t.get("is_short", False) or t.get("entry_type") == "stop_sell"
+            qty     = int(t.get("qty", 100))
+            ep      = float(t.get("entry_p", 0))
+            cl_exit = float(t.get("exit_p", 0))  # 現在の引け決済価格
+            next_op = _get_next_open(symbol, exit_dt)
+            if next_op is None or cl_exit <= 0:
+                continue
+            # 翌日寄り付きで決済した場合のPnL差分
+            if is_short:
+                pnl_close    = (ep - cl_exit) * qty
+                pnl_next_op  = (ep - next_op) * qty
+            else:
+                pnl_close    = (cl_exit - ep) * qty
+                pnl_next_op  = (next_op - ep) * qty
+            delta = pnl_next_op - pnl_close
+            rows_data.append({
+                "strategy": t.get("strategy", ""),
+                "symbol":   symbol,
+                "name":     t.get("name", ""),
+                "exit_dt":  exit_dt,
+                "cl_exit":  cl_exit,
+                "next_op":  next_op,
+                "pnl_close":   pnl_close,
+                "pnl_next_op": pnl_next_op,
+                "delta":    delta,
+                "is_short": is_short,
+            })
+
+        if len(rows_data) < 3:
+            return ""
+
+        n_total       = len(rows_data)
+        delta_total   = sum(r["delta"] for r in rows_data)
+        pnl_close_sum = sum(r["pnl_close"] for r in rows_data)
+        pnl_open_sum  = sum(r["pnl_next_op"] for r in rows_data)
+        n_open_better = sum(1 for r in rows_data if r["delta"] > 0)
+        n_close_better = sum(1 for r in rows_data if r["delta"] < 0)
+        winner = "翌日寄り付き" if delta_total > 0 else "当日引け"
+        winner_color = "#4ade80" if delta_total > 0 else "#94a3b8"
+
+        # 戦略別集計
+        from collections import defaultdict as _dd_tc
+        strat_agg: dict = _dd_tc(lambda: {"n": 0, "delta": 0.0, "pnl_c": 0.0, "pnl_o": 0.0, "n_open_better": 0})
+        for r in rows_data:
+            s = r["strategy"]
+            strat_agg[s]["n"] += 1
+            strat_agg[s]["delta"] += r["delta"]
+            strat_agg[s]["pnl_c"] += r["pnl_close"]
+            strat_agg[s]["pnl_o"] += r["pnl_next_op"]
+            if r["delta"] > 0:
+                strat_agg[s]["n_open_better"] += 1
+
+        def _fmt(v):
+            s = f"{int(v):,}"
+            return f'<span style="color:#4ade80">+{s}</span>' if v > 0 else (f'<span style="color:#f87171">{s}</span>' if v < 0 else s)
+
+        strat_rows_html = ""
+        for strat in sorted(strat_agg.keys()):
+            ag = strat_agg[strat]
+            pct_open = ag["n_open_better"] / ag["n"] * 100 if ag["n"] > 0 else 0
+            winner_s = "寄り付き有利" if ag["delta"] > 0 else "引け有利"
+            wc = "#4ade80" if ag["delta"] > 0 else "#94a3b8"
+            strat_rows_html += f"""<tr style="border-bottom:1px solid #334155">
+  <td style="padding:4px 10px;color:#e2e8f0">{strat}</td>
+  <td style="padding:4px 10px;text-align:right;color:#94a3b8">{ag['n']}</td>
+  <td style="padding:4px 10px;text-align:right">{_fmt(ag['pnl_c'])}</td>
+  <td style="padding:4px 10px;text-align:right">{_fmt(ag['pnl_o'])}</td>
+  <td style="padding:4px 10px;text-align:right">{_fmt(ag['delta'])}</td>
+  <td style="padding:4px 10px;text-align:right;color:#94a3b8">{pct_open:.0f}%</td>
+  <td style="padding:4px 10px;text-align:center;color:{wc};font-weight:bold">{winner_s}</td>
+</tr>"""
+
+        return f"""
+<div style="background:#1e293b;border-radius:8px;padding:16px;margin:16px 0">
+  <h3 style="color:#f8fafc;margin:0 0 4px">⏰ タイムカット: 当日引け vs 翌日寄り付き 比較</h3>
+  <p style="color:#94a3b8;font-size:12px;margin:0 0 12px">
+    保有期限到達時に「当日引け成行(MOC)」で売るか「翌日寄付き成行(MOO)」で売るかの損益比較。
+    対象: タイムカット {n_total}件
+  </p>
+
+  <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+    <div style="background:#0f172a;border-radius:6px;padding:12px 20px;text-align:center">
+      <div style="color:#94a3b8;font-size:11px">当日引け合計損益</div>
+      <div style="font-size:20px;font-weight:bold">{_fmt(pnl_close_sum)}</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px 20px;text-align:center">
+      <div style="color:#94a3b8;font-size:11px">翌日寄り付き合計損益</div>
+      <div style="font-size:20px;font-weight:bold">{_fmt(pnl_open_sum)}</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px 20px;text-align:center">
+      <div style="color:#94a3b8;font-size:11px">差分（寄り付き－引け）</div>
+      <div style="font-size:20px;font-weight:bold">{_fmt(delta_total)}</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px 20px;text-align:center">
+      <div style="color:#94a3b8;font-size:11px">結論</div>
+      <div style="font-size:18px;font-weight:bold;color:{winner_color}">{winner}が有利</div>
+      <div style="color:#64748b;font-size:11px">寄り付き有利 {n_open_better}件 / 引け有利 {n_close_better}件</div>
+    </div>
+  </div>
+
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid #475569">
+      <th style="color:#94a3b8;padding:4px 10px;text-align:left">戦略</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:right">件数</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:right">引け損益</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:right">寄り付き損益</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:right">差分</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:right">寄り付き有利%</th>
+      <th style="color:#94a3b8;padding:4px 10px;text-align:center">判定</th>
+    </tr></thead>
+    <tbody>{strat_rows_html}</tbody>
+  </table>
+  <p style="color:#64748b;font-size:11px;margin:8px 0 0">
+    ※ 翌日寄り付き損益 = タイムカット翌営業日の始値で決済した場合の仮想損益（スリッページ除く）
+  </p>
+</div>"""
+
+    _tc_cmp_html = _timecut_open_vs_close_html(done_trades)
+    if _tc_cmp_html:
+        _speed_html = (_speed_html or "") + _tc_cmp_html
+
     # ── ⑦ 損切りパターン分析（BT70以上）────────────────────────────────────
     def _stop_pattern_html(trades_list):
         """BT70以上の損切りトレードについて、損切り日のOHLC vs 損切り価格を分析する。

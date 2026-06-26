@@ -604,6 +604,7 @@ def run_limit_backtest(
     entry_delay: int = 0,          # シグナル発生から何日後から注文を受け付けるか
     entry_expire: int | None = None,  # 注文有効日数。None=ENTRY_EXPIRE。entry_delayと独立
     rolling_entry: int | None = None, # ローリング更新回数。None=ROLLING_ENTRY。0=無効。
+    timecut_price: str = "close",  # タイムカット決済価格: "close"=当日終値 / "next_open"=翌日始値
 ) -> dict:
     """
     指値 or 逆指値エントリー + OCO決済 バックテスト。
@@ -880,7 +881,11 @@ def run_limit_backtest(
             elif hit_stp:
                 exit_p_pos = pos["sp"]; exit_reason_pos = "損切り"
             elif hold_days >= max_hold:
-                exit_p_pos = cl;        exit_reason_pos = "タイムカット"
+                if timecut_price == "next_open" and i + 1 < len(df):
+                    exit_p_pos = float(df.iloc[i + 1]["open"])
+                else:
+                    exit_p_pos = cl
+                exit_reason_pos = "タイムカット"
 
             if exit_p_pos is None:
                 pos["min_lo"] = min(pos.get("min_lo", lo), lo)
