@@ -226,7 +226,7 @@ if _args.both and not _args.short:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ホールドアウト全設定 ロング+ショート統合 {_bd}</title>
+<title>ホールドアウト全設定 ロング+ショート統合 {_bd} [保有{__import__('backtest_limit_entry').MAX_HOLD}日]</title>
 <style>
 body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 .ls-nav{{display:flex;gap:0;align-items:flex-end;border-bottom:2px solid #1e293b;background:#0f172a;
@@ -1201,7 +1201,7 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ホールドアウト全設定 シグナル・損益{'（ショート）' if _args.short else ''} {date_str}</title>
+<title>ホールドアウト全設定 シグナル・損益{'（ショート）' if _args.short else ''} {date_str} [保有{_bte.MAX_HOLD}日]</title>
 <style>
 {_na.CSS}
 {_extra_css}
@@ -1211,6 +1211,7 @@ html = f"""<!DOCTYPE html>
 <h1>ホールドアウト全設定 シグナル・損益レポート{'（ショート）' if _args.short else ''}</h1>
 <p class="subtitle">
   基準日: {date_str} &nbsp;|&nbsp;
+  保有期限: {_bte.MAX_HOLD}日 &nbsp;|&nbsp;
   設定数: {len(_all_configs)}件 &nbsp;|&nbsp;
   workers={_args.workers}
 </p>
