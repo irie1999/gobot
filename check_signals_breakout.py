@@ -314,12 +314,11 @@ def backtest_one(symbol: str, name: str, strategy: str,
     period_results: dict[int, dict] = {}
     for days in PERIODS:
         cutoff = today - timedelta(days=days)
-        # 表示用: 発注中のみ除外（保有中は取引明細に表示する）
+        # 表示用: 発注中も含める（銘柄詳細タブで当日シグナルを可視化するため）
         sub_display = [t for t in full_r["trade_log"]
-                       if t["signal_dt"].date() >= cutoff
-                       and t.get("reason") != "発注中"]
-        # 統計・スコア計算用: 保有中も除外（未決済ポジションはスコアに影響させない）
-        sub = [t for t in sub_display if t.get("reason") != "保有中"]
+                       if t["signal_dt"].date() >= cutoff]
+        # 統計・スコア計算用: 発注中・保有中を除外（未決済ポジションはスコアに影響させない）
+        sub = [t for t in sub_display if t.get("reason") not in ("発注中", "保有中")]
         if not sub_display:
             continue
         filled = len(sub)

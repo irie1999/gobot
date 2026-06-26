@@ -269,9 +269,10 @@ def backtest_one(symbol: str, name: str, strategy: str,
     period_results: dict[int, dict] = {}
     for days in PERIODS:
         cutoff = today - timedelta(days=days)
-        sub    = [t for t in full_r["trade_log"]
-                  if t["signal_dt"].date() >= cutoff]
-        if not sub:
+        sub_display = [t for t in full_r["trade_log"]
+                       if t["signal_dt"].date() >= cutoff]
+        sub = [t for t in sub_display if t.get("reason") not in ("発注中", "保有中")]
+        if not sub_display:
             continue
         filled = len(sub)
         wins   = sum(1 for t in sub if t["pnl"] > 0)
@@ -283,14 +284,14 @@ def backtest_one(symbol: str, name: str, strategy: str,
             symbol=symbol, name=name, strategy=strategy,
             signals=full_r["signals"], filled=filled,
             trades=filled, wins=wins, losses=losses,
-            win_rate=wins / filled * 100,
+            win_rate=wins / filled * 100 if filled else 0.0,
             pf=pf, total_pnl=sum(t["pnl"] for t in sub),
             total_fee=sum(t.get("fee", 0) for t in sub),
             slippage_pct=full_r["slippage_pct"],
             fee_pct_one_way=full_r["fee_pct_one_way"],
-            avg_hold=sum(t["hold_days"] for t in sub) / filled,
+            avg_hold=sum(t["hold_days"] for t in sub) / filled if filled else 0.0,
             fill_rate=full_r["fill_rate"],
-            trade_log=sub,
+            trade_log=sub_display,
         )
 
     return dict(symbol=symbol, name=name, strategy=strategy,
