@@ -26,7 +26,8 @@ JST = timezone(timedelta(hours=9))
 
 
 def _load_signals(json_path: str | None) -> dict[str, list[dict]]:
-    """シグナルJSONを読み込み symbol → [signal, ...] の辞書を返す。"""
+    """全シグナルJSONを読み込み symbol → [signal, ...] の辞書を返す。
+    最新日付のファイルほど優先（同じsymbol+strategyが重複した場合）。"""
 
     def _try_load(path: str) -> list[dict]:
         try:
@@ -36,27 +37,39 @@ def _load_signals(json_path: str | None) -> dict[str, list[dict]]:
         except Exception:
             return []
 
-    # 読み込み対象ファイルを決定
     if json_path:
         candidates = [json_path]
     else:
-        # signals_latest.json → 日付付き降順 の順で探す
-        dated = sorted(glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json"),
-                       reverse=True)
-        candidates = ["signals_latest.json"] + dated
+        # 日付付きファイルを降順（新しい順）+ latest を先頭に
+        dated = sorted(
+            glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json"),
+            reverse=True
+        )
+        candidates = ["signals_latest.json", "signals_latest_short.json"] + dated
+
+    # 全ファイルをマージ（新しいファイルが優先）
+    result: dict[str, list[dict]] = {}
+    loaded_files = []
+    seen: set[tuple] = set()  # (symbol, strategy) の重複排除
 
     for path in candidates:
         sigs = _try_load(path)
-        if sigs:
-            print(f"[シグナル] {path} を使用 ({len(sigs)} 件)")
-            result: dict[str, list[dict]] = {}
-            for s in sigs:
-                sym = str(s["symbol"])
+        if not sigs:
+            continue
+        loaded_files.append(f"{Path(path).name}({len(sigs)}件)")
+        for s in sigs:
+            sym = str(s["symbol"])
+            strat = s.get("strategy", "")
+            key = (sym, strat)
+            if key not in seen:
+                seen.add(key)
                 result.setdefault(sym, []).append(s)
-            return result
 
-    print("[WARN] シグナルJSONが見つかりません。--json でファイルを指定してください。")
-    return {}
+    if result:
+        print(f"[シグナル] {', '.join(loaded_files)} を統合 (計{len(seen)}件)")
+    else:
+        print("[WARN] シグナルJSONが見つかりません。--json でファイルを指定してください。")
+    return result
 
 
 def _pct(price: float, ref: float) -> str:
