@@ -41,11 +41,30 @@ def _load_signals(json_path: str | None) -> dict[str, list[dict]]:
         candidates = [json_path]
     else:
         # 日付付きファイルを降順（新しい順）+ latest を先頭に
-        dated = sorted(
+        # ロング版: signals_YYYY-MM-DD.json
+        # ショート版: signals_YYYY-MM-DD_short.json
+        dated_long  = sorted(
             glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json"),
             reverse=True
         )
-        candidates = ["signals_latest.json", "signals_latest_short.json"] + dated
+        dated_short = sorted(
+            glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_short.json"),
+            reverse=True
+        )
+        # 同じ日付のlong/shortをペアで並べる（新しい日付が先）
+        dated_pairs: list[str] = []
+        all_dates = sorted(
+            {f.replace("_short", "") for f in dated_long + dated_short},
+            reverse=True
+        )
+        for d in all_dates:
+            base = d  # e.g. "signals_2026-06-25.json"
+            short = d.replace(".json", "_short.json")
+            if base in dated_long:
+                dated_pairs.append(base)
+            if short in dated_short:
+                dated_pairs.append(short)
+        candidates = ["signals_latest.json", "signals_latest_short.json"] + dated_pairs
 
     # 全ファイルをマージ（新しいファイルが優先）
     result: dict[str, list[dict]] = {}
@@ -58,7 +77,8 @@ def _load_signals(json_path: str | None) -> dict[str, list[dict]]:
             continue
         loaded_files.append(f"{Path(path).name}({len(sigs)}件)")
         for s in sigs:
-            sym = str(s["symbol"])
+            # yfinance形式 "8544.T" → kabu形式 "8544" に正規化
+            sym = str(s["symbol"]).upper().removesuffix(".T")
             strat = s.get("strategy", "")
             key = (sym, strat)
             if key not in seen:
@@ -133,7 +153,7 @@ def main():
     has_total  = False
 
     for pos in positions:
-        sym       = str(pos.get("Symbol", ""))
+        sym       = str(pos.get("Symbol", "")).upper().removesuffix(".T")
         name      = pos.get("SymbolName") or pos.get("Name") or sym
         side_code = pos.get("Side", "")          # "1"=売 "2"=買
         is_long   = side_code == "2"
