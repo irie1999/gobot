@@ -5698,7 +5698,18 @@ function switchTbd(id, tab) {{
             df_s = _df_cache[symbol]
             if df_s is None or df_s.empty:
                 return None
-            future = df_s[df_s.index > exit_dt]
+            # タイムゾーン差異を吸収してから比較
+            exit_dt_norm = exit_dt.tz_localize(None) if getattr(exit_dt, "tz", None) else exit_dt
+            idx = df_s.index
+            try:
+                idx_norm = idx.tz_localize(None) if idx.tz is not None else idx
+            except Exception:
+                idx_norm = idx
+            try:
+                mask = idx_norm > exit_dt_norm
+            except Exception:
+                return None
+            future = df_s[mask]
             if future.empty:
                 return None
             return float(future.iloc[0]["open"])
@@ -5707,12 +5718,17 @@ function switchTbd(id, tab) {{
         for t in tc_trades:
             exit_dt = _pd_tc.Timestamp(t["exit_dt"]) if not isinstance(t["exit_dt"], _pd_tc.Timestamp) else t["exit_dt"]
             symbol  = t.get("symbol", "")
-            is_short = t.get("is_short", False) or t.get("entry_type") == "stop_sell"
+            # 方向はorder_stop vs entry_pで判定(ショート=stop > entry)
+            order_stop = float(t.get("order_stop", 0))
+            ep         = float(t.get("entry_p", 0))
+            is_short   = (order_stop > ep) if (order_stop > 0 and ep > 0) else False
             qty     = int(t.get("qty", 100))
-            ep      = float(t.get("entry_p", 0))
             cl_exit = float(t.get("exit_p", 0))  # 現在の引け決済価格
             next_op = _get_next_open(symbol, exit_dt)
-            if next_op is None or cl_exit <= 0:
+            if next_op is None or cl_exit <= 0 or ep <= 0:
+                continue
+            # サニティチェック: next_opが終値の50%〜200%の範囲外なら異常値として除外
+            if not (cl_exit * 0.5 <= next_op <= cl_exit * 2.0):
                 continue
             # 翌日寄り付きで決済した場合のPnL差分
             if is_short:
