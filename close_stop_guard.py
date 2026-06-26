@@ -50,12 +50,19 @@ close は「引けの瞬間の値段で判定」が本質なので、broker に�
   python close_stop_guard.py --use-kabu-pos --execute # kabu 建玉と照合して発注
   python close_stop_guard.py --log other.csv          # 別のログファイルを使う
   python close_stop_guard.py --aggressive             # aggressive ログを対象にする
+
+  ▼ kabu建玉 + signals JSON モード（CSVなし・推奨）
+  python close_stop_guard.py --kabu                   # dry-run
+  python close_stop_guard.py --kabu --execute         # デモ口座に発注
+  python close_stop_guard.py --kabu --execute --prod  # 本番口座に発注
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import glob
+import json
 import sys
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
@@ -65,6 +72,154 @@ import pandas as pd
 from kabu_api import KabuClient, CASH_GENBUTSU, CASH_MARGIN_CLOSE
 
 JST = timezone(timedelta(hours=9))
+
+
+# ────────────────────────────────────────────────────────────
+# signals JSON から stop_p / target_p を読み込む
+# ────────────────────────────────────────────────────────────
+def _load_signals_json(json_path: str | None = None) -> dict[str, list[dict]]:
+    """全シグナルJSONをマージして symbol → [signal, ...] の辞書を返す。
+    シンボルは ".T" サフィックスを除去してkabu形式に正規化する。"""
+
+    def _try_load(path: str) -> list[dict]:
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            sigs = data.get("signals", []) if isinstance(data, dict) else data
+            return [s for s in sigs if s.get("symbol")]
+        except Exception:
+            return []
+
+    if json_path:
+        candidates = [json_path]
+    else:
+        dated_long  = sorted(
+            glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json"),
+            reverse=True
+        )
+        dated_short = sorted(
+            glob.glob("signals_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_short.json"),
+            reverse=True
+        )
+        dated_pairs: list[str] = []
+        all_dates = sorted(
+            {f.replace("_short", "") for f in dated_long + dated_short},
+            reverse=True
+        )
+        for d in all_dates:
+            base  = d
+            short = d.replace(".json", "_short.json")
+            if base  in dated_long:  dated_pairs.append(base)
+            if short in dated_short: dated_pairs.append(short)
+        candidates = ["signals_latest.json", "signals_latest_short.json"] + dated_pairs
+
+    result: dict[str, list[dict]] = {}
+    loaded_files = []
+    seen: set[tuple] = set()
+
+    for path in candidates:
+        sigs = _try_load(path)
+        if not sigs:
+            continue
+        loaded_files.append(f"{Path(path).name}({len(sigs)}件)")
+        for s in sigs:
+            sym   = str(s["symbol"]).upper().removesuffix(".T")
+            strat = s.get("strategy", "")
+            key   = (sym, strat)
+            if key not in seen:
+                seen.add(key)
+                result.setdefault(sym, []).append(s)
+
+    if result:
+        print(f"  [シグナル] {', '.join(loaded_files)} を統合 ({len(seen)}件)")
+    else:
+        print("  [WARN] シグナルJSONが見つかりません")
+    return result
+
+
+def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
+                   fill_price: float, is_short: bool
+                   ) -> tuple[float | None, float | None, str]:
+    """sig_map からシンボルに対応するstop_p/target_pを返す。
+    複数戦略がある場合は fill_price に最も近い order_p を優先。"""
+    candidates = sig_map.get(sym, [])
+    if not candidates:
+        return None, None, ""
+    best = None
+    for s in candidates:
+        op = float(s.get("order_p") or 0)
+        sp = float(s.get("stop_p")  or 0)
+        tp = float(s.get("target_p") or 0)
+        if sp <= 0:
+            continue
+        diff = abs(op - fill_price) / max(op, 1)
+        if best is None or diff < best[3]:
+            best = (sp, tp, s.get("strategy", ""), diff)
+    if best:
+        return best[0], best[1], best[2]
+    return None, None, ""
+
+
+# ────────────────────────────────────────────────────────────
+# kabu建玉 + signals JSON からポジション一覧を構築（--kabu モード）
+# ────────────────────────────────────────────────────────────
+def load_positions_from_kabu(cli: KabuClient, product: int = 2) -> list[dict]:
+    """kabu の実建玉を取得し、signals JSON で stop/target を補完して返す。"""
+    try:
+        raw = cli.get_positions(product=product)
+    except Exception as e:
+        print(f"  ✗ kabu 建玉取得失敗: {e}")
+        return []
+
+    sig_map = _load_signals_json()
+    positions: list[dict] = []
+
+    for kp in raw:
+        sym  = str(kp.get("Symbol", "")).upper().removesuffix(".T")
+        name = (kp.get("SymbolName") or kp.get("Name") or sym)[:16]
+        side_str = str(kp.get("Side", ""))
+        is_short = (side_str == "1")
+        leaves   = int(kp.get("LeavesQty") or kp.get("Qty") or 0)
+        if leaves == 0:
+            continue
+        fill_p = float(kp.get("AveragePrice") or kp.get("Price") or 0)
+        margin_type = int(kp.get("MarginTradeType") or 1)
+        cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
+
+        stop_p, tgt_p, strat = _lookup_signal(sym, sig_map, fill_p, is_short)
+
+        if stop_p is not None:
+            src = "signals_json"
+            print(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]")
+        else:
+            # フォールバック: 既存のシグナル逆引き
+            if fill_p > 0:
+                print(f"  🔍 {sym} {name}: signals JSONに未登録 → シグナル逆引き中...")
+                stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
+            if stop_p is None and fill_p > 0:
+                stop_p = calc_atr_stop(sym, fill_p, is_short, strat or "")
+                src = "atr_estimate"
+                if stop_p:
+                    print(f"  ⚠ {sym} {name}: ATR推定 stop={stop_p:.0f}")
+                else:
+                    print(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
+            else:
+                src = "signal_lookup" if stop_p else "missing"
+
+        positions.append({
+            "symbol":       sym,
+            "name":         name,
+            "strategy":     strat or "?",
+            "stop_price":   stop_p,
+            "target_price": tgt_p,
+            "is_short":     is_short,
+            "qty":          leaves,
+            "fill_price":   fill_p,
+            "fill_date":    "",
+            "cash_margin":  cm,
+            "source":       src,
+        })
+
+    return positions
 
 
 # ────────────────────────────────────────────────────────────
@@ -521,6 +676,10 @@ def main() -> int:
                     help="引け後モード: yfinance 終値で判定し翌日寄成(MOO)で発注する")
     ap.add_argument("--use-kabu-pos", action="store_true",
                     help="kabu の実建玉を取得して CSV ポジションと照合する")
+    ap.add_argument("--kabu", action="store_true",
+                    help="kabu 実建玉 + signals JSON を使用 (CSV 不要・推奨)")
+    ap.add_argument("--product", type=int, default=2,
+                    help="--kabu 時の取得建玉種別: 0=全 1=現物 2=信用 (default:2)")
     args = ap.parse_args()
 
     log_path = args.log or _default_log_path(args.aggressive)
@@ -530,7 +689,6 @@ def main() -> int:
     now = datetime.now(JST)
 
     # 15:30 以降は市場外のため post-close フラグを自動設定
-    # (価格ソースを yfinance 終値に切替える。発注は常に成行。)
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 15, 30
     if not args.post_close:
         after_close = (now.hour, now.minute) >= (MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN)
@@ -539,28 +697,18 @@ def main() -> int:
             args.post_close = True
 
     timing_label = "post-close (yfinance終値)" if args.post_close else "pre-close (現在値)"
+    src_label    = "kabu建玉+signals JSON" if args.kabu else \
+                   ("kabu建玉+CSV" if args.use_kabu_pos else f"CSV: {log_path}")
     print("=" * 65)
     print(f"close 損切りガード  {now:%Y-%m-%d %H:%M JST}")
-    print(f"モード  : {mode_label}")
+    print(f"モード    : {mode_label}")
     print(f"タイミング: {timing_label}")
-    print(f"接続先  : {env_label}  /  ログ: {log_path}")
-    if args.use_kabu_pos:
-        print("建玉照合: kabu 実建玉を優先します (CSV なしでも動作)")
+    print(f"接続先    : {env_label}  /  ソース: {src_label}")
     print("=" * 65)
-
-    # --use-kabu-pos 時は kabu 実建玉を主ソースにするため CSV は任意
-    positions = load_open_positions(log_path)
-    if not positions and not args.use_kabu_pos:
-        print("保有中ポジションなし。終了します。")
-        return 0
-    if positions:
-        print(f"CSV 保有中ポジション: {len(positions)} 件\n")
-    else:
-        print("CSV にポジションなし — kabu 実建玉から取得します\n")
 
     # kabu クライアント
     cli: KabuClient | None = None
-    need_kabu = args.execute or args.use_kabu_pos
+    need_kabu = args.execute or args.use_kabu_pos or args.kabu
     if need_kabu:
         cli = KabuClient(prod=args.prod, dry_run=not args.execute)
         try:
@@ -568,17 +716,37 @@ def main() -> int:
             print(f"kabu 接続成功 ({cli.env_label})\n")
         except Exception as e:
             print(f"✗ kabu 接続失敗: {e}")
-            if args.execute or args.use_kabu_pos:
-                return 1
-            cli = None
+            return 1
 
-    # kabu 建玉との照合
-    if args.use_kabu_pos and cli is not None:
-        positions = reconcile_with_kabu(positions, cli)
+    # ── ポジション取得 ────────────────────────────────────────────────────
+    if args.kabu:
+        # kabu建玉 + signals JSON モード（CSV不要）
+        if cli is None:
+            cli = KabuClient(prod=args.prod, dry_run=True)
+            cli.connect()
+        positions = load_positions_from_kabu(cli, product=args.product)
         if not positions:
-            print("kabu 実建玉なし。終了します。")
+            print("kabu 建玉なし。終了します。")
             return 0
-        print(f"照合後ポジション: {len(positions)} 件\n")
+        print(f"\nkabu 建玉: {len(positions)} 件\n")
+    else:
+        # 従来モード: CSV ベース
+        positions = load_open_positions(log_path)
+        if not positions and not args.use_kabu_pos:
+            print("保有中ポジションなし。終了します。")
+            return 0
+        if positions:
+            print(f"CSV 保有中ポジション: {len(positions)} 件\n")
+        else:
+            print("CSV にポジションなし — kabu 実建玉から取得します\n")
+
+        # kabu 建玉との照合
+        if args.use_kabu_pos and cli is not None:
+            positions = reconcile_with_kabu(positions, cli)
+            if not positions:
+                print("kabu 実建玉なし。終了します。")
+                return 0
+            print(f"照合後ポジション: {len(positions)} 件\n")
 
     # 価格取得の方針
     # post-close: yfinance 終値を使う (kabu 不要)
