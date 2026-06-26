@@ -5716,7 +5716,16 @@ function switchTbd(id, tab) {{
 
         rows_data = []
         for t in tc_trades:
-            exit_dt = _pd_tc.Timestamp(t["exit_dt"]) if not isinstance(t["exit_dt"], _pd_tc.Timestamp) else t["exit_dt"]
+            # exit_d_raw (datetime.date) を優先。なければ exit_dt 文字列をパース
+            _exit_raw = t.get("exit_d_raw")
+            if _exit_raw is not None:
+                exit_dt = _pd_tc.Timestamp(_exit_raw)
+            else:
+                _s = t.get("exit_dt", "")
+                try:
+                    exit_dt = _pd_tc.Timestamp(_s)
+                except Exception:
+                    continue
             symbol  = t.get("symbol", "")
             # 方向はorder_stop vs entry_pで判定(ショート=stop > entry)
             order_stop = float(t.get("order_stop", 0))
@@ -5727,8 +5736,8 @@ function switchTbd(id, tab) {{
             next_op = _get_next_open(symbol, exit_dt)
             if next_op is None or cl_exit <= 0 or ep <= 0:
                 continue
-            # サニティチェック: next_opが終値の50%〜200%の範囲外なら異常値として除外
-            if not (cl_exit * 0.5 <= next_op <= cl_exit * 2.0):
+            # サニティチェック: next_opが終値の80%〜125%の範囲外なら異常値として除外
+            if not (cl_exit * 0.80 <= next_op <= cl_exit * 1.25):
                 continue
             # 翌日寄り付きで決済した場合のPnL差分
             if is_short:
