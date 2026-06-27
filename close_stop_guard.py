@@ -788,15 +788,17 @@ def main() -> int:
                 note = f"あと{remaining}営業日"
             rows.append((tc_date, pos, fd, hold_days, mh, note))
         rows.sort(key=lambda r: r[0])
-        print(f"タイムカット売却予定 (基準日 {now:%Y-%m-%d}, MAX_HOLD超で引け成行MOC)\n")
-        print(f"  {'売却予定日':<12} {'銘柄':<10} {'戦略':<6} {'区分':<5} "
-              f"{'約定日':<11} {'保有':<5} {'期限':<5} 状況")
-        print("  " + "-" * 78)
+        print(f"タイムカット売却予定 (基準日 {now:%Y-%m-%d})")
+        print(f"※ 「売却日」の引け成行(MOC)で自動決済します\n")
+        print(f"  {'売却日(期限)':<14} {'銘柄':<8} {'名前':<16} {'戦略':<6} {'区分':<5} "
+              f"{'約定日':<11} 状況")
+        print("  " + "-" * 82)
         for tc_date, pos, fd, hold_days, mh, note in rows:
-            tcs = "—" if fd == "—" else f"{tc_date:%Y-%m-%d(%a)}"
+            tcs = "約定日不明" if fd == "—" else f"{tc_date:%Y-%m-%d(%a)}"
             side_label = "ショート" if pos["is_short"] else "ロング"
-            print(f"  {tcs:<12} {pos['symbol']:<10} {pos.get('strategy',''):<6} "
-                  f"{side_label:<5} {fd:<11} {str(hold_days):<5} {str(mh):<5} {note}")
+            nm = (pos.get("name", "") or "")[:14]
+            print(f"  {tcs:<14} {pos['symbol']:<8} {nm:<16} {pos.get('strategy',''):<6} "
+                  f"{side_label:<5} {fd:<11} {note}")
         print()
         return 0
 
