@@ -366,8 +366,11 @@ class KabuClient:
 
     def send_buy(self, symbol: int | str, qty: int, price: float | None = None,
                  cash_margin: int = CASH_MARGIN_OPEN,
-                 order_type: str = "market") -> dict:
-        """普通の買い注文 (逆指値ではない通常エントリー)。
+                 order_type: str = "market",
+                 close_positions: list[dict] | None = None,
+                 expire_day: int | None = None,
+                 omit_close_positions: bool = False) -> dict:
+        """買い注文 (新規エントリー or 信用返済の買戻し)。
 
         order_type:
           "market" = 成行 (ザラ場中のみ。時間外は kabu に弾かれる)
@@ -375,8 +378,11 @@ class KabuClient:
           "moo"    = 寄成 (翌寄付きの成行。時間外でも発注できる)
         cash_margin:
           CASH_MARGIN_OPEN(2) = 信用新規 (既定) / CASH_GENBUTSU(1) = 現物
+          CASH_MARGIN_CLOSE(3) = 信用返済(買戻し)。ショート利確/決済に使う
         """
         body = self._base_order(symbol, SIDE_BUY, qty, cash_margin)
+        if expire_day is not None:
+            body["ExpireDay"] = expire_day
         if order_type == "limit":
             if price is None:
                 raise ValueError("order_type='limit' には price が必要です。")
@@ -393,7 +399,23 @@ class KabuClient:
             body["FrontOrderType"] = FOT_MARKET
             body["Price"] = 0
             label = f"成行買い {symbol} x{qty}"
-        kind = "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物"
+
+        # 信用返済(買戻し)の ClosePositions (省略時は API の自動割当て)
+        if cash_margin == CASH_MARGIN_CLOSE and not omit_close_positions:
+            if close_positions is not None:
+                body["ClosePositions"] = close_positions
+            elif self.dry_run:
+                body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
+            else:
+                self.cancel_open_close_orders(symbol, SIDE_BUY)
+                cp = self._build_close_positions(symbol, qty, SIDE_BUY)
+                if not cp:
+                    print(f"  ⚠ {symbol}: 返済対象の売建玉が見つかりません。発注をスキップします。")
+                    return {"Result": -1, "Message": "建玉なし"}
+                body["ClosePositions"] = cp
+
+        kind = ("信用返済(買戻)" if cash_margin == CASH_MARGIN_CLOSE
+                else "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物")
         return self._post_order(body, f"{label} ({kind})")
 
     def send_sell(self, symbol: int | str, qty: int, price: float | None = None,
