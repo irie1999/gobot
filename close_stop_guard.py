@@ -680,6 +680,8 @@ def main() -> int:
                     help="kabu 実建玉 + signals JSON を使用 (CSV 不要・推奨)")
     ap.add_argument("--product", type=int, default=2,
                     help="--kabu 時の取得建玉種別: 0=全 1=現物 2=信用 (default:2)")
+    ap.add_argument("--schedule", action="store_true",
+                    help="各保有のタイムカット売却予定日を一覧表示して終了 (価格取得・発注なし)")
     args = ap.parse_args()
 
     log_path = args.log or _default_log_path(args.aggressive)
@@ -747,6 +749,43 @@ def main() -> int:
                 print("kabu 実建玉なし。終了します。")
                 return 0
             print(f"照合後ポジション: {len(positions)} 件\n")
+
+    # ── --schedule: タイムカット売却予定日の一覧 (価格取得・発注なし) ──
+    if args.schedule:
+        from backtest_limit_entry import default_max_hold as _dmh
+        today_b = pd.Timestamp(now.date())
+        rows = []
+        for pos in positions:
+            strat = pos.get("strategy", "")
+            side_label = "ショート" if pos["is_short"] else "ロング"
+            fd = pos.get("fill_date", "").strip()
+            mh = _dmh(strat)
+            if not fd:
+                rows.append((pd.Timestamp.max, pos, "—", "—", mh, "約定日不明"))
+                continue
+            fb = pd.Timestamp(fd)
+            hold_days = len(pd.bdate_range(fb, today_b)) - 1
+            tc_date = (fb + pd.tseries.offsets.BDay(mh)).normalize()
+            remaining = mh - hold_days
+            if remaining <= 0:
+                note = "★本日以前に売却対象"
+            elif remaining == 1:
+                note = "翌営業日に売却"
+            else:
+                note = f"あと{remaining}営業日"
+            rows.append((tc_date, pos, fd, hold_days, mh, note))
+        rows.sort(key=lambda r: r[0])
+        print(f"タイムカット売却予定 (基準日 {now:%Y-%m-%d}, MAX_HOLD超で引け成行MOC)\n")
+        print(f"  {'売却予定日':<12} {'銘柄':<10} {'戦略':<6} {'区分':<5} "
+              f"{'約定日':<11} {'保有':<5} {'期限':<5} 状況")
+        print("  " + "-" * 78)
+        for tc_date, pos, fd, hold_days, mh, note in rows:
+            tcs = "—" if fd == "—" else f"{tc_date:%Y-%m-%d(%a)}"
+            side_label = "ショート" if pos["is_short"] else "ロング"
+            print(f"  {tcs:<12} {pos['symbol']:<10} {pos.get('strategy',''):<6} "
+                  f"{side_label:<5} {fd:<11} {str(hold_days):<5} {str(mh):<5} {note}")
+        print()
+        return 0
 
     # 価格取得の方針
     # post-close: yfinance 終値を使う (kabu 不要)
