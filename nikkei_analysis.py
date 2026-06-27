@@ -2040,15 +2040,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 function gobotOrder(sym, side, strat, entry, stop, target, qty){
   var lbl = (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
   if(!confirm('\\u3010\\u767a\\u6ce8\\u78ba\\u8a8d\\u3011\\n'+sym+' '+strat+' ('+side+')\\n'+lbl
-      +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\nposition_server(8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
+      +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\n\\u767a\\u6ce8\\u30b5\\u30fc\\u30d0(order_server:8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
       +'\\n\\u5b9f\\u767a\\u6ce8/dry-run\\u30fb\\u30c7\\u30e2/\\u672c\\u756a\\u306f\\u30b5\\u30fc\\u30d0\\u8d77\\u52d5\\u30aa\\u30d7\\u30b7\\u30e7\\u30f3\\u306b\\u5f93\\u3044\\u307e\\u3059\\u3002\\n\\n\\u3088\\u308d\\u3057\\u3044\\u3067\\u3059\\u304b\\uff1f')) return;
-  var body = new URLSearchParams({ajax:'1',symbol:sym,entry:entry,stop:stop,target:target,
-                                  strategy:strat,side:side,qty:qty,return_to:'/signals'});
+  var body = new URLSearchParams({symbol:sym,entry:entry,stop:stop,target:target,
+                                  strategy:strat,side:side,qty:qty});
   fetch('http://127.0.0.1:8765/order',{method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.text();})
     .then(function(t){alert(t);})
-    .catch(function(e){alert('\\u767a\\u6ce8\\u5931\\u6557: position_server(8765)\\u304c\\u8d77\\u52d5\\u3057\\u3066\\u3044\\u308b\\u304b\\u78ba\\u8a8d\\u3057\\u3066\\u304f\\u3060\\u3055\\u3044\\n'+e);});
+    .catch(function(e){alert('\\u767a\\u6ce8\\u5931\\u6557: \\u767a\\u6ce8\\u30b5\\u30fc\\u30d0\\u3092\\u8d77\\u52d5\\u3057\\u3066\\u304f\\u3060\\u3055\\u3044\\n  python order_server.py\\n'+e);});
 }
 </script>
 """
