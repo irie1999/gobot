@@ -34,6 +34,11 @@ HOST = "127.0.0.1"
 PORT = 8765
 TODAY = date.today()
 
+# ── 発注(arm)状態: --execute で実発注 / --prod で本番。既定は dry-run + デモ ──
+ORDER_EXECUTE = False   # True なら kabu に実発注。False なら内容表示のみ(dry-run)
+ORDER_PROD    = False   # True なら本番(18080)。False ならデモ(18081)
+ORDER_MARGIN  = False   # True ならロングも信用新規。False ならロングは現物
+
 # 現在値を1回のページ表示中だけキャッシュ（同じ銘柄を何度も叩かない）
 _price_cache: dict[str, float | None] = {}
 
@@ -324,6 +329,13 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
         for f in SIGNAL_FILES
     )
 
+    # 発注ボタンの arm 状態（確認ダイアログに表示）
+    _env_lbl = "本番(18080)" if ORDER_PROD else "デモ(18081)"
+    if ORDER_EXECUTE:
+        _ORDER_ARM_LABEL = f"⚠ 実発注モード / 接続先: {_env_lbl}"
+    else:
+        _ORDER_ARM_LABEL = f"dry-run（発注内容の確認のみ）/ 接続先: {_env_lbl}"
+
     rows = ""
     for _ri, s in enumerate(signals):
         sym_code = s["symbol"].split(".")[0]
@@ -362,8 +374,11 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
       </div>
       <input name="entry" type="number" step="any" value="{s['order_p']:.0f}"
              style="width:82px;padding:6px;border:1px solid #334155;border-radius:4px;font-size:13px;background:#0f172a;color:#e2e8f0"
-             title="実際の約定値に修正してから登録">
-      <button class="btn btn-add" type="submit">📥 登録</button>
+             title="逆指値トリガー価格 / 登録時は約定値に修正">
+      <button class="btn btn-add" type="submit" formaction="/add">📥 登録</button>
+      <button class="btn btn-order" type="submit" formaction="/order"
+              onclick="return confirm('【発注確認】\\n{html.escape(s['symbol'])} {html.escape(s['strategy'])} {side_badge}\\n逆指値トリガー: {s['order_p']:,.0f}円\\n株数: {qty_val}株\\n\\n{_ORDER_ARM_LABEL}\\n\\nこの内容で発注しますか？')"
+              style="background:#dc2626">🚀 発注</button>
     </form>
   </td>
 </tr>"""
@@ -404,6 +419,10 @@ def render_signals_page(date_str: str = "", message: str = "") -> str:
           cursor:pointer; color:#fff; font-weight:bold; }}
   .btn-primary {{ background:#2d6cdf; }}
   .btn-add {{ background:#16a34a; }}
+  .btn-order {{ background:#dc2626; }}
+  .armbar {{ padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:13px; font-weight:600; }}
+  .arm-live {{ background:#7f1d1d; border:1px solid #ef4444; color:#fecaca; }}
+  .arm-dry  {{ background:#1e293b; border:1px solid #475569; color:#94a3b8; }}
   .back {{ color:#60a5fa; text-decoration:none; font-size:14px; }}
   .back:hover {{ text-decoration:underline; }}
   table {{ width:100%; border-collapse:collapse; background:#1e293b;
@@ -441,6 +460,12 @@ function adjQty(ri, delta) {{
 </script></head>
 <body><div class="wrap">
   <h1>📋 シグナル確認</h1>
+  <div class="armbar {'arm-live' if ORDER_EXECUTE else 'arm-dry'}">
+    🚀 発注ボタン: {'⚠ 実発注モード' if ORDER_EXECUTE else 'dry-run（内容確認のみ）'}
+    ／ 接続先 {'本番(18080)' if ORDER_PROD else 'デモ(18081)'}
+    ／ ロング {'信用新規' if ORDER_MARGIN else '現物'}・ショート信用新規
+    {'' if ORDER_EXECUTE else '　※ 実発注するには position_server.py を --execute で起動'}
+  </div>
   {msg_html}
   <div class="toolbar">
     <a href="/" class="back">← ポジション管理</a>
@@ -866,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/add":
                 msg, return_to = self._handle_add(form)
+            elif path == "/order":
+                msg, return_to = self._handle_order(form)
             elif path == "/close":
                 msg, return_to = self._handle_close(form)
             elif path == "/update":
@@ -875,6 +902,55 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             msg, return_to = f"エラー: {e}", "/"
         self._redirect(msg, to=return_to)
+
+    def _handle_order(self, form) -> tuple[str, str]:
+        """シグナルの内容で kabu に逆指値エントリーを発注する。
+        ロング = 逆指値買い(以上で発動) / ショート = 逆指値売り(以下で発動・信用新規)。
+        ORDER_EXECUTE=False のときは dry-run（発注内容を表示するだけ）。"""
+        return_to = form.get("return_to", "/signals")
+        symbol = form["symbol"].split(".")[0].strip()
+        entry  = _f(form.get("entry"))    # = 逆指値トリガー価格
+        qty    = int(_f(form.get("qty")) or 100)
+        side   = "short" if (form.get("side", "long") == "short") else "long"
+        strat  = (form.get("strategy") or "").upper()
+
+        if not symbol or entry <= 0 or qty <= 0:
+            return "発注失敗: 銘柄・逆指値・株数が不正です", return_to
+
+        # 現物(1) / 信用新規(2)。ショートは必ず信用新規。
+        cash_margin = 2 if (side == "short" or ORDER_MARGIN) else 1
+
+        try:
+            from kabu_api import KabuClient
+            cli = KabuClient(prod=ORDER_PROD, dry_run=not ORDER_EXECUTE)
+            if ORDER_EXECUTE:           # dry-run は接続不要（内容プレビューのみ）
+                cli.connect()
+        except Exception as e:
+            return f"発注失敗: kabu 接続エラー ({e})", return_to
+
+        try:
+            if side == "short":
+                res = cli.send_stop_sell(symbol, qty=qty, trigger_price=entry,
+                                         cash_margin=cash_margin)
+                dir_label = f"逆指値売り(信用新規) @≤{entry:,.0f}"
+            else:
+                res = cli.send_stop_buy(symbol, qty=qty, trigger_price=entry,
+                                        cash_margin=cash_margin)
+                kind = "信用新規" if cash_margin == 2 else "現物"
+                dir_label = f"逆指値買い({kind}) @≥{entry:,.0f}"
+        except Exception as e:
+            return f"発注失敗: {symbol} ({e})", return_to
+
+        env  = "本番" if ORDER_PROD else "デモ"
+        if not ORDER_EXECUTE:
+            return (f"🧪 dry-run: {symbol} {strat} {dir_label} x{qty}株 "
+                    f"({env}) — 実発注は --execute で起動", return_to)
+        ok = (res.get("Result") == 0) or res.get("_dry_run")
+        if ok:
+            oid = res.get("OrderId", "")
+            return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
+                    f"({env}口座) OrderId={oid}", return_to)
+        return (f"⚠ 発注応答エラー: {symbol} {res}", return_to)
 
     def _handle_add(self, form) -> tuple[str, str]:
         return_to = form.get("return_to", "/")
@@ -1007,9 +1083,26 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    import argparse
+    global ORDER_EXECUTE, ORDER_PROD, ORDER_MARGIN
+    ap = argparse.ArgumentParser(description="ポジション管理 + シグナル発注 Web UI")
+    ap.add_argument("--execute", action="store_true",
+                    help="🚀発注ボタンで kabu に実発注する (未指定なら dry-run)")
+    ap.add_argument("--prod", action="store_true",
+                    help="本番口座(18080)に接続 (未指定ならデモ18081)")
+    ap.add_argument("--margin", action="store_true",
+                    help="ロングも信用新規で発注 (未指定なら現物)")
+    args = ap.parse_args()
+    ORDER_EXECUTE = args.execute
+    ORDER_PROD    = args.prod
+    ORDER_MARGIN  = args.margin
+
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}"
     print(f"📊 ポジション管理 Web UI を起動しました → {url}")
+    _arm = "⚠実発注" if ORDER_EXECUTE else "dry-run"
+    _env = "本番(18080)" if ORDER_PROD else "デモ(18081)"
+    print(f"   🚀発注ボタン: {_arm} / 接続先 {_env} / ロング{'信用' if ORDER_MARGIN else '現物'}")
     print("   停止するには Ctrl+C")
     from _open_html import open_html
     threading.Timer(0.8, lambda: open_html(url)).start()
