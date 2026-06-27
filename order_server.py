@@ -57,16 +57,34 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     except Exception as e:
         return f"発注失敗: kabu 接続エラー ({e})"
 
+    # ── トリガー価格の自動調整 (kabu Code 100217 回避) ──
+    # 逆指値買いはトリガーが現在値より上、逆指値売りは現在値より下でないと
+    # 「即約定になる」と弾かれる。現値を取得し、必要なら現値±1ティックに調整する。
+    adj_note = ""
+    if EXECUTE:
+        cur = cli.get_current_price(symbol)
+        if cur and cur > 0:
+            from backtest_limit_entry import tick_size, round_to_tick
+            tick = tick_size(cur)
+            if side == "long" and entry <= cur:
+                new = round_to_tick(cur + tick)
+                adj_note = f" ※現値{cur:,.0f}≧逆指値→{new:,.0f}に引上げ"
+                entry = new
+            elif side == "short" and entry >= cur:
+                new = round_to_tick(cur - tick)
+                adj_note = f" ※現値{cur:,.0f}≦逆指値→{new:,.0f}に引下げ"
+                entry = new
+
     try:
         if side == "short":
             res = cli.send_stop_sell(symbol, qty=qty, trigger_price=entry,
                                      cash_margin=cash_margin)
-            dir_label = f"逆指値売り(信用新規) @≤{entry:,.0f}"
+            dir_label = f"逆指値売り(信用新規) @≤{entry:,.0f}{adj_note}"
         else:
             res = cli.send_stop_buy(symbol, qty=qty, trigger_price=entry,
                                     cash_margin=cash_margin)
             kind = "信用新規" if cash_margin == 2 else "現物"
-            dir_label = f"逆指値買い({kind}) @≥{entry:,.0f}"
+            dir_label = f"逆指値買い({kind}) @≥{entry:,.0f}{adj_note}"
     except Exception as e:
         return f"発注失敗: {symbol} ({e})"
 
