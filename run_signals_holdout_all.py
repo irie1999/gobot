@@ -101,7 +101,41 @@ _pre.add_argument("--oos-days",  type=int, default=365,
                   help="OOS検証期間（日数）. デフォルト365日")
 _pre.add_argument("--max-holds", type=str, default=None,
                   help="比較する最大保有日数をカンマ区切りで指定 (例: 7,15,20). --bothと組み合わせて使用")
+_pre.add_argument("--serve", action="store_true",
+                  help="レポート生成後に発注サーバ(order_server.py)を起動する (既定dry-run)")
+_pre.add_argument("--serve-execute", action="store_true",
+                  help="--serve 時に実発注で起動する")
+_pre.add_argument("--serve-prod", action="store_true",
+                  help="--serve 時に本番口座(18080)で起動する")
+_pre.add_argument("--serve-margin", action="store_true",
+                  help="--serve 時にロングも信用新規で起動する")
 _args, _ = _pre.parse_known_args()
+
+
+def _maybe_serve_orders():
+    """--serve 指定時、レポート生成後に発注サーバを前面で起動する。
+    Ctrl+C で停止するまでブロックする。"""
+    if not getattr(_args, "serve", False):
+        return
+    import subprocess as _sp2
+    from pathlib import Path as _P2
+    _srv = _P2(__file__).resolve().parent / "order_server.py"
+    _cmd = [sys.executable, str(_srv)]
+    if _args.serve_execute:
+        _cmd.append("--execute")
+    if _args.serve_prod:
+        _cmd.append("--prod")
+    if _args.serve_margin:
+        _cmd.append("--margin")
+    print("\n" + "=" * 65)
+    print("発注サーバを起動します（レポートの🚀発注ボタンの送信先）")
+    print("  " + " ".join(_cmd))
+    print("  停止するには Ctrl+C")
+    print("=" * 65)
+    try:
+        _sp2.run(_cmd)
+    except KeyboardInterrupt:
+        pass
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
 if _args.both and not _args.short:
@@ -115,6 +149,7 @@ if _args.both and not _args.short:
         if not _args.no_browser:
             from _open_html import open_html
             open_html(_bout.resolve())
+        _maybe_serve_orders()
         sys.exit(0)
 
     # 株価範囲リストを構築
@@ -128,7 +163,8 @@ if _args.both and not _args.short:
     # --both / --short / --no-browser / --price-ranges / --output-suffix は渡さず、
     # --max-holds / --force はサブプロセスに伝播させる
     _base_cargs = [a for a in sys.argv[1:]
-                   if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix")
+                   if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix",
+                                "--serve", "--serve-execute", "--serve-prod", "--serve-margin")
                    and not a.startswith("--price-ranges=")
                    and not a.startswith("--output-suffix=")]
     # --max-price も除去（後で各ループで付け直す）
@@ -278,6 +314,7 @@ function switchPr(pr) {{
     if not _args.no_browser:
         from _open_html import open_html
         open_html(_bout.resolve())
+    _maybe_serve_orders()
     sys.exit(0)
 
 # ── ロング/ショートの戦略セット ──────────────────────────────────────────────
