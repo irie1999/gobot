@@ -18,7 +18,7 @@ if not defined PYEXE (
   where python >nul 2>&1 && set "PYEXE=python"
 )
 if not defined PYEXE (
-  echo [ERROR] Python が見つかりません。run_close_guard.bat の PYEXE にフルパスを設定してください。
+  echo [ERROR] Python not found. Set PYEXE full path in run_close_guard.bat
   goto :hold
 )
 
@@ -28,7 +28,6 @@ rem ※本番口座に実発注します。テストしたい時は末尾の --e
 :hold
 echo.
 echo ============================================================
-echo  実行が完了しました(上の内容を確認してください)。
-echo  このウィンドウを閉じるには何かキーを押してください。
+echo  DONE. Check the output above. Press any key to close.
 echo ============================================================
 pause >nul
