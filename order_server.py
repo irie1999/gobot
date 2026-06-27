@@ -27,9 +27,9 @@ from urllib.parse import parse_qs, urlparse
 HOST = "127.0.0.1"
 PORT = 8765
 
-EXECUTE = False   # True なら実発注。False なら dry-run (接続なし・内容のみ)
-PROD    = False   # True なら本番(18080)。False ならデモ(18081)
-MARGIN  = False   # True ならロングも信用新規。False ならロングは現物
+EXECUTE  = False   # True なら実発注。False なら dry-run (接続なし・内容のみ)
+PROD     = False   # True なら本番(18080)。False ならデモ(18081)
+GENBUTSU = False   # True ならロングを現物で発注。False(既定) ならロングも信用新規
 
 
 def _f(v, default=0.0):
@@ -47,7 +47,8 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     if not symbol or entry <= 0 or qty <= 0:
         return "発注失敗: 銘柄・逆指値・株数が不正です"
 
-    cash_margin = 2 if (side == "short" or MARGIN) else 1  # 現物1 / 信用新規2
+    # 既定は信用新規(2)。ロングで --genbutsu 指定時のみ現物(1)。ショートは常に信用。
+    cash_margin = 1 if (side == "long" and GENBUTSU) else 2
 
     try:
         from kabu_api import KabuClient
@@ -125,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
             arm = "⚠実発注" if EXECUTE else "dry-run"
             env = "本番(18080)" if PROD else "デモ(18081)"
             self._text(f"order_server 稼働中 / {arm} / 接続先 {env} / "
-                       f"ロング{'信用' if MARGIN else '現物'}")
+                       f"ロング{'現物' if GENBUTSU else '信用新規'}")
         else:
             self._text("404", 404)
 
@@ -154,24 +155,24 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global EXECUTE, PROD, MARGIN, PORT
+    global EXECUTE, PROD, GENBUTSU, PORT
     ap = argparse.ArgumentParser(description="シグナルレポート発注専用サーバ")
     ap.add_argument("--execute", action="store_true",
                     help="kabu に実発注する (未指定なら dry-run)")
     ap.add_argument("--prod", action="store_true",
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
-    ap.add_argument("--margin", action="store_true",
-                    help="ロングも信用新規で発注 (未指定なら現物)")
+    ap.add_argument("--genbutsu", action="store_true",
+                    help="ロングを現物で発注 (未指定なら信用新規)")
     ap.add_argument("--port", type=int, default=PORT,
                     help=f"待受ポート (既定 {PORT})")
     args = ap.parse_args()
-    EXECUTE, PROD, MARGIN, PORT = args.execute, args.prod, args.margin, args.port
+    EXECUTE, PROD, GENBUTSU, PORT = args.execute, args.prod, args.genbutsu, args.port
 
     arm = "⚠実発注" if EXECUTE else "dry-run (接続なし・内容のみ)"
     env = "本番(18080)" if PROD else "デモ(18081)"
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"🚀 発注サーバを起動しました → http://{HOST}:{PORT}/order")
-    print(f"   モード: {arm} / 接続先 {env} / ロング{'信用新規' if MARGIN else '現物'}")
+    print(f"   モード: {arm} / 接続先 {env} / ロング{'現物' if GENBUTSU else '信用新規'}")
     print(f"   レポートの🚀発注ボタンがここに発注リクエストを送ります")
     print(f"   停止するには Ctrl+C")
     try:

@@ -107,8 +107,8 @@ _pre.add_argument("--serve-execute", action="store_true",
                   help="--serve 時に実発注で起動する")
 _pre.add_argument("--serve-prod", action="store_true",
                   help="--serve 時に本番口座(18080)で起動する")
-_pre.add_argument("--serve-margin", action="store_true",
-                  help="--serve 時にロングも信用新規で起動する")
+_pre.add_argument("--serve-genbutsu", action="store_true",
+                  help="--serve 時にロングを現物で起動する (未指定なら信用新規)")
 _args, _ = _pre.parse_known_args()
 
 
@@ -125,8 +125,8 @@ def _maybe_serve_orders():
         _cmd.append("--execute")
     if _args.serve_prod:
         _cmd.append("--prod")
-    if _args.serve_margin:
-        _cmd.append("--margin")
+    if _args.serve_genbutsu:
+        _cmd.append("--genbutsu")
     print("\n" + "=" * 65)
     print("発注サーバを起動します（レポートの🚀発注ボタンの送信先）")
     print("  " + " ".join(_cmd))
@@ -164,7 +164,7 @@ if _args.both and not _args.short:
     # --max-holds / --force はサブプロセスに伝播させる
     _base_cargs = [a for a in sys.argv[1:]
                    if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix",
-                                "--serve", "--serve-execute", "--serve-prod", "--serve-margin")
+                                "--serve", "--serve-execute", "--serve-prod", "--serve-genbutsu")
                    and not a.startswith("--price-ranges=")
                    and not a.startswith("--output-suffix=")]
     # --max-price も除去（後で各ループで付け直す）
