@@ -138,12 +138,12 @@ def _load_signals_json(json_path: str | None = None) -> dict[str, list[dict]]:
 
 def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
                    fill_price: float, is_short: bool
-                   ) -> tuple[float | None, float | None, str]:
-    """sig_map からシンボルに対応するstop_p/target_pを返す。
+                   ) -> tuple[float | None, float | None, str, str]:
+    """sig_map からシンボルに対応するstop_p/target_p/signal_dateを返す。
     複数戦略がある場合は fill_price に最も近い order_p を優先。"""
     candidates = sig_map.get(sym, [])
     if not candidates:
-        return None, None, ""
+        return None, None, "", ""
     best = None
     for s in candidates:
         op = float(s.get("order_p") or 0)
@@ -152,11 +152,22 @@ def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
         if sp <= 0:
             continue
         diff = abs(op - fill_price) / max(op, 1)
-        if best is None or diff < best[3]:
-            best = (sp, tp, s.get("strategy", ""), diff)
+        if best is None or diff < best[4]:
+            best = (sp, tp, s.get("strategy", ""), str(s.get("signal_date", "")), diff)
     if best:
-        return best[0], best[1], best[2]
-    return None, None, ""
+        return best[0], best[1], best[2], best[3]
+    return None, None, "", ""
+
+
+def _fill_date_from_signal(signal_date: str) -> str:
+    """シグナル日(終値判定)の翌営業日 = 逆指値約定日 を返す。空なら空文字。"""
+    if not signal_date:
+        return ""
+    try:
+        return (pd.Timestamp(signal_date)
+                + pd.tseries.offsets.BDay(1)).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 
 
 # ────────────────────────────────────────────────────────────
@@ -185,11 +196,13 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2) -> list[dict]:
         margin_type = int(kp.get("MarginTradeType") or 1)
         cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
 
-        stop_p, tgt_p, strat = _lookup_signal(sym, sig_map, fill_p, is_short)
+        stop_p, tgt_p, strat, sig_date = _lookup_signal(sym, sig_map, fill_p, is_short)
+        fill_date = _fill_date_from_signal(sig_date)
 
         if stop_p is not None:
             src = "signals_json"
-            print(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]")
+            _fd_note = f" 約定日={fill_date}" if fill_date else " 約定日不明"
+            print(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]{_fd_note}")
         else:
             # フォールバック: 既存のシグナル逆引き
             if fill_p > 0:
@@ -214,7 +227,7 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2) -> list[dict]:
             "is_short":     is_short,
             "qty":          leaves,
             "fill_price":   fill_p,
-            "fill_date":    "",
+            "fill_date":    fill_date,
             "cash_margin":  cm,
             "source":       src,
         })
