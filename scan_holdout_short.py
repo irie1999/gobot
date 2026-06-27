@@ -20,7 +20,8 @@
   python scan_holdout_short.py --holdouts 30 90 180  # 設定を絞る
 
 出力:
-  walkforward_results/walkforward_<STRATEGY>_ho<N>_<date>.csv  (各設定ごと)
+  walkforward_results/walkforward_<STRATEGY>_holdout<N>d_<date>-7d.csv
+  (-7d = MAX_HOLD。スキャン後に自動でタグ付けされ、ホールドアウト7日用として区別できる)
 
 スキャン後の流れ:
   python build_watchlist.py --budget 600000          # WATCHLIST 提案生成
@@ -28,11 +29,36 @@
 """
 
 import argparse
+import re
 import subprocess
 import sys
+from pathlib import Path
+
+import backtest_limit_entry as _bte
 
 SHORT_FAMILIES = ["short", "short_brk"]
+SHORT_STRATEGIES = ["A7_S", "MACD_S", "RSI2_S", "DON_S", "MOM_S", "GAP_S"]
 HOLDOUTS = [30, 60, 90, 120, 150, 180]
+
+
+def _tag_max_hold(wf_dir: Path) -> int:
+    """生成済みショート holdout CSV に保有期限サフィックス (-7d 等) を付ける。
+
+    scan_walkforward.py は ..._holdout{N}d_{date}.csv で出力し MAX_HOLD を
+    名前に残さないため、ここで -{MAX_HOLD}d を追記してホールドアウト7日用
+    として区別できるようにする。既に -Nd が付いているものはスキップ。
+    """
+    mh = _bte.MAX_HOLD
+    renamed = 0
+    for k in SHORT_STRATEGIES:
+        for p in wf_dir.glob(f"walkforward_{k}_holdout*d_*.csv"):
+            if re.search(r"-\d+d$", p.stem):
+                continue  # 既にサフィックス済み
+            dst = p.with_name(f"{p.stem}-{mh}d.csv")
+            p.rename(dst)
+            print(f"  rename: {p.name} -> {dst.name}")
+            renamed += 1
+    return renamed
 
 
 def main() -> None:
@@ -69,7 +95,8 @@ def main() -> None:
             if rc != 0:
                 print(f"  ✘ 終了コード {rc} で失敗。続行します。")
 
-    print("\n=== 全スキャン完了 ===")
+    n_tag = _tag_max_hold(Path("walkforward_results"))
+    print(f"\n=== 全スキャン完了  (-{_bte.MAX_HOLD}d を {n_tag} 本にタグ付け) ===")
     print("次の手順:")
     print("  python build_watchlist.py --budget 600000")
     print("  python verify_watchlist.py")
