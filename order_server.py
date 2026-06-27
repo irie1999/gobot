@@ -21,15 +21,24 @@ position_server.py を経由せず、これ単体で kabu に逆指値エント�
 """
 
 import argparse
+import threading
+import time as _time
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 HOST = "127.0.0.1"
 PORT = 8765
+JST = timezone(timedelta(hours=9))
 
 EXECUTE  = False   # True なら実発注。False なら dry-run (接続なし・内容のみ)
 PROD     = False   # True なら本番(18080)。False ならデモ(18081)
 GENBUTSU = False   # True ならロングを現物で発注。False(既定) ならロングも信用新規
+
+# ── 約定監視 (エントリー約定 → 利確指値を即発注) ──────────────────────
+POLL_SEC = 10                    # 約定チェック間隔(秒)
+_pending = []                    # 約定待ち: [{symbol, side, qty, target, strategy}]
+_pending_lock = threading.Lock()
 
 
 def _f(v, default=0.0):
@@ -40,8 +49,9 @@ def _f(v, default=0.0):
 
 
 def place_order(symbol: str, entry: float, qty: int, side: str,
-                strat: str = "") -> str:
-    """逆指値エントリーを発注し、結果メッセージを返す。"""
+                strat: str = "", target: float = 0.0) -> str:
+    """逆指値エントリーを発注し、結果メッセージを返す。
+    target>0 かつ実発注なら、約定監視に登録して約定後に利確指値を自動発注する。"""
     symbol = (symbol or "").split(".")[0].strip()
     side = "short" if side == "short" else "long"
     if not symbol or entry <= 0 or qty <= 0:
@@ -95,9 +105,112 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 f"({env}) — 実発注は --execute で起動")
     ok = (res.get("Result") == 0) or res.get("_dry_run")
     if ok:
+        watch_note = ""
+        if EXECUTE and target and target > 0:
+            with _pending_lock:
+                _pending.append({"symbol": symbol, "side": side, "qty": qty,
+                                 "target": float(target), "strategy": strat})
+            watch_note = f" / 約定したら利確@{float(target):,.0f}を自動発注(監視中)"
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
-                f"({env}口座) OrderId={res.get('OrderId','')}")
+                f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
     return f"⚠ 発注応答エラー: {symbol} {res}"
+
+
+# ── 約定監視ワーカー ──────────────────────────────────────────────
+def _watch_build_client():
+    from kabu_api import KabuClient
+    c = KabuClient(prod=PROD, dry_run=not EXECUTE)
+    if EXECUTE:
+        c.connect()
+    return c
+
+
+def _is_filled(cli, symbol: str, side: str) -> bool:
+    """建玉が出来ているか(=約定)。long→買建(Side2)/short→売建(Side1)。"""
+    try:
+        positions = cli.get_positions(product=0)
+    except Exception:
+        return False
+    want = "2" if side == "long" else "1"
+    for p in positions:
+        if str(p.get("Symbol", "")).split(".")[0] != symbol:
+            continue
+        if str(p.get("Side", "")) == want and int(p.get("LeavesQty") or 0) > 0:
+            return True
+    return False
+
+
+def _has_active_close_order(cli, symbol: str, side: str) -> bool:
+    """利確(決済)注文が既に出ているか。long利確=売(1)/short利確=買戻(2)。"""
+    try:
+        orders = cli.get_orders()
+    except Exception:
+        return False
+    want = "1" if side == "long" else "2"
+    ACTIVE = {1, 2, 3, 4, 5}
+    for o in orders:
+        if str(o.get("Symbol", "")).split(".")[0] != symbol:
+            continue
+        if str(o.get("Side", "")) == want and \
+           int(o.get("OrderState") or o.get("State") or 0) in ACTIVE:
+            return True
+    return False
+
+
+def _place_target_now(cli, p: dict) -> str:
+    """約定後の利確指値を発注。重複は出さない。"""
+    symbol, side, qty, target, strat = (p["symbol"], p["side"], p["qty"],
+                                        p["target"], p["strategy"])
+    if _has_active_close_order(cli, symbol, side):
+        return "exists"
+    import pandas as pd
+    from backtest_limit_entry import default_max_hold
+    mh = default_max_hold(strat)
+    today = pd.Timestamp(datetime.now(JST).date())
+    try:
+        expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
+    except Exception:
+        expire = 0
+    try:
+        if side == "short":
+            res = cli.send_buy(symbol, qty=qty, price=target, order_type="limit",
+                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
+        else:
+            cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
+            res = cli.send_sell(symbol, qty=qty, price=target, order_type="limit",
+                                cash_margin=cm, expire_day=expire)
+    except Exception as e:
+        return f"fail({e})"
+    return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
+
+
+def _watch_loop():
+    """約定待ちを定期チェックし、約定したら利確指値を即発注する。"""
+    cli = None
+    while True:
+        _time.sleep(POLL_SEC)
+        with _pending_lock:
+            items = list(_pending)
+        if not items:
+            continue
+        if cli is None:
+            try:
+                cli = _watch_build_client()
+            except Exception as e:
+                print(f"  ⚠ 監視用kabu接続失敗(次回再試行): {e}")
+                continue
+        for p in items:
+            try:
+                if _is_filled(cli, p["symbol"], p["side"]):
+                    st = _place_target_now(cli, p)
+                    print(f"  🎯 約定検知→利確 {p['symbol']} {p['side']} "
+                          f"@{p['target']:,.0f} : {st}")
+                    if st in ("placed", "exists"):
+                        with _pending_lock:
+                            if p in _pending:
+                                _pending.remove(p)
+            except Exception as e:
+                print(f"  ⚠ 監視エラー {p.get('symbol')}: {e}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -145,6 +258,7 @@ class Handler(BaseHTTPRequestHandler):
                 qty=int(_f(form.get("qty")) or 100),
                 side=form.get("side", "long"),
                 strat=(form.get("strategy") or "").upper(),
+                target=_f(form.get("target")),
             )
         except Exception as e:
             msg = f"エラー: {e}"
@@ -174,6 +288,11 @@ def main():
     print(f"🚀 発注サーバを起動しました → http://{HOST}:{PORT}/order")
     print(f"   モード: {arm} / 接続先 {env} / ロング{'現物' if GENBUTSU else '信用新規'}")
     print(f"   レポートの🚀発注ボタンがここに発注リクエストを送ります")
+    if EXECUTE:
+        threading.Thread(target=_watch_loop, daemon=True).start()
+        print(f"   約定監視: ON ({POLL_SEC}秒間隔。約定したら利確指値を即発注)")
+    else:
+        print(f"   約定監視: OFF (dry-runのため。--execute で有効)")
     print(f"   停止するには Ctrl+C")
     try:
         server.serve_forever()
