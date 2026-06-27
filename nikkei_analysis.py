@@ -1993,7 +1993,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         _sig_is_short = str(s["strategy"]).upper().endswith("_S")
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
-        # 📥 登録ボタン: position_server (8765) のフォームを自動入力
+        # 📥 登録 / 🚀 発注ボタン: position_server (8765) と連携
         _side   = "short" if str(s["strategy"]).upper().endswith("_S") else "long"
         _scode  = str(s["symbol"]).split(".")[0]
         _reg_url = (f"http://127.0.0.1:8765/?prefill=1"
@@ -2004,10 +2004,18 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     f"&strategy={s['strategy']}"
                     f"&qty={qty}"
                     f"&side={_side}")
-        _reg_btn = (f'<a href="{_reg_url}" target="_blank" '
-                    f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
-                    f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
-                    f'white-space:nowrap">📥 登録</a>')
+        # 🚀発注: このタブから fetch で /order に発注リクエスト（確認ダイアログ付き）
+        _ord_btn = (f"<button type=\"button\" "
+                    f"onclick=\"gobotOrder('{_scode}','{_side}','{s['strategy']}',"
+                    f"{s['order_p']:.0f},{s['stop_p']:.0f},{s['target_p']:.0f},{qty})\" "
+                    f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
+                    f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
+                    f"white-space:nowrap;margin-bottom:3px\">🚀 発注</button>")
+        _reg_link = (f'<a href="{_reg_url}" target="_blank" '
+                     f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
+                     f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
+                     f'white-space:nowrap">📥 登録</a>')
+        _reg_btn = f'<div style="display:flex;flex-direction:column;gap:2px;align-items:center">{_ord_btn}{_reg_link}</div>'
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -2027,7 +2035,24 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 </tr>"""
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
-    return score_section + f"""
+    _order_js = """
+<script>
+function gobotOrder(sym, side, strat, entry, stop, target, qty){
+  var lbl = (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
+  if(!confirm('\\u3010\\u767a\\u6ce8\\u78ba\\u8a8d\\u3011\\n'+sym+' '+strat+' ('+side+')\\n'+lbl
+      +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\nposition_server(8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
+      +'\\n\\u5b9f\\u767a\\u6ce8/dry-run\\u30fb\\u30c7\\u30e2/\\u672c\\u756a\\u306f\\u30b5\\u30fc\\u30d0\\u8d77\\u52d5\\u30aa\\u30d7\\u30b7\\u30e7\\u30f3\\u306b\\u5f93\\u3044\\u307e\\u3059\\u3002\\n\\n\\u3088\\u308d\\u3057\\u3044\\u3067\\u3059\\u304b\\uff1f')) return;
+  var body = new URLSearchParams({ajax:'1',symbol:sym,entry:entry,stop:stop,target:target,
+                                  strategy:strat,side:side,qty:qty,return_to:'/signals'});
+  fetch('http://127.0.0.1:8765/order',{method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){return r.text();})
+    .then(function(t){alert(t);})
+    .catch(function(e){alert('\\u767a\\u6ce8\\u5931\\u6557: position_server(8765)\\u304c\\u8d77\\u52d5\\u3057\\u3066\\u3044\\u308b\\u304b\\u78ba\\u8a8d\\u3057\\u3066\\u304f\\u3060\\u3055\\u3044\\n'+e);});
+}
+</script>
+"""
+    return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが高い順に並んでいます。

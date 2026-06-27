@@ -846,6 +846,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", to + sep + "msg=" + quote(msg))
         self.end_headers()
 
+    def _send_text(self, msg: str, code: int = 200):
+        """AJAX(fetch)用の素のテキスト応答。レポート(file://)からの発注で使う。"""
+        data = msg.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")  # file:// からのfetch許可
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_OPTIONS(self):
+        # CORS プリフライト（念のため対応）
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
@@ -901,7 +919,11 @@ class Handler(BaseHTTPRequestHandler):
                 msg, return_to = "不明な操作", "/"
         except Exception as e:
             msg, return_to = f"エラー: {e}", "/"
-        self._redirect(msg, to=return_to)
+        # レポート(file://)等からの fetch は ajax=1 を付ける → リダイレクトせず本文を返す
+        if form.get("ajax") == "1":
+            self._send_text(msg)
+        else:
+            self._redirect(msg, to=return_to)
 
     def _handle_order(self, form) -> tuple[str, str]:
         """シグナルの内容で kabu に逆指値エントリーを発注する。
