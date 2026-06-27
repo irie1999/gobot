@@ -159,6 +159,62 @@ def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
     return None, None, "", ""
 
 
+def _target_already_set(sym: str, is_short: bool, open_orders: list[dict]) -> bool:
+    """指定銘柄に利確指値(未約定)が既に出ているか。ロング=売り(1)/ショート=買戻し(2)。"""
+    want_side = "2" if is_short else "1"
+    ACTIVE = {1, 2, 3, 4, 5}
+    for o in open_orders:
+        if str(o.get("Symbol", "")).strip() != str(sym).strip():
+            continue
+        if str(o.get("Side", "")) != want_side:
+            continue
+        if int(o.get("OrderState") or o.get("State") or 0) in ACTIVE:
+            return True
+    return False
+
+
+def _place_target_order(cli, pos: dict, open_orders: list[dict]) -> tuple[str, str]:
+    """保有1件に利確指値を発注する。重複は出さない。
+    返り値: (status, message)  status = placed / exists / skip / fail"""
+    sym   = str(pos["symbol"]).split(".")[0]   # kabuは銘柄コードのみ
+    tp    = pos.get("target_price")
+    qty   = pos.get("qty", 100)
+    cm    = pos.get("cash_margin", CASH_GENBUTSU)
+    strat = pos.get("strategy", "")
+    name  = pos.get("name", "")
+    side_label = "ショート" if pos["is_short"] else "ロング"
+    if not tp or tp <= 0:
+        return "skip", f"  ? {sym} {name}: 目標価格なし → スキップ"
+    if _target_already_set(sym, pos["is_short"], open_orders):
+        return "exists", f"  ↺ {sym} {name} [{strat}/{side_label}]: 既に利確注文あり → スキップ"
+    # 有効期限 = タイムカット日 (YYYYMMDD)。約定日不明なら当日(0)。
+    fd = pos.get("fill_date", "").strip()
+    expire_day = 0
+    if fd:
+        try:
+            from backtest_limit_entry import default_max_hold as _dmh
+            expire_day = int((pd.Timestamp(fd) + pd.tseries.offsets.BDay(_dmh(strat)))
+                             .strftime("%Y%m%d"))
+        except Exception:
+            expire_day = 0
+    try:
+        if pos["is_short"]:
+            res = cli.send_buy(sym, qty=qty, price=tp, order_type="limit",
+                               cash_margin=CASH_MARGIN_CLOSE, expire_day=expire_day)
+            lbl = f"利確 指値買戻し @{tp:,.0f}"
+        else:
+            res = cli.send_sell(sym, qty=qty, price=tp, order_type="limit",
+                                cash_margin=cm, expire_day=expire_day)
+            lbl = f"利確 指値売り @{tp:,.0f}"
+    except Exception as e:
+        return "fail", f"  ⚠ {sym} {name}: 利確発注失敗 ({e})"
+    ok = (res.get("Result") == 0) or res.get("_dry_run")
+    exp_lbl = f"期限{expire_day}" if expire_day else "期限当日"
+    if ok:
+        return "placed", f"  🎯発注 {sym} {name} [{strat}/{side_label}] {lbl} x{qty} ({exp_lbl})"
+    return "fail", f"  ⚠失敗 {sym} {name}: 応答 {res}"
+
+
 def _fill_date_from_signal(signal_date: str) -> str:
     """シグナル日(終値判定)の翌営業日 = 逆指値約定日 を返す。空なら空文字。"""
     if not signal_date:
@@ -698,6 +754,9 @@ def main() -> int:
     ap.add_argument("--targets", action="store_true",
                     help="各保有に利確指値を発注 (ロング=指値売り/ショート=指値買戻し)。"
                          "リレー未対応のためエントリー約定後に日次で置く運用")
+    ap.add_argument("--with-targets", action="store_true",
+                    help="損切り/タイムカット判定の際に、決済しない保有の利確指値が"
+                         "未設定なら自動で発注する")
     args = ap.parse_args()
 
     log_path = args.log or _default_log_path(args.aggressive)
@@ -807,84 +866,26 @@ def main() -> int:
 
     # ── --targets: 各保有に利確指値を発注 (リレー未対応のため約定後に置く) ──
     if args.targets:
-        from backtest_limit_entry import default_max_hold as _dmh2
-        today_b = pd.Timestamp(now.date())
         # dry-run プレビュー用に未接続なら dry-run クライアントを用意 (接続なし)
         if cli is None:
             cli = KabuClient(prod=args.prod, dry_run=True)
         # 既存の未約定注文（重複発注防止）
         open_orders = []
-        if cli is not None and args.execute:
+        if args.execute:
             try:
                 open_orders = cli.get_orders()
             except Exception as e:
                 print(f"  ⚠ 注文一覧取得失敗 ({e}) — 重複チェックなしで続行")
 
-        def _has_target_order(sym: str, want_side: str) -> bool:
-            ACTIVE = {1, 2, 3, 4, 5}
-            for o in open_orders:
-                if str(o.get("Symbol", "")).strip() != str(sym).strip():
-                    continue
-                if str(o.get("Side", "")) != want_side:
-                    continue
-                # 指値(20)の未約定
-                if int(o.get("OrderState") or o.get("State") or 0) in ACTIVE:
-                    return True
-            return False
-
         print(f"利確指値の発注 ({'★実発注★' if args.execute else 'dry-run'} / {env_label})")
         print(f"※ ロング=指値売り / ショート=指値買戻し。期限=タイムカット日まで\n")
         placed = skipped = 0
         for pos in positions:
-            sym  = str(pos["symbol"]).split(".")[0]   # kabuは銘柄コードのみ
-            tp   = pos.get("target_price")
-            qty  = pos.get("qty", 100)
-            cm   = pos.get("cash_margin", CASH_GENBUTSU)
-            strat = pos.get("strategy", "")
-            side_label = "ショート" if pos["is_short"] else "ロング"
-            if not tp or tp <= 0:
-                print(f"  ? {sym} {pos['name']}: 目標価格なし → スキップ")
-                skipped += 1
-                continue
-            # 有効期限 = タイムカット日 (YYYYMMDD)。約定日不明なら当日(0)。
-            fd = pos.get("fill_date", "").strip()
-            if fd:
-                try:
-                    _tc = (pd.Timestamp(fd) + pd.tseries.offsets.BDay(_dmh2(strat)))
-                    expire_day = int(_tc.strftime("%Y%m%d"))
-                except Exception:
-                    expire_day = 0
+            status, msg = _place_target_order(cli, pos, open_orders)
+            print(msg)
+            if status == "placed":
+                placed += 1
             else:
-                expire_day = 0
-            want_side = "2" if pos["is_short"] else "1"  # 買戻し=2 / 売り=1
-            if _has_target_order(sym, want_side):
-                print(f"  ↺ {sym} {pos['name']} [{strat}/{side_label}]: 既に利確注文あり → スキップ")
-                skipped += 1
-                continue
-            if cli is None:
-                print(f"  ✗ {sym}: kabu 未接続のため発注不可 (--execute か --kabu が必要)")
-                skipped += 1
-                continue
-            try:
-                if pos["is_short"]:
-                    res = cli.send_buy(sym, qty=qty, price=tp, order_type="limit",
-                                       cash_margin=CASH_MARGIN_CLOSE, expire_day=expire_day)
-                    lbl = f"利確 指値買戻し @{tp:,.0f}"
-                else:
-                    res = cli.send_sell(sym, qty=qty, price=tp, order_type="limit",
-                                        cash_margin=cm, expire_day=expire_day)
-                    lbl = f"利確 指値売り @{tp:,.0f}"
-                ok = (res.get("Result") == 0) or res.get("_dry_run")
-                tag = "🎯発注" if ok else "⚠失敗"
-                exp_lbl = f"期限{expire_day}" if expire_day else "期限当日"
-                print(f"  {tag} {sym} {pos['name']} [{strat}/{side_label}] {lbl} x{qty} ({exp_lbl})")
-                if ok:
-                    placed += 1
-                else:
-                    print(f"      応答: {res}")
-                    skipped += 1
-            except Exception as e:
-                print(f"  ⚠ {sym}: 利確発注失敗 ({e})")
                 skipped += 1
         print(f"\n利確発注: {placed}件 / スキップ: {skipped}件")
         if not args.execute:
@@ -970,6 +971,30 @@ def main() -> int:
             breached.append(pos)
 
     print()
+
+    # ── --with-targets: 決済しない保有に利確指値が無ければ発注 ──
+    if args.with_targets:
+        if cli is None:
+            cli = KabuClient(prod=args.prod, dry_run=True)
+        _breached_keys = {(str(p["symbol"]).split(".")[0], p["is_short"]) for p in breached}
+        _held = [p for p in positions
+                 if (str(p["symbol"]).split(".")[0], p["is_short"]) not in _breached_keys]
+        _open_orders = []
+        if args.execute:
+            try:
+                _open_orders = cli.get_orders()
+            except Exception as e:
+                print(f"  ⚠ 注文一覧取得失敗 ({e}) — 利確の重複チェックなしで続行")
+        print(f"[利確指値チェック] 決済しない保有 {len(_held)}件 "
+              f"({'★実発注★' if args.execute else 'dry-run'})")
+        _tp_placed = 0
+        for _pos in _held:
+            _status, _msg = _place_target_order(cli, _pos, _open_orders)
+            print(_msg)
+            if _status == "placed":
+                _tp_placed += 1
+        print(f"利確指値: {_tp_placed}件 新規発注\n")
+
     if not breached:
         print("損切り・タイムカット抵触なし。発注なし。")
         return 0
