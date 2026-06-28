@@ -4681,32 +4681,56 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _lv = _reg_cache[_sdt]
             if _lv in _env_buckets:
                 _env_buckets[_lv].append(_t)
-        _env_rows = ""
-        for _k in _env_order:
-            _ts = _env_buckets[_k]
-            _col = _env_col[_k]
-            if not _ts:
-                _env_rows += (f'<tr><td style="color:{_col};font-weight:700;border-left:3px solid {_col};'
-                              f'padding-left:8px">{_k}</td><td colspan="6" style="text-align:center;color:#475569">該当なし</td></tr>')
-                continue
+        def _env_stats(_ts):
             _w = [_t for _t in _ts if _t["pnl"] > 0]
             _l = [_t for _t in _ts if _t["pnl"] <= 0]
             _gp = sum(_t["pnl"] for _t in _w)
             _gl = abs(sum(_t["pnl"] for _t in _l))
             _net = _gp - _gl
-            _wr = len(_w) / len(_ts) * 100
+            _n = len(_ts)
+            _wr = len(_w) / _n * 100 if _n else 0.0
             _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
             _pf_s = "∞" if _pf == float("inf") else f"{_pf:.2f}"
-            _pc = "profit" if _net >= 0 else "loss"
-            _wr_c = "#4ade80" if _wr >= 55 else ("#fbbf24" if _wr >= 45 else "#f87171")
+            return {"n": _n, "wr": _wr, "pf": _pf_s, "gp": _gp, "gl": _gl,
+                    "net": _net, "nw": len(_w), "nl": len(_l)}
+
+        def _env_dual(_metric, _sa, _sb):
+            # _sa=全, _sb=BT70。e-all/e-bt70 spanで出し分け
+            def _fmt(_s):
+                if _s["n"] == 0:
+                    return ("—", "#475569", "")
+                if _metric == "n":
+                    return (f"{_s['n']}件", "#e2e8f0", "")
+                if _metric == "wr":
+                    _c = "#4ade80" if _s["wr"] >= 55 else ("#fbbf24" if _s["wr"] >= 45 else "#f87171")
+                    return (f"{_s['wr']:.0f}%", _c, "")
+                if _metric == "pf":
+                    return (_s["pf"], "#e2e8f0", "")
+                if _metric == "gp":
+                    return (f"+{_s['gp']:,.0f}", "#4ade80",
+                            f"<br><span style='color:#64748b;font-size:0.7rem'>({_s['nw']}勝)</span>")
+                if _metric == "gl":
+                    return (f"-{_s['gl']:,.0f}", "#f87171",
+                            f"<br><span style='color:#64748b;font-size:0.7rem'>({_s['nl']}敗)</span>")
+                _c = "#4ade80" if _s["net"] >= 0 else "#f87171"
+                return (f"{_s['net']:+,.0f}円", _c, "")
+            _ta, _ca, _xa = _fmt(_sa)
+            _tb, _cb, _xb = _fmt(_sb)
+            _wgt = "font-weight:700" if _metric == "net" else ""
+            return (f'<td style="text-align:right">'
+                    f'<span class="e-all"  style="color:{_ca};{_wgt}">{_ta}{_xa}</span>'
+                    f'<span class="e-bt70" style="color:{_cb};{_wgt};display:none">{_tb}{_xb}</span></td>')
+
+        _env_rows = ""
+        for _k in _env_order:
+            _ts = _env_buckets[_k]
+            _col = _env_col[_k]
+            _sa = _env_stats(_ts)
+            _sb = _env_stats([_t for _t in _ts if (_t.get("rec_score") or 0) >= 70])
             _env_rows += f"""<tr>
   <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:8px">{_k}</td>
-  <td style="text-align:right">{len(_ts)}</td>
-  <td style="text-align:right;color:{_wr_c}">{_wr:.0f}%</td>
-  <td style="text-align:right">{_pf_s}</td>
-  <td class="profit" style="text-align:right">+{_gp:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_w)}勝)</span></td>
-  <td class="loss"   style="text-align:right">-{_gl:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_l)}敗)</span></td>
-  <td class="{_pc}"  style="text-align:right;font-weight:700">{_net:+,.0f}円</td>
+  {_env_dual('n', _sa, _sb)}{_env_dual('wr', _sa, _sb)}{_env_dual('pf', _sa, _sb)}
+  {_env_dual('gp', _sa, _sb)}{_env_dual('gl', _sa, _sb)}{_env_dual('net', _sa, _sb)}
 </tr>"""
         _env_html = f"""
 <h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
@@ -4714,8 +4738,25 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </h3>
 <p class="footnote" style="margin-bottom:8px">
   ✅推奨=通常 ／ ⚠️注意=下落 or 横ばい高ボラ ／ ❌荒れ(急落)=下落×高ボラ×過去30日に-3%超の急落日あり。
-  各トレードをシグナル発生日の日経環境で分類。
 </p>
+<div style="margin:4px 0 8px">
+  <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">損益の対象:</span>
+  <button id="envpnl-all-btn" onclick="setEnvPnl('all')"
+    style="padding:4px 12px;border:none;border-radius:6px;cursor:pointer;font-weight:600;background:#2d6cdf;color:#fff">全トレード</button>
+  <button id="envpnl-bt70-btn" onclick="setEnvPnl('bt70')"
+    style="padding:4px 12px;border:none;border-radius:6px;cursor:pointer;font-weight:600;background:#1e293b;color:#94a3b8">BT70以上</button>
+</div>
+<script>
+function setEnvPnl(m){{
+  document.querySelectorAll('.e-all').forEach(function(e){{e.style.display=(m==='all')?'':'none';}});
+  document.querySelectorAll('.e-bt70').forEach(function(e){{e.style.display=(m==='bt70')?'':'none';}});
+  var a=document.getElementById('envpnl-all-btn'), b=document.getElementById('envpnl-bt70-btn');
+  if(a&&b){{
+    a.style.background=(m==='all')?'#2d6cdf':'#1e293b'; a.style.color=(m==='all')?'#fff':'#94a3b8';
+    b.style.background=(m==='bt70')?'#2d6cdf':'#1e293b'; b.style.color=(m==='bt70')?'#fff':'#94a3b8';
+  }}
+}}
+</script>
 <table style="font-size:0.88rem">
   <thead><tr><th style="text-align:left">相場環境</th><th>件数</th><th>勝率</th><th>PF</th>
     <th>利益計</th><th>損失計</th><th>損益合計</th></tr></thead>
