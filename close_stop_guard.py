@@ -77,7 +77,7 @@ JST = timezone(timedelta(hours=9))
 # ────────────────────────────────────────────────────────────
 # signals JSON から stop_p / target_p を読み込む
 # ────────────────────────────────────────────────────────────
-def _load_signals_json(json_path: str | None = None) -> dict[str, list[dict]]:
+def _load_signals_json(json_path: str | None = None, verbose: bool = True) -> dict[str, list[dict]]:
     """全シグナルJSONをマージして symbol → [signal, ...] の辞書を返す。
     シンボルは ".T" サフィックスを除去してkabu形式に正規化する。"""
 
@@ -129,10 +129,11 @@ def _load_signals_json(json_path: str | None = None) -> dict[str, list[dict]]:
                 seen.add(key)
                 result.setdefault(sym, []).append(s)
 
-    if result:
-        print(f"  [シグナル] {', '.join(loaded_files)} を統合 ({len(seen)}件)")
-    else:
-        print("  [WARN] シグナルJSONが見つかりません")
+    if verbose:
+        if result:
+            print(f"  [シグナル] {', '.join(loaded_files)} を統合 ({len(seen)}件)")
+        else:
+            print("  [WARN] シグナルJSONが見つかりません")
     return result
 
 
@@ -363,7 +364,7 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         _p(f"  ✗ kabu 建玉取得失敗: {e}")
         return []
 
-    sig_map = _load_signals_json()
+    sig_map = _load_signals_json(verbose=verbose)
     positions: list[dict] = []
 
     for kp in raw:

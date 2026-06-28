@@ -231,14 +231,21 @@ def _watch_loop():
     併せて保有銘柄HTML(📌保有タブ)を定期更新する。"""
     cli = None
     cycle = 0
+    _warned = False
     while True:
         _time.sleep(POLL_SEC)
         cycle += 1
         if cli is None:
             try:
                 cli = _watch_build_client()
-            except Exception as e:
-                print(f"  ⚠ 監視用kabu接続失敗(次回再試行): {e}")
+                if _warned:
+                    print("  ✓ 監視用kabu接続 復旧")
+                _warned = False
+            except Exception:
+                if not _warned:   # 連続スパムを避け、最初の1回だけ警告
+                    print("  ⚠ 監視用kabu未接続: kabuステーション(本番18080)を起動・ログインしてください。"
+                          "接続できるまで保有タブ更新・約定監視は待機します。")
+                    _warned = True
                 continue
         # 約定待ちの利確発注
         with _pending_lock:
