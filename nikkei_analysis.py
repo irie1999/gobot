@@ -4586,6 +4586,52 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_bt70_rows}</tbody>
 </table>""" if _bt70 else ""
 
+        # ── トレンド期間別 損益（個々の期間ごと・新しい順）──────────────────────
+        try:
+            _ppnl_periods = extract_periods(_n225_close, _n225_trend,
+                                            _n225_close.index[-1].date())
+        except Exception:
+            _ppnl_periods = []
+        _per_rows = ""
+        for _p in reversed(_ppnl_periods):   # 新しい順
+            _ps, _pe = _p["start"], _p["end"]
+            _psub = [_t for _t in kpi_trades
+                     if _t.get("signal_dt_raw") and _ps <= _t["signal_dt_raw"] <= _pe]
+            if not _psub:
+                continue   # トレードのない期間は省略
+            _w  = [_t for _t in _psub if _t["pnl"] > 0]
+            _l  = [_t for _t in _psub if _t["pnl"] <= 0]
+            _gp = sum(_t["pnl"] for _t in _w)
+            _gl = abs(sum(_t["pnl"] for _t in _l))
+            _pnl = _gp - _gl
+            _wr  = len(_w) / len(_psub) * 100
+            _lbl, _col, _bg = _tlabels.get(_p["trend"], _tlabels[None])
+            _pc = "profit" if _pnl >= 0 else "loss"
+            _per_rows += f"""<tr style="background:{_bg}15">
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:8px">{_lbl}</td>
+  <td style="text-align:center;color:#94a3b8;font-size:0.8rem">{_ps}〜{_pe}</td>
+  <td style="text-align:right;color:{'#f87171' if _p['pct']<0 else '#4ade80'}">{_p['pct']:+.1f}%</td>
+  <td style="text-align:right">{len(_psub)}件</td>
+  <td style="text-align:right;color:{'#4ade80' if _wr>=55 else ('#fbbf24' if _wr>=45 else '#f87171')}">{_wr:.0f}%</td>
+  <td class="profit" style="text-align:right">+{_gp:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_w)}勝)</span></td>
+  <td class="loss"   style="text-align:right">-{_gl:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_l)}敗)</span></td>
+  <td class="{_pc}"  style="text-align:right;font-weight:700">{_pnl:+,.0f}円</td>
+</tr>"""
+        _period_pnl_html = f"""
+<h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
+  トレンド期間別 損益（個々の期間ごと・新しい順）
+</h3>
+<p class="footnote" style="margin-bottom:8px">
+  各トレンド期間に発生したシグナルのトレードを期間ごとに集計。トレードのある期間のみ表示。
+</p>
+<table style="font-size:0.85rem">
+  <thead><tr>
+    <th style="text-align:left">種別</th><th>期間</th><th>騰落率</th><th>件数</th><th>勝率</th>
+    <th>利益計</th><th>損失計</th><th>損益合計</th>
+  </tr></thead>
+  <tbody>{_per_rows}</tbody>
+</table>""" if _per_rows else ""
+
         # ── 日経トレンド × 含み損分析 ────────────────────────────────────────
         _trend_neg_rows = ""
         for _tk in _order:
@@ -4665,6 +4711,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <div id="{_tbd_id}_pane_cross" style="display:none">
 {_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
 {_bt70_html}
+{_period_pnl_html}
 </div>
 
 <div id="{_tbd_id}_pane_neg" style="display:none">
