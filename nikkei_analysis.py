@@ -324,13 +324,26 @@ def fetch_n225(years: int, end_date=None) -> pd.Series:
     return close.dropna().sort_index()
 
 
+# トレンド判定パラメータ（調整可）
+TREND_MA_SHORT = 5     # 短期MA（小さいほど細かく区切れる）
+TREND_MA_LONG  = 10    # 長期MA
+TREND_DROP_PCT = -3.0  # 直近5日でこの%以下の下落は MA に関わらず「下落」扱い(V字対策)
+
+
 def label_trend(close: pd.Series) -> pd.Series:
-    """MA10/MA25 クロスでトレンドラベル付け: 'up' / 'down' / 'sideways'"""
-    ma10 = close.rolling(10).mean()
-    ma25 = close.rolling(25).mean()
+    """短期MA(5/10)クロス + 急落判定でトレンドラベル付け: 'up' / 'down' / 'sideways'
+
+    - MA10/MA25 から MA5/MA10 に短縮 → 局面の切り替わりを細かく捉える。
+    - 直近5日が TREND_DROP_PCT 以下の急落は、MA がラグしても「下落」扱い。
+      (急落して戻すV字が「横ばい」に誤分類されるのを防ぐ)
+    """
+    ma_s = close.rolling(TREND_MA_SHORT).mean()
+    ma_l = close.rolling(TREND_MA_LONG).mean()
+    ret5 = close.pct_change(5) * 100
     trend = pd.Series("sideways", index=close.index)
-    trend[(close > ma10) & (ma10 > ma25)] = "up"
-    trend[(close < ma10) & (ma10 < ma25)] = "down"
+    trend[(close > ma_s) & (ma_s > ma_l)] = "up"
+    trend[(close < ma_s) & (ma_s < ma_l)] = "down"
+    trend[ret5 <= TREND_DROP_PCT] = "down"   # 急落は下落（V字含む）
     return trend
 
 
