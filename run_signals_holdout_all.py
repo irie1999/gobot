@@ -681,15 +681,27 @@ try:
         }
         print("参考指標取得中...", flush=True)
         _na_indicators = _na.fetch_market_indicators(years=1, end_date=_na_end)
-        _market_tab1_html = _na._tab1_signal_html(
-            _na_r, _na_ref, indicators=_na_indicators, periods=_na_periods)
-        _market_tab2_html = _na._tab2_trend_html(
-            _na_close, _na_trend, _na_periods, _na_years)
-        _market_tab3_html = _na._tab3_timing_html(
-            _na_close, _na_up_p, _na_all_stats)
+        import traceback as _tb_mkt
+        # タブごとに個別 try: 1つ失敗しても他のタブを生かす + 例外を必ず表示
+        try:
+            _market_tab1_html = _na._tab1_signal_html(
+                _na_r, _na_ref, indicators=_na_indicators, periods=_na_periods)
+        except Exception as _e1:
+            print(f"[WARN] 相場環境タブ失敗: {_e1}\n{_tb_mkt.format_exc()}", flush=True)
+        try:
+            _market_tab2_html = _na._tab2_trend_html(
+                _na_close, _na_trend, _na_periods, _na_years)
+        except Exception as _e2t:
+            print(f"[WARN] トレンド期間タブ失敗: {_e2t}\n{_tb_mkt.format_exc()}", flush=True)
+        try:
+            _market_tab3_html = _na._tab3_timing_html(
+                _na_close, _na_up_p, _na_all_stats)
+        except Exception as _e3t:
+            print(f"[WARN] エントリー分析タブ失敗: {_e3t}\n{_tb_mkt.format_exc()}", flush=True)
         print("市場分析タブ生成完了", flush=True)
 except Exception as _me:
-    print(f"[WARN] 市場分析スキップ: {_me}", flush=True)
+    import traceback as _tb_mkt2
+    print(f"[WARN] 市場分析スキップ: {_me}\n{_tb_mkt2.format_exc()}", flush=True)
 
 if _market_tab1_html:
     _market_tab_btns = (
