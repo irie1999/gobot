@@ -219,8 +219,7 @@ def _regen_holdings(cli) -> None:
         positions = load_positions_from_kabu(cli, product=0, verbose=False)
         html = _build_holdings_html(positions, datetime.now(JST),
                                     price_fn=cli.get_current_price)
-        d = datetime.now(JST).strftime("%Y-%m-%d")
-        out = Path(__file__).resolve().parent / f"holdings_{d}.html"
+        out = Path(__file__).resolve().parent / "holdings_latest.html"
         out.write_text(html, encoding="utf-8")
     except Exception as e:
         print(f"  ⚠ 保有HTML更新失敗: {e}")

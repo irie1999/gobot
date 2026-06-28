@@ -1002,7 +1002,7 @@ def main() -> int:
             except Exception:
                 return None
         html_str = _build_holdings_html(positions, now, price_fn=_price)
-        out = Path(__file__).resolve().parent / f"holdings_{now:%Y-%m-%d}.html"
+        out = Path(__file__).resolve().parent / "holdings_latest.html"
         out.write_text(html_str, encoding="utf-8")
         print(f"保有銘柄HTML: {out}  ({len(positions)}件)")
         try:

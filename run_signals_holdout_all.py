@@ -251,7 +251,7 @@ if _args.both and not _args.short:
     # 📌 保有タブ（実際に約定した建玉。close_stop_guard --holdings-html が生成）
     _nav_btns += '  <span class="nav-sep"></span>\n'
     _nav_btns += '  <button class="hold-btn" onclick="switchHoldings(event)">📌 保有</button>\n'
-    _holdings_path = Path(f"holdings_{_bd}.html")
+    _holdings_path = Path("holdings_latest.html")
     if not _holdings_path.exists():
         _holdings_path.write_text(
             "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
@@ -271,7 +271,7 @@ if _args.both and not _args.short:
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
             _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}?v={_cache_bust}"></iframe>\n'
-    _frames += f'<iframe id="holdings-frame" class="hold-frame" src="holdings_{_bd}.html?v={_cache_bust}"></iframe>\n'
+    _frames += f'<iframe id="holdings-frame" class="hold-frame" src="holdings_latest.html?v={_cache_bust}"></iframe>\n'
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
