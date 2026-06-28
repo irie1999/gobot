@@ -4656,6 +4656,72 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_bt70_rows}</tbody>
 </table>""" if _bt70 else ""
 
+        # ── 相場環境判定別 成績（✅推奨/⚠️注意/❌荒れ）──────────────────────────
+        def _env_level(_r):
+            _tr, _vl, _dp = _r["trend"], _r["vol_level"], _r["max_1d_drop"]
+            if _tr == "down" and _vl == "high" and _dp < -3.0:
+                return "❌ 荒れ(急落)"
+            if _tr == "down" or (_tr == "sideways" and _vl == "high"):
+                return "⚠️ 注意"
+            return "✅ 推奨"
+        _env_order = ["✅ 推奨", "⚠️ 注意", "❌ 荒れ(急落)"]
+        _env_col = {"✅ 推奨": "#4ade80", "⚠️ 注意": "#fbbf24", "❌ 荒れ(急落)": "#f87171"}
+        _env_buckets = {_k: [] for _k in _env_order}
+        _reg_cache: dict = {}
+        for _t in kpi_trades:
+            _sdt = _t.get("signal_dt_raw")
+            if not _sdt:
+                continue
+            if _sdt not in _reg_cache:
+                _sc = _n225_close[_n225_close.index <= pd.Timestamp(_sdt)]
+                try:
+                    _reg_cache[_sdt] = _env_level(get_regime(_sc)) if len(_sc) >= 21 else None
+                except Exception:
+                    _reg_cache[_sdt] = None
+            _lv = _reg_cache[_sdt]
+            if _lv in _env_buckets:
+                _env_buckets[_lv].append(_t)
+        _env_rows = ""
+        for _k in _env_order:
+            _ts = _env_buckets[_k]
+            _col = _env_col[_k]
+            if not _ts:
+                _env_rows += (f'<tr><td style="color:{_col};font-weight:700;border-left:3px solid {_col};'
+                              f'padding-left:8px">{_k}</td><td colspan="6" style="text-align:center;color:#475569">該当なし</td></tr>')
+                continue
+            _w = [_t for _t in _ts if _t["pnl"] > 0]
+            _l = [_t for _t in _ts if _t["pnl"] <= 0]
+            _gp = sum(_t["pnl"] for _t in _w)
+            _gl = abs(sum(_t["pnl"] for _t in _l))
+            _net = _gp - _gl
+            _wr = len(_w) / len(_ts) * 100
+            _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+            _pf_s = "∞" if _pf == float("inf") else f"{_pf:.2f}"
+            _pc = "profit" if _net >= 0 else "loss"
+            _wr_c = "#4ade80" if _wr >= 55 else ("#fbbf24" if _wr >= 45 else "#f87171")
+            _env_rows += f"""<tr>
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:8px">{_k}</td>
+  <td style="text-align:right">{len(_ts)}</td>
+  <td style="text-align:right;color:{_wr_c}">{_wr:.0f}%</td>
+  <td style="text-align:right">{_pf_s}</td>
+  <td class="profit" style="text-align:right">+{_gp:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_w)}勝)</span></td>
+  <td class="loss"   style="text-align:right">-{_gl:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_l)}敗)</span></td>
+  <td class="{_pc}"  style="text-align:right;font-weight:700">{_net:+,.0f}円</td>
+</tr>"""
+        _env_html = f"""
+<h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
+  相場環境判定別 成績（シグナル日の日経環境で分類）
+</h3>
+<p class="footnote" style="margin-bottom:8px">
+  ✅推奨=通常 ／ ⚠️注意=下落 or 横ばい高ボラ ／ ❌荒れ(急落)=下落×高ボラ×過去30日に-3%超の急落日あり。
+  各トレードをシグナル発生日の日経環境で分類。
+</p>
+<table style="font-size:0.88rem">
+  <thead><tr><th style="text-align:left">相場環境</th><th>件数</th><th>勝率</th><th>PF</th>
+    <th>利益計</th><th>損失計</th><th>損益合計</th></tr></thead>
+  <tbody>{_env_rows}</tbody>
+</table>"""
+
         # ── トレンド期間別 損益（個々の期間ごと・新しい順）──────────────────────
         try:
             _ppnl_periods = extract_periods(_n225_close, _n225_trend,
@@ -4781,6 +4847,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <div id="{_tbd_id}_pane_cross" style="display:none">
 {_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
 {_bt70_html}
+{_env_html}
 </div>
 
 <div id="{_tbd_id}_pane_neg" style="display:none">
