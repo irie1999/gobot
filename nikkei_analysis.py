@@ -1446,8 +1446,7 @@ function setTrdPnl(m){
   ※ 価格はすべて <strong>終値</strong>（始値・高値・安値は使用していません）<br>
   ※ 判定: 終値&gt;MA10&gt;MA25=上昇(▲) ／ 終値&lt;MA10&lt;MA25=下落(▼) ／ それ以外=横ばい(→)<br>
   ※ 横ばいでも ⚠️V字 は3%超の下落があったV字回復を示す
-</p>
-{_risk_period_html}"""
+</p>"""
 
 
 def _tab3_timing_html(close: pd.Series, up_periods: list[dict], all_stats: dict) -> str:
