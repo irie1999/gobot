@@ -325,25 +325,32 @@ def fetch_n225(years: int, end_date=None) -> pd.Series:
 
 
 # トレンド判定パラメータ（調整可）
-TREND_MA_SHORT = 5     # 短期MA（小さいほど細かく区切れる）
-TREND_MA_LONG  = 10    # 長期MA
-TREND_DROP_PCT = -3.0  # 直近5日でこの%以下の下落は MA に関わらず「下落」扱い(V字対策)
+# トレンド = 相場環境判定 を1本化: 上昇=推奨 / 横ばい=注意 / 下落=荒れ
+TREND_MA_SHORT      = 5     # 短期MA（小さいほど細かく区切れる）
+TREND_MA_LONG       = 10    # 長期MA
+TREND_DROP_PCT      = -3.0  # 直近5日でこの%以下の下落は MA に関わらず「下落(荒れ)」扱い
+TREND_CRASH_PCT     = -3.5  # この%以下の「単日」急落があれば「下落(荒れ)」扱い
+TREND_CRASH_LOOKBACK = 3    # 単日急落を何営業日さかのぼって警戒扱いにするか
 
 
 def label_trend(close: pd.Series) -> pd.Series:
-    """短期MA(5/10)クロス + 急落判定でトレンドラベル付け: 'up' / 'down' / 'sideways'
+    """短期MA(5/10)クロス + 急落判定でトレンドラベル: 'up'(推奨)/'sideways'(注意)/'down'(荒れ)
 
-    - MA10/MA25 から MA5/MA10 に短縮 → 局面の切り替わりを細かく捉える。
-    - 直近5日が TREND_DROP_PCT 以下の急落は、MA がラグしても「下落」扱い。
-      (急落して戻すV字が「横ばい」に誤分類されるのを防ぐ)
+    - MA5/MA10 クロスで方向を判定（局面を細かく捉える）。
+    - 直近5日が TREND_DROP_PCT 以下、または直近 TREND_CRASH_LOOKBACK 日に
+      単日 TREND_CRASH_PCT 以下の急落があれば、MAがラグしても「下落(荒れ)」扱い。
+      → V字で戻しても急落直後の数日は「下落(荒れ)」になり、相場環境判定と一致する。
     """
     ma_s = close.rolling(TREND_MA_SHORT).mean()
     ma_l = close.rolling(TREND_MA_LONG).mean()
     ret5 = close.pct_change(5) * 100
+    ret1 = close.pct_change() * 100                       # 単日リターン
+    recent_crash = ret1.rolling(TREND_CRASH_LOOKBACK).min() <= TREND_CRASH_PCT
     trend = pd.Series("sideways", index=close.index)
     trend[(close > ma_s) & (ma_s > ma_l)] = "up"
     trend[(close < ma_s) & (ma_s < ma_l)] = "down"
-    trend[ret5 <= TREND_DROP_PCT] = "down"   # 急落は下落（V字含む）
+    trend[ret5 <= TREND_DROP_PCT] = "down"               # 5日累積の下落(V字含む)
+    trend[recent_crash] = "down"                         # 単日急落の直後数日(荒れ)
     return trend
 
 
@@ -428,12 +435,16 @@ def get_regime(close: pd.Series) -> dict:
     mom20   = (cur / float(close.iloc[-21]) - 1) * 100
     max_1d_drop = float(rets.tail(30).min() * 100)
 
-    if cur > ma10 and ma10 > ma25:
-        trend = "up"
-    elif cur < ma10 and ma10 < ma25:
-        trend = "down"
-    else:
-        trend = "sideways"
+    # トレンドは label_trend(MA5/10+急落) に統一（相場環境タブとトレンド分類を一致させる）
+    try:
+        trend = str(label_trend(close).iloc[-1])
+    except Exception:
+        if cur > ma10 and ma10 > ma25:
+            trend = "up"
+        elif cur < ma10 and ma10 < ma25:
+            trend = "down"
+        else:
+            trend = "sideways"
 
     vol_level   = "high" if vol14 > 1.5 else ("mid" if vol14 > 0.8 else "low")
     above_ma200 = (cur >= ma200) if ma200 else True
@@ -4656,31 +4667,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_bt70_rows}</tbody>
 </table>""" if _bt70 else ""
 
-        # ── 相場環境判定別 成績（✅推奨/⚠️注意/❌荒れ）──────────────────────────
-        def _env_level(_r):
-            _tr, _vl, _dp = _r["trend"], _r["vol_level"], _r["max_1d_drop"]
-            if _tr == "down" and _vl == "high" and _dp < -3.0:
-                return "❌ 荒れ(急落)"
-            if _tr == "down" or (_tr == "sideways" and _vl == "high"):
-                return "⚠️ 注意"
-            return "✅ 推奨"
-        _env_order = ["✅ 推奨", "⚠️ 注意", "❌ 荒れ(急落)"]
-        _env_col = {"✅ 推奨": "#4ade80", "⚠️ 注意": "#fbbf24", "❌ 荒れ(急落)": "#f87171"}
-        _env_buckets = {_k: [] for _k in _env_order}
-        _reg_cache: dict = {}
-        for _t in kpi_trades:
-            _sdt = _t.get("signal_dt_raw")
-            if not _sdt:
-                continue
-            if _sdt not in _reg_cache:
-                _sc = _n225_close[_n225_close.index <= pd.Timestamp(_sdt)]
-                try:
-                    _reg_cache[_sdt] = _env_level(get_regime(_sc)) if len(_sc) >= 21 else None
-                except Exception:
-                    _reg_cache[_sdt] = None
-            _lv = _reg_cache[_sdt]
-            if _lv in _env_buckets:
-                _env_buckets[_lv].append(_t)
+        # ── 相場環境判定別 成績（トレンドと統一: 上昇=推奨/横ばい=注意/下落=荒れ）──
+        # label_trend を唯一の分類とし、トレンド別成績と同じバケットを使う。
+        _env_order = ["✅ 推奨", "⚠️ 注意", "❌ 荒れ"]
+        _env_col = {"✅ 推奨": "#4ade80", "⚠️ 注意": "#fbbf24", "❌ 荒れ": "#f87171"}
+        _env_src = {"✅ 推奨": "up", "⚠️ 注意": "sideways", "❌ 荒れ": "down"}
+        _env_buckets = {_k: _tbuckets.get(_env_src[_k], []) for _k in _env_order}
         def _env_stats(_ts):
             _w = [_t for _t in _ts if _t["pnl"] > 0]
             _l = [_t for _t in _ts if _t["pnl"] <= 0]
@@ -4734,10 +4726,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 </tr>"""
         _env_html = f"""
 <h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
-  相場環境判定別 成績（シグナル日の日経環境で分類）
+  相場環境判定別 成績（トレンドと統一: ▲上昇=✅推奨 / →横ばい=⚠️注意 / ▼下落=❌荒れ）
 </h3>
 <p class="footnote" style="margin-bottom:8px">
-  ✅推奨=通常 ／ ⚠️注意=下落 or 横ばい高ボラ ／ ❌荒れ(急落)=下落×高ボラ×過去30日に-3%超の急落日あり。
+  日経トレンド分類(label_trend)を唯一の基準に統一。下落(荒れ)は MA下落・5日-3%以下・
+  単日-3.5%以下の急落(直近{TREND_CRASH_LOOKBACK}日)のいずれかで判定。シグナル発生日の環境で分類。
 </p>
 <div style="margin:4px 0 8px">
   <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">損益の対象:</span>
