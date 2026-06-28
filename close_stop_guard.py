@@ -350,12 +350,17 @@ def _fill_date_from_signal(signal_date: str) -> str:
 # ────────────────────────────────────────────────────────────
 # kabu建玉 + signals JSON からポジション一覧を構築（--kabu モード）
 # ────────────────────────────────────────────────────────────
-def load_positions_from_kabu(cli: KabuClient, product: int = 2) -> list[dict]:
-    """kabu の実建玉を取得し、signals JSON で stop/target を補完して返す。"""
+def load_positions_from_kabu(cli: KabuClient, product: int = 2,
+                             verbose: bool = True) -> list[dict]:
+    """kabu の実建玉を取得し、signals JSON で stop/target を補完して返す。
+    verbose=False で進捗printを抑制(保有HTMLの定期更新などで使う)。"""
+    def _p(*a):
+        if verbose:
+            print(*a)
     try:
         raw = cli.get_positions(product=product)
     except Exception as e:
-        print(f"  ✗ kabu 建玉取得失敗: {e}")
+        _p(f"  ✗ kabu 建玉取得失敗: {e}")
         return []
 
     sig_map = _load_signals_json()
@@ -379,19 +384,19 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2) -> list[dict]:
         if stop_p is not None:
             src = "signals_json"
             _fd_note = f" 約定日={fill_date}" if fill_date else " 約定日不明"
-            print(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]{_fd_note}")
+            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]{_fd_note}")
         else:
             # フォールバック: 既存のシグナル逆引き
             if fill_p > 0:
-                print(f"  🔍 {sym} {name}: signals JSONに未登録 → シグナル逆引き中...")
+                _p(f"  🔍 {sym} {name}: signals JSONに未登録 → シグナル逆引き中...")
                 stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
             if stop_p is None and fill_p > 0:
                 stop_p = calc_atr_stop(sym, fill_p, is_short, strat or "")
                 src = "atr_estimate"
                 if stop_p:
-                    print(f"  ⚠ {sym} {name}: ATR推定 stop={stop_p:.0f}")
+                    _p(f"  ⚠ {sym} {name}: ATR推定 stop={stop_p:.0f}")
                 else:
-                    print(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
+                    _p(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
             else:
                 src = "signal_lookup" if stop_p else "missing"
 

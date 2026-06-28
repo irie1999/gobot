@@ -211,21 +211,38 @@ def _place_target_now(cli, p: dict) -> str:
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
 
 
+def _regen_holdings(cli) -> None:
+    """実建玉から保有銘柄HTML(holdings_<date>.html)を再生成する(📌保有タブ用)。"""
+    try:
+        from close_stop_guard import load_positions_from_kabu, _build_holdings_html
+        from pathlib import Path
+        positions = load_positions_from_kabu(cli, product=0, verbose=False)
+        html = _build_holdings_html(positions, datetime.now(JST),
+                                    price_fn=cli.get_current_price)
+        d = datetime.now(JST).strftime("%Y-%m-%d")
+        out = Path(__file__).resolve().parent / f"holdings_{d}.html"
+        out.write_text(html, encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠ 保有HTML更新失敗: {e}")
+
+
 def _watch_loop():
-    """約定待ちを定期チェックし、約定したら利確指値を即発注する。"""
+    """約定待ちを定期チェックし、約定したら利確指値を即発注する。
+    併せて保有銘柄HTML(📌保有タブ)を定期更新する。"""
     cli = None
+    cycle = 0
     while True:
         _time.sleep(POLL_SEC)
-        with _pending_lock:
-            items = list(_pending)
-        if not items:
-            continue
+        cycle += 1
         if cli is None:
             try:
                 cli = _watch_build_client()
             except Exception as e:
                 print(f"  ⚠ 監視用kabu接続失敗(次回再試行): {e}")
                 continue
+        # 約定待ちの利確発注
+        with _pending_lock:
+            items = list(_pending)
         for p in items:
             try:
                 if _is_filled(cli, p["symbol"], p["side"]):
@@ -236,8 +253,12 @@ def _watch_loop():
                         with _pending_lock:
                             if p in _pending:
                                 _pending.remove(p)
+                        _regen_holdings(cli)   # 約定したら即 保有タブ更新
             except Exception as e:
                 print(f"  ⚠ 監視エラー {p.get('symbol')}: {e}")
+        # 保有HTMLを約30秒ごとに更新(現在値・含み損益のリフレッシュ)
+        if cycle % 3 == 1:
+            _regen_holdings(cli)
 
 
 class Handler(BaseHTTPRequestHandler):
