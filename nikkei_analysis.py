@@ -1141,16 +1141,21 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
 def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int,
                      trades: list[dict] | None = None) -> str:
     """タブ2: トレンド期間分析。trades を渡すと全期間一覧に損益列を追加する。"""
-    # 期間ごとの損益 (signal_dt_raw が期間内のトレードを集計)
+    # 期間ごとの損益 (signal_dt_raw が期間内のトレードを集計)。全トレード/BT70以上の両方。
     _pnl_by_period: dict = {}
     if trades:
+        def _agg(_sub):
+            _gp = sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) > 0)
+            _gl = abs(sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) <= 0))
+            return (len(_sub), _gp, _gl)
         for _pp in periods:
             _ps, _pe = _pp["start"], _pp["end"]
             _sub = [_t for _t in trades
                     if _t.get("signal_dt_raw") and _ps <= _t["signal_dt_raw"] <= _pe]
-            _gp = sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) > 0)
-            _gl = abs(sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) <= 0))
-            _pnl_by_period[(_ps, _pe)] = (len(_sub), _gp, _gl)
+            _pnl_by_period[(_ps, _pe)] = {
+                "all":  _agg(_sub),
+                "bt70": _agg([_t for _t in _sub if (_t.get("rec_score") or 0) >= 70]),
+            }
     up_p   = [p for p in periods if p["trend"] == "up"]
     down_p = [p for p in periods if p["trend"] == "down"]
     su = calc_stats(up_p)
@@ -1252,17 +1257,30 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
             note = f'<span style="color:#f87171;font-size:0.75rem"> ⚠️V字{drop:.0f}%</span>'
         _pnl_cells = ""
         if trades:
-            _cnt, _gp, _gl = _pnl_by_period.get((p['start'], p['end']), (0, 0.0, 0.0))
-            if _cnt:
-                _net = _gp - _gl
-                _net_c = "#4ade80" if _net >= 0 else "#f87171"
-                _pnl_cells = (
-                    f'<td style="text-align:right;color:#94a3b8">{_cnt}件</td>'
-                    f'<td style="text-align:right;color:#4ade80">+{_gp:,.0f}</td>'
-                    f'<td style="text-align:right;color:#f87171">-{_gl:,.0f}</td>'
-                    f'<td style="text-align:right;color:{_net_c};font-weight:700">{_net:+,.0f}</td>')
-            else:
-                _pnl_cells = '<td style="text-align:right;color:#475569">—</td>' * 4
+            _d = _pnl_by_period.get((p['start'], p['end']), {"all": (0, 0.0, 0.0), "bt70": (0, 0.0, 0.0)})
+
+            def _dual_cell(metric):
+                # metric(cnt,gp,gl) -> (表示文字, 色) を全/BT70で出し分けるtd
+                def _fmt(_t):
+                    _c, _gp, _gl = _t
+                    if metric == "cnt":
+                        return (f"{_c}件", "#94a3b8") if _c else ("—", "#475569")
+                    if not _c:
+                        return ("—", "#475569")
+                    if metric == "gp":
+                        return (f"+{_gp:,.0f}", "#4ade80")
+                    if metric == "gl":
+                        return (f"-{_gl:,.0f}", "#f87171")
+                    _net = _gp - _gl
+                    return (f"{_net:+,.0f}", "#4ade80" if _net >= 0 else "#f87171")
+                _ta, _ca = _fmt(_d["all"])
+                _tb, _cb = _fmt(_d["bt70"])
+                _w = "font-weight:700" if metric == "net" else ""
+                return (f'<td style="text-align:right">'
+                        f'<span class="m-all"  style="color:{_ca};{_w}">{_ta}</span>'
+                        f'<span class="m-bt70" style="color:{_cb};{_w};display:none">{_tb}</span></td>')
+            _pnl_cells = (_dual_cell("cnt") + _dual_cell("gp")
+                          + _dual_cell("gl") + _dual_cell("net"))
         rows += f"""<tr style="{bg_r}{bold}">
   <td style="color:{tc};{bl}padding-left:10px">{mark}{note}</td>
   <td>{p['start']}</td>
@@ -1276,6 +1294,30 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   {_pnl_cells}
 </tr>"""
 
+    _pnl_toggle = ""
+    if trades:
+        _pnl_toggle = """
+<div style="margin:6px 0 10px">
+  <span style="color:#94a3b8;font-size:0.82rem;margin-right:8px">損益の対象:</span>
+  <button id="trdpnl-all-btn" onclick="setTrdPnl('all')"
+    style="padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-weight:600;
+    background:#2d6cdf;color:#fff">全トレード</button>
+  <button id="trdpnl-bt70-btn" onclick="setTrdPnl('bt70')"
+    style="padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-weight:600;
+    background:#1e293b;color:#94a3b8">BT70以上</button>
+</div>
+<script>
+function setTrdPnl(m){
+  document.querySelectorAll('.m-all').forEach(function(e){e.style.display = (m==='all')?'':'none';});
+  document.querySelectorAll('.m-bt70').forEach(function(e){e.style.display = (m==='bt70')?'':'none';});
+  var a=document.getElementById('trdpnl-all-btn'), b=document.getElementById('trdpnl-bt70-btn');
+  if(a&&b){
+    a.style.background = (m==='all')?'#2d6cdf':'#1e293b'; a.style.color=(m==='all')?'#fff':'#94a3b8';
+    b.style.background = (m==='bt70')?'#2d6cdf':'#1e293b'; b.style.color=(m==='bt70')?'#fff':'#94a3b8';
+  }
+}
+</script>"""
+
     return f"""
 <h2>現在のトレンド状況</h2>
 {current_box}
@@ -1287,6 +1329,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
 </div>
 
 <h2>全トレンド期間一覧（新しい順）</h2>
+{_pnl_toggle}
 <table>
 <thead><tr>
   <th>種別</th><th>開始日</th><th>終了日</th>
