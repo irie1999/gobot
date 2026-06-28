@@ -852,6 +852,17 @@ print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
+# トレンド期間タブの一覧表に損益列を追加（損益計算で得たトレードを使って再生成）
+if _market_tab2_html:
+    try:
+        _mkt_trades = getattr(_na, "_LAST_KPI_TRADES", None)
+        if _mkt_trades:
+            _market_tab2_html = _na._tab2_trend_html(
+                _na_close, _na_trend, _na_periods, _na_years, trades=_mkt_trades)
+            print("トレンド期間タブに損益列を追加", flush=True)
+    except Exception as _e2:
+        print(f"[WARN] トレンド期間タブ損益列スキップ: {_e2}", flush=True)
+
 # ── 最大保有日数比較セクション（⑪⑫タブ）日付キャッシュ付き ──────────────────
 import pickle as _mhpk
 from pathlib import Path as _MHP

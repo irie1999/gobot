@@ -1138,8 +1138,19 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
 </p>"""
 
 
-def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int) -> str:
-    """タブ2: トレンド期間分析"""
+def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int,
+                     trades: list[dict] | None = None) -> str:
+    """タブ2: トレンド期間分析。trades を渡すと全期間一覧に損益列を追加する。"""
+    # 期間ごとの損益 (signal_dt_raw が期間内のトレードを集計)
+    _pnl_by_period: dict = {}
+    if trades:
+        for _pp in periods:
+            _ps, _pe = _pp["start"], _pp["end"]
+            _sub = [_t for _t in trades
+                    if _t.get("signal_dt_raw") and _ps <= _t["signal_dt_raw"] <= _pe]
+            _gp = sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) > 0)
+            _gl = abs(sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) <= 0))
+            _pnl_by_period[(_ps, _pe)] = (len(_sub), _gp, _gl)
     up_p   = [p for p in periods if p["trend"] == "up"]
     down_p = [p for p in periods if p["trend"] == "down"]
     su = calc_stats(up_p)
@@ -1239,6 +1250,19 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
         note   = ""
         if t == "sideways" and drop < -3:
             note = f'<span style="color:#f87171;font-size:0.75rem"> ⚠️V字{drop:.0f}%</span>'
+        _pnl_cells = ""
+        if trades:
+            _cnt, _gp, _gl = _pnl_by_period.get((p['start'], p['end']), (0, 0.0, 0.0))
+            if _cnt:
+                _net = _gp - _gl
+                _net_c = "#4ade80" if _net >= 0 else "#f87171"
+                _pnl_cells = (
+                    f'<td style="text-align:right;color:#94a3b8">{_cnt}件</td>'
+                    f'<td style="text-align:right;color:#4ade80">+{_gp:,.0f}</td>'
+                    f'<td style="text-align:right;color:#f87171">-{_gl:,.0f}</td>'
+                    f'<td style="text-align:right;color:{_net_c};font-weight:700">{_net:+,.0f}</td>')
+            else:
+                _pnl_cells = '<td style="text-align:right;color:#475569">—</td>' * 4
         rows += f"""<tr style="{bg_r}{bold}">
   <td style="color:{tc};{bl}padding-left:10px">{mark}{note}</td>
   <td>{p['start']}</td>
@@ -1249,6 +1273,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   <td style="text-align:right">{p['start_price']:,.0f}</td>
   <td style="text-align:right">{p['min_price']:,.0f}</td>
   <td style="text-align:right">{p['end_price']:,.0f}</td>
+  {_pnl_cells}
 </tr>"""
 
     return f"""
@@ -1267,6 +1292,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
   <th>種別</th><th>開始日</th><th>終了日</th>
   <th>日数</th><th>騰落率</th><th>最大下落</th>
   <th>開始日終値(円)</th><th>最安値(円)</th><th>終了日終値(円)</th>
+  {'<th>件数</th><th>利益計</th><th>損失計</th><th>損益合計</th>' if trades else ''}
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
@@ -4394,6 +4420,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # ── KPI (発注中=未約定は除外) ──
     # all_trades は (sym, strat, signal_dt) で重複除外済み（同一シグナルは最初のconfigのみ）
     kpi_trades = [t for t in all_trades if t.get("reason") != "発注中"]
+    globals()["_LAST_KPI_TRADES"] = kpi_trades   # トレンド期間タブの損益列で再利用
 
     # ── 日経トレンド別成績 ──────────────────────────────────────────────────────
     _trend_breakdown_html = ""
@@ -4711,7 +4738,6 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <div id="{_tbd_id}_pane_cross" style="display:none">
 {_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
 {_bt70_html}
-{_period_pnl_html}
 </div>
 
 <div id="{_tbd_id}_pane_neg" style="display:none">
