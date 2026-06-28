@@ -4538,6 +4538,54 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
   <tbody>{_bt_trend_rows}</tbody>
 </table>""" if _bt_trend_rows else ""
 
+        # ── BT70以上 × トレンド別 損益（下落相場が本当に損か検証）──────────────
+        _bt70 = [_t for _t in kpi_trades
+                 if _t.get("rec_score") is not None and _t["rec_score"] >= 70]
+        _bt70_rows = ""
+        for _tk in _trend_order_main:   # up, sideways, down
+            _lbl, _col, _bg = _tlabels[_tk]
+            _sub = [_t for _t in _bt70 if _tbuckets_map.get(id(_t)) == _tk]
+            if not _sub:
+                _bt70_rows += (f'<tr style="background:{_bg}20">'
+                               f'<td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>'
+                               f'<td colspan="6" style="text-align:center;color:#475569">該当なし</td></tr>')
+                continue
+            _w  = [_t for _t in _sub if _t["pnl"] > 0]
+            _l  = [_t for _t in _sub if _t["pnl"] <= 0]
+            _gp = sum(_t["pnl"] for _t in _w)
+            _gl = abs(sum(_t["pnl"] for _t in _l))
+            _pnl = _gp - _gl
+            _wr  = len(_w) / len(_sub) * 100
+            _pf  = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+            _pf_s = "∞" if _pf == float("inf") else f"{_pf:.2f}"
+            _pc   = "profit" if _pnl >= 0 else "loss"
+            _wr_c = "#4ade80" if _wr >= 55 else ("#fbbf24" if _wr >= 45 else "#f87171")
+            _bt70_rows += f"""<tr style="background:{_bg}20">
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:10px">{_lbl}</td>
+  <td style="text-align:right">{len(_sub)}</td>
+  <td style="text-align:right;color:{_wr_c};font-weight:600">{_wr:.1f}%</td>
+  <td style="text-align:right">{_pf_s}</td>
+  <td class="profit" style="text-align:right">+{_gp:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_w)}勝)</span></td>
+  <td class="loss"   style="text-align:right">-{_gl:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_l)}敗)</span></td>
+  <td class="{_pc}"  style="text-align:right;font-weight:700">{_pnl:+,.0f}円</td>
+</tr>"""
+        _bt70_total = sum(_t["pnl"] for _t in _bt70)
+        _bt70_html = f"""
+<h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
+  BT70以上 × 日経トレンド別 損益（下落相場が本当に損か検証）
+</h3>
+<p class="footnote" style="margin-bottom:8px">
+  BTスコア70以上のトレードのみを日経トレンド別に集計。利益計/損失計を分けて表示。
+  BT70合計: <span style="color:{'#4ade80' if _bt70_total>=0 else '#f87171'};font-weight:700">{_bt70_total:+,.0f}円</span> ({len(_bt70)}件)
+</p>
+<table style="font-size:0.88rem">
+  <thead><tr>
+    <th style="text-align:left">日経トレンド</th><th>件数</th><th>勝率</th><th>PF</th>
+    <th>利益計</th><th>損失計</th><th>損益合計</th>
+  </tr></thead>
+  <tbody>{_bt70_rows}</tbody>
+</table>""" if _bt70 else ""
+
         # ── 日経トレンド × 含み損分析 ────────────────────────────────────────
         _trend_neg_rows = ""
         for _tk in _order:
@@ -4616,6 +4664,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
 <div id="{_tbd_id}_pane_cross" style="display:none">
 {_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
+{_bt70_html}
 </div>
 
 <div id="{_tbd_id}_pane_neg" style="display:none">
