@@ -4598,7 +4598,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 <p class="footnote" style="margin-bottom:10px">
   シグナル発生日（引け後エントリー判断日）の日経トレンドで分類。
   {_mode_note}<br>
-  ▲=終値&gt;MA10&gt;MA25 ／ ▼=終値&lt;MA10&lt;MA25 ／ →=移行期間
+  ▲=終値&gt;MA5&gt;MA10 ／ ▼=終値&lt;MA5&lt;MA10 または直近5日{TREND_DROP_PCT:.0f}%以下の急落 ／ →=移行期間
 </p>
 <table>
   <thead><tr>
