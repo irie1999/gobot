@@ -248,6 +248,21 @@ if _args.both and not _args.short:
             f'株価 {_price_label(_price_list[0])}</span>\n'
         )
 
+    # 📌 保有タブ（実際に約定した建玉。close_stop_guard --holdings-html が生成）
+    _nav_btns += '  <span class="nav-sep"></span>\n'
+    _nav_btns += '  <button class="hold-btn" onclick="switchHoldings(event)">📌 保有</button>\n'
+    _holdings_path = Path(f"holdings_{_bd}.html")
+    if not _holdings_path.exists():
+        _holdings_path.write_text(
+            "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
+            "<style>body{background:#0f172a;color:#94a3b8;font-family:sans-serif;padding:30px}"
+            "h2{color:#e2e8f0}pre{color:#fbbf24;background:#1e293b;padding:12px;border-radius:8px}</style>"
+            "</head><body><h2>📌 保有銘柄</h2>"
+            "<p>まだ約定確認をしていません。引け後に次を実行すると、実際に約定した保有銘柄と"
+            "タイムカット日が表示されます（このタブを再読み込み）:</p>"
+            "<pre>python close_stop_guard.py --holdings-html --kabu --prod</pre>"
+            "</body></html>", encoding="utf-8")
+
     import time as _time_mod
     _cache_bust = int(_time_mod.time())
     for _dir in ("long", "short"):
@@ -256,6 +271,7 @@ if _args.both and not _args.short:
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
             _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}?v={_cache_bust}"></iframe>\n'
+    _frames += f'<iframe id="holdings-frame" class="hold-frame" src="holdings_{_bd}.html?v={_cache_bust}"></iframe>\n'
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
@@ -279,8 +295,13 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 .pr-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .pr-btn.active{{background:#0f172a;border-bottom:2px solid #fbbf24;color:#fbbf24}}
 .nav-sep{{width:1px;background:#334155;margin:8px 8px 4px;align-self:stretch}}
-.ls-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
-.ls-frame.active{{display:block}}
+.hold-btn{{padding:9px 20px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
+  color:#94a3b8;cursor:pointer;font-size:0.92rem;font-weight:600;
+  border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
+.hold-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
+.hold-btn.active{{background:#0f172a;border-bottom:2px solid #60a5fa;color:#60a5fa}}
+.ls-frame,.hold-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
+.ls-frame.active,.hold-frame.active{{display:block}}
 </style>
 </head>
 <body>
@@ -291,7 +312,8 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 var _curDir = 'long';
 var _curPr  = {_first_mp};
 function _showFrame() {{
-  document.querySelectorAll('.ls-frame').forEach(f => f.classList.remove('active'));
+  document.querySelectorAll('.ls-frame,.hold-frame').forEach(f => f.classList.remove('active'));
+  document.querySelectorAll('.hold-btn').forEach(b => b.classList.remove('active'));
   var f = document.getElementById('ls-' + _curDir + '-' + _curPr);
   if (f) f.classList.add('active');
 }}
@@ -306,6 +328,12 @@ function switchPr(pr) {{
   document.querySelectorAll('.pr-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   _showFrame();
+}}
+function switchHoldings(ev) {{
+  document.querySelectorAll('.ls-frame,.hold-frame').forEach(f => f.classList.remove('active'));
+  document.querySelectorAll('.hold-btn').forEach(b => b.classList.remove('active'));
+  ev.target.classList.add('active');
+  document.getElementById('holdings-frame').classList.add('active');
 }}
 </script>
 </body>

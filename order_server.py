@@ -48,8 +48,28 @@ def _f(v, default=0.0):
         return default
 
 
+def _log_placed_order(rec: dict) -> None:
+    """発注内容を placed_orders_<date>.csv に追記する(保有銘柄タブのソース)。"""
+    import csv
+    from pathlib import Path
+    d = datetime.now(JST).strftime("%Y-%m-%d")
+    path = Path(__file__).resolve().parent / f"placed_orders_{d}.csv"
+    cols = ["placed_at", "symbol", "name", "strategy", "side", "qty",
+            "entry", "stop", "target", "env"]
+    new = not path.exists()
+    try:
+        with path.open("a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            if new:
+                w.writeheader()
+            w.writerow({k: rec.get(k, "") for k in cols})
+    except Exception as e:
+        print(f"  ⚠ 発注ログ書き込み失敗: {e}")
+
+
 def place_order(symbol: str, entry: float, qty: int, side: str,
-                strat: str = "", target: float = 0.0) -> str:
+                strat: str = "", target: float = 0.0,
+                stop: float = 0.0, name: str = "") -> str:
     """逆指値エントリーを発注し、結果メッセージを返す。
     target>0 かつ実発注なら、約定監視に登録して約定後に利確指値を自動発注する。"""
     symbol = (symbol or "").split(".")[0].strip()
@@ -111,6 +131,13 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 _pending.append({"symbol": symbol, "side": side, "qty": qty,
                                  "target": float(target), "strategy": strat})
             watch_note = f" / 約定したら利確@{float(target):,.0f}を自動発注(監視中)"
+        if EXECUTE:
+            _log_placed_order({
+                "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                "symbol": symbol, "name": name, "strategy": strat, "side": side,
+                "qty": qty, "entry": f"{entry:.0f}", "stop": f"{stop:.0f}" if stop else "",
+                "target": f"{target:.0f}" if target else "", "env": env,
+            })
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
                 f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
     return f"⚠ 発注応答エラー: {symbol} {res}"
@@ -259,6 +286,8 @@ class Handler(BaseHTTPRequestHandler):
                 side=form.get("side", "long"),
                 strat=(form.get("strategy") or "").upper(),
                 target=_f(form.get("target")),
+                stop=_f(form.get("stop")),
+                name=form.get("name", ""),
             )
         except Exception as e:
             msg = f"エラー: {e}"

@@ -215,6 +215,127 @@ def _place_target_order(cli, pos: dict, open_orders: list[dict]) -> tuple[str, s
     return "fail", f"  ⚠失敗 {sym} {name}: 応答 {res}"
 
 
+def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
+    """実際に約定した保有銘柄(kabu建玉)の詳細HTMLを生成する。
+    タイムカット日・損切り/利確・含み損益を表示。price_fn(sym)->現在値 を渡すと損益も表示。"""
+    import html as _html
+    from backtest_limit_entry import default_max_hold as _dmh, MAX_HOLD as _MH
+    today_b = pd.Timestamp(now.date())
+
+    rows_data = []
+    for pos in positions:
+        sym   = str(pos["symbol"]).split(".")[0]
+        name  = pos.get("name", "")
+        strat = pos.get("strategy", "")
+        is_short = pos["is_short"]
+        qty   = pos.get("qty", 100)
+        fp    = pos.get("fill_price", 0) or 0
+        sp    = pos.get("stop_price")
+        tp    = pos.get("target_price")
+        fd    = pos.get("fill_date", "").strip()
+        mh    = _dmh(strat)
+        # タイムカット日と残り
+        if fd:
+            try:
+                fb = pd.Timestamp(fd)
+                hold_days = len(pd.bdate_range(fb, today_b)) - 1
+                tc = (fb + pd.tseries.offsets.BDay(mh)).normalize()
+                tc_str = f"{tc:%Y-%m-%d(%a)}"
+                remaining = mh - hold_days
+                rem_str = ("本日以前" if remaining <= 0 else
+                           "翌営業日" if remaining == 1 else f"あと{remaining}営業日")
+                sort_key = tc
+            except Exception:
+                tc_str, rem_str, hold_days, sort_key = "—", "約定日不明", "—", pd.Timestamp.max
+        else:
+            tc_str, rem_str, hold_days, sort_key = "—", "約定日不明", "—", pd.Timestamp.max
+        # 現在値・含み損益
+        cur = price_fn(sym) if price_fn else None
+        if cur and fp:
+            pnl = (fp - cur) * qty if is_short else (cur - fp) * qty
+        else:
+            pnl = None
+        rows_data.append({
+            "sym": sym, "name": name, "strat": strat, "is_short": is_short,
+            "qty": qty, "fp": fp, "sp": sp, "tp": tp, "fd": fd,
+            "hold_days": hold_days, "mh": mh, "tc_str": tc_str, "rem_str": rem_str,
+            "cur": cur, "pnl": pnl, "sort_key": sort_key,
+        })
+    rows_data.sort(key=lambda r: r["sort_key"])
+
+    def _pct(base, other):
+        return f"{(other-base)/base*100:+.1f}%" if (base and other) else ""
+
+    trs = ""
+    total_pnl = 0.0
+    for r in rows_data:
+        side_lbl = "ショート" if r["is_short"] else "ロング"
+        side_col = "#f87171" if r["is_short"] else "#38bdf8"
+        sp_pct = ""
+        tp_pct = ""
+        if r["fp"] and r["sp"]:
+            sp_pct = f"{(r['sp']-r['fp'])/r['fp']*100:+.1f}%"
+        if r["fp"] and r["tp"]:
+            tp_pct = f"{(r['tp']-r['fp'])/r['fp']*100:+.1f}%"
+        cur_str = f"{r['cur']:,.0f}" if r["cur"] else "—"
+        if r["pnl"] is not None:
+            total_pnl += r["pnl"]
+            pnl_col = "#4ade80" if r["pnl"] >= 0 else "#f87171"
+            pnl_str = f"<span style='color:{pnl_col};font-weight:700'>{r['pnl']:+,.0f}円</span>"
+        else:
+            pnl_str = "—"
+        rem_col = "#f59e0b" if "あと" in r["rem_str"] or "翌" in r["rem_str"] else "#f87171"
+        trs += f"""<tr>
+  <td style="text-align:left">{_html.escape(r['sym'])}<br><span style="color:#64748b;font-size:.78rem">{_html.escape(r['name'])}</span></td>
+  <td style="text-align:center">{_html.escape(r['strat'])}</td>
+  <td style="text-align:center;color:{side_col}">{side_lbl}</td>
+  <td style="text-align:right;color:#94a3b8">{_html.escape(r['fd'] or '—')}</td>
+  <td style="text-align:right">{r['fp']:,.0f}円</td>
+  <td style="text-align:right;color:#f87171">{(f"{r['sp']:,.0f}円<br><span style='font-size:.72rem'>{sp_pct}</span>") if r['sp'] else '—'}</td>
+  <td style="text-align:right;color:#4ade80">{(f"{r['tp']:,.0f}円<br><span style='font-size:.72rem'>{tp_pct}</span>") if r['tp'] else '—'}</td>
+  <td style="text-align:right;color:#e2e8f0">{cur_str}</td>
+  <td style="text-align:right">{pnl_str}</td>
+  <td style="text-align:center;color:#f59e0b;font-weight:700">{r['tc_str']}</td>
+  <td style="text-align:center;color:{rem_col}">{r['rem_str']}</td>
+</tr>"""
+
+    if not rows_data:
+        trs = ('<tr><td colspan="11" style="text-align:center;color:#94a3b8;padding:24px">'
+               '実際に約定した保有銘柄はありません（kabu建玉なし）</td></tr>')
+
+    total_row = ""
+    if any(r["pnl"] is not None for r in rows_data):
+        tcol = "#4ade80" if total_pnl >= 0 else "#f87171"
+        total_row = (f'<p style="margin-top:10px;font-size:1.05rem">含み損益合計: '
+                     f'<span style="color:{tcol};font-weight:700">{total_pnl:+,.0f}円</span></p>')
+
+    return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>保有銘柄 詳細 {now:%Y-%m-%d}</title>
+<style>
+  body {{ font-family:-apple-system,"Hiragino Sans",sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:16px; }}
+  h2 {{ font-size:1.15rem; border-left:4px solid #2d6cdf; padding-left:8px; }}
+  .sub {{ color:#94a3b8; font-size:.85rem; margin-bottom:14px; }}
+  table {{ width:100%; border-collapse:collapse; background:#1e293b; border-radius:10px; overflow:hidden; }}
+  th {{ background:#0f172a; color:#94a3b8; padding:9px; font-size:.74rem; }}
+  td {{ padding:8px 10px; border-bottom:1px solid #334155; font-size:.82rem; }}
+  tr:hover td {{ background:#243045; }}
+</style></head><body>
+<h2>📌 保有銘柄 詳細（実際に約定した建玉）</h2>
+<p class="sub">基準日 {now:%Y-%m-%d %H:%M} JST ／ 保有期限(タイムカット) = 約定日 + MAX_HOLD営業日（MOM=20日, 他=7日）<br>
+  ※ kabuの実建玉のみ表示（実際に約定した銘柄）。損切り/利確はシグナル(発注時)の値。</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">銘柄/名前</th><th>戦略</th><th>区分</th><th>約定日</th><th>約定値</th>
+    <th>損切り</th><th>利確目標</th><th>現在値</th><th>含み損益</th>
+    <th>タイムカット日</th><th>残り</th>
+  </tr></thead>
+  <tbody>{trs}</tbody>
+</table>
+{total_row}
+</body></html>"""
+
+
 def _fill_date_from_signal(signal_date: str) -> str:
     """シグナル日(終値判定)の翌営業日 = 逆指値約定日 を返す。空なら空文字。"""
     if not signal_date:
@@ -757,6 +878,9 @@ def main() -> int:
     ap.add_argument("--with-targets", action="store_true",
                     help="損切り/タイムカット判定の際に、決済しない保有の利確指値が"
                          "未設定なら自動で発注する")
+    ap.add_argument("--holdings-html", action="store_true",
+                    help="実際に約定した保有銘柄の詳細(タイムカット日・損切り/利確)を"
+                         "HTMLに出力して終了 (発注なし)")
     args = ap.parse_args()
 
     log_path = args.log or _default_log_path(args.aggressive)
@@ -862,6 +986,24 @@ def main() -> int:
             print(f"  {tcs:<14} {pos['symbol']:<8} {nm:<16} {pos.get('strategy',''):<6} "
                   f"{side_label:<5} {fd:<11} {note}")
         print()
+        return 0
+
+    # ── --holdings-html: 実際に約定した保有銘柄の詳細HTMLを出力 ──
+    if args.holdings_html:
+        def _price(sym):
+            try:
+                return get_current_price_fallback(sym)
+            except Exception:
+                return None
+        html_str = _build_holdings_html(positions, now, price_fn=_price)
+        out = Path(__file__).resolve().parent / f"holdings_{now:%Y-%m-%d}.html"
+        out.write_text(html_str, encoding="utf-8")
+        print(f"保有銘柄HTML: {out}  ({len(positions)}件)")
+        try:
+            from _open_html import open_html
+            open_html(out.resolve().as_uri())
+        except Exception:
+            pass
         return 0
 
     # ── --targets: 各保有に利確指値を発注 (リレー未対応のため約定後に置く) ──
