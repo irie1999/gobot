@@ -325,9 +325,11 @@ def fetch_n225(years: int, end_date=None) -> pd.Series:
 
 
 # トレンド判定パラメータ（調整可）
-TREND_MA_SHORT = 5     # 短期MA（小さいほど細かく区切れる）
-TREND_MA_LONG  = 10    # 長期MA
-TREND_DROP_PCT = -3.0  # 直近5日でこの%以下の下落は MA に関わらず「下落」扱い(V字対策)
+TREND_MA_SHORT = 5      # 短期MA（小さいほど細かく区切れる）
+TREND_MA_LONG  = 10     # 長期MA
+TREND_DROP_PCT = -3.0   # 直近5日でこの%以下の下落は MA に関わらず「下落」扱い(V字対策)
+TREND_CRASH_PCT      = -3.5  # この%以下の「単日」急落があれば「下落」扱い
+TREND_CRASH_LOOKBACK = 3     # 単日急落を何営業日さかのぼって警戒扱いにするか
 
 
 def label_trend(close: pd.Series) -> pd.Series:
@@ -340,10 +342,13 @@ def label_trend(close: pd.Series) -> pd.Series:
     ma_s = close.rolling(TREND_MA_SHORT).mean()
     ma_l = close.rolling(TREND_MA_LONG).mean()
     ret5 = close.pct_change(5) * 100
+    ret1 = close.pct_change() * 100                       # 単日リターン
+    recent_crash = ret1.rolling(TREND_CRASH_LOOKBACK).min() <= TREND_CRASH_PCT
     trend = pd.Series("sideways", index=close.index)
     trend[(close > ma_s) & (ma_s > ma_l)] = "up"
     trend[(close < ma_s) & (ma_s < ma_l)] = "down"
-    trend[ret5 <= TREND_DROP_PCT] = "down"   # 急落は下落（V字含む）
+    trend[ret5 <= TREND_DROP_PCT] = "down"   # 5日累積の急落(V字含む)
+    trend[recent_crash] = "down"             # 単日急落の直後数日も下落扱い
     return trend
 
 
