@@ -433,12 +433,16 @@ def get_regime(close: pd.Series) -> dict:
     mom20   = (cur / float(close.iloc[-21]) - 1) * 100
     max_1d_drop = float(rets.tail(30).min() * 100)
 
-    if cur > ma10 and ma10 > ma25:
-        trend = "up"
-    elif cur < ma10 and ma10 < ma25:
-        trend = "down"
-    else:
-        trend = "sideways"
+    # 方向は label_trend(MA5/10+急落) に統一 → 相場環境タブとトレンド期間タブを一致させる
+    try:
+        trend = str(label_trend(close).iloc[-1])
+    except Exception:
+        if cur > ma10 and ma10 > ma25:
+            trend = "up"
+        elif cur < ma10 and ma10 < ma25:
+            trend = "down"
+        else:
+            trend = "sideways"
 
     vol_level   = "high" if vol14 > 1.5 else ("mid" if vol14 > 0.8 else "low")
     above_ma200 = (cur >= ma200) if ma200 else True
