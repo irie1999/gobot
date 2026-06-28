@@ -237,9 +237,9 @@ def _watch_loop():
         if cli is None:
             try:
                 cli = _watch_build_client()
-                if _warned:
-                    print("  ✓ 監視用kabu接続 復旧")
+                print("  ✓ 監視用kabu接続OK → 保有タブ(holdings_latest.html)を生成します")
                 _warned = False
+                _regen_holdings(cli)   # 接続できたら即 保有タブ生成(起動直後に反映)
             except Exception:
                 if not _warned:   # 連続スパムを避け、最初の1回だけ警告
                     print("  ⚠ 監視用kabu未接続: kabuステーション(本番18080)を起動・ログインしてください。"
