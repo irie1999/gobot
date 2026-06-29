@@ -339,7 +339,29 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 7
+_NORM_CACHE_VERSION = 8
+
+
+def _align_scale(df_long: pd.DataFrame, df_recent: pd.DataFrame) -> pd.DataFrame:
+    """
+    quarantine(df_long) を minute_5m(df_recent) の価格スケールに合わせる。
+
+    株式分割/調整差で2ソースの価格水準が異なると、マージ時に minute に
+    欠損がある時刻だけ quarantine の別スケール値が出て偽スパイクになる
+    (例: 1379.T minute≈1823 / quarantine≈4250)。重複する同一時刻の
+    close 比 (recent/long) の中央値でスケール係数を求め、係数が 1 から
+    大きく外れていれば quarantine 全体を補正して水準を一致させる。
+    """
+    common = df_recent.index.intersection(df_long.index)
+    if len(common) < 20:
+        return df_long
+    ratio = (df_recent.loc[common, "close"] / df_long.loc[common, "close"]).median()
+    if not (ratio > 0) or (0.8 <= ratio <= 1.25):
+        return df_long  # スケール一致 → 補正不要
+    df_long = df_long.copy()
+    for c in ("open", "high", "low", "close"):
+        df_long[c] = df_long[c] * ratio
+    return df_long
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
@@ -367,6 +389,7 @@ def _load_local_full(jq_code: str) -> pd.DataFrame | None:
     if df_recent is None and df_long is None:
         return None
     if df_recent is not None and df_long is not None:
+        df_long = _align_scale(df_long, df_recent)  # 分割/調整差を補正
         combined = pd.concat([df_long, df_recent])
         combined = combined[~combined.index.duplicated(keep="last")]
         df = combined.sort_index()
