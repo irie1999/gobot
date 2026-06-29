@@ -88,10 +88,14 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── DateTime 構築 ─────────────────────────────────────
     if "DateTime" in df.columns:
-        dt_series = pd.to_datetime(df["DateTime"])
+        dt_series = pd.to_datetime(df["DateTime"], errors="coerce")
     elif "Date" in df.columns and "Time" in df.columns:
+        # Date 列は "2024-04-12" / "2024-04-12 00:00:00" / Timestamp など
+        # 形式がまちまち。まず日付部分だけに正規化してから Time と連結する。
+        date_part = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        time_part = df["Time"].astype(str).str.strip()
         dt_series = pd.to_datetime(
-            df["Date"].astype(str) + " " + df["Time"].astype(str),
+            date_part + " " + time_part,
             format="%Y-%m-%d %H:%M",
             errors="coerce",
         )
