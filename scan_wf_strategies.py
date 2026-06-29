@@ -221,7 +221,7 @@ def main() -> None:
         rows = sorted(per_strategy[s],
                       key=lambda r: (-r["folds_passed"], -r["total_test_pnl"]))
         csv_path = out_dir / f"wf_strategies_{s}_{TODAY}.csv"
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             for r in rows:
