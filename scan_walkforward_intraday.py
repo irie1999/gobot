@@ -448,6 +448,10 @@ def main() -> None:
     parser.add_argument("--diagnose", action="store_true",
                         help="全銘柄×全戦略のトレードを集計し決済理由(目標達成/損切り/"
                              "引け強制)の内訳を表示 (なぜ負けるかの定量分析)")
+    parser.add_argument("--gap-min-pct", type=float, default=None,
+                        help="GAP_DOWN 最小ギャップ率 (例:0.015=1.5pct). 浅い下げを除外")
+    parser.add_argument("--gap-max-pct", type=float, default=None,
+                        help="GAP_DOWN 最大ギャップ率 (例:0.06=6pct). 深い急落を除外")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true")
     mode_group.add_argument("--conservative", action="store_true")
@@ -475,6 +479,15 @@ def main() -> None:
         TEST_MIN_TRADES = args.test_trades
     if args.folds_pass_required is not None:
         FOLDS_PASS_REQUIRED = args.folds_pass_required
+
+    # GAP_DOWN ギャップ幅フィルタの閾値上書き (backtest_intraday のモジュール定数)
+    import backtest_intraday as _bti
+    if args.gap_min_pct is not None:
+        _bti.GAP_DOWN_MIN_PCT = args.gap_min_pct
+    if args.gap_max_pct is not None:
+        _bti.GAP_DOWN_MAX_PCT = args.gap_max_pct
+    print(f"  GAP_DOWNギャップ幅フィルタ: "
+          f"{_bti.GAP_DOWN_MIN_PCT*100:.1f}pct 〜 {_bti.GAP_DOWN_MAX_PCT*100:.1f}pct")
 
     if args.folds_short:
         FOLDS = FOLDS_SHORT

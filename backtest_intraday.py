@@ -57,6 +57,12 @@ MIN_PRICE         = 100.0
 MAX_PRICE         = 100_000.0
 BACKTEST_DAYS     = 180             # デフォルトバックテスト期間
 
+# GAP_DOWN ギャップ幅フィルタ (寄りギャップダウン率 = (前日終値-始値)/前日終値)
+#   浅すぎ(<MIN)=ノイズでエッジ無し / 深すぎ(>MAX)=悪材料急落で埋まらず大損。
+#   適度な売られすぎだけ拾うことで期待値を改善する。0.0/1.0 で実質無効。
+GAP_DOWN_MIN_PCT  = 0.015           # 最小ギャップ率 1.5%
+GAP_DOWN_MAX_PCT  = 0.06            # 最大ギャップ率 6%
+
 
 def _is_trading_time(t: dtime) -> bool:
     """東証の立会時間か判定。"""
@@ -419,6 +425,11 @@ def run_intraday_backtest(
             # 始値が前日終値 - ATR×em を下回るギャップダウン日のみ (mean reversion)
             day_open = float(day_df.iloc[0]["open"])
             if day_open >= prev_close - atr * entry_atr_mult:
+                continue
+            # ギャップ幅フィルタ: 適度な売られすぎ (MIN〜MAX) だけ拾う。
+            # 深い急落(悪材料)は埋まらず大損、浅い下げはエッジ無し。
+            gap_pct = (prev_close - day_open) / prev_close if prev_close > 0 else 0.0
+            if gap_pct < GAP_DOWN_MIN_PCT or gap_pct > GAP_DOWN_MAX_PCT:
                 continue
             # order_p = day_open にすることで 1本目から即エントリー
             order_p = day_open
