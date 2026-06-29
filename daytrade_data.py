@@ -580,7 +580,68 @@ if __name__ == "__main__":
                         help="quarantine_5m / minute_5m フォルダ全体の期間を一覧 (2年分データの所在確認)")
     parser.add_argument("--dump-day", type=str, default=None,
                         help="指定日(YYYY-MM-DD)の生バーを両ファイルから表示 (破損調査)")
+    parser.add_argument("--audit", action="store_true",
+                        help="クリーン後データの残存破損を監査 (急変→即戻りの単独バーを検出)")
+    parser.add_argument("--audit-threshold", type=float, default=0.10,
+                        help="監査の急変閾値 (デフォルト0.10=5分足で10pct超の変動を異常とみなす)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="監査対象を先頭N銘柄に制限")
     args = parser.parse_args()
+
+    if args.audit:
+        T = args.audit_threshold
+        codes = available_local_symbols()
+        syms = (args.symbols if args.symbols
+                else [jq_to_yf(c) for c in codes])
+        if args.limit > 0:
+            syms = syms[:args.limit]
+        print(f"=== データ監査: {len(syms)}銘柄  閾値={T*100:.0f}pct "
+              f"(クリーン後データの残存破損検出) ===")
+        print("  検出: 5分足が閾値超で急変し、次バーで即戻る(往復)単独バー")
+        print("        = 正常市場ではほぼ起きない → 残存破損の指標\n")
+        total_bars = 0
+        total_spikes = 0       # 急変→即戻り (往復) = ほぼ破損
+        total_extreme = 0      # 単純な閾値超え変動 (急変だが戻らない=本物の可能性)
+        worst = []             # (revert_size, sym, ts, prev, cur, nxt)
+        done = 0
+        for sym in syms:
+            df = load_intraday(sym, days=900, source="local")
+            done += 1
+            if df is None or len(df) < 20:
+                continue
+            c = df["close"].values
+            idx = df.index
+            # 同日内のみ比較 (日跨ぎ/ギャップを除外)
+            same_day = (idx.normalize().values[1:] == idx.normalize().values[:-1])
+            ret = c[1:] / c[:-1] - 1.0
+            total_bars += len(c)
+            for i in range(len(ret) - 1):
+                if not (same_day[i] and same_day[i + 1]):
+                    continue
+                if abs(ret[i]) > T:
+                    total_extreme += 1
+                    # 往復判定: 急変の次バーが逆方向に同程度戻る
+                    if (abs(ret[i + 1]) > T and ret[i] * ret[i + 1] < 0):
+                        total_spikes += 1
+                        revert = min(abs(ret[i]), abs(ret[i + 1]))
+                        worst.append((revert, sym, idx[i + 1],
+                                      c[i], c[i + 1], c[i + 2]))
+            if done % 200 == 0:
+                print(f"  ...{done}/{len(syms)} 監査済", flush=True)
+        print(f"\n  総バー数: {total_bars:,}")
+        print(f"  閾値超の急変: {total_extreme:,}本 "
+              f"({total_extreme/max(total_bars,1)*100:.3f}pct)")
+        print(f"  ★急変→即戻り(往復=残存破損疑い): {total_spikes:,}本 "
+              f"({total_spikes/max(total_bars,1)*100:.4f}pct)")
+        worst.sort(reverse=True)
+        if worst:
+            print(f"\n  --- 残存破損疑い 上位10 (往復が大きい順) ---")
+            for rev, sym, ts, prev, cur, nxt in worst[:10]:
+                print(f"    {sym:>8} {ts}  {prev:.0f}→{cur:.0f}→{nxt:.0f} "
+                      f"(往復{rev*100:.0f}pct)")
+        else:
+            print("\n  ✓ 往復スパイク(残存破損疑い)は検出されませんでした。")
+        sys.exit(0)
 
     if args.dump_day:
         import pickle as _pickle
