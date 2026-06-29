@@ -11,7 +11,7 @@ param(
     [double]$MinPrice = 1000,   # 低位株除外
     [string]$Strategy = "ALL",  # "Donchian" など個別指定も可
     [int]$Limit = 0,            # 先頭N銘柄に制限 (0=全銘柄)。本番前の動作確認に使う
-    [int]$HoldoutDays = 0,      # 直近N日を選定から除外しOOS答え合わせ (例:90)
+    [int[]]$Holdouts = @(30, 90, 180),  # ホールドアウト日数の一括検証 (スイング同様)。@(0)=除外なし
     [switch]$SkipAudit          # データ監査をスキップ
 )
 
@@ -37,23 +37,31 @@ Log "==================================================================="
 
 $limitArg = if ($Limit -gt 0) { @("--limit", $Limit) } else { @() }
 $stratArg = if ($Strategy -eq "ALL") { @() } else { @("--strategy", $Strategy) }
-$hoArg    = if ($HoldoutDays -gt 0) { @("--holdout-days", $HoldoutDays) } else { @() }
+Log "  Holdouts(除外日数の一括検証): $($Holdouts -join ', ')"
+Log "==================================================================="
 
 # ── データ品質の監査 (往復破損が増えていないか確認) ──
 if (-not $SkipAudit) {
-    Log "[1/2] データ監査 (残存破損チェック)..."
+    Log "[監査] データ品質 (残存破損チェック)..."
     python daytrade_data.py --audit @limitArg 2>&1 | Tee-Object -FilePath $log -Append
 } else {
-    Log "[1/2] データ監査スキップ"
+    Log "[監査] スキップ"
 }
 
-# ── 戦略 WalkForward 検証 ──
-Log "[2/2] WalkForward 検証 (戦略=$Strategy)..."
-python scan_wf_strategies.py --workers $Workers --max-price $MaxPrice --min-price $MinPrice @stratArg @limitArg @hoArg 2>&1 |
-    Tee-Object -FilePath $log -Append
+# ── 各ホールドアウト設定で WalkForward 検証 (スイング同様の複数設定一括) ──
+$i = 0
+foreach ($ho in $Holdouts) {
+    $i++
+    $hoArg = if ($ho -gt 0) { @("--holdout-days", $ho) } else { @() }
+    $label = if ($ho -gt 0) { "ホールドアウト${ho}日" } else { "除外なし" }
+    Log "[WF $i/$($Holdouts.Count)] $label で検証中..."
+    python scan_wf_strategies.py --workers $Workers --max-price $MaxPrice --min-price $MinPrice @stratArg @limitArg @hoArg 2>&1 |
+        Tee-Object -FilePath $log -Append
+}
 
 Log "==================================================================="
 Log " 完了。確認するもの:"
 Log "   - ログ全体:        $log"
-Log "   - 戦略別の合格銘柄: walkforward_results\wf_strategies_*_$(Get-Date -Format 'yyyy-MM-dd').csv"
+Log "   - 各ホールドアウト別CSV: walkforward_results\wf_strategies_<戦略>_ho<N>_$(Get-Date -Format 'yyyy-MM-dd').csv"
+Log "   (HO30/90/180 の全てで合格し holdout損益がプラスの銘柄が本物の候補)"
 Log "==================================================================="
