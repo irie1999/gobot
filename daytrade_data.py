@@ -216,7 +216,35 @@ def _drop_intraday_outliers(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["open", "high", "low", "close"]:
         r = df[c] / day_med
         keep &= (~valid) | ((r >= DLO) & (r <= DHI))
-    return df[keep]
+    df = df[keep]
+    return _drop_roundtrip_spikes(df)
+
+
+def _drop_roundtrip_spikes(df: pd.DataFrame, T: float = 0.10) -> pd.DataFrame:
+    """
+    『1本だけ急変→次バーで即戻る(往復)』スパイクを除去する。
+
+    中央値フィルタは、スパイクが密に出ると中央値自体が汚れて素通りさせて
+    しまう (例: 1379.T が 1823↔4250 を繰り返す)。これは中央値に依存せず、
+    隣接バーとの往復 (前バーから T 超で動き、次バーで逆方向に T 超戻る) で
+    孤立スパイクを直接検出する。5分足が±10%超を往復するのは正常市場では
+    ほぼ無いため、本物の値動きは誤除去しない。同日内の連続バーのみ対象。
+    """
+    if df is None or len(df) < 3:
+        return df
+    c = df["close"].values
+    day = df.index.normalize().values
+    ret_prev = c[1:-1] / c[:-2] - 1.0     # 前バーからの変化 (中央バー基準)
+    ret_next = c[2:] / c[1:-1] - 1.0      # 次バーへの変化
+    same = (day[1:-1] == day[:-2]) & (day[2:] == day[1:-1])
+    is_spike = (
+        same
+        & (abs(ret_prev) > T) & (abs(ret_next) > T)
+        & (ret_prev * ret_next < 0)        # 往復 (逆方向)
+    )
+    keep = pd.Series(True, index=df.index)
+    keep.iloc[1:-1] = ~is_spike
+    return df[keep.values]
 
 
 def inspect_pkl(symbol: str) -> None:
@@ -315,7 +343,7 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 5
+_NORM_CACHE_VERSION = 6
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
