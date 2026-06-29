@@ -215,14 +215,30 @@ def _place_target_now(cli, p: dict) -> str:
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
 
 
+def _kabu_get(fn, *a, tries=4, **k):
+    """429(レート制限)時にバックオフ再試行する get 系ラッパ。"""
+    last = None
+    for i in range(tries):
+        try:
+            return fn(*a, **k)
+        except Exception as e:
+            last = e
+            if "429" in str(e) or "Too Many" in str(e):
+                _time.sleep(1.0 + i)   # 1,2,3,4秒
+                continue
+            raise
+    raise last
+
+
 def _load_signal_targets() -> dict:
-    """signals_latest.json / signals_latest_short.json から
-    {(symbol, side): {"target":利確価格, "strategy":戦略}} を作る。
-    利確補完(接続時に取りこぼした利確を発注)で参照する。"""
-    import json
+    """(symbol, side) -> {"target":利確価格, "strategy":戦略} を作る。
+    当日シグナル(signals_latest.json)に加え、my_positions.csv(実保有の記録)も読み、
+    古い保有(当日シグナルに無い銘柄)の利確目標もカバーする。my_positions.csvを優先。"""
+    import json, csv
     from pathlib import Path
     out: dict = {}
     base = Path(__file__).resolve().parent
+    # 1) 当日シグナル
     for fn, side in (("signals_latest.json", "long"),
                      ("signals_latest_short.json", "short")):
         p = base / fn
@@ -237,26 +253,61 @@ def _load_signal_targets() -> dict:
             tp = _f(s.get("target_p"))
             if sym and tp > 0:
                 out[(sym, side)] = {"target": tp, "strategy": s.get("strategy", "")}
+    # 2) my_positions.csv(保有記録)で上書き＝古い保有もカバー
+    pcsv = base / "my_positions.csv"
+    if pcsv.exists():
+        try:
+            with open(pcsv, encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if str(row.get("status", "")).strip() not in ("holding", "filled"):
+                        continue
+                    sym = str(row.get("symbol", "")).split(".")[0]
+                    side = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                    tp = _f(row.get("target_price"))
+                    if sym and tp > 0:
+                        out[(sym, side)] = {"target": tp, "strategy": row.get("strategy", "")}
+        except Exception:
+            pass
+    return out
+
+
+def _active_close_set(cli) -> set:
+    """利確(決済)注文が既に出ている (symbol, side) の集合。get_ordersは1回だけ(429回避)。
+    long利確=売(1) / short利確=買戻(2)。"""
+    out: set = set()
+    try:
+        orders = _kabu_get(cli.get_orders)
+    except Exception as e:
+        print(f"  ⚠ 利確補完: 注文一覧取得失敗 ({e}) → 重複チェックなしで続行")
+        return out
+    ACTIVE = {1, 2, 3, 4, 5}
+    for o in orders or []:
+        if int(o.get("OrderState") or o.get("State") or 0) not in ACTIVE:
+            continue
+        sym = str(o.get("Symbol", "")).split(".")[0]
+        s = str(o.get("Side", ""))
+        if s == "1":
+            out.add((sym, "long"))
+        elif s == "2":
+            out.add((sym, "short"))
     return out
 
 
 def _backfill_targets(cli) -> None:
     """実建玉を調べ、利確(決済)注文が無いポジションに利確指値を補完発注する。
 
-    order_server が「約定の瞬間」に起動していなくても(=9:00常駐していなくても)、
-    kabu に接続できた時点で保有を点検し、利確の取りこぼしを埋める。
-    目標価格は signals_latest.json / _short の target_p を symbol+side で照合。
-    既に利確注文があるものは _place_target_now 内の重複チェックでスキップ。"""
+    order_server が約定の瞬間に起動していなくても(9:00常駐不要)、接続時に保有を点検し
+    取りこぼしを埋める。目標価格は signals_latest.json + my_positions.csv で照合。
+    get_orders/get_positions は1回だけ叩き、429時はバックオフ再試行する。"""
     if not EXECUTE:
         return
     try:
-        positions = cli.get_positions(product=0)
+        positions = _kabu_get(cli.get_positions, product=0)
     except Exception as e:
         print(f"  ⚠ 利確補完: 建玉取得失敗のためスキップ ({e})")
         return
-    # (symbol, side) ごとに保有数量を合算
     agg: dict = {}
-    for p in positions:
+    for p in positions or []:
         sym = str(p.get("Symbol", "")).split(".")[0]
         qty = int(p.get("LeavesQty") or p.get("HoldQty") or 0)
         if not sym or qty <= 0:
@@ -266,20 +317,22 @@ def _backfill_targets(cli) -> None:
     if not agg:
         return
     targets = _load_signal_targets()
+    have_close = _active_close_set(cli)   # 既存利確を一括取得(get_ordersは1回)
     for (sym, side), qty in agg.items():
+        if (sym, side) in have_close:
+            continue   # 既に利確あり
+        info = targets.get((sym, side))
+        if not info or info["target"] <= 0:
+            print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が signals/my_positions.csv に無し "
+                  f"→ 手動で利確を入れてください")
+            continue
         try:
-            if _has_active_close_order(cli, sym, side):
-                continue   # 既に利確あり
-            info = targets.get((sym, side))
-            if not info or info["target"] <= 0:
-                print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が signals_latest"
-                      f"{'_short' if side=='short' else ''}.json に無し → 手動で利確を入れてください")
-                continue
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
                                          "target": info["target"], "strategy": info["strategy"]})
             print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
         except Exception as e:
             print(f"  ⚠ 利確補完エラー {sym}: {e}")
+        _time.sleep(0.6)   # 連続発注のレート制限(429)回避
 
 
 def _regen_holdings(cli) -> None:
