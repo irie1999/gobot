@@ -506,7 +506,8 @@ if __name__ == "__main__":
             for i, f in enumerate(files, 1):
                 total_bytes += f.stat().st_size
                 try:
-                    raw = _pickle.loads(f.read_bytes())
+                    with open(f, "rb") as _fh:
+                        raw = _pickle.load(_fh)
                     rng = _cheap_daterange(raw)
                     del raw
                     if rng is None:
