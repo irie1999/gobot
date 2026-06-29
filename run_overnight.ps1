@@ -1,0 +1,53 @@
+# run_overnight.ps1 ― デイトレ戦略の夜間一括 WalkForward 検証
+# 使い方:  .\run_overnight.ps1
+#          .\run_overnight.ps1 -Workers 6 -MaxPrice 6000 -MinPrice 1000
+#
+# 全9戦略 × 全プライム銘柄を OOS 検証し、結果を overnight_<日時>.log に保存。
+# 朝に log と walkforward_results\wf_strategies_*.csv を確認する。
+
+param(
+    [int]$Workers  = 8,
+    [double]$MaxPrice = 6000,   # 1株6000円以下 (60万円で100株)
+    [double]$MinPrice = 1000,   # 低位株除外
+    [string]$Strategy = "ALL",  # "Donchian" など個別指定も可
+    [int]$Limit = 0,            # 先頭N銘柄に制限 (0=全銘柄)。本番前の動作確認に使う
+    [switch]$SkipAudit          # データ監査をスキップ
+)
+
+$ErrorActionPreference = "Continue"
+$ts  = Get-Date -Format "yyyyMMdd_HHmm"
+$log = "overnight_$ts.log"
+
+function Log($msg) {
+    $line = "[$(Get-Date -Format 'HH:mm:ss')] $msg"
+    Write-Host $line
+    Add-Content -Path $log -Value $line
+}
+
+$mode = if ($Limit -gt 0) { "確認実行 (先頭${Limit}銘柄)" } else { "本番 (全プライム銘柄)" }
+Log "==================================================================="
+Log " デイトレ戦略 夜間一括 WalkForward 検証 開始  [$mode]"
+Log "  Workers=$Workers  MaxPrice=$MaxPrice  MinPrice=$MinPrice  Strategy=$Strategy"
+Log "==================================================================="
+
+$limitArg = if ($Limit -gt 0) { @("--limit", $Limit) } else { @() }
+$stratArg = if ($Strategy -eq "ALL") { @() } else { @("--strategy", $Strategy) }
+
+# ── データ品質の監査 (往復破損が増えていないか確認) ──
+if (-not $SkipAudit) {
+    Log "[1/2] データ監査 (残存破損チェック)..."
+    python daytrade_data.py --audit @limitArg 2>&1 | Tee-Object -FilePath $log -Append
+} else {
+    Log "[1/2] データ監査スキップ"
+}
+
+# ── 戦略 WalkForward 検証 ──
+Log "[2/2] WalkForward 検証 (戦略=$Strategy)..."
+python scan_wf_strategies.py --workers $Workers --max-price $MaxPrice --min-price $MinPrice @stratArg @limitArg 2>&1 |
+    Tee-Object -FilePath $log -Append
+
+Log "==================================================================="
+Log " 完了。確認するもの:"
+Log "   - ログ全体:        $log"
+Log "   - 戦略別の合格銘柄: walkforward_results\wf_strategies_*_$(Get-Date -Format 'yyyy-MM-dd').csv"
+Log "==================================================================="
