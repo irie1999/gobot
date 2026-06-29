@@ -464,50 +464,82 @@ if __name__ == "__main__":
 
     if args.survey:
         import pickle as _pickle
+        import gc
+
+        def _cheap_daterange(raw):
+            """full normalize せず日付範囲だけ安価に取得 (メモリ節約)。
+            return (first_ts, last_ts, nrows) or None。"""
+            if not isinstance(raw, pd.DataFrame) or raw.empty:
+                return None
+            nrows = len(raw)
+            # DateTime 列 or index から日付だけ拾う
+            if "DateTime" in raw.columns:
+                s = pd.to_datetime(raw["DateTime"], errors="coerce")
+            elif "Date" in raw.columns:
+                s = pd.to_datetime(raw["Date"].astype(str), errors="coerce")
+            elif "datetime" in raw.columns:
+                s = pd.to_datetime(raw["datetime"], errors="coerce")
+            elif isinstance(raw.index, pd.DatetimeIndex):
+                s = raw.index
+            else:
+                return None
+            s = pd.Series(s).dropna()
+            if s.empty:
+                return None
+            return (s.min(), s.max(), nrows)
+
         for label, dir_path in [("quarantine_5m (長期)", QUARANTINE_DIR),
                                  ("minute_5m (直近)", DATA_DIR)]:
             print(f"\n{'='*70}")
-            print(f"  {label}: {dir_path}")
-            print(f"{'='*70}")
+            print(f"  {label}: {dir_path}", flush=True)
+            print(f"{'='*70}", flush=True)
             if not dir_path.exists():
-                print("  フォルダなし")
+                print("  フォルダなし", flush=True)
                 continue
             files = sorted(dir_path.glob("*.pkl"))
             if not files:
-                print("  pkl ファイルなし")
+                print("  pkl ファイルなし", flush=True)
                 continue
             spans = []  # (days_span, code, first, last, nbars)
             total_bytes = 0
-            for f in files:
+            print(f"  走査中... ({len(files)}ファイル)", flush=True)
+            for i, f in enumerate(files, 1):
                 total_bytes += f.stat().st_size
                 try:
                     raw = _pickle.loads(f.read_bytes())
-                    df = normalize_minute_df(raw)
-                    if df is None or df.empty:
+                    rng = _cheap_daterange(raw)
+                    del raw
+                    if rng is None:
                         spans.append((-1, f.stem, None, None, 0))
-                        continue
-                    first, last = df.index[0], df.index[-1]
-                    span_days = (last - first).days
-                    spans.append((span_days, f.stem, first, last, len(df)))
+                    else:
+                        first, last, nrows = rng
+                        span_days = (last - first).days
+                        spans.append((span_days, f.stem, first, last, nrows))
                 except Exception as e:
-                    spans.append((-2, f.stem, str(e), None, 0))
+                    spans.append((-2, f.stem, str(e)[:40], None, 0))
+                if i % 200 == 0:
+                    print(f"    ...{i}/{len(files)} 完了", flush=True)
+                    gc.collect()
             ok = [s for s in spans if s[0] >= 0]
             bad = [s for s in spans if s[0] < 0]
-            print(f"  ファイル数: {len(files)}  合計: {total_bytes/1024/1024:.1f}MB")
+            print(f"  ファイル数: {len(files)}  合計: {total_bytes/1024/1024:.1f}MB",
+                  flush=True)
             if ok:
                 max_span = max(s[0] for s in ok)
                 over2y = [s for s in ok if s[0] >= 700]
                 over1y = [s for s in ok if s[0] >= 350]
-                print(f"  正常読込: {len(ok)}銘柄  最長期間: {max_span}日 (~{max_span/365:.1f}年)")
-                print(f"    ≥2年(700日): {len(over2y)}銘柄  ≥1年(350日): {len(over1y)}銘柄")
-                # 期間が長い順 上位10
-                print(f"  --- 期間が長い順 上位10 ---")
-                for span, code, first, last, n in sorted(ok, reverse=True)[:10]:
-                    print(f"    {code:>6}  {span:>4}日  {n:>6}本  "
-                          f"{first.date()} 〜 {last.date()}")
+                print(f"  正常読込: {len(ok)}銘柄  最長期間: {max_span}日 "
+                      f"(~{max_span/365:.1f}年)", flush=True)
+                print(f"    ≥2年(700日): {len(over2y)}銘柄  "
+                      f"≥1年(350日): {len(over1y)}銘柄", flush=True)
+                print(f"  --- 期間が長い順 上位10 ---", flush=True)
+                for span, code, first, last, n in sorted(
+                        ok, key=lambda x: x[0], reverse=True)[:10]:
+                    print(f"    {code:>6}  {span:>4}日  {n:>7}本  "
+                          f"{first.date()} 〜 {last.date()}", flush=True)
             if bad:
                 print(f"  ★ 読込失敗/空: {len(bad)}銘柄 "
-                      f"(例: {', '.join(s[1] for s in bad[:5])})")
+                      f"(例: {', '.join(s[1] for s in bad[:5])})", flush=True)
         sys.exit(0)
 
     if args.inspect:
