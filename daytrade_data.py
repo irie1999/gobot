@@ -149,11 +149,11 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """
-    破損バー (極端な価格) を除去する。
-
-    5分足の close が局所中央値の 3倍超 / 1/3未満 になることは正常な値動きでは
-    ありえない (yfinance 等の bad tick / 桁ズレ)。ローリング中央値 (外れ値に
-    頑健) を基準に band 外のバーを落とす。また非正の値・high<low も除去。
+    破損バーを 3 段で除去する:
+      1. クロス日ローリング中央値の[0.5,2.0]倍外れ (大きな桁ズレ/ブロック破損)
+      2. 同日中央値の[0.75,1.33]倍外れ (寄り等の単独誤バー)
+      3. 隣接バーとの往復スパイク (中央値が苦手な孤立スパイク)
+    各段は独立に必ず適用する (旧実装は高速パスで2,3段をスキップするバグがあった)。
     """
     if df is None or df.empty:
         return df
@@ -162,37 +162,34 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     df = df[base]
     if len(df) < 20:
         return df
-    # 許容帯: 5分足1本が局所中央値の 0.5倍未満/2.0倍超になることは正常市場では
-    # ありえない (値幅制限)。安値方向の破損(寄りだけ1970円等)も捕まえるため、
-    # close だけでなく high/low も基準にする (low<=open,close<=high なので
-    # high/low を見れば全OHLCをカバー)。
+    df = _drop_rolling_outliers(df)
+    df = _drop_intraday_outliers(df)
+    df = _drop_roundtrip_spikes(df)
+    return df
+
+
+def _drop_rolling_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """クロス日ローリング中央値の[LO,HI]倍を外れるバーを除去。"""
+    if df is None or len(df) < 20:
+        return df
     LO, HI = 0.5, 2.0
     cols = ["open", "high", "low", "close"]
-    # ── 高速パス: 全価格レンジが HI(=2.0)倍以内なら外れ値は存在し得ない ──
-    # 全値が [pmin, pmax] (pmax/pmin <= HI) に収まるなら、任意のバー値 v と
-    # 任意の局所中央値 m (共に [pmin,pmax] 内) について v/m は [pmin/pmax, pmax/pmin]
-    # ⊆ [LO,HI] に必ず収まる → 除去対象ゼロ確定。重いローリング計算をスキップできる。
-    # (旧実装は『全体中央値』基準で判定していたため、2年で3倍化した銘柄等で
-    #  全体中央値が局所水準とズレ、局所外れ値を見逃すバグがあった)
+    # 高速パス: 全価格レンジが HI(=2.0)倍以内なら、この段の除去対象は
+    # 数学的に存在し得ない (重いローリング計算だけをスキップ。後段は別途実行)。
     pmin = df[cols].min().min()
     pmax = df[cols].max().max()
     if pmin > 0 and pmax / pmin <= HI:
-        return df  # 外れ値は数学的に存在し得ない
-    # ── 通常パス: 窓は十分大きく (~1ヶ月)。破損が数日連続ブロックでも窓内では
-    #    少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
-    #    トレンドはローリング中央値が追従するので誤除去しない。
+        return df
     global_med = df["close"].median()
     win = min(2001, len(df) // 2 * 2 + 1)
     med = df["close"].rolling(win, min_periods=50, center=True).median()
     med = med.bfill().ffill()
-    # 全OHLC(open/high/low/close)が局所中央値の[LO,HI]倍内に収まるバーだけ残す。
     keep = pd.Series(True, index=df.index)
     for c in cols:
         r = df[c] / med
         rg = df[c] / global_med if global_med > 0 else r
         keep &= (r >= LO) & (r <= HI) & (rg >= 0.1) & (rg <= 10.0)
-    df = df[keep]
-    return _drop_intraday_outliers(df)
+    return df[keep]
 
 
 def _drop_intraday_outliers(df: pd.DataFrame) -> pd.DataFrame:
@@ -216,8 +213,7 @@ def _drop_intraday_outliers(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["open", "high", "low", "close"]:
         r = df[c] / day_med
         keep &= (~valid) | ((r >= DLO) & (r <= DHI))
-    df = df[keep]
-    return _drop_roundtrip_spikes(df)
+    return df[keep]
 
 
 def _drop_roundtrip_spikes(df: pd.DataFrame, T: float = 0.10) -> pd.DataFrame:
@@ -343,7 +339,7 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 6
+_NORM_CACHE_VERSION = 7
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
