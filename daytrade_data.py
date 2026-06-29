@@ -167,11 +167,14 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     # close だけでなく high/low も基準にする (low<=open,close<=high なので
     # high/low を見れば全OHLCをカバー)。
     LO, HI = 0.5, 2.0
+    cols = ["open", "high", "low", "close"]
     # ── 高速パス: 全体中央値に対して極端な値が無ければローリング計算をスキップ ──
+    # open だけ破損するケース(寄りバー)があるため全OHLCの最小/最大で判定する。
     global_med = df["close"].median()
     if global_med > 0:
-        if (df["low"].min() / global_med >= LO
-                and df["high"].max() / global_med <= HI):
+        gmin = df[cols].min().min() / global_med
+        gmax = df[cols].max().max() / global_med
+        if gmin >= LO and gmax <= HI:
             return df  # 外れ値なし → 重いローリング中央値は計算しない
     # ── 通常パス: 窓は十分大きく (~1ヶ月)。破損が数日連続ブロックでも窓内では
     #    少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
@@ -179,10 +182,12 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     win = min(2001, len(df) // 2 * 2 + 1)
     med = df["close"].rolling(win, min_periods=50, center=True).median()
     med = med.bfill().ffill()
-    keep = (
-        (df["low"]  / med >= LO) & (df["high"] / med <= HI)
-        & (df["low"]  / global_med >= 0.1) & (df["high"] / global_med <= 10.0)
-    )
+    # 全OHLC(open/high/low/close)が局所中央値の[LO,HI]倍内に収まるバーだけ残す。
+    keep = pd.Series(True, index=df.index)
+    for c in cols:
+        r = df[c] / med
+        rg = df[c] / global_med
+        keep &= (r >= LO) & (r <= HI) & (rg >= 0.1) & (rg <= 10.0)
     return df[keep]
 
 
@@ -282,7 +287,7 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 2
+_NORM_CACHE_VERSION = 3
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
