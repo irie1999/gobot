@@ -191,6 +191,31 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
         r = df[c] / med
         rg = df[c] / global_med if global_med > 0 else r
         keep &= (r >= LO) & (r <= HI) & (rg >= 0.1) & (rg <= 10.0)
+    df = df[keep]
+    return _drop_intraday_outliers(df)
+
+
+def _drop_intraday_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    同日中央値から大きく外れる単独バーを除去する。
+
+    寄り(09:00)など1本だけ誤価格になる破損(例: 同日の他バーが5600円なのに
+    1本だけ1970円/4000円)は、クロス日のローリング中央値(局所水準~5600)では
+    軽度(6〜50%)だと素通りしてしまう。そこで『同じ日の中央値』を基準に、
+    [DLO, DHI] 倍を外れるバーを除去する。
+    本物のギャップ日(その日全体が下がっている)は日中央値もその水準になるため
+    残る。単独の誤バーだけが弾かれる。
+    """
+    if df is None or df.empty or len(df) < 10:
+        return df
+    DLO, DHI = 0.75, 1.33  # 同日中央値±33% を超える単独バーは破損とみなす
+    dates = df.index.normalize()
+    day_med = df["close"].groupby(dates).transform("median")
+    keep = pd.Series(True, index=df.index)
+    valid = day_med > 0
+    for c in ["open", "high", "low", "close"]:
+        r = df[c] / day_med
+        keep &= (~valid) | ((r >= DLO) & (r <= DHI))
     return df[keep]
 
 
@@ -290,7 +315,7 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 4
+_NORM_CACHE_VERSION = 5
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
