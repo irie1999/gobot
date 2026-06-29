@@ -584,6 +584,34 @@ if __name__ == "__main__":
                 cc = pd.to_numeric(raw[ccol], errors="coerce").dropna()
                 print(f"  ファイル全体の close: min={cc.min():.0f} "
                       f"中央値={cc.median():.0f} max={cc.max():.0f}")
+            # フィルタが使うローリング中央値と比率を当日について表示
+            norm = normalize_minute_df(raw)  # 注: これは外れ値除去後
+            # 外れ値除去前の生seriesでローリング中央値を再現
+            if "DateTime" in raw.columns:
+                idx = pd.to_datetime(raw["DateTime"], errors="coerce")
+            else:
+                idx = pd.to_datetime(raw["Date"].astype(str).str.slice(0, 10)
+                                     + " " + raw["Time"].astype(str), errors="coerce")
+            s = pd.Series(pd.to_numeric(raw[ccol], errors="coerce").values, index=idx)
+            s = s[~s.index.isna()].dropna()
+            s = s[~s.index.duplicated()].sort_index()
+            win = min(2001, len(s) // 2 * 2 + 1)
+            med = s.rolling(win, min_periods=50, center=True).median().bfill().ffill()
+            day_mask = s.index.strftime("%Y-%m-%d") == day
+            print(f"  --- ローリング中央値(win={win})と比率 (当日先頭5本) ---")
+            for ts in s.index[day_mask][:5]:
+                c = s.loc[ts]; m = med.loc[ts]
+                r = c / m if m else 0
+                flag = " ★除去対象" if (r < 0.5 or r > 2.0) else ""
+                print(f"    {ts}  close={c:.0f}  med={m:.0f}  ratio={r:.3f}{flag}")
+            # 当月の分布
+            month = day[:7]
+            mm = s[s.index.strftime("%Y-%m") == month]
+            if len(mm):
+                print(f"  {month}全体: min={mm.min():.0f} 中央値={mm.median():.0f} "
+                      f"max={mm.max():.0f}  n<3000={int((mm<3000).sum())}/{len(mm)}")
+            print(f"  normalize_minute_df後の当日バー数: "
+                  f"{int((norm.index.strftime('%Y-%m-%d')==day).sum()) if not norm.empty else 0}")
         sys.exit(0)
 
     if args.survey:
