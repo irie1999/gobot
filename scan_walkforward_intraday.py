@@ -442,6 +442,9 @@ def main() -> None:
                              "(TRAIN PF>=1.0/WR>=35pct, TEST PF>=0.9/WR>=30pct, fold 1/2)")
     parser.add_argument("--debug-symbol", type=str, default=None,
                         help="指定銘柄の診断 (例: 7203.T). fold別の実際のWR/PFを表示")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="全銘柄×全戦略のトレードを集計し決済理由(目標達成/損切り/"
+                             "引け強制)の内訳を表示 (なぜ負けるかの定量分析)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--aggressive",   action="store_true")
     mode_group.add_argument("--conservative", action="store_true")
@@ -562,6 +565,67 @@ def main() -> None:
 
     if args.limit > 0:
         symbols = symbols[:args.limit]
+
+    # ── 定量診断モード: 決済理由の内訳を集計 ──────────────────────
+    if args.diagnose:
+        from collections import defaultdict
+        import gc as _gc
+        print(f"\n=== 定量診断: {len(symbols)}銘柄 × {len(strategies)}戦略 ===")
+        print("  各トレードの決済理由を集計し『なぜ負けるか』を分析します。\n")
+        # strategy -> reason -> {n, pnl, pct, hold_min, wins}
+        agg: dict = {s: defaultdict(lambda: {"n": 0, "pnl": 0.0,
+                     "pct": 0.0, "hold": 0.0}) for s in strategies}
+        done = 0
+        for sym, sym_name in symbols:
+            df = load_intraday(sym, days=args.data_days, source=args.source)
+            done += 1
+            if df is None or df.empty or len(df) < 50:
+                continue
+            for strat in strategies:
+                em, sm, tm = STRATEGY_DEFS[strat]
+                try:
+                    res = run_intraday_backtest(
+                        sym, sym_name, df, em, sm, tm,
+                        backtest_days=args.data_days, strategy_name=strat)
+                except Exception:
+                    continue
+                for t in res.get("all_trades", []):
+                    a = agg[strat][t.get("reason", "?")]
+                    a["n"] += 1
+                    a["pnl"] += t.get("pnl", 0.0)
+                    a["pct"] += t.get("pct", 0.0)
+                    try:
+                        a["hold"] += (t["exit_dt"] - t["entry_dt"]).total_seconds() / 60
+                    except Exception:
+                        pass
+            del df
+            if done % 25 == 0:
+                print(f"  進捗: {done}/{len(symbols)}", flush=True)
+                _gc.collect()
+
+        for strat in strategies:
+            em, sm, tm = STRATEGY_DEFS[strat]
+            rows = agg[strat]
+            total_n = sum(r["n"] for r in rows.values())
+            total_pnl = sum(r["pnl"] for r in rows.values())
+            print(f"\n  【{strat}】 em={em} sm={sm} tm={tm}  "
+                  f"全{total_n}取引  総PnL={total_pnl:+,.0f}円")
+            if total_n == 0:
+                print("    取引なし")
+                continue
+            print(f"    {'決済理由':<10}{'件数':>7}{'割合':>7}"
+                  f"{'平均pnl':>11}{'平均%':>8}{'平均保有分':>10}{'合計pnl':>13}")
+            print("    " + "-" * 64)
+            # 件数の多い順
+            for reason in sorted(rows, key=lambda k: -rows[k]["n"]):
+                r = rows[reason]
+                if r["n"] == 0:
+                    continue
+                print(f"    {reason:<10}{r['n']:>7}{r['n']/total_n*100:>6.1f}%"
+                      f"{r['pnl']/r['n']:>+11,.0f}{r['pct']/r['n']:>+8.2f}"
+                      f"{r['hold']/r['n']:>9.0f}分{r['pnl']:>+13,.0f}")
+        print("\n完了。")
+        return
 
     # ローカルデータの存在確認
     if args.source in ("local", "auto"):
