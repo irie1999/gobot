@@ -438,8 +438,8 @@ def main() -> None:
     parser.add_argument("--folds-pass-required", type=int, default=None,
                         help="合格に必要なfold数 (デフォルト: 2=全fold通過)")
     parser.add_argument("--relaxed", action="store_true",
-                        help="閾値を大幅緩和して『通る銘柄が存在するか』を確認する"
-                             "(TRAIN PF>=1.0/WR>=35%, TEST PF>=0.9/WR>=30%, fold 1/2)")
+                        help="閾値を大幅緩和して『通る銘柄が存在するか』を確認する "
+                             "(TRAIN PF>=1.0/WR>=35pct, TEST PF>=0.9/WR>=30pct, fold 1/2)")
     parser.add_argument("--debug-symbol", type=str, default=None,
                         help="指定銘柄の診断 (例: 7203.T). fold別の実際のWR/PFを表示")
     mode_group = parser.add_mutually_exclusive_group()
