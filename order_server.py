@@ -110,16 +110,24 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 adj_note = f" ※現値{cur:,.0f}≦逆指値→{new:,.0f}に引下げ"
                 entry = new
 
+    # 逆指値付き指値: 発火後は指値で約定（ロング:+3%上限 / ショート:-3%下限）。
+    # ギャップが大きすぎる時は約定せず見送る＝バックテストの「+3%超キャンセル」と一致。
+    try:
+        from backtest_limit_entry import round_to_tick as _r2t
+        limit_p = _r2t(entry * (0.97 if side == "short" else 1.03))
+    except Exception:
+        limit_p = round(entry * (0.97 if side == "short" else 1.03))
+
     try:
         if side == "short":
             res = cli.send_stop_sell(symbol, qty=qty, trigger_price=entry,
-                                     cash_margin=cash_margin)
-            dir_label = f"逆指値売り(信用新規) @≤{entry:,.0f}{adj_note}"
+                                     cash_margin=cash_margin, after_hit_price=limit_p)
+            dir_label = f"逆指値売り→指値(信用新規) 発動≤{entry:,.0f}/指値≥{limit_p:,.0f}{adj_note}"
         else:
             res = cli.send_stop_buy(symbol, qty=qty, trigger_price=entry,
-                                    cash_margin=cash_margin)
+                                    cash_margin=cash_margin, after_hit_price=limit_p)
             kind = "信用新規" if cash_margin == 2 else "現物"
-            dir_label = f"逆指値買い({kind}) @≥{entry:,.0f}{adj_note}"
+            dir_label = f"逆指値買い→指値({kind}) 発動≥{entry:,.0f}/指値≤{limit_p:,.0f}{adj_note}"
     except Exception as e:
         return f"発注失敗: {symbol} ({e})"
 

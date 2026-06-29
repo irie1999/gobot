@@ -470,19 +470,29 @@ class KabuClient:
         return self._post_order(body, f"{label} ({kind})")
 
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
-                       cash_margin: int = CASH_GENBUTSU) -> dict:
-        """損切り逆指値 (trigger_price 以下で成行売り)。ザラ場 intraday 損切り用。"""
+                       cash_margin: int = CASH_GENBUTSU,
+                       after_hit_price: float | None = None) -> dict:
+        """逆指値売り (trigger_price 以下で発動)。
+
+        after_hit_price=None なら発火後は成行 (損切り/intraday用の既定)。
+        値を渡すと発火後は指値 (ショート新規の下限ガード用。-3%超の窓開けは約定しない)。
+        """
         body = self._base_order(symbol, SIDE_SELL, qty, cash_margin)
         body["FrontOrderType"] = FOT_STOP
         body["Price"] = 0
+        if after_hit_price is None:
+            after_type, after_price = AFTERHIT_MARKET, 0
+        else:
+            after_type, after_price = AFTERHIT_LIMIT, round(after_hit_price)
         body["ReverseLimitOrder"] = {
             "TriggerSec": TRIGGER_AFTER_ORDER,
             "TriggerPrice": round(trigger_price),
-            "UnderOver": UNDER,         # 以下 (下落で損切り)
-            "AfterHitOrderType": AFTERHIT_MARKET,
-            "AfterHitPrice": 0,
+            "UnderOver": UNDER,         # 以下 (下落で発動)
+            "AfterHitOrderType": after_type,
+            "AfterHitPrice": after_price,
         }
-        return self._post_order(body, f"損切り逆指値 {symbol} x{qty} @≤{trigger_price:.0f}")
+        _lbl = "逆指値売り" if after_hit_price is None else "逆指値売り→指値"
+        return self._post_order(body, f"{_lbl} {symbol} x{qty} @≤{trigger_price:.0f}")
 
     def send_moc(self, symbol: int | str, qty: int, side: str = "sell",
                  cash_margin: int = CASH_GENBUTSU,
