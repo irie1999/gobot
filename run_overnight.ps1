@@ -15,10 +15,10 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-# Python 出力を UTF-8 に強制 (cp932 に無い文字 ✓ 等での UnicodeEncodeError 回避)
-$env:PYTHONUTF8 = "1"
-$env:PYTHONIOENCODING = "utf-8"
-$OutputEncoding = [System.Text.Encoding]::UTF8
+# Python 出力を cp932 にし、エンコード不能文字(✓等)は ? に置換。
+# これで UnicodeEncodeError クラッシュも文字化けも両方回避 (PowerShellがcp932のため)。
+$env:PYTHONUTF8 = "0"
+$env:PYTHONIOENCODING = "cp932:replace"
 $ts  = Get-Date -Format "yyyyMMdd_HHmm"
 $log = "overnight_$ts.log"
 
