@@ -181,7 +181,7 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10)
                    for r in results) / len(results)
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
-    t_trades = sum(r["trades"] for r in results)
+    t_trades = max((r["trades"] for r in results), default=0)  # 重複窓を足さず実数(180日)で数える
 
     score = round(
         avg_wr * 0.4
@@ -203,7 +203,7 @@ def calc_bt_type(period_results: dict) -> str:
     avg_wr   = sum(r["win_rate"] for r in results) / len(results)
     avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10) for r in results) / len(results)
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
-    t_trades = sum(r["trades"] for r in results)
+    t_trades = max((r["trades"] for r in results), default=0)  # 重複窓を足さず実数(180日)で数える
     components = {
         "安定":  stable,
         "高WR":  avg_wr / 100,
