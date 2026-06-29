@@ -162,10 +162,16 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     df = df[base]
     if len(df) < 20:
         return df
-    med = df["close"].rolling(101, min_periods=21, center=True).median()
+    # 窓は十分大きく取る (~1ヶ月分)。破損が数日連続ブロックでも、窓内では
+    # 破損が少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
+    win = min(2001, len(df) // 2 * 2 + 1)
+    med = df["close"].rolling(win, min_periods=50, center=True).median()
     med = med.bfill().ffill()
+    # 念のため全体中央値でもガード (極端に長い破損ブロック対策)
+    global_med = df["close"].median()
     ratio = df["close"] / med
-    keep = (ratio >= 1.0 / 3.0) & (ratio <= 3.0)
+    ratio_g = df["close"] / global_med
+    keep = (ratio >= 0.25) & (ratio <= 4.0) & (ratio_g >= 0.1) & (ratio_g <= 10.0)
     return df[keep]
 
 
