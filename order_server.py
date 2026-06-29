@@ -23,7 +23,7 @@ position_server.py を経由せず、これ単体で kabu に逆指値エント�
 import argparse
 import threading
 import time as _time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -37,6 +37,10 @@ GENBUTSU = False   # True ならロングを現物で発注。False(既定) な�
 
 # ── 約定監視 (エントリー約定 → 利確指値を即発注) ──────────────────────
 POLL_SEC = 10                    # 約定チェック間隔(秒)
+# 14:50の損切りタスク(kabu_close_guard)とkabuトークンを取り合わないため、
+# この時間帯は order_server 側がkabuアクセスを一時停止してタスクに譲る。
+GUARD_PAUSE_START = dtime(14, 48)
+GUARD_PAUSE_END   = dtime(14, 53)
 _pending = []                    # 約定待ち: [{symbol, side, qty, target, strategy}]
 _pending_lock = threading.Lock()
 
@@ -301,6 +305,12 @@ def _watch_loop():
     while True:
         _time.sleep(POLL_SEC)
         cycle += 1
+        # 14:50の損切りタスクにkabuを譲る(トークン競合401/429を回避)。窓を抜けたら再接続。
+        if GUARD_PAUSE_START <= datetime.now(JST).time() <= GUARD_PAUSE_END:
+            if cli is not None:
+                print("  ⏸ 14:50損切りタスクにkabuを譲るため監視を一時停止(〜14:53)")
+                cli = None   # トークンを解放。窓を抜けた次サイクルで再接続する
+            continue
         if cli is None:
             try:
                 cli = _watch_build_client()
