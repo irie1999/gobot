@@ -162,21 +162,27 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     df = df[base]
     if len(df) < 20:
         return df
+    # 許容帯: 5分足1本が局所中央値の 0.5倍未満/2.0倍超になることは正常市場では
+    # ありえない (値幅制限)。安値方向の破損(寄りだけ1970円等)も捕まえるため、
+    # close だけでなく high/low も基準にする (low<=open,close<=high なので
+    # high/low を見れば全OHLCをカバー)。
+    LO, HI = 0.5, 2.0
     # ── 高速パス: 全体中央値に対して極端な値が無ければローリング計算をスキップ ──
-    # 大多数の銘柄は破損バーが無いので、ここで O(n) チェックだけして即 return。
     global_med = df["close"].median()
     if global_med > 0:
-        g = df["close"] / global_med
-        if g.max() <= 4.0 and g.min() >= 0.25:
+        if (df["low"].min() / global_med >= LO
+                and df["high"].max() / global_med <= HI):
             return df  # 外れ値なし → 重いローリング中央値は計算しない
     # ── 通常パス: 窓は十分大きく (~1ヶ月)。破損が数日連続ブロックでも窓内では
     #    少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
+    #    トレンドはローリング中央値が追従するので誤除去しない。
     win = min(2001, len(df) // 2 * 2 + 1)
     med = df["close"].rolling(win, min_periods=50, center=True).median()
     med = med.bfill().ffill()
-    ratio = df["close"] / med
-    ratio_g = df["close"] / global_med
-    keep = (ratio >= 0.25) & (ratio <= 4.0) & (ratio_g >= 0.1) & (ratio_g <= 10.0)
+    keep = (
+        (df["low"]  / med >= LO) & (df["high"] / med <= HI)
+        & (df["low"]  / global_med >= 0.1) & (df["high"] / global_med <= 10.0)
+    )
     return df[keep]
 
 
@@ -275,6 +281,8 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
+# 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
+_NORM_CACHE_VERSION = 2
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
@@ -289,7 +297,7 @@ def _load_local_full(jq_code: str) -> pd.DataFrame | None:
     if not src_mtimes:
         return None
 
-    cache_path = NORM_CACHE_DIR / f"{jq_code}.pkl"
+    cache_path = NORM_CACHE_DIR / f"{jq_code}_v{_NORM_CACHE_VERSION}.pkl"
     # キャッシュが全ソースより新しければ採用
     if cache_path.exists() and cache_path.stat().st_mtime >= max(src_mtimes):
         try:
