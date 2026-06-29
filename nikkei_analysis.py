@@ -4318,6 +4318,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _get_wf2 = getattr(_stop, "get_wf_score", None)
             wf2 = _get_wf2(sym, strat) if _get_wf2 else None
             rec_score2, rec_rank2 = _stop.calc_recommend_score(period_results)
+            _btf2 = getattr(_stop, "calc_bt_type", None)
+            bt_type2 = _btf2(period_results) if _btf2 else ""
             _OOS_BT_SCORES[(sym, strat)] = rec_score2
             if wf2:
                 wf_score2, wf_rank_str2 = wf2
@@ -4364,6 +4366,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         "is_wf": is_wf2, "wf_score": wf_score2,
                         "rec_score": _sig_sc,   # BT表示・フィルタも発生時スコアで統一
                         "preoos_score": _sig_sc,
+                        "bt_type": bt_type2,    # BTスコアの支配要素(安定/取引数/高WR/高PF)
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
                 _sdt_raw = t.get("signal_dt")
@@ -4763,6 +4766,59 @@ function setEnvPnl(m){{
   <tbody>{_env_rows}</tbody>
 </table>"""
 
+        # ── BTタイプ別 成績（安定/取引数/高WR/高PF）──────────────────────────
+        _bt_type_colors = getattr(_stop, "_BT_TYPE_COLORS",
+                                  {"安定": "#10b981", "高WR": "#3b82f6",
+                                   "高PF": "#f59e0b", "取引数": "#a855f7"})
+        _bttype_order = ["安定", "取引数", "高WR", "高PF"]
+
+        def _bttype_rows(_min_bt):
+            _src = [_t for _t in kpi_trades if (_t.get("rec_score") or 0) >= _min_bt]
+            _rows = ""
+            for _bt in _bttype_order:
+                _col = _bt_type_colors.get(_bt, "#94a3b8")
+                _ts = [_t for _t in _src if _t.get("bt_type") == _bt]
+                if not _ts:
+                    _rows += (f'<tr><td style="color:{_col};font-weight:700;border-left:3px solid {_col};'
+                              f'padding-left:8px">{_bt}</td>'
+                              f'<td colspan="6" style="text-align:center;color:#475569">該当なし</td></tr>')
+                    continue
+                _w = [_t for _t in _ts if _t["pnl"] > 0]
+                _l = [_t for _t in _ts if _t["pnl"] <= 0]
+                _gp = sum(_t["pnl"] for _t in _w)
+                _gl = abs(sum(_t["pnl"] for _t in _l))
+                _net = _gp - _gl
+                _wr = len(_w) / len(_ts) * 100
+                _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+                _pf_s = "∞" if _pf == float("inf") else f"{_pf:.2f}"
+                _pc = "profit" if _net >= 0 else "loss"
+                _wr_c = "#4ade80" if _wr >= 55 else ("#fbbf24" if _wr >= 45 else "#f87171")
+                _rows += f"""<tr>
+  <td style="color:{_col};font-weight:700;border-left:3px solid {_col};padding-left:8px">{_bt}</td>
+  <td style="text-align:right">{len(_ts)}</td>
+  <td style="text-align:right;color:{_wr_c}">{_wr:.0f}%</td>
+  <td style="text-align:right">{_pf_s}</td>
+  <td class="profit" style="text-align:right">+{_gp:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_w)}勝)</span></td>
+  <td class="loss"   style="text-align:right">-{_gl:,.0f}円<br><span style="color:#64748b;font-size:0.7rem">({len(_l)}敗)</span></td>
+  <td class="{_pc}"  style="text-align:right;font-weight:700">{_net:+,.0f}円</td>
+</tr>"""
+            return _rows
+
+        _bttype_head = ('<thead><tr><th style="text-align:left">BTタイプ</th><th>件数</th>'
+                        '<th>勝率</th><th>PF</th><th>利益計</th><th>損失計</th><th>損益合計</th></tr></thead>')
+        _bttype_html = f"""
+<h3 style="margin-top:24px;margin-bottom:8px;color:#94a3b8;font-size:0.95rem">
+  BTタイプ別 成績（BTスコアの支配要素ごと）
+</h3>
+<p class="footnote" style="margin-bottom:8px">
+  各トレードを「BTスコアを最も押し上げた要素」で分類。安定=期間安定性 ／ 取引数=取引回数 ／
+  高WR=勝率 ／ 高PF=PF。<strong>取引数タイプは件数が少なく参考値</strong>の場合あり。
+</p>
+<div style="color:#94a3b8;font-size:0.85rem;margin:6px 0 2px">▼ BT70以上</div>
+<table style="font-size:0.88rem">{_bttype_head}<tbody>{_bttype_rows(70)}</tbody></table>
+<div style="color:#94a3b8;font-size:0.85rem;margin:12px 0 2px">▼ BT80以上</div>
+<table style="font-size:0.88rem">{_bttype_head}<tbody>{_bttype_rows(80)}</tbody></table>"""
+
         # ── トレンド期間別 損益（個々の期間ごと・新しい順）──────────────────────
         try:
             _ppnl_periods = extract_periods(_n225_close, _n225_trend,
@@ -4888,6 +4944,7 @@ function setEnvPnl(m){{
 <div id="{_tbd_id}_pane_cross" style="display:none">
 {_bt_cross_html if _bt_cross_html else '<p class="footnote">データなし</p>'}
 {_bt70_html}
+{_bttype_html}
 {_env_html}
 </div>
 
