@@ -82,13 +82,15 @@ WATCHLIST: list[tuple[str, str]] = [
 ]
 
 # ── 戦略パラメータ (em, sm, tm) ──────────────────────────────
-# conservative モード (デフォルト): tm=3.0 (2R設定)
+# 倍率は日足ATR基準 (run_intraday_backtest の stop_basis="daily")。
+# sm=0.5→stop約1-1.5%, tm=1.0→target約2-3% (2R)。5分足ATR基準時代の
+# 1.5/3.0 はstopが0.6%と狭すぎノイズで即損切りだったため変更。
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "PREV_CLOSE_BREAK": (0.0, 1.5, 3.0),  # prev_close逆指値, stop=1.5ATR, target=3ATR
+    "PREV_CLOSE_BREAK": (0.0, 0.5, 1.0),  # prev_close逆指値, stop=0.5日ATR, target=1.0日ATR
 }
-# aggressive モード: tm=2.0 (回転率優先)
+# aggressive モード: 回転率優先 (1.5R)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "PREV_CLOSE_BREAK": (0.0, 1.5, 2.0),
+    "PREV_CLOSE_BREAK": (0.0, 0.5, 0.75),
 }
 
 import os as _os

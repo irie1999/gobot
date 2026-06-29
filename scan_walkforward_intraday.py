@@ -109,19 +109,22 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 #   GAP_UP          : ギャップ最小幅 = atr × em (0.0 = 任意ギャップ)
 #   ORB30           : 未使用
 #   PREV_HIGH_BREAK : 未使用
+# 倍率は「日足ATR基準」(backtest_intraday の stop_basis="daily")。
+# 日足ATR≈価格の2-3% なので sm=0.5→stop約1-1.5%, tm=1.0→target約2-3% (2R設定)。
+# (旧: 5分足ATR基準で sm=1.5/tm=3.0 → stopが0.6%と狭すぎノイズで即損切りだった)
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple[float, float, float]] = {
-    "PREV_CLOSE_BREAK": (0.0, 1.5, 3.0),
-    "GAP_UP":           (0.0, 1.5, 3.0),  # ギャップアップ日限定 (選別的)
-    "GAP_DOWN":         (0.0, 1.5, 3.0),  # ギャップダウン日限定 mean-reversion (目標=ギャップフィル)
-    "ORB30":            (0.0, 1.5, 3.0),  # 30分Opening Range Breakout
-    "PREV_HIGH_BREAK":  (0.0, 1.5, 3.0),  # 前日高値ブレイク
+    "PREV_CLOSE_BREAK": (0.0, 0.5, 1.0),
+    "GAP_UP":           (0.0, 0.5, 1.0),  # ギャップアップ日限定 (選別的)
+    "GAP_DOWN":         (0.0, 0.5, 1.0),  # ギャップダウン日限定 mean-reversion (目標=ギャップフィル)
+    "ORB30":            (0.0, 0.5, 1.0),  # 30分Opening Range Breakout
+    "PREV_HIGH_BREAK":  (0.0, 0.5, 1.0),  # 前日高値ブレイク
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple[float, float, float]] = {
-    "PREV_CLOSE_BREAK": (0.0, 1.5, 2.0),
-    "GAP_UP":           (0.0, 1.5, 2.0),
-    "GAP_DOWN":         (0.0, 1.5, 2.0),
-    "ORB30":            (0.0, 1.5, 2.0),
-    "PREV_HIGH_BREAK":  (0.0, 1.5, 2.0),
+    "PREV_CLOSE_BREAK": (0.0, 0.5, 0.75),
+    "GAP_UP":           (0.0, 0.5, 0.75),
+    "GAP_DOWN":         (0.0, 0.5, 0.75),
+    "ORB30":            (0.0, 0.5, 0.75),
+    "PREV_HIGH_BREAK":  (0.0, 0.5, 0.75),
 }
 
 import os as _os

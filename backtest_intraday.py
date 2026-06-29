@@ -82,18 +82,45 @@ def calc_atr_5m(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
     return df
 
 
+def calc_atr_daily(df_5m: pd.DataFrame, period: int = 14) -> dict:
+    """
+    5分足を日足にリサンプルし、日足 True Range の EWM ATR を計算。
+    返り値: {date: その日終値時点の日足ATR}。
+
+    stop/target を「日次ボラ」で測るために使う。5分足ATRは1バー分の
+    値幅しかなく、デイトレのstopとしては狭すぎてノイズで即狩られるため。
+    """
+    if df_5m is None or df_5m.empty:
+        return {}
+    daily = df_5m.resample("1D").agg({
+        "high": "max", "low": "min", "close": "last",
+    }).dropna(subset=["close"])
+    if len(daily) < 2:
+        return {}
+    prev_c = daily["close"].shift(1)
+    tr = pd.concat([
+        daily["high"] - daily["low"],
+        (daily["high"] - prev_c).abs(),
+        (daily["low"]  - prev_c).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    return {ts.date(): float(v) for ts, v in atr.items() if pd.notna(v)}
+
+
 # ── 日次グループ化 ─────────────────────────────────────────────
 
 def _get_daily_groups(
     df_5m: pd.DataFrame,
-) -> list[tuple[date, float, float, float, pd.DataFrame]]:
+) -> list[tuple[date, float, float, float, float, pd.DataFrame]]:
     """
     5分足 DataFrame を日付でグループ化し、各日について
-    (日付, 前日終値, 前日高値, 前日末ATR, その日の立会時間5分足 DataFrame) を返す。
+    (日付, 前日終値, 前日高値, 前日末5分足ATR, 前日末日足ATR,
+     その日の立会時間5分足 DataFrame) を返す。
 
     最初の取引日はprev_closeがないためスキップ。
     """
     df_5m = calc_atr_5m(df_5m)
+    daily_atr_map = calc_atr_daily(df_5m)
     dates = sorted(set(df_5m.index.date))
     result = []
     for i in range(1, len(dates)):
@@ -107,6 +134,7 @@ def _get_daily_groups(
         prev_close = float(prev_bars["close"].iloc[-1])
         prev_high  = float(prev_bars["high"].max())
         prev_atr   = float(prev_bars["atr"].iloc[-1])
+        prev_atr_d = daily_atr_map.get(prev_d, 0.0)
 
         if pd.isna(prev_close) or pd.isna(prev_atr) or prev_atr <= 0:
             continue
@@ -117,7 +145,7 @@ def _get_daily_groups(
         if len(day_df) < 3:
             continue
 
-        result.append((d, prev_close, prev_high, prev_atr, day_df))
+        result.append((d, prev_close, prev_high, prev_atr, prev_atr_d, day_df))
     return result
 
 
@@ -314,9 +342,17 @@ def run_intraday_backtest(
     target_atr_mult: float = 3.0,
     backtest_days: int = BACKTEST_DAYS,
     strategy_name: str = "PREV_CLOSE_BREAK",
+    stop_basis: str = "daily",
 ) -> dict:
     """
     5分足を使ったデイトレバックテスト。
+
+    stop_basis:
+      "daily" (既定): stop/target を日足ATR基準で測る。5分足ATRは1バー分
+                      しかなくstopが価格の0.6%程度と狭すぎ、ノイズで即狩られて
+                      勝率が崩壊する (76-89%が4-10分で損切り) ため日次ボラに変更。
+      "5m"          : 旧挙動 (stop/target も5分足ATR基準)。比較・後方互換用。
+    entry の order_p は従来どおり5分足ATR基準 (em=0.0なら影響なし)。
 
     strategy_name:
       PREV_CLOSE_BREAK : 前日終値ブレイク (毎日エントリー)
@@ -349,13 +385,19 @@ def run_intraday_backtest(
 
     trades: list[dict] = []
 
-    for d, prev_close, prev_high, atr, day_df in daily_groups:
+    for d, prev_close, prev_high, atr, atr_daily, day_df in daily_groups:
         # バックテスト期間内のみ
         if d < today - timedelta(days=backtest_days):
             continue
 
         if prev_close < MIN_PRICE or prev_close > MAX_PRICE:
             continue
+
+        # stop/target サイジング用ATR (basis に応じて切替)
+        if stop_basis == "daily" and atr_daily and atr_daily > 0:
+            size_atr = atr_daily
+        else:
+            size_atr = atr
 
         # ── 戦略別エントリー条件 ──────────────────────────────
         target_override: float | None = None
@@ -404,7 +446,7 @@ def run_intraday_backtest(
             order_p = prev_close + atr * entry_atr_mult
             sim_df  = day_df
 
-        trade = _simulate_day(sim_df, order_p, atr, stop_atr_mult, target_atr_mult,
+        trade = _simulate_day(sim_df, order_p, size_atr, stop_atr_mult, target_atr_mult,
                               target_price_override=target_override)
         if trade is None:
             continue
@@ -413,7 +455,9 @@ def run_intraday_backtest(
         trade["signal_dt"]     = pd.Timestamp(d)
         trade["prev_close"]    = prev_close
         trade["atr_5m"]        = round(atr, 2)
-        trade["stop_loss_pct"] = round(atr * stop_atr_mult / ep * 100, 2) if ep > 0 else 0.0
+        trade["atr_daily"]     = round(atr_daily, 2)
+        trade["size_atr"]      = round(size_atr, 2)
+        trade["stop_loss_pct"] = round(size_atr * stop_atr_mult / ep * 100, 2) if ep > 0 else 0.0
         trades.append(trade)
 
     period_results = {d: _period_stats(trades, d) for d in PERIODS}
