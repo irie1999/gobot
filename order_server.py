@@ -211,6 +211,73 @@ def _place_target_now(cli, p: dict) -> str:
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
 
 
+def _load_signal_targets() -> dict:
+    """signals_latest.json / signals_latest_short.json から
+    {(symbol, side): {"target":利確価格, "strategy":戦略}} を作る。
+    利確補完(接続時に取りこぼした利確を発注)で参照する。"""
+    import json
+    from pathlib import Path
+    out: dict = {}
+    base = Path(__file__).resolve().parent
+    for fn, side in (("signals_latest.json", "long"),
+                     ("signals_latest_short.json", "short")):
+        p = base / fn
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for s in data.get("signals", []):
+            sym = str(s.get("symbol", "")).split(".")[0]
+            tp = _f(s.get("target_p"))
+            if sym and tp > 0:
+                out[(sym, side)] = {"target": tp, "strategy": s.get("strategy", "")}
+    return out
+
+
+def _backfill_targets(cli) -> None:
+    """実建玉を調べ、利確(決済)注文が無いポジションに利確指値を補完発注する。
+
+    order_server が「約定の瞬間」に起動していなくても(=9:00常駐していなくても)、
+    kabu に接続できた時点で保有を点検し、利確の取りこぼしを埋める。
+    目標価格は signals_latest.json / _short の target_p を symbol+side で照合。
+    既に利確注文があるものは _place_target_now 内の重複チェックでスキップ。"""
+    if not EXECUTE:
+        return
+    try:
+        positions = cli.get_positions(product=0)
+    except Exception as e:
+        print(f"  ⚠ 利確補完: 建玉取得失敗のためスキップ ({e})")
+        return
+    # (symbol, side) ごとに保有数量を合算
+    agg: dict = {}
+    for p in positions:
+        sym = str(p.get("Symbol", "")).split(".")[0]
+        qty = int(p.get("LeavesQty") or p.get("HoldQty") or 0)
+        if not sym or qty <= 0:
+            continue
+        side = "long" if str(p.get("Side", "")) == "2" else "short"
+        agg[(sym, side)] = agg.get((sym, side), 0) + qty
+    if not agg:
+        return
+    targets = _load_signal_targets()
+    for (sym, side), qty in agg.items():
+        try:
+            if _has_active_close_order(cli, sym, side):
+                continue   # 既に利確あり
+            info = targets.get((sym, side))
+            if not info or info["target"] <= 0:
+                print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が signals_latest"
+                      f"{'_short' if side=='short' else ''}.json に無し → 手動で利確を入れてください")
+                continue
+            st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
+                                         "target": info["target"], "strategy": info["strategy"]})
+            print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
+        except Exception as e:
+            print(f"  ⚠ 利確補完エラー {sym}: {e}")
+
+
 def _regen_holdings(cli) -> None:
     """実建玉から保有銘柄HTML(holdings_<date>.html)を再生成する(📌保有タブ用)。"""
     try:
@@ -240,6 +307,7 @@ def _watch_loop():
                 print("  ✓ 監視用kabu接続OK → 保有タブ(holdings_latest.html)を生成します")
                 _warned = False
                 _regen_holdings(cli)   # 接続できたら即 保有タブ生成(起動直後に反映)
+                _backfill_targets(cli)  # 接続時に利確の取りこぼしを補完発注(9:00常駐前提にしない)
             except Exception:
                 if not _warned:   # 連続スパムを避け、最初の1回だけ警告
                     print("  ⚠ 監視用kabu未接続: kabuステーション(本番18080)を起動・ログインしてください。"
@@ -262,9 +330,10 @@ def _watch_loop():
                         _regen_holdings(cli)   # 約定したら即 保有タブ更新
             except Exception as e:
                 print(f"  ⚠ 監視エラー {p.get('symbol')}: {e}")
-        # 保有HTMLを約30秒ごとに更新(現在値・含み損益のリフレッシュ)
+        # 保有HTMLを約30秒ごとに更新(現在値・含み損益のリフレッシュ)+利確の取りこぼし点検
         if cycle % 3 == 1:
             _regen_holdings(cli)
+            _backfill_targets(cli)   # 監視中に現れた建玉の利確抜けも定期補完(重複は出さない)
 
 
 class Handler(BaseHTTPRequestHandler):
