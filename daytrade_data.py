@@ -162,13 +162,18 @@ def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
     df = df[base]
     if len(df) < 20:
         return df
-    # 窓は十分大きく取る (~1ヶ月分)。破損が数日連続ブロックでも、窓内では
-    # 破損が少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
+    # ── 高速パス: 全体中央値に対して極端な値が無ければローリング計算をスキップ ──
+    # 大多数の銘柄は破損バーが無いので、ここで O(n) チェックだけして即 return。
+    global_med = df["close"].median()
+    if global_med > 0:
+        g = df["close"] / global_med
+        if g.max() <= 4.0 and g.min() >= 0.25:
+            return df  # 外れ値なし → 重いローリング中央値は計算しない
+    # ── 通常パス: 窓は十分大きく (~1ヶ月)。破損が数日連続ブロックでも窓内では
+    #    少数派なので中央値は真の価格水準を保つ → ブロック破損も弾ける。
     win = min(2001, len(df) // 2 * 2 + 1)
     med = df["close"].rolling(win, min_periods=50, center=True).median()
     med = med.bfill().ffill()
-    # 念のため全体中央値でもガード (極端に長い破損ブロック対策)
-    global_med = df["close"].median()
     ratio = df["close"] / med
     ratio_g = df["close"] / global_med
     keep = (ratio >= 0.25) & (ratio <= 4.0) & (ratio_g >= 0.1) & (ratio_g <= 10.0)

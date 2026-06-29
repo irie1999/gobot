@@ -249,8 +249,6 @@ def walkforward_one(
     1銘柄 × 1戦略の Walk-forward を実行。
     合格条件を満たせば dict を、満たさなければ None を返す。
     """
-    em, sm, tm = STRATEGY_DEFS[strategy_name]
-
     # データ取得 (Walk-forward 全期間分)
     df_all = load_intraday(symbol, days=data_days, source=source)
     if df_all is None or df_all.empty or len(df_all) < 50:
@@ -267,6 +265,16 @@ def walkforward_one(
         return None
     if min_price > 0 and latest_price < min_price:
         return None
+
+    return _walkforward_with_df(symbol, name, strategy_name, df_all, latest_price)
+
+
+def _walkforward_with_df(
+    symbol: str, name: str, strategy_name: str,
+    df_all: "pd.DataFrame", latest_price: float,
+) -> dict | None:
+    """事前ロード済み df で 1銘柄×1戦略の Walk-forward を実行 (load を含まない)。"""
+    em, sm, tm = STRATEGY_DEFS[strategy_name]
 
     folds_passed  = 0
     train_results: list[dict] = []
@@ -350,6 +358,44 @@ def walkforward_one(
     )
 
 
+def walkforward_symbol(
+    symbol: str, name: str, strategy_list: list[str],
+    max_price: float = 0.0, min_price: float = 0.0,
+    source: str = "local", data_days: int = 800,
+) -> dict[str, dict]:
+    """
+    1銘柄のデータを **1回だけ** ロードし、全戦略を回す (メモリ&I/O削減)。
+    返り値: {strategy_name: result_dict}  (合格戦略のみ)
+    """
+    import gc as _gc
+    df_all = load_intraday(symbol, days=data_days, source=source)
+    if df_all is None or df_all.empty or len(df_all) < 50:
+        return {}
+    try:
+        latest_price = float(df_all["close"].iloc[-1])
+    except Exception:
+        return {}
+    if latest_price <= 0:
+        return {}
+    if max_price > 0 and latest_price > max_price:
+        return {}
+    if min_price > 0 and latest_price < min_price:
+        return {}
+
+    out: dict[str, dict] = {}
+    for strat in strategy_list:
+        try:
+            r = _walkforward_with_df(symbol, name, strat, df_all, latest_price)
+        except Exception:
+            r = None
+        if r:
+            out[strat] = r
+    # 大きな df を即解放 (他アプリのメモリ圧迫を防ぐ)
+    del df_all
+    _gc.collect()
+    return out
+
+
 # ── メイン ───────────────────────────────────────────────────────
 
 def main() -> None:
@@ -362,8 +408,9 @@ def main() -> None:
     parser.add_argument("--source",   default="local",
                         choices=["local", "auto", "yfinance"],
                         help="データソース (デフォルト: local)")
-    parser.add_argument("--workers",  type=int, default=4,
-                        help="並列数")
+    parser.add_argument("--workers",  type=int, default=2,
+                        help="並列数 (大きいほど高速だがメモリ消費増。"
+                             "他アプリが落ちる場合は 1〜2 に下げる)")
     parser.add_argument("--top",      type=int, default=30,
                         help="表示する上位N (CSVは全件保存)")
     parser.add_argument("--symbols",  type=str, default=None,
@@ -544,39 +591,45 @@ def main() -> None:
 
     mode_suffix = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
 
+    # ── 銘柄ごとに1回だけロードして全戦略を回す (メモリ&I/O を約6倍削減) ──
+    import gc as _gc
+    per_strategy: dict[str, list[dict]] = {s: [] for s in strategies}
+    print(f"\n=== スキャン中 ({len(symbols)}銘柄 × {len(strategies)}戦略) ===")
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {
+            ex.submit(
+                walkforward_symbol, sym, sym_name, strategies,
+                effective_max_price, args.min_price,
+                args.source, args.data_days,
+            ): sym
+            for sym, sym_name in symbols
+        }
+        done = 0
+        n_cand = 0
+        progress_every = max(len(symbols) // 20, 25)
+        for fut in as_completed(futs):
+            done += 1
+            try:
+                d = fut.result()  # {strategy: result}
+                for strat, r in d.items():
+                    per_strategy[strat].append(r)
+                    n_cand += 1
+            except Exception:
+                pass
+            if done % progress_every == 0 or done == len(symbols):
+                print(f"  進捗: {done}/{len(symbols)}  候補(延べ): {n_cand}",
+                      flush=True)
+                _gc.collect()  # 完了済み future のメモリを定期的に解放
+
+    fold_suffix = "_short" if args.folds_short else ""
     for strategy in strategies:
-        print(f"\n=== {strategy} ===")
-        results: list[dict] = []
-
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = {
-                ex.submit(
-                    walkforward_one, sym, sym_name, strategy,
-                    effective_max_price, args.min_price,
-                    args.source, args.data_days,
-                ): sym
-                for sym, sym_name in symbols
-            }
-            done = 0
-            progress_every = max(len(symbols) // 20, 25)
-            for fut in as_completed(futs):
-                done += 1
-                try:
-                    r = fut.result()
-                    if r:
-                        results.append(r)
-                except Exception:
-                    pass
-                if done % progress_every == 0 or done == len(symbols):
-                    print(f"  進捗: {done}/{len(symbols)}  候補: {len(results)}",
-                          flush=True)
-
+        results = per_strategy[strategy]
         results.sort(key=lambda r: (-r["folds_passed"], -r["total_test_pnl"]))
 
-        print(f"\n  {strategy}: 全候補={len(results)}")
+        print(f"\n=== {strategy} ===")
+        print(f"  {strategy}: 全候補={len(results)}")
 
         # ── CSV 保存 ──
-        fold_suffix = "_short" if args.folds_short else ""
         csv_path = out_dir / f"walkforward_intraday_{strategy}{mode_suffix}{fold_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
