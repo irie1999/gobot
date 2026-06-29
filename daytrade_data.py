@@ -169,12 +169,19 @@ def inspect_pkl(symbol: str) -> None:
 
         print(f"    shape: {raw.shape}")
         print(f"    index type: {type(raw.index).__name__}")
-        print(f"    columns: {list(raw.columns)[:8]}")
-        if len(raw) >= 2:
+        print(f"    columns(全): {list(raw.columns)}")
+        if len(raw) >= 2 and isinstance(raw.index, pd.DatetimeIndex):
             print(f"    index[0]:  {raw.index[0]}")
             print(f"    index[-1]: {raw.index[-1]}")
             avg_gap = (raw.index[-1] - raw.index[0]).total_seconds() / (len(raw) - 1)
             print(f"    avg bar gap: {avg_gap:.0f}s ({avg_gap/60:.1f}min)")
+        # DateTime列があればそこから期間を表示 (RangeIndex対応)
+        for dtcol in ("DateTime", "Date", "datetime"):
+            if dtcol in raw.columns:
+                _dt = pd.to_datetime(raw[dtcol], errors="coerce").dropna()
+                if not _dt.empty:
+                    print(f"    {dtcol}列の範囲: {_dt.min()} 〜 {_dt.max()}")
+                break
         print(f"    head(1):\n{raw.head(1).to_string()}")
 
         # normalize 試行
