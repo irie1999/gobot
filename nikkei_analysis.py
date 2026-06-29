@@ -1141,7 +1141,7 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
 def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], years: int,
                      trades: list[dict] | None = None) -> str:
     """タブ2: トレンド期間分析。trades を渡すと全期間一覧に損益列を追加する。"""
-    # 期間ごとの損益 (signal_dt_raw が期間内のトレードを集計)。全トレード/BT70以上の両方。
+    # 期間ごとの損益 (エントリー(約定)日が期間内のトレードを集計)。損益タブの日別と基準を統一。
     _pnl_by_period: dict = {}
     if trades:
         def _agg(_sub):
@@ -1151,7 +1151,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
         for _pp in periods:
             _ps, _pe = _pp["start"], _pp["end"]
             _sub = [_t for _t in trades
-                    if _t.get("signal_dt_raw") and _ps <= _t["signal_dt_raw"] <= _pe]
+                    if _t.get("entry_d_raw") and _ps <= _t["entry_d_raw"] <= _pe]
             _pnl_by_period[(_ps, _pe)] = {
                 "all":  _agg(_sub),
                 "bt70": _agg([_t for _t in _sub if (_t.get("rec_score") or 0) >= 70]),
