@@ -194,21 +194,6 @@ def inspect_pkl(symbol: str) -> None:
                   f"{df_norm.index[0]} 〜 {df_norm.index[-1]}")
 
 
-
-    """1分足 → 5分足。既に5分足なら不要。"""
-    if df.empty:
-        return df
-    # 平均バー間隔を推定
-    if len(df) >= 2:
-        avg_gap = (df.index[-1] - df.index[0]).total_seconds() / (len(df) - 1)
-        if avg_gap >= 250:  # 既に ~5分足
-            return df
-    return df.resample("5min", label="left", closed="left").agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna(subset=["close"])
-
-
 # ─────────────────────────────────────────────────────────────
 # ソース1: ローカル保存データ (data/minute_5m/*.pkl)
 # ─────────────────────────────────────────────────────────────
@@ -473,7 +458,57 @@ if __name__ == "__main__":
                         help="ローカルに保存済みの銘柄一覧を表示")
     parser.add_argument("--inspect", action="store_true",
                         help="pkl ファイルを直接検査 (データ読み込み問題の診断)")
+    parser.add_argument("--survey", action="store_true",
+                        help="quarantine_5m / minute_5m フォルダ全体の期間を一覧 (2年分データの所在確認)")
     args = parser.parse_args()
+
+    if args.survey:
+        import pickle as _pickle
+        for label, dir_path in [("quarantine_5m (長期)", QUARANTINE_DIR),
+                                 ("minute_5m (直近)", DATA_DIR)]:
+            print(f"\n{'='*70}")
+            print(f"  {label}: {dir_path}")
+            print(f"{'='*70}")
+            if not dir_path.exists():
+                print("  フォルダなし")
+                continue
+            files = sorted(dir_path.glob("*.pkl"))
+            if not files:
+                print("  pkl ファイルなし")
+                continue
+            spans = []  # (days_span, code, first, last, nbars)
+            total_bytes = 0
+            for f in files:
+                total_bytes += f.stat().st_size
+                try:
+                    raw = _pickle.loads(f.read_bytes())
+                    df = normalize_minute_df(raw)
+                    if df is None or df.empty:
+                        spans.append((-1, f.stem, None, None, 0))
+                        continue
+                    first, last = df.index[0], df.index[-1]
+                    span_days = (last - first).days
+                    spans.append((span_days, f.stem, first, last, len(df)))
+                except Exception as e:
+                    spans.append((-2, f.stem, str(e), None, 0))
+            ok = [s for s in spans if s[0] >= 0]
+            bad = [s for s in spans if s[0] < 0]
+            print(f"  ファイル数: {len(files)}  合計: {total_bytes/1024/1024:.1f}MB")
+            if ok:
+                max_span = max(s[0] for s in ok)
+                over2y = [s for s in ok if s[0] >= 700]
+                over1y = [s for s in ok if s[0] >= 350]
+                print(f"  正常読込: {len(ok)}銘柄  最長期間: {max_span}日 (~{max_span/365:.1f}年)")
+                print(f"    ≥2年(700日): {len(over2y)}銘柄  ≥1年(350日): {len(over1y)}銘柄")
+                # 期間が長い順 上位10
+                print(f"  --- 期間が長い順 上位10 ---")
+                for span, code, first, last, n in sorted(ok, reverse=True)[:10]:
+                    print(f"    {code:>6}  {span:>4}日  {n:>6}本  "
+                          f"{first.date()} 〜 {last.date()}")
+            if bad:
+                print(f"  ★ 読込失敗/空: {len(bad)}銘柄 "
+                      f"(例: {', '.join(s[1] for s in bad[:5])})")
+        sys.exit(0)
 
     if args.inspect:
         targets = args.symbols if args.symbols else quarantine_symbols()[:3]
