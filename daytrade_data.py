@@ -339,29 +339,37 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
 
 NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
 # 正規化/外れ値除去ロジックを変えたらバンプする (古いキャッシュを自動無効化)。
-_NORM_CACHE_VERSION = 8
+_NORM_CACHE_VERSION = 9
 
 
-def _align_scale(df_long: pd.DataFrame, df_recent: pd.DataFrame) -> pd.DataFrame:
+def _scaled_pre_minute(df_long: pd.DataFrame, df_recent: pd.DataFrame) -> pd.DataFrame:
     """
-    quarantine(df_long) を minute_5m(df_recent) の価格スケールに合わせる。
+    quarantine(df_long) のうち minute_5m(df_recent) 開始より前の部分だけを返し、
+    境界付近の価格比で minute スケールに合わせる。
 
-    株式分割/調整差で2ソースの価格水準が異なると、マージ時に minute に
+    背景: 株式分割/調整差で2ソースの価格水準が異なると、マージ時に minute に
     欠損がある時刻だけ quarantine の別スケール値が出て偽スパイクになる
-    (例: 1379.T minute≈1823 / quarantine≈4250)。重複する同一時刻の
-    close 比 (recent/long) の中央値でスケール係数を求め、係数が 1 から
-    大きく外れていれば quarantine 全体を補正して水準を一致させる。
+    (例: 1379.T)。さらに分割が期間中にあると単一係数では補正しきれない。
+    → 重複期間は minute のみを採用 (この関数は minute 開始前だけ返す) し、
+       境界 (minute 開始直後 N 日 と quarantine 同期間) の close 比でスケールを
+       合わせる。これでソース混在による偽スパイクを原理的に排除する。
     """
-    common = df_recent.index.intersection(df_long.index)
-    if len(common) < 20:
-        return df_long
-    ratio = (df_recent.loc[common, "close"] / df_long.loc[common, "close"]).median()
-    if not (ratio > 0) or (0.8 <= ratio <= 1.25):
-        return df_long  # スケール一致 → 補正不要
-    df_long = df_long.copy()
-    for c in ("open", "high", "low", "close"):
-        df_long[c] = df_long[c] * ratio
-    return df_long
+    rec_start = df_recent.index.min()
+    pre = df_long[df_long.index < rec_start]
+    if pre.empty:
+        return pre
+    # 境界比率: minute開始後30日 と quarantine同30日 の同一時刻 close 比
+    win_end = rec_start + pd.Timedelta(days=30)
+    rec_w = df_recent[(df_recent.index >= rec_start) & (df_recent.index < win_end)]
+    lng_w = df_long[(df_long.index >= rec_start) & (df_long.index < win_end)]
+    common = rec_w.index.intersection(lng_w.index)
+    if len(common) >= 20:
+        ratio = (rec_w.loc[common, "close"] / lng_w.loc[common, "close"]).median()
+        if ratio > 0 and not (0.8 <= ratio <= 1.25):
+            pre = pre.copy()
+            for c in ("open", "high", "low", "close"):
+                pre[c] = pre[c] * ratio
+    return pre
 
 
 def _load_local_full(jq_code: str) -> pd.DataFrame | None:
@@ -389,8 +397,10 @@ def _load_local_full(jq_code: str) -> pd.DataFrame | None:
     if df_recent is None and df_long is None:
         return None
     if df_recent is not None and df_long is not None:
-        df_long = _align_scale(df_long, df_recent)  # 分割/調整差を補正
-        combined = pd.concat([df_long, df_recent])
+        # 重複期間は minute のみ採用 (ソース混在による偽スパイクを排除)。
+        # quarantine は minute 開始前のみ、境界比率でスケールを合わせて使う。
+        pre = _scaled_pre_minute(df_long, df_recent)
+        combined = pd.concat([pre, df_recent])
         combined = combined[~combined.index.duplicated(keep="last")]
         df = combined.sort_index()
     elif df_recent is not None:
