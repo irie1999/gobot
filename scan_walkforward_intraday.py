@@ -438,6 +438,25 @@ def main() -> None:
             return (f"trades={r['trades']:3d}  WR={r['win_rate']:5.1f}%  "
                     f"PF={pf_str}  PnL={r['total_pnl']:+,.0f}円")
 
+        def _dump_worst(r: dict | None, n: int = 3) -> None:
+            """損益絶対値が大きい順に上位nトレードの明細を表示 (異常バー特定用)。"""
+            if not r:
+                return
+            log = r.get("trade_log", [])
+            if not log:
+                return
+            worst = sorted(log, key=lambda t: abs(t.get("pnl", 0)), reverse=True)[:n]
+            for t in worst:
+                ed = t.get("entry_dt")
+                xd = t.get("exit_dt")
+                ed_s = ed.strftime("%Y-%m-%d %H:%M") if ed is not None else "?"
+                xd_s = xd.strftime("%H:%M") if xd is not None else "?"
+                print(f"        ◆ pnl={t.get('pnl',0):+,.0f}円  "
+                      f"entry={t.get('entry_p')}→exit={t.get('exit_p')}  "
+                      f"atr5m={t.get('atr_5m')}  stop={t.get('stop_p')} "
+                      f"tgt={t.get('target_p')}  {t.get('reason')}  "
+                      f"{ed_s}〜{xd_s}")
+
         for strat in strategies:
             em, sm, tm = STRATEGY_DEFS[strat]
             print(f"\n  【{strat}】 em={em} sm={sm} tm={tm}")
@@ -452,6 +471,13 @@ def main() -> None:
                 ok_v = "✓" if _passes_test(test_r)  else "✗"
                 print(f"    {fold_name} TRAIN{ok_t} [{ts_d}〜{te_d}]: {_fmt(train_r)}")
                 print(f"    {fold_name} TEST {ok_v} [{vs_d}〜{ve_d}]: {_fmt(test_r)}")
+                # 異常検知: 1トレードあたり平均|pnl|が大きい窓は明細をダンプ
+                for lbl, r in (("TRAIN", train_r), ("TEST", test_r)):
+                    if r and r.get("trades", 0) > 0:
+                        avg_abs = abs(r["total_pnl"]) / r["trades"]
+                        if avg_abs > 20000:  # 100株なら1取引2万円超は異常
+                            print(f"      ⚠ {lbl} 異常明細 (avg|pnl|={avg_abs:,.0f}円/取引):")
+                            _dump_worst(r)
         return
 
     # ユニバース読み込み
