@@ -11,6 +11,7 @@ param(
     [double]$MinPrice = 1000,   # 低位株除外
     [string]$Strategy = "ALL",  # "Donchian" など個別指定も可
     [int]$Limit = 0,            # 先頭N銘柄に制限 (0=全銘柄)。本番前の動作確認に使う
+    [int]$HoldoutDays = 0,      # 直近N日を選定から除外しOOS答え合わせ (例:90)
     [switch]$SkipAudit          # データ監査をスキップ
 )
 
@@ -36,6 +37,7 @@ Log "==================================================================="
 
 $limitArg = if ($Limit -gt 0) { @("--limit", $Limit) } else { @() }
 $stratArg = if ($Strategy -eq "ALL") { @() } else { @("--strategy", $Strategy) }
+$hoArg    = if ($HoldoutDays -gt 0) { @("--holdout-days", $HoldoutDays) } else { @() }
 
 # ── データ品質の監査 (往復破損が増えていないか確認) ──
 if (-not $SkipAudit) {
@@ -47,7 +49,7 @@ if (-not $SkipAudit) {
 
 # ── 戦略 WalkForward 検証 ──
 Log "[2/2] WalkForward 検証 (戦略=$Strategy)..."
-python scan_wf_strategies.py --workers $Workers --max-price $MaxPrice --min-price $MinPrice @stratArg @limitArg 2>&1 |
+python scan_wf_strategies.py --workers $Workers --max-price $MaxPrice --min-price $MinPrice @stratArg @limitArg @hoArg 2>&1 |
     Tee-Object -FilePath $log -Append
 
 Log "==================================================================="

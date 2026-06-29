@@ -85,9 +85,11 @@ def _stats(trades: list[dict]) -> dict | None:
                 pnl=sum(t["pnl"] for t in trades))
 
 
-def _slice(df: pd.DataFrame, start_days: int, end_days: int) -> pd.DataFrame:
-    s = TODAY - timedelta(days=start_days)
-    e = TODAY - timedelta(days=end_days)
+def _slice(df: pd.DataFrame, start_days: int, end_days: int,
+           base=None) -> pd.DataFrame:
+    b = base or TODAY
+    s = b - timedelta(days=start_days)
+    e = b - timedelta(days=end_days)
     d = df.index.date
     return df[(d >= s) & (d <= e)]
 
@@ -101,14 +103,22 @@ def _cap_pf(p):
     return 10.0 if p == float("inf") else min(p, 10.0)
 
 
-def wf_one(fn, sym: str, name: str, df: pd.DataFrame) -> dict | None:
-    """1銘柄×1戦略の WalkForward。両 fold 通過なら集計 dict、不合格なら None。"""
+def wf_one(fn, sym: str, name: str, df: pd.DataFrame,
+           holdout_days: int = 0) -> dict | None:
+    """
+    1銘柄×1戦略の WalkForward。両 fold 通過なら集計 dict、不合格なら None。
+
+    holdout_days>0 のとき: 選定 fold を (今日-holdout_days) 基準に後ろ倒しし、
+    直近 holdout_days 日を選定から完全に除外。合格銘柄について、その除外した
+    直近 holdout_days 日 (真の未使用OOS) での成績を holdout_* に記録する。
+    """
+    base = TODAY - timedelta(days=holdout_days)
     folds_passed = 0
     test_stats: list[dict] = []
     train_pnl_total = 0.0
     for _, ts, te, vs, ve in FOLDS:
-        df_tr = _slice(df, ts, te)
-        df_te = _slice(df, vs, ve)
+        df_tr = _slice(df, ts, te, base)
+        df_te = _slice(df, vs, ve, base)
         if len(df_tr) < 50 or len(df_te) < 50:
             continue
         r_tr = _run_strat(fn, sym, name, df_tr)
@@ -132,11 +142,24 @@ def wf_one(fn, sym: str, name: str, df: pd.DataFrame) -> dict | None:
         latest = float(df["close"].iloc[-1])
     except Exception:
         latest = 0.0
-    return dict(symbol=sym, name=name, latest_price=round(latest, 0),
-                folds_passed=folds_passed, total_test_trades=tot_test_tr,
-                total_test_pnl=round(tot_test_pnl, 0),
-                total_train_pnl=round(train_pnl_total, 0),
-                avg_test_pf=round(avg_pf, 2), avg_test_wr=round(avg_wr, 1))
+    res = dict(symbol=sym, name=name, latest_price=round(latest, 0),
+               folds_passed=folds_passed, total_test_trades=tot_test_tr,
+               total_test_pnl=round(tot_test_pnl, 0),
+               total_train_pnl=round(train_pnl_total, 0),
+               avg_test_pf=round(avg_pf, 2), avg_test_wr=round(avg_wr, 1))
+    # ── ホールドアウト (選定に未使用の直近 holdout_days 日) での答え合わせ ──
+    if holdout_days > 0:
+        d = df.index.date
+        df_ho = df[(d > base) & (d <= TODAY)]
+        st_ho = _stats(_run_strat(fn, sym, name, df_ho)["trades"]) \
+            if len(df_ho) >= 20 else None
+        res.update(
+            holdout_trades=st_ho["n"] if st_ho else 0,
+            holdout_pnl=round(st_ho["pnl"], 0) if st_ho else 0,
+            holdout_pf=round(_cap_pf(st_ho["pf"]), 2) if st_ho else 0.0,
+            holdout_wr=round(st_ho["wr"], 1) if st_ho else 0.0,
+        )
+    return res
 
 
 def main() -> None:
@@ -147,6 +170,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--data-days", type=int, default=800)
+    ap.add_argument("--holdout-days", type=int, default=0,
+                    help="直近N日を選定から除外し、そのN日(真の未使用OOS)で答え合わせ"
+                         " (スイング版ホールドアウトと同じ。例: 90)")
     ap.add_argument("--max-price", type=float, default=0.0)
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--budget", type=float, default=0.0)
@@ -161,20 +187,28 @@ def main() -> None:
     if args.limit > 0:
         symbols = symbols[:args.limit]
 
+    ho = args.holdout_days
+    base = TODAY - timedelta(days=ho)
     print("=" * 78)
     print("独立戦略 WalkForward 検証")
     print(f"  基準日: {TODAY}  ユニバース: {uni} ({len(symbols)}銘柄)")
     print(f"  戦略: {', '.join(strategies)}  並列: {args.workers}")
+    if ho > 0:
+        print(f"  ★ホールドアウト: 直近{ho}日を選定から除外 "
+              f"({base}〜{TODAY} で答え合わせ)")
     print(f"  合格: TRAIN n>={TRAIN_MIN_TRADES} PF>={TRAIN_MIN_PF} WR>={TRAIN_MIN_WR}"
           f" / TEST n>={TEST_MIN_TRADES} PF>={TEST_MIN_PF} WR>={TEST_MIN_WR}"
           f" / {FOLDS_PASS_REQUIRED}fold")
     for nm, ts, te, vs, ve in FOLDS:
-        print(f"  {nm}: TRAIN {TODAY-timedelta(days=ts)}〜{TODAY-timedelta(days=te)}"
-              f" / TEST {TODAY-timedelta(days=vs)}〜{TODAY-timedelta(days=ve)}")
+        print(f"  {nm}: TRAIN {base-timedelta(days=ts)}〜{base-timedelta(days=te)}"
+              f" / TEST {base-timedelta(days=vs)}〜{base-timedelta(days=ve)}")
     print("=" * 78)
 
+    # ホールドアウト分も含めて十分なデータを読む
+    load_days = args.data_days + ho
+
     def worker(sym, name):
-        df = load_intraday(sym, days=args.data_days, source="local")
+        df = load_intraday(sym, days=load_days, source="local")
         if df is None or df.empty or len(df) < 100:
             return {}
         if eff_max > 0 or args.min_price > 0:
@@ -189,7 +223,7 @@ def main() -> None:
         out = {}
         for s in strategies:
             try:
-                r = wf_one(STRATEGIES[s], sym, name, df)
+                r = wf_one(STRATEGIES[s], sym, name, df, holdout_days=ho)
             except Exception:
                 r = None
             if r:
@@ -217,22 +251,34 @@ def main() -> None:
     fields = ["symbol", "name", "latest_price", "folds_passed",
               "total_test_trades", "total_test_pnl", "total_train_pnl",
               "avg_test_pf", "avg_test_wr"]
+    if ho > 0:
+        fields += ["holdout_trades", "holdout_pnl", "holdout_pf", "holdout_wr"]
+    suffix = f"_ho{ho}" if ho > 0 else ""
     for s in strategies:
-        rows = sorted(per_strategy[s],
-                      key=lambda r: (-r["folds_passed"], -r["total_test_pnl"]))
-        csv_path = out_dir / f"wf_strategies_{s}_{TODAY}.csv"
+        # ホールドアウト時は『未使用OOSのholdout損益』降順で並べる
+        if ho > 0:
+            rows = sorted(per_strategy[s], key=lambda r: -r.get("holdout_pnl", 0))
+        else:
+            rows = sorted(per_strategy[s],
+                          key=lambda r: (-r["folds_passed"], -r["total_test_pnl"]))
+        csv_path = out_dir / f"wf_strategies_{s}{suffix}_{TODAY}.csv"
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
             for r in rows:
-                w.writerow(r)
+                w.writerow({k: r.get(k, "") for k in fields})
         print(f"\n=== {s}: 合格 {len(rows)}銘柄  → {csv_path.name} ===")
         for r in rows[:args.top]:
-            print(f"  {r['symbol']:<9}{r['name'][:18]:<20}"
-                  f"{r['latest_price']:>7,.0f}  fld{r['folds_passed']}"
-                  f"  取引{r['total_test_trades']:>4}"
-                  f"  TEST損益{r['total_test_pnl']:>+11,.0f}"
-                  f"  PF{r['avg_test_pf']:>5.2f}  WR{r['avg_test_wr']:>5.1f}%")
+            line = (f"  {r['symbol']:<9}{r['name'][:18]:<20}"
+                    f"{r['latest_price']:>7,.0f}  fld{r['folds_passed']}"
+                    f"  TEST損益{r['total_test_pnl']:>+10,.0f}"
+                    f"  PF{r['avg_test_pf']:>5.2f}  WR{r['avg_test_wr']:>5.1f}%")
+            if ho > 0:
+                line += (f"  ||HO {r.get('holdout_trades',0):>3}取引"
+                         f" 損益{r.get('holdout_pnl',0):>+10,.0f}"
+                         f" PF{r.get('holdout_pf',0):>5.2f}"
+                         f" WR{r.get('holdout_wr',0):>5.1f}%")
+            print(line)
         if not rows:
             print("  (合格銘柄なし)")
 
