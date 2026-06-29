@@ -433,8 +433,13 @@ def main() -> None:
     parser.add_argument("--train-wr", type=float, default=None)
     parser.add_argument("--test-pf",  type=float, default=None)
     parser.add_argument("--test-wr",  type=float, default=None)
+    parser.add_argument("--train-trades", type=int, default=None)
+    parser.add_argument("--test-trades",  type=int, default=None)
     parser.add_argument("--folds-pass-required", type=int, default=None,
                         help="合格に必要なfold数 (デフォルト: 2=全fold通過)")
+    parser.add_argument("--relaxed", action="store_true",
+                        help="閾値を大幅緩和して『通る銘柄が存在するか』を確認する"
+                             "(TRAIN PF>=1.0/WR>=35%, TEST PF>=0.9/WR>=30%, fold 1/2)")
     parser.add_argument("--debug-symbol", type=str, default=None,
                         help="指定銘柄の診断 (例: 7203.T). fold別の実際のWR/PFを表示")
     mode_group = parser.add_mutually_exclusive_group()
@@ -444,6 +449,12 @@ def main() -> None:
 
     # ── 閾値上書き ─────────────────────────────────────────────
     global TRAIN_MIN_PF, TRAIN_MIN_WR, TEST_MIN_PF, TEST_MIN_WR, FOLDS, FOLDS_PASS_REQUIRED
+    global TRAIN_MIN_TRADES, TEST_MIN_TRADES
+    if args.relaxed:
+        # 「そもそも通る銘柄が存在するか」を確認するための大幅緩和プリセット
+        TRAIN_MIN_PF, TRAIN_MIN_WR = 1.0, 35.0
+        TEST_MIN_PF,  TEST_MIN_WR  = 0.9, 30.0
+        FOLDS_PASS_REQUIRED = 1
     if args.train_pf is not None:
         TRAIN_MIN_PF = args.train_pf
     if args.train_wr is not None:
@@ -452,6 +463,10 @@ def main() -> None:
         TEST_MIN_PF = args.test_pf
     if args.test_wr is not None:
         TEST_MIN_WR = args.test_wr
+    if args.train_trades is not None:
+        TRAIN_MIN_TRADES = args.train_trades
+    if args.test_trades is not None:
+        TEST_MIN_TRADES = args.test_trades
     if args.folds_pass_required is not None:
         FOLDS_PASS_REQUIRED = args.folds_pass_required
 
