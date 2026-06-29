@@ -3,6 +3,7 @@ __pycache__/
 *.log
 positions_top10/
 .rsi2_cache/
+.daytrade_norm_cache/
 watchlist_*.html
 candidates_*.csv
 report_combined_*.html

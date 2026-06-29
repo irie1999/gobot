@@ -274,23 +274,34 @@ def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
     return resample_to_5m(df)
 
 
-def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
+NORM_CACHE_DIR = Path(__file__).resolve().parent / ".daytrade_norm_cache"
+
+
+def _load_local_full(jq_code: str) -> pd.DataFrame | None:
     """
-    ローカル pickle から読み込み → 正規化 → 期間フィルタ。
-
-    minute_5m (直近) と quarantine_5m (長期) の両方を読み込んで
-    マージする。重複インデックスは新しいデータ (minute_5m) を優先。
+    minute_5m + quarantine_5m をマージ・正規化した『全期間』df を返す
+    (期間フィルタ前)。正規化結果をディスクキャッシュし、2回目以降を高速化。
+    ソース pkl より新しいキャッシュがあればそれを使う。
     """
-    jq_code = yf_to_jquants(symbol)
-
-    df_recent = _load_pkl(DATA_DIR / f"{jq_code}.pkl")
-    df_long   = _load_pkl(QUARANTINE_DIR / f"{jq_code}.pkl")
-
-    if df_recent is None and df_long is None:
+    recent_path = DATA_DIR / f"{jq_code}.pkl"
+    long_path   = QUARANTINE_DIR / f"{jq_code}.pkl"
+    src_mtimes = [p.stat().st_mtime for p in (recent_path, long_path) if p.exists()]
+    if not src_mtimes:
         return None
 
+    cache_path = NORM_CACHE_DIR / f"{jq_code}.pkl"
+    # キャッシュが全ソースより新しければ採用
+    if cache_path.exists() and cache_path.stat().st_mtime >= max(src_mtimes):
+        try:
+            return pickle.loads(cache_path.read_bytes())
+        except Exception:
+            pass  # 壊れていたら作り直す
+
+    df_recent = _load_pkl(recent_path)
+    df_long   = _load_pkl(long_path)
+    if df_recent is None and df_long is None:
+        return None
     if df_recent is not None and df_long is not None:
-        # マージ: quarantine (長期) をベースに recent (直近) で上書き
         combined = pd.concat([df_long, df_recent])
         combined = combined[~combined.index.duplicated(keep="last")]
         df = combined.sort_index()
@@ -298,6 +309,26 @@ def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
         df = df_recent
     else:
         df = df_long
+
+    try:
+        NORM_CACHE_DIR.mkdir(exist_ok=True)
+        cache_path.write_bytes(pickle.dumps(df))
+    except Exception:
+        pass
+    return df
+
+
+def _load_local(symbol: str, days: int) -> pd.DataFrame | None:
+    """
+    ローカル pickle から読み込み → 正規化 → 期間フィルタ。
+
+    minute_5m (直近) と quarantine_5m (長期) の両方を読み込んでマージ
+    (正規化済みをキャッシュ)。重複インデックスは新しいデータ (minute_5m) を優先。
+    """
+    jq_code = yf_to_jquants(symbol)
+    df = _load_local_full(jq_code)
+    if df is None or df.empty:
+        return None
 
     # 期間フィルタ
     cutoff = pd.Timestamp(datetime.now(JST).date() - timedelta(days=days))

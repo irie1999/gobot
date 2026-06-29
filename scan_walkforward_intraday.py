@@ -575,15 +575,16 @@ def main() -> None:
         import gc as _gc
         print(f"\n=== 定量診断: {len(symbols)}銘柄 × {len(strategies)}戦略 ===")
         print("  各トレードの決済理由を集計し『なぜ負けるか』を分析します。\n")
-        # strategy -> reason -> {n, pnl, pct, hold_min, wins}
+        # strategy -> reason -> {n, pnl, pct, hold_min}
         agg: dict = {s: defaultdict(lambda: {"n": 0, "pnl": 0.0,
                      "pct": 0.0, "hold": 0.0}) for s in strategies}
-        done = 0
-        for sym, sym_name in symbols:
+
+        def _diag_one(sym: str, sym_name: str) -> dict:
+            """1銘柄をロードし全戦略の決済理由を集計して返す (並列ワーカー)。"""
             df = load_intraday(sym, days=args.data_days, source=args.source)
-            done += 1
             if df is None or df.empty or len(df) < 50:
-                continue
+                return {}
+            local: dict = {}
             for strat in strategies:
                 em, sm, tm = STRATEGY_DEFS[strat]
                 try:
@@ -593,7 +594,9 @@ def main() -> None:
                 except Exception:
                     continue
                 for t in res.get("all_trades", []):
-                    a = agg[strat][t.get("reason", "?")]
+                    reason = t.get("reason", "?")
+                    a = local.setdefault(strat, {}).setdefault(
+                        reason, {"n": 0, "pnl": 0.0, "pct": 0.0, "hold": 0.0})
                     a["n"] += 1
                     a["pnl"] += t.get("pnl", 0.0)
                     a["pct"] += t.get("pct", 0.0)
@@ -602,9 +605,25 @@ def main() -> None:
                     except Exception:
                         pass
             del df
-            if done % 25 == 0:
-                print(f"  進捗: {done}/{len(symbols)}", flush=True)
-                _gc.collect()
+            return local
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_diag_one, s, n): s for s, n in symbols}
+            for fut in as_completed(futs):
+                done += 1
+                try:
+                    local = fut.result()
+                except Exception:
+                    local = {}
+                for strat, rows in local.items():
+                    for reason, a in rows.items():
+                        g = agg[strat][reason]
+                        g["n"] += a["n"]; g["pnl"] += a["pnl"]
+                        g["pct"] += a["pct"]; g["hold"] += a["hold"]
+                if done % 25 == 0:
+                    print(f"  進捗: {done}/{len(symbols)}", flush=True)
+                    _gc.collect()
 
         for strat in strategies:
             em, sm, tm = STRATEGY_DEFS[strat]
