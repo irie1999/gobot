@@ -142,7 +142,31 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.dropna(subset=["close"])
     out.index.name = "DateTime"
-    return out.sort_index()
+    out = out.sort_index()
+    out = _drop_price_outliers(out)
+    return out
+
+
+def _drop_price_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    破損バー (極端な価格) を除去する。
+
+    5分足の close が局所中央値の 3倍超 / 1/3未満 になることは正常な値動きでは
+    ありえない (yfinance 等の bad tick / 桁ズレ)。ローリング中央値 (外れ値に
+    頑健) を基準に band 外のバーを落とす。また非正の値・high<low も除去。
+    """
+    if df is None or df.empty:
+        return df
+    # 基本サニティ: 正の価格・high>=low
+    base = (df[["open", "high", "low", "close"]] > 0).all(axis=1) & (df["high"] >= df["low"])
+    df = df[base]
+    if len(df) < 20:
+        return df
+    med = df["close"].rolling(101, min_periods=21, center=True).median()
+    med = med.bfill().ffill()
+    ratio = df["close"] / med
+    keep = (ratio >= 1.0 / 3.0) & (ratio <= 3.0)
+    return df[keep]
 
 
 def inspect_pkl(symbol: str) -> None:
