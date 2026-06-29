@@ -550,7 +550,41 @@ if __name__ == "__main__":
                         help="pkl ファイルを直接検査 (データ読み込み問題の診断)")
     parser.add_argument("--survey", action="store_true",
                         help="quarantine_5m / minute_5m フォルダ全体の期間を一覧 (2年分データの所在確認)")
+    parser.add_argument("--dump-day", type=str, default=None,
+                        help="指定日(YYYY-MM-DD)の生バーを両ファイルから表示 (破損調査)")
     args = parser.parse_args()
+
+    if args.dump_day:
+        import pickle as _pickle
+        target = args.symbols[0] if args.symbols else "1721.T"
+        jq_code = yf_to_jquants(target)
+        day = args.dump_day
+        for label, dir_path in [("minute_5m", DATA_DIR), ("quarantine_5m", QUARANTINE_DIR)]:
+            p = dir_path / f"{jq_code}.pkl"
+            print(f"\n{'='*60}\n  [{label}] {p}  日={day}\n{'='*60}")
+            if not p.exists():
+                print("  ファイルなし"); continue
+            raw = _pickle.loads(p.read_bytes())
+            # 日付列を特定
+            if "DateTime" in raw.columns:
+                dts = pd.to_datetime(raw["DateTime"], errors="coerce")
+            elif "Date" in raw.columns:
+                dts = pd.to_datetime(raw["Date"], errors="coerce")
+            else:
+                print("  日付列なし"); continue
+            mask = dts.dt.strftime("%Y-%m-%d") == day
+            sub = raw[mask]
+            print(f"  {day} のバー数: {len(sub)}")
+            ohlc = [c for c in ["O","H","L","C","Open","High","Low","Close","Time"] if c in raw.columns]
+            if len(sub):
+                print(sub[ohlc].head(8).to_string())
+            # その銘柄全体の価格レンジも表示 (スケール確認)
+            ccol = "C" if "C" in raw.columns else ("Close" if "Close" in raw.columns else None)
+            if ccol:
+                cc = pd.to_numeric(raw[ccol], errors="coerce").dropna()
+                print(f"  ファイル全体の close: min={cc.min():.0f} "
+                      f"中央値={cc.median():.0f} max={cc.max():.0f}")
+        sys.exit(0)
 
     if args.survey:
         import pickle as _pickle
