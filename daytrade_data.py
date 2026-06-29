@@ -213,6 +213,20 @@ def inspect_pkl(symbol: str) -> None:
 # ソース1: ローカル保存データ (data/minute_5m/*.pkl)
 # ─────────────────────────────────────────────────────────────
 
+def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
+    """1分足 → 5分足。既に5分足ならそのまま返す (J-Quants 5分足は no-op)。"""
+    if df is None or df.empty:
+        return df
+    if len(df) >= 2:
+        avg_gap = (df.index[-1] - df.index[0]).total_seconds() / (len(df) - 1)
+        if avg_gap >= 250:   # 平均バー間隔 ~5分以上 → 既に5分足
+            return df
+    return df.resample("5min", label="left", closed="left").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna(subset=["close"])
+
+
 def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
     """pkl ファイルを読み込んで正規化・5分足化して返す。"""
     if not pkl_path.exists():
