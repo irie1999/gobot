@@ -127,14 +127,24 @@ def _get_daily_groups(
     """
     df_5m = calc_atr_5m(df_5m)
     daily_atr_map = calc_atr_daily(df_5m)
-    dates = sorted(set(df_5m.index.date))
+
+    # 立会時間マスクを全体に対して1回だけ計算 (ベクトル化)
+    times = df_5m.index.time
+    trade_mask = pd.Series(
+        [(AM_START <= t < AM_END) or (PM_START <= t < PM_END) for t in times],
+        index=df_5m.index)
+
+    # 日付ごとに1回だけ groupby (旧実装の O(バー数×日数) を O(バー数) に)
+    g_full = {d: g for d, g in df_5m.groupby(df_5m.index.date)}
+    dates = sorted(g_full.keys())
+
     result = []
     for i in range(1, len(dates)):
         d      = dates[i]
         prev_d = dates[i - 1]
 
-        prev_bars = df_5m[df_5m.index.date == prev_d]
-        if prev_bars.empty:
+        prev_bars = g_full.get(prev_d)
+        if prev_bars is None or prev_bars.empty:
             continue
 
         prev_close = float(prev_bars["close"].iloc[-1])
@@ -145,9 +155,11 @@ def _get_daily_groups(
         if pd.isna(prev_close) or pd.isna(prev_atr) or prev_atr <= 0:
             continue
 
-        day_df = df_5m[df_5m.index.date == d]
-        # 立会時間外をフィルタ
-        day_df = day_df[[_is_trading_time(ts.time()) for ts in day_df.index]]
+        cur = g_full.get(d)
+        if cur is None:
+            continue
+        # 立会時間外をフィルタ (事前計算したマスクを使う)
+        day_df = cur[trade_mask.loc[cur.index].values]
         if len(day_df) < 3:
             continue
 
@@ -349,6 +361,7 @@ def run_intraday_backtest(
     backtest_days: int = BACKTEST_DAYS,
     strategy_name: str = "PREV_CLOSE_BREAK",
     stop_basis: str = "daily",
+    daily_groups: list | None = None,
 ) -> dict:
     """
     5分足を使ったデイトレバックテスト。
@@ -377,17 +390,21 @@ def run_intraday_backtest(
     if df_5m is None or df_5m.empty:
         return _empty_result(symbol, name, strategy_name)
 
-    # バックテスト期間にカット (余裕を持って +ATR_PERIOD バー分を含める)
-    today   = datetime.now(JST).date()
-    cutoff  = pd.Timestamp(today - timedelta(days=backtest_days + 10))
-    df_5m   = df_5m[df_5m.index >= cutoff].copy()
+    # daily_groups を渡されたら再計算しない (同一銘柄×同一窓で全戦略共有=高速化)
+    if daily_groups is None:
+        # バックテスト期間にカット (余裕を持って +ATR_PERIOD バー分を含める)
+        today   = datetime.now(JST).date()
+        cutoff  = pd.Timestamp(today - timedelta(days=backtest_days + 10))
+        df_5m   = df_5m[df_5m.index >= cutoff].copy()
 
-    if len(df_5m) < ATR_PERIOD + 5:
-        return _empty_result(symbol, name, strategy_name)
+        if len(df_5m) < ATR_PERIOD + 5:
+            return _empty_result(symbol, name, strategy_name)
 
-    daily_groups = _get_daily_groups(df_5m)
+        daily_groups = _get_daily_groups(df_5m)
     if not daily_groups:
         return _empty_result(symbol, name, strategy_name)
+
+    today = datetime.now(JST).date()
 
     trades: list[dict] = []
 

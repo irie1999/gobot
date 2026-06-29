@@ -63,6 +63,8 @@ import pandas as pd
 from backtest_intraday import (
     run_intraday_backtest,
     BACKTEST_DAYS,
+    _get_daily_groups,
+    ATR_PERIOD,
 )
 from daytrade_data import load_intraday, DATA_DIR, quarantine_symbols
 from risk_metrics import enrich_backtest_result
@@ -597,13 +599,22 @@ def main() -> None:
             df = load_intraday(sym, days=args.data_days, source=args.source)
             if df is None or df.empty or len(df) < 50:
                 return {}
+            # daily_groups を1回だけ計算して全戦略で共有 (5倍の再計算を回避)
+            cutoff = pd.Timestamp(TODAY - timedelta(days=args.data_days + 10))
+            df_cut = df[df.index >= cutoff]
+            if len(df_cut) < ATR_PERIOD + 5:
+                return {}
+            groups = _get_daily_groups(df_cut)
+            if not groups:
+                return {}
             local: dict = {}
             for strat in strategies:
                 em, sm, tm = STRATEGY_DEFS[strat]
                 try:
                     res = run_intraday_backtest(
                         sym, sym_name, df, em, sm, tm,
-                        backtest_days=args.data_days, strategy_name=strat)
+                        backtest_days=args.data_days, strategy_name=strat,
+                        daily_groups=groups)
                 except Exception:
                     continue
                 for t in res.get("all_trades", []):
