@@ -1563,18 +1563,26 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         f'border-radius:3px;font-size:0.65rem;display:inline-block;margin-top:2px">'
         f'{bt_type}</span>'
     ) if bt_type else ""
+    # BTスコアの計算元になった実取引数。少ない(10件未満)と少数サンプル=赤で警告
+    _bt_tr = s.get("bt_trades")
+    if _bt_tr is not None:
+        _tr_c = "#f87171" if _bt_tr < 10 else "#94a3b8"
+        _tr_badge = (f'<span style="font-size:0.62rem;color:{_tr_c};display:block;margin-top:1px">'
+                     f'取引{_bt_tr}件{"⚠少" if _bt_tr < 10 else ""}</span>')
+    else:
+        _tr_badge = ""
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
         return (
             f'<span style="color:{col};font-weight:700">WF&nbsp;{s["wf_score"]}</span>'
             f'<span style="font-size:0.68rem;color:#64748b;display:block">{rank} / BT:{rec}</span>'
-            f'{type_badge}'
+            f'{type_badge}{_tr_badge}'
         )
     else:
         return (
             f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["score"]}</span>'
             f'<br><span style="font-size:0.68rem;color:#f59e0b">BT(参考)</span>'
-            f'<br>{type_badge}'
+            f'<br>{type_badge}{_tr_badge}'
         )
 
 
@@ -1654,6 +1662,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                              else "★" if _fz >= 40 else "△")
             _bt_type_fn = getattr(_stop, "calc_bt_type", None)
             bt_type = _bt_type_fn(bt["period_results"]) if _bt_type_fn else "?"
+            # BTスコアの計算元になった実取引数(180日=最長窓、重複なし)
+            _pr_vals = [r for r in bt["period_results"].values()
+                        if r and r.get("trades", 0) > 0]
+            bt_trades = max((r["trades"] for r in _pr_vals), default=0)
             # WFスコア（out-of-sample）があれば優先してソートキーに使う
             _get_wf = getattr(_stop, "get_wf_score", None)
             wf = _get_wf(sym, strat) if _get_wf else None
@@ -1705,6 +1717,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "score": score, "rank": rank, "is_wf": is_wf,
                     "wf_score": wf_score, "wf_rank_str": wf_rank_str,
                     "rec_score": rec_score, "bt_type": bt_type,
+                    "bt_trades":    bt_trades,
                     "signal_date":  sig_dt,
                     "signal_price": sig.get("signal_price", 0),
                     "order_p":      order_p,
