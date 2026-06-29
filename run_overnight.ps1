@@ -15,6 +15,10 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# Python 出力を UTF-8 に強制 (cp932 に無い文字 ✓ 等での UnicodeEncodeError 回避)
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $ts  = Get-Date -Format "yyyyMMdd_HHmm"
 $log = "overnight_$ts.log"
 

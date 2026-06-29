@@ -697,7 +697,7 @@ if __name__ == "__main__":
                 print(f"    {sym:>8} {ts}  {prev:.0f}→{cur:.0f}→{nxt:.0f} "
                       f"(往復{rev*100:.0f}pct)")
         else:
-            print("\n  ✓ 往復スパイク(残存破損疑い)は検出されませんでした。")
+            print("\n  [OK] 往復スパイク(残存破損疑い)は検出されませんでした。")
         sys.exit(0)
 
     if args.dump_day:
