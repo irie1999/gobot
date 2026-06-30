@@ -523,6 +523,69 @@ function show(id, el){
 """
 
 
+def _hold_minutes(t):
+    ed, xd = t.get("entry_dt"), t.get("exit_dt")
+    try:
+        return max(0.0, (xd - ed).total_seconds() / 60.0)
+    except Exception:
+        return 0.0
+
+
+def _strategy_summary_html(groups, err, oos_cutoff=None, oos_days=90) -> str:
+    """スイング版相当の戦略別サマリー (リスク指標 + 純OOS併記)。"""
+    if err:
+        return f'<h2>戦略別サマリー</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>戦略別サマリー</h2><p class="badge">データがありません。</p>'
+    try:
+        from risk_metrics import (calc_max_drawdown, calc_max_consecutive_losses,
+                                   calc_sharpe)
+    except Exception:
+        calc_max_drawdown = calc_max_consecutive_losses = calc_sharpe = None
+
+    from collections import defaultdict
+    by_strat = defaultdict(list)
+    for strat, code, name, trades in groups:
+        by_strat[strat].extend(trades)
+
+    def _pf_s(v):
+        return "∞" if v == float("inf") else f"{v:.2f}"
+
+    def _row(label, trades, accent=False):
+        s = _split_stats(trades)
+        os_ = _split_stats([t for t in trades if _is_oos(t, oos_cutoff)])
+        if calc_max_drawdown:
+            _, dd_pct = calc_max_drawdown(trades)
+            mcl = calc_max_consecutive_losses(trades)
+            shp = calc_sharpe(trades, trades_per_year=250)
+        else:
+            dd_pct, mcl, shp = 0.0, 0, 0.0
+        hold = sum(_hold_minutes(t) for t in trades) / len(trades) if trades else 0.0
+        nc = "pos" if s["net"] > 0 else "neg"
+        oc = "pos" if os_["net"] > 0 else ("neg" if os_["net"] < 0 else "zero")
+        st = ' style="font-weight:700;background:#0f1a2e"' if accent else ""
+        return (f'<tr{st}><td class="nm">{label}</td>'
+                f'<td>{s["n"]}</td><td>{s["wr"]:.0f}%</td><td>{_pf_s(s["pf"])}</td>'
+                f'<td class="{nc}">{s["net"]:+,.0f}</td>'
+                f'<td class="neg">{dd_pct:.1f}%</td><td>{mcl}</td><td>{shp:.2f}</td>'
+                f'<td>{hold:.0f}分</td>'
+                f'<td class="{oc}">{os_["net"]:+,.0f}</td></tr>')
+
+    all_tr = [t for ts in by_strat.values() for t in ts]
+    h = [f'<h2>戦略別サマリー <span class="badge">リスク指標つき / '
+         f'純OOS=直近{oos_days}日</span></h2>',
+         '<table><thead><tr><th>戦略</th><th>取引</th><th>勝率</th><th>PF</th>'
+         '<th>純損益</th><th>MaxDD</th><th>最大連敗</th><th>Sharpe</th>'
+         '<th>平均保有</th><th>★純OOS</th></tr></thead><tbody>']
+    for strat in sorted(by_strat, key=lambda s: -_split_stats(by_strat[s])["net"]):
+        h.append(_row(strat, by_strat[strat]))
+    h.append(_row("全戦略 合計", all_tr, accent=True))
+    h.append('</tbody></table>')
+    h.append('<p class="badge">MaxDD=最大ドローダウン% / Sharpe=年率(250取引想定) / '
+             '★純OOS=選定に使っていない直近期間の純損益。</p>')
+    return "".join(h)
+
+
 def build_html(date: str, signal_days: int, detail_days: int, oos_days: int = 90):
     oos_cutoff = _oos_cutoff(date, oos_days)
     # WF検証
@@ -542,6 +605,11 @@ def build_html(date: str, signal_days: int, detail_days: int, oos_days: int = 90
     tabs.append(f'<button class="tab active" onclick="show(\'sig\',this)">'
                 f'🚀 今日のシグナル <span class="tn">{sig_n}</span></button>')
     panes.append(f'<div id="sig" class="pane active">{_signals_html(sigs, err)}</div>')
+    # 戦略別サマリー (リスク指標つき)
+    tabs.append('<button class="tab" onclick="show(\'stratsum\',this)">'
+                '📊 戦略別サマリー</button>')
+    panes.append(f'<div id="stratsum" class="pane">'
+                 f'{_strategy_summary_html(groups, derr, oos_cutoff, oos_days)}</div>')
     # 取引明細タブ (銘柄別)
     det_n = len(groups) if groups else 0
     tabs.append(f'<button class="tab" onclick="show(\'detail\',this)">'
