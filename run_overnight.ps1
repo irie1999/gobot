@@ -59,8 +59,12 @@ foreach ($ho in $Holdouts) {
         Tee-Object -FilePath $log -Append
 }
 
-# ── HTMLレポート生成 (スイング同様にブラウザで確認) ──
+# ── WATCHLIST 再構築 (新CSVから TEST窓のみで選定。直近HO日は使わない) ──
 $today = Get-Date -Format 'yyyy-MM-dd'
+Log "[WATCHLIST] build_watchlist_wf.py で再構築中 (TEST選定・OOS不使用)..."
+python build_watchlist_wf.py --date $today 2>&1 | Tee-Object -FilePath $log -Append
+
+# ── HTMLレポート生成 (スイング同様にブラウザで確認) ──
 Log "[レポート] HTML生成中..."
 python daytrade_report.py --date $today --no-browser 2>&1 | Tee-Object -FilePath $log -Append
 
