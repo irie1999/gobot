@@ -232,6 +232,22 @@ def _trade_detail(detail_days: int):
     return groups, None
 
 
+def _oos_cutoff(date_str: str, oos_days: int):
+    """OOS境界日を返す。これより後(>)の取引が純OOS(選定未使用)。
+    HO90 の選定窓は date-90 で終わるため、直近 oos_days(既定90)日は
+    どの選定窓も見ていない純粋な未知データ。"""
+    try:
+        base = datetime.fromisoformat(date_str).date()
+    except Exception:
+        base = datetime.now(JST).date()
+    return base - timedelta(days=oos_days)
+
+
+def _is_oos(t, cutoff):
+    ed = t.get("entry_dt")
+    return ed is not None and cutoff is not None and ed.date() > cutoff
+
+
 def _split_stats(trades: list):
     """損と利益を分けて集計。"""
     wins = [t for t in trades if _f(t.get("pnl")) > 0]
@@ -248,47 +264,82 @@ def _split_stats(trades: list):
     }
 
 
-def _detail_html(groups, err) -> str:
+def _detail_html(groups, err, oos_cutoff=None, oos_days=90) -> str:
     if err:
         return f'<h2>取引明細</h2><p class="warn">{err}</p>'
     if not groups:
         return '<h2>取引明細</h2><p class="badge">WATCHLISTが空か、データがありません。</p>'
 
-    # 全体の損益分離サマリー
+    def _pf_s(v):
+        return "∞" if v == float("inf") else f"{v:.2f}"
+
+    # 全体の損益分離サマリー (全期間 と 純OOS を並記)
     all_tr = [t for _, _, _, ts in groups for t in ts]
     g = _split_stats(all_tr)
-    pf_s = "∞" if g["pf"] == float("inf") else f"{g['pf']:.2f}"
-    h = ['<h2>取引明細 <span class="badge">損と利益を分離</span></h2>']
+    oos_tr = [t for t in all_tr if _is_oos(t, oos_cutoff)]
+    og = _split_stats(oos_tr)
+    cut_s = oos_cutoff.isoformat() if oos_cutoff else "―"
+
+    h = ['<h2>取引明細 <span class="badge">損と利益を分離 / '
+         f'純OOS=直近{oos_days}日({cut_s}以降・選定未使用)</span></h2>']
+    # 全期間
     h.append('<table style="width:auto"><tbody>'
+             '<tr><th colspan="2" style="color:#94a3b8">▼ 全期間 (選定窓+OOS 混在・参考)</th></tr>'
              f'<tr><th>利益トレード</th><td class="pos">{g["win_n"]}件 / 合計 +{g["gross_profit"]:,.0f}円 / 平均 +{g["avg_win"]:,.0f}円</td></tr>'
              f'<tr><th>損失トレード</th><td class="neg">{g["loss_n"]}件 / 合計 {g["gross_loss"]:,.0f}円 / 平均 {g["avg_loss"]:,.0f}円</td></tr>'
              f'<tr><th>純損益</th><td class="{"pos" if g["net"]>0 else "neg"}">{g["net"]:+,.0f}円</td></tr>'
-             f'<tr><th>勝率 / PF</th><td>{g["wr"]:.1f}% / PF {pf_s}</td></tr>'
+             f'<tr><th>勝率 / PF</th><td>{g["wr"]:.1f}% / PF {_pf_s(g["pf"])}</td></tr>'
              '</tbody></table>')
+    # 純OOS (これが本当の答え合わせ)
+    oos_net_c = "pos" if og["net"] > 0 else "neg"
+    h.append('<table style="width:auto;border:2px solid #fbbf24"><tbody>'
+             f'<tr><th colspan="2" style="color:#fbbf24">★ 純OOS (直近{oos_days}日・選定に未使用＝真の実力)</th></tr>'
+             f'<tr><th>利益トレード</th><td class="pos">{og["win_n"]}件 / 合計 +{og["gross_profit"]:,.0f}円</td></tr>'
+             f'<tr><th>損失トレード</th><td class="neg">{og["loss_n"]}件 / 合計 {og["gross_loss"]:,.0f}円</td></tr>'
+             f'<tr><th>純損益</th><td class="{oos_net_c}" style="font-weight:700">{og["net"]:+,.0f}円</td></tr>'
+             f'<tr><th>勝率 / PF</th><td>{og["wr"]:.1f}% / PF {_pf_s(og["pf"])}</td></tr>'
+             '</tbody></table>')
+    verdict = ("✅ OOSでもプラス＝過学習でなく本物の可能性が高い"
+               if og["net"] > 0 else
+               "⚠️ OOSがマイナス＝選定窓だけ良い過学習の疑い。要注意")
+    h.append(f'<p class="badge" style="margin-top:6px">{verdict}</p>')
 
-    # 銘柄別 (純損益降順)
+    # 銘柄別 (純損益降順)。各銘柄に OOS小計、表内に OOS 境界線を表示
     groups2 = sorted(groups, key=lambda x: -_split_stats(x[3])["net"])
     for strat, code, name, trades in groups2:
         s = _split_stats(trades)
-        spf = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+        os_ = _split_stats([t for t in trades if _is_oos(t, oos_cutoff)])
         net_c = "pos" if s["net"] > 0 else "neg"
+        oc = "pos" if os_["net"] > 0 else ("neg" if os_["net"] < 0 else "zero")
         h.append(f'<h3 style="color:#cbd5e1;font-size:13px;margin:14px 0 4px">'
                  f'{strat} / {code} {name[:16]} '
                  f'<span class="badge">純<span class="{net_c}">{s["net"]:+,.0f}</span> '
                  f'| 利{s["win_n"]}件+{s["gross_profit"]:,.0f} '
-                 f'/ 損{s["loss_n"]}件{s["gross_loss"]:,.0f} | PF{spf} WR{s["wr"]:.0f}%</span></h3>')
+                 f'/ 損{s["loss_n"]}件{s["gross_loss"]:,.0f} | PF{_pf_s(s["pf"])} WR{s["wr"]:.0f}%</span> '
+                 f'<span class="badge" style="border-color:#fbbf24">★OOS '
+                 f'<span class="{oc}">{os_["net"]:+,.0f}</span> '
+                 f'({os_["n"]}取引 WR{os_["wr"]:.0f}% PF{_pf_s(os_["pf"])})</span></h3>')
         h.append('<table><thead><tr><th>日付</th><th>時刻</th>'
                  '<th>エントリー</th><th>決済</th><th>損益</th><th>%</th><th>理由</th>'
                  '</tr></thead><tbody>')
-        for t in sorted(trades, key=lambda x: x.get("entry_dt") or datetime.now()):
+        sorted_tr = sorted(trades, key=lambda x: x.get("entry_dt") or datetime.now())
+        oos_marked = False
+        for t in sorted_tr:
             ed = t.get("entry_dt")
+            # OOS 境界線 (最初の OOS 取引の直前に1本)
+            if not oos_marked and _is_oos(t, oos_cutoff):
+                h.append('<tr><td colspan="7" style="background:#3a2f0a;'
+                         'color:#fbbf24;font-weight:700;text-align:center;'
+                         f'border-top:2px solid #fbbf24">━━ ここから純OOS (直近{oos_days}日・選定未使用) ━━</td></tr>')
+                oos_marked = True
             xd = t.get("exit_dt")
             pnl = _f(t.get("pnl"))
             c = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+            row_bg = ' style="background:rgba(251,191,36,0.06)"' if _is_oos(t, oos_cutoff) else ""
             d_s = ed.strftime("%Y-%m-%d") if ed is not None else "?"
             t_s = (ed.strftime("%H:%M") if ed is not None else "") + \
                   ("→" + xd.strftime("%H:%M") if xd is not None else "")
-            h.append(f'<tr><td class="nm">{d_s}</td><td class="nm">{t_s}</td>'
+            h.append(f'<tr{row_bg}><td class="nm">{d_s}</td><td class="nm">{t_s}</td>'
                      f'<td>{_f(t.get("entry_p")):,.0f}</td><td>{_f(t.get("exit_p")):,.0f}</td>'
                      f'<td class="{c}">{pnl:+,.0f}</td>'
                      f'<td class="{c}">{_f(t.get("pct")):+.2f}</td>'
@@ -471,7 +522,8 @@ function show(id, el){
 """
 
 
-def build_html(date: str, signal_days: int, detail_days: int):
+def build_html(date: str, signal_days: int, detail_days: int, oos_days: int = 90):
+    oos_cutoff = _oos_cutoff(date, oos_days)
     # WF検証
     wf = {}
     for s in STRATEGIES:
@@ -493,7 +545,7 @@ def build_html(date: str, signal_days: int, detail_days: int):
     det_n = len(groups) if groups else 0
     tabs.append(f'<button class="tab" onclick="show(\'detail\',this)">'
                 f'📋 取引明細(銘柄別) <span class="tn">{det_n}</span></button>')
-    panes.append(f'<div id="detail" class="pane">{_detail_html(groups, derr)}</div>')
+    panes.append(f'<div id="detail" class="pane">{_detail_html(groups, derr, oos_cutoff, oos_days)}</div>')
     # 日別取引タブ
     tabs.append('<button class="tab" onclick="show(\'bydate\',this)">'
                 '📅 日別取引</button>')
@@ -529,10 +581,13 @@ def main():
     ap.add_argument("--signal-days", type=int, default=60)
     ap.add_argument("--detail-days", type=int, default=365,
                     help="取引明細の対象期間 (実トレード履歴を再計算する日数)")
+    ap.add_argument("--oos-days", type=int, default=90,
+                    help="純OOS境界 (直近N日は選定未使用＝答え合わせ領域。既定90)")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    html, summary, sig_n = build_html(args.date, args.signal_days, args.detail_days)
+    html, summary, sig_n = build_html(args.date, args.signal_days,
+                                      args.detail_days, args.oos_days)
     out = Path(f"daytrade_report_{args.date}.html")
     out.write_text(html, encoding="utf-8")
     print(f"HTML 生成: {out.resolve()}")
