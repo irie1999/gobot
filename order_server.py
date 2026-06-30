@@ -230,33 +230,62 @@ def _place_target_now(cli, p: dict) -> str:
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
 
 
+# 東証 制限値幅テーブル: 基準値段(前日終値) → 片側の値幅
+# https://www.jpx.co.jp/equities/trading/domestic/06.html
+_TSE_LIMIT_TABLE = [
+    (100, 30), (200, 50), (500, 80), (700, 100), (1000, 150),
+    (1500, 300), (2000, 400), (3000, 500), (5000, 700), (7000, 1000),
+    (10000, 1500), (15000, 3000), (20000, 4000), (30000, 5000),
+    (50000, 7000), (70000, 10000), (100000, 15000), (150000, 30000),
+    (200000, 40000), (300000, 50000), (500000, 70000), (700000, 100000),
+    (1000000, 150000), (1500000, 300000), (2000000, 400000),
+    (3000000, 500000), (5000000, 700000),
+]
+
+
+def _tse_price_limit_width(base: float) -> float:
+    """基準値段(前日終値)に対する東証の制限値幅(片側)。"""
+    for threshold, width in _TSE_LIMIT_TABLE:
+        if base < threshold:
+            return width
+    return 1000000.0  # 1000万円以上 (フォールバック)
+
+
 def _cap_to_price_limit(cli, symbol: str, side: str, target: float):
     """値幅制限(ストップ高/安=指値で指定可能な最大/最小値)でキャップする。
-    long利確(売り): target が当日上限(UpperLimit)超なら上限値に。
-    short利確(買戻): target が当日下限(LowerLimit)割れなら下限値に。
-    値幅が取得できない(429等)/上限0(時間外)のときは None を返す
-    → 呼び出し側で『弾かれる値を送らずスキップ』する (429ストーム防止)。"""
-    try:
-        board = _kabu_get(cli.get_board, symbol)
-    except Exception as e:
-        print(f"  ⚠ 値幅取得失敗 {symbol} ({e}) → 今回スキップ(次回再試行)")
+
+    kabu の board は UpperLimit/LowerLimit を返さないので、board の PreviousClose
+    (前日終値=基準値段) に東証の制限値幅を足し引きして算出する。
+    例: 5726 前日終値2700 → 値幅±500 → 上限3200/下限2200。
+    前日終値が取れない(429/時間外)ときは None → 呼び出し側でスキップ(429ストーム防止)。"""
+    base = None
+    for i in range(4):
+        try:
+            board = cli.get_board(symbol)
+        except Exception:
+            board = None
+        if board:
+            base = (board.get("PreviousClose") or board.get("CalcPrice")
+                    or board.get("CurrentPrice"))
+        if base:
+            break
+        _time.sleep(1.0 + i)   # register/board の 429 をバックオフ再試行
+    if not base:
+        print(f"  ⚠ {symbol} 前日終値が取得できず → 今回スキップ(次回再試行)")
         return None
+    width = _tse_price_limit_width(float(base))
+    upper = float(base) + width
+    lower = float(base) - width
     if side == "short":
-        lo = board.get("LowerLimit") or 0
-        if not lo:
-            print(f"  ⚠ {symbol} 下限値が取得できず(時間外?) → 今回スキップ")
-            return None
-        if target < lo:
-            print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lo:,.0f}割れ → 下限値で発注")
-            return float(lo)
+        if target < lower:
+            print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lower:,.0f}割れ "
+                  f"(前日終値{base:,.0f}-値幅{width:,.0f}) → 下限値で発注")
+            return lower
     else:
-        up = board.get("UpperLimit") or 0
-        if not up:
-            print(f"  ⚠ {symbol} 上限値が取得できず(時間外?) → 今回スキップ")
-            return None
-        if target > up:
-            print(f"  ↗ {symbol} 利確{target:,.0f}が上限{up:,.0f}超 → 上限値{up:,.0f}で発注")
-            return float(up)
+        if target > upper:
+            print(f"  ↗ {symbol} 利確{target:,.0f}が上限{upper:,.0f}超 "
+                  f"(前日終値{base:,.0f}+値幅{width:,.0f}) → 上限値で発注")
+            return upper
     return target
 
 
