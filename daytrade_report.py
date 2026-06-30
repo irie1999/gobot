@@ -312,20 +312,22 @@ def _bydate_html(groups, err) -> str:
             bydate[ed.date()].append((strat, code, name, t))
     dates = sorted(bydate.keys(), reverse=True)
 
-    # 全体 + 日別サマリー
-    h = ['<h2>日別取引 <span class="badge">日付ごとの損益</span></h2>']
-    h.append('<table style="width:auto"><thead><tr><th>日付</th><th>取引</th>'
-             '<th>勝/負</th><th>純損益</th></tr></thead><tbody>')
+    # 全体 + 日別サマリー (横幅を使う多列グリッド)
+    tot = sum(_f(x[3].get("pnl")) for d in dates for x in bydate[d])
+    tc = "pos" if tot > 0 else "neg"
+    h = ['<h2>日別取引 <span class="badge">日付ごとの損益 / '
+         f'全{len(dates)}日 純<span class="{tc}">{tot:+,.0f}</span></span></h2>',
+         '<div class="daygrid">']
     for d in dates:
         ts = [x[3] for x in bydate[d]]
         net = sum(_f(t.get("pnl")) for t in ts)
         w = sum(1 for t in ts if _f(t.get("pnl")) > 0)
         l = sum(1 for t in ts if _f(t.get("pnl")) < 0)
         c = "pos" if net > 0 else ("neg" if net < 0 else "zero")
-        h.append(f'<tr><td class="nm"><a href="#d{d}" '
-                 f'style="color:#7dd3fc">{d}</a></td><td>{len(ts)}</td>'
-                 f'<td>{w}/{l}</td><td class="{c}">{net:+,.0f}</td></tr>')
-    h.append('</tbody></table>')
+        h.append(f'<a href="#d{d}" class="daycell {c}">'
+                 f'<span class="dd">{str(d)[5:]}</span> {net:+,.0f}'
+                 f'<span class="dn">{w}/{l}</span></a>')
+    h.append('</div>')
 
     # 日別の明細
     for d in dates:
@@ -377,6 +379,14 @@ th{background:#1e293b;color:#cbd5e1} td.nm,td.star{text-align:left}
 .pos{color:#34d399} .neg{color:#f87171} .zero{color:#475569} .test{color:#7d93b0}
 tr.robust{background:#0f2a1c} tr.robust td.star{color:#fbbf24;font-weight:bold}
 tr:hover{background:#172033}
+.daygrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));
+         gap:5px;margin:8px 0 16px}
+.daycell{padding:4px 7px;border:1px solid #1e293b;border-radius:5px;background:#141b2b;
+         text-decoration:none;font-size:11px;text-align:right;font-weight:600}
+.daycell .dd{float:left;color:#7dd3fc;font-weight:400}
+.daycell .dn{display:block;color:#64748b;font-size:9px;font-weight:400}
+.daycell.pos{color:#34d399} .daycell.neg{color:#f87171} .daycell.zero{color:#64748b}
+.daycell:hover{border-color:#475569}
 """
 
 JS = """
