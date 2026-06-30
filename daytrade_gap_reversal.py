@@ -108,6 +108,9 @@ def backtest_day(day_df, prev_close):
                 i += 1
                 continue
             qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+            if qty <= 0:        # 予算で100株買えない高額株 → エントリーしない
+                i += 1
+                continue
             state = "in_pos"
             i += 2
             continue

@@ -150,6 +150,9 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
                 continue
             target_p = entry_p + (entry_p - stop_p) * TARGET_R
             qty = calc_position_size(entry_p, stop_p, BUDGET, MAX_RISK)
+            if qty <= 0:        # 予算で100株買えない高額株 → エントリーしない
+                i += 1
+                continue
             state = "in_pos"
             trail_level = 0
             i += 2

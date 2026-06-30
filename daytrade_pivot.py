@@ -138,6 +138,9 @@ def backtest_pivot_day(day_df: pd.DataFrame, pivot: dict,
                 i += 1
                 continue
             qty = calc_position_size(entry_p, stop_p, budget, max_risk)
+            if qty <= 0:        # 予算で100株買えない高額株 → エントリーしない
+                i += 1
+                continue
             state = "in_pos"
             trailing = False
             i += 2

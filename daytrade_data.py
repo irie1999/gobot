@@ -583,6 +583,11 @@ def calc_position_size(entry_p: float, stop_p: float,
     Returns:
         株数 (100株単位、最低100株)
     """
+    # 予算から逆算した最大株数 (100株単位)
+    qty_by_budget = int(budget / entry_p / 100) * 100 if entry_p > 0 else 0
+    if qty_by_budget < 100:
+        return 0   # 予算で100株すら買えない高額株 → トレード不可 (呼び出し側でスキップ)
+
     risk_per_share = abs(entry_p - stop_p)
     if risk_per_share <= 0:
         return 100
@@ -590,11 +595,8 @@ def calc_position_size(entry_p: float, stop_p: float,
     # リスクから逆算した株数
     qty_by_risk = int(max_risk / risk_per_share / 100) * 100
 
-    # 予算から逆算した最大株数
-    qty_by_budget = int(budget / entry_p / 100) * 100
-
     qty = min(qty_by_risk, qty_by_budget)
-    return max(100, qty)
+    return max(100, qty)   # 予算は100株以上を許容済みなので max(100,) は安全
 
 
 def split_by_day(df: pd.DataFrame) -> dict:
