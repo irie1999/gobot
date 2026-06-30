@@ -63,8 +63,10 @@ def _resample_daily(df5: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 
-def _verify_symbol(sym: str, name: str, days: int) -> list[dict]:
-    """1銘柄の全シグナル約定について同日ショート結果を返す。"""
+def _verify_symbol(sym: str, name: str, days: int,
+                   allowed: set | None = None) -> list[dict]:
+    """1銘柄の全シグナル約定について同日ショート結果を返す。
+    allowed が指定されればその戦略だけ評価 (WATCHLISTの割当戦略に限定)。"""
     try:
         df5 = load_intraday(sym, days=DATA_DAYS, source="local")
     except Exception:
@@ -81,6 +83,8 @@ def _verify_symbol(sym: str, name: str, days: int) -> list[dict]:
 
     out = []
     for strat, calc_fn in STRATS.items():
+        if allowed is not None and strat not in allowed:
+            continue
         try:
             d = calc_fn(daily.copy())
         except Exception:
@@ -150,6 +154,8 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(試し)")
     ap.add_argument("--strategy", choices=list(STRATS.keys()), default=None)
+    ap.add_argument("--watchlist", action="store_true",
+                    help="スイング選定WATCHLIST(stop+breakout)の『銘柄×割当戦略』だけで検証")
     args = ap.parse_args()
 
     if args.strategy:
@@ -157,14 +163,31 @@ def main():
             if s != args.strategy:
                 STRATS.pop(s)
 
-    universe = SYMBOLS[:args.limit] if args.limit else SYMBOLS
-    print(f"同日ショート 5分足検証: {len(universe)}銘柄 / 直近{args.days}日 / "
+    # ── 対象銘柄と、銘柄ごとの許可戦略 (allowed) を決定 ──
+    sym_allowed: dict[str, set] = {}     # sym -> {許可戦略}。Noneなら全戦略
+    if args.watchlist:
+        from check_signals_stop import WATCHLIST as _W_STOP
+        from check_signals_breakout import WATCHLIST as _W_BRK
+        names: dict[str, str] = {}
+        for code, nm, strat in list(_W_STOP) + list(_W_BRK):
+            if args.strategy and strat != args.strategy:
+                continue
+            sym_allowed.setdefault(code, set()).add(strat)
+            names[code] = nm
+        universe = [(c, names[c]) for c in sym_allowed]
+        src = "スイング選定WATCHLIST(銘柄×割当戦略のみ)"
+    else:
+        universe = SYMBOLS[:args.limit] if args.limit else SYMBOLS
+        src = f"プライム{len(universe)}銘柄(全戦略)"
+
+    print(f"同日ショート 5分足検証: {src} / 直近{args.days}日 / "
           f"戦略 {','.join(STRATS)} / EM={EM}", flush=True)
 
     recs: list[dict] = []
     done = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_verify_symbol, s, n, args.days): s for s, n in universe}
+        futs = {ex.submit(_verify_symbol, s, n, args.days,
+                          sym_allowed.get(s)): s for s, n in universe}
         for f in as_completed(futs):
             try:
                 recs.extend(f.result())
