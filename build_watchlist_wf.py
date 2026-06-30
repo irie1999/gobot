@@ -86,8 +86,13 @@ def main() -> None:
                     help="選定窓 TEST の最小取引数 (既定 3)")
     ap.add_argument("--strict-both", action="store_true",
                     help="HO90&HO180両方で合格を要求 (クリーンOOSは直近90日に縮む)")
+    ap.add_argument("--strategies", nargs="+", default=["Donchian", "Pivot"],
+                    help="採用する戦略 (既定: Donchian Pivot = クリーンOOSでプラス確認済の2戦略)。"
+                         " 全戦略を見るなら --strategies "
+                         "Donchian GapReversal VWAP RSI Pivot OpenMomentum MACDBreak StochATR VolSurge")
     ap.add_argument("--out", default="daytrade_watchlist.py")
     args = ap.parse_args()
+    use_strategies = [s for s in STRATEGIES if s in set(args.strategies)]
 
     sho = args.select_ho
     watchlist: dict[str, list] = {}
@@ -99,6 +104,7 @@ def main() -> None:
           f" / test_trades>={args.min_test_trades}")
     print(f"  厳選: 選定スコア(TEST窓のPF/勝率/取引数) 上位{args.per_strategy}銘柄/戦略")
     print(f"  ※ HO* 列は選定に使っていない純OOS答え合わせ (表示のみ・選定不使用)")
+    print(f"  採用戦略: {', '.join(use_strategies)}")
     print("=" * 104)
 
     def selectable(r):
@@ -107,7 +113,7 @@ def main() -> None:
                 and _f(r.get("avg_test_pf")) >= args.min_test_pf
                 and _f(r.get("total_test_trades")) >= args.min_test_trades)
 
-    for strat in STRATEGIES:
+    for strat in use_strategies:
         data = {ho: _load(strat, ho, args.date) for ho in HOLDOUTS}
         pool = data.get(sho, {})
         if not pool:
