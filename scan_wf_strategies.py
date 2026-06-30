@@ -39,6 +39,7 @@ import daytrade_stoch_atr
 import daytrade_volsurge
 import daytrade_pivot
 import daytrade_rsi
+import daytrade_stop_short
 
 STRATEGIES = {
     "Donchian":     daytrade_donchian.backtest_symbol,
@@ -50,6 +51,7 @@ STRATEGIES = {
     "VolSurge":     daytrade_volsurge.backtest_symbol,
     "Pivot":        daytrade_pivot.backtest_symbol,
     "RSI":          daytrade_rsi.backtest_symbol,
+    "StopShort":    daytrade_stop_short.backtest_symbol,
 }
 
 JST = timezone(timedelta(hours=9))

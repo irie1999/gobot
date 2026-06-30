@@ -39,6 +39,7 @@ STRAT_MODULES = {
     "MACDBreak":    "daytrade_macd_break",
     "StochATR":     "daytrade_stoch_atr",
     "VolSurge":     "daytrade_volsurge",
+    "StopShort":    "daytrade_stop_short",
 }
 STRATEGIES = list(STRAT_MODULES.keys())
 

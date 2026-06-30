@@ -40,7 +40,7 @@ from pathlib import Path
 JST = timezone(timedelta(hours=9))
 RESULTS = Path("walkforward_results")
 STRATEGIES = ["Donchian", "GapReversal", "VWAP", "RSI", "Pivot",
-              "OpenMomentum", "MACDBreak", "StochATR", "VolSurge"]
+              "OpenMomentum", "MACDBreak", "StochATR", "VolSurge", "StopShort"]
 HOLDOUTS = [30, 90, 180]
 
 
