@@ -45,3 +45,6 @@ signal_score_cache.json
 .risk_check_cache_*.json
 mae_analysis_*.html
 signals_holdout_all*.html
+
+daytrade_wf_report_*.html
+daytrade_watchlist.py
