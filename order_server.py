@@ -210,20 +210,52 @@ def _place_target_now(cli, p: dict) -> str:
         expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
     except Exception:
         expire = 0
-    # 値幅制限(ストップ高/安)を超える指値は kabu の値段チェックで弾かれる
-    # (ERROR_CD_000_000_103)。上限超なら上限値に、下限割れなら下限値にキャップ。
+    # SOR(9)は『現在値から離れて待機する通常指値』を受け付けず値段/トリガチェックで
+    # 弾く(ERROR_CD_000_000_103)。SORを使ったまま利確するには逆指値(トリガで発動
+    # →即執行=SORがルーティング可)にする。エントリーの逆指値付き指値と同じ仕組み。
+    #   long 利確 = 逆指値売り (目標で上昇発動 OVER) → 発動後 指値@目標
+    #   short利確 = 逆指値買戻 (目標で下落発動 UNDER) → 発動後 指値@目標
+    # 念のため値幅制限(ストップ高/安)も超えないようキャップする。
     price = _cap_to_price_limit(cli, symbol, side, target)
+    from kabu_api import SIDE_SELL, SIDE_BUY
     try:
         if side == "short":
-            res = cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
-                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
+            cp = _build_close_cp(cli, symbol, qty, SIDE_BUY)   # 信用返済(買戻)
+            if not cp:
+                return "fail(建玉なし)"
+            res = cli.send_stop_buy(symbol, qty=qty, trigger_price=price,
+                                    cash_margin=3, expire_day=expire,
+                                    under_over="under", after_hit_price=price,
+                                    close_positions=cp)
         else:
             cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
-            res = cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
-                                cash_margin=cm, expire_day=expire)
+            cp = None if cm == 1 else _build_close_cp(cli, symbol, qty, SIDE_SELL)
+            if cm == 3 and not cp:
+                return "fail(建玉なし)"
+            res = cli.send_stop_sell(symbol, qty=qty, trigger_price=price,
+                                     cash_margin=cm, expire_day=expire,
+                                     under_over="over", after_hit_price=price,
+                                     close_positions=cp)
     except Exception as e:
         return f"fail({e})"
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
+
+
+def _build_close_cp(cli, symbol: str, qty: int, side_const: str):
+    """信用返済の ClosePositions を組む (既存返済注文を取消して建玉を解放)。
+    dry-run は疑似値。建玉なしは None。利確側だけで明示的に組むことで、
+    エントリー時の損切り逆指値の挙動を一切変えない。"""
+    if getattr(cli, "dry_run", False):
+        return [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
+    try:
+        cli.cancel_open_close_orders(symbol, side_const)
+    except Exception:
+        pass
+    try:
+        return cli._build_close_positions(symbol, qty, side_const)
+    except Exception as e:
+        print(f"  ⚠ {symbol}: 建玉取得失敗 ({e})")
+        return None
 
 
 def _cap_to_price_limit(cli, symbol: str, side: str, target: float) -> float:
