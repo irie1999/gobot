@@ -296,6 +296,64 @@ def _detail_html(groups, err) -> str:
     return "".join(h)
 
 
+def _bydate_html(groups, err) -> str:
+    """日付別の取引詳細。その日の全銘柄×全戦略のトレードと日次損益を表示。"""
+    if err:
+        return f'<h2>日別取引</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>日別取引</h2><p class="badge">WATCHLISTが空か、データがありません。</p>'
+    from collections import defaultdict
+    bydate = defaultdict(list)
+    for strat, code, name, trades in groups:
+        for t in trades:
+            ed = t.get("entry_dt")
+            if ed is None:
+                continue
+            bydate[ed.date()].append((strat, code, name, t))
+    dates = sorted(bydate.keys(), reverse=True)
+
+    # 全体 + 日別サマリー
+    h = ['<h2>日別取引 <span class="badge">日付ごとの損益</span></h2>']
+    h.append('<table style="width:auto"><thead><tr><th>日付</th><th>取引</th>'
+             '<th>勝/負</th><th>純損益</th></tr></thead><tbody>')
+    for d in dates:
+        ts = [x[3] for x in bydate[d]]
+        net = sum(_f(t.get("pnl")) for t in ts)
+        w = sum(1 for t in ts if _f(t.get("pnl")) > 0)
+        l = sum(1 for t in ts if _f(t.get("pnl")) < 0)
+        c = "pos" if net > 0 else ("neg" if net < 0 else "zero")
+        h.append(f'<tr><td class="nm"><a href="#d{d}" '
+                 f'style="color:#7dd3fc">{d}</a></td><td>{len(ts)}</td>'
+                 f'<td>{w}/{l}</td><td class="{c}">{net:+,.0f}</td></tr>')
+    h.append('</tbody></table>')
+
+    # 日別の明細
+    for d in dates:
+        items = sorted(bydate[d], key=lambda x: (x[3].get("entry_dt") or datetime.now()))
+        net = sum(_f(x[3].get("pnl")) for x in items)
+        c = "pos" if net > 0 else ("neg" if net < 0 else "zero")
+        h.append(f'<h3 id="d{d}" style="color:#cbd5e1;font-size:13px;margin:14px 0 4px">'
+                 f'{d} <span class="badge">純<span class="{c}">{net:+,.0f}</span> '
+                 f'/ {len(items)}件</span></h3>')
+        h.append('<table><thead><tr><th>時刻</th><th>戦略</th><th>コード</th>'
+                 '<th>銘柄</th><th>エントリー</th><th>決済</th><th>損益</th>'
+                 '<th>%</th><th>理由</th></tr></thead><tbody>')
+        for strat, code, name, t in items:
+            pnl = _f(t.get("pnl"))
+            cc = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+            ed = t.get("entry_dt"); xd = t.get("exit_dt")
+            ts_s = (ed.strftime("%H:%M") if ed is not None else "") + \
+                   ("→" + xd.strftime("%H:%M") if xd is not None else "")
+            h.append(f'<tr><td class="nm">{ts_s}</td><td class="nm">{strat}</td>'
+                     f'<td>{code}</td><td class="nm">{name[:14]}</td>'
+                     f'<td>{_f(t.get("entry_p")):,.0f}</td><td>{_f(t.get("exit_p")):,.0f}</td>'
+                     f'<td class="{cc}">{pnl:+,.0f}</td>'
+                     f'<td class="{cc}">{_f(t.get("pct")):+.2f}</td>'
+                     f'<td class="nm">{t.get("reason","")}</td></tr>')
+        h.append('</tbody></table>')
+    return "".join(h)
+
+
 CSS = """
 body{margin:0;padding:0;background:#0f172a;color:#94a3b8;font-family:sans-serif}
 .wrap{padding:22px 28px}
@@ -349,11 +407,15 @@ def build_html(date: str, signal_days: int, detail_days: int):
     tabs.append(f'<button class="tab active" onclick="show(\'sig\',this)">'
                 f'🚀 今日のシグナル <span class="tn">{sig_n}</span></button>')
     panes.append(f'<div id="sig" class="pane active">{_signals_html(sigs, err)}</div>')
-    # 取引明細タブ
+    # 取引明細タブ (銘柄別)
     det_n = len(groups) if groups else 0
     tabs.append(f'<button class="tab" onclick="show(\'detail\',this)">'
-                f'📋 取引明細 <span class="tn">{det_n}</span></button>')
+                f'📋 取引明細(銘柄別) <span class="tn">{det_n}</span></button>')
     panes.append(f'<div id="detail" class="pane">{_detail_html(groups, derr)}</div>')
+    # 日別取引タブ
+    tabs.append('<button class="tab" onclick="show(\'bydate\',this)">'
+                '📅 日別取引</button>')
+    panes.append(f'<div id="bydate" class="pane">{_bydate_html(groups, derr)}</div>')
     tabs.append('<span class="sep"></span>')
     # WF検証タブ
     summary = {}
