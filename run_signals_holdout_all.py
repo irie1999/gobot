@@ -513,6 +513,37 @@ for cfgs in _period_configs.values():
 n_items_total = sum(len(c["stop_wl"]) + len(c["brk_wl"]) for c in _all_configs)
 print(f"設定数: {len(_all_configs)}件 / アイテム合計: {n_items_total}件")
 
+# ── holdout選定銘柄をエクスポート (デイトレ5分足の同日ショート検証用) ──────────
+# 全設定の (銘柄 × 戦略) を重複なしで holdout_selected_symbols.py に出力。
+# con/agg はエントリー(em=0)が同一なので (code, strat) で重複排除。
+# デイトレ側 verify_sameday_short_intraday.py --symbols-file で読み込む。
+try:
+    _sel_seen: set = set()
+    _sel: list[tuple] = []
+    for _c in _all_configs:
+        for _code, _name, _strat in list(_c["stop_wl"]) + list(_c["brk_wl"]):
+            _k = (_code, _strat)
+            if _code and _k not in _sel_seen:
+                _sel_seen.add(_k)
+                _sel.append((_code, _name, _strat))
+    _sel_suffix = "_short" if _args.short else ""
+    _sel_path = Path(f"holdout_selected_symbols{_sel_suffix}.py")
+    _sel_lines = [
+        '"""holdout_selected_symbols.py — run_signals_holdout_all が選定した',
+        f'(銘柄, 名前, 戦略) の重複なし一覧。{TODAY} 自動生成。',
+        'デイトレ5分足の同日ショート検証用:',
+        '  verify_sameday_short_intraday.py --symbols-file holdout_selected_symbols.py',
+        '"""',
+        "SELECTED = [",
+    ]
+    for _code, _name, _strat in _sel:
+        _sel_lines.append(f"    ({_code!r}, {_name!r}, {_strat!r}),")
+    _sel_lines.append("]")
+    _sel_path.write_text("\n".join(_sel_lines), encoding="utf-8")
+    print(f"[export] holdout選定 {len(_sel)}ペア → {_sel_path}")
+except Exception as _e:
+    print(f"[export] holdout_selected_symbols 出力失敗: {_e}")
+
 # ── ローリング逆指値: バックテストエンジンにモジュール定数を注入 ──────────────
 import backtest_limit_entry as _bte
 if _args.rolling > 0:
