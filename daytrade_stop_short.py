@@ -7,21 +7,24 @@ daytrade_stop_short.py  ―  デイトレ・ショート (スイング逆指値�
   そこで逆指値を「下抜けで売り」にミラーし、同日内で下落を取りにいく
   デイトレ・ショート戦略。
 
-【スイングとの対応 (ミラー)】
-  ロング: order = close_prev + atr_prev*em / 買い / stop=order-atr*sm / target=order+atr*tm
-  ショート: order = close_prev - atr_prev*em / 空売り / stop=order+atr*sm / target=order-atr*tm
+【設計の経緯】
+  当初スイングの逆指値(日足ATR×1.5/3.0)をそのままミラーしたが、日足ATRは
+  同日決済には遠すぎ、87%が引け強制になりエッジが出ず、さらにショートは上方
+  スパイクに無防備で口座が吹き飛ぶ破綻を確認。そこで同日決済(デイトレ)向けに
+  intraday %スケールへ再設計した。
 
 【エントリー】
-  前日終値 close_prev と前日 (日足) ATR atr_prev から
-    order_p  = close_prev - atr_prev*EM    (EM=0.0 → 前日終値ちょうど)
-  当日のザラ場で安値が order_p 以下に下抜けたら逆指値売りで約定
-  (寄りで既に order_p 以下なら寄り値で約定 = ギャップスルー)。
-  ENTRY_CUTOFF まで。1日1トレード (スイング同様、1シグナル1ポジション)。
+  前日終値 close_prev から
+    order_p = close_prev × (1 - EM_PCT)    (0.3% 下を下抜け＝下方ブレイク確認)
+  当日ザラ場の安値が order_p 以下になったら逆指値売りで約定
+  (寄りで既に下なら寄り値で約定 = ギャップスルー)。ENTRY_CUTOFF まで。1日1トレード。
+  寄りが前日終値から±MAX_GAP_PCT 超の異常日はスキップ (スパイク対策)。
 
 【決済 (同日)】
-  損切り: order_p + atr_prev*SM   (上に逆行)
-  目標:   order_p - atr_prev*TM   (下落達成)
-  同一バーで両方ヒット時は「目標優先」(スイング §5 と同じ慣習)
+  損切り: 約定 × (1 + STOP_PCT)   (上に逆行)
+  目標:   約定 × (1 - TARGET_PCT) (下落達成、R:R 2.0)
+  損切り/目標は引け強制より先に判定しテールを必ず止める。
+  同一バー両ヒットは「損切り優先」(ショートは保守側)。
   強制:   FORCE_CLOSE (14:55) で当日引け成行
 
 【使い方】
@@ -44,40 +47,19 @@ JST = timezone(timedelta(hours=9))
 
 BUDGET       = 600_000
 MAX_RISK     = 6_000
-EM           = 0.0     # 逆指値オフセット (0 = 前日終値ちょうど)
-SM           = 1.5     # 損切り = order + atr*SM
-TM           = 3.0     # 目標   = order - atr*TM  (R:R = 2.0)
-ATR_PERIOD   = 14
+# 同日決済(デイトレ)向けの intraday スケール (%ベース)。
+# 日足ATR×(1.5/3.0) のスイング値は同日には遠すぎ、ほぼ引け強制になり破綻したため変更。
+EM_PCT       = 0.003   # 前日終値 ×(1-0.3%) を下抜けで逆指値売り (下方ブレイク確認)
+STOP_PCT     = 0.004   # 損切り = 約定 ×(1+0.4%)  (上に逆行)
+TARGET_PCT   = 0.008   # 目標   = 約定 ×(1-0.8%)  (R:R = 2.0)
+MAX_GAP_PCT  = 0.05    # 寄りが前日終値から±5%超は異常(スパイク/特殊)としてスキップ
 FORCE_CLOSE  = dtime(14, 55)
 ENTRY_CUTOFF = dtime(14, 0)
 STRAT_NAME   = "StopShort"
 
 
-def _daily_atr(daily: dict, dates: list) -> dict:
-    """日足 OHLC から ATR(14) を算出し、各日付に『前日の ATR』を返す。"""
-    rows = []
-    for d in dates:
-        ddf = daily[d]
-        rows.append((ddf["high"].max(), ddf["low"].min(),
-                     float(ddf.iloc[-1]["close"])))
-    highs = np.array([r[0] for r in rows], dtype=float)
-    lows  = np.array([r[1] for r in rows], dtype=float)
-    closes = np.array([r[2] for r in rows], dtype=float)
-    prev_c = np.concatenate([[closes[0]], closes[:-1]])
-    tr = np.maximum.reduce([highs - lows,
-                            np.abs(highs - prev_c),
-                            np.abs(lows - prev_c)])
-    atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False).mean().to_numpy()
-    # その日のシグナルに使うのは『前日まで』の ATR
-    atr_prev = {dates[i]: (atr[i - 1] if i >= 1 else np.nan)
-                for i in range(len(dates))}
-    return atr_prev
-
-
-def backtest_day(day_df, prev_close, atr_prev):
-    if not prev_close or prev_close <= 0 or not atr_prev or atr_prev <= 0:
-        return []
-    if np.isnan(atr_prev):
+def backtest_day(day_df, prev_close):
+    if not prev_close or prev_close <= 0:
         return []
 
     opens  = day_df["open"].to_numpy(dtype=float)
@@ -89,15 +71,15 @@ def backtest_day(day_df, prev_close, atr_prev):
     if n < 3:
         return []
 
-    order_p  = prev_close - atr_prev * EM
-    stop_p   = order_p + atr_prev * SM
-    target_p = order_p - atr_prev * TM
-    if target_p <= 0 or stop_p <= order_p:
+    # 寄りが前日終値から極端に乖離する日は異常データの疑い → スキップ (ショートのテール対策)
+    if abs(opens[0] - prev_close) / prev_close > MAX_GAP_PCT:
         return []
+
+    order_p = prev_close * (1 - EM_PCT)
 
     trades = []
     state = "idle"
-    entry_p = entry_dt = None
+    entry_p = stop_p = target_p = entry_dt = None
     qty = 0
 
     def _finish(exit_p, exit_dt, reason):
@@ -117,21 +99,18 @@ def backtest_day(day_df, prev_close, atr_prev):
         hi, lo, cl, op = highs[i], lows[i], closes[i], opens[i]
 
         if state == "in_pos":
-            if t >= FORCE_CLOSE:
-                _finish(cl, times[i], "引け強制")
-                state = "idle"
-                break
+            # ── 損切り/目標を引け強制より先に判定 (テールを必ず止める) ──
             hit_stop = hi >= stop_p
             hit_tgt  = lo <= target_p
-            if hit_tgt and hit_stop:
-                _finish(target_p, times[i], "目標達成")   # 同バー両ヒットは目標優先
+            if hit_stop:                                   # 同バー両ヒットは損切り優先(保守)
+                _finish(stop_p, times[i], "損切り")
                 state = "idle"; i += 1; continue
             if hit_tgt:
                 _finish(target_p, times[i], "目標達成")
                 state = "idle"; i += 1; continue
-            if hit_stop:
-                _finish(stop_p, times[i], "損切り")
-                state = "idle"; i += 1; continue
+            if t >= FORCE_CLOSE:
+                _finish(cl, times[i], "引け強制")
+                state = "idle"; break
             i += 1
             continue
 
@@ -140,13 +119,15 @@ def backtest_day(day_df, prev_close, atr_prev):
             i += 1
             continue
         if lo <= order_p:
-            # 寄りで既に下なら寄り値で約定 (ギャップスルー)、それ以外は order_p
-            fill = min(order_p, op)
-            q = calc_position_size(fill, stop_p, BUDGET, MAX_RISK)
+            fill = min(order_p, op)         # 寄りで既に下ならギャップスルーで寄り値
+            stop0 = fill * (1 + STOP_PCT)
+            q = calc_position_size(fill, stop0, BUDGET, MAX_RISK)
             if q <= 0:
                 i += 1
                 continue
             entry_p = fill
+            stop_p = stop0
+            target_p = fill * (1 - TARGET_PCT)
             entry_dt = times[i]
             qty = q
             state = "in_pos"
@@ -162,14 +143,13 @@ def backtest_day(day_df, prev_close, atr_prev):
 def backtest_symbol(sym, name, df, budget=BUDGET, max_risk=MAX_RISK):
     daily = split_by_day(df)
     dates = sorted(daily.keys())
-    if len(dates) < ATR_PERIOD + 2:
+    if len(dates) < 2:
         return None
-    atr_prev = _daily_atr(daily, dates)
     trades = []
     prev_close = None
     for d in dates:
         if prev_close is not None:
-            trades.extend(backtest_day(daily[d], prev_close, atr_prev.get(d)))
+            trades.extend(backtest_day(daily[d], prev_close))
         prev_close = float(daily[d].iloc[-1]["close"])
     return dict(symbol=sym, name=name, trades=trades)
 
@@ -214,7 +194,8 @@ def main():
     targets = [(s, s) for s in args.symbols] if args.symbols else DAYTRADE_SYMBOLS
     symbols = [s for s, _ in targets]
     print(f"{STRAT_NAME}: {len(targets)}銘柄 / {args.days}日 / 予算{args.budget:,}円 "
-          f"(EM={EM} SM={SM} TM={TM})", flush=True)
+          f"(下抜け{EM_PCT*100:.1f}% 損切+{STOP_PCT*100:.1f}% 目標-{TARGET_PCT*100:.1f}%)",
+          flush=True)
 
     fetched = load_intraday_batch(symbols, args.days, source=args.source)
     max_price = args.budget / 100
