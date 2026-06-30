@@ -207,6 +207,8 @@ def main():
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--budget", type=int, default=BUDGET)
     parser.add_argument("--source", choices=["auto", "local", "yfinance"], default="auto")
+    parser.add_argument("--detail", type=int, default=0,
+                        help="先頭N件の個別トレード明細を表示 (戦略の妥当性確認用)")
     args = parser.parse_args()
 
     targets = [(s, s) for s in args.symbols] if args.symbols else DAYTRADE_SYMBOLS
@@ -234,6 +236,22 @@ def main():
     stats = calc_stats(all_trades, args.budget)
     print(f"\n取引:{stats['n']}  勝率:{stats['win_rate']:.1f}%  PF:{_pf(stats['pf'])}  "
           f"損益:{stats['total_pnl']:+,.0f}  DD:{stats['max_dd']:+.1f}%")
+
+    # ── 戦略の妥当性チェック: 決済理由の内訳 ──
+    from collections import Counter
+    reasons = Counter(t.get("reason", "?") for t in all_trades)
+    tot = max(1, len(all_trades))
+    print("\n[決済理由の内訳] ※引け強制が大半なら目標/損切りが遠すぎ(スケール不整合)")
+    for rsn, cnt in reasons.most_common():
+        print(f"  {rsn:<8} {cnt:>5}件 ({cnt/tot*100:>4.0f}%)")
+
+    if args.detail:
+        print(f"\n[サンプル明細 先頭{args.detail}件] entry→exit / stop / target / 理由")
+        for t in all_trades[:args.detail]:
+            ed = t["entry_dt"].strftime("%Y-%m-%d %H:%M") if t.get("entry_dt") else "?"
+            print(f"  {ed}  {t['entry_p']:,.1f}→{t['exit_p']:,.1f}  "
+                  f"stop {t['stop_p']:,.1f} / tgt {t['target_p']:,.1f}  "
+                  f"qty{t['qty']}  {t['pnl']:+,.0f}  {t['reason']}")
 
     print(f"\n{'='*78}")
     print(f"  銘柄別サマリ ({len(items)}銘柄)")
