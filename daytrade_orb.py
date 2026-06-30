@@ -43,7 +43,10 @@ import numpy as np
 import pandas as pd
 
 from daytrade_symbols import DAYTRADE_SYMBOLS
-from daytrade_data import load_intraday_batch, split_by_day
+from daytrade_data import load_intraday_batch, split_by_day, calc_position_size
+
+BUDGET   = 600_000
+MAX_RISK = 6_000
 
 JST = timezone(timedelta(hours=9))
 
@@ -77,7 +80,8 @@ DEFAULT_SYMBOLS = DAYTRADE_SYMBOLS  # 共通リスト (60銘柄)
 
 def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
                      or_minutes: int,
-                     prev_close: float | None = None) -> dict | None:
+                     prev_close: float | None = None,
+                     budget: int = BUDGET, max_risk: int = MAX_RISK) -> dict | None:
     """1日分のORBバックテスト。エントリー0〜1回 (1ポジ/日)。"""
     or_end = (datetime.combine(datetime.today(), AM_START)
               + timedelta(minutes=or_minutes)).time()
@@ -201,7 +205,10 @@ def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
     if state != "closed" or exit_p is None or entry_dt is None:
         return None
 
-    qty = FIXED_QTY
+    # サイジングを他のデイトレ戦略と統一 (リスクベース∩予算)
+    qty = calc_position_size(entry_p, stop_p, budget, max_risk)
+    if qty <= 0:        # 予算で100株買えない高額株 → エントリーしない
+        return None
     pnl = (exit_p - entry_p) * qty
     pct = (exit_p - entry_p) / entry_p * 100
     return dict(
@@ -210,7 +217,7 @@ def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
         pnl=pnl, pct=pct,
         or_hi=or_hi, or_lo=or_lo, or_w=or_w,
         stop_p=stop_p, target_p=target_p,
-        reason=reason,
+        strategy="ORB", reason=reason,
     )
 
 
@@ -219,8 +226,11 @@ def backtest_orb_day(day_df: pd.DataFrame, target_k: float,
 # ─────────────────────────────────────────────────────────────
 
 def backtest_symbol(symbol: str, name: str, df: pd.DataFrame,
-                    target_k: float, or_minutes: int) -> dict | None:
-    """pre-fetched df を使って銘柄バックテスト (並列取得問題を回避)。"""
+                    budget: int = BUDGET, max_risk: int = MAX_RISK,
+                    target_k: float = TARGET_K,
+                    or_minutes: int = OR_MINUTES) -> dict | None:
+    """pre-fetched df を使って銘柄バックテスト (並列取得問題を回避)。
+    引数順は他のデイトレ戦略 (budget, max_risk) に統一しパイプライン互換。"""
     if df is None or df.empty:
         return None
     daily = split_by_day(df)
@@ -233,7 +243,8 @@ def backtest_symbol(symbol: str, name: str, df: pd.DataFrame,
     for date in dates:
         day_df = daily[date]
         t = backtest_orb_day(day_df, target_k, or_minutes,
-                             prev_close=prev_close)
+                             prev_close=prev_close,
+                             budget=budget, max_risk=max_risk)
         if t:
             trades.append(t)
         prev_close = float(day_df.iloc[-1]["close"])
@@ -482,7 +493,7 @@ def main() -> None:
             continue
         try:
             r = backtest_symbol(sym, name, fetched[sym],
-                                args.target_k, args.or_minutes)
+                                target_k=args.target_k, or_minutes=args.or_minutes)
             if r:
                 results.append(r)
         except Exception as e:
