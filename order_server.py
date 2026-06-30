@@ -210,14 +210,21 @@ def _place_target_now(cli, p: dict) -> str:
         expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
     except Exception:
         expire = 0
+    # 利確は『現在値から離れた待機注文』。SOR(9)は待機する通常指値を受け付けず
+    # 値段/トリガチェックで弾く(ERROR_CD_000_000_103)。SORを使ったまま利確する
+    # には逆指値(トリガで発動→即執行)にする必要がある:
+    #   long 利確 = 逆指値売り (目標で上昇発動 OVER) → 発動後 指値@目標
+    #   short利確 = 逆指値買戻 (目標で下落発動 UNDER) → 発動後 指値@目標
     try:
         if side == "short":
-            res = cli.send_buy(symbol, qty=qty, price=target, order_type="limit",
-                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
+            res = cli.send_stop_buy(symbol, qty=qty, trigger_price=target,
+                                    cash_margin=3, expire_day=expire,
+                                    under_over="under", after_hit_price=target)
         else:
             cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
-            res = cli.send_sell(symbol, qty=qty, price=target, order_type="limit",
-                                cash_margin=cm, expire_day=expire)
+            res = cli.send_stop_sell(symbol, qty=qty, trigger_price=target,
+                                     cash_margin=cm, expire_day=expire,
+                                     under_over="over", after_hit_price=target)
     except Exception as e:
         return f"fail({e})"
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
