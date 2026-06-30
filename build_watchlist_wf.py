@@ -158,6 +158,13 @@ def main() -> None:
 
     # ── daytrade_watchlist.py 出力 ──
     total = sum(len(v) for v in watchlist.values())
+    # 安全ガード: 選定0件なら既存WATCHLISTを上書きしない (誤って空にする事故防止)
+    if total == 0:
+        print("\n" + "=" * 92)
+        print(f"[警告] 選定銘柄が0件のため {args.out} は上書きしませんでした。")
+        print("  (既存のWATCHLISTを保護。--strategies/--min-test-pf を見直してください)")
+        print("=" * 92)
+        return
     lines = [
         '"""daytrade_watchlist.py ― OOS堅牢なデイトレ WATCHLIST',
         f'build_watchlist_wf.py により {args.date} に自動生成。',
