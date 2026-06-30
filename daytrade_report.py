@@ -312,21 +312,86 @@ def _bydate_html(groups, err) -> str:
             bydate[ed.date()].append((strat, code, name, t))
     dates = sorted(bydate.keys(), reverse=True)
 
-    # 全体 + 日別サマリー (横幅を使う多列グリッド)
-    tot = sum(_f(x[3].get("pnl")) for d in dates for x in bydate[d])
+    import calendar as _cal
+    # 日別の純損益マップ
+    daynet = {d: sum(_f(x[3].get("pnl")) for x in bydate[d]) for d in dates}
+    daycnt = {d: len(bydate[d]) for d in dates}
+    tot = sum(daynet.values())
     tc = "pos" if tot > 0 else "neg"
+    # 色スケール (外れ値に強い: 上位10%目安)
+    mags = sorted(abs(v) for v in daynet.values() if v)
+    scale = mags[int(len(mags) * 0.9)] if mags else 1.0
+    scale = max(scale, 1.0)
+
+    def _cell_bg(net):
+        a = min(1.0, abs(net) / scale) * 0.85
+        if net > 0:
+            return f"background:rgba(52,211,153,{a:.2f})"
+        if net < 0:
+            return f"background:rgba(248,113,113,{a:.2f})"
+        return "background:#141b2b"
+
     h = ['<h2>日別取引 <span class="badge">日付ごとの損益 / '
-         f'全{len(dates)}日 純<span class="{tc}">{tot:+,.0f}</span></span></h2>',
-         '<div class="daygrid">']
+         f'全{len(dates)}日 純<span class="{tc}">{tot:+,.0f}</span> '
+         f'(緑=勝ち日 / 赤=負け日 / 濃いほど大)</span></h2>']
+
+    # ── 月別サマリー (累計つき) ──
+    from collections import defaultdict as _dd
+    mon = _dd(lambda: {"net": 0.0, "n": 0, "w": 0, "l": 0})
     for d in dates:
-        ts = [x[3] for x in bydate[d]]
-        net = sum(_f(t.get("pnl")) for t in ts)
-        w = sum(1 for t in ts if _f(t.get("pnl")) > 0)
-        l = sum(1 for t in ts if _f(t.get("pnl")) < 0)
-        c = "pos" if net > 0 else ("neg" if net < 0 else "zero")
-        h.append(f'<a href="#d{d}" class="daycell {c}">'
-                 f'<span class="dd">{str(d)[5:]}</span> {net:+,.0f}'
-                 f'<span class="dn">{w}/{l}</span></a>')
+        k = (d.year, d.month)
+        for st_, cd_, nm_, t in bydate[d]:
+            p = _f(t.get("pnl"))
+            mon[k]["net"] += p; mon[k]["n"] += 1
+            if p > 0: mon[k]["w"] += 1
+            elif p < 0: mon[k]["l"] += 1
+    mkeys = sorted(mon.keys())  # 古い順
+    h.append('<table style="width:auto"><thead><tr><th>月</th><th>取引</th>'
+             '<th>勝/負</th><th>純損益</th><th>累計</th></tr></thead><tbody>')
+    # 累計は古い順に積む
+    cum = 0.0
+    cummap = {}
+    for k in mkeys:
+        cum += mon[k]["net"]; cummap[k] = cum
+    for k in reversed(mkeys):   # 表示は新しい順
+        m = mon[k]
+        c = "pos" if m["net"] > 0 else ("neg" if m["net"] < 0 else "zero")
+        cc = "pos" if cummap[k] > 0 else "neg"
+        h.append(f'<tr><td class="nm">{k[0]}-{k[1]:02d}</td><td>{m["n"]}</td>'
+                 f'<td>{m["w"]}/{m["l"]}</td><td class="{c}">{m["net"]:+,.0f}</td>'
+                 f'<td class="{cc}">{cummap[k]:+,.0f}</td></tr>')
+    h.append('</tbody></table>')
+
+    # ── カレンダー・ヒートマップ (月ごと、横に流す) ──
+    h.append('<div class="cals">')
+    wd = ["月", "火", "水", "木", "金"]
+    for k in reversed(mkeys):
+        y, m = k
+        mnet = mon[k]["net"]
+        mc = "pos" if mnet > 0 else ("neg" if mnet < 0 else "zero")
+        h.append('<div class="calbox">')
+        h.append(f'<div class="caltitle">{y}-{m:02d} '
+                 f'<span class="{mc}">{mnet:+,.0f}</span></div>')
+        h.append('<table class="cal"><thead><tr>'
+                 + "".join(f"<th>{w}</th>" for w in wd) + '</tr></thead><tbody>')
+        for week in _cal.monthcalendar(y, m):
+            h.append('<tr>')
+            for dow in range(5):   # 月〜金のみ
+                dnum = week[dow]
+                if dnum == 0:
+                    h.append('<td class="empty"></td>')
+                    continue
+                from datetime import date as _date
+                dd = _date(y, m, dnum)
+                if dd in daynet:
+                    net = daynet[dd]
+                    h.append(f'<td style="{_cell_bg(net)}"><a href="#d{dd}">'
+                             f'<span class="dnum">{dnum}</span>'
+                             f'<span class="dpnl">{net/1000:+.0f}k</span></a></td>')
+                else:
+                    h.append(f'<td class="notr"><span class="dnum">{dnum}</span></td>')
+            h.append('</tr>')
+        h.append('</tbody></table></div>')
     h.append('</div>')
 
     # 日別の明細
@@ -379,14 +444,20 @@ th{background:#1e293b;color:#cbd5e1} td.nm,td.star{text-align:left}
 .pos{color:#34d399} .neg{color:#f87171} .zero{color:#475569} .test{color:#7d93b0}
 tr.robust{background:#0f2a1c} tr.robust td.star{color:#fbbf24;font-weight:bold}
 tr:hover{background:#172033}
-.daygrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));
-         gap:5px;margin:8px 0 16px}
-.daycell{padding:4px 7px;border:1px solid #1e293b;border-radius:5px;background:#141b2b;
-         text-decoration:none;font-size:11px;text-align:right;font-weight:600}
-.daycell .dd{float:left;color:#7dd3fc;font-weight:400}
-.daycell .dn{display:block;color:#64748b;font-size:9px;font-weight:400}
-.daycell.pos{color:#34d399} .daycell.neg{color:#f87171} .daycell.zero{color:#64748b}
-.daycell:hover{border-color:#475569}
+.cals{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 16px}
+.calbox{display:inline-block}
+.caltitle{color:#cbd5e1;font-size:12px;font-weight:700;margin-bottom:3px}
+table.cal{border-collapse:collapse}
+table.cal th{font-size:10px;color:#64748b;padding:1px 0;font-weight:400}
+table.cal td{width:48px;height:34px;border:1px solid #0f172a;vertical-align:top;
+             text-align:right;padding:1px 3px;background:#141b2b}
+table.cal td.empty{background:#0f172a;border-color:#0f172a}
+table.cal td.notr{background:#161d2c}
+table.cal td a{text-decoration:none;display:block;height:100%}
+table.cal .dnum{color:#cbd5e1;font-size:9px;float:left;opacity:.7}
+table.cal .dpnl{display:block;color:#0f172a;font-size:11px;font-weight:700;
+                margin-top:9px;text-shadow:0 0 2px rgba(255,255,255,.4)}
+table.cal td.notr .dnum{color:#475569}
 """
 
 JS = """
