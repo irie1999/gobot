@@ -4124,14 +4124,18 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
 
         n = len(trades)
         wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        losses = sum(1 for t in trades if t.get("pnl", 0) < 0)
         gp = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
         gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
         pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
         timecuts = sum(1 for t in trades if t.get("reason") == "タイムカット")
         avg_hold = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
         return {
-            "trades": n, "wins": wins,
+            "trades": n, "wins": wins, "losses": losses,
             "win_rate": wins / n * 100 if n else 0.0,
+            "gross_profit": gp, "gross_loss": -gl,
+            "avg_win": gp / wins if wins else 0.0,
+            "avg_loss": -gl / losses if losses else 0.0,
             "total_pnl": sum(t.get("pnl", 0) for t in trades),
             "pf": pf, "avg_hold": avg_hold, "timecuts": timecuts,
         }
@@ -4155,21 +4159,35 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
                 f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["trades"]:,}</td>'
                 f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["win_rate"]:.1f}%</td>'
                 f'<td style="padding:6px 10px;text-align:right;color:#93c5fd">{pf_str}</td>'
+                # 利益側 (勝ち件数 / 利益合計 / 平均利益)
+                f'<td style="padding:6px 10px;text-align:right;color:#4ade80">{r["wins"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#4ade80">+{r["gross_profit"]:,.0f}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#4ade80">+{r["avg_win"]:,.0f}</td>'
+                # 損失側 (負け件数 / 損失合計 / 平均損失)
+                f'<td style="padding:6px 10px;text-align:right;color:#f87171">{r["losses"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#f87171">{r["gross_loss"]:,.0f}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#f87171">{r["avg_loss"]:,.0f}</td>'
                 f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{r["avg_hold"]:.1f}日</td>'
                 f'<td style="padding:6px 10px;text-align:right;color:#fbbf24">{r["timecuts"]:,}</td>'
                 f'<td style="padding:6px 10px;text-align:right;font-weight:700;color:{pnl_color}">{pnl_str}円</td>'
                 f'</tr>\n'
             )
         return (
-            f'<table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
-            f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.78rem">'
+            f'<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
+            f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
             f'<th style="padding:5px 10px;text-align:left">最大保有</th>'
             f'<th style="padding:5px 10px;text-align:right">件数</th>'
             f'<th style="padding:5px 10px;text-align:right">勝率</th>'
             f'<th style="padding:5px 10px;text-align:right">PF</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#4ade80">勝数</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#4ade80">利益合計</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#4ade80">平均利益</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#f87171">負数</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#f87171">損失合計</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#f87171">平均損失</th>'
             f'<th style="padding:5px 10px;text-align:right">平均保有日</th>'
             f'<th style="padding:5px 10px;text-align:right">タイムカット</th>'
-            f'<th style="padding:5px 10px;text-align:right">損益合計</th>'
+            f'<th style="padding:5px 10px;text-align:right">純損益</th>'
             f'</tr></thead>'
             f'<tbody>{rows}</tbody>'
             f'</table>'
