@@ -66,7 +66,7 @@ python build_watchlist_wf.py --date $today 2>&1 | Tee-Object -FilePath $log -App
 
 # ── HTMLレポート生成 (スイング同様にブラウザで確認) ──
 Log "[レポート] HTML生成中..."
-python daytrade_report.py --date $today --no-browser 2>&1 | Tee-Object -FilePath $log -Append
+python daytrade_report.py --date $today --oos-days 180 --no-browser 2>&1 | Tee-Object -FilePath $log -Append
 
 Log "==================================================================="
 Log " 完了。確認するもの:"
