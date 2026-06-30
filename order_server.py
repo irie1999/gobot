@@ -210,73 +210,52 @@ def _place_target_now(cli, p: dict) -> str:
         expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
     except Exception:
         expire = 0
-    # SOR(9)は『現在値から離れて待機する通常指値』を受け付けず値段/トリガチェックで
-    # 弾く(ERROR_CD_000_000_103)。SORを使ったまま利確するには逆指値(トリガで発動
-    # →即執行=SORがルーティング可)にする。エントリーの逆指値付き指値と同じ仕組み。
-    #   long 利確 = 逆指値売り (目標で上昇発動 OVER) → 発動後 指値@目標
-    #   short利確 = 逆指値買戻 (目標で下落発動 UNDER) → 発動後 指値@目標
-    # 念のため値幅制限(ストップ高/安)も超えないようキャップする。
+    # 利確指値は値幅制限(ストップ高/安=指定可能な最大/最小値)を超えると kabu の
+    # 値段チェックで弾かれる(ERROR_CD_000_000_103)。上限超なら上限値にキャップ。
+    # 値幅が取得できない時(429等)は 3230 のような弾かれる値を送らずスキップする
+    # (送る→失敗→再試行 の 429 ストームを防ぐ)。
     price = _cap_to_price_limit(cli, symbol, side, target)
-    from kabu_api import SIDE_SELL, SIDE_BUY
+    if price is None:
+        return "skip(値幅取得失敗→次回再試行)"
     try:
         if side == "short":
-            cp = _build_close_cp(cli, symbol, qty, SIDE_BUY)   # 信用返済(買戻)
-            if not cp:
-                return "fail(建玉なし)"
-            res = cli.send_stop_buy(symbol, qty=qty, trigger_price=price,
-                                    cash_margin=3, expire_day=expire,
-                                    under_over="under", after_hit_price=price,
-                                    close_positions=cp)
+            res = cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
+                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
         else:
             cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
-            cp = None if cm == 1 else _build_close_cp(cli, symbol, qty, SIDE_SELL)
-            if cm == 3 and not cp:
-                return "fail(建玉なし)"
-            res = cli.send_stop_sell(symbol, qty=qty, trigger_price=price,
-                                     cash_margin=cm, expire_day=expire,
-                                     under_over="over", after_hit_price=price,
-                                     close_positions=cp)
+            res = cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
+                                cash_margin=cm, expire_day=expire)
     except Exception as e:
         return f"fail({e})"
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
 
 
-def _build_close_cp(cli, symbol: str, qty: int, side_const: str):
-    """信用返済の ClosePositions を組む (既存返済注文を取消して建玉を解放)。
-    dry-run は疑似値。建玉なしは None。利確側だけで明示的に組むことで、
-    エントリー時の損切り逆指値の挙動を一切変えない。"""
-    if getattr(cli, "dry_run", False):
-        return [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
-    try:
-        cli.cancel_open_close_orders(symbol, side_const)
-    except Exception:
-        pass
-    try:
-        return cli._build_close_positions(symbol, qty, side_const)
-    except Exception as e:
-        print(f"  ⚠ {symbol}: 建玉取得失敗 ({e})")
-        return None
-
-
-def _cap_to_price_limit(cli, symbol: str, side: str, target: float) -> float:
-    """値幅制限(ストップ高/安)で指値をキャップする。
+def _cap_to_price_limit(cli, symbol: str, side: str, target: float):
+    """値幅制限(ストップ高/安=指値で指定可能な最大/最小値)でキャップする。
     long利確(売り): target が当日上限(UpperLimit)超なら上限値に。
     short利確(買戻): target が当日下限(LowerLimit)割れなら下限値に。
-    取得失敗時や上限/下限が0(時間外等)はそのまま返す。"""
+    値幅が取得できない(429等)/上限0(時間外)のときは None を返す
+    → 呼び出し側で『弾かれる値を送らずスキップ』する (429ストーム防止)。"""
     try:
         board = _kabu_get(cli.get_board, symbol)
     except Exception as e:
-        print(f"  ⚠ 値幅取得失敗 {symbol} ({e}) → 目標そのまま")
-        return target
+        print(f"  ⚠ 値幅取得失敗 {symbol} ({e}) → 今回スキップ(次回再試行)")
+        return None
     if side == "short":
         lo = board.get("LowerLimit") or 0
-        if lo and target < lo:
+        if not lo:
+            print(f"  ⚠ {symbol} 下限値が取得できず(時間外?) → 今回スキップ")
+            return None
+        if target < lo:
             print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lo:,.0f}割れ → 下限値で発注")
             return float(lo)
     else:
         up = board.get("UpperLimit") or 0
-        if up and target > up:
-            print(f"  ↗ {symbol} 利確{target:,.0f}が上限{up:,.0f}超 → 上限値で発注")
+        if not up:
+            print(f"  ⚠ {symbol} 上限値が取得できず(時間外?) → 今回スキップ")
+            return None
+        if target > up:
+            print(f"  ↗ {symbol} 利確{target:,.0f}が上限{up:,.0f}超 → 上限値{up:,.0f}で発注")
             return float(up)
     return target
 
