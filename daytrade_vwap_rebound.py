@@ -77,6 +77,7 @@ def backtest_day(day_df, prev_close=None):
         if state == "in_pos":
             if t >= FORCE_CLOSE:
                 _finish(cl, times[i], "引け強制")
+                state = "idle"   # ← 末尾フォールバックでの二重決済を防ぐ
                 break
             if lo <= stop_p:
                 _finish(stop_p, times[i], "損切り")

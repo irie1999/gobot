@@ -101,6 +101,7 @@ def backtest_donchian_day(day_df: pd.DataFrame, prev_close=None):
         if state == "in_pos":
             if t >= FORCE_CLOSE:
                 _finish_trade(cl, times[i], "引け強制")
+                state = "idle"   # ← 末尾フォールバックでの二重決済を防ぐ
                 break
             stop_labels = ("損切り", "建値撤退", "+0.3Rロック", "+0.7Rロック")
             exit_reason = stop_labels[min(trail_level, len(stop_labels) - 1)]
