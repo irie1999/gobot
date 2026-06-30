@@ -134,6 +134,33 @@ def _report_block(title, rows):
           f"合計損益 {_pnl(ok_rows):+,.0f}円")
 
 
+def _sameday_short_sim(rows, targets=(0.5, 1.0, 1.5, 2.0)):
+    """同日ショートの『上限期待値』を測る (日足ベース・ベストケース)。
+    約定値で空売り → その日の安値が -target% に届けば target% で利確、
+    届かなければ引けで買い戻し (= -fd_close_pct)。
+    ★重要: これは『下げが約定の後に来た』と仮定した上限値。
+            日足では順番が不明なので、実際はこれより悪い。
+    """
+    n = len(rows)
+    if n == 0:
+        return
+    print("\n" + "=" * 72)
+    print("  【参考】同日ショートの上限期待値 (日足ベスト仮定・実際はこれ以下)")
+    print("=" * 72)
+    print("  ターゲット  到達率   平均期待値/件   合計(100株想定 概算)")
+    print("  " + "-" * 60)
+    for tg in targets:
+        hits = sum(1 for r in rows if r["fd_low_pct"] <= -tg)
+        # 到達→+tg% / 未到達→引け買戻し(ショート損益% = -fd_close_pct)
+        pnls = [tg if r["fd_low_pct"] <= -tg else -r["fd_close_pct"] for r in rows]
+        avg = sum(pnls) / n
+        # 概算円: 約定2000円×100株=20万 を1単位と仮定し avg% を金額化
+        yen = avg / 100 * 200_000 * n
+        print(f"  -{tg:>3.1f}%     {hits/n*100:5.1f}%    {avg:+6.3f}%        "
+              f"{yen:+,.0f}円")
+    print("  ※到達率=その日の安値が約定値-target%に届いた割合(順番無視の上限)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="逆指値 約定初日 含み損 分析")
     ap.add_argument("--days", type=int, default=365,
@@ -152,6 +179,8 @@ def main():
     _report_block("全戦略 合計", rows)
     for strat in ("MACD", "A7", "RSI2"):
         _report_block(strat, [r for r in rows if r["strat"] == strat])
+
+    _sameday_short_sim(rows)
 
     print("\n" + "=" * 72)
     print("読み方:")
