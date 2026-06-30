@@ -62,11 +62,11 @@ foreach ($ho in $Holdouts) {
 # ── HTMLレポート生成 (スイング同様にブラウザで確認) ──
 $today = Get-Date -Format 'yyyy-MM-dd'
 Log "[レポート] HTML生成中..."
-python report_wf_html.py --date $today --no-browser 2>&1 | Tee-Object -FilePath $log -Append
+python daytrade_report.py --date $today --no-browser 2>&1 | Tee-Object -FilePath $log -Append
 
 Log "==================================================================="
 Log " 完了。確認するもの:"
-Log "   - HTMLレポート:    daytrade_wf_report_$today.html  (★本命=HO90&HO180で黒字)"
+Log "   - HTMLレポート:    daytrade_report_$today.html  (★本命=HO90&HO180で黒字)"
 Log "   - ログ全体:        $log"
 Log "   - 各ホールドアウト別CSV: walkforward_results\wf_strategies_<戦略>_ho<N>_$today.csv"
 Log "==================================================================="

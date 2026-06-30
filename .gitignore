@@ -48,3 +48,4 @@ signals_holdout_all*.html
 
 daytrade_wf_report_*.html
 daytrade_watchlist.py
+daytrade_report_*.html
