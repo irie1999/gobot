@@ -951,13 +951,29 @@ _phase("最大保有日数比較完了")
 if not _args.short:
     _na._PNL_CONFIGS[:] = _all_configs
     _pb_list = [0.3, 0.5, 1.0]
-    print(f"押し目買い比較中 ({_pb_list}, conservative)...", flush=True)
-    try:
-        _pb_html = _na.build_pullback_comparison_html(
-            _pb_list, _DEFAULT_DAYS, _args.workers) or ""
-    except Exception as _pbe:
-        print(f"[押し目買い比較] 失敗: {_pbe}", flush=True)
-        _pb_html = ""
+    _pb_cache_file = _mh_cache_dir / f"pullback_cmp_{TODAY}.pkl"
+    _pb_html = None
+    # 計算済みキャッシュがあれば再計算をスキップ (--force で再計算)
+    if _pb_cache_file.exists() and not _args.force:
+        try:
+            _pb_html = _mhpk.loads(_pb_cache_file.read_bytes()).get("html", "")
+            print(f"[押し目買い比較] キャッシュ使用: {_pb_cache_file.name}", flush=True)
+        except Exception:
+            _pb_html = None
+    if _pb_html is None:
+        print(f"押し目買い比較中 ({_pb_list}, conservative)...", flush=True)
+        try:
+            _pb_html = _na.build_pullback_comparison_html(
+                _pb_list, _DEFAULT_DAYS, _args.workers) or ""
+        except Exception as _pbe:
+            print(f"[押し目買い比較] 失敗: {_pbe}", flush=True)
+            _pb_html = ""
+        if _pb_html:
+            try:
+                _pb_cache_file.write_bytes(_mhpk.dumps({"html": _pb_html}))
+                print(f"[押し目買い比較] キャッシュ保存: {_pb_cache_file.name}", flush=True)
+            except Exception:
+                pass
     if _pb_html:
         _all_period_html = _all_period_html.replace(
             "<!-- PULLBACK_CMP_SLOT -->", _pb_html, 1)
