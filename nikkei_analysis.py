@@ -4219,6 +4219,164 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
         )
 
 
+def build_pullback_comparison_html(pullbacks: list[float], days: int,
+                                   workers: int) -> str:
+    """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。
+
+    同一シグナルで entry だけ変える:
+      逆指値ブレイク(現行) = entry_type=stop, em=0  (前日終値で約定)
+      押し目指値          = entry_type=limit, em=PB (前日終値-ATR×PB で約定)
+    『全トレード』と『BT70以上の銘柄のみ』の2表を出す。
+    対象は本レポートの _PNL_CONFIGS（=実際にトレードする選定銘柄）。
+    """
+    if not _SIGNALS_AVAILABLE or not pullbacks:
+        return ""
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+
+    from backtest_limit_entry import fetch as _fetch, run_limit_backtest as _rlb
+
+    # ── BTスコア (production: stop・365スライス) を (sym,strat) ごとに算出 ──
+    bt: dict = {}
+    def _btone(it):
+        sym, name, strat = it
+        mod = _mod_for(strat)
+        try:
+            if strat not in getattr(mod, "STRATEGY_PARAMS", {}):
+                return (sym, strat, 0)
+            r = mod.backtest_one(sym, name, strat)
+            if not r:
+                return (sym, strat, 0)
+            sc, _rk = mod.calc_recommend_score(r.get("period_results", {}))
+            return (sym, strat, sc)
+        except Exception:
+            return (sym, strat, 0)
+    print("  [押し目比較] BTスコア算出中...", flush=True)
+    with _TPE(max_workers=workers) as ex:
+        for sym, strat, sc in ex.map(_btone, items):
+            bt[(sym, strat)] = sc
+
+    variants = [("逆指値ブレイク(現行)", "stop", 0.0)]
+    for pb in pullbacks:
+        variants.append((f"押し目指値 -{pb}ATR", "limit", float(pb)))
+
+    per_variant: dict = {}
+    for label, etype, em in variants:
+        def _one(it, etype=etype, em=em):
+            sym, name, strat = it
+            mod = _mod_for(strat)
+            params = getattr(mod, "STRATEGY_PARAMS", {})
+            if strat not in params:
+                return None
+            cf, _em0, sm, tm = params[strat]
+            df = _fetch(sym, days)
+            if df is None:
+                return None
+            try:
+                r = _rlb(sym, name, df, cf, em, sm, tm, days, strat,
+                         entry_type=etype)
+            except Exception:
+                return None
+            if not r:
+                return None
+            tl = [t for t in r.get("trade_log", [])
+                  if t.get("reason") not in ("発注中", "保有中")]
+            return (sym, strat, r.get("signals", 0), len(tl), tl)
+        print(f"  [押し目比較] {label} 集計中...", flush=True)
+        res = []
+        with _TPE(max_workers=workers) as ex:
+            for x in ex.map(_one, items):
+                if x:
+                    res.append(x)
+        per_variant[label] = res
+
+    def _agg(label: str, only_bt70: bool) -> dict:
+        sig = fil = 0
+        trades: list = []
+        for sym, strat, s, f, tl in per_variant[label]:
+            if only_bt70 and bt.get((sym, strat), 0) < 70:
+                continue
+            sig += s; fil += f; trades += tl
+        wins = [t for t in trades if t.get("pnl", 0) > 0]
+        gp = sum(t["pnl"] for t in wins)
+        gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        return dict(signals=sig, filled=fil,
+                    fill_rate=fil / sig * 100 if sig else 0.0,
+                    win_rate=len(wins) / len(trades) * 100 if trades else 0.0,
+                    pf=pf, total_pnl=sum(t.get("pnl", 0) for t in trades),
+                    avg_win=gp / len(wins) if wins else 0.0)
+
+    def _table(only_bt70: bool) -> str:
+        base = _agg(variants[0][0], only_bt70)["total_pnl"]
+        best = max(variants, key=lambda v: _agg(v[0], only_bt70)["total_pnl"])[0]
+        rows = ""
+        for label, _e, _m in variants:
+            st = _agg(label, only_bt70)
+            is_base = (label == variants[0][0])
+            diff = st["total_pnl"] - base
+            pf_s = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+            pnl = st["total_pnl"]
+            pc = "#4ade80" if pnl > 0 else "#f87171" if pnl < 0 else "#94a3b8"
+            dc = "#94a3b8" if is_base else ("#4ade80" if diff > 0 else "#f87171")
+            ds = "—" if is_base else (f"+{diff:,.0f}" if diff >= 0 else f"{diff:,.0f}")
+            bg = "background:#172032;" if label == best else ""
+            badge = ('' if label != best else
+                     ' <span style="font-size:0.6rem;background:#4ade80;color:#052e16;'
+                     'padding:1px 4px;border-radius:3px">最良</span>')
+            rows += (
+                f'<tr style="{bg}">'
+                f'<td style="padding:6px 10px;font-weight:700;color:#e2e8f0">{label}{badge}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{st["signals"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{st["filled"]:,}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{st["fill_rate"]:.0f}%</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{st["win_rate"]:.0f}%</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#93c5fd">{pf_s}</td>'
+                f'<td style="padding:6px 10px;text-align:right;font-weight:700;color:{pc}">{pnl:+,.0f}円</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:{dc}">{ds}</td>'
+                f'<td style="padding:6px 10px;text-align:right;color:#94a3b8">{st["avg_win"]:+,.0f}</td>'
+                f'</tr>\n'
+            )
+        return (
+            f'<table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
+            f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.78rem">'
+            f'<th style="padding:5px 10px;text-align:left">エントリー方式</th>'
+            f'<th style="padding:5px 10px;text-align:right">ｼｸﾞﾅﾙ</th>'
+            f'<th style="padding:5px 10px;text-align:right">約定</th>'
+            f'<th style="padding:5px 10px;text-align:right">fill率</th>'
+            f'<th style="padding:5px 10px;text-align:right">勝率</th>'
+            f'<th style="padding:5px 10px;text-align:right">PF</th>'
+            f'<th style="padding:5px 10px;text-align:right">総損益</th>'
+            f'<th style="padding:5px 10px;text-align:right">対現行</th>'
+            f'<th style="padding:5px 10px;text-align:right">平均利益</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>'
+        )
+
+    return (
+        f'<div style="margin:0 0 16px;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #34d399">'
+        f'<h4 style="margin:0 0 8px;color:#34d399;font-size:0.95rem">'
+        f'📥 押し目指値買い vs 逆指値ブレイク買い（全トレード・直近{days}日）</h4>'
+        f'<p style="margin:0 0 10px;color:#94a3b8;font-size:0.76rem">'
+        f'同一シグナルで entry のみ変更。押し目=前日終値−ATR×n を指値買い。'
+        f'「対現行」がプラス かつ PF改善 なら押し目買いが優位。'
+        f'マイナスなら、押さず上昇する強い勝ちを取り逃す方が大きい。</p>'
+        f'{_table(False)}</div>'
+        f'<div style="padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #fbbf24">'
+        f'<h4 style="margin:0 0 10px;color:#fbbf24;font-size:0.95rem">'
+        f'📥 同上 — BT70以上の銘柄のみ</h4>'
+        f'{_table(True)}</div>'
+    )
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
@@ -7433,6 +7591,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold\')">⑪ 保有日数比較</button>\n'
         f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold_cmp\')">⑫ con/agg比較</button>'
     )
+    _pullback_tab_btn = (
+        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'pullback\')">⑬ 押し目買い比較</button>'
+    )
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -7451,6 +7612,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 {_preoos_tab_btn}
 {_maxhold_tab_btn}
+{_pullback_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -7678,6 +7840,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- MAXHOLD_CMP_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_pullback" class="analysis-tab-pane">
+<!-- PULLBACK_CMP_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -7727,7 +7893,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos','maxhold','maxhold_cmp'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos','maxhold','maxhold_cmp','pullback'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

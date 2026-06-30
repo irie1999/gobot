@@ -944,6 +944,25 @@ if _mh_cmp_html:
     _all_period_html = _all_period_html.replace("<!-- MAXHOLD_CMP_SLOT -->", _mh_cmp_html, 1)
 _phase("最大保有日数比較完了")
 
+# ── ⑬ 押し目指値買い vs 逆指値ブレイク買い 比較 (詳細分析タブ) ──────────────────
+# 「約定後すぐ押す」を活かせるか= 押し目を指値で安く買う方が良いかを本レポートの
+# 選定銘柄(=_all_configs)の実トレードで比較。BT70以上のフィルタ表も併記。
+# ショートモードでは押し目買いの概念が無いためスキップ。
+if not _args.short:
+    _na._PNL_CONFIGS[:] = _all_configs
+    _pb_list = [0.3, 0.5, 1.0]
+    print(f"押し目買い比較中 ({_pb_list}, conservative)...", flush=True)
+    try:
+        _pb_html = _na.build_pullback_comparison_html(
+            _pb_list, _DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _pbe:
+        print(f"[押し目買い比較] 失敗: {_pbe}", flush=True)
+        _pb_html = ""
+    if _pb_html:
+        _all_period_html = _all_period_html.replace(
+            "<!-- PULLBACK_CMP_SLOT -->", _pb_html, 1)
+    _phase("押し目買い比較完了")
+
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
