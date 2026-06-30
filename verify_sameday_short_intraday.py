@@ -156,6 +156,9 @@ def main():
     ap.add_argument("--strategy", choices=list(STRATS.keys()), default=None)
     ap.add_argument("--watchlist", action="store_true",
                     help="スイング選定WATCHLIST(stop+breakout)の『銘柄×割当戦略』だけで検証")
+    ap.add_argument("--symbols-file", default=None,
+                    help="SELECTED=[(code,name,strat),...] を持つpyファイル。"
+                         "run_signals_holdout_all が出力する holdout_selected_symbols.py 用")
     args = ap.parse_args()
 
     if args.strategy:
@@ -165,7 +168,22 @@ def main():
 
     # ── 対象銘柄と、銘柄ごとの許可戦略 (allowed) を決定 ──
     sym_allowed: dict[str, set] = {}     # sym -> {許可戦略}。Noneなら全戦略
-    if args.watchlist:
+    if args.symbols_file:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_selmod", args.symbols_file)
+        _m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_m)
+        names: dict[str, str] = {}
+        for code, nm, strat in _m.SELECTED:
+            if args.strategy and strat != args.strategy:
+                continue
+            if strat not in STRATS:        # 未知戦略はスキップ
+                continue
+            sym_allowed.setdefault(code, set()).add(strat)
+            names[code] = nm
+        universe = [(c, names[c]) for c in sym_allowed]
+        src = f"holdout選定銘柄 {len(_m.SELECTED)}ペア ({args.symbols_file})"
+    elif args.watchlist:
         from check_signals_stop import WATCHLIST as _W_STOP
         from check_signals_breakout import WATCHLIST as _W_BRK
         names: dict[str, str] = {}
