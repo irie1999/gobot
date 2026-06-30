@@ -192,6 +192,110 @@ def _signals_html(sigs, err) -> str:
     return "".join(h)
 
 
+def _trade_detail(detail_days: int):
+    """WATCHLIST の各(銘柄×戦略)を再実行して実トレード履歴を取得。
+    返り値: {(strat,code,name): [trades...]} と全体集計。"""
+    try:
+        wl = importlib.import_module("daytrade_watchlist").WATCHLIST
+    except Exception:
+        return None, "daytrade_watchlist.py が無いか壊れています。build_watchlist_wf.py を先に実行してください。"
+    try:
+        from daytrade_data import load_intraday
+    except Exception as e:
+        return None, f"daytrade_data 読込失敗: {e}"
+
+    groups = []
+    for strat, syms in wl.items():
+        mod_name = STRAT_MODULES.get(strat)
+        if not mod_name:
+            continue
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for code, name in syms:
+            sym = code if code.endswith(".T") else f"{code}.T"
+            try:
+                df = load_intraday(sym, days=detail_days, source="local")
+                if df is None or df.empty:
+                    continue
+                try:
+                    res = mod.backtest_symbol(sym, name, df)
+                except TypeError:
+                    res = mod.backtest_symbol(sym, name, df, 600000, 6000)
+                trades = (res or {}).get("trades", [])
+                if trades:
+                    groups.append((strat, code, name, trades))
+            except Exception:
+                continue
+    return groups, None
+
+
+def _split_stats(trades: list):
+    """損と利益を分けて集計。"""
+    wins = [t for t in trades if _f(t.get("pnl")) > 0]
+    losses = [t for t in trades if _f(t.get("pnl")) < 0]
+    gp = sum(_f(t.get("pnl")) for t in wins)
+    gl = sum(_f(t.get("pnl")) for t in losses)   # 負値
+    return {
+        "n": len(trades), "win_n": len(wins), "loss_n": len(losses),
+        "gross_profit": gp, "gross_loss": gl, "net": gp + gl,
+        "avg_win": gp / len(wins) if wins else 0.0,
+        "avg_loss": gl / len(losses) if losses else 0.0,
+        "pf": gp / abs(gl) if gl else (float("inf") if gp else 0.0),
+        "wr": len(wins) / len(trades) * 100 if trades else 0.0,
+    }
+
+
+def _detail_html(groups, err) -> str:
+    if err:
+        return f'<h2>取引明細</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>取引明細</h2><p class="badge">WATCHLISTが空か、データがありません。</p>'
+
+    # 全体の損益分離サマリー
+    all_tr = [t for _, _, _, ts in groups for t in ts]
+    g = _split_stats(all_tr)
+    pf_s = "∞" if g["pf"] == float("inf") else f"{g['pf']:.2f}"
+    h = ['<h2>取引明細 <span class="badge">損と利益を分離</span></h2>']
+    h.append('<table style="width:auto"><tbody>'
+             f'<tr><th>利益トレード</th><td class="pos">{g["win_n"]}件 / 合計 +{g["gross_profit"]:,.0f}円 / 平均 +{g["avg_win"]:,.0f}円</td></tr>'
+             f'<tr><th>損失トレード</th><td class="neg">{g["loss_n"]}件 / 合計 {g["gross_loss"]:,.0f}円 / 平均 {g["avg_loss"]:,.0f}円</td></tr>'
+             f'<tr><th>純損益</th><td class="{"pos" if g["net"]>0 else "neg"}">{g["net"]:+,.0f}円</td></tr>'
+             f'<tr><th>勝率 / PF</th><td>{g["wr"]:.1f}% / PF {pf_s}</td></tr>'
+             '</tbody></table>')
+
+    # 銘柄別 (純損益降順)
+    groups2 = sorted(groups, key=lambda x: -_split_stats(x[3])["net"])
+    for strat, code, name, trades in groups2:
+        s = _split_stats(trades)
+        spf = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+        net_c = "pos" if s["net"] > 0 else "neg"
+        h.append(f'<h3 style="color:#cbd5e1;font-size:13px;margin:14px 0 4px">'
+                 f'{strat} / {code} {name[:16]} '
+                 f'<span class="badge">純<span class="{net_c}">{s["net"]:+,.0f}</span> '
+                 f'| 利{s["win_n"]}件+{s["gross_profit"]:,.0f} '
+                 f'/ 損{s["loss_n"]}件{s["gross_loss"]:,.0f} | PF{spf} WR{s["wr"]:.0f}%</span></h3>')
+        h.append('<table><thead><tr><th>日付</th><th>時刻</th>'
+                 '<th>エントリー</th><th>決済</th><th>損益</th><th>%</th><th>理由</th>'
+                 '</tr></thead><tbody>')
+        for t in sorted(trades, key=lambda x: x.get("entry_dt") or datetime.now()):
+            ed = t.get("entry_dt")
+            xd = t.get("exit_dt")
+            pnl = _f(t.get("pnl"))
+            c = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+            d_s = ed.strftime("%Y-%m-%d") if ed is not None else "?"
+            t_s = (ed.strftime("%H:%M") if ed is not None else "") + \
+                  ("→" + xd.strftime("%H:%M") if xd is not None else "")
+            h.append(f'<tr><td class="nm">{d_s}</td><td class="nm">{t_s}</td>'
+                     f'<td>{_f(t.get("entry_p")):,.0f}</td><td>{_f(t.get("exit_p")):,.0f}</td>'
+                     f'<td class="{c}">{pnl:+,.0f}</td>'
+                     f'<td class="{c}">{_f(t.get("pct")):+.2f}</td>'
+                     f'<td class="nm">{t.get("reason","")}</td></tr>')
+        h.append('</tbody></table>')
+    return "".join(h)
+
+
 CSS = """
 body{margin:0;padding:0;background:#0f172a;color:#94a3b8;font-family:sans-serif}
 .wrap{padding:22px 28px}
@@ -227,7 +331,7 @@ function show(id, el){
 """
 
 
-def build_html(date: str, signal_days: int):
+def build_html(date: str, signal_days: int, detail_days: int):
     # WF検証
     wf = {}
     for s in STRATEGIES:
@@ -236,6 +340,8 @@ def build_html(date: str, signal_days: int):
             wf[s] = rows
     # 今日のシグナル
     sigs, err = _today_signals(signal_days)
+    # 取引明細 (損益分離)
+    groups, derr = _trade_detail(detail_days)
 
     tabs, panes = [], []
     # シグナルタブ (先頭)
@@ -243,6 +349,11 @@ def build_html(date: str, signal_days: int):
     tabs.append(f'<button class="tab active" onclick="show(\'sig\',this)">'
                 f'🚀 今日のシグナル <span class="tn">{sig_n}</span></button>')
     panes.append(f'<div id="sig" class="pane active">{_signals_html(sigs, err)}</div>')
+    # 取引明細タブ
+    det_n = len(groups) if groups else 0
+    tabs.append(f'<button class="tab" onclick="show(\'detail\',this)">'
+                f'📋 取引明細 <span class="tn">{det_n}</span></button>')
+    panes.append(f'<div id="detail" class="pane">{_detail_html(groups, derr)}</div>')
     tabs.append('<span class="sep"></span>')
     # WF検証タブ
     summary = {}
@@ -271,10 +382,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now(JST).date().isoformat())
     ap.add_argument("--signal-days", type=int, default=60)
+    ap.add_argument("--detail-days", type=int, default=365,
+                    help="取引明細の対象期間 (実トレード履歴を再計算する日数)")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    html, summary, sig_n = build_html(args.date, args.signal_days)
+    html, summary, sig_n = build_html(args.date, args.signal_days, args.detail_days)
     out = Path(f"daytrade_report_{args.date}.html")
     out.write_text(html, encoding="utf-8")
     print(f"HTML 生成: {out.resolve()}")
