@@ -5,7 +5,8 @@ daytrade_report.py  ―  デイトレ 日次レポート (スイング run_signa
   1. 今日のシグナル … daytrade_watchlist.py の (銘柄×戦略) を最新営業日で評価し、
                       今日エントリーが出た銘柄を表示。
   2. WF検証(ホールドアウト) … wf_strategies_*_ho{30,90,180}.csv を戦略別タブで表示。
-                      HO90 & HO180 の両方で holdout損益>0 を ★本命 として強調。
+                      選定はTEST(選定窓=直近HO日より前)で実施し直近HO日は不使用。
+                      選定後の純OOS(直近HO日)がHO90&HO180両方で黒字なら ★本命 と強調。
 
 スイング版と同じダークテーマ・上部タブ・色分け。
 
@@ -514,7 +515,8 @@ def build_html(date: str, signal_days: int, detail_days: int):
 <div class="wrap">
 <h1>デイトレ日次レポート <span class="badge">{date} / WF★本命 計{total_rob}</span></h1>
 <p class="badge">🚀今日のシグナル=WATCHLIST銘柄が最新営業日に出したエントリー。
-WF検証の★本命=HO90&HO180両方で未使用OOS損益>0(取引≥3)。</p>
+銘柄選定はWFのTEST(選定窓=直近HO日より前)のみで実施し、直近HO日は選定に不使用。
+★本命=選定後の純OOS(直近HO日)でもHO90&HO180両方が黒字(取引≥3)=答え合わせ合格。</p>
 {''.join(panes)}
 </div>
 <script>{JS}</script></body></html>"""
