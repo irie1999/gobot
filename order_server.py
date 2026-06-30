@@ -210,24 +210,43 @@ def _place_target_now(cli, p: dict) -> str:
         expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
     except Exception:
         expire = 0
-    # 利確は『現在値から離れた待機注文』。SOR(9)は待機する通常指値を受け付けず
-    # 値段/トリガチェックで弾く(ERROR_CD_000_000_103)。SORを使ったまま利確する
-    # には逆指値(トリガで発動→即執行)にする必要がある:
-    #   long 利確 = 逆指値売り (目標で上昇発動 OVER) → 発動後 指値@目標
-    #   short利確 = 逆指値買戻 (目標で下落発動 UNDER) → 発動後 指値@目標
+    # 値幅制限(ストップ高/安)を超える指値は kabu の値段チェックで弾かれる
+    # (ERROR_CD_000_000_103)。上限超なら上限値に、下限割れなら下限値にキャップ。
+    price = _cap_to_price_limit(cli, symbol, side, target)
     try:
         if side == "short":
-            res = cli.send_stop_buy(symbol, qty=qty, trigger_price=target,
-                                    cash_margin=3, expire_day=expire,
-                                    under_over="under", after_hit_price=target)
+            res = cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
+                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
         else:
             cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
-            res = cli.send_stop_sell(symbol, qty=qty, trigger_price=target,
-                                     cash_margin=cm, expire_day=expire,
-                                     under_over="over", after_hit_price=target)
+            res = cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
+                                cash_margin=cm, expire_day=expire)
     except Exception as e:
         return f"fail({e})"
     return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
+
+
+def _cap_to_price_limit(cli, symbol: str, side: str, target: float) -> float:
+    """値幅制限(ストップ高/安)で指値をキャップする。
+    long利確(売り): target が当日上限(UpperLimit)超なら上限値に。
+    short利確(買戻): target が当日下限(LowerLimit)割れなら下限値に。
+    取得失敗時や上限/下限が0(時間外等)はそのまま返す。"""
+    try:
+        board = _kabu_get(cli.get_board, symbol)
+    except Exception as e:
+        print(f"  ⚠ 値幅取得失敗 {symbol} ({e}) → 目標そのまま")
+        return target
+    if side == "short":
+        lo = board.get("LowerLimit") or 0
+        if lo and target < lo:
+            print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lo:,.0f}割れ → 下限値で発注")
+            return float(lo)
+    else:
+        up = board.get("UpperLimit") or 0
+        if up and target > up:
+            print(f"  ↗ {symbol} 利確{target:,.0f}が上限{up:,.0f}超 → 上限値で発注")
+            return float(up)
+    return target
 
 
 def _kabu_get(fn, *a, tries=4, **k):

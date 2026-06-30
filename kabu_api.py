@@ -235,27 +235,6 @@ class KabuClient:
                 break
         return close_list
 
-    def _attach_close(self, body: dict, symbol, qty: int, side: str,
-                      close_positions: list[dict] | None,
-                      omit: bool) -> bool:
-        """信用返済の ClosePositions を body に付与する。
-        建玉が見つからなければ False を返す (発注中止用)。dry_run はダミー。"""
-        if omit:
-            return True
-        if close_positions is not None:
-            body["ClosePositions"] = close_positions
-            return True
-        if self.dry_run:
-            body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
-            return True
-        self.cancel_open_close_orders(symbol, side)
-        cp = self._build_close_positions(symbol, qty, side)
-        if not cp:
-            print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
-            return False
-        body["ClosePositions"] = cp
-        return True
-
     def cancel_open_close_orders(self, symbol: int | str,
                                   side: str = SIDE_SELL) -> list[str]:
         """同一銘柄の未約定 信用返済注文を一括取消して建玉を解放する。
@@ -362,49 +341,35 @@ class KabuClient:
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
                       cash_margin: int = CASH_GENBUTSU,
-                      after_hit_price: float | None = None,
-                      under_over: str = "over",
-                      expire_day: int | None = None,
-                      close_positions: list[dict] | None = None,
-                      omit_close_positions: bool = False) -> dict:
-        """逆指値買い (trigger_price で発動して買い)。
+                      after_hit_price: float | None = None) -> dict:
+        """逆指値買いエントリー (trigger_price 以上で買い)。
 
         逆指値シグナルの order_price をそのまま trigger_price に渡す。
-        after_hit_price=None なら発火後は成行 (実運用の既定)。値を渡すと指値。
-        under_over: "over"=以上で発動(エントリー/ブレイク既定) / "under"=以下で発動
-                    (ショート利確の買戻し=下落で発動 に使う)。
-        cash_margin=3(信用返済) のときは ClosePositions を自動生成する。
+        after_hit_price=None なら発火後は成行 (実運用の既定)。
+        値を渡すと発火後は指値 (時間外テストなど成行が弾かれる場面で使う)。
         """
         body = self._base_order(symbol, SIDE_BUY, qty, cash_margin)
-        if expire_day is not None:
-            body["ExpireDay"] = expire_day
         body["FrontOrderType"] = FOT_STOP
         body["Price"] = 0
         if after_hit_price is None:
             after_type, after_price = AFTERHIT_MARKET, 0
         else:
             after_type, after_price = AFTERHIT_LIMIT, round(after_hit_price)
-        uo = OVER if str(under_over).lower() == "over" else UNDER
         body["ReverseLimitOrder"] = {
             "TriggerSec": TRIGGER_AFTER_ORDER,
             "TriggerPrice": round(trigger_price),
-            "UnderOver": uo,
+            "UnderOver": OVER,          # 以上 (ブレイク方向)
             "AfterHitOrderType": after_type,
             "AfterHitPrice": after_price,
         }
-        if cash_margin == CASH_MARGIN_CLOSE and not self._attach_close(
-                body, symbol, qty, SIDE_BUY, close_positions, omit_close_positions):
-            return {"Result": -1, "Message": "建玉なし"}
-        _op = "≥" if uo == OVER else "≤"
-        return self._post_order(body, f"逆指値買い {symbol} x{qty} @{_op}{trigger_price:.0f}")
+        return self._post_order(body, f"逆指値買い {symbol} x{qty} @≥{trigger_price:.0f}")
 
     def send_buy(self, symbol: int | str, qty: int, price: float | None = None,
                  cash_margin: int = CASH_MARGIN_OPEN,
                  order_type: str = "market",
                  close_positions: list[dict] | None = None,
                  expire_day: int | None = None,
-                 omit_close_positions: bool = False,
-                 exchange: int | None = None) -> dict:
+                 omit_close_positions: bool = False) -> dict:
         """買い注文 (新規エントリー or 信用返済の買戻し)。
 
         order_type:
@@ -423,9 +388,6 @@ class KabuClient:
                 raise ValueError("order_type='limit' には price が必要です。")
             body["FrontOrderType"] = FOT_LIMIT
             body["Price"] = round(price)
-            # 待機指値は SOR(9) 非対応 → 東証＋(27)等を明示指定 (ショート利確の買戻し等)
-            if exchange is not None:
-                body["Exchange"] = exchange
             label = f"指値買い {symbol} x{qty} @{round(price)}"
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
@@ -461,8 +423,7 @@ class KabuClient:
                   order_type: str = "market",
                   close_positions: list[dict] | None = None,
                   expire_day: int | None = None,
-                  omit_close_positions: bool = False,
-                  exchange: int | None = None) -> dict:
+                  omit_close_positions: bool = False) -> dict:
         """普通の売り注文 (現物売り or 信用返済売り)。
 
         order_type:
@@ -478,10 +439,6 @@ class KabuClient:
                 raise ValueError("order_type='limit' には price が必要です。")
             body["FrontOrderType"] = FOT_LIMIT
             body["Price"] = round(price)
-            # 利確等の『市場から離れた待機指値』は SOR(9) 非対応 (値段/トリガ
-            # チェックで弾かれる: ERROR_CD_000_000_103)。東証＋(27)等を明示指定。
-            if exchange is not None:
-                body["Exchange"] = exchange
             label = f"指値売り {symbol} x{qty} @{round(price)}"
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
@@ -514,41 +471,28 @@ class KabuClient:
 
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
                        cash_margin: int = CASH_GENBUTSU,
-                       after_hit_price: float | None = None,
-                       under_over: str = "under",
-                       expire_day: int | None = None,
-                       close_positions: list[dict] | None = None,
-                       omit_close_positions: bool = False) -> dict:
-        """逆指値売り (trigger_price で発動)。
+                       after_hit_price: float | None = None) -> dict:
+        """逆指値売り (trigger_price 以下で発動)。
 
-        after_hit_price=None なら発火後は成行 (損切り/intraday用の既定)。値を渡すと指値。
-        under_over: "under"=以下で発動(損切り既定) / "over"=以上で発動
-                    (ロング利確=上昇で発動 に使う)。
-        cash_margin=3(信用返済) のときは ClosePositions を自動生成する。
+        after_hit_price=None なら発火後は成行 (損切り/intraday用の既定)。
+        値を渡すと発火後は指値 (ショート新規の下限ガード用。-3%超の窓開けは約定しない)。
         """
         body = self._base_order(symbol, SIDE_SELL, qty, cash_margin)
-        if expire_day is not None:
-            body["ExpireDay"] = expire_day
         body["FrontOrderType"] = FOT_STOP
         body["Price"] = 0
         if after_hit_price is None:
             after_type, after_price = AFTERHIT_MARKET, 0
         else:
             after_type, after_price = AFTERHIT_LIMIT, round(after_hit_price)
-        uo = OVER if str(under_over).lower() == "over" else UNDER
         body["ReverseLimitOrder"] = {
             "TriggerSec": TRIGGER_AFTER_ORDER,
             "TriggerPrice": round(trigger_price),
-            "UnderOver": uo,
+            "UnderOver": UNDER,         # 以下 (下落で発動)
             "AfterHitOrderType": after_type,
             "AfterHitPrice": after_price,
         }
-        if cash_margin == CASH_MARGIN_CLOSE and not self._attach_close(
-                body, symbol, qty, SIDE_SELL, close_positions, omit_close_positions):
-            return {"Result": -1, "Message": "建玉なし"}
-        _op = "≥" if uo == OVER else "≤"
         _lbl = "逆指値売り" if after_hit_price is None else "逆指値売り→指値"
-        return self._post_order(body, f"{_lbl} {symbol} x{qty} @{_op}{trigger_price:.0f}")
+        return self._post_order(body, f"{_lbl} {symbol} x{qty} @≤{trigger_price:.0f}")
 
     def send_moc(self, symbol: int | str, qty: int, side: str = "sell",
                  cash_margin: int = CASH_GENBUTSU,
