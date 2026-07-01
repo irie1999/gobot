@@ -483,6 +483,18 @@ def calc_macd(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_macd_tf(df: pd.DataFrame) -> pd.DataFrame:
+    """MACD + トレンドフィルター強化版 (MACDTF)。
+    現行MACDのトレンド条件は MA10 のみと短く、下降トレンド中の小反発
+    (falling knife) も拾いうる。終値 > MA50 を追加し上昇基調に限定する。
+    (VOLTF と同じ主旨。WFでMACDと比較して改善するか検証してから採用判断)
+    """
+    df = calc_macd(df)   # まず通常MACDのシグナル/ATRを算出
+    ma50 = df["close"].rolling(50).mean()
+    df["entry_sig"] = df["entry_sig"] & (df["close"] > ma50)
+    return df
+
+
 # ── A7 インジケーター計算 ────────────────────────────────────────
 def calc_a7(df: pd.DataFrame) -> pd.DataFrame:
     """ストキャスティクスゴールデンクロス × MA75トレンドフィルター。"""

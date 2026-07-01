@@ -85,7 +85,7 @@ elif "--conservative" in sys.argv:
 
 from backtest_limit_entry import (
     fetch,
-    calc_macd, calc_a7, calc_rsi2,
+    calc_macd, calc_macd_tf, calc_a7, calc_rsi2,
     run_limit_backtest,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -154,6 +154,7 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 # TRADING_MODE=aggressive のとき積極利確プリセットを使う
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
     "MACD":  (calc_macd,          0.0, 1.5, 3.0, "stop",      "stop"),
+    "MACDTF":(calc_macd_tf,       0.0, 1.5, 3.0, "stop",      "stop"),  # MACD+MA50フィルタ比較用
     "A7":    (calc_a7,            0.0, 1.5, 3.0, "stop",      "stop"),
     "RSI2":  (calc_rsi2,          0.0, 2.0, 4.0, "stop",      "stop"),
     "DON":   (calc_donchian,      0.0, 1.5, 3.0, "breakout",  "stop"),
@@ -169,6 +170,7 @@ STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
     "MACD":  (calc_macd,          0.0, 1.5, 2.0, "stop",      "stop"),
+    "MACDTF":(calc_macd_tf,       0.0, 1.5, 2.0, "stop",      "stop"),  # MACD+MA50フィルタ比較用
     "A7":    (calc_a7,            0.0, 1.5, 2.0, "stop",      "stop"),
     "RSI2":  (calc_rsi2,          0.0, 1.5, 2.0, "stop",      "stop"),
     "DON":   (calc_donchian,      0.0, 1.5, 2.0, "breakout",  "stop"),
@@ -592,12 +594,12 @@ def main() -> None:
     effective_min_price = args.min_price
 
     _FAMILY_STRATS = {
-        "stop":      ["MACD", "A7", "RSI2"],
+        "stop":      ["MACD", "MACDTF", "A7", "RSI2"],
         "breakout":  ["DON", "VOL", "VOLTF", "MOM"],
         "short":     ["A7_S", "MACD_S", "RSI2_S"],
         "short_brk": ["DON_S", "MOM_S", "GAP_S"],
-        "both":      ["MACD", "A7", "RSI2", "DON", "VOL", "VOLTF", "MOM"],
-        "all":       ["MACD", "A7", "RSI2", "DON", "VOL", "VOLTF", "MOM",
+        "both":      ["MACD", "MACDTF", "A7", "RSI2", "DON", "VOL", "VOLTF", "MOM"],
+        "all":       ["MACD", "MACDTF", "A7", "RSI2", "DON", "VOL", "VOLTF", "MOM",
                       "A7_S", "MACD_S", "RSI2_S", "DON_S", "MOM_S", "GAP_S"],
     }
     strategies = _FAMILY_STRATS[args.family]
