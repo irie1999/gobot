@@ -202,14 +202,11 @@ def _place_target_now(cli, p: dict) -> str:
                                         p["target"], p["strategy"])
     if _has_active_close_order(cli, symbol, side):
         return "exists"
-    import pandas as pd
-    from backtest_limit_entry import default_max_hold
-    mh = default_max_hold(strat)
-    today = pd.Timestamp(datetime.now(JST).date())
-    try:
-        expire = int((today + pd.tseries.offsets.BDay(mh)).strftime("%Y%m%d"))
-    except Exception:
-        expire = 0
+    # 利確指値は ExpireDay=0(当日限り)。kabuは長期の有効期限を受け付けない
+    # (28営業日先などを送ると Code 5「正しい有効期限を設定してください」で弾かれる)。
+    # 複数日の保有カバーは order_server が接続時に毎回 _backfill_targets で
+    # 再発注することで担保する (§16 引け前ガードと同様に日次運用が前提)。
+    expire = 0
     # 利確指値は値幅制限(ストップ高/安=指定可能な最大/最小値)を超えると kabu の
     # 値段チェックで弾かれる(ERROR_CD_000_000_103)。上限超なら上限値にキャップ。
     # 値幅が取得できない時(429等)は 3230 のような弾かれる値を送らずスキップする
