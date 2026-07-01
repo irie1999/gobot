@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import time
 from typing import Any
 
 import requests
@@ -150,6 +151,30 @@ class KabuClient:
             h["Content-Type"] = "application/json"
         return h
 
+    def _get_json(self, url: str, params: dict | None = None,
+                  retries: int = 5):
+        """GET して JSON を返す。429(レート制限)は指数バックオフで再試行。
+
+        kabuステーション API は短時間に叩くと 429 を返す。建玉取得(/positions)や
+        注文取得(/orders)が 429 で例外送出すると損切り成行の発注全体が落ちるため、
+        ここで待って再試行する。最終的に失敗したら raise_for_status で送出する。
+        """
+        last = None
+        for i in range(retries):
+            r = requests.get(url, headers=self._headers(),
+                             params=params, timeout=self.timeout)
+            if r.status_code != 429:
+                r.raise_for_status()
+                return r.json()
+            last = r
+            wait = 1.5 * (i + 1)
+            print(f"  ⚠ 429 レート制限: {wait:.1f}秒待って再試行 ({i+1}/{retries}) {url}")
+            time.sleep(wait)
+        # ここに来たら最後まで 429。呼び出し側で扱えるよう送出。
+        if last is not None:
+            last.raise_for_status()
+        raise RuntimeError(f"GET 失敗: {url}")
+
     # ── 情報取得 (GET) ───────────────────────────────────────
     def register(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
         """/board で時価を取る前に必要な銘柄登録 (PUT /register)。
@@ -174,9 +199,7 @@ class KabuClient:
         """時価情報 (CurrentPrice 等) を取得。事前に銘柄登録を行う。"""
         self.register(symbol, exchange)
         url = f"{self.base_url}/kabusapi/board/{symbol}@{exchange}"
-        r = requests.get(url, headers=self._headers(), timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
+        return self._get_json(url)
 
     def get_current_price(self, symbol: int | str,
                           exchange: int = EXCHANGE_TOSHO) -> float | None:
@@ -190,10 +213,7 @@ class KabuClient:
     def get_positions(self, product: int = 0) -> list[dict]:
         """建玉一覧。product: 0=すべて 1=現物 2=信用 3=先物 4=OP。"""
         url = f"{self.base_url}/kabusapi/positions"
-        r = requests.get(url, headers=self._headers(),
-                         params={"product": product}, timeout=self.timeout)
-        r.raise_for_status()
-        data = r.json()
+        data = self._get_json(url, params={"product": product})
         return data if isinstance(data, list) else []
 
     def get_margin_positions(self, symbol: int | str | None = None) -> list[dict]:
@@ -271,16 +291,13 @@ class KabuClient:
     def get_cash(self) -> dict:
         """買付余力。"""
         url = f"{self.base_url}/kabusapi/wallet/cash"
-        r = requests.get(url, headers=self._headers(), timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
+        return self._get_json(url)
 
     def get_orders(self) -> list[dict]:
         """注文一覧。"""
         url = f"{self.base_url}/kabusapi/orders"
-        r = requests.get(url, headers=self._headers(), timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
+        data = self._get_json(url)
+        return data if isinstance(data, list) else []
 
     # ── 発注 (POST) ──────────────────────────────────────────
     def _post_order(self, body: dict, label: str) -> dict:
@@ -407,12 +424,19 @@ class KabuClient:
             elif self.dry_run:
                 body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
             else:
-                self.cancel_open_close_orders(symbol, SIDE_BUY)
-                cp = self._build_close_positions(symbol, qty, SIDE_BUY)
-                if not cp:
+                try:
+                    self.cancel_open_close_orders(symbol, SIDE_BUY)
+                    cp = self._build_close_positions(symbol, qty, SIDE_BUY)
+                except Exception as e:
+                    # 建玉/注文取得が 429 等で失敗しても損切り(買戻し)は止めない。
+                    print(f"  ⚠ {symbol}: 建玉取得に失敗 ({e}) → ClosePositions 省略で発注続行")
+                    cp = None
+                if cp:
+                    body["ClosePositions"] = cp
+                elif cp is not None:
                     print(f"  ⚠ {symbol}: 返済対象の売建玉が見つかりません。発注をスキップします。")
                     return {"Result": -1, "Message": "建玉なし"}
-                body["ClosePositions"] = cp
+                # cp is None (取得失敗): ClosePositions を付けず自動割当てに任せる
 
         kind = ("信用返済(買戻)" if cash_margin == CASH_MARGIN_CLOSE
                 else "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物")
@@ -459,12 +483,21 @@ class KabuClient:
                 body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
             else:
                 # 既存の返済注文を取消して建玉を解放してから発注する
-                self.cancel_open_close_orders(symbol, SIDE_SELL)
-                cp = self._build_close_positions(symbol, qty, SIDE_SELL)
-                if not cp:
+                try:
+                    self.cancel_open_close_orders(symbol, SIDE_SELL)
+                    cp = self._build_close_positions(symbol, qty, SIDE_SELL)
+                except Exception as e:
+                    # 建玉/注文取得が 429 等で失敗しても損切りは止めない。
+                    # ClosePositions を省略して API の自動割当てに任せる。
+                    print(f"  ⚠ {symbol}: 建玉取得に失敗 ({e}) → ClosePositions 省略で発注続行")
+                    cp = None
+                if cp:
+                    body["ClosePositions"] = cp
+                elif cp is not None:
+                    # 取得は成功したが該当建玉ゼロ → 発注しても無駄
                     print(f"  ⚠ {symbol}: 返済対象の信用建玉が見つかりません。発注をスキップします。")
                     return {"Result": -1, "Message": "建玉なし"}
-                body["ClosePositions"] = cp
+                # cp is None (取得失敗): ClosePositions を付けず自動割当てに任せる
 
         kind = "信用返済" if cash_margin == CASH_MARGIN_CLOSE else "現物売"
         return self._post_order(body, f"{label} ({kind})")
