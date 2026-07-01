@@ -422,6 +422,7 @@ def _backfill_targets(cli) -> None:
         print(f"  ⚠ 利確補完: 建玉取得失敗のためスキップ ({e})")
         return
     agg: dict = {}
+    fillp: dict = {}   # (sym,side) -> 約定値 (30日照合フォールバック用)
     for p in positions or []:
         sym = str(p.get("Symbol", "")).split(".")[0]
         qty = int(p.get("LeavesQty") or p.get("HoldQty") or 0)
@@ -429,6 +430,9 @@ def _backfill_targets(cli) -> None:
             continue
         side = "long" if str(p.get("Side", "")) == "2" else "short"
         agg[(sym, side)] = agg.get((sym, side), 0) + qty
+        fp = float(p.get("Price") or 0)
+        if fp > 0:
+            fillp[(sym, side)] = fp
     if not agg:
         return
     targets = _load_signal_targets()
@@ -438,9 +442,20 @@ def _backfill_targets(cli) -> None:
             continue   # 既に利確あり
         info = targets.get((sym, side))
         if not info or info["target"] <= 0:
-            print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が signals/my_positions.csv に無し "
-                  f"→ 手動で利確を入れてください")
-            continue
+            # フォールバック: 保有タブと同じ『直近30営業日シグナル全戦略照合』で
+            # 約定値に一致する目標を導出 (古い保有=当日シグナルに無い銘柄をカバー)。
+            try:
+                from close_stop_guard import lookup_stop_from_signal
+                _s, _tgt, _strat = lookup_stop_from_signal(
+                    sym, fillp.get((sym, side), 0), side == "short")
+            except Exception:
+                _tgt, _strat = None, ""
+            if _tgt and _tgt > 0:
+                info = {"target": float(_tgt), "strategy": _strat or ""}
+            else:
+                print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が特定できません "
+                      f"(当日シグナル/my_positions.csv/30日照合すべて不一致) → 手動で利確を")
+                continue
         try:
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
                                          "target": info["target"], "strategy": info["strategy"]})
