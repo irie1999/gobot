@@ -1047,10 +1047,23 @@ def main() -> int:
         if args.post_close:
             return get_current_price_fallback(symbol)
         if cli is not None and args.execute:
-            price = cli.get_current_price(symbol)
-            if price is None:
-                price = get_current_price_fallback(symbol)
-            return price
+            # ★重要: 損切り判定のリアルタイム価格。429等で取れないと古い前日終値
+            # (yfinanceフォールバック)で「セーフ」と誤判定し損切りが効かなくなる。
+            # kabu現在値をバックオフ再試行で確実に取りにいく。
+            import time as _t
+            for _i in range(5):
+                try:
+                    price = cli.get_current_price(symbol)
+                except Exception:
+                    price = None
+                if price is not None and price > 0:
+                    return price
+                _t.sleep(1.5 * (_i + 1))   # 1.5/3.0/4.5/6.0/7.5s
+            # kabu が全滅 → yfinanceフォールバック(前日終値=遅延の可能性)。警告。
+            fb = get_current_price_fallback(symbol)
+            print(f"  ⚠ {symbol}: kabu現在値が5回取得失敗 → yfinance終値{('%.0f'%fb) if fb else 'なし'}"
+                  f"(遅延/前日値の可能性)で判定。損切り取りこぼしに注意")
+            return fb
         return get_current_price_fallback(symbol)
 
     # MAX_HOLD は戦略別 (RSI2=7, MOM=20, other=15)
@@ -1086,7 +1099,8 @@ def main() -> int:
 
         price = _get_price(pos["symbol"])
         if price is None:
-            print(f"  ? {pos['symbol']} {pos['name']}: 現在値取得不可 → スキップ")
+            print(f"  ⚠⚠ {pos['symbol']} {pos['name']}: 現在値取得不可(429等) "
+                  f"→ 損切り判定できず【無防備】。手動で価格・損切りを確認してください")
             continue
 
         # ── 利確判定 (target_price) ──
