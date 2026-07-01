@@ -1169,21 +1169,15 @@ def main() -> int:
         print(f"dry-run のため発注しません (成行)。実発注するには --execute を付けてください。")
         return 0
 
-    order_label = "成行(翌朝)" if args.post_close else "引け成行(MOC)"
+    order_label = "成行"
     print(f"{order_label} を {env_label} に発注します...")
-    print(f"  ※ タイムカットは分析結果(引け有利)に基づき、実行時刻に関わらず常に引け成行(MOC)で決済します")
     ok = 0
     for pos in breached:
-        # タイムカットは「引けで売る」方が有利(寄付vs引け比較で確認済み)。
-        # post-closeで実行されても翌引けMOCを使い、翌朝の寄り(MOO)は避ける。
-        is_timecut = pos.get("exit_reason") == "タイムカット"
-        use_moc = is_timecut or (not args.post_close)
-        if use_moc:
-            if send_moc_order(pos, cli):
-                ok += 1
-        else:
-            if send_moo_order(pos, cli):
-                ok += 1
+        # 損切り・利確・タイムカットとも通常成行(FrontOrderType=10)で即時決済する。
+        # ガードは引け前(14:50頃)に走るため通常成行でもほぼ引け値で約定し、
+        # 引け成行(MOC)特有の失効/エラーを避けられる。
+        if send_moo_order(pos, cli):
+            ok += 1
     print(f"\n発注完了: {ok}/{len(breached)} 件成功 ({order_label})")
     return 0
 
