@@ -532,16 +532,37 @@ class KabuClient:
         return self._post_order(body, f"引け成行 {symbol} x{qty} ({side})")
 
     def cancel_order(self, order_id: str) -> dict:
-        """注文取消。"""
+        """注文取消。
+
+        取消の失敗 (HTTP エラー / kabu エラーコード) は **例外を送出しない**。
+        既に State=4(訂正取消送信中) や終了(State=5) の注文を取消すと kabu が
+        エラーを返すが、これは「もう取消/終了している」だけで後続の損切り成行を
+        止める理由にはならない。呼び出し側 (cancel_open_close_orders → send_moc)
+        が続行できるよう、失敗時は Result!=0 の dict を返してログのみ出す。
+        """
         if self.dry_run:
             print(f"  [dry-run] 取消: {order_id}")
             return {"Result": 0, "_dry_run": True}
         url = f"{self.base_url}/kabusapi/cancelorder"
         body = {"OrderId": order_id, "Password": self._password}
-        r = requests.put(url, headers=self._headers(with_content=True),
-                         json=body, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = requests.put(url, headers=self._headers(with_content=True),
+                             json=body, timeout=self.timeout)
+        except Exception as e:
+            print(f"  ⚠ 取消 通信失敗 (続行): {order_id}: {e}")
+            return {"Result": -1, "_exception": str(e)}
+        try:
+            res = r.json()
+        except Exception:
+            res = {"_raw": r.text}
+        if not r.ok:
+            print(f"  ⚠ 取消 HTTP {r.status_code} (続行, 既に取消/終了済みの可能性): "
+                  f"{order_id}: {res}")
+            return {"Result": -1, "_http_status": r.status_code, **(
+                res if isinstance(res, dict) else {})}
+        if isinstance(res, dict) and res.get("Result") not in (0, None):
+            print(f"  ⚠ 取消 失敗 (続行): {order_id}: {res}")
+        return res if isinstance(res, dict) else {"Result": -1, "_raw": res}
 
 
 if __name__ == "__main__":
