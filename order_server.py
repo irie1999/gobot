@@ -186,7 +186,10 @@ def _has_active_close_order(cli, symbol: str, side: str) -> bool:
     except Exception:
         return False
     want = "1" if side == "long" else "2"
-    ACTIVE = {1, 2, 3, 4, 5}
+    # OrderState: 1待機/2処理中/3処理済/4訂正取消送信中/5終了(=約定・失効・取消)。
+    # 5(終了)は「有効な板上の注文」ではない。失効した利確を有効と誤判定すると
+    # 再発注されず建玉が無防備になるため、5は除外する。
+    ACTIVE = {1, 2, 3, 4}
     for o in orders:
         if str(o.get("Symbol", "")).split(".")[0] != symbol:
             continue
@@ -390,7 +393,9 @@ def _active_close_set(cli) -> set:
     except Exception as e:
         print(f"  ⚠ 利確補完: 注文一覧取得失敗 ({e}) → 重複チェックなしで続行")
         return out
-    ACTIVE = {1, 2, 3, 4, 5}
+    # 5(終了=約定・失効・取消)は有効注文でない。失効した利確を有効扱いすると
+    # 再発注されず無防備になるため除外 (値幅外で失効→翌日再発注が必要なケース対応)。
+    ACTIVE = {1, 2, 3, 4}
     for o in orders or []:
         if int(o.get("OrderState") or o.get("State") or 0) not in ACTIVE:
             continue
