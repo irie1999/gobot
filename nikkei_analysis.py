@@ -6729,8 +6729,8 @@ function switchTbd(id, tab) {{
     _stop_pattern_html_str = _stop_pattern_html(done_trades)
 
     # ── ⑧ 保有中の2回目以降シグナル成績分析 ────────────────────────────────
-    def _overlap_analysis_html(overlap_dropped):
-        """保有中に同一銘柄で発生した2回目以降のシグナルの成績分析。"""
+    def _overlap_analysis_html(overlap_dropped, uid=0):
+        """保有中に同一銘柄で発生した2回目以降のシグナルの成績分析(BTフィルタ付)。"""
         from datetime import date as _date2
         settled = [t for t in overlap_dropped
                    if t.get("reason") not in ("発注中", "保有中", None)
@@ -6813,85 +6813,111 @@ function switchTbd(id, tab) {{
                            f'<td style="text-align:right;color:#94a3b8;padding:3px 10px">{len(lst)}件</td>'
                            f'</tr>')
 
-        # 明細テーブル（BT70以上 直近25件）
-        detail_rows = ""
-        for t in sorted(bt70_settled, key=lambda x: x.get("exit_d_raw") or _date2.min, reverse=True)[:25]:
-            sym   = str(t.get("symbol","")).split(".")[0]
-            name  = t.get("name","")[:8]
-            strat = t.get("strategy","")
-            pnl   = t.get("pnl", 0)
-            reas  = t.get("reason","")
-            pc    = "#4ade80" if pnl > 0 else "#f87171"
-            if reas == "目標達成":
-                rc = '<span style="color:#4ade80">目標達成</span>'
-            elif reas == "損切り":
-                rc = '<span style="color:#f87171">損切り</span>'
-            elif reas == "タイムカット":
-                rc = f'<span style="color:{"#4ade80" if pnl > 0 else "#f87171"}">タイムカット</span>'
-            else:
-                rc = f'<span style="color:#94a3b8">{reas}</span>'
-            ep   = t.get("entry_p", 0)
-            xp   = t.get("exit_p", 0)
-            hold = t.get("hold_days", 0)
-            bt   = t.get("rec_score") or 0
-            bt_c = "#4ade80" if bt >= 70 else ("#facc15" if bt >= 60 else "#94a3b8")
-            detail_rows += (
-                f'<tr>'
-                f'<td style="color:#94a3b8;padding:3px 8px">{t.get("exit_dt","")}</td>'
-                f'<td style="text-align:left;padding:3px 8px;color:#e2e8f0">{sym} {name}</td>'
-                f'<td style="padding:3px 8px;color:#94a3b8">{strat}</td>'
-                f'<td style="text-align:right;padding:3px 8px;color:{bt_c}">BT:{bt}</td>'
-                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{ep:,.0f}→{xp:,.0f}</td>'
-                f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{hold}日</td>'
-                f'<td style="padding:3px 8px">{rc}</td>'
-                f'<td style="text-align:right;padding:3px 8px;color:{pc}">{pnl:+,.0f}円</td>'
-                f'</tr>'
+        # 明細テーブル行ビルダー（BTフィルタ後の任意リストに対応）
+        def _ov_detail_rows(lst):
+            rows = ""
+            for t in sorted(lst, key=lambda x: x.get("exit_d_raw") or _date2.min,
+                            reverse=True)[:30]:
+                sym   = str(t.get("symbol","")).split(".")[0]
+                name  = t.get("name","")[:8]
+                strat = t.get("strategy","")
+                pnl   = t.get("pnl", 0)
+                reas  = t.get("reason","")
+                pc    = "#4ade80" if pnl > 0 else "#f87171"
+                if reas == "目標達成":
+                    rc = '<span style="color:#4ade80">目標達成</span>'
+                elif reas == "損切り":
+                    rc = '<span style="color:#f87171">損切り</span>'
+                elif reas == "タイムカット":
+                    rc = f'<span style="color:{"#4ade80" if pnl > 0 else "#f87171"}">タイムカット</span>'
+                else:
+                    rc = f'<span style="color:#94a3b8">{reas}</span>'
+                ep   = t.get("entry_p", 0)
+                xp   = t.get("exit_p", 0)
+                hold = t.get("hold_days", 0)
+                bt   = t.get("rec_score") or 0
+                bt_c = "#4ade80" if bt >= 70 else ("#facc15" if bt >= 60 else "#94a3b8")
+                rows += (
+                    f'<tr>'
+                    f'<td style="color:#94a3b8;padding:3px 8px">{t.get("exit_dt","")}</td>'
+                    f'<td style="text-align:left;padding:3px 8px;color:#e2e8f0">{sym} {name}</td>'
+                    f'<td style="padding:3px 8px;color:#94a3b8">{strat}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:{bt_c}">BT:{bt}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{ep:,.0f}→{xp:,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">{hold}日</td>'
+                    f'<td style="padding:3px 8px">{rc}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:{pc}">{pnl:+,.0f}円</td>'
+                    f'</tr>'
+                )
+            return rows or ('<tr><td colspan="8" style="color:#475569;'
+                            'padding:8px;text-align:center">該当トレードなし</td></tr>')
+
+        # BTフィルタ: 全部 / BT60以上 / BT70以上 の3ブロック(KPI+明細)をJSトグル
+        _ov_filters = [
+            ("all",  "全部",     settled),
+            ("bt60", "BT60以上", [t for t in settled if (t.get("rec_score") or 0) >= 60]),
+            ("bt70", "BT70以上", bt70_settled),
+        ]
+
+        def _ov_kpi_and_detail(lst, key, active):
+            wr, pf_s, pnl, w, l, gp, gl = _band_kpi(lst)
+            n   = w + l
+            wrc = "#4ade80" if wr >= 55 else ("#facc15" if wr >= 45 else "#f87171")
+            pc  = "#4ade80" if pnl >= 0 else "#f87171"
+            disp = "block" if active else "none"
+            kpi = (
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'
+                f'<div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">'
+                f'<div style="color:{wrc};font-size:1.3rem;font-weight:700">{wr:.1f}%</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem">勝率 ({w}W/{l}L)</div></div>'
+                f'<div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">'
+                f'<div style="color:#e2e8f0;font-size:1.3rem;font-weight:700">{pf_s}</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem">PF</div></div>'
+                f'<div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">'
+                f'<div style="color:#4ade80;font-size:1.3rem;font-weight:700">+{gp:,.0f}円</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem">利益合計</div></div>'
+                f'<div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">'
+                f'<div style="color:#f87171;font-size:1.3rem;font-weight:700">-{gl:,.0f}円</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem">損失合計</div></div>'
+                f'<div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">'
+                f'<div style="color:{pc};font-size:1.3rem;font-weight:700">{pnl:+,.0f}円</div>'
+                f'<div style="color:#94a3b8;font-size:0.72rem">合計損益 ({n}件)</div></div>'
+                '</div>'
             )
+            det = (
+                '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">'
+                '<thead><tr>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">決済日</th>'
+                '<th style="text-align:left;color:#94a3b8;font-size:0.75rem;padding:3px 8px">銘柄</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">戦略</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">BT</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">約定→決済</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">保有</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">理由</th>'
+                '<th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">損益</th>'
+                f'</tr></thead><tbody>{_ov_detail_rows(lst)}</tbody></table>'
+                '<p class="footnote">明細は決済日降順・直近30件</p></div>'
+            )
+            return (f'<div id="ovblk_{uid}_{key}" style="display:{disp}">{kpi}{det}</div>')
 
-        bt70_wr_col  = "#4ade80" if bt70_wr >= 55 else ("#facc15" if bt70_wr >= 45 else "#f87171")
-        bt70_pnl_col = "#4ade80" if bt70_pnl >= 0 else "#f87171"
-        return f"""<h2 style="margin-top:24px">⑧ 保有中の2回目以降シグナル成績（{len(settled)}件）</h2>
+        _ov_btns = "".join(
+            f'<button class="ovbt-btn{" active" if k=="all" else ""}" '
+            f'id="ovbtn_{uid}_{k}" onclick="switchOvBt({uid},\'{k}\')">'
+            f'{lbl} <span style="font-size:0.72rem;color:#94a3b8">({len(lst)})</span></button>'
+            for k, lbl, lst in _ov_filters
+        )
+        _ov_blocks = "".join(
+            _ov_kpi_and_detail(lst, k, k == "all") for k, lbl, lst in _ov_filters
+        )
+
+        return f"""<h2 style="margin-top:24px">⑧ 重複保有シグナル成績（保有中の2回目以降 / {len(settled)}件）</h2>
 <p class="footnote">1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」を仮発注した場合の成績。<br>
-計測外だが参考として: 勝率・損益が1回目と同程度なら追加エントリーの根拠になる。</p>
+計測外だが参考として: 勝率・損益が1回目と同程度なら追加エントリー(同銘柄の複数保有)の根拠になる。</p>
 
-<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-start">
-<div>
-<p style="color:#94a3b8;font-size:0.75rem;margin:0 0 6px">全体（{len(settled)}件）</p>
-<div style="display:flex;gap:10px;flex-wrap:wrap">
-  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:{wr_col};font-size:1.3rem;font-weight:700">{win_rate:.1f}%</div>
-    <div style="color:#94a3b8;font-size:0.72rem">勝率 ({len(wins)}W/{len(losses)}L)</div>
-  </div>
-  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:#e2e8f0;font-size:1.3rem;font-weight:700">{pf_str}</div>
-    <div style="color:#94a3b8;font-size:0.72rem">PF</div>
-  </div>
-  <div style="background:#1e293b;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:{pnl_col};font-size:1.3rem;font-weight:700">{total_pnl:+,.0f}円</div>
-    <div style="color:#94a3b8;font-size:0.72rem">合計損益</div>
-  </div>
-</div>
-</div>
-<div>
-<p style="color:#4ade80;font-size:0.75rem;margin:0 0 6px">★ BT70以上のみ（{len(bt70_settled)}件）</p>
-<div style="display:flex;gap:10px;flex-wrap:wrap">
-  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:{bt70_wr_col};font-size:1.3rem;font-weight:700">{bt70_wr:.1f}%</div>
-    <div style="color:#94a3b8;font-size:0.72rem">勝率 ({bt70_w}W/{bt70_l}L)</div>
-  </div>
-  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:#e2e8f0;font-size:1.3rem;font-weight:700">{bt70_pf}</div>
-    <div style="color:#94a3b8;font-size:0.72rem">PF</div>
-  </div>
-  <div style="background:#0d2818;border:1px solid #166534;padding:8px 16px;border-radius:6px;text-align:center">
-    <div style="color:{bt70_pnl_col};font-size:1.3rem;font-weight:700">{bt70_pnl:+,.0f}円</div>
-    <div style="color:#94a3b8;font-size:0.72rem">合計損益</div>
-  </div>
-</div>
-</div>
-</div>
+<div class="detail-tab-nav" style="margin-bottom:12px">{_ov_btns}</div>
+{_ov_blocks}
 
-<div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:16px">
+<div style="display:flex;gap:32px;flex-wrap:wrap;margin-top:20px">
 <div>
 <p style="color:#94a3b8;font-size:0.78rem;margin-bottom:6px">BT帯別集計</p>
 <table style="border-collapse:collapse">
@@ -6921,25 +6947,9 @@ function switchTbd(id, tab) {{
   <tbody>{strat_rows}</tbody>
 </table>
 </div>
-<div style="overflow-x:auto">
-<p style="color:#4ade80;font-size:0.78rem;margin-bottom:6px">明細（BT70以上 直近25件）</p>
-<table style="border-collapse:collapse;font-size:0.82rem">
-  <thead><tr>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">決済日</th>
-    <th style="text-align:left;color:#94a3b8;font-size:0.75rem;padding:3px 8px">銘柄</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">戦略</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">BT</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">約定→決済</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">保有</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">理由</th>
-    <th style="color:#94a3b8;font-size:0.75rem;padding:3px 8px">損益</th>
-  </tr></thead>
-  <tbody>{detail_rows}</tbody>
-</table>
-</div>
 </div>"""
 
-    _overlap_html = _overlap_analysis_html(_overlap_dropped)
+    _overlap_html = ""  # _dseq 確定後に生成する（下記参照）
 
     # ── ⑨ エントリータイミング比較（2軸：注文保持期間 / エントリー遅延 / ローリング比較）──
     def _entry_timing_cmp_html(trades_list):
@@ -7735,6 +7745,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
+    # 重複保有分析は _dseq 確定後に生成（BTフィルタのDOM id一意化のため）
+    _overlap_html = _overlap_analysis_html(_overlap_dropped, _dseq)
+
     _preoos_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'preoos\')">⑩ シグナル時点BTスコア</button>'
     _maxhold_tab_btn = (
         f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'maxhold\')">⑪ 保有日数比較</button>\n'
@@ -7757,7 +7770,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'cross')">③ ④ BT×WF・高BT銘柄</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
-  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ ⑧ 損切り・追加</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'overlap')">⑧ 重複保有</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 {_preoos_tab_btn}
 {_maxhold_tab_btn}
@@ -7972,7 +7986,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
 <div id="analtab_{_dseq}_extra" class="analysis-tab-pane">
 {_stop_pattern_html_str}
-{_overlap_html}
+</div>
+
+<div id="analtab_{_dseq}_overlap" class="analysis-tab-pane">
+{_overlap_html if _overlap_html else '<p style="color:#64748b;padding:20px">重複保有(既保有中の同銘柄シグナル)の決済済みトレードが3件未満のため表示なし</p>'}
 </div>
 
 <div id="analtab_{_dseq}_timing" class="analysis-tab-pane">
@@ -8045,7 +8062,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','timing','preoos','maxhold','maxhold_cmp','pullback'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
@@ -8070,6 +8087,14 @@ function switchSumFilter(seq, mode) {{
   bt70Div.style.display = isAll ? 'none' : '';
   if (allBtn)  {{ allBtn.style.background  = isAll ? '#3b82f6' : '#1e293b'; allBtn.style.color  = isAll ? '#fff' : '#94a3b8'; allBtn.style.border  = isAll ? 'none' : '1px solid #334155'; }}
   if (bt70Btn) {{ bt70Btn.style.background = isAll ? '#1e293b' : '#3b82f6'; bt70Btn.style.color = isAll ? '#94a3b8' : '#fff'; bt70Btn.style.border = isAll ? '1px solid #334155' : 'none'; }}
+}}
+function switchOvBt(uid, key) {{
+  ['all','bt60','bt70'].forEach(function(k) {{
+    var blk = document.getElementById('ovblk_'+uid+'_'+k);
+    if (blk) blk.style.display = (k === key) ? 'block' : 'none';
+    var btn = document.getElementById('ovbtn_'+uid+'_'+k);
+    if (btn) btn.classList.toggle('active', k === key);
+  }});
 }}
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
@@ -8159,6 +8184,11 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
                   font-size:0.85rem; font-family:inherit; }
 .detail-tab-btn.active { background:#0d2818; color:#4ade80; border-color:#4ade80; font-weight:700; }
 .detail-tab-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
+.ovbt-btn { padding:6px 16px; background:#1e293b; border:1px solid #334155;
+            border-radius:6px; color:#94a3b8; cursor:pointer;
+            font-size:0.85rem; font-family:inherit; }
+.ovbt-btn.active { background:#1a1333; color:#a78bfa; border-color:#7c3aed; font-weight:700; }
+.ovbt-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
 .detail-tab-pane.active { display:block; overflow-x:auto; }
 
