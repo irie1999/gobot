@@ -47,6 +47,40 @@ _PNL_CONFIGS: list[dict] = []
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
+
+# トレンドフィルタ版(TF)は基底戦略の別名。凍結スコアは改名前(VOL/MACD)で
+# 記録されていることがあるため、照会時に両表記を試せるよう対応表を持つ。
+_TF_STRAT_ALIASES: dict[str, str] = {
+    "VOLTF": "VOL", "VOL": "VOLTF",
+    "MACDTF": "MACD", "MACD": "MACDTF",
+}
+
+
+def _lookup_signal_date_bt(sym: str, strat: str, sig_date_str: str | None):
+    """(sym, strat, signal_date) の発生時BTスコアを返す。
+    TF別名(VOLTF↔VOL / MACDTF↔MACD)でも探す。無ければ None。"""
+    if not sig_date_str:
+        return None
+    v = _SIGNAL_DATE_BT_SCORES.get((sym, strat, sig_date_str))
+    if v is not None:
+        return v
+    alt = _TF_STRAT_ALIASES.get(strat)
+    if alt is not None:
+        v = _SIGNAL_DATE_BT_SCORES.get((sym, alt, sig_date_str))
+        if v is not None:
+            return v
+    return None
+
+
+def _lookup_frozen_bt(sym: str, strat: str):
+    """(sym, strat) の凍結BTスコアを返す。TF別名でも探す。無ければ None。"""
+    v = _FROZEN_BT_SCORES.get((sym, strat))
+    if v is not None:
+        return v
+    alt = _TF_STRAT_ALIASES.get(strat)
+    if alt is not None:
+        return _FROZEN_BT_SCORES.get((sym, alt))
+    return None
 try:
     os.environ.setdefault("TRADING_MODE", "conservative")
     import check_signals_stop     as _stop
@@ -1655,7 +1689,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             # おすすめスコアは常に計算
             rec_score, rec_rank = _stop.calc_recommend_score(bt["period_results"])
             # 初回発信時スコアが凍結されていればそちらを使用 (BTスコアの日次変動を抑制)
-            _fz = _FROZEN_BT_SCORES.get((sym, strat))
+            _fz = _lookup_frozen_bt(sym, strat)
             if _fz is not None:
                 rec_score = _fz
                 rec_rank  = ("★★★" if _fz >= 80 else "★★" if _fz >= 60
@@ -4539,10 +4573,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 # signal_score_cache.json にある場合は発生時スコア固定、なければ今日のスコア
                 _sdt_for_key = t.get("signal_dt")
                 _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
-                _cache_key = (sym, strat, str(_sd_for_key)) if _sd_for_key else None
-                if _cache_key and _cache_key in _SIGNAL_DATE_BT_SCORES:
-                    _sig_sc = _SIGNAL_DATE_BT_SCORES[_cache_key]
-                else:
+                _sig_sc = _lookup_signal_date_bt(
+                    sym, strat, str(_sd_for_key) if _sd_for_key else None)
+                if _sig_sc is None:
                     _sig_sc = rec_score2
                 # signal_score からランクを決定
                 if _sig_sc >= 80: _sig_rank = "★★★"
