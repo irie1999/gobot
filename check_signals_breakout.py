@@ -44,7 +44,8 @@ from backtest_limit_entry import (
     calc_qty,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
-from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
+from scan_breakout_entry import (calc_donchian, calc_vol_breakout,
+                                 calc_vol_breakout_tf, calc_momentum)
 from compute_wf_scores import build_wf_scores, calc_wf_score, wf_rank
 
 JST     = timezone(timedelta(hours=9))
@@ -142,15 +143,17 @@ WATCHLIST: list[tuple[str, str, str]] = [
 # TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
 # デフォルトは conservative (現行踏襲)
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "DON": (calc_donchian,     0.0, 1.5, 3.0),
-    "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
-    "MOM": (calc_momentum,     0.0, 1.5, 3.0),
+    "DON":   (calc_donchian,       0.0, 1.5, 3.0),
+    "VOL":   (calc_vol_breakout,   0.0, 1.5, 3.0),
+    "VOLTF": (calc_vol_breakout_tf, 0.0, 1.5, 3.0),  # VOL+MA50 (falling knife除外)
+    "MOM":   (calc_momentum,       0.0, 1.5, 3.0),
 }
 # aggressive: sm=1.5/tm=2.0 (run_signals_prime.py / scan_walkforward と統一)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "DON": (calc_donchian,     0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
-    "VOL": (calc_vol_breakout, 0.0, 1.5, 2.0),
-    "MOM": (calc_momentum,     0.0, 1.5, 2.0),
+    "DON":   (calc_donchian,       0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
+    "VOL":   (calc_vol_breakout,   0.0, 1.5, 2.0),
+    "VOLTF": (calc_vol_breakout_tf, 0.0, 1.5, 2.0),
+    "MOM":   (calc_momentum,       0.0, 1.5, 2.0),
 }
 
 import os as _os

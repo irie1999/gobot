@@ -350,8 +350,11 @@ if _args.short:
     _STOP_STRATS = ["A7_S", "RSI2_S", "MACD_S"]      # ショート逆指値系
     _BRK_STRATS  = ["DON_S", "MOM_S", "GAP_S"]       # ショートBRK系
 else:
-    _STOP_STRATS = ["MACD", "A7", "RSI2"]
-    _BRK_STRATS  = ["DON", "VOL", "MOM"]
+    # VOL/MACD はトレンドフィルタ版(VOLTF/MACDTF, +MA50)を採用。
+    # WF比較(compare_filter_variants)で全12設定 PF↑・DD↓・PnL↑ を確認済み。
+    # falling knife(MA50割れ, 例:東洋エンジ)のシグナルを除外する。
+    _STOP_STRATS = ["MACDTF", "A7", "RSI2"]
+    _BRK_STRATS  = ["DON", "VOLTF", "MOM"]
 
 JST   = _JST_TZ
 TODAY = _report_date()
