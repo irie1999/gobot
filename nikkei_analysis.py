@@ -5279,6 +5279,49 @@ function switchTbd(id, tab) {{
     sum_rows      = _sum_rows_for(0)
     sum_rows_bt70 = _sum_rows_for(70)
 
+    # ── 戦略別サマリー (MACD/A7/RSI2/DON/VOL/MOM) 重複除外の実取引ベース ──
+    def _strat_sum_rows(min_bt: int) -> str:
+        from collections import defaultdict as _dd
+        g = _dd(list)
+        for t in kpi_trades:
+            if t.get("score", 0) >= min_bt:
+                g[t.get("strategy", "?")].append(t)
+        rows = ""
+        for strat in sorted(g, key=lambda s: -sum(x["pnl"] for x in g[s])):
+            tr = g[strat]; n = len(tr)
+            wins = sum(1 for t in tr if t["pnl"] > 0); losses = n - wins
+            gp = sum(t["pnl"] for t in tr if t["pnl"] > 0)
+            gl = abs(sum(t["pnl"] for t in tr if t["pnl"] < 0))
+            pnl = gp - gl
+            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+            wr = wins / n * 100 if n else 0.0
+            avgh = sum(t.get("hold_days", 0) for t in tr) / n if n else 0.0
+            avgw = gp / wins if wins else 0.0
+            avgl = -gl / losses if losses else 0.0
+            lpc = "profit" if pnl >= 0 else "loss"
+            rows += (f'<tr><td class="sym" style="text-align:left;font-weight:700">{strat}</td>'
+                     f'<td>{n}</td><td>{wins}</td><td>{wr:.1f}%</td><td>{pf_s}</td>'
+                     f'<td style="text-align:right">{avgh:.1f}日</td>'
+                     f'<td class="profit" style="text-align:right">+{gp:,.0f}円</td>'
+                     f'<td class="profit" style="text-align:right">+{avgw:,.0f}</td>'
+                     f'<td class="loss" style="text-align:right">-{gl:,.0f}円</td>'
+                     f'<td class="loss" style="text-align:right">{avgl:,.0f}</td>'
+                     f'<td class="{lpc}" style="text-align:right;font-weight:700">{pnl:+,.0f}円</td></tr>')
+        return rows or '<tr><td colspan="11" style="color:#64748b">該当なし</td></tr>'
+
+    def _strat_table(min_bt: int, title: str) -> str:
+        return (f'<h3 style="color:#93c5fd;margin:12px 0 4px;font-size:0.95rem">{title}</h3>'
+                '<table><thead><tr><th style="text-align:left">戦略</th>'
+                '<th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>平均保有</th>'
+                '<th style="color:#4ade80">利益</th><th style="color:#4ade80">平均利益</th>'
+                '<th style="color:#f87171">損失</th><th style="color:#f87171">平均損失</th>'
+                '<th>損益合計</th></tr></thead><tbody>'
+                f'{_strat_sum_rows(min_bt)}</tbody></table>')
+
+    strat_summary_html = (_strat_table(0, "戦略別サマリー（全件・重複除外の実取引ベース）")
+                          + _strat_table(70, "戦略別サマリー（BT70以上）"))
+
     # BT70フィルター合計行用
     _bt70_cfg = [t for t in _all_cfg if t.get("score", 0) >= 70]
     bt70_n   = len(_bt70_cfg); bt70_win = sum(1 for t in _bt70_cfg if t["pnl"] > 0)
@@ -7634,7 +7677,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
-<h2>スクリプト別サマリー</h2>
+<h2>戦略別サマリー</h2>
+{strat_summary_html}
+<h2 style="margin-top:20px">設定別サマリー（ホールドアウト×con/agg）</h2>
 <p style="font-size:0.75rem;color:#64748b;margin-bottom:10px">
   ※ 含み損保有 = 損失で終わったトレードの平均保有日数（最終PnL &lt; 0 の取引のみ対象）
 </p>
