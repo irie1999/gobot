@@ -5790,6 +5790,47 @@ function switchTbd(id, tab) {{
                            if t.get("reason") in ("発注中", "保有中")]
     display_trades = all_trades + _unsettled_overlaps
 
+    # ── 重複保有(計測外)シグナルの勝率サマリー ──────────────────────────────
+    # 1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」の決済済み成績を
+    # 取引明細の見出し直下に要約表示する(詳細は⑧タブ)。計測外だが「追加エントリー
+    # したらどうだったか」の参考値。
+    _ov_settled = [t for t in _overlap_dropped
+                   if t.get("reason") not in ("発注中", "保有中", None)
+                   and t.get("pnl") is not None]
+    if _ov_settled:
+        _ov_n   = len(_ov_settled)
+        _ov_win = sum(1 for t in _ov_settled if t["pnl"] > 0)
+        _ov_wr  = _ov_win / _ov_n * 100
+        _ov_gp  = sum(t["pnl"] for t in _ov_settled if t["pnl"] > 0)
+        _ov_gl  = abs(sum(t["pnl"] for t in _ov_settled if t["pnl"] < 0))
+        _ov_pnl = _ov_gp - _ov_gl
+        _ov_pf  = _ov_gp / _ov_gl if _ov_gl > 0 else float("inf")
+        _ov_pf_s = "∞" if _ov_pf == float("inf") else f"{_ov_pf:.2f}"
+        _ov_wr_c  = "#4ade80" if _ov_wr >= 55 else ("#facc15" if _ov_wr >= 45 else "#f87171")
+        _ov_pnl_c = "#4ade80" if _ov_pnl >= 0 else "#f87171"
+        _ov_pend  = len(_unsettled_overlaps)
+        _overlap_kpi_html = (
+            '<div style="background:#1a1333;border:1px solid #7c3aed;border-radius:8px;'
+            'padding:10px 14px;margin:6px 0 14px;font-size:0.82rem">'
+            '<span style="color:#a78bfa;font-weight:700">重複保有シグナル（計測外・参考）</span>'
+            '<span style="color:#64748b">：既に同銘柄を保有中に出た2回目以降のシグナルを'
+            '仮に取っていた場合の決済済み成績。KPI/月別には含みません。</span><br>'
+            f'<span style="color:#94a3b8">決済 </span><b>{_ov_n}件</b>'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">勝率 </span>'
+            f'<b style="color:{_ov_wr_c}">{_ov_wr:.1f}%</b>'
+            f'&nbsp;({_ov_win}W/{_ov_n - _ov_win}L)'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">PF </span><b>{_ov_pf_s}</b>'
+            f'&nbsp;/&nbsp;<span style="color:#4ade80">+{_ov_gp:,.0f}円</span>'
+            f'&nbsp;<span style="color:#f87171">-{_ov_gl:,.0f}円</span>'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">損益 </span>'
+            f'<b style="color:{_ov_pnl_c}">{_ov_pnl:+,.0f}円</b>'
+            + (f'&nbsp;<span style="color:#64748b">（未決済 {_ov_pend}件は下表に計測外表示）</span>'
+               if _ov_pend else "")
+            + '&nbsp;<span style="color:#64748b">詳細は⑧タブ</span></div>'
+        )
+    else:
+        _overlap_kpi_html = ""
+
     # 発注中を先頭に、それ以外は決済日降順
     pending_trades = [t for t in display_trades if t.get("reason") == "発注中"]
     done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
@@ -7959,6 +8000,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
+{_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
