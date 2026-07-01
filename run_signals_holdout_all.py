@@ -101,6 +101,9 @@ _pre.add_argument("--oos-days",  type=int, default=365,
                   help="OOS検証期間（日数）. デフォルト365日")
 _pre.add_argument("--max-holds", type=str, default=None,
                   help="比較する最大保有日数をカンマ区切りで指定 (例: 7,15,20). --bothと組み合わせて使用")
+_pre.add_argument("--recalc-analysis", action="store_true",
+                  help="保有期間比較・押し目買い比較など日々変わらない構造分析を強制再計算する "
+                       "(既定: 最新キャッシュを日付跨ぎで再利用。--force では再計算しない)")
 _pre.add_argument("--serve", action="store_true",
                   help="レポート生成後に発注サーバ(order_server.py)を起動する (既定dry-run)")
 _pre.add_argument("--serve-execute", action="store_true",
@@ -909,20 +912,48 @@ if _market_tab2_html:
     except Exception as _e2:
         print(f"[WARN] トレンド期間タブ損益列スキップ: {_e2}", flush=True)
 
-# ── 最大保有日数比較セクション（⑪⑫タブ）日付キャッシュ付き ──────────────────
+# ── 最大保有日数比較セクション（⑪⑫タブ）日付跨ぎキャッシュ付き ──────────────────
+# 保有期間比較・押し目買い比較は長期窓の構造分析で日々ほとんど変わらないため、
+# 日付が変わっても最新の既存キャッシュを再利用する (再計算しない)。
+# 強制再計算は --recalc-analysis のみ。--force(シグナル/HTML更新)では再計算しない。
 import pickle as _mhpk
 from pathlib import Path as _MHP
 _mh_cache_dir  = _MHP(".holdout_bt_cache")
 _mh_cache_dir.mkdir(exist_ok=True)
-_mh_cache_file = _mh_cache_dir / f"maxhold_cmp_{TODAY}.pkl"
-_mh_force      = getattr(_args, "force", False)
+# short/設定ごとに分けるため suffix (_cache_short = _short + 設定sig) を含める
+_ANALYSIS_STALE_DAYS = 30   # これより古い場合のみ自動リフレッシュ
 
-if _mh_cache_file.exists() and not _mh_force:
+def _latest_analysis_cache(prefix: str):
+    """prefix にマッチする最新キャッシュ(日付跨ぎ)を返す。
+    無い / _ANALYSIS_STALE_DAYS より古い / --recalc-analysis なら None。"""
+    if getattr(_args, "recalc_analysis", False):
+        return None
+    cands = sorted(_mh_cache_dir.glob(f"{prefix}_*.pkl"), reverse=True)
+    if not cands:
+        return None
+    newest = cands[0]
+    # ファイル名末尾の YYYY-MM-DD を取り出して鮮度判定
     try:
-        _mh_cached = _mhpk.loads(_mh_cache_file.read_bytes())
+        _dstr = newest.stem.rsplit("_", 1)[-1]
+        _fdate = datetime.strptime(_dstr, "%Y-%m-%d").date()
+        if (TODAY - _fdate).days > _ANALYSIS_STALE_DAYS:
+            print(f"[{prefix}] 最新キャッシュ {newest.name} が"
+                  f"{_ANALYSIS_STALE_DAYS}日超で古いため再計算", flush=True)
+            return None
+    except Exception:
+        pass
+    return newest
+
+_mh_prefix     = f"maxhold_cmp{_cache_short}"
+_mh_cache_file = _mh_cache_dir / f"{_mh_prefix}_{TODAY}.pkl"
+_mh_reuse      = _latest_analysis_cache(_mh_prefix)
+
+if _mh_reuse is not None:
+    try:
+        _mh_cached = _mhpk.loads(_mh_reuse.read_bytes())
         _mh_html     = _mh_cached.get("conservative", "")
         _mh_cmp_html = _mh_cached.get("con_agg", "")
-        print(f"[最大保有日数比較] キャッシュ使用: {_mh_cache_file.name}", flush=True)
+        print(f"[最大保有日数比較] キャッシュ再利用(日付跨ぎ可): {_mh_reuse.name}", flush=True)
     except Exception:
         _mh_html = _mh_cmp_html = None
 else:
@@ -954,13 +985,15 @@ _phase("最大保有日数比較完了")
 if not _args.short:
     _na._PNL_CONFIGS[:] = _all_configs
     _pb_list = [0.3, 0.5, 1.0]
-    _pb_cache_file = _mh_cache_dir / f"pullback_cmp_{TODAY}.pkl"
+    _pb_prefix = f"pullback_cmp{_cache_short}"
+    _pb_cache_file = _mh_cache_dir / f"{_pb_prefix}_{TODAY}.pkl"
     _pb_html = None
-    # 計算済みキャッシュがあれば再計算をスキップ (--force で再計算)
-    if _pb_cache_file.exists() and not _args.force:
+    # 日付跨ぎで最新キャッシュを再利用 (再計算は --recalc-analysis のみ)
+    _pb_reuse = _latest_analysis_cache(_pb_prefix)
+    if _pb_reuse is not None:
         try:
-            _pb_html = _mhpk.loads(_pb_cache_file.read_bytes()).get("html", "")
-            print(f"[押し目買い比較] キャッシュ使用: {_pb_cache_file.name}", flush=True)
+            _pb_html = _mhpk.loads(_pb_reuse.read_bytes()).get("html", "")
+            print(f"[押し目買い比較] キャッシュ再利用(日付跨ぎ可): {_pb_reuse.name}", flush=True)
         except Exception:
             _pb_html = None
     if _pb_html is None:
