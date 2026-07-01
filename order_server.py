@@ -196,35 +196,74 @@ def _has_active_close_order(cli, symbol: str, side: str) -> bool:
     return False
 
 
+# kabu が受け付けた最長の ExpireDay 営業日オフセットをキャッシュ (毎回の探索を避ける)
+_EXPIRE_OK_BDAYS: int | None = None
+
+
+def _expire_int(bdays: int) -> int:
+    """今日+bdays営業日 を YYYYMMDD int で返す (0=当日)。"""
+    if bdays <= 0:
+        return 0
+    import pandas as pd
+    try:
+        today = pd.Timestamp(datetime.now(JST).date())
+        return int((today + pd.tseries.offsets.BDay(bdays)).strftime("%Y%m%d"))
+    except Exception:
+        return 0
+
+
 def _place_target_now(cli, p: dict) -> str:
-    """約定後の利確指値を発注。重複は出さない。"""
+    """約定後の利確指値を発注。重複は出さない。
+    ExpireDay は「kabu が受け付ける最長」を自動採用する:
+      朝一に order_server を起動できなくても、前営業日に置いた利確指値が
+      board に残り、寄りの上昇でも約定できるようにするため。
+      希望(max_hold営業日)から順に短くして試し、Code5(有効期限エラー)なら
+      次の候補へ。通った最長をキャッシュして次回以降の再探索を省く。
+    """
+    global _EXPIRE_OK_BDAYS
     symbol, side, qty, target, strat = (p["symbol"], p["side"], p["qty"],
                                         p["target"], p["strategy"])
     if _has_active_close_order(cli, symbol, side):
         return "exists"
-    # 利確指値は ExpireDay=0(当日限り)。kabuは長期の有効期限を受け付けない
-    # (28営業日先などを送ると Code 5「正しい有効期限を設定してください」で弾かれる)。
-    # 複数日の保有カバーは order_server が接続時に毎回 _backfill_targets で
-    # 再発注することで担保する (§16 引け前ガードと同様に日次運用が前提)。
-    expire = 0
-    # 利確指値は値幅制限(ストップ高/安=指定可能な最大/最小値)を超えると kabu の
-    # 値段チェックで弾かれる(ERROR_CD_000_000_103)。上限超なら上限値にキャップ。
-    # 値幅が取得できない時(429等)は 3230 のような弾かれる値を送らずスキップする
-    # (送る→失敗→再試行 の 429 ストームを防ぐ)。
+    # 利確指値は値幅制限(ストップ高/安)超だと kabu の値段チェックで弾かれるので
+    # 上限にキャップ。取得失敗時(429等)は弾かれる値を送らずスキップ(ストーム防止)。
     price = _cap_to_price_limit(cli, symbol, side, target)
     if price is None:
         return "skip(値幅取得失敗→次回再試行)"
-    try:
+
+    from backtest_limit_entry import default_max_hold
+    mh = default_max_hold(strat)
+    if _EXPIRE_OK_BDAYS is not None:
+        # 既知の最長のみ試す (だめなら当日)
+        cand = [_EXPIRE_OK_BDAYS] + ([0] if _EXPIRE_OK_BDAYS != 0 else [])
+    else:
+        # 長い順に候補。kabuが受け付ける最長を探す
+        cand = [n for n in (mh, 10, 5, 4, 3, 2, 1, 0)]
+        _seen: set = set()
+        cand = [n for n in cand if not (n in _seen or _seen.add(n))]
+
+    def _send(expire):
         if side == "short":
-            res = cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
-                               cash_margin=3, expire_day=expire)   # 信用返済(買戻)
-        else:
-            cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
-            res = cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
-                                cash_margin=cm, expire_day=expire)
-    except Exception as e:
-        return f"fail({e})"
-    return "placed" if ((res.get("Result") == 0) or res.get("_dry_run")) else f"fail({res})"
+            return cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
+                                cash_margin=3, expire_day=expire)   # 信用返済(買戻)
+        cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
+        return cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
+                             cash_margin=cm, expire_day=expire)
+
+    res = None
+    for n in cand:
+        try:
+            res = _send(_expire_int(n))
+        except Exception as e:
+            return f"fail({e})"
+        if (res.get("Result") == 0) or res.get("_dry_run"):
+            _EXPIRE_OK_BDAYS = n   # 通った最長をキャッシュ
+            return f"placed(exp={n}営業日)"
+        # 有効期限エラー(Code5)なら短い候補へ。それ以外は即中断(スパム防止)
+        if res.get("Code") == 5 or "有効期限" in str(res.get("Message", "")):
+            continue
+        return f"fail({res})"
+    return f"fail({res})"
 
 
 # 東証 制限値幅テーブル: 基準値段(前日終値) → 片側の値幅
