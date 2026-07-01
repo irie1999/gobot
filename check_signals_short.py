@@ -104,6 +104,16 @@ def calc_macd_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_macd_short_tf(df: pd.DataFrame) -> pd.DataFrame:
+    """MACD_S のトレンドフィルタ版。MA10 だけでは上昇トレンド中の押し目を
+    デッドクロスで空売りしてしまう(踏み上げリスク)。終値 < MA50 を追加し、
+    既に中期下降基調にある銘柄の売りに限定する(買い側 MACDTF の裏返し)。"""
+    df = calc_macd_short(df)
+    ma50 = df["close"].rolling(50).mean()
+    df["entry_sig"] = df["entry_sig"] & (df["close"] < ma50)
+    return df
+
+
 def calc_a7_short(df: pd.DataFrame) -> pd.DataFrame:
     """ストキャス デッドクロス (買われすぎ圏から) 売りシグナル。"""
     df = df.copy()
@@ -162,11 +172,13 @@ STRATEGY_PARAMS_CONSERVATIVE = {
     "A7_S":   (calc_a7_short,   0.0, 1.5, 2.5),  # turnover最適(選定WL/365d): tm=2.5 (1日損益ピーク)
     "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 2.5),  # turnover最適(選定WL/365d): tm=2.5 (1.5→2.5で1日損益3.4倍)
     "MACD_S": (calc_macd_short, 0.0, 1.5, 2.0),  # turnover最適(選定WL/365d): tm=2.0 (1日損益ピーク)
+    "MACD_S_TF": (calc_macd_short_tf, 0.0, 1.5, 2.0),  # MACD_S + MA50下方フィルタ
 }
 STRATEGY_PARAMS_AGGRESSIVE = {
     "A7_S":   (calc_a7_short,   0.0, 1.5, 2.0),
     "RSI2_S": (calc_rsi2_short, 0.0, 1.5, 1.5),  # sweep最適: sm=1.5, tm=1.5
     "MACD_S": (calc_macd_short, 0.0, 1.5, 2.0),
+    "MACD_S_TF": (calc_macd_short_tf, 0.0, 1.5, 2.0),  # MACD_S + MA50下方フィルタ
 }
 
 import os as _os

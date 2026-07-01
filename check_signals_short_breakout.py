@@ -141,16 +141,29 @@ def calc_gap_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_gap_short_tf(df: pd.DataFrame) -> pd.DataFrame:
+    """GAP_S のトレンドフィルタ版。GAP_S はトレンドフィルタが無く、中期上昇
+    トレンド中の一時的なギャップダウンでも空売りしてしまう(踏み上げリスク)。
+    終値 < MA50 を追加し、既に下降基調にある銘柄の売りに限定する
+    (買い側 VOLTF の裏返し)。"""
+    df = calc_gap_short(df)
+    ma50 = df["close"].rolling(50).mean()
+    df["entry_sig"] = df["entry_sig"] & (df["close"] < ma50)
+    return df
+
+
 # ── プリセット切替 (TRADING_MODE: conservative / aggressive) ──────────────────
 STRATEGY_PARAMS_CONSERVATIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 3.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 3.0),
     "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5 (PF1.30)
+    "GAP_S_TF": (calc_gap_short_tf, 0.0, 2.0, 1.5),  # GAP_S + MA50下方フィルタ
 }
 STRATEGY_PARAMS_AGGRESSIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 2.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 2.0),
     "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5
+    "GAP_S_TF": (calc_gap_short_tf, 0.0, 2.0, 1.5),  # GAP_S + MA50下方フィルタ
 }
 
 import os as _os

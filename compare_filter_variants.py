@@ -23,7 +23,10 @@ from pathlib import Path
 JST = timezone(timedelta(hours=9))
 RESULTS = Path("walkforward_results")
 HOLDOUTS = [30, 60, 90, 120, 150, 180]
-PAIRS = [("VOL", "VOLTF"), ("MACD", "MACDTF")]
+PAIRS = [
+    ("VOL", "VOLTF"), ("MACD", "MACDTF"),            # ロング (買い)
+    ("MACD_S", "MACD_S_TF"), ("GAP_S", "GAP_S_TF"),  # ショート (売り)
+]
 MODES = [("", "con"), ("_aggressive", "agg")]
 
 
