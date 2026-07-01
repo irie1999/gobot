@@ -1032,9 +1032,18 @@ for days in _PNL_PERIODS:
 # _last_signals はシグナルタブ生成時に _na 側で設定される
 _signal_stocks: list[tuple] = []
 _seen_sym: set = set()
+# 銘柄 → 本日シグナルが出た戦略の集合 (銘柄詳細タブを「チップのBT=本日の戦略」に絞る)
+_sym_today_strats: dict[str, list[str]] = {}
 for _sig in _na._last_signals:
     _s = _sig.get("symbol", "")
-    if _s and _s not in _seen_sym:
+    if not _s:
+        continue
+    _st = _sig.get("strategy", "")
+    if _st:
+        _lst = _sym_today_strats.setdefault(_s, [])
+        if _st not in _lst:
+            _lst.append(_st)
+    if _s not in _seen_sym:
         _seen_sym.add(_s)
         _signal_stocks.append((_s, _sig.get("name", ""), _sig.get("rec_score") or 0))
 
@@ -1053,8 +1062,11 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
         f'</button>\n'
     )
     _na._PNL_CONFIGS[:] = _all_configs
-    print(f"銘柄詳細生成中: {_sym} {_sname}...", flush=True)
-    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym], skip_timing9=True)
+    # 本日シグナルが出た戦略(=チップのBT)だけに絞る。取引明細・KPIとも一致させる。
+    _today_strats = _sym_today_strats.get(_sym) or None
+    print(f"銘柄詳細生成中: {_sym} {_sname} (戦略={_today_strats or 'all'})...", flush=True)
+    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym],
+                                  strategy_filter=_today_strats, skip_timing9=True)
     _sym_tab_panes += (
         f'<div id="{_tid}" class="sym-tab-pane" style="display:{_display}">'
         f'{_sym_pnl}</div>\n'

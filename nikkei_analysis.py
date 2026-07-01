@@ -1831,10 +1831,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     win_ts.append(t)
         max_loss = min((t["pnl"] for t in loss_ts), default=0)
         max_win  = max((t["pnl"] for t in win_ts), default=0)
+        gross_win  = sum(t["pnl"] for t in win_ts)
+        gross_loss = abs(sum(t["pnl"] for t in loss_ts))
         items = [
             ("取引数",       f'{st["n"]}件',                            "#e2e8f0"),
             ("勝率",         f'{wr:.1f}%',                              wrc),
             ("PF",           pf_s,                                      pfc),
+            ("利益計",       f'+{gross_win:,.0f}円' if gross_win else "—",  "#4ade80"),
+            ("損失計",       f'-{gross_loss:,.0f}円' if gross_loss else "—","#f87171"),
             ("合計損益",     f'{st["pnl"]:+,.0f}円',                   "#4ade80" if st["pnl"]>=0 else "#f87171"),
             ("平均損益",     f'{avg:+,.0f}円',                          "#4ade80" if avg>=0 else "#f87171"),
             ("最大利益",     f'{max_win:+,.0f}円' if max_win else "—",  "#4ade80"),
@@ -4433,12 +4437,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
                    skip_timing9: bool = False,
-                   preoos_cutoff_days: int | None = None) -> str:
+                   preoos_cutoff_days: int | None = None,
+                   strategy_filter: list[str] | None = None) -> str:
     """タブ5: 直近N日 取引損益レポート。cfg_filter 指定時は対象configのみ表示。
     entry_days 指定時は「エントリー日が直近N日以内」の取引だけを取引明細に表示する。
     skip_timing9=True なら⑨Rolling/em比較をスキップ（期間フィルタタブ用に軽量化）。
     preoos_cutoff_days 指定時は「today-N日以前のデータのみ」でBTスコアを再計算し
-    OOS前BTスコア別成績タブを追加（メインBTスコアは変更しない）。"""
+    OOS前BTスコア別成績タブを追加（メインBTスコアは変更しない）。
+    strategy_filter 指定時はその戦略のみに絞る（銘柄詳細タブで「本日シグナルが
+    出た戦略=チップのBT」に一致する取引だけを表示するために使用）。"""
     if not _SIGNALS_AVAILABLE:
         return '<p style="color:#64748b;padding:20px">シグナルモジュールが見つかりません</p>'
 
@@ -4451,10 +4458,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # 同一セッション内で複数の days で呼ばれる場合、バックテスト自体は1回だけ実行する。
     # days の違いは後段のフィルタで対応するため再実行は不要。
     _sym_filter_key = tuple(sorted(symbol_filter)) if symbol_filter else None
+    _strat_filter_key = tuple(sorted(strategy_filter)) if strategy_filter else None
     _cfg_cache_key = (
         tuple((c["label"], c["mode"], str(c.get("sm_tm")),
                tuple(c.get("stop_wl", [])), tuple(c.get("brk_wl", []))) for c in _PNL_CONFIGS),
         _sym_filter_key,
+        _strat_filter_key,
     )
 
     if _cfg_cache_key not in _pnl_bt_cache:
@@ -4467,6 +4476,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             if symbol_filter:
                 _wl_stop = [(s, n, st) for s, n, st in _wl_stop if s in symbol_filter]
                 _wl_brk  = [(s, n, st) for s, n, st in _wl_brk  if s in symbol_filter]
+            if strategy_filter:
+                _wl_stop = [(s, n, st) for s, n, st in _wl_stop if st in strategy_filter]
+                _wl_brk  = [(s, n, st) for s, n, st in _wl_brk  if st in strategy_filter]
             items: list[dict] = []
             with _TPE(max_workers=workers) as ex:
                 futs = {}
@@ -5269,6 +5281,8 @@ function switchTbd(id, tab) {{
 <div class="kpi-grid" style="margin-bottom:8px">
   <div class="kpi"><div class="kpi-l">総取引数 ※</div><div class="kpi-v">{n_total}件</div></div>
   <div class="kpi"><div class="kpi-l">勝率</div><div class="kpi-v">{"—" if not n_total else f"{wr:.1f}%"}</div></div>
+  <div class="kpi"><div class="kpi-l">利益合計</div><div class="kpi-v profit">{"—" if not n_total else f"+{dedup_gp:,.0f}円"}</div></div>
+  <div class="kpi"><div class="kpi-l">損失合計</div><div class="kpi-v loss">{"—" if not n_total else f"-{dedup_gl:,.0f}円"}</div></div>
   <div class="kpi"><div class="kpi-l">合計損益</div><div class="kpi-v {pc}">{"—" if not n_total else f"{pnl_sum:+,.0f}円"}</div></div>
   <div class="kpi"><div class="kpi-l">勝ち/負け</div><div class="kpi-v">{n_win}W / {n_total - n_win}L</div></div>
 </div>
