@@ -315,17 +315,39 @@ def _cap_to_price_limit(cli, symbol: str, side: str, target: float):
     width = _tse_price_limit_width(float(base))
     upper = float(base) + width
     lower = float(base) - width
+
+    # 呼値(tick)に丸める。値幅上限/下限は端数だと kabu の値段チェック(トリガチェック
+    # エラー 4002004 / 呼値エラー)で弾かれるため、売りは切り捨て・買い戻しは切り上げで
+    # 必ず値幅内かつ呼値刻みに収める。通常の利確価格も同様に呼値へ丸める。
+    import math as _math
+    from backtest_limit_entry import tick_size as _tsz
+
+    def _floor_tick(p: float) -> int:
+        t = _tsz(float(p))
+        return int(p // t) * t
+
+    def _ceil_tick(p: float) -> int:
+        t = _tsz(float(p))
+        return int(_math.ceil(p / t)) * t
+
     if side == "short":
-        if target < lower:
+        # 買い戻し利確: 下限以上・呼値刻み(切り上げ)
+        capped = max(float(target), lower)
+        price = _ceil_tick(capped)
+        if price < lower:
+            price = _ceil_tick(lower)
+        if float(target) < lower:
             print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lower:,.0f}割れ "
-                  f"(前日終値{base:,.0f}-値幅{width:,.0f}) → 下限値で発注")
-            return lower
+                  f"(前日終値{base:,.0f}-値幅{width:,.0f}) → 下限{price:,d}で発注")
+        return price
     else:
-        if target > upper:
+        # 売り利確: 上限以下・呼値刻み(切り捨て)
+        capped = min(float(target), upper)
+        price = _floor_tick(capped)
+        if float(target) > upper:
             print(f"  ↗ {symbol} 利確{target:,.0f}が上限{upper:,.0f}超 "
-                  f"(前日終値{base:,.0f}+値幅{width:,.0f}) → 上限値で発注")
-            return upper
-    return target
+                  f"(前日終値{base:,.0f}+値幅{width:,.0f}) → 上限{price:,d}で発注")
+        return price
 
 
 def _kabu_get(fn, *a, tries=4, **k):
