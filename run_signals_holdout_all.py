@@ -1067,7 +1067,7 @@ _phase("寄り確認検証完了")
 
 # ── ⑮ 逆指値の約定率・約定タイミング (詳細分析タブ) 日付跨ぎキャッシュ ─────────────
 # em=0で約定挙動はcon/agg共通・5分足不要の軽いバックテスト。日付跨ぎ再利用。
-_ft_prefix    = f"filltimingv1{_cache_short}"
+_ft_prefix    = f"filltimingv2{_cache_short}"   # v2: BTフィルタ追加
 _ft_reuse     = _latest_analysis_cache(_ft_prefix)
 _ft_html = None
 if _ft_reuse is not None:

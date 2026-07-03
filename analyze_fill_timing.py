@@ -51,21 +51,26 @@ def _pairs(universe):
 
 
 def _one(mod, sym, name, strat, cutoff):
-    """1(銘柄,戦略): (signals, 約定明細[days_to_fill,signal_date,strategy]) を返す。"""
-    params = mod.STRATEGY_PARAMS.get(strat)
-    if not params:
-        return 0, []
-    calc_fn, em, sm, tm = params
-    df = fetch(sym, 400)
-    if df is None:
-        return 0, []
-    etype = getattr(mod, "ENTRY_TYPE", "stop")
-    r = run_limit_backtest(sym, name, df, calc_fn, em, sm, tm, 365, strat,
-                           entry_type=etype)
-    if not r:
-        return 0, []
+    """1(銘柄,戦略): (rec_score, signals, 約定明細[(days_to_fill,strategy),...]) を返す。
+    rec_score(BTスコア)はBTフィルタ用。約定挙動は em=0 で con/agg 共通。"""
+    try:
+        bt = mod.backtest_one(sym, name, strat)
+    except Exception:
+        return 0, 0, []
+    if not bt:
+        return 0, 0, []
+    pr = bt.get("period_results") or {}
+    if not pr:
+        return 0, 0, []
+    try:
+        rec, _ = mod.calc_recommend_score(pr)
+    except Exception:
+        rec = 0
+    maxp = max(pr.keys())
+    prm = pr[maxp]
+    signals = prm.get("signals", 0)
     fills = []
-    for t in r.get("trade_log", []):
+    for t in prm.get("trade_log", []):
         if t.get("reason") == "発注中":       # 未約定(まだ期限内)は約定にカウントしない
             continue
         sdt = t.get("signal_dt")
@@ -73,44 +78,29 @@ def _one(mod, sym, name, strat, cutoff):
         if cutoff and sd and sd < cutoff:
             continue
         fills.append((t.get("days_to_fill", 0), strat))
-    # signals も cutoff で正確に絞るのは難しいので、cutoff未指定時のみ signals を使う
-    return r.get("signals", 0), fills
+    return rec, signals, fills
 
 
 def _aggregate(pairs, cutoff, workers):
-    """(mod,sym,name,strat) を集計し (total_signals, dtf_all, by_strat_*) を返す。"""
-    from collections import defaultdict as _dd
-    total_signals = 0
-    dtf_all = _dd(int)
-    by_sig, by_fill, by_t1 = _dd(int), _dd(int), _dd(int)
-
-    def _acc(st, sig, fills):
-        nonlocal total_signals
-        total_signals += sig
-        by_sig[st] += sig
-        for dtf, s2 in fills:
-            dtf_all[dtf] += 1
-            by_fill[s2] += 1
-            if dtf == 1:
-                by_t1[s2] += 1
-
+    """(mod,sym,name,strat) を並列集計し records=[(rec_score,signals,fills,strat),...] を返す。"""
+    records = []
     if workers and workers > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(_one, m, s, n, st, cutoff): st for (m, s, n, st) in pairs}
             for fu in as_completed(futs):
-                sig, fills = fu.result()
-                _acc(futs[fu], sig, fills)
+                rec, sig, fills = fu.result()
+                records.append((rec, sig, fills, futs[fu]))
     else:
         for (m, s, n, st) in pairs:
-            sig, fills = _one(m, s, n, st, cutoff)
-            _acc(st, sig, fills)
-    return total_signals, dict(dtf_all), dict(by_sig), dict(by_fill), dict(by_t1)
+            rec, sig, fills = _one(m, s, n, st, cutoff)
+            records.append((rec, sig, fills, st))
+    return records
 
 
 def build_html(is_short: bool = False, workers: int = 4) -> str:
     """レポート詳細タブ用: 逆指値の約定率・約定タイミング・失効(未約定)の集計HTML。
-    em=0(トリガ=前日終値)で約定挙動は con/agg 共通のため1回のバックテストで足りる。"""
+    BTフィルタ(全部/BT60/BT70)付き。em=0(トリガ=前日終値)で約定挙動は con/agg 共通。"""
     if is_short:
         try:
             import check_signals_short as m1
@@ -130,69 +120,74 @@ def build_html(is_short: bool = False, workers: int = 4) -> str:
     if not pairs:
         return '<p style="color:#94a3b8;padding:16px">WATCHLISTが空です</p>'
 
-    total_signals, dtf_all, by_sig, by_fill, by_t1 = _aggregate(pairs, None, workers)
-    total_filled = sum(dtf_all.values())
-    expired = max(0, total_signals - total_filled)
+    records = _aggregate(pairs, None, workers)  # (rec_score, signals, fills, strat)
 
     def _c(v, base):
         return "#4ade80" if v >= base else "#f87171"
 
-    # 内訳バー行
-    def _row(label, n, note=""):
-        pct = n / total_signals * 100 if total_signals else 0
-        return (f'<tr><td style="padding:3px 12px">{label}</td>'
-                f'<td style="padding:3px 12px;text-align:right">{n:,}件</td>'
-                f'<td style="padding:3px 12px;text-align:right">{pct:.1f}%</td>'
-                f'<td style="padding:3px 12px;color:#94a3b8">{note}</td></tr>')
+    def _render_block(recs, key, active):
+        from collections import defaultdict as _dd
+        total_signals = sum(r[1] for r in recs)
+        dtf_all = _dd(int)
+        by_sig, by_fill, by_t1 = _dd(int), _dd(int), _dd(int)
+        for rec, sig, fills, strat in recs:
+            by_sig[strat] += sig
+            for dtf, s2 in fills:
+                dtf_all[dtf] += 1
+                by_fill[s2] += 1
+                if dtf == 1:
+                    by_t1[s2] += 1
+        total_filled = sum(dtf_all.values())
+        expired = max(0, total_signals - total_filled)
+        fill_pct = total_filled / total_signals * 100 if total_signals else 0
+        exp_pct = expired / total_signals * 100 if total_signals else 0
+        t1 = dtf_all.get(1, 0)
+        t1_pct = t1 / total_signals * 100 if total_signals else 0
 
-    rows = ""
-    for d in sorted(dtf_all):
-        lbl = {1: "翌日(T+1)約定", 2: "2日目(T+2)約定", 3: "3日目(T+3)約定"}.get(d, f"{d}日目約定")
-        rows += _row(lbl, dtf_all[d])
-    rows += _row("失効(未約定)", expired, "3営業日以内にトリガ未達=ブレイク不発/逆行")
+        def _row(label, n, note=""):
+            pct = n / total_signals * 100 if total_signals else 0
+            return (f'<tr><td style="padding:3px 12px">{label}</td>'
+                    f'<td style="padding:3px 12px;text-align:right">{n:,}件</td>'
+                    f'<td style="padding:3px 12px;text-align:right">{pct:.1f}%</td>'
+                    f'<td style="padding:3px 12px;color:#94a3b8">{note}</td></tr>')
 
-    fill_pct = total_filled / total_signals * 100 if total_signals else 0
-    exp_pct = expired / total_signals * 100 if total_signals else 0
-    t1 = dtf_all.get(1, 0)
-    t1_pct = t1 / total_signals * 100 if total_signals else 0
+        rows = ""
+        for d in sorted(dtf_all):
+            lbl = {1: "翌日(T+1)約定", 2: "2日目(T+2)約定", 3: "3日目(T+3)約定"}.get(d, f"{d}日目約定")
+            rows += _row(lbl, dtf_all[d])
+        rows += _row("失効(未約定)", expired, "3営業日以内にトリガ未達=ブレイク不発/逆行")
 
-    # 戦略別
-    strat_rows = ""
-    for st in sorted(by_fill, key=lambda s: -by_fill.get(s, 0)):
-        sig = by_sig.get(st, 0)
-        fil = by_fill.get(st, 0)
-        exp = max(0, sig - fil)
-        fr = fil / sig * 100 if sig else 0
-        er = exp / sig * 100 if sig else 0
-        t1r = by_t1.get(st, 0) / fil * 100 if fil else 0
-        strat_rows += (
-            f'<tr><td style="padding:3px 12px">{st}</td>'
-            f'<td style="padding:3px 12px;text-align:right">{sig:,}</td>'
-            f'<td style="padding:3px 12px;text-align:right">{fil:,}</td>'
-            f'<td style="padding:3px 12px;text-align:right">{exp:,}</td>'
-            f'<td style="padding:3px 12px;text-align:right;color:{_c(fr,50)}">{fr:.1f}%</td>'
-            f'<td style="padding:3px 12px;text-align:right;color:{_c(50,er)}">{er:.1f}%</td>'
-            f'<td style="padding:3px 12px;text-align:right;color:#94a3b8">{t1r:.1f}%</td></tr>'
-        )
-
-    return f"""<h2 style="margin-top:8px">⑮ 逆指値の約定率・約定タイミング</h2>
-<p class="footnote">{side_label}。シグナルが出た逆指値注文(有効期限3営業日)が、いつ約定するか/
-約定しないか(失効)を集計。em=0(トリガ=前日終値)のため con/agg 共通。WATCHLIST基準・直近365日。</p>
-
+        strat_rows = ""
+        for st in sorted(by_fill, key=lambda s: -by_fill.get(s, 0)):
+            sig = by_sig.get(st, 0)
+            fil = by_fill.get(st, 0)
+            exp = max(0, sig - fil)
+            fr = fil / sig * 100 if sig else 0
+            er = exp / sig * 100 if sig else 0
+            t1r = by_t1.get(st, 0) / fil * 100 if fil else 0
+            strat_rows += (
+                f'<tr><td style="padding:3px 12px">{st}</td>'
+                f'<td style="padding:3px 12px;text-align:right">{sig:,}</td>'
+                f'<td style="padding:3px 12px;text-align:right">{fil:,}</td>'
+                f'<td style="padding:3px 12px;text-align:right">{exp:,}</td>'
+                f'<td style="padding:3px 12px;text-align:right;color:{_c(fr,50)}">{fr:.1f}%</td>'
+                f'<td style="padding:3px 12px;text-align:right;color:{_c(50,er)}">{er:.1f}%</td>'
+                f'<td style="padding:3px 12px;text-align:right;color:#94a3b8">{t1r:.1f}%</td></tr>'
+            )
+        disp = "block" if active else "none"
+        return f"""<div id="ftblk_{key}" style="display:{disp}">
 <div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:inline-block">
   シグナル <b>{total_signals:,}</b> 件 &nbsp;/&nbsp;
   約定 <b style="color:#4ade80">{total_filled:,}件 ({fill_pct:.1f}%)</b> &nbsp;/&nbsp;
   失効 <b style="color:#f87171">{expired:,}件 ({exp_pct:.1f}%)</b> &nbsp;/&nbsp;
   うち翌日(T+1)約定 <b>{t1:,}件 ({t1_pct:.1f}%)</b>
 </div>
-
 <h3 style="margin:10px 0 4px;font-size:0.95rem">シグナル→約定 内訳 (全シグナル比)</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8"><th style="padding:3px 12px;text-align:left">区分</th>
 <th style="padding:3px 12px">件数</th><th style="padding:3px 12px">全シグナル比</th>
 <th style="padding:3px 12px;text-align:left">備考</th></tr></thead>
 <tbody>{rows}</tbody></table></div>
-
 <h3 style="margin:14px 0 4px;font-size:0.95rem">戦略別</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8"><th style="padding:3px 12px;text-align:left">戦略</th>
@@ -200,11 +195,40 @@ def build_html(is_short: bool = False, workers: int = 4) -> str:
 <th style="padding:3px 12px">失効</th><th style="padding:3px 12px">fill率</th>
 <th style="padding:3px 12px">失効率</th><th style="padding:3px 12px">翌日/約定</th></tr></thead>
 <tbody>{strat_rows}</tbody></table></div>
+</div>"""
 
+    bt_filters = [("all", "全部", lambda sc: True),
+                  ("bt60", "BT60以上", lambda sc: (sc or 0) >= 60),
+                  ("bt70", "BT70以上", lambda sc: (sc or 0) >= 70)]
+    btns = "".join(
+        f'<button class="ovbt-btn{" active" if k=="all" else ""}" id="ftbtn_{k}" '
+        f'onclick="switchFtBt(\'{k}\')">{lbl} '
+        f'<span style="font-size:0.72rem;color:#94a3b8">'
+        f'({sum(1 for r in records if f(r[0]))}銘柄戦略)</span></button>'
+        for k, lbl, f in bt_filters
+    )
+    blocks = "".join(
+        _render_block([r for r in records if f(r[0])], k, k == "all")
+        for k, lbl, f in bt_filters
+    )
+
+    return f"""<h2 style="margin-top:8px">⑮ 逆指値の約定率・約定タイミング</h2>
+<p class="footnote">{side_label}。シグナルが出た逆指値注文(有効期限3営業日)が、いつ約定するか/
+約定しないか(失効)を集計。em=0(トリガ=前日終値)のため con/agg 共通。WATCHLIST基準・直近365日。</p>
+<div class="detail-tab-nav" style="margin:10px 0">{btns}</div>
+{blocks}
 <p class="footnote" style="margin-top:10px">
 読み方: fill率=約定した割合。失効率=約定せず期限切れ(=ブレイク不発/逆行)。
 翌日/約定=約定のうちT+1に約定した割合(逆指値は寄り付きに集中しやすい)。<br>
-失効率が高い戦略はシグナルが空振りしやすい(発注コストは小さいが機会損失)。</p>"""
+失効率が高い戦略はシグナルが空振りしやすい(発注コストは小さいが機会損失)。</p>
+<script>
+function switchFtBt(key){{
+  ['all','bt60','bt70'].forEach(function(k){{
+    var b=document.getElementById('ftblk_'+k); if(b) b.style.display=(k===key)?'block':'none';
+    var t=document.getElementById('ftbtn_'+k); if(t) t.classList.toggle('active', k===key);
+  }});
+}}
+</script>"""
 
 
 def main():
@@ -259,7 +283,7 @@ def main():
                     for (m, s, n, st) in pairs}
             done = 0
             for fu in as_completed(futs):
-                sig, fills = fu.result()
+                _rec, sig, fills = fu.result()
                 _acc(sig, fills)
                 by_strat_sig[futs[fu]] += sig
                 done += 1
@@ -267,7 +291,7 @@ def main():
                     print(f"  ...{done}/{len(pairs)}", flush=True)
     else:
         for (m, s, n, st) in pairs:
-            sig, fills = _one(m, s, n, st, cutoff)
+            _rec, sig, fills = _one(m, s, n, st, cutoff)
             _acc(sig, fills)
             by_strat_sig[st] += sig
 
