@@ -164,6 +164,122 @@ def _one(mod, sym, name, strat, cutoff, times, minute_dir, is_short):
     return out
 
 
+def _fmt_hhmm(cm):
+    return f"09:{cm:02d}" if cm < 60 else f"{9 + cm // 60}:{cm % 60:02d}"
+
+
+def build_fair_html(is_short: bool = False, workers: int = 4,
+                    minute_dir=None, times=None) -> str:
+    """レポート⑭用: フェア版(後知恵なし)。全シグナル(約定+失効)を対象に
+    A(逆指値ブレイク) vs F(T+1各時刻に全成行) を比較。BTフィルタ付き。"""
+    if times is None:
+        times = _TIMES
+    if is_short:
+        import check_signals_short as m1
+        import check_signals_short_breakout as m2
+    else:
+        import check_signals_stop as m1
+        import check_signals_breakout as m2
+    mods = [m1, m2]
+    pairs = [(mod, sym, name, strat) for mod in mods
+             for sym, name, strat in getattr(mod, "WATCHLIST", [])]
+    if not pairs:
+        return ""
+
+    records = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = [ex.submit(_one, m, s, n, st, None, times, minute_dir, is_short)
+                for (m, s, n, st) in pairs]
+        for fu in as_completed(futs):
+            records.extend(fu.result() or [])
+    if not records:
+        return ('<h3 style="margin-top:14px">③ フェア版(後知恵なし)</h3>'
+                '<p style="color:#f87171;padding:8px">5分足が取得できず算出不可</p>')
+
+    def _c(v):
+        return "#4ade80" if v >= 0 else "#f87171"
+
+    def _block(recs, key, active):
+        n_sig = len(recs)
+        a_filled = [r for r in recs if r["a_pnl"] is not None]
+        a_total = sum(r["a_pnl"] for r in a_filled)
+        sweep = ""
+        best = None
+        for cm in times:
+            fr = [r for r in recs if cm in r["f_by"]]
+            if not fr:
+                continue
+            f_total = sum(r["f_by"][cm] for r in fr)
+            f_win = sum(1 for r in fr if r["f_by"][cm] > 0)
+            a_same = sum((r["a_pnl"] or 0) for r in fr)
+            vs = f_total - a_same
+            if best is None or vs > best[1]:
+                best = (cm, vs)
+            star = ' style="background:#0d2818"' if (best and cm == best[0]) else ""
+            sweep += (
+                f'<tr>'
+                f'<td style="padding:3px 10px;text-align:center">{_fmt_hhmm(cm)}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{len(fr)}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{f_win/len(fr)*100:.1f}%</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(f_total)}">{f_total:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_same:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(vs)};font-weight:700">{vs:+,.0f}円</td>'
+                f'</tr>'
+            )
+        # 最良は正しく再判定(★位置)
+        best = None
+        for cm in times:
+            fr = [r for r in recs if cm in r["f_by"]]
+            if not fr:
+                continue
+            vs = sum(r["f_by"][cm] for r in fr) - sum((r["a_pnl"] or 0) for r in fr)
+            if best is None or vs > best[1]:
+                best = (cm, vs)
+        verdict = ("❌ 全時刻でAに劣る→T+1成行は非推奨" if (best and best[1] <= 0)
+                   else f"✅ 最良{_fmt_hhmm(best[0])}でA比{best[1]:+,.0f}円(要フォワード)" if best else "-")
+        disp = "block" if active else "none"
+        return f"""<div id="ftrblk_{key}" style="display:{disp}">
+<div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:10px;display:inline-block">
+  全シグナル <b>{n_sig}</b>件 &nbsp;/&nbsp;
+  A(逆指値): 約定<b>{len(a_filled)}</b>件(fill率{len(a_filled)/n_sig*100:.0f}%) 損益 <b style="color:{_c(a_total)}">{a_total:+,.0f}円</b>
+  &nbsp;/&nbsp; 判定: <b>{verdict}</b>
+</div>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:#94a3b8">
+  <th style="padding:3px 10px">T+1時刻</th><th style="padding:3px 10px">F件</th>
+  <th style="padding:3px 10px">F勝率</th><th style="padding:3px 10px">F損益</th>
+  <th style="padding:3px 10px" title="Fが買えた同じ母集団をAで取った損益">A(同母集団)</th>
+  <th style="padding:3px 10px">vs A</th>
+</tr></thead><tbody>{sweep}</tbody></table></div></div>"""
+
+    filters = [("all", "全部", lambda s: True),
+               ("bt60", "BT60以上", lambda s: (s or 0) >= 60),
+               ("bt70", "BT70以上", lambda s: (s or 0) >= 70)]
+    btns = "".join(
+        f'<button class="ovbt-btn{" active" if k=="all" else ""}" id="ftrbtn_{k}" '
+        f'onclick="switchFtrBt(\'{k}\')">{lbl} '
+        f'<span style="font-size:0.72rem;color:#94a3b8">'
+        f'({sum(1 for r in records if f(r["rec_score"]))})</span></button>'
+        for k, lbl, f in filters)
+    blocks = "".join(_block([r for r in records if f(r["rec_score"])], k, k == "all")
+                     for k, lbl, f in filters)
+
+    return f"""<h3 style="margin:20px 0 4px;font-size:1.0rem;color:#60a5fa">③ フェア版(後知恵なし): 全シグナル(約定+失効)対象・T+1成行 vs 逆指値</h3>
+<p class="footnote">②は『Aが結局約定した分』だけで後知恵があった。③は<b>失効(不発)シグナルも含む全シグナル</b>を、
+T+1の各時刻に成行買い(F)して逆指値ブレイク(A)と比較。vs A がプラスなら本当にT+1成行が優位。</p>
+<div class="detail-tab-nav" style="margin:8px 0">{btns}</div>
+{blocks}
+<script>
+function switchFtrBt(key){{
+  ['all','bt60','bt70'].forEach(function(k){{
+    var b=document.getElementById('ftrblk_'+k); if(b) b.style.display=(k===key)?'block':'none';
+    var t=document.getElementById('ftrbtn_'+k); if(t) t.classList.toggle('active', k===key);
+  }});
+}}
+</script>"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sweep", default="0,15,30,45,60,90,120,150,180,240")

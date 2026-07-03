@@ -73,8 +73,10 @@ _pre.add_argument("--symbol",     type=str,   default=None,
                   help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
 _pre.add_argument("--short",      action="store_true",
                   help="ショート戦略(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S/VOL_S)で出力")
-_pre.add_argument("--force",      action="store_true",
-                  help="当日の生成済みHTMLがあっても無視して再生成する")
+_pre.add_argument("--force",      action="store_true", default=True,
+                  help="当日の生成済みHTMLがあっても無視して再生成する(既定ON)")
+_pre.add_argument("--no-force",    dest="force", action="store_false",
+                  help="当日キャッシュがあれば再生成しない")
 _pre.add_argument("--entry-days", type=int, default=None,
                   help="取引明細をエントリー日ベースで絞り込む日数 (例: 7=直近1週間エントリーのみ)")
 _pre.add_argument("--both",       action="store_true",
@@ -89,10 +91,14 @@ _pre.add_argument("--wf-until", type=str, default=None,
                   help="WF歴史検証の最新基準日 (YYYY-MM-DD). 省略時は6ヶ月前を自動設定")
 _pre.add_argument("--wf-periods", type=int, default=4,
                   help="WF歴史検証の期間数・6ヶ月間隔 (デフォルト: 4期間 = 約2年分). 0を指定するとスキップ")
-_pre.add_argument("--no-wf-history", action="store_true",
-                  help="WF歴史検証タブをスキップ（高速化）")
-_pre.add_argument("--no-preoos", action="store_true",
-                  help="OOS前BTスコア計算をスキップ（高速化）")
+_pre.add_argument("--no-wf-history", action="store_true", default=True,
+                  help="WF歴史検証タブをスキップ（高速化・既定ON）")
+_pre.add_argument("--wf-history", dest="no_wf_history", action="store_false",
+                  help="WF歴史検証タブを計算する")
+_pre.add_argument("--no-preoos", action="store_true", default=True,
+                  help="OOS前BTスコア計算をスキップ（高速化・既定ON）")
+_pre.add_argument("--preoos", dest="no_preoos", action="store_false",
+                  help="OOS前BTスコア計算を行う")
 _pre.add_argument("--wf-universe", type=str, default=None,
                   help="WF歴史検証で使うユニバースファイル (例: symbols_all.py=N225, symbols_listed_prime.py=プライム全体). デフォルト: 自動検出")
 _pre.add_argument("--oos-until", type=str, default=None,
@@ -1039,24 +1045,19 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv8_{_oc_src_tok}{_cache_short}"   # v8: 無条件成行(見送りなし)比較を追加
+_oc_prefix    = f"openconfirmv9_{_oc_src_tok}{_cache_short}"   # v9: ③フェア版を統合
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None
 if _oc_reuse is not None:
     try:
         _oc_html = _mhpk.loads(_oc_reuse.read_bytes()).get("html", "")
-        print(f"[寄り確認] キャッシュ再利用(日付跨ぎ可): {_oc_reuse.name}", flush=True)
+        print(f"[寄り確認] キャッシュ再利用(=2回目以降スキップ): {_oc_reuse.name}", flush=True)
     except Exception:
         _oc_html = None
-if _oc_html is None and not getattr(_args, "open_confirm", False):
-    # 重い(5分足)ので既定では計算しない。キャッシュも無ければ案内だけ表示。
-    _oc_html = ('<p style="color:#94a3b8;padding:16px">⑭ 寄り確認は重い分析のため既定で未計算です。'
-                '生成するには <code>--open-confirm</code> を付けて実行してください'
-                '(生成後はキャッシュされ、以降フラグ無しでも表示されます)。</p>')
-    print("[寄り確認] スキップ (--open-confirm 未指定・キャッシュ無し)", flush=True)
-elif _oc_html is None:
-    print(f"寄り確認エントリー検証中 (5分足源: {_oc_src_tok})...", flush=True)
+# キャッシュが無い場合のみ計算(=一度計算したら以降スキップ)。①②寄り確認 + ③フェア版。
+if _oc_html is None:
+    print(f"寄り確認+フェア版 検証中 (初回のみ・5分足源: {_oc_src_tok})...", flush=True)
     try:
         _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
                                   is_short=_args.short,
@@ -1065,10 +1066,19 @@ elif _oc_html is None:
         import traceback as _octb
         print(f"[寄り確認] 失敗: {_oce}\n{_octb.format_exc()}", flush=True)
         _oc_html = ""
+    # ③ フェア版(後知恵なし・全シグナル)を追記
+    try:
+        import analyze_fair_market_entry as _fair
+        _oc_html += _fair.build_fair_html(is_short=_args.short,
+                                          workers=_args.workers,
+                                          minute_dir=_args.minute_dir) or ""
+    except Exception as _fe:
+        import traceback as _fetb
+        print(f"[フェア版] 失敗: {_fe}\n{_fetb.format_exc()}", flush=True)
     if _oc_html:
         try:
             _oc_cache_file.write_bytes(_mhpk.dumps({"html": _oc_html}))
-            print(f"[寄り確認] キャッシュ保存: {_oc_cache_file.name}", flush=True)
+            print(f"[寄り確認] キャッシュ保存(以降スキップ): {_oc_cache_file.name}", flush=True)
         except Exception:
             pass
 if _oc_html:
@@ -1087,13 +1097,8 @@ if _ft_reuse is not None:
         print(f"[約定タイミング] キャッシュ再利用(日付跨ぎ可): {_ft_reuse.name}", flush=True)
     except Exception:
         _ft_html = None
-if _ft_html is None and not getattr(_args, "fill_timing", False):
-    _ft_html = ('<p style="color:#94a3b8;padding:16px">⑮ 約定タイミングは既定で未計算です。'
-                '生成するには <code>--fill-timing</code> を付けて実行してください'
-                '(生成後はキャッシュされ、以降フラグ無しでも表示されます)。</p>')
-    print("[約定タイミング] スキップ (--fill-timing 未指定・キャッシュ無し)", flush=True)
-elif _ft_html is None:
-    print("約定タイミング集計中...", flush=True)
+if _ft_html is None:
+    print("約定タイミング集計中 (初回のみ・以降スキップ)...", flush=True)
     try:
         import analyze_fill_timing as _ft
         _ft_html = _ft.build_html(is_short=_args.short, workers=_args.workers) or ""
