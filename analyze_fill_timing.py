@@ -153,35 +153,46 @@ def main():
               f"{total_signals - total_filled} 件 "
               f"({(total_signals - total_filled) / total_signals * 100:.1f}%)")
 
-    print("\n── 約定タイミング内訳 (約定した注文の中で) ──────────────")
+    expired = (total_signals - total_filled) if (total_signals and not cutoff) else None
+
+    print("\n── シグナル→約定 内訳 (シグナル全体を100%として) ──────────")
     for d in sorted(dtf_all):
-        label = {1: "翌日(T+1)", 2: "2日目(T+2)", 3: "3日目(T+3)"}.get(d, f"{d}日目")
+        label = {1: "翌日(T+1)約定", 2: "2日目(T+2)約定", 3: "3日目(T+3)約定"}.get(d, f"{d}日目約定")
         n = dtf_all[d]
         pct_fill = n / total_filled * 100 if total_filled else 0
         pct_sig = n / total_signals * 100 if total_signals and not cutoff else None
-        line = f"  {label:<10}: {n:>6}件  約定内{pct_fill:5.1f}%"
-        if pct_sig is not None:
-            line += f"  / シグナル全体の{pct_sig:5.1f}%"
+        line = f"  {label:<14}: {n:>6}件  (約定内{pct_fill:5.1f}%"
+        line += f" / 全シグナルの{pct_sig:5.1f}%)" if pct_sig is not None else ")"
         print(line)
+    if expired is not None:
+        print(f"  {'失効(未約定)':<14}: {expired:>6}件  "
+              f"(全シグナルの{expired / total_signals * 100:5.1f}%)  "
+              f"← 3営業日以内に前日終値超えに届かず=ブレイク不発/下落")
 
     _t1 = dtf_all.get(1, 0)
-    if total_filled:
-        print(f"\n★ 約定のうち『翌日(T+1)』が {_t1 / total_filled * 100:.1f}%"
-              + (f"、シグナル全体では {_t1 / total_signals * 100:.1f}% が翌日約定"
-                 if total_signals and not cutoff else ""))
+    if total_signals and not cutoff:
+        print(f"\n★ 全シグナルのうち: 翌日約定 {_t1 / total_signals * 100:.1f}% / "
+              f"約定計 {total_filled / total_signals * 100:.1f}% / "
+              f"失効 {expired / total_signals * 100:.1f}%")
 
-    print("\n── 戦略別 (fill率 / 翌日約定の割合) ──────────────────────")
-    print(f"  {'戦略':<8}{'シグナル':>8}{'約定':>7}{'fill率':>8}{'翌日約定':>8}{'翌日/約定':>9}")
+    print("\n── 戦略別 (fill率 / 失効率 / 翌日約定) ────────────────────")
+    print(f"  {'戦略':<8}{'シグナル':>8}{'約定':>7}{'失効':>7}{'fill率':>8}{'失効率':>8}{'翌日/約定':>9}")
     for st in sorted(by_strat_fill, key=lambda s: -by_strat_fill[s]):
         sig = by_strat_sig.get(st, 0)
         fil = by_strat_fill.get(st, 0)
         t1 = by_strat_t1.get(st, 0)
+        exp = (sig - fil) if (sig and not cutoff) else None
         fr = f"{fil / sig * 100:.1f}%" if sig and not cutoff else "-"
+        er = f"{exp / sig * 100:.1f}%" if exp is not None and sig else "-"
         t1r = f"{t1 / fil * 100:.1f}%" if fil else "-"
-        print(f"  {st:<8}{sig:>8}{fil:>7}{fr:>8}{t1:>8}{t1r:>9}")
+        exp_s = str(exp) if exp is not None else "-"
+        print(f"  {st:<8}{sig:>8}{fil:>7}{exp_s:>7}{fr:>8}{er:>8}{t1r:>9}")
 
-    print("\n読み方: fill率=シグナルのうち約定した割合。翌日約定=約定の中でT+1に約定した割合。")
-    print(f"        逆指値は前日終値超えで発火するため、寄り(T+1朝)で約定が集中しやすい。")
+    print("\n読み方:")
+    print("  ・fill率=シグナルのうち約定した割合。失効率=約定せず期限切れの割合(=不発/下落)。")
+    print("  ・翌日約定=約定の中でT+1に約定した割合。逆指値は前日終値超えで発火するため")
+    print("    寄り(T+1朝)に集中しやすい。")
+    print("  ・失効が多い戦略=シグナルが出ても伸びずに終わることが多い(空振りコスト小だが機会損失)。")
 
 
 if __name__ == "__main__":
