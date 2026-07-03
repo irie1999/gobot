@@ -598,10 +598,32 @@ def build_html(minute_dir: str | None = None, times=None,
                 f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_n - b_n}</td></tr>'
             )
         disp = "block" if active else "none"
+        # 判定: 全確認時刻がAに劣るなら「非推奨」。★は僅差の最大でノイズなので過信させない。
+        best_vs = best['bpnl'] - apnl
+        n_beat = sum(1 for r in results if (r['bpnl'] - apnl) > 0)
+        if best_vs <= 0:
+            verdict = (f'<div style="background:#3a1520;border:1px solid #f87171;border-radius:6px;'
+                       f'padding:8px 14px;margin-bottom:8px;color:#fca5a5;font-weight:600">'
+                       f'❌ 判定: 寄り確認は非推奨 — 全{len(results)}時刻でAに劣ります'
+                       f'(最良でもA比 {best_vs:+,.0f}円)。'
+                       f'<span style="color:#94a3b8;font-weight:400">★は僅差の最大でノイズ。'
+                       f'実行ごとに位置が変わるのは「最適時刻が無い＝どの時刻もダメ」の証拠です。</span></div>')
+        elif n_beat <= 2:
+            verdict = (f'<div style="background:#2a2410;border:1px solid #facc15;border-radius:6px;'
+                       f'padding:8px 14px;margin-bottom:8px;color:#fde68a;font-weight:600">'
+                       f'△ 判定: A超えは{len(results)}時刻中{n_beat}時刻のみ(僅差)。'
+                       f'<span style="color:#94a3b8;font-weight:400">過学習の可能性。'
+                       f'フォワードで確認するまで採用は保留推奨。</span></div>')
+        else:
+            verdict = (f'<div style="background:#0d2818;border:1px solid #4ade80;border-radius:6px;'
+                       f'padding:8px 14px;margin-bottom:8px;color:#86efac;font-weight:600">'
+                       f'✅ 判定: A超えが{len(results)}時刻中{n_beat}時刻。寄り確認が有効な可能性あり'
+                       f'(要フォワード確認)。</div>')
         return f"""<div id="ocblk_{key}" style="display:{disp}">
+{verdict}
 <div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:inline-block">
   A(現行 逆指値): <b>{an}件</b> 勝率{awr:.1f}% 損益 <b style="color:{_c(apnl)}">{apnl:+,.0f}円</b>
-  &nbsp;/&nbsp; ★最良の確認時刻 <b style="color:#4ade80">{_fmt_hhmm(best['confirm_min'])}</b>
+  &nbsp;/&nbsp; 参考: 僅差最大の確認時刻 <b style="color:#94a3b8">{_fmt_hhmm(best['confirm_min'])}</b>
   (寄り+{best['confirm_min']}分) 損益 <b style="color:{_c(best['bpnl'])}">{best['bpnl']:+,.0f}円</b>
   (A比 <b style="color:{_c(best['bpnl']-apnl)}">{best['bpnl']-apnl:+,.0f}円</b>)
 </div>
