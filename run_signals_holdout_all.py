@@ -931,7 +931,9 @@ def _latest_analysis_cache(prefix: str):
     無い / _ANALYSIS_STALE_DAYS より古い / --recalc-analysis なら None。"""
     if getattr(_args, "recalc_analysis", False):
         return None
-    cands = sorted(_mh_cache_dir.glob(f"{prefix}_*.pkl"), reverse=True)
+    # 日付(YYYY...)始まりのみに限定。prefix="openconfirm" が
+    # "openconfirm_short_*" を誤って拾う(ロングがショートのキャッシュを読む)のを防ぐ。
+    cands = sorted(_mh_cache_dir.glob(f"{prefix}_[0-9]*.pkl"), reverse=True)
     if not cands:
         return None
     newest = cands[0]
