@@ -1065,6 +1065,37 @@ if _oc_html:
         "<!-- OPENCONFIRM_SLOT -->", _oc_html, 1)
 _phase("寄り確認検証完了")
 
+# ── ⑮ 逆指値の約定率・約定タイミング (詳細分析タブ) 日付跨ぎキャッシュ ─────────────
+# em=0で約定挙動はcon/agg共通・5分足不要の軽いバックテスト。日付跨ぎ再利用。
+_ft_prefix    = f"filltimingv1{_cache_short}"
+_ft_reuse     = _latest_analysis_cache(_ft_prefix)
+_ft_html = None
+if _ft_reuse is not None:
+    try:
+        _ft_html = _mhpk.loads(_ft_reuse.read_bytes()).get("html", "")
+        print(f"[約定タイミング] キャッシュ再利用(日付跨ぎ可): {_ft_reuse.name}", flush=True)
+    except Exception:
+        _ft_html = None
+if _ft_html is None:
+    print("約定タイミング集計中...", flush=True)
+    try:
+        import analyze_fill_timing as _ft
+        _ft_html = _ft.build_html(is_short=_args.short, workers=_args.workers) or ""
+    except Exception as _fte:
+        import traceback as _fttb
+        print(f"[約定タイミング] 失敗: {_fte}\n{_fttb.format_exc()}", flush=True)
+        _ft_html = ""
+    if _ft_html:
+        try:
+            (_mh_cache_dir / f"{_ft_prefix}_{TODAY}.pkl").write_bytes(
+                _mhpk.dumps({"html": _ft_html}))
+        except Exception:
+            pass
+if _ft_html:
+    _all_period_html = _all_period_html.replace(
+        "<!-- FILLTIMING_SLOT -->", _ft_html, 1)
+_phase("約定タイミング集計完了")
+
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
