@@ -19,8 +19,51 @@ from pathlib import Path
 import pandas as pd
 
 from analyze_open_confirm_entry import (
-    locate_5m_dirs, _normalize_min, _yf_to_jq, _PKL_CACHE_FILE,
+    locate_5m_dirs, _normalize_min, _yf_to_jq, _jq_to_yf, _PKL_CACHE_FILE,
 )
+
+
+def _dir_symbols(d: Path) -> set:
+    """ディレクトリ内の pkl を yfinanceコード集合で返す(4桁普通株のみ)。"""
+    out = set()
+    for p in d.glob("*.pkl"):
+        yf = _jq_to_yf(p.stem)
+        base = yf.replace(".T", "")
+        if len(base) == 4 and base.isdigit():
+            out.add(yf)
+    return out
+
+
+def _watchlist_symbols() -> set:
+    """スイングWATCHLIST(ロング+ショート)の銘柄集合。"""
+    import importlib
+    syms = set()
+    for name in ("check_signals_stop", "check_signals_breakout",
+                 "check_signals_short", "check_signals_short_breakout"):
+        try:
+            m = importlib.import_module(name)
+            for s, n, st in getattr(m, "WATCHLIST", []):
+                syms.add(s)
+        except Exception:
+            pass
+    return syms
+
+
+def _universe_symbols() -> tuple[set, str]:
+    """プライム等のユニバース銘柄集合(あれば)。"""
+    import importlib
+    for name in ("symbols_listed_prime", "symbols_listed_all",
+                 "symbols_listed_standard", "symbols_all"):
+        try:
+            m = importlib.import_module(name)
+            for attr in ("SYMBOLS", "symbols", "TICKERS", "tickers"):
+                lst = getattr(m, attr, None)
+                if lst:
+                    return {str(x) if str(x).endswith(".T") else f"{x}.T"
+                            for x in lst}, name
+        except Exception:
+            pass
+    return set(), ""
 
 
 def _coverage(pkl_path: Path):
@@ -70,6 +113,43 @@ def main():
             elif cov:
                 print(f"   例 {p.stem}: 読込エラー ({cov[1]})")
         print()
+
+    # ── カバレッジ集計 ────────────────────────────────────────────────
+    q_syms, m_syms = set(), set()
+    for d in dirs:
+        if "quarantine" in d.name:
+            q_syms |= _dir_symbols(d)
+        elif "minute" in d.name:
+            m_syms |= _dir_symbols(d)
+    print("=" * 70)
+    print("カバレッジ集計")
+    print("=" * 70)
+    print(f"  quarantine_5m (jquants長期~2年): {len(q_syms):>5} 銘柄")
+    print(f"  minute_5m     (yfinance直近~60日): {len(m_syms):>5} 銘柄")
+    print(f"  どちらかにある合計            : {len(q_syms | m_syms):>5} 銘柄")
+    print(f"  長期のみ(quarantineのみ)      : {len(q_syms - m_syms):>5} 銘柄")
+    print(f"  直近のみ(minuteのみ・60日)    : {len(m_syms - q_syms):>5} 銘柄")
+
+    wl = _watchlist_symbols()
+    if wl:
+        wl_q = wl & q_syms
+        wl_any = wl & (q_syms | m_syms)
+        print(f"\n  ▼ スイングWATCHLIST {len(wl)}銘柄 のカバー:")
+        print(f"    長期(2年,jquants)あり : {len(wl_q):>4} 銘柄 ({len(wl_q)/len(wl)*100:.0f}%) ← ③フェア版を長期で見られる")
+        print(f"    直近60日のみ          : {len(wl_any - wl_q):>4} 銘柄")
+        print(f"    5分足なし             : {len(wl - wl_any):>4} 銘柄")
+        _miss = sorted(wl - wl_any)
+        if _miss:
+            print(f"    (なし例: {', '.join(_miss[:15])}{' ...' if len(_miss)>15 else ''})")
+
+    uni, uname = _universe_symbols()
+    if uni:
+        u_q = uni & q_syms
+        u_any = uni & (q_syms | m_syms)
+        print(f"\n  ▼ ユニバース {uname} {len(uni)}銘柄 のカバー:")
+        print(f"    長期(2年)あり : {len(u_q):>5} 銘柄 ({len(u_q)/len(uni)*100:.0f}%)")
+        print(f"    直近60日あり  : {len(u_any):>5} 銘柄 ({len(u_any)/len(uni)*100:.0f}%)")
+    print()
 
     if args.sample:
         jq = _yf_to_jq(args.sample)
