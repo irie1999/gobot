@@ -677,8 +677,13 @@ def main():
     print("=" * 82)
 
     trades = _collect_trades(args.days, universe=universe, workers=args.workers)
-    _scope = f"ユニバース{len(universe)}銘柄" if universe is not None else "WATCHLIST"
-    print(f"対象決済済みロング取引: {len(trades)}件 ({_scope}全戦略)")
+    _traded_syms = {t["symbol"] for t in trades}
+    if universe is not None:
+        print(f"探索母集団: {len(universe)}銘柄 → 直近{args.days}日に"
+              f"『取引があった銘柄』: {len(_traded_syms)}銘柄 / {len(trades)}件")
+    else:
+        print(f"対象決済済みロング取引: {len(trades)}件 "
+              f"(WATCHLIST {len(_traded_syms)}銘柄・直近{args.days}日)")
 
     # 各トレードについて、全候補時刻の株価をまとめて取得 (5分足は1回ロード)
     rows, no_data = [], 0
