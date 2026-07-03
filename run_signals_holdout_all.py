@@ -1023,7 +1023,16 @@ if not _args.short:
 # ── ⑭ 寄り後確認エントリー検証 (詳細分析タブ) 日付跨ぎキャッシュ ─────────────────
 # 5分足が必要な重い分析なので、構造分析扱いで日付跨ぎ再利用 (--recalc-analysis で再計算)。
 # ショートはロング専用のため即ノート表示。
-_oc_prefix    = f"openconfirmv3{_cache_short}"   # v3: BTフィルタ/診断/バグ修正版
+# データ源(yfinance / pkl何個)をキャッシュキーに含める → pkl検出時に自動で再計算
+# (yfinance時の古い結果を使い回さない)。
+import analyze_open_confirm_entry as _oc
+try:
+    _oc_dirs = [] if _args.short else _oc.locate_5m_dirs()
+except Exception:
+    _oc_dirs = []
+_oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
+               else ("short" if _args.short else "yf"))
+_oc_prefix    = f"openconfirmv3_{_oc_src_tok}{_cache_short}"   # v3: BTフィルタ/診断/データ源別
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None
@@ -1034,9 +1043,8 @@ if _oc_reuse is not None:
     except Exception:
         _oc_html = None
 if _oc_html is None:
-    print("寄り確認エントリー検証中 (5分足取得)...", flush=True)
+    print(f"寄り確認エントリー検証中 (5分足源: {_oc_src_tok})...", flush=True)
     try:
-        import analyze_open_confirm_entry as _oc
         _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
                                   is_short=_args.short) or ""
     except Exception as _oce:
