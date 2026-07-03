@@ -107,6 +107,11 @@ _pre.add_argument("--recalc-analysis", action="store_true",
 _pre.add_argument("--minute-dir", default=None,
                   help="⑭寄り確認タブ用の5分足CSVディレクトリ ({code}.csv)。"
                        "無指定はyfinance(約60日)")
+_pre.add_argument("--open-confirm", action="store_true",
+                  help="⑭寄り確認タブを計算する(5分足を読むので重い)。"
+                       "未指定でもキャッシュがあれば表示。既定OFFで日次レポートを軽量化")
+_pre.add_argument("--fill-timing", action="store_true",
+                  help="⑮約定タイミングタブを計算する。未指定でもキャッシュがあれば表示")
 _pre.add_argument("--serve", action="store_true",
                   help="レポート生成後に発注サーバ(order_server.py)を起動する (既定dry-run)")
 _pre.add_argument("--serve-execute", action="store_true",
@@ -1044,7 +1049,13 @@ if _oc_reuse is not None:
         print(f"[寄り確認] キャッシュ再利用(日付跨ぎ可): {_oc_reuse.name}", flush=True)
     except Exception:
         _oc_html = None
-if _oc_html is None:
+if _oc_html is None and not getattr(_args, "open_confirm", False):
+    # 重い(5分足)ので既定では計算しない。キャッシュも無ければ案内だけ表示。
+    _oc_html = ('<p style="color:#94a3b8;padding:16px">⑭ 寄り確認は重い分析のため既定で未計算です。'
+                '生成するには <code>--open-confirm</code> を付けて実行してください'
+                '(生成後はキャッシュされ、以降フラグ無しでも表示されます)。</p>')
+    print("[寄り確認] スキップ (--open-confirm 未指定・キャッシュ無し)", flush=True)
+elif _oc_html is None:
     print(f"寄り確認エントリー検証中 (5分足源: {_oc_src_tok})...", flush=True)
     try:
         _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
@@ -1076,7 +1087,12 @@ if _ft_reuse is not None:
         print(f"[約定タイミング] キャッシュ再利用(日付跨ぎ可): {_ft_reuse.name}", flush=True)
     except Exception:
         _ft_html = None
-if _ft_html is None:
+if _ft_html is None and not getattr(_args, "fill_timing", False):
+    _ft_html = ('<p style="color:#94a3b8;padding:16px">⑮ 約定タイミングは既定で未計算です。'
+                '生成するには <code>--fill-timing</code> を付けて実行してください'
+                '(生成後はキャッシュされ、以降フラグ無しでも表示されます)。</p>')
+    print("[約定タイミング] スキップ (--fill-timing 未指定・キャッシュ無し)", flush=True)
+elif _ft_html is None:
     print("約定タイミング集計中...", flush=True)
     try:
         import analyze_fill_timing as _ft
