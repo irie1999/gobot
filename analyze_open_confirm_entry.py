@@ -164,6 +164,30 @@ def _yf_to_jq(symbol: str) -> str:
     return code + "0" if (len(code) == 4 and code.isdigit()) else code
 
 
+def _jq_to_yf(jq_code: str) -> str:
+    """72030 → 7203.T (pklファイル名 → yfinanceコード)。"""
+    code = str(jq_code).strip()
+    if len(code) == 5 and code.isdigit():
+        return code[:4] + ".T"
+    return code if code.endswith(".T") else code + ".T"
+
+
+def universe_from_pkl() -> list[str]:
+    """5分足pklが存在する全銘柄(yfinanceコード)を列挙。= 5分足で検証可能な全銘柄。"""
+    syms = set()
+    for d in _pkl_dirs():
+        try:
+            for p in Path(d).glob("*.pkl"):
+                yf = _jq_to_yf(p.stem)
+                # 4桁+.T の普通株のみ (ETF/指数等の5桁以上は除外)
+                base = yf.replace(".T", "")
+                if len(base) == 4 and base.isdigit():
+                    syms.add(yf)
+        except Exception:
+            pass
+    return sorted(syms)
+
+
 def _normalize_min(raw: pd.DataFrame) -> pd.DataFrame | None:
     """デイトレpkl等の分足を open/high/low/close・naive JST index に正規化。"""
     if raw is None or getattr(raw, "empty", True):
@@ -302,44 +326,75 @@ def _price_at(symbol: str, day, confirm_min: int, minute_dir: str | None):
 
 
 # ── 対象トレード収集 ─────────────────────────────────────────────────────────
-def _collect_trades(days: int):
-    """スイングWATCHLIST全戦略をバックテストし、決済済みロング取引を返す。
-    各取引に BTスコア(rec_score) を付与する(BTフィルタ用)。"""
+def _one_symbol_trades(mod, sym, name, strat, cutoff):
+    """1 (銘柄,戦略) のバックテスト → 直近cutoff以降の決済済みロング取引リスト。"""
+    try:
+        bt = mod.backtest_one(sym, name, strat)
+    except Exception:
+        return []
+    if not bt:
+        return []
+    pr = bt.get("period_results") or {}
+    if not pr:
+        return []
+    try:
+        rec_score, _ = mod.calc_recommend_score(pr)
+    except Exception:
+        rec_score = 0
+    maxp = max(pr.keys())
+    res = []
+    for t in pr[maxp].get("trade_log", []):
+        if t.get("reason") in ("発注中", "保有中"):
+            continue
+        edt = t.get("entry_dt")
+        if edt is None:
+            continue
+        edate = edt.date() if hasattr(edt, "date") else edt
+        if edate < cutoff:
+            continue
+        res.append(dict(
+            symbol=sym, name=name, strategy=strat,
+            entry_dt=edt, entry_p=t["entry_p"], exit_p=t["exit_p"],
+            trigger=t.get("order_limit"), qty=t.get("qty", FIXED_QTY),
+            reason=t.get("reason", ""), pnl_a=t["pnl"], rec_score=rec_score,
+        ))
+    return res
+
+
+def _collect_trades(days: int, universe: list[str] | None = None,
+                    workers: int = 1):
+    """決済済みロング取引を収集し BTスコア(rec_score)を付与する。
+    universe=None → スイングWATCHLIST。
+    universe=銘柄リスト → その全銘柄 × 全戦略(逆指値系+ブレイク系)を対象。"""
     cutoff = datetime.now(JST).date() - timedelta(days=days)
+    # (mod, sym, name, strat) ペアを構築
+    pairs = []
+    if universe is None:
+        for mod in (_stop, _brk):
+            for sym, name, strat in getattr(mod, "WATCHLIST", []):
+                pairs.append((mod, sym, sym, strat))
+    else:
+        for sym in universe:
+            for strat in getattr(_stop, "STRATEGY_PARAMS", {}):
+                pairs.append((_stop, sym, sym, strat))
+            for strat in getattr(_brk, "STRATEGY_PARAMS", {}):
+                pairs.append((_brk, sym, sym, strat))
+
     out = []
-    for mod in (_stop, _brk):
-        wl = getattr(mod, "WATCHLIST", [])
-        for sym, name, strat in wl:
-            try:
-                bt = mod.backtest_one(sym, name, strat)
-            except Exception:
-                continue
-            if not bt:
-                continue
-            pr = bt.get("period_results") or {}
-            if not pr:
-                continue
-            try:
-                rec_score, _ = mod.calc_recommend_score(pr)
-            except Exception:
-                rec_score = 0
-            maxp = max(pr.keys())
-            for t in pr[maxp].get("trade_log", []):
-                if t.get("reason") in ("発注中", "保有中"):
-                    continue
-                edt = t.get("entry_dt")
-                if edt is None:
-                    continue
-                edate = edt.date() if hasattr(edt, "date") else edt
-                if edate < cutoff:
-                    continue
-                out.append(dict(
-                    symbol=sym, name=name, strategy=strat,
-                    entry_dt=edt, entry_p=t["entry_p"], exit_p=t["exit_p"],
-                    trigger=t.get("order_limit"), qty=t.get("qty", FIXED_QTY),
-                    reason=t.get("reason", ""), pnl_a=t["pnl"],
-                    rec_score=rec_score,
-                ))
+    if workers and workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(_one_symbol_trades, m, s, n, st, cutoff)
+                    for (m, s, n, st) in pairs]
+            done = 0
+            for fu in as_completed(futs):
+                out.extend(fu.result() or [])
+                done += 1
+                if done % 200 == 0:
+                    print(f"  ...収集 {done}/{len(pairs)} 済", flush=True)
+    else:
+        for (m, s, n, st) in pairs:
+            out.extend(_one_symbol_trades(m, s, n, st, cutoff) or [])
     return out
 
 
@@ -589,6 +644,12 @@ def main():
                     help="5分足CSVディレクトリ ({code}.csv)。無指定はyfinance(60日)")
     ap.add_argument("--days", type=int, default=400,
                     help="対象トレードのエントリー日を直近何日に絞るか (既定400=ほぼ全期間)")
+    ap.add_argument("--all-minute", action="store_true",
+                    help="WATCHLISTでなく『5分足がある全銘柄』を対象にする(ユニバース検証)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="--all-minute 時、先頭N銘柄だけ(デバッグ/時短)")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="--all-minute 時の並列数")
     ap.add_argument("--aggressive", action="store_true")
     args = ap.parse_args()
 
@@ -598,14 +659,26 @@ def main():
         times = [int(x) for x in args.sweep.split(",") if x.strip() != ""]
 
     mode = os.environ.get("TRADING_MODE", "conservative")
+    # ユニバース決定
+    universe = None
+    if args.all_minute:
+        universe = universe_from_pkl()
+        if args.limit and args.limit > 0:
+            universe = universe[:args.limit]
+
     print("=" * 82)
     print(f"寄り後 確認エントリー検証(最適時刻スイープ)  mode={mode}  "
           f"margin={args.margin_pct}%")
-    print(f"確認時刻(分): {times}   5分足={'CSV:'+args.minute_dir if args.minute_dir else 'yfinance(60日)'}")
+    print(f"確認時刻(分): {times}   5分足={'CSV:'+args.minute_dir if args.minute_dir else 'pkl自動/yfinance'}")
+    if universe is not None:
+        print(f"対象ユニバース: 5分足がある全銘柄 {len(universe)}銘柄 × 全戦略 "
+              f"(直近{args.days}日, workers={args.workers})")
+        print("  ※ 銘柄数が多いと時間がかかります(--limit で時短可)")
     print("=" * 82)
 
-    trades = _collect_trades(args.days)
-    print(f"対象決済済みロング取引: {len(trades)}件 (WATCHLIST全戦略)")
+    trades = _collect_trades(args.days, universe=universe, workers=args.workers)
+    _scope = f"ユニバース{len(universe)}銘柄" if universe is not None else "WATCHLIST"
+    print(f"対象決済済みロング取引: {len(trades)}件 ({_scope}全戦略)")
 
     # 各トレードについて、全候補時刻の株価をまとめて取得 (5分足は1回ロード)
     rows, no_data = [], 0
