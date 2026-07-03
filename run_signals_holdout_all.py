@@ -1032,7 +1032,7 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv3_{_oc_src_tok}{_cache_short}"   # v3: BTフィルタ/診断/データ源別
+_oc_prefix    = f"openconfirmv4_{_oc_src_tok}{_cache_short}"   # v4: 対象期間表示追加
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None

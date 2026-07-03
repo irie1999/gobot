@@ -604,11 +604,26 @@ def build_html(minute_dir: str | None = None, times=None,
         for k, lbl, f in bt_filters
     )
 
+    # 実際の取引(約定日)の期間レンジ
+    def _d(x):
+        return x.date() if hasattr(x, "date") else x
+    _edts = [_d(r["entry_dt"]) for r in rows if r.get("entry_dt") is not None]
+    n_syms = len({r["symbol"] for r in rows})
+    if _edts:
+        _dmin, _dmax = min(_edts), max(_edts)
+        _range = f"{_dmin}〜{_dmax} (約{(_dmax - _dmin).days}日 / {n_syms}銘柄)"
+    else:
+        _range = "-"
+
     return f"""<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証（最適時刻スイープ）</h2>
 <p class="footnote">
 逆指値ブレイク買い(A=現行)と「寄り(09:00)後N分に前日終値=トリガ超えを確認して買う」(B)を実5分足で比較。<br>
-損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。
-対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件) &nbsp; source={src} &nbsp; margin={margin_pct}%</p>
+損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。<br>
+<b>対象期間(約定日): {_range}</b> &nbsp;/&nbsp; 対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件)
+&nbsp; source={src} &nbsp; margin={margin_pct}%<br>
+<span style="color:#fbbf24">※ これはWATCHLIST銘柄・直近{days}日窓の集計です(市場全体ではありません)。
+市場全体で60日に取引があった全銘柄を見るには
+<code>python analyze_open_confirm_entry.py --all-minute --days 60</code> を実行。</span></p>
 {diag_html}
 <div class="detail-tab-nav" style="margin:10px 0">{btns}</div>
 {blocks}
