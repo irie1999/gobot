@@ -120,11 +120,11 @@ def _normalize_min(raw: pd.DataFrame) -> pd.DataFrame | None:
     return out.dropna(subset=["close"]).sort_index()
 
 
-def _load_local_pkl(symbol: str) -> pd.DataFrame | None:
-    """data/minute_5m + quarantine_5m の pkl を読み・マージして返す。"""
+def _load_local_pkl(symbol: str, extra_dirs=()) -> pd.DataFrame | None:
+    """data/minute_5m + quarantine_5m (+ extra_dirs) の pkl を読み・マージして返す。"""
     jq = _yf_to_jq(symbol)
     frames = []
-    for d in _PKL_DIRS:
+    for d in list(extra_dirs) + list(_PKL_DIRS):
         p = Path(d) / f"{jq}.pkl"
         if p.exists():
             try:
@@ -164,9 +164,9 @@ def _load_minute(symbol: str, minute_dir: str | None) -> pd.DataFrame | None:
                 except Exception as e:
                     print(f"  ⚠ {symbol}: CSV読込失敗 {e}")
                 break
-    # 2) デイトレpkl 自動検出 (data/minute_5m + quarantine_5m)
+    # 2) pkl: --minute-dir 指定ディレクトリ + data/minute_5m + quarantine_5m を自動検出
     if df is None:
-        df = _load_local_pkl(symbol)
+        df = _load_local_pkl(symbol, extra_dirs=((minute_dir,) if minute_dir else ()))
     # 3) yfinance フォールバック
     if df is None:
         try:
