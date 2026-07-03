@@ -118,15 +118,27 @@ _pre.add_argument("--open-confirm", action="store_true",
                        "未指定でもキャッシュがあれば表示。既定OFFで日次レポートを軽量化")
 _pre.add_argument("--fill-timing", action="store_true",
                   help="⑮約定タイミングタブを計算する。未指定でもキャッシュがあれば表示")
-_pre.add_argument("--serve", action="store_true",
-                  help="レポート生成後に発注サーバ(order_server.py)を起動する (既定dry-run)")
-_pre.add_argument("--serve-execute", action="store_true",
-                  help="--serve 時に実発注で起動する")
-_pre.add_argument("--serve-prod", action="store_true",
-                  help="--serve 時に本番口座(18080)で起動する")
+_pre.add_argument("--serve", action="store_true", default=True,
+                  help="レポート生成後に発注サーバ(order_server.py)を起動する (既定ON)")
+_pre.add_argument("--serve-execute", action="store_true", default=True,
+                  help="--serve 時に実発注で起動する (既定ON)")
+_pre.add_argument("--serve-prod", action="store_true", default=True,
+                  help="--serve 時に本番口座(18080)で起動する (既定ON)")
 _pre.add_argument("--serve-genbutsu", action="store_true",
                   help="--serve 時にロングを現物で起動する (未指定なら信用新規)")
+# ── 安全解除フラグ (既定=本番自動発注ON のため、止める/デモにする手段を用意) ──
+_pre.add_argument("--no-serve", dest="serve", action="store_false",
+                  help="発注サーバを起動しない(レポート生成のみ)")
+_pre.add_argument("--demo", action="store_true",
+                  help="デモ口座(18081)・実発注で起動 (本番=18080 を回避)")
+_pre.add_argument("--dry", action="store_true",
+                  help="発注サーバを dry-run で起動 (実発注しない)")
 _args, _ = _pre.parse_known_args()
+# --demo / --dry の反映
+if getattr(_args, "demo", False):
+    _args.serve_prod = False
+if getattr(_args, "dry", False):
+    _args.serve_execute = False
 
 
 def _maybe_serve_orders():
@@ -144,8 +156,16 @@ def _maybe_serve_orders():
         _cmd.append("--prod")
     if _args.serve_genbutsu:
         _cmd.append("--genbutsu")
+    _is_prod_live = _args.serve_execute and _args.serve_prod
     print("\n" + "=" * 65)
-    print("発注サーバを起動します（レポートの🚀発注ボタンの送信先）")
+    if _is_prod_live:
+        print("⚠⚠⚠  本番口座(18080)・実発注モードで発注サーバを起動します  ⚠⚠⚠")
+        print("⚠  接続時に本番の自動発注(利確補完など)が走ります。誤発注に注意。")
+        print("⚠  止める: --no-serve / デモ: --demo / 実発注しない: --dry")
+    else:
+        _lbl = ("デモ(18081)" if not _args.serve_prod else "本番(18080)")
+        _ex = "実発注" if _args.serve_execute else "dry-run(発注なし)"
+        print(f"発注サーバを起動します（{_lbl} / {_ex}）")
     print("  " + " ".join(_cmd))
     print("  停止するには Ctrl+C")
     print("=" * 65)
@@ -200,6 +220,8 @@ if _args.both and not _args.short:
     if "--force" not in _base_cargs_no_price:
         _base_cargs_no_price.append("--force")
     _base_cargs_no_price.append("--no-browser")
+    # serve は既定ONのため、サブプロセスでは必ず無効化(発注サーバは親が最後に1回だけ起動)
+    _base_cargs_no_price.append("--no-serve")
 
     # 各価格範囲 × ロング/ショートを生成（逐次実行でメモリ使用を抑える）
     # --max-holds はサブプロセスに渡り、損益タブ内の比較セクションとして生成される
@@ -1584,4 +1606,7 @@ print(f"\nレポート生成完了: {out_path.resolve()}")
 if not _args.no_browser:
     from _open_html import open_html
     open_html(out_path.resolve())
+
+# 単独(非--both)実行でも発注サーバを起動 (--no-serve で無効・既定ON)
+_maybe_serve_orders()
 
