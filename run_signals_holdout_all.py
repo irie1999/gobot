@@ -1034,7 +1034,7 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv5_{_oc_src_tok}{_cache_short}"   # v5: 損益タブと同じ取引セット(全設定)
+_oc_prefix    = f"openconfirmv6_{_oc_src_tok}{_cache_short}"   # v6: 生値統一+スケール異常ガード
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None

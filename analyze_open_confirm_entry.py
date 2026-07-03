@@ -207,8 +207,11 @@ def _normalize_min(raw: pd.DataFrame) -> pd.DataFrame | None:
     ren = {"O": "Open", "H": "High", "L": "Low", "C": "Close"}
     df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
     cols = None
-    for c in [("AdjustmentOpen", "AdjustmentHigh", "AdjustmentLow", "AdjustmentClose"),
-              ("Open", "High", "Low", "Close"), ("open", "high", "low", "close")]:
+    # 日足トリガは auto_adjust=False(=生値)。5分足も生値を優先し、スケールを一致させる。
+    # Adjustment*(調整値)を先に選ぶと quarantine(jquants)領域で日足と桁ズレし建値差が
+    # 異常値になる(過去バグ)。生値(open/Open)が無い時のみ調整値にフォールバック。
+    for c in [("open", "high", "low", "close"), ("Open", "High", "Low", "Close"),
+              ("AdjustmentOpen", "AdjustmentHigh", "AdjustmentLow", "AdjustmentClose")]:
         if all(x in df.columns for x in c):
             cols = c
             break
@@ -485,7 +488,9 @@ def build_html(minute_dir: str | None = None, times=None,
         pm = {}
         for cm in times:
             p = _price_at(t["symbol"], t["entry_dt"], cm, minute_dir)
-            if p is not None:
+            # 安全ガード: 5分足価格がトリガ(前日終値)から±35%超はスケール不一致/
+            # データ破損の疑い → 採用しない(建値差の異常値混入を防ぐ)
+            if p is not None and 0.65 * trig <= p <= 1.35 * trig:
                 pm[cm] = p
         if not pm:
             no_data += 1
@@ -736,7 +741,7 @@ def main():
         pm = {}
         for cm in times:
             p = _price_at(t["symbol"], t["entry_dt"], cm, args.minute_dir)
-            if p is not None:
+            if p is not None and 0.65 * trig <= p <= 1.35 * trig:
                 pm[cm] = p
         if not pm:
             no_data += 1
