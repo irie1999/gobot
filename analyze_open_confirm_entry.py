@@ -220,28 +220,28 @@ def _price_at(symbol: str, day, confirm_min: int, minute_dir: str | None):
 
 # ── 対象トレード収集 ─────────────────────────────────────────────────────────
 def _collect_trades(days: int):
-    """スイングWATCHLIST全戦略をバックテストし、決済済みロング取引を返す。"""
-    fams = [
-        (_stop, getattr(_stop, "WATCHLIST", []), _stop.STRATEGY_PARAMS,
-         getattr(_stop, "ENTRY_TYPE", "stop")),
-        (_brk, getattr(_brk, "WATCHLIST", []), _brk.STRATEGY_PARAMS,
-         getattr(_brk, "ENTRY_TYPE", "stop")),
-    ]
+    """スイングWATCHLIST全戦略をバックテストし、決済済みロング取引を返す。
+    各取引に BTスコア(rec_score) を付与する(BTフィルタ用)。"""
     cutoff = datetime.now(JST).date() - timedelta(days=days)
     out = []
-    for mod, wl, params, etype in fams:
+    for mod in (_stop, _brk):
+        wl = getattr(mod, "WATCHLIST", [])
         for sym, name, strat in wl:
-            if strat not in params:
+            try:
+                bt = mod.backtest_one(sym, name, strat)
+            except Exception:
                 continue
-            calc_fn, em, sm, tm = params[strat]
-            df = fetch(sym, 400)
-            if df is None:
+            if not bt:
                 continue
-            r = run_limit_backtest(sym, name, df, calc_fn, em, sm, tm,
-                                   365, strat, entry_type=etype)
-            if not r:
+            pr = bt.get("period_results") or {}
+            if not pr:
                 continue
-            for t in r.get("trade_log", []):
+            try:
+                rec_score, _ = mod.calc_recommend_score(pr)
+            except Exception:
+                rec_score = 0
+            maxp = max(pr.keys())
+            for t in pr[maxp].get("trade_log", []):
                 if t.get("reason") in ("発注中", "保有中"):
                     continue
                 edt = t.get("entry_dt")
@@ -255,6 +255,7 @@ def _collect_trades(days: int):
                     entry_dt=edt, entry_p=t["entry_p"], exit_p=t["exit_p"],
                     trigger=t.get("order_limit"), qty=t.get("qty", FIXED_QTY),
                     reason=t.get("reason", ""), pnl_a=t["pnl"],
+                    rec_score=rec_score,
                 ))
     return out
 
@@ -338,64 +339,102 @@ def build_html(minute_dir: str | None = None, times=None,
                 f'(source={src})。<br>ローカルで <code>--minute-dir</code> にデイトレ5分足を'
                 f'指定するか、yfinance導入・直近60日での実行をお試しください。</p>')
 
-    an, awr, apnl = _stat(rows, "pnl_a")
-    results = [_eval_time(rows, cm, margin_pct) for cm in times]
-    best = max(results, key=lambda r: r["bpnl"])
+    # 一意キーを付与 (戦略別テーブルの取引照合用。id()はコピーで壊れるため)
+    for _i, r in enumerate(rows):
+        r["_key"] = _i
 
-    def _c(v):  # 損益の色
+    def _c(v):
         return "#4ade80" if v >= 0 else "#f87171"
 
-    sweep_rows = ""
-    for r in results:
-        vs = r["bpnl"] - apnl
-        is_best = (r["confirm_min"] == best["confirm_min"])
-        star = ' style="background:#0d2818"' if is_best else ""
-        sweep_rows += (
-            f'<tr{star}>'
-            f'<td style="padding:3px 10px;text-align:center">{_fmt_hhmm(r["confirm_min"])}'
-            f'{" ★" if is_best else ""}</td>'
-            f'<td style="padding:3px 10px;text-align:right">{r["bn"]}</td>'
-            f'<td style="padding:3px 10px;text-align:right">{r["bwr"]:.1f}%</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:{_c(r["bpnl"])}">{r["bpnl"]:+,.0f}円</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:{_c(vs)};font-weight:700">{vs:+,.0f}円</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["sn"]}</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:{_c(r["spnl"])}">{r["spnl"]:+,.0f}円</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["prem"]:+.0f}</td>'
-            f'</tr>'
-        )
+    # ── 5分足データ検証(診断) ──────────────────────────────────────────────
+    diag = []
+    syms = sorted({r["symbol"] for r in rows})
+    for sym in syms[:200]:
+        d = _MIN_CACHE.get(sym)
+        if d is None or getattr(d, "empty", True):
+            continue
+        try:
+            days_span = f"{d.index.min().date()}〜{d.index.max().date()}"
+            per_day = d.groupby(d.index.date).size()
+            diag.append((sym, len(d), days_span, int(per_day.median())))
+        except Exception:
+            pass
+    diag_rows = "".join(
+        f'<tr><td style="padding:2px 8px">{s}</td>'
+        f'<td style="padding:2px 8px;text-align:right">{n:,}</td>'
+        f'<td style="padding:2px 8px">{span}</td>'
+        f'<td style="padding:2px 8px;text-align:right">{md}</td></tr>'
+        for s, n, span, md in diag[:40]
+    )
+    diag_html = (
+        '<details style="margin:8px 0"><summary style="cursor:pointer;color:#93c5fd">'
+        f'▶ 5分足データ検証 ({len(diag)}銘柄が実際にロードされた・クリックで明細)</summary>'
+        '<p class="footnote">1日あたり中央値バー数が概ね 50前後(9:00-15:00を5分刻み=約60本)'
+        'なら正常。極端に少ない/多い・期間が飛んでいる銘柄はデータ破損の疑い。</p>'
+        '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.8rem">'
+        '<thead><tr style="color:#94a3b8"><th style="padding:2px 8px">銘柄</th>'
+        '<th style="padding:2px 8px">総バー</th><th style="padding:2px 8px">期間</th>'
+        '<th style="padding:2px 8px">日中央値バー数</th></tr></thead>'
+        f'<tbody>{diag_rows}</tbody></table></div></details>'
+    )
 
-    # 最良時刻の戦略別
-    taken_by = {id(x): x for x in best["taken"]}
-    strat_rows = ""
-    for s in sorted({r["strategy"] for r in rows}):
-        rs = [r for r in rows if r["strategy"] == s]
-        ts = [taken_by[id(r)] for r in rs if id(r) in taken_by]
-        a_n, a_wr, a_p = _stat(rs, "pnl_a")
-        b_n, b_wr, b_p = _stat(ts, "pnl_b")
-        strat_rows += (
-            f'<tr><td style="padding:3px 10px">{s}</td>'
-            f'<td style="padding:3px 10px;text-align:right">{a_n}</td>'
-            f'<td style="padding:3px 10px;text-align:right">{a_wr:.1f}%</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:{_c(a_p)}">{a_p:+,.0f}円</td>'
-            f'<td style="padding:3px 10px;text-align:right">{b_n}</td>'
-            f'<td style="padding:3px 10px;text-align:right">{b_wr:.1f}%</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:{_c(b_p)}">{b_p:+,.0f}円</td>'
-            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_n - b_n}</td></tr>'
-        )
+    # ── BTフィルタ別に全ブロックを描画 (全部/BT60/BT70) ─────────────────────
+    bt_filters = [
+        ("all",  "全部",     lambda sc: True),
+        ("bt60", "BT60以上", lambda sc: (sc or 0) >= 60),
+        ("bt70", "BT70以上", lambda sc: (sc or 0) >= 70),
+    ]
 
-    return f"""<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証（最適時刻スイープ）</h2>
-<p class="footnote">
-逆指値ブレイク買い(A=現行)と「寄り(09:00)後N分に前日終値=トリガ超えを確認して買う」(B)を実5分足で比較。<br>
-損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。
-対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件) &nbsp; source={src} &nbsp; margin={margin_pct}%</p>
-
+    def _render_block(subset, key, active):
+        an, awr, apnl = _stat(subset, "pnl_a")
+        if not subset:
+            return (f'<div id="ocblk_{key}" style="display:{"block" if active else "none"}">'
+                    f'<p style="color:#94a3b8;padding:12px">該当BT帯の取引なし</p></div>')
+        results = [_eval_time(subset, cm, margin_pct) for cm in times]
+        best = max(results, key=lambda r: r["bpnl"])
+        sweep_rows = ""
+        for r in results:
+            vs = r["bpnl"] - apnl
+            star = ' style="background:#0d2818"' if r["confirm_min"] == best["confirm_min"] else ""
+            sweep_rows += (
+                f'<tr{star}>'
+                f'<td style="padding:3px 10px;text-align:center">{_fmt_hhmm(r["confirm_min"])}'
+                f'{" ★" if r["confirm_min"]==best["confirm_min"] else ""}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{r["bn"]}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{r["bwr"]:.1f}%</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(r["bpnl"])}">{r["bpnl"]:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(vs)};font-weight:700">{vs:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["sn"]}</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(r["spnl"])}">{r["spnl"]:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["prem"]:+.0f}</td>'
+                f'</tr>'
+            )
+        # 最良時刻の戦略別 (_key で照合 = id()バグ修正)
+        taken_by = {x["_key"]: x for x in best["taken"]}
+        strat_rows = ""
+        for s in sorted({r["strategy"] for r in subset}):
+            rs = [r for r in subset if r["strategy"] == s]
+            ts = [taken_by[r["_key"]] for r in rs if r["_key"] in taken_by]
+            a_n, a_wr, a_p = _stat(rs, "pnl_a")
+            b_n, b_wr, b_p = _stat(ts, "pnl_b")
+            strat_rows += (
+                f'<tr><td style="padding:3px 10px">{s}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{a_n}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{a_wr:.1f}%</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(a_p)}">{a_p:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right">{b_n}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{b_wr:.1f}%</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(b_p)}">{b_p:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_n - b_n}</td></tr>'
+            )
+        disp = "block" if active else "none"
+        return f"""<div id="ocblk_{key}" style="display:{disp}">
 <div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:inline-block">
   A(現行 逆指値): <b>{an}件</b> 勝率{awr:.1f}% 損益 <b style="color:{_c(apnl)}">{apnl:+,.0f}円</b>
   &nbsp;/&nbsp; ★最良の確認時刻 <b style="color:#4ade80">{_fmt_hhmm(best['confirm_min'])}</b>
   (寄り+{best['confirm_min']}分) 損益 <b style="color:{_c(best['bpnl'])}">{best['bpnl']:+,.0f}円</b>
   (A比 <b style="color:{_c(best['bpnl']-apnl)}">{best['bpnl']-apnl:+,.0f}円</b>)
 </div>
-
 <h3 style="margin:10px 0 4px;font-size:0.95rem">確認時刻スイープ</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8">
@@ -405,7 +444,6 @@ def build_html(minute_dir: str | None = None, times=None,
   <th style="padding:3px 10px" title="Bが見送った取引をAで取った損益。マイナスほど見送りが正解">見送A損益</th>
   <th style="padding:3px 10px" title="両方取った取引の平均建値差(B-A円/株)。プラス=高値掴み">建値差</th>
 </tr></thead><tbody>{sweep_rows}</tbody></table></div>
-
 <h3 style="margin:14px 0 4px;font-size:0.95rem">最良時刻({_fmt_hhmm(best['confirm_min'])})の戦略別</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8">
@@ -414,13 +452,44 @@ def build_html(minute_dir: str | None = None, times=None,
   <th style="padding:3px 10px">B件</th><th style="padding:3px 10px">B勝率</th>
   <th style="padding:3px 10px">B損益</th><th style="padding:3px 10px">見送</th>
 </tr></thead><tbody>{strat_rows}</tbody></table></div>
+</div>"""
 
+    btns = "".join(
+        f'<button class="ovbt-btn{" active" if k=="all" else ""}" '
+        f'id="ocbtn_{k}" onclick="switchOcBt(\'{k}\')">{lbl} '
+        f'<span style="font-size:0.72rem;color:#94a3b8">'
+        f'({sum(1 for r in rows if f(r["rec_score"]))})</span></button>'
+        for k, lbl, f in bt_filters
+    )
+    blocks = "".join(
+        _render_block([r for r in rows if f(r["rec_score"])], k, k == "all")
+        for k, lbl, f in bt_filters
+    )
+
+    return f"""<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証（最適時刻スイープ）</h2>
+<p class="footnote">
+逆指値ブレイク買い(A=現行)と「寄り(09:00)後N分に前日終値=トリガ超えを確認して買う」(B)を実5分足で比較。<br>
+損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。
+対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件) &nbsp; source={src} &nbsp; margin={margin_pct}%</p>
+{diag_html}
+<div class="detail-tab-nav" style="margin:10px 0">{btns}</div>
+{blocks}
 <p class="footnote" style="margin-top:10px">
 読み方: 『vs A』最大の時刻が最適。プラスなら寄り確認が有効。<br>
-『見送A損益』が大きくマイナス=その時刻の見送り(ダマシ除外)が効いている。
+『見送A損益』が大きくマイナス=見送った取引がAでは『勝ち』だった=見送りは損。
+プラスに近い/マイナスなら見送り(ダマシ除外)が効いている。
 『建値差』大=本物のブレイクを高値掴み(出遅れコスト)。<br>
-※ yfinanceは約60日のみ。長期は <code>--minute-dir</code> でデイトレ5分足流用を推奨。
-最適時刻は過学習しやすいので数ヶ月のフォワードで確認を。</p>"""
+※ source=yfinance の場合は data/minute_5m が見つからず約60日のyfinanceで検証。
+長期・確実な検証は data/minute_5m のデイトレ5分足を使用(自動検出)。
+最適時刻は過学習しやすいので数ヶ月のフォワードで確認を。</p>
+<script>
+function switchOcBt(key){{
+  ['all','bt60','bt70'].forEach(function(k){{
+    var b=document.getElementById('ocblk_'+k); if(b) b.style.display=(k===key)?'block':'none';
+    var t=document.getElementById('ocbtn_'+k); if(t) t.classList.toggle('active', k===key);
+  }});
+}}
+</script>"""
 
 
 def main():
@@ -468,7 +537,7 @@ def main():
         if not pm:
             no_data += 1
             continue
-        rows.append(dict(**t, price_map=pm))
+        rows.append(dict(**t, price_map=pm, _key=len(rows)))
 
     cover = len(rows)
     print(f"5分足が取得できた取引: {cover}件 / データ無し {no_data}件"
@@ -505,11 +574,11 @@ def main():
     print("\n── 最良時刻の戦略別 (A損益 / B損益 / 見送り件数) ──────────────")
     print(f"  {'戦略':<8}{'A件':>5}{'A勝率':>7}{'A損益':>12}"
           f"{'B件':>5}{'B勝率':>7}{'B損益':>12}{'見送':>5}")
-    taken_by = {id(x): x for x in best["taken"]}
+    taken_by = {x["_key"]: x for x in best["taken"]}
     strats = sorted({r["strategy"] for r in rows})
     for s in strats:
         rs = [r for r in rows if r["strategy"] == s]
-        ts = [taken_by[id(r)] for r in rs if id(r) in taken_by]
+        ts = [taken_by[r["_key"]] for r in rs if r["_key"] in taken_by]
         a_n, a_wr, a_p = _stat(rs, "pnl_a")
         b_n, b_wr, b_p = _stat(ts, "pnl_b")
         print(f"  {s:<8}{a_n:>5}{a_wr:>6.1f}%{a_p:>+12,.0f}"
