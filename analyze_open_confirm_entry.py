@@ -438,10 +438,34 @@ def _fmt_hhmm(cm: int) -> str:
     return f"09:{cm:02d}" if cm < 60 else f"{9 + cm // 60}:{cm % 60:02d}"
 
 
+def _normalize_report_trades(rep_trades) -> list[dict]:
+    """レポートの取引dict(base+extra: 全設定・全銘柄・重複除外済)を
+    寄り確認の内部形式に変換。決済済みロングのみ(保有中/発注中は除外)。"""
+    out = []
+    for t in rep_trades or []:
+        if t.get("reason") in ("発注中", "保有中", None):
+            continue
+        xp = t.get("exit_p")
+        trig = t.get("order_limit") or t.get("trigger")
+        edt = t.get("entry_d_raw") or t.get("entry_dt")
+        if not xp or not trig or edt is None:
+            continue
+        out.append(dict(
+            symbol=t.get("symbol", ""), name=t.get("name", ""),
+            strategy=t.get("strategy", ""), entry_dt=edt,
+            entry_p=t.get("entry_p", 0), exit_p=xp, trigger=trig,
+            qty=t.get("qty") or FIXED_QTY, reason=t.get("reason", ""),
+            pnl_a=t.get("pnl", t.get("pnl_a", 0)),
+            rec_score=t.get("rec_score", 0),
+        ))
+    return out
+
+
 def build_html(minute_dir: str | None = None, times=None,
                margin_pct: float = 0.0, days: int = 400,
-               is_short: bool = False) -> str:
-    """レポート詳細タブ用HTML。寄り後確認エントリー(A vs B)の時刻スイープ。"""
+               is_short: bool = False, trades=None) -> str:
+    """レポート詳細タブ用HTML。寄り後確認エントリー(A vs B)の時刻スイープ。
+    trades 指定時はそのレポート取引セット(全設定・全銘柄)を使う(=損益タブと一致)。"""
     if is_short:
         return ('<p style="color:#94a3b8;padding:16px">'
                 '寄り確認エントリー分析はロング(逆指値ブレイク買い)専用です。'
@@ -449,7 +473,10 @@ def build_html(minute_dir: str | None = None, times=None,
     if times is None:
         times = [0, 15, 30, 45, 60, 90, 120, 150, 180, 240]
 
-    trades = _collect_trades(days)
+    if trades is not None:
+        trades = _normalize_report_trades(trades)   # 損益タブと同じ取引セット
+    else:
+        trades = _collect_trades(days)
     rows, no_data = [], 0
     for t in trades:
         trig = t["trigger"]
@@ -621,9 +648,9 @@ def build_html(minute_dir: str | None = None, times=None,
 損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。<br>
 <b>対象期間(約定日): {_range}</b> &nbsp;/&nbsp; 対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件)
 &nbsp; source={src} &nbsp; margin={margin_pct}%<br>
-<span style="color:#fbbf24">※ これはWATCHLIST銘柄・直近{days}日窓の集計です(市場全体ではありません)。
-市場全体で60日に取引があった全銘柄を見るには
-<code>python analyze_open_confirm_entry.py --all-minute --days 60</code> を実行。</span></p>
+<span style="color:#94a3b8">※ 損益タブと同じ取引セット(全設定=con/agg×全ホールドアウト・監視対象の全銘柄・
+重複除外・決済済みロングのみ)。市場全体の全銘柄を見るには
+<code>python analyze_open_confirm_entry.py --all-minute --days 60</code>。</span></p>
 {diag_html}
 <div class="detail-tab-nav" style="margin:10px 0">{btns}</div>
 {blocks}

@@ -902,6 +902,8 @@ except Exception as _e:
 _na._PNL_CONFIGS[:] = _all_configs
 print(f"損益集計中 (全設定統合・直近{_DEFAULT_DAYS}日 / {len(_all_configs)}設定)...", flush=True)
 _all_period_html = _na._tab5_pnl_html(_DEFAULT_DAYS, _args.workers, entry_days=_args.entry_days, skip_timing9=True)
+# ⑭寄り確認用に、この全設定統合ペインの取引セット(=損益タブの取引明細と同一)を退避
+_oc_report_trades = list(getattr(_na, "_LAST_KPI_TRADES", []) or [])
 _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 
 # トレンド期間タブの一覧表に損益列を追加（損益計算で得たトレードを使って再生成）
@@ -1032,7 +1034,7 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv4_{_oc_src_tok}{_cache_short}"   # v4: 対象期間表示追加
+_oc_prefix    = f"openconfirmv5_{_oc_src_tok}{_cache_short}"   # v5: 損益タブと同じ取引セット(全設定)
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None
@@ -1046,7 +1048,8 @@ if _oc_html is None:
     print(f"寄り確認エントリー検証中 (5分足源: {_oc_src_tok})...", flush=True)
     try:
         _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
-                                  is_short=_args.short) or ""
+                                  is_short=_args.short,
+                                  trades=None if _args.short else _oc_report_trades) or ""
     except Exception as _oce:
         import traceback as _octb
         print(f"[寄り確認] 失敗: {_oce}\n{_octb.format_exc()}", flush=True)
