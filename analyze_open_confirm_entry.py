@@ -71,8 +71,13 @@ def _round_tick_up(p: float) -> int:
 
 # ── 5分足ローダー ────────────────────────────────────────────────────────────
 _MIN_CACHE: dict[str, pd.DataFrame | None] = {}
-# デイトレ5分足の保存先 (data/minute_5m=直近, quarantine_5m=長期蓄積) を自動検出
-_PKL_DIRS = ("data/minute_5m", "data/quarantine_5m")
+# デイトレ5分足の保存先 (data/minute_5m=直近, quarantine_5m=長期蓄積) を自動検出。
+# CWD 依存を避けるため、スクリプト位置基準 + CWD の両方を候補にする。
+_HERE = Path(__file__).resolve().parent
+_PKL_DIRS = (
+    _HERE / "data" / "minute_5m", _HERE / "data" / "quarantine_5m",
+    Path("data/minute_5m"), Path("data/quarantine_5m"),
+)
 
 
 def _yf_to_jq(symbol: str) -> str:

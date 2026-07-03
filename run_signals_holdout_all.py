@@ -1023,7 +1023,7 @@ if not _args.short:
 # ── ⑭ 寄り後確認エントリー検証 (詳細分析タブ) 日付跨ぎキャッシュ ─────────────────
 # 5分足が必要な重い分析なので、構造分析扱いで日付跨ぎ再利用 (--recalc-analysis で再計算)。
 # ショートはロング専用のため即ノート表示。
-_oc_prefix    = f"openconfirm{_cache_short}"
+_oc_prefix    = f"openconfirmv3{_cache_short}"   # v3: BTフィルタ/診断/バグ修正版
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 _oc_reuse     = _latest_analysis_cache(_oc_prefix)
 _oc_html = None
