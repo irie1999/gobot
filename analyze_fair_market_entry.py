@@ -169,9 +169,10 @@ def _fmt_hhmm(cm):
 
 
 def build_fair_html(is_short: bool = False, workers: int = 4,
-                    minute_dir=None, times=None) -> str:
+                    minute_dir=None, times=None, days: int = 60) -> str:
     """レポート⑭用: フェア版(後知恵なし)。全シグナル(約定+失効)を対象に
-    A(逆指値ブレイク) vs F(T+1各時刻に全成行) を比較。BTフィルタ付き。"""
+    A(逆指値ブレイク) vs F(T+1各時刻に全成行) を比較。BTフィルタ付き。
+    days: 直近N日のシグナルに限定(既定60=5分足がほぼ全件揃う範囲)。0=全期間。"""
     if times is None:
         times = _TIMES
     if is_short:
@@ -186,10 +187,11 @@ def build_fair_html(is_short: bool = False, workers: int = 4,
     if not pairs:
         return ""
 
+    cutoff = (datetime.now(JST).date() - timedelta(days=days)) if days else None
     records = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        futs = [ex.submit(_one, m, s, n, st, None, times, minute_dir, is_short)
+        futs = [ex.submit(_one, m, s, n, st, cutoff, times, minute_dir, is_short)
                 for (m, s, n, st) in pairs]
         for fu in as_completed(futs):
             records.extend(fu.result() or [])
@@ -265,9 +267,12 @@ def build_fair_html(is_short: bool = False, workers: int = 4,
     blocks = "".join(_block([r for r in records if f(r["rec_score"])], k, k == "all")
                      for k, lbl, f in filters)
 
-    return f"""<h3 style="margin:20px 0 4px;font-size:1.0rem;color:#60a5fa">③ フェア版(後知恵なし): 全シグナル(約定+失効)対象・T+1成行 vs 逆指値</h3>
+    _span = f"直近{days}日" if days else "全期間"
+    return f"""<h3 style="margin:20px 0 4px;font-size:1.0rem;color:#60a5fa">③ フェア版(後知恵なし・{_span}): 全シグナル(約定+失効)対象・T+1成行 vs 逆指値</h3>
 <p class="footnote">②は『Aが結局約定した分』だけで後知恵があった。③は<b>失効(不発)シグナルも含む全シグナル</b>を、
-T+1の各時刻に成行買い(F)して逆指値ブレイク(A)と比較。vs A がプラスなら本当にT+1成行が優位。</p>
+T+1の各時刻に成行買い(F)して逆指値ブレイク(A)と比較。vs A がプラスなら本当にT+1成行が優位。<br>
+<b>{_span}に限定</b>する理由: それ以前は5分足(minute_5m~3ヶ月/quarantine 664銘柄/yfinance~60日)が
+全銘柄分そろわず欠損が出るため。最新化は <code>python update_minute_5m.py</code> を実行。</p>
 <div class="detail-tab-nav" style="margin:8px 0">{btns}</div>
 {blocks}
 <script>
