@@ -71,15 +71,82 @@ def _round_tick_up(p: float) -> int:
 
 # ── 5分足ローダー ────────────────────────────────────────────────────────────
 _MIN_CACHE: dict[str, pd.DataFrame | None] = {}
+# デイトレ5分足の保存先 (data/minute_5m=直近, quarantine_5m=長期蓄積) を自動検出
+_PKL_DIRS = ("data/minute_5m", "data/quarantine_5m")
+
+
+def _yf_to_jq(symbol: str) -> str:
+    """7203.T → 72030 (デイトレpklのファイル名は5桁jquantsコード)。"""
+    code = symbol.strip().upper().replace(".T", "")
+    return code + "0" if (len(code) == 4 and code.isdigit()) else code
+
+
+def _normalize_min(raw: pd.DataFrame) -> pd.DataFrame | None:
+    """デイトレpkl等の分足を open/high/low/close・naive JST index に正規化。"""
+    if raw is None or getattr(raw, "empty", True):
+        return None
+    df = raw.copy()
+    if "DateTime" in df.columns:
+        dt = pd.to_datetime(df["DateTime"], errors="coerce")
+    elif "Date" in df.columns and "Time" in df.columns:
+        dp = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        dt = pd.to_datetime(dp + " " + df["Time"].astype(str).str.strip(), errors="coerce")
+    elif "datetime" in df.columns:
+        dt = pd.to_datetime(df["datetime"], errors="coerce")
+    elif isinstance(df.index, pd.DatetimeIndex):
+        dt = df.index
+    else:
+        return None
+    ren = {"O": "Open", "H": "High", "L": "Low", "C": "Close"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    cols = None
+    for c in [("AdjustmentOpen", "AdjustmentHigh", "AdjustmentLow", "AdjustmentClose"),
+              ("Open", "High", "Low", "Close"), ("open", "high", "low", "close")]:
+        if all(x in df.columns for x in c):
+            cols = c
+            break
+    if cols is None:
+        return None
+    out = pd.DataFrame({
+        "open":  pd.to_numeric(df[cols[0]], errors="coerce").values,
+        "high":  pd.to_numeric(df[cols[1]], errors="coerce").values,
+        "low":   pd.to_numeric(df[cols[2]], errors="coerce").values,
+        "close": pd.to_numeric(df[cols[3]], errors="coerce").values,
+    }, index=dt.values if hasattr(dt, "values") else dt)
+    idx = pd.DatetimeIndex(out.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("Asia/Tokyo").tz_localize(None)
+    out.index = idx
+    return out.dropna(subset=["close"]).sort_index()
+
+
+def _load_local_pkl(symbol: str) -> pd.DataFrame | None:
+    """data/minute_5m + quarantine_5m の pkl を読み・マージして返す。"""
+    jq = _yf_to_jq(symbol)
+    frames = []
+    for d in _PKL_DIRS:
+        p = Path(d) / f"{jq}.pkl"
+        if p.exists():
+            try:
+                n = _normalize_min(pd.read_pickle(p))
+                if n is not None and not n.empty:
+                    frames.append(n)
+            except Exception:
+                pass
+    if not frames:
+        return None
+    m = pd.concat(frames)
+    return m[~m.index.duplicated(keep="last")].sort_index()
 
 
 def _load_minute(symbol: str, minute_dir: str | None) -> pd.DataFrame | None:
-    """5分足を JST index の DataFrame(open/high/low/close) で返す。失敗時 None。"""
+    """5分足を JST index の DataFrame(open/high/low/close) で返す。失敗時 None。
+    優先: 明示CSV(--minute-dir) → デイトレpkl(data/minute_5m自動) → yfinance。"""
     if symbol in _MIN_CACHE:
         return _MIN_CACHE[symbol]
     df = None
     code = symbol.replace(".T", "")
-    # 1) ローカル CSV (デイトレ5分足流用)
+    # 1) ローカル CSV (--minute-dir 明示時)
     if minute_dir:
         for cand in (f"{code}.csv", f"{symbol}.csv", f"{code}.T.csv"):
             p = Path(minute_dir) / cand
@@ -97,7 +164,10 @@ def _load_minute(symbol: str, minute_dir: str | None) -> pd.DataFrame | None:
                 except Exception as e:
                     print(f"  ⚠ {symbol}: CSV読込失敗 {e}")
                 break
-    # 2) yfinance フォールバック
+    # 2) デイトレpkl 自動検出 (data/minute_5m + quarantine_5m)
+    if df is None:
+        df = _load_local_pkl(symbol)
+    # 3) yfinance フォールバック
     if df is None:
         try:
             import yfinance as yf
@@ -256,7 +326,12 @@ def build_html(minute_dir: str | None = None, times=None,
             continue
         rows.append(dict(**t, price_map=pm))
 
-    src = f"CSV:{minute_dir}" if minute_dir else "yfinance(約60日)"
+    if minute_dir:
+        src = f"CSV:{minute_dir}"
+    elif any(Path(d).is_dir() for d in _PKL_DIRS):
+        src = "デイトレ5分足(data/minute_5m+quarantine_5m)"
+    else:
+        src = "yfinance(約60日)"
     if not rows:
         return (f'<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証</h2>'
                 f'<p style="color:#f87171;padding:12px">5分足データが取得できませんでした '
