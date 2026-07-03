@@ -71,13 +71,80 @@ def _round_tick_up(p: float) -> int:
 
 # ── 5分足ローダー ────────────────────────────────────────────────────────────
 _MIN_CACHE: dict[str, pd.DataFrame | None] = {}
-# デイトレ5分足の保存先 (data/minute_5m=直近, quarantine_5m=長期蓄積) を自動検出。
-# CWD 依存を避けるため、スクリプト位置基準 + CWD の両方を候補にする。
 _HERE = Path(__file__).resolve().parent
-_PKL_DIRS = (
-    _HERE / "data" / "minute_5m", _HERE / "data" / "quarantine_5m",
-    Path("data/minute_5m"), Path("data/quarantine_5m"),
-)
+_PKL_CACHE_FILE = _HERE / ".minute_data_dirs.txt"   # 発見済みディレクトリを記憶
+_PKL_DIRS_MEMO: list | None = None
+
+
+def locate_5m_dirs(force: bool = False, verbose: bool = False) -> list:
+    """デイトレ5分足pklのディレクトリ(minute_5m / quarantine_5m)を広く自動探索。
+    発見結果は .minute_data_dirs.txt に記憶し、次回以降は即返す(場所を再質問しない)。"""
+    global _PKL_DIRS_MEMO
+    if _PKL_DIRS_MEMO is not None and not force:
+        return _PKL_DIRS_MEMO
+    found, seen = [], set()
+
+    def _add(d):
+        try:
+            d = Path(d)
+            if d.is_dir() and any(d.glob("*.pkl")):
+                key = str(d.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    found.append(d)
+        except Exception:
+            pass
+
+    # 1) 記憶済みキャッシュ
+    if _PKL_CACHE_FILE.exists() and not force:
+        for line in _PKL_CACHE_FILE.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                _add(line.strip())
+    # 2) スクリプト位置 / CWD の周辺数階層
+    bases = []
+    for b in (_HERE, Path.cwd()):
+        p = b
+        for _ in range(5):
+            bases.append(p)
+            if p.parent == p:
+                break
+            p = p.parent
+    try:
+        bases.append(Path.home())
+    except Exception:
+        pass
+    for b in bases:
+        _add(b / "data" / "minute_5m")
+        _add(b / "data" / "quarantine_5m")
+    # 3) それでも無ければ home 配下を浅くグロブ (2階層まで)
+    if not found:
+        try:
+            home = Path.home()
+            for pat in ("*/data/quarantine_5m", "*/*/data/quarantine_5m",
+                        "*/data/minute_5m", "*/*/data/minute_5m"):
+                for d in home.glob(pat):
+                    _add(d)
+        except Exception:
+            pass
+    # 記憶
+    if found:
+        try:
+            _PKL_CACHE_FILE.write_text(
+                "\n".join(str(d.resolve()) for d in found), encoding="utf-8")
+        except Exception:
+            pass
+    if verbose:
+        if found:
+            for d in found:
+                print(f"  ✓ {d}  ({len(list(d.glob('*.pkl')))} pkl)")
+        else:
+            print("  ✗ 5分足pklディレクトリが見つかりませんでした")
+    _PKL_DIRS_MEMO = found
+    return found
+
+
+def _pkl_dirs() -> list:
+    return locate_5m_dirs()
 
 
 def _yf_to_jq(symbol: str) -> str:
@@ -129,7 +196,7 @@ def _load_local_pkl(symbol: str, extra_dirs=()) -> pd.DataFrame | None:
     """data/minute_5m + quarantine_5m (+ extra_dirs) の pkl を読み・マージして返す。"""
     jq = _yf_to_jq(symbol)
     frames = []
-    for d in list(extra_dirs) + list(_PKL_DIRS):
+    for d in list(extra_dirs) + list(_pkl_dirs()):
         p = Path(d) / f"{jq}.pkl"
         if p.exists():
             try:
@@ -334,7 +401,7 @@ def build_html(minute_dir: str | None = None, times=None,
 
     if minute_dir:
         src = f"CSV:{minute_dir}"
-    elif any(Path(d).is_dir() for d in _PKL_DIRS):
+    elif _pkl_dirs():
         src = "デイトレ5分足(data/minute_5m+quarantine_5m)"
     else:
         src = "yfinance(約60日)"
@@ -484,8 +551,9 @@ def build_html(minute_dir: str | None = None, times=None,
 『見送A損益』が大きくマイナス=見送った取引がAでは『勝ち』だった=見送りは損。
 プラスに近い/マイナスなら見送り(ダマシ除外)が効いている。
 『建値差』大=本物のブレイクを高値掴み(出遅れコスト)。<br>
-※ source=yfinance の場合は data/minute_5m が見つからず約60日のyfinanceで検証。
-長期・確実な検証は data/minute_5m のデイトレ5分足を使用(自動検出)。
+※ source=yfinance の場合は 5分足pkl が見つからず約60日のyfinanceで検証。
+長期(~2年)で検証するには <code>python find_minute_data.py</code> を一度実行すると
+data/quarantine_5m 等を自動特定して記憶し、以降このタブが自動使用します。
 最適時刻は過学習しやすいので数ヶ月のフォワードで確認を。</p>
 <script>
 function switchOcBt(key){{
