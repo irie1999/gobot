@@ -100,28 +100,39 @@ def locate_5m_dirs(force: bool = False, verbose: bool = False) -> list:
         for line in _PKL_CACHE_FILE.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 _add(line.strip())
-    # 2) スクリプト位置 / CWD の周辺数階層
-    bases = []
+    # 2) スクリプト位置 / CWD の祖先を数階層たどる (swingtrade→kabu station→…)
+    ancestors = []
     for b in (_HERE, Path.cwd()):
         p = b
-        for _ in range(5):
-            bases.append(p)
+        for _ in range(6):
+            if p not in ancestors:
+                ancestors.append(p)
             if p.parent == p:
                 break
             p = p.parent
     try:
-        bases.append(Path.home())
+        ancestors.append(Path.home())
     except Exception:
         pass
-    for b in bases:
-        _add(b / "data" / "minute_5m")
-        _add(b / "data" / "quarantine_5m")
-    # 3) それでも無ければ home 配下を浅くグロブ (2階層まで)
+    for a in ancestors:
+        # 直下の data/
+        _add(a / "data" / "minute_5m")
+        _add(a / "data" / "quarantine_5m")
+        # 祖先の『子フォルダ』の data/ (= 姉妹フォルダ。例 swingtrade の隣の daytrading)
+        try:
+            for name in ("minute_5m", "quarantine_5m"):
+                for d in a.glob(f"*/data/{name}"):
+                    _add(d)
+        except Exception:
+            pass
+    # 3) それでも無ければ home 配下を浅くグロブ (3階層まで)
     if not found:
         try:
             home = Path.home()
             for pat in ("*/data/quarantine_5m", "*/*/data/quarantine_5m",
-                        "*/data/minute_5m", "*/*/data/minute_5m"):
+                        "*/*/*/data/quarantine_5m", "*/*/*/*/data/quarantine_5m",
+                        "*/data/minute_5m", "*/*/data/minute_5m",
+                        "*/*/*/data/minute_5m", "*/*/*/*/data/minute_5m"):
                 for d in home.glob(pat):
                     _add(d)
         except Exception:
