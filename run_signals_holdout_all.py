@@ -133,6 +133,8 @@ _pre.add_argument("--demo", action="store_true",
                   help="デモ口座(18081)・実発注で起動 (本番=18080 を回避)")
 _pre.add_argument("--dry", action="store_true",
                   help="発注サーバを dry-run で起動 (実発注しない)")
+_pre.add_argument("--no-minute-update", action="store_true",
+                  help="5分足の自動更新(1日1回)を行わない")
 _args, _ = _pre.parse_known_args()
 # --demo / --dry の反映
 if getattr(_args, "demo", False):
@@ -173,6 +175,52 @@ def _maybe_serve_orders():
         _sp2.run(_cmd)
     except KeyboardInterrupt:
         pass
+
+
+def _auto_update_minute():
+    """WATCHLIST銘柄の5分足を最新化する(1日1回・自動・非致命)。
+    ⑭③フェア版が最新5分足を使えるように、日次コマンドの中で自動更新する。
+    別コマンド(update_minute_5m)を打たなくて済むように統合。"""
+    _mk = Path(".holdout_bt_cache")
+    _mk.mkdir(exist_ok=True)
+    _flag = _mk / f".minute_updated_{_report_date()}"
+    if _flag.exists():
+        return                                  # 本日更新済み → スキップ
+    # fetcher を姉妹フォルダ探索で特定
+    try:
+        from update_minute_5m import _find_fetcher
+        fetcher = _find_fetcher()
+    except Exception:
+        fetcher = None
+    if fetcher is None:
+        return                                  # 見つからなければ黙ってスキップ
+    # WATCHLIST 銘柄を集める(ロング+ショート)
+    syms: set = set()
+    for _mod_name in ("check_signals_stop", "check_signals_breakout",
+                      "check_signals_short", "check_signals_short_breakout"):
+        try:
+            _m = _importlib.import_module(_mod_name)
+            for _s, _n, _st in getattr(_m, "WATCHLIST", []):
+                syms.add(_s)
+        except Exception:
+            pass
+    if not syms:
+        return
+    import subprocess as _sp3
+    _cmd = [sys.executable, str(fetcher), "--symbols", *sorted(syms)]
+    print("=" * 65)
+    print(f"5分足を自動更新中 (WATCHLIST {len(syms)}銘柄・本日初回のみ)...", flush=True)
+    print("=" * 65)
+    try:
+        _sp3.run(_cmd, cwd=str(fetcher.parent), timeout=600)
+        _flag.write_text("ok", encoding="utf-8")
+    except Exception as _e:
+        print(f"  ⚠ 5分足自動更新スキップ ({_e})", flush=True)
+
+
+# 日次コマンドの一部として5分足を自動更新(1日1回)。--no-minute-update で無効化。
+if not getattr(_args, "no_minute_update", False):
+    _auto_update_minute()
 
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
 if _args.both and not _args.short:
@@ -1069,12 +1117,13 @@ _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
 _oc_prefix    = f"openconfirmv10_{_oc_src_tok}{_cache_short}"   # v10: ③フェア版を直近60日に限定
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
-_oc_reuse     = _latest_analysis_cache(_oc_prefix)
+# 本日分キャッシュがあれば再利用(=同日2回目以降スキップ)。無ければ再計算
+# (=5分足自動更新後の最新データを反映)。翌日は自動的に作り直す。
 _oc_html = None
-if _oc_reuse is not None:
+if _oc_cache_file.exists():
     try:
-        _oc_html = _mhpk.loads(_oc_reuse.read_bytes()).get("html", "")
-        print(f"[寄り確認] キャッシュ再利用(=2回目以降スキップ): {_oc_reuse.name}", flush=True)
+        _oc_html = _mhpk.loads(_oc_cache_file.read_bytes()).get("html", "")
+        print(f"[寄り確認] 本日分キャッシュ再利用(2回目以降スキップ): {_oc_cache_file.name}", flush=True)
     except Exception:
         _oc_html = None
 # キャッシュが無い場合のみ計算(=一度計算したら以降スキップ)。①②寄り確認 + ③フェア版。
