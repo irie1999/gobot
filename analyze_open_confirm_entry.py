@@ -416,25 +416,38 @@ def _stat(lst, key):
 
 
 def _eval_time(rows, confirm_min, margin_pct):
-    """指定した確認時刻での B 成績を算出。rows は price_map に各時刻の株価を持つ。"""
-    taken, skipped, both_prem = [], [], []
+    """指定した確認時刻での成績を算出。
+    B(条件付き=寄り確認): 確認時刻にトリガ超えなら買う・割れたら見送り。
+    C(無条件成行=見送りなし): 全取引を確認時刻の値で成行買い。
+    rows は price_map に各時刻の株価を持つ。"""
+    taken, skipped, both_prem = [], [], []   # B
+    uncond, uncond_prem = [], []             # C
+    a_for_time = 0.0                          # 価格が取れた取引のA損益合計(C比較用)
     for r in rows:
         p = r["price_map"].get(confirm_min)
         if p is None:
             continue
+        a_for_time += (r.get("pnl_a") or 0)
+        # C: 無条件に確認時刻の値で成行買い
+        entry_c = _round_tick_up(p * (1.0 + SLIPPAGE_STOP_PCT))
+        uncond.append({**r, "pnl_c": _pnl_long(entry_c, r["exit_p"], r["qty"])})
+        uncond_prem.append(entry_c - r["entry_p"])
+        # B: トリガ超えのみ
         thr = r["trigger"] * (1.0 + margin_pct / 100.0)
         if p > thr:
             entry_b = _round_tick_up(p * (1.0 + SLIPPAGE_STOP_PCT))
-            pnl_b = _pnl_long(entry_b, r["exit_p"], r["qty"])
-            taken.append({**r, "pnl_b": pnl_b})
+            taken.append({**r, "pnl_b": _pnl_long(entry_b, r["exit_p"], r["qty"])})
             both_prem.append(entry_b - r["entry_p"])
         else:
             skipped.append(r)
     bn, bwr, bpnl = _stat(taken, "pnl_b")
     sn, swr, spnl = _stat(skipped, "pnl_a")
+    cn, cwr, cpnl = _stat(uncond, "pnl_c")
     prem = (sum(both_prem) / len(both_prem)) if both_prem else 0.0
+    cprem = (sum(uncond_prem) / len(uncond_prem)) if uncond_prem else 0.0
     return dict(confirm_min=confirm_min, taken=taken, skipped=skipped,
-                bn=bn, bwr=bwr, bpnl=bpnl, sn=sn, swr=swr, spnl=spnl, prem=prem)
+                bn=bn, bwr=bwr, bpnl=bpnl, sn=sn, swr=swr, spnl=spnl, prem=prem,
+                cn=cn, cwr=cwr, cpnl=cpnl, cprem=cprem, a_for_time=a_for_time)
 
 
 def _fmt_hhmm(cm: int) -> str:
@@ -597,6 +610,26 @@ def build_html(minute_dir: str | None = None, times=None,
                 f'<td style="padding:3px 10px;text-align:right;color:{_c(b_p)}">{b_p:+,.0f}円</td>'
                 f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_n - b_n}</td></tr>'
             )
+        # C: 無条件成行(見送りなし) = 全取引を確認時刻の値で成行買い
+        cbest = max(results, key=lambda r: r["cpnl"])
+        csweep_rows = ""
+        for r in results:
+            cvs = r["cpnl"] - r["a_for_time"]
+            cstar = ' style="background:#0d2818"' if r["confirm_min"] == cbest["confirm_min"] else ""
+            csweep_rows += (
+                f'<tr{cstar}>'
+                f'<td style="padding:3px 10px;text-align:center">{_fmt_hhmm(r["confirm_min"])}'
+                f'{" ★" if r["confirm_min"]==cbest["confirm_min"] else ""}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{r["cn"]}</td>'
+                f'<td style="padding:3px 10px;text-align:right">{r["cwr"]:.1f}%</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(r["cpnl"])}">{r["cpnl"]:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:{_c(cvs)};font-weight:700">{cvs:+,.0f}円</td>'
+                f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["cprem"]:+.0f}</td>'
+                f'</tr>'
+            )
+        c_n_beat = sum(1 for r in results if (r["cpnl"] - r["a_for_time"]) > 0)
+        c_best_vs = cbest["cpnl"] - cbest["a_for_time"]
+
         disp = "block" if active else "none"
         # 判定: 全確認時刻がAに劣るなら「非推奨」。★は僅差の最大でノイズなので過信させない。
         best_vs = best['bpnl'] - apnl
@@ -627,7 +660,7 @@ def build_html(minute_dir: str | None = None, times=None,
   (寄り+{best['confirm_min']}分) 損益 <b style="color:{_c(best['bpnl'])}">{best['bpnl']:+,.0f}円</b>
   (A比 <b style="color:{_c(best['bpnl']-apnl)}">{best['bpnl']-apnl:+,.0f}円</b>)
 </div>
-<h3 style="margin:10px 0 4px;font-size:0.95rem">確認時刻スイープ</h3>
+<h3 style="margin:10px 0 4px;font-size:0.95rem">① 寄り確認(条件付き): 確認時刻にトリガ超えなら買い・割れたら見送り</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8">
   <th style="padding:3px 10px">確認時刻</th><th style="padding:3px 10px">B件</th>
@@ -636,6 +669,20 @@ def build_html(minute_dir: str | None = None, times=None,
   <th style="padding:3px 10px" title="Bが見送った取引をAで取った損益。マイナスほど見送りが正解">見送A損益</th>
   <th style="padding:3px 10px" title="両方取った取引の平均建値差(B-A円/株)。プラス=高値掴み">建値差</th>
 </tr></thead><tbody>{sweep_rows}</tbody></table></div>
+
+<h3 style="margin:16px 0 4px;font-size:0.95rem">② 無条件成行(見送りなし): 全取引を確認時刻の値で成行買い
+  <span style="color:#94a3b8;font-size:0.8rem">← シグナルが出たら必ず買う。A比プラスなら「その時刻に成行」が有効</span></h3>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:#94a3b8">
+  <th style="padding:3px 10px">確認時刻</th><th style="padding:3px 10px">件数</th>
+  <th style="padding:3px 10px">勝率</th><th style="padding:3px 10px">損益</th>
+  <th style="padding:3px 10px" title="同じ取引をAで取った場合との差">vs A</th>
+  <th style="padding:3px 10px" title="平均建値差(C-A円/株)。プラス=Aより高く買っている">建値差</th>
+</tr></thead><tbody>{csweep_rows}</tbody></table></div>
+<p class="footnote">②の判定: A超えは{len(results)}時刻中 <b>{c_n_beat}</b> 時刻
+(最良 {_fmt_hhmm(cbest['confirm_min'])} で A比 {c_best_vs:+,.0f}円)。
+{'✅ 成行が有効な可能性(要フォワード)' if c_best_vs > 0 else '❌ どの時刻もAに劣る=無条件成行も非推奨'}</p>
+
 <h3 style="margin:14px 0 4px;font-size:0.95rem">最良時刻({_fmt_hhmm(best['confirm_min'])})の戦略別</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8">
