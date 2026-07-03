@@ -7756,6 +7756,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _pullback_tab_btn = (
         f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'pullback\')">⑬ 押し目買い比較</button>'
     )
+    _openconfirm_tab_btn = (
+        f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'openconfirm\')">⑭ 寄り確認</button>'
+    )
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -7776,6 +7779,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_preoos_tab_btn}
 {_maxhold_tab_btn}
 {_pullback_tab_btn}
+{_openconfirm_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -8012,6 +8016,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- PULLBACK_CMP_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_openconfirm" class="analysis-tab-pane">
+<!-- OPENCONFIRM_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -8062,7 +8070,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback'];
+  var tabs = ['summary','score','cross','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

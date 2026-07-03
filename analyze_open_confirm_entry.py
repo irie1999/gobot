@@ -225,6 +225,129 @@ def _eval_time(rows, confirm_min, margin_pct):
                 bn=bn, bwr=bwr, bpnl=bpnl, sn=sn, swr=swr, spnl=spnl, prem=prem)
 
 
+def _fmt_hhmm(cm: int) -> str:
+    return f"09:{cm:02d}" if cm < 60 else f"{9 + cm // 60}:{cm % 60:02d}"
+
+
+def build_html(minute_dir: str | None = None, times=None,
+               margin_pct: float = 0.0, days: int = 400,
+               is_short: bool = False) -> str:
+    """レポート詳細タブ用HTML。寄り後確認エントリー(A vs B)の時刻スイープ。"""
+    if is_short:
+        return ('<p style="color:#94a3b8;padding:16px">'
+                '寄り確認エントリー分析はロング(逆指値ブレイク買い)専用です。'
+                'ショートは対象外。</p>')
+    if times is None:
+        times = [0, 15, 30, 45, 60, 90, 120, 150, 180, 240]
+
+    trades = _collect_trades(days)
+    rows, no_data = [], 0
+    for t in trades:
+        trig = t["trigger"]
+        if not trig or trig <= 0:
+            continue
+        pm = {}
+        for cm in times:
+            p = _price_at(t["symbol"], t["entry_dt"], cm, minute_dir)
+            if p is not None:
+                pm[cm] = p
+        if not pm:
+            no_data += 1
+            continue
+        rows.append(dict(**t, price_map=pm))
+
+    src = f"CSV:{minute_dir}" if minute_dir else "yfinance(約60日)"
+    if not rows:
+        return (f'<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証</h2>'
+                f'<p style="color:#f87171;padding:12px">5分足データが取得できませんでした '
+                f'(source={src})。<br>ローカルで <code>--minute-dir</code> にデイトレ5分足を'
+                f'指定するか、yfinance導入・直近60日での実行をお試しください。</p>')
+
+    an, awr, apnl = _stat(rows, "pnl_a")
+    results = [_eval_time(rows, cm, margin_pct) for cm in times]
+    best = max(results, key=lambda r: r["bpnl"])
+
+    def _c(v):  # 損益の色
+        return "#4ade80" if v >= 0 else "#f87171"
+
+    sweep_rows = ""
+    for r in results:
+        vs = r["bpnl"] - apnl
+        is_best = (r["confirm_min"] == best["confirm_min"])
+        star = ' style="background:#0d2818"' if is_best else ""
+        sweep_rows += (
+            f'<tr{star}>'
+            f'<td style="padding:3px 10px;text-align:center">{_fmt_hhmm(r["confirm_min"])}'
+            f'{" ★" if is_best else ""}</td>'
+            f'<td style="padding:3px 10px;text-align:right">{r["bn"]}</td>'
+            f'<td style="padding:3px 10px;text-align:right">{r["bwr"]:.1f}%</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:{_c(r["bpnl"])}">{r["bpnl"]:+,.0f}円</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:{_c(vs)};font-weight:700">{vs:+,.0f}円</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["sn"]}</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:{_c(r["spnl"])}">{r["spnl"]:+,.0f}円</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{r["prem"]:+.0f}</td>'
+            f'</tr>'
+        )
+
+    # 最良時刻の戦略別
+    taken_by = {id(x): x for x in best["taken"]}
+    strat_rows = ""
+    for s in sorted({r["strategy"] for r in rows}):
+        rs = [r for r in rows if r["strategy"] == s]
+        ts = [taken_by[id(r)] for r in rs if id(r) in taken_by]
+        a_n, a_wr, a_p = _stat(rs, "pnl_a")
+        b_n, b_wr, b_p = _stat(ts, "pnl_b")
+        strat_rows += (
+            f'<tr><td style="padding:3px 10px">{s}</td>'
+            f'<td style="padding:3px 10px;text-align:right">{a_n}</td>'
+            f'<td style="padding:3px 10px;text-align:right">{a_wr:.1f}%</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:{_c(a_p)}">{a_p:+,.0f}円</td>'
+            f'<td style="padding:3px 10px;text-align:right">{b_n}</td>'
+            f'<td style="padding:3px 10px;text-align:right">{b_wr:.1f}%</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:{_c(b_p)}">{b_p:+,.0f}円</td>'
+            f'<td style="padding:3px 10px;text-align:right;color:#94a3b8">{a_n - b_n}</td></tr>'
+        )
+
+    return f"""<h2 style="margin-top:8px">⑭ 寄り後確認エントリー検証（最適時刻スイープ）</h2>
+<p class="footnote">
+逆指値ブレイク買い(A=現行)と「寄り(09:00)後N分に前日終値=トリガ超えを確認して買う」(B)を実5分足で比較。<br>
+損切り/目標は絶対価格なので決済はA/B共通。5分足は各取引の約定日の株価取得のみに使用。
+対象 <b>{len(rows)}件</b>(5分足取得済 / データ無し {no_data}件) &nbsp; source={src} &nbsp; margin={margin_pct}%</p>
+
+<div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:inline-block">
+  A(現行 逆指値): <b>{an}件</b> 勝率{awr:.1f}% 損益 <b style="color:{_c(apnl)}">{apnl:+,.0f}円</b>
+  &nbsp;/&nbsp; ★最良の確認時刻 <b style="color:#4ade80">{_fmt_hhmm(best['confirm_min'])}</b>
+  (寄り+{best['confirm_min']}分) 損益 <b style="color:{_c(best['bpnl'])}">{best['bpnl']:+,.0f}円</b>
+  (A比 <b style="color:{_c(best['bpnl']-apnl)}">{best['bpnl']-apnl:+,.0f}円</b>)
+</div>
+
+<h3 style="margin:10px 0 4px;font-size:0.95rem">確認時刻スイープ</h3>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:#94a3b8">
+  <th style="padding:3px 10px">確認時刻</th><th style="padding:3px 10px">B件</th>
+  <th style="padding:3px 10px">B勝率</th><th style="padding:3px 10px">B損益</th>
+  <th style="padding:3px 10px">vs A</th><th style="padding:3px 10px">見送件</th>
+  <th style="padding:3px 10px" title="Bが見送った取引をAで取った損益。マイナスほど見送りが正解">見送A損益</th>
+  <th style="padding:3px 10px" title="両方取った取引の平均建値差(B-A円/株)。プラス=高値掴み">建値差</th>
+</tr></thead><tbody>{sweep_rows}</tbody></table></div>
+
+<h3 style="margin:14px 0 4px;font-size:0.95rem">最良時刻({_fmt_hhmm(best['confirm_min'])})の戦略別</h3>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:#94a3b8">
+  <th style="padding:3px 10px">戦略</th><th style="padding:3px 10px">A件</th>
+  <th style="padding:3px 10px">A勝率</th><th style="padding:3px 10px">A損益</th>
+  <th style="padding:3px 10px">B件</th><th style="padding:3px 10px">B勝率</th>
+  <th style="padding:3px 10px">B損益</th><th style="padding:3px 10px">見送</th>
+</tr></thead><tbody>{strat_rows}</tbody></table></div>
+
+<p class="footnote" style="margin-top:10px">
+読み方: 『vs A』最大の時刻が最適。プラスなら寄り確認が有効。<br>
+『見送A損益』が大きくマイナス=その時刻の見送り(ダマシ除外)が効いている。
+『建値差』大=本物のブレイクを高値掴み(出遅れコスト)。<br>
+※ yfinanceは約60日のみ。長期は <code>--minute-dir</code> でデイトレ5分足流用を推奨。
+最適時刻は過学習しやすいので数ヶ月のフォワードで確認を。</p>"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sweep", default="0,15,30,45,60,90,120,150,180,240",

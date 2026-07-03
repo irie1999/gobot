@@ -102,8 +102,11 @@ _pre.add_argument("--oos-days",  type=int, default=365,
 _pre.add_argument("--max-holds", type=str, default=None,
                   help="比較する最大保有日数をカンマ区切りで指定 (例: 7,15,20). --bothと組み合わせて使用")
 _pre.add_argument("--recalc-analysis", action="store_true",
-                  help="保有期間比較・押し目買い比較など日々変わらない構造分析を強制再計算する "
-                       "(既定: 最新キャッシュを日付跨ぎで再利用。--force では再計算しない)")
+                  help="保有期間比較・押し目買い比較・寄り確認など日々変わらない構造分析を"
+                       "強制再計算する (既定: 最新キャッシュを日付跨ぎで再利用。--force では再計算しない)")
+_pre.add_argument("--minute-dir", default=None,
+                  help="⑭寄り確認タブ用の5分足CSVディレクトリ ({code}.csv)。"
+                       "無指定はyfinance(約60日)")
 _pre.add_argument("--serve", action="store_true",
                   help="レポート生成後に発注サーバ(order_server.py)を起動する (既定dry-run)")
 _pre.add_argument("--serve-execute", action="store_true",
@@ -1014,6 +1017,40 @@ if not _args.short:
         _all_period_html = _all_period_html.replace(
             "<!-- PULLBACK_CMP_SLOT -->", _pb_html, 1)
     _phase("押し目買い比較完了")
+
+# ── ⑭ 寄り後確認エントリー検証 (詳細分析タブ) 日付跨ぎキャッシュ ─────────────────
+# 5分足が必要な重い分析なので、構造分析扱いで日付跨ぎ再利用 (--recalc-analysis で再計算)。
+# ショートはロング専用のため即ノート表示。
+_oc_prefix    = f"openconfirm{_cache_short}"
+_oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
+_oc_reuse     = _latest_analysis_cache(_oc_prefix)
+_oc_html = None
+if _oc_reuse is not None:
+    try:
+        _oc_html = _mhpk.loads(_oc_reuse.read_bytes()).get("html", "")
+        print(f"[寄り確認] キャッシュ再利用(日付跨ぎ可): {_oc_reuse.name}", flush=True)
+    except Exception:
+        _oc_html = None
+if _oc_html is None:
+    print("寄り確認エントリー検証中 (5分足取得)...", flush=True)
+    try:
+        import analyze_open_confirm_entry as _oc
+        _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
+                                  is_short=_args.short) or ""
+    except Exception as _oce:
+        import traceback as _octb
+        print(f"[寄り確認] 失敗: {_oce}\n{_octb.format_exc()}", flush=True)
+        _oc_html = ""
+    if _oc_html:
+        try:
+            _oc_cache_file.write_bytes(_mhpk.dumps({"html": _oc_html}))
+            print(f"[寄り確認] キャッシュ保存: {_oc_cache_file.name}", flush=True)
+        except Exception:
+            pass
+if _oc_html:
+    _all_period_html = _all_period_html.replace(
+        "<!-- OPENCONFIRM_SLOT -->", _oc_html, 1)
+_phase("寄り確認検証完了")
 
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
