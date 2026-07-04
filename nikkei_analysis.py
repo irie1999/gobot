@@ -5820,6 +5820,7 @@ function switchTbd(id, tab) {{
     # 6つの選定基準日として使い、各基準日の"その後の月次成績"を並べる。新規
     # スキャン不要(既存の設定別トレードを除外窓で切るだけ)。conservativeのみ。
     import re as _re_rf
+    _RF_BT_MIN = 70   # ロールフォワードOOSに適用するBTスコア下限(実運用フィルタ相当)
     _con_lbls_rf = {cfg["label"] for cfg in _PNL_CONFIGS
                     if str(cfg.get("mode", "")).lower() == "conservative"}
     _rf_data = []   # (holdout_days, as_of_date, oos_trades)
@@ -5833,7 +5834,8 @@ function switchTbd(id, tab) {{
         _asof = _TODAY - timedelta(days=_hd)
         _oos = [t for t in _trs
                 if t.get("signal_dt_raw") and t["signal_dt_raw"] >= _asof
-                and t.get("reason") not in ("発注中", "保有中")]
+                and t.get("reason") not in ("発注中", "保有中")
+                and (t.get("rec_score") or 0) >= _RF_BT_MIN]   # BT≥70 フィルタ
         _rf_data.append((_hd, _asof, _oos))
     _rf_data.sort(key=lambda x: -x[0])   # 最長holdout(=最古as-of)を上に
     _rf_months = sorted({t["signal_dt_raw"].strftime("%Y-%m")
@@ -5866,11 +5868,12 @@ function switchTbd(id, tab) {{
                      f'<br><span style="font-size:0.6rem;color:#94a3b8">{_tn}件 {_twr:.0f}%</span></td></tr>')
     _rf_month_h = "".join(f'<th>{_mo[5:]}月</th>' for _mo in _rf_months)
     rollforward_html = f"""
-<h2 style="margin-top:24px">★ ロールフォワードOOS検証（選定as-of別・月次 / conservative）</h2>
+<h2 style="margin-top:24px">★ ロールフォワードOOS検証（選定as-of別・月次 / conservative / <span style="color:#fbbf24">BT≥{_RF_BT_MIN}</span>）</h2>
 <p class="footnote" style="margin-bottom:8px">
   各holdout設定は「今日−N日」時点での選定＝それ以降が純OOS。<b>行</b>=選定基準日(古い順)、<b>列</b>=各月の成績。
-  <span style="color:#334155">·</span>=選定に使った月(in-sample) / 数字=OOS月の損益。下の行ほど長く先まで検証できている。
-  <b>OOS月が軒並みグリーンなら、選定が時期を越えて機能した証拠。</b>各行は別々の選定(再選定)＝正しいロールフォワード。
+  <span style="color:#334155">·</span>=選定に使った月(in-sample) / 数字=OOS月の損益 / —=取引なし。下の行ほど長く先まで検証。
+  <b>各取引に BT≥{_RF_BT_MIN} フィルタ適用</b>（BTフィルタ無しだと全期間マイナス＝BTの識別力を示す）。各行は別々の再選定＝正しいロールフォワード。
+  ※ as-of は最短でも 6月(HO30d)。7月基準は holdout&lt;30日のスキャンが必要で、かつ7月は数日のみ→フォワードテストで蓄積。7月の決済があれば列に自動表示。
 </p>
 <div style="overflow-x:auto"><table>
 <thead><tr><th style="text-align:left">選定as-of</th>{_rf_month_h}<th>OOS計</th></tr></thead>
