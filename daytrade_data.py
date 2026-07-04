@@ -36,11 +36,27 @@ import pandas as pd
 JST = timezone(timedelta(hours=9))
 
 # ── ローカルデータのパス ────────────────────────────────────
-# minute_5m   : 直近データ (日次更新, ~3ヶ月)  → 日次シグナル確認に使用
-# quarantine_5m: 長期データ (蓄積済, ~2年)     → WalkForward銘柄選定に使用
-# _load_local は両フォルダをマージして返す (重複は新しい方を優先)
-DATA_DIR       = Path(__file__).resolve().parent / "data" / "minute_5m"
-QUARANTINE_DIR = Path(__file__).resolve().parent / "data" / "quarantine_5m"
+# minute_5m : 直近データ (日次更新, ~3ヶ月)  → 日次シグナル確認に使用
+# stock_5min: 長期5分足 (~2年, 親フォルダ共有) → WalkForward銘柄選定に使用
+#             スイング(swingtrade)/デイトレ(daytrading)の親に1箇所置き共用する。
+# quarantine_5m: 旧・長期フォルダ(後方互換のフォールバック)
+# _load_local は minute_5m + 長期フォルダをマージして返す (重複は新しい方を優先)
+DATA_DIR         = Path(__file__).resolve().parent / "data" / "minute_5m"
+SHARED_5M        = Path(__file__).resolve().parent.parent / "stock_5min"
+_LEGACY_QUAR_DIR = Path(__file__).resolve().parent / "data" / "quarantine_5m"
+# 長期5分足の探索順(先頭優先)。共有 stock_5min → 旧 quarantine_5m
+QUARANTINE_DIRS  = [SHARED_5M, _LEGACY_QUAR_DIR]
+# 既存コード互換: 単一パス参照は共有フォルダを指す
+QUARANTINE_DIR   = SHARED_5M
+
+
+def _long_pkl(jq_code: str) -> Path | None:
+    """長期5分足 pkl を共有→旧の順で探し、最初に見つかったパスを返す。"""
+    for d in QUARANTINE_DIRS:
+        p = d / f"{jq_code}.pkl"
+        if p.exists():
+            return p
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -64,10 +80,12 @@ def jq_to_yf(jq_code: str) -> str:
 
 
 def quarantine_symbols() -> list[str]:
-    """quarantine_5m フォルダに存在する銘柄コード一覧 (yfinance形式)。"""
-    if not QUARANTINE_DIR.exists():
-        return []
-    return sorted(jq_to_yf(f.stem) for f in QUARANTINE_DIR.glob("*.pkl"))
+    """長期5分足フォルダ(共有 stock_5min + 旧 quarantine_5m)の銘柄コード一覧。"""
+    codes: set[str] = set()
+    for d in QUARANTINE_DIRS:
+        if d.exists():
+            codes.update(jq_to_yf(f.stem) for f in d.glob("*.pkl"))
+    return sorted(codes)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -321,9 +339,9 @@ def resample_to_5m(df: pd.DataFrame) -> pd.DataFrame:
     }).dropna(subset=["close"])
 
 
-def _load_pkl(pkl_path: Path) -> pd.DataFrame | None:
+def _load_pkl(pkl_path: Path | None) -> pd.DataFrame | None:
     """pkl ファイルを読み込んで正規化・5分足化して返す。"""
-    if not pkl_path.exists():
+    if pkl_path is None or not pkl_path.exists():
         return None
     try:
         raw = pickle.loads(pkl_path.read_bytes())
@@ -379,8 +397,9 @@ def _load_local_full(jq_code: str) -> pd.DataFrame | None:
     ソース pkl より新しいキャッシュがあればそれを使う。
     """
     recent_path = DATA_DIR / f"{jq_code}.pkl"
-    long_path   = QUARANTINE_DIR / f"{jq_code}.pkl"
-    src_mtimes = [p.stat().st_mtime for p in (recent_path, long_path) if p.exists()]
+    long_path   = _long_pkl(jq_code)   # 共有 stock_5min → 旧 quarantine_5m
+    src_paths = [p for p in (recent_path, long_path) if p and p.exists()]
+    src_mtimes = [p.stat().st_mtime for p in src_paths]
     if not src_mtimes:
         return None
 
@@ -612,10 +631,9 @@ def split_by_day(df: pd.DataFrame) -> dict:
 def available_local_symbols() -> list[str]:
     """ローカルに保存されている銘柄コード一覧 (両フォルダの和集合)。"""
     codes: set[str] = set()
-    if DATA_DIR.exists():
-        codes.update(f.stem for f in DATA_DIR.glob("*.pkl"))
-    if QUARANTINE_DIR.exists():
-        codes.update(f.stem for f in QUARANTINE_DIR.glob("*.pkl"))
+    for d in [DATA_DIR, *QUARANTINE_DIRS]:
+        if d.exists():
+            codes.update(f.stem for f in d.glob("*.pkl"))
     return sorted(codes)
 
 

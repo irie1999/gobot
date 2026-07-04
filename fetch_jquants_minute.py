@@ -6,7 +6,8 @@ jquants_fetch.fetch_intraday はデータを ~/.jquants_cache/ に保存する�
 本スクリプトで『J-Quants 5分足を取得 → data/ に正しい形式で保存』する。
 
 保存先(既定):
-  data/quarantine_5m/{jqコード}.pkl   ← 長期(2年)5分足。デイトレWF選定が読む場所
+  ../stock_5min/{jqコード}.pkl   ← 長期(2年)5分足。親フォルダに1箇所置き、
+                                   スイング(swingtrade)/デイトレ(daytrading)双方が読む共有場所
 
 【セットアップ】(初回のみ)
   1) pip install jquants-api-client
@@ -36,6 +37,9 @@ import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
+# 5分足の共有フォルダ。スイング(swingtrade)/デイトレ(daytrading)の親に1箇所置き、
+# 両プロジェクトから読めるようにする(例 kabu station/stock_5min/)。
+SHARED_5M = _HERE.parent / "stock_5min"
 DATA_MIN = _HERE / "data" / "minute_5m"
 DATA_QUAR = _HERE / "data" / "quarantine_5m"
 
@@ -93,8 +97,9 @@ def main():
     ap.add_argument("--swing-watchlist", action="store_true", help="スイングWATCHLIST")
     ap.add_argument("--symbols-file", default=None, help="銘柄リストの.py")
     ap.add_argument("--days", type=int, default=730, help="取得日数(5分足は2年=730が上限)")
-    ap.add_argument("--dir", choices=["quarantine", "minute"], default="quarantine",
-                    help="保存先。quarantine=長期(既定)/minute=直近")
+    ap.add_argument("--dir", choices=["shared", "quarantine", "minute"], default="shared",
+                    help="保存先。shared=親フォルダ共有 stock_5min(既定・スイング/デイトレ共用)"
+                         " / quarantine=daytrading/data/quarantine_5m(旧) / minute=直近")
     ap.add_argument("--sleep", type=float, default=1.1, help="1銘柄ごとの待機秒(レート制限)")
     ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(動作確認)")
     ap.add_argument("--force", action="store_true", help="既存pklも再取得")
@@ -127,7 +132,8 @@ def main():
     if args.limit and args.limit > 0:
         syms = syms[:args.limit]
 
-    out_dir = DATA_QUAR if args.dir == "quarantine" else DATA_MIN
+    out_dir = {"shared": SHARED_5M, "quarantine": DATA_QUAR,
+               "minute": DATA_MIN}[args.dir]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

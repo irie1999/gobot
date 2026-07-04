@@ -29,12 +29,20 @@ import argparse
 import os
 import pickle
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
+
+# レート制限(429)対策。分足は1銘柄=24チャンクを連射するため、チャンク間に
+# スリープを入れ、429時は指数バックオフでリトライする。Lightは60件/分。
+CHUNK_SLEEP_SEC = 1.1       # チャンク間の待機秒
+CHUNK_MAX_RETRY = 5         # 429時のリトライ回数
+CHUNK_BACKOFF_BASE = 4.0    # バックオフ基準秒 (4,8,16,32,64s)
+
 CACHE_ROOT = Path.home() / ".jquants_cache"
 DAILY_CACHE_DIR = CACHE_ROOT / "daily"
 MINUTE_CACHE_DIR = CACHE_ROOT / "minute"
@@ -321,24 +329,39 @@ def fetch_intraday(symbol: str, days: int = 60,
         chunk_idx += 1
         from_d = current.strftime("%Y%m%d")
         to_d = chunk_end.strftime("%Y%m%d")
-        try:
-            raw = fetch_method(
-                code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
-            )
-            if raw is not None and not raw.empty:
-                # 銘柄フィルタ
-                if "Code" in raw.columns:
-                    raw = raw[raw["Code"].astype(str).str.startswith(
-                        jq_code[:4])].copy()
-                if not raw.empty:
-                    all_dfs.append(raw)
-                    print(f"    chunk {chunk_idx}: "
-                          f"{current.strftime('%Y-%m-%d')}〜"
-                          f"{chunk_end.strftime('%Y-%m-%d')} → "
-                          f"{len(raw)}行", flush=True)
-        except Exception as e:
-            print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+        # 429 は指数バックオフでリトライ (jquantsapi 内部リトライを使い切っても粘る)
+        raw = None
+        for attempt in range(CHUNK_MAX_RETRY):
+            try:
+                raw = fetch_method(
+                    code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
+                )
+                break
+            except Exception as e:
+                is_429 = "429" in str(e) or "too many" in str(e).lower()
+                if is_429 and attempt < CHUNK_MAX_RETRY - 1:
+                    wait = CHUNK_BACKOFF_BASE * (2 ** attempt)
+                    print(f"    chunk {chunk_idx}: 429 → {wait:.0f}s待機して"
+                          f"リトライ ({attempt + 1}/{CHUNK_MAX_RETRY})",
+                          file=sys.stderr, flush=True)
+                    time.sleep(wait)
+                    continue
+                print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+                raw = None
+                break
+        if raw is not None and not raw.empty:
+            # 銘柄フィルタ
+            if "Code" in raw.columns:
+                raw = raw[raw["Code"].astype(str).str.startswith(
+                    jq_code[:4])].copy()
+            if not raw.empty:
+                all_dfs.append(raw)
+                print(f"    chunk {chunk_idx}: "
+                      f"{current.strftime('%Y-%m-%d')}〜"
+                      f"{chunk_end.strftime('%Y-%m-%d')} → "
+                      f"{len(raw)}行", flush=True)
         current = chunk_end + timedelta(days=1)
+        time.sleep(CHUNK_SLEEP_SEC)   # チャンク間レート制限(429回避)
 
     if not all_dfs:
         print(f"  [warn] {symbol}: 分足データなし", file=sys.stderr)
