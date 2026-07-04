@@ -146,18 +146,39 @@ def main():
     if not syms:
         print("対象銘柄が0件です(ユニバースファイルを確認)。")
         sys.exit(1)
-    if args.limit and args.limit > 0:
-        syms = syms[:args.limit]
 
     out_dir = {"shared": SHARED_5M, "quarantine": DATA_QUAR,
                "minute": DATA_MIN}[args.dir]
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 取得済み(pkl 存在)を先に除外してから --limit を適用する。これにより
+    # --limit N = 「未取得の先頭N件」となり、繰り返し実行で分割取得できる
+    # (今日300件→明日300件…)。--force 時は全件対象。
+    total_universe = len(syms)
+    if not args.force:
+        already = sum(1 for s in syms
+                      if (out_dir / f"{yf_to_jquants(s)}.pkl").exists())
+        syms = [s for s in syms
+                if not (out_dir / f"{yf_to_jquants(s)}.pkl").exists()]
+    else:
+        already = 0
+    remaining = len(syms)
+    if args.limit and args.limit > 0:
+        syms = syms[:args.limit]
+
     print("=" * 70)
     print(f"J-Quants 5分足 取得 → {out_dir}")
-    print(f"対象: {src} {len(syms)}銘柄 / {args.days}日 / sleep={args.sleep}s / "
-          f"{'上書き' if args.force else '既存はスキップ(再開可)'}")
+    print(f"対象: {src} 全{total_universe}銘柄 / 取得済み{already} / "
+          f"未取得{remaining} / 今回{len(syms)}銘柄 / {args.days}日 / "
+          f"sleep={args.sleep}s / {'上書き' if args.force else '既存スキップ(再開可)'}")
+    # 概算所要時間 (1銘柄あたり 24チャンク×チャンクsleep + 銘柄sleep)
+    from jquants_fetch import CHUNK_SLEEP_SEC
+    est_min = len(syms) * (24 * CHUNK_SLEEP_SEC + args.sleep) / 60
+    print(f"概算所要時間: 約{est_min:.0f}分 (429バックオフ発生時はさらに増加)")
     print("=" * 70)
+    if not syms:
+        print("今回取得する銘柄はありません(全て取得済み)。完了。")
+        return
 
     ok = skip = fail = 0
     for i, sym in enumerate(syms, 1):
