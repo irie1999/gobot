@@ -5,13 +5,17 @@ BTスコア(calc_recommend_score)が、どの期間窓(30/90/180/365日)の成�
 決まっているかを可視化する。「なぜこの銘柄はBTが低い/高いのか」を調べる用。
 
 使い方:
-  python bt_breakdown.py 8343.T DON
-  python bt_breakdown.py 3046.T MACD
+  python bt_breakdown.py 8343.T DON          # 戦略を指定
+  python bt_breakdown.py 3046.T              # 戦略省略 → 全6戦略のBTを一覧
+  python bt_breakdown.py 3046.T ALL          # 同上
   python bt_breakdown.py 6136.T A7 --name オーエスジー
 
 戦略の自動振り分け:
   DON / VOL / MOM        → ブレイクアウト (check_signals_breakout)
   MACD / A7 / RSI2       → 逆指値B       (check_signals_stop)
+
+※ レポートに出る「BT:○○」は"今日シグナルが出た戦略"の値。どの戦略か分から
+   ないときは戦略を省略して全戦略のBTを一覧し、値が一致するものを探す。
 """
 from __future__ import annotations
 
@@ -20,25 +24,71 @@ import sys
 
 BREAKOUT = {"DON", "VOL", "MOM"}
 STOP = {"MACD", "A7", "RSI2"}
+ALL_STRATS = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+
+
+def _module_for(strat: str):
+    if strat in BREAKOUT:
+        import check_signals_breakout as mod
+        return mod
+    if strat in STOP:
+        import check_signals_stop as mod
+        return mod
+    return None
+
+
+def _score_of(symbol: str, strat: str, name: str):
+    """(score, rank, period_results) を返す。取得失敗時は (None, None, None)。"""
+    mod = _module_for(strat)
+    if mod is None:
+        return None, None, None
+    r = mod.backtest_one(symbol, name, strat)
+    if r is None:
+        return None, None, None
+    pr = r["period_results"]
+    score, rank = mod.calc_recommend_score(pr)
+    return score, rank, pr
+
+
+def _print_all(symbol: str, name: str) -> None:
+    print("=" * 66)
+    print(f"  {symbol}  全戦略の BTスコア一覧")
+    print("=" * 66)
+    print(f"  {'戦略':>6} | {'BT':>4} | ランク | 各窓の取引数(30/90/180/365)")
+    print("  " + "-" * 62)
+    for strat in ALL_STRATS:
+        score, rank, pr = _score_of(symbol, strat, name)
+        if score is None:
+            print(f"  {strat:>6} |   -- | (データ/シグナルなし)")
+            continue
+        counts = "/".join(str(pr.get(d, {}).get("trades", 0))
+                          for d in (30, 90, 180, 365))
+        print(f"  {strat:>6} | {score:>4} | {rank:<4} | {counts}")
+    print("  " + "-" * 62)
+    print("  詳細内訳を見たい戦略: python bt_breakdown.py "
+          f"{symbol} <戦略名>")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("symbol", help="銘柄コード (例 8343.T)")
-    ap.add_argument("strategy", help="戦略 (DON/VOL/MOM/MACD/A7/RSI2)")
+    ap.add_argument("strategy", nargs="?", default="ALL",
+                    help="戦略 (DON/VOL/MOM/MACD/A7/RSI2)。省略で全戦略一覧")
     ap.add_argument("--name", default="", help="銘柄名 (表示用・任意)")
     args = ap.parse_args()
 
+    name = args.name or args.symbol
     strat = args.strategy.upper()
-    if strat in BREAKOUT:
-        import check_signals_breakout as mod
-    elif strat in STOP:
-        import check_signals_stop as mod
-    else:
+
+    if strat == "ALL":
+        _print_all(args.symbol, name)
+        return
+
+    mod = _module_for(strat)
+    if mod is None:
         print(f"未知の戦略: {strat} (DON/VOL/MOM/MACD/A7/RSI2 のいずれか)")
         sys.exit(1)
 
-    name = args.name or args.symbol
     r = mod.backtest_one(args.symbol, name, strat)
     if r is None:
         print(f"{args.symbol} {strat}: バックテスト結果なし (データ取得失敗?)")
