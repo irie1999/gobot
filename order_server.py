@@ -181,22 +181,34 @@ def _is_filled(cli, symbol: str, side: str) -> bool:
 
 def _has_active_close_order(cli, symbol: str, side: str) -> bool:
     """利確(決済)注文が既に出ているか。long利確=売(1)/short利確=買戻(2)。"""
+    return _active_close_order(cli, symbol, side)[0] is not None
+
+
+def _active_close_order(cli, symbol: str, side: str):
+    """アクティブな利確注文の (order_id, price) を返す。無ければ (None, None)。
+    long利確=売(1)/short利確=買戻(2)。"""
     try:
         orders = cli.get_orders()
     except Exception:
-        return False
+        return None, None
     want = "1" if side == "long" else "2"
     # OrderState: 1待機/2処理中/3処理済/4訂正取消送信中/5終了(=約定・失効・取消)。
-    # 5(終了)は「有効な板上の注文」ではない。失効した利確を有効と誤判定すると
-    # 再発注されず建玉が無防備になるため、5は除外する。
+    # 5(終了)は有効な板上の注文でないため除外。
     ACTIVE = {1, 2, 3, 4}
     for o in orders:
         if str(o.get("Symbol", "")).split(".")[0] != symbol:
             continue
-        if str(o.get("Side", "")) == want and \
-           int(o.get("OrderState") or o.get("State") or 0) in ACTIVE:
-            return True
-    return False
+        if str(o.get("Side", "")) != want:
+            continue
+        if int(o.get("OrderState") or o.get("State") or 0) not in ACTIVE:
+            continue
+        oid = o.get("ID", "") or o.get("OrderId", "")
+        try:
+            price = float(o.get("Price") or 0)
+        except Exception:
+            price = 0.0
+        return oid, price
+    return None, None
 
 
 # kabu が受け付けた最長の ExpireDay 営業日オフセットをキャッシュ (毎回の探索を避ける)
@@ -215,7 +227,7 @@ def _expire_int(bdays: int) -> int:
         return 0
 
 
-def _place_target_now(cli, p: dict) -> str:
+def _place_target_now(cli, p: dict, existing=None) -> str:
     """約定後の利確指値を発注。重複は出さない。
     ExpireDay は「kabu が受け付ける最長」を自動採用する:
       朝一に order_server を起動できなくても、前営業日に置いた利確指値が
@@ -226,13 +238,31 @@ def _place_target_now(cli, p: dict) -> str:
     global _EXPIRE_OK_BDAYS
     symbol, side, qty, target, strat = (p["symbol"], p["side"], p["qty"],
                                         p["target"], p["strategy"])
-    if _has_active_close_order(cli, symbol, side):
-        return "exists"
-    # 利確指値は値幅制限(ストップ高/安)超だと kabu の値段チェックで弾かれるので
-    # 上限にキャップ。取得失敗時(429等)は弾かれる値を送らずスキップ(ストーム防止)。
+    # 本来の利確目標を当日の値幅で丸めた「発注すべき価格」。値幅超なら上限に自動キャップ。
+    # 取得失敗時(429等)は弾かれる値を送らずスキップ(ストーム防止)。
     price = _cap_to_price_limit(cli, symbol, side, target)
     if price is None:
         return "skip(値幅取得失敗→次回再試行)"
+
+    # 既存利確があれば価格を比較。値幅が広がって本来目標に近づけられる/狭まって
+    # 値幅内に収め直す必要がある場合は、キャンセルして置き直す(=目標更新)。
+    # existing=(oid,price) が渡されればそれを使う(get_orders再取得を避け429回避)。
+    if existing is not None:
+        _oid, _cur = existing
+    else:
+        _oid, _cur = _active_close_order(cli, symbol, side)
+    _relabel = ""
+    if _oid is not None:
+        from backtest_limit_entry import tick_size as _tsz
+        if abs(_cur - price) <= _tsz(price):
+            return "exists"                     # 現行と実質同じ → 据置
+        # 置き直し: 既存をキャンセル(非送出化済み)してから発注
+        try:
+            cli.cancel_order(_oid)
+        except Exception:
+            pass
+        _relabel = (f"目標更新↑({_cur:,.0f}→{price:,.0f})" if price > _cur
+                    else f"値幅内へ修正↓({_cur:,.0f}→{price:,.0f})")
 
     from backtest_limit_entry import default_max_hold
     mh = default_max_hold(strat)
@@ -261,7 +291,7 @@ def _place_target_now(cli, p: dict) -> str:
             return f"fail({e})"
         if (res.get("Result") == 0) or res.get("_dry_run"):
             _EXPIRE_OK_BDAYS = n   # 通った最長をキャッシュ
-            return f"placed(exp={n}営業日)"
+            return f"{_relabel or 'placed'}(exp={n}営業日)"
         # 有効期限エラー(Code5)なら短い候補へ。それ以外は即中断(スパム防止)
         if res.get("Code") == 5 or "有効期限" in str(res.get("Message", "")):
             continue
@@ -406,27 +436,31 @@ def _load_signal_targets() -> dict:
     return out
 
 
-def _active_close_set(cli) -> set:
-    """利確(決済)注文が既に出ている (symbol, side) の集合。get_ordersは1回だけ(429回避)。
-    long利確=売(1) / short利確=買戻(2)。"""
-    out: set = set()
+def _active_close_map(cli) -> dict:
+    """利確(決済)注文がある (symbol, side) → (order_id, price) の辞書。
+    get_ordersは1回だけ(429回避)。long利確=売(1)/short利確=買戻(2)。"""
+    out: dict = {}
     try:
         orders = _kabu_get(cli.get_orders)
     except Exception as e:
         print(f"  ⚠ 利確補完: 注文一覧取得失敗 ({e}) → 重複チェックなしで続行")
         return out
-    # 5(終了=約定・失効・取消)は有効注文でない。失効した利確を有効扱いすると
-    # 再発注されず無防備になるため除外 (値幅外で失効→翌日再発注が必要なケース対応)。
+    # 5(終了=約定・失効・取消)は有効注文でない。除外。
     ACTIVE = {1, 2, 3, 4}
     for o in orders or []:
         if int(o.get("OrderState") or o.get("State") or 0) not in ACTIVE:
             continue
         sym = str(o.get("Symbol", "")).split(".")[0]
         s = str(o.get("Side", ""))
-        if s == "1":
-            out.add((sym, "long"))
-        elif s == "2":
-            out.add((sym, "short"))
+        side = "long" if s == "1" else "short" if s == "2" else None
+        if side is None:
+            continue
+        try:
+            price = float(o.get("Price") or 0)
+        except Exception:
+            price = 0.0
+        oid = o.get("ID", "") or o.get("OrderId", "")
+        out[(sym, side)] = (oid, price)   # 同一(sym,side)は1件想定
     return out
 
 
@@ -458,10 +492,11 @@ def _backfill_targets(cli) -> None:
     if not agg:
         return
     targets = _load_signal_targets()
-    have_close = _active_close_set(cli)   # 既存利確を一括取得(get_ordersは1回)
+    close_map = _active_close_map(cli)   # 既存利確 (sym,side)->(oid,price) を一括取得
     for (sym, side), qty in agg.items():
-        if (sym, side) in have_close:
-            continue   # 既に利確あり
+        # 既存利確があってもスキップせず、_place_target_now に渡して
+        # 「据置 / 目標更新(値幅が広がれば本来目標へ) / 値幅内へ修正」を判定させる。
+        _existing = close_map.get((sym, side))
         info = targets.get((sym, side))
         if not info or info["target"] <= 0:
             # フォールバック: 保有タブと同じ『直近30営業日シグナル全戦略照合』で
@@ -480,7 +515,8 @@ def _backfill_targets(cli) -> None:
                 continue
         try:
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
-                                         "target": info["target"], "strategy": info["strategy"]})
+                                         "target": info["target"], "strategy": info["strategy"]},
+                                    existing=_existing)
             print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
         except Exception as e:
             print(f"  ⚠ 利確補完エラー {sym}: {e}")
