@@ -5881,6 +5881,83 @@ function switchTbd(id, tab) {{
 </table></div>
 """
 
+    # ── 基準月別 union ロールフォワード ──────────────────────────────────────
+    # 「基準月Mまでに選定できた全holdout設定の銘柄をまとめて(union)、Mより後(=純OOS)
+    # の月次成績を集計」。設定を横断unionするので件数が増え、"5月基準→6月"の検証に
+    # ちょうど対応する。dedup=(sym,strat,signal日)。BT≥_RF_BT_MIN フィルタ適用。
+    _cfg_asof2 = []   # (as_of_month_str, trades)
+    for _lab, _trs in cfg_trades_map.items():
+        if _lab not in _con_lbls_rf:
+            continue
+        _m2 = _re_rf.search(r"HO(\d+)d", _lab)
+        if not _m2:
+            continue
+        _asof2 = (_TODAY - timedelta(days=int(_m2.group(1)))).strftime("%Y-%m")
+        _cfg_asof2.append((_asof2, _trs))
+    _base_ms = sorted({am for am, _ in _cfg_asof2})
+    _u_fwd = set()
+    _u_seen_by_base = {}
+    for _bm in _base_ms:
+        _seen_u = {}   # (sym,strat,sd) -> (pnl, fwd_month)
+        for _am, _trs in _cfg_asof2:
+            if _am > _bm:
+                continue
+            for t in _trs:
+                if t.get("reason") in ("発注中", "保有中"):
+                    continue
+                if (t.get("rec_score") or 0) < _RF_BT_MIN:
+                    continue
+                _sd = t.get("signal_dt_raw")
+                if not _sd:
+                    continue
+                _sm = _sd.strftime("%Y-%m")
+                if _sm <= _bm:
+                    continue
+                _seen_u[(t["symbol"], t["strategy"], _sd)] = (t.get("pnl", 0), _sm)
+                _u_fwd.add(_sm)
+        _u_seen_by_base[_bm] = _seen_u
+    _u_months = sorted(_u_fwd)
+    _u_rows = ""
+    for _bm in _base_ms:
+        _sn = _u_seen_by_base[_bm]
+        _cells = ""
+        for _mo in _u_months:
+            if _mo <= _bm:
+                _cells += '<td style="color:#334155;text-align:center">·</td>'
+                continue
+            _pl = [p for (p, m) in _sn.values() if m == _mo]
+            if not _pl:
+                _cells += '<td style="color:#475569;text-align:center">—</td>'
+                continue
+            _p = sum(_pl)
+            _w = sum(1 for x in _pl if x > 0)
+            _c = "#4ade80" if _p > 0 else ("#f87171" if _p < 0 else "#94a3b8")
+            _cells += (f'<td style="text-align:right;color:{_c};font-weight:700">{_p:+,.0f}'
+                       f'<br><span style="font-size:0.6rem;color:#94a3b8">{len(_pl)}件{_w}勝</span></td>')
+        _allp = [p for (p, m) in _sn.values()]
+        _tp = sum(_allp)
+        _tn = len(_allp)
+        _tw = sum(1 for x in _allp if x > 0)
+        _twr = _tw / _tn * 100 if _tn else 0
+        _tc = "#4ade80" if _tp > 0 else ("#f87171" if _tp < 0 else "#94a3b8")
+        _u_rows += (f'<tr><td style="text-align:left;white-space:nowrap">{_bm} まで選定</td>{_cells}'
+                    f'<td style="text-align:right;color:{_tc};font-weight:700">{_tp:+,.0f}円'
+                    f'<br><span style="font-size:0.6rem;color:#94a3b8">{_tn}件 {_twr:.0f}%</span></td></tr>')
+    _u_month_h = "".join(f'<th>{_mo[5:]}月</th>' for _mo in _u_months)
+    _union_html = f"""
+<h2 style="margin-top:24px">★ 基準月別 ロールフォワードOOS（全holdout選定を union / conservative / <span style="color:#fbbf24">BT≥{_RF_BT_MIN}</span>）</h2>
+<p class="footnote" style="margin-bottom:8px">
+  <b>行=選定の基準月</b>（その月末までのデータだけで選定できた全holdout設定の銘柄を <b>まとめて union</b>）、<b>列=基準月より後(=純OOS)の各月成績</b>。
+  例: 「2026-05 まで選定」行の 06月 = <b>5月末までに選ばれた全銘柄を、未知の6月で試した結果</b>。設定を横断unionするので件数が多い。
+  <span style="color:#334155">·</span>=基準月以前(in-sample) / 数字=OOS月損益 / —=取引なし。BT≥{_RF_BT_MIN} フィルタ適用。dedup=銘柄×戦略×シグナル日。
+</p>
+<div style="overflow-x:auto"><table>
+<thead><tr><th style="text-align:left">選定基準月</th>{_u_month_h}<th>OOS計</th></tr></thead>
+<tbody>{_u_rows or '<tr><td colspan="99" style="text-align:center;color:#64748b;padding:12px">OOSデータなし</td></tr>'}</tbody>
+</table></div>
+"""
+    rollforward_html = _union_html + rollforward_html
+
     # ── ⑤ BT60-69 × WFクロス + 銘柄別（conservative限定）──
     # conservativeラベルを含む設定のみ抽出
     con_labels = {cfg["label"] for cfg in _PNL_CONFIGS if "conservative" in cfg.get("mode", "").lower() or "conservative" in cfg.get("label", "").lower()}
