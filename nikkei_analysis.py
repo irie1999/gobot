@@ -5866,7 +5866,7 @@ function switchTbd(id, tab) {{
                      f'<br><span style="font-size:0.6rem;color:#94a3b8">{_tn}件 {_twr:.0f}%</span></td></tr>')
     _rf_month_h = "".join(f'<th>{_mo[5:]}月</th>' for _mo in _rf_months)
     rollforward_html = f"""
-<h2 style="margin-top:24px">⑥ ロールフォワードOOS検証（選定as-of別・月次 / conservative）</h2>
+<h2 style="margin-top:24px">★ ロールフォワードOOS検証（選定as-of別・月次 / conservative）</h2>
 <p class="footnote" style="margin-bottom:8px">
   各holdout設定は「今日−N日」時点での選定＝それ以降が純OOS。<b>行</b>=選定基準日(古い順)、<b>列</b>=各月の成績。
   <span style="color:#334155">·</span>=選定に使った月(in-sample) / 数字=OOS月の損益。下の行ほど長く先まで検証できている。
@@ -8015,6 +8015,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn active" onclick="switchAnalysisTab({_dseq},'summary')">スクリプト別</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'score')">① ② スコア別実績</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'cross')">③ ④ BT×WF・高BT銘柄</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'rollfwd')">★ ロールフォワードOOS</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り</button>
@@ -8192,6 +8193,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <b>純OOS損益</b> = その銘柄を選定に使っていない期間（各holdout設定の直近除外窓）だけのトレード損益。WFと違い選定バイアスが無い唯一の本物のOOS。<br>
   「損益合計プラス・純OOSもプラス」= 本物 / 「損益合計プラスだが純OOSマイナス」= 直近で崩れている。窓(d)が長いほど信頼度が高い。
 </p>
+</div>
+
+<div id="analtab_{_dseq}_rollfwd" class="analysis-tab-pane">
 {rollforward_html}
 </div>
 
@@ -8325,7 +8329,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming'];
+  var tabs = ['summary','score','cross','rollfwd','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
