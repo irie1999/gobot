@@ -4643,6 +4643,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         "is_wf": is_wf2, "wf_score": wf_score2,
                         "rec_score": _sig_sc,   # BT表示・フィルタも発生時スコアで統一
                         "preoos_score": _sig_sc,
+                        "signal_dt_raw": _sd_for_key,   # ④純OOS列: 除外窓判定用
                         "bt_type": bt_type2,    # BTスコアの支配要素(安定/取引数/高WR/高PF)
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
                         "pnl": t.get("pnl", 0), "reason": reason}
@@ -5707,36 +5708,27 @@ function switchTbd(id, tab) {{
 """
 
     # ── holdout-OOS 集計 (④表「純OOS」列用) ────────────────────────────────
-    # 各config は「直近 holdout_days 日を除外して選定」→ その直近窓のトレードは
-    # 選定に一切使っていない純粋OOS。conservative設定のみ対象、同一シグナルは
-    # 最長のholdout窓(=最も信頼できるOOS)で分類する。WFと違い選定バイアスなし。
+    # ④行と同じ bt60_trades を母集団とし、そのうち「各config が選定に使っていない
+    # 直近除外窓(signal日が TODAY - holdout_days 以降)」に入るトレードだけを抽出。
+    # → 必ず行の取引数の部分集合になる(純OOS件数 ≤ 行の取引数)。WFと違い選定
+    #   バイアスの無い本物のOOS。標準WF(HOxx無)のconfigでは判定不能=対象外。
     import re as _re_ho
-    _oos_trade: dict = {}   # (sym, strat, signal_dt) -> (pnl, window_days)
-    for _lab, _trs in cfg_trades_map.items():
-        if "con" not in _lab.lower():
-            continue
-        _mho = _re_ho.search(r"HO(\d+)d", _lab)
+    _oos_sym: dict = defaultdict(lambda: {"n": 0, "w": 0, "pnl": 0, "win": 0})
+    for _t in bt60_trades:
+        _mho = _re_ho.search(r"HO(\d+)d", _t.get("label", "") or "")
         if not _mho:
             continue
         _hd = int(_mho.group(1))
-        _cut = _TODAY - timedelta(days=_hd)
-        for _t in _trs:
-            _sd = _t.get("signal_dt_raw")
-            if _sd is None or _t.get("reason") in ("発注中", "保有中"):
-                continue
-            if _sd >= _cut:
-                _k = (_t.get("symbol"), _t.get("strategy"), _sd)
-                _prev = _oos_trade.get(_k)
-                if _prev is None or _hd > _prev[1]:
-                    _oos_trade[_k] = (_t.get("pnl", 0), _hd)
-    _oos_sym: dict = defaultdict(lambda: {"n": 0, "w": 0, "pnl": 0, "win": 0})
-    for (_s, _st, _sd), (_pnl, _hd) in _oos_trade.items():
-        _o = _oos_sym[_s]
-        _o["n"] += 1
-        _o["pnl"] += _pnl
-        if _pnl > 0:
-            _o["w"] += 1
-        _o["win"] = max(_o["win"], _hd)
+        _sd = _t.get("signal_dt_raw")
+        if _sd is None:
+            continue
+        if _sd >= _TODAY - timedelta(days=_hd):
+            _o = _oos_sym[_t["symbol"]]
+            _o["n"]   += 1
+            _o["pnl"] += _t["pnl"]
+            if _t["pnl"] > 0:
+                _o["w"] += 1
+            _o["win"] = max(_o["win"], _hd)
 
     # ── ④ 高BT銘柄別成績 (BT≥60 / rec_scoreで選定・per-symbol) ──
     sym_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
