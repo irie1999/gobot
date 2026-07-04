@@ -5815,6 +5815,69 @@ function switchTbd(id, tab) {{
     if not sym_rows:
         sym_rows = '<tr><td colspan="11" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
 
+    # ── ⑥ ロールフォワードOOS検証 (選定as-o別・月次) ───────────────────────────
+    # 各holdout設定は「今日−N日」時点で選定=それ以降が純OOS。HO30d〜HO180d を
+    # 6つの選定基準日として使い、各基準日の"その後の月次成績"を並べる。新規
+    # スキャン不要(既存の設定別トレードを除外窓で切るだけ)。conservativeのみ。
+    import re as _re_rf
+    _con_lbls_rf = {cfg["label"] for cfg in _PNL_CONFIGS
+                    if str(cfg.get("mode", "")).lower() == "conservative"}
+    _rf_data = []   # (holdout_days, as_of_date, oos_trades)
+    for _lab, _trs in cfg_trades_map.items():
+        if _lab not in _con_lbls_rf:
+            continue
+        _m = _re_rf.search(r"HO(\d+)d", _lab)
+        if not _m:
+            continue
+        _hd = int(_m.group(1))
+        _asof = _TODAY - timedelta(days=_hd)
+        _oos = [t for t in _trs
+                if t.get("signal_dt_raw") and t["signal_dt_raw"] >= _asof
+                and t.get("reason") not in ("発注中", "保有中")]
+        _rf_data.append((_hd, _asof, _oos))
+    _rf_data.sort(key=lambda x: -x[0])   # 最長holdout(=最古as-of)を上に
+    _rf_months = sorted({t["signal_dt_raw"].strftime("%Y-%m")
+                         for _, _, _oos in _rf_data for t in _oos})
+    _rf_rows = ""
+    for _hd, _asof, _oos in _rf_data:
+        _asof_m = _asof.strftime("%Y-%m")
+        _cells = ""
+        for _mo in _rf_months:
+            if _mo < _asof_m:   # 選定に使った月=in-sample
+                _cells += '<td style="color:#334155;text-align:center">·</td>'
+                continue
+            _mt = [t for t in _oos if t["signal_dt_raw"].strftime("%Y-%m") == _mo]
+            if not _mt:
+                _cells += '<td style="color:#475569;text-align:center">—</td>'
+                continue
+            _p = sum(t["pnl"] for t in _mt)
+            _w = sum(1 for t in _mt if t["pnl"] > 0)
+            _c = "#4ade80" if _p > 0 else ("#f87171" if _p < 0 else "#94a3b8")
+            _cells += (f'<td style="text-align:right;color:{_c};font-weight:700">{_p:+,.0f}'
+                       f'<br><span style="font-size:0.6rem;color:#94a3b8">{len(_mt)}件{_w}勝</span></td>')
+        _tp = sum(t["pnl"] for t in _oos)
+        _tn = len(_oos)
+        _tw = sum(1 for t in _oos if t["pnl"] > 0)
+        _twr = _tw / _tn * 100 if _tn else 0
+        _tc = "#4ade80" if _tp > 0 else ("#f87171" if _tp < 0 else "#94a3b8")
+        _rf_rows += (f'<tr><td style="text-align:left;white-space:nowrap">as-of {_asof_m}'
+                     f'<br><span style="font-size:0.65rem;color:#94a3b8">HO{_hd}d</span></td>{_cells}'
+                     f'<td style="text-align:right;color:{_tc};font-weight:700">{_tp:+,.0f}円'
+                     f'<br><span style="font-size:0.6rem;color:#94a3b8">{_tn}件 {_twr:.0f}%</span></td></tr>')
+    _rf_month_h = "".join(f'<th>{_mo[5:]}月</th>' for _mo in _rf_months)
+    rollforward_html = f"""
+<h2 style="margin-top:24px">⑥ ロールフォワードOOS検証（選定as-of別・月次 / conservative）</h2>
+<p class="footnote" style="margin-bottom:8px">
+  各holdout設定は「今日−N日」時点での選定＝それ以降が純OOS。<b>行</b>=選定基準日(古い順)、<b>列</b>=各月の成績。
+  <span style="color:#334155">·</span>=選定に使った月(in-sample) / 数字=OOS月の損益。下の行ほど長く先まで検証できている。
+  <b>OOS月が軒並みグリーンなら、選定が時期を越えて機能した証拠。</b>各行は別々の選定(再選定)＝正しいロールフォワード。
+</p>
+<div style="overflow-x:auto"><table>
+<thead><tr><th style="text-align:left">選定as-of</th>{_rf_month_h}<th>OOS計</th></tr></thead>
+<tbody>{_rf_rows or '<tr><td colspan="99" style="text-align:center;color:#64748b;padding:12px">OOSデータなし</td></tr>'}</tbody>
+</table></div>
+"""
+
     # ── ⑤ BT60-69 × WFクロス + 銘柄別（conservative限定）──
     # conservativeラベルを含む設定のみ抽出
     con_labels = {cfg["label"] for cfg in _PNL_CONFIGS if "conservative" in cfg.get("mode", "").lower() or "conservative" in cfg.get("label", "").lower()}
@@ -8129,6 +8192,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <b>純OOS損益</b> = その銘柄を選定に使っていない期間（各holdout設定の直近除外窓）だけのトレード損益。WFと違い選定バイアスが無い唯一の本物のOOS。<br>
   「損益合計プラス・純OOSもプラス」= 本物 / 「損益合計プラスだが純OOSマイナス」= 直近で崩れている。窓(d)が長いほど信頼度が高い。
 </p>
+{rollforward_html}
 </div>
 
 <div id="analtab_{_dseq}_bt6069" class="analysis-tab-pane">
