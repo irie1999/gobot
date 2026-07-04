@@ -133,15 +133,18 @@ def _normalize(df: pd.DataFrame, dt_col: str = "Date") -> pd.DataFrame:
     df = df.copy()
 
     # ── DateTime 解決 ─────────────────────────────────────
-    if dt_col in df.columns:
-        df[dt_col] = pd.to_datetime(df[dt_col])
-    elif "DateTime" in df.columns:
+    # 分足は Date(日付) と Time(時刻) が別列で来る。Date だけを使うと時刻が落ち
+    # 全バーが 00:00:00 になる(過去バグ)。DateTime → Date+Time → Date の順で解決。
+    if "DateTime" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(df[dt_col])
     elif "Date" in df.columns and "Time" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(
-            df["Date"].astype(str) + " " + df["Time"].astype(str))
+            df["Date"].astype(str).str.replace(r"[ T].*$", "", regex=True)
+            + " " + df["Time"].astype(str))
+    elif dt_col in df.columns:
+        df[dt_col] = pd.to_datetime(df[dt_col])
     else:
         return pd.DataFrame()
 
