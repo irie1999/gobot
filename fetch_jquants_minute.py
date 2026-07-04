@@ -76,6 +76,23 @@ def _auto_universe() -> tuple[list[str], str]:
     return [], ""
 
 
+def _has_intraday_time(df) -> bool:
+    """DataFrame の index に分足時刻が入っているか(全バー00:00:00でないか)。
+
+    時刻欠落バグ(Date列だけ使い時刻が落ちる)で全バーが 00:00:00 に潰れた
+    壊れデータを弾くための検査。1本でも 00:00:00 以外の時刻があればOK。
+    """
+    try:
+        idx = df.index
+        # DatetimeIndex 前提。時・分の合計が 0 でないバーが1本でもあればOK
+        secs = idx.hour * 3600 + idx.minute * 60 + getattr(idx, "second", 0)
+        return bool((secs != 0).any())
+    except Exception:
+        # 判定不能なら安全側(壊れ扱い=保存しない)ではなく、従来通り保存を許可
+        # (index が Datetime でない特殊形式のときに取りこぼさないため)
+        return True
+
+
 def _swing_watchlist() -> list[str]:
     import importlib
     out = set()
@@ -163,6 +180,12 @@ def main():
             continue
         if df is None or getattr(df, "empty", True):
             print(f"  [{i}/{len(syms)}] {sym} データ無し", flush=True)
+            fail += 1
+        elif not _has_intraday_time(df):
+            # 安全弁: 全バーが 00:00:00(時刻欠落バグ)なら保存しない。
+            # 壊れたデータを気づかず蓄積するのを構造的に防ぐ。
+            print(f"  [{i}/{len(syms)}] {sym} 時刻欠落(全バー00:00:00)を検知→保存スキップ",
+                  flush=True)
             fail += 1
         else:
             try:
