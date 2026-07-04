@@ -144,7 +144,12 @@ def main():
             skip += 1
             continue
         try:
-            df = fetch_intraday(sym, days=args.days, interval="5m")
+            # jquants_fetch 内部キャッシュ(~/.jquants_cache)は使わない。
+            # 当日中に旧コードで作られた壊れたキャッシュを掴んで再取得が
+            # 効かなくなるため(全バー00:00:00バグの再発源)。重複制御は本スク
+            # リプトの data/ pkl skip-existing 側で担保する。
+            df = fetch_intraday(sym, days=args.days, interval="5m",
+                                use_cache=False)
         except Exception as e:
             print(f"  [{i}/{len(syms)}] {sym} 取得失敗: {e}", flush=True)
             fail += 1
