@@ -1587,8 +1587,24 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
 
 _BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", "取引数": "#a855f7"}
 
-# BT高・WF低(OOS弱)の警告しきい値: (BT下限, WF上限)。BT≥60 かつ WF<40 で赤バッジ。
+# BT高・WF低(OOS弱)の警告しきい値: (BT下限, WF上限)。③-b 影響分析の集計に使用。
 _BT_HIGH_WF_LOW = (60, 40)
+
+
+def _oos_weak_badge(s: dict) -> str:
+    """⚠OOS弱 バッジHTML。純OOS(各configの直近除外窓=選定に使っていない期間)の
+    損益がマイナスの銘柄に赤バッジ。WF(選定バイアスあり)ではなく holdout実績で判定。
+    OOSトレードが無い(窓に決済トレードなし)場合はバッジ無し。"""
+    _on = s.get("oos_n", 0) or 0
+    _op = s.get("oos_pnl", 0) or 0
+    _ow = s.get("oos_win", 0) or 0
+    if _on > 0 and _op < 0:
+        return (
+            '<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;'
+            'border-radius:3px;font-size:0.62rem;display:block;margin-top:1px" '
+            f'title="純OOS({_ow}日除外窓)で {_op:+,.0f}円 / {_on}件。選定に使っていない期間で負けている">'
+            f'⚠OOS弱 {_op:+,.0f}円</span>')
+    return ""
 
 
 def _fmt_score_cell(s: dict, col: str) -> str:
@@ -1609,29 +1625,21 @@ def _fmt_score_cell(s: dict, col: str) -> str:
                      f'取引{_bt_tr}件{"⚠少" if _bt_tr < 10 else ""}</span>')
     else:
         _tr_badge = ""
+    # ⚠OOS弱 バッジ: 純OOS(各configが選定に使っていない直近除外窓)の損益が
+    # マイナスなら警告。WF(選定バイアスあり)ではなく holdout実績で判定する。
+    _oos_badge = _oos_weak_badge(s)
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
-        # BT高いのにWF低い(OOS弱)を警告。直近実績(BT)は良いが未来再現性(WF)が
-        # 低い"時期依存の罠"。WFの方が信頼できる(§17.4)ので赤バッジで注意喚起。
-        _wf = s.get("wf_score")
-        _div_badge = ""
-        if (isinstance(rec, (int, float)) and _wf is not None
-                and rec >= _BT_HIGH_WF_LOW[0] and _wf < _BT_HIGH_WF_LOW[1]):
-            _div_badge = (
-                '<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;'
-                'border-radius:3px;font-size:0.62rem;display:block;margin-top:1px" '
-                'title="BTは高いがWF(未来再現性)が低い。時期依存の可能性">'
-                f'⚠OOS弱</span>')
         return (
             f'<span style="color:{col};font-weight:700">WF&nbsp;{s["wf_score"]}</span>'
             f'<span style="font-size:0.68rem;color:#64748b;display:block">{rank} / BT:{rec}</span>'
-            f'{type_badge}{_tr_badge}{_div_badge}'
+            f'{type_badge}{_tr_badge}{_oos_badge}'
         )
     else:
         return (
             f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["score"]}</span>'
             f'<br><span style="font-size:0.68rem;color:#f59e0b">BT(参考)</span>'
-            f'<br>{type_badge}{_tr_badge}'
+            f'<br>{type_badge}{_tr_badge}{_oos_badge}'
         )
 
 
@@ -1759,6 +1767,23 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                                             periods=_EXP + _MH + 1)[-1].date()
             except Exception:
                 _max_exit = None
+            # 純OOS成績: このconfigは直近 holdout_days 日を除外して選定したので、
+            # その直近窓のトレードは選定に使っていない純粋OOS。⚠OOS弱バッジの根拠。
+            import re as _re_sig
+            _oos_pnl = 0.0
+            _oos_n = 0
+            _oos_win = 0
+            _hd_m = _re_sig.search(r"HO(\d+)d", _cfg_label or "")
+            if _hd_m:
+                _oos_win = int(_hd_m.group(1))
+                _oos_cut = _TODAY - timedelta(days=_oos_win)
+                for _tt in trade_log:
+                    _tsd = _tt.get("signal_dt")
+                    _tsd = _tsd.date() if hasattr(_tsd, "date") else _tsd
+                    if (_tsd and _tsd >= _oos_cut
+                            and _tt.get("reason") not in ("発注中", "保有中")):
+                        _oos_n += 1
+                        _oos_pnl += _tt.get("pnl", 0)
             return {
                 "_bt": bt_info,
                 "_sig": {
@@ -1767,6 +1792,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "wf_score": wf_score, "wf_rank_str": wf_rank_str,
                     "rec_score": rec_score, "bt_type": bt_type,
                     "bt_trades":    bt_trades,
+                    "oos_pnl":      _oos_pnl,
+                    "oos_n":        _oos_n,
+                    "oos_win":      _oos_win,
                     "signal_date":  sig_dt,
                     "signal_price": sig.get("signal_price", 0),
                     "order_p":      order_p,
@@ -5656,18 +5684,18 @@ function switchTbd(id, tab) {{
         _wpf_s = "∞" if _wpf == float("inf") else f"{_wpf:.2f}"
         _worse = _davg < 0
         _oos_verdict = (
-            f"⚠OOS弱({_wn}件)は健全({_hn}件)に比べ、"
+            f"WF低群({_wn}件)は健全({_hn}件)に比べ、"
             f"勝率 {_dwr:+.1f}pt・PF {_wpf_s} vs {_hpf_s}・"
             f"平均損益 {_wavg:+,.0f}円 vs {_havg:+,.0f}円/取引"
             f"（1取引あたり {_davg:+,.0f}円 {'悪化' if _worse else '良化'}）。"
-            f" ⇒ ⚠OOS弱バッジは{'回避する価値がある' if _worse else '今回は明確な差が小さい'}。")
+            f" ⇒ WFは{'BT高群の中で追加の識別力あり' if _worse else '今回は明確な差が小さい'}。")
         _oos_vcol = "#f87171" if _worse else "#94a3b8"
     else:
-        _oos_verdict = "健全またはOOS弱のいずれかが該当なしのため比較不可。"
+        _oos_verdict = "健全またはWF低群のいずれかが該当なしのため比較不可。"
         _oos_vcol = "#94a3b8"
     oos_impact_html = f"""
-<h2 style="margin-top:24px">③-b ⚠OOS弱 影響分析（BT≥{_bt_lo} を WF で二分 / 365日全取引）</h2>
-<p class="footnote" style="margin-bottom:8px">シグナル一覧の <span style="color:#f87171;font-weight:700">⚠OOS弱</span> バッジ（BT≥{_bt_lo} かつ WF&lt;{_wf_hi}）が実際に成績を悪化させているかを、同じ閾値で健全群と比較して検証する。</p>
+<h2 style="margin-top:24px">③-b WF高低 影響分析（BT≥{_bt_lo} を WF で二分 / 365日全取引）</h2>
+<p class="footnote" style="margin-bottom:8px">BT≥{_bt_lo} を WF{_wf_hi}以上(健全)/WF{_wf_hi}未満 に二分し、WFスコアがBT高群の中で追加の識別力を持つかを検証（<b>WF基準</b>。選定バイアスあり）。純OOS基準の判定は ④表の「純OOS損益」列と シグナル一覧の <span style="color:#f87171;font-weight:700">⚠OOS弱</span> バッジを参照。</p>
 <table>
   <thead><tr>
     <th style="text-align:left">区分</th><th>取引数</th><th>勝率</th><th>PF</th>
@@ -5677,6 +5705,38 @@ function switchTbd(id, tab) {{
 </table>
 <p class="footnote" style="margin-top:6px;color:{_oos_vcol};font-weight:700">{_oos_verdict}</p>
 """
+
+    # ── holdout-OOS 集計 (④表「純OOS」列用) ────────────────────────────────
+    # 各config は「直近 holdout_days 日を除外して選定」→ その直近窓のトレードは
+    # 選定に一切使っていない純粋OOS。conservative設定のみ対象、同一シグナルは
+    # 最長のholdout窓(=最も信頼できるOOS)で分類する。WFと違い選定バイアスなし。
+    import re as _re_ho
+    _oos_trade: dict = {}   # (sym, strat, signal_dt) -> (pnl, window_days)
+    for _lab, _trs in cfg_trades_map.items():
+        if "con" not in _lab.lower():
+            continue
+        _mho = _re_ho.search(r"HO(\d+)d", _lab)
+        if not _mho:
+            continue
+        _hd = int(_mho.group(1))
+        _cut = _TODAY - timedelta(days=_hd)
+        for _t in _trs:
+            _sd = _t.get("signal_dt_raw")
+            if _sd is None or _t.get("reason") in ("発注中", "保有中"):
+                continue
+            if _sd >= _cut:
+                _k = (_t.get("symbol"), _t.get("strategy"), _sd)
+                _prev = _oos_trade.get(_k)
+                if _prev is None or _hd > _prev[1]:
+                    _oos_trade[_k] = (_t.get("pnl", 0), _hd)
+    _oos_sym: dict = defaultdict(lambda: {"n": 0, "w": 0, "pnl": 0, "win": 0})
+    for (_s, _st, _sd), (_pnl, _hd) in _oos_trade.items():
+        _o = _oos_sym[_s]
+        _o["n"] += 1
+        _o["pnl"] += _pnl
+        if _pnl > 0:
+            _o["w"] += 1
+        _o["win"] = max(_o["win"], _hd)
 
     # ── ④ 高BT銘柄別成績 (BT≥60 / rec_scoreで選定・per-symbol) ──
     sym_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
@@ -5712,6 +5772,17 @@ function switchTbd(id, tab) {{
         avg_rec = round(sum(d["rec_scores"]) / len(d["rec_scores"])) if d["rec_scores"] else None
         wf_disp  = f'<span style="color:{"#4ade80" if avg_wf and avg_wf>=70 else ("#fbbf24" if avg_wf and avg_wf>=50 else "#f87171")};font-weight:700">{avg_wf}</span>' if avg_wf is not None else '—'
         rec_disp = f'<span style="color:{"#4ade80" if avg_rec and avg_rec>=60 else ("#fbbf24" if avg_rec and avg_rec>=40 else "#f87171")};font-weight:700">{avg_rec}</span>' if avg_rec is not None else '—'
+        # 純OOS(holdout除外窓)の成績。WFと違い選定バイアスのない本物のOOS。
+        _oo = _oos_sym.get(sym)
+        if _oo and _oo["n"] > 0:
+            _owr  = _oo["w"] / _oo["n"] * 100
+            _opnl = _oo["pnl"]
+            _oc   = "#4ade80" if _opnl > 0 else ("#f87171" if _opnl < 0 else "#94a3b8")
+            _oos_cell = (f'<td style="text-align:right;color:{_oc};font-weight:700">'
+                         f'{_opnl:+,.0f}円<br><span style="font-size:0.66rem;color:#94a3b8">'
+                         f'{_oo["n"]}件 {_owr:.0f}% / {_oo["win"]}d窓</span></td>')
+        else:
+            _oos_cell = '<td style="text-align:center;color:#475569">—</td>'
         # 赤枠: 損失が大きい銘柄を強調
         row_style = ' style="background:#1a0a0a;border-left:3px solid #f87171"' if pnl < -30000 else (
                     ' style="background:#0a1a0a;border-left:3px solid #4ade80"' if pnl > 50000 else "")
@@ -5726,9 +5797,10 @@ function switchTbd(id, tab) {{
   <td class="profit" style="text-align:right">+{gp:,.0f}円</td>
   <td class="loss"   style="text-align:right">-{gl:,.0f}円</td>
   <td class="{spc}"  style="text-align:right;font-weight:700">{pnl:+,.0f}円</td>
+  {_oos_cell}
 </tr>"""
     if not sym_rows:
-        sym_rows = '<tr><td colspan="10" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
+        sym_rows = '<tr><td colspan="11" style="text-align:center;color:#64748b;padding:12px">BT≥60の取引なし</td></tr>'
 
     # ── ⑤ BT60-69 × WFクロス + 銘柄別（conservative限定）──
     # conservativeラベルを含む設定のみ抽出
@@ -8036,9 +8108,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     <th style="color:#4ade80">利益</th>
     <th style="color:#f87171">損失</th>
     <th>損益合計</th>
+    <th>純OOS損益<br><small style="color:#94a3b8;font-weight:400">holdout除外窓のみ</small></th>
   </tr></thead>
   <tbody>{sym_rows}</tbody>
 </table>
+<p class="footnote" style="margin-top:6px">
+  <b>純OOS損益</b> = その銘柄を選定に使っていない期間（各holdout設定の直近除外窓）だけのトレード損益。WFと違い選定バイアスが無い唯一の本物のOOS。<br>
+  「損益合計プラス・純OOSもプラス」= 本物 / 「損益合計プラスだが純OOSマイナス」= 直近で崩れている。窓(d)が長いほど信頼度が高い。
+</p>
 </div>
 
 <div id="analtab_{_dseq}_bt6069" class="analysis-tab-pane">
