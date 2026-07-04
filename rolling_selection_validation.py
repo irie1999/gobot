@@ -42,15 +42,20 @@ import pandas as _pd
 import scan_walkforward as _swf
 import check_signals_stop as _stop
 import check_signals_breakout as _brk
-from backtest_limit_entry import fetch, run_limit_backtest
+from backtest_limit_entry import fetch, run_limit_backtest, INITIAL_CASH
+from risk_metrics import enrich_backtest_result
 
 JST = timezone(timedelta(hours=9))
+
+# レポート(run_signals_holdout_all)の選定に使う戦略セットと同一
+LONG_STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+SHORT_STRATS = ["A7_S", "RSI2_S", "MACD_S", "DON_S", "MOM_S", "GAP_S"]
 
 
 def _wf_asof(sym: str, strat: str, asof: date) -> dict | None:
     """レポートと同じ FOLDS(2年/2fold) を基準日 asof に当てて WF 選定指標を計算。
-    _run_window_abs で df を各窓に絶対日付でトリム → 未来データ遮断。
-    返り値: folds_passed / total_test_pnl / latest_price / max_drawdown_pct / sharpe"""
+    holdout=today-asof で FOLDS をずらすのと数学的に等価(未来遮断)。MaxDD/Sharpe は
+    全testfoldのtrade_logを結合して enrich_backtest_result で計算(walkforward_one と同一)。"""
     if strat not in _swf.STRATEGY_DEFS:
         return None
     calc_fn, em, sm, tm, family, entry_type = _swf.STRATEGY_DEFS[strat]
@@ -82,12 +87,17 @@ def _wf_asof(sym: str, strat: str, asof: date) -> dict | None:
             test_results.append(vr)
     if not test_results:
         return None
-    tpnl = sum(r.get("total_pnl", 0) for r in test_results)
-    dd = max((r.get("max_drawdown_pct", 0) or 0) for r in test_results)
-    shp = sum((r.get("sharpe", 0) or 0) for r in test_results) / len(test_results)
+    # walkforward_one と同一: 全testfoldのtrade_logを結合して1回リスク指標を計算
+    all_test_trades: list[dict] = []
+    tpnl = 0.0
+    for r in test_results:
+        all_test_trades.extend(r.get("trade_log", []))
+        tpnl += r.get("total_pnl", 0.0)
+    agg = enrich_backtest_result({"trade_log": all_test_trades}, INITIAL_CASH)
     return dict(symbol=sym, strategy=strat, folds_passed=folds_passed,
                 total_test_pnl=tpnl, latest_price=price,
-                max_drawdown_pct=dd, sharpe=shp)
+                max_drawdown_pct=agg.get("max_drawdown_pct", 0.0),
+                sharpe=agg.get("sharpe", 0.0))
 
 
 def _load_symbols_file(path: str) -> list[str]:
@@ -109,28 +119,38 @@ def _load_symbols_file(path: str) -> list[str]:
     return []
 
 
-def _candidate_pairs(symbols_file: str | None, limit: int) -> list[tuple[str, str]]:
-    """検証する (銘柄, 戦略)。symbols_file 指定時は全上場×全戦略(重い)。
-    未指定は監視銘柄union(候補プール)。戦略は STRATEGY_DEFS にあるものだけ。"""
-    strats = [s for s in _swf.STRATEGY_DEFS.keys()]
-    pairs: list[tuple[str, str]] = []
-    if symbols_file:
-        syms = _load_symbols_file(symbols_file)
+def _auto_universe_file() -> str | None:
+    """レポートと同じユニバース(プライム優先)を自動検出。"""
+    for name in ("symbols_listed_prime.py", "symbols_listed_all.py",
+                 "symbols_listed_standard.py", "symbols_all.py"):
+        if os.path.exists(name):
+            return name
+    return None
+
+
+def _candidate_pairs(symbols_file: str | None, limit: int,
+                     short: bool) -> tuple[list[tuple[str, str]], str]:
+    """検証する (銘柄, 戦略) と使ったユニバース名を返す。
+    戦略はレポートと同一 (LONG_STRATS / SHORT_STRATS)。
+    symbols_file 未指定なら symbols_listed_prime.py を自動検出(=レポートと同じ母集団)。"""
+    strats = SHORT_STRATS if short else LONG_STRATS
+    strats = [s for s in strats if s in _swf.STRATEGY_DEFS]
+    src = symbols_file or _auto_universe_file()
+    if src:
+        syms = _load_symbols_file(src)
         if limit and limit > 0:
             syms = syms[:limit]
-        for s in syms:
-            for st in strats:
-                pairs.append((s, st))
-    else:
-        for mod in (_stop, _brk):
-            for sym, _name, strat in getattr(mod, "WATCHLIST", []):
-                s = sym if str(sym).endswith(".T") else f"{sym}.T"
-                if strat in _swf.STRATEGY_DEFS:
-                    pairs.append((s, strat))
-        pairs = sorted(set(pairs))
-        if limit and limit > 0:
-            pairs = pairs[:limit]
-    return pairs
+        pairs = [(s, st) for s in syms for st in strats]
+        return pairs, src
+    # フォールバック: 監視銘柄union(母集団がレポートと違う=真の一致ではない)
+    syms = set()
+    for mod in (_stop, _brk):
+        for sym, _name, _strat in getattr(mod, "WATCHLIST", []):
+            syms.add(sym if str(sym).endswith(".T") else f"{sym}.T")
+    pairs = sorted((s, st) for s in syms for st in strats)
+    if limit and limit > 0:
+        pairs = pairs[:limit]
+    return pairs, "監視union(※母集団がレポートと不一致)"
 
 
 def _month_ends(start: date, end: date) -> list[date]:
@@ -160,7 +180,9 @@ def _forward_trades(sym: str, strat: str, hist_days: int) -> list[dict]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbols", default=None, help="候補ユニバース.py(全上場)。未指定は監視union")
+    ap.add_argument("--symbols", default=None,
+                    help="候補ユニバース.py。未指定は symbols_listed_prime.py 自動検出(=レポートと同じ母集団)")
+    ap.add_argument("--short", action="store_true", help="ショート側(SHORT_STRATS)を検証")
     ap.add_argument("--start", default="2026-01", help="最古の基準月 (YYYY-MM)")
     ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(レポート準拠)")
     ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限%(レポート準拠)")
@@ -175,14 +197,18 @@ def main():
     today = datetime.now(JST).date()
     _sy, _sm = map(int, args.start.split("-"))
     base_dates = [d for d in _month_ends(date(_sy, _sm, 1), today) if (today - d).days >= 5]
-    pairs = _candidate_pairs(args.symbols, args.limit)
+    pairs, src = _candidate_pairs(args.symbols, args.limit, args.short)
     mode = "aggressive" if args.aggressive else "conservative"
+    side = "SHORT" if args.short else "LONG"
+    strats = SHORT_STRATS if args.short else LONG_STRATS
 
     print("=" * 74)
-    print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / mode={mode}")
+    print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / {side} / mode={mode}")
+    print(f"ユニバース: {src}")
+    print(f"戦略: {strats}")
     print(f"候補 {len(pairs)}(銘柄×戦略) / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)"
           f" / per_strategy={args.per_strategy} MaxDD≤{args.max_dd}%")
-    print("※ walkforward_one_asof は重い。監視unionで数分 / 全上場は数時間")
+    print("※ 全上場×6戦略×基準月 は重い(数時間)。まず --limit で確認を")
     print("=" * 74)
 
     # ── フォワード用 trade_log を候補ごとに1回だけ取得 ──
