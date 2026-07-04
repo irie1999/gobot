@@ -186,6 +186,7 @@ def main():
     ap.add_argument("--start", default="2026-01", help="最古の基準月 (YYYY-MM)")
     ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(レポート準拠)")
     ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限パーセント(レポート準拠)")
+    ap.add_argument("--min-folds", type=int, default=2, help="folds_passed下限(scan_walkforward CSV準拠=2)")
     ap.add_argument("--price-ranges", default=None,
                     help="価格上限をカンマ区切りで複数(例 6000,10000)。各上限で選定しunion(レポート準拠)")
     ap.add_argument("--max-price", type=float, default=0.0, help="価格上限(--price-ranges 未指定時)")
@@ -258,6 +259,9 @@ def main():
             return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
         base_elig = []
         for r in asof_rows:
+            # scan_walkforward は CSV書込時に folds_passed>=2 で絞る(=レポートの前提)
+            if int(r.get("folds_passed", 0)) < args.min_folds:
+                continue
             if float(r.get("total_test_pnl", 0)) <= 0:
                 continue
             if float(r.get("max_drawdown_pct", 0)) > args.max_dd:
