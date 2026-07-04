@@ -38,12 +38,56 @@ if "--aggressive" in sys.argv:
 else:
     os.environ.setdefault("TRADING_MODE", "conservative")
 
+import pandas as _pd
 import scan_walkforward as _swf
 import check_signals_stop as _stop
 import check_signals_breakout as _brk
 from backtest_limit_entry import fetch, run_limit_backtest
 
 JST = timezone(timedelta(hours=9))
+
+
+def _wf_asof(sym: str, strat: str, asof: date) -> dict | None:
+    """レポートと同じ FOLDS(2年/2fold) を基準日 asof に当てて WF 選定指標を計算。
+    _run_window_abs で df を各窓に絶対日付でトリム → 未来データ遮断。
+    返り値: folds_passed / total_test_pnl / latest_price / max_drawdown_pct / sharpe"""
+    if strat not in _swf.STRATEGY_DEFS:
+        return None
+    calc_fn, em, sm, tm, family, entry_type = _swf.STRATEGY_DEFS[strat]
+    need = (_swf.TODAY - asof).days + 800
+    df = fetch(sym, need)
+    if df is None or len(df) < 400:
+        return None
+    df = df[df.index <= _pd.Timestamp(asof)].copy()
+    if len(df) < 200:
+        return None
+    try:
+        price = float(df.iloc[-1]["close"])
+    except Exception:
+        return None
+    if price <= 0:
+        return None
+    test_results: list[dict] = []
+    folds_passed = 0
+    for _fname, ts, te, vs, ve in _swf.FOLDS:
+        tr = _swf._run_window_abs(sym, sym, df, calc_fn, em, sm, tm,
+                                  asof - timedelta(days=ts), asof - timedelta(days=te),
+                                  strat, entry_type=entry_type)
+        vr = _swf._run_window_abs(sym, sym, df, calc_fn, em, sm, tm,
+                                  asof - timedelta(days=vs), asof - timedelta(days=ve),
+                                  strat, entry_type=entry_type)
+        if _swf._passes_train(tr) and _swf._passes_test(vr):
+            folds_passed += 1
+        if vr:
+            test_results.append(vr)
+    if not test_results:
+        return None
+    tpnl = sum(r.get("total_pnl", 0) for r in test_results)
+    dd = max((r.get("max_drawdown_pct", 0) or 0) for r in test_results)
+    shp = sum((r.get("sharpe", 0) or 0) for r in test_results) / len(test_results)
+    return dict(symbol=sym, strategy=strat, folds_passed=folds_passed,
+                total_test_pnl=tpnl, latest_price=price,
+                max_drawdown_pct=dd, sharpe=shp)
 
 
 def _load_symbols_file(path: str) -> list[str]:
@@ -118,8 +162,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", default=None, help="候補ユニバース.py(全上場)。未指定は監視union")
     ap.add_argument("--start", default="2026-01", help="最古の基準月 (YYYY-MM)")
-    ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(build_watchlist準拠)")
-    ap.add_argument("--min-folds", type=int, default=2, help="folds_passed 下限(build_watchlist準拠)")
+    ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(レポート準拠)")
+    ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限%(レポート準拠)")
     ap.add_argument("--max-price", type=float, default=0.0)
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--hist-days", type=int, default=730, help="フォワード用バックテスト履歴日数")
@@ -137,7 +181,7 @@ def main():
     print("=" * 74)
     print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / mode={mode}")
     print(f"候補 {len(pairs)}(銘柄×戦略) / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)"
-          f" / per_strategy={args.per_strategy} folds≥{args.min_folds}")
+          f" / per_strategy={args.per_strategy} MaxDD≤{args.max_dd}%")
     print("※ walkforward_one_asof は重い。監視unionで数分 / 全上場は数時間")
     print("=" * 74)
 
@@ -158,11 +202,10 @@ def main():
     # ── 各基準月: as-of選定 → フォワード集計 ──
     result = {}
     for D in base_dates:
-        # as-of D の WF 指標を全候補で計算
+        # as-of D の WF 指標を全候補で計算 (レポートと同じ FOLDS 方式)
         asof_rows: list[dict] = []
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = {ex.submit(_swf.walkforward_one_asof, s, s, st, D): (s, st)
-                    for s, st in pairs}
+            futs = {ex.submit(_wf_asof, s, st, D): (s, st) for s, st in pairs}
             for fut in as_completed(futs):
                 try:
                     r = fut.result()
@@ -170,12 +213,13 @@ def main():
                     r = None
                 if r:
                     asof_rows.append(r)
-        # build_watchlist 準拠フィルタ
+        # 選定フィルタ = run_signals_holdout_all._load_wl_from_csv 準拠:
+        #   total_test_pnl>0 / max_drawdown_pct<=max_dd / 価格。folds は課さない。
         elig = []
         for r in asof_rows:
-            if int(r.get("folds_passed", 0)) < args.min_folds:
-                continue
             if float(r.get("total_test_pnl", 0)) <= 0:
+                continue
+            if float(r.get("max_drawdown_pct", 0)) > args.max_dd:
                 continue
             price = float(r.get("latest_price", 0))
             if args.max_price > 0 and price > args.max_price:
@@ -183,13 +227,15 @@ def main():
             if args.min_price > 0 and price < args.min_price:
                 continue
             elig.append(r)
-        # 戦略ごと total_test_pnl 降順 上位 per_strategy (composite の主成分で代用)
+        # 戦略ごと composite=total_test_pnl×(1+max(sharpe,0)) 降順 上位 per_strategy
+        def _composite(r):
+            return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
         by_strat: dict = defaultdict(list)
         for r in elig:
             by_strat[r["strategy"]].append(r)
         selected = []
         for st, rows in by_strat.items():
-            rows.sort(key=lambda x: float(x.get("total_test_pnl", 0)), reverse=True)
+            rows.sort(key=_composite, reverse=True)
             for r in rows[:args.per_strategy]:
                 selected.append((r["symbol"], r["strategy"]))
         # フォワード集計 (signal_dt > D)
@@ -225,11 +271,11 @@ def main():
                 continue
             p = sum(pl); w = sum(1 for x in pl if x > 0)
             allp.extend(pl)
-            cells.append(f"{p:+>9,.0f}({len(pl)}/{w})".rjust(15))
+            cells.append(f"{p:+,.0f}({len(pl)}/{w})".rjust(15))
         tp = sum(allp); tn = len(allp); tw = sum(1 for x in allp if x > 0)
         twr = tw / tn * 100 if tn else 0
         print(f"{str(D):<12}{len(r['sel']):>5} | " + " ".join(cells) +
-              f" | {tp:+>11,.0f} ({tn}件 {twr:.0f}%)")
+              f" | {tp:+,.0f} ({tn}件 {twr:.0f}%)".rjust(22))
     print("-" * len(hdr))
     print("各セル: OOS損益(取引数/勝ち)  ·=基準月以前(選定に使用)  —=取引なし")
     print("選定=その基準月末までのデータだけでWF選定(未来遮断)。現在と同じ選定条件を各月で再現。")
