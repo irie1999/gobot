@@ -1591,6 +1591,29 @@ _BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", 
 _BT_HIGH_WF_LOW = (60, 40)
 
 
+def _holdout_window_map() -> dict:
+    """(symbol, strategy) → その銘柄が選定された中で最長の holdout_days。
+    純OOS判定は「選定に使っていない直近除外窓」で行うが、同じ銘柄でも設定に
+    よって窓長(HO30d〜HO180d)が違う。最長窓を使うと除外期間が最も広く取れ、
+    OOSトレードを十分拾える(短窓HO30dだけだと数件しか拾えない)。"""
+    import re as _re_hw
+    m: dict = {}
+    for cfg in _PNL_CONFIGS:
+        _mm = _re_hw.search(r"HO(\d+)d", cfg.get("label", "") or "")
+        if not _mm:
+            continue
+        hd = int(_mm.group(1))
+        for wl in (cfg.get("stop_wl") or [], cfg.get("brk_wl") or []):
+            for row in wl:
+                try:
+                    k = (row[0], row[2])
+                except Exception:
+                    continue
+                if hd > m.get(k, 0):
+                    m[k] = hd
+    return m
+
+
 def _oos_weak_badge(s: dict) -> str:
     """⚠OOS弱 バッジHTML。純OOS(各configの直近除外窓=選定に使っていない期間)の
     損益がマイナスの銘柄に赤バッジ。WF(選定バイアスあり)ではなく holdout実績で判定。
@@ -1696,6 +1719,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     import pandas as _pd
     from backtest_limit_entry import ENTRY_EXPIRE as _EXP, MAX_HOLD as _MH
 
+    _maxwin_sig = _holdout_window_map()   # (sym,strat)→最長holdout窓(⚠OOS弱バッジ用)
+
     for cfg in _PNL_CONFIGS:
         group = items_by_cfg.get(cfg["label"], [])
         if not group:
@@ -1767,15 +1792,12 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                                             periods=_EXP + _MH + 1)[-1].date()
             except Exception:
                 _max_exit = None
-            # 純OOS成績: このconfigは直近 holdout_days 日を除外して選定したので、
-            # その直近窓のトレードは選定に使っていない純粋OOS。⚠OOS弱バッジの根拠。
-            import re as _re_sig
+            # 純OOS成績: その銘柄が選定された最長holdout窓(選定に使っていない
+            # 直近除外期間)のトレードだけを集計。⚠OOS弱バッジの根拠。
             _oos_pnl = 0.0
             _oos_n = 0
-            _oos_win = 0
-            _hd_m = _re_sig.search(r"HO(\d+)d", _cfg_label or "")
-            if _hd_m:
-                _oos_win = int(_hd_m.group(1))
+            _oos_win = _maxwin_sig.get((sym, strat), 0)
+            if _oos_win:
                 _oos_cut = _TODAY - timedelta(days=_oos_win)
                 for _tt in trade_log:
                     _tsd = _tt.get("signal_dt")
@@ -5712,13 +5734,12 @@ function switchTbd(id, tab) {{
     # 直近除外窓(signal日が TODAY - holdout_days 以降)」に入るトレードだけを抽出。
     # → 必ず行の取引数の部分集合になる(純OOS件数 ≤ 行の取引数)。WFと違い選定
     #   バイアスの無い本物のOOS。標準WF(HOxx無)のconfigでは判定不能=対象外。
-    import re as _re_ho
+    _maxwin = _holdout_window_map()   # (sym,strat) → 最長holdout窓(日)
     _oos_sym: dict = defaultdict(lambda: {"n": 0, "w": 0, "pnl": 0, "win": 0})
     for _t in bt60_trades:
-        _mho = _re_ho.search(r"HO(\d+)d", _t.get("label", "") or "")
-        if not _mho:
+        _hd = _maxwin.get((_t.get("symbol"), _t.get("strategy")), 0)
+        if not _hd:
             continue
-        _hd = int(_mho.group(1))
         _sd = _t.get("signal_dt_raw")
         if _sd is None:
             continue
