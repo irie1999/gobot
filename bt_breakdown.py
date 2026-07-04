@@ -20,21 +20,31 @@ BTスコア(calc_recommend_score)が、どの期間窓(30/90/180/365日)の成�
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 BREAKOUT = {"DON", "VOL", "MOM"}
 STOP = {"MACD", "A7", "RSI2"}
 ALL_STRATS = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
 
+# main() で設定。レポートの各config(conservative/aggressive/NOLIMIT等)を
+# 再現するためのパラメータ上書き。
+_SM_TM: tuple | None = None
+
 
 def _module_for(strat: str):
     if strat in BREAKOUT:
         import check_signals_breakout as mod
-        return mod
-    if strat in STOP:
+    elif strat in STOP:
         import check_signals_stop as mod
-        return mod
-    return None
+    else:
+        return None
+    # sm/tm 上書き (NOLIMIT WF config の sm_tm=(1.5,2.0) 等を再現)
+    if _SM_TM:
+        sm, tm = _SM_TM
+        for k, v in list(mod.STRATEGY_PARAMS.items()):
+            mod.STRATEGY_PARAMS[k] = (v[0], v[1], sm, tm)
+    return mod
 
 
 def _score_of(symbol: str, strat: str, name: str):
@@ -75,10 +85,26 @@ def main() -> None:
     ap.add_argument("strategy", nargs="?", default="ALL",
                     help="戦略 (DON/VOL/MOM/MACD/A7/RSI2)。省略で全戦略一覧")
     ap.add_argument("--name", default="", help="銘柄名 (表示用・任意)")
+    ap.add_argument("--aggressive", action="store_true",
+                    help="aggressiveモードで計算 (レポートのaggressive系configを再現)")
+    ap.add_argument("--sm-tm", nargs=2, type=float, default=None,
+                    metavar=("SM", "TM"),
+                    help="損切/目標倍率を上書き (例 NOLIMIT WF config: --sm-tm 1.5 2.0)")
     args = ap.parse_args()
+
+    # レポートの config を再現するためのモード設定。
+    # TRADING_MODE は check_signals_* の import 前に設定する必要がある。
+    global _SM_TM
+    if args.aggressive:
+        os.environ["TRADING_MODE"] = "aggressive"
+    _SM_TM = tuple(args.sm_tm) if args.sm_tm else None
+    _mode_label = ("aggressive" if args.aggressive else "conservative")
+    if _SM_TM:
+        _mode_label += f" + sm_tm={_SM_TM}"
 
     name = args.name or args.symbol
     strat = args.strategy.upper()
+    print(f"[mode: {_mode_label}]")
 
     if strat == "ALL":
         _print_all(args.symbol, name)
