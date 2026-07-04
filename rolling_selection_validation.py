@@ -185,7 +185,7 @@ def main():
     ap.add_argument("--short", action="store_true", help="ショート側(SHORT_STRATS)を検証")
     ap.add_argument("--start", default="2026-01", help="最古の基準月 (YYYY-MM)")
     ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(レポート準拠)")
-    ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限%(レポート準拠)")
+    ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限パーセント(レポート準拠)")
     ap.add_argument("--max-price", type=float, default=0.0)
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--hist-days", type=int, default=730, help="フォワード用バックテスト履歴日数")
