@@ -179,7 +179,7 @@ ENTRY_TYPE = "stop_sell"
 
 # 薄サンプル減点の閾値: 最長窓(365日)の実取引数がこれ未満だと、勝率/PF/安定の
 # 品質点(最大80点)を線形に割り引く。少数トレードでの過大評価(例: 2取引で91点)を抑制。
-MIN_TRADES_FOR_FULL_BT = 5
+MIN_TRADES_FOR_FULL_BT = 10
 
 
 def calc_recommend_score(period_results: dict) -> tuple[int, str]:
