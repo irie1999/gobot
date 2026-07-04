@@ -5600,6 +5600,84 @@ function switchTbd(id, tab) {{
   <td style="text-align:right;color:#60a5fa;font-weight:700">{aavg:+,.0f}円</td>
 </tr>"""
 
+    # ── ③-b ⚠OOS弱 影響分析 (BT≥60 を WF健全/OOS弱 で二分し成績差を定量化) ──
+    # シグナル一覧の⚠OOS弱バッジ(_BT_HIGH_WF_LOW = BT≥60 & WF<40)が、実際に
+    # 成績を悪化させているかを、同じ閾値で健全群と比較して検証する。
+    _bt_lo, _wf_hi = _BT_HIGH_WF_LOW
+    _oos_healthy = [t for t in bt60_trades
+                    if t.get("wf_score") is not None and t["wf_score"] >= _wf_hi]
+    _oos_weak    = [t for t in bt60_trades
+                    if t.get("wf_score") is not None and t["wf_score"] < _wf_hi]
+    _oos_none    = [t for t in bt60_trades if t.get("wf_score") is None]
+    _oos_groups = [
+        (f"健全 (BT≥{_bt_lo}・WF{_wf_hi}以上)",   _oos_healthy, "#4ade80"),
+        (f"⚠OOS弱 (BT≥{_bt_lo}・WF{_wf_hi}未満)", _oos_weak,    "#f87171"),
+    ]
+    _oos_rows = ""
+    _oos_stat: dict = {}
+    for _lbl, _grp, _c in _oos_groups:
+        if not _grp:
+            _oos_rows += (f'<tr><td style="color:{_c};font-weight:700;text-align:left">{_lbl}</td>'
+                          f'<td colspan="5" style="text-align:center;color:#64748b">該当なし</td></tr>')
+            _oos_stat[_lbl] = None
+            continue
+        gn, gw, gpnl, ggp, ggl, gpf, gavg, _, _ = _band_stats(_grp)
+        _oos_stat[_lbl] = (gn, gw / gn * 100, gpf, gavg, gpnl)
+        _pfs = "∞" if gpf == float("inf") else f"{gpf:.2f}"
+        _pc  = "profit" if gpnl >= 0 else "loss"
+        _ac  = "profit" if gavg >= 0 else "loss"
+        _oos_rows += f"""<tr>
+  <td style="color:{_c};font-weight:700;text-align:left">{_lbl}</td>
+  <td style="font-weight:700">{gn}</td>
+  <td style="font-weight:700">{gw / gn * 100:.1f}%</td>
+  <td style="font-weight:700">{_pfs}</td>
+  <td class="{_pc}" style="text-align:right;font-weight:700">{gpnl:+,.0f}円</td>
+  <td class="{_ac}" style="text-align:right;font-weight:700">{gavg:+,.0f}円</td>
+</tr>"""
+    if _oos_none:
+        _nn, _nw, _npnl, _, _, _npf, _navg, _, _ = _band_stats(_oos_none)
+        _npc = "profit" if _npnl >= 0 else "loss"
+        _nac = "profit" if _navg >= 0 else "loss"
+        _npfs = "∞" if _npf == float("inf") else f"{_npf:.2f}"
+        _oos_rows += f"""<tr style="opacity:.7">
+  <td style="color:#94a3b8;font-weight:700;text-align:left">参考: WFなし</td>
+  <td>{_nn}</td><td>{_nw / _nn * 100:.1f}%</td><td>{_npfs}</td>
+  <td class="{_npc}" style="text-align:right">{_npnl:+,.0f}円</td>
+  <td class="{_nac}" style="text-align:right">{_navg:+,.0f}円</td>
+</tr>"""
+    _hk = f"健全 (BT≥{_bt_lo}・WF{_wf_hi}以上)"
+    _wk = f"⚠OOS弱 (BT≥{_bt_lo}・WF{_wf_hi}未満)"
+    if _oos_stat.get(_hk) and _oos_stat.get(_wk):
+        _hn, _hwr, _hpf, _havg, _hpnl = _oos_stat[_hk]
+        _wn, _wwr, _wpf, _wavg, _wpnl = _oos_stat[_wk]
+        _dwr = _wwr - _hwr
+        _davg = _wavg - _havg
+        _hpf_s = "∞" if _hpf == float("inf") else f"{_hpf:.2f}"
+        _wpf_s = "∞" if _wpf == float("inf") else f"{_wpf:.2f}"
+        _worse = _davg < 0
+        _oos_verdict = (
+            f"⚠OOS弱({_wn}件)は健全({_hn}件)に比べ、"
+            f"勝率 {_dwr:+.1f}pt・PF {_wpf_s} vs {_hpf_s}・"
+            f"平均損益 {_wavg:+,.0f}円 vs {_havg:+,.0f}円/取引"
+            f"（1取引あたり {_davg:+,.0f}円 {'悪化' if _worse else '良化'}）。"
+            f" ⇒ ⚠OOS弱バッジは{'回避する価値がある' if _worse else '今回は明確な差が小さい'}。")
+        _oos_vcol = "#f87171" if _worse else "#94a3b8"
+    else:
+        _oos_verdict = "健全またはOOS弱のいずれかが該当なしのため比較不可。"
+        _oos_vcol = "#94a3b8"
+    oos_impact_html = f"""
+<h2 style="margin-top:24px">③-b ⚠OOS弱 影響分析（BT≥{_bt_lo} を WF で二分 / 365日全取引）</h2>
+<p class="footnote" style="margin-bottom:8px">シグナル一覧の <span style="color:#f87171;font-weight:700">⚠OOS弱</span> バッジ（BT≥{_bt_lo} かつ WF&lt;{_wf_hi}）が実際に成績を悪化させているかを、同じ閾値で健全群と比較して検証する。</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">区分</th><th>取引数</th><th>勝率</th><th>PF</th>
+    <th>損益合計</th><th>平均損益/取引</th>
+  </tr></thead>
+  <tbody>{_oos_rows}</tbody>
+</table>
+<p class="footnote" style="margin-top:6px;color:{_oos_vcol};font-weight:700">{_oos_verdict}</p>
+"""
+
     # ── ④ 高BT銘柄別成績 (BT≥60 / rec_scoreで選定・per-symbol) ──
     sym_agg: dict = defaultdict(lambda: {"n":0,"w":0,"pnl":0,"gp":0,"gl":0,
                                           "strats":set(),"wf_scores":[],"rec_scores":[]})
@@ -7942,7 +8020,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   </tr></thead>
   <tbody>{"<tr><td colspan='8' style='text-align:center;color:#64748b;padding:12px'>BT≥60の取引なし</td></tr>" if not cross_rows else cross_rows}</tbody>
 </table>
-
+{oos_impact_html}
 <h2 style="margin-top:24px">④ 高BT銘柄別成績（BT≥60 / 損益降順 / 365日全取引）</h2>
 <p class="footnote" style="margin-bottom:8px">
   BTスコア≥60の銘柄ごとの損益集計。<span style="color:#f87171">■</span> = 損失-3万超、<span style="color:#4ade80">■</span> = 利益+5万超。<br>
