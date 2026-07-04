@@ -1587,6 +1587,10 @@ def _set_sig_params(mode: str, sm_tm=None) -> None:
 
 _BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", "取引数": "#a855f7"}
 
+# BT高・WF低(OOS弱)の警告しきい値: (BT下限, WF上限)。BT≥60 かつ WF<40 で赤バッジ。
+_BT_HIGH_WF_LOW = (60, 40)
+
+
 def _fmt_score_cell(s: dict, col: str) -> str:
     """シグナルテーブルのスコアセルHTML。WFスコアとBTスコアを両表示。"""
     rank = s["rank"]
@@ -1607,10 +1611,21 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         _tr_badge = ""
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
+        # BT高いのにWF低い(OOS弱)を警告。直近実績(BT)は良いが未来再現性(WF)が
+        # 低い"時期依存の罠"。WFの方が信頼できる(§17.4)ので赤バッジで注意喚起。
+        _wf = s.get("wf_score")
+        _div_badge = ""
+        if (isinstance(rec, (int, float)) and _wf is not None
+                and rec >= _BT_HIGH_WF_LOW[0] and _wf < _BT_HIGH_WF_LOW[1]):
+            _div_badge = (
+                '<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;'
+                'border-radius:3px;font-size:0.62rem;display:block;margin-top:1px" '
+                'title="BTは高いがWF(未来再現性)が低い。時期依存の可能性">'
+                f'⚠OOS弱</span>')
         return (
             f'<span style="color:{col};font-weight:700">WF&nbsp;{s["wf_score"]}</span>'
             f'<span style="font-size:0.68rem;color:#64748b;display:block">{rank} / BT:{rec}</span>'
-            f'{type_badge}{_tr_badge}'
+            f'{type_badge}{_tr_badge}{_div_badge}'
         )
     else:
         return (
