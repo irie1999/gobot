@@ -178,6 +178,11 @@ else:
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 注文価格 で約定）
 
 
+# 薄サンプル減点の閾値: 最長窓(365日)の実取引数がこれ未満だと、勝率/PF/安定の
+# 品質点(最大80点)を線形に割り引く。少数トレードでの過大評価(例: 2取引で91点)を抑制。
+MIN_TRADES_FOR_FULL_BT = 5
+
+
 def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     """
     バックテスト成績からおすすめスコア(0-100)とランクを計算。
@@ -196,12 +201,12 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
     t_trades = max((r["trades"] for r in results), default=0)  # 重複窓を足さず実数(180日)で数える
 
-    score = round(
-        avg_wr * 0.4
-        + (avg_pf / 10) * 30
-        + stable * 20
-        + min(t_trades / 20, 1) * 10
-    )
+    # 薄サンプル減点: 勝率/PF/安定(最大80点)は少数トレードで簡単に満点化するため、
+    # 最長窓の実取引数が MIN_TRADES_FOR_FULL_BT 未満なら線形に割り引く。
+    # (取引回数点は元々サンプルに比例するので対象外)
+    confidence = min(1.0, t_trades / MIN_TRADES_FOR_FULL_BT) if MIN_TRADES_FOR_FULL_BT > 0 else 1.0
+    quality = avg_wr * 0.4 + (avg_pf / 10) * 30 + stable * 20
+    score = round(quality * confidence + min(t_trades / 20, 1) * 10)
     rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
     return score, rank
 
