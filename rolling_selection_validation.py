@@ -129,11 +129,10 @@ def _auto_universe_file() -> str | None:
 
 
 def _candidate_pairs(symbols_file: str | None, limit: int,
-                     short: bool) -> tuple[list[tuple[str, str]], str]:
+                     strats: list) -> tuple[list[tuple[str, str]], str]:
     """検証する (銘柄, 戦略) と使ったユニバース名を返す。
-    戦略はレポートと同一 (LONG_STRATS / SHORT_STRATS)。
+    strats はレポートと同一の戦略セット。
     symbols_file 未指定なら symbols_listed_prime.py を自動検出(=レポートと同じ母集団)。"""
-    strats = SHORT_STRATS if short else LONG_STRATS
     strats = [s for s in strats if s in _swf.STRATEGY_DEFS]
     src = symbols_file or _auto_universe_file()
     if src:
@@ -182,11 +181,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", default=None,
                     help="候補ユニバース.py。未指定は symbols_listed_prime.py 自動検出(=レポートと同じ母集団)")
-    ap.add_argument("--short", action="store_true", help="ショート側(SHORT_STRATS)を検証")
+    ap.add_argument("--short", action="store_true", help="ショート側のみ(SHORT_STRATS)")
+    ap.add_argument("--both", action="store_true", help="ロング+ショート同時(レポート --both 準拠)")
     ap.add_argument("--start", default="2026-01", help="最古の基準月 (YYYY-MM)")
     ap.add_argument("--per-strategy", type=int, default=10, help="戦略あたり選定数(レポート準拠)")
     ap.add_argument("--max-dd", type=float, default=15.0, help="MaxDD上限パーセント(レポート準拠)")
-    ap.add_argument("--max-price", type=float, default=0.0)
+    ap.add_argument("--price-ranges", default=None,
+                    help="価格上限をカンマ区切りで複数(例 6000,10000)。各上限で選定しunion(レポート準拠)")
+    ap.add_argument("--max-price", type=float, default=0.0, help="価格上限(--price-ranges 未指定時)")
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--hist-days", type=int, default=730, help="フォワード用バックテスト履歴日数")
     ap.add_argument("--workers", type=int, default=6)
@@ -197,18 +199,27 @@ def main():
     today = datetime.now(JST).date()
     _sy, _sm = map(int, args.start.split("-"))
     base_dates = [d for d in _month_ends(date(_sy, _sm, 1), today) if (today - d).days >= 5]
-    pairs, src = _candidate_pairs(args.symbols, args.limit, args.short)
     mode = "aggressive" if args.aggressive else "conservative"
-    side = "SHORT" if args.short else "LONG"
-    strats = SHORT_STRATS if args.short else LONG_STRATS
+    if args.both:
+        strats, side = LONG_STRATS + SHORT_STRATS, "LONG+SHORT"
+    elif args.short:
+        strats, side = SHORT_STRATS, "SHORT"
+    else:
+        strats, side = LONG_STRATS, "LONG"
+    # 価格上限リスト(レポート --price-ranges 準拠): 各上限で選定しunion
+    if args.price_ranges:
+        ceilings = [float(x) for x in args.price_ranges.split(",") if x.strip()]
+    else:
+        ceilings = [args.max_price]
+    pairs, src = _candidate_pairs(args.symbols, args.limit, strats)
 
     print("=" * 74)
     print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / {side} / mode={mode}")
     print(f"ユニバース: {src}")
     print(f"戦略: {strats}")
-    print(f"候補 {len(pairs)}(銘柄×戦略) / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)"
-          f" / per_strategy={args.per_strategy} MaxDD≤{args.max_dd}%")
-    print("※ 全上場×6戦略×基準月 は重い(数時間)。まず --limit で確認を")
+    print(f"価格上限: {ceilings} (min={args.min_price}) / per_strategy={args.per_strategy} MaxDD≤{args.max_dd}")
+    print(f"候補 {len(pairs)}(銘柄×戦略) / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)")
+    print("※ 全上場×戦略×基準月 は重い(数時間)。まず --limit で確認を")
     print("=" * 74)
 
     # ── フォワード用 trade_log を候補ごとに1回だけ取得 ──
@@ -241,29 +252,32 @@ def main():
                     asof_rows.append(r)
         # 選定フィルタ = run_signals_holdout_all._load_wl_from_csv 準拠:
         #   total_test_pnl>0 / max_drawdown_pct<=max_dd / 価格。folds は課さない。
-        elig = []
+        #   価格上限は複数(--price-ranges)可。各上限で「戦略ごとcomposite上位per_strategy」を
+        #   選び、全上限をunion(レポートの複数price-rangeと同じ)。
+        def _composite(r):
+            return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
+        base_elig = []
         for r in asof_rows:
             if float(r.get("total_test_pnl", 0)) <= 0:
                 continue
             if float(r.get("max_drawdown_pct", 0)) > args.max_dd:
                 continue
             price = float(r.get("latest_price", 0))
-            if args.max_price > 0 and price > args.max_price:
-                continue
             if args.min_price > 0 and price < args.min_price:
                 continue
-            elig.append(r)
-        # 戦略ごと composite=total_test_pnl×(1+max(sharpe,0)) 降順 上位 per_strategy
-        def _composite(r):
-            return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
-        by_strat: dict = defaultdict(list)
-        for r in elig:
-            by_strat[r["strategy"]].append(r)
-        selected = []
-        for st, rows in by_strat.items():
-            rows.sort(key=_composite, reverse=True)
-            for r in rows[:args.per_strategy]:
-                selected.append((r["symbol"], r["strategy"]))
+            base_elig.append(r)
+        selected_set = set()
+        for ceil in ceilings:
+            elig = [r for r in base_elig
+                    if ceil <= 0 or float(r.get("latest_price", 0)) <= ceil]
+            by_strat: dict = defaultdict(list)
+            for r in elig:
+                by_strat[r["strategy"]].append(r)
+            for st, rows in by_strat.items():
+                rows.sort(key=_composite, reverse=True)
+                for r in rows[:args.per_strategy]:
+                    selected_set.add((r["symbol"], r["strategy"]))
+        selected = sorted(selected_set)
         # フォワード集計 (signal_dt > D)
         fwd = defaultdict(list)
         for (sym, strat) in selected:
