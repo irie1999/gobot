@@ -51,14 +51,18 @@ JST = timezone(timedelta(hours=9))
 LONG_STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
 SHORT_STRATS = ["A7_S", "RSI2_S", "MACD_S", "DON_S", "MOM_S", "GAP_S"]
 
+# con / agg の STRATEGY_DEFS (レポートは両モードを選定してunion)
+CON_DEFS = _swf.STRATEGY_DEFS_CONSERVATIVE
+AGG_DEFS = _swf.STRATEGY_DEFS_AGGRESSIVE
 
-def _wf_asof(sym: str, strat: str, asof: date) -> dict | None:
+
+def _wf_asof(sym: str, strat: str, asof: date, defs: dict) -> dict | None:
     """レポートと同じ FOLDS(2年/2fold) を基準日 asof に当てて WF 選定指標を計算。
     holdout=today-asof で FOLDS をずらすのと数学的に等価(未来遮断)。MaxDD/Sharpe は
     全testfoldのtrade_logを結合して enrich_backtest_result で計算(walkforward_one と同一)。"""
-    if strat not in _swf.STRATEGY_DEFS:
+    if strat not in defs:
         return None
-    calc_fn, em, sm, tm, family, entry_type = _swf.STRATEGY_DEFS[strat]
+    calc_fn, em, sm, tm, family, entry_type = defs[strat]
     need = (_swf.TODAY - asof).days + 800
     df = fetch(sym, need)
     if df is None or len(df) < 400:
@@ -164,11 +168,11 @@ def _month_ends(start: date, end: date) -> list[date]:
     return outs
 
 
-def _forward_trades(sym: str, strat: str, hist_days: int) -> list[dict]:
+def _forward_trades(sym: str, strat: str, hist_days: int, defs: dict) -> list[dict]:
     """(sym,strat) を通しバックテストし trade_log を返す(フォワード集計用)。"""
-    if strat not in _swf.STRATEGY_DEFS:
+    if strat not in defs:
         return []
-    calc_fn, em, sm, tm, family, entry_type = _swf.STRATEGY_DEFS[strat]
+    calc_fn, em, sm, tm, family, entry_type = defs[strat]
     df = fetch(sym, hist_days)
     if df is None or getattr(df, "empty", True):
         return []
@@ -192,21 +196,28 @@ def main():
     ap.add_argument("--max-price", type=float, default=0.0, help="価格上限(--price-ranges 未指定時)")
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--hist-days", type=int, default=730, help="フォワード用バックテスト履歴日数")
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=3, help="並列数(裏でデイトレ稼働中は控えめ推奨)")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--aggressive", action="store_true")
+    ap.add_argument("--con-only", action="store_true", help="conservativeのみ(既定はcon+agg両方)")
+    ap.add_argument("--agg-only", action="store_true", help="aggressiveのみ(既定はcon+agg両方)")
     args = ap.parse_args()
 
     today = datetime.now(JST).date()
     _sy, _sm = map(int, args.start.split("-"))
     base_dates = [d for d in _month_ends(date(_sy, _sm, 1), today) if (today - d).days >= 5]
-    mode = "aggressive" if args.aggressive else "conservative"
     if args.both:
         strats, side = LONG_STRATS + SHORT_STRATS, "LONG+SHORT"
     elif args.short:
         strats, side = SHORT_STRATS, "SHORT"
     else:
         strats, side = LONG_STRATS, "LONG"
+    # モード: レポートは con+agg 両方を選定してunion。既定で両方。
+    if args.con_only:
+        modes = [("con", CON_DEFS)]
+    elif args.agg_only:
+        modes = [("agg", AGG_DEFS)]
+    else:
+        modes = [("con", CON_DEFS), ("agg", AGG_DEFS)]
     # 価格上限リスト(レポート --price-ranges 準拠): 各上限で選定しunion
     if args.price_ranges:
         ceilings = [float(x) for x in args.price_ranges.split(",") if x.strip()]
@@ -214,19 +225,25 @@ def main():
         ceilings = [args.max_price]
     pairs, src = _candidate_pairs(args.symbols, args.limit, strats)
 
+    def _composite(r):
+        return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
+
     print("=" * 74)
-    print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / {side} / mode={mode}")
-    print(f"ユニバース: {src}")
+    print(f"完全版ロールフォワード(現在と同じWF選定を各基準月で再現) / {side}")
+    print(f"モード: {[m for m, _ in modes]} (レポートは両方union) / ユニバース: {src}")
     print(f"戦略: {strats}")
-    print(f"価格上限: {ceilings} (min={args.min_price}) / per_strategy={args.per_strategy} MaxDD≤{args.max_dd}")
-    print(f"候補 {len(pairs)}(銘柄×戦略) / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)")
-    print("※ 全上場×戦略×基準月 は重い(数時間)。まず --limit で確認を")
+    print(f"価格上限: {ceilings} (min={args.min_price}) / per_strategy={args.per_strategy} "
+          f"MaxDD≤{args.max_dd} folds≥{args.min_folds}")
+    print(f"候補 {len(pairs)}×{len(modes)}モード / 基準月 {base_dates[0]}〜{base_dates[-1]}({len(base_dates)}件)")
+    print(f"※ 重い。裏でデイトレ稼働中は workers={args.workers}(控えめ)。まず --limit で確認を")
     print("=" * 74)
 
-    # ── フォワード用 trade_log を候補ごとに1回だけ取得 ──
+    # ── フォワード用 trade_log: (sym, strat, mode) ごとに1回 ──
+    fwd_tasks = [(s, st, mn, dfs) for s, st in pairs for mn, dfs in modes]
     fwd_logs: dict[tuple, list] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_forward_trades, s, st, args.hist_days): (s, st) for s, st in pairs}
+        futs = {ex.submit(_forward_trades, s, st, args.hist_days, dfs): (s, st, mn)
+                for s, st, mn, dfs in fwd_tasks}
         done = 0
         for fut in as_completed(futs):
             k = futs[fut]; done += 1
@@ -234,65 +251,51 @@ def main():
                 fwd_logs[k] = fut.result()
             except Exception:
                 fwd_logs[k] = []
-            if done % 50 == 0 or done == len(pairs):
-                print(f"  forward backtest {done}/{len(pairs)}", flush=True)
+            if done % 100 == 0 or done == len(fwd_tasks):
+                print(f"  forward backtest {done}/{len(fwd_tasks)}", flush=True)
 
-    # ── 各基準月: as-of選定 → フォワード集計 ──
+    # ── 各基準月: 各モードで as-of選定 → (sym,strat,mode) union → フォワード集計 ──
     result = {}
     for D in base_dates:
-        # as-of D の WF 指標を全候補で計算 (レポートと同じ FOLDS 方式)
-        asof_rows: list[dict] = []
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = {ex.submit(_wf_asof, s, st, D): (s, st) for s, st in pairs}
-            for fut in as_completed(futs):
-                try:
-                    r = fut.result()
-                except Exception:
-                    r = None
-                if r:
-                    asof_rows.append(r)
-        # 選定フィルタ = run_signals_holdout_all._load_wl_from_csv 準拠:
-        #   total_test_pnl>0 / max_drawdown_pct<=max_dd / 価格。folds は課さない。
-        #   価格上限は複数(--price-ranges)可。各上限で「戦略ごとcomposite上位per_strategy」を
-        #   選び、全上限をunion(レポートの複数price-rangeと同じ)。
-        def _composite(r):
-            return float(r.get("total_test_pnl", 0)) * (1.0 + max(float(r.get("sharpe", 0)), 0.0))
-        base_elig = []
-        for r in asof_rows:
-            # scan_walkforward は CSV書込時に folds_passed>=2 で絞る(=レポートの前提)
-            if int(r.get("folds_passed", 0)) < args.min_folds:
-                continue
-            if float(r.get("total_test_pnl", 0)) <= 0:
-                continue
-            if float(r.get("max_drawdown_pct", 0)) > args.max_dd:
-                continue
-            price = float(r.get("latest_price", 0))
-            if args.min_price > 0 and price < args.min_price:
-                continue
-            base_elig.append(r)
         selected_set = set()
-        for ceil in ceilings:
-            elig = [r for r in base_elig
-                    if ceil <= 0 or float(r.get("latest_price", 0)) <= ceil]
-            by_strat: dict = defaultdict(list)
-            for r in elig:
-                by_strat[r["strategy"]].append(r)
-            for st, rows in by_strat.items():
-                rows.sort(key=_composite, reverse=True)
-                for r in rows[:args.per_strategy]:
-                    selected_set.add((r["symbol"], r["strategy"]))
-        selected = sorted(selected_set)
-        # フォワード集計 (signal_dt > D)
+        for mn, dfs in modes:
+            asof_rows: list[dict] = []
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                futs = {ex.submit(_wf_asof, s, st, D, dfs): (s, st) for s, st in pairs}
+                for fut in as_completed(futs):
+                    try:
+                        r = fut.result()
+                    except Exception:
+                        r = None
+                    if r:
+                        asof_rows.append(r)
+            # 選定フィルタ (scan_walkforward CSV + _load_wl_from_csv 準拠)
+            base_elig = [r for r in asof_rows
+                         if int(r.get("folds_passed", 0)) >= args.min_folds
+                         and float(r.get("total_test_pnl", 0)) > 0
+                         and float(r.get("max_drawdown_pct", 0)) <= args.max_dd
+                         and (args.min_price <= 0 or float(r.get("latest_price", 0)) >= args.min_price)]
+            for ceil in ceilings:
+                elig = [r for r in base_elig
+                        if ceil <= 0 or float(r.get("latest_price", 0)) <= ceil]
+                by_strat: dict = defaultdict(list)
+                for r in elig:
+                    by_strat[r["strategy"]].append(r)
+                for st, rows in by_strat.items():
+                    rows.sort(key=_composite, reverse=True)
+                    for r in rows[:args.per_strategy]:
+                        selected_set.add((r["symbol"], r["strategy"], mn))
+        # フォワード集計 (signal_dt > D)。con/agg は別設定として両方計上(レポート準拠)
         fwd = defaultdict(list)
-        for (sym, strat) in selected:
-            for t in fwd_logs.get((sym, strat), []):
+        for (sym, strat, mn) in selected_set:
+            for t in fwd_logs.get((sym, strat, mn), []):
                 sd = t.get("signal_dt")
                 sd = sd.date() if hasattr(sd, "date") else sd
                 if sd is None or sd <= D or t.get("reason") in ("発注中", "保有中"):
                     continue
                 fwd[sd.strftime("%Y-%m")].append(t["pnl"])
-        result[D] = {"sel": selected, "fwd": fwd}
-        print(f"  基準 {D}: 選定 {len(selected)}銘柄×戦略", flush=True)
+        result[D] = {"sel": sorted(selected_set), "fwd": fwd}
+        print(f"  基準 {D}: 選定 {len(selected_set)}(銘柄×戦略×モード)", flush=True)
 
     # ── 出力 ──
     all_months = sorted({m for D in base_dates for m in result[D]["fwd"]})
