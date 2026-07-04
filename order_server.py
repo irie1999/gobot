@@ -397,28 +397,15 @@ def _kabu_get(fn, *a, tries=4, **k):
 
 def _load_signal_targets() -> dict:
     """(symbol, side) -> {"target":利確価格, "strategy":戦略} を作る。
-    当日シグナル(signals_latest.json)に加え、my_positions.csv(実保有の記録)も読み、
-    古い保有(当日シグナルに無い銘柄)の利確目標もカバーする。my_positions.csvを優先。"""
+    当日シグナル(signals_latest.json=最新・HTMLと同値)を優先し、当日シグナルに無い
+    古い保有だけ my_positions.csv で補う。
+    ※ 以前は my_positions.csv を優先していたが、建玉時に記録された古い目標が最新の
+      HTML目標を上書きしてしまい、実発注がHTMLとズレる原因になっていたため反転。"""
     import json, csv
     from pathlib import Path
     out: dict = {}
     base = Path(__file__).resolve().parent
-    # 1) 当日シグナル
-    for fn, side in (("signals_latest.json", "long"),
-                     ("signals_latest_short.json", "short")):
-        p = base / fn
-        if not p.exists():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for s in data.get("signals", []):
-            sym = str(s.get("symbol", "")).split(".")[0]
-            tp = _f(s.get("target_p"))
-            if sym and tp > 0:
-                out[(sym, side)] = {"target": tp, "strategy": s.get("strategy", "")}
-    # 2) my_positions.csv(保有記録)で上書き＝古い保有もカバー
+    # 1) my_positions.csv(古い保有の記録)を先に入れる=土台。当日シグナルで上書きされる。
     pcsv = base / "my_positions.csv"
     if pcsv.exists():
         try:
@@ -433,6 +420,21 @@ def _load_signal_targets() -> dict:
                         out[(sym, side)] = {"target": tp, "strategy": row.get("strategy", "")}
         except Exception:
             pass
+    # 2) 当日シグナル(最新=HTMLと同値)で上書き=当日シグナルがある銘柄は最新目標を採用
+    for fn, side in (("signals_latest.json", "long"),
+                     ("signals_latest_short.json", "short")):
+        p = base / fn
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for s in data.get("signals", []):
+            sym = str(s.get("symbol", "")).split(".")[0]
+            tp = _f(s.get("target_p"))
+            if sym and tp > 0:
+                out[(sym, side)] = {"target": tp, "strategy": s.get("strategy", "")}
     return out
 
 
