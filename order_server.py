@@ -397,15 +397,24 @@ def _kabu_get(fn, *a, tries=4, **k):
 
 def _load_signal_targets() -> dict:
     """(symbol, side) -> {"target":利確価格, "strategy":戦略} を作る。
-    当日シグナル(signals_latest.json=最新・HTMLと同値)を優先し、当日シグナルに無い
-    古い保有だけ my_positions.csv で補う。
-    ※ 以前は my_positions.csv を優先していたが、建玉時に記録された古い目標が最新の
-      HTML目標を上書きしてしまい、実発注がHTMLとズレる原因になっていたため反転。"""
-    import json, csv
+
+    保有中ポジションの利確目標は『エントリー時に確定した目標』を最優先する。
+    = my_positions.csv の target_price (発注/登録時に記録=HTML取引明細が示す
+      order_target と同値)。
+
+    ※ 2026-07-05 是正: 以前は当日シグナル(signals_latest.json)を優先していたが、
+      当日シグナルの目標は entry 後に前日終値/ATR/値幅が変わると再計算されて
+      『本来より高く』上振れする(例: 4088 エントリー目標3,111 → 当日シグナル3,235)。
+      逆指値戦略の利確目標はエントリー時に固定される値なので、保有ポジションには
+      当日シグナルを一切使わない。ここでは my_positions.csv のエントリー目標だけを
+      返し、CSV に無い保有は呼び出し側(_backfill_targets)が『約定値から当日以前の
+      エントリーシグナルを逆引き』(lookup_stop_from_signal)で補完する。"""
+    import csv
     from pathlib import Path
     out: dict = {}
     base = Path(__file__).resolve().parent
-    # 1) my_positions.csv(古い保有の記録)を先に入れる=土台。当日シグナルで上書きされる。
+    # my_positions.csv = 発注/登録時に記録したエントリー目標(HTML取引明細の
+    # order_target と同値)。保有ポジションの利確はこれを使う。
     pcsv = base / "my_positions.csv"
     if pcsv.exists():
         try:
@@ -420,21 +429,6 @@ def _load_signal_targets() -> dict:
                         out[(sym, side)] = {"target": tp, "strategy": row.get("strategy", "")}
         except Exception:
             pass
-    # 2) 当日シグナル(最新=HTMLと同値)で上書き=当日シグナルがある銘柄は最新目標を採用
-    for fn, side in (("signals_latest.json", "long"),
-                     ("signals_latest_short.json", "short")):
-        p = base / fn
-        if not p.exists():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for s in data.get("signals", []):
-            sym = str(s.get("symbol", "")).split(".")[0]
-            tp = _f(s.get("target_p"))
-            if sym and tp > 0:
-                out[(sym, side)] = {"target": tp, "strategy": s.get("strategy", "")}
     return out
 
 
