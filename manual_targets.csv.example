@@ -1,11 +1,10 @@
-symbol,side,target,stop,strategy
+symbol,side,target,stop,strategy,fill_date
 # このファイルを manual_targets.csv にコピーして使う(最優先override)。
 # placed_orders_*.csv / my_positions.csv に記録が無い保有(手動発注・記録欠落)の
-# 正しい利確(target)/損切(stop)を、レポート取引明細の値で直接指定する。
-# order_server(利確) と close_stop_guard(損切) が最優先で採用する。
-# side は long / short。strategy は任意(表示用)。行頭 # のコメント行は無視される。
+# 正しい利確(target)/損切(stop)/約定日(fill_date)を、レポート取引明細の値で直接指定。
+# order_server(利確) と close_stop_guard(損切/保有タブ) が最優先で採用する。
+# side は long / short。strategy/fill_date は任意(表示用)。行頭 # のコメント行は無視。
 #
-# 例: 4088 は記録欠落 → レポート取引明細の値(利確3,111 / 損切2,671)を指定
-4088,long,3111,2671,MOM
-# 8237,long,<レポートの目標>,<レポートの損切>,A7
-# 8395,long,<レポートの目標>,<レポートの損切>,MACDTF
+# 例: 4088 は記録欠落 → 取引明細の値(利確3,110 / 損切2,670 / 約定日2026-06-26)
+4088,long,3110,2670,MOM,2026-06-26
+# 8237,long,2100,1630,VOL,2026-06-29

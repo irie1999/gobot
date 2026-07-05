@@ -161,12 +161,13 @@ def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
 
 
 def _csv_entry_stop_target(sym: str, side: str
-                           ) -> tuple[float | None, float | None, str]:
-    """エントリー時に記録した固定 (stop, target, strategy) を返す。
-    ① placed_orders_*.csv (発注ボタンが記録=最も信頼できる。日付昇順で最新を採用)
+                           ) -> tuple[float | None, float | None, str, str]:
+    """エントリー時に記録した固定 (stop, target, strategy, 約定日) を返す。
+    ⓪ manual_targets.csv (手動指定=最優先。fill_date列で約定日も指定可)
+    ① placed_orders_*.csv (発注ボタンが記録。placed_at から約定日を導出)
     ② my_positions.csv
-    のどちらかから取得。どちらもレポート取引明細と同値で、再計算しないのでズレない。
-    見つからなければ (None, None, "")。"""
+    のいずれかから取得。どれもレポート取引明細と同値で再計算しないのでズレない。
+    見つからなければ (None, None, "", "")。"""
     import csv as _csv
     import glob as _glob
     from pathlib import Path as _Path
@@ -187,7 +188,8 @@ def _csv_entry_stop_target(sym: str, side: str
                     except Exception:
                         continue
                     if sp > 0:
-                        return sp, (tp if tp > 0 else None), row.get("strategy", "")
+                        return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
+                                str(row.get("fill_date", "") or "").strip())
         except Exception:
             pass
     # ① placed_orders_*.csv (日付昇順で読み、最新の発注で上書き)
@@ -206,7 +208,8 @@ def _csv_entry_stop_target(sym: str, side: str
                     except Exception:
                         continue
                     if sp > 0:
-                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""))
+                        _pa = str(row.get("placed_at", "") or "")[:10]
+                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""), _pa)
         except Exception:
             continue
     if best is not None:
@@ -229,10 +232,11 @@ def _csv_entry_stop_target(sym: str, side: str
                     except Exception:
                         continue
                     if sp > 0:
-                        return sp, (tp if tp > 0 else None), row.get("strategy", "")
+                        return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
+                                str(row.get("fill_date", "") or "").strip())
         except Exception:
             pass
-    return None, None, ""
+    return None, None, "", ""
 
 
 def _target_already_set(sym: str, is_short: bool, open_orders: list[dict]) -> bool:
@@ -458,11 +462,13 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         # 固定 stop/target)。check_signal_on_date 再計算はモード(con/agg)/データ調整で
         # ズレる(例: 4088 記録3,111 → 再計算3,235)ため、記録があればそれを最優先。
         _side_lbl = "short" if is_short else "long"
-        stop_p, tgt_p, strat = _csv_entry_stop_target(sym, _side_lbl)
+        stop_p, tgt_p, strat, _csv_fill_date = _csv_entry_stop_target(sym, _side_lbl)
         sig_date = ""
+        _fixed_fill_date = ""   # CSV/手動指定が持つ約定日(あれば直接採用)
         if stop_p is not None:
             src = "my_positions.csv"
-            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p or 0:.0f} [{strat}] (CSV記録)")
+            _fixed_fill_date = _csv_fill_date
+            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p or 0:.0f} [{strat}] (記録/手動)")
         else:
             # フォールバック1: 約定値からエントリーシグナルを逆引き(CSV記録なしの保有)
             if fill_p > 0:
@@ -489,7 +495,8 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
                         _p(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
                 else:
                     src = "missing"
-        fill_date = _fill_date_from_signal(sig_date)
+        # 約定日: 手動指定/記録の fill_date を最優先、無ければシグナル日から導出
+        fill_date = _fixed_fill_date or _fill_date_from_signal(sig_date)
 
         positions.append({
             "symbol":       sym,
