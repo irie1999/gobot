@@ -43,6 +43,7 @@ GUARD_PAUSE_START = dtime(14, 48)
 GUARD_PAUSE_END   = dtime(14, 53)
 _pending = []                    # 約定待ち: [{symbol, side, qty, target, strategy}]
 _pending_lock = threading.Lock()
+_CAP_WARNED: set = set()         # 値幅キャップ通知を(銘柄,価格)ごとに1回だけ出すための記録
 
 
 def _f(v, default=0.0):
@@ -366,7 +367,8 @@ def _cap_to_price_limit(cli, symbol: str, side: str, target: float):
         price = _ceil_tick(capped)
         if price < lower:
             price = _ceil_tick(lower)
-        if float(target) < lower:
+        if float(target) < lower and (symbol, price) not in _CAP_WARNED:
+            _CAP_WARNED.add((symbol, price))   # 銘柄+価格ごとに1回だけ(10秒ループのスパム防止)
             print(f"  ↘ {symbol} 利確{target:,.0f}が下限{lower:,.0f}割れ "
                   f"(前日終値{base:,.0f}-値幅{width:,.0f}) → 下限{price:,d}で発注")
         return price
@@ -374,7 +376,8 @@ def _cap_to_price_limit(cli, symbol: str, side: str, target: float):
         # 売り利確: 上限以下・呼値刻み(切り捨て)
         capped = min(float(target), upper)
         price = _floor_tick(capped)
-        if float(target) > upper:
+        if float(target) > upper and (symbol, price) not in _CAP_WARNED:
+            _CAP_WARNED.add((symbol, price))   # 銘柄+価格ごとに1回だけ(10秒ループのスパム防止)
             print(f"  ↗ {symbol} 利確{target:,.0f}が上限{upper:,.0f}超 "
                   f"(前日終値{base:,.0f}+値幅{width:,.0f}) → 上限{price:,d}で発注")
         return price
@@ -579,17 +582,23 @@ def _backfill_targets(cli) -> None:
             print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が特定できません "
                   f"(placed_orders/my_positions.csv/約定値逆引き すべて不一致) → 手動で利確を")
             continue
-        if _lk_tgt and _lk_tgt > 0 and abs(_lk_tgt - info["target"]) > 1:
-            print(f"    ℹ {sym}: 採用目標{info['target']:,.0f}({_src}) "
-                  f"／当日再計算={_lk_tgt:,.0f} は不採用(モード/データでズレるため)")
-        print(f"    ▸ {sym} 目標={info['target']:,.0f} 情報源={_src} 約定値={_fp:,.0f}")
         try:
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
                                          "target": info["target"], "strategy": info["strategy"]},
                                     existing=_existing)
-            print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
         except Exception as e:
             print(f"  ⚠ 利確補完エラー {sym}: {e}")
+            _time.sleep(0.6)
+            continue
+        # 変化があったときだけログ出力。exists(据置)は静かに。
+        # 約定監視は10秒間隔で回るため、全保有が据置の定常状態では毎回同じ行が
+        # 出続けてスパムになる。発注/更新/失敗のときのみ表示する。
+        if st != "exists":
+            if _lk_tgt and _lk_tgt > 0 and abs(_lk_tgt - info["target"]) > 1:
+                print(f"    ℹ {sym}: 採用目標{info['target']:,.0f}({_src}) "
+                      f"／当日再計算={_lk_tgt:,.0f} は不採用(モード/データでズレるため)")
+            print(f"    ▸ {sym} 目標={info['target']:,.0f} 情報源={_src} 約定値={_fp:,.0f}")
+            print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
         _time.sleep(0.6)   # 連続発注のレート制限(429)回避
 
 
