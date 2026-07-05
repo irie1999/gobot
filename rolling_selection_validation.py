@@ -21,7 +21,7 @@ rolling_selection_validation.py ― 現在と同じ選定を各基準月で再�
   python rolling_selection_validation.py                      # 監視union / 既定
   python rolling_selection_validation.py --start 2026-03 --per-strategy 10
   python rolling_selection_validation.py --symbols symbols_listed_prime.py --limit 200 --workers 8
-  python rolling_selection_validation.py --aggressive --max-price 6000 --min-price 1000
+  python rolling_selection_validation.py --both --price-ranges 6000,10000 --min-price 1000
 """
 from __future__ import annotations
 
@@ -29,14 +29,13 @@ import argparse
 import importlib.util
 import os
 import sys
+import webbrowser
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
-if "--aggressive" in sys.argv:
-    os.environ["TRADING_MODE"] = "aggressive"
-else:
-    os.environ.setdefault("TRADING_MODE", "conservative")
+os.environ.setdefault("TRADING_MODE", "conservative")
 
 import pandas as _pd
 import scan_walkforward as _swf
@@ -181,6 +180,68 @@ def _forward_trades(sym: str, strat: str, hist_days: int, defs: dict) -> list[di
     return r.get("trade_log", []) if r else []
 
 
+def _write_html(path: str, result: dict, base_dates: list, all_months: list, meta: str):
+    """現行レポート風(ダークテーマ・色付き)のロールフォワードOOS表をHTML出力。"""
+    def _cell(pl):
+        p = sum(pl); w = sum(1 for x in pl if x > 0); n = len(pl)
+        c = "#4ade80" if p > 0 else ("#f87171" if p < 0 else "#94a3b8")
+        return (f'<td style="text-align:right;color:{c};font-weight:700">{p:+,.0f}'
+                f'<br><span style="font-size:.68rem;color:#94a3b8">{n}件 {w}勝</span></td>')
+    month_h = "".join(f"<th>{m[5:]}月</th>" for m in all_months)
+    rows = ""
+    diag_t = diag_n = diag_w = 0
+    for D in base_dates:
+        dm = D.strftime("%Y-%m")
+        r = result[D]
+        cells = ""
+        allp = []
+        for m in all_months:
+            if m <= dm:
+                cells += '<td style="color:#334155;text-align:center">·</td>'
+                continue
+            pl = r["fwd"].get(m, [])
+            if not pl:
+                cells += '<td style="color:#475569;text-align:center">—</td>'
+                continue
+            allp.extend(pl)
+            cells += _cell(pl)
+        nxt = next((m for m in all_months if m > dm), None)
+        if nxt and r["fwd"].get(nxt):
+            dpl = r["fwd"][nxt]
+            diag_t += sum(dpl); diag_n += len(dpl); diag_w += sum(1 for x in dpl if x > 0)
+        tp = sum(allp); tn = len(allp); tw = sum(1 for x in allp if x > 0)
+        twr = tw / tn * 100 if tn else 0
+        tc = "#4ade80" if tp > 0 else ("#f87171" if tp < 0 else "#94a3b8")
+        rows += (f'<tr><td style="text-align:left;white-space:nowrap">{dm} まで選定'
+                 f'<br><span style="font-size:.65rem;color:#94a3b8">{len(r["sel"])}件</span></td>'
+                 f'{cells}<td style="text-align:right;color:{tc};font-weight:700">{tp:+,.0f}円'
+                 f'<br><span style="font-size:.65rem;color:#94a3b8">{tn}件 {twr:.0f}%</span></td></tr>')
+    dwr = diag_w / diag_n * 100 if diag_n else 0
+    dc = "#4ade80" if diag_t > 0 else "#f87171"
+    html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>ロールフォワードOOS検証</title>
+<style>
+ body{{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Meiryo,sans-serif;padding:18px}}
+ h2{{color:#60a5fa}} .meta{{color:#94a3b8;font-size:.82rem;margin:4px 0 12px;line-height:1.6}}
+ table{{border-collapse:collapse;margin-top:10px}}
+ th,td{{border:1px solid #334155;padding:5px 9px;font-size:.8rem;white-space:nowrap}}
+ th{{background:#1e293b;color:#cbd5e1}} .note{{color:#94a3b8;font-size:.76rem;margin-top:8px;line-height:1.6}}
+ .summary{{background:#1e293b;border-left:4px solid {dc};padding:10px 14px;margin:10px 0;font-size:.95rem}}
+</style></head><body>
+<h2>★ ロールフォワードOOS検証（後知恵ゼロ / 現行と同一選定を各基準月で再現）</h2>
+<p class="meta">{meta}</p>
+<div class="summary"><b>翌月OOS合計（非重複・これが最重要）:</b>
+ <b style="color:{dc};font-size:1.2rem">{diag_t:+,.0f}円</b> &nbsp; {diag_n}件 勝率{dwr:.0f}%
+ <br><span style="color:#94a3b8;font-size:.8rem">各基準月末で選定→翌月だけのOOSを合算(重複なし)。これがプラスなら選定は時期を越えて機能。</span></div>
+<div style="overflow-x:auto"><table>
+<thead><tr><th style="text-align:left">選定基準月</th>{month_h}<th>全OOS計</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<p class="note">各セル = OOS損益(取引数/勝ち)。<span style="color:#334155">·</span>=基準月以前(選定に使用) / —=取引なし。<br>
+ <b>「全OOS計」列は各行で期間が重複するので足し算しないこと。</b>非重複で信頼できるのは上の「翌月OOS合計」。</p>
+</body></html>"""
+    Path(path).write_text(html, encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", default=None,
@@ -200,6 +261,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--con-only", action="store_true", help="conservativeのみ(既定はcon+agg両方)")
     ap.add_argument("--agg-only", action="store_true", help="aggressiveのみ(既定はcon+agg両方)")
+    ap.add_argument("--no-browser", action="store_true", help="HTMLをブラウザで開かない")
     args = ap.parse_args()
 
     today = datetime.now(JST).date()
@@ -326,6 +388,20 @@ def main():
     print("-" * len(hdr))
     print("各セル: OOS損益(取引数/勝ち)  ·=基準月以前(選定に使用)  —=取引なし")
     print("選定=その基準月末までのデータだけでWF選定(未来遮断)。現在と同じ選定条件を各月で再現。")
+
+    # ── HTML出力(現行レポート風・文字化けしない) ──
+    _meta = (f"{side} / モード {[m for m, _ in modes]} / ユニバース {src} / "
+             f"戦略 {strats}<br>価格上限 {ceilings} (min={args.min_price}) / "
+             f"per_strategy={args.per_strategy} MaxDD≤{args.max_dd} folds≥{args.min_folds} / "
+             f"基準月 {base_dates[0]}〜{base_dates[-1]}")
+    _html_path = f"rolling_oos_{today}.html"
+    _write_html(_html_path, result, base_dates, all_months, _meta)
+    print(f"\nHTML出力: {os.path.abspath(_html_path)}")
+    if not args.no_browser:
+        try:
+            webbrowser.open("file://" + os.path.abspath(_html_path))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
