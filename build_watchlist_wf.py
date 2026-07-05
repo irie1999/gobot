@@ -86,6 +86,8 @@ def main() -> None:
                     help="選定窓 TEST の最小平均PF (既定 1.2)")
     ap.add_argument("--min-test-trades", type=int, default=3,
                     help="選定窓 TEST の最小取引数 (既定 3)")
+    ap.add_argument("--single-ho", action="store_true",
+                    help="1期間(--select-ho)だけで選定。既定は6期間(30-180)をunion(スイング同様)")
     ap.add_argument("--strict-both", action="store_true",
                     help="HO90&HO180両方で合格を要求 (クリーンOOSは直近90日に縮む)")
     ap.add_argument("--strategies", nargs="+", default=["Donchian", "Pivot"],
@@ -115,45 +117,54 @@ def main() -> None:
                 and _f(r.get("avg_test_pf")) >= args.min_test_pf
                 and _f(r.get("total_test_trades")) >= args.min_test_trades)
 
+    # 選定に使うholdout期間: 既定は6期間union(スイング同様)、--single-ho で1期間のみ
+    hos_used = [sho] if args.single_ho else HOLDOUTS
     for strat in use_strategies:
         data = {ho: _load(strat, ho, args.date) for ho in HOLDOUTS}
-        pool = data.get(sho, {})
-        if not pool:
-            continue
-        cand = []
-        for code, r in pool.items():
-            if not selectable(r):
+        # 各holdout期間で「選定スコア上位per_strategy」を選び、全期間をunion(dedupe)。
+        # = スイング run_signals_holdout_all が HO30d〜HO180d をunionするのと同じ。
+        picked: dict = {}   # code -> pick(最良scoreを保持)
+        for ho in hos_used:
+            pool = data.get(ho, {})
+            if not pool:
                 continue
-            r90 = data[90].get(code)
-            if args.strict_both and not selectable(r90):
-                continue
-            cand.append({
-                "code": code, "name": r.get("name", ""),
-                "price": _f(r.get("latest_price")),
-                "score": _test_score(r),
-                "test": _f(r.get("total_test_pnl")),
-                "pf": _f(r.get("avg_test_pf")),
-                "wr": _f(r.get("avg_test_wr")),
-                # 答え合わせ (純OOS, 表示のみ)
-                "ho_sel": _f(r.get("holdout_pnl")),       # 選定窓のholdout=クリーン
-                "ho90": _f(r90.get("holdout_pnl")) if r90 else 0.0,
-            })
-        if not cand:
+            cand = []
+            for code, r in pool.items():
+                if not selectable(r):
+                    continue
+                r90 = data.get(90, {}).get(code)
+                if args.strict_both and not selectable(r90):
+                    continue
+                cand.append({
+                    "code": code, "name": r.get("name", ""),
+                    "price": _f(r.get("latest_price")),
+                    "score": _test_score(r),
+                    "test": _f(r.get("total_test_pnl")),
+                    "pf": _f(r.get("avg_test_pf")),
+                    "wr": _f(r.get("avg_test_wr")),
+                    "from_ho": ho,
+                    "ho_sel": _f(r.get("holdout_pnl")),
+                    "ho90": _f(r90.get("holdout_pnl")) if r90 else 0.0,
+                })
+            cand.sort(key=lambda x: -x["score"])
+            for p in cand[:args.per_strategy]:
+                prev = picked.get(p["code"])
+                if prev is None or p["score"] > prev["score"]:
+                    picked[p["code"]] = p
+        if not picked:
             continue
-        # 選定スコア降順 → 上位 per-strategy
-        cand.sort(key=lambda x: -x["score"])
-        picks = cand[:args.per_strategy]
+        picks = sorted(picked.values(), key=lambda x: -x["score"])
         watchlist[strat] = [(p["code"], p["name"]) for p in picks]
         ho_sum = sum(p["ho_sel"] for p in picks)
-        print(f"\n【{strat}】 候補{len(cand)} → 採用{len(picks)}銘柄  "
-              f"(純OOS HO{sho}合計 {ho_sum:+,.0f})")
+        _mode = f"HO{sho}単独" if args.single_ho else f"6期間union({'/'.join(map(str, hos_used))})"
+        print(f"\n【{strat}】 採用{len(picks)}銘柄  [{_mode}]  (採用元holdoutの純OOS合計 {ho_sum:+,.0f})")
         print(f"  {'銘柄':<9}{'名前':<20}{'株価':>7}"
-              f" │ {'Score':>6}{'TEST':>9}{'PF':>6}{'WR':>5}"
-              f" │OOS {('HO'+str(sho)):>9}{'HO90':>9}")
-        print("  " + "-" * 96)
+              f" │ {'採用HO':>6}{'Score':>6}{'TEST':>9}{'PF':>6}{'WR':>5}"
+              f" │OOS {'純OOS':>9}{'HO90':>9}")
+        print("  " + "-" * 100)
         for p in picks:
             print(f"  {p['code']:<9}{p['name'][:18]:<20}{p['price']:>7,.0f}"
-                  f" │ {p['score']:>6.1f}{p['test']:>+9,.0f}{p['pf']:>6.2f}"
+                  f" │ {('HO'+str(p['from_ho'])):>6}{p['score']:>6.1f}{p['test']:>+9,.0f}{p['pf']:>6.2f}"
                   f"{p['wr']:>4.0f}%"
                   f" │    {p['ho_sel']:>+9,.0f}{p['ho90']:>+9,.0f}")
 
