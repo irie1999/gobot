@@ -6324,7 +6324,15 @@ function switchTbd(id, tab) {{
                          f'<br><span style="font-size:0.73rem;color:#f87171">{sp_pct:+.1f}%</span></td>')
             tgt_cell  = (f'<td style="text-align:right;white-space:nowrap">{otp:,.0f}'
                          f'<br><span style="font-size:0.73rem;color:#4ade80">{tp_pct:+.1f}%</span></td>')
-            olp_sub   = f'<br><span style="font-size:0.71rem;color:#64748b">逆:{olp:,.0f}</span>'
+            # 逆指値トリガー + 指値上限/下限(±3%)。シグナル一覧と同じ発注条件を併記し、
+            # 「シグナルで出た指値条件」を取引詳細でも突合できるようにする。
+            _is_short_t = str(t.get("strategy", "")).upper().endswith("_S")
+            _lim_entry  = olp * ((1.0 - 0.03) if _is_short_t else (1.0 + 0.03))
+            _lim_lbl    = "指値下限≥" if _is_short_t else "指値上限≤"
+            _lim_pct    = "-3.0%" if _is_short_t else "+3.0%"
+            olp_sub   = (f'<br><span style="font-size:0.71rem;color:#38bdf8">逆:{olp:,.0f}</span>'
+                         f'<br><span style="font-size:0.71rem;color:#f59e0b">{_lim_lbl}{_lim_entry:,.0f}'
+                         f'<span style="color:#64748b">({_lim_pct})</span></span>')
             # 現在値: 保有中のみ表示（現在株価・損切りまで・目標まで）
             cur = t.get("exit_p", 0)
             if t.get("reason") == "保有中" and cur > 0 and osp > 0 and otp > 0:
@@ -6485,7 +6493,7 @@ function switchTbd(id, tab) {{
 <table>
   <thead><tr>
     <th>エントリー</th><th style="text-align:left">銘柄</th><th>戦略</th><th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th>
+    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th>
     <th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>決済日</th>
   </tr></thead>
@@ -8505,7 +8513,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
+    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows_all}</tbody>
@@ -8518,7 +8526,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     <th style="text-align:left">銘柄</th>
     <th>戦略</th>
     <th>設定</th>
-    <th>約定値</th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
+    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows_bt70}</tbody>
