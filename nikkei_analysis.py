@@ -6398,6 +6398,61 @@ function switchTbd(id, tab) {{
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
 
+    # ── 同時保有の最大必要資金（sweep-line） ──────────────────────────
+    # 各ポジションが約定額(entry_p×qty)を entry_d〜exit_d の間だけ拘束すると考え、
+    # 時系列を走査して「同時に拘束されている資金」のピークを求める。
+    # = この取引群を全部やるのに最低限必要な資金。発注中(未約定)は拘束なしで除外。
+    # 同日は entry を exit より先に処理して保守的(最大)ピークを取る。
+    def _peak_capital(trades):
+        evts = []
+        total = 0.0
+        for t in trades:
+            if t.get("reason") == "発注中":
+                continue
+            ed = t.get("entry_d_raw"); xd = t.get("exit_d_raw")
+            cap = (t.get("entry_p") or 0) * (t.get("qty") or 0)
+            if ed is None or cap <= 0:
+                continue
+            total += cap
+            evts.append((ed, 0, cap, 1))       # 約定=資金拘束+
+            if xd is not None:
+                evts.append((xd, 1, -cap, -1))  # 決済=解放(同日約定の後)
+        if not evts:
+            return 0.0, None, 0, 0, 0.0
+        evts.sort(key=lambda e: (e[0], e[1]))
+        cur_cap = cur_cnt = 0.0
+        peak_cap = 0.0; peak_date = None; peak_cnt = 0; max_cnt = 0
+        for d, _o, dcap, dcnt in evts:
+            cur_cap += dcap; cur_cnt += dcnt
+            if cur_cnt > max_cnt:
+                max_cnt = int(cur_cnt)
+            if cur_cap > peak_cap:
+                peak_cap = cur_cap; peak_date = d; peak_cnt = int(cur_cnt)
+        return peak_cap, peak_date, peak_cnt, max_cnt, total
+
+    def _cap_row(trades, label, accent):
+        pc, pd_, pcnt, mc, tot = _peak_capital(trades)
+        if pc <= 0:
+            return ""
+        pd_s = str(pd_) if pd_ else "—"
+        return (f'<div style="margin:2px 0"><b style="color:{accent}">{label}</b>：'
+                f'同時保有の最大必要資金 '
+                f'<b style="color:{accent};font-size:1.05rem">{pc:,.0f}円</b>'
+                f'<span style="color:#64748b">（{pd_s} に {pcnt}銘柄同時保有）</span>'
+                f'&nbsp;/&nbsp;最大同時保有 <b>{mc}銘柄</b>'
+                f'&nbsp;/&nbsp;<span style="color:#94a3b8">延べ投入額 {tot:,.0f}円</span></div>')
+
+    _cap_all  = _cap_row(sorted_trades, "全取引", "#38bdf8")
+    _cap_bt70 = _cap_row(bt70_trades,   "BT70以上", "#4ade80")
+    _capital_summary_html = (
+        '<div style="background:#0b2536;border:1px solid #0e7490;border-radius:8px;'
+        'padding:10px 14px;margin:6px 0 14px;font-size:0.84rem">'
+        '<span style="color:#38bdf8;font-weight:700">💰 必要資金（約定額=株価×株数ベース・100株固定）</span>'
+        '<span style="color:#64748b">：全ポジションを同時に持ったときの資金ピーク。'
+        '発注中(未約定)は除外。</span><br>'
+        + _cap_all + _cap_bt70
+        + '</div>') if (_cap_all or _cap_bt70) else ""
+
     # ── エントリー日別グリッド HTML ──────────────────────────────────
     from collections import defaultdict as _dd
     _ENTRY_GRID_DAYS = days  # グリッド表示は分析期間全体
@@ -8509,6 +8564,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
+{_capital_summary_html}
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
