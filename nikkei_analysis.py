@@ -1592,6 +1592,15 @@ _BT_HIGH_WF_LOW = (60, 40)
 
 
 def _rolling_oos_cache_html() -> str:
+    """例外が絶対に外へ漏れないラッパ(現行レポートを壊さない保証)。"""
+    try:
+        return _rolling_oos_cache_html_impl()
+    except Exception as _e:
+        return (f'<p class="footnote" style="color:#94a3b8">月次ロールフォワード表示スキップ '
+                f'(キャッシュ異常: {_e})</p>')
+
+
+def _rolling_oos_cache_html_impl() -> str:
     """rolling_selection_validation.py が書いた rolling_oos_cache.json を読み、
     現行レポート風の月次ロールフォワードOOSマトリクスを描画。未計算なら案内を返す。"""
     import json as _json2
@@ -1626,14 +1635,15 @@ def _rolling_oos_cache_html() -> str:
             if not v:
                 cells += '<td style="color:#475569;text-align:center">—</td>'
                 continue
-            p_, n_, w_ = v["pnl"], v["n"], v["w"]
+            p_ = v.get("pnl", 0); n_ = v.get("n", 0); w_ = v.get("w", 0)
             s_pnl += p_; s_n += n_; s_w += w_
             col = "#4ade80" if p_ > 0 else ("#f87171" if p_ < 0 else "#94a3b8")
             cells += (f'<td style="text-align:right;color:{col};font-weight:700">{p_:+,.0f}'
                       f'<br><span style="font-size:.68rem;color:#94a3b8">{n_}件 {w_}勝</span></td>')
         nxt = next((m for m in months if m > bm), None)
         if nxt and fwd.get(nxt):
-            diag_t += fwd[nxt]["pnl"]; diag_n += fwd[nxt]["n"]; diag_w += fwd[nxt]["w"]
+            _nv = fwd[nxt]
+            diag_t += _nv.get("pnl", 0); diag_n += _nv.get("n", 0); diag_w += _nv.get("w", 0)
         twr = s_w / s_n * 100 if s_n else 0
         tc = "#4ade80" if s_pnl > 0 else ("#f87171" if s_pnl < 0 else "#94a3b8")
         rows += (f'<tr><td style="text-align:left;white-space:nowrap">{bm} まで選定'
