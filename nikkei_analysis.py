@@ -6234,7 +6234,12 @@ function switchTbd(id, tab) {{
     # 例: デジタルアーツが 06/03 から保有中でも、06/10 の新シグナルを表示する。
     _unsettled_overlaps = [t for t in _overlap_dropped
                            if t.get("reason") in ("発注中", "保有中")]
-    display_trades = all_trades + _unsettled_overlaps
+    # 重複保有(保有中の2回目以降)シグナルも、決済済み含めて全て取引明細・日別・
+    # 月別に「普通のシグナル」として表示する。ユーザーが実際に保有中の追加シグナルで
+    # 取引するため(例: 北日本銀行を保有中に2回目シグナルで再エントリー)。
+    # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
+    #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
+    display_trades = all_trades + _overlap_dropped
 
     # ── 重複保有(計測外)シグナルの勝率サマリー ──────────────────────────────
     # 1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」の決済済み成績を
@@ -6258,9 +6263,10 @@ function switchTbd(id, tab) {{
         _overlap_kpi_html = (
             '<div style="background:#1a1333;border:1px solid #7c3aed;border-radius:8px;'
             'padding:10px 14px;margin:6px 0 14px;font-size:0.82rem">'
-            '<span style="color:#a78bfa;font-weight:700">重複保有シグナル（計測外・参考）</span>'
-            '<span style="color:#64748b">：既に同銘柄を保有中に出た2回目以降のシグナルを'
-            '仮に取っていた場合の決済済み成績。KPI/月別には含みません。</span><br>'
+            '<span style="color:#a78bfa;font-weight:700">重複保有シグナル（再エントリー）</span>'
+            '<span style="color:#64748b">：既に同銘柄を保有中に出た2回目以降のシグナル。'
+            '取引明細・日別・月別には普通のシグナルとして計上。上部KPI/BTスコアには'
+            '含みません（下記は再エントリー分だけの決済済み成績の内訳）。</span><br>'
             f'<span style="color:#94a3b8">決済 </span><b>{_ov_n}件</b>'
             f'&nbsp;/&nbsp;<span style="color:#94a3b8">勝率 </span>'
             f'<b style="color:{_ov_wr_c}">{_ov_wr:.1f}%</b>'
@@ -6270,7 +6276,7 @@ function switchTbd(id, tab) {{
             f'&nbsp;<span style="color:#f87171">-{_ov_gl:,.0f}円</span>'
             f'&nbsp;/&nbsp;<span style="color:#94a3b8">損益 </span>'
             f'<b style="color:{_ov_pnl_c}">{_ov_pnl:+,.0f}円</b>'
-            + (f'&nbsp;<span style="color:#64748b">（未決済 {_ov_pend}件は下表に計測外表示）</span>'
+            + (f'&nbsp;<span style="color:#64748b">（未決済 {_ov_pend}件も下表に表示）</span>'
                if _ov_pend else "")
             + '&nbsp;<span style="color:#64748b">詳細は⑧タブ</span></div>'
         )
@@ -6285,9 +6291,10 @@ function switchTbd(id, tab) {{
     def _build_trade_row(t, entry_first=False) -> str:
         is_pending = t.get("reason") == "発注中"
         is_overlap = bool(t.get("_overlap"))
+        # 重複保有(再エントリー)は情報として印だけ残すが、日別/月別では普通に計上する。
         overlap_badge = ('<br><span style="background:#7c3aed;color:#fff;font-size:0.66rem;'
                          'font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap">'
-                         '重複保有・計測外</span>') if is_overlap else ""
+                         '重複保有(再エントリー)</span>') if is_overlap else ""
         tpc = "profit" if t["pnl"] > 0 else ("" if is_pending else "loss")
         tag = f'<span class="tag tag-{t["strategy"].lower()}">{t["strategy"]}</span>'
         sc  = t.get("score"); rk = t.get("rank")
@@ -6297,7 +6304,8 @@ function switchTbd(id, tab) {{
         else:
             sc_html = ""
         if is_overlap:
-            row_style = ' style="opacity:0.6;border-left:3px solid #7c3aed"'
+            # 普通のシグナルと同様に扱う(dimしない)。左帯だけで再エントリーを示す。
+            row_style = ' style="border-left:3px solid #7c3aed"'
         elif is_pending:
             row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"'
         else:
