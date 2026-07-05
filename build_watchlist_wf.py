@@ -42,7 +42,7 @@ RESULTS = Path("walkforward_results")
 STRATEGIES = ["Donchian", "GapReversal", "VWAP", "RSI", "Pivot",
               "OpenMomentum", "MACDBreak", "StochATR", "VolSurge", "StopShort",
               "ORB"]
-HOLDOUTS = [30, 90, 180]
+HOLDOUTS = [30, 60, 90, 120, 150, 180]   # スイング(run_signals_holdout_all)と同一の6期間
 
 
 def _f(v, d=0.0):
@@ -76,9 +76,10 @@ def _test_score(r) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now(JST).date().isoformat())
-    ap.add_argument("--select-ho", type=int, default=180, choices=[30, 90, 180],
-                    help="選定に使うホールドアウトCSV。既定180=直近180日を"
-                         "選定に使わない=クリーンOOSが最長(180日)")
+    ap.add_argument("--select-ho", type=int, default=180,
+                    choices=[30, 60, 90, 120, 150, 180],
+                    help="選定に使うホールドアウトCSV(スイングと同一の6期間)。既定180="
+                         "直近180日を選定に使わない=クリーンOOSが最長(180日)")
     ap.add_argument("--per-strategy", type=int, default=10,
                     help="戦略あたり採用する上位銘柄数 (選定スコア順)")
     ap.add_argument("--min-test-pf", type=float, default=1.2,
