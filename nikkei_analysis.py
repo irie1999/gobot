@@ -1591,6 +1591,73 @@ _BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", 
 _BT_HIGH_WF_LOW = (60, 40)
 
 
+def _rolling_oos_cache_html() -> str:
+    """rolling_selection_validation.py が書いた rolling_oos_cache.json を読み、
+    現行レポート風の月次ロールフォワードOOSマトリクスを描画。未計算なら案内を返す。"""
+    import json as _json2
+    from pathlib import Path as _P2
+    p = _P2("rolling_oos_cache.json")
+    if not p.exists():
+        return ('<h2 style="margin-top:8px">★ 月次ロールフォワードOOS検証（後知恵ゼロ）</h2>'
+                '<p class="footnote" style="color:#94a3b8">まだ計算されていません。以下を別途実行(重い・夜間推奨)すると、'
+                'ここに現行と同じ形式で各基準月の結果が表示されます:<br>'
+                '<code>python rolling_selection_validation.py --both --price-ranges 6000,10000 '
+                '--min-price 1000 --start 2025-07 --workers 4</code></p>')
+    try:
+        d = _json2.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return f'<p class="footnote">ロールフォワードキャッシュ読込失敗: {e}</p>'
+    months = d.get("months", [])
+    bases = d.get("base_months", [])
+    cells_data = d.get("cells", {})
+    month_h = "".join(f"<th>{m[5:]}月</th>" for m in months)
+    rows = ""
+    diag_t = diag_n = diag_w = 0
+    for bm in bases:
+        c = cells_data.get(bm, {})
+        fwd = c.get("fwd", {})
+        cells = ""
+        s_pnl = s_n = s_w = 0
+        for m in months:
+            if m <= bm:
+                cells += '<td style="color:#334155;text-align:center">·</td>'
+                continue
+            v = fwd.get(m)
+            if not v:
+                cells += '<td style="color:#475569;text-align:center">—</td>'
+                continue
+            p_, n_, w_ = v["pnl"], v["n"], v["w"]
+            s_pnl += p_; s_n += n_; s_w += w_
+            col = "#4ade80" if p_ > 0 else ("#f87171" if p_ < 0 else "#94a3b8")
+            cells += (f'<td style="text-align:right;color:{col};font-weight:700">{p_:+,.0f}'
+                      f'<br><span style="font-size:.68rem;color:#94a3b8">{n_}件 {w_}勝</span></td>')
+        nxt = next((m for m in months if m > bm), None)
+        if nxt and fwd.get(nxt):
+            diag_t += fwd[nxt]["pnl"]; diag_n += fwd[nxt]["n"]; diag_w += fwd[nxt]["w"]
+        twr = s_w / s_n * 100 if s_n else 0
+        tc = "#4ade80" if s_pnl > 0 else ("#f87171" if s_pnl < 0 else "#94a3b8")
+        rows += (f'<tr><td style="text-align:left;white-space:nowrap">{bm} まで選定'
+                 f'<br><span style="font-size:.65rem;color:#94a3b8">{c.get("sel", 0)}件</span></td>'
+                 f'{cells}<td style="text-align:right;color:{tc};font-weight:700">{s_pnl:+,.0f}円'
+                 f'<br><span style="font-size:.65rem;color:#94a3b8">{s_n}件 {twr:.0f}%</span></td></tr>')
+    dwr = diag_w / diag_n * 100 if diag_n else 0
+    dc = "#4ade80" if diag_t > 0 else "#f87171"
+    return f"""
+<h2 style="margin-top:8px">★ 月次ロールフォワードOOS検証（後知恵ゼロ / 現行と同一選定を各基準月で再現）</h2>
+<p class="footnote">{d.get("meta", "")}<br>生成日: {d.get("generated", "")}（rolling_selection_validation.py のキャッシュ）</p>
+<div style="background:#1e293b;border-left:4px solid {dc};padding:10px 14px;margin:10px 0">
+ <b>翌月OOS合計（非重複・最重要）:</b>
+ <b style="color:{dc};font-size:1.2rem">{diag_t:+,.0f}円</b> &nbsp;{diag_n}件 勝率{dwr:.0f}%
+ <br><span style="color:#94a3b8;font-size:.8rem">各基準月末で選定→翌月だけのOOSを合算(重複なし)。プラスなら選定は時期を越えて機能。</span></div>
+<div style="overflow-x:auto"><table>
+<thead><tr><th style="text-align:left">選定基準月</th>{month_h}<th>全OOS計</th></tr></thead>
+<tbody>{rows or '<tr><td colspan="99" style="text-align:center;color:#64748b;padding:12px">データなし</td></tr>'}</tbody>
+</table></div>
+<p class="footnote">各セル=OOS損益(取引数/勝ち)。<span style="color:#334155">·</span>=基準月以前(選定に使用)/—=取引なし。
+ <b>「全OOS計」列は期間が重複するので足さない。</b>非重複で信頼できるのは上の「翌月OOS合計」。</p>
+"""
+
+
 def _holdout_window_map() -> dict:
     """(symbol, strategy) → その銘柄が選定された中で最長の holdout_days。
     純OOS判定は「選定に使っていない直近除外窓」で行うが、同じ銘柄でも設定に
@@ -8288,6 +8355,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 
 <div id="analtab_{_dseq}_rollfwd" class="analysis-tab-pane">
+{_rolling_oos_cache_html()}
+<hr style="border-color:#334155;margin:20px 0">
 {rollforward_html}
 </div>
 

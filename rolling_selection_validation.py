@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import sys
 import webbrowser
@@ -397,6 +398,29 @@ def main():
     _html_path = f"rolling_oos_{today}.html"
     _write_html(_html_path, result, base_dates, all_months, _meta)
     print(f"\nHTML出力: {os.path.abspath(_html_path)}")
+
+    # ── JSONキャッシュ (run_signals_holdout_all の詳細分析タブが読む) ──
+    _cache = {
+        "generated": str(today), "meta": _meta,
+        "months": list(all_months),
+        "base_months": [D.strftime("%Y-%m") for D in base_dates],
+        "cells": {},
+    }
+    for D in base_dates:
+        dm = D.strftime("%Y-%m")
+        r = result[D]
+        fwd = {}
+        for m, pl in r["fwd"].items():
+            fwd[m] = {"pnl": sum(pl), "n": len(pl),
+                      "w": sum(1 for x in pl if x > 0)}
+        _cache["cells"][dm] = {"sel": len(r["sel"]), "fwd": fwd}
+    try:
+        Path("rolling_oos_cache.json").write_text(
+            json.dumps(_cache, ensure_ascii=False), encoding="utf-8")
+        print(f"キャッシュ出力: {os.path.abspath('rolling_oos_cache.json')} "
+              f"(run_signals_holdout_all の詳細分析タブが読みます)")
+    except Exception as _e:
+        print(f"[WARN] キャッシュ書込失敗: {_e}")
     if not args.no_browser:
         try:
             webbrowser.open("file://" + os.path.abspath(_html_path))
