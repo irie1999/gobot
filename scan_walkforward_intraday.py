@@ -432,6 +432,11 @@ def main() -> None:
                         help="総予算 (円). FIXED_QTY=100株換算で --max-price と同義")
     parser.add_argument("--folds-short", action="store_true",
                         help="短縮fold設計 (yfinance 60日制限対応)")
+    parser.add_argument("--holdout-days", type=int, default=0,
+                        help="直近N日を選定から除外(OOS検証用/スイング同様)。"
+                             "FOLDSをN日後ろにずらす。5分足2年制限のため自動でFOLDS_SHORT使用")
+    parser.add_argument("--holdout-end", type=str, default=None,
+                        help="除外開始日 YYYY-MM-DD (holdout_days=TODAY-この日)")
     parser.add_argument("--data-days", type=int, default=800,
                         help="1銘柄あたりのデータ取得期間 (暦日, デフォルト800=約2年)")
     parser.add_argument("--train-pf", type=float, default=None)
@@ -493,6 +498,31 @@ def main() -> None:
 
     if args.folds_short:
         FOLDS = FOLDS_SHORT
+
+    # ── ホールドアウト (スイング同様: 直近N日を選定から除外=OOS検証用) ──────────
+    holdout_days = args.holdout_days
+    if holdout_days <= 0 and args.holdout_end:
+        holdout_days = (TODAY - datetime.strptime(args.holdout_end, "%Y-%m-%d").date()).days
+        if holdout_days < 0:
+            print(f"[ERROR] --holdout-end {args.holdout_end} は未来日です", file=sys.stderr)
+            sys.exit(1)
+    holdout_suffix = ""
+    if holdout_days > 0:
+        # 5分足は2年(~730日)が上限。FOLDS_NORMAL(730日遡及)+holdoutは範囲外に出るため
+        # 自動で FOLDS_SHORT(TRAIN6M/TEST3M=365日遡及)に切替え、holdout分の余地を確保。
+        if not args.folds_short:
+            FOLDS = FOLDS_SHORT
+            print("  [holdout] 5分足2年制限のため FOLDS_SHORT(TRAIN6M/TEST3M) を使用")
+        FOLDS = [(n, ts + holdout_days, te + holdout_days,
+                  vs + holdout_days, ve + holdout_days)
+                 for (n, ts, te, vs, ve) in FOLDS]
+        _need = 365 + holdout_days + 60
+        if args.data_days < _need:
+            args.data_days = _need
+            print(f"  [holdout] data_days を {_need} に自動拡張")
+        holdout_suffix = f"_holdout{holdout_days}d"
+        print(f"  ホールドアウト: 直近 {holdout_days} 日を選定から除外 "
+              f"({TODAY - timedelta(days=holdout_days)} 以降をテスト対象外)")
 
     effective_max_price = args.max_price
     if args.budget > 0 and args.max_price == 0:
@@ -755,7 +785,7 @@ def main() -> None:
         print(f"  {strategy}: 全候補={len(results)}")
 
         # ── CSV 保存 ──
-        csv_path = out_dir / f"walkforward_intraday_{strategy}{mode_suffix}{fold_suffix}_{TODAY}.csv"
+        csv_path = out_dir / f"walkforward_intraday_{strategy}{mode_suffix}{fold_suffix}{holdout_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
             "folds_passed",
