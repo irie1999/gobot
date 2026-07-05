@@ -5506,39 +5506,64 @@ function switchTbd(id, tab) {{
     sum_rows_bt70 = _sum_rows_for(70)
 
     # ── 戦略別サマリー (MACD/A7/RSI2/DON/VOL/MOM) 重複除外の実取引ベース ──
+    def _strat_priority(wr: float, pf: float, avgh: float) -> tuple[float, str, str]:
+        """戦略の総合優先度スコア(0〜100)とランク★・色を返す。
+        勝率40点 + PF40点(PF10でキャップ,∞=10) + 速度20点(平均保有15日で0)。"""
+        pf_c = 10.0 if pf == float("inf") else min(pf, 10.0)
+        wr_pts    = wr * 0.4
+        pf_pts    = pf_c / 10.0 * 40.0
+        speed_pts = max(0.0, 1.0 - avgh / 15.0) * 20.0
+        sc = round(wr_pts + pf_pts + speed_pts, 1)
+        if sc >= 80:   return sc, "★★★", "#4ade80"
+        if sc >= 60:   return sc, "★★",  "#fbbf24"
+        if sc >= 40:   return sc, "★",   "#93c5fd"
+        return sc, "△", "#94a3b8"
+
     def _strat_sum_rows(min_bt: int) -> str:
         from collections import defaultdict as _dd
         g = _dd(list)
         for t in kpi_trades:
             if t.get("score", 0) >= min_bt:
                 g[t.get("strategy", "?")].append(t)
-        rows = ""
-        for strat in sorted(g, key=lambda s: -sum(x["pnl"] for x in g[s])):
-            tr = g[strat]; n = len(tr)
+        # 各戦略の指標を先に計算し、優先度スコア降順で並べる
+        stats = {}
+        for strat, tr in g.items():
+            n = len(tr)
             wins = sum(1 for t in tr if t["pnl"] > 0); losses = n - wins
             gp = sum(t["pnl"] for t in tr if t["pnl"] > 0)
             gl = abs(sum(t["pnl"] for t in tr if t["pnl"] < 0))
             pnl = gp - gl
             pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
             wr = wins / n * 100 if n else 0.0
             avgh = sum(t.get("hold_days", 0) for t in tr) / n if n else 0.0
             avgw = gp / wins if wins else 0.0
             avgl = -gl / losses if losses else 0.0
-            lpc = "profit" if pnl >= 0 else "loss"
+            pri_sc, pri_rk, pri_col = _strat_priority(wr, pf, avgh)
+            stats[strat] = dict(n=n, wins=wins, losses=losses, gp=gp, gl=gl,
+                                pnl=pnl, pf=pf, wr=wr, avgh=avgh, avgw=avgw,
+                                avgl=avgl, pri_sc=pri_sc, pri_rk=pri_rk,
+                                pri_col=pri_col)
+        rows = ""
+        for strat in sorted(stats, key=lambda s: -stats[s]["pri_sc"]):
+            d = stats[strat]
+            pf_s = "∞" if d["pf"] == float("inf") else f"{d['pf']:.2f}"
+            lpc = "profit" if d["pnl"] >= 0 else "loss"
             rows += (f'<tr><td class="sym" style="text-align:left;font-weight:700">{strat}</td>'
-                     f'<td>{n}</td><td>{wins}</td><td>{wr:.1f}%</td><td>{pf_s}</td>'
-                     f'<td style="text-align:right">{avgh:.1f}日</td>'
-                     f'<td class="profit" style="text-align:right">+{gp:,.0f}円</td>'
-                     f'<td class="profit" style="text-align:right">+{avgw:,.0f}</td>'
-                     f'<td class="loss" style="text-align:right">-{gl:,.0f}円</td>'
-                     f'<td class="loss" style="text-align:right">{avgl:,.0f}</td>'
-                     f'<td class="{lpc}" style="text-align:right;font-weight:700">{pnl:+,.0f}円</td></tr>')
-        return rows or '<tr><td colspan="11" style="color:#64748b">該当なし</td></tr>'
+                     f'<td style="text-align:center;color:{d["pri_col"]};font-weight:700;white-space:nowrap">'
+                     f'{d["pri_rk"]}<br><span style="font-size:0.72rem">{d["pri_sc"]:.0f}</span></td>'
+                     f'<td>{d["n"]}</td><td>{d["wins"]}</td><td>{d["wr"]:.1f}%</td><td>{pf_s}</td>'
+                     f'<td style="text-align:right">{d["avgh"]:.1f}日</td>'
+                     f'<td class="profit" style="text-align:right">+{d["gp"]:,.0f}円</td>'
+                     f'<td class="profit" style="text-align:right">+{d["avgw"]:,.0f}</td>'
+                     f'<td class="loss" style="text-align:right">-{d["gl"]:,.0f}円</td>'
+                     f'<td class="loss" style="text-align:right">{d["avgl"]:,.0f}</td>'
+                     f'<td class="{lpc}" style="text-align:right;font-weight:700">{d["pnl"]:+,.0f}円</td></tr>')
+        return rows or '<tr><td colspan="12" style="color:#64748b">該当なし</td></tr>'
 
     def _strat_table(min_bt: int, title: str) -> str:
         return (f'<h3 style="color:#93c5fd;margin:12px 0 4px;font-size:0.95rem">{title}</h3>'
                 '<table><thead><tr><th style="text-align:left">戦略</th>'
+                '<th>優先度<br><small style="color:#64748b">勝率+PF+速度</small></th>'
                 '<th>取引数</th><th>勝数</th><th>勝率</th><th>PF</th><th>平均保有</th>'
                 '<th style="color:#4ade80">利益</th><th style="color:#4ade80">平均利益</th>'
                 '<th style="color:#f87171">損失</th><th style="color:#f87171">平均損失</th>'
