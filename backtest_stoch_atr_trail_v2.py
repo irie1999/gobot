@@ -38,6 +38,7 @@ elif hasattr(sys.stdout, "buffer"):
 import argparse
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1131,7 +1132,7 @@ def main() -> None:
 
         html_path = generate_signal_html_a7(sig)
         print(f"  HTMLレポート: {html_path.resolve()}")
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
         print()
         return
 
@@ -1222,7 +1223,7 @@ def main() -> None:
     html_path = generate_html(results, days, period_label,
                               single_sym=args.symbol if args.symbol else None)
     print(f"  HTMLレポート: {html_path.resolve()}")
-    webbrowser.open(html_path.resolve().as_uri())
+    open_html(html_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

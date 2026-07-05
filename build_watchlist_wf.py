@@ -1,0 +1,221 @@
+"""
+build_watchlist_wf.py  ―  WFスキャン結果(wf_strategies_*_ho*.csv)から
+                          OOS堅牢なデイトレ WATCHLIST を確定する。
+
+★重要な原則 (2026-06-30 改修): 直近ホールドアウト期間(HO日数)は銘柄選定に
+  一切使わない。選定は WF の TRAIN/TEST 成績 (= 選定窓 base=今日-HO日 以前の
+  データのみ) だけで行い、holdout_* (直近HO日の成績) は『答え合わせ用の
+  純OOS指標』として表示するだけ。フィルタには絶対に使わない。
+
+選定方針 (既定): HO180 の CSV 1本だけで選定する。これにより直近180日が
+まるごとクリーンOOS (どの選定窓も触っていない) になり、答え合わせ期間が最長。
+  1. 候補 = HO180 CSV の合格銘柄 (= WF fold を 2/2 通過済み) のうち
+       total_test_pnl > 0 / avg_test_pf >= --min-test-pf / test_trades >= 3
+     を満たすもの (= 幅広い候補プール)
+  2. その候補を『選定スコア』(TEST窓の PF/勝率/取引数 だけで算出。holdout不使用)
+     で並べ、戦略あたり上位 --per-strategy 銘柄に厳選
+holdout_* はテーブルに OOS 検証列として併記するだけ (選定には絶対に不使用)。
+
+--strict-both を付けると HO90&HO180 両方合格を要求 (クリーンOOSは直近90日に縮む)。
+--select-ho 90 で選定窓を直近90日除外に変更可。
+
+出力:
+  daytrade_watchlist.py    … WATCHLIST = {戦略: [(code, name), ...]} の Python
+  画面に戦略別ランキング (Score=選定指標 と HO=純OOS答え合わせ を並記)
+
+使い方:
+  python build_watchlist_wf.py                          # HO180選定・上位10銘柄/戦略
+  python build_watchlist_wf.py --per-strategy 6 --min-test-pf 1.5
+  python build_watchlist_wf.py --date 2026-06-30
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import glob
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+JST = timezone(timedelta(hours=9))
+RESULTS = Path("walkforward_results")
+STRATEGIES = ["Donchian", "GapReversal", "VWAP", "RSI", "Pivot",
+              "OpenMomentum", "MACDBreak", "StochATR", "VolSurge", "StopShort",
+              "ORB"]
+HOLDOUTS = [30, 60, 90, 120, 150, 180]   # スイング(run_signals_holdout_all)と同一の6期間
+
+
+def _f(v, d=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return d
+
+
+def _load(strategy: str, ho: int, date: str) -> dict:
+    """wf_strategies_<strategy>_ho<ho>_<date>.csv → {code: row}。"""
+    path = RESULTS / f"wf_strategies_{strategy}_ho{ho}_{date}.csv"
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            out[r["symbol"]] = r
+    return out
+
+
+def _composite(r) -> float:
+    """選定スコア = スイング build_watchlist の composite と同一式。
+       composite = total_test_pnl × (1 + max(sharpe, 0))。
+       TEST窓のデータだけで算出。holdoutは一切使わない。
+       Sharpe が未記録の古いCSVでは sharpe=0 扱い (= 純 test_pnl 順)。"""
+    pnl = _f(r.get("total_test_pnl"))
+    sharpe = max(_f(r.get("test_sharpe")), 0.0)
+    return round(pnl * (1.0 + sharpe), 0)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", default=datetime.now(JST).date().isoformat())
+    ap.add_argument("--select-ho", type=int, default=180,
+                    choices=[30, 60, 90, 120, 150, 180],
+                    help="選定に使うホールドアウトCSV(スイングと同一の6期間)。既定180="
+                         "直近180日を選定に使わない=クリーンOOSが最長(180日)")
+    ap.add_argument("--per-strategy", type=int, default=10,
+                    help="戦略あたり採用する上位銘柄数 (選定スコア順)")
+    ap.add_argument("--min-test-pf", type=float, default=1.2,
+                    help="選定窓 TEST の最小平均PF (既定 1.2)")
+    ap.add_argument("--min-test-trades", type=int, default=3,
+                    help="選定窓 TEST の最小取引数 (既定 3)")
+    ap.add_argument("--max-dd", type=float, default=15.0,
+                    help="選定窓 TEST の最大DD%%上限 (既定15=スイングと同一)。"
+                         "test_max_dd_pct列が無い古いCSVではこのフィルタはスキップ")
+    ap.add_argument("--single-ho", action="store_true",
+                    help="1期間(--select-ho)だけで選定。既定は6期間(30-180)をunion(スイング同様)")
+    ap.add_argument("--strict-both", action="store_true",
+                    help="HO90&HO180両方で合格を要求 (クリーンOOSは直近90日に縮む)")
+    ap.add_argument("--strategies", nargs="+", default=["Donchian", "Pivot"],
+                    help="採用する戦略 (既定: Donchian Pivot = クリーンOOSでプラス確認済の2戦略)。"
+                         " 全戦略を見るなら --strategies "
+                         "Donchian GapReversal VWAP RSI Pivot OpenMomentum MACDBreak StochATR VolSurge")
+    ap.add_argument("--out", default="daytrade_watchlist.py")
+    args = ap.parse_args()
+    use_strategies = [s for s in STRATEGIES if s in set(args.strategies)]
+
+    sho = args.select_ho
+    watchlist: dict[str, list] = {}
+    print("=" * 104)
+    print(f"OOS堅牢 WATCHLIST 選定  (date={args.date})")
+    print(f"  選定窓: HO{sho} のCSV (直近{sho}日は選定に不使用＝クリーンOOS{sho}日)"
+          + ("  +HO90も合格必須" if args.strict_both else ""))
+    print(f"  候補条件(TESTのみ): total_test_pnl>0 / avg_test_pf>={args.min_test_pf}"
+          f" / test_trades>={args.min_test_trades} / MaxDD<={args.max_dd}%")
+    print(f"  厳選: composite=TEST損益×(1+max(Sharpe,0)) 上位{args.per_strategy}銘柄/戦略"
+          f"  (スイング build_watchlist と同一式)")
+    print(f"  ※ HO* 列は選定に使っていない純OOS答え合わせ (表示のみ・選定不使用)")
+    print(f"  採用戦略: {', '.join(use_strategies)}")
+    print("=" * 104)
+
+    def selectable(r):
+        if not (r
+                and _f(r.get("total_test_pnl")) > 0
+                and _f(r.get("avg_test_pf")) >= args.min_test_pf
+                and _f(r.get("total_test_trades")) >= args.min_test_trades):
+            return False
+        # MaxDD フィルタ (スイングと同一)。列が無い古いCSVでは後方互換でスキップ。
+        dd = r.get("test_max_dd_pct")
+        if dd not in (None, "") and _f(dd) > args.max_dd:
+            return False
+        return True
+
+    # 選定に使うholdout期間: 既定は6期間union(スイング同様)、--single-ho で1期間のみ
+    hos_used = [sho] if args.single_ho else HOLDOUTS
+    for strat in use_strategies:
+        data = {ho: _load(strat, ho, args.date) for ho in HOLDOUTS}
+        # 各holdout期間で「選定スコア上位per_strategy」を選び、全期間をunion(dedupe)。
+        # = スイング run_signals_holdout_all が HO30d〜HO180d をunionするのと同じ。
+        picked: dict = {}   # code -> pick(最良scoreを保持)
+        for ho in hos_used:
+            pool = data.get(ho, {})
+            if not pool:
+                continue
+            cand = []
+            for code, r in pool.items():
+                if not selectable(r):
+                    continue
+                r90 = data.get(90, {}).get(code)
+                if args.strict_both and not selectable(r90):
+                    continue
+                cand.append({
+                    "code": code, "name": r.get("name", ""),
+                    "price": _f(r.get("latest_price")),
+                    "score": _composite(r),
+                    "test": _f(r.get("total_test_pnl")),
+                    "pf": _f(r.get("avg_test_pf")),
+                    "wr": _f(r.get("avg_test_wr")),
+                    "dd": _f(r.get("test_max_dd_pct")),
+                    "sharpe": _f(r.get("test_sharpe")),
+                    "from_ho": ho,
+                    "ho_sel": _f(r.get("holdout_pnl")),
+                    "ho90": _f(r90.get("holdout_pnl")) if r90 else 0.0,
+                })
+            cand.sort(key=lambda x: -x["score"])
+            for p in cand[:args.per_strategy]:
+                prev = picked.get(p["code"])
+                if prev is None or p["score"] > prev["score"]:
+                    picked[p["code"]] = p
+        if not picked:
+            continue
+        picks = sorted(picked.values(), key=lambda x: -x["score"])
+        watchlist[strat] = [(p["code"], p["name"]) for p in picks]
+        ho_sum = sum(p["ho_sel"] for p in picks)
+        _mode = f"HO{sho}単独" if args.single_ho else f"6期間union({'/'.join(map(str, hos_used))})"
+        print(f"\n【{strat}】 採用{len(picks)}銘柄  [{_mode}]  (採用元holdoutの純OOS合計 {ho_sum:+,.0f})")
+        print(f"  {'銘柄':<9}{'名前':<20}{'株価':>7}"
+              f" │ {'採用HO':>6}{'Score':>10}{'TEST':>9}{'PF':>6}{'WR':>5}{'DD%':>6}{'Shrp':>6}"
+              f" │OOS {'純OOS':>9}{'HO90':>9}")
+        print("  " + "-" * 112)
+        for p in picks:
+            print(f"  {p['code']:<9}{p['name'][:18]:<20}{p['price']:>7,.0f}"
+                  f" │ {('HO'+str(p['from_ho'])):>6}{p['score']:>+10,.0f}{p['test']:>+9,.0f}{p['pf']:>6.2f}"
+                  f"{p['wr']:>4.0f}%{p['dd']:>5.1f}%{p['sharpe']:>6.2f}"
+                  f" │    {p['ho_sel']:>+9,.0f}{p['ho90']:>+9,.0f}")
+
+    # ── daytrade_watchlist.py 出力 ──
+    total = sum(len(v) for v in watchlist.values())
+    # 安全ガード: 選定0件なら既存WATCHLISTを上書きしない (誤って空にする事故防止)
+    if total == 0:
+        print("\n" + "=" * 92)
+        print(f"[警告] 選定銘柄が0件のため {args.out} は上書きしませんでした。")
+        print("  (既存のWATCHLISTを保護。--strategies/--min-test-pf を見直してください)")
+        print("=" * 92)
+        return
+    lines = [
+        '"""daytrade_watchlist.py ― OOS堅牢なデイトレ WATCHLIST',
+        f'build_watchlist_wf.py により {args.date} に自動生成。',
+        f'選定窓: HO{sho} のCSV (直近{sho}日は選定に不使用＝クリーンOOS{sho}日)。',
+        '選定は WF TRAIN/TEST のみで実施し、holdout(直近HO日)は選定に不使用。',
+        f'候補(TESTのみ): test_pnl>0 / avg_test_pf>={args.min_test_pf} を満たす中から',
+        f'選定スコア(TEST窓のPF/勝率/取引数)上位{args.per_strategy}銘柄/戦略を採用。',
+        '"""',
+        "",
+        "# 戦略 -> [(コード, 名前), ...]",
+        "WATCHLIST = {",
+    ]
+    for strat, syms in watchlist.items():
+        lines.append(f"    {strat!r}: [")
+        for code, name in syms:
+            lines.append(f"        ({code!r}, {name!r}),")
+        lines.append("    ],")
+    lines.append("}")
+    lines.append("")
+    Path(args.out).write_text("\n".join(lines), encoding="utf-8")
+
+    print("\n" + "=" * 92)
+    print(f"合計 {total}銘柄(延べ) を {args.out} に出力しました。")
+    print("  戦略別:", {k: len(v) for k, v in watchlist.items()})
+    print("=" * 92)
+
+
+if __name__ == "__main__":
+    main()

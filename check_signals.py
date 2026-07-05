@@ -22,6 +22,7 @@ import argparse
 import math
 import sys
 import webbrowser
+from _open_html import open_html
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -366,7 +367,7 @@ def check_today(target_date: date | None, verbose: bool,
     print(f"HTML: {outpath.resolve()}")
 
     if not no_browser:
-        webbrowser.open(f"file://{outpath.resolve()}")
+        open_html(f"file://{outpath.resolve()}")
 
     print(f"{'='*72}\n")
 
@@ -653,7 +654,7 @@ def check_history(from_date: date, to_date: date, verbose: bool,
     out_path.write_text(html, encoding="utf-8")
     print(f"HTML: {out_path.resolve()}")
     if not no_browser:
-        webbrowser.open(f"file://{out_path.resolve()}")
+        open_html(f"file://{out_path.resolve()}")
 
 
 def _build_calendar_heatmap(all_dates: dict[str, int],

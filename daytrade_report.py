@@ -1,0 +1,672 @@
+"""
+daytrade_report.py  ―  デイトレ 日次レポート (スイング run_signals_holdout_all 風)
+
+2つの内容を 1 つの HTML にまとめる:
+  1. 今日のシグナル … daytrade_watchlist.py の (銘柄×戦略) を最新営業日で評価し、
+                      今日エントリーが出た銘柄を表示。
+  2. WF検証(ホールドアウト) … wf_strategies_*_ho{30,90,180}.csv を戦略別タブで表示。
+                      選定はTEST(選定窓=直近HO日より前)で実施し直近HO日は不使用。
+                      選定後の純OOS(直近HO日)がHO90&HO180両方で黒字なら ★本命 と強調。
+
+スイング版と同じダークテーマ・上部タブ・色分け。
+
+使い方:
+  python daytrade_report.py
+  python daytrade_report.py --date 2026-06-30 --no-browser
+  python daytrade_report.py --signal-days 60   # 今日シグナル判定用のロード日数
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib
+import webbrowser
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+JST = timezone(timedelta(hours=9))
+RESULTS = Path("walkforward_results")
+HOLDOUTS = [30, 90, 180]
+
+# 戦略名 → (モジュール, 表示色クラス)
+STRAT_MODULES = {
+    "Donchian":     "daytrade_donchian",
+    "GapReversal":  "daytrade_gap_reversal",
+    "VWAP":         "daytrade_vwap_rebound",
+    "RSI":          "daytrade_rsi",
+    "Pivot":        "daytrade_pivot",
+    "OpenMomentum": "daytrade_opening_momentum",
+    "MACDBreak":    "daytrade_macd_break",
+    "StochATR":     "daytrade_stoch_atr",
+    "VolSurge":     "daytrade_volsurge",
+    "StopShort":    "daytrade_stop_short",
+    "ORB":          "daytrade_orb",
+}
+STRATEGIES = list(STRAT_MODULES.keys())
+
+
+def _f(v, d=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return d
+
+
+# ─────────────────────────────────────────────────────────────
+# WF検証データ
+# ─────────────────────────────────────────────────────────────
+def _load_csv(strategy: str, ho: int, date: str) -> dict:
+    path = RESULTS / f"wf_strategies_{strategy}_ho{ho}_{date}.csv"
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            out[r["symbol"]] = r
+    return out
+
+
+def _collect_wf(strategy: str, date: str):
+    data = {ho: _load_csv(strategy, ho, date) for ho in HOLDOUTS}
+    if not any(data.values()):
+        return []
+    codes = set()
+    for d in data.values():
+        codes.update(d.keys())
+    rows = []
+    for code in codes:
+        r = {"code": code}
+        for ho in HOLDOUTS:
+            if code in data[ho]:
+                r["name"] = data[ho][code].get("name", "")
+                r["price"] = _f(data[ho][code].get("latest_price"))
+                break
+        for ho in HOLDOUTS:
+            rr = data[ho].get(code)
+            r[f"ho{ho}_pnl"] = _f(rr.get("holdout_pnl")) if rr else 0.0
+            r[f"ho{ho}_tr"] = _f(rr.get("holdout_trades")) if rr else 0.0
+            r[f"ho{ho}_test"] = _f(rr.get("total_test_pnl")) if rr else 0.0
+            r[f"ho{ho}_in"] = rr is not None
+        r["robust"] = (r["ho90_pnl"] > 0 and r["ho90_tr"] >= 3
+                       and r["ho180_pnl"] > 0 and r["ho180_tr"] >= 3)
+        r["score"] = r["ho180_pnl"] + r["ho90_pnl"]
+        rows.append(r)
+    rows.sort(key=lambda x: (-int(x["robust"]), -x["score"]))
+    return rows
+
+
+def _wf_table(strategy: str, rows: list) -> str:
+    rob = sum(1 for r in rows if r["robust"])
+    h = [f'<h2>{strategy} <span class="badge">候補{len(rows)} / ★本命{rob}</span></h2>',
+         '<table><thead><tr><th>★</th><th>コード</th><th>銘柄</th><th>株価</th>']
+    for ho in HOLDOUTS:
+        h.append(f'<th colspan="2" class="cen">HO{ho}日</th>')
+    h.append('</tr><tr><th></th><th></th><th></th><th></th>')
+    for ho in HOLDOUTS:
+        h.append('<th class="sub">TEST</th><th class="sub">HO損益(取引)</th>')
+    h.append('</tr></thead><tbody>')
+    for r in rows:
+        cls = ' class="robust"' if r["robust"] else ""
+        h.append(f'<tr{cls}><td class="star">{"★" if r["robust"] else ""}</td>'
+                 f'<td>{r["code"]}</td><td class="nm">{r.get("name","")[:18]}</td>'
+                 f'<td>{r.get("price",0):,.0f}</td>')
+        for ho in HOLDOUTS:
+            test = f'{r[f"ho{ho}_test"]:+,.0f}' if r[f"ho{ho}_in"] else "―"
+            h.append(f'<td class="test">{test}</td>')
+            pnl, tr = r[f"ho{ho}_pnl"], r[f"ho{ho}_tr"]
+            if tr <= 0:
+                h.append('<td class="zero">―</td>')
+            else:
+                c = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+                h.append(f'<td class="{c}">{pnl:+,.0f}<span class="sub">{int(tr)}</span></td>')
+        h.append('</tr>')
+    h.append('</tbody></table>')
+    return "".join(h)
+
+
+# ─────────────────────────────────────────────────────────────
+# 今日のシグナル (WATCHLIST × 戦略 を最新営業日で評価)
+# ─────────────────────────────────────────────────────────────
+def _today_signals(signal_days: int):
+    try:
+        wl = importlib.import_module("daytrade_watchlist").WATCHLIST
+    except Exception:
+        return None, "daytrade_watchlist.py が無いか壊れています。build_watchlist_wf.py を先に実行してください。"
+    try:
+        from daytrade_data import load_intraday
+    except Exception as e:
+        return None, f"daytrade_data 読込失敗: {e}"
+
+    sigs = []
+    for strat, syms in wl.items():
+        mod_name = STRAT_MODULES.get(strat)
+        if not mod_name:
+            continue
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for code, name in syms:
+            sym = code if code.endswith(".T") else f"{code}.T"
+            try:
+                df = load_intraday(sym, days=signal_days, source="local")
+                if df is None or df.empty:
+                    continue
+                last_day = df.index[-1].date()
+                try:
+                    res = mod.backtest_symbol(sym, name, df)
+                except TypeError:
+                    res = mod.backtest_symbol(sym, name, df, 600000, 6000)
+                for t in (res or {}).get("trades", []):
+                    ed = t.get("entry_dt")
+                    if ed is not None and ed.date() == last_day:
+                        sigs.append({
+                            "strat": strat, "code": code, "name": name,
+                            "date": last_day, "entry_t": ed.strftime("%H:%M"),
+                            "entry": t.get("entry_p"), "exit": t.get("exit_p"),
+                            "pnl": t.get("pnl", 0), "reason": t.get("reason", ""),
+                        })
+            except Exception:
+                continue
+    sigs.sort(key=lambda s: -_f(s.get("pnl")))
+    return sigs, None
+
+
+def _signals_html(sigs, err) -> str:
+    if err:
+        return f'<h2>今日のシグナル</h2><p class="warn">{err}</p>'
+    if not sigs:
+        return ('<h2>今日のシグナル</h2>'
+                '<p class="badge">最新営業日にエントリーした銘柄はありません'
+                '（引け後に実行すると当日約定が反映されます）。</p>')
+    day = sigs[0]["date"]
+    h = [f'<h2>今日のシグナル <span class="badge">{day} / {len(sigs)}件</span></h2>',
+         '<table><thead><tr><th>戦略</th><th>コード</th><th>銘柄</th>'
+         '<th>時刻</th><th>エントリー</th><th>決済</th><th>損益</th><th>理由</th>'
+         '</tr></thead><tbody>']
+    for s in sigs:
+        pnl = _f(s["pnl"])
+        c = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+        h.append(f'<tr><td class="nm">{s["strat"]}</td><td>{s["code"]}</td>'
+                 f'<td class="nm">{s["name"][:16]}</td><td>{s["entry_t"]}</td>'
+                 f'<td>{_f(s["entry"]):,.0f}</td><td>{_f(s["exit"]):,.0f}</td>'
+                 f'<td class="{c}">{pnl:+,.0f}</td><td class="nm">{s["reason"]}</td></tr>')
+    h.append('</tbody></table>')
+    return "".join(h)
+
+
+def _trade_detail(detail_days: int):
+    """WATCHLIST の各(銘柄×戦略)を再実行して実トレード履歴を取得。
+    返り値: {(strat,code,name): [trades...]} と全体集計。"""
+    try:
+        wl = importlib.import_module("daytrade_watchlist").WATCHLIST
+    except Exception:
+        return None, "daytrade_watchlist.py が無いか壊れています。build_watchlist_wf.py を先に実行してください。"
+    try:
+        from daytrade_data import load_intraday
+    except Exception as e:
+        return None, f"daytrade_data 読込失敗: {e}"
+
+    groups = []
+    for strat, syms in wl.items():
+        mod_name = STRAT_MODULES.get(strat)
+        if not mod_name:
+            continue
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for code, name in syms:
+            sym = code if code.endswith(".T") else f"{code}.T"
+            try:
+                df = load_intraday(sym, days=detail_days, source="local")
+                if df is None or df.empty:
+                    continue
+                try:
+                    res = mod.backtest_symbol(sym, name, df)
+                except TypeError:
+                    res = mod.backtest_symbol(sym, name, df, 600000, 6000)
+                trades = (res or {}).get("trades", [])
+                if trades:
+                    groups.append((strat, code, name, trades))
+            except Exception:
+                continue
+    return groups, None
+
+
+def _oos_cutoff(date_str: str, oos_days: int):
+    """OOS境界日を返す。これより後(>)の取引が純OOS(選定未使用)。
+    HO90 の選定窓は date-90 で終わるため、直近 oos_days(既定90)日は
+    どの選定窓も見ていない純粋な未知データ。"""
+    try:
+        base = datetime.fromisoformat(date_str).date()
+    except Exception:
+        base = datetime.now(JST).date()
+    return base - timedelta(days=oos_days)
+
+
+def _is_oos(t, cutoff):
+    ed = t.get("entry_dt")
+    return ed is not None and cutoff is not None and ed.date() > cutoff
+
+
+def _split_stats(trades: list):
+    """損と利益を分けて集計。"""
+    wins = [t for t in trades if _f(t.get("pnl")) > 0]
+    losses = [t for t in trades if _f(t.get("pnl")) < 0]
+    gp = sum(_f(t.get("pnl")) for t in wins)
+    gl = sum(_f(t.get("pnl")) for t in losses)   # 負値
+    return {
+        "n": len(trades), "win_n": len(wins), "loss_n": len(losses),
+        "gross_profit": gp, "gross_loss": gl, "net": gp + gl,
+        "avg_win": gp / len(wins) if wins else 0.0,
+        "avg_loss": gl / len(losses) if losses else 0.0,
+        "pf": gp / abs(gl) if gl else (float("inf") if gp else 0.0),
+        "wr": len(wins) / len(trades) * 100 if trades else 0.0,
+    }
+
+
+def _detail_html(groups, err, oos_cutoff=None, oos_days=90) -> str:
+    if err:
+        return f'<h2>取引明細</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>取引明細</h2><p class="badge">WATCHLISTが空か、データがありません。</p>'
+
+    def _pf_s(v):
+        return "∞" if v == float("inf") else f"{v:.2f}"
+
+    # 全体の損益分離サマリー (全期間 と 純OOS を並記)
+    all_tr = [t for _, _, _, ts in groups for t in ts]
+    g = _split_stats(all_tr)
+    oos_tr = [t for t in all_tr if _is_oos(t, oos_cutoff)]
+    og = _split_stats(oos_tr)
+    cut_s = oos_cutoff.isoformat() if oos_cutoff else "―"
+
+    h = ['<h2>取引明細 <span class="badge">損と利益を分離 / '
+         f'純OOS=直近{oos_days}日({cut_s}以降・選定未使用)</span></h2>']
+    # 全期間
+    h.append('<table style="width:auto"><tbody>'
+             '<tr><th colspan="2" style="color:#94a3b8">▼ 全期間 (選定窓+OOS 混在・参考)</th></tr>'
+             f'<tr><th>利益トレード</th><td class="pos">{g["win_n"]}件 / 合計 +{g["gross_profit"]:,.0f}円 / 平均 +{g["avg_win"]:,.0f}円</td></tr>'
+             f'<tr><th>損失トレード</th><td class="neg">{g["loss_n"]}件 / 合計 {g["gross_loss"]:,.0f}円 / 平均 {g["avg_loss"]:,.0f}円</td></tr>'
+             f'<tr><th>純損益</th><td class="{"pos" if g["net"]>0 else "neg"}">{g["net"]:+,.0f}円</td></tr>'
+             f'<tr><th>勝率 / PF</th><td>{g["wr"]:.1f}% / PF {_pf_s(g["pf"])}</td></tr>'
+             '</tbody></table>')
+    # 純OOS (これが本当の答え合わせ)
+    oos_net_c = "pos" if og["net"] > 0 else "neg"
+    h.append('<table style="width:auto;border:2px solid #fbbf24"><tbody>'
+             f'<tr><th colspan="2" style="color:#fbbf24">★ 純OOS (直近{oos_days}日・選定に未使用＝真の実力)</th></tr>'
+             f'<tr><th>利益トレード</th><td class="pos">{og["win_n"]}件 / 合計 +{og["gross_profit"]:,.0f}円</td></tr>'
+             f'<tr><th>損失トレード</th><td class="neg">{og["loss_n"]}件 / 合計 {og["gross_loss"]:,.0f}円</td></tr>'
+             f'<tr><th>純損益</th><td class="{oos_net_c}" style="font-weight:700">{og["net"]:+,.0f}円</td></tr>'
+             f'<tr><th>勝率 / PF</th><td>{og["wr"]:.1f}% / PF {_pf_s(og["pf"])}</td></tr>'
+             '</tbody></table>')
+    verdict = ("✅ OOSでもプラス＝過学習でなく本物の可能性が高い"
+               if og["net"] > 0 else
+               "⚠️ OOSがマイナス＝選定窓だけ良い過学習の疑い。要注意")
+    h.append(f'<p class="badge" style="margin-top:6px">{verdict}</p>')
+
+    # 銘柄別 (純損益降順)。各銘柄に OOS小計、表内に OOS 境界線を表示
+    groups2 = sorted(groups, key=lambda x: -_split_stats(x[3])["net"])
+    for strat, code, name, trades in groups2:
+        s = _split_stats(trades)
+        os_ = _split_stats([t for t in trades if _is_oos(t, oos_cutoff)])
+        net_c = "pos" if s["net"] > 0 else "neg"
+        oc = "pos" if os_["net"] > 0 else ("neg" if os_["net"] < 0 else "zero")
+        h.append(f'<h3 style="color:#cbd5e1;font-size:13px;margin:14px 0 4px">'
+                 f'{strat} / {code} {name[:16]} '
+                 f'<span class="badge">純<span class="{net_c}">{s["net"]:+,.0f}</span> '
+                 f'| 利{s["win_n"]}件+{s["gross_profit"]:,.0f} '
+                 f'/ 損{s["loss_n"]}件{s["gross_loss"]:,.0f} | PF{_pf_s(s["pf"])} WR{s["wr"]:.0f}%</span> '
+                 f'<span class="badge" style="border-color:#fbbf24">★OOS '
+                 f'<span class="{oc}">{os_["net"]:+,.0f}</span> '
+                 f'({os_["n"]}取引 WR{os_["wr"]:.0f}% PF{_pf_s(os_["pf"])})</span></h3>')
+        h.append('<table><thead><tr><th>日付</th><th>時刻</th>'
+                 '<th>エントリー</th><th>決済</th><th>損益</th><th>%</th><th>理由</th>'
+                 '</tr></thead><tbody>')
+        sorted_tr = sorted(trades, key=lambda x: x.get("entry_dt") or datetime.now())
+        oos_marked = False
+        for t in sorted_tr:
+            ed = t.get("entry_dt")
+            # OOS 境界線 (最初の OOS 取引の直前に1本)
+            if not oos_marked and _is_oos(t, oos_cutoff):
+                h.append('<tr><td colspan="7" style="background:#3a2f0a;'
+                         'color:#fbbf24;font-weight:700;text-align:center;'
+                         f'border-top:2px solid #fbbf24">━━ ここから純OOS (直近{oos_days}日・選定未使用) ━━</td></tr>')
+                oos_marked = True
+            xd = t.get("exit_dt")
+            pnl = _f(t.get("pnl"))
+            c = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+            row_bg = ' style="background:rgba(251,191,36,0.06)"' if _is_oos(t, oos_cutoff) else ""
+            d_s = ed.strftime("%Y-%m-%d") if ed is not None else "?"
+            t_s = (ed.strftime("%H:%M") if ed is not None else "") + \
+                  ("→" + xd.strftime("%H:%M") if xd is not None else "")
+            h.append(f'<tr{row_bg}><td class="nm">{d_s}</td><td class="nm">{t_s}</td>'
+                     f'<td>{_f(t.get("entry_p")):,.0f}</td><td>{_f(t.get("exit_p")):,.0f}</td>'
+                     f'<td class="{c}">{pnl:+,.0f}</td>'
+                     f'<td class="{c}">{_f(t.get("pct")):+.2f}</td>'
+                     f'<td class="nm">{t.get("reason","")}</td></tr>')
+        h.append('</tbody></table>')
+    return "".join(h)
+
+
+def _bydate_html(groups, err) -> str:
+    """日付別の取引詳細。その日の全銘柄×全戦略のトレードと日次損益を表示。"""
+    if err:
+        return f'<h2>日別取引</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>日別取引</h2><p class="badge">WATCHLISTが空か、データがありません。</p>'
+    from collections import defaultdict
+    bydate = defaultdict(list)
+    for strat, code, name, trades in groups:
+        for t in trades:
+            ed = t.get("entry_dt")
+            if ed is None:
+                continue
+            bydate[ed.date()].append((strat, code, name, t))
+    dates = sorted(bydate.keys(), reverse=True)
+
+    import calendar as _cal
+    # 日別の純損益マップ
+    daynet = {d: sum(_f(x[3].get("pnl")) for x in bydate[d]) for d in dates}
+    daycnt = {d: len(bydate[d]) for d in dates}
+    tot = sum(daynet.values())
+    tc = "pos" if tot > 0 else "neg"
+    # 色スケール (外れ値に強い: 上位10%目安)
+    mags = sorted(abs(v) for v in daynet.values() if v)
+    scale = mags[int(len(mags) * 0.9)] if mags else 1.0
+    scale = max(scale, 1.0)
+
+    def _cell_bg(net):
+        a = min(1.0, abs(net) / scale) * 0.85
+        if net > 0:
+            return f"background:rgba(52,211,153,{a:.2f})"
+        if net < 0:
+            return f"background:rgba(248,113,113,{a:.2f})"
+        return "background:#141b2b"
+
+    h = ['<h2>日別取引 <span class="badge">日付ごとの損益 / '
+         f'全{len(dates)}日 純<span class="{tc}">{tot:+,.0f}</span> '
+         f'(緑=勝ち日 / 赤=負け日 / 濃いほど大)</span></h2>']
+
+    # ── 月別サマリー (累計つき) ──
+    from collections import defaultdict as _dd
+    mon = _dd(lambda: {"net": 0.0, "n": 0, "w": 0, "l": 0})
+    for d in dates:
+        k = (d.year, d.month)
+        for st_, cd_, nm_, t in bydate[d]:
+            p = _f(t.get("pnl"))
+            mon[k]["net"] += p; mon[k]["n"] += 1
+            if p > 0: mon[k]["w"] += 1
+            elif p < 0: mon[k]["l"] += 1
+    mkeys = sorted(mon.keys())  # 古い順
+    h.append('<table style="width:auto"><thead><tr><th>月</th><th>取引</th>'
+             '<th>勝/負</th><th>純損益</th><th>累計</th></tr></thead><tbody>')
+    # 累計は古い順に積む
+    cum = 0.0
+    cummap = {}
+    for k in mkeys:
+        cum += mon[k]["net"]; cummap[k] = cum
+    for k in reversed(mkeys):   # 表示は新しい順
+        m = mon[k]
+        c = "pos" if m["net"] > 0 else ("neg" if m["net"] < 0 else "zero")
+        cc = "pos" if cummap[k] > 0 else "neg"
+        h.append(f'<tr><td class="nm">{k[0]}-{k[1]:02d}</td><td>{m["n"]}</td>'
+                 f'<td>{m["w"]}/{m["l"]}</td><td class="{c}">{m["net"]:+,.0f}</td>'
+                 f'<td class="{cc}">{cummap[k]:+,.0f}</td></tr>')
+    h.append('</tbody></table>')
+
+    # ── カレンダー・ヒートマップ (月ごと、横に流す) ──
+    h.append('<div class="cals">')
+    wd = ["月", "火", "水", "木", "金"]
+    for k in reversed(mkeys):
+        y, m = k
+        mnet = mon[k]["net"]
+        mc = "pos" if mnet > 0 else ("neg" if mnet < 0 else "zero")
+        h.append('<div class="calbox">')
+        h.append(f'<div class="caltitle">{y}-{m:02d} '
+                 f'<span class="{mc}">{mnet:+,.0f}</span></div>')
+        h.append('<table class="cal"><thead><tr>'
+                 + "".join(f"<th>{w}</th>" for w in wd) + '</tr></thead><tbody>')
+        for week in _cal.monthcalendar(y, m):
+            h.append('<tr>')
+            for dow in range(5):   # 月〜金のみ
+                dnum = week[dow]
+                if dnum == 0:
+                    h.append('<td class="empty"></td>')
+                    continue
+                from datetime import date as _date
+                dd = _date(y, m, dnum)
+                if dd in daynet:
+                    net = daynet[dd]
+                    h.append(f'<td style="{_cell_bg(net)}"><a href="#d{dd}">'
+                             f'<span class="dnum">{dnum}</span>'
+                             f'<span class="dpnl">{net/1000:+.0f}k</span></a></td>')
+                else:
+                    h.append(f'<td class="notr"><span class="dnum">{dnum}</span></td>')
+            h.append('</tr>')
+        h.append('</tbody></table></div>')
+    h.append('</div>')
+
+    # 日別の明細
+    for d in dates:
+        items = sorted(bydate[d], key=lambda x: (x[3].get("entry_dt") or datetime.now()))
+        net = sum(_f(x[3].get("pnl")) for x in items)
+        c = "pos" if net > 0 else ("neg" if net < 0 else "zero")
+        h.append(f'<h3 id="d{d}" style="color:#cbd5e1;font-size:13px;margin:14px 0 4px">'
+                 f'{d} <span class="badge">純<span class="{c}">{net:+,.0f}</span> '
+                 f'/ {len(items)}件</span></h3>')
+        h.append('<table><thead><tr><th>時刻</th><th>戦略</th><th>コード</th>'
+                 '<th>銘柄</th><th>エントリー</th><th>決済</th><th>損益</th>'
+                 '<th>%</th><th>理由</th></tr></thead><tbody>')
+        for strat, code, name, t in items:
+            pnl = _f(t.get("pnl"))
+            cc = "pos" if pnl > 0 else ("neg" if pnl < 0 else "zero")
+            ed = t.get("entry_dt"); xd = t.get("exit_dt")
+            ts_s = (ed.strftime("%H:%M") if ed is not None else "") + \
+                   ("→" + xd.strftime("%H:%M") if xd is not None else "")
+            h.append(f'<tr><td class="nm">{ts_s}</td><td class="nm">{strat}</td>'
+                     f'<td>{code}</td><td class="nm">{name[:14]}</td>'
+                     f'<td>{_f(t.get("entry_p")):,.0f}</td><td>{_f(t.get("exit_p")):,.0f}</td>'
+                     f'<td class="{cc}">{pnl:+,.0f}</td>'
+                     f'<td class="{cc}">{_f(t.get("pct")):+.2f}</td>'
+                     f'<td class="nm">{t.get("reason","")}</td></tr>')
+        h.append('</tbody></table>')
+    return "".join(h)
+
+
+CSS = """
+body{margin:0;padding:0;background:#0f172a;color:#94a3b8;font-family:sans-serif}
+.wrap{padding:22px 28px}
+h1{color:#e2e8f0;font-size:19px} h2{color:#e2e8f0;font-size:15px;margin:16px 0 6px}
+.badge{font-size:11px;color:#7dd3fc;font-weight:normal}
+.warn{color:#fbbf24}
+.nav{display:flex;gap:0;align-items:flex-end;border-bottom:2px solid #1e293b;
+     background:#0f172a;padding:8px 18px 0;flex-wrap:wrap}
+.tab{padding:10px 22px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
+     color:#94a3b8;cursor:pointer;font-size:0.98rem;font-weight:600;margin-right:3px}
+.tab:hover:not(.active){background:#263349;color:#e2e8f0}
+.tab.active{background:#0f172a;border-bottom:2px solid #fbbf24;color:#fbbf24}
+.tab .tn{background:#0006;border-radius:8px;padding:0 6px;margin-left:5px;font-size:11px}
+.sep{width:1px;background:#334155;margin:8px 10px 4px;align-self:stretch}
+.pane{display:none} .pane.active{display:block}
+table{border-collapse:collapse;font-size:12px;width:100%;margin-top:6px}
+th,td{border:1px solid #1e293b;padding:4px 8px;text-align:right}
+th{background:#1e293b;color:#cbd5e1} td.nm,td.star{text-align:left}
+.cen{text-align:center;background:#172033}
+.sub{font-size:10px;color:#64748b;font-weight:normal;margin-left:3px}
+.pos{color:#34d399} .neg{color:#f87171} .zero{color:#475569} .test{color:#7d93b0}
+tr.robust{background:#0f2a1c} tr.robust td.star{color:#fbbf24;font-weight:bold}
+tr:hover{background:#172033}
+.cals{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 16px}
+.calbox{display:inline-block}
+.caltitle{color:#cbd5e1;font-size:12px;font-weight:700;margin-bottom:3px}
+table.cal{border-collapse:collapse}
+table.cal th{font-size:10px;color:#64748b;padding:1px 0;font-weight:400}
+table.cal td{width:48px;height:34px;border:1px solid #0f172a;vertical-align:top;
+             text-align:right;padding:1px 3px;background:#141b2b}
+table.cal td.empty{background:#0f172a;border-color:#0f172a}
+table.cal td.notr{background:#161d2c}
+table.cal td a{text-decoration:none;display:block;height:100%}
+table.cal .dnum{color:#cbd5e1;font-size:9px;float:left;opacity:.7}
+table.cal .dpnl{display:block;color:#0f172a;font-size:11px;font-weight:700;
+                margin-top:9px;text-shadow:0 0 2px rgba(255,255,255,.4)}
+table.cal td.notr .dnum{color:#475569}
+"""
+
+JS = """
+function show(id, el){
+  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  el.classList.add('active');
+}
+"""
+
+
+def _hold_minutes(t):
+    ed, xd = t.get("entry_dt"), t.get("exit_dt")
+    try:
+        return max(0.0, (xd - ed).total_seconds() / 60.0)
+    except Exception:
+        return 0.0
+
+
+def _strategy_summary_html(groups, err, oos_cutoff=None, oos_days=90) -> str:
+    """スイング版相当の戦略別サマリー (リスク指標 + 純OOS併記)。"""
+    if err:
+        return f'<h2>戦略別サマリー</h2><p class="warn">{err}</p>'
+    if not groups:
+        return '<h2>戦略別サマリー</h2><p class="badge">データがありません。</p>'
+    try:
+        from risk_metrics import (calc_max_drawdown, calc_max_consecutive_losses,
+                                   calc_sharpe)
+    except Exception:
+        calc_max_drawdown = calc_max_consecutive_losses = calc_sharpe = None
+
+    from collections import defaultdict
+    by_strat = defaultdict(list)
+    for strat, code, name, trades in groups:
+        by_strat[strat].extend(trades)
+
+    def _pf_s(v):
+        return "∞" if v == float("inf") else f"{v:.2f}"
+
+    def _row(label, trades, accent=False):
+        s = _split_stats(trades)
+        os_ = _split_stats([t for t in trades if _is_oos(t, oos_cutoff)])
+        if calc_max_drawdown:
+            _, dd_pct = calc_max_drawdown(trades)
+            mcl = calc_max_consecutive_losses(trades)
+            shp = calc_sharpe(trades, trades_per_year=250)
+        else:
+            dd_pct, mcl, shp = 0.0, 0, 0.0
+        hold = sum(_hold_minutes(t) for t in trades) / len(trades) if trades else 0.0
+        nc = "pos" if s["net"] > 0 else "neg"
+        oc = "pos" if os_["net"] > 0 else ("neg" if os_["net"] < 0 else "zero")
+        st = ' style="font-weight:700;background:#0f1a2e"' if accent else ""
+        return (f'<tr{st}><td class="nm">{label}</td>'
+                f'<td>{s["n"]}</td><td>{s["wr"]:.0f}%</td><td>{_pf_s(s["pf"])}</td>'
+                f'<td class="{nc}">{s["net"]:+,.0f}</td>'
+                f'<td class="neg">{dd_pct:.1f}%</td><td>{mcl}</td><td>{shp:.2f}</td>'
+                f'<td>{hold:.0f}分</td>'
+                f'<td class="{oc}">{os_["net"]:+,.0f}</td></tr>')
+
+    all_tr = [t for ts in by_strat.values() for t in ts]
+    h = [f'<h2>戦略別サマリー <span class="badge">リスク指標つき / '
+         f'純OOS=直近{oos_days}日</span></h2>',
+         '<table><thead><tr><th>戦略</th><th>取引</th><th>勝率</th><th>PF</th>'
+         '<th>純損益</th><th>MaxDD</th><th>最大連敗</th><th>Sharpe</th>'
+         '<th>平均保有</th><th>★純OOS</th></tr></thead><tbody>']
+    for strat in sorted(by_strat, key=lambda s: -_split_stats(by_strat[s])["net"]):
+        h.append(_row(strat, by_strat[strat]))
+    h.append(_row("全戦略 合計", all_tr, accent=True))
+    h.append('</tbody></table>')
+    h.append('<p class="badge">MaxDD=最大ドローダウン% / Sharpe=年率(250取引想定) / '
+             '★純OOS=選定に使っていない直近期間の純損益。</p>')
+    return "".join(h)
+
+
+def build_html(date: str, signal_days: int, detail_days: int, oos_days: int = 90):
+    oos_cutoff = _oos_cutoff(date, oos_days)
+    # WF検証
+    wf = {}
+    for s in STRATEGIES:
+        rows = _collect_wf(s, date)
+        if rows:
+            wf[s] = rows
+    # 今日のシグナル
+    sigs, err = _today_signals(signal_days)
+    # 取引明細 (損益分離)
+    groups, derr = _trade_detail(detail_days)
+
+    tabs, panes = [], []
+    # シグナルタブ (先頭)
+    sig_n = len(sigs) if sigs else 0
+    tabs.append(f'<button class="tab active" onclick="show(\'sig\',this)">'
+                f'🚀 今日のシグナル <span class="tn">{sig_n}</span></button>')
+    panes.append(f'<div id="sig" class="pane active">{_signals_html(sigs, err)}</div>')
+    # 戦略別サマリー (リスク指標つき)
+    tabs.append('<button class="tab" onclick="show(\'stratsum\',this)">'
+                '📊 戦略別サマリー</button>')
+    panes.append(f'<div id="stratsum" class="pane">'
+                 f'{_strategy_summary_html(groups, derr, oos_cutoff, oos_days)}</div>')
+    # 取引明細タブ (銘柄別)
+    det_n = len(groups) if groups else 0
+    tabs.append(f'<button class="tab" onclick="show(\'detail\',this)">'
+                f'📋 取引明細(銘柄別) <span class="tn">{det_n}</span></button>')
+    panes.append(f'<div id="detail" class="pane">{_detail_html(groups, derr, oos_cutoff, oos_days)}</div>')
+    # 日別取引タブ
+    tabs.append('<button class="tab" onclick="show(\'bydate\',this)">'
+                '📅 日別取引</button>')
+    panes.append(f'<div id="bydate" class="pane">{_bydate_html(groups, derr)}</div>')
+    tabs.append('<span class="sep"></span>')
+    # WF検証タブ
+    summary = {}
+    for s, rows in wf.items():
+        rob = sum(1 for r in rows if r["robust"])
+        summary[s] = (len(rows), rob)
+        tabs.append(f'<button class="tab" onclick="show(\'{s}\',this)">'
+                    f'{s} <span class="tn">{rob}</span></button>')
+        panes.append(f'<div id="{s}" class="pane">{_wf_table(s, rows)}</div>')
+
+    total_rob = sum(r for _, r in summary.values())
+    html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">
+<title>デイトレ日次レポート {date}</title><style>{CSS}</style></head><body>
+<div class="nav">{''.join(tabs)}</div>
+<div class="wrap">
+<h1>デイトレ日次レポート <span class="badge">{date} / WF★本命 計{total_rob}</span></h1>
+<p class="badge">🚀今日のシグナル=WATCHLIST銘柄が最新営業日に出したエントリー。
+銘柄選定はWFのTEST(選定窓=直近HO日より前)のみで実施し、直近HO日は選定に不使用。
+★本命=選定後の純OOS(直近HO日)でもHO90&HO180両方が黒字(取引≥3)=答え合わせ合格。</p>
+{''.join(panes)}
+</div>
+<script>{JS}</script></body></html>"""
+    return html, summary, sig_n
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", default=datetime.now(JST).date().isoformat())
+    ap.add_argument("--signal-days", type=int, default=60)
+    ap.add_argument("--detail-days", type=int, default=365,
+                    help="取引明細の対象期間 (実トレード履歴を再計算する日数)")
+    ap.add_argument("--oos-days", type=int, default=90,
+                    help="純OOS境界 (直近N日は選定未使用＝答え合わせ領域。既定90)")
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+
+    html, summary, sig_n = build_html(args.date, args.signal_days,
+                                      args.detail_days, args.oos_days)
+    out = Path(f"daytrade_report_{args.date}.html")
+    out.write_text(html, encoding="utf-8")
+    print(f"HTML 生成: {out.resolve()}")
+    print(f"  今日のシグナル: {sig_n}件")
+    print("  WF検証 (候補/★本命):",
+          {s: f"{n}/{r}" for s, (n, r) in summary.items()})
+    if not args.no_browser:
+        webbrowser.open(out.resolve().as_uri())
+
+
+if __name__ == "__main__":
+    main()

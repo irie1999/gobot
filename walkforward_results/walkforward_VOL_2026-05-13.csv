@@ -1,0 +1,1 @@
+symbol,name,strategy,family,latest_price,folds_passed,total_test_trades,total_test_pnl,total_train_pnl,avg_test_pf,avg_test_wr,max_drawdown_pct,max_consecutive_losses,sharpe,recovery_factor,train_to_test_degradation_pct

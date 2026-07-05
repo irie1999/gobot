@@ -23,10 +23,12 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yfinance as yf
 import pandas as pd
 
 from backtest_limit_entry import (
@@ -34,46 +36,106 @@ from backtest_limit_entry import (
     run_limit_backtest,
     fetch_n225_return,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
+    MAX_HOLD, ENTRY_EXPIRE,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
+    compute_period_result,
+    round_to_tick,
+    calc_qty,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
 from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
+from compute_wf_scores import build_wf_scores, calc_wf_score, wf_rank
 
 JST     = timezone(timedelta(hours=9))
 PERIODS = [30, 90, 180, 365]
+
+import json as _json
+_WF_SCORES_PATH = Path("wf_scores.json")
+if _WF_SCORES_PATH.exists():
+    with open(_WF_SCORES_PATH, encoding="utf-8") as _f:
+        _WF_SCORES: dict = _json.load(_f)
+else:
+    _WF_SCORES: dict = build_wf_scores()
+
+def get_wf_score(symbol: str, strategy: str) -> tuple[int, str] | None:
+    """WFスコアとランクを返す。データなしの場合はNone。"""
+    v = _WF_SCORES.get(f"{symbol}_{strategy}")
+    if v is None:
+        return None
+    return v["score"], v["rank"]
+
+
+def _load_cpcv_flags() -> dict:
+    """cpcv_flags*.py を全て読み込んでマージする (danger > warning 優先)。"""
+    import importlib.util as _ilu, os as _os2
+    _lvl = {"danger": 2, "warning": 1}
+    aggressive = _os2.getenv("TRADING_MODE", "").lower() == "aggressive"
+    merged: dict = {}
+    for p in sorted(Path(".").glob("cpcv_flags*.py")):
+        is_agg = "aggressive" in p.name
+        if is_agg and not aggressive:
+            continue
+        if not is_agg and aggressive and "holdout_all" not in p.name and p.name != "cpcv_flags.py":
+            continue
+        try:
+            spec = _ilu.spec_from_file_location(f"_cpcv_{p.stem}", p)
+            mod  = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            for sym, info in getattr(mod, "CPCV_FLAGS", {}).items():
+                existing = merged.get(sym)
+                if existing is None or _lvl.get(info["level"], 0) > _lvl.get(existing["level"], 0):
+                    merged[sym] = info
+        except Exception:
+            pass
+    return merged
+
+CPCV_FLAGS: dict = _load_cpcv_flags()
+
+try:
+    from signal_risk_check import (
+        RISK_FLAGS as _RISK_FLAGS,
+        render_risk_badges as _render_risk_badges,
+        render_earnings_date as _render_earnings_date,
+    )
+except Exception:
+    _RISK_FLAGS = {}
+    def _render_risk_badges(_sym): return ""
+    def _render_earnings_date(_sym, _td=None): return ""
+
+
+def _fetch_live_price(symbol: str, fallback: float) -> float:
+    """最新の日足終値をキャッシュを使わず直接取得。失敗時はフォールバック。"""
+    try:
+        df = yf.Ticker(symbol).history(period="5d", interval="1d",
+                                       auto_adjust=False, actions=False)
+        if df is not None and not df.empty:
+            p = float(df["Close"].iloc[-1])
+            return p if p > 0 else fallback
+    except Exception:
+        pass
+    return fallback
 
 # ── scan_breakout_entry.py --max-price 5000（緩和パラメータ）スキャン上位銘柄 ──
 # DON:15日高値 / VOL:5日高値+出来高1.5x / MOM:ROC>3%
 # 複数期間で安定した成績を示した銘柄を優先選定
 WATCHLIST: list[tuple[str, str, str]] = [
-    # ── DON ドンチャン（15日高値ブレイク）複数期間安定上位 ──
-    ("6101.T", "ツガミ",                   "DON"),   # 3期間 100%  10回 +217K
-    ("6745.T", "ホーチキ",                 "DON"),   # 3期間 90-100% 11回 +102K
-    ("7380.T", "十六フィナンシャルグループ", "DON"),   # 3期間 90-100% 10回  +83K
-    ("5830.T", "いよぎんホールディングス",  "DON"),   # 3期間 80-100% 10回 +106K
-    ("6498.T", "キッツ",                   "DON"),   # 3期間 100%  10回  +91K
-    ("1332.T", "ニッスイ",                 "DON"),   # 3期間 90-100% 10回  +49K
-    ("1979.T", "大氣社",                   "DON"),   # 3期間 88-100%  9回  +93K
-    ("3395.T", "サンマルクHD",             "DON"),   # 3期間 85-100%  7回  +57K
-    # ── VOL 出来高急増（5日高値+1.5x）複数期間安定上位 ──
-    ("1982.T", "日比谷総合設備",           "VOL"),   # 3期間 100%  6回 +110K
-    ("3482.T", "ロードスターキャピタル",   "VOL"),   # 3期間 100%  6回 +101K
-    ("4401.T", "ADEKA",                   "VOL"),   # 3期間 100%  4回  +93K
-    ("7182.T", "ゆうちょ銀行",             "VOL"),   # 3期間 100%  5回  +72K
-    ("1332.T", "ニッスイ",                 "VOL"),   # 3期間 100%  6回
-    ("4114.T", "日本触媒",                 "VOL"),   # 3期間 100%  5回
-    ("6058.T", "ベクトル",                 "VOL"),   # 2期間 100%  5回
-    ("6136.T", "オーエスジー",             "VOL"),   # 2期間 100%  5回
-    # ── MOM モメンタム（ROC>3%）複数期間安定上位 ──
-    ("4368.T", "扶桑化学工業",             "MOM"),   # 3期間 100% 11回 +184K
-    ("5821.T", "平河ヒューテック",         "MOM"),   # 3期間 100% 10回 +258K
-    ("4114.T", "日本触媒",                 "MOM"),   # 3期間 100%  5回
-    ("4310.T", "ドリームインキュベータ",   "MOM"),   # 3期間 100%  3回
-    ("6113.T", "アマダ",                   "MOM"),   # 3期間 100%  6回  +73K
-    ("4221.T", "大倉工業",                 "MOM"),   # 1期間 100%  6回 +118K
-    ("6310.T", "井関農機",                 "MOM"),   # 1期間 100%  7回 +106K
-    ("4343.T", "イオンファンタジー",       "MOM"),   # 1期間 100%  4回 +105K
+    # ── DON: Walk-forward 選定 (2026-06-06, max-price≤5000円) ──
+    ("8091.T", "ニチモウ",                           "DON"),  # 2,211円 400株≒884k  folds=2 PF1.62 WR59.0% DD=8.0%  Shrp0.96
+    # ── MOM: Walk-forward 選定 (2026-06-06, max-price≤5000円) ──
+    ("6762.T", "ＴＤＫ",                             "MOM"),  # 4,111円 200株≒822k  folds=2 PF6.42 WR69.0% DD=12.4% Shrp2.83
+    ("8237.T", "松屋",                               "MOM"),  # 1,524円 600株≒914k  folds=2 PF3.07 WR75.0% DD=14.9% Shrp2.34
+    ("7242.T", "カヤバ",                             "MOM"),  # 3,970円 200株≒794k  folds=2 PF2.99 WR71.7% DD=10.1% Shrp2.52
+    ("1951.T", "エクシオグループ",                   "MOM"),  # 2,830円 300株≒849k  folds=2 PF5.69 WR77.4% DD=10.5% Shrp3.29
+    ("4554.T", "富士製薬工業",                       "MOM"),  # 2,184円 400株≒874k  folds=2 PF2.72 WR71.8% DD=10.5% Shrp1.77
+    # ── VOL: Walk-forward 選定 (2026-06-06, max-price≤5000円) ──
+    ("7013.T", "ＩＨＩ",                             "VOL"),  # 2,574円 300株≒772k  folds=2 PF3.6  WR77.4% DD=11.9% Shrp2.78
+    ("4390.T", "ＩＰＳ",                             "VOL"),  # 4,000円 200株≒800k  folds=2 PF4.33 WR77.5% DD=11.5% Shrp3.26
+    ("1803.T", "清水建設",                           "VOL"),  # 2,514円 300株≒754k  folds=2 PF4.29 WR62.5% DD=10.5% Shrp2.84
+    ("1952.T", "新日本空調",                         "VOL"),  # 3,315円 300株≒994k  folds=2 PF5.65 WR65.0% DD=7.5%  Shrp2.66
+    ("9887.T", "松屋フーズホールディングス",         "VOL"),  # 4,415円 200株≒883k  folds=2 PF7.73 WR90.0% DD=6.1%  Shrp3.09
+    ("6952.T", "カシオ計算機",                       "VOL"),  # 1,836円 500株≒918k  folds=2 PF6.79 WR70.8% DD=6.4%  Shrp3.01
+    ("6250.T", "やまびこ",                           "VOL"),  # 3,650円 200株≒730k  folds=2 PF5.88 WR63.3% DD=13.5% Shrp1.14
 ]
 
 # ── パラメータ (プリセット切替) ───────────────────────────────────
@@ -84,11 +146,11 @@ STRATEGY_PARAMS_CONSERVATIVE = {
     "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
     "MOM": (calc_momentum,     0.0, 1.5, 3.0),
 }
-# aggressive: 利確 1.5R で回転率優先
+# aggressive: sm=1.5/tm=2.0 (run_signals_prime.py / scan_walkforward と統一)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "DON": (calc_donchian,     0.0, 1.0, 1.5),   # 目標 +4.5% / 損切 -3%
-    "VOL": (calc_vol_breakout, 0.0, 1.0, 1.5),
-    "MOM": (calc_momentum,     0.0, 1.0, 1.5),
+    "DON": (calc_donchian,     0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
+    "VOL": (calc_vol_breakout, 0.0, 1.5, 2.0),
+    "MOM": (calc_momentum,     0.0, 1.5, 2.0),
 }
 
 import os as _os
@@ -131,6 +193,46 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     return score, rank
 
 
+_BT_TYPE_COLORS = {"安定": "#10b981", "高WR": "#3b82f6", "高PF": "#f59e0b", "取引数": "#a855f7"}
+
+def calc_bt_type(period_results: dict) -> str:
+    """BTスコアの支配要素タイプを返す: 安定 / 高WR / 高PF / 取引数"""
+    results = [r for r in period_results.values() if r and r.get("trades", 0) > 0]
+    if not results:
+        return "?"
+    avg_wr   = sum(r["win_rate"] for r in results) / len(results)
+    avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10) for r in results) / len(results)
+    stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
+    t_trades = sum(r["trades"] for r in results)
+    components = {
+        "安定":  stable,
+        "高WR":  avg_wr / 100,
+        "高PF":  avg_pf / 10,
+        "取引数": min(t_trades / 20, 1),
+    }
+    return max(components, key=components.get)
+
+
+def _bt_type_badge(period_results: dict) -> str:
+    """小さなインラインバッジ HTML を返す。"""
+    bt_type = calc_bt_type(period_results)
+    color = _BT_TYPE_COLORS.get(bt_type, "#94a3b8")
+    return (f'<br><small style="background:{color}22;color:{color};'
+            f'padding:1px 5px;border-radius:3px;font-size:10px">{bt_type}</small>')
+
+
+def apply_atr_penalty(score: int, stop_loss_pct: float) -> tuple[int, str]:
+    """
+    損切り幅(ATR幅)が広い時にスコアを減点。
+    基準7%以下: ペナルティなし。7%超: 線形減点、最大50%減(37%超で頭打ち)。
+    Returns: (adjusted_score, atr_note)  atr_noteは "" (ペナルティなし) or "17.8%" 形式
+    """
+    if stop_loss_pct <= 7.0:
+        return score, ""
+    multiplier = max(0.5, 1.0 - (stop_loss_pct - 7.0) / 30.0)
+    return round(score * multiplier), f"{stop_loss_pct:.1f}%"
+
+
 def check_signal_on_date(symbol: str, strategy: str,
                          target_date=None) -> dict | None:
     """target_date の前営業日にシグナルが出ているか確認。"""
@@ -144,7 +246,8 @@ def check_signal_on_date(symbol: str, strategy: str,
         return None
 
     if target_date is None:
-        prev_idx, next_idx = -1, -1
+        next_idx = -1
+        prev_idx = -1   # 最新足のみ判定（連続シグナルでも当日分だけ表示）
     else:
         ts = pd.Timestamp(target_date)
         cands = df.index[df.index <= ts]
@@ -162,6 +265,8 @@ def check_signal_on_date(symbol: str, strategy: str,
 
     close_prev = float(prev["close"])
     current_p  = float(next_row["close"])
+    if target_date is None:
+        current_p = _fetch_live_price(symbol, current_p)
 
     # 逆指値: 終値 + ATR×em（em=0.0なら終値ちょうど）
     order_p     = close_prev + atr_v * em
@@ -169,18 +274,25 @@ def check_signal_on_date(symbol: str, strategy: str,
     tp          = order_p + atr_v * tm
     # 逆指値→指値注文の指値上限 (kabu 発注時 AfterHitPrice 用)
     limit_entry = order_p * (1.0 + LIMIT_ENTRY_MARGIN_PCT)
+    stop_loss_pct = (order_p - sl) / order_p * 100 if order_p > 0 else 0.0
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
+    qty        = calc_qty(order_p, sl)
+    position_v = round(order_p * qty)
+
     return dict(
-        order_price=round(order_p, 0),
-        limit_entry_price=round(limit_entry, 0),
-        stop_price=round(sl, 0),
-        target_price=round(tp, 0),
+        order_price=round_to_tick(order_p),
+        limit_entry_price=round_to_tick(limit_entry),
+        stop_price=round_to_tick(sl),
+        target_price=round_to_tick(tp),
         current_price=current_p,
         signal_date=sig_date,
         signal_price=round(close_prev, 0),
+        stop_loss_pct=round(stop_loss_pct, 1),
+        qty=qty,
+        position_value=position_v,
     )
 
 
@@ -189,13 +301,45 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     df = fetch(symbol, max(PERIODS))
     if df is None:
         return None
+
+    full_r = run_limit_backtest(symbol, name, df, calc_fn,
+                                em, sm, tm, max(PERIODS), strategy,
+                                entry_type=ENTRY_TYPE)
+    if not full_r:
+        return None
+
+    today  = datetime.now(JST).date()
     period_results: dict[int, dict] = {}
     for days in PERIODS:
-        r = run_limit_backtest(symbol, name, df, calc_fn,
-                               em, sm, tm, days, strategy,
-                               entry_type=ENTRY_TYPE)
-        if r and r["trades"] >= 1:
-            period_results[days] = r
+        cutoff = today - timedelta(days=days)
+        # 表示用: 発注中のみ除外（保有中は取引明細に表示する）
+        sub_display = [t for t in full_r["trade_log"]
+                       if t["signal_dt"].date() >= cutoff
+                       and t.get("reason") != "発注中"]
+        # 統計・スコア計算用: 保有中も除外（未決済ポジションはスコアに影響させない）
+        sub = [t for t in sub_display if t.get("reason") != "保有中"]
+        if not sub_display:
+            continue
+        filled = len(sub)
+        wins   = sum(1 for t in sub if t["pnl"] > 0)
+        losses = sum(1 for t in sub if t["pnl"] <= 0)
+        gp     = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+        gl     = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+        pf     = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        period_results[days] = dict(
+            symbol=symbol, name=name, strategy=strategy,
+            signals=full_r["signals"], filled=filled,
+            trades=filled, wins=wins, losses=losses,
+            win_rate=wins / filled * 100 if filled else 0.0,
+            pf=pf, total_pnl=sum(t["pnl"] for t in sub),
+            total_fee=sum(t.get("fee", 0) for t in sub),
+            slippage_pct=full_r["slippage_pct"],
+            fee_pct_one_way=full_r["fee_pct_one_way"],
+            avg_hold=sum(t["hold_days"] for t in sub) / filled if filled else 0.0,
+            fill_rate=full_r["fill_rate"],
+            trade_log=sub_display,  # 表示用は保有中を含む
+        )
+
     return dict(symbol=symbol, name=name, strategy=strategy,
                 period_results=period_results, today_sig=None)
 
@@ -205,7 +349,7 @@ def _pf_str(pf: float) -> str:
 
 
 def build_html(all_items: list[dict], show_days: int,
-               date_label: str = "本日") -> str:
+               date_label: str = "本日", run_cmd: str = "") -> str:
     today_str = datetime.now(JST).strftime("%Y-%m-%d")
 
     # サマリー (戦略別に trade_log を結合してリスク指標計算)
@@ -215,7 +359,7 @@ def build_html(all_items: list[dict], show_days: int,
         if strat not in strategy_summary:
             strategy_summary[strat] = dict(
                 trades=0, wins=0, pnl=0.0, gp=0.0, gl=0.0, trade_log=[])
-        pr = item["period_results"].get(show_days) or {}
+        pr = compute_period_result(item, show_days)
         if pr:
             strategy_summary[strat]["trades"] += pr["trades"]
             strategy_summary[strat]["wins"]   += pr["wins"]
@@ -273,31 +417,95 @@ def build_html(all_items: list[dict], show_days: int,
           <td>{hs.get('avg', 0):.1f}日<br><small class="hold-break">{hold_break_str}</small></td>
         </tr>"""
 
-    # シグナル行（スコア降順で表示）
-    signal_items = [(item, calc_recommend_score(item["period_results"]))
-                    for item in all_items if item["today_sig"]]
-    signal_items.sort(key=lambda x: x[1][0], reverse=True)
+    # シグナル行（当日新規のみ。ルックバック継続/保有中は除外）
+    def _signal_sort_key(item):
+        wf = get_wf_score(item["symbol"], item["strategy"])
+        return wf[0] if wf else calc_recommend_score(item["period_results"])[0]
+
+    def _atr_badge(stop_pct: float) -> str:
+        if stop_pct > 15:
+            return "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"
+        if stop_pct > 10:
+            return "<span style='background:#f97316;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR高</span>"
+        if stop_pct > 7:
+            return "<span style='background:#eab308;color:#111;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR↑</span>"
+        return ""
+
+    signal_items = [item for item in all_items
+                    if item["today_sig"]
+                    and not item["today_sig"].get("_pending_lookback")
+                    and not item["today_sig"].get("_filled_holding")]
+    signal_items.sort(key=_signal_sort_key, reverse=True)
 
     signal_rows = ""
-    for item, (score, rank) in signal_items:
-        sig   = item["today_sig"]
-        strat = item["strategy"]
+    for item in signal_items:
+        sig      = item["today_sig"]
+        strat    = item["strategy"]
+        stop_pct = sig.get("stop_loss_pct", 0.0)
+        wf = get_wf_score(item["symbol"], strat)
+        if wf:
+            score, rank = wf
+            score_label = f"{score}点<br><small style='color:#94a3b8;font-size:10px'>WF</small>"
+        else:
+            score, rank = calc_recommend_score(item["period_results"])
+            score_label = f"{score}点<br><small style='color:#f59e0b;font-size:10px'>参考</small>"
+        score_label += _bt_type_badge(item["period_results"])
         rank_cls = {"★★★": "rank-s", "★★": "rank-a", "★": "rank-b"}.get(rank, "rank-c")
+        if wf and score >= 70:
+            row_style = "border-left:3px solid #22c55e"
+        elif wf and score >= 55:
+            row_style = "border-left:3px solid #f59e0b"
+        elif wf:
+            row_style = "border-left:3px solid #ef4444"
+        else:
+            row_style = ""
+        _sig_dt = pd.to_datetime(sig['signal_date'])
+        _max_exit = pd.bdate_range(start=_sig_dt, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+        max_exit_str = _max_exit.strftime("%Y-%m-%d")
+        cpcv_info = CPCV_FLAGS.get(item["symbol"])
+        if cpcv_info:
+            _lvl = cpcv_info["level"]
+            _rsn = cpcv_info["reason"].replace('"', "&quot;")
+            if _lvl == "danger":
+                cpcv_badge = (f'<br><span title="{_rsn}" style="cursor:help;'
+                              f'color:#ef4444;font-size:10px;font-weight:700">'
+                              f'❌ CPCV警告</span>')
+            else:
+                cpcv_badge = (f'<br><span title="{_rsn}" style="cursor:help;'
+                              f'color:#fbbf24;font-size:10px;font-weight:700">'
+                              f'⚠️ CPCV要注意</span>')
+        else:
+            cpcv_badge = ""
+        risk_badges    = _render_risk_badges(item["symbol"])
+        earnings_badge = _render_earnings_date(item["symbol"])
+        _sym_code = item['symbol'].split('.')[0]
+        _reg_qty  = sig.get('qty', 100)
+        _reg_url  = (f"http://127.0.0.1:8765/?prefill=1"
+                     f"&symbol={_sym_code}"
+                     f"&entry={sig['order_price']:.0f}"
+                     f"&stop={sig['stop_price']:.0f}"
+                     f"&target={sig['target_price']:.0f}"
+                     f"&strategy={strat}"
+                     f"&qty={_reg_qty}")
         signal_rows += f"""
-        <tr>
-          <td class="sym">{item['symbol']}<br><small>{item['name']}</small></td>
-          <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
-          <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score}点</td>
+        <tr style="{row_style}">
+          <td class="sym">{item['symbol']}<br><small>{item['name']}</small>{cpcv_badge}{risk_badges}{earnings_badge}</td>
+          <td><span class="tag tag-{strat.lower()}">{strat}</span>{_atr_badge(stop_pct)}</td>
+          <td class="score-cell"><span class="{rank_cls}">{rank}</span><br>{score_label}</td>
           <td>{sig['signal_date']}</td>
           <td>{sig['signal_price']:,.0f}</td>
           <td>{sig['current_price']:,.0f}</td>
           <td class="stop">{sig['order_price']:,.0f}</td>
           <td class="limit-entry">{sig.get('limit_entry_price', sig['order_price']):,.0f}</td>
-          <td class="loss">{sig['stop_price']:,.0f}</td>
+          <td class="loss">{sig['stop_price']:,.0f}<br><small style="color:#94a3b8;font-size:10px">-{stop_pct:.1f}%</small></td>
           <td class="profit">{sig['target_price']:,.0f}</td>
+          <td style="color:#e2e8f0;text-align:right">{sig.get('qty', '-')}株<br><small style="color:#94a3b8;font-size:10px">{sig.get('position_value', 0):,.0f}円</small></td>
+          <td style="color:#94a3b8">{MAX_HOLD}日</td>
+          <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
+          <td><a href="{_reg_url}" target="_blank" class="reg-btn">📥 登録</a></td>
         </tr>"""
     if not signal_rows:
-        signal_rows = f'<tr><td colspan="10" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
+        signal_rows = f'<tr><td colspan="14" style="text-align:center;color:#94a3b8">{date_label} シグナルなし</td></tr>'
 
     # 4期間比較
     period_headers  = "".join(f"<th colspan='4'>{p}日</th>" for p in PERIODS)
@@ -306,7 +514,7 @@ def build_html(all_items: list[dict], show_days: int,
     stock_rows = ""
     for strat in ["DON", "VOL", "MOM"]:
         items = [i for i in all_items if i["strategy"] == strat]
-        items.sort(key=lambda x: (x["period_results"].get(show_days) or {}).get("total_pnl", -999999), reverse=True)
+        items.sort(key=lambda x: (compute_period_result(x, show_days)).get("total_pnl", -999999), reverse=True)
         for item in items:
             cells = ""
             for p in PERIODS:
@@ -320,14 +528,27 @@ def build_html(all_items: list[dict], show_days: int,
                               f"<td>{_pf_str(r['pf'])}</td>"
                               f"<td class='{pc}'>{r['total_pnl']:+,.0f}</td>")
             # show_days 期間の平均保有日数
-            pr_show   = item["period_results"].get(show_days) or {}
+            pr_show   = compute_period_result(item, show_days)
             hs_item   = calc_hold_stats(pr_show.get("trade_log", []))
             hold_cell = f"{hs_item['avg']:.1f}日" if hs_item["count"] > 0 else "-"
-            mark = "🔔" if item["today_sig"] else ""
+            sig_m = item["today_sig"]
+            mark = ("🔔" if sig_m
+                         and not sig_m.get("_pending_lookback")
+                         and not sig_m.get("_filled_holding")
+                    else "")
+            wf_item = get_wf_score(item["symbol"], strat)
+            if wf_item:
+                wf_s, wf_r = wf_item
+                wf_cls  = "profit" if wf_s >= 70 else ("" if wf_s >= 55 else "loss")
+                wf_cell = f'<span class="{wf_cls}">{wf_r} {wf_s}</span>'
+            else:
+                wf_cell = '<span style="color:#64748b">-</span>'
+            wf_cell += _bt_type_badge(item["period_results"])
             stock_rows += f"""
         <tr>
           <td class="sym">{item['symbol']}{mark}<br><small>{item['name']}</small></td>
           <td><span class="tag tag-{strat.lower()}">{strat}</span></td>
+          <td class="score-cell">{wf_cell}</td>
           {cells}
           <td>{hold_cell}</td>
         </tr>"""
@@ -335,9 +556,9 @@ def build_html(all_items: list[dict], show_days: int,
     # 個別トレード
     trade_sections = ""
     for item in all_items:
-        pr   = item["period_results"].get(show_days) or {}
+        pr   = compute_period_result(item, show_days)
         logs = pr.get("trade_log") or []
-        if not logs:
+        if not logs and not item.get("today_sig"):
             continue
         trade_rows     = ""
         fill_days_list = []
@@ -347,27 +568,114 @@ def build_html(all_items: list[dict], show_days: int,
             x_str   = t["exit_dt"].strftime("%Y-%m-%d")  if hasattr(t["exit_dt"],  "strftime") else str(t["exit_dt"])
             sig_dt  = t.get("signal_dt")
             s_str   = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else (str(sig_dt) if sig_dt else "-")
+            # 最大決済日: シグナル日 + ENTRY_EXPIRE + MAX_HOLD 営業日
+            if sig_dt is not None:
+                _max_exit = pd.bdate_range(start=pd.to_datetime(sig_dt), periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+                max_exit_str = _max_exit.strftime("%Y-%m-%d")
+            else:
+                max_exit_str = "-"
             s_p     = t.get("signal_price", "-")
             s_p_str = f"{s_p:,.0f}" if isinstance(s_p, float) else str(s_p)
             dtf     = t.get("days_to_fill", "-")
             fill_days_list.append(dtf) if isinstance(dtf, int) else None
             ol  = t.get("order_limit")
             osl = t.get("order_stop")
+            otg = t.get("order_target")
+            ole = ol * (1.0 + LIMIT_ENTRY_MARGIN_PCT) if isinstance(ol, float) else None
             ol_str  = f"{ol:,.0f}"  if isinstance(ol,  float) else str(ol  or "-")
             osl_str = f"{osl:,.0f}" if isinstance(osl, float) else str(osl or "-")
+            otg_str = f"{otg:,.0f}" if isinstance(otg, float) else str(otg or "-")
+            ole_str = f"{ole:,.0f}" if isinstance(ole, float) else "-"
             trade_rows += f"""
               <tr>
                 <td>{s_str}</td><td class="stop">{s_p_str}</td>
                 <td>{e_str}</td><td>{x_str}</td>
                 <td class="stop">{ol_str}</td>
+                <td class="limit-entry">{ole_str}</td>
                 <td class="loss">{osl_str}</td>
+                <td class="profit">{otg_str}</td>
                 <td>{t['entry_p']:,.0f}</td><td>{t['exit_p']:,.0f}</td>
                 <td>{t['qty']}</td>
                 <td class="{pnl_cls}">{t['pnl']:+,.0f}</td>
                 <td class="{pnl_cls}">{t['pct']:+.2f}%</td>
                 <td>{t['hold_days']}日</td>
                 <td class="stop">{dtf}日</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_str}</td>
                 <td>{t['reason']}</td>
+              </tr>"""
+        # 未約定/保有中シグナルを取引詳細の末尾に追記
+        if item.get("today_sig"):
+            sig = item["today_sig"]
+            # バックテスト trade_log に同シグナル日のトレードが既存なら重複しない
+            _sig_date_str = sig["signal_date"]
+            _already = any(
+                t.get("signal_dt") is not None
+                and t["signal_dt"].strftime("%Y-%m-%d") == _sig_date_str
+                for t in logs
+            )
+            if not _already:
+                _sig_dt_p   = pd.to_datetime(sig["signal_date"])
+                _max_exit_p = pd.bdate_range(start=_sig_dt_p, periods=ENTRY_EXPIRE + MAX_HOLD + 1)[-1]
+                max_exit_pending = _max_exit_p.strftime("%Y-%m-%d")
+                ol_p  = sig["order_price"]
+                ole_p = sig.get("limit_entry_price", round(ol_p * (1 + LIMIT_ENTRY_MARGIN_PCT), 0))
+                if sig.get("_filled_holding"):
+                    row_bg    = "background:rgba(34,197,94,0.12)"
+                    ep        = sig.get("_entry_price", ol_p)
+                    cp        = sig.get("_current_latest", sig["current_price"])
+                    upnl      = sig.get("_unreal_pnl", 0)
+                    upct      = sig.get("_unreal_pct", 0)
+                    hd        = sig.get("_hold_days", 0)
+                    fd        = sig.get("_fill_days", "-")
+                    qty       = sig.get("_qty", 100)
+                    fill_dt   = sig.get("_fill_date", "-")
+                    pnl_cls   = "profit" if upnl >= 0 else "loss"
+                    reason_td = '<td style="color:#4ade80">保有中</td>'
+                    trade_rows += f"""
+              <tr style="{row_bg}">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>{fill_dt}</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>{ep:,.0f}</td><td>{cp:,.0f}</td>
+                <td>{qty}</td>
+                <td class="{pnl_cls}">{upnl:+,.0f}</td>
+                <td class="{pnl_cls}">{upct:+.2f}%</td>
+                <td>{hd}日</td><td>{fd}日</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                {reason_td}
+              </tr>"""
+                elif sig.get("_pending_lookback"):
+                    row_bg    = "background:rgba(245,158,11,0.12)"
+                    reason_td = '<td style="color:#f59e0b">⏳ 未約定（継続中）</td>'
+                    trade_rows += f"""
+              <tr style="{row_bg}">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>-</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                {reason_td}
+              </tr>"""
+                else:
+                    row_bg    = "background:rgba(245,158,11,0.12)"
+                    reason_td = '<td style="color:#f59e0b">⏳ 未約定</td>'
+                    trade_rows += f"""
+              <tr style="{row_bg}">
+                <td>{sig['signal_date']}</td><td class="stop">{sig['signal_price']:,.0f}</td>
+                <td>-</td><td>-</td>
+                <td class="stop">{ol_p:,.0f}</td>
+                <td class="limit-entry">{ole_p:,.0f}</td>
+                <td class="loss">{sig['stop_price']:,.0f}</td>
+                <td class="profit">{sig['target_price']:,.0f}</td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                <td style="color:#f59e0b;font-size:12px">{max_exit_pending}</td>
+                {reason_td}
               </tr>"""
         strat     = item["strategy"]
         pnl_total = pr.get("total_pnl", 0)
@@ -409,10 +717,10 @@ def build_html(all_items: list[dict], show_days: int,
           <thead><tr>
             <th>シグナル日</th><th>シグナル時株価</th>
             <th>エントリー</th><th>エグジット</th>
-            <th>逆指値</th><th>損切り</th>
+            <th>逆指値</th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標価格</th>
             <th>エントリー価格</th><th>エグジット価格</th>
             <th>数量</th><th>損益(円)</th><th>損益(%)</th>
-            <th>保有日数</th><th>約定日数</th><th>理由</th>
+            <th>保有日数</th><th>約定日数</th><th>最大決済日</th><th>理由</th>
           </tr></thead>
           <tbody>{trade_rows}</tbody>
         </table>
@@ -448,6 +756,9 @@ def build_html(all_items: list[dict], show_days: int,
   .fill-stat {{ color:#38bdf8; font-size:0.82rem; margin-bottom:6px; }}
   .hold-stat {{ color:#a5b4fc; font-size:0.82rem; margin-bottom:6px; }}
   .hold-break {{ color:#94a3b8; font-size:0.70rem; font-weight:normal; white-space:nowrap; }}
+  .reg-btn {{ display:inline-block; padding:4px 8px; background:#2d6cdf; color:#fff;
+              border-radius:5px; font-size:12px; text-decoration:none; white-space:nowrap; }}
+  .reg-btn:hover {{ background:#1e4fc0; }}
   .rank-s {{ background:#fbbf24; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-a {{ background:#4ade80; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
   .rank-b {{ background:#38bdf8; color:#000; padding:2px 6px; border-radius:4px; font-weight:700; }}
@@ -467,6 +778,7 @@ def build_html(all_items: list[dict], show_days: int,
   <span style="color:#cffafe">DON: ドンチャン高値ブレイク</span> ／
   <span style="color:#fef3c7">VOL: 出来高急増ブレイク</span> ／
   <span style="color:#ecfccb">MOM: モメンタムブレイク</span>
+  {f'<br>▶ 実行: <code style="background:#0f172a;padding:2px 8px;border-radius:4px;color:#38bdf8;font-size:0.88rem">{run_cmd}</code>' if run_cmd else ""}
 </p>
 
 <h2>戦略サマリー（{show_days}日）</h2>
@@ -487,7 +799,7 @@ def build_html(all_items: list[dict], show_days: int,
 <table>
   <thead><tr>
     <th>銘柄</th><th>戦略</th><th>スコア</th><th>シグナル日</th><th>シグナル時株価</th>
-    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th>
+    <th>現在値</th><th>逆指値<br><small>(トリガー)</small></th><th>指値上限<br><small>(+{LIMIT_ENTRY_MARGIN_PCT*100:.1f}%)</small></th><th>損切り</th><th>目標</th><th>株数<br><small>想定額</small></th><th>最大保有日</th><th>最大決済日<br><small>(約定期限+保有)</small></th><th>登録</th>
   </tr></thead>
   <tbody>{signal_rows}</tbody>
 </table>
@@ -497,6 +809,7 @@ def build_html(all_items: list[dict], show_days: int,
   <thead>
     <tr>
       <th rowspan="2">銘柄</th><th rowspan="2">戦略</th>
+      <th rowspan="2" title="Walk-forwardスコア: out-of-sampleデータで評価した将来勝率の指標">WF<br>スコア</th>
       {period_headers}
       <th rowspan="2">平均<br>保有<br><small>({show_days}日)</small></th>
     </tr>
@@ -592,7 +905,7 @@ def main() -> None:
     print("  " + "-" * 72)
     for strat in ["DON", "VOL", "MOM"]:
         for item in [i for i in all_items if i["strategy"] == strat]:
-            r = item["period_results"].get(show_days)
+            r = compute_period_result(item, show_days)
             if not r:
                 print(f"  {item['symbol']:<12} {item['name']:<24} {strat:<5} データなし")
                 continue
@@ -606,7 +919,7 @@ def main() -> None:
     print(f"\nHTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

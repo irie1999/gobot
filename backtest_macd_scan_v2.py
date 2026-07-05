@@ -42,6 +42,7 @@ import argparse
 import json
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2115,7 +2116,7 @@ def main() -> None:
 
         html_path = generate_signal_html(sig, portfolio)
         print(f"  HTMLレポート: {html_path.resolve()}")
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
         print()
         return
 
@@ -2197,7 +2198,7 @@ def main() -> None:
     # ── HTML レポート ─────────────────────────────────────────
     html_path = generate_html(results, days, label)
     print(f"  HTMLレポート: {html_path.resolve()}")
-    webbrowser.open(html_path.resolve().as_uri())
+    open_html(html_path.resolve().as_uri())
     print()
 
     # ── CSV出力 ───────────────────────────────────────────────

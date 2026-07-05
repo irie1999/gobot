@@ -1,8 +1,9 @@
 """
 scan_walkforward.py  ―  Walk-forward 方式による銘柄スキャン
 =================================================================
-ユニバース (デフォルト=プライム市場 ~1800銘柄) × 6戦略
-  (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト)
+ユニバース (デフォルト=プライム市場 ~1800銘柄) × 10戦略
+  (MACD/A7/RSI2 逆指値B + DON/VOL/MOM ブレイクアウト
+   + A7_S/DON_S/MOM_S/GAP_S 空売り)
 に対し、非重複の 3 fold Walk-forward バックテストを実行し、
 TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽出する。
 
@@ -35,9 +36,12 @@ TRAIN (選定用) で勝ち、かつ TEST (検証用) でも勝つ銘柄を抽�
   python fetch_listed_symbols.py --market prime
 
   # 本番スキャン
-  python scan_walkforward.py                      # 全戦略 (6つ)
+  python scan_walkforward.py                      # 全長戦略 (6つ, --family both)
+  python scan_walkforward.py --family all         # 全10戦略 (空売り含む)
   python scan_walkforward.py --family stop        # 逆指値Bのみ
   python scan_walkforward.py --family breakout    # ブレイクアウトのみ
+  python scan_walkforward.py --family short       # 空売りA7_Sのみ
+  python scan_walkforward.py --family short_brk   # 空売りブレイクアウトのみ
   python scan_walkforward.py --workers 8
   python scan_walkforward.py --top 50             # 表示する上位N
   python scan_walkforward.py --symbols symbols_listed_all.py   # 明示指定
@@ -72,6 +76,13 @@ from pathlib import Path
 
 import pandas as pd
 
+# ── TRADING_MODE を import 前に設定 (モジュールトップで env var を読む) ──
+import os as _os_pre
+if "--aggressive" in sys.argv:
+    _os_pre.environ["TRADING_MODE"] = "aggressive"
+elif "--conservative" in sys.argv:
+    _os_pre.environ["TRADING_MODE"] = "conservative"
+
 from backtest_limit_entry import (
     fetch,
     calc_macd, calc_a7, calc_rsi2,
@@ -80,6 +91,10 @@ from backtest_limit_entry import (
 )
 from scan_breakout_entry import (
     calc_donchian, calc_vol_breakout, calc_momentum,
+)
+from check_signals_short import calc_a7_short, calc_rsi2_short, calc_macd_short
+from check_signals_short_breakout import (
+    calc_donchian_short, calc_momentum_short, calc_gap_short,
 )
 from risk_metrics import enrich_backtest_result
 
@@ -135,23 +150,35 @@ def load_universe(explicit_path: str | None = None) -> tuple[list[tuple[str, str
 
 
 # ── 戦略定義 (プリセット切替) ─────────────────────────────────
-# (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family)
+# (calc_fn, entry_atr_mult, stop_atr_mult, target_atr_mult, family, entry_type)
 # TRADING_MODE=aggressive のとき積極利確プリセットを使う
 STRATEGY_DEFS_CONSERVATIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.5, 3.0, "stop"),
-    "A7":   (calc_a7,          0.0, 1.5, 3.0, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 2.0, 4.0, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.5, 3.0, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.5, 3.0, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.5, 3.0, "breakout"),
+    "MACD":  (calc_macd,          0.0, 1.5, 3.0, "stop",      "stop"),
+    "A7":    (calc_a7,            0.0, 1.5, 3.0, "stop",      "stop"),
+    "RSI2":  (calc_rsi2,          0.0, 2.0, 4.0, "stop",      "stop"),
+    "DON":   (calc_donchian,      0.0, 1.5, 3.0, "breakout",  "stop"),
+    "VOL":   (calc_vol_breakout,  0.0, 1.5, 3.0, "breakout",  "stop"),
+    "MOM":   (calc_momentum,      0.0, 1.5, 3.0, "breakout",  "stop"),
+    "A7_S":  (calc_a7_short,      0.0, 1.5, 2.5, "short",     "stop_sell"),  # turnover最適 tm=2.5
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 2.5, "short",     "stop_sell"),  # turnover最適 tm=2.5
+    "MACD_S":(calc_macd_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),  # turnover最適 tm=2.0
+    "DON_S": (calc_donchian_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),  # turnover最適 tm=3.0 据置
+    "MOM_S": (calc_momentum_short,0.0, 1.5, 3.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 2.0, 1.5, "short_brk", "stop_sell"),  # sweep最適
 }
 STRATEGY_DEFS_AGGRESSIVE: dict[str, tuple] = {
-    "MACD": (calc_macd,        0.0, 1.0, 1.5, "stop"),
-    "A7":   (calc_a7,          0.0, 1.0, 1.5, "stop"),
-    "RSI2": (calc_rsi2,        0.0, 1.2, 1.8, "stop"),
-    "DON":  (calc_donchian,    0.0, 1.0, 1.5, "breakout"),
-    "VOL":  (calc_vol_breakout,0.0, 1.0, 1.5, "breakout"),
-    "MOM":  (calc_momentum,    0.0, 1.0, 1.5, "breakout"),
+    "MACD":  (calc_macd,          0.0, 1.5, 2.0, "stop",      "stop"),
+    "A7":    (calc_a7,            0.0, 1.5, 2.0, "stop",      "stop"),
+    "RSI2":  (calc_rsi2,          0.0, 1.5, 2.0, "stop",      "stop"),
+    "DON":   (calc_donchian,      0.0, 1.5, 2.0, "breakout",  "stop"),
+    "VOL":   (calc_vol_breakout,  0.0, 1.5, 2.0, "breakout",  "stop"),
+    "MOM":   (calc_momentum,      0.0, 1.5, 2.0, "breakout",  "stop"),
+    "A7_S":  (calc_a7_short,      0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "RSI2_S":(calc_rsi2_short,    0.0, 1.5, 1.5, "short",     "stop_sell"),  # sweep最適
+    "MACD_S":(calc_macd_short,    0.0, 1.5, 2.0, "short",     "stop_sell"),
+    "DON_S": (calc_donchian_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
+    "MOM_S": (calc_momentum_short,0.0, 1.5, 2.0, "short_brk", "stop_sell"),
+    "GAP_S": (calc_gap_short,     0.0, 2.0, 1.5, "short_brk", "stop_sell"),  # sweep最適
 }
 
 import os as _os
@@ -166,13 +193,12 @@ else:
 # ── Walk-forward fold 定義 (days ago from today) ──
 # (name, train_start, train_end, test_start, test_end)  すべて "今日からN日前"
 FOLDS: list[tuple[str, int, int, int, int]] = [
-    ("fold1", 730, 540, 540, 360),
-    ("fold2", 540, 360, 360, 180),
-    ("fold3", 360, 180, 180,   0),
+    ("fold1", 730, 370, 370, 180),  # TRAIN 12M / TEST 6M
+    ("fold2", 550, 180, 180,   0),  # TRAIN 12M / TEST 6M
 ]
 
 # ── 合格閾値 ─────────────────────────────────────────────────────
-TRAIN_MIN_TRADES = 3
+TRAIN_MIN_TRADES = 5   # 12M TRAINに合わせて引き上げ
 TRAIN_MIN_PF     = 1.5
 TRAIN_MIN_WR     = 55.0
 TEST_MIN_TRADES  = 2
@@ -241,7 +267,7 @@ def _passes_test(r: dict | None) -> bool:
 # ── 1 銘柄 × 1 戦略 × 3 fold ─────────────────────────────────────
 def walkforward_one(symbol: str, name: str, strategy_name: str,
                     max_price: float = 0.0) -> dict | None:
-    calc_fn, em, sm, tm, family = STRATEGY_DEFS[strategy_name]
+    calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy_name]
 
     full_df = fetch(symbol, 800)   # Walk-forward には ~2年のデータが必要
     if full_df is None or len(full_df) < 400:
@@ -266,9 +292,9 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 
     for fold_name, ts, te, vs, ve in FOLDS:
         train_r = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              ts, te, strategy_name)
+                              ts, te, strategy_name, entry_type=entry_type)
         test_r  = _run_window(symbol, name, full_df, calc_fn, em, sm, tm,
-                              vs, ve, strategy_name)
+                              vs, ve, strategy_name, entry_type=entry_type)
 
         pass_train = _passes_train(train_r)
         pass_test  = _passes_test(test_r)
@@ -304,6 +330,13 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
         total_test_pnl += r.get("total_pnl", 0.0)
         total_test_tr  += r.get("trades", 0)
 
+    # 平均保有日数 (約定済みトレードのみ)
+    filled_trades = [t for t in all_test_trades if t.get("hold_days", 0) > 0]
+    avg_hold_days = (
+        round(sum(t["hold_days"] for t in filled_trades) / len(filled_trades), 1)
+        if filled_trades else 0.0
+    )
+
     # 結合トレードログからリスク指標
     agg = enrich_backtest_result({"trade_log": all_test_trades}, INITIAL_CASH)
 
@@ -327,6 +360,7 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
         latest_price=round(latest_price, 0),
         folds_passed=folds_passed,
         total_test_trades=total_test_tr,
+        avg_hold_days=avg_hold_days,
         total_test_pnl=round(total_test_pnl, 0),
         total_train_pnl=round(train_pnl_sum, 0),
         avg_test_pf=round(avg_test_pf, 2),
@@ -342,7 +376,7 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
 # ── メイン ───────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-forward 銘柄スキャナー")
-    parser.add_argument("--family",  choices=["stop", "breakout", "both"], default="both")
+    parser.add_argument("--family",  choices=["stop", "breakout", "short", "short_brk", "all", "both"], default="both")
     parser.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
     parser.add_argument("--top",     type=int, default=30,
                         help="表示する上位N (CSVは全件保存)")
@@ -356,19 +390,80 @@ def main() -> None:
     parser.add_argument("--budget",  type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄に絞る = --max-price (予算/100). "
                              "--max-price と併用時は --max-price 優先")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="積極利確モード (tm=1.5, 目標+4.5%%)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="標準モード (tm=3.0, 目標+9%%, デフォルト)")
+    holdout_group = parser.add_mutually_exclusive_group()
+    holdout_group.add_argument("--holdout-days", type=int, default=0,
+                               help="直近N日をホールドアウト除外。Fold境界を全て+N日ずらす (例: 65)")
+    holdout_group.add_argument("--holdout-end", type=str, default=None,
+                               help="ホールドアウト終了日 YYYY-MM-DD。その日以降をテスト対象外にする")
+    parser.add_argument("--train-pf", type=float, default=None,
+                        help="TRAIN期間の合格PF閾値 (デフォルト 1.5。空売り系は 1.1 推奨)")
+    parser.add_argument("--test-pf",  type=float, default=None,
+                        help="TEST期間の合格PF閾値 (デフォルト 1.2。空売り系は 1.0 推奨)")
+    parser.add_argument("--train-wr", type=float, default=None,
+                        help="TRAIN期間の合格勝率閾値%% (デフォルト 55。空売り系は 45 推奨)")
+    parser.add_argument("--test-wr",  type=float, default=None,
+                        help="TEST期間の合格勝率閾値%% (デフォルト 45。空売り系は 40 推奨)")
+    parser.add_argument("--relax-short", action="store_true",
+                        help="空売り系 (--family short/short_brk) で閾値を自動緩和 "
+                             "(TRAIN PF≥1.1/WR≥45%%, TEST PF≥1.0/WR≥40%%)")
     args = parser.parse_args()
+
+    # ── 合格閾値の上書き ───────────────────────────────────────────
+    global TRAIN_MIN_PF, TRAIN_MIN_WR, TEST_MIN_PF, TEST_MIN_WR
+    is_short_family = args.family in ("short", "short_brk")
+    if getattr(args, "relax_short", False) and is_short_family:
+        TRAIN_MIN_PF = 1.1
+        TRAIN_MIN_WR = 45.0
+        TEST_MIN_PF  = 1.0
+        TEST_MIN_WR  = 40.0
+    if getattr(args, "train_pf", None) is not None:
+        TRAIN_MIN_PF = args.train_pf
+    if getattr(args, "train_wr", None) is not None:
+        TRAIN_MIN_WR = args.train_wr
+    if getattr(args, "test_pf", None) is not None:
+        TEST_MIN_PF = args.test_pf
+    if getattr(args, "test_wr", None) is not None:
+        TEST_MIN_WR = args.test_wr
+
+    # ── ホールドアウト計算 ──────────────────────────────────────────
+    holdout_days = 0
+    if args.holdout_days > 0:
+        holdout_days = args.holdout_days
+    elif args.holdout_end:
+        holdout_end_date = datetime.strptime(args.holdout_end, "%Y-%m-%d").date()
+        holdout_days = (TODAY - holdout_end_date).days
+        if holdout_days < 0:
+            print(f"[ERROR] --holdout-end {args.holdout_end} は未来日です", file=sys.stderr)
+            sys.exit(1)
+
+    if holdout_days > 0:
+        holdout_end_date = TODAY - timedelta(days=holdout_days)
+        FOLDS[:] = [
+            (n, ts + holdout_days, te + holdout_days,
+                vs + holdout_days, ve + holdout_days)
+            for n, ts, te, vs, ve in FOLDS
+        ]
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
     effective_max_price = args.max_price
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    if args.family == "stop":
-        strategies = ["MACD", "A7", "RSI2"]
-    elif args.family == "breakout":
-        strategies = ["DON", "VOL", "MOM"]
-    else:
-        strategies = ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"]
+    _FAMILY_STRATS = {
+        "stop":      ["MACD", "A7", "RSI2"],
+        "breakout":  ["DON", "VOL", "MOM"],
+        "short":     ["A7_S", "MACD_S", "RSI2_S"],
+        "short_brk": ["DON_S", "MOM_S", "GAP_S"],
+        "both":      ["MACD", "A7", "RSI2", "DON", "VOL", "MOM"],
+        "all":       ["MACD", "A7", "RSI2", "DON", "VOL", "MOM",
+                      "A7_S", "MACD_S", "RSI2_S", "DON_S", "MOM_S", "GAP_S"],
+    }
+    strategies = _FAMILY_STRATS[args.family]
 
     # ユニバース読み込み
     try:
@@ -388,6 +483,8 @@ def main() -> None:
     print(f"  Folds     : {len(FOLDS)}")
     print(f"  Workers   : {args.workers}")
     print(f"  モード    : {TRADING_MODE}")
+    if holdout_days > 0:
+        print(f"  ホールドアウト: 直近 {holdout_days} 日 ({holdout_end_date} 以降をテスト対象外)")
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
@@ -442,11 +539,12 @@ def main() -> None:
         # ── CSV 保存 (全候補) ──
         # conservative (デフォルト) は suffix なし、aggressive は "_aggressive"
         mode_suffix = f"_{TRADING_MODE}" if TRADING_MODE != "conservative" else ""
-        csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}_{TODAY}.csv"
+        holdout_suffix = f"_holdout{holdout_days}d" if holdout_days > 0 else ""
+        csv_path = out_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}_{TODAY}.csv"
         fields = [
             "symbol", "name", "strategy", "family", "latest_price",
             "folds_passed",
-            "total_test_trades", "total_test_pnl", "total_train_pnl",
+            "total_test_trades", "avg_hold_days", "total_test_pnl", "total_train_pnl",
             "avg_test_pf", "avg_test_wr",
             "max_drawdown_pct", "max_consecutive_losses", "sharpe",
             "recovery_factor", "train_to_test_degradation_pct",
