@@ -357,8 +357,14 @@ if _args.both and not _args.short:
             _frame_id = f"ls-{_dir}-{_mp}"
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
-            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" src="{_src}?v={_cache_bust}"></iframe>\n'
-    _frames += f'<iframe id="holdings-frame" class="hold-frame" src="holdings_latest.html?v={_cache_bust}"></iframe>\n'
+            # 遅延ロード: 初期アクティブ(long×先頭価格帯)のみ src を入れ、残りは
+            # data-src にして初回クリック時に読む。開いた瞬間に全レポートを同時
+            # ロードして重くなるのを防ぐ (5枚→1枚)。
+            _is_active_fr = (_dir == "long" and _i == 0)
+            _src_attr = (f'src="{_src}?v={_cache_bust}"' if _is_active_fr
+                         else f'data-src="{_src}?v={_cache_bust}"')
+            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" {_src_attr}></iframe>\n'
+    _frames += f'<iframe id="holdings-frame" class="hold-frame" data-src="holdings_latest.html?v={_cache_bust}"></iframe>\n'
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
@@ -398,11 +404,15 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 <script>
 var _curDir = 'long';
 var _curPr  = {_first_mp};
+function _ensureLoaded(f) {{
+  // data-src だけの iframe を初回表示時に読み込む (遅延ロード)
+  if (f && f.dataset && f.dataset.src) {{ f.src = f.dataset.src; f.removeAttribute('data-src'); }}
+}}
 function _showFrame() {{
   document.querySelectorAll('.ls-frame,.hold-frame').forEach(f => f.classList.remove('active'));
   document.querySelectorAll('.hold-btn').forEach(b => b.classList.remove('active'));
   var f = document.getElementById('ls-' + _curDir + '-' + _curPr);
-  if (f) f.classList.add('active');
+  if (f) {{ _ensureLoaded(f); f.classList.add('active'); }}
 }}
 function switchLs(dir) {{
   _curDir = dir;
@@ -420,7 +430,9 @@ function switchHoldings(ev) {{
   document.querySelectorAll('.ls-frame,.hold-frame').forEach(f => f.classList.remove('active'));
   document.querySelectorAll('.hold-btn').forEach(b => b.classList.remove('active'));
   ev.target.classList.add('active');
-  document.getElementById('holdings-frame').classList.add('active');
+  var hf = document.getElementById('holdings-frame');
+  _ensureLoaded(hf);
+  hf.classList.add('active');
 }}
 </script>
 </body>
