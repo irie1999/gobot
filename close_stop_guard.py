@@ -171,6 +171,25 @@ def _csv_entry_stop_target(sym: str, side: str
     import glob as _glob
     from pathlib import Path as _Path
     base = _Path(__file__).resolve().parent
+    # ⓪ manual_targets.csv (手動指定=最優先override。記録欠落保有の正しい値をここで指定)
+    mp = base / "manual_targets.csv"
+    if mp.exists():
+        try:
+            with open(mp, encoding="utf-8-sig") as f:
+                for row in _csv.DictReader(f):
+                    rsym = str(row.get("symbol", "")).split(".")[0]
+                    rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                    if rsym != sym or rside != side:
+                        continue
+                    try:
+                        sp = float(row.get("stop") or 0)
+                        tp = float(row.get("target") or 0)
+                    except Exception:
+                        continue
+                    if sp > 0:
+                        return sp, (tp if tp > 0 else None), row.get("strategy", "")
+        except Exception:
+            pass
     # ① placed_orders_*.csv (日付昇順で読み、最新の発注で上書き)
     best = None
     for fp in sorted(_glob.glob(str(base / "placed_orders_*.csv"))):

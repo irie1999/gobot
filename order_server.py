@@ -395,6 +395,32 @@ def _kabu_get(fn, *a, tries=4, **k):
     raise last
 
 
+def _load_manual_targets() -> dict:
+    """manual_targets.csv (手動指定の最優先override) → (sym,side)->{target,stop,strategy}。
+    placed_orders にも my_positions.csv にも記録が無い保有(手動発注・記録欠落)の
+    正しい利確/損切を、ユーザーがレポート取引明細の値で直接指定するためのファイル。
+    列: symbol, side(long/short), target, stop, strategy(任意)。ヘッダ必須。"""
+    import csv
+    from pathlib import Path
+    p = Path(__file__).resolve().parent / "manual_targets.csv"
+    out: dict = {}
+    if not p.exists():
+        return out
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                sym = str(row.get("symbol", "")).split(".")[0]
+                side = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                tp = _f(row.get("target"))
+                sp = _f(row.get("stop"))
+                if sym and tp > 0:
+                    out[(sym, side)] = {"target": tp, "stop": sp,
+                                        "strategy": row.get("strategy", "")}
+    except Exception:
+        pass
+    return out
+
+
 def _load_placed_orders() -> dict:
     """placed_orders_*.csv(発注ボタンが記録したエントリー注文)から
     (sym, side) -> {"target":, "stop":, "strategy":} を返す。日付昇順で読み、
@@ -514,6 +540,7 @@ def _backfill_targets(cli) -> None:
             fillp[(sym, side)] = fp
     if not agg:
         return
+    manual  = _load_manual_targets()     # manual_targets.csv = 手動指定(最優先override)
     placed  = _load_placed_orders()      # placed_orders_*.csv = 発注時のエントリー記録
     targets = _load_signal_targets()     # my_positions.csv = 補助のエントリー記録
     close_map = _active_close_map(cli)   # 既存利確 (sym,side)->(oid,price) を一括取得
@@ -525,7 +552,9 @@ def _backfill_targets(cli) -> None:
         # エントリー時に記録した固定目標を最優先(=レポート取引明細の order_target と同値)。
         # check_signal_on_date 再計算はモード(con/agg)/データ調整でズレる(例: 4088
         # 記録3,111 → 再計算3,235)ため使わない。
-        # 優先順: ①placed_orders_*.csv(発注ボタンの記録) ②my_positions.csv ③約定値逆引き
+        # 優先順: ⓪manual_targets.csv(手動指定) ①placed_orders_*.csv(発注記録)
+        #        ②my_positions.csv ③約定値逆引き
+        _mn = manual.get((sym, side))
         _pl = placed.get((sym, side))
         _csv_info = targets.get((sym, side))
         _lk_tgt, _lk_strat = None, ""
@@ -534,7 +563,10 @@ def _backfill_targets(cli) -> None:
             _s, _lk_tgt, _lk_strat = lookup_stop_from_signal(sym, _fp, side == "short")
         except Exception:
             _lk_tgt, _lk_strat = None, ""
-        if _pl and _pl["target"] > 0:
+        if _mn and _mn["target"] > 0:
+            info = {"target": _mn["target"], "strategy": _mn.get("strategy", "")}
+            _src = "manual_targets.csv(手動指定)"
+        elif _pl and _pl["target"] > 0:
             info = {"target": _pl["target"], "strategy": _pl.get("strategy", "")}
             _src = "placed_orders(発注時記録)"
         elif _csv_info and _csv_info["target"] > 0:
