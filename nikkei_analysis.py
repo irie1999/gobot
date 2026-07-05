@@ -1620,51 +1620,87 @@ def _rolling_oos_cache_html_impl() -> str:
     bases = d.get("base_months", [])
     cells_data = d.get("cells", {})
     month_h = "".join(f"<th>{m[5:]}月</th>" for m in months)
-    rows = ""
-    diag_t = diag_n = diag_w = 0
+
+    def _matrix(fwd_key: str, sel_key: str):
+        """fwd_key('fwd' or 'fwd70') の月次マトリクスHTMLと翌月OOS合計を返す。"""
+        rows = ""
+        dt = dn = dw = 0
+        for bm in bases:
+            c = cells_data.get(bm, {})
+            fwd = c.get(fwd_key, {})
+            cells = ""
+            s_pnl = s_n = s_w = 0
+            for m in months:
+                if m <= bm:
+                    cells += '<td style="color:#334155;text-align:center">·</td>'
+                    continue
+                v = fwd.get(m)
+                if not v:
+                    cells += '<td style="color:#475569;text-align:center">—</td>'
+                    continue
+                p_ = v.get("pnl", 0); n_ = v.get("n", 0); w_ = v.get("w", 0)
+                s_pnl += p_; s_n += n_; s_w += w_
+                col = "#4ade80" if p_ > 0 else ("#f87171" if p_ < 0 else "#94a3b8")
+                cells += (f'<td style="text-align:right;color:{col};font-weight:700">{p_:+,.0f}'
+                          f'<br><span style="font-size:.68rem;color:#94a3b8">{n_}件 {w_}勝</span></td>')
+            nxt = next((m for m in months if m > bm), None)
+            if nxt and fwd.get(nxt):
+                _nv = fwd[nxt]
+                dt += _nv.get("pnl", 0); dn += _nv.get("n", 0); dw += _nv.get("w", 0)
+            twr = s_w / s_n * 100 if s_n else 0
+            tc = "#4ade80" if s_pnl > 0 else ("#f87171" if s_pnl < 0 else "#94a3b8")
+            selc = c.get(sel_key, 0)
+            rows += (f'<tr><td style="text-align:left;white-space:nowrap">{bm} まで選定'
+                     f'<br><span style="font-size:.65rem;color:#94a3b8">{selc}件</span></td>'
+                     f'{cells}<td style="text-align:right;color:{tc};font-weight:700">{s_pnl:+,.0f}円'
+                     f'<br><span style="font-size:.65rem;color:#94a3b8">{s_n}件 {twr:.0f}%</span></td></tr>')
+        dwr = dw / dn * 100 if dn else 0
+        dc = "#4ade80" if dt > 0 else "#f87171"
+        summary = (f'<div style="background:#1e293b;border-left:4px solid {dc};padding:8px 12px;margin:8px 0">'
+                   f'<b>翌月OOS合計(非重複):</b> <b style="color:{dc};font-size:1.15rem">{dt:+,.0f}円</b>'
+                   f' &nbsp;{dn}件 勝率{dwr:.0f}%</div>')
+        table = (f'<div style="overflow-x:auto"><table>'
+                 f'<thead><tr><th style="text-align:left">選定基準月</th>{month_h}<th>全期間計</th></tr></thead>'
+                 f'<tbody>{rows or "<tr><td colspan=99>データなし</td></tr>"}</tbody></table></div>')
+        return summary + table
+
+    # BT70取引明細(基準月ごとに折りたたみ)
+    det_html = ""
     for bm in bases:
-        c = cells_data.get(bm, {})
-        fwd = c.get("fwd", {})
-        cells = ""
-        s_pnl = s_n = s_w = 0
-        for m in months:
-            if m <= bm:
-                cells += '<td style="color:#334155;text-align:center">·</td>'
-                continue
-            v = fwd.get(m)
-            if not v:
-                cells += '<td style="color:#475569;text-align:center">—</td>'
-                continue
-            p_ = v.get("pnl", 0); n_ = v.get("n", 0); w_ = v.get("w", 0)
-            s_pnl += p_; s_n += n_; s_w += w_
-            col = "#4ade80" if p_ > 0 else ("#f87171" if p_ < 0 else "#94a3b8")
-            cells += (f'<td style="text-align:right;color:{col};font-weight:700">{p_:+,.0f}'
-                      f'<br><span style="font-size:.68rem;color:#94a3b8">{n_}件 {w_}勝</span></td>')
-        nxt = next((m for m in months if m > bm), None)
-        if nxt and fwd.get(nxt):
-            _nv = fwd[nxt]
-            diag_t += _nv.get("pnl", 0); diag_n += _nv.get("n", 0); diag_w += _nv.get("w", 0)
-        twr = s_w / s_n * 100 if s_n else 0
-        tc = "#4ade80" if s_pnl > 0 else ("#f87171" if s_pnl < 0 else "#94a3b8")
-        rows += (f'<tr><td style="text-align:left;white-space:nowrap">{bm} まで選定'
-                 f'<br><span style="font-size:.65rem;color:#94a3b8">{c.get("sel", 0)}件</span></td>'
-                 f'{cells}<td style="text-align:right;color:{tc};font-weight:700">{s_pnl:+,.0f}円'
-                 f'<br><span style="font-size:.65rem;color:#94a3b8">{s_n}件 {twr:.0f}%</span></td></tr>')
-    dwr = diag_w / diag_n * 100 if diag_n else 0
-    dc = "#4ade80" if diag_t > 0 else "#f87171"
+        det = cells_data.get(bm, {}).get("det70", [])
+        if not det:
+            continue
+        det_sorted = sorted(det, key=lambda x: x.get("signal", ""))
+        drows = ""
+        for t in det_sorted:
+            pnl = t.get("pnl", 0)
+            pc = "#4ade80" if pnl > 0 else ("#f87171" if pnl < 0 else "#94a3b8")
+            drows += (f'<tr><td>{t.get("signal","")}</td><td>{t.get("exit","")}</td>'
+                      f'<td style="text-align:left">{t.get("sym","")}</td>'
+                      f'<td>{t.get("strat","")}/{t.get("mode","")}</td>'
+                      f'<td style="text-align:center">{t.get("bt","")}</td>'
+                      f'<td style="text-align:right;color:{pc};font-weight:700">{pnl:+,.0f}</td>'
+                      f'<td>{t.get("reason","")}</td></tr>')
+        _tot = sum(t.get("pnl", 0) for t in det)
+        _w = sum(1 for t in det if t.get("pnl", 0) > 0)
+        det_html += (f'<details style="margin:4px 0"><summary style="cursor:pointer">'
+                     f'{bm} まで選定 の BT70取引明細 — {len(det)}件 {_w}勝 '
+                     f'<b style="color:{"#4ade80" if _tot>0 else "#f87171"}">{_tot:+,.0f}円</b></summary>'
+                     f'<table style="margin-top:4px"><thead><tr><th>シグナル日</th><th>決済日</th>'
+                     f'<th style="text-align:left">銘柄</th><th>戦略/モード</th><th>BT</th><th>損益</th>'
+                     f'<th>理由</th></tr></thead><tbody>{drows}</tbody></table></details>')
+
     return f"""
 <h2 style="margin-top:8px">★ 月次ロールフォワードOOS検証（後知恵ゼロ / 現行と同一選定を各基準月で再現）</h2>
 <p class="footnote">{d.get("meta", "")}<br>生成日: {d.get("generated", "")}（rolling_selection_validation.py のキャッシュ）</p>
-<div style="background:#1e293b;border-left:4px solid {dc};padding:10px 14px;margin:10px 0">
- <b>翌月OOS合計（非重複・最重要）:</b>
- <b style="color:{dc};font-size:1.2rem">{diag_t:+,.0f}円</b> &nbsp;{diag_n}件 勝率{dwr:.0f}%
- <br><span style="color:#94a3b8;font-size:.8rem">各基準月末で選定→翌月だけのOOSを合算(重複なし)。プラスなら選定は時期を越えて機能。</span></div>
-<div style="overflow-x:auto"><table>
-<thead><tr><th style="text-align:left">選定基準月</th>{month_h}<th>全OOS計</th></tr></thead>
-<tbody>{rows or '<tr><td colspan="99" style="text-align:center;color:#64748b;padding:12px">データなし</td></tr>'}</tbody>
-</table></div>
-<p class="footnote">各セル=OOS損益(取引数/勝ち)。<span style="color:#334155">·</span>=基準月以前(選定に使用)/—=取引なし。
- <b>「全OOS計」列は期間が重複するので足さない。</b>非重複で信頼できるのは上の「翌月OOS合計」。</p>
+<h3 style="color:#cbd5e1;margin:14px 0 2px">① 全選定銘柄</h3>
+{_matrix("fwd", "sel")}
+<h3 style="color:#fbbf24;margin:18px 0 2px">② BT70以上のみ（各基準月末時点BT・後知恵なし）</h3>
+{_matrix("fwd70", "n70")}
+<h3 style="color:#cbd5e1;margin:18px 0 6px">③ BT70 取引明細（基準月ごと・クリックで展開）</h3>
+{det_html or '<p class="footnote" style="color:#94a3b8">BT70取引明細なし(キャッシュが旧版の可能性→再実行で付与)。</p>'}
+<p class="footnote">各セル=OOS損益(取引数/勝ち)。<span style="color:#334155">·</span>=基準月以前/—=取引なし。
+ 「全期間計」は月が重複するので足さない。非重複は「翌月OOS合計」。BTは各基準月末までの実績で算出=後知恵なし。</p>
 """
 
 

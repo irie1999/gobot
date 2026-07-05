@@ -169,6 +169,38 @@ def _month_ends(start: date, end: date) -> list[date]:
     return outs
 
 
+def _pit_bt(trade_log: list, asof: date) -> int:
+    """基準日 asof 時点の BTスコア(calc_recommend_score)を、その時点で決済済み
+    (exit_dt≤asof)のトレードだけから計算。後知恵ゼロ。stop/breakout同一実装。"""
+    pr = {}
+    for days in (30, 90, 180, 365):
+        lo = asof - timedelta(days=days)
+        sub = []
+        for t in trade_log:
+            ed = t.get("exit_dt")
+            ed = ed.date() if hasattr(ed, "date") else ed
+            if ed is None or t.get("reason") in ("発注中", "保有中"):
+                continue
+            if lo <= ed <= asof:
+                sub.append(t)
+        n = len(sub)
+        if n == 0:
+            continue
+        wins = sum(1 for t in sub if t["pnl"] > 0)
+        gp = sum(t["pnl"] for t in sub if t["pnl"] > 0)
+        gl = abs(sum(t["pnl"] for t in sub if t["pnl"] < 0))
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[days] = {"trades": n, "win_rate": wins / n * 100,
+                    "pf": pf, "total_pnl": sum(t["pnl"] for t in sub)}
+    if not pr:
+        return 0
+    try:
+        score, _ = _brk.calc_recommend_score(pr)
+        return int(score)
+    except Exception:
+        return 0
+
+
 def _forward_trades(sym: str, strat: str, hist_days: int, defs: dict) -> list[dict]:
     """(sym,strat) を通しバックテストし trade_log を返す(フォワード集計用)。"""
     if strat not in defs:
@@ -377,16 +409,36 @@ def main():
                     for r in rows[:args.per_strategy]:
                         selected_set.add((r["symbol"], r["strategy"], mn))
         # フォワード集計 (signal_dt > D)。con/agg は別設定として両方計上(レポート準拠)
+        # fwd=全選定 / fwd70=選定銘柄のうち"D時点BT≥70"(後知恵なし)だけ / det70=BT70の取引明細
         fwd = defaultdict(list)
+        fwd70 = defaultdict(list)
+        det70 = []
+        n70 = 0
         for (sym, strat, mn) in selected_set:
-            for t in fwd_logs.get((sym, strat, mn), []):
+            tl = fwd_logs.get((sym, strat, mn), [])
+            bt = _pit_bt(tl, D)          # その基準月末までの実績で計算=後知恵なし
+            is70 = bt >= 70
+            if is70:
+                n70 += 1
+            for t in tl:
                 sd = t.get("signal_dt")
                 sd = sd.date() if hasattr(sd, "date") else sd
                 if sd is None or sd <= D or t.get("reason") in ("発注中", "保有中"):
                     continue
-                fwd[sd.strftime("%Y-%m")].append(t["pnl"])
-        result[D] = {"sel": sorted(selected_set), "fwd": fwd}
-        print(f"  基準 {D}: 選定 {len(selected_set)}(銘柄×戦略×モード)", flush=True)
+                m = sd.strftime("%Y-%m")
+                pnl = t.get("pnl", 0)
+                fwd[m].append(pnl)
+                if is70:
+                    fwd70[m].append(pnl)
+                    ed = t.get("exit_dt")
+                    ed = ed.date() if hasattr(ed, "date") else ed
+                    det70.append({"sym": sym, "strat": strat, "mode": mn, "bt": bt,
+                                  "signal": str(sd), "exit": str(ed) if ed else "",
+                                  "pnl": pnl, "reason": t.get("reason", "")})
+        result[D] = {"sel": sorted(selected_set), "fwd": fwd,
+                     "fwd70": fwd70, "det70": det70, "n70": n70}
+        print(f"  基準 {D}: 選定 {len(selected_set)} / うちBT70 {n70}銘柄 "
+              f"/ BT70取引 {len(det70)}件", flush=True)
 
     # ── 出力 ──
     all_months = sorted({m for D in base_dates for m in result[D]["fwd"]})
@@ -441,7 +493,15 @@ def main():
         for m, pl in r["fwd"].items():
             fwd[m] = {"pnl": sum(pl), "n": len(pl),
                       "w": sum(1 for x in pl if x > 0)}
-        _cache["cells"][dm] = {"sel": len(r["sel"]), "fwd": fwd}
+        fwd70 = {}
+        for m, pl in r.get("fwd70", {}).items():
+            fwd70[m] = {"pnl": sum(pl), "n": len(pl),
+                        "w": sum(1 for x in pl if x > 0)}
+        _cache["cells"][dm] = {
+            "sel": len(r["sel"]), "n70": r.get("n70", 0),
+            "fwd": fwd, "fwd70": fwd70,
+            "det70": r.get("det70", []),   # BT70取引明細
+        }
     try:
         Path("rolling_oos_cache.json").write_text(
             json.dumps(_cache, ensure_ascii=False), encoding="utf-8")
