@@ -64,13 +64,14 @@ def _load(strategy: str, ho: int, date: str) -> dict:
     return out
 
 
-def _test_score(r) -> float:
-    """選定スコア (0〜100)。TEST窓のデータだけで算出。holdoutは一切使わない。
-       PF 40点 + 勝率 40点 + 取引数 20点。"""
-    pf = min(_f(r.get("avg_test_pf")), 10.0)
-    wr = _f(r.get("avg_test_wr"))          # 0〜100
-    tr = _f(r.get("total_test_trades"))
-    return round((pf / 10) * 40 + (wr / 100) * 40 + min(tr / 30, 1) * 20, 1)
+def _composite(r) -> float:
+    """選定スコア = スイング build_watchlist の composite と同一式。
+       composite = total_test_pnl × (1 + max(sharpe, 0))。
+       TEST窓のデータだけで算出。holdoutは一切使わない。
+       Sharpe が未記録の古いCSVでは sharpe=0 扱い (= 純 test_pnl 順)。"""
+    pnl = _f(r.get("total_test_pnl"))
+    sharpe = max(_f(r.get("test_sharpe")), 0.0)
+    return round(pnl * (1.0 + sharpe), 0)
 
 
 def main() -> None:
@@ -86,6 +87,9 @@ def main() -> None:
                     help="選定窓 TEST の最小平均PF (既定 1.2)")
     ap.add_argument("--min-test-trades", type=int, default=3,
                     help="選定窓 TEST の最小取引数 (既定 3)")
+    ap.add_argument("--max-dd", type=float, default=15.0,
+                    help="選定窓 TEST の最大DD%%上限 (既定15=スイングと同一)。"
+                         "test_max_dd_pct列が無い古いCSVではこのフィルタはスキップ")
     ap.add_argument("--single-ho", action="store_true",
                     help="1期間(--select-ho)だけで選定。既定は6期間(30-180)をunion(スイング同様)")
     ap.add_argument("--strict-both", action="store_true",
@@ -105,17 +109,24 @@ def main() -> None:
     print(f"  選定窓: HO{sho} のCSV (直近{sho}日は選定に不使用＝クリーンOOS{sho}日)"
           + ("  +HO90も合格必須" if args.strict_both else ""))
     print(f"  候補条件(TESTのみ): total_test_pnl>0 / avg_test_pf>={args.min_test_pf}"
-          f" / test_trades>={args.min_test_trades}")
-    print(f"  厳選: 選定スコア(TEST窓のPF/勝率/取引数) 上位{args.per_strategy}銘柄/戦略")
+          f" / test_trades>={args.min_test_trades} / MaxDD<={args.max_dd}%")
+    print(f"  厳選: composite=TEST損益×(1+max(Sharpe,0)) 上位{args.per_strategy}銘柄/戦略"
+          f"  (スイング build_watchlist と同一式)")
     print(f"  ※ HO* 列は選定に使っていない純OOS答え合わせ (表示のみ・選定不使用)")
     print(f"  採用戦略: {', '.join(use_strategies)}")
     print("=" * 104)
 
     def selectable(r):
-        return (r
+        if not (r
                 and _f(r.get("total_test_pnl")) > 0
                 and _f(r.get("avg_test_pf")) >= args.min_test_pf
-                and _f(r.get("total_test_trades")) >= args.min_test_trades)
+                and _f(r.get("total_test_trades")) >= args.min_test_trades):
+            return False
+        # MaxDD フィルタ (スイングと同一)。列が無い古いCSVでは後方互換でスキップ。
+        dd = r.get("test_max_dd_pct")
+        if dd not in (None, "") and _f(dd) > args.max_dd:
+            return False
+        return True
 
     # 選定に使うholdout期間: 既定は6期間union(スイング同様)、--single-ho で1期間のみ
     hos_used = [sho] if args.single_ho else HOLDOUTS
@@ -138,10 +149,12 @@ def main() -> None:
                 cand.append({
                     "code": code, "name": r.get("name", ""),
                     "price": _f(r.get("latest_price")),
-                    "score": _test_score(r),
+                    "score": _composite(r),
                     "test": _f(r.get("total_test_pnl")),
                     "pf": _f(r.get("avg_test_pf")),
                     "wr": _f(r.get("avg_test_wr")),
+                    "dd": _f(r.get("test_max_dd_pct")),
+                    "sharpe": _f(r.get("test_sharpe")),
                     "from_ho": ho,
                     "ho_sel": _f(r.get("holdout_pnl")),
                     "ho90": _f(r90.get("holdout_pnl")) if r90 else 0.0,
@@ -159,13 +172,13 @@ def main() -> None:
         _mode = f"HO{sho}単独" if args.single_ho else f"6期間union({'/'.join(map(str, hos_used))})"
         print(f"\n【{strat}】 採用{len(picks)}銘柄  [{_mode}]  (採用元holdoutの純OOS合計 {ho_sum:+,.0f})")
         print(f"  {'銘柄':<9}{'名前':<20}{'株価':>7}"
-              f" │ {'採用HO':>6}{'Score':>6}{'TEST':>9}{'PF':>6}{'WR':>5}"
+              f" │ {'採用HO':>6}{'Score':>10}{'TEST':>9}{'PF':>6}{'WR':>5}{'DD%':>6}{'Shrp':>6}"
               f" │OOS {'純OOS':>9}{'HO90':>9}")
-        print("  " + "-" * 100)
+        print("  " + "-" * 112)
         for p in picks:
             print(f"  {p['code']:<9}{p['name'][:18]:<20}{p['price']:>7,.0f}"
-                  f" │ {('HO'+str(p['from_ho'])):>6}{p['score']:>6.1f}{p['test']:>+9,.0f}{p['pf']:>6.2f}"
-                  f"{p['wr']:>4.0f}%"
+                  f" │ {('HO'+str(p['from_ho'])):>6}{p['score']:>+10,.0f}{p['test']:>+9,.0f}{p['pf']:>6.2f}"
+                  f"{p['wr']:>4.0f}%{p['dd']:>5.1f}%{p['sharpe']:>6.2f}"
                   f" │    {p['ho_sel']:>+9,.0f}{p['ho90']:>+9,.0f}")
 
     # ── daytrade_watchlist.py 出力 ──

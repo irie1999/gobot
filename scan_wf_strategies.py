@@ -28,6 +28,7 @@ import pandas as pd
 
 from daytrade_data import load_intraday
 from scan_walkforward_intraday import load_universe
+from risk_metrics import calc_max_drawdown, calc_sharpe
 
 # 独立戦略の backtest_symbol を登録
 import daytrade_donchian
@@ -67,6 +68,10 @@ FOLDS = [
 TRAIN_MIN_TRADES, TRAIN_MIN_PF, TRAIN_MIN_WR = 5, 1.1, 45.0
 TEST_MIN_TRADES,  TEST_MIN_PF,  TEST_MIN_WR  = 3, 1.0, 40.0
 FOLDS_PASS_REQUIRED = 2
+
+# MaxDD% / Sharpe をスイングと同じ基準 (risk_metrics) で計算するための正規化元本。
+# スイング backtest_limit_entry.INITIAL_CASH と揃える (DD% の分母を一致させる)。
+INITIAL_CASH = 500_000
 
 
 def _run_strat(fn, sym, name, df):
@@ -119,6 +124,7 @@ def wf_one(fn, sym: str, name: str, df: pd.DataFrame,
     base = TODAY - timedelta(days=holdout_days)
     folds_passed = 0
     test_stats: list[dict] = []
+    all_test_trades: list[dict] = []   # 全fold TEST の生トレード (MaxDD/Sharpe算出用)
     train_pnl_total = 0.0
     for _, ts, te, vs, ve in FOLDS:
         df_tr = _slice(df, ts, te, base)
@@ -136,12 +142,18 @@ def wf_one(fn, sym: str, name: str, df: pd.DataFrame,
             train_pnl_total += st_tr["pnl"]
         if st_te:
             test_stats.append(st_te)
+            all_test_trades.extend(r_te["trades"])
     if folds_passed < FOLDS_PASS_REQUIRED or not test_stats:
         return None
     tot_test_pnl = sum(s["pnl"] for s in test_stats)
     tot_test_tr = sum(s["n"] for s in test_stats)
     avg_pf = sum(_cap_pf(s["pf"]) for s in test_stats) / len(test_stats)
     avg_wr = sum(s["wr"] for s in test_stats) / len(test_stats)
+    # スイングと同じ risk_metrics で TEST 窓の MaxDD% / Sharpe を算出。
+    # build_watchlist_wf の composite = test_pnl×(1+max(sharpe,0)) と
+    # MaxDD≤閾値 フィルタ (スイングと同一の選定方針) に使う。
+    _mdd_amt, test_mdd_pct = calc_max_drawdown(all_test_trades, INITIAL_CASH)
+    test_sharpe = calc_sharpe(all_test_trades, INITIAL_CASH)
     try:
         latest = float(df["close"].iloc[-1])
     except Exception:
@@ -150,7 +162,8 @@ def wf_one(fn, sym: str, name: str, df: pd.DataFrame,
                folds_passed=folds_passed, total_test_trades=tot_test_tr,
                total_test_pnl=round(tot_test_pnl, 0),
                total_train_pnl=round(train_pnl_total, 0),
-               avg_test_pf=round(avg_pf, 2), avg_test_wr=round(avg_wr, 1))
+               avg_test_pf=round(avg_pf, 2), avg_test_wr=round(avg_wr, 1),
+               test_max_dd_pct=test_mdd_pct, test_sharpe=test_sharpe)
     # ── ホールドアウト (選定に未使用の直近 holdout_days 日) での答え合わせ ──
     if holdout_days > 0:
         d = df.index.date
@@ -254,7 +267,7 @@ def main() -> None:
     out_dir.mkdir(exist_ok=True)
     fields = ["symbol", "name", "latest_price", "folds_passed",
               "total_test_trades", "total_test_pnl", "total_train_pnl",
-              "avg_test_pf", "avg_test_wr"]
+              "avg_test_pf", "avg_test_wr", "test_max_dd_pct", "test_sharpe"]
     if ho > 0:
         fields += ["holdout_trades", "holdout_pnl", "holdout_pf", "holdout_wr"]
     suffix = f"_ho{ho}" if ho > 0 else ""
