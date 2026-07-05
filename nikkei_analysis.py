@@ -6498,6 +6498,7 @@ function switchTbd(id, tab) {{
   <span style="font-size:0.8rem;color:#94a3b8">{len(done_d)}件決済 &nbsp;勝率{wr_d:.0f}%
     &nbsp;損益<span style="color:{pnl_col};font-weight:700">{pnl_d:+,.0f}円</span></span>
 </div>
+<div style="overflow-x:auto">
 <table>
   <thead><tr>
     <th>エントリー</th><th style="text-align:left">銘柄</th><th>戦略</th><th>設定</th>
@@ -6507,6 +6508,7 @@ function switchTbd(id, tab) {{
   </tr></thead>
   <tbody>{rows_d}</tbody>
 </table>
+</div>
 </div>"""
 
     def _month_summary_html(trades_list):
