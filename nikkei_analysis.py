@@ -6430,29 +6430,6 @@ function switchTbd(id, tab) {{
                 peak_cap = cur_cap; peak_date = d; peak_cnt = int(cur_cnt)
         return peak_cap, peak_date, peak_cnt, max_cnt, total
 
-    def _cap_row(trades, label, accent):
-        pc, pd_, pcnt, mc, tot = _peak_capital(trades)
-        if pc <= 0:
-            return ""
-        pd_s = str(pd_) if pd_ else "—"
-        return (f'<div style="margin:2px 0"><b style="color:{accent}">{label}</b>：'
-                f'同時保有の最大必要資金 '
-                f'<b style="color:{accent};font-size:1.05rem">{pc:,.0f}円</b>'
-                f'<span style="color:#64748b">（{pd_s} に {pcnt}銘柄同時保有）</span>'
-                f'&nbsp;/&nbsp;最大同時保有 <b>{mc}銘柄</b>'
-                f'&nbsp;/&nbsp;<span style="color:#94a3b8">延べ投入額 {tot:,.0f}円</span></div>')
-
-    _cap_all  = _cap_row(sorted_trades, "全取引", "#38bdf8")
-    _cap_bt70 = _cap_row(bt70_trades,   "BT70以上", "#4ade80")
-    _capital_summary_html = (
-        '<div style="background:#0b2536;border:1px solid #0e7490;border-radius:8px;'
-        'padding:10px 14px;margin:6px 0 14px;font-size:0.84rem">'
-        '<span style="color:#38bdf8;font-weight:700">💰 必要資金（約定額=株価×株数ベース・100株固定）</span>'
-        '<span style="color:#64748b">：全ポジションを同時に持ったときの資金ピーク。'
-        '発注中(未約定)は除外。</span><br>'
-        + _cap_all + _cap_bt70
-        + '</div>') if (_cap_all or _cap_bt70) else ""
-
     # ── エントリー日別グリッド HTML ──────────────────────────────────
     from collections import defaultdict as _dd
     _ENTRY_GRID_DAYS = days  # グリッド表示は分析期間全体
@@ -6587,6 +6564,8 @@ function switchTbd(id, tab) {{
             bar_w    = min(abs(pnl_m) / 300000 * 100, 100)  # 30万円で100%
             bar_col  = "rgba(74,222,128,0.25)" if pnl_m >= 0 else "rgba(248,113,113,0.25)"
             mm       = ym[5:7] + "月"
+            # その月に約定した取引の同時保有ピーク資金(=その月を回すのに必要な資金)
+            _mc_cap, _mc_pd, _mc_pcnt, _mc_max, _mc_tot = _peak_capital(trades_m)
             rows += (f'<tr>'
                      f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}</td>'
                      f'<td style="text-align:right;color:#94a3b8">{len(done_m)}件</td>'
@@ -6598,6 +6577,9 @@ function switchTbd(id, tab) {{
                      f'width:{bar_w/2:.1f}%;background:{bar_col};border-radius:2px"></div>'
                      f'<span style="position:relative;font-weight:700;color:{pnl_col}">{pnl_m:+,.0f}円</span>'
                      f'</td>'
+                     f'<td style="text-align:right;color:#38bdf8;font-weight:700;white-space:nowrap">'
+                     f'{_mc_cap:,.0f}円'
+                     f'<br><span style="font-size:0.7rem;color:#64748b">最大{_mc_max}銘柄同時</span></td>'
                      f'</tr>')
         return f"""<div style="margin-bottom:14px">
 <table style="border-collapse:collapse;width:auto">
@@ -6608,6 +6590,7 @@ function switchTbd(id, tab) {{
     <th style="color:#4ade80;font-size:0.78rem;padding:3px 8px">利益</th>
     <th style="color:#f87171;font-size:0.78rem;padding:3px 8px">損失</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;text-align:center">損益合計</th>
+    <th style="color:#38bdf8;font-size:0.78rem;padding:3px 8px;text-align:right">必要資金<br><small style="color:#64748b">同時保有ピーク</small></th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
@@ -8564,7 +8547,6 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
-{_capital_summary_html}
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
