@@ -379,19 +379,29 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         margin_type = int(kp.get("MarginTradeType") or 1)
         cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
 
-        stop_p, tgt_p, strat, sig_date = _lookup_signal(sym, sig_map, fill_p, is_short)
-        fill_date = _fill_date_from_signal(sig_date)
-
-        if stop_p is not None:
-            src = "signals_json"
-            _fd_note = f" 約定日={fill_date}" if fill_date else " 約定日不明"
-            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}]{_fd_note}")
-        else:
-            # フォールバック: 既存のシグナル逆引き
-            if fill_p > 0:
-                _p(f"  🔍 {sym} {name}: signals JSONに未登録 → シグナル逆引き中...")
+        # 【第一情報源】約定値からエントリーシグナルを逆引きして stop/target を特定
+        # (=損切・利確が必ずシグナルと一致)。当日シグナルJSONは entry 後に再計算されて
+        # ズレるため使わず、過去30営業日を遡って order_price≈約定値 のエントリー
+        # シグナルを check_signal_on_date で再現する。
+        stop_p = tgt_p = None
+        strat = ""
+        sig_date = ""
+        if fill_p > 0:
+            try:
                 stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
-            if stop_p is None and fill_p > 0:
+            except Exception:
+                stop_p = None
+        if stop_p is not None:
+            src = "signal_backtrack"
+            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (約定値逆引き)")
+        else:
+            # フォールバック1: 当日シグナルJSON(約定値マッチ)。約定日もここで取得。
+            stop_p, tgt_p, strat, sig_date = _lookup_signal(sym, sig_map, fill_p, is_short)
+            if stop_p is not None:
+                src = "signals_json"
+                _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (当日JSON照合)")
+            elif fill_p > 0:
+                # フォールバック2: ATR推定
                 stop_p = calc_atr_stop(sym, fill_p, is_short, strat or "")
                 src = "atr_estimate"
                 if stop_p:
@@ -399,7 +409,8 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
                 else:
                     _p(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
             else:
-                src = "signal_lookup" if stop_p else "missing"
+                src = "missing"
+        fill_date = _fill_date_from_signal(sig_date)
 
         positions.append({
             "symbol":       sym,
