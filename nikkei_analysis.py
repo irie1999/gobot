@@ -1779,6 +1779,20 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         )
 
 
+def _calc_strat_priority(wr: float, pf: float, avgh: float) -> tuple[float, str, str]:
+    """戦略の総合優先度スコア(0〜100)とランク★・色を返す(戦略別サマリーと共通)。
+    勝率40点 + PF40点(PF10でキャップ,∞=10) + 速度20点(平均保有15日で0)。"""
+    pf_c = 10.0 if pf == float("inf") else min(pf, 10.0)
+    wr_pts    = wr * 0.4
+    pf_pts    = pf_c / 10.0 * 40.0
+    speed_pts = max(0.0, 1.0 - avgh / 15.0) * 20.0
+    sc = round(wr_pts + pf_pts + speed_pts, 1)
+    if sc >= 80:   return sc, "★★★", "#4ade80"
+    if sc >= 60:   return sc, "★★",  "#fbbf24"
+    if sc >= 40:   return sc, "★",   "#93c5fd"
+    return sc, "△", "#94a3b8"
+
+
 def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                        score_filter: int | None = None,
                        cfg_filter: str | None = None) -> str:
@@ -2258,6 +2272,69 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <td></td>
   </tr></tfoot>
 </table>"""
+
+    # ── 戦略別 優先度サマリー(BT70以上): シグナルタブ上部に表示 ──
+    # 損益タブの戦略別サマリーと同じ優先度(勝率+PF+速度)を、今日のシグナル判断用に
+    # シグナルタブにも載せる。all_trade_infos(全銘柄×config)をBT70で絞り集計。
+    from collections import defaultdict as _dd_sp
+    _g_sp: dict = _dd_sp(list)
+    _seen_sp: set = set()
+    for info in all_trade_infos:
+        if info.get("score", 0) < 70:
+            continue
+        for t in info["trades"]:
+            _k = (info["sym"], info["strat"], t.get("signal_dt"))
+            if _k in _seen_sp:
+                continue
+            _seen_sp.add(_k)
+            _g_sp[info["strat"]].append(t)
+    _sp_rows = []
+    for _strat, _tr in _g_sp.items():
+        _n = len(_tr)
+        if _n == 0:
+            continue
+        _wins = sum(1 for t in _tr if t["pnl"] > 0)
+        _gp = sum(t["pnl"] for t in _tr if t["pnl"] > 0)
+        _gl = abs(sum(t["pnl"] for t in _tr if t["pnl"] < 0))
+        _pnl = _gp - _gl
+        _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+        _wr = _wins / _n * 100
+        _avgh = sum(t.get("hold_days", 0) for t in _tr) / _n
+        _sc, _rk, _col = _calc_strat_priority(_wr, _pf, _avgh)
+        _sp_rows.append((_sc, _rk, _col, _strat, _n, _wr, _pf, _avgh, _pnl))
+    _sp_rows.sort(key=lambda x: -x[0])
+    _strat_pri_html = ""
+    if _sp_rows:
+        _sp_body = ""
+        for _sc, _rk, _col, _strat, _n, _wr, _pf, _avgh, _pnl in _sp_rows:
+            _pf_s = "∞" if _pf == float("inf") else f"{_pf:.2f}"
+            _pnl_c = "#4ade80" if _pnl >= 0 else "#f87171"
+            _sp_body += (f'<tr><td style="text-align:left;font-weight:700">{_strat}</td>'
+                         f'<td style="text-align:center;color:{_col};font-weight:700;white-space:nowrap">{_rk}'
+                         f'<br><span style="font-size:0.72rem">{_sc:.0f}</span></td>'
+                         f'<td style="text-align:right">{_n}</td>'
+                         f'<td style="text-align:right">{_wr:.1f}%</td>'
+                         f'<td style="text-align:right">{_pf_s}</td>'
+                         f'<td style="text-align:right">{_avgh:.1f}日</td>'
+                         f'<td style="text-align:right;color:{_pnl_c};font-weight:700">{_pnl:+,.0f}円</td></tr>')
+        _strat_pri_html = (
+            '<h2>戦略別 優先度（BT70以上）</h2>'
+            '<p style="color:#64748b;font-size:0.8rem;margin-bottom:8px">'
+            '優先度 = 勝率+PF+速度の総合スコア(★★★≥80/★★≥60/★≥40)。'
+            '今日どの戦略のシグナルを優先するかの目安。</p>'
+            '<table style="max-width:680px"><thead><tr>'
+            '<th style="text-align:left">戦略</th>'
+            '<th>優先度<br><small style="color:#64748b">勝率+PF+速度</small></th>'
+            '<th>取引数</th><th>勝率</th><th>PF</th><th>平均保有</th><th>損益合計</th>'
+            '</tr></thead><tbody>' + _sp_body + '</tbody></table>')
+    # スコア帯別テーブルは普段見ないので折りたたむ(details)
+    if score_section:
+        score_section = (
+            '<details style="margin:10px 0"><summary style="cursor:pointer;color:#93c5fd;'
+            'font-weight:700;padding:4px 0;font-size:0.95rem">▸ スコア帯別 バックテスト勝率'
+            '（クリックで展開）</summary>' + score_section + '</details>')
+    # 戦略別優先度を上、スコア帯別(折りたたみ)を下に
+    score_section = _strat_pri_html + score_section
 
     sig_label = str(target_date) if target_date else str(_TODAY)
     if not signals:
@@ -5506,18 +5583,7 @@ function switchTbd(id, tab) {{
     sum_rows_bt70 = _sum_rows_for(70)
 
     # ── 戦略別サマリー (MACD/A7/RSI2/DON/VOL/MOM) 重複除外の実取引ベース ──
-    def _strat_priority(wr: float, pf: float, avgh: float) -> tuple[float, str, str]:
-        """戦略の総合優先度スコア(0〜100)とランク★・色を返す。
-        勝率40点 + PF40点(PF10でキャップ,∞=10) + 速度20点(平均保有15日で0)。"""
-        pf_c = 10.0 if pf == float("inf") else min(pf, 10.0)
-        wr_pts    = wr * 0.4
-        pf_pts    = pf_c / 10.0 * 40.0
-        speed_pts = max(0.0, 1.0 - avgh / 15.0) * 20.0
-        sc = round(wr_pts + pf_pts + speed_pts, 1)
-        if sc >= 80:   return sc, "★★★", "#4ade80"
-        if sc >= 60:   return sc, "★★",  "#fbbf24"
-        if sc >= 40:   return sc, "★",   "#93c5fd"
-        return sc, "△", "#94a3b8"
+    _strat_priority = _calc_strat_priority   # 共通のモジュール関数を使用
 
     def _strat_sum_rows(min_bt: int) -> str:
         from collections import defaultdict as _dd
