@@ -160,6 +160,62 @@ def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
     return None, None, "", ""
 
 
+def _csv_entry_stop_target(sym: str, side: str
+                           ) -> tuple[float | None, float | None, str]:
+    """エントリー時に記録した固定 (stop, target, strategy) を返す。
+    ① placed_orders_*.csv (発注ボタンが記録=最も信頼できる。日付昇順で最新を採用)
+    ② my_positions.csv
+    のどちらかから取得。どちらもレポート取引明細と同値で、再計算しないのでズレない。
+    見つからなければ (None, None, "")。"""
+    import csv as _csv
+    import glob as _glob
+    from pathlib import Path as _Path
+    base = _Path(__file__).resolve().parent
+    # ① placed_orders_*.csv (日付昇順で読み、最新の発注で上書き)
+    best = None
+    for fp in sorted(_glob.glob(str(base / "placed_orders_*.csv"))):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                for row in _csv.DictReader(f):
+                    rsym = str(row.get("symbol", "")).split(".")[0]
+                    rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                    if rsym != sym or rside != side:
+                        continue
+                    try:
+                        sp = float(row.get("stop") or 0)
+                        tp = float(row.get("target") or 0)
+                    except Exception:
+                        continue
+                    if sp > 0:
+                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""))
+        except Exception:
+            continue
+    if best is not None:
+        return best
+    # ② my_positions.csv
+    p = base / "my_positions.csv"
+    if p.exists():
+        try:
+            with open(p, encoding="utf-8") as f:
+                for row in _csv.DictReader(f):
+                    if str(row.get("status", "")).strip() not in ("holding", "filled"):
+                        continue
+                    rsym = str(row.get("symbol", "")).split(".")[0]
+                    rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                    if rsym != sym or rside != side:
+                        continue
+                    try:
+                        sp = float(row.get("stop_price") or 0)
+                        tp = float(row.get("target_price") or 0)
+                    except Exception:
+                        continue
+                    if sp > 0:
+                        return sp, (tp if tp > 0 else None), row.get("strategy", "")
+        except Exception:
+            pass
+    return None, None, ""
+
+
 def _target_already_set(sym: str, is_short: bool, open_orders: list[dict]) -> bool:
     """指定銘柄に利確指値(未約定)が既に出ているか。ロング=売り(1)/ショート=買戻し(2)。"""
     want_side = "2" if is_short else "1"
@@ -379,37 +435,41 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         margin_type = int(kp.get("MarginTradeType") or 1)
         cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
 
-        # 【第一情報源】約定値からエントリーシグナルを逆引きして stop/target を特定
-        # (=損切・利確が必ずシグナルと一致)。当日シグナルJSONは entry 後に再計算されて
-        # ズレるため使わず、過去30営業日を遡って order_price≈約定値 のエントリー
-        # シグナルを check_signal_on_date で再現する。
-        stop_p = tgt_p = None
-        strat = ""
+        # 【第一情報源】my_positions.csv のエントリー記録(=レポート取引明細と同値の
+        # 固定 stop/target)。check_signal_on_date 再計算はモード(con/agg)/データ調整で
+        # ズレる(例: 4088 記録3,111 → 再計算3,235)ため、記録があればそれを最優先。
+        _side_lbl = "short" if is_short else "long"
+        stop_p, tgt_p, strat = _csv_entry_stop_target(sym, _side_lbl)
         sig_date = ""
-        if fill_p > 0:
-            try:
-                stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
-            except Exception:
-                stop_p = None
         if stop_p is not None:
-            src = "signal_backtrack"
-            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (約定値逆引き)")
+            src = "my_positions.csv"
+            _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p or 0:.0f} [{strat}] (CSV記録)")
         else:
-            # フォールバック1: 当日シグナルJSON(約定値マッチ)。約定日もここで取得。
-            stop_p, tgt_p, strat, sig_date = _lookup_signal(sym, sig_map, fill_p, is_short)
+            # フォールバック1: 約定値からエントリーシグナルを逆引き(CSV記録なしの保有)
+            if fill_p > 0:
+                try:
+                    stop_p, tgt_p, strat = lookup_stop_from_signal(sym, fill_p, is_short)
+                except Exception:
+                    stop_p = None
             if stop_p is not None:
-                src = "signals_json"
-                _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (当日JSON照合)")
-            elif fill_p > 0:
-                # フォールバック2: ATR推定
-                stop_p = calc_atr_stop(sym, fill_p, is_short, strat or "")
-                src = "atr_estimate"
-                if stop_p:
-                    _p(f"  ⚠ {sym} {name}: ATR推定 stop={stop_p:.0f}")
-                else:
-                    _p(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
+                src = "signal_backtrack"
+                _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (約定値逆引き)")
             else:
-                src = "missing"
+                # フォールバック2: 当日シグナルJSON(約定値マッチ)。約定日もここで取得。
+                stop_p, tgt_p, strat, sig_date = _lookup_signal(sym, sig_map, fill_p, is_short)
+                if stop_p is not None:
+                    src = "signals_json"
+                    _p(f"  ✓ {sym} {name}: stop={stop_p:.0f} target={tgt_p:.0f} [{strat}] (当日JSON照合)")
+                elif fill_p > 0:
+                    # フォールバック3: ATR推定
+                    stop_p = calc_atr_stop(sym, fill_p, is_short, strat or "")
+                    src = "atr_estimate"
+                    if stop_p:
+                        _p(f"  ⚠ {sym} {name}: ATR推定 stop={stop_p:.0f}")
+                    else:
+                        _p(f"  ✗ {sym} {name}: 損切り価格取得失敗 → 判定スキップ")
+                else:
+                    src = "missing"
         fill_date = _fill_date_from_signal(sig_date)
 
         positions.append({

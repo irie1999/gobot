@@ -395,6 +395,33 @@ def _kabu_get(fn, *a, tries=4, **k):
     raise last
 
 
+def _load_placed_orders() -> dict:
+    """placed_orders_*.csv(発注ボタンが記録したエントリー注文)から
+    (sym, side) -> {"target":, "stop":, "strategy":} を返す。日付昇順で読み、
+    同一(sym,side)は『最も新しい発注』で上書き。
+    = エントリー時に記録した固定 target/stop で、レポート取引明細と同値。
+      当日再計算(check_signal_on_date)のようにモード/データでズレない、
+      最も信頼できる利確/損切の情報源。"""
+    import csv, glob
+    from pathlib import Path
+    base = Path(__file__).resolve().parent
+    out: dict = {}
+    for fp in sorted(glob.glob(str(base / "placed_orders_*.csv"))):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    sym = str(row.get("symbol", "")).split(".")[0]
+                    side = "short" if str(row.get("side", "")).strip() == "short" else "long"
+                    tp = _f(row.get("target"))
+                    sp = _f(row.get("stop"))
+                    if sym and tp > 0:
+                        out[(sym, side)] = {"target": tp, "stop": sp,
+                                            "strategy": row.get("strategy", "")}
+        except Exception:
+            continue
+    return out
+
+
 def _load_signal_targets() -> dict:
     """(symbol, side) -> {"target":利確価格, "strategy":戦略} を作る。
 
@@ -487,31 +514,43 @@ def _backfill_targets(cli) -> None:
             fillp[(sym, side)] = fp
     if not agg:
         return
-    targets = _load_signal_targets()
+    placed  = _load_placed_orders()      # placed_orders_*.csv = 発注時のエントリー記録
+    targets = _load_signal_targets()     # my_positions.csv = 補助のエントリー記録
     close_map = _active_close_map(cli)   # 既存利確 (sym,side)->(oid,price) を一括取得
     for (sym, side), qty in agg.items():
         # 既存利確があってもスキップせず、_place_target_now に渡して
         # 「据置 / 目標更新(値幅が広がれば本来目標へ) / 値幅内へ修正」を判定させる。
         _existing = close_map.get((sym, side))
-        # 【第一情報源】約定値からエントリーシグナルを逆引きし、その利確目標を正とする。
-        # 直近30営業日を check_signal_on_date で再現し order_price≈約定値 のシグナルを
-        # 照合(=利確が必ずシグナルと一致)。当日の再計算値や CSV の記録には依存しない。
-        info = None
+        _fp = fillp.get((sym, side), 0)
+        # エントリー時に記録した固定目標を最優先(=レポート取引明細の order_target と同値)。
+        # check_signal_on_date 再計算はモード(con/agg)/データ調整でズレる(例: 4088
+        # 記録3,111 → 再計算3,235)ため使わない。
+        # 優先順: ①placed_orders_*.csv(発注ボタンの記録) ②my_positions.csv ③約定値逆引き
+        _pl = placed.get((sym, side))
+        _csv_info = targets.get((sym, side))
+        _lk_tgt, _lk_strat = None, ""
         try:
             from close_stop_guard import lookup_stop_from_signal
-            _s, _tgt, _strat = lookup_stop_from_signal(
-                sym, fillp.get((sym, side), 0), side == "short")
-            if _tgt and _tgt > 0:
-                info = {"target": float(_tgt), "strategy": _strat or ""}
+            _s, _lk_tgt, _lk_strat = lookup_stop_from_signal(sym, _fp, side == "short")
         except Exception:
-            info = None
-        # フォールバック: my_positions.csv のエントリー記録 (逆引き不一致時のみ)
-        if not info or info["target"] <= 0:
-            info = targets.get((sym, side))
-        if not info or info["target"] <= 0:
+            _lk_tgt, _lk_strat = None, ""
+        if _pl and _pl["target"] > 0:
+            info = {"target": _pl["target"], "strategy": _pl.get("strategy", "")}
+            _src = "placed_orders(発注時記録)"
+        elif _csv_info and _csv_info["target"] > 0:
+            info = _csv_info
+            _src = "my_positions.csv(エントリー記録)"
+        elif _lk_tgt and _lk_tgt > 0:
+            info = {"target": float(_lk_tgt), "strategy": _lk_strat or ""}
+            _src = "約定値逆引き(記録なし)"
+        else:
             print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が特定できません "
-                  f"(約定値からのシグナル逆引き/my_positions.csv すべて不一致) → 手動で利確を")
+                  f"(placed_orders/my_positions.csv/約定値逆引き すべて不一致) → 手動で利確を")
             continue
+        if _lk_tgt and _lk_tgt > 0 and abs(_lk_tgt - info["target"]) > 1:
+            print(f"    ℹ {sym}: 採用目標{info['target']:,.0f}({_src}) "
+                  f"／当日再計算={_lk_tgt:,.0f} は不採用(モード/データでズレるため)")
+        print(f"    ▸ {sym} 目標={info['target']:,.0f} 情報源={_src} 約定値={_fp:,.0f}")
         try:
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
                                          "target": info["target"], "strategy": info["strategy"]},
