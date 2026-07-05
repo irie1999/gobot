@@ -29,6 +29,7 @@ import argparse
 import importlib.util
 import json
 import os
+import pickle
 import sys
 import webbrowser
 from collections import defaultdict
@@ -318,20 +319,47 @@ def main():
                 print(f"  forward backtest {done}/{len(fwd_tasks)}", flush=True)
 
     # ── 各基準月: 各モードで as-of選定 → (sym,strat,mode) union → フォワード集計 ──
+    # 重いので (基準月,モード) 単位で .rollsel_cache/ に結果をキャッシュ。中断しても
+    # 済んだ組合せは即スキップ=再開可能。進捗も逐次表示。
+    _rs_cache = Path(".rollsel_cache")
+    _rs_cache.mkdir(exist_ok=True)
     result = {}
     for D in base_dates:
         selected_set = set()
         for mn, dfs in modes:
-            asof_rows: list[dict] = []
-            with ThreadPoolExecutor(max_workers=args.workers) as ex:
-                futs = {ex.submit(_wf_asof, s, st, D, dfs): (s, st) for s, st in pairs}
-                for fut in as_completed(futs):
-                    try:
-                        r = fut.result()
-                    except Exception:
-                        r = None
-                    if r:
-                        asof_rows.append(r)
+            _cf = _rs_cache / f"asof_{D}_{mn}.pkl"
+            cached: dict = {}
+            if _cf.exists():
+                try:
+                    cached = pickle.loads(_cf.read_bytes())
+                except Exception:
+                    cached = {}
+            todo = [(s, st) for s, st in pairs if (s, st) not in cached]
+            if todo:
+                print(f"  as-of {D}/{mn}: {len(todo)}件 計算 (済 {len(cached)}件)", flush=True)
+                cnt = 0
+                with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                    futs = {ex.submit(_wf_asof, s, st, D, dfs): (s, st) for s, st in todo}
+                    for fut in as_completed(futs):
+                        s, st = futs[fut]
+                        try:
+                            cached[(s, st)] = fut.result()
+                        except Exception:
+                            cached[(s, st)] = None
+                        cnt += 1
+                        if cnt % 3000 == 0:
+                            print(f"    {D}/{mn} {cnt}/{len(todo)}", flush=True)
+                            try:
+                                _cf.write_bytes(pickle.dumps(cached))  # 途中保存(再開用)
+                            except Exception:
+                                pass
+                try:
+                    _cf.write_bytes(pickle.dumps(cached))
+                except Exception:
+                    pass
+            else:
+                print(f"  as-of {D}/{mn}: 全{len(cached)}件キャッシュ済(スキップ)", flush=True)
+            asof_rows = [r for r in cached.values() if r]
             # 選定フィルタ (scan_walkforward CSV + _load_wl_from_csv 準拠)
             base_elig = [r for r in asof_rows
                          if int(r.get("folds_passed", 0)) >= args.min_folds
