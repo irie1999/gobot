@@ -1046,14 +1046,16 @@ def _latest_analysis_cache(prefix: str):
 
 _mh_prefix     = f"maxhold_cmp{_cache_short}"
 _mh_cache_file = _mh_cache_dir / f"{_mh_prefix}_{TODAY}.pkl"
-_mh_reuse      = _latest_analysis_cache(_mh_prefix)
+# --force 時はキャッシュを使わず再計算する(コード修正=HTML構造の変更を反映するため)。
+# --no-force なら日付跨ぎでpklを再利用して高速化。
+_mh_reuse      = None if _args.force else _latest_analysis_cache(_mh_prefix)
 
 if _mh_reuse is not None:
     try:
         _mh_cached = _mhpk.loads(_mh_reuse.read_bytes())
         _mh_html     = _mh_cached.get("conservative", "")
         _mh_cmp_html = _mh_cached.get("con_agg", "")
-        print(f"[最大保有日数比較] キャッシュ再利用(日付跨ぎ可): {_mh_reuse.name}", flush=True)
+        print(f"[最大保有日数比較] キャッシュ再利用(日付跨ぎ可・--no-force): {_mh_reuse.name}", flush=True)
     except Exception:
         _mh_html = _mh_cmp_html = None
 else:
