@@ -1601,7 +1601,7 @@ html = f"""<!DOCTYPE html>
 <h1>ホールドアウト全設定 シグナル・損益レポート{'（ショート）' if _args.short else ''}</h1>
 <p class="subtitle">
   基準日: {date_str} &nbsp;|&nbsp;
-  保有期限: {_bte.MAX_HOLD}日 &nbsp;|&nbsp;
+  保有期限: {(str(_bte.MAX_HOLD)+'日') if _bte.timecut_enabled() else 'タイムカットなし(目標/損切のみ)'} &nbsp;|&nbsp;
   設定数: {len(_all_configs)}件 &nbsp;|&nbsp;
   workers={_args.workers}
 </p>

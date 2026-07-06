@@ -303,6 +303,11 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
     タイムカット日・損切り/利確・含み損益を表示。price_fn(sym)->現在値 を渡すと損益も表示。"""
     import html as _html
     from backtest_limit_entry import default_max_hold as _dmh, MAX_HOLD as _MH
+    try:
+        from backtest_limit_entry import timecut_enabled as _tc_enabled
+        _tc_on = _tc_enabled()
+    except Exception:
+        _tc_on = True
     today_b = pd.Timestamp(now.date())
 
     rows_data = []
@@ -318,7 +323,19 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
         fd    = pos.get("fill_date", "").strip()
         mh    = _dmh(strat)
         # タイムカット日と残り
-        if fd:
+        if not _tc_on:
+            # タイムカット無効: 目標/損切りに当たるまで保有。日付は出さない。
+            if fd:
+                try:
+                    fb = pd.Timestamp(fd)
+                    hold_days = len(pd.bdate_range(fb, today_b)) - 1
+                except Exception:
+                    hold_days = "—"
+            else:
+                hold_days = "—"
+            tc_str, rem_str = "タイムカットなし", "—"
+            sort_key = pd.Timestamp(fd) if fd else pd.Timestamp.max
+        elif fd:
             try:
                 fb = pd.Timestamp(fd)
                 hold_days = len(pd.bdate_range(fb, today_b)) - 1
@@ -368,7 +385,8 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
             pnl_str = f"<span style='color:{pnl_col};font-weight:700'>{r['pnl']:+,.0f}円</span>"
         else:
             pnl_str = "—"
-        rem_col = "#f59e0b" if "あと" in r["rem_str"] or "翌" in r["rem_str"] else "#f87171"
+        rem_col = ("#94a3b8" if r["rem_str"] in ("—", "") else
+                   "#f59e0b" if "あと" in r["rem_str"] or "翌" in r["rem_str"] else "#f87171")
         # シグナル発注時BT: 値があれば帯色付きで表示
         _bt = r.get("bt")
         try:
@@ -418,7 +436,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
   tr:hover td {{ background:#243045; }}
 </style></head><body>
 <h2>📌 保有銘柄 詳細（実際に約定した建玉）</h2>
-<p class="sub">基準日 {now:%Y-%m-%d %H:%M} JST ／ 保有期限(タイムカット) = 約定日 + 7営業日（全戦略7日に統一）<br>
+<p class="sub">基準日 {now:%Y-%m-%d %H:%M} JST ／ {'保有期限(タイムカット) = 約定日 + 7営業日（全戦略7日に統一）' if _tc_on else '<span style="color:#fbbf24">タイムカット無効（目標/損切りに当たるまで保有）</span>'}<br>
   ※ kabuの実建玉のみ表示（実際に約定した銘柄）。損切り/利確はシグナル(発注時)の値。</p>
 <table>
   <thead><tr>

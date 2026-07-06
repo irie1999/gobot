@@ -584,6 +584,20 @@ def default_stop_mode(strategy_name: str, is_short: bool) -> str:
 # 環境変数 MAX_HOLD_OVERRIDE で全戦略一括上書き可 (検証用)。
 _DEFAULT_HOLD = 7
 _MAX_HOLD_BY_STRATEGY = {}
+# タイムカット(最大保有日数での強制決済)の有効/無効スイッチ。
+# False = タイムカットを外す = 目標/損切りに当たるまで保有(未決着は「保有中」で持ち越し)。
+# 最適な保有日数を検討中のため一時的に無効化 (2026-07)。
+# 7日や10日に戻すときは _TIMECUT_ENABLED=True にし、_DEFAULT_HOLD/_MAX_HOLD_BY_STRATEGY を設定。
+# 環境変数 MAX_HOLD_OVERRIDE を設定した場合はそちらが最優先(この無効化より優先)。
+_TIMECUT_ENABLED = False
+_NO_TIMECUT_HOLD = 100_000   # 実質無限(バックテスト窓を超える大きさ=タイムカット発火せず)
+
+
+def timecut_enabled() -> bool:
+    """タイムカットが有効か(=有限の最大保有日数で強制決済するか)。"""
+    if os.getenv("MAX_HOLD_OVERRIDE"):
+        return True
+    return _TIMECUT_ENABLED
 
 
 def default_max_hold(strategy_name: str) -> int:
@@ -593,6 +607,8 @@ def default_max_hold(strategy_name: str) -> int:
             return int(ovr)
         except ValueError:
             pass
+    if not _TIMECUT_ENABLED:
+        return _NO_TIMECUT_HOLD   # タイムカット無効: 目標/損切りのみで決済
     return _MAX_HOLD_BY_STRATEGY.get((strategy_name or "").upper(), _DEFAULT_HOLD)
 
 
