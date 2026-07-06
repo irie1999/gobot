@@ -1664,7 +1664,13 @@ _sym_suffix    = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
 _short_suffix  = "_short" if _args.short else ""
 _output_suffix = _args.output_suffix if _args.output_suffix else ""
 out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}_{date_str}{_output_suffix}.html")
-out_path.write_text(html, encoding="utf-8")
+# 巨大HTMLを write_text で一括書き込みすると str→bytes 変換でピークメモリが約2倍
+# になり MemoryError になることがある(Python3.14 / 銘柄詳細が多いとき)。
+# 1MBずつ分割書き込みしてピークを抑える。
+with open(out_path, "w", encoding="utf-8", newline="") as _f:
+    for _i in range(0, len(html), 1_000_000):
+        _f.write(html[_i:_i + 1_000_000])
+del html   # 後続(--both統合ラッパー等)のためにメモリを解放
 print(f"\nレポート生成完了: {out_path.resolve()}")
 
 if not _args.no_browser:
