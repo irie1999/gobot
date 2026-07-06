@@ -60,7 +60,7 @@ def _log_placed_order(rec: dict) -> None:
     d = datetime.now(JST).strftime("%Y-%m-%d")
     path = Path(__file__).resolve().parent / f"placed_orders_{d}.csv"
     cols = ["placed_at", "symbol", "name", "strategy", "side", "qty",
-            "entry", "stop", "target", "env"]
+            "entry", "stop", "target", "bt", "env"]
     new = not path.exists()
     try:
         with path.open("a", newline="", encoding="utf-8") as f:
@@ -74,7 +74,7 @@ def _log_placed_order(rec: dict) -> None:
 
 def place_order(symbol: str, entry: float, qty: int, side: str,
                 strat: str = "", target: float = 0.0,
-                stop: float = 0.0, name: str = "") -> str:
+                stop: float = 0.0, name: str = "", bt: str = "") -> str:
     """逆指値エントリーを発注し、結果メッセージを返す。
     target>0 かつ実発注なら、約定監視に登録して約定後に利確指値を自動発注する。"""
     symbol = (symbol or "").split(".")[0].strip()
@@ -149,7 +149,7 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
                 "symbol": symbol, "name": name, "strategy": strat, "side": side,
                 "qty": qty, "entry": f"{entry:.0f}", "stop": f"{stop:.0f}" if stop else "",
-                "target": f"{target:.0f}" if target else "", "env": env,
+                "target": f"{target:.0f}" if target else "", "bt": str(bt or ""), "env": env,
             })
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
                 f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
@@ -714,6 +714,7 @@ class Handler(BaseHTTPRequestHandler):
                 target=_f(form.get("target")),
                 stop=_f(form.get("stop")),
                 name=form.get("name", ""),
+                bt=form.get("bt", ""),
             )
         except Exception as e:
             msg = f"エラー: {e}"

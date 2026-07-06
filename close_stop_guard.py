@@ -189,7 +189,8 @@ def _csv_entry_stop_target(sym: str, side: str
                         continue
                     if sp > 0:
                         return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
-                                str(row.get("fill_date", "") or "").strip())
+                                str(row.get("fill_date", "") or "").strip(),
+                                str(row.get("bt", "") or "").strip())
         except Exception:
             pass
     # ① placed_orders_*.csv (日付昇順で読み、最新の発注で上書き)
@@ -209,7 +210,8 @@ def _csv_entry_stop_target(sym: str, side: str
                         continue
                     if sp > 0:
                         _pa = str(row.get("placed_at", "") or "")[:10]
-                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""), _pa)
+                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""), _pa,
+                                str(row.get("bt", "") or "").strip())
         except Exception:
             continue
     if best is not None:
@@ -233,10 +235,11 @@ def _csv_entry_stop_target(sym: str, side: str
                         continue
                     if sp > 0:
                         return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
-                                str(row.get("fill_date", "") or "").strip())
+                                str(row.get("fill_date", "") or "").strip(),
+                                str(row.get("bt", "") or "").strip())
         except Exception:
             pass
-    return None, None, "", ""
+    return None, None, "", "", ""
 
 
 def _target_already_set(sym: str, is_short: bool, open_orders: list[dict]) -> bool:
@@ -340,6 +343,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
             "qty": qty, "fp": fp, "sp": sp, "tp": tp, "fd": fd,
             "hold_days": hold_days, "mh": mh, "tc_str": tc_str, "rem_str": rem_str,
             "cur": cur, "pnl": pnl, "sort_key": sort_key,
+            "bt": pos.get("bt", ""),   # シグナル発注時のBTスコア(記録があれば)
         })
     rows_data.sort(key=lambda r: r["sort_key"])
 
@@ -365,9 +369,21 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
         else:
             pnl_str = "—"
         rem_col = "#f59e0b" if "あと" in r["rem_str"] or "翌" in r["rem_str"] else "#f87171"
+        # シグナル発注時BT: 値があれば帯色付きで表示
+        _bt = r.get("bt")
+        try:
+            _btv = int(float(_bt)) if _bt not in (None, "") else None
+        except Exception:
+            _btv = None
+        if _btv is None:
+            bt_cell = '<span style="color:#475569">—</span>'
+        else:
+            _bc = "#4ade80" if _btv >= 80 else ("#60a5fa" if _btv >= 60 else ("#fbbf24" if _btv >= 40 else "#f87171"))
+            bt_cell = f'<span style="color:{_bc};font-weight:700">{_btv}</span>'
         trs += f"""<tr>
   <td style="text-align:left">{_html.escape(r['sym'])}<br><span style="color:#64748b;font-size:.78rem">{_html.escape(r['name'])}</span></td>
   <td style="text-align:center">{_html.escape(r['strat'])}</td>
+  <td style="text-align:center">{bt_cell}</td>
   <td style="text-align:center;color:{side_col}">{side_lbl}</td>
   <td style="text-align:right;color:#94a3b8">{_html.escape(r['fd'] or '—')}</td>
   <td style="text-align:right">{r['fp']:,.0f}円</td>
@@ -380,7 +396,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
 </tr>"""
 
     if not rows_data:
-        trs = ('<tr><td colspan="11" style="text-align:center;color:#94a3b8;padding:24px">'
+        trs = ('<tr><td colspan="12" style="text-align:center;color:#94a3b8;padding:24px">'
                '実際に約定した保有銘柄はありません（kabu建玉なし）</td></tr>')
 
     total_row = ""
@@ -406,7 +422,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
   ※ kabuの実建玉のみ表示（実際に約定した銘柄）。損切り/利確はシグナル(発注時)の値。</p>
 <table>
   <thead><tr>
-    <th style="text-align:left">銘柄/名前</th><th>戦略</th><th>区分</th><th>約定日</th><th>約定値</th>
+    <th style="text-align:left">銘柄/名前</th><th>戦略</th><th>シグナル時<br>BT</th><th>区分</th><th>約定日</th><th>約定値</th>
     <th>損切り</th><th>利確目標</th><th>現在値</th><th>含み損益</th>
     <th>タイムカット日</th><th>残り</th>
   </tr></thead>
@@ -462,9 +478,10 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         # 固定 stop/target)。check_signal_on_date 再計算はモード(con/agg)/データ調整で
         # ズレる(例: 4088 記録3,111 → 再計算3,235)ため、記録があればそれを最優先。
         _side_lbl = "short" if is_short else "long"
-        stop_p, tgt_p, strat, _csv_fill_date = _csv_entry_stop_target(sym, _side_lbl)
+        stop_p, tgt_p, strat, _csv_fill_date, _csv_bt = _csv_entry_stop_target(sym, _side_lbl)
         sig_date = ""
         _fixed_fill_date = ""   # CSV/手動指定が持つ約定日(あれば直接採用)
+        _entry_bt = _csv_bt     # シグナル発注時のBT(記録があれば)
         if stop_p is not None:
             src = "my_positions.csv"
             _fixed_fill_date = _csv_fill_date
@@ -510,6 +527,7 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
             "fill_date":    fill_date,
             "cash_margin":  cm,
             "source":       src,
+            "bt":           _entry_bt,   # シグナル発注時のBT(記録があれば表示)
         })
 
     return positions
