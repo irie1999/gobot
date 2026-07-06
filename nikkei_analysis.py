@@ -1779,11 +1779,13 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         )
 
 
-def _dump_trade_factors(trades, path="trades_factors.csv") -> None:
-    """決済済み全取引を『成績に効く要素』付きでCSV出力(factor_analysis.py用)。
-    列: strategy/config/bt_score/wf_score/bt_type/stop_pct/target_pct/
-        hold_days/days_to_fill/overlap/reason/pnl/win。"""
-    import csv
+def _factor_analysis_html(trades) -> str:
+    """成績に効く要素を機械的にランキングするHTML(詳細分析タブ★効く要素)。
+    各要素(BT/WFスコア・戦略・設定・損切幅・目標幅・保有日数・約定遅延・重複保有・
+    決済理由)ごとに勝率/PF/平均損益/総損益を集計し、平均損益の加重RMS(判別力)で
+    『成績を最も分離する要素』を上位に並べる。※in-sample探索用(OOSで裏取り前提)。"""
+    import math as _m
+    from collections import defaultdict as _dd
     rows = []
     for t in trades:
         if t.get("reason") in ("発注中", "保有中"):
@@ -1791,43 +1793,122 @@ def _dump_trade_factors(trades, path="trades_factors.csv") -> None:
         olp = t.get("order_limit") or 0
         osp = t.get("order_stop") or 0
         otp = t.get("order_target") or 0
-        stop_pct = (osp - olp) / olp * 100 if olp else 0.0
-        tgt_pct = (otp - olp) / olp * 100 if olp else 0.0
-        _cfg = str(t.get("label", "") or "")
-        _mode = "agg" if "/agg" in _cfg else ("con" if "/con" in _cfg else "")
-        _ho = _cfg.split("/")[0] if "/" in _cfg else _cfg
-        rows.append({
-            "symbol":       str(t.get("symbol", "")).split(".")[0],
-            "strategy":     t.get("strategy", ""),
-            "config":       _cfg,
-            "holdout":      _ho,
-            "mode":         _mode,
-            "bt_score":     t.get("rec_score") if t.get("rec_score") is not None else (t.get("score") or 0),
-            "wf_score":     t.get("wf_score") if t.get("wf_score") is not None else "",
-            "bt_type":      t.get("bt_type", ""),
-            "stop_pct":     round(stop_pct, 1),
-            "target_pct":   round(tgt_pct, 1),
-            "hold_days":    t.get("hold_days", 0),
-            "days_to_fill": t.get("days_to_fill", 0),
-            "overlap":      1 if t.get("_overlap") else 0,
-            "reason":       t.get("reason", ""),
-            "pnl":          round(t.get("pnl", 0)),
-            "win":          1 if (t.get("pnl", 0) or 0) > 0 else 0,
-            "entry_d":      str(t.get("entry_d_raw", "") or ""),
-            "exit_d":       str(t.get("exit_d_raw", "") or ""),
-        })
-    if not rows:
-        return
-    try:
-        from pathlib import Path as _P
-        p = _P(__file__).resolve().parent / path
-        with open(p, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
-        print(f"  [factor] {len(rows)}取引を {p.name} に出力 → python factor_analysis.py", flush=True)
-    except Exception as e:
-        print(f"  [factor] CSVダンプ失敗: {e}", flush=True)
+        cfg = str(t.get("label", "") or "")
+        rows.append(dict(
+            strategy=t.get("strategy", "") or "?",
+            holdout=(cfg.split("/")[0] if "/" in cfg else cfg) or "?",
+            mode=("agg" if "/agg" in cfg else ("con" if "/con" in cfg else "?")),
+            bt=float(t.get("rec_score") if t.get("rec_score") is not None else (t.get("score") or 0)),
+            wf=(float(t.get("wf_score")) if t.get("wf_score") not in (None, "") else None),
+            bt_type=t.get("bt_type", "") or "?",
+            stop_pct=((osp - olp) / olp * 100 if olp else 0.0),
+            target_pct=((otp - olp) / olp * 100 if olp else 0.0),
+            hold=float(t.get("hold_days", 0) or 0),
+            dtf=float(t.get("days_to_fill", 0) or 0),
+            overlap=("再エントリー" if t.get("_overlap") else "通常"),
+            reason=t.get("reason", "") or "?",
+            pnl=float(t.get("pnl", 0) or 0),
+        ))
+    if len(rows) < 20:
+        return '<p style="color:#64748b;padding:20px">取引が少なく要素分析できません。</p>'
+    base_avg = sum(r["pnl"] for r in rows) / len(rows)
+
+    def _st(g):
+        n = len(g)
+        p = [r["pnl"] for r in g]
+        w = sum(1 for x in p if x > 0)
+        gp = sum(x for x in p if x > 0); gl = abs(sum(x for x in p if x <= 0))
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        return dict(n=n, wr=w / n * 100, pf=pf, avg=sum(p) / n, tot=sum(p))
+
+    def _numbuck(key, edges, labels):
+        o = _dd(list)
+        for r in rows:
+            v = r[key]
+            if v is None:
+                continue
+            placed = False
+            for i, e in enumerate(edges):
+                if v < e:
+                    o[labels[i]].append(r); placed = True; break
+            if not placed:
+                o[labels[-1]].append(r)
+        return o
+
+    def _catbuck(key):
+        o = _dd(list)
+        for r in rows:
+            o[str(r[key])].append(r)
+        return o
+
+    factors = [
+        ("BTスコア帯", _numbuck("bt", [30, 50, 60, 70, 80],
+                               ["0-29", "30-49", "50-59", "60-69", "70-79", "80+"])),
+        ("WFスコア帯", _numbuck("wf", [30, 50, 70, 90],
+                               ["<30", "30-49", "50-69", "70-89", "90+"])),
+        ("損切り幅(絶対%)", _numbuck("stop_pct", [-15, -10, -7, -5, -3, 0],
+                               ["<-15", "-15~-10", "-10~-7", "-7~-5", "-5~-3", "-3~0", ">0"])),
+        ("目標幅(%)", _numbuck("target_pct", [5, 8, 12, 18], ["<5", "5-8", "8-12", "12-18", "18+"])),
+        ("保有日数", _numbuck("hold", [1, 3, 5, 8, 12], ["0", "1-2", "3-4", "5-7", "8-11", "12+"])),
+        ("約定遅延(日)", _numbuck("dtf", [1, 2], ["0(当日)", "1", "2+"])),
+        ("戦略", _catbuck("strategy")),
+        ("モード(con/agg)", _catbuck("mode")),
+        ("ホールドアウト設定", _catbuck("holdout")),
+        ("BTタイプ", _catbuck("bt_type")),
+        ("重複保有", _catbuck("overlap")),
+        ("決済理由", _catbuck("reason")),
+    ]
+    MIN_C = 15
+    tables = []
+    ranking = []
+    for title, groups in factors:
+        valid = {k: _st(v) for k, v in groups.items() if len(v) >= MIN_C}
+        if len(valid) < 2:
+            continue
+        tot_n = sum(s["n"] for s in valid.values())
+        spread = sum(s["n"] / tot_n * (s["avg"] - base_avg) ** 2 for s in valid.values())
+        rms = _m.sqrt(spread)
+        ranking.append((rms, title))
+        body = ""
+        for k in sorted(valid, key=lambda x: -valid[x]["avg"]):
+            s = valid[k]
+            pf_s = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+            wrc = "#4ade80" if s["wr"] >= 55 else ("#fbbf24" if s["wr"] >= 45 else "#f87171")
+            ac = "#4ade80" if s["avg"] >= 0 else "#f87171"
+            body += (f'<tr><td style="text-align:left">{k}</td>'
+                     f'<td style="text-align:right">{s["n"]}</td>'
+                     f'<td style="text-align:right;color:{wrc}">{s["wr"]:.1f}%</td>'
+                     f'<td style="text-align:right">{pf_s}</td>'
+                     f'<td style="text-align:right;color:{ac};font-weight:700">{s["avg"]:+,.0f}円</td>'
+                     f'<td style="text-align:right;color:{ac}">{s["tot"]:+,.0f}円</td></tr>')
+        tables.append(
+            f'<details style="margin:6px 0"><summary style="cursor:pointer;color:#93c5fd;'
+            f'font-weight:700;padding:3px 0">{title}（判別力 {rms:,.0f}円）</summary>'
+            f'<table style="max-width:560px"><thead><tr><th style="text-align:left">グループ</th>'
+            f'<th>件数</th><th>勝率</th><th>PF</th><th>平均損益</th><th>総損益</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></details>')
+    ranking.sort(reverse=True)
+    _max = ranking[0][0] if ranking else 1
+    rank_rows = ""
+    for i, (rms, title) in enumerate(ranking, 1):
+        w = max(2, int(rms / _max * 100))
+        rank_rows += (f'<tr><td style="text-align:right;color:#64748b">{i}</td>'
+                      f'<td style="text-align:left;font-weight:700">{title}</td>'
+                      f'<td style="text-align:right;color:#38bdf8;font-weight:700">{rms:,.0f}円</td>'
+                      f'<td style="width:220px"><div style="height:12px;width:{w}%;'
+                      f'background:linear-gradient(90deg,#38bdf8,#0ea5e9);border-radius:3px"></div></td></tr>')
+    return (
+        '<h2>★ 成績に効く要素ランキング</h2>'
+        '<p style="color:#64748b;font-size:0.82rem;margin-bottom:8px">'
+        '各要素でグループ分けし、平均損益が全体からどれだけ離れるか(加重RMS=判別力)で並べています。'
+        '上位ほど「その分け方で成績が大きく変わる=効く要素」。'
+        '<b style="color:#fbbf24">※ in-sample を含む探索用。実運用判断は'
+        '★ロールフォワードOOS/損益タブで裏取りしてください。</b></p>'
+        f'<table style="max-width:640px"><thead><tr><th>#</th>'
+        '<th style="text-align:left">要素</th><th>判別力</th><th style="text-align:left">効き具合</th>'
+        f'</tr></thead><tbody>{rank_rows}</tbody></table>'
+        '<h3 style="color:#93c5fd;margin:14px 0 4px">要素ごとのグループ別成績（クリックで展開）</h3>'
+        + "".join(tables))
 
 
 def _calc_strat_priority(wr: float, pf: float, avgh: float) -> tuple[float, str, str]:
@@ -6382,11 +6463,11 @@ function switchTbd(id, tab) {{
     # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
     #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
     display_trades = all_trades + _overlap_dropped
-    # 成績に効く要素の分析用に全取引をCSVダンプ (factor_analysis.py で読む)
+    # 成績に効く要素の分析HTML(詳細分析タブ★効く要素)
     try:
-        _dump_trade_factors(display_trades)
+        _factors_html = _factor_analysis_html(display_trades)
     except Exception:
-        pass
+        _factors_html = ""
 
     # ── 重複保有(計測外)シグナルの勝率サマリー ──────────────────────────────
     # 1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」の決済済み成績を
@@ -8424,6 +8505,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'score')">① ② スコア別実績</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'cross')">③ ④ BT×WF・高BT銘柄</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'rollfwd')">★ ロールフォワードOOS</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'factors')">★ 効く要素</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り</button>
@@ -8609,6 +8691,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {rollforward_html}
 </div>
 
+<div id="analtab_{_dseq}_factors" class="analysis-tab-pane">
+{_factors_html}
+</div>
+
 <div id="analtab_{_dseq}_bt6069" class="analysis-tab-pane">
 <h2>⑤ BT60-69 × WFクロス分析（conservative限定）</h2>
 <p class="footnote" style="margin-bottom:8px">
@@ -8739,7 +8825,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
