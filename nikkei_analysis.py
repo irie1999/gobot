@@ -1868,7 +1868,9 @@ def _factor_analysis_html(trades) -> str:
         tot_n = sum(s["n"] for s in valid.values())
         spread = sum(s["n"] / tot_n * (s["avg"] - base_avg) ** 2 for s in valid.values())
         rms = _m.sqrt(spread)
-        ranking.append((rms, title))
+        # 決済理由/保有日数は『結果指標(循環)』= エントリー時に選べない。別枠に分ける。
+        _is_circ = title in ("決済理由", "保有日数")
+        ranking.append((rms, title, _is_circ))
         body = ""
         for k in sorted(valid, key=lambda x: -valid[x]["avg"]):
             s = valid[k]
@@ -1888,15 +1890,20 @@ def _factor_analysis_html(trades) -> str:
             f'<th>件数</th><th>勝率</th><th>PF</th><th>平均損益</th><th>総損益</th></tr></thead>'
             f'<tbody>{body}</tbody></table></details>')
     ranking.sort(reverse=True)
-    _max = ranking[0][0] if ranking else 1
-    rank_rows = ""
-    for i, (rms, title) in enumerate(ranking, 1):
-        w = max(2, int(rms / _max * 100))
-        rank_rows += (f'<tr><td style="text-align:right;color:#64748b">{i}</td>'
-                      f'<td style="text-align:left;font-weight:700">{title}</td>'
-                      f'<td style="text-align:right;color:#38bdf8;font-weight:700">{rms:,.0f}円</td>'
-                      f'<td style="width:220px"><div style="height:12px;width:{w}%;'
-                      f'background:linear-gradient(90deg,#38bdf8,#0ea5e9);border-radius:3px"></div></td></tr>')
+    _act = [r for r in ranking if not r[2]]   # エントリー時に選べる=本当に効く要素
+    _cir = [r for r in ranking if r[2]]        # 結果指標(循環)
+    _max = _act[0][0] if _act else 1
+
+    def _rrows(items, accent):
+        html = ""
+        for i, (rms, title, _c) in enumerate(items, 1):
+            w = max(2, int(rms / _max * 100))
+            html += (f'<tr><td style="text-align:right;color:#64748b">{i}</td>'
+                     f'<td style="text-align:left;font-weight:700">{title}</td>'
+                     f'<td style="text-align:right;color:{accent};font-weight:700">{rms:,.0f}円</td>'
+                     f'<td style="width:220px"><div style="height:12px;width:{w}%;'
+                     f'background:{accent};border-radius:3px;opacity:.85"></div></td></tr>')
+        return html
     return (
         '<h2>★ 成績に効く要素ランキング</h2>'
         '<p style="color:#64748b;font-size:0.82rem;margin-bottom:8px">'
@@ -1904,9 +1911,16 @@ def _factor_analysis_html(trades) -> str:
         '上位ほど「その分け方で成績が大きく変わる=効く要素」。'
         '<b style="color:#fbbf24">※ in-sample を含む探索用。実運用判断は'
         '★ロールフォワードOOS/損益タブで裏取りしてください。</b></p>'
+        '<h3 style="color:#4ade80;margin:8px 0 4px">◎ エントリー時に選べる要素（=本当に効く）</h3>'
         f'<table style="max-width:640px"><thead><tr><th>#</th>'
         '<th style="text-align:left">要素</th><th>判別力</th><th style="text-align:left">効き具合</th>'
-        f'</tr></thead><tbody>{rank_rows}</tbody></table>'
+        f'</tr></thead><tbody>{_rrows(_act, "#38bdf8")}</tbody></table>'
+        '<h3 style="color:#94a3b8;margin:14px 0 4px">△ 結果指標（循環・選定には使えない）</h3>'
+        '<p style="color:#64748b;font-size:0.78rem;margin:0 0 4px">'
+        '決済理由(損切り=定義上マイナス等)や保有日数(早期決済=勝ちが多い)は、'
+        '<b>結果を後から見た値</b>なので判別力が高くて当然。エントリー時には選べないため'
+        '銘柄選定の基準には使えません。</p>'
+        f'<table style="max-width:640px"><tbody>{_rrows(_cir, "#64748b")}</tbody></table>'
         '<h3 style="color:#93c5fd;margin:14px 0 4px">要素ごとのグループ別成績（クリックで展開）</h3>'
         + "".join(tables))
 
