@@ -1129,7 +1129,7 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv11_{_oc_src_tok}{_cache_short}"   # v11: ③フェア版を全期間に(5分足が全銘柄で揃ったため60日上限を撤廃)
+_oc_prefix    = f"openconfirmv12_{_oc_src_tok}{_cache_short}"   # v12: 5分足を信頼源ティア優先(quarantine/J-Quants>minute_5m)で読み込み・混ぜない
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 # 本日分キャッシュがあれば再利用(=同日2回目以降スキップ)。無ければ再計算
 # (=5分足自動更新後の最新データを反映)。翌日は自動的に作り直す。

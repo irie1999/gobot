@@ -231,22 +231,29 @@ def _normalize_min(raw: pd.DataFrame) -> pd.DataFrame | None:
 
 
 def _load_local_pkl(symbol: str, extra_dirs=()) -> pd.DataFrame | None:
-    """data/minute_5m + quarantine_5m (+ extra_dirs) の pkl を読み・マージして返す。"""
+    """5分足pklを『信頼度ティア』優先で読む。ティアをまたいで混ぜない。
+    優先順: 明示(--minute-dir) > quarantine_5m(J-Quants長期・最信頼) > minute_5m(yfinance直近)。
+    ある銘柄が quarantine にあれば quarantine のバーだけを使い、yfinance系は混入させない
+    (信頼源の統一)。quarantine に無い銘柄のみ minute_5m にフォールバック。"""
     jq = _yf_to_jq(symbol)
-    frames = []
-    for d in list(extra_dirs) + list(_pkl_dirs()):
-        p = Path(d) / f"{jq}.pkl"
-        if p.exists():
-            try:
-                n = _normalize_min(pd.read_pickle(p))
-                if n is not None and not n.empty:
-                    frames.append(n)
-            except Exception:
-                pass
-    if not frames:
-        return None
-    m = pd.concat(frames)
-    return m[~m.index.duplicated(keep="last")].sort_index()
+    dirs = list(_pkl_dirs())
+    tier_q = [d for d in dirs if "quarantine" in Path(d).name.lower()]
+    tier_m = [d for d in dirs if "quarantine" not in Path(d).name.lower()]
+    for tier in ([Path(d) for d in extra_dirs], tier_q, tier_m):
+        frames = []
+        for d in tier:
+            p = Path(d) / f"{jq}.pkl"
+            if p.exists():
+                try:
+                    n = _normalize_min(pd.read_pickle(p))
+                    if n is not None and not n.empty:
+                        frames.append(n)
+                except Exception:
+                    pass
+        if frames:
+            m = pd.concat(frames)
+            return m[~m.index.duplicated(keep="last")].sort_index()
+    return None
 
 
 def _load_minute(symbol: str, minute_dir: str | None) -> pd.DataFrame | None:
