@@ -268,11 +268,19 @@ def build_fair_html(is_short: bool = False, workers: int = 4,
                      for k, lbl, f in filters)
 
     _span = f"直近{days}日" if days else "全期間"
+    if days:
+        _span_note = (f'<b>{_span}に限定</b>する理由: それ以前は5分足'
+                      f'(minute_5m~3ヶ月/quarantine 664銘柄/yfinance~60日)が'
+                      f'全銘柄分そろわず欠損が出るため。最新化は '
+                      f'<code>python update_minute_5m.py</code> を実行。')
+    else:
+        _span_note = ('<b>全期間で検証</b>(デイトレ5分足が監視対象の全銘柄で揃ったため上限を撤廃)。'
+                      '5分足が無い日のシグナルは自動的に除外して集計。最新化は '
+                      '<code>python update_minute_5m.py</code> を実行。')
     return f"""<h3 style="margin:20px 0 4px;font-size:1.0rem;color:#60a5fa">③ フェア版(後知恵なし・{_span}): 全シグナル(約定+失効)対象・T+1成行 vs 逆指値</h3>
 <p class="footnote">②は『Aが結局約定した分』だけで後知恵があった。③は<b>失効(不発)シグナルも含む全シグナル</b>を、
 T+1の各時刻に成行買い(F)して逆指値ブレイク(A)と比較。vs A がプラスなら本当にT+1成行が優位。<br>
-<b>{_span}に限定</b>する理由: それ以前は5分足(minute_5m~3ヶ月/quarantine 664銘柄/yfinance~60日)が
-全銘柄分そろわず欠損が出るため。最新化は <code>python update_minute_5m.py</code> を実行。</p>
+{_span_note}</p>
 <div class="detail-tab-nav" style="margin:8px 0">{btns}</div>
 {blocks}
 <script>

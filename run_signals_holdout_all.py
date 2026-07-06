@@ -1129,7 +1129,7 @@ except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
                else ("short" if _args.short else "yf"))
-_oc_prefix    = f"openconfirmv10_{_oc_src_tok}{_cache_short}"   # v10: ③フェア版を直近60日に限定
+_oc_prefix    = f"openconfirmv11_{_oc_src_tok}{_cache_short}"   # v11: ③フェア版を全期間に(5分足が全銘柄で揃ったため60日上限を撤廃)
 _oc_cache_file = _mh_cache_dir / f"{_oc_prefix}_{TODAY}.pkl"
 # 本日分キャッシュがあれば再利用(=同日2回目以降スキップ)。無ければ再計算
 # (=5分足自動更新後の最新データを反映)。翌日は自動的に作り直す。
@@ -1156,7 +1156,8 @@ if _oc_html is None:
         import analyze_fair_market_entry as _fair
         _oc_html += _fair.build_fair_html(is_short=_args.short,
                                           workers=_args.workers,
-                                          minute_dir=_args.minute_dir) or ""
+                                          minute_dir=_args.minute_dir,
+                                          days=0) or ""   # 全期間(5分足が無い日は自動除外)
     except Exception as _fe:
         import traceback as _fetb
         print(f"[フェア版] 失敗: {_fe}\n{_fetb.format_exc()}", flush=True)
