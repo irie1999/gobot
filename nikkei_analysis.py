@@ -4532,7 +4532,28 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
 
     since = _TODAY - timedelta(days=days)
 
-    def _collect(mh: int) -> dict:
+    def _stats(trades: list[dict]) -> dict:
+        n = len(trades)
+        wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
+        losses = sum(1 for t in trades if t.get("pnl", 0) < 0)
+        gp = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
+        gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        timecuts = sum(1 for t in trades if t.get("reason") == "タイムカット")
+        avg_hold = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
+        return {
+            "trades": n, "wins": wins, "losses": losses,
+            "win_rate": wins / n * 100 if n else 0.0,
+            "gross_profit": gp, "gross_loss": -gl,
+            "avg_win": gp / wins if wins else 0.0,
+            "avg_loss": -gl / losses if losses else 0.0,
+            "total_pnl": sum(t.get("pnl", 0) for t in trades),
+            "pf": pf, "avg_hold": avg_hold, "timecuts": timecuts,
+        }
+
+    def _collect(mh: int) -> list[dict]:
+        """MAX_HOLD=mh で全銘柄をバックテストし、対象期間の決済済みトレードを
+        戦略タグ(_strat)付きで返す。"""
         trades: list[dict] = []
         _errors = 0
         with _TPE(max_workers=workers) as ex:
@@ -4555,31 +4576,36 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
                         sig_date = sig.date() if hasattr(sig, "date") else sig
                         if (sig_date >= since
                                 and t.get("reason") not in ("発注中", "保有中")):
-                            trades.append(t)
+                            _t = dict(t)
+                            _t["_strat"] = sym_st[1]
+                            trades.append(_t)
                 except Exception as _e:
                     _errors += 1
                     if _errors <= 3:
                         print(f"  [max_hold比較] エラー {sym_st}: {_e}", flush=True)
         if _errors:
             print(f"  [max_hold比較] MAX_HOLD={mh}: {len(trades)}件 (エラー{_errors}件)", flush=True)
+        return trades
 
-        n = len(trades)
-        wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
-        losses = sum(1 for t in trades if t.get("pnl", 0) < 0)
-        gp = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
-        gl = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
-        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-        timecuts = sum(1 for t in trades if t.get("reason") == "タイムカット")
-        avg_hold = sum(t.get("hold_days", 0) for t in trades) / n if n else 0.0
-        return {
-            "trades": n, "wins": wins, "losses": losses,
-            "win_rate": wins / n * 100 if n else 0.0,
-            "gross_profit": gp, "gross_loss": -gl,
-            "avg_win": gp / wins if wins else 0.0,
-            "avg_loss": -gl / losses if losses else 0.0,
-            "total_pnl": sum(t.get("pnl", 0) for t in trades),
-            "pf": pf, "avg_hold": avg_hold, "timecuts": timecuts,
-        }
+    def _per_strategy_html(trades_by_mh: dict) -> str:
+        """戦略別に MAX_HOLD 比較テーブルを折りたたみで出す。各戦略の最良保有日数を明示。"""
+        try:
+            from backtest_limit_entry import default_max_hold as _dmh_default
+        except Exception:
+            _dmh_default = lambda s: 15
+        strats = sorted({t["_strat"] for mh in hold_list for t in trades_by_mh[mh]})
+        out = ""
+        for st in strats:
+            sr = {mh: _stats([t for t in trades_by_mh[mh] if t["_strat"] == st]) for mh in hold_list}
+            if max(sr[mh]["trades"] for mh in hold_list) < 10:
+                continue   # サンプル過少はスキップ
+            best = max(hold_list, key=lambda m: sr[m]["total_pnl"])
+            _cur = _dmh_default(st)
+            _note = (f'現行{_cur}日' + ('＝最良' if _cur == best else f' → 最良は{best}日'))
+            out += (f'<details style="margin:6px 0"><summary style="cursor:pointer;'
+                    f'color:#93c5fd;font-weight:700;padding:3px 0">{st}'
+                    f'（最良=最大{best}日 / {_note}）</summary>{_build_table(sr)}</details>')
+        return out or '<p style="color:#64748b">戦略別に十分なサンプルがありません。</p>'
 
     def _build_table(results: dict) -> str:
         best_mh = max(hold_list, key=lambda m: results[m]["total_pnl"])
@@ -4641,14 +4667,14 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
         con_results: dict[int, dict] = {}
         for mh in hold_list:
             print(f"    MAX_HOLD={mh}日...", flush=True)
-            con_results[mh] = _collect(mh)
+            con_results[mh] = _stats(_collect(mh))
         # Aggressive
         print(f"  [max_hold比較] aggressive 集計中...", flush=True)
         _set_sig_params("aggressive")
         agg_results: dict[int, dict] = {}
         for mh in hold_list:
             print(f"    MAX_HOLD={mh}日...", flush=True)
-            agg_results[mh] = _collect(mh)
+            agg_results[mh] = _stats(_collect(mh))
         # Restore conservative
         _set_sig_params("conservative")
 
@@ -4665,16 +4691,20 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
             f'{agg_table}</div>'
         )
     else:
-        results: dict[int, dict] = {}
+        trades_by_mh: dict[int, list] = {}
         for mh in hold_list:
             print(f"  [max_hold比較] MAX_HOLD={mh}日 集計中...", flush=True)
-            results[mh] = _collect(mh)
+            trades_by_mh[mh] = _collect(mh)
+        results = {mh: _stats(trades_by_mh[mh]) for mh in hold_list}
         return (
             f'<div style="margin:0 0 24px;padding:16px 20px;background:#1e293b;'
             f'border-radius:8px;border-left:3px solid #a78bfa">'
             f'<h4 style="margin:0 0 12px;color:#a78bfa;font-size:0.95rem">'
-            f'⏱ 最大保有日数 比較（直近{days}日）</h4>'
-            f'{_build_table(results)}</div>'
+            f'⏱ 最大保有日数 比較（全戦略まとめ・直近{days}日）</h4>'
+            f'{_build_table(results)}'
+            f'<h4 style="margin:16px 0 6px;color:#93c5fd;font-size:0.9rem">'
+            f'戦略別 最大保有日数比較（クリックで展開・各戦略の最良保有日数を表示）</h4>'
+            f'{_per_strategy_html(trades_by_mh)}</div>'
         )
 
 
