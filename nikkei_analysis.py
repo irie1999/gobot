@@ -4578,6 +4578,7 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
                                 and t.get("reason") not in ("発注中", "保有中")):
                             _t = dict(t)
                             _t["_strat"] = sym_st[1]
+                            _t["_sym"] = sym_st[0]
                             trades.append(_t)
                 except Exception as _e:
                     _errors += 1
@@ -4660,6 +4661,104 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
             f'</table>'
         )
 
+    def _recovery_html(trades_by_mh: dict) -> str:
+        """『7日でタイムカット(=未決着)だった玉を、そのまま10日/15日まで持つと
+        どうなるか』を、7日決済時の含み損/含み益で分けて実測する。
+        同一エントリー(sym,strat,signal_dt)を延長版バックテストと突き合わせ。
+        感情(損切りは惜しい)ではなく『延長で純損益が改善するか』で判断するための表。"""
+        base = 7
+        longer = [m for m in (10, 15) if m in trades_by_mh and m != base]
+        if base not in trades_by_mh or not longer:
+            return ""
+
+        def _key(t):
+            sd = t.get("signal_dt")
+            sd = sd.date() if hasattr(sd, "date") else sd
+            return (t.get("_sym"), t.get("_strat"), sd)
+
+        base_map = {_key(t): t for t in trades_by_mh[base]}
+        # 7日で「タイムカット」= 損切り/利確に届かず未決着で切られた玉のみ対象
+        tc7 = {k: t for k, t in base_map.items() if t.get("reason") == "タイムカット"}
+        if not tc7:
+            return ""
+
+        def _grp_stats(mh: int, want_loss: bool) -> dict:
+            lmap = {_key(t): t for t in trades_by_mh[mh]}
+            keys = [k for k, t in tc7.items()
+                    if (t.get("pnl", 0) < 0) == want_loss and k in lmap]
+            n = len(keys)
+            base_pnl = sum(tc7[k].get("pnl", 0) for k in keys)
+            long_pnl = sum(lmap[k].get("pnl", 0) for k in keys)
+            recovered = sum(1 for k in keys if lmap[k].get("pnl", 0) > tc7[k].get("pnl", 0))
+            turned_pos = sum(1 for k in keys
+                             if tc7[k].get("pnl", 0) < 0 and lmap[k].get("pnl", 0) > 0)
+            worse = sum(1 for k in keys if lmap[k].get("pnl", 0) < tc7[k].get("pnl", 0))
+            still_tc = sum(1 for k in keys if lmap[k].get("reason") == "タイムカット")
+            wins = sum(1 for k in keys if lmap[k].get("pnl", 0) > 0)
+            return {"n": n, "base_pnl": base_pnl, "long_pnl": long_pnl,
+                    "delta": long_pnl - base_pnl, "recovered": recovered,
+                    "turned_pos": turned_pos, "worse": worse,
+                    "still_tc": still_tc, "wins": wins}
+
+        rows = ""
+        verdicts = []
+        for mh in longer:
+            for want_loss, glabel, gcol in ((True, "7日時点 含み損", "#f87171"),
+                                            (False, "7日時点 含み益", "#4ade80")):
+                s = _grp_stats(mh, want_loss)
+                if s["n"] == 0:
+                    continue
+                dc = "#4ade80" if s["delta"] >= 0 else "#f87171"
+                wr = s["wins"] / s["n"] * 100 if s["n"] else 0.0
+                rows += (
+                    f'<tr>'
+                    f'<td style="padding:5px 10px;color:{gcol};text-align:left">{glabel}</td>'
+                    f'<td style="padding:5px 10px;text-align:right">→{mh}日</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{s["n"]}件</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:#94a3b8">{s["base_pnl"]:+,.0f}</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{s["long_pnl"]:+,.0f}</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:{dc};font-weight:700">{s["delta"]:+,.0f}</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:#4ade80">{s["turned_pos"]}件</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:#f87171">{s["worse"]}件</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:#94a3b8">{s["still_tc"]}件</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{wr:.0f}%</td>'
+                    f'</tr>'
+                )
+                if want_loss:
+                    kind = "改善" if s["delta"] > 0 else "悪化"
+                    verdicts.append(
+                        f'7日時点で含み損だった {s["n"]}件を{mh}日まで持つと純損益 '
+                        f'<b style="color:{dc}">{s["delta"]:+,.0f}円 {kind}</b>'
+                        f'（プラス転換 {s["turned_pos"]}件 / さらに悪化 {s["worse"]}件）')
+
+        if not rows:
+            return ""
+        vhtml = "<br>".join(verdicts)
+        return (
+            f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+            f'border-radius:8px;border-left:3px solid #fbbf24">'
+            f'<h4 style="margin:0 0 6px;color:#fbbf24;font-size:0.9rem">'
+            f'⑬ 7日タイムカット玉を延長すると回復するか（含み損/含み益 別・後知恵なし）</h4>'
+            f'<p style="margin:0 0 10px;color:#94a3b8;font-size:0.78rem">'
+            f'7日で未決着(タイムカット)だった同一エントリーを、そのまま10日/15日まで持った'
+            f'場合の実損益。<b>「差分」がプラスなら延長に価値あり／マイナスなら7日で切るのが正解</b>。'
+            f'「損切りが惜しい」という感情ではなく、この差分で判断する。</p>'
+            f'<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
+            f'<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            f'<th style="padding:5px 10px;text-align:left">7日決済時グループ</th>'
+            f'<th style="padding:5px 10px;text-align:right">延長</th>'
+            f'<th style="padding:5px 10px;text-align:right">件数</th>'
+            f'<th style="padding:5px 10px;text-align:right">7日損益</th>'
+            f'<th style="padding:5px 10px;text-align:right">延長後損益</th>'
+            f'<th style="padding:5px 10px;text-align:right">差分(延長効果)</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#4ade80">プラス転換</th>'
+            f'<th style="padding:5px 10px;text-align:right;color:#f87171">悪化</th>'
+            f'<th style="padding:5px 10px;text-align:right">なお未決着</th>'
+            f'<th style="padding:5px 10px;text-align:right">延長後勝率</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>'
+            f'<p style="margin:10px 0 0;color:#cbd5e1;font-size:0.82rem">{vhtml}</p></div>'
+        )
+
     if compare_modes:
         # Conservative
         print(f"  [max_hold比較] conservative 集計中...", flush=True)
@@ -4705,6 +4804,7 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
             f'<h4 style="margin:16px 0 6px;color:#93c5fd;font-size:0.9rem">'
             f'戦略別 最大保有日数比較（クリックで展開・各戦略の最良保有日数を表示）</h4>'
             f'{_per_strategy_html(trades_by_mh)}</div>'
+            f'{_recovery_html(trades_by_mh)}'
         )
 
 
