@@ -576,16 +576,14 @@ def default_stop_mode(strategy_name: str, is_short: bool) -> str:
     return "close"
 
 
-# ── 戦略別 最大保有日数 (改善④) ─────────────────────────────────
-# 戦略の性質に応じてタイムカット日数を変える。
-#   RSI2 (売られすぎ反発): 反発は数日で完結 → 短く保有してタイムカット損失を減らす
-#   MOM  (モメンタム継続) : トレンドが伸びる → 長く保有して利を伸ばす
-#   その他               : 現状維持 (MAX_HOLD)
+# ── 戦略別 最大保有日数 ─────────────────────────────────────────
+# 2026-07-06: 全戦略 7日 に統一 (高回転=資金効率優先の運用方針)。
+#   資金効率(円/保有日)は全体で7日≈10日と拮抗し、回転率の高い7日を採用。
+#   戦略別に変えたい場合はここに {"MOM": 10, ...} のように追記する
+#   (in-sample分析では MOM/RSI2/A7 は10日が最良だったが、回転率優先で7日統一)。
 # 環境変数 MAX_HOLD_OVERRIDE で全戦略一括上書き可 (検証用)。
-_MAX_HOLD_BY_STRATEGY = {
-    "RSI2": 7,
-    "MOM":  20,
-}
+_DEFAULT_HOLD = 7
+_MAX_HOLD_BY_STRATEGY = {}
 
 
 def default_max_hold(strategy_name: str) -> int:
@@ -595,7 +593,7 @@ def default_max_hold(strategy_name: str) -> int:
             return int(ovr)
         except ValueError:
             pass
-    return _MAX_HOLD_BY_STRATEGY.get((strategy_name or "").upper(), MAX_HOLD)
+    return _MAX_HOLD_BY_STRATEGY.get((strategy_name or "").upper(), _DEFAULT_HOLD)
 
 
 # ── 指値エントリー バックテスト ─────────────────────────────────

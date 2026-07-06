@@ -418,7 +418,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
   tr:hover td {{ background:#243045; }}
 </style></head><body>
 <h2>📌 保有銘柄 詳細（実際に約定した建玉）</h2>
-<p class="sub">基準日 {now:%Y-%m-%d %H:%M} JST ／ 保有期限(タイムカット) = 約定日 + MAX_HOLD営業日（MOM=20日, 他=7日）<br>
+<p class="sub">基準日 {now:%Y-%m-%d %H:%M} JST ／ 保有期限(タイムカット) = 約定日 + 7営業日（全戦略7日に統一）<br>
   ※ kabuの実建玉のみ表示（実際に約定した銘柄）。損切り/利確はシグナル(発注時)の値。</p>
 <table>
   <thead><tr>
@@ -1181,7 +1181,7 @@ def main() -> int:
             return fb
         return get_current_price_fallback(symbol)
 
-    # MAX_HOLD は戦略別 (RSI2=7, MOM=20, other=15)
+    # MAX_HOLD は全戦略7日に統一 (default_max_hold)
     from backtest_limit_entry import default_max_hold
 
     today_bdate = pd.Timestamp(now.date())
