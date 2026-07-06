@@ -1779,6 +1779,57 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         )
 
 
+def _dump_trade_factors(trades, path="trades_factors.csv") -> None:
+    """決済済み全取引を『成績に効く要素』付きでCSV出力(factor_analysis.py用)。
+    列: strategy/config/bt_score/wf_score/bt_type/stop_pct/target_pct/
+        hold_days/days_to_fill/overlap/reason/pnl/win。"""
+    import csv
+    rows = []
+    for t in trades:
+        if t.get("reason") in ("発注中", "保有中"):
+            continue
+        olp = t.get("order_limit") or 0
+        osp = t.get("order_stop") or 0
+        otp = t.get("order_target") or 0
+        stop_pct = (osp - olp) / olp * 100 if olp else 0.0
+        tgt_pct = (otp - olp) / olp * 100 if olp else 0.0
+        _cfg = str(t.get("label", "") or "")
+        _mode = "agg" if "/agg" in _cfg else ("con" if "/con" in _cfg else "")
+        _ho = _cfg.split("/")[0] if "/" in _cfg else _cfg
+        rows.append({
+            "symbol":       str(t.get("symbol", "")).split(".")[0],
+            "strategy":     t.get("strategy", ""),
+            "config":       _cfg,
+            "holdout":      _ho,
+            "mode":         _mode,
+            "bt_score":     t.get("rec_score") if t.get("rec_score") is not None else (t.get("score") or 0),
+            "wf_score":     t.get("wf_score") if t.get("wf_score") is not None else "",
+            "bt_type":      t.get("bt_type", ""),
+            "stop_pct":     round(stop_pct, 1),
+            "target_pct":   round(tgt_pct, 1),
+            "hold_days":    t.get("hold_days", 0),
+            "days_to_fill": t.get("days_to_fill", 0),
+            "overlap":      1 if t.get("_overlap") else 0,
+            "reason":       t.get("reason", ""),
+            "pnl":          round(t.get("pnl", 0)),
+            "win":          1 if (t.get("pnl", 0) or 0) > 0 else 0,
+            "entry_d":      str(t.get("entry_d_raw", "") or ""),
+            "exit_d":       str(t.get("exit_d_raw", "") or ""),
+        })
+    if not rows:
+        return
+    try:
+        from pathlib import Path as _P
+        p = _P(__file__).resolve().parent / path
+        with open(p, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+        print(f"  [factor] {len(rows)}取引を {p.name} に出力 → python factor_analysis.py", flush=True)
+    except Exception as e:
+        print(f"  [factor] CSVダンプ失敗: {e}", flush=True)
+
+
 def _calc_strat_priority(wr: float, pf: float, avgh: float) -> tuple[float, str, str]:
     """戦略の総合優先度スコア(0〜100)とランク★・色を返す(戦略別サマリーと共通)。
     勝率40点 + PF40点(PF10でキャップ,∞=10) + 速度20点(平均保有15日で0)。"""
@@ -6331,6 +6382,11 @@ function switchTbd(id, tab) {{
     # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
     #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
     display_trades = all_trades + _overlap_dropped
+    # 成績に効く要素の分析用に全取引をCSVダンプ (factor_analysis.py で読む)
+    try:
+        _dump_trade_factors(display_trades)
+    except Exception:
+        pass
 
     # ── 重複保有(計測外)シグナルの勝率サマリー ──────────────────────────────
     # 1銘柄1ポジション制で弾かれた「既保有中の同銘柄シグナル」の決済済み成績を
