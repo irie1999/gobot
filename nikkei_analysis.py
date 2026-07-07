@@ -5103,13 +5103,13 @@ def build_fade_short_html(days: int, workers: int) -> str:
 
 
 def build_holdday_curve_html(days: int, workers: int) -> str:
-    """『保有N日目に含み損がどう変化するか』を実測（詳細分析タブ用）。
+    """『保有N日目の平均含み損益』を実測（詳細分析タブ用）。
     各ロングエントリーを日次で追い、終値ベースの目標/損切りで決済されるまでの
-    "未決着玉" の含み損益を保有日ごとに集計。序盤の押し→回復の形を可視化する。
+    未決着玉の平均含み損益を保有日ごとに出す。加えて『初日(1日目)に含み損だった
+    エントリーだけ』に絞った平均も並べ、序盤マイナス→回復の形を確認できる。
     全戦略 em=0(トリガー=前日終値)・close損切りに統一済みなので再現可能。"""
     if not _SIGNALS_AVAILABLE:
         return ""
-    import numpy as np
     from backtest_limit_entry import (
         fetch as _fetch, SLIPPAGE_STOP_PCT as _SLIP, FIXED_QTY as _QTY,
         ENTRY_EXPIRE as _EXP, MIN_PRICE as _MINP, MAX_PRICE as _MAXP,
@@ -5128,6 +5128,7 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
     since = _TODAY - timedelta(days=days)
 
     def _one(sym, name, strat) -> list:
+        """(bt, {保有日: 含み損益}) のリストを返す（エントリー単位の軌跡）。"""
         mod = _mod_for(strat)
         try:
             params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
@@ -5157,7 +5158,7 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
                 atrs = tr.ewm(alpha=1 / 14, adjust=False).mean().values
             idx = df.index
             n = len(df)
-            recs = []   # (bt, day, pnl)  未決着玉の含み損益
+            entries = []   # (bt, {day: pnl})
             for s in range(n - 1):
                 if not bool(sigs[s]):
                     continue
@@ -5182,6 +5183,7 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
                 entry_p = order_p * (1 + _SLIP)
                 stop = order_p - a * _sm
                 target = order_p + a * _tm
+                traj = {}
                 for d in range(1, HOLD_MAX + 1):
                     ei = fill + d
                     if ei >= n:
@@ -5189,59 +5191,70 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
                     c = closes[ei]
                     if c >= target or c <= stop:   # 終値ベースで決済 → 以降は保有せず
                         break
-                    recs.append((bt, d, (c - entry_p) * _QTY))
-            return recs
+                    traj[d] = (c - entry_p) * _QTY
+                if traj:
+                    entries.append((bt, traj))
+            return entries
         except Exception:
             return []
 
-    all_recs: list = []
+    all_entries: list = []
     with _TPE(max_workers=workers) as ex:
         futs = [ex.submit(_one, s, n, st) for s, n, st in items]
         for fut in _asc(futs):
             try:
-                all_recs.extend(fut.result() or [])
+                all_entries.extend(fut.result() or [])
             except Exception:
                 pass
-    if not all_recs:
+    if not all_entries:
         return ""
 
-    def _table(recs: list) -> str:
+    def _table(entries: list) -> str:
+        # 初日(1日目)に含み損だったエントリー = traj[1] < 0
+        cond = [t for (_b, t) in entries if t.get(1) is not None and t[1] < 0]
+        allt = [t for (_b, t) in entries]
         rows = ""
         for d in range(1, HOLD_MAX + 1):
-            sub = [r[2] for r in recs if r[1] == d]
-            if not sub:
+            av = [t[d] for t in allt if d in t]
+            cv = [t[d] for t in cond if d in t]
+            if not av:
                 continue
-            cnt = len(sub)
-            neg = [x for x in sub if x < 0]
-            under_pct = len(neg) / cnt * 100 if cnt else 0.0
-            avg = sum(sub) / cnt if cnt else 0.0
-            avg_loss = sum(neg) / len(neg) if neg else 0.0
-            worst = min(sub) if sub else 0.0
-            ac = "#4ade80" if avg >= 0 else "#f87171"
-            uc = "#f87171" if under_pct >= 50 else "#fbbf24" if under_pct >= 35 else "#94a3b8"
+            a_avg = sum(av) / len(av)
+            ac = "#4ade80" if a_avg >= 0 else "#f87171"
+            if cv:
+                c_avg = sum(cv) / len(cv)
+                cc = "#4ade80" if c_avg >= 0 else "#f87171"
+                c_cnt = f"{len(cv)}件"
+                c_val = f'{c_avg:+,.0f}'
+            else:
+                cc, c_cnt, c_val = "#475569", "—", "—"
             rows += (
-                f'<tr><td style="padding:5px 10px;text-align:right">{d}日目</td>'
-                f'<td style="padding:5px 10px;text-align:right">{cnt}件</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:{uc}">{under_pct:.0f}%</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:{ac};font-weight:700">{avg:+,.0f}</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{avg_loss:+,.0f}</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{worst:+,.0f}</td></tr>')
+                f'<tr><td style="padding:5px 12px;text-align:right">{d}日目</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8">{len(av)}件</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{ac};font-weight:700">{a_avg:+,.0f}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8;'
+                f'border-left:1px solid #334155">{c_cnt}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{cc};font-weight:700">{c_val}</td></tr>')
         if not rows:
             return ""
         return (
-            '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
-            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
-            '<th style="padding:5px 10px;text-align:right">保有</th>'
-            '<th style="padding:5px 10px;text-align:right">未決着件数</th>'
-            '<th style="padding:5px 10px;text-align:right">含み損率</th>'
-            '<th style="padding:5px 10px;text-align:right">平均含み損益</th>'
-            '<th style="padding:5px 10px;text-align:right">平均含み損(負のみ)</th>'
-            '<th style="padding:5px 10px;text-align:right">最悪含み損</th>'
+            '<table style="width:auto;min-width:560px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead>'
+            '<tr style="color:#64748b;font-size:0.72rem">'
+            '<th></th><th colspan="2" style="padding:3px 12px;text-align:center;color:#94a3b8">全エントリー</th>'
+            '<th colspan="2" style="padding:3px 12px;text-align:center;color:#f87171;'
+            'border-left:1px solid #334155">初日に含み損だった玉のみ</th></tr>'
+            '<tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 12px;text-align:right">保有</th>'
+            '<th style="padding:5px 12px;text-align:right">件数</th>'
+            '<th style="padding:5px 12px;text-align:right">平均含み損益</th>'
+            '<th style="padding:5px 12px;text-align:right;border-left:1px solid #334155">件数</th>'
+            '<th style="padding:5px 12px;text-align:right">平均含み損益</th>'
             f'</tr></thead><tbody>{rows}</tbody></table>')
 
     blocks = ""
     for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
-        sub = [r for r in all_recs if (r[0] or 0) >= bt_min]
+        sub = [e for e in all_entries if (e[0] or 0) >= bt_min]
         tbl = _table(sub)
         if not tbl:
             continue
@@ -5252,12 +5265,12 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
         f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
         f'border-radius:8px;border-left:3px solid #38bdf8">'
         f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
-        f'⑮ 保有日数に対する含み損の変化（未決着玉・終値ベース・直近{days}日）</h4>'
+        f'⑮ 保有日数に対する平均含み損益（未決着玉・終値ベース・直近{days}日）</h4>'
         f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
         f'各ロングエントリーを日次で追い、終値が目標/損切りに達するまでの"まだ持っている玉"の'
-        f'含み損益を保有日ごとに集計。<b>含み損率と平均含み損が保有1〜3日目でピークになり、'
-        f'その後薄れる（=序盤の押し→回復）</b>なら、若い含み損は待つのが正解を裏付ける。'
-        f'逆に日を追うごとに悪化するなら早期損切りが必要。</p>'
+        f'平均含み損益を保有日ごとに集計。右2列は<b>「初日(1日目)に含み損だったエントリー」だけ</b>'
+        f'に絞った平均。<b>初日マイナスでも日を追うごとに平均が回復していく</b>なら、'
+        f'あなたの今の含み損は待つのが正解。逆に悪化し続けるなら早期損切りが必要。</p>'
         f'{blocks}</div>'
     )
 
