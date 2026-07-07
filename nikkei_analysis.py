@@ -5505,6 +5505,216 @@ def build_stop_width_html(days: int, workers: int) -> str:
     )
 
 
+def build_open_direction_accuracy_html(days: int, workers: int = 1) -> str:
+    """⑰ 寄り付き方向 予測精度（詳細分析タブ用）。
+    夜間指標（前夜S&P500・CME日経先物ナイト）が、翌日の日経の
+      ①寄りギャップ（始値/前日終値）
+      ②寄り→引け（終値/始値）
+      ③前日終値→当日終値
+    の方向をどれだけ当てるかを的中率で測る。指標=上/下 それぞれの条件付き精度も出す。
+    相場別（上昇/横ばい/下落）にも分割し「下落局面で翌日プラスを当てられるか」を見る。
+    データは yfinance（^N225 / ^GSPC / NKD=F）。取得失敗時は空文字。"""
+    import bisect
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        import yfinance as _yf
+        import pandas as _pd
+    except Exception:
+        return ""
+
+    buf = max(int(days * 1.6) + 30, 120)
+    _now = _dt.now()
+    _start = (_now - _td(days=buf)).strftime("%Y-%m-%d")
+    _end = (_now + _td(days=1)).strftime("%Y-%m-%d")
+
+    def _ohlc(ticker):
+        try:
+            raw = _yf.Ticker(ticker).history(
+                start=_start, end=_end, interval="1d",
+                auto_adjust=False, actions=False)
+            if raw is None or len(raw) < 30:
+                return None
+            return raw
+        except Exception:
+            return None
+
+    n225 = _ohlc("^N225")
+    if n225 is None:
+        return ""
+
+    def _dkey(idx):
+        return idx.date() if hasattr(idx, "date") else idx
+
+    # 日経: 日付→(open, close)
+    n_dates = [_dkey(i) for i in n225.index]
+    n_open = [float(x) for x in n225["Open"].values]
+    n_close = [float(x) for x in n225["Close"].values]
+
+    # 相場ラベル（既存 label_trend を流用）
+    _tmap = {}
+    try:
+        _trend = label_trend(n225["Close"])
+        _tmap = {_dkey(dt): tr for dt, tr in zip(_trend.index, _trend)}
+    except Exception:
+        _tmap = {}
+
+    since = (_now - _td(days=days)).date()
+
+    # 予測元: ticker → sorted[(date, daily_return)]
+    def _ret_series(ticker):
+        raw = _ohlc(ticker)
+        if raw is None:
+            return None
+        cl = raw["Close"].astype(float)
+        rets = cl.pct_change()
+        out = [(_dkey(dt), float(r)) for dt, r in zip(raw.index, rets.values)
+               if r == r]  # NaN除外
+        out.sort(key=lambda x: x[0])
+        return out
+
+    predictors = []
+    for tk, lbl in [("^GSPC", "前夜S&P500"), ("NKD=F", "CME日経先物ナイト")]:
+        rs = _ret_series(tk)
+        if rs and len(rs) >= 30:
+            predictors.append((lbl, rs))
+    if not predictors:
+        return ""
+
+    def _pred_before(rs, d):
+        """JP営業日 d の寄り前に判明している最新の指標リターン（date < d の最後）。"""
+        ds = [x[0] for x in rs]
+        i = bisect.bisect_left(ds, d)
+        if i == 0:
+            return None
+        return rs[i - 1][1]
+
+    # JP各日の実測（②③は前日終値が必要なので index>=1 から）
+    targets = [("寄りギャップ", "gap"), ("寄り→引け", "intra"), ("前日終値→当日終値", "full")]
+    # 各(predictor, target)ごとに (pred_ret, actual_ret, trend) を貯める
+    samples: dict = {}
+    for plbl, _rs in predictors:
+        for _, tk in targets:
+            samples[(plbl, tk)] = []
+
+    for k in range(1, len(n_dates)):
+        d = n_dates[k]
+        if d < since:
+            continue
+        prev_c = n_close[k - 1]
+        op = n_open[k]
+        cl = n_close[k]
+        if prev_c <= 0 or op <= 0 or cl <= 0:
+            continue
+        actual = {
+            "gap": op / prev_c - 1.0,
+            "intra": cl / op - 1.0,
+            "full": cl / prev_c - 1.0,
+        }
+        tr = _tmap.get(d)
+        for plbl, rs in predictors:
+            pr = _pred_before(rs, d)
+            if pr is None or pr == 0:
+                continue
+            for _, tk in targets:
+                av = actual[tk]
+                if av == 0:
+                    continue
+                samples[(plbl, tk)].append((pr, av, tr))
+
+    def _acc(pairs):
+        n = len(pairs)
+        if n == 0:
+            return None
+        hit = sum(1 for pr, av, _ in pairs if (pr > 0) == (av > 0))
+        up = [av for pr, av, _ in pairs if pr > 0]
+        dn = [av for pr, av, _ in pairs if pr < 0]
+        up_prec = (sum(1 for a in up if a > 0) / len(up) * 100.0) if up else None
+        dn_prec = (sum(1 for a in dn if a < 0) / len(dn) * 100.0) if dn else None
+        return {"n": n, "acc": hit / n * 100.0,
+                "n_up": len(up), "up_prec": up_prec,
+                "n_dn": len(dn), "dn_prec": dn_prec}
+
+    def _c(v):
+        if v is None:
+            return '<span style="color:#475569">—</span>'
+        col = "#4ade80" if v >= 60 else ("#fbbf24" if v >= 52 else "#f87171")
+        return f'<span style="color:{col};font-weight:700">{v:.0f}%</span>'
+
+    blocks = ""
+    for plbl, _rs in predictors:
+        rows = ""
+        for tlbl, tk in targets:
+            st = _acc(samples[(plbl, tk)])
+            if not st:
+                continue
+            rows += (
+                f'<tr><td style="padding:5px 12px;text-align:left">{tlbl}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8">{st["n"]}</td>'
+                f'<td style="padding:5px 12px;text-align:right">{_c(st["acc"])}</td>'
+                f'<td style="padding:5px 12px;text-align:right">{_c(st["up_prec"])}'
+                f'<br><span style="font-size:0.68rem;color:#64748b">{st["n_up"]}日</span></td>'
+                f'<td style="padding:5px 12px;text-align:right">{_c(st["dn_prec"])}'
+                f'<br><span style="font-size:0.68rem;color:#64748b">{st["n_dn"]}日</span></td></tr>')
+        if not rows:
+            continue
+        # 相場別（③前日終値→当日終値のみ）
+        reg_rows = ""
+        reg_samples = samples[(plbl, "full")]
+        for rk, rlbl in [("up", "▲上昇"), ("sideways", "→横ばい"), ("down", "▼下落")]:
+            sub = [(pr, av, tr) for pr, av, tr in reg_samples if tr == rk]
+            st = _acc(sub)
+            if not st:
+                continue
+            reg_rows += (
+                f'<tr><td style="padding:4px 12px;text-align:left;color:#94a3b8">{rlbl}</td>'
+                f'<td style="padding:4px 12px;text-align:right;color:#94a3b8">{st["n"]}</td>'
+                f'<td style="padding:4px 12px;text-align:right">{_c(st["acc"])}</td>'
+                f'<td style="padding:4px 12px;text-align:right">{_c(st["up_prec"])}'
+                f'<br><span style="font-size:0.68rem;color:#64748b">{st["n_up"]}日</span></td></tr>')
+        reg_tbl = ""
+        if reg_rows:
+            reg_tbl = (
+                '<div style="margin:6px 0 0 12px"><span style="color:#64748b;font-size:0.72rem">'
+                '相場別（③前日終値→当日終値）</span>'
+                '<table style="width:auto;min-width:420px;border-collapse:collapse;font-size:0.8rem;margin-top:2px">'
+                '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.7rem">'
+                '<th style="padding:4px 12px;text-align:left">相場</th>'
+                '<th style="padding:4px 12px;text-align:right">日数</th>'
+                '<th style="padding:4px 12px;text-align:right">的中率</th>'
+                '<th style="padding:4px 12px;text-align:right">指標=上→実際上</th>'
+                f'</tr></thead><tbody>{reg_rows}</tbody></table></div>')
+        blocks += (
+            f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{plbl}</h5>'
+            '<table style="width:auto;min-width:560px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 12px;text-align:left">予測対象</th>'
+            '<th style="padding:5px 12px;text-align:right">日数</th>'
+            '<th style="padding:5px 12px;text-align:right">全体的中率</th>'
+            '<th style="padding:5px 12px;text-align:right">指標=上→実際上</th>'
+            '<th style="padding:5px 12px;text-align:right">指標=下→実際下</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>{reg_tbl}')
+
+    if not blocks:
+        return ""
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
+        f'⑰ 寄り付き方向 予測精度（夜間指標→翌日の日経・直近{days}日）</h4>'
+        f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
+        f'前夜に判明している指標（S&amp;P500の当日リターン / CME日経先物ナイト）が、'
+        f'翌日の日経の方向をどれだけ当てるかを的中率で測定。'
+        f'<b>①寄りギャップ</b>（始値/前日終値）は当たりやすいが寄り値に織り込み済み。'
+        f'<b>②寄り→引け</b>と<b>③前日終値→当日終値</b>が当たるなら発注判断に使える。'
+        f'色: <span style="color:#4ade80">≥60%</span> / '
+        f'<span style="color:#fbbf24">52〜60%</span> / '
+        f'<span style="color:#f87171">&lt;52%（コイン投げ以下）</span>。'
+        f'「指標=上→実際上」は<b>指標が上を示した日に実際に上がった割合</b>＝'
+        f'"上げ予測で多めに発注"の信頼度。</p>'
+        f'{blocks}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。
