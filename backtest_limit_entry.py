@@ -52,7 +52,7 @@ _CACHE_DIR    = Path(".rsi2_cache")
 
 ENTRY_EXPIRE  = 1      # 指値有効日数（翌日のみ有効）
 ROLLING_ENTRY = 0      # ローリング逆指値: 0=無効, N=最大更新回数（未約定時に終値で価格を更新）
-MAX_HOLD      = 7      # 最大保有日数
+MAX_HOLD      = 10     # 最大保有日数 (全戦略10日。⑬回復分析で10日が総損益/PFの最良)
 INITIAL_CASH  = 500_000
 POSITION_SIZE = 100_000
 FIXED_QTY     = 100         # 後方互換用 (廃止予定: calc_qty を使用)
@@ -582,17 +582,17 @@ def default_stop_mode(strategy_name: str, is_short: bool) -> str:
 # ── 戦略別 最大保有日数 ─────────────────────────────────────────
 # 2026-07-06: 全戦略 7日 に統一 (高回転=資金効率優先の運用方針)。
 #   資金効率(円/保有日)は全体で7日≈10日と拮抗し、回転率の高い7日を採用。
-#   戦略別に変えたい場合はここに {"MOM": 10, ...} のように追記する
-#   (in-sample分析では MOM/RSI2/A7 は10日が最良だったが、回転率優先で7日統一)。
+#   戦略別に変えたい場合はここに {"DON": 7, "MACDTF": 7, ...} のように追記する
+#   (⑬回復分析: 全体は10日が最良。戦略別最適は DON/MACDTF=7・他=10 だが全10日で統一)。
 # 環境変数 MAX_HOLD_OVERRIDE で全戦略一括上書き可 (検証用)。
-_DEFAULT_HOLD = 7
+_DEFAULT_HOLD = 10
 _MAX_HOLD_BY_STRATEGY = {}
 # タイムカット(最大保有日数での強制決済)の有効/無効スイッチ。
+# True  = 約定日+_DEFAULT_HOLD営業日でタイムカット(全戦略10日・約定日基準)。
 # False = タイムカットを外す = 目標/損切りに当たるまで保有(未決着は「保有中」で持ち越し)。
-# 最適な保有日数を検討中のため一時的に無効化 (2026-07)。
-# 7日や10日に戻すときは _TIMECUT_ENABLED=True にし、_DEFAULT_HOLD/_MAX_HOLD_BY_STRATEGY を設定。
-# 環境変数 MAX_HOLD_OVERRIDE を設定した場合はそちらが最優先(この無効化より優先)。
-_TIMECUT_ENABLED = False
+# 2026-07-07: ⑬回復分析(含み損玉は10日で回復/含み益は15日でgive back)を根拠に全10日で再有効化。
+# 環境変数 MAX_HOLD_OVERRIDE を設定した場合はそちらが最優先。
+_TIMECUT_ENABLED = True
 _NO_TIMECUT_HOLD = 100_000   # 実質無限(バックテスト窓を超える大きさ=タイムカット発火せず)
 
 
