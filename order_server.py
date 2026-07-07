@@ -215,6 +215,9 @@ def _active_close_order(cli, symbol: str, side: str):
 # kabu が受け付けた最長の ExpireDay 営業日オフセットをキャッシュ (毎回の探索を避ける)
 _EXPIRE_OK_BDAYS: int | None = None
 
+# 「場が引けました」検知後、利確補完を一時休止する期限 (429の嵐を防ぐ)。
+_BACKFILL_COOLDOWN_UNTIL = None  # datetime|None
+
 
 def _expire_int(bdays: int) -> int:
     """今日+bdays営業日 を YYYYMMDD int で返す (0=当日)。"""
@@ -529,7 +532,13 @@ def _backfill_targets(cli) -> None:
     order_server が約定の瞬間に起動していなくても(9:00常駐不要)、接続時に保有を点検し
     取りこぼしを埋める。目標価格は signals_latest.json + my_positions.csv で照合。
     get_orders/get_positions は1回だけ叩き、429時はバックオフ再試行する。"""
+    global _BACKFILL_COOLDOWN_UNTIL
     if not EXECUTE:
+        return
+    # 場が引けている時間帯(kabu:「場が引けました」)は利確指値を置けない。
+    # 直前に検知したクールダウン中は丸ごとスキップ(30秒ごとの無限リトライ=429の嵐を防ぐ)。
+    # 保有タブの更新は _regen_holdings が別途行うので影響しない。
+    if _BACKFILL_COOLDOWN_UNTIL is not None and datetime.now(JST) < _BACKFILL_COOLDOWN_UNTIL:
         return
     try:
         positions = _kabu_get(cli.get_positions, product=0)
@@ -597,6 +606,12 @@ def _backfill_targets(cli) -> None:
             print(f"  ⚠ 利確補完エラー {sym}: {e}")
             _time.sleep(0.6)
             continue
+        # 場が引けている(kabu:「場が引けました」/Code100244)なら、残り建玉も同様に
+        # 失敗する。30分クールダウンして中断し、429の嵐を止める(市場が開けば再開)。
+        if "場が引け" in str(st) or "100244" in str(st):
+            _BACKFILL_COOLDOWN_UNTIL = datetime.now(JST) + timedelta(minutes=30)
+            print("  ⏸ 場が引けているため利確補完を30分休止します(市場が開いたら自動再開)")
+            return
         # 変化があったときだけログ出力。exists(据置)は静かに。
         # 約定監視は10秒間隔で回るため、全保有が据置の定常状態では毎回同じ行が
         # 出続けてスパムになる。発注/更新/失敗のときのみ表示する。
