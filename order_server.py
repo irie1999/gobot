@@ -603,13 +603,19 @@ def _backfill_targets(cli) -> None:
 
 
 def _regen_holdings(cli) -> None:
-    """実建玉から保有銘柄HTML(holdings_<date>.html)を再生成する(📌保有タブ用)。"""
+    """実建玉から保有銘柄HTML(holdings_<date>.html)を再生成する(📌保有タブ用)。
+    kabu APIが一時失敗(空[])したときは『建玉なし』で上書きせず前回表示を維持する
+    (保有があるのに消える誤表示を防ぐ)。"""
     try:
-        from close_stop_guard import load_positions_from_kabu, _build_holdings_html
+        import close_stop_guard as _csg
         from pathlib import Path
-        positions = load_positions_from_kabu(cli, product=0, verbose=False)
-        html = _build_holdings_html(positions, datetime.now(JST),
-                                    price_fn=cli.get_current_price)
+        positions = _csg.load_positions_from_kabu(cli, product=0, verbose=False)
+        if not _csg.LAST_KABU_FETCH_OK:
+            # 取得失敗: 保有ゼロとは限らない → 既存の保有HTMLを上書きしない
+            print("  ⚠ 保有取得が一時失敗 → holdings_latest.html は上書きせず前回表示を維持")
+            return
+        html = _csg._build_holdings_html(positions, datetime.now(JST),
+                                         price_fn=cli.get_current_price)
         out = Path(__file__).resolve().parent / "holdings_latest.html"
         out.write_text(html, encoding="utf-8")
     except Exception as e:

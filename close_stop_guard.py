@@ -464,16 +464,24 @@ def _fill_date_from_signal(signal_date: str) -> str:
 # ────────────────────────────────────────────────────────────
 # kabu建玉 + signals JSON からポジション一覧を構築（--kabu モード）
 # ────────────────────────────────────────────────────────────
+LAST_KABU_FETCH_OK = True   # 直近の get_positions が成功したか。
+# 一時的なAPIエラー(空[])を「建玉なし」と誤表示・誤上書きしないため、呼び出し側が参照する。
+
+
 def load_positions_from_kabu(cli: KabuClient, product: int = 2,
                              verbose: bool = True) -> list[dict]:
     """kabu の実建玉を取得し、signals JSON で stop/target を補完して返す。
-    verbose=False で進捗printを抑制(保有HTMLの定期更新などで使う)。"""
+    verbose=False で進捗printを抑制(保有HTMLの定期更新などで使う)。
+    取得の成否は module 変数 LAST_KABU_FETCH_OK に記録(失敗時 False)。"""
+    global LAST_KABU_FETCH_OK
     def _p(*a):
         if verbose:
             print(*a)
     try:
         raw = cli.get_positions(product=product)
+        LAST_KABU_FETCH_OK = True
     except Exception as e:
+        LAST_KABU_FETCH_OK = False
         _p(f"  ✗ kabu 建玉取得失敗: {e}")
         return []
 
