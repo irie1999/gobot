@@ -5367,6 +5367,10 @@ def build_stop_width_html(days: int, workers: int) -> str:
             "pf": pf, "total": sum(pnls),
             "avg": sum(pnls) / n,
             "worst": min(pnls) if pnls else 0,
+            "nw": len(wins), "nl": len(losses),
+            "gp": gp, "gl": -gl,   # 利益合計(+) / 損失合計(-)
+            "avg_win": (gp / len(wins)) if wins else 0.0,
+            "avg_loss": (-gl / len(losses)) if losses else 0.0,
         }
 
     def _maxdd(trs: list) -> float:
@@ -5395,26 +5399,51 @@ def build_stop_width_html(days: int, workers: int) -> str:
             wide = lo >= 8
             row_bg = "background:#2d0a0a;" if wide else ""
             rows += (
-                f'<tr style="{row_bg}"><td style="padding:5px 12px;text-align:left">{lbl}</td>'
-                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8">{st["n"]}</td>'
-                f'<td style="padding:5px 12px;text-align:right">{st["wr"]:.0f}%</td>'
-                f'<td style="padding:5px 12px;text-align:right">{_fmt_pf(st["pf"])}</td>'
-                f'<td style="padding:5px 12px;text-align:right;color:{tc};font-weight:700">{st["total"]:+,.0f}</td>'
-                f'<td style="padding:5px 12px;text-align:right;color:{tc}">{st["avg"]:+,.0f}</td>'
-                f'<td style="padding:5px 12px;text-align:right;color:#f87171">{st["worst"]:+,.0f}</td></tr>')
+                f'<tr style="{row_bg}"><td style="padding:5px 10px;text-align:left">{lbl}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#94a3b8">{st["n"]}</td>'
+                f'<td style="padding:5px 10px;text-align:right">{st["wr"]:.0f}%</td>'
+                f'<td style="padding:5px 10px;text-align:right">{_fmt_pf(st["pf"])}</td>'
+                # ── 利益側（勝ち）──
+                f'<td style="padding:5px 10px;text-align:right;color:#4ade80;'
+                f'border-left:1px solid #334155">{st["nw"]}件</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#4ade80;font-weight:700">{st["gp"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#4ade80">{st["avg_win"]:+,.0f}</td>'
+                # ── 損失側（負け）──
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171;'
+                f'border-left:1px solid #334155">{st["nl"]}件</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171;font-weight:700">{st["gl"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{st["avg_loss"]:+,.0f}</td>'
+                # ── 差引 ──
+                f'<td style="padding:5px 10px;text-align:right;color:{tc};font-weight:700;'
+                f'border-left:1px solid #334155">{st["total"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{st["worst"]:+,.0f}</td></tr>')
         if not rows:
             return ""
         return (
-            '<table style="width:auto;min-width:620px;border-collapse:collapse;font-size:0.85rem">'
-            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
-            '<th style="padding:5px 12px;text-align:left">損切り幅</th>'
-            '<th style="padding:5px 12px;text-align:right">件数</th>'
-            '<th style="padding:5px 12px;text-align:right">勝率</th>'
-            '<th style="padding:5px 12px;text-align:right">PF</th>'
-            '<th style="padding:5px 12px;text-align:right">総損益</th>'
-            '<th style="padding:5px 12px;text-align:right">平均</th>'
-            '<th style="padding:5px 12px;text-align:right">最大単発損失</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table>')
+            '<div style="overflow-x:auto">'
+            '<table style="width:auto;min-width:820px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead>'
+            '<tr style="color:#64748b;font-size:0.7rem">'
+            '<th colspan="4"></th>'
+            '<th colspan="3" style="padding:3px 10px;text-align:center;color:#4ade80;'
+            'border-left:1px solid #334155">利益側（勝ち）</th>'
+            '<th colspan="3" style="padding:3px 10px;text-align:center;color:#f87171;'
+            'border-left:1px solid #334155">損失側（負け）</th>'
+            '<th colspan="2" style="border-left:1px solid #334155"></th></tr>'
+            '<tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 10px;text-align:left">損切り幅</th>'
+            '<th style="padding:5px 10px;text-align:right">件数</th>'
+            '<th style="padding:5px 10px;text-align:right">勝率</th>'
+            '<th style="padding:5px 10px;text-align:right">PF</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">勝件数</th>'
+            '<th style="padding:5px 10px;text-align:right">利益合計</th>'
+            '<th style="padding:5px 10px;text-align:right">平均利益</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">負件数</th>'
+            '<th style="padding:5px 10px;text-align:right">損失合計</th>'
+            '<th style="padding:5px 10px;text-align:right">平均損失</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">差引損益</th>'
+            '<th style="padding:5px 10px;text-align:right">最大単発損失</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
     def _sim_table(trs: list) -> str:
         # 現状 vs 損切り幅>8%除外
@@ -5465,9 +5494,11 @@ def build_stop_width_html(days: int, workers: int) -> str:
         f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
         f'⑯ 損切り幅別 成績＋広損切り除外シミュレーション（完了トレード・直近{days}日）</h4>'
         f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
-        f'完了トレードを損切り幅%（|損切り価格-注文価格|/注文価格）で帯分け。'
-        f'<b>赤帯=損切り幅8%超（高ボラ銘柄）</b>。100株固定なので損切り幅が広いほど'
-        f'1発の円損失が大きく、テール（最大単発損失・MaxDD）を作る。下段は'
+        f'完了トレードを損切り幅%（|損切り価格-注文価格|/注文価格＝ボラの代理）で帯分けし、'
+        f'<b>利益側（勝ち）と損失側（負け）を分けて</b>集計。'
+        f'<b>赤帯=損切り幅8%超（高ボラ銘柄）</b>。100株固定なので損切り幅が広い（高ボラ）ほど'
+        f'1発の利益も損失も大きくなる。<b>「高ボラ帯は損失合計も大きいが利益合計はそれ以上に大きい」'
+        f'なら、ボラの高さ自体は稼ぎの源</b>。下段は'
         f'<b>「損切り幅8%超を除外」した場合</b>の総損益・最大単発損失・MaxDDを現状と比較。'
         f'総損益をあまり削らずにテールだけ小さくできるなら、損切り幅フィルターが有効。</p>'
         f'{blocks}</div>'
