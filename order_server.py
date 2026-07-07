@@ -266,7 +266,11 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
                     else f"値幅内へ修正↓({_cur:,.0f}→{price:,.0f})")
 
     from backtest_limit_entry import default_max_hold
-    mh = default_max_hold(strat)
+    # タイムカット無効時 default_max_hold は 100000(実質無限) を返す。そのまま
+    # ExpireDay に使うと「約定日+100000営業日=西暦2409年」となり kabu が
+    # 「返済期日超過(Code45)」で拒否する。信用の返済期日内に収まる現実的な上限で
+    # キャップし、実際に受け付けられる最長は下の候補探索で決める。
+    mh = min(default_max_hold(strat), 25)
     if _EXPIRE_OK_BDAYS is not None:
         # 既知の最長のみ試す (だめなら当日)
         cand = [_EXPIRE_OK_BDAYS] + ([0] if _EXPIRE_OK_BDAYS != 0 else [])
@@ -293,10 +297,13 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
         if (res.get("Result") == 0) or res.get("_dry_run"):
             _EXPIRE_OK_BDAYS = n   # 通った最長をキャッシュ
             return f"{_relabel or 'placed'}(exp={n}営業日)"
-        # 有効期限エラー(Code5)なら短い候補へ。それ以外は即中断(スパム防止)
-        if res.get("Code") == 5 or "有効期限" in str(res.get("Message", "")):
+        # 有効期限系エラーなら短い候補へ。Code5(有効期限エラー)に加え、
+        # Code45(注文期限が返済期日超過)や期限/返済期日を含むメッセージも対象。
+        _msg = str(res.get("Message", ""))
+        if (res.get("Code") in (5, 45) or "有効期限" in _msg
+                or "返済期日" in _msg or "注文期限" in _msg):
             continue
-        return f"fail({res})"
+        return f"fail({res})"   # それ以外(価格エラー等)は即中断(スパム防止)
     return f"fail({res})"
 
 
