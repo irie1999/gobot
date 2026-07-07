@@ -5102,6 +5102,166 @@ def build_fade_short_html(days: int, workers: int) -> str:
     )
 
 
+def build_holdday_curve_html(days: int, workers: int) -> str:
+    """『保有N日目に含み損がどう変化するか』を実測（詳細分析タブ用）。
+    各ロングエントリーを日次で追い、終値ベースの目標/損切りで決済されるまでの
+    "未決着玉" の含み損益を保有日ごとに集計。序盤の押し→回復の形を可視化する。
+    全戦略 em=0(トリガー=前日終値)・close損切りに統一済みなので再現可能。"""
+    if not _SIGNALS_AVAILABLE:
+        return ""
+    import numpy as np
+    from backtest_limit_entry import (
+        fetch as _fetch, SLIPPAGE_STOP_PCT as _SLIP, FIXED_QTY as _QTY,
+        ENTRY_EXPIRE as _EXP, MIN_PRICE as _MINP, MAX_PRICE as _MAXP,
+        MAX_ATR_RATIO as _MAXATR)
+    HOLD_MAX = 12   # 10日タイムカット + 余裕2日
+
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+    since = _TODAY - timedelta(days=days)
+
+    def _one(sym, name, strat) -> list:
+        mod = _mod_for(strat)
+        try:
+            params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
+            if not params or len(params) < 4:
+                return []
+            calc_fn, _em, _sm, _tm = params[0], params[1], params[2], params[3]
+            df = _fetch(sym)
+            if df is None or len(df) < 40:
+                return []
+            df = calc_fn(df.copy())
+            if "entry_sig" not in df:
+                return []
+            try:
+                bt = mod.calc_recommend_score(
+                    mod.backtest_one(sym, name, strat).get("period_results", {}))[0]
+            except Exception:
+                bt = 0
+            closes = df["close"].values
+            highs = df["high"].values
+            sigs = df["entry_sig"].values
+            if "atr" in df:
+                atrs = df["atr"].values
+            else:
+                h, l, c = df["high"], df["low"], df["close"]
+                pc = c.shift(1)
+                tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+                atrs = tr.ewm(alpha=1 / 14, adjust=False).mean().values
+            idx = df.index
+            n = len(df)
+            recs = []   # (bt, day, pnl)  未決着玉の含み損益
+            for s in range(n - 1):
+                if not bool(sigs[s]):
+                    continue
+                cp = closes[s]
+                if not (_MINP <= cp <= _MAXP):
+                    continue
+                a = atrs[s]
+                if not a or a <= 0 or a / cp > _MAXATR:
+                    continue
+                order_p = cp   # em=0
+                fill = None
+                for j in range(s + 1, min(s + 2 + _EXP, n)):
+                    if highs[j] >= order_p:
+                        fill = j
+                        break
+                if fill is None:
+                    continue
+                fdate = idx[fill]
+                fdate = fdate.date() if hasattr(fdate, "date") else fdate
+                if fdate < since:
+                    continue
+                entry_p = order_p * (1 + _SLIP)
+                stop = order_p - a * _sm
+                target = order_p + a * _tm
+                for d in range(1, HOLD_MAX + 1):
+                    ei = fill + d
+                    if ei >= n:
+                        break
+                    c = closes[ei]
+                    if c >= target or c <= stop:   # 終値ベースで決済 → 以降は保有せず
+                        break
+                    recs.append((bt, d, (c - entry_p) * _QTY))
+            return recs
+        except Exception:
+            return []
+
+    all_recs: list = []
+    with _TPE(max_workers=workers) as ex:
+        futs = [ex.submit(_one, s, n, st) for s, n, st in items]
+        for fut in _asc(futs):
+            try:
+                all_recs.extend(fut.result() or [])
+            except Exception:
+                pass
+    if not all_recs:
+        return ""
+
+    def _table(recs: list) -> str:
+        rows = ""
+        for d in range(1, HOLD_MAX + 1):
+            sub = [r[2] for r in recs if r[1] == d]
+            if not sub:
+                continue
+            cnt = len(sub)
+            neg = [x for x in sub if x < 0]
+            under_pct = len(neg) / cnt * 100 if cnt else 0.0
+            avg = sum(sub) / cnt if cnt else 0.0
+            avg_loss = sum(neg) / len(neg) if neg else 0.0
+            worst = min(sub) if sub else 0.0
+            ac = "#4ade80" if avg >= 0 else "#f87171"
+            uc = "#f87171" if under_pct >= 50 else "#fbbf24" if under_pct >= 35 else "#94a3b8"
+            rows += (
+                f'<tr><td style="padding:5px 10px;text-align:right">{d}日目</td>'
+                f'<td style="padding:5px 10px;text-align:right">{cnt}件</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{uc}">{under_pct:.0f}%</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{ac};font-weight:700">{avg:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{avg_loss:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171">{worst:+,.0f}</td></tr>')
+        if not rows:
+            return ""
+        return (
+            '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 10px;text-align:right">保有</th>'
+            '<th style="padding:5px 10px;text-align:right">未決着件数</th>'
+            '<th style="padding:5px 10px;text-align:right">含み損率</th>'
+            '<th style="padding:5px 10px;text-align:right">平均含み損益</th>'
+            '<th style="padding:5px 10px;text-align:right">平均含み損(負のみ)</th>'
+            '<th style="padding:5px 10px;text-align:right">最悪含み損</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+
+    blocks = ""
+    for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
+        sub = [r for r in all_recs if (r[0] or 0) >= bt_min]
+        tbl = _table(sub)
+        if not tbl:
+            continue
+        blocks += f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{lbl}</h5>{tbl}'
+    if not blocks:
+        return ""
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
+        f'⑮ 保有日数に対する含み損の変化（未決着玉・終値ベース・直近{days}日）</h4>'
+        f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
+        f'各ロングエントリーを日次で追い、終値が目標/損切りに達するまでの"まだ持っている玉"の'
+        f'含み損益を保有日ごとに集計。<b>含み損率と平均含み損が保有1〜3日目でピークになり、'
+        f'その後薄れる（=序盤の押し→回復）</b>なら、若い含み損は待つのが正解を裏付ける。'
+        f'逆に日を追うごとに悪化するなら早期損切りが必要。</p>'
+        f'{blocks}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。

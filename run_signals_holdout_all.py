@@ -1083,6 +1083,12 @@ if _mh_html is None:
         _mh_html += _na.build_fade_short_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _fse:
         print(f"[逆張りショート] 失敗: {_fse}", flush=True)
+    # ⑮ 保有日数に対する含み損の変化 を ⑪ の下に追記
+    print("保有日数に対する含み損の変化 検証中...", flush=True)
+    try:
+        _mh_html += _na.build_holdday_curve_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _hce:
+        print(f"[含み損カーブ] 失敗: {_hce}", flush=True)
     try:
         _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)
