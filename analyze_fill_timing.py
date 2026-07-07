@@ -51,17 +51,18 @@ def _pairs(universe):
 
 
 def _one(mod, sym, name, strat, cutoff):
-    """1(銘柄,戦略): (rec_score, signals, 約定明細[(days_to_fill,strategy),...]) を返す。
+    """1(銘柄,戦略): (rec_score, signals, 約定明細[(days_to_fill,strategy),...],
+    決済済トレード[{fill_type,pnl},...]) を返す。
     rec_score(BTスコア)はBTフィルタ用。約定挙動は em=0 で con/agg 共通。"""
     try:
         bt = mod.backtest_one(sym, name, strat)
     except Exception:
-        return 0, 0, []
+        return 0, 0, [], []
     if not bt:
-        return 0, 0, []
+        return 0, 0, [], []
     pr = bt.get("period_results") or {}
     if not pr:
-        return 0, 0, []
+        return 0, 0, [], []
     try:
         rec, _ = mod.calc_recommend_score(pr)
     except Exception:
@@ -70,6 +71,7 @@ def _one(mod, sym, name, strat, cutoff):
     prm = pr[maxp]
     signals = prm.get("signals", 0)
     fills = []
+    closed = []   # 約定タイプ別成績用: 決済済トレードの {fill_type, pnl}
     for t in prm.get("trade_log", []):
         if t.get("reason") == "発注中":       # 未約定(まだ期限内)は約定にカウントしない
             continue
@@ -78,7 +80,10 @@ def _one(mod, sym, name, strat, cutoff):
         if cutoff and sd and sd < cutoff:
             continue
         fills.append((t.get("days_to_fill", 0), strat))
-    return rec, signals, fills
+        if t.get("reason") != "保有中":        # 決済済のみ損益集計
+            closed.append({"fill_type": t.get("fill_type", "normal"),
+                           "pnl": float(t.get("pnl", 0) or 0)})
+    return rec, signals, fills, closed
 
 
 def _aggregate(pairs, cutoff, workers):
@@ -89,12 +94,12 @@ def _aggregate(pairs, cutoff, workers):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(_one, m, s, n, st, cutoff): st for (m, s, n, st) in pairs}
             for fu in as_completed(futs):
-                rec, sig, fills = fu.result()
-                records.append((rec, sig, fills, futs[fu]))
+                rec, sig, fills, closed = fu.result()
+                records.append((rec, sig, fills, futs[fu], closed))
     else:
         for (m, s, n, st) in pairs:
-            rec, sig, fills = _one(m, s, n, st, cutoff)
-            records.append((rec, sig, fills, st))
+            rec, sig, fills, closed = _one(m, s, n, st, cutoff)
+            records.append((rec, sig, fills, st, closed))
     return records
 
 
@@ -130,13 +135,16 @@ def build_html(is_short: bool = False, workers: int = 4) -> str:
         total_signals = sum(r[1] for r in recs)
         dtf_all = _dd(int)
         by_sig, by_fill, by_t1 = _dd(int), _dd(int), _dd(int)
-        for rec, sig, fills, strat in recs:
+        ft_trades = _dd(list)   # 約定タイプ別 {fill_type: [pnl,...]}
+        for rec, sig, fills, strat, closed in recs:
             by_sig[strat] += sig
             for dtf, s2 in fills:
                 dtf_all[dtf] += 1
                 by_fill[s2] += 1
                 if dtf == 1:
                     by_t1[s2] += 1
+            for _t in closed:
+                ft_trades[_t["fill_type"]].append(_t["pnl"])
         total_filled = sum(dtf_all.values())
         expired = max(0, total_signals - total_filled)
         fill_pct = total_filled / total_signals * 100 if total_signals else 0
@@ -174,6 +182,44 @@ def build_html(is_short: bool = False, workers: int = 4) -> str:
                 f'<td style="padding:3px 12px;text-align:right;color:{_c(50,er)}">{er:.1f}%</td>'
                 f'<td style="padding:3px 12px;text-align:right;color:#94a3b8">{t1r:.1f}%</td></tr>'
             )
+        # ── 約定タイプ別 成績 (normal=ザラ場上抜け / gap_open=ギャップUP寄り約定 / gap_comeback=大ギャップ) ──
+        _ft_label = {"normal": "normal（ザラ場で上抜け＝A）",
+                     "gap_open": "gap_open（ギャップUP寄り約定＝B）",
+                     "gap_comeback": "gap_comeback（大ギャップ・戻り約定）"}
+        _ft_order = ["normal", "gap_open", "gap_comeback"]
+        ft_rows = ""
+        for _ft in _ft_order + [k for k in ft_trades if k not in _ft_order]:
+            pnls = ft_trades.get(_ft, [])
+            if not pnls:
+                continue
+            n = len(pnls)
+            w = sum(1 for p in pnls if p > 0)
+            gp = sum(p for p in pnls if p > 0)
+            gl = abs(sum(p for p in pnls if p < 0))
+            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            tot = gp - gl
+            avg = tot / n if n else 0.0
+            wr = w / n * 100 if n else 0.0
+            tc = "#4ade80" if tot >= 0 else "#f87171"
+            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+            ft_rows += (
+                f'<tr><td style="padding:3px 12px;text-align:left">{_ft_label.get(_ft, _ft)}</td>'
+                f'<td style="padding:3px 12px;text-align:right">{n:,}件</td>'
+                f'<td style="padding:3px 12px;text-align:right">{wr:.0f}%</td>'
+                f'<td style="padding:3px 12px;text-align:right">{pf_s}</td>'
+                f'<td style="padding:3px 12px;text-align:right;color:{tc}">{avg:+,.0f}</td>'
+                f'<td style="padding:3px 12px;text-align:right;color:{tc};font-weight:700">{tot:+,.0f}</td></tr>')
+        ft_block = (
+            '<h3 style="margin:14px 0 4px;font-size:0.95rem">約定タイプ別 成績'
+            '<span style="font-size:0.72rem;color:#94a3b8">'
+            '（A=ザラ場で下から上抜け / B=ギャップUPで寄り約定。Bが劣るなら「寄りがトリガー超なら見送り」が有効）</span></h3>'
+            '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="color:#94a3b8"><th style="padding:3px 12px;text-align:left">約定タイプ</th>'
+            '<th style="padding:3px 12px">件数</th><th style="padding:3px 12px">勝率</th>'
+            '<th style="padding:3px 12px">PF</th><th style="padding:3px 12px">平均損益</th>'
+            '<th style="padding:3px 12px">総損益</th></tr></thead>'
+            f'<tbody>{ft_rows}</tbody></table></div>') if ft_rows else ""
+
         disp = "block" if active else "none"
         return f"""<div id="ftblk_{key}" style="display:{disp}">
 <div style="background:#111827;border:1px solid #1e293b;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:inline-block">
@@ -182,6 +228,7 @@ def build_html(is_short: bool = False, workers: int = 4) -> str:
   失効 <b style="color:#f87171">{expired:,}件 ({exp_pct:.1f}%)</b> &nbsp;/&nbsp;
   うち翌日(T+1)約定 <b>{t1:,}件 ({t1_pct:.1f}%)</b>
 </div>
+{ft_block}
 <h3 style="margin:10px 0 4px;font-size:0.95rem">シグナル→約定 内訳 (全シグナル比)</h3>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:#94a3b8"><th style="padding:3px 12px;text-align:left">区分</th>
