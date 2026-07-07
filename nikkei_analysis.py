@@ -1205,6 +1205,7 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
             _pnl = _gp - _gl
             _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
             return {"n": _n, "wr": (_wins / _n * 100 if _n else 0.0),
+                    "gp": _gp, "gl": _gl,
                     "pnl": _pnl, "pf": _pf, "avg": (_pnl / _n if _n else 0.0)}
         for _tr in _rbucket:
             _bt = [_t for _t in _rbucket[_tr] if (_t.get("rec_score") or 0) >= 70]
@@ -1400,6 +1401,8 @@ function setTrdPnl(m){
                 + _rcell(f'{_a["n"]}件', "#94a3b8", f'{_b["n"]}件', "#94a3b8")
                 + _rcell(f'{_a["wr"]:.0f}%', "#e2e8f0", f'{_b["wr"]:.0f}%', "#e2e8f0")
                 + _rcell(_pf_s(_a["pf"]), "#e2e8f0", _pf_s(_b["pf"]), "#e2e8f0")
+                + _rcell(f'+{_a["gp"]:,.0f}', "#4ade80", f'+{_b["gp"]:,.0f}', "#4ade80")
+                + _rcell(f'-{_a["gl"]:,.0f}', "#f87171", f'-{_b["gl"]:,.0f}', "#f87171")
                 + _rcell(f'{_a["pnl"]:+,.0f}', _pnl_c(_a["pnl"]), f'{_b["pnl"]:+,.0f}', _pnl_c(_b["pnl"]), bold=True)
                 + _rcell(f'{_a["avg"]:+,.0f}', _pnl_c(_a["avg"]), f'{_b["avg"]:+,.0f}', _pnl_c(_b["avg"]))
                 + '</tr>')
@@ -1418,6 +1421,8 @@ function setTrdPnl(m){
             '<th style="padding:5px 14px">取引数</th>'
             '<th style="padding:5px 14px">勝率</th>'
             '<th style="padding:5px 14px">PF</th>'
+            '<th style="padding:5px 14px;color:#4ade80">利益計</th>'
+            '<th style="padding:5px 14px;color:#f87171">損失計</th>'
             '<th style="padding:5px 14px">総損益</th>'
             '<th style="padding:5px 14px">平均/取引</th>'
             f'</tr></thead><tbody>{_srows}</tbody></table>')
