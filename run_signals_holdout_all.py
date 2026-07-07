@@ -1089,6 +1089,12 @@ if _mh_html is None:
         _mh_html += _na.build_holdday_curve_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _hce:
         print(f"[含み損カーブ] 失敗: {_hce}", flush=True)
+    # ⑯ 損切り幅別 成績＋広損切り除外シミュレーション を ⑮ の下に追記
+    print("損切り幅別 成績 検証中...", flush=True)
+    try:
+        _mh_html += _na.build_stop_width_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _swe:
+        print(f"[損切り幅別] 失敗: {_swe}", flush=True)
     try:
         _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)

@@ -5275,6 +5275,205 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
     )
 
 
+def build_stop_width_html(days: int, workers: int) -> str:
+    """⑯ 損切り幅別 成績（詳細分析タブ用）。
+    完了トレードを損切り幅%（|order_stop-order_limit|/order_limit）で帯分けし、
+    件数/勝率/PF/総損益/平均損益/最大単発損失を集計する。加えて『損切り幅>8%を
+    除外した場合』の総損益・最大単発損失・MaxDDを現状と並べ、高ボラ(広損切り)銘柄の
+    一発大損がテールをどれだけ作っているかを可視化する。
+    (sym,strat)単位で1回だけバックテストするのでconfig重複はカウントされない。"""
+    if not _SIGNALS_AVAILABLE:
+        return ""
+
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+    since = _TODAY - timedelta(days=days)
+
+    def _one(sym, name, strat) -> list:
+        """(bt, stop_pct絶対%, pnl, exit_date) のリスト。"""
+        mod = _mod_for(strat)
+        try:
+            res = mod.backtest_one(sym, name, strat)
+            if not res:
+                return []
+            pr = res.get("period_results", {})
+            if not pr:
+                return []
+            try:
+                bt = mod.calc_recommend_score(pr)[0]
+            except Exception:
+                bt = 0
+            trade_log = pr[max(pr.keys())].get("trade_log", [])
+            out = []
+            tseen: set = set()
+            for t in trade_log:
+                reason = t.get("reason", "") or ""
+                if reason in ("", "発注中", "保有中"):
+                    continue
+                exit_dt = t.get("exit_dt")
+                if exit_dt is None:
+                    continue
+                exit_d = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
+                if exit_d < since:
+                    continue
+                k = (t.get("entry_dt"), exit_dt)
+                if k in tseen:
+                    continue
+                tseen.add(k)
+                olp = t.get("order_limit", 0) or 0
+                osp = t.get("order_stop", 0) or 0
+                if olp <= 0 or osp <= 0:
+                    continue
+                sw = abs(osp - olp) / olp * 100.0
+                out.append((bt, sw, t.get("pnl", 0), exit_d))
+            return out
+        except Exception:
+            return []
+
+    rows_all: list = []
+    with _TPE(max_workers=workers) as ex:
+        futs = [ex.submit(_one, s, n, st) for s, n, st in items]
+        for fut in _asc(futs):
+            try:
+                rows_all.extend(fut.result() or [])
+            except Exception:
+                pass
+    if not rows_all:
+        return ""
+
+    # 損切り幅の帯
+    BUCKETS = [(0, 5, "≤5%"), (5, 8, "5〜8%"), (8, 10, "8〜10%"),
+               (10, 13, "10〜13%"), (13, 999, ">13%")]
+
+    def _stats(trs: list) -> dict:
+        pnls = [p for (_b, _w, p, _d) in trs]
+        n = len(pnls)
+        if n == 0:
+            return {}
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gp = sum(wins)
+        gl = -sum(losses)
+        pf = (gp / gl) if gl > 0 else float("inf")
+        return {
+            "n": n, "wr": len(wins) / n * 100.0,
+            "pf": pf, "total": sum(pnls),
+            "avg": sum(pnls) / n,
+            "worst": min(pnls) if pnls else 0,
+        }
+
+    def _maxdd(trs: list) -> float:
+        # 決済日順の累積損益から最大ドローダウン（円）
+        s = sorted(trs, key=lambda x: x[3])
+        cum = 0.0
+        peak = 0.0
+        dd = 0.0
+        for (_b, _w, p, _d) in s:
+            cum += p
+            peak = max(peak, cum)
+            dd = min(dd, cum - peak)
+        return dd
+
+    def _fmt_pf(pf: float) -> str:
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _bucket_table(trs: list) -> str:
+        rows = ""
+        for lo, hi, lbl in BUCKETS:
+            sub = [r for r in trs if lo <= r[1] < hi]
+            st = _stats(sub)
+            if not st:
+                continue
+            tc = "#4ade80" if st["total"] >= 0 else "#f87171"
+            wide = lo >= 8
+            row_bg = "background:#2d0a0a;" if wide else ""
+            rows += (
+                f'<tr style="{row_bg}"><td style="padding:5px 12px;text-align:left">{lbl}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8">{st["n"]}</td>'
+                f'<td style="padding:5px 12px;text-align:right">{st["wr"]:.0f}%</td>'
+                f'<td style="padding:5px 12px;text-align:right">{_fmt_pf(st["pf"])}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{tc};font-weight:700">{st["total"]:+,.0f}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{tc}">{st["avg"]:+,.0f}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#f87171">{st["worst"]:+,.0f}</td></tr>')
+        if not rows:
+            return ""
+        return (
+            '<table style="width:auto;min-width:620px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 12px;text-align:left">損切り幅</th>'
+            '<th style="padding:5px 12px;text-align:right">件数</th>'
+            '<th style="padding:5px 12px;text-align:right">勝率</th>'
+            '<th style="padding:5px 12px;text-align:right">PF</th>'
+            '<th style="padding:5px 12px;text-align:right">総損益</th>'
+            '<th style="padding:5px 12px;text-align:right">平均</th>'
+            '<th style="padding:5px 12px;text-align:right">最大単発損失</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+
+    def _sim_table(trs: list) -> str:
+        # 現状 vs 損切り幅>8%除外
+        keep = [r for r in trs if r[1] <= 8]
+        cur_st, keep_st = _stats(trs), _stats(keep)
+        if not cur_st or not keep_st:
+            return ""
+        cur_dd, keep_dd = _maxdd(trs), _maxdd(keep)
+        dropped = cur_st["n"] - keep_st["n"]
+
+        def _cell(v, good_pos=True, money=True):
+            c = "#4ade80" if (v >= 0) == good_pos else "#f87171"
+            s = f'{v:+,.0f}' if money else f'{v:,.0f}'
+            return f'<td style="padding:5px 14px;text-align:right;color:{c};font-weight:700">{s}</td>'
+
+        return (
+            '<table style="width:auto;min-width:520px;border-collapse:collapse;font-size:0.85rem;margin-top:6px">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 14px;text-align:left"></th>'
+            '<th style="padding:5px 14px;text-align:right">件数</th>'
+            '<th style="padding:5px 14px;text-align:right">総損益</th>'
+            '<th style="padding:5px 14px;text-align:right">最大単発損失</th>'
+            '<th style="padding:5px 14px;text-align:right">MaxDD(円)</th>'
+            '</tr></thead><tbody>'
+            f'<tr><td style="padding:5px 14px;text-align:left;color:#e2e8f0">現状(全部)</td>'
+            f'<td style="padding:5px 14px;text-align:right;color:#94a3b8">{cur_st["n"]}</td>'
+            f'{_cell(cur_st["total"])}{_cell(cur_st["worst"])}{_cell(cur_dd)}</tr>'
+            f'<tr style="background:#052e16"><td style="padding:5px 14px;text-align:left;color:#e2e8f0">損切り幅>8%を除外</td>'
+            f'<td style="padding:5px 14px;text-align:right;color:#94a3b8">{keep_st["n"]}<br>'
+            f'<span style="font-size:0.7rem;color:#64748b">(-{dropped}件)</span></td>'
+            f'{_cell(keep_st["total"])}{_cell(keep_st["worst"])}{_cell(keep_dd)}</tr>'
+            '</tbody></table>')
+
+    blocks = ""
+    for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
+        sub = [r for r in rows_all if (r[0] or 0) >= bt_min]
+        tbl = _bucket_table(sub)
+        if not tbl:
+            continue
+        sim = _sim_table(sub)
+        blocks += (f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{lbl}</h5>{tbl}'
+                   f'{sim}')
+    if not blocks:
+        return ""
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
+        f'⑯ 損切り幅別 成績＋広損切り除外シミュレーション（完了トレード・直近{days}日）</h4>'
+        f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
+        f'完了トレードを損切り幅%（|損切り価格-注文価格|/注文価格）で帯分け。'
+        f'<b>赤帯=損切り幅8%超（高ボラ銘柄）</b>。100株固定なので損切り幅が広いほど'
+        f'1発の円損失が大きく、テール（最大単発損失・MaxDD）を作る。下段は'
+        f'<b>「損切り幅8%超を除外」した場合</b>の総損益・最大単発損失・MaxDDを現状と比較。'
+        f'総損益をあまり削らずにテールだけ小さくできるなら、損切り幅フィルターが有効。</p>'
+        f'{blocks}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。
