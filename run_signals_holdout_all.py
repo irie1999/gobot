@@ -1068,6 +1068,12 @@ if _mh_html is None:
     _mh_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=False) or ""
     print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
     _mh_cmp_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True) or ""
+    # ⑭ ブレイク逆張りショート(N日手仕舞い)検証を ⑪ の下に追記
+    print("ブレイク逆張りショート(N日手仕舞い)検証中...", flush=True)
+    try:
+        _mh_html += _na.build_fade_short_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _fse:
+        print(f"[逆張りショート] 失敗: {_fse}", flush=True)
     try:
         _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)

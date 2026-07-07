@@ -4856,6 +4856,175 @@ def build_max_hold_comparison_html(hold_list: list[int], days: int, workers: int
         )
 
 
+def build_fade_short_html(days: int, workers: int) -> str:
+    """『ブレイク逆張りショート』検証。ロングのブレイクシグナルを同じトリガーで
+    ショートで入り、N日(1〜5)後の終値で手仕舞いした場合の損益を実測する。
+    全戦略 em=0 なのでトリガー=前日終値。約定=long と同条件(高値>=前日終値)。
+    エントリー(空売り)にスリッページ、往復手数料を計上。差分ではなく総損益で判断。"""
+    if not _SIGNALS_AVAILABLE:
+        return ""
+    from backtest_limit_entry import (
+        fetch as _fetch, SLIPPAGE_STOP_PCT as _SLIP, FEE_PCT_ONE_WAY as _FEE,
+        FIXED_QTY as _QTY, ENTRY_EXPIRE as _EXP, MIN_PRICE as _MINP,
+        MAX_PRICE as _MAXP, MAX_ATR_RATIO as _MAXATR)
+    _NS = [1, 2, 3, 4, 5]
+
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+    since = _TODAY - timedelta(days=days)
+
+    def _one(sym, name, strat) -> list:
+        mod = _mod_for(strat)
+        try:
+            params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
+            if not params:
+                return []
+            calc_fn = params[0]
+            df = _fetch(sym)
+            if df is None or len(df) < 30:
+                return []
+            df = calc_fn(df.copy())
+            if "entry_sig" not in df:
+                return []
+            try:
+                r = mod.backtest_one(sym, name, strat)
+                bt = mod.calc_recommend_score(r.get("period_results", {}))[0] if r else 0
+            except Exception:
+                bt = 0
+            closes = df["close"].values
+            highs = df["high"].values
+            sigs = df["entry_sig"].values
+            atrs = df["atr"].values if "atr" in df else None
+            idx = df.index
+            n = len(df)
+            recs = []
+            for s in range(n - 1):
+                if not bool(sigs[s]):
+                    continue
+                cp = closes[s]
+                if not (_MINP <= cp <= _MAXP):
+                    continue
+                if atrs is not None:
+                    a = atrs[s]
+                    if a and cp and a / cp > _MAXATR:
+                        continue
+                order_p = cp   # em=0 → トリガー=前日終値
+                fill = None
+                for j in range(s + 1, min(s + 2 + _EXP, n)):
+                    if highs[j] >= order_p:
+                        fill = j
+                        break
+                if fill is None:
+                    continue
+                fdate = idx[fill]
+                fdate = fdate.date() if hasattr(fdate, "date") else fdate
+                if fdate < since:
+                    continue
+                entry_p = order_p * (1 - _SLIP)   # 空売り約定=不利側
+                for N in _NS:
+                    ei = fill + N
+                    if ei >= n:
+                        continue
+                    exit_c = closes[ei]
+                    fee = (entry_p + exit_c) * _QTY * _FEE
+                    pnl = (entry_p - exit_c) * _QTY - fee   # ショート損益
+                    recs.append({"strat": strat, "bt": bt, "N": N, "pnl": pnl})
+            return recs
+        except Exception:
+            return []
+
+    all_recs: list[dict] = []
+    with _TPE(max_workers=workers) as ex:
+        futs = [ex.submit(_one, s, n, st) for s, n, st in items]
+        for fut in _asc(futs):
+            try:
+                all_recs.extend(fut.result() or [])
+            except Exception:
+                pass
+    if not all_recs:
+        return ""
+
+    def _table(recs: list[dict]) -> tuple[str, str]:
+        rows = ""
+        best_n, best_pnl = None, None
+        for N in _NS:
+            sub = [r for r in recs if r["N"] == N]
+            if not sub:
+                continue
+            cnt = len(sub)
+            pnl = sum(r["pnl"] for r in sub)
+            w = sum(1 for r in sub if r["pnl"] > 0)
+            gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
+            gl = abs(sum(r["pnl"] for r in sub if r["pnl"] < 0))
+            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            wr = w / cnt * 100 if cnt else 0.0
+            avg = pnl / cnt if cnt else 0.0
+            if best_pnl is None or pnl > best_pnl:
+                best_pnl, best_n = pnl, N
+            pc = "#4ade80" if pnl >= 0 else "#f87171"
+            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+            rows += (
+                f'<tr><td style="padding:5px 10px;text-align:right">{N}日で手仕舞い</td>'
+                f'<td style="padding:5px 10px;text-align:right">{cnt}件</td>'
+                f'<td style="padding:5px 10px;text-align:right">{wr:.0f}%</td>'
+                f'<td style="padding:5px 10px;text-align:right">{pf_s}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{pc};font-weight:700">{pnl:+,.0f}円</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{pc}">{avg:+,.0f}</td></tr>')
+        if not rows:
+            return "", ""
+        tbl = (
+            '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 10px;text-align:right">手仕舞い</th>'
+            '<th style="padding:5px 10px;text-align:right">件数</th>'
+            '<th style="padding:5px 10px;text-align:right">勝率</th>'
+            '<th style="padding:5px 10px;text-align:right">PF</th>'
+            '<th style="padding:5px 10px;text-align:right">総損益</th>'
+            '<th style="padding:5px 10px;text-align:right">平均損益</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+        if best_pnl is None:
+            verdict = ""
+        elif best_pnl > 0:
+            verdict = (f'最良は<b>{best_n}日</b>で総損益 '
+                       f'<b style="color:#4ade80">{best_pnl:+,.0f}円</b>。'
+                       f'プラスなら逆張りショートに一定の有効性(要フォワード)。')
+        else:
+            verdict = ('<b style="color:#f87171">全N日でマイナス</b>。'
+                       'ブレイクを逆張りショートしても勝てない＝理屈どおり'
+                       '(勝ちブレイクの上昇に踏まれる)。')
+        return tbl, verdict
+
+    blocks = ""
+    for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
+        sub = [r for r in all_recs if (r["bt"] or 0) >= bt_min]
+        tbl, verdict = _table(sub)
+        if not tbl:
+            continue
+        blocks += (
+            f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{lbl}</h5>{tbl}'
+            f'<p style="margin:6px 0 0;color:#cbd5e1;font-size:0.8rem">{verdict}</p>')
+    if not blocks:
+        return ""
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #f472b6">'
+        f'<h4 style="margin:0 0 6px;color:#f472b6;font-size:0.9rem">'
+        f'⑭ ブレイク逆張りショート（ロングシグナルをショートで入りN日で手仕舞い・直近{days}日）</h4>'
+        f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
+        f'ロングのブレイクシグナルを、同じトリガー(前日終値)を高値が超えたところで'
+        f'<b>ショート</b>し、1〜5日後の終値で手仕舞いした場合の損益。空売り約定にスリッページ、'
+        f'往復手数料を計上。<b>プラスなら「序盤の押しをショートで取る」が成立／マイナスなら不成立</b>。</p>'
+        f'{blocks}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。
