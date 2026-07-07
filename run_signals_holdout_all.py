@@ -682,9 +682,18 @@ _bt_cache: dict[tuple, dict | None] = {}
 
 _bt_cache_dir  = Path(".holdout_bt_cache")
 _bt_cache_dir.mkdir(exist_ok=True)
-_bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_cache_date}.pkl"
-# BTキャッシュはキーが日付付き（bt_YYYY-MM-DD.pkl）のため同日内は常に有効。
-# --force はHTML再生成のみを強制し、BTキャッシュは削除しない。
+# BTキャッシュのキーは「期待される最新確定バー日付」を使う。
+# 15:00 JST を跨ぐ(前営業日→当日)と自動で別ファイル=再計算になり、
+# 「引け前に作ったキャッシュ(現在値=前日)が引け後も再利用され、現在値が更新されない」
+# 問題を防ぐ。--date 指定(過去日再現)時はその日付を使う。
+try:
+    from backtest_limit_entry import _expected_latest_bar_date as _exp_bar_date
+    _bt_bar_tok = str(_args.date) if _args.date else str(_exp_bar_date())
+except Exception:
+    _bt_bar_tok = _cache_date
+_bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_bt_bar_tok}.pkl"
+# 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
+# バー日付が進めば自動で作り直す）。
 if _bt_cache_file.exists():
     try:
         with open(_bt_cache_file, "rb") as _bf:
