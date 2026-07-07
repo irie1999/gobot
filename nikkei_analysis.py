@@ -1177,11 +1177,14 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
     """タブ2: トレンド期間分析。trades を渡すと全期間一覧に損益列を追加する。"""
     # 期間ごとの損益 (エントリー(約定)日が期間内のトレードを集計)。損益タブの日別と基準を統一。
     _pnl_by_period: dict = {}
+    _regime_agg: dict = {}   # trend種別 -> {"all":{...}, "bt70":{...}, "n_periods":int}
     if trades:
         def _agg(_sub):
             _gp = sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) > 0)
             _gl = abs(sum(_t["pnl"] for _t in _sub if _t.get("pnl", 0) <= 0))
             return (len(_sub), _gp, _gl)
+        _rbucket = {"up": [], "down": [], "sideways": []}
+        _nperiods = {"up": 0, "down": 0, "sideways": 0}
         for _pp in periods:
             _ps, _pe = _pp["start"], _pp["end"]
             _sub = [_t for _t in trades
@@ -1190,6 +1193,24 @@ def _tab2_trend_html(close: pd.Series, trend: pd.Series, periods: list[dict], ye
                 "all":  _agg(_sub),
                 "bt70": _agg([_t for _t in _sub if (_t.get("rec_score") or 0) >= 70]),
             }
+            _tr = _pp.get("trend")
+            if _tr in _rbucket:
+                _rbucket[_tr].extend(_sub)
+                _nperiods[_tr] += 1
+        def _rstats(_lst):
+            _n = len(_lst)
+            _wins = sum(1 for _t in _lst if _t.get("pnl", 0) > 0)
+            _gp = sum(_t["pnl"] for _t in _lst if _t.get("pnl", 0) > 0)
+            _gl = abs(sum(_t["pnl"] for _t in _lst if _t.get("pnl", 0) <= 0))
+            _pnl = _gp - _gl
+            _pf = _gp / _gl if _gl > 0 else (float("inf") if _gp > 0 else 0.0)
+            return {"n": _n, "wr": (_wins / _n * 100 if _n else 0.0),
+                    "pnl": _pnl, "pf": _pf, "avg": (_pnl / _n if _n else 0.0)}
+        for _tr in _rbucket:
+            _bt = [_t for _t in _rbucket[_tr] if (_t.get("rec_score") or 0) >= 70]
+            _regime_agg[_tr] = {"all": _rstats(_rbucket[_tr]),
+                                "bt70": _rstats(_bt),
+                                "n_periods": _nperiods[_tr]}
     up_p   = [p for p in periods if p["trend"] == "up"]
     down_p = [p for p in periods if p["trend"] == "down"]
     su = calc_stats(up_p)
@@ -1352,6 +1373,55 @@ function setTrdPnl(m){
 }
 </script>"""
 
+    # ── レジーム別 損益サマリー (全/BT70は上のトグルに連動) ──
+    _regime_summary_html = ""
+    if trades and _regime_agg:
+        def _rcell(a_val, a_col, b_val, b_col, bold=False):
+            _w = "font-weight:700" if bold else ""
+            return (f'<td style="text-align:right;padding:5px 14px">'
+                    f'<span class="m-all"  style="color:{a_col};{_w}">{a_val}</span>'
+                    f'<span class="m-bt70" style="color:{b_col};{_w};display:none">{b_val}</span></td>')
+        def _pnl_c(x):
+            return "#4ade80" if x >= 0 else "#f87171"
+        def _pf_s(x):
+            return "∞" if x == float("inf") else f"{x:.2f}"
+        _srows = ""
+        for _key, _lbl, _col in (("up", "▲ 上昇", "#4ade80"),
+                                 ("down", "▼ 下落", "#f87171"),
+                                 ("sideways", "→ 横ばい", "#fbbf24")):
+            _ag = _regime_agg.get(_key)
+            if not _ag:
+                continue
+            _a, _b = _ag["all"], _ag["bt70"]
+            _srows += (
+                f'<tr>'
+                f'<td style="text-align:left;color:{_col};font-weight:700;padding:5px 14px">{_lbl}</td>'
+                f'<td style="text-align:right;color:#94a3b8;padding:5px 14px">{_ag["n_periods"]}期間</td>'
+                + _rcell(f'{_a["n"]}件', "#94a3b8", f'{_b["n"]}件', "#94a3b8")
+                + _rcell(f'{_a["wr"]:.0f}%', "#e2e8f0", f'{_b["wr"]:.0f}%', "#e2e8f0")
+                + _rcell(_pf_s(_a["pf"]), "#e2e8f0", _pf_s(_b["pf"]), "#e2e8f0")
+                + _rcell(f'{_a["pnl"]:+,.0f}', _pnl_c(_a["pnl"]), f'{_b["pnl"]:+,.0f}', _pnl_c(_b["pnl"]), bold=True)
+                + _rcell(f'{_a["avg"]:+,.0f}', _pnl_c(_a["avg"]), f'{_b["avg"]:+,.0f}', _pnl_c(_b["avg"]))
+                + '</tr>')
+        _regime_summary_html = (
+            '<h2>レジーム別 損益サマリー'
+            '<span style="font-size:0.75rem;color:#64748b;font-weight:400">'
+            '（約定日が属するレジームで集計・上の「損益の対象」トグルで全/BT70切替）</span></h2>'
+            '<p class="footnote" style="color:#94a3b8;margin:2px 0 8px">'
+            '各レジーム(日経の上昇/下落/横ばい)で発注したトレードの合計。'
+            '<b>「上昇の日だけ張る」が有効か</b>は、上昇の総損益が突出して大きく、下落/横ばいが'
+            'マイナス〜低調かで判断する。3つとも大きくプラスなら、レジームでの足切りは逆効果。</p>'
+            '<table style="width:auto;min-width:660px;border-collapse:collapse">'
+            '<thead><tr style="color:#64748b;font-size:0.75rem;border-bottom:1px solid #334155">'
+            '<th style="text-align:left;padding:5px 14px">レジーム</th>'
+            '<th style="padding:5px 14px">期間数</th>'
+            '<th style="padding:5px 14px">取引数</th>'
+            '<th style="padding:5px 14px">勝率</th>'
+            '<th style="padding:5px 14px">PF</th>'
+            '<th style="padding:5px 14px">総損益</th>'
+            '<th style="padding:5px 14px">平均/取引</th>'
+            f'</tr></thead><tbody>{_srows}</tbody></table>')
+
     return f"""
 <h2>現在のトレンド状況</h2>
 {current_box}
@@ -1362,8 +1432,10 @@ function setTrdPnl(m){
   {down_card}
 </div>
 
-<h2>全トレンド期間一覧（新しい順）</h2>
 {_pnl_toggle}
+{_regime_summary_html}
+
+<h2>全トレンド期間一覧（新しい順）</h2>
 <table>
 <thead><tr>
   <th>種別</th><th>開始日</th><th>終了日</th>
