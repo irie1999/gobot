@@ -848,8 +848,13 @@ import score_speed_patch  # check_signals_stop/breakout の calc_recommend_score
 
 | 戦略 | stop_mode | 理由 |
 |------|-----------|------|
-| **MOM ロング** | `intraday` | close で唯一成績悪化 (-7万円) するため据え置き |
-| 上記以外 全部 (ロング各種 + ショート全部) | `close` | ヒゲ刈り回避で勝率/PF/総損益が改善 |
+| **全戦略 (ロング/ショート全部)** | `close` | ヒゲ刈り回避。**実運用 close_stop_guard が終値ベースのため統一** |
+
+> **2026-07-07 変更**: 旧ポリシーは MOM ロングのみ `intraday`（§16.2 実測で close だと悪化したため据え置き）だったが、
+> 実運用の `close_stop_guard` は終値ベースで、MOM だけバックテストとライブが乖離していた
+> (終値では損切り未達なのにレポートは損切り表示)。ザラ場逆指値を実際には置かない運用に合わせ、
+> **MOM も close に統一**（`default_stop_mode` の MOM 例外を削除）。MOM のザラ場優位を取り戻したい場合は
+> `kabu_send_signals --with-stop` でザラ場逆指値を実際に置く運用に切り替える必要がある。
 
 ### 16.3 実測エビデンス (365日, in-sample, analyze_stop_hunt.py)
 

@@ -571,8 +571,11 @@ def calc_rsi2(df: pd.DataFrame) -> pd.DataFrame:
 #   既定は close (ヒゲ刈りを回避し勝率/PF/総損益が改善)。
 #   ただし MOM ロングのみ close で成績悪化するため intraday 据え置き。
 def default_stop_mode(strategy_name: str, is_short: bool) -> str:
-    if strategy_name == "MOM" and not is_short:
-        return "intraday"
+    # 全戦略 終値判定(close)に統一 (2026-07-07)。
+    # 旧: MOMロングのみ intraday(ザラ場安値で損切り)。§16.2でMOMはザラ場が優位と
+    # されていたが、実運用の close_stop_guard は終値ベースのため、バックテストと
+    # ライブが乖離していた(例: MOM銘柄が終値では損切り未達なのにレポートは損切り表示)。
+    # ザラ場逆指値を実際に置かない運用に合わせ、MOMも終値判定に統一した。
     return "close"
 
 
