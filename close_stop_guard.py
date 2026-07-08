@@ -398,7 +398,38 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
         else:
             _bc = "#4ade80" if _btv >= 80 else ("#60a5fa" if _btv >= 60 else ("#fbbf24" if _btv >= 40 else "#f87171"))
             bt_cell = f'<span style="color:{_bc};font-weight:700">{_btv}</span>'
-        trs += f"""<tr>
+        # ── 状況（損切り/利確 の方向・距離）と行の色分け ──
+        cur, fp2, sp2, tp2, sh2 = r["cur"], r["fp"], r["sp"], r["tp"], r["is_short"]
+        status_cell = '<span style="color:#475569">—</span>'
+        row_bg = ""
+        if cur and fp2 and r["pnl"] is not None:
+            if r["pnl"] >= 0:
+                # 含み益（利確方向）
+                row_bg = "background:rgba(74,222,128,0.10)"
+                reached = ((cur >= tp2) if not sh2 else (cur <= tp2)) if tp2 else False
+                if reached:
+                    status_cell = ('<span style="background:#052e16;color:#4ade80;font-weight:700;'
+                                   'padding:3px 9px;border-radius:5px">🟢 利確到達</span>')
+                elif tp2:
+                    d = abs(tp2 - cur) / cur * 100
+                    status_cell = ('<span style="color:#4ade80;font-weight:700">🟢 含み益</span>'
+                                   f'<br><span style="font-size:.72rem;color:#94a3b8">利確まで {d:.1f}%</span>')
+                else:
+                    status_cell = '<span style="color:#4ade80;font-weight:700">🟢 含み益</span>'
+            else:
+                # 含み損（損切り方向）
+                row_bg = "background:rgba(248,113,113,0.10)"
+                stopped = ((cur <= sp2) if not sh2 else (cur >= sp2)) if sp2 else False
+                if stopped:
+                    status_cell = ('<span style="background:#2d0a0a;color:#f87171;font-weight:700;'
+                                   'padding:3px 9px;border-radius:5px">🔴 損切り到達</span>')
+                elif sp2:
+                    d = abs(cur - sp2) / cur * 100
+                    status_cell = ('<span style="color:#f87171;font-weight:700">🔴 含み損</span>'
+                                   f'<br><span style="font-size:.72rem;color:#94a3b8">損切りまで {d:.1f}%</span>')
+                else:
+                    status_cell = '<span style="color:#f87171;font-weight:700">🔴 含み損</span>'
+        trs += f"""<tr style="{row_bg}">
   <td style="text-align:left">{_html.escape(r['sym'])}<br><span style="color:#64748b;font-size:.78rem">{_html.escape(r['name'])}</span></td>
   <td style="text-align:center">{_html.escape(r['strat'])}</td>
   <td style="text-align:center">{bt_cell}</td>
@@ -409,12 +440,13 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
   <td style="text-align:right;color:#4ade80">{(f"{r['tp']:,.0f}円<br><span style='font-size:.72rem'>{tp_pct}</span>") if r['tp'] else '—'}</td>
   <td style="text-align:right;color:#e2e8f0">{cur_str}</td>
   <td style="text-align:right">{pnl_str}</td>
+  <td style="text-align:center">{status_cell}</td>
   <td style="text-align:center;color:#f59e0b;font-weight:700">{r['tc_str']}</td>
   <td style="text-align:center;color:{rem_col}">{r['rem_str']}</td>
 </tr>"""
 
     if not rows_data:
-        trs = ('<tr><td colspan="12" style="text-align:center;color:#94a3b8;padding:24px">'
+        trs = ('<tr><td colspan="13" style="text-align:center;color:#94a3b8;padding:24px">'
                '実際に約定した保有銘柄はありません（kabu建玉なし）</td></tr>')
 
     total_row = ""
@@ -441,7 +473,7 @@ def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
 <table>
   <thead><tr>
     <th style="text-align:left">銘柄/名前</th><th>戦略</th><th>シグナル時<br>BT</th><th>区分</th><th>約定日</th><th>約定値</th>
-    <th>損切り</th><th>利確目標</th><th>現在値</th><th>含み損益</th>
+    <th>損切り</th><th>利確目標</th><th>現在値</th><th>含み損益</th><th>状況</th>
     <th>タイムカット日</th><th>残り</th>
   </tr></thead>
   <tbody>{trs}</tbody>
