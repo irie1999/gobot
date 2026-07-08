@@ -1061,7 +1061,7 @@ _mh_reuse      = None if _args.force else _latest_analysis_cache(_mh_prefix)
 
 # 各分析は独立タブ。⑪=保有日数比較のみ / ⑯損切り幅 ⑰寄り付き方向 ⑱下落深さ
 # ⑲逆張りショート ⑳保有日数カーブ はそれぞれ別スロットに入れる。
-_fade_html = _curve_html = _stopw_html = _opendir_html = _drop_html = ""
+_fade_html = _curve_html = _stopw_html = _opendir_html = _drop_html = _emcmp_html = ""
 if _mh_reuse is not None:
     try:
         _mh_cached   = _mhpk.loads(_mh_reuse.read_bytes())
@@ -1072,6 +1072,7 @@ if _mh_reuse is not None:
         _stopw_html  = _mh_cached.get("stopwidth", "")
         _opendir_html = _mh_cached.get("opendir", "")
         _drop_html   = _mh_cached.get("drop", "")
+        _emcmp_html  = _mh_cached.get("emcmp", "")
         print(f"[最大保有日数比較] キャッシュ再利用(日付跨ぎ可・--no-force): {_mh_reuse.name}", flush=True)
     except Exception:
         _mh_html = _mh_cmp_html = None
@@ -1115,11 +1116,17 @@ if _mh_html is None:
         _curve_html = _na.build_holdday_curve_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _hce:
         print(f"[含み損カーブ] 失敗: {_hce}", flush=True)
+    # ㉑ 逆指値em比較＋直近取引がどうなるか（独立タブ）
+    print("逆指値em比較 検証中...", flush=True)
+    try:
+        _emcmp_html = _na.build_em_comparison_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _eme:
+        print(f"[em比較] 失敗: {_eme}", flush=True)
     try:
         _mh_cache_file.write_bytes(_mhpk.dumps({
             "conservative": _mh_html, "con_agg": _mh_cmp_html,
             "fade": _fade_html, "curve": _curve_html, "stopwidth": _stopw_html,
-            "opendir": _opendir_html, "drop": _drop_html}))
+            "opendir": _opendir_html, "drop": _drop_html, "emcmp": _emcmp_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)
     except Exception as _mhe:
         print(f"[最大保有日数比較] キャッシュ保存失敗: {_mhe}", flush=True)
@@ -1138,6 +1145,8 @@ if _fade_html:
     _all_period_html = _all_period_html.replace("<!-- FADESHORT_SLOT -->", _fade_html, 1)
 if _curve_html:
     _all_period_html = _all_period_html.replace("<!-- HOLDCURVE_SLOT -->", _curve_html, 1)
+if _emcmp_html:
+    _all_period_html = _all_period_html.replace("<!-- EMCMP_SLOT -->", _emcmp_html, 1)
 _phase("最大保有日数比較完了")
 
 # ── ⑬ 押し目指値買い vs 逆指値ブレイク買い 比較 (詳細分析タブ) ──────────────────

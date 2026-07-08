@@ -5922,6 +5922,220 @@ def build_drop_entry_html(days: int, workers: int) -> str:
     )
 
 
+def build_em_comparison_html(days: int, workers: int, ems=(0.0, 0.5, 1.0),
+                             recent_days: int = 15) -> str:
+    """㉑ 逆指値の高さ(em)別 成績＋直近の取引がどうなるか（詳細分析タブ用）。
+    同一シグナルで em（前日終値からの上乗せ・ATR単位）だけ変えて再バックテスト。
+      em=0   ＝ トリガー前日終値（現行・約定しやすい）
+      em=0.5 ＝ 前日終値+0.5ATR（≒+1%前後・強めの上抜けのみ約定）
+      em=1.0 ＝ 前日終値+1.0ATR（≒+2%前後・かなり強い上抜けのみ約定）
+    上段: em別の約定率/勝率/PF/総損益（全・BT70）。
+    下段: 直近{recent_days}日に約定した実トレードが、em>0 なら約定したか/回避されたかを個別表示。
+    → 今週の下げ銘柄が em>0 で回避できたかを直接読める。"""
+    if not _SIGNALS_AVAILABLE:
+        return ""
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+
+    from backtest_limit_entry import fetch as _fetch, run_limit_backtest as _rlb
+
+    # BTスコア
+    bt: dict = {}
+    def _btone(it):
+        sym, name, strat = it
+        mod = _mod_for(strat)
+        try:
+            if strat not in getattr(mod, "STRATEGY_PARAMS", {}):
+                return (sym, strat, 0)
+            r = mod.backtest_one(sym, name, strat)
+            if not r:
+                return (sym, strat, 0)
+            sc, _rk = mod.calc_recommend_score(r.get("period_results", {}))
+            return (sym, strat, sc)
+        except Exception:
+            return (sym, strat, 0)
+    print("  [em比較] BTスコア算出中...", flush=True)
+    with _TPE(max_workers=workers) as ex:
+        for sym, strat, sc in ex.map(_btone, items):
+            bt[(sym, strat)] = sc
+
+    from datetime import date as _date
+    since_recent = _TODAY - timedelta(days=recent_days)
+    ems = list(ems)
+
+    # em変種ごとに再バックテスト → 約定トレードを収集
+    per_em: dict = {}          # em -> [(sym, strat, signals, filled_trades)]
+    for em in ems:
+        def _one(it, em=em):
+            sym, name, strat = it
+            mod = _mod_for(strat)
+            params = getattr(mod, "STRATEGY_PARAMS", {})
+            if strat not in params:
+                return None
+            cf, _em0, sm, tm = params[strat]
+            df = _fetch(sym, days)
+            if df is None:
+                return None
+            try:
+                r = _rlb(sym, name, df, cf, em, sm, tm, days, strat, entry_type="stop")
+            except Exception:
+                return None
+            if not r:
+                return None
+            filled = [t for t in r.get("trade_log", [])
+                      if t.get("entry_dt") is not None
+                      and t.get("reason") not in ("発注中", "保有中", "")]
+            return (sym, strat, r.get("signals", 0), name, filled)
+        print(f"  [em比較] em={em} 集計中...", flush=True)
+        res = []
+        with _TPE(max_workers=workers) as ex:
+            for x in ex.map(_one, items):
+                if x:
+                    res.append(x)
+        per_em[em] = res
+
+    def _sigkey(t, sym, strat):
+        sdt = t.get("signal_dt")
+        sd = sdt.date() if hasattr(sdt, "date") else sdt
+        return (sym, strat, sd)
+
+    # em -> {sigkey: (pnl, reason, entry_p, exit_d)}
+    fmap: dict = {em: {} for em in ems}
+    for em in ems:
+        for sym, strat, _s, _nm, filled in per_em[em]:
+            for t in filled:
+                fmap[em][_sigkey(t, sym, strat)] = (
+                    t.get("pnl", 0), t.get("reason", ""),
+                    t.get("entry_p", 0),
+                    (t.get("exit_dt").date() if hasattr(t.get("exit_dt"), "date")
+                     else t.get("exit_dt")))
+
+    # ── 上段: em別サマリー ──
+    def _agg(em, only_bt70):
+        sig = 0
+        pnls = []
+        for sym, strat, s, _nm, filled in per_em[em]:
+            if only_bt70 and bt.get((sym, strat), 0) < 70:
+                continue
+            sig += s
+            pnls += [t.get("pnl", 0) for t in filled]
+        n = len(pnls)
+        wins = [p for p in pnls if p > 0]
+        gl = -sum(p for p in pnls if p <= 0)
+        gp = sum(wins)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        return dict(signals=sig, filled=n,
+                    fill=(n / sig * 100 if sig else 0.0),
+                    wr=(len(wins) / n * 100 if n else 0.0),
+                    pf=pf, total=sum(pnls))
+
+    def _summary_table(only_bt70):
+        base = _agg(ems[0], only_bt70)["total"]
+        rows = ""
+        for em in ems:
+            st = _agg(em, only_bt70)
+            pf_s = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+            tc = "#4ade80" if st["total"] >= 0 else "#f87171"
+            diff = st["total"] - base
+            dc = "#4ade80" if diff >= 0 else "#f87171"
+            lbl = ("em=0（現行/前日終値）" if em == 0 else
+                   f"em=+{em}ATR（≒+{int(em*2)}%前後）")
+            rows += (
+                f'<tr><td style="padding:5px 12px;text-align:left">{lbl}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:#94a3b8">{st["filled"]}/{st["signals"]}</td>'
+                f'<td style="padding:5px 12px;text-align:right">{st["fill"]:.0f}%</td>'
+                f'<td style="padding:5px 12px;text-align:right">{st["wr"]:.0f}%</td>'
+                f'<td style="padding:5px 12px;text-align:right">{pf_s}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{tc};font-weight:700">{st["total"]:+,.0f}</td>'
+                f'<td style="padding:5px 12px;text-align:right;color:{dc}">'
+                f'{("基準" if em == ems[0] else f"{diff:+,.0f}")}</td></tr>')
+        return (
+            '<table style="width:auto;min-width:600px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 12px;text-align:left">逆指値の高さ</th>'
+            '<th style="padding:5px 12px;text-align:right">約定/シグナル</th>'
+            '<th style="padding:5px 12px;text-align:right">約定率</th>'
+            '<th style="padding:5px 12px;text-align:right">勝率</th>'
+            '<th style="padding:5px 12px;text-align:right">PF</th>'
+            '<th style="padding:5px 12px;text-align:right">総損益</th>'
+            '<th style="padding:5px 12px;text-align:right">em=0比</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+
+    # ── 下段: 直近の実トレードが em>0 でどうなるか ──
+    base_recent = []
+    for k, (pnl, reason, ep, exit_d) in fmap[ems[0]].items():
+        if exit_d is not None and exit_d >= since_recent:
+            base_recent.append((k, pnl, reason, ep, exit_d))
+    # name参照
+    _name_of = {(s, st): nm for em in [ems[0]] for s, st, _sg, nm, _f in per_em[em]}
+    base_recent.sort(key=lambda x: (x[4] or _date.min), reverse=True)
+
+    recent_rows = ""
+    for (sym, strat, sd), pnl, reason, ep, exit_d in base_recent:
+        b = bt.get((sym, strat), 0)
+        nm = _name_of.get((sym, strat), "")
+        tc0 = "#4ade80" if pnl >= 0 else "#f87171"
+        cells = (
+            f'<td style="padding:4px 10px;text-align:left">{sym} '
+            f'<span style="color:#64748b;font-size:0.72rem">{nm[:8]} {strat} BT{b}</span></td>'
+            f'<td style="padding:4px 10px;text-align:center;color:#94a3b8">{sd}</td>'
+            f'<td style="padding:4px 10px;text-align:right;color:{tc0};font-weight:700">{pnl:+,.0f}<br>'
+            f'<span style="font-size:0.68rem;color:#64748b">{reason}</span></td>')
+        for em in ems[1:]:
+            hit = fmap[em].get((sym, strat, sd))
+            if hit is None:
+                cells += ('<td style="padding:4px 10px;text-align:center;color:#4ade80;'
+                          'font-weight:700;background:#052e16">回避<br>'
+                          '<span style="font-size:0.68rem;color:#64748b">約定せず</span></td>')
+            else:
+                p2, r2, _e2, _x2 = hit
+                c2 = "#4ade80" if p2 >= 0 else "#f87171"
+                cells += (f'<td style="padding:4px 10px;text-align:right;color:{c2};font-weight:700">'
+                          f'{p2:+,.0f}<br><span style="font-size:0.68rem;color:#64748b">{r2}</span></td>')
+        recent_rows += f'<tr>{cells}</tr>'
+
+    recent_tbl = ""
+    if recent_rows:
+        heads = ''.join(
+            f'<th style="padding:5px 10px;text-align:right">em=+{em}ATR</th>' for em in ems[1:])
+        recent_tbl = (
+            f'<h5 style="margin:16px 0 4px;color:#e2e8f0;font-size:0.82rem">'
+            f'直近{recent_days}日に約定した実トレード（em=0）が、em>0でどうなるか</h5>'
+            '<div style="overflow-x:auto"><table style="width:auto;min-width:560px;'
+            'border-collapse:collapse;font-size:0.82rem">'
+            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.7rem">'
+            '<th style="padding:5px 10px;text-align:left">銘柄/戦略</th>'
+            '<th style="padding:5px 10px;text-align:center">シグナル日</th>'
+            '<th style="padding:5px 10px;text-align:right">em=0（実際）</th>'
+            f'{heads}</tr></thead><tbody>{recent_rows}</tbody></table></div>'
+            '<p style="margin:6px 0 0;color:#64748b;font-size:0.72rem">'
+            '「回避」= em を上げたトリガーに高値が届かず約定しなかった（＝その損益が消える）。'
+            '損失トレードが「回避」なら em>0 で今週の負けを避けられたことを意味する。'
+            'ただし勝ちトレードが「回避」になっていないか（利益も消えていないか）を必ず確認。</p>')
+
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
+        f'㉑ 逆指値の高さ(em)別 成績＋今週の取引がどうなるか（直近{days}日）</h4>'
+        f'<p style="margin:0 0 8px;color:#94a3b8;font-size:0.78rem">'
+        f'同一シグナルで<b>逆指値トリガーの高さ(em)だけ</b>変えて再計算。'
+        f'<b>em=0=前日終値（現行・約定しやすい）</b>／em=+0.5〜1.0ATR=強い上抜けのみ約定（≒+1〜2%）。'
+        f'em を上げると<b>ダマシの弱い上抜けを弾ける</b>が、<b>本物の反発の初動や勝ちトレードも一部逃す</b>。'
+        f'総損益が下がらずに済むかがカギ。</p>'
+        f'<h5 style="margin:8px 0 4px;color:#e2e8f0;font-size:0.82rem">全部</h5>{_summary_table(False)}'
+        f'<h5 style="margin:12px 0 4px;color:#e2e8f0;font-size:0.82rem">BT70以上</h5>{_summary_table(True)}'
+        f'{recent_tbl}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。
@@ -9757,6 +9971,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _drop_tab_btn      = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'drop\')">⑱ 下落深さ</button>'
     _fadeshort_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'fadeshort\')">⑲ 逆張りショート</button>'
     _holdcurve_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'holdcurve\')">⑳ 保有日数カーブ</button>'
+    _emcmp_tab_btn     = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'emcmp\')">㉑ em比較</button>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -9786,6 +10001,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_drop_tab_btn}
 {_fadeshort_tab_btn}
 {_holdcurve_tab_btn}
+{_emcmp_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -10065,6 +10281,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- HOLDCURVE_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_emcmp" class="analysis-tab-pane">
+<!-- EMCMP_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -10115,7 +10335,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
