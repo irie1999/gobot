@@ -5012,7 +5012,8 @@ def build_fade_short_html(days: int, workers: int) -> str:
                     exit_c = closes[ei]
                     fee = (entry_p + exit_c) * _QTY * _FEE
                     pnl = (entry_p - exit_c) * _QTY - fee   # ショート損益
-                    recs.append({"strat": strat, "bt": bt, "N": N, "pnl": pnl})
+                    recs.append({"strat": strat, "bt": bt, "N": N, "pnl": pnl,
+                                 "fd": fdate})
             return recs
         except Exception:
             return []
@@ -5028,44 +5029,87 @@ def build_fade_short_html(days: int, workers: int) -> str:
     if not all_recs:
         return ""
 
-    def _table(recs: list[dict]) -> tuple[str, str]:
-        rows = ""
-        best_n, best_pnl = None, None
-        for N in _NS:
-            sub = [r for r in recs if r["N"] == N]
-            if not sub:
-                continue
-            cnt = len(sub)
-            pnl = sum(r["pnl"] for r in sub)
-            w = sum(1 for r in sub if r["pnl"] > 0)
-            gp = sum(r["pnl"] for r in sub if r["pnl"] > 0)
-            gl = abs(sum(r["pnl"] for r in sub if r["pnl"] < 0))
-            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-            wr = w / cnt * 100 if cnt else 0.0
-            avg = pnl / cnt if cnt else 0.0
-            if best_pnl is None or pnl > best_pnl:
-                best_pnl, best_n = pnl, N
-            pc = "#4ade80" if pnl >= 0 else "#f87171"
-            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
-            rows += (
-                f'<tr><td style="padding:5px 10px;text-align:right">{N}日で手仕舞い</td>'
-                f'<td style="padding:5px 10px;text-align:right">{cnt}件</td>'
-                f'<td style="padding:5px 10px;text-align:right">{wr:.0f}%</td>'
-                f'<td style="padding:5px 10px;text-align:right">{pf_s}</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:{pc};font-weight:700">{pnl:+,.0f}円</td>'
-                f'<td style="padding:5px 10px;text-align:right;color:{pc}">{avg:+,.0f}</td></tr>')
-        if not rows:
-            return "", ""
-        tbl = (
-            '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">'
-            '<thead><tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
-            '<th style="padding:5px 10px;text-align:right">手仕舞い</th>'
+    # ── 日経レジーム（約定日基準）を各レコードに付与 ──
+    _tmap = {}
+    try:
+        _n225_close = fetch_n225(2)
+        _n225_trend = label_trend(_n225_close)
+        _tmap = {(dt.date() if hasattr(dt, "date") else dt): tr
+                 for dt, tr in zip(_n225_trend.index, _n225_trend)}
+    except Exception:
+        _tmap = {}
+    for r in all_recs:
+        r["trend"] = _tmap.get(r.get("fd"))
+
+    def _split(sub):
+        """件数/勝率/PF/勝件数/利益合計/負件数/損失合計/総損益/平均 の辞書。"""
+        cnt = len(sub)
+        if cnt == 0:
+            return None
+        pnls = [r["pnl"] for r in sub]
+        wins = [p for p in pnls if p > 0]
+        gp = sum(wins)
+        gl = -sum(p for p in pnls if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        return {"n": cnt, "wr": len(wins) / cnt * 100, "pf": pf,
+                "nw": len(wins), "gp": gp, "nl": cnt - len(wins), "gl": -gl,
+                "total": sum(pnls), "avg": sum(pnls) / cnt}
+
+    def _pf(pf):
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _row(label, st):
+        tc = "#4ade80" if st["total"] >= 0 else "#f87171"
+        return (
+            f'<tr><td style="padding:5px 10px;text-align:left">{label}</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:#94a3b8">{st["n"]}件</td>'
+            f'<td style="padding:5px 10px;text-align:right">{st["wr"]:.0f}%</td>'
+            f'<td style="padding:5px 10px;text-align:right">{_pf(st["pf"])}</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:#4ade80;'
+            f'border-left:1px solid #334155">{st["nw"]}件</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:#4ade80;font-weight:700">{st["gp"]:+,.0f}</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:#f87171;'
+            f'border-left:1px solid #334155">{st["nl"]}件</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:#f87171;font-weight:700">{st["gl"]:+,.0f}</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:{tc};font-weight:700;'
+            f'border-left:1px solid #334155">{st["total"]:+,.0f}</td>'
+            f'<td style="padding:5px 10px;text-align:right;color:{tc}">{st["avg"]:+,.0f}</td></tr>')
+
+    def _head(first):
+        return (
+            '<div style="overflow-x:auto"><table style="width:auto;min-width:720px;'
+            'border-collapse:collapse;font-size:0.85rem"><thead>'
+            '<tr style="color:#64748b;font-size:0.7rem"><th colspan="4"></th>'
+            '<th colspan="2" style="padding:3px 10px;text-align:center;color:#4ade80;'
+            'border-left:1px solid #334155">利益側(ショート勝ち)</th>'
+            '<th colspan="2" style="padding:3px 10px;text-align:center;color:#f87171;'
+            'border-left:1px solid #334155">損失側(踏み上げ)</th>'
+            '<th colspan="2" style="border-left:1px solid #334155"></th></tr>'
+            '<tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            f'<th style="padding:5px 10px;text-align:left">{first}</th>'
             '<th style="padding:5px 10px;text-align:right">件数</th>'
             '<th style="padding:5px 10px;text-align:right">勝率</th>'
             '<th style="padding:5px 10px;text-align:right">PF</th>'
-            '<th style="padding:5px 10px;text-align:right">総損益</th>'
-            '<th style="padding:5px 10px;text-align:right">平均損益</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table>')
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">勝件数</th>'
+            '<th style="padding:5px 10px;text-align:right">利益合計</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">負件数</th>'
+            '<th style="padding:5px 10px;text-align:right">損失合計</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">総損益</th>'
+            '<th style="padding:5px 10px;text-align:right">平均</th></tr></thead><tbody>')
+
+    def _table(recs):
+        rows = ""
+        best_n, best_pnl = None, None
+        for N in _NS:
+            st = _split([r for r in recs if r["N"] == N])
+            if not st:
+                continue
+            if best_pnl is None or st["total"] > best_pnl:
+                best_pnl, best_n = st["total"], N
+            rows += _row(f"{N}日で手仕舞い", st)
+        if not rows:
+            return "", ""
+        tbl = _head("手仕舞い") + rows + "</tbody></table></div>"
         if best_pnl is None:
             verdict = ""
         elif best_pnl > 0:
@@ -5078,15 +5122,44 @@ def build_fade_short_html(days: int, workers: int) -> str:
                        '(勝ちブレイクの上昇に踏まれる)。')
         return tbl, verdict
 
+    def _trend_table(recs, N=3):
+        """N日手仕舞い固定で、日経レジーム別に利益/損失分離。"""
+        rows = ""
+        pos_down = None
+        for tk, tl in [("up", "▲ 上昇"), ("sideways", "→ 横ばい"), ("down", "▼ 下落")]:
+            st = _split([r for r in recs if r["N"] == N and r.get("trend") == tk])
+            if not st:
+                continue
+            if tk == "down":
+                pos_down = st["total"]
+            rows += _row(tl, st)
+        if not rows:
+            return "", None
+        return _head("約定日の日経") + rows + "</tbody></table></div>", pos_down
+
     blocks = ""
     for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
         sub = [r for r in all_recs if (r["bt"] or 0) >= bt_min]
         tbl, verdict = _table(sub)
         if not tbl:
             continue
+        ttbl, down_pnl = _trend_table(sub, N=3)
+        tblock = ""
+        if ttbl:
+            if down_pnl is not None and down_pnl > 0:
+                tv = ('<b style="color:#4ade80">▼下落レジームでは逆張りショートがプラス</b>'
+                      '＝下げ相場ではブレイクのダマシをショートで取れる可能性(要フォワード)。')
+            elif down_pnl is not None:
+                tv = ('▼下落レジームでもマイナス＝下げ相場でも逆張りショートは不成立。')
+            else:
+                tv = ""
+            tblock = (
+                '<div style="margin:8px 0 0"><span style="color:#64748b;font-size:0.74rem">'
+                'トレンド別（3日手仕舞い固定・約定日の日経レジームで集計）</span>'
+                f'{ttbl}<p style="margin:4px 0 0;color:#cbd5e1;font-size:0.78rem">{tv}</p></div>')
         blocks += (
             f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{lbl}</h5>{tbl}'
-            f'<p style="margin:6px 0 0;color:#cbd5e1;font-size:0.8rem">{verdict}</p>')
+            f'<p style="margin:6px 0 0;color:#cbd5e1;font-size:0.8rem">{verdict}</p>{tblock}')
     if not blocks:
         return ""
     return (
