@@ -5093,7 +5093,7 @@ def build_fade_short_html(days: int, workers: int) -> str:
         f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
         f'border-radius:8px;border-left:3px solid #f472b6">'
         f'<h4 style="margin:0 0 6px;color:#f472b6;font-size:0.9rem">'
-        f'⑭ ブレイク逆張りショート（ロングシグナルをショートで入りN日で手仕舞い・直近{days}日）</h4>'
+        f'⑲ ブレイク逆張りショート（ロングシグナルをショートで入りN日で手仕舞い・直近{days}日）</h4>'
         f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
         f'ロングのブレイクシグナルを、同じトリガー(前日終値)を高値が超えたところで'
         f'<b>ショート</b>し、1〜5日後の終値で手仕舞いした場合の損益。空売り約定にスリッページ、'
@@ -5265,7 +5265,7 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
         f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
         f'border-radius:8px;border-left:3px solid #38bdf8">'
         f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
-        f'⑮ 保有日数に対する平均含み損益（未決着玉・終値ベース・直近{days}日）</h4>'
+        f'⑳ 保有日数に対する平均含み損益（未決着玉・終値ベース・直近{days}日）</h4>'
         f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
         f'各ロングエントリーを日次で追い、終値が目標/損切りに達するまでの"まだ持っている玉"の'
         f'平均含み損益を保有日ごとに集計。右2列は<b>「初日(1日目)に含み損だったエントリー」だけ</b>'
@@ -9752,6 +9752,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _filltiming_tab_btn = (
         f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'filltiming\')">⑮ 約定タイミング</button>'
     )
+    _stopwidth_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'stopwidth\')">⑯ 損切り幅</button>'
+    _opendir_tab_btn   = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'opendir\')">⑰ 寄り付き方向</button>'
+    _drop_tab_btn      = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'drop\')">⑱ 下落深さ</button>'
+    _fadeshort_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'fadeshort\')">⑲ 逆張りショート</button>'
+    _holdcurve_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'holdcurve\')">⑳ 保有日数カーブ</button>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -9776,6 +9781,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_pullback_tab_btn}
 {_openconfirm_tab_btn}
 {_filltiming_tab_btn}
+{_stopwidth_tab_btn}
+{_opendir_tab_btn}
+{_drop_tab_btn}
+{_fadeshort_tab_btn}
+{_holdcurve_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -10035,6 +10045,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- FILLTIMING_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_stopwidth" class="analysis-tab-pane">
+<!-- STOPWIDTH_SLOT -->
+</div>
+
+<div id="analtab_{_dseq}_opendir" class="analysis-tab-pane">
+<!-- OPENDIR_SLOT -->
+</div>
+
+<div id="analtab_{_dseq}_drop" class="analysis-tab-pane">
+<!-- DROP_SLOT -->
+</div>
+
+<div id="analtab_{_dseq}_fadeshort" class="analysis-tab-pane">
+<!-- FADESHORT_SLOT -->
+</div>
+
+<div id="analtab_{_dseq}_holdcurve" class="analysis-tab-pane">
+<!-- HOLDCURVE_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -10085,7 +10115,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

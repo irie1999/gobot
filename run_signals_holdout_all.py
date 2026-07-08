@@ -1059,11 +1059,19 @@ _mh_cache_file = _mh_cache_dir / f"{_mh_prefix}_{TODAY}.pkl"
 # --no-force なら日付跨ぎでpklを再利用して高速化。
 _mh_reuse      = None if _args.force else _latest_analysis_cache(_mh_prefix)
 
+# 各分析は独立タブ。⑪=保有日数比較のみ / ⑯損切り幅 ⑰寄り付き方向 ⑱下落深さ
+# ⑲逆張りショート ⑳保有日数カーブ はそれぞれ別スロットに入れる。
+_fade_html = _curve_html = _stopw_html = _opendir_html = _drop_html = ""
 if _mh_reuse is not None:
     try:
-        _mh_cached = _mhpk.loads(_mh_reuse.read_bytes())
+        _mh_cached   = _mhpk.loads(_mh_reuse.read_bytes())
         _mh_html     = _mh_cached.get("conservative", "")
         _mh_cmp_html = _mh_cached.get("con_agg", "")
+        _fade_html   = _mh_cached.get("fade", "")
+        _curve_html  = _mh_cached.get("curve", "")
+        _stopw_html  = _mh_cached.get("stopwidth", "")
+        _opendir_html = _mh_cached.get("opendir", "")
+        _drop_html   = _mh_cached.get("drop", "")
         print(f"[最大保有日数比較] キャッシュ再利用(日付跨ぎ可・--no-force): {_mh_reuse.name}", flush=True)
     except Exception:
         _mh_html = _mh_cmp_html = None
@@ -1077,38 +1085,41 @@ if _mh_html is None:
     _mh_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=False) or ""
     print(f"最大保有日数比較中 ({_hold_list}, con+agg)...", flush=True)
     _mh_cmp_html = _na.build_max_hold_comparison_html(_hold_list, _DEFAULT_DAYS, _args.workers, compare_modes=True) or ""
-    # ⑭ ブレイク逆張りショート(N日手仕舞い)検証を ⑪ の下に追記
-    print("ブレイク逆張りショート(N日手仕舞い)検証中...", flush=True)
-    try:
-        _mh_html += _na.build_fade_short_html(_DEFAULT_DAYS, _args.workers) or ""
-    except Exception as _fse:
-        print(f"[逆張りショート] 失敗: {_fse}", flush=True)
-    # ⑮ 保有日数に対する含み損の変化 を ⑪ の下に追記
-    print("保有日数に対する含み損の変化 検証中...", flush=True)
-    try:
-        _mh_html += _na.build_holdday_curve_html(_DEFAULT_DAYS, _args.workers) or ""
-    except Exception as _hce:
-        print(f"[含み損カーブ] 失敗: {_hce}", flush=True)
-    # ⑯ 損切り幅別 成績＋広損切り除外シミュレーション を ⑮ の下に追記
+    # ⑯ 損切り幅別 成績（独立タブ）
     print("損切り幅別 成績 検証中...", flush=True)
     try:
-        _mh_html += _na.build_stop_width_html(_DEFAULT_DAYS, _args.workers) or ""
+        _stopw_html = _na.build_stop_width_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _swe:
         print(f"[損切り幅別] 失敗: {_swe}", flush=True)
-    # ⑰ 寄り付き方向 予測精度（夜間指標→翌日日経）を ⑯ の下に追記
+    # ⑰ 寄り付き方向 予測精度（独立タブ）
     print("寄り付き方向 予測精度 検証中...", flush=True)
     try:
-        _mh_html += _na.build_open_direction_accuracy_html(_DEFAULT_DAYS, _args.workers) or ""
+        _opendir_html = _na.build_open_direction_accuracy_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _ode:
         print(f"[寄り付き方向] 失敗: {_ode}", flush=True)
-    # ⑱ 下落深さ別 成績（"下げた後に買う"の検証）を ⑰ の下に追記
+    # ⑱ 下落深さ別 成績（独立タブ）
     print("下落深さ別 成績 検証中...", flush=True)
     try:
-        _mh_html += _na.build_drop_entry_html(_DEFAULT_DAYS, _args.workers) or ""
+        _drop_html = _na.build_drop_entry_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _dee:
         print(f"[下落深さ別] 失敗: {_dee}", flush=True)
+    # ⑲ ブレイク逆張りショート(N日手仕舞い)（独立タブ）
+    print("ブレイク逆張りショート(N日手仕舞い)検証中...", flush=True)
     try:
-        _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
+        _fade_html = _na.build_fade_short_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _fse:
+        print(f"[逆張りショート] 失敗: {_fse}", flush=True)
+    # ⑳ 保有日数に対する含み損の変化（独立タブ）
+    print("保有日数に対する含み損の変化 検証中...", flush=True)
+    try:
+        _curve_html = _na.build_holdday_curve_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _hce:
+        print(f"[含み損カーブ] 失敗: {_hce}", flush=True)
+    try:
+        _mh_cache_file.write_bytes(_mhpk.dumps({
+            "conservative": _mh_html, "con_agg": _mh_cmp_html,
+            "fade": _fade_html, "curve": _curve_html, "stopwidth": _stopw_html,
+            "opendir": _opendir_html, "drop": _drop_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)
     except Exception as _mhe:
         print(f"[最大保有日数比較] キャッシュ保存失敗: {_mhe}", flush=True)
@@ -1117,6 +1128,16 @@ if _mh_html:
     _all_period_html = _all_period_html.replace("<!-- MAXHOLD_SLOT -->", _mh_html, 1)
 if _mh_cmp_html:
     _all_period_html = _all_period_html.replace("<!-- MAXHOLD_CMP_SLOT -->", _mh_cmp_html, 1)
+if _stopw_html:
+    _all_period_html = _all_period_html.replace("<!-- STOPWIDTH_SLOT -->", _stopw_html, 1)
+if _opendir_html:
+    _all_period_html = _all_period_html.replace("<!-- OPENDIR_SLOT -->", _opendir_html, 1)
+if _drop_html:
+    _all_period_html = _all_period_html.replace("<!-- DROP_SLOT -->", _drop_html, 1)
+if _fade_html:
+    _all_period_html = _all_period_html.replace("<!-- FADESHORT_SLOT -->", _fade_html, 1)
+if _curve_html:
+    _all_period_html = _all_period_html.replace("<!-- HOLDCURVE_SLOT -->", _curve_html, 1)
 _phase("最大保有日数比較完了")
 
 # ── ⑬ 押し目指値買い vs 逆指値ブレイク買い 比較 (詳細分析タブ) ──────────────────
