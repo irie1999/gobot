@@ -5715,6 +5715,213 @@ def build_open_direction_accuracy_html(days: int, workers: int = 1) -> str:
     )
 
 
+def build_drop_entry_html(days: int, workers: int) -> str:
+    """⑱ 下落深さ別 成績（詳細分析タブ用）。
+    各トレードのシグナル日時点で「日経が直前2営業日でどれだけ下げていたか」で
+    帯分けし、利益側/損失側を分けて集計する。
+    「深い持続下落（≤-4%＝今の局面）で約定した玉は勝つのか負けるのか」を実測し、
+    "下げた後に買う"意味と、今の下げで新規を続けるべきかを数値で判断する。
+    (sym,strat)単位で1回だけBT。日経は yfinance(^N225)。"""
+    if not _SIGNALS_AVAILABLE:
+        return ""
+
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+    since = _TODAY - timedelta(days=days)
+
+    # ── 日経の「直前2営業日リターン」マップ ──
+    try:
+        import yfinance as _yf
+        from datetime import datetime as _dt, timedelta as _td
+        buf = max(int(days * 1.6) + 30, 120)
+        _s = (_dt.now() - _td(days=buf)).strftime("%Y-%m-%d")
+        _e = (_dt.now() + _td(days=1)).strftime("%Y-%m-%d")
+        _raw = _yf.Ticker("^N225").history(start=_s, end=_e, interval="1d",
+                                           auto_adjust=False, actions=False)
+        if _raw is None or len(_raw) < 10:
+            return ""
+        _ndates = [(i.date() if hasattr(i, "date") else i) for i in _raw.index]
+        _nclose = [float(x) for x in _raw["Close"].values]
+        _didx = {d: k for k, d in enumerate(_ndates)}
+    except Exception:
+        return ""
+
+    import bisect
+
+    def _drop2(sig_d):
+        """シグナル日の直前2営業日リターン(%)。日経営業日に無ければ直近以前。"""
+        if sig_d is None:
+            return None
+        k = _didx.get(sig_d)
+        if k is None:
+            j = bisect.bisect_right(_ndates, sig_d) - 1
+            if j < 0:
+                return None
+            k = j
+        if k < 2:
+            return None
+        base = _nclose[k - 2]
+        if base <= 0:
+            return None
+        return (_nclose[k] / base - 1.0) * 100.0
+
+    def _one(sym, name, strat) -> list:
+        mod = _mod_for(strat)
+        try:
+            res = mod.backtest_one(sym, name, strat)
+            if not res:
+                return []
+            pr = res.get("period_results", {})
+            if not pr:
+                return []
+            try:
+                bt = mod.calc_recommend_score(pr)[0]
+            except Exception:
+                bt = 0
+            trade_log = pr[max(pr.keys())].get("trade_log", [])
+            out = []
+            tseen: set = set()
+            for t in trade_log:
+                reason = t.get("reason", "") or ""
+                if reason in ("", "発注中", "保有中"):
+                    continue
+                exit_dt = t.get("exit_dt")
+                if exit_dt is None:
+                    continue
+                exit_d = exit_dt.date() if hasattr(exit_dt, "date") else exit_dt
+                if exit_d < since:
+                    continue
+                k = (t.get("entry_dt"), exit_dt)
+                if k in tseen:
+                    continue
+                tseen.add(k)
+                sdt = t.get("signal_dt")
+                sd = sdt.date() if hasattr(sdt, "date") else sdt
+                dr = _drop2(sd)
+                if dr is None:
+                    continue
+                out.append((bt, dr, t.get("pnl", 0)))
+            return out
+        except Exception:
+            return []
+
+    rows_all: list = []
+    with _TPE(max_workers=workers) as ex:
+        futs = [ex.submit(_one, s, n, st) for s, n, st in items]
+        for fut in _asc(futs):
+            try:
+                rows_all.extend(fut.result() or [])
+            except Exception:
+                pass
+    if not rows_all:
+        return ""
+
+    # 直前2日リターンの帯（下→上）
+    BUCKETS = [
+        (-1e9, -4, "≤ -4%（急落・今の局面）", True),
+        (-4, -2, "-4〜-2%（強い下げ）", True),
+        (-2, -1, "-2〜-1%（下げ）", False),
+        (-1, 0, "-1〜0%（小幅安）", False),
+        (0, 2, "0〜+2%（上げ）", False),
+        (2, 1e9, "+2%以上（急騰）", False),
+    ]
+
+    def _stats(trs):
+        pnls = [p for (_b, _r, p) in trs]
+        n = len(pnls)
+        if n == 0:
+            return None
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gp, gl = sum(wins), -sum(losses)
+        pf = (gp / gl) if gl > 0 else float("inf")
+        return {"n": n, "wr": len(wins) / n * 100.0, "pf": pf,
+                "nw": len(wins), "gp": gp, "avgw": gp / len(wins) if wins else 0,
+                "nl": len(losses), "gl": -gl,
+                "avgl": (-gl / len(losses)) if losses else 0,
+                "total": sum(pnls), "avg": sum(pnls) / n}
+
+    def _pf(pf):
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _table(trs):
+        rows = ""
+        for lo, hi, lbl, deep in BUCKETS:
+            sub = [r for r in trs if lo <= r[1] < hi]
+            st = _stats(sub)
+            if not st:
+                continue
+            tc = "#4ade80" if st["total"] >= 0 else "#f87171"
+            bg = "background:#2d0a0a;" if deep else ""
+            rows += (
+                f'<tr style="{bg}"><td style="padding:5px 10px;text-align:left">{lbl}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#94a3b8">{st["n"]}</td>'
+                f'<td style="padding:5px 10px;text-align:right">{st["wr"]:.0f}%</td>'
+                f'<td style="padding:5px 10px;text-align:right">{_pf(st["pf"])}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#4ade80;'
+                f'border-left:1px solid #334155">{st["nw"]}件</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#4ade80;font-weight:700">{st["gp"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171;'
+                f'border-left:1px solid #334155">{st["nl"]}件</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:#f87171;font-weight:700">{st["gl"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{tc};font-weight:700;'
+                f'border-left:1px solid #334155">{st["total"]:+,.0f}</td>'
+                f'<td style="padding:5px 10px;text-align:right;color:{tc}">{st["avg"]:+,.0f}</td></tr>')
+        if not rows:
+            return ""
+        return (
+            '<div style="overflow-x:auto">'
+            '<table style="width:auto;min-width:760px;border-collapse:collapse;font-size:0.85rem">'
+            '<thead><tr style="color:#64748b;font-size:0.7rem">'
+            '<th colspan="4"></th>'
+            '<th colspan="2" style="padding:3px 10px;text-align:center;color:#4ade80;'
+            'border-left:1px solid #334155">利益側</th>'
+            '<th colspan="2" style="padding:3px 10px;text-align:center;color:#f87171;'
+            'border-left:1px solid #334155">損失側</th>'
+            '<th colspan="2" style="border-left:1px solid #334155"></th></tr>'
+            '<tr style="border-bottom:1px solid #334155;color:#64748b;font-size:0.72rem">'
+            '<th style="padding:5px 10px;text-align:left">シグナル日の直前2日 日経</th>'
+            '<th style="padding:5px 10px;text-align:right">件数</th>'
+            '<th style="padding:5px 10px;text-align:right">勝率</th>'
+            '<th style="padding:5px 10px;text-align:right">PF</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">勝件数</th>'
+            '<th style="padding:5px 10px;text-align:right">利益合計</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">負件数</th>'
+            '<th style="padding:5px 10px;text-align:right">損失合計</th>'
+            '<th style="padding:5px 10px;text-align:right;border-left:1px solid #334155">総損益</th>'
+            '<th style="padding:5px 10px;text-align:right">平均</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>')
+
+    blocks = ""
+    for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
+        sub = [r for r in rows_all if (r[0] or 0) >= bt_min]
+        tbl = _table(sub)
+        if tbl:
+            blocks += f'<h5 style="margin:14px 0 4px;color:#e2e8f0;font-size:0.82rem">{lbl}</h5>{tbl}'
+    if not blocks:
+        return ""
+    return (
+        f'<div style="margin:20px 0 0;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#38bdf8;font-size:0.9rem">'
+        f'⑱ 下落深さ別 成績（"下げた後に買う"の検証・直近{days}日）</h4>'
+        f'<p style="margin:0 0 4px;color:#94a3b8;font-size:0.78rem">'
+        f'各トレードの<b>シグナル日時点で、日経が直前2営業日でどれだけ動いていたか</b>で帯分けし、'
+        f'利益側/損失側を分けて集計。<b>赤帯=急落後（≤-4%＝今の局面）に約定した玉</b>。'
+        f'<b>「急落後の帯が総損益プラス」なら"下げた後に買う"は有効</b>（反発を取れている）、'
+        f'<b>マイナスなら落ちるナイフを掴んでいる</b>＝深い下落中は新規を絞るべき。'
+        f'今の相場（直前2日で約-4%）が、過去に約定した玉でどうだったかを直接読める。</p>'
+        f'{blocks}</div>'
+    )
+
+
 def build_pullback_comparison_html(pullbacks: list[float], days: int,
                                    workers: int) -> str:
     """押し目指値買い vs 逆指値ブレイク買い の比較セクション（詳細分析タブ用）。

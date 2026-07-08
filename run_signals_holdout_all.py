@@ -1101,6 +1101,12 @@ if _mh_html is None:
         _mh_html += _na.build_open_direction_accuracy_html(_DEFAULT_DAYS, _args.workers) or ""
     except Exception as _ode:
         print(f"[寄り付き方向] 失敗: {_ode}", flush=True)
+    # ⑱ 下落深さ別 成績（"下げた後に買う"の検証）を ⑰ の下に追記
+    print("下落深さ別 成績 検証中...", flush=True)
+    try:
+        _mh_html += _na.build_drop_entry_html(_DEFAULT_DAYS, _args.workers) or ""
+    except Exception as _dee:
+        print(f"[下落深さ別] 失敗: {_dee}", flush=True)
     try:
         _mh_cache_file.write_bytes(_mhpk.dumps({"conservative": _mh_html, "con_agg": _mh_cmp_html}))
         print(f"[最大保有日数比較] キャッシュ保存: {_mh_cache_file.name}", flush=True)
