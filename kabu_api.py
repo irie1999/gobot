@@ -299,6 +299,30 @@ class KabuClient:
         data = self._get_json(url)
         return data if isinstance(data, list) else []
 
+    def get_ranking(self, ranking_type: str = "1",
+                    exchange_division: str = "ALL") -> list[dict]:
+        """ランキング取得 (GET /ranking)。読み取り専用・発注には無関係。
+
+        ザラ場中は「今この瞬間」のランキング、引け後は当日引けのランキングを返す。
+        過去日の“ザラ場”ランキングは kabu 側に保存が無いため取得できない。
+
+        ranking_type (Type):
+          "1"=値上がり率 "2"=値下がり率 "3"=売買高上位 "4"=売買代金上位
+          "5"=TICK回数 "6"=急上昇 "7"=急降下  (他は kabu ドキュメント参照)
+        exchange_division:
+          "ALL"=全市場 / "T"=東証全体 / "TP"=プライム / "TS"=スタンダード
+          / "TG"=グロース / "M"=名証 など
+
+        返り値: Ranking 配列 (通常 最大30件)。各要素は No/Symbol/SymbolName/
+        CurrentPrice/ChangeRatio(騰落率) 等を含む。
+        """
+        url = f"{self.base_url}/kabusapi/ranking"
+        data = self._get_json(url, params={"Type": ranking_type,
+                                           "ExchangeDivision": exchange_division})
+        if isinstance(data, dict):
+            return data.get("Ranking", []) or []
+        return []
+
     # ── 発注 (POST) ──────────────────────────────────────────
     def _post_order(self, body: dict, label: str) -> dict:
         """sendorder の共通処理。dry_run なら送信せず内容を表示。"""
