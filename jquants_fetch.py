@@ -48,9 +48,25 @@ for d in [CACHE_ROOT, DAILY_CACHE_DIR, MINUTE_CACHE_DIR]:
 # ─────────────────────────────────────────────────────────────
 
 def _load_dotenv() -> None:
-    for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
-        if not p.exists():
+    # swingtrade だけでなく近隣フォルダ(kabu station直下・daytrading・stock_5min)
+    # の .env も探索する。鍵が別プロジェクト側にあっても見つける。
+    here = Path(__file__).resolve().parent
+    candidates = [
+        Path.cwd() / ".env",
+        here / ".env",
+        here.parent / ".env",
+        here.parent / "daytrading" / ".env",
+        here.parent / "stock_5min" / ".env",
+    ]
+    seen = set()
+    for p in candidates:
+        try:
+            p = p.resolve()
+        except Exception:
             continue
+        if p in seen or not p.exists():
+            continue
+        seen.add(p)
         try:
             for line in p.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -61,9 +77,10 @@ def _load_dotenv() -> None:
                 val = val.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = val
-            return
         except Exception:
             pass
+        if os.environ.get("JQUANTS_API_KEY"):
+            return
 
 
 _load_dotenv()
