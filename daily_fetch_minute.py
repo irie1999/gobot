@@ -37,7 +37,13 @@ from pathlib import Path
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
-DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+# 保存先は daytrade_data の自動解決を使う(環境変数 MINUTE_5M_DIR →
+# data/minute_5m → 隣接 stock_5min の順)。これで swingtrade から実行しても
+# 「完璧な」J-Quants データ(stock_5min)を直接 追記更新できる。
+try:
+    from daytrade_data import DATA_DIR  # noqa: E402
+except Exception:
+    DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
 
 # .env
@@ -163,8 +169,11 @@ def main():
                         help="daytrade_symbols.py の20銘柄のみ更新 (日次運用用)")
     args = parser.parse_args()
 
+    print(f"  保存先(更新対象): {DATA_DIR}")
     if not DATA_DIR.exists():
-        print("[ERROR] data/minute_5m/ が見つかりません", file=sys.stderr)
+        print(f"[ERROR] 5分足フォルダが見つかりません: {DATA_DIR}\n"
+              "  環境変数 MINUTE_5M_DIR で明示指定するか、stock_5min の場所を確認してください。",
+              file=sys.stderr)
         sys.exit(1)
 
     cli = get_client()
