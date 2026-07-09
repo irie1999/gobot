@@ -197,19 +197,29 @@ def index_data(data: dict) -> dict:
     for sym, df in data.items():
         if df is None or df.empty:
             continue
+        ts = df.index
+        # groupby は遅いので numpy スライスで日境界を切る(indexは時刻昇順の前提)
+        days = ts.normalize().values                         # datetime64[ns] (00:00)
+        tod = (ts.hour * 3600 + ts.minute * 60 + ts.second).to_numpy().astype(int)
+        opens = df["open"].to_numpy(dtype=float)
+        closes = df["close"].to_numpy(dtype=float)
+        n = len(days)
+        # 日が変わる位置
+        bounds = np.flatnonzero(days[1:] != days[:-1]) + 1
+        starts = np.concatenate(([0], bounds))
+        ends = np.concatenate((bounds, [n]))
         recs = []
         prev_close = None
-        for d, day in df.groupby(df.index.normalize()):
-            tods = (day.index.hour * 3600 + day.index.minute * 60
-                    + day.index.second).to_numpy().astype(int)
+        for a, b_ in zip(starts, ends):
+            last_close = float(closes[b_ - 1])
             recs.append({
-                "date": pd.Timestamp(d),
+                "date": pd.Timestamp(days[a]),
                 "prev_close": prev_close,
-                "tods": tods,
-                "opens": day["open"].to_numpy(dtype=float),
-                "last_close": float(day["close"].iloc[-1]),
+                "tods": tod[a:b_],
+                "opens": opens[a:b_],
+                "last_close": last_close,
             })
-            prev_close = float(day["close"].iloc[-1])
+            prev_close = last_close
         if recs:
             idx[sym] = recs
     return idx
@@ -267,6 +277,93 @@ def sweep(idx: dict, entry_list: list, exit_list: list, top_n: int,
             pts = points_from_index(idx, e_sec, x_sec)
             res = run(pts, top_n, slip, max_price, min_price)
             row["cells"][x] = {k: res["aggs"][k]["avg"] for k in DIRECTIONS}
+        rows.append(row)
+    return rows
+
+
+def sweep_fast(idx: dict, entry_list: list, exit_list: list, top_n: int,
+               slip: float, max_price, min_price: float) -> list:
+    """高速スイープ。生ループは1回だけ(全時刻の価格を先に抽出)→あとはベクトル化。
+
+    従来の sweep() は (entry×exit) combo ごとに全銘柄×日をループして遅かった。
+    ここでは各銘柄×日について「必要な全 entry時刻・exit時刻の価格」を一度に取り、
+    日付ごとの断面行列を作ってから、combo をベクトル演算で処理する。
+    """
+    entry_secs = [_sec(e) for e in entry_list]
+    exit_secs = [None if x == "close" else _sec(x) for x in exit_list]
+    n_e, n_x = len(entry_secs), len(exit_secs)
+    round_cost = (slip + FEE_ONE_WAY) * 2
+    mx = np.inf if max_price is None else float(max_price)
+
+    # ── 断面データを1パスで構築 ──
+    date_pc: dict = defaultdict(list)
+    date_ent: dict = defaultdict(list)
+    date_exi: dict = defaultdict(list)
+    for sym, recs in idx.items():
+        for r in recs:
+            pc = r["prev_close"]
+            if pc is None or pc <= 0:
+                continue
+            tods = r["tods"]; opens = r["opens"]; lastc = r["last_close"]
+            m = len(tods)
+            ei = np.searchsorted(tods, entry_secs, side="left")
+            ent = [float(opens[j]) if j < m else 0.0 for j in ei]
+            exi = []
+            for xs in exit_secs:
+                if xs is None:
+                    exi.append(lastc)
+                else:
+                    j = int(np.searchsorted(tods, xs, side="left"))
+                    exi.append(float(opens[j]) if j < m else lastc)
+            d = r["date"]
+            date_pc[d].append(pc)
+            date_ent[d].append(ent)
+            date_exi[d].append(exi)
+
+    # ── combo ごとの集計器(sum_ret / count) ──
+    dirs = DIRECTIONS
+    sums = {k: np.zeros((n_e, n_x)) for k in dirs}
+    cnts = {k: np.zeros((n_e, n_x), dtype=int) for k in dirs}
+
+    for d in date_pc:
+        pc = np.asarray(date_pc[d])
+        ent = np.asarray(date_ent[d])          # (nsym, n_e)
+        exi = np.asarray(date_exi[d])          # (nsym, n_x)
+        for a in range(n_e):
+            ep = ent[:, a]
+            valid = (ep > 0) & (pc > 0) & (ep >= min_price) & (ep <= mx)
+            iv = np.where(valid)[0]
+            if len(iv) < top_n * 2:
+                continue
+            rr = ep[iv] / pc[iv] - 1
+            order = iv[np.argsort(-rr)]
+            gain = order[:top_n]
+            lose = order[-top_n:]
+            for b in range(n_x):
+                if exit_secs[b] is not None and exit_secs[b] <= entry_secs[a]:
+                    continue
+                xp = exi[:, b]
+                rg = xp[gain] / ep[gain] - 1     # gainers 素リターン(ロング視点)
+                rl = xp[lose] / ep[lose] - 1     # losers 素リターン(ロング視点)
+                sums["LONG_GAINERS"][a, b] += np.sum(rg - round_cost)
+                sums["SHORT_GAINERS"][a, b] += np.sum(-rg - round_cost)
+                sums["LONG_LOSERS"][a, b] += np.sum(rl - round_cost)
+                sums["SHORT_LOSERS"][a, b] += np.sum(-rl - round_cost)
+                for k in dirs:
+                    cnts[k][a, b] += top_n
+
+    rows = []
+    for a, e in enumerate(entry_list):
+        row = {"entry": e, "cells": {}}
+        for b, x in enumerate(exit_list):
+            if exit_secs[b] is not None and exit_secs[b] <= entry_secs[a]:
+                row["cells"][x] = None
+                continue
+            cell = {}
+            for k in dirs:
+                n = cnts[k][a, b]
+                cell[k] = (sums[k][a, b] / n * 100) if n else None
+            row["cells"][x] = cell
         rows.append(row)
     return rows
 
@@ -587,9 +684,9 @@ def main() -> int:
                                   args.min_price, n_dates=3)
         entry_list = [s.strip() for s in args.sweep_entry.split(",") if s.strip()]
         exit_list = [s.strip() for s in args.sweep_exit.split(",") if s.strip()]
-        print(f"  スイープ: entry {len(entry_list)} × exit {len(exit_list)} 通り...")
-        sweeps = sweep(idx, entry_list, exit_list, args.top_n, slip,
-                       max_price, args.min_price)
+        print(f"  スイープ: entry {len(entry_list)} × exit {len(exit_list)} 通り (高速版)...")
+        sweeps = sweep_fast(idx, entry_list, exit_list, args.top_n, slip,
+                            max_price, args.min_price)
         meta = {
             "subtitle": (f"銘柄{len(data)} / 直近{args.days}日 / 上位下位各{args.top_n} / "
                          f"スリッページ片道{args.slippage:.2f}%(往復{(slip+FEE_ONE_WAY)*2*100:.2f}%) / "
