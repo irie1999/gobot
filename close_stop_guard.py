@@ -568,6 +568,13 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         fill_p = float(kp.get("AveragePrice") or kp.get("Price") or 0)
         margin_type = int(kp.get("MarginTradeType") or 1)
         cm = CASH_MARGIN_CLOSE if margin_type >= 1 else CASH_GENBUTSU
+        # 建玉個別決済用の HoldID。kabu /positions の実フィールド名を確定できて
+        # いないため ExecutionID / HoldID の両方を試す(空なら建玉個別ができず
+        # FIFO にフォールバック)。信用建てなのに空なら警告する。
+        hold_id = str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip()
+        if cm == CASH_MARGIN_CLOSE and not hold_id:
+            _p(f"  ⚠ {sym} {name}: 建玉ID(ExecutionID)が空 → 建玉個別決済ができず"
+               f"FIFO/銘柄単位にフォールバックします(同一銘柄複数建玉なら利確が1本のみ)")
 
         # 【第一情報源】my_positions.csv のエントリー記録(=レポート取引明細と同値の
         # 固定 stop/target)。check_signal_on_date 再計算はモード(con/agg)/データ調整で
@@ -623,9 +630,9 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
             "cash_margin":  cm,
             "source":       src,
             "bt":           _entry_bt,   # シグナル発注時のBT(記録があれば表示)
-            # 建玉個別決済用の HoldID(=positions API の ExecutionID)。同一銘柄を
-            # 複数建玉で持つとき、この ID で建玉ごとに別々の損切り/利確を発注する。
-            "hold_id":      str(kp.get("ExecutionID", "") or "").strip(),
+            # 建玉個別決済用の HoldID。同一銘柄を複数建玉で持つとき、この ID で
+            # 建玉ごとに別々の損切り/利確を発注する。
+            "hold_id":      hold_id,
         })
 
     return positions
@@ -894,7 +901,7 @@ def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict
                 "fill_date": "",
                 "cash_margin": cm,
                 "source": "kabu_only",
-                "hold_id": str(kp.get("ExecutionID", "") or "").strip(),
+                "hold_id": str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip(),
             })
 
     return reconciled
