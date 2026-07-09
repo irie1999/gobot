@@ -225,13 +225,23 @@ def main() -> int:
     ap.add_argument("--min-price", type=float, default=100.0, help="株価下限(円)")
     ap.add_argument("--limit", type=int, default=None, help="先頭N銘柄だけ(デバッグ)")
     ap.add_argument("--source", default="local", choices=["local", "auto", "yfinance"])
+    ap.add_argument("--data-dir", default=None,
+                    help="5分足pklのフォルダを明示指定 (未指定なら自動検出: 環境変数"
+                         "MINUTE_5M_DIR → data/minute_5m → 隣接daytrading/data/minute_5m)")
     ap.add_argument("--self-test", action="store_true", help="合成データでロジック検証")
     args = ap.parse_args()
 
     if args.self_test:
         return _self_test()
 
-    from daytrade_data import load_intraday_batch, available_local_symbols
+    # データ場所を明示指定されたら daytrade_data のパスを上書き
+    if args.data_dir:
+        import daytrade_data as _dd
+        from pathlib import Path as _P
+        _dd.DATA_DIR = _P(args.data_dir)
+
+    from daytrade_data import load_intraday_batch, available_local_symbols, DATA_DIR
+    print(f"  5分足データ: {DATA_DIR}")
 
     symbols = available_local_symbols()
     if not symbols:

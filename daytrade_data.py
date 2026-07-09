@@ -25,6 +25,7 @@ daytrade_data.py  ―  デイトレ戦略共通のデータローダー
 
 from __future__ import annotations
 
+import os
 import pickle
 import sys
 from datetime import datetime, timedelta, timezone
@@ -35,8 +36,38 @@ import pandas as pd
 
 JST = timezone(timedelta(hours=9))
 
-# ── ローカルデータのパス ────────────────────────────────────
-DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+
+# ── ローカルデータ(J-Quants 5分足)のパス ────────────────────────────
+# データは別プロジェクト(daytrading フォルダ)に置かれていることが多い。
+# swingtrade から実行しても見つかるよう、以下の順で自動解決する:
+#   1. 環境変数 MINUTE_5M_DIR (最優先。恒久固定したいとき)
+#   2. <このファイルの隣>/data/minute_5m
+#   3. 隣接する daytrading プロジェクトの data/minute_5m
+#      (例: ...\kabu station\swingtrade と ...\kabu station\daytrading が兄弟)
+def _resolve_data_dir() -> Path:
+    env = os.environ.get("MINUTE_5M_DIR")
+    if env:
+        return Path(env)
+    here = Path(__file__).resolve().parent
+    # 「完璧な」J-Quants 5分足は隣接の stock_5min フォルダに置かれている。
+    # (例: ...\kabu station\swingtrade と ...\kabu station\stock_5min が兄弟)
+    candidates = [
+        here / "data" / "minute_5m",
+        here.parent / "stock_5min",
+        here.parent / "stock_5min" / "data" / "minute_5m",
+        here.parent / "daytrading" / "data" / "minute_5m",
+        here.parent / "daytrade" / "data" / "minute_5m",
+    ]
+    for c in candidates:
+        try:
+            if c.exists() and any(c.glob("*.pkl")):
+                return c
+        except Exception:
+            continue
+    return candidates[0]   # 見つからなければ従来の既定 (空でも従来通り動く)
+
+
+DATA_DIR = _resolve_data_dir()
 
 
 # ─────────────────────────────────────────────────────────────

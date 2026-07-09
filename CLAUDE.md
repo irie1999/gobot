@@ -6,6 +6,19 @@
 
 ---
 
+## ★ データ場所メモ (毎回忘れないこと)
+
+- **J-Quants の「完璧な」5分足データは `stock_5min` フォルダにある**。
+  swingtrade リポジトリ内 (`data/minute_5m/`) には **無い**。
+  - Windows実体: `C:\Users\to732\OneDrive\ドキュメント\kabu station\stock_5min`
+    (swingtrade と stock_5min は "kabu station" 直下の兄弟フォルダ)
+  - `daytrade_data.py` の `DATA_DIR` は自動検出する (`_resolve_data_dir`):
+    環境変数 `MINUTE_5M_DIR` → `data/minute_5m` → 隣接 `stock_5min` の順。
+  - 明示指定するなら各スクリプトの `--data-dir` か `set MINUTE_5M_DIR=...` で固定。
+- 日足のスイング用データは `.rsi2_cache/` (yfinance永続キャッシュ)。こちらは別物。
+
+---
+
 ## 0. メイン分析ツール（最重要）
 
 ### `nikkei_analysis_holdout_2config.py` = バックテスト分析のメインコマンド
