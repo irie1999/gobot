@@ -37,12 +37,23 @@ backtest_intraday_ranking.py ― 「その日の値上がり/値下がりラン�
 from __future__ import annotations
 
 import argparse
+import html as _html
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
+
+DIRECTIONS = ("LONG_GAINERS", "SHORT_GAINERS", "LONG_LOSERS", "SHORT_LOSERS")
+DIR_LABELS = {
+    "LONG_GAINERS":  "値上がりTOP買い",
+    "SHORT_GAINERS": "値上がりTOP空売り",
+    "LONG_LOSERS":   "値下がりTOP買い",
+    "SHORT_LOSERS":  "値下がりTOP空売り",
+}
 
 # コストモデル(既定)。ランキング銘柄は流動性・ボラが激しいので片道0.3%を既定に。
 FEE_ONE_WAY = 0.001          # 手数料 片道0.1%(往復0.2%)
@@ -173,6 +184,264 @@ def run(points_by_symbol: dict, top_n: int, slip_one_way: float,
     return {"n_days": n_days, "aggs": {k: v.summary() for k, v in aggs.items()}}
 
 
+# ══════════════════════════════════════════════════════════════════
+# 高速インデックス (時間帯スイープ用) ― 銘柄ごとに日次レコードを1回だけ構築
+# ══════════════════════════════════════════════════════════════════
+def index_data(data: dict) -> dict:
+    """{sym: df} → {sym: [ {date, prev_close, tods(sec), opens, last_close} ]}。
+
+    tods は各バーの「その日の秒(9:00=32400)」の昇順配列。searchsorted で任意
+    時刻の価格を高速に引ける。prev_close は前営業日の最終バー終値。
+    """
+    idx = {}
+    for sym, df in data.items():
+        if df is None or df.empty:
+            continue
+        recs = []
+        prev_close = None
+        for d, day in df.groupby(df.index.normalize()):
+            tods = (day.index.hour * 3600 + day.index.minute * 60
+                    + day.index.second).to_numpy().astype(int)
+            recs.append({
+                "date": pd.Timestamp(d),
+                "prev_close": prev_close,
+                "tods": tods,
+                "opens": day["open"].to_numpy(dtype=float),
+                "last_close": float(day["close"].iloc[-1]),
+            })
+            prev_close = float(day["close"].iloc[-1])
+        if recs:
+            idx[sym] = recs
+    return idx
+
+
+def points_from_index(idx: dict, entry_sec: int, exit_sec: int | None) -> dict:
+    """インデックスから (entry_sec, exit_sec) の points 辞書を高速生成。
+    exit_sec=None は当日最終バー終値(引け)。"""
+    pts = {}
+    for sym, recs in idx.items():
+        d = {}
+        for r in recs:
+            pc = r["prev_close"]
+            if pc is None or pc <= 0:
+                continue
+            tods = r["tods"]
+            ei = int(np.searchsorted(tods, entry_sec, side="left"))
+            if ei >= len(tods):
+                continue
+            p_rank = float(r["opens"][ei])
+            if p_rank <= 0:
+                continue
+            if exit_sec is None:
+                p_exit = r["last_close"]
+            else:
+                xi = int(np.searchsorted(tods, exit_sec, side="left"))
+                p_exit = float(r["opens"][xi]) if xi < len(tods) else r["last_close"]
+            d[r["date"]] = {"prev_close": pc, "p_rank": p_rank, "p_exit": p_exit}
+        if d:
+            pts[sym] = d
+    return pts
+
+
+def _sec(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 3600 + int(m) * 60
+
+
+def sweep(idx: dict, entry_list: list, exit_list: list, top_n: int,
+          slip: float, max_price, min_price: float) -> list:
+    """entry時刻 × exit時刻 のグリッドで4方向の平均%を計算。
+    返り値: [ {entry, cells:{exit_label: {dir: avg%|None}}} ]"""
+    rows = []
+    for e in entry_list:
+        e_sec = _sec(e)
+        row = {"entry": e, "cells": {}}
+        for x in exit_list:
+            if x == "close":
+                x_sec = None
+            else:
+                x_sec = _sec(x)
+                if x_sec <= e_sec:
+                    row["cells"][x] = None
+                    continue
+            pts = points_from_index(idx, e_sec, x_sec)
+            res = run(pts, top_n, slip, max_price, min_price)
+            row["cells"][x] = {k: res["aggs"][k]["avg"] for k in DIRECTIONS}
+        rows.append(row)
+    return rows
+
+
+def data_health(idx: dict) -> dict:
+    """データ健全性の要約。バー数/日・期間・薄い日の検出。"""
+    bars = []
+    dmin = dmax = None
+    total_days = 0
+    thin = 0
+    for sym, recs in idx.items():
+        for r in recs:
+            nb = len(r["tods"])
+            bars.append(nb)
+            total_days += 1
+            if nb < 30:           # 通常 ~54本(昼休み除く)。極端に少ない=欠損疑い
+                thin += 1
+            d = r["date"]
+            dmin = d if (dmin is None or d < dmin) else dmin
+            dmax = d if (dmax is None or d > dmax) else dmax
+    bars_arr = np.array(bars) if bars else np.array([0])
+    return {
+        "n_symbols": len(idx),
+        "date_min": dmin, "date_max": dmax,
+        "sym_day_records": total_days,
+        "bars_mean": float(bars_arr.mean()),
+        "bars_min": int(bars_arr.min()),
+        "bars_max": int(bars_arr.max()),
+        "thin_days": thin,
+    }
+
+
+def sample_rankings(idx: dict, top_n: int, entry_sec: int,
+                    max_price, min_price: float, n_dates: int = 3) -> list:
+    """直近 n_dates 日について、実際のランキング上位/下位の生値を返す(データ検証用)。
+    各要素: {date, gainers:[...], losers:[...]}。各銘柄 (sym, prev_close, p_rank,
+    last_close, ret_rank%, ret_close%)。"""
+    pts = points_from_index(idx, entry_sec, None)   # exit=引け
+    by_date = defaultdict(list)
+    for sym, d in pts.items():
+        for dt, p in d.items():
+            by_date[dt].append((sym, p))
+    out = []
+    for dt in sorted(by_date.keys())[-n_dates:]:
+        ranked = []
+        for sym, p in by_date[dt]:
+            pr = p["p_rank"]
+            if pr < min_price or (max_price is not None and pr > max_price):
+                continue
+            ret_rank = pr / p["prev_close"] - 1
+            ret_close = p["p_exit"] / pr - 1
+            ranked.append((ret_rank, sym, p["prev_close"], pr, p["p_exit"], ret_close))
+        if len(ranked) < top_n * 2:
+            continue
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        out.append({
+            "date": dt,
+            "gainers": ranked[:top_n],
+            "losers": list(reversed(ranked[-top_n:])),
+        })
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
+# HTML レポート
+# ══════════════════════════════════════════════════════════════════
+def _cell_color(v):
+    """平均%を緑(プラス)/赤(マイナス)の背景色に。強度は絶対値。"""
+    if v is None:
+        return "background:#1e293b;color:#475569", "―"
+    cap = min(abs(v) / 1.5, 1.0)       # ±1.5%で最大濃度
+    if v > 0:
+        return f"background:rgba(34,197,94,{0.12+0.55*cap});color:#dcfce7", f"{v:+.2f}%"
+    if v < 0:
+        return f"background:rgba(239,68,68,{0.12+0.55*cap});color:#fee2e2", f"{v:+.2f}%"
+    return "background:#334155;color:#cbd5e1", "0.00%"
+
+
+def build_html(meta: dict, health: dict, samples: list, sweeps: list,
+               summary: dict) -> str:
+    esc = _html.escape
+    css = """
+    body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Meiryo,sans-serif;
+         margin:0;padding:24px;line-height:1.5}
+    h1{font-size:1.5rem;margin:0 0 4px} h2{font-size:1.15rem;margin:28px 0 10px;
+       color:#93c5fd;border-left:4px solid #60a5fa;padding-left:10px}
+    .sub{color:#94a3b8;font-size:0.85rem;margin-bottom:8px}
+    table{border-collapse:collapse;margin:8px 0 18px;font-size:0.82rem}
+    th,td{border:1px solid #334155;padding:5px 9px;text-align:right;white-space:nowrap}
+    th{background:#1e293b;color:#cbd5e1} td.l,th.l{text-align:left}
+    .note{color:#94a3b8;font-size:0.8rem;margin:4px 0 16px}
+    .good{color:#4ade80} .bad{color:#f87171}
+    .box{background:#1e293b;border:1px solid #334155;border-radius:8px;
+         padding:12px 16px;margin:8px 0;display:inline-block}
+    .warn{color:#fbbf24}
+    """
+    P = [f"<style>{css}</style>",
+         f"<h1>その日のランキング上位デイトレ検証</h1>",
+         f"<div class='sub'>{esc(meta['subtitle'])}</div>"]
+
+    # ── データ健全性 ──
+    P.append("<h2>① データ健全性（本当に合っているかの確認）</h2>")
+    P.append("<div class='box'>")
+    P.append(f"銘柄数: <b>{health['n_symbols']}</b>　")
+    P.append(f"期間: <b>{health['date_min']:%Y-%m-%d}〜{health['date_max']:%Y-%m-%d}</b>　")
+    P.append(f"銘柄×日レコード: <b>{health['sym_day_records']:,}</b><br>")
+    P.append(f"1日あたりバー数 平均: <b>{health['bars_mean']:.1f}</b> "
+             f"(最小{health['bars_min']} / 最大{health['bars_max']})　")
+    thin_cls = "warn" if health['thin_days'] > health['sym_day_records'] * 0.1 else ""
+    P.append(f"<span class='{thin_cls}'>薄い日(30バー未満): {health['thin_days']:,}</span>")
+    P.append("</div>")
+    P.append("<div class='note'>※ 東証は 9:00-11:30 / 12:30-15:00 で、5分足は昼休み除き"
+             "1日約54本が正常。平均が54前後で薄い日が少なければデータは健全。</div>")
+
+    # ── サンプル日のランキング実値 ──
+    P.append("<h2>② サンプル日のランキング実値（前日終値→9:30→引け）</h2>")
+    P.append("<div class='note'>実際の銘柄・値段を並べます。知っている日と照合して"
+             "データが正しいか目視確認してください。ret(9:30)=前日終値比の騰落率で順位付け、"
+             "ret(引け)=9:30から引けまでの実際の値動き(=このトレードの素リターン)。</div>")
+    for s in samples:
+        P.append(f"<h3 style='margin:10px 0 4px;color:#e2e8f0;font-size:0.95rem'>"
+                 f"{s['date']:%Y-%m-%d (%a)}</h3>")
+        for tag, rows in (("値上がりTOP", s["gainers"]), ("値下がりTOP", s["losers"])):
+            P.append(f"<table><thead><tr><th class='l'>{tag}</th><th>コード</th>"
+                     f"<th>前日終値</th><th>9:30値</th><th>引け値</th>"
+                     f"<th>ret(9:30)</th><th>ret(引け)</th></tr></thead><tbody>")
+            for i, (rr, sym, pc, pr, px, rc) in enumerate(rows, 1):
+                rc_cls = "good" if rc > 0 else "bad"
+                P.append(f"<tr><td class='l'>{i}</td><td>{esc(str(sym))}</td>"
+                         f"<td>{pc:,.1f}</td><td>{pr:,.1f}</td><td>{px:,.1f}</td>"
+                         f"<td>{rr*100:+.2f}%</td>"
+                         f"<td class='{rc_cls}'>{rc*100:+.2f}%</td></tr>")
+            P.append("</tbody></table>")
+
+    # ── 時間帯スイープ ──
+    P.append("<h2>③ 時間帯スイープ（エントリー時刻 × 決済時刻 → 平均%）</h2>")
+    P.append("<div class='note'>各セル=100株1トレードあたり平均リターン%(スリッページ・手数料込み)。"
+             "緑=プラス / 赤=マイナス。どの時間の組み合わせでもプラスに出る所があるかを見る。"
+             "エッジがあれば緑の塊が出る。全面赤ならエッジ無し。</div>")
+    exit_cols = meta["exit_list"]
+    for dkey in DIRECTIONS:
+        P.append(f"<h3 style='margin:10px 0 4px;font-size:0.95rem'>{DIR_LABELS[dkey]}</h3>")
+        P.append("<table><thead><tr><th class='l'>entry\\exit</th>")
+        for x in exit_cols:
+            P.append(f"<th>{esc(x)}</th>")
+        P.append("</tr></thead><tbody>")
+        for row in sweeps:
+            P.append(f"<tr><th class='l'>{esc(row['entry'])}</th>")
+            for x in exit_cols:
+                cell = row["cells"].get(x)
+                v = cell[dkey] if isinstance(cell, dict) else None
+                style, txt = _cell_color(v)
+                P.append(f"<td style='{style}'>{txt}</td>")
+            P.append("</tr>")
+        P.append("</tbody></table>")
+
+    # ── サマリー(既定 9:30→引け) ──
+    P.append("<h2>④ サマリー（既定: 9:30エントリー → 引け決済）</h2>")
+    P.append(f"<div class='sub'>検証日数 {summary['n_days']}日</div>")
+    P.append("<table><thead><tr><th class='l'>戦略</th><th>取引</th><th>勝率</th>"
+             "<th>平均%</th><th>平均円</th><th>合計円</th></tr></thead><tbody>")
+    for k in DIRECTIONS:
+        s = summary["aggs"][k]
+        tot_cls = "good" if s["total_yen"] > 0 else "bad"
+        P.append(f"<tr><td class='l'>{DIR_LABELS[k]}</td><td>{s['n']:,}</td>"
+                 f"<td>{s['wr']:.1f}%</td><td>{s['avg']:+.2f}%</td>"
+                 f"<td>{s['avg_yen']:+,.0f}</td>"
+                 f"<td class='{tot_cls}'>{s['total_yen']:+,.0f}</td></tr>")
+    P.append("</tbody></table>")
+    P.append(f"<div class='note'>{esc(meta['footer'])}</div>")
+    return "<!doctype html><html><head><meta charset='utf-8'>" \
+           "<title>ランキングデイトレ検証</title></head><body>" \
+           + "\n".join(P) + "</body></html>"
+
+
 def _self_test():
     """合成データでロジック(ランキング/リターン/コスト)を検証。"""
     idx = []
@@ -229,6 +498,13 @@ def main() -> int:
                     help="5分足pklのフォルダを明示指定 (未指定なら自動検出: 環境変数"
                          "MINUTE_5M_DIR → data/minute_5m → 隣接daytrading/data/minute_5m)")
     ap.add_argument("--self-test", action="store_true", help="合成データでロジック検証")
+    ap.add_argument("--html", action="store_true",
+                    help="HTMLレポート(データ健全性/サンプル実値/時間帯スイープ)を出力")
+    ap.add_argument("--sweep-entry", default="09:05,09:30,10:00,10:30,11:00,12:30,13:00,14:00",
+                    help="スイープのエントリー時刻(カンマ区切り HH:MM)")
+    ap.add_argument("--sweep-exit", default="09:30,10:00,11:00,12:30,13:30,14:55,close",
+                    help="スイープの決済時刻(カンマ区切り。close=引け)")
+    ap.add_argument("--no-browser", action="store_true", help="HTMLを自動で開かない")
     args = ap.parse_args()
 
     if args.self_test:
@@ -237,8 +513,7 @@ def main() -> int:
     # データ場所を明示指定されたら daytrade_data のパスを上書き
     if args.data_dir:
         import daytrade_data as _dd
-        from pathlib import Path as _P
-        _dd.DATA_DIR = _P(args.data_dir)
+        _dd.DATA_DIR = Path(args.data_dir)
 
     from daytrade_data import load_intraday_batch, available_local_symbols, DATA_DIR
     print(f"  5分足データ: {DATA_DIR}")
@@ -301,6 +576,38 @@ def main() -> int:
     print()
     print("※ 平均円/合計円は 100株・前日終値比ランキングでのスリッページ&手数料込み概算。")
     print("※ 期間が短い(ローカル5分足の範囲)ため結果は暫定。プラスでも過信しないこと。")
+
+    # ── HTML レポート ──
+    if args.html:
+        print("\nHTMLレポート生成中 (インデックス構築・時間帯スイープ)...")
+        idx = index_data(data)
+        health = data_health(idx)
+        entry_sec = _sec(args.rank_time)
+        samples = sample_rankings(idx, args.top_n, entry_sec, max_price,
+                                  args.min_price, n_dates=3)
+        entry_list = [s.strip() for s in args.sweep_entry.split(",") if s.strip()]
+        exit_list = [s.strip() for s in args.sweep_exit.split(",") if s.strip()]
+        print(f"  スイープ: entry {len(entry_list)} × exit {len(exit_list)} 通り...")
+        sweeps = sweep(idx, entry_list, exit_list, args.top_n, slip,
+                       max_price, args.min_price)
+        meta = {
+            "subtitle": (f"銘柄{len(data)} / 直近{args.days}日 / 上位下位各{args.top_n} / "
+                         f"スリッページ片道{args.slippage:.2f}%(往復{(slip+FEE_ONE_WAY)*2*100:.2f}%) / "
+                         + (f"株価{args.min_price:.0f}〜{max_price:.0f}円" if max_price
+                            else "株価フィルタなし")),
+            "exit_list": exit_list,
+            "footer": "※ ランキング=前日終値比の騰落率。平均%はスリッページ・手数料込み。"
+                      "J-Quants 5分足使用。緑=プラス/赤=マイナス。",
+        }
+        out = Path(f"intraday_ranking_report_{datetime.now(JST):%Y-%m-%d}.html")
+        out.write_text(build_html(meta, health, samples, sweeps, res), encoding="utf-8")
+        print(f"  → {out.resolve()}")
+        if not args.no_browser:
+            try:
+                import webbrowser
+                webbrowser.open(out.resolve().as_uri())
+            except Exception:
+                pass
     return 0
 
 
