@@ -36,6 +36,19 @@ close は「引けの瞬間の値段で判定」が本質なので、broker に�
   cash_margin は CSV の値を使うが、ショートは必ず信用建て (CASH_MARGIN_CLOSE=3)
   のはずなので、CSV が 1 (現物) になっている場合は自動で 3 に補正し警告を出す。
 
+【建玉個別管理 (同一銘柄を複数建玉で持つ場合)】
+  --kabu / --use-kabu-pos モードでは kabu 実建玉の ExecutionID を各ポジションの
+  hold_id として保持し、決済(損切り/利確/タイムカット)を ClosePositions で
+  「その建玉だけ」に発注する。これにより同一銘柄を 2 建玉持っても、建玉ごとに
+  別々の損切り価格・利確価格で管理できる。
+    ※ 前提: 信用建て (kabu_send_signals.py --margin でエントリー) であること。
+      現物は同一銘柄が合算され建玉個別指定ができない (hold_id なし → 従来の
+      銘柄単位 FIFO / 銘柄単位の利確重複判定にフォールバック)。
+    ※ 制約: kabu /orders は返済注文の対象建玉を返さないため、決済時に同一銘柄の
+      利確を一括取消する (別建玉の利確も一旦消える)。close_stop_guard は毎回
+      利確価格も評価して決済するので取りこぼしはなく、次回 --with-targets で
+      生存建玉へ利確が再発注される。
+
 【安全設計】
   - デフォルトは dry-run。--execute を付けたときだけ実発注する。
   - --execute でも接続先は既定でデモ(18081)。本番は --prod を明示しないと使えない。
@@ -256,8 +269,16 @@ def _target_already_set(sym: str, is_short: bool, open_orders: list[dict]) -> bo
     return False
 
 
-def _place_target_order(cli, pos: dict, open_orders: list[dict]) -> tuple[str, str]:
-    """保有1件に利確指値を発注する。重複は出さない。
+def _place_target_order(cli, pos: dict, open_orders: list[dict],
+                        placed_holds: set | None = None) -> tuple[str, str]:
+    """保有1件に利確指値を発注する。
+
+    建玉個別管理:
+      - pos["hold_id"] があれば ClosePositions でその建玉だけに利確を出す。
+        同一銘柄を複数建玉で持っても、建玉ごとに別々の利確価格を置ける。
+      - placed_holds(このrunで発注済みの HoldID 集合) を渡すと、同じ建玉への
+        二重発注を防ぐ。銘柄単位ではなく建玉単位で重複判定する。
+      - hold_id が無い(現物/合算)場合は従来どおり銘柄単位で重複判定する。
     返り値: (status, message)  status = placed / exists / skip / fail"""
     sym   = str(pos["symbol"]).split(".")[0]   # kabuは銘柄コードのみ
     tp    = pos.get("target_price")
@@ -266,10 +287,17 @@ def _place_target_order(cli, pos: dict, open_orders: list[dict]) -> tuple[str, s
     strat = pos.get("strategy", "")
     name  = pos.get("name", "")
     side_label = "ショート" if pos["is_short"] else "ロング"
+    hid   = str(pos.get("hold_id") or "").strip()
     if not tp or tp <= 0:
         return "skip", f"  ? {sym} {name}: 目標価格なし → スキップ"
-    if _target_already_set(sym, pos["is_short"], open_orders):
-        return "exists", f"  ↺ {sym} {name} [{strat}/{side_label}]: 既に利確注文あり → スキップ"
+    if hid:
+        # 建玉単位の重複判定 (このrunで既に同じ建玉に出していればスキップ)
+        if placed_holds is not None and hid in placed_holds:
+            return "exists", f"  ↺ {sym} {name} 建玉{hid[:8]}: 既に利確発注済 → スキップ"
+    else:
+        # hold_id 無し(現物/合算)は従来どおり銘柄単位で重複判定
+        if _target_already_set(sym, pos["is_short"], open_orders):
+            return "exists", f"  ↺ {sym} {name} [{strat}/{side_label}]: 既に利確注文あり → スキップ"
     # 有効期限 = タイムカット日 (YYYYMMDD)。約定日不明なら当日(0)。
     fd = pos.get("fill_date", "").strip()
     expire_day = 0
@@ -280,21 +308,30 @@ def _place_target_order(cli, pos: dict, open_orders: list[dict]) -> tuple[str, s
                              .strftime("%Y%m%d"))
         except Exception:
             expire_day = 0
+    cp = _close_list_for(pos)   # 建玉個別: この建玉だけを返済
+    hid_lbl = f" 建玉{hid[:8]}" if hid else ""
     try:
         if pos["is_short"]:
             res = cli.send_buy(sym, qty=qty, price=tp, order_type="limit",
-                               cash_margin=CASH_MARGIN_CLOSE, expire_day=expire_day)
+                               cash_margin=CASH_MARGIN_CLOSE, expire_day=expire_day,
+                               close_positions=cp)
             lbl = f"利確 指値買戻し @{tp:,.0f}"
         else:
             res = cli.send_sell(sym, qty=qty, price=tp, order_type="limit",
-                                cash_margin=cm, expire_day=expire_day)
+                                cash_margin=cm, expire_day=expire_day,
+                                close_positions=cp)
             lbl = f"利確 指値売り @{tp:,.0f}"
     except Exception as e:
         return "fail", f"  ⚠ {sym} {name}: 利確発注失敗 ({e})"
     ok = (res.get("Result") == 0) or res.get("_dry_run")
+    # 4001005 = 建玉拘束(既に返済注文あり)。二重ではなく「既に利確あり」の無害スキップ。
+    if not ok and str(res.get("Code") or res.get("Result")) == "4001005":
+        return "exists", f"  ↺ {sym} {name}{hid_lbl}: 建玉拘束(既に利確あり) → スキップ"
     exp_lbl = f"期限{expire_day}" if expire_day else "期限当日"
     if ok:
-        return "placed", f"  🎯発注 {sym} {name} [{strat}/{side_label}] {lbl} x{qty} ({exp_lbl})"
+        if placed_holds is not None and hid:
+            placed_holds.add(hid)
+        return "placed", f"  🎯発注 {sym} {name} [{strat}/{side_label}]{hid_lbl} {lbl} x{qty} ({exp_lbl})"
     return "fail", f"  ⚠失敗 {sym} {name}: 応答 {res}"
 
 
@@ -586,6 +623,9 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
             "cash_margin":  cm,
             "source":       src,
             "bt":           _entry_bt,   # シグナル発注時のBT(記録があれば表示)
+            # 建玉個別決済用の HoldID(=positions API の ExecutionID)。同一銘柄を
+            # 複数建玉で持つとき、この ID で建玉ごとに別々の損切り/利確を発注する。
+            "hold_id":      str(kp.get("ExecutionID", "") or "").strip(),
         })
 
     return positions
@@ -854,6 +894,7 @@ def reconcile_with_kabu(csv_positions: list[dict], cli: KabuClient) -> list[dict
                 "fill_date": "",
                 "cash_margin": cm,
                 "source": "kabu_only",
+                "hold_id": str(kp.get("ExecutionID", "") or "").strip(),
             })
 
     return reconciled
@@ -970,6 +1011,26 @@ def cancel_open_buy_orders(symbol: str, cli: KabuClient) -> bool:
 
 
 # ────────────────────────────────────────────────────────────
+# 建玉個別決済用の ClosePositions
+# ────────────────────────────────────────────────────────────
+def _close_list_for(pos: dict) -> list[dict] | None:
+    """信用返済を「この建玉だけ」に限定する ClosePositions を返す。
+
+    pos["hold_id"] (positions API の ExecutionID) があり、かつ信用返済
+    (cash_margin=3) のときだけ [{"HoldID": ..., "Qty": ...}] を返す。
+    - 同一銘柄を複数建玉で保有していても、指定した建玉だけを決済できる。
+    - hold_id が無い / 現物 のときは None を返し、kabu_api 側の
+      FIFO 自動割当て(従来動作)に委ねる。
+    """
+    if pos.get("cash_margin") != CASH_MARGIN_CLOSE:
+        return None
+    hid = str(pos.get("hold_id") or "").strip()
+    if not hid:
+        return None
+    return [{"HoldID": hid, "Qty": int(pos.get("qty", 100))}]
+
+
+# ────────────────────────────────────────────────────────────
 # 引け成行 (MOC) または翌日寄成 (MOO) 発注
 # ────────────────────────────────────────────────────────────
 def send_moc_order(pos: dict, cli: KabuClient) -> bool:
@@ -981,6 +1042,11 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     """
     # 損切り前に残っている反対側の注文をキャンセルする
     # キャンセル失敗時は空売りになるため発注しない
+    # 【建玉個別管理の注意】kabu /orders は返済注文の対象建玉(HoldID)を返さないため、
+    # 「この建玉の利確だけ」を狙ってキャンセルできない。同一銘柄の利確を一括取消して
+    # 建玉の拘束(4001005)を解いてから決済する。→ 継続保有する別建玉の利確も一旦消えるが、
+    # close_stop_guard は毎回 利確価格も評価して決済する(取りこぼしなし)ので実害はなく、
+    # 次回 --with-targets 実行時に生存建玉へ利確が再発注される。
     if pos["is_short"]:
         ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
@@ -993,8 +1059,11 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     cm = pos.get("cash_margin", CASH_GENBUTSU)
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
     side_label = "買い戻し" if pos["is_short"] else "売り決済"
-    print(f"    → {label} 引け成行({side_label}) side={side} cash_margin={cm}")
-    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side, cash_margin=cm)
+    cp = _close_list_for(pos)   # 建玉個別: この建玉だけを返済
+    hid_lbl = f" 建玉={cp[0]['HoldID'][:8]}" if cp else ""
+    print(f"    → {label} 引け成行({side_label}) side={side} cash_margin={cm}{hid_lbl}")
+    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side, cash_margin=cm,
+                       close_positions=cp)
     return res.get("Result") == 0
 
 
@@ -1015,15 +1084,19 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
 
     cm = pos.get("cash_margin", CASH_GENBUTSU)
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
+    cp = _close_list_for(pos)   # 建玉個別: この建玉だけを返済
+    hid_lbl = f" 建玉={cp[0]['HoldID'][:8]}" if cp else ""
 
     if pos["is_short"]:  # ショート → 成行買い戻し
-        print(f"    → {label} 成行(買い戻し) cash_margin={cm}")
+        print(f"    → {label} 成行(買い戻し) cash_margin={cm}{hid_lbl}")
         res = cli.send_buy(pos["symbol"], qty=pos["qty"],
-                           cash_margin=cm, order_type="market")
+                           cash_margin=cm, order_type="market",
+                           close_positions=cp)
     else:  # ロング → 成行売り決済
-        print(f"    → {label} 成行(売り決済) cash_margin={cm}")
+        print(f"    → {label} 成行(売り決済) cash_margin={cm}{hid_lbl}")
         res = cli.send_sell(pos["symbol"], qty=pos["qty"],
-                            cash_margin=cm, order_type="market")
+                            cash_margin=cm, order_type="market",
+                            close_positions=cp)
     return res.get("Result") == 0
 
 
@@ -1199,10 +1272,12 @@ def main() -> int:
                 print(f"  ⚠ 注文一覧取得失敗 ({e}) — 重複チェックなしで続行")
 
         print(f"利確指値の発注 ({'★実発注★' if args.execute else 'dry-run'} / {env_label})")
-        print(f"※ ロング=指値売り / ショート=指値買戻し。期限=タイムカット日まで\n")
+        print(f"※ ロング=指値売り / ショート=指値買戻し。期限=タイムカット日まで")
+        print(f"※ 同一銘柄でも建玉ごとに別々の利確を発注(HoldID個別)\n")
         placed = skipped = 0
+        placed_holds: set = set()   # このrunで利確済みの建玉ID(建玉単位の重複防止)
         for pos in positions:
-            status, msg = _place_target_order(cli, pos, open_orders)
+            status, msg = _place_target_order(cli, pos, open_orders, placed_holds)
             print(msg)
             if status == "placed":
                 placed += 1
@@ -1311,9 +1386,22 @@ def main() -> int:
     if args.with_targets:
         if cli is None:
             cli = KabuClient(prod=args.prod, dry_run=True)
-        _breached_keys = {(str(p["symbol"]).split(".")[0], p["is_short"]) for p in breached}
-        _held = [p for p in positions
-                 if (str(p["symbol"]).split(".")[0], p["is_short"]) not in _breached_keys]
+        # 決済対象の建玉を除外して「継続保有」だけに利確を出す。
+        # 建玉個別管理: HoldID がある建玉は HoldID 単位で除外し、同一銘柄でも
+        # 決済しない建玉には利確を出す。HoldID が無い(現物/合算)場合のみ
+        # 従来どおり (銘柄, 売買方向) 単位で除外する。
+        _breached_holds = {str(p.get("hold_id") or "").strip()
+                           for p in breached if str(p.get("hold_id") or "").strip()}
+        _breached_keys = {(str(p["symbol"]).split(".")[0], p["is_short"])
+                          for p in breached if not str(p.get("hold_id") or "").strip()}
+
+        def _is_breached(p: dict) -> bool:
+            hid = str(p.get("hold_id") or "").strip()
+            if hid:
+                return hid in _breached_holds
+            return (str(p["symbol"]).split(".")[0], p["is_short"]) in _breached_keys
+
+        _held = [p for p in positions if not _is_breached(p)]
         _open_orders = []
         if args.execute:
             try:
@@ -1323,8 +1411,9 @@ def main() -> int:
         print(f"[利確指値チェック] 決済しない保有 {len(_held)}件 "
               f"({'★実発注★' if args.execute else 'dry-run'})")
         _tp_placed = 0
+        _placed_holds: set = set()   # このrunで利確済みの建玉ID(建玉単位の重複防止)
         for _pos in _held:
-            _status, _msg = _place_target_order(cli, _pos, _open_orders)
+            _status, _msg = _place_target_order(cli, _pos, _open_orders, _placed_holds)
             print(_msg)
             if _status == "placed":
                 _tp_placed += 1
