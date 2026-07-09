@@ -178,42 +178,30 @@ def _maybe_serve_orders():
 
 
 def _auto_update_minute():
-    """WATCHLIST銘柄の5分足を最新化する(1日1回・自動・非致命)。
-    ⑭③フェア版が最新5分足を使えるように、日次コマンドの中で自動更新する。
-    別コマンド(update_minute_5m)を打たなくて済むように統合。"""
+    """stock_5min の5分足を最新化する(1日1回・自動・非致命)。
+
+    J-Quants サブスク終了に備え、yfinance で「既存より後のバーだけ」安全に追記する
+    daily_fetch_minute.run_update を使う(時刻を保持し、既存の完璧データは書き換えない)。
+    ランキング検証(backtest_intraday_ranking)が最新5分足を使えるよう、日次コマンドの
+    中で stock_5min 全銘柄を自動更新する。--no-minute-update で無効化。"""
     _mk = Path(".holdout_bt_cache")
     _mk.mkdir(exist_ok=True)
     _flag = _mk / f".minute_updated_{_report_date()}"
     if _flag.exists():
         return                                  # 本日更新済み → スキップ
-    # fetcher を姉妹フォルダ探索で特定
     try:
-        from update_minute_5m import _find_fetcher
-        fetcher = _find_fetcher()
-    except Exception:
-        fetcher = None
-    if fetcher is None:
-        return                                  # 見つからなければ黙ってスキップ
-    # WATCHLIST 銘柄を集める(ロング+ショート)
-    syms: set = set()
-    for _mod_name in ("check_signals_stop", "check_signals_breakout",
-                      "check_signals_short", "check_signals_short_breakout"):
-        try:
-            _m = _importlib.import_module(_mod_name)
-            for _s, _n, _st in getattr(_m, "WATCHLIST", []):
-                syms.add(_s)
-        except Exception:
-            pass
-    if not syms:
+        from daily_fetch_minute import run_update
+    except Exception as _e:
+        print(f"  ⚠ 5分足自動更新スキップ (import失敗: {_e})", flush=True)
         return
-    import subprocess as _sp3
-    _cmd = [sys.executable, str(fetcher), "--symbols", *sorted(syms)]
     print("=" * 65)
-    print(f"5分足を自動更新中 (WATCHLIST {len(syms)}銘柄・本日初回のみ)...", flush=True)
+    print("5分足(stock_5min)を自動更新中 (yfinance・本日初回のみ)...", flush=True)
     print("=" * 65)
     try:
-        _sp3.run(_cmd, cwd=str(fetcher.parent), timeout=600)
-        _flag.write_text("ok", encoding="utf-8")
+        _res = run_update(source="yfinance", verbose=True)
+        _flag.write_text("ok", encoding="utf-8")   # 成功時のみフラグ
+        print(f"  5分足更新完了: +{_res.get('bars', 0):,}バー / "
+              f"{_res.get('updated', 0)}銘柄", flush=True)
     except Exception as _e:
         print(f"  ⚠ 5分足自動更新スキップ ({_e})", flush=True)
 

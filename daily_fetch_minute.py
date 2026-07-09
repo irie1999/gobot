@@ -160,7 +160,8 @@ def jq_to_yf(code: str) -> str:
 
 def fetch_and_append(cli, code: str, pkl_path: Path,
                      from_date: str, to_date: str, dry_run: bool = False,
-                     source: str = "yfinance", fetch_days: int = 7) -> int:
+                     source: str = "yfinance", fetch_days: int = 7,
+                     prefetched=None) -> int:
     """5分足を取得し、既存(正規化済み)pklに「後ろだけ」追記する。
 
     source:
@@ -179,7 +180,14 @@ def fetch_and_append(cli, code: str, pkl_path: Path,
     global _PREVIEW_SHOWN
     from daytrade_data import normalize_minute_df, load_intraday
 
-    if source == "yfinance":
+    if prefetched is not None:
+        # バッチ取得済みの正規化 df を使う(run_update の高速経路)
+        new = prefetched
+        if new is None or new.empty:
+            return 0
+        if not isinstance(new.index, pd.DatetimeIndex):
+            new = normalize_minute_df(new)
+    elif source == "yfinance":
         yf_sym = jq_to_yf(code)
         new = load_intraday(yf_sym, days=fetch_days, source="yfinance")
         if new is None or new.empty:
@@ -242,6 +250,99 @@ def fetch_and_append(cli, code: str, pkl_path: Path,
     return len(new_only)
 
 
+def run_update(source: str = "yfinance", limit: int = 0, dry_run: bool = False,
+               fetch_days: int = 7, daytrade_only: bool = False,
+               check_only: bool = False, verbose: bool = True) -> dict:
+    """5分足を最新まで更新するコア(run_signals 等から呼べる)。
+
+    yfinance は load_intraday_batch で一括取得して高速化。既存バーは書き換えず、
+    各pklの最終時刻より後のバーだけ追記する(完璧データ保護)。
+    返り値: {'updated','skipped','bars'} 集計。
+    """
+    def _p(*a):
+        if verbose:
+            print(*a, flush=True)
+
+    if not DATA_DIR.exists():
+        _p(f"  [warn] 5分足フォルダが無い: {DATA_DIR} — 更新スキップ")
+        return {"updated": 0, "skipped": 0, "bars": 0, "error": "no_dir"}
+
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    cli = get_client() if source == "jquants" else None
+
+    # 対象pkl
+    if daytrade_only:
+        try:
+            from daytrade_symbols import DAYTRADE_SYMBOLS
+            codes = [s.replace(".T", "") + "0" for s, _ in DAYTRADE_SYMBOLS]
+            pkl_files = sorted(DATA_DIR / f"{c}.pkl" for c in codes
+                               if (DATA_DIR / f"{c}.pkl").exists())
+        except Exception:
+            pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+    else:
+        pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+    if limit > 0:
+        pkl_files = pkl_files[:limit]
+
+    # 更新が必要な銘柄(最終日 < today)だけに絞る
+    todo = []
+    for pkl in pkl_files:
+        last = get_last_date(pkl)
+        if last is None or last >= today:
+            continue
+        todo.append((pkl, last))
+    _p(f"  対象 {len(pkl_files)}銘柄 / 未取得あり {len(todo)}銘柄 / 基準日 {today}")
+
+    if check_only:
+        for pkl, last in todo:
+            gap = (datetime.strptime(today, "%Y-%m-%d")
+                   - datetime.strptime(last, "%Y-%m-%d")).days
+            _p(f"    {pkl.stem}: 最終 {last} → {gap}日欠損")
+        return {"updated": 0, "skipped": len(pkl_files) - len(todo),
+                "bars": 0, "todo": len(todo)}
+    if not todo:
+        _p("  すべて最新。更新なし。")
+        return {"updated": 0, "skipped": len(pkl_files), "bars": 0}
+
+    # yfinance は一括プリフェッチ(高速)
+    batch = None
+    if source == "yfinance":
+        try:
+            from daytrade_data import load_intraday_batch
+            yf_syms = [jq_to_yf(pkl.stem) for pkl, _ in todo]
+            _p(f"  yfinanceバッチ取得: {len(yf_syms)}銘柄 直近{fetch_days}日 ...")
+            batch = load_intraday_batch(yf_syms, days=fetch_days, source="yfinance")
+        except Exception as e:
+            _p(f"  [warn] バッチ取得失敗({e}) → 個別取得にフォールバック")
+            batch = None
+
+    updated = 0
+    total = 0
+    for i, (pkl, last) in enumerate(todo, 1):
+        code = pkl.stem
+        gap = (datetime.strptime(today, "%Y-%m-%d")
+               - datetime.strptime(last, "%Y-%m-%d")).days
+        pre = None
+        if source == "yfinance" and batch is not None:
+            pre = batch.get(jq_to_yf(code))
+            if pre is None or getattr(pre, "empty", True):
+                continue
+        bars = fetch_and_append(cli, code, pkl, "", today, dry_run=dry_run,
+                                source=source, fetch_days=max(fetch_days, gap + 2),
+                                prefetched=pre)
+        if bars > 0:
+            total += bars
+            updated += 1
+        if verbose and (i % 200 == 0 or i == len(todo)):
+            _p(f"    {i}/{len(todo)} (更新{updated} 追加{total:,})")
+        if source == "jquants":
+            time.sleep(0.3)   # J-Quants レート制限(yfinanceバッチは不要)
+
+    _p(f"  5分足更新完了: 更新{updated} / 追加バー{total:,}"
+       + (" (DRY-RUN 書き込みなし)" if dry_run else ""))
+    return {"updated": updated, "skipped": len(pkl_files) - len(todo), "bars": total}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="毎日の5分足データ自動取得 + 欠損補完")
@@ -269,92 +370,13 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    # J-Quants クライアントは source=jquants のときだけ必要
-    cli = get_client() if args.source == "jquants" else None
-    today = datetime.now(JST).strftime("%Y-%m-%d")
-
-    # 対象 pkl ファイル決定
-    if args.daytrade_only:
-        try:
-            from daytrade_symbols import DAYTRADE_SYMBOLS
-        except ImportError:
-            print("[ERROR] daytrade_symbols.py が見つかりません", file=sys.stderr)
-            sys.exit(1)
-        # "8032.T" → "80320" に変換
-        target_codes = [s.replace(".T", "") + "0" for s, _ in DAYTRADE_SYMBOLS]
-        pkl_files = []
-        for code5 in target_codes:
-            pkl = DATA_DIR / f"{code5}.pkl"
-            if pkl.exists():
-                pkl_files.append(pkl)
-            else:
-                print(f"  [warn] {code5}.pkl が存在しません (スキップ)")
-        pkl_files.sort()
-        print(f"daytrade対象: {len(pkl_files)}/{len(target_codes)}銘柄")
-    else:
-        pkl_files = sorted(DATA_DIR.glob("*.pkl"))
-    if args.limit > 0:
-        pkl_files = pkl_files[:args.limit]
-
-    print(f"日次更新: {len(pkl_files)}銘柄 / 基準日: {today}", flush=True)
-
-    # 欠損チェック + 取得
-    updated = 0
-    skipped = 0
-    errors = 0
-    total_bars = 0
-
-    for i, pkl_path in enumerate(pkl_files, 1):
-        code = pkl_path.stem  # "72030"
-
-        # 最終日確認
-        last_date = get_last_date(pkl_path)
-        if last_date is None:
-            skipped += 1
-            continue
-
-        # 最終日が今日ならスキップ
-        if last_date >= today:
-            skipped += 1
-            continue
-
-        # 欠損日数
-        gap_days = (datetime.strptime(today, "%Y-%m-%d")
-                    - datetime.strptime(last_date, "%Y-%m-%d")).days
-
-        # 翌日から今日まで取得
-        fetch_from = (datetime.strptime(last_date, "%Y-%m-%d")
-                      + timedelta(days=1)).strftime("%Y-%m-%d")
-
-        if args.check_only:
-            if gap_days > 1:
-                print(f"  {code}: 最終日 {last_date} → {gap_days}日分の欠損")
-            continue
-
-        # 取得 (yfinance 既定 / 既存より後のバーだけ追記)
-        bars = fetch_and_append(cli, code, pkl_path, fetch_from, today,
-                                dry_run=args.dry_run, source=args.source,
-                                fetch_days=max(args.fetch_days, gap_days + 2))
-        if bars > 0:
-            total_bars += bars
-            updated += 1
-        # bars==0 は「新規バー無し(最新済み)」も含むので error 扱いにしない
-        # (旧実装は0をerrorにしていたが誤解を招くため updated/skip のみで集計)
-
-        if i % 100 == 0 or i == len(pkl_files):
-            print(f"  {i}/{len(pkl_files)} 処理済み "
-                  f"(更新:{updated} スキップ:{skipped} エラー:{errors})",
-                  flush=True)
-
-        # レート制限対策
-        time.sleep(0.3)
-
-    print()
     print("=" * 50)
-    print(f"  日次更新完了")
-    print(f"  処理: {len(pkl_files)}銘柄")
-    print(f"  更新: {updated}  スキップ: {skipped}  エラー: {errors}")
-    print(f"  追加バー: {total_bars:,}")
+    res = run_update(source=args.source, limit=args.limit, dry_run=args.dry_run,
+                     fetch_days=args.fetch_days, daytrade_only=args.daytrade_only,
+                     check_only=args.check_only, verbose=True)
+    print("=" * 50)
+    print(f"  完了: 更新 {res.get('updated', 0)}  "
+          f"スキップ {res.get('skipped', 0)}  追加バー {res.get('bars', 0):,}")
     print("=" * 50)
 
 
