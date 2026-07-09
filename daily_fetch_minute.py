@@ -46,11 +46,28 @@ except Exception:
     DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
 
-# .env
+# .env — swingtrade だけでなく近隣フォルダ(kabu station直下・daytrading・
+# stock_5min 等)も探索して JQUANTS_API_KEY 等を読む。データ場所と同じ思想。
 def _load_dotenv():
-    for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
-        if not p.exists():
+    here = Path(__file__).resolve().parent
+    candidates = [
+        Path.cwd() / ".env",
+        here / ".env",
+        here.parent / ".env",              # "kabu station" 直下
+        here.parent / "daytrading" / ".env",
+        here.parent / "stock_5min" / ".env",
+    ]
+    try:
+        from daytrade_data import DATA_DIR as _DD  # stock_5min 等
+        candidates += [Path(_DD) / ".env", Path(_DD).parent / ".env"]
+    except Exception:
+        pass
+    seen = set()
+    for p in candidates:
+        p = p.resolve()
+        if p in seen or not p.exists():
             continue
+        seen.add(p)
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -58,7 +75,8 @@ def _load_dotenv():
                 k, v = k.strip(), v.strip().strip('"').strip("'")
                 if k and k not in os.environ:
                     os.environ[k] = v
-        return
+        if os.environ.get("JQUANTS_API_KEY"):
+            return   # キーが取れたら十分
 
 
 _load_dotenv()
