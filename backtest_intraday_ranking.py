@@ -142,8 +142,9 @@ class Agg:
 
 
 def run(points_by_symbol: dict, top_n: int, slip_one_way: float,
-        max_price: float | None, min_price: float) -> dict:
-    """クロスセクションにランキングを組んで4方向を集計。"""
+        max_price: float | None, min_price: float, min_move: float = 0.0) -> dict:
+    """クロスセクションにランキングを組んで4方向を集計。
+    min_move: 9:30騰落率の絶対値(比率)がこれ未満の銘柄を除外。"""
     # date -> {sym: points}
     by_date: dict = defaultdict(dict)
     for sym, pts in points_by_symbol.items():
@@ -164,6 +165,8 @@ def run(points_by_symbol: dict, top_n: int, slip_one_way: float,
             if max_price is not None and pr > max_price:
                 continue
             ret = pr / p["prev_close"] - 1
+            if min_move and abs(ret) < min_move:
+                continue
             ranked.append((ret, sym, p))
         if len(ranked) < top_n * 2:
             continue  # ランキングを作るに足りない
@@ -282,7 +285,7 @@ def sweep(idx: dict, entry_list: list, exit_list: list, top_n: int,
 
 
 def sweep_fast(idx: dict, entry_list: list, exit_list: list, top_n: int,
-               slip: float, max_price, min_price: float) -> list:
+               slip: float, max_price, min_price: float, min_move: float = 0.0) -> list:
     """高速スイープ。生ループは1回だけ(全時刻の価格を先に抽出)→あとはベクトル化。
 
     従来の sweep() は (entry×exit) combo ごとに全銘柄×日をループして遅かった。
@@ -332,6 +335,10 @@ def sweep_fast(idx: dict, entry_list: list, exit_list: list, top_n: int,
         for a in range(n_e):
             ep = ent[:, a]
             valid = (ep > 0) & (pc > 0) & (ep >= min_price) & (ep <= mx)
+            if min_move:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    mv = np.abs(ep / pc - 1)
+                valid = valid & (mv >= min_move)
             iv = np.where(valid)[0]
             if len(iv) < top_n * 2:
                 continue
@@ -427,6 +434,55 @@ def sample_rankings(idx: dict, top_n: int, entry_sec: int,
     return out
 
 
+def magnitude_short_gainers(idx: dict, entry_sec: int, exit_sec: int | None,
+                            slip: float, min_price: float, max_price,
+                            edges=(3, 5, 8, 12, 18, 100)) -> list:
+    """値上がり銘柄を「9:30時点の上げ幅(前日終値比%)」帯ごとに空売りした成績。
+
+    top-N ではなく、その帯に入る全銘柄を空売りしたと仮定して反落の傾斜を見る。
+    大きく上げた帯ほど反落が強く、コストを超えてプラスになるか？を検証する。
+    返り値: [(帯ラベル, 件数, 勝率%, 平均net%, 平均gross%, 合計円)]
+    """
+    round_cost = (slip + FEE_ONE_WAY) * 2
+    pts = points_from_index(idx, entry_sec, exit_sec)
+    mx = float("inf") if max_price is None else float(max_price)
+    labels = [f"+{edges[i]}〜{edges[i+1]}%" for i in range(len(edges) - 1)]
+    labels[-1] = f"+{edges[-2]}%以上"
+    agg = [{"n": 0, "w": 0, "net": 0.0, "gross": 0.0, "yen": 0.0} for _ in labels]
+    for sym, d in pts.items():
+        for dt, p in d.items():
+            pr = p["p_rank"]
+            if pr < min_price or pr > mx or p["prev_close"] <= 0:
+                continue
+            ret = (pr / p["prev_close"] - 1) * 100
+            if ret < edges[0]:
+                continue
+            bi = None
+            for i in range(len(edges) - 1):
+                if edges[i] <= ret < edges[i + 1]:
+                    bi = i
+                    break
+            if bi is None:
+                continue
+            gross = -(p["p_exit"] / pr - 1)      # 空売り素リターン
+            net = gross - round_cost
+            a = agg[bi]
+            a["n"] += 1
+            a["net"] += net
+            a["gross"] += gross
+            a["yen"] += net * pr * FIXED_QTY
+            if net > 0:
+                a["w"] += 1
+    rows = []
+    for lab, a in zip(labels, agg):
+        if a["n"] == 0:
+            rows.append((lab, 0, 0.0, 0.0, 0.0, 0.0))
+        else:
+            rows.append((lab, a["n"], a["w"] / a["n"] * 100,
+                         a["net"] / a["n"] * 100, a["gross"] / a["n"] * 100, a["yen"]))
+    return rows
+
+
 # ══════════════════════════════════════════════════════════════════
 # HTML レポート
 # ══════════════════════════════════════════════════════════════════
@@ -443,7 +499,7 @@ def _cell_color(v):
 
 
 def build_html(meta: dict, health: dict, samples: list, sweeps: list,
-               summary: dict) -> str:
+               summary: dict, mag: list | None = None) -> str:
     esc = _html.escape
     css = """
     body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Meiryo,sans-serif;
@@ -533,6 +589,27 @@ def build_html(meta: dict, health: dict, samples: list, sweeps: list,
                  f"<td>{s['avg_yen']:+,.0f}</td>"
                  f"<td class='{tot_cls}'>{s['total_yen']:+,.0f}</td></tr>")
     P.append("</tbody></table>")
+
+    # ── ⑤ 値上がりトップ空売り: 上げ幅帯別 ──
+    if mag:
+        P.append("<h2>⑤ 値上がりトップ空売り ― 上げ幅帯別の反落成績</h2>")
+        P.append("<div class='note'>9:30時点の上げ幅(前日終値比%)の帯ごとに、その帯の"
+                 "全銘柄を空売りして決済した成績。大きく上げた帯ほど反落が強いか、"
+                 "そして net(コスト後)がプラスに転じる帯があるかを見る。"
+                 "gross=コスト前 / net=スリッページ・手数料込み。</div>")
+        P.append("<table><thead><tr><th class='l'>上げ幅帯</th><th>件数</th><th>勝率</th>"
+                 "<th>平均gross%</th><th>平均net%</th><th>合計円</th></tr></thead><tbody>")
+        for lab, n, wr, net, gross, yen in mag:
+            ncls = "good" if net > 0 else "bad"
+            gcls = "good" if gross > 0 else "bad"
+            P.append(f"<tr><td class='l'>{esc(lab)}</td><td>{n:,}</td><td>{wr:.1f}%</td>"
+                     f"<td class='{gcls}'>{gross:+.2f}%</td>"
+                     f"<td class='{ncls}'>{net:+.2f}%</td><td>{yen:+,.0f}</td></tr>")
+        P.append("</tbody></table>")
+        P.append("<div class='note'>※ net がプラスの帯があれば「その上げ幅だけ空売り」候補。"
+                 "ただし大きく上げた小型株の空売りは踏み上げ(squeeze)・借株難のリスクが高い。"
+                 "件数が少ない帯は統計的に不安定。</div>")
+
     P.append(f"<div class='note'>{esc(meta['footer'])}</div>")
     return "<!doctype html><html><head><meta charset='utf-8'>" \
            "<title>ランキングデイトレ検証</title></head><body>" \
@@ -589,6 +666,9 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=None, help="予算(円)。100株買える株価に絞る")
     ap.add_argument("--max-price", type=float, default=None, help="株価上限(円)。--budget と同義")
     ap.add_argument("--min-price", type=float, default=100.0, help="株価下限(円)")
+    ap.add_argument("--min-move", type=float, default=0.0,
+                    help="9:30騰落率の絶対値がこの%%未満の銘柄をランキングから除外"
+                         "(大きく動いた銘柄だけに絞る。例: --min-move 15)")
     ap.add_argument("--limit", type=int, default=None, help="先頭N銘柄だけ(デバッグ)")
     ap.add_argument("--source", default="local", choices=["local", "auto", "yfinance"])
     ap.add_argument("--data-dir", default=None,
@@ -657,7 +737,8 @@ def main() -> int:
         return 1
 
     res = run(points, top_n=args.top_n, slip_one_way=slip,
-              max_price=max_price, min_price=args.min_price)
+              max_price=max_price, min_price=args.min_price,
+              min_move=args.min_move / 100.0)
 
     print(f"検証日数: {res['n_days']}日\n")
     labels = {
@@ -676,12 +757,27 @@ def main() -> int:
     print("※ 平均円/合計円は 100株・前日終値比ランキングでのスリッページ&手数料込み概算。")
     print("※ 期間が短い(ローカル5分足の範囲)ため結果は暫定。プラスでも過信しないこと。")
 
+    # ── 値上がりトップ空売り: 上げ幅帯別の反落成績 (核心) ──
+    idx = index_data(data)
+    entry_sec = _sec(args.rank_time)
+    exit_sec = _sec(args.exit_time) if args.exit_time else None
+    mag = magnitude_short_gainers(idx, entry_sec, exit_sec, slip,
+                                  args.min_price, max_price)
+    print("\n" + "=" * 70)
+    print(f"【値上がりトップ空売り】上げ幅帯別 (9:30空売り→"
+          f"{args.exit_time or '引け'}買戻し / スリッページ・手数料込み)")
+    print("=" * 70)
+    print(f"  {'上げ幅帯':<12}{'件数':>7}{'勝率':>8}{'平均net%':>10}{'平均gross%':>12}{'合計円':>13}")
+    print("  " + "-" * 62)
+    for lab, n, wr, net, gross, yen in mag:
+        print(f"  {lab:<12}{n:>7}{wr:>7.1f}%{net:>+9.2f}%{gross:>+11.2f}%{yen:>+13,.0f}")
+    print("  ※ gross=コスト前。net(コスト後)がプラスの帯があれば「その上げ幅だけ空売り」候補。")
+    print("  ※ ただし大きく上げた小型株の空売りは踏み上げ(squeeze)・借株難のリスクが高い。")
+
     # ── HTML レポート ──
     if args.html:
-        print("\nHTMLレポート生成中 (インデックス構築・時間帯スイープ)...")
-        idx = index_data(data)
+        print("\nHTMLレポート生成中 (時間帯スイープ)...")
         health = data_health(idx)
-        entry_sec = _sec(args.rank_time)
         samples = sample_rankings(idx, args.top_n, entry_sec, max_price,
                                   args.min_price, n_dates=args.sample_dates)
         if samples:
@@ -692,7 +788,7 @@ def main() -> int:
         exit_list = [s.strip() for s in args.sweep_exit.split(",") if s.strip()]
         print(f"  スイープ: entry {len(entry_list)} × exit {len(exit_list)} 通り (高速版)...")
         sweeps = sweep_fast(idx, entry_list, exit_list, args.top_n, slip,
-                            max_price, args.min_price)
+                            max_price, args.min_price, min_move=args.min_move / 100.0)
         meta = {
             "subtitle": (f"銘柄{len(data)} / 直近{args.days}日 / 上位下位各{args.top_n} / "
                          f"スリッページ片道{args.slippage:.2f}%(往復{(slip+FEE_ONE_WAY)*2*100:.2f}%) / "
@@ -703,7 +799,8 @@ def main() -> int:
                       "J-Quants 5分足使用。緑=プラス/赤=マイナス。",
         }
         out = Path(f"intraday_ranking_report_{datetime.now(JST):%Y-%m-%d}.html")
-        out.write_text(build_html(meta, health, samples, sweeps, res), encoding="utf-8")
+        out.write_text(build_html(meta, health, samples, sweeps, res, mag),
+                       encoding="utf-8")
         print(f"  → {out.resolve()}")
         if not args.no_browser:
             try:
