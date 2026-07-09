@@ -10536,7 +10536,15 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 .ovbt-btn.active { background:#1a1333; color:#a78bfa; border-color:#7c3aed; font-weight:700; }
 .ovbt-btn:hover:not(.active) { background:#263349; color:#e2e8f0; }
 .detail-tab-pane { display:none; }
-.detail-tab-pane.active { display:block; overflow-x:auto; }
+.detail-tab-pane.active { display:block; }
+/* 取引明細テーブルは横スクロールを出さず全列を一画面に収める (コンパクト表示) */
+.detail-tab-pane table { width:100%; border-collapse:collapse; }
+.detail-tab-pane th, .detail-tab-pane td {
+  font-size:0.72rem; padding:3px 4px; white-space:nowrap; }
+/* 銘柄名だけは折り返し可 (切り詰めない) */
+.detail-tab-pane td:nth-child(2), .detail-tab-pane th:nth-child(2) {
+  white-space:normal; word-break:break-word; }
+.detail-tab-pane th small { font-size:0.6rem; }
 
 /* 詳細分析ブロック 内部タブ */
 .analysis-tab-nav { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
