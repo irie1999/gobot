@@ -602,6 +602,8 @@ def main() -> int:
     ap.add_argument("--sweep-exit", default="09:30,10:00,11:00,12:30,13:30,14:55,close",
                     help="スイープの決済時刻(カンマ区切り。close=引け)")
     ap.add_argument("--no-browser", action="store_true", help="HTMLを自動で開かない")
+    ap.add_argument("--sample-dates", type=int, default=3,
+                    help="②サンプル日ランキングに表示する直近日数(既定3)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -681,7 +683,11 @@ def main() -> int:
         health = data_health(idx)
         entry_sec = _sec(args.rank_time)
         samples = sample_rankings(idx, args.top_n, entry_sec, max_price,
-                                  args.min_price, n_dates=3)
+                                  args.min_price, n_dates=args.sample_dates)
+        if samples:
+            print(f"  サンプル日: {samples[0]['date']:%Y-%m-%d}〜"
+                  f"{samples[-1]['date']:%Y-%m-%d} ({len(samples)}日)  "
+                  f"※データ最新日={health['date_max']:%Y-%m-%d}")
         entry_list = [s.strip() for s in args.sweep_entry.split(",") if s.strip()]
         exit_list = [s.strip() for s in args.sweep_exit.split(",") if s.strip()]
         print(f"  スイープ: entry {len(entry_list)} × exit {len(exit_list)} 通り (高速版)...")
