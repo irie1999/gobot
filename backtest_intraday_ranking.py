@@ -218,8 +218,10 @@ def _sim_tpsl_exit(rec, ei, entry_price, is_long, tp, sl):
     return rec["last_close"], "close"
 
 
-def run_tpsl(idx, entry_sec, top_n, slip, max_price, min_price, tp, sl):
-    """9:30ランキング → TP/SL(ザラ場)で4方向を集計。
+def run_tpsl(idx, entry_sec, top_n, slip, max_price, min_price, tp, sl,
+             rank_basis="prevclose"):
+    """ランキング → TP/SL(ザラ場)で4方向を集計。
+    rank_basis: "prevclose"=前日終値比 / "open"=今日の寄りからの初動で順位付け。
     コスト: エントリー=slip+fee。決済= SLはslip+fee / TP・引けはfeeのみ。
     tp, sl は比率(例 0.03=3%)。"""
     fee = FEE_ONE_WAY
@@ -241,7 +243,10 @@ def run_tpsl(idx, entry_sec, top_n, slip, max_price, min_price, tp, sl):
             ep = float(r["opens"][ei])
             if ep <= 0 or ep < min_price or ep > mx:
                 continue
-            by_date[r["date"]].append((ep / pc - 1, r, ei, ep))
+            base = r["day_open"] if rank_basis == "open" else pc
+            if base <= 0:
+                continue
+            by_date[r["date"]].append((ep / base - 1, r, ei, ep))
 
     def _add(sel, long_key, short_key):
         for _ret, rec, ei, ep in sel:
@@ -298,6 +303,7 @@ def index_data(data: dict) -> dict:
             recs.append({
                 "date": pd.Timestamp(days[a]),
                 "prev_close": prev_close,
+                "day_open": float(opens[a]),   # 今日の寄り値(初動の起点)
                 "tods": tod[a:b_],
                 "opens": opens[a:b_],
                 "highs": highs[a:b_],
@@ -778,6 +784,9 @@ def main() -> int:
                          "(サーフェス全体を見て、プラス領域が本物か偶然かを判定)")
     ap.add_argument("--grid-tp", default="2,3,4,5,6", help="--grid のTP候補(カンマ区切り%%)")
     ap.add_argument("--grid-sl", default="1,1.5,2,3", help="--grid のSL候補(カンマ区切り%%)")
+    ap.add_argument("--rank-basis", choices=["prevclose", "open"], default="prevclose",
+                    help="順位付けの基準: prevclose=前日終値比(既定) / "
+                         "open=今日の寄りからの初動(9:30固定にこだわらず初動の勢いで選ぶ)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -829,7 +838,8 @@ def main() -> int:
     if _tpsl_mode:
         # 利確目標(TP)・損切り(SL)でザラ場決済
         res = run_tpsl(idx, entry_sec, args.top_n, slip, max_price,
-                       args.min_price, args.tp / 100.0, args.sl / 100.0)
+                       args.min_price, args.tp / 100.0, args.sl / 100.0,
+                       rank_basis=args.rank_basis)
         print(f"★決済方式: 利確+{args.tp:.1f}% / 損切り-{args.sl:.1f}% "
               f"(ザラ場でタッチ→そこで決済 / 未達は引け)")
     else:
@@ -885,7 +895,8 @@ def main() -> int:
             es = _sec(e)
             if _tpsl_mode:
                 r = run_tpsl(idx, es, args.top_n, slip, max_price,
-                             args.min_price, args.tp / 100.0, args.sl / 100.0)
+                             args.min_price, args.tp / 100.0, args.sl / 100.0,
+                             rank_basis=args.rank_basis)
             else:
                 pts = points_from_index(idx, es, exit_sec)
                 r = run(pts, args.top_n, slip, max_price, args.min_price,
@@ -912,7 +923,8 @@ def main() -> int:
         for tp in _tps:
             for sl in _sls:
                 r = run_tpsl(idx, entry_sec, args.top_n, slip, max_price,
-                             args.min_price, tp / 100.0, sl / 100.0)
+                             args.min_price, tp / 100.0, sl / 100.0,
+                             rank_basis=args.rank_basis)
                 cube[(tp, sl)] = {k: r["aggs"][k]["avg"] for k in DIRECTIONS}
         _npos = 0
         for k in DIRECTIONS:
