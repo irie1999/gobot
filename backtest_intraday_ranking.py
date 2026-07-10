@@ -776,8 +776,8 @@ def main() -> int:
     ap.add_argument("--grid", action="store_true",
                     help="利確(TP)×損切り(SL)の全組み合わせを4方向でマトリクス表示"
                          "(サーフェス全体を見て、プラス領域が本物か偶然かを判定)")
-    ap.add_argument("--grid-tp", default="2,3,4,5,6", help="--grid のTP候補(カンマ区切り%)")
-    ap.add_argument("--grid-sl", default="1,1.5,2,3", help="--grid のSL候補(カンマ区切り%)")
+    ap.add_argument("--grid-tp", default="2,3,4,5,6", help="--grid のTP候補(カンマ区切り%%)")
+    ap.add_argument("--grid-sl", default="1,1.5,2,3", help="--grid のSL候補(カンマ区切り%%)")
     args = ap.parse_args()
 
     if args.self_test:
