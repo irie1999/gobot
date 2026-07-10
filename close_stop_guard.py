@@ -173,20 +173,44 @@ def _lookup_signal(sym: str, sig_map: dict[str, list[dict]],
     return None, None, "", ""
 
 
-def _csv_entry_stop_target(sym: str, side: str
-                           ) -> tuple[float | None, float | None, str, str]:
-    """エントリー時に記録した固定 (stop, target, strategy, 約定日) を返す。
+def _csv_entry_stop_target(sym: str, side: str, fill_price: float | None = None
+                           ) -> tuple[float | None, float | None, str, str, str]:
+    """エントリー時に記録した固定 (stop, target, strategy, 約定日, bt) を返す。
     ⓪ manual_targets.csv (手動指定=最優先。fill_date列で約定日も指定可)
     ① placed_orders_*.csv (発注ボタンが記録。placed_at から約定日を導出)
     ② my_positions.csv
     のいずれかから取得。どれもレポート取引明細と同値で再計算しないのでズレない。
-    見つからなければ (None, None, "", "")。"""
+
+    ★同一銘柄を複数建玉で持つ場合: fill_price を渡すと、各ソース内で「記録された
+      エントリー価格(entry/約定値)が fill_price に最も近い行」を選ぶ。これで建玉ごとに
+      別々の stop/target を正しく引き当てる(合算して同じ値になるバグを回避)。
+      価格列が無い/1行しか無い場合は従来どおり先頭行。
+    見つからなければ (None, None, "", "", "")。"""
     import csv as _csv
     import glob as _glob
     from pathlib import Path as _Path
     base = _Path(__file__).resolve().parent
-    # ⓪ manual_targets.csv (手動指定=最優先override。記録欠落保有の正しい値をここで指定)
+
+    def _num(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    def _pick(cands: list):
+        """cands: [{'stop','target','strat','date','bt','price'}]。
+        fill_price 指定かつ price を持つ候補が複数あれば最も近いものを選ぶ。"""
+        if not cands:
+            return None
+        if fill_price and len(cands) > 1:
+            withp = [c for c in cands if c["price"] > 0]
+            if withp:
+                return min(withp, key=lambda c: abs(c["price"] - fill_price))
+        return cands[0]
+
+    # ⓪ manual_targets.csv
     mp = base / "manual_targets.csv"
+    cands = []
     if mp.exists():
         try:
             with open(mp, encoding="utf-8-sig") as f:
@@ -195,19 +219,24 @@ def _csv_entry_stop_target(sym: str, side: str
                     rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
                     if rsym != sym or rside != side:
                         continue
-                    try:
-                        sp = float(row.get("stop") or 0)
-                        tp = float(row.get("target") or 0)
-                    except Exception:
-                        continue
+                    sp = _num(row.get("stop"))
+                    tp = _num(row.get("target"))
                     if sp > 0:
-                        return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
-                                str(row.get("fill_date", "") or "").strip(),
-                                str(row.get("bt", "") or "").strip())
+                        price = _num(row.get("entry") or row.get("約定値")
+                                     or row.get("fill_price") or row.get("price"))
+                        cands.append({"stop": sp, "target": tp if tp > 0 else None,
+                                      "strat": row.get("strategy", ""),
+                                      "date": str(row.get("fill_date", "") or "").strip(),
+                                      "bt": str(row.get("bt", "") or "").strip(),
+                                      "price": price})
         except Exception:
             pass
-    # ① placed_orders_*.csv (日付昇順で読み、最新の発注で上書き)
-    best = None
+    c = _pick(cands)
+    if c:
+        return (c["stop"], c["target"], c["strat"], c["date"], c["bt"])
+
+    # ① placed_orders_*.csv (発注記録。price=entry=逆指値価格)
+    cands = []
     for fp in sorted(_glob.glob(str(base / "placed_orders_*.csv"))):
         try:
             with open(fp, encoding="utf-8") as f:
@@ -216,20 +245,22 @@ def _csv_entry_stop_target(sym: str, side: str
                     rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
                     if rsym != sym or rside != side:
                         continue
-                    try:
-                        sp = float(row.get("stop") or 0)
-                        tp = float(row.get("target") or 0)
-                    except Exception:
-                        continue
+                    sp = _num(row.get("stop"))
+                    tp = _num(row.get("target"))
                     if sp > 0:
-                        _pa = str(row.get("placed_at", "") or "")[:10]
-                        best = (sp, tp if tp > 0 else None, row.get("strategy", ""), _pa,
-                                str(row.get("bt", "") or "").strip())
+                        cands.append({"stop": sp, "target": tp if tp > 0 else None,
+                                      "strat": row.get("strategy", ""),
+                                      "date": str(row.get("placed_at", "") or "")[:10],
+                                      "bt": str(row.get("bt", "") or "").strip(),
+                                      "price": _num(row.get("entry"))})
         except Exception:
             continue
-    if best is not None:
-        return best
-    # ② my_positions.csv
+    c = _pick(cands)
+    if c:
+        return (c["stop"], c["target"], c["strat"], c["date"], c["bt"])
+
+    # ② my_positions.csv (price=fill_price)
+    cands = []
     p = base / "my_positions.csv"
     if p.exists():
         try:
@@ -241,17 +272,20 @@ def _csv_entry_stop_target(sym: str, side: str
                     rside = "short" if str(row.get("side", "")).strip() == "short" else "long"
                     if rsym != sym or rside != side:
                         continue
-                    try:
-                        sp = float(row.get("stop_price") or 0)
-                        tp = float(row.get("target_price") or 0)
-                    except Exception:
-                        continue
+                    sp = _num(row.get("stop_price"))
+                    tp = _num(row.get("target_price"))
                     if sp > 0:
-                        return (sp, (tp if tp > 0 else None), row.get("strategy", ""),
-                                str(row.get("fill_date", "") or "").strip(),
-                                str(row.get("bt", "") or "").strip())
+                        cands.append({"stop": sp, "target": tp if tp > 0 else None,
+                                      "strat": row.get("strategy", ""),
+                                      "date": str(row.get("fill_date", "") or "").strip(),
+                                      "bt": str(row.get("bt", "") or "").strip(),
+                                      "price": _num(row.get("fill_price"))})
         except Exception:
             pass
+    c = _pick(cands)
+    if c:
+        return (c["stop"], c["target"], c["strat"], c["date"], c["bt"])
+
     return None, None, "", "", ""
 
 
@@ -580,7 +614,9 @@ def load_positions_from_kabu(cli: KabuClient, product: int = 2,
         # 固定 stop/target)。check_signal_on_date 再計算はモード(con/agg)/データ調整で
         # ズレる(例: 4088 記録3,111 → 再計算3,235)ため、記録があればそれを最優先。
         _side_lbl = "short" if is_short else "long"
-        stop_p, tgt_p, strat, _csv_fill_date, _csv_bt = _csv_entry_stop_target(sym, _side_lbl)
+        # fill_p を渡して、同一銘柄の複数建玉でも約定値に最も近い記録行を引き当てる
+        stop_p, tgt_p, strat, _csv_fill_date, _csv_bt = _csv_entry_stop_target(
+            sym, _side_lbl, fill_price=fill_p)
         sig_date = ""
         _fixed_fill_date = ""   # CSV/手動指定が持つ約定日(あれば直接採用)
         _entry_bt = _csv_bt     # シグナル発注時のBT(記録があれば)

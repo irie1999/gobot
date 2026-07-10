@@ -248,25 +248,33 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
     if price is None:
         return "skip(値幅取得失敗→次回再試行)"
 
-    # 既存利確があれば価格を比較。値幅が広がって本来目標に近づけられる/狭まって
-    # 値幅内に収め直す必要がある場合は、キャンセルして置き直す(=目標更新)。
-    # existing=(oid,price) が渡されればそれを使う(get_orders再取得を避け429回避)。
-    if existing is not None:
-        _oid, _cur = existing
-    else:
-        _oid, _cur = _active_close_order(cli, symbol, side)
+    # 建玉個別(hold_id あり): ClosePositions でその建玉だけに利確を出す。
+    # /orders は返済注文の対象建玉を返せず (sym,side) 単位の既存判定では別建玉を
+    # 誤って据置/取消してしまうため、建玉個別のときは既存チェックを行わず素直に
+    # 発注し、既に利確がある建玉は kabu が 4001005(建玉拘束)を返す→exists 扱いにする。
+    hid = str(p.get("hold_id") or "").strip()
+    cp = [{"HoldID": hid, "Qty": qty}] if hid else None
+
     _relabel = ""
-    if _oid is not None:
-        from backtest_limit_entry import tick_size as _tsz
-        if abs(_cur - price) <= _tsz(price):
-            return "exists"                     # 現行と実質同じ → 据置
-        # 置き直し: 既存をキャンセル(非送出化済み)してから発注
-        try:
-            cli.cancel_order(_oid)
-        except Exception:
-            pass
-        _relabel = (f"目標更新↑({_cur:,.0f}→{price:,.0f})" if price > _cur
-                    else f"値幅内へ修正↓({_cur:,.0f}→{price:,.0f})")
+    if not hid:
+        # 既存利確があれば価格を比較。値幅が広がって本来目標に近づけられる/狭まって
+        # 値幅内に収め直す必要がある場合は、キャンセルして置き直す(=目標更新)。
+        # existing=(oid,price) が渡されればそれを使う(get_orders再取得を避け429回避)。
+        if existing is not None:
+            _oid, _cur = existing
+        else:
+            _oid, _cur = _active_close_order(cli, symbol, side)
+        if _oid is not None:
+            from backtest_limit_entry import tick_size as _tsz
+            if abs(_cur - price) <= _tsz(price):
+                return "exists"                     # 現行と実質同じ → 据置
+            # 置き直し: 既存をキャンセル(非送出化済み)してから発注
+            try:
+                cli.cancel_order(_oid)
+            except Exception:
+                pass
+            _relabel = (f"目標更新↑({_cur:,.0f}→{price:,.0f})" if price > _cur
+                        else f"値幅内へ修正↓({_cur:,.0f}→{price:,.0f})")
 
     from backtest_limit_entry import default_max_hold
     # タイムカット無効時 default_max_hold は 100000(実質無限) を返す。そのまま
@@ -286,10 +294,11 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
     def _send(expire):
         if side == "short":
             return cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
-                                cash_margin=3, expire_day=expire)   # 信用返済(買戻)
+                                cash_margin=3, expire_day=expire,
+                                close_positions=cp)   # 信用返済(買戻)
         cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
         return cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
-                             cash_margin=cm, expire_day=expire)
+                             cash_margin=cm, expire_day=expire, close_positions=cp)
 
     res = None
     for n in cand:
@@ -300,6 +309,9 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
         if (res.get("Result") == 0) or res.get("_dry_run"):
             _EXPIRE_OK_BDAYS = n   # 通った最長をキャッシュ
             return f"{_relabel or 'placed'}(exp={n}営業日)"
+        # 建玉個別で既に利確がある建玉 = 4001005(建玉拘束)。二重ではなく据置扱い。
+        if hid and str(res.get("Code")) == "4001005":
+            return "exists(建玉拘束)"
         # 有効期限系エラーなら短い候補へ。Code5(有効期限エラー)に加え、
         # Code45(注文期限が返済期日超過)や期限/返済期日を含むメッセージも対象。
         _msg = str(res.get("Message", ""))
@@ -545,63 +557,44 @@ def _backfill_targets(cli) -> None:
     except Exception as e:
         print(f"  ⚠ 利確補完: 建玉取得失敗のためスキップ ({e})")
         return
-    agg: dict = {}
-    fillp: dict = {}   # (sym,side) -> 約定値 (30日照合フォールバック用)
-    for p in positions or []:
+    if not positions:
+        return
+    # ── 建玉ごと(信用=建玉別行 / 現物=合算1行)に利確を補完 ──
+    # 目標は「約定値(Price)に最も近い記録行」を引き当てる(_csv_entry_stop_target が
+    # manual>placed>my_positions の優先順＋fill_price で建玉判別)。これで同一銘柄を
+    # 複数建玉で持っても、建玉ごとに別々の目標で利確を発注できる。ExecutionID を
+    # ClosePositions に渡し、その建玉だけを決済する。
+    from close_stop_guard import _csv_entry_stop_target as _cst
+    try:
+        from close_stop_guard import lookup_stop_from_signal as _lookup
+    except Exception:
+        _lookup = None
+    for p in positions:
         sym = str(p.get("Symbol", "")).split(".")[0]
         qty = int(p.get("LeavesQty") or p.get("HoldQty") or 0)
         if not sym or qty <= 0:
             continue
         side = "long" if str(p.get("Side", "")) == "2" else "short"
-        agg[(sym, side)] = agg.get((sym, side), 0) + qty
-        fp = float(p.get("Price") or 0)
-        if fp > 0:
-            fillp[(sym, side)] = fp
-    if not agg:
-        return
-    manual  = _load_manual_targets()     # manual_targets.csv = 手動指定(最優先override)
-    placed  = _load_placed_orders()      # placed_orders_*.csv = 発注時のエントリー記録
-    targets = _load_signal_targets()     # my_positions.csv = 補助のエントリー記録
-    close_map = _active_close_map(cli)   # 既存利確 (sym,side)->(oid,price) を一括取得
-    for (sym, side), qty in agg.items():
-        # 既存利確があってもスキップせず、_place_target_now に渡して
-        # 「据置 / 目標更新(値幅が広がれば本来目標へ) / 値幅内へ修正」を判定させる。
-        _existing = close_map.get((sym, side))
-        _fp = fillp.get((sym, side), 0)
-        # エントリー時に記録した固定目標を最優先(=レポート取引明細の order_target と同値)。
-        # check_signal_on_date 再計算はモード(con/agg)/データ調整でズレる(例: 4088
-        # 記録3,111 → 再計算3,235)ため使わない。
-        # 優先順: ⓪manual_targets.csv(手動指定) ①placed_orders_*.csv(発注記録)
-        #        ②my_positions.csv ③約定値逆引き
-        _mn = manual.get((sym, side))
-        _pl = placed.get((sym, side))
-        _csv_info = targets.get((sym, side))
-        _lk_tgt, _lk_strat = None, ""
-        try:
-            from close_stop_guard import lookup_stop_from_signal
-            _s, _lk_tgt, _lk_strat = lookup_stop_from_signal(sym, _fp, side == "short")
-        except Exception:
-            _lk_tgt, _lk_strat = None, ""
-        if _mn and _mn["target"] > 0:
-            info = {"target": _mn["target"], "strategy": _mn.get("strategy", "")}
-            _src = "manual_targets.csv(手動指定)"
-        elif _pl and _pl["target"] > 0:
-            info = {"target": _pl["target"], "strategy": _pl.get("strategy", "")}
-            _src = "placed_orders(発注時記録)"
-        elif _csv_info and _csv_info["target"] > 0:
-            info = _csv_info
-            _src = "my_positions.csv(エントリー記録)"
-        elif _lk_tgt and _lk_tgt > 0:
-            info = {"target": float(_lk_tgt), "strategy": _lk_strat or ""}
-            _src = "約定値逆引き(記録なし)"
-        else:
-            print(f"  ⚠ 利確補完できず: {sym} {side} の目標価格が特定できません "
-                  f"(placed_orders/my_positions.csv/約定値逆引き すべて不一致) → 手動で利確を")
+        _fp = float(p.get("Price") or 0)
+        hold_id = str(p.get("ExecutionID", "") or "").strip()
+
+        # 約定値マッチで固定目標を引き当て(建玉ごとに別々の値になる)
+        _stop, _tgt, _strat, _d, _bt = _cst(sym, side, fill_price=_fp)
+        _src = "記録(約定値マッチ)"
+        if (not _tgt or _tgt <= 0) and _lookup is not None and _fp > 0:
+            try:
+                _s, _tgt, _strat = _lookup(sym, _fp, side == "short")
+                _src = "約定値逆引き(記録なし)"
+            except Exception:
+                _tgt = None
+        if not _tgt or _tgt <= 0:
+            print(f"  ⚠ 利確補完できず: {sym} {side} 約定値{_fp:,.0f} の目標特定不可 "
+                  f"→ 手動で利確を")
             continue
         try:
             st = _place_target_now(cli, {"symbol": sym, "side": side, "qty": qty,
-                                         "target": info["target"], "strategy": info["strategy"]},
-                                    existing=_existing)
+                                         "target": float(_tgt), "strategy": _strat or "",
+                                         "hold_id": hold_id})
         except Exception as e:
             print(f"  ⚠ 利確補完エラー {sym}: {e}")
             _time.sleep(0.6)
@@ -612,15 +605,11 @@ def _backfill_targets(cli) -> None:
             _BACKFILL_COOLDOWN_UNTIL = datetime.now(JST) + timedelta(minutes=30)
             print("  ⏸ 場が引けているため利確補完を30分休止します(市場が開いたら自動再開)")
             return
-        # 変化があったときだけログ出力。exists(据置)は静かに。
-        # 約定監視は10秒間隔で回るため、全保有が据置の定常状態では毎回同じ行が
-        # 出続けてスパムになる。発注/更新/失敗のときのみ表示する。
-        if st != "exists":
-            if _lk_tgt and _lk_tgt > 0 and abs(_lk_tgt - info["target"]) > 1:
-                print(f"    ℹ {sym}: 採用目標{info['target']:,.0f}({_src}) "
-                      f"／当日再計算={_lk_tgt:,.0f} は不採用(モード/データでズレるため)")
-            print(f"    ▸ {sym} 目標={info['target']:,.0f} 情報源={_src} 約定値={_fp:,.0f}")
-            print(f"  🎯 利確補完(接続時) {sym} {side} @{info['target']:,.0f} x{qty} : {st}")
+        # 発注/失敗のときのみ表示(exists は静かに)。
+        if st not in ("exists", "exists(建玉拘束)"):
+            _hl = f" 建玉{hold_id[:8]}" if hold_id else ""
+            print(f"    ▸ {sym}{_hl} 目標={float(_tgt):,.0f} 情報源={_src} 約定値={_fp:,.0f}")
+            print(f"  🎯 利確補完(接続時) {sym} {side}{_hl} @{float(_tgt):,.0f} x{qty} : {st}")
         _time.sleep(0.6)   # 連続発注のレート制限(429)回避
 
 
