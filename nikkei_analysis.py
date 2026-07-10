@@ -10474,6 +10474,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
@@ -10515,6 +10516,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b> 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")}
 </div>
+<div id="detail_{_dseq}_bt70exit" class="detail-tab-pane">
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　決済日ごとに <b>目標達成 / 損切り / タイムカット</b> 別で表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_accordion_exit_html(*_build_exit_grid(_bt70_entry_sorted), _dseq, "y")}
+</div>
 <script>
 function switchAnalysisTab(seq, which) {{
   var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp'];
@@ -10554,14 +10559,14 @@ function switchOvBt(uid, key) {{
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt70','entry','bt70entry','exit'].forEach(function(w) {{
+  ['all','bt70','entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = ['all','bt70','entry','bt70entry','exit'];
+    var order = ['all','bt70','entry','bt70entry','exit','bt70exit'];
     btns.forEach(function(b, i) {{
       b.classList.toggle('active', (!closing) && order[i] === which);
     }});
@@ -10587,7 +10592,8 @@ function _showEntryDateGrid(seq, dk, pfx) {{
     detArea.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
   }}
   // アクティブボタンをリセット（全体）
-  var _pane = (pfx==='e'?'entry':(pfx==='b'?'bt70entry':'exit'));
+  var _paneMap = {{'e':'entry','b':'bt70entry','x':'exit','y':'bt70exit'}};
+  var _pane = _paneMap[pfx] || 'entry';
   var con = document.getElementById('detail_'+seq+'_'+_pane);
   if (con) con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
   if (!isActive) {{
@@ -10602,6 +10608,7 @@ function _showEntryDateGrid(seq, dk, pfx) {{
 function showEntryDateE(seq, dk) {{ _showEntryDateGrid(seq, dk, 'e'); }}
 function showEntryDateB(seq, dk) {{ _showEntryDateGrid(seq, dk, 'b'); }}
 function showEntryDateX(seq, dk) {{ _showEntryDateGrid(seq, dk, 'x'); }}
+function showEntryDateY(seq, dk) {{ _showEntryDateGrid(seq, dk, 'y'); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
