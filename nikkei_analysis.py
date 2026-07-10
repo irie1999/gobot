@@ -8318,6 +8318,110 @@ function switchTbd(id, tab) {{
 </div>
 </div>"""
 
+    # ── 決済日別グリッド（目標達成/損切り/タイムカット 基準） ──────────────
+    _REASON_ORDER = {"目標達成": 0, "損切り": 1, "タイムカット": 2}
+    _DONE_REASONS = ("目標達成", "損切り", "タイムカット")
+
+    def _build_exit_grid(trades_list):
+        """trades_list を決済日でグループ化（決着済のみ）。(by_date, sorted_dates)。"""
+        by_date: dict = _dd(list)
+        cutoff_d = until - timedelta(days=_ENTRY_GRID_DAYS)
+        for _t in trades_list:
+            if _t.get("reason") not in _DONE_REASONS:
+                continue
+            _dk = str(_t.get("exit_d_raw") or "")
+            if _dk and _dk >= str(cutoff_d):
+                by_date[_dk].append(_t)
+        return by_date, sorted(by_date.keys(), reverse=True)
+
+    def _exit_reason_counts(trades_d):
+        n_t = sum(1 for t in trades_d if t.get("reason") == "目標達成")
+        n_s = sum(1 for t in trades_d if t.get("reason") == "損切り")
+        n_c = sum(1 for t in trades_d if t.get("reason") == "タイムカット")
+        return n_t, n_s, n_c
+
+    def _exit_date_btn(dk, dseq, by_date, pfx):
+        trades_d = by_date[dk]
+        n_t, n_s, n_c = _exit_reason_counts(trades_d)
+        pnl_d = sum(t["pnl"] for t in trades_d)
+        pnl_col = "#4ade80" if pnl_d >= 0 else "#f87171"
+        mm_dd = dk[5:7] + "/" + dk[8:10]
+        dk_key = dk.replace("-", "")
+        brk = ('<span style="font-size:0.62rem">'
+               f'<span style="color:#4ade80">目{n_t}</span> '
+               f'<span style="color:#f87171">損{n_s}</span> '
+               f'<span style="color:#94a3b8">T{n_c}</span></span>')
+        return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
+                f'onclick="showEntryDate{pfx.upper()}({dseq},\'{dk_key}\')">'
+                f'<span class="edate-mm">{mm_dd}</span>'
+                f'<span class="edate-stat">{len(trades_d)}件</span>'
+                f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
+                f'{brk}</button>')
+
+    def _exit_date_detail(dk, dseq, show, by_date, pfx):
+        trades_d = sorted(by_date[dk],
+                          key=lambda t: (_REASON_ORDER.get(t.get("reason"), 9), -t["pnl"]))
+        n_t, n_s, n_c = _exit_reason_counts(trades_d)
+        pnl_d = sum(t["pnl"] for t in trades_d)
+        pnl_col = "#4ade80" if pnl_d >= 0 else "#f87171"
+        rows_d = "".join(_build_trade_row(t, entry_first=False) for t in trades_d)
+        dk_key = dk.replace("-", "")
+        disp = "block" if show else "none"
+        return f"""<div id="{pfx}date_detail_{dseq}_{dk_key}" style="display:{disp}">
+<div style="padding:8px 0 12px;margin-bottom:8px;border-bottom:1px solid #1e293b;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+  <span style="font-size:0.9rem;font-weight:700;color:#a78bfa">{dk} の決済</span>
+  <span style="font-size:0.8rem;color:#94a3b8">{len(trades_d)}件決済 &nbsp;
+    <span style="color:#4ade80">目標達成{n_t}</span> /
+    <span style="color:#f87171">損切り{n_s}</span> /
+    <span style="color:#94a3b8">タイムカット{n_c}</span>
+    &nbsp;損益<span style="color:{pnl_col};font-weight:700">{pnl_d:+,.0f}円</span></span>
+</div>
+<div style="overflow-x:auto">
+<table>
+  <thead><tr>
+    <th>決済日</th><th style="text-align:left">銘柄</th><th>戦略</th><th>設定</th>
+    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th>
+    <th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
+    <th>損益</th><th>理由</th><th>エントリー</th>
+  </tr></thead>
+  <tbody>{rows_d}</tbody>
+</table>
+</div>
+</div>"""
+
+    def _month_accordion_exit_html(by_date, sorted_dates, dseq, pfx, expand_months=2):
+        """決済日別の月折りたたみアコーディオン（理由内訳付き）。"""
+        by_month = _group_by_month(sorted_dates)
+        html = ""
+        for i, (ym, dks) in enumerate(by_month.items()):
+            is_open   = (i < expand_months)
+            ym_key    = ym.replace("-", "")
+            all_t     = [t for dk in dks for t in by_date[dk]]
+            n_t, n_s, n_c = _exit_reason_counts(all_t)
+            pnl_m     = sum(t["pnl"] for t in all_t)
+            pnl_col   = "#4ade80" if pnl_m >= 0 else "#f87171"
+            arrow     = "▼" if is_open else "▶"
+            body_disp = "block" if is_open else "none"
+            btns_html = "".join(_exit_date_btn(dk, dseq, by_date, pfx) for dk in dks)
+            dets_html = "".join(_exit_date_detail(dk, dseq, False, by_date, pfx) for dk in dks)
+            html += (
+                f'<div class="mg-block">'
+                f'<div class="mg-header" onclick="toggleMG(\'{pfx}\',{dseq},\'{ym_key}\')">'
+                f'<span class="mg-arrow" id="mg_arr_{pfx}{dseq}_{ym_key}">{arrow}</span>'
+                f'<span class="mg-ym">{ym[:4]}/{ym[5:7]}月</span>'
+                f'<span class="mg-stats">{len(all_t)}件決済&nbsp;'
+                f'<span style="color:#4ade80">目{n_t}</span> '
+                f'<span style="color:#f87171">損{n_s}</span> '
+                f'<span style="color:#94a3b8">T{n_c}</span>&nbsp;'
+                f'<span style="color:{pnl_col};font-weight:700">{pnl_m:+,.0f}円</span></span>'
+                f'</div>'
+                f'<div class="mg-body" id="mgb_{pfx}{dseq}_{ym_key}" style="display:{body_disp}">'
+                f'<div class="edate-grid">{btns_html}</div>'
+                f'<div class="mg-detail" id="mgd_{pfx}{dseq}_{ym_key}">{dets_html}</div>'
+                f'</div></div>\n'
+            )
+        return html
+
     def _month_summary_html(trades_list):
         """月別サマリーバーを生成する（全期間）。"""
         from collections import defaultdict as _dd2
@@ -10369,6 +10473,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 <table>
@@ -10405,6 +10510,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt70_entry_sorted)}
 {_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
+</div>
+<div id="detail_{_dseq}_exit" class="detail-tab-pane">
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b> 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")}
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
@@ -10445,14 +10554,14 @@ function switchOvBt(uid, key) {{
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt70','entry','bt70entry'].forEach(function(w) {{
+  ['all','bt70','entry','bt70entry','exit'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = ['all','bt70','entry','bt70entry'];
+    var order = ['all','bt70','entry','bt70entry','exit'];
     btns.forEach(function(b, i) {{
       b.classList.toggle('active', (!closing) && order[i] === which);
     }});
@@ -10478,7 +10587,8 @@ function _showEntryDateGrid(seq, dk, pfx) {{
     detArea.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
   }}
   // アクティブボタンをリセット（全体）
-  var con = document.getElementById('detail_'+seq+'_'+(pfx==='e'?'entry':'bt70entry'));
+  var _pane = (pfx==='e'?'entry':(pfx==='b'?'bt70entry':'exit'));
+  var con = document.getElementById('detail_'+seq+'_'+_pane);
   if (con) con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
   if (!isActive) {{
     var det = document.getElementById(detId);
@@ -10491,6 +10601,7 @@ function _showEntryDateGrid(seq, dk, pfx) {{
 }}
 function showEntryDateE(seq, dk) {{ _showEntryDateGrid(seq, dk, 'e'); }}
 function showEntryDateB(seq, dk) {{ _showEntryDateGrid(seq, dk, 'b'); }}
+function showEntryDateX(seq, dk) {{ _showEntryDateGrid(seq, dk, 'x'); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
