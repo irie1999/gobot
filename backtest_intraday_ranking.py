@@ -773,6 +773,11 @@ def main() -> int:
     ap.add_argument("--entry-sweep", action="store_true",
                     help="エントリー時刻を --sweep-entry のリストで振って4方向を一覧比較"
                          "(TP/SL指定時はTP/SL決済、なければ引け決済)")
+    ap.add_argument("--grid", action="store_true",
+                    help="利確(TP)×損切り(SL)の全組み合わせを4方向でマトリクス表示"
+                         "(サーフェス全体を見て、プラス領域が本物か偶然かを判定)")
+    ap.add_argument("--grid-tp", default="2,3,4,5,6", help="--grid のTP候補(カンマ区切り%)")
+    ap.add_argument("--grid-sl", default="1,1.5,2,3", help="--grid のSL候補(カンマ区切り%)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -892,6 +897,38 @@ def main() -> int:
                   f"{a['LONG_LOSERS']['avg']:>+9.2f}%"
                   f"{a['SHORT_LOSERS']['avg']:>+9.2f}%")
         print("  ※ 各セル=1トレード平均%(コスト込み)。プラスがあれば緑候補。")
+
+    # ── 利確TP × 損切りSL のグリッド (サーフェス全体) ──
+    if args.grid:
+        _tps = [float(x) for x in args.grid_tp.split(",") if x.strip()]
+        _sls = [float(x) for x in args.grid_sl.split(",") if x.strip()]
+        _short = {"LONG_GAINERS": "値上買い", "SHORT_GAINERS": "値上空売",
+                  "LONG_LOSERS": "値下買い", "SHORT_LOSERS": "値下空売"}
+        print("\n" + "=" * 70)
+        print(f"利確TP × 損切りSL グリッド (エントリー{args.rank_time}, top{args.top_n}, "
+              f"{len(_tps)}×{len(_sls)}={len(_tps)*len(_sls)}通り)")
+        print("=" * 70)
+        cube = {}
+        for tp in _tps:
+            for sl in _sls:
+                r = run_tpsl(idx, entry_sec, args.top_n, slip, max_price,
+                             args.min_price, tp / 100.0, sl / 100.0)
+                cube[(tp, sl)] = {k: r["aggs"][k]["avg"] for k in DIRECTIONS}
+        _npos = 0
+        for k in DIRECTIONS:
+            print(f"\n  【{_short[k]}】 行=利確TP% / 列=損切りSL%  (セル=平均%)")
+            print("   TP\\SL " + "".join(f"{sl:>8.1f}" for sl in _sls))
+            for tp in _tps:
+                cells = ""
+                for sl in _sls:
+                    v = cube[(tp, sl)][k]
+                    if v > 0:
+                        _npos += 1
+                    cells += f"{v:>+7.2f}%"
+                print(f"   {tp:>4.1f} {cells}")
+        _total = len(_tps) * len(_sls) * 4
+        print(f"\n  → 全{_total}マス中 プラス {_npos}マス。"
+              f"{'散発的ならノイズ(過剰最適化)。まとまった緑の塊があれば本物候補。' if _npos else '全マス赤=エッジ無し確定。'}")
 
     # ── 値上がりトップ空売り: 上げ幅帯別の反落成績 (核心) ──
     mag = magnitude_short_gainers(idx, entry_sec, exit_sec, slip,
