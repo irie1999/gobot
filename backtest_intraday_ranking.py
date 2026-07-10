@@ -188,6 +188,84 @@ def run(points_by_symbol: dict, top_n: int, slip_one_way: float,
 
 
 # ══════════════════════════════════════════════════════════════════
+# 利確目標(TP)・損切り(SL)でザラ場決済する版
+# ══════════════════════════════════════════════════════════════════
+def _sim_tpsl_exit(rec, ei, entry_price, is_long, tp, sl):
+    """entry_price から TP/SL を建て、entry バー以降のザラ場でどちらか先に
+    タッチした方で決済。どちらも当たらなければ引け(last_close)。
+    同一バーで両方タッチは保守的に SL 優先。返り値: (exit_price, 'tp'/'sl'/'close')。"""
+    highs = rec["highs"]; lows = rec["lows"]; n = len(highs)
+    if is_long:
+        tp_p = entry_price * (1 + tp)
+        sl_p = entry_price * (1 - sl)
+        for j in range(ei, n):
+            hit_sl = lows[j] <= sl_p
+            hit_tp = highs[j] >= tp_p
+            if hit_sl:            # 同一バー両方でも SL 優先(保守)
+                return sl_p, "sl"
+            if hit_tp:
+                return tp_p, "tp"
+    else:
+        tp_p = entry_price * (1 - tp)    # ショートの利確は下
+        sl_p = entry_price * (1 + sl)    # ショートの損切りは上
+        for j in range(ei, n):
+            hit_sl = highs[j] >= sl_p
+            hit_tp = lows[j] <= tp_p
+            if hit_sl:
+                return sl_p, "sl"
+            if hit_tp:
+                return tp_p, "tp"
+    return rec["last_close"], "close"
+
+
+def run_tpsl(idx, entry_sec, top_n, slip, max_price, min_price, tp, sl):
+    """9:30ランキング → TP/SL(ザラ場)で4方向を集計。
+    コスト: エントリー=slip+fee。決済= SLはslip+fee / TP・引けはfeeのみ。
+    tp, sl は比率(例 0.03=3%)。"""
+    fee = FEE_ONE_WAY
+    entry_cost = slip + fee
+    mx = np.inf if max_price is None else float(max_price)
+    aggs = {k: Agg() for k in DIRECTIONS}
+    reasons = {k: {"tp": 0, "sl": 0, "close": 0} for k in DIRECTIONS}
+    n_days = 0
+    by_date = defaultdict(list)
+    for sym, recs in idx.items():
+        for r in recs:
+            pc = r["prev_close"]
+            if pc is None or pc <= 0:
+                continue
+            tods = r["tods"]
+            ei = int(np.searchsorted(tods, entry_sec, side="left"))
+            if ei >= len(tods):
+                continue
+            ep = float(r["opens"][ei])
+            if ep <= 0 or ep < min_price or ep > mx:
+                continue
+            by_date[r["date"]].append((ep / pc - 1, r, ei, ep))
+
+    def _add(sel, long_key, short_key):
+        for _ret, rec, ei, ep in sel:
+            xp, rs = _sim_tpsl_exit(rec, ei, ep, True, tp, sl)
+            ec = (slip + fee) if rs == "sl" else fee
+            aggs[long_key].add((xp / ep - 1) - entry_cost - ec, ep)
+            reasons[long_key][rs] += 1
+            xp2, rs2 = _sim_tpsl_exit(rec, ei, ep, False, tp, sl)
+            ec2 = (slip + fee) if rs2 == "sl" else fee
+            aggs[short_key].add(-(xp2 / ep - 1) - entry_cost - ec2, ep)
+            reasons[short_key][rs2] += 1
+
+    for d, rows in sorted(by_date.items()):
+        if len(rows) < top_n * 2:
+            continue
+        n_days += 1
+        rows.sort(key=lambda x: x[0], reverse=True)
+        _add(rows[:top_n], "LONG_GAINERS", "SHORT_GAINERS")
+        _add(rows[-top_n:], "LONG_LOSERS", "SHORT_LOSERS")
+    return {"n_days": n_days, "aggs": {k: v.summary() for k, v in aggs.items()},
+            "reasons": reasons}
+
+
+# ══════════════════════════════════════════════════════════════════
 # 高速インデックス (時間帯スイープ用) ― 銘柄ごとに日次レコードを1回だけ構築
 # ══════════════════════════════════════════════════════════════════
 def index_data(data: dict) -> dict:
@@ -206,6 +284,8 @@ def index_data(data: dict) -> dict:
         tod = (ts.hour * 3600 + ts.minute * 60 + ts.second).to_numpy().astype(int)
         opens = df["open"].to_numpy(dtype=float)
         closes = df["close"].to_numpy(dtype=float)
+        highs = df["high"].to_numpy(dtype=float) if "high" in df.columns else opens
+        lows = df["low"].to_numpy(dtype=float) if "low" in df.columns else opens
         n = len(days)
         # 日が変わる位置
         bounds = np.flatnonzero(days[1:] != days[:-1]) + 1
@@ -220,6 +300,8 @@ def index_data(data: dict) -> dict:
                 "prev_close": prev_close,
                 "tods": tod[a:b_],
                 "opens": opens[a:b_],
+                "highs": highs[a:b_],
+                "lows": lows[a:b_],
                 "last_close": last_close,
             })
             prev_close = last_close
@@ -684,6 +766,10 @@ def main() -> int:
     ap.add_argument("--no-browser", action="store_true", help="HTMLを自動で開かない")
     ap.add_argument("--sample-dates", type=int, default=3,
                     help="②サンプル日ランキングに表示する直近日数(既定3)")
+    ap.add_argument("--tp", type=float, default=0.0,
+                    help="利確目標%%(エントリー値比)。--sl と両方指定でザラ場TP/SL決済に切替")
+    ap.add_argument("--sl", type=float, default=0.0,
+                    help="損切り%%(エントリー値比)。例: --tp 3 --sl 2 で+3%%利確/-2%%損切り")
     args = ap.parse_args()
 
     if args.self_test:
@@ -727,18 +813,29 @@ def main() -> int:
     data = load_intraday_batch(symbols, days=args.days, source=args.source)
     print(f"  データ取得: {len(data)}銘柄\n")
 
-    points = {}
-    for sym, df in data.items():
-        pts = daily_points(df, rank_off, exit_off)
-        if pts:
-            points[sym] = pts
-    if not points:
-        print("[ERROR] 有効なデータがありません。")
-        return 1
+    idx = index_data(data)
+    entry_sec = _sec(args.rank_time)
+    exit_sec = _sec(args.exit_time) if args.exit_time else None
+    _tpsl_mode = bool(args.tp and args.sl)
 
-    res = run(points, top_n=args.top_n, slip_one_way=slip,
-              max_price=max_price, min_price=args.min_price,
-              min_move=args.min_move / 100.0)
+    if _tpsl_mode:
+        # 利確目標(TP)・損切り(SL)でザラ場決済
+        res = run_tpsl(idx, entry_sec, args.top_n, slip, max_price,
+                       args.min_price, args.tp / 100.0, args.sl / 100.0)
+        print(f"★決済方式: 利確+{args.tp:.1f}% / 損切り-{args.sl:.1f}% "
+              f"(ザラ場でタッチ→そこで決済 / 未達は引け)")
+    else:
+        points = {}
+        for sym, df in data.items():
+            pts = daily_points(df, rank_off, exit_off)
+            if pts:
+                points[sym] = pts
+        if not points:
+            print("[ERROR] 有効なデータがありません。")
+            return 1
+        res = run(points, top_n=args.top_n, slip_one_way=slip,
+                  max_price=max_price, min_price=args.min_price,
+                  min_move=args.min_move / 100.0)
 
     print(f"検証日数: {res['n_days']}日\n")
     labels = {
@@ -757,10 +854,16 @@ def main() -> int:
     print("※ 平均円/合計円は 100株・前日終値比ランキングでのスリッページ&手数料込み概算。")
     print("※ 期間が短い(ローカル5分足の範囲)ため結果は暫定。プラスでも過信しないこと。")
 
+    if _tpsl_mode:
+        print("\n  [決済理由の内訳]  TP=利確 / SL=損切り / close=引け(未達)")
+        for k in ("LONG_GAINERS", "SHORT_GAINERS", "LONG_LOSERS", "SHORT_LOSERS"):
+            r = res["reasons"][k]
+            tot = r["tp"] + r["sl"] + r["close"] or 1
+            print(f"  {labels[k]:<40} TP {r['tp']:>4}({r['tp']/tot*100:>3.0f}%) "
+                  f"SL {r['sl']:>4}({r['sl']/tot*100:>3.0f}%) "
+                  f"引け {r['close']:>4}({r['close']/tot*100:>3.0f}%)")
+
     # ── 値上がりトップ空売り: 上げ幅帯別の反落成績 (核心) ──
-    idx = index_data(data)
-    entry_sec = _sec(args.rank_time)
-    exit_sec = _sec(args.exit_time) if args.exit_time else None
     mag = magnitude_short_gainers(idx, entry_sec, exit_sec, slip,
                                   args.min_price, max_price)
     print("\n" + "=" * 70)
