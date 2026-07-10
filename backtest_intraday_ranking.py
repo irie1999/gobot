@@ -770,6 +770,9 @@ def main() -> int:
                     help="利確目標%%(エントリー値比)。--sl と両方指定でザラ場TP/SL決済に切替")
     ap.add_argument("--sl", type=float, default=0.0,
                     help="損切り%%(エントリー値比)。例: --tp 3 --sl 2 で+3%%利確/-2%%損切り")
+    ap.add_argument("--entry-sweep", action="store_true",
+                    help="エントリー時刻を --sweep-entry のリストで振って4方向を一覧比較"
+                         "(TP/SL指定時はTP/SL決済、なければ引け決済)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -862,6 +865,33 @@ def main() -> int:
             print(f"  {labels[k]:<40} TP {r['tp']:>4}({r['tp']/tot*100:>3.0f}%) "
                   f"SL {r['sl']:>4}({r['sl']/tot*100:>3.0f}%) "
                   f"引け {r['close']:>4}({r['close']/tot*100:>3.0f}%)")
+
+    # ── エントリー時刻スイープ (9:30 以外もいろいろ試す) ──
+    if args.entry_sweep:
+        _elist = [s.strip() for s in args.sweep_entry.split(",") if s.strip()]
+        _dmode = (f"TP+{args.tp:.1f}%/SL-{args.sl:.1f}%" if _tpsl_mode
+                  else f"{args.exit_time or '引け'}決済")
+        print("\n" + "=" * 70)
+        print(f"エントリー時刻スイープ ({_dmode} / 各時刻でランキング→建てる)")
+        print("=" * 70)
+        print(f"  {'entry':<8}{'値上買い':>10}{'値上空売':>10}{'値下買い':>10}{'値下空売':>10}")
+        print("  " + "-" * 48)
+        for e in _elist:
+            es = _sec(e)
+            if _tpsl_mode:
+                r = run_tpsl(idx, es, args.top_n, slip, max_price,
+                             args.min_price, args.tp / 100.0, args.sl / 100.0)
+            else:
+                pts = points_from_index(idx, es, exit_sec)
+                r = run(pts, args.top_n, slip, max_price, args.min_price,
+                        min_move=args.min_move / 100.0)
+            a = r["aggs"]
+            print(f"  {e:<8}"
+                  f"{a['LONG_GAINERS']['avg']:>+9.2f}%"
+                  f"{a['SHORT_GAINERS']['avg']:>+9.2f}%"
+                  f"{a['LONG_LOSERS']['avg']:>+9.2f}%"
+                  f"{a['SHORT_LOSERS']['avg']:>+9.2f}%")
+        print("  ※ 各セル=1トレード平均%(コスト込み)。プラスがあれば緑候補。")
 
     # ── 値上がりトップ空売り: 上げ幅帯別の反落成績 (核心) ──
     mag = magnitude_short_gainers(idx, entry_sec, exit_sec, slip,
