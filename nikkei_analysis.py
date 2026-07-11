@@ -10218,6 +10218,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _fadeshort_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'fadeshort\')">⑲ 逆張りショート</button>'
     _holdcurve_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'holdcurve\')">⑳ 保有日数カーブ</button>'
     _emcmp_tab_btn     = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'emcmp\')">㉑ em比較</button>'
+    _breadth_tab_btn   = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'breadth\')">㉒ シグナル数別</button>'
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -10248,6 +10249,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_fadeshort_tab_btn}
 {_holdcurve_tab_btn}
 {_emcmp_tab_btn}
+{_breadth_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -10531,11 +10533,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- EMCMP_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_breadth" class="analysis-tab-pane">
+{_signal_breadth_html}
+</div>
+
 </div>
 
 {_trend_breakdown_html}
-
-{_signal_breadth_html}
 
 <h2>取引明細</h2>
 {_overlap_kpi_html}
@@ -10593,7 +10597,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
