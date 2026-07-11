@@ -409,11 +409,18 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
                     min_price: float = 0.0) -> dict | None:
     calc_fn, em, sm, tm, family, entry_type = STRATEGY_DEFS[strategy_name]
 
-    full_df = fetch(symbol, 800)   # Walk-forward には ~2年のデータが必要
+    # as-of(過去基準)時は、古いfold用に取得日数を offset ぶん増やし、TODAY 以降を
+    # トリムする(未来データを見ない)。通常(TODAY=今日)は offset=0 で従来どおり。
+    _asof_offset = max(0, (datetime.now(JST).date() - TODAY).days)
+    full_df = fetch(symbol, 800 + _asof_offset)   # Walk-forward には ~2年のデータが必要
     if full_df is None or len(full_df) < 400:
         return None
+    if _asof_offset > 0:
+        full_df = full_df[full_df.index <= pd.Timestamp(TODAY)]
+        if len(full_df) < 400:
+            return None
 
-    # 最新終値 (予算フィルター & CSV出力用)
+    # 最新終値 (予算フィルター & CSV出力用) = as-of 時点の終値
     try:
         latest_price = float(full_df.iloc[-1]["close"])
     except Exception:
@@ -555,7 +562,26 @@ def main() -> None:
     parser.add_argument("--relax-short", action="store_true",
                         help="空売り系 (--family short/short_brk) で閾値を自動緩和 "
                              "(TRAIN PF≥1.1/WR≥45%%, TEST PF≥1.0/WR≥40%%)")
+    parser.add_argument("--as-of", type=str, default=None,
+                        help="基準日(今日)をこの日付 YYYY-MM-DD に固定して"
+                             "現行アルゴリズムを過去時点で実行。選定もOOSもこの日基準。"
+                             "--holdout-days と併用可(この日から更にN日ホールドアウト)")
     args = parser.parse_args()
+
+    # ── as-of: 基準日(TODAY)を過去に固定して現行アルゴリズムを走らせる ──────
+    # scan の TODAY と backtest の _TODAY を同じ日に揃えることで、フォールド窓と
+    # run_limit_backtest の cutoff が整合する(両方読み取り専用なのでスレッド安全)。
+    global TODAY
+    if args.as_of:
+        import backtest_limit_entry as _ble
+        _asof = datetime.strptime(args.as_of, "%Y-%m-%d").date()
+        if _asof > datetime.now(JST).date():
+            print(f"[ERROR] --as-of {args.as_of} は未来日です", file=sys.stderr)
+            sys.exit(1)
+        TODAY = _asof
+        _ble._TODAY = _asof
+        print(f"[as-of] 基準日を {_asof} に固定。現行アルゴリズムをこの時点で実行"
+              f"(選定・OOSともに {_asof} 基準)")
 
     # ── 合格閾値の上書き ───────────────────────────────────────────
     global TRAIN_MIN_PF, TRAIN_MIN_WR, TEST_MIN_PF, TEST_MIN_WR
