@@ -480,6 +480,10 @@ if _cached_out.exists() and not _args.force:
     sys.exit(0)
 
 _PNL_PERIODS  = [30, 60, 90, 120, 150, 180, 270, 365]
+# --days が既定リスト外(例: 540/730 など長期の過去検証)なら、その値を期間リストに
+# 追加して初期表示にする。日次運用(--days 365 など既定値)では挙動不変。
+if _args.days and _args.days not in _PNL_PERIODS:
+    _PNL_PERIODS = sorted(set(_PNL_PERIODS) | {_args.days})
 _DEFAULT_DAYS = _args.days if _args.days in _PNL_PERIODS else 180
 
 HOLDOUT_CONFIGS = [
@@ -1484,10 +1488,17 @@ if _args.symbol:
 </div>"""
 
 # ── 期間セレクターのHTML部品 ──────────────────────────────────────────────────
+def _period_label(d: int) -> str:
+    """期間ボタンの表記。長期は『(◯年)』を添えて分かりやすくする。"""
+    if d >= 365:
+        yrs = d / 365.0
+        return f"{d}日 ({yrs:.0f}年)" if abs(yrs - round(yrs)) < 0.1 else f"{d}日 ({yrs:.1f}年)"
+    return f"{d}日"
+
 # デフォルトは「全設定」ボタン（全10設定の合算）
 _period_btns = (
     '<button class="ho-period-btn active" data-days="all" '
-    "onclick=\"switchHoPeriod('all')\">全設定 (180日)</button>\n"
+    f"onclick=\"switchHoPeriod('all')\">全設定 ({_period_label(_DEFAULT_DAYS)})</button>\n"
 )
 _period_panes = (
     f'<div id="hdall" class="ho-period-pane" style="display:block">'
@@ -1496,7 +1507,7 @@ _period_panes = (
 for days in _PNL_PERIODS:
     _period_btns += (
         f'<button class="ho-period-btn" '
-        f'data-days="{days}" onclick="switchHoPeriod({days})">{days}日</button>\n'
+        f'data-days="{days}" onclick="switchHoPeriod({days})">{_period_label(days)}</button>\n'
     )
     _period_panes += (
         f'<div id="hd{days}" class="ho-period-pane" style="display:none">'
