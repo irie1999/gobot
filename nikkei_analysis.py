@@ -8173,6 +8173,75 @@ function switchTbd(id, tab) {{
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
 
+    # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
+    from collections import defaultdict as _dd_b
+
+    def _breadth_rows(trs):
+        """trs(BT70の決着済トレード)をエントリー日でまとめ、その日のシグナル数(件数)で
+        バケツ分けして成績を返す。"""
+        by_ed: dict = _dd_b(list)
+        for t in trs:
+            ed = t.get("entry_d_raw")
+            if ed:
+                by_ed[str(ed)].append(t)
+        buckets = [("1〜2件", 1, 2), ("3〜5件", 3, 5),
+                   ("6〜10件", 6, 10), ("11件以上", 11, 999999)]
+        out = []
+        for lab, lo, hi in buckets:
+            dts = [d for d, ts in by_ed.items() if lo <= len(ts) <= hi]
+            group = [t for d in dts for t in by_ed[d]]
+            if not group:
+                out.append((lab, 0, 0, 0.0, None, 0, 0, 0.0, 0.0))
+                continue
+            n = len(group)
+            wins = sum(1 for t in group if t["pnl"] > 0)
+            stops = sum(1 for t in group if t.get("reason") == "損切り")
+            tcs = sum(1 for t in group if t.get("reason") == "タイムカット")
+            gp = sum(t["pnl"] for t in group if t["pnl"] > 0)
+            gl = -sum(t["pnl"] for t in group if t["pnl"] < 0)
+            pf = (gp / gl) if gl > 0 else None
+            tot = sum(t["pnl"] for t in group)
+            out.append((lab, len(dts), n, wins / n * 100, pf, tot,
+                        tot / n, stops / n * 100, tcs / n * 100))
+        return out
+
+    _bt70_done = [t for t in bt70_trades
+                  if t.get("reason") in ("目標達成", "損切り", "タイムカット")]
+    _brow_html = ""
+    for lab, ndays, n, wr, pf, tot, avg, sr, tcr in _breadth_rows(_bt70_done):
+        if n == 0:
+            _brow_html += (f'<tr><td>{lab}</td><td colspan="8" '
+                           f'style="text-align:center;color:#64748b">該当なし</td></tr>')
+            continue
+        pfs = "∞" if pf is None else f"{pf:.2f}"
+        totc = "#4ade80" if tot >= 0 else "#f87171"
+        _brow_html += (
+            f'<tr><td>{lab}</td><td style="text-align:right">{ndays}</td>'
+            f'<td style="text-align:right">{n}</td>'
+            f'<td style="text-align:right">{wr:.0f}%</td>'
+            f'<td style="text-align:right">{pfs}</td>'
+            f'<td style="text-align:right;color:{totc};font-weight:600">{tot:+,.0f}</td>'
+            f'<td style="text-align:right">{avg:+,.0f}</td>'
+            f'<td style="text-align:right;color:#f87171">{sr:.0f}%</td>'
+            f'<td style="text-align:right;color:#94a3b8">{tcr:.0f}%</td></tr>')
+    _signal_breadth_html = f"""<h2>㉒ シグナル数別 成績（BT70シグナルが多い日ほど良いか）</h2>
+<p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px;line-height:1.7">
+同じエントリー日に BT70以上のシグナルが何件出たか（＝相場の広がり／ブレッド）でバケツ分けし、
+その日に入ったBT70トレードのその後の成績を集計。<br>
+・<b>件数が多い日ほど勝率・PF・平均損益が高ければ「多く出た日ほど張り時」</b>（ブレッドが有効な指標）。<br>
+・<b>『1〜2件』など少ない日のバケツで損切率が高ければ、損切りは“孤立シグナルの日”に集中</b>していた
+（＝あなたの仮説「損切が多い時は少シグナルの日だった」の検証）。</p>
+<table>
+  <thead><tr>
+    <th>その日のBT70シグナル数</th><th>日数</th><th>取引数</th><th>勝率</th><th>PF</th>
+    <th>総損益</th><th>平均/取引</th><th style="color:#f87171">損切率</th>
+    <th style="color:#94a3b8">TC率</th>
+  </tr></thead>
+  <tbody>{_brow_html}</tbody>
+</table>
+<p class="footnote">※ 「その日のシグナル数」= 同一エントリー日に決着したBT70トレードの件数
+（未約定・期限切れは含まない近似）。日数が少ないバケツは統計的に不安定。</p>"""
+
     # ── 同時保有の最大必要資金（sweep-line） ──────────────────────────
     # 各ポジションが約定額(entry_p×qty)を entry_d〜exit_d の間だけ拘束すると考え、
     # 時系列を走査して「同時に拘束されている資金」のピークを求める。
@@ -10465,6 +10534,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 
 {_trend_breakdown_html}
+
+{_signal_breadth_html}
 
 <h2>取引明細</h2>
 {_overlap_kpi_html}
