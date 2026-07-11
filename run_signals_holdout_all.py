@@ -29,6 +29,7 @@ import copy as _copy
 import csv
 import importlib as _importlib
 import os
+import re
 import sys
 
 # OpenBLAS/MKLのスレッド数を1に制限（メモリ不足エラー回避）
@@ -506,10 +507,15 @@ def _float(v, default=0.0) -> float:
 def _composite_score(r: dict) -> float:
     return _float(r.get("total_test_pnl", 0)) * (1.0 + max(_float(r.get("sharpe", 0)), 0.0))
 
+_SCAN_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
 def _csv_scan_date(p: Path) -> str:
-    """CSVファイル名末尾のスキャン日付 YYYY-MM-DD を返す(取れなければ空)。"""
-    tok = p.stem.rsplit("_", 1)[-1]
-    return tok if (len(tok) == 10 and tok[4] == "-" and tok[7] == "-") else ""
+    """CSVファイル名からスキャン日付 YYYY-MM-DD を返す(取れなければ空)。
+    末尾に -15d / -7d 等の派生サフィックスが付くファイル名
+    (例: walkforward_A7_holdout120d_2026-06-08-15d.csv) でも
+    正しく日付部分を抽出する。複数一致時は最後(最も右)の日付を採用。"""
+    m = _SCAN_DATE_RE.findall(p.stem)
+    return m[-1] if m else ""
 
 
 def _find_csv(strategy: str, holdout_days: int, wf_dir: Path,
@@ -522,8 +528,10 @@ def _find_csv(strategy: str, holdout_days: int, wf_dir: Path,
 
     def _pick(cands: list) -> Path | None:
         # cands は日付降順(新しい順)。base_date 指定時は base_date 以前のみ。
+        # 日付が読めないファイルは(未来の派生CSVが漏れ込むのを防ぐため)採用しない。
         if base_date:
-            ok = [c for c in cands if not _csv_scan_date(c) or _csv_scan_date(c) <= base_date]
+            ok = [c for c in cands
+                  if _csv_scan_date(c) and _csv_scan_date(c) <= base_date]
             return ok[0] if ok else None
         return cands[0] if cands else None
 
