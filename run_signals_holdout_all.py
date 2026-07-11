@@ -502,16 +502,38 @@ def _float(v, default=0.0) -> float:
 def _composite_score(r: dict) -> float:
     return _float(r.get("total_test_pnl", 0)) * (1.0 + max(_float(r.get("sharpe", 0)), 0.0))
 
+def _csv_scan_date(p: Path) -> str:
+    """CSVファイル名末尾のスキャン日付 YYYY-MM-DD を返す(取れなければ空)。"""
+    tok = p.stem.rsplit("_", 1)[-1]
+    return tok if (len(tok) == 10 and tok[4] == "-" and tok[7] == "-") else ""
+
+
 def _find_csv(strategy: str, holdout_days: int, wf_dir: Path,
-              mode: str = "conservative") -> tuple[Path | None, str]:
+              mode: str = "conservative",
+              base_date: str | None = None) -> tuple[Path | None, str]:
+    """holdout CSV を探す。base_date 指定時は『base_date 以後にスキャンされたCSVは
+    使わない』(=未来の選定で過去検証を汚染しない)。該当が無ければ標準CSVに fallback。
+    base_date=None なら従来どおり最新を採用。"""
     mode_suffix = f"_{mode}" if mode != "conservative" else ""
-    cands = sorted(wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_holdout{holdout_days}d_*.csv"), reverse=True)
-    if cands:
-        return cands[0], "holdout"
-    fallback = [f for f in sorted(wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_*.csv"), reverse=True)
-                if "holdout" not in f.name]
-    if fallback:
-        return fallback[0], "standard"
+
+    def _pick(cands: list) -> Path | None:
+        # cands は日付降順(新しい順)。base_date 指定時は base_date 以前のみ。
+        if base_date:
+            ok = [c for c in cands if not _csv_scan_date(c) or _csv_scan_date(c) <= base_date]
+            return ok[0] if ok else None
+        return cands[0] if cands else None
+
+    cands = sorted(wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_holdout{holdout_days}d_*.csv"),
+                   key=lambda c: _csv_scan_date(c), reverse=True)
+    hit = _pick(cands)
+    if hit:
+        return hit, "holdout"
+    fallback = sorted([f for f in wf_dir.glob(f"walkforward_{strategy}{mode_suffix}_*.csv")
+                       if "holdout" not in f.name],
+                      key=lambda c: _csv_scan_date(c), reverse=True)
+    hit = _pick(fallback)
+    if hit:
+        return hit, "standard"
     return None, "none"
 
 def _load_wl_from_csv(csv_path: Path, max_price: float, strategy: str,
@@ -538,6 +560,13 @@ print("=" * 65)
 wf_dir = _args.wf_dir
 wf_dir.mkdir(exist_ok=True)
 
+# 選定CSVを探す基準日: --date 指定時はその日(=それ以後にスキャンしたCSVは使わない)。
+# 未指定なら今日 → 既存CSVは全て今日以前なので従来どおり最新を採用(挙動不変)。
+_wl_base_date = _args.date or str(TODAY)
+if _args.date:
+    print(f"  [選定CSV] base_date={_wl_base_date} 以前にスキャンしたCSVのみ使用"
+          f"(未来の選定で汚染しない)")
+
 # period_days → list of config dicts
 _period_configs: dict[int, list[dict]] = {d: [] for d in _PNL_PERIODS}
 
@@ -548,12 +577,12 @@ for holdout_days, ho_label, col_con, col_agg in HOLDOUT_CONFIGS:
         brk_wl:  list[tuple] = []
         has_data = False
         for strat in _STOP_STRATS:
-            p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
+            p, _ = _find_csv(strat, holdout_days, wf_dir, mode, base_date=_wl_base_date)
             if p:
                 stop_wl.extend(_load_wl_from_csv(p, _args.max_price, strat, min_price=_args.min_price))
                 has_data = True
         for strat in _BRK_STRATS:
-            p, _ = _find_csv(strat, holdout_days, wf_dir, mode)
+            p, _ = _find_csv(strat, holdout_days, wf_dir, mode, base_date=_wl_base_date)
             if p:
                 brk_wl.extend(_load_wl_from_csv(p, _args.max_price, strat, min_price=_args.min_price))
                 has_data = True
