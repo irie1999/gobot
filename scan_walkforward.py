@@ -412,7 +412,14 @@ def walkforward_one(symbol: str, name: str, strategy_name: str,
     # as-of(過去基準)時は、古いfold用に取得日数を offset ぶん増やし、TODAY 以降を
     # トリムする(未来データを見ない)。通常(TODAY=今日)は offset=0 で従来どおり。
     _asof_offset = max(0, (datetime.now(JST).date() - TODAY).days)
-    full_df = fetch(symbol, 800 + _asof_offset)   # Walk-forward には ~2年のデータが必要
+    if _asof_offset > 0:
+        # as-of(過去基準): キャッシュが浅いと fetch は古い期間を再取得せず
+        # そのまま返す(min_start_date 未指定時)。古い基準日で必要な最古日付を
+        # 明示し、キャッシュ不足時は自動で深く再ダウンロードさせる。
+        _need_start = datetime.now(JST).date() - timedelta(days=800 + _asof_offset + 300)
+        full_df = fetch(symbol, 800 + _asof_offset, min_start_date=_need_start)
+    else:
+        full_df = fetch(symbol, 800 + _asof_offset)   # Walk-forward には ~2年のデータが必要
     if full_df is None or len(full_df) < 400:
         return None
     if _asof_offset > 0:
