@@ -294,6 +294,23 @@ def _trim_incomplete_bar(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].copy()
 
 
+def _clean_prices(df):
+    """前日比±50%超のバー(異常値/未調整分割の転換バー・単発グリッチ)を除去。
+    除去後も >50% のギャップが残る銘柄は、未調整の株式分割等で価格スケールが
+    断裂したデータ不整合とみなし None を返す(バックテストから除外し汚染を防ぐ)。
+    単発グリッチ(すぐ戻る)は転換バーを消せば連続化するので通過する。"""
+    if df is None or len(df) < 210:
+        return None
+    pct = df["close"].pct_change().abs()
+    df = df[pct <= 0.5].copy()
+    if len(df) < 210:
+        return None
+    # 除去後に再計算しても残る大ギャップ = スケール断裂(未調整分割) → 不整合として除外
+    if float(df["close"].pct_change().abs().max()) > 0.5:
+        return None
+    return df
+
+
 def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
           min_start_date=None) -> pd.DataFrame | None:
     """永続キャッシュ優先・フォールバックでダウンロード。
@@ -325,17 +342,13 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
                         if oldest_date > min_start_date:
                             pass  # キャッシュが足りない → fall through で再取得
                         else:
-                            # 株価異常値を除去
-                            pct_chg = df["close"].pct_change().abs()
-                            df = df[pct_chg <= 0.5].copy()
-                            if len(df) >= 210:
-                                return df
+                            _cleaned = _clean_prices(df)
+                            if _cleaned is not None:
+                                return _cleaned
                     else:
-                        # 株価異常値を除去
-                        pct_chg = df["close"].pct_change().abs()
-                        df = df[pct_chg <= 0.5].copy()
-                        if len(df) >= 210:
-                            return df
+                        _cleaned = _clean_prices(df)
+                        if _cleaned is not None:
+                            return _cleaned
                 # 古いキャッシュ → fall through で再取得
         except Exception:
             pass
@@ -374,10 +387,9 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
         raw = raw.dropna(subset=["close"])
         if len(raw) < 210:
             return None
-        # 株価異常値を除去（前日比±50%超はデータエラーとして除外）
-        pct_chg = raw["close"].pct_change().abs()
-        raw = raw[pct_chg <= 0.5].copy()
-        if len(raw) < 210:
+        # 株価異常値除去 + スケール断裂(未調整分割)銘柄の除外
+        raw = _clean_prices(raw)
+        if raw is None:
             return None
         df_out = pd.DataFrame({
             "open":   raw["open"].to_numpy(dtype=float),
