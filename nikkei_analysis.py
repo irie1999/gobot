@@ -480,11 +480,34 @@ def get_regime(close: pd.Series) -> dict:
     vol_level   = "high" if vol14 > 1.5 else ("mid" if vol14 > 0.8 else "low")
     above_ma200 = (cur >= ma200) if ma200 else True
 
+    # ── 大局レジーム (上げ/横ばい/下げ) ──────────────────────────────
+    # 終値のみなのでADXの代わりに「効率比ER(トレンド強度)」+ MA200傾き で判定。
+    #   ER = 60日の正味変化 / 経路長。1に近い=強トレンド, 0に近い=もみ合い。
+    ma75 = float(close.rolling(75).mean().iloc[-1]) if len(close) >= 75 else None
+    slope200 = 0.0
+    if ma200 and len(close) >= 221:
+        _ma200_prev = float(close.rolling(200).mean().iloc[-21])
+        slope200 = (ma200 / _ma200_prev - 1) * 100 if _ma200_prev else 0.0
+    er = 0.0
+    if len(close) > 61:
+        _net  = abs(float(close.iloc[-1]) - float(close.iloc[-61]))
+        _path = float(close.diff().abs().tail(60).sum())
+        er = _net / _path if _path > 0 else 0.0
+    if er < 0.20:                                   # トレンド弱い = 横ばい
+        macro = "sideways"
+    elif above_ma200 and slope200 > 0:
+        macro = "up"
+    elif (not above_ma200) and slope200 < 0:
+        macro = "down"
+    else:                                            # 方向が曖昧 = 移行/横ばい扱い
+        macro = "sideways"
+
     return {
-        "cur": cur, "ma10": ma10, "ma25": ma25, "ma200": ma200,
+        "cur": cur, "ma10": ma10, "ma25": ma25, "ma75": ma75, "ma200": ma200,
         "vol": vol14, "vol_level": vol_level, "trend": trend,
         "mom5": mom5, "mom20": mom20,
         "above_ma200": above_ma200, "max_1d_drop": max_1d_drop,
+        "macro": macro, "er": er, "slope200": slope200,
     }
 
 
@@ -1046,9 +1069,19 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
     mom20_c = "#4ade80" if r["mom20"] >= 0 else "#f87171"
     drop_c  = "#f87171" if r["max_1d_drop"] < -3 else "#94a3b8"
 
+    _macro_map = {
+        "up":       ("🟢 上げ", "#4ade80", "順張り(現行)が得意"),
+        "sideways": ("🟡 横ばい", "#fbbf24", "逆張り(RSI2)向き・現行は苦手"),
+        "down":     ("🔴 下げ", "#f87171", "現金/ショート"),
+    }
+    _mlbl, _mcol, _mnote = _macro_map.get(r.get("macro", "sideways"), ("―", "#94a3b8", ""))
     regime_items = [
         ("日経225",     f'<strong style="font-size:1.25rem">{r["cur"]:,.0f}円</strong>'),
-        ("トレンド",    f'<span style="color:{trend_color};font-weight:700;font-size:1.05rem">{trend_ja}</span>'),
+        ("大局レジーム",
+         f'<span style="color:{_mcol};font-weight:700;font-size:1.15rem">{_mlbl}</span>'
+         f'<br><span style="font-size:0.68rem;color:#64748b">{_mnote}<br>'
+         f'ER {r.get("er",0):.2f} / MA200傾き {r.get("slope200",0):+.1f}%</span>'),
+        ("トレンド(短期)", f'<span style="color:{trend_color};font-weight:700;font-size:1.05rem">{trend_ja}</span>'),
         ("ボラ (14日)", f'<span style="color:{vol_color}">{vol_ja} ({r["vol"]:.2f}%)</span>'),
         ("5日騰落",     f'<span style="color:{mom5_c};font-weight:600">{r["mom5"]:+.2f}%</span>'),
         ("20日騰落",    f'<span style="color:{mom20_c};font-weight:600">{r["mom20"]:+.2f}%</span>'),
