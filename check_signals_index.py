@@ -234,19 +234,139 @@ def trades_in_window(preset="wide", start="2021-01-01", end="2023-12-31",
     return out
 
 
+def build_html(trades: list[dict], meta: dict) -> str:
+    """損益タブ風の HTML(KPIカード + 銘柄別サマリー + 取引明細)を返す。"""
+    n = len(trades)
+    win = sum(1 for t in trades if t["pnl"] > 0)
+    gp = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gl = sum(t["pnl"] for t in trades if t["pnl"] <= 0)
+    tot = gp + gl
+    pf = gp / -gl if gl < 0 else (float("inf") if gp > 0 else 0.0)
+    wr = win / n * 100 if n else 0.0
+    pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    def _card(label, val, color="#e2e8f0"):
+        return (f'<div class="card"><div class="card-l">{label}</div>'
+                f'<div class="card-v" style="color:{color}">{val}</div></div>')
+
+    cards = "".join([
+        _card("総取引数", f"{n:,}件"),
+        _card("勝率", f"{wr:.1f}%", "#4ade80" if wr >= 55 else "#e2e8f0"),
+        _card("利益合計", f"+{gp:,.0f}円", "#4ade80"),
+        _card("損失合計", f"{gl:,.0f}円", "#f87171"),
+        _card("合計損益", f"{tot:+,.0f}円", "#4ade80" if tot >= 0 else "#f87171"),
+        _card("PF", pf_s, "#4ade80" if pf >= 1 else "#f87171"),
+        _card("勝ち/負け", f"{win}W / {n-win}L"),
+    ])
+
+    # 銘柄別サマリー
+    by_sym: dict = {}
+    for t in trades:
+        k = (t["symbol"], t["name"])
+        d = by_sym.setdefault(k, [0, 0, 0.0])
+        d[0] += 1; d[1] += 1 if t["pnl"] > 0 else 0; d[2] += t["pnl"]
+    sym_rows = ""
+    for (sym, name), (c, w, p) in sorted(by_sym.items(), key=lambda kv: -kv[1][2]):
+        col = "#4ade80" if p >= 0 else "#f87171"
+        sym_rows += (f'<tr><td>{sym}</td><td>{name}</td><td class="r">{c}</td>'
+                     f'<td class="r">{w/c*100:.0f}%</td>'
+                     f'<td class="r" style="color:{col}">{p:+,.0f}</td></tr>')
+
+    # 取引明細
+    _rj = {"target": ("利確", "#4ade80"), "stop": ("損切", "#f87171"),
+           "timecut": ("時間切", "#94a3b8")}
+    tr_rows = ""
+    for t in trades:
+        rlbl, rcol = _rj.get(t["reason"], (t["reason"], "#94a3b8"))
+        pcol = "#4ade80" if t["pnl"] >= 0 else "#f87171"
+        e = pd.Timestamp(t["entry_dt"]).strftime("%Y-%m-%d")
+        x = pd.Timestamp(t["exit_dt"]).strftime("%Y-%m-%d")
+        tr_rows += (
+            f'<tr><td>{e}</td><td>{x}</td><td>{t["symbol"]}</td>'
+            f'<td>{t["name"]}</td><td class="r">{t["entry_p"]:,}</td>'
+            f'<td class="r">{t["exit_p"]:,}</td><td class="r">{t["qty"]}</td>'
+            f'<td class="r">{t["hold"]}日</td>'
+            f'<td style="color:{rcol};font-weight:600">{rlbl}</td>'
+            f'<td class="r" style="color:{pcol};font-weight:600">{t["pnl"]:+,.0f}</td></tr>')
+
+    bt = meta.get("bt", {})
+    bt_line = ""
+    if bt:
+        bt_line = (f'横ばい全期間BT: {bt.get("n",0)}件 PF{bt.get("pf","-")} '
+                   f'損益{bt.get("pnl",0):+,.0f}円')
+
+    return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>指数ETF横ばい戦略 {meta.get('period','')}</title>
+<style>
+  body {{ background:#0a0e1a; color:#e2e8f0; font-family:'Segoe UI',sans-serif; margin:0; padding:24px; }}
+  h1 {{ font-size:1.3rem; margin:0 0 4px; }}
+  .sub {{ color:#94a3b8; font-size:0.85rem; margin-bottom:20px; }}
+  .cards {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; }}
+  .card {{ background:#111827; border:1px solid #1e293b; border-radius:10px; padding:14px 20px; min-width:120px; }}
+  .card-l {{ color:#94a3b8; font-size:0.78rem; margin-bottom:6px; }}
+  .card-v {{ font-size:1.5rem; font-weight:700; }}
+  h2 {{ font-size:1.05rem; margin:24px 0 10px; border-left:3px solid #3b82f6; padding-left:10px; }}
+  table {{ border-collapse:collapse; width:100%; font-size:0.83rem; }}
+  th,td {{ padding:6px 10px; border-bottom:1px solid #1e293b; text-align:left; }}
+  th {{ color:#94a3b8; font-weight:600; background:#0d1424; position:sticky; top:0; }}
+  td.r,th.r {{ text-align:right; }}
+  tr:hover td {{ background:#0d1424; }}
+  .wrap {{ max-height:70vh; overflow:auto; border:1px solid #1e293b; border-radius:8px; }}
+</style></head><body>
+<h1>🟡 横ばい相場用 指数ETF戦略（STOロングbounce）</h1>
+<div class="sub">期間 {meta.get('period','')} ／ {meta.get('scope','')} ／ preset={meta.get('preset','')}
+  ／ コスト 信用0.03%＋スリッページ0.30%<br>{bt_line}</div>
+<div class="cards">{cards}</div>
+<h2>銘柄別サマリー（損益降順）</h2>
+<div class="wrap"><table>
+<thead><tr><th>銘柄</th><th>名前</th><th class="r">取引</th><th class="r">勝率</th><th class="r">損益(円)</th></tr></thead>
+<tbody>{sym_rows}</tbody></table></div>
+<h2>取引明細（約定日順・{n}件）</h2>
+<div class="wrap"><table>
+<thead><tr><th>約定日</th><th>決済日</th><th>銘柄</th><th>名前</th><th class="r">買値</th>
+<th class="r">売値</th><th class="r">株数</th><th class="r">保有</th><th>結果</th><th class="r">損益(円)</th></tr></thead>
+<tbody>{tr_rows}</tbody></table></div>
+</body></html>"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=None, help="判定日 YYYY-MM-DD (既定=最新)")
     ap.add_argument("--preset", default="wide", choices=["wide", "atr1R"])
     ap.add_argument("--backtest", action="store_true", help="非相関ユニバースで直近成績を再計算")
     ap.add_argument("--trades", action="store_true", help="過去の横ばい局面の実トレードを1件ずつ表示")
-    ap.add_argument("--from", dest="dfrom", default="2021-01-01", help="--trades 開始日")
-    ap.add_argument("--to", dest="dto", default="2023-12-31", help="--trades 終了日")
-    ap.add_argument("--symbol", default=None, help="--trades 対象を1銘柄に絞る(例 1321.T)")
-    ap.add_argument("--all-regime", action="store_true", help="--trades で横ばい以外も含める")
+    ap.add_argument("--html", action="store_true", help="損益タブ風HTMLで出力(--trades期間を使用)")
+    ap.add_argument("--no-browser", action="store_true", help="--html でブラウザ自動起動しない")
+    ap.add_argument("--from", dest="dfrom", default="2021-01-01", help="--trades/--html 開始日")
+    ap.add_argument("--to", dest="dto", default="2023-12-31", help="--trades/--html 終了日")
+    ap.add_argument("--symbol", default=None, help="対象を1銘柄に絞る(例 1321.T)")
+    ap.add_argument("--all-regime", action="store_true", help="横ばい以外も含める")
     ap.add_argument("--force-signal", action="store_true",
                     help="レジームゲートを無視して条件成立銘柄を表示(検証用)")
     args = ap.parse_args()
+
+    if args.html:
+        tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
+                              sideways_only=not args.all_regime)
+        bt = backtest(args.preset)["sideways"]
+        pf_s = "∞" if bt["pf"] == float("inf") else f"{bt['pf']:.2f}"
+        meta = {"period": f"{args.dfrom}〜{args.dto}",
+                "scope": "全レジーム" if args.all_regime else "横ばいのみ",
+                "preset": args.preset,
+                "bt": {"n": bt["n"], "pf": pf_s, "pnl": bt["pnl"]}}
+        html = build_html(tr, meta)
+        fname = f"signals_index_{args.dfrom}_{args.dto}.html"
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"HTML出力: {fname} ({len(tr)}件)")
+        if not args.no_browser:
+            try:
+                from _open_html import open_html
+                open_html(fname)
+            except Exception:
+                import webbrowser
+                webbrowser.open(fname)
+        return
 
     if args.trades:
         tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
