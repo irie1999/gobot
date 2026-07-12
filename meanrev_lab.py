@@ -159,7 +159,9 @@ def _run_mr(df, sig_long, sig_short, direction, entry_style, exit_style,
                 ep = pos["ep"]; qty = pos["qty"]
                 f = (ep + xp) * qty * fee
                 pnl = ((xp - ep) if is_long else (ep - xp)) * qty - f
-                trades.append(dict(sig_dt=pos["sig_dt"], pnl=pnl, hold=hold, reason=xr))
+                trades.append(dict(sig_dt=pos["sig_dt"], pnl=pnl, hold=hold, reason=xr,
+                                   entry_dt=idx[pos["start"]], exit_dt=idx[i],
+                                   entry_p=ep, exit_p=round(xp), qty=qty))
                 pos = None
 
         # ── 2. 新規シグナル → 注文 ──

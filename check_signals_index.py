@@ -198,14 +198,81 @@ def backtest(preset: str = "wide", since: str = "2014-01-01",
     return {"sideways": ml._stats(side), "all": ml._stats(allt)}
 
 
+def trades_in_window(preset="wide", start="2021-01-01", end="2023-12-31",
+                     symbol=None, sideways_only=True,
+                     since="2014-01-01", fee=0.0003, slip=0.003) -> list[dict]:
+    """指定期間に約定した実トレードを1件ずつ返す(既定=横ばいレジームのみ)。"""
+    import meanrev_lab as ml
+    from datetime import date
+    p = PRESETS[preset]
+    since_d = datetime.strptime(since, "%Y-%m-%d").date()
+    s_ts, e_ts = pd.Timestamp(start), pd.Timestamp(end)
+    bt_days = (date.today() - since_d).days + 400
+    reg = ml._regime_series(15, strict=True)
+    wl = [(s, n) for s, n in WATCHLIST if symbol is None or s == symbol]
+    out = []
+    for sym, name in wl:
+        df = fetch(sym, bt_days, min_start_date=since_d)
+        if df is None or len(df) < 260:
+            continue
+        d2 = calc_sto(df)
+        sig_long = d2["entry_sig"].fillna(False)
+        sig_short = pd.Series(False, index=df.index)
+        stock_ok = (d2["stock_er"] < STOCK_ER_MAX).to_numpy()
+        trs = ml._run_mr(df, sig_long, sig_short, "long", "bounce",
+                         "atr" if preset == "atr1R" else "wide",
+                         0.0, p["sm"], p["tm"], p["max_hold"],
+                         fee, slip, 0.0, stock_ok)
+        for t in trs:
+            edt = pd.Timestamp(t["entry_dt"])
+            if not (s_ts <= edt <= e_ts):
+                continue
+            if sideways_only and reg is not None and reg.asof(pd.Timestamp(t["sig_dt"])) != "sideways":
+                continue
+            out.append({**t, "symbol": sym, "name": name})
+    out.sort(key=lambda t: pd.Timestamp(t["entry_dt"]))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=None, help="判定日 YYYY-MM-DD (既定=最新)")
     ap.add_argument("--preset", default="wide", choices=["wide", "atr1R"])
     ap.add_argument("--backtest", action="store_true", help="非相関ユニバースで直近成績を再計算")
+    ap.add_argument("--trades", action="store_true", help="過去の横ばい局面の実トレードを1件ずつ表示")
+    ap.add_argument("--from", dest="dfrom", default="2021-01-01", help="--trades 開始日")
+    ap.add_argument("--to", dest="dto", default="2023-12-31", help="--trades 終了日")
+    ap.add_argument("--symbol", default=None, help="--trades 対象を1銘柄に絞る(例 1321.T)")
+    ap.add_argument("--all-regime", action="store_true", help="--trades で横ばい以外も含める")
     ap.add_argument("--force-signal", action="store_true",
                     help="レジームゲートを無視して条件成立銘柄を表示(検証用)")
     args = ap.parse_args()
+
+    if args.trades:
+        tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
+                              sideways_only=not args.all_regime)
+        scope = "全レジーム" if args.all_regime else "横ばいのみ"
+        print(f"=== 過去トレード明細 {args.dfrom}〜{args.dto} / {scope} / preset={args.preset}"
+              f"{' / '+args.symbol if args.symbol else ''} ===")
+        if not tr:
+            print("  該当トレードなし")
+            return
+        print(f"{'約定日':<12}{'決済日':<12}{'銘柄':<9}{'名前':<15}{'買値':>8}{'売値':>8}"
+              f"{'保有':>4}{'結果':>8}{'損益':>10}")
+        print("-" * 96)
+        tot = 0.0; win = 0
+        _rj = {"target": "利確", "stop": "損切", "timecut": "時間切"}
+        for t in tr:
+            tot += t["pnl"]; win += 1 if t["pnl"] > 0 else 0
+            e = pd.Timestamp(t["entry_dt"]).strftime("%Y-%m-%d")
+            x = pd.Timestamp(t["exit_dt"]).strftime("%Y-%m-%d")
+            print(f"{e:<12}{x:<12}{t['symbol']:<9}{t['name'][:14]:<15}"
+                  f"{t['entry_p']:>8,}{t['exit_p']:>8,}{t['hold']:>4}"
+                  f"{_rj.get(t['reason'], t['reason']):>8}{t['pnl']:>+10,.0f}")
+        n = len(tr)
+        print("-" * 96)
+        print(f"合計 {n}件 / 勝率 {win/n*100:.0f}% / 損益 {tot:+,.0f}円 / 平均 {tot/n:+,.0f}円/件")
+        return
 
     td = None if args.date is None else datetime.strptime(args.date, "%Y-%m-%d").date()
 
