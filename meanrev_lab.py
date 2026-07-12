@@ -263,7 +263,7 @@ def main():
     ap.add_argument("--fee", type=float, default=0.001, help="片道手数料(既定0.001=現物. 信用は0.0003)")
     ap.add_argument("--slip", type=float, default=0.005, help="損切り/逆指値スリッページ(既定0.005)")
     ap.add_argument("--range-band", type=float, default=0.0,
-                    help="MA200±この割合の押し目だけ採用(例0.20=±20%内)。0=無効")
+                    help="MA200±この割合の押し目だけ採用(例0.20=±20%%内)。0=無効")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
 
