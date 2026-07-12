@@ -5079,7 +5079,15 @@ def build_fade_short_html(days: int, workers: int) -> str:
     # ── 日経レジーム（約定日基準）を各レコードに付与 ──
     _tmap = {}
     try:
-        _n225_close = fetch_n225(2)
+        # 過去検証対応: レコードの約定日レンジをカバーする日経を取得
+        # (fetch_n225(2)固定だと過去基準でトレードと重ならず trend=None になる)
+        _fds = [r.get("fd") for r in all_recs if r.get("fd")]
+        if _fds:
+            _fd_min, _fd_max = min(_fds), max(_fds)
+            _ny = max(2, (_fd_max - _fd_min).days // 365 + 3)
+            _n225_close = fetch_n225(_ny, end_date=_fd_max)
+        else:
+            _n225_close = fetch_n225(2)
         _n225_trend = label_trend(_n225_close)
         _tmap = {(dt.date() if hasattr(dt, "date") else dt): tr
                  for dt, tr in zip(_n225_trend.index, _n225_trend)}
@@ -6767,7 +6775,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     # ── 日経トレンド別成績 ──────────────────────────────────────────────────────
     _trend_breakdown_html = ""
     try:
-        _n225_close = fetch_n225(2)
+        # 過去検証対応: 表示期間 [since, until] をカバーする日経を取得。
+        # fetch_n225(2)固定だと直近2年しか取れず、過去基準の月では
+        # トレードと日経が重ならず全トレンドが「該当なし」になっていた。
+        _n_years = max(2, (until - since).days // 365 + 3)
+        _n225_close = fetch_n225(_n_years, end_date=until)
         _n225_trend = label_trend(_n225_close)
         _tmap = {dt.date(): tr for dt, tr in zip(_n225_trend.index, _n225_trend)}
 
