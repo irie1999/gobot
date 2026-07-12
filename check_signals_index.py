@@ -234,6 +234,32 @@ def trades_in_window(preset="wide", start="2021-01-01", end="2023-12-31",
     return out
 
 
+def symbol_stats(trades: list[dict]) -> list[dict]:
+    """銘柄別に 取引数/勝率/前半損益/後半損益/合計 を集計(頑健性判定用)。
+    前半後半は全トレードの決済日レンジの中点で分割。両方プラス=robust。"""
+    if not trades:
+        return []
+    xds = [pd.Timestamp(t["exit_dt"]) for t in trades]
+    mid = min(xds) + (max(xds) - min(xds)) / 2
+    agg: dict = {}
+    for t in trades:
+        k = (t["symbol"], t["name"])
+        d = agg.setdefault(k, {"n": 0, "win": 0, "h1": 0.0, "h2": 0.0, "tot": 0.0})
+        d["n"] += 1
+        d["win"] += 1 if t["pnl"] > 0 else 0
+        d["tot"] += t["pnl"]
+        if pd.Timestamp(t["exit_dt"]) < mid:
+            d["h1"] += t["pnl"]
+        else:
+            d["h2"] += t["pnl"]
+    out = []
+    for (sym, name), d in agg.items():
+        out.append({"symbol": sym, "name": name, **d,
+                    "robust": d["h1"] > 0 and d["h2"] > 0})
+    out.sort(key=lambda r: -r["tot"])
+    return out
+
+
 def build_html(trades: list[dict], meta: dict) -> str:
     """損益タブ風の HTML(KPIカード + 銘柄別サマリー + 取引明細)を返す。"""
     n = len(trades)
@@ -259,18 +285,24 @@ def build_html(trades: list[dict], meta: dict) -> str:
         _card("勝ち/負け", f"{win}W / {n-win}L"),
     ])
 
-    # 銘柄別サマリー
-    by_sym: dict = {}
-    for t in trades:
-        k = (t["symbol"], t["name"])
-        d = by_sym.setdefault(k, [0, 0, 0.0])
-        d[0] += 1; d[1] += 1 if t["pnl"] > 0 else 0; d[2] += t["pnl"]
+    # 銘柄別サマリー(前半/後半 + 頑健フラグ)
+    sstats = symbol_stats(trades)
+    n_robust = sum(1 for s in sstats if s["robust"])
     sym_rows = ""
-    for (sym, name), (c, w, p) in sorted(by_sym.items(), key=lambda kv: -kv[1][2]):
-        col = "#4ade80" if p >= 0 else "#f87171"
-        sym_rows += (f'<tr><td>{sym}</td><td>{name}</td><td class="r">{c}</td>'
-                     f'<td class="r">{w/c*100:.0f}%</td>'
-                     f'<td class="r" style="color:{col}">{p:+,.0f}</td></tr>')
+    for s in sstats:
+        def _c(v): return "#4ade80" if v >= 0 else "#f87171"
+        flag = ('<span style="color:#4ade80;font-weight:700">✓頑健</span>' if s["robust"]
+                else ('<span style="color:#f87171">✗除外</span>' if s["tot"] < 0
+                      else '<span style="color:#94a3b8">△片側</span>'))
+        rowbg = "background:rgba(22,163,74,0.08)" if s["robust"] else (
+            "background:rgba(220,38,38,0.08)" if s["tot"] < 0 else "")
+        sym_rows += (
+            f'<tr style="{rowbg}"><td>{s["symbol"]}</td><td>{s["name"]}</td>'
+            f'<td class="r">{s["n"]}</td><td class="r">{s["win"]/s["n"]*100:.0f}%</td>'
+            f'<td class="r" style="color:{_c(s["h1"])}">{s["h1"]:+,.0f}</td>'
+            f'<td class="r" style="color:{_c(s["h2"])}">{s["h2"]:+,.0f}</td>'
+            f'<td class="r" style="color:{_c(s["tot"])};font-weight:700">{s["tot"]:+,.0f}</td>'
+            f'<td>{flag}</td></tr>')
 
     # ── 月別・日別集計 (決済日基準) + 必要資金(同時保有ピーク) ──
     def _pnl_cell(v):
@@ -409,9 +441,11 @@ def build_html(trades: list[dict], meta: dict) -> str:
 <tbody>{mrows}</tbody></table></div>
 <h2>月別 取引詳細（月をクリックで展開）</h2>
 {month_detail}
-<h2>銘柄別サマリー（損益降順）</h2>
+<h2>銘柄別サマリー（損益降順・{n_robust}銘柄が✓頑健）</h2>
+<div class="sub" style="margin:0 0 6px">✓頑健=前半後半とも利益(=実運用候補) ／ △片側=合計は黒字だが片期間赤字 ／ ✗除外=合計赤字</div>
 <div class="wrap"><table>
-<thead><tr><th>銘柄</th><th>名前</th><th class="r">取引</th><th class="r">勝率</th><th class="r">損益(円)</th></tr></thead>
+<thead><tr><th>銘柄</th><th>名前</th><th class="r">取引</th><th class="r">勝率</th>
+<th class="r">前半損益</th><th class="r">後半損益</th><th class="r">合計損益</th><th>判定</th></tr></thead>
 <tbody>{sym_rows}</tbody></table></div>
 </body></html>"""
 
@@ -428,9 +462,32 @@ def main():
     ap.add_argument("--to", dest="dto", default="2023-12-31", help="--trades/--html 終了日")
     ap.add_argument("--symbol", default=None, help="対象を1銘柄に絞る(例 1321.T)")
     ap.add_argument("--all-regime", action="store_true", help="横ばい以外も含める")
+    ap.add_argument("--extract", action="store_true",
+                    help="銘柄別に前半/後半を集計し、両方プラス(✓頑健)の銘柄をWATCHLISTとして抽出")
     ap.add_argument("--force-signal", action="store_true",
                     help="レジームゲートを無視して条件成立銘柄を表示(検証用)")
     args = ap.parse_args()
+
+    if args.extract:
+        tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
+                              sideways_only=not args.all_regime)
+        ss = symbol_stats(tr)
+        print(f"=== 銘柄別 頑健性 {args.dfrom}〜{args.dto} (前半/後半とも黒字=✓) ===")
+        print(f"{'銘柄':<9}{'名前':<16}{'取引':>5}{'前半':>11}{'後半':>11}{'合計':>11}  判定")
+        print("-" * 72)
+        for s in ss:
+            flag = "✓頑健" if s["robust"] else ("✗除外" if s["tot"] < 0 else "△片側")
+            print(f"{s['symbol']:<9}{s['name'][:15]:<16}{s['n']:>5}"
+                  f"{s['h1']:>+11,.0f}{s['h2']:>+11,.0f}{s['tot']:>+11,.0f}  {flag}")
+        keep = [s for s in ss if s["robust"]]
+        print("-" * 72)
+        print(f"\n✓頑健 {len(keep)}銘柄 → WATCHLIST 候補 (check_signals_index.py に貼付):\n")
+        print("WATCHLIST = [")
+        for s in keep:
+            print(f'    ("{s["symbol"]}", "{s["name"]}"),')
+        print("]")
+        print("\n※ 前半・後半の両方でプラスの銘柄のみ。全期間合計だけで選ぶとin-sample biasになる。")
+        return
 
     if args.html:
         tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
