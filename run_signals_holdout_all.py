@@ -696,6 +696,9 @@ _brk.WATCHLIST[:]  = _orig_brk_wl
 # nikkei_analysis にホールドアウト設定を注入
 _na._SIGNALS_AVAILABLE = True
 _na._PNL_CONFIGS[:] = _all_configs
+# 損益タブの月別グリッドを全期間表示する窓(日)。--days が365超なら過去まで表示。
+# 365以下(既定/ライブ)なら None 相当で従来どおり(挙動不変)。
+_na._BT_WINDOW_DAYS = max(_PNL_PERIODS) if max(_PNL_PERIODS) > 365 else None
 # ショートモード: トレンド別成績テーブルの表示順・凡例を反転
 _na._IS_SHORT_MODE = _args.short
 

@@ -44,6 +44,10 @@ _TODAY = datetime.now(JST).date()
 _SIGNALS_AVAILABLE = False
 _DEF_WORKERS = 4
 _PNL_CONFIGS: list[dict] = []
+# 損益タブの月別グリッドを全期間表示するためのバックテスト窓(日)。
+# None/365以下 → 従来どおり直近365日のみ。run_signals_holdout_all が --days に応じて設定。
+# backtest_one(スコア計算・ライブ)は一切変えず、表示用の全期間 trade_log だけ別途取得する。
+_BT_WINDOW_DAYS: int | None = None
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
@@ -6398,6 +6402,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                tuple(c.get("stop_wl", [])), tuple(c.get("brk_wl", []))) for c in _PNL_CONFIGS),
         _sym_filter_key,
         _strat_filter_key,
+        _BT_WINDOW_DAYS,   # 全期間バックテスト窓が変われば再構築
     )
 
     if _cfg_cache_key not in _pnl_bt_cache:
@@ -6427,6 +6432,45 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                             items.append(r)
                     except Exception:
                         pass
+
+            # ── 全期間 trade_log（過去検証で月別グリッドを全期間表示するため）──────
+            # backtest_one のスコアは365日のまま（＝ライブと同一）。ここで別途、
+            # 指定窓(_BT_WINDOW_DAYS)の全期間バックテストを回し full_trade_log を付与する。
+            # _set_sig_params(cfg["mode"]) はこの時点で有効なので con/agg も正しく反映。
+            if _BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365:
+                from backtest_limit_entry import (
+                    fetch as _fw_fetch, run_limit_backtest as _fw_rbt)
+
+                def _full_log(_sym, _name, _strat):
+                    try:
+                        _mod = _mod_for(_strat)
+                        _p = _mod.STRATEGY_PARAMS.get(_strat)
+                        if not _p:
+                            return None
+                        _cf, _e, _s, _t = _p
+                        _dfx = _fw_fetch(_sym, _BT_WINDOW_DAYS)
+                        if _dfx is None:
+                            return None
+                        _et = getattr(_mod, "ENTRY_TYPE",
+                                      "stop_sell" if _strat.endswith("_S") else "stop")
+                        _rr = _fw_rbt(_sym, _name, _dfx, _cf, _e, _s, _t,
+                                      _BT_WINDOW_DAYS, _strat, entry_type=_et)
+                        return _rr["trade_log"] if _rr else None
+                    except Exception:
+                        return None
+
+                with _TPE(max_workers=workers) as _ex2:
+                    _f2 = {_ex2.submit(_full_log, it["symbol"], it["name"], it["strategy"]): it
+                           for it in items}
+                    for _fut in _asc(_f2):
+                        _it = _f2[_fut]
+                        try:
+                            _fl = _fut.result()
+                            if _fl is not None:
+                                _it["full_trade_log"] = _fl
+                        except Exception:
+                            pass
+
             _cached_items_per_cfg[cfg["label"]] = items
         _pnl_bt_cache[_cfg_cache_key] = _cached_items_per_cfg
         gc.collect()
@@ -6498,8 +6542,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 wf_score2, wf_rank_str2 = None, None
                 score, rank = rec_score2, rec_rank2
                 is_wf2 = False
-            max_period    = max(period_results.keys())
-            trade_log     = period_results[max_period].get("trade_log", [])
+            # 全期間 trade_log があればそれを使う(過去検証で月別グリッドを全期間表示)。
+            # 無ければ従来どおり最長期間(365日)の trade_log。
+            trade_log     = it.get("full_trade_log")
+            if trade_log is None:
+                max_period = max(period_results.keys())
+                trade_log  = period_results[max_period].get("trade_log", [])
             seen: set     = set()
             for t in trade_log:
                 exit_dt = t.get("exit_dt")
