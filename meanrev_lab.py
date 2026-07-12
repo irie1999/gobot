@@ -277,6 +277,8 @@ def main():
                     help="銘柄自身の効率比(60日ER)がこの値未満の日だけ発注(例0.25)。0=無効")
     ap.add_argument("--loose", action="store_true",
                     help="低ボラ銘柄(指数ETF)向けに閾値を緩和(IBS<0.15/RSI2<10/BB2.0σ/STO<20)")
+    ap.add_argument("--oos", action="store_true",
+                    help="過学習チェック: 横ばいの成績を期間前半/後半に分けて表示(両方PF>1なら頑健)")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
 
@@ -381,6 +383,38 @@ def main():
     print("-" * 100)
     print("読み方: 横ばい損益プラス かつ 横ばいPF>1.0 なら本物。bounce(反転確認)がdip(ナイフ掴み)より")
     print("        改善しているか、mean(中心回帰)出口が効くかに注目。PF>1 が1つも無ければ横ばいロングは不可。")
+
+    # ── 過学習チェック: 横ばい成績を期間前半/後半に分割 ──
+    if args.oos:
+        today = datetime.now().date()
+        mid = since + (today - since) / 2
+        mid_ts = pd.Timestamp(mid)
+
+        def _half(trades, first):
+            return [t for t in trades
+                    if (pd.Timestamp(t["sig_dt"]) < mid_ts) == first]
+
+        # 横ばいPFで上位20構成だけ表示(全部は多い)
+        oos_rows = sorted(rows, key=lambda r: -r[1]["pf"])[:20]
+        print("\n" + "=" * 100)
+        print(f"  過学習チェック — 横ばい成績を前半({since}〜{mid})/後半({mid}〜{today})に分割")
+        print("  ※両方の期間でPF>1 かつ 件数が十分なら『期間依存でない本物』")
+        print("=" * 100)
+        print(f"{'シグナル':<8}{'方向':<6}{'入口':<8}{'出口':<7}"
+              f"|{'前半件':>6}{'前半PF':>7}{'前半損益':>12}"
+              f"  |{'後半件':>6}{'後半PF':>7}{'後半損益':>12}")
+        print("-" * 100)
+        for (sname, direction, estyle, cname), sw, al in oos_rows:
+            sw_tr = results[(sname, direction, estyle, cname)]["sideways"]
+            h1 = _stats(_half(sw_tr, True))
+            h2 = _stats(_half(sw_tr, False))
+            dlabel = "ロング" if direction == "long" else "ｼｮｰﾄ"
+            robust = "  ✓頑健" if (h1["pf"] > 1 and h2["pf"] > 1 and h1["n"] >= 20 and h2["n"] >= 20) else ""
+            print(f"{sname:<8}{dlabel:<6}{estyle:<8}{cname:<7}"
+                  f"|{h1['n']:>6}{_pf(h1['pf']):>7}{h1['pnl']:>+12,.0f}"
+                  f"  |{h2['n']:>6}{_pf(h2['pf']):>7}{h2['pnl']:>+12,.0f}{robust}")
+        print("-" * 100)
+        print("✓頑健 = 前半後半とも PF>1 かつ 各20件以上。ここに残る構成だけが実運用候補。")
 
 
 if __name__ == "__main__":
