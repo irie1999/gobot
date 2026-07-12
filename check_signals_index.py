@@ -35,18 +35,28 @@ import nikkei_analysis as na
 
 JST = timezone(timedelta(hours=9))
 
-# ── 監視ユニバース (非相関: 日経1・TOPIX1・独立セクター/REIT・レバ1) ──
+# ── 監視ユニバース (頑健性フィルター後) ──────────────────────────
+# --extract (2014-2026・前半/後半とも黒字=✓頑健) で選定した実運用WATCHLIST。
+# セクターETFが平均回帰に効き、広域指数(1321日経ETF)はむしろ赤字だった。
+#   1633不動産 +620k / 1625機械 +244k / 1631商社 +240k / 1627電機 +84k … 本命4本
+#   1615銀行は名目✓だが合計+1,139円(1取引+88円)=実質ノイズ。値がさ小さく値幅が乏しい。
+# 除外: 1321日経ETF(✗赤字), 1617食品/1621素材/1343REIT(△片側=一方の期間が赤字)。
+# 全候補で検証したい場合は WATCHLIST_FULL を使う(下記)。
 WATCHLIST: list[tuple[str, str]] = [
-    ("1321.T", "日経225ETF"),
-    ("1306.T", "TOPIX ETF"),
-    ("1615.T", "TOPIX-17 銀行"),
-    ("1617.T", "TOPIX-17 食品"),
-    ("1621.T", "TOPIX-17 素材化学"),
-    ("1625.T", "TOPIX-17 機械"),
-    ("1627.T", "TOPIX-17 電機精密"),
-    ("1631.T", "TOPIX-17 商社卸売"),
     ("1633.T", "TOPIX-17 不動産"),
-    ("1343.T", "NEXT FUNDS REIT"),
+    ("1625.T", "TOPIX-17 機械"),
+    ("1631.T", "TOPIX-17 商社卸売"),
+    ("1627.T", "TOPIX-17 電機精密"),
+    ("1615.T", "TOPIX-17 銀行"),   # 名目✓だが実質ノイズ。外しても可。
+]
+
+# 全候補ユニバース (頑健性検証・--extract の対象にしたい時に差し替え)
+WATCHLIST_FULL: list[tuple[str, str]] = [
+    ("1321.T", "日経225ETF"), ("1306.T", "TOPIX ETF"),
+    ("1615.T", "TOPIX-17 銀行"), ("1617.T", "TOPIX-17 食品"),
+    ("1621.T", "TOPIX-17 素材化学"), ("1625.T", "TOPIX-17 機械"),
+    ("1627.T", "TOPIX-17 電機精密"), ("1631.T", "TOPIX-17 商社卸売"),
+    ("1633.T", "TOPIX-17 不動産"), ("1343.T", "NEXT FUNDS REIT"),
     ("1570.T", "日経レバ(2倍)"),
 ]
 
@@ -464,9 +474,15 @@ def main():
     ap.add_argument("--all-regime", action="store_true", help="横ばい以外も含める")
     ap.add_argument("--extract", action="store_true",
                     help="銘柄別に前半/後半を集計し、両方プラス(✓頑健)の銘柄をWATCHLISTとして抽出")
+    ap.add_argument("--full", action="store_true",
+                    help="絞込み前の全候補ユニバース(WATCHLIST_FULL)で実行(--extract/--backtest用)")
     ap.add_argument("--force-signal", action="store_true",
                     help="レジームゲートを無視して条件成立銘柄を表示(検証用)")
     args = ap.parse_args()
+
+    if args.full:
+        global WATCHLIST
+        WATCHLIST = WATCHLIST_FULL
 
     if args.extract:
         tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
