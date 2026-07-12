@@ -1055,6 +1055,76 @@ def _market_overview_html(indicators: dict) -> str:
 <div class="mkt-grid">{''.join(cards)}</div>"""
 
 
+def _regime_history_html(ref_date, months: int = 120) -> str:
+    """相場環境タブ用: 過去の大局レジーム(月末)を折りたたみ表で返す。
+    各月末までの終値だけで判定(先読みなし・get_regime と同一ロジック)。"""
+    try:
+        c = fetch_n225(months // 12 + 3, end_date=ref_date)
+        if c is None or len(c) < 260:
+            return ""
+        c = c.sort_index()
+        ma200 = c.rolling(200).mean()
+        slope200 = ma200.pct_change(20) * 100
+        er = (c - c.shift(60)).abs() / c.diff().abs().rolling(60).sum().replace(0, np.nan)
+        above = c >= ma200
+        _df = pd.DataFrame({"c": c, "ma200": ma200, "slope": slope200,
+                            "er": er, "above": above})
+        _df["ym"] = c.index.strftime("%Y-%m")
+        _me = _df.groupby("ym").tail(1).tail(months)
+        _lbl = {"up": ("🟢 上げ", "#4ade80"), "sideways": ("🟡 横ばい", "#fbbf24"),
+                "down": ("🔴 下げ", "#f87171"), "?": ("―", "#64748b")}
+
+        def _mac(row):
+            if pd.isna(row["ma200"]) or pd.isna(row["er"]):
+                return "?"
+            if row["er"] < 0.20:
+                return "sideways"
+            if row["above"] and row["slope"] > 0:
+                return "up"
+            if (not row["above"]) and row["slope"] < 0:
+                return "down"
+            return "sideways"
+
+        rows = ""
+        cnt = {"up": 0, "sideways": 0, "down": 0}
+        for _, row in _me.iterrows():
+            rg = _mac(row)
+            if rg in cnt:
+                cnt[rg] += 1
+            lbl, col = _lbl.get(rg, ("―", "#64748b"))
+            vm = (row["c"] / row["ma200"] - 1) * 100 if not pd.isna(row["ma200"]) else float("nan")
+            rows += (f'<tr><td style="padding:2px 6px">{row["ym"]}</td>'
+                     f'<td style="text-align:right;padding:2px 6px">{row["c"]:,.0f}</td>'
+                     f'<td style="text-align:right;padding:2px 6px">{row["er"]:.2f}</td>'
+                     f'<td style="text-align:right;padding:2px 6px">{row["slope"]:+.1f}%</td>'
+                     f'<td style="text-align:right;padding:2px 6px">{vm:+.1f}%</td>'
+                     f'<td style="padding:2px 6px;color:{col};font-weight:700">{lbl}</td></tr>')
+        if not rows:
+            return ""
+        _sm = f'上げ {cnt["up"]} / 横ばい {cnt["sideways"]} / 下げ {cnt["down"]} ヶ月'
+        return (
+            '<details style="margin:10px 0 4px;background:#0d1424;border:1px solid #1e293b;'
+            'border-radius:8px;padding:8px 14px">'
+            '<summary style="cursor:pointer;color:#93c5fd;font-weight:600">'
+            f'▶ 過去の大局レジーム推移（月末・{len(_me)}ヶ月）— {_sm}</summary>'
+            '<div style="max-height:420px;overflow-y:auto;margin-top:8px">'
+            '<table style="border-collapse:collapse;font-size:0.78rem;width:auto">'
+            '<thead><tr style="color:#64748b;border-bottom:1px solid #1e293b">'
+            '<th style="text-align:left;padding:2px 6px">月</th>'
+            '<th style="text-align:right;padding:2px 6px">終値</th>'
+            '<th style="text-align:right;padding:2px 6px">ER</th>'
+            '<th style="text-align:right;padding:2px 6px">MA200傾</th>'
+            '<th style="text-align:right;padding:2px 6px">vsMA200</th>'
+            '<th style="text-align:left;padding:2px 6px">レジーム</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>'
+            '<p style="font-size:0.7rem;color:#64748b;margin:6px 0 0">'
+            'ER=トレンド強度(0=もみ合い/1=強トレンド)。ER&lt;0.20=横ばい。'
+            '各月末までの終値のみで判定(先読みなし)。</p></details>'
+        )
+    except Exception:
+        return ""
+
+
 def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
                       periods: list | None = None) -> str:
     """タブ1: シグナル判定"""
@@ -1194,9 +1264,12 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
         pred    = calc_trend_prediction(periods, cur_p["trend"], cur_p["days"])
         pred_html = _trend_prediction_html(pred, cur_p["trend"])
 
+    _regime_hist_html = _regime_history_html(ref_date)
+
     return f"""
 <h2>{ref_date} 時点の相場環境（日経225）</h2>
 <div class="regime-panel">{regime_html}</div>
+{_regime_hist_html}
 {warn_html}
 {pred_html}
 {mkt_html}
