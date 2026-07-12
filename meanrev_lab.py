@@ -106,8 +106,9 @@ EXPIRE = 3
 
 
 def _run_mr(df, sig_long, sig_short, direction, entry_style, exit_style,
-            em, sm, tm, max_hold, fee, slip, range_band) -> list[dict]:
-    """単一銘柄・単一構成の平均回帰バックテスト(同時1ポジション)。損切りは終値判定。"""
+            em, sm, tm, max_hold, fee, slip, range_band, stock_ok=None) -> list[dict]:
+    """単一銘柄・単一構成の平均回帰バックテスト(同時1ポジション)。損切りは終値判定。
+    stock_ok: 各バーで発注を許可するか(銘柄自身がレンジの日だけ True)。None=常に許可。"""
     atr = _atr(df).to_numpy()
     ma10 = df["close"].rolling(10).mean().to_numpy()
     ma200 = df["close"].rolling(200).mean().to_numpy()
@@ -162,7 +163,8 @@ def _run_mr(df, sig_long, sig_short, direction, entry_style, exit_style,
                 pos = None
 
         # ── 2. 新規シグナル → 注文 ──
-        if pos is None and pending is None and bool(sig[i - 1]):
+        stock_ranging = (stock_ok is None) or bool(stock_ok[i - 1])
+        if pos is None and pending is None and bool(sig[i - 1]) and stock_ranging:
             cp = float(cl[i - 1])
             m2 = ma200[i - 1]
             in_range = (not range_band) or (np.isfinite(m2) and m2 > 0
@@ -206,7 +208,10 @@ def _run_mr(df, sig_long, sig_short, direction, entry_style, exit_style,
 
 
 # ── 大局レジーム(日次)系列 ───────────────────────────────────────
-def _regime_series(years: int) -> pd.Series | None:
+def _regime_series(years: int, strict: bool = False) -> pd.Series | None:
+    """日経の大局レジーム(先読みなし)。
+    strict=True: 横ばいを ER<0.15 かつ |MA200傾き|<0.5% の「本当に方向感なし」に厳格化。
+                 (トレンド寄りの日は sideways から外れて up/down/? になる)"""
     c = na.fetch_n225(years)
     if c is None or len(c) < 260:
         return None
@@ -215,18 +220,20 @@ def _regime_series(years: int) -> pd.Series | None:
     slope = ma200.pct_change(20) * 100
     er = (c - c.shift(60)).abs() / c.diff().abs().rolling(60).sum().replace(0, np.nan)
     above = c >= ma200
+    er_th = 0.15 if strict else 0.20
+    slope_band = 0.5 if strict else None
     reg = pd.Series(index=c.index, dtype=object)
     for i in range(len(c)):
         if not np.isfinite(ma200.iloc[i]) or not np.isfinite(er.iloc[i]):
             reg.iloc[i] = "?"
-        elif er.iloc[i] < 0.20:
+        elif er.iloc[i] < er_th and (slope_band is None or abs(slope.iloc[i]) < slope_band):
             reg.iloc[i] = "sideways"
         elif above.iloc[i] and slope.iloc[i] > 0:
             reg.iloc[i] = "up"
         elif (not above.iloc[i]) and slope.iloc[i] < 0:
             reg.iloc[i] = "down"
         else:
-            reg.iloc[i] = "sideways"
+            reg.iloc[i] = "?" if strict else "sideways"
     return reg
 
 
@@ -264,6 +271,10 @@ def main():
     ap.add_argument("--slip", type=float, default=0.005, help="損切り/逆指値スリッページ(既定0.005)")
     ap.add_argument("--range-band", type=float, default=0.0,
                     help="MA200±この割合の押し目だけ採用(例0.20=±20%%内)。0=無効")
+    ap.add_argument("--strict-regime", action="store_true",
+                    help="横ばい定義を厳格化(日経ER<0.15かつMA200傾き±0.5%%以内)")
+    ap.add_argument("--stock-range", type=float, default=0.0,
+                    help="銘柄自身の効率比(60日ER)がこの値未満の日だけ発注(例0.25)。0=無効")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
 
@@ -277,14 +288,17 @@ def main():
     print(f"ユニバース: {src} ({len(universe)}銘柄) / since={since} / エンジン:meanrev_lab v2(独立)")
     print(f"コスト: 手数料片道{args.fee*100:.2f}% / スリッページ{args.slip*100:.2f}%"
           f" / range_band={args.range_band or 'off'}"
+          f" / strict_regime={'on' if args.strict_regime else 'off'}"
+          f" / stock_range={args.stock_range or 'off'}"
           f" / 閾値 IBS<{TH_IBS_L} RSI2<{TH_RSI_L} BB{TH_BB_K}σ STO<{TH_STO_L}")
 
-    reg = _regime_series(args.years)
+    reg = _regime_series(args.years, strict=args.strict_regime)
     if reg is None:
         print("[ERROR] 日経レジーム系列の取得に失敗しました")
         return
     _rc = reg.value_counts()
-    print(f"日経レジーム日数: 上げ{_rc.get('up',0)} / 横ばい{_rc.get('sideways',0)} / 下げ{_rc.get('down',0)}\n")
+    print(f"日経レジーム日数: 上げ{_rc.get('up',0)} / 横ばい{_rc.get('sideways',0)}"
+          f" / 下げ{_rc.get('down',0)} / 除外(?){_rc.get('?',0)}\n")
 
     sig_names = args.signal or ["IBS", "RSI2r", "BB", "STO"]
     directions = ["long", "short"]
@@ -299,6 +313,12 @@ def main():
         if not (args.min_price <= px <= args.max_price):
             return None
         sigs = _signals(df)
+        # 銘柄自身がレンジか: 60日効率比(ER) が閾値未満の日だけ発注を許可
+        stock_ok = None
+        if args.stock_range > 0:
+            sc = df["close"]
+            s_er = (sc - sc.shift(60)).abs() / sc.diff().abs().rolling(60).sum().replace(0, np.nan)
+            stock_ok = (s_er < args.stock_range).to_numpy()
         local: dict = defaultdict(list)
         for sname in sig_names:
             sl, ss = sigs[sname]
@@ -306,7 +326,7 @@ def main():
                 for estyle, xstyle, cname, p in COMBOS:
                     trs = _run_mr(df, sl, ss, direction, estyle, xstyle,
                                   p["em"], p["sm"], p["tm"], p["mh"],
-                                  args.fee, args.slip, args.range_band)
+                                  args.fee, args.slip, args.range_band, stock_ok)
                     local[(sname, direction, estyle, cname)].extend(trs)
         return local
 
