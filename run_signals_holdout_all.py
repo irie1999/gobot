@@ -117,6 +117,10 @@ _pre.add_argument("--minute-dir", default=None,
 _pre.add_argument("--open-confirm", action="store_true",
                   help="⑭寄り確認タブを計算する(5分足を読むので重い)。"
                        "未指定でもキャッシュがあれば表示。既定OFFで日次レポートを軽量化")
+_pre.add_argument("--no-analysis", action="store_true",
+                  help="詳細分析タブ群(最大保有日数比較・損切り幅別・寄り付き方向・"
+                       "下落深さ別・逆張りショート・含み損カーブ・em比較)を丸ごとスキップ。"
+                       "過去検証で損益タブだけ高速に見たいときに使う")
 _pre.add_argument("--fill-timing", action="store_true",
                   help="⑮約定タイミングタブを計算する。未指定でもキャッシュがあれば表示")
 _pre.add_argument("--serve", action="store_true", default=True,
@@ -1094,7 +1098,10 @@ _mh_reuse      = None if _args.force else _latest_analysis_cache(_mh_prefix)
 # 各分析は独立タブ。⑪=保有日数比較のみ / ⑯損切り幅 ⑰寄り付き方向 ⑱下落深さ
 # ⑲逆張りショート ⑳保有日数カーブ はそれぞれ別スロットに入れる。
 _fade_html = _curve_html = _stopw_html = _opendir_html = _drop_html = _emcmp_html = ""
-if _mh_reuse is not None:
+if getattr(_args, "no_analysis", False):
+    print("詳細分析タブ群: スキップ (--no-analysis)", flush=True)
+    _mh_html = _mh_cmp_html = ""   # 空にしてスロット未置換(タブは空表示)にする
+elif _mh_reuse is not None:
     try:
         _mh_cached   = _mhpk.loads(_mh_reuse.read_bytes())
         _mh_html     = _mh_cached.get("conservative", "")
