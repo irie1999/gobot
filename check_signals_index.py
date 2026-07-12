@@ -244,6 +244,18 @@ def trades_in_window(preset="wide", start="2021-01-01", end="2023-12-31",
     return out
 
 
+def _stats_of(trades: list[dict]) -> dict:
+    """トレード配列の件数/勝率/PF/損益を返す(サブタイトル/集計用)。"""
+    n = len(trades)
+    if n == 0:
+        return {"n": 0, "wr": 0.0, "pf": 0.0, "pnl": 0.0}
+    gp = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gl = sum(t["pnl"] for t in trades if t["pnl"] <= 0)
+    pf = gp / -gl if gl < 0 else (float("inf") if gp > 0 else 0.0)
+    win = sum(1 for t in trades if t["pnl"] > 0)
+    return {"n": n, "wr": win / n * 100, "pf": pf, "pnl": gp + gl}
+
+
 def symbol_stats(trades: list[dict]) -> list[dict]:
     """銘柄別に 取引数/勝率/前半損益/後半損益/合計 を集計(頑健性判定用)。
     前半後半は全トレードの決済日レンジの中点で分割。両方プラス=robust。"""
@@ -508,12 +520,13 @@ def main():
     if args.html:
         tr = trades_in_window(args.preset, args.dfrom, args.dto, args.symbol,
                               sideways_only=not args.all_regime)
-        bt = backtest(args.preset)["sideways"]
-        pf_s = "∞" if bt["pf"] == float("inf") else f"{bt['pf']:.2f}"
+        # サブタイトルのBTはKPIと同じ窓内トレードから算出(数字の食い違い防止)
+        _bs = _stats_of(tr)
+        pf_s = "∞" if _bs["pf"] == float("inf") else f"{_bs['pf']:.2f}"
         meta = {"period": f"{args.dfrom}〜{args.dto}",
                 "scope": "全レジーム" if args.all_regime else "横ばいのみ",
                 "preset": args.preset,
-                "bt": {"n": bt["n"], "pf": pf_s, "pnl": bt["pnl"]}}
+                "bt": {"n": _bs["n"], "pf": pf_s, "pnl": _bs["pnl"]}}
         html = build_html(tr, meta)
         fname = f"signals_index_{args.dfrom}_{args.dto}.html"
         with open(fname, "w", encoding="utf-8") as f:
