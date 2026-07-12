@@ -6480,6 +6480,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 from backtest_limit_entry import (
                     fetch as _fw_fetch, run_limit_backtest as _fw_rbt)
 
+                # スコア計算用に、基準日より約1年前(+400日)からバックテストする。
+                # これで基準日直後(例2018-08)のシグナルにも『直近1年の実績』が揃い、
+                # 当時のBTスコアを正しく算出できる(先読みではない=当時入手可能な過去)。
+                # 表示・集計は since=基準日 でフィルタするので、基準日前のトレードは
+                # スコア計算にのみ使われ、月別グリッドには出ない。
+                _score_win = _BT_WINDOW_DAYS + 400
+
                 def _full_log(_sym, _name, _strat):
                     try:
                         _mod = _mod_for(_strat)
@@ -6487,13 +6494,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         if not _p:
                             return None
                         _cf, _e, _s, _t = _p
-                        _dfx = _fw_fetch(_sym, _BT_WINDOW_DAYS)
+                        _dfx = _fw_fetch(_sym, _score_win)
                         if _dfx is None:
                             return None
                         _et = getattr(_mod, "ENTRY_TYPE",
                                       "stop_sell" if _strat.endswith("_S") else "stop")
                         _rr = _fw_rbt(_sym, _name, _dfx, _cf, _e, _s, _t,
-                                      _BT_WINDOW_DAYS, _strat, entry_type=_et)
+                                      _score_win, _strat, entry_type=_et)
                         return _rr["trade_log"] if _rr else None
                     except Exception:
                         return None
