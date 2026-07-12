@@ -2700,6 +2700,45 @@ _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_html
 _pnl_bt_cache: dict = {}         # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
 _preoos_tab5_score_cache: dict = {}  # (sym, strat, cutoff_days) -> score
+_ASOF_BT_CACHE: dict = {}  # (sym, strat, mode, sig_date, window) -> シグナル日時点BTスコア
+
+
+def _asof_bt_score(full_log, mod, asof_date, periods=(30, 90, 180, 365)):
+    """full_trade_log から asof_date 時点のBTスコアを計算(先読みなし)。
+    各期間pは [asof-p, asof) に『決済済み』のトレードだけで統計を作り
+    mod.calc_recommend_score にかける。asof より前の決済トレードが無ければ None。
+    → 過去検証で「当時のBTスコア」を追加バックテストなしに再現するための関数。"""
+    pr = {}
+    for p in periods:
+        lo = asof_date - timedelta(days=p)
+        n = wins = 0
+        gp = gl = tot = 0.0
+        for t in full_log:
+            if t.get("reason") in ("発注中", "保有中"):
+                continue
+            ed = t.get("exit_dt")
+            if ed is None:
+                continue
+            edd = ed.date() if hasattr(ed, "date") else ed
+            if lo <= edd < asof_date:
+                pnl = float(t.get("pnl", 0.0))
+                n += 1
+                tot += pnl
+                if pnl > 0:
+                    wins += 1
+                    gp += pnl
+                else:
+                    gl += -pnl
+        if n == 0:
+            continue
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[p] = {"trades": n, "win_rate": wins / n * 100.0, "pf": pf, "total_pnl": tot}
+    if not pr:
+        return None
+    try:
+        return mod.calc_recommend_score(pr)[0]
+    except Exception:
+        return None
 
 
 def _calc_preoos_bt_score_for_tab5(sym: str, strat: str, cutoff_days: int) -> int:
@@ -6569,6 +6608,19 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 _sd_for_key = _sdt_for_key.date() if hasattr(_sdt_for_key, "date") else _sdt_for_key
                 _sig_sc = _lookup_signal_date_bt(
                     sym, strat, str(_sd_for_key) if _sd_for_key else None)
+                # 過去検証(全期間)モード: シグナル日時点のBTスコアを full_trade_log から
+                # 算出(先読みなし)。当時決済済みのトレードだけで calc_recommend_score する。
+                if (_sig_sc is None and _BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365
+                        and it.get("full_trade_log") is not None and _sd_for_key is not None):
+                    _ak = (sym, strat, cfg["mode"], str(_sd_for_key), _BT_WINDOW_DAYS)
+                    if _ak in _ASOF_BT_CACHE:
+                        _sig_sc = _ASOF_BT_CACHE[_ak]
+                    else:
+                        _sig_sc = _asof_bt_score(it["full_trade_log"], _mod_for(strat), _sd_for_key)
+                        _ASOF_BT_CACHE[_ak] = _sig_sc
+                    # 当時の決済実績が無い(履歴不足)→ 0=未実証 として扱い先読みを避ける
+                    if _sig_sc is None:
+                        _sig_sc = 0
                 if _sig_sc is None:
                     _sig_sc = rec_score2
                 # signal_score からランクを決定
