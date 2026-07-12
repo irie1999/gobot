@@ -272,11 +272,87 @@ def build_html(trades: list[dict], meta: dict) -> str:
                      f'<td class="r">{w/c*100:.0f}%</td>'
                      f'<td class="r" style="color:{col}">{p:+,.0f}</td></tr>')
 
-    # 取引明細
+    # ── 月別・日別集計 (決済日基準) + 必要資金(同時保有ピーク) ──
+    def _pnl_cell(v):
+        c = "#4ade80" if v >= 0 else "#f87171"
+        return f'<span style="color:{c}">{v:+,.0f}円</span>'
+
+    # 決済日ごと集計
+    by_day: dict = {}      # 'YYYY-MM-DD' -> [n, win, pnl]
+    by_month: dict = {}    # 'YYYY-MM'    -> [n, win, gp, gl]
+    for t in trades:
+        xd = pd.Timestamp(t["exit_dt"])
+        dk = xd.strftime("%Y-%m-%d"); mk = xd.strftime("%Y-%m")
+        d = by_day.setdefault(dk, [0, 0, 0.0])
+        d[0] += 1; d[1] += 1 if t["pnl"] > 0 else 0; d[2] += t["pnl"]
+        m = by_month.setdefault(mk, [0, 0, 0.0, 0.0])
+        m[0] += 1; m[1] += 1 if t["pnl"] > 0 else 0
+        if t["pnl"] > 0: m[2] += t["pnl"]
+        else: m[3] += t["pnl"]
+
+    # 必要資金(同時保有ピーク): 各エントリー日で同時保有中の建玉数と評価額を数え、月別に最大を取る
+    peak_by_month: dict = {}   # 'YYYY-MM' -> [max_cnt, max_cap]
+    for t in trades:
+        d0 = pd.Timestamp(t["entry_dt"])
+        openpos = [u for u in trades
+                   if pd.Timestamp(u["entry_dt"]) <= d0 <= pd.Timestamp(u["exit_dt"])]
+        cnt = len(openpos)
+        cap = sum(u["entry_p"] * u["qty"] for u in openpos)
+        mk = d0.strftime("%Y-%m")
+        pk = peak_by_month.setdefault(mk, [0, 0.0])
+        if cnt > pk[0]:
+            pk[0] = cnt; pk[1] = cap
+
+    max_abs = max((abs(m[2] + m[3]) for m in by_month.values()), default=1) or 1
+    months_desc = sorted(by_month.keys(), reverse=True)
+
+    # 月次テーブル
+    mrows = ""
+    for mk in months_desc:
+        c, w, gpp, gll = by_month[mk]
+        mt = gpp + gll
+        bar_w = int(abs(mt) / max_abs * 90)
+        bcol = "#16a34a" if mt >= 0 else "#dc2626"
+        pk = peak_by_month.get(mk, [0, 0.0])
+        cap_str = f"{pk[1]:,.0f}円" if pk[0] else "—"
+        mtcol = "#4ade80" if mt >= 0 else "#f87171"
+        mrows += (
+            f'<tr><td><b>{mk.replace("-","/")}月</b></td><td class="r">{c}件</td>'
+            f'<td class="r">{w/c*100:.0f}%</td>'
+            f'<td class="r" style="color:#4ade80">+{gpp:,.0f}円</td>'
+            f'<td class="r" style="color:#f87171">{gll:,.0f}円</td>'
+            f'<td class="r"><span style="color:{mtcol};font-weight:600">{mt:+,.0f}円</span>'
+            f' <span style="display:inline-block;height:10px;width:{bar_w}px;'
+            f'background:{bcol};border-radius:2px;vertical-align:middle"></span></td>'
+            f'<td class="r"><span style="color:#38bdf8">{cap_str}</span>'
+            f'<br><span style="font-size:0.7rem;color:#64748b">最大{pk[0]}銘柄同時</span></td></tr>')
+
+    # 月ごとの日別カード(折りたたみ)
     _rj = {"target": ("利確", "#4ade80"), "stop": ("損切", "#f87171"),
            "timecut": ("時間切", "#94a3b8")}
+    day_blocks = ""
+    for mk in months_desc:
+        c, w, gpp, gll = by_month[mk]
+        mt = gpp + gll
+        days = sorted([d for d in by_day if d.startswith(mk)], reverse=True)
+        cards_d = ""
+        for dk in days:
+            dn, dw, dp = by_day[dk]
+            dcol = "#4ade80" if dp >= 0 else "#f87171"
+            mmdd = pd.Timestamp(dk).strftime("%m/%d")
+            cards_d += (
+                f'<div class="daycard"><div class="dc-d">{mmdd}</div>'
+                f'<div class="dc-s">{dn}件 {dw/dn*100:.0f}%</div>'
+                f'<div class="dc-p" style="color:{dcol}">{dp:+,.0f}</div></div>')
+        mtc = "#4ade80" if mt >= 0 else "#f87171"
+        day_blocks += (
+            f'<details class="mblock"><summary>▼ {mk.replace("-","/")}月　'
+            f'{c}件 {w/c*100:.0f}% <span style="color:{mtc}">{mt:+,.0f}円</span></summary>'
+            f'<div class="daygrid">{cards_d}</div></details>')
+
+    # 全取引明細(折りたたみ)
     tr_rows = ""
-    for t in trades:
+    for t in sorted(trades, key=lambda x: pd.Timestamp(x["exit_dt"]), reverse=True):
         rlbl, rcol = _rj.get(t["reason"], (t["reason"], "#94a3b8"))
         pcol = "#4ade80" if t["pnl"] >= 0 else "#f87171"
         e = pd.Timestamp(t["entry_dt"]).strftime("%Y-%m-%d")
@@ -312,20 +388,34 @@ def build_html(trades: list[dict], meta: dict) -> str:
   td.r,th.r {{ text-align:right; }}
   tr:hover td {{ background:#0d1424; }}
   .wrap {{ max-height:70vh; overflow:auto; border:1px solid #1e293b; border-radius:8px; }}
+  .mblock {{ background:#111827; border:1px solid #1e293b; border-radius:8px; margin:8px 0; }}
+  .mblock summary {{ cursor:pointer; padding:10px 14px; font-weight:600; }}
+  .daygrid {{ display:flex; flex-wrap:wrap; gap:8px; padding:6px 14px 14px; }}
+  .daycard {{ background:#0d1424; border:1px solid #1e293b; border-radius:8px; padding:8px 12px; min-width:78px; text-align:center; }}
+  .dc-d {{ font-weight:700; font-size:0.85rem; }}
+  .dc-s {{ color:#94a3b8; font-size:0.7rem; margin:3px 0; }}
+  .dc-p {{ font-weight:600; font-size:0.82rem; }}
 </style></head><body>
 <h1>🟡 横ばい相場用 指数ETF戦略（STOロングbounce）</h1>
 <div class="sub">期間 {meta.get('period','')} ／ {meta.get('scope','')} ／ preset={meta.get('preset','')}
   ／ コスト 信用0.03%＋スリッページ0.30%<br>{bt_line}</div>
 <div class="cards">{cards}</div>
+<h2>月別損益（決済日基準）</h2>
+<div class="wrap"><table>
+<thead><tr><th>月</th><th class="r">件数</th><th class="r">勝率</th><th class="r">利益</th>
+<th class="r">損失</th><th class="r">損益合計</th><th class="r">必要資金<br><span style="font-size:0.7rem">同時保有ピーク</span></th></tr></thead>
+<tbody>{mrows}</tbody></table></div>
+<h2>日別内訳（クリックで月を展開）</h2>
+{day_blocks}
 <h2>銘柄別サマリー（損益降順）</h2>
 <div class="wrap"><table>
 <thead><tr><th>銘柄</th><th>名前</th><th class="r">取引</th><th class="r">勝率</th><th class="r">損益(円)</th></tr></thead>
 <tbody>{sym_rows}</tbody></table></div>
-<h2>取引明細（約定日順・{n}件）</h2>
-<div class="wrap"><table>
+<details style="margin-top:16px"><summary style="cursor:pointer;color:#93c5fd">▶ 全取引明細（決済日順・{n}件）を表示</summary>
+<div class="wrap" style="margin-top:8px"><table>
 <thead><tr><th>約定日</th><th>決済日</th><th>銘柄</th><th>名前</th><th class="r">買値</th>
 <th class="r">売値</th><th class="r">株数</th><th class="r">保有</th><th>結果</th><th class="r">損益(円)</th></tr></thead>
-<tbody>{tr_rows}</tbody></table></div>
+<tbody>{tr_rows}</tbody></table></div></details>
 </body></html>"""
 
 
