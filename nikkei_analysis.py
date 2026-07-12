@@ -1059,6 +1059,7 @@ def _regime_history_html(ref_date, months: int = 120) -> str:
     """相場環境タブ用: 過去の大局レジーム(月末)を折りたたみ表で返す。
     各月末までの終値だけで判定(先読みなし・get_regime と同一ロジック)。"""
     try:
+        import numpy as np
         c = fetch_n225(months // 12 + 3, end_date=ref_date)
         if c is None or len(c) < 260:
             return ""
