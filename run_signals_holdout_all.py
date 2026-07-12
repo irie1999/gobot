@@ -125,6 +125,10 @@ _pre.add_argument("--forward-days", type=int, default=0,
                   help="過去検証(--date)で損益タブを『基準日〜基準日+N日』だけ集計する。"
                        "現在まで走らせないので軽量。例: --forward-days 365 で基準月+1年。"
                        "(--date 指定が前提。当時BTスコアは先読みなしのまま)")
+_pre.add_argument("--back-days", type=int, default=0,
+                  help="--forward-days と併用。基準日より前 N 日も表示する(選定期間=in-sample "
+                       "の成績を並べて崖を可視化)。例: --back-days 365 --forward-days 365 で "
+                       "基準月の前後1年ずつ。基準日前は当時BTスコアが選定期間と重なる(in-sample)点に注意。")
 _pre.add_argument("--fill-timing", action="store_true",
                   help="⑮約定タイミングタブを計算する。未指定でもキャッシュがあれば表示")
 _pre.add_argument("--serve", action="store_true", default=True,
@@ -489,8 +493,11 @@ if _cached_out.exists() and not _args.force:
     sys.exit(0)
 
 _PNL_PERIODS  = [30, 60, 90, 120, 150, 180, 270, 365]
-# --forward-days 指定時は表示窓=基準日+N日ぶん(since=基準日)。それ以外は --days。
-_disp_days = _args.forward_days if _args.forward_days > 0 else _args.days
+# --forward-days/--back-days 指定時は表示窓=基準日の前後ぶん(since=基準日-back)。それ以外は --days。
+if _args.forward_days > 0 or _args.back_days > 0:
+    _disp_days = _args.forward_days + _args.back_days
+else:
+    _disp_days = _args.days
 # --days/--forward-days が既定リスト外なら、その値を期間リストに追加して初期表示にする。
 if _disp_days and _disp_days not in _PNL_PERIODS:
     _PNL_PERIODS = sorted(set(_PNL_PERIODS) | {_disp_days})
@@ -708,18 +715,20 @@ _na._PNL_CONFIGS[:] = _all_configs
 # 損益タブの月別グリッドを全期間表示する窓(日)。--days が365超なら過去まで表示。
 # 365以下(既定/ライブ)なら None 相当で従来どおり(挙動不変)。
 _na._BT_WINDOW_DAYS = max(_PNL_PERIODS) if max(_PNL_PERIODS) > 365 else None
-# --forward-days: 損益タブを『基準日〜基準日+N日』で打ち切る(現在まで走らせず軽量化)。
-if _args.forward_days > 0 and _args.date:
+# --forward-days/--back-days: 損益タブを『基準日-back 〜 基準日+forward』で打ち切る(軽量化)。
+if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
     from datetime import date as _fwd_date_cls
     try:
         _fwd_base = _fwd_date_cls.fromisoformat(_args.date)
-        _na._REPORT_START = _fwd_base
+        # 表示の最古日(=warmupの起点)。基準日より前も出す場合はその分さかのぼる。
+        _na._REPORT_START = _fwd_base - timedelta(days=_args.back_days)
         _na._REPORT_END = _fwd_base + timedelta(days=_args.forward_days)
-        _na._BT_WINDOW_DAYS = _args.forward_days   # full_trade_log を確実に回す
-        print(f"  [forward] 損益タブ集計期間: {_fwd_base} 〜 {_na._REPORT_END} "
-              f"({_args.forward_days}日) ※現在まで走らせない軽量モード", flush=True)
+        _na._BT_WINDOW_DAYS = _disp_days   # full_trade_log を確実に回す
+        print(f"  [forward] 損益タブ集計期間: {_na._REPORT_START} 〜 {_na._REPORT_END} "
+              f"(基準日 {_fwd_base} / 前{_args.back_days}日+後{_args.forward_days}日) "
+              f"※現在まで走らせない軽量モード", flush=True)
     except ValueError:
-        print(f"[WARN] --date {_args.date} が不正。--forward-days を無視します。")
+        print(f"[WARN] --date {_args.date} が不正。--forward-days/--back-days を無視します。")
 # ショートモード: トレンド別成績テーブルの表示順・凡例を反転
 _na._IS_SHORT_MODE = _args.short
 
