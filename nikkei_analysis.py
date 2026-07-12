@@ -48,6 +48,10 @@ _PNL_CONFIGS: list[dict] = []
 # None/365以下 → 従来どおり直近365日のみ。run_signals_holdout_all が --days に応じて設定。
 # backtest_one(スコア計算・ライブ)は一切変えず、表示用の全期間 trade_log だけ別途取得する。
 _BT_WINDOW_DAYS: int | None = None
+# 過去検証で損益タブを「基準日〜基準日+N日」だけ集計する(現在まで走らせず軽量化)。
+# _REPORT_END を date に設定すると until をそこにし、全期間trade_logも同日でトリムする。
+_REPORT_START = None   # 基準日 (date)。全期間バックテストの下限側(warmup)の起点に使う。
+_REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)まで。
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
@@ -6428,7 +6432,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
 
     import gc
     from collections import defaultdict
-    until = _TODAY
+    # _REPORT_END 指定時は「基準日+N日」で集計を打ち切る(現在まで走らせない・軽量化)。
+    until = _REPORT_END or _TODAY
     since = until - timedelta(days=days)
 
     # ── バックテスト結果キャッシュ ─────────────────────────────────────────────
@@ -6476,7 +6481,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             # backtest_one のスコアは365日のまま（＝ライブと同一）。ここで別途、
             # 指定窓(_BT_WINDOW_DAYS)の全期間バックテストを回し full_trade_log を付与する。
             # _set_sig_params(cfg["mode"]) はこの時点で有効なので con/agg も正しく反映。
-            if _BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365:
+            if (_BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365) or _REPORT_END is not None:
+                import pandas as _pd_fl
                 from backtest_limit_entry import (
                     fetch as _fw_fetch, run_limit_backtest as _fw_rbt)
 
@@ -6485,7 +6491,13 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 # 当時のBTスコアを正しく算出できる(先読みではない=当時入手可能な過去)。
                 # 表示・集計は since=基準日 でフィルタするので、基準日前のトレードは
                 # スコア計算にのみ使われ、月別グリッドには出ない。
-                _score_win = _BT_WINDOW_DAYS + 400
+                if _REPORT_END is not None:
+                    # 基準月+N日で打ち切る軽量モード: 窓を [基準日-400, _REPORT_END] に限定。
+                    _cutoff_start = (_REPORT_START or (_REPORT_END - timedelta(days=365))) \
+                        - timedelta(days=400)
+                    _score_win = max(210, (_TODAY - _cutoff_start).days)
+                else:
+                    _score_win = _BT_WINDOW_DAYS + 400
 
                 def _full_log(_sym, _name, _strat):
                     try:
@@ -6494,9 +6506,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         if not _p:
                             return None
                         _cf, _e, _s, _t = _p
-                        _dfx = _fw_fetch(_sym, _score_win)
+                        if _REPORT_END is not None:
+                            _dfx = _fw_fetch(_sym, _score_win, min_start_date=_cutoff_start)
+                        else:
+                            _dfx = _fw_fetch(_sym, _score_win)
                         if _dfx is None:
                             return None
+                        if _REPORT_END is not None:
+                            # 集計終了日で未来をトリム(基準月+N日以降は生成しない)
+                            _dfx = _dfx[_dfx.index <= _pd_fl.Timestamp(_REPORT_END)]
+                            if len(_dfx) < 210:
+                                return None
                         _et = getattr(_mod, "ENTRY_TYPE",
                                       "stop_sell" if _strat.endswith("_S") else "stop")
                         _rr = _fw_rbt(_sym, _name, _dfx, _cf, _e, _s, _t,
@@ -6617,8 +6637,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     sym, strat, str(_sd_for_key) if _sd_for_key else None)
                 # 過去検証(全期間)モード: シグナル日時点のBTスコアを full_trade_log から
                 # 算出(先読みなし)。当時決済済みのトレードだけで calc_recommend_score する。
-                if (_sig_sc is None and _BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365
-                        and it.get("full_trade_log") is not None and _sd_for_key is not None):
+                if (_sig_sc is None and it.get("full_trade_log") is not None
+                        and _sd_for_key is not None):
                     _ak = (sym, strat, cfg["mode"], str(_sd_for_key), _BT_WINDOW_DAYS)
                     if _ak in _ASOF_BT_CACHE:
                         _sig_sc = _ASOF_BT_CACHE[_ak]
