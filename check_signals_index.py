@@ -322,10 +322,10 @@ def build_html(trades: list[dict], meta: dict) -> str:
             f'<td class="r prof">+{gpp:,.0f}円</td>'
             f'<td class="r loss">{gll:,.0f}円</td>'
             f'<td class="r"><span style="color:{mtcol};font-weight:700">{mt:+,.0f}円</span>'
-            f' <span style="display:inline-block;height:11px;width:{bar_w}px;'
+            f' <span style="display:inline-block;height:9px;width:{bar_w}px;'
             f'background:{bcol};border-radius:2px;vertical-align:middle"></span></td>'
-            f'<td class="r"><span style="color:#38bdf8">{cap_str}</span>'
-            f'<br><span style="font-size:0.7rem;color:#64748b">最大{pk[0]}銘柄同時</span></td></tr>')
+            f'<td class="r" style="color:#38bdf8">{cap_str}'
+            f' <span style="font-size:0.68rem;color:#64748b">×{pk[0]}</span></td></tr>')
 
     # 月ごとの取引明細(折りたたみ) — 買った日/売った日/買値/売値/保有/結果/損益
     _rj = {"target": ("利確", "#4ade80"), "stop": ("損切", "#f87171"),
@@ -358,12 +358,12 @@ def build_html(trades: list[dict], meta: dict) -> str:
                      key=lambda x: pd.Timestamp(x["exit_dt"]), reverse=True)
         rows = "".join(_detail_row(t) for t in mtr)
         month_detail += (
-            f'<details class="mblock"><summary>▼ {mk.replace("-","/")}月　'
-            f'{c}件　勝率{w/c*100:.0f}%　'
-            f'<span class="prof">利益+{gpp:,.0f}</span>　'
-            f'<span class="loss">損失{gll:,.0f}</span>　'
-            f'<span style="color:{mtc};font-weight:700">合計{mt:+,.0f}円</span></summary>'
-            f'<div class="wrap" style="margin:8px 12px 12px"><table>{_dhead}'
+            f'<details class="mblock"><summary>{mk.replace("-","/")}　'
+            f'{c}件 {w/c*100:.0f}%　'
+            f'<span class="prof">+{gpp:,.0f}</span> '
+            f'<span class="loss">{gll:,.0f}</span> = '
+            f'<span style="color:{mtc};font-weight:700">{mt:+,.0f}円</span></summary>'
+            f'<div class="wrap" style="margin:4px 10px 8px"><table>{_dhead}'
             f'<tbody>{rows}</tbody></table></div></details>')
 
     bt = meta.get("bt", {})
@@ -375,22 +375,22 @@ def build_html(trades: list[dict], meta: dict) -> str:
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>指数ETF横ばい戦略 {meta.get('period','')}</title>
 <style>
-  body {{ background:#0a0e1a; color:#e2e8f0; font-family:'Segoe UI',sans-serif; margin:0; padding:24px; }}
-  h1 {{ font-size:1.3rem; margin:0 0 4px; }}
-  .sub {{ color:#94a3b8; font-size:0.85rem; margin-bottom:20px; }}
-  .cards {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; }}
-  .card {{ background:#111827; border:1px solid #1e293b; border-radius:10px; padding:14px 20px; min-width:120px; }}
-  .card-l {{ color:#94a3b8; font-size:0.78rem; margin-bottom:6px; }}
-  .card-v {{ font-size:1.5rem; font-weight:700; }}
-  h2 {{ font-size:1.05rem; margin:24px 0 10px; border-left:3px solid #3b82f6; padding-left:10px; }}
-  table {{ border-collapse:collapse; width:100%; font-size:0.83rem; }}
-  th,td {{ padding:6px 10px; border-bottom:1px solid #1e293b; text-align:left; }}
+  body {{ background:#0a0e1a; color:#e2e8f0; font-family:'Segoe UI',sans-serif; margin:0; padding:12px 16px; font-size:13px; }}
+  h1 {{ font-size:1.05rem; margin:0 0 2px; }}
+  .sub {{ color:#94a3b8; font-size:0.72rem; margin-bottom:10px; }}
+  .cards {{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }}
+  .card {{ background:#111827; border:1px solid #1e293b; border-radius:7px; padding:5px 11px; min-width:82px; }}
+  .card-l {{ color:#94a3b8; font-size:0.68rem; margin-bottom:1px; }}
+  .card-v {{ font-size:1.05rem; font-weight:700; }}
+  h2 {{ font-size:0.85rem; margin:12px 0 5px; border-left:3px solid #3b82f6; padding-left:8px; }}
+  table {{ border-collapse:collapse; width:100%; font-size:0.74rem; }}
+  th,td {{ padding:2px 8px; border-bottom:1px solid #16202f; text-align:left; white-space:nowrap; }}
   th {{ color:#94a3b8; font-weight:600; background:#0d1424; position:sticky; top:0; }}
   td.r,th.r {{ text-align:right; }}
   tr:hover td {{ background:#0d1424; }}
-  .wrap {{ max-height:70vh; overflow:auto; border:1px solid #1e293b; border-radius:8px; }}
-  .mblock {{ background:#111827; border:1px solid #1e293b; border-radius:8px; margin:8px 0; }}
-  .mblock summary {{ cursor:pointer; padding:11px 14px; font-weight:600; font-size:0.9rem; }}
+  .wrap {{ max-height:52vh; overflow:auto; border:1px solid #1e293b; border-radius:7px; }}
+  .mblock {{ background:#111827; border:1px solid #1e293b; border-radius:6px; margin:4px 0; }}
+  .mblock summary {{ cursor:pointer; padding:6px 12px; font-size:0.78rem; }}
   .mblock summary:hover {{ background:#0d1424; }}
   .prof {{ color:#4ade80; }}
   .loss {{ color:#f87171; }}
