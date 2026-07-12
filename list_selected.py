@@ -8,6 +8,7 @@ list_selected.py — 指定基準日の選定銘柄(WFテスト合格)を戦略�
 import argparse
 import csv
 import glob
+import os
 
 ap = argparse.ArgumentParser()
 ap.add_argument("date", help="基準日 YYYY-MM-DD (例: 2018-06-30)")
@@ -25,8 +26,11 @@ print(f"=== 選定銘柄 (基準日 {args.date} / holdout{args.holdout}d / TEST�
 print(f"{'戦略':<10}{'銘柄':<10}{'名前':<16}{'選定TEST損益':>13}{'PF':>6}{'勝率':>6}{'fold':>5}")
 print("-" * 70)
 for f in files:
-    stem = f.split("walkforward_")[1]
-    strat = stem.split("_holdout")[0]
+    # ディレクトリ名(walkforward_results)を除いてから戦略名を取り出す
+    base = os.path.basename(f)                       # walkforward_MACD_holdout30d_2018-06-30.csv
+    strat = base.split("walkforward_", 1)[1].split("_holdout")[0]
+    if strat.endswith("_aggressive"):
+        strat = strat[: -len("_aggressive")]
     try:
         rows = list(csv.DictReader(open(f, encoding="utf-8")))
     except Exception:
