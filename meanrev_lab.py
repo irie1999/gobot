@@ -5,35 +5,35 @@ meanrev_lab.py — 横ばい(レンジ)相場向け 平均回帰(逆張り)戦�
 一切触れない**ので、日々のシグナルには影響しない。ここで勝つ構成を見つけてから、
 check_signals_* / エンジンに正式移植する、という段取り(CLAUDE.md §13 の検証優先方針)。
 
-検証する構成(グリッド):
-  シグナル(行き過ぎの測り方4種) × 方向(ロング/ショート)
-    IBS   : 足内位置 (終値が安値/高値寄り)
-    RSI2r : 短期モメンタム売られ/買われすぎ (MA200フィルタ無し=横ばい版)
-    BB    : ボリンジャー±2σ (ボラ正規化乖離)
-    STO   : ストキャス %K (N日レンジ内の位置)
-  × 出口タイプ2種
-    atr  : target = order ± ATR×tm  (既存流用)
-    mean : target = MA20 到達で利確 (平均回帰を素直に表現)
-  × プリセット2種
-    tight: em0.5 sm1.5 tm1.0 保有5日  (高勝率・小利)
-    bal  : em0.5 sm1.5 tm1.5 保有6日  (バランス1R)
+── v1 の結果(全銀柄・生逆張り)= 32構成すべて負け(PF 0.4-0.7)。原因は3つ:
+   (1) 押し目を指値で下に買う → 落ちるナイフを掴む
+   (2) ATR損切りのスリッページで出血
+   (3) シグナルが浅く選別力不足(勝率50-56%止まり)
 
-各構成を「大局レジーム=横ばいの日に出たシグナルだけ」と「全レジーム」で集計して
-比較する。横ばいで勝ち・トレンドで負けるなら、レジームゲートの価値が数字で見える。
+── v2(このファイル)の改良ノブ:
+   entry_style:
+     dip    = 前日終値-ATR×em を指値買い(v1と同じ・ナイフ掴み)
+     bounce = 売られすぎ翌日、前日高値を上抜けたら逆指値買い(反転確認=ナイフ回避)
+   exit_style:
+     atr  = target=order±ATR×tm / stop=order∓ATR×sm  (v1と同じ)
+     mean = target=MA10到達で利確 / 損切りは広いディザスター(ATR×sm、滅多に当たらない)
+   signal 閾値を深く(選別力↑): IBS<0.10 / RSI2<5 / BB 2.5σ / STO<10
+   コスト: --fee / --slip で信用(0.03%)想定に下げて感度を見られる
+
+各構成を「大局レジーム=横ばいの日に出たシグナルだけ」と「全レジーム」で集計して比較。
 
 使い方:
-  python meanrev_lab.py --limit 300 --since 2014-01-01        # 300銘柄で全構成
-  python meanrev_lab.py --symbols symbols_listed_prime.py     # ユニバース明示
-  python meanrev_lab.py --max-price 10000 --min-price 1000    # 価格フィルタ
-  python meanrev_lab.py --signal IBS --signal RSI2r           # 一部シグナルだけ
-  python meanrev_lab.py --workers 8
+  python meanrev_lab.py --limit 300 --since 2014-01-01 --max-price 10000 --min-price 1000 --workers 8
+  python meanrev_lab.py --limit 300 --fee 0.0003 --slip 0.003     # 信用コスト想定で再テスト
+  python meanrev_lab.py --signal IBS --signal RSI2r               # 一部シグナルだけ
+  python meanrev_lab.py --range-band 0.20                         # MA200±20%内の押し目だけ(ナイフ更に回避)
 """
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,6 @@ import pandas as pd
 import backtest_limit_entry as ble
 from backtest_limit_entry import (
     fetch, calc_qty,
-    SLIPPAGE_STOP_PCT, SLIPPAGE_LIMIT_PCT, FEE_PCT_ONE_WAY,
     MIN_PRICE, MAX_PRICE, MAX_ATR_RATIO,
 )
 import nikkei_analysis as na
@@ -55,64 +54,71 @@ def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(span=n, adjust=False).mean()
 
 
+# シグナル閾値 (v2: 深く=選別力↑)
+TH_IBS_L, TH_IBS_S = 0.10, 0.90
+TH_RSI_L, TH_RSI_S = 5, 95
+TH_BB_K = 2.5
+TH_STO_L, TH_STO_S = 10, 90
+
+
 def _signals(df: pd.DataFrame) -> dict:
     """各シグナルの (ロングbool, ショートbool) を返す。"""
     c, h, l = df["close"], df["high"], df["low"]
     out = {}
 
-    # IBS = (終値-安値)/(高値-安値)
     rng = (h - l).replace(0, np.nan)
     ibs = ((c - l) / rng).fillna(0.5)
-    out["IBS"] = (ibs < 0.15, ibs > 0.85)
+    out["IBS"] = (ibs < TH_IBS_L, ibs > TH_IBS_S)
 
-    # RSI(2) Wilder α=0.5 (MA200フィルタ無しの横ばい版)
     delta = c.diff()
     gain = delta.clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
     loss = (-delta).clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
     rsi2 = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-    out["RSI2r"] = (rsi2 < 10, rsi2 > 90)
+    out["RSI2r"] = (rsi2 < TH_RSI_L, rsi2 > TH_RSI_S)
 
-    # ボリンジャー ±2σ
     ma20 = c.rolling(20).mean()
     sd20 = c.rolling(20).std()
-    out["BB"] = (c < ma20 - 2.0 * sd20, c > ma20 + 2.0 * sd20)
+    out["BB"] = (c < ma20 - TH_BB_K * sd20, c > ma20 + TH_BB_K * sd20)
 
-    # ストキャス %K(14) → 3日平滑 (slow %K)
     ll = l.rolling(14).min()
     hh = h.rolling(14).max()
     k = (c - ll) / (hh - ll).replace(0, np.nan) * 100
     ks = k.rolling(3).mean()
-    out["STO"] = (ks < 20, ks > 80)
+    out["STO"] = (ks < TH_STO_L, ks > TH_STO_S)
 
     return out
 
 
-# ── プリセット & 出口タイプ ──────────────────────────────────────
-PRESETS = {
-    #        em   sm   tm   max_hold
-    "tight": (0.5, 1.5, 1.0, 5),
-    "bal":   (0.5, 1.5, 1.5, 6),
-}
-EXIT_MODES = ["atr", "mean"]
-EXPIRE = 3   # 指値の有効日数(シグナルから)
+# ── 構成 (coherent な入口×出口の組合せのみ) ──────────────────────
+# (entry_style, exit_style, name, params)
+#   dip+atr1R  : 押し目を指値買い→対称1R利確  (v1流用の素朴逆張り)
+#   dip+mean   : 押し目を指値買い→MA10回帰で利確+広いディザスター損切り(ATR×3)
+#   bounce+atr : 反転確認(前日高安ブレイク)で逆指値→ATR利確  (ナイフ回避)
+#   bounce+wide: 反転確認→広め利確(tm3.0)で伸ばす         (ナイフ回避+トレンド乗り)
+# ※ bounce+mean は除外: 反転買いは既にMA10より上に居るため中心回帰出口が退化する
+COMBOS = [
+    ("dip",    "atr",  "atr1R", dict(em=0.5, sm=2.0, tm=2.0, mh=6)),
+    ("dip",    "mean", "mean",  dict(em=0.5, sm=3.0, tm=0.0, mh=5)),
+    ("bounce", "atr",  "atr1R", dict(em=0.5, sm=2.0, tm=2.0, mh=6)),
+    ("bounce", "atr",  "wide",  dict(em=0.0, sm=2.0, tm=3.0, mh=8)),
+]
+EXPIRE = 3
 
 
-def _run_mr(df: pd.DataFrame, sig_long: pd.Series, sig_short: pd.Series,
-            direction: str, em: float, sm: float, tm: float,
-            exit_mode: str, max_hold: int) -> list[dict]:
-    """単一銘柄・単一構成の平均回帰バックテスト(同時1ポジション)。
-    ロング=押し目を指値買い / ショート=吹き値を指値売り。損切りは終値判定(close)。"""
+def _run_mr(df, sig_long, sig_short, direction, entry_style, exit_style,
+            em, sm, tm, max_hold, fee, slip, range_band) -> list[dict]:
+    """単一銘柄・単一構成の平均回帰バックテスト(同時1ポジション)。損切りは終値判定。"""
     atr = _atr(df).to_numpy()
-    ma20 = df["close"].rolling(20).mean().to_numpy()
-    op = df["open"].to_numpy(); hi = df["high"].to_numpy()
-    lo = df["low"].to_numpy();  cl = df["close"].to_numpy()
+    ma10 = df["close"].rolling(10).mean().to_numpy()
+    ma200 = df["close"].rolling(200).mean().to_numpy()
+    hi = df["high"].to_numpy(); lo = df["low"].to_numpy(); cl = df["close"].to_numpy()
     idx = df.index
     sig = (sig_long if direction == "long" else sig_short).to_numpy()
     is_long = direction == "long"
 
     trades: list[dict] = []
-    pending = None   # {lp,sp,tp,expire,sig_i}
-    pos = None       # {ep,sp,tp,start,sig_dt}
+    pending = None
+    pos = None
     n = len(df)
 
     for i in range(1, n):
@@ -120,59 +126,78 @@ def _run_mr(df: pd.DataFrame, sig_long: pd.Series, sig_short: pd.Series,
         if not np.isfinite(a) or a <= 0:
             continue
 
-        # ── 1. 保有ポジションの決済 ──
+        # ── 1. 決済 ──
         if pos is not None:
             hold = i - pos["start"]
-            m = ma20[i]
             if is_long:
-                tp = pos["tp"] if exit_mode == "atr" else m
-                hit_t = np.isfinite(tp) and hi[i] >= tp
+                if exit_style == "mean":
+                    # 中心回帰: MA10 が約定値より上(=上に戻る余地あり)のときだけ有効目標
+                    tgt = ma10[i]
+                    hit_t = np.isfinite(tgt) and tgt > pos["ep"] and hi[i] >= tgt
+                else:
+                    tgt = pos["tp"]; hit_t = hi[i] >= tgt
                 hit_s = cl[i] <= pos["sp"]
             else:
-                tp = pos["tp"] if exit_mode == "atr" else m
-                hit_t = np.isfinite(tp) and lo[i] <= tp
+                if exit_style == "mean":
+                    tgt = ma10[i]
+                    hit_t = np.isfinite(tgt) and tgt < pos["ep"] and lo[i] <= tgt
+                else:
+                    tgt = pos["tp"]; hit_t = lo[i] <= tgt
                 hit_s = cl[i] >= pos["sp"]
 
             xp = xr = None
             if hit_t:
-                xp = tp; xr = "target"
+                xp = tgt; xr = "target"
             elif hit_s:
-                xp = cl[i] * (1 - SLIPPAGE_STOP_PCT) if is_long else cl[i] * (1 + SLIPPAGE_STOP_PCT)
+                xp = cl[i] * (1 - slip) if is_long else cl[i] * (1 + slip)
                 xr = "stop"
             elif hold >= max_hold:
                 xp = cl[i]; xr = "timecut"
 
             if xp is not None:
                 ep = pos["ep"]; qty = pos["qty"]
-                fee = (ep + xp) * qty * FEE_PCT_ONE_WAY
-                pnl = ((xp - ep) if is_long else (ep - xp)) * qty - fee
+                f = (ep + xp) * qty * fee
+                pnl = ((xp - ep) if is_long else (ep - xp)) * qty - f
                 trades.append(dict(sig_dt=pos["sig_dt"], pnl=pnl, hold=hold, reason=xr))
                 pos = None
 
-        # ── 2. 新規シグナル → 指値注文 (flat のときだけ) ──
+        # ── 2. 新規シグナル → 注文 ──
         if pos is None and pending is None and bool(sig[i - 1]):
             cp = float(cl[i - 1])
-            if MIN_PRICE <= cp <= MAX_PRICE and a / cp <= MAX_ATR_RATIO:
+            m2 = ma200[i - 1]
+            in_range = (not range_band) or (np.isfinite(m2) and m2 > 0
+                        and abs(cp / m2 - 1.0) <= range_band)
+            if MIN_PRICE <= cp <= MAX_PRICE and a / cp <= MAX_ATR_RATIO and in_range:
+                if entry_style == "bounce":
+                    # 反転確認: 前日(売られすぎ)の高値/安値をブレイクしたら逆指値
+                    trig = float(hi[i - 1]) if is_long else float(lo[i - 1])
+                else:  # dip: 前日終値からATR×em 逆方向に指値
+                    trig = cp - a * em if is_long else cp + a * em
                 if is_long:
-                    lp = cp - a * em            # 押し目 (前日終値より下)
-                    sp = lp - a * sm; tp = lp + a * tm
-                    ok = lp > 0 and sp > 0 and tp > lp
+                    sp = trig - a * sm; tp = trig + a * tm
+                    ok = trig > 0 and sp > 0 and (exit_style == "mean" or tp > trig)
                 else:
-                    lp = cp + a * em            # 吹き値 (前日終値より上)
-                    sp = lp + a * sm; tp = lp - a * tm
-                    ok = lp > 0 and tp > 0 and tp < lp and sp > lp
+                    sp = trig + a * sm; tp = trig - a * tm
+                    ok = trig > 0 and (exit_style == "mean" or (0 < tp < trig)) and sp > trig
                 if ok:
-                    pending = {"lp": lp, "sp": sp, "tp": tp,
+                    pending = {"trig": trig, "sp": sp, "tp": tp,
                                "expire": i + EXPIRE, "sig_i": i - 1}
 
-        # ── 3. pending の約定判定 (T+1 の当バーから) ──
+        # ── 3. 約定判定 ──
         if pending is not None and pos is None:
             if i > pending["expire"]:
                 pending = None
             else:
-                filled = (lo[i] <= pending["lp"]) if is_long else (hi[i] >= pending["lp"])
+                trig = pending["trig"]
+                if entry_style == "bounce":
+                    # 逆指値: ロング=高値≥trig / ショート=安値≤trig で約定(スリッページあり)
+                    filled = (hi[i] >= trig) if is_long else (lo[i] <= trig)
+                    ep = round(trig * (1 + slip)) if is_long else round(trig * (1 - slip))
+                else:
+                    # 指値: ロング=安値≤trig / ショート=高値≥trig で約定(スリッページ0)
+                    filled = (lo[i] <= trig) if is_long else (hi[i] >= trig)
+                    ep = round(trig)
                 if filled:
-                    ep = round(pending["lp"] * (1 + SLIPPAGE_LIMIT_PCT))  # 指値=スリッページ0
                     pos = {"ep": ep, "sp": pending["sp"], "tp": pending["tp"],
                            "qty": calc_qty(ep, pending["sp"]),
                            "start": i, "sig_dt": idx[pending["sig_i"]]}
@@ -182,7 +207,6 @@ def _run_mr(df: pd.DataFrame, sig_long: pd.Series, sig_short: pd.Series,
 
 # ── 大局レジーム(日次)系列 ───────────────────────────────────────
 def _regime_series(years: int) -> pd.Series | None:
-    """日経終値から各日の大局レジーム(up/sideways/down)を先読みなしで返す。"""
     c = na.fetch_n225(years)
     if c is None or len(c) < 260:
         return None
@@ -191,7 +215,6 @@ def _regime_series(years: int) -> pd.Series | None:
     slope = ma200.pct_change(20) * 100
     er = (c - c.shift(60)).abs() / c.diff().abs().rolling(60).sum().replace(0, np.nan)
     above = c >= ma200
-
     reg = pd.Series(index=c.index, dtype=object)
     for i in range(len(c)):
         if not np.isfinite(ma200.iloc[i]) or not np.isfinite(er.iloc[i]):
@@ -208,14 +231,12 @@ def _regime_series(years: int) -> pd.Series | None:
 
 
 def _regime_at(reg: pd.Series, d) -> str:
-    """日付 d 時点(以前で直近)のレジーム。"""
     try:
         return reg.asof(pd.Timestamp(d))
     except Exception:
         return "?"
 
 
-# ── 集計 ─────────────────────────────────────────────────────────
 def _stats(trades: list[dict]) -> dict:
     n = len(trades)
     if n == 0:
@@ -231,14 +252,18 @@ def _stats(trades: list[dict]) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbols", default=None, help="ユニバースファイル (省略時は自動検出)")
-    ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ (0=全部)")
-    ap.add_argument("--since", default="2014-01-01", help="この日付まで遡ってデータ取得")
-    ap.add_argument("--years", type=int, default=15, help="日経レジーム系列の取得年数")
+    ap.add_argument("--symbols", default=None)
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--since", default="2014-01-01")
+    ap.add_argument("--years", type=int, default=15)
     ap.add_argument("--min-price", type=float, default=0.0)
     ap.add_argument("--max-price", type=float, default=1e9)
     ap.add_argument("--signal", action="append", default=None,
-                    help="対象シグナル (IBS/RSI2r/BB/STO)。複数可。省略時は全部")
+                    help="対象シグナル (IBS/RSI2r/BB/STO)。複数可")
+    ap.add_argument("--fee", type=float, default=0.001, help="片道手数料(既定0.001=現物. 信用は0.0003)")
+    ap.add_argument("--slip", type=float, default=0.005, help="損切り/逆指値スリッページ(既定0.005)")
+    ap.add_argument("--range-band", type=float, default=0.0,
+                    help="MA200±この割合の押し目だけ採用(例0.20=±20%内)。0=無効")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
 
@@ -249,7 +274,10 @@ def main():
     universe, src = swf.load_universe(args.symbols)
     if args.limit > 0:
         universe = universe[: args.limit]
-    print(f"ユニバース: {src} ({len(universe)}銘柄) / since={since} / エンジン:meanrev_lab(独立)")
+    print(f"ユニバース: {src} ({len(universe)}銘柄) / since={since} / エンジン:meanrev_lab v2(独立)")
+    print(f"コスト: 手数料片道{args.fee*100:.2f}% / スリッページ{args.slip*100:.2f}%"
+          f" / range_band={args.range_band or 'off'}"
+          f" / 閾値 IBS<{TH_IBS_L} RSI2<{TH_RSI_L} BB{TH_BB_K}σ STO<{TH_STO_L}")
 
     reg = _regime_series(args.years)
     if reg is None:
@@ -260,12 +288,10 @@ def main():
 
     sig_names = args.signal or ["IBS", "RSI2r", "BB", "STO"]
     directions = ["long", "short"]
-
-    # 構成キー -> {"all": [trades], "sideways": [trades]}
     results: dict = defaultdict(lambda: {"all": [], "sideways": []})
 
     def _work(sym_name):
-        sym, name = sym_name[0], (sym_name[1] if len(sym_name) > 1 else "")
+        sym = sym_name[0]
         df = fetch(sym, bt_days, min_start_date=since)
         if df is None or len(df) < 260:
             return None
@@ -277,11 +303,11 @@ def main():
         for sname in sig_names:
             sl, ss = sigs[sname]
             for direction in directions:
-                for pkey, (em, sm, tm, mh) in PRESETS.items():
-                    for xmode in EXIT_MODES:
-                        trs = _run_mr(df, sl, ss, direction, em, sm, tm, xmode, mh)
-                        key = (sname, direction, xmode, pkey)
-                        local[key].extend(trs)
+                for estyle, xstyle, cname, p in COMBOS:
+                    trs = _run_mr(df, sl, ss, direction, estyle, xstyle,
+                                  p["em"], p["sm"], p["tm"], p["mh"],
+                                  args.fee, args.slip, args.range_band)
+                    local[(sname, direction, estyle, cname)].extend(trs)
         return local
 
     done = 0
@@ -303,34 +329,29 @@ def main():
                     if _regime_at(reg, t["sig_dt"]) == "sideways":
                         results[key]["sideways"].append(t)
 
-    # ── レポート: 横ばい損益で降順ソート ──
     rows = []
     for key, buckets in results.items():
-        sw = _stats(buckets["sideways"])
-        al = _stats(buckets["all"])
-        rows.append((key, sw, al))
+        rows.append((key, _stats(buckets["sideways"]), _stats(buckets["all"])))
     rows.sort(key=lambda r: -r[1]["pnl"])
 
     def _pf(v):
         return "∞" if v == float("inf") else f"{v:.2f}"
 
-    print("\n" + "=" * 96)
-    print("  平均回帰(逆張り)構成ランキング  ※横ばいレジームの日に出たシグナルだけの損益で降順")
-    print("=" * 96)
-    hdr = (f"{'シグナル':<8}{'方向':<6}{'出口':<6}{'presets':<7}"
-           f"|{'横ばい件':>7}{'勝率':>6}{'PF':>6}{'損益':>12}{'保有':>5}"
-           f"  |{'全件':>6}{'勝率':>6}{'PF':>6}{'損益':>12}")
-    print(hdr)
-    print("-" * 96)
-    for (sname, direction, xmode, pkey), sw, al in rows:
+    print("\n" + "=" * 100)
+    print("  平均回帰v2 構成ランキング  ※横ばいレジームの日に出たシグナルだけの損益で降順")
+    print("=" * 100)
+    print(f"{'シグナル':<8}{'方向':<6}{'入口':<8}{'出口':<7}"
+          f"|{'横ばい件':>7}{'勝率':>6}{'PF':>6}{'損益':>13}{'保有':>5}"
+          f"  |{'全件':>7}{'勝率':>6}{'PF':>6}{'損益':>13}")
+    print("-" * 100)
+    for (sname, direction, estyle, cname), sw, al in rows:
         dlabel = "ロング" if direction == "long" else "ｼｮｰﾄ"
-        print(f"{sname:<8}{dlabel:<6}{xmode:<6}{pkey:<7}"
-              f"|{sw['n']:>7}{sw['wr']:>5.0f}%{_pf(sw['pf']):>6}{sw['pnl']:>+12,.0f}{sw['hold']:>5.1f}"
-              f"  |{al['n']:>6}{al['wr']:>5.0f}%{_pf(al['pf']):>6}{al['pnl']:>+12,.0f}")
-
-    print("-" * 96)
-    print("読み方: 横ばい損益がプラス かつ 横ばいPF>全件PF なら『横ばい特化で機能』の証拠。")
-    print("        横ばいだけプラスで全件マイナスなら、レジームゲート(横ばい時のみ発動)の価値あり。")
+        print(f"{sname:<8}{dlabel:<6}{estyle:<8}{cname:<7}"
+              f"|{sw['n']:>7}{sw['wr']:>5.0f}%{_pf(sw['pf']):>6}{sw['pnl']:>+13,.0f}{sw['hold']:>5.1f}"
+              f"  |{al['n']:>7}{al['wr']:>5.0f}%{_pf(al['pf']):>6}{al['pnl']:>+13,.0f}")
+    print("-" * 100)
+    print("読み方: 横ばい損益プラス かつ 横ばいPF>1.0 なら本物。bounce(反転確認)がdip(ナイフ掴み)より")
+    print("        改善しているか、mean(中心回帰)出口が効くかに注目。PF>1 が1つも無ければ横ばいロングは不可。")
 
 
 if __name__ == "__main__":
