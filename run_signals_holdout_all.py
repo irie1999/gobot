@@ -1285,7 +1285,10 @@ _phase("寄り確認検証完了")
 _ft_prefix    = f"filltimingv3{_cache_short}"   # v2: BTフィルタ追加
 _ft_reuse     = _latest_analysis_cache(_ft_prefix)
 _ft_html = None
-if _ft_reuse is not None:
+if getattr(_args, "no_analysis", False):
+    print("約定タイミングタブ: スキップ (--no-analysis)", flush=True)
+    _ft_html = ""
+elif _ft_reuse is not None:
     try:
         _ft_html = _mhpk.loads(_ft_reuse.read_bytes()).get("html", "")
         print(f"[約定タイミング] キャッシュ再利用(日付跨ぎ可): {_ft_reuse.name}", flush=True)
@@ -1314,7 +1317,14 @@ _phase("約定タイミング集計完了")
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
+_skip_period_panes = getattr(_args, "no_analysis", False)
+if _skip_period_panes:
+    print("期間別パネル(30/60/…日): スキップ (--no-analysis)。全設定パネルのみ表示", flush=True)
 for days in _PNL_PERIODS:
+    if _skip_period_panes:
+        _period_pane_htmls[days] = ('<p style="color:#64748b;padding:20px">'
+                                    '--no-analysis のためスキップ（「全設定」タブを見てください）</p>')
+        continue
     cfgs = _period_configs.get(days) or _all_configs
     _na._PNL_CONFIGS[:] = cfgs
     print(f"損益集計中 (直近{days}日 / {len(cfgs)}設定)...", flush=True)
@@ -1345,6 +1355,9 @@ for _sig in _na._last_signals:
 
 _sym_tab_nav   = ""
 _sym_tab_panes = ""
+if getattr(_args, "no_analysis", False):
+    print("銘柄詳細タブ: スキップ (--no-analysis)", flush=True)
+    _signal_stocks = []   # ループを回さず銘柄詳細タブを生成しない
 for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
     _tid     = f"sym_{_sym.replace('.','_')}"
     _active  = "active" if _i == 0 else ""
