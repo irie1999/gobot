@@ -275,8 +275,17 @@ def main():
                     help="横ばい定義を厳格化(日経ER<0.15かつMA200傾き±0.5%%以内)")
     ap.add_argument("--stock-range", type=float, default=0.0,
                     help="銘柄自身の効率比(60日ER)がこの値未満の日だけ発注(例0.25)。0=無効")
+    ap.add_argument("--loose", action="store_true",
+                    help="低ボラ銘柄(指数ETF)向けに閾値を緩和(IBS<0.15/RSI2<10/BB2.0σ/STO<20)")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
+
+    if args.loose:
+        global TH_IBS_L, TH_IBS_S, TH_RSI_L, TH_RSI_S, TH_BB_K, TH_STO_L, TH_STO_S
+        TH_IBS_L, TH_IBS_S = 0.15, 0.85
+        TH_RSI_L, TH_RSI_S = 10, 90
+        TH_BB_K = 2.0
+        TH_STO_L, TH_STO_S = 20, 80
 
     since = datetime.strptime(args.since, "%Y-%m-%d").date()
     bt_days = (datetime.now().date() - since).days + 400
