@@ -1,110 +1,70 @@
 """
-market_regime.py — 日経平均から「今の相場レジーム(上げ / 横ばい / 下げ)」を大局判定する。
+market_regime.py — 相場環境タブと同じ判定(get_regime)で、日経の大局レジーム
+(上げ / 横ばい / 下げ)を現在＆過去について月ごとに表示する。
 
-現行の日次分類(終値>MA5>MA10)は短期すぎるので、より大きな括りで：
-  - ADX(トレンド強度)  : 高い=トレンドあり / 低い=横ばい(レンジ)
-  - MA200 と傾き        : 方向(上げ / 下げ)
-で分類する。過去N ヶ月の推移も出してチャートと照合できる。
+各月末について「その時点までの日経終値だけ」で判定するので(先読みなし)、
+チャートと照合して『2021-2023は横ばい』『2020/3は下げ』等が正しく出るか検証できる。
 
 使い方:
-  python market_regime.py
-  python market_regime.py --months 36        # 過去3年の推移
-  python market_regime.py --symbol ^N225
+  python market_regime.py                 # 過去36ヶ月
+  python market_regime.py --months 120    # 過去10年
+  python market_regime.py --years 20      # 日経を20年ぶん取得
 """
 import argparse
 
-import numpy as np
-import pandas as pd
-import yfinance as yf
+import nikkei_analysis as na
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--symbol", default="^N225", help="指数 (既定: 日経平均 ^N225)")
-ap.add_argument("--months", type=int, default=18, help="推移を表示する月数 (既定18)")
-ap.add_argument("--adx-trend", type=float, default=25.0, help="ADXがこれ以上=トレンドあり")
-ap.add_argument("--adx-range", type=float, default=20.0, help="ADXがこれ未満=横ばい")
+ap.add_argument("--months", type=int, default=36, help="表示する月数 (既定36)")
+ap.add_argument("--years", type=int, default=15, help="取得する日経の年数 (既定15)")
 args = ap.parse_args()
 
-
-def compute_adx(df, n=14):
-    h, l, c = df["High"], df["Low"], df["Close"]
-    up = h.diff()
-    dn = -l.diff()
-    plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
-    minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
-    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
-    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    return dx.ewm(alpha=1 / n, adjust=False).mean(), plus_di, minus_di
-
-
-def classify(close, ma200, slope200, adxv, adx_trend, adx_range):
-    """大局レジーム: 上げ / 横ばい / 下げ / 移行"""
-    if pd.isna(ma200) or pd.isna(adxv):
-        return "?"
-    if adxv < adx_range:
-        return "横ばい"          # トレンド弱い=レンジ
-    if adxv >= adx_trend:
-        if close > ma200 and slope200 > 0:
-            return "上げ"
-        if close < ma200 and slope200 < 0:
-            return "下げ"
-        return "移行"
-    return "移行"                # ADX 20-25 は中間
-
-
-# ── データ取得 ──
-raw = yf.Ticker(args.symbol).history(period="6y", interval="1d", auto_adjust=False)
-if raw.empty or len(raw) < 220:
-    print("[ERROR] データ取得失敗 or データ不足")
+close = na.fetch_n225(args.years)
+if close is None or len(close) < 220:
+    print("[ERROR] 日経データ取得失敗 or データ不足")
     raise SystemExit(1)
-if raw.index.tz is not None:
-    raw.index = raw.index.tz_localize(None)
+close = close.sort_index()
 
-df = raw[["Open", "High", "Low", "Close"]].copy()
-df["MA25"] = df["Close"].rolling(25).mean()
-df["MA75"] = df["Close"].rolling(75).mean()
-df["MA200"] = df["Close"].rolling(200).mean()
-df["slope200"] = df["MA200"].pct_change(20) * 100          # MA200の20日変化率(%)
-df["ret6m"] = df["Close"].pct_change(120) * 100            # 約6ヶ月リターン(%)
-df["ADX"], df["+DI"], df["-DI"] = compute_adx(df)
-df["regime"] = [
-    classify(c, m, s, a, args.adx_trend, args.adx_range)
-    for c, m, s, a in zip(df["Close"], df["MA200"], df["slope200"], df["ADX"])
-]
+# ── 各月末について「その時点まで」で大局レジームを判定(先読みなし) ──
+_ym = close.index.strftime("%Y-%m")
+_month_ends = close.groupby(_ym).tail(1)
 
-cur = df.iloc[-1]
-_lbl = {"上げ": "🟢 上げ相場(トレンドあり・上向き)",
-        "横ばい": "🟡 横ばい相場(レンジ・トレンド弱い) ← 戦略が苦手",
-        "下げ": "🔴 下げ相場(トレンドあり・下向き)",
-        "移行": "⚪ 移行期(判定中間)",
-        "?": "? 判定不能"}
+_lbl = {"up": "🟢 上げ", "sideways": "🟡 横ばい", "down": "🔴 下げ", "?": "? 不明"}
+rows = []
+for d in _month_ends.index:
+    sub = close[close.index <= d]
+    if len(sub) < 220:
+        continue
+    r = na.get_regime(sub)
+    vm = (r["cur"] / r["ma200"] - 1) * 100 if r.get("ma200") else float("nan")
+    rows.append((d, r["cur"], r["macro"], r.get("er", 0.0), r.get("slope200", 0.0), vm))
 
-print("=" * 60)
-print(f"  日経平均 現在レジーム判定  ({cur.name.date()})")
-print("=" * 60)
-print(f"  → 【 {_lbl.get(cur['regime'], cur['regime'])} 】\n")
-print(f"  終値        : {cur['Close']:>10,.0f}")
-print(f"  MA200       : {cur['MA200']:>10,.0f}  (終値は {(cur['Close']/cur['MA200']-1)*100:+.1f}%)")
-print(f"  MA200 傾き  : {cur['slope200']:+.1f}%  (20日変化 / +=上向き)")
-print(f"  ADX(14)     : {cur['ADX']:>6.1f}   "
-      f"({'トレンドあり' if cur['ADX'] >= args.adx_trend else '横ばい寄り' if cur['ADX'] < args.adx_range else '中間'})")
-print(f"  +DI / -DI   : {cur['+DI']:.1f} / {cur['-DI']:.1f}  "
-      f"({'買い優勢' if cur['+DI'] > cur['-DI'] else '売り優勢'})")
-print(f"  6ヶ月リターン: {cur['ret6m']:+.1f}%")
+if not rows:
+    print("[ERROR] 判定に十分なデータがありません")
+    raise SystemExit(1)
 
-# ── 月末レジームの推移 ──
-print("\n" + "=" * 60)
-print(f"  月末レジーム推移 (直近{args.months}ヶ月・チャートと照合用)")
-print("=" * 60)
-print(f"{'月':<9}{'終値':>10}{'ADX':>7}{'vs MA200':>10}   レジーム")
-print("-" * 55)
-df["ym"] = df.index.strftime("%Y-%m")
-last = df.groupby("ym").tail(1).set_index("ym")
-for ym in list(last.index)[-args.months:]:
-    r = last.loc[ym]
-    vm = (r["Close"] / r["MA200"] - 1) * 100 if not pd.isna(r["MA200"]) else float("nan")
-    print(f"{ym:<9}{r['Close']:>10,.0f}{r['ADX']:>7.1f}{vm:>+9.1f}%   {r['regime']}")
+# ── 現在 ──
+d0, c0, m0, er0, sl0, vm0 = rows[-1]
+print("=" * 62)
+print(f"  現在の大局レジーム ({d0.date()})  ※相場環境タブと同一ロジック")
+print("=" * 62)
+print(f"  → 【 {_lbl.get(m0, m0)} 】   終値 {c0:,.0f}円")
+print(f"     ER(トレンド強度) {er0:.2f}   MA200傾き {sl0:+.1f}%   終値はMA200から {vm0:+.1f}%")
+print(f"     (ER<0.20=横ばい / ER高+MA200上向き&上=上げ / ER高+MA200下向き&下=下げ)")
 
-print("\n※ 上げ=順張り(現行)が得意 / 横ばい=逆張り(RSI2)向き / 下げ=現金・ショート")
+# ── 月末推移(チャート照合用) ──
+print("\n" + "=" * 62)
+print(f"  月末レジーム推移 (直近{args.months}ヶ月・チャートと見比べる)")
+print("=" * 62)
+print(f"{'月':<9}{'終値':>10}{'ER':>6}{'MA200傾':>9}{'vsMA200':>9}  レジーム")
+print("-" * 58)
+for d, c, m, er, sl, vm in rows[-args.months:]:
+    print(f"{d.strftime('%Y-%m'):<9}{c:>10,.0f}{er:>6.2f}{sl:>+8.1f}%{vm:>+8.1f}%  {_lbl.get(m, m)}")
+
+# ── 集計 ──
+from collections import Counter
+_c = Counter(r[2] for r in rows[-args.months:])
+print("\n" + "-" * 58)
+print(f"  直近{args.months}ヶ月の内訳: "
+      f"上げ {_c.get('up',0)}ヶ月 / 横ばい {_c.get('sideways',0)}ヶ月 / 下げ {_c.get('down',0)}ヶ月")
+print("※ 横ばいの月が多い時期＝現行(順張り)が苦手だった時期のはず")
