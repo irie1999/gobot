@@ -319,51 +319,52 @@ def build_html(trades: list[dict], meta: dict) -> str:
         mrows += (
             f'<tr><td><b>{mk.replace("-","/")}月</b></td><td class="r">{c}件</td>'
             f'<td class="r">{w/c*100:.0f}%</td>'
-            f'<td class="r" style="color:#4ade80">+{gpp:,.0f}円</td>'
-            f'<td class="r" style="color:#f87171">{gll:,.0f}円</td>'
-            f'<td class="r"><span style="color:{mtcol};font-weight:600">{mt:+,.0f}円</span>'
-            f' <span style="display:inline-block;height:10px;width:{bar_w}px;'
+            f'<td class="r prof">+{gpp:,.0f}円</td>'
+            f'<td class="r loss">{gll:,.0f}円</td>'
+            f'<td class="r"><span style="color:{mtcol};font-weight:700">{mt:+,.0f}円</span>'
+            f' <span style="display:inline-block;height:11px;width:{bar_w}px;'
             f'background:{bcol};border-radius:2px;vertical-align:middle"></span></td>'
             f'<td class="r"><span style="color:#38bdf8">{cap_str}</span>'
             f'<br><span style="font-size:0.7rem;color:#64748b">最大{pk[0]}銘柄同時</span></td></tr>')
 
-    # 月ごとの日別カード(折りたたみ)
+    # 月ごとの取引明細(折りたたみ) — 買った日/売った日/買値/売値/保有/結果/損益
     _rj = {"target": ("利確", "#4ade80"), "stop": ("損切", "#f87171"),
            "timecut": ("時間切", "#94a3b8")}
-    day_blocks = ""
-    for mk in months_desc:
-        c, w, gpp, gll = by_month[mk]
-        mt = gpp + gll
-        days = sorted([d for d in by_day if d.startswith(mk)], reverse=True)
-        cards_d = ""
-        for dk in days:
-            dn, dw, dp = by_day[dk]
-            dcol = "#4ade80" if dp >= 0 else "#f87171"
-            mmdd = pd.Timestamp(dk).strftime("%m/%d")
-            cards_d += (
-                f'<div class="daycard"><div class="dc-d">{mmdd}</div>'
-                f'<div class="dc-s">{dn}件 {dw/dn*100:.0f}%</div>'
-                f'<div class="dc-p" style="color:{dcol}">{dp:+,.0f}</div></div>')
-        mtc = "#4ade80" if mt >= 0 else "#f87171"
-        day_blocks += (
-            f'<details class="mblock"><summary>▼ {mk.replace("-","/")}月　'
-            f'{c}件 {w/c*100:.0f}% <span style="color:{mtc}">{mt:+,.0f}円</span></summary>'
-            f'<div class="daygrid">{cards_d}</div></details>')
 
-    # 全取引明細(折りたたみ)
-    tr_rows = ""
-    for t in sorted(trades, key=lambda x: pd.Timestamp(x["exit_dt"]), reverse=True):
+    def _detail_row(t):
         rlbl, rcol = _rj.get(t["reason"], (t["reason"], "#94a3b8"))
         pcol = "#4ade80" if t["pnl"] >= 0 else "#f87171"
         e = pd.Timestamp(t["entry_dt"]).strftime("%Y-%m-%d")
         x = pd.Timestamp(t["exit_dt"]).strftime("%Y-%m-%d")
-        tr_rows += (
+        gain = "#4ade80" if t["exit_p"] >= t["entry_p"] else "#f87171"
+        return (
             f'<tr><td>{e}</td><td>{x}</td><td>{t["symbol"]}</td>'
             f'<td>{t["name"]}</td><td class="r">{t["entry_p"]:,}</td>'
-            f'<td class="r">{t["exit_p"]:,}</td><td class="r">{t["qty"]}</td>'
-            f'<td class="r">{t["hold"]}日</td>'
+            f'<td class="r" style="color:{gain}">{t["exit_p"]:,}</td>'
+            f'<td class="r">{t["qty"]}</td><td class="r">{t["hold"]}日</td>'
             f'<td style="color:{rcol};font-weight:600">{rlbl}</td>'
-            f'<td class="r" style="color:{pcol};font-weight:600">{t["pnl"]:+,.0f}</td></tr>')
+            f'<td class="r" style="color:{pcol};font-weight:700">{t["pnl"]:+,.0f}</td></tr>')
+
+    _dhead = ('<thead><tr><th>買った日</th><th>売った日</th><th>銘柄</th><th>名前</th>'
+              '<th class="r">買値</th><th class="r">売値</th><th class="r">株数</th>'
+              '<th class="r">保有</th><th>結果</th><th class="r">損益(円)</th></tr></thead>')
+    month_detail = ""
+    for mk in months_desc:
+        c, w, gpp, gll = by_month[mk]
+        mt = gpp + gll
+        mtc = "#4ade80" if mt >= 0 else "#f87171"
+        mtr = sorted([t for t in trades
+                      if pd.Timestamp(t["exit_dt"]).strftime("%Y-%m") == mk],
+                     key=lambda x: pd.Timestamp(x["exit_dt"]), reverse=True)
+        rows = "".join(_detail_row(t) for t in mtr)
+        month_detail += (
+            f'<details class="mblock"><summary>▼ {mk.replace("-","/")}月　'
+            f'{c}件　勝率{w/c*100:.0f}%　'
+            f'<span class="prof">利益+{gpp:,.0f}</span>　'
+            f'<span class="loss">損失{gll:,.0f}</span>　'
+            f'<span style="color:{mtc};font-weight:700">合計{mt:+,.0f}円</span></summary>'
+            f'<div class="wrap" style="margin:8px 12px 12px"><table>{_dhead}'
+            f'<tbody>{rows}</tbody></table></div></details>')
 
     bt = meta.get("bt", {})
     bt_line = ""
@@ -389,12 +390,12 @@ def build_html(trades: list[dict], meta: dict) -> str:
   tr:hover td {{ background:#0d1424; }}
   .wrap {{ max-height:70vh; overflow:auto; border:1px solid #1e293b; border-radius:8px; }}
   .mblock {{ background:#111827; border:1px solid #1e293b; border-radius:8px; margin:8px 0; }}
-  .mblock summary {{ cursor:pointer; padding:10px 14px; font-weight:600; }}
-  .daygrid {{ display:flex; flex-wrap:wrap; gap:8px; padding:6px 14px 14px; }}
-  .daycard {{ background:#0d1424; border:1px solid #1e293b; border-radius:8px; padding:8px 12px; min-width:78px; text-align:center; }}
-  .dc-d {{ font-weight:700; font-size:0.85rem; }}
-  .dc-s {{ color:#94a3b8; font-size:0.7rem; margin:3px 0; }}
-  .dc-p {{ font-weight:600; font-size:0.82rem; }}
+  .mblock summary {{ cursor:pointer; padding:11px 14px; font-weight:600; font-size:0.9rem; }}
+  .mblock summary:hover {{ background:#0d1424; }}
+  .prof {{ color:#4ade80; }}
+  .loss {{ color:#f87171; }}
+  td.prof {{ color:#4ade80; background:rgba(22,163,74,0.12); }}
+  td.loss {{ color:#f87171; background:rgba(220,38,38,0.12); }}
 </style></head><body>
 <h1>🟡 横ばい相場用 指数ETF戦略（STOロングbounce）</h1>
 <div class="sub">期間 {meta.get('period','')} ／ {meta.get('scope','')} ／ preset={meta.get('preset','')}
@@ -402,20 +403,16 @@ def build_html(trades: list[dict], meta: dict) -> str:
 <div class="cards">{cards}</div>
 <h2>月別損益（決済日基準）</h2>
 <div class="wrap"><table>
-<thead><tr><th>月</th><th class="r">件数</th><th class="r">勝率</th><th class="r">利益</th>
-<th class="r">損失</th><th class="r">損益合計</th><th class="r">必要資金<br><span style="font-size:0.7rem">同時保有ピーク</span></th></tr></thead>
+<thead><tr><th>月</th><th class="r">件数</th><th class="r">勝率</th>
+<th class="r prof">利益</th><th class="r loss">損失</th>
+<th class="r">損益合計</th><th class="r">必要資金<br><span style="font-size:0.7rem">同時保有ピーク</span></th></tr></thead>
 <tbody>{mrows}</tbody></table></div>
-<h2>日別内訳（クリックで月を展開）</h2>
-{day_blocks}
+<h2>月別 取引詳細（月をクリックで展開）</h2>
+{month_detail}
 <h2>銘柄別サマリー（損益降順）</h2>
 <div class="wrap"><table>
 <thead><tr><th>銘柄</th><th>名前</th><th class="r">取引</th><th class="r">勝率</th><th class="r">損益(円)</th></tr></thead>
 <tbody>{sym_rows}</tbody></table></div>
-<details style="margin-top:16px"><summary style="cursor:pointer;color:#93c5fd">▶ 全取引明細（決済日順・{n}件）を表示</summary>
-<div class="wrap" style="margin-top:8px"><table>
-<thead><tr><th>約定日</th><th>決済日</th><th>銘柄</th><th>名前</th><th class="r">買値</th>
-<th class="r">売値</th><th class="r">株数</th><th class="r">保有</th><th>結果</th><th class="r">損益(円)</th></tr></thead>
-<tbody>{tr_rows}</tbody></table></div></details>
 </body></html>"""
 
 
