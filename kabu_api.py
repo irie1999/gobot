@@ -588,38 +588,57 @@ class KabuClient:
 
         return self._post_order(body, f"引け成行 {symbol} x{qty} ({side})")
 
-    def cancel_order(self, order_id: str) -> dict:
+    def cancel_order(self, order_id: str, retries: int = 5) -> dict:
         """注文取消。
 
-        取消の失敗 (HTTP エラー / kabu エラーコード) は **例外を送出しない**。
+        429 (API実行回数制限) は **一過性** なので指数バックオフで再試行する。
+        429 をリトライせず失敗を返すと、呼び出し側 (cancel_open_sell_orders 等)
+        が「取消失敗 → 損切り発注を中断」してしまい、建玉が無防備になる事故に
+        つながる (2026-07 DIC 4631 で実際に発生)。_get_json と同じ方針で待って再試行。
+
+        429 以外の失敗 (HTTP エラー / kabu エラーコード) は **例外を送出しない**。
         既に State=4(訂正取消送信中) や終了(State=5) の注文を取消すと kabu が
         エラーを返すが、これは「もう取消/終了している」だけで後続の損切り成行を
-        止める理由にはならない。呼び出し側 (cancel_open_close_orders → send_moc)
-        が続行できるよう、失敗時は Result!=0 の dict を返してログのみ出す。
+        止める理由にはならない。呼び出し側が続行できるよう Result!=0 の dict を返す。
         """
         if self.dry_run:
             print(f"  [dry-run] 取消: {order_id}")
             return {"Result": 0, "_dry_run": True}
         url = f"{self.base_url}/kabusapi/cancelorder"
         body = {"OrderId": order_id, "Password": self._password}
-        try:
-            r = requests.put(url, headers=self._headers(with_content=True),
-                             json=body, timeout=self.timeout)
-        except Exception as e:
-            print(f"  ⚠ 取消 通信失敗 (続行): {order_id}: {e}")
-            return {"Result": -1, "_exception": str(e)}
-        try:
-            res = r.json()
-        except Exception:
-            res = {"_raw": r.text}
-        if not r.ok:
-            print(f"  ⚠ 取消 HTTP {r.status_code} (続行, 既に取消/終了済みの可能性): "
-                  f"{order_id}: {res}")
-            return {"Result": -1, "_http_status": r.status_code, **(
-                res if isinstance(res, dict) else {})}
-        if isinstance(res, dict) and res.get("Result") not in (0, None):
-            print(f"  ⚠ 取消 失敗 (続行): {order_id}: {res}")
-        return res if isinstance(res, dict) else {"Result": -1, "_raw": res}
+        last_429 = None
+        for i in range(retries):
+            try:
+                r = requests.put(url, headers=self._headers(with_content=True),
+                                 json=body, timeout=self.timeout)
+            except Exception as e:
+                print(f"  ⚠ 取消 通信失敗 (続行): {order_id}: {e}")
+                return {"Result": -1, "_exception": str(e)}
+            try:
+                res = r.json()
+            except Exception:
+                res = {"_raw": r.text}
+            if r.status_code == 429:
+                # レート制限は一過性 → 待って再試行 (取消は必ず通したい)
+                last_429 = {"Result": -1, "_http_status": 429,
+                            **(res if isinstance(res, dict) else {})}
+                if i < retries - 1:
+                    wait = 1.5 * (i + 1)
+                    print(f"  ⚠ 取消 429 レート制限: {wait:.1f}秒待って再試行 "
+                          f"({i+1}/{retries}) {order_id}")
+                    time.sleep(wait)
+                    continue
+                print(f"  ✗ 取消 429 が {retries}回続き取消できませんでした: {order_id}")
+                return last_429
+            if not r.ok:
+                print(f"  ⚠ 取消 HTTP {r.status_code} (続行, 既に取消/終了済みの可能性): "
+                      f"{order_id}: {res}")
+                return {"Result": -1, "_http_status": r.status_code, **(
+                    res if isinstance(res, dict) else {})}
+            if isinstance(res, dict) and res.get("Result") not in (0, None):
+                print(f"  ⚠ 取消 失敗 (続行): {order_id}: {res}")
+            return res if isinstance(res, dict) else {"Result": -1, "_raw": res}
+        return last_429 or {"Result": -1, "_http_status": 429}
 
 
 if __name__ == "__main__":
