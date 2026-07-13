@@ -45,6 +45,8 @@ ap.add_argument("--slip", type=float, default=None,
 ap.add_argument("--aggressive", action="store_true")
 ap.add_argument("--short", action="store_true",
                 help="ショート戦略で検証(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S)")
+ap.add_argument("--fade", action="store_true",
+                help="シグナルの逆を取る(ロング戦略→ショート/ショート戦略→ロング)で検証")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -208,6 +210,8 @@ def main():
 
     mode = "aggressive" if args.aggressive else "conservative"
     direction = "ショート" if args.short else "ロング"
+    if args.fade:
+        direction += "→逆(fade)"
     print(f"ローリング再選定OOS [{direction}] / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
           f"/ 価格{args.min_price:.0f}-{args.max_price:.0f} / top{args.per_strategy}")
     print(f"コスト: 手数料片道{ble.FEE_PCT_ONE_WAY*100:.2f}% / "
@@ -242,8 +246,11 @@ def main():
             df = df[df.index <= pd.Timestamp(oos_end)]
             if len(df) < 210:
                 continue
+            etype = getattr(mod, "ENTRY_TYPE", "stop")
+            if args.fade:   # シグナルの逆: 買い戦略→売り / 売り戦略→買い
+                etype = "stop_sell" if etype == "stop" else "stop"
             res = ble.run_limit_backtest(sym, name, df, cf, em, sm, tm, bt_days, strat,
-                                         entry_type=getattr(mod, "ENTRY_TYPE", "stop"))
+                                         entry_type=etype)
             if not res:
                 continue
             full = res["trade_log"]
