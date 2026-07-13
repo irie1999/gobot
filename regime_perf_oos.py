@@ -43,6 +43,8 @@ ap.add_argument("--fee", type=float, default=None,
 ap.add_argument("--slip", type=float, default=None,
                 help="逆指値買い/損切りスリッページを上書き(例0.002=0.2%)。既定0.005")
 ap.add_argument("--aggressive", action="store_true")
+ap.add_argument("--short", action="store_true",
+                help="ショート戦略で検証(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S)")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -59,16 +61,21 @@ if args.fee is not None:
 if args.slip is not None:
     ble.SLIPPAGE_STOP_PCT = args.slip
 
-# 現行ライブが使うロング6戦略(scan --family both の一部)
-STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+# 検証対象の戦略群(ロング=--family both / ショート=--family short+short_brk)
+if args.short:
+    STRATS = ["A7_S", "RSI2_S", "MACD_S", "DON_S", "MOM_S", "GAP_S"]
+    _MOD_NAMES = ("check_signals_short", "check_signals_short_breakout")
+else:
+    STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+    _MOD_NAMES = ("check_signals_stop", "check_signals_breakout")
 MODE_SUFFIX = "_aggressive" if args.aggressive else ""
 
 _mods = {}
-for _n in ("check_signals_stop", "check_signals_breakout"):
+for _n in _MOD_NAMES:
     try:
         _mods[_n] = __import__(_n)
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[WARN] {_n} の読み込み失敗: {_e}")
 
 
 def mod_for(strat):
@@ -200,7 +207,8 @@ def main():
         return
 
     mode = "aggressive" if args.aggressive else "conservative"
-    print(f"ローリング再選定OOS / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
+    direction = "ショート" if args.short else "ロング"
+    print(f"ローリング再選定OOS [{direction}] / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
           f"/ 価格{args.min_price:.0f}-{args.max_price:.0f} / top{args.per_strategy}")
     print(f"コスト: 手数料片道{ble.FEE_PCT_ONE_WAY*100:.2f}% / "
           f"スリッページ{ble.SLIPPAGE_STOP_PCT*100:.2f}%")
