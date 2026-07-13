@@ -32,6 +32,7 @@ ap.add_argument("--bases", default=None, help="基準日をカンマ区切りで
 ap.add_argument("--interval-months", type=int, default=12, help="各基準月のOOS窓(=再選定間隔)")
 ap.add_argument("--per-strategy", type=int, default=10)
 ap.add_argument("--monthly", action="store_true", help="OOSトレードを月別にも集計して表示")
+ap.add_argument("--html", action="store_true", help="損益タブ風HTML(大局レジーム付き月別グリッド)を出力してブラウザで開く")
 ap.add_argument("--min-bt", type=float, default=0.0,
                 help="このBTスコア以上のOOSトレードだけで状態別/月別を集計(例70)。BT帯別表は常に表示")
 ap.add_argument("--max-bt", type=float, default=0.0,
@@ -356,6 +357,144 @@ def main():
         print("-" * 46)
         print("↑ 各月の『本物のOOS』損益。レポート月別(現WATCHLISTを過去に当てた値=汚染)と")
         print("  比べると、holdout短設定の in-sample 分がどれだけ数字を盛っていたかが分かる。")
+
+    if args.html:
+        _write_html(filt, TR, per_base, st, direction, bt_note)
+
+
+_REG_LBL = {"up": ("🟢上げ", "#4ade80"), "wait": ("🟡横ばい待ち", "#fbbf24"),
+            "range": ("🟠真横ばい", "#fb923c"), "down": ("🔴下げ", "#f87171"),
+            "?": ("―", "#64748b")}
+
+
+def _write_html(filt, TR, per_base, st, direction, bt_note):
+    """ローリングOOSの成績を損益タブ風HTMLで出力(大局レジーム付き月別グリッド)。"""
+    def _pf(g, l):
+        return "∞" if l <= 0 and g > 0 else (f"{g/l:.2f}" if l > 0 else "—")
+
+    def _agg_row(rows):
+        n = len(rows)
+        if n == 0:
+            return 0, 0.0, "—", 0.0, 0.0
+        w = sum(1 for p in rows if p > 0)
+        gp = sum(p for p in rows if p > 0); gl = -sum(p for p in rows if p <= 0)
+        return n, w / n * 100, _pf(gp, gl), gp, gl
+
+    # 月末レジーム(st から)
+    def _month_reg(mk):
+        try:
+            end = pd.Timestamp(mk + "-28") + pd.offsets.MonthEnd(0)
+            return st.asof(end)
+        except Exception:
+            return "?"
+
+    pnls = [r["pnl"] for r in filt]
+    n, wr, pf_s, gp, gl = _agg_row(pnls)
+    tot = gp - gl
+    tcol = "#4ade80" if tot >= 0 else "#f87171"
+
+    def _card(l, v, c="#e2e8f0"):
+        return (f'<div class="card"><div class="cl">{l}</div>'
+                f'<div class="cv" style="color:{c}">{v}</div></div>')
+    cards = "".join([
+        _card("総取引", f"{n:,}件"), _card("勝率", f"{wr:.0f}%"),
+        _card("PF", pf_s, "#4ade80" if pf_s != "—" and pf_s != "∞" and float(pf_s) >= 1 else "#e2e8f0"),
+        _card("利益", f"+{gp:,.0f}", "#4ade80"), _card("損失", f"-{gl:,.0f}", "#f87171"),
+        _card("合計損益", f"{tot:+,.0f}円", tcol)])
+
+    # 状態別
+    srows = ""
+    for k in ["up", "wait", "range", "down"]:
+        rr = [r["pnl"] for r in filt if r["state"] == k]
+        sn, swr, spf, sgp, sgl = _agg_row(rr)
+        st_tot = sgp - sgl
+        lbl, col = _REG_LBL[k]
+        c = "#4ade80" if st_tot >= 0 else "#f87171"
+        srows += (f'<tr><td style="color:{col};font-weight:700">{lbl}</td>'
+                  f'<td class="r">{sn}</td><td class="r">{swr:.0f}%</td><td class="r">{spf}</td>'
+                  f'<td class="r" style="color:{c};font-weight:700">{st_tot:+,.0f}</td></tr>')
+
+    # BT帯別(TR 全体)
+    brows = ""
+    for lbl, lo, hi in [("BT≥70", 70, 1e9), ("BT60-69", 60, 70), ("BT40-59", 40, 60),
+                        ("BT<40", -1e9, 40), ("スコアなし", None, None)]:
+        if lo is None:
+            rr = [r["pnl"] for r in TR if r["bt"] is None]
+        else:
+            rr = [r["pnl"] for r in TR if r["bt"] is not None and lo <= r["bt"] < hi]
+        bn, bwr, bpf, bgp, bgl = _agg_row(rr)
+        bt_tot = bgp - bgl
+        c = "#4ade80" if bt_tot >= 0 else "#f87171"
+        brows += (f'<tr><td>{lbl}</td><td class="r">{bn}</td><td class="r">{bwr:.0f}%</td>'
+                  f'<td class="r">{bpf}</td><td class="r" style="color:{c};font-weight:700">{bt_tot:+,.0f}</td></tr>')
+
+    # 月別(大局レジーム付き)
+    from collections import defaultdict as _dd
+    bym = _dd(list)
+    for r in filt:
+        bym[r["month"]].append(r["pnl"])
+    mrows = ""
+    for mk in sorted(bym, reverse=True):
+        pl = bym[mk]
+        mn, mwr, mpf, mgp, mgl = _agg_row(pl)
+        m_tot = mgp - mgl
+        rlbl, rcol = _REG_LBL.get(_month_reg(mk), ("―", "#64748b"))
+        c = "#4ade80" if m_tot >= 0 else "#f87171"
+        mrows += (f'<tr><td><b>{mk}</b></td>'
+                  f'<td style="text-align:center;color:{rcol};font-weight:700">{rlbl}</td>'
+                  f'<td class="r">{mn}</td><td class="r">{mwr:.0f}%</td>'
+                  f'<td class="r" style="color:#4ade80">+{mgp:,.0f}</td>'
+                  f'<td class="r" style="color:#f87171">-{mgl:,.0f}</td>'
+                  f'<td class="r" style="color:{c};font-weight:700">{m_tot:+,.0f}円</td></tr>')
+
+    # 基準月別
+    prows = "".join(
+        f'<tr><td>{b}</td><td class="r">{c}件</td>'
+        f'<td class="r" style="color:{"#4ade80" if p>=0 else "#f87171"};font-weight:700">{p:+,.0f}円</td></tr>'
+        for b, c, p in per_base)
+
+    html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>ローリングOOS {direction}</title><style>
+body{{background:#0a0e1a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;margin:0;padding:16px;font-size:13px}}
+h1{{font-size:1.1rem;margin:0 0 4px}} .sub{{color:#94a3b8;font-size:0.78rem;margin-bottom:12px}}
+.cards{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}}
+.card{{background:#111827;border:1px solid #1e293b;border-radius:8px;padding:7px 13px;min-width:90px}}
+.cl{{color:#94a3b8;font-size:0.7rem}} .cv{{font-size:1.15rem;font-weight:700}}
+h2{{font-size:0.9rem;margin:16px 0 6px;border-left:3px solid #3b82f6;padding-left:8px}}
+table{{border-collapse:collapse;font-size:0.78rem;margin-bottom:4px}}
+th,td{{padding:3px 10px;border-bottom:1px solid #16202f;white-space:nowrap}}
+th{{color:#94a3b8;background:#0d1424;text-align:left}} td.r,th.r{{text-align:right}}
+</style></head><body>
+<h1>ローリング再選定OOS [{direction}]{bt_note}</h1>
+<div class="sub">6ヶ月ごとにas-of選定→直後を運用した"汚染なし"の成績。大局レジーム=各月末のER+MA200傾き判定(先読みなし)。</div>
+<div class="cards">{cards}</div>
+<h2>月別損益（大局レジーム付き）</h2>
+<table><thead><tr><th>月</th><th style="text-align:center">大局<br>レジーム</th><th class="r">件数</th>
+<th class="r">勝率</th><th class="r">利益</th><th class="r">損失</th><th class="r">損益合計</th></tr></thead>
+<tbody>{mrows}</tbody></table>
+<h2>大局レジーム状態別</h2>
+<table><thead><tr><th>状態</th><th class="r">取引</th><th class="r">勝率</th><th class="r">PF</th><th class="r">損益</th></tr></thead>
+<tbody>{srows}</tbody></table>
+<h2>BTスコア帯別（当時BT・先読みなし）</h2>
+<table><thead><tr><th>BT帯</th><th class="r">取引</th><th class="r">勝率</th><th class="r">PF</th><th class="r">損益</th></tr></thead>
+<tbody>{brows}</tbody></table>
+<h2>基準月別</h2>
+<table><thead><tr><th>基準月</th><th class="r">OOS取引</th><th class="r">損益</th></tr></thead>
+<tbody>{prows}</tbody></table>
+</body></html>"""
+    fn = "regime_perf_oos.html"
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"\nHTML出力: {fn}")
+    try:
+        from _open_html import open_html
+        open_html(fn)
+    except Exception:
+        try:
+            import webbrowser
+            webbrowser.open(fn)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
