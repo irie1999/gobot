@@ -369,6 +369,60 @@ def _place_target_order(cli, pos: dict, open_orders: list[dict],
     return "fail", f"  ⚠失敗 {sym} {name}: 応答 {res}"
 
 
+def _register_holdings_to_ordered(positions: list[dict], prod: bool) -> int:
+    """実際に約定した保有建玉を ordered_signals.csv に登録する。
+    発注ログ機能を追加する前に発注した保有分を、レポートの取引明細で📤発注済と
+    表示するための遡及登録。(record_date=約定日 / 銘柄+戦略で突合)。
+    既に同一(約定日+銘柄+戦略)があれば追加しない(冪等)。"""
+    import csv as _csv
+    log = Path(__file__).resolve().parent / "ordered_signals.csv"
+    existing: set = set()
+    if log.exists():
+        try:
+            for r in _csv.DictReader(open(log, encoding="utf-8")):
+                existing.add((str(r.get("record_date", "")).strip(),
+                              str(r.get("symbol", "")).upper().removesuffix(".T"),
+                              str(r.get("strategy", "")).strip()))
+        except Exception:
+            pass
+    fields = ["record_date", "ordered_at", "symbol", "name", "strategy", "family",
+              "order_price", "stop_price", "qty", "prod", "cash_margin"]
+    added = 0
+    new_file = not log.exists()
+    try:
+        with open(log, "a", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=fields)
+            if new_file:
+                w.writeheader()
+            for p in positions:
+                sym   = str(p.get("symbol", "")).upper().removesuffix(".T")
+                strat = str(p.get("strategy", "") or "").strip()
+                fd    = str(p.get("fill_date", "") or "").strip()[:10]
+                if not sym or not fd:
+                    continue
+                key = (fd, sym, strat)
+                if key in existing:
+                    continue
+                w.writerow({
+                    "record_date": fd,
+                    "ordered_at":  datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                    "symbol":      sym,
+                    "name":        p.get("name", ""),
+                    "strategy":    strat,
+                    "family":      "",
+                    "order_price": round(float(p.get("fill_price", 0) or 0)),
+                    "stop_price":  round(float(p.get("stop_price", 0) or 0)),
+                    "qty":         p.get("qty", 0),
+                    "prod":        int(bool(prod)),
+                    "cash_margin": p.get("cash_margin", ""),
+                })
+                existing.add(key)
+                added += 1
+    except Exception as e:
+        print(f"  ⚠ 保有の発注記録登録に失敗 ({e})")
+    return added
+
+
 def _build_holdings_html(positions: list[dict], now, price_fn=None) -> str:
     """実際に約定した保有銘柄(kabu建玉)の詳細HTMLを生成する。
     タイムカット日・損切り/利確・含み損益を表示。price_fn(sym)->現在値 を渡すと損益も表示。"""
@@ -1358,6 +1412,10 @@ def main() -> int:
         out = Path(__file__).resolve().parent / "holdings_latest.html"
         out.write_text(html_str, encoding="utf-8")
         print(f"保有銘柄HTML: {out}  ({len(positions)}件)")
+        # 保有建玉を ordered_signals.csv に遡及登録(レポートで📤発注済表示)
+        _reg = _register_holdings_to_ordered(positions, args.prod)
+        if _reg:
+            print(f"  ↳ ordered_signals.csv に保有 {_reg}件を登録(📤発注済表示用)")
         try:
             from _open_html import open_html
             open_html(out.resolve().as_uri())
