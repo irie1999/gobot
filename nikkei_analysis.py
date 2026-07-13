@@ -6529,6 +6529,65 @@ def build_pullback_comparison_html(pullbacks: list[float], days: int,
     )
 
 
+_ORDERED_CACHE = None
+
+def _load_ordered_orders() -> list[dict]:
+    """kabu_send_signals が実発注時に記録した ordered_signals.csv を読む。
+    レポートの取引明細で『発注済』印を付けるための突合データ(銘柄+戦略+日付)。"""
+    global _ORDERED_CACHE
+    if _ORDERED_CACHE is not None:
+        return _ORDERED_CACHE
+    import csv as _csv
+    from pathlib import Path as _P
+    from datetime import datetime as _dt
+    rows: list[dict] = []
+    for _fn in ("ordered_signals.csv", "ordered_signals_aggressive.csv"):
+        p = _P(_fn)
+        if not p.exists():
+            continue
+        try:
+            for r in _csv.DictReader(open(p, encoding="utf-8")):
+                try:
+                    rd = _dt.strptime(str(r.get("record_date", "")).strip(), "%Y-%m-%d").date()
+                except Exception:
+                    continue
+                rows.append({
+                    "date": rd,
+                    "symbol": str(r.get("symbol", "")).upper().removesuffix(".T"),
+                    "strategy": str(r.get("strategy", "")).upper().replace("TF", ""),
+                    "prod": str(r.get("prod", "")).strip(),
+                })
+        except Exception:
+            pass
+    _ORDERED_CACHE = rows
+    return rows
+
+
+def _ordered_badge_for(t: dict) -> str:
+    """トレード t が実発注済みなら『発注済』バッジHTMLを返す。
+    突合: 銘柄一致 + 戦略一致(TF差は無視) + 発注日がエントリー日の[-1,+5]日以内。"""
+    orders = _load_ordered_orders()
+    if not orders:
+        return ""
+    sym = str(t.get("symbol", "")).upper().removesuffix(".T")
+    strat = str(t.get("strategy", "")).upper().replace("TF", "")
+    ed = t.get("entry_d_raw")
+    for o in orders:
+        if o["symbol"] != sym:
+            continue
+        if strat and o["strategy"] and o["strategy"] != strat:
+            continue
+        if ed is not None and hasattr(ed, "toordinal") and hasattr(o["date"], "toordinal"):
+            delta = (ed - o["date"]).days
+            if not (-1 <= delta <= 5):
+                continue
+        prod_lbl = "" if o["prod"] == "1" else "(デモ)"
+        return ('<br><span style="background:#0891b2;color:#fff;font-size:0.66rem;'
+                'font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap">'
+                f'📤発注済{prod_lbl}</span>')
+    return ""
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
@@ -8398,7 +8457,7 @@ function switchTbd(id, tab) {{
   {hold_cell}
   {delay_cell}
   <td class="{tpc}" style="text-align:right">{pnl_cell}</td>
-  <td>{_rhtml(t["reason"])}{overlap_badge}</td>
+  <td>{_rhtml(t["reason"])}{overlap_badge}{_ordered_badge_for(t)}</td>
   {last_col}
 </tr>"""
 
