@@ -1146,12 +1146,36 @@ def _tab1_signal_html(r: dict, ref_date, indicators: dict | None = None,
         "down":     ("🔴 下げ", "#f87171", "現金/ショート"),
     }
     _mlbl, _mcol, _mnote = _macro_map.get(r.get("macro", "sideways"), ("―", "#94a3b8", ""))
+
+    # 横ばい戦略(指数ETF STOロングbounce)のゲート状態。
+    # check_signals_index の厳密判定(ER<0.15 かつ |MA200傾き|<0.5%)と一致させる。
+    _g_er = r.get("er", 0.0)
+    _g_sl = r.get("slope200", 0.0)
+    _gate_on = (_g_er < 0.15 and abs(_g_sl) < 0.5)
+    if _gate_on:
+        _gate_val = (
+            '<span style="color:#4ade80;font-weight:700;font-size:1.1rem">● 発動中</span>'
+            '<br><span style="font-size:0.68rem;color:#64748b">'
+            '指数ETF逆張り(check_signals_index)を発注可</span>')
+    else:
+        _greason = []
+        if _g_er >= 0.15:
+            _greason.append(f"ER {_g_er:.2f}≥0.15")
+        if abs(_g_sl) >= 0.5:
+            _greason.append(f"MA200傾き{_g_sl:+.1f}%(±0.5%超)")
+        _gate_val = (
+            '<span style="color:#94a3b8;font-weight:700;font-size:1.1rem">○ 横ばい待ち</span>'
+            '<br><span style="font-size:0.68rem;color:#64748b">'
+            + (" / ".join(_greason) or "条件計算中")
+            + '<br>まだ真のレンジでない=現行(順張り)の管轄</span>')
+
     regime_items = [
         ("日経225",     f'<strong style="font-size:1.25rem">{r["cur"]:,.0f}円</strong>'),
         ("大局レジーム",
          f'<span style="color:{_mcol};font-weight:700;font-size:1.15rem">{_mlbl}</span>'
          f'<br><span style="font-size:0.68rem;color:#64748b">{_mnote}<br>'
          f'ER {r.get("er",0):.2f} / MA200傾き {r.get("slope200",0):+.1f}%</span>'),
+        ("横ばい戦略ゲート", _gate_val),
         ("トレンド(短期)", f'<span style="color:{trend_color};font-weight:700;font-size:1.05rem">{trend_ja}</span>'),
         ("ボラ (14日)", f'<span style="color:{vol_color}">{vol_ja} ({r["vol"]:.2f}%)</span>'),
         ("5日騰落",     f'<span style="color:{mom5_c};font-weight:600">{r["mom5"]:+.2f}%</span>'),
