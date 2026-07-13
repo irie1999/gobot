@@ -6612,6 +6612,45 @@ def _ordered_badge_for(t: dict) -> str:
     return ""
 
 
+_MONTH_REGIME_CACHE = None
+
+def _month_regime(ym: str) -> tuple:
+    """ym('YYYY-MM') 末時点の大局レジーム(先読みなし)。(ラベル, 色)を返す。
+    相場環境タブ/market_regime.py と同じ ER+MA200傾き 判定。"""
+    global _MONTH_REGIME_CACHE
+    if _MONTH_REGIME_CACHE is None:
+        _MONTH_REGIME_CACHE = {}
+        try:
+            import numpy as _np
+            c = fetch_n225(15)
+            if c is not None and len(c) >= 230:
+                c = c.sort_index()
+                ma200 = c.rolling(200).mean()
+                slope = ma200.pct_change(20) * 100
+                er = (c - c.shift(60)).abs() / c.diff().abs().rolling(60).sum().replace(0, _np.nan)
+                above = c >= ma200
+                _me = c.groupby(c.index.strftime("%Y-%m")).tail(1)
+                for d in _me.index:
+                    i = c.index.get_loc(d)
+                    e, s, a, m = er.iloc[i], slope.iloc[i], above.iloc[i], ma200.iloc[i]
+                    k = d.strftime("%Y-%m")
+                    if not _np.isfinite(m) or not _np.isfinite(e):
+                        _MONTH_REGIME_CACHE[k] = "?"
+                    elif e < 0.20:
+                        _MONTH_REGIME_CACHE[k] = "sideways"
+                    elif a and s > 0:
+                        _MONTH_REGIME_CACHE[k] = "up"
+                    elif (not a) and s < 0:
+                        _MONTH_REGIME_CACHE[k] = "down"
+                    else:
+                        _MONTH_REGIME_CACHE[k] = "sideways"
+        except Exception:
+            pass
+    _lbl = {"up": ("🟢上げ", "#4ade80"), "sideways": ("🟡横ばい", "#fbbf24"),
+            "down": ("🔴下げ", "#f87171"), "?": ("―", "#64748b")}
+    return _lbl.get(_MONTH_REGIME_CACHE.get(ym, "?"), ("―", "#64748b"))
+
+
 def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                    symbol_filter: list[str] | None = None,
                    entry_days: int | None = None,
@@ -8841,10 +8880,12 @@ function switchTbd(id, tab) {{
             bar_w    = min(abs(pnl_m) / 300000 * 100, 100)  # 30万円で100%
             bar_col  = "rgba(74,222,128,0.25)" if pnl_m >= 0 else "rgba(248,113,113,0.25)"
             mm       = ym[5:7] + "月"
+            _reg_lbl, _reg_col = _month_regime(ym)   # その月末の大局レジーム
             # その月に約定した取引の同時保有ピーク資金(=その月を回すのに必要な資金)
             _mc_cap, _mc_pd, _mc_pcnt, _mc_max, _mc_tot = _peak_capital(trades_m)
             rows += (f'<tr>'
                      f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}</td>'
+                     f'<td style="text-align:center;color:{_reg_col};font-weight:700;white-space:nowrap">{_reg_lbl}</td>'
                      f'<td style="text-align:right;color:#94a3b8">{len(done_m)}件</td>'
                      f'<td style="text-align:right;color:#94a3b8">{wr_m:.0f}%</td>'
                      f'<td style="text-align:right;color:#4ade80">+{gp_m:,.0f}円</td>'
@@ -8862,6 +8903,7 @@ function switchTbd(id, tab) {{
 <table style="border-collapse:collapse;width:auto">
   <thead><tr>
     <th style="text-align:left;color:#94a3b8;font-size:0.78rem;padding:3px 8px">月</th>
+    <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;text-align:center">大局<br>レジーム</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">件数</th>
     <th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">勝率</th>
     <th style="color:#4ade80;font-size:0.78rem;padding:3px 8px">利益</th>
