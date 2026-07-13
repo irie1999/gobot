@@ -38,6 +38,10 @@ ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--max-dd", type=float, default=15.0)
 ap.add_argument("--years", type=int, default=15, help="日経レジーム系列の取得年数")
+ap.add_argument("--fee", type=float, default=None,
+                help="片道手数料を上書き(例0=無料)。既定は0.001(往復0.2%)")
+ap.add_argument("--slip", type=float, default=None,
+                help="逆指値買い/損切りスリッページを上書き(例0.002=0.2%)。既定0.005")
 ap.add_argument("--aggressive", action="store_true")
 args = ap.parse_args()
 if args.aggressive:
@@ -47,6 +51,13 @@ import numpy as np
 import pandas as pd
 import backtest_limit_entry as ble
 import nikkei_analysis as na
+
+# コスト上書き(あなたの実コストで測る用)。run_limit_backtest はモジュール定数を
+# 実行時に参照するので、ここで書き換えれば全バックテストに反映される。
+if args.fee is not None:
+    ble.FEE_PCT_ONE_WAY = args.fee
+if args.slip is not None:
+    ble.SLIPPAGE_STOP_PCT = args.slip
 
 # 現行ライブが使うロング6戦略(scan --family both の一部)
 STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
@@ -191,6 +202,8 @@ def main():
     mode = "aggressive" if args.aggressive else "conservative"
     print(f"ローリング再選定OOS / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
           f"/ 価格{args.min_price:.0f}-{args.max_price:.0f} / top{args.per_strategy}")
+    print(f"コスト: 手数料片道{ble.FEE_PCT_ONE_WAY*100:.2f}% / "
+          f"スリッページ{ble.SLIPPAGE_STOP_PCT*100:.2f}%")
     print(f"基準月: {', '.join(bases)}\n")
 
     today = ble._TODAY
