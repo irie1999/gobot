@@ -34,6 +34,8 @@ ap.add_argument("--per-strategy", type=int, default=10)
 ap.add_argument("--monthly", action="store_true", help="OOSトレードを月別にも集計して表示")
 ap.add_argument("--min-bt", type=float, default=0.0,
                 help="このBTスコア以上のOOSトレードだけで状態別/月別を集計(例70)。BT帯別表は常に表示")
+ap.add_argument("--max-bt", type=float, default=0.0,
+                help="このBTスコア未満のトレードだけで集計(例40=BT<40だけ)。--min-btと併用可")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--max-dd", type=float, default=15.0)
@@ -283,8 +285,20 @@ def main():
     # ── BTフィルタ(状態別/月別に適用) ──
     def _pnls(rows):
         return [r["pnl"] for r in rows]
-    filt = [r for r in TR if args.min_bt <= 0 or (r["bt"] is not None and r["bt"] >= args.min_bt)]
-    bt_note = f" (BT≥{args.min_bt:.0f}のみ)" if args.min_bt > 0 else ""
+
+    def _keep(r):
+        if args.min_bt > 0 and (r["bt"] is None or r["bt"] < args.min_bt):
+            return False
+        if args.max_bt > 0 and (r["bt"] is None or r["bt"] >= args.max_bt):
+            return False
+        return True
+    filt = [r for r in TR if _keep(r)]
+    _nb = []
+    if args.min_bt > 0:
+        _nb.append(f"BT≥{args.min_bt:.0f}")
+    if args.max_bt > 0:
+        _nb.append(f"BT<{args.max_bt:.0f}")
+    bt_note = f" ({'かつ'.join(_nb)}のみ)" if _nb else ""
 
     # ── 状態別集計 ──
     print(f"\n【状態別{bt_note}】")
