@@ -51,6 +51,8 @@ ap.add_argument("--fade", action="store_true",
                 help="シグナルの逆を取る(ロング戦略→ショート/ショート戦略→ロング)で検証")
 ap.add_argument("--mirror", action="store_true",
                 help="各取引の損益を符号反転(=同じ約定値で逆サイドを取った鏡写し)。手数料は往復2倍で計上")
+ap.add_argument("--losers", action="store_true",
+                help="勝ち銘柄top-Nでなく『それまでの累積損益ワーストN』を選定(as-of)。--mirrorと併用してフェード検証")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -146,11 +148,19 @@ def _select_watchlist(base: str) -> dict:
                 rows = list(csv.DictReader(open(f, encoding="utf-8")))
             except Exception:
                 continue
-            filt = [r for r in rows
-                    if float(r.get("total_test_pnl", 0) or 0) > 0
-                    and float(r.get("max_drawdown_pct", 999) or 999) <= args.max_dd
-                    and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
-            filt.sort(key=lambda r: -float(r.get("total_test_pnl", 0) or 0))
+            if args.losers:
+                # 累積損益ワーストN(as-of): total_test_pnl が最も低い銘柄を選ぶ(DD制約なし)
+                filt = [r for r in rows
+                        if float(r.get("total_test_pnl", 0) or 0) < 0
+                        and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
+                filt.sort(key=lambda r: float(r.get("total_test_pnl", 0) or 0))  # 昇順=最悪が先頭
+            else:
+                # 従来: 勝ち銘柄top-N
+                filt = [r for r in rows
+                        if float(r.get("total_test_pnl", 0) or 0) > 0
+                        and float(r.get("max_drawdown_pct", 999) or 999) <= args.max_dd
+                        and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
+                filt.sort(key=lambda r: -float(r.get("total_test_pnl", 0) or 0))
             for r in filt[: args.per_strategy]:
                 wl[(r["symbol"], strat)] = r.get("name", "")
     return wl
@@ -216,6 +226,8 @@ def main():
     direction = "ショート" if args.short else "ロング"
     if args.fade:
         direction += "→逆(fade)"
+    if args.losers:
+        direction += "・損益ワースト選定"
     if args.mirror:
         direction += "→鏡写し(mirror)"
     print(f"ローリング再選定OOS [{direction}] / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
