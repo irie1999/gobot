@@ -39,9 +39,9 @@ ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--max-dd", type=float, default=15.0)
 ap.add_argument("--years", type=int, default=15, help="日経レジーム系列の取得年数")
 ap.add_argument("--fee", type=float, default=None,
-                help="片道手数料を上書き(例0=無料)。既定は0.001(往復0.2%)")
+                help="片道手数料を上書き(例0=無料)。既定は0.001(往復0.2%%)")
 ap.add_argument("--slip", type=float, default=None,
-                help="逆指値買い/損切りスリッページを上書き(例0.002=0.2%)。既定0.005")
+                help="逆指値買い/損切りスリッページを上書き(例0.002=0.2%%)。既定0.005")
 ap.add_argument("--aggressive", action="store_true")
 ap.add_argument("--short", action="store_true",
                 help="ショート戦略で検証(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S)")
