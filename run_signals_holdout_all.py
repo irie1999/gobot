@@ -580,6 +580,34 @@ def _load_wl_from_csv(csv_path: Path, max_price: float, strategy: str,
     return [(r.get("symbol", ""), r.get("name", ""), strategy)
             for r in filtered[:per_strategy] if r.get("symbol")]
 
+
+def _filter_wl_by_price(wl: list, min_price: float, max_price: float) -> list:
+    """フォールバック(現行WATCHLIST)を最新終値で価格フィルタする。
+    CSV経路の latest_price フィルタ相当。価格指定が無ければ素通し。
+    価格取得に失敗した銘柄は安全側で除外する。"""
+    _has_max = bool(max_price) and 0 < max_price < 100000
+    _has_min = bool(min_price) and min_price > 0
+    if not _has_max and not _has_min:
+        return list(wl)
+    import backtest_limit_entry as _ble
+    out: list = []
+    dropped = 0
+    for item in wl:
+        code = item[0] if item else ""
+        try:
+            df = _ble.fetch(code, 400)
+            px = float(df["close"].iloc[-1]) if df is not None and len(df) else None
+        except Exception:
+            px = None
+        if px is None or (_has_max and px > max_price) or (_has_min and px < min_price):
+            dropped += 1
+            continue
+        out.append(item)
+    if dropped:
+        print(f"  [価格フィルタ] 現行WATCHLIST {len(wl)}→{len(out)}件 "
+              f"(min={min_price:g}/max={max_price:g} で {dropped}件除外)")
+    return out
+
 # ── PNL_CONFIGS 構築 ──────────────────────────────────────────────────────────
 print("=" * 65)
 print(f"run_signals_holdout_all: {TODAY}")
@@ -642,8 +670,10 @@ if _using_fallback:
         "color":   "#3b82f6",
         "mode":    "conservative",
         "sm_tm":   None,
-        "stop_wl": list(_fb_stop_mod.WATCHLIST),
-        "brk_wl":  list(_fb_brk_mod.WATCHLIST),
+        "stop_wl": _filter_wl_by_price(list(_fb_stop_mod.WATCHLIST),
+                                       _args.min_price, _args.max_price),
+        "brk_wl":  _filter_wl_by_price(list(_fb_brk_mod.WATCHLIST),
+                                       _args.min_price, _args.max_price),
     }
     for days in _PNL_PERIODS:
         _period_configs[days] = [_fb_cfg]
