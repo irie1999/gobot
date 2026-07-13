@@ -47,6 +47,8 @@ ap.add_argument("--short", action="store_true",
                 help="ショート戦略で検証(A7_S/RSI2_S/MACD_S/DON_S/MOM_S/GAP_S)")
 ap.add_argument("--fade", action="store_true",
                 help="シグナルの逆を取る(ロング戦略→ショート/ショート戦略→ロング)で検証")
+ap.add_argument("--mirror", action="store_true",
+                help="各取引の損益を符号反転(=同じ約定値で逆サイドを取った鏡写し)。手数料は往復2倍で計上")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -212,6 +214,8 @@ def main():
     direction = "ショート" if args.short else "ロング"
     if args.fade:
         direction += "→逆(fade)"
+    if args.mirror:
+        direction += "→鏡写し(mirror)"
     print(f"ローリング再選定OOS [{direction}] / mode={mode} / 再選定間隔{args.interval_months}ヶ月 "
           f"/ 価格{args.min_price:.0f}-{args.max_price:.0f} / top{args.per_strategy}")
     print(f"コスト: 手数料片道{ble.FEE_PCT_ONE_WAY*100:.2f}% / "
@@ -263,11 +267,16 @@ def main():
                     continue
                 state = st.asof(pd.Timestamp(sd))
                 bt = asof_bt(full, mod, sd)   # 当時BTスコア(先読みなし)
-                TR.append({"pnl": float(t["pnl"]),
+                if args.mirror:
+                    # 同じ約定で逆サイド(鏡写し): 損益を符号反転、手数料は往復2回分
+                    _pnl = -float(t["pnl"]) - 2.0 * float(t.get("fee", 0) or 0)
+                else:
+                    _pnl = float(t["pnl"])
+                TR.append({"pnl": _pnl,
                            "state": state if (state and state != "?") else None,
                            "month": pd.Timestamp(sd).strftime("%Y-%m"),
                            "bt": bt})
-                b_n += 1; b_pnl += float(t["pnl"])
+                b_n += 1; b_pnl += _pnl
         per_base.append((base, b_n, b_pnl))
         print(f"  {base}→+{args.interval_months}ヶ月: 選定{len(wl)}件 / OOS取引{b_n} / 損益{b_pnl:+,.0f}")
 
