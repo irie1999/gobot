@@ -52,6 +52,11 @@ _BT_WINDOW_DAYS: int | None = None
 # _REPORT_END を date に設定すると until をそこにし、全期間trade_logも同日でトリムする。
 _REPORT_START = None   # 基準日 (date)。全期間バックテストの下限側(warmup)の起点に使う。
 _REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)まで。
+# 損益タブ: 約定値(entry_p)で取引を弾く予算フィルタ。0=無効。
+# 選定時の latest_price フィルタと違い「約定時に予算内で買えた取引だけ」に絞る。
+# (選定時は安かったが約定時に急騰した銘柄=100株買えない取引を明細/集計から除外)
+_PNL_ENTRY_MIN_PRICE = 0.0
+_PNL_ENTRY_MAX_PRICE = 0.0
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
@@ -6853,6 +6858,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 trade_log  = period_results[max_period].get("trade_log", [])
             seen: set     = set()
             for t in trade_log:
+                # 予算フィルタ: 約定値(entry_p)が範囲外の取引は「100株買えない」ので除外。
+                # 選定時 latest_price は範囲内でも、約定時に急騰した銘柄をここで弾く。
+                if _PNL_ENTRY_MAX_PRICE > 0 or _PNL_ENTRY_MIN_PRICE > 0:
+                    _ep = float(t.get("entry_p", 0) or 0)
+                    if _ep > 0 and (
+                        (_PNL_ENTRY_MAX_PRICE > 0 and _ep > _PNL_ENTRY_MAX_PRICE)
+                        or (_PNL_ENTRY_MIN_PRICE > 0 and _ep < _PNL_ENTRY_MIN_PRICE)
+                    ):
+                        continue
                 exit_dt = t.get("exit_dt")
                 if exit_dt is None:
                     continue

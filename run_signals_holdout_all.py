@@ -742,6 +742,11 @@ _brk.WATCHLIST[:]  = _orig_brk_wl
 # nikkei_analysis にホールドアウト設定を注入
 _na._SIGNALS_AVAILABLE = True
 _na._PNL_CONFIGS[:] = _all_configs
+# 損益タブの予算フィルタ: 約定値(entry_p)で「100株買えた取引だけ」に絞る。
+# 選定時の latest_price フィルタは範囲内でも、約定時に急騰した銘柄(例:選定時5,000円→
+# 約定時20,000円)は 100株買えないので明細/月別集計から除外する。
+_na._PNL_ENTRY_MAX_PRICE = _args.max_price if (_args.max_price and _args.max_price < 100000) else 0.0
+_na._PNL_ENTRY_MIN_PRICE = _args.min_price if (_args.min_price and _args.min_price > 0) else 0.0
 # 損益タブの月別グリッドを全期間表示する窓(日)。--days が365超なら過去まで表示。
 # 365以下(既定/ライブ)なら None 相当で従来どおり(挙動不変)。
 _na._BT_WINDOW_DAYS = max(_PNL_PERIODS) if max(_PNL_PERIODS) > 365 else None
