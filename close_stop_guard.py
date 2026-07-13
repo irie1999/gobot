@@ -1296,6 +1296,12 @@ def main() -> int:
                          "HTMLに出力して終了 (発注なし)")
     args = ap.parse_args()
 
+    # --holdings-html は「実際に約定した建玉」を表示する機能。既定ソースの
+    # my_positions.csv は手動記録で古い(既に決済した銘柄が残る等)ことがあるため、
+    # 常に kabu の実建玉をソースにする(2026-07: CSVの古い8086だけ表示される不具合)。
+    if args.holdings_html and not args.kabu and not args.use_kabu_pos:
+        args.kabu = True
+
     log_path = args.log or _default_log_path(args.aggressive)
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注★" if args.execute else "dry-run (発注なし)"
