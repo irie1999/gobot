@@ -1073,6 +1073,54 @@ def _close_list_for(pos: dict) -> list[dict] | None:
     return [{"HoldID": hid, "Qty": int(pos.get("qty", 100))}]
 
 
+def _resolve_actual_holding(pos: dict, cli: KabuClient) -> dict | None:
+    """実際のkabu口座の保有を確認し、決済に使う cash_margin/hold_id/qty を
+    実態に合わせて返す。CSVと口座がズレていても『実際に持っている建玉』だけを
+    決済するための安全機構(2026-07 8086/DIC の決済スキップ対策)。
+
+    返り値: {"cash_margin":.., "hold_id":.., "qty":..}
+            None = 口座に該当保有なし(=既に決済済み等、売る対象がない)
+    dry_run / API照合失敗時は CSV の指定をそのまま返す(従来動作)。
+    """
+    sym = str(pos["symbol"]).upper().removesuffix(".T")
+    is_short = pos["is_short"]
+    csv_cm = pos.get("cash_margin", CASH_GENBUTSU)
+    fallback = {"cash_margin": csv_cm,
+                "hold_id": str(pos.get("hold_id") or "").strip(),
+                "qty": int(pos.get("qty", 100))}
+    if cli.dry_run:
+        return fallback
+    try:
+        genbutsu = cli.get_positions(product=1)   # 現物
+        shinyo   = cli.get_positions(product=2)   # 信用
+    except Exception as e:
+        print(f"    ⚠ {sym}: 建玉照合に失敗 ({e}) → CSV指定のまま発注")
+        return fallback
+
+    def _m(p): return str(p.get("Symbol", "")).upper().removesuffix(".T") == sym
+    want_side = "1" if is_short else "2"   # 信用 売建=1 / 買建=2
+
+    def _leaves(p): return int(p.get("LeavesQty") or p.get("Qty") or 0)
+    gen = [p for p in genbutsu if _m(p) and _leaves(p) > 0]
+    mar = [p for p in shinyo if _m(p) and str(p.get("Side", "")) == want_side and _leaves(p) > 0]
+    gen_qty = sum(_leaves(p) for p in gen)
+    mar_qty = sum(_leaves(p) for p in mar)
+
+    want_qty = int(pos.get("qty", 100))
+    # 意図した建て方(CSV)が実口座にあればそれを、無ければ実在するもう一方を使う。
+    if csv_cm == CASH_MARGIN_CLOSE and mar_qty > 0:
+        hid = str(mar[0].get("ExecutionID") or mar[0].get("HoldID") or "").strip()
+        return {"cash_margin": CASH_MARGIN_CLOSE, "hold_id": hid, "qty": min(want_qty, mar_qty)}
+    if not is_short and gen_qty > 0:
+        print(f"    ℹ {sym}: 信用建玉なし・現物保有あり → 現物売りで決済 (CSVは信用指定だった)")
+        return {"cash_margin": CASH_GENBUTSU, "hold_id": "", "qty": min(want_qty, gen_qty)}
+    if mar_qty > 0:
+        hid = str(mar[0].get("ExecutionID") or mar[0].get("HoldID") or "").strip()
+        print(f"    ℹ {sym}: 現物なし・信用建玉あり → 信用返済で決済")
+        return {"cash_margin": CASH_MARGIN_CLOSE, "hold_id": hid, "qty": min(want_qty, mar_qty)}
+    return None   # 口座に該当保有なし
+
+
 # ────────────────────────────────────────────────────────────
 # 引け成行 (MOC) または翌日寄成 (MOO) 発注
 # ────────────────────────────────────────────────────────────
@@ -1090,6 +1138,12 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
     # 建玉の拘束(4001005)を解いてから決済する。→ 継続保有する別建玉の利確も一旦消えるが、
     # close_stop_guard は毎回 利確価格も評価して決済する(取りこぼしなし)ので実害はなく、
     # 次回 --with-targets 実行時に生存建玉へ利確が再発注される。
+    # 実口座の保有を照合し、現物/信用と建玉IDを実態に合わせる(CSVズレ対策)
+    actual = _resolve_actual_holding(pos, cli)
+    if actual is None:
+        print(f"    ℹ {pos['symbol']}: 口座に該当保有なし(既に決済済み?) → 発注不要")
+        return True
+
     if pos["is_short"]:
         ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
@@ -1099,13 +1153,15 @@ def send_moc_order(pos: dict, cli: KabuClient) -> bool:
         return False
 
     side = "buy" if pos["is_short"] else "sell"
-    cm = pos.get("cash_margin", CASH_GENBUTSU)
+    cm = actual["cash_margin"]
+    qty = actual["qty"]
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
     side_label = "買い戻し" if pos["is_short"] else "売り決済"
-    cp = _close_list_for(pos)   # 建玉個別: この建玉だけを返済
+    cp = ([{"HoldID": actual["hold_id"], "Qty": qty}]
+          if cm == CASH_MARGIN_CLOSE and actual["hold_id"] else None)
     hid_lbl = f" 建玉={cp[0]['HoldID'][:8]}" if cp else ""
-    print(f"    → {label} 引け成行({side_label}) side={side} cash_margin={cm}{hid_lbl}")
-    res = cli.send_moc(pos["symbol"], qty=pos["qty"], side=side, cash_margin=cm,
+    print(f"    → {label} 引け成行({side_label}) side={side} cash_margin={cm} qty={qty}{hid_lbl}")
+    res = cli.send_moc(pos["symbol"], qty=qty, side=side, cash_margin=cm,
                        close_positions=cp)
     return res.get("Result") == 0
 
@@ -1117,6 +1173,12 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
     MOO (FrontOrderType=13) は 信用返済で 4001005 になるため使わない。
     """
     from kabu_api import CASH_GENBUTSU, CASH_MARGIN_CLOSE
+    # 実口座の保有を照合し、現物/信用と建玉IDを実態に合わせる(CSVズレ対策)
+    actual = _resolve_actual_holding(pos, cli)
+    if actual is None:
+        print(f"    ℹ {pos['symbol']}: 口座に該当保有なし(既に決済済み?) → 発注不要")
+        return True
+
     if pos["is_short"]:
         ok = cancel_open_buy_orders(pos["symbol"], cli)
     else:
@@ -1125,19 +1187,21 @@ def send_moo_order(pos: dict, cli: KabuClient) -> bool:
         print(f"    ✗ {pos['symbol']}: 既存注文のキャンセルに失敗したため損切り発注をスキップします。手動で対応してください。")
         return False
 
-    cm = pos.get("cash_margin", CASH_GENBUTSU)
+    cm = actual["cash_margin"]
+    qty = actual["qty"]
     label = "信用返済" if cm == CASH_MARGIN_CLOSE else "現物"
-    cp = _close_list_for(pos)   # 建玉個別: この建玉だけを返済
+    cp = ([{"HoldID": actual["hold_id"], "Qty": qty}]
+          if cm == CASH_MARGIN_CLOSE and actual["hold_id"] else None)
     hid_lbl = f" 建玉={cp[0]['HoldID'][:8]}" if cp else ""
 
     if pos["is_short"]:  # ショート → 成行買い戻し
-        print(f"    → {label} 成行(買い戻し) cash_margin={cm}{hid_lbl}")
-        res = cli.send_buy(pos["symbol"], qty=pos["qty"],
+        print(f"    → {label} 成行(買い戻し) cash_margin={cm} qty={qty}{hid_lbl}")
+        res = cli.send_buy(pos["symbol"], qty=qty,
                            cash_margin=cm, order_type="market",
                            close_positions=cp)
     else:  # ロング → 成行売り決済
-        print(f"    → {label} 成行(売り決済) cash_margin={cm}{hid_lbl}")
-        res = cli.send_sell(pos["symbol"], qty=pos["qty"],
+        print(f"    → {label} 成行(売り決済) cash_margin={cm} qty={qty}{hid_lbl}")
+        res = cli.send_sell(pos["symbol"], qty=qty,
                             cash_margin=cm, order_type="market",
                             close_positions=cp)
     return res.get("Result") == 0
