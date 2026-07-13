@@ -32,6 +32,8 @@ ap.add_argument("--bases", default=None, help="基準日をカンマ区切りで
 ap.add_argument("--interval-months", type=int, default=12, help="各基準月のOOS窓(=再選定間隔)")
 ap.add_argument("--per-strategy", type=int, default=10)
 ap.add_argument("--monthly", action="store_true", help="OOSトレードを月別にも集計して表示")
+ap.add_argument("--min-bt", type=float, default=0.0,
+                help="このBTスコア以上のOOSトレードだけで状態別/月別を集計(例70)。BT帯別表は常に表示")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--max-dd", type=float, default=15.0)
@@ -130,6 +132,52 @@ def _select_watchlist(base: str) -> dict:
     return wl
 
 
+def asof_bt(full, mod, sd, periods=(30, 90, 180, 365)):
+    """シグナル日 sd 以前に決済したトレードだけで当時BTスコアを計算(先読みなし)。"""
+    pr = {}
+    for p in periods:
+        lo = sd - timedelta(days=p)
+        n = w = 0
+        gp = gl = tot = 0.0
+        for t in full:
+            if t.get("reason") in ("発注中", "保有中"):
+                continue
+            ed = t.get("exit_dt")
+            if ed is None:
+                continue
+            edd = ed.date() if hasattr(ed, "date") else ed
+            if lo <= edd < sd:
+                pnl = float(t.get("pnl", 0.0))
+                n += 1; tot += pnl
+                if pnl > 0:
+                    w += 1; gp += pnl
+                else:
+                    gl += -pnl
+        if n == 0:
+            continue
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[p] = {"trades": n, "win_rate": w / n * 100.0, "pf": pf, "total_pnl": tot}
+    if not pr:
+        return None
+    try:
+        return mod.calc_recommend_score(pr)[0]
+    except Exception:
+        return None
+
+
+def _agg(rows):
+    """(pnl の list) → 件数/勝率/PF/損益/平均 の表示文字列タプル。"""
+    n = len(rows)
+    if n == 0:
+        return (0, "—", "—", "—", "—")
+    wins = [p for p in rows if p > 0]
+    gp = sum(wins); gl = -sum(p for p in rows if p <= 0)
+    pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+    tot = sum(rows)
+    return (n, f"{len(wins)/n*100:.0f}%", pf_s, f"{tot:+,.0f}", f"{tot/n:+,.0f}")
+
+
 def main():
     st = nikkei_state_series(args.years)
     if st is None:
@@ -146,9 +194,8 @@ def main():
     print(f"基準月: {', '.join(bases)}\n")
 
     today = ble._TODAY
-    buckets: dict = defaultdict(list)     # state -> [pnl,...]
-    by_month: dict = defaultdict(list)    # 'YYYY-MM' -> [pnl,...]
-    per_base: list = []                   # (base, n, pnl)
+    TR: list = []          # 全OOSトレード: {"pnl","state","month","bt"}
+    per_base: list = []    # (base, n, pnl)
 
     for base in bases:
         bd = datetime.strptime(base, "%Y-%m-%d").date()
@@ -178,7 +225,8 @@ def main():
                                          entry_type=getattr(mod, "ENTRY_TYPE", "stop"))
             if not res:
                 continue
-            for t in res["trade_log"]:
+            full = res["trade_log"]
+            for t in full:
                 if t.get("reason") in ("発注中", "保有中") or t.get("signal_dt") is None:
                     continue
                 sd = t["signal_dt"].date() if hasattr(t["signal_dt"], "date") else t["signal_dt"]
@@ -186,34 +234,53 @@ def main():
                 if not (bd <= sd <= oos_end):
                     continue
                 state = st.asof(pd.Timestamp(sd))
-                if state and state != "?":
-                    buckets[state].append(float(t["pnl"]))
-                by_month[pd.Timestamp(sd).strftime("%Y-%m")].append(float(t["pnl"]))
+                bt = asof_bt(full, mod, sd)   # 当時BTスコア(先読みなし)
+                TR.append({"pnl": float(t["pnl"]),
+                           "state": state if (state and state != "?") else None,
+                           "month": pd.Timestamp(sd).strftime("%Y-%m"),
+                           "bt": bt})
                 b_n += 1; b_pnl += float(t["pnl"])
         per_base.append((base, b_n, b_pnl))
         print(f"  {base}→+{args.interval_months}ヶ月: 選定{len(wl)}件 / OOS取引{b_n} / 損益{b_pnl:+,.0f}")
 
+    # ── BTフィルタ(状態別/月別に適用) ──
+    def _pnls(rows):
+        return [r["pnl"] for r in rows]
+    filt = [r for r in TR if args.min_bt <= 0 or (r["bt"] is not None and r["bt"] >= args.min_bt)]
+    bt_note = f" (BT≥{args.min_bt:.0f}のみ)" if args.min_bt > 0 else ""
+
     # ── 状態別集計 ──
-    print(f"\n{'状態':<14}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}{'平均/件':>11}")
+    print(f"\n【状態別{bt_note}】")
+    print(f"{'状態':<14}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}{'平均/件':>11}")
     print("-" * 62)
     for k in ["up", "wait", "range", "down"]:
-        pl = buckets.get(k, [])
-        n = len(pl)
-        if n == 0:
-            print(f"{LABELS[k]:<14}{0:>6}{'—':>7}{'—':>7}{'—':>15}{'—':>11}")
-            continue
-        wins = [p for p in pl if p > 0]
-        gp = sum(wins); gl = -sum(p for p in pl if p <= 0)
-        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
-        pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
-        tot = sum(pl)
-        print(f"{LABELS[k]:<14}{n:>6}{len(wins)/n*100:>6.0f}%{pf_s:>7}{tot:>+15,.0f}{tot/n:>+11,.0f}")
+        n, wr, pf_s, tot, avg = _agg(_pnls([r for r in filt if r["state"] == k]))
+        print(f"{LABELS[k]:<14}{n:>6}{wr:>7}{pf_s:>7}{tot:>15}{avg:>11}")
     print("-" * 62)
     print("これは look-ahead を排除した OOS 成績(各時点で選定→直後だけ運用)。")
-    print("『🟡 横ばい待ち』の行が、今のような調整局面での現行戦略の本物の期待値。")
+
+    # ── BT帯別集計(常に全トレードで表示) ──
+    print(f"\n【BTスコア帯別(当時BT・先読みなし)】")
+    print(f"{'BT帯':<14}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}{'平均/件':>11}")
+    print("-" * 62)
+    _bt_bands = [("BT≥70", 70, 1e9), ("BT60-69", 60, 70), ("BT40-59", 40, 60),
+                 ("BT<40", -1e9, 40), ("スコアなし", None, None)]
+    for lbl, lo, hi in _bt_bands:
+        if lo is None:
+            rows = [r for r in TR if r["bt"] is None]
+        else:
+            rows = [r for r in TR if r["bt"] is not None and lo <= r["bt"] < hi]
+        n, wr, pf_s, tot, avg = _agg(_pnls(rows))
+        print(f"{lbl:<14}{n:>6}{wr:>7}{pf_s:>7}{tot:>15}{avg:>11}")
+    print("-" * 62)
+    print("↑ BT≥70/≥60 だけOOSでプラスなら『高BTに絞れば本物』。全帯マイナスなら選定自体が過学習。")
 
     if args.monthly:
-        print(f"\n{'月':<9}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}")
+        by_month: dict = defaultdict(list)
+        for r in filt:
+            by_month[r["month"]].append(r["pnl"])
+        print(f"\n【月別{bt_note}】")
+        print(f"{'月':<9}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}")
         print("-" * 46)
         for mk in sorted(by_month):
             pl = by_month[mk]
