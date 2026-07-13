@@ -31,6 +31,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--bases", default=None, help="基準日をカンマ区切りで(省略時はCSVから自動検出)")
 ap.add_argument("--interval-months", type=int, default=12, help="各基準月のOOS窓(=再選定間隔)")
 ap.add_argument("--per-strategy", type=int, default=10)
+ap.add_argument("--monthly", action="store_true", help="OOSトレードを月別にも集計して表示")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--max-dd", type=float, default=15.0)
@@ -146,6 +147,7 @@ def main():
 
     today = ble._TODAY
     buckets: dict = defaultdict(list)     # state -> [pnl,...]
+    by_month: dict = defaultdict(list)    # 'YYYY-MM' -> [pnl,...]
     per_base: list = []                   # (base, n, pnl)
 
     for base in bases:
@@ -186,6 +188,7 @@ def main():
                 state = st.asof(pd.Timestamp(sd))
                 if state and state != "?":
                     buckets[state].append(float(t["pnl"]))
+                by_month[pd.Timestamp(sd).strftime("%Y-%m")].append(float(t["pnl"]))
                 b_n += 1; b_pnl += float(t["pnl"])
         per_base.append((base, b_n, b_pnl))
         print(f"  {base}→+{args.interval_months}ヶ月: 選定{len(wl)}件 / OOS取引{b_n} / 損益{b_pnl:+,.0f}")
@@ -208,6 +211,21 @@ def main():
     print("-" * 62)
     print("これは look-ahead を排除した OOS 成績(各時点で選定→直後だけ運用)。")
     print("『🟡 横ばい待ち』の行が、今のような調整局面での現行戦略の本物の期待値。")
+
+    if args.monthly:
+        print(f"\n{'月':<9}{'取引':>6}{'勝率':>7}{'PF':>7}{'損益':>15}")
+        print("-" * 46)
+        for mk in sorted(by_month):
+            pl = by_month[mk]
+            n = len(pl)
+            wins = [p for p in pl if p > 0]
+            gp = sum(wins); gl = -sum(p for p in pl if p <= 0)
+            pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+            pf_s = "∞" if pf == float("inf") else f"{pf:.2f}"
+            print(f"{mk:<9}{n:>6}{len(wins)/n*100:>6.0f}%{pf_s:>7}{sum(pl):>+15,.0f}")
+        print("-" * 46)
+        print("↑ 各月の『本物のOOS』損益。レポート月別(現WATCHLISTを過去に当てた値=汚染)と")
+        print("  比べると、holdout短設定の in-sample 分がどれだけ数字を盛っていたかが分かる。")
 
 
 if __name__ == "__main__":
