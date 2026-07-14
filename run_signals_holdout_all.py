@@ -118,9 +118,9 @@ _pre.add_argument("--open-confirm", action="store_true",
                   help="⑭寄り確認タブを計算する(5分足を読むので重い)。"
                        "未指定でもキャッシュがあれば表示。既定OFFで日次レポートを軽量化")
 _pre.add_argument("--no-analysis", action="store_true",
-                  help="詳細分析タブ群(最大保有日数比較・損切り幅別・寄り付き方向・"
-                       "下落深さ別・逆張りショート・含み損カーブ・em比較)を丸ごとスキップ。"
-                       "過去検証で損益タブだけ高速に見たいときに使う")
+                  help="重い解析タブ(詳細分析タブ群・約定タイミング・期間別パネル30/60/…日)"
+                       "をスキップして高速化。相場環境・トレンド期間・エントリー分析・"
+                       "銘柄詳細の相場コンテキストタブは計算する(シグナル+損益+相場は残る)")
 _pre.add_argument("--forward-days", type=int, default=0,
                   help="過去検証(--date)で損益タブを『基準日〜基準日+N日』だけ集計する。"
                        "現在まで走らせないので軽量。例: --forward-days 365 で基準月+1年。"
@@ -927,20 +927,18 @@ try:
                 _na_r, _na_ref, indicators=_na_indicators, periods=_na_periods)
         except Exception as _e1:
             print(f"[WARN] 相場環境タブ失敗: {_e1}\n{_tb_mkt.format_exc()}", flush=True)
-        # --no-analysis: トレンド期間・エントリー分析タブはスキップ(シグナル+損益だけ高速に)
-        if getattr(_args, "no_analysis", False):
-            print("トレンド期間・エントリー分析タブ: スキップ (--no-analysis)", flush=True)
-        else:
-            try:
-                _market_tab2_html = _na._tab2_trend_html(
-                    _na_close, _na_trend, _na_periods, _na_years)
-            except Exception as _e2t:
-                print(f"[WARN] トレンド期間タブ失敗: {_e2t}\n{_tb_mkt.format_exc()}", flush=True)
-            try:
-                _market_tab3_html = _na._tab3_timing_html(
-                    _na_close, _na_up_p, _na_all_stats)
-            except Exception as _e3t:
-                print(f"[WARN] エントリー分析タブ失敗: {_e3t}\n{_tb_mkt.format_exc()}", flush=True)
+        # 相場環境/トレンド期間/エントリー分析は日経データ1回で作れる軽い相場コンテキスト。
+        # --no-analysis でも計算する(重いのは期間別パネル/詳細分析/約定タイミングの方)。
+        try:
+            _market_tab2_html = _na._tab2_trend_html(
+                _na_close, _na_trend, _na_periods, _na_years)
+        except Exception as _e2t:
+            print(f"[WARN] トレンド期間タブ失敗: {_e2t}\n{_tb_mkt.format_exc()}", flush=True)
+        try:
+            _market_tab3_html = _na._tab3_timing_html(
+                _na_close, _na_up_p, _na_all_stats)
+        except Exception as _e3t:
+            print(f"[WARN] エントリー分析タブ失敗: {_e3t}\n{_tb_mkt.format_exc()}", flush=True)
         print("市場分析タブ生成完了", flush=True)
 except Exception as _me:
     import traceback as _tb_mkt2
@@ -1422,9 +1420,8 @@ for _sig in _na._last_signals:
 
 _sym_tab_nav   = ""
 _sym_tab_panes = ""
-if getattr(_args, "no_analysis", False):
-    print("銘柄詳細タブ: スキップ (--no-analysis)", flush=True)
-    _signal_stocks = []   # ループを回さず銘柄詳細タブを生成しない
+# 銘柄詳細は「本日シグナルが出た銘柄」だけの相場コンテキストなので --no-analysis でも計算する
+# (重い期間別パネル/詳細分析/約定タイミングだけをスキップする)。
 for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
     _tid     = f"sym_{_sym.replace('.','_')}"
     _active  = "active" if _i == 0 else ""
