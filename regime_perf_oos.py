@@ -56,6 +56,8 @@ ap.add_argument("--losers", action="store_true",
                 help="勝ち銘柄top-Nでなく『それまでの累積損益ワーストN』を選定(as-of)。--mirrorと併用してフェード検証")
 ap.add_argument("--max-hold", type=int, default=0,
                 help="保有上限(タイムカット)日数を上書き(例3=3日で終値決済)。ミラーの早期利確検証用。0=既定(戦略別)")
+ap.add_argument("--holdout-select", action="store_true",
+                help="6つのholdout窓(HO30〜180d)の各top-Nを統合して選定(walkforward_*_holdout{N}d_{base}.csv を使用)")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -139,33 +141,55 @@ def _detect_bases() -> list[str]:
     return sorted(bases)
 
 
+HOLDOUT_WINDOWS = (30, 60, 90, 120, 150, 180)
+
+
+def _rank_topN(rows: list) -> list:
+    """1つのCSVの行から、選定条件でフィルタ→ソート→top-N を返す。"""
+    if args.losers:
+        # 累積損益ワーストN(as-of): total_test_pnl が最も低い銘柄を選ぶ(DD制約なし)
+        filt = [r for r in rows
+                if float(r.get("total_test_pnl", 0) or 0) < 0
+                and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
+        filt.sort(key=lambda r: float(r.get("total_test_pnl", 0) or 0))  # 昇順=最悪が先頭
+    else:
+        # 従来: 勝ち銘柄top-N
+        filt = [r for r in rows
+                if float(r.get("total_test_pnl", 0) or 0) > 0
+                and float(r.get("max_drawdown_pct", 999) or 999) <= args.max_dd
+                and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
+        filt.sort(key=lambda r: -float(r.get("total_test_pnl", 0) or 0))
+    return filt[: args.per_strategy]
+
+
+def _read_csv(path: str) -> list:
+    try:
+        return list(csv.DictReader(open(path, encoding="utf-8")))
+    except Exception:
+        return []
+
+
 def _select_watchlist(base: str) -> dict:
-    """基準日 base の as-of CSV から WATCHLIST を選定(TEST損益>0 / DD<=15 / 価格帯 / top-N)。"""
+    """基準日 base の CSV から WATCHLIST を選定(TEST損益>0 / DD<=15 / 価格帯 / top-N)。
+    --holdout-select 時は6つのholdout窓(HO30〜180d)それぞれの top-N を統合(重複除去)する。"""
     wl = {}
     for strat in STRATS:
-        pat = f"walkforward_results/walkforward_{strat}{MODE_SUFFIX}_{base}.csv"
-        for f in glob.glob(pat):
-            if "holdout" in os.path.basename(f):
-                continue
-            try:
-                rows = list(csv.DictReader(open(f, encoding="utf-8")))
-            except Exception:
-                continue
-            if args.losers:
-                # 累積損益ワーストN(as-of): total_test_pnl が最も低い銘柄を選ぶ(DD制約なし)
-                filt = [r for r in rows
-                        if float(r.get("total_test_pnl", 0) or 0) < 0
-                        and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
-                filt.sort(key=lambda r: float(r.get("total_test_pnl", 0) or 0))  # 昇順=最悪が先頭
-            else:
-                # 従来: 勝ち銘柄top-N
-                filt = [r for r in rows
-                        if float(r.get("total_test_pnl", 0) or 0) > 0
-                        and float(r.get("max_drawdown_pct", 999) or 999) <= args.max_dd
-                        and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
-                filt.sort(key=lambda r: -float(r.get("total_test_pnl", 0) or 0))
-            for r in filt[: args.per_strategy]:
-                wl[(r["symbol"], strat)] = r.get("name", "")
+        if args.holdout_select:
+            # 6つのholdout窓それぞれから各top-Nを取り、統合(top10を弱いランクで薄めない)
+            for hd in HOLDOUT_WINDOWS:
+                path = (f"walkforward_results/walkforward_{strat}{MODE_SUFFIX}"
+                        f"_holdout{hd}d_{base}.csv")
+                for r in _rank_topN(_read_csv(path)):
+                    if r.get("symbol"):
+                        wl[(r["symbol"], strat)] = r.get("name", "")
+        else:
+            pat = f"walkforward_results/walkforward_{strat}{MODE_SUFFIX}_{base}.csv"
+            for f in glob.glob(pat):
+                if "holdout" in os.path.basename(f):
+                    continue
+                for r in _rank_topN(_read_csv(f)):
+                    if r.get("symbol"):
+                        wl[(r["symbol"], strat)] = r.get("name", "")
     return wl
 
 
