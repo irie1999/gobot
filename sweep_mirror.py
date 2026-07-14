@@ -13,9 +13,13 @@ regime_perf_oos.py を組合せぶん呼び出し、各設定の BT<40 帯 OOS �
   python sweep_mirror.py --years 8 --interval-months 6
 """
 import argparse
+import os
 import re
 import subprocess
 import sys
+
+# 子プロセス(regime_perf_oos)に UTF-8 で出力させる (Windows cp932 での文字化け/クラッシュ回避)
+_CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--holds", default="1,2,3,5,10", help="保有日数をカンマ区切り")
@@ -53,7 +57,8 @@ def run_one(sel_args, hold):
            "--min-price", str(args.min_price),
            "--max-price", str(args.max_price)] + sel_args
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=_CHILD_ENV)
     except Exception as e:
         return None, f"err({e})"
     out = r.stdout or ""
