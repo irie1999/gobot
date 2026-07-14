@@ -324,8 +324,10 @@ class KabuClient:
         return []
 
     # ── 発注 (POST) ──────────────────────────────────────────
-    def _post_order(self, body: dict, label: str) -> dict:
-        """sendorder の共通処理。dry_run なら送信せず内容を表示。"""
+    def _post_order(self, body: dict, label: str, quiet: bool = False) -> dict:
+        """sendorder の共通処理。dry_run なら送信せず内容を表示。
+        quiet=True のとき失敗時のエラー表示を抑制する(利確補完など、既に注文が
+        あって毎回同じエラーで失敗する定期発注のログ氾濫を防ぐ用)。"""
         if self.dry_run:
             print(f"  [dry-run] {label}: {body}")
             return {"Result": 0, "OrderId": "DRYRUN", "_dry_run": True}
@@ -339,13 +341,15 @@ class KabuClient:
         except Exception:
             res = {"_raw": r.text}
         if not r.ok:
-            print(f"  ✗ {label} HTTP {r.status_code}: {res}")
-            body_display = dict(body, Password="***")
-            print(f"    送信ボディ: {body_display}")
+            if not quiet:
+                print(f"  ✗ {label} HTTP {r.status_code}: {res}")
+                body_display = dict(body, Password="***")
+                print(f"    送信ボディ: {body_display}")
             return {"Result": -1, "_http_status": r.status_code, **(
                 res if isinstance(res, dict) else {})}
         if res.get("Result") != 0:
-            print(f"  ✗ {label} 発注失敗: {res}")
+            if not quiet:
+                print(f"  ✗ {label} 発注失敗: {res}")
         else:
             print(f"  ✓ {label} 発注成功 OrderId={res.get('OrderId')}")
         return res
@@ -410,7 +414,8 @@ class KabuClient:
                  order_type: str = "market",
                  close_positions: list[dict] | None = None,
                  expire_day: int | None = None,
-                 omit_close_positions: bool = False) -> dict:
+                 omit_close_positions: bool = False,
+                 quiet: bool = False) -> dict:
         """買い注文 (新規エントリー or 信用返済の買戻し)。
 
         order_type:
@@ -464,14 +469,15 @@ class KabuClient:
 
         kind = ("信用返済(買戻)" if cash_margin == CASH_MARGIN_CLOSE
                 else "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物")
-        return self._post_order(body, f"{label} ({kind})")
+        return self._post_order(body, f"{label} ({kind})", quiet=quiet)
 
     def send_sell(self, symbol: int | str, qty: int, price: float | None = None,
                   cash_margin: int = CASH_MARGIN_CLOSE,
                   order_type: str = "market",
                   close_positions: list[dict] | None = None,
                   expire_day: int | None = None,
-                  omit_close_positions: bool = False) -> dict:
+                  omit_close_positions: bool = False,
+                  quiet: bool = False) -> dict:
         """普通の売り注文 (現物売り or 信用返済売り)。
 
         order_type:
@@ -524,7 +530,7 @@ class KabuClient:
                 # cp is None (取得失敗): ClosePositions を付けず自動割当てに任せる
 
         kind = "信用返済" if cash_margin == CASH_MARGIN_CLOSE else "現物売"
-        return self._post_order(body, f"{label} ({kind})")
+        return self._post_order(body, f"{label} ({kind})", quiet=quiet)
 
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
                        cash_margin: int = CASH_GENBUTSU,

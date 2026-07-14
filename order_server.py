@@ -292,13 +292,16 @@ def _place_target_now(cli, p: dict, existing=None) -> str:
         cand = [n for n in cand if not (n in _seen or _seen.add(n))]
 
     def _send(expire):
+        # quiet=True: 既に利確があって毎回 Code8 等で失敗する定期補完のログ氾濫を抑制
+        # (失敗は戻り値 res で判定し、成功時のみ上位が表示する)。
         if side == "short":
             return cli.send_buy(symbol, qty=qty, price=price, order_type="limit",
                                 cash_margin=3, expire_day=expire,
-                                close_positions=cp)   # 信用返済(買戻)
+                                close_positions=cp, quiet=True)   # 信用返済(買戻)
         cm = 1 if GENBUTSU else 3   # 現物売(1) / 信用返済売(3)
         return cli.send_sell(symbol, qty=qty, price=price, order_type="limit",
-                             cash_margin=cm, expire_day=expire, close_positions=cp)
+                             cash_margin=cm, expire_day=expire, close_positions=cp,
+                             quiet=True)
 
     res = None
     for n in cand:
