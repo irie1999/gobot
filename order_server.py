@@ -605,8 +605,11 @@ def _backfill_targets(cli) -> None:
             _BACKFILL_COOLDOWN_UNTIL = datetime.now(JST) + timedelta(minutes=30)
             print("  ⏸ 場が引けているため利確補完を30分休止します(市場が開いたら自動再開)")
             return
-        # 発注/失敗のときのみ表示(exists は静かに)。
-        if st not in ("exists", "exists(建玉拘束)"):
+        # 実際に発注できたときのみ表示。失敗(fail/skip)・exists は無駄なので出さない
+        # (Code8「決済指定内容に誤り」等で毎回失敗する建玉のログ氾濫を止める)。
+        _st_str = str(st)
+        _placed = ("placed" in _st_str) or ("exp=" in _st_str)
+        if _placed:
             _hl = f" 建玉{hold_id[:8]}" if hold_id else ""
             print(f"    ▸ {sym}{_hl} 目標={float(_tgt):,.0f} 情報源={_src} 約定値={_fp:,.0f}")
             print(f"  🎯 利確補完(接続時) {sym} {side}{_hl} @{float(_tgt):,.0f} x{qty} : {st}")
