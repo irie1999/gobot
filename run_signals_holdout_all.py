@@ -757,6 +757,13 @@ if _args.long_stop_short:
     _bte._ENTRY_TYPE_FORCE = "stop_sell"   # ロング銘柄を逆指値の空売りで評価
     print("[LSS] ロング銘柄を逆指値空売り(stop_sell)で評価(下ブレイク継続)")
 
+# mirror/lss は「検証専用」モード: 実発注用の signals_latest.json や共有スコア
+# キャッシュを上書きしない(発注サーバが誤モードのシグナルを掴むのを防ぐ)。
+_analysis_only = bool(_args.mirror or _args.long_stop_short)
+
+class _AnalysisOnlySkip(Exception):
+    """分析専用モードで JSON/キャッシュ書き出しを飛ばすための番兵。"""
+
 # ── nikkei_analysis をインポートして PNL_CONFIGS を注入 ───────────────────────
 # nikkei_analysis は import 時に _stop/_brk を reload する。
 # WATCHLIST が上書きされないよう、reload 後に元に戻す。
@@ -1080,19 +1087,28 @@ if _precompute_risks and _sig_sym_map:
 elif not _sig_sym_map:
     print("[INFO] シグナルなし — リスクチェックスキップ", flush=True)
 
-# キャッシュ保存
-try:
-    _score_cache_path.write_text(
-        _json.dumps(_score_cache, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"[INFO] シグナルスコアキャッシュ: {len(_score_cache)}件保存", flush=True)
-except Exception as _e:
-    print(f"[WARN] キャッシュ保存失敗: {_e}", flush=True)
+# キャッシュ保存 (mirror/lss は共有スコアキャッシュを汚さないためスキップ)
+if _analysis_only:
+    print("[INFO] mirror/lss は分析専用: signal_score_cache.json 保存スキップ", flush=True)
+else:
+    try:
+        _score_cache_path.write_text(
+            _json.dumps(_score_cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[INFO] シグナルスコアキャッシュ: {len(_score_cache)}件保存", flush=True)
+    except Exception as _e:
+        print(f"[WARN] キャッシュ保存失敗: {_e}", flush=True)
 
 # ── シグナルを JSON へエクスポート (position_server の /signals が読む) ─────────
 # ロング → signals_latest.json / ショート → signals_latest_short.json
 # position_server.py からワンクリック登録できるよう、確定シグナルを永続化する。
+# ※ mirror/lss は分析専用モード。実発注用の signals_latest.json を上書きすると
+#   発注サーバが誤ったモードのシグナルを掴むため、JSON書き出しをスキップする。
+if _analysis_only:
+    print("[INFO] mirror/lss は分析専用: signals_latest.json 書き出しスキップ", flush=True)
 try:
+    if _analysis_only:
+        raise _AnalysisOnlySkip()
     _sig_export = []
     for _s in _na._last_signals:
         try:
@@ -1140,6 +1156,8 @@ try:
     _sig_dated = Path(f"signals_{_cache_date}{'_short' if _args.short else ''}.json")
     _sig_dated.write_text(_sig_payload, encoding="utf-8")
     print(f"[INFO] シグナルJSON書き出し: {_sig_out.name} + {_sig_dated.name} ({len(_merged)}件, うち今回{len(_sig_export)}件)", flush=True)
+except _AnalysisOnlySkip:
+    pass
 except Exception as _e:
     print(f"[WARN] シグナルJSON書き出し失敗: {_e}", flush=True)
 
@@ -1899,7 +1917,16 @@ html = f"""<!DOCTYPE html>
 </html>"""
 
 _sym_suffix    = f"_{_sym_arg.replace('.', '')}" if _args.symbol else ""
-_short_suffix  = "_short" if _args.short else ""
+# モード接頭辞: mirror(ロングミラー) / lss(ロング銘柄ショート) / short(ショート)。
+# --both ラッパーが参照するファイル名と一致させる必要がある。
+if _args.mirror:
+    _short_suffix = "_mirror"
+elif _args.long_stop_short:
+    _short_suffix = "_lss"
+elif _args.short:
+    _short_suffix = "_short"
+else:
+    _short_suffix = ""
 _output_suffix = _args.output_suffix if _args.output_suffix else ""
 out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}_{date_str}{_output_suffix}.html")
 # 巨大HTMLを write_text で一括書き込みすると str→bytes 変換でピークメモリが約2倍
