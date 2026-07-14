@@ -1839,10 +1839,12 @@ html = f"""<!DOCTYPE html>
 </div>
 
 <div id="ho-mkt2" class="ho-outer-pane">
+<div style="color:#60a5fa;padding:6px 10px;border:1px solid #334155;border-radius:6px;margin-bottom:8px;font-size:0.8rem">▼ トレンド期間（内容 {len(_market_tab2_html or '')} 文字・生成 {date_str}）</div>
 {_market_tab2_html or '<p style="color:#f87171;padding:20px">トレンド期間データが空です（市場データ取得を確認してください）</p>'}
 </div>
 
 <div id="ho-mkt3" class="ho-outer-pane">
+<div style="color:#60a5fa;padding:6px 10px;border:1px solid #334155;border-radius:6px;margin-bottom:8px;font-size:0.8rem">▼ エントリー分析（内容 {len(_market_tab3_html or '')} 文字・生成 {date_str}）</div>
 {_market_tab3_html or '<p style="color:#f87171;padding:20px">エントリー分析データが空です（市場データ取得を確認してください）</p>'}
 </div>
 {_sym_detail_tab_pane}
