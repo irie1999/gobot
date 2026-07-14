@@ -43,6 +43,8 @@ ap.add_argument("--days", type=int, default=365 * 3, help="バックテスト期
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--short", action="store_true", help="ショートミラー(下ブレイク→買い)も含める")
 ap.add_argument("--out", default="mirror_features.csv")
+ap.add_argument("--split-date", default=None,
+                help="この日付でTRAIN(前)/TEST=OOS(後)に分割。TRAINで見つけた帯がTESTで再現するか検証 例2025-07-01")
 ap.add_argument("--slip", type=float, default=0.0,
                 help="スリッページ(既定0=幻の利益を排除)。0以外だとミラーが水増しされるので特徴発見には0推奨")
 ap.add_argument("--fee", type=float, default=0.0, help="片道手数料(既定0)")
@@ -194,18 +196,7 @@ def process(sym: str, name: str) -> list:
     return rows
 
 
-def analyze(rows: list) -> None:
-    df = pd.DataFrame(rows)
-    print("\n" + "=" * 74)
-    print("全体")
-    print("=" * 74)
-    print(f"信号数 {len(df):,} / 勝率 {df['mirror_win'].mean()*100:.1f}% / "
-          f"平均ミラー損益 {df['mirror_pnl'].mean():+,.0f} / 合計 {df['mirror_pnl'].sum():+,.0f}")
-    # side別
-    for sd in df["side"].unique():
-        s = df[df["side"] == sd]
-        print(f"  [{sd}] 信号{len(s):,} 勝率{s['mirror_win'].mean()*100:.1f}% "
-              f"平均{s['mirror_pnl'].mean():+,.0f}")
+def _single_period_buckets(df: pd.DataFrame) -> None:
     print("\n特徴量ごとの5分位バケット(フェード成功=勝率/平均が高い帯を探す):")
     for col in FEAT_COLS:
         s = pd.to_numeric(df[col], errors="coerce")
@@ -222,6 +213,54 @@ def analyze(rows: list) -> None:
             lo, hi = sub["_v"].min(), sub["_v"].max()
             print(f"  Q{int(q)+1} [{lo:9.2f}〜{hi:9.2f}]  n={len(sub):5d}  "
                   f"勝率{sub['mirror_win'].mean()*100:5.1f}%  平均{sub['mirror_pnl'].mean():+8,.0f}")
+
+
+def _train_test_buckets(df: pd.DataFrame, split_date: str) -> None:
+    cut = pd.Timestamp(split_date)
+    df = df.assign(_d=pd.to_datetime(df["signal_dt"], errors="coerce"))
+    tr = df[df["_d"] < cut].copy()
+    te = df[df["_d"] >= cut].copy()
+    print(f"\nTRAIN(〜{split_date}) {len(tr):,}件 勝率{tr['mirror_win'].mean()*100:.1f}%"
+          f"  |  TEST/OOS({split_date}〜) {len(te):,}件 勝率{te['mirror_win'].mean()*100:.1f}%")
+    print("\n各特徴の5分位: TRAIN勝率 → TEST勝率 (両方55%超で一致する帯=再現する本物のフィルタ)")
+    for col in FEAT_COLS:
+        trv = pd.to_numeric(tr[col], errors="coerce")
+        tev = pd.to_numeric(te[col], errors="coerce")
+        dv = trv.dropna()
+        if len(dv) < 100:
+            continue
+        try:
+            _, edges = pd.qcut(dv, 5, retbins=True, duplicates="drop")
+        except Exception:
+            continue
+        tr["_b"] = pd.cut(trv, bins=edges, labels=False, include_lowest=True)
+        te["_b"] = pd.cut(tev, bins=edges, labels=False, include_lowest=True)
+        print(f"\n■ {col}")
+        for b in range(len(edges) - 1):
+            ts = tr[tr["_b"] == b]
+            es = te[te["_b"] == b]
+            tw = ts["mirror_win"].mean() * 100 if len(ts) else float("nan")
+            ew = es["mirror_win"].mean() * 100 if len(es) else float("nan")
+            ep = es["mirror_pnl"].mean() if len(es) else float("nan")
+            print(f"  Q{b+1} [{edges[b]:9.2f}〜{edges[b+1]:9.2f}]  "
+                  f"TRAIN n={len(ts):5d} {tw:5.1f}%  →  TEST n={len(es):5d} {ew:5.1f}% 平均{ep:+7,.0f}")
+
+
+def analyze(rows: list, split_date: str | None = None) -> None:
+    df = pd.DataFrame(rows)
+    print("\n" + "=" * 74)
+    print("全体")
+    print("=" * 74)
+    print(f"信号数 {len(df):,} / 勝率 {df['mirror_win'].mean()*100:.1f}% / "
+          f"平均ミラー損益 {df['mirror_pnl'].mean():+,.0f} / 合計 {df['mirror_pnl'].sum():+,.0f}")
+    for sd in df["side"].unique():
+        s = df[df["side"] == sd]
+        print(f"  [{sd}] 信号{len(s):,} 勝率{s['mirror_win'].mean()*100:.1f}% "
+              f"平均{s['mirror_pnl'].mean():+,.0f}")
+    if split_date:
+        _train_test_buckets(df, split_date)
+    else:
+        _single_period_buckets(df)
 
 
 def main() -> int:
@@ -254,7 +293,7 @@ def main() -> int:
         w.writeheader()
         w.writerows(all_rows)
     print(f"データセット出力: {args.out}")
-    analyze(all_rows)
+    analyze(all_rows, args.split_date)
     print("\n※ ここから『勝率/平均が高い帯』を組み合わせてフィルタ法則を作り、"
           "別期間(train/test)で再現するか検証するのが次の一歩。")
     return 0
