@@ -888,6 +888,16 @@ def _make_cached_bt(orig_fn):
             except Exception:
                 pass
         key  = f"{symbol}|{strategy}|{mode}{_cache_settings}{mh_key}"
+        # ミラー/空売り/同日決済(max_hold=0)の状態をキーに含める。
+        # これが無いと、旧バージョン(例: lss が同日決済でなかった頃)の
+        # bt_{mirror,lss}_*.pkl キャッシュを誤って再利用し、保有日数や損益が
+        # 古い挙動のまま表示されてしまう。フラグが立つ mirror/lss のみ付与する
+        # ので、ロング/ショートの既存キャッシュキーは不変(再計算を強制しない)。
+        _mhf = getattr(_bte, "_MAX_HOLD_FORCE", None)
+        if getattr(_bte, "_MIRROR_PNL", False) or getattr(_bte, "_ENTRY_TYPE_FORCE", None) or _mhf is not None:
+            key += (f"|MIR{int(bool(getattr(_bte, '_MIRROR_PNL', False)))}"
+                    f"|ET{getattr(_bte, '_ENTRY_TYPE_FORCE', None) or ''}"
+                    f"|MHF{_mhf if _mhf is not None else ''}")
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
             _bt_cache_dirty["n"] += 1

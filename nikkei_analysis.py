@@ -8906,6 +8906,15 @@ function switchTbd(id, tab) {{
     )
     _bt70_entry_by_date, _sorted_bt70_entry_dates = _build_entry_grid(_bt70_entry_sorted, "b")
 
+    # BT40以下(ロングが弱い銘柄)のエントリー日別グリッド。mirror/lss では
+    # _LONG_BT_REF(ロングの真のBT)で判定(_eff_long_bt)。
+    _bt40_entry_sorted = pending_trades + sorted(
+        [t for t in done_trades if _eff_long_bt(t) < 40],
+        key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
+        reverse=True
+    )
+    _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
+
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
         from collections import OrderedDict
@@ -11170,6 +11179,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#6d28d9">🪞 BT40以下 <span style="font-size:0.72rem;color:#c4b5fd">({len(bt40_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#6d28d9">🪞 BT40×エントリー日別 <span style="font-size:0.72rem;color:#c4b5fd">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -11219,6 +11229,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(entry_sorted_trades)}
 {_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
+</div>
+<div id="detail_{_dseq}_bt40entry" class="detail-tab-pane">
+<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">🪞 ロングBT40未満（ロングが弱い銘柄）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_summary_html(_bt40_entry_sorted)}
+{_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
 </div>
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
@@ -11272,14 +11287,14 @@ function switchOvBt(uid, key) {{
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt40','bt70','entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
+  ['all','bt40','bt70','entry','bt40entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = ['all','bt40','bt70','entry','bt70entry','exit','bt70exit'];
+    var order = ['all','bt40','bt70','entry','bt40entry','bt70entry','exit','bt70exit'];
     btns.forEach(function(b, i) {{
       b.classList.toggle('active', (!closing) && order[i] === which);
     }});
