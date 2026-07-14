@@ -1757,6 +1757,9 @@ function switchHoTab(tab) {
   document.querySelectorAll('.ho-outer-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('ho-' + tab).classList.add('active');
   (event.target.closest('.ho-outer-btn') || event.target).classList.add('active');
+  // 縦長タブ(損益)で下までスクロール→短いタブへ切替時に、スクロール位置が下のまま
+  // 残ると内容より下の余白が見えて「空白」に見える。切替時は先頭へ戻す。
+  window.scrollTo(0, 0);
 }
 function switchHoPeriod(days) {
   document.querySelectorAll('.ho-period-pane').forEach(p => p.style.display = 'none');
