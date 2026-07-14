@@ -64,6 +64,26 @@ _PNL_ENTRY_MAX_PRICE = 0.0
 _PNL_BT_MAX = 0.0
 _PNL_BT_MIN = 0.0
 _LONG_BT_REF: dict[tuple, float] = {}   # (symbol, strategy) -> ロングBTスコア
+
+
+def _bt_filter_banner_html() -> str:
+    """ロングBTフィルタが有効なとき、損益タブに表示する説明バナー(mirror/lss用)。"""
+    if not (_PNL_BT_MAX > 0 or _PNL_BT_MIN > 0):
+        return ""
+    _lo = f"{_PNL_BT_MIN:.0f} ≤ " if _PNL_BT_MIN > 0 else ""
+    _hi = f" &lt; {_PNL_BT_MAX:.0f}" if _PNL_BT_MAX > 0 else ""
+    _src = "別途測定したロングBT" if _LONG_BT_REF else "現レポートのBT"
+    return (
+        '<div style="margin:10px 0 14px;padding:10px 14px;border-radius:8px;'
+        'background:#1e1b2e;border:1px solid #6d28d9;color:#ddd6fe;font-size:0.86rem">'
+        f'🔎 <b>ロングBTフィルタ有効</b>: この損益レポートは全体で '
+        f'<b style="color:#c4b5fd">ロングBT {_lo}銘柄{_hi}</b> '
+        'の銘柄だけを集計しています（＝ロングが弱い銘柄をフェード）。'
+        '上の月別グリッド・KPI・下の取引明細すべてに適用済み。<br>'
+        f'<span style="color:#a5b4fc;font-size:0.78rem">判定は{_src}で行っています。'
+        '閾値は <code>--bt-max</code> / <code>--bt-min</code> で変更できます。</span>'
+        '</div>'
+    )
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
@@ -10949,6 +10969,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
+{_bt_filter_banner_html()}
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
