@@ -29,7 +29,7 @@ ap.add_argument("--interval-months", type=int, default=6)
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--fee", type=float, default=0.0,
-                help="片道手数料/コスト(例0.001=往復0.2%相当)。ミラーのコスト評価はコレを使う(正しく差し引かれる)")
+                help="片道手数料/コスト(例0.001=往復0.2%%相当)。ミラーのコスト評価はコレを使う(正しく差し引かれる)")
 ap.add_argument("--slip", type=float, default=0.0,
                 help="スリッページ。※ミラーでは幻の利益として加算されるので、コスト評価には使わない(--feeを使う)")
 args = ap.parse_args()
