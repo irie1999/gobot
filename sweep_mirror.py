@@ -28,6 +28,10 @@ ap.add_argument("--years", type=int, default=8)
 ap.add_argument("--interval-months", type=int, default=6)
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
+ap.add_argument("--fee", type=float, default=0.0,
+                help="片道手数料/コスト(例0.001=往復0.2%相当)。ミラーのコスト評価はコレを使う(正しく差し引かれる)")
+ap.add_argument("--slip", type=float, default=0.0,
+                help="スリッページ。※ミラーでは幻の利益として加算されるので、コスト評価には使わない(--feeを使う)")
 args = ap.parse_args()
 
 HOLDS = [int(x) for x in args.holds.split(",") if x.strip()]
@@ -53,7 +57,7 @@ def run_one(sel_args, hold):
            "--years", str(args.years),
            "--interval-months", str(args.interval_months),
            "--mirror", "--max-hold", str(hold),
-           "--slip", "0", "--fee", "0",
+           "--slip", str(args.slip), "--fee", str(args.fee),
            "--min-price", str(args.min_price),
            "--max-price", str(args.max_price)] + sel_args
     try:
@@ -73,9 +77,11 @@ def run_one(sel_args, hold):
 
 
 def main():
+    _cost = ("摩擦ゼロ" if (args.fee == 0 and args.slip == 0)
+             else f"手数料片道{args.fee*100:.2f}%% / スリッページ{args.slip*100:.2f}%%".replace("%%", "%"))
     print("=" * 70)
     print(f"ミラー グリッド検証  {BAND_LABEL} 帯 / {args.years}年 / "
-          f"再選定{args.interval_months}ヶ月 / 価格{args.min_price:.0f}-{args.max_price:.0f} / 摩擦ゼロ")
+          f"再選定{args.interval_months}ヶ月 / 価格{args.min_price:.0f}-{args.max_price:.0f} / {_cost}")
     print("=" * 70)
     print(f"※ 各セルは『{BAND_LABEL} 帯』のOOS損益（先読みなし）。上=損益 / 下=PF・勝率・取引数\n")
 
