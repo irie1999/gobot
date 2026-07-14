@@ -555,9 +555,9 @@ def judge(script: dict, r: dict) -> tuple[str, str, str]:
 
     if "nolimit" in cmd:
         if trend == "down":
-            return "❌ 停止", f"トレンド下落 (MA10<MA25)", "相場回復まで使用停止"
+            return "❌ 停止", f"トレンド下落 (MA10&lt;MA25)", "相場回復まで使用停止"
         if not above:
-            return "❌ 停止", f"日経 < MA200 (長期下落トレンド)", "既存版のみに絞る"
+            return "❌ 停止", f"日経 &lt; MA200 (長期下落トレンド)", "既存版のみに絞る"
         if mom5 < -2.0:
             return "❌ 停止", f"5日騰落 {mom5:+.1f}% (急落中)", "反発確認後に再開"
         if mom5 >= 2.0 and mom20 >= 3.0 and trend == "up":
