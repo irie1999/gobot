@@ -36,6 +36,11 @@ import backtest_limit_entry as ble
 ap = argparse.ArgumentParser()
 ap.add_argument("--symbols", default=None,
                 help="ユニバースファイル(省略時 symbols_listed_prime.py → symbols_all.py)")
+ap.add_argument("--wf-base", default=None,
+                help="この基準日のWF勝ち銘柄top-Nを選定して対象にする(例2024-12-31)。"
+                     "選定は現行と同じ(total_test_pnl>0 top-N)。信号は基準日より後(OOS)のみ記録")
+ap.add_argument("--per-strategy", type=int, default=10, help="--wf-base時: 戦略あたり上位N銘柄")
+ap.add_argument("--max-dd", type=float, default=15.0, help="--wf-base時: 最大DD上限")
 ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(デバッグ)")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
@@ -67,6 +72,32 @@ if args.short:
 
 FEAT_COLS = ["price", "ext_ma5", "ext_ma25", "gap", "rsi2", "rsi14", "up_days",
              "atr_ratio", "ma200_pos", "ma200_slope", "vol_ratio", "ret5", "ret20"]
+
+
+_LONG_STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+
+
+def wf_selected_universe(base: str):
+    """基準日 base のWF CSVから勝ち銘柄top-Nを選定(現行と同じ基準)。信号記録は base より後(OOS)。"""
+    import glob
+    syms = {}
+    for strat in _LONG_STRATS:
+        for f in glob.glob(f"walkforward_results/walkforward_{strat}_{base}.csv"):
+            if "holdout" in os.path.basename(f):
+                continue
+            try:
+                rows = list(csv.DictReader(open(f, encoding="utf-8")))
+            except Exception:
+                continue
+            filt = [r for r in rows
+                    if float(r.get("total_test_pnl", 0) or 0) > 0
+                    and float(r.get("max_drawdown_pct", 999) or 999) <= args.max_dd
+                    and args.min_price <= float(r.get("latest_price", 0) or 0) <= args.max_price]
+            filt.sort(key=lambda r: -float(r.get("total_test_pnl", 0) or 0))
+            for r in filt[: args.per_strategy]:
+                if r.get("symbol"):
+                    syms[r["symbol"]] = r.get("name", "")
+    return [(s, n) for s, n in syms.items()], f"WF勝ち銘柄選定(base={base})"
 
 
 def load_universe(path):
@@ -180,6 +211,10 @@ def process(sym: str, name: str) -> list:
             for t in res["trade_log"]:
                 if t.get("reason") in ("発注中", "保有中") or t.get("signal_dt") is None:
                     continue
+                _sd = str(pd.Timestamp(t["signal_dt"]).date())
+                # --wf-base 時は基準日より後(=選定に使っていないOOS)の信号だけ記録
+                if args.wf_base and _sd <= args.wf_base:
+                    continue
                 feats = features_at(dfx, pd.Timestamp(t["signal_dt"]))
                 if feats is None:
                     continue
@@ -264,7 +299,13 @@ def analyze(rows: list, split_date: str | None = None) -> None:
 
 
 def main() -> int:
-    syms, src = load_universe(args.symbols)
+    if args.wf_base:
+        syms, src = wf_selected_universe(args.wf_base)
+        if not syms:
+            print(f"[ERROR] {args.wf_base} のWF選定銘柄が0件(CSVなし/条件外)")
+            return 1
+    else:
+        syms, src = load_universe(args.symbols)
     if not syms:
         print("[ERROR] ユニバースが見つかりません(symbols_listed_prime.py 等)")
         return 1
