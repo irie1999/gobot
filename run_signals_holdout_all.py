@@ -1832,15 +1832,15 @@ html = f"""<!DOCTYPE html>
 </div>
 
 <div id="ho-mkt1" class="ho-outer-pane">
-{_market_tab1_html}
+{_market_tab1_html or '<p style="color:#f87171;padding:20px">相場環境データが空です</p>'}
 </div>
 
 <div id="ho-mkt2" class="ho-outer-pane">
-{_market_tab2_html}
+{_market_tab2_html or '<p style="color:#f87171;padding:20px">トレンド期間データが空です（市場データ取得を確認してください）</p>'}
 </div>
 
 <div id="ho-mkt3" class="ho-outer-pane">
-{_market_tab3_html}
+{_market_tab3_html or '<p style="color:#f87171;padding:20px">エントリー分析データが空です（市場データ取得を確認してください）</p>'}
 </div>
 {_sym_detail_tab_pane}
 {_wfh_tab_pane}
