@@ -64,6 +64,8 @@ _PNL_ENTRY_MAX_PRICE = 0.0
 _PNL_BT_MAX = 0.0
 _PNL_BT_MIN = 0.0
 _LONG_BT_REF: dict[tuple, float] = {}   # (symbol, strategy) -> ロングBTスコア
+_SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLスイープ」タブを出す
+_SAMEDAY_SWEEP_INVERTED = True   # ミラー(符号反転)なら True / ロング銘柄ショートなら False
 
 
 def _bt_filter_banner_html() -> str:
@@ -6592,6 +6594,177 @@ def build_pullback_comparison_html(pullbacks: list[float], days: int,
     )
 
 
+def build_sameday_tpsl_sweep_html(days: int, workers: int,
+                                  inverted: bool = True,
+                                  sm_list: list | None = None,
+                                  tm_list: list | None = None) -> str:
+    """㉓ 同日決済(日計り)向け 損切/利確幅スイープ（mirror/lss 用の詳細分析）。
+
+    現モード(mirror/lss = max_hold を 0 に強制)のまま、各戦略の (sm, tm)=
+    (損切ATR倍率, 利確ATR倍率) を総当りで差し替えて同日決済し、損益/PF/勝率を
+    2次元グリッドで比較する。スイング用の広い幅ではなく、その日のうちに当たる
+    現実的な幅(≈0.3〜2ATR)の中で最適点を探すためのタブ。
+
+    ※ run_limit_backtest は唯一の約定エンジン。mirror/lss の pnl反転・entry_type・
+       max_hold=0 はモジュールフラグで全体に効いているので、ここでは (sm,tm) を
+       変えて呼ぶだけで“そのモードの同日決済”を測れる。
+    """
+    if not _SIGNALS_AVAILABLE:
+        return ""
+    sm_list = sm_list or [0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
+    tm_list = tm_list or [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
+
+    seen: set = set()
+    items: list[tuple] = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat))
+                items.append((sym, name, strat))
+    if not items:
+        return ""
+
+    from backtest_limit_entry import fetch as _fetch, run_limit_backtest as _rlb
+    since = _TODAY - timedelta(days=days)
+
+    def _run(sm: float, tm: float) -> list:
+        def _one(it, sm=sm, tm=tm) -> list:
+            sym, name, strat = it
+            mod = _mod_for(strat)
+            p = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
+            if not p:
+                return []
+            cf, em, _sm0, _tm0 = p
+            df = _fetch(sym, days)
+            if df is None:
+                return []
+            try:
+                r = _rlb(sym, name, df, cf, em, sm, tm, days, strat,
+                         entry_type=getattr(mod, "ENTRY_TYPE", "stop"))
+            except Exception:
+                return []
+            if not r:
+                return []
+            out = []
+            for t in r.get("trade_log", []):
+                if t.get("reason") in ("発注中", "保有中"):
+                    continue
+                ed = t.get("exit_dt")
+                ed = ed.date() if hasattr(ed, "date") else ed
+                if ed is None or ed < since:
+                    continue
+                out.append((t.get("pnl", 0) or 0, t.get("reason", "") or ""))
+            return out
+        trades: list = []
+        with _TPE(max_workers=workers) as ex:
+            for x in ex.map(_one, items):
+                trades += x
+        return trades
+
+    def _stat(trades: list) -> dict:
+        pnls = [p for p, _r in trades]
+        n = len(pnls)
+        if n == 0:
+            return {"n": 0, "pnl": 0.0, "pf": 0.0, "wr": 0.0,
+                    "tgt": 0, "stp": 0, "tc": 0}
+        wins = [p for p in pnls if p > 0]
+        gp = sum(wins)
+        gl = -sum(p for p in pnls if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        # 決済理由の内訳(目標達成/損切り/タイムカット)
+        tgt = sum(1 for _p, r in trades if r == "目標達成")
+        stp = sum(1 for _p, r in trades if r == "損切り")
+        tc  = sum(1 for _p, r in trades if r == "タイムカット")
+        return {"n": n, "pnl": sum(pnls), "pf": pf,
+                "wr": len(wins) / n * 100.0, "tgt": tgt, "stp": stp, "tc": tc}
+
+    # baseline: 幅なし(発火しない極大値) = 純粋に「引け決済のみ」
+    print("  [同日TP/SL] baseline(引け決済のみ) 集計中...", flush=True)
+    base = _stat(_run(99.0, 99.0))
+
+    grid: dict = {}   # (sm,tm) -> stat
+    best_key = None
+    for tm in tm_list:
+        for sm in sm_list:
+            print(f"  [同日TP/SL] sm{sm}/tm{tm} 集計中...", flush=True)
+            st = _stat(_run(sm, tm))
+            grid[(sm, tm)] = st
+            if st["n"] > 0 and (best_key is None or st["pnl"] > grid[best_key]["pnl"]):
+                best_key = (sm, tm)
+
+    def _pf(pf) -> str:
+        return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+    # ── グリッド表(行=sm, 列=tm)。セル=総損益、下段にPF/勝率 ──
+    _th = 'padding:5px 8px;text-align:center;color:#94a3b8;font-size:0.72rem'
+    head = f'<th style="{_th};text-align:left">損切ATR＼利確ATR</th>' + "".join(
+        f'<th style="{_th}">tm={tm}</th>' for tm in tm_list)
+    body = ""
+    for sm in sm_list:
+        cells = f'<td style="{_th};text-align:left;color:#e2e8f0;font-weight:700">sm={sm}</td>'
+        for tm in tm_list:
+            st = grid[(sm, tm)]
+            if st["n"] == 0:
+                cells += f'<td style="{_th}">—</td>'
+                continue
+            is_best = (best_key == (sm, tm))
+            pc = "#4ade80" if st["pnl"] > 0 else "#f87171" if st["pnl"] < 0 else "#94a3b8"
+            bg = "background:#0e3320;" if is_best else ("background:#101826;" if st["pnl"] > 0 else "")
+            star = " ★" if is_best else ""
+            cells += (
+                f'<td style="padding:5px 8px;text-align:center;{bg}">'
+                f'<div style="color:{pc};font-weight:700;font-size:0.82rem">{st["pnl"]:+,.0f}{star}</div>'
+                f'<div style="color:#64748b;font-size:0.66rem">PF{_pf(st["pf"])}/{st["wr"]:.0f}%</div>'
+                f'</td>'
+            )
+        body += f'<tr>{cells}</tr>'
+
+    bk = best_key
+    best_line = ""
+    if bk:
+        b = grid[bk]
+        d = b["pnl"] - base["pnl"]
+        best_line = (
+            f'<p style="margin:10px 0 4px;font-size:0.9rem">'
+            f'★ 最適: <b style="color:#4ade80">損切ATR={bk[0]} / 利確ATR={bk[1]}</b> → '
+            f'<b style="color:{"#4ade80" if b["pnl"]>=0 else "#f87171"}">{b["pnl"]:+,.0f}円</b> '
+            f'(PF{_pf(b["pf"])} / 勝率{b["wr"]:.0f}% / {b["n"]}取引) '
+            f'&nbsp;<span style="color:#94a3b8;font-size:0.8rem">'
+            f'目標{b["tgt"]}/損切{b["stp"]}/引け{b["tc"]}件</span><br>'
+            f'<span style="color:#94a3b8;font-size:0.8rem">'
+            f'「幅なし(引け決済のみ)」比 {("+"+format(d,",.0f")) if d>=0 else format(d,",.0f")}円 '
+            f'(引けのみ: {base["pnl"]:+,.0f}円 / PF{_pf(base["pf"])} / 勝率{base["wr"]:.0f}% / {base["n"]}取引)'
+            f'</span></p>'
+        )
+
+    inv_note = (
+        'ミラーでは long の <b>損切(sm)=ミラーの利確</b> / long の <b>利確(tm)=ミラーの損切</b> '
+        'に対応します（符号反転）。表の sm/tm はエンジンに渡す long 基準の ATR 倍率です。'
+        if inverted else
+        'sm=損切ATR倍率 / tm=利確ATR倍率（この空売りの実際の損切/利確幅）。'
+    )
+
+    return (
+        f'<div style="margin:0 0 16px;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #a78bfa">'
+        f'<h4 style="margin:0 0 6px;color:#c4b5fd;font-size:0.95rem">'
+        f'🎯 同日決済(日計り)向け 損切/利確幅スイープ（直近{days}日 / 対象{len(items)}銘柄）</h4>'
+        f'<p style="margin:0 0 10px;color:#94a3b8;font-size:0.76rem">'
+        f'その日のうちに決済する前提で、(損切ATR, 利確ATR) を総当りで変えて同日決済した'
+        f'ときの総損益を比較。スイング用の広い幅(sm1.5/tm3.0等)は同日ではほぼ発火せず'
+        f'「引け決済のみ」に等しくなるので、当たる幅(≈0.3〜1ATR)を探すためのタブ。<br>'
+        f'{inv_note}</p>'
+        f'{best_line}'
+        f'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.8rem">'
+        f'<thead><tr style="border-bottom:1px solid #334155">{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
+        f'<p style="margin:8px 0 0;color:#64748b;font-size:0.72rem">'
+        f'各セル上段=総損益 / 下段=PF・勝率。★=最良。'
+        f'「目標/損切/引け件数」は最適セルの決済理由内訳。</p>'
+        f'</div>'
+    )
+
+
 _ORDERED_CACHE = None
 
 def _load_ordered_orders() -> list[dict]:
@@ -10658,6 +10831,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _holdcurve_tab_btn = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'holdcurve\')">⑳ 保有日数カーブ</button>'
     _emcmp_tab_btn     = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'emcmp\')">㉑ em比較</button>'
     _breadth_tab_btn   = f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'breadth\')">㉒ シグナル数別</button>'
+    _sameday_tab_btn   = (
+        f'  <button class="analysis-tab-btn" style="border-color:#6d28d9" onclick="switchAnalysisTab({_dseq},\'sameday\')">🎯 同日TP/SL最適化</button>'
+        if _SAMEDAY_SWEEP_TAB else "")
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -10689,6 +10865,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_holdcurve_tab_btn}
 {_emcmp_tab_btn}
 {_breadth_tab_btn}
+{_sameday_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -10976,6 +11153,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_signal_breadth_html}
 </div>
 
+<div id="analtab_{_dseq}_sameday" class="analysis-tab-pane">
+<!-- SAMEDAY_TPSL_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -11053,7 +11234,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth','sameday'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

@@ -812,6 +812,10 @@ if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
 # ミラー(指値空売り)/ロング銘柄ショート も建玉は「売り」なのでショート視点で色付けする。
 _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 
+# mirror/lss: 詳細分析に「同日TP/SL最適化」タブを出す(--no-analysis 時は重いので省略)。
+_na._SAMEDAY_SWEEP_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
+_na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=そのまま
+
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
 # 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
 # 1プロセス内で結果をメモ化して重複計算を防ぐ。
@@ -1474,6 +1478,24 @@ if _oc_html:
     _all_period_html = _all_period_html.replace(
         "<!-- OPENCONFIRM_SLOT -->", _oc_html, 1)
 _phase("寄り確認検証完了")
+
+# ── ㉓ 同日決済(日計り)向け 損切/利確幅スイープ (mirror/lss 専用・詳細分析) ────────
+# 同日決済なのにスイング用の広い幅(sm1.5/tm3.0)を使っている現状を、当たる幅
+# (≈0.3〜1ATR)の総当りで最適化するための調査タブ。--no-analysis 時は省略。
+if getattr(_na, "_SAMEDAY_SWEEP_TAB", False):
+    print("同日TP/SLスイープ 検証中 (mirror/lss)...", flush=True)
+    try:
+        _sd_html = _na.build_sameday_tpsl_sweep_html(
+            _DEFAULT_DAYS, _args.workers,
+            inverted=getattr(_na, "_SAMEDAY_SWEEP_INVERTED", True)) or ""
+    except Exception as _sde:
+        import traceback as _sdtb
+        print(f"[同日TP/SL] 失敗: {_sde}\n{_sdtb.format_exc()}", flush=True)
+        _sd_html = ""
+    if _sd_html:
+        _all_period_html = _all_period_html.replace(
+            "<!-- SAMEDAY_TPSL_SLOT -->", _sd_html, 1)
+    _phase("同日TP/SLスイープ完了")
 
 # ── ⑮ 逆指値の約定率・約定タイミング (詳細分析タブ) 日付跨ぎキャッシュ ─────────────
 # em=0で約定挙動はcon/agg共通・5分足不要の軽いバックテスト。日付跨ぎ再利用。
