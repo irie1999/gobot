@@ -6679,9 +6679,13 @@ def build_sameday_tpsl_sweep_html(days: int, workers: int,
         return {"n": n, "pnl": sum(pnls), "pf": pf,
                 "wr": len(wins) / n * 100.0, "tgt": tgt, "stp": stp, "tc": tc}
 
-    # baseline: 幅なし(発火しない極大値) = 純粋に「引け決済のみ」
-    print("  [同日TP/SL] baseline(引け決済のみ) 集計中...", flush=True)
-    base = _stat(_run(99.0, 99.0))
+    # baseline: ほぼ発火しない広い幅(=実質「引け決済のみ」)。
+    # 極大値(99等)にすると sp=lp-atr*sm が負になり、エンジンの妥当性チェック
+    # (sp>0 / tp>0)で全シグナルが弾かれ0取引になる(MAX_ATR_RATIO=0.20 のため
+    # sm<5 でないと sp が負)。同日ではまず当たらない 4ATR を使う。
+    _BASE_W = 4.0
+    print(f"  [同日TP/SL] baseline(≈引け決済 {_BASE_W}ATR幅) 集計中...", flush=True)
+    base = _stat(_run(_BASE_W, _BASE_W))
 
     grid: dict = {}   # (sm,tm) -> stat
     best_key = None
@@ -6733,8 +6737,8 @@ def build_sameday_tpsl_sweep_html(days: int, workers: int,
             f'&nbsp;<span style="color:#94a3b8;font-size:0.8rem">'
             f'目標{b["tgt"]}/損切{b["stp"]}/引け{b["tc"]}件</span><br>'
             f'<span style="color:#94a3b8;font-size:0.8rem">'
-            f'「幅なし(引け決済のみ)」比 {("+"+format(d,",.0f")) if d>=0 else format(d,",.0f")}円 '
-            f'(引けのみ: {base["pnl"]:+,.0f}円 / PF{_pf(base["pf"])} / 勝率{base["wr"]:.0f}% / {base["n"]}取引)'
+            f'「ほぼ引け決済(4ATR幅)」比 {("+"+format(d,",.0f")) if d>=0 else format(d,",.0f")}円 '
+            f'(4ATR幅: {base["pnl"]:+,.0f}円 / PF{_pf(base["pf"])} / 勝率{base["wr"]:.0f}% / {base["n"]}取引)'
             f'</span></p>'
         )
 
@@ -11335,6 +11339,7 @@ function _showEntryDateGrid(seq, dk, pfx) {{
 }}
 function showEntryDateE(seq, dk) {{ _showEntryDateGrid(seq, dk, 'e'); }}
 function showEntryDateB(seq, dk) {{ _showEntryDateGrid(seq, dk, 'b'); }}
+function showEntryDateC(seq, dk) {{ _showEntryDateGrid(seq, dk, 'c'); }}
 function showEntryDateX(seq, dk) {{ _showEntryDateGrid(seq, dk, 'x'); }}
 function showEntryDateY(seq, dk) {{ _showEntryDateGrid(seq, dk, 'y'); }}
 function toggleAnalysis(seq) {{
