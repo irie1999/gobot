@@ -939,7 +939,9 @@ try:
                 _na_close, _na_up_p, _na_all_stats)
         except Exception as _e3t:
             print(f"[WARN] エントリー分析タブ失敗: {_e3t}\n{_tb_mkt.format_exc()}", flush=True)
-        print("市場分析タブ生成完了", flush=True)
+        print(f"市場分析タブ生成完了 (相場環境={len(_market_tab1_html)}字 "
+              f"/ トレンド期間={len(_market_tab2_html)}字 "
+              f"/ エントリー分析={len(_market_tab3_html)}字)", flush=True)
 except Exception as _me:
     import traceback as _tb_mkt2
     print(f"[WARN] 市場分析スキップ: {_me}\n{_tb_mkt2.format_exc()}", flush=True)
