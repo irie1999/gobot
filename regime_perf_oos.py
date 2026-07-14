@@ -54,6 +54,8 @@ ap.add_argument("--mirror", action="store_true",
                 help="各取引の損益を符号反転(=同じ約定値で逆サイドを取った鏡写し)。手数料は往復2倍で計上")
 ap.add_argument("--losers", action="store_true",
                 help="勝ち銘柄top-Nでなく『それまでの累積損益ワーストN』を選定(as-of)。--mirrorと併用してフェード検証")
+ap.add_argument("--max-hold", type=int, default=0,
+                help="保有上限(タイムカット)日数を上書き(例3=3日で終値決済)。ミラーの早期利確検証用。0=既定(戦略別)")
 args = ap.parse_args()
 if args.aggressive:
     os.environ["TRADING_MODE"] = "aggressive"
@@ -269,7 +271,8 @@ def main():
             if args.fade:   # シグナルの逆: 買い戦略→売り / 売り戦略→買い
                 etype = "stop_sell" if etype == "stop" else "stop"
             res = ble.run_limit_backtest(sym, name, df, cf, em, sm, tm, bt_days, strat,
-                                         entry_type=etype)
+                                         entry_type=etype,
+                                         max_hold=(args.max_hold if args.max_hold > 0 else None))
             if not res:
                 continue
             full = res["trade_log"]
