@@ -87,6 +87,11 @@ _pre.add_argument("--mirror",     action="store_true",
                        "ロング銘柄・戦略はそのままに、約定損益を符号反転し max_hold=0 に固定")
 _pre.add_argument("--long-stop-short", dest="long_stop_short", action="store_true",
                   help="ロング銘柄を逆指値の空売り(stop_sell)で評価(下ブレイク継続狙い)")
+_pre.add_argument("--bt-max", type=float, default=None,
+                  help="ロングBTスコアの上限フィルタ(この値未満の銘柄だけ集計)。"
+                       "mirror/lss では未指定なら自動で40(ロングが弱い銘柄だけをフェード)")
+_pre.add_argument("--bt-min", type=float, default=None,
+                  help="ロングBTスコアの下限フィルタ(この値以上の銘柄だけ集計)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -755,7 +760,8 @@ if _args.mirror:
     print("[MIRROR] ロングミラー(指値空売り・同日決済): 全トレードpnl反転 / max_hold=0")
 if _args.long_stop_short:
     _bte._ENTRY_TYPE_FORCE = "stop_sell"   # ロング銘柄を逆指値の空売りで評価
-    print("[LSS] ロング銘柄を逆指値空売り(stop_sell)で評価(下ブレイク継続)")
+    _bte._MAX_HOLD_FORCE = 0     # 同日決済(日計り)。ミラーと揃える
+    print("[LSS] ロング銘柄を逆指値空売り(stop_sell)・同日決済で評価(下ブレイク継続)")
 
 # mirror/lss は「検証専用」モード: 実発注用の signals_latest.json や共有スコア
 # キャッシュを上書きしない(発注サーバが誤モードのシグナルを掴むのを防ぐ)。
@@ -888,6 +894,56 @@ for _mod_attr in ("_short", "_sbrk"):
     if _m is not None and hasattr(_m, "backtest_one"):
         _m.backtest_one = _make_cached_bt(_m.backtest_one)
 
+# ── ロングBTスコアフィルタ (mirror/lss 専用) ─────────────────────────────────
+# 「ロングが弱い(BT低)銘柄だけをフェードする」フィルタ。BTスコアは現モード
+# (mirror/lss)で測ると符号が反転して意味が逆になるため、必ず“ロングの”BTで判定する。
+# ロングのBTは同日に先行実行されたロング子プロセスの BTキャッシュ(bt_{bar}.pkl)から
+# 読み出す(--both はロング→ショート→mirror→lss の順なので mirror/lss 実行時には存在)。
+_bt_max_eff = _args.bt_max
+_bt_min_eff = _args.bt_min
+if _analysis_only and _bt_max_eff is None and _bt_min_eff is None:
+    _bt_max_eff = 40.0   # 既定: ロングBT<40 (ロングが機能しない銘柄) だけをフェード
+if _analysis_only and ((_bt_max_eff or 0) > 0 or (_bt_min_eff or 0) > 0):
+    _long_bt_ref: dict = {}
+    _long_cache_file = _bt_cache_dir / f"bt_{_bt_bar_tok}.pkl"   # ロング(_cache_short="")のキャッシュ
+    if _long_cache_file.exists():
+        try:
+            with open(_long_cache_file, "rb") as _lbf:
+                _long_bt_raw = _pickle.load(_lbf)
+            for _k, _v in _long_bt_raw.items():
+                if not _v or not isinstance(_v, dict):
+                    continue
+                _pr = _v.get("period_results")
+                if not _pr:
+                    continue
+                _parts = str(_k).split("|")
+                if len(_parts) < 2:
+                    continue
+                _ksym, _kstrat = _parts[0], _parts[1]
+                try:
+                    _sc = _na._mod_for(_kstrat).calc_recommend_score(_pr)[0]
+                except Exception:
+                    continue
+                _kk = (_ksym, _kstrat)
+                # 同一(sym,strat)が複数mode(con/agg)で入るので最大(=最良ロングBT)を採用
+                if _kk not in _long_bt_ref or _sc > _long_bt_ref[_kk]:
+                    _long_bt_ref[_kk] = _sc
+            print(f"[BTフィルタ] ロングBT参照 {len(_long_bt_ref)}件を {_long_cache_file.name} から読込")
+        except Exception as _e:
+            print(f"[BTフィルタ] ロングBT参照の読込失敗: {_e} → 現モードBTで代替判定")
+    else:
+        print(f"[BTフィルタ] ロングBTキャッシュ {_long_cache_file.name} が無い → 現モードBTで代替判定"
+              f"(--both ならロングを先に実行すれば正確になります)")
+    _na._LONG_BT_REF = _long_bt_ref
+    _na._PNL_BT_MAX = float(_bt_max_eff or 0)
+    _na._PNL_BT_MIN = float(_bt_min_eff or 0)
+    print(f"[BTフィルタ] ロングBT {(''+format(_bt_min_eff,'.0f')+'≤') if _bt_min_eff else ''}"
+          f"{('<'+format(_bt_max_eff,'.0f')) if _bt_max_eff else ''} の銘柄だけを集計")
+elif ((_args.bt_max or 0) > 0 or (_args.bt_min or 0) > 0):
+    # ロング/ショートでも明示指定されたら現モードBTで素直に適用
+    _na._PNL_BT_MAX = float(_args.bt_max or 0)
+    _na._PNL_BT_MIN = float(_args.bt_min or 0)
+
 # ── シグナルスコアキャッシュ読み込み ─────────────────────────────────────────
 # 初回発信時のBTスコアを保存し、以後の実行でも同じスコアを表示する。
 # キャッシュキー: "{symbol}::{strategy}::{signal_date}"
@@ -938,10 +994,15 @@ if _args.date:
 date_str = _args.date or str(TODAY)
 
 # レポート種別ラベル(タイトル/見出し用)
+_bt_flt_lbl = ""
+if _na._PNL_BT_MAX > 0 or _na._PNL_BT_MIN > 0:
+    _lo = f"BT{_na._PNL_BT_MIN:.0f}≤" if _na._PNL_BT_MIN > 0 else ""
+    _hi = f"<{_na._PNL_BT_MAX:.0f}" if _na._PNL_BT_MAX > 0 else ""
+    _bt_flt_lbl = f"・ロング{_lo}{_hi}"
 if _args.mirror:
-    _mode_label_ja = "（ロングミラー・指値空売り/同日決済）"
+    _mode_label_ja = f"（ロングミラー・指値空売り/同日決済{_bt_flt_lbl}）"
 elif _args.long_stop_short:
-    _mode_label_ja = "（ロング銘柄ショート・逆指値空売り）"
+    _mode_label_ja = f"（ロング銘柄ショート・逆指値空売り/同日決済{_bt_flt_lbl}）"
 elif _args.short:
     _mode_label_ja = "（ショート）"
 else:

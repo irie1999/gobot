@@ -57,6 +57,13 @@ _REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)ま�
 # (選定時は安かったが約定時に急騰した銘柄=100株買えない取引を明細/集計から除外)
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
+# 損益タブ: ロングBTスコアで銘柄を絞るフィルタ。0=無効。
+# mirror/lss(ロングミラー/ロング銘柄ショート)で「ロングが弱い銘柄だけをフェード」する用。
+# _LONG_BT_REF が与えられればそのスコア(=別モードで測ったロングBT)で判定し、
+# 無ければ現モードの item BTスコア(rec_score)で判定する。
+_PNL_BT_MAX = 0.0
+_PNL_BT_MIN = 0.0
+_LONG_BT_REF: dict[tuple, float] = {}   # (symbol, strategy) -> ロングBTスコア
 _last_signals: list[dict] = []   # _tab4_signals_html() 呼び出し後に最新シグナルリストを保持
 _FROZEN_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy) → 初回発信時のBTスコア (外部から注入)
 _SIGNAL_DATE_BT_SCORES: dict[tuple, int] = {}  # (symbol, strategy, signal_date_str) → シグナル発生時BTスコア (外部から注入)
@@ -6849,6 +6856,14 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             _btf2 = getattr(_stop, "calc_bt_type", None)
             bt_type2 = _btf2(period_results) if _btf2 else ""
             _OOS_BT_SCORES[(sym, strat)] = rec_score2
+            # ロングBTスコアフィルタ (mirror/lss で「ロングが弱い銘柄だけ」に絞る)。
+            # _LONG_BT_REF があれば別モードで測ったロングBT、無ければ現モードのBTで判定。
+            if _PNL_BT_MAX > 0 or _PNL_BT_MIN > 0:
+                _bt_flt = _LONG_BT_REF.get((sym, strat), rec_score2) if _LONG_BT_REF else rec_score2
+                if _PNL_BT_MAX > 0 and _bt_flt >= _PNL_BT_MAX:
+                    continue   # BTが高い(ロングが強い)銘柄はフェード対象外
+                if _PNL_BT_MIN > 0 and _bt_flt < _PNL_BT_MIN:
+                    continue
             if wf2:
                 wf_score2, wf_rank_str2 = wf2
                 score, rank = wf_score2, wf_rank_str2
