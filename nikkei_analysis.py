@@ -5517,8 +5517,15 @@ def build_holdday_curve_html(days: int, workers: int) -> str:
             f'</tr></thead><tbody>{rows}</tbody></table>')
 
     blocks = ""
-    for bt_min, lbl in [(0, "全部"), (60, "BT60以上"), (70, "BT70以上")]:
-        sub = [e for e in all_entries if (e[0] or 0) >= bt_min]
+    # (BT下限, BT上限, ラベル)。低BT帯を追加(ミラー早期利確の検討用)。
+    for bt_lo, bt_hi, lbl in [
+        (0, 1e9, "全部"),
+        (0, 40, "BT&lt;40 (低BT)"),
+        (40, 60, "BT40-59"),
+        (60, 1e9, "BT60以上"),
+        (70, 1e9, "BT70以上"),
+    ]:
+        sub = [e for e in all_entries if bt_lo <= (e[0] or 0) < bt_hi]
         tbl = _table(sub)
         if not tbl:
             continue
