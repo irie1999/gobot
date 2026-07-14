@@ -88,10 +88,11 @@ _pre.add_argument("--mirror",     action="store_true",
 _pre.add_argument("--long-stop-short", dest="long_stop_short", action="store_true",
                   help="ロング銘柄を逆指値の空売り(stop_sell)で評価(下ブレイク継続狙い)")
 _pre.add_argument("--bt-max", type=float, default=None,
-                  help="ロングBTスコアの上限フィルタ(この値未満の銘柄だけ集計)。"
-                       "mirror/lss では未指定なら自動で40(ロングが弱い銘柄だけをフェード)")
+                  help="ロングBTスコアの上限グローバル絞り込み(この値未満の銘柄だけ"
+                       "レポート全体を集計)。未指定なら全銘柄を集計し、取引明細の"
+                       "『BT40以下』ボタンで切り替える運用(mirror/lssではロングBTで判定)")
 _pre.add_argument("--bt-min", type=float, default=None,
-                  help="ロングBTスコアの下限フィルタ(この値以上の銘柄だけ集計)")
+                  help="ロングBTスコアの下限グローバル絞り込み(この値以上の銘柄だけ集計)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -894,16 +895,13 @@ for _mod_attr in ("_short", "_sbrk"):
     if _m is not None and hasattr(_m, "backtest_one"):
         _m.backtest_one = _make_cached_bt(_m.backtest_one)
 
-# ── ロングBTスコアフィルタ (mirror/lss 専用) ─────────────────────────────────
-# 「ロングが弱い(BT低)銘柄だけをフェードする」フィルタ。BTスコアは現モード
-# (mirror/lss)で測ると符号が反転して意味が逆になるため、必ず“ロングの”BTで判定する。
-# ロングのBTは同日に先行実行されたロング子プロセスの BTキャッシュ(bt_{bar}.pkl)から
-# 読み出す(--both はロング→ショート→mirror→lss の順なので mirror/lss 実行時には存在)。
-_bt_max_eff = _args.bt_max
-_bt_min_eff = _args.bt_min
-if _analysis_only and _bt_max_eff is None and _bt_min_eff is None:
-    _bt_max_eff = 40.0   # 既定: ロングBT<40 (ロングが機能しない銘柄) だけをフェード
-if _analysis_only and ((_bt_max_eff or 0) > 0 or (_bt_min_eff or 0) > 0):
+# ── ロングBT参照 & BTフィルタ ────────────────────────────────────────────────
+# 取引明細の「BT40以下」ボタンや、任意の --bt-max/--bt-min グローバル絞り込みは
+# “ロングの”BTで判定する。BTを現モード(mirror/lss)で測ると符号が反転して意味が
+# 逆になるため。ロングBTは同日に先行実行されたロング子プロセスの BTキャッシュ
+# (bt_{bar}.pkl)から読み出す(--both はロング→ショート→mirror→lss の順なので
+# mirror/lss 実行時には存在する)。
+if _analysis_only:
     _long_bt_ref: dict = {}
     _long_cache_file = _bt_cache_dir / f"bt_{_bt_bar_tok}.pkl"   # ロング(_cache_short="")のキャッシュ
     if _long_cache_file.exists():
@@ -928,21 +926,23 @@ if _analysis_only and ((_bt_max_eff or 0) > 0 or (_bt_min_eff or 0) > 0):
                 # 同一(sym,strat)が複数mode(con/agg)で入るので最大(=最良ロングBT)を採用
                 if _kk not in _long_bt_ref or _sc > _long_bt_ref[_kk]:
                     _long_bt_ref[_kk] = _sc
-            print(f"[BTフィルタ] ロングBT参照 {len(_long_bt_ref)}件を {_long_cache_file.name} から読込")
+            print(f"[BTフィルタ] ロングBT参照 {len(_long_bt_ref)}件を {_long_cache_file.name} から読込"
+                  f"(取引明細の『BT40以下』ボタンで使用)")
         except Exception as _e:
             print(f"[BTフィルタ] ロングBT参照の読込失敗: {_e} → 現モードBTで代替判定")
     else:
         print(f"[BTフィルタ] ロングBTキャッシュ {_long_cache_file.name} が無い → 現モードBTで代替判定"
               f"(--both ならロングを先に実行すれば正確になります)")
     _na._LONG_BT_REF = _long_bt_ref
-    _na._PNL_BT_MAX = float(_bt_max_eff or 0)
-    _na._PNL_BT_MIN = float(_bt_min_eff or 0)
-    print(f"[BTフィルタ] ロングBT {(''+format(_bt_min_eff,'.0f')+'≤') if _bt_min_eff else ''}"
-          f"{('<'+format(_bt_max_eff,'.0f')) if _bt_max_eff else ''} の銘柄だけを集計")
-elif ((_args.bt_max or 0) > 0 or (_args.bt_min or 0) > 0):
-    # ロング/ショートでも明示指定されたら現モードBTで素直に適用
+
+# 任意のグローバルBT絞り込み(--bt-max / --bt-min)。既定は無効(=全銘柄を集計し、
+# 取引明細の『BT40以下』ボタンで切り替える運用)。明示指定時のみレポート全体を絞る。
+if (_args.bt_max or 0) > 0 or (_args.bt_min or 0) > 0:
     _na._PNL_BT_MAX = float(_args.bt_max or 0)
     _na._PNL_BT_MIN = float(_args.bt_min or 0)
+    print(f"[BTフィルタ] グローバル絞り込み: ロングBT "
+          f"{(format(_args.bt_min,'.0f')+'≤') if _args.bt_min else ''}"
+          f"{('<'+format(_args.bt_max,'.0f')) if _args.bt_max else ''} の銘柄だけを集計")
 
 # ── シグナルスコアキャッシュ読み込み ─────────────────────────────────────────
 # 初回発信時のBTスコアを保存し、以後の実行でも同じスコアを表示する。

@@ -8586,8 +8586,19 @@ function switchTbd(id, tab) {{
             rows = f'<tr><td colspan="15" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
         return rows
 
-    # 全部 / BT70以上 / エントリー日別グリッド の 3 系統を用意
+    # 全部 / BT70以上 / BT40以下 / エントリー日別グリッド の 系統を用意
     bt70_trades = [t for t in sorted_trades if (t.get("rec_score") or 0) >= 70]
+
+    # BT40以下バンド: ロングが弱い銘柄だけを抽出（mirror/lss のフェード対象と一致）。
+    # BTは現モードで測ると mirror/lss で符号反転するため、_LONG_BT_REF があれば
+    # “ロングの”BTで判定する(無ければ現モードのシグナル時BT=rec_score)。
+    def _eff_long_bt(t) -> float:
+        if _LONG_BT_REF:
+            _v = _LONG_BT_REF.get((t.get("symbol"), t.get("strategy")))
+            if _v is not None:
+                return _v
+        return t.get("rec_score") or 0
+    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) < 40]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
         done_trades,
@@ -8596,6 +8607,7 @@ function switchTbd(id, tab) {{
     )
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
+    trade_rows_bt40 = _rows_for(bt40_trades,   "BT40以下の取引なし")
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -10973,6 +10985,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#6d28d9">🪞 BT40以下 <span style="font-size:0.72rem;color:#c4b5fd">({len(bt40_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -10990,6 +11003,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
   <tbody>{trade_rows_all}</tbody>
+</table>
+</div>
+<div id="detail_{_dseq}_bt40" class="detail-tab-pane">
+<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">
+🪞 ロングBT40未満（＝ロングが弱い銘柄）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
+<table>
+  <thead><tr>
+    <th>決済日</th>
+    <th style="text-align:left">銘柄</th>
+    <th>戦略</th>
+    <th>設定</th>
+    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
+    <th>損益</th><th>理由</th><th>エントリー</th>
+  </tr></thead>
+  <tbody>{trade_rows_bt40}</tbody>
 </table>
 </div>
 <div id="detail_{_dseq}_bt70" class="detail-tab-pane">
@@ -11062,14 +11090,14 @@ function switchOvBt(uid, key) {{
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt70','entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
+  ['all','bt40','bt70','entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = ['all','bt70','entry','bt70entry','exit','bt70exit'];
+    var order = ['all','bt40','bt70','entry','bt70entry','exit','bt70exit'];
     btns.forEach(function(b, i) {{
       b.classList.toggle('active', (!closing) && order[i] === which);
     }});
