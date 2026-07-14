@@ -1379,7 +1379,10 @@ _phase("最大保有日数比較完了")
 # 「約定後すぐ押す」を活かせるか= 押し目を指値で安く買う方が良いかを本レポートの
 # 選定銘柄(=_all_configs)の実トレードで比較。BT70以上のフィルタ表も併記。
 # ショートモードでは押し目買いの概念が無いためスキップ。
-if not _args.short:
+# mirror/lss(指値空売り/逆指値空売り)も「押し目買い」は非該当なのでスキップ(重い)。
+if _analysis_only:
+    print("押し目買い比較タブ: スキップ (mirror/lss は非該当)", flush=True)
+if not _args.short and not _analysis_only:
     _na._PNL_CONFIGS[:] = _all_configs
     _pb_list = [0.3, 0.5, 1.0]
     _pb_prefix = f"pullback_cmp{_cache_short}"
@@ -1419,7 +1422,8 @@ if not _args.short:
 # (yfinance時の古い結果を使い回さない)。
 import analyze_open_confirm_entry as _oc
 try:
-    _oc_dirs = [] if _args.short else _oc.locate_5m_dirs()
+    # ショート/mirror/lss はロング専用の寄り後確認が非該当 → 5分足探索もスキップ
+    _oc_dirs = [] if (_args.short or _analysis_only) else _oc.locate_5m_dirs()
 except Exception:
     _oc_dirs = []
 _oc_src_tok = (f"pkl{len(_oc_dirs)}" if _oc_dirs
@@ -1436,7 +1440,11 @@ if _oc_cache_file.exists():
     except Exception:
         _oc_html = None
 # キャッシュが無い場合のみ計算(=一度計算したら以降スキップ)。①②寄り確認 + ③フェア版。
-if _oc_html is None:
+# mirror/lss はロング専用の寄り後確認が非該当 → 計算せずスキップ(最大の時短ポイント)。
+if _analysis_only:
+    print("寄り確認タブ: スキップ (mirror/lss は非該当)", flush=True)
+    _oc_html = ""
+elif _oc_html is None:
     print(f"寄り確認+フェア版 検証中 (初回のみ・5分足源: {_oc_src_tok})...", flush=True)
     try:
         _oc_html = _oc.build_html(minute_dir=_args.minute_dir,
