@@ -259,8 +259,11 @@ if _args.both and not _args.short:
 
     # --both / --short / --no-browser / --price-ranges / --output-suffix は渡さず、
     # --max-holds / --force はサブプロセスに伝播させる
+    # --no-analysis は各方向で個別に付け直す(ロング/ショート=省略で高速 /
+    # ロングミラー・ロング銘柄ショート=フル実行で同日TP/SL最適化タブを出す)ため除外。
     _base_cargs = [a for a in sys.argv[1:]
                    if a not in ("--both", "--short", "--mirror", "--long-stop-short",
+                                "--no-analysis",
                                 "--no-browser", "--price-ranges", "--output-suffix",
                                 "--serve", "--serve-execute", "--serve-prod", "--serve-genbutsu")
                    and not a.startswith("--price-ranges=")
@@ -288,11 +291,13 @@ if _args.both and not _args.short:
     # --max-holds はサブプロセスに渡り、損益タブ内の比較セクションとして生成される
     _generated: dict = {}  # (direction, max_p) -> Path
     # 生成する方向: (dir_key, ラベル, 追加引数, 出力ファイル接頭辞)
+    # ロング/ショートは --no-analysis で高速化(詳細分析タブ群を省略)。
+    # ロングミラー/ロング銘柄ショートはフル実行(→「同日TP/SL最適化」タブが出る)。
     _DIRECTIONS = [
-        ("long",   "ロング",             [],                    "signals_holdout_all"),
-        ("short",  "ショート",           ["--short"],           "signals_holdout_all_short"),
-        ("mirror", "ロングミラー",       ["--mirror"],          "signals_holdout_all_mirror"),
-        ("lss",    "ロング銘柄ショート", ["--long-stop-short"], "signals_holdout_all_lss"),
+        ("long",   "ロング",             ["--no-analysis"],              "signals_holdout_all"),
+        ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
+        ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
+        ("lss",    "ロング銘柄ショート", ["--long-stop-short"],          "signals_holdout_all_lss"),
     ]
     for _mp in _price_list:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
