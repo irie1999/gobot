@@ -607,15 +607,33 @@ _MAX_HOLD_BY_STRATEGY = {}
 _TIMECUT_ENABLED = True
 _NO_TIMECUT_HOLD = 100_000   # 実質無限(バックテスト窓を超える大きさ=タイムカット発火せず)
 
+# ── ロングミラー / ロング銘柄ショート 検証フック ─────────────────────────────
+# run_limit_backtest は唯一の約定エンジンなので、ここにモジュールフラグを置けば
+# 全レポート(nikkei_analysis の全タブ・全キャッシュ)へ一貫して反映される。
+#   _MIRROR_PNL     : True にすると各トレードの pnl を符号反転し手数料を往復2回分計上。
+#                     = ロングと同じ約定(逆指値買い hi>=order_p)を「指値空売り」の
+#                       鏡写しとして評価する。regime_perf_oos の --mirror と同一式。
+#   _ENTRY_TYPE_FORCE: 非Noneならロング戦略の entry_type を一括上書き(例 "stop_sell")。
+#                     = ロング銘柄を「逆指値の空売り」で評価する用。
+#   _MAX_HOLD_FORCE : 非Noneなら default_max_hold より最優先で最大保有日数を固定。
+#                     ミラー同日決済(日計り)は 0 を入れる。環境変数と違いキャッシュ名を汚さない。
+_MIRROR_PNL: bool = False
+_ENTRY_TYPE_FORCE: str | None = None
+_MAX_HOLD_FORCE: int | None = None
+
 
 def timecut_enabled() -> bool:
     """タイムカットが有効か(=有限の最大保有日数で強制決済するか)。"""
+    if _MAX_HOLD_FORCE is not None:
+        return True
     if os.getenv("MAX_HOLD_OVERRIDE"):
         return True
     return _TIMECUT_ENABLED
 
 
 def default_max_hold(strategy_name: str) -> int:
+    if _MAX_HOLD_FORCE is not None:
+        return _MAX_HOLD_FORCE
     ovr = os.getenv("MAX_HOLD_OVERRIDE")
     if ovr:
         try:
@@ -680,6 +698,10 @@ def run_limit_backtest(
 
     trades: list[dict] = []
     signals  = 0
+    # ロング銘柄を空売りで評価するモード(_ENTRY_TYPE_FORCE)。ミラー(_MIRROR_PNL)は
+    # ロングと同じ約定を使うので entry_type は上書きしない(pnl の符号だけ後で反転)。
+    if _ENTRY_TYPE_FORCE is not None:
+        entry_type = _ENTRY_TYPE_FORCE
     is_short = (entry_type == "stop_sell")
     if stop_mode is None:
         stop_mode = default_stop_mode(strategy_name, is_short)
@@ -1048,6 +1070,17 @@ def run_limit_backtest(
             order_limit=po["lp"], order_stop=po["sp"], order_target=po["tp"],
             reason="発注中",
         ))
+
+    # ── ロングミラー: 各トレードを「指値空売りの鏡写し」に変換 ────────────────
+    # ロング net pnl = gross - fee。鏡写し net = -gross - fee = -pnl - 2*fee。
+    # (regime_perf_oos の --mirror と同一式。手数料は往復ぶんを二重に引く)
+    if _MIRROR_PNL:
+        for _t in trades:
+            if _t.get("reason") == "発注中":
+                continue
+            _f = float(_t.get("fee", 0) or 0)
+            _t["pnl"] = -float(_t.get("pnl", 0) or 0) - 2.0 * _f
+            _t["pct"] = -float(_t.get("pct", 0) or 0)
 
     # 統計計算 (発注中は除外)
     stat_trades = [t for t in trades if t.get("reason") != "発注中"]

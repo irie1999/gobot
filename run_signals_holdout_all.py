@@ -82,6 +82,11 @@ _pre.add_argument("--entry-days", type=int, default=None,
                   help="取引明細をエントリー日ベースで絞り込む日数 (例: 7=直近1週間エントリーのみ)")
 _pre.add_argument("--both",       action="store_true",
                   help="ロング+ショート両方を実行して1つのHTMLにまとめる")
+_pre.add_argument("--mirror",     action="store_true",
+                  help="ロングミラー(指値空売り・同日決済/日計り)で評価。"
+                       "ロング銘柄・戦略はそのままに、約定損益を符号反転し max_hold=0 に固定")
+_pre.add_argument("--long-stop-short", dest="long_stop_short", action="store_true",
+                  help="ロング銘柄を逆指値の空売り(stop_sell)で評価(下ブレイク継続狙い)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -249,7 +254,8 @@ if _args.both and not _args.short:
     # --both / --short / --no-browser / --price-ranges / --output-suffix は渡さず、
     # --max-holds / --force はサブプロセスに伝播させる
     _base_cargs = [a for a in sys.argv[1:]
-                   if a not in ("--both", "--short", "--no-browser", "--price-ranges", "--output-suffix",
+                   if a not in ("--both", "--short", "--mirror", "--long-stop-short",
+                                "--no-browser", "--price-ranges", "--output-suffix",
                                 "--serve", "--serve-execute", "--serve-prod", "--serve-genbutsu")
                    and not a.startswith("--price-ranges=")
                    and not a.startswith("--output-suffix=")]
@@ -275,27 +281,26 @@ if _args.both and not _args.short:
     # 各価格範囲 × ロング/ショートを生成（逐次実行でメモリ使用を抑える）
     # --max-holds はサブプロセスに渡り、損益タブ内の比較セクションとして生成される
     _generated: dict = {}  # (direction, max_p) -> Path
+    # 生成する方向: (dir_key, ラベル, 追加引数, 出力ファイル接頭辞)
+    _DIRECTIONS = [
+        ("long",   "ロング",             [],                    "signals_holdout_all"),
+        ("short",  "ショート",           ["--short"],           "signals_holdout_all_short"),
+        ("mirror", "ロングミラー",       ["--mirror"],          "signals_holdout_all_mirror"),
+        ("lss",    "ロング銘柄ショート", ["--long-stop-short"], "signals_holdout_all_lss"),
+    ]
     for _mp in _price_list:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
-        _lf = Path(f"signals_holdout_all_{_bd}{_mp_suffix}.html")
-        _sf = Path(f"signals_holdout_all_short_{_bd}{_mp_suffix}.html")
         _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp), "--output-suffix", _mp_suffix]
-
-        print("=" * 65)
-        print(f"=== ロングシグナル生成中 (〜{_mp:,}円) ===")
-        print("=" * 65)
-        _sp.run([sys.executable, __file__] + _cargs_mp)
-
-        print("=" * 65)
-        print(f"=== ショートシグナル生成中 (〜{_mp:,}円) ===")
-        print("=" * 65)
-        _sp.run([sys.executable, __file__] + _cargs_mp + ["--short"])
-
-        if not _lf.exists() or not _sf.exists():
-            print(f"[ERROR] ロング/ショートHTMLの生成に失敗しました (max-price={_mp})")
-            sys.exit(1)
-        _generated[("long",  _mp)] = _lf
-        _generated[("short", _mp)] = _sf
+        for _dk, _dlabel, _dargs, _dprefix in _DIRECTIONS:
+            _df = Path(f"{_dprefix}_{_bd}{_mp_suffix}.html")
+            print("=" * 65)
+            print(f"=== {_dlabel}シグナル生成中 (〜{_mp:,}円) ===")
+            print("=" * 65)
+            _sp.run([sys.executable, __file__] + _cargs_mp + _dargs)
+            if not _df.exists():
+                print(f"[ERROR] {_dlabel}HTMLの生成に失敗しました (max-price={_mp})")
+                sys.exit(1)
+            _generated[(_dk, _mp)] = _df
 
     # ── 最初の価格範囲をデフォルト表示 ──────────────────────────────────────
     _first_mp   = _price_list[0]
@@ -312,8 +317,13 @@ if _args.both and not _args.short:
     _nav_btns = ""
     _frames   = ""
 
-    # ロング/ショートボタン
-    for _dir, _lbl_prefix, _dir_cls in [("long", "📈 ロング", "lb"), ("short", "📉 ショート", "sb")]:
+    # ロング/ショート/ロングミラー/ロング銘柄ショート ボタン
+    for _dir, _lbl_prefix, _dir_cls in [
+        ("long",   "📈 ロング",           "lb"),
+        ("short",  "📉 ショート",         "sb"),
+        ("mirror", "🪞 ロングミラー",     "mb"),
+        ("lss",    "🔻 ロング銘柄ショート", "xb"),
+    ]:
         _is_active = _dir == "long"
         _nav_btns += (
             f'  <button class="ls-btn {_dir_cls}{" active" if _is_active else ""}" '
@@ -353,7 +363,7 @@ if _args.both and not _args.short:
 
     import time as _time_mod
     _cache_bust = int(_time_mod.time())
-    for _dir in ("long", "short"):
+    for _dir in ("long", "short", "mirror", "lss"):
         for _i, _mp in enumerate(_price_list):
             _frame_id = f"ls-{_dir}-{_mp}"
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
@@ -383,6 +393,8 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 .ls-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .ls-btn.active.lb{{color:#34d399;border-bottom:2px solid #34d399;background:#0f172a}}
 .ls-btn.active.sb{{color:#f87171;border-bottom:2px solid #f87171;background:#0f172a}}
+.ls-btn.active.mb{{color:#fbbf24;border-bottom:2px solid #fbbf24;background:#0f172a}}
+.ls-btn.active.xb{{color:#a78bfa;border-bottom:2px solid #a78bfa;background:#0f172a}}
 .pr-btn{{padding:9px 20px;background:#1e293b;border:none;border-radius:6px 6px 0 0;
   color:#94a3b8;cursor:pointer;font-size:0.92rem;font-weight:600;
   border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
@@ -463,7 +475,14 @@ TODAY = _report_date()
 # 重いバックテストに入る前に、同一パラメータの出力ファイルが既に存在すれば
 # それを開いて即終了する。--force で強制再生成。
 _cache_date    = _args.date or str(TODAY)
-_cache_short   = "_short" if _args.short else ""
+if _args.mirror:
+    _cache_short = "_mirror"
+elif _args.long_stop_short:
+    _cache_short = "_lss"
+elif _args.short:
+    _cache_short = "_short"
+else:
+    _cache_short = ""
 # サイジング/保有日数の設定をキャッシュ名に反映 (設定を変えたら別キャッシュになる)
 # これが無いと VOL_PARITY や MAX_HOLD_OVERRIDE を変えても古い結果を読んでしまう
 def _settings_sig() -> str:
@@ -727,6 +746,17 @@ if _args.rolling > 0:
     _bte.ROLLING_ENTRY = _args.rolling
     print(f"[ROLLING] ローリング逆指値 有効: 最大{_args.rolling}回更新")
 
+# ── ロングミラー / ロング銘柄ショート の評価フックを注入 ─────────────────────
+# どちらもロング銘柄・ロング戦略・ロングWATCHLISTをそのまま使い、約定エンジンの
+# 挙動だけ差し替える(唯一の約定ロジック run_limit_backtest に効くので全タブへ波及)。
+if _args.mirror:
+    _bte._MIRROR_PNL = True      # 損益を符号反転(指値空売りの鏡写し)
+    _bte._MAX_HOLD_FORCE = 0     # 同日決済(日計り)。環境変数と違いキャッシュ名を汚さない
+    print("[MIRROR] ロングミラー(指値空売り・同日決済): 全トレードpnl反転 / max_hold=0")
+if _args.long_stop_short:
+    _bte._ENTRY_TYPE_FORCE = "stop_sell"   # ロング銘柄を逆指値の空売りで評価
+    print("[LSS] ロング銘柄を逆指値空売り(stop_sell)で評価(下ブレイク継続)")
+
 # ── nikkei_analysis をインポートして PNL_CONFIGS を注入 ───────────────────────
 # nikkei_analysis は import 時に _stop/_brk を reload する。
 # WATCHLIST が上書きされないよう、reload 後に元に戻す。
@@ -764,8 +794,9 @@ if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
               f"※現在まで走らせない軽量モード", flush=True)
     except ValueError:
         print(f"[WARN] --date {_args.date} が不正。--forward-days/--back-days を無視します。")
-# ショートモード: トレンド別成績テーブルの表示順・凡例を反転
-_na._IS_SHORT_MODE = _args.short
+# ショートモード: トレンド別成績テーブルの表示順・凡例を反転。
+# ミラー(指値空売り)/ロング銘柄ショート も建玉は「売り」なのでショート視点で色付けする。
+_na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
 # 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
@@ -898,6 +929,16 @@ if _args.date:
         pass
 
 date_str = _args.date or str(TODAY)
+
+# レポート種別ラベル(タイトル/見出し用)
+if _args.mirror:
+    _mode_label_ja = "（ロングミラー・指値空売り/同日決済）"
+elif _args.long_stop_short:
+    _mode_label_ja = "（ロング銘柄ショート・逆指値空売り）"
+elif _args.short:
+    _mode_label_ja = "（ショート）"
+else:
+    _mode_label_ja = ""
 
 # ── 日経相場環境・トレンド・エントリー分析タブ ─────────────────────────────────
 print("日経平均データ取得中 (市場分析)...", flush=True)
@@ -1788,14 +1829,14 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ホールドアウト全設定 シグナル・損益{'（ショート）' if _args.short else ''} {date_str} [保有{_bte.MAX_HOLD}日]</title>
+<title>ホールドアウト全設定 シグナル・損益{_mode_label_ja} {date_str} [保有{_bte.MAX_HOLD}日]</title>
 <style>
 {_na.CSS}
 {_extra_css}
 </style>
 </head>
 <body>
-<h1>ホールドアウト全設定 シグナル・損益レポート{'（ショート）' if _args.short else ''}</h1>
+<h1>ホールドアウト全設定 シグナル・損益レポート{_mode_label_ja}</h1>
 <p class="subtitle">
   基準日: {date_str} &nbsp;|&nbsp;
   保有期限: {(str(_bte.MAX_HOLD)+'日') if _bte.timecut_enabled() else 'タイムカットなし(目標/損切のみ)'} &nbsp;|&nbsp;
