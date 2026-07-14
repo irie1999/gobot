@@ -821,6 +821,11 @@ _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 _na._SAMEDAY_SWEEP_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
 _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=そのまま
 
+# 重い長系の詳細分析(保有日数比較/損切り幅/寄り付き方向/下落深さ/em比較/約定
+# タイミング/期間別パネル)を飛ばすか。--no-analysis 指定時に加え、mirror/lss は
+# これらが全てロング前提で無意味なので常にスキップ(=同日スイープだけ回して高速化)。
+_skip_heavy_analysis = getattr(_args, "no_analysis", False) or _analysis_only
+
 # ── バックテストキャッシュ (5期間 × 同一銘柄の重複実行を防ぐ) ─────────────────
 # 全設定統合(180)+6期間+シグナルタブで同一(銘柄,戦略,モード)が何度も呼ばれるため、
 # 1プロセス内で結果をメモ化して重複計算を防ぐ。
@@ -1294,8 +1299,9 @@ _mh_reuse      = None if _args.force else _latest_analysis_cache(_mh_prefix)
 # 各分析は独立タブ。⑪=保有日数比較のみ / ⑯損切り幅 ⑰寄り付き方向 ⑱下落深さ
 # ⑲逆張りショート ⑳保有日数カーブ はそれぞれ別スロットに入れる。
 _fade_html = _curve_html = _stopw_html = _opendir_html = _drop_html = _emcmp_html = ""
-if getattr(_args, "no_analysis", False):
-    print("詳細分析タブ群: スキップ (--no-analysis)", flush=True)
+if _skip_heavy_analysis:
+    print("詳細分析タブ群: スキップ"
+          + (" (mirror/lss は同日スイープのみ)" if _analysis_only else " (--no-analysis)"), flush=True)
     _mh_html = _mh_cmp_html = ""   # 空にしてスロット未置換(タブは空表示)にする
 elif _mh_reuse is not None:
     try:
@@ -1507,8 +1513,9 @@ if getattr(_na, "_SAMEDAY_SWEEP_TAB", False):
 _ft_prefix    = f"filltimingv3{_cache_short}"   # v2: BTフィルタ追加
 _ft_reuse     = _latest_analysis_cache(_ft_prefix)
 _ft_html = None
-if getattr(_args, "no_analysis", False):
-    print("約定タイミングタブ: スキップ (--no-analysis)", flush=True)
+if _skip_heavy_analysis:
+    print("約定タイミングタブ: スキップ"
+          + (" (mirror/lss)" if _analysis_only else " (--no-analysis)"), flush=True)
     _ft_html = ""
 elif _ft_reuse is not None:
     try:
@@ -1539,9 +1546,9 @@ _phase("約定タイミング集計完了")
 # 期間別: 各期間のconfigs（⑨Rolling/em比較はスキップして高速化）
 # preoos_cutoff_days=days を渡してOOS前BTスコア別成績タブを追加
 _period_pane_htmls: dict[int, str] = {}
-_skip_period_panes = getattr(_args, "no_analysis", False)
+_skip_period_panes = _skip_heavy_analysis
 if _skip_period_panes:
-    print("期間別パネル(30/60/…日): スキップ (--no-analysis)。全設定パネルのみ表示", flush=True)
+    print("期間別パネル(30/60/…日): スキップ。全設定パネルのみ表示", flush=True)
 for days in _PNL_PERIODS:
     if _skip_period_panes:
         _period_pane_htmls[days] = ('<p style="color:#64748b;padding:20px">'
