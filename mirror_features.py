@@ -43,8 +43,16 @@ ap.add_argument("--days", type=int, default=365 * 3, help="バックテスト期
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--short", action="store_true", help="ショートミラー(下ブレイク→買い)も含める")
 ap.add_argument("--out", default="mirror_features.csv")
+ap.add_argument("--slip", type=float, default=0.0,
+                help="スリッページ(既定0=幻の利益を排除)。0以外だとミラーが水増しされるので特徴発見には0推奨")
+ap.add_argument("--fee", type=float, default=0.0, help="片道手数料(既定0)")
 ap.add_argument("--aggressive", action="store_true")
 args = ap.parse_args()
+
+# ミラー特徴発見はコストゼロ(素の価格方向)で見る。既定0でモジュール定数を上書き。
+ble.SLIPPAGE_STOP_PCT = args.slip
+ble.SLIPPAGE_LIMIT_PCT = args.slip
+ble.FEE_PCT_ONE_WAY = args.fee
 
 # ── 戦略モジュール(フラットに全戦略の信号を集める) ─────────────────────────────
 import check_signals_stop as _stop           # noqa: E402
