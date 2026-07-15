@@ -40,6 +40,12 @@ ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="loca
 ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(0=全部。デバッグ用)")
 ap.add_argument("--min-price", type=float, default=0.0)
 ap.add_argument("--max-price", type=float, default=1e9)
+ap.add_argument("--budget", type=float, default=0.0,
+                help="予算(円)。指定すると max-price=budget/FIXED_QTY に自動設定(100株で買える上限)。"
+                     "値がさ大型を除外し『円』ランキングのスケール偏りも抑える")
+ap.add_argument("--max-per-symbol", type=int, default=0,
+                help="1銘柄あたり採用する戦略数の上限(TRAIN期待値上位から。0=無制限)。"
+                     "同一銘柄への建玉集中を防ぐ。推奨2")
 ap.add_argument("--qty", type=int, default=None, help="株数(既定=FIXED_QTY)")
 ap.add_argument("--slip", type=float, default=0.0, help="損切り買い戻しの不利スリップ(0.005=0.5%%)")
 ap.add_argument("--fee", type=float, default=None, help="片道手数料率(既定=FEE_PCT_ONE_WAY)")
@@ -71,6 +77,9 @@ ble._INTRADAY_5M = False
 QTY = args.qty if args.qty is not None else ble.FIXED_QTY
 FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY if args.fee is None else args.fee
 BASE_END = (pd.Period(args.base_month, "M").end_time).normalize()
+# --budget 指定時は max-price を budget/株数 に上書き(既存 --max-price と併用時は厳しい方)
+if args.budget > 0:
+    args.max_price = min(args.max_price, args.budget / max(1, QTY))
 
 
 def _jq_to_yf(code: str) -> str:
@@ -228,8 +237,26 @@ def main():
             selected.append(r)
     selected.sort(key=lambda r: -r["train"]["exp"])   # TRAIN期待値(1件あたり)で降順
 
+    # 1銘柄あたりの戦略数上限(建玉集中の抑制)。上位から採用。
+    n_before_cap = len(selected)
+    if args.max_per_symbol > 0:
+        per: dict = {}
+        capped = []
+        for r in selected:
+            k = r["sym"]
+            if per.get(k, 0) >= args.max_per_symbol:
+                continue
+            per[k] = per.get(k, 0) + 1
+            capped.append(r)
+        selected = capped
+
     print("\n" + "=" * 90)
-    print(f"■ 選定結果: TRAIN合格 {len(selected)}ペア / 全{len(results)}ペア中")
+    print(f"■ 選定結果: TRAIN合格 {n_before_cap}ペア / 全{len(results)}ペア中"
+          + (f" → 1銘柄{args.max_per_symbol}戦略上限で {len(selected)}ペア({len({r['sym'] for r in selected})}銘柄)"
+             if args.max_per_symbol > 0 else ""))
+    if args.max_price < 1e9:
+        print(f"  価格フィルタ: 約定価格 ≤ {args.max_price:,.0f}円"
+              + (f" (予算{args.budget:,.0f}円/{QTY}株)" if args.budget > 0 else ""))
     print("=" * 90)
     if not selected:
         print("  合格ゼロ。しきい値(--train-min-pf/--train-min-trades)を緩めるか、"
