@@ -94,10 +94,10 @@ def _jq_to_yf(code: str) -> str:
 
 
 def _strategies() -> list[str]:
-    import check_signals_stop as _stop
-    import check_signals_breakout as _brk
-    return list(getattr(_stop, "STRATEGY_PARAMS", {}).keys()) + \
-           list(getattr(_brk, "STRATEGY_PARAMS", {}).keys())
+    # ホールドアウトレポート(run_signals_holdout_all)が集計する6戦略に合わせる。
+    # MACD/VOL(非TF)はレポート非対応 → 提案を run_signals_holdout_all --lss-proposal に
+    # そのまま渡せるよう、ここでは含めない。
+    return ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
 
 
 def _name_map() -> dict:

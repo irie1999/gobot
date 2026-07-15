@@ -87,6 +87,10 @@ _pre.add_argument("--mirror",     action="store_true",
                        "ロング銘柄・戦略はそのままに、約定損益を符号反転し max_hold=0 に固定")
 _pre.add_argument("--long-stop-short", dest="long_stop_short", action="store_true",
                   help="ロング銘柄を逆指値の空売り(stop_sell)で評価(下ブレイク継続狙い)")
+_pre.add_argument("--lss-proposal", type=str, default=None,
+                  help="lss専用の選定ファイル(scan_lss_universe が出力する lss_watchlist_proposal_*.py)を"
+                       "銘柄リストとして使う。指定するとWF選定の代わりに SELECTED を全設定共通で使用し、"
+                       "取引明細メインの軽量lssタブになる。'auto'で最新の提案ファイルを自動検出")
 _pre.add_argument("--bt-max", type=float, default=None,
                   help="ロングBTスコアの上限グローバル絞り込み(この値未満の銘柄だけ"
                        "レポート全体を集計)。未指定なら全銘柄を集計し、取引明細の"
@@ -286,10 +290,11 @@ if _args.both and not _args.short:
         if _skip_next:
             _skip_next = False
             continue
-        if _a == "--max-price":
+        # --max-price は後で付け直す。--lss-proposal は lss 方向にだけ付けるので共通からは除く
+        if _a in ("--max-price", "--lss-proposal"):
             _skip_next = True
             continue
-        if _a.startswith("--max-price="):
+        if _a.startswith("--max-price=") or _a.startswith("--lss-proposal="):
             continue
         _base_cargs_no_price.append(_a)
     if "--force" not in _base_cargs_no_price:
@@ -304,19 +309,39 @@ if _args.both and not _args.short:
     # 生成する方向: (dir_key, ラベル, 追加引数, 出力ファイル接頭辞)
     # ロング/ショートは --no-analysis で高速化(詳細分析タブ群を省略)。
     # ロングミラー/ロング銘柄ショートはフル実行(→「同日TP/SL最適化」タブが出る)。
+    # lss専用選定ファイル(scan_lss_universe の提案)を解決。'auto'=最新を自動検出。
+    # 指定時は lss を「新選定・取引明細メインの軽量タブ」で生成する(既存lssを置き換え)。
+    _lss_proposal_path = None
+    _lp_arg = getattr(_args, "lss_proposal", None)
+    if _lp_arg:
+        if _lp_arg == "auto":
+            _cands = sorted(Path(".").glob("lss_watchlist_proposal_*.py"))
+            _lss_proposal_path = str(_cands[-1]) if _cands else None
+            if _lss_proposal_path:
+                print(f"[lss] 提案ファイル自動検出: {_lss_proposal_path}")
+            else:
+                print("[lss] lss_watchlist_proposal_*.py が見つからず → 既存WATCHLISTでlss生成")
+        else:
+            _lss_proposal_path = _lp_arg
+    _lss_dargs = ["--long-stop-short"]
+    if _lss_proposal_path:
+        _lss_dargs += ["--lss-proposal", _lss_proposal_path]
+
     _DIRECTIONS = [
         ("long",   "ロング",             ["--no-analysis"],              "signals_holdout_all"),
         ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
-        ("lss",    "ロング銘柄ショート", ["--long-stop-short"],          "signals_holdout_all_lss"),
+        ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
     ]
     for _mp in _price_list:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
-        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp), "--output-suffix", _mp_suffix]
+        # _mp==0 は「価格無制限」。サブプロセスには十分大きい上限を渡す。
+        _mp_cap = 1_000_000 if _mp == 0 else _mp
+        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp_cap), "--output-suffix", _mp_suffix]
         for _dk, _dlabel, _dargs, _dprefix in _DIRECTIONS:
             _df = Path(f"{_dprefix}_{_bd}{_mp_suffix}.html")
             print("=" * 65)
-            print(f"=== {_dlabel}シグナル生成中 (〜{_mp:,}円) ===")
+            print(f"=== {_dlabel}シグナル生成中 ({'価格無制限' if _mp == 0 else f'〜{_mp:,}円'}) ===")
             print("=" * 65)
             _sp.run([sys.executable, __file__] + _cargs_mp + _dargs)
             if not _df.exists():
@@ -329,6 +354,8 @@ if _args.both and not _args.short:
     _min_p_disp = int(_min_p_val) if _min_p_val > 0 else None
 
     def _price_label(mp: int) -> str:
+        if mp == 0 or mp >= 100000:
+            return (f"{_min_p_disp:,}〜無制限" if _min_p_disp else "無制限")
         parts = []
         if _min_p_disp:
             parts.append(f"{_min_p_disp:,}〜")
@@ -719,6 +746,45 @@ if _using_fallback:
     for days in _PNL_PERIODS:
         _period_configs[days] = [_fb_cfg]
 
+# ── lss専用選定(scan_lss_universe の提案)で上書き ──────────────────────────
+# --lss-proposal 指定時は WF選定/フォールバックを捨て、提案 SELECTED を全設定共通の
+# 単一設定として使う(既存lssタブを置き換え=取引明細メインの軽量lss)。フラグ未指定なら
+# この節は完全にスキップされ、既存挙動は一切変わらない。
+_lss_proposal_file = getattr(_args, "lss_proposal", None)
+if _args.long_stop_short and _lss_proposal_file:
+    _CANON_STOP = {"MACDTF", "A7", "RSI2"}
+    _CANON_BRK  = {"DON", "VOLTF", "MOM"}
+    _sel = []
+    try:
+        _pns: dict = {}
+        exec(Path(_lss_proposal_file).read_text(encoding="utf-8"), _pns)
+        _sel = list(_pns.get("SELECTED", []))
+    except Exception as _e:
+        print(f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e} → 既存選定のまま")
+    if _sel:
+        _p_stop, _p_brk, _dropped = [], [], 0
+        for _tup in _sel:
+            if not _tup or len(_tup) < 3:
+                continue
+            _c, _n, _s = _tup[0], _tup[1], _tup[2]
+            if _s in _CANON_STOP:
+                _p_stop.append((_c, _n, _s))
+            elif _s in _CANON_BRK:
+                _p_brk.append((_c, _n, _s))
+            else:
+                _dropped += 1   # MACD/VOL 等 非対応戦略は除外(レポートは6戦略前提)
+        _p_stop = _filter_wl_by_price(_p_stop, _args.min_price, _args.max_price)
+        _p_brk  = _filter_wl_by_price(_p_brk,  _args.min_price, _args.max_price)
+        _lss_cfg = {
+            "label": "lss選定", "color": "#f472b6", "mode": "conservative",
+            "sm_tm": None, "stop_wl": _p_stop, "brk_wl": _p_brk,
+        }
+        for days in _PNL_PERIODS:
+            _period_configs[days] = [_lss_cfg]
+        print(f"[lss] 新選定で上書き: {Path(_lss_proposal_file).name} → "
+              f"stop {len(_p_stop)} / brk {len(_p_brk)} 件"
+              + (f" (非対応戦略{_dropped}件は除外)" if _dropped else ""))
+
 # シグナルタブ用: 全設定を重複なしで結合
 _seen_cfg_labels: set = set()
 _all_configs: list[dict] = []
@@ -863,7 +929,10 @@ _na._SAMEDAY_SWEEP_TAB = (_analysis_only and not getattr(_args, "no_analysis", F
                           and getattr(_args, "daily_tpsl_sweep", False))
 _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=そのまま
 # 5分足版TP/SLスイープ(正確・本命)。5分足が無ければタブ内に注意書き(グレースフル)。
-_na._SAMEDAY_5M_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
+# ただし --lss-proposal(新選定・取引明細メインの軽量lss)ではスイープ格子は省略する
+# (取引明細の5分足集計自体は _INTRADAY_5M で維持されるので同日損益は正確なまま)。
+_na._SAMEDAY_5M_TAB = (_analysis_only and not getattr(_args, "no_analysis", False)
+                       and not getattr(_args, "lss_proposal", None))
 
 # 重い長系の詳細分析(保有日数比較/損切り幅/寄り付き方向/下落深さ/em比較/約定
 # タイミング/期間別パネル)を飛ばすか。--no-analysis 指定時に加え、mirror/lss は
