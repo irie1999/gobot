@@ -783,13 +783,19 @@ if _args.long_stop_short:
 # ※同日スイープ自体は build_sameday_tpsl_sweep_html 内で一時的にこの上書きを外すので、
 #   グリッドは常に本来の総当り結果を示す(適用値に引きずられない)。
 if (_args.mirror or _args.long_stop_short):
-    if _args.mirror_sm is not None:
-        _bte._SM_FORCE = _args.mirror_sm
-    if _args.mirror_tm is not None:
-        _bte._TM_FORCE = _args.mirror_tm
-    if _args.mirror_sm is not None or _args.mirror_tm is not None:
-        print(f"[TP/SL適用] 損切ATR={_args.mirror_sm if _args.mirror_sm is not None else '既定'} / "
-              f"利確ATR={_args.mirror_tm if _args.mirror_tm is not None else '既定'} を全体に適用", flush=True)
+    # 5分足スイープで確定した最適な同日TP/SL幅(モード別)をデフォルトにする。
+    # --mirror-sm / --mirror-tm を明示指定すれば上書き。
+    #   ミラー(指値空売り): 損切ATR0.5 / 利確ATR0.1 (long基準。5分足★最良)
+    #   ロング銘柄ショート(逆指値空売り): 損切ATR0.1 / 利確ATR1.0 (short基準。5分足★最良)
+    _MIRROR_OPT = (0.5, 0.1)
+    _LSS_OPT    = (0.1, 1.0)
+    _def_sm, _def_tm = _MIRROR_OPT if _args.mirror else _LSS_OPT
+    _bte._SM_FORCE = _args.mirror_sm if _args.mirror_sm is not None else _def_sm
+    _bte._TM_FORCE = _args.mirror_tm if _args.mirror_tm is not None else _def_tm
+    _sm_src = "指定" if _args.mirror_sm is not None else "5分足最適(既定)"
+    _tm_src = "指定" if _args.mirror_tm is not None else "5分足最適(既定)"
+    print(f"[TP/SL適用] 損切ATR={_bte._SM_FORCE}({_sm_src}) / "
+          f"利確ATR={_bte._TM_FORCE}({_tm_src}) を全体に適用", flush=True)
     # mirror/lss の取引明細・KPI・月別を5分足ベースで集計する(--no-5m で無効化)。
     if not getattr(_args, "no_5m", False):
         try:
