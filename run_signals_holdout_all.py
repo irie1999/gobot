@@ -1598,7 +1598,8 @@ if getattr(_na, "_SAMEDAY_5M_TAB", False):
     except Exception:
         _5m_src = "auto"
     _s5_mp     = int(_args.max_price) if (_args.max_price and _args.max_price < 100000) else 0
-    _s5_prefix = f"sameday5m{_cache_short}_mp{_s5_mp}_{_5m_src}"
+    # v2: グローバル解除バグ修正+グリッド変更に伴いキャッシュキー更新(旧の誤グリッド無効化)
+    _s5_prefix = f"sameday5m2{_cache_short}_mp{_s5_mp}_{_5m_src}"
     _s5_reuse  = _latest_analysis_cache(_s5_prefix)
     _s5_html = None
     if _s5_reuse is not None:

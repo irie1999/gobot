@@ -6800,8 +6800,8 @@ def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
     except Exception as _e:
         return (f'<div style="padding:16px;color:#f87171">5分足コア(sameday5m_core)の'
                 f'読み込みに失敗しました: {_e}</div>')
-    sm_list = sm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
-    tm_list = tm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
+    sm_list = sm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 1.0]
+    tm_list = tm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 1.0]
     cells = [(sm, tm) for tm in tm_list for sm in sm_list]
 
     seen: set = set()
@@ -6813,26 +6813,42 @@ def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
     if not items:
         return ""
 
+    import backtest_limit_entry as _blm
     from backtest_limit_entry import FIXED_QTY as _QTY, FEE_PCT_ONE_WAY as fee
     agg = {c: [] for c in cells}
     n_with_5m = 0
     print(f"  [5分足TP/SL] {len(items)}銘柄 × {len(cells)}マス 集計中(5分足ソース={source})...", flush=True)
-    with _TPE(max_workers=workers) as ex:
-        futs = {ex.submit(_c5.sweep_symbol, s, n, st, is_mirror, cells, days,
-                          source, 0.0, 1e12, _QTY, fee, slip): (s, st)
-                for (s, n, st) in items}
-        _done = 0
-        for fut in _asc(futs):
-            _done += 1
-            try:
-                r = fut.result()
-            except Exception:
-                continue
-            _tot = sum(len(v) for v in r.values())
-            if _tot > 0:
-                n_with_5m += 1
-            for c, pnls in r.items():
-                agg[c] += pnls
+    # ── スイープ中はレポートのモードグローバルを一時解除 ──────────────────────
+    # sweep_symbol は各セルの sm/tm を run_limit_backtest に直接渡し、決済も自前の
+    # 5分足 first-touch で計算する。_SM_FORCE/_TM_FORCE(適用値)や _INTRADAY_5M
+    # (集計用の5分足置換)が効いたままだと、全マスが同じ幅になり、かつ余計な5分足
+    # 置換が49倍走って激遅になる。ここで退避→解除→復元する(スレッド起動前なので安全)。
+    _saved = {k: getattr(_blm, k, None) for k in
+              ("_SM_FORCE", "_TM_FORCE", "_INTRADAY_5M", "_MIRROR_PNL", "_ENTRY_TYPE_FORCE")}
+    _blm._SM_FORCE = None; _blm._TM_FORCE = None
+    _blm._INTRADAY_5M = False; _blm._MIRROR_PNL = False; _blm._ENTRY_TYPE_FORCE = None
+    try:
+        with _TPE(max_workers=workers) as ex:
+            futs = {ex.submit(_c5.sweep_symbol, s, n, st, is_mirror, cells, days,
+                              source, 0.0, 1e12, _QTY, fee, slip): (s, st)
+                    for (s, n, st) in items}
+            _done = 0
+            for fut in _asc(futs):
+                _done += 1
+                if _done % 50 == 0:
+                    print(f"    ...{_done}/{len(items)}銘柄", flush=True)
+                try:
+                    r = fut.result()
+                except Exception:
+                    continue
+                _tot = sum(len(v) for v in r.values())
+                if _tot > 0:
+                    n_with_5m += 1
+                for c, pnls in r.items():
+                    agg[c] += pnls
+    finally:
+        for k, v in _saved.items():
+            setattr(_blm, k, v)
 
     stats = {c: _c5.cell_stat(agg[c]) for c in cells}
     if not any(stats.values()):
