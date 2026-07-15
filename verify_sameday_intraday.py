@@ -581,8 +581,8 @@ def main():
         tm_list = [float(x) for x in args.tm_list.split(",") if x.strip()]
         results = [_run_sweep(m, uniq, sm_list, tm_list) for m in modes]
         if not args.no_html:
-            from datetime import date as _d
-            out = Path(f"sameday5m_sweep_{ble._TODAY}.html")
+            _mtag = "".join(m[0] for m in modes)
+            out = Path(f"sameday5m_sweep_{_mtag}_{ble._TODAY}.html")
             out.write_text(_build_sweep_html(results), encoding="utf-8")
             print(f"[HTML] 5分足スイープ → {out.resolve()}")
             if not args.no_browser:
@@ -595,7 +595,8 @@ def main():
         results = [_run_mode(m, uniq) for m in modes]
         if not args.no_html:
             html = _build_detail_html([r for r in results if r])
-            out = Path(f"sameday5m_detail_{ble._TODAY}.html")
+            _mtag = "".join(m[0] for m in modes)   # mirror→m / lss→l
+            out = Path(f"sameday5m_detail_{_mtag}_sm{args.sm}_tm{args.tm}_{ble._TODAY}.html")
             out.write_text(html, encoding="utf-8")
             print(f"[HTML] 5分足 取引明細 → {out.resolve()}")
             if not args.no_browser:
