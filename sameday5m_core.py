@@ -85,11 +85,20 @@ def prepare_symbol(sym, name, strat, days, source):
         df_ind = cf(df_raw.copy())
     except Exception:
         return None
-    try:
-        m5 = load_intraday(sym, days=days + 5, source=source)
-    except Exception:
-        m5 = None
-    by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
+    # 5分足はエンジンの共通キャッシュ(_INTRADAY_5M_CACHE)を read/populate する。
+    # レポートの取引明細集計(_INTRADAY_5M)とスイープタブで同じロードを共有し、
+    # 初回の2重ロードを防ぐ(同一プロセスで銘柄あたり1回だけロード)。
+    _cache = getattr(ble, "_INTRADAY_5M_CACHE", None)
+    if _cache is not None and sym in _cache:
+        by_day = _cache[sym]
+    else:
+        try:
+            m5 = load_intraday(sym, days=400, source=source)
+            by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
+        except Exception:
+            by_day = {}
+        if _cache is not None:
+            _cache[sym] = by_day    # エンジン側の集計とも共有
     return df_raw, df_ind, (lambda d: d), by_day, em
 
 
