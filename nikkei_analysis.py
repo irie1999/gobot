@@ -8906,10 +8906,11 @@ function switchTbd(id, tab) {{
             rows = f'<tr><td colspan="15" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
         return rows
 
-    # 全部 / BT70以上 / BT40以下 / エントリー日別グリッド の 系統を用意
+    # 全部 / BT70以上 / BT40以上 / エントリー日別グリッド の 系統を用意
     bt70_trades = [t for t in sorted_trades if (t.get("rec_score") or 0) >= 70]
 
-    # BT40以下バンド: ロングが弱い銘柄だけを抽出（mirror/lss のフェード対象と一致）。
+    # BT40以上バンド: BTスコア40以上(=質の高い銘柄)だけを抽出。
+    # 分析でBT<40はPF1.4/薄利、BT≥40はPF3〜6.5と判明したため、良い層をハイライトする。
     # BTは現モードで測ると mirror/lss で符号反転するため、_LONG_BT_REF があれば
     # “ロングの”BTで判定する(無ければ現モードのシグナル時BT=rec_score)。
     def _eff_long_bt(t) -> float:
@@ -8918,7 +8919,7 @@ function switchTbd(id, tab) {{
             if _v is not None:
                 return _v
         return t.get("rec_score") or 0
-    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) < 40]
+    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 40]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
         done_trades,
@@ -8927,7 +8928,7 @@ function switchTbd(id, tab) {{
     )
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
-    trade_rows_bt40 = _rows_for(bt40_trades,   "BT40以下の取引なし")
+    trade_rows_bt40 = _rows_for(bt40_trades,   "BT40以上の取引なし")
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -9052,10 +9053,10 @@ function switchTbd(id, tab) {{
     )
     _bt70_entry_by_date, _sorted_bt70_entry_dates = _build_entry_grid(_bt70_entry_sorted, "b")
 
-    # BT40以下(ロングが弱い銘柄)のエントリー日別グリッド。mirror/lss では
+    # BT40以上(質の高い銘柄)のエントリー日別グリッド。mirror/lss では
     # _LONG_BT_REF(ロングの真のBT)で判定(_eff_long_bt)。
     _bt40_entry_sorted = pending_trades + sorted(
-        [t for t in done_trades if _eff_long_bt(t) < 40],
+        [t for t in done_trades if _eff_long_bt(t) >= 40],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
@@ -9115,13 +9116,17 @@ function switchTbd(id, tab) {{
         mm_dd     = dk[5:7] + "/" + dk[8:10]
         pend_span = (f'<span style="color:#fbbf24;font-size:0.66rem">発注中{n_pend}</span>'
                      if n_pend else "")
+        # その日の最大必要資金(同時保有ピーク=約定額の同時拘束)。同日決済なら約定額合計。
+        _cap_d = _peak_capital(trades_d)[0]
+        cap_span = (f'<span style="color:#38bdf8;font-size:0.6rem">要¥{_cap_d:,.0f}</span>'
+                    if _cap_d > 0 else "")
         dk_key = dk.replace("-", "")
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
                 f'onclick="showEntryDate{pfx.upper()}({dseq},\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
-                f'{pend_span}</button>')
+                f'{cap_span}{pend_span}</button>')
 
     def _entry_date_detail(dk, dseq, show, by_date, pfx):
         trades_d = by_date[dk]
@@ -9138,6 +9143,7 @@ function switchTbd(id, tab) {{
   <span style="font-size:0.9rem;font-weight:700;color:#60a5fa">{dk} のエントリー</span>
   <span style="font-size:0.8rem;color:#94a3b8">{len(done_d)}件決済 &nbsp;勝率{wr_d:.0f}%
     &nbsp;損益<span style="color:{pnl_col};font-weight:700">{pnl_d:+,.0f}円</span></span>
+  <span style="font-size:0.8rem;color:#38bdf8">最大必要資金 <span style="font-weight:700">¥{_peak_capital(trades_d)[0]:,.0f}</span></span>
 </div>
 <div style="overflow-x:auto">
 <table>
@@ -11330,10 +11336,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#6d28d9">🪞 BT40以下 <span style="font-size:0.72rem;color:#c4b5fd">({len(bt40_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT40以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#6d28d9">🪞 BT40×エントリー日別 <span style="font-size:0.72rem;color:#c4b5fd">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT40以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -11352,8 +11358,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </table>
 </div>
 <div id="detail_{_dseq}_bt40" class="detail-tab-pane">
-<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">
-🪞 ロングBT40未満（＝ロングが弱い銘柄）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
+<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">
+🎯 BTスコア40以上（＝質の高い銘柄）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -11385,7 +11391,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
 </div>
 <div id="detail_{_dseq}_bt40entry" class="detail-tab-pane">
-<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">🪞 ロングBT40未満（ロングが弱い銘柄）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">🎯 BTスコア40以上（質の高い銘柄）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt40_entry_sorted)}
 {_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
 </div>
