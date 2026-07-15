@@ -94,6 +94,10 @@ _pre.add_argument("--lss-proposal", type=str, default=None,
 _pre.add_argument("--lss-top", type=int, default=0,
                   help="提案ファイル(TRAIN期待値順に整列済み)から使う上位ペア数(0=全部)。"
                        "既存の提案をそのまま使い、価格フィルタ後の上位N本だけ採用する(再スキャン不要)。推奨150")
+_pre.add_argument("--long-base", type=str, default=None,
+                  help="ロングを指定as-of日のWFスキャンCSV(walkforward_<戦略>_<日付>.csv)で"
+                       "単一選定して評価する。例 2025-12-31 → lssと同じ2025-12基準・2026がOOS。"
+                       "12ホールドアウトを1設定『long選定』に集約する")
 _pre.add_argument("--no-mirror", action="store_true",
                   help="--both でロングミラー(却下済み・重い5分足スイープ)を生成しない")
 _pre.add_argument("--no-short", action="store_true",
@@ -297,11 +301,12 @@ if _args.both and not _args.short:
         if _skip_next:
             _skip_next = False
             continue
-        # --max-price は後で付け直す。--lss-proposal は lss 方向にだけ付けるので共通からは除く
-        if _a in ("--max-price", "--lss-proposal"):
+        # --max-price は後で付け直す。--lss-proposal/--long-base は各方向にだけ付けるので共通からは除く
+        if _a in ("--max-price", "--lss-proposal", "--long-base"):
             _skip_next = True
             continue
-        if _a.startswith("--max-price=") or _a.startswith("--lss-proposal="):
+        if (_a.startswith("--max-price=") or _a.startswith("--lss-proposal=")
+                or _a.startswith("--long-base=")):
             continue
         _base_cargs_no_price.append(_a)
     if "--force" not in _base_cargs_no_price:
@@ -334,6 +339,13 @@ if _args.both and not _args.short:
     if _lss_proposal_path:
         _lss_dargs += ["--lss-proposal", _lss_proposal_path]
 
+    # long を指定as-of(例2025-12-31)のWFスキャンCSVで単一選定する場合、その方向にだけ付与
+    _long_base = getattr(_args, "long_base", None)
+    _long_dargs = ["--no-analysis"]
+    if _long_base:
+        _long_dargs += ["--long-base", _long_base]
+        print(f"[long] 2025-12基準など単一as-of選定: base={_long_base}")
+
     # スキップ指定(--no-mirror / --no-short)を除いた生成対象。longは常に生成。
     _skip_dirs = set()
     if getattr(_args, "no_mirror", False):
@@ -341,7 +353,7 @@ if _args.both and not _args.short:
     if getattr(_args, "no_short", False):
         _skip_dirs.add("short")
     _DIRECTIONS = [d for d in [
-        ("long",   "ロング",             ["--no-analysis"],              "signals_holdout_all"),
+        ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
         ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
         ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
@@ -812,6 +824,41 @@ if _args.long_stop_short and _lss_proposal_file:
               + (f"(上位{_lss_top}) " if _lss_top > 0 else " ")
               + f"[stop {len(_p_stop)}/brk {len(_p_brk)}]"
               + (f" 非対応{_dropped}除外" if _dropped else ""))
+
+# ── long を指定as-of(例2025-12-31)のWFスキャンCSVで単一選定 ──────────────────
+# --long-base 指定かつ通常ロング(short/mirror/lss以外)のとき、walkforward_<戦略>_<base>.csv
+# を6戦略ぶん読み、12ホールドアウトを1設定「long選定(base)」に集約(=lssと同じ土俵)。
+# フラグ未指定なら完全スキップ=既存挙動不変。
+_long_base_file = getattr(_args, "long_base", None)
+if _long_base_file and not (_args.short or _args.mirror or _args.long_stop_short):
+    _LB_STOP = ["MACDTF", "A7", "RSI2"]
+    _LB_BRK  = ["DON", "VOLTF", "MOM"]
+    _lb_stop, _lb_brk, _lb_missing = [], [], []
+    for _s in _LB_STOP:
+        _p = wf_dir / f"walkforward_{_s}_{_long_base_file}.csv"
+        if _p.exists():
+            _lb_stop.extend(_load_wl_from_csv(_p, _args.max_price, _s, min_price=_args.min_price))
+        else:
+            _lb_missing.append(_s)
+    for _s in _LB_BRK:
+        _p = wf_dir / f"walkforward_{_s}_{_long_base_file}.csv"
+        if _p.exists():
+            _lb_brk.extend(_load_wl_from_csv(_p, _args.max_price, _s, min_price=_args.min_price))
+        else:
+            _lb_missing.append(_s)
+    if _lb_stop or _lb_brk:
+        _long_cfg = {
+            "label": f"long選定({_long_base_file})", "color": "#3b82f6",
+            "mode": "conservative", "sm_tm": None,
+            "stop_wl": _lb_stop, "brk_wl": _lb_brk,
+        }
+        for days in _PNL_PERIODS:
+            _period_configs[days] = [_long_cfg]
+        print(f"[long] {_long_base_file}基準で上書き: 価格≤{_args.max_price:,.0f}円で "
+              f"stop {len(_lb_stop)}/brk {len(_lb_brk)} 件"
+              + (f" (CSV無 {','.join(_lb_missing)})" if _lb_missing else ""))
+    else:
+        print(f"[long] walkforward_*_{_long_base_file}.csv が見つからず → 通常のホールドアウト選定のまま")
 
 # シグナルタブ用: 全設定を重複なしで結合
 _seen_cfg_labels: set = set()
