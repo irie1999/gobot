@@ -57,6 +57,9 @@ ap.add_argument("--train-min-wr", type=float, default=0.0, help="TRAIN最低勝�
 ap.add_argument("--test-min-trades", type=int, default=3,
                 help="TEST最低取引数(下回るとOOS判定を『検証不足』扱い。選定条件ではない)")
 ap.add_argument("--top", type=int, default=40, help="コンソールに出す上位件数")
+ap.add_argument("--select-top", type=int, default=0,
+                help="提案ファイルに書き出すペア数の上限(TRAIN期待値上位から。0=全部)。"
+                     "run_signals_holdout_all --lss-proposal で扱える件数に絞る用途。推奨150")
 ap.add_argument("--out", type=str, default=None, help="提案ファイル名(既定=lss_watchlist_proposal_<date>.py)")
 args = ap.parse_args()
 
@@ -250,10 +253,16 @@ def main():
             capped.append(r)
         selected = capped
 
+    # 提案に書き出す件数の上限(レポートで扱える件数に絞る)。TRAIN期待値上位から。
+    n_after_cap = len(selected)
+    if args.select_top > 0:
+        selected = selected[:args.select_top]
+
     print("\n" + "=" * 90)
     print(f"■ 選定結果: TRAIN合格 {n_before_cap}ペア / 全{len(results)}ペア中"
-          + (f" → 1銘柄{args.max_per_symbol}戦略上限で {len(selected)}ペア({len({r['sym'] for r in selected})}銘柄)"
-             if args.max_per_symbol > 0 else ""))
+          + (f" → 1銘柄{args.max_per_symbol}戦略上限で {n_after_cap}ペア" if args.max_per_symbol > 0 else "")
+          + (f" → 上位{args.select_top}に絞り {len(selected)}ペア" if args.select_top > 0 else "")
+          + f" ({len({r['sym'] for r in selected})}銘柄)")
     if args.max_price < 1e9:
         print(f"  価格フィルタ: 約定価格 ≤ {args.max_price:,.0f}円"
               + (f" (予算{args.budget:,.0f}円/{QTY}株)" if args.budget > 0 else ""))
