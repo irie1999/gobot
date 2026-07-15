@@ -66,6 +66,9 @@ ap.add_argument("--sm-list", type=str, default="0.1,0.15,0.2,0.3,0.5,0.75,1.0",
                 help="スイープの損切ATR倍率(カンマ区切り)")
 ap.add_argument("--tm-list", type=str, default="0.1,0.15,0.2,0.3,0.5,0.75,1.0",
                 help="スイープの利確ATR倍率(カンマ区切り)")
+ap.add_argument("--by-regime", action="store_true",
+                help="日経レジーム(上げ/横ばい/下げ)別・月別に損益を分解する(B: レジーム頑健性)。"
+                     "--days を大きく(例730)して複数レジームで検証する用途。")
 args = ap.parse_args()
 
 if not (args.mirror or args.lss or args.both):
@@ -565,6 +568,84 @@ def _build_detail_html(results: list) -> str:
             f'エントリーは注文価格ちょうど・{_cost}</p>{blocks}</body></html>')
 
 
+# ── B: 日経レジーム別・月別 分解 ─────────────────────────────────────────────
+def _load_regime_map(days: int):
+    """日経のトレンドラベル (date→'up'/'sideways'/'down') を返す。取得失敗時 None。
+    label_trend/fetch_n225 は nikkei_analysis の既存実装を再利用(二重実装を避ける)。"""
+    try:
+        from nikkei_analysis import fetch_n225, label_trend
+        years = max(1, (days + 400) // 365 + 1)
+        close = fetch_n225(years)
+        trend = label_trend(close)
+        trend.index = pd.to_datetime(trend.index).tz_localize(None).normalize()
+        return trend.sort_index()
+    except Exception as e:
+        print(f"[warn] 日経レジーム取得失敗 ({e}) → レジーム分解をスキップ", file=sys.stderr)
+        return None
+
+
+def _agg_pnls(pnls: list):
+    n = len(pnls)
+    if n == 0:
+        return None
+    wins = [p for p in pnls if p > 0]
+    gp = sum(wins); gl = -sum(p for p in pnls if p <= 0)
+    pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    return {"n": n, "pnl": sum(pnls), "wr": len(wins) / n * 100, "pf": pf}
+
+
+def _print_group(title: str, groups: dict, order=None):
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+    print(f"  【{title}】")
+    keys = order if order else sorted(groups.keys())
+    for k in keys:
+        st = groups.get(k)
+        if not st:
+            continue
+        print(f"    {str(k):<14}{st['n']:>5}件  勝率{st['wr']:>4.0f}%  "
+              f"PF{_pf(st['pf']):>6}  {st['pnl']:>+13,.0f}円  (平均{st['pnl']/st['n']:>+8,.0f})")
+
+
+def _regime_breakdown(results: list, regime):
+    """各モードの all_trades を 日経レジーム別 / 月別 に分解して表示。"""
+    _JA = {"up": "🟢上げ", "sideways": "🟡横ばい", "down": "🔴下げ", "?": "―不明"}
+    for R in results:
+        trs = (R or {}).get("trades") or []
+        if not trs:
+            continue
+        print("─" * 72)
+        print(f"■ {R['label']} — レジーム別 / 月別 (5分足・{len(trs)}取引)")
+        by_reg: dict = {}
+        by_mon: dict = {}
+        for t in trs:
+            d = pd.Timestamp(t["date"]).normalize()
+            lbl = "?"
+            if regime is not None:
+                try:
+                    v = regime.asof(d)          # その日以前の直近ラベル(祝日/週末対策)
+                    if isinstance(v, str):
+                        lbl = v
+                except Exception:
+                    lbl = "?"
+            by_reg.setdefault(lbl, []).append(t["pnl_5m"])
+            by_mon.setdefault(d.strftime("%Y-%m"), []).append(t["pnl_5m"])
+        reg_named = {_JA.get(k, k): _agg_pnls(v) for k, v in by_reg.items()}
+        mon_stat = {k: _agg_pnls(v) for k, v in by_mon.items()}
+        _print_group("日経レジーム別", reg_named,
+                     order=["🟢上げ", "🟡横ばい", "🔴下げ", "―不明"])
+        _print_group("月別", mon_stat, order=sorted(mon_stat.keys()))
+        # 頑健性の一言判定: 全レジームでプラスか
+        pos = [k for k, st in reg_named.items() if st and st["pnl"] > 0 and k != "―不明"]
+        neg = [k for k, st in reg_named.items() if st and st["pnl"] <= 0 and k != "―不明"]
+        if pos and not neg:
+            print(f"  → 頑健: 判定できた全レジームでプラス ({'/'.join(pos)})")
+        elif neg:
+            print(f"  → 注意: マイナスのレジームあり ({'/'.join(neg)})。"
+                  f"特定相場依存の可能性 → 期間を延ばして再確認を")
+        print()
+
+
 def main():
     symbols = _load_symbols()
     seen = set(); uniq = []
@@ -593,6 +674,9 @@ def main():
                     pass
     else:
         results = [_run_mode(m, uniq) for m in modes]
+        if args.by_regime:
+            regime = _load_regime_map(args.days)
+            _regime_breakdown(results, regime)
         if not args.no_html:
             html = _build_detail_html([r for r in results if r])
             _mtag = "".join(m[0] for m in modes)   # mirror→m / lss→l
