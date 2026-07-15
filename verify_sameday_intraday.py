@@ -74,19 +74,17 @@ if not (args.mirror or args.lss or args.both):
 # ── バックテストエンジン(唯一の約定ロジック) ────────────────────────────────
 import backtest_limit_entry as ble
 from daytrade_data import load_intraday, split_by_day
+import sameday5m_core as _c5   # first-touch 等の共通コア(二重実装を避ける)
 
 QTY = args.qty if args.qty is not None else ble.FIXED_QTY
 FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY if args.fee is None else args.fee
 
+# first-touch / 損益計算は共通コアに委譲(バグの温床を1箇所に集約)
+_mod_for = _c5.mod_for
 
-# ── 銘柄リスト読み込み ───────────────────────────────────────────────────────
-def _mod_for(strat: str):
-    """戦略名→シグナルモジュール(ロング側のみ。mirror/lss はロング銘柄が対象)。"""
-    import check_signals_stop as _stop
-    import check_signals_breakout as _brk
-    if strat in getattr(_brk, "STRATEGY_PARAMS", {}):
-        return _brk
-    return _stop
+
+def _short_pnl(entry_p, exit_p, reason):
+    return _c5.short_pnl(entry_p, exit_p, reason, QTY, FEE_ONE_WAY, args.slip)
 
 
 def _load_symbols() -> list[tuple]:
@@ -116,94 +114,6 @@ def _load_symbols() -> list[tuple]:
     out = list(_stop.WATCHLIST) + list(_brk.WATCHLIST)
     print(f"[info] WATCHLIST から {len(out)}ペア(フォールバック)")
     return out
-
-
-# ── 5分足 first-touch 決済(ショート) ────────────────────────────────────────
-def _short_exit_5m(day_bars: pd.DataFrame, entry_p: float,
-                   stop_p: float, target_p: float, is_rise_trigger: bool):
-    """約定日の5分足からショートの決済価格・理由を first-touch で求める。
-
-    Args:
-      day_bars       : その約定日の5分足(open/high/low/close, 昇順)
-      entry_p        : 約定価格(=order_p)。エントリーバーの特定に使う
-      stop_p         : ショートの損切(上側)
-      target_p       : ショートの利確(下側)
-      is_rise_trigger: True=価格が上昇してentry_pに到達で約定(mirror・指値空売り)
-                       False=価格が下落してentry_pに到達で約定(lss・逆指値空売り)
-
-    Returns: (exit_price, reason)  reason ∈ {"target","stop","close","no_entry"}
-      約定バーが見つからなければ ("", "no_entry")。
-    """
-    if day_bars is None or day_bars.empty:
-        return None, "no_5m", None, None
-    highs = day_bars["high"].to_numpy(dtype=float)
-    lows  = day_bars["low"].to_numpy(dtype=float)
-    closes = day_bars["close"].to_numpy(dtype=float)
-    times = day_bars.index
-    n = len(highs)
-
-    # 1) 約定バーを特定(トリガー到達で約定)
-    ei = None
-    for j in range(n):
-        if is_rise_trigger:
-            if highs[j] >= entry_p:   # 上昇して指値売りに到達
-                ei = j
-                break
-        else:
-            if lows[j] <= entry_p:    # 下落して逆指値売りに到達
-                ei = j
-                break
-    if ei is None:
-        return None, "no_entry", None, None
-
-    ent_ts = times[ei]
-    # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読みを避ける)
-    for j in range(ei + 1, n):
-        hit_stop = highs[j] >= stop_p      # 損切り(上抜け)= 同一バー両方でも優先
-        hit_tgt  = lows[j] <= target_p     # 利確(下抜け)
-        if hit_stop:
-            return stop_p, "stop", ent_ts, times[j]
-        if hit_tgt:
-            return target_p, "target", ent_ts, times[j]
-    # 3) どちらも当たらなければ引け(その日の最終バー終値)
-    return float(closes[-1]), "close", ent_ts, times[-1]
-
-
-def _short_exit_daily(hi: float, lo: float, cl: float, entry_p: float,
-                      stop_p: float, target_p: float, is_rise_trigger: bool,
-                      tie: str = "stop"):
-    """日足近似の決済(5分足との比較用)。日足の high/low だけでは損切と利確の
-    どちらが先か分からないので、tie で優先を切替える:
-      tie="stop"   : 同時タッチは損切り優先(保守=悲観側の下限)
-      tie="target" : 同時タッチは利確優先(=日足エンジンの同日決済と同じ楽観側の上限)
-    Returns: (exit_price, reason) reason∈{"target","stop","close","no_entry"}"""
-    if is_rise_trigger:
-        if hi < entry_p:
-            return None, "no_entry"
-    else:
-        if lo > entry_p:
-            return None, "no_entry"
-    hit_stop = hi >= stop_p     # 上抜け=損切
-    hit_tgt  = lo <= target_p   # 下抜け=利確
-    if tie == "target":
-        if hit_tgt:
-            return target_p, "target"
-        if hit_stop:
-            return stop_p, "stop"
-    else:
-        if hit_stop:
-            return stop_p, "stop"
-        if hit_tgt:
-            return target_p, "target"
-    return cl, "close"
-
-
-def _short_pnl(entry_p: float, exit_p: float, reason: str) -> float:
-    """ショート損益(円)。買い戻し(exit)は損切り時のみ不利スリッページを乗せる。
-    エントリーは指値/約定価格ちょうど(ミラーの幻スリッページを排除)。"""
-    exit_eff = exit_p * (1.0 + args.slip) if reason == "stop" else exit_p
-    fee = (entry_p + exit_eff) * QTY * FEE_ONE_WAY
-    return (entry_p - exit_eff) * QTY - fee
 
 
 # ── 1銘柄の検証 ──────────────────────────────────────────────────────────────
@@ -282,9 +192,9 @@ def _verify_one(sym: str, name: str, strat: str, is_rise_trigger: bool) -> dict:
         pnl_opt = pnl_cons = None
         if drow is not None:
             _hi, _lo, _cl = float(drow["high"]), float(drow["low"]), float(drow["close"])
-            oxp, oreason = _short_exit_daily(_hi, _lo, _cl, lp, stop_p, target_p,
+            oxp, oreason = _c5.short_exit_daily(_hi, _lo, _cl, lp, stop_p, target_p,
                                              is_rise_trigger, tie="target")
-            cxp, creason = _short_exit_daily(_hi, _lo, _cl, lp, stop_p, target_p,
+            cxp, creason = _c5.short_exit_daily(_hi, _lo, _cl, lp, stop_p, target_p,
                                              is_rise_trigger, tie="stop")
             if oreason != "no_entry":
                 pnl_opt = _short_pnl(lp, oxp, oreason)
@@ -295,7 +205,7 @@ def _verify_one(sym: str, name: str, strat: str, is_rise_trigger: bool) -> dict:
         if day_bars is None or len(day_bars) < 2:
             res["no_5m"] += 1
             continue
-        exit_p, reason, ent_ts, ext_ts = _short_exit_5m(
+        exit_p, reason, ent_ts, ext_ts = _c5.short_exit_5m(
             day_bars, lp, stop_p, target_p, is_rise_trigger)
         if reason == "no_5m":
             res["no_5m"] += 1
@@ -459,7 +369,7 @@ def _sweep_one(sym: str, name: str, strat: str, is_mirror: bool,
             db = by_day.get(fill_d)
             if db is None or len(db) < 2:
                 continue
-            xp, reason, _e, _x = _short_exit_5m(db, lp, stop_p, target_p, is_rise)
+            xp, reason, _e, _x = _c5.short_exit_5m(db, lp, stop_p, target_p, is_rise)
             if reason in ("no_5m", "no_entry"):
                 continue
             out[(sm, tm)].append(_short_pnl(lp, xp, reason))

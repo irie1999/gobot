@@ -66,6 +66,7 @@ _PNL_BT_MIN = 0.0
 _LONG_BT_REF: dict[tuple, float] = {}   # (symbol, strategy) -> ロングBTスコア
 _SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLスイープ」タブを出す
 _SAMEDAY_SWEEP_INVERTED = True   # ミラー(符号反転)なら True / ロング銘柄ショートなら False
+_SAMEDAY_5M_TAB = False   # mirror/lss 用: 詳細分析に「5分足TP/SL最適化」タブを出す
 
 
 def _bt_filter_banner_html() -> str:
@@ -6780,6 +6781,120 @@ def build_sameday_tpsl_sweep_html(days: int, workers: int,
     )
 
 
+def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
+                                sm_list: list | None = None,
+                                tm_list: list | None = None,
+                                source: str = "auto", slip: float = 0.0) -> str:
+    """㉔ 同日TP/SL最適化を「5分足」で総当り(mirror/lss 用)。
+
+    日足スイープは同日の TP/SL どちらが先かを日足高安だけで判定する近似。ここでは
+    5分足の実際の値動き順で first-touch 判定して正確な同日損益を出す。ロジックは
+    sameday5m_core(スタンドアロン検証ツールと共通)に集約=二重実装しない。
+    5分足が無い銘柄は集計から除外し、カバレッジを明示する。
+    """
+    if not _SIGNALS_AVAILABLE:
+        return ""
+    try:
+        import sameday5m_core as _c5
+    except Exception as _e:
+        return (f'<div style="padding:16px;color:#f87171">5分足コア(sameday5m_core)の'
+                f'読み込みに失敗しました: {_e}</div>')
+    sm_list = sm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
+    tm_list = tm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
+    cells = [(sm, tm) for tm in tm_list for sm in sm_list]
+
+    seen: set = set()
+    items: list = []
+    for cfg in _PNL_CONFIGS:
+        for sym, name, strat in cfg.get("stop_wl", []) + cfg.get("brk_wl", []):
+            if (sym, strat) not in seen:
+                seen.add((sym, strat)); items.append((sym, name, strat))
+    if not items:
+        return ""
+
+    from backtest_limit_entry import FIXED_QTY as _QTY, FEE_PCT_ONE_WAY as fee
+    agg = {c: [] for c in cells}
+    n_with_5m = 0
+    print(f"  [5分足TP/SL] {len(items)}銘柄 × {len(cells)}マス 集計中(5分足ソース={source})...", flush=True)
+    with _TPE(max_workers=workers) as ex:
+        futs = {ex.submit(_c5.sweep_symbol, s, n, st, is_mirror, cells, days,
+                          source, 0.0, 1e12, _QTY, fee, slip): (s, st)
+                for (s, n, st) in items}
+        _done = 0
+        for fut in _asc(futs):
+            _done += 1
+            try:
+                r = fut.result()
+            except Exception:
+                continue
+            _tot = sum(len(v) for v in r.values())
+            if _tot > 0:
+                n_with_5m += 1
+            for c, pnls in r.items():
+                agg[c] += pnls
+
+    stats = {c: _c5.cell_stat(agg[c]) for c in cells}
+    if not any(stats.values()):
+        return (f'<div style="margin:16px 0;padding:16px 20px;background:#1e293b;'
+                f'border-radius:8px;border-left:3px solid #f59e0b;color:#fbbf24">'
+                f'🕔 5分足TP/SL: 5分足データが見つからないか、対象銘柄に5分足がありません'
+                f'(対象{len(items)}銘柄 / 5分足あり{n_with_5m}銘柄)。<br>'
+                f'ローカルの stock_5min を用意し、run_signals_holdout_all を '
+                f'MINUTE_5M_DIR 環境変数付きで実行するか、5分足ソースを見直してください。</div>')
+
+    best = None
+    for c in cells:
+        st = stats[c]
+        if st and (best is None or st["pnl"] > stats[best]["pnl"]):
+            best = c
+
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+    _th = 'padding:5px 8px;text-align:center;color:#94a3b8;font-size:0.72rem'
+    head = f'<th style="{_th};text-align:left">損切ATR＼利確ATR</th>' + "".join(
+        f'<th style="{_th}">tm={tm}</th>' for tm in tm_list)
+    body = ""
+    for sm in sm_list:
+        row = f'<td style="{_th};text-align:left;color:#e2e8f0;font-weight:700">sm={sm}</td>'
+        for tm in tm_list:
+            st = stats[(sm, tm)]
+            if not st:
+                row += f'<td style="{_th}">—</td>'; continue
+            is_best = (best == (sm, tm))
+            pc = "#4ade80" if st["pnl"] > 0 else "#f87171" if st["pnl"] < 0 else "#94a3b8"
+            bg = "background:#0e3320;" if is_best else ("background:#101826;" if st["pnl"] > 0 else "")
+            star = " ★" if is_best else ""
+            row += (f'<td style="padding:5px 8px;text-align:center;{bg}">'
+                    f'<div style="color:{pc};font-weight:700;font-size:0.82rem">{st["pnl"]:+,.0f}{star}</div>'
+                    f'<div style="color:#64748b;font-size:0.66rem">PF{_pf(st["pf"])}/{st["wr"]:.0f}%</div></td>')
+        body += f"<tr>{row}</tr>"
+    bline = ""
+    if best:
+        b = stats[best]
+        bline = (f'<p style="margin:10px 0 4px;font-size:0.9rem">★ 5分足の最適: '
+                 f'<b style="color:#4ade80">損切ATR={best[0]} / 利確ATR={best[1]}</b> → '
+                 f'<b style="color:{"#4ade80" if b["pnl"]>=0 else "#f87171"}">{b["pnl"]:+,.0f}円</b> '
+                 f'(PF{_pf(b["pf"])} / 勝率{b["wr"]:.0f}% / {b["n"]}取引)</p>')
+    _cost = "摩擦なし(スリッページ0)" if slip == 0 else f"損切スリップ{slip*100:.2f}%"
+    return (
+        f'<div style="margin:0 0 16px;padding:16px 20px;background:#1e293b;'
+        f'border-radius:8px;border-left:3px solid #38bdf8">'
+        f'<h4 style="margin:0 0 6px;color:#7dd3fc;font-size:0.95rem">'
+        f'🕔 同日TP/SL最適化【5分足・正確】（直近{days}日 / 対象{len(items)}銘柄 '
+        f'/ 5分足あり{n_with_5m}銘柄）</h4>'
+        f'<p style="margin:0 0 10px;color:#94a3b8;font-size:0.76rem">'
+        f'5分足の実際の値動き順で first-touch 判定(約定前ヒットの先読み回避・同時タッチは'
+        f'損切優先)。エントリーは注文価格ちょうど(ミラーの幻スリッページ排除)。{_cost}。<br>'
+        f'※ 日足スイープ(隣タブ)は近似。狭い幅(0.1等)ほど日足では両方が値幅に入り不正確に'
+        f'なるので、こちらの5分足版が本当の最適値。5分足の無い銘柄は集計から除外。</p>'
+        f'{bline}'
+        f'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.8rem">'
+        f'<thead><tr style="border-bottom:1px solid #334155">{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
+        f'<p style="margin:8px 0 0;color:#64748b;font-size:0.72rem">'
+        f'各セル上段=総損益 / 下段=PF・勝率。★=最良。</p></div>')
+
+
 _ORDERED_CACHE = None
 
 def _load_ordered_orders() -> list[dict]:
@@ -10858,6 +10973,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _sameday_tab_btn   = (
         f'  <button class="analysis-tab-btn" style="border-color:#6d28d9" onclick="switchAnalysisTab({_dseq},\'sameday\')">🎯 同日TP/SL最適化</button>'
         if _SAMEDAY_SWEEP_TAB else "")
+    _sameday5m_tab_btn = (
+        f'  <button class="analysis-tab-btn" style="border-color:#0369a1" onclick="switchAnalysisTab({_dseq},\'sameday5m\')">🕔 5分足TP/SL</button>'
+        if _SAMEDAY_5M_TAB else "")
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -10890,6 +11008,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_emcmp_tab_btn}
 {_breadth_tab_btn}
 {_sameday_tab_btn}
+{_sameday5m_tab_btn}
 </div>
 
 <div id="analtab_{_dseq}_summary" class="analysis-tab-pane active">
@@ -11181,6 +11300,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <!-- SAMEDAY_TPSL_SLOT -->
 </div>
 
+<div id="analtab_{_dseq}_sameday5m" class="analysis-tab-pane">
+<!-- SAMEDAY_5M_SLOT -->
+</div>
+
 </div>
 
 {_trend_breakdown_html}
@@ -11264,7 +11387,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth','sameday'];
+  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth','sameday','sameday5m'];
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);

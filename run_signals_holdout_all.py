@@ -836,6 +836,8 @@ _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 # mirror/lss: 詳細分析に「同日TP/SL最適化」タブを出す(--no-analysis 時は重いので省略)。
 _na._SAMEDAY_SWEEP_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
 _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=そのまま
+# 5分足版TP/SLスイープ(正確)。5分足が無ければタブ内に注意書きを出す(グレースフル)。
+_na._SAMEDAY_5M_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
 
 # 重い長系の詳細分析(保有日数比較/損切り幅/寄り付き方向/下落深さ/em比較/約定
 # タイミング/期間別パネル)を飛ばすか。--no-analysis 指定時に加え、mirror/lss は
@@ -1554,6 +1556,47 @@ if getattr(_na, "_SAMEDAY_SWEEP_TAB", False):
         _all_period_html = _all_period_html.replace(
             "<!-- SAMEDAY_TPSL_SLOT -->", _sd_html, 1)
     _phase("同日TP/SLスイープ完了")
+
+# ── ㉔ 同日TP/SL最適化【5分足・正確】 (mirror/lss 専用・詳細分析) ──────────────────
+# 日足スイープの近似を5分足の実際の値動きで正確化。5分足ソースをキャッシュキーに
+# 含める(local有無で結果が変わるため)。日付跨ぎキャッシュで翌日以降もスキップ。
+if getattr(_na, "_SAMEDAY_5M_TAB", False):
+    try:
+        import daytrade_data as _dtd
+        _5m_src = "local" if (_dtd.DATA_DIR.exists() and any(_dtd.DATA_DIR.glob("*.pkl"))) else "auto"
+    except Exception:
+        _5m_src = "auto"
+    _s5_mp     = int(_args.max_price) if (_args.max_price and _args.max_price < 100000) else 0
+    _s5_prefix = f"sameday5m{_cache_short}_mp{_s5_mp}_{_5m_src}"
+    _s5_reuse  = _latest_analysis_cache(_s5_prefix)
+    _s5_html = None
+    if _s5_reuse is not None:
+        try:
+            _s5_html = _mhpk.loads(_s5_reuse.read_bytes()).get("html", "")
+            print(f"[5分足TP/SL] キャッシュ再利用(日付跨ぎ): {_s5_reuse.name}", flush=True)
+        except Exception:
+            _s5_html = None
+    if _s5_html is None:
+        print(f"5分足TP/SLスイープ 検証中 (mirror/lss・初回のみ・5分足源={_5m_src})...", flush=True)
+        try:
+            _s5_html = _na.build_sameday_5m_sweep_html(
+                _DEFAULT_DAYS, _args.workers,
+                is_mirror=bool(_args.mirror), source=_5m_src) or ""
+        except Exception as _s5e:
+            import traceback as _s5tb
+            print(f"[5分足TP/SL] 失敗: {_s5e}\n{_s5tb.format_exc()}", flush=True)
+            _s5_html = ""
+        if _s5_html:
+            try:
+                (_mh_cache_dir / f"{_s5_prefix}_{_cache_date}.pkl").write_bytes(
+                    _mhpk.dumps({"html": _s5_html}))
+                print(f"[5分足TP/SL] キャッシュ保存(以降スキップ): {_s5_prefix}_{_cache_date}.pkl", flush=True)
+            except Exception:
+                pass
+    if _s5_html:
+        _all_period_html = _all_period_html.replace(
+            "<!-- SAMEDAY_5M_SLOT -->", _s5_html, 1)
+    _phase("5分足TP/SLスイープ完了")
 
 # ── ⑮ 逆指値の約定率・約定タイミング (詳細分析タブ) 日付跨ぎキャッシュ ─────────────
 # em=0で約定挙動はcon/agg共通・5分足不要の軽いバックテスト。日付跨ぎ再利用。
