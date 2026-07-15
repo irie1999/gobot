@@ -69,6 +69,10 @@ ap.add_argument("--tm-list", type=str, default="0.1,0.15,0.2,0.3,0.5,0.75,1.0",
 ap.add_argument("--by-regime", action="store_true",
                 help="日経レジーム(上げ/横ばい/下げ)別・月別に損益を分解する(B: レジーム頑健性)。"
                      "--days を大きく(例730)して複数レジームで検証する用途。")
+ap.add_argument("--capital-cap", type=float, default=0.0,
+                help="予算(円)。指定すると『その資金の範囲で実際に拾える取引だけ』の実現損益を"
+                     "5分足の約定/決済時刻でザラ場の同時保有を判定して算出。資金切れ時は"
+                     "後から来たシグナルをスキップ(時刻順=先着優先)。例 4500000")
 args = ap.parse_args()
 
 if not (args.mirror or args.lss or args.both):
@@ -607,6 +611,62 @@ def _print_group(title: str, groups: dict, order=None):
               f"PF{_pf(st['pf']):>6}  {st['pnl']:>+13,.0f}円  (平均{st['pnl']/st['n']:>+8,.0f})")
 
 
+def _capital_capped(trades: list, cap: float):
+    """予算cap円の範囲で実際に拾える取引だけの実現損益を、ザラ場の同時保有で判定。
+    各取引は entry_ts で建て exit_ts で解放。エントリー時に deployed+約定額 > cap なら
+    そのシグナルはスキップ(=時刻順で先着優先)。同日でも時刻でザラ場の重なりを正確に見る。"""
+    from collections import defaultdict
+    by_day: dict = defaultdict(list)
+    for t in trades:
+        by_day[t["date"]].append(t)
+    cap_pnl = 0.0
+    cap_n = skip_n = 0
+    for _d, ts in by_day.items():
+        evts = []
+        for t in ts:
+            cost = float(t["entry"]) * QTY
+            evts.append((str(t.get("entry_ts")), 0, cost, id(t), t))   # 0=建て
+            evts.append((str(t.get("exit_ts")),  1, cost, id(t), t))   # 1=解放
+        evts.sort(key=lambda e: (e[0], e[1]))
+        deployed = 0.0
+        accepted: set = set()
+        for _tm, order, cost, tid, t in evts:
+            if order == 0:      # 建て
+                if deployed + cost <= cap:
+                    deployed += cost
+                    accepted.add(tid)
+                    cap_pnl += float(t["pnl_5m"])
+                    cap_n += 1
+                else:
+                    skip_n += 1
+            else:               # 解放(建てた分のみ)
+                if tid in accepted:
+                    deployed -= cost
+    return cap_pnl, cap_n, skip_n
+
+
+def _print_capital_cap(results: list, cap: float):
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+    for R in results:
+        trs = (R or {}).get("trades") or []
+        if not trs:
+            continue
+        full_pnl = sum(float(t["pnl_5m"]) for t in trs)
+        full_n = len(trs)
+        cap_pnl, cap_n, skip_n = _capital_capped(trs, cap)
+        rate = cap_pnl / full_pnl * 100 if full_pnl else 0.0
+        print("─" * 72)
+        print(f"■ {R['label']} — 予算キャップ試算 (資金 ¥{cap:,.0f} / 株数{QTY})")
+        print(f"  全取引        : {full_n:>5}件  実現損益 {full_pnl:>+13,.0f}円 (資金無制限)")
+        print(f"  ¥{cap:,.0f}以内: {cap_n:>5}件  実現損益 {cap_pnl:>+13,.0f}円  "
+              f"(資金切れでスキップ {skip_n}件)")
+        print(f"  → 予算内で全体の {rate:.0f}% の損益を捕捉"
+              + ("(ほぼ取りこぼしなし)" if rate >= 90 else
+                 f"(残り{100-rate:.0f}%はピーク日の資金切れで取りこぼし)"))
+        print()
+
+
 def _regime_breakdown(results: list, regime):
     """各モードの all_trades を 日経レジーム別 / 月別 に分解して表示。"""
     _JA = {"up": "🟢上げ", "sideways": "🟡横ばい", "down": "🔴下げ", "?": "―不明"}
@@ -674,6 +734,8 @@ def main():
                     pass
     else:
         results = [_run_mode(m, uniq) for m in modes]
+        if args.capital_cap > 0:
+            _print_capital_cap(results, args.capital_cap)
         if args.by_regime:
             regime = _load_regime_map(args.days)
             _regime_breakdown(results, regime)
