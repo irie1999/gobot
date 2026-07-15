@@ -11419,7 +11419,7 @@ function switchAnalysisTab(seq, which) {{
   if (nav) {{
     nav.querySelectorAll('.analysis-tab-btn').forEach(function(b) {{
       var onclick = b.getAttribute('onclick') || '';
-      var m = onclick.match(/switchAnalysisTab\(\d+,'([^']+)'\)/);
+      var m = onclick.match(/switchAnalysisTab\\(\\d+,'([^']+)'\\)/);
       if (m) b.classList.toggle('active', m[1] === which);
     }});
   }}
