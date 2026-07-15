@@ -73,6 +73,17 @@ FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY if args.fee is None else args.fee
 BASE_END = (pd.Period(args.base_month, "M").end_time).normalize()
 
 
+def _jq_to_yf(code: str) -> str:
+    """J-Quants 5桁(pkl名) → yfinance形式。 72030 → 7203.T / 既に .T ならそのまま。
+    daytrade_data.yf_to_jquants(7203.T→72030) の逆。ble.fetch(日足=yfinance)は .T 形式が必須。"""
+    c = code.strip().upper()
+    if c.endswith(".T"):
+        return c
+    if len(c) == 5 and c[-1] == "0" and c[:4].isalnum():
+        return c[:4] + ".T"      # 標準的な内国株(4桁+末尾0)
+    return c + ".T"
+
+
 def _strategies() -> list[str]:
     import check_signals_stop as _stop
     import check_signals_breakout as _brk
@@ -173,7 +184,12 @@ def _pf(x):
 
 
 def main():
-    universe = available_local_symbols()
+    # pkl名(J-Quants 5桁)を yfinance形式(.T)へ変換。ble.fetch / load_intraday とも .T 前提。
+    _seen = set(); universe = []
+    for _s in available_local_symbols():
+        yf = _jq_to_yf(_s)
+        if yf not in _seen:
+            _seen.add(yf); universe.append(yf)
     if args.limit > 0:
         universe = universe[:args.limit]
     if not universe:
