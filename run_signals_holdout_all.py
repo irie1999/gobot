@@ -1526,7 +1526,8 @@ if getattr(_na, "_SAMEDAY_SWEEP_TAB", False):
     # 変わらない構造分析なので)。--recalc-analysis で強制再計算。キャッシュキーは
     # mirror/lss × 価格帯で分離(異なる銘柄セットの結果を取り違えないため)。
     _sd_mp        = int(_args.max_price) if (_args.max_price and _args.max_price < 100000) else 0
-    _sd_prefix    = f"samedaytpsl{_cache_short}_mp{_sd_mp}"
+    # v2: グリッドを 0.1〜1.0 に拡張したのでキャッシュキーを更新(旧0.3始まりを無効化)
+    _sd_prefix    = f"samedaytpsl2{_cache_short}_mp{_sd_mp}"
     _sd_reuse     = _latest_analysis_cache(_sd_prefix)
     _sd_html = None
     if _sd_reuse is not None:

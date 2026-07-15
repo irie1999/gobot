@@ -6612,9 +6612,10 @@ def build_sameday_tpsl_sweep_html(days: int, workers: int,
     """
     if not _SIGNALS_AVAILABLE:
         return ""
-    # 同日決済で当たる幅に絞った粗めグリッド(高速化)。必要なら呼び出し側で細分化可。
-    sm_list = sm_list or [0.3, 0.5, 1.0, 1.5]
-    tm_list = tm_list or [0.3, 0.5, 1.0, 1.5, 2.0]
+    # 5分足版と同じ軸(0.1〜1.0)にして直接見比べられるようにする。狭い側(0.1)ほど
+    # 同日で当たりやすく最適が寄りがちなので必ず含める。
+    sm_list = sm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
+    tm_list = tm_list or [0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
 
     seen: set = set()
     items: list[tuple] = []
