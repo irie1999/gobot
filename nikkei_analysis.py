@@ -6683,19 +6683,29 @@ def build_sameday_tpsl_sweep_html(days: int, workers: int,
     # 極大値(99等)にすると sp=lp-atr*sm が負になり、エンジンの妥当性チェック
     # (sp>0 / tp>0)で全シグナルが弾かれ0取引になる(MAX_ATR_RATIO=0.20 のため
     # sm<5 でないと sp が負)。同日ではまず当たらない 4ATR を使う。
-    _BASE_W = 4.0
-    print(f"  [同日TP/SL] baseline(≈引け決済 {_BASE_W}ATR幅) 集計中...", flush=True)
-    base = _stat(_run(_BASE_W, _BASE_W))
+    # スイープ中は sm/tm 強制上書き(--mirror-sm/--mirror-tm による適用値)を一時解除。
+    # そうしないと全マスが適用値で計算され、総当りグリッドの意味が消える。
+    import backtest_limit_entry as _blm
+    _saved_sm_force, _saved_tm_force = getattr(_blm, "_SM_FORCE", None), getattr(_blm, "_TM_FORCE", None)
+    _blm._SM_FORCE = None
+    _blm._TM_FORCE = None
+    try:
+        _BASE_W = 4.0
+        print(f"  [同日TP/SL] baseline(≈引け決済 {_BASE_W}ATR幅) 集計中...", flush=True)
+        base = _stat(_run(_BASE_W, _BASE_W))
 
-    grid: dict = {}   # (sm,tm) -> stat
-    best_key = None
-    for tm in tm_list:
-        for sm in sm_list:
-            print(f"  [同日TP/SL] sm{sm}/tm{tm} 集計中...", flush=True)
-            st = _stat(_run(sm, tm))
-            grid[(sm, tm)] = st
-            if st["n"] > 0 and (best_key is None or st["pnl"] > grid[best_key]["pnl"]):
-                best_key = (sm, tm)
+        grid: dict = {}   # (sm,tm) -> stat
+        best_key = None
+        for tm in tm_list:
+            for sm in sm_list:
+                print(f"  [同日TP/SL] sm{sm}/tm{tm} 集計中...", flush=True)
+                st = _stat(_run(sm, tm))
+                grid[(sm, tm)] = st
+                if st["n"] > 0 and (best_key is None or st["pnl"] > grid[best_key]["pnl"]):
+                    best_key = (sm, tm)
+    finally:
+        _blm._SM_FORCE = _saved_sm_force
+        _blm._TM_FORCE = _saved_tm_force
 
     def _pf(pf) -> str:
         return "∞" if pf == float("inf") else f"{pf:.2f}"

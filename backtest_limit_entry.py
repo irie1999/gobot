@@ -617,9 +617,13 @@ _NO_TIMECUT_HOLD = 100_000   # 実質無限(バックテスト窓を超える大
 #                     = ロング銘柄を「逆指値の空売り」で評価する用。
 #   _MAX_HOLD_FORCE : 非Noneなら default_max_hold より最優先で最大保有日数を固定。
 #                     ミラー同日決済(日計り)は 0 を入れる。環境変数と違いキャッシュ名を汚さない。
+#   _SM_FORCE/_TM_FORCE: 非Noneなら損切ATR倍率(sm)/利確ATR倍率(tm)を一括上書き。
+#                     同日TP/SL最適化で見つけた最適幅を mirror/lss レポート全体に適用する用。
 _MIRROR_PNL: bool = False
 _ENTRY_TYPE_FORCE: str | None = None
 _MAX_HOLD_FORCE: int | None = None
+_SM_FORCE: float | None = None
+_TM_FORCE: float | None = None
 
 
 def timecut_enabled() -> bool:
@@ -702,6 +706,11 @@ def run_limit_backtest(
     # ロングと同じ約定を使うので entry_type は上書きしない(pnl の符号だけ後で反転)。
     if _ENTRY_TYPE_FORCE is not None:
         entry_type = _ENTRY_TYPE_FORCE
+    # 損切/利確 ATR倍率の一括上書き(同日TP/SL最適値を全レポートに適用する用)。
+    if _SM_FORCE is not None:
+        stop_atr_mult = _SM_FORCE
+    if _TM_FORCE is not None:
+        target_atr_mult = _TM_FORCE
     is_short = (entry_type == "stop_sell")
     if stop_mode is None:
         stop_mode = default_stop_mode(strategy_name, is_short)
