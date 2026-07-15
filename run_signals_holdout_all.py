@@ -91,6 +91,9 @@ _pre.add_argument("--lss-proposal", type=str, default=None,
                   help="lss専用の選定ファイル(scan_lss_universe が出力する lss_watchlist_proposal_*.py)を"
                        "銘柄リストとして使う。指定するとWF選定の代わりに SELECTED を全設定共通で使用し、"
                        "取引明細メインの軽量lssタブになる。'auto'で最新の提案ファイルを自動検出")
+_pre.add_argument("--lss-top", type=int, default=0,
+                  help="提案ファイル(TRAIN期待値順に整列済み)から使う上位ペア数(0=全部)。"
+                       "既存の提案をそのまま使い、価格フィルタ後の上位N本だけ採用する(再スキャン不要)。推奨150")
 _pre.add_argument("--bt-max", type=float, default=None,
                   help="ロングBTスコアの上限グローバル絞り込み(この値未満の銘柄だけ"
                        "レポート全体を集計)。未指定なら全銘柄を集計し、取引明細の"
@@ -762,19 +765,26 @@ if _args.long_stop_short and _lss_proposal_file:
     except Exception as _e:
         print(f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e} → 既存選定のまま")
     if _sel:
-        _p_stop, _p_brk, _dropped = [], [], 0
+        # 提案はTRAIN期待値の高い順に整列済み。その順序を保ったまま:
+        #   1) レポート対応6戦略(MACDTF/A7/RSI2/DON/VOLTF/MOM)だけ残す(MACD/VOL除外)
+        #   2) 価格フィルタ(この価格タブの max_price。無制限タブは素通し)を先に適用
+        #      → 値がさが上位に偏るので、先に価格で絞らないと予算タブが空になる
+        #   3) その上で上位N本(--lss-top)だけ採用
+        _canon, _dropped = [], 0
         for _tup in _sel:
             if not _tup or len(_tup) < 3:
                 continue
             _c, _n, _s = _tup[0], _tup[1], _tup[2]
-            if _s in _CANON_STOP:
-                _p_stop.append((_c, _n, _s))
-            elif _s in _CANON_BRK:
-                _p_brk.append((_c, _n, _s))
+            if _s in _CANON_STOP or _s in _CANON_BRK:
+                _canon.append((_c, _n, _s))
             else:
-                _dropped += 1   # MACD/VOL 等 非対応戦略は除外(レポートは6戦略前提)
-        _p_stop = _filter_wl_by_price(_p_stop, _args.min_price, _args.max_price)
-        _p_brk  = _filter_wl_by_price(_p_brk,  _args.min_price, _args.max_price)
+                _dropped += 1
+        _canon = _filter_wl_by_price(_canon, _args.min_price, _args.max_price)
+        _lss_top = getattr(_args, "lss_top", 0) or 0
+        if _lss_top > 0:
+            _canon = _canon[:_lss_top]
+        _p_stop = [t for t in _canon if t[2] in _CANON_STOP]
+        _p_brk  = [t for t in _canon if t[2] in _CANON_BRK]
         _lss_cfg = {
             "label": "lss選定", "color": "#f472b6", "mode": "conservative",
             "sm_tm": None, "stop_wl": _p_stop, "brk_wl": _p_brk,
@@ -782,8 +792,10 @@ if _args.long_stop_short and _lss_proposal_file:
         for days in _PNL_PERIODS:
             _period_configs[days] = [_lss_cfg]
         print(f"[lss] 新選定で上書き: {Path(_lss_proposal_file).name} → "
-              f"stop {len(_p_stop)} / brk {len(_p_brk)} 件"
-              + (f" (非対応戦略{_dropped}件は除外)" if _dropped else ""))
+              f"価格≤{_args.max_price:,.0f}円で {len(_canon)}ペア"
+              + (f"(上位{_lss_top}) " if _lss_top > 0 else " ")
+              + f"[stop {len(_p_stop)}/brk {len(_p_brk)}]"
+              + (f" 非対応{_dropped}除外" if _dropped else ""))
 
 # シグナルタブ用: 全設定を重複なしで結合
 _seen_cfg_labels: set = set()
