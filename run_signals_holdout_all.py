@@ -1504,15 +1504,36 @@ _phase("寄り確認検証完了")
 # 同日決済なのにスイング用の広い幅(sm1.5/tm3.0)を使っている現状を、当たる幅
 # (≈0.3〜1ATR)の総当りで最適化するための調査タブ。--no-analysis 時は省略。
 if getattr(_na, "_SAMEDAY_SWEEP_TAB", False):
-    print("同日TP/SLスイープ 検証中 (mirror/lss)...", flush=True)
-    try:
-        _sd_html = _na.build_sameday_tpsl_sweep_html(
-            _DEFAULT_DAYS, _args.workers,
-            inverted=getattr(_na, "_SAMEDAY_SWEEP_INVERTED", True)) or ""
-    except Exception as _sde:
-        import traceback as _sdtb
-        print(f"[同日TP/SL] 失敗: {_sde}\n{_sdtb.format_exc()}", flush=True)
-        _sd_html = ""
+    # 日付跨ぎキャッシュ: 一度計算したら翌日以降も再利用(最適な同日幅は日々ほとんど
+    # 変わらない構造分析なので)。--recalc-analysis で強制再計算。キャッシュキーは
+    # mirror/lss × 価格帯で分離(異なる銘柄セットの結果を取り違えないため)。
+    _sd_mp        = int(_args.max_price) if (_args.max_price and _args.max_price < 100000) else 0
+    _sd_prefix    = f"samedaytpsl{_cache_short}_mp{_sd_mp}"
+    _sd_reuse     = _latest_analysis_cache(_sd_prefix)
+    _sd_html = None
+    if _sd_reuse is not None:
+        try:
+            _sd_html = _mhpk.loads(_sd_reuse.read_bytes()).get("html", "")
+            print(f"[同日TP/SL] キャッシュ再利用(日付跨ぎ・翌日以降もスキップ): {_sd_reuse.name}", flush=True)
+        except Exception:
+            _sd_html = None
+    if _sd_html is None:
+        print("同日TP/SLスイープ 検証中 (mirror/lss・初回のみ)...", flush=True)
+        try:
+            _sd_html = _na.build_sameday_tpsl_sweep_html(
+                _DEFAULT_DAYS, _args.workers,
+                inverted=getattr(_na, "_SAMEDAY_SWEEP_INVERTED", True)) or ""
+        except Exception as _sde:
+            import traceback as _sdtb
+            print(f"[同日TP/SL] 失敗: {_sde}\n{_sdtb.format_exc()}", flush=True)
+            _sd_html = ""
+        if _sd_html:
+            try:
+                _sd_cache_file = _mh_cache_dir / f"{_sd_prefix}_{_cache_date}.pkl"
+                _sd_cache_file.write_bytes(_mhpk.dumps({"html": _sd_html}))
+                print(f"[同日TP/SL] キャッシュ保存(以降スキップ): {_sd_cache_file.name}", flush=True)
+            except Exception:
+                pass
     if _sd_html:
         _all_period_html = _all_period_html.replace(
             "<!-- SAMEDAY_TPSL_SLOT -->", _sd_html, 1)
