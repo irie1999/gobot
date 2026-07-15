@@ -98,6 +98,9 @@ _pre.add_argument("--mirror-sm", type=float, default=None,
                        "見つけた最適幅を損益/取引明細に適用する(例 0.3)")
 _pre.add_argument("--mirror-tm", type=float, default=None,
                   help="mirror/lss の利確ATR倍率(tm)を一括上書き(例 0.3)")
+_pre.add_argument("--daily-tpsl-sweep", action="store_true",
+                  help="mirror/lss に日足版の同日TP/SLスイープタブも出す(既定OFF。"
+                       "日足は同日の当たり判定が近似で不正確なため、通常は5分足版のみ)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -833,10 +836,13 @@ if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
 # ミラー(指値空売り)/ロング銘柄ショート も建玉は「売り」なのでショート視点で色付けする。
 _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 
-# mirror/lss: 詳細分析に「同日TP/SL最適化」タブを出す(--no-analysis 時は重いので省略)。
-_na._SAMEDAY_SWEEP_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
+# 日足版の同日TP/SLスイープは「近似」で不正確(同日の当たり判定が日足高安のみ。
+# 実測ではミラーが日足+191万→5分足-240万と真逆になった)。既定OFF、--daily-tpsl-sweep
+# で明示的に出したときだけ表示する。通常は下の5分足版(正確)のみ。
+_na._SAMEDAY_SWEEP_TAB = (_analysis_only and not getattr(_args, "no_analysis", False)
+                          and getattr(_args, "daily_tpsl_sweep", False))
 _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=そのまま
-# 5分足版TP/SLスイープ(正確)。5分足が無ければタブ内に注意書きを出す(グレースフル)。
+# 5分足版TP/SLスイープ(正確・本命)。5分足が無ければタブ内に注意書き(グレースフル)。
 _na._SAMEDAY_5M_TAB = _analysis_only and not getattr(_args, "no_analysis", False)
 
 # 重い長系の詳細分析(保有日数比較/損切り幅/寄り付き方向/下落深さ/em比較/約定
