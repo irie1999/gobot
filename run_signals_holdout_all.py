@@ -94,6 +94,10 @@ _pre.add_argument("--lss-proposal", type=str, default=None,
 _pre.add_argument("--lss-top", type=int, default=0,
                   help="提案ファイル(TRAIN期待値順に整列済み)から使う上位ペア数(0=全部)。"
                        "既存の提案をそのまま使い、価格フィルタ後の上位N本だけ採用する(再スキャン不要)。推奨150")
+_pre.add_argument("--no-mirror", action="store_true",
+                  help="--both でロングミラー(却下済み・重い5分足スイープ)を生成しない")
+_pre.add_argument("--no-short", action="store_true",
+                  help="--both でショート(WF選定ショート)を生成しない")
 _pre.add_argument("--bt-max", type=float, default=None,
                   help="ロングBTスコアの上限グローバル絞り込み(この値未満の銘柄だけ"
                        "レポート全体を集計)。未指定なら全銘柄を集計し、取引明細の"
@@ -281,7 +285,7 @@ if _args.both and not _args.short:
     # ロングミラー・ロング銘柄ショート=フル実行で同日TP/SL最適化タブを出す)ため除外。
     _base_cargs = [a for a in sys.argv[1:]
                    if a not in ("--both", "--short", "--mirror", "--long-stop-short",
-                                "--no-analysis",
+                                "--no-analysis", "--no-mirror", "--no-short",
                                 "--no-browser", "--price-ranges", "--output-suffix",
                                 "--serve", "--serve-execute", "--serve-prod", "--serve-genbutsu")
                    and not a.startswith("--price-ranges=")
@@ -330,12 +334,20 @@ if _args.both and not _args.short:
     if _lss_proposal_path:
         _lss_dargs += ["--lss-proposal", _lss_proposal_path]
 
-    _DIRECTIONS = [
+    # スキップ指定(--no-mirror / --no-short)を除いた生成対象。longは常に生成。
+    _skip_dirs = set()
+    if getattr(_args, "no_mirror", False):
+        _skip_dirs.add("mirror")
+    if getattr(_args, "no_short", False):
+        _skip_dirs.add("short")
+    _DIRECTIONS = [d for d in [
         ("long",   "ロング",             ["--no-analysis"],              "signals_holdout_all"),
         ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
         ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
-    ]
+    ] if d[0] not in _skip_dirs]
+    if _skip_dirs:
+        print(f"[both] スキップ: {', '.join(sorted(_skip_dirs))}")
     for _mp in _price_list:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
         # _mp==0 は「価格無制限」。サブプロセスには十分大きい上限を渡す。
@@ -369,13 +381,15 @@ if _args.both and not _args.short:
     _nav_btns = ""
     _frames   = ""
 
-    # ロング/ショート/ロングミラー/ロング銘柄ショート ボタン
+    # ロング/ショート/ロングミラー/ロング銘柄ショート ボタン(スキップ分は出さない)
     for _dir, _lbl_prefix, _dir_cls in [
         ("long",   "📈 ロング",           "lb"),
         ("short",  "📉 ショート",         "sb"),
         ("mirror", "🪞 ロングミラー",     "mb"),
         ("lss",    "🔻 ロング銘柄ショート", "xb"),
     ]:
+        if _dir in _skip_dirs:
+            continue
         _is_active = _dir == "long"
         _nav_btns += (
             f'  <button class="ls-btn {_dir_cls}{" active" if _is_active else ""}" '
@@ -416,6 +430,8 @@ if _args.both and not _args.short:
     import time as _time_mod
     _cache_bust = int(_time_mod.time())
     for _dir in ("long", "short", "mirror", "lss"):
+        if _dir in _skip_dirs:
+            continue
         for _i, _mp in enumerate(_price_list):
             _frame_id = f"ls-{_dir}-{_mp}"
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
