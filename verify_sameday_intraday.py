@@ -57,6 +57,15 @@ ap.add_argument("--slip", type=float, default=0.0,
 ap.add_argument("--fee", type=float, default=None,
                 help="片道手数料率(既定=FEE_PCT_ONE_WAY)。0で手数料なし")
 ap.add_argument("--workers", type=int, default=4)
+ap.add_argument("--no-html", action="store_true",
+                help="HTML(5分足ベースの取引明細)を生成しない(コンソール集計のみ)")
+ap.add_argument("--no-browser", action="store_true", help="生成HTMLを自動で開かない")
+ap.add_argument("--sweep", action="store_true",
+                help="5分足ベースで (損切ATR × 利確ATR) を総当りし最適な同日幅を探す")
+ap.add_argument("--sm-list", type=str, default="0.1,0.15,0.2,0.3,0.5,0.75,1.0",
+                help="スイープの損切ATR倍率(カンマ区切り)")
+ap.add_argument("--tm-list", type=str, default="0.1,0.15,0.2,0.3,0.5,0.75,1.0",
+                help="スイープの利確ATR倍率(カンマ区切り)")
 args = ap.parse_args()
 
 if not (args.mirror or args.lss or args.both):
@@ -126,10 +135,11 @@ def _short_exit_5m(day_bars: pd.DataFrame, entry_p: float,
       約定バーが見つからなければ ("", "no_entry")。
     """
     if day_bars is None or day_bars.empty:
-        return None, "no_5m"
+        return None, "no_5m", None, None
     highs = day_bars["high"].to_numpy(dtype=float)
     lows  = day_bars["low"].to_numpy(dtype=float)
     closes = day_bars["close"].to_numpy(dtype=float)
+    times = day_bars.index
     n = len(highs)
 
     # 1) 約定バーを特定(トリガー到達で約定)
@@ -144,18 +154,19 @@ def _short_exit_5m(day_bars: pd.DataFrame, entry_p: float,
                 ei = j
                 break
     if ei is None:
-        return None, "no_entry"
+        return None, "no_entry", None, None
 
+    ent_ts = times[ei]
     # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読みを避ける)
     for j in range(ei + 1, n):
         hit_stop = highs[j] >= stop_p      # 損切り(上抜け)= 同一バー両方でも優先
         hit_tgt  = lows[j] <= target_p     # 利確(下抜け)
         if hit_stop:
-            return stop_p, "stop"
+            return stop_p, "stop", ent_ts, times[j]
         if hit_tgt:
-            return target_p, "target"
+            return target_p, "target", ent_ts, times[j]
     # 3) どちらも当たらなければ引け(その日の最終バー終値)
-    return float(closes[-1]), "close"
+    return float(closes[-1]), "close", ent_ts, times[-1]
 
 
 def _short_exit_daily(hi: float, lo: float, cl: float, entry_p: float,
@@ -284,8 +295,8 @@ def _verify_one(sym: str, name: str, strat: str, is_rise_trigger: bool) -> dict:
         if day_bars is None or len(day_bars) < 2:
             res["no_5m"] += 1
             continue
-        exit_p, reason = _short_exit_5m(day_bars, lp, stop_p, target_p,
-                                        is_rise_trigger)
+        exit_p, reason, ent_ts, ext_ts = _short_exit_5m(
+            day_bars, lp, stop_p, target_p, is_rise_trigger)
         if reason == "no_5m":
             res["no_5m"] += 1
             continue
@@ -294,8 +305,10 @@ def _verify_one(sym: str, name: str, strat: str, is_rise_trigger: bool) -> dict:
             continue
         pnl_5m = _short_pnl(lp, exit_p, reason)
         res["trades"].append({
-            "sym": sym, "strat": strat, "date": str(fill_d),
+            "sym": sym, "name": name, "strat": strat, "date": str(fill_d),
             "entry": lp, "exit": exit_p, "reason": reason,
+            "entry_ts": ent_ts, "exit_ts": ext_ts,
+            "stop_p": stop_p, "target_p": target_p,
             "pnl_5m": pnl_5m,
             "pnl_opt":  pnl_opt if pnl_opt is not None else pnl_5m,
             "pnl_cons": pnl_cons if pnl_cons is not None else pnl_5m,
@@ -336,7 +349,7 @@ def _run_mode(mode: str, symbols: list[tuple]):
     if not all_trades:
         print("  検証できる取引がありません(5分足データが無い可能性)。")
         print(f"  (5分足なし {no_5m}件 / 約定不成立 {no_entry}件)")
-        return
+        return {"label": label, "trades": [], "no_5m": no_5m, "no_entry": no_entry}
 
     def _agg(trades, key):
         pnls = [t[key] for t in trades]
@@ -370,26 +383,317 @@ def _run_mode(mode: str, symbols: list[tuple]):
         print(f"  → 日足の楽観↔保守の幅 {_span:,.0f}円。実際(5分足)は下限から {_pos:.0f}% の位置。"
               f"({'楽観寄り=利確が先に来やすい' if _pos>=50 else '保守寄り=損切が先に来やすい'})")
     print()
+    return {
+        "label": label, "trades": all_trades, "no_5m": no_5m, "no_entry": no_entry,
+        "n": n, "tot5": tot5, "wr5": wr5, "pf5": pf5,
+        "topt": topt, "tcons": tcons,
+        "reasons": reasons, "cost": _cost,
+    }
+
+
+# ── 5分足ベースのスイープ ────────────────────────────────────────────────────
+def _sweep_one(sym: str, name: str, strat: str, is_mirror: bool,
+               cells: list) -> dict:
+    """1銘柄について、grid の各(sm,tm)で5分足決済の損益リストを返す。
+    エントリーは sm/tm 非依存(前日終値到達で約定)なので 5分足は1回だけロード。
+    指標計算も1回だけ(precompute)して各マスで使い回す。"""
+    out = {c: [] for c in cells}
+    mod = _mod_for(strat)
+    params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
+    if not params:
+        return out
+    cf, em, _sm, _tm = params
+    try:
+        df_raw = ble.fetch(sym, args.days + 420)
+    except Exception:
+        return out
+    if df_raw is None or df_raw.empty:
+        return out
+    try:
+        df_ind = cf(df_raw.copy())    # 指標を1回だけ計算 → 各マスは素通しで使い回す
+    except Exception:
+        return out
+    _ident = lambda d: d
+    et = "stop" if is_mirror else "stop_sell"
+    is_rise = is_mirror
+
+    # 5分足を1回だけロード(この銘柄の最も重い処理)
+    try:
+        m5 = load_intraday(sym, days=args.days + 5, source=args.source)
+    except Exception:
+        m5 = None
+    by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
+    if not by_day:
+        return out   # 5分足が無ければ検証不能
+
+    daily_rows = {d.date(): df_raw.loc[d] for d in df_raw.index}
+    since = ble._TODAY - timedelta(days=args.days)
+
+    for (sm, tm) in cells:
+        try:
+            r = ble.run_limit_backtest(sym, name, df_ind, _ident, em, sm, tm,
+                                       args.days + 420, strat,
+                                       entry_type=et, max_hold=0)
+        except Exception:
+            continue
+        if not r:
+            continue
+        for t in r.get("trade_log", []):
+            if t.get("reason") in ("発注中", "保有中"):
+                continue
+            sdt = t.get("signal_dt"); edt = t.get("entry_dt")
+            if sdt is None or edt is None:
+                continue
+            sd = sdt.date() if hasattr(sdt, "date") else sdt
+            if sd < since:
+                continue
+            lp = float(t.get("order_limit", 0) or 0)
+            osp = float(t.get("order_stop", 0) or 0)
+            otp = float(t.get("order_target", 0) or 0)
+            if lp <= 0 or osp <= 0 or otp <= 0:
+                continue
+            if lp < args.min_price or lp > args.max_price:
+                continue
+            stop_p = max(osp, otp); target_p = min(osp, otp)
+            fill_d = edt.date() if hasattr(edt, "date") else edt
+            db = by_day.get(fill_d)
+            if db is None or len(db) < 2:
+                continue
+            xp, reason, _e, _x = _short_exit_5m(db, lp, stop_p, target_p, is_rise)
+            if reason in ("no_5m", "no_entry"):
+                continue
+            out[(sm, tm)].append(_short_pnl(lp, xp, reason))
+    return out
+
+
+def _run_sweep(mode: str, symbols: list[tuple], sm_list, tm_list) -> dict:
+    is_mirror = (mode == "mirror")
+    # スイープはパラメータを run_limit_backtest に直接渡すので、グローバル上書きは無効化
+    ble._MIRROR_PNL = False
+    ble._ENTRY_TYPE_FORCE = None
+    ble._MAX_HOLD_FORCE = None
+    ble._SM_FORCE = None
+    ble._TM_FORCE = None
+
+    cells = [(sm, tm) for tm in tm_list for sm in sm_list]
+    label = "ロングミラー(指値空売り)" if is_mirror else "ロング銘柄ショート(逆指値空売り)"
+    print("=" * 72)
+    print(f"■ {label}  5分足スイープ  損切ATR{sm_list} × 利確ATR{tm_list} / 直近{args.days}日")
+    print("=" * 72)
+
+    agg = {c: [] for c in cells}
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(_sweep_one, c, n, s, is_mirror, cells): c
+                for (c, n, s) in symbols}
+        done = 0
+        for fut in as_completed(futs):
+            done += 1
+            if done % 25 == 0:
+                print(f"  ...{done}/{len(symbols)}銘柄", flush=True)
+            try:
+                r = fut.result()
+            except Exception:
+                continue
+            for c, pnls in r.items():
+                agg[c] += pnls
+
+    def _cell_stat(pnls):
+        n = len(pnls)
+        if n == 0:
+            return None
+        wins = [p for p in pnls if p > 0]
+        gp = sum(wins); gl = -sum(p for p in pnls if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        return {"n": n, "pnl": sum(pnls), "pf": pf, "wr": len(wins) / n * 100}
+
+    stats = {c: _cell_stat(agg[c]) for c in cells}
+    best = None
+    for c in cells:
+        st = stats[c]
+        if st and (best is None or st["pnl"] > stats[best]["pnl"]):
+            best = c
+
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+
+    # コンソール: グリッド(行=sm, 列=tm)
+    hdr = "損切＼利確".ljust(10) + "".join(f"tm{tm}".rjust(13) for tm in tm_list)
+    print("\n" + hdr)
+    print("-" * len(hdr))
+    for sm in sm_list:
+        row = f"sm{sm}".ljust(10)
+        for tm in tm_list:
+            st = stats[(sm, tm)]
+            if not st:
+                row += "—".rjust(13)
+            else:
+                mark = "*" if best == (sm, tm) else " "
+                row += f"{st['pnl']:+,.0f}{mark}".rjust(13)
+        print(row)
+    print("-" * len(hdr))
+    if best:
+        b = stats[best]
+        print(f"★ 最良(5分足): 損切ATR={best[0]} / 利確ATR={best[1]} → "
+              f"{b['pnl']:+,.0f}円 (PF{_pf(b['pf'])} / 勝率{b['wr']:.0f}% / {b['n']}取引)")
+    print()
+    return {"mode": mode, "label": label, "sm_list": sm_list, "tm_list": tm_list,
+            "stats": stats, "best": best}
+
+
+def _build_sweep_html(results: list) -> str:
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+    blocks = ""
+    for R in results:
+        sm_list, tm_list, stats, best = R["sm_list"], R["tm_list"], R["stats"], R["best"]
+        th = 'padding:6px 10px;text-align:center;color:#94a3b8;font-size:0.75rem'
+        head = f'<th style="{th};text-align:left">損切ATR＼利確ATR</th>' + "".join(
+            f'<th style="{th}">tm={tm}</th>' for tm in tm_list)
+        body = ""
+        for sm in sm_list:
+            cells = f'<td style="{th};text-align:left;color:#e2e8f0;font-weight:700">sm={sm}</td>'
+            for tm in tm_list:
+                st = stats.get((sm, tm))
+                if not st:
+                    cells += f'<td style="{th}">—</td>'; continue
+                is_best = (best == (sm, tm))
+                pc = "#4ade80" if st["pnl"] > 0 else "#f87171" if st["pnl"] < 0 else "#94a3b8"
+                bg = "background:#0e3320;" if is_best else ("background:#101826;" if st["pnl"] > 0 else "")
+                star = " ★" if is_best else ""
+                cells += (f'<td style="padding:5px 8px;text-align:center;{bg}">'
+                          f'<div style="color:{pc};font-weight:700">{st["pnl"]:+,.0f}{star}</div>'
+                          f'<div style="color:#64748b;font-size:0.66rem">PF{_pf(st["pf"])}/{st["wr"]:.0f}%</div></td>')
+            body += f"<tr>{cells}</tr>"
+        bline = ""
+        if best:
+            b = stats[best]
+            bline = (f'<p style="margin:8px 0;color:#c4b5fd">★ 最良(5分足): '
+                     f'<b>損切ATR={best[0]} / 利確ATR={best[1]}</b> → '
+                     f'<b style="color:{"#4ade80" if b["pnl"]>=0 else "#f87171"}">{b["pnl"]:+,.0f}円</b> '
+                     f'(PF{_pf(b["pf"])} / 勝率{b["wr"]:.0f}% / {b["n"]}取引)</p>')
+        blocks += (f'<div style="margin:16px 0;padding:16px 20px;background:#1e293b;'
+                   f'border-radius:8px;border-left:3px solid #a78bfa">'
+                   f'<h3 style="color:#c4b5fd;margin:0 0 6px">🎯 {R["label"]} — 5分足スイープ</h3>'
+                   f'{bline}'
+                   f'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">'
+                   f'<thead><tr style="border-bottom:1px solid #334155">{head}</tr></thead>'
+                   f'<tbody>{body}</tbody></table></div></div>')
+    return (f'<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">'
+            f'<title>5分足 同日TP/SLスイープ sm/tm 総当り</title>'
+            f'<style>body{{background:#0f172a;color:#e2e8f0;font-family:sans-serif;padding:20px}}'
+            f'table{{background:#0f172a}}</style></head><body>'
+            f'<h1 style="color:#a78bfa">🕔 5分足ベース 同日TP/SL 最適化スイープ</h1>'
+            f'<p style="color:#94a3b8">直近{args.days}日 / 5分足の実際の値動き順で first-touch 判定'
+            f'(約定前ヒットの先読み回避・同時タッチは損切優先)。'
+            f'エントリーは注文価格ちょうど(ミラーの幻スリッページ排除)。'
+            f'{"損切スリップ"+format(args.slip*100,".2f")+"%" if args.slip else "摩擦なし(スリッページ0)"}。</p>'
+            f'{blocks}</body></html>')
+
+
+def _build_detail_html(results: list) -> str:
+    """単一sm/tmモード: 5分足ベースの取引明細(決済日降順)をHTML化。"""
+    def _ts(x):
+        try:
+            return pd.Timestamp(x).strftime("%m/%d %H:%M")
+        except Exception:
+            return "—"
+    def _pf(x):
+        return "∞" if x == float("inf") else f"{x:.2f}"
+    blocks = ""
+    for R in results:
+        if not R or not R.get("trades"):
+            continue
+        trs = sorted(R["trades"], key=lambda t: (t["date"], str(t.get("exit_ts"))), reverse=True)
+        rmap = {"target": ("利確", "#4ade80"), "stop": ("損切", "#f87171"),
+                "close": ("引け", "#94a3b8")}
+        rows = ""
+        for t in trs:
+            rlbl, rcol = rmap.get(t["reason"], (t["reason"], "#94a3b8"))
+            pnl = t["pnl_5m"]; pc = "#4ade80" if pnl >= 0 else "#f87171"
+            rows += (
+                f'<tr>'
+                f'<td>{t["date"]}</td>'
+                f'<td style="text-align:left">{t["sym"]}<br>'
+                f'<span style="color:#64748b;font-size:0.7rem">{t.get("name","")}</span></td>'
+                f'<td>{t["strat"]}</td>'
+                f'<td style="color:#94a3b8">{_ts(t.get("entry_ts"))}</td>'
+                f'<td style="text-align:right">{t["entry"]:,.0f}</td>'
+                f'<td style="text-align:right;color:#f87171">{t["stop_p"]:,.0f}</td>'
+                f'<td style="text-align:right;color:#4ade80">{t["target_p"]:,.0f}</td>'
+                f'<td style="color:#94a3b8">{_ts(t.get("exit_ts"))}</td>'
+                f'<td style="text-align:right">{t["exit"]:,.0f}</td>'
+                f'<td style="color:{rcol};font-weight:700">{rlbl}</td>'
+                f'<td style="text-align:right;color:{pc};font-weight:700">{pnl:+,.0f}</td>'
+                f'</tr>')
+        tot = R.get("tot5", 0); n = R.get("n", len(trs)); wr = R.get("wr5", 0); pf = R.get("pf5", 0)
+        rc = R.get("reasons", {})
+        summary = (f'<p style="font-size:0.95rem">決済 <b>{n}件</b> / 勝率 '
+                   f'<b>{wr:.1f}%</b> / PF <b>{_pf(pf)}</b> / 損益 '
+                   f'<b style="color:{"#4ade80" if tot>=0 else "#f87171"}">{tot:+,.0f}円</b> '
+                   f'&nbsp;<span style="color:#64748b">利確{rc.get("target",0)}/'
+                   f'損切{rc.get("stop",0)}/引け{rc.get("close",0)} '
+                   f'・5分足なし{R.get("no_5m",0)}/約定不成立{R.get("no_entry",0)}</span></p>')
+        blocks += (
+            f'<div style="margin:18px 0">'
+            f'<h2 style="color:#c4b5fd">🕔 {R["label"]} — 5分足ベース取引明細</h2>'
+            f'{summary}'
+            f'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr style="border-bottom:1px solid #334155;color:#94a3b8">'
+            f'<th>決済日</th><th style="text-align:left">銘柄</th><th>戦略</th>'
+            f'<th>約定時刻</th><th>約定値</th><th style="color:#f87171">損切</th>'
+            f'<th style="color:#4ade80">利確</th><th>決済時刻</th><th>決済値</th>'
+            f'<th>理由</th><th>損益</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div></div>')
+    _cost = "摩擦なし" if (args.slip == 0 and FEE_ONE_WAY == 0) else \
+        f"損切スリップ{args.slip*100:.2f}% / 手数料片道{FEE_ONE_WAY*100:.2f}%"
+    return (f'<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">'
+            f'<title>5分足 同日取引明細 sm{args.sm}/tm{args.tm}</title>'
+            f'<style>body{{background:#0f172a;color:#e2e8f0;font-family:sans-serif;padding:20px}}'
+            f'td,th{{padding:5px 8px;border-bottom:1px solid #1e293b;text-align:center}}</style></head><body>'
+            f'<h1 style="color:#a78bfa">🕔 5分足ベース 同日取引明細 (損切ATR={args.sm} / 利確ATR={args.tm})</h1>'
+            f'<p style="color:#94a3b8">直近{args.days}日 / 実際の値動き順で first-touch 判定・'
+            f'エントリーは注文価格ちょうど・{_cost}</p>{blocks}</body></html>')
 
 
 def main():
     symbols = _load_symbols()
-    # 重複(code,strategy)排除
     seen = set(); uniq = []
     for c, n, s in symbols:
         if (c, s) not in seen:
             seen.add((c, s)); uniq.append((c, n, s))
     print(f"[info] 対象 {len(uniq)}ペア / 5分足ソース={args.source} / 株数={QTY}")
 
-    modes = []
-    if args.both or (args.mirror and args.lss):
-        modes = ["mirror", "lss"]
-    elif args.mirror:
-        modes = ["mirror"]
-    elif args.lss:
-        modes = ["lss"]
-    for m in modes:
-        _run_mode(m, uniq)
+    modes = ["mirror", "lss"] if (args.both or (args.mirror and args.lss)) else \
+            (["mirror"] if args.mirror else ["lss"])
+
+    if args.sweep:
+        sm_list = [float(x) for x in args.sm_list.split(",") if x.strip()]
+        tm_list = [float(x) for x in args.tm_list.split(",") if x.strip()]
+        results = [_run_sweep(m, uniq, sm_list, tm_list) for m in modes]
+        if not args.no_html:
+            from datetime import date as _d
+            out = Path(f"sameday5m_sweep_{ble._TODAY}.html")
+            out.write_text(_build_sweep_html(results), encoding="utf-8")
+            print(f"[HTML] 5分足スイープ → {out.resolve()}")
+            if not args.no_browser:
+                try:
+                    from _open_html import open_html
+                    open_html(out.resolve())
+                except Exception:
+                    pass
+    else:
+        results = [_run_mode(m, uniq) for m in modes]
+        if not args.no_html:
+            html = _build_detail_html([r for r in results if r])
+            out = Path(f"sameday5m_detail_{ble._TODAY}.html")
+            out.write_text(html, encoding="utf-8")
+            print(f"[HTML] 5分足 取引明細 → {out.resolve()}")
+            if not args.no_browser:
+                try:
+                    from _open_html import open_html
+                    open_html(out.resolve())
+                except Exception:
+                    pass
 
     print("注意: 5分足は約定バーの次バー以降で first-touch 判定(約定前ヒットの先読み回避)。")
     print("      同一バーで損切・利確が両方タッチした場合は保守的に損切り優先で計上。")
