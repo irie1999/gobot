@@ -22,6 +22,8 @@ import pandas as pd
 
 import backtest_limit_entry as ble
 from daytrade_data import load_intraday, split_by_day
+# first-touch/損益はリーフモジュールに集約(二重実装を避ける)
+from sameday5m_firsttouch import short_exit_5m, short_exit_daily, short_pnl  # noqa: F401
 
 
 def mod_for(strat: str):
@@ -31,80 +33,6 @@ def mod_for(strat: str):
     if strat in getattr(_brk, "STRATEGY_PARAMS", {}):
         return _brk
     return _stop
-
-
-def short_exit_5m(day_bars: pd.DataFrame, entry_p: float,
-                  stop_p: float, target_p: float, is_rise_trigger: bool):
-    """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
-
-    Returns: (exit_price, reason, entry_ts, exit_ts)
-      reason ∈ {"target","stop","close","no_entry","no_5m"}
-    """
-    if day_bars is None or day_bars.empty:
-        return None, "no_5m", None, None
-    highs = day_bars["high"].to_numpy(dtype=float)
-    lows = day_bars["low"].to_numpy(dtype=float)
-    closes = day_bars["close"].to_numpy(dtype=float)
-    times = day_bars.index
-    n = len(highs)
-
-    # 1) 約定バー(トリガー到達)
-    ei = None
-    for j in range(n):
-        if is_rise_trigger:
-            if highs[j] >= entry_p:   # 上昇して指値売りに到達(mirror)
-                ei = j
-                break
-        else:
-            if lows[j] <= entry_p:    # 下落して逆指値売りに到達(lss)
-                ei = j
-                break
-    if ei is None:
-        return None, "no_entry", None, None
-
-    ent_ts = times[ei]
-    # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読み回避)
-    for j in range(ei + 1, n):
-        if highs[j] >= stop_p:        # 上抜け=損切(同時タッチも優先)
-            return stop_p, "stop", ent_ts, times[j]
-        if lows[j] <= target_p:       # 下抜け=利確
-            return target_p, "target", ent_ts, times[j]
-    # 3) どちらも当たらなければ引け
-    return float(closes[-1]), "close", ent_ts, times[-1]
-
-
-def short_exit_daily(hi: float, lo: float, cl: float, entry_p: float,
-                     stop_p: float, target_p: float, is_rise_trigger: bool,
-                     tie: str = "stop"):
-    """日足近似の決済(5分足との比較用)。tie="stop"=保守(下限)/"target"=楽観(上限)。"""
-    if is_rise_trigger:
-        if hi < entry_p:
-            return None, "no_entry"
-    else:
-        if lo > entry_p:
-            return None, "no_entry"
-    hit_stop = hi >= stop_p
-    hit_tgt = lo <= target_p
-    if tie == "target":
-        if hit_tgt:
-            return target_p, "target"
-        if hit_stop:
-            return stop_p, "stop"
-    else:
-        if hit_stop:
-            return stop_p, "stop"
-        if hit_tgt:
-            return target_p, "target"
-    return cl, "close"
-
-
-def short_pnl(entry_p: float, exit_p: float, reason: str,
-              qty: int, fee_one_way: float, slip: float) -> float:
-    """ショート損益(円)。買い戻し(exit)は損切り時のみ不利スリッページ。
-    エントリーは注文価格ちょうど(ミラーの幻スリッページ排除)。"""
-    exit_eff = exit_p * (1.0 + slip) if reason == "stop" else exit_p
-    fee = (entry_p + exit_eff) * qty * fee_one_way
-    return (entry_p - exit_eff) * qty - fee
 
 
 def _collect_fills(sym, name, strat, is_mirror, sm, tm, days,

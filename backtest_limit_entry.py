@@ -625,6 +625,35 @@ _MAX_HOLD_FORCE: int | None = None
 _SM_FORCE: float | None = None
 _TM_FORCE: float | None = None
 
+#   _INTRADAY_5M : True にすると、同日決済(max_hold=0)トレードの決済を5分足の実際の
+#                  値動き順(first-touch)で作り直す。mirror/lss の取引明細・KPI・月別を
+#                  5分足ベースにするためのフック。5分足の無い日のトレードは集計から除外。
+#                  ※ この時 pnl はショート損益を直接計上するので _MIRROR_PNL 反転は使わない。
+_INTRADAY_5M: bool = False
+_INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
+_INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
+_INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
+
+
+def _load_5m_by_day(symbol: str) -> dict:
+    """5分足を日別分割して返す(銘柄あたり1回だけロード=プロセス内キャッシュ)。"""
+    if symbol in _INTRADAY_5M_CACHE:
+        return _INTRADAY_5M_CACHE[symbol]
+    by_day: dict = {}
+    try:
+        from daytrade_data import load_intraday as _li, split_by_day as _sbd
+        m5 = _li(symbol, days=400, source=_INTRADAY_5M_SOURCE)
+        if m5 is not None and not m5.empty:
+            by_day = _sbd(m5)
+    except Exception:
+        by_day = {}
+    _INTRADAY_5M_CACHE[symbol] = by_day
+    return by_day
+
+
+# 5分足の決済理由 → レポートの決済理由 表記へ変換
+_5M_REASON_JA = {"target": "目標達成", "stop": "損切り", "close": "タイムカット"}
+
 
 def timecut_enabled() -> bool:
     """タイムカットが有効か(=有限の最大保有日数で強制決済するか)。"""
@@ -1080,10 +1109,50 @@ def run_limit_backtest(
             reason="発注中",
         ))
 
+    # ── 5分足で同日決済を作り直す(mirror/lss の取引明細を5分足ベースに) ─────────
+    # 各トレード(発注中を除く)を「注文価格ちょうどで空売り→5分足 first-touch で決済」
+    # に置換。5分足の無い日は除外。pnl はショート損益を直接計上するので、この時は
+    # _MIRROR_PNL の反転は行わない(下の if でスキップ)。
+    if _INTRADAY_5M:
+        from sameday5m_firsttouch import short_exit_5m as _se5, short_pnl as _sp5
+        _is_rise = (entry_type == "stop")   # mirror=上昇約定 / lss(stop_sell)=下落約定
+        _bd = _load_5m_by_day(symbol)
+        _new = []
+        for _t in trades:
+            if _t.get("reason") == "発注中":
+                _new.append(_t); continue
+            _lp = float(_t.get("order_limit", 0) or 0)
+            _osp = float(_t.get("order_stop", 0) or 0)
+            _otp = float(_t.get("order_target", 0) or 0)
+            if _lp <= 0 or _osp <= 0 or _otp <= 0:
+                continue
+            _edt = _t.get("entry_dt")
+            _fd = _edt.date() if hasattr(_edt, "date") else _edt
+            _db = _bd.get(_fd)
+            if _db is None or len(_db) < 2:
+                continue   # 5分足なし → 除外(日足へフォールバックしない)
+            _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
+            _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise)
+            if _rsn in ("no_5m", "no_entry"):
+                continue
+            _qty = _t.get("qty", FIXED_QTY)
+            _pnl = _sp5(_lp, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
+            _t["entry_p"] = _lp
+            _t["exit_p"] = _xp
+            _t["exit_dt"] = _ext_ts if _ext_ts is not None else _t.get("exit_dt")
+            _t["reason"] = _5M_REASON_JA.get(_rsn, _rsn)
+            _t["pnl"] = _pnl
+            _t["pct"] = (_lp - _xp) / _lp * 100 if _lp else 0.0
+            _t["hold_days"] = 0
+            _t["fee"] = round((_lp + _xp) * _qty * FEE_PCT_ONE_WAY, 0)
+            _new.append(_t)
+        trades = _new
+
     # ── ロングミラー: 各トレードを「指値空売りの鏡写し」に変換 ────────────────
     # ロング net pnl = gross - fee。鏡写し net = -gross - fee = -pnl - 2*fee。
     # (regime_perf_oos の --mirror と同一式。手数料は往復ぶんを二重に引く)
-    if _MIRROR_PNL:
+    # ※ 5分足モード時はショート損益を直接計上済みなので反転しない。
+    if _MIRROR_PNL and not _INTRADAY_5M:
         for _t in trades:
             if _t.get("reason") == "発注中":
                 continue

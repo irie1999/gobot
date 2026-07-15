@@ -101,6 +101,9 @@ _pre.add_argument("--mirror-tm", type=float, default=None,
 _pre.add_argument("--daily-tpsl-sweep", action="store_true",
                   help="mirror/lss に日足版の同日TP/SLスイープタブも出す(既定OFF。"
                        "日足は同日の当たり判定が近似で不正確なため、通常は5分足版のみ)")
+_pre.add_argument("--no-5m", action="store_true",
+                  help="mirror/lss の取引明細を5分足で集計しない(日足近似のまま)。"
+                       "既定は5分足で集計(正確)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -787,6 +790,17 @@ if (_args.mirror or _args.long_stop_short):
     if _args.mirror_sm is not None or _args.mirror_tm is not None:
         print(f"[TP/SL適用] 損切ATR={_args.mirror_sm if _args.mirror_sm is not None else '既定'} / "
               f"利確ATR={_args.mirror_tm if _args.mirror_tm is not None else '既定'} を全体に適用", flush=True)
+    # mirror/lss の取引明細・KPI・月別を5分足ベースで集計する(--no-5m で無効化)。
+    if not getattr(_args, "no_5m", False):
+        try:
+            import daytrade_data as _dtd0
+            _bte._INTRADAY_5M_SOURCE = "local" if (
+                _dtd0.DATA_DIR.exists() and any(_dtd0.DATA_DIR.glob("*.pkl"))) else "auto"
+        except Exception:
+            _bte._INTRADAY_5M_SOURCE = "auto"
+        _bte._INTRADAY_5M = True
+        print(f"[5分足集計] mirror/lss の同日決済を5分足で集計(ソース={_bte._INTRADAY_5M_SOURCE})。"
+              f"5分足の無い取引は除外されます。", flush=True)
 
 # mirror/lss は「検証専用」モード: 実発注用の signals_latest.json や共有スコア
 # キャッシュを上書きしない(発注サーバが誤モードのシグナルを掴むのを防ぐ)。
@@ -922,6 +936,10 @@ def _make_cached_bt(orig_fn):
             key += (f"|MIR{int(bool(getattr(_bte, '_MIRROR_PNL', False)))}"
                     f"|ET{getattr(_bte, '_ENTRY_TYPE_FORCE', None) or ''}"
                     f"|MHF{_mhf if _mhf is not None else ''}")
+            # 5分足集計の有無・幅もキーに含める(日足近似の旧キャッシュ誤再利用を防ぐ)
+            if getattr(_bte, "_INTRADAY_5M", False):
+                key += (f"|5M{getattr(_bte, '_INTRADAY_5M_SOURCE', '')}"
+                        f"|SM{getattr(_bte, '_SM_FORCE', '')}|TM{getattr(_bte, '_TM_FORCE', '')}")
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
             _bt_cache_dirty["n"] += 1
