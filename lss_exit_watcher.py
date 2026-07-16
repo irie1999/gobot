@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import os
 import sys
 import time as _time
 from datetime import datetime, timezone, timedelta, time as dtime
@@ -52,6 +53,35 @@ from kabu_api import KabuClient, CASH_MARGIN_CLOSE
 JST = timezone(timedelta(hours=9))
 _BASE = Path(__file__).resolve().parent
 MARKET_END = dtime(15, 0)     # 大引け(東証)。これを過ぎたらループ終了
+
+# ── 多重起動防止(タスクスケジューラの重複起動・手動起動が重なっても1つだけ動かす) ──
+# lock ファイルの mtime を各ループで更新(ハートビート)。_LOCK_STALE 秒より古い lock は
+# 「死んだインスタンス」とみなして無視する(クラッシュ後の残骸で永久ブロックしない)。
+_LOCK = _BASE / ".lss_watcher.lock"
+_LOCK_STALE = 180
+
+
+def _lock_alive() -> bool:
+    if not _LOCK.exists():
+        return False
+    try:
+        return (_time.time() - _LOCK.stat().st_mtime) < _LOCK_STALE
+    except Exception:
+        return False
+
+
+def _touch_lock() -> None:
+    try:
+        _LOCK.write_text(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def _release_lock() -> None:
+    try:
+        _LOCK.unlink()
+    except Exception:
+        pass
 
 
 def _num(v) -> float:
@@ -226,13 +256,35 @@ def main() -> int:
     print(f"引け成行切替: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
     print("=" * 66)
 
-    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。
+    if _lock_alive():
+        print("別の lss_exit_watcher が稼働中です(lockあり)。二重起動を避けて終了します。")
+        return 0
+    _touch_lock()
     try:
-        cli.connect()   # dry-run でも建玉・現在値の取得に接続が要る(発注のみ dry_run)
-    except Exception as e:
-        print(f"✗ kabu 接続失敗: {e}")
-        print("  (現在値・建玉の監視には kabuステーション起動+ログインが必要です)")
-        return 1
+        return _run(args, close_at, today)
+    finally:
+        _release_lock()
+
+
+def _run(args, close_at, today) -> int:
+    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    # kabuステーション未ログインでも待機して再接続を試みる(後でログインするケースに対応)。
+    # 実運用(--execute)は大引けまで30秒ごとにリトライ。dry-run/--once は1回だけ。
+    while True:
+        try:
+            cli.connect()   # 建玉・現在値の取得に接続が要る(発注のみ dry_run)
+            break
+        except Exception as e:
+            _retry = args.execute and not args.once and datetime.now(JST).time() < MARKET_END
+            if not _retry:
+                print(f"✗ kabu 接続失敗: {e}")
+                print("  (現在値・建玉の監視には kabuステーション起動+ログインが必要です)")
+                return 1
+            print(f"  kabu未接続 ({e}) → kabuステーションのログイン待ち。30秒後に再試行...",
+                  flush=True)
+            _touch_lock()
+            _time.sleep(30)
 
     closed: set = set()
     while True:
@@ -278,6 +330,7 @@ def main() -> int:
             # dry-run は1巡して終了(監視ループは実行時のみ)
             print("dry-run のため1巡で終了します。--execute で常時監視+決済します。")
             break
+        _touch_lock()   # ハートビート(多重起動防止のlockを更新)
         _time.sleep(max(1.0, args.poll))
 
     print("終了しました。")
