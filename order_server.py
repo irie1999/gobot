@@ -34,6 +34,8 @@ JST = timezone(timedelta(hours=9))
 EXECUTE  = False   # True なら実発注。False なら dry-run (接続なし・内容のみ)
 PROD     = False   # True なら本番(18080)。False ならデモ(18081)
 GENBUTSU = False   # True ならロングを現物で発注。False(既定) ならロングも信用新規
+TICK_ADJUST = False  # True なら場中の即約定回避(現在値±1ティック調整)を行う。
+                     # False(既定=引け後運用) ならトリガー=終値のまま(調整しない)。
 
 # ── 約定監視 (エントリー約定 → 利確指値を即発注) ──────────────────────
 POLL_SEC = 10                    # 約定チェック間隔(秒)
@@ -93,14 +95,23 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     except Exception as e:
         return f"発注失敗: kabu 接続エラー ({e})"
 
-    # ── トリガー価格の自動調整 (kabu Code 100217 回避) ──
+    # ── トリガー価格を呼値(ティック)に丸める ──
+    # kabu は無効な呼値を『下方向』に floor する(例: 端数3,024→3,020)ため、
+    # 必ず最寄りの有効呼値に丸めてから送る(トリガー=終値ぴったりにする)。
+    try:
+        from backtest_limit_entry import tick_size, round_to_tick
+        entry = round_to_tick(entry)
+    except Exception:
+        pass
+
+    # ── 場中の即約定回避 (--intraday-tick 指定時のみ) ──
     # 逆指値買いはトリガーが現在値より上、逆指値売りは現在値より下でないと
-    # 「即約定になる」と弾かれる。現値を取得し、必要なら現値±1ティックに調整する。
+    # 「即約定になる」と弾かれる(kabu Code 100217)。場中に発注する場合だけ、
+    # 現値±1ティックに調整する。既定(引け後運用)は調整せずトリガー=終値のまま。
     adj_note = ""
-    if EXECUTE:
+    if EXECUTE and TICK_ADJUST:
         cur = cli.get_current_price(symbol)
         if cur and cur > 0:
-            from backtest_limit_entry import tick_size, round_to_tick
             tick = tick_size(cur)
             if side == "long" and entry <= cur:
                 new = round_to_tick(cur + tick)
@@ -748,7 +759,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global EXECUTE, PROD, GENBUTSU, PORT
+    global EXECUTE, PROD, GENBUTSU, PORT, TICK_ADJUST
     ap = argparse.ArgumentParser(description="シグナルレポート発注専用サーバ")
     ap.add_argument("--execute", action="store_true",
                     help="kabu に実発注する (未指定なら dry-run)")
@@ -756,10 +767,14 @@ def main():
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
     ap.add_argument("--genbutsu", action="store_true",
                     help="ロングを現物で発注 (未指定なら信用新規)")
+    ap.add_argument("--intraday-tick", action="store_true",
+                    help="場中発注用: 現在値±1ティック調整で即約定を回避 "
+                         "(既定OFF=引け後運用でトリガー=終値のまま)")
     ap.add_argument("--port", type=int, default=PORT,
                     help=f"待受ポート (既定 {PORT})")
     args = ap.parse_args()
     EXECUTE, PROD, GENBUTSU, PORT = args.execute, args.prod, args.genbutsu, args.port
+    TICK_ADJUST = args.intraday_tick
 
     arm = "⚠実発注" if EXECUTE else "dry-run (接続なし・内容のみ)"
     env = "本番(18080)" if PROD else "デモ(18081)"
