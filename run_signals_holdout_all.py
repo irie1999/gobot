@@ -984,6 +984,9 @@ _na._ANALYSIS_ONLY = _analysis_only
 # lss(--long-stop-short)は『信用新規売りの逆指値』として正しく発注できるようにする
 # (side=short・エントリーのみ・同日引け買戻し)。mirror(--mirror)は却下済で発注不可のまま。
 _na._LSS_ORDER_MODE = bool(_args.long_stop_short and not _args.mirror)
+# lss の損切/利確ATR倍率(既定0.1/1.0)をレポートの表示計算へ渡す(実際の注文内容に合わせる)。
+_na._LSS_SM = _bte._SM_FORCE if getattr(_bte, "_SM_FORCE", None) is not None else 0.1
+_na._LSS_TM = _bte._TM_FORCE if getattr(_bte, "_TM_FORCE", None) is not None else 1.0
 
 # 日足版の同日TP/SLスイープは「近似」で不正確(同日の当たり判定が日足高安のみ。
 # 実測ではミラーが日足+191万→5分足-240万と真逆になった)。既定OFF、--daily-tpsl-sweep

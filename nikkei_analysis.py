@@ -196,6 +196,11 @@ _ANALYSIS_ONLY: bool = False
 # (同日引けの買戻しは手動 or close_stop_guard で対応)。mirror(却下)は対象外。
 _LSS_ORDER_MODE: bool = False
 
+# lss の損切/利確 ATR倍率(実際の注文内容に合わせた表示計算に使う)。
+# run_signals_holdout_all が _bte._SM_FORCE/_TM_FORCE(既定 0.1/1.0)から設定する。
+_LSS_SM: float = 0.1
+_LSS_TM: float = 1.0
+
 # ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
 # strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
 _short = None
@@ -2327,6 +2332,31 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                                             periods=_EXP + _MH + 1)[-1].date()
             except Exception:
                 _max_exit = None
+
+            # ── lss タブ: 実際の注文内容(逆指値空売り・同日決済)に合わせた表示値 ──
+            # check_signal_on_date はロング値(損切=下/目標=上/em=0)を返すので、
+            # そこから ATR を逆算して lss の 損切=上 / 目標=下 / 指値下限(-3%) を作る。
+            # 注文数量(qty)は long stop から算出するので stop_p/target_p は温存する。
+            _lss_stop = _lss_target = _lss_hold = _lss_exit = None
+            _lss_limit = limit_p
+            if _LSS_ORDER_MODE and order_p:
+                try:
+                    _plp = mod.STRATEGY_PARAMS.get(strat)
+                    _sm_long = float(_plp[2]) if _plp else 0.0
+                    _stop_long = float(sig.get("stop_price", 0) or 0)
+                    _atr = (order_p - _stop_long) / _sm_long if (_sm_long and _stop_long) else 0.0
+                    if _atr > 0:
+                        _lss_stop   = order_p + _atr * _LSS_SM   # 損切=上(価格上昇で損切)
+                        _lss_target = order_p - _atr * _LSS_TM   # 目標=下(価格下落で利確)
+                    _lss_limit = round(order_p * (1.0 - 0.03))   # 発動後の指値下限(-3%)
+                    _lss_hold  = "同日"                          # 同日決済(max_hold=0)
+                    try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
+                        _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
+                                                    periods=2)[-1].date()
+                    except Exception:
+                        _lss_exit = _max_exit
+                except Exception:
+                    pass
             # 純OOS成績: その銘柄が選定された最長holdout窓(選定に使っていない
             # 直近除外期間)のトレードだけを集計。⚠OOS弱バッジの根拠。
             _oos_pnl = 0.0
@@ -2355,11 +2385,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "signal_date":  sig_dt,
                     "signal_price": sig.get("signal_price", 0),
                     "order_p":      order_p,
-                    "limit_p":      limit_p,
+                    "limit_p":      _lss_limit if _LSS_ORDER_MODE else limit_p,
                     "stop_p":       sig.get("stop_price",  0),
                     "target_p":     sig.get("target_price", 0),
-                    "max_hold":     _MH,
-                    "max_exit":     _max_exit,
+                    "is_lss":       _LSS_ORDER_MODE,
+                    "lss_stop":     _lss_stop,      # lss 損切=上 (None ならロング値表示)
+                    "lss_target":   _lss_target,    # lss 目標=下
+                    "max_hold":     (_lss_hold if _LSS_ORDER_MODE else _MH),
+                    "max_exit":     (_lss_exit if _LSS_ORDER_MODE else _max_exit),
                     "sources":      _sm.get((sym, strat), []),
                     "cfg_label":    _cfg_label,
                 },
@@ -2766,6 +2799,18 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         qty      = _calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0
         pos_val  = round(s["order_p"] * qty)
+        # 損切/目標の表示セル。lss は実際の注文(空売り)に合わせて 損切=上(+%)/目標=下(-%)。
+        _is_lss_row = bool(s.get("is_lss"))
+        if _is_lss_row and s.get("lss_stop") and s.get("lss_target"):
+            _op = s["order_p"]; _ls = s["lss_stop"]; _lt = s["lss_target"]
+            _stop_up = (_ls - _op) / _op * 100 if _op else 0   # 価格上昇で損切
+            _tgt_dn  = (_op - _lt) / _op * 100 if _op else 0   # 価格下落で利確
+            _stop_cell = f'+{_stop_up:.1f}%<br><span style="font-size:0.72rem">{_ls:,.0f}円</span>'
+            _tgt_cell  = f'-{_tgt_dn:.1f}%<br><span style="font-size:0.72rem">{_lt:,.0f}円</span>'
+        else:
+            _stop_cell = f'-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span>'
+            _tgt_cell  = f'+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span>'
+        _hold_cell = "同日" if _is_lss_row else f'{s.get("max_hold","—")}日'
         if stop_pct > 15:
             atr_badge = "<span style='background:#ef4444;color:white;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:3px'>ATR大</span>"
         elif stop_pct > 10:
@@ -2795,11 +2840,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         # lss は同日決済なので自動利確(target)は付けない(=0)。同日引けに買戻し。
         _side   = "short" if (str(s["strategy"]).upper().endswith("_S") or _LSS_ORDER_MODE) else "long"
         _ord_target = 0 if _LSS_ORDER_MODE else s['target_p']
+        # lss は損切=上(空売り)。発注ログ用の stop も実際の値に合わせる(cosmetic)。
+        _ord_stop = (s.get("lss_stop") or s['stop_p']) if _is_lss_row else s['stop_p']
         _scode  = str(s["symbol"]).split(".")[0]
         _reg_url = (f"http://127.0.0.1:8765/?prefill=1"
                     f"&symbol={_scode}"
                     f"&entry={s['order_p']:.0f}"
-                    f"&stop={s['stop_p']:.0f}"
+                    f"&stop={_ord_stop:.0f}"
                     f"&target={_ord_target:.0f}"
                     f"&strategy={s['strategy']}"
                     f"&qty={qty}"
@@ -2808,7 +2855,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         # 🚀発注: このタブから fetch で /order に発注リクエスト（確認ダイアログ付き）
         _ord_btn = (f"<button type=\"button\" "
                     f"onclick=\"gobotOrder('{_scode}','{_side}','{s['strategy']}',"
-                    f"{s['order_p']:.0f},{s['stop_p']:.0f},{_ord_target:.0f},{qty},"
+                    f"{s['order_p']:.0f},{_ord_stop:.0f},{_ord_target:.0f},{qty},"
                     f"'{s.get('rec_score', '') or ''}')\" "
                     f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
                     f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
@@ -2836,10 +2883,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
   <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
-  <td style="text-align:right;color:#f87171">-{stop_pct:.1f}%<br><span style="font-size:0.72rem">{s["stop_p"]:,.0f}円</span></td>
-  <td style="text-align:right;color:#4ade80">+{tgt_pct:.1f}%<br><span style="font-size:0.72rem">{s["target_p"]:,.0f}円</span></td>
+  <td style="text-align:right;color:#f87171">{_stop_cell}</td>
+  <td style="text-align:right;color:#4ade80">{_tgt_cell}</td>
   <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span></td>
-  <td style="text-align:center;color:#94a3b8">{s.get("max_hold","—")}日</td>
+  <td style="text-align:center;color:#94a3b8">{_hold_cell}</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
   <td style="text-align:center">{_reg_btn}</td>
 </tr>"""
@@ -2868,13 +2915,14 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
             '<div style="margin:10px 0;padding:12px 16px;background:#1e293b;border:1px solid #38bdf8;'
             'border-radius:8px;color:#bae6fd;font-size:0.86rem;line-height:1.6">'
             '🔻 <b>このタブは lss(逆指値空売り・同日決済)です。</b><br>'
-            '🚀発注は <b>信用新規売りの逆指値</b>(トリガー=下の逆指値価格・以下で発動 / 発動後 -3%下限指値)'
-            'として order_server に送られます(side=short)。'
-            '<b>同日決済なので自動利確は付けません</b>。約定したら<b>その日の引けに手動で買戻し</b>'
-            '(または close_stop_guard 相当)で手仕舞ってください。<br>'
-            '※ 表の<b>損切り(下)・目標(上)・最大保有</b>はロング逆指値買いの参考値です。'
-            '実際の lss は損切り=上/目標=下/その日の引け決済で、発注される損切り・利確とは別物です。'
-            'まず <code>order_server.py</code>(--execute なし=dry-run)で内容を確認してください。</div>')
+            '🚀発注は <b>信用新規売りの逆指値</b>(トリガー=前日終値・以下で発動 / 発動後 -3%下限指値)'
+            'として order_server に送られます(side=short)。表の<b>指値下限(-3%)・損切り(上)・目標(下)・同日決済</b>は'
+            '実際の注文内容に合わせて表示しています(損切り=上/目標=下=5分足OCOの基準値)。<br>'
+            '<b>発注はエントリー(逆指値売り)のみ</b>で自動の損切り・利確注文は置きません。'
+            '約定したら<b>その日の引けに買戻し</b>で決済します — '
+            '<code>python close_lss_guard.py --execute</code> を引け前(14:50頃)に実行すると自動で引け成行買戻しします'
+            '(ロング建玉・メインショート*_Sは触りません)。'
+            'まず <code>order_server.py</code> / <code>close_lss_guard.py</code> を --execute なし(dry-run)で確認してください。</div>')
     elif _ANALYSIS_ONLY:
         # mirror(却下済): 値がロングのままなので発注不可。
         _analysis_warn = (
@@ -2903,14 +2951,14 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
     <th>戦略</th><th>スコア</th>
     <th>シグナル日<br>時株価</th>
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
-    <th style="color:#f59e0b">指値上限/下限<br>(±3%)</th>
-    <th>損切り(-)</th><th>目標(+)</th>
+    <th style="color:#f59e0b">{'指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)'}</th>
+    <th>{'損切り(上)' if _LSS_ORDER_MODE else '損切り(-)'}</th><th>{'目標(下)' if _LSS_ORDER_MODE else '目標(+)'}</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
-<p class="footnote">※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日</p>"""
+<p class="footnote">{'※ lss は同日決済: 逆指値売りが約定した当日の引け成行で買戻し(close_lss_guard.py)。損切り=上/目標=下は5分足OCOの基準値で、実発注はエントリーのみ(利確・損切りは引け決済)。' if _LSS_ORDER_MODE else '※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日'}</p>"""
 
 
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
