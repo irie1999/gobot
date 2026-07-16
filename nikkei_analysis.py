@@ -190,6 +190,12 @@ _IS_SHORT_MODE: bool = False
 # 発注を無効化して誤発注を防ぐ(実発注は逆指値空売りの専用フローが必要)。
 _ANALYSIS_ONLY: bool = False
 
+# lss タブ(逆指値空売り選定)のとき True。発注ボタンを『信用新規売りの逆指値』
+# として正しく送れるようにする(side=short / order_server が send_stop_sell で発注)。
+# lss は同日決済なので自動利確(target)は付けず、エントリーのみ発注する
+# (同日引けの買戻しは手動 or close_stop_guard で対応)。mirror(却下)は対象外。
+_LSS_ORDER_MODE: bool = False
+
 # ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
 # strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
 _short = None
@@ -2784,13 +2790,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         lim_pct  = (s["limit_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         # 📥 登録 / 🚀 発注ボタン: position_server (8765) と連携
-        _side   = "short" if str(s["strategy"]).upper().endswith("_S") else "long"
+        # lss タブ(_LSS_ORDER_MODE)は『信用新規売りの逆指値』として side=short で送る。
+        # トリガー(order_p)は em=0.0 → 前日終値ちょうど = lss の売りトリガーと一致。
+        # lss は同日決済なので自動利確(target)は付けない(=0)。同日引けに買戻し。
+        _side   = "short" if (str(s["strategy"]).upper().endswith("_S") or _LSS_ORDER_MODE) else "long"
+        _ord_target = 0 if _LSS_ORDER_MODE else s['target_p']
         _scode  = str(s["symbol"]).split(".")[0]
         _reg_url = (f"http://127.0.0.1:8765/?prefill=1"
                     f"&symbol={_scode}"
                     f"&entry={s['order_p']:.0f}"
                     f"&stop={s['stop_p']:.0f}"
-                    f"&target={s['target_p']:.0f}"
+                    f"&target={_ord_target:.0f}"
                     f"&strategy={s['strategy']}"
                     f"&qty={qty}"
                     f"&side={_side}"
@@ -2798,7 +2808,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         # 🚀発注: このタブから fetch で /order に発注リクエスト（確認ダイアログ付き）
         _ord_btn = (f"<button type=\"button\" "
                     f"onclick=\"gobotOrder('{_scode}','{_side}','{s['strategy']}',"
-                    f"{s['order_p']:.0f},{s['stop_p']:.0f},{s['target_p']:.0f},{qty},"
+                    f"{s['order_p']:.0f},{s['stop_p']:.0f},{_ord_target:.0f},{qty},"
                     f"'{s.get('rec_score', '') or ''}')\" "
                     f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
                     f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
@@ -2807,9 +2817,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
                      f'white-space:nowrap">📥 登録</a>')
-        if _ANALYSIS_ONLY:
-            # mirror/lss: 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
-            # 分析専用なので無効化し、注意書きに置き換える。実発注は逆指値空売りの専用フローで。
+        if _ANALYSIS_ONLY and not _LSS_ORDER_MODE:
+            # mirror(却下済): 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
+            # 分析専用なので無効化し、注意書きに置き換える。
             _reg_btn = ('<div style="text-align:center;color:#f87171;font-size:0.7rem;'
                         'line-height:1.3">🚫 発注不可<br><span style="color:#94a3b8">分析専用'
                         '<br>(値はロング)</span></div>')
@@ -2852,14 +2862,30 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
 }
 </script>
 """
-    _analysis_warn = ("" if not _ANALYSIS_ONLY else
-        '<div style="margin:10px 0;padding:12px 16px;background:#3f1d1d;border:1px solid #b91c1c;'
-        'border-radius:8px;color:#fecaca;font-size:0.86rem;line-height:1.6">'
-        '🚫 <b>この画面から発注しないでください（分析専用）。</b><br>'
-        'このタブは <b>ロング銘柄ショート(逆指値空売り・同日決済)</b> の検証ですが、'
-        '下表の逆指値・損切り・目標・保有日数は<b>ロング逆指値買いの値</b>のまま表示されています'
-        '（損切り=下/目標=上/最大保有10日）。実際のlssは<b>売りトリガー・損切り=上・目標=下・その日の引けで決済</b>です。'
-        'そのため発注ボタンは無効化しています。実発注は逆指値空売りの専用フローで行ってください。</div>')
+    if _LSS_ORDER_MODE:
+        # lss タブ: 発注ボタンは『信用新規売りの逆指値』として正しく送られる。
+        _analysis_warn = (
+            '<div style="margin:10px 0;padding:12px 16px;background:#1e293b;border:1px solid #38bdf8;'
+            'border-radius:8px;color:#bae6fd;font-size:0.86rem;line-height:1.6">'
+            '🔻 <b>このタブは lss(逆指値空売り・同日決済)です。</b><br>'
+            '🚀発注は <b>信用新規売りの逆指値</b>(トリガー=下の逆指値価格・以下で発動 / 発動後 -3%下限指値)'
+            'として order_server に送られます(side=short)。'
+            '<b>同日決済なので自動利確は付けません</b>。約定したら<b>その日の引けに手動で買戻し</b>'
+            '(または close_stop_guard 相当)で手仕舞ってください。<br>'
+            '※ 表の<b>損切り(下)・目標(上)・最大保有</b>はロング逆指値買いの参考値です。'
+            '実際の lss は損切り=上/目標=下/その日の引け決済で、発注される損切り・利確とは別物です。'
+            'まず <code>order_server.py</code>(--execute なし=dry-run)で内容を確認してください。</div>')
+    elif _ANALYSIS_ONLY:
+        # mirror(却下済): 値がロングのままなので発注不可。
+        _analysis_warn = (
+            '<div style="margin:10px 0;padding:12px 16px;background:#3f1d1d;border:1px solid #b91c1c;'
+            'border-radius:8px;color:#fecaca;font-size:0.86rem;line-height:1.6">'
+            '🚫 <b>この画面から発注しないでください（分析専用）。</b><br>'
+            'このタブは <b>ロングミラー(指値空売り)</b> の検証で、'
+            '下表の逆指値・損切り・目標・保有日数は<b>ロング逆指値買いの値</b>のまま表示されています。'
+            'そのため発注ボタンは無効化しています。</div>')
+    else:
+        _analysis_warn = ""
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
 {_analysis_warn}
