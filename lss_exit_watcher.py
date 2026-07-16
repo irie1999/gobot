@@ -2,15 +2,19 @@
 lss_exit_watcher.py — lss(逆指値空売り・同日決済)の日中OCO決済ウォッチャー
 ==============================================================================
 
-kabu はOCO(利確と損切を同時に置く)機能を持たない。そこで現在値を数秒ごとに
-ポーリングし、**損切(上)・利確(下)の先に当たった方**を『信用返済成行買い』で
-決済する(=バックテスト short_exit_5m の first-touch を再現)。どちらも当たらず
+kabu はOCO(利確と損切を同時に置く)機能を持たない(建玉に返済注文は1つしか
+紐付けられない)。そこで **損切(上)は逆指値買いを建玉に置きっぱなし**にして板側で
+自動発火させ(遅延ゼロ)、**利確(下)は現在値をポーリング**して到達したら成行で
+買い戻す(このとき send_buy が損切の逆指値を自動取消する)。どちらも当たらず
 引け近く(既定14:55)になったら『引け成行(MOC)』で買い戻す。
 
   約定(3,020以下で売り) →
-    現在値 ≥ 損切(上)  → 損切: 信用返済成行買い
-    現在値 ≤ 利確(下)  → 利確: 信用返済成行買い   ← 先に当たった方
-    14:55以降どちらも未達 → 引け成行で買戻し
+    損切(上): 逆指値買い(信用返済)を @≥損切 に置きっぱなし → 上抜けで自動発火(成行)
+    利確(下): 現在値 ≤ 利確 になったら成行買戻し(損切逆指値を取消してから)
+    14:55以降どちらも未達 → 引け成行で買戻し(損切逆指値を取消してから)
+
+  ※ 損切をrestingにするのは、損切0.1ATR(タイト)がポーリング遅延に最も弱いため。
+    利確1.0ATR(広い)は遅延の影響が小さいのでポーリングで足りる。
 
 【誤決済防止】
   対象は「今日lssとして発注した売建」だけ:
@@ -201,12 +205,30 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
     return out
 
 
-def _close_buy(cli, sym: str, qty: int, hold_id: str, reason: str) -> bool:
-    """信用返済成行買いで決済(既存返済注文は send_buy が自動取消)。"""
+def _place_stop_buy(cli, sym: str, qty: int, hold_id: str, stop_p: float) -> str:
+    """損切(上)を『逆指値買い(信用返済)』で建玉に置きっぱなしにする。
+    発火後は成行(after_hit_price=None)。返り値: "ok" / "exists"(建玉拘束=既に設置済) / "fail"。"""
     cp = [{"HoldID": hold_id, "Qty": qty}] if hold_id else None
     try:
+        res = cli.send_stop_buy(sym, qty=qty, trigger_price=stop_p,
+                                cash_margin=CASH_MARGIN_CLOSE, close_positions=cp)
+    except Exception as e:
+        print(f"  ⚠ {sym} 損切逆指値の設置失敗: {e}")
+        return "fail"
+    if (res.get("Result") == 0) or res.get("_dry_run"):
+        return "ok"
+    if str(res.get("Code")) == "4001005":   # 建玉拘束 = 既に返済注文(=損切)あり
+        return "exists"
+    print(f"  ⚠ {sym} 損切逆指値の設置応答エラー: {res}")
+    return "fail"
+
+
+def _close_buy(cli, sym: str, qty: int, hold_id: str, reason: str) -> bool:
+    """信用返済成行買いで決済。close_positions=None にして send_buy に既存の返済注文
+    (=置きっぱなしの損切逆指値)を自動取消させてから買い戻す(二重返済にならない)。"""
+    try:
         res = cli.send_buy(sym, qty=qty, order_type="market",
-                           cash_margin=CASH_MARGIN_CLOSE, close_positions=cp)
+                           cash_margin=CASH_MARGIN_CLOSE, close_positions=None)
     except Exception as e:
         print(f"  ⚠ {sym} {reason} 決済失敗: {e}")
         return False
@@ -215,11 +237,10 @@ def _close_buy(cli, sym: str, qty: int, hold_id: str, reason: str) -> bool:
 
 
 def _close_moc(cli, sym: str, qty: int, hold_id: str) -> bool:
-    """引け成行(MOC)で買戻し決済。"""
-    cp = [{"HoldID": hold_id, "Qty": qty}] if hold_id else None
+    """引け成行(MOC)で買戻し決済。close_positions=None で既存の損切逆指値を自動取消。"""
     try:
         res = cli.send_moc(sym, qty=qty, side="buy",
-                           cash_margin=CASH_MARGIN_CLOSE, close_positions=cp)
+                           cash_margin=CASH_MARGIN_CLOSE, close_positions=None)
     except Exception as e:
         print(f"  ⚠ {sym} 引け成行 決済失敗: {e}")
         return False
@@ -287,10 +308,11 @@ def _run(args, close_at, today) -> int:
             _touch_lock()
             _time.sleep(30)
 
-    closed: set = set()
+    closed: set = set()        # 決済済み(このセッションで買戻した銘柄)
+    stop_placed: set = set()   # 損切の逆指値買いを建玉に設置済みの銘柄
     while True:
         now = datetime.now(JST)
-        before_open = now.time() < MARKET_START      # 寄り前は成行が通らないので発火しない
+        before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
         after_close = now.time() >= close_at
         lss_map = _load_lss_orders(today, args.all_dates)
         shorts = _lss_shorts(cli, lss_map, args.tol, closed) if lss_map else []
@@ -302,25 +324,32 @@ def _run(args, close_at, today) -> int:
                 sym, qty, hid = p["sym"], p["qty"], p["hold_id"]
                 cur = cli.get_current_price(sym)
                 _curs = f"{cur:,.0f}" if cur else "?"
+                # 引け: 損切逆指値を取消して引け成行で買戻し
                 if after_close:
                     print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行買戻し")
                     if _close_moc(cli, sym, qty, hid):
                         closed.add(sym)
                     continue
+                # ① 損切(上): 逆指値買い(信用返済)を建玉に『置きっぱなし』(1回だけ設置)。
+                #    以降は板側で自動発火するのでポーリング遅延ゼロ。発火したら建玉が消える。
+                if p["stop"] and sym not in stop_placed:
+                    _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
+                    if _r in ("ok", "exists"):
+                        stop_placed.add(sym)
+                        print(f"  [損切設置] {sym} {p['name']} 逆指値買い @≥{p['stop']:,.0f} を建玉に設置"
+                              f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
+                # ② 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
                 if cur is None or cur <= 0:
                     continue
-                if p["stop"] and cur >= p["stop"]:
-                    print(f"  [損切] {sym} {p['name']} 現在{_curs} ≥ 損切{p['stop']:,.0f} → 成行買戻し")
-                    if _close_buy(cli, sym, qty, hid, "損切"):
-                        closed.add(sym)
-                elif p["target"] and cur <= p["target"]:
-                    print(f"  [利確] {sym} {p['name']} 現在{_curs} ≤ 利確{p['target']:,.0f} → 成行買戻し")
+                if p["target"] and cur <= p["target"]:
+                    print(f"  [利確] {sym} {p['name']} 現在{_curs} ≤ 利確{p['target']:,.0f} "
+                          f"→ 損切逆指値を取消して成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "利確"):
                         closed.add(sym)
                 else:
-                    _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
-                    _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
-                    print(f"  [監視] {sym} {p['name']} 現在{_curs} (未達: {_st}/{_tg})")
+                    _st = f"損切{p['stop']:,.0f}(逆指値)" if p['stop'] else "損切-"
+                    _tg = f"利確{p['target']:,.0f}(監視)" if p['target'] else "利確-"
+                    print(f"  [監視] {sym} {p['name']} 現在{_curs} ({_st} / {_tg})")
         else:
             print(f"  {now:%H:%M:%S} 対象のlss売建なし(未約定 or 全決済済み)")
 

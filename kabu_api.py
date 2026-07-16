@@ -386,12 +386,18 @@ class KabuClient:
 
     def send_stop_buy(self, symbol: int | str, qty: int, trigger_price: float,
                       cash_margin: int = CASH_GENBUTSU,
-                      after_hit_price: float | None = None) -> dict:
-        """逆指値買いエントリー (trigger_price 以上で買い)。
+                      after_hit_price: float | None = None,
+                      close_positions: list[dict] | None = None,
+                      omit_close_positions: bool = False) -> dict:
+        """逆指値買い (trigger_price 以上で発火)。新規エントリー or 信用返済(買戻し)。
 
         逆指値シグナルの order_price をそのまま trigger_price に渡す。
         after_hit_price=None なら発火後は成行 (実運用の既定)。
         値を渡すと発火後は指値 (時間外テストなど成行が弾かれる場面で使う)。
+
+        cash_margin=CASH_MARGIN_CLOSE(3) にすると『ショートの損切(買戻し)を上に
+        置きっぱなしにする逆指値買い返済』になる(lss の日中OCOの損切側で使う)。
+        close_positions を渡すとその建玉(HoldID)を返済対象にする。
         """
         body = self._base_order(symbol, SIDE_BUY, qty, cash_margin)
         body["FrontOrderType"] = FOT_STOP
@@ -403,11 +409,25 @@ class KabuClient:
         body["ReverseLimitOrder"] = {
             "TriggerSec": TRIGGER_AFTER_ORDER,
             "TriggerPrice": round(trigger_price),
-            "UnderOver": OVER,          # 以上 (ブレイク方向)
+            "UnderOver": OVER,          # 以上 (ブレイク方向 / ショート損切=上抜けで発火)
             "AfterHitOrderType": after_type,
             "AfterHitPrice": after_price,
         }
-        return self._post_order(body, f"逆指値買い {symbol} x{qty} @≥{trigger_price:.0f}")
+        # 信用返済(ショートの損切=買戻し)の ClosePositions
+        if cash_margin == CASH_MARGIN_CLOSE and not omit_close_positions:
+            if close_positions is not None:
+                body["ClosePositions"] = close_positions
+            elif self.dry_run:
+                body["ClosePositions"] = [{"HoldID": "(実行時に自動取得)", "Qty": qty}]
+            else:
+                cp = self._build_close_positions(symbol, qty, SIDE_BUY)
+                if not cp:
+                    print(f"  ⚠ {symbol}: 返済対象の売建玉が見つかりません。逆指値買戻しをスキップ。")
+                    return {"Result": -1, "Message": "建玉なし"}
+                body["ClosePositions"] = cp
+        _kind = ("信用返済(逆指値買戻)" if cash_margin == CASH_MARGIN_CLOSE
+                 else "信用新規" if cash_margin == CASH_MARGIN_OPEN else "現物")
+        return self._post_order(body, f"逆指値買い {symbol} x{qty} @≥{trigger_price:.0f} ({_kind})")
 
     def send_buy(self, symbol: int | str, qty: int, price: float | None = None,
                  cash_margin: int = CASH_MARGIN_OPEN,
