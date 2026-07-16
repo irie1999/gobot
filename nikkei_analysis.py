@@ -2337,19 +2337,21 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             # check_signal_on_date はロング値(損切=下/目標=上/em=0)を返すので、
             # そこから ATR を逆算して lss の 損切=上 / 目標=下 / 指値下限(-3%) を作る。
             # 注文数量(qty)は long stop から算出するので stop_p/target_p は温存する。
-            _lss_stop = _lss_target = _lss_hold = _lss_exit = None
+            _lss_stop = _lss_target = _lss_hold = _lss_exit = _lss_sigprice = None
             _lss_limit = limit_p
             if _LSS_ORDER_MODE and order_p:
                 try:
-                    from backtest_limit_entry import round_to_tick as _r2t
+                    from backtest_limit_entry import round_to_tick as _r2t, tick_size as _tsz
                     _plp = mod.STRATEGY_PARAMS.get(strat)
                     _sm_long = float(_plp[2]) if _plp else 0.0
                     _stop_long = float(sig.get("stop_price", 0) or 0)
                     _atr = (order_p - _stop_long) / _sm_long if (_sm_long and _stop_long) else 0.0
-                    # トリガーは order_p(=check_signal_on_date で round_to_tick 済み=呼値に
-                    # 合った終値)をそのまま使う。kabu は無効な呼値を『下方向』に丸めてしまう
-                    # (例: 端数の3,024を送ると3,020に floor される)ので、必ず呼値に丸めた
-                    # 値を送る。損切・利確・指値下限も呼値に丸める。
+                    # order_p は round_to_tick 済み = 前日終値(呼値に合った値)。
+                    # 逆指値売りは現在値(引け後=前日終値)以上のトリガーだと即約定で弾かれる
+                    # (kabu Code 100217)。実発注は必ず「前日終値-1ティック」になるので、
+                    # 表示トリガー・損切・目標・指値下限もその値に合わせる(表示=実注文)。
+                    _lss_sigprice = order_p                        # シグナル日時株価=前日終値
+                    order_p = _r2t(order_p - _tsz(order_p))        # トリガー=前日終値-1ティック
                     if _atr > 0:
                         _lss_stop   = _r2t(order_p + _atr * _LSS_SM)   # 損切=上(価格上昇で損切)
                         _lss_target = _r2t(order_p - _atr * _LSS_TM)   # 目標=下(価格下落で利確)
@@ -2388,9 +2390,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "oos_n":        _oos_n,
                     "oos_win":      _oos_win,
                     "signal_date":  sig_dt,
-                    # lss は「シグナル日時株価」も呼値に合った終値(=トリガー order_p)を表示し、
-                    # トリガーと1円ずれて見えないようにする(生の yfinance 端数を出さない)。
-                    "signal_price": (order_p if _LSS_ORDER_MODE else sig.get("signal_price", 0)),
+                    # lss の「シグナル日時株価」は前日終値(呼値に合った値)。トリガーは
+                    # その前日終値-1ティック(即約定回避=実発注値)なので、両者は1ティック差になる。
+                    "signal_price": (_lss_sigprice if (_LSS_ORDER_MODE and _lss_sigprice) else sig.get("signal_price", 0)),
                     "order_p":      order_p,
                     "limit_p":      _lss_limit if _LSS_ORDER_MODE else limit_p,
                     "stop_p":       sig.get("stop_price",  0),
@@ -2922,9 +2924,11 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
             '<div style="margin:10px 0;padding:12px 16px;background:#1e293b;border:1px solid #38bdf8;'
             'border-radius:8px;color:#bae6fd;font-size:0.86rem;line-height:1.6">'
             '🔻 <b>このタブは lss(逆指値空売り・同日決済)です。</b><br>'
-            '🚀発注は <b>信用新規売りの逆指値</b>(トリガー=前日終値・以下で発動 / 発動後 -3%下限指値)'
-            'として order_server に送られます(side=short)。表の<b>指値下限(-3%)・損切り(上)・目標(下)・同日決済</b>は'
-            '実際の注文内容に合わせて表示しています(損切り=上/目標=下=5分足OCOの基準値)。<br>'
+            '🚀発注は <b>信用新規売りの逆指値</b>(トリガー=<b>前日終値-1ティック</b>・以下で発動 / 発動後 -3%下限指値)'
+            'として order_server に送られます(side=short)。'
+            '<b>前日終値ちょうどは kabu が即約定(Code 100217)で弾く</b>ため、実発注は必ず1ティック下になります'
+            '(=前日終値を割ったら発動)。表の<b>トリガー・指値下限・損切り(上)・目標(下)・同日決済</b>は'
+            'この実発注値に合わせて表示しています(損切り=上/目標=下=5分足OCOの基準値)。<br>'
             '<b>発注はエントリー(逆指値売り)のみ</b>で自動の損切り・利確注文は置きません。'
             '約定したら<b>その日の引けに買戻し</b>で決済します — '
             '<code>python close_lss_guard.py --execute</code> を引け前(14:50頃)に実行すると自動で引け成行買戻しします'
