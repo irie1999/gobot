@@ -225,9 +225,6 @@ def main() -> int:
                     help="逆指値発動後の下限ガード率。-この%%超の窓開けは約定させない (既定 0.03=3%%)")
     ap.add_argument("--no-gap-guard", action="store_true",
                     help="下限ガードを外す (発動後は成行)")
-    ap.add_argument("--intraday", action="store_true",
-                    help="場中発注用: 現在値≤トリガーなら現在値-1ティックに引き下げ即約定を回避"
-                         "(既定OFF=引け後運用でトリガー=終値のまま)")
     ap.add_argument("--aggressive", action="store_true", help="aggressive モード")
     ap.add_argument("--conservative", action="store_true", help="conservative モード (既定)")
     args = ap.parse_args()
@@ -302,18 +299,22 @@ def main() -> int:
         from backtest_limit_entry import tick_size, round_to_tick
         trig = round_to_tick(order_p)
         adj_note = ""
-        # 【既定=引け後運用】トリガー=終値のまま。場中に発注して現在値≤トリガーだと
-        # 即約定で弾かれる(kabu Code 100217)が、引け後発注では起きないので何もしない。
-        # 場中に発注する場合のみ --intraday を付けると、現在値-1ティックに引き下げて
-        # 即約定弾きを回避する(その分トリガーは終値からずれる)。
-        if args.execute and getattr(args, "intraday", False):
+        # 【即約定回避・必須】逆指値売りはトリガーが現在値以上だと「即座に市場に発注」で
+        # 弾かれる(kabu Code 100217)。引け後は現在値=前日終値なので、終値ちょうどの
+        # トリガーは必ず弾かれる → 現在値-1ティックに引き下げる。現在値が取れない場合も
+        # 弾き回避のため1ティック下げる(引け後は現値=終値のため)。
+        if args.execute:
             try:
                 cur = cli.get_current_price(sym)
             except Exception:
                 cur = None
-            if cur and cur > 0 and trig >= cur:
-                trig = round_to_tick(cur - tick_size(cur))
-                adj_note = f" ※現値{cur:,.0f}≦トリガー→{trig:,.0f}に引下げ(--intraday)"
+            if cur and cur > 0:
+                if trig >= cur:
+                    trig = round_to_tick(cur - tick_size(cur))
+                    adj_note = f" ※現値{cur:,.0f}≧トリガー→{trig:,.0f}に引下げ"
+            else:
+                trig = round_to_tick(trig - tick_size(trig))
+                adj_note = f" ※現値不明→{trig:,.0f}に1ティック引下げ"
         # 発動後の指値下限(-3%)も呼値に丸める(端数だと kabu が下方向に丸めるため)。
         after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
         guard_label = "成行" if after is None else f"下限¥{after:,.0f}(-{args.gap_guard*100:.0f}%)"

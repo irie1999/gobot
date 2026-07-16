@@ -34,8 +34,6 @@ JST = timezone(timedelta(hours=9))
 EXECUTE  = False   # True なら実発注。False なら dry-run (接続なし・内容のみ)
 PROD     = False   # True なら本番(18080)。False ならデモ(18081)
 GENBUTSU = False   # True ならロングを現物で発注。False(既定) ならロングも信用新規
-TICK_ADJUST = False  # True なら場中の即約定回避(現在値±1ティック調整)を行う。
-                     # False(既定=引け後運用) ならトリガー=終値のまま(調整しない)。
 
 # ── 約定監視 (エントリー約定 → 利確指値を即発注) ──────────────────────
 POLL_SEC = 10                    # 約定チェック間隔(秒)
@@ -104,22 +102,36 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     except Exception:
         pass
 
-    # ── 場中の即約定回避 (--intraday-tick 指定時のみ) ──
+    # ── 即約定回避 (必須) ──
     # 逆指値買いはトリガーが現在値より上、逆指値売りは現在値より下でないと
-    # 「即約定になる」と弾かれる(kabu Code 100217)。場中に発注する場合だけ、
-    # 現値±1ティックに調整する。既定(引け後運用)は調整せずトリガー=終値のまま。
+    # 「即座に市場に発注されてしまう」と弾かれる(kabu Code 100217)。引け後は
+    # 現在値=前日終値なので、ショートのトリガーを終値ちょうどにすると必ず弾かれる。
+    # → 現在値以上(買いは以下)なら現値±1ティックに調整する。現在値が取れない場合も
+    #   即約定弾きを避けるため 1ティック ずらしておく(引け後は現値=終値のため)。
     adj_note = ""
-    if EXECUTE and TICK_ADJUST:
+    if EXECUTE:
         cur = cli.get_current_price(symbol)
         if cur and cur > 0:
             tick = tick_size(cur)
             if side == "long" and entry <= cur:
                 new = round_to_tick(cur + tick)
-                adj_note = f" ※現値{cur:,.0f}≧逆指値→{new:,.0f}に引上げ"
+                adj_note = f" ※現値{cur:,.0f}≦逆指値→{new:,.0f}に引上げ"
                 entry = new
             elif side == "short" and entry >= cur:
                 new = round_to_tick(cur - tick)
-                adj_note = f" ※現値{cur:,.0f}≦逆指値→{new:,.0f}に引下げ"
+                adj_note = f" ※現値{cur:,.0f}≧逆指値→{new:,.0f}に引下げ"
+                entry = new
+        else:
+            # 現在値が取れない(引け後で板が価格を返さない等)。トリガー=終値のままだと
+            # kabu が即約定(Code 100217)で弾くので、1ティック ずらす。
+            t = tick_size(entry)
+            if side == "short":
+                new = round_to_tick(entry - t)
+                adj_note = f" ※現値不明→{new:,.0f}に1ティック引下げ"
+                entry = new
+            elif side == "long":
+                new = round_to_tick(entry + t)
+                adj_note = f" ※現値不明→{new:,.0f}に1ティック引上げ"
                 entry = new
 
     # 逆指値付き指値: 発火後は指値で約定（ロング:+3%上限 / ショート:-3%下限）。
@@ -759,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global EXECUTE, PROD, GENBUTSU, PORT, TICK_ADJUST
+    global EXECUTE, PROD, GENBUTSU, PORT
     ap = argparse.ArgumentParser(description="シグナルレポート発注専用サーバ")
     ap.add_argument("--execute", action="store_true",
                     help="kabu に実発注する (未指定なら dry-run)")
@@ -767,14 +779,10 @@ def main():
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
     ap.add_argument("--genbutsu", action="store_true",
                     help="ロングを現物で発注 (未指定なら信用新規)")
-    ap.add_argument("--intraday-tick", action="store_true",
-                    help="場中発注用: 現在値±1ティック調整で即約定を回避 "
-                         "(既定OFF=引け後運用でトリガー=終値のまま)")
     ap.add_argument("--port", type=int, default=PORT,
                     help=f"待受ポート (既定 {PORT})")
     args = ap.parse_args()
     EXECUTE, PROD, GENBUTSU, PORT = args.execute, args.prod, args.genbutsu, args.port
-    TICK_ADJUST = args.intraday_tick
 
     arm = "⚠実発注" if EXECUTE else "dry-run (接続なし・内容のみ)"
     env = "本番(18080)" if PROD else "デモ(18081)"
@@ -791,8 +799,7 @@ def main():
         return
     print(f"🚀 発注サーバを起動しました → http://{HOST}:{PORT}/order")
     print(f"   モード: {arm} / 接続先 {env} / ロング{'現物' if GENBUTSU else '信用新規'}")
-    print(f"   トリガー: 呼値に丸めて送信 / 1ティック調整: "
-          f"{'ON(場中・--intraday-tick)' if TICK_ADJUST else 'OFF(引け後=終値のまま)'}")
+    print(f"   トリガー: 呼値に丸め + 即約定回避(現値以上のショートは現値-1ティック)")
     print(f"   レポートの🚀発注ボタンがここに発注リクエストを送ります")
     if EXECUTE:
         threading.Thread(target=_watch_loop, daemon=True).start()
