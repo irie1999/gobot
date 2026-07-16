@@ -15,6 +15,7 @@ echo. >> lss_watcher.log
 echo ==== %date% %time% START ==== >> lss_watcher.log
 
 REM Live account, real settlement. The script waits/retries if kabu is not logged in yet.
-python lss_exit_watcher.py --execute --prod >> lss_watcher.log 2>&1
+REM -u = unbuffered output, so lss_watcher.log updates live (not buffered).
+python -u lss_exit_watcher.py --execute --prod >> lss_watcher.log 2>&1
 
 echo ==== %date% %time% END ==== >> lss_watcher.log
