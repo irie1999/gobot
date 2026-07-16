@@ -2345,6 +2345,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     _sm_long = float(_plp[2]) if _plp else 0.0
                     _stop_long = float(sig.get("stop_price", 0) or 0)
                     _atr = (order_p - _stop_long) / _sm_long if (_sm_long and _stop_long) else 0.0
+                    # トリガーは終値そのものにする。order_price は round_to_tick を通っており、
+                    # 呼値テーブルが TOPIX100(実際は1円刻み)を5円刻みと誤判定して粗く丸める
+                    # (例: 終値3,024 → 3,025)。実発注(kabu_send_lss=round(close))と一致させるため、
+                    # signal_price(=round(close_prev,0)=終値)をトリガーに採用する。
+                    _close = float(sig.get("signal_price", 0) or 0)
+                    if _close > 0:
+                        order_p = _close
                     if _atr > 0:
                         _lss_stop   = order_p + _atr * _LSS_SM   # 損切=上(価格上昇で損切)
                         _lss_target = order_p - _atr * _LSS_TM   # 目標=下(価格下落で利確)
