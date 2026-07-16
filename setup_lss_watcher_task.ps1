@@ -1,63 +1,57 @@
 # ============================================================
 # setup_lss_watcher_task.ps1
-#   lss 日中OCO決済ウォッチャーを Windows タスクスケジューラに登録する。
+#   Register the lss intraday OCO exit watcher as a Windows Scheduled Task.
 #
-#   - 毎日 8:45 に run_lss_watcher.bat を起動
-#   - StartWhenAvailable: その時刻にPCが起動していなくても、
-#     次にPCを起動/ログオンしたタイミングで(起動漏れ分を)自動実行
-#   - ログオン時トリガーも追加(念のため二重の保険)
-#   - 多重起動は BAT/スクリプト側の lock で防止(重複しても1つだけ動く)
+#   - Runs run_lss_watcher.bat every day at 8:45
+#   - StartWhenAvailable: if the PC is off at 8:45, it runs the missed
+#     instance the next time the PC starts / you log on
+#   - Also adds an AtLogOn trigger as a safety net
+#   - Duplicate launches are prevented by a lock inside the watcher
+#     (even if triggered twice, only one instance actually runs)
 #
-#   使い方(このファイルを右クリック →「PowerShell で実行」、または):
+#   Run (right-click -> Run with PowerShell, or):
 #     powershell -ExecutionPolicy Bypass -File setup_lss_watcher_task.ps1
 #
-#   解除したいとき:
+#   Remove:
 #     Unregister-ScheduledTask -TaskName "LSS Exit Watcher" -Confirm:$false
+#
+#   NOTE: This file is intentionally ASCII-only. Windows PowerShell 5.1
+#   reads .ps1 as the system ANSI codepage (Shift-JIS) unless there is a
+#   UTF-8 BOM, so non-ASCII text would break parsing.
 # ============================================================
 
 $ErrorActionPreference = "Stop"
 
-# このスクリプトが置かれているフォルダ(=swingtrade)
+# Folder that contains this script (= swingtrade)
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bat = Join-Path $dir "run_lss_watcher.bat"
 
 if (-not (Test-Path $bat)) {
-    Write-Host "✗ run_lss_watcher.bat が見つかりません: $bat" -ForegroundColor Red
-    Write-Host "  このスクリプトを swingtrade フォルダに置いて実行してください。"
+    Write-Host "[X] run_lss_watcher.bat not found: $bat" -ForegroundColor Red
+    Write-Host "    Put this script in the swingtrade folder and run again."
     exit 1
 }
 
 $taskName = "LSS Exit Watcher"
 
-# 実行内容: run_lss_watcher.bat を swingtrade フォルダで起動
-$action = New-ScheduledTaskAction -Execute "cmd.exe" `
-    -Argument "/c `"$bat`"" -WorkingDirectory $dir
+# Action: launch run_lss_watcher.bat in the swingtrade folder
+$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$bat`"" -WorkingDirectory $dir
 
-# トリガー: 毎日 8:45 + ログオン時
+# Triggers: daily at 8:45 + at logon
 $trigDaily = New-ScheduledTaskTrigger -Daily -At 8:45AM
 $trigLogon = New-ScheduledTaskTrigger -AtLogOn
 
-# 設定: 起動漏れは可能になり次第実行 / 多重起動は新規を無視 / 実行時間上限8時間
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries
+# Settings: run missed starts when available, ignore new if already running, 8h limit
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 8) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
-# 現在のユーザーで登録(kabuステーションはユーザーセッションが必要なため対話ユーザーで実行)
-Register-ScheduledTask -TaskName $taskName `
-    -Action $action `
-    -Trigger @($trigDaily, $trigLogon) `
-    -Settings $settings `
-    -Description "lss(逆指値空売り・同日決済)の日中OCO決済ウォッチャーを毎営業日8:45に起動" `
-    -Force | Out-Null
+# Register for the current interactive user (kabu station needs a user session)
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigDaily, $trigLogon) -Settings $settings -Description "lss intraday OCO exit watcher - launched every trading day at 8:45" -Force | Out-Null
 
-Write-Host "✓ タスク登録完了: `"$taskName`"" -ForegroundColor Green
-Write-Host "  - 毎日 8:45 に $bat を起動"
-Write-Host "  - PCが8:45にオフでも、次回起動/ログオン時に自動実行(StartWhenAvailable)"
-Write-Host "  - 多重起動は lock で防止(重複しても1つだけ動作)"
+Write-Host "[OK] Scheduled task registered: $taskName" -ForegroundColor Green
+Write-Host "     - Runs $bat every day at 8:45"
+Write-Host "     - If PC is off at 8:45, runs at next start/logon (StartWhenAvailable)"
+Write-Host "     - Duplicate launches blocked by lock (only one instance runs)"
 Write-Host ""
-Write-Host "確認:   Get-ScheduledTask -TaskName `"$taskName`""
-Write-Host "手動実行: Start-ScheduledTask -TaskName `"$taskName`""
-Write-Host "解除:   Unregister-ScheduledTask -TaskName `"$taskName`" -Confirm:`$false"
+Write-Host "Check:   Get-ScheduledTask -TaskName '$taskName'"
+Write-Host "Run now: Start-ScheduledTask -TaskName '$taskName'"
+Write-Host "Remove:  Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
