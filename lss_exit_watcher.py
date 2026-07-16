@@ -52,6 +52,7 @@ from kabu_api import KabuClient, CASH_MARGIN_CLOSE
 
 JST = timezone(timedelta(hours=9))
 _BASE = Path(__file__).resolve().parent
+MARKET_START = dtime(9, 0)    # 寄り(東証)。これより前は成行が通らないので発火しない
 MARKET_END = dtime(15, 0)     # 大引け(東証)。これを過ぎたらループ終了
 
 # ── 多重起動防止(タスクスケジューラの重複起動・手動起動が重なっても1つだけ動かす) ──
@@ -289,11 +290,14 @@ def _run(args, close_at, today) -> int:
     closed: set = set()
     while True:
         now = datetime.now(JST)
+        before_open = now.time() < MARKET_START      # 寄り前は成行が通らないので発火しない
         after_close = now.time() >= close_at
         lss_map = _load_lss_orders(today, args.all_dates)
         shorts = _lss_shorts(cli, lss_map, args.tol, closed) if lss_map else []
 
-        if shorts:
+        if shorts and before_open:
+            print(f"  {now:%H:%M:%S} 寄り前(9:00前): lss売建 {len(shorts)}件を待機中(発火なし)")
+        elif shorts:
             for p in shorts:
                 sym, qty, hid = p["sym"], p["qty"], p["hold_id"]
                 cur = cli.get_current_price(sym)
