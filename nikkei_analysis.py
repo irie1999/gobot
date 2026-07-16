@@ -2341,21 +2341,19 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             _lss_limit = limit_p
             if _LSS_ORDER_MODE and order_p:
                 try:
+                    from backtest_limit_entry import round_to_tick as _r2t
                     _plp = mod.STRATEGY_PARAMS.get(strat)
                     _sm_long = float(_plp[2]) if _plp else 0.0
                     _stop_long = float(sig.get("stop_price", 0) or 0)
                     _atr = (order_p - _stop_long) / _sm_long if (_sm_long and _stop_long) else 0.0
-                    # トリガーは終値そのものにする。order_price は round_to_tick を通っており、
-                    # 呼値テーブルが TOPIX100(実際は1円刻み)を5円刻みと誤判定して粗く丸める
-                    # (例: 終値3,024 → 3,025)。実発注(kabu_send_lss=round(close))と一致させるため、
-                    # signal_price(=round(close_prev,0)=終値)をトリガーに採用する。
-                    _close = float(sig.get("signal_price", 0) or 0)
-                    if _close > 0:
-                        order_p = _close
+                    # トリガーは order_p(=check_signal_on_date で round_to_tick 済み=呼値に
+                    # 合った終値)をそのまま使う。kabu は無効な呼値を『下方向』に丸めてしまう
+                    # (例: 端数の3,024を送ると3,020に floor される)ので、必ず呼値に丸めた
+                    # 値を送る。損切・利確・指値下限も呼値に丸める。
                     if _atr > 0:
-                        _lss_stop   = order_p + _atr * _LSS_SM   # 損切=上(価格上昇で損切)
-                        _lss_target = order_p - _atr * _LSS_TM   # 目標=下(価格下落で利確)
-                    _lss_limit = round(order_p * (1.0 - 0.03))   # 発動後の指値下限(-3%)
+                        _lss_stop   = _r2t(order_p + _atr * _LSS_SM)   # 損切=上(価格上昇で損切)
+                        _lss_target = _r2t(order_p - _atr * _LSS_TM)   # 目標=下(価格下落で利確)
+                    _lss_limit = _r2t(order_p * (1.0 - 0.03))          # 発動後の指値下限(-3%)
                     _lss_hold  = "同日"                          # 同日決済(max_hold=0)
                     try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
                         _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
@@ -2390,7 +2388,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "oos_n":        _oos_n,
                     "oos_win":      _oos_win,
                     "signal_date":  sig_dt,
-                    "signal_price": sig.get("signal_price", 0),
+                    # lss は「シグナル日時株価」も呼値に合った終値(=トリガー order_p)を表示し、
+                    # トリガーと1円ずれて見えないようにする(生の yfinance 端数を出さない)。
+                    "signal_price": (order_p if _LSS_ORDER_MODE else sig.get("signal_price", 0)),
                     "order_p":      order_p,
                     "limit_p":      _lss_limit if _LSS_ORDER_MODE else limit_p,
                     "stop_p":       sig.get("stop_price",  0),

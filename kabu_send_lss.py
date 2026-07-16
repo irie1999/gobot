@@ -293,21 +293,25 @@ def main() -> int:
     for s in signals:
         sym, name = str(s["symbol"]).split(".")[0], s["name"]   # kabuは数値コード(.T無し)
         order_p, stop_p, tgt_p = s["order_price"], s["stop_price"], s["target_price"]
-        # 逆指値売りはトリガーが現在値『以上』だと即約定扱いで弾かれる(kabu Code 100217)。
-        # 今発注する時点で株価が前日終値(=トリガー)以下なら、現在値-1ティックに引き下げる
-        # (ロングの逆指値買いが現在値+1ティックに引き上げるのと対称)。order_server と同挙動。
-        trig = order_p
+        # トリガーは呼値(ティック)に丸めて送る。kabu は無効な呼値を『下方向』に floor する
+        # (例: 端数の3,024を送ると3,020に丸められる)ため、必ず最寄りの有効呼値に丸める
+        # (資生堂4911の終値3,024.x → round_to_tick 3,025 = 実際の終値)。
+        from backtest_limit_entry import tick_size, round_to_tick
+        trig = round_to_tick(order_p)
         adj_note = ""
         if args.execute:
+            # 逆指値売りはトリガーが現在値『以上』だと即約定扱いで弾かれる(kabu Code 100217)。
+            # 今発注する時点で株価が前日終値(=トリガー)以下なら、現在値-1ティックに引き下げる
+            # (ロングの逆指値買いが現在値+1ティックに引き上げるのと対称)。order_server と同挙動。
             try:
                 cur = cli.get_current_price(sym)
             except Exception:
                 cur = None
             if cur and cur > 0 and trig >= cur:
-                from backtest_limit_entry import tick_size, round_to_tick
                 trig = round_to_tick(cur - tick_size(cur))
                 adj_note = f" ※現値{cur:,.0f}≦トリガー→{trig:,.0f}に引下げ"
-        after = None if args.no_gap_guard else trig * (1.0 - args.gap_guard)
+        # 発動後の指値下限(-3%)も呼値に丸める(端数だと kabu が下方向に丸めるため)。
+        after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
         guard_label = "成行" if after is None else f"下限¥{after:,.0f}(-{args.gap_guard*100:.0f}%)"
         print(f"・{sym} {name} [{s['strategy']}] 新規売り逆指値 "
               f"@≤{trig:,.0f}{adj_note}  損切¥{stop_p:,.0f} / 利確¥{tgt_p:,.0f} / 発動後{guard_label}")
