@@ -260,6 +260,8 @@ def main() -> int:
                     help="引け成行に切替える時刻 HH:MM (既定 14:55)")
     ap.add_argument("--tol", type=float, default=0.08,
                     help="建玉の平均約定値とlss発注価格の一致許容(既定0.08=±8%%)")
+    ap.add_argument("--margin-type", type=int, default=3,
+                    help="信用取引区分(建玉と一致必須) 1=制度 / 2=一般(長期) / 3=一般(デイトレ)。既定3")
     ap.add_argument("--all-dates", action="store_true",
                     help="今日以外の日付で発注したlss建玉も対象にする")
     ap.add_argument("--once", action="store_true",
@@ -290,7 +292,10 @@ def main() -> int:
 
 
 def _run(args, close_at, today) -> int:
-    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    # 返済は建玉と同じ信用区分でないと通らない。lssエントリーは一般信用デイトレ(3)
+    # で建てるので、決済(買戻し)も 3 に合わせる。--margin-type で上書き可。
+    cli = KabuClient(prod=args.prod, dry_run=not args.execute,
+                     margin_type=args.margin_type)
     # kabuステーション未ログインでも待機して再接続を試みる(後でログインするケースに対応)。
     # 実運用(--execute)は大引けまで30秒ごとにリトライ。dry-run/--once は1回だけ。
     while True:

@@ -85,9 +85,14 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     # 既定は信用新規(2)。ロングで --genbutsu 指定時のみ現物(1)。ショートは常に信用。
     cash_margin = 1 if (side == "long" and GENBUTSU) else 2
 
+    # lss(同日決済ショート = side=short かつ 戦略が *_S でない)は一般信用デイトレ(3)で売る。
+    # 制度信用(1)の空売りは貸借銘柄限定で、非貸借銘柄(例4662)は MarginTradeType不正で弾かれる。
+    _is_lss = (side == "short" and not str(strat).upper().endswith("_S"))
+    _margin_type = 3 if _is_lss else 1
+
     try:
         from kabu_api import KabuClient
-        cli = KabuClient(prod=PROD, dry_run=not EXECUTE)
+        cli = KabuClient(prod=PROD, dry_run=not EXECUTE, margin_type=_margin_type)
         if EXECUTE:                 # dry-run は接続不要 (内容プレビューのみ)
             cli.connect()
     except Exception as e:
@@ -162,10 +167,8 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     ok = (res.get("Result") == 0) or res.get("_dry_run")
     if ok:
         watch_note = ""
-        # lss(同日決済ショート = side=short かつ 戦略が *_S でない)は自動利確を置かない。
-        # 日中の利確(下)・損切(上)は lss_exit_watcher.py が価格監視して成行で決済する
-        # (resting利確を置くとポーリング決済と二重管理になり建玉拘束の原因になる)。
-        _is_lss = (side == "short" and not str(strat).upper().endswith("_S"))
+        # lss(_is_lss は上で判定済み)は自動利確を置かない。日中の利確(下)・損切(上)は
+        # lss_exit_watcher.py が監視して決済する(resting利確を置くと二重管理・建玉拘束の元)。
         if EXECUTE and target and target > 0 and not _is_lss:
             with _pending_lock:
                 _pending.append({"symbol": symbol, "side": side, "qty": qty,

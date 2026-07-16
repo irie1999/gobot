@@ -225,6 +225,9 @@ def main() -> int:
                     help="逆指値発動後の下限ガード率。-この%%超の窓開けは約定させない (既定 0.03=3%%)")
     ap.add_argument("--no-gap-guard", action="store_true",
                     help="下限ガードを外す (発動後は成行)")
+    ap.add_argument("--margin-type", type=int, default=3,
+                    help="信用取引区分 1=制度 / 2=一般(長期) / 3=一般(デイトレ)。"
+                         "lssは同日決済+非貸借銘柄も売るため既定3(デイトレ)")
     ap.add_argument("--aggressive", action="store_true", help="aggressive モード")
     ap.add_argument("--conservative", action="store_true", help="conservative モード (既定)")
     args = ap.parse_args()
@@ -281,7 +284,10 @@ def main() -> int:
 
     print(f"発注対象シグナル: {len(signals)} 件\n")
 
-    cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+    # lss は一般信用デイトレ(3)で売る。制度信用(1)の空売りは貸借銘柄限定で、
+    # 非貸借銘柄(例4662)は MarginTradeType不正で弾かれるため。--margin-type で上書き可。
+    cli = KabuClient(prod=args.prod, dry_run=not args.execute,
+                     margin_type=args.margin_type)
     if args.execute:
         try:
             cli.connect()

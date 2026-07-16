@@ -88,7 +88,8 @@ class KabuClient:
 
     def __init__(self, prod: bool = False, dry_run: bool = True,
                  password: str | None = None, timeout: float = 10.0,
-                 order_exchange: int = EXCHANGE_SOR):
+                 order_exchange: int = EXCHANGE_SOR,
+                 margin_type: int = 1):
         """
         Parameters
         ----------
@@ -109,6 +110,10 @@ class KabuClient:
         self.base_url = PROD_URL if prod else DEMO_URL
         self.timeout = timeout
         self.order_exchange = order_exchange   # 発注の市場コード (9=SOR / 27=東証＋)
+        # 信用取引区分: 1=制度信用 / 2=一般信用(長期) / 3=一般信用(デイトレ)。
+        # 制度信用の空売りは貸借銘柄限定。lss(同日決済ショート)は非貸借銘柄も売れるよう
+        # 一般信用デイトレ(3)を使う(kabu_send_lss / order_server の lss / lss_exit_watcher)。
+        self.margin_trade_type = margin_type
         self._password = password or self._password_from_env(prod)
         self._token: str | None = None
         self._registered: set[tuple[str, int]] = set()  # /board 用 銘柄登録済み
@@ -376,7 +381,9 @@ class KabuClient:
                 body["FundType"] = "  "  # 現物売は半角スペース2つ
         else:
             # 信用新規(2) / 信用返済(3) 共通
-            body["MarginTradeType"] = 1   # 制度信用
+            # 制度信用(1)は空売りが貸借銘柄限定。非貸借銘柄も売る lss は一般信用
+            # デイトレ(3)を self.margin_trade_type で指定する。
+            body["MarginTradeType"] = self.margin_trade_type
             if cash_margin == CASH_MARGIN_OPEN:
                 body["DelivType"] = 0     # 信用新規: 指定なし
                 body["FundType"] = "11"   # 信用新規のみ FundType 必要
