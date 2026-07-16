@@ -778,9 +778,21 @@ def main():
 
     arm = "⚠実発注" if EXECUTE else "dry-run (接続なし・内容のみ)"
     env = "本番(18080)" if PROD else "デモ(18081)"
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        print("=" * 64)
+        print(f"✗ ポート {PORT} を確保できません ({e})")
+        print(f"  → 別の(古い)order_server が既に {PORT} で動いています。")
+        print(f"    そのままだと発注ボタンは『古い版』に繋がります(修正が反映されません)。")
+        print(f"    古い order_server / run_signals_holdout_all を全て停止(Ctrl+C・")
+        print(f"    ターミナルを閉じる)してから、もう一度起動してください。")
+        print("=" * 64)
+        return
     print(f"🚀 発注サーバを起動しました → http://{HOST}:{PORT}/order")
     print(f"   モード: {arm} / 接続先 {env} / ロング{'現物' if GENBUTSU else '信用新規'}")
+    print(f"   トリガー: 呼値に丸めて送信 / 1ティック調整: "
+          f"{'ON(場中・--intraday-tick)' if TICK_ADJUST else 'OFF(引け後=終値のまま)'}")
     print(f"   レポートの🚀発注ボタンがここに発注リクエストを送ります")
     if EXECUTE:
         threading.Thread(target=_watch_loop, daemon=True).start()
