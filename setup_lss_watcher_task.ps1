@@ -22,6 +22,26 @@
 
 $ErrorActionPreference = "Stop"
 
+# Registering a scheduled task in the root folder needs Administrator rights.
+# The TASK still RUNS as your normal user (so kabu station session is fine);
+# only the one-time REGISTRATION needs elevation.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "[X] Administrator rights are required to register the task (Access denied 0x80070005)." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "    How to fix:" -ForegroundColor Yellow
+    Write-Host "      1) Press Start, type 'PowerShell'"
+    Write-Host "      2) Right-click 'Windows PowerShell' -> 'Run as administrator'"
+    Write-Host "      3) In the admin window, cd to this folder, e.g.:"
+    Write-Host "           cd `"$($MyInvocation.MyCommand.Definition | Split-Path -Parent)`""
+    Write-Host "      4) Run again:"
+    Write-Host "           powershell -ExecutionPolicy Bypass -File setup_lss_watcher_task.ps1"
+    Write-Host ""
+    Write-Host "    (The scheduled task itself will run as your normal user, not as admin,"
+    Write-Host "     so the kabu station login/session works as usual.)"
+    exit 1
+}
+
 # Folder that contains this script (= swingtrade)
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bat = Join-Path $dir "run_lss_watcher.bat"
