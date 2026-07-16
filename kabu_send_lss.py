@@ -289,11 +289,25 @@ def main() -> int:
     for s in signals:
         sym, name = s["symbol"], s["name"]
         order_p, stop_p, tgt_p = s["order_price"], s["stop_price"], s["target_price"]
-        after = None if args.no_gap_guard else order_p * (1.0 - args.gap_guard)
+        # 逆指値売りはトリガーが現在値『以上』だと即約定扱いで弾かれる(kabu Code 100217)。
+        # 今発注する時点で株価が前日終値(=トリガー)以下なら、現在値-1ティックに引き下げる
+        # (ロングの逆指値買いが現在値+1ティックに引き上げるのと対称)。order_server と同挙動。
+        trig = order_p
+        adj_note = ""
+        if args.execute:
+            try:
+                cur = cli.get_current_price(sym)
+            except Exception:
+                cur = None
+            if cur and cur > 0 and trig >= cur:
+                from backtest_limit_entry import tick_size, round_to_tick
+                trig = round_to_tick(cur - tick_size(cur))
+                adj_note = f" ※現値{cur:,.0f}≦トリガー→{trig:,.0f}に引下げ"
+        after = None if args.no_gap_guard else trig * (1.0 - args.gap_guard)
         guard_label = "成行" if after is None else f"下限¥{after:,.0f}(-{args.gap_guard*100:.0f}%)"
         print(f"・{sym} {name} [{s['strategy']}] 新規売り逆指値 "
-              f"@≤{order_p:,.0f}  損切¥{stop_p:,.0f} / 利確¥{tgt_p:,.0f} / 発動後{guard_label}")
-        res = cli.send_stop_sell(sym, qty=args.qty, trigger_price=order_p,
+              f"@≤{trig:,.0f}{adj_note}  損切¥{stop_p:,.0f} / 利確¥{tgt_p:,.0f} / 発動後{guard_label}")
+        res = cli.send_stop_sell(sym, qty=args.qty, trigger_price=trig,
                                  cash_margin=CASH_MARGIN_OPEN,
                                  after_hit_price=after)
         if res.get("Result") == 0:
