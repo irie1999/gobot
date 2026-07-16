@@ -2845,12 +2845,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         max_exit = str(s["max_exit"]) if s.get("max_exit") else "—"
         # 📥 登録 / 🚀 発注ボタン: position_server (8765) と連携
         # lss タブ(_LSS_ORDER_MODE)は『信用新規売りの逆指値』として side=short で送る。
-        # トリガー(order_p)は em=0.0 → 前日終値ちょうど = lss の売りトリガーと一致。
-        # lss は同日決済なので自動利確(target)は付けない(=0)。同日引けに買戻し。
+        # lss は同日決済。利確(下)・損切(上)は placed_orders に記録され、日中は
+        # lss_exit_watcher.py が価格監視して先着で成行決済する(order_server 側は
+        # lss には自動利確を置かない=ポーリングと二重にしない)。
         _side   = "short" if (str(s["strategy"]).upper().endswith("_S") or _LSS_ORDER_MODE) else "long"
-        _ord_target = 0 if _LSS_ORDER_MODE else s['target_p']
-        # lss は損切=上(空売り)。発注ログ用の stop も実際の値に合わせる(cosmetic)。
-        _ord_stop = (s.get("lss_stop") or s['stop_p']) if _is_lss_row else s['stop_p']
+        # lss は損切=上/利確=下(空売り)。発注ログ(placed_orders)に実際の値を記録する。
+        _ord_target = (s.get("lss_target") or s['target_p']) if _is_lss_row else s['target_p']
+        _ord_stop   = (s.get("lss_stop") or s['stop_p']) if _is_lss_row else s['stop_p']
         _scode  = str(s["symbol"]).split(".")[0]
         _reg_url = (f"http://127.0.0.1:8765/?prefill=1"
                     f"&symbol={_scode}"

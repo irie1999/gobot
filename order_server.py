@@ -162,11 +162,17 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     ok = (res.get("Result") == 0) or res.get("_dry_run")
     if ok:
         watch_note = ""
-        if EXECUTE and target and target > 0:
+        # lss(同日決済ショート = side=short かつ 戦略が *_S でない)は自動利確を置かない。
+        # 日中の利確(下)・損切(上)は lss_exit_watcher.py が価格監視して成行で決済する
+        # (resting利確を置くとポーリング決済と二重管理になり建玉拘束の原因になる)。
+        _is_lss = (side == "short" and not str(strat).upper().endswith("_S"))
+        if EXECUTE and target and target > 0 and not _is_lss:
             with _pending_lock:
                 _pending.append({"symbol": symbol, "side": side, "qty": qty,
                                  "target": float(target), "strategy": strat})
             watch_note = f" / 約定したら利確@{float(target):,.0f}を自動発注(監視中)"
+        elif _is_lss:
+            watch_note = " / lss決済は lss_exit_watcher.py が監視(利確下・損切上・先着で成行)"
         if EXECUTE:
             _log_placed_order({
                 "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
@@ -606,6 +612,10 @@ def _backfill_targets(cli) -> None:
 
         # 約定値マッチで固定目標を引き当て(建玉ごとに別々の値になる)
         _stop, _tgt, _strat, _d, _bt = _cst(sym, side, fill_price=_fp)
+        # lss(同日決済ショート = 売建 かつ 戦略が *_S でない)は resting 利確を置かない。
+        # 日中決済は lss_exit_watcher.py がポーリングで行うため、ここでは触らない。
+        if side == "short" and not str(_strat or "").upper().endswith("_S"):
+            continue
         _src = "記録(約定値マッチ)"
         if (not _tgt or _tgt <= 0) and _lookup is not None and _fp > 0:
             try:
