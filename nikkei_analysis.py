@@ -185,6 +185,11 @@ except Exception:
 # _tab5_pnl_html の日経トレンド別成績テーブルでの表示順・凡例切替に使用。
 _IS_SHORT_MODE: bool = False
 
+# mirror/lss (ロング銘柄を空売りで評価する分析専用モード) のとき True。
+# シグナルタブの発注ボタンはロング逆指値買いの値を送るため、このモードでは
+# 発注を無効化して誤発注を防ぐ(実発注は逆指値空売りの専用フローが必要)。
+_ANALYSIS_ONLY: bool = False
+
 # ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
 # strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
 _short = None
@@ -2802,7 +2807,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
                      f'white-space:nowrap">📥 登録</a>')
-        _reg_btn = f'<div style="display:flex;flex-direction:column;gap:2px;align-items:center">{_ord_btn}{_reg_link}</div>'
+        if _ANALYSIS_ONLY:
+            # mirror/lss: 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
+            # 分析専用なので無効化し、注意書きに置き換える。実発注は逆指値空売りの専用フローで。
+            _reg_btn = ('<div style="text-align:center;color:#f87171;font-size:0.7rem;'
+                        'line-height:1.3">🚫 発注不可<br><span style="color:#94a3b8">分析専用'
+                        '<br>(値はロング)</span></div>')
+        else:
+            _reg_btn = (f'<div style="display:flex;flex-direction:column;gap:2px;'
+                        f'align-items:center">{_ord_btn}{_reg_link}</div>')
         rows += f"""<tr>
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -2839,8 +2852,17 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
 }
 </script>
 """
+    _analysis_warn = ("" if not _ANALYSIS_ONLY else
+        '<div style="margin:10px 0;padding:12px 16px;background:#3f1d1d;border:1px solid #b91c1c;'
+        'border-radius:8px;color:#fecaca;font-size:0.86rem;line-height:1.6">'
+        '🚫 <b>この画面から発注しないでください（分析専用）。</b><br>'
+        'このタブは <b>ロング銘柄ショート(逆指値空売り・同日決済)</b> の検証ですが、'
+        '下表の逆指値・損切り・目標・保有日数は<b>ロング逆指値買いの値</b>のまま表示されています'
+        '（損切り=下/目標=上/最大保有10日）。実際のlssは<b>売りトリガー・損切り=上・目標=下・その日の引けで決済</b>です。'
+        'そのため発注ボタンは無効化しています。実発注は逆指値空売りの専用フローで行ってください。</div>')
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
+{_analysis_warn}
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが高い順に並んでいます。
 </p>

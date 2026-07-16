@@ -978,6 +978,9 @@ if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
 # ショートモード: トレンド別成績テーブルの表示順・凡例を反転。
 # ミラー(指値空売り)/ロング銘柄ショート も建玉は「売り」なのでショート視点で色付けする。
 _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
+# mirror/lss(ロング銘柄を空売り評価する分析専用)はシグナルタブの発注ボタンが
+# ロング逆指値買いの値を送るため、発注を無効化して誤発注を防ぐ。
+_na._ANALYSIS_ONLY = _analysis_only
 
 # 日足版の同日TP/SLスイープは「近似」で不正確(同日の当たり判定が日足高安のみ。
 # 実測ではミラーが日足+191万→5分足-240万と真逆になった)。既定OFF、--daily-tpsl-sweep
