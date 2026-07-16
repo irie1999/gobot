@@ -448,19 +448,20 @@ if _args.both and not _args.short:
             _frame_id = f"ls-{_dir}-{_mp}"
             _active_fr = " active" if _dir == "long" and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
-            # 遅延ロード: 初期アクティブ(long×先頭価格帯)のみ src を入れ、残りは
-            # data-src にして初回クリック時に読む。開いた瞬間に全レポートを同時
-            # ロードして重くなるのを防ぐ (5枚→1枚)。
-            _is_active_fr = (_dir == "long" and _i == 0)
-            _src_attr = (f'src="{_src}?v={_cache_bust}"' if _is_active_fr
-                         else f'data-src="{_src}?v={_cache_bust}"')
-            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" {_src_attr}></iframe>\n'
-    _frames += f'<iframe id="holdings-frame" class="hold-frame" data-src="holdings_latest.html?v={_cache_bust}"></iframe>\n'
+            # 遅延ロード: 全iframeを data-src(素のファイル名)にし、表示時にJSが
+            # ?v=Date.now() を付けて読み込む。file:// はクエリを無視して古いiframeを
+            # キャッシュするため、生成時刻の固定トークンでは reload/複製で古い版が出る。
+            # ロード毎に一意トークンにすることで必ず最新のhtmlを読む。
+            _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" data-src="{_src}"></iframe>\n'
+    _frames += '<iframe id="holdings-frame" class="hold-frame" data-src="holdings_latest.html"></iframe>\n'
 
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ホールドアウト全設定 ロング+ショート統合 {_bd} [保有{__import__('backtest_limit_entry').MAX_HOLD}日]</title>
 <style>
@@ -498,8 +499,13 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 var _curDir = 'long';
 var _curPr  = {_first_mp};
 function _ensureLoaded(f) {{
-  // data-src だけの iframe を初回表示時に読み込む (遅延ロード)
-  if (f && f.dataset && f.dataset.src) {{ f.src = f.dataset.src; f.removeAttribute('data-src'); }}
+  // data-src だけの iframe を初回表示時に読み込む (遅延ロード)。
+  // ?v=Date.now() を毎回付けて file:// のキャッシュ(古いiframe)を確実に回避する。
+  if (f && f.dataset && f.dataset.src) {{
+    var s = f.dataset.src;
+    f.src = s + (s.indexOf('?') >= 0 ? '&' : '?') + 'v=' + Date.now();
+    f.removeAttribute('data-src');
+  }}
 }}
 function _showFrame() {{
   document.querySelectorAll('.ls-frame,.hold-frame').forEach(f => f.classList.remove('active'));
@@ -527,6 +533,8 @@ function switchHoldings(ev) {{
   _ensureLoaded(hf);
   hf.classList.add('active');
 }}
+// 初期アクティブ(long×先頭価格帯)を、ページ読み込み/リロードごとに最新トークンで読み込む
+_showFrame();
 </script>
 </body>
 </html>""", encoding="utf-8")
@@ -2189,6 +2197,9 @@ html = f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ホールドアウト全設定 シグナル・損益{_mode_label_ja} {date_str} [保有{_bte.MAX_HOLD}日]</title>
 <style>
