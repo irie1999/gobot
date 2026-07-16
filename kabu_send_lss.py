@@ -152,8 +152,12 @@ def _lss_signal_today(sym: str, name: str, strat: str,
         tp = float(t.get("order_target", 0) or 0)  # 利確(下側)
         if lp <= 0 or sp <= 0 or tp <= 0:
             continue
+        # kabu へ渡す銘柄コードは .T を外した数値コード(例 4911)。
+        # yf_sym(4911.T)はバックテスト取得用で、発注時は数値コードでないと
+        # 「銘柄が見つからない」(Code 4002001)になる。
+        kabu_code = yf_sym.upper().removesuffix(".T").split(".")[0]
         return {
-            "symbol": yf_sym, "name": name, "strategy": strat,
+            "symbol": kabu_code, "name": name, "strategy": strat,
             "family": "lss",
             "order_price": lp, "stop_price": sp, "target_price": tp,
             "signal_date": str(sd),
@@ -287,7 +291,7 @@ def main() -> int:
 
     ok = 0
     for s in signals:
-        sym, name = s["symbol"], s["name"]
+        sym, name = str(s["symbol"]).split(".")[0], s["name"]   # kabuは数値コード(.T無し)
         order_p, stop_p, tgt_p = s["order_price"], s["stop_price"], s["target_price"]
         # 逆指値売りはトリガーが現在値『以上』だと即約定扱いで弾かれる(kabu Code 100217)。
         # 今発注する時点で株価が前日終値(=トリガー)以下なら、現在値-1ティックに引き下げる
