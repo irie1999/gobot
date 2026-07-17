@@ -9200,7 +9200,7 @@ function switchTbd(id, tab) {{
             dets_html = "".join(_entry_date_detail(dk, dseq, False, by_date, pfx) for dk in dks)
             html += (
                 f'<div class="mg-block">'
-                f'<div class="mg-header" onclick="toggleMG(\'{pfx}\',{dseq},\'{ym_key}\')">'
+                f'<div class="mg-header" onclick="toggleMG(this)">'
                 f'<span class="mg-arrow" id="mg_arr_{pfx}{dseq}_{ym_key}">{arrow}</span>'
                 f'<span class="mg-ym">{ym[:4]}/{ym[5:7]}月</span>'
                 f'<span class="mg-stats">{len(done_m)}件&nbsp;{wr_m:.0f}%&nbsp;'
@@ -9354,7 +9354,7 @@ function switchTbd(id, tab) {{
             dets_html = "".join(_exit_date_detail(dk, dseq, False, by_date, pfx) for dk in dks)
             html += (
                 f'<div class="mg-block">'
-                f'<div class="mg-header" onclick="toggleMG(\'{pfx}\',{dseq},\'{ym_key}\')">'
+                f'<div class="mg-header" onclick="toggleMG(this)">'
                 f'<span class="mg-arrow" id="mg_arr_{pfx}{dseq}_{ym_key}">{arrow}</span>'
                 f'<span class="mg-ym">{ym[:4]}/{ym[5:7]}月</span>'
                 f'<span class="mg-stats">{len(all_t)}件決済&nbsp;'
@@ -11568,9 +11568,17 @@ function switchDetailTab(seq, which) {{
     }});
   }}
 }}
-function toggleMG(pfx, seq, ym) {{
-  var body = document.getElementById('mgb_'+pfx+seq+'_'+ym);
-  var arr  = document.getElementById('mg_arr_'+pfx+seq+'_'+ym);
+function toggleMG(hdr) {{
+  // 月ヘッダー(this)を起点に、その直後の .mg-body を開閉する。
+  // 以前は getElementById で id 指定していたが、同一ページに同じ id が複数あると
+  // 常に最初の要素だけを操作してしまい「押しても開かない」不具合が出た。
+  // DOM の兄弟関係で辿ることで id 重複に依存しない(=堅牢)。
+  if (typeof hdr === 'string') {{  // 旧シグネチャ toggleMG(pfx,seq,ym) 後方互換
+    var _b = document.getElementById('mgb_'+arguments[0]+arguments[1]+'_'+arguments[2]);
+    if (_b) hdr = _b.previousElementSibling; else return;
+  }}
+  var body = hdr.nextElementSibling;
+  var arr  = hdr.querySelector('.mg-arrow');
   if (!body) return;
   var isOpen = body.style.display !== 'none';
   body.style.display = isOpen ? 'none' : 'block';
