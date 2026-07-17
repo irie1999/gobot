@@ -433,6 +433,10 @@ if _args.both and not _args.short:
     # 📌 保有タブ（実際に約定した建玉。close_stop_guard --holdings-html が生成）
     _nav_btns += '  <span class="nav-sep"></span>\n'
     _nav_btns += '  <button class="hold-btn" onclick="switchHoldings(event)">📌 保有</button>\n'
+    # 🔻 監視に切替: 発注サーバを止めて lss_exit_watcher を起動(kabuトークン解放)。
+    _nav_btns += ('  <button class="handoff-btn" onclick="handoffWatcher()" '
+                  'title="発注サーバを停止して lss_exit_watcher --execute --prod を起動します">'
+                  '🔻 監視に切替</button>\n')
     _holdings_path = Path("holdings_latest.html")
     if not _holdings_path.exists():
         _holdings_path.write_text(
@@ -493,6 +497,11 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
   border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}}
 .hold-btn:hover:not(.active){{background:#263349;color:#e2e8f0}}
 .hold-btn.active{{background:#0f172a;border-bottom:2px solid #60a5fa;color:#60a5fa}}
+.handoff-btn{{padding:9px 16px;margin-left:6px;background:#3f1d2b;border:1px solid #f472b6;
+  border-radius:6px;color:#f9a8d4;cursor:pointer;font-size:0.86rem;font-weight:700;
+  align-self:center;transition:all .15s}}
+.handoff-btn:hover:not(:disabled){{background:#4c1d3a;color:#fbcfe8}}
+.handoff-btn:disabled{{opacity:.6;cursor:default}}
 .ls-frame,.hold-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
 .ls-frame.active,.hold-frame.active{{display:block}}
 </style>
@@ -538,6 +547,23 @@ function switchHoldings(ev) {{
   var hf = document.getElementById('holdings-frame');
   _ensureLoaded(hf);
   hf.classList.add('active');
+}}
+function handoffWatcher() {{
+  if (!confirm('発注サーバを停止して、監視(lss_exit_watcher --execute --prod)に切り替えます。\\n'
+    + '・新しいウィンドウで watcher が起動します\\n'
+    + '・発注サーバは停止します(以降このレポートの🚀発注ボタンは使えません)\\n'
+    + '・出した注文は kabu 側に残ります\\n'
+    + '・保有/損益は📌保有タブを再読込すれば更新されます\\n\\nよろしいですか？')) return;
+  var b = document.querySelector('.handoff-btn');
+  if (b) {{ b.disabled = true; b.textContent = '⏳ 切替中...'; }}
+  fetch('http://127.0.0.1:8765/handoff-watcher').then(r => r.text()).then(t => {{
+    alert(t);
+    if (b) b.textContent = '✅ 監視に切替済み';
+  }}).catch(e => {{
+    alert('切替リクエスト失敗: ' + e + '\\n(発注サーバが起動していない可能性があります。'
+      + '手動で lss_exit_watcher を起動してください)');
+    if (b) {{ b.disabled = false; b.textContent = '🔻 監視に切替'; }}
+  }});
 }}
 // 初期アクティブ(long×先頭価格帯)を、ページ読み込み/リロードごとに最新トークンで読み込む
 _showFrame();

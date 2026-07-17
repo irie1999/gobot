@@ -762,6 +762,40 @@ def _watch_loop():
             _backfill_targets(cli)   # 監視中に現れた建玉の利確抜けも定期補完(重複は出さない)
 
 
+def _handoff_to_watcher() -> str:
+    """発注サーバを停止し、lss_exit_watcher を新しいウィンドウで起動する(ハンドオフ)。
+    kabu はトークン1個なので、watcher を起動したら発注サーバは終了して接続を解放する。
+    watcher は holdings_latest.html を更新するので、レポートの📌保有タブは再読込で反映される。"""
+    import subprocess, sys as _sys, threading as _th, os as _os
+    from pathlib import Path as _P
+    base = _P(__file__).resolve().parent
+    cmd = [_sys.executable, "-u", str(base / "lss_exit_watcher.py"), "--execute"]
+    if PROD:
+        cmd.append("--prod")
+    try:
+        kwargs: dict = {"cwd": str(base)}
+        if _os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE  # 別ウィンドウで表示
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **kwargs)
+    except Exception as e:
+        return f"watcher起動失敗: {e}(発注サーバは継続します)"
+
+    # レスポンスを返し終えてから発注サーバを落とす(kabuトークンを解放)。
+    def _bye():
+        import time as _t
+        _t.sleep(1.2)
+        print("🔻 監視(watcher)にハンドオフ → 発注サーバを終了します(kabu接続を解放)。")
+        _os._exit(0)
+    _th.Thread(target=_bye, daemon=True).start()
+    _lbl = "本番(18080)" if PROD else "デモ(18081)"
+    return ("watcher(lss_exit_watcher --execute" + (" --prod" if PROD else "")
+            + f" / {_lbl})を新しいウィンドウで起動しました。\n"
+            "発注サーバは間もなく停止します(kabu接続を解放)。\n"
+            "以降の保有・損益は📌保有タブを再読込すれば反映されます。")
+
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -789,6 +823,9 @@ class Handler(BaseHTTPRequestHandler):
             env = "本番(18080)" if PROD else "デモ(18081)"
             self._text(f"order_server 稼働中 / {arm} / 接続先 {env} / "
                        f"ロング{'現物' if GENBUTSU else '信用新規'}")
+        elif path == "/handoff-watcher":
+            # 発注サーバを止めて lss_exit_watcher に切り替える(kabuトークン解放)
+            self._text(_handoff_to_watcher())
         else:
             self._text("404", 404)
 
