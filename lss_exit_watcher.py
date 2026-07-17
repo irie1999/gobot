@@ -345,25 +345,35 @@ def _run(args, close_at, today) -> int:
                     if _close_moc(cli, sym, qty, hid):
                         closed.add(sym)
                     continue
-                # ① 損切(上): 逆指値買い(信用返済)を建玉に『置きっぱなし』(1回だけ設置)。
-                #    以降は板側で自動発火するのでポーリング遅延ゼロ。発火したら建玉が消える。
+                if cur is None or cur <= 0:
+                    print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
+                    continue
+                # ① 損切(上): 現在値が既に損切ライン以上なら『今すぐ成行で損切』。
+                #    (逆指値買いは現在値以上のトリガーだと即約定/決済誤り(Code8)で置けないため)
+                if p["stop"] and cur >= p["stop"]:
+                    print(f"  [損切] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
+                    if _close_buy(cli, sym, qty, hid, "損切"):
+                        closed.add(sym)
+                    continue
+                # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし(1回だけ試す)。
+                #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
                 if p["stop"] and sym not in stop_placed:
+                    stop_placed.add(sym)   # 成否に関わらず1回だけ(失敗時のスパム防止)
                     _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
                     if _r in ("ok", "exists"):
-                        stop_placed.add(sym)
                         print(f"  [損切設置] {sym} {p['name']} 逆指値買い @>={p['stop']:,.0f} を建玉に設置"
                               f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
-                # ② 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
-                if cur is None or cur <= 0:
-                    continue
+                    else:
+                        print(f"  [損切] {sym} {p['name']} 逆指値設置不可 → ポーリング成行で損切を担保")
+                # ③ 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
                 if p["target"] and cur <= p["target"]:
                     print(f"  [利確] {sym} {p['name']} 現在{_curs} <= 利確{p['target']:,.0f} "
                           f"→ 損切逆指値を取消して成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "利確"):
                         closed.add(sym)
                 else:
-                    _st = f"損切{p['stop']:,.0f}(逆指値)" if p['stop'] else "損切-"
-                    _tg = f"利確{p['target']:,.0f}(監視)" if p['target'] else "利確-"
+                    _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
+                    _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
                     print(f"  [監視] {sym} {p['name']} 現在{_curs} ({_st} / {_tg})")
         else:
             print(f"  {now:%H:%M:%S} 対象のlss売建なし(未約定 or 全決済済み)")
