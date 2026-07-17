@@ -435,10 +435,13 @@ if _args.both and not _args.short:
     # 📌 保有タブ（実際に約定した建玉。close_stop_guard --holdings-html が生成）
     _nav_btns += '  <span class="nav-sep"></span>\n'
     _nav_btns += '  <button class="hold-btn" onclick="switchHoldings(event)">📌 保有</button>\n'
-    # 🔻 監視に切替: 発注サーバを止めて lss_exit_watcher を起動(kabuトークン解放)。
+    # 🔻 監視に切替 / 🚀 発注に切替: 発注サーバ⇄watcher の双方向トグル(kabuトークンを渡す)。
     _nav_btns += ('  <button class="handoff-btn" onclick="handoffWatcher()" '
                   'title="発注サーバを停止して lss_exit_watcher --execute --prod を起動します">'
                   '🔻 監視に切替</button>\n')
+    _nav_btns += ('  <button class="handoff-btn handoff-order" onclick="handoffOrder()" '
+                  'title="watcherを停止して発注サーバ(order_server --execute)を起動します">'
+                  '🚀 発注に切替</button>\n')
     _holdings_path = Path("holdings_latest.html")
     if not _holdings_path.exists():
         _holdings_path.write_text(
@@ -504,6 +507,8 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
   align-self:center;transition:all .15s}}
 .handoff-btn:hover:not(:disabled){{background:#4c1d3a;color:#fbcfe8}}
 .handoff-btn:disabled{{opacity:.6;cursor:default}}
+.handoff-order{{background:#14312b;border-color:#34d399;color:#6ee7b7}}
+.handoff-order:hover:not(:disabled){{background:#12463a;color:#a7f3d0}}
 .ls-frame,.hold-frame{{display:none;width:100%;border:none;height:calc(100vh - 54px)}}
 .ls-frame.active,.hold-frame.active{{display:block}}
 </style>
@@ -565,6 +570,22 @@ function handoffWatcher() {{
     alert('切替リクエスト失敗: ' + e + '\\n(発注サーバが起動していない可能性があります。'
       + '手動で lss_exit_watcher を起動してください)');
     if (b) {{ b.disabled = false; b.textContent = '🔻 監視に切替'; }}
+  }});
+}}
+function handoffOrder() {{
+  if (!confirm('監視(watcher)を停止して、発注サーバに切り替えます。\\n'
+    + '・新しいウィンドウで発注サーバが起動します\\n'
+    + '・watcherは停止します(日中の自動決済監視も止まります)\\n'
+    + '・レポートの🚀発注ボタンが再び使えます\\n\\nよろしいですか？')) return;
+  var b = document.querySelector('.handoff-order');
+  if (b) {{ b.disabled = true; b.textContent = '⏳ 切替中...'; }}
+  fetch('http://127.0.0.1:8766/handoff-order').then(r => r.text()).then(t => {{
+    alert(t);
+    if (b) b.textContent = '✅ 発注に切替済み';
+  }}).catch(e => {{
+    alert('切替リクエスト失敗: ' + e + '\\n(watcherが起動していない可能性があります。'
+      + '発注サーバは daily で起動できます)');
+    if (b) {{ b.disabled = false; b.textContent = '🚀 発注に切替'; }}
   }});
 }}
 // 初期アクティブ(long×先頭価格帯)を、ページ読み込み/リロードごとに最新トークンで読み込む

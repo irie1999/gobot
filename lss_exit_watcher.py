@@ -342,6 +342,84 @@ def main() -> int:
         _release_lock()
 
 
+def _handoff_to_order(prod: bool) -> str:
+    """watcherを止めて order_server(発注サーバ)を新ウィンドウで起動する逆ハンドオフ。
+    レポートの🚀発注が再び使えるようになる(kabuトークンは order_server 側へ移る)。"""
+    import subprocess
+    import threading as _th
+    import os as _os
+    cmd = [sys.executable, "-u", str(_BASE / "order_server.py"), "--execute"]
+    if prod:
+        cmd.append("--prod")
+    try:
+        kw: dict = {"cwd": str(_BASE)}
+        if _os.name == "nt":
+            kw["creationflags"] = subprocess.CREATE_NEW_CONSOLE  # 別ウィンドウ表示
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen(cmd, **kw)
+    except Exception as e:
+        return f"発注サーバ起動失敗: {e}(watcherは継続します)"
+
+    def _bye():
+        _time.sleep(1.2)
+        print("🚀 発注サーバにハンドオフ → watcherを終了します(kabu接続を解放)。")
+        try:
+            _release_lock()
+        except Exception:
+            pass
+        _os._exit(0)
+    _th.Thread(target=_bye, daemon=True).start()
+    return ("発注サーバ(order_server --execute" + (" --prod" if prod else "")
+            + ")を新しいウィンドウで起動しました。\n"
+            "watcherは間もなく停止します。レポートの🚀発注ボタンが再び使えます。")
+
+
+def _start_control_server(prod: bool) -> None:
+    """watcherに制御用HTTPサーバ(127.0.0.1:8766)を持たせる。レポートの
+    『🚀発注に切替』ボタンが /handoff-order を叩くと、watcherを止めて発注サーバに戻せる
+    (発注⇄監視の双方向トグル)。"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse as _up
+    import threading as _th
+
+    class _H(BaseHTTPRequestHandler):
+        def _t(self, msg, code=200):
+            b = msg.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.end_headers()
+
+        def do_GET(self):
+            p = _up(self.path).path
+            if p in ("/", "/health"):
+                self._t("lss_exit_watcher 稼働中")
+            elif p == "/handoff-order":
+                self._t(_handoff_to_order(prod))
+            else:
+                self._t("404", 404)
+
+        def log_message(self, *a):
+            pass
+
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", 8766), _H)
+    except Exception as e:
+        print(f"  [!] 制御サーバ(8766)起動失敗: {e} → 『🚀発注に切替』ボタンは使えません")
+        return
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+    print("  制御サーバ: http://127.0.0.1:8766/handoff-order (『🚀発注に切替』ボタン用)")
+
+
 def _run(args, close_at, today) -> int:
     # 返済は建玉と同じ信用区分でないと通らない。lssエントリーは一般信用デイトレ(3)
     # で建てるので、決済(買戻し)も 3 に合わせる。--margin-type で上書き可。
@@ -363,6 +441,10 @@ def _run(args, close_at, today) -> int:
                   flush=True)
             _touch_lock()
             _time.sleep(30)
+
+    # 制御サーバ(8766)を起動: レポートの『🚀発注に切替』ボタンで発注サーバへ戻せる。
+    if not args.once:
+        _start_control_server(args.prod)
 
     closed: set = set()        # 決済済み(このセッションで買戻した銘柄)
     stop_placed: set = set()   # 損切の逆指値買いを建玉に設置済みの銘柄
