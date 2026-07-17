@@ -311,6 +311,8 @@ def main() -> int:
                     help="1回だけ判定して終了(監視ループを回さない・デバッグ用)")
     ap.add_argument("--no-holdings", action="store_true",
                     help="保有タブ(holdings_latest.html)の定期更新をしない")
+    ap.add_argument("--use-moc", action="store_true",
+                    help="引けの決済を引け成行(MOC/大引け約定)にする(既定は即時成行)")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -322,7 +324,8 @@ def main() -> int:
     print("=" * 66)
     print(f"lss 日中OCO決済ウォッチャー  {now:%Y-%m-%d %H:%M JST}")
     print(f"モード: {mode_label} / 接続先: {env_label} / 損切(上)・利確(下) 先着で成行買戻し")
-    print(f"引け成行切替: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
+    _close_kind = "引け成行(MOC)" if args.use_moc else "即時成行"
+    print(f"引け決済({_close_kind})切替: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
     print("=" * 66)
 
     # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。
@@ -382,8 +385,15 @@ def _run(args, close_at, today) -> int:
                 _curs = f"{cur:,.0f}" if cur else "?"
                 # 引け: 損切逆指値を取消して引け成行で買戻し
                 if after_close:
-                    print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行買戻し")
-                    if _close_moc(cli, sym, qty, hid):
+                    # 既定は「即時成行」で買戻し(数秒で約定・目視確認可・失敗しても
+                    # 5秒ごとの次サイクルで自動リトライ)。--use-moc で引け成行(MOC)。
+                    if args.use_moc:
+                        print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
+                        ok = _close_moc(cli, sym, qty, hid)
+                    else:
+                        print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 即時成行で買戻し")
+                        ok = _close_buy(cli, sym, qty, hid, "引け")
+                    if ok:
                         closed.add(sym)
                     continue
                 if cur is None or cur <= 0:
