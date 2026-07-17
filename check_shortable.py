@@ -15,9 +15,11 @@ kabu ステーションの銘柄マスタ照会(/symbol)を使い、MarginSell(�
 from __future__ import annotations
 
 import argparse
+import csv as _csv
 import glob
 import sys
 import time as _time
+from datetime import datetime
 from pathlib import Path
 
 # Windows(cp932)コンソールで表示が落ちないように
@@ -131,8 +133,16 @@ def main() -> int:
         print("  (kabu ステーションの起動+ログインと KABU_API_PASSWORD が必要です)")
         return 1
 
+    # 結果を CSV に逐次保存(途中で止めても残る)。20分照会を無駄にしないため。
+    _date = datetime.now().strftime("%Y-%m-%d")
+    _csv_path = _BASE / f"shortable_status_{_date}.csv"
+    _csv_f = _csv_path.open("w", newline="", encoding="utf-8-sig")
+    _csv_w = _csv.writer(_csv_f)
+    _csv_w.writerow(["code", "name", "margin_buy", "margin_sell", "verdict"])
+
     print("=" * 68)
     print(f"信用売建(空売り)可否チェック  接続先: {env}  対象{len(codes)}銘柄")
+    print(f"結果CSV: {_csv_path.name} (逐次保存)")
     print("=" * 68)
     print(f"{'コード':<7}{'銘柄名':<16}{'買建':<5}{'売建':<5}{'判定'}")
     print("-" * 68)
@@ -146,6 +156,7 @@ def main() -> int:
         except Exception as e:
             print(f"{c:<7}{'(照会失敗)':<16}{'?':<5}{'?':<5}照会エラー: {e}")
             unknown.append(c)
+            _csv_w.writerow([c, "", "", "", f"照会エラー:{e}"]); _csv_f.flush()
             continue
         if args.raw:
             import json as _json
@@ -165,13 +176,26 @@ def main() -> int:
         else:
             verdict = "不明(MarginSellフラグ無し)"; unknown.append(c)
         print(f"{c:<7}{name:<16}{_mk(mb):<5}{_mk(ms):<5}{verdict}")
+        _csv_w.writerow([c, name, _mk(mb), _mk(ms), verdict]); _csv_f.flush()
         _time.sleep(0.3)   # レート制限(429)緩和: 1銘柄=登録+照会+解除の3コール
+
+    _csv_f.close()
+    # 空売り不可リストを Python ファイルにも保存(選定の除外リストとして import できる)
+    _ng_path = _BASE / "not_shortable.py"
+    try:
+        _ng_path.write_text(
+            '"""not_shortable.py — check_shortable が検出した空売り不可(非貸借/取扱なし)銘柄。\n'
+            f'生成日: {_date} / 接続先: {env}。lss 選定・発注の除外リストに使う(月1で再生成推奨)。"""\n'
+            f"NOT_SHORTABLE = {sorted(ng)!r}\n", encoding="utf-8")
+    except Exception as e:
+        print(f"  [!] not_shortable.py 保存失敗: {e}")
 
     print("-" * 68)
     _tot = len(codes)
     _rate = (len(ok) / _tot * 100) if _tot else 0
     print(f"照会{_tot}銘柄: 空売り可 {len(ok)} / 不可 {len(ng)} / 不明 {len(unknown)}"
           f"  → 空売り可能率 {_rate:.0f}%")
+    print(f"結果保存: {_csv_path.name} / 除外リスト: not_shortable.py ({len(ng)}銘柄)")
     if ng:
         print(f"空売り不可 → {', '.join(ng)}")
         print("  これらは lss の選定/発注から除外すべき候補です。")
