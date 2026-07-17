@@ -8277,7 +8277,10 @@ function switchTbd(id, tab) {{
 
     fine_rows = ""
     for lo, hi, lbl_s, col in score_buckets:
-        tr = [t for t in full_year_trades if t.get("score") is not None and lo <= t["score"] < hi]
+        # ① WF軸: wf_score で帯分け(旧: score=WF値のため②BTと同一表になっていた)。
+        # WF未付与の取引はWF軸に載せられないので除外。
+        tr = [t for t in full_year_trades
+              if t.get("wf_score") is not None and lo <= t["wf_score"] < hi]
         n  = len(tr)
         if not n:
             continue
@@ -8333,8 +8336,9 @@ function switchTbd(id, tab) {{
     ]
     bt_fine_rows = ""
     for lo, hi, lbl_s, col in bt_buckets:
+        # ② BT軸: rec_score(直近BTスコア)で帯分け(旧: score=WF値でWF軸と同一だった)。
         tr = [t for t in full_year_trades
-              if t.get("score") is not None and lo <= t["score"] < hi]
+              if t.get("rec_score") is not None and lo <= t["rec_score"] < hi]
         n = len(tr)
         if not n:
             continue
