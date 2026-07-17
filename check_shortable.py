@@ -7,7 +7,8 @@ kabu ステーションの銘柄マスタ照会(/symbol)を使い、MarginSell(�
   python check_shortable.py 4662 7203 9449       # 指定銘柄を照会(デモ18081)
   python check_shortable.py 4662 --prod           # 本番(18080)で照会
   python check_shortable.py --from-csv            # ordered_signals_lss.csv の銘柄を照会
-  python check_shortable.py --watchlist           # lss選定(placed_orders/提案)の銘柄を照会
+  python check_shortable.py --proposal            # 最新 lss_watchlist_proposal_*.py の選定銘柄を照会
+  python check_shortable.py --proposal foo.py     # 指定した提案ファイルの選定銘柄を照会
 
 前提: kabu ステーションが起動・ログイン済みで、KABU_API_PASSWORD が設定済み。
 """
@@ -66,20 +67,55 @@ def _symbols_from_csv() -> list[str]:
     return out
 
 
+def _symbols_from_proposal(path: str | None) -> list[str]:
+    """lss_watchlist_proposal_*.py の SELECTED=[(code,name,strat),...] から銘柄を集める。"""
+    if path:
+        p = Path(path)
+    else:
+        cands = sorted(_BASE.glob("lss_watchlist_proposal_*.py"))
+        if not cands:
+            print("  [!] lss_watchlist_proposal_*.py が見つかりません(scan_lss_universe で生成)。")
+            return []
+        p = cands[-1]
+        print(f"  提案ファイル自動検出: {p.name}")
+    if not p.exists():
+        print(f"  [!] {p} が見つかりません。")
+        return []
+    try:
+        ns: dict = {}
+        exec(compile(p.read_text(encoding="utf-8"), str(p), "exec"), ns)
+    except Exception as e:
+        print(f"  [!] 提案ファイル読込失敗: {e}")
+        return []
+    sel = ns.get("SELECTED") or ns.get("LSS_WATCHLIST") or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in sel:
+        c = _bare(row[0]) if isinstance(row, (list, tuple)) and row else ""
+        if c and c not in seen:
+            seen.add(c); out.append(c)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="銘柄の信用売建(空売り)可否を kabu に照会")
     ap.add_argument("symbols", nargs="*", help="銘柄コード(複数可)。例: 4662 7203")
     ap.add_argument("--prod", action="store_true", help="本番(18080)に接続(既定デモ18081)")
     ap.add_argument("--from-csv", action="store_true",
                     help="ordered_signals_lss.csv / placed_orders_*.csv の銘柄を対象にする")
+    ap.add_argument("--proposal", nargs="?", const="__AUTO__", default=None,
+                    help="lss_watchlist_proposal_*.py の選定銘柄を対象(省略時は最新を自動検出)")
     args = ap.parse_args()
 
     codes = [_bare(s) for s in args.symbols if _bare(s)]
     if args.from_csv:
         codes += [c for c in _symbols_from_csv() if c not in codes]
+    if args.proposal is not None:
+        _pp = None if args.proposal == "__AUTO__" else args.proposal
+        codes += [c for c in _symbols_from_proposal(_pp) if c not in codes]
     if not codes:
         print("銘柄を指定してください(例: python check_shortable.py 4662)、"
-              "または --from-csv を付けてください。")
+              "または --from-csv / --proposal を付けてください。")
         return 1
 
     from kabu_api import KabuClient
@@ -98,12 +134,15 @@ def main() -> int:
     print(f"{'コード':<7}{'銘柄名':<16}{'買建':<5}{'売建':<5}{'判定'}")
     print("-" * 68)
 
-    ng: list[str] = []
+    ng: list[str] = []      # 空売り不可
+    ok: list[str] = []      # 空売り可
+    unknown: list[str] = []  # 判定不能
     for c in codes:
         try:
             info = cli.get_symbol(c)
         except Exception as e:
             print(f"{c:<7}{'(照会失敗)':<16}{'?':<5}{'?':<5}照会エラー: {e}")
+            unknown.append(c)
             continue
         name = str(info.get("SymbolName") or info.get("DisplayName") or "")[:14]
         mb = info.get("MarginBuy")
@@ -113,19 +152,23 @@ def main() -> int:
             return "○" if v is True else "×" if v is False else "?"
 
         if ms is True:
-            verdict = "空売り可"
+            verdict = "空売り可"; ok.append(c)
         elif ms is False:
             verdict = "空売り不可(非貸借/取扱なし)"; ng.append(c)
         else:
-            verdict = "不明(MarginSellフラグ無し)"
+            verdict = "不明(MarginSellフラグ無し)"; unknown.append(c)
         print(f"{c:<7}{name:<16}{_mk(mb):<5}{_mk(ms):<5}{verdict}")
 
     print("-" * 68)
+    _tot = len(codes)
+    _rate = (len(ok) / _tot * 100) if _tot else 0
+    print(f"照会{_tot}銘柄: 空売り可 {len(ok)} / 不可 {len(ng)} / 不明 {len(unknown)}"
+          f"  → 空売り可能率 {_rate:.0f}%")
     if ng:
-        print(f"空売り不可: {len(ng)}銘柄 → {', '.join(ng)}")
+        print(f"空売り不可 → {', '.join(ng)}")
         print("  これらは lss の選定/発注から除外すべき候補です。")
-    else:
-        print("空売り不可の銘柄はありませんでした(または全て判定不能)。")
+    if unknown:
+        print(f"判定不能 → {', '.join(unknown)}  (デモの銘柄マスタが不完全な可能性。--prod で再確認)")
     return 0
 
 
