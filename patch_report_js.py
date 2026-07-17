@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -57,16 +58,23 @@ def patch_file(p: Path, new_js: str) -> str:
 
 
 def main() -> int:
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--all"]
+    patch_all = "--all" in sys.argv[1:]
     if args:
         files: list[Path] = []
         for a in args:
             files += [Path(x) for x in glob.glob(a)] or [Path(a)]
-    else:
+    elif patch_all:
+        # 過去分も含めて全部(既定では今日のみ。ノイズ回避)
         files = [Path(f) for f in sorted(glob.glob(str(BASE / "signals_holdout_all*.html")))]
-    if not files:
-        print("対象HTMLが見つかりません(signals_holdout_all*.html)。")
-        return 1
+    else:
+        # 既定: 今日の日付を含むレポートだけ(あなたが今見るのはこれ)
+        _today = datetime.now().strftime("%Y-%m-%d")
+        files = [Path(f) for f in sorted(glob.glob(str(BASE / f"signals_holdout_all*{_today}*.html")))]
+        if not files:
+            print(f"今日({_today})のレポートが見つかりません。ファイル名を直接指定するか "
+                  "--all で全期間を対象にできます。")
+            return 1
     try:
         new_js = _extract_current_js()
     except Exception as e:
@@ -74,13 +82,17 @@ def main() -> int:
         return 1
     print(f"最新UI JS({len(new_js)}字)を {len(files)}ファイルに適用します。")
     print("-" * 60)
+    _npatched = 0
     for p in files:
         if not p.exists():
             print(f"{p.name}: ファイルなし")
             continue
-        print(f"{p.name}: {patch_file(p, new_js)}")
+        _r = patch_file(p, new_js)
+        if _r.startswith("パッチ済み"):
+            _npatched += 1
+        print(f"{p.name}: {_r}")
     print("-" * 60)
-    print("→ ブラウザで Ctrl+Shift+R で反映してください(再生成・バックテスト不要)。")
+    print(f"パッチ済み {_npatched} ファイル。→ ブラウザで Ctrl+Shift+R で反映(再生成・バックテスト不要)。")
     return 0
 
 
