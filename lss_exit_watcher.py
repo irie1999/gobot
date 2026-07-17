@@ -9,8 +9,8 @@ kabu はOCO(利確と損切を同時に置く)機能を持たない(建玉に返
 引け近く(既定14:55)になったら『引け成行(MOC)』で買い戻す。
 
   約定(3,020以下で売り) →
-    損切(上): 逆指値買い(信用返済)を @≥損切 に置きっぱなし → 上抜けで自動発火(成行)
-    利確(下): 現在値 ≤ 利確 になったら成行買戻し(損切逆指値を取消してから)
+    損切(上): 逆指値買い(信用返済)を @>=損切 に置きっぱなし → 上抜けで自動発火(成行)
+    利確(下): 現在値 <= 利確 になったら成行買戻し(損切逆指値を取消してから)
     14:55以降どちらも未達 → 引け成行で買戻し(損切逆指値を取消してから)
 
   ※ 損切をrestingにするのは、損切0.1ATR(タイト)がポーリング遅延に最も弱いため。
@@ -51,6 +51,16 @@ import sys
 import time as _time
 from datetime import datetime, timezone, timedelta, time as dtime
 from pathlib import Path
+
+# Windows の cp932 コンソール/ログに [!] >= <= ✓ 等(cp932非対応文字)を出すと
+# UnicodeEncodeError でプロセスごと落ちる(常駐ウォッチャーが死ぬと決済されない)。
+# 既定エンコード(cp932)のまま errors=replace にして、非対応文字は '?' に置換し落とさない
+# (Get-Content 既定でも日本語はそのまま読める)。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 from kabu_api import KabuClient, CASH_MARGIN_CLOSE
 
@@ -126,7 +136,7 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                      r.get("name", ""), _num(r.get("stop_price")),
                      _num(r.get("target_price")))
         except Exception as e:
-            print(f"  ⚠ ordered_signals_lss.csv 読込失敗 ({e})")
+            print(f"  [!] ordered_signals_lss.csv 読込失敗 ({e})")
 
     # B) placed_orders_<date>.csv (レポート発注ボタン = order_server)
     for fp in sorted(glob.glob(str(_BASE / "placed_orders_*.csv"))):
@@ -182,7 +192,7 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
     try:
         positions = cli.get_positions(product=2)   # 信用建玉
     except Exception as e:
-        print(f"  ⚠ 建玉取得失敗: {e}")
+        print(f"  [!] 建玉取得失敗: {e}")
         return []
     out = []
     for kp in positions:
@@ -213,13 +223,13 @@ def _place_stop_buy(cli, sym: str, qty: int, hold_id: str, stop_p: float) -> str
         res = cli.send_stop_buy(sym, qty=qty, trigger_price=stop_p,
                                 cash_margin=CASH_MARGIN_CLOSE, close_positions=cp)
     except Exception as e:
-        print(f"  ⚠ {sym} 損切逆指値の設置失敗: {e}")
+        print(f"  [!] {sym} 損切逆指値の設置失敗: {e}")
         return "fail"
     if (res.get("Result") == 0) or res.get("_dry_run"):
         return "ok"
     if str(res.get("Code")) == "4001005":   # 建玉拘束 = 既に返済注文(=損切)あり
         return "exists"
-    print(f"  ⚠ {sym} 損切逆指値の設置応答エラー: {res}")
+    print(f"  [!] {sym} 損切逆指値の設置応答エラー: {res}")
     return "fail"
 
 
@@ -230,7 +240,7 @@ def _close_buy(cli, sym: str, qty: int, hold_id: str, reason: str) -> bool:
         res = cli.send_buy(sym, qty=qty, order_type="market",
                            cash_margin=CASH_MARGIN_CLOSE, close_positions=None)
     except Exception as e:
-        print(f"  ⚠ {sym} {reason} 決済失敗: {e}")
+        print(f"  [!] {sym} {reason} 決済失敗: {e}")
         return False
     ok = (res.get("Result") == 0) or res.get("_dry_run")
     return bool(ok)
@@ -242,7 +252,7 @@ def _close_moc(cli, sym: str, qty: int, hold_id: str) -> bool:
         res = cli.send_moc(sym, qty=qty, side="buy",
                            cash_margin=CASH_MARGIN_CLOSE, close_positions=None)
     except Exception as e:
-        print(f"  ⚠ {sym} 引け成行 決済失敗: {e}")
+        print(f"  [!] {sym} 引け成行 決済失敗: {e}")
         return False
     return bool((res.get("Result") == 0) or res.get("_dry_run"))
 
@@ -305,7 +315,7 @@ def _run(args, close_at, today) -> int:
         except Exception as e:
             _retry = args.execute and not args.once and datetime.now(JST).time() < MARKET_END
             if not _retry:
-                print(f"✗ kabu 接続失敗: {e}")
+                print(f"[X] kabu 接続失敗: {e}")
                 print("  (現在値・建玉の監視には kabuステーション起動+ログインが必要です)")
                 return 1
             print(f"  kabu未接続 ({e}) → kabuステーションのログイン待ち。30秒後に再試行...",
@@ -341,13 +351,13 @@ def _run(args, close_at, today) -> int:
                     _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
                     if _r in ("ok", "exists"):
                         stop_placed.add(sym)
-                        print(f"  [損切設置] {sym} {p['name']} 逆指値買い @≥{p['stop']:,.0f} を建玉に設置"
+                        print(f"  [損切設置] {sym} {p['name']} 逆指値買い @>={p['stop']:,.0f} を建玉に設置"
                               f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
                 # ② 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
                 if cur is None or cur <= 0:
                     continue
                 if p["target"] and cur <= p["target"]:
-                    print(f"  [利確] {sym} {p['name']} 現在{_curs} ≤ 利確{p['target']:,.0f} "
+                    print(f"  [利確] {sym} {p['name']} 現在{_curs} <= 利確{p['target']:,.0f} "
                           f"→ 損切逆指値を取消して成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "利確"):
                         closed.add(sym)

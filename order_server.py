@@ -21,11 +21,19 @@ position_server.py を経由せず、これ単体で kabu に逆指値エント�
 """
 
 import argparse
+import sys
 import threading
 import time as _time
 from datetime import datetime, timezone, timedelta, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+# Windows の cp932 出力で非対応文字(⚠等)を出しても落ちないようにする。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 HOST = "127.0.0.1"
 PORT = 8765

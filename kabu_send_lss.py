@@ -45,6 +45,13 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# Windows の cp932 出力で非対応文字(⚠等)を出しても落ちないようにする。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 # ── TRADING_MODE を import 前に設定(各スクリプトと同じ作法) ──
 if "--aggressive" in sys.argv:
     os.environ["TRADING_MODE"] = "aggressive"
