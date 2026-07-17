@@ -541,7 +541,10 @@ _showFrame();
     print(f"\n統合レポート生成完了: {_bout.resolve()}")
     if not _args.no_browser:
         from _open_html import open_html
-        open_html(_bout.resolve())
+        # file:// は同名ファイルを作り直しても、既に開いているタブを自動で読み直さない
+        # (手動リロードするまで古い内容のまま)。トップURLに一意トークンを付けて
+        # 「別URL＝新規ナビゲーション」にし、必ず最新をディスクから読ませる。
+        open_html(_bout.resolve().as_uri() + f"?v={_cache_bust}")
     _maybe_serve_orders()
     sys.exit(0)
 
