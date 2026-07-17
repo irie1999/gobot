@@ -105,6 +105,8 @@ def main() -> int:
                     help="ordered_signals_lss.csv / placed_orders_*.csv の銘柄を対象にする")
     ap.add_argument("--proposal", nargs="?", const="__AUTO__", default=None,
                     help="lss_watchlist_proposal_*.py の選定銘柄を対象(省略時は最新を自動検出)")
+    ap.add_argument("--raw", action="store_true",
+                    help="/symbol の生レスポンス(全フィールド)を表示する(フラグ名確認用)")
     args = ap.parse_args()
 
     codes = [_bare(s) for s in args.symbols if _bare(s)]
@@ -144,6 +146,10 @@ def main() -> int:
             print(f"{c:<7}{'(照会失敗)':<16}{'?':<5}{'?':<5}照会エラー: {e}")
             unknown.append(c)
             continue
+        if args.raw:
+            import json as _json
+            print(f"--- {c} /symbol 生レスポンス ---")
+            print(_json.dumps(info, ensure_ascii=False, indent=2))
         name = str(info.get("SymbolName") or info.get("DisplayName") or "")[:14]
         mb = info.get("MarginBuy")
         ms = info.get("MarginSell")
