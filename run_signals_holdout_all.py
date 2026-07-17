@@ -119,6 +119,8 @@ _pre.add_argument("--daily-tpsl-sweep", action="store_true",
 _pre.add_argument("--no-5m", action="store_true",
                   help="mirror/lss の取引明細を5分足で集計しない(日足近似のまま)。"
                        "既定は5分足で集計(正確)")
+_pre.add_argument("--no-news", action="store_true",
+                  help="ニュース取得(スコア計算＋ニュース・情報タブ)をスキップして高速化する")
 _pre.add_argument("--lss-tpsl", action="store_true",
                   help="--lss-proposal 使用時でも『㉔ 5分足TP/SL最適化』タブ(損切/利確の"
                        "最適ATR幅)を出す。初回は計算、以降はキャッシュ表示(SAMEDAY5M_RESWEEP=1で再計算)")
@@ -1930,7 +1932,7 @@ _na._PNL_CONFIGS[:] = _all_configs
 # ── ニュースモデル スコアテーブル HTML ────────────────────────────────────────
 # news_model.json が存在する場合のみ、シグナル銘柄のニューススコアを表示する
 _news_score_table_html = ""
-if _signal_stocks:
+if _signal_stocks and not getattr(_args, "no_news", False):
     try:
         _model_path = Path("news_model.json")
         if _model_path.exists():
@@ -2006,14 +2008,20 @@ if _nikkei_banner or _news_score_table_html:
     _sig_html = _nikkei_banner + _news_score_table_html + _sig_html
 
 # ── ニュース・情報タブ HTML ────────────────────────────────────────────────────
-try:
-    from fetch_signal_news import build_news_html as _build_news_html
-    _news_html = _build_news_html(_signal_stocks, workers=_args.workers)
-    _news_tab_ok = True
-except Exception as _e:
-    print(f"[WARN] ニュース取得スキップ: {_e}", flush=True)
-    _news_html  = f'<p style="color:#ef4444;padding:24px">ニュース取得エラー: {_e}</p>'
+if getattr(_args, "no_news", False):
+    print("ニュース取得: スキップ (--no-news)", flush=True)
+    _news_html = ('<p style="color:#94a3b8;padding:24px">ニュース取得は --no-news で'
+                  'スキップされました。ニュースを見るには --no-news を外して再生成してください。</p>')
     _news_tab_ok = False
+else:
+    try:
+        from fetch_signal_news import build_news_html as _build_news_html
+        _news_html = _build_news_html(_signal_stocks, workers=_args.workers)
+        _news_tab_ok = True
+    except Exception as _e:
+        print(f"[WARN] ニュース取得スキップ: {_e}", flush=True)
+        _news_html  = f'<p style="color:#ef4444;padding:24px">ニュース取得エラー: {_e}</p>'
+        _news_tab_ok = False
 
 # ── --symbol 指定時: 銘柄別期間別取引詳細タブ ────────────────────────────────
 _sym_detail_tab_btn  = ""
