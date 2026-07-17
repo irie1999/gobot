@@ -211,6 +211,9 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
             "qty": qty, "avg": avg, "strategy": rec.get("strategy", ""),
             "stop": rec.get("stop", 0.0), "target": rec.get("target", 0.0),
             "hold_id": str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip(),
+            # 返済は建玉と同じ信用区分でないと Code 8(決済指定内容に誤り)。
+            # 建玉の MarginTradeType(1=制度/2=一般長期/3=一般デイトレ)を読んで返済で合わせる。
+            "margin_type": int(kp.get("MarginTradeType") or 1),
         })
     return out
 
@@ -337,6 +340,9 @@ def _run(args, close_at, today) -> int:
         elif shorts:
             for p in shorts:
                 sym, qty, hid = p["sym"], p["qty"], p["hold_id"]
+                # 返済は建玉と同じ信用区分でないと Code 8(決済指定内容に誤り)。
+                # 建玉ごとに MarginTradeType(制度=1/一般長期=2/デイトレ=3)を合わせる。
+                cli.margin_trade_type = p.get("margin_type", args.margin_type)
                 cur = cli.get_current_price(sym)
                 _curs = f"{cur:,.0f}" if cur else "?"
                 # 引け: 損切逆指値を取消して引け成行で買戻し
