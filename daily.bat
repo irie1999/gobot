@@ -1,13 +1,13 @@
 @echo off
 REM ============================================================
-REM daily.bat - 毎朝のlssレポート生成(発注サーバ付き)の短縮コマンド
-REM   長いフルコマンドをこれ1つにまとめたもの。
-REM   使い方(swingtradeフォルダで):  daily          または  .\daily.bat
-REM   追加オプションもそのまま渡せる:  daily --no-analysis   /   daily --lss-tpsl
-REM   (末尾の %* が、打ったオプションをそのまま python に渡します)
+REM daily.bat - short command for the morning lss report (+ order server)
+REM   Usage (in the swingtrade folder):  .\daily      (PowerShell)  /  daily  (cmd)
+REM   Extra options pass through:  .\daily --no-analysis   /   .\daily --lss-tpsl
+REM   (the trailing %* forwards whatever options you type to python)
+REM   ASCII-only on purpose to avoid Shift-JIS codepage mojibake.
 REM ============================================================
 
-REM このbatのあるフォルダ(=swingtrade)に移動
+REM move to the folder that contains this .bat (= swingtrade)
 cd /d "%~dp0"
 
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal auto --lss-top 700 --long-base 2025-12-31 --no-mirror --force --no-news %*
