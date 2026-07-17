@@ -200,6 +200,20 @@ class KabuClient:
         except Exception as e:
             print(f"  ⚠ {symbol}: 銘柄登録(register)失敗 ({e})")
 
+    def unregister(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
+        """銘柄登録を解除 (PUT /unregister)。登録上限(50銘柄)対策で使う。"""
+        key = (str(symbol), exchange)
+        url = f"{self.base_url}/kabusapi/unregister"
+        body = {"Symbols": [{"Symbol": str(symbol), "Exchange": exchange}]}
+        try:
+            r = requests.put(url, headers=self._headers(with_content=True),
+                             json=body, timeout=self.timeout)
+            r.raise_for_status()
+        except Exception:
+            pass
+        finally:
+            self._registered.discard(key)
+
     def get_board(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
         """時価情報 (CurrentPrice 等) を取得。事前に銘柄登録を行う。"""
         self.register(symbol, exchange)
@@ -208,9 +222,19 @@ class KabuClient:
 
     def get_symbol(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
         """銘柄マスタ照会 (/symbol)。信用売建可否(MarginSell)・信用買建可否(MarginBuy)・
-        貸借区分などを含む。空売り可否の判定に使う(読み取りのみ・発注しない)。"""
-        url = f"{self.base_url}/kabusapi/symbol/{symbol}@{exchange}"
-        return self._get_json(url)
+        貸借区分などを含む。空売り可否の判定に使う(読み取りのみ・発注しない)。
+
+        kabu は未登録銘柄の /symbol に 400 を返すため、事前に銘柄登録する。
+        新規に登録した銘柄は照会後に解除し、登録上限(50銘柄)を埋めないようにする。"""
+        key = (str(symbol), exchange)
+        newly = key not in self._registered
+        self.register(symbol, exchange)
+        try:
+            url = f"{self.base_url}/kabusapi/symbol/{symbol}@{exchange}"
+            return self._get_json(url)
+        finally:
+            if newly:
+                self.unregister(symbol, exchange)
 
     def is_margin_sellable(self, symbol: int | str,
                            exchange: int = EXCHANGE_TOSHO) -> bool | None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import glob
 import sys
+import time as _time
 from pathlib import Path
 
 # Windows(cp932)コンソールで表示が落ちないように
@@ -164,6 +165,7 @@ def main() -> int:
         else:
             verdict = "不明(MarginSellフラグ無し)"; unknown.append(c)
         print(f"{c:<7}{name:<16}{_mk(mb):<5}{_mk(ms):<5}{verdict}")
+        _time.sleep(0.3)   # レート制限(429)緩和: 1銘柄=登録+照会+解除の3コール
 
     print("-" * 68)
     _tot = len(codes)
