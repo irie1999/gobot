@@ -119,6 +119,9 @@ _pre.add_argument("--daily-tpsl-sweep", action="store_true",
 _pre.add_argument("--no-5m", action="store_true",
                   help="mirror/lss の取引明細を5分足で集計しない(日足近似のまま)。"
                        "既定は5分足で集計(正確)")
+_pre.add_argument("--lss-tpsl", action="store_true",
+                  help="--lss-proposal 使用時でも『㉔ 5分足TP/SL最適化』タブ(損切/利確の"
+                       "最適ATR幅)を出す。初回は計算、以降はキャッシュ表示(SAMEDAY5M_RESWEEP=1で再計算)")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -1019,7 +1022,8 @@ _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=�
 # ただし --lss-proposal(新選定・取引明細メインの軽量lss)ではスイープ格子は省略する
 # (取引明細の5分足集計自体は _INTRADAY_5M で維持されるので同日損益は正確なまま)。
 _na._SAMEDAY_5M_TAB = (_analysis_only and not getattr(_args, "no_analysis", False)
-                       and not getattr(_args, "lss_proposal", None))
+                       and (not getattr(_args, "lss_proposal", None)
+                            or getattr(_args, "lss_tpsl", False)))
 
 # 重い長系の詳細分析(保有日数比較/損切り幅/寄り付き方向/下落深さ/em比較/約定
 # タイミング/期間別パネル)を飛ばすか。--no-analysis 指定時に加え、mirror/lss は
