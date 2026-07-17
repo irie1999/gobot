@@ -272,7 +272,10 @@ if not getattr(_args, "no_minute_update", False):
 if _args.both and not _args.short:
     import subprocess as _sp
     _bd   = _args.date or str(_report_date())
-    _bout = Path(f"signals_holdout_all_both_{_bd}.html")
+    # --output-suffix(例 _base2024-06)を統合HTMLと各方向HTMLの両方に波及させて、
+    # 基準月スイープで4つのレポートが上書きされないようにする(空なら従来どおり)。
+    _BASE_SUFFIX = _args.output_suffix or ""
+    _bout = Path(f"signals_holdout_all_both_{_bd}{_BASE_SUFFIX}.html")
 
     if _bout.exists() and not _args.force:
         print(f"[CACHE] 当日生成済み(both): {_bout.resolve()}")
@@ -372,9 +375,10 @@ if _args.both and not _args.short:
         _mp_suffix = f"_p{_mp}" if _multi_price else ""
         # _mp==0 は「価格無制限」。サブプロセスには十分大きい上限を渡す。
         _mp_cap = 1_000_000 if _mp == 0 else _mp
-        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp_cap), "--output-suffix", _mp_suffix]
+        _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp_cap),
+                                            "--output-suffix", _mp_suffix + _BASE_SUFFIX]
         for _dk, _dlabel, _dargs, _dprefix in _DIRECTIONS:
-            _df = Path(f"{_dprefix}_{_bd}{_mp_suffix}.html")
+            _df = Path(f"{_dprefix}_{_bd}{_mp_suffix}{_BASE_SUFFIX}.html")
             print("=" * 65)
             print(f"=== {_dlabel}シグナル生成中 ({'価格無制限' if _mp == 0 else f'〜{_mp:,}円'}) ===")
             print("=" * 65)
@@ -2289,6 +2293,16 @@ function switchSpPeriod(days) {
 }
 """
 
+# 選定基準月(WF as-of)をヘッダに明示する。--output-suffix に base<YYYY-MM> があればそれ、
+# 無ければ --long-base、それも無ければ「直近WF(自動)」。実行日(date_str)と混同しないため。
+import re as _re_base
+_sel_base_disp = "直近WF(自動)"
+_m_base = _re_base.search(r"base(\d{4}-\d{2})", (_args.output_suffix or ""))
+if _m_base:
+    _sel_base_disp = _m_base.group(1)
+elif getattr(_args, "long_base", None):
+    _sel_base_disp = str(_args.long_base)[:7]
+
 html = f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -2306,7 +2320,8 @@ html = f"""<!DOCTYPE html>
 <body>
 <h1>ホールドアウト全設定 シグナル・損益レポート{_mode_label_ja}</h1>
 <p class="subtitle">
-  基準日: {date_str} &nbsp;|&nbsp;
+  <b style="color:#f472b6">選定基準月: {_sel_base_disp}</b> &nbsp;|&nbsp;
+  実行日: {date_str} &nbsp;|&nbsp;
   保有期限: {(str(_bte.MAX_HOLD)+'日') if _bte.timecut_enabled() else 'タイムカットなし(目標/損切のみ)'} &nbsp;|&nbsp;
   設定数: {len(_all_configs)}件 &nbsp;|&nbsp;
   workers={_args.workers}
