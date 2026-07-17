@@ -122,6 +122,9 @@ _pre.add_argument("--no-5m", action="store_true",
 _pre.add_argument("--lss-tpsl", action="store_true",
                   help="--lss-proposal 使用時でも『㉔ 5分足TP/SL最適化』タブ(損切/利確の"
                        "最適ATR幅)を出す。初回は計算、以降はキャッシュ表示(SAMEDAY5M_RESWEEP=1で再計算)")
+_pre.add_argument("--tpsl-wide", action="store_true",
+                  help="㉔ 5分足TP/SL のグリッドを広げる(利確ATR tm を 1.5/2.0/3.0 まで)。"
+                       "現行★が端(tm=1.0)にあるので、さらに伸ばすと良いか検証用。別キャッシュ")
 _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
@@ -1759,7 +1762,10 @@ if getattr(_na, "_SAMEDAY_5M_TAB", False):
         _5m_src = "auto"
     _s5_mp     = int(_args.max_price) if (_args.max_price and _args.max_price < 100000) else 0
     # v2: グローバル解除バグ修正+グリッド変更に伴いキャッシュキー更新(旧の誤グリッド無効化)
-    _s5_prefix = f"sameday5m2{_cache_short}_mp{_s5_mp}_{_5m_src}"
+    # --tpsl-wide は広いグリッド(別結果)なのでキャッシュキーも分ける(狭/広で混ざらない)。
+    _tpsl_wide = getattr(_args, "tpsl_wide", False)
+    _wide_tm = [0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 1.5, 2.0, 3.0] if _tpsl_wide else None
+    _s5_prefix = f"sameday5m2{_cache_short}_mp{_s5_mp}_{_5m_src}{'_wide' if _tpsl_wide else ''}"
     _s5_reuse  = _latest_analysis_cache(_s5_prefix)
     _s5_html = None
     if _s5_reuse is not None:
@@ -1773,7 +1779,8 @@ if getattr(_na, "_SAMEDAY_5M_TAB", False):
         try:
             _s5_html = _na.build_sameday_5m_sweep_html(
                 _DEFAULT_DAYS, _args.workers,
-                is_mirror=bool(_args.mirror), source=_5m_src) or ""
+                is_mirror=bool(_args.mirror), source=_5m_src,
+                tm_list=_wide_tm) or ""
         except Exception as _s5e:
             import traceback as _s5tb
             print(f"[5分足TP/SL] 失敗: {_s5e}\n{_s5tb.format_exc()}", flush=True)
