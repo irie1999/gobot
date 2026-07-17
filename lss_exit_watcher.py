@@ -260,6 +260,25 @@ def _close_moc(cli, sym: str, qty: int, hold_id: str) -> bool:
     return bool((res.get("Result") == 0) or res.get("_dry_run"))
 
 
+def _regen_holdings(cli) -> None:
+    """実建玉から保有銘柄HTML(holdings_latest.html)を再生成する(📌保有タブ用)。
+    watcher が kabu トークンを握っている間、run_signals_holdout_all を別接続すると
+    401(トークン競合)になるため、同じ接続でここが保有タブ(損益)を更新する。
+    kabu APIが一時失敗(空[])したときは前回表示を維持(保有ゼロ誤表示を防ぐ)。"""
+    try:
+        import close_stop_guard as _csg
+        from pathlib import Path
+        positions = _csg.load_positions_from_kabu(cli, product=0, verbose=False)
+        if not _csg.LAST_KABU_FETCH_OK:
+            return   # 取得失敗 → 上書きしない(前回表示を維持)
+        html = _csg._build_holdings_html(positions, datetime.now(JST),
+                                         price_fn=cli.get_current_price)
+        out = Path(__file__).resolve().parent / "holdings_latest.html"
+        out.write_text(html, encoding="utf-8")
+    except Exception as e:
+        print(f"  [!] 保有タブ(holdings_latest.html)更新失敗: {e}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="lss(同日決済)の日中OCO決済ウォッチャー")
@@ -279,6 +298,8 @@ def main() -> int:
                     help="今日以外の日付で発注したlss建玉も対象にする")
     ap.add_argument("--once", action="store_true",
                     help="1回だけ判定して終了(監視ループを回さない・デバッグ用)")
+    ap.add_argument("--no-holdings", action="store_true",
+                    help="保有タブ(holdings_latest.html)の定期更新をしない")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -328,6 +349,9 @@ def _run(args, close_at, today) -> int:
 
     closed: set = set()        # 決済済み(このセッションで買戻した銘柄)
     stop_placed: set = set()   # 損切の逆指値買いを建玉に設置済みの銘柄
+    _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
+    if not args.no_holdings:
+        _regen_holdings(cli)   # 起動直後に保有タブ(損益)を1回生成
     while True:
         now = datetime.now(JST)
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
@@ -383,6 +407,12 @@ def _run(args, close_at, today) -> int:
                     print(f"  [監視] {sym} {p['name']} 現在{_curs} ({_st} / {_tg})")
         else:
             print(f"  {now:%H:%M:%S} 対象のlss売建なし(未約定 or 全決済済み)")
+
+        # 保有タブ(損益)を定期更新: 約6サイクルごと(poll=5秒なら約30秒)。
+        # watcher が握る同一トークンで生成するので token 競合(401)にならない。
+        _hcycle += 1
+        if not args.no_holdings and _hcycle % 6 == 1:
+            _regen_holdings(cli)
 
         # 終了判定
         if args.once:
