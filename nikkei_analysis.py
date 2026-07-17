@@ -6925,40 +6925,71 @@ def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
     from backtest_limit_entry import FIXED_QTY as _QTY, FEE_PCT_ONE_WAY as fee
     agg = {c: [] for c in cells}
     n_with_5m = 0
-    print(f"  [5分足TP/SL] {len(items)}銘柄 × {len(cells)}マス 集計中(5分足ソース={source})...", flush=True)
-    # ── スイープ中はレポートのモードグローバルを一時解除 ──────────────────────
-    # sweep_symbol は各セルの sm/tm を run_limit_backtest に直接渡し、決済も自前の
-    # 5分足 first-touch で計算する。_SM_FORCE/_TM_FORCE(適用値)や _INTRADAY_5M
-    # (集計用の5分足置換)が効いたままだと、全マスが同じ幅になり、かつ余計な5分足
-    # 置換が49倍走って激遅になる。ここで退避→解除→復元する(スレッド起動前なので安全)。
-    _saved = {k: getattr(_blm, k, None) for k in
-              ("_SM_FORCE", "_TM_FORCE", "_INTRADAY_5M", "_MIRROR_PNL", "_ENTRY_TYPE_FORCE")}
-    _blm._SM_FORCE = None; _blm._TM_FORCE = None
-    _blm._INTRADAY_5M = False; _blm._MIRROR_PNL = False; _blm._ENTRY_TYPE_FORCE = None
-    try:
-        with _TPE(max_workers=workers) as ex:
-            futs = {ex.submit(_c5.sweep_symbol, s, n, st, is_mirror, cells, days,
-                              source, 0.0, 1e12, _QTY, fee, slip): (s, st)
-                    for (s, n, st) in items}
-            _done = 0
-            for fut in _asc(futs):
-                _done += 1
-                if _done % 50 == 0:
-                    print(f"    ...{_done}/{len(items)}銘柄", flush=True)
-                try:
-                    r = fut.result()
-                except Exception:
-                    continue
-                _tot = sum(len(v) for v in r.values())
-                if _tot > 0:
-                    n_with_5m += 1
-                for c, pnls in r.items():
-                    agg[c] += pnls
-    finally:
-        for k, v in _saved.items():
-            setattr(_blm, k, v)
 
-    stats = {c: _c5.cell_stat(agg[c]) for c in cells}
+    # ── 最適値キャッシュ ─────────────────────────────────────────────────
+    # 5分足スイープは重い(sm×tm × 全銘柄 × 5分足)。一度計算したら結果(stats)を保存し、
+    # 2回目以降は計算せずキャッシュを表示する。再計算したいときだけ SAMEDAY5M_RESWEEP=1。
+    import os as _os5, pickle as _pk5
+    from datetime import datetime as _dt5
+    from pathlib import Path as _P5
+    _mode5 = _os5.getenv("TRADING_MODE", "conservative")
+    _fam5 = "mirror" if is_mirror else "lss"
+    _cdir5 = _P5(__file__).resolve().parent / ".sameday5m_cache"
+    _cf5 = _cdir5 / f"sweep_{_mode5}_{_fam5}.pkl"
+    _resweep5 = _os5.getenv("SAMEDAY5M_RESWEEP") == "1"
+    _cached5 = None
+    if _cf5.exists() and not _resweep5:
+        try:
+            with open(_cf5, "rb") as _cfp:
+                _c = _pk5.load(_cfp)
+            if (_c.get("sm_list") == sm_list and _c.get("tm_list") == tm_list
+                    and _c.get("days") == days):
+                _cached5 = _c
+        except Exception:
+            _cached5 = None
+
+    _cache_note5 = ""
+    if _cached5 is not None:
+        stats = _cached5["stats"]
+        n_with_5m = _cached5.get("n_with_5m", 0)
+        _cache_note5 = (f'<span style="color:#fbbf24">（キャッシュ再利用: '
+                        f'{_cached5.get("computed", "?")} 計算。再計算は '
+                        f'SAMEDAY5M_RESWEEP=1 を付けて実行）</span>')
+    else:
+        print(f"  [5分足TP/SL] {len(items)}銘柄 × {len(cells)}マス 集計中(5分足ソース={source})...", flush=True)
+        # ── スイープ中はレポートのモードグローバルを一時解除 ──────────────────────
+        # sweep_symbol は各セルの sm/tm を run_limit_backtest に直接渡し、決済も自前の
+        # 5分足 first-touch で計算する。_SM_FORCE/_TM_FORCE(適用値)や _INTRADAY_5M
+        # (集計用の5分足置換)が効いたままだと、全マスが同じ幅になり、かつ余計な5分足
+        # 置換が49倍走って激遅になる。ここで退避→解除→復元する(スレッド起動前なので安全)。
+        _saved = {k: getattr(_blm, k, None) for k in
+                  ("_SM_FORCE", "_TM_FORCE", "_INTRADAY_5M", "_MIRROR_PNL", "_ENTRY_TYPE_FORCE")}
+        _blm._SM_FORCE = None; _blm._TM_FORCE = None
+        _blm._INTRADAY_5M = False; _blm._MIRROR_PNL = False; _blm._ENTRY_TYPE_FORCE = None
+        try:
+            with _TPE(max_workers=workers) as ex:
+                futs = {ex.submit(_c5.sweep_symbol, s, n, st, is_mirror, cells, days,
+                                  source, 0.0, 1e12, _QTY, fee, slip): (s, st)
+                        for (s, n, st) in items}
+                _done = 0
+                for fut in _asc(futs):
+                    _done += 1
+                    if _done % 50 == 0:
+                        print(f"    ...{_done}/{len(items)}銘柄", flush=True)
+                    try:
+                        r = fut.result()
+                    except Exception:
+                        continue
+                    _tot = sum(len(v) for v in r.values())
+                    if _tot > 0:
+                        n_with_5m += 1
+                    for c, pnls in r.items():
+                        agg[c] += pnls
+        finally:
+            for k, v in _saved.items():
+                setattr(_blm, k, v)
+        stats = {c: _c5.cell_stat(agg[c]) for c in cells}
+
     if not any(stats.values()):
         return (f'<div style="margin:16px 0;padding:16px 20px;background:#1e293b;'
                 f'border-radius:8px;border-left:3px solid #f59e0b;color:#fbbf24">'
@@ -6972,6 +7003,17 @@ def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
         st = stats[c]
         if st and (best is None or st["pnl"] > stats[best]["pnl"]):
             best = c
+
+    # 新規計算したときだけ結果を保存(次回以降は計算スキップ)。
+    if _cached5 is None:
+        try:
+            _cdir5.mkdir(exist_ok=True)
+            with open(_cf5, "wb") as _cfp:
+                _pk5.dump({"stats": stats, "n_with_5m": n_with_5m, "sm_list": sm_list,
+                           "tm_list": tm_list, "days": days,
+                           "computed": _dt5.now().strftime("%Y-%m-%d %H:%M")}, _cfp)
+        except Exception:
+            pass
 
     def _pf(x):
         return "∞" if x == float("inf") else f"{x:.2f}"
@@ -6999,7 +7041,7 @@ def build_sameday_5m_sweep_html(days: int, workers: int, is_mirror: bool,
         bline = (f'<p style="margin:10px 0 4px;font-size:0.9rem">★ 5分足の最適: '
                  f'<b style="color:#4ade80">損切ATR={best[0]} / 利確ATR={best[1]}</b> → '
                  f'<b style="color:{"#4ade80" if b["pnl"]>=0 else "#f87171"}">{b["pnl"]:+,.0f}円</b> '
-                 f'(PF{_pf(b["pf"])} / 勝率{b["wr"]:.0f}% / {b["n"]}取引)</p>')
+                 f'(PF{_pf(b["pf"])} / 勝率{b["wr"]:.0f}% / {b["n"]}取引) {_cache_note5}</p>')
     _cost = "摩擦なし(スリッページ0)" if slip == 0 else f"損切スリップ{slip*100:.2f}%"
     return (
         f'<div style="margin:0 0 16px;padding:16px 20px;background:#1e293b;'
