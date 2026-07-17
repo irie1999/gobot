@@ -9230,7 +9230,7 @@ function switchTbd(id, tab) {{
                     if _cap_d > 0 else "")
         dk_key = dk.replace("-", "")
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
-                f'onclick="showEntryDate{pfx.upper()}({dseq},\'{dk_key}\')">'
+                f'onclick="showEntryDate{pfx.upper()}(this,\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
@@ -9300,7 +9300,7 @@ function switchTbd(id, tab) {{
                f'<span style="color:#f87171">損{n_s}</span> '
                f'<span style="color:#94a3b8">T{n_c}</span></span>')
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
-                f'onclick="showEntryDate{pfx.upper()}({dseq},\'{dk_key}\')">'
+                f'onclick="showEntryDate{pfx.upper()}(this,\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
@@ -11584,36 +11584,36 @@ function toggleMG(hdr) {{
   body.style.display = isOpen ? 'none' : 'block';
   if (arr) arr.textContent = isOpen ? '▶' : '▼';
 }}
-function _showEntryDateGrid(seq, dk, pfx) {{
-  var ym     = dk.substr(0,6);
-  var btnId  = pfx+'date_btn_'+seq+'_'+dk;
-  var detId  = pfx+'date_detail_'+seq+'_'+dk;
-  var curBtn = document.getElementById(btnId);
-  var isActive = curBtn && curBtn.classList.contains('edate-active');
-  // この月の詳細エリアだけ閉じる
-  var detArea = document.getElementById('mgd_'+pfx+seq+'_'+ym);
-  if (detArea) {{
-    detArea.querySelectorAll('[id^="'+pfx+'date_detail_'+seq+'_"]').forEach(function(el) {{ el.style.display='none'; }});
+function _showEntryDateGrid(btn, dk) {{
+  // クリックしたボタン(this)を起点に、同じ月ブロック(.mg-body)内の詳細だけ開閉する。
+  // 以前は getElementById で id 指定していたが、同一ページに同じ id が複数あると
+  // 常に最初の(隠れた)要素を操作してしまい「押しても詳細が出ない」不具合が出た。
+  // DOM の親子関係で辿ることで id 重複に依存しない(=堅牢)。
+  if (typeof btn === 'string' || typeof btn === 'number') return;  // 旧シグネチャ無効化
+  var body = btn.closest('.mg-body');
+  if (!body) return;
+  var wasActive = btn.classList.contains('edate-active');
+  // この月のボタン選択を解除 + 詳細を全部閉じる(この月ブロック内だけ)
+  body.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
+  var det = body.querySelector('.mg-detail');
+  if (det) {{
+    det.querySelectorAll('[id*="date_detail_"]').forEach(function(el) {{ el.style.display='none'; }});
   }}
-  // アクティブボタンをリセット（全体）
-  var _paneMap = {{'e':'entry','b':'bt70entry','x':'exit','y':'bt70exit'}};
-  var _pane = _paneMap[pfx] || 'entry';
-  var con = document.getElementById('detail_'+seq+'_'+_pane);
-  if (con) con.querySelectorAll('.edate-btn').forEach(function(b) {{ b.classList.remove('edate-active'); }});
-  if (!isActive) {{
-    var det = document.getElementById(detId);
-    if (det) {{
-      det.style.display = 'block';
-      setTimeout(function() {{ det.scrollIntoView({{behavior:'smooth', block:'nearest'}}); }}, 50);
+  if (!wasActive && det) {{
+    // クリック日の詳細は id が _<dk> で終わる。この月ブロック内で一意。
+    var target = det.querySelector('[id*="date_detail_"][id$="_'+dk+'"]');
+    if (target) {{
+      target.style.display = 'block';
+      setTimeout(function() {{ target.scrollIntoView({{behavior:'smooth', block:'nearest'}}); }}, 50);
     }}
-    if (curBtn) curBtn.classList.add('edate-active');
+    btn.classList.add('edate-active');
   }}
 }}
-function showEntryDateE(seq, dk) {{ _showEntryDateGrid(seq, dk, 'e'); }}
-function showEntryDateB(seq, dk) {{ _showEntryDateGrid(seq, dk, 'b'); }}
-function showEntryDateC(seq, dk) {{ _showEntryDateGrid(seq, dk, 'c'); }}
-function showEntryDateX(seq, dk) {{ _showEntryDateGrid(seq, dk, 'x'); }}
-function showEntryDateY(seq, dk) {{ _showEntryDateGrid(seq, dk, 'y'); }}
+function showEntryDateE(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateB(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateC(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateX(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateY(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
