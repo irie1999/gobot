@@ -37,7 +37,8 @@ kabu はOCO(利確と損切を同時に置く)機能を持たない(建玉に返
   python lss_exit_watcher.py --execute          # デモ口座に決済発注
   python lss_exit_watcher.py --execute --prod   # 本番口座 (要明示)
   python lss_exit_watcher.py --poll 5           # ポーリング間隔(秒, 既定5)
-  python lss_exit_watcher.py --close-at 14:55   # 引け成行に切替える時刻(既定14:55)
+  python lss_exit_watcher.py --close-at 15:20   # 引け決済に切替える時刻(既定15:20)
+  python lss_exit_watcher.py --immediate        # 引けを即時成行に(既定は引け成行MOC)
   python lss_exit_watcher.py --all-dates        # 過去日発注の取りこぼしlss建玉も対象
 """
 
@@ -67,7 +68,8 @@ from kabu_api import KabuClient, CASH_MARGIN_CLOSE
 JST = timezone(timedelta(hours=9))
 _BASE = Path(__file__).resolve().parent
 MARKET_START = dtime(9, 0)    # 寄り(東証)。これより前は成行が通らないので発火しない
-MARKET_END = dtime(15, 0)     # 大引け(東証)。これを過ぎたらループ終了
+MARKET_END = dtime(15, 30)    # 大引け(東証, 2024/11/5以降は15:30)。これを過ぎたらループ終了
+                              # ※15:25-15:30はクロージング・オークション
 
 # ── 多重起動防止(タスクスケジューラの重複起動・手動起動が重なっても1つだけ動かす) ──
 # lock ファイルの mtime を各ループで更新(ハートビート)。_LOCK_STALE 秒より古い lock は
@@ -184,7 +186,7 @@ def _parse_hhmm(s: str) -> dtime:
         hh, mm = s.split(":")
         return dtime(int(hh), int(mm))
     except Exception:
-        return dtime(14, 55)
+        return dtime(15, 20)
 
 
 def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
@@ -299,8 +301,9 @@ def main() -> int:
                     help="本番口座(18080)に接続 (未指定ならデモ18081)")
     ap.add_argument("--poll", type=float, default=5.0,
                     help="ポーリング間隔(秒, 既定5)")
-    ap.add_argument("--close-at", default="14:55",
-                    help="引け成行に切替える時刻 HH:MM (既定 14:55)")
+    ap.add_argument("--close-at", default="15:20",
+                    help="引け決済に切替える時刻 HH:MM (既定 15:20 = 15:25の"
+                         "クロージング・オークション直前。それまで損切/利確を優先)")
     ap.add_argument("--tol", type=float, default=0.08,
                     help="建玉の平均約定値とlss発注価格の一致許容(既定0.08=±8%%)")
     ap.add_argument("--margin-type", type=int, default=3,
@@ -311,8 +314,8 @@ def main() -> int:
                     help="1回だけ判定して終了(監視ループを回さない・デバッグ用)")
     ap.add_argument("--no-holdings", action="store_true",
                     help="保有タブ(holdings_latest.html)の定期更新をしない")
-    ap.add_argument("--use-moc", action="store_true",
-                    help="引けの決済を引け成行(MOC/大引け約定)にする(既定は即時成行)")
+    ap.add_argument("--immediate", action="store_true",
+                    help="引けの決済を即時成行にする(既定は引け成行MOC=15:30終値約定)")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -324,8 +327,8 @@ def main() -> int:
     print("=" * 66)
     print(f"lss 日中OCO決済ウォッチャー  {now:%Y-%m-%d %H:%M JST}")
     print(f"モード: {mode_label} / 接続先: {env_label} / 損切(上)・利確(下) 先着で成行買戻し")
-    _close_kind = "引け成行(MOC)" if args.use_moc else "即時成行"
-    print(f"引け決済({_close_kind})切替: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
+    _close_kind = "即時成行" if args.immediate else "引け成行(MOC)"
+    print(f"引け決済({_close_kind})発注: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
     print("=" * 66)
 
     # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。
@@ -385,14 +388,15 @@ def _run(args, close_at, today) -> int:
                 _curs = f"{cur:,.0f}" if cur else "?"
                 # 引け: 損切逆指値を取消して引け成行で買戻し
                 if after_close:
-                    # 既定は「即時成行」で買戻し(数秒で約定・目視確認可・失敗しても
-                    # 5秒ごとの次サイクルで自動リトライ)。--use-moc で引け成行(MOC)。
-                    if args.use_moc:
-                        print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
-                        ok = _close_moc(cli, sym, qty, hid)
-                    else:
+                    # 既定は「引け成行(MOC)」= 15:30のクロージング・オークション(終値)で約定。
+                    # 発注時刻に関係なく終値で約定するのでバックテスト(終値決済)と一致。
+                    # --immediate で即時成行(数秒で約定・目視確認可・5秒ごと自動リトライ)。
+                    if args.immediate:
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 即時成行で買戻し")
                         ok = _close_buy(cli, sym, qty, hid, "引け")
+                    else:
+                        print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
+                        ok = _close_moc(cli, sym, qty, hid)
                     if ok:
                         closed.add(sym)
                     continue
