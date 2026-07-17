@@ -192,8 +192,19 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
     try:
         positions = cli.get_positions(product=2)   # 信用建玉
     except Exception as e:
-        print(f"  [!] 建玉取得失敗: {e}")
-        return []
+        # 401(Unauthorized) = トークン失効(他プロセスが /token を取り直した等)。
+        # 一度だけ再接続してトークンを取り直し、リトライする(競合が消えれば自己回復)。
+        if "401" in str(e) or "Unauthorized" in str(e):
+            try:
+                print("  [再接続] トークン失効(401)を検知 → kabu再接続してリトライ")
+                cli.connect()
+                positions = cli.get_positions(product=2)
+            except Exception as e2:
+                print(f"  [!] 建玉取得失敗(再接続後も): {e2}")
+                return []
+        else:
+            print(f"  [!] 建玉取得失敗: {e}")
+            return []
     out = []
     for kp in positions:
         sym = str(kp.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
