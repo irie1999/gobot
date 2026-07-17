@@ -818,11 +818,28 @@ if _args.long_stop_short and _lss_proposal_file:
         #   2) 価格フィルタ(この価格タブの max_price。無制限タブは素通し)を先に適用
         #      → 値がさが上位に偏るので、先に価格で絞らないと予算タブが空になる
         #   3) その上で上位N本(--lss-top)だけ採用
-        _canon, _dropped = [], 0
+        # 空売り不可(非貸借/取扱なし)銘柄を自動除外する。check_shortable.py が
+        # kabu の MarginSell 照会で作る not_shortable.py(NOT_SHORTABLE=[...])を読む。
+        # ファイルが無ければ除外しない(後方互換)。月1で check_shortable を回して更新する。
+        _not_short: set = set()
+        try:
+            _nsp = Path(__file__).resolve().parent / "not_shortable.py"
+            if _nsp.exists():
+                _nsns: dict = {}
+                exec(_nsp.read_text(encoding="utf-8"), _nsns)
+                _not_short = {str(x).upper().removesuffix(".T").split(".")[0]
+                              for x in _nsns.get("NOT_SHORTABLE", [])}
+        except Exception as _e:
+            print(f"[lss] not_shortable.py 読み込み失敗: {_e} → 除外なしで続行")
+
+        _canon, _dropped, _ns_dropped = [], 0, 0
         for _tup in _sel:
             if not _tup or len(_tup) < 3:
                 continue
             _c, _n, _s = _tup[0], _tup[1], _tup[2]
+            if str(_c).upper().removesuffix(".T").split(".")[0] in _not_short:
+                _ns_dropped += 1
+                continue   # 空売り不可 → lss から自動除外
             if _s in _CANON_STOP or _s in _CANON_BRK:
                 _canon.append((_c, _n, _s))
             else:
@@ -843,7 +860,8 @@ if _args.long_stop_short and _lss_proposal_file:
               f"価格≤{_args.max_price:,.0f}円で {len(_canon)}ペア"
               + (f"(上位{_lss_top}) " if _lss_top > 0 else " ")
               + f"[stop {len(_p_stop)}/brk {len(_p_brk)}]"
-              + (f" 非対応{_dropped}除外" if _dropped else ""))
+              + (f" 非対応{_dropped}除外" if _dropped else "")
+              + (f" 空売不可{_ns_dropped}除外" if _ns_dropped else ""))
 
 # シグナルタブ用: 全設定を重複なしで結合
 _seen_cfg_labels: set = set()

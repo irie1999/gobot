@@ -61,6 +61,30 @@ def _f(v, default=0.0):
         return default
 
 
+_NOT_SHORTABLE_CACHE: set | None = None
+
+
+def _load_not_shortable() -> set:
+    """not_shortable.py(check_shortable が kabu 照会で作成)の NOT_SHORTABLE を読む。
+    プロセス内で1回だけ読み込む。ファイルが無ければ空集合(=除外なし・後方互換)。"""
+    global _NOT_SHORTABLE_CACHE
+    if _NOT_SHORTABLE_CACHE is not None:
+        return _NOT_SHORTABLE_CACHE
+    out: set = set()
+    try:
+        from pathlib import Path
+        p = Path(__file__).resolve().parent / "not_shortable.py"
+        if p.exists():
+            ns: dict = {}
+            exec(p.read_text(encoding="utf-8"), ns)
+            out = {str(x).upper().removesuffix(".T").split(".")[0]
+                   for x in ns.get("NOT_SHORTABLE", [])}
+    except Exception as e:
+        print(f"  ⚠ not_shortable.py 読み込み失敗: {e}")
+    _NOT_SHORTABLE_CACHE = out
+    return out
+
+
 def _log_placed_order(rec: dict) -> None:
     """発注内容を placed_orders_<date>.csv に追記する(保有銘柄タブのソース)。"""
     import csv
@@ -89,6 +113,11 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     side = "short" if side == "short" else "long"
     if not symbol or entry <= 0 or qty <= 0:
         return "発注失敗: 銘柄・逆指値・株数が不正です"
+
+    # 空売り不可(非貸借/取扱なし)銘柄はショート発注を止める(最終ガード)。
+    # check_shortable.py が作る not_shortable.py の NOT_SHORTABLE を参照。
+    if side == "short" and symbol in _load_not_shortable():
+        return f"発注中止: {symbol} は空売り不可(非貸借/取扱なし)。lss対象外です。"
 
     # 既定は信用新規(2)。ロングで --genbutsu 指定時のみ現物(1)。ショートは常に信用。
     cash_margin = 1 if (side == "long" and GENBUTSU) else 2
