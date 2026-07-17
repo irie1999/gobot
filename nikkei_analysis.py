@@ -9003,7 +9003,9 @@ function switchTbd(id, tab) {{
                          f'<br><span style="font-size:0.73rem;color:#4ade80">{tp_pct:+.1f}%</span></td>')
             # 逆指値トリガー + 指値上限/下限(±3%)。シグナル一覧と同じ発注条件を併記し、
             # 「シグナルで出た指値条件」を取引詳細でも突合できるようにする。
-            _is_short_t = str(t.get("strategy", "")).upper().endswith("_S")
+            # ショート判定は「損切りがエントリーより上」で行う(戦略名末尾_Sだと lss を
+            # 取りこぼす: lssは MACDTF/DON 等と同名なので、指値ガードが+3%になってしまう)。
+            _is_short_t = (osp > olp)
             _lim_entry  = olp * ((1.0 - 0.03) if _is_short_t else (1.0 + 0.03))
             _lim_lbl    = "指値下限≥" if _is_short_t else "指値上限≤"
             _lim_pct    = "-3.0%" if _is_short_t else "+3.0%"
