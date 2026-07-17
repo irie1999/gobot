@@ -206,6 +206,23 @@ class KabuClient:
         url = f"{self.base_url}/kabusapi/board/{symbol}@{exchange}"
         return self._get_json(url)
 
+    def get_symbol(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
+        """銘柄マスタ照会 (/symbol)。信用売建可否(MarginSell)・信用買建可否(MarginBuy)・
+        貸借区分などを含む。空売り可否の判定に使う(読み取りのみ・発注しない)。"""
+        url = f"{self.base_url}/kabusapi/symbol/{symbol}@{exchange}"
+        return self._get_json(url)
+
+    def is_margin_sellable(self, symbol: int | str,
+                           exchange: int = EXCHANGE_TOSHO) -> bool | None:
+        """信用売建(空売り)が可能か。/symbol の MarginSell を見る。
+        取得失敗/フラグ不明時は None(判定不能)を返す。"""
+        try:
+            info = self.get_symbol(symbol, exchange)
+        except Exception:
+            return None
+        v = info.get("MarginSell")
+        return bool(v) if v is not None else None
+
     def get_current_price(self, symbol: int | str,
                           exchange: int = EXCHANGE_TOSHO) -> float | None:
         """現在値だけ取り出す。取得失敗時は None。"""
