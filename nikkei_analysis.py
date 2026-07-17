@@ -9075,7 +9075,7 @@ function switchTbd(id, tab) {{
             if _v is not None:
                 return _v
         return t.get("rec_score") or 0
-    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 40]
+    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 30]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
         done_trades,
@@ -9084,7 +9084,7 @@ function switchTbd(id, tab) {{
     )
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
-    trade_rows_bt40 = _rows_for(bt40_trades,   "BT40以上の取引なし")
+    trade_rows_bt40 = _rows_for(bt40_trades,   "BT30以上の取引なし")
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -9212,7 +9212,7 @@ function switchTbd(id, tab) {{
     # BT40以上(質の高い銘柄)のエントリー日別グリッド。mirror/lss では
     # _LONG_BT_REF(ロングの真のBT)で判定(_eff_long_bt)。
     _bt40_entry_sorted = pending_trades + sorted(
-        [t for t in done_trades if _eff_long_bt(t) >= 40],
+        [t for t in done_trades if _eff_long_bt(t) >= 30],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
@@ -11492,10 +11492,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT40以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT30以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT40以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT30以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -11515,7 +11515,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_bt40" class="detail-tab-pane">
 <p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">
-🎯 BTスコア40以上（＝質の高い銘柄）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
+🎯 BTスコア30以上（＝赤字の0-29帯を除外）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -11547,7 +11547,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
 </div>
 <div id="detail_{_dseq}_bt40entry" class="detail-tab-pane">
-<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">🎯 BTスコア40以上（質の高い銘柄）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">🎯 BTスコア30以上（赤字の0-29帯を除外）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt40_entry_sorted)}
 {_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
 </div>
