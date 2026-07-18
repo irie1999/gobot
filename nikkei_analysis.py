@@ -10290,12 +10290,21 @@ function switchTbd(id, tab) {{
             except Exception:
                 agg = None
 
+        # 既定では計算しない(.\daily を止めない/BTがディスク復元だと5分足が未ロードで重い)。
+        # 有効キャッシュがあれば表示、無ければ「未計算」案内のみ。計算は明示 RESWEEP=1 のとき。
+        if (agg is None or agg.get("_v") != 4) and not _resweep2:
+            return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
+                    '<p class="footnote">未計算です（重いので既定ではスキップ）。'
+                    '<b>一度だけ</b> 次で計算してください（5分足を読み込むので数分かかる場合あり）：'
+                    '<br><code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily; $env:LSS_CLOSESTOP_RESWEEP=&quot;&quot;</code>'
+                    '<br>一度計算すればキャッシュされ、以降の <code>.\\daily</code> で自動表示されます。</p>')
+
         if agg is None or agg.get("_v") != 4:
-            # 5分足は損益集計のバックテストで既にメモリ(_INTRADAY_5M_CACHE)に載っている。
-            # それを再利用して重いロードをせず判定だけ再計算する(=固まらない)。
-            # メモリに無い銘柄はスキップ(新規ロードしない)。
-            print(f"  [終値損切り比較] メモリ上の5分足で {len(tgt)}件を再判定中"
-                  f"(損切り/利確を分離)...", flush=True)
+            # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
+            # 銘柄あたり1回だけロード(_l5=プロセスキャッシュ)。進捗を出して無反応を防ぐ。
+            print(f"  [終値損切り比較] {len(tgt)}件を再判定中(損切り/利確を日足終値=引けに委ねる比較)...",
+                  flush=True)
+            _by_sym5: dict = {}
             def _si():
                 return {"n": 0, "pnl": 0.0, "win": 0, "stop": 0, "tgt": 0, "close": 0}
             def _acc(st, pnl, rsn):
@@ -10312,9 +10321,16 @@ function switchTbd(id, tab) {{
             diffs = []   # 利確を日足終値 vs 現行 で判定が変わったトレード
             _miss = 0; _tot5 = len(tgt)
             for _i5, (sym, name, strat, fd, lp, osp, otp, qty) in enumerate(tgt, 1):
-                if _i5 % 3000 == 0:
+                if _i5 % 2000 == 0:
                     print(f"    [終値損切り比較] {_i5}/{_tot5} 判定済み...", flush=True)
-                _sd = _m5c.get(sym)   # メモリにある5分足だけ使う(新規ロードしない)
+                # メモリにあれば即利用、無ければその場でロード(銘柄あたり1回)。
+                _sd = _m5c.get(sym)
+                if _sd is None:
+                    _sd = _by_sym5.get(sym)
+                    if _sd is None:
+                        try: _sd = _l5(sym) or {}
+                        except Exception: _sd = {}
+                        _by_sym5[sym] = _sd
                 db = _sd.get(fd) if _sd else None
                 if db is None or len(db) < 2:
                     _miss += 1
@@ -10355,9 +10371,8 @@ function switchTbd(id, tab) {{
         tc = agg["touch"]; ds = agg["dstop"]; dt = agg["dtgt"]
         if tc["n"] == 0:
             return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
-                    '<p class="footnote">メモリ上に5分足が無く比較不可（BTがディスクキャッシュから'
-                    '復元された場合など）。<code>set SAMEDAY5M_RESWEEP=1</code> 等で5分足を再計算する'
-                    '実行にすると集計されます。</p>')
+                    '<p class="footnote">5分足が揃うトレードが無く比較不可（対象銘柄の5分足pklが'
+                    'stock_5min に無い等）。</p>')
 
         def _wr(st): return st["win"] / st["n"] * 100 if st["n"] else 0.0
 
