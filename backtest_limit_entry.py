@@ -632,6 +632,8 @@ _TM_FORCE: float | None = None
 _INTRADAY_5M: bool = False
 _INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
 _INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
+_INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
+                                       # ときは呼び出し側で増やす(既定400=ライブ用)
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
 
 
@@ -642,7 +644,7 @@ def _load_5m_by_day(symbol: str) -> dict:
     by_day: dict = {}
     try:
         from daytrade_data import load_intraday as _li, split_by_day as _sbd
-        m5 = _li(symbol, days=400, source=_INTRADAY_5M_SOURCE)
+        m5 = _li(symbol, days=_INTRADAY_5M_DAYS, source=_INTRADAY_5M_SOURCE)
         if m5 is not None and not m5.empty:
             by_day = _sbd(m5)
     except Exception:

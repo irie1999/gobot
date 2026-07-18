@@ -1039,8 +1039,11 @@ if (_args.mirror or _args.long_stop_short):
         except Exception:
             _bte._INTRADAY_5M_SOURCE = "auto"
         _bte._INTRADAY_5M = True
-        print(f"[5分足集計] mirror/lss の同日決済を5分足で集計(ソース={_bte._INTRADAY_5M_SOURCE})。"
-              f"5分足の無い取引は除外されます。", flush=True)
+        # 5分足ロード日数を表示窓に合わせる(既定400=ライブ)。基準月スイープ等で表示窓が
+        # 長いと、5分足を400日しか読まず古い月がlssから欠落するため、窓+60日に拡張する。
+        _bte._INTRADAY_5M_DAYS = max(400, _disp_days + 60)
+        print(f"[5分足集計] mirror/lss の同日決済を5分足で集計(ソース={_bte._INTRADAY_5M_SOURCE} / "
+              f"5分足ロード{_bte._INTRADAY_5M_DAYS}日)。5分足の無い取引は除外されます。", flush=True)
 
 # mirror/lss は「検証専用」モード: 実発注用の signals_latest.json や共有スコア
 # キャッシュを上書きしない(発注サーバが誤モードのシグナルを掴むのを防ぐ)。
