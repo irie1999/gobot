@@ -12,7 +12,7 @@ import pandas as pd
 
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
-                  no_target=False):
+                  no_target=False, no_stop=False):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -35,6 +35,9 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
       no_target      : True=利確(target)を一切見ない。損切りだけ判定し、当たらなければ
                        引け決済(=同日lssで『利確を日足終値=引けに委ねる/利確を置かない』
                        運用に相当)。損切りは soc に従う(既定タッチ)。
+      no_stop        : True=損切り(stop)を一切見ない。利確だけ判定し、当たらなければ
+                       引け決済(=同日lssで『損切りを日足終値=引けに委ねる』運用に相当)。
+                       損失が引けまで走るので通常は不利側の検証用。
     Returns: (exit_price, reason, entry_ts, exit_ts)
       reason ∈ {"target","stop","close","no_entry","no_5m"}
     """
@@ -66,9 +69,10 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読み回避)。
     #    損切り(上)・利確(下)は独立に close/タッチを選べる。損切り優先は維持。
     for j in range(ei + 1, n):
-        stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
-        if stop_hit:                  # 上抜け=損切(同時タッチも優先)
-            return (float(closes[j]) if soc else stop_p), "stop", ent_ts, times[j]
+        if not no_stop:               # no_stop=True なら損切りを見ない(引けまで持つ)
+            stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
+            if stop_hit:              # 上抜け=損切(同時タッチも優先)
+                return (float(closes[j]) if soc else stop_p), "stop", ent_ts, times[j]
         if not no_target:             # no_target=True なら利確を見ない(引けまで持つ)
             tgt_hit = (closes[j] <= target_p) if toc else (lows[j] <= target_p)
             if tgt_hit:               # 下抜け=利確

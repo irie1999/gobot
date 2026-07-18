@@ -10290,7 +10290,7 @@ function switchTbd(id, tab) {{
             except Exception:
                 agg = None
 
-        if agg is None or agg.get("_v") != 3:
+        if agg is None or agg.get("_v") != 4:
             # 5分足は損益集計のバックテストで既にメモリ(_INTRADAY_5M_CACHE)に載っている。
             # それを再利用して重いロードをせず判定だけ再計算する(=固まらない)。
             # メモリに無い銘柄はスキップ(新規ロードしない)。
@@ -10304,10 +10304,12 @@ function switchTbd(id, tab) {{
                 if rsn == "stop": st["stop"] += 1
                 elif rsn == "target": st["tgt"] += 1
                 else: st["close"] += 1
-            # 5モード: touch=現行 / sclose=損切りだけ終値 / tclose=利確だけ終値 /
-            #          bclose=両方終値 / hikec=損切りタッチ+利確なし(引け決済=日足終値相当)
-            touch, sclose, tclose, bclose, hikec = _si(), _si(), _si(), _si(), _si()
-            diffs = []   # 損切りだけ終値 vs 現行 で判定が変わったトレード
+            # 3モード(すべて日足終値=同日lssでは引け決済に委ねる):
+            #   touch  = 現行(損切り・利確ともタッチ)
+            #   dstop  = 損切りを日足終値(日中は損切りせず引けまで持つ / 利確はタッチ)
+            #   dtgt   = 利確を日足終値(日中は利確せず引けまで持つ / 損切りはタッチ)
+            touch, dstop, dtgt = _si(), _si(), _si()
+            diffs = []   # 利確を日足終値 vs 現行 で判定が変わったトレード
             _miss = 0; _tot5 = len(tgt)
             for _i5, (sym, name, strat, fd, lp, osp, otp, qty) in enumerate(tgt, 1):
                 if _i5 % 3000 == 0:
@@ -10319,33 +10321,29 @@ function switchTbd(id, tab) {{
                     continue
                 stop_p = max(osp, otp); tp = min(osp, otp)
                 q = qty or 100
-                # 同じ5分足に対し5モードの決済を評価(エントリーは同一)
-                # (key, stats, stop_on_close, target_on_close, no_target)
+                # 同じ5分足に対し3モードの決済を評価(エントリーは同一)
+                # (key, stats, no_target, no_stop)
                 _modes = (
-                    ("touch",  touch,  False, False, False),
-                    ("sclose", sclose, True,  False, False),
-                    ("tclose", tclose, False, True,  False),
-                    ("bclose", bclose, True,  True,  False),
-                    ("hikec",  hikec,  False, False, True),   # 損切りタッチ+利確なし(引け)
+                    ("touch", touch, False, False),   # 現行: 損切り・利確ともタッチ
+                    ("dstop", dstop, False, True),    # 損切りを日足終値(=日中損切りなし)
+                    ("dtgt",  dtgt,  True,  False),   # 利確を日足終値(=日中利確なし)
                 )
                 res = {}
                 bad = False
-                for key, st, soc, toc, notgt in _modes:
+                for key, st, notgt, nostop in _modes:
                     xp, rsn, _, _ = _se(db, lp, stop_p, tp, False,
-                                        stop_on_close=soc, target_on_close=toc,
-                                        no_target=notgt)
+                                        no_target=notgt, no_stop=nostop)
                     if rsn in ("no_5m", "no_entry"):
                         bad = True; break
                     res[key] = (_sp(lp, xp, rsn, q, _fee5, _slip5), rsn)
                 if bad:
                     continue
-                for key, st, _soc, _toc, _nt in _modes:
+                for key, st, _nt, _ns in _modes:
                     _acc(st, res[key][0], res[key][1])
-                pt, rt = res["touch"]; ps, rs = res["sclose"]
+                pt, rt = res["touch"]; ps, rs = res["dtgt"]
                 if rt != rs or abs(pt - ps) > 1:
                     diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
-            agg = {"_v": 3, "touch": touch, "sclose": sclose,
-                   "tclose": tclose, "bclose": bclose, "hikec": hikec,
+            agg = {"_v": 4, "touch": touch, "dstop": dstop, "dtgt": dtgt,
                    "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
             try:
@@ -10354,8 +10352,7 @@ function switchTbd(id, tab) {{
             except Exception:
                 pass
 
-        tc = agg["touch"]; sc = agg["sclose"]; tgc = agg["tclose"]; bc = agg["bclose"]
-        hk = agg.get("hikec") or {"n": 0, "pnl": 0.0, "win": 0, "stop": 0, "tgt": 0, "close": 0}
+        tc = agg["touch"]; ds = agg["dstop"]; dt = agg["dtgt"]
         if tc["n"] == 0:
             return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
                     '<p class="footnote">メモリ上に5分足が無く比較不可（BTがディスクキャッシュから'
@@ -10383,12 +10380,11 @@ function switchTbd(id, tab) {{
                     f'損切{st["stop"]} / 利確{st["tgt"]} / 引け{st["close"]}</div></div>')
 
         # 最良モードを判定
-        _cands = [("損切りだけ終値", sc), ("利確だけ終値", tgc),
-                  ("両方終値", bc), ("利確なし・引け決済", hk), ("現行タッチ", tc)]
+        _cands = [("損切りを日足終値", ds), ("利確を日足終値", dt), ("現行タッチ", tc)]
         _best = max(_cands, key=lambda x: x[1]["pnl"])
         verdict = (f'✅ 最良は <b>{_best[0]}</b>（{_best[1]["pnl"]:+,.0f}円 / 現行比 '
                    f'{_best[1]["pnl"]-tc["pnl"]:+,.0f}円）' if _best[1] is not tc
-                   else '→ 現行(タッチ)が最良。終値判定に変える利点なし')
+                   else '→ 現行(両方タッチ)が最良。日足終値に委ねる利点なし')
 
         drows = ""
         _ja = {"stop": "損切り", "target": "利確", "close": "引け"}
@@ -10409,34 +10405,31 @@ function switchTbd(id, tab) {{
 
         _cache_note = "（キャッシュ済み・再計算は LSS_CLOSESTOP_RESWEEP=1）"
         return f"""<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）{_cache_note}</h3>
-<p class="footnote">同じエントリーで決済ルールだけ変更して比較。<b>タッチ</b>=5分足の高値/安値が
-ラインにタッチで発火(一瞬のヒゲでも発火)。<b>終値</b>=5分足の終値がラインを超えたバーで発火(ヒゲ無視)。
-損切りと利確を別々に切替えて比較。BT30以上のlssトレードのみ。<br>
-🎯 <b>利確なし・引け決済(=日足終値)</b>＝日中に利確を置かず、損切りされない限り引け成行で決済
-(同日lssで『利確を日足終値に委ねる』運用に相当)。損切りはタッチのまま。</p>
+<p class="footnote">同じエントリーで決済ルールだけ変更して比較（BT30以上のlssトレードのみ）。
+同日決済なので<b>日足終値で判定＝その決済を日中に置かず引けまで持つ（引け成行）</b>を意味する。<br>
+・<b>損切りを日足終値</b>＝日中は損切りせず引けまで持つ（損失が引けまで走る）／利確はタッチのまま。<br>
+・<b>利確を日足終値</b>＝日中は利確せず引けまで持つ／損切りはタッチのまま。</p>
 <div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0">
 {_card("現行: 両方タッチ", tc, "#f59e0b")}
-{_card("損切りだけ終値", sc, "#4ade80", base=tc)}
-{_card("利確だけ終値(5分足)", tgc, "#a78bfa", base=tc)}
-{_card("両方終値", bc, "#38bdf8", base=tc)}
-{_card("🎯 利確なし・引け決済(=日足終値)", hk, "#f472b6", base=tc)}
+{_card("損切りを日足終値(引けまで持つ)", ds, "#f472b6", base=tc)}
+{_card("利確を日足終値(引けまで持つ)", dt, "#38bdf8", base=tc)}
 </div>
 <p style="margin:6px 0 12px;font-size:0.9rem;color:#cbd5e1">{verdict}</p>
 <p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">
-  「損切りだけ終値 vs 現行」で判定が変わったトレード（差分の大きい順・上位20件）</p>
+  「利確を日足終値 vs 現行」で決済が変わったトレード（差分の大きい順・上位20件）</p>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">
   <thead><tr>
     <th style="text-align:left;padding:3px 8px;color:#94a3b8;font-size:0.75rem">約定日</th>
     <th style="text-align:left;padding:3px 8px;color:#94a3b8;font-size:0.75rem">銘柄</th>
     <th style="padding:3px 8px;color:#94a3b8;font-size:0.75rem">戦略</th>
     <th style="padding:3px 8px;color:#f59e0b;font-size:0.75rem">現行損益</th>
-    <th style="padding:3px 8px;color:#4ade80;font-size:0.75rem">損切り終値損益</th>
+    <th style="padding:3px 8px;color:#38bdf8;font-size:0.75rem">利確を日足終値の損益</th>
     <th style="padding:3px 8px;color:#94a3b8;font-size:0.75rem">差分</th>
   </tr></thead>
-  <tbody>{drows or '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:12px">判定が変わったトレードなし</td></tr>'}</tbody>
+  <tbody>{drows or '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:12px">決済が変わったトレードなし</td></tr>'}</tbody>
 </table></div>
-<p class="footnote" style="margin-top:8px">※ 総損益で比較。「損切りだけ終値」が現行より大きければ、
-損切りのみ終値判定に切替える価値あり（利確はタッチ維持）。実運用反映は §16 と整合確認のうえ。</p>"""
+<p class="footnote" style="margin-top:8px">※ 総損益で比較。現行より大きいモードがあれば、その決済ルールに
+切替える価値あり。実運用に反映するには watcher/close_lss_guard を同じ判定に揃える(§16 と整合確認)。</p>"""
 
     _close_stop_compare_html_str = _close_stop_compare_html(done_trades)
 
