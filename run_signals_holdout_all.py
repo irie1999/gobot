@@ -127,6 +127,9 @@ _pre.add_argument("--no-5m", action="store_true",
                        "既定は5分足で集計(正確)")
 _pre.add_argument("--no-news", action="store_true",
                   help="ニュース取得(スコア計算＋ニュース・情報タブ)をスキップして高速化する")
+_pre.add_argument("--no-risk", action="store_true",
+                  help="決算日/リスクチェック(kabutan等へのWeb取得)をスキップして高速化する。"
+                       "503連発で遅い初回に有効。同日キャッシュがある2回目は元から速い")
 _pre.add_argument("--lss-tpsl", action="store_true",
                   help="--lss-proposal 使用時でも『㉔ 5分足TP/SL最適化』タブ(損切/利確の"
                        "最適ATR幅)を出す。初回は計算、以降はキャッシュ表示(SAMEDAY5M_RESWEEP=1で再計算)")
@@ -1452,7 +1455,9 @@ for _sig in _na._last_signals:
     if _s and _s not in _sig_sym_map:
         _sig_sym_map[_s] = _n
 
-if _precompute_risks and _sig_sym_map:
+if getattr(_args, "no_risk", False):
+    print("決算日/リスクチェック: スキップ (--no-risk)", flush=True)
+elif _precompute_risks and _sig_sym_map:
     try:
         _precompute_risks(
             list(_sig_sym_map.items()),
