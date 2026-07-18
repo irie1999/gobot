@@ -2975,6 +2975,15 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
 
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
 
+# 取引明細フラットテーブル(全部/BT30以上/BT70以上)の描画行数上限。
+# lss top指定なしで数万行になりHTMLが重くなるため、既定で直近1500件に打ち切る。
+# 集計(サマリー/月別/スコア別)は全件ベースで別計算なので数字は変わらない。
+# 全件描画したいときは環境変数 DETAIL_ROW_CAP=0 (または大きい値) で上書き。
+try:
+    _DETAIL_ROW_CAP = int(os.environ.get("DETAIL_ROW_CAP", "1500"))
+except Exception:
+    _DETAIL_ROW_CAP = 1500
+
 _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_html
 _pnl_bt_cache: dict = {}         # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
 _preoos_tab5_score_cache: dict = {}  # (sym, strat, cutoff_days) -> score
@@ -9056,10 +9065,24 @@ function switchTbd(id, tab) {{
   {last_col}
 </tr>"""
 
-    def _rows_for(trades, empty_msg, entry_first=False) -> str:
+    def _rows_for(trades, empty_msg, entry_first=False, cap=None) -> str:
+        # 描画行数を上限で打ち切る(軽量化)。trades は決済日/エントリー日の降順で
+        # 渡ってくるので、先頭=直近を残す。集計(サマリー/月別/スコア別)は全件ベースの
+        # まま別途計算しているので、ここでの打ち切りは表示だけに影響する。
+        # 環境変数 DETAIL_ROW_CAP=0 で無制限(全件描画)に戻せる。
+        _cap = _DETAIL_ROW_CAP if cap is None else cap
+        _omitted = 0
+        if _cap and len(trades) > _cap:
+            _omitted = len(trades) - _cap
+            trades = trades[:_cap]
         rows = "".join(_build_trade_row(t, entry_first=entry_first) for t in trades)
         if not rows:
             rows = f'<tr><td colspan="15" style="text-align:center;color:#64748b;padding:16px">{empty_msg}</td></tr>'
+        elif _omitted:
+            rows += (f'<tr><td colspan="15" style="text-align:center;color:#94a3b8;'
+                     f'padding:12px;background:#1e293b">… 軽量化のため直近{_cap:,}件のみ表示。'
+                     f'残り{_omitted:,}件は省略（集計値は全件ベース）。'
+                     f'全件表示は環境変数 DETAIL_ROW_CAP=0 で再実行 …</td></tr>')
         return rows
 
     # 全部 / BT70以上 / BT40以上 / エントリー日別グリッド の 系統を用意
