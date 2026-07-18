@@ -2300,6 +2300,16 @@ _sel_base_disp = "直近WF(自動)"
 _m_base = _re_base.search(r"base(\d{4}-\d{2})", (_args.output_suffix or ""))
 if _m_base:
     _sel_base_disp = _m_base.group(1)
+elif getattr(_args, "lss_proposal", None):
+    # lssは提案ファイルで選定。提案の基準月を読む(BASE_MONTH変数 or 旧docstringコメント)。
+    try:
+        _pt = Path(_args.lss_proposal).read_text(encoding="utf-8")
+        _bm = (_re_base.search(r'BASE_MONTH\s*=\s*["\']?(\d{4}-\d{2})', _pt)
+               or _re_base.search(r'基準月\(TRAIN終端\):\s*(\d{4}-\d{2})', _pt))
+        if _bm:
+            _sel_base_disp = _bm.group(1)
+    except Exception:
+        pass
 elif getattr(_args, "long_base", None):
     _sel_base_disp = str(_args.long_base)[:7]
 

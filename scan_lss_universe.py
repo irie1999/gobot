@@ -320,6 +320,7 @@ def main():
         f'取引>={args.train_min_trades} 損益>0。TEST(2026-)は選定に未使用のOOS検証。',
         f'  合格 {len(selected)}ペア。TRAIN期待値順。',
         '"""',
+        f'BASE_MONTH = "{args.base_month}"   # 選定基準月(WF as-of)。レポートのヘッダ表示に使う',
         "SELECTED = [",
     ]
     for r in selected:
