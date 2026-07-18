@@ -134,6 +134,10 @@ _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
                   help="出力HTMLファイル名にサフィックスを付ける (内部用・--bothから自動設定)")
+_pre.add_argument("--default-tab", type=str, default="long",
+                  choices=["long", "short", "mirror", "lss"],
+                  help="統合レポートを開いたとき最初に表示する方向タブ (既定 long)。"
+                       "lss検証スイープでは lss を指定すると『ロング銘柄ショート』が最初に開く")
 _pre.add_argument("--rolling", type=int, default=0,
                   help="ローリング逆指値: 未約定時に終値で注文価格を更新する最大回数 (例: --rolling 2)")
 _pre.add_argument("--wf-until", type=str, default=None,
@@ -366,6 +370,10 @@ if _args.both and not _args.short:
         _skip_dirs.add("mirror")
     if getattr(_args, "no_short", False):
         _skip_dirs.add("short")
+    # 最初に開く方向タブ(--default-tab)。生成されない方向を指定したら long にフォールバック。
+    _default_dir = getattr(_args, "default_tab", "long")
+    if _default_dir in _skip_dirs:
+        _default_dir = "long"
     _DIRECTIONS = [d for d in [
         ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
         ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
@@ -417,7 +425,7 @@ if _args.both and not _args.short:
     ]:
         if _dir in _skip_dirs:
             continue
-        _is_active = _dir == "long"
+        _is_active = _dir == _default_dir
         _nav_btns += (
             f'  <button class="ls-btn {_dir_cls}{" active" if _is_active else ""}" '
             f'onclick="switchLs(\'{_dir}\')">{_lbl_prefix}</button>\n'
@@ -468,7 +476,7 @@ if _args.both and not _args.short:
             continue
         for _i, _mp in enumerate(_price_list):
             _frame_id = f"ls-{_dir}-{_mp}"
-            _active_fr = " active" if _dir == "long" and _i == 0 else ""
+            _active_fr = " active" if _dir == _default_dir and _i == 0 else ""
             _src = _generated[(_dir, _mp)].name
             # 遅延ロード: 全iframeを data-src(素のファイル名)にし、表示時にJSが
             # ?v=Date.now() を付けて読み込む。file:// はクエリを無視して古いiframeを
@@ -525,7 +533,7 @@ body{{margin:0;padding:0;background:#0f172a;font-family:sans-serif}}
 {_nav_btns}</div>
 {_frames}
 <script>
-var _curDir = 'long';
+var _curDir = '{_default_dir}';
 var _curPr  = {_first_mp};
 function _ensureLoaded(f) {{
   // data-src だけの iframe を初回表示時に読み込む (遅延ロード)。
