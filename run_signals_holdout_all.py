@@ -70,6 +70,9 @@ _pre.add_argument("--min-price",  type=float, default=0.0,
                   help="最新終値の下限 (円/株). 低位株除外 (例: 1000)")
 _pre.add_argument("--days",       type=int,   default=180,
                   help="損益タブで最初に表示する期間 (30/60/90/120/150/180)")
+_pre.add_argument("--days-from-base", action="store_true",
+                  help="表示期間を『選定基準月の翌月〜今日』にする(基準月スイープのOOS全体を表示)。"
+                       "基準月は --output-suffix の base<YYYY-MM> か --long-base から判定")
 _pre.add_argument("--symbol",     type=str,   default=None,
                   help="指定銘柄の期間別取引詳細を追加表示 (例: 8050.T)")
 _pre.add_argument("--short",      action="store_true",
@@ -662,6 +665,21 @@ if _cached_out.exists() and not _args.force:
     sys.exit(0)
 
 _PNL_PERIODS  = [30, 60, 90, 120, 150, 180, 270, 365]
+# --days-from-base: 選定基準月の翌月〜今日 を表示期間にする(基準月スイープのOOS全体)。
+if getattr(_args, "days_from_base", False):
+    import re as _re_dfb
+    from datetime import date as _dt_date
+    _bm_m = _re_dfb.search(r"base(\d{4})-(\d{2})", (_args.output_suffix or ""))
+    if not _bm_m and getattr(_args, "long_base", None):
+        _bm_m = _re_dfb.search(r"(\d{4})-(\d{2})", str(_args.long_base))
+    if _bm_m:
+        _by, _bmo = int(_bm_m.group(1)), int(_bm_m.group(2))
+        # OOS開始 = 基準月の翌月1日(基準月=TRAIN終端なので、その翌月からがOOS)
+        _oos_start = (_dt_date(_by + 1, 1, 1) if _bmo == 12 else _dt_date(_by, _bmo + 1, 1))
+        _dfb = (TODAY - _oos_start).days
+        if _dfb > 0:
+            _args.days = _dfb
+            print(f"[days-from-base] 表示期間を基準月{_by}-{_bmo:02d}の翌月〜今日={_dfb}日 に設定")
 # --forward-days/--back-days 指定時は表示窓=基準日の前後ぶん(since=基準日-back)。それ以外は --days。
 if _args.forward_days > 0 or _args.back_days > 0:
     _disp_days = _args.forward_days + _args.back_days

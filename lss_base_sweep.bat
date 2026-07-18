@@ -32,5 +32,5 @@ echo.
 echo ==================== base-month %BM% : lss selection ====================
 python scan_lss_universe.py --base-month %BM% --out lss_proposal_%BM%.py --max-price 6000 --source local
 echo ==================== base-month %BM% : report ====================
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_%BM%.py --long-base %LB% --no-mirror --force --no-news --no-serve --output-suffix _base%BM%
+python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_%BM%.py --long-base %LB% --days-from-base --no-mirror --force --no-news --no-serve --output-suffix _base%BM%
 goto :eof
