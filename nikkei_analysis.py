@@ -8965,8 +8965,11 @@ function switchTbd(id, tab) {{
     else:
         _overlap_kpi_html = ""
 
-    # 発注中を先頭に、それ以外は決済日降順
-    pending_trades = [t for t in display_trades if t.get("reason") == "発注中"]
+    # 損益タブ(取引明細)には「発注中」を表示しない。
+    # 発注中はBTキャッシュ由来の未決着シグナルで、キャッシュが古いと実際とズレる
+    # (幽霊表示)。今日の発注はライブ判定のシグナルタブが権威なので、明細は
+    # 決済済み(＋保有中)のみを出す。pending_trades は空にして先頭付加を止める。
+    pending_trades = []
     done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
