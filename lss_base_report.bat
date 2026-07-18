@@ -9,7 +9,6 @@ REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
 REM ============================================================
 cd /d "%~dp0"
 
-call :one 2024-06 2024-06-30
 call :one 2024-12 2024-12-31
 call :one 2025-06 2025-06-30
 call :one 2025-12 2025-12-31

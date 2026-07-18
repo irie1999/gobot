@@ -8,7 +8,6 @@ REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
 REM ============================================================
 cd /d "%~dp0"
 
-call :openlatest _base2024-06
 call :openlatest _base2024-12
 call :openlatest _base2025-06
 call :openlatest _base2025-12
