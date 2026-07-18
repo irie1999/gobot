@@ -2802,12 +2802,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         def _rrb_fn(sym):         return ""
         def _red_fn(sym, td=None): return ""
     rows = ""
+    _cum_cap = 0   # 予算表示用: BT降順の累計必要額(この行まで全部発注したら合計いくら)
     for i, s in enumerate(signals, 1):
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         qty      = _calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0
         pos_val  = round(s["order_p"] * qty)
+        _cum_cap += pos_val
         # 損切/目標の表示セル。lss は実際の注文(空売り)に合わせて 損切=上(+%)/目標=下(-%)。
         _is_lss_row = bool(s.get("is_lss"))
         if _is_lss_row and s.get("lss_stop") and s.get("lss_target"):
@@ -2863,10 +2865,11 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     f"&side={_side}"
                     f"&bt={s.get('rec_score', '') or ''}")
         # 🚀発注: このタブから fetch で /order に発注リクエスト（確認ダイアログ付き）
+        # 第1引数に this(=ボタン) を渡し、成功時に行へ✓を付けて発注済み累計に想定額を足す。
         _ord_btn = (f"<button type=\"button\" "
-                    f"onclick=\"gobotOrder('{_scode}','{_side}','{s['strategy']}',"
+                    f"onclick=\"gobotOrder(this,'{_scode}','{_side}','{s['strategy']}',"
                     f"{s['order_p']:.0f},{_ord_stop:.0f},{_ord_target:.0f},{qty},"
-                    f"'{s.get('rec_score', '') or ''}')\" "
+                    f"'{s.get('rec_score', '') or ''}',{pos_val})\" "
                     f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
                     f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
                     f"white-space:nowrap;margin-bottom:3px\">🚀 発注</button>")
@@ -2883,7 +2886,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         else:
             _reg_btn = (f'<div style="display:flex;flex-direction:column;gap:2px;'
                         f'align-items:center">{_ord_btn}{_reg_link}</div>')
-        rows += f"""<tr>
+        rows += f"""<tr class="sigrow" data-posval="{pos_val}" data-cum="{_cum_cap}">
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
     <span style="color:#64748b;font-size:0.75rem">{s["name"]}</span>{earn_html}<br>
@@ -2895,7 +2898,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#f87171">{_stop_cell}</td>
   <td style="text-align:right;color:#4ade80">{_tgt_cell}</td>
-  <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span></td>
+  <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span>
+    <br><span style="font-size:0.68rem;color:#64748b">累計 {_cum_cap:,.0f}円</span></td>
   <td style="text-align:center;color:#94a3b8">{_hold_cell}</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
   <td style="text-align:center">{_reg_btn}</td>
@@ -2904,7 +2908,56 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
     _order_js = """
 <script>
-function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
+var gobotOrderedTotal = 0;   // 発注済み合計額(円)
+var gobotOrderedCount = 0;   // 発注済み件数
+function gobotYen(n){ return Math.round(n).toLocaleString('ja-JP'); }
+
+// 予算入力 → BT降順で累計し、予算内までを緑ハイライト。上位N銘柄/合計/残を表示。
+function gobotApplyBudget(){
+  var el = document.getElementById('gobotBudget');
+  if(!el) return;
+  var budget = parseFloat((el.value||'').replace(/[^0-9.]/g,'')) || 0;
+  var rows = document.querySelectorAll('tr.sigrow');
+  var inN = 0, inSum = 0, lastInRow = null;
+  rows.forEach(function(r){
+    var cum = parseFloat(r.getAttribute('data-cum')) || 0;
+    var pv  = parseFloat(r.getAttribute('data-posval')) || 0;
+    r.classList.remove('inbudget','budgetline');
+    if(budget > 0 && cum <= budget){
+      r.classList.add('inbudget');
+      inN += 1; inSum += pv; lastInRow = r;
+    }
+  });
+  if(lastInRow) lastInRow.classList.add('budgetline');
+  var box = document.getElementById('gobotBudgetInfo');
+  if(box){
+    if(budget <= 0){ box.innerHTML = '予算を入力すると、上位から何銘柄まで発注できるかを緑で表示します。'; }
+    else {
+      box.innerHTML = '予算 <b>\\u00a5'+gobotYen(budget)+'</b> \\u2192 上位 <b style="color:#4ade80">'
+        + inN + '銘柄</b> まで発注可 / 合計必要額 <b>\\u00a5'+gobotYen(inSum)+'</b>'
+        + ' / 予算残 <b>\\u00a5'+gobotYen(budget-inSum)+'</b>';
+    }
+  }
+  gobotUpdateOrdered();
+}
+
+function gobotUpdateOrdered(){
+  var el = document.getElementById('gobotBudget');
+  var budget = el ? (parseFloat((el.value||'').replace(/[^0-9.]/g,'')) || 0) : 0;
+  var box = document.getElementById('gobotOrderedInfo');
+  if(!box) return;
+  var rem = budget > 0 ? (' / 予算残 <b>\\u00a5'+gobotYen(budget-gobotOrderedTotal)+'</b>') : '';
+  box.innerHTML = '発注済み <b style="color:#f87171">'+gobotOrderedCount+'件</b>'
+    + ' 合計 <b>\\u00a5'+gobotYen(gobotOrderedTotal)+'</b>' + rem;
+}
+function gobotResetOrdered(){
+  gobotOrderedTotal = 0; gobotOrderedCount = 0;
+  document.querySelectorAll('tr.sigrow.ordered').forEach(function(r){ r.classList.remove('ordered'); });
+  document.querySelectorAll('.gobot-ordermark').forEach(function(m){ m.remove(); });
+  gobotUpdateOrdered();
+}
+
+function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval){
   var lbl = (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
   if(!confirm('\\u3010\\u767a\\u6ce8\\u78ba\\u8a8d\\u3011\\n'+sym+' '+strat+' ('+side+')\\n'+lbl
       +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\n\\u767a\\u6ce8\\u30b5\\u30fc\\u30d0(order_server:8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
@@ -2914,11 +2967,57 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
   fetch('http://127.0.0.1:8765/order',{method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.text();})
-    .then(function(t){alert(t);})
+    .then(function(t){
+      // 発注済みとして記録(想定額を累計に加算・行に✓)。中止応答は加算しない。
+      var ok = !(/\\u4e2d\\u6b62|\\u5931\\u6557|error|Error/.test(t));
+      if(ok){
+        gobotOrderedTotal += (parseFloat(posval)||0);
+        gobotOrderedCount += 1;
+        var row = btn ? btn.closest('tr') : null;
+        if(row && !row.classList.contains('ordered')){
+          row.classList.add('ordered');
+          var mark = document.createElement('span');
+          mark.className = 'gobot-ordermark';
+          mark.textContent = ' \\u2713発注済';
+          mark.style.cssText = 'color:#f87171;font-size:0.7rem;font-weight:700;display:block';
+          btn.parentNode.appendChild(mark);
+        }
+        gobotUpdateOrdered();
+      }
+      alert(t);
+    })
     .catch(function(e){alert('\\u767a\\u6ce8\\u5931\\u6557: \\u767a\\u6ce8\\u30b5\\u30fc\\u30d0\\u3092\\u8d77\\u52d5\\u3057\\u3066\\u304f\\u3060\\u3055\\u3044\\n  python order_server.py\\n'+e);});
 }
+document.addEventListener('DOMContentLoaded', function(){
+  var el = document.getElementById('gobotBudget');
+  if(el){ el.addEventListener('input', gobotApplyBudget); gobotApplyBudget(); }
+});
 </script>
+<style>
+tr.sigrow.inbudget > td { background: rgba(34,197,94,0.10); }
+tr.sigrow.budgetline > td { border-bottom: 2px solid #22c55e; }
+tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
+#gobotBudgetBar input { width:150px;padding:6px 8px;border-radius:6px;border:1px solid #475569;
+  background:#0f172a;color:#e2e8f0;font-size:0.95rem;text-align:right; }
+#gobotBudgetBar button { padding:6px 10px;border-radius:6px;border:1px solid #475569;
+  background:#1e293b;color:#cbd5e1;font-size:0.82rem;cursor:pointer; }
+</style>
 """
+    # 予算バー: 予算を入れると予算内までを緑表示 / 発注ボタンで発注済み累計を集計
+    _budget_bar = (
+        '<div id="gobotBudgetBar" style="margin:10px 0;padding:12px 16px;background:#0b1220;'
+        'border:1px solid #334155;border-radius:8px;display:flex;flex-wrap:wrap;gap:14px;'
+        'align-items:center">'
+        '<label style="color:#93c5fd;font-weight:700;font-size:0.9rem">💰 予算(円): '
+        '<input id="gobotBudget" type="text" inputmode="numeric" placeholder="例: 3000000"></label>'
+        '<button type="button" onclick="gobotApplyBudget()">反映</button>'
+        '<span id="gobotBudgetInfo" style="color:#cbd5e1;font-size:0.86rem">'
+        '予算を入力すると、上位から何銘柄まで発注できるかを緑で表示します。</span>'
+        '<span style="flex-basis:100%;height:0"></span>'
+        '<span id="gobotOrderedInfo" style="color:#cbd5e1;font-size:0.86rem">'
+        '発注済み <b style="color:#f87171">0件</b> 合計 <b>¥0</b></span>'
+        '<button type="button" onclick="gobotResetOrdered()">発注済みをリセット</button>'
+        '</div>')
     if _LSS_ORDER_MODE:
         # lss タブ: 発注ボタンは『信用新規売りの逆指値』として正しく送られる。
         _analysis_warn = (
@@ -2956,6 +3055,7 @@ function gobotOrder(sym, side, strat, entry, stop, target, qty, bt){
   ※ 逆指値注文（青）= ロング:翌日高値がこの価格以上で発動 / ショート:翌日安値がこの価格以下で発動<br>
   ※ 指値（橙）= ロング:上限(+3%) ギャップアップが大きすぎたらキャンセル / ショート:下限(-3%) ギャップダウンが大きすぎたらキャンセル
 </p>
+{_budget_bar}
 <table>
   <thead><tr>
     <th>順位</th>
