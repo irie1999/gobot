@@ -10232,7 +10232,9 @@ function switchTbd(id, tab) {{
 </div>
 </div>"""
 
-    _stop_pattern_html_str = _stop_pattern_html(done_trades)
+    # ⑦ 損切りパターン分析(BT70以上)は削除。ロング方向ロジック(当日安値/終値<stop)で
+    # lss(ショート=stopは上側)には合わず誤解を招くため。代わりに下の『終値損切り比較』を出す。
+    _stop_pattern_html_str = ""
 
     # ── 🔻 lss 終値損切り比較（BT30以上）─────────────────────────────────────
     # lssの損切りは現行「5分足の高値がstopにタッチ」で発火(=一瞬の上ヒゲでも損切り)。
