@@ -10,7 +10,8 @@ from __future__ import annotations
 import pandas as pd
 
 
-def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger):
+def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
+                  on_close=False):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -20,6 +21,12 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger):
       target_p       : ショートの利確(下側)
       is_rise_trigger: True=価格が上昇して entry_p に到達で約定(mirror・指値空売り)
                        False=価格が下落して entry_p に到達で約定(lss・逆指値空売り)
+      on_close       : False(既定)=タッチ判定(高値≥stop / 安値≤target で発火。現行挙動)。
+                       True=終値判定(5分足の終値がstop/targetを超えたバーで発火)。
+                       一瞬のヒゲで刈られる損切りを避けたいときの比較用。約定は
+                       タッチ判定のまま(注文の性質上、寄せ・トリガー到達は変えない)。
+                       発火価格は終値判定では『そのバーの終値』を使う(タッチ判定は
+                       ライン価格ちょうど)。
     Returns: (exit_price, reason, entry_ts, exit_ts)
       reason ∈ {"target","stop","close","no_entry","no_5m"}
     """
@@ -31,7 +38,7 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger):
     times = day_bars.index
     n = len(highs)
 
-    # 1) 約定バー(トリガー到達)
+    # 1) 約定バー(トリガー到達)。約定はタッチ判定のまま(on_closeでも変えない)。
     ei = None
     for j in range(n):
         if is_rise_trigger:
@@ -48,10 +55,17 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger):
     ent_ts = times[ei]
     # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読み回避)
     for j in range(ei + 1, n):
-        if highs[j] >= stop_p:        # 上抜け=損切(同時タッチも優先)
-            return stop_p, "stop", ent_ts, times[j]
-        if lows[j] <= target_p:       # 下抜け=利確
-            return target_p, "target", ent_ts, times[j]
+        if on_close:
+            # 終値判定: 5分足の終値がライン超え=発火。発火価格はそのバー終値。
+            if closes[j] >= stop_p:       # 終値で損切りライン超え
+                return float(closes[j]), "stop", ent_ts, times[j]
+            if closes[j] <= target_p:     # 終値で利確ライン超え
+                return float(closes[j]), "target", ent_ts, times[j]
+        else:
+            if highs[j] >= stop_p:        # 上抜け=損切(同時タッチも優先)
+                return stop_p, "stop", ent_ts, times[j]
+            if lows[j] <= target_p:       # 下抜け=利確
+                return target_p, "target", ent_ts, times[j]
     # 3) どちらも当たらなければ引け
     return float(closes[-1]), "close", ent_ts, times[-1]
 

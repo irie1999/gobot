@@ -630,6 +630,8 @@ _TM_FORCE: float | None = None
 #                  5分足ベースにするためのフック。5分足の無い日のトレードは集計から除外。
 #                  ※ この時 pnl はショート損益を直接計上するので _MIRROR_PNL 反転は使わない。
 _INTRADAY_5M: bool = False
+_INTRADAY_5M_ON_CLOSE: bool = False    # True=5分足の"終値"でstop/target判定(ヒゲ刈り回避の比較用)
+                                       # False(既定)=タッチ判定(高値≥stop/安値≤target。現行)
 _INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
 _INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
 _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
@@ -1134,7 +1136,8 @@ def run_limit_backtest(
             if _db is None or len(_db) < 2:
                 continue   # 5分足なし → 除外(日足へフォールバックしない)
             _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
-            _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise)
+            _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
+                                               on_close=_INTRADAY_5M_ON_CLOSE)
             if _rsn in ("no_5m", "no_entry"):
                 continue
             _qty = _t.get("qty", FIXED_QTY)
