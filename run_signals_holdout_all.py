@@ -378,16 +378,18 @@ if _args.both and not _args.short:
         _skip_dirs.add("short")
     if getattr(_args, "no_long", False):
         _skip_dirs.add("long")
-    # 最初に開く方向タブ(--default-tab)。生成されない方向を指定したら long にフォールバック。
-    _default_dir = getattr(_args, "default_tab", "long")
-    if _default_dir in _skip_dirs:
-        _default_dir = "long"
     _DIRECTIONS = [d for d in [
         ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
         ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
         ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
     ] if d[0] not in _skip_dirs]
+    # 最初に開く方向タブ(--default-tab)。生成されない方向を指定したら、生成される
+    # 先頭の方向にフォールバック(--no-long 等で long 自体を省くケースに対応)。
+    _default_dir = getattr(_args, "default_tab", "long")
+    _avail_dirs = [d[0] for d in _DIRECTIONS]
+    if _default_dir not in _avail_dirs:
+        _default_dir = _avail_dirs[0] if _avail_dirs else "long"
     if _skip_dirs:
         print(f"[both] スキップ: {', '.join(sorted(_skip_dirs))}")
     for _mp in _price_list:
