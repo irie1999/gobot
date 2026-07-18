@@ -10289,6 +10289,15 @@ function switchTbd(id, tab) {{
             except Exception:
                 agg = None
 
+        # 既定では計算しない(.\daily を止めないため)。有効なキャッシュがあれば表示、
+        # 無ければ「未計算」を出すだけ。計算は明示 LSS_CLOSESTOP_RESWEEP=1 のときのみ。
+        if (agg is None or agg.get("_v") != 2) and not _resweep2:
+            return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
+                    '<p class="footnote">未計算です（重いので既定ではスキップ）。計算するには '
+                    '<code>set LSS_CLOSESTOP_RESWEEP=1</code> を付けて一度だけ実行してください'
+                    '（例: <code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily</code>）。'
+                    '一度計算すればキャッシュされ、以降は自動表示されます。</p>')
+
         if agg is None or agg.get("_v") != 2:
             def _si():
                 return {"n": 0, "pnl": 0.0, "win": 0, "stop": 0, "tgt": 0, "close": 0}
