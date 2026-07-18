@@ -10289,7 +10289,7 @@ function switchTbd(id, tab) {{
             except Exception:
                 agg = None
 
-        if agg is None:
+        if agg is None or agg.get("_v") != 2:
             def _si():
                 return {"n": 0, "pnl": 0.0, "win": 0, "stop": 0, "tgt": 0, "close": 0}
             def _acc(st, pnl, rsn):
@@ -10298,8 +10298,9 @@ function switchTbd(id, tab) {{
                 if rsn == "stop": st["stop"] += 1
                 elif rsn == "target": st["tgt"] += 1
                 else: st["close"] += 1
-            touch, clos = _si(), _si()
-            diffs = []
+            # 4モード: touch=現行 / sclose=損切りだけ終値 / tclose=利確だけ終値 / bclose=両方終値
+            touch, sclose, tclose, bclose = _si(), _si(), _si(), _si()
+            diffs = []   # 損切りだけ終値 vs 現行 で判定が変わったトレード
             by_sym: dict = {}
             for sym, name, strat, fd, lp, osp, otp, qty in tgt:
                 if sym not in by_sym:
@@ -10310,16 +10311,30 @@ function switchTbd(id, tab) {{
                     continue
                 stop_p = max(osp, otp); tp = min(osp, otp)
                 q = qty or 100
-                xt, rt, _, _ = _se(db, lp, stop_p, tp, False, on_close=False)
-                xc, rc, _, _ = _se(db, lp, stop_p, tp, False, on_close=True)
-                if rt in ("no_5m", "no_entry") or rc in ("no_5m", "no_entry"):
+                # 同じ5分足に対し4モードの決済を評価(エントリーは同一)
+                _modes = (
+                    ("touch",  touch,  False, False),
+                    ("sclose", sclose, True,  False),
+                    ("tclose", tclose, False, True),
+                    ("bclose", bclose, True,  True),
+                )
+                res = {}
+                bad = False
+                for key, st, soc, toc in _modes:
+                    xp, rsn, _, _ = _se(db, lp, stop_p, tp, False,
+                                        stop_on_close=soc, target_on_close=toc)
+                    if rsn in ("no_5m", "no_entry"):
+                        bad = True; break
+                    res[key] = (_sp(lp, xp, rsn, q, _fee5, _slip5), rsn)
+                if bad:
                     continue
-                pt = _sp(lp, xt, rt, q, _fee5, _slip5)
-                pc = _sp(lp, xc, rc, q, _fee5, _slip5)
-                _acc(touch, pt, rt); _acc(clos, pc, rc)
-                if rt != rc or abs(pt - pc) > 1:
-                    diffs.append((sym, name, strat, str(fd), pt, rt, pc, rc))
-            agg = {"touch": touch, "close": clos, "ndiff": len(diffs),
+                for key, st, _soc, _toc in _modes:
+                    _acc(st, res[key][0], res[key][1])
+                pt, rt = res["touch"]; ps, rs = res["sclose"]
+                if rt != rs or abs(pt - ps) > 1:
+                    diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
+            agg = {"_v": 2, "touch": touch, "sclose": sclose,
+                   "tclose": tclose, "bclose": bclose, "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
             try:
                 _cdir2.mkdir(exist_ok=True)
@@ -10327,35 +10342,44 @@ function switchTbd(id, tab) {{
             except Exception:
                 pass
 
-        tc, cl = agg["touch"], agg["close"]
+        tc = agg["touch"]; sc = agg["sclose"]; tgc = agg["tclose"]; bc = agg["bclose"]
         if tc["n"] == 0:
             return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
                     '<p class="footnote">5分足が揃うトレードが無く比較不可。</p>')
 
-        # 勝率・総損益・決済理由内訳で比較(勝ち額/負け額は保持していないのでPFは出さない)。
         def _wr(st): return st["win"] / st["n"] * 100 if st["n"] else 0.0
-        d_pnl = cl["pnl"] - tc["pnl"]
-        d_col = "#4ade80" if d_pnl > 0 else ("#f87171" if d_pnl < 0 else "#94a3b8")
-        verdict = ("✅ 終値判定のほうが総損益が大きい（ヒゲ刈り回避が効いている）" if d_pnl > 0
-                   else "❌ 終値判定は総損益が悪化（ヒゲ回避より利を伸ばせない損が上回る）" if d_pnl < 0
-                   else "→ ほぼ差なし")
 
-        def _card(title, st, col):
+        def _card(title, st, col, base=None):
+            d_html = ""
+            if base is not None:
+                dp = st["pnl"] - base["pnl"]
+                dcol = "#4ade80" if dp > 0 else ("#f87171" if dp < 0 else "#94a3b8")
+                d_html = (f'<div style="color:{dcol};font-size:0.82rem;font-weight:700;'
+                          f'margin-top:4px">対現行 {dp:+,.0f}円</div>')
             return (f'<div style="background:#1e293b;padding:12px 18px;border-radius:8px;'
-                    f'min-width:210px">'
+                    f'min-width:200px;{"border:1px solid "+col if base is not None else ""}">'
                     f'<div style="color:{col};font-weight:700;margin-bottom:6px">{title}</div>'
-                    f'<div style="font-size:1.3rem;font-weight:700;color:'
+                    f'<div style="font-size:1.25rem;font-weight:700;color:'
                     f'{"#4ade80" if st["pnl"]>=0 else "#f87171"}">{st["pnl"]:+,.0f}円</div>'
+                    f'{d_html}'
                     f'<div style="color:#94a3b8;font-size:0.78rem;margin-top:4px">'
                     f'{st["n"]}取引 / 勝率 {_wr(st):.0f}%</div>'
                     f'<div style="color:#64748b;font-size:0.72rem;margin-top:2px">'
                     f'損切{st["stop"]} / 利確{st["tgt"]} / 引け{st["close"]}</div></div>')
 
+        # 最良モードを判定
+        _cands = [("損切りだけ終値", sc), ("利確だけ終値", tgc),
+                  ("両方終値", bc), ("現行タッチ", tc)]
+        _best = max(_cands, key=lambda x: x[1]["pnl"])
+        verdict = (f'✅ 最良は <b>{_best[0]}</b>（{_best[1]["pnl"]:+,.0f}円 / 現行比 '
+                   f'{_best[1]["pnl"]-tc["pnl"]:+,.0f}円）' if _best[1] is not tc
+                   else '→ 現行(タッチ)が最良。終値判定に変える利点なし')
+
         drows = ""
-        for sym, name, strat, fd, pt, rt, pc, rc in agg["diffs"][:20]:
-            dd = pc - pt
+        _ja = {"stop": "損切り", "target": "利確", "close": "引け"}
+        for sym, name, strat, fd, pt, rt, ps, rs in agg["diffs"][:20]:
+            dd = ps - pt
             dc = "#4ade80" if dd > 0 else ("#f87171" if dd < 0 else "#94a3b8")
-            _ja = {"stop": "損切り", "target": "利確", "close": "引け"}
             drows += (f'<tr>'
                       f'<td style="text-align:left;padding:3px 8px;color:#94a3b8">{fd}</td>'
                       f'<td style="text-align:left;padding:3px 8px">{sym.split(".")[0]} '
@@ -10363,42 +10387,39 @@ function switchTbd(id, tab) {{
                       f'<td style="text-align:center;padding:3px 8px;color:#94a3b8">{strat}</td>'
                       f'<td style="text-align:right;padding:3px 8px">{pt:+,.0f}<br>'
                       f'<span style="font-size:0.68rem;color:#64748b">{_ja.get(rt,rt)}</span></td>'
-                      f'<td style="text-align:right;padding:3px 8px">{pc:+,.0f}<br>'
-                      f'<span style="font-size:0.68rem;color:#64748b">{_ja.get(rc,rc)}</span></td>'
+                      f'<td style="text-align:right;padding:3px 8px">{ps:+,.0f}<br>'
+                      f'<span style="font-size:0.68rem;color:#64748b">{_ja.get(rs,rs)}</span></td>'
                       f'<td style="text-align:right;padding:3px 8px;color:{dc};font-weight:700">{dd:+,.0f}</td>'
                       f'</tr>')
 
         _cache_note = "（キャッシュ済み・再計算は LSS_CLOSESTOP_RESWEEP=1）"
         return f"""<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）{_cache_note}</h3>
-<p class="footnote">同じエントリーで決済ルールだけ変更して比較。
-<b>現行(タッチ)</b>=5分足の高値がstopにタッチで損切り(一瞬の上ヒゲでも発火)。
-<b>終値判定</b>=5分足の終値がstop/targetを超えたバーで発火(ヒゲは無視)。
-損切り・利確とも終値判定。BT30以上のlssトレードのみ。</p>
-<div style="display:flex;gap:16px;flex-wrap:wrap;margin:12px 0">
-{_card("現行: タッチ判定", tc, "#f59e0b")}
-{_card("終値判定(損切り/利確とも)", cl, "#38bdf8")}
-<div style="background:#0e1a2e;padding:12px 18px;border-radius:8px;min-width:210px;
-  border:1px solid {d_col}">
-  <div style="color:#93c5fd;font-weight:700;margin-bottom:6px">差分（終値−タッチ）</div>
-  <div style="font-size:1.3rem;font-weight:700;color:{d_col}">{d_pnl:+,.0f}円</div>
-  <div style="color:#cbd5e1;font-size:0.8rem;margin-top:6px">{verdict}</div>
-  <div style="color:#64748b;font-size:0.72rem;margin-top:4px">判定が変わった: {agg["ndiff"]}件</div>
+<p class="footnote">同じエントリーで決済ルールだけ変更して比較。<b>タッチ</b>=5分足の高値/安値が
+ラインにタッチで発火(一瞬のヒゲでも発火)。<b>終値</b>=5分足の終値がラインを超えたバーで発火(ヒゲ無視)。
+損切りと利確を<b>別々に</b>切替えて4パターン比較。BT30以上のlssトレードのみ。<br>
+🎯 <b>損切りだけ終値</b>＝一瞬の上ヒゲ損切りを回避しつつ、利確はタッチのまま取り逃さない案（本命）。</p>
+<div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0">
+{_card("現行: 両方タッチ", tc, "#f59e0b")}
+{_card("🎯 損切りだけ終値", sc, "#4ade80", base=tc)}
+{_card("利確だけ終値", tgc, "#a78bfa", base=tc)}
+{_card("両方終値", bc, "#38bdf8", base=tc)}
 </div>
-</div>
-<p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">判定が変わったトレード（差分の大きい順・上位20件）</p>
+<p style="margin:6px 0 12px;font-size:0.9rem;color:#cbd5e1">{verdict}</p>
+<p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">
+  「損切りだけ終値 vs 現行」で判定が変わったトレード（差分の大きい順・上位20件）</p>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">
   <thead><tr>
     <th style="text-align:left;padding:3px 8px;color:#94a3b8;font-size:0.75rem">約定日</th>
     <th style="text-align:left;padding:3px 8px;color:#94a3b8;font-size:0.75rem">銘柄</th>
     <th style="padding:3px 8px;color:#94a3b8;font-size:0.75rem">戦略</th>
-    <th style="padding:3px 8px;color:#f59e0b;font-size:0.75rem">タッチ損益</th>
-    <th style="padding:3px 8px;color:#38bdf8;font-size:0.75rem">終値損益</th>
+    <th style="padding:3px 8px;color:#f59e0b;font-size:0.75rem">現行損益</th>
+    <th style="padding:3px 8px;color:#4ade80;font-size:0.75rem">損切り終値損益</th>
     <th style="padding:3px 8px;color:#94a3b8;font-size:0.75rem">差分</th>
   </tr></thead>
   <tbody>{drows or '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:12px">判定が変わったトレードなし</td></tr>'}</tbody>
 </table></div>
-<p class="footnote" style="margin-top:8px">※ 勝率・総損益・決済理由内訳で比較。総損益がプラス側なら終値判定が優位。
-実運用に反映するなら backtest_limit_entry._INTRADAY_5M_ON_CLOSE を既定Trueにする(要 §16 と整合確認)。</p>"""
+<p class="footnote" style="margin-top:8px">※ 総損益で比較。「損切りだけ終値」が現行より大きければ、
+損切りのみ終値判定に切替える価値あり（利確はタッチ維持）。実運用反映は §16 と整合確認のうえ。</p>"""
 
     _close_stop_compare_html_str = _close_stop_compare_html(done_trades)
 
