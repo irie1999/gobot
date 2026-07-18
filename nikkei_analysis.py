@@ -10263,7 +10263,9 @@ function switchTbd(id, tab) {{
             lp  = float(t.get("order_limit", 0) or 0)
             osp = float(t.get("order_stop", 0) or 0)
             otp = float(t.get("order_target", 0) or 0)
-            edt = t.get("entry_dt")
+            # 約定日は正規化済み date の entry_d_raw を使う(entry_dt は "%m/%d" 文字列で
+            # 年が無く、5分足の日付キー[date]と一致しない)。lss同日なので exit_d_raw で代替可。
+            edt = t.get("entry_d_raw") or t.get("exit_d_raw")
             fd  = edt.date() if hasattr(edt, "date") else edt
             if lp <= 0 or osp <= 0 or otp <= 0 or fd is None:
                 continue
