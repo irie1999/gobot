@@ -105,6 +105,9 @@ _pre.add_argument("--no-mirror", action="store_true",
                   help="--both でロングミラー(却下済み・重い5分足スイープ)を生成しない")
 _pre.add_argument("--no-short", action="store_true",
                   help="--both でショート(WF選定ショート)を生成しない")
+_pre.add_argument("--no-long", action="store_true",
+                  help="--both でロングを生成しない(lss単独の調査を高速化)。lssの②BT軸分析は"
+                       "rec_scoreベースなので影響なし。BT30フィルタタブのみrec_scoreにフォールバック")
 _pre.add_argument("--bt-max", type=float, default=None,
                   help="ロングBTスコアの上限グローバル絞り込み(この値未満の銘柄だけ"
                        "レポート全体を集計)。未指定なら全銘柄を集計し、取引明細の"
@@ -370,6 +373,8 @@ if _args.both and not _args.short:
         _skip_dirs.add("mirror")
     if getattr(_args, "no_short", False):
         _skip_dirs.add("short")
+    if getattr(_args, "no_long", False):
+        _skip_dirs.add("long")
     # 最初に開く方向タブ(--default-tab)。生成されない方向を指定したら long にフォールバック。
     _default_dir = getattr(_args, "default_tab", "long")
     if _default_dir in _skip_dirs:

@@ -29,5 +29,5 @@ if not exist "lss_proposal_%BM%.py" (
   goto :eof
 )
 echo ==================== base-month %BM% : report only ====================
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_%BM%.py --long-base %LB% --days-from-base --default-tab lss --no-mirror --force --no-news --no-serve --output-suffix _base%BM%
+python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_%BM%.py --long-base %LB% --days-from-base --default-tab lss --no-mirror --no-short --no-long --force --no-news --no-serve --output-suffix _base%BM%
 goto :eof
