@@ -2425,7 +2425,27 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 
     _set_sig_params("conservative")
 
-    signals.sort(key=lambda x: -(x.get("rec_score") or 0))
+    # 流動性(平均日次売買代金=出来高×終値)を各シグナルに付与。
+    # 検証で「厚い銘柄ほど1件あたり利益が大きい」と分かったため、BT同点時は厚い方を優先。
+    try:
+        from backtest_limit_entry import fetch as _fq
+        for _s in signals:
+            try:
+                _dfq = _fq(_s["symbol"], 200)
+                if _dfq is not None and not _dfq.empty:
+                    _cc = "close" if "close" in _dfq.columns else "Close"
+                    _vv = "volume" if "volume" in _dfq.columns else "Volume"
+                    _s["liquidity"] = float((_dfq[_vv] * _dfq[_cc]).tail(120).mean())
+                else:
+                    _s["liquidity"] = 0.0
+            except Exception:
+                _s["liquidity"] = 0.0
+    except Exception:
+        for _s in signals:
+            _s["liquidity"] = 0.0
+
+    # 主: BTスコア降順 / 副: 売買代金降順(BTが同点なら流動性の高い銘柄を上に)
+    signals.sort(key=lambda x: (-(x.get("rec_score") or 0), -(x.get("liquidity") or 0)))
     _last_signals.clear()
     _last_signals.extend(signals)
     if cfg_filter:
@@ -2886,6 +2906,18 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         else:
             _reg_btn = (f'<div style="display:flex;flex-direction:column;gap:2px;'
                         f'align-items:center">{_ord_btn}{_reg_link}</div>')
+        _liq_v = float(s.get("liquidity", 0) or 0)
+        _liq_oku = _liq_v / 1e8
+        if _liq_v <= 0:
+            _liq_cell = '<span style="color:#64748b">—</span>'
+        elif _liq_oku < 3:
+            _liq_cell = (f'<span style="color:#f87171;font-weight:700">{_liq_oku:,.0f}億</span>'
+                         f'<br><span style="font-size:0.64rem;color:#f87171">⚠低流動</span>')
+        elif _liq_oku >= 30:
+            _liq_cell = (f'<span style="color:#4ade80;font-weight:700">{_liq_oku:,.0f}億</span>'
+                         f'<br><span style="font-size:0.64rem;color:#4ade80">厚</span>')
+        else:
+            _liq_cell = f'<span style="color:#cbd5e1">{_liq_oku:,.0f}億</span>'
         rows += f"""<tr class="sigrow" data-posval="{pos_val}" data-cum="{_cum_cap}">
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -2893,6 +2925,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     <span style="display:inline-flex;flex-wrap:wrap;gap:2px;margin-top:3px">{src_html}{risk_html}</span></td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{ _fmt_score_cell(s, col) }</td>
+  <td style="text-align:right;font-size:0.78rem">{_liq_cell}</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
   <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
@@ -3061,6 +3094,7 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     <th>順位</th>
     <th style="text-align:left">銘柄 / スクリプト</th>
     <th>戦略</th><th>スコア</th>
+    <th>売買代金<br><small>/日</small></th>
     <th>シグナル日<br>時株価</th>
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
     <th style="color:#f59e0b">{'指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)'}</th>
