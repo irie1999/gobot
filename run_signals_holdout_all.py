@@ -1146,7 +1146,11 @@ try:
     _bt_bar_tok = str(_args.date) if _args.date else str(_exp_bar_date())
 except Exception:
     _bt_bar_tok = _cache_date
-_bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_bt_bar_tok}.pkl"
+# 約定ロジックのバージョン。約定/決済モデルを変えたらここを上げると、旧BTキャッシュを
+# 自動で無効化(ファイル名が変わる)して作り直す。バー日付だけだとコード変更が反映されない。
+#   v2: 現実的約定モデル(min(トリガー,始値)+-3%指値ガード)を導入(2026-07-18)
+_BT_LOGIC_VER = "v2"
+_bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。
 if _bt_cache_file.exists():
@@ -1230,7 +1234,7 @@ for _mod_attr in ("_short", "_sbrk"):
 # mirror/lss 実行時には存在する)。
 if _analysis_only:
     _long_bt_ref: dict = {}
-    _long_cache_file = _bt_cache_dir / f"bt_{_bt_bar_tok}.pkl"   # ロング(_cache_short="")のキャッシュ
+    _long_cache_file = _bt_cache_dir / f"bt_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"   # ロング(_cache_short="")のキャッシュ(版付き)
     if _long_cache_file.exists():
         try:
             with open(_long_cache_file, "rb") as _lbf:
