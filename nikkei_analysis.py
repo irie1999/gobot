@@ -10425,6 +10425,77 @@ function switchTbd(id, tab) {{
                 '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">件数</th>'
                 '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>'
                 '</tr></thead><tbody>' + _rows + '</tbody></table></div>')
+        def _build_budget_sim_html(rows):
+            # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで買った場合の月次成績。
+            # 同日決済なので予算は毎日リセット。必要資金=約定値×株数の累計が予算を超えたら打ち切り。
+            if len(rows) < 20:
+                return ""
+            import os as _osb
+            try:
+                _bud = float(_osb.environ.get("LSS_BUDGET_MAN", "400")) * 1e4
+            except Exception:
+                _bud = 4e6
+            _bud_man = int(_bud / 1e4)
+            _by_day: dict = {}
+            for _d, _bt, _no, _p in rows:
+                _by_day.setdefault(_d, []).append((_bt, _no, _p))
+            _mon: dict = {}   # YYYY-MM -> {n,pnl,win,days,used_sum}
+            _tot = {"n": 0, "pnl": 0.0, "win": 0}
+            for _d, _lst in _by_day.items():
+                _mk = _d[:7]   # YYYY-MM
+                _cap = 0.0
+                _picked = []
+                for _bt, _no, _p in sorted(_lst, key=lambda x: -x[0]):
+                    if _cap + _no > _bud:
+                        continue   # 予算超過はスキップ(次に安いのが入るか試す=貪欲)
+                    _cap += _no; _picked.append((_no, _p))
+                _m = _mon.setdefault(_mk, {"n": 0, "pnl": 0.0, "win": 0, "used": 0.0, "days": 0})
+                _m["days"] += 1; _m["used"] += _cap
+                for _no, _p in _picked:
+                    _m["n"] += 1; _m["pnl"] += _p
+                    if _p > 0: _m["win"] += 1
+                    _tot["n"] += 1; _tot["pnl"] += _p
+                    if _p > 0: _tot["win"] += 1
+            _rows = ""
+            for _mk in sorted(_mon.keys(), reverse=True):
+                _m = _mon[_mk]
+                if _m["n"] == 0:
+                    continue
+                _wr = _m["win"] / _m["n"] * 100
+                _avgd = _m["used"] / _m["days"] if _m["days"] else 0
+                _pc = "#4ade80" if _m["pnl"] >= 0 else "#f87171"
+                _rows += (f'<tr>'
+                          f'<td style="text-align:left;padding:3px 10px;font-weight:700">{_mk}</td>'
+                          f'<td style="text-align:right;padding:3px 10px">{_m["n"]}件</td>'
+                          f'<td style="text-align:right;padding:3px 10px">{_wr:.0f}%</td>'
+                          f'<td style="text-align:right;padding:3px 10px;color:{_pc};font-weight:700">{_m["pnl"]:+,.0f}円</td>'
+                          f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">{_avgd/1e4:,.0f}万</td>'
+                          f'</tr>')
+            _twr = _tot["win"] / _tot["n"] * 100 if _tot["n"] else 0
+            _tpc = "#4ade80" if _tot["pnl"] >= 0 else "#f87171"
+            _rows += (f'<tr style="border-top:2px solid #475569">'
+                      f'<td style="text-align:left;padding:4px 10px;font-weight:700">合計</td>'
+                      f'<td style="text-align:right;padding:4px 10px;font-weight:700">{_tot["n"]}件</td>'
+                      f'<td style="text-align:right;padding:4px 10px">{_twr:.0f}%</td>'
+                      f'<td style="text-align:right;padding:4px 10px;color:{_tpc};font-weight:700">{_tot["pnl"]:+,.0f}円</td>'
+                      f'<td style="text-align:right;padding:4px 10px;color:#64748b">—</td>'
+                      f'</tr>')
+            return (
+                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで買った場合（月次）</h4>'
+                f'<p class="footnote">毎日その日のBT降順で、必要資金(約定値×100株)の累計が'
+                f'<b>{_bud_man}万円</b>に収まるだけ買う（同日決済なので予算は毎日リセット）。'
+                f'この価格帯タブ(表示中の価格上限)の銘柄のみ。実運用に一番近い「予算内で上から買う」の再現。'
+                f'予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。</p>'
+                '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
+                '<thead><tr>'
+                '<th style="text-align:left;padding:3px 10px;color:#94a3b8;font-size:0.75rem">月</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">取引数</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">損益</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">平均使用額/日</th>'
+                '</tr></thead><tbody>' + _rows + '</tbody></table></div>'
+                '<p class="footnote" style="margin-top:6px">※ これが「400万円で毎日上から買う」実運用に最も近い月次成績。'
+                '全月プラスなら予算内運用でも安定。平均使用額/日が予算に届いていなければ、その月は候補が少なく予算を使い切れていない。</p>')
         def _build_slot_sim_html(sim_rows):
             # 資金制約=「1日N銘柄まで」を想定した方式対決:
             #   方式A: その日のBT降順で上位N
@@ -10521,6 +10592,7 @@ function switchTbd(id, tab) {{
         _liq = {l: {"n": 0, "pnl": 0.0, "win": 0} for l in _liqlabs}
         _liq_pairs = []   # (売買代金, pnl) — しきい値以上の累計成績用
         _sim_rows = []    # (entry_date, bt, 売買代金, pnl) — 枠数固定の方式対決用
+        _bud_rows = []    # (entry_date, bt, 必要資金, pnl) — 予算固定シミュ用
         for _t in trades_list:
             if _t.get("reason") in ("発注中", "保有中", None):
                 continue
@@ -10531,12 +10603,17 @@ function switchTbd(id, tab) {{
             _b = _liq[_liq_bucket(_lv)]
             _b["n"] += 1; _b["pnl"] += _p
             if _p > 0: _b["win"] += 1
+            _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+            _bt_v = float(_eff_long_bt(_t))
+            _notional = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
+            if _notional > 0:
+                _bud_rows.append((_dk, _bt_v, _notional, _p))
             if _lv is not None:
                 _liq_pairs.append((_lv, _p))
-                _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
-                _sim_rows.append((_dk, float(_eff_long_bt(_t)), _lv, _p))
+                _sim_rows.append((_dk, _bt_v, _lv, _p))
         _liq_html = (_build_liq_html(_liq, _liqlabs)
                      + _build_liq_threshold_html(_liq_pairs)
+                     + _build_budget_sim_html(_bud_rows)
                      + _build_slot_sim_html(_sim_rows))
 
         _sig2 = _hl2.md5(repr(sorted([x[:1] + (str(x[3]),) + x[4:] for x in tgt])).encode()).hexdigest()[:16]
