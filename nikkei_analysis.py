@@ -10425,6 +10425,71 @@ function switchTbd(id, tab) {{
                 '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">件数</th>'
                 '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>'
                 '</tr></thead><tbody>' + _rows + '</tbody></table></div>')
+        def _build_slot_sim_html(sim_rows):
+            # 資金制約=「1日N銘柄まで」を想定した方式対決:
+            #   方式A: その日のBT降順で上位N
+            #   方式B: 流動性≥しきい値 の中からBT降順で上位N
+            # 期間全体で実現総損益・勝率を比較。どちらが資金効率が良いかを直接判定。
+            if len(sim_rows) < 20:
+                return ""
+            import os as _oss
+            try:
+                _thr = float(_oss.environ.get("LSS_SLOTSIM_LIQ_OKU", "10")) * 1e8
+            except Exception:
+                _thr = 1e9
+            _thr_oku = int(_thr / 1e8)
+            _by_day: dict = {}
+            for _d, _bt, _lv, _p in sim_rows:
+                _by_day.setdefault(_d, []).append((_bt, _lv, _p))
+            _Ns = [3, 5, 10, 20, 30, 50]
+            _srows = ""
+            for _N in _Ns:
+                _a_pnl = _a_n = _a_w = 0
+                _b_pnl = _b_n = _b_w = 0
+                for _d, _lst in _by_day.items():
+                    _a = sorted(_lst, key=lambda x: -x[0])[:_N]
+                    _b = sorted([x for x in _lst if x[1] >= _thr], key=lambda x: -x[0])[:_N]
+                    for _bt, _lv, _p in _a:
+                        _a_pnl += _p; _a_n += 1
+                        if _p > 0: _a_w += 1
+                    for _bt, _lv, _p in _b:
+                        _b_pnl += _p; _b_n += 1
+                        if _p > 0: _b_w += 1
+                if _a_n == 0:
+                    continue
+                _awr = _a_w / _a_n * 100 if _a_n else 0
+                _bwr = _b_w / _b_n * 100 if _b_n else 0
+                _diff = _b_pnl - _a_pnl
+                _dc = "#4ade80" if _diff > 0 else ("#f87171" if _diff < 0 else "#94a3b8")
+                _apnlc = "#4ade80" if _a_pnl >= 0 else "#f87171"
+                _bpnlc = "#4ade80" if _b_pnl >= 0 else "#f87171"
+                _srows += (f'<tr>'
+                           f'<td style="text-align:left;padding:3px 10px;font-weight:700">{_N}銘柄/日</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:{_apnlc};font-weight:700">{_a_pnl:+,.0f}円</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">{_awr:.0f}%</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:{_bpnlc};font-weight:700">{_b_pnl:+,.0f}円</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">{_bwr:.0f}%({_b_n}件)</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:{_dc};font-weight:700">{_diff:+,.0f}円</td>'
+                           f'</tr>')
+            if not _srows:
+                return ""
+            return (
+                '<h4 style="color:#cbd5e1;margin:18px 0 6px">🆚 資金制約シミュ: BTのみ vs 流動性フィルタ（1日N銘柄まで）</h4>'
+                f'<p class="footnote">「1日にN銘柄しか張れない」資金制約を想定し、各日で'
+                f'<b>方式A=BT降順で上位N</b> と <b>方式B=売買代金≥{_thr_oku}億の中からBT降順で上位N</b> '
+                f'を選び、期間全体の実現損益を比較。差分(B−A)がプラスなら「その枠数では流動性で絞る方が得」、'
+                f'マイナスなら「BT降順のまま（絞らない方）が得」。しきい値は環境変数 LSS_SLOTSIM_LIQ_OKU(既定10億)。</p>'
+                '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
+                '<thead><tr>'
+                '<th style="text-align:left;padding:3px 10px;color:#94a3b8;font-size:0.75rem">枠数</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#f59e0b;font-size:0.75rem">方式A(BTのみ)</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">A勝率</th>'
+                f'<th style="text-align:right;padding:3px 10px;color:#38bdf8;font-size:0.75rem">方式B(≥{_thr_oku}億)</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">B勝率(件数)</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">差分(B−A)</th>'
+                '</tr></thead><tbody>' + _srows + '</tbody></table></div>'
+                '<p class="footnote" style="margin-top:6px">※ 差分がほぼ全枠でマイナス→BT降順が正解(流動性で絞らない)。'
+                'プラスの枠がある→その枠数なら流動性フィルタの価値あり。</p>')
         import os as _os2, pickle as _pk2, hashlib as _hl2
         from pathlib import Path as _P2
 
@@ -10455,6 +10520,7 @@ function switchTbd(id, tab) {{
         _liqlabs = [l for l, _, _ in _LIQ_BUCKETS] + ["不明"]
         _liq = {l: {"n": 0, "pnl": 0.0, "win": 0} for l in _liqlabs}
         _liq_pairs = []   # (売買代金, pnl) — しきい値以上の累計成績用
+        _sim_rows = []    # (entry_date, bt, 売買代金, pnl) — 枠数固定の方式対決用
         for _t in trades_list:
             if _t.get("reason") in ("発注中", "保有中", None):
                 continue
@@ -10467,7 +10533,11 @@ function switchTbd(id, tab) {{
             if _p > 0: _b["win"] += 1
             if _lv is not None:
                 _liq_pairs.append((_lv, _p))
-        _liq_html = _build_liq_html(_liq, _liqlabs) + _build_liq_threshold_html(_liq_pairs)
+                _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+                _sim_rows.append((_dk, float(_eff_long_bt(_t)), _lv, _p))
+        _liq_html = (_build_liq_html(_liq, _liqlabs)
+                     + _build_liq_threshold_html(_liq_pairs)
+                     + _build_slot_sim_html(_sim_rows))
 
         _sig2 = _hl2.md5(repr(sorted([x[:1] + (str(x[3]),) + x[4:] for x in tgt])).encode()).hexdigest()[:16]
         _cdir2 = _P2(__file__).resolve().parent / ".lss_closestop_cache"
