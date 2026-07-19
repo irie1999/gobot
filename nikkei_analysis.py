@@ -10249,11 +10249,39 @@ function switchTbd(id, tab) {{
         try:
             from backtest_limit_entry import (
                 _load_5m_by_day as _l5, FEE_PCT_ONE_WAY as _fee5,
-                _INTRADAY_5M_SLIP as _slip5, _INTRADAY_5M_CACHE as _m5c)
+                _INTRADAY_5M_SLIP as _slip5, _INTRADAY_5M_CACHE as _m5c,
+                fetch as _fetchd)
             from sameday5m_firsttouch import (short_exit_5m as _se, short_pnl as _sp,
                                               short_entry_fill_5m as _sef)
         except Exception:
             return ""
+
+        # 銘柄の流動性(平均日次売買代金=出来高×終値)。銘柄あたり1回だけ日足から算出。
+        _liq_cache: dict = {}
+        def _liq_of(sym):
+            if sym in _liq_cache:
+                return _liq_cache[sym]
+            v = None
+            try:
+                _dfd = _fetchd(sym, 200)
+                if _dfd is not None and not _dfd.empty:
+                    _c = "close" if "close" in _dfd.columns else "Close"
+                    _vv = "volume" if "volume" in _dfd.columns else "Volume"
+                    v = float((_dfd[_vv] * _dfd[_c]).tail(120).mean())
+            except Exception:
+                v = None
+            _liq_cache[sym] = v
+            return v
+        _LIQ_BUCKETS = [("<3億", 0, 3e8), ("3-10億", 3e8, 1e9),
+                        ("10-30億", 1e9, 3e9), ("30-100億", 3e9, 1e10),
+                        ("100億+", 1e10, float("inf"))]
+        def _liq_bucket(v):
+            if v is None:
+                return "不明"
+            for lab, lo, hi in _LIQ_BUCKETS:
+                if lo <= v < hi:
+                    return lab
+            return "不明"
         import os as _os2, pickle as _pk2, hashlib as _hl2
         from pathlib import Path as _P2
 
@@ -10293,14 +10321,14 @@ function switchTbd(id, tab) {{
 
         # 既定では計算しない(.\daily を止めない/BTがディスク復元だと5分足が未ロードで重い)。
         # 有効キャッシュがあれば表示、無ければ「未計算」案内のみ。計算は明示 RESWEEP=1 のとき。
-        if (agg is None or agg.get("_v") != 5) and not _resweep2:
+        if (agg is None or agg.get("_v") != 6) and not _resweep2:
             return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
                     '<p class="footnote">未計算です（重いので既定ではスキップ）。'
                     '<b>一度だけ</b> 次で計算してください（5分足を読み込むので数分かかる場合あり）：'
                     '<br><code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily; $env:LSS_CLOSESTOP_RESWEEP=&quot;&quot;</code>'
                     '<br>一度計算すればキャッシュされ、以降の <code>.\\daily</code> で自動表示されます。</p>')
 
-        if agg is None or agg.get("_v") != 5:
+        if agg is None or agg.get("_v") != 6:
             # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
             # 銘柄あたり1回だけロード(_l5=プロセスキャッシュ)。進捗を出して無反応を防ぐ。
             print(f"  [終値損切り比較] {len(tgt)}件を再判定中(損切り/利確を日足終値=引けに委ねる比較)...",
@@ -10322,6 +10350,9 @@ function switchTbd(id, tab) {{
             # 指値ガード%スイープ(約定モデルの検証): 決済はtouch固定、entryだけ可変。
             _GUARDS = [("2%", 0.02), ("3%", 0.03), ("5%", 0.05), ("10%", 0.10), ("無制限", None)]
             guards = {lab: {"n": 0, "pnl": 0.0, "win": 0, "skip": 0} for lab, _ in _GUARDS}
+            # 流動性(売買代金)帯別の成績(現行=touch/realistic約定)。エッジが出来高で変わるか。
+            _liqlabs = [l for l, _, _ in _LIQ_BUCKETS] + ["不明"]
+            liq = {l: {"n": 0, "pnl": 0.0, "win": 0} for l in _liqlabs}
             diffs = []   # 利確を日足終値 vs 現行 で判定が変わったトレード
             _miss = 0; _tot5 = len(tgt)
             for _i5, (sym, name, strat, fd, lp, osp, otp, qty) in enumerate(tgt, 1):
@@ -10371,10 +10402,15 @@ function switchTbd(id, tab) {{
                 _acc(touch, res["touch"][0], res["touch"][1])
                 _acc(dstop, res["dstop"][0], res["dstop"][1])
                 _acc(dtgt,  res["dtgt"][0],  res["dtgt"][1])
+                # 流動性帯別(現行=touch/realistic約定の損益で集計)
+                _lqb = liq[_liq_bucket(_liq_of(sym))]
+                _lqb["n"] += 1; _lqb["pnl"] += res["touch"][0]
+                if res["touch"][0] > 0: _lqb["win"] += 1
                 pt, rt = res["touch"]; ps, rs = res["dtgt"]
                 if rt != rs or abs(pt - ps) > 1:
                     diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
-            agg = {"_v": 5, "touch": touch, "dstop": dstop, "dtgt": dtgt, "guards": guards,
+            agg = {"_v": 6, "touch": touch, "dstop": dstop, "dtgt": dtgt,
+                   "guards": guards, "liq": liq, "liqlabs": _liqlabs,
                    "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
             try:
@@ -10458,6 +10494,48 @@ function switchTbd(id, tab) {{
   ✅ 総損益が最大のガードは <b>{_gbest[0]}</b>（{_gbest[1]["pnl"]:+,.0f}円）。
   {'現行3%が最良。変更不要。' if _gbest[0]=='3%' else '現行3%と比べて要検討（差が小さければ誤差）。'}</p>"""
 
+        # ── 流動性(売買代金)帯別の成績(エッジが出来高で変わるか) ──
+        _liq = agg.get("liq") or {}
+        _liqlabs2 = agg.get("liqlabs") or []
+        _lqvalid = [(l, _liq[l]) for l in _liqlabs2 if l in _liq and _liq[l]["n"] > 0]
+        _liq_html = ""
+        if _lqvalid:
+            _tot_lq_n = sum(v["n"] for _, v in _lqvalid) or 1
+            _lqrows = ""
+            for _l, _v in _lqvalid:
+                _lwr = _v["win"] / _v["n"] * 100 if _v["n"] else 0
+                _avg = _v["pnl"] / _v["n"] if _v["n"] else 0
+                _shr = _v["n"] / _tot_lq_n * 100
+                _pc = "#4ade80" if _v["pnl"] >= 0 else "#f87171"
+                _ac = "#4ade80" if _avg >= 0 else "#f87171"
+                _lqrows += (f'<tr>'
+                            f'<td style="text-align:left;padding:3px 10px;font-weight:700">{_l}</td>'
+                            f'<td style="text-align:right;padding:3px 10px;color:{_pc};font-weight:700">{_v["pnl"]:+,.0f}円</td>'
+                            f'<td style="text-align:right;padding:3px 10px;color:{_ac}">{_avg:+,.0f}円</td>'
+                            f'<td style="text-align:right;padding:3px 10px">{_v["n"]}件</td>'
+                            f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">{_shr:.0f}%</td>'
+                            f'<td style="text-align:right;padding:3px 10px">{_lwr:.0f}%</td>'
+                            f'</tr>')
+            _liq_html = f"""
+<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 流動性(売買代金)帯別の成績（BT30以上・現行約定）</h3>
+<p class="footnote">各銘柄の平均日次売買代金(出来高×終値)で帯分けし、lssの成績を比較。
+<b>1トレード平均損益</b>が帯によって大きく違えば「エッジが出来高で変わる」＝薄い/厚い銘柄で
+優劣がある。薄い帯(&lt;3億等)が大きく稼いでいる場合、実運用ではスリッページで目減りしやすい
+点に注意(100株なら影響は小さめ)。件数%はどの流動性にトレードが偏っているか。</p>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+  <thead><tr>
+    <th style="text-align:left;padding:3px 10px;color:#94a3b8;font-size:0.75rem">売買代金/日</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">総損益</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">平均損益/件</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">件数</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">件数%</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>
+  </tr></thead>
+  <tbody>{_lqrows}</tbody>
+</table></div>
+<p class="footnote" style="margin-top:6px">※ 平均損益/件が全帯で似ていれば「出来高はエッジに効かない」。
+特定帯だけ突出/劣後していれば、その流動性を優先/回避する選定余地あり。</p>"""
+
         drows = ""
         _ja = {"stop": "損切り", "target": "利確", "close": "引け"}
         for sym, name, strat, fd, pt, rt, ps, rs in agg["diffs"][:20]:
@@ -10488,6 +10566,7 @@ function switchTbd(id, tab) {{
 </div>
 <p style="margin:6px 0 12px;font-size:0.9rem;color:#cbd5e1">{verdict}</p>
 {_guard_html}
+{_liq_html}
 <p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">
   「利確を日足終値 vs 現行」で決済が変わったトレード（差分の大きい順・上位20件）</p>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">
