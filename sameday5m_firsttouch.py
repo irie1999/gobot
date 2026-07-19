@@ -81,6 +81,56 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     return float(closes[-1]), "close", ent_ts, times[-1]
 
 
+def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None):
+    """空売りの『現実的な約定価格』を5分足から求める(ギャップ考慮)。
+
+    現行バックテストは常に trigger 価格で約定させるが、実際は寄りが既にトリガーを
+    割って/超えて始まると『始値』で約定する。それを再現する。
+
+    Args:
+      day_bars       : 約定日の5分足(open/high/low/close 昇順)
+      trigger_p      : 逆指値/指値の注文価格(トリガー)
+      is_rise_trigger: False=lss(逆指値売り・下落約定) / True=mirror(指値売り・上昇約定)
+      entry_gap_limit: 指値ガード(例0.03=±3%)。lssはトリガー×(1-limit)を下回るギャップ
+                       ダウンなら『指値下限で約定不可』としてスキップ(None返す)。
+                       mirrorはトリガー×(1+limit)を超えるギャップアップでスキップ。
+                       None=ガードなし。
+    Returns: fill_price(float) / None(約定せず or ギャップ過大でキャンセル)
+
+    lss(下落約定)の考え方:
+      約定バー = 最初に low<=trigger のバー。
+        寄り(始値)が trigger 以下(ギャップダウン/寄りで既に割れ) → 約定=始値(より安い=不利)
+        寄りが trigger 超 → 日中に trigger まで下げて発火 → 約定=trigger(現行と同じ)
+      → 約定 = min(trigger, 始値)。ただし始値がトリガー×(1-limit)未満なら約定不可。
+    """
+    if day_bars is None or day_bars.empty:
+        return None
+    opens = day_bars["open"].to_numpy(dtype=float)
+    highs = day_bars["high"].to_numpy(dtype=float)
+    lows = day_bars["low"].to_numpy(dtype=float)
+    n = len(opens)
+    ei = None
+    for j in range(n):
+        if is_rise_trigger:
+            if highs[j] >= trigger_p:
+                ei = j; break
+        else:
+            if lows[j] <= trigger_p:
+                ei = j; break
+    if ei is None:
+        return None
+    o = float(opens[ei])
+    if is_rise_trigger:
+        fill = max(trigger_p, o)             # 上昇約定: ギャップアップは始値(高い=有利)
+        if entry_gap_limit is not None and fill > trigger_p * (1.0 + entry_gap_limit):
+            return None                      # ギャップアップ過大 → キャンセル
+    else:
+        fill = min(trigger_p, o)             # 下落約定: ギャップダウンは始値(安い=不利)
+        if entry_gap_limit is not None and fill < trigger_p * (1.0 - entry_gap_limit):
+            return None                      # ギャップダウン過大 → 指値下限でキャンセル
+    return float(fill)
+
+
 def short_exit_daily(hi, lo, cl, entry_p, stop_p, target_p, is_rise_trigger, tie="stop"):
     """日足近似の決済(比較用)。tie="stop"=保守(下限)/"target"=楽観(上限)。"""
     if is_rise_trigger:

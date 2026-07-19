@@ -66,7 +66,7 @@ args = ap.parse_args()
 import backtest_limit_entry as ble
 from daytrade_data import available_local_symbols, load_intraday, split_by_day
 from sameday5m_core import mod_for
-from sameday5m_firsttouch import short_exit_5m, short_pnl
+from sameday5m_firsttouch import short_exit_5m, short_pnl, short_entry_fill_5m
 
 # エンジンのモードグローバルは既定(未強制)に固定。pnl は自前の5分足で計算するので、
 # エンジン側の mirror 反転 / 5分足置換 / 幅強制が絡まないようにする。
@@ -179,10 +179,14 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             if db is None or len(db) < 2:
                 continue
             stop_p, target_p = max(osp, otp), min(osp, otp)
+            # 現実的な約定価格(ギャップ考慮 + -3%指値ガード)。エンジンと揃える。
+            entry_fill = short_entry_fill_5m(db, lp, False, entry_gap_limit=0.03)
+            if entry_fill is None:
+                continue   # ギャップ過大 → 約定不成立
             xp, reason, _e, _x = short_exit_5m(db, lp, stop_p, target_p, False)  # lss=下落約定
             if reason in ("no_5m", "no_entry"):
                 continue
-            pnl = short_pnl(lp, xp, reason, QTY, FEE_ONE_WAY, args.slip)
+            pnl = short_pnl(entry_fill, xp, reason, QTY, FEE_ONE_WAY, args.slip)
             (train if pd.Timestamp(fd) <= BASE_END else test).append(pnl)
         if not train and not test:
             continue

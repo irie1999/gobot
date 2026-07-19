@@ -632,6 +632,12 @@ _TM_FORCE: float | None = None
 _INTRADAY_5M: bool = False
 _INTRADAY_5M_ON_CLOSE: bool = False    # True=5分足の"終値"でstop/target判定(ヒゲ刈り回避の比較用)
                                        # False(既定)=タッチ判定(高値≥stop/安値≤target。現行)
+_INTRADAY_5M_REALISTIC_ENTRY: bool = True   # True(既定)=約定を『min(トリガー,始値)』の現実的
+                                       # モデルに(ギャップダウン寄りは始値約定=不利)。
+                                       # False=常にトリガー約定(旧挙動)。
+_INTRADAY_5M_ENTRY_GAP_LIMIT: float = 0.03  # 約定時の指値ガード(±3%)。lssはトリガー×(1-これ)
+                                       # を下回るギャップダウンは約定不可(キャンセル)。
+                                       # ここを変えて再実行すれば3%の妥当性を検証できる。
 _INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
 _INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
 _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
@@ -1118,7 +1124,8 @@ def run_limit_backtest(
     # に置換。5分足の無い日は除外。pnl はショート損益を直接計上するので、この時は
     # _MIRROR_PNL の反転は行わない(下の if でスキップ)。
     if _INTRADAY_5M:
-        from sameday5m_firsttouch import short_exit_5m as _se5, short_pnl as _sp5
+        from sameday5m_firsttouch import (short_exit_5m as _se5, short_pnl as _sp5,
+                                          short_entry_fill_5m as _sef5)
         _is_rise = (entry_type == "stop")   # mirror=上昇約定 / lss(stop_sell)=下落約定
         _bd = _load_5m_by_day(symbol)
         _new = []
@@ -1136,20 +1143,31 @@ def run_limit_backtest(
             if _db is None or len(_db) < 2:
                 continue   # 5分足なし → 除外(日足へフォールバックしない)
             _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
+            # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
+            # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
+            if _INTRADAY_5M_REALISTIC_ENTRY:
+                _entry_fill = _sef5(_db, _lp, _is_rise,
+                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT)
+                if _entry_fill is None:
+                    continue   # ギャップ過大 → 約定不成立(トレードなし)
+            else:
+                _entry_fill = _lp
+            # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
                                                on_close=_INTRADAY_5M_ON_CLOSE)
             if _rsn in ("no_5m", "no_entry"):
                 continue
             _qty = _t.get("qty", FIXED_QTY)
-            _pnl = _sp5(_lp, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
-            _t["entry_p"] = _lp
+            # 損益は現実的な約定価格(_entry_fill)基準。
+            _pnl = _sp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
+            _t["entry_p"] = _entry_fill
             _t["exit_p"] = _xp
             _t["exit_dt"] = _ext_ts if _ext_ts is not None else _t.get("exit_dt")
             _t["reason"] = _5M_REASON_JA.get(_rsn, _rsn)
             _t["pnl"] = _pnl
-            _t["pct"] = (_lp - _xp) / _lp * 100 if _lp else 0.0
+            _t["pct"] = (_entry_fill - _xp) / _entry_fill * 100 if _entry_fill else 0.0
             _t["hold_days"] = 0
-            _t["fee"] = round((_lp + _xp) * _qty * FEE_PCT_ONE_WAY, 0)
+            _t["fee"] = round((_entry_fill + _xp) * _qty * FEE_PCT_ONE_WAY, 0)
             _new.append(_t)
         trades = _new
 

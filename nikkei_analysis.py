@@ -10250,7 +10250,8 @@ function switchTbd(id, tab) {{
             from backtest_limit_entry import (
                 _load_5m_by_day as _l5, FEE_PCT_ONE_WAY as _fee5,
                 _INTRADAY_5M_SLIP as _slip5, _INTRADAY_5M_CACHE as _m5c)
-            from sameday5m_firsttouch import short_exit_5m as _se, short_pnl as _sp
+            from sameday5m_firsttouch import (short_exit_5m as _se, short_pnl as _sp,
+                                              short_entry_fill_5m as _sef)
         except Exception:
             return ""
         import os as _os2, pickle as _pk2, hashlib as _hl2
@@ -10337,6 +10338,10 @@ function switchTbd(id, tab) {{
                     continue
                 stop_p = max(osp, otp); tp = min(osp, otp)
                 q = qty or 100
+                # 現実的な約定価格(エンジンと揃える: ギャップ考慮 + -3%指値ガード)
+                _efill = _sef(db, lp, False, entry_gap_limit=0.03)
+                if _efill is None:
+                    _miss += 1; continue
                 # 同じ5分足に対し3モードの決済を評価(エントリーは同一)
                 # (key, stats, no_target, no_stop)
                 _modes = (
@@ -10351,7 +10356,7 @@ function switchTbd(id, tab) {{
                                         no_target=notgt, no_stop=nostop)
                     if rsn in ("no_5m", "no_entry"):
                         bad = True; break
-                    res[key] = (_sp(lp, xp, rsn, q, _fee5, _slip5), rsn)
+                    res[key] = (_sp(_efill, xp, rsn, q, _fee5, _slip5), rsn)
                 if bad:
                     continue
                 for key, st, _nt, _ns in _modes:
