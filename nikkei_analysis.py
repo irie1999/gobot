@@ -10293,14 +10293,14 @@ function switchTbd(id, tab) {{
 
         # 既定では計算しない(.\daily を止めない/BTがディスク復元だと5分足が未ロードで重い)。
         # 有効キャッシュがあれば表示、無ければ「未計算」案内のみ。計算は明示 RESWEEP=1 のとき。
-        if (agg is None or agg.get("_v") != 4) and not _resweep2:
+        if (agg is None or agg.get("_v") != 5) and not _resweep2:
             return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
                     '<p class="footnote">未計算です（重いので既定ではスキップ）。'
                     '<b>一度だけ</b> 次で計算してください（5分足を読み込むので数分かかる場合あり）：'
                     '<br><code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily; $env:LSS_CLOSESTOP_RESWEEP=&quot;&quot;</code>'
                     '<br>一度計算すればキャッシュされ、以降の <code>.\\daily</code> で自動表示されます。</p>')
 
-        if agg is None or agg.get("_v") != 4:
+        if agg is None or agg.get("_v") != 5:
             # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
             # 銘柄あたり1回だけロード(_l5=プロセスキャッシュ)。進捗を出して無反応を防ぐ。
             print(f"  [終値損切り比較] {len(tgt)}件を再判定中(損切り/利確を日足終値=引けに委ねる比較)...",
@@ -10319,6 +10319,9 @@ function switchTbd(id, tab) {{
             #   dstop  = 損切りを日足終値(日中は損切りせず引けまで持つ / 利確はタッチ)
             #   dtgt   = 利確を日足終値(日中は利確せず引けまで持つ / 損切りはタッチ)
             touch, dstop, dtgt = _si(), _si(), _si()
+            # 指値ガード%スイープ(約定モデルの検証): 決済はtouch固定、entryだけ可変。
+            _GUARDS = [("2%", 0.02), ("3%", 0.03), ("5%", 0.05), ("10%", 0.10), ("無制限", None)]
+            guards = {lab: {"n": 0, "pnl": 0.0, "win": 0, "skip": 0} for lab, _ in _GUARDS}
             diffs = []   # 利確を日足終値 vs 現行 で判定が変わったトレード
             _miss = 0; _tot5 = len(tgt)
             for _i5, (sym, name, strat, fd, lp, osp, otp, qty) in enumerate(tgt, 1):
@@ -10338,33 +10341,40 @@ function switchTbd(id, tab) {{
                     continue
                 stop_p = max(osp, otp); tp = min(osp, otp)
                 q = qty or 100
-                # 現実的な約定価格(エンジンと揃える: ギャップ考慮 + -3%指値ガード)
+                # touch決済(損切り・利確ともタッチ)を先に1回。ガードスイープ・決済比較の共通ベース。
+                _xpt, _rsnt, _, _ = _se(db, lp, stop_p, tp, False)
+                if _rsnt in ("no_5m", "no_entry"):
+                    _miss += 1; continue
+                # ── ガード%スイープ(決済touch固定・entryだけ可変。全約定トレードで評価) ──
+                for _glab, _g in _GUARDS:
+                    _ef = _sef(db, lp, False, entry_gap_limit=_g)
+                    _gs = guards[_glab]
+                    if _ef is None:
+                        _gs["skip"] += 1; continue   # そのガードでは約定不可
+                    _pg = _sp(_ef, _xpt, _rsnt, q, _fee5, _slip5)
+                    _gs["n"] += 1; _gs["pnl"] += _pg
+                    if _pg > 0: _gs["win"] += 1
+                # ── 決済モード比較(既定=3%約定モデル) ──
                 _efill = _sef(db, lp, False, entry_gap_limit=0.03)
                 if _efill is None:
-                    _miss += 1; continue
-                # 同じ5分足に対し3モードの決済を評価(エントリーは同一)
-                # (key, stats, no_target, no_stop)
-                _modes = (
-                    ("touch", touch, False, False),   # 現行: 損切り・利確ともタッチ
-                    ("dstop", dstop, False, True),    # 損切りを日足終値(=日中損切りなし)
-                    ("dtgt",  dtgt,  True,  False),   # 利確を日足終値(=日中利確なし)
-                )
-                res = {}
-                bad = False
-                for key, st, notgt, nostop in _modes:
+                    continue   # 既定モデルで約定しない → 決済比較からは除外(ガードには計上済み)
+                res = {"touch": (_sp(_efill, _xpt, _rsnt, q, _fee5, _slip5), _rsnt)}
+                _bad = False
+                for key, notgt, nostop in (("dstop", False, True), ("dtgt", True, False)):
                     xp, rsn, _, _ = _se(db, lp, stop_p, tp, False,
                                         no_target=notgt, no_stop=nostop)
                     if rsn in ("no_5m", "no_entry"):
-                        bad = True; break
+                        _bad = True; break
                     res[key] = (_sp(_efill, xp, rsn, q, _fee5, _slip5), rsn)
-                if bad:
+                if _bad:
                     continue
-                for key, st, _nt, _ns in _modes:
-                    _acc(st, res[key][0], res[key][1])
+                _acc(touch, res["touch"][0], res["touch"][1])
+                _acc(dstop, res["dstop"][0], res["dstop"][1])
+                _acc(dtgt,  res["dtgt"][0],  res["dtgt"][1])
                 pt, rt = res["touch"]; ps, rs = res["dtgt"]
                 if rt != rs or abs(pt - ps) > 1:
                     diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
-            agg = {"_v": 4, "touch": touch, "dstop": dstop, "dtgt": dtgt,
+            agg = {"_v": 5, "touch": touch, "dstop": dstop, "dtgt": dtgt, "guards": guards,
                    "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
             try:
@@ -10406,6 +10416,48 @@ function switchTbd(id, tab) {{
                    f'{_best[1]["pnl"]-tc["pnl"]:+,.0f}円）' if _best[1] is not tc
                    else '→ 現行(両方タッチ)が最良。日足終値に委ねる利点なし')
 
+        # ── 指値ガード%スイープ(約定モデルの検証)の描画 ──
+        _guards = agg.get("guards") or {}
+        _glabels = ["2%", "3%", "5%", "10%", "無制限"]
+        _gvalid = [(l, _guards[l]) for l in _glabels if l in _guards and _guards[l]["n"] > 0]
+        _guard_html = ""
+        if _gvalid:
+            _gbest = max(_gvalid, key=lambda x: x[1]["pnl"])
+            _grows = ""
+            for _l, _g in _gvalid:
+                _gwr = _g["win"] / _g["n"] * 100 if _g["n"] else 0
+                _is_cur = (_l == "3%")
+                _is_bst = (_l == _gbest[0])
+                _mark = (" ★最良" if _is_bst else "") + ("（現行）" if _is_cur else "")
+                _pc = "#4ade80" if _g["pnl"] >= 0 else "#f87171"
+                _bg = "background:#0e3320;" if _is_bst else ("background:#101826;" if _is_cur else "")
+                _grows += (f'<tr style="{_bg}">'
+                           f'<td style="text-align:left;padding:3px 10px;font-weight:700">{_l}{_mark}</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:{_pc};font-weight:700">{_g["pnl"]:+,.0f}円</td>'
+                           f'<td style="text-align:right;padding:3px 10px">{_g["n"]}件</td>'
+                           f'<td style="text-align:right;padding:3px 10px">{_gwr:.0f}%</td>'
+                           f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">{_g["skip"]}件</td>'
+                           f'</tr>')
+            _guard_html = f"""
+<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 指値ガード% スイープ（約定モデルの検証・BT30以上）</h3>
+<p class="footnote">逆指値売りが発火した後の<b>指値下限（−X%）</b>を変えて比較。決済はtouch固定、
+約定価格＝min(トリガー,始値)で下限X%未満のギャップダウンは約定不可(=不成立)。
+ガードが緩い(5%/無制限)ほど深いギャップも約定するが不利な安値で売る。厳しい(2%)ほど
+不成立が増える。<b>総損益が最大のガードが最適</b>。現行は3%。</p>
+<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">
+  <thead><tr>
+    <th style="text-align:left;padding:3px 10px;color:#94a3b8;font-size:0.75rem">指値ガード</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">総損益</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">約定数</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>
+    <th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">不成立</th>
+  </tr></thead>
+  <tbody>{_grows}</tbody>
+</table></div>
+<p style="margin:6px 0 14px;font-size:0.9rem;color:#cbd5e1">
+  ✅ 総損益が最大のガードは <b>{_gbest[0]}</b>（{_gbest[1]["pnl"]:+,.0f}円）。
+  {'現行3%が最良。変更不要。' if _gbest[0]=='3%' else '現行3%と比べて要検討（差が小さければ誤差）。'}</p>"""
+
         drows = ""
         _ja = {"stop": "損切り", "target": "利確", "close": "引け"}
         for sym, name, strat, fd, pt, rt, ps, rs in agg["diffs"][:20]:
@@ -10435,6 +10487,7 @@ function switchTbd(id, tab) {{
 {_card("利確を日足終値(引けまで持つ)", dt, "#38bdf8", base=tc)}
 </div>
 <p style="margin:6px 0 12px;font-size:0.9rem;color:#cbd5e1">{verdict}</p>
+{_guard_html}
 <p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">
   「利確を日足終値 vs 現行」で決済が変わったトレード（差分の大きい順・上位20件）</p>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">
