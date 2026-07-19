@@ -9378,6 +9378,37 @@ function switchTbd(id, tab) {{
     )
     _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
 
+    # BT30以上 かつ 流動性(平均日次売買代金)≥ しきい値。厚い銘柄に絞った月別成績を見る。
+    # しきい値は環境変数 LSS_LIQ_MIN_OKU(億, 既定5)で調整可。lssレポートのみ有効。
+    try:
+        _liq_min_yen = float(os.environ.get("LSS_LIQ_MIN_OKU", "5")) * 1e8
+    except Exception:
+        _liq_min_yen = 5e8
+    _liq_cache_pnl: dict = {}
+    def _liq_of_sym(sym):
+        if sym in _liq_cache_pnl:
+            return _liq_cache_pnl[sym]
+        v = None
+        try:
+            from backtest_limit_entry import fetch as _fqp
+            _d = _fqp(sym, 200)
+            if _d is not None and not _d.empty:
+                _cc = "close" if "close" in _d.columns else "Close"
+                _vv = "volume" if "volume" in _d.columns else "Volume"
+                v = float((_d[_vv] * _d[_cc]).tail(120).mean())
+        except Exception:
+            v = None
+        _liq_cache_pnl[sym] = v
+        return v
+    _liq_min_oku_disp = int(_liq_min_yen / 1e8)
+    # 流動性フィルタは lss のみ(ロング/ショートでは計算しない=無駄なfetch回避)。
+    if _LSS_ORDER_MODE:
+        _bt40liq_entry_sorted = [t for t in _bt40_entry_sorted
+                                 if (_liq_of_sym(str(t.get("symbol", ""))) or 0) >= _liq_min_yen]
+    else:
+        _bt40liq_entry_sorted = []
+    _bt40liq_entry_by_date, _sorted_bt40liq_entry_dates = _build_entry_grid(_bt40liq_entry_sorted, "q")
+
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
         from collections import OrderedDict
@@ -11686,6 +11717,32 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
+    # 取引明細タブのID順(ボタン描画順と一致させる。lssのみ bt40liq を bt40entry の後に挿入)。
+    _detail_tab_ids = ['all', 'bt40', 'bt70', 'entry', 'bt40entry']
+    if _LSS_ORDER_MODE:
+        _detail_tab_ids.append('bt40liq')
+    _detail_tab_ids += ['bt70entry', 'exit', 'bt70exit']
+    _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
+
+    # BT30以上×流動性フィルタ タブ(lssのみ)。ボタンとペインをここで組み立てる。
+    _bt40liq_btn = ""
+    _bt40liq_pane = ""
+    if _LSS_ORDER_MODE:
+        _bt40liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'bt40liq\')" '
+            f'style="border-color:#38bdf8">🎯 BT30×流動性≥{_liq_min_oku_disp}億×日別 '
+            f'<span style="font-size:0.72rem;color:#7dd3fc">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _bt40liq_pane = (
+            f'<div id="detail_{_dseq}_bt40liq" class="detail-tab-pane">'
+            f'<p style="color:#7dd3fc;font-size:0.8rem;margin-bottom:10px">'
+            f'🎯 BT30以上 かつ 平均日次売買代金 ≥{_liq_min_oku_disp}億円 の銘柄のみ（厚い＝1件あたり'
+            f'利益が大きい・執行が楽）。日付をクリックで詳細（直近{_ENTRY_GRID_DAYS}日）。'
+            f'しきい値は環境変数 LSS_LIQ_MIN_OKU で変更可（既定5億）。</p>'
+            + _month_summary_html(_bt40liq_entry_sorted)
+            + _month_accordion_html(_bt40liq_entry_by_date, _sorted_bt40liq_entry_dates, _dseq, "q")
+            + '</div>')
+
     # 重複保有分析は _dseq 確定後に生成（BTフィルタのDOM id一意化のため）
     _overlap_html = _overlap_analysis_html(_overlap_dropped, _dseq)
 
@@ -12058,6 +12115,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT30以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  {_bt40liq_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -12113,6 +12171,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_summary_html(_bt40_entry_sorted)}
 {_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
 </div>
+{_bt40liq_pane}
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt70_entry_sorted)}
@@ -12165,14 +12224,14 @@ function switchOvBt(uid, key) {{
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
   var closing = target && target.classList.contains('active');
-  ['all','bt40','bt70','entry','bt40entry','bt70entry','exit','bt70exit'].forEach(function(w) {{
+  {_detail_tabs_js}.forEach(function(w) {{
     var pane = document.getElementById('detail_'+seq+'_'+w);
     if (pane) pane.classList.toggle('active', (!closing) && (w === which));
   }});
   var nav = document.getElementById('detail_'+seq+'_all');
   if (nav) {{
     var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = ['all','bt40','bt70','entry','bt40entry','bt70entry','exit','bt70exit'];
+    var order = {_detail_tabs_js};
     btns.forEach(function(b, i) {{
       b.classList.toggle('active', (!closing) && order[i] === which);
     }});
