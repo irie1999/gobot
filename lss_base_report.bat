@@ -12,10 +12,12 @@ cd /d "%~dp0"
 call :one 2024-12 2024-12-31
 call :one 2025-06 2025-06-30
 call :one 2025-12 2025-12-31
+call :one 2026-06 2026-06-30
 
 echo.
 echo ============================================================
-echo DONE. 4 reports regenerated (report only, no re-scan).
+echo DONE. base-month reports regenerated (report only, no re-scan).
+echo   Open them with .\open_sweep.bat
 echo ============================================================
 goto :eof
 

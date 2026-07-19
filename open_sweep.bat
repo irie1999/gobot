@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM open_sweep.bat - reopen the 4 base-month sweep reports (no re-scan).
-REM   Opens the NEWEST report for each base month (2024-06/12, 2025-06/12).
+REM   Opens the NEWEST report for each base month (2024-12/2025-06/2025-12/2026-06).
 REM   Run lss_base_sweep.bat first to generate them; then use this to reopen anytime.
 REM   Usage (swingtrade folder):  .\open_sweep.bat
 REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
@@ -11,6 +11,7 @@ cd /d "%~dp0"
 call :openlatest _base2024-12
 call :openlatest _base2025-06
 call :openlatest _base2025-12
+call :openlatest _base2026-06
 goto :eof
 
 REM ---- :openlatest <suffix> : open the newest _both html with that suffix ----
