@@ -10302,8 +10302,11 @@ function switchTbd(id, tab) {{
     # 5分足)ので結果をディスクにキャッシュし、2回目以降は再計算しない
     # (環境変数 LSS_CLOSESTOP_RESWEEP=1 で強制再計算)。
     def _close_stop_compare_html(trades_list):
+        # 調査の各部品をキー別に返す(呼び出し側が別々の調査タブに載せる):
+        #   closestop / guard / liq / budgetsim / slotsim
+        _EMPTY = {"closestop": "", "guard": "", "liq": "", "budgetsim": "", "slotsim": ""}
         if not _LSS_ORDER_MODE:
-            return ""   # lss(逆指値空売り・同日決済)レポートのときだけ
+            return dict(_EMPTY)   # lss(逆指値空売り・同日決済)レポートのときだけ
         try:
             from backtest_limit_entry import (
                 _load_5m_by_day as _l5, FEE_PCT_ONE_WAY as _fee5,
@@ -10312,7 +10315,7 @@ function switchTbd(id, tab) {{
             from sameday5m_firsttouch import (short_exit_5m as _se, short_pnl as _sp,
                                               short_entry_fill_5m as _sef)
         except Exception:
-            return ""
+            return dict(_EMPTY)
 
         # 銘柄の流動性(平均日次売買代金=出来高×終値)。銘柄あたり1回だけ日足から算出。
         _liq_cache: dict = {}
@@ -10577,8 +10580,8 @@ function switchTbd(id, tab) {{
                         str(t.get("strategy", "")), fd, lp, osp, otp,
                         int(t.get("qty", 0) or 0)))
         if len(tgt) < 5:
-            return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
-                    '<p class="footnote">対象トレードが5件未満のため表示なし。</p>')
+            return {"closestop": ('<p class="footnote">対象トレードが5件未満のため表示なし。</p>'),
+                    "guard": "", "liq": "", "budgetsim": "", "slotsim": ""}
 
         # ── 流動性(売買代金)帯別: 既存トレードのpnlから軽く集計(重い5分足ループ不要・常時表示) ──
         _liqlabs = [l for l, _, _ in _LIQ_BUCKETS] + ["不明"]
@@ -10604,10 +10607,10 @@ function switchTbd(id, tab) {{
             if _lv is not None:
                 _liq_pairs.append((_lv, _p))
                 _sim_rows.append((_dk, _bt_v, _lv, _p))
-        _liq_html = (_build_liq_html(_liq, _liqlabs)
-                     + _build_liq_threshold_html(_liq_pairs)
-                     + _build_budget_sim_html(_bud_rows)
-                     + _build_slot_sim_html(_sim_rows))
+        # 調査ごとに部品を分けて保持(それぞれ別の調査タブに載せる)。
+        _liq_html = _build_liq_html(_liq, _liqlabs) + _build_liq_threshold_html(_liq_pairs)
+        _budgetsim_html = _build_budget_sim_html(_bud_rows)
+        _slotsim_html = _build_slot_sim_html(_sim_rows)
 
         _sig2 = _hl2.md5(repr(sorted([x[:1] + (str(x[3]),) + x[4:] for x in tgt])).encode()).hexdigest()[:16]
         _cdir2 = _P2(__file__).resolve().parent / ".lss_closestop_cache"
@@ -10623,12 +10626,13 @@ function switchTbd(id, tab) {{
         # 既定では計算しない(.\daily を止めない/BTがディスク復元だと5分足が未ロードで重い)。
         # 有効キャッシュがあれば表示、無ければ「未計算」案内のみ。計算は明示 RESWEEP=1 のとき。
         if (agg is None or agg.get("_v") != 5) and not _resweep2:
-            # 終値判定/ガードは未計算(重い)だが、流動性帯別(軽い)は常に出す。
-            return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
-                    '<p class="footnote">終値判定・指値ガードの比較は未計算です（重いので既定ではスキップ）。'
-                    '<b>一度だけ</b> <code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily; $env:LSS_CLOSESTOP_RESWEEP=&quot;&quot;</code> '
-                    'で計算するとキャッシュされ、以降の <code>.\\daily</code> で自動表示されます。'
-                    '（下の流動性帯別は既存データから常に表示）</p>' + _liq_html)
+            # 終値判定/ガードは未計算(重い)。流動性/資金シミュ(軽い)は各タブに常時表示。
+            _note = ('<h3 style="color:#cbd5e1;margin:8px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
+                     '<p class="footnote">未計算です（重いので既定ではスキップ）。'
+                     '<b>一度だけ</b> <code>$env:LSS_CLOSESTOP_RESWEEP=1; .\\daily; $env:LSS_CLOSESTOP_RESWEEP=&quot;&quot;</code> '
+                     'で計算するとキャッシュされ、以降の <code>.\\daily</code> で自動表示されます。</p>')
+            return {"closestop": _note, "guard": "", "liq": _liq_html,
+                    "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
         if agg is None or agg.get("_v") != 5:
             # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
@@ -10716,9 +10720,10 @@ function switchTbd(id, tab) {{
 
         tc = agg["touch"]; ds = agg["dstop"]; dt = agg["dtgt"]
         if tc["n"] == 0:
-            return ('<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
-                    '<p class="footnote">5分足が揃うトレードが無く比較不可（対象銘柄の5分足pklが'
-                    'stock_5min に無い等）。</p>')
+            return {"closestop": ('<p class="footnote">5分足が揃うトレードが無く比較不可'
+                                  '（対象銘柄の5分足pklが stock_5min に無い等）。</p>'),
+                    "guard": "", "liq": _liq_html,
+                    "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
         def _wr(st): return st["win"] / st["n"] * 100 if st["n"] else 0.0
 
@@ -10809,8 +10814,7 @@ function switchTbd(id, tab) {{
                       f'</tr>')
 
         _cache_note = "（キャッシュ済み・再計算は LSS_CLOSESTOP_RESWEEP=1）"
-        return f"""<h3 style="color:#cbd5e1;margin:22px 0 6px">🔻 lss 終値損切り比較（BT30以上）{_cache_note}</h3>
-<p class="footnote">同じエントリーで決済ルールだけ変更して比較（BT30以上のlssトレードのみ）。
+        _closestop_html = f"""<p class="footnote">同じエントリーで決済ルールだけ変更して比較（BT30以上のlssトレードのみ）{_cache_note}。
 同日決済なので<b>日足終値で判定＝その決済を日中に置かず引けまで持つ（引け成行）</b>を意味する。<br>
 ・<b>損切りを日足終値</b>＝日中は損切りせず引けまで持つ（損失が引けまで走る）／利確はタッチのまま。<br>
 ・<b>利確を日足終値</b>＝日中は利確せず引けまで持つ／損切りはタッチのまま。</p>
@@ -10820,8 +10824,6 @@ function switchTbd(id, tab) {{
 {_card("利確を日足終値(引けまで持つ)", dt, "#38bdf8", base=tc)}
 </div>
 <p style="margin:6px 0 12px;font-size:0.9rem;color:#cbd5e1">{verdict}</p>
-{_guard_html}
-{_liq_html}
 <p style="color:#94a3b8;font-size:0.78rem;margin:10px 0 4px">
   「利確を日足終値 vs 現行」で決済が変わったトレード（差分の大きい順・上位20件）</p>
 <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.82rem">
@@ -10837,8 +10839,17 @@ function switchTbd(id, tab) {{
 </table></div>
 <p class="footnote" style="margin-top:8px">※ 総損益で比較。現行より大きいモードがあれば、その決済ルールに
 切替える価値あり。実運用に反映するには watcher/close_lss_guard を同じ判定に揃える(§16 と整合確認)。</p>"""
+        return {"closestop": _closestop_html, "guard": _guard_html, "liq": _liq_html,
+                "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
-    _close_stop_compare_html_str = _close_stop_compare_html(done_trades)
+    _inv = _close_stop_compare_html(done_trades)
+    if not isinstance(_inv, dict):
+        _inv = {}
+    _inv_closestop = _inv.get("closestop", "")
+    _inv_guard     = _inv.get("guard", "")
+    _inv_liq       = _inv.get("liq", "")
+    _inv_budgetsim = _inv.get("budgetsim", "")
+    _inv_slotsim   = _inv.get("slotsim", "")
 
     # ── ⑧ 保有中の2回目以降シグナル成績分析 ────────────────────────────────
     def _overlap_analysis_html(overlap_dropped, uid=0):
@@ -11884,6 +11895,29 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_entry_by_date, _sorted_budget_entry_dates, _dseq, "q")
             + '</div>')
 
+    # lss 調査タブ(⑦終値損切りに集約せず、調査ごとに分割)。ボタン・ペイン・tabs配列を用意。
+    _inv_analysis_btns = ""
+    _inv_analysis_panes = ""
+    _inv_analysis_ids = []
+    if _LSS_ORDER_MODE:
+        _inv_analysis_btns = (
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'guard\')" style="border-color:#38bdf8">㉔ 指値ガード</button>\n'
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'liq\')" style="border-color:#38bdf8">㉕ 流動性</button>\n'
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'moneysim\')" style="border-color:#38bdf8">㉖ 資金シミュ</button>')
+        _guard_pane_body = _inv_guard or '<p class="footnote">指値ガードの比較は未計算です。$env:LSS_CLOSESTOP_RESWEEP=1 で計算してください。</p>'
+        _money_pane_body = (_inv_budgetsim or "") + (_inv_slotsim or "") or '<p class="footnote">資金シミュのデータがありません。</p>'
+        _inv_analysis_panes = (
+            f'<div id="analtab_{_dseq}_guard" class="analysis-tab-pane">{_guard_pane_body}</div>'
+            f'<div id="analtab_{_dseq}_liq" class="analysis-tab-pane">{_inv_liq}</div>'
+            f'<div id="analtab_{_dseq}_moneysim" class="analysis-tab-pane">{_money_pane_body}</div>')
+        _inv_analysis_ids = ['guard', 'liq', 'moneysim']
+    _analysis_tab_ids = ['summary', 'score', 'cross', 'rollfwd', 'factors', 'bt6069',
+                         'speed', 'extra'] + _inv_analysis_ids + \
+        ['overlap', 'timing', 'preoos', 'maxhold', 'maxhold_cmp', 'pullback',
+         'openconfirm', 'filltiming', 'stopwidth', 'opendir', 'drop', 'fadeshort',
+         'holdcurve', 'emcmp', 'breadth', 'sameday', 'sameday5m']
+    _analysis_tabs_js = "[" + ",".join(f"'{x}'" for x in _analysis_tab_ids) + "]"
+
     # 重複保有分析は _dseq 確定後に生成（BTフィルタのDOM id一意化のため）
     _overlap_html = _overlap_analysis_html(_overlap_dropped, _dseq)
 
@@ -11930,7 +11964,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'factors')">★ 効く要素</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
-  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り{'(終値比較)' if _LSS_ORDER_MODE else ''}</button>
+{_inv_analysis_btns}
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'overlap')">⑧ 重複保有</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 {_preoos_tab_btn}
@@ -12172,8 +12207,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
 <div id="analtab_{_dseq}_extra" class="analysis-tab-pane">
 {_stop_pattern_html_str}
-{_close_stop_compare_html_str}
+{('<h3 style="color:#cbd5e1;margin:8px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>' + _inv_closestop) if _LSS_ORDER_MODE else _inv_closestop}
 </div>
+{_inv_analysis_panes}
 
 <div id="analtab_{_dseq}_overlap" class="analysis-tab-pane">
 {_overlap_html if _overlap_html else '<p style="color:#64748b;padding:20px">重複保有(既保有中の同銘柄シグナル)の決済済みトレードが3件未満のため表示なし</p>'}
@@ -12328,7 +12364,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <script>
 function switchAnalysisTab(seq, which) {{
-  var tabs = ['summary','score','cross','rollfwd','factors','bt6069','speed','extra','overlap','timing','preoos','maxhold','maxhold_cmp','pullback','openconfirm','filltiming','stopwidth','opendir','drop','fadeshort','holdcurve','emcmp','breadth','sameday','sameday5m'];
+  var tabs = {_analysis_tabs_js};
   tabs.forEach(function(t) {{
     var pane = document.getElementById('analtab_'+seq+'_'+t);
     if (pane) pane.classList.toggle('active', t === which);
@@ -12424,6 +12460,7 @@ function showEntryDateB(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateC(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateX(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateY(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQ(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
