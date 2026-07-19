@@ -32,7 +32,9 @@ set "BM=%~1"
 set "LB=%~2"
 echo.
 echo ==================== base-month %BM% : lss selection ====================
-python scan_lss_universe.py --base-month %BM% --out lss_proposal_%BM%.py --max-price 6000 --source local
+REM 全価格で選定(現行dailyと同じ=--max-price 未指定でデフォルト1e9)。価格の6000/無制限は
+REM レポート表示側の --price-ranges で分ける。選定では絞らない。他も全てデフォルト(現行と同一)。
+python scan_lss_universe.py --base-month %BM% --out lss_proposal_%BM%.py --source local
 echo ==================== base-month %BM% : report ====================
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_%BM%.py --long-base %LB% --days-from-base --default-tab lss --no-mirror --no-short --no-long --force --no-news --no-serve --output-suffix _base%BM%
 goto :eof
