@@ -10353,6 +10353,47 @@ function switchTbd(id, tab) {{
                 '</tr></thead><tbody>' + _rows + '</tbody></table></div>'
                 '<p class="footnote" style="margin-top:6px">※ 平均損益/件が全帯で似ていれば出来高はエッジに'
                 '効かない。特定帯だけ突出/劣後していれば、その流動性を優先/回避する余地あり。</p>')
+        def _build_liq_threshold_html(pairs):
+            # 「売買代金 X億円以上」に絞った場合の累計成績(BT30以上)。
+            # 流動性の高い銘柄だけに投資した場合の総損益・平均損益/件・件数・勝率を見る。
+            if len(pairs) < 5:
+                return ""
+            _ths = [("全部(≥0)", 0.0), ("≥3億", 3e8), ("≥5億", 5e8),
+                    ("≥10億", 1e9), ("≥30億", 3e9), ("≥100億", 1e10)]
+            _rows = ""
+            for _lab, _th in _ths:
+                _sel = [(v, p) for v, p in pairs if v >= _th]
+                _n = len(_sel)
+                if _n == 0:
+                    continue
+                _pnl = sum(p for _, p in _sel)
+                _win = sum(1 for _, p in _sel if p > 0)
+                _avg = _pnl / _n
+                _wr = _win / _n * 100
+                _pc = "#4ade80" if _pnl >= 0 else "#f87171"
+                _ac = "#4ade80" if _avg >= 0 else "#f87171"
+                _rows += (f'<tr>'
+                          f'<td style="text-align:left;padding:3px 10px;font-weight:700">{_lab}</td>'
+                          f'<td style="text-align:right;padding:3px 10px;color:{_pc};font-weight:700">{_pnl:+,.0f}円</td>'
+                          f'<td style="text-align:right;padding:3px 10px;color:{_ac}">{_avg:+,.0f}円</td>'
+                          f'<td style="text-align:right;padding:3px 10px">{_n}件</td>'
+                          f'<td style="text-align:right;padding:3px 10px">{_wr:.0f}%</td>'
+                          f'</tr>')
+            if not _rows:
+                return ""
+            return (
+                '<h4 style="color:#cbd5e1;margin:16px 0 6px">▸ 売買代金しきい値以上に絞った場合の成績（BT30以上）</h4>'
+                '<p class="footnote">「BT30以上 かつ 売買代金がX億円以上」だけに投資した場合の累計。'
+                '厚い銘柄に絞ると件数は減るが、1件あたりの利益や勝率が上がるか(＝流動性で絞る価値があるか)を見る。'
+                '総損益は件数が減るので下がるのが普通。<b>平均損益/件</b>が上がるかに注目。</p>'
+                '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
+                '<thead><tr>'
+                '<th style="text-align:left;padding:3px 10px;color:#94a3b8;font-size:0.75rem">売買代金</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">総損益</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">平均損益/件</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">件数</th>'
+                '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>'
+                '</tr></thead><tbody>' + _rows + '</tbody></table></div>')
         import os as _os2, pickle as _pk2, hashlib as _hl2
         from pathlib import Path as _P2
 
@@ -10382,16 +10423,20 @@ function switchTbd(id, tab) {{
         # ── 流動性(売買代金)帯別: 既存トレードのpnlから軽く集計(重い5分足ループ不要・常時表示) ──
         _liqlabs = [l for l, _, _ in _LIQ_BUCKETS] + ["不明"]
         _liq = {l: {"n": 0, "pnl": 0.0, "win": 0} for l in _liqlabs}
+        _liq_pairs = []   # (売買代金, pnl) — しきい値以上の累計成績用
         for _t in trades_list:
             if _t.get("reason") in ("発注中", "保有中", None):
                 continue
             if _eff_long_bt(_t) < 30:
                 continue
             _p = float(_t.get("pnl", 0) or 0)
-            _b = _liq[_liq_bucket(_liq_of(str(_t.get("symbol", ""))))]
+            _lv = _liq_of(str(_t.get("symbol", "")))
+            _b = _liq[_liq_bucket(_lv)]
             _b["n"] += 1; _b["pnl"] += _p
             if _p > 0: _b["win"] += 1
-        _liq_html = _build_liq_html(_liq, _liqlabs)
+            if _lv is not None:
+                _liq_pairs.append((_lv, _p))
+        _liq_html = _build_liq_html(_liq, _liqlabs) + _build_liq_threshold_html(_liq_pairs)
 
         _sig2 = _hl2.md5(repr(sorted([x[:1] + (str(x[3]),) + x[4:] for x in tgt])).encode()).hexdigest()[:16]
         _cdir2 = _P2(__file__).resolve().parent / ".lss_closestop_cache"
