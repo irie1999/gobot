@@ -11901,9 +11901,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _inv_analysis_ids = []
     if _LSS_ORDER_MODE:
         _inv_analysis_btns = (
-            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'guard\')" style="border-color:#38bdf8">㉔ 指値ガード</button>\n'
-            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'liq\')" style="border-color:#38bdf8">㉕ 流動性</button>\n'
-            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'moneysim\')" style="border-color:#38bdf8">㉖ 資金シミュ</button>')
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'guard\')" style="border-color:#38bdf8">㉓ 指値ガード</button>\n'
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'liq\')" style="border-color:#38bdf8">㉔ 流動性</button>\n'
+            f'  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},\'moneysim\')" style="border-color:#38bdf8">㉕ 資金シミュ</button>')
         _guard_pane_body = _inv_guard or '<p class="footnote">指値ガードの比較は未計算です。$env:LSS_CLOSESTOP_RESWEEP=1 で計算してください。</p>'
         _money_pane_body = (_inv_budgetsim or "") + (_inv_slotsim or "") or '<p class="footnote">資金シミュのデータがありません。</p>'
         _inv_analysis_panes = (
@@ -11965,7 +11965,6 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'speed')">⑥ 速度分析</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'extra')">⑦ 損切り{'(終値比較)' if _LSS_ORDER_MODE else ''}</button>
-{_inv_analysis_btns}
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'overlap')">⑧ 重複保有</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'timing')">⑨ 翌日のみ比較</button>
 {_preoos_tab_btn}
@@ -11980,6 +11979,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_holdcurve_tab_btn}
 {_emcmp_tab_btn}
 {_breadth_tab_btn}
+{_inv_analysis_btns}
 {_sameday_tab_btn}
 {_sameday5m_tab_btn}
 </div>
