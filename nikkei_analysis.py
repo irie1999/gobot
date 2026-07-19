@@ -9378,36 +9378,29 @@ function switchTbd(id, tab) {{
     )
     _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
 
-    # BT30以上 かつ 流動性(平均日次売買代金)≥ しきい値。厚い銘柄に絞った月別成績を見る。
-    # しきい値は環境変数 LSS_LIQ_MIN_OKU(億, 既定5)で調整可。lssレポートのみ有効。
+    # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで買った場合に「実際に約定した
+    # トレードだけ」を抽出。同日決済なので予算は毎日リセット。必要資金=約定値×株数。
+    # 予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。lssのみ。
     try:
-        _liq_min_yen = float(os.environ.get("LSS_LIQ_MIN_OKU", "5")) * 1e8
+        _budget_yen = float(os.environ.get("LSS_BUDGET_MAN", "400")) * 1e4
     except Exception:
-        _liq_min_yen = 5e8
-    _liq_cache_pnl: dict = {}
-    def _liq_of_sym(sym):
-        if sym in _liq_cache_pnl:
-            return _liq_cache_pnl[sym]
-        v = None
-        try:
-            from backtest_limit_entry import fetch as _fqp
-            _d = _fqp(sym, 200)
-            if _d is not None and not _d.empty:
-                _cc = "close" if "close" in _d.columns else "Close"
-                _vv = "volume" if "volume" in _d.columns else "Volume"
-                v = float((_d[_vv] * _d[_cc]).tail(120).mean())
-        except Exception:
-            v = None
-        _liq_cache_pnl[sym] = v
-        return v
-    _liq_min_oku_disp = int(_liq_min_yen / 1e8)
-    # 流動性フィルタは lss のみ(ロング/ショートでは計算しない=無駄なfetch回避)。
+        _budget_yen = 4e6
+    _budget_man = int(_budget_yen / 1e4)
+    _budget_entry_sorted = []
     if _LSS_ORDER_MODE:
-        _bt40liq_entry_sorted = [t for t in _bt40_entry_sorted
-                                 if (_liq_of_sym(str(t.get("symbol", ""))) or 0) >= _liq_min_yen]
-    else:
-        _bt40liq_entry_sorted = []
-    _bt40liq_entry_by_date, _sorted_bt40liq_entry_dates = _build_entry_grid(_bt40liq_entry_sorted, "q")
+        _by_day_bud: dict = _dd(list)
+        for _t in _bt40_entry_sorted:
+            _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
+        for _dk in _by_day_bud:
+            _cap = 0.0
+            for _t in sorted(_by_day_bud[_dk], key=lambda x: -_eff_long_bt(x)):
+                _no = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
+                if _no <= 0 or _cap + _no > _budget_yen:
+                    continue   # 予算超過はスキップ(次の安い銘柄が入るか試す=貪欲)
+                _cap += _no
+                _budget_entry_sorted.append(_t)
+        _budget_entry_sorted.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
+    _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
 
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
@@ -11864,30 +11857,31 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
-    # 取引明細タブのID順(ボタン描画順と一致させる。lssのみ bt40liq を bt40entry の後に挿入)。
+    # 取引明細タブのID順(ボタン描画順と一致させる。lssのみ budget を bt40entry の後に挿入)。
     _detail_tab_ids = ['all', 'bt40', 'bt70', 'entry', 'bt40entry']
     if _LSS_ORDER_MODE:
-        _detail_tab_ids.append('bt40liq')
+        _detail_tab_ids.append('budget')
     _detail_tab_ids += ['bt70entry', 'exit', 'bt70exit']
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
-    # BT30以上×流動性フィルタ タブ(lssのみ)。ボタンとペインをここで組み立てる。
+    # 予算固定(400万円/日・BT降順)タブ(lssのみ)。ボタンとペインをここで組み立てる。
     _bt40liq_btn = ""
     _bt40liq_pane = ""
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
-            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'bt40liq\')" '
-            f'style="border-color:#38bdf8">🎯 BT30×流動性≥{_liq_min_oku_disp}億×日別 '
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
-            f'<div id="detail_{_dseq}_bt40liq" class="detail-tab-pane">'
+            f'<div id="detail_{_dseq}_budget" class="detail-tab-pane">'
             f'<p style="color:#7dd3fc;font-size:0.8rem;margin-bottom:10px">'
-            f'🎯 BT30以上 かつ 平均日次売買代金 ≥{_liq_min_oku_disp}億円 の銘柄のみ（厚い＝1件あたり'
-            f'利益が大きい・執行が楽）。日付をクリックで詳細（直近{_ENTRY_GRID_DAYS}日）。'
-            f'しきい値は環境変数 LSS_LIQ_MIN_OKU で変更可（既定5億）。</p>'
-            + _month_summary_html(_bt40liq_entry_sorted)
-            + _month_accordion_html(_bt40liq_entry_by_date, _sorted_bt40liq_entry_dates, _dseq, "q")
+            f'💰 毎日その日のBT降順で、必要資金(約定値×100株)の累計が <b>{_budget_man}万円</b> に収まる'
+            f'だけ買った場合に「実際に約定したトレードだけ」を表示（同日決済なので予算は毎日リセット）。'
+            f'この価格帯タブの銘柄のみ＝実運用「予算内で上から買う」に最も近い。日付クリックで詳細'
+            f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
+            + _month_summary_html(_budget_entry_sorted)
+            + _month_accordion_html(_budget_entry_by_date, _sorted_budget_entry_dates, _dseq, "q")
             + '</div>')
 
     # 重複保有分析は _dseq 確定後に生成（BTフィルタのDOM id一意化のため）
