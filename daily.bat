@@ -1,25 +1,19 @@
 @echo off
 REM ============================================================
-REM daily.bat - short command for the morning lss report (+ order server)
-REM   Usage (in the swingtrade folder):  .\daily      (PowerShell)  /  daily  (cmd)
-REM   Extra options pass through:  .\daily --no-analysis   /   .\daily --lss-tpsl
-REM   (the trailing %* forwards whatever options you type to python)
-REM   ASCII-only on purpose to avoid Shift-JIS codepage mojibake.
+REM daily.bat - 朝の発注用(6月基準・lss・高速・発注サーバ起動)
+REM   Usage (swingtradeフォルダ):  .\daily   (PowerShell)  /  daily  (cmd)
+REM   速度優先で最小限に統合(発注に必要なものだけ):
+REM     --no-short    : ショートは発注に不要(ロングはlssのBT参照用に残す=long tabも見れる)
+REM     --no-analysis : 重い5分足TP/SLスイープ等の分析タブを省略(発注リスト・400万円タブは残る)
+REM     --no-serve なし: レポート後に発注サーバを起動(朝の発注/監視トグル用)
+REM   基準月=2026-06 (lss_proposal_2026-06.py)。ガードは現行3%(検証済:新基準では3%が最良)。
+REM   追加オプションは末尾に付けると透過:  .\daily --price-ranges 0   等
+REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
+REM
+REM   ※ 深掘り調査したい日(⑦終値比較/㉓指値ガード/5分足スイープ)は --no-analysis を外すか
+REM     LSS_CLOSESTOP_RESWEEP=1 / LSS_GUARD_ONLY=1 を付けて別途実行。
+REM   ※ ショートの日別成績も見たい日は --short を末尾に足す:  .\daily --short
+REM   ※ 新しい取引日の1本目はBTキャッシュ再構築で少し時間がかかる(不可避)。以降は速い。
 REM ============================================================
-
-REM move to the folder that contains this .bat (= swingtrade)
 cd /d "%~dp0"
-
-REM Main tab = lss (long-candidate short). Long/short are kept too but LIGHT:
-REM they run with --no-analysis (detail tabs skipped, no 5-min) so you still get
-REM their per-day (daily) performance grid without the heavy analysis.
-REM   - --default-tab lss: opens on the lss tab (long/short are secondary).
-REM   - no --lss-top cap: every WF-test-passing/shortable/in-range stock signals;
-REM     pick BT30+ by BT desc, invest as budget allows.
-REM   - --workers 8: no-top makes ~3200 pairs; parallel reads local cache only.
-REM     Override with:  .\daily --workers 4
-REM Base month = 2026-06 (lss_proposal_2026-06.py). Generate it first (SAME method as
-REM current: all prices=default max-price, all other args default):
-REM   python scan_lss_universe.py --base-month 2026-06 --out lss_proposal_2026-06.py --source local
-REM (or run .\lss_base_sweep.bat which regenerates all base months the same way, latest fixes).
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal lss_proposal_2026-06.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_2026-06.py --long-base 2026-06-30 --no-mirror --no-short --default-tab lss --force --no-news --no-risk --workers 8 %*
