@@ -10830,7 +10830,9 @@ function switchTbd(id, tab) {{
                     pass
 
         tc = agg["touch"]; ds = agg["dstop"]; dt = agg["dtgt"]
-        if tc["n"] == 0:
+        # guard_only は touch/dstop/dtgt を空にしている(意図的)。この早期リターンは
+        # 終値比較モードのみ適用し、guard_only ではガードHTMLの描画へ進める。
+        if tc["n"] == 0 and not agg.get("_guard_only"):
             return {"closestop": ('<p class="footnote">5分足が揃うトレードが無く比較不可'
                                   '（対象銘柄の5分足pklが stock_5min に無い等）。</p>'),
                     "guard": "", "liq": _liq_html,
