@@ -10727,7 +10727,7 @@ function switchTbd(id, tab) {{
 
         # 既定では計算しない(.\daily を止めない/BTがディスク復元だと5分足が未ロードで重い)。
         # 有効キャッシュがあれば表示、無ければ「未計算」案内のみ。計算は明示 RESWEEP=1 のとき。
-        if (agg is None or agg.get("_v") != 6) and not _resweep2:
+        if (agg is None or agg.get("_v") != 7) and not _resweep2:
             # 終値判定/ガードは未計算(重い)。流動性/資金シミュ(軽い)は各タブに常時表示。
             _note = ('<h3 style="color:#cbd5e1;margin:8px 0 6px">🔻 lss 終値損切り比較（BT30以上）</h3>'
                      '<p class="footnote">未計算です（重いので既定ではスキップ）。'
@@ -10736,7 +10736,7 @@ function switchTbd(id, tab) {{
             return {"closestop": _note, "guard": "", "liq": _liq_html,
                     "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
-        if agg is None or agg.get("_v") != 6:
+        if agg is None or agg.get("_v") != 7:
             # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
             # 銘柄あたり1回だけロード(_l5=プロセスキャッシュ)。進捗を出して無反応を防ぐ。
             print(f"  [終値損切り比較] {len(tgt)}件を再判定中(損切り/利確を日足終値=引けに委ねる比較)...",
@@ -10756,9 +10756,10 @@ function switchTbd(id, tab) {{
             #   dtgt   = 利確を日足終値(日中は利確せず引けまで持つ / 損切りはタッチ)
             touch, dstop, dtgt = _si(), _si(), _si()
             # 指値ガード%スイープ(約定モデルの検証): 決済はtouch固定、entryだけ可変。
-            _GUARDS = [("1%", 0.01), ("2%", 0.02), ("3%", 0.03), ("4%", 0.04),
-                       ("5%", 0.05), ("7%", 0.07), ("10%", 0.10), ("15%", 0.15),
-                       ("無制限", None)]
+            # 3%以上は非拘束(-3%超ギャップが実質無い)と判明→サブ1%を細かく探索する。
+            _GUARDS = [("0.25%", 0.0025), ("0.5%", 0.005), ("0.75%", 0.0075),
+                       ("1%", 0.01), ("1.5%", 0.015), ("2%", 0.02), ("3%", 0.03),
+                       ("5%", 0.05), ("無制限", None)]
             guards = {lab: {"n": 0, "pnl": 0.0, "win": 0, "skip": 0} for lab, _ in _GUARDS}
             diffs = []   # 利確を日足終値 vs 現行 で判定が変わったトレード
             _miss = 0; _tot5 = len(tgt)
@@ -10812,7 +10813,7 @@ function switchTbd(id, tab) {{
                 pt, rt = res["touch"]; ps, rs = res["dtgt"]
                 if rt != rs or abs(pt - ps) > 1:
                     diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
-            agg = {"_v": 6, "touch": touch, "dstop": dstop, "dtgt": dtgt,
+            agg = {"_v": 7, "touch": touch, "dstop": dstop, "dtgt": dtgt,
                    "guards": guards,
                    "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
@@ -10858,7 +10859,7 @@ function switchTbd(id, tab) {{
 
         # ── 指値ガード%スイープ(約定モデルの検証)の描画 ──
         _guards = agg.get("guards") or {}
-        _glabels = ["1%", "2%", "3%", "4%", "5%", "7%", "10%", "15%", "無制限"]
+        _glabels = ["0.25%", "0.5%", "0.75%", "1%", "1.5%", "2%", "3%", "5%", "無制限"]
         _gvalid = [(l, _guards[l]) for l in _glabels if l in _guards and _guards[l]["n"] > 0]
         _guard_html = ""
         if _gvalid:
