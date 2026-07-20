@@ -7,6 +7,8 @@ REM   前提: lss_proposal_2025-03 / 2025-06 / 2025-09 / 2025-12 / 2026-03 / 202
 REM         すべて始値モデル(7/19以降)で選定済みであること。
 REM   比較の公平性: BTランキング(ロング参照)を揃えるため、全レポートで
 REM         --long-base 2026-06-30 に固定。--no-short で高速化。無制限(--price-ranges 0)。
+REM   表示期間: --days 520(=2025-03以降を全レポート共通で表示)。これで古いbaseほど
+REM         OOS月数が多い(base月より後が全部OOS)のを同じ窓で読み比べられる。重いが必要。
 REM   Usage (swingtrade フォルダ):  .\lss_merge_ladder.bat
 REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
 REM ============================================================
@@ -50,5 +52,5 @@ REM ---- :rep <proposal.py> <output-suffix> ----
 REM 全レポート共通: 無制限 / ショート省略 / ロング参照は2026-06-30固定(BTランキングを揃える)
 :rep
 echo -------------------- report: %1  (suffix %2) --------------------
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 0 --lss-proposal %1 --long-base 2026-06-30 --no-mirror --no-short --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix %2
+python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 0 --days 520 --lss-proposal %1 --long-base 2026-06-30 --no-mirror --no-short --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix %2
 goto :eof
