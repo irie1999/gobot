@@ -1044,6 +1044,12 @@ if (_args.mirror or _args.long_stop_short):
         except Exception:
             _bte._INTRADAY_5M_SOURCE = "auto"
         _bte._INTRADAY_5M = True
+        # 約定モデルの切替(A/B用): LSS_REALISTIC_ENTRY=0 で旧・楽観モデル(常にトリガー約定)。
+        # 既定(未設定/1)は現実的モデル(min(トリガー,始値)+-3%ガード)。約定値の寄与を測る用。
+        import os as _os_re
+        if _os_re.environ.get("LSS_REALISTIC_ENTRY") == "0":
+            _bte._INTRADAY_5M_REALISTIC_ENTRY = False
+            print("[約定モデル] 現実的約定=OFF: 常にトリガー約定(旧・楽観モデル)で計算します", flush=True)
         # 5分足ロード日数を表示窓に合わせる(既定400=ライブ)。基準月スイープ等で表示窓が
         # 長いと、5分足を400日しか読まず古い月がlssから欠落するため、窓+60日に拡張する。
         _bte._INTRADAY_5M_DAYS = max(400, _disp_days + 60)
@@ -1209,6 +1215,10 @@ def _make_cached_bt(orig_fn):
             if getattr(_bte, "_INTRADAY_5M", False):
                 key += (f"|5M{getattr(_bte, '_INTRADAY_5M_SOURCE', '')}"
                         f"|SM{getattr(_bte, '_SM_FORCE', '')}|TM{getattr(_bte, '_TM_FORCE', '')}")
+                # 約定モデルOFF(旧・楽観)のときだけキーを分ける。既定(現実的)は従来キーのまま
+                # =温まった既存キャッシュを維持。A/B比較でキャッシュが混ざらないようにする。
+                if not getattr(_bte, "_INTRADAY_5M_REALISTIC_ENTRY", True):
+                    key += "|RE0"
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
             _bt_cache_dirty["n"] += 1
