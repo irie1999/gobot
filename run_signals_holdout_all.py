@@ -1168,9 +1168,12 @@ def _save_bt_cache():
     if _bt_cache_dirty["n"] == 0:
         return
     try:
+        # ワーカースレッドが書き込み中でも落ちないよう、反復前にスナップショットを取る
+        # (dict changed size during iteration 対策)。dict(...) は原子的でスレッド安全。
+        _snap = dict(_bt_cache)
         with open(_bt_cache_file, "wb") as _bf:
-            _pickle.dump(_bt_cache, _bf, protocol=_pickle.HIGHEST_PROTOCOL)
-        print(f"[BTキャッシュ] {len(_bt_cache)}件を保存 ({_bt_cache_file})")
+            _pickle.dump(_snap, _bf, protocol=_pickle.HIGHEST_PROTOCOL)
+        print(f"[BTキャッシュ] {len(_snap)}件を保存 ({_bt_cache_file})")
     except Exception as _e:
         print(f"[BTキャッシュ] 保存失敗: {_e}")
 
