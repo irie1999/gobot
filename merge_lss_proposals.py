@@ -18,6 +18,14 @@
   python merge_lss_proposals.py lss_proposal_2026-06.py lss_proposal_2025-12.py \
       --mode intersection --out lss_proposal_common_06_12.py
 
+  # K-of-N 投票: N個中K個以上のepochが選んだ銘柄のみ(頑健さと本数のバランス)。
+  # 例: 4基準月中3つ以上で選ばれた「ロバスト核」
+  python merge_lss_proposals.py \
+      lss_proposal_2024-12.py lss_proposal_2025-06.py lss_proposal_2025-12.py lss_proposal_2026-06.py \
+      --min-votes 3 --out lss_proposal_vote3.py
+
+  # (union = --min-votes 1 と同じ / intersection = --min-votes N と同じ)
+
   その後:
   python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 \
       --lss-proposal lss_proposal_merged_06_12.py --long-base 2026-06-30 \
@@ -47,7 +55,11 @@ def main():
     ap = argparse.ArgumentParser(description="lss proposal を union/intersection でマージ")
     ap.add_argument("files", nargs="+", help="マージする proposal ファイル(2つ以上)")
     ap.add_argument("--mode", choices=["union", "intersection"], default="union",
-                    help="union=どちらかに入れば採用(既定) / intersection=全ファイル共通のみ")
+                    help="union=どれか1つでも採用(既定) / intersection=全ファイル共通のみ。"
+                         "--min-votes 指定時はそちらが優先。")
+    ap.add_argument("--min-votes", type=int, default=0,
+                    help="K-of-N投票: N個中この数以上のファイルに出た銘柄×戦略のみ採用。"
+                         "1=union / N=intersection。0(既定)なら --mode に従う。")
     ap.add_argument("--out", type=str, default="lss_proposal_merged.py", help="出力ファイル名")
     args = ap.parse_args()
 
@@ -72,7 +84,12 @@ def main():
         per_file_keys.append(keys)
         print(f"[読込] {f}: {len(keys)}件 (code,strat)")
 
-    if args.mode == "union":
+    n_files = len(args.files)
+    if args.min_votes and args.min_votes > 0:
+        _k = max(1, min(args.min_votes, n_files))
+        merged_keys = {key for key, c in src_count.items() if c >= _k}
+        print(f"[条件] K-of-N投票: {n_files}個中 {_k}個以上に出た銘柄×戦略のみ採用")
+    elif args.mode == "union":
         merged_keys = set().union(*per_file_keys)
     else:  # intersection: 全ファイル共通
         merged_keys = set(per_file_keys[0])
@@ -82,13 +99,21 @@ def main():
     # BTスコア順は run 側で付くので、ここでは code,strat でソートして安定出力にするだけ
     merged = sorted(merged_keys, key=lambda k: (k[0], k[1]))
     n_overlap = sum(1 for k in merged_keys if src_count.get(k, 0) >= 2)
-    print(f"[結果] mode={args.mode} → {len(merged)}件 "
+    _crit = (f"min-votes={max(1, min(args.min_votes, n_files))}/{n_files}"
+             if (args.min_votes and args.min_votes > 0) else f"mode={args.mode}")
+    print(f"[結果] {_crit} → {len(merged)}件 "
           f"(うち2ファイル以上に共通={n_overlap}件)")
+    # 投票分布(何個のepochに出たか)を表示: ロバスト核がどれだけあるか把握用
+    _dist: dict = {}
+    for k in merged_keys:
+        _dist[src_count.get(k, 0)] = _dist.get(src_count.get(k, 0), 0) + 1
+    print("  投票分布(採用分): " + " / ".join(
+        f"{v}個epoch={_dist[v]}件" for v in sorted(_dist, reverse=True)))
 
     lines = [
         '"""lss proposal (merged) — merge_lss_proposals.py 生成',
-        f'  mode={args.mode} / sources={", ".join(Path(x).name for x in args.files)}',
-        f'  {len(merged)}件 (共通={n_overlap}件)。BTは基準月非依存なので run 側でBT降順に予算配分される。',
+        f'  {_crit} / sources={", ".join(Path(x).name for x in args.files)}',
+        f'  {len(merged)}件 (2ファイル以上共通={n_overlap}件)。BTは基準月非依存なので run 側でBT降順に予算配分される。',
         '"""',
         "SELECTED = [",
     ]
