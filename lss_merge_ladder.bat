@@ -22,6 +22,12 @@ python merge_lss_proposals.py lss_proposal_2025-03.py lss_proposal_2025-06.py ls
 python merge_lss_proposals.py lss_proposal_2025-03.py lss_proposal_2025-06.py lss_proposal_2025-09.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --mode union --out lss_proposal_cum_6.py
 
 echo.
+echo ==================== K-of-N 投票 proposal を生成(6窓中K窓以上) ====================
+python merge_lss_proposals.py lss_proposal_2025-03.py lss_proposal_2025-06.py lss_proposal_2025-09.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --min-votes 4 --out lss_proposal_vote4.py
+python merge_lss_proposals.py lss_proposal_2025-03.py lss_proposal_2025-06.py lss_proposal_2025-09.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --min-votes 5 --out lss_proposal_vote5.py
+python merge_lss_proposals.py lss_proposal_2025-03.py lss_proposal_2025-06.py lss_proposal_2025-09.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --min-votes 6 --out lss_proposal_vote6.py
+
+echo.
 echo ==================== 単独 基準月レポート(6本) ====================
 call :rep lss_proposal_2025-03.py _s2025-03
 call :rep lss_proposal_2025-06.py _s2025-06
@@ -39,12 +45,20 @@ call :rep lss_proposal_cum_5.py _cum5_to0326
 call :rep lss_proposal_cum_6.py _cum6_all
 
 echo.
+echo ==================== K-of-N 投票レポート(3本) ====================
+call :rep lss_proposal_vote4.py _vote4
+call :rep lss_proposal_vote5.py _vote5
+call :rep lss_proposal_vote6.py _vote6
+
+echo.
 echo ============================================================
-echo DONE. 11本のHTMLを生成しました。ファイル名の suffix で見分けます:
+echo DONE. 14本のHTMLを生成しました。ファイル名の suffix で見分けます:
 echo   単独:   signals_holdout_all_both_*_s2025-03.html ... _s2026-06.html
 echo   累積:   signals_holdout_all_both_*_cum2_0306.html ... _cum6_all.html
+echo   投票:   signals_holdout_all_both_*_vote4.html / _vote5.html / _vote6.html
 echo   各HTML -> lssタブ -> 1,000〜無制限 -> 400万円 -> 2026/07行(および各月)を比較。
-echo   古いbase(2025-03)ほどOOS月数が多い(2025-04以降が全部OOS)。
+echo   単独: 古いbase(2025-03)ほどOOS月数が多い(2025-04以降が全部OOS)=長期検証向き。
+echo   投票: 繰り返し選ばれた頑健核。OOSは7月のみだが本物度が高い。
 echo ============================================================
 goto :eof
 
