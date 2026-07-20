@@ -63,8 +63,11 @@ echo ============================================================
 goto :eof
 
 REM ---- :rep <proposal.py> <output-suffix> ----
-REM 全レポート共通: 無制限 / ショート省略 / ロング参照は2026-06-30固定(BTランキングを揃える)
+REM 全レポート共通: 無制限 / lssのみ表示(--no-long --no-short) / 高速。
+REM   --no-long: ロングタブを出さず、ロング計算もスキップ(=速い)。BTランキングは既存の
+REM   ロング参照キャッシュ bt_v3_<バー>.pkl から読むので同一。※そのキャッシュが必要なので、
+REM   新しい取引日は最初に一度 .\daily 等(ロング込み)を回してキャッシュを作っておくこと。
 :rep
 echo -------------------- report: %1  (suffix %2) --------------------
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 0 --days 520 --lss-proposal %1 --long-base 2026-06-30 --no-mirror --no-short --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix %2
+python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 0 --days 520 --lss-proposal %1 --long-base 2026-06-30 --no-mirror --no-short --no-long --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix %2
 goto :eof
