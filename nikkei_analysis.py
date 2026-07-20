@@ -10742,8 +10742,8 @@ function switchTbd(id, tab) {{
         if agg is None or agg.get("_v") != 7:
             # 計算時は5分足を必要に応じてロードする(BTがディスク復元だとメモリに無いため)。
             # 銘柄あたり1回だけロード(_l5=プロセスキャッシュ)。進捗を出して無反応を防ぐ。
-            print(f"  [終値損切り比較] {len(tgt)}件を再判定中(損切り/利確を日足終値=引けに委ねる比較)...",
-                  flush=True)
+            _swlab = "指値ガードスイープ(終値比較はスキップ)" if _guard_only else "終値損切り比較"
+            print(f"  [{_swlab}] {len(tgt)}件を再判定中(5分足ロード中)...", flush=True)
             _by_sym5: dict = {}
             def _si():
                 return {"n": 0, "pnl": 0.0, "win": 0, "stop": 0, "tgt": 0, "close": 0}
@@ -10768,7 +10768,7 @@ function switchTbd(id, tab) {{
             _miss = 0; _tot5 = len(tgt)
             for _i5, (sym, name, strat, fd, lp, osp, otp, qty) in enumerate(tgt, 1):
                 if _i5 % 2000 == 0:
-                    print(f"    [終値損切り比較] {_i5}/{_tot5} 判定済み...", flush=True)
+                    print(f"    [{_swlab}] {_i5}/{_tot5} 判定済み...", flush=True)
                 # メモリにあれば即利用、無ければその場でロード(銘柄あたり1回)。
                 _sd = _m5c.get(sym)
                 if _sd is None:
