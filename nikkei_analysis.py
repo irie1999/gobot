@@ -10717,7 +10717,10 @@ function switchTbd(id, tab) {{
         _sig2 = _hl2.md5(repr(sorted([x[:1] + (str(x[3]),) + x[4:] for x in tgt])).encode()).hexdigest()[:16]
         _cdir2 = _P2(__file__).resolve().parent / ".lss_closestop_cache"
         _cf2 = _cdir2 / f"cmp_{_sig2}.pkl"
-        _resweep2 = _os2.getenv("LSS_CLOSESTOP_RESWEEP") == "1"
+        # LSS_GUARD_ONLY=1: 指値ガードスイープだけ計算(終値損切り比較dstop/dtgtをスキップ=速い)。
+        # 計算は強制するがキャッシュは書かない(既存のフル cache を汚さない・毎回ガードだけ再計算)。
+        _guard_only = _os2.getenv("LSS_GUARD_ONLY") == "1"
+        _resweep2 = _os2.getenv("LSS_CLOSESTOP_RESWEEP") == "1" or _guard_only
         agg = None
         if _cf2.exists() and not _resweep2:
             try:
@@ -10793,7 +10796,9 @@ function switchTbd(id, tab) {{
                     _pg = _sp(_ef, _xpt, _rsnt, q, _fee5, _slip5)
                     _gs["n"] += 1; _gs["pnl"] += _pg
                     if _pg > 0: _gs["win"] += 1
-                # ── 決済モード比較(既定=3%約定モデル) ──
+                # ── 決済モード比較(既定=3%約定モデル) ── guard_only 時はスキップして高速化
+                if _guard_only:
+                    continue
                 _efill = _sef(db, lp, False, entry_gap_limit=0.03)
                 if _efill is None:
                     continue   # 既定モデルで約定しない → 決済比較からは除外(ガードには計上済み)
@@ -10814,14 +10819,15 @@ function switchTbd(id, tab) {{
                 if rt != rs or abs(pt - ps) > 1:
                     diffs.append((sym, name, strat, str(fd), pt, rt, ps, rs))
             agg = {"_v": 7, "touch": touch, "dstop": dstop, "dtgt": dtgt,
-                   "guards": guards,
+                   "guards": guards, "_guard_only": _guard_only,
                    "ndiff": len(diffs),
                    "diffs": sorted(diffs, key=lambda d: d[6] - d[4], reverse=True)}
-            try:
-                _cdir2.mkdir(exist_ok=True)
-                _cf2.write_bytes(_pk2.dumps(agg))
-            except Exception:
-                pass
+            if not _guard_only:   # guard_only はキャッシュを書かない(フルcacheを汚さない)
+                try:
+                    _cdir2.mkdir(exist_ok=True)
+                    _cf2.write_bytes(_pk2.dumps(agg))
+                except Exception:
+                    pass
 
         tc = agg["touch"]; ds = agg["dstop"]; dt = agg["dtgt"]
         if tc["n"] == 0:
@@ -10947,6 +10953,9 @@ function switchTbd(id, tab) {{
 </table></div>
 <p class="footnote" style="margin-top:8px">※ 総損益で比較。現行より大きいモードがあれば、その決済ルールに
 切替える価値あり。実運用に反映するには watcher/close_lss_guard を同じ判定に揃える(§16 と整合確認)。</p>"""
+        if agg.get("_guard_only"):
+            _closestop_html = ('<p class="footnote">🔻 終値損切り比較は <b>LSS_GUARD_ONLY=1</b>（ガードのみ計算）'
+                               'のためスキップしました。⑦を見るには LSS_CLOSESTOP_RESWEEP=1 で再計算してください。</p>')
         return {"closestop": _closestop_html, "guard": _guard_html, "liq": _liq_html,
                 "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
