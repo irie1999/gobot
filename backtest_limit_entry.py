@@ -1123,12 +1123,27 @@ def run_limit_backtest(
     # 各トレード(発注中を除く)を「注文価格ちょうどで空売り→5分足 first-touch で決済」
     # に置換。5分足の無い日は除外。pnl はショート損益を直接計上するので、この時は
     # _MIRROR_PNL の反転は行わない(下の if でスキップ)。
+    _nofill_log: list = []   # 発注はしたが不約定(トリガー未達/ギャップ過大)。予算シミュの枠消費用。
     if _INTRADAY_5M:
         from sameday5m_firsttouch import (short_exit_5m as _se5, short_pnl as _sp5,
                                           short_entry_fill_5m as _sef5)
         _is_rise = (entry_type == "stop")   # mirror=上昇約定 / lss(stop_sell)=下落約定
         _bd = _load_5m_by_day(symbol)
         _new = []
+
+        def _mk_nofill(_t, _lp, _edt, _qty):
+            """不約定レコード: 注文は出したので発注枠(注文トリガー価格×株数)は消費する。
+            pnl=0。予算シミュだけが参照する(KPI/月次には混ぜない=別リストで返す)。"""
+            _nf = dict(_t)
+            _nf["reason"] = "約定せず"
+            _nf["pnl"] = 0.0
+            _nf["entry_p"] = _lp     # 注文トリガー価格(=前日終値ベース)。枠計算の基準。
+            _nf["exit_p"] = 0.0
+            _nf["exit_dt"] = _edt    # 同日(synthetic)。窓フィルタが effect するように。
+            _nf["hold_days"] = 0
+            _nf["qty"] = _qty
+            return _nf
+
         for _t in trades:
             if _t.get("reason") == "発注中":
                 _new.append(_t); continue
@@ -1141,23 +1156,27 @@ def run_limit_backtest(
             _fd = _edt.date() if hasattr(_edt, "date") else _edt
             _db = _bd.get(_fd)
             if _db is None or len(_db) < 2:
-                continue   # 5分足なし → 除外(日足へフォールバックしない)
+                continue   # 5分足なし → 除外(日足へフォールバックしない)。データ欠なので不約定扱いにもしない。
             _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
+            _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
                 _entry_fill = _sef5(_db, _lp, _is_rise,
                                     entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT)
                 if _entry_fill is None:
-                    continue   # ギャップ過大 → 約定不成立(トレードなし)
+                    # ギャップ過大 → 約定不成立だが発注はした → 枠消費用に不約定記録。
+                    _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
             else:
                 _entry_fill = _lp
             # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
                                                on_close=_INTRADAY_5M_ON_CLOSE)
-            if _rsn in ("no_5m", "no_entry"):
-                continue
-            _qty = _t.get("qty", FIXED_QTY)
+            if _rsn == "no_5m":
+                continue   # データ欠 → 不約定扱いにしない
+            if _rsn == "no_entry":
+                # 終日トリガー未達 → 不約定だが発注はした → 枠消費用に記録。
+                _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
             # 損益は現実的な約定価格(_entry_fill)基準。
             _pnl = _sp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
             _t["entry_p"] = _entry_fill
@@ -1206,6 +1225,7 @@ def run_limit_backtest(
         slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=avg_hold, fill_rate=fill_rate,
         trade_log=trades,
+        nofill_log=_nofill_log,
     )
 
 
@@ -1217,6 +1237,7 @@ def _empty_result(symbol: str, name: str, strategy: str) -> dict:
         total_fee=0.0,
         slippage_pct=SLIPPAGE_STOP_PCT, fee_pct_one_way=FEE_PCT_ONE_WAY,
         avg_hold=0.0, fill_rate=0.0, trade_log=[],
+        nofill_log=[],
     )
 
 

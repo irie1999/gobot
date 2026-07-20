@@ -7410,7 +7410,9 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                                       "stop_sell" if _strat.endswith("_S") else "stop")
                         _rr = _fw_rbt(_sym, _name, _dfx, _cf, _e, _s, _t,
                                       _score_win, _strat, entry_type=_et)
-                        return _rr["trade_log"] if _rr else None
+                        if not _rr:
+                            return None
+                        return (_rr["trade_log"], _rr.get("nofill_log", []))
                     except Exception:
                         return None
 
@@ -7422,7 +7424,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         try:
                             _fl = _fut.result()
                             if _fl is not None:
-                                _it["full_trade_log"] = _fl
+                                _it["full_trade_log"] = _fl[0]
+                                _it["full_nofill_log"] = _fl[1]
                         except Exception:
                             pass
 
@@ -7469,8 +7472,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     all_trades: list[dict] = []        # デデュップ済み（総KPI・取引リスト用）
     full_year_trades: list[dict] = []  # デデュップ済み（スコア別実績用）
     cfg_trades_map: dict = {}          # config別取引（サマリーテーブル用・デデュップなし）
+    all_nofills: list[dict] = []       # lss不約定(発注枠は消費/pnl=0)。予算シミュ専用。
     # 取引リスト表示用: 同一 (sym, strat, signal_dt) は最初のconfig分だけ表示
     seen_global: set = set()
+    _seen_nofill: set = set()          # 不約定デデュップ (sym, strat, entry_d)
 
     for cfg in _PNL_CONFIGS:
         items = _cached_items_per_cfg.get(cfg["label"], [])
@@ -7601,6 +7606,59 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 # 取引明細テーブルには発注中も表示
                 if since <= exit_d <= until:
                     all_trades.append({**base, **extra})
+
+            # ── 不約定(発注枠は消費/pnl=0)を予算シミュ用に別リストへ ──────────────
+            # lssのみ。注文は出したがトリガー未達/ギャップ過大で約定しなかったシグナル。
+            # KPI・月次・取引明細には一切混ぜず、予算シミュ(注文時に枠を消費)だけが参照する。
+            if _LSS_ORDER_MODE:
+                _nf_src = it.get("full_nofill_log")
+                if _nf_src is None:
+                    _mp_nf = max(period_results.keys())
+                    _nf_src = period_results[_mp_nf].get("nofill_log", [])
+                for _nt in (_nf_src or []):
+                    _n_edt = _nt.get("entry_dt")
+                    if _n_edt is None:
+                        continue
+                    _n_ed = _n_edt.date() if hasattr(_n_edt, "date") else _n_edt
+                    if not (since <= _n_ed <= until):
+                        continue
+                    _n_lp = float(_nt.get("order_limit", 0) or 0)
+                    if _n_lp <= 0:
+                        continue
+                    # 価格帯フィルタ(6000円タブ等)は注文トリガー価格(終値ベース)で判定。
+                    if _PNL_ENTRY_MAX_PRICE > 0 and _n_lp > _PNL_ENTRY_MAX_PRICE:
+                        continue
+                    if _PNL_ENTRY_MIN_PRICE > 0 and _n_lp < _PNL_ENTRY_MIN_PRICE:
+                        continue
+                    _nkey = (sym, strat, _n_ed)
+                    if _nkey in _seen_nofill:
+                        continue
+                    _seen_nofill.add(_nkey)
+                    # シグナル時点BT(fillと同じ算出)。BT30未満は発注対象外なので枠も消費しない。
+                    _n_sdt = _nt.get("signal_dt")
+                    _n_sd = _n_sdt.date() if hasattr(_n_sdt, "date") else (_n_sdt or _n_ed)
+                    _n_sc = _lookup_signal_date_bt(sym, strat, str(_n_sd) if _n_sd else None)
+                    if (_n_sc is None and it.get("full_trade_log") is not None
+                            and _n_sd is not None):
+                        _ak2 = (sym, strat, cfg["mode"], str(_n_sd), _BT_WINDOW_DAYS)
+                        if _ak2 in _ASOF_BT_CACHE:
+                            _n_sc = _ASOF_BT_CACHE[_ak2]
+                        else:
+                            _n_sc = _asof_bt_score(it["full_trade_log"], _mod_for(strat), _n_sd)
+                            _ASOF_BT_CACHE[_ak2] = _n_sc
+                        if _n_sc is None:
+                            _n_sc = 0
+                    if _n_sc is None:
+                        _n_sc = rec_score2
+                    if _n_sc < 30:
+                        continue   # BT30未満は注文しない → 枠も消費しない
+                    all_nofills.append({
+                        "symbol": sym, "name": name, "strategy": strat,
+                        "rec_score": _n_sc, "score": _n_sc,
+                        "entry_d_raw": _n_ed, "exit_d_raw": _n_ed,
+                        "order_limit": _n_lp, "entry_p": _n_lp,
+                        "qty": _nt.get("qty", 0), "reason": "約定せず", "pnl": 0.0,
+                    })
 
     # reset to conservative
     _stop.STRATEGY_PARAMS.update(_CON_STOP)
@@ -9378,27 +9436,49 @@ function switchTbd(id, tab) {{
     )
     _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
 
-    # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで買った場合に「実際に約定した
-    # トレードだけ」を抽出。同日決済なので予算は毎日リセット。必要資金=約定値×株数。
-    # 予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。lssのみ。
+    # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の成績。lssのみ。
+    #  ・「終値で判断」: 予算に収まるかは注文トリガー価格(order_limit=前日終値ベース)×株数で判定
+    #    (約定値ではない=発注時点で確定する必要資金)。
+    #  ・「注文時に枠を消費」: 約定した注文だけでなく、不約定(トリガー未達/ギャップ過大)の注文も
+    #    発注枠を消費する(=その下のBTの約定を締め出す)。損益・グリッドには約定分のみ計上。
+    #  ・同日決済なので予算は毎日リセット。予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。
     try:
         _budget_yen = float(os.environ.get("LSS_BUDGET_MAN", "400")) * 1e4
     except Exception:
         _budget_yen = 4e6
     _budget_man = int(_budget_yen / 1e4)
+
+    def _order_notional(_t):
+        # 注文時の必要資金 = 注文トリガー価格(終値ベース) × 株数。約定値ではない。
+        _op = float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)
+        return _op * float(_t.get("qty", 0) or 0)
+
     _budget_entry_sorted = []
     if _LSS_ORDER_MODE:
         _by_day_bud: dict = _dd(list)
         for _t in _bt40_entry_sorted:
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
+        # 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。ただし同一銘柄同日に
+        # 約定注文があれば二重発注しない(1銘柄1注文/日)。
+        _fill_sym_day = {(_t.get("symbol"),
+                          str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
+                         for _t in _bt40_entry_sorted}
+        for _t in all_nofills:
+            if _eff_long_bt(_t) < 30:
+                continue
+            _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+            if (_t.get("symbol"), _dk2) in _fill_sym_day:
+                continue
+            _by_day_bud[_dk2].append(_t)
         for _dk in _by_day_bud:
             _cap = 0.0
             for _t in sorted(_by_day_bud[_dk], key=lambda x: -_eff_long_bt(x)):
-                _no = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
+                _no = _order_notional(_t)
                 if _no <= 0 or _cap + _no > _budget_yen:
-                    continue   # 予算超過はスキップ(次の安い銘柄が入るか試す=貪欲)
+                    continue   # 予算超過はスキップ(次の安い注文が入るか試す=貪欲)
                 _cap += _no
-                _budget_entry_sorted.append(_t)
+                if _t.get("reason") != "約定せず":
+                    _budget_entry_sorted.append(_t)   # 約定分だけグリッド・損益に計上
         _budget_entry_sorted.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
 
@@ -10301,7 +10381,7 @@ function switchTbd(id, tab) {{
     # エントリーは同一・決済ルールだけ変えて apples-to-apples 比較する。重い(全trade×
     # 5分足)ので結果をディスクにキャッシュし、2回目以降は再計算しない
     # (環境変数 LSS_CLOSESTOP_RESWEEP=1 で強制再計算)。
-    def _close_stop_compare_html(trades_list):
+    def _close_stop_compare_html(trades_list, nofills=None):
         # 調査の各部品をキー別に返す(呼び出し側が別々の調査タブに載せる):
         #   closestop / guard / liq / budgetsim / slotsim
         _EMPTY = {"closestop": "", "guard": "", "liq": "", "budgetsim": "", "slotsim": ""}
@@ -10422,8 +10502,10 @@ function switchTbd(id, tab) {{
                 '<th style="text-align:right;padding:3px 10px;color:#94a3b8;font-size:0.75rem">勝率</th>'
                 '</tr></thead><tbody>' + _rows + '</tbody></table></div>')
         def _build_budget_sim_html(rows):
-            # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで買った場合の月次成績。
-            # 同日決済なので予算は毎日リセット。必要資金=約定値×株数の累計が予算を超えたら打ち切り。
+            # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の月次成績。
+            #  ・必要資金=注文トリガー価格(終値ベース)×株数の累計が予算を超えたら打ち切り。
+            #  ・不約定の注文(is_fill=False)も発注枠を消費するが、損益・件数には計上しない。
+            #  ・同日決済なので予算は毎日リセット。
             if len(rows) < 20:
                 return ""
             import os as _osb
@@ -10433,18 +10515,20 @@ function switchTbd(id, tab) {{
                 _bud = 4e6
             _bud_man = int(_bud / 1e4)
             _by_day: dict = {}
-            for _d, _bt, _no, _p in rows:
-                _by_day.setdefault(_d, []).append((_bt, _no, _p))
+            for _d, _bt, _no, _p, _isf in rows:
+                _by_day.setdefault(_d, []).append((_bt, _no, _p, _isf))
             _mon: dict = {}   # YYYY-MM -> {n,pnl,win,days,used_sum}
             _tot = {"n": 0, "pnl": 0.0, "win": 0}
             for _d, _lst in _by_day.items():
                 _mk = _d[:7]   # YYYY-MM
                 _cap = 0.0
                 _picked = []
-                for _bt, _no, _p in sorted(_lst, key=lambda x: -x[0]):
+                for _bt, _no, _p, _isf in sorted(_lst, key=lambda x: -x[0]):
                     if _cap + _no > _bud:
-                        continue   # 予算超過はスキップ(次に安いのが入るか試す=貪欲)
-                    _cap += _no; _picked.append((_no, _p))
+                        continue   # 予算超過はスキップ(次に安い注文が入るか試す=貪欲)
+                    _cap += _no                      # 約定・不約定とも発注枠を消費
+                    if _isf:
+                        _picked.append((_no, _p))    # 損益・件数は約定分のみ
                 _m = _mon.setdefault(_mk, {"n": 0, "pnl": 0.0, "win": 0, "used": 0.0, "days": 0})
                 _m["days"] += 1; _m["used"] += _cap
                 for _no, _p in _picked:
@@ -10477,10 +10561,11 @@ function switchTbd(id, tab) {{
                       f'<td style="text-align:right;padding:4px 10px;color:#64748b">—</td>'
                       f'</tr>')
             return (
-                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで買った場合（月次）</h4>'
-                f'<p class="footnote">毎日その日のBT降順で、必要資金(約定値×100株)の累計が'
-                f'<b>{_bud_man}万円</b>に収まるだけ買う（同日決済なので予算は毎日リセット）。'
-                f'この価格帯タブ(表示中の価格上限)の銘柄のみ。実運用に一番近い「予算内で上から買う」の再現。'
+                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで注文した場合（月次）</h4>'
+                f'<p class="footnote">毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が'
+                f'<b>{_bud_man}万円</b>に収まるだけ<b>注文</b>する（同日決済なので予算は毎日リセット）。'
+                f'<b>不約定(トリガー未達・ギャップ過大)の注文も発注枠を消費</b>する（＝その下のBTの約定を締め出す）。'
+                f'損益・件数は約定分のみ計上。この価格帯タブ(表示中の価格上限)の銘柄のみ。'
                 f'予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。</p>'
                 '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
                 '<thead><tr>'
@@ -10588,7 +10673,10 @@ function switchTbd(id, tab) {{
         _liq = {l: {"n": 0, "pnl": 0.0, "win": 0} for l in _liqlabs}
         _liq_pairs = []   # (売買代金, pnl) — しきい値以上の累計成績用
         _sim_rows = []    # (entry_date, bt, 売買代金, pnl) — 枠数固定の方式対決用
-        _bud_rows = []    # (entry_date, bt, 必要資金, pnl) — 予算固定シミュ用
+        # (entry_date, bt, 必要資金(注文トリガー価格×株数), pnl, is_fill) — 予算固定シミュ用。
+        # 必要資金は「終値で判断」= 注文トリガー価格(order_limit=前日終値ベース)で集計。
+        _bud_rows = []
+        _fill_sym_day_m = set()
         for _t in trades_list:
             if _t.get("reason") in ("発注中", "保有中", None):
                 continue
@@ -10601,12 +10689,26 @@ function switchTbd(id, tab) {{
             if _p > 0: _b["win"] += 1
             _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
             _bt_v = float(_eff_long_bt(_t))
-            _notional = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
+            # 必要資金 = 注文トリガー価格(終値ベース) × 株数。約定値ではない。
+            _notional = (float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)) \
+                * float(_t.get("qty", 0) or 0)
             if _notional > 0:
-                _bud_rows.append((_dk, _bt_v, _notional, _p))
+                _bud_rows.append((_dk, _bt_v, _notional, _p, True))
+                _fill_sym_day_m.add((_t.get("symbol"), _dk))
             if _lv is not None:
                 _liq_pairs.append((_lv, _p))
                 _sim_rows.append((_dk, _bt_v, _lv, _p))
+        # 不約定(発注枠は消費するが損益0)を月次シミュにも投入(1銘柄1注文/日で重複除外)。
+        for _t in (nofills or []):
+            if _eff_long_bt(_t) < 30:
+                continue
+            _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+            if (_t.get("symbol"), _dk) in _fill_sym_day_m:
+                continue
+            _notional = (float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)) \
+                * float(_t.get("qty", 0) or 0)
+            if _notional > 0:
+                _bud_rows.append((_dk, float(_eff_long_bt(_t)), _notional, 0.0, False))
         # 調査ごとに部品を分けて保持(それぞれ別の調査タブに載せる)。
         _liq_html = _build_liq_html(_liq, _liqlabs) + _build_liq_threshold_html(_liq_pairs)
         _budgetsim_html = _build_budget_sim_html(_bud_rows)
@@ -10842,7 +10944,7 @@ function switchTbd(id, tab) {{
         return {"closestop": _closestop_html, "guard": _guard_html, "liq": _liq_html,
                 "budgetsim": _budgetsim_html, "slotsim": _slotsim_html}
 
-    _inv = _close_stop_compare_html(done_trades)
+    _inv = _close_stop_compare_html(done_trades, nofills=all_nofills)
     if not isinstance(_inv, dict):
         _inv = {}
     _inv_closestop = _inv.get("closestop", "")
@@ -11887,9 +11989,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _bt40liq_pane = (
             f'<div id="detail_{_dseq}_budget" class="detail-tab-pane">'
             f'<p style="color:#7dd3fc;font-size:0.8rem;margin-bottom:10px">'
-            f'💰 毎日その日のBT降順で、必要資金(約定値×100株)の累計が <b>{_budget_man}万円</b> に収まる'
-            f'だけ買った場合に「実際に約定したトレードだけ」を表示（同日決済なので予算は毎日リセット）。'
-            f'この価格帯タブの銘柄のみ＝実運用「予算内で上から買う」に最も近い。日付クリックで詳細'
+            f'💰 毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が '
+            f'<b>{_budget_man}万円</b> に収まるだけ<b>注文</b>した場合の「約定したトレード」を表示'
+            f'（同日決済なので予算は毎日リセット）。<b>不約定の注文も発注枠を消費</b>する'
+            f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。日付クリックで詳細'
             f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
             + _month_summary_html(_budget_entry_sorted)
             + _month_accordion_html(_budget_entry_by_date, _sorted_budget_entry_dates, _dseq, "q")

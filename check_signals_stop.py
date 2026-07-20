@@ -360,6 +360,9 @@ def backtest_one(symbol: str, name: str, strategy: str,
             avg_hold=sum(t["hold_days"] for t in sub) / filled if filled else 0.0,
             fill_rate=full_r["fill_rate"],
             trade_log=sub_display,  # 表示用は保有中を含む
+            # 不約定(発注枠は消費/pnl=0)。lss予算シミュだけが参照。窓でトリム。
+            nofill_log=[t for t in full_r.get("nofill_log", [])
+                        if t.get("entry_dt") is not None and t["entry_dt"].date() >= cutoff],
         )
 
     return dict(symbol=symbol, name=name, strategy=strategy,
