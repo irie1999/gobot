@@ -30,7 +30,7 @@ ap = argparse.ArgumentParser(description="日経寄りギャップで上げ日�
 ap.add_argument("--proposal", required=True)
 ap.add_argument("--base-month", type=str, default="2026-03")
 ap.add_argument("--thresholds", type=str, default="0.3,0.5,1.0,1.5,2.0",
-                help="上ギャップ閾値%(カンマ区切り)。gap>=閾値の日は見送り。")
+                help="up-gap thresholds in percent, comma-separated. gap>=threshold の日は見送り。")
 ap.add_argument("--sm", type=float, default=0.1)
 ap.add_argument("--tm", type=float, default=1.0)
 ap.add_argument("--days", type=int, default=800)
