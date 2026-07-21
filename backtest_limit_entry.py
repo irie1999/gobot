@@ -50,7 +50,8 @@ JST           = timezone(timedelta(hours=9))
 _TODAY        = datetime.now(JST).date()
 _CACHE_DIR    = Path(".rsi2_cache")
 
-ENTRY_EXPIRE  = 1      # 指値有効日数（翌日のみ有効）
+ENTRY_EXPIRE  = 0      # 注文の繰越日数。0=翌営業日のみ有効(当日限り・繰越なし=実運用の当日限り注文に一致)。
+                       # 1にすると翌営業日で不約定でももう1日繰り越す(=当日+1日後の2日有効)。
 ROLLING_ENTRY = 0      # ローリング逆指値: 0=無効, N=最大更新回数（未約定時に終値で価格を更新）
 MAX_HOLD      = 10     # 最大保有日数 (全戦略10日。⑬回復分析で10日が総損益/PFの最良)
 INITIAL_CASH  = 500_000

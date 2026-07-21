@@ -1167,7 +1167,8 @@ except Exception:
 # 自動で無効化(ファイル名が変わる)して作り直す。バー日付だけだとコード変更が反映されない。
 #   v2: 現実的約定モデル(min(トリガー,始値)+-3%指値ガード)を導入(2026-07-18)
 #   v3: 不約定(nofill_log)を保持(予算シミュの注文時枠消費用)。結果dictに新フィールド追加(2026-07-20)
-_BT_LOGIC_VER = "v3"
+#   v4: ENTRY_EXPIRE 1→0(翌営業日のみ有効=当日限り。実運用の当日限り注文に一致)(2026-07-21)
+_BT_LOGIC_VER = "v4"
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。
