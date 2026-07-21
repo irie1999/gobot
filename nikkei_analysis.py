@@ -10543,6 +10543,9 @@ function switchTbd(id, tab) {{
             except Exception:
                 _bud = 4e6
             _bud_man = int(_bud / 1e4)
+            # 開始月フィルタ(環境変数 LSS_MONTH_FROM=YYYY-MM)。マージ提案で最新基準月より
+            # 後だけ(=OOS)を見たいとき指定。例: 最新基準2026-03 → LSS_MONTH_FROM=2026-04。
+            _mfrom = _osb.environ.get("LSS_MONTH_FROM", "").strip()
             _by_day: dict = {}
             for _d, _bt, _no, _p, _isf in rows:
                 _by_day.setdefault(_d, []).append((_bt, _no, _p, _isf))
@@ -10550,6 +10553,8 @@ function switchTbd(id, tab) {{
             _tot = {"n": 0, "pnl": 0.0, "win": 0}
             for _d, _lst in _by_day.items():
                 _mk = _d[:7]   # YYYY-MM
+                if _mfrom and _mk < _mfrom:
+                    continue   # 開始月より前(In-sample側)はスキップ
                 _cap = 0.0
                 _picked = []
                 for _bt, _no, _p, _isf in sorted(_lst, key=lambda x: -x[0]):
@@ -10592,6 +10597,7 @@ function switchTbd(id, tab) {{
             return (
                 f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで注文した場合（月次）'
                 + (f'<span style="color:#fbbf24">［BT{_BUD_MIN_BT}以上のみ］</span>' if _BUD_MIN_BT > 30 else '')
+                + (f'<span style="color:#38bdf8">［{_mfrom}以降=OOS］</span>' if _mfrom else '')
                 + '</h4>'
                 f'<p class="footnote">毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が'
                 f'<b>{_bud_man}万円</b>に収まるだけ<b>注文</b>する（同日決済なので予算は毎日リセット）。'
