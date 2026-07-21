@@ -1,30 +1,37 @@
-"""test_day_market.py — 「lssの日次損益は日経/先物の動きに連動しているか」を測る。
+"""test_day_market.py — 「lssの日次損益は"寄り前に分かる"市場指標に連動しているか」を測る。
 
 背景(ユーザー): 日によって lss(ロング銘柄ショート)の合計損益が大きくぶれる。
-  その差が『その日の日経(=寄り前は先物で予告される)』の動きで説明できるなら、
+  その差が『9:00の寄り前に確定している指標(米国株・先物・ドル円)』で説明できるなら、
   上げ気配の日はショートを見送り/ロングのデイトレに回す、という対策を打ちたい。
+  重要: 発注は9:00の寄り前に間に合わせたい。よって指標は"寄り前に確定"していること。
 
-test_gap_filter.py との違い:
-  - あちらは『個々のトレードを寄りギャップ閾で見送る』フィルター評価。
-  - こちらは『その日の lss 合計損益』を1点として、日経の各指標との
-    相関・バケット別成績を出す(=日単位の連動を見る)。
+指標(すべて9:00より前に判明 → 発注判断に使える):
+  cme_nikkei  NIY=F  CME日経先物(円建て,朝6時) = 現物ギャップの直接予告「シカゴ日経比」
+  sp500_fut   ES=F   S&P500先物(24h, 寄り直前まで連続) = 一番"寄り前"に近いリスクオン/オフ
+  usdjpy      JPY=X  ドル円(24h) 円安→株高
+  sp500       ^GSPC  S&P500現物 前夜終値(朝5時)
+  nasdaq      ^IXIC  Nasdaq現物 前夜終値(朝6時)
+  vix         ^VIX   VIX 前夜終値
+  (参考) cash_gap: 現物日経の当日寄りギャップ%。9:00にしか確定しない=発注には間に合わない。
+                   連動の"答え合わせ"用に併記するだけ。
 
-日経(^N225)の3指標:
-  gap%      = (当日始値 - 前日終値) / 前日終値 * 100   ← 寄りで判明(先物ナイトが予告)= 対策に使える
-  intraday% = (当日終値 - 当日始値) / 当日始値 * 100    ← 当日の値動き(事後)
-  day%      = (当日終値 - 前日終値) / 前日終値 * 100     ← 全日(事後)
+先読み防止(重要):
+  各 JST営業日 D について「D の寄りより厳密に前に確定した最新バー」を使う。
+  pandas merge_asof(backward, allow_exact_matches=False) で D 未満の最新値を紐付け。
+  cash_gap だけは同日9:00の値(=事後参考)。
 
 やること:
   1) 各 (symbol,strategy) を run_limit_backtest → D+1エントリー(現行) → 5分足first-touchで損益。
   2) 損益を『エントリー日』で合計 → 日次 lss 損益系列。
-  3) 日経3指標を日付で紐付け。
-  4) 相関(Pearson) と バケット別(gap/intraday/day)の日次成績を出す。
+  3) 各指標の日次変化%を"寄り前asof"で紐付け。
+  4) 相関(Pearson) と バケット別(寄り前指標)の日次成績を出す。
   5) base-month で TRAIN/TEST(OOS)分割。TEST が本命。
 
 使い方:
   python test_day_market.py --proposal lss_proposal_2026-06.py --base-month 2026-06 \
       --source local --workers 8
   (12月基準でも: --proposal lss_proposal_2025-12.py --base-month 2025-12)
+  指標を絞る: --proxies cme_nikkei,sp500_fut,usdjpy
 """
 from __future__ import annotations
 import argparse
@@ -33,9 +40,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
-ap = argparse.ArgumentParser(description="lss日次損益と日経/先物の連動を測る")
+# 寄り前に確定する指標(ticker) — 名前: (yfticker, 表示ラベル)
+PROXY_DEFS = {
+    "cme_nikkei": ("NIY=F", "CME日経先物%(前夜,寄り前)"),
+    "sp500_fut":  ("ES=F",  "S&P500先物%(寄り直前)"),
+    "usdjpy":     ("JPY=X", "ドル円%(前夜)"),
+    "sp500":      ("^GSPC", "S&P500現物%(前夜終値)"),
+    "nasdaq":     ("^IXIC", "Nasdaq現物%(前夜終値)"),
+    "vix":        ("^VIX",  "VIX%(前夜)"),
+}
+
+ap = argparse.ArgumentParser(description="lss日次損益と寄り前市場指標の連動を測る")
 ap.add_argument("--proposal", required=True)
 ap.add_argument("--base-month", type=str, default="2026-06")
+ap.add_argument("--proxies", type=str,
+                default="cme_nikkei,sp500_fut,usdjpy,sp500,nasdaq,vix",
+                help="使う寄り前指標(カンマ区切り): " + ",".join(PROXY_DEFS))
 ap.add_argument("--sm", type=float, default=0.1)
 ap.add_argument("--tm", type=float, default=1.0)
 ap.add_argument("--days", type=int, default=800)
@@ -57,10 +77,28 @@ ble._ENTRY_TYPE_FORCE = None
 QTY = ble.FIXED_QTY
 FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY
 BASE_END = pd.Period(args.base_month, "M").end_time.normalize()
+USE_PROXIES = [p.strip() for p in args.proxies.split(",")
+               if p.strip() in PROXY_DEFS]
 
 
-def _nikkei_by_date() -> dict:
-    """^N225 の {date: (gap%, intraday%, day%)} を返す(yfinance)。"""
+def _dl_pct(ticker: str) -> pd.Series:
+    """ticker の日次終値変化%(前バー比)を date昇順の Series(index=Timestamp)で返す。"""
+    import yfinance as yf
+    df = yf.download(ticker, period="3y", interval="1d",
+                     auto_adjust=False, progress=False)
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    cl = df["Close"].astype(float)
+    pct = cl.pct_change() * 100.0
+    pct = pct.dropna()
+    pct.index = pd.to_datetime(pct.index).normalize()
+    return pct
+
+
+def _nikkei_cash_gap() -> dict:
+    """^N225 現物の当日寄りギャップ% {date: gap%}(=9:00確定, 事後参考)。"""
     try:
         import yfinance as yf
         df = yf.download("^N225", period="3y", interval="1d",
@@ -70,20 +108,28 @@ def _nikkei_by_date() -> dict:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         op = df["Open"].astype(float)
-        cl = df["Close"].astype(float)
-        prev = cl.shift(1)
+        prev = df["Close"].astype(float).shift(1)
         gap = (op - prev) / prev * 100.0
-        intr = (cl - op) / op * 100.0
-        day = (cl - prev) / prev * 100.0
-        out = {}
-        for ts in df.index:
-            g, i, d = gap.get(ts), intr.get(ts), day.get(ts)
-            if pd.notna(g) and pd.notna(i) and pd.notna(d):
-                out[ts.date()] = (float(g), float(i), float(d))
-        return out
+        return {ts.date(): float(g) for ts, g in gap.items() if pd.notna(g)}
     except Exception as e:
-        print(f"[warn] ^N225 取得失敗: {e}")
+        print(f"[warn] ^N225 現物取得失敗: {e}")
         return {}
+
+
+def _asof_before(pct: pd.Series, jst_dates: list) -> dict:
+    """各 JST営業日 D に『D より厳密に前の最新 pct』を紐付け(先読み防止)。
+    D の寄り前に確定していた最新の指標変化を表す。"""
+    if pct.empty:
+        return {}
+    left = pd.DataFrame({"d": pd.to_datetime(jst_dates)}).sort_values("d")
+    right = pd.DataFrame({"d": pct.index, "v": pct.values}).sort_values("d")
+    merged = pd.merge_asof(left, right, on="d", direction="backward",
+                           allow_exact_matches=False)
+    out = {}
+    for _, row in merged.iterrows():
+        if pd.notna(row["v"]):
+            out[row["d"].date()] = float(row["v"])
+    return out
 
 
 def _load_pairs(path):
@@ -162,46 +208,43 @@ def _fmt_corr(x):
     return "n/a" if x != x else f"{x:+.3f}"
 
 
-def _bucket_report(rows, key_idx, label, edges, edge_labels):
-    """rows=[(date,pnl,gap,intr,day)]。key_idx: 2=gap,3=intr,4=day。
-    edges で日経指標をバケット分割し、日次lss成績を出す。"""
-    # 日単位に集約(その日の lss 合計 pnl と、日経指標=同じ日は同値)
-    day_pnl, day_key = {}, {}
-    for (d, pnl, g, i, dd) in rows:
-        day_pnl[d] = day_pnl.get(d, 0.0) + pnl
-        day_key[d] = (g, i, dd)[key_idx - 2]
-    days = sorted(day_pnl)
+def _bucket_report(day_pnl: dict, day_val: dict, label, edges, edge_labels):
+    days = [d for d in sorted(day_pnl) if d in day_val]
     print(f"\n■ {label} バケット別 lss日次成績 (TEST/OOS, {len(days)}営業日)")
     print(f"{'区分':>12} | {'日数':>5} {'勝ち日':>6} {'合計損益':>12} {'平均/日':>10} {'中央/日':>10}")
     print("-" * 68)
     for lo, hi, lab in zip([None] + edges, edges + [None], edge_labels):
-        sel = []
-        for d in days:
-            k = day_key[d]
-            if (lo is None or k >= lo) and (hi is None or k < hi):
-                sel.append(day_pnl[d])
+        sel = [day_pnl[d] for d in days
+               if (lo is None or day_val[d] >= lo) and (hi is None or day_val[d] < hi)]
         if not sel:
             print(f"{lab:>12} | {0:>5} {'-':>6} {'-':>12} {'-':>10} {'-':>10}")
             continue
         s = pd.Series(sel)
-        winday = (s > 0).mean() * 100
-        print(f"{lab:>12} | {len(sel):>5} {winday:>5.0f}% {s.sum():>+12,.0f} "
-              f"{s.mean():>+10,.0f} {s.median():>+10,.0f}")
+        print(f"{lab:>12} | {len(sel):>5} {(s>0).mean()*100:>5.0f}% "
+              f"{s.sum():>+12,.0f} {s.mean():>+10,.0f} {s.median():>+10,.0f}")
 
 
 def main():
-    nikkei = _nikkei_by_date()
-    if not nikkei:
-        print("[error] 日経が取れませんでした(yfinance ^N225)。中断。")
-        return
+    print(f"[info] 寄り前指標をDL中: {', '.join(PROXY_DEFS[p][0] for p in USE_PROXIES)} ...")
+    proxy_pct = {}
+    for p in USE_PROXIES:
+        tk = PROXY_DEFS[p][0]
+        try:
+            s = _dl_pct(tk)
+        except Exception as e:
+            print(f"  [warn] {tk} 取得失敗: {e}")
+            s = pd.Series(dtype=float)
+        proxy_pct[p] = s
+        print(f"  {tk:>7}: {len(s)}バー")
+    cash_gap = _nikkei_cash_gap()
+
     pairs = _load_pairs(args.proposal)
     if args.limit > 0:
         pairs = pairs[:args.limit]
     print(f"[info] proposal={args.proposal} {len(pairs)}ペア / base={args.base_month} "
-          f"(翌月以降=OOS) / 日経日数={len(nikkei)}")
+          f"(翌月以降=OOS)")
 
-    rows_all = []   # (date, pnl, gap, intr, day, is_test)
-    miss = 0
+    rows_all = []   # (date, pnl, is_test)
     done = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_one, s, n, st): 1 for (s, n, st) in pairs}
@@ -213,58 +256,64 @@ def main():
                 rr = fut.result()
             except Exception:
                 continue
-            for fd, pnl, is_test in rr:
-                nk = nikkei.get(fd)
-                if nk is None:
-                    miss += 1
-                    continue
-                rows_all.append((fd, pnl, nk[0], nk[1], nk[2], is_test))
+            rows_all.extend(rr)
 
-    test = [(d, p, g, i, dd) for (d, p, g, i, dd, t) in rows_all if t]
-    print(f"\n収集: 全{len(rows_all)}トレード(日経紐付け不可 {miss}件除外) / "
-          f"TEST(OOS)トレード={len(test)}件")
+    test = [(d, p) for (d, p, t) in rows_all if t]
+    print(f"\n収集: 全{len(rows_all)}トレード / TEST(OOS)トレード={len(test)}件")
     if not test:
         print("[error] OOSトレードが0件。base-monthかproposalを確認。")
         return
 
-    # 日次集約(相関用)
-    day_pnl, day_nk = {}, {}
-    for (d, p, g, i, dd) in test:
+    # 日次集約
+    day_pnl = {}
+    for (d, p) in test:
         day_pnl[d] = day_pnl.get(d, 0.0) + p
-        day_nk[d] = (g, i, dd)
     days = sorted(day_pnl)
-    dfp = pd.Series([day_pnl[d] for d in days])
-    dgap = pd.Series([day_nk[d][0] for d in days])
-    dint = pd.Series([day_nk[d][1] for d in days])
-    dday = pd.Series([day_nk[d][2] for d in days])
+    dfp = pd.Series([day_pnl[d] for d in days], index=pd.to_datetime(days))
 
-    print("\n" + "=" * 68)
-    print(f"■ 日次lss損益 vs 日経 相関 (Pearson, TEST/OOS {len(days)}営業日)")
-    print("=" * 68)
-    print(f"  寄りギャップ% (前日終値→始値, 寄り前に判明=対策に使える) : {_fmt_corr(dfp.corr(dgap))}")
-    print(f"  当日値幅%     (始値→終値, 事後)                        : {_fmt_corr(dfp.corr(dint))}")
-    print(f"  全日%         (前日終値→終値, 事後)                    : {_fmt_corr(dfp.corr(dday))}")
-    print("  ※ 負の相関 = 日経が上げるほど lss(ショート)は負ける、を意味する。")
-    print(f"  参考: 日次lss損益  合計{dfp.sum():+,.0f} / 平均{dfp.mean():+,.0f} / "
+    # 各指標を"寄り前asof"で日付紐付け
+    day_val = {}   # proxy -> {date: pct}
+    for p in USE_PROXIES:
+        day_val[p] = _asof_before(proxy_pct[p], days)
+    day_val["cash_gap"] = {d: cash_gap[d] for d in days if d in cash_gap}
+
+    print("\n" + "=" * 74)
+    print(f"■ 日次lss損益 vs 寄り前指標 相関 (Pearson, TEST/OOS {len(days)}営業日)")
+    print("=" * 74)
+    print("  ※ 負の相関 = その指標が上がる(株高気配)ほど lss(ショート)は負ける。")
+    for p in USE_PROXIES:
+        dv = day_val[p]
+        common = [d for d in days if d in dv]
+        if len(common) < 5:
+            print(f"  {PROXY_DEFS[p][1]:<26}: データ不足({len(common)})")
+            continue
+        a = pd.Series([day_pnl[d] for d in common])
+        b = pd.Series([dv[d] for d in common])
+        print(f"  {PROXY_DEFS[p][1]:<26}: {_fmt_corr(a.corr(b))}  (n={len(common)})")
+    # cash_gap 参考
+    dv = day_val["cash_gap"]
+    common = [d for d in days if d in dv]
+    if len(common) >= 5:
+        a = pd.Series([day_pnl[d] for d in common])
+        b = pd.Series([dv[d] for d in common])
+        print(f"  {'(参考)現物ギャップ%(9:00確定=事後)':<26}: {_fmt_corr(a.corr(b))}  (n={len(common)})")
+    print(f"\n  参考: 日次lss損益  合計{dfp.sum():+,.0f} / 平均{dfp.mean():+,.0f} / "
           f"勝ち日{(dfp>0).mean()*100:.0f}%")
 
-    rows_t = [(d, day_pnl[d], day_nk[d][0], day_nk[d][1], day_nk[d][2]) for d in days]
-    # gap / intraday / day バケット
-    _bucket_report(rows_t, 2, "寄りギャップ%(先物代理・対策に使える)",
-                   [-1.0, -0.3, 0.0, 0.3, 1.0],
-                   ["< -1%", "-1〜-0.3", "-0.3〜0", "0〜0.3", "0.3〜1", ">= 1%"])
-    _bucket_report(rows_t, 3, "当日値幅%(事後)",
-                   [-1.5, -0.5, 0.0, 0.5, 1.5],
-                   ["< -1.5%", "-1.5〜-0.5", "-0.5〜0", "0〜0.5", "0.5〜1.5", ">= 1.5%"])
-    _bucket_report(rows_t, 4, "全日%(事後)",
-                   [-1.5, -0.5, 0.0, 0.5, 1.5],
-                   ["< -1.5%", "-1.5〜-0.5", "-0.5〜0", "0〜0.5", "0.5〜1.5", ">= 1.5%"])
+    # 寄り前指標のバケット(発注判断に使える指標を優先)
+    _prefer = ["cme_nikkei", "sp500_fut", "usdjpy"]
+    for p in _prefer:
+        if p in USE_PROXIES and len(day_val[p]) >= 10:
+            _bucket_report(day_pnl, day_val[p], PROXY_DEFS[p][1],
+                           [-1.0, -0.3, 0.0, 0.3, 1.0],
+                           ["< -1%", "-1〜-0.3", "-0.3〜0", "0〜0.3", "0.3〜1", ">= 1%"])
 
     print("\n判定の読み方:")
-    print("  - 寄りギャップ% との相関が明確に負 & 上ギャップ帯の合計損益がマイナス")
-    print("    → 上げ気配の日はショート不利。その日はロングに回す/見送りが有効。")
-    print("  - 相関が弱い(±0.1未満)なら、日経で日を選ぶ効果は薄い(銘柄選定の方が効く)。")
-    print("  - 当日値幅/全日は事後指標。連動の裏取り用で、発注判断には使えない点に注意。")
+    print("  - 寄り前指標(CME日経/S&P先物/ドル円)との相関が明確に負 &")
+    print("    上げ帯(0.3%〜, 1%〜)の合計損益がマイナス")
+    print("    → その日は株高気配 = ショート不利。ロングに回す/見送りが有効。")
+    print("  - 相関が弱い(±0.1未満)なら、寄り前指標で日を選ぶ効果は薄い。")
+    print("  - 寄り前指標の相関が(参考)現物ギャップと同符号なら、先物で代替できる裏付け。")
 
 
 if __name__ == "__main__":
