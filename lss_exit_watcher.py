@@ -225,7 +225,11 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
         if str(kp.get("Side", "")) != "1":     # 売建のみ(買建=ロングは触らない)
             continue
         qty = int(kp.get("LeavesQty") or kp.get("Qty") or 0)
-        if qty <= 0 or sym in closed:
+        # 建玉(HoldID)単位で管理する。同一銘柄を複数建てた(例 200株=2建玉)場合でも、
+        # 各建玉に個別に損切逆指値を置き、個別に決済するため。pkey がその建玉の管理キー。
+        hid = str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip()
+        pkey = hid or sym   # HoldIDが空の環境では銘柄名にフォールバック(1建玉のみ想定)
+        if qty <= 0 or pkey in closed:
             continue
         avg = _num(kp.get("AveragePrice") or kp.get("Price"))
         rec = _match_lss(sym, avg, lss_map, tol)
@@ -235,7 +239,7 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
             "sym": sym, "name": rec.get("name", "") or (kp.get("SymbolName") or sym),
             "qty": qty, "avg": avg, "strategy": rec.get("strategy", ""),
             "stop": rec.get("stop", 0.0), "target": rec.get("target", 0.0),
-            "hold_id": str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip(),
+            "hold_id": hid, "pkey": pkey,
             # 返済は建玉と同じ信用区分でないと Code 8(決済指定内容に誤り)。
             # 建玉の MarginTradeType(1=制度/2=一般長期/3=一般デイトレ)を読んで返済で合わせる。
             "margin_type": int(kp.get("MarginTradeType") or 1),
@@ -458,8 +462,9 @@ def _run(args, close_at, today) -> int:
     if not args.once:
         _start_control_server(args.prod)
 
-    closed: set = set()        # 決済済み(このセッションで買戻した銘柄)
-    stop_placed: set = set()   # 損切の逆指値買いを建玉に設置済みの銘柄
+    closed: set = set()        # 決済済み建玉(このセッションで買戻した pkey=HoldID)
+    stop_placed: set = set()   # 損切の逆指値買いを設置済みの建玉(pkey=HoldID)。建玉単位なので
+                               #   同一銘柄200株(2建玉)でも両建玉に個別に板逆指値が乗る。
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
     # ※ 起動直後の _regen_holdings(保有ごとに現在値APIを叩く=遅い)はここでは"やらない"。
     #    寄り付き付近で損切が決まる場合があるため、監視ループ(=損切設置)を最優先で即開始する。
@@ -476,6 +481,7 @@ def _run(args, close_at, today) -> int:
         elif shorts:
             for p in shorts:
                 sym, qty, hid = p["sym"], p["qty"], p["hold_id"]
+                pk = p["pkey"]   # 建玉単位の管理キー(HoldID優先)
                 # 返済は建玉と同じ信用区分でないと Code 8(決済指定内容に誤り)。
                 # 建玉ごとに MarginTradeType(制度=1/一般長期=2/デイトレ=3)を合わせる。
                 cli.margin_trade_type = p.get("margin_type", args.margin_type)
@@ -493,7 +499,7 @@ def _run(args, close_at, today) -> int:
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
                         ok = _close_moc(cli, sym, qty, hid)
                     if ok:
-                        closed.add(sym)
+                        closed.add(pk)
                     continue
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
@@ -503,12 +509,12 @@ def _run(args, close_at, today) -> int:
                 if p["stop"] and cur >= p["stop"]:
                     print(f"  [損切] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "損切"):
-                        closed.add(sym)
+                        closed.add(pk)
                     continue
                 # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし(1回だけ試す)。
                 #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
-                if p["stop"] and sym not in stop_placed:
-                    stop_placed.add(sym)   # 成否に関わらず1回だけ(失敗時のスパム防止)
+                if p["stop"] and pk not in stop_placed:
+                    stop_placed.add(pk)   # 建玉ごとに1回だけ(成否問わずスパム防止)
                     _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
                     if _r in ("ok", "exists"):
                         print(f"  [損切設置] {sym} {p['name']} 逆指値買い @>={p['stop']:,.0f} を建玉に設置"
@@ -520,7 +526,7 @@ def _run(args, close_at, today) -> int:
                     print(f"  [利確] {sym} {p['name']} 現在{_curs} <= 利確{p['target']:,.0f} "
                           f"→ 損切逆指値を取消して成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "利確"):
-                        closed.add(sym)
+                        closed.add(pk)
                 else:
                     _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
                     _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
