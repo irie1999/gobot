@@ -1,8 +1,9 @@
 @echo off
 REM ============================================================
 REM lssbt.bat - lss (long-candidate short) ONLY, minimal compute, for one base month.
-REM   Skips long / short / mirror and the heavy 5min sweep. Just the lss signal +
-REM   PnL tabs. Use to compare base months quickly.
+REM   Skips long / short / mirror, the heavy 5min sweep, AND the order server
+REM   (--no-serve: investigation only). Just the lss signal + PnL tabs. Use to
+REM   compare base months quickly.
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
 REM   Usage:  .\lssbt <base-month>
@@ -23,4 +24,4 @@ if "%~1"=="" (
 )
 set "LSS_CLOSESTOP_RESWEEP="
 set "LSS_GUARD_ONLY="
-python run_signals_holdout_all.py --both --no-long --no-short --no-mirror --lss-proposal lss_proposal_%~1.py --min-price 1000 --price-ranges 0 --no-analysis --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix _base%~1 %2 %3 %4 %5 %6
+python run_signals_holdout_all.py --both --no-long --no-short --no-mirror --no-serve --lss-proposal lss_proposal_%~1.py --min-price 1000 --price-ranges 0 --no-analysis --default-tab lss --force --no-news --no-risk --workers 8 --output-suffix _base%~1 %2 %3 %4 %5 %6
