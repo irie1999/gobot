@@ -91,7 +91,7 @@ def _dl_pct(ticker: str) -> pd.Series:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     cl = df["Close"].astype(float)
-    pct = cl.pct_change() * 100.0
+    pct = cl.pct_change(fill_method=None) * 100.0
     pct = pct.dropna()
     pct.index = pd.to_datetime(pct.index).normalize()
     return pct
