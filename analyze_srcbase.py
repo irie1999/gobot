@@ -32,8 +32,9 @@ import pandas as pd
 
 ap = argparse.ArgumentParser(description="選定基準月ラベル別に lss 損益を分解")
 ap.add_argument("--proposal", required=True, help="マージ提案(SOURCE_BASES を含む)")
-ap.add_argument("--pivot-month", type=str, default="2026-07",
-                help="この月=『7月』/ これ未満=『7月以前』として分割")
+ap.add_argument("--oos-from", type=str, default="2026-07",
+                help="この月以降=OOS / これ未満=IS(In-sample)。マージした一番新しい基準月の"
+                     "翌月を指定する(例: 最新基準が2026-03なら --oos-from 2026-04)。")
 ap.add_argument("--sm", type=float, default=0.1)
 ap.add_argument("--tm", type=float, default=1.0)
 ap.add_argument("--days", type=int, default=800)
@@ -54,7 +55,7 @@ ble._INTRADAY_5M = False
 ble._ENTRY_TYPE_FORCE = None
 QTY = ble.FIXED_QTY
 FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY
-PIVOT = pd.Period(args.pivot_month, "M")
+PIVOT = pd.Period(args.oos_from, "M")   # この月以降=OOS
 
 
 def _norm(code):
@@ -170,8 +171,8 @@ def _row(tag, pnls):
 
 def main():
     pairs = PAIRS[:args.limit] if args.limit > 0 else PAIRS
-    print(f"[info] proposal={args.proposal} {len(pairs)}ペア / pivot={args.pivot_month} "
-          f"(={args.pivot_month}を『7月』, 未満を『7月以前』)")
+    print(f"[info] proposal={args.proposal} {len(pairs)}ペア / OOS開始={args.oos_from} "
+          f"({args.oos_from}以降=OOS, 未満=IS(In-sample))")
     # 投票分布
     _vd = defaultdict(int)
     for (s, n, st) in pairs:
@@ -200,7 +201,7 @@ def main():
             bases = lab.split("/")
             for (fd, pnl) in rows:
                 per = pd.Period(pd.Timestamp(fd), "M")
-                pkey = "7月" if per == PIVOT else ("7月以前" if per < PIVOT else "7月以降")
+                pkey = "OOS" if per >= PIVOT else "IS"
                 by_votes[votes][pkey].append(pnl)
                 by_votes[votes]["全期間"].append(pnl)
                 by_label[lab][pkey].append(pnl)
@@ -215,7 +216,7 @@ def main():
     print("\n" + "=" * 70)
     print("【A】投票数(いくつの基準月で選ばれたか)別")
     print("=" * 70)
-    for per in ("7月", "7月以前", "全期間"):
+    for per in ("OOS", "IS", "全期間"):
         print(f"\n-- {per} --\n{_hdr}\n" + "-" * 60)
         for v in sorted(by_votes, reverse=True):
             print(_row(f"{v}基準で選定", by_votes[v].get(per, [])))
@@ -223,7 +224,7 @@ def main():
     print("\n" + "=" * 70)
     print("【B】基準月メンバーシップ別(その基準月に含まれる銘柄。かぶりは重複計上)")
     print("=" * 70)
-    for per in ("7月", "7月以前"):
+    for per in ("OOS", "IS"):
         print(f"\n-- {per} --\n{_hdr}\n" + "-" * 60)
         for b in sorted(by_member, key=lambda x: (len(x), x)):
             print(_row(f"{b}月を含む", by_member[b].get(per, [])))
@@ -232,7 +233,7 @@ def main():
     print("【C】ラベル別(選ばれた基準月の組み合わせそのもの)")
     print("=" * 70)
     _labs = sorted(by_label, key=lambda L: (-len(by_label[L].get("全期間", [])), L))
-    for per in ("7月", "7月以前"):
+    for per in ("OOS", "IS"):
         print(f"\n-- {per} --\n{_hdr}\n" + "-" * 60)
         for L in _labs:
             print(_row(L, by_label[L].get(per, [])))
@@ -253,11 +254,12 @@ def main():
         print(f"{m:>9} | " + " ".join(cells) + f"{mtot:>+13,.0f}")
 
     print("\n判定の読み方:")
-    print("  【A】7月で『3基準で選定』の損益/PFが『1基準』を上回れば、")
-    print("       = 多くの基準月で選ばれた銘柄ほど7月に強い、が裏付けられる。")
-    print("  【B】7月以前で『12月を含む』『3月を含む』の損益が『6月を含む』より高ければ、")
-    print("       = 7月以前は12月・3月選定銘柄が強い、が裏付けられる。")
-    print("  ※ これは無フィルター母集団。実運用はBT70/予算で更に絞る点に注意。")
+    print("  ★ 本命は OOS(=最新基準月より後)。IS(In-sample)は選定に使った期間で水増しあり。")
+    print("  【A】OOS で『3基準 > 2基準 > 1基準』と PF/平均が単調に並べば、")
+    print("       = 多くの基準月で選ばれた銘柄ほど強い、が(OOSで)裏付けられる。")
+    print("       非単調(例 2>3>1)ならノイズ=投票数は選別根拠にならない。")
+    print("  【B】OOS で特定の基準月を含む銘柄が明確に強ければ、その基準月が効いている。")
+    print("  ※ これは無フィルター母集団。実運用はBT/予算で更に絞る点に注意。")
 
 
 if __name__ == "__main__":
