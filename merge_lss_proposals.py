@@ -79,7 +79,8 @@ def main():
     # 各ファイルの (code, strat) 集合と、code→name / (code,strat)→行 を集める
     per_file_keys: list[set] = []
     name_map: dict = {}
-    row_map: dict = {}   # (code, strat) -> (code, name, strat)
+    row_map: dict = {}   # (正規化code, strat) -> (出力code, name, strat)
+    out_code: dict = {}  # (正規化code, strat) -> 出力コード(元表記, .T付き優先)
     src_count: dict = {}  # (code, strat) -> 何ファイルに出たか
     src_bases: dict = {}  # (code, strat) -> [基準月ラベル,...] (出現ファイル順・重複なし)
     for f in args.files:
@@ -87,13 +88,20 @@ def main():
         _tag = _base_tag(f)
         keys = set()
         for code, name, strat in sel:
-            # コードを正規化(.T 有無を吸収)してキーにする。これをしないと
-            # "7261"(12月) と "7261.T"(6月) が別銘柄扱いになり、かぶりが重複出力される。
+            # キーは正規化(.T 有無を吸収)して「かぶり」を1銘柄に集約する。これをしないと
+            # "7261"(12月) と "7261.T"(6月) が別銘柄扱いになり重複出力される。
+            # ただし SELECTED の出力コードは元の表記を保持する。fetch(yfinance)は
+            # ".T" 付きコードを要求するため、正規化した裸コードを出力すると取得失敗する。
+            # かぶった場合は ".T" 付きの表記を優先採用。
             _cn = str(code).upper().removesuffix(".T").split(".")[0]
             k = (_cn, strat)
             keys.add(k)
             name_map.setdefault(_cn, name)
-            row_map[k] = (_cn, name_map[_cn], strat)
+            _prev = out_code.get(k)
+            if _prev is None or (".T" in str(code).upper()
+                                 and ".T" not in str(_prev).upper()):
+                out_code[k] = code
+            row_map[k] = (out_code[k], name_map[_cn], strat)
         for k in keys:
             src_count[k] = src_count.get(k, 0) + 1
             _lst = src_bases.setdefault(k, [])
