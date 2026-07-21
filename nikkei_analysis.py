@@ -2842,13 +2842,33 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     except Exception:
         def _rrb_fn(sym):         return ""
         def _red_fn(sym, td=None): return ""
+    # lss: 同一銘柄は全戦略でトリガー/損切/目標が同一(=同じ1トレード)。発注リストを
+    # 1銘柄1行にデデュープし、数量 = 一致した戦略数 × 基本株数 にする。2戦略一致なら
+    # 200株を1注文(1建玉)で出せて確実(watcherは建玉の実数量で損切り・決済する)。
+    if _LSS_ORDER_MODE and signals:
+        _dd: dict = {}
+        for _s in signals:
+            _k = str(_s["symbol"]).split(".")[0].upper()
+            _st = str(_s.get("strategy", ""))
+            if _k not in _dd:
+                _r = dict(_s); _r["_agree_strats"] = {_st}; _dd[_k] = _r
+            else:
+                _r = _dd[_k]; _sset = _r["_agree_strats"]; _sset.add(_st)
+                # 代表は BT(rec_score)最大の行に差し替え(一致情報は保持)
+                if (_s.get("rec_score") or 0) > (_r.get("rec_score") or 0):
+                    _r = dict(_s); _r["_agree_strats"] = _sset; _dd[_k] = _r
+        signals = sorted(_dd.values(), key=lambda x: -(x.get("rec_score") or 0))
+
     rows = ""
     _cum_cap = 0   # 予算表示用: BT降順の累計必要額(この行まで全部発注したら合計いくら)
     for i, s in enumerate(signals, 1):
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
-        qty      = _calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0
+        _agree   = len(s.get("_agree_strats", ())) or 1   # 一致した戦略数(lssのみ>1あり)
+        qty      = (_calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0) * _agree
+        _agree_badge = (f' <span style="font-size:0.62rem;color:#a78bfa;font-weight:700">'
+                        f'{_agree}戦略一致</span>' if _agree > 1 else "")
         pos_val  = round(s["order_p"] * qty)
         _cum_cap += pos_val
         # 損切/目標の表示セル。lss は実際の注文(空売り)に合わせて 損切=上(+%)/目標=下(-%)。
@@ -2952,7 +2972,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
   <td style="text-align:right;color:#f87171">{_stop_cell}</td>
   <td style="text-align:right;color:#4ade80">{_tgt_cell}</td>
-  <td style="text-align:right;color:#e2e8f0">{qty}株<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span>
+  <td style="text-align:right;color:#e2e8f0">{qty}株{_agree_badge}<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span>
     <br><span style="font-size:0.68rem;color:#64748b">累計 {_cum_cap:,.0f}円</span></td>
   <td style="text-align:center;color:#94a3b8">{_hold_cell}</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
