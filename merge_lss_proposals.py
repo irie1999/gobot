@@ -160,6 +160,16 @@ def main():
         _lab = "/".join(src_bases.get(k, []))
         lines.append(f'    ("{_cn}", "{strat}"): "{_lab}",')
     lines.append("}")
+    # MERGED_BASES: マージした基準月(フル YYYY-MM)。レポートの「選定基準月」ヘッダに出す。
+    _bmonths = []
+    for f in args.files:
+        m = re.search(r"(\d{4}-\d{2})", Path(f).name)
+        if m and m.group(1) not in _bmonths:
+            _bmonths.append(m.group(1))
+    _merged_bases_disp = " / ".join(sorted(_bmonths)) if _bmonths else ""
+    lines.append("")
+    lines.append("# マージした基準月(フル YYYY-MM)。レポートの選定基準月ヘッダ表示用。")
+    lines.append(f'MERGED_BASES = "{_merged_bases_disp}"')
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[出力] {Path(args.out).resolve()}")
     print("  次: run_signals_holdout_all.py --lss-proposal でこのファイルを指定して比較。")

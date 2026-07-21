@@ -2371,12 +2371,16 @@ _m_base = _re_base.search(r"base(\d{4}-\d{2})", (_args.output_suffix or ""))
 if _m_base:
     _sel_base_disp = _m_base.group(1)
 elif getattr(_args, "lss_proposal", None):
-    # lssは提案ファイルで選定。提案の基準月を読む(BASE_MONTH変数 or 旧docstringコメント)。
+    # lssは提案ファイルで選定。マージ提案なら MERGED_BASES(複数基準月)を優先表示。
+    # 単一提案は BASE_MONTH変数 or 旧docstringコメントから基準月を読む。
     try:
         _pt = Path(_args.lss_proposal).read_text(encoding="utf-8")
+        _mb = _re_base.search(r'MERGED_BASES\s*=\s*["\']([^"\']+)["\']', _pt)
         _bm = (_re_base.search(r'BASE_MONTH\s*=\s*["\']?(\d{4}-\d{2})', _pt)
                or _re_base.search(r'基準月\(TRAIN終端\):\s*(\d{4}-\d{2})', _pt))
-        if _bm:
+        if _mb and _mb.group(1).strip():
+            _sel_base_disp = "マージ " + _mb.group(1).strip()
+        elif _bm:
             _sel_base_disp = _bm.group(1)
     except Exception:
         pass
