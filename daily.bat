@@ -1,27 +1,30 @@
 @echo off
 REM ============================================================
-REM daily.bat - 朝の発注用(6月基準・lssのみ・最速・発注サーバ起動)
-REM   Usage (swingtradeフォルダ):  .\daily   (PowerShell)  /  daily  (cmd)
-REM   発注に必要な最小限だけ(9:00の発注に間に合う速度を最優先):
-REM     --no-long     : ロング方向を廃止(★最大の時短)。発注リストはlssのBT(rec_score)で
-REM                     出るのでロード不要。予算タブ/BTフィルタはrec_scoreに自動フォールバック。
-REM     --no-short    : ショートも発注に不要。
-REM     --no-analysis : 重い5分足スイープ等の分析タブを省略(発注リスト・400万円タブは残る)。
-REM     --price-ranges 6000,0 : 6,000円と無制限の両タブ(2パス。発注6000/参考に無制限)。
-REM     --no-serve なし     : レポート後に発注サーバを起動(朝の発注/監視トグル用)。
-REM   起動時に LSS_CLOSESTOP_RESWEEP / LSS_GUARD_ONLY を必ずクリア(残ると『終値損切り比較』の
-REM     5分足フルロード=数百秒が毎回走って激遅になるため)。
-REM   基準月=2026-06。ガードは現行3%(検証済)。
-REM   追加オプションは末尾に透過:  .\daily --price-ranges 6000 (=6000円のみで速く) 等
-REM   ASCII-only on purpose (avoid Shift-JIS mojibake).
+REM daily.bat - morning lss order report (June base, lss only, fast, order server)
+REM   Usage (swingtrade folder):  .\daily   (PowerShell)  /  daily  (cmd)
+REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
-REM   ※ 深掘り調査(⑦終値比較/㉓指値ガード/5分足スイープ)や long/short の日別成績を見たい時は
-REM     別コマンドで(--no-long/--no-short/--no-analysis を外す、RESWEEP/GUARD_ONLY を付ける等)。
-REM   ※ 新しい取引日の1本目はlssのBTキャッシュ再構築で少し時間がかかる(不可避)。以降は速い。
-REM   ※ 9:00に間に合わせるため、8:45頃までに一度回しておくのが安全。
+REM   Flags (minimum needed to place orders, fast enough for 9:00):
+REM     --no-long     : drop long direction (biggest speedup). Signal list uses lss BT
+REM                     (rec_score); long BT ref falls back to rec_score automatically.
+REM     --no-short    : short not needed for ordering.
+REM     --no-analysis : skip heavy 5min TP/SL sweep tabs (signal list + budget tab stay).
+REM     --price-ranges 6000,0 : both 1000-6000 and unlimited tabs (2 passes).
+REM     (no --no-serve): start order server after the report (order/watch toggle).
+REM   Clears LSS_CLOSESTOP_RESWEEP / LSS_GUARD_ONLY on start (if left set they force the
+REM     heavy close-stop compare = hundreds of seconds every run).
+REM   Base month = 2026-06. Guard = 3% (verified best for recent base).
+REM
+REM   Pass-through options at the end:
+REM     .\daily --price-ranges 6000     (6000 only = faster, single pass)
+REM     .\daily --price-ranges 0        (unlimited only)
+REM     .\daily --short                 (also show short daily grid)
+REM   Notes:
+REM     - First run of a new trading day rebuilds the lss BT cache (slower once).
+REM     - Run once by ~8:45 so the order list is ready before 9:00.
 REM ============================================================
 cd /d "%~dp0"
-REM --- 残った重い調査フラグを無効化(daily は常に軽く動かす) ---
+REM --- clear heavy research flags so daily always runs light ---
 set "LSS_CLOSESTOP_RESWEEP="
 set "LSS_GUARD_ONLY="
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_2026-06.py --long-base 2026-06-30 --no-mirror --no-short --no-long --default-tab lss --force --no-news --no-risk --workers 8 %*
