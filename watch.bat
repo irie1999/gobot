@@ -9,17 +9,20 @@ REM
 REM   Prereq: today's lss orders are recorded so the watcher can find them:
 REM     - ordered_signals_lss.csv   (from kabu_send_lss), or
 REM     - placed_orders_<date>.csv  (from the report order button).
-REM   If you placed the orders the EVENING BEFORE, add --all-dates so the watcher also
-REM   reads yesterday-dated CSVs:  .\watch --all-dates
+REM   --all-dates is ENABLED BY DEFAULT (orders are placed the evening before, so the
+REM   order CSV is dated yesterday). Same-morning orders still work (today is included).
 REM
 REM   Keep it running until the close (15:30). Do NOT close it early (missed close = risk).
 REM   Do NOT run the order server at the same time (one kabu token = 401 conflict).
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
 REM   Usage:
-REM     .\watch                 (real, production, poll 5s, close 15:20)
-REM     .\watch --all-dates     (also read yesterday's order CSV)
+REM     .\watch                 (real, production, all-dates on, poll 5s, close 15:20)
 REM     .\watch --poll 3        (faster polling near the open)
 REM ============================================================
 cd /d "%~dp0"
-python lss_exit_watcher.py --execute --prod %*
+REM --all-dates is ON by default here: orders are placed the EVENING BEFORE, so
+REM their CSV is dated yesterday. Without --all-dates the watcher would pick up
+REM nothing. If you ever place orders same-morning, that still works (today is a
+REM subset of all-dates). Extra options pass through, e.g. .\watch --poll 3
+python lss_exit_watcher.py --execute --prod --all-dates %*
