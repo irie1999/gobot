@@ -366,9 +366,11 @@ if _args.both and not _args.short:
     # long を指定as-of(例2025-12-31)のWFスキャンCSVで単一選定する場合、その方向にだけ付与
     _long_base = getattr(_args, "long_base", None)
     _long_dargs = ["--no-analysis"]
+    _short_dargs = ["--short", "--no-analysis"]
     if _long_base:
         _long_dargs += ["--long-base", _long_base]
-        print(f"[long] 2025-12基準など単一as-of選定: base={_long_base}")
+        _short_dargs += ["--long-base", _long_base]   # short も同じas-of(6月基準)に揃える
+        print(f"[long/short] 単一as-of選定: base={_long_base}")
 
     # スキップ指定(--no-mirror / --no-short)を除いた生成対象。longは常に生成。
     _skip_dirs = set()
@@ -380,7 +382,7 @@ if _args.both and not _args.short:
         _skip_dirs.add("long")
     _DIRECTIONS = [d for d in [
         ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
-        ("short",  "ショート",           ["--short", "--no-analysis"],   "signals_holdout_all_short"),
+        ("short",  "ショート",           _short_dargs,                   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
         ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
     ] if d[0] not in _skip_dirs]
@@ -829,10 +831,12 @@ _wl_base_date = _args.date or str(TODAY)
 # (例2025-12-31版)を拾う=2025-12基準で6ホールドアウト選定。表示(直近N日)は今日のまま
 # =2026がOOS。lssと同じ土俵(2025-12選定→2026検証)になる。
 _long_base_asof = getattr(_args, "long_base", None)
-if _long_base_asof and not (_args.short or _args.mirror or _args.long_stop_short):
+if _long_base_asof and not (_args.mirror or _args.long_stop_short):
+    # long と short の両方に適用(mirror/lssは除く)。short もWFホールドアウトCSVの
+    # as-ofを同じ日付に固定=long/short とも同一基準月(例2026-06)で選定。
     _wl_base_date = _long_base_asof
-    print(f"  [long] CSV参照as-ofを {_wl_base_date} に固定(2025-12基準で6ホールドアウト選定 / "
-          f"表示は今日=2026がOOS)")
+    print(f"  [{'short' if _args.short else 'long'}] CSV参照as-ofを {_wl_base_date} に固定"
+          f"(同一基準月で6ホールドアウト選定 / 表示は今日=OOS)")
 elif _args.date:
     print(f"  [選定CSV] base_date={_wl_base_date} 以前にスキャンしたCSVのみ使用"
           f"(未来の選定で汚染しない)")
