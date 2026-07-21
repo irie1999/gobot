@@ -9447,6 +9447,12 @@ function switchTbd(id, tab) {{
     except Exception:
         _budget_yen = 4e6
     _budget_man = int(_budget_yen / 1e4)
+    # 予算シミュのBT下限(既定30)。LSS_BUDGET_MIN_BT=70 で「全取引をBT70以上に集中」できる。
+    # 複数基準月をunionマージした大きなプールと組み合わせると、高BTだけで枠が埋まりやすくなる。
+    try:
+        _BUD_MIN_BT = max(30, int(os.environ.get("LSS_BUDGET_MIN_BT", "30")))
+    except Exception:
+        _BUD_MIN_BT = 30
 
     def _order_notional(_t):
         # 注文時の必要資金 = 注文トリガー価格(終値ベース) × 株数。約定値ではない。
@@ -9457,6 +9463,8 @@ function switchTbd(id, tab) {{
     if _LSS_ORDER_MODE:
         _by_day_bud: dict = _dd(list)
         for _t in _bt40_entry_sorted:
+            if _eff_long_bt(_t) < _BUD_MIN_BT:
+                continue
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
         # 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。ただし同一銘柄同日に
         # 約定注文があれば二重発注しない(1銘柄1注文/日)。
@@ -9464,7 +9472,7 @@ function switchTbd(id, tab) {{
                           str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
                          for _t in _bt40_entry_sorted}
         for _t in all_nofills:
-            if _eff_long_bt(_t) < 30:
+            if _eff_long_bt(_t) < _BUD_MIN_BT:
                 continue
             _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
             if (_t.get("symbol"), _dk2) in _fill_sym_day:
@@ -10561,11 +10569,14 @@ function switchTbd(id, tab) {{
                       f'<td style="text-align:right;padding:4px 10px;color:#64748b">—</td>'
                       f'</tr>')
             return (
-                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで注文した場合（月次）</h4>'
+                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで注文した場合（月次）'
+                + (f'<span style="color:#fbbf24">［BT{_BUD_MIN_BT}以上のみ］</span>' if _BUD_MIN_BT > 30 else '')
+                + '</h4>'
                 f'<p class="footnote">毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が'
                 f'<b>{_bud_man}万円</b>に収まるだけ<b>注文</b>する（同日決済なので予算は毎日リセット）。'
                 f'<b>不約定(トリガー未達・ギャップ過大)の注文も発注枠を消費</b>する（＝その下のBTの約定を締め出す）。'
                 f'損益・件数は約定分のみ計上。この価格帯タブ(表示中の価格上限)の銘柄のみ。'
+                f'BT下限={_BUD_MIN_BT}(環境変数 LSS_BUDGET_MIN_BT, 既定30)。'
                 f'予算は環境変数 LSS_BUDGET_MAN(万, 既定400)で変更可。</p>'
                 '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:0.85rem">'
                 '<thead><tr>'
