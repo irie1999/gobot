@@ -201,6 +201,20 @@ _LSS_ORDER_MODE: bool = False
 _LSS_SM: float = 0.1
 _LSS_TM: float = 1.0
 
+# lss proposal をマージした場合、(銘柄, 戦略) → 選定基準月ラベル(例 "12/6")。
+# merge_lss_proposals.py が出力する SOURCE_BASES を run_signals_holdout_all が流し込む。
+# 空なら基準月バッジは出ない(単一基準・後方互換)。
+_LSS_SRC_BASES: dict = {}
+
+
+def _lss_src_base_of(sym, strat):
+    """(銘柄, 戦略) の選定基準月ラベルを返す(無ければ None)。銘柄は .T 有無を吸収。"""
+    if not _LSS_SRC_BASES:
+        return None
+    _c = str(sym).upper().removesuffix(".T").split(".")[0]
+    return (_LSS_SRC_BASES.get((_c, strat)) or _LSS_SRC_BASES.get(_c)
+            or _LSS_SRC_BASES.get((str(sym), strat)))
+
 # ── ショートモジュール (guarded: 失敗してもロングに影響しない) ────────────────
 # strat名でモジュールを振り分ける (_mod_for)。短期戦略は "_S" で終わる。
 _short = None
@@ -2031,18 +2045,24 @@ def _fmt_score_cell(s: dict, col: str) -> str:
     # ⚠OOS弱 バッジ: 純OOS(各configが選定に使っていない直近除外窓)の損益が
     # マイナスなら警告。WF(選定バイアスあり)ではなく holdout実績で判定する。
     _oos_badge = _oos_weak_badge(s)
+    # 選定基準月バッジ(proposalマージ時のみ)。同じ銘柄が複数基準で選ばれていても
+    # どの基準月由来かを見分けられるようにする(例 「基 12/6」)。
+    _sb = s.get("src_base") or _lss_src_base_of(
+        s.get("symbol") or s.get("sym"), s.get("strategy") or s.get("strat"))
+    _src_badge = (f'<span style="font-size:0.62rem;color:#38bdf8;font-weight:700;display:block;'
+                  f'margin-top:1px" title="選定基準月">基&nbsp;{_sb}</span>') if _sb else ""
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
         return (
             f'<span style="color:{col};font-weight:700">WF&nbsp;{s["wf_score"]}</span>'
             f'<span style="font-size:0.68rem;color:#64748b;display:block">{rank} / BT:{rec}</span>'
-            f'{type_badge}{_tr_badge}{_oos_badge}'
+            f'{type_badge}{_tr_badge}{_oos_badge}{_src_badge}'
         )
     else:
         return (
             f'<span style="color:{col};font-weight:700">{rank}&nbsp;{s["score"]}</span>'
             f'<br><span style="font-size:0.68rem;color:#f59e0b">BT(参考)</span>'
-            f'<br>{type_badge}{_tr_badge}{_oos_badge}'
+            f'<br>{type_badge}{_tr_badge}{_oos_badge}{_src_badge}'
         )
 
 
@@ -2383,6 +2403,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 "_sig": {
                     "symbol": sym, "name": name, "strategy": strat,
                     "score": score, "rank": rank, "is_wf": is_wf,
+                    "src_base": _lss_src_base_of(sym, strat),
                     "wf_score": wf_score, "wf_rank_str": wf_rank_str,
                     "rec_score": rec_score, "bt_type": bt_type,
                     "bt_trades":    bt_trades,

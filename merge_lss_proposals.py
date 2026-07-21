@@ -33,8 +33,18 @@
       --output-suffix _merged0612
 """
 import argparse
+import re
 import runpy
 from pathlib import Path
+
+
+def _base_tag(path: str) -> str:
+    """ファイル名から選定基準月ラベルを作る。lss_proposal_2025-12.py → '12',
+    2026-03 → '3'。YYYY-MM が拾えなければファイル名(拡張子なし)を使う。"""
+    m = re.search(r"(\d{4})-(\d{2})", Path(path).name)
+    if m:
+        return str(int(m.group(2)))  # 月の先頭0を落とす(12/3/6 表記)
+    return Path(path).stem
 
 
 def _load_selected(path: str) -> list[tuple]:
@@ -71,18 +81,26 @@ def main():
     name_map: dict = {}
     row_map: dict = {}   # (code, strat) -> (code, name, strat)
     src_count: dict = {}  # (code, strat) -> 何ファイルに出たか
+    src_bases: dict = {}  # (code, strat) -> [基準月ラベル,...] (出現ファイル順・重複なし)
     for f in args.files:
         sel = _load_selected(f)
+        _tag = _base_tag(f)
         keys = set()
         for code, name, strat in sel:
-            k = (code, strat)
+            # コードを正規化(.T 有無を吸収)してキーにする。これをしないと
+            # "7261"(12月) と "7261.T"(6月) が別銘柄扱いになり、かぶりが重複出力される。
+            _cn = str(code).upper().removesuffix(".T").split(".")[0]
+            k = (_cn, strat)
             keys.add(k)
-            name_map.setdefault(code, name)
-            row_map[k] = (code, name_map[code], strat)
+            name_map.setdefault(_cn, name)
+            row_map[k] = (_cn, name_map[_cn], strat)
         for k in keys:
             src_count[k] = src_count.get(k, 0) + 1
+            _lst = src_bases.setdefault(k, [])
+            if _tag not in _lst:
+                _lst.append(_tag)
         per_file_keys.append(keys)
-        print(f"[読込] {f}: {len(keys)}件 (code,strat)")
+        print(f"[読込] {f}: {len(keys)}件 (code,strat) 基準月={_tag}")
 
     n_files = len(args.files)
     if args.min_votes and args.min_votes > 0:
@@ -122,6 +140,18 @@ def main():
         _name = name.replace('"', "'")
         lines.append(f'    ("{code}", "{_name}", "{strat}"),')
     lines.append("]")
+    # SOURCE_BASES: (正規化コード, 戦略) -> "12/6" のような基準月ラベル。
+    # run_signals_holdout_all がレポートに流し、シグナル/明細に基準月バッジを出す。
+    # かぶり銘柄でも「どの基準月由来か」を見分けられるようにするため。
+    lines.append("")
+    lines.append("# (正規化コード, 戦略) -> 選定基準月ラベル(かぶりは '/' 連結, 例 '12/6')")
+    lines.append("SOURCE_BASES = {")
+    for k in merged:
+        code, _name, strat = row_map[k]
+        _cn = str(code).upper().removesuffix(".T").split(".")[0]
+        _lab = "/".join(src_bases.get(k, []))
+        lines.append(f'    ("{_cn}", "{strat}"): "{_lab}",')
+    lines.append("}")
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[出力] {Path(args.out).resolve()}")
     print("  次: run_signals_holdout_all.py --lss-proposal でこのファイルを指定して比較。")

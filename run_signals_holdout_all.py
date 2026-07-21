@@ -901,6 +901,7 @@ if _using_fallback:
 # 単一設定として使う(既存lssタブを置き換え=取引明細メインの軽量lss)。フラグ未指定なら
 # この節は完全にスキップされ、既存挙動は一切変わらない。
 _lss_proposal_file = getattr(_args, "lss_proposal", None)
+_lss_source_bases: dict = {}   # merge時の (code,strat)->基準月ラベル。import後に _na へ流す
 if _args.long_stop_short and _lss_proposal_file:
     _CANON_STOP = {"MACDTF", "A7", "RSI2"}
     _CANON_BRK  = {"DON", "VOLTF", "MOM"}
@@ -909,6 +910,7 @@ if _args.long_stop_short and _lss_proposal_file:
         _pns: dict = {}
         exec(Path(_lss_proposal_file).read_text(encoding="utf-8"), _pns)
         _sel = list(_pns.get("SELECTED", []))
+        _lss_source_bases = dict(_pns.get("SOURCE_BASES") or {})
     except Exception as _e:
         print(f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e} → 既存選定のまま")
     if _sel:
@@ -1074,6 +1076,11 @@ _orig_stop_wl = list(_stop.WATCHLIST)
 _orig_brk_wl  = list(_brk.WATCHLIST)
 
 import nikkei_analysis as _na
+
+# proposalマージ時の選定基準月ラベルをレポートへ流す(かぶり銘柄の由来を明示)。
+if _lss_source_bases:
+    _na._LSS_SRC_BASES = _lss_source_bases
+    print(f"[lss] 基準月ラベル {len(_lss_source_bases)}件をシグナル/明細に表示")
 
 # reload で上書きされた WATCHLIST を元に戻す
 _stop.WATCHLIST[:] = _orig_stop_wl
