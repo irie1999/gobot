@@ -461,8 +461,9 @@ def _run(args, close_at, today) -> int:
     closed: set = set()        # 決済済み(このセッションで買戻した銘柄)
     stop_placed: set = set()   # 損切の逆指値買いを建玉に設置済みの銘柄
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
-    if not args.no_holdings:
-        _regen_holdings(cli)   # 起動直後に保有タブ(損益)を1回生成
+    # ※ 起動直後の _regen_holdings(保有ごとに現在値APIを叩く=遅い)はここでは"やらない"。
+    #    寄り付き付近で損切が決まる場合があるため、監視ループ(=損切設置)を最優先で即開始する。
+    #    保有タブはループ1周目の末尾(下の _hcycle 判定)で生成される(=損切設置の後)。
     while True:
         now = datetime.now(JST)
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
@@ -529,8 +530,9 @@ def _run(args, close_at, today) -> int:
 
         # 保有タブ(損益)を定期更新: 約6サイクルごと(poll=5秒なら約30秒)。
         # watcher が握る同一トークンで生成するので token 競合(401)にならない。
+        # 起動直後(最初の~6サイクル)は生成せず監視だけに専念=寄り付き付近の損切/利確を最優先。
         _hcycle += 1
-        if not args.no_holdings and _hcycle % 6 == 1:
+        if not args.no_holdings and _hcycle % 6 == 0:
             _regen_holdings(cli)
 
         # 終了判定
