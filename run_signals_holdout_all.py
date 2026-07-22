@@ -1056,6 +1056,15 @@ if (_args.mirror or _args.long_stop_short):
         if _os_re.environ.get("LSS_REALISTIC_ENTRY") == "0":
             _bte._INTRADAY_5M_REALISTIC_ENTRY = False
             print("[約定モデル] 現実的約定=OFF: 常にトリガー約定(旧・楽観モデル)で計算します", flush=True)
+        # 約定遅延(検証用): LSS_ENTRY_DELAY_BARS=N で寄りからN本(=N×5分)待ってから約定。
+        # 400万タブ含む全タブに反映される。既定0=即約定(通常運用)。
+        try:
+            _edly = int(_os_re.environ.get("LSS_ENTRY_DELAY_BARS", "0") or "0")
+        except Exception:
+            _edly = 0
+        if _edly > 0:
+            _bte._INTRADAY_5M_ENTRY_DELAY = _edly
+            print(f"[約定遅延] 寄りから{_edly}本(={_edly*5}分)待ってから約定で計算します", flush=True)
         # 5分足ロード日数を表示窓に合わせる(既定400=ライブ)。基準月スイープ等で表示窓が
         # 長いと、5分足を400日しか読まず古い月がlssから欠落するため、窓+60日に拡張する。
         _bte._INTRADAY_5M_DAYS = max(400, _disp_days + 60)
@@ -1237,6 +1246,10 @@ def _make_cached_bt(orig_fn):
                 # =温まった既存キャッシュを維持。A/B比較でキャッシュが混ざらないようにする。
                 if not getattr(_bte, "_INTRADAY_5M_REALISTIC_ENTRY", True):
                     key += "|RE0"
+                # 約定遅延ありのときだけキーを分ける(既定0は従来キー=温存)。
+                _edly_k = int(getattr(_bte, "_INTRADAY_5M_ENTRY_DELAY", 0) or 0)
+                if _edly_k > 0:
+                    key += f"|DLY{_edly_k}"
         if key not in _bt_cache:
             _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
             _bt_cache_dirty["n"] += 1

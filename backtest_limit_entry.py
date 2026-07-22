@@ -641,6 +641,9 @@ _INTRADAY_5M_ENTRY_GAP_LIMIT: float = 0.03  # 約定時の指値ガード(±3%)�
                                        # ここを変えて再実行すれば3%の妥当性を検証できる。
 _INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
 _INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
+_INTRADAY_5M_ENTRY_DELAY: int = 0      # 寄りから何本(=N×5分)待ってから約定するか(既定0=即)。
+                                       # >0 で約定日5分足の先頭N本をスキップ(=寄りヒゲ回避の検証用)。
+                                       # 寄り値は遅延後の先頭バー始値を使う。
 _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
                                        # ときは呼び出し側で増やす(既定400=ライブ用)
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
@@ -1158,19 +1161,28 @@ def run_limit_backtest(
             _db = _bd.get(_fd)
             if _db is None or len(_db) < 2:
                 continue   # 5分足なし → 除外(日足へフォールバックしない)。データ欠なので不約定扱いにもしない。
+            # 寄りからN本(=N×5分)待ってから約定する検証用(既定0=即)。約定日5分足の先頭N本をスキップ。
+            if _INTRADAY_5M_ENTRY_DELAY > 0:
+                if len(_db) - _INTRADAY_5M_ENTRY_DELAY < 2:
+                    continue
+                _db = _db.iloc[_INTRADAY_5M_ENTRY_DELAY:]
             _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
             _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
-                # 寄り値は日足の始値を優先(5分足の寄りは稀に壊れるため)。約定日の日足始値を引く。
-                _day_open = None
-                try:
-                    _drow = df.loc[df.index.normalize() == pd.Timestamp(_fd)]
-                    if len(_drow):
-                        _day_open = float(_drow["open"].iloc[0])
-                except Exception:
+                # 寄り値: 遅延ありは遅延後の先頭バー始値、遅延なしは日足始値優先(5分足の寄りは
+                # 稀に壊れるため)。約定日の日足始値を引く。
+                if _INTRADAY_5M_ENTRY_DELAY > 0:
+                    _day_open = float(_db["open"].iloc[0])
+                else:
                     _day_open = None
+                    try:
+                        _drow = df.loc[df.index.normalize() == pd.Timestamp(_fd)]
+                        if len(_drow):
+                            _day_open = float(_drow["open"].iloc[0])
+                    except Exception:
+                        _day_open = None
                 _entry_fill = _sef5(_db, _lp, _is_rise,
                                     entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
                                     day_open=_day_open)
