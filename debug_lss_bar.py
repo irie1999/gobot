@@ -98,7 +98,10 @@ except Exception as _e:
 
 # short_exit_5m と同じ判定を実行(約定は日足始値優先)
 ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_open)
-xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False)
+# 寄り約定(ギャップ=約定価格がトリガーと異なる)なら約定バーから損切りを見る
+_gap = (ef is not None) and (abs(ef - trig) > 1e-9)
+print(f"寄り約定(ギャップ)= {_gap}  (True=約定バーから損切りチェック / False=次バーから)")
+xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False, include_entry_bar=_gap)
 print(f"\n▼ short_exit_5m 判定")
 print(f"  約定価格(現実モデル)= {ef if ef is not None else 'なし(ギャップ過大)'}")
 print(f"  決済理由 = {reason}  決済価格 = {xp}")

@@ -12,7 +12,7 @@ import pandas as pd
 
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
-                  no_target=False, no_stop=False):
+                  no_target=False, no_stop=False, include_entry_bar=False):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -38,6 +38,11 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
       no_stop        : True=損切り(stop)を一切見ない。利確だけ判定し、当たらなければ
                        引け決済(=同日lssで『損切りを日足終値=引けに委ねる』運用に相当)。
                        損失が引けまで走るので通常は不利側の検証用。
+      include_entry_bar: True=約定バー(ei)からも損切り/利確をチェックする。**寄り約定
+                       (ギャップで始値約定)** のとき使う。この場合、建玉は寄りの瞬間から
+                       開いているので、約定バー内の高値/安値もヒット対象(約定前の跳ねを
+                       スキップする必要がない)。False(既定)=ei+1から(ザラ場約定=約定前の
+                       跳ねをスキップ)。呼び出し側が『約定価格==始値(ギャップ約定)』かで切替。
     Returns: (exit_price, reason, entry_ts, exit_ts)
       reason ∈ {"target","stop","close","no_entry","no_5m"}
     """
@@ -66,9 +71,11 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
         return None, "no_entry", None, None
 
     ent_ts = times[ei]
-    # 2) 約定バーの次バー以降で first-touch(約定前ヒットの先読み回避)。
+    # 2) first-touch で決済。ザラ場約定は約定バーの"次バー以降"(約定前ヒットの先読み回避)。
+    #    寄り約定(ギャップ)は建玉が寄りから開いているので約定バー(ei)から見る。
     #    損切り(上)・利確(下)は独立に close/タッチを選べる。損切り優先は維持。
-    for j in range(ei + 1, n):
+    _start = ei if include_entry_bar else ei + 1
+    for j in range(_start, n):
         if not no_stop:               # no_stop=True なら損切りを見ない(引けまで持つ)
             stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
             if stop_hit:              # 上抜け=損切(同時タッチも優先)

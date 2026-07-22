@@ -1179,9 +1179,13 @@ def run_limit_backtest(
                     _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
             else:
                 _entry_fill = _lp
+            # 寄り約定(ギャップで始値約定=約定価格がトリガーと異なる)かどうか。寄り約定なら
+            # 建玉は寄りから開いているので、約定バー内の損切り/利確もヒット対象にする。
+            _gap_entry = abs(_entry_fill - _lp) > 1e-9
             # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
-                                               on_close=_INTRADAY_5M_ON_CLOSE)
+                                               on_close=_INTRADAY_5M_ON_CLOSE,
+                                               include_entry_bar=_gap_entry)
             if _rsn == "no_5m":
                 continue   # データ欠 → 不約定扱いにしない
             if _rsn == "no_entry":
