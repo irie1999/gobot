@@ -86,7 +86,9 @@ if pre_spike:
 _day_open = None
 try:
     import backtest_limit_entry as _ble
-    _ddf = _ble.fetch(args.symbol, 30)
+    # 日足はyfinance=東証は .T サフィックスが必要(例 2674.T)。付いていなければ付ける。
+    _sym_t = args.symbol if args.symbol.upper().endswith(".T") else args.symbol + ".T"
+    _ddf = _ble.fetch(_sym_t, 30)
     _drow = _ddf.loc[_ddf.index.normalize() == pd.Timestamp(_want)]
     if len(_drow):
         _day_open = float(_drow["open"].iloc[0])
