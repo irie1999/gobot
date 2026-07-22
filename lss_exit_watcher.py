@@ -220,32 +220,35 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         else:
             print(f"  [!] 建玉取得失敗: {e}")
             return []
-    out = []
+    # 銘柄単位で合算する。kabuの信用返済は『銘柄単位で建玉を自動選択し、発注時に既存の
+    # 返済注文を取消す』ため、建玉ごとに決済すると片方の返済注文(MOC/逆指値)がもう片方の
+    # 発注取消で消え、100株しか決済されない。合計数量で1回だけ決済/板逆指値すれば回避できる。
+    agg: dict = {}
     for kp in positions:
         sym = str(kp.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
         if str(kp.get("Side", "")) != "1":     # 売建のみ(買建=ロングは触らない)
             continue
         qty = int(kp.get("LeavesQty") or kp.get("Qty") or 0)
-        # 建玉(HoldID)単位で管理する。同一銘柄を複数建てた(例 200株=2建玉)場合でも、
-        # 各建玉に個別に損切逆指値を置き、個別に決済するため。pkey がその建玉の管理キー。
-        hid = str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip()
-        pkey = hid or sym   # HoldIDが空の環境では銘柄名にフォールバック(1建玉のみ想定)
         if qty <= 0:        # LeavesQty<=0 は決済済み。残玉(部分約定後)は qty>0 で拾い続ける
             continue
         avg = _num(kp.get("AveragePrice") or kp.get("Price"))
         rec = _match_lss(sym, avg, lss_map, tol)
         if rec is None:
             continue   # lss記録に一致しない売建(メインショート等) → 触らない
-        out.append({
-            "sym": sym, "name": rec.get("name", "") or (kp.get("SymbolName") or sym),
-            "qty": qty, "avg": avg, "strategy": rec.get("strategy", ""),
-            "stop": rec.get("stop", 0.0), "target": rec.get("target", 0.0),
-            "hold_id": hid, "pkey": pkey,
-            # 返済は建玉と同じ信用区分でないと Code 8(決済指定内容に誤り)。
-            # 建玉の MarginTradeType(1=制度/2=一般長期/3=一般デイトレ)を読んで返済で合わせる。
-            "margin_type": int(kp.get("MarginTradeType") or 1),
-        })
-    return out
+        a = agg.get(sym)
+        if a is None:
+            agg[sym] = {
+                "sym": sym, "name": rec.get("name", "") or (kp.get("SymbolName") or sym),
+                "qty": qty, "avg": avg, "strategy": rec.get("strategy", ""),
+                "stop": rec.get("stop", 0.0), "target": rec.get("target", 0.0),
+                # 決済は close_positions=None で kabu が銘柄内の建玉を自動選択(合計数量分)。
+                "hold_id": "", "pkey": sym,
+                # 返済は建玉と同じ信用区分でないと Code 8。同一銘柄の建玉は同区分想定。
+                "margin_type": int(kp.get("MarginTradeType") or 1),
+            }
+        else:
+            a["qty"] += qty   # 同一銘柄の複数建玉を合算(200株=1回で決済)
+    return list(agg.values())
 
 
 def _place_stop_buy(cli, sym: str, qty: int, hold_id: str, stop_p: float) -> str:
@@ -463,11 +466,11 @@ def _run(args, close_at, today) -> int:
     if not args.once:
         _start_control_server(args.prod)
 
-    stop_placed: set = set()   # 損切の逆指値買いを設置済みの建玉(pkey=HoldID)。建玉単位なので
-                               #   同一銘柄200株(2建玉)でも両建玉に個別に板逆指値が乗る。
-    moc_placed: set = set()    # 引けMOCを出した建玉(pkey)。引けは建玉ごとに1回だけ(重複キュー防止)。
-    close_cool: dict = {}      # pkey -> 直近に成行決済を送った時刻(unix秒)。部分約定の残玉を
-                               #   再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
+    stop_placed: set = set()   # 板逆指値を設置済みの銘柄(pkey=銘柄)。銘柄単位で合計数量に
+                               #   1本だけ置く(同一銘柄200株=2建玉でも1本で全建玉をカバー)。
+    moc_placed: set = set()    # 引けMOCを出した銘柄(pkey)。引けは銘柄ごとに1回だけ(重複キュー防止)。
+    close_cool: dict = {}      # pkey(銘柄) -> 直近に成行決済を送った時刻(unix秒)。部分約定の
+                               #   残玉を再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
     _CLOSE_COOLDOWN = 20.0     # 秒。成行決済を送ったら同じ建玉にはこの秒数だけ再送しない
                                #   (約定 or 取消の確定待ち)。残玉が残ればクールダウン後に再決済。
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
