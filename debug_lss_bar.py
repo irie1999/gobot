@@ -81,8 +81,21 @@ if pre_spike:
     print(f"※ 約定バー(#{ei})以前に高値>=損切({stop:,.0f})のバーあり: {pre_spike} "
           f"→ これは『約定前の跳ね』なので損切り判定に使われない(正しい挙動)")
 
-# short_exit_5m と同じ判定を実行
-ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03)
+# 日足の始値を取得(レポートと同じ=寄り値は日足始値優先)。5分足の寄りが壊れていても
+# 日足始値で約定するので、レポートの約定値と一致する。
+_day_open = None
+try:
+    import backtest_limit_entry as _ble
+    _ddf = _ble.fetch(args.symbol, 30)
+    _drow = _ddf.loc[_ddf.index.normalize() == pd.Timestamp(_want)]
+    if len(_drow):
+        _day_open = float(_drow["open"].iloc[0])
+    print(f"日足の始値(寄り) = {_day_open}")
+except Exception as _e:
+    print(f"[warn] 日足始値取得失敗: {_e}")
+
+# short_exit_5m と同じ判定を実行(約定は日足始値優先)
+ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_open)
 xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False)
 print(f"\n▼ short_exit_5m 判定")
 print(f"  約定価格(現実モデル)= {ef if ef is not None else 'なし(ギャップ過大)'}")

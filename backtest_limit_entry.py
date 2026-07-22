@@ -1163,8 +1163,17 @@ def run_limit_backtest(
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
+                # 寄り値は日足の始値を優先(5分足の寄りは稀に壊れるため)。約定日の日足始値を引く。
+                _day_open = None
+                try:
+                    _drow = df.loc[df.index.normalize() == pd.Timestamp(_fd)]
+                    if len(_drow):
+                        _day_open = float(_drow["open"].iloc[0])
+                except Exception:
+                    _day_open = None
                 _entry_fill = _sef5(_db, _lp, _is_rise,
-                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT)
+                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
+                                    day_open=_day_open)
                 if _entry_fill is None:
                     # ギャップ過大 → 約定不成立だが発注はした → 枠消費用に不約定記録。
                     _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue

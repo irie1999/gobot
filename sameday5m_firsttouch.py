@@ -81,7 +81,8 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     return float(closes[-1]), "close", ent_ts, times[-1]
 
 
-def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None):
+def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None,
+                        day_open=None):
     """空売りの『現実的な約定価格』を5分足から求める(ギャップ考慮)。
 
     現行バックテストは常に trigger 価格で約定させるが、実際は寄りが既にトリガーを
@@ -122,9 +123,12 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
                 ei = j; break
     if ei is None:
         return None
-    # 約定価格の基準は『その日の始値(opens[0])』= 寄り。約定バー(ザラ場)の始値ではない。
+    # 約定価格の基準は『その日の始値』= 寄り。約定バー(ザラ場)の始値ではない。
     # 逆指値/指値はトリガーを抜けた瞬間に約定するので、寄りがトリガー超なら約定=トリガー。
-    o = float(opens[0])
+    # 寄り値は日足の始値(day_open)を優先する。5分足の寄り(opens[0])は稀に壊れる
+    # (寄り付き付近のバー欠落・異常値。例: 実際は2,869で寄ったのに5分足が2,819始まり)ので、
+    # 信頼できる日足始値があればそれを使う。無ければ5分足のopens[0]にフォールバック。
+    o = float(day_open) if (day_open is not None and day_open > 0) else float(opens[0])
     if is_rise_trigger:
         fill = max(trigger_p, o)             # 上昇約定: 寄りギャップアップは始値(高い=有利)
         if entry_gap_limit is not None and fill > trigger_p * (1.0 + entry_gap_limit):
