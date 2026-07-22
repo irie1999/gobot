@@ -98,10 +98,13 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
     Returns: fill_price(float) / None(約定せず or ギャップ過大でキャンセル)
 
     lss(下落約定)の考え方:
-      約定バー = 最初に low<=trigger のバー。
-        寄り(始値)が trigger 以下(ギャップダウン/寄りで既に割れ) → 約定=始値(より安い=不利)
-        寄りが trigger 超 → 日中に trigger まで下げて発火 → 約定=trigger(現行と同じ)
-      → 約定 = min(trigger, 始値)。ただし始値がトリガー×(1-limit)未満なら約定不可。
+      約定 = min(trigger, その日の始値[opens[0]])。
+        寄り(その日の始値)が trigger 以下(寄りギャップダウン) → 約定=始値(より安い=不利)
+        寄りが trigger 超 → ザラ場で trigger を下抜けた瞬間に約定 → 約定=trigger
+      ※ ここは『その日の始値(opens[0])』を使う。約定バー(ザラ場)の始値ではない。
+        逆指値売りはトリガーを下抜けた"瞬間"に約定するので、約定バーの始値(トリガーより
+        更に下)を使うと空売りに不利すぎる過小評価になる(実約定はトリガー近辺になる)。
+      始値がトリガー×(1-limit)未満なら約定不可(指値下限ガード)。
     """
     if day_bars is None or day_bars.empty:
         return None
@@ -119,15 +122,17 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
                 ei = j; break
     if ei is None:
         return None
-    o = float(opens[ei])
+    # 約定価格の基準は『その日の始値(opens[0])』= 寄り。約定バー(ザラ場)の始値ではない。
+    # 逆指値/指値はトリガーを抜けた瞬間に約定するので、寄りがトリガー超なら約定=トリガー。
+    o = float(opens[0])
     if is_rise_trigger:
-        fill = max(trigger_p, o)             # 上昇約定: ギャップアップは始値(高い=有利)
+        fill = max(trigger_p, o)             # 上昇約定: 寄りギャップアップは始値(高い=有利)
         if entry_gap_limit is not None and fill > trigger_p * (1.0 + entry_gap_limit):
-            return None                      # ギャップアップ過大 → キャンセル
+            return None                      # 寄りギャップアップ過大 → キャンセル
     else:
-        fill = min(trigger_p, o)             # 下落約定: ギャップダウンは始値(安い=不利)
+        fill = min(trigger_p, o)             # 下落約定: 寄りギャップダウンは始値(安い=不利)
         if entry_gap_limit is not None and fill < trigger_p * (1.0 - entry_gap_limit):
-            return None                      # ギャップダウン過大 → 指値下限でキャンセル
+            return None                      # 寄りギャップダウン過大 → 指値下限でキャンセル
     return float(fill)
 
 
