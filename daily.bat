@@ -31,6 +31,7 @@ cd /d "%~dp0"
 REM --- clear heavy research flags so daily always runs light ---
 set "LSS_CLOSESTOP_RESWEEP="
 set "LSS_GUARD_ONLY="
+set "LSS_ENTRY_DELAY_BARS="
 REM --- rebuild the merged lss proposal (union of the 3 fresh bases) ---
 python merge_lss_proposals.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --out lss_proposal_merged3.py
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_merged3.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
