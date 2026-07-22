@@ -1162,9 +1162,19 @@ def run_limit_backtest(
             _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
+            # J-Quants 5分足は 09:05 スタートで 09:00 寄り付きバーが欠落しているため、
+            # 日足始値(daily open)をギャップ判定の基準として渡す。
+            _daily_open = None
+            try:
+                _dt_key = pd.Timestamp(_fd)
+                if _dt_key in df.index and "open" in df.columns:
+                    _daily_open = float(df.at[_dt_key, "open"])
+            except Exception:
+                pass
             if _INTRADAY_5M_REALISTIC_ENTRY:
                 _entry_fill = _sef5(_db, _lp, _is_rise,
-                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT)
+                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
+                                    daily_open=_daily_open)
                 if _entry_fill is None:
                     # ギャップ過大 → 約定不成立だが発注はした → 枠消費用に不約定記録。
                     _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue

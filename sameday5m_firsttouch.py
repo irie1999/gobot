@@ -81,7 +81,8 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     return float(closes[-1]), "close", ent_ts, times[-1]
 
 
-def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None):
+def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None,
+                        daily_open=None):
     """空売りの『現実的な約定価格』を5分足から求める(ギャップ考慮)。
 
     現行バックテストは常に trigger 価格で約定させるが、実際は寄りが既にトリガーを
@@ -95,15 +96,17 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
                        ダウンなら『指値下限で約定不可』としてスキップ(None返す)。
                        mirrorはトリガー×(1+limit)を超えるギャップアップでスキップ。
                        None=ガードなし。
+      daily_open     : 日足OHLCV の始値(日足から取得)。J-Quants 5分足は 09:05 始まりで
+                       09:00 の寄り付きバーが欠落しているため、5分足の opens[0] では
+                       ギャップダウン/アップを正しく判定できない。日足始値を渡すと
+                       こちらを基準にする。None のときは opens[0] にフォールバック。
     Returns: fill_price(float) / None(約定せず or ギャップ過大でキャンセル)
 
     lss(下落約定)の考え方:
-      約定 = min(trigger, その日の始値[opens[0]])。
-        寄り(その日の始値)が trigger 以下(寄りギャップダウン) → 約定=始値(より安い=不利)
-        寄りが trigger 超 → ザラ場で trigger を下抜けた瞬間に約定 → 約定=trigger
-      ※ ここは『その日の始値(opens[0])』を使う。約定バー(ザラ場)の始値ではない。
-        逆指値売りはトリガーを下抜けた"瞬間"に約定するので、約定バーの始値(トリガーより
-        更に下)を使うと空売りに不利すぎる過小評価になる(実約定はトリガー近辺になる)。
+      約定 = min(trigger, 寄り始値)。
+        寄り始値が trigger 以下(寄りギャップダウン) → 約定=始値(より安い=不利)
+        寄り始値が trigger 超 → ザラ場で trigger を下抜けた瞬間に約定 → 約定=trigger
+      寄り始値には daily_open を優先する(J-Quants 5分足は 09:00 バー欠落のため)。
       始値がトリガー×(1-limit)未満なら約定不可(指値下限ガード)。
     """
     if day_bars is None or day_bars.empty:
@@ -122,9 +125,11 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
                 ei = j; break
     if ei is None:
         return None
-    # 約定価格の基準は『その日の始値(opens[0])』= 寄り。約定バー(ザラ場)の始値ではない。
-    # 逆指値/指値はトリガーを抜けた瞬間に約定するので、寄りがトリガー超なら約定=トリガー。
-    o = float(opens[0])
+    # 寄り始値の基準: daily_open(日足OHLCV始値)を優先。
+    # J-Quants 5分足は 09:05 スタートで 09:00 寄り付きバーが欠落しているため、
+    # opens[0] を使うと「09:00〜09:05 でトリガーを通過した」ケースをギャップダウンと
+    # 誤判定し、約定価格が不当に悪くなる。日足始値が渡されれば正確に判定できる。
+    o = float(daily_open) if daily_open is not None else float(opens[0])
     if is_rise_trigger:
         fill = max(trigger_p, o)             # 上昇約定: 寄りギャップアップは始値(高い=有利)
         if entry_gap_limit is not None and fill > trigger_p * (1.0 + entry_gap_limit):
