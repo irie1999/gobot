@@ -201,8 +201,9 @@ def _parse_hhmm(s: str) -> dtime:
         return dtime(15, 20)
 
 
-def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
-    """kabu建玉から、対象の lss 売建(未決済)を抽出。"""
+def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
+    """kabu建玉から、対象の lss 売建(未決済)を抽出。毎回 kabu の実建玉を読むので、
+    部分約定で減った残玉(LeavesQty)もそのまま拾える(=残玉を監視し続ける)。"""
     try:
         positions = cli.get_positions(product=2)   # 信用建玉
     except Exception as e:
@@ -229,7 +230,7 @@ def _lss_shorts(cli, lss_map: dict, tol: float, closed: set) -> list[dict]:
         # 各建玉に個別に損切逆指値を置き、個別に決済するため。pkey がその建玉の管理キー。
         hid = str(kp.get("ExecutionID") or kp.get("HoldID") or "").strip()
         pkey = hid or sym   # HoldIDが空の環境では銘柄名にフォールバック(1建玉のみ想定)
-        if qty <= 0 or pkey in closed:
+        if qty <= 0:        # LeavesQty<=0 は決済済み。残玉(部分約定後)は qty>0 で拾い続ける
             continue
         avg = _num(kp.get("AveragePrice") or kp.get("Price"))
         rec = _match_lss(sym, avg, lss_map, tol)
@@ -462,9 +463,13 @@ def _run(args, close_at, today) -> int:
     if not args.once:
         _start_control_server(args.prod)
 
-    closed: set = set()        # 決済済み建玉(このセッションで買戻した pkey=HoldID)
     stop_placed: set = set()   # 損切の逆指値買いを設置済みの建玉(pkey=HoldID)。建玉単位なので
                                #   同一銘柄200株(2建玉)でも両建玉に個別に板逆指値が乗る。
+    moc_placed: set = set()    # 引けMOCを出した建玉(pkey)。引けは建玉ごとに1回だけ(重複キュー防止)。
+    close_cool: dict = {}      # pkey -> 直近に成行決済を送った時刻(unix秒)。部分約定の残玉を
+                               #   再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
+    _CLOSE_COOLDOWN = 20.0     # 秒。成行決済を送ったら同じ建玉にはこの秒数だけ再送しない
+                               #   (約定 or 取消の確定待ち)。残玉が残ればクールダウン後に再決済。
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
     # ※ 起動直後の _regen_holdings(保有ごとに現在値APIを叩く=遅い)はここでは"やらない"。
     #    寄り付き付近で損切が決まる場合があるため、監視ループ(=損切設置)を最優先で即開始する。
@@ -474,7 +479,7 @@ def _run(args, close_at, today) -> int:
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
         after_close = now.time() >= close_at
         lss_map = _load_lss_orders(today, args.all_dates)
-        shorts = _lss_shorts(cli, lss_map, args.tol, closed) if lss_map else []
+        shorts = _lss_shorts(cli, lss_map, args.tol) if lss_map else []
 
         if shorts and before_open:
             print(f"  {now:%H:%M:%S} 寄り前(9:00前): lss売建 {len(shorts)}件を待機中(発火なし)")
@@ -487,19 +492,25 @@ def _run(args, close_at, today) -> int:
                 cli.margin_trade_type = p.get("margin_type", args.margin_type)
                 cur = cli.get_current_price(sym)
                 _curs = f"{cur:,.0f}" if cur else "?"
+                # 成行決済のクールダウン中(直近に送った)か。部分約定の残玉は次サイクルで
+                # qty が減って再度拾われるので、クールダウンだけで二重成行を防ぐ。
+                _cooling = (now.timestamp() - close_cool.get(pk, 0.0)) < _CLOSE_COOLDOWN
                 # 引け: 損切逆指値を取消して引け成行で買戻し
                 if after_close:
                     # 既定は「引け成行(MOC)」= 15:30のクロージング・オークション(終値)で約定。
                     # 発注時刻に関係なく終値で約定するのでバックテスト(終値決済)と一致。
                     # --immediate で即時成行(数秒で約定・目視確認可・5秒ごと自動リトライ)。
                     if args.immediate:
+                        if _cooling:
+                            continue   # 直近に送った成行の約定待ち(残玉あれば次で再送)
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 即時成行で買戻し")
-                        ok = _close_buy(cli, sym, qty, hid, "引け")
-                    else:
+                        if _close_buy(cli, sym, qty, hid, "引け"):
+                            close_cool[pk] = now.timestamp()
+                            stop_placed.discard(pk)
+                    elif pk not in moc_placed:
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
-                        ok = _close_moc(cli, sym, qty, hid)
-                    if ok:
-                        closed.add(pk)
+                        if _close_moc(cli, sym, qty, hid):
+                            moc_placed.add(pk)   # MOCは建玉ごとに1回(重複キュー防止)
                     continue
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
@@ -507,26 +518,37 @@ def _run(args, close_at, today) -> int:
                 # ① 損切(上): 現在値が既に損切ライン以上なら『今すぐ成行で損切』。
                 #    (逆指値買いは現在値以上のトリガーだと即約定/決済誤り(Code8)で置けないため)
                 if p["stop"] and cur >= p["stop"]:
-                    print(f"  [損切] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
+                    if _cooling:
+                        print(f"  [損切待ち] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} "
+                              f"(直近成行の約定待ち)")
+                        continue
+                    print(f"  [損切] {sym} {p['name']} 売建{qty} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "損切"):
-                        closed.add(pk)
+                        close_cool[pk] = now.timestamp()
+                        stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
                     continue
-                # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし(1回だけ試す)。
+                # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし。
                 #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
+                #    部分約定で取消された残玉は stop_placed から外れているので再設置される。
                 if p["stop"] and pk not in stop_placed:
-                    stop_placed.add(pk)   # 建玉ごとに1回だけ(成否問わずスパム防止)
+                    stop_placed.add(pk)
                     _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
                     if _r in ("ok", "exists"):
-                        print(f"  [損切設置] {sym} {p['name']} 逆指値買い @>={p['stop']:,.0f} を建玉に設置"
+                        print(f"  [損切設置] {sym} {p['name']} 売建{qty} 逆指値買い @>={p['stop']:,.0f} を設置"
                               f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
                     else:
                         print(f"  [損切] {sym} {p['name']} 逆指値設置不可 → ポーリング成行で損切を担保")
                 # ③ 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
                 if p["target"] and cur <= p["target"]:
-                    print(f"  [利確] {sym} {p['name']} 現在{_curs} <= 利確{p['target']:,.0f} "
+                    if _cooling:
+                        print(f"  [利確待ち] {sym} {p['name']} 現在{_curs} <= 利確{p['target']:,.0f} "
+                              f"(直近成行の約定待ち)")
+                        continue
+                    print(f"  [利確] {sym} {p['name']} 売建{qty} 現在{_curs} <= 利確{p['target']:,.0f} "
                           f"→ 損切逆指値を取消して成行買戻し")
                     if _close_buy(cli, sym, qty, hid, "利確"):
-                        closed.add(pk)
+                        close_cool[pk] = now.timestamp()
+                        stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
                 else:
                     _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
                     _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
