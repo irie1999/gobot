@@ -143,6 +143,15 @@ def round_to_tick(price: float) -> int:
     t = tick_size(float(price))
     return int(round(price / t) * t)
 
+def ceil_to_tick(price: float) -> int:
+    """TSE呼値単位で「ライン以上の最初のティック」に切り上げる。
+    実発注は5円刻み等の呼値でしか置けないため、損切ライン(逆指値売りの上側)は
+    ライン直上のティックに置く=早すぎる損切りを避ける。利確ラインも一つ上で判定。
+    ラインがちょうど呼値に乗っている場合は同値を返す。"""
+    import math
+    t = tick_size(float(price))
+    return int(math.ceil(float(price) / t) * t)
+
 
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
@@ -1166,7 +1175,12 @@ def run_limit_backtest(
                 if len(_db) - _INTRADAY_5M_ENTRY_DELAY < 2:
                     continue
                 _db = _db.iloc[_INTRADAY_5M_ENTRY_DELAY:]
-            _stop_p = max(_osp, _otp); _tgt_p = min(_osp, _otp)
+            # 実発注は呼値(5円刻み等)でしか置けない。約定判定を実注文の価格グリッドに
+            # 合わせる: 損切=ライン直上のティック(ceil, 早すぎる損切り回避)、利確=一つ上で判定、
+            # トリガーは最近接ティック。これでBTと実注文の損切/利確が一致する。
+            _lp = float(round_to_tick(_lp))
+            _stop_p = float(ceil_to_tick(max(_osp, _otp)))
+            _tgt_p = float(ceil_to_tick(min(_osp, _otp)))
             _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。

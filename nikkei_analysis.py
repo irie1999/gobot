@@ -2361,7 +2361,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             _lss_limit = limit_p
             if _LSS_ORDER_MODE and order_p:
                 try:
-                    from backtest_limit_entry import round_to_tick as _r2t, tick_size as _tsz
+                    from backtest_limit_entry import (round_to_tick as _r2t,
+                                                      tick_size as _tsz,
+                                                      ceil_to_tick as _c2t)
                     _plp = mod.STRATEGY_PARAMS.get(strat)
                     _sm_long = float(_plp[2]) if _plp else 0.0
                     _stop_long = float(sig.get("stop_price", 0) or 0)
@@ -2373,8 +2375,11 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     _lss_sigprice = order_p                        # シグナル日時株価=前日終値
                     order_p = _r2t(order_p - _tsz(order_p))        # トリガー=前日終値-1ティック
                     if _atr > 0:
-                        _lss_stop   = _r2t(order_p + _atr * _LSS_SM)   # 損切=上(価格上昇で損切)
-                        _lss_target = _r2t(order_p - _atr * _LSS_TM)   # 目標=下(価格下落で利確)
+                        # 実発注は呼値グリッド上でしか置けない。損切=ライン直上のティック
+                        # (ceil)にして早すぎる損切りを回避(例:損切ライン2,232→注文2,235)。
+                        # 利確も一つ上で判定(ceil)。BT側(5分約定判定)と同一グリッドで一致。
+                        _lss_stop   = _c2t(order_p + _atr * _LSS_SM)   # 損切=上(価格上昇で損切)
+                        _lss_target = _c2t(order_p - _atr * _LSS_TM)   # 目標=下(価格下落で利確)
                     _lss_limit = _r2t(order_p * (1.0 - 0.03))          # 発動後の指値下限(-3%)
                     _lss_hold  = "同日"                          # 同日決済(max_hold=0)
                     try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
