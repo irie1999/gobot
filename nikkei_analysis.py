@@ -9249,6 +9249,15 @@ function switchTbd(id, tab) {{
         olp = t.get("order_limit", 0)
         osp = t.get("order_stop", 0)
         otp = t.get("order_target", 0)
+        # lss は実発注の呼値グリッドに合わせて表示(=BTの5分約定判定と同一)。
+        # 損切=ライン直上ティック(ceil,早すぎる損切り回避)/利確=一つ上で判定(ceil)/
+        # トリガー=最近接ティック。例:シーイーシー損切ライン2,232→表示&発注2,235。
+        if _LSS_ORDER_MODE and olp > 0 and osp > 0 and otp > 0:
+            from backtest_limit_entry import (round_to_tick as _r2t2,
+                                              ceil_to_tick as _c2t2)
+            olp = float(_r2t2(olp))
+            osp = float(_c2t2(osp))
+            otp = float(_c2t2(otp))
         if olp > 0 and osp > 0 and otp > 0:
             sp_pct   = (osp - olp) / olp * 100
             tp_pct   = (otp - olp) / olp * 100
