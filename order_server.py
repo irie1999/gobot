@@ -85,6 +85,56 @@ def _load_not_shortable() -> set:
     return out
 
 
+def _append_not_shortable(symbol: str, reason: str = "") -> bool:
+    """恒久的にlss不可な銘柄(例: 一般信用デイトレ売り非対応=Code4002013)を not_shortable.py に
+    追記する。check_shortable が作る形式(NOT_SHORTABLE=[...])を維持するので、レポート選定
+    (run_signals_holdout_all)・発注(place_order)の両方で次回から事前除外される。
+    プロセス内キャッシュも破棄して同一セッション内でも即反映する。"""
+    global _NOT_SHORTABLE_CACHE
+    from pathlib import Path
+    sym = str(symbol).upper().removesuffix(".T").split(".")[0]
+    p = Path(__file__).resolve().parent / "not_shortable.py"
+    try:
+        cur: list = []
+        if p.exists():
+            ns: dict = {}
+            exec(p.read_text(encoding="utf-8"), ns)
+            cur = list(ns.get("NOT_SHORTABLE", []))
+        cur_set = {str(x).upper().removesuffix(".T").split(".")[0] for x in cur}
+        if sym in cur_set:
+            return False
+        cur_set.add(sym)
+        d = datetime.now(JST).strftime("%Y-%m-%d")
+        p.write_text(
+            '"""not_shortable.py — 空売り不可(非貸借/取扱なし/一般デイトレ売り非対応)銘柄。\n'
+            f"check_shortable が生成 + order_server が発注時の恒久リジェクトを自動追記。"
+            f"最終更新: {d}。lss 選定・発注の除外リストに使う。\"\"\"\n"
+            f"NOT_SHORTABLE = {sorted(cur_set)!r}\n", encoding="utf-8")
+        _NOT_SHORTABLE_CACHE = None
+        print(f"  [i] not_shortable.py に {sym} を追加({reason})。次回から事前除外。")
+        return True
+    except Exception as e:
+        print(f"  ⚠ not_shortable.py 追記失敗: {e}")
+        return False
+
+
+def _record_lss_skip(symbol: str, code, reason: str) -> None:
+    """発注時の想定内スキップ(売建規制/デイトレ非対応)を日次CSVに記録(監査用)。"""
+    import csv
+    from pathlib import Path
+    d = datetime.now(JST).strftime("%Y-%m-%d")
+    path = Path(__file__).resolve().parent / f"lss_order_skipped_{d}.csv"
+    new = not path.exists()
+    try:
+        with path.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["time", "symbol", "code", "reason"])
+            w.writerow([datetime.now(JST).strftime("%H:%M:%S"), symbol, code, reason])
+    except Exception as e:
+        print(f"  ⚠ スキップ記録失敗: {e}")
+
+
 def _log_placed_order(rec: dict) -> None:
     """発注内容を placed_orders_<date>.csv に追記する(保有銘柄タブのソース)。"""
     import csv
@@ -222,6 +272,25 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
             })
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
                 f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
+    # ── 想定内のリジェクトは分かりやすいスキップにする(一括発注を止めない・パニックしない) ──
+    _code = res.get("Code")
+    try:
+        _code_i = int(_code)
+    except Exception:
+        _code_i = None
+    _msg = str(res.get("Message", ""))
+    if _code_i == 100302 or "売建規制" in _msg:
+        # 売建規制は当日限りの動的規制。恒久除外はしない(翌営業日は解除のことが多い)。
+        _record_lss_skip(symbol, _code, "売建規制(100302)")
+        return (f"⏭ スキップ: {symbol} は本日『売建規制』(Code100302)で発注不可。"
+                f"当日限りの規制のため恒久除外はしません(翌営業日に解除の可能性)。")
+    if _code_i == 4002013 or "MarginTradeType" in _msg:
+        # 一般信用デイトレ売り非対応(在庫対象外)。銘柄固有で安定 → not_shortable に恒久追加し、
+        # 次回からレポート選定・発注の両方で事前除外する。
+        _append_not_shortable(symbol, "一般デイトレ売り非対応(4002013)")
+        _record_lss_skip(symbol, _code, "一般デイトレ売り非対応(4002013)")
+        return (f"⏭ スキップ: {symbol} は一般信用デイトレ売り非対応(Code4002013)。"
+                f"not_shortable に追加し、次回からシグナル・発注の両方で事前除外します。")
     return f"⚠ 発注応答エラー: {symbol} {res}"
 
 
