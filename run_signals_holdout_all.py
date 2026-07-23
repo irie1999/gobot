@@ -1325,7 +1325,11 @@ if (_args.bt_max or 0) > 0 or (_args.bt_min or 0) > 0:
 # キャッシュキー: "{symbol}::{strategy}::{signal_date}"
 import json as _json
 
-_score_cache_path = Path("signal_score_cache.json")
+# lss は専用キャッシュに凍結BTを保存(long/short と (sym,strat,date) キーが衝突するため分離)。
+# これで『シグナルが出た時点のBTスコアを凍結し、以降の再計算で上書きしない』=発注時BTと一致。
+_score_cache_path = Path("signal_score_cache_lss.json"
+                         if getattr(_args, "long_stop_short", False)
+                         else "signal_score_cache.json")
 _score_cache: dict = {}
 if _score_cache_path.exists():
     try:
@@ -1526,9 +1530,10 @@ elif _precompute_risks and _sig_sym_map:
 elif not _sig_sym_map:
     print("[INFO] シグナルなし — リスクチェックスキップ", flush=True)
 
-# キャッシュ保存 (mirror/lss は共有スコアキャッシュを汚さないためスキップ)
-if _analysis_only:
-    print("[INFO] mirror/lss は分析専用: signal_score_cache.json 保存スキップ", flush=True)
+# キャッシュ保存: lss は専用キャッシュ(signal_score_cache_lss.json)にBTを凍結して保存。
+# mirror は却下済み・分析専用なのでスキップ。long/short は従来通り共有キャッシュ。
+if getattr(_args, "mirror", False):
+    print("[INFO] mirror は分析専用: signal_score_cache 保存スキップ", flush=True)
 else:
     try:
         _score_cache_path.write_text(
