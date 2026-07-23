@@ -9250,14 +9250,21 @@ function switchTbd(id, tab) {{
         osp = t.get("order_stop", 0)
         otp = t.get("order_target", 0)
         # lss は実発注の呼値グリッドに合わせて表示(=BTの5分約定判定と同一)。
-        # 損切=ライン直上ティック(ceil,早すぎる損切り回避)/利確=一つ上で判定(ceil)/
-        # トリガー=最近接ティック。例:シーイーシー損切ライン2,232→表示&発注2,235。
+        # トリガー=前日終値-1ティック(逆指値売りは現在値以上だと即約定で弾かれる)、
+        # 損切=トリガー+atr*sm をライン直上ティック(ceil,早すぎる損切り回避)、利確=同ceil。
+        # atr幅は engine生値から復元(osp-olp=atr*sm, olp-otp=atr*tm)。
+        # 例:応用地質 損切2,835(生)→2,830 / シーイーシー損切2,232(生)→2,235。
         if _LSS_ORDER_MODE and olp > 0 and osp > 0 and otp > 0:
             from backtest_limit_entry import (round_to_tick as _r2t2,
-                                              ceil_to_tick as _c2t2)
-            olp = float(_r2t2(olp))
-            osp = float(_c2t2(osp))
-            otp = float(_c2t2(otp))
+                                              ceil_to_tick as _c2t2,
+                                              tick_size as _tsz2)
+            _base2 = _r2t2(olp)                        # 前日終値(呼値)
+            _trig2 = _r2t2(_base2 - _tsz2(_base2))     # トリガー=前日終値-1tick
+            _atr_sm2 = osp - olp                       # 損切幅(上)
+            _atr_tm2 = olp - otp                       # 利確幅(下)
+            olp = float(_trig2)
+            osp = float(_c2t2(_trig2 + _atr_sm2))
+            otp = float(_c2t2(_trig2 - _atr_tm2))
         if olp > 0 and osp > 0 and otp > 0:
             sp_pct   = (osp - olp) / olp * 100
             tp_pct   = (otp - olp) / olp * 100

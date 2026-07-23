@@ -1175,12 +1175,21 @@ def run_limit_backtest(
                 if len(_db) - _INTRADAY_5M_ENTRY_DELAY < 2:
                     continue
                 _db = _db.iloc[_INTRADAY_5M_ENTRY_DELAY:]
-            # 実発注は呼値(5円刻み等)でしか置けない。約定判定を実注文の価格グリッドに
-            # 合わせる: 損切=ライン直上のティック(ceil, 早すぎる損切り回避)、利確=一つ上で判定、
-            # トリガーは最近接ティック。これでBTと実注文の損切/利確が一致する。
-            _lp = float(round_to_tick(_lp))
-            _stop_p = float(ceil_to_tick(max(_osp, _otp)))
-            _tgt_p = float(ceil_to_tick(min(_osp, _otp)))
+            # 実発注の価格グリッドに約定判定を一致させる。
+            #  (1) 逆指値売りトリガーは「前日終値-1ティック」に置く(現在値以上だと即約定で
+            #      弾かれる, kabu Code 100217)。engineの生値 _lp=前日終値 には -1tick が
+            #      入っていないため、ここで引いて実注文に合わせる。
+            #  (2) 損切=トリガー+atr*sm / 利確=トリガー-atr*tm を、ライン直上ティック(ceil)に。
+            #      atr幅は engine生値から復元(_osp-_lp=atr*sm, _lp-_otp=atr*tm)。
+            # これで engine の損切/利確が実注文と1ティックもズレない(例:応用地質 損切2,835→
+            # 実注文2,830に修正され、寄り高値2,830で正しく損切り)。
+            _base = round_to_tick(_lp)                       # 前日終値(呼値)
+            _trig = round_to_tick(_base - tick_size(_base))  # トリガー=前日終値-1tick
+            _atr_sm = _osp - _lp                             # atr*sm (損切幅, 上)
+            _atr_tm = _lp - _otp                             # atr*tm (利確幅, 下)
+            _lp = float(_trig)
+            _stop_p = float(ceil_to_tick(_trig + _atr_sm))
+            _tgt_p = float(ceil_to_tick(_trig - _atr_tm))
             _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
