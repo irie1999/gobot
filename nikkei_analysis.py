@@ -3048,8 +3048,9 @@ function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval)
         headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.text();})
     .then(function(t){
-      // 発注済みとして記録(想定額を累計に加算・行に✓)。中止応答は加算しない。
-      var ok = !(/\\u4e2d\\u6b62|\\u5931\\u6557|error|Error/.test(t));
+      // 発注済みとして記録(想定額を累計に加算・行に✓)。実際に発注できた(🚀発注完了)か
+      // dry-runプレビューのみ計上。⏭スキップ(売建規制/デイトレ非対応)・⚠エラー・中止は計上しない。
+      var ok = /\\u767a\\u6ce8\\u5b8c\\u4e86|dry-run/.test(t);
       if(ok){
         gobotOrderedTotal += (parseFloat(posval)||0);
         gobotOrderedCount += 1;
