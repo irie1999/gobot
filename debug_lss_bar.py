@@ -93,8 +93,20 @@ if ei is None:
         print(f"\n日足OHLC(yfinance): 始値 {_day_open:,.0f} / 高値 {_day_high:,.0f} / 安値 {_day_low:,.0f}")
         if _day_low <= trig:
             print(f"  ⚠ 日足安値 {_day_low:,.0f} ≤ トリガー {trig:,.0f}")
-            print("    → 現実は寄り(欠落バー)でトリガーに達し約定していた可能性大。")
-            print("      5分足だけだと取りこぼす = 日足安値フォールバックで修正すべきケース。")
+            print("    → 現実は寄り(欠落バー)でトリガーに達し約定していた。日足安値フォールバックで救済:")
+            _ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03,
+                                      day_open=_day_open, day_low=_day_low, day_high=_day_high)
+            if _ef is None:
+                print("      → 指値下限ガード(-3%)超のギャップダウン = 約定不可(正しく見送り)。")
+            else:
+                _xp2, _rsn2, _e2, _x2 = short_exit_5m(db, trig, stop, tgt, False,
+                                                      include_entry_bar=True,
+                                                      day_low=_day_low, day_high=_day_high)
+                _pnl2 = short_pnl(_ef, _xp2, _rsn2, 100, 0.001, 0.0)
+                _xlbl = _x2.strftime('%H:%M') if hasattr(_x2, 'strftime') else str(_x2)
+                print(f"      約定価格 = {_ef:,.0f} (=min(トリガー,日足始値))")
+                print(f"      決済理由 = {_rsn2} / 決済価格 = {_xp2:,.0f} / 決済バー = {_xlbl}")
+                print(f"      100株損益(手数料込) = {_pnl2:+,.0f}円  ← 修正後の計上値")
         else:
             print(f"  ✓ 日足安値 {_day_low:,.0f} > トリガー {trig:,.0f}")
             print("    → 実際に安値がトリガーに届いていない。約定しないのが正しい")
@@ -116,12 +128,14 @@ if pre_spike:
 # 日足の始値は冒頭で取得済み(_day_open)。約定は日足始値優先。
 print(f"日足の始値(寄り) = {_day_open}")
 
-# short_exit_5m と同じ判定を実行(約定は日足始値優先)
-ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_open)
+# short_exit_5m と同じ判定を実行(約定は日足始値優先/欠落バーは日足安値で救済)
+ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_open,
+                         day_low=_day_low, day_high=_day_high)
 # 寄り約定(ギャップ=約定価格がトリガーと異なる)なら約定バーから損切りを見る
 _gap = (ef is not None) and (abs(ef - trig) > 1e-9)
 print(f"寄り約定(ギャップ)= {_gap}  (True=約定バーから損切りチェック / False=次バーから)")
-xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False, include_entry_bar=_gap)
+xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False, include_entry_bar=_gap,
+                                       day_low=_day_low, day_high=_day_high)
 print(f"\n▼ short_exit_5m 判定")
 print(f"  約定価格(現実モデル)= {ef if ef is not None else 'なし(ギャップ過大)'}")
 print(f"  決済理由 = {reason}  決済価格 = {xp}")

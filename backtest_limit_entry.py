@@ -1188,26 +1188,31 @@ def run_limit_backtest(
             _stop_p = float(ceil_to_tick(max(_osp, _otp)))         # 損切=前日終値+atr*sm(ceil)
             _tgt_p = float(ceil_to_tick(min(_osp, _otp)))          # 利確=前日終値-atr*tm(ceil)
             _qty = _t.get("qty", FIXED_QTY)
+            # 日足の始値/安値/高値。5分足の寄り(09:00-09:05)は稀に欠落するため、日足で補う。
+            #  ・始値: 約定価格の寄り基準。 ・安値/高値: トリガー到達の最終判定(欠落バー救済)。
+            _day_open = _day_low = _day_high = None
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
                 # 寄り値: 遅延ありは遅延後の先頭バー始値、遅延なしは日足始値優先(5分足の寄りは
-                # 稀に壊れるため)。約定日の日足始値を引く。
+                # 稀に壊れるため)。約定日の日足OHLCを引く。
                 if _INTRADAY_5M_ENTRY_DELAY > 0:
                     _day_open = float(_db["open"].iloc[0])
                 else:
-                    _day_open = None
                     try:
                         _drow = df.loc[df.index.normalize() == pd.Timestamp(_fd)]
                         if len(_drow):
                             _day_open = float(_drow["open"].iloc[0])
+                            _day_low = float(_drow["low"].iloc[0])
+                            _day_high = float(_drow["high"].iloc[0])
                     except Exception:
-                        _day_open = None
+                        _day_open = _day_low = _day_high = None
                 _entry_fill = _sef5(_db, _lp, _is_rise,
                                     entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
-                                    day_open=_day_open)
+                                    day_open=_day_open,
+                                    day_low=_day_low, day_high=_day_high)
                 if _entry_fill is None:
-                    # ギャップ過大 → 約定不成立だが発注はした → 枠消費用に不約定記録。
+                    # ギャップ過大 or 終日トリガー未達 → 約定不成立だが発注はした → 枠消費用に記録。
                     _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
             else:
                 _entry_fill = _lp
@@ -1217,7 +1222,8 @@ def run_limit_backtest(
             # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
                                                on_close=_INTRADAY_5M_ON_CLOSE,
-                                               include_entry_bar=_gap_entry)
+                                               include_entry_bar=_gap_entry,
+                                               day_low=_day_low, day_high=_day_high)
             if _rsn == "no_5m":
                 continue   # データ欠 → 不約定扱いにしない
             if _rsn == "no_entry":

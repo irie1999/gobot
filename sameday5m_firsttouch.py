@@ -12,7 +12,8 @@ import pandas as pd
 
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
-                  no_target=False, no_stop=False, include_entry_bar=False):
+                  no_target=False, no_stop=False, include_entry_bar=False,
+                  day_low=None, day_high=None):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -68,7 +69,17 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                 ei = j
                 break
     if ei is None:
-        return None, "no_entry", None, None
+        # 5分足がトリガーに触れない = 寄り(09:00-09:05)の欠落バーで触れた/割った可能性。
+        # 日足の安値(lss)/高値(mirror)がトリガーに達していれば「寄りで約定」とみなす。
+        # 建玉は寄りから開いているので、記録済み5分足の先頭バー(bor0)から損切り/利確を見る。
+        if not is_rise_trigger:
+            _touched = (day_low is not None and day_low > 0 and day_low <= entry_p)
+        else:
+            _touched = (day_high is not None and day_high > 0 and day_high >= entry_p)
+        if not _touched:
+            return None, "no_entry", None, None
+        ei = 0
+        include_entry_bar = True
 
     ent_ts = times[ei]
     # 2) first-touch で決済。ザラ場約定は約定バーの"次バー以降"(約定前ヒットの先読み回避)。
@@ -89,7 +100,7 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
 
 
 def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None,
-                        day_open=None):
+                        day_open=None, day_low=None, day_high=None):
     """空売りの『現実的な約定価格』を5分足から求める(ギャップ考慮)。
 
     現行バックテストは常に trigger 価格で約定させるが、実際は寄りが既にトリガーを
@@ -129,7 +140,15 @@ def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=No
             if lows[j] <= trigger_p:
                 ei = j; break
     if ei is None:
-        return None
+        # 5分足がトリガーに触れない = 寄り(09:00-09:05)の欠落バーで触れた/割った可能性。
+        # 日足の安値(lss)/高値(mirror)がトリガーに達していれば「寄りで約定」とみなし、
+        # 約定価格は下の min/max(トリガー, 日足始値) ロジックで決める(欠落バー救済)。
+        if not is_rise_trigger:
+            _touched = (day_low is not None and day_low > 0 and day_low <= trigger_p)
+        else:
+            _touched = (day_high is not None and day_high > 0 and day_high >= trigger_p)
+        if not _touched:
+            return None
     # 約定価格の基準は『その日の始値』= 寄り。約定バー(ザラ場)の始値ではない。
     # 逆指値/指値はトリガーを抜けた瞬間に約定するので、寄りがトリガー超なら約定=トリガー。
     # 寄り値は日足の始値(day_open)を優先する。5分足の寄り(opens[0])は稀に壊れる
