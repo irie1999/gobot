@@ -42,6 +42,22 @@ trig, stop, tgt = args.trigger, args.stop, args.target
 lows = db["low"].to_numpy(dtype=float)
 highs = db["high"].to_numpy(dtype=float)
 
+# 日足OHLC(yfinance)を先に取得。約定判定は5分足で行うが、5分足は寄り(09:00-09:05)の
+# バーが欠落することがある。日足の安値/高値は寄りの一瞬も含むので、「本当にトリガーへ
+# 達したか」の最終証拠になる(5分足で未達でも日足安値≤トリガーなら現実は約定していた)。
+_day_open = _day_low = _day_high = None
+try:
+    import backtest_limit_entry as _ble
+    _sym_t = args.symbol if args.symbol.upper().endswith(".T") else args.symbol + ".T"
+    _ddf = _ble.fetch(_sym_t, 30)
+    _drow = _ddf.loc[_ddf.index.normalize() == pd.Timestamp(_want)]
+    if len(_drow):
+        _day_open = float(_drow["open"].iloc[0])
+        _day_low = float(_drow["low"].iloc[0])
+        _day_high = float(_drow["high"].iloc[0])
+except Exception as _e:
+    print(f"[warn] 日足OHLC取得失敗: {_e}")
+
 # 約定バー = 最初に安値<=トリガー
 ei = None
 for j in range(len(lows)):
@@ -68,7 +84,23 @@ for j in range(len(db)):
 
 print()
 if ei is None:
-    print("判定: 約定せず(安値がトリガーに一度も達しない)= no_entry")
+    _first_ts = db.index[0]
+    _first_lbl = _first_ts.strftime('%H:%M') if hasattr(_first_ts, 'strftime') else str(_first_ts)
+    print("判定(5分足): 約定せず(5分足の安値がトリガーに一度も達しない)= no_entry")
+    print(f"  5分足の最安値 = {lows.min():,.0f} (トリガー {trig:,.0f})")
+    print(f"  5分足の先頭バー時刻 = {_first_lbl}  ← 09:05なら 09:00-09:05 が欠落している")
+    if _day_low is not None:
+        print(f"\n日足OHLC(yfinance): 始値 {_day_open:,.0f} / 高値 {_day_high:,.0f} / 安値 {_day_low:,.0f}")
+        if _day_low <= trig:
+            print(f"  ⚠ 日足安値 {_day_low:,.0f} ≤ トリガー {trig:,.0f}")
+            print("    → 現実は寄り(欠落バー)でトリガーに達し約定していた可能性大。")
+            print("      5分足だけだと取りこぼす = 日足安値フォールバックで修正すべきケース。")
+        else:
+            print(f"  ✓ 日足安値 {_day_low:,.0f} > トリガー {trig:,.0f}")
+            print("    → 実際に安値がトリガーに届いていない。約定しないのが正しい")
+            print("      (チャートの目視は1〜2ティックの誤差が出る)。修正不要。")
+    else:
+        print("[warn] 日足安値が取得できず、欠落バー起因かの判定不可。")
     raise SystemExit(0)
 
 ent_ts = db.index[ei]
@@ -81,20 +113,8 @@ if pre_spike:
     print(f"※ 約定バー(#{ei})以前に高値>=損切({stop:,.0f})のバーあり: {pre_spike} "
           f"→ これは『約定前の跳ね』なので損切り判定に使われない(正しい挙動)")
 
-# 日足の始値を取得(レポートと同じ=寄り値は日足始値優先)。5分足の寄りが壊れていても
-# 日足始値で約定するので、レポートの約定値と一致する。
-_day_open = None
-try:
-    import backtest_limit_entry as _ble
-    # 日足はyfinance=東証は .T サフィックスが必要(例 2674.T)。付いていなければ付ける。
-    _sym_t = args.symbol if args.symbol.upper().endswith(".T") else args.symbol + ".T"
-    _ddf = _ble.fetch(_sym_t, 30)
-    _drow = _ddf.loc[_ddf.index.normalize() == pd.Timestamp(_want)]
-    if len(_drow):
-        _day_open = float(_drow["open"].iloc[0])
-    print(f"日足の始値(寄り) = {_day_open}")
-except Exception as _e:
-    print(f"[warn] 日足始値取得失敗: {_e}")
+# 日足の始値は冒頭で取得済み(_day_open)。約定は日足始値優先。
+print(f"日足の始値(寄り) = {_day_open}")
 
 # short_exit_5m と同じ判定を実行(約定は日足始値優先)
 ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_open)
