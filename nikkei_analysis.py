@@ -2370,17 +2370,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     _atr = (order_p - _stop_long) / _sm_long if (_sm_long and _stop_long) else 0.0
                     # order_p は round_to_tick 済み = 前日終値(呼値に合った値)。
                     # 逆指値売りは現在値(引け後=前日終値)以上のトリガーだと即約定で弾かれる
-                    # (kabu Code 100217)。実発注は必ず「前日終値-1ティック」になるので、
-                    # 表示トリガー・損切・目標・指値下限もその値に合わせる(表示=実注文)。
+                    # (kabu Code 100217)。トリガーだけ「前日終値-1ティック」に置く。
+                    # 損切/利確のリスク幅は前日終値基準(§18検証モデル)で測り、呼値グリッド上は
+                    # ライン直上ティック(ceil)。-1tickは約定用の小細工なので損切りには反映しない
+                    # (不必要にタイトにしない)。例:応用地質 トリガー2,825 / 損切2,835 / 利確2,785。
                     _lss_sigprice = order_p                        # シグナル日時株価=前日終値
-                    order_p = _r2t(order_p - _tsz(order_p))        # トリガー=前日終値-1ティック
+                    _close_ref = order_p                           # 損切/利確の基準=前日終値
+                    order_p = _r2t(order_p - _tsz(order_p))        # トリガー=前日終値-1ティック(約定用のみ)
                     if _atr > 0:
-                        # 実発注は呼値グリッド上でしか置けない。損切=ライン直上のティック
-                        # (ceil)にして早すぎる損切りを回避(例:損切ライン2,232→注文2,235)。
-                        # 利確も一つ上で判定(ceil)。BT側(5分約定判定)と同一グリッドで一致。
-                        _lss_stop   = _c2t(order_p + _atr * _LSS_SM)   # 損切=上(価格上昇で損切)
-                        _lss_target = _c2t(order_p - _atr * _LSS_TM)   # 目標=下(価格下落で利確)
-                    _lss_limit = _r2t(order_p * (1.0 - 0.03))          # 発動後の指値下限(-3%)
+                        _lss_stop   = _c2t(_close_ref + _atr * _LSS_SM)   # 損切=前日終値+atr*sm(上)
+                        _lss_target = _c2t(_close_ref - _atr * _LSS_TM)   # 目標=前日終値-atr*tm(下)
+                    _lss_limit = _r2t(order_p * (1.0 - 0.03))          # 発動後の指値下限(トリガー基準-3%)
                     _lss_hold  = "同日"                          # 同日決済(max_hold=0)
                     try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
                         _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
@@ -9250,21 +9250,18 @@ function switchTbd(id, tab) {{
         osp = t.get("order_stop", 0)
         otp = t.get("order_target", 0)
         # lss は実発注の呼値グリッドに合わせて表示(=BTの5分約定判定と同一)。
-        # トリガー=前日終値-1ティック(逆指値売りは現在値以上だと即約定で弾かれる)、
-        # 損切=トリガー+atr*sm をライン直上ティック(ceil,早すぎる損切り回避)、利確=同ceil。
-        # atr幅は engine生値から復元(osp-olp=atr*sm, olp-otp=atr*tm)。
-        # 例:応用地質 損切2,835(生)→2,830 / シーイーシー損切2,232(生)→2,235。
+        # トリガーだけ前日終値-1ティック(逆指値売りは現在値以上だと即約定で弾かれる)、
+        # 損切/利確のリスク幅は前日終値基準(§18検証モデル)でライン直上ティック(ceil)。
+        # -1tickは約定用の小細工なので損切りには反映しない(不必要にタイトにしない)。
+        # 例:応用地質 トリガー2,825 / 損切2,835 / 利確2,785。
         if _LSS_ORDER_MODE and olp > 0 and osp > 0 and otp > 0:
             from backtest_limit_entry import (round_to_tick as _r2t2,
                                               ceil_to_tick as _c2t2,
                                               tick_size as _tsz2)
             _base2 = _r2t2(olp)                        # 前日終値(呼値)
-            _trig2 = _r2t2(_base2 - _tsz2(_base2))     # トリガー=前日終値-1tick
-            _atr_sm2 = osp - olp                       # 損切幅(上)
-            _atr_tm2 = olp - otp                       # 利確幅(下)
-            olp = float(_trig2)
-            osp = float(_c2t2(_trig2 + _atr_sm2))
-            otp = float(_c2t2(_trig2 - _atr_tm2))
+            olp = float(_r2t2(_base2 - _tsz2(_base2)))  # トリガー=前日終値-1tick(約定用のみ)
+            osp = float(_c2t2(osp))                    # 損切=前日終値+atr*sm(ceil)
+            otp = float(_c2t2(otp))                    # 利確=前日終値-atr*tm(ceil)
         if olp > 0 and osp > 0 and otp > 0:
             sp_pct   = (osp - olp) / olp * 100
             tp_pct   = (otp - olp) / olp * 100

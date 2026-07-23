@@ -1176,20 +1176,17 @@ def run_limit_backtest(
                     continue
                 _db = _db.iloc[_INTRADAY_5M_ENTRY_DELAY:]
             # 実発注の価格グリッドに約定判定を一致させる。
-            #  (1) 逆指値売りトリガーは「前日終値-1ティック」に置く(現在値以上だと即約定で
-            #      弾かれる, kabu Code 100217)。engineの生値 _lp=前日終値 には -1tick が
-            #      入っていないため、ここで引いて実注文に合わせる。
-            #  (2) 損切=トリガー+atr*sm / 利確=トリガー-atr*tm を、ライン直上ティック(ceil)に。
-            #      atr幅は engine生値から復元(_osp-_lp=atr*sm, _lp-_otp=atr*tm)。
-            # これで engine の損切/利確が実注文と1ティックもズレない(例:応用地質 損切2,835→
-            # 実注文2,830に修正され、寄り高値2,830で正しく損切り)。
-            _base = round_to_tick(_lp)                       # 前日終値(呼値)
-            _trig = round_to_tick(_base - tick_size(_base))  # トリガー=前日終値-1tick
-            _atr_sm = _osp - _lp                             # atr*sm (損切幅, 上)
-            _atr_tm = _lp - _otp                             # atr*tm (利確幅, 下)
-            _lp = float(_trig)
-            _stop_p = float(ceil_to_tick(_trig + _atr_sm))
-            _tgt_p = float(ceil_to_tick(_trig - _atr_tm))
+            #  (1) 逆指値売りトリガーだけ「前日終値-1ティック」に置く(現在値以上だと即約定で
+            #      弾かれる, kabu Code 100217)。engineの生値 _lp=前日終値 に -1tick を適用。
+            #  (2) 損切/利確のリスク幅は「前日終値」を基準に測る(=§18でOOS検証したモデル)。
+            #      -1tick は約定用の小細工でリスク幅ではないため、損切りに反映させない。
+            #      損切=前日終値+atr*sm / 利確=前日終値-atr*tm を ライン直上ティック(ceil)に。
+            # これで損切/利確は検証済みモデルと一致し、寄りヒゲで刈られにくい(例:応用地質
+            # 損切2,835で寄り高値2,830はタイムカット)。トリガーのみ実注文2,825に一致。
+            _base = round_to_tick(_lp)                             # 前日終値(呼値)
+            _lp = float(round_to_tick(_base - tick_size(_base)))   # トリガー=前日終値-1tick(約定用のみ)
+            _stop_p = float(ceil_to_tick(max(_osp, _otp)))         # 損切=前日終値+atr*sm(ceil)
+            _tgt_p = float(ceil_to_tick(min(_osp, _otp)))          # 利確=前日終値-atr*tm(ceil)
             _qty = _t.get("qty", FIXED_QTY)
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
