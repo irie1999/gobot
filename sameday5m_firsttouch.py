@@ -39,11 +39,11 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
       no_stop        : True=損切り(stop)を一切見ない。利確だけ判定し、当たらなければ
                        引け決済(=同日lssで『損切りを日足終値=引けに委ねる』運用に相当)。
                        損失が引けまで走るので通常は不利側の検証用。
-      include_entry_bar: True=約定バー(ei)からも損切り/利確をチェックする。**寄り約定
-                       (ギャップで始値約定)** のとき使う。この場合、建玉は寄りの瞬間から
-                       開いているので、約定バー内の高値/安値もヒット対象(約定前の跳ねを
-                       スキップする必要がない)。False(既定)=ei+1から(ザラ場約定=約定前の
-                       跳ねをスキップ)。呼び出し側が『約定価格==始値(ギャップ約定)』かで切替。
+      include_entry_bar: 【v13(2026-07-24)以降は _start に不使用・後方互換のため残置】
+                       旧: True=約定バー(ei)から / False=ei+1から損切り・利確を判定。
+                       現: 同バー損切りの取りこぼしを無くすため、ギャップ約定/ザラ場約定に
+                       関わらず常に約定バー(ei)から判定する(悲観=損切り優先)。この引数の
+                       値に関わらず _start=ei。
     Returns: (exit_price, reason, entry_ts, exit_ts)
       reason ∈ {"target","stop","close","no_entry","no_5m"}
     """
@@ -82,10 +82,19 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
         include_entry_bar = True
 
     ent_ts = times[ei]
-    # 2) first-touch で決済。ザラ場約定は約定バーの"次バー以降"(約定前ヒットの先読み回避)。
-    #    寄り約定(ギャップ)は建玉が寄りから開いているので約定バー(ei)から見る。
-    #    損切り(上)・利確(下)は独立に close/タッチを選べる。損切り優先は維持。
-    _start = ei if include_entry_bar else ei + 1
+    # 2) first-touch で決済。
+    #    【同バー損切り(2026-07-24, v13): 悲観=損切り優先】
+    #    5分足はOHLCしか無く、約定バー内で高値(損切)と安値(約定/利確)のどちらが先かは
+    #    復元できない。約定した"同じ足"の中で損切りラインに触れるケース(例:4092は約定
+    #    5,710→同じ5分足内で5,770へ跳ねて損切り。旧ロジックは無視し後の目標達成+41,901円
+    #    と誤計上)を取りこぼさないよう、約定バー(ei)からも損切り/利確を判定する(常に
+    #    _start=ei)。区別できない同バーは損切り優先(=下の loop が stop を先に見る)。
+    #    ・副作用: 約定前の跳ね(価格が上から降りてきた寄り天)を損切りに誤計上するケースは
+    #      出るが受容。実運用は lss_exit_watcher が約定後にOCO損切りを実際に置くため、同バーで
+    #      損切りへ触れれば刈られるのが現実に近い(§18.8 楽観バイアス除去とも整合)。
+    #    ・利確(lss=下/mirror=上)は約定後にしか触れないので約定バーから見ても先読みでない。
+    #      損切り側のみが悲観的仮定。include_entry_bar は後方互換のため残すが _start には不使用。
+    _start = ei
     for j in range(_start, n):
         if not no_stop:               # no_stop=True なら損切りを見ない(引けまで持つ)
             stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
