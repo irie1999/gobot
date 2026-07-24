@@ -25,4 +25,10 @@ REM --all-dates is ON by default here: orders are placed the EVENING BEFORE, so
 REM their CSV is dated yesterday. Without --all-dates the watcher would pick up
 REM nothing. If you ever place orders same-morning, that still works (today is a
 REM subset of all-dates). Extra options pass through, e.g. .\watch --poll 3
-python lss_exit_watcher.py --execute --prod --all-dates %*
+REM
+REM --stop-delay-bars 1 (delay1) is ON by default: during the entry 5min bar the
+REM watcher places NO stop, then arms the stop from the next grid (09:05/09:10...).
+REM Avoids getting wicked out by the opening bounce on the tight 0.1ATR stop
+REM (BT30+ realistic: win 48->54%, PF 1.63->1.95). Target/close stay active during
+REM the no-stop window. To disable for one run: .\watch --stop-delay-bars 0
+python lss_exit_watcher.py --execute --prod --all-dates --stop-delay-bars 1 %*

@@ -35,6 +35,12 @@ set "LSS_ENTRY_DELAY_BARS="
 set "LSS_BUDGET_MIN_BT="
 set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
+REM --- delay1 ON by default: engine skips the stop on the entry 5min bar and arms it
+REM     from the next grid (matches watch.bat --stop-delay-bars 1). Report BT/ranking
+REM     reflect delay1. NOTE: the P&L tab under delay1 is OPTIMISTIC (engine fills the
+REM     stop at the line); the realistic verdict is compare_lss_rules.py net-real.
+REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
+set "LSS_STOP_DELAY_BARS=1"
 REM --- rebuild the merged lss proposal (union of the 3 fresh bases) ---
 python merge_lss_proposals.py lss_proposal_2025-12.py lss_proposal_2026-03.py lss_proposal_2026-06.py --out lss_proposal_merged3.py
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_merged3.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
