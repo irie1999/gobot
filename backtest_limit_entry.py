@@ -664,11 +664,6 @@ _INTRADAY_5M_ENTRY_DELAY: int = 0      # 寄りから何本(=N×5分)待って�
                                        # 寄り値は遅延後の先頭バー始値を使う。
 _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
                                        # ときは呼び出し側で増やす(既定400=ライブ用)
-# lss損切り遅延: 約定バーから何本(=N×5分)損切りを効かせないか。0(既定)=現行。
-# 1(delay1)=約定した5分足の中は損切りせず次の足から(寄り1本目のヒゲ刈り回避。lss検証で
-# PF 0.93→1.43)。環境変数 LSS_STOP_DELAY_BARS で切替可(実運用は寄り5分後に逆指値損切りを
-# 設置する運用に対応)。mirror(指値空売り)には適用しない=lss(stop_sell)のみ。
-_LSS_STOP_DELAY_BARS: int = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
 
 
@@ -1236,14 +1231,11 @@ def run_limit_backtest(
             # 建玉は寄りから開いているので、約定バー内の損切り/利確もヒット対象にする。
             _gap_entry = abs(_entry_fill - _lp) > 1e-9
             # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
-            # 損切り遅延は lss(下落約定=stop_sell)のみ。mirror(is_rise)には適用しない。
-            _sd_bars = _LSS_STOP_DELAY_BARS if not _is_rise else 0
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
                                                on_close=_INTRADAY_5M_ON_CLOSE,
                                                include_entry_bar=_gap_entry,
                                                day_low=_day_low, day_high=_day_high,
-                                               day_close=_day_close,
-                                               stop_delay_bars=_sd_bars)
+                                               day_close=_day_close)
             if _rsn == "no_5m":
                 continue   # データ欠 → 不約定扱いにしない
             if _rsn == "no_entry":

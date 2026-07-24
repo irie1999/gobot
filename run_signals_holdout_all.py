@@ -1205,11 +1205,6 @@ except Exception:
 #        扱いに(旧は約定バーを飛ばし後の目標達成を誤計上。例:4092は約定5,710→同足5,770で損切り
 #        なのに+41,901円と計上)。short_exit_5m を常に約定バー(ei)から判定(2026-07-24)
 _BT_LOGIC_VER = "v13"
-# lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
-# 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
-_LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
-if _LSS_STOP_DELAY > 0:
-    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。

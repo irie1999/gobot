@@ -13,7 +13,7 @@ import pandas as pd
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
                   no_target=False, no_stop=False, include_entry_bar=False,
-                  day_low=None, day_high=None, day_close=None, stop_delay_bars=0):
+                  day_low=None, day_high=None, day_close=None):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -44,9 +44,6 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                        現: 同バー損切りの取りこぼしを無くすため、ギャップ約定/ザラ場約定に
                        関わらず常に約定バー(ei)から判定する(悲観=損切り優先)。この引数の
                        値に関わらず _start=ei。
-      stop_delay_bars: 損切りを約定バーから何本(=何×5分)遅らせるか。0(既定)=約定バーから
-                       損切り有効(現行)。1(delay1)=約定した5分足の中は損切りせず、次の足から
-                       損切り(寄り1本目のヒゲ刈り回避)。利確・引けは常に約定バーから。
     Returns: (exit_price, reason, entry_ts, exit_ts)
       reason ∈ {"target","stop","close","no_entry","no_5m"}
     """
@@ -97,15 +94,9 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     #      損切りへ触れれば刈られるのが現実に近い(§18.8 楽観バイアス除去とも整合)。
     #    ・利確(lss=下/mirror=上)は約定後にしか触れないので約定バーから見ても先読みでない。
     #      損切り側のみが悲観的仮定。include_entry_bar は後方互換のため残すが _start には不使用。
-    #    【損切り遅延(2026-07-24): stop_delay_bars】約定バーから K本(=K×5分)は損切りを
-    #    効かせない。K=1(delay1)なら「約定した5分足の中は損切りせず、次の足から損切り」。
-    #    寄り1本目の一瞬のヒゲで刈られるのを回避する(lss検証で PF 0.93→1.43 に改善)。
-    #    利確・引けは約定バーから通常どおり。実運用は「約定→その5分足が閉じたら逆指値損切りを
-    #    設置」に対応(lss_exit_watcher)。K=0(既定)なら現行と完全一致。
     _start = ei
-    _stop_start = ei + max(0, int(stop_delay_bars))   # 損切りが効き始めるバー(遅延中は損切り無効)
     for j in range(_start, n):
-        if not no_stop and j >= _stop_start:  # no_stop=True or 遅延中(j<_stop_start)は損切りを見ない
+        if not no_stop:               # no_stop=True なら損切りを見ない(引けまで持つ)
             stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
             if stop_hit:              # 上抜け=損切(同時タッチも優先)
                 return (float(closes[j]) if soc else stop_p), "stop", ent_ts, times[j]
