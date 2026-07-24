@@ -74,6 +74,8 @@ RULES = [
     {"name": "base(v13 sm0.1)",       "stop_off": 0, "sm2": None, "gap_skip": None},
     {"name": "delay1(寄1本目stopなし)", "stop_off": 1, "sm2": None, "gap_skip": None},
     {"name": "delay2(寄2本目からstop)", "stop_off": 2, "sm2": None, "gap_skip": None},
+    {"name": "delay3(寄3本目=15分後)",   "stop_off": 3, "sm2": None, "gap_skip": None},
+    {"name": "delay4(寄4本目=20分後)",   "stop_off": 4, "sm2": None, "gap_skip": None},
     {"name": "gap<-1.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.010},
     {"name": "gap<-1.5%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.015},
     {"name": "gap<-2.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.020},
