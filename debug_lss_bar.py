@@ -23,6 +23,9 @@ ap.add_argument("--stop", type=float, required=True, help="損切り(上)")
 ap.add_argument("--target", type=float, required=True, help="目標(下)")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--days", type=int, default=10)
+ap.add_argument("--stop-delay-bars", type=int, default=0,
+                help="損切り遅延(delay1)。約定バーからN本は損切り無効(無保護窓)、次の足から損切り有効。"
+                     "1=delay1(寄り1本目スキップ)。運用(.\\watch)と揃えて確認するなら 1")
 args = ap.parse_args()
 
 from daytrade_data import load_intraday, split_by_day
@@ -66,8 +69,15 @@ for j in range(len(lows)):
         ei = j
         break
 
+# 損切りが効き始めるバー(delay1なら ei+1)。ei未満/no_entryのときは後段で扱う。
+_arm = (ei + args.stop_delay_bars) if ei is not None else None
+
 print(f"\n=== {args.symbol} {args.date} lss(逆指値売り) ===")
 print(f"トリガー(約定)={trig:,.0f} / 損切り(上)={stop:,.0f} / 目標(下)={tgt:,.0f}")
+if args.stop_delay_bars > 0 and _arm is not None:
+    _arm_ts = db.index[_arm].strftime("%H:%M") if _arm < len(db) and hasattr(db.index[_arm], "strftime") else "-"
+    print(f"損切り遅延: delay{args.stop_delay_bars} → 約定バー#{ei}の間は損切り無効、"
+          f"#{_arm}({_arm_ts})から損切り有効")
 print(f"5分足 {len(db)}本\n")
 print(f"{'#':>3} {'時刻':>8} {'始値':>8} {'高値':>8} {'安値':>8} {'終値':>8}  印")
 for j in range(len(db)):
@@ -76,9 +86,12 @@ for j in range(len(db)):
     mark = []
     if ei is not None and j == ei:
         mark.append("◀約定")
-    if ei is not None and j > ei and highs[j] >= stop:
-        mark.append("↑損切ライン到達")
-    if ei is not None and j > ei and lows[j] <= tgt:
+    # 損切りは _arm 以降だけ有効。無保護窓(ei<=j<_arm)で高値>=損切りは"発火せず"を明示。
+    if ei is not None and _arm is not None and j >= _arm and highs[j] >= stop:
+        mark.append("↑損切ライン到達(損切り発火)")
+    elif ei is not None and ei <= j < (_arm or ei) and highs[j] >= stop:
+        mark.append("↑損切ライン到達(無保護=発火せず)")
+    if ei is not None and j >= ei and lows[j] <= tgt:
         mark.append("↓目標到達")
     o = float(db["open"].iloc[j]); h = highs[j]; l = lows[j]; c = float(db["close"].iloc[j])
     print(f"{j:>3} {ts:>8} {o:>8,.0f} {h:>8,.0f} {l:>8,.0f} {c:>8,.0f}  {' '.join(mark)}")
@@ -138,8 +151,9 @@ _gap = (ef is not None) and (abs(ef - trig) > 1e-9)
 print(f"寄り約定(ギャップ)= {_gap}  (True=約定バーから損切りチェック / False=次バーから)")
 xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False, include_entry_bar=_gap,
                                        day_low=_day_low, day_high=_day_high,
-                                       day_close=_day_close)
-print(f"\n▼ short_exit_5m 判定")
+                                       day_close=_day_close,
+                                       stop_delay_bars=args.stop_delay_bars)
+print(f"\n▼ short_exit_5m 判定 (stop_delay_bars={args.stop_delay_bars})")
 print(f"  約定価格(現実モデル)= {ef if ef is not None else 'なし(ギャップ過大)'}")
 print(f"  決済理由 = {reason}  決済価格 = {xp}")
 if x_ts is not None:
@@ -148,8 +162,15 @@ if ef is not None:
     pnl = short_pnl(ef, xp, reason, 100, 0.001, 0.0)
     print(f"  100株損益(手数料込) = {pnl:+,.0f}円")
 
-print("\n読み方(v13 悲観=損切り優先):")
-print("  ・『◀約定』のバーを含め、それ以降で高値>=損切に触れれば損切り(同じ5分足内でもOK)。")
-print("  ・約定バー内で高値と安値の順番は5分足からは復元できないため、同バーで損切りに")
-print("    触れていれば損切り優先(悲観)で計上する = 実運用のOCO損切りに近い。")
-print("  ・利確(下)は約定後にしか触れないので、約定バーから見ても先読みにはならない。")
+if args.stop_delay_bars > 0:
+    print(f"\n読み方(delay{args.stop_delay_bars} 運用=.\\watch と一致):")
+    print(f"  ・約定バー#{ei}〜#{(_arm or ei)-1} は『無保護窓』= 高値>=損切に触れても損切りにならない。")
+    print(f"  ・#{_arm}以降で高値>=損切に触れれば必ず損切り(発火)。利確(下)は約定バーから有効。")
+    print("  ・→ 『武装後(次足以降)に損切りラインへ触れたら必ず損切り』が保証される(先着=損切り優先)。")
+    print("     無保護窓で触れて戻ったものだけが利確/引けに残る(=delay1の狙い)。")
+else:
+    print("\n読み方(v13 悲観=損切り優先):")
+    print("  ・『◀約定』のバーを含め、それ以降で高値>=損切に触れれば損切り(同じ5分足内でもOK)。")
+    print("  ・約定バー内で高値と安値の順番は5分足からは復元できないため、同バーで損切りに")
+    print("    触れていれば損切り優先(悲観)で計上する = 実運用のOCO損切りに近い。")
+    print("  ・利確(下)は約定後にしか触れないので、約定バーから見ても先読みにはならない。")
