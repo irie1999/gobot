@@ -48,8 +48,12 @@ ap.add_argument("--bt-min", type=float, default=0.0,
 ap.add_argument("--by-month", action="store_true", help="月別内訳も出力")
 ap.add_argument("--audit", type=str, default="",
                 help="指定ルール(例: delay1)の全トレードを1件ずつCSVに監査出力。各トレードの "
-                     "楽観(=レポート値)/現実/保守のpnlと理由を並べ、『利確が現実でもプラスか』"
-                     "『損切りが現実でどれだけ悪化するか』を全件確認できる。母集団は --bt-min に従う")
+                     "楽観(=レポート値)/現実/保守のpnlと理由・MAE(最大逆行)を並べ、『利確が現実でも"
+                     "プラスか』『損切りが現実でどれだけ悪化するか』『利確に必要な含み損の深さ』を"
+                     "全件確認できる。母集団は --bt-min に従う")
+ap.add_argument("--stop-slip", type=float, default=0.005,
+                help="保守モデルの損切りスリッページ(既定0.5%%)。実スリッページが大きい想定なら "
+                     "0.01(1%%)/0.02(2%%)に上げてストレス。② テストより損切りが大きくなる懸念の検証用")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -87,6 +91,10 @@ RULES = [
     {"name": "sm0.2(base)",            "stop_off": 0, "sm2": 0.2,  "gap_skip": None},
     {"name": "sm0.3(base)",            "stop_off": 0, "sm2": 0.3,  "gap_skip": None},
     {"name": "delay1+sm0.2",           "stop_off": 1, "sm2": 0.2,  "gap_skip": None},
+    # 保険のハード損切り: 約定と同時に広い損切り(entry+H%)を置く。タイト損切りは delay1(次足)。
+    # ①含み損に耐えきれず切る問題を機械化(H%で必ず止まる) & ②走り上がりの青天井損失をキャップ。
+    {"name": "delay1+hard3%",          "stop_off": 1, "sm2": None, "gap_skip": None, "hard": 0.03},
+    {"name": "delay1+hard5%",          "stop_off": 1, "sm2": None, "gap_skip": None, "hard": 0.05},
 ]
 
 # --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
@@ -158,34 +166,41 @@ def _bt_score(trades) -> int:
     return _calc_bt(pr)[0]
 
 
-_STOP_SLIP = 0.005   # 保守モデルの追加スリッページ(0.5%)
+_STOP_SLIP = args.stop_slip   # 保守モデルの損切りスリッページ(既定0.5%、--stop-slip で可変)
 
 
-def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close):
-    """約定バー ei から利確、stop_from(>=ei) から損切りを first-touch。損切り優先。
-    損切り発火時の買い戻し価格を3通り返す(live下限測定用):
-      line = stop ちょうど(楽観)。
-      real = 現実。同バー損切り(j==ei)は stop で約定(始値/高値は約定前の値を含むため不可)。
-             次足以降(j>ei)は max(stop, その足の始値)=窓を空けて超えたら始値約定(delay1の
-             無保護窓リスクを捕捉)。逆指値はライン越えの"瞬間"に成行約定するので高値は使わない。
-      slip = real + 0.5%スリッページ(保守)。
-    利確・引けは3通りとも同値。戻り: (reason, ex_line, ex_real, ex_slip)。"""
+def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close,
+          hard_stop_p=None):
+    """約定バー ei から利確、stop_from(>=ei) からタイト損切りを first-touch。損切り優先。
+    hard_stop_p(保険の広い損切り)を渡すと、約定と同時に(ei から)効く=無保護窓でも青天井を防ぐ。
+    価格上昇時は tight(低い) が先に当たるので、tight未武装(遅延中)のときだけ hard に到達する。
+    損切り発火時の買い戻し3通り(line=楽観/real=窓埋め/slip=+スリッページ)。
+    戻り: (reason, ex_line, ex_real, ex_slip, exit_idx)。"""
     n = len(highs)
+
+    def _stop_fills(px, j):
+        line = float(px)
+        real = line if j == ei else max(line, float(opens[j]))   # 次足以降は窓埋め(始値)
+        return line, real, real * (1.0 + _STOP_SLIP)
+
     for j in range(ei, n):
+        # タイト損切り(低い): 武装済み(j>=stop_from)なら上昇時に先に当たる
         if j >= stop_from:
             sh = closes[j] >= stop_p if _ON_CLOSE else highs[j] >= stop_p
             if sh:
-                ex_line = float(closes[j]) if _ON_CLOSE else stop_p
-                # 同バーは約定前価格の混入を避け stop で約定。次足以降は窓埋め(始値)を考慮。
-                ex_real = ex_line if j == ei else max(ex_line, float(opens[j]))
-                ex_slip = ex_real * (1.0 + _STOP_SLIP)
-                return "stop", ex_line, ex_real, ex_slip
+                px = float(closes[j]) if _ON_CLOSE else stop_p
+                ln, rl, sl = _stop_fills(px, j)
+                return "stop", ln, rl, sl, j
+        # 保険のハード損切り(広い): ei から常時。tight未武装(無保護窓)で価格が hard に達したら発火
+        if hard_stop_p is not None and highs[j] >= hard_stop_p:
+            ln, rl, sl = _stop_fills(hard_stop_p, j)
+            return "hardstop", ln, rl, sl, j
         th = closes[j] <= target_p if _ON_CLOSE else lows[j] <= target_p
         if th:
             tp = float(closes[j]) if _ON_CLOSE else target_p
-            return "target", tp, tp, tp
+            return "target", tp, tp, tp, j
     cx = day_close if (day_close and day_close > 0) else float(closes[-1])
-    return "close", cx, cx, cx
+    return "close", cx, cx, cx, n - 1
 
 
 def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
@@ -277,7 +292,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 else:
                     continue
             # BTスコア用: base(現行v13, stopちょうど=engine楽観fill)の pnl を365日ぶん記録
-            rb, exl, _, _ = _exit(opens, highs, lows, closes, ei, ei, stop_p, target_p, d_close)
+            rb, exl, _, _, _ = _exit(opens, highs, lows, closes, ei, ei, stop_p, target_p, d_close)
             bt_trades.append((fd, short_pnl(entry_fill, exl, rb, QTY, FEE_ONE_WAY, 0.0)))
             # ルール比較は --days 窓のトレードだけ
             if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=args.days):
@@ -291,8 +306,10 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 else:
                     sp = stop_p
                 stop_from = ei + rule["stop_off"]
-                reason, ex_line, ex_real, ex_slip = _exit(
-                    opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close)
+                hard_p = float(entry_fill * (1.0 + rule["hard"])) if rule.get("hard") else None
+                reason, ex_line, ex_real, ex_slip, exit_idx = _exit(
+                    opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close,
+                    hard_stop_p=hard_p)
                 pnl_line = short_pnl(entry_fill, ex_line, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_real = short_pnl(entry_fill, ex_real, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_slip = short_pnl(entry_fill, ex_slip, reason, QTY, FEE_ONE_WAY, 0.0)
@@ -301,7 +318,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 a["pnl_line"] += pnl_line
                 a["pnl_real"] += pnl_real
                 a["pnl_slip"] += pnl_slip
-                a[reason if reason in ("stop", "close") else "tgt"] += 1
+                # hardstop も損失なので stop に計上(利確=tgt / 引け=close / それ以外=stop)
+                a["tgt" if reason == "target" else ("close" if reason == "close" else "stop")] += 1
                 if pnl_real > 0:
                     a["win"] += 1
                     a["gp"] += pnl_real
@@ -311,11 +329,17 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     local_mon[(rule["name"], mon_key)] = \
                         local_mon.get((rule["name"], mon_key), 0.0) + pnl_real
                 if rule["name"] == _AUDIT_NAME:
-                    _ja = {"stop": "損切り", "target": "利確", "close": "引け"}.get(reason, reason)
+                    _ja = {"stop": "損切り", "target": "利確", "close": "引け",
+                           "hardstop": "ハード損切り"}.get(reason, reason)
+                    # MAE=最大逆行(約定〜決済までに価格がショートに逆行して付けた最大の含み損%)。
+                    # 「この利確/引けを取るのに、どれだけの含み損を我慢する必要があったか」の指標。
+                    _mae_hi = float(highs[ei:exit_idx + 1].max()) if exit_idx >= ei else float(highs[ei])
+                    _mae_pct = (_mae_hi - entry_fill) / entry_fill * 100 if entry_fill > 0 else 0.0
                     local_audit.append({
                         "date": str(fd), "sym": sym, "name": name, "strat": strat,
                         "reason": _ja, "entry": round(entry_fill, 1),
                         "stop": round(sp, 1), "target": round(target_p, 1),
+                        "MAE最大逆行%": round(_mae_pct, 1),   # 我慢が必要だった含み損の深さ
                         "pnl_report_楽観": round(pnl_line, 0),   # レポート(.\daily)の表示値
                         "pnl_現実": round(pnl_real, 0),
                         "pnl_保守": round(pnl_slip, 0),
@@ -440,24 +464,32 @@ def main():
         apath = Path(f"lss_audit_{_short}_{date_s}.csv")
         adf.to_csv(apath, index=False, encoding="utf-8-sig")
         # 監査サマリー: 利確が現実でもプラスか / 損切りが現実でどれだけ悪化したか
-        wins = adf[adf["reason"] == "利確"]
-        stops = adf[adf["reason"] == "損切り"]
-        win_still_pos = int((wins["pnl_現実"] > 0).sum())
-        win_flip = int((wins["pnl_現実"] <= 0).sum())
+        wins = adf[adf["pnl_現実"] > 0]   # 現実でプラスのトレード(利確+勝ち引け)
+        stops = adf[adf["reason"].isin(["損切り", "ハード損切り"])]
+        tgt = adf[adf["reason"] == "利確"]
+        tgt_flip = int((tgt["pnl_現実"] <= 0).sum())   # 利確なのに現実マイナス
         print("\n" + "=" * 72)
         print(f"【監査】ルール『{_AUDIT_NAME}』 全{len(adf)}トレード (母集団=BT{args.bt_min:.0f}以上)")
         print("=" * 72)
-        print(f"  利確: {len(wins)}件 → 現実でもプラス {win_still_pos}件 / "
-              f"マイナスに転落 {win_flip}件")
-        print(f"    → 利確が現実で損切りに転落する件数 = {win_flip} "
-              f"({'想定どおり0(判定は楽観=現実)' if win_flip == 0 else '要確認'})")
+        print(f"  利確判定: {len(tgt)}件 → 現実で損切りに転落 {tgt_flip}件 "
+              f"({'想定どおり0(判定は楽観=現実)' if tgt_flip == 0 else '要確認'})")
         if len(stops):
-            _avg_worse = stops["現実−楽観"].mean()
-            print(f"  損切り: {len(stops)}件 → 現実の悪化 平均 {_avg_worse:+,.0f}円/件 "
+            print(f"  損切り: {len(stops)}件 → 現実の悪化 平均 {stops['現実−楽観'].mean():+,.0f}円/件 "
                   f"(合計 {stops['現実−楽観'].sum():+,.0f}円)")
-        print(f"  合計pnl: レポート(楽観) {adf['pnl_report_楽観'].sum():+,.0f}円 / "
+        # ① 含み損に耐えきれず切る問題の可視化: 勝ちトレードが我慢した含み損の深さ(MAE)
+        if len(wins) and "MAE最大逆行%" in adf.columns:
+            _m = wins["MAE最大逆行%"]
+            print("\n  ── 勝ちトレードが利確までに我慢した含み損(MAE=最大逆行%) ──")
+            print(f"     中央値 {_m.median():.1f}% / 平均 {_m.mean():.1f}% / 最大 {_m.max():.1f}%")
+            for thr in (2, 3, 5):
+                _cut = int((_m >= thr).sum())
+                print(f"     含み損 {thr}%以上を耐えた勝ち = {_cut}件 "
+                      f"({_cut/len(wins)*100:.0f}%) ← {thr}%で切っていたら失っていた利益")
+            print("     → 『無保護窓の含み損に耐えきれず切る』と、これらの勝ちを損切りに変えてしまう。")
+            print("       保険のハード損切り(delay1+hard3%/5% の行)で、切る水準を機械化して比較可能。")
+        print(f"\n  合計pnl: レポート(楽観) {adf['pnl_report_楽観'].sum():+,.0f}円 / "
               f"現実 {adf['pnl_現実'].sum():+,.0f}円 / 保守 {adf['pnl_保守'].sum():+,.0f}円")
-        print(f"\n[出力] {apath}  (現実で悪い順。'現実−楽観'列がマイナス=レポートより実際は悪い)")
+        print(f"\n[出力] {apath}  (現実で悪い順。MAE列=我慢が必要だった含み損 / 現実−楽観=レポートとの差)")
 
 
 if __name__ == "__main__":
