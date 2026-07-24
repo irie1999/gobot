@@ -123,24 +123,35 @@ def _prices(order_limit, order_stop, order_target):
     return trigger, stop_p, target_p
 
 
-def _exit(highs, lows, closes, ei, stop_from, stop_p, target_p, day_close):
+def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close):
     """約定バー ei から利確、stop_from(>=ei) から損切りを first-touch。損切り優先。
-    利確は約定バーから(下抜けは約定後にしか起きない)。引けは day_close。"""
+    損切り発火時は3通りの買い戻し価格を返す(live悲観の下限測定用):
+      line = stop ちょうど(楽観・現状) / open = max(stop, その足の始値=窓埋め不利) /
+      high = その足の高値(最悪=5分足の中で最も悲観)。
+    利確・引けは3通りとも同値。戻り: (reason, ex_line, ex_open, ex_high)。"""
     n = len(highs)
     for j in range(ei, n):
         if j >= stop_from:
             sh = closes[j] >= stop_p if _ON_CLOSE else highs[j] >= stop_p
             if sh:
-                return "stop", (float(closes[j]) if _ON_CLOSE else stop_p)
+                ex_line = float(closes[j]) if _ON_CLOSE else stop_p
+                ex_open = max(ex_line, float(opens[j]))   # 窓を空けて超えたら始値約定
+                ex_high = float(highs[j])                 # 最悪=その足の高値で買い戻し
+                return "stop", ex_line, ex_open, ex_high
         th = closes[j] <= target_p if _ON_CLOSE else lows[j] <= target_p
         if th:
-            return "target", (float(closes[j]) if _ON_CLOSE else target_p)
-    return "close", (day_close if (day_close and day_close > 0) else float(closes[-1]))
+            tp = float(closes[j]) if _ON_CLOSE else target_p
+            return "target", tp, tp, tp
+    cx = day_close if (day_close and day_close > 0) else float(closes[-1])
+    return "close", cx, cx, cx
 
 
 def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
     """1銘柄・全戦略のlssトレードを各ルールで再計算し、ルール別の集計partialを返す。"""
-    agg = {r["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0, "pnl": 0.0,
+    # pnl は損切り約定モデル別に3通り集計: line(楽観)/open(現実・窓埋め)/high(最悪)。
+    # 勝率/PF は open(現実)ベースで表示。
+    agg = {r["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                       "pnl_line": 0.0, "pnl_open": 0.0, "pnl_high": 0.0,
                        "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon = {}  # (rule,month)->pnl (by-month用)
     try:
@@ -197,6 +208,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 continue
             gap_pct = (entry_fill - trigger) / trigger if trigger > 0 else 0.0
             atr = (osp - olp) / args.sm if args.sm > 0 else 0.0
+            opens = db["open"].to_numpy(dtype=float)
             highs = db["high"].to_numpy(dtype=float)
             lows = db["low"].to_numpy(dtype=float)
             closes = db["close"].to_numpy(dtype=float)
@@ -222,12 +234,18 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 else:
                     sp = stop_p
                 stop_from = ei + rule["stop_off"]
-                reason, xp = _exit(highs, lows, closes, ei, stop_from, sp, target_p, d_close)
-                pnl = short_pnl(entry_fill, xp, reason, QTY, FEE_ONE_WAY, args.slip)
+                reason, ex_line, ex_open, ex_high = _exit(
+                    opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close)
+                pnl_line = short_pnl(entry_fill, ex_line, reason, QTY, FEE_ONE_WAY, args.slip)
+                pnl_open = short_pnl(entry_fill, ex_open, reason, QTY, FEE_ONE_WAY, args.slip)
+                pnl_high = short_pnl(entry_fill, ex_high, reason, QTY, FEE_ONE_WAY, args.slip)
                 a = agg[rule["name"]]
                 a["n"] += 1
-                a["pnl"] += pnl
+                a["pnl_line"] += pnl_line
+                a["pnl_open"] += pnl_open
+                a["pnl_high"] += pnl_high
                 a[reason if reason in ("stop", "close") else "tgt"] += 1
+                pnl = pnl_open   # 勝率/PF は現実(open)ベース
                 if pnl > 0:
                     a["win"] += 1
                     a["gp"] += pnl
@@ -262,7 +280,8 @@ def main():
     print(f"[比較] {len(syms)}銘柄 / 遡及{args.days}日 / 価格{args.min_price:.0f}〜{args.max_price:.0f}円 "
           f"/ {len(RULES)}ルール")
 
-    total = {r["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0, "pnl": 0.0,
+    total = {r["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                         "pnl_line": 0.0, "pnl_open": 0.0, "pnl_high": 0.0,
                          "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon_total: dict = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -277,32 +296,35 @@ def main():
                 continue
             for name, a in res["agg"].items():
                 t = total[name]
-                for k in ("n", "win", "gp", "gl", "pnl", "tgt", "stop", "close"):
+                for k in ("n", "win", "gp", "gl", "pnl_line", "pnl_open", "pnl_high",
+                          "tgt", "stop", "close"):
                     t[k] += a[k]
             for k, v in res["mon"].items():
                 mon_total[k] = mon_total.get(k, 0.0) + v
             if done % 50 == 0:
                 base = total["base(v13 sm0.1)"]
-                print(f"  ...{done}/{len(syms)}銘柄  base net {base['pnl']:+,.0f}円 ({base['n']}件)")
+                print(f"  ...{done}/{len(syms)}銘柄  base net(現実) {base['pnl_open']:+,.0f}円 "
+                      f"({base['n']}件)")
 
-    base_pnl = total["base(v13 sm0.1)"]["pnl"]
-    print("\n" + "=" * 92)
-    print("lss ルール案 ネット比較(全トレード・勝ち負け込み)")
-    print("=" * 92)
-    print(f"{'ルール':<22}{'件数':>7}{'勝率':>7}{'PF':>7}{'利確':>6}{'損切':>6}{'引け':>6}"
-          f"{'ネット損益':>15}{'base比':>14}")
+    base = total["base(v13 sm0.1)"]
+    print("\n" + "=" * 104)
+    print("lss ルール案 ネット比較 — 損切り約定を 楽観(line)/現実(open)/最悪(high) で下限測定")
+    print("=" * 104)
+    print(f"{'ルール':<22}{'件数':>6}{'勝率':>6}{'PF':>6}{'利確':>5}{'損切':>5}{'引け':>5}"
+          f"{'net楽観':>13}{'net現実':>13}{'net最悪':>13}{'base比(現実)':>14}")
     for rule in RULES:
         t = total[rule["name"]]
         n = t["n"] or 1
         wr = t["win"] / n * 100
-        exp = t["pnl"] / n
-        d = t["pnl"] - base_pnl
+        d = t["pnl_open"] - base["pnl_open"]
         tag = " ←現状" if rule["name"].startswith("base") else ""
-        print(f"{rule['name']:<22}{t['n']:>7}{wr:>6.0f}%{_pf_s(t['gp'], t['gl']):>7}"
-              f"{t['tgt']:>6}{t['stop']:>6}{t['close']:>6}{t['pnl']:>+15,.0f}{d:>+14,.0f}{tag}")
-    print(f"\n(期待値/件: base = {base_pnl/(total['base(v13 sm0.1)']['n'] or 1):+,.0f}円)")
-    print("※ 全選定ペア対象(BT/予算フィルター前)。方向の比較用。件数が減るルール=見送りで"
-          "トレード数自体が減る(その分ネットが上がれば見送りが有効)。")
+        print(f"{rule['name']:<22}{t['n']:>6}{wr:>5.0f}%{_pf_s(t['gp'], t['gl']):>6}"
+              f"{t['tgt']:>5}{t['stop']:>5}{t['close']:>5}"
+              f"{t['pnl_line']:>+13,.0f}{t['pnl_open']:>+13,.0f}{t['pnl_high']:>+13,.0f}"
+              f"{d:>+14,.0f}{tag}")
+    print("\n※ net楽観=stopちょうど / net現実=窓埋め(始値約定) / net最悪=損切り足の高値で買戻し(5分足で最悪)")
+    print("※ 見るポイント: delay1 の『net最悪』が base の『net楽観』を上回れば、liveの最悪ケースでも"
+          "現状より良い=堅牢。全選定ペア対象(BT/予算フィルター前)。")
 
     # ── 月別(--by-month) ──
     if args.by_month:
@@ -321,8 +343,10 @@ def main():
         n = t["n"] or 1
         rows.append({"rule": rule["name"], "trades": t["n"], "win_rate": round(t["win"]/n*100, 1),
                      "pf": round(_pf(t["gp"], t["gl"]), 2), "target": t["tgt"], "stop": t["stop"],
-                     "close": t["close"], "net_pnl": round(t["pnl"], 0),
-                     "exp_per_trade": round(t["pnl"]/n, 0), "vs_base": round(t["pnl"]-base_pnl, 0)})
+                     "close": t["close"], "net_optimistic_line": round(t["pnl_line"], 0),
+                     "net_realistic_open": round(t["pnl_open"], 0),
+                     "net_worst_high": round(t["pnl_high"], 0),
+                     "vs_base_realistic": round(t["pnl_open"] - base["pnl_open"], 0)})
     pd.DataFrame(rows).to_csv(Path(f"compare_lss_rules_{date_s}.csv"), index=False,
                               encoding="utf-8-sig")
     print(f"\n[出力] compare_lss_rules_{date_s}.csv")
