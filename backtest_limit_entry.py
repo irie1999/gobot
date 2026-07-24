@@ -255,11 +255,15 @@ def get_n225_ma75_above() -> dict:
 def _expected_latest_bar_date():
     """
     現在時刻から「期待される最新の取引日」を返す。
-      - 平日 15:00 JST 以降 → 今日 (引け済み)
-      - 平日 15:00 JST より前 → 前営業日
+      - 平日 15:40 JST 以降 → 今日 (引け済み・確定終値あり)
+      - 平日 15:40 JST より前 → 前営業日
       - 土曜日             → 金曜日
       - 日曜日             → 金曜日
-      - 月曜日 15時前      → 前金曜日
+      - 月曜日 引け前      → 前金曜日
+    東証の大引けは2024/11以降 15:30。yfinance の日足確定終値が反映されるまで
+    数分ラグがあるため、+10分の 15:40 を「今日の終値が確定した」境界にする。
+    これより前(=15:30の引け直後や、旧15:00基準で拾っていた場中の暫定値)は前営業日
+    扱いにして、暫定終値をキャッシュに焼き付けない(引け後に更新されない不具合の防止)。
     祝日は考慮しない (祝日でデータが無い場合は yfinance が前営業日を返すので
     結果オーライ)。
     """
@@ -272,10 +276,11 @@ def _expected_latest_bar_date():
     if wd == 6:  # 日
         return today - timedelta(days=2)
 
-    # 平日
-    if now.hour >= 15:
-        return today  # 引け後 → 今日
-    # 引け前 → 前営業日
+    # 平日: 大引け15:30 + yfinance確定待ち10分 = 15:40 を境に「今日確定」
+    _after_close = (now.hour > 15) or (now.hour == 15 and now.minute >= 40)
+    if _after_close:
+        return today  # 引け後(確定) → 今日
+    # 引け前 or 引け直後(未確定) → 前営業日
     if wd == 0:  # 月
         return today - timedelta(days=3)  # 前金曜
     return today - timedelta(days=1)
@@ -331,8 +336,12 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
       - 未確定バー (15:00 JST 前の今日のバー) は読み込み時に除去する
       - min_start_date 指定時: キャッシュの最古バーがその日より新しければ再取得
     """
+    # 強制リフレッシュ: 環境変数 GOBOT_REFRESH_DATA=1 でキャッシュ有効判定を無視して
+    # 必ず再ダウンロードする。引け直後にキャッシュへ焼き付いた暫定終値を、確定終値へ
+    # 手動更新したいとき用(例: $env:GOBOT_REFRESH_DATA="1"; .\daily)。
+    _force_refresh = os.environ.get("GOBOT_REFRESH_DATA", "").strip().lower() not in ("", "0", "false", "no")
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
-    if persistent.exists():
+    if persistent.exists() and not _force_refresh:
         try:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
