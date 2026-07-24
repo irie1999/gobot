@@ -42,11 +42,15 @@ ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--bt-min", type=float, default=0.0,
+                help="BTスコア下限で母集団を絞る(実際に投資する集団)。30=BT30以上/70=BT70以上/0=全部。"
+                     "各(銘柄,戦略)の現行base(v13)成績を直近365日で6期間スライスし calc_recommend_score で算出")
 ap.add_argument("--by-month", action="store_true", help="月別内訳も出力")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
 from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
+from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
 from daytrade_data import load_intraday, split_by_day
 from sameday5m_core import mod_for
 from sameday5m_firsttouch import short_entry_fill_5m, short_pnl
@@ -123,6 +127,27 @@ def _prices(order_limit, order_stop, order_target):
     return trigger, stop_p, target_p
 
 
+def _bt_score(trades) -> int:
+    """(約定日, base-line pnl) のリストから BTスコアを算出(レポートのBTに近い近似)。
+    直近365日を PERIODS(30/90/180/365)でスライスし勝率/PF/安定/取引数で採点。
+    現行base(v13, stopちょうど=engineと同じ楽観fill)の成績で計算=レポートのBT定義に一致。"""
+    if not trades:
+        return 0
+    pr = {}
+    for P in _BT_PERIODS:
+        cutoff = TODAY - pd.Timedelta(days=P)
+        sub = [p for (d, p) in trades if pd.Timestamp(d) >= cutoff]
+        if not sub:
+            continue
+        wins = sum(1 for p in sub if p > 0)
+        gp = sum(p for p in sub if p > 0)
+        gl = -sum(p for p in sub if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[P] = {"trades": len(sub), "win_rate": wins / len(sub) * 100,
+                 "pf": pf, "total_pnl": sum(sub)}
+    return _calc_bt(pr)[0]
+
+
 _STOP_SLIP = 0.005   # 保守モデルの追加スリッページ(0.5%)
 
 
@@ -175,6 +200,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
     if df_raw is None or df_raw.empty:
         return {"agg": agg, "mon": mon}
 
+    # BTスコアは直近365日で算出するので、ルール比較窓(--days)より長く見る必要がある。
+    _bt_window = max(args.days, max(_BT_PERIODS))
     for strat in strats:
         mod = mod_for(strat)
         params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
@@ -190,6 +217,12 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
             continue
         if not r:
             continue
+        # この (銘柄,戦略) 分をローカル集計し、BTスコアが閾値を満たしたら agg に合流する。
+        local = {ru["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                              "pnl_line": 0.0, "pnl_real": 0.0, "pnl_slip": 0.0,
+                              "tgt": 0, "stop": 0, "close": 0} for ru in RULES}
+        local_mon: dict = {}
+        bt_trades: list = []   # (約定日, base-lineのpnl) 直近365日 → BTスコア算出用
         for t in r.get("trade_log", []):
             if t.get("reason") in ("発注中", "保有中"):
                 continue
@@ -202,7 +235,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
             if olp <= 0 or osp <= 0 or otp <= 0 or olp < args.min_price or olp > args.max_price:
                 continue
             fd = edt.date() if hasattr(edt, "date") else edt
-            if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=args.days):
+            if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=_bt_window):
                 continue
             db = by_day.get(fd)
             if db is None or len(db) < 2:
@@ -231,8 +264,13 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     ei = 0
                 else:
                     continue
+            # BTスコア用: base(現行v13, stopちょうど=engine楽観fill)の pnl を365日ぶん記録
+            rb, exl, _, _ = _exit(opens, highs, lows, closes, ei, ei, stop_p, target_p, d_close)
+            bt_trades.append((fd, short_pnl(entry_fill, exl, rb, QTY, FEE_ONE_WAY, 0.0)))
+            # ルール比較は --days 窓のトレードだけ
+            if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=args.days):
+                continue
             mon_key = str(fd)[:7]
-
             for rule in RULES:
                 if rule["gap_skip"] is not None and gap_pct <= rule["gap_skip"]:
                     continue  # ギャップダウン見送り = このトレードは発注しない
@@ -246,20 +284,29 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 pnl_line = short_pnl(entry_fill, ex_line, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_real = short_pnl(entry_fill, ex_real, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_slip = short_pnl(entry_fill, ex_slip, reason, QTY, FEE_ONE_WAY, 0.0)
-                a = agg[rule["name"]]
+                a = local[rule["name"]]
                 a["n"] += 1
                 a["pnl_line"] += pnl_line
                 a["pnl_real"] += pnl_real
                 a["pnl_slip"] += pnl_slip
                 a[reason if reason in ("stop", "close") else "tgt"] += 1
-                pnl = pnl_real   # 勝率/PF は現実(real)ベース
-                if pnl > 0:
+                if pnl_real > 0:
                     a["win"] += 1
-                    a["gp"] += pnl
+                    a["gp"] += pnl_real
                 else:
-                    a["gl"] += -pnl
+                    a["gl"] += -pnl_real
                 if args.by_month:
-                    mon[(rule["name"], mon_key)] = mon.get((rule["name"], mon_key), 0.0) + pnl
+                    local_mon[(rule["name"], mon_key)] = \
+                        local_mon.get((rule["name"], mon_key), 0.0) + pnl_real
+        # BTスコアで母集団を絞る(実際に投資する集団)。閾値未満は集計に含めない。
+        if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
+            continue
+        for rname, a in local.items():
+            t2 = agg[rname]
+            for k in a:
+                t2[k] += a[k]
+        for k, v in local_mon.items():
+            mon[k] = mon.get(k, 0.0) + v
     return {"agg": agg, "mon": mon}
 
 
@@ -284,8 +331,9 @@ def main():
     syms = list(by_sym.items())
     if args.limit:
         syms = syms[:args.limit]
+    _btlab = f" / BT{args.bt_min:.0f}以上に絞る" if args.bt_min > 0 else " / 全部(BTフィルタ無し)"
     print(f"[比較] {len(syms)}銘柄 / 遡及{args.days}日 / 価格{args.min_price:.0f}〜{args.max_price:.0f}円 "
-          f"/ {len(RULES)}ルール")
+          f"/ {len(RULES)}ルール{_btlab}")
 
     total = {r["name"]: {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
                          "pnl_line": 0.0, "pnl_real": 0.0, "pnl_slip": 0.0,
@@ -330,8 +378,9 @@ def main():
               f"{t['pnl_line']:>+13,.0f}{t['pnl_real']:>+13,.0f}{t['pnl_slip']:>+13,.0f}"
               f"{d:>+14,.0f}{tag}")
     print("\n※ net楽観=stopちょうど / net現実=次足損切りは窓埋め(始値約定)・同バーはstop / net保守=現実+0.5%")
-    print("※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
-          "base vs delay1 の『net現実』差が期待できる現実的な改善幅。全選定ペア(BT/予算フィルター前)。")
+    _pop = f"BT{args.bt_min:.0f}以上(実際に投資する集団)" if args.bt_min > 0 else "全選定ペア(BTフィルタ無し)"
+    print(f"※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
+          f"base vs delay1 の『net現実』差が期待できる現実的な改善幅。母集団={_pop}。")
 
     # ── 月別(--by-month) ──
     if args.by_month:
