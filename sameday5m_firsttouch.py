@@ -13,7 +13,7 @@ import pandas as pd
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
                   no_target=False, no_stop=False, include_entry_bar=False,
-                  day_low=None, day_high=None):
+                  day_low=None, day_high=None, day_close=None):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -95,8 +95,12 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
             tgt_hit = (closes[j] <= target_p) if toc else (lows[j] <= target_p)
             if tgt_hit:               # 下抜け=利確
                 return (float(closes[j]) if toc else target_p), "target", ent_ts, times[j]
-    # 3) どちらも当たらなければ引け
-    return float(closes[-1]), "close", ent_ts, times[-1]
+    # 3) どちらも当たらなければ引け(タイムカット)。lss決済は引け成行(MOC)=その日の公式終値
+    #    (引け値)で買戻すため、5分足の最終足終値ではなく日足の確定終値(day_close)を優先する。
+    #    引けの寄成/引成が最終足とギャップすること・当日5分足が未同期(場中/部分)なことを吸収。
+    #    day_close が無ければ5分足最終足にフォールバック(従来挙動)。
+    _close_px = float(day_close) if (day_close is not None and day_close > 0) else float(closes[-1])
+    return _close_px, "close", ent_ts, times[-1]
 
 
 def short_entry_fill_5m(day_bars, trigger_p, is_rise_trigger, entry_gap_limit=None,

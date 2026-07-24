@@ -1197,9 +1197,10 @@ def run_limit_backtest(
             _stop_p = float(ceil_to_tick(max(_osp, _otp)))         # 損切=前日終値+atr*sm(ceil)
             _tgt_p = float(ceil_to_tick(min(_osp, _otp)))          # 利確=前日終値-atr*tm(ceil)
             _qty = _t.get("qty", FIXED_QTY)
-            # 日足の始値/安値/高値。5分足の寄り(09:00-09:05)は稀に欠落するため、日足で補う。
+            # 日足の始値/安値/高値/終値。5分足の寄り(09:00-09:05)欠落や引けギャップを日足で補う。
             #  ・始値: 約定価格の寄り基準。 ・安値/高値: トリガー到達の最終判定(欠落バー救済)。
-            _day_open = _day_low = _day_high = None
+            #  ・終値: タイムカット(引け成行MOC)の決済価格=公式終値(引け値)。
+            _day_open = _day_low = _day_high = _day_close = None
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
@@ -1214,8 +1215,9 @@ def run_limit_backtest(
                             _day_open = float(_drow["open"].iloc[0])
                             _day_low = float(_drow["low"].iloc[0])
                             _day_high = float(_drow["high"].iloc[0])
+                            _day_close = float(_drow["close"].iloc[0])
                     except Exception:
-                        _day_open = _day_low = _day_high = None
+                        _day_open = _day_low = _day_high = _day_close = None
                 _entry_fill = _sef5(_db, _lp, _is_rise,
                                     entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
                                     day_open=_day_open,
@@ -1232,7 +1234,8 @@ def run_limit_backtest(
             _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
                                                on_close=_INTRADAY_5M_ON_CLOSE,
                                                include_entry_bar=_gap_entry,
-                                               day_low=_day_low, day_high=_day_high)
+                                               day_low=_day_low, day_high=_day_high,
+                                               day_close=_day_close)
             if _rsn == "no_5m":
                 continue   # データ欠 → 不約定扱いにしない
             if _rsn == "no_entry":

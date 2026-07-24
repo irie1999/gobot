@@ -45,7 +45,7 @@ highs = db["high"].to_numpy(dtype=float)
 # 日足OHLC(yfinance)を先に取得。約定判定は5分足で行うが、5分足は寄り(09:00-09:05)の
 # バーが欠落することがある。日足の安値/高値は寄りの一瞬も含むので、「本当にトリガーへ
 # 達したか」の最終証拠になる(5分足で未達でも日足安値≤トリガーなら現実は約定していた)。
-_day_open = _day_low = _day_high = None
+_day_open = _day_low = _day_high = _day_close = None
 try:
     import backtest_limit_entry as _ble
     _sym_t = args.symbol if args.symbol.upper().endswith(".T") else args.symbol + ".T"
@@ -55,6 +55,7 @@ try:
         _day_open = float(_drow["open"].iloc[0])
         _day_low = float(_drow["low"].iloc[0])
         _day_high = float(_drow["high"].iloc[0])
+        _day_close = float(_drow["close"].iloc[0])
 except Exception as _e:
     print(f"[warn] 日足OHLC取得失敗: {_e}")
 
@@ -101,7 +102,8 @@ if ei is None:
             else:
                 _xp2, _rsn2, _e2, _x2 = short_exit_5m(db, trig, stop, tgt, False,
                                                       include_entry_bar=True,
-                                                      day_low=_day_low, day_high=_day_high)
+                                                      day_low=_day_low, day_high=_day_high,
+                                                      day_close=_day_close)
                 _pnl2 = short_pnl(_ef, _xp2, _rsn2, 100, 0.001, 0.0)
                 _xlbl = _x2.strftime('%H:%M') if hasattr(_x2, 'strftime') else str(_x2)
                 print(f"      約定価格 = {_ef:,.0f} (=min(トリガー,日足始値))")
@@ -135,7 +137,8 @@ ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=0.03, day_open=_day_op
 _gap = (ef is not None) and (abs(ef - trig) > 1e-9)
 print(f"寄り約定(ギャップ)= {_gap}  (True=約定バーから損切りチェック / False=次バーから)")
 xp, reason, e_ts, x_ts = short_exit_5m(db, trig, stop, tgt, False, include_entry_bar=_gap,
-                                       day_low=_day_low, day_high=_day_high)
+                                       day_low=_day_low, day_high=_day_high,
+                                       day_close=_day_close)
 print(f"\n▼ short_exit_5m 判定")
 print(f"  約定価格(現実モデル)= {ef if ef is not None else 'なし(ギャップ過大)'}")
 print(f"  決済理由 = {reason}  決済価格 = {xp}")
