@@ -201,6 +201,15 @@ def _parse_hhmm(s: str) -> dtime:
         return dtime(15, 20)
 
 
+def _stop_arm_time(first_seen: datetime, delay_bars: int) -> datetime:
+    """損切りを効かせ始める時刻 = 約定検知した5分足が閉じる次の5分グリッド × delay_bars本。
+    例) 09:01約定検知・delay=1 → 09:05 / 09:06約定検知・delay=1 → 09:10。
+    5分足ラベルは left(区間の始まり)なので、検知時刻を5分床にして delay_bars×5分 を足す。"""
+    floored = first_seen.replace(minute=(first_seen.minute // 5) * 5,
+                                 second=0, microsecond=0)
+    return floored + timedelta(minutes=5 * max(1, delay_bars))
+
+
 def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
     """kabu建玉から、対象の lss 売建(未決済)を抽出。毎回 kabu の実建玉を読むので、
     部分約定で減った残玉(LeavesQty)もそのまま拾える(=残玉を監視し続ける)。"""
@@ -336,6 +345,11 @@ def main() -> int:
                     help="保有タブ(holdings_latest.html)の定期更新をしない")
     ap.add_argument("--immediate", action="store_true",
                     help="引けの決済を即時成行にする(既定は引け成行MOC=15:30終値約定)")
+    ap.add_argument("--stop-delay-bars", type=int, default=0,
+                    help="損切り遅延(delay1)。約定した5分足の間は損切りを設置せず、次の5分グリッド"
+                         "(09:05/09:10…)から損切りを有効にする。1=約定バーの次足から(寄り1本目の"
+                         "ヒゲ刈り回避。BT30以上でPF1.63→1.95)。0(既定)=約定検知後すぐ損切り(現行)。"
+                         "バックテストの LSS_STOP_DELAY_BARS と対応。利確・引けは常に有効")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -349,6 +363,11 @@ def main() -> int:
     print(f"モード: {mode_label} / 接続先: {env_label} / 損切(上)・利確(下) 先着で成行買戻し")
     _close_kind = "即時成行" if args.immediate else "引け成行(MOC)"
     print(f"引け決済({_close_kind})発注: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
+    if args.stop_delay_bars > 0:
+        print(f"損切り遅延(delay{args.stop_delay_bars}): 約定検知の5分足の間は損切り無効 → "
+              f"次の5分グリッド({args.stop_delay_bars * 5}分後)から損切り有効(寄りヒゲ刈り回避)")
+    else:
+        print("損切り遅延: なし(約定検知後すぐ損切り=現行)。delay1にするなら --stop-delay-bars 1")
     print("=" * 66)
 
     # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。
@@ -471,6 +490,9 @@ def _run(args, close_at, today) -> int:
     moc_placed: set = set()    # 引けMOCを出した銘柄(pkey)。引けは銘柄ごとに1回だけ(重複キュー防止)。
     close_cool: dict = {}      # pkey(銘柄) -> 直近に成行決済を送った時刻(unix秒)。部分約定の
                                #   残玉を再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
+    first_seen: dict = {}      # pkey -> この建玉を最初に検知した時刻(datetime)。delay1の損切り
+                               #   設置開始時刻(次の5分グリッド)の起点。lssは寄り約定+watcherは
+                               #   寄りから常駐なので検知≒約定時刻。決済で消して再エントリーに備える。
     _CLOSE_COOLDOWN = 20.0     # 秒。成行決済を送ったら同じ建玉にはこの秒数だけ再送しない
                                #   (約定 or 取消の確定待ち)。残玉が残ればクールダウン後に再決済。
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
@@ -518,29 +540,43 @@ def _run(args, close_at, today) -> int:
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
                     continue
-                # ① 損切(上): 現在値が既に損切ライン以上なら『今すぐ成行で損切』。
-                #    (逆指値買いは現在値以上のトリガーだと即約定/決済誤り(Code8)で置けないため)
-                if p["stop"] and cur >= p["stop"]:
-                    if _cooling:
-                        print(f"  [損切待ち] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} "
-                              f"(直近成行の約定待ち)")
+                # delay1: 約定を検知した5分足の間は損切りを一切効かせない(①②とも無効)。
+                #   次の5分グリッド(09:05/09:10…)から損切りを有効化。寄り1本目のヒゲ刈り回避。
+                #   利確(③)・引けはこの間も有効。検知≒約定時刻(lssは寄り約定+寄りから常駐)。
+                if pk not in first_seen:
+                    first_seen[pk] = now
+                _stop_armed = True
+                if args.stop_delay_bars > 0:
+                    _arm = _stop_arm_time(first_seen[pk], args.stop_delay_bars)
+                    _stop_armed = now >= _arm
+                    if not _stop_armed:
+                        print(f"  [損切待機] {sym} {p['name']} 現在{_curs} "
+                              f"寄り{args.stop_delay_bars * 5}分は損切り無効 → {_arm:%H:%M} から有効"
+                              f"(利確・引けは有効)")
+                if _stop_armed:
+                    # ① 損切(上): 現在値が既に損切ライン以上なら『今すぐ成行で損切』。
+                    #    (逆指値買いは現在値以上のトリガーだと即約定/決済誤り(Code8)で置けないため)
+                    if p["stop"] and cur >= p["stop"]:
+                        if _cooling:
+                            print(f"  [損切待ち] {sym} {p['name']} 現在{_curs} >= 損切{p['stop']:,.0f} "
+                                  f"(直近成行の約定待ち)")
+                            continue
+                        print(f"  [損切] {sym} {p['name']} 売建{qty} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
+                        if _close_buy(cli, sym, qty, hid, "損切"):
+                            close_cool[pk] = now.timestamp()
+                            stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
                         continue
-                    print(f"  [損切] {sym} {p['name']} 売建{qty} 現在{_curs} >= 損切{p['stop']:,.0f} → 成行買戻し")
-                    if _close_buy(cli, sym, qty, hid, "損切"):
-                        close_cool[pk] = now.timestamp()
-                        stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
-                    continue
-                # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし。
-                #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
-                #    部分約定で取消された残玉は stop_placed から外れているので再設置される。
-                if p["stop"] and pk not in stop_placed:
-                    stop_placed.add(pk)
-                    _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
-                    if _r in ("ok", "exists"):
-                        print(f"  [損切設置] {sym} {p['name']} 売建{qty} 逆指値買い @>={p['stop']:,.0f} を設置"
-                              f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
-                    else:
-                        print(f"  [損切] {sym} {p['name']} 逆指値設置不可 → ポーリング成行で損切を担保")
+                    # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし。
+                    #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
+                    #    部分約定で取消された残玉は stop_placed から外れているので再設置される。
+                    if p["stop"] and pk not in stop_placed:
+                        stop_placed.add(pk)
+                        _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
+                        if _r in ("ok", "exists"):
+                            print(f"  [損切設置] {sym} {p['name']} 売建{qty} 逆指値買い @>={p['stop']:,.0f} を設置"
+                                  f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
+                        else:
+                            print(f"  [損切] {sym} {p['name']} 逆指値設置不可 → ポーリング成行で損切を担保")
                 # ③ 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
                 if p["target"] and cur <= p["target"]:
                     if _cooling:
