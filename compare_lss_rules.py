@@ -46,6 +46,10 @@ ap.add_argument("--bt-min", type=float, default=0.0,
                 help="BTスコア下限で母集団を絞る(実際に投資する集団)。30=BT30以上/70=BT70以上/0=全部。"
                      "各(銘柄,戦略)の現行base(v13)成績を直近365日で6期間スライスし calc_recommend_score で算出")
 ap.add_argument("--by-month", action="store_true", help="月別内訳も出力")
+ap.add_argument("--audit", type=str, default="",
+                help="指定ルール(例: delay1)の全トレードを1件ずつCSVに監査出力。各トレードの "
+                     "楽観(=レポート値)/現実/保守のpnlと理由を並べ、『利確が現実でもプラスか』"
+                     "『損切りが現実でどれだけ悪化するか』を全件確認できる。母集団は --bt-min に従う")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -84,6 +88,10 @@ RULES = [
     {"name": "sm0.3(base)",            "stop_off": 0, "sm2": 0.3,  "gap_skip": None},
     {"name": "delay1+sm0.2",           "stop_off": 1, "sm2": 0.2,  "gap_skip": None},
 ]
+
+# --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
+_AUDIT_NAME = next((ru["name"] for ru in RULES if ru["name"].startswith(args.audit)), None) \
+    if args.audit else None
 
 
 def _load_selected() -> list[tuple]:
@@ -188,6 +196,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                        "pnl_line": 0.0, "pnl_real": 0.0, "pnl_slip": 0.0,
                        "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon = {}  # (rule,month)->pnl (by-month用)
+    audit_rows: list = []   # --audit 指定ルールの全トレード(監査用)
     try:
         m5 = load_intraday(sym, days=args.days + 5, source=args.source)
     except Exception:
@@ -224,6 +233,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                               "pnl_line": 0.0, "pnl_real": 0.0, "pnl_slip": 0.0,
                               "tgt": 0, "stop": 0, "close": 0} for ru in RULES}
         local_mon: dict = {}
+        local_audit: list = []   # --audit ルールの全トレード(BT合格時のみ確定)
         bt_trades: list = []   # (約定日, base-lineのpnl) 直近365日 → BTスコア算出用
         for t in r.get("trade_log", []):
             if t.get("reason") in ("発注中", "保有中"):
@@ -300,6 +310,17 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 if args.by_month:
                     local_mon[(rule["name"], mon_key)] = \
                         local_mon.get((rule["name"], mon_key), 0.0) + pnl_real
+                if rule["name"] == _AUDIT_NAME:
+                    _ja = {"stop": "損切り", "target": "利確", "close": "引け"}.get(reason, reason)
+                    local_audit.append({
+                        "date": str(fd), "sym": sym, "name": name, "strat": strat,
+                        "reason": _ja, "entry": round(entry_fill, 1),
+                        "stop": round(sp, 1), "target": round(target_p, 1),
+                        "pnl_report_楽観": round(pnl_line, 0),   # レポート(.\daily)の表示値
+                        "pnl_現実": round(pnl_real, 0),
+                        "pnl_保守": round(pnl_slip, 0),
+                        "現実−楽観": round(pnl_real - pnl_line, 0),  # マイナス=現実の方が悪い
+                    })
         # BTスコアで母集団を絞る(実際に投資する集団)。閾値未満は集計に含めない。
         if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
             continue
@@ -309,7 +330,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 t2[k] += a[k]
         for k, v in local_mon.items():
             mon[k] = mon.get(k, 0.0) + v
-    return {"agg": agg, "mon": mon}
+        audit_rows.extend(local_audit)
+    return {"agg": agg, "mon": mon, "audit": audit_rows}
 
 
 def _pf(gp, gl):
@@ -341,6 +363,7 @@ def main():
                          "pnl_line": 0.0, "pnl_real": 0.0, "pnl_slip": 0.0,
                          "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon_total: dict = {}
+    audit_all: list = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, code, v["name"], v["strats"]): code
                 for code, v in syms}
@@ -358,6 +381,7 @@ def main():
                     t[k] += a[k]
             for k, v in res["mon"].items():
                 mon_total[k] = mon_total.get(k, 0.0) + v
+            audit_all.extend(res.get("audit", []))
             if done % 50 == 0:
                 base = total["base(v13 sm0.1)"]
                 print(f"  ...{done}/{len(syms)}銘柄  base net(現実) {base['pnl_real']:+,.0f}円 "
@@ -408,6 +432,32 @@ def main():
     pd.DataFrame(rows).to_csv(Path(f"compare_lss_rules_{date_s}.csv"), index=False,
                               encoding="utf-8-sig")
     print(f"\n[出力] compare_lss_rules_{date_s}.csv")
+
+    # ── 監査(--audit): 指定ルールの全トレードを1件ずつ ──
+    if _AUDIT_NAME and audit_all:
+        adf = pd.DataFrame(audit_all).sort_values("pnl_現実")   # 現実で悪い順
+        _short = args.audit
+        apath = Path(f"lss_audit_{_short}_{date_s}.csv")
+        adf.to_csv(apath, index=False, encoding="utf-8-sig")
+        # 監査サマリー: 利確が現実でもプラスか / 損切りが現実でどれだけ悪化したか
+        wins = adf[adf["reason"] == "利確"]
+        stops = adf[adf["reason"] == "損切り"]
+        win_still_pos = int((wins["pnl_現実"] > 0).sum())
+        win_flip = int((wins["pnl_現実"] <= 0).sum())
+        print("\n" + "=" * 72)
+        print(f"【監査】ルール『{_AUDIT_NAME}』 全{len(adf)}トレード (母集団=BT{args.bt_min:.0f}以上)")
+        print("=" * 72)
+        print(f"  利確: {len(wins)}件 → 現実でもプラス {win_still_pos}件 / "
+              f"マイナスに転落 {win_flip}件")
+        print(f"    → 利確が現実で損切りに転落する件数 = {win_flip} "
+              f"({'想定どおり0(判定は楽観=現実)' if win_flip == 0 else '要確認'})")
+        if len(stops):
+            _avg_worse = stops["現実−楽観"].mean()
+            print(f"  損切り: {len(stops)}件 → 現実の悪化 平均 {_avg_worse:+,.0f}円/件 "
+                  f"(合計 {stops['現実−楽観'].sum():+,.0f}円)")
+        print(f"  合計pnl: レポート(楽観) {adf['pnl_report_楽観'].sum():+,.0f}円 / "
+              f"現実 {adf['pnl_現実'].sum():+,.0f}円 / 保守 {adf['pnl_保守'].sum():+,.0f}円")
+        print(f"\n[出力] {apath}  (現実で悪い順。'現実−楽観'列がマイナス=レポートより実際は悪い)")
 
 
 if __name__ == "__main__":
