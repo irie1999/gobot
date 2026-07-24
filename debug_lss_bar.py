@@ -137,8 +137,12 @@ print(f"約定バー: #{ei} {ent_ts.strftime('%H:%M') if hasattr(ent_ts,'strftim
 # 約定バー内で損切りラインに達していたか(=同じ足の中で損切り)を明示
 same_bar = [j for j in range(0, ei + 1) if highs[j] >= stop]
 if same_bar:
-    print(f"※ 約定バー(#{ei})以内に高値>=損切({stop:,.0f})のバーあり: {same_bar} "
-          f"→ v13(悲観)では『同バー損切り』として損切り扱い(高値/安値の順番は復元不能なため損切り優先)")
+    if args.stop_delay_bars > 0:
+        print(f"※ 約定バー(#{ei})以内に高値>=損切({stop:,.0f})のバーあり: {same_bar} "
+              f"→ delay{args.stop_delay_bars}では無保護窓なので損切りにしない(#{_arm}以降で触れたら損切り)")
+    else:
+        print(f"※ 約定バー(#{ei})以内に高値>=損切({stop:,.0f})のバーあり: {same_bar} "
+              f"→ v13(悲観)では『同バー損切り』として損切り扱い(高値/安値の順番は復元不能なため損切り優先)")
 
 # 日足の始値は冒頭で取得済み(_day_open)。約定は日足始値優先。
 print(f"日足の始値(寄り) = {_day_open}")
