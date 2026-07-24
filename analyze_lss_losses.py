@@ -214,6 +214,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             # ── 形状指標 ──
             lows = db["low"].to_numpy(dtype=float)
             highs = db["high"].to_numpy(dtype=float)
+            closes_a = db["close"].to_numpy(dtype=float)
             times = db.index
             n = len(lows)
             ei = 0
@@ -238,12 +239,20 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             atr = (osp - olp) / args.sm if args.sm > 0 else 0.0   # 近似ATR(前日終値基準)
 
             # ── 反実仮想: 約定バー(同バー)の損切りを無視して"持ち続けたら"どうなったか ──
-            #    include_entry_bar=False = 約定バーの次バー以降だけで損切り/利確を判定。
-            #    同バー損切りを刈られずに残った場合、その後 利確 / 後で損切り / 引け のどれに
-            #    なるかを測る(=v13の同バー損切りが正しいか厳しすぎるかの判断材料)。
-            xp_h, rsn_h, _eh, _xh = short_exit_5m(db, trigger, stop_p, target_p, False,
-                                                  on_close=_ON_CLOSE, include_entry_bar=False,
-                                                  day_low=d_low, day_high=d_high, day_close=d_close)
+            #    約定バーの"次バー以降"(ei+1〜)だけで損切り/利確を first-touch 判定する
+            #    (=v13前の楽観ロジックを手動再現。v13で include_entry_bar が無効化された
+            #    ため short_exit_5m では計算できない)。同バー損切りを刈られずに残った場合、
+            #    その後 利確 / 後で損切り / 引け のどれになるかを測る。
+            rsn_h, xp_h = "close", (d_close if (d_close and d_close > 0) else float(closes_a[-1]))
+            for j in range(ei + 1, n):
+                _sh = closes_a[j] >= stop_p if _ON_CLOSE else highs[j] >= stop_p
+                if _sh:
+                    rsn_h, xp_h = "stop", (float(closes_a[j]) if _ON_CLOSE else stop_p)
+                    break
+                _th = closes_a[j] <= target_p if _ON_CLOSE else lows[j] <= target_p
+                if _th:
+                    rsn_h, xp_h = "target", (float(closes_a[j]) if _ON_CLOSE else target_p)
+                    break
             pnl_h = short_pnl(entry_fill, xp_h, rsn_h, QTY, FEE_ONE_WAY, args.slip)
 
             # ── stop幅 what-if(この日、sm を広げたら結果はどうなるか) ──
