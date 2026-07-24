@@ -237,6 +237,15 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
                 stop_min = None
             atr = (osp - olp) / args.sm if args.sm > 0 else 0.0   # 近似ATR(前日終値基準)
 
+            # ── 反実仮想: 約定バー(同バー)の損切りを無視して"持ち続けたら"どうなったか ──
+            #    include_entry_bar=False = 約定バーの次バー以降だけで損切り/利確を判定。
+            #    同バー損切りを刈られずに残った場合、その後 利確 / 後で損切り / 引け のどれに
+            #    なるかを測る(=v13の同バー損切りが正しいか厳しすぎるかの判断材料)。
+            xp_h, rsn_h, _eh, _xh = short_exit_5m(db, trigger, stop_p, target_p, False,
+                                                  on_close=_ON_CLOSE, include_entry_bar=False,
+                                                  day_low=d_low, day_high=d_high, day_close=d_close)
+            pnl_h = short_pnl(entry_fill, xp_h, rsn_h, QTY, FEE_ONE_WAY, args.slip)
+
             # ── stop幅 what-if(この日、sm を広げたら結果はどうなるか) ──
             sweep = {}
             for sm2 in SM_SWEEP:
@@ -257,6 +266,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
                 "reversal": round(stop_p - mfe_low, 1), "stop_min": stop_min,
                 "same_bar": stop_idx == ei, "gap": gap, "pnl": round(pnl, 0),
                 "bucket": bucket, "sweep": sweep,
+                "held_reason": rsn_h, "held_pnl": round(pnl_h, 0),
                 # チャート用に5分足を軽量保存(HTML gallery)
                 "_bars": db[["open", "high", "low", "close"]].to_dict("list"),
                 "_times": [str(x)[11:16] for x in times],
@@ -378,6 +388,31 @@ def main():
     near = sum(1 for r in losses if r["mfe_ratio"] >= 0.7)
     print(f"→ 利確まで70%以上進んで反発(惜しい)= {near}件 ({near/len(losses)*100:.0f}%)")
 
+    # ── 反実仮想: 同バー損切りを刈られず持ち続けたら? ──
+    def _held_report(title, rows):
+        if not rows:
+            return
+        c = {"target": 0, "stop": 0, "close": 0}
+        for r in rows:
+            c[r["held_reason"]] = c.get(r["held_reason"], 0) + 1
+        now_sum = sum(r["pnl"] for r in rows)          # 現状(同バーで損切り)
+        held_sum = sum(r["held_pnl"] for r in rows)    # 持ち続けた場合
+        tot = len(rows)
+        print(f"\n【{title}】{tot}件 — もし約定バーで損切りせず持ち続けたら:")
+        print(f"  利確(利益)   : {c['target']:>5}件 ({c['target']/tot*100:>3.0f}%)")
+        print(f"  後で損切り    : {c['stop']:>5}件 ({c['stop']/tot*100:>3.0f}%)")
+        print(f"  引け(タイムカット): {c['close']:>5}件 ({c['close']/tot*100:>3.0f}%)")
+        print(f"  → 損益: 現状(同バー損切り) {now_sum:>+12,.0f}円  "
+              f"持ち続け {held_sum:>+12,.0f}円  差 {held_sum-now_sum:>+12,.0f}円")
+
+    same_bar_rows = [r for r in losses if r["same_bar"] and not r["gap"]]
+    gap_rows = [r for r in losses if r["gap"]]
+    _held_report("同バー即損切り(寄り天/V字)を持ち続けたら", same_bar_rows)
+    _held_report("ギャップ寄り→反発損切りを持ち続けたら", gap_rows)
+    print("  ※ 差がプラス=同バー損切り(v13)が利益を刈っている / マイナス=v13が正しく損失回避")
+    print("  ※ ただし『持ち続け』は実運用で日中OCO損切りを置かない前提。ヒゲで刈られないが")
+    print("     深い含み損を引けまで抱えるリスクと引き換え。")
+
     # ── 損切り時刻 ──
     mins = [r["stop_min"] for r in losses if r["stop_min"] is not None]
     if mins:
@@ -421,7 +456,7 @@ def main():
     csv_path = Path(f"lss_loss_analysis_{date_s}.csv")
     cols = ["date", "month", "sym", "name", "strat", "entry", "trigger", "stop",
             "target", "mfe_low", "mfe_ratio", "reversal", "stop_min", "same_bar",
-            "gap", "pnl", "bucket"]
+            "gap", "pnl", "bucket", "held_reason", "held_pnl"]
     pd.DataFrame([{k: r[k] for k in cols} for r in losses]).sort_values("pnl").to_csv(
         csv_path, index=False, encoding="utf-8-sig")
     print(f"\n[出力] {csv_path}")
