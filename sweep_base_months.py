@@ -48,7 +48,10 @@ ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--skip-run", action="store_true", help="レポート実行を飛ばし既存CSVのみ集約")
 ap.add_argument("--only", type=str, default="", help="この基準月だけを1マージに(カンマ区切り 例 2025-03,2025-06,2025-09)")
 ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(LSS_STOP_DELAY_BARS=0)")
+ap.add_argument("--no-open", action="store_true", help="生成HTMLをブラウザで自動オープンしない")
 args = ap.parse_args()
+
+import webbrowser
 
 TODAY = date.today()
 _PY = sys.executable or "python"
@@ -117,7 +120,13 @@ def _run_one(win: list[str]) -> Path | None:
     # 生成された本体HTML(400万×BTタブ入り)のパスを表示
     _htmls = sorted(Path(".").glob(f"signals_holdout_all*_sweep_{lab}.html"))
     if _htmls:
-        print(f"  [html] {_htmls[-1].name}  ← 開いて『万円×BT降順×日別』タブを見る")
+        _hp = _htmls[-1]
+        print(f"  [html] {_hp.name}  ← 開いて『万円×BT降順×日別』タブを見る")
+        if not args.no_open:
+            try:
+                webbrowser.open(_hp.resolve().as_uri())   # いつものレポートHTMLを自動で開く
+            except Exception as _oe:
+                print(f"  [!] 自動オープン失敗({_oe}) → 手動で開いてください: {_hp}")
     return csv_out if csv_out.exists() else None
 
 
