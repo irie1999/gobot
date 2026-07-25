@@ -10,6 +10,9 @@
           表示ウィンドウは「その窓の最も古い基準月〜今日」(--days 自動)。delay1(LSS_STOP_DELAY_BARS=1)。
           環境変数 LSS_BUDGET_MONTHLY_CSV に月別P&Lを書かせる(nikkei_analysis 側で出力)。
   3. 各窓の月別CSVを集約 → 月×窓 の比較表をコンソール表示 + sweep_base_comparison_<date>.csv。
+  4. 各窓の本体HTMLを --output-suffix _sweep_<label> で保存(上書き回避)。
+     signals_holdout_all*_sweep_<label>.html を開き、『400万円×BT降順×日別』タブで
+     月別＋取引詳細(フル装飾)を確認できる。CSVは横比較・HTMLは1窓の詳細確認、と使い分ける。
 
 使い方(あなたの機械で。5分足データが必要):
   python sweep_base_months.py                       # 全連続3本組を自動でスイープ
@@ -104,12 +107,17 @@ def _run_one(win: list[str]) -> Path | None:
            "--long-stop-short", "--lss-proposal", str(merged),
            "--min-price", str(args.min_price), "--max-price", str(args.max_price),
            "--days", str(days), "--no-browser", "--force",
-           "--no-news", "--no-risk", "--no-analysis", "--workers", str(args.workers)]
+           "--no-news", "--no-risk", "--no-analysis", "--workers", str(args.workers),
+           "--output-suffix", f"_sweep_{lab}"]   # マージごとにHTMLを保存(上書き回避)
     print(f"  [run] --days {days} (最古基準月 {win[0]} から) / delay{'0' if args.no_delay else '1'}")
     r = subprocess.run(cmd, env=env)
     if r.returncode != 0:
         print(f"  [!] レポート実行 失敗(code {r.returncode})")
         return csv_out if csv_out.exists() else None
+    # 生成された本体HTML(400万×BTタブ入り)のパスを表示
+    _htmls = sorted(Path(".").glob(f"signals_holdout_all*_sweep_{lab}.html"))
+    if _htmls:
+        print(f"  [html] {_htmls[-1].name}  ← 開いて『万円×BT降順×日別』タブを見る")
     return csv_out if csv_out.exists() else None
 
 
