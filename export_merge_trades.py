@@ -53,7 +53,10 @@ ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(L
 ap.add_argument("--fast", action="store_true",
                 help="詳細分析タブを省いて高速化(--no-analysis)。既定はフル=いつもの形式のHTML")
 ap.add_argument("--no-html", action="store_true", help="HTMLを出さずCSVだけ(既定はHTMLもout-dirにコピー)")
+ap.add_argument("--no-open", action="store_true", help="生成HTMLをブラウザで自動オープンしない(既定は各HTMLを既定ブラウザで開く)")
 args = ap.parse_args()
+
+import webbrowser
 
 TODAY = date.today()
 _PY = sys.executable or "python"
@@ -136,12 +139,20 @@ def _run_one(win: list[str], out_dir: Path, name_prefix: str = "trades_") -> Pat
                   f"レポート生成が失敗した可能性 → 上のログを確認してください。")
         for _hp in _pick:
             tag = "" if suffix in _hp.name else "  ⚠suffix不一致(最新HTMLを採用)"
+            _open_target = _hp.resolve()   # コピー失敗時は元ファイルを開く
             try:
                 _dst = out_dir / _hp.name
                 shutil.copy2(_hp, _dst)
+                _open_target = _dst.resolve()
                 print(f"  [html] {_dst}{tag}")
             except Exception as _he:
                 print(f"  [!] HTMLコピー失敗({_he}) → 元ファイルは {_hp.resolve()}")
+            # 既定ブラウザ(Edge等)で自動オープン。as_uri()で空白/日本語パスも安全。
+            if not args.no_open:
+                try:
+                    webbrowser.open(_open_target.as_uri())
+                except Exception as _oe:
+                    print(f"  [!] 自動オープン失敗({_oe}) → 手動で開いてください: {_open_target}")
     return csv_out if csv_out.exists() else None
 
 
