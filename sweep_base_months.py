@@ -47,6 +47,8 @@ ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--skip-run", action="store_true", help="レポート実行を飛ばし既存CSVのみ集約")
 ap.add_argument("--only", type=str, default="", help="この基準月だけを1マージに(カンマ区切り 例 2025-03,2025-06,2025-09)")
+ap.add_argument("--from", dest="frm", type=str, default="", help="この基準月以降だけを対象(YYYY-MM)。短TRAINの古い月を除外する用 例 2025-09")
+ap.add_argument("--to", dest="to", type=str, default="", help="この基準月まで対象(YYYY-MM)")
 ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(LSS_STOP_DELAY_BARS=0)")
 ap.add_argument("--no-open", action="store_true", help="生成HTMLをブラウザで自動オープンしない")
 args = ap.parse_args()
@@ -182,7 +184,14 @@ def main():
         bases = _find_bases()
         if not bases:
             sys.exit("[error] lss_proposal_YYYY-MM.py が見つかりません")
-        print(f"[検出] 基準月: {', '.join(bases)}")
+        if args.frm:
+            bases = [b for b in bases if b >= args.frm]
+        if args.to:
+            bases = [b for b in bases if b <= args.to]
+        if not bases:
+            sys.exit(f"[error] --from {args.frm} --to {args.to} で対象基準月がゼロ")
+        print(f"[検出] 基準月: {', '.join(bases)}"
+              + (f"  (--from {args.frm}" + (f" --to {args.to}" if args.to else "") + " で絞込)" if args.frm or args.to else ""))
         wins = _windows(bases, args.window)
         if not wins:
             sys.exit(f"[error] 基準月が {args.window} 本未満")
