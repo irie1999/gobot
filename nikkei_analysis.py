@@ -9549,6 +9549,36 @@ function switchTbd(id, tab) {{
                 if _t.get("reason") != "約定せず":
                     _budget_entry_sorted.append(_t)   # 約定分だけグリッド・損益に計上
         _budget_entry_sorted.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
+    # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
+    # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
+    _bud_csv = os.environ.get("LSS_BUDGET_MONTHLY_CSV", "").strip()
+    if _bud_csv and _LSS_ORDER_MODE:
+        try:
+            import csv as _csvmod
+            _bm: dict = {}
+            for _t in _budget_entry_sorted:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _ym = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if not _ym:
+                    continue
+                _pv = float(_t.get("pnl", 0) or 0)
+                _e = _bm.setdefault(_ym, {"n": 0, "win": 0, "pnl": 0.0})
+                _e["n"] += 1
+                _e["pnl"] += _pv
+                if _pv > 0:
+                    _e["win"] += 1
+            with open(_bud_csv, "w", newline="", encoding="utf-8-sig") as _f:
+                _w = _csvmod.writer(_f)
+                _w.writerow(["month", "trades", "win_rate", "pnl", "budget_man", "min_bt"])
+                for _ym in sorted(_bm):
+                    _e = _bm[_ym]
+                    _w.writerow([_ym, _e["n"],
+                                 round(_e["win"] / _e["n"] * 100, 1) if _e["n"] else 0,
+                                 round(_e["pnl"], 0), _budget_man, _BUD_MIN_BT])
+            print(f"[予算月別CSV] {_bud_csv} に {len(_bm)}ヶ月を出力", flush=True)
+        except Exception as _ce:
+            print(f"[予算月別CSV] 出力失敗: {_ce}", flush=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
 
     def _group_by_month(sorted_dates):
