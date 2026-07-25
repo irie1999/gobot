@@ -39,6 +39,10 @@ ap.add_argument("--base-months", type=str, default="",
                      "lss_proposal_<基準月>.py を月ごとに出力(大幅高速化)。--out は無視。")
 ap.add_argument("--sm", type=float, default=0.1, help="損切ATR倍率(既定=5分足スイープ最適0.1)")
 ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍率(既定=5分足スイープ最適1.0)")
+ap.add_argument("--stop-delay-bars", type=int, default=0,
+                help="選定バックテストの損切り遅延本数。0(既定)=v13(同バー損切りを損切り扱い=厳しい=薄い選定)。"
+                     "1=約定5分足の損切りを無効化(≒pre-v13の同バー無視=甘い=厚い選定)。"
+                     "12/3/6の旧proposal(7/20・pre-v13)相当に揃えたいなら1。")
 ap.add_argument("--days", type=int, default=800, help="遡及日数(TRAIN先頭を十分含む長さ)")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(0=全部。デバッグ用)")
@@ -189,7 +193,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             entry_fill = short_entry_fill_5m(db, lp, False, entry_gap_limit=0.03)
             if entry_fill is None:
                 continue   # ギャップ過大 → 約定不成立
-            xp, reason, _e, _x = short_exit_5m(db, lp, stop_p, target_p, False)  # lss=下落約定
+            xp, reason, _e, _x = short_exit_5m(db, lp, stop_p, target_p, False,
+                                               stop_delay_bars=args.stop_delay_bars)  # lss=下落約定
             if reason in ("no_5m", "no_entry"):
                 continue
             pnl = short_pnl(entry_fill, xp, reason, QTY, FEE_ONE_WAY, args.slip)
@@ -257,7 +262,8 @@ def _select_and_write(results: list[dict], base_month: str, multi: bool):
         (Path(args.out) if args.out else Path(f"lss_watchlist_proposal_{ble._TODAY}.py"))
     lines = [
         '"""lss専用WATCHLIST提案 — scan_lss_universe.py 生成',
-        f'  基準月(TRAIN終端): {base_month} / sm={args.sm} tm={args.tm} / slip={args.slip} fee={FEE_ONE_WAY}',
+        f'  基準月(TRAIN終端): {base_month} / sm={args.sm} tm={args.tm} / slip={args.slip} fee={FEE_ONE_WAY}'
+        f' / stop_delay_bars={args.stop_delay_bars}({"pre-v13相当=厚い" if args.stop_delay_bars>=1 else "v13=薄い"})',
         f'  選定: TRAIN({base_end.date()}以前)で PF>={args.train_min_pf} 取引>={args.train_min_trades} 損益>0。',
         f'  合格 {len(selected)}ペア。TRAIN期待値順。',
         '"""',
