@@ -57,6 +57,9 @@ _REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)ま�
 # (選定時は安かったが約定時に急騰した銘柄=100株買えない取引を明細/集計から除外)
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
+# 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
+# メイン/期間パネル/銘柄詳細で多数回呼ばれるので、最長窓(月数最多)の1回だけを採用する。
+_BUD_CSV_BEST_MONTHS = -1
 # 損益タブ: ロングBTスコアで銘柄を絞るフィルタ。0=無効。
 # mirror/lss(ロングミラー/ロング銘柄ショート)で「ロングが弱い銘柄だけをフェード」する用。
 # _LONG_BT_REF が与えられればそのスコア(=別モードで測ったロングBT)で判定し、
@@ -9551,8 +9554,12 @@ function switchTbd(id, tab) {{
         _budget_entry_sorted.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
+    # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
+    #   多数回呼ばれる。フィルター付き呼び出しは _budget_entry_sorted が部分的/空になるので、
+    #   フィルター無し かつ 最も月数の多い(=最長窓の)呼び出しだけを採用して上書き事故を防ぐ。
     _bud_csv = os.environ.get("LSS_BUDGET_MONTHLY_CSV", "").strip()
-    if _bud_csv and _LSS_ORDER_MODE:
+    if (_bud_csv and _LSS_ORDER_MODE and cfg_filter is None
+            and not symbol_filter and not strategy_filter):
         try:
             import csv as _csvmod
             _bm: dict = {}
@@ -9568,15 +9575,18 @@ function switchTbd(id, tab) {{
                 _e["pnl"] += _pv
                 if _pv > 0:
                     _e["win"] += 1
-            with open(_bud_csv, "w", newline="", encoding="utf-8-sig") as _f:
-                _w = _csvmod.writer(_f)
-                _w.writerow(["month", "trades", "win_rate", "pnl", "budget_man", "min_bt"])
-                for _ym in sorted(_bm):
-                    _e = _bm[_ym]
-                    _w.writerow([_ym, _e["n"],
-                                 round(_e["win"] / _e["n"] * 100, 1) if _e["n"] else 0,
-                                 round(_e["pnl"], 0), _budget_man, _BUD_MIN_BT])
-            print(f"[予算月別CSV] {_bud_csv} に {len(_bm)}ヶ月を出力", flush=True)
+            global _BUD_CSV_BEST_MONTHS
+            if len(_bm) >= _BUD_CSV_BEST_MONTHS:   # 最長窓(月数最多)の呼び出しだけ採用
+                _BUD_CSV_BEST_MONTHS = len(_bm)
+                with open(_bud_csv, "w", newline="", encoding="utf-8-sig") as _f:
+                    _w = _csvmod.writer(_f)
+                    _w.writerow(["month", "trades", "win_rate", "pnl", "budget_man", "min_bt"])
+                    for _ym in sorted(_bm):
+                        _e = _bm[_ym]
+                        _w.writerow([_ym, _e["n"],
+                                     round(_e["win"] / _e["n"] * 100, 1) if _e["n"] else 0,
+                                     round(_e["pnl"], 0), _budget_man, _BUD_MIN_BT])
+                print(f"[予算月別CSV] {_bud_csv} に {len(_bm)}ヶ月を出力", flush=True)
         except Exception as _ce:
             print(f"[予算月別CSV] 出力失敗: {_ce}", flush=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")

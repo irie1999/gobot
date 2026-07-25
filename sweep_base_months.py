@@ -106,9 +106,9 @@ def _run_one(win: list[str]) -> Path | None:
     cmd = [_PY, "run_signals_holdout_all.py",
            "--long-stop-short", "--lss-proposal", str(merged),
            "--min-price", str(args.min_price), "--max-price", str(args.max_price),
-           "--days", str(days), "--no-browser", "--force",
+           "--days", str(days), "--no-browser", "--no-serve", "--force",
            "--no-news", "--no-risk", "--no-analysis", "--workers", str(args.workers),
-           "--output-suffix", f"_sweep_{lab}"]   # マージごとにHTMLを保存(上書き回避)
+           "--output-suffix", f"_sweep_{lab}"]   # --no-serve=発注サーバを起動しない(重要)
     print(f"  [run] --days {days} (最古基準月 {win[0]} から) / delay{'0' if args.no_delay else '1'}")
     r = subprocess.run(cmd, env=env)
     if r.returncode != 0:
