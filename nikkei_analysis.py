@@ -60,6 +60,8 @@ _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
 # メイン/期間パネル/銘柄詳細で多数回呼ばれるので、最長窓(月数最多)の1回だけを採用する。
 _BUD_CSV_BEST_MONTHS = -1
+# 全取引CSV(LSS_TRADES_CSV)出力: これまでに書いた最多取引件数。予算CSVと同じく最長窓の1回だけ採用。
+_TRADES_CSV_BEST_N = -1
 # 損益タブ: ロングBTスコアで銘柄を絞るフィルタ。0=無効。
 # mirror/lss(ロングミラー/ロング銘柄ショート)で「ロングが弱い銘柄だけをフェード」する用。
 # _LONG_BT_REF が与えられればそのスコア(=別モードで測ったロングBT)で判定し、
@@ -9215,6 +9217,44 @@ function switchTbd(id, tab) {{
     pending_trades = []
     done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
+
+    # 全取引CSV(env LSS_TRADES_CSV=path): done_trades(全決済済み・全BT・切り捨て無し)を丸ごと出力。
+    # HTML明細は直近1500件に切られるので、基準月まとめ等で全件を手元に落とす用途。予算CSVと同じく
+    # メイン(フィルター無し)かつ最長窓の1回だけ採用して、部分呼び出しによる上書き事故を防ぐ。
+    _trades_csv = os.environ.get("LSS_TRADES_CSV", "").strip()
+    if (_trades_csv and cfg_filter is None
+            and not symbol_filter and not strategy_filter):
+        try:
+            import csv as _csvmod2
+            global _TRADES_CSV_BEST_N
+            _rows_out = sorted(done_trades,
+                               key=lambda x: (str(x.get("exit_d_raw") or ""),
+                                              str(x.get("symbol") or "")))
+            if len(_rows_out) >= _TRADES_CSV_BEST_N:   # 最長窓(件数最多)だけ採用
+                _TRADES_CSV_BEST_N = len(_rows_out)
+                _cols = ["entry_date", "exit_date", "symbol", "name", "strategy",
+                         "bt", "wf", "reason", "order_limit", "entry_p", "exit_p",
+                         "stop_price", "target_price", "qty", "hold_days",
+                         "liquidity", "mode", "pnl"]
+                with open(_trades_csv, "w", newline="", encoding="utf-8-sig") as _f2:
+                    _w2 = _csvmod2.writer(_f2)
+                    _w2.writerow(_cols)
+                    for _t in _rows_out:
+                        _w2.writerow([
+                            _t.get("entry_d_raw", ""), _t.get("exit_d_raw", ""),
+                            _t.get("symbol", ""), _t.get("name", ""),
+                            _t.get("strategy", "") or _t.get("strat", ""),
+                            _t.get("rec_score", "") if _t.get("rec_score") is not None else _t.get("score", ""),
+                            _t.get("wf_score", ""), _t.get("reason", ""),
+                            _t.get("order_limit", ""), _t.get("entry_p", ""),
+                            _t.get("exit_p", ""), _t.get("stop_price", ""),
+                            _t.get("target_price", ""), _t.get("qty", ""),
+                            _t.get("hold_days", ""), _t.get("liquidity", ""),
+                            _t.get("mode", ""), _t.get("pnl", ""),
+                        ])
+                print(f"[全取引CSV] {_trades_csv} に {len(_rows_out)}件を出力", flush=True)
+        except Exception as _te:
+            print(f"[全取引CSV] 出力失敗: {_te}", flush=True)
 
     def _build_trade_row(t, entry_first=False) -> str:
         is_pending = t.get("reason") == "発注中"
