@@ -69,6 +69,10 @@ ap.add_argument("--select-top", type=int, default=0,
                 help="提案ファイルに書き出すペア数の上限(TRAIN期待値上位から。0=全部)。"
                      "run_signals_holdout_all --lss-proposal で扱える件数に絞る用途。推奨150")
 ap.add_argument("--out", type=str, default=None, help="提案ファイル名(既定=lss_watchlist_proposal_<date>.py)")
+ap.add_argument("--no-cache", action="store_true",
+                help="母集団取引ログのキャッシュを使わない(常に再計算)")
+ap.add_argument("--refresh-cache", action="store_true",
+                help="キャッシュを無視して再計算し、上書き保存する")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -307,18 +311,53 @@ def main():
         print(f"[info] 一括モード: 取引ログを1回だけ計算し、{len(base_list)}基準月に振り分けて出力(高速)")
 
     # ── バックテストは基準月に依存しないので、取引ログを1回だけ計算 ──
-    results = []
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(_scan_symbol, s, names.get(s, s), strats): s for s in universe}
-        done = 0
-        for fut in as_completed(futs):
-            done += 1
-            if done % 50 == 0:
-                print(f"  ...{done}/{len(universe)}銘柄", flush=True)
+    #   取引ログは「基準月」に依存しない(基準月の違いはTRAIN/TESTの振り分けだけ)。
+    #   そこで取引ログ(results)をディスクキャッシュし、同一パラメータの2回目以降は再計算しない。
+    #   キャッシュキーは"取引に影響する条件"のみ(基準月は含めない=別基準月でも再利用可)。
+    import hashlib as _hashlib, pickle as _pickle
+    from pathlib import Path as _Path
+    _cache_dir = _Path(".lss_scan_cache")
+    _eng_ver = str(getattr(ble, "_BT_LOGIC_VER", "?"))
+    _key_src = "|".join(str(x) for x in [
+        "scanv2",                                   # 選定/取引計算ロジックの版(変えたら手動で上げる)
+        _eng_ver, args.sm, args.tm, args.slip, FEE_ONE_WAY, args.stop_delay_bars,
+        args.source, args.days, args.limit, args.min_price, args.max_price, QTY,
+        len(universe), _hashlib.md5(",".join(universe).encode()).hexdigest(),
+        ",".join(strats),
+    ])
+    _key = _hashlib.md5(_key_src.encode()).hexdigest()[:16]
+    _cache_f = _cache_dir / f"trades_{_key}.pkl"
+
+    results = None
+    if _cache_f.exists() and not args.no_cache and not args.refresh_cache:
+        try:
+            results = _pickle.loads(_cache_f.read_bytes())
+            print(f"[cache] 取引ログを再利用: {_cache_f} ({len(results)}ペア) "
+                  f"※再計算するなら --refresh-cache", flush=True)
+        except Exception as _ce:
+            print(f"[cache] 読込失敗({_ce}) → 再計算します", flush=True)
+            results = None
+    if results is None:
+        results = []
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_scan_symbol, s, names.get(s, s), strats): s for s in universe}
+            done = 0
+            for fut in as_completed(futs):
+                done += 1
+                if done % 50 == 0:
+                    print(f"  ...{done}/{len(universe)}銘柄", flush=True)
+                try:
+                    results += fut.result()
+                except Exception:
+                    continue
+        if not args.no_cache:
             try:
-                results += fut.result()
-            except Exception:
-                continue
+                _cache_dir.mkdir(exist_ok=True)
+                _cache_f.write_bytes(_pickle.dumps(results))
+                print(f"[cache] 取引ログを保存: {_cache_f} ({len(results)}ペア) "
+                      f"→ 次回同条件は即ロード", flush=True)
+            except Exception as _ce:
+                print(f"[cache] 保存失敗({_ce})", flush=True)
 
     # ── 各基準月で TRAIN/TEST に振り分けて選定・出力 ──
     for bm in base_list:

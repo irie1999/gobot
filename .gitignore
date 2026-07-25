@@ -49,3 +49,4 @@ entry_delay_analysis*.html
 # Claude Code agent worktrees (ephemeral, never commit)
 .claude/worktrees/
 .sameday5m_cache/
+.lss_scan_cache/
