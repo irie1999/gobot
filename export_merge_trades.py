@@ -1,8 +1,9 @@
-"""export_merge_trades.py — lss基準月の連続W本(既定3)マージごとに、全取引(切り捨て無し)を
-CSVで指定フォルダに書き出す。
+"""export_merge_trades.py — lss基準月の連続W本(既定3)マージごとに、全取引(切り捨て無し)の
+CSVと、いつもの形式のHTMLレポートを指定フォルダに書き出す。
 
-HTMLの取引明細は直近1500件に切られるが、これは done_trades(全決済済み・全BT)を丸ごと
-LSS_TRADES_CSV で出力する(nikkei_analysis 側の全取引CSV機能を使う)。1マージ=1CSV。
+HTMLの取引明細は直近1500件に切られるが、CSVは done_trades(全決済済み・全BT)を丸ごと
+LSS_TRADES_CSV で出力する(nikkei_analysis 側の全取引CSV機能を使う)。1マージ=1CSV+1HTML。
+HTMLは run_signals_holdout_all の通常出力(いつもの形式)を out-dir にコピーする(--no-html で抑制)。
 
 やること:
   1. 手元の lss_proposal_YYYY-MM.py を検出(--from/--to で範囲を絞れる)。
@@ -49,6 +50,9 @@ ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(LSS_STOP_DELAY_BARS=0)")
+ap.add_argument("--fast", action="store_true",
+                help="詳細分析タブを省いて高速化(--no-analysis)。既定はフル=いつもの形式のHTML")
+ap.add_argument("--no-html", action="store_true", help="HTMLを出さずCSVだけ(既定はHTMLもout-dirにコピー)")
 args = ap.parse_args()
 
 TODAY = date.today()
@@ -101,20 +105,36 @@ def _run_one(win: list[str], out_dir: Path, name_prefix: str = "trades_") -> Pat
     env = dict(os.environ)
     env["LSS_TRADES_CSV"] = str(csv_out)
     env["LSS_STOP_DELAY_BARS"] = "0" if args.no_delay else "1"
+    suffix = f"_{name_prefix.rstrip('_')}_{lab}"   # 例 _trades_cumul_2025-09_2026-04
     cmd = [_PY, "run_signals_holdout_all.py",
            "--long-stop-short", "--lss-proposal", str(merged),
            "--min-price", str(args.min_price), "--max-price", str(args.max_price),
            "--days", str(days), "--no-browser", "--no-serve", "--force",
-           "--no-news", "--no-risk", "--no-analysis", "--workers", str(args.workers)]
-    print(f"  [run] --days {days} (最古基準月 {win[0]} から) / delay{'0' if args.no_delay else '1'}")
+           "--no-news", "--no-risk", "--workers", str(args.workers),
+           "--output-suffix", suffix]
+    if args.fast:
+        cmd.append("--no-analysis")   # 詳細分析タブを省いて高速化(既定はフル=いつもの形式)
+    print(f"  [run] --days {days} (最古基準月 {win[0]} から) / delay{'0' if args.no_delay else '1'}"
+          + (" / fast" if args.fast else " / フル分析"))
     r = subprocess.run(cmd, env=env)
     if r.returncode != 0:
         print(f"  [!] レポート実行 失敗(code {r.returncode})")
     if csv_out.exists():
         print(f"  [csv] {csv_out}")
-        return csv_out
-    print(f"  [!] CSVが生成されませんでした: {csv_out}")
-    return None
+    else:
+        print(f"  [!] CSVが生成されませんでした: {csv_out}")
+    # 生成HTML(いつもの形式)を out_dir にコピーして CSV と同じ場所にまとめる。
+    if not args.no_html:
+        import shutil
+        _htmls = sorted(Path(".").glob(f"signals_holdout_all*{suffix}.html"))
+        for _hp in _htmls:
+            try:
+                _dst = out_dir / _hp.name
+                shutil.copy2(_hp, _dst)
+                print(f"  [html] {_dst}")
+            except Exception as _he:
+                print(f"  [!] HTMLコピー失敗({_he}) → 元ファイル: {_hp}")
+    return csv_out if csv_out.exists() else None
 
 
 def main():
