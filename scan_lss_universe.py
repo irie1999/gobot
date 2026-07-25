@@ -33,6 +33,10 @@ import pandas as pd
 ap = argparse.ArgumentParser(description="lss専用の銘柄選定スキャン(TRAIN選定/TEST検証)")
 ap.add_argument("--base-month", type=str, default="2025-12",
                 help="TRAIN の終端月(この月末まで=選定期間 / 翌月以降=OOS検証)。例 2025-12")
+ap.add_argument("--base-months", type=str, default="",
+                help="複数基準月をカンマ区切りで一括選定(例 2025-10,2025-11,2026-01)。指定すると "
+                     "5分足ロード・バックテストを1回だけ行い、各基準月でTRAIN/TESTに振り分けて "
+                     "lss_proposal_<基準月>.py を月ごとに出力(大幅高速化)。--out は無視。")
 ap.add_argument("--sm", type=float, default=0.1, help="損切ATR倍率(既定=5分足スイープ最適0.1)")
 ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍率(既定=5分足スイープ最適1.0)")
 ap.add_argument("--days", type=int, default=800, help="遡及日数(TRAIN先頭を十分含む長さ)")
@@ -124,8 +128,10 @@ def _stat(pnls: list):
 
 
 def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
-    """1銘柄について全戦略の lss を回し、(sym,strat)ごとに TRAIN/TEST の損益リストを返す。
-    5分足は銘柄あたり1回だけロード(最も重い処理)。"""
+    """1銘柄について全戦略の lss を回し、(sym,strat)ごとに (約定日, pnl) の取引リストを返す。
+    5分足は銘柄あたり1回だけロード(最も重い処理)。取引は基準月に依存しないので、複数基準月の
+    選定でも本関数は1回だけ実行し、main側で各基準月の BASE_END で TRAIN/TEST に振り分ける
+    (=5分足ロード・バックテストを基準月ごとに繰り返さない=大幅高速化)。"""
     out = []
     # 5分足を1回だけロード(この銘柄の最重処理)。無ければ検証不能なのでスキップ。
     try:
@@ -160,7 +166,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             continue
         if not r:
             continue
-        train, test = [], []
+        trades = []   # (約定日 Timestamp, pnl) 基準月に依存しない生の取引
         for t in r.get("trade_log", []):
             if t.get("reason") in ("発注中", "保有中"):
                 continue
@@ -187,16 +193,86 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
             if reason in ("no_5m", "no_entry"):
                 continue
             pnl = short_pnl(entry_fill, xp, reason, QTY, FEE_ONE_WAY, args.slip)
-            (train if pd.Timestamp(fd) <= BASE_END else test).append(pnl)
-        if not train and not test:
+            trades.append((pd.Timestamp(fd), pnl))
+        if not trades:
             continue
-        out.append({"sym": sym, "name": name, "strat": strat,
-                    "train": _stat(train), "test": _stat(test)})
+        out.append({"sym": sym, "name": name, "strat": strat, "trades": trades})
     return out
 
 
 def _pf(x):
     return "∞" if x == float("inf") else f"{x:.2f}"
+
+
+def _select_and_write(results: list[dict], base_month: str, multi: bool):
+    """共有の取引ログ(results)を、この基準月の BASE_END で TRAIN/TEST に振り分けて選定・出力。"""
+    base_end = pd.Period(base_month, "M").end_time.normalize()
+    selected = []
+    for r in results:
+        train = [p for (fd, p) in r["trades"] if fd <= base_end]
+        tr = _stat(train)
+        if not tr:
+            continue
+        if (tr["n"] >= args.train_min_trades and tr["pf"] >= args.train_min_pf
+                and tr["pnl"] > 0 and tr["wr"] >= args.train_min_wr):
+            test = [p for (fd, p) in r["trades"] if fd > base_end]
+            selected.append({"sym": r["sym"], "name": r["name"], "strat": r["strat"],
+                             "train": tr, "test": _stat(test)})
+    selected.sort(key=lambda r: -r["train"]["exp"])   # TRAIN期待値順
+
+    n_before_cap = len(selected)
+    if args.max_per_symbol > 0:
+        per: dict = {}; capped = []
+        for r in selected:
+            if per.get(r["sym"], 0) >= args.max_per_symbol:
+                continue
+            per[r["sym"]] = per.get(r["sym"], 0) + 1
+            capped.append(r)
+        selected = capped
+    n_after_cap = len(selected)
+    if args.select_top > 0:
+        selected = selected[:args.select_top]
+
+    print("\n" + "=" * 90)
+    print(f"■ [{base_month}] TRAIN合格 {n_before_cap}ペア / 全{len(results)}ペア"
+          + (f" → 1銘柄{args.max_per_symbol}戦略上限 {n_after_cap}" if args.max_per_symbol > 0 else "")
+          + (f" → 上位{args.select_top} {len(selected)}" if args.select_top > 0 else "")
+          + f" ({len({r['sym'] for r in selected})}銘柄)")
+    if not selected:
+        print(f"  [{base_month}] 合格ゼロ。しきい値を緩めるか5分足在庫を増やす。")
+        return
+    test_pos = test_have = 0
+    for r in selected:
+        te = r["test"]
+        if te and te["n"] >= args.test_min_trades:
+            test_have += 1
+            test_pos += 1 if te["pnl"] > 0 else 0
+    tr_tot = sum(r["train"]["pnl"] for r in selected)
+    te_tot = sum(r["test"]["pnl"] for r in selected if r["test"])
+    print(f"  TRAIN合算 損益 {tr_tot:>+13,.0f}円 (≤{base_end.date()}) / "
+          f"TEST(OOS) 損益 {te_tot:>+13,.0f}円 (>{base_end.date()})"
+          + (f" / OOSプラス率 {test_pos}/{test_have}" if test_have else ""))
+
+    out_path = Path(f"lss_proposal_{base_month}.py") if multi else \
+        (Path(args.out) if args.out else Path(f"lss_watchlist_proposal_{ble._TODAY}.py"))
+    lines = [
+        '"""lss専用WATCHLIST提案 — scan_lss_universe.py 生成',
+        f'  基準月(TRAIN終端): {base_month} / sm={args.sm} tm={args.tm} / slip={args.slip} fee={FEE_ONE_WAY}',
+        f'  選定: TRAIN({base_end.date()}以前)で PF>={args.train_min_pf} 取引>={args.train_min_trades} 損益>0。',
+        f'  合格 {len(selected)}ペア。TRAIN期待値順。',
+        '"""',
+        f'BASE_MONTH = "{base_month}"',
+        "SELECTED = [",
+    ]
+    for r in selected:
+        tr, te = r["train"], r["test"]
+        te_note = f"TEST {te['n']}件 PF{_pf(te['pf'])} {te['pnl']:+,.0f}" if te else "TEST データ無"
+        lines.append(
+            f'    ({r["sym"]!r}, {r["name"]!r}, {r["strat"]!r}),'
+            f'  # TRAIN {tr["n"]}件 PF{_pf(tr["pf"])} 勝率{tr["wr"]:.0f}% {tr["pnl"]:+,.0f} / {te_note}')
+    lines.append("]")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  [出力] {out_path.resolve()}")
 
 
 def main():
@@ -214,12 +290,17 @@ def main():
         return
     names = _name_map()
     strats = _strategies()
+    base_list = [b.strip() for b in args.base_months.split(",") if b.strip()] \
+        if args.base_months else [args.base_month]
+    multi = bool(args.base_months)
     print(f"[info] 母集団(5分足あり) {len(universe)}銘柄 × {len(strats)}戦略 = "
           f"{len(universe)*len(strats)}ペア候補")
-    print(f"[info] TRAIN=≤{BASE_END.date()}(選定) / TEST=>{BASE_END.date()}(OOS検証) / "
-          f"sm={args.sm} tm={args.tm} / "
+    print(f"[info] 基準月: {', '.join(base_list)} / sm={args.sm} tm={args.tm} / "
           f"{'摩擦なし' if (args.slip==0 and FEE_ONE_WAY==0) else f'slip{args.slip*100:.2f}%/手数料{FEE_ONE_WAY*100:.2f}%'}")
+    if multi:
+        print(f"[info] 一括モード: 取引ログを1回だけ計算し、{len(base_list)}基準月に振り分けて出力(高速)")
 
+    # ── バックテストは基準月に依存しないので、取引ログを1回だけ計算 ──
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, s, names.get(s, s), strats): s for s in universe}
@@ -233,111 +314,9 @@ def main():
             except Exception:
                 continue
 
-    # ── 選定は TRAIN のみ ────────────────────────────────────────────────
-    selected = []
-    for r in results:
-        tr = r["train"]
-        if not tr:
-            continue
-        if (tr["n"] >= args.train_min_trades and tr["pf"] >= args.train_min_pf
-                and tr["pnl"] > 0 and tr["wr"] >= args.train_min_wr):
-            selected.append(r)
-    selected.sort(key=lambda r: -r["train"]["exp"])   # TRAIN期待値(1件あたり)で降順
-
-    # 1銘柄あたりの戦略数上限(建玉集中の抑制)。上位から採用。
-    n_before_cap = len(selected)
-    if args.max_per_symbol > 0:
-        per: dict = {}
-        capped = []
-        for r in selected:
-            k = r["sym"]
-            if per.get(k, 0) >= args.max_per_symbol:
-                continue
-            per[k] = per.get(k, 0) + 1
-            capped.append(r)
-        selected = capped
-
-    # 提案に書き出す件数の上限(レポートで扱える件数に絞る)。TRAIN期待値上位から。
-    n_after_cap = len(selected)
-    if args.select_top > 0:
-        selected = selected[:args.select_top]
-
-    print("\n" + "=" * 90)
-    print(f"■ 選定結果: TRAIN合格 {n_before_cap}ペア / 全{len(results)}ペア中"
-          + (f" → 1銘柄{args.max_per_symbol}戦略上限で {n_after_cap}ペア" if args.max_per_symbol > 0 else "")
-          + (f" → 上位{args.select_top}に絞り {len(selected)}ペア" if args.select_top > 0 else "")
-          + f" ({len({r['sym'] for r in selected})}銘柄)")
-    if args.max_price < 1e9:
-        print(f"  価格フィルタ: 約定価格 ≤ {args.max_price:,.0f}円"
-              + (f" (予算{args.budget:,.0f}円/{QTY}株)" if args.budget > 0 else ""))
-    print("=" * 90)
-    if not selected:
-        print("  合格ゼロ。しきい値(--train-min-pf/--train-min-trades)を緩めるか、"
-              "5分足の在庫を増やしてください。")
-        return
-
-    # ── 選定銘柄の TEST(OOS) 集計 = 本物の検証 ───────────────────────────
-    test_pnls = []
-    test_pos = test_have = 0
-    for r in selected:
-        te = r["test"]
-        if te and te["n"] >= args.test_min_trades:
-            test_have += 1
-            if te["pnl"] > 0:
-                test_pos += 1
-    # 選定銘柄を1つのポートフォリオとみなした TRAIN/TEST 合算
-    tr_tot = sum(r["train"]["pnl"] for r in selected)
-    te_tot = sum(r["test"]["pnl"] for r in selected if r["test"])
-    te_all = [r["test"] for r in selected if r["test"]]
-    te_n = sum(s["n"] for s in te_all)
-    tr_n = sum(r["train"]["n"] for r in selected)
-    print(f"  TRAIN合算 : {tr_n:>5}取引  損益 {tr_tot:>+13,.0f}円")
-    print(f"  TEST合算  : {te_n:>5}取引  損益 {te_tot:>+13,.0f}円   ← OOS(選定に未使用)")
-    if test_have:
-        print(f"  OOS検証   : TEST取引{args.test_min_trades}件以上の {test_have}銘柄中 "
-              f"{test_pos}銘柄がプラス ({test_pos/test_have*100:.0f}%)")
-        if te_tot > 0 and test_pos / max(1, test_have) >= 0.6:
-            print("  → 頑健: 選定銘柄はOOSでも過半がプラス。選定基準が機能している")
-        else:
-            print("  → 注意: OOSの生存率/損益が弱い。overfit の疑い(しきい値を厳しく or 期間延長)")
-
-    # ── 上位ランキング ────────────────────────────────────────────────
-    print(f"\n  上位{min(args.top, len(selected))}ペア (TRAIN期待値順) — TRAIN実績 / TEST(OOS)実績")
-    print(f"  {'銘柄':<12}{'戦略':<8}"
-          f"{'TR件':>5}{'TR勝':>5}{'TR-PF':>7}{'TR損益':>12}  "
-          f"{'TE件':>5}{'TE-PF':>7}{'TE損益':>12}  名称")
-    for r in selected[:args.top]:
-        tr, te = r["train"], r["test"]
-        te_s = (f"{te['n']:>5}{_pf(te['pf']):>7}{te['pnl']:>+12,.0f}" if te
-                else f"{'—':>5}{'—':>7}{'—':>12}")
-        print(f"  {r['sym']:<12}{r['strat']:<8}"
-              f"{tr['n']:>5}{tr['wr']:>4.0f}%{_pf(tr['pf']):>7}{tr['pnl']:>+12,.0f}  "
-              f"{te_s}  {r['name']}")
-
-    # ── 提案ファイル出力 ──────────────────────────────────────────────
-    out_path = Path(args.out) if args.out else Path(f"lss_watchlist_proposal_{ble._TODAY}.py")
-    lines = [
-        '"""lss専用WATCHLIST提案 — scan_lss_universe.py 生成',
-        f'  基準月(TRAIN終端): {args.base_month} / sm={args.sm} tm={args.tm} / '
-        f'slip={args.slip} fee={FEE_ONE_WAY}',
-        f'  選定: TRAIN({BASE_END.date()}以前)で PF>={args.train_min_pf} '
-        f'取引>={args.train_min_trades} 損益>0。TEST(2026-)は選定に未使用のOOS検証。',
-        f'  合格 {len(selected)}ペア。TRAIN期待値順。',
-        '"""',
-        f'BASE_MONTH = "{args.base_month}"   # 選定基準月(WF as-of)。レポートのヘッダ表示に使う',
-        "SELECTED = [",
-    ]
-    for r in selected:
-        tr, te = r["train"], r["test"]
-        te_note = f"TEST {te['n']}件 PF{_pf(te['pf'])} {te['pnl']:+,.0f}" if te else "TEST データ無"
-        lines.append(
-            f'    ({r["sym"]!r}, {r["name"]!r}, {r["strat"]!r}),'
-            f'  # TRAIN {tr["n"]}件 PF{_pf(tr["pf"])} 勝率{tr["wr"]:.0f}% {tr["pnl"]:+,.0f} / {te_note}')
-    lines.append("]")
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"\n[出力] 提案WATCHLIST → {out_path.resolve()}")
-    print("  次: この SELECTED を verify_sameday_intraday.py --symbols-file で5分足レジーム検証、"
-          "納得したら check_signals_*.py の WATCHLIST に反映。")
+    # ── 各基準月で TRAIN/TEST に振り分けて選定・出力 ──
+    for bm in base_list:
+        _select_and_write(results, bm, multi)
 
 
 if __name__ == "__main__":

@@ -83,26 +83,24 @@ def main():
                   f"--out lss_proposal_{ym}.py")
         return
 
-    print(f"\n[選定開始] {len(todo)}ヶ月。1ヶ月ずつ scan_lss_universe を実行します。")
-    print("  (途中で止めても、出来た月は次回スキップ=レジューム可)")
-    done = 0
-    for ym in todo:
-        out = f"lss_proposal_{ym}.py"
-        print(f"\n===== [{done + 1}/{len(todo)}] 基準月 {ym} を選定中 → {out} =====", flush=True)
-        cmd = [_PY, "scan_lss_universe.py", "--base-month", ym,
-               "--sm", str(args.sm), "--tm", str(args.tm),
-               "--source", args.source, "--workers", str(args.workers),
-               "--out", out]
-        r = subprocess.run(cmd)
-        if r.returncode != 0:
-            print(f"  [!] {ym} の選定に失敗(code {r.returncode})。次の月へ進みます。")
-            continue
-        if Path(out).exists():
-            done += 1
-            print(f"  [OK] {out} を生成")
-        else:
-            print(f"  [!] {ym}: {out} が生成されませんでした(要確認)")
-    print(f"\n[完了] {done}/{len(todo)} ヶ月の選定を生成しました。")
+    # 高速化: scan_lss_universe を1回だけ呼び、--base-months で全未選定月をまとめて出力。
+    # 5分足ロード・バックテストを1回で済ませ、各基準月にTRAIN/TESTを振り分ける(月数分の再計算なし)。
+    bms = ",".join(todo)
+    print(f"\n[選定開始] {len(todo)}ヶ月を"
+          f"『一括モード』で選定します（5分足ロード・バックテストは1回だけ＝高速）。")
+    cmd = [_PY, "scan_lss_universe.py", "--base-months", bms,
+           "--sm", str(args.sm), "--tm", str(args.tm),
+           "--source", args.source, "--workers", str(args.workers)]
+    print("  " + " ".join(cmd), flush=True)
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        print(f"  [!] 選定に失敗(code {r.returncode})。")
+        return
+    made = [ym for ym in todo if Path(f"lss_proposal_{ym}.py").exists()]
+    miss = [ym for ym in todo if ym not in made]
+    print(f"\n[完了] {len(made)}/{len(todo)} ヶ月の選定を生成: {', '.join(made) if made else 'なし'}")
+    if miss:
+        print(f"  [!] 未生成(要確認): {', '.join(miss)}")
     print("次: マージや sweep_base_months.py / .\\daily --lss-proposal で評価してください。")
 
 
