@@ -126,14 +126,22 @@ def _run_one(win: list[str], out_dir: Path, name_prefix: str = "trades_") -> Pat
     # 生成HTML(いつもの形式)を out_dir にコピーして CSV と同じ場所にまとめる。
     if not args.no_html:
         import shutil
-        _htmls = sorted(Path(".").glob(f"signals_holdout_all*{suffix}.html"))
-        for _hp in _htmls:
+        _all = sorted(Path(".").glob("signals_holdout_all*.html"),
+                      key=lambda p: p.stat().st_mtime)
+        _matched = [p for p in _all if suffix in p.name]
+        # suffix一致が最優先。無ければ「この実行後に更新された最新HTML」を拾う(名前ズレ保険)。
+        _pick = _matched if _matched else ([_all[-1]] if _all else [])
+        if not _pick:
+            print(f"  [!] HTMLが見つかりません(CWD に signals_holdout_all*.html 無し)。"
+                  f"レポート生成が失敗した可能性 → 上のログを確認してください。")
+        for _hp in _pick:
+            tag = "" if suffix in _hp.name else "  ⚠suffix不一致(最新HTMLを採用)"
             try:
                 _dst = out_dir / _hp.name
                 shutil.copy2(_hp, _dst)
-                print(f"  [html] {_dst}")
+                print(f"  [html] {_dst}{tag}")
             except Exception as _he:
-                print(f"  [!] HTMLコピー失敗({_he}) → 元ファイル: {_hp}")
+                print(f"  [!] HTMLコピー失敗({_he}) → 元ファイルは {_hp.resolve()}")
     return csv_out if csv_out.exists() else None
 
 
