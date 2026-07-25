@@ -35,6 +35,11 @@ _DEFAULT_OUT = r"C:\Users\to732\OneDrive\ドキュメント\tmp\基準月まと�
 
 ap = argparse.ArgumentParser(description="lss基準月マージごとに全取引CSVを出力")
 ap.add_argument("--window", type=int, default=3, help="1マージに含める連続基準月の本数(既定3)")
+ap.add_argument("--cumulative", action="store_true",
+                help="累積マージ: --from から各基準月Bまでの全基準月をマージ(9月〜B)。"
+                     "各ファイルの初OOS月=Bの翌月。高BT投資で在庫が枯れないよう母集団を最大化する検証用。")
+ap.add_argument("--cumulative-min", type=int, default=3,
+                help="累積マージの最小本数(既定3。これ未満の短い累積は作らない)")
 ap.add_argument("--from", dest="frm", type=str, default="2025-09", help="この基準月以降だけ対象(YYYY-MM)")
 ap.add_argument("--to", dest="to", type=str, default="", help="この基準月まで対象(YYYY-MM)")
 ap.add_argument("--only", type=str, default="", help="この基準月だけを1マージに(カンマ区切り)")
@@ -72,10 +77,15 @@ def _label(win: list[str]) -> str:
     return f"{win[0]}_{win[-1]}"
 
 
-def _run_one(win: list[str], out_dir: Path) -> Path | None:
+def _cumul_windows(bases: list[str], min_n: int) -> list[list[str]]:
+    """累積窓: bases[0..i] を i=min_n-1 から末尾まで。各窓は先頭からの累積マージ。"""
+    return [bases[:i + 1] for i in range(min_n - 1, len(bases))]
+
+
+def _run_one(win: list[str], out_dir: Path, name_prefix: str = "trades_") -> Path | None:
     lab = _label(win)
     merged = Path(f"lss_proposal_mergetrades_{lab}.py")
-    csv_out = out_dir / f"trades_{lab}.csv"
+    csv_out = out_dir / f"{name_prefix}{lab}.csv"
     files = [f"lss_proposal_{ym}.py" for ym in win]
     for f in files:
         if not Path(f).exists():
@@ -111,6 +121,7 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[出力先] {out_dir}")
+    name_prefix = "trades_"
     if args.only:
         wins = [[x.strip() for x in args.only.split(",") if x.strip()]]
     else:
@@ -124,13 +135,20 @@ def main():
         if not bases:
             sys.exit(f"[error] --from {args.frm} --to {args.to} で対象基準月がゼロ")
         print(f"[検出] 基準月: {', '.join(bases)}")
-        wins = _windows(bases, args.window)
-        if not wins:
-            sys.exit(f"[error] 基準月が {args.window} 本未満")
+        if args.cumulative:
+            name_prefix = "trades_cumul_"
+            wins = _cumul_windows(bases, args.cumulative_min)
+            if not wins:
+                sys.exit(f"[error] 基準月が {args.cumulative_min} 本未満")
+            print(f"[累積モード] {args.frm} から各基準月まで累積マージ")
+        else:
+            wins = _windows(bases, args.window)
+            if not wins:
+                sys.exit(f"[error] 基準月が {args.window} 本未満")
     print(f"[窓] {len(wins)}件: " + " / ".join(_label(w) for w in wins))
     made = []
     for win in wins:
-        p = _run_one(win, out_dir)
+        p = _run_one(win, out_dir, name_prefix)
         if p:
             made.append(p)
     print(f"\n[完了] {len(made)}/{len(wins)} 窓のCSVを {out_dir} に出力")
