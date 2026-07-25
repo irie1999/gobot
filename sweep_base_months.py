@@ -123,10 +123,18 @@ def _run_one(win: list[str]) -> Path | None:
         _hp = _htmls[-1]
         print(f"  [html] {_hp.name}  ← 開いて『万円×BT降順×日別』タブを見る")
         if not args.no_open:
+            _uri = _hp.resolve().as_uri()
             try:
-                webbrowser.open(_hp.resolve().as_uri())   # いつものレポートHTMLを自動で開く
-            except Exception as _oe:
-                print(f"  [!] 自動オープン失敗({_oe}) → 手動で開いてください: {_hp}")
+                if os.name == "nt":
+                    # Windows: 既定ブラウザに関わらず Edge で開く(失敗時は既定へフォールバック)
+                    os.system(f'start "" msedge "{_uri}"')
+                else:
+                    webbrowser.open(_uri)
+            except Exception:
+                try:
+                    webbrowser.open(_uri)
+                except Exception as _oe:
+                    print(f"  [!] 自動オープン失敗({_oe}) → 手動で開いてください: {_hp}")
     return csv_out if csv_out.exists() else None
 
 
