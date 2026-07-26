@@ -9606,11 +9606,13 @@ function switchTbd(id, tab) {{
         _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
         return _out
 
-    _budget_entry_sorted = _run_budget_sim(_BUD_MIN_BT)
+    # 予算タブは _BT_TAB_MIN(既定50)以上のみで発注。BT降順で埋めるので実質高BTのみだが、
+    # 下限を明示的に _BT_TAB_MIN に揃える(『BT50以上』表示と一致)。
+    _budget_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN))
     # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
-    _budget50_entry_sorted = _run_budget_sim(50) if _BUD_MIN_BT < 50 else []
+    _budget50_entry_sorted: list = []   # 予算タブ本体をBT50化したので別タブは廃止
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -12180,7 +12182,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
-            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
