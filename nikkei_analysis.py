@@ -9607,10 +9607,10 @@ function switchTbd(id, tab) {{
         return _out
 
     _budget_entry_sorted = _run_budget_sim(_BUD_MIN_BT)
-    # 予算タブは BT降順で埋めるため、予算内に入るのは元々高BTのみ＝BT下限を上げても結果が
-    # ほぼ変わらない(BT30版とBT50版が同一)。よって予算のBT50版タブは無効化(混乱回避)。
-    # 「BT50以上のみ」の効果は予算なしの『BT○以上』タブ(_BT_TAB_MIN)で見る。
-    _budget50_entry_sorted: list = []
+    # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
+    # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
+    # _BUD_MIN_BT が既に50以上なら重複するので作らない。
+    _budget50_entry_sorted = _run_budget_sim(50) if _BUD_MIN_BT < 50 else []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
