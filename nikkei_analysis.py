@@ -9397,7 +9397,9 @@ function switchTbd(id, tab) {{
             if _v is not None:
                 return _v
         return t.get("rec_score") or 0
-    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 30]
+    # 「BTスコア○以上」タブの下限。既定50(env LSS_BT_TAB_MIN で変更可。30に戻すなら =30)。
+    _BT_TAB_MIN = int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
+    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= _BT_TAB_MIN]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
         done_trades,
@@ -9406,7 +9408,7 @@ function switchTbd(id, tab) {{
     )
     trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
-    trade_rows_bt40 = _rows_for(bt40_trades,   "BT30以上の取引なし")
+    trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -9534,11 +9536,18 @@ function switchTbd(id, tab) {{
     # BT40以上(質の高い銘柄)のエントリー日別グリッド。mirror/lss では
     # _LONG_BT_REF(ロングの真のBT)で判定(_eff_long_bt)。
     _bt40_entry_sorted = pending_trades + sorted(
-        [t for t in done_trades if _eff_long_bt(t) >= 30],
+        [t for t in done_trades if _eff_long_bt(t) >= _BT_TAB_MIN],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
     _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
+    # 予算シミュ専用の候補プール(BT30固定・表示閾値 _BT_TAB_MIN とは独立)。予算はBT降順で埋める
+    # ため実質高BTのみ約定するが、プールは従来どおりBT30から用意して挙動を変えない。
+    _bt30_entry_sorted = pending_trades + sorted(
+        [t for t in done_trades if _eff_long_bt(t) >= 30],
+        key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
+        reverse=True
+    )
 
     # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の成績。lssのみ。
     #  ・「終値で判断」: 予算に収まるかは注文トリガー価格(order_limit=前日終値ベース)×株数で判定
@@ -9569,7 +9578,7 @@ function switchTbd(id, tab) {{
         if not _LSS_ORDER_MODE:
             return _out
         _by_day_bud: dict = _dd(list)
-        for _t in _bt40_entry_sorted:
+        for _t in _bt30_entry_sorted:
             if _eff_long_bt(_t) < _min_bt:
                 continue
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
@@ -9577,7 +9586,7 @@ function switchTbd(id, tab) {{
         # 約定注文があれば二重発注しない(1銘柄1注文/日)。
         _fill_sym_day = {(_t.get("symbol"),
                           str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
-                         for _t in _bt40_entry_sorted}
+                         for _t in _bt30_entry_sorted}
         for _t in all_nofills:
             if _eff_long_bt(_t) < _min_bt:
                 continue
@@ -9598,9 +9607,10 @@ function switchTbd(id, tab) {{
         return _out
 
     _budget_entry_sorted = _run_budget_sim(_BUD_MIN_BT)
-    # BT50以上のみ投資版(高品質集中)。既定タブ(_BUD_MIN_BT)と別タブで比較する用。
-    # _BUD_MIN_BT が既に50以上なら重複するので作らない。
-    _budget50_entry_sorted = _run_budget_sim(50) if _BUD_MIN_BT < 50 else []
+    # 予算タブは BT降順で埋めるため、予算内に入るのは元々高BTのみ＝BT下限を上げても結果が
+    # ほぼ変わらない(BT30版とBT50版が同一)。よって予算のBT50版タブは無効化(混乱回避)。
+    # 「BT50以上のみ」の効果は予算なしの『BT○以上』タブ(_BT_TAB_MIN)で見る。
+    _budget50_entry_sorted: list = []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -12598,10 +12608,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT30以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT30以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_bt40liq_btn}
   {_bt50liq_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
@@ -12623,7 +12633,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_bt40" class="detail-tab-pane">
 <p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">
-🎯 BTスコア30以上（＝赤字の0-29帯を除外）だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
+🎯 BTスコア{_BT_TAB_MIN}以上だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
 <table>
   <thead><tr>
     <th>決済日</th>
