@@ -29,49 +29,20 @@ from pathlib import Path
 import pandas as pd
 from dateutil import tz as _dtz
 
-# .env 読み込み(jquants_fetch と同じ近隣探索を流用)
-try:
-    import jquants_fetch as _jf  # 副作用で .env をロード
-except Exception:
-    pass
-
-
-def get_client():
-    """追加データ(空売り/信用/決算/貸借等)は V1 の jquantsapi.Client にある。
-    新J-QuantsのAPI Key はリフレッシュトークン相当なので refresh_token として渡す。
-    ダメなら MAIL/PASSWORD にフォールバック。"""
-    import jquantsapi
-    api_key = os.environ.get("JQUANTS_API_KEY")
-    errs = []
-    if api_key:
-        for kw in (dict(refresh_token=api_key),):
-            try:
-                return jquantsapi.Client(**kw)
-            except Exception as e:
-                errs.append(f"refresh_token: {e}")
-    mail = (os.environ.get("JQUANTS_MAIL_ADDRESS") or os.environ.get("JQUANTS_MAIL")
-            or os.environ.get("JQUANTS_EMAIL"))
-    pw = os.environ.get("JQUANTS_PASSWORD")
-    if mail and pw:
-        try:
-            return jquantsapi.Client(mail_address=mail, password=pw)
-        except Exception as e:
-            errs.append(f"mail/password: {e}")
-    raise RuntimeError(
-        "V1 Client(jquantsapi.Client) の認証に失敗。JQUANTS_API_KEY をrefresh_tokenとして使うか、"
-        "JQUANTS_MAIL_ADDRESS + JQUANTS_PASSWORD を .env に設定してください。\n  " + " / ".join(errs))
+# ClientV2 を流用(V1は廃止=410 Gone。5分足取得と同じ認証)。
+from jquants_fetch import get_client
 
 # 取得名 -> jquantsapi クライアントのメソッド名
 DATASETS = {
-    "short_positions": "get_markets_short_selling_positions_range",
-    "daily_margin":    "get_daily_margin_interest_range",
-    "weekly_margin":   "get_weekly_margin_range",
-    "short_selling":   "get_short_selling_range",
-    "announcement":    "get_fins_announcement",
-    "listed_info":     "get_listed_info",
-    "calendar":        "get_markets_trading_calendar",
-    "trades_spec":     "get_markets_trades_spec",
-    "breakdown":       "get_breakdown_range",
+    "short_sale_report": "get_mkt_short_sale_report_range",  # 空売り集計/残高 → 踏み上げ
+    "short_ratio":       "get_mkt_short_ratio_range",        # 業種別空売り比率 → レジーム
+    "margin_interest":   "get_mkt_margin_interest_range",    # 信用残高(週次 買残/売残)
+    "margin_alert":      "get_mkt_margin_alert_range",       # 信用規制/日々公表
+    "earnings_cal":      "get_eq_earnings_cal",              # 決算発表予定 → イベント回避
+    "master":            "get_eq_master",                    # 銘柄マスタ(貸借区分/業種)
+    "calendar":          "get_mkt_calendar",                 # 営業日カレンダー
+    "investor_types":    "get_eq_investor_types",            # 投資部門別売買 → フロー
+    "breakdown":         "get_mkt_breakdown_range",          # 売買内訳
 }
 
 ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ一括取得")
