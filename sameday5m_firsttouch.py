@@ -217,3 +217,82 @@ def short_pnl(entry_p, exit_p, reason, qty, fee_one_way, slip):
     exit_eff = exit_p * (1.0 + slip) if reason == "stop" else exit_p
     fee = (entry_p + exit_eff) * qty * fee_one_way
     return (entry_p - exit_eff) * qty - fee
+
+
+# ─────────────────────────────────────────────────────────────
+# ロングデイトレ(逆指値買い=上ブレイク・同日決済)。上の short_* の上下反転(鏡像)。
+#   lss(ショート): 前日終値-1tick 逆指値売り→下ブレイク約定→下落継続を取る
+#   long(ロング) : 前日終値+1tick 逆指値買い→上ブレイク約定→上昇継続(モメンタム)を取る
+# 損切り=約定より下 / 利確=約定より上。first-touch・同バー損切り優先(悲観)・stop_delay_bars対応。
+# ─────────────────────────────────────────────────────────────
+
+def long_entry_fill_5m(day_bars, trigger_p, entry_gap_limit=None,
+                       day_open=None, day_high=None):
+    """ロングの現実的約定価格(逆指値買い=上ブレイク)。
+    約定 = max(trigger, その日の始値)。寄りがトリガー超(ギャップアップ)なら始値約定(高い=不利)。
+    始値が trigger×(1+limit) を超えるギャップアップは指値上限で約定不可(None)。"""
+    if day_bars is None or day_bars.empty:
+        return None
+    opens = day_bars["open"].to_numpy(dtype=float)
+    highs = day_bars["high"].to_numpy(dtype=float)
+    n = len(opens)
+    ei = None
+    for j in range(n):
+        if highs[j] >= trigger_p:   # 上昇して逆指値買いに到達
+            ei = j
+            break
+    if ei is None:
+        _touched = (day_high is not None and day_high > 0 and day_high >= trigger_p)
+        if not _touched:
+            return None
+    o = float(day_open) if (day_open is not None and day_open > 0) else float(opens[0])
+    fill = max(trigger_p, o)
+    if entry_gap_limit is not None and fill > trigger_p * (1.0 + entry_gap_limit):
+        return None                 # ギャップアップ過大 → 指値上限でキャンセル
+    return float(fill)
+
+
+def long_exit_5m(day_bars, entry_p, stop_p, target_p,
+                 no_target=False, no_stop=False,
+                 day_high=None, day_close=None, stop_delay_bars=0):
+    """ロング(逆指値買い)の同日決済を first-touch で。stop=下側 / target=上側。
+    同バー損切り優先(悲観)・stop_delay_bars(約定バーからK本は損切り無効)対応。
+    Returns: (exit_price, reason, entry_ts, exit_ts)  reason ∈ {target,stop,close,no_entry,no_5m}
+    """
+    if day_bars is None or day_bars.empty:
+        return None, "no_5m", None, None
+    highs = day_bars["high"].to_numpy(dtype=float)
+    lows = day_bars["low"].to_numpy(dtype=float)
+    closes = day_bars["close"].to_numpy(dtype=float)
+    times = day_bars.index
+    n = len(highs)
+    # 約定バー(上昇してトリガー到達)
+    ei = None
+    for j in range(n):
+        if highs[j] >= entry_p:
+            ei = j
+            break
+    if ei is None:
+        _touched = (day_high is not None and day_high > 0 and day_high >= entry_p)
+        if not _touched:
+            return None, "no_entry", None, None
+        ei = 0
+    ent_ts = times[ei]
+    _start = ei
+    _stop_start = ei + max(0, int(stop_delay_bars))
+    for j in range(_start, n):
+        if not no_stop and j >= _stop_start:
+            if lows[j] <= stop_p:          # 下抜け=損切(同バー優先)
+                return stop_p, "stop", ent_ts, times[j]
+        if not no_target:
+            if highs[j] >= target_p:       # 上抜け=利確
+                return target_p, "target", ent_ts, times[j]
+    _close_px = float(day_close) if (day_close is not None and day_close > 0) else float(closes[-1])
+    return _close_px, "close", ent_ts, times[-1]
+
+
+def long_pnl(entry_p, exit_p, reason, qty, fee_one_way, slip):
+    """ロング損益(円)。決済売りは損切り時のみ不利スリッページ(安く売る=不利)。"""
+    exit_eff = exit_p * (1.0 - slip) if reason == "stop" else exit_p
+    fee = (entry_p + exit_eff) * qty * fee_one_way
+    return (exit_eff - entry_p) * qty - fee
