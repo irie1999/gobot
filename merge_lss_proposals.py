@@ -73,8 +73,17 @@ def main():
     ap.add_argument("--out", type=str, default="lss_proposal_merged.py", help="出力ファイル名")
     args = ap.parse_args()
 
+    # 存在するファイルだけ使う(欠損は警告してスキップ=累積の1基準月が未生成でも daily を止めない)。
+    _existing = []
+    for f in args.files:
+        if Path(f).exists():
+            _existing.append(f)
+        else:
+            print(f"[WARN] {f} が見つかりません → スキップ(累積から除外)")
+    args.files = _existing
+
     if len(args.files) < 2:
-        raise SystemExit("[ERROR] マージには2ファイル以上が必要です")
+        raise SystemExit("[ERROR] 有効な proposal が2つ未満です(基準月ファイルを生成してください)")
 
     # 各ファイルの (code, strat) 集合と、code→name / (code,strat)→行 を集める
     per_file_keys: list[set] = []
