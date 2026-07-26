@@ -90,6 +90,13 @@ _pre.add_argument("--mirror",     action="store_true",
                        "ロング銘柄・戦略はそのままに、約定損益を符号反転し max_hold=0 に固定")
 _pre.add_argument("--long-stop-short", dest="long_stop_short", action="store_true",
                   help="ロング銘柄を逆指値の空売り(stop_sell)で評価(下ブレイク継続狙い)")
+_pre.add_argument("--long-daytrade", dest="long_daytrade", action="store_true",
+                  help="ロングデイトレ(逆指値買い=上ブレイク・同日決済)で評価。lssの鏡像。"
+                       "1月などロング有利な相場を取るための検証・銘柄確認用(当面 発注は分析専用)")
+_pre.add_argument("--ldt-proposal", type=str, default=None,
+                  help="ロングデイトレの選定ファイル(scan_long_daytrade が出力する "
+                       "long_watchlist_proposal_*.py / long_proposal_*.py)を銘柄リストとして使う。"
+                       "'auto' で最新の long_watchlist_proposal_*.py を自動検出")
 _pre.add_argument("--lss-proposal", type=str, default=None,
                   help="lss専用の選定ファイル(scan_lss_universe が出力する lss_watchlist_proposal_*.py)を"
                        "銘柄リストとして使う。指定するとWF選定の代わりに SELECTED を全設定共通で使用し、"
@@ -652,6 +659,8 @@ if _args.mirror:
     _cache_short = "_mirror"
 elif _args.long_stop_short:
     _cache_short = "_lss"
+elif getattr(_args, "long_daytrade", False):
+    _cache_short = "_ldt"
 elif _args.short:
     _cache_short = "_short"
 else:
@@ -964,6 +973,61 @@ if _args.long_stop_short and _lss_proposal_file:
               + (f" 非対応{_dropped}除外" if _dropped else "")
               + (f" 空売不可{_ns_dropped}除外" if _ns_dropped else ""))
 
+# ── ロングデイトレ専用選定(scan_long_daytrade の提案)で上書き ────────────────
+# --long-daytrade + --ldt-proposal 指定時は WF選定/フォールバックを捨て、提案 SELECTED を
+# 全設定共通の単一設定として使う(lss の --lss-proposal と同じ経路の鏡像)。ロングなので
+# 空売り不可(not_shortable)の除外は行わない。
+_ldt_proposal_file = None
+if getattr(_args, "long_daytrade", False):
+    _ldt_arg = getattr(_args, "ldt_proposal", None)
+    if _ldt_arg == "auto":
+        _cands = sorted(Path(".").glob("long_watchlist_proposal_*.py"))
+        _ldt_proposal_file = str(_cands[-1]) if _cands else None
+        if _ldt_proposal_file:
+            print(f"[ldt] 提案ファイル自動検出: {_ldt_proposal_file}")
+        else:
+            print("[ldt] long_watchlist_proposal_*.py が見つからず → 既存WATCHLISTでロングデイトレ生成")
+    elif _ldt_arg:
+        _ldt_proposal_file = _ldt_arg
+if getattr(_args, "long_daytrade", False) and _ldt_proposal_file:
+    _CANON_STOP = {"MACDTF", "A7", "RSI2"}
+    _CANON_BRK  = {"DON", "VOLTF", "MOM"}
+    _sel = []
+    try:
+        _pns: dict = {}
+        exec(Path(_ldt_proposal_file).read_text(encoding="utf-8"), _pns)
+        _sel = list(_pns.get("SELECTED", []))
+        _lss_source_bases = dict(_pns.get("SOURCE_BASES") or {})
+    except Exception as _e:
+        print(f"[ldt] 提案ファイル読み込み失敗 {_ldt_proposal_file}: {_e} → 既存選定のまま")
+    if _sel:
+        _canon, _dropped = [], 0
+        for _tup in _sel:
+            if not _tup or len(_tup) < 3:
+                continue
+            _c, _n, _s = _tup[0], _tup[1], _tup[2]
+            if _s in _CANON_STOP or _s in _CANON_BRK:
+                _canon.append((_c, _n, _s))
+            else:
+                _dropped += 1
+        _canon = _filter_wl_by_price(_canon, _args.min_price, _args.max_price)
+        _ldt_top = getattr(_args, "lss_top", 0) or 0
+        if _ldt_top > 0:
+            _canon = _canon[:_ldt_top]
+        _p_stop = [t for t in _canon if t[2] in _CANON_STOP]
+        _p_brk  = [t for t in _canon if t[2] in _CANON_BRK]
+        _ldt_cfg = {
+            "label": "ロングデイトレ選定", "color": "#34d399", "mode": "conservative",
+            "sm_tm": None, "stop_wl": _p_stop, "brk_wl": _p_brk,
+        }
+        for days in _PNL_PERIODS:
+            _period_configs[days] = [_ldt_cfg]
+        print(f"[ldt] 新選定で上書き: {Path(_ldt_proposal_file).name} → "
+              f"価格≤{_args.max_price:,.0f}円で {len(_canon)}ペア"
+              + (f"(上位{_ldt_top}) " if _ldt_top > 0 else " ")
+              + f"[stop {len(_p_stop)}/brk {len(_p_brk)}]"
+              + (f" 非対応{_dropped}除外" if _dropped else ""))
+
 # シグナルタブ用: 全設定を重複なしで結合
 _seen_cfg_labels: set = set()
 _all_configs: list[dict] = []
@@ -1024,17 +1088,30 @@ if _args.long_stop_short:
     _bte._ENTRY_TYPE_FORCE = "stop_sell"   # ロング銘柄を逆指値の空売りで評価
     _bte._MAX_HOLD_FORCE = 0     # 同日決済(日計り)。ミラーと揃える
     print("[LSS] ロング銘柄を逆指値空売り(stop_sell)・同日決済で評価(下ブレイク継続)")
+if getattr(_args, "long_daytrade", False):
+    # ロングデイトレ: 逆指値買い(上ブレイク継続)を本物のロングで同日決済。lssの鏡像。
+    _bte._ENTRY_TYPE_FORCE = "stop"   # 逆指値買い(前日終値+atr*em, em=0→前日終値)
+    _bte._MAX_HOLD_FORCE = 0          # 同日決済(日計り)
+    _bte._LONG_DAYTRADE = True        # 5分足同日決済ブロックを long_* 関数で評価(pnl反転なし)
+    print("[LDT] ロングデイトレ(逆指値買い=上ブレイク)・同日決済で評価(本物のロング)")
 # 同日TP/SL最適幅の適用(mirror/lss のみ)。損益/取引明細/月別すべてがこの幅で計算される。
 # ※同日スイープ自体は build_sameday_tpsl_sweep_html 内で一時的にこの上書きを外すので、
 #   グリッドは常に本来の総当り結果を示す(適用値に引きずられない)。
-if (_args.mirror or _args.long_stop_short):
+if (_args.mirror or _args.long_stop_short or getattr(_args, "long_daytrade", False)):
     # 5分足スイープで確定した最適な同日TP/SL幅(モード別)をデフォルトにする。
     # --mirror-sm / --mirror-tm を明示指定すれば上書き。
     #   ミラー(指値空売り): 損切ATR0.5 / 利確ATR0.1 (long基準。5分足★最良)
     #   ロング銘柄ショート(逆指値空売り): 損切ATR0.1 / 利確ATR1.0 (short基準。5分足★最良)
+    #   ロングデイトレ(逆指値買い): 損切ATR0.1 / 利確ATR1.0 (lssの鏡像。要フォワード検証)
     _MIRROR_OPT = (0.5, 0.1)
     _LSS_OPT    = (0.1, 1.0)
-    _def_sm, _def_tm = _MIRROR_OPT if _args.mirror else _LSS_OPT
+    _LDT_OPT    = (0.1, 1.0)
+    if _args.mirror:
+        _def_sm, _def_tm = _MIRROR_OPT
+    elif _args.long_stop_short:
+        _def_sm, _def_tm = _LSS_OPT
+    else:
+        _def_sm, _def_tm = _LDT_OPT
     _bte._SM_FORCE = _args.mirror_sm if _args.mirror_sm is not None else _def_sm
     _bte._TM_FORCE = _args.mirror_tm if _args.mirror_tm is not None else _def_tm
     _sm_src = "指定" if _args.mirror_sm is not None else "5分足最適(既定)"
@@ -1073,7 +1150,8 @@ if (_args.mirror or _args.long_stop_short):
 
 # mirror/lss は「検証専用」モード: 実発注用の signals_latest.json や共有スコア
 # キャッシュを上書きしない(発注サーバが誤モードのシグナルを掴むのを防ぐ)。
-_analysis_only = bool(_args.mirror or _args.long_stop_short)
+_analysis_only = bool(_args.mirror or _args.long_stop_short
+                      or getattr(_args, "long_daytrade", False))
 
 class _AnalysisOnlySkip(Exception):
     """分析専用モードで JSON/キャッシュ書き出しを飛ばすための番兵。"""
@@ -1122,13 +1200,19 @@ if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
         print(f"[WARN] --date {_args.date} が不正。--forward-days/--back-days を無視します。")
 # ショートモード: トレンド別成績テーブルの表示順・凡例を反転。
 # ミラー(指値空売り)/ロング銘柄ショート も建玉は「売り」なのでショート視点で色付けする。
+# ロングデイトレは本物のロング(買い建玉)なのでショート視点にはしない。
 _na._IS_SHORT_MODE = _args.short or _args.mirror or _args.long_stop_short
 # mirror/lss(ロング銘柄を空売り評価する分析専用)はシグナルタブの発注ボタンが
 # ロング逆指値買いの値を送るため、発注を無効化して誤発注を防ぐ。
 _na._ANALYSIS_ONLY = _analysis_only
 # lss(--long-stop-short)は『信用新規売りの逆指値』として正しく発注できるようにする
 # (side=short・エントリーのみ・同日引け買戻し)。mirror(--mirror)は却下済で発注不可のまま。
-_na._LSS_ORDER_MODE = bool(_args.long_stop_short and not _args.mirror)
+# ロングデイトレ(--long-daytrade)は同日決済レポートの骨格(月別/BT50/予算400万タブ)を
+# lss と共有するため _LSS_ORDER_MODE を立て、向きだけ _LSS_LONG=True で反転する
+# (発注は当面 分析専用=ロング用の同日決済watcherが未整備のため)。
+_na._LSS_ORDER_MODE = bool((_args.long_stop_short or getattr(_args, "long_daytrade", False))
+                           and not _args.mirror)
+_na._LSS_LONG = bool(getattr(_args, "long_daytrade", False) and not _args.mirror)
 # lss の損切/利確ATR倍率(既定0.1/1.0)をレポートの表示計算へ渡す(実際の注文内容に合わせる)。
 _na._LSS_SM = _bte._SM_FORCE if getattr(_bte, "_SM_FORCE", None) is not None else 0.1
 _na._LSS_TM = _bte._TM_FORCE if getattr(_bte, "_TM_FORCE", None) is not None else 1.0
@@ -1142,7 +1226,10 @@ _na._SAMEDAY_SWEEP_INVERTED = bool(_args.mirror)   # mirror=符号反転 / lss=�
 # 5分足版TP/SLスイープ(正確・本命)。5分足が無ければタブ内に注意書き(グレースフル)。
 # ただし --lss-proposal(新選定・取引明細メインの軽量lss)ではスイープ格子は省略する
 # (取引明細の5分足集計自体は _INTRADAY_5M で維持されるので同日損益は正確なまま)。
+# ロングデイトレ(long_daytrade)は 5分足TP/SLスイープ格子(short前提の計算)を出さない。
+# 取引明細の5分足集計は _INTRADAY_5M + _LONG_DAYTRADE で正しく維持される。
 _na._SAMEDAY_5M_TAB = (_analysis_only and not getattr(_args, "no_analysis", False)
+                       and not getattr(_args, "long_daytrade", False)
                        and (not getattr(_args, "lss_proposal", None)
                             or getattr(_args, "lss_tpsl", False)))
 
@@ -1303,7 +1390,9 @@ for _mod_attr in ("_short", "_sbrk"):
 # 逆になるため。ロングBTは同日に先行実行されたロング子プロセスの BTキャッシュ
 # (bt_{bar}.pkl)から読み出す(--both はロング→ショート→mirror→lss の順なので
 # mirror/lss 実行時には存在する)。
-if _analysis_only:
+# ※ ロングデイトレ(long_daytrade)は本物のロングなので現モードBT自体がロングBT。
+#   外部のスイングロングBTで上書きせず、native BT(_eff_long_bt の rec_score)を使う。
+if _analysis_only and not getattr(_args, "long_daytrade", False):
     _long_bt_ref: dict = {}
     _long_cache_file = _bt_cache_dir / f"bt_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"   # ロング(_cache_short="")のキャッシュ(版付き)
     if _long_cache_file.exists():
@@ -1353,9 +1442,11 @@ import json as _json
 
 # lss は専用キャッシュに凍結BTを保存(long/short と (sym,strat,date) キーが衝突するため分離)。
 # これで『シグナルが出た時点のBTスコアを凍結し、以降の再計算で上書きしない』=発注時BTと一致。
-_score_cache_path = Path("signal_score_cache_lss.json"
-                         if getattr(_args, "long_stop_short", False)
-                         else "signal_score_cache.json")
+_score_cache_path = Path("signal_score_cache_ldt.json"
+                         if getattr(_args, "long_daytrade", False)
+                         else ("signal_score_cache_lss.json"
+                               if getattr(_args, "long_stop_short", False)
+                               else "signal_score_cache.json"))
 _score_cache: dict = {}
 if _score_cache_path.exists():
     try:
@@ -1409,6 +1500,8 @@ if _args.mirror:
     _mode_label_ja = f"（ロングミラー・指値空売り/同日決済{_bt_flt_lbl}）"
 elif _args.long_stop_short:
     _mode_label_ja = f"（ロング銘柄ショート・逆指値空売り/同日決済{_bt_flt_lbl}）"
+elif getattr(_args, "long_daytrade", False):
+    _mode_label_ja = f"（ロングデイトレ・逆指値買い/同日決済{_bt_flt_lbl}）"
 elif _args.short:
     _mode_label_ja = "（ショート）"
 else:
@@ -2523,6 +2616,8 @@ if _args.mirror:
     _short_suffix = "_mirror"
 elif _args.long_stop_short:
     _short_suffix = "_lss"
+elif getattr(_args, "long_daytrade", False):
+    _short_suffix = "_ldt"
 elif _args.short:
     _short_suffix = "_short"
 else:

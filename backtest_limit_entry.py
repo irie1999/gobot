@@ -152,6 +152,14 @@ def ceil_to_tick(price: float) -> int:
     t = tick_size(float(price))
     return int(math.ceil(float(price) / t) * t)
 
+def floor_to_tick(price: float) -> int:
+    """TSE呼値単位で「ライン以下の最初のティック」に切り下げる。
+    ロング(逆指値買い)の損切ライン(下側)/利確ライン(上側)を一つ下のティックに置く=
+    ceil_to_tick の鏡写し(早すぎる損切りを避ける・利確は一つ下で判定)。"""
+    import math
+    t = tick_size(float(price))
+    return int(math.floor(float(price) / t) * t)
+
 
 # ── MACD パラメータ ──────────────────────────────────────────────
 MACD_FAST         = 8
@@ -643,6 +651,11 @@ _ENTRY_TYPE_FORCE: str | None = None
 _MAX_HOLD_FORCE: int | None = None
 _SM_FORCE: float | None = None
 _TM_FORCE: float | None = None
+#   _LONG_DAYTRADE : True にすると 5分足同日決済ブロックを「ロング(逆指値買い=上ブレイク・
+#                    同日決済)」で評価する(mirror/lss は空売り=売りだが、これは本物のロング)。
+#                    long_entry_fill_5m/long_exit_5m/long_pnl を使い pnl は符号反転しない。
+#                    entry_type="stop"(逆指値買い)+ _MAX_HOLD_FORCE=0 と組で使う。
+_LONG_DAYTRADE: bool = False
 
 #   _INTRADAY_5M : True にすると、同日決済(max_hold=0)トレードの決済を5分足の実際の
 #                  値動き順(first-touch)で作り直す。mirror/lss の取引明細・KPI・月別を
@@ -1153,7 +1166,12 @@ def run_limit_backtest(
     _nofill_log: list = []   # 発注はしたが不約定(トリガー未達/ギャップ過大)。予算シミュの枠消費用。
     if _INTRADAY_5M:
         from sameday5m_firsttouch import (short_exit_5m as _se5, short_pnl as _sp5,
-                                          short_entry_fill_5m as _sef5)
+                                          short_entry_fill_5m as _sef5,
+                                          long_exit_5m as _le5, long_pnl as _lp5,
+                                          long_entry_fill_5m as _lef5)
+        # ロングデイトレ(逆指値買い=上ブレイク・同日決済)は本物のロング(買い→同日売り)。
+        # mirror/lss は空売り(売り→同日買戻し)。_LONG_DAYTRADE で約定/決済/損益の向きを切替。
+        _dt_long = bool(_LONG_DAYTRADE)
         _is_rise = (entry_type == "stop")   # mirror=上昇約定 / lss(stop_sell)=下落約定
         _bd = _load_5m_by_day(symbol)
         _new = []
@@ -1198,9 +1216,16 @@ def run_limit_backtest(
             # これで損切/利確は検証済みモデルと一致し、寄りヒゲで刈られにくい(例:応用地質
             # 損切2,835で寄り高値2,830はタイムカット)。トリガーのみ実注文2,825に一致。
             _base = round_to_tick(_lp)                             # 前日終値(呼値)
-            _lp = float(round_to_tick(_base - tick_size(_base)))   # トリガー=前日終値-1tick(約定用のみ)
-            _stop_p = float(ceil_to_tick(max(_osp, _otp)))         # 損切=前日終値+atr*sm(ceil)
-            _tgt_p = float(ceil_to_tick(min(_osp, _otp)))          # 利確=前日終値-atr*tm(ceil)
+            if _dt_long:
+                # ロング(逆指値買い): トリガー=前日終値+1tick(現在値以下だと即約定で弾かれる)。
+                # 損切=下=floor / 利確=上=floor(ceil_to_tick の鏡写し=一つ下で判定・早すぎる損切り回避)。
+                _lp = float(round_to_tick(_base + tick_size(_base)))   # トリガー=前日終値+1tick(約定用)
+                _stop_p = float(floor_to_tick(min(_osp, _otp)))       # 損切=前日終値-atr*sm(下, floor)
+                _tgt_p = float(floor_to_tick(max(_osp, _otp)))        # 利確=前日終値+atr*tm(上, floor)
+            else:
+                _lp = float(round_to_tick(_base - tick_size(_base)))   # トリガー=前日終値-1tick(約定用のみ)
+                _stop_p = float(ceil_to_tick(max(_osp, _otp)))         # 損切=前日終値+atr*sm(ceil)
+                _tgt_p = float(ceil_to_tick(min(_osp, _otp)))          # 利確=前日終値-atr*tm(ceil)
             _qty = _t.get("qty", FIXED_QTY)
             # 日足の始値/安値/高値/終値。5分足の寄り(09:00-09:05)欠落や引けギャップを日足で補う。
             #  ・始値: 約定価格の寄り基準。 ・安値/高値: トリガー到達の最終判定(欠落バー救済)。
@@ -1223,10 +1248,15 @@ def run_limit_backtest(
                             _day_close = float(_drow["close"].iloc[0])
                     except Exception:
                         _day_open = _day_low = _day_high = _day_close = None
-                _entry_fill = _sef5(_db, _lp, _is_rise,
-                                    entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
-                                    day_open=_day_open,
-                                    day_low=_day_low, day_high=_day_high)
+                if _dt_long:
+                    _entry_fill = _lef5(_db, _lp,
+                                        entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
+                                        day_open=_day_open, day_high=_day_high)
+                else:
+                    _entry_fill = _sef5(_db, _lp, _is_rise,
+                                        entry_gap_limit=_INTRADAY_5M_ENTRY_GAP_LIMIT,
+                                        day_open=_day_open,
+                                        day_low=_day_low, day_high=_day_high)
                 if _entry_fill is None:
                     # ギャップ過大 or 終日トリガー未達 → 約定不成立だが発注はした → 枠消費用に記録。
                     _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
@@ -1237,26 +1267,37 @@ def run_limit_backtest(
             _gap_entry = abs(_entry_fill - _lp) > 1e-9
             # 決済判定はトリガー基準の stop/target で行う(注文はシグナル時に確定済み)。
             # 損切り遅延は lss(下落約定=stop_sell)のみ。mirror(is_rise)には適用しない。
-            _sd_bars = _LSS_STOP_DELAY_BARS if not _is_rise else 0
-            _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
-                                               on_close=_INTRADAY_5M_ON_CLOSE,
-                                               include_entry_bar=_gap_entry,
-                                               day_low=_day_low, day_high=_day_high,
-                                               day_close=_day_close,
-                                               stop_delay_bars=_sd_bars)
+            _sd_bars = _LSS_STOP_DELAY_BARS if (_dt_long or not _is_rise) else 0
+            if _dt_long:
+                _xp, _rsn, _ent_ts, _ext_ts = _le5(_db, _lp, _stop_p, _tgt_p,
+                                                   day_high=_day_high,
+                                                   day_close=_day_close,
+                                                   stop_delay_bars=_sd_bars)
+            else:
+                _xp, _rsn, _ent_ts, _ext_ts = _se5(_db, _lp, _stop_p, _tgt_p, _is_rise,
+                                                   on_close=_INTRADAY_5M_ON_CLOSE,
+                                                   include_entry_bar=_gap_entry,
+                                                   day_low=_day_low, day_high=_day_high,
+                                                   day_close=_day_close,
+                                                   stop_delay_bars=_sd_bars)
             if _rsn == "no_5m":
                 continue   # データ欠 → 不約定扱いにしない
             if _rsn == "no_entry":
                 # 終日トリガー未達 → 不約定だが発注はした → 枠消費用に記録。
                 _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
-            # 損益は現実的な約定価格(_entry_fill)基準。
-            _pnl = _sp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
+            # 損益は現実的な約定価格(_entry_fill)基準。ロングは long_pnl(買い→売り)。
+            if _dt_long:
+                _pnl = _lp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
+            else:
+                _pnl = _sp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)
             _t["entry_p"] = _entry_fill
             _t["exit_p"] = _xp
             _t["exit_dt"] = _ext_ts if _ext_ts is not None else _t.get("exit_dt")
             _t["reason"] = _5M_REASON_JA.get(_rsn, _rsn)
             _t["pnl"] = _pnl
-            _t["pct"] = (_entry_fill - _xp) / _entry_fill * 100 if _entry_fill else 0.0
+            # ロング=(売値-買値)/買値、ショート=(売値-買戻)/売値
+            _t["pct"] = (((_xp - _entry_fill) if _dt_long else (_entry_fill - _xp))
+                         / _entry_fill * 100) if _entry_fill else 0.0
             _t["hold_days"] = 0
             _t["fee"] = round((_entry_fill + _xp) * _qty * FEE_PCT_ONE_WAY, 0)
             _new.append(_t)

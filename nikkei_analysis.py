@@ -201,6 +201,12 @@ _ANALYSIS_ONLY: bool = False
 # (同日引けの買戻しは手動 or close_stop_guard で対応)。mirror(却下)は対象外。
 _LSS_ORDER_MODE: bool = False
 
+# _LSS_ORDER_MODE の「向き」フラグ。False(既定)=lss(逆指値空売り・売り建玉)。
+# True=ロングデイトレ(逆指値買い=上ブレイク・同日決済/買い建玉)。同日決済レポートの
+# 骨格(月別/BT50/予算400万タブ)は共通で使い、発注side・損切(下)/利確(上)・ラベルだけ
+# ロング向きに反転する。run_signals_holdout_all の --long-daytrade で立てる。
+_LSS_LONG: bool = False
+
 # lss の損切/利確 ATR倍率(実際の注文内容に合わせた表示計算に使う)。
 # run_signals_holdout_all が _bte._SM_FORCE/_TM_FORCE(既定 0.1/1.0)から設定する。
 _LSS_SM: float = 0.1
@@ -2364,7 +2370,27 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             # 注文数量(qty)は long stop から算出するので stop_p/target_p は温存する。
             _lss_stop = _lss_target = _lss_hold = _lss_exit = _lss_sigprice = None
             _lss_limit = limit_p
-            if _LSS_ORDER_MODE and order_p:
+            if _LSS_ORDER_MODE and _LSS_LONG and order_p:
+                # ロングデイトレ(逆指値買い=上ブレイク・同日決済)。check_signal_on_date が返す
+                # ロング値(order_p=前日終値+atr*em[em=0→前日終値] / 損切=下 / 目標=上)は
+                # そのまま正しい。トリガーだけ「前日終値+1ティック」に置く(逆指値買いは現在値
+                # 以下だと即約定で弾かれるため)。指値上限=+3%。損切=下/目標=上は反転しない
+                # (_lss_stop/_lss_target=None のまま=ロング値 stop_p/target_p を表示)。
+                try:
+                    from backtest_limit_entry import (round_to_tick as _r2t,
+                                                      tick_size as _tsz)
+                    _lss_sigprice = order_p                         # シグナル日時株価=前日終値
+                    order_p = _r2t(order_p + _tsz(order_p))         # トリガー=前日終値+1ティック(約定用)
+                    _lss_limit = _r2t(order_p * (1.0 + 0.03))       # 発動後の指値上限(トリガー+3%)
+                    _lss_hold  = "同日"                             # 同日決済(max_hold=0)
+                    try:
+                        _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
+                                                    periods=2)[-1].date()
+                    except Exception:
+                        _lss_exit = _max_exit
+                except Exception:
+                    pass
+            elif _LSS_ORDER_MODE and order_p:
                 try:
                     from backtest_limit_entry import (round_to_tick as _r2t,
                                                       tick_size as _tsz,
@@ -2922,7 +2948,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         # lss は同日決済。利確(下)・損切(上)は placed_orders に記録され、日中は
         # lss_exit_watcher.py が価格監視して先着で成行決済する(order_server 側は
         # lss には自動利確を置かない=ポーリングと二重にしない)。
-        _side   = "short" if (str(s["strategy"]).upper().endswith("_S") or _LSS_ORDER_MODE) else "long"
+        _side   = ("long" if _LSS_LONG
+                   else ("short" if (str(s["strategy"]).upper().endswith("_S") or _LSS_ORDER_MODE)
+                         else "long"))
         # lss は損切=上/利確=下(空売り)。発注ログ(placed_orders)に実際の値を記録する。
         _ord_target = (s.get("lss_target") or s['target_p']) if _is_lss_row else s['target_p']
         _ord_stop   = (s.get("lss_stop") or s['stop_p']) if _is_lss_row else s['stop_p']
@@ -2949,12 +2977,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
                      f'white-space:nowrap">📥 登録</a>')
-        if _ANALYSIS_ONLY and not _LSS_ORDER_MODE:
+        if _ANALYSIS_ONLY and (not _LSS_ORDER_MODE or _LSS_LONG):
             # mirror(却下済): 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
-            # 分析専用なので無効化し、注意書きに置き換える。
+            # ロングデイトレ(_LSS_LONG): 値は正しいロング逆指値買いだが、同日決済の自動決済
+            # (ロング用watcher)が未整備なので、当面は分析専用として発注を無効化する。
+            # どちらも分析専用なので無効化し、注意書きに置き換える。
             _reg_btn = ('<div style="text-align:center;color:#f87171;font-size:0.7rem;'
                         'line-height:1.3">🚫 発注不可<br><span style="color:#94a3b8">分析専用'
-                        '<br>(値はロング)</span></div>')
+                        + ('<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
+                        + '</span></div>')
         else:
             _reg_btn = (f'<div style="display:flex;flex-direction:column;gap:2px;'
                         f'align-items:center">{_ord_btn}{_reg_link}</div>')
@@ -3104,7 +3135,18 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
         '発注済み <b style="color:#f87171">0件</b> 合計 <b>¥0</b></span>'
         '<button type="button" onclick="gobotResetOrdered()">発注済みをリセット</button>'
         '</div>')
-    if _LSS_ORDER_MODE:
+    if _LSS_ORDER_MODE and _LSS_LONG:
+        # ロングデイトレ タブ: 逆指値買い(上ブレイク)・同日決済。発注は当面 分析専用。
+        _analysis_warn = (
+            '<div style="margin:10px 0;padding:12px 16px;background:#14312b;border:1px solid #34d399;'
+            'border-radius:8px;color:#a7f3d0;font-size:0.86rem;line-height:1.6">'
+            '📈 <b>このタブは ロングデイトレ(逆指値買い=上ブレイク・同日決済)です。</b><br>'
+            'トリガー=<b>前日終値+1ティック</b>(以上で発動 / 発動後 +3%上限指値)、'
+            '<b>損切り=下 / 目標=上</b>(5分足OCOの基準値)。約定したら<b>その日の引けに売り</b>で決済します。<br>'
+            '⚠ 同日決済の自動決済(ロング用watcher)が未整備のため、'
+            '<b>このタブからの発注は当面無効化</b>しています(検証・銘柄確認用)。'
+            'lss が強い相場(5-7月)の裏で、ロング有利な相場(1月など)を取るための鏡像戦略です。</div>')
+    elif _LSS_ORDER_MODE:
         # lss タブ: 発注ボタンは『信用新規売りの逆指値』として正しく送られる。
         _analysis_warn = (
             '<div style="margin:10px 0;padding:12px 16px;background:#1e293b;border:1px solid #38bdf8;'
@@ -3150,8 +3192,8 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     <th>売買代金<br><small>/日</small></th>
     <th>シグナル日<br>時株価</th>
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
-    <th style="color:#f59e0b">{'指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)'}</th>
-    <th>{'損切り(上)' if _LSS_ORDER_MODE else '損切り(-)'}</th><th>{'目標(下)' if _LSS_ORDER_MODE else '目標(+)'}</th>
+    <th style="color:#f59e0b">{'指値上限<br>(+3%)' if _LSS_LONG else ('指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)')}</th>
+    <th>{'損切り(下)' if _LSS_LONG else ('損切り(上)' if _LSS_ORDER_MODE else '損切り(-)')}</th><th>{'目標(上)' if _LSS_LONG else ('目標(下)' if _LSS_ORDER_MODE else '目標(+)')}</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>
   </tr></thead>
