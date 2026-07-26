@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,7 +29,37 @@ from pathlib import Path
 import pandas as pd
 from dateutil import tz as _dtz
 
-from jquants_fetch import get_client
+# .env 読み込み(jquants_fetch と同じ近隣探索を流用)
+try:
+    import jquants_fetch as _jf  # 副作用で .env をロード
+except Exception:
+    pass
+
+
+def get_client():
+    """追加データ(空売り/信用/決算/貸借等)は V1 の jquantsapi.Client にある。
+    新J-QuantsのAPI Key はリフレッシュトークン相当なので refresh_token として渡す。
+    ダメなら MAIL/PASSWORD にフォールバック。"""
+    import jquantsapi
+    api_key = os.environ.get("JQUANTS_API_KEY")
+    errs = []
+    if api_key:
+        for kw in (dict(refresh_token=api_key),):
+            try:
+                return jquantsapi.Client(**kw)
+            except Exception as e:
+                errs.append(f"refresh_token: {e}")
+    mail = (os.environ.get("JQUANTS_MAIL_ADDRESS") or os.environ.get("JQUANTS_MAIL")
+            or os.environ.get("JQUANTS_EMAIL"))
+    pw = os.environ.get("JQUANTS_PASSWORD")
+    if mail and pw:
+        try:
+            return jquantsapi.Client(mail_address=mail, password=pw)
+        except Exception as e:
+            errs.append(f"mail/password: {e}")
+    raise RuntimeError(
+        "V1 Client(jquantsapi.Client) の認証に失敗。JQUANTS_API_KEY をrefresh_tokenとして使うか、"
+        "JQUANTS_MAIL_ADDRESS + JQUANTS_PASSWORD を .env に設定してください。\n  " + " / ".join(errs))
 
 # 取得名 -> jquantsapi クライアントのメソッド名
 DATASETS = {
