@@ -288,6 +288,19 @@ def _auto_update_minute():
 if not getattr(_args, "no_minute_update", False):
     _auto_update_minute()
 
+# 5分足の鮮度チェック: lss/mirror/ロングデイトレ(同日5分足を使うモード)や --both のとき、
+# ローカル5分足が最新営業日まで揃っているかを判定し、古ければ警告する(更新失敗の検知)。
+# --both の子プロセスで重複表示しないよう env で1プロセスツリー1回に制限する。
+_uses_5m = (_args.both or _args.mirror or _args.long_stop_short
+            or getattr(_args, "long_daytrade", False))
+if _uses_5m and os.environ.get("_5M_FRESH_CHECKED") != "1":
+    os.environ["_5M_FRESH_CHECKED"] = "1"   # 子プロセス(subprocess)は env を継承しスキップ
+    try:
+        from check_5m_freshness import check_freshness
+        check_freshness(verbose=True)
+    except Exception as _e:
+        print(f"[5分足鮮度] チェック省略({_e})", flush=True)
+
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
 if _args.both and not _args.short:
     import subprocess as _sp
