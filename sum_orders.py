@@ -41,11 +41,16 @@ def _trigger_price(o: dict) -> float:
 
 
 def _is_active(o: dict) -> bool:
-    """注文中(未約定で有効)か。State/OrderState=5(終了)や全約定は除外。"""
-    st = int(o.get("State") or o.get("OrderState") or 0)
-    if st == 5:                      # 終了(約定完了/失効/取消済)
+    """注文中(未約定で有効)か。
+    kabu: State 1待機/2処理中/3処理済/4取消送信/5終了 だが「処理済(3)」でも
+    OrderState 側で細分(1:待機 2:処理中 3:処理済 4:訂正取消 5:終了)。
+    逆指値の予約や発注中は State/OrderState<5 で残数量>0。厳しすぎると全部消えるので、
+    『State<5 かつ 未約定数量>0』を有効とみなす(約定済・取消済・失効は State=5)。"""
+    st  = int(o.get("State") or 0)
+    ost = int(o.get("OrderState") or 0)
+    if st == 5 or ost == 5:          # 終了(約定完了/失効/取消済)
         return False
-    qty = float(o.get("Qty") or 0)
+    qty = float(o.get("OrderQty") or o.get("Qty") or 0)
     cum = float(o.get("CumQty") or 0)
     return (qty - cum) > 0           # 未約定数量が残っている
 
@@ -67,7 +72,7 @@ def main():
         sym = str(o.get("Symbol") or "")
         name = str(o.get("SymbolName") or "")
         side = _SIDE.get(str(o.get("Side")), str(o.get("Side")))
-        qty = float(o.get("Qty") or 0)
+        qty = float(o.get("OrderQty") or o.get("Qty") or 0)   # kabuは OrderQty
         cum = float(o.get("CumQty") or 0)
         rem = qty - cum
         st = int(o.get("State") or o.get("OrderState") or 0)
