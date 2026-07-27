@@ -9648,9 +9648,17 @@ function switchTbd(id, tab) {{
         _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
         return _out
 
-    # 予算タブは _BT_TAB_MIN(既定50)以上のみで発注。BT降順で埋めるので実質高BTのみだが、
-    # 下限を明示的に _BT_TAB_MIN に揃える(『BT50以上』表示と一致)。
-    _budget_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN))
+    # 予算タブの発注下限(BTフロア)。既定は _BT_TAB_MIN と揃える(従来=『BT50以上』表示と一致)が、
+    # env LSS_BUDGET_FLOOR_BT で明細タブとは独立に変更できる(例=40: 予算だけBT40まで裾を拾う)。
+    # ラベルもこの値を使うので表示と実際のフロアが常に一致する。
+    _BUD_FLOOR = max(_BUD_MIN_BT, _BT_TAB_MIN)
+    try:
+        _bf_env = os.environ.get("LSS_BUDGET_FLOOR_BT", "").strip()
+        if _bf_env:
+            _BUD_FLOOR = max(30, int(_bf_env))
+    except Exception:
+        pass
+    _budget_entry_sorted = _run_budget_sim(_BUD_FLOOR)
     # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
@@ -12224,7 +12232,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
-            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BUD_FLOOR}以上) '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
