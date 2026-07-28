@@ -1295,6 +1295,14 @@ def run_limit_backtest(
             _t["exit_dt"] = _ext_ts if _ext_ts is not None else _t.get("exit_dt")
             _t["reason"] = _5M_REASON_JA.get(_rsn, _rsn)
             _t["pnl"] = _pnl
+            # 約定した5分足バーの【開始】時刻(HH:MM)。約定時刻別の成績分析(#9)専用の表示フィールド。
+            # pnl・選定・予算・発注には一切使わない(現行システムに影響なし)。
+            # 注意: これは約定足の"開始"なので、実際の約定は [entry_time, entry_time+5分) の窓内。
+            #   例 "09:15" = 09:15〜09:20 の約定。カットオフ解釈時は5分窓を考慮のこと。
+            try:
+                _t["entry_time"] = _ent_ts.strftime("%H:%M") if _ent_ts is not None else ""
+            except Exception:
+                _t["entry_time"] = ""
             # ロング=(売値-買値)/買値、ショート=(売値-買戻)/売値
             _t["pct"] = (((_xp - _entry_fill) if _dt_long else (_entry_fill - _xp))
                          / _entry_fill * 100) if _entry_fill else 0.0

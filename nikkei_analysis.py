@@ -7685,6 +7685,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     "order_limit":  t.get("order_limit", 0),
                     "order_stop":   t.get("order_stop", 0),
                     "order_target": t.get("order_target", 0),
+                    "entry_time":   t.get("entry_time", ""),   # 約定5分足の開始時刻(#9・CSV用)
                     "signal_dt_raw": _sdt_raw.date() if hasattr(_sdt_raw, "date") else _sdt_raw,
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
@@ -9277,7 +9278,7 @@ function switchTbd(id, tab) {{
                 _cols = ["entry_date", "exit_date", "symbol", "name", "strategy",
                          "bt", "wf", "reason", "order_limit", "entry_p", "exit_p",
                          "stop_price", "target_price", "qty", "hold_days",
-                         "liquidity", "mode", "pnl"]
+                         "liquidity", "mode", "pnl", "entry_time"]
                 with open(_trades_csv, "w", newline="", encoding="utf-8-sig") as _f2:
                     _w2 = _csvmod2.writer(_f2)
                     _w2.writerow(_cols)
@@ -9293,6 +9294,7 @@ function switchTbd(id, tab) {{
                             _t.get("target_price", ""), _t.get("qty", ""),
                             _t.get("hold_days", ""), _t.get("liquidity", ""),
                             _t.get("mode", ""), _t.get("pnl", ""),
+                            _t.get("entry_time", ""),   # 約定5分足の開始時刻 HH:MM(#9・約定時刻分析用)
                         ])
                 print(f"[全取引CSV] {_trades_csv} に {len(_rows_out)}件を出力", flush=True)
         except Exception as _te:
