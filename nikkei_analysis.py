@@ -9431,13 +9431,12 @@ function switchTbd(id, tab) {{
 
     # BT40以上バンド: BTスコア40以上(=質の高い銘柄)だけを抽出。
     # 分析でBT<40はPF1.4/薄利、BT≥40はPF3〜6.5と判明したため、良い層をハイライトする。
-    # BTは現モードで測ると mirror/lss で符号反転するため、_LONG_BT_REF があれば
-    # “ロングの”BTで判定する(無ければ現モードのシグナル時BT=rec_score)。
+    # 予算・BTxxタブの足切り/並べ替えは【画面表示のBT(rec_score=凍結シグナル時BT)】と一致させる。
+    #   旧実装は _LONG_BT_REF(別測定のロングBT・BTキャッシュ由来)を優先していたため、
+    #   「表示はBT76なのに予算タブでは別BTで40未満と判定され足切り」→ BTキャッシュ再構築の
+    #   たびに40ラインを跨いで 200↔100 とフリッカーするバグがあった(#9 三井E&S VOLTF)。
+    #   表示と一致させ、凍結BT(signal_score_cache由来=安定)で判定することで解消。
     def _eff_long_bt(t) -> float:
-        if _LONG_BT_REF:
-            _v = _LONG_BT_REF.get((t.get("symbol"), t.get("strategy")))
-            if _v is not None:
-                return _v
         return t.get("rec_score") or 0
     # 「BTスコア○以上」タブの下限。既定50(env LSS_BT_TAB_MIN で変更可。30に戻すなら =30)。
     _BT_TAB_MIN = int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
@@ -9575,8 +9574,8 @@ function switchTbd(id, tab) {{
     )
     _bt70_entry_by_date, _sorted_bt70_entry_dates = _build_entry_grid(_bt70_entry_sorted, "b")
 
-    # BT40以上(質の高い銘柄)のエントリー日別グリッド。mirror/lss では
-    # _LONG_BT_REF(ロングの真のBT)で判定(_eff_long_bt)。
+    # BT40以上(質の高い銘柄)のエントリー日別グリッド。判定は _eff_long_bt
+    # (=表示のシグナル時BT rec_score。mirror/lss も表示と一致・安定)。
     _bt40_entry_sorted = pending_trades + sorted(
         [t for t in done_trades if _eff_long_bt(t) >= _BT_TAB_MIN],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
@@ -12677,7 +12676,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_bt40" class="detail-tab-pane">
 <p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">
-🎯 BTスコア{_BT_TAB_MIN}以上だけを抽出。{('別途測定したロングBTで判定' if _LONG_BT_REF else 'このレポートのシグナル時BTで判定')}。{len(bt40_trades)}件。</p>
+🎯 BTスコア{_BT_TAB_MIN}以上だけを抽出。このレポートのシグナル時BT(表示BTと同一)で判定。{len(bt40_trades)}件。</p>
 <table>
   <thead><tr>
     <th>決済日</th>
