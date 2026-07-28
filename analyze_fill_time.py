@@ -191,7 +191,7 @@ def _scan_symbol(sym, name, strats):
                 continue
             ts = pd.Timestamp(ent_ts)
             mod_day = ts.hour * 60 + ts.minute
-            local.append((mod_day, pnl, reason))
+            local.append((fd, mod_day, pnl, reason))
         if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
             continue
         out.extend(local)
@@ -230,7 +230,7 @@ def main():
     print(f"[分析] {len(syms)}銘柄 / 遡及{args.days}日 / 価格{args.min_price:.0f}-{args.max_price:.0f} "
           f"/ BT{args.bt_min:.0f}以上")
 
-    all_items = []   # (minute_of_day, pnl, reason)
+    all_items = []   # (date, minute_of_day, pnl, reason)
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, c, v["name"], v["strats"]): c for c, v in syms}
         done = 0
@@ -249,7 +249,7 @@ def main():
 
     # 時間帯別
     buckets = defaultdict(list)
-    for mday, pnl, reason in all_items:
+    for fd, mday, pnl, reason in all_items:
         buckets[_bucket(mday)].append((pnl, reason))
     print(f"\n=== 約定時刻別(BT{args.bt_min:.0f}以上・{len(all_items)}トレード) ===")
     print(f"{'時間帯':<18}{'件数':>6}{'総損益':>12}{'1取引':>8}{'勝率':>6}{'PF':>6}{'損切率':>7}")
@@ -265,12 +265,34 @@ def main():
     print(f"{'締切':<10}{'件数':>6}{'総損益':>12}{'1取引':>8}{'勝率':>6}{'PF':>6}")
     for h, m in _CUTOFFS:
         lim = h * 60 + m
-        items = [(p, r) for md, p, r in all_items if md < lim]
+        items = [(p, r) for fd, md, p, r in all_items if md < lim]
         s = _stat(items)
         if not s:
             continue
         n, tot, per, wr, pf, _ = s
         print(f"{f'〜{h:02d}:{m:02d}':<10}{n:>6}{tot:>+12,.0f}{per:>+8,.0f}{wr:>5.0f}%{_pf(pf):>6}")
+
+    # ── 月別 頑健性: 寄り(〜09:15) vs 遅い(09:15以降) が全月で一貫するか ──
+    _CUT = 9 * 60 + 15
+    mon = defaultdict(lambda: {"e": [], "l": []})
+    for fd, mday, pnl, reason in all_items:
+        ym = str(fd)[:7]
+        (mon[ym]["e"] if mday < _CUT else mon[ym]["l"]).append(pnl)
+    print(f"\n=== 月別: 寄り(〜09:15) vs 遅い(09:15以降) の純損益(頑健性確認) ===")
+    print(f"{'月':>9}{'寄り件':>6}{'寄り損益':>12}{'遅い件':>6}{'遅い損益':>12}"
+          f"{'遅い1取引':>10}{'切る効果':>11}")
+    n_late_neg = n_early_pos = n_tot = 0
+    for ym in sorted(mon):
+        e, l = mon[ym]["e"], mon[ym]["l"]
+        es, ls = sum(e), sum(l)
+        lp = ls / len(l) if l else 0.0
+        n_tot += 1
+        n_late_neg += 1 if ls < 0 else 0            # 遅いがマイナス=切ると得
+        n_early_pos += 1 if es > 0 else 0           # 寄りがプラス
+        print(f"{ym:>9}{len(e):>6}{es:>+12,.0f}{len(l):>6}{ls:>+12,.0f}"
+              f"{lp:>+10,.0f}{-ls:>+11,.0f}")
+    print(f"  → 寄りがプラスだった月: {n_early_pos}/{n_tot} / "
+          f"遅いがマイナス(=09:15カットオフが得)だった月: {n_late_neg}/{n_tot}")
 
     date_s = str(TODAY.date())
     rows = []
