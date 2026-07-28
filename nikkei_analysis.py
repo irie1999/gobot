@@ -7685,7 +7685,6 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     "order_limit":  t.get("order_limit", 0),
                     "order_stop":   t.get("order_stop", 0),
                     "order_target": t.get("order_target", 0),
-                    "entry_time":   t.get("entry_time", ""),   # 約定5分足の時刻 HH:MM(#9・CSV用)
                     "signal_dt_raw": _sdt_raw.date() if hasattr(_sdt_raw, "date") else _sdt_raw,
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
@@ -9278,7 +9277,7 @@ function switchTbd(id, tab) {{
                 _cols = ["entry_date", "exit_date", "symbol", "name", "strategy",
                          "bt", "wf", "reason", "order_limit", "entry_p", "exit_p",
                          "stop_price", "target_price", "qty", "hold_days",
-                         "liquidity", "mode", "pnl", "entry_time"]
+                         "liquidity", "mode", "pnl"]
                 with open(_trades_csv, "w", newline="", encoding="utf-8-sig") as _f2:
                     _w2 = _csvmod2.writer(_f2)
                     _w2.writerow(_cols)
@@ -9294,7 +9293,6 @@ function switchTbd(id, tab) {{
                             _t.get("target_price", ""), _t.get("qty", ""),
                             _t.get("hold_days", ""), _t.get("liquidity", ""),
                             _t.get("mode", ""), _t.get("pnl", ""),
-                            _t.get("entry_time", ""),   # 約定した5分足バーの時刻 HH:MM(#9用)
                         ])
                 print(f"[全取引CSV] {_trades_csv} に {len(_rows_out)}件を出力", flush=True)
         except Exception as _te:
@@ -9650,17 +9648,9 @@ function switchTbd(id, tab) {{
         _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
         return _out
 
-    # 予算タブの発注下限(BTフロア)。既定は _BT_TAB_MIN と揃える(従来=『BT50以上』表示と一致)が、
-    # env LSS_BUDGET_FLOOR_BT で明細タブとは独立に変更できる(例=40: 予算だけBT40まで裾を拾う)。
-    # ラベルもこの値を使うので表示と実際のフロアが常に一致する。
-    _BUD_FLOOR = max(_BUD_MIN_BT, _BT_TAB_MIN)
-    try:
-        _bf_env = os.environ.get("LSS_BUDGET_FLOOR_BT", "").strip()
-        if _bf_env:
-            _BUD_FLOOR = max(30, int(_bf_env))
-    except Exception:
-        pass
-    _budget_entry_sorted = _run_budget_sim(_BUD_FLOOR)
+    # 予算タブは _BT_TAB_MIN(既定50)以上のみで発注。BT降順で埋めるので実質高BTのみだが、
+    # 下限を明示的に _BT_TAB_MIN に揃える(『BT50以上』表示と一致)。
+    _budget_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN))
     # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
@@ -12234,7 +12224,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
-            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BUD_FLOOR}以上) '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (

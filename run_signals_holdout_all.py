@@ -288,19 +288,6 @@ def _auto_update_minute():
 if not getattr(_args, "no_minute_update", False):
     _auto_update_minute()
 
-# 5分足の鮮度チェック: lss/mirror/ロングデイトレ(同日5分足を使うモード)や --both のとき、
-# ローカル5分足が最新営業日まで揃っているかを判定し、古ければ警告する(更新失敗の検知)。
-# --both の子プロセスで重複表示しないよう env で1プロセスツリー1回に制限する。
-_uses_5m = (_args.both or _args.mirror or _args.long_stop_short
-            or getattr(_args, "long_daytrade", False))
-if _uses_5m and os.environ.get("_5M_FRESH_CHECKED") != "1":
-    os.environ["_5M_FRESH_CHECKED"] = "1"   # 子プロセス(subprocess)は env を継承しスキップ
-    try:
-        from check_5m_freshness import check_freshness
-        check_freshness(verbose=True)
-    except Exception as _e:
-        print(f"[5分足鮮度] チェック省略({_e})", flush=True)
-
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
 if _args.both and not _args.short:
     import subprocess as _sp
@@ -1304,18 +1291,12 @@ except Exception:
 #   v13: 同バー損切り(悲観=損切り優先)。約定した5分足の中で損切りラインに触れていれば損切り
 #        扱いに(旧は約定バーを飛ばし後の目標達成を誤計上。例:4092は約定5,710→同足5,770で損切り
 #        なのに+41,901円と計上)。short_exit_5m を常に約定バー(ei)から判定(2026-07-24)
-_BT_LOGIC_VER = "v13et"   # et: エンジンが約定時刻entry_timeを記録(#9)。旧v13キャッシュの
-                          # trade_logにはentry_timeが無くCSVが空になるため版を上げて1回だけ再構築
+_BT_LOGIC_VER = "v13"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
-# 約定時刻カットオフ(env LSS_ENTRY_TIME_CUTOFF="0915" 等)。9:15以降の約定を非約定扱いに
-# するので損益が変わる → キャッシュを別管理(ec<HHMM>を版トークンに付与)。既定=無効=付与なし。
-_LSS_ENTRY_CUT = os.environ.get("LSS_ENTRY_TIME_CUTOFF", "").strip().replace(":", "")
-if _LSS_ENTRY_CUT:
-    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}ec{_LSS_ENTRY_CUT}"
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。
