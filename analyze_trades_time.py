@@ -1,4 +1,4 @@
-"""analyze_trades_time.py — レポートのlss取引CSV(LSS_TRADES_CSV 出力)を読んで、
+r"""analyze_trades_time.py — レポートのlss取引CSV(LSS_TRADES_CSV 出力)を読んで、
 約定時刻別の成績と時間カットオフを集計する。#9の"決定版"。
 
 なぜこれが正しいか:
