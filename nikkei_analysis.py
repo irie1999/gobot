@@ -7685,6 +7685,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     "order_limit":  t.get("order_limit", 0),
                     "order_stop":   t.get("order_stop", 0),
                     "order_target": t.get("order_target", 0),
+                    "entry_time":   t.get("entry_time", ""),   # 約定5分足の時刻 HH:MM(#9・CSV用)
                     "signal_dt_raw": _sdt_raw.date() if hasattr(_sdt_raw, "date") else _sdt_raw,
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
