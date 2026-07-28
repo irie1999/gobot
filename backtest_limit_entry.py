@@ -1293,6 +1293,11 @@ def run_limit_backtest(
             _t["entry_p"] = _entry_fill
             _t["exit_p"] = _xp
             _t["exit_dt"] = _ext_ts if _ext_ts is not None else _t.get("exit_dt")
+            # 約定した5分足バーの時刻(HH:MM)。約定時刻別の成績分析(#9)用。ent_ts が無ければ空。
+            try:
+                _t["entry_time"] = _ent_ts.strftime("%H:%M") if _ent_ts is not None else ""
+            except Exception:
+                _t["entry_time"] = ""
             _t["reason"] = _5M_REASON_JA.get(_rsn, _rsn)
             _t["pnl"] = _pnl
             # ロング=(売値-買値)/買値、ショート=(売値-買戻)/売値

@@ -9277,7 +9277,7 @@ function switchTbd(id, tab) {{
                 _cols = ["entry_date", "exit_date", "symbol", "name", "strategy",
                          "bt", "wf", "reason", "order_limit", "entry_p", "exit_p",
                          "stop_price", "target_price", "qty", "hold_days",
-                         "liquidity", "mode", "pnl"]
+                         "liquidity", "mode", "pnl", "entry_time"]
                 with open(_trades_csv, "w", newline="", encoding="utf-8-sig") as _f2:
                     _w2 = _csvmod2.writer(_f2)
                     _w2.writerow(_cols)
@@ -9293,6 +9293,7 @@ function switchTbd(id, tab) {{
                             _t.get("target_price", ""), _t.get("qty", ""),
                             _t.get("hold_days", ""), _t.get("liquidity", ""),
                             _t.get("mode", ""), _t.get("pnl", ""),
+                            _t.get("entry_time", ""),   # 約定した5分足バーの時刻 HH:MM(#9用)
                         ])
                 print(f"[全取引CSV] {_trades_csv} に {len(_rows_out)}件を出力", flush=True)
         except Exception as _te:
