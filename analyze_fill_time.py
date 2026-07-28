@@ -34,6 +34,10 @@ ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--bt-min", type=float, default=30.0, help="BTスコア下限で母集団を絞る(実投資集団)")
 ap.add_argument("--stop-slip", type=float, default=0.005, help="現実モデルの損切りスリッページ")
+ap.add_argument("--oos", action="store_true",
+                help="純OOSのみ集計: 各ペアの選定基準月(SOURCE_BASES)より後の約定だけ使う")
+ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py",
+                help="SOURCE_BASES を持つ提案ファイル(既定 lss_proposal_cumul.py)。--oos時に参照")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -66,6 +70,36 @@ _BUCKETS = ["1) 寄り 09:00-09:15", "2) 09:15-09:30", "3) 09:30-10:00", "4) 10:
             "5) 10:30-前引", "6) 後場-13:30", "7) 13:30-大引"]
 # 時間カットオフのしきい(この時刻までに約定した分だけ採用)
 _CUTOFFS = [(9, 15), (9, 30), (10, 0), (10, 30), (11, 30), (15, 30)]
+
+
+def _month_end(m: int) -> pd.Timestamp:
+    """基準月ラベル(月番号)→月末日。累積2025-09..2026-06前提: 月>=7=2025年 / 月<=6=2026年。"""
+    m = int(m)
+    year = 2025 if m >= 7 else 2026
+    return pd.Period(f"{year}-{m:02d}", "M").end_time.normalize()
+
+
+_OOS_BASES: dict = {}   # (code_norm, strat) -> 選定最新基準月の月末(これより後がOOS)
+
+
+def _load_oos_bases(path: str) -> dict:
+    """提案ファイルの SOURCE_BASES から (code, strat)->最新基準月末 を作る。"""
+    p = Path(path)
+    if not p.exists():
+        sys.exit(f"[error] --oos 用の {path} が無い。SOURCE_BASES を持つ提案ファイルを指定してください")
+    ns: dict = {}
+    exec(p.read_text(encoding="utf-8"), ns)
+    sb = ns.get("SOURCE_BASES") or {}
+    out = {}
+    for k, lab in sb.items():
+        months = [int(x) for x in str(lab).replace(" ", "").split("/") if x.strip().isdigit()]
+        if not months:
+            continue
+        # キー正規化: (code, strat)。code は .T 無しに揃える。
+        code = str(k[0]).upper().removesuffix(".T").split(".")[0]
+        out[(code, str(k[1]))] = max(_month_end(m) for m in months)
+    print(f"[OOS] {path} の SOURCE_BASES {len(out)}ペアを読込 → 各ペアの基準月より後のみ集計")
+    return out
 
 
 def _load_selected() -> list[tuple]:
@@ -162,6 +196,11 @@ def _scan_symbol(sym, name, strats):
             fd = edt.date() if hasattr(edt, "date") else edt
             if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=_bt_window):
                 continue
+            # 純OOS: このペアの選定最新基準月より後の約定だけ(時刻分析用のlocalに影響、BT算出は全期間のまま)
+            _oos_ok = True
+            if args.oos:
+                _lbe = _OOS_BASES.get((sym.split(".")[0], strat))
+                _oos_ok = (_lbe is not None) and (pd.Timestamp(fd) > _lbe)
             db = by_day.get(fd)
             if db is None or len(db) < 2:
                 continue
@@ -188,6 +227,8 @@ def _scan_symbol(sym, name, strats):
             # BTスコア用は全期間(直近365)、時刻分析は --days 窓
             bt_trades.append((fd, short_pnl(entry_fill, xp, reason, QTY, FEE, 0.0)))
             if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=args.days):
+                continue
+            if args.oos and not _oos_ok:      # 純OOS指定時: 基準月以前(in-sample)は時刻分析から除外
                 continue
             ts = pd.Timestamp(ent_ts)
             mod_day = ts.hour * 60 + ts.minute
@@ -216,6 +257,9 @@ def _pf(v):
 
 
 def main():
+    global _OOS_BASES
+    if args.oos:
+        _OOS_BASES = _load_oos_bases(args.oos_proposal)
     sel = _load_selected()
     by_sym = defaultdict(lambda: {"name": "", "strats": []})
     for code, name, strat in sel:
