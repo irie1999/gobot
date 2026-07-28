@@ -39,7 +39,7 @@ ap.add_argument("--oos", action="store_true",
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py",
                 help="SOURCE_BASES を持つ提案ファイル(既定 lss_proposal_cumul.py)。--oos時に参照")
 ap.add_argument("--asof-bt", action="store_true",
-                help="BTフィルタを『各取引の"その時点まで"のデータだけ』で計算(先読みなし=真のOOS)。"
+                help="BTフィルタを各取引の時点までのデータだけで計算(先読みなし=真のOOS)。"
                      "既定は今日のBT(直近365)でペア単位に選別(先読みあり)")
 args = ap.parse_args()
 
