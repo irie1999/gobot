@@ -1304,7 +1304,8 @@ except Exception:
 #   v13: 同バー損切り(悲観=損切り優先)。約定した5分足の中で損切りラインに触れていれば損切り
 #        扱いに(旧は約定バーを飛ばし後の目標達成を誤計上。例:4092は約定5,710→同足5,770で損切り
 #        なのに+41,901円と計上)。short_exit_5m を常に約定バー(ei)から判定(2026-07-24)
-_BT_LOGIC_VER = "v13"
+_BT_LOGIC_VER = "v13et"   # et: エンジンが約定時刻entry_timeを記録(#9)。旧v13キャッシュの
+                          # trade_logにはentry_timeが無くCSVが空になるため版を上げて1回だけ再構築
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
