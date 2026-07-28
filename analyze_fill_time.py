@@ -41,6 +41,9 @@ ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py",
 ap.add_argument("--asof-bt", action="store_true",
                 help="BTフィルタを各取引の時点までのデータだけで計算(先読みなし=真のOOS)。"
                      "既定は今日のBT(直近365)でペア単位に選別(先読みあり)")
+ap.add_argument("--stop-delay-bars", type=int, default=1,
+                help="損切り遅延(delay1)。約定した5分足の間は損切りせず次の5分から効かせる"
+                     "(実運用/dailyと一致=既定1)。0にすると寄りヒゲで刈られる旧挙動")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -236,7 +239,8 @@ def _scan_symbol(sym, name, strats):
             gap_entry = abs(entry_fill - trig) > 1e-9
             xp, reason, ent_ts, _ext = short_exit_5m(db, trig, stop_p, tgt_p, False,
                                                      include_entry_bar=gap_entry,
-                                                     day_low=d_low, day_high=d_high, day_close=d_close)
+                                                     day_low=d_low, day_high=d_high, day_close=d_close,
+                                                     stop_delay_bars=args.stop_delay_bars)
             if reason in ("no_5m", "no_entry") or ent_ts is None:
                 continue
             pnl = short_pnl(entry_fill, xp, reason, QTY, FEE, args.stop_slip if reason == "stop" else 0.0)
