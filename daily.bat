@@ -42,9 +42,11 @@ REM     reflect delay1. NOTE: the P&L tab under delay1 is OPTIMISTIC (engine fil
 REM     stop at the line); the realistic verdict is compare_lss_rules.py net-real.
 REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
 set "LSS_STOP_DELAY_BARS=1"
-REM --- budget tab (400man x BT-descending) invests down to BT40 (BT30-39 is marginal,
-REM     BT<30 is the losing band). Detail "BT50+" tab is unaffected. Set to 50 to revert. ---
-set "LSS_BUDGET_FLOOR_BT=40"
+REM --- BT threshold = 40 for ALL "BTxx-and-above" places: the detail filter tabs
+REM     (BT40+ list / BT40+ x entry-day) AND the 400man x BT-descending budget floor
+REM     (max(_BUD_MIN_BT=30, _BT_TAB_MIN)=40). One env drives them all. Set to 50 to revert.
+REM     (Note: after the #9 revert the old LSS_BUDGET_FLOOR_BT env is no longer read; use this.)
+set "LSS_BT_TAB_MIN=40"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
