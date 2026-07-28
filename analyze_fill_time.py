@@ -38,6 +38,9 @@ ap.add_argument("--oos", action="store_true",
                 help="純OOSのみ集計: 各ペアの選定基準月(SOURCE_BASES)より後の約定だけ使う")
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py",
                 help="SOURCE_BASES を持つ提案ファイル(既定 lss_proposal_cumul.py)。--oos時に参照")
+ap.add_argument("--asof-bt", action="store_true",
+                help="BTフィルタを『各取引の"その時点まで"のデータだけ』で計算(先読みなし=真のOOS)。"
+                     "既定は今日のBT(直近365)でペア単位に選別(先読みあり)")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -135,6 +138,7 @@ def _prices(olp, osp, otp):
 
 
 def _bt_score(trades) -> int:
+    """今日基準BT(直近365を6期間スライス)。先読みあり=従来。"""
     if not trades:
         return 0
     pr = {}
@@ -148,6 +152,23 @@ def _bt_score(trades) -> int:
         pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
         pr[P] = {"trades": len(sub), "win_rate": wins / len(sub) * 100, "pf": pf, "total_pnl": sum(sub)}
     return _calc_bt(pr)[0]
+
+
+def _asof_bt_score(series, asof) -> int:
+    """as-of BT: 『asof(取引日)より"前"のトレードだけ』を asof-P..asof でスライスして算出(先読みなし)。
+    series=[(date, baseline_pnl)] 昇順。dailyの凍結シグナル時BTと同じ考え方。"""
+    a = pd.Timestamp(asof)
+    pr = {}
+    for P in _BT_PERIODS:
+        lo = a - pd.Timedelta(days=P)
+        sub = [p for (d, p) in series if lo <= pd.Timestamp(d) < a]   # < a = 取引日より前のみ
+        if not sub:
+            continue
+        wins = sum(1 for p in sub if p > 0)
+        gp = sum(p for p in sub if p > 0); gl = -sum(p for p in sub if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[P] = {"trades": len(sub), "win_rate": wins / len(sub) * 100, "pf": pf, "total_pnl": sum(sub)}
+    return _calc_bt(pr)[0] if pr else 0
 
 
 def _scan_symbol(sym, name, strats):
@@ -182,7 +203,7 @@ def _scan_symbol(sym, name, strats):
             continue
         if not r:
             continue
-        local, bt_trades = [], []
+        recs, series = [], []   # recs=(fd,mday,pnl,reason,in_win,oos_ok) / series=(fd,baseline_pnl)
         for t in r.get("trade_log", []):
             if t.get("reason") in ("発注中", "保有中"):
                 continue
@@ -196,11 +217,6 @@ def _scan_symbol(sym, name, strats):
             fd = edt.date() if hasattr(edt, "date") else edt
             if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=_bt_window):
                 continue
-            # 純OOS: このペアの選定最新基準月より後の約定だけ(時刻分析用のlocalに影響、BT算出は全期間のまま)
-            _oos_ok = True
-            if args.oos:
-                _lbe = _OOS_BASES.get((sym.split(".")[0], strat))
-                _oos_ok = (_lbe is not None) and (pd.Timestamp(fd) > _lbe)
             db = by_day.get(fd)
             if db is None or len(db) < 2:
                 continue
@@ -224,18 +240,31 @@ def _scan_symbol(sym, name, strats):
             if reason in ("no_5m", "no_entry") or ent_ts is None:
                 continue
             pnl = short_pnl(entry_fill, xp, reason, QTY, FEE, args.stop_slip if reason == "stop" else 0.0)
-            # BTスコア用は全期間(直近365)、時刻分析は --days 窓
-            bt_trades.append((fd, short_pnl(entry_fill, xp, reason, QTY, FEE, 0.0)))
-            if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=args.days):
-                continue
-            if args.oos and not _oos_ok:      # 純OOS指定時: 基準月以前(in-sample)は時刻分析から除外
-                continue
+            series.append((fd, short_pnl(entry_fill, xp, reason, QTY, FEE, 0.0)))  # BT算出用(スリップ無し)
+            in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
+            _oos_ok = True
+            if args.oos:
+                _lbe = _OOS_BASES.get((sym.split(".")[0], strat))
+                _oos_ok = (_lbe is not None) and (pd.Timestamp(fd) > _lbe)
             ts = pd.Timestamp(ent_ts)
-            mod_day = ts.hour * 60 + ts.minute
-            local.append((fd, mod_day, pnl, reason))
-        if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
-            continue
-        out.extend(local)
+            recs.append((fd, ts.hour * 60 + ts.minute, pnl, reason, in_win, _oos_ok))
+
+        # BTフィルタ: --asof-bt=各取引の"その時点まで"のBT(先読みなし) / 既定=今日のBT(ペア単位)
+        if args.asof_bt:
+            ser = sorted(series, key=lambda x: pd.Timestamp(x[0]))
+            for (fd, mday, pnl, reason, in_win, oos_ok) in recs:
+                if not in_win or (args.oos and not oos_ok):
+                    continue
+                if args.bt_min > 0 and _asof_bt_score(ser, fd) < args.bt_min:
+                    continue
+                out.append((fd, mday, pnl, reason))
+        else:
+            if args.bt_min > 0 and _bt_score(series) < args.bt_min:
+                continue
+            for (fd, mday, pnl, reason, in_win, oos_ok) in recs:
+                if not in_win or (args.oos and not oos_ok):
+                    continue
+                out.append((fd, mday, pnl, reason))
     return out
 
 
