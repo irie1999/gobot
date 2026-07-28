@@ -682,6 +682,21 @@ _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか�
 # PF 0.93→1.43)。環境変数 LSS_STOP_DELAY_BARS で切替可(実運用は寄り5分後に逆指値損切りを
 # 設置する運用に対応)。mirror(指値空売り)には適用しない=lss(stop_sell)のみ。
 _LSS_STOP_DELAY_BARS: int = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
+
+
+def _parse_entry_cutoff():
+    """LSS_ENTRY_TIME_CUTOFF を分(0時からの経過)に変換。'0915'/'09:15'/'555' 対応。空=None(無効)。
+    約定バーがこの時刻より後なら不約定扱い(=その時刻に未約定逆指値を取消する運用に一致)。#9。"""
+    v = os.environ.get("LSS_ENTRY_TIME_CUTOFF", "").strip().replace(":", "")
+    if not v:
+        return None
+    try:
+        return int(v[:-2]) * 60 + int(v[-2:]) if len(v) >= 3 else int(v)
+    except Exception:
+        return None
+
+
+_INTRADAY_5M_ENTRY_CUTOFF = _parse_entry_cutoff()   # 約定時刻カットオフ(分)。既定None=終日約定
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
 
 
@@ -1285,6 +1300,16 @@ def run_limit_backtest(
             if _rsn == "no_entry":
                 # 終日トリガー未達 → 不約定だが発注はした → 枠消費用に記録。
                 _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
+            # エントリー時間カットオフ: 約定バーが cutoff(分)より後なら、実運用で「その時刻に
+            # 未約定の逆指値を取消」する運用に合わせて不約定扱い(枠は消費・損益には計上しない)。
+            # env LSS_ENTRY_TIME_CUTOFF="0915" 等で有効化(既定None=無効=終日約定)。#9検証で
+            # 09:15までの約定が最良(遅い約定は継続せずフェードして損切りされやすい)。
+            if _INTRADAY_5M_ENTRY_CUTOFF is not None and _ent_ts is not None:
+                try:
+                    if (_ent_ts.hour * 60 + _ent_ts.minute) > _INTRADAY_5M_ENTRY_CUTOFF:
+                        _nofill_log.append(_mk_nofill(_t, _lp, _edt, _qty)); continue
+                except Exception:
+                    pass
             # 損益は現実的な約定価格(_entry_fill)基準。ロングは long_pnl(買い→売り)。
             if _dt_long:
                 _pnl = _lp5(_entry_fill, _xp, _rsn, _qty, FEE_PCT_ONE_WAY, _INTRADAY_5M_SLIP)

@@ -1310,6 +1310,11 @@ _BT_LOGIC_VER = "v13"
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
+# 約定時刻カットオフ(env LSS_ENTRY_TIME_CUTOFF="0915" 等)。9:15以降の約定を非約定扱いに
+# するので損益が変わる → キャッシュを別管理(ec<HHMM>を版トークンに付与)。既定=無効=付与なし。
+_LSS_ENTRY_CUT = os.environ.get("LSS_ENTRY_TIME_CUTOFF", "").strip().replace(":", "")
+if _LSS_ENTRY_CUT:
+    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}ec{_LSS_ENTRY_CUT}"
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。
