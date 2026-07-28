@@ -35,10 +35,31 @@ ap.add_argument("--csv", type=str, default=None, help="実約定サマリーのC
 ap.add_argument("--expected", type=str, default=None,
                 help="想定値CSV(列: symbol,entry,exit,pnl)。あれば乖離を並べて表示")
 ap.add_argument("--fee", type=float, default=None, help="片道手数料率(既定=FEE_PCT_ONE_WAY)")
+ap.add_argument("--debug", action="store_true",
+                help="約定が0件のとき等、生の注文/Details構造を先頭数件ダンプして原因調査")
+ap.add_argument("--no-date", action="store_true", help="日付で絞らず全約定を集計")
 args = ap.parse_args()
 
 FEE = FEE_PCT_ONE_WAY if args.fee is None else args.fee
 _DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
+
+
+def _digits(s) -> str:
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+
+_DATE_DIG = _digits(_DATE)
+
+
+def _match_date(t: str) -> bool:
+    """約定時刻 t が対象日か。ISO(2026-07-28T..)/yyyyMMddHHMMSS どちらでも桁で判定。
+    時刻が空(取れない)場合は除外しない(=今日扱い)。--no-date で常にTrue。"""
+    if args.no_date:
+        return True
+    dt = _digits(t)
+    if not dt:
+        return True
+    return _DATE_DIG in dt
 
 
 def _exec_time(d: dict) -> str:
@@ -94,6 +115,20 @@ def main():
     print(f"[取得] 全注文 {len(orders)}件 / 接続先 {'本番18080' if args.prod else 'デモ18081'} "
           f"/ 対象日 {_DATE}\n")
 
+    if args.debug:
+        import json as _json
+        # 約定がありそうな注文(CumQty>0 か Detailsに約定record)を優先して数件ダンプ
+        cand = [o for o in orders if float(o.get("CumQty") or 0) > 0] or orders
+        print("=== [debug] 先頭注文の生構造(RecType/価格/時刻フィールドの確認用) ===")
+        for o in cand[:3]:
+            slim = {k: o.get(k) for k in ("ID", "Symbol", "SymbolName", "Side",
+                                          "State", "OrderState", "OrderQty", "CumQty",
+                                          "Price", "RecvTime")}
+            print(_json.dumps(slim, ensure_ascii=False))
+            for d in (o.get("Details") or []):
+                print("   Detail:", _json.dumps(d, ensure_ascii=False))
+        print("=== [debug] ここまで ===\n")
+
     # 銘柄×売買 で約定を集約(対象日のみ)
     sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
     buys = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
@@ -103,7 +138,7 @@ def main():
         names[sym] = str(o.get("SymbolName") or "")
         side = str(o.get("Side"))            # "1"=売 "2"=買
         for px, qty, t in _executions(o):
-            if _DATE and not str(t).startswith(_DATE):
+            if not _match_date(t):
                 continue
             book = sells if side == "1" else buys
             book[sym]["qty"] += qty
