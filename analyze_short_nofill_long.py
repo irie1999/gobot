@@ -43,6 +43,10 @@ ap.add_argument("--bt-min", type=float, default=0.0,
                 help="サマリー行のBT下限(既定0=全件)。BT帯別は常に全帯表示")
 ap.add_argument("--long-slip", type=float, default=0.0,
                 help="ロング成行約定の不利スリッページ(既定0)。保守側で見るなら0.005等")
+ap.add_argument("--long-stop-pct", type=float, default=0.0,
+                help="9:05ロングの損切り幅(例0.02=-2%%)。0=損切りなし(引けまで持つ)")
+ap.add_argument("--long-target-pct", type=float, default=0.0,
+                help="9:05ロングの利確幅(例0.03=+3%%)。0=利確なし(引けまで持つ)")
 ap.add_argument("--oos", action="store_true",
                 help="純OOSのみ: 各ペアの選定基準月(SOURCE_BASES)より後の日だけ集計")
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py")
@@ -55,7 +59,7 @@ from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
 from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
 from daytrade_data import load_intraday, split_by_day
 from sameday5m_core import mod_for
-from sameday5m_firsttouch import short_entry_fill_5m, short_exit_5m, short_pnl
+from sameday5m_firsttouch import short_entry_fill_5m, short_exit_5m, short_pnl, long_pnl
 
 ble._MIRROR_PNL = False
 ble._ENTRY_TYPE_FORCE = None
@@ -241,25 +245,54 @@ def _scan_symbol(sym, name, strats):
             n_nofill += 1
             base = float(round_to_tick(olp))          # 前日終値(注文基準)
             e0905 = float(db["open"].iloc[1])          # 9:05=2本目始値
+            # (A)(B) は日足close-only(信頼度高・ベンチマーク)
             pnl_prev = _guarded_pnl(base, d_close)
             pnl_open = _guarded_pnl(d_open, d_close)
-            pnl_0905 = _guarded_pnl(e0905, d_close)
+            # (C) 9:05ロング: 損切/利確付き(--long-stop-pct/--long-target-pct)。
+            #     未指定なら引けまで=タイムカットのみ。決済理由(target/stop/close)も記録。
+            pnl_0905 = None; r_0905 = None
+            _e_ok = (e0905 > 0 and (not d_open or d_open <= 0
+                                    or abs(e0905 / d_open - 1.0) <= 0.25))   # 5分足始値グリッチ除外
+            if _e_ok:
+                _xp_l, r_0905 = _long_exit_st(db, 1, e0905, d_close)
+                if _xp_l > 0:
+                    pnl_0905 = long_pnl(e0905, _xp_l, r_0905, QTY, FEE, args.long_slip)
             in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
             oos_ok = True
             if args.oos:
                 lbe = _OOS_BASES.get((sym.split(".")[0], strat))
                 oos_ok = (lbe is not None) and (pd.Timestamp(fd) > lbe)
-            recs.append((fd, pnl_prev, pnl_open, pnl_0905, in_win, oos_ok))
+            recs.append((fd, pnl_prev, pnl_open, pnl_0905, r_0905, in_win, oos_ok))
 
         # 各未約定ロング取引に BT を付与(asof=先読みなし / 既定=今日基準・ペア単位)
         ser = sorted(series, key=lambda x: pd.Timestamp(x[0]))
         pair_bt = _bt_from_series(ser) if not args.asof_bt else None
-        for (fd, pnl_prev, pnl_open, pnl_0905, in_win, oos_ok) in recs:
+        for (fd, pnl_prev, pnl_open, pnl_0905, r_0905, in_win, oos_ok) in recs:
             if not in_win or (args.oos and not oos_ok):
                 continue
             bt = _bt_from_series(ser, asof=fd) if args.asof_bt else pair_bt
-            out.append((bt, pnl_prev, pnl_open, pnl_0905, oos_ok))
+            out.append((bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok))
     return out, n_sig, n_nofill
+
+
+def _long_exit_st(db, start_idx, entry, d_close):
+    """9:05ロングの同日決済(利確/損切り/タイムカット)を5分足 first-touch で。
+    stop=entry×(1-long_stop_pct) / target=entry×(1+long_target_pct)。同バーは損切り優先(悲観)。
+    どちらも0なら引け(大引け)まで持つ=タイムカットのみ。
+    Returns: (exit_price, reason∈{target,stop,close})。"""
+    sp = entry * (1.0 - args.long_stop_pct) if args.long_stop_pct > 0 else None
+    tp = entry * (1.0 + args.long_target_pct) if args.long_target_pct > 0 else None
+    cl = float(d_close) if (d_close and d_close > 0) else float(db["close"].iloc[-1])
+    if sp is None and tp is None:
+        return cl, "close"
+    highs = db["high"].to_numpy(dtype=float)
+    lows = db["low"].to_numpy(dtype=float)
+    for j in range(int(start_idx), len(highs)):
+        if sp is not None and lows[j] <= sp:      # 下抜け=損切(同バー優先)
+            return sp, "stop"
+        if tp is not None and highs[j] >= tp:      # 上抜け=利確
+            return tp, "target"
+    return cl, "close"                              # 引けまで未達=タイムカット
 
 
 def _guarded_pnl(entry, exit_):
@@ -327,7 +360,8 @@ def main():
 
     prev_by_band: dict = defaultdict(list)   # (A) 前日終値→大引け
     open_by_band: dict = defaultdict(list)   # (B) 寄り(9:00)→大引け
-    n0905_by_band: dict = defaultdict(list)  # (C) 9:05→大引け
+    n0905_by_band: dict = defaultdict(list)  # (C) 9:05→大引け(損切/利確付き)
+    reason_mix: dict = defaultdict(list)     # (C) BT≥30 の決済理由内訳
     tot_sig = tot_nofill = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, sym, nm_st[0] or "", nm_st[1]): sym
@@ -342,11 +376,13 @@ def main():
             except Exception:
                 continue
             tot_sig += n_sig; tot_nofill += n_nf
-            for (bt, pnl_prev, pnl_open, pnl_0905, oos_ok) in rows:
+            for (bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok) in rows:
                 lab = _bt_band(bt)
                 prev_by_band[lab].append(pnl_prev)
                 open_by_band[lab].append(pnl_open)
                 n0905_by_band[lab].append(pnl_0905)
+                if bt >= 30 and pnl_0905 is not None and r_0905:
+                    reason_mix[r_0905].append(pnl_0905)
 
     print("\n" + "=" * 60)
     print(f"母集団: 全シグナル {tot_sig} 件 / うち寄りでショート未約定(=ロング対象) {tot_nofill} 件"
@@ -354,13 +390,29 @@ def main():
     print(f"期間: 直近{args.days}日" + ("  | 純OOSのみ" if args.oos else "")
           + ("  | BT=先読みなし(asof)" if args.asof_bt else "  | BT=今日基準(ペア単位)"))
     print("※ 全て『買い→同日大引け売り』。決済は公式大引け。±25%超の異常足は除外済み。")
+    _st_lab = (f"損切-{args.long_stop_pct*100:.1f}% / 利確+{args.long_target_pct*100:.1f}%"
+               if (args.long_stop_pct > 0 or args.long_target_pct > 0) else "損切/利確なし=引けまで")
     _print_table("(A) 前日終値→大引け [あなたの直感の検証・理論値]", prev_by_band)
     _print_table("(B) 寄り(9:00)→大引け [実際に買える最速・成行]", open_by_band)
-    _print_table("(C) 9:05→大引け [#6元案・2本目始値で成行]", n0905_by_band)
+    _print_table(f"(C) 9:05ロング [{_st_lab}]", n0905_by_band)
+    # (C) の決済理由内訳(BT≥30)
+    print(f"\n--- (C) 9:05ロング BT≥30 決済理由の内訳 [{_st_lab}] ---")
+    print(f"{'理由':>8}{'件数':>7}{'合計損益':>13}{'1件平均':>10}")
+    _rmix_all = []
+    for _rk, _ja in (("target", "目標達成"), ("stop", "損切り"), ("close", "タイムカット")):
+        _v = reason_mix.get(_rk, [])
+        _rmix_all += _v
+        if _v:
+            print(f"{_ja:>8}{len(_v):>7}{sum(_v):>+13,.0f}{sum(_v)/len(_v):>+10,.0f}")
+        else:
+            print(f"{_ja:>8}{0:>7}{'—':>13}{'—':>10}")
+    if _rmix_all:
+        print(f"{'合計':>8}{len(_rmix_all):>7}{sum(_rmix_all):>+13,.0f}"
+              f"{sum(_rmix_all)/len(_rmix_all):>+10,.0f}")
     print("\n読み方: (A)がプラスで(C)がマイナスなら『寄りで急騰→フェード』型=買うなら寄り(B)。")
-    print("       (A)(B)は日足(yfinance)ベースで信頼度高。(C)は5分足始値ベース。")
-    print("注意: 損切/利確なしの単純版。実スリッページ未反映。スレッド破損(SystemError)が")
-    print("      出たら --workers 1 で再実行して数値を確定してください。")
+    print("       損切/利確を入れると(C)の内訳(目標達成/損切り/タイムカット)が分かれる。")
+    print("       (A)(B)は日足ベースで信頼度高。(C)は5分足ベース(±25%グリッチ・5分始値乖離を除外)。")
+    print("注意: 実スリッページ・成行の入口ズレは概算。SystemErrorが出たら --workers 1 で再実行。")
 
 
 if __name__ == "__main__":
