@@ -1,14 +1,19 @@
-"""verify_fills.py — kabuの実約定(get_orders の Details, RecType=8=約定)を取得し、
-銘柄別に「実際の売り約定(lssエントリー)/買戻し(決済)/実損益/約定時刻」を集計する。
+"""verify_fills.py — kabuの実注文/実約定(get_orders)を取得して当日の取引を集計する。
 
-これで実運用の乖離(実スリッページ・実現損益・約定時刻)をデータで測れる(§18.7)。
-レポート/バックテストの想定値(約定値・決済値・損益)と突き合わせて比較する土台。
+2つのセクションを出力:
+  ① 全注文一覧 — 対象日に出した注文をすべて表示(約定した/しなかった を問わず)。
+     注文株数・注文値・状態(全約定/一部約定/未約定/取消・失効/期限切れ)・約定株数/値/時刻。
+     → 「注文は出したが約定しなかった」ものが一目で分かる。
+  ② 結果 — ①のうち 約定して決済(買戻し)まで済んだ往復取引の実損益・約定時刻。
+     レポート/バックテストの想定値と突き合わせて実運用の乖離(§18.7)を測れる。
 
 使い方(あなたの機械・本番口座 / KABU_API_PASSWORD 設定済み):
-  python verify_fills.py --prod                    # 今日の実約定を集計
-  python verify_fills.py --prod --date 20260728    # 指定日(ExecutionDayで絞る)
-  python verify_fills.py --prod --csv fills.csv     # CSV保存
-  python verify_fills.py --prod --expected signals_expected.csv  # 想定値CSVと乖離比較
+  python verify_fills.py --prod                    # 今日の全注文+結果
+  python verify_fills.py --prod --date 20260728    # 指定日
+  python verify_fills.py --prod --orders-csv orders.csv  # 全注文一覧をCSV保存
+  python verify_fills.py --prod --csv fills.csv     # 往復損益サマリーをCSV保存
+  python verify_fills.py --prod --expected signals_expected.csv  # 想定値と乖離比較
+  python verify_fills.py --prod --no-date          # 日付で絞らず全注文
 
 照会のみ(発注しない)。発注サーバ/watcher 稼働中は 401(トークン取り合い)になることが
 あるので、その時は片方を一瞬止めるか少し待って再実行。
@@ -31,7 +36,9 @@ _JST = timezone(timedelta(hours=9))
 ap = argparse.ArgumentParser(description="kabu実約定を集計(実損益・約定時刻)し想定と比較")
 ap.add_argument("--prod", action="store_true", help="本番(18080)。未指定はデモ(18081)")
 ap.add_argument("--date", type=str, default=None, help="対象日 yyyyMMdd(既定=今日JST)")
-ap.add_argument("--csv", type=str, default=None, help="実約定サマリーのCSV保存先")
+ap.add_argument("--csv", type=str, default=None, help="実約定サマリー(往復損益)のCSV保存先")
+ap.add_argument("--orders-csv", type=str, default=None,
+                help="全注文一覧(未約定・取消含む)のCSV保存先")
 ap.add_argument("--expected", type=str, default=None,
                 help="想定値CSV(列: symbol,entry,exit,pnl)。あれば乖離を並べて表示")
 ap.add_argument("--fee", type=float, default=None, help="片道手数料率(既定=FEE_PCT_ONE_WAY)")
@@ -84,6 +91,55 @@ def _executions(o: dict):
     return out
 
 
+def _order_date(o: dict) -> str:
+    """注文を出した日時。RecvTime 優先、無ければ Details の最初の受付/約定時刻。"""
+    for k in ("RecvTime", "TransactTime"):
+        v = o.get(k)
+        if v:
+            return str(v)
+    for d in (o.get("Details") or []):
+        t = _exec_time(d)
+        if t:
+            return t
+    return ""
+
+
+def _order_price(o: dict) -> float:
+    """注文価格。通常は Price。逆指値(ReverseLimitOrder)なら TriggerPrice を拾う。"""
+    p = float(o.get("Price") or 0)
+    if p > 0:
+        return p
+    rl = o.get("ReverseLimitOrder")
+    if isinstance(rl, dict):
+        for k in ("TriggerPrice", "Price", "AfterHitPrice"):
+            v = float(rl.get(k) or 0)
+            if v > 0:
+                return v
+    return 0.0
+
+
+def _order_status(o: dict) -> str:
+    """注文の状態を日本語で返す。約定株数(CumQty)と注文株数(OrderQty)・State から判定。
+    kabu State: 1=待機 2=処理中 3=処理済 4=訂正取消送信中 5=終了。
+    CumQty=0 で終了なら未約定のまま失効/取消。"""
+    oq = float(o.get("OrderQty") or 0)
+    cq = float(o.get("CumQty") or 0)
+    state = int(o.get("State") or o.get("OrderState") or 0)
+    if oq > 0 and cq >= oq:
+        return "全約定"
+    if cq > 0:
+        return f"一部約定({int(cq)}/{int(oq)})"
+    # ここから未約定(CumQty=0)
+    rectypes = {int(d.get("RecType") or 0) for d in (o.get("Details") or [])}
+    if 6 in rectypes:
+        return "取消/失効"
+    if 3 in rectypes:
+        return "期限切れ"
+    if state == 5:
+        return "未約定(終了)"
+    return "未約定(有効)"
+
+
 def _hhmm(t: str) -> str:
     """約定時刻文字列から HH:MM を抜く(表示用)。yyyyMMddHHMMSS / ISO どちらも対応。"""
     s = str(t)
@@ -129,6 +185,54 @@ def main():
                 print("   Detail:", _json.dumps(d, ensure_ascii=False))
         print("=== [debug] ここまで ===\n")
 
+    # ── 全注文一覧(対象日に出した注文をすべて。未約定・取消・失効も含む) ──────────
+    # 「注文は出したが約定しなかった」ものも見えるように、注文単位で状態を表示する。
+    order_rows = []
+    for o in orders:
+        if not (args.no_date or _match_date(_order_date(o))):
+            continue
+        sym = str(o.get("Symbol") or "").split(".")[0]
+        names[sym] = str(o.get("SymbolName") or "")
+        side = "売" if str(o.get("Side")) == "1" else "買"
+        oq = int(float(o.get("OrderQty") or 0))
+        cq = int(float(o.get("CumQty") or 0))
+        # 約定時刻(あれば):この注文の約定明細の最初の時刻
+        _ex = [t for _, _, t in _executions(o)]
+        fill_t = _hhmm(min(_ex)) if _ex else "—"
+        # 約定値(あれば):約定明細の平均
+        _exf = [(px, q) for px, q, _ in _executions(o)]
+        fill_p = (sum(px * q for px, q in _exf) / sum(q for _, q in _exf)) if _exf else 0.0
+        order_rows.append({
+            "code": sym, "name": names.get(sym, ""), "side": side,
+            "order_qty": oq, "order_price": round(_order_price(o), 1),
+            "status": _order_status(o), "cum_qty": cq,
+            "fill_price": round(fill_p, 1), "fill_time": fill_t,
+            "recv": _hhmm(_order_date(o)),
+        })
+
+    order_rows.sort(key=lambda r: (r["code"], r["side"]))
+    _n_all = len(order_rows)
+    _n_fill = sum(1 for r in order_rows if r["cum_qty"] > 0)
+    _n_nofill = _n_all - _n_fill
+    print(f"=== 全注文一覧 (対象日 {_DATE} に出した注文: {_n_all}件 / "
+          f"約定 {_n_fill}件・未約定 {_n_nofill}件) ===")
+    print(f"{'コード':>6} {'銘柄':<12}{'売買':>4}{'注文株':>7}{'注文値':>9}"
+          f"{'発注':>6}{'状態':>14}{'約定株':>7}{'約定値':>9}{'約定':>6}")
+    for r in order_rows:
+        _fp = f"{r['fill_price']:,.1f}" if r['fill_price'] else "—"
+        print(f"{r['code']:>6} {r['name'][:12]:<12}{r['side']:>4}{r['order_qty']:>7}"
+              f"{r['order_price']:>9,.1f}{r['recv']:>6}{r['status']:>14}"
+              f"{r['cum_qty']:>7}{_fp:>9}{r['fill_time']:>6}")
+    if not order_rows:
+        print("  (対象日に出した注文が見つかりませんでした。--no-date で全期間、--debug で生構造を確認)")
+    if args.orders_csv and order_rows:
+        with open(args.orders_csv, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=list(order_rows[0].keys()))
+            w.writeheader()
+            w.writerows(order_rows)
+        print(f"[出力] 全注文一覧 → {args.orders_csv}")
+    print()
+
     # 銘柄×売買 で約定を集約(対象日のみ)
     sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
     buys = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
@@ -169,6 +273,7 @@ def main():
                      "entry_t": et, "exit_t": xt, "pnl": round(net, 0), "pct": round(pct, 2)})
 
     # 表示
+    print("=== 結果 (上の注文のうち 約定して決済まで済んだ取引の実損益) ===")
     print(f"{'コード':>6} {'銘柄':<12}{'株数':>5}{'実売り':>9}{'実買戻':>9}"
           f"{'約定':>6}{'決済':>6}{'実損益':>10}{'%':>7}" + ("   |想定損益  乖離" if exp else ""))
     for r in rows:
