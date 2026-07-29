@@ -240,6 +240,7 @@ def _scan_symbol(sym, name, strats):
             # BT算出用(全シグナルのショート baseline pnl、スリップ無し)。エンジンと同じ経路。
             _ef = short_entry_fill_5m(db, trig, False, entry_gap_limit=_GAP,
                                       day_open=d_open, day_low=d_low, day_high=d_high)
+            _xp = _rs = None
             if _ef is not None:
                 _ge = abs(_ef - trig) > 1e-9
                 _xp, _rs, _et, _ = short_exit_5m(db, trig, stop_p, tgt_p, False,
@@ -266,6 +267,12 @@ def _scan_symbol(sym, name, strats):
             n_nofill += 1
             base = float(round_to_tick(olp))          # 前日終値(注文基準)
             e0905 = float(db["open"].iloc[1])          # 9:05=2本目始値
+            # bar0未約定の内訳: _ef(全日約定)が在る=後でトリガー到達=「A:後で逆指値約定」、
+            #   None=終日未達=「B:終日未約定(資金浮き)」。#6bが本当に補填すべきはB。
+            filled_later = (_ef is not None)
+            # A の場合、後からの逆指値約定でlssが取る損益(参考: 9:05成行 vs 逆指値後約定の比較用)
+            pnl_gyaku = (short_pnl(_ef, _xp, _rs, QTY, FEE, 0.005 if _rs == "stop" else 0.0)
+                         if (filled_later and _rs not in ("no_5m", "no_entry", None)) else None)
             # (A)(B) は日足close-only(信頼度高・ベンチマーク)
             pnl_prev = _guarded_pnl(base, d_close)
             pnl_open = _guarded_pnl(d_open, d_close)
@@ -304,19 +311,22 @@ def _scan_symbol(sym, name, strats):
             if args.oos:
                 lbe = _OOS_BASES.get((sym.split(".")[0], strat))
                 oos_ok = (lbe is not None) and (pd.Timestamp(fd) > lbe)
-            recs.append((fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls, in_win, oos_ok))
+            recs.append((fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls,
+                         filled_later, pnl_gyaku, in_win, oos_ok))
 
         # 各未約定ロング取引に BT を付与(asof=先読みなし / 既定=今日基準・ペア単位)
         ser = sorted(series, key=lambda x: pd.Timestamp(x[0]))
         pair_bt = _bt_from_series(ser) if not args.asof_bt else None
-        for (fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls, in_win, oos_ok) in recs:
+        for (fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls,
+             filled_later, pnl_gyaku, in_win, oos_ok) in recs:
             if not in_win or (args.oos and not oos_ok):
                 continue
             bt = _bt_from_series(ser, asof=fd) if args.asof_bt else pair_bt
             if args.sweep:
                 out.append((bt, sweep_pnls, oos_ok))
             else:
-                out.append((bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok))
+                out.append((bt, pnl_prev, pnl_open, pnl_0905, r_0905,
+                            filled_later, pnl_gyaku, oos_ok))
     return out, n_sig, n_nofill
 
 
@@ -497,6 +507,8 @@ def main():
     open_by_band: dict = defaultdict(list)   # (B) 寄り(9:00)→大引け
     n0905_by_band: dict = defaultdict(list)  # (C) 9:05→大引け(損切/利確付き)
     reason_mix: dict = defaultdict(list)     # (C) BT≥30 の決済理由内訳
+    # A/B内訳(BT≥30): A=後で逆指値約定(lssが取る) / B=終日未約定(資金浮き=#6bの真の対象)
+    _cA = []; _cB = []; _gyakuA = []
     tot_sig = tot_nofill = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, sym, nm_st[0] or "", nm_st[1]): sym
@@ -511,13 +523,20 @@ def main():
             except Exception:
                 continue
             tot_sig += n_sig; tot_nofill += n_nf
-            for (bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok) in rows:
+            for (bt, pnl_prev, pnl_open, pnl_0905, r_0905, filled_later, pnl_gyaku, oos_ok) in rows:
                 lab = _bt_band(bt)
                 prev_by_band[lab].append(pnl_prev)
                 open_by_band[lab].append(pnl_open)
                 n0905_by_band[lab].append(pnl_0905)
                 if bt >= 30 and pnl_0905 is not None and r_0905:
                     reason_mix[r_0905].append(pnl_0905)
+                if bt >= 30 and pnl_0905 is not None:
+                    if filled_later:
+                        _cA.append(pnl_0905)
+                        if pnl_gyaku is not None:
+                            _gyakuA.append(pnl_gyaku)
+                    else:
+                        _cB.append(pnl_0905)
 
     print("\n" + "=" * 60)
     print(f"母集団: 全シグナル {tot_sig} 件 / うち寄りでショート未約定(=ロング対象) {tot_nofill} 件"
@@ -549,6 +568,27 @@ def main():
     if _rmix_all:
         print(f"{'合計':>8}{len(_rmix_all):>7}{sum(_rmix_all):>+13,.0f}"
               f"{sum(_rmix_all)/len(_rmix_all):>+10,.0f}")
+
+    # ── A/B内訳: (C)9:05 を「後で逆指値約定(A)」と「終日未約定=資金浮き(B)」に分ける(BT≥30) ──
+    print(f"\n--- (C) 9:05{_DIR} BT≥30 の A/B内訳 [{_st_lab}] ---")
+    print("  A=後でトリガー到達=逆指値が後で約定(lssが取る/資金は遊ばない)")
+    print("  B=終日トリガー未達=逆指値は約定せず(資金が浮く=#6bが本当に補填すべき対象)")
+    print(f"{'区分':>28}{'件数':>7}{'合計損益':>13}{'1件平均':>10}{'PF':>7}")
+    for _lab2, _v in ((f"A: 後で約定 (9:05{_DIR})", _cA),
+                      (f"B: 終日未約定=資金浮き (9:05{_DIR})", _cB)):
+        st = _stat(_v)
+        if st:
+            n, tot, per, wr, pf = st
+            print(f"{_lab2:>28}{n:>7}{tot:>+13,.0f}{per:>+10,.0f}{_pf(pf):>7}")
+        else:
+            print(f"{_lab2:>28}{0:>7}{'—':>13}{'—':>10}{'—':>7}")
+    stg = _stat(_gyakuA)
+    if stg:
+        n, tot, per, wr, pf = stg
+        print(f"{'A参考: 後からの逆指値約定(lss)':>28}{n:>7}{tot:>+13,.0f}{per:>+10,.0f}{_pf(pf):>7}")
+    print("  → Bがプラスなら『純粋な上乗せ』。Aは lss が既に取る分なので、9:05成行(A)と逆指値(A参考)を")
+    print("    比べて成行が勝つ時だけ置換価値あり(そうでなければ二重取り=見かけ倒し)。")
+
     print("\n読み方: (A)がプラスで(C)がマイナスなら『寄りで急騰→フェード』型=買うなら寄り(B)。")
     print("       損切/利確を入れると(C)の内訳(目標達成/損切り/タイムカット)が分かれる。")
     print("       (A)(B)は日足ベースで信頼度高。(C)は5分足ベース(±25%グリッチ・5分始値乖離を除外)。")
