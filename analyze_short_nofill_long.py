@@ -51,6 +51,8 @@ ap.add_argument("--long-stop-delay-bars", type=int, default=1,
                 help="delay1: 約定足(9:05足)から何本は損切りを効かせないか(既定1=ショートと同じ)。0=即損切り")
 ap.add_argument("--long-max-gap", type=float, default=0.0,
                 help="上ギャップ過大の見送り(ショートの下-3%%ガードの反転)。例0.03=9:05が前日終値+3%%超なら見送り。0=無効")
+ap.add_argument("--sweep", action="store_true",
+                help="損切%%×利確%% のグリッドを一括検証(9:05ロング)。どの損切/利確が最適か・そもそも成立するかを一度に見る")
 ap.add_argument("--oos", action="store_true",
                 help="純OOSのみ: 各ペアの選定基準月(SOURCE_BASES)より後の日だけ集計")
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py")
@@ -84,6 +86,12 @@ def _bt_band(bt: float) -> str:
         if lo <= bt < hi:
             return lab
     return "60+"
+
+
+# --sweep 用: 損切%%×利確%% グリッド(9:05ロング)。フェード母集団で成立する組があるか探索。
+_SWEEP_STOPS = [0.005, 0.008, 0.012, 0.02]
+_SWEEP_TGTS = [0.005, 0.008, 0.012, 0.02, 0.03]
+_SWEEP_COMBOS = [(s, t) for s in _SWEEP_STOPS for t in _SWEEP_TGTS]
 
 
 def _month_end(m: int) -> pd.Timestamp:
@@ -276,21 +284,34 @@ def _scan_symbol(sym, name, strats):
                 _xp_l, r_0905 = _long_exit_st(db, 1, _sp, _tp, d_close, args.long_stop_delay_bars)
                 if _xp_l > 0:
                     pnl_0905 = long_pnl(e0905, _xp_l, r_0905, QTY, FEE, args.long_slip)
+            # --sweep: 損切%×利確% グリッドの各組で 9:05ロングの損益を試算(entry=e0905 固定)
+            sweep_pnls = None
+            if args.sweep and _e_ok:
+                sweep_pnls = []
+                for (_s, _t) in _SWEEP_COMBOS:
+                    _csp = float(floor_to_tick(e0905 * (1.0 - _s)))
+                    _ctp = float(floor_to_tick(e0905 * (1.0 + _t)))
+                    _cxp, _crs = _long_exit_st(db, 1, _csp, _ctp, d_close, args.long_stop_delay_bars)
+                    sweep_pnls.append(long_pnl(e0905, _cxp, _crs, QTY, FEE, args.long_slip)
+                                      if _cxp > 0 else None)
             in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
             oos_ok = True
             if args.oos:
                 lbe = _OOS_BASES.get((sym.split(".")[0], strat))
                 oos_ok = (lbe is not None) and (pd.Timestamp(fd) > lbe)
-            recs.append((fd, pnl_prev, pnl_open, pnl_0905, r_0905, in_win, oos_ok))
+            recs.append((fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls, in_win, oos_ok))
 
         # 各未約定ロング取引に BT を付与(asof=先読みなし / 既定=今日基準・ペア単位)
         ser = sorted(series, key=lambda x: pd.Timestamp(x[0]))
         pair_bt = _bt_from_series(ser) if not args.asof_bt else None
-        for (fd, pnl_prev, pnl_open, pnl_0905, r_0905, in_win, oos_ok) in recs:
+        for (fd, pnl_prev, pnl_open, pnl_0905, r_0905, sweep_pnls, in_win, oos_ok) in recs:
             if not in_win or (args.oos and not oos_ok):
                 continue
             bt = _bt_from_series(ser, asof=fd) if args.asof_bt else pair_bt
-            out.append((bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok))
+            if args.sweep:
+                out.append((bt, sweep_pnls, oos_ok))
+            else:
+                out.append((bt, pnl_prev, pnl_open, pnl_0905, r_0905, oos_ok))
     return out, n_sig, n_nofill
 
 
@@ -376,6 +397,55 @@ def main():
         sym = code if "." in code else f"{code}.T"
         by_sym[sym][0] = nm
         by_sym[sym][1].append(strat)
+
+    # ── --sweep: 損切%×利確% グリッドを一括検証(9:05ロング) ──────────────────────
+    if args.sweep:
+        _sw30 = [[] for _ in _SWEEP_COMBOS]   # combo -> pnl list (BT≥30)
+        _sw40 = [[] for _ in _SWEEP_COMBOS]   # combo -> pnl list (BT≥40)
+        _sig = _nf = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_scan_symbol, sym, nm_st[0] or "", nm_st[1]): sym
+                    for sym, nm_st in by_sym.items()}
+            done = 0
+            for fu in as_completed(futs):
+                done += 1
+                if done % 50 == 0:
+                    print(f"  ...{done}/{len(futs)} 銘柄", flush=True)
+                try:
+                    rows, n_sig, n_nf = fu.result()
+                except Exception:
+                    continue
+                _sig += n_sig; _nf += n_nf
+                for (bt, sweep_pnls, oos_ok) in rows:
+                    if not sweep_pnls:
+                        continue
+                    for ci, p in enumerate(sweep_pnls):
+                        if p is None:
+                            continue
+                        if bt >= 30:
+                            _sw30[ci].append(p)
+                        if bt >= 40:
+                            _sw40[ci].append(p)
+        print("\n" + "=" * 60)
+        print(f"母集団: 全シグナル {_sig} 件 / 寄りで未約定 {_nf} 件"
+              + (f" ({_nf/_sig*100:.1f}%)" if _sig else ""))
+        print(f"期間: 直近{args.days}日" + ("  | 純OOSのみ" if args.oos else "")
+              + ("  | BT=先読みなし(asof)" if args.asof_bt else "  | BT=今日基準")
+              + f"  | delay{args.long_stop_delay_bars}"
+              + (f"  | 上ギャップ{args.long_max_gap*100:.0f}%見送り" if args.long_max_gap > 0 else ""))
+        for _lab, _sw in (("BT≥30", _sw30), ("BT≥40", _sw40)):
+            print(f"\n=== 損切×利確 スイープ [{_lab}] (9:05ロング・PF降順) ===")
+            print(f"{'損切%':>7}{'利確%':>7}{'件数':>7}{'合計損益':>13}{'1件平均':>10}{'勝率':>8}{'PF':>7}")
+            _tbl = []
+            for ci, (s, t) in enumerate(_SWEEP_COMBOS):
+                st = _stat(_sw[ci])
+                if st:
+                    _tbl.append((s, t, *st))
+            for (s, t, n, tot, per, wr, pf) in sorted(_tbl, key=lambda x: -(x[6] if x[6] != float("inf") else 9e9)):
+                print(f"{s*100:>6.1f}%{t*100:>6.1f}%{n:>7}{tot:>+13,.0f}{per:>+10,.0f}{wr:>7.1f}%{_pf(pf):>7}")
+        print("\n読み方: フェード母集団なのでロングは基本不利。どの組もPF<1.2/損益マイナスなら#6却下確定。")
+        print("       一部の組だけプラスでも、件数が少なければ過学習(たまたま)を疑うこと。")
+        return
 
     prev_by_band: dict = defaultdict(list)   # (A) 前日終値→大引け
     open_by_band: dict = defaultdict(list)   # (B) 寄り(9:00)→大引け
