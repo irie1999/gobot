@@ -16,8 +16,13 @@
   python analyze_short_nofill_long.py --bt-min 30
   python analyze_short_nofill_long.py --oos                 # 各ペア選定基準月より後(純OOS)
   python analyze_short_nofill_long.py --asof-bt --oos       # 先読みなしBT × 純OOS(最も厳しい)
+  python analyze_short_nofill_long.py --oos --asof-bt --days 400 --sweep          # 損切×利確 一括探索
+  python analyze_short_nofill_long.py --oos --asof-bt --days 400 --short --sweep  # #6b: 9:05成行ショート
 
-出力: BT帯別に「9:05ロング(同日決済)」の 件数/合計/勝率/PF/1件あたり。
+#6(ロング)は却下確定(全損切/利確組でPF<1)。#6b は --short で「未約定→9:05成行ショート」を検証
+(フェードを空売りで拾う。買いの完全ミラー)。--short 時は (A)(B)(C)・スイープすべてショート方向。
+
+出力: BT帯別に「9:05ロング/ショート(同日決済)」の 件数/合計/勝率/PF/1件あたり。
 """
 from __future__ import annotations
 import argparse
@@ -52,7 +57,9 @@ ap.add_argument("--long-stop-delay-bars", type=int, default=1,
 ap.add_argument("--long-max-gap", type=float, default=0.0,
                 help="上ギャップ過大の見送り(ショートの下-3%%ガードの反転)。例0.03=9:05が前日終値+3%%超なら見送り。0=無効")
 ap.add_argument("--sweep", action="store_true",
-                help="損切%%×利確%% のグリッドを一括検証(9:05ロング)。どの損切/利確が最適か・そもそも成立するかを一度に見る")
+                help="損切%%×利確%% のグリッドを一括検証(9:05)。どの損切/利確が最適か・そもそも成立するかを一度に見る")
+ap.add_argument("--short", action="store_true",
+                help="#6b: ロングでなく『未約定→9:05成行ショート』を検証(買いの完全ミラー)。フェードを空売りで拾う")
 ap.add_argument("--oos", action="store_true",
                 help="純OOSのみ: 各ペアの選定基準月(SOURCE_BASES)より後の日だけ集計")
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py")
@@ -75,6 +82,8 @@ QTY = ble.FIXED_QTY
 FEE = ble.FEE_PCT_ONE_WAY
 _GAP = getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.03)
 TODAY = pd.Timestamp.now().normalize()
+_DIR = "ショート" if args.short else "ロング"      # 表示用の方向ワード
+_BUYSELL = "売り→買い" if args.short else "買い→売り"
 
 # BT帯
 _BT_BANDS = [(0, 30, "0-29"), (30, 40, "30-39"), (40, 50, "40-49"),
@@ -265,35 +274,31 @@ def _scan_symbol(sym, name, strats):
             pnl_0905 = None; r_0905 = None
             _e_ok = (e0905 > 0 and (not d_open or d_open <= 0
                                     or abs(e0905 / d_open - 1.0) <= 0.25))   # 5分足始値グリッチ除外
-            # 上ギャップ過大の見送り(ショートの下-3%ガードの反転)
-            if args.long_max_gap > 0 and base > 0 and (e0905 / base - 1.0) > args.long_max_gap:
+            # ギャップ過大の見送り(ロングのみ: 上に走りすぎたチェイス回避。ショートは対象外)
+            if (not args.short) and args.long_max_gap > 0 and base > 0 and (e0905 / base - 1.0) > args.long_max_gap:
                 _e_ok = False
             if _e_ok:
-                # 損切/利確価格を決める。既定=ATRミラー(ショートのstop/target距離を反転して9:05に適用)。
-                #   ショート: stop=base+atr*sm(=osp, 上) / target=base-atr*tm(=otp, 下)
-                #   → 距離 stop_dist=osp-base(=atr*sm), tgt_dist=base-otp(=atr*tm)
-                #   ロング(反転): stop=9:05-atr*sm(下, floor) / target=9:05+atr*tm(上, floor)
+                # 損切/利確の"距離"を決める。既定=ATRミラー(ショートのstop/target距離=atr*sm/atr*tm)。
+                #   ショートの order: stop=base+atr*sm(=osp) / target=base-atr*tm(=otp)
+                #   → sdist=osp-base(=atr*sm), tdist=base-otp(=atr*tm)。方向は _st_prices が処理。
                 if args.long_stop_pct > 0 or args.long_target_pct > 0:
-                    _sp = float(floor_to_tick(e0905 * (1.0 - args.long_stop_pct))) if args.long_stop_pct > 0 else None
-                    _tp = float(floor_to_tick(e0905 * (1.0 + args.long_target_pct))) if args.long_target_pct > 0 else None
+                    _sdist = e0905 * args.long_stop_pct if args.long_stop_pct > 0 else 0.0
+                    _tdist = e0905 * args.long_target_pct if args.long_target_pct > 0 else 0.0
                 else:
                     _sdist = osp - base    # atr*sm
                     _tdist = base - otp    # atr*tm
-                    _sp = float(floor_to_tick(e0905 - _sdist)) if _sdist > 0 else None
-                    _tp = float(floor_to_tick(e0905 + _tdist)) if _tdist > 0 else None
-                _xp_l, r_0905 = _long_exit_st(db, 1, _sp, _tp, d_close, args.long_stop_delay_bars)
+                _sp, _tp = _st_prices(e0905, _sdist, _tdist)
+                _xp_l, r_0905 = _exit_st(db, 1, _sp, _tp, d_close, args.long_stop_delay_bars)
                 if _xp_l > 0:
-                    pnl_0905 = long_pnl(e0905, _xp_l, r_0905, QTY, FEE, args.long_slip)
-            # --sweep: 損切%×利確% グリッドの各組で 9:05ロングの損益を試算(entry=e0905 固定)
+                    pnl_0905 = _dir_pnl(e0905, _xp_l, r_0905)
+            # --sweep: 損切%×利確% グリッドの各組で 9:05(ロング/ショート)の損益を試算(entry=e0905 固定)
             sweep_pnls = None
             if args.sweep and _e_ok:
                 sweep_pnls = []
                 for (_s, _t) in _SWEEP_COMBOS:
-                    _csp = float(floor_to_tick(e0905 * (1.0 - _s)))
-                    _ctp = float(floor_to_tick(e0905 * (1.0 + _t)))
-                    _cxp, _crs = _long_exit_st(db, 1, _csp, _ctp, d_close, args.long_stop_delay_bars)
-                    sweep_pnls.append(long_pnl(e0905, _cxp, _crs, QTY, FEE, args.long_slip)
-                                      if _cxp > 0 else None)
+                    _csp, _ctp = _st_prices(e0905, e0905 * _s, e0905 * _t)
+                    _cxp, _crs = _exit_st(db, 1, _csp, _ctp, d_close, args.long_stop_delay_bars)
+                    sweep_pnls.append(_dir_pnl(e0905, _cxp, _crs) if _cxp > 0 else None)
             in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
             oos_ok = True
             if args.oos:
@@ -335,14 +340,55 @@ def _long_exit_st(db, start_idx, sp, tp, d_close, stop_delay_bars):
     return cl, "close"                                              # 引けまで未達=タイムカット
 
 
+def _short_exit_st(db, start_idx, sp, tp, d_close, stop_delay_bars):
+    """9:05ショートの同日決済。sp=損切り価格(上) / tp=利確価格(下)。同バーは損切り優先(悲観)。
+    delay: 約定足から stop_delay_bars 本は損切り無効。利確は常時。Returns (exit_price, reason)。"""
+    cl = float(d_close) if (d_close and d_close > 0) else float(db["close"].iloc[-1])
+    if sp is None and tp is None:
+        return cl, "close"
+    highs = db["high"].to_numpy(dtype=float)
+    lows = db["low"].to_numpy(dtype=float)
+    stop_start = int(start_idx) + max(0, int(stop_delay_bars))
+    for j in range(int(start_idx), len(highs)):
+        if sp is not None and j >= stop_start and highs[j] >= sp:   # 上抜け=損切(遅延後・同バー優先)
+            return sp, "stop"
+        if tp is not None and lows[j] <= tp:                        # 下抜け=利確
+            return tp, "target"
+    return cl, "close"
+
+
+def _st_prices(entry, sdist, tdist):
+    """損切り距離 sdist / 利確距離 tdist(ともに>0の円)から、方向に応じた(損切価格, 利確価格)。
+    ロング: 損切=下(floor)/利確=上(floor)。ショート: 損切=上(ceil)/利確=下(ceil)。"""
+    if args.short:
+        sp = float(ceil_to_tick(entry + sdist)) if sdist > 0 else None
+        tp = float(ceil_to_tick(entry - tdist)) if tdist > 0 else None
+    else:
+        sp = float(floor_to_tick(entry - sdist)) if sdist > 0 else None
+        tp = float(floor_to_tick(entry + tdist)) if tdist > 0 else None
+    return sp, tp
+
+
+def _exit_st(db, start_idx, sp, tp, d_close, delay):
+    return (_short_exit_st if args.short else _long_exit_st)(db, start_idx, sp, tp, d_close, delay)
+
+
+def _dir_pnl(entry, exit_, reason):
+    fn = short_pnl if args.short else long_pnl
+    return fn(entry, exit_, reason, QTY, FEE, args.long_slip)
+
+
 def _guarded_pnl(entry, exit_):
-    """買い→大引け売りの損益(円)。データエラー(1日±25%超/非正値)は None で除外。"""
+    """成行→大引け決済の損益(円)。ロング=買い→売り / ショート=売り→買い。
+    データエラー(1日±25%超/非正値)は None で除外。"""
     if entry is None or exit_ is None or entry <= 0 or exit_ <= 0:
         return None
     if abs(exit_ / entry - 1.0) > 0.25:
         return None
     fee = (entry + exit_) * QTY * FEE
-    return (exit_ - entry) * QTY - fee
+    if args.short:
+        return (entry - exit_) * QTY - fee    # 売り→買い(ショート)
+    return (exit_ - entry) * QTY - fee         # 買い→売り(ロング)
 
 
 def _stat(pnls):
@@ -434,7 +480,7 @@ def main():
               + f"  | delay{args.long_stop_delay_bars}"
               + (f"  | 上ギャップ{args.long_max_gap*100:.0f}%見送り" if args.long_max_gap > 0 else ""))
         for _lab, _sw in (("BT≥30", _sw30), ("BT≥40", _sw40)):
-            print(f"\n=== 損切×利確 スイープ [{_lab}] (9:05ロング・PF降順) ===")
+            print(f"\n=== 損切×利確 スイープ [{_lab}] (9:05{_DIR}・PF降順) ===")
             print(f"{'損切%':>7}{'利確%':>7}{'件数':>7}{'合計損益':>13}{'1件平均':>10}{'勝率':>8}{'PF':>7}")
             _tbl = []
             for ci, (s, t) in enumerate(_SWEEP_COMBOS):
@@ -443,7 +489,7 @@ def main():
                     _tbl.append((s, t, *st))
             for (s, t, n, tot, per, wr, pf) in sorted(_tbl, key=lambda x: -(x[6] if x[6] != float("inf") else 9e9)):
                 print(f"{s*100:>6.1f}%{t*100:>6.1f}%{n:>7}{tot:>+13,.0f}{per:>+10,.0f}{wr:>7.1f}%{_pf(pf):>7}")
-        print("\n読み方: フェード母集団なのでロングは基本不利。どの組もPF<1.2/損益マイナスなら#6却下確定。")
+        print(f"\n読み方: {_DIR}。PF>1.2の組が件数十分＆隣接組も揃えば有望。全組<1.2なら不成立。")
         print("       一部の組だけプラスでも、件数が少なければ過学習(たまたま)を疑うこと。")
         return
 
@@ -478,7 +524,7 @@ def main():
           f" ({tot_nofill/tot_sig*100:.1f}%)" if tot_sig else "シグナルなし")
     print(f"期間: 直近{args.days}日" + ("  | 純OOSのみ" if args.oos else "")
           + ("  | BT=先読みなし(asof)" if args.asof_bt else "  | BT=今日基準(ペア単位)"))
-    print("※ 全て『買い→同日大引け売り』。決済は公式大引け。±25%超の異常足は除外済み。")
+    print(f"※ 全て『{_BUYSELL}(同日大引け決済)』。±25%超の異常足は除外済み。方向={_DIR}")
     if args.long_stop_pct > 0 or args.long_target_pct > 0:
         _st_lab = f"損切-{args.long_stop_pct*100:.1f}% / 利確+{args.long_target_pct*100:.1f}%"
     else:
@@ -486,11 +532,11 @@ def main():
     _st_lab += f" / delay{args.long_stop_delay_bars}"
     if args.long_max_gap > 0:
         _st_lab += f" / 上ギャップ{args.long_max_gap*100:.0f}%見送り"
-    _print_table("(A) 前日終値→大引け [あなたの直感の検証・理論値]", prev_by_band)
-    _print_table("(B) 寄り(9:00)→大引け [実際に買える最速・成行]", open_by_band)
-    _print_table(f"(C) 9:05ロング [{_st_lab}]", n0905_by_band)
+    _print_table(f"(A) 前日終値→大引け [{_DIR}・理論値]", prev_by_band)
+    _print_table(f"(B) 寄り(9:00)→大引け [{_DIR}・実際に建てられる最速]", open_by_band)
+    _print_table(f"(C) 9:05{_DIR} [{_st_lab}]", n0905_by_band)
     # (C) の決済理由内訳(BT≥30)
-    print(f"\n--- (C) 9:05ロング BT≥30 決済理由の内訳 [{_st_lab}] ---")
+    print(f"\n--- (C) 9:05{_DIR} BT≥30 決済理由の内訳 [{_st_lab}] ---")
     print(f"{'理由':>8}{'件数':>7}{'合計損益':>13}{'1件平均':>10}")
     _rmix_all = []
     for _rk, _ja in (("target", "目標達成"), ("stop", "損切り"), ("close", "タイムカット")):
