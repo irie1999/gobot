@@ -2973,6 +2973,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
                     f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
                     f"white-space:nowrap;margin-bottom:3px\">🚀 発注</button>")
+        # 発注株数を100株単位で変更できる入力欄。既定=計算株数(100×戦略一致数)。減らせば分散発注。
+        # gobotOrder がボタン隣接の .gobotqty を読んで qty/想定額を上書きする(id不要=衝突回避)。
+        _qty_input = (f'<input type="number" class="gobotqty" value="{qty}" step="100" min="100" '
+                      f'max="{qty}" title="発注株数(100株単位で変更可)" '
+                      f'style="width:54px;padding:2px 4px;margin-bottom:2px;border:1px solid #475569;'
+                      f'border-radius:4px;background:#0f172a;color:#e2e8f0;font-size:12px;'
+                      f'text-align:right">')
+        _ord_btn = _qty_input + _ord_btn
         _reg_link = (f'<a href="{_reg_url}" target="_blank" '
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
@@ -3074,6 +3082,9 @@ function gobotResetOrdered(){
 }
 
 function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval){
+  // ボタン隣接の株数入力(.gobotqty)があればその値で発注(100株単位で減らせる)。想定額も再計算。
+  var qin = btn ? (btn.parentNode && btn.parentNode.querySelector('.gobotqty')) : null;
+  if(qin){ var qv = parseInt(qin.value,10); if(qv>0){ qty = qv; posval = Math.round(entry*qv); } }
   var lbl = (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
   if(!confirm('\\u3010\\u767a\\u6ce8\\u78ba\\u8a8d\\u3011\\n'+sym+' '+strat+' ('+side+')\\n'+lbl
       +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\n\\u767a\\u6ce8\\u30b5\\u30fc\\u30d0(order_server:8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
