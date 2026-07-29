@@ -7670,6 +7670,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         "signal_dt_raw": _sd_for_key,   # ④純OOS列: 除外窓判定用
                         "bt_type": bt_type2,    # BTスコアの支配要素(安定/取引数/高WR/高PF)
                         "entry_d_raw": entry_d, "exit_d_raw": exit_d,
+                        "entry_time": t.get("entry_time", ""),   # 約定5分足の開始時刻(#9・明細表示用)
                         "pnl": t.get("pnl", 0), "reason": reason}
                 _sdt_raw = t.get("signal_dt")
                 extra = {
