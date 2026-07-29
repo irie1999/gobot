@@ -270,8 +270,9 @@ def _scan_symbol(sym, name, strats):
             # bar0未約定の内訳: _ef(全日約定)が在る=後でトリガー到達=「A:後で逆指値約定」、
             #   None=終日未達=「B:終日未約定(資金浮き)」。#6bが本当に補填すべきはB。
             filled_later = (_ef is not None)
-            # A の場合、後からの逆指値約定でlssが取る損益(参考: 9:05成行 vs 逆指値後約定の比較用)
-            pnl_gyaku = (short_pnl(_ef, _xp, _rs, QTY, FEE, 0.005 if _rs == "stop" else 0.0)
+            # A の場合、後からの逆指値約定でlssが取る損益(参考: 9:05成行 vs 逆指値後約定の比較用)。
+            # スリッページは現行lssエンジンと同じ基準(_INTRADAY_5M_SLIP=既定0)に揃える=args.long_slip。
+            pnl_gyaku = (short_pnl(_ef, _xp, _rs, QTY, FEE, args.long_slip)
                          if (filled_later and _rs not in ("no_5m", "no_entry", None)) else None)
             # (A)(B) は日足close-only(信頼度高・ベンチマーク)
             pnl_prev = _guarded_pnl(base, d_close)
