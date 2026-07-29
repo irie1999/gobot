@@ -16,7 +16,6 @@
   python analyze_short_nofill_long.py --bt-min 30
   python analyze_short_nofill_long.py --oos                 # 各ペア選定基準月より後(純OOS)
   python analyze_short_nofill_long.py --asof-bt --oos       # 先読みなしBT × 純OOS(最も厳しい)
-  python analyze_short_nofill_long.py --compare-short       # 同じ日にショートを続けた場合と比較
 
 出力: BT帯別に「9:05ロング(同日決済)」の 件数/合計/勝率/PF/1件あたり。
 """
@@ -49,8 +48,6 @@ ap.add_argument("--oos", action="store_true",
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py")
 ap.add_argument("--asof-bt", action="store_true",
                 help="BTを各取引時点までのデータだけで算出(先読みなし=真OOS)。既定は今日基準BT(ペア単位)")
-ap.add_argument("--compare-short", action="store_true",
-                help="同じ未約定日に『ショートを終日待って約定させた場合』の成績も併記(参考)")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -58,8 +55,7 @@ from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
 from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
 from daytrade_data import load_intraday, split_by_day
 from sameday5m_core import mod_for
-from sameday5m_firsttouch import (short_entry_fill_5m, short_exit_5m, short_pnl,
-                                  long_pnl)
+from sameday5m_firsttouch import short_entry_fill_5m, short_exit_5m, short_pnl
 
 ble._MIRROR_PNL = False
 ble._ENTRY_TYPE_FORCE = None
@@ -156,7 +152,7 @@ def _bt_from_series(series, asof=None) -> int:
 
 
 def _scan_symbol(sym, name, strats):
-    """[(bt, pnl_long, pnl_short_ctx, oos_ok)] を返す。ショートが寄りで未約定の日のみ。"""
+    """[(bt, pnl_prev, pnl_open, pnl_0905, oos_ok)] を返す。ショートが寄りで未約定の日のみ。"""
     out = []
     try:
         m5 = load_intraday(sym, days=args.days + 5, source=args.source)
@@ -188,7 +184,7 @@ def _scan_symbol(sym, name, strats):
             continue
         if not r:
             continue
-        recs, series = [], []   # recs=(fd, pnl_long, pnl_short_ctx, in_win, oos_ok)
+        recs, series = [], []   # recs=(fd, pnl_prev, pnl_open, pnl_0905, in_win, oos_ok)
         for t in r.get("trade_log", []):
             if t.get("reason") in ("発注中", "保有中"):
                 continue
@@ -234,34 +230,50 @@ def _scan_symbol(sym, name, strats):
             gap_low = (o0 < trig * (1.0 - _GAP))    # ギャップダウン過大=弱い=対象外
             if short_filled_bar0 or gap_low:
                 continue
-            # 寄りで未約定 → 9:05(2本目始値)で成行ロング → 大引け(公式終値優先)で決済
+            # 寄りで未約定 → ロング。エントリー時点を3つ試算して比較する:
+            #  (A) 前日終値→大引け : あなたの直感「未約定株は結局プラス」の直接検証(理論値)
+            #  (B) 寄り(9:00)→大引け: 寄りで成行ロング(実際に買える最速)
+            #  (C) 9:05→大引け     : 2本目始値で成行ロング(#6の元案)
+            # (A)(B)は日足のみ(yfinance・信頼できる)、(C)は5分足始値。決済は全て公式大引け。
+            # グリッチガード: 1日で±25%超の値動き=壊れた足(データエラー)として除外(None)。
+            if not (d_close and d_close > 0):
+                continue    # 大引けが取れない日は判定不能
             n_nofill += 1
-            l_entry = float(db["open"].iloc[1])
-            l_close = float(d_close) if (d_close and d_close > 0) else float(db["close"].iloc[-1])
-            pnl_long = long_pnl(l_entry, l_close, "close", QTY, FEE, args.long_slip)
-            # 参考: 同じ日にショートを終日待って約定させた場合(compare用)
-            pnl_short_ctx = None
-            if args.compare_short and _ef is not None and _rs not in ("no_5m", "no_entry"):
-                pnl_short_ctx = short_pnl(_ef, _xp, _rs, QTY, FEE, 0.005 if _rs == "stop" else 0.0)
+            base = float(round_to_tick(olp))          # 前日終値(注文基準)
+            e0905 = float(db["open"].iloc[1])          # 9:05=2本目始値
+            pnl_prev = _guarded_pnl(base, d_close)
+            pnl_open = _guarded_pnl(d_open, d_close)
+            pnl_0905 = _guarded_pnl(e0905, d_close)
             in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
             oos_ok = True
             if args.oos:
                 lbe = _OOS_BASES.get((sym.split(".")[0], strat))
                 oos_ok = (lbe is not None) and (pd.Timestamp(fd) > lbe)
-            recs.append((fd, pnl_long, pnl_short_ctx, in_win, oos_ok))
+            recs.append((fd, pnl_prev, pnl_open, pnl_0905, in_win, oos_ok))
 
         # 各未約定ロング取引に BT を付与(asof=先読みなし / 既定=今日基準・ペア単位)
         ser = sorted(series, key=lambda x: pd.Timestamp(x[0]))
         pair_bt = _bt_from_series(ser) if not args.asof_bt else None
-        for (fd, pnl_long, pnl_short_ctx, in_win, oos_ok) in recs:
+        for (fd, pnl_prev, pnl_open, pnl_0905, in_win, oos_ok) in recs:
             if not in_win or (args.oos and not oos_ok):
                 continue
             bt = _bt_from_series(ser, asof=fd) if args.asof_bt else pair_bt
-            out.append((bt, pnl_long, pnl_short_ctx, oos_ok))
+            out.append((bt, pnl_prev, pnl_open, pnl_0905, oos_ok))
     return out, n_sig, n_nofill
 
 
+def _guarded_pnl(entry, exit_):
+    """買い→大引け売りの損益(円)。データエラー(1日±25%超/非正値)は None で除外。"""
+    if entry is None or exit_ is None or entry <= 0 or exit_ <= 0:
+        return None
+    if abs(exit_ / entry - 1.0) > 0.25:
+        return None
+    fee = (entry + exit_) * QTY * FEE
+    return (exit_ - entry) * QTY - fee
+
+
 def _stat(pnls):
+    pnls = [p for p in pnls if p is not None]
     n = len(pnls)
     if n == 0:
         return None
@@ -313,8 +325,9 @@ def main():
         by_sym[sym][0] = nm
         by_sym[sym][1].append(strat)
 
-    long_by_band: dict = defaultdict(list)
-    short_by_band: dict = defaultdict(list)
+    prev_by_band: dict = defaultdict(list)   # (A) 前日終値→大引け
+    open_by_band: dict = defaultdict(list)   # (B) 寄り(9:00)→大引け
+    n0905_by_band: dict = defaultdict(list)  # (C) 9:05→大引け
     tot_sig = tot_nofill = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, sym, nm_st[0] or "", nm_st[1]): sym
@@ -329,22 +342,25 @@ def main():
             except Exception:
                 continue
             tot_sig += n_sig; tot_nofill += n_nf
-            for (bt, pnl_long, pnl_short_ctx, oos_ok) in rows:
+            for (bt, pnl_prev, pnl_open, pnl_0905, oos_ok) in rows:
                 lab = _bt_band(bt)
-                long_by_band[lab].append(pnl_long)
-                if pnl_short_ctx is not None:
-                    short_by_band[lab].append(pnl_short_ctx)
+                prev_by_band[lab].append(pnl_prev)
+                open_by_band[lab].append(pnl_open)
+                n0905_by_band[lab].append(pnl_0905)
 
     print("\n" + "=" * 60)
     print(f"母集団: 全シグナル {tot_sig} 件 / うち寄りでショート未約定(=ロング対象) {tot_nofill} 件"
           f" ({tot_nofill/tot_sig*100:.1f}%)" if tot_sig else "シグナルなし")
     print(f"期間: 直近{args.days}日" + ("  | 純OOSのみ" if args.oos else "")
           + ("  | BT=先読みなし(asof)" if args.asof_bt else "  | BT=今日基準(ペア単位)"))
-    _print_table("#6 ショート不約定 → 9:05ロング(同日大引け決済)", long_by_band)
-    if args.compare_short:
-        _print_table("参考: 同じ未約定日にショートを終日待った場合", short_by_band)
-    print("\n注意: ロングは9:05成行→大引け決済の単純版(損切/利確なし)。"
-          "実運用のスリッページ・約定ズレは未反映(--long-slip で保守側に振れる)。")
+    print("※ 全て『買い→同日大引け売り』。決済は公式大引け。±25%超の異常足は除外済み。")
+    _print_table("(A) 前日終値→大引け [あなたの直感の検証・理論値]", prev_by_band)
+    _print_table("(B) 寄り(9:00)→大引け [実際に買える最速・成行]", open_by_band)
+    _print_table("(C) 9:05→大引け [#6元案・2本目始値で成行]", n0905_by_band)
+    print("\n読み方: (A)がプラスで(C)がマイナスなら『寄りで急騰→フェード』型=買うなら寄り(B)。")
+    print("       (A)(B)は日足(yfinance)ベースで信頼度高。(C)は5分足始値ベース。")
+    print("注意: 損切/利確なしの単純版。実スリッページ未反映。スレッド破損(SystemError)が")
+    print("      出たら --workers 1 で再実行して数値を確定してください。")
 
 
 if __name__ == "__main__":
