@@ -1269,6 +1269,9 @@ except Exception:
 # 期待日より古ければ、キャッシュタグを実バー日付に落とす。当日バーが配信された後の実行で
 # 初めて今日タグの新規キャッシュが作られ、シグナルが正しく出力・凍結される。
 # --date(過去日再現)時は対象外。通常(データ確定済み)は実バー==期待日で挙動は不変。
+# _data_asof = このキャッシュが実際に使うデータの最新バー日付(鮮度スタンプ)。
+# キャッシュ再利用時に「保存時データ < 今使えるデータ」なら自動で作り直す判定に使う。
+_data_asof = str(_args.date) if _args.date else None
 if not _args.date:
     try:
         from datetime import date as _date_cls2
@@ -1284,13 +1287,20 @@ if not _args.date:
                     break
             except Exception:
                 continue
-        if (_actual_bar is not None and isinstance(_expected_bar, _date_cls2)
-                and _actual_bar < _expected_bar):
-            print(f"[BTキャッシュ] データ未確定検出: 実最新バー {_actual_bar} < 期待 "
-                  f"{_expected_bar} → キャッシュタグを実バー {_actual_bar} に調整"
-                  f"(ラグ中の暫定キャッシュが『今日版』として固定される不具合を回避)",
-                  flush=True)
-            _bt_bar_tok = str(_actual_bar)
+        if _actual_bar is not None:
+            # 実際に取れているデータの最新日(期待日を超えない=trim済み)を鮮度スタンプに。
+            if isinstance(_expected_bar, _date_cls2):
+                _data_asof = str(min(_actual_bar, _expected_bar))
+            else:
+                _data_asof = str(_actual_bar)
+            if isinstance(_expected_bar, _date_cls2) and _actual_bar < _expected_bar:
+                print(f"[BTキャッシュ] データ未確定検出: 実最新バー {_actual_bar} < 期待 "
+                      f"{_expected_bar} → キャッシュタグを実バー {_actual_bar} に調整"
+                      f"(ラグ中の暫定キャッシュが『今日版』として固定される不具合を回避)",
+                      flush=True)
+                _bt_bar_tok = str(_actual_bar)
+        else:
+            _data_asof = str(_expected_bar)
     except Exception as _tok_e:
         print(f"[BTキャッシュ] 実バー確認をスキップ (期待日でタグ付け): {_tok_e}", flush=True)
 # 約定ロジックのバージョン。約定/決済モデルを変えたらここを上げると、旧BTキャッシュを
@@ -1332,15 +1342,32 @@ _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
+# 鮮度スタンプ: このキャッシュが「どのデータ日付で作られたか」を隣に記録する。
+_bt_asof_file  = _bt_cache_file.with_suffix(".pkl.asof")
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは
 # バー日付が進めば自動で作り直す）。
+# さらに鮮度スタンプで「保存時データ < 今使えるデータ」なら自動で破棄・再生成する。
+# これにより、同じトークン名のまま古いデータで作られたキャッシュ(例: 修正前に引け直後の
+# 未確定データで作られた『今日版』)が残っていても、手動削除なしに自動で作り直される。
 if _bt_cache_file.exists():
-    try:
-        with open(_bt_cache_file, "rb") as _bf:
-            _bt_cache = _pickle.load(_bf)
-        print(f"[BTキャッシュ] {len(_bt_cache)}件をディスクから復元")
-    except Exception:
-        _bt_cache = {}
+    _bt_stale = False
+    if not _args.date and _data_asof:
+        try:
+            _saved_asof = (_bt_asof_file.read_text(encoding="utf-8").strip()
+                           if _bt_asof_file.exists() else "")
+        except Exception:
+            _saved_asof = ""
+        if (not _saved_asof) or (_saved_asof < _data_asof):
+            print(f"[BTキャッシュ] 鮮度スタンプ {_saved_asof or '無し'} < 現在データ "
+                  f"{_data_asof} → 古いキャッシュを破棄して再生成します", flush=True)
+            _bt_stale = True
+    if not _bt_stale:
+        try:
+            with open(_bt_cache_file, "rb") as _bf:
+                _bt_cache = _pickle.load(_bf)
+            print(f"[BTキャッシュ] {len(_bt_cache)}件をディスクから復元")
+        except Exception:
+            _bt_cache = {}
 
 _bt_cache_dirty = {"n": 0}
 
@@ -1353,6 +1380,11 @@ def _save_bt_cache():
         _snap = dict(_bt_cache)
         with open(_bt_cache_file, "wb") as _bf:
             _pickle.dump(_snap, _bf, protocol=_pickle.HIGHEST_PROTOCOL)
+        # 鮮度スタンプを更新(このキャッシュがどのデータ日付で作られたか)。
+        try:
+            _bt_asof_file.write_text(str(_data_asof or _bt_bar_tok), encoding="utf-8")
+        except Exception:
+            pass
         print(f"[BTキャッシュ] {len(_snap)}件を保存 ({_bt_cache_file})")
     except Exception as _e:
         print(f"[BTキャッシュ] 保存失敗: {_e}")
