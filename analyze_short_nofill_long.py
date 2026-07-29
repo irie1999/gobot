@@ -44,9 +44,13 @@ ap.add_argument("--bt-min", type=float, default=0.0,
 ap.add_argument("--long-slip", type=float, default=0.0,
                 help="ロング成行約定の不利スリッページ(既定0)。保守側で見るなら0.005等")
 ap.add_argument("--long-stop-pct", type=float, default=0.0,
-                help="9:05ロングの損切り幅(例0.02=-2%%)。0=損切りなし(引けまで持つ)")
+                help="9:05ロングの損切り幅(例0.02=-2%%)。0=ATRミラー(ショートのatr*smを反転)を使う")
 ap.add_argument("--long-target-pct", type=float, default=0.0,
-                help="9:05ロングの利確幅(例0.03=+3%%)。0=利確なし(引けまで持つ)")
+                help="9:05ロングの利確幅(例0.03=+3%%)。0=ATRミラー(ショートのatr*tmを反転)を使う")
+ap.add_argument("--long-stop-delay-bars", type=int, default=1,
+                help="delay1: 約定足(9:05足)から何本は損切りを効かせないか(既定1=ショートと同じ)。0=即損切り")
+ap.add_argument("--long-max-gap", type=float, default=0.0,
+                help="上ギャップ過大の見送り(ショートの下-3%%ガードの反転)。例0.03=9:05が前日終値+3%%超なら見送り。0=無効")
 ap.add_argument("--oos", action="store_true",
                 help="純OOSのみ: 各ペアの選定基準月(SOURCE_BASES)より後の日だけ集計")
 ap.add_argument("--oos-proposal", type=str, default="lss_proposal_cumul.py")
@@ -55,7 +59,7 @@ ap.add_argument("--asof-bt", action="store_true",
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
-from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
+from backtest_limit_entry import ceil_to_tick, floor_to_tick, round_to_tick, tick_size
 from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
 from daytrade_data import load_intraday, split_by_day
 from sameday5m_core import mod_for
@@ -253,8 +257,23 @@ def _scan_symbol(sym, name, strats):
             pnl_0905 = None; r_0905 = None
             _e_ok = (e0905 > 0 and (not d_open or d_open <= 0
                                     or abs(e0905 / d_open - 1.0) <= 0.25))   # 5分足始値グリッチ除外
+            # 上ギャップ過大の見送り(ショートの下-3%ガードの反転)
+            if args.long_max_gap > 0 and base > 0 and (e0905 / base - 1.0) > args.long_max_gap:
+                _e_ok = False
             if _e_ok:
-                _xp_l, r_0905 = _long_exit_st(db, 1, e0905, d_close)
+                # 損切/利確価格を決める。既定=ATRミラー(ショートのstop/target距離を反転して9:05に適用)。
+                #   ショート: stop=base+atr*sm(=osp, 上) / target=base-atr*tm(=otp, 下)
+                #   → 距離 stop_dist=osp-base(=atr*sm), tgt_dist=base-otp(=atr*tm)
+                #   ロング(反転): stop=9:05-atr*sm(下, floor) / target=9:05+atr*tm(上, floor)
+                if args.long_stop_pct > 0 or args.long_target_pct > 0:
+                    _sp = float(floor_to_tick(e0905 * (1.0 - args.long_stop_pct))) if args.long_stop_pct > 0 else None
+                    _tp = float(floor_to_tick(e0905 * (1.0 + args.long_target_pct))) if args.long_target_pct > 0 else None
+                else:
+                    _sdist = osp - base    # atr*sm
+                    _tdist = base - otp    # atr*tm
+                    _sp = float(floor_to_tick(e0905 - _sdist)) if _sdist > 0 else None
+                    _tp = float(floor_to_tick(e0905 + _tdist)) if _tdist > 0 else None
+                _xp_l, r_0905 = _long_exit_st(db, 1, _sp, _tp, d_close, args.long_stop_delay_bars)
                 if _xp_l > 0:
                     pnl_0905 = long_pnl(e0905, _xp_l, r_0905, QTY, FEE, args.long_slip)
             in_win = pd.Timestamp(fd) >= TODAY - pd.Timedelta(days=args.days)
@@ -275,24 +294,24 @@ def _scan_symbol(sym, name, strats):
     return out, n_sig, n_nofill
 
 
-def _long_exit_st(db, start_idx, entry, d_close):
+def _long_exit_st(db, start_idx, sp, tp, d_close, stop_delay_bars):
     """9:05ロングの同日決済(利確/損切り/タイムカット)を5分足 first-touch で。
-    stop=entry×(1-long_stop_pct) / target=entry×(1+long_target_pct)。同バーは損切り優先(悲観)。
-    どちらも0なら引け(大引け)まで持つ=タイムカットのみ。
+    sp=損切り価格(下) / tp=利確価格(上)。同バーは損切り優先(悲観・ショートと同じ)。
+    delay1: 約定足(start_idx)から stop_delay_bars 本は損切りを効かせない(ショートと同じ)。利確は常時。
+    sp/tp とも None なら引けまで=タイムカットのみ。
     Returns: (exit_price, reason∈{target,stop,close})。"""
-    sp = entry * (1.0 - args.long_stop_pct) if args.long_stop_pct > 0 else None
-    tp = entry * (1.0 + args.long_target_pct) if args.long_target_pct > 0 else None
     cl = float(d_close) if (d_close and d_close > 0) else float(db["close"].iloc[-1])
     if sp is None and tp is None:
         return cl, "close"
     highs = db["high"].to_numpy(dtype=float)
     lows = db["low"].to_numpy(dtype=float)
+    stop_start = int(start_idx) + max(0, int(stop_delay_bars))
     for j in range(int(start_idx), len(highs)):
-        if sp is not None and lows[j] <= sp:      # 下抜け=損切(同バー優先)
+        if sp is not None and j >= stop_start and lows[j] <= sp:   # 下抜け=損切(遅延後・同バー優先)
             return sp, "stop"
-        if tp is not None and highs[j] >= tp:      # 上抜け=利確
+        if tp is not None and highs[j] >= tp:                      # 上抜け=利確(遅延の影響なし)
             return tp, "target"
-    return cl, "close"                              # 引けまで未達=タイムカット
+    return cl, "close"                                              # 引けまで未達=タイムカット
 
 
 def _guarded_pnl(entry, exit_):
@@ -390,8 +409,13 @@ def main():
     print(f"期間: 直近{args.days}日" + ("  | 純OOSのみ" if args.oos else "")
           + ("  | BT=先読みなし(asof)" if args.asof_bt else "  | BT=今日基準(ペア単位)"))
     print("※ 全て『買い→同日大引け売り』。決済は公式大引け。±25%超の異常足は除外済み。")
-    _st_lab = (f"損切-{args.long_stop_pct*100:.1f}% / 利確+{args.long_target_pct*100:.1f}%"
-               if (args.long_stop_pct > 0 or args.long_target_pct > 0) else "損切/利確なし=引けまで")
+    if args.long_stop_pct > 0 or args.long_target_pct > 0:
+        _st_lab = f"損切-{args.long_stop_pct*100:.1f}% / 利確+{args.long_target_pct*100:.1f}%"
+    else:
+        _st_lab = f"ATRミラー(sm={args.sm}/tm={args.tm}を反転)"
+    _st_lab += f" / delay{args.long_stop_delay_bars}"
+    if args.long_max_gap > 0:
+        _st_lab += f" / 上ギャップ{args.long_max_gap*100:.0f}%見送り"
     _print_table("(A) 前日終値→大引け [あなたの直感の検証・理論値]", prev_by_band)
     _print_table("(B) 寄り(9:00)→大引け [実際に買える最速・成行]", open_by_band)
     _print_table(f"(C) 9:05ロング [{_st_lab}]", n0905_by_band)
