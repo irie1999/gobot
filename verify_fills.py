@@ -187,6 +187,7 @@ def main():
 
     # ── 全注文一覧(対象日に出した注文をすべて。未約定・取消・失効も含む) ──────────
     # 「注文は出したが約定しなかった」ものも見えるように、注文単位で状態を表示する。
+    names = {}
     order_rows = []
     for o in orders:
         if not (args.no_date or _match_date(_order_date(o))):
@@ -236,7 +237,6 @@ def main():
     # 銘柄×売買 で約定を集約(対象日のみ)
     sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
     buys = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
-    names = {}
     for o in orders:
         sym = str(o.get("Symbol") or "").split(".")[0]
         names[sym] = str(o.get("SymbolName") or "")
