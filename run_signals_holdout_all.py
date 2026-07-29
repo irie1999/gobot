@@ -1259,6 +1259,40 @@ try:
     _bt_bar_tok = str(_args.date) if _args.date else str(_exp_bar_date())
 except Exception:
     _bt_bar_tok = _cache_date
+# ── ラグ対策: BTキャッシュのタグを「実データの最新バー」で確定する ──────────────
+# _expected_latest_bar_date() は時計(平日15:40以降=今日)で期待日を返すが、yfinance の
+# 日足確定には数十分ラグがあり、15:40〜(引け直後)に実行するとまだ当日バーが配信されて
+# いないことがある。その状態で作った BTキャッシュ(中身は前営業日まで)が「今日版」として
+# ファイル名にタグ付けされ、当日中ずっと使い回されると、当日バーで初めて立つシグナルが
+# 一日中出力・凍結されない(→ 損益タブが凍結BTを引けず別ロジックの仮値を表示する)。
+# 対策: 起動時に流動性の高い基準銘柄で「実際に取れている最新バー日付」を確認し、それが
+# 期待日より古ければ、キャッシュタグを実バー日付に落とす。当日バーが配信された後の実行で
+# 初めて今日タグの新規キャッシュが作られ、シグナルが正しく出力・凍結される。
+# --date(過去日再現)時は対象外。通常(データ確定済み)は実バー==期待日で挙動は不変。
+if not _args.date:
+    try:
+        from datetime import date as _date_cls2
+        from backtest_limit_entry import fetch as _ref_fetch
+        _expected_bar = _exp_bar_date()
+        _actual_bar = None
+        for _ref_sym in ("7203.T", "6758.T", "9984.T"):   # トヨタ/ソニー/SBG (高流動・欠損稀)
+            try:
+                _ref_df = _ref_fetch(_ref_sym, 30)
+                if _ref_df is not None and len(_ref_df) > 0:
+                    _lb = _ref_df.index[-1]
+                    _actual_bar = _lb.date() if hasattr(_lb, "date") else _lb
+                    break
+            except Exception:
+                continue
+        if (_actual_bar is not None and isinstance(_expected_bar, _date_cls2)
+                and _actual_bar < _expected_bar):
+            print(f"[BTキャッシュ] データ未確定検出: 実最新バー {_actual_bar} < 期待 "
+                  f"{_expected_bar} → キャッシュタグを実バー {_actual_bar} に調整"
+                  f"(ラグ中の暫定キャッシュが『今日版』として固定される不具合を回避)",
+                  flush=True)
+            _bt_bar_tok = str(_actual_bar)
+    except Exception as _tok_e:
+        print(f"[BTキャッシュ] 実バー確認をスキップ (期待日でタグ付け): {_tok_e}", flush=True)
 # 約定ロジックのバージョン。約定/決済モデルを変えたらここを上げると、旧BTキャッシュを
 # 自動で無効化(ファイル名が変わる)して作り直す。バー日付だけだとコード変更が反映されない。
 #   v2: 現実的約定モデル(min(トリガー,始値)+-3%指値ガード)を導入(2026-07-18)
