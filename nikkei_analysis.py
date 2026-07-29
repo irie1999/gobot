@@ -9386,10 +9386,15 @@ function switchTbd(id, tab) {{
             tgt_cell  = '<td style="color:#475569;text-align:right">—</td>'
             loc_cell  = '<td style="color:#475569;text-align:center">—</td>'
             olp_sub   = ""
-        first_col = (f'<td style="color:#94a3b8">{t["entry_dt"]}</td>'
+        # 約定時刻(#9: entry_time=約定5分足の開始時刻 HH:MM)をエントリー日の下に表示。
+        # 実約定は [entry_time, entry_time+5分) の窓内。空(非lss等)なら非表示。
+        _etime = str(t.get("entry_time", "") or "")
+        _etime_sub = (f'<br><span style="font-size:0.72rem;color:#38bdf8;white-space:nowrap">'
+                      f'約定 {_etime}</span>') if _etime else ""
+        first_col = (f'<td style="color:#94a3b8">{t["entry_dt"]}{_etime_sub}</td>'
                      if entry_first else f'<td>{t["exit_dt"]}</td>')
         last_col  = (f'<td>{t["exit_dt"]}</td>'
-                     if entry_first else f'<td style="color:#94a3b8">{t["entry_dt"]}</td>')
+                     if entry_first else f'<td style="color:#94a3b8">{t["entry_dt"]}{_etime_sub}</td>')
         return f"""<tr{row_style}>
   {first_col}
   <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
