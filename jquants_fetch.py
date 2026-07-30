@@ -29,6 +29,7 @@ import argparse
 import os
 import pickle
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -326,7 +327,12 @@ def fetch_intraday(symbol: str, days: int = 60,
               file=sys.stderr)
         return None
 
-    # 30日チャンクで取得 (大量データ対応)
+    # 30日チャンクで取得 (大量データ対応)。
+    # レート制限(429)対策: チャンクごとに指数バックオフで再試行し、チャンク間に待機を入れる。
+    #   JQ_CHUNK_PAUSE = チャンク間の基本待機秒(既定1.0)。429が続くなら 2.0〜3.0 に上げる。
+    #   JQ_CHUNK_RETRY = 1チャンクの最大再試行回数(既定5)。バックオフ 5,10,20,40,60秒(上限60)。
+    _chunk_pause = float(os.environ.get("JQ_CHUNK_PAUSE", "1.0") or "1.0")
+    _chunk_retry = int(os.environ.get("JQ_CHUNK_RETRY", "5") or "5")
     all_dfs: list[pd.DataFrame] = []
     current = start
     chunk_idx = 0
@@ -335,24 +341,37 @@ def fetch_intraday(symbol: str, days: int = 60,
         chunk_idx += 1
         from_d = current.strftime("%Y%m%d")
         to_d = chunk_end.strftime("%Y%m%d")
-        try:
-            raw = fetch_method(
-                code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
-            )
-            if raw is not None and not raw.empty:
-                # 銘柄フィルタ
-                if "Code" in raw.columns:
-                    raw = raw[raw["Code"].astype(str).str.startswith(
-                        jq_code[:4])].copy()
-                if not raw.empty:
-                    all_dfs.append(raw)
+        raw = None
+        for _attempt in range(max(1, _chunk_retry)):
+            try:
+                raw = fetch_method(
+                    code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
+                )
+                break
+            except Exception as e:
+                _is429 = "429" in str(e) or "too many" in str(e).lower()
+                if _attempt < _chunk_retry - 1:
+                    _wait = min(60, 5 * (2 ** _attempt))   # 5,10,20,40,60
                     print(f"    chunk {chunk_idx}: "
-                          f"{current.strftime('%Y-%m-%d')}〜"
-                          f"{chunk_end.strftime('%Y-%m-%d')} → "
-                          f"{len(raw)}行", flush=True)
-        except Exception as e:
-            print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+                          f"{'429' if _is429 else type(e).__name__} → "
+                          f"{_wait}秒待って再試行 ({_attempt+1}/{_chunk_retry})",
+                          file=sys.stderr, flush=True)
+                    time.sleep(_wait)
+                else:
+                    print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+        if raw is not None and not raw.empty:
+            # 銘柄フィルタ
+            if "Code" in raw.columns:
+                raw = raw[raw["Code"].astype(str).str.startswith(
+                    jq_code[:4])].copy()
+            if not raw.empty:
+                all_dfs.append(raw)
+                print(f"    chunk {chunk_idx}: "
+                      f"{current.strftime('%Y-%m-%d')}〜"
+                      f"{chunk_end.strftime('%Y-%m-%d')} → "
+                      f"{len(raw)}行", flush=True)
         current = chunk_end + timedelta(days=1)
+        time.sleep(_chunk_pause)   # チャンク間の基本待機(429回避)
 
     if not all_dfs:
         print(f"  [warn] {symbol}: 分足データなし", file=sys.stderr)
