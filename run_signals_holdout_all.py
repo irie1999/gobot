@@ -288,6 +288,39 @@ def _auto_update_minute():
 if not getattr(_args, "no_minute_update", False):
     _auto_update_minute()
 
+
+def _data_freshness_line() -> str:
+    """レポートが「今使える最新の確定データ」で作られたかを1行に要約する。
+    実行の最後に表示し、鮮度を消極的判定(=警告が出ない)ではなく明示的に伝える。
+    高流動の基準銘柄(トヨタ/ソニー/SBG)の日足最新バーと、期待される最新確定バー
+    (_expected_latest_bar_date: 平日15:40以降=当日)を突き合わせる。"""
+    if getattr(_args, "date", None):
+        return f"📅 データ基準: 指定日 {_args.date} で生成(過去再現モード)"
+    try:
+        from datetime import date as _dcls
+        from backtest_limit_entry import (fetch as _rf,
+                                          _expected_latest_bar_date as _expf)
+        exp = _expf()
+        act = None
+        for _s in ("7203.T", "6758.T", "9984.T"):   # トヨタ/ソニー/SBG(高流動・欠損稀)
+            try:
+                _d = _rf(_s, 30)
+                if _d is not None and len(_d) > 0:
+                    _lb = _d.index[-1]
+                    act = _lb.date() if hasattr(_lb, "date") else _lb
+                    break
+            except Exception:
+                continue
+        if act is None:
+            return "ℹ データ鮮度: 基準銘柄を取得できず未確認(ネットワーク?)"
+        if isinstance(exp, _dcls) and act < exp:
+            return (f"⚠ データ未確定で生成: 日足最新バー {act} < 期待 {exp} "
+                    f"(引け直後で当日バー未配信の可能性 → 引け後しばらくして再実行推奨)")
+        return f"✅ 最新データで生成: 日足最新バー {act}(期待どおり最新の確定データを使用)"
+    except Exception as _e:
+        return f"ℹ データ鮮度: 確認スキップ({_e})"
+
+
 # ── --both モード: ロング+ショートを統合HTMLに ───────────────────────────────
 if _args.both and not _args.short:
     import subprocess as _sp
@@ -628,6 +661,7 @@ _showFrame();
 </body>
 </html>""", encoding="utf-8")
     print(f"\n統合レポート生成完了: {_bout.resolve()}")
+    print(_data_freshness_line())
     if not _args.no_browser:
         from _open_html import open_html
         # file:// は同名ファイルを作り直しても、既に開いているタブを自動で読み直さない
@@ -2698,6 +2732,7 @@ with open(out_path, "w", encoding="utf-8", newline="") as _f:
         _f.write(html[_i:_i + 1_000_000])
 del html   # 後続(--both統合ラッパー等)のためにメモリを解放
 print(f"\nレポート生成完了: {out_path.resolve()}")
+print(_data_freshness_line())
 
 if not _args.no_browser:
     from _open_html import open_html
