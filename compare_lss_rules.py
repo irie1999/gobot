@@ -95,6 +95,10 @@ RULES = [
     # ①含み損に耐えきれず切る問題を機械化(H%で必ず止まる) & ②走り上がりの青天井損失をキャップ。
     {"name": "delay1+hard3%",          "stop_off": 1, "sm2": None, "gap_skip": None, "hard": 0.03},
     {"name": "delay1+hard5%",          "stop_off": 1, "sm2": None, "gap_skip": None, "hard": 0.05},
+    # 損切り終値判定: 5分足が"終値"で損切り線を超えたバーで発火=一瞬の上ヒゲでは損切らない
+    # (ユーザー案: 一定時間=1本(5分)ラインを超えたら本当に損切る)。利確はタッチのまま。
+    {"name": "損切り終値判定(soc)",       "stop_off": 0, "sm2": None, "gap_skip": None, "soc": True},
+    {"name": "delay1+損切り終値",         "stop_off": 1, "sm2": None, "gap_skip": None, "soc": True},
 ]
 
 # --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
@@ -170,13 +174,16 @@ _STOP_SLIP = args.stop_slip   # 保守モデルの損切りスリッページ(�
 
 
 def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close,
-          hard_stop_p=None):
+          hard_stop_p=None, stop_on_close=None):
     """約定バー ei から利確、stop_from(>=ei) からタイト損切りを first-touch。損切り優先。
     hard_stop_p(保険の広い損切り)を渡すと、約定と同時に(ei から)効く=無保護窓でも青天井を防ぐ。
     価格上昇時は tight(低い) が先に当たるので、tight未武装(遅延中)のときだけ hard に到達する。
     損切り発火時の買い戻し3通り(line=楽観/real=窓埋め/slip=+スリッページ)。
     戻り: (reason, ex_line, ex_real, ex_slip, exit_idx)。"""
     n = len(highs)
+    # 損切りだけ終値判定(soc=True): 5分足が"終値"でライン超えたバーで発火=一瞬の上ヒゲでは損切らない。
+    # None=グローバル _ON_CLOSE に従う(既定=タッチ)。利確は従来どおり(_ON_CLOSE)。
+    _soc = _ON_CLOSE if stop_on_close is None else stop_on_close
 
     def _stop_fills(px, j):
         line = float(px)
@@ -186,9 +193,9 @@ def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close
     for j in range(ei, n):
         # タイト損切り(低い): 武装済み(j>=stop_from)なら上昇時に先に当たる
         if j >= stop_from:
-            sh = closes[j] >= stop_p if _ON_CLOSE else highs[j] >= stop_p
+            sh = closes[j] >= stop_p if _soc else highs[j] >= stop_p
             if sh:
-                px = float(closes[j]) if _ON_CLOSE else stop_p
+                px = float(closes[j]) if _soc else stop_p
                 ln, rl, sl = _stop_fills(px, j)
                 return "stop", ln, rl, sl, j
         # 保険のハード損切り(広い): ei から常時。tight未武装(無保護窓)で価格が hard に達したら発火
@@ -309,7 +316,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 hard_p = float(entry_fill * (1.0 + rule["hard"])) if rule.get("hard") else None
                 reason, ex_line, ex_real, ex_slip, exit_idx = _exit(
                     opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close,
-                    hard_stop_p=hard_p)
+                    hard_stop_p=hard_p, stop_on_close=rule.get("soc"))
                 pnl_line = short_pnl(entry_fill, ex_line, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_real = short_pnl(entry_fill, ex_real, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_slip = short_pnl(entry_fill, ex_slip, reason, QTY, FEE_ONE_WAY, 0.0)
