@@ -349,7 +349,16 @@ def fetch_intraday(symbol: str, days: int = 60,
                 )
                 break
             except Exception as e:
-                _is429 = "429" in str(e) or "too many" in str(e).lower()
+                _msg = str(e)
+                # 400/契約範囲外 = 恒久エラー(古すぎる期間)。再試行せず即スキップして次チャンクへ。
+                # (例: "400 ... Your subscription covers the following dates: 2024-07-30 ~")
+                if "400" in _msg or "subscription covers" in _msg.lower():
+                    print(f"    chunk {chunk_idx}: 契約範囲外(400)→スキップ "
+                          f"({current.strftime('%Y-%m-%d')}〜{chunk_end.strftime('%Y-%m-%d')})",
+                          file=sys.stderr, flush=True)
+                    break
+                # 429/一時エラー/接続断 = 指数バックオフで再試行
+                _is429 = "429" in _msg or "too many" in _msg.lower()
                 if _attempt < _chunk_retry - 1:
                     _wait = min(60, 5 * (2 ** _attempt))   # 5,10,20,40,60
                     print(f"    chunk {chunk_idx}: "
