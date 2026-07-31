@@ -386,6 +386,10 @@ def main() -> int:
                          "(09:05/09:10…)から損切りを有効にする。1=約定バーの次足から(寄り1本目の"
                          "ヒゲ刈り回避。BT30以上でPF1.63→1.95)。0(既定)=約定検知後すぐ損切り(現行)。"
                          "バックテストの LSS_STOP_DELAY_BARS と対応。利確・引けは常に有効")
+    ap.add_argument("--no-cancel-gap", dest="cancel_gap", action="store_false", default=True,
+                    help="寄り深ギャップ取消を無効化。既定ON=未約定のlss逆指値のうち『現在値<トリガー"
+                         "-X%%(X=_INTRADAY_5M_ENTRY_GAP_LIMIT=3%%)』のものを毎ループ取消(analyze_gap_bt "
+                         "の OOS検証で>3%%超の深ギャップ約定は不利=バックテストと一致させる)。--execute時のみ実取消")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -535,11 +539,38 @@ def _run(args, close_at, today) -> int:
     # ※ 起動直後の _regen_holdings(保有ごとに現在値APIを叩く=遅い)はここでは"やらない"。
     #    寄り付き付近で損切が決まる場合があるため、監視ループ(=損切設置)を最優先で即開始する。
     #    保有タブはループ1周目の末尾(下の _hcycle 判定)で生成される(=損切設置の後)。
+    # 寄り深ギャップ取消(既定ON): 未約定のlss逆指値のうち『現在値<トリガー-X%』を毎ループ取消する。
+    #   X=_INTRADAY_5M_ENTRY_GAP_LIMIT(=3%)。バックテストは>X%超を除外(約定不可)しており、
+    #   analyze_gap_bt の OOS検証で 3% が最適=深ギャップ(>3%)約定は不利。実運用も取り消して一致させる。
+    _gap_done: dict = {}
+    try:
+        import backtest_limit_entry as _ble_g
+        _gap_pct = getattr(_ble_g, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.03)
+    except Exception:
+        _gap_pct = 0.03
+    _gap_sweep = None
+    if args.cancel_gap:
+        try:
+            from cancel_gap_orders import _sweep as _gap_sweep
+            print(f"  寄り深ギャップ取消: ON (現在値<トリガー-{_gap_pct*100:.0f}% の未約定lss逆指値を"
+                  f"毎ループ取消{'' if args.execute else ' / dry-run'})")
+        except Exception as _e:
+            print(f"  [!] 深ギャップ取消の読込失敗({_e}) → 無効")
+            _gap_sweep = None
+    else:
+        print("  寄り深ギャップ取消: OFF (--no-cancel-gap)")
     while True:
         now = datetime.now(JST)
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
         after_close = now.time() >= close_at
         lss_map = _load_lss_orders(today, args.all_dates)
+        # 寄り深ギャップ取消: 未約定lss逆指値のうち 現在値<トリガー-X% を取り消す(=バックテストの
+        # >X%超除外に一致)。ザラ場中のみ(寄り前は現在値が無い/引け後は不要)。--execute時のみ実取消。
+        if _gap_sweep is not None and lss_map and not before_open and not after_close:
+            try:
+                _gap_sweep(cli, lss_map, _gap_pct, _gap_done, dry=not args.execute)
+            except Exception as _e:
+                print(f"  [!] 深ギャップ取消でエラー(継続): {_e}")
         shorts = _lss_shorts(cli, lss_map, args.tol) if lss_map else []
 
         if shorts and before_open:
