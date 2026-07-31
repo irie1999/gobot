@@ -226,13 +226,18 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 adj_note = f" ※現値不明→{new:,.0f}に1ティック引上げ"
                 entry = new
 
-    # 逆指値付き指値: 発火後は指値で約定（ロング:+3%上限 / ショート:-3%下限）。
-    # ギャップが大きすぎる時は約定せず見送る＝バックテストの「+3%超キャンセル」と一致。
+    # 逆指値付き指値: 発火後は指値で約定（ロング:+X%上限 / ショート:-X%下限）。
+    # ギャップが大きすぎる時は約定せず見送る＝バックテストの「±X%超キャンセル」と一致。
+    # X はバックテストのガード(_INTRADAY_5M_ENTRY_GAP_LIMIT)と必ず同値にする(2026-07-31: 2%)。
     try:
-        from backtest_limit_entry import round_to_tick as _r2t
-        limit_p = _r2t(entry * (0.97 if side == "short" else 1.03))
+        from backtest_limit_entry import (round_to_tick as _r2t,
+                                          _INTRADAY_5M_ENTRY_GAP_LIMIT as _gap)
+        _mult = (1.0 - _gap) if side == "short" else (1.0 + _gap)
+        limit_p = _r2t(entry * _mult)
     except Exception:
-        limit_p = round(entry * (0.97 if side == "short" else 1.03))
+        _gap = 0.02
+        _mult = (1.0 - _gap) if side == "short" else (1.0 + _gap)
+        limit_p = round(entry * _mult)
 
     try:
         if side == "short":

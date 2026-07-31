@@ -10622,6 +10622,7 @@ function switchTbd(id, tab) {{
             from backtest_limit_entry import (
                 _load_5m_by_day as _l5, FEE_PCT_ONE_WAY as _fee5,
                 _INTRADAY_5M_SLIP as _slip5, _INTRADAY_5M_CACHE as _m5c,
+                _INTRADAY_5M_ENTRY_GAP_LIMIT as _gaplim5,
                 fetch as _fetchd)
             from sameday5m_firsttouch import (short_exit_5m as _se, short_pnl as _sp,
                                               short_entry_fill_5m as _sef)
@@ -11039,7 +11040,7 @@ function switchTbd(id, tab) {{
                 # ── 決済モード比較(既定=3%約定モデル) ── guard_only 時はスキップして高速化
                 if _guard_only:
                     continue
-                _efill = _sef(db, lp, False, entry_gap_limit=0.03)
+                _efill = _sef(db, lp, False, entry_gap_limit=_gaplim5)
                 if _efill is None:
                     continue   # 既定モデルで約定しない → 決済比較からは除外(ガードには計上済み)
                 res = {"touch": (_sp(_efill, _xpt, _rsnt, q, _fee5, _slip5), _rsnt)}

@@ -194,7 +194,9 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
                 continue
             stop_p, target_p = max(osp, otp), min(osp, otp)
             # 現実的な約定価格(ギャップ考慮 + -3%指値ガード)。エンジンと揃える。
-            entry_fill = short_entry_fill_5m(db, lp, False, entry_gap_limit=0.03)
+            entry_fill = short_entry_fill_5m(
+                db, lp, False,
+                entry_gap_limit=getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.02))
             if entry_fill is None:
                 continue   # ギャップ過大 → 約定不成立
             xp, reason, _e, _x = short_exit_5m(db, lp, stop_p, target_p, False,

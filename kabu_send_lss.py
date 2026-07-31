@@ -228,8 +228,10 @@ def main() -> int:
                     help=f"利確ATR倍率 (既定 {DEFAULT_TM})")
     ap.add_argument("--days", type=int, default=60,
                     help="シグナル判定に使う日足ルックバック日数 (既定 60)")
-    ap.add_argument("--gap-guard", type=float, default=0.03,
-                    help="逆指値発動後の下限ガード率。-この%%超の窓開けは約定させない (既定 0.03=3%%)")
+    ap.add_argument("--gap-guard", type=float,
+                    default=getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.02),
+                    help="逆指値発動後の下限ガード率。-この%%超の窓開けは約定させない "
+                         "(既定=バックテストのガード _INTRADAY_5M_ENTRY_GAP_LIMIT と同値=2%%)")
     ap.add_argument("--no-gap-guard", action="store_true",
                     help="下限ガードを外す (発動後は成行)")
     ap.add_argument("--margin-type", type=int, default=3,

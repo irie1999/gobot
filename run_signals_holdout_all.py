@@ -1369,7 +1369,9 @@ if not _args.date:
 #   v13: 同バー損切り(悲観=損切り優先)。約定した5分足の中で損切りラインに触れていれば損切り
 #        扱いに(旧は約定バーを飛ばし後の目標達成を誤計上。例:4092は約定5,710→同足5,770で損切り
 #        なのに+41,901円と計上)。short_exit_5m を常に約定バー(ei)から判定(2026-07-24)
-_BT_LOGIC_VER = "v13"
+#   v14: 指値ガードを 3%→2% に(_INTRADAY_5M_ENTRY_GAP_LIMIT=0.02)。analyze_gap_fills の
+#        OOS検証で2%が総損益最大・深ギャップ約定は net 損。旧v13キャッシュ(3%)を自動無効化(2026-07-31)
+_BT_LOGIC_VER = "v14"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
