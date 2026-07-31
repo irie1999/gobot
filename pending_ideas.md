@@ -232,15 +232,22 @@
     * 全取引(予算なし) = 予算シミュだと深ギャップ玉のサンプルが薄い。BT40全取引なら多く集まる。
     * 本番エンジン = analyze_gap_fills(再実装)は最適%がズレるので使わない。
     * 「ガード%比較 = 深ギャップ取消の調査」は同義(バックテストのガード=X%超を除外=取消)。
-  - **env A/B(実装済 2026-07-31)**: `LSS_GAP_LIMIT` でガード上書き + BTキャッシュキーに g<‰> 付与
-    (別ガードの結果を混同しない)。既定は3%(未設定時)=通常運用は不変。
+  - **専用ツール `analyze_gap_bt.py`(実装済 2026-07-31・信頼版)**: これで切り出して調べる。
+    * 約定/決済は **本番エンジンと同一の呼び出し**(short_entry_fill_5m に day_open/low/high /
+      short_exit_5m に on_close/include_entry_bar/stop_delay_bars / short_pnl / slip=_INTRADAY_5M_SLIP)。
+      ← 前版 analyze_gap_fills が本番とズレた原因(引数不足+自作決済)を解消。
+    * **BTは LSS_TRADES_CSV の bt列** から取得(=レポートのBTと完全一致) → BT>=--bt-min(既定40)のペアのみ。
+    * 全取引(予算なし)・OOS分割(--base-month)・ガード%スイープ(1.5〜10%/∞)を出力。
     ```
-    set LSS_GAP_LIMIT=0.03 & .\daily     # 3%版
-    set LSS_GAP_LIMIT=0.02 & .\daily     # 2%版
+    set LSS_TRADES_CSV=lss_trades.csv & python analyze_gap_bt.py --bt-min 40 --source local --workers 8
     ```
-    → 各レポートの **BT40以上(2877)フィルタの総損益** を突き合わせる(=BT40全取引で深ギャップ検証)。
-  - **仮説**: 予算内(高BT)で 3%≥2%(深ギャップ微プラス) だったので、BT40全取引でも 3%≥2% の見込み。
-    もし BT40全取引で 2%>3% なら「BT40でも深ギャップは損」→取消を再検討。3%≥2%なら現状維持・取消不要で確定。
+    → 全期間/TRAIN/TEST(OOS) それぞれで「総損益 最大のガード%」が最適閾値。TESTでも同%最大なら本物。
+    前提: 先に .\daily を1回回して lss_trades.csv(BT列)を作る。
+  - **env A/B(`.\daily`側・補助)**: `LSS_GAP_LIMIT` でガード上書き+BTキャッシュキーに g<‰> 付与。
+    ただし .\daily は子プロセス起動で env が伝わりにくい報告あり(2026-07-31「結果が同じ」) →
+    ガード検証は上の **analyze_gap_bt.py(単一プロセス・確実)** を正とする。
+  - **仮説**: 予算内(高BT)で 3%≥2%(深ギャップ微プラス)だった。BT40全取引でも 3%≥2%(現状維持・取消不要)の見込み。
+    analyze_gap_bt の OOS(TEST)で最大%が3%近傍なら確定。2%以下が明確に最大なら取消を再検討。
 - コード資産は残す: cancel_gap_orders.py(dry-run既定・安全設計) と analyze_gap_fills.py は
   将来の本番検証・運用に流用可能(閾値は定数連動)。
 
