@@ -42,6 +42,9 @@ ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍率(lss既定
 ap.add_argument("--stop-delay-bars", type=int, default=1,
                 help="損切り遅延(既定1=delay1=実運用watcherと一致)")
 ap.add_argument("--days", type=int, default=500, help="遡及日数")
+ap.add_argument("--base-month", type=str, default="2026-01",
+                help="OOS分割の基準月(この月末以前=TRAIN/in-sample、以後=TEST/OOS)。"
+                     "空文字なら全期間のみ。既定2026-01(直近をOOS検証)。")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(デバッグ)")
 ap.add_argument("--min-price", type=float, default=0.0)
@@ -71,8 +74,9 @@ FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY if args.fee is None else args.fee
 DELAY = max(0, int(args.stop_delay_bars))
 
 # ガード閾値スイープ (None = 無制限=ガードなし)
-GUARDS = [0.02, 0.03, 0.05, 0.10, None]
-GLABEL = {0.02: "2%", 0.03: "3%", 0.05: "5%", 0.10: "10%", None: "無制限"}
+GUARDS = [0.01, 0.015, 0.02, 0.03, 0.05, 0.10, None]
+GLABEL = {0.01: "1%", 0.015: "1.5%", 0.02: "2%", 0.03: "3%", 0.05: "5%",
+          0.10: "10%", None: "無制限"}
 CURRENT_GUARD = 0.03   # 現行の実運用/バックテストのガード
 
 
@@ -228,6 +232,7 @@ def _scan_symbol(sym, name, strats):
             out.append({
                 "trigger": lp, "stop": max(osp, otp), "target": min(osp, otp),
                 "o": o, "gap": (lp - o) / lp if lp > 0 else 0.0,
+                "fd": pd.Timestamp(fd),   # 約定日(OOS TRAIN/TEST分割用)
                 "highs": db["high"].to_numpy(dtype=float),
                 "lows": db["low"].to_numpy(dtype=float),
                 "closes": db["close"].to_numpy(dtype=float),
@@ -250,6 +255,43 @@ def _fmt(s):
         return "  取引なし"
     _pf = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
     return (f"{s['n']:>6}件  損益{s['pnl']:>+13,.0f}  勝率{s['wr']:>4.0f}%  PF{_pf:>5}")
+
+
+def _report(sigs, title):
+    """シグナル集合について ①ガードスイープ(A約定不可 vs B下限約定) と ②深ギャップ増分 を出す。"""
+    print("\n" + "=" * 82)
+    print(f"【{title}】 {len(sigs)}シグナル")
+    print("=" * 82)
+    if not sigs:
+        print("  (該当シグナルなし)")
+        return
+    # ① ガード閾値スイープ
+    print("① ガード閾値スイープ (lss全体の同日損益)")
+    print("-" * 82)
+    print(f"  {'ガード':<6}{'A:約定不可(=取消/現行BT)':<36}{'B:下限約定(=放置/実運用)'}")
+    for g in GUARDS:
+        a = _stat([p for s in sigs if (p := _one(s, g, False)) is not None])
+        b = _stat([p for s in sigs if (p := _one(s, g, True)) is not None])
+        _ag = "   ∞ " if g is None else f"{GLABEL[g]:>4} "
+        print(f"  {_ag}{_fmt(a):<36}{_fmt(b)}")
+    print("  (A=そのガード超を取り消す/約定させない。同ガードでA>Bなら『取り消す』方が良い)")
+    # ② 現行-3%で除外中の深ギャップを下限約定させた増分(=放置した時の損)
+    print("\n② 現行-3%で除外中の『深ギャップ』を下限約定させた増分損益(=取り消さず放置した分)")
+    print("-" * 82)
+    buckets = {"−3〜5%": (0.03, 0.05), "−5〜10%": (0.05, 0.10), "−10%超": (0.10, 9.9)}
+    total_deep = []
+    for label, (lo, hi) in buckets.items():
+        pnls = []
+        for s in sigs:
+            g = s["gap"]
+            if lo < g <= hi:
+                p3 = _one(s, CURRENT_GUARD, True)   # -3%下限で約定させた場合
+                if p3 is not None:
+                    pnls.append(p3)
+        total_deep += pnls
+        print(f"  深さ {label:<8}: {_fmt(_stat(pnls))}")
+    print(f"  {'合計(深ギャップ放置分)':<12}: {_fmt(_stat(total_deep))}")
+    print("  → 合計がマイナス: 深ギャップは取り消す方が良い(この分の損を回避)。プラス: 放置(約定)が良い。")
 
 
 def main():
@@ -289,7 +331,7 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".gapfill_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "gapv1", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, args.source,
+        "gapv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, args.source,
         args.days, args.limit, args.min_price, args.max_price, QTY,
         _h.md5(",".join(sorted(universe)).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
@@ -327,42 +369,25 @@ def main():
         print("[error] シグナル0件。5分足在庫や期間を確認。", file=sys.stderr)
         return
 
-    print(f"\n全lssシグナル {len(sigs)}件 で検証\n" + "=" * 78)
+    print(f"\n全lssシグナル {len(sigs)}件 で検証")
 
-    # ① ガード閾値スイープ: A)約定不可(現行) vs B)下限約定
-    print("① ガード閾値スイープ  (lss全体の同日損益)")
-    print("-" * 78)
-    print(f"  {'ガード':<6}{'A:約定不可(現行方式)':<34}{'B:下限約定(実運用寄り)'}")
-    for g in GUARDS:
-        a = _stat([p for s in sigs if (p := _one(s, g, False)) is not None])
-        b = _stat([p for s in sigs if (p := _one(s, g, True)) is not None])
-        _ag = "   ∞ " if g is None else f"{GLABEL[g]:>4} "
-        print(f"  {_ag}{_fmt(a):<34}{_fmt(b)}")
-    print("  (Aは深ギャップ除外・Bは下限で約定。同ガードでB>Aなら下限約定が寄与)")
+    _report(sigs, "全期間 (in-sample選定期間を含む)")
 
-    # ② 現行-3%で「除外されている深ギャップ」を下限約定させた増分(深さ別)
-    print("\n② 現行-3%ガードで除外中の『深ギャップ』を下限約定させた増分損益")
-    print("-" * 78)
-    buckets = {"−3〜5%": (0.03, 0.05), "−5〜10%": (0.05, 0.10), "−10%超": (0.10, 9.9)}
-    total_deep = []
-    for label, (lo, hi) in buckets.items():
-        pnls = []
-        for s in sigs:
-            g = s["gap"]
-            if lo < g <= hi:                # 寄りが trigger より lo〜hi 下(=現行-3%で除外域)
-                # 実発注の-3%下限で約定(価格が-3%下限に戻れば約定)。これが現行除外分の増分。
-                p3 = _one(s, CURRENT_GUARD, True)
-                if p3 is not None:
-                    pnls.append(p3)
-        st = _stat(pnls)
-        total_deep += pnls
-        print(f"  深さ {label:<8}: {_fmt(st)}")
-    print(f"  {'合計(深ギャップ下限約定)':<12}: {_fmt(_stat(total_deep))}")
-    print("  → 合計がプラス: 実運用に合わせ下限約定をモデル化する価値。マイナス/誤差: 現行-3%約定不可が正しい。")
+    bm = args.base_month.strip()
+    if bm:
+        try:
+            be = pd.Period(bm, "M").end_time.normalize()
+            tr = [s for s in sigs if s.get("fd") is not None and s["fd"] <= be]
+            te = [s for s in sigs if s.get("fd") is not None and s["fd"] > be]
+            _report(tr, f"TRAIN ≤{be.date()} (in-sample・選定に使った期間を含む)")
+            _report(te, f"TEST >{be.date()} (OOS・選定後の擬似未来)")
+        except Exception as _e:
+            print(f"[warn] base-month分割スキップ({_e})")
 
-    print("\n" + "=" * 78)
-    print("判断メモ: ①でB>Aが安定 & ②合計がプラスなら、_INTRADAY_5M_ENTRY_GAP_LIMIT と")
-    print("実発注の−X%下限指値を最適ガードに揃える(両者必ず同値)。差が誤差なら現行-3%維持。")
+    print("\n" + "=" * 82)
+    print("判断メモ: ①で A>B が安定 & ②合計がマイナスなら『深ギャップは取り消す』が正解。")
+    print("  最適ガード%(A列が最大の行)を _INTRADAY_5M_ENTRY_GAP_LIMIT・実発注下限指値・寄り取消閾値の")
+    print("  3箇所に同値で適用する。★TEST(OOS)でも同じ結論なら本物。全期間だけで判断しないこと。")
 
 
 if __name__ == "__main__":
