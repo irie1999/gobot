@@ -667,11 +667,13 @@ _INTRADAY_5M_ON_CLOSE: bool = False    # True=5分足の"終値"でstop/target�
 _INTRADAY_5M_REALISTIC_ENTRY: bool = True   # True(既定)=約定を『min(トリガー,始値)』の現実的
                                        # モデルに(ギャップダウン寄りは始値約定=不利)。
                                        # False=常にトリガー約定(旧挙動)。
-_INTRADAY_5M_ENTRY_GAP_LIMIT: float = 0.02  # 約定時の指値ガード(±2%)。lssはトリガー×(1-これ)
+_INTRADAY_5M_ENTRY_GAP_LIMIT: float = 0.03  # 約定時の指値ガード(±3%)。lssはトリガー×(1-これ)
                                        # を下回るギャップダウンは約定不可(キャンセル)。
-                                       # 2026-07-31: analyze_gap_fills の OOS検証で 2% が総損益最大
-                                       # (全期間/TRAIN/TEST 一致・深ギャップ約定は net 損 PF0.41)のため
-                                       # 3%→2%に変更。実発注の下限指値・寄り深ギャップ取消も同値(2%)に揃える。
+                                       # 2026-07-31: analyze_gap_fills(簡易再実装)で「2%最良」と出たため
+                                       # 一旦2%にしたが、本番エンジン(run_signals_holdout_all)の月別損益で
+                                       # 2%は3%より約-1%(微減)と判明→3%に戻した。診断ツールの最適%は
+                                       # 当てにならず(絶対額が近似)。深ギャップ取消の是非は本番エンジンで要再検証。
+                                       # この定数を実発注(order_server/kabu_send_lss)・取消(cancel_gap_orders)が参照。
 _INTRADAY_5M_SOURCE: str = "auto"      # "local"=stock_5min のみ / "auto"=local→yfinance
 _INTRADAY_5M_SLIP: float = 0.0         # 損切り買い戻しの不利スリッページ(0=なし)
 _INTRADAY_5M_ENTRY_DELAY: int = 0      # 寄りから何本(=N×5分)待ってから約定するか(既定0=即)。
