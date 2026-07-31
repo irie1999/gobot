@@ -1377,6 +1377,21 @@ _BT_LOGIC_VER = "v13"
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
+# 指値ガード(深ギャップ約定不可の閾値)を env で上書き可能に(A/B検証用)。既定=3%。
+# 既定と異なる時だけ BTキャッシュキーに g<‰> を付与し、別ガードの結果を混同しない。
+#   例: set LSS_GAP_LIMIT=0.02 & .\daily  → 2%版を別キャッシュで生成。
+#   比較は「BT40以上(2877)フィルタの総損益」を 2% と 3% で突き合わせる(=BT40全取引で深ギャップ検証)。
+_LSS_GAP_ENV = os.environ.get("LSS_GAP_LIMIT", "").strip()
+if _LSS_GAP_ENV:
+    try:
+        _gv = float(_LSS_GAP_ENV)
+        if _gv > 0:
+            _bte._INTRADAY_5M_ENTRY_GAP_LIMIT = _gv
+            print(f"[gap] 指値ガードを env で {_gv*100:.2f}% に上書き", flush=True)
+            if abs(_gv - 0.03) > 1e-9:
+                _BT_LOGIC_VER = f"{_BT_LOGIC_VER}g{int(round(_gv * 1000))}"
+    except ValueError:
+        print(f"[gap] LSS_GAP_LIMIT='{_LSS_GAP_ENV}' を解釈できず → 既定3%のまま", flush=True)
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # 鮮度スタンプ: このキャッシュが「どのデータ日付で作られたか」を隣に記録する。
 _bt_asof_file  = _bt_cache_file.with_suffix(".pkl.asof")
