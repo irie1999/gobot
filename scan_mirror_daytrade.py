@@ -80,11 +80,10 @@ args = ap.parse_args()
 import backtest_limit_entry as ble
 from daytrade_data import available_local_symbols, load_intraday, split_by_day
 from sameday5m_firsttouch import long_exit_5m, long_pnl, long_entry_fill_5m
-# ★lss鏡像: 信号は「ショート候補(弱気セットアップ)」。それを逆指値買いする。
-from check_signals_short import calc_a7_short, calc_rsi2_short, calc_macd_short
-from check_signals_short_breakout import (
-    calc_donchian_short, calc_momentum_short, calc_gap_short,
-)
+# ★lss鏡像: 信号は「ロング6戦略の忠実な鏡像(弱気セットアップ)」。それを逆指値買いする。
+#   check_signals_short(旧)はロングの厳密反転になっていない箇所が多く信号頻度が非対称だったため、
+#   mirror_signals(ロング calc を条件ごとに1:1反転)に差し替え=「すべてをロングの鏡像」。
+from mirror_signals import MIRROR_CALC
 
 ble._MIRROR_PNL = False
 ble._ENTRY_TYPE_FORCE = None
@@ -99,16 +98,9 @@ BASE_END = (pd.Period(args.base_month, "M").end_time).normalize()
 if args.budget > 0:
     args.max_price = min(args.max_price, args.budget / max(1, QTY))
 
-# ロング6戦略(MACDTF/A7/RSI2/DON/VOLTF/MOM)の鏡像となるショート6戦略。
-# 信号(弱気セットアップ)を計算する calc 関数のみ使う(sm/tm/em はコマンドライン優先)。
-_SHORT_CALC = {
-    "A7_S":   calc_a7_short,
-    "RSI2_S": calc_rsi2_short,
-    "MACD_S": calc_macd_short,
-    "DON_S":  calc_donchian_short,
-    "MOM_S":  calc_momentum_short,
-    "GAP_S":  calc_gap_short,
-}
+# ロング6戦略(MACDTF/A7/RSI2/DON/VOLTF/MOM)を条件ごとに1:1反転した忠実な鏡像。
+# 戦略名はロングと同一(=すべてロングの鏡像)。信号頻度・合格数がロングと対称になる。
+_SHORT_CALC = MIRROR_CALC
 
 
 def _jq_to_yf(code: str) -> str:

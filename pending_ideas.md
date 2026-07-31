@@ -23,7 +23,7 @@
 |---|---|---|---|
 | **#5** | 寄りギャップ見送り | 実質クローズ（ライブでは実損でないと判明） | ほぼ決着。ライブで実損化しないため優先度低。 |
 | ~~#6~~ | ~~ショート不約定→9:05ロング~~ | ~~要フレッシュ実行~~ | **却下確定(2026-07-29)**。損切×利確 全20組×OOS(N=88/56)で PF最良0.74(BT30)/0.90(BT40)＝全組<1。買いでは成立せず。→ #6b へ。 |
-| **#7** | ショート戦略×逆指値買い（lss鏡像） | 1月ヘッジ最有力・要検証 | **OOS失敗(2026-07-30)**。10基準月中9でTEST負・OOSプラス率~28%=overfit。却下寄りだが `--aggregate` 診断(方向が逆かの最終確認)待ち。 |
+| **#7** | ショート戦略×逆指値買い（lss鏡像） | 1月ヘッジ最有力・要検証 | **信号を忠実鏡像に作り直し(2026-07-31)**。旧はショート信号がロングの厳密反転でなく合格銘柄が極端に低かった → `mirror_signals.py`(ロング6戦略を1:1反転)に差替え。実機で再スキャン→OOS再判定待ち。 |
 | **#8** | 呼値テーブル精緻化（公式JPX） | 大型株/低位株の約定精度・要再計算 | 未着手。約定精度に効く。 |
 | **#9** | 約定時刻別の成績（新規） | 寄り vs ザラ場後半・時間カットオフ検討 | 着手済: `analyze_trades_time.py` / `analyze_fill_time.py`、entry_time記録(1679be2)。 |
 
@@ -108,8 +108,24 @@
   足りないのは**信号ソース**だけ: long_daytrade は `mod_for`=ロング信号を買う。
   #7 はショート信号(`check_signals_short` A7_S/RSI2_S/MACD_S + `check_signals_short_breakout`
   DON_S/MOM_S/GAP_S)の弱気セットアップ日に逆指値買いを置く。
-- **実装(Phase 1=OOS検証ツール)**: `scan_mirror_daytrade.py`。
-  `scan_long_daytrade.py` の忠実な鏡像で、信号ソースだけ 6ショート戦略に差替え。
+- **★信号を忠実鏡像に作り直し(2026-07-31)**: 監査で「合格銘柄が極端に低い」主因が判明=旧の
+  ショート信号(check_signals_short)が**ロングの厳密反転になっていなかった**:
+    * MACD: 長=ヒストグラム zero-cross/加速、旧短=macd/signalデッドクロス(別ロジック)
+    * A7: 長=slow_k<買われすぎ(70)、旧短=prev_k>買われすぎ(条件が別)
+    * DON: 長=15日高値、旧短=20日安値(頻度非対称) / MOM: 旧短は出来高フィルタ欠落
+    * VOLTF: 短版が無く GAP_S で代用(別物・実証WFで0銘柄=ほぼ発火せず) ← 極端に低い合格の主犯
+  → **`mirror_signals.py`** 新設: ロング6 calc(calc_macd_tf/calc_a7/calc_rsi2/calc_donchian/
+    calc_vol_breakout_tf/calc_momentum)を **条件ごとに1:1反転**(方向条件だけ反転・定数は同一)。
+    戦略名もロングと同一(MACDTF/A7/RSI2/DON/VOLTF/MOM)=「すべてロングの鏡像」。信号頻度・合格数が対称に。
+  → `scan_mirror_daytrade` は `_SHORT_CALC = MIRROR_CALC` に差替え済。監査で方向/符号のバグは無し(機構は
+    scan_long_daytradeの忠実クローン)と確認。閾値(min-trades8/PF1.5)はlssと同一。
+- **次**: 実機で再スキャン → 合格銘柄数がロングと対称になったか + OOS(TRAIN/TEST)を確認。
+  ```
+  python scan_mirror_daytrade.py --base-months 2025-09,2025-10,2025-11,2025-12,2026-01,2026-02,2026-03,2026-04,2026-05,2026-06 --sm 0.1 --tm 1.0 --source local --workers 8
+  python scan_mirror_daytrade.py --base-months ... --aggregate   # 選定なし全ペアの地力(方向の是非)
+  ```
+- **(旧)実装 Phase 1=OOS検証ツール**: `scan_mirror_daytrade.py`。
+  `scan_long_daytrade.py` の忠実な鏡像で、信号ソースだけ 6ショート戦略に差替え(→上で忠実鏡像に修正)。
   母集団=stock_5min全銘柄×6ショート戦略。entry_type="stop"(上ブレイク買い)、long_* 5分足first-touch決済。
   約定日でTRAIN/TEST分割 → 出力に **TRAIN合算 / TEST(OOS)損益 / OOSプラス率** を印字。空売りでないので
   not_shortable除外は不要。
