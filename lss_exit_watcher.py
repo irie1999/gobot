@@ -127,13 +127,13 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {}
 
-    def _add(sym, entry, qty, strat, name, stop, target):
+    def _add(sym, entry, qty, strat, name, stop, target, date=""):
         sym = str(sym).upper().removesuffix(".T").split(".")[0]
         if not sym:
             return
         out.setdefault(sym, []).append(
             {"entry": entry, "qty": qty, "strategy": strat, "name": name,
-             "stop": stop, "target": target})
+             "stop": stop, "target": target, "date": str(date)[:10]})
 
     # A) ordered_signals_lss.csv (kabu_send_lss)
     p = _BASE / "ordered_signals_lss.csv"
@@ -148,7 +148,7 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                 _add(r.get("symbol"), _num(r.get("order_price")),
                      int(_num(r.get("qty")) or 100), r.get("strategy", ""),
                      r.get("name", ""), _num(r.get("stop_price")),
-                     _num(r.get("target_price")))
+                     _num(r.get("target_price")), date=d)
         except Exception as e:
             print(f"  [!] ordered_signals_lss.csv 読込失敗 ({e})")
 
@@ -166,31 +166,59 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                     continue
                 _add(r.get("symbol"), _num(r.get("entry")),
                      int(_num(r.get("qty")) or 100), strat, r.get("name", ""),
-                     _num(r.get("stop")), _num(r.get("target")))
+                     _num(r.get("stop")), _num(r.get("target")), date=d)
         except Exception:
             continue
 
     return out
 
 
-def _match_lss(sym: str, avg_price: float, lss_map: dict, tol: float) -> dict | None:
-    """kabu売建(sym, 平均約定値)が lss発注記録に一致すれば記録を返す。"""
+def _date_ord(d: str) -> int:
+    """YYYY-MM-DD → 比較用整数(新しいほど大)。不正は0。"""
+    try:
+        y, m, dd = str(d)[:10].split("-")
+        return int(y) * 10000 + int(m) * 100 + int(dd)
+    except Exception:
+        return 0
+
+
+def _match_lss(sym: str, avg_price: float, qty: int, lss_map: dict,
+               tol: float) -> dict | None:
+    """kabu売建(sym, 平均約定値, 数量)を lss発注記録に紐づける。
+
+    ★複数日ぶんの注文が残っている場合の誤マッチ対策(2026-07-31):
+      旧実装は「平均約定値に最も近い entry」だけで選んだ。今日の玉がギャップ約定して
+      前日の注文 entry に近づくと、前日の注文行(=古い/逆側の損切・利確)に誤マッチし、
+      今日の玉に前日の損切りが当たる事故が起きた(例: 2674 今日3,025玉に7/29の損切2,910)。
+      lssは同日決済が原則なので、優先度を
+        1) 建玉数量が一致する注文  2) 発注日が新しい注文  3) 平均約定値が近い注文
+      に変更する(数量と日付で「どの日の玉か」を確定してから価格で詰める)。
+    """
     cands = lss_map.get(sym)
     if not cands:
         return None
-    if avg_price <= 0:
-        return cands[0]
-    best, best_diff = None, 1e9
-    for c in cands:
-        e = c["entry"]
-        if e <= 0:
-            if best is None:
-                best, best_diff = c, tol
-            continue
-        diff = abs(avg_price - e) / e
-        if diff < best_diff:
-            best, best_diff = c, diff
-    return best if (best is not None and best_diff <= tol) else None
+
+    def _within(c) -> bool:
+        e = float(c.get("entry", 0.0) or 0.0)
+        if avg_price <= 0 or e <= 0:
+            return True
+        return abs(avg_price - e) / e <= tol
+
+    def _prox(c) -> float:
+        e = float(c.get("entry", 0.0) or 0.0)
+        if avg_price <= 0 or e <= 0:
+            return tol
+        return abs(avg_price - e) / e
+
+    pool = [c for c in cands if _within(c)]
+    if not pool:
+        return None
+    pool.sort(key=lambda c: (
+        0 if int(c.get("qty", 0) or 0) == int(qty or 0) else 1,   # 1) 数量一致
+        -_date_ord(c.get("date", "")),                            # 2) 新しい発注日
+        _prox(c),                                                 # 3) 平均約定値が近い
+    ))
+    return pool[0]
 
 
 def _parse_hhmm(s: str) -> dtime:
@@ -241,9 +269,17 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         if qty <= 0:        # LeavesQty<=0 は決済済み。残玉(部分約定後)は qty>0 で拾い続ける
             continue
         avg = _num(kp.get("AveragePrice") or kp.get("Price"))
-        rec = _match_lss(sym, avg, lss_map, tol)
+        rec = _match_lss(sym, avg, qty, lss_map, tol)
         if rec is None:
             continue   # lss記録に一致しない売建(メインショート等) → 触らない
+        # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。損切≤平均約定=逆側/陳腐化した
+        # 注文の疑い → その損切りは無効化して誤決済を防ぐ(利確・引けは有効のまま)。マッチ改善後も
+        # なお不整合な場合の最終防波堤。0.1ATRのタイト損切りでも avg より上なので通常は発火しない。
+        _stop_v = _num(rec.get("stop", 0.0))
+        if _stop_v and avg > 0 and _stop_v <= avg:
+            print(f"  [!] {sym} 損切{_stop_v:,.0f} が平均約定{avg:,.0f}以下(ショート逆側/古い注文の疑い) "
+                  f"→ この損切りは無効化(利確・引けのみ)。注文記録を確認してください")
+            rec = dict(rec); rec["stop"] = 0.0
         a = agg.get(sym)
         if a is None:
             agg[sym] = {
