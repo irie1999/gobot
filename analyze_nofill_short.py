@@ -130,7 +130,9 @@ def _pnl(entry_p, exit_p, qty):
 
 
 def _collect(sym_yf, strat):
-    """1(銘柄,戦略)の #6b トレード(9:05成行ショート)を集める。"""
+    """1(銘柄,戦略)の #6b トレード(9:05成行ショート)を集める。
+    ★修正(2026-08-01): エンジンのfill結果でなく df_ind の entry_sig(全シグナル)から直接拾う。
+      (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
     out = []
     params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
     if not params:
@@ -145,48 +147,50 @@ def _collect(sym_yf, strat):
     try:
         df_raw = ble.fetch(sym_yf, args.days + 420)
         df_ind = cf(df_raw.copy())
-        r = ble.run_limit_backtest(sym_yf, sym_yf, df_ind, lambda d: d, 0.0,
-                                   args.sm, args.tm, args.days + 420, strat,
-                                   entry_type="stop_sell", max_hold=0)
     except Exception:
         return out
-    if not r:
+    if df_ind is None or df_ind.empty or "entry_sig" not in df_ind.columns:
         return out
-    sigs = [t for t in r.get("trade_log", []) if t.get("reason") not in ("発注中", "保有中")]
-    sigs += r.get("nofill_log", [])
-    for t in sigs:
-        edt = t.get("entry_dt")
-        if edt is None:
+    one_dates = sorted(by_day.keys())
+    from datetime import timedelta as _td
+    since = ble._TODAY - _td(days=args.days)
+    sig = df_ind[df_ind["entry_sig"].fillna(False)]
+    for S, row in sig.iterrows():
+        try:
+            Sdate = S.date() if hasattr(S, "date") else S
+        except Exception:
             continue
-        lp = float(t.get("order_limit", 0) or 0)
-        osp = float(t.get("order_stop", 0) or 0)
-        otp = float(t.get("order_target", 0) or 0)
-        if lp <= 0 or osp <= 0 or otp <= 0:
+        if Sdate < since:
             continue
-        fd = edt.date() if hasattr(edt, "date") else edt
-        db = by_day.get(fd)
+        prev_close = float(row.get("close", 0) or 0)
+        atr = float(row.get("atr", 0) or 0)
+        if prev_close <= 0 or atr <= 0 or atr != atr:   # NaN除外
+            continue
+        trigger = prev_close                  # lss注文価格(em=0)。-1tickは<0.1%で無視
+        # エントリー日 = シグナル日の翌1分足営業日
+        edate = next((d for d in one_dates if d > Sdate), None)
+        if edate is None:
+            continue
+        db = by_day.get(edate)
         if db is None or len(db) < 2:
             continue
-        # 09:05までに lss逆指値(安値<=トリガー)が発動したか
         pre = db[db.index.time < _0905]
-        if not pre.empty and float(pre["low"].min()) <= lp:
-            continue   # 9:05までに約定=lssが処理 → #6b対象外
+        if not pre.empty and float(pre["low"].min()) <= trigger:
+            continue   # 9:05までに安値がトリガー到達=lssが約定 → #6b対象外
         post = db[db.index.time >= _0905]
         if post.empty or len(post) < 2:
             continue
-        entry05 = float(post["open"].iloc[0])   # 09:05 成行ショート価格
+        day_open = float(db["open"].iloc[0])
+        entry05 = float(post["open"].iloc[0])
         if entry05 <= 0:
             continue
-        risk = osp - lp                          # 損切り距離(ATR×sm, 上)
-        reward = lp - otp                        # 利確距離(ATR×tm, 下)
-        if risk <= 0 or reward <= 0:
-            continue
-        stop05 = entry05 + risk
-        target05 = entry05 - reward
+        gap = (day_open - prev_close) / prev_close if prev_close > 0 else 0.0
+        stop05 = entry05 + atr * args.sm       # ショート: 損切=上
+        target05 = entry05 - atr * args.tm     # 利確=下
         xp, _rsn = _short_exit(post["high"].to_numpy(float), post["low"].to_numpy(float),
                                post["close"].to_numpy(float), post["open"].to_numpy(float),
                                stop05, target05)
-        out.append({"fd": pd.Timestamp(fd), "pnl": _pnl(entry05, xp, QTY)})
+        out.append({"fd": pd.Timestamp(edate), "pnl": _pnl(entry05, xp, QTY), "gap": gap})
     return out
 
 
@@ -264,13 +268,40 @@ def main():
         print("-" * 78)
         print("  " + _fmt(_stat([t["pnl"] for t in ts])))
 
+    def _gbucket(g):
+        p = g * 100
+        if p < 0:   return "<0%(下げたが未約定)"
+        if p < 1:   return "0〜+1%"
+        if p < 2:   return "+1〜+2%"
+        if p < 3:   return "+2〜+3%"
+        if p < 5:   return "+3〜+5%"
+        return "+5%超(大ギャップUP)"
+    _GORDER = ["<0%(下げたが未約定)", "0〜+1%", "+1〜+2%", "+2〜+3%", "+3〜+5%", "+5%超(大ギャップUP)"]
+
+    def _gap_report(ts, title):
+        from collections import defaultdict
+        agg = defaultdict(list)
+        for t in ts:
+            agg[_gbucket(t.get("gap", 0.0))].append(t["pnl"])
+        print("\n" + "=" * 78)
+        print(f"【{title}】ギャップ帯別(始値の前日終値比) #6b内訳  計{len(ts)}件")
+        print("-" * 78)
+        for b in _GORDER:
+            pn = agg.get(b)
+            if not pn:
+                continue
+            print(f"  {b:<20} {_fmt(_stat(pn))}")
+
     _report(trades, f"BT{args.bt_min:.0f}以上・全期間(in-sample含む)")
+    _gap_report(trades, f"BT{args.bt_min:.0f}以上・全期間")
     bm = args.base_month.strip()
     if bm:
         try:
             be = pd.Period(bm, "M").end_time.normalize()
+            te = [t for t in trades if t["fd"] > be]
             _report([t for t in trades if t["fd"] <= be], f"TRAIN ≤{be.date()} (in-sample)")
-            _report([t for t in trades if t["fd"] > be], f"TEST >{be.date()} (OOS)")
+            _report(te, f"TEST >{be.date()} (OOS)")
+            _gap_report(te, f"BT{args.bt_min:.0f}以上・TEST(OOS)")
         except Exception as _e:
             print(f"[warn] base-month分割スキップ({_e})")
 
