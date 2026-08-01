@@ -151,15 +151,22 @@ def _normalize(df: pd.DataFrame, dt_col: str = "Date") -> pd.DataFrame:
     df = df.copy()
 
     # ── DateTime 解決 ─────────────────────────────────────
-    if dt_col in df.columns:
-        df[dt_col] = pd.to_datetime(df[dt_col])
-    elif "DateTime" in df.columns:
+    # ★2026-08-01 バグ修正: 旧実装は dt_col="Date" を最優先で判定していたため、分足で
+    #   Date列(日付のみ)+Time列 がある場合に Time を捨てて日付だけ(00:00)にしていた
+    #   (=1分足の時刻が全て消える bug)。分足は DateTime / Date+Time を優先して結合し、
+    #   日足(Timeなし)のときだけ Date 単独を使う。
+    if "DateTime" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(df[dt_col])
     elif "Date" in df.columns and "Time" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(
             df["Date"].astype(str) + " " + df["Time"].astype(str))
+    elif dt_col in df.columns:
+        df[dt_col] = pd.to_datetime(df[dt_col])
+    elif "Date" in df.columns:
+        dt_col = "Date"
+        df[dt_col] = pd.to_datetime(df[dt_col])
     else:
         return pd.DataFrame()
 
