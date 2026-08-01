@@ -337,10 +337,17 @@
 - **判断**: ①でB>A安定 & ②合計プラス → 実運用に合わせ下限約定をモデル化+最適ガードに①②同値で統一。
   誤差/マイナス → 現行−3%約定不可(保守)が正しい(実運用は下限で頭打ち=実害小)と確認。
 
-### 🟠 1分足が貯まったら
-- **#6e 「1分持続したら損切り」を正式検証**(ユーザーの理想)。今は5分足しか無く不可 → 1分足で
-  compare_lss_rules を1分足対応にし「touch / 1分持続 / 5分終値(soc) / delay1」をBT30以上・現実モデルで比較。
-  delay1は据え置き前提。1分持続はtouchと5分終値の中間なので delay1 を超えるかがカギ。
+### 🟠 #6e 「1分持続したら損切り」検証 — ツール実装済(2026-08-01)。実機で実行
+- 1分足取得(fetch_1m_all)完了 → **`compare_lss_stop_1m.py`** 実装。1分足で「K本連続で終値が損切り超
+  なら損切り」を実装し touch(即時)/1分持続/2分/3分/5分持続/delay1(寄5分stopなし) を比較。
+  * エントリーは本番同等(min(トリガー,始値)+-3%ガード)。持続の損切りexitは確定バー終値=楽観にしない。
+  * BTは lss_trades.csv の bt列(=レポート一致)、BT>=--bt-min(既定40)、OOS(--base-month)分割。
+  ```
+  set LSS_TRADES_CSV=lss_trades.csv & python compare_lss_stop_1m.py --bt-min 40 --workers 8
+  ```
+  → TEST(OOS)で「1分持続」が touch/delay1 を総損益で上回れば採用価値。上回れば
+    sameday5m_firsttouch.short_exit_5m + lss_exit_watcher を1分持続対応にして揃える。
+- **delay1より上の候補**(compare_lss_rules 2026-07-30): delay1+hard5% / delay1+sm0.2 / delay2。現実モデル＋フォワードで要確認。
 - **delay1より上の候補**(compare_lss_rules 2026-07-30で判明): delay1+hard5%(+82万/PF1.74最良) /
   delay1+sm0.2(net保守+1.28M最高) / delay2(+70万)。採用は現実モデル＋フォワードで要確認。delay1は当面据え置き。
 
