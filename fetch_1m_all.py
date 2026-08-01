@@ -72,6 +72,14 @@ def already_have(sym: str) -> bool:
     df = jf._load_pkl(_cache_path(sym))
     if df is None or getattr(df, "empty", True):
         return False
+    # ★2026-08-01: 旧バグ(時刻消失)で作られた「日付のみ(全バー同一時刻)」の壊れキャッシュは
+    #   不十分扱いで取り直す(手動削除不要・再開可)。正しい1分足は時刻が多数=distinct>1。
+    try:
+        _times = set(df.index.time)
+        if len(_times) <= 1:
+            return False
+    except Exception:
+        pass
     try:
         earliest = pd.Timestamp(df.index.min())
         if earliest.tzinfo is not None:
