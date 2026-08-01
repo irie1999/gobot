@@ -47,6 +47,8 @@ ap.add_argument("--qty", type=int, default=None)
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--no-cache", action="store_true")
 ap.add_argument("--refresh-cache", action="store_true")
+ap.add_argument("--no-touch-timing", dest="touch_timing", action="store_false", default=True,
+                help="損切りタッチの『だまし(戻る)/本物(走る)』時刻帯別集計を出さない")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -276,6 +278,78 @@ def _report(sigs, title):
         print(f"  → 総損益 最大: {best[0]}")
 
 
+def _tod_bucket(t) -> str:
+    """datetime.time → 時刻帯ラベル(寄り直後を細かく)。"""
+    m = t.hour * 60 + t.minute
+    if m < 9 * 60 + 5:   return "09:00-09:05(寄1本目)"
+    if m < 9 * 60 + 10:  return "09:05-09:10"
+    if m < 9 * 60 + 15:  return "09:10-09:15"
+    if m < 9 * 60 + 30:  return "09:15-09:30"
+    if m < 10 * 60:      return "09:30-10:00"
+    if m < 11 * 60 + 30: return "10:00-前引"
+    if m < 13 * 60:      return "前引-12:30"
+    if m < 14 * 60 + 30: return "12:30-14:30"
+    return "14:30-引け"
+
+
+_TOD_ORDER = ["09:00-09:05(寄1本目)", "09:05-09:10", "09:10-09:15", "09:15-09:30",
+              "09:30-10:00", "10:00-前引", "前引-12:30", "12:30-14:30", "14:30-引け"]
+
+
+def _touch_timing(sigs, title):
+    """損切りタッチ(即時touch基準)を時刻帯別に『だまし(戻れば得) / 本物(走る)』集計。
+    各タッチで「損切りした損益」vs「損切らず保有した損益(利確 or 引け)」を比べ、
+    regret=保有−損切 が正なら『だまし(損切りが損)』。時刻帯別に だまし率・平均regret を出す。"""
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"n": 0, "false": 0, "regret": 0.0})
+    for s in sigs:
+        db = s["db"]; lp = s["lp"]; stop_p = s["stop"]; target_p = s["target"]
+        fill, ebar = _entry_1m(db, lp)
+        if fill is None:
+            continue
+        highs = db["high"].to_numpy(dtype=float)
+        lows = db["low"].to_numpy(dtype=float)
+        closes = db["close"].to_numpy(dtype=float)
+        times = db.index
+        n = len(highs)
+        tj = None
+        for j in range(ebar, n):
+            if highs[j] >= stop_p:          # 損切りに触れた最初のバー(即時touch基準)
+                tj = j; break
+            if lows[j] <= target_p:         # 先に利確 → このトレードは損切りタッチせず
+                break
+        if tj is None:
+            continue
+        stop_pnl = _pnl(fill, stop_p, QTY)          # ここで損切りした場合
+        hold_exit = None                            # 損切らず保有した場合の決済
+        for k in range(tj, n):
+            if lows[k] <= target_p:
+                hold_exit = target_p; break
+        if hold_exit is None:
+            hold_exit = float(closes[-1])           # 引けまで持つ
+        hold_pnl = _pnl(fill, hold_exit, QTY)
+        regret = hold_pnl - stop_pnl                # >0 = 損切りが損だった(だまし)
+        b = _tod_bucket(times[tj].time())
+        a = agg[b]; a["n"] += 1; a["regret"] += regret
+        if regret > 0:
+            a["false"] += 1
+    tot_n = sum(a["n"] for a in agg.values())
+    print("\n" + "=" * 78)
+    print(f"【{title}】損切りタッチの だまし(戻る)/本物(走る) 時刻帯別  (総タッチ {tot_n}件)")
+    print("=" * 78)
+    print(f"  {'時刻帯':<20}{'タッチ数':>7}{'だまし率':>8}{'平均regret':>12}{'合計regret':>14}")
+    print("-" * 78)
+    for b in _TOD_ORDER:
+        a = agg.get(b)
+        if not a or a["n"] == 0:
+            continue
+        fr = a["false"] / a["n"] * 100
+        print(f"  {b:<20}{a['n']:>7}{fr:>7.0f}%{a['regret']/a['n']:>+12,.0f}{a['regret']:>+14,.0f}")
+    print("-" * 78)
+    print("  だまし率=損切り後に戻って保有が得だった割合 / regret=保有損益−損切損益(+=損切りが損=だまし)。")
+    print("  寄り直後(09:00-09:05等)に だまし率・合計regret が集中していれば「一瞬の割れは寄りに集中」を実証。")
+
+
 def main():
     keep = _load_bt_pairs()
     if not keep:
@@ -329,13 +403,20 @@ def main():
 
     _report(sigs, f"BT{args.bt_min:.0f}以上・全期間(in-sample含む)")
     bm = args.base_month.strip()
+    te_sigs = None
     if bm:
         try:
             be = pd.Period(bm, "M").end_time.normalize()
+            te_sigs = [s for s in sigs if s["fd"] > be]
             _report([s for s in sigs if s["fd"] <= be], f"TRAIN ≤{be.date()} (in-sample)")
-            _report([s for s in sigs if s["fd"] > be], f"TEST >{be.date()} (OOS)")
+            _report(te_sigs, f"TEST >{be.date()} (OOS)")
         except Exception as _e:
             print(f"[warn] base-month分割スキップ({_e})")
+
+    if args.touch_timing:
+        _touch_timing(sigs, f"BT{args.bt_min:.0f}以上・全期間")
+        if te_sigs:
+            _touch_timing(te_sigs, f"BT{args.bt_min:.0f}以上・TEST(OOS)")
 
     print("\n" + "=" * 74)
     print("判断: TEST(OOS)で『1分持続』が touch/delay1 を総損益で上回れば採用価値あり。")
