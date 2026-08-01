@@ -50,6 +50,9 @@ ap.add_argument("--stop-delay-bars", type=int, default=None,
                 help="損切り遅延(本数)。未指定=delay1相当(5m:1本/1m:5本=どちらも5分)")
 ap.add_argument("--slip", type=float, default=0.0,
                 help="成行ショートの不利スリップ(既定0=現行lssと同基準だが楽観。0.002=0.2%%も見る)")
+ap.add_argument("--min-gap", type=float, default=None,
+                help="この始値ギャップ率以上の候補だけに絞る(例0.05=+5%%以上の大ギャップUPだけ空売り)。"
+                     "未指定=全候補。大ギャップUPフェード戦略の検証用")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -204,6 +207,8 @@ def _collect(sym_yf, strat):
         if entry05 <= 0:
             continue
         gap = (day_open - prev_close) / prev_close if prev_close > 0 else 0.0
+        if args.min_gap is not None and gap < args.min_gap:
+            continue   # 指定ギャップ未満は除外(大ギャップUPフェードだけ検証)
         stop05 = entry05 + atr * args.sm       # ショート: 損切=上
         target05 = entry05 - atr * args.tm     # 利確=下
         xp, _rsn = _short_exit(post["high"].to_numpy(float), post["low"].to_numpy(float),
@@ -244,7 +249,7 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv5", args.tf, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv6", args.tf, args.min_gap, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
