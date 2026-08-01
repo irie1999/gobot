@@ -43,7 +43,11 @@ ap.add_argument("--base-month", type=str, default="2026-01",
                 help="OOS分割(以前=TRAIN、以後=TEST)。空=全期間のみ")
 ap.add_argument("--sm", type=float, default=0.1)
 ap.add_argument("--tm", type=float, default=1.0)
-ap.add_argument("--stop-delay-bars", type=int, default=1, help="損切り遅延(既定1=delay1)")
+ap.add_argument("--tf", choices=["5m", "1m"], default="5m",
+                help="分足(既定5m=stock_5min・完全に揃っている。#6bは9:05境界なので5分で十分)。"
+                     "1m=jquantsキャッシュ(再取得が要る)")
+ap.add_argument("--stop-delay-bars", type=int, default=None,
+                help="損切り遅延(本数)。未指定=delay1相当(5m:1本/1m:5本=どちらも5分)")
 ap.add_argument("--slip", type=float, default=0.0,
                 help="成行ショートの不利スリップ(既定0=現行lssと同基準だが楽観。0.002=0.2%%も見る)")
 ap.add_argument("--days", type=int, default=500)
@@ -56,7 +60,7 @@ args = ap.parse_args()
 
 import backtest_limit_entry as ble
 from jquants_fetch import _load_pkl, _cache_path, MINUTE_CACHE_DIR, yf_to_jquants
-from daytrade_data import split_by_day
+from daytrade_data import split_by_day, load_intraday
 from sameday5m_core import mod_for
 
 ble._MIRROR_PNL = False
@@ -65,7 +69,9 @@ ble._INTRADAY_5M = False
 
 QTY = args.qty if args.qty is not None else ble.FIXED_QTY
 FEE = ble.FEE_PCT_ONE_WAY
-DELAY = max(0, int(args.stop_delay_bars))
+# delay1相当=約定バーから5分。5m足なら1本、1m足なら5本。
+DELAY = args.stop_delay_bars if args.stop_delay_bars is not None else (1 if args.tf == "5m" else 5)
+DELAY = max(0, int(DELAY))
 _0905 = dtime(9, 5)
 
 
@@ -102,8 +108,11 @@ def _load_bt_pairs():
     return {k: v for k, v in bt.items() if v >= args.bt_min}
 
 
-def _load_1m(sym_yf):
+def _load_tf(sym_yf):
+    """分足ロード。--tf 5m=stock_5min(完全) / 1m=jquantsキャッシュ(再取得要)。"""
     try:
+        if args.tf == "5m":
+            return load_intraday(sym_yf, days=args.days + 5, source="local")
         return _load_pkl(_cache_path(MINUTE_CACHE_DIR, f"{yf_to_jquants(sym_yf)}_1m"))
     except Exception:
         return None
@@ -140,7 +149,7 @@ def _collect(sym_yf, strat):
     if not params:
         return out, stats
     cf = params[0]
-    m1 = _load_1m(sym_yf)
+    m1 = _load_tf(sym_yf)
     if m1 is None or m1.empty:
         return out, stats            # 1分足キャッシュ無し(未取得)=has1m=0
     by_day = split_by_day(m1)
@@ -229,13 +238,13 @@ def main():
     pairs = sorted(keep.keys())
     if args.limit > 0:
         pairs = pairs[:args.limit]
-    print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / sm={args.sm} tm={args.tm} delay={DELAY} "
-          f"slip{args.slip*100:.2f}% fee{FEE*100:.2f}% / #6b=9:05成行ショート(本番同等)")
+    print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / tf={args.tf} sm={args.sm} tm={args.tm} "
+          f"delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% / #6b=9:05成行ショート(本番同等)")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv4", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv5", args.tf, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
@@ -282,8 +291,8 @@ def main():
         _nr = agg_stats["nofill905"] / _sig * 100 if _sig else 0
         print("\n" + "=" * 78)
         print("【約定率の健全性チェック】(実運用の fill率 ~70% と比べる)")
-        print(f"  1分足あり {agg_stats['has1m']} / 全 {agg_stats['pair']} ペア"
-              f"{'  ← ★1分足の再取得が未完了(母数不足)' if agg_stats['has1m'] < agg_stats['pair'] * 0.9 else ''}")
+        print(f"  {args.tf}足あり {agg_stats['has1m']} / 全 {agg_stats['pair']} ペア"
+              f"{'  ← ★分足データ不足(5mなら stock_5min / 1mなら再取得を確認)' if agg_stats['has1m'] < agg_stats['pair'] * 0.9 else ''}")
         print(f"  有効シグナル {_sig} / 9:05までに約定 {agg_stats['filled905']}({_fr:.0f}%) "
               f"/ 未約定(=#6b候補) {agg_stats['nofill905']}({_nr:.0f}%) "
               f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
