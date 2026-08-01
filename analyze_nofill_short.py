@@ -53,6 +53,9 @@ ap.add_argument("--slip", type=float, default=0.0,
 ap.add_argument("--min-gap", type=float, default=None,
                 help="この始値ギャップ率以上の候補だけに絞る(例0.05=+5%%以上の大ギャップUPだけ空売り)。"
                      "未指定=全候補。大ギャップUPフェード戦略の検証用")
+ap.add_argument("--entry-time", type=str, default="09:05",
+                help="成行ショートの時刻 HH:MM(既定09:05)。この時刻以降の最初の足で約定=以降で決済。"
+                     "lss発動判定(安値<=トリガー)もこの時刻より前で行う。9:10/09:15/09:30 で吹き値売りを比較")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -75,7 +78,11 @@ FEE = ble.FEE_PCT_ONE_WAY
 # delay1相当=約定バーから5分。5m足なら1本、1m足なら5本。
 DELAY = args.stop_delay_bars if args.stop_delay_bars is not None else (1 if args.tf == "5m" else 5)
 DELAY = max(0, int(DELAY))
-_0905 = dtime(9, 5)
+try:
+    _eh, _em = args.entry_time.split(":")
+    _0905 = dtime(int(_eh), int(_em))     # 成行ショートの時刻(既定09:05)。sweep可
+except Exception:
+    _0905 = dtime(9, 5)
 
 
 def _norm(sym): return str(sym).upper().removesuffix(".T").split(".")[0]
@@ -244,12 +251,12 @@ def main():
     if args.limit > 0:
         pairs = pairs[:args.limit]
     print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / tf={args.tf} sm={args.sm} tm={args.tm} "
-          f"delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% / #6b=9:05成行ショート(本番同等)")
+          f"entry={args.entry_time} delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% / #6b=9:05成行ショート(本番同等)")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv6", args.tf, args.min_gap, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv7", args.tf, args.min_gap, args.entry_time, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
