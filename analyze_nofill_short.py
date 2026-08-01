@@ -134,23 +134,24 @@ def _collect(sym_yf, strat):
     ★修正(2026-08-01): エンジンのfill結果でなく df_ind の entry_sig(全シグナル)から直接拾う。
       (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
     out = []
+    stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0}
     params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
     if not params:
-        return out
+        return out, stats
     cf = params[0]
     m1 = _load_1m(sym_yf)
     if m1 is None or m1.empty:
-        return out
+        return out, stats
     by_day = split_by_day(m1)
     if not by_day:
-        return out
+        return out, stats
     try:
         df_raw = ble.fetch(sym_yf, args.days + 420)
         df_ind = cf(df_raw.copy())
     except Exception:
-        return out
+        return out, stats
     if df_ind is None or df_ind.empty or "entry_sig" not in df_ind.columns:
-        return out
+        return out, stats
     one_dates = sorted(by_day.keys())
     from datetime import timedelta as _td
     since = ble._TODAY - _td(days=args.days)
@@ -164,22 +165,29 @@ def _collect(sym_yf, strat):
             continue
         prev_close = float(row.get("close", 0) or 0)
         atr = float(row.get("atr", 0) or 0)
-        if prev_close <= 0 or atr <= 0 or atr != atr:   # NaN除外
+        if prev_close <= 0 or atr <= 0 or atr != atr:   # NaN除外(指標ウォームアップ等)
+            stats["warmup"] += 1
             continue
+        stats["sig"] += 1                     # 有効シグナル(atr確定)
         trigger = prev_close                  # lss注文価格(em=0)。-1tickは<0.1%で無視
         # エントリー日 = シグナル日の翌1分足営業日
         edate = next((d for d in one_dates if d > Sdate), None)
         if edate is None:
+            stats["nodata"] += 1
             continue
         db = by_day.get(edate)
         if db is None or len(db) < 2:
+            stats["nodata"] += 1
             continue
         pre = db[db.index.time < _0905]
         if not pre.empty and float(pre["low"].min()) <= trigger:
+            stats["filled905"] += 1
             continue   # 9:05までに安値がトリガー到達=lssが約定 → #6b対象外
         post = db[db.index.time >= _0905]
         if post.empty or len(post) < 2:
+            stats["nodata"] += 1
             continue
+        stats["nofill905"] += 1
         day_open = float(db["open"].iloc[0])
         entry05 = float(post["open"].iloc[0])
         if entry05 <= 0:
@@ -191,7 +199,7 @@ def _collect(sym_yf, strat):
                                post["close"].to_numpy(float), post["open"].to_numpy(float),
                                stop05, target05)
         out.append({"fd": pd.Timestamp(edate), "pnl": _pnl(entry05, xp, QTY), "gap": gap})
-    return out
+    return out, stats
 
 
 def _stat(pnls):
@@ -225,21 +233,24 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv3", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
     _cf = _cd / f"trades_{_key}.pkl"
 
     trades = None
+    agg_stats = None
     if _cf.exists() and not args.no_cache and not args.refresh_cache:
         try:
-            trades = _pk.loads(_cf.read_bytes())
+            _obj = _pk.loads(_cf.read_bytes())
+            trades, agg_stats = _obj if isinstance(_obj, tuple) else (_obj, None)
             print(f"[cache] 再利用: {_cf} ({len(trades)}件) ※--refresh-cacheで再計算")
         except Exception:
             trades = None
     if trades is None:
         trades = []
+        agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0}
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(_collect, _jq_to_yf(s), t): (s, t) for (s, t) in pairs}
             done = 0
@@ -248,16 +259,30 @@ def main():
                 if done % 100 == 0:
                     print(f"  ...{done}/{len(pairs)}ペア", flush=True)
                 try:
-                    trades += fut.result()
+                    _o, _st = fut.result()
+                    trades += _o
+                    for k in agg_stats:
+                        agg_stats[k] += _st.get(k, 0)
                 except Exception:
                     continue
         if not args.no_cache:
             try:
                 _cd.mkdir(exist_ok=True)
-                _cf.write_bytes(_pk.dumps(trades))
+                _cf.write_bytes(_pk.dumps((trades, agg_stats)))
                 print(f"[cache] 保存: {_cf} ({len(trades)}件)")
             except Exception as _e:
                 print(f"[cache] 保存失敗({_e})")
+
+    if agg_stats:
+        _sig = agg_stats["sig"]
+        _fr = agg_stats["filled905"] / _sig * 100 if _sig else 0
+        _nr = agg_stats["nofill905"] / _sig * 100 if _sig else 0
+        print("\n" + "=" * 78)
+        print("【約定率の健全性チェック】(実運用の fill率 ~70% と比べる)")
+        print(f"  有効シグナル {_sig} / 9:05までに約定 {agg_stats['filled905']}({_fr:.0f}%) "
+              f"/ 未約定(=#6b候補) {agg_stats['nofill905']}({_nr:.0f}%) "
+              f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
+        print("  ★未約定率が実運用(~30%)より極端に低ければ、この#6bの母数は過小=結論保留。")
 
     if not trades:
         print("[error] #6bトレード0件。1分足キャッシュ/CSVを確認。", file=sys.stderr); return
