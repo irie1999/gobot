@@ -350,9 +350,9 @@ def main():
             print(f"[warn] base-month分割スキップ({_e})")
 
     print("\n" + "=" * 78)
-    print("判断: TEST(OOS)が明確にプラス(PF>1.2目安)なら #6b は上乗せ価値あり。")
-    print(f"  ★ただし成行ショートは実スリッページが大きい。--slip 0.002〜0.003 でも残るか必ず確認")
-    print(f"    (現在 slip={args.slip*100:.2f}%)。OOSがマイナス/slip込みで消えるなら却下。")
+    print("判断: TEST(OOS)が明確にプラス(PF>1.1目安)なら #6b は上乗せ価値あり。")
+    print("  無差別は却下(全期間PF~0.96)。大ギャップUP(--min-gap 0.05等)に絞ると TRAIN/OOS両方+。")
+    print("  スリッページは現行lssと同基準で考慮しない(slip=0固定・ユーザー方針2026-08-01)。")
 
 
 if __name__ == "__main__":
