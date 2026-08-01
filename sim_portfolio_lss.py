@@ -41,6 +41,8 @@ ap = argparse.ArgumentParser(description="lss over-subscribe ポートフォリ�
 ap.add_argument("--trades-csv", type=str, default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"))
 ap.add_argument("--bt-min", type=float, default=40.0)
 ap.add_argument("--budget", type=float, default=4_000_000.0, help="予算(円)。約定累計がこれに達したら残り注文をキャンセル")
+ap.add_argument("--min-price", type=float, default=1000.0, help="対象銘柄の最低株価(実運用 daily と揃える。既定1000)")
+ap.add_argument("--max-price", type=float, default=6000.0, help="対象銘柄の最高株価(実運用 daily=6000 と揃える。既定6000)")
 ap.add_argument("--multiples", type=str, default="1.0,1.5,2.0,2.5,3.0",
                 help="注文倍率(予算の何倍ぶん注文を出すか)をカンマ区切りで。1.0=現行(予算ぴったり)")
 ap.add_argument("--base-month", type=str, default="2026-01", help="OOS分割(以前=TRAIN、以後=TEST)。空=全期間のみ")
@@ -159,6 +161,8 @@ def _collect(sym_yf, strat, bt):
             continue
         if not (ble.MIN_PRICE <= prev_close <= ble.MAX_PRICE):
             continue
+        if not (args.min_price <= prev_close <= args.max_price):
+            continue                               # 実運用 daily の価格レンジ(1000-6000)と揃える
         if atr / prev_close > ble.MAX_ATR_RATIO:
             continue
         trigger = prev_close                       # em=0: lp = 前日終値
@@ -279,14 +283,15 @@ def main():
     if args.limit > 0:
         pairs = pairs[:args.limit]
     print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / 予算{args.budget/1e4:.0f}万 / "
-          f"倍率{MULTIPLES} / sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
+          f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
+          f"sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
           f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".simportfolio_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "spv1", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, GAP_LIMIT,
-        args.days, args.bt_min, args.limit, QTY,
+        "spv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, GAP_LIMIT,
+        args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
     _cf = _cd / f"records_{_key}.pkl"
