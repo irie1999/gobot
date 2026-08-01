@@ -347,6 +347,17 @@
   ```
   → TEST(OOS)で「1分持続」が touch/delay1 を総損益で上回れば採用価値。上回れば
     sameday5m_firsttouch.short_exit_5m + lss_exit_watcher を1分持続対応にして揃える。
+- **★1回目の結果(2026-08-01, BT40 OOS)**: 「1分持続」はユーザーの直感どおり有効=touch(即時)を大幅に
+  上回る(OOS touch +5.35M → 1分持続 +9.52M / 待つほど良い・全期間TRAIN/TESTで一貫=ヒゲ刈り回避は本物)。
+  ただし **delay1(現行既定=寄5分stopなし)がさらに上(OOS +12.4M/PF3.03)**。＝現行が既に最良版に近い。
+  **⚠ 注意**: 初回のdelay系exitは楽観(§18.9=無保護窓で通過してもstop価格で約定と計上)。持続は確定終値
+  =現実的なので **delay vs 持続 の比較が不公平だった**。
+- **★公平化+combo追加(2026-08-01)**: (1)delay系のexitを現実化(無保護窓で通過済ならstop価格でなく遅延解除時
+  の実価格=始値で成行)。(2)ルールに **delay1+K分持続(両取り)** ・delay2 を追加。→ 再実行して
+  「delay1+持続」が単独delay1/単独持続を上回るか、公平基準での最良ルールを確定する:
+  ```
+  set LSS_TRADES_CSV=lss_trades.csv & python compare_lss_stop_1m.py --bt-min 40 --workers 8  # 再実行(--refresh-cache不要=ルールのみ変更)
+  ```
 - **delay1より上の候補**(compare_lss_rules 2026-07-30): delay1+hard5% / delay1+sm0.2 / delay2。現実モデル＋フォワードで要確認。
 - **delay1より上の候補**(compare_lss_rules 2026-07-30で判明): delay1+hard5%(+82万/PF1.74最良) /
   delay1+sm0.2(net保守+1.28M最高) / delay2(+70万)。採用は現実モデル＋フォワードで要確認。delay1は当面据え置き。

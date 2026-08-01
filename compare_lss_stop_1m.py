@@ -66,12 +66,17 @@ GAP = args.gap if args.gap is not None else getattr(ble, "_INTRADAY_5M_ENTRY_GAP
 #   touch : 高値が損切り到達で即損切り(遅延=delay分だけ寄り無効)
 #   sustain: 終値が損切り超をK本連続で損切り(exitは確定バー終値=不利側)
 RULES = [
-    ("touch(即時)",        "touch",   0, 0),
-    ("1分持続",            "sustain", 1, 0),
-    ("2分持続",            "sustain", 2, 0),
-    ("3分持続",            "sustain", 3, 0),
-    ("5分持続",            "sustain", 5, 0),
-    ("delay1(寄5分stopなし)", "touch", 0, 5),
+    ("touch(即時)",            "touch",   0, 0),
+    ("1分持続",                "sustain", 1, 0),
+    ("2分持続",                "sustain", 2, 0),
+    ("3分持続",                "sustain", 3, 0),
+    ("5分持続",                "sustain", 5, 0),
+    ("delay1(寄5分stopなし)",     "touch",   0, 5),
+    ("delay2(寄10分stopなし)",    "touch",   0, 10),
+    ("delay1+1分持続",           "sustain", 1, 5),   # 寄り5分なし + その後は終値1本持続で損切り
+    ("delay1+2分持続",           "sustain", 2, 5),
+    ("delay1+3分持続",           "sustain", 3, 5),
+    ("delay2+2分持続",           "sustain", 2, 10),
 ]
 
 
@@ -140,8 +145,12 @@ def _entry_1m(bars, trigger):
 
 def _exit_short(bars, ebar, stop_p, target_p, kind, K, delay):
     """ショート決済。stop=上/target=下。Returns (exit_price, reason)。
-    touch: 高値≥stop で即損切り(exit=stop)。sustain: 終値≥stop がK本連続で損切り(exit=確定バー終値)。
-    利確は常に 安値≤target で target。同バーは損切り優先(touch)/持続はバー内利確優先。"""
+    touch: 高値≥stop で即損切り。sustain: 終値≥stop がK本連続で損切り(exit=確定バー終値=待った分不利)。
+    利確は常に 安値≤target で target。同バーは損切り優先(touch)/持続はバー内利確優先。
+    ★遅延(delay>0)の現実化(§18.9): 無保護窓の間に価格が損切りを通過し、遅延解除の最初の判定バーで
+      既に丸ごと損切り超(安値>stop)なら、stop価格では約定できず遅延解除時の実価格(始値)で成行=不利。
+      (これを入れないと delay 系だけ楽観的に過大評価になる。)"""
+    opens = bars["open"].to_numpy(dtype=float)
     highs = bars["high"].to_numpy(dtype=float)
     lows = bars["low"].to_numpy(dtype=float)
     closes = bars["close"].to_numpy(dtype=float)
@@ -151,6 +160,8 @@ def _exit_short(bars, ebar, stop_p, target_p, kind, K, delay):
     for j in range(ebar, n):
         if kind == "touch":
             if j >= stop_from and highs[j] >= stop_p:   # 同バー損切り優先(悲観)
+                if delay > 0 and j == stop_from and lows[j] > stop_p:
+                    return max(stop_p, float(opens[j])), "stop"   # 無保護窓で通過済→実価格で成行
                 return stop_p, "stop"
             if lows[j] <= target_p:
                 return target_p, "target"
