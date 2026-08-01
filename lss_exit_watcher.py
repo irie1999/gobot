@@ -390,6 +390,11 @@ def main() -> int:
                     help="寄り深ギャップ取消を無効化。既定ON=未約定のlss逆指値のうち『現在値<トリガー"
                          "-X%%(X=_INTRADAY_5M_ENTRY_GAP_LIMIT=3%%)』のものを毎ループ取消(analyze_gap_bt "
                          "の OOS検証で>3%%超の深ギャップ約定は不利=バックテストと一致させる)。--execute時のみ実取消")
+    ap.add_argument("--budget-cap", type=float, default=0.0,
+                    help="予算上限管理(over-subscribe運用)。約定済lss売建の累計(平均約定値×株数)が"
+                         "この額(円)に達したら、未発動のlss新規売り逆指値を全取消する。例4000000=400万で頭打ち。"
+                         "0(既定)=無効。予算より多め(BT降順)に発注しておき、埋まったら残りを自動キャンセルする用途。"
+                         "watcherは終日動くので全日キャップになる。--execute時のみ実取消")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -559,6 +564,17 @@ def _run(args, close_at, today) -> int:
             _gap_sweep = None
     else:
         print("  寄り深ギャップ取消: OFF (--no-cancel-gap)")
+    # 予算上限管理(over-subscribe運用): 約定累計が --budget-cap 到達で未発動lss逆指値を全取消。
+    _budget_sweep = None
+    _budget_done: dict = {}
+    if args.budget_cap and args.budget_cap > 0:
+        try:
+            from cancel_gap_orders import _budget_sweep as _budget_sweep
+            print(f"  予算上限管理: ON (約定累計 ≥ {args.budget_cap/1e4:.0f}万 で未発動lss逆指値を"
+                  f"全取消{'' if args.execute else ' / dry-run'})")
+        except Exception as _e:
+            print(f"  [!] 予算上限管理の読込失敗({_e}) → 無効")
+            _budget_sweep = None
     while True:
         now = datetime.now(JST)
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
@@ -572,6 +588,22 @@ def _run(args, close_at, today) -> int:
             except Exception as _e:
                 print(f"  [!] 深ギャップ取消でエラー(継続): {_e}")
         shorts = _lss_shorts(cli, lss_map, args.tol) if lss_map else []
+
+        # 予算上限管理: 約定済lss売建の累計(平均約定値×株数)が --budget-cap に達したら、
+        #   未発動のlss新規売り逆指値を全取消(=「400万埋まったら それ以外は取消」)。終日有効。
+        if _budget_sweep is not None and not before_open and not after_close:
+            filled_notional = sum(_num(p.get("avg", 0)) * int(p.get("qty", 0))
+                                  for p in shorts if _num(p.get("avg", 0)) > 0)
+            _reached = filled_notional >= args.budget_cap
+            print(f"  {now:%H:%M:%S} 予算: 約定済 {filled_notional/1e4:.0f}万 / 上限 "
+                  f"{args.budget_cap/1e4:.0f}万{' ★到達→残り取消' if _reached else ''}")
+            if _reached:
+                try:
+                    _bt, _bs = _budget_sweep(cli, lss_map, _budget_done, dry=not args.execute)
+                    if _bt:
+                        print(f"    予算上限取消: 対象{_bt}件 / 送信{_bs}件")
+                except Exception as _e:
+                    print(f"  [!] 予算上限取消でエラー(継続): {_e}")
 
         if shorts and before_open:
             print(f"  {now:%H:%M:%S} 寄り前(9:00前): lss売建 {len(shorts)}件を待機中(発火なし)")

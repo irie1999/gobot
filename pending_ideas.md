@@ -41,9 +41,19 @@
   python lss_budget_cap.py --execute                # デモ発注+上限監視
   python lss_budget_cap.py --execute --prod         # 本番(要明示)
   ```
+- **全日キャップ = watcher に統合済(2026-08-01)**: `lss_exit_watcher.py --budget-cap 4000000` で、
+  約定済lss売建の累計(平均約定値×株数)が上限到達で未発動lss逆指値を全取消(`cancel_gap_orders._budget_sweep`)。
+  watcherは終日常駐なので朝だけの `lss_budget_cap.py` と違い全日有効。深ギャップ取消と同じ安全設計
+  (lss記録にある銘柄のCumQty0・信用新規売りのみ・--execute時のみ実取消)。
+  ```
+  python lss_exit_watcher.py --execute --prod --budget-cap 4000000 --stop-delay-bars 1
+  ```
+- **180万口座での妥当値(2026-08-01)**: 買付余力=180万×約3(信用デイトレ)≈540万。sim(400万注文→平均273万
+  約定/OOS278万)・実測(~200万=50%)。買付余力が制約=800万注文(fill50%で400万埋める)は出せない。
+  → 注文~450万・cap(取消しきい値)~350万が妥当(最悪ピーク≤450万<余力540万)。平常日は~225万約定止まり。
+  「必ず400万約定」は増資しないと不可(180万では平常日~250万が上限)。
 - **残タスク(倍率確定)**: デモ→本番小ロットで forward 実測(実fill率・実損益)を貯め、実測fill率に
-  合わせて --budget-multiple を確定(実測~50%なら2.0)。全日キャップは将来 watcher へ統合
-  (現状は監視終了後に約定した分は予算超過しうる=倍率を上げ過ぎない運用で吸収)。
+  合わせて注文額(over-subscribe)を確定。
 
 ## ~~#6b / GUF(Gap-Up Fade)~~ 大ギャップUPフェード → **却下確定(2026-08-01)**
 - 命名: **GUF(Gap-Up Fade)** = lss(ロング候補)が9:05までに未約定 かつ 始値が前日終値+5%以上 →

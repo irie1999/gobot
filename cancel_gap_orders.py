@@ -118,6 +118,67 @@ def _sweep(cli, lss_map, gap, done, dry) -> tuple[int, int]:
     return n_target, n_sent
 
 
+def _budget_sweep(cli, lss_map, done, dry) -> tuple[int, int]:
+    """予算到達時の上限管理: active かつ『未発動(CumQty==0)』の lss 新規売り逆指値を全取り消す。
+    深ギャップ(_sweep)と違い価格条件は付けず、残っている未約定 lss エントリーを一掃する
+    (=約定累計が予算に達したら『それ以外は取消』)。一部約定(CumQty>0)は残す。
+    Returns: (取消対象件数, 取消送信できた件数)。done は取消確認済み OrderId 集合(更新)。"""
+    from kabu_api import SIDE_SELL, CASH_MARGIN_OPEN
+    try:
+        orders = cli.get_orders()
+    except Exception as e:
+        if "401" in str(e) or "Unauthorized" in str(e):
+            try:
+                print("  [再接続] トークン失効(401) → 再接続してリトライ")
+                cli.connect(); orders = cli.get_orders()
+            except Exception as e2:
+                print(f"  ⚠ get_orders 失敗(再接続後も): {e2}"); return 0, 0
+        else:
+            print(f"  ⚠ get_orders 失敗: {e}"); return 0, 0
+
+    active_ids = set()
+    for o in orders:
+        st = int(o.get("OrderState") or o.get("State") or 0)
+        if st in ACTIVE_STATES and o.get("ID"):
+            active_ids.add(o.get("ID"))
+    for oid in list(done):
+        if oid not in active_ids:
+            done[oid] = "gone"
+
+    n_target = n_sent = 0
+    for o in orders:
+        oid = o.get("ID", "")
+        if not oid or done.get(oid) == "gone":
+            continue
+        if o.get("Side") != SIDE_SELL:
+            continue
+        if int(o.get("CashMargin") or 0) != CASH_MARGIN_OPEN:   # 信用新規売りのみ
+            continue
+        st = int(o.get("OrderState") or o.get("State") or 0)
+        if st not in ACTIVE_STATES:
+            continue
+        if float(o.get("CumQty", 0) or 0) > 0:
+            continue   # 一部約定は残す(未発動=CumQty0 のみ取消)
+        sym = str(o.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
+        recs = lss_map.get(sym)
+        if not recs:
+            continue   # lss記録に無い銘柄 → 触らない(メインショート/手動等の保護)
+        n_target += 1
+        nm = recs[0].get("name", "")
+        print(f"  [予算到達取消] {sym} {nm} 未発動lss新規売り逆指値 OrderId={oid} State={st}")
+        if dry:
+            print("    → [dry-run] 実行時はこの注文を取り消します")
+            continue
+        res = cli.cancel_order(oid)
+        if res.get("Result") == 0 or res.get("_dry_run"):
+            n_sent += 1
+            done.setdefault(oid, "sent")
+            print("    → 取消送信OK(次ループで消えたか検証)")
+        else:
+            print(f"    → 取消失敗: {res} (次ループで再試行)")
+    return n_target, n_sent
+
+
 def main():
     ap = argparse.ArgumentParser(description="寄り深ギャップの lss 逆指値を確実に取り消す")
     ap.add_argument("--execute", action="store_true", help="実際に取り消す(既定 dry-run)")
