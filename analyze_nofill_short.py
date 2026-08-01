@@ -134,17 +134,19 @@ def _collect(sym_yf, strat):
     ★修正(2026-08-01): エンジンのfill結果でなく df_ind の entry_sig(全シグナル)から直接拾う。
       (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
     out = []
-    stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0}
+    stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
+             "pair": 1, "has1m": 0}
     params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
     if not params:
         return out, stats
     cf = params[0]
     m1 = _load_1m(sym_yf)
     if m1 is None or m1.empty:
-        return out, stats
+        return out, stats            # 1分足キャッシュ無し(未取得)=has1m=0
     by_day = split_by_day(m1)
     if not by_day:
         return out, stats
+    stats["has1m"] = 1
     try:
         df_raw = ble.fetch(sym_yf, args.days + 420)
         df_ind = cf(df_raw.copy())
@@ -233,7 +235,7 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv3", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv4", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
@@ -250,7 +252,8 @@ def main():
             trades = None
     if trades is None:
         trades = []
-        agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0}
+        agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
+                     "pair": 0, "has1m": 0}
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(_collect, _jq_to_yf(s), t): (s, t) for (s, t) in pairs}
             done = 0
@@ -279,10 +282,12 @@ def main():
         _nr = agg_stats["nofill905"] / _sig * 100 if _sig else 0
         print("\n" + "=" * 78)
         print("【約定率の健全性チェック】(実運用の fill率 ~70% と比べる)")
+        print(f"  1分足あり {agg_stats['has1m']} / 全 {agg_stats['pair']} ペア"
+              f"{'  ← ★1分足の再取得が未完了(母数不足)' if agg_stats['has1m'] < agg_stats['pair'] * 0.9 else ''}")
         print(f"  有効シグナル {_sig} / 9:05までに約定 {agg_stats['filled905']}({_fr:.0f}%) "
               f"/ 未約定(=#6b候補) {agg_stats['nofill905']}({_nr:.0f}%) "
               f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
-        print("  ★未約定率が実運用(~30%)より極端に低ければ、この#6bの母数は過小=結論保留。")
+        print("  ★1分足ありが全ペアに満たない=再取得完了後に再実行(--refresh-cache)して母数を揃えること。")
 
     if not trades:
         print("[error] #6bトレード0件。1分足キャッシュ/CSVを確認。", file=sys.stderr); return
