@@ -67,6 +67,10 @@ ap.add_argument("--exclude-lss-overlap", action="store_true",
                 help="lssが9:05以降にその日約定する日をGUFから除外する。既定OFF=含める(元の挙動)。"
                      "GUFとlssは別価格の独立トレードなので二重計上ではない(足しても重複なし)。"
                      "同一日に両者が発火した件数だけ知りたい場合の分析用オプション")
+ap.add_argument("--require-rollover", action="store_true",
+                help="ロールオーバー確認: 寄り〜エントリー時刻までの最初の足が陰線(崩れ始め)の時だけ"
+                     "9:05成行ショート。踏み上げ月(ギャップが崩れず上昇継続)は『崩れないのでエントリーしない』"
+                     "→ 上昇局面の連続被弾を回避する狙い。強さに逆らわず崩れを確認してから売る")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -174,7 +178,7 @@ def _collect(sym_yf, strat):
       (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
     out = []
     stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
-             "pair": 1, "has1m": 0, "overlap_late": 0}
+             "pair": 1, "has1m": 0, "overlap_late": 0, "roll_skip": 0}
     params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
     if not params:
         return out, stats
@@ -242,6 +246,14 @@ def _collect(sym_yf, strat):
         gap = (day_open - prev_close) / prev_close if prev_close > 0 else 0.0
         if args.min_gap is not None and gap < args.min_gap:
             continue   # 指定ギャップ未満は除外(大ギャップUPフェードだけ検証)
+        # ロールオーバー確認: 寄り〜エントリー時刻の最初の足が陰線(崩れ始め)の時だけ売る。
+        #   踏み上げ(ギャップ崩れず上昇継続)日はエントリーしない=上昇局面の連続被弾を回避。
+        if args.require_rollover:
+            if pre.empty:
+                continue   # 確認材料なし(エントリー時刻=寄り等)は見送り
+            if float(pre["close"].iloc[-1]) >= float(pre["open"].iloc[0]):
+                stats["roll_skip"] += 1
+                continue   # 最初の足が陽線/同値=まだ崩れていない → 見送り
         stop05 = entry05 + atr * args.sm       # ショート: 損切=上
         target05 = entry05 - atr * args.tm     # 利確=下
         xp, _rsn = _short_exit(post["high"].to_numpy(float), post["low"].to_numpy(float),
@@ -283,11 +295,13 @@ def main():
     if _GUF:
         print("  ★GUF(Gap-Up Fade): lss(ロング候補)が未約定 かつ 始値が前日終値+5%以上 → 9:05成行ショート(寄り天フェード)。"
               "lss本体とは別戦略として成績を測る。")
+    if args.require_rollover:
+        print("  ★ロールオーバー確認ON: 最初の足が陰線(崩れ始め)の日だけ売る=踏み上げ日は見送り。")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv8", args.tf, args.min_gap, args.entry_time, args.exclude_lss_overlap,
+        "nfsv9", args.tf, args.min_gap, args.entry_time, args.exclude_lss_overlap, args.require_rollover,
         getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
@@ -306,7 +320,7 @@ def main():
     if trades is None:
         trades = []
         agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
-                     "pair": 0, "has1m": 0, "overlap_late": 0}
+                     "pair": 0, "has1m": 0, "overlap_late": 0, "roll_skip": 0}
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(_collect, _jq_to_yf(s), t): (s, t) for (s, t) in pairs}
             done = 0
@@ -343,6 +357,9 @@ def main():
         _ovl = agg_stats.get("overlap_late", 0)
         _ovl_state = "除外" if args.exclude_lss_overlap else "含める(別価格の独立トレード=二重計上ではない)"
         print(f"  うち同一日にlssも9:05以降約定(GUFとlss両発火) {_ovl}件 → GUF側は{_ovl_state}")
+        if args.require_rollover:
+            _rs = agg_stats.get("roll_skip", 0)
+            print(f"  ロールオーバー未確認(最初の足が陽線=踏み上げ)で見送り {_rs}件 → 実エントリーから除外")
         print("  ★1分足ありが全ペアに満たない=再取得完了後に再実行(--refresh-cache)して母数を揃えること。")
 
     if not trades:
