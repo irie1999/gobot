@@ -56,6 +56,13 @@ ap.add_argument("--min-gap", type=float, default=None,
 ap.add_argument("--entry-time", type=str, default="09:05",
                 help="成行ショートの時刻 HH:MM(既定09:05)。この時刻以降の最初の足で約定=以降で決済。"
                      "lss発動判定(安値<=トリガー)もこの時刻より前で行う。9:10/09:15/09:30 で吹き値売りを比較")
+ap.add_argument("--guf", action="store_true",
+                help="GUF(Gap-Up Fade)プリセット: --min-gap 0.05 かつ --entry-time 09:05。"
+                     "lss未約定+始値が前日終値+5%%以上の日を9:05成行ショート(寄り天フェード)で拾うサブ戦略。"
+                     "この戦略の成績を lss(ショート)本体と分けて見るための既定設定")
+ap.add_argument("--by-month", action="store_true",
+                help="約定月ごとの成績を出す(GUFの月次頑健性チェック=本番投入前の最終確認)。"
+                     "全月プラス寄りなら本物。特定月だけプラスなら overfit の疑い")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -63,6 +70,15 @@ ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--no-cache", action="store_true")
 ap.add_argument("--refresh-cache", action="store_true")
 args = ap.parse_args()
+
+# GUF(Gap-Up Fade)プリセット: 大ギャップUP(+5%以上)を9:05成行ショートで拾うサブ戦略。
+# 明示指定が無い項目だけプリセット値に落とす(ユーザーが個別に上書きしたら尊重)。
+_GUF = bool(args.guf)
+if _GUF:
+    if args.min_gap is None:
+        args.min_gap = 0.05
+    if "--entry-time" not in sys.argv:
+        args.entry_time = "09:05"
 
 import backtest_limit_entry as ble
 from jquants_fetch import _load_pkl, _cache_path, MINUTE_CACHE_DIR, yf_to_jquants
@@ -250,8 +266,13 @@ def main():
     pairs = sorted(keep.keys())
     if args.limit > 0:
         pairs = pairs[:args.limit]
+    _LABEL = "GUF(Gap-Up Fade)" if _GUF else "#6b"
     print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / tf={args.tf} sm={args.sm} tm={args.tm} "
-          f"entry={args.entry_time} delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% / #6b=9:05成行ショート(本番同等)")
+          f"entry={args.entry_time} delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% "
+          f"min_gap={args.min_gap} / {_LABEL}=lss未約定→{args.entry_time}成行ショート(本番同等)")
+    if _GUF:
+        print("  ★GUF(Gap-Up Fade): lss(ロング候補)が未約定 かつ 始値が前日終値+5%以上 → 9:05成行ショート(寄り天フェード)。"
+              "lss本体とは別戦略として成績を測る。")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
@@ -315,9 +336,33 @@ def main():
 
     def _report(ts, title):
         print("\n" + "=" * 78)
-        print(f"【{title}】 #6b(9:05成行ショート) {len(ts)}件")
+        print(f"【{title}】 {_LABEL}({args.entry_time}成行ショート) {len(ts)}件")
         print("-" * 78)
         print("  " + _fmt(_stat([t["pnl"] for t in ts])))
+
+    def _month_report(ts, title):
+        """約定月ごとの成績(GUFの月次頑健性=本番投入前の最終確認)。"""
+        from collections import defaultdict
+        agg = defaultdict(list)
+        for t in ts:
+            try:
+                mk = pd.Timestamp(t["fd"]).strftime("%Y-%m")
+            except Exception:
+                continue
+            agg[mk].append(t["pnl"])
+        print("\n" + "=" * 78)
+        print(f"【{title}】約定月別  計{len(ts)}件（全月プラス寄り=本物 / 特定月だけ=overfit疑い）")
+        print("-" * 78)
+        _plus = _minus = 0
+        for mk in sorted(agg.keys()):
+            s = _stat(agg[mk])
+            if s and s["pnl"] > 0:
+                _plus += 1
+            elif s:
+                _minus += 1
+            print(f"  {mk}  {_fmt(s)}")
+        print("-" * 78)
+        print(f"  プラス月 {_plus} / マイナス月 {_minus} / 合計 {_plus + _minus}ヶ月")
 
     def _gbucket(g):
         p = g * 100
@@ -344,7 +389,8 @@ def main():
             print(f"  {b:<20} {_fmt(_stat(pn))}")
 
     _report(trades, f"BT{args.bt_min:.0f}以上・全期間(in-sample含む)")
-    _gap_report(trades, f"BT{args.bt_min:.0f}以上・全期間")
+    if not _GUF:
+        _gap_report(trades, f"BT{args.bt_min:.0f}以上・全期間")
     bm = args.base_month.strip()
     if bm:
         try:
@@ -352,13 +398,22 @@ def main():
             te = [t for t in trades if t["fd"] > be]
             _report([t for t in trades if t["fd"] <= be], f"TRAIN ≤{be.date()} (in-sample)")
             _report(te, f"TEST >{be.date()} (OOS)")
-            _gap_report(te, f"BT{args.bt_min:.0f}以上・TEST(OOS)")
+            if not _GUF:
+                _gap_report(te, f"BT{args.bt_min:.0f}以上・TEST(OOS)")
         except Exception as _e:
             print(f"[warn] base-month分割スキップ({_e})")
 
+    if args.by_month:
+        _month_report(trades, f"{_LABEL}・BT{args.bt_min:.0f}以上・全期間")
+
     print("\n" + "=" * 78)
-    print("判断: TEST(OOS)が明確にプラス(PF>1.1目安)なら #6b は上乗せ価値あり。")
-    print("  無差別は却下(全期間PF~0.96)。大ギャップUP(--min-gap 0.05等)に絞ると TRAIN/OOS両方+。")
+    if _GUF:
+        print("判断(GUF): 月次(--by-month)が全月プラス寄り かつ TEST(OOS)がPF>1.1なら本番投入候補。")
+        print("  GUFは lss(ショート)本体とは別戦略。lssの空振り日(未約定)に上乗せする独立エッジ。")
+        print("  live実装は『lss未約定 かつ 始値+5%以上 → 9:05成行ショート』を watcher/order_server に追加。")
+    else:
+        print("判断: TEST(OOS)が明確にプラス(PF>1.1目安)なら #6b は上乗せ価値あり。")
+        print("  無差別は却下(全期間PF~0.96)。大ギャップUP(--guf / --min-gap 0.05等)に絞ると TRAIN/OOS両方+。")
     print("  スリッページは現行lssと同基準で考慮しない(slip=0固定・ユーザー方針2026-08-01)。")
 
 
