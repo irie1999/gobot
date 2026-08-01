@@ -28,11 +28,14 @@
   稼ぐのは急落月のみの局面依存・高分散。単月0%勝率のテールリスク。
 - **lssへの上乗せも却下**: lss本体は13ヶ月連続プラス(§18)。9ヶ月負けるGUFを重ねると
   smoothingにならず分散を増やすだけ(lssが負けない=GUFがカバーする局面がない)。
+- **ロールオーバー確認フィルタ(--require-rollover)も却下**。「最初の足が陰線=崩れ始めの日だけ売る」で
+  救済を試みたが逆効果: 全期間+268k→**−184k**(PF1.16→0.69)、TRAIN/OOS両方マイナス、月次8勝→4勝10敗。
+  教訓: **フェードのエッジは『最初は上げ続けて(=最初の足が陽線=高値を付けて)から崩れる日』に宿る**。
+  陰線確認はこの一番おいしい反落パターンを丸ごと除外し、凡庸な設定だけ残った=件数と勝ち筋が同時に消えた。
+  質を上げようとするフィルタは全滅=GUFのエッジは薄く局面依存で救済不能。
 - **切り分けの成果**: lssの安定性は lss固有であり GUF由来ではない、が確認できた(当初の目的達成)。
-- ツール: `analyze_nofill_short.py`(`--guf` / `--by-month` / `--exclude-lss-overlap`)。再検証したい時のみ:
-  ```
-  set LSS_TRADES_CSV=lss_trades.csv & python analyze_nofill_short.py --bt-min 40 --guf --by-month --workers 8
-  ```
+- ツール: `analyze_nofill_short.py`(`--guf` / `--by-month` / `--require-rollover` / `--exclude-lss-overlap`)。
+  **GUFは完全終了。再検証不要**(蒸し返さない)。
 
 ## actionable な出口（研究の着地点メモ）
 
