@@ -63,9 +63,10 @@ ap.add_argument("--guf", action="store_true",
 ap.add_argument("--by-month", action="store_true",
                 help="約定月ごとの成績を出す(GUFの月次頑健性チェック=本番投入前の最終確認)。"
                      "全月プラス寄りなら本物。特定月だけプラスなら overfit の疑い")
-ap.add_argument("--keep-lss-overlap", action="store_true",
-                help="lssが9:05以降にその日約定する日(=GUFとlssが二重ショートになる日)もGUFに含める。"
-                     "既定OFF=除外(GUFとlssを完全排他にして成績を分離)。onにすると旧挙動(重複あり)")
+ap.add_argument("--exclude-lss-overlap", action="store_true",
+                help="lssが9:05以降にその日約定する日をGUFから除外する。既定OFF=含める(元の挙動)。"
+                     "GUFとlssは別価格の独立トレードなので二重計上ではない(足しても重複なし)。"
+                     "同一日に両者が発火した件数だけ知りたい場合の分析用オプション")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -228,11 +229,11 @@ def _collect(sym_yf, strat):
             stats["nodata"] += 1
             continue
         stats["nofill905"] += 1
-        # ★lssが9:05以降にその日約定する日(post安値<=トリガー)=GUFとlssが二重ショートになる日。
-        #   既定は除外してGUFとlssを完全排他に(「見分けたい」目的)。--keep-lss-overlap で旧挙動。
+        # lssが9:05以降にその日約定する日(post安値<=トリガー)。GUF(9:05成行)とlss(prev_close逆指値)は
+        #   別価格の独立トレードなので二重計上ではない → 既定は含める。--exclude-lss-overlap で除外可。
         if float(post["low"].min()) <= trigger:
             stats["overlap_late"] += 1
-            if not args.keep_lss_overlap:
+            if args.exclude_lss_overlap:
                 continue
         day_open = float(db["open"].iloc[0])
         entry05 = float(post["open"].iloc[0])
@@ -286,7 +287,7 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv8", args.tf, args.min_gap, args.entry_time, args.keep_lss_overlap,
+        "nfsv8", args.tf, args.min_gap, args.entry_time, args.exclude_lss_overlap,
         getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
@@ -340,8 +341,8 @@ def main():
               f"/ 未約定(=GUF候補) {agg_stats['nofill905']}({_nr:.0f}%) "
               f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
         _ovl = agg_stats.get("overlap_late", 0)
-        _ovl_state = "含める(旧挙動・二重ショート)" if args.keep_lss_overlap else "除外(GUF/lss完全排他)"
-        print(f"  うち lss が9:05以降に約定する日(GUF∩lss重複) {_ovl}件 → {_ovl_state}")
+        _ovl_state = "除外" if args.exclude_lss_overlap else "含める(別価格の独立トレード=二重計上ではない)"
+        print(f"  うち同一日にlssも9:05以降約定(GUFとlss両発火) {_ovl}件 → GUF側は{_ovl_state}")
         print("  ★1分足ありが全ペアに満たない=再取得完了後に再実行(--refresh-cache)して母数を揃えること。")
 
     if not trades:
