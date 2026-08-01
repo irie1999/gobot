@@ -225,7 +225,7 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv1", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
