@@ -63,6 +63,9 @@ ap.add_argument("--guf", action="store_true",
 ap.add_argument("--by-month", action="store_true",
                 help="約定月ごとの成績を出す(GUFの月次頑健性チェック=本番投入前の最終確認)。"
                      "全月プラス寄りなら本物。特定月だけプラスなら overfit の疑い")
+ap.add_argument("--keep-lss-overlap", action="store_true",
+                help="lssが9:05以降にその日約定する日(=GUFとlssが二重ショートになる日)もGUFに含める。"
+                     "既定OFF=除外(GUFとlssを完全排他にして成績を分離)。onにすると旧挙動(重複あり)")
 ap.add_argument("--days", type=int, default=500)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--qty", type=int, default=None)
@@ -170,7 +173,7 @@ def _collect(sym_yf, strat):
       (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
     out = []
     stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
-             "pair": 1, "has1m": 0}
+             "pair": 1, "has1m": 0, "overlap_late": 0}
     params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
     if not params:
         return out, stats
@@ -225,6 +228,12 @@ def _collect(sym_yf, strat):
             stats["nodata"] += 1
             continue
         stats["nofill905"] += 1
+        # ★lssが9:05以降にその日約定する日(post安値<=トリガー)=GUFとlssが二重ショートになる日。
+        #   既定は除外してGUFとlssを完全排他に(「見分けたい」目的)。--keep-lss-overlap で旧挙動。
+        if float(post["low"].min()) <= trigger:
+            stats["overlap_late"] += 1
+            if not args.keep_lss_overlap:
+                continue
         day_open = float(db["open"].iloc[0])
         entry05 = float(post["open"].iloc[0])
         if entry05 <= 0:
@@ -277,7 +286,8 @@ def main():
     import hashlib as _h, pickle as _pk
     _cd = Path(".nofillshort_cache")
     _key = _h.md5("|".join(str(x) for x in [
-        "nfsv7", args.tf, args.min_gap, args.entry_time, getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        "nfsv8", args.tf, args.min_gap, args.entry_time, args.keep_lss_overlap,
+        getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
         args.days, args.bt_min, args.limit, QTY,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
@@ -295,7 +305,7 @@ def main():
     if trades is None:
         trades = []
         agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
-                     "pair": 0, "has1m": 0}
+                     "pair": 0, "has1m": 0, "overlap_late": 0}
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(_collect, _jq_to_yf(s), t): (s, t) for (s, t) in pairs}
             done = 0
@@ -327,8 +337,11 @@ def main():
         print(f"  {args.tf}足あり {agg_stats['has1m']} / 全 {agg_stats['pair']} ペア"
               f"{'  ← ★分足データ不足(5mなら stock_5min / 1mなら再取得を確認)' if agg_stats['has1m'] < agg_stats['pair'] * 0.9 else ''}")
         print(f"  有効シグナル {_sig} / 9:05までに約定 {agg_stats['filled905']}({_fr:.0f}%) "
-              f"/ 未約定(=#6b候補) {agg_stats['nofill905']}({_nr:.0f}%) "
+              f"/ 未約定(=GUF候補) {agg_stats['nofill905']}({_nr:.0f}%) "
               f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
+        _ovl = agg_stats.get("overlap_late", 0)
+        _ovl_state = "含める(旧挙動・二重ショート)" if args.keep_lss_overlap else "除外(GUF/lss完全排他)"
+        print(f"  うち lss が9:05以降に約定する日(GUF∩lss重複) {_ovl}件 → {_ovl_state}")
         print("  ★1分足ありが全ペアに満たない=再取得完了後に再実行(--refresh-cache)して母数を揃えること。")
 
     if not trades:
