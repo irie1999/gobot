@@ -47,6 +47,18 @@ def _base_tag(path: str) -> str:
     return Path(path).stem
 
 
+def _full_base_month(path: str) -> str | None:
+    """ファイル名から YYYY-MM を返す。lss_proposal_2026-07.py → '2026-07'。"""
+    m = re.search(r"(\d{4}-\d{2})", Path(path).name)
+    return m.group(1) if m else None
+
+
+def _oos_start_date(yyyymm: str) -> str:
+    """YYYY-MM の翌月1日を返す (OOS 開始日 YYYY-MM-DD)。2026-07 → '2026-08-01'。"""
+    y, mo = int(yyyymm[:4]), int(yyyymm[5:7])
+    return f"{y + 1}-01-01" if mo == 12 else f"{y}-{mo + 1:02d}-01"
+
+
 def _load_selected(path: str) -> list[tuple]:
     """proposal ファイルを実行して SELECTED=[(code,name,strat),...] を取り出す。"""
     ns = runpy.run_path(path)
@@ -92,6 +104,7 @@ def main():
     out_code: dict = {}  # (正規化code, strat) -> 出力コード(元表記, .T付き優先)
     src_count: dict = {}  # (code, strat) -> 何ファイルに出たか
     src_bases: dict = {}  # (code, strat) -> [基準月ラベル,...] (出現ファイル順・重複なし)
+    src_yyyymm: dict = {}  # (code, strat) -> earliest YYYY-MM (OOS開始日算出用)
     for f in args.files:
         sel = _load_selected(f)
         _tag = _base_tag(f)
@@ -116,6 +129,11 @@ def main():
             _lst = src_bases.setdefault(k, [])
             if _tag not in _lst:
                 _lst.append(_tag)
+        _ym = _full_base_month(f)
+        if _ym:
+            for k in keys:
+                if k not in src_yyyymm or _ym < src_yyyymm[k]:
+                    src_yyyymm[k] = _ym
         per_file_keys.append(keys)
         print(f"[読込] {f}: {len(keys)}件 (code,strat) 基準月={_tag}")
 
@@ -133,6 +151,21 @@ def main():
 
     # BTスコア順は run 側で付くので、ここでは code,strat でソートして安定出力にするだけ
     merged = sorted(merged_keys, key=lambda k: (k[0], k[1]))
+
+    # START_DATES: 最新基準月のみで初めて選ばれた銘柄 → OOS開始日(翌月1日)。
+    # それ以外の銘柄(過去月でも選ばれていた)は制限なし。
+    # 目的: 新基準月を追加しても既存月の取引結果が変わらないようにする。
+    _latest_yyyymm = max((_full_base_month(f) for f in args.files if _full_base_month(f)),
+                         default=None)
+    start_dates: dict = {}
+    if _latest_yyyymm:
+        for k in merged:
+            if src_yyyymm.get(k) == _latest_yyyymm:  # 最新基準月が初出 = 新規銘柄
+                _cn = str(row_map[k][0]).upper().removesuffix(".T").split(".")[0]
+                start_dates[(_cn, k[1])] = _oos_start_date(_latest_yyyymm)
+    if start_dates:
+        print(f"[START_DATES] 最新基準月({_latest_yyyymm})のみ新規 {len(start_dates)}件 "
+              f"→ OOS開始日 {_oos_start_date(_latest_yyyymm)} 以降のみ集計")
     n_overlap = sum(1 for k in merged_keys if src_count.get(k, 0) >= 2)
     _crit = (f"min-votes={max(1, min(args.min_votes, n_files))}/{n_files}"
              if (args.min_votes and args.min_votes > 0) else f"mode={args.mode}")
@@ -168,6 +201,14 @@ def main():
         _cn = str(code).upper().removesuffix(".T").split(".")[0]
         _lab = "/".join(src_bases.get(k, []))
         lines.append(f'    ("{_cn}", "{strat}"): "{_lab}",')
+    lines.append("}")
+    # START_DATES: 最新基準月のみで初めて選ばれた銘柄の OOS 開始日。
+    # レポートはこの日付以降の取引のみ集計する(過去日への遡及を防ぐ)。
+    lines.append("")
+    lines.append("# (正規化コード, 戦略) -> OOS開始日(YYYY-MM-DD)。最新基準月のみ銘柄の遡及防止。")
+    lines.append("START_DATES = {")
+    for (cn, st), sd in sorted(start_dates.items()):
+        lines.append(f'    ("{cn}", "{st}"): "{sd}",')
     lines.append("}")
     # MERGED_BASES: マージした基準月(フル YYYY-MM)。レポートの「選定基準月」ヘッダに出す。
     _bmonths = []

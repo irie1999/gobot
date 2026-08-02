@@ -216,6 +216,7 @@ _LSS_TM: float = 1.0
 # merge_lss_proposals.py が出力する SOURCE_BASES を run_signals_holdout_all が流し込む。
 # 空なら基準月バッジは出ない(単一基準・後方互換)。
 _LSS_SRC_BASES: dict = {}
+_LSS_START_DATES: dict = {}   # (正規化コード, 戦略) -> OOS開始日文字列。run_signals が流し込む。
 
 
 def _lss_src_base_of(sym, strat):
@@ -7623,6 +7624,15 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 max_period = max(period_results.keys())
                 trade_log  = period_results[max_period].get("trade_log", [])
             seen: set     = set()
+            # START_DATES によるOOS開始日制限: 最新基準月のみ銘柄はその日付以前を除外。
+            # _eff_since = max(since, pair_oos_start_date) で取引フィルタを引き上げる。
+            _cn_key = str(sym).upper().removesuffix(".T").split(".")[0]
+            _pair_oos_date = None
+            if _LSS_START_DATES:
+                _sd = _LSS_START_DATES.get((_cn_key, strat))
+                if _sd:
+                    _pair_oos_date = pd.Timestamp(_sd).date()
+            _eff_since = max(since, _pair_oos_date) if _pair_oos_date else since
             for t in trade_log:
                 # 予算フィルタ: 約定値(entry_p)が範囲外の取引は「100株買えない」ので除外。
                 # 選定時 latest_price は範囲内でも、約定時に急騰した銘柄をここで弾く。
@@ -7701,7 +7711,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     "signal_dt_raw": _sdt_raw.date() if hasattr(_sdt_raw, "date") else _sdt_raw,
                 }
                 # サマリー用: config独立でカウント（発注中・他configとの重複は除外しない）
-                if reason != "発注中" and since <= exit_d <= until:
+                if reason != "発注中" and _eff_since <= exit_d <= until:
                     cfg_trades_map[cfg["label"]].append({**base, **extra})
                 # 取引リスト・総KPI用: 同一シグナルは最初のconfig分だけ
                 gkey = (sym, strat, signal_dt)
@@ -7709,10 +7719,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     continue
                 seen_global.add(gkey)
                 # 発注中はスコア帯統計から除外 (未約定のためpnl=0で歪む)
-                if reason != "発注中" and since <= exit_d <= until:
+                if reason != "発注中" and _eff_since <= exit_d <= until:
                     full_year_trades.append(base)
                 # 取引明細テーブルには発注中も表示
-                if since <= exit_d <= until:
+                if _eff_since <= exit_d <= until:
                     all_trades.append({**base, **extra})
 
             # ── 不約定(発注枠は消費/pnl=0)を予算シミュ用に別リストへ ──────────────
@@ -7728,7 +7738,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     if _n_edt is None:
                         continue
                     _n_ed = _n_edt.date() if hasattr(_n_edt, "date") else _n_edt
-                    if not (since <= _n_ed <= until):
+                    if not (_eff_since <= _n_ed <= until):
                         continue
                     _n_lp = float(_nt.get("order_limit", 0) or 0)
                     if _n_lp <= 0:

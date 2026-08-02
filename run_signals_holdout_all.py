@@ -945,6 +945,7 @@ if _using_fallback:
 # この節は完全にスキップされ、既存挙動は一切変わらない。
 _lss_proposal_file = getattr(_args, "lss_proposal", None)
 _lss_source_bases: dict = {}   # merge時の (code,strat)->基準月ラベル。import後に _na へ流す
+_lss_start_dates: dict = {}    # merge時の (code,strat)->OOS開始日。最新基準月のみ銘柄の遡及防止。
 if _args.long_stop_short and _lss_proposal_file:
     _CANON_STOP = {"MACDTF", "A7", "RSI2"}
     _CANON_BRK  = {"DON", "VOLTF", "MOM"}
@@ -954,6 +955,7 @@ if _args.long_stop_short and _lss_proposal_file:
         exec(Path(_lss_proposal_file).read_text(encoding="utf-8"), _pns)
         _sel = list(_pns.get("SELECTED", []))
         _lss_source_bases = dict(_pns.get("SOURCE_BASES") or {})
+        _lss_start_dates = dict(_pns.get("START_DATES") or {})
     except Exception as _e:
         print(f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e} → 既存選定のまま")
     if _sel:
@@ -1032,6 +1034,7 @@ if getattr(_args, "long_daytrade", False) and _ldt_proposal_file:
         exec(Path(_ldt_proposal_file).read_text(encoding="utf-8"), _pns)
         _sel = list(_pns.get("SELECTED", []))
         _lss_source_bases = dict(_pns.get("SOURCE_BASES") or {})
+        _lss_start_dates = dict(_pns.get("START_DATES") or {})
     except Exception as _e:
         print(f"[ldt] 提案ファイル読み込み失敗 {_ldt_proposal_file}: {_e} → 既存選定のまま")
     if _sel:
@@ -1202,6 +1205,9 @@ import nikkei_analysis as _na
 if _lss_source_bases:
     _na._LSS_SRC_BASES = _lss_source_bases
     print(f"[lss] 基準月ラベル {len(_lss_source_bases)}件をシグナル/明細に表示")
+if _lss_start_dates:
+    _na._LSS_START_DATES = _lss_start_dates
+    print(f"[lss] OOS開始日制限 {len(_lss_start_dates)}件 (最新基準月のみ銘柄の遡及防止)")
 
 # reload で上書きされた WATCHLIST を元に戻す
 _stop.WATCHLIST[:] = _orig_stop_wl
