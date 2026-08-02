@@ -20,6 +20,7 @@ import argparse
 import math
 import sys
 import webbrowser
+from _open_html import open_html
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -409,7 +410,7 @@ def check_today_main(target_date: date | None, no_browser: bool) -> None:
     out.write_text(html, encoding="utf-8")
     print(f"\nHTML: {out}")
     if not no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 def run_backtest(days: int, no_browser: bool) -> None:
@@ -454,7 +455,7 @@ def run_backtest(days: int, no_browser: bool) -> None:
     out.write_text(html, encoding="utf-8")
     print(f"\nHTML: {out}")
     if not no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 def main() -> None:

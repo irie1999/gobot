@@ -23,6 +23,7 @@ import subprocess
 import sys
 import io
 import webbrowser
+from _open_html import open_html
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -158,7 +159,7 @@ def main() -> None:
 
     # HTML を順番に開く
     for _, p in html_files:
-        webbrowser.open(p.resolve().as_uri())
+        open_html(p.resolve().as_uri())
 
 
 if __name__ == "__main__":

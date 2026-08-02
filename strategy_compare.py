@@ -24,6 +24,7 @@ import argparse
 import math
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -558,7 +559,7 @@ def _run_backtest_main(args) -> None:
     out.write_text(html, encoding="utf-8")
     print(f"\nHTML: {out.resolve()}")
     if not args.no_browser:
-        webbrowser.open(f"file://{out.resolve()}")
+        open_html(f"file://{out.resolve()}")
     print(f"{'='*65}\n")
 
 
@@ -1050,7 +1051,7 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool,
     out_html.write_text(rank_html, encoding="utf-8")
     print(f"  HTMLレポート（ランキング）: {out_html.resolve()}")
     if not no_browser:
-        webbrowser.open(f"file://{out_html.resolve()}")
+        open_html(f"file://{out_html.resolve()}")
 
     # ── バックテスト詳細HTML（365日の取引履歴＆エクイティカーブ）──
     sp_results_365: dict[str, list[dict]] = sp_multi.get(365, {})
@@ -1059,7 +1060,7 @@ def build_watchlist(top: int, min_pf: float, min_trades: int, no_browser: bool,
     out_bt_html.write_text(bt_html, encoding="utf-8")
     print(f"  HTMLレポート（バックテスト）: {out_bt_html.resolve()}")
     if not no_browser:
-        webbrowser.open(f"file://{out_bt_html.resolve()}")
+        open_html(f"file://{out_bt_html.resolve()}")
 
     print(f"\n{'='*65}\n")
 
