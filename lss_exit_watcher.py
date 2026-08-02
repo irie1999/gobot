@@ -391,10 +391,10 @@ def main() -> int:
                          "-X%%(X=_INTRADAY_5M_ENTRY_GAP_LIMIT=3%%)』のものを毎ループ取消(analyze_gap_bt "
                          "の OOS検証で>3%%超の深ギャップ約定は不利=バックテストと一致させる)。--execute時のみ実取消")
     ap.add_argument("--budget-cap", type=float, default=0.0,
-                    help="予算上限管理(over-subscribe運用)。約定済lss売建の累計(平均約定値×株数)が"
-                         "この額(円)に達したら、未発動のlss新規売り逆指値を全取消する。例4000000=400万で頭打ち。"
-                         "0(既定)=無効。予算より多め(BT降順)に発注しておき、埋まったら残りを自動キャンセルする用途。"
-                         "watcherは終日動くので全日キャップになる。--execute時のみ実取消")
+                    help="予算上限管理(over-subscribe運用)。同時保有lss売建の合計時価(平均約定値×残玉数)が"
+                         "この額(円)に達したら、未発動のlss新規売り逆指値を全取消する。例3000000=300万で頭打ち。"
+                         "0(既定)=無効。予算より多め(BT降順)に発注しておき、同時保有が上限に達したら残りを自動キャンセル。"
+                         "決済済みポジションは除外(同時保有金額=一瞬でも閾値超で発動)。--execute時のみ実取消")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -564,13 +564,14 @@ def _run(args, close_at, today) -> int:
             _gap_sweep = None
     else:
         print("  寄り深ギャップ取消: OFF (--no-cancel-gap)")
-    # 予算上限管理(over-subscribe運用): 約定累計が --budget-cap 到達で未発動lss逆指値を全取消。
+    # 予算上限管理(over-subscribe運用): 同時保有金額が --budget-cap 到達で未発動lss逆指値を全取消。
+    #   同時保有 = 現在の未決済lss売建の (平均約定値×残玉数) の合計。決済済みは除外。
     _budget_sweep = None
     _budget_done: dict = {}
     if args.budget_cap and args.budget_cap > 0:
         try:
             from cancel_gap_orders import _budget_sweep as _budget_sweep
-            print(f"  予算上限管理: ON (約定累計 ≥ {args.budget_cap/1e4:.0f}万 で未発動lss逆指値を"
+            print(f"  予算上限管理: ON (同時保有 ≥ {args.budget_cap/1e4:.0f}万 で未発動lss逆指値を"
                   f"全取消{'' if args.execute else ' / dry-run'})")
         except Exception as _e:
             print(f"  [!] 予算上限管理の読込失敗({_e}) → 無効")
@@ -589,13 +590,13 @@ def _run(args, close_at, today) -> int:
                 print(f"  [!] 深ギャップ取消でエラー(継続): {_e}")
         shorts = _lss_shorts(cli, lss_map, args.tol) if lss_map else []
 
-        # 予算上限管理: 約定済lss売建の累計(平均約定値×株数)が --budget-cap に達したら、
-        #   未発動のlss新規売り逆指値を全取消(=「400万埋まったら それ以外は取消」)。終日有効。
+        # 予算上限管理: 同時保有lss売建の合計時価(平均約定値×残玉数)が --budget-cap に達したら、
+        #   未発動のlss新規売り逆指値を全取消。決済済みポジションは除外(同時保有ベース)。終日有効。
         if _budget_sweep is not None and not before_open and not after_close:
             filled_notional = sum(_num(p.get("avg", 0)) * int(p.get("qty", 0))
                                   for p in shorts if _num(p.get("avg", 0)) > 0)
             _reached = filled_notional >= args.budget_cap
-            print(f"  {now:%H:%M:%S} 予算: 約定済 {filled_notional/1e4:.0f}万 / 上限 "
+            print(f"  {now:%H:%M:%S} 予算: 同時保有 {filled_notional/1e4:.0f}万 / 上限 "
                   f"{args.budget_cap/1e4:.0f}万{' ★到達→残り取消' if _reached else ''}")
             if _reached:
                 try:
