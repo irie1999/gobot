@@ -31,4 +31,4 @@ REM watcher places NO stop, then arms the stop from the next grid (09:05/09:10..
 REM Avoids getting wicked out by the opening bounce on the tight 0.1ATR stop
 REM (BT30+ realistic: win 48->54%, PF 1.63->1.95). Target/close stay active during
 REM the no-stop window. To disable for one run: .\watch --stop-delay-bars 0
-python lss_exit_watcher.py --execute --prod --all-dates --stop-delay-bars 1 %*
+python lss_exit_watcher.py --execute --prod --all-dates --budget-cap 4000000 --stop-delay-bars 1 %*
