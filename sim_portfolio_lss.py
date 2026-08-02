@@ -23,6 +23,15 @@ BTは lss_trades.csv の bt列(=レポート一致)、BT>=--bt-min。同一銘�
   set LSS_TRADES_CSV=lss_trades.csv & python sim_portfolio_lss.py --bt-min 40 --budget 4000000 --workers 8
   ... --multiples 1.0,1.5,2.0,2.5,3.0     # 倍率を振る
   ... --by-multiple                        # 倍率ごとの月次も出す
+
+厳密OOS(基準月選定→翌月のみ検証):
+  set LSS_TRADES_CSV=lss_trades.csv & python sim_portfolio_lss.py \
+      --proposal lss_proposal_2026-06.py --only-month 2026-07 \
+      --budget 4000000 --multiples 1.0,1.2,1.5 --workers 8
+  # --proposal: scan_lss_universe.py が出力した SELECTED ファイル
+  # --only-month: 基準月の翌月を指定 → 選定に使っていないデータで検証
+  # bt-min フィルターは無効(提案ファイルが既に選定済み)
+  # 複数基準月をまとめて確認したい場合は --only-month を外して全期間/TRAIN分割で比較
 """
 from __future__ import annotations
 
@@ -58,6 +67,15 @@ ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--no-cache", action="store_true")
 ap.add_argument("--refresh-cache", action="store_true")
+ap.add_argument("--proposal", type=str, default=None,
+                help="lss_proposal_YYYY-MM.py ファイル。SELECTED の (code,strat) ペアのみを対象にする。"
+                     "--bt-min フィルターより優先(提案ファイルが選定基準を持つ)。"
+                     "厳密OOS検証: --only-month <翌月> と組み合わせる。"
+                     "例: --proposal lss_proposal_2026-06.py --only-month 2026-07")
+ap.add_argument("--only-month", type=str, default=None,
+                help="この月(YYYY-MM)のトレードのみでシミュレーション。"
+                     "--proposal と組み合わせて「基準月選定→翌月のみ検証」の厳密OOSを測る。"
+                     "例: --proposal lss_proposal_2026-06.py --only-month 2026-07")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -112,6 +130,43 @@ def _load_bt_pairs():
             b = 0.0
         bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
     return {k: v for k, v in bt.items() if v >= args.bt_min}
+
+
+def _load_all_bt() -> dict:
+    """lss_trades.csv から全 (sym,strat) のBT値を返す(bt_min フィルターなし)。
+    proposal モードで BT順ソートの重みとして使う。未登録ペアは 0.0 で補完される。"""
+    p = Path(args.trades_csv)
+    if not p.exists():
+        return {}
+    bt: dict = {}
+    for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        sym = _norm(r.get("symbol") or r.get("code") or "")
+        strat = str(r.get("strategy") or "").strip()
+        if not sym or not strat:
+            continue
+        try:
+            b = float(r.get("bt") or 0)
+        except Exception:
+            b = 0.0
+        bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
+    return bt
+
+
+def _load_proposal_pairs(path: str) -> set[tuple[str, str]]:
+    """lss_proposal_YYYY-MM.py の SELECTED=[(code,name,strat),...] を読んで (sym,strat) の集合を返す。"""
+    import runpy
+    ns = runpy.run_path(path)
+    sel = ns.get("SELECTED")
+    if not sel:
+        print(f"[error] {path} に SELECTED が見つかりません", file=sys.stderr)
+        return set()
+    out: set = set()
+    for row in sel:
+        if len(row) >= 3:
+            code = _norm(str(row[0]))
+            strat = str(row[2]).strip()
+            out.add((code, strat))
+    return out
 
 
 def _collect(sym_yf, strat, bt):
@@ -276,22 +331,38 @@ def _fmt(a):
 
 
 def main():
-    keep = _load_bt_pairs()
-    if not keep:
-        print("[error] BT対象ペアが0。", file=sys.stderr); return
+    # ── ペア集合の決定 ────────────────────────────────────────────────────
+    if args.proposal:
+        prop_pairs = _load_proposal_pairs(args.proposal)
+        if not prop_pairs:
+            print("[error] proposal ファイルの SELECTED が空", file=sys.stderr); return
+        all_bt = _load_all_bt()
+        keep = {pair: all_bt.get(pair, 0.0) for pair in prop_pairs}
+        print(f"[info] --proposal {Path(args.proposal).name}: {len(keep)}ペア "
+              f"(bt-min フィルター無効・BT順ソートのみ lss_trades.csv 参照)")
+    else:
+        keep = _load_bt_pairs()
+        if not keep:
+            print("[error] BT対象ペアが0。", file=sys.stderr); return
+
     pairs = sorted(keep.keys())
     if args.limit > 0:
         pairs = pairs[:args.limit]
-    print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / 予算{args.budget/1e4:.0f}万 / "
+
+    mode_label = f"proposal={Path(args.proposal).name}" if args.proposal else f"BT{args.bt_min:.0f}以上"
+    only_month_label = f" / 検証月={args.only_month}" if args.only_month else ""
+    print(f"[info] {mode_label} {len(pairs)}ペア / 予算{args.budget/1e4:.0f}万 / "
           f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
           f"sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
-          f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}")
+          f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}{only_month_label}")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".simportfolio_cache")
+    _prop_tag = _h.md5(Path(args.proposal).read_bytes()).hexdigest()[:8] if args.proposal else "nopr"
     _key = _h.md5("|".join(str(x) for x in [
         "spv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, GAP_LIMIT,
         args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
+        _prop_tag,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
     ]).encode()).hexdigest()[:16]
     _cf = _cd / f"records_{_key}.pkl"
@@ -327,18 +398,35 @@ def main():
     if not records:
         print("[error] 注文0件。5分足/CSVを確認。", file=sys.stderr); return
 
+    # ── --only-month フィルター ───────────────────────────────────────────
+    om_period = None
+    if args.only_month:
+        try:
+            om_period = pd.Period(args.only_month, "M")
+            om_start = om_period.start_time.normalize()
+            om_end   = om_period.end_time.normalize()
+            before = len(records)
+            records = [r for r in records if om_start <= r["date"] <= om_end]
+            print(f"[info] --only-month {args.only_month}: {before}注文 → {len(records)}注文に絞り込み")
+        except Exception as e:
+            print(f"[warn] --only-month パース失敗({e})、フィルターをスキップ")
+
     n_fill = sum(1 for r in records if r["filled"])
     on = sum(r["order_notional"] for r in records)
     fn = sum(r["fill_notional"] for r in records)
     print("\n" + "=" * 96)
-    print("【全注文の約定率(母数チェック)】")
-    print(f"  注文 {len(records)}件 / 約定 {n_fill}件({n_fill/len(records)*100:.0f}%)  "
-          f"/ 金額ベース約定率 {fn/on*100:.0f}%(注文額{on/1e8:.2f}億 → 約定額{fn/1e8:.2f}億)")
+    hdr_suffix = f"  【OOS月: {args.only_month}】" if om_period else ""
+    print(f"【全注文の約定率(母数チェック)】{hdr_suffix}")
+    if on > 0:
+        print(f"  注文 {len(records)}件 / 約定 {n_fill}件({n_fill/len(records)*100:.0f}%)  "
+              f"/ 金額ベース約定率 {fn/on*100:.0f}%(注文額{on/1e8:.2f}億 → 約定額{fn/1e8:.2f}億)")
+    else:
+        print(f"  注文 {len(records)}件 / 約定 {n_fill}件  注文額0(価格レンジ外 or データなし)")
     print("  ※金額ベース約定率 ≒ 倍率1.0(予算ぴったり注文)時の稼働率の目安。ユーザー実測~50%と比較。")
 
     bm = args.base_month.strip()
     be = None
-    if bm:
+    if bm and not om_period:   # --only-month 指定時は TRAIN/TEST 分割を表示しない
         try:
             be = pd.Period(bm, "M").end_time.normalize()
         except Exception:
@@ -346,7 +434,11 @@ def main():
 
     # 倍率ごとにシミュレーション
     print("\n" + "=" * 96)
-    print(f"【倍率別サマリー】予算{args.budget/1e4:.0f}万・約定累計が予算到達で残り注文キャンセル(live上限管理)")
+    _mode_note = (f"proposal={Path(args.proposal).name}" if args.proposal
+                  else f"BT{args.bt_min:.0f}以上")
+    _month_note = f"  OOS月={args.only_month}" if om_period else ""
+    print(f"【倍率別サマリー】予算{args.budget/1e4:.0f}万・約定累計が予算到達で残り注文キャンセル(live上限管理)"
+          f"  [{_mode_note}{_month_note}]")
     hdr = "TRAIN/OOS" if be is not None else "全期間"
     for mult in MULTIPLES:
         days = _sim(records, mult)
