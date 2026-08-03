@@ -403,18 +403,23 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     _ja = {"stop": "損切り", "target": "利確", "close": "引け",
                            "hardstop": "ハード損切り"}.get(reason, reason)
                     # MAE=最大逆行(約定〜決済までに価格がショートに逆行して付けた最大の含み損%)。
-                    # 「この利確/引けを取るのに、どれだけの含み損を我慢する必要があったか」の指標。
                     _mae_hi = float(highs[ei:exit_idx + 1].max()) if exit_idx >= ei else float(highs[ei])
                     _mae_pct = (_mae_hi - entry_fill) / entry_fill * 100 if entry_fill > 0 else 0.0
+                    # MFE=最大有利到達点(ショート: どこまで価格が下落したか)。
+                    # target_dist = entry→target の距離。MFE_ratio = 何%到達したか(100%=利確水準)。
+                    _mfe_lo = float(lows[ei:exit_idx + 1].min()) if exit_idx >= ei else float(lows[ei])
+                    _target_dist = entry_fill - target_p  # ショート: 下方向が有利
+                    _mfe_ratio = (entry_fill - _mfe_lo) / _target_dist * 100 if _target_dist > 0 else 0.0
                     local_audit.append({
                         "date": str(fd), "sym": sym, "name": name, "strat": strat,
                         "reason": _ja, "entry": round(entry_fill, 1),
                         "stop": round(sp, 1), "target": round(target_p, 1),
-                        "MAE最大逆行%": round(_mae_pct, 1),   # 我慢が必要だった含み損の深さ
-                        "pnl_report_楽観": round(pnl_line, 0),   # レポート(.\daily)の表示値
+                        "MAE最大逆行%": round(_mae_pct, 1),
+                        "MFE利確到達率%": round(_mfe_ratio, 1),  # 100%=利確水準まで到達, 50%=半分まで
+                        "pnl_report_楽観": round(pnl_line, 0),
                         "pnl_現実": round(pnl_real, 0),
                         "pnl_保守": round(pnl_slip, 0),
-                        "現実−楽観": round(pnl_real - pnl_line, 0),  # マイナス=現実の方が悪い
+                        "現実−楽観": round(pnl_real - pnl_line, 0),
                     })
         # BTスコアで母集団を絞る(実際に投資する集団)。閾値未満は集計に含めない。
         if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
@@ -558,9 +563,19 @@ def main():
                       f"({_cut/len(wins)*100:.0f}%) ← {thr}%で切っていたら失っていた利益")
             print("     → 『無保護窓の含み損に耐えきれず切る』と、これらの勝ちを損切りに変えてしまう。")
             print("       保険のハード損切り(delay1+hard3%/5% の行)で、切る水準を機械化して比較可能。")
+        # ② 損切りトレードのMFE分析: 「利確方向に進んでから反転して損切られたか」
+        if len(stops) and "MFE利確到達率%" in adf.columns:
+            _mfe = stops["MFE利確到達率%"]
+            print("\n  ── 損切りトレードの利確方向への到達率(MFE) ──")
+            print(f"     中央値 {_mfe.median():.0f}% / 平均 {_mfe.mean():.0f}% / 最大 {_mfe.max():.0f}%")
+            for thr in (50, 70, 90, 100):
+                _n = int((_mfe >= thr).sum())
+                print(f"     利確水準の{thr}%以上到達してから損切り = {_n}件 "
+                      f"({_n/len(stops)*100:.1f}%)")
+            print("     → 100%超 = 一度利確水準を突破したが反転して損切り。")
         print(f"\n  合計pnl: レポート(楽観) {adf['pnl_report_楽観'].sum():+,.0f}円 / "
               f"現実 {adf['pnl_現実'].sum():+,.0f}円 / 保守 {adf['pnl_保守'].sum():+,.0f}円")
-        print(f"\n[出力] {apath}  (現実で悪い順。MAE列=我慢が必要だった含み損 / 現実−楽観=レポートとの差)")
+        print(f"\n[出力] {apath}  (現実で悪い順。MFE列=利確方向への到達率 / MAE列=逆行耐久量)")
 
 
 if __name__ == "__main__":
