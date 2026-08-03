@@ -41,13 +41,13 @@ ap.add_argument("--orders-csv", type=str, default=None,
                 help="全注文一覧(未約定・取消含む)のCSV保存先")
 ap.add_argument("--expected", type=str, default=None,
                 help="想定値CSV(列: symbol,entry,exit,pnl)。あれば乖離を並べて表示")
-ap.add_argument("--fee", type=float, default=None, help="片道手数料率(既定=FEE_PCT_ONE_WAY)")
+ap.add_argument("--fee", type=float, default=0.0, help="片道手数料率(既定=0。信用大口優遇プランは手数料無料)")
 ap.add_argument("--debug", action="store_true",
                 help="約定が0件のとき等、生の注文/Details構造を先頭数件ダンプして原因調査")
 ap.add_argument("--no-date", action="store_true", help="日付で絞らず全約定を集計")
 args = ap.parse_args()
 
-FEE = FEE_PCT_ONE_WAY if args.fee is None else args.fee
+FEE = args.fee
 _DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
 
 
