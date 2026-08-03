@@ -286,8 +286,8 @@
 
 ### 🔴 進行中・最優先
 - ~~**1分足取得を完走**~~ ✅ 完了 (2026-08-02)。compare_lss_stop_1m.py 最終実行 → delay1 維持確定(下記 #6e 参照)。
-- **extraデータ取得(消える前に)**: `python fetch_jquants_extra.py --days 760`
-  (空売り残高/信用残高/貸借区分/決算予定/空売り比率… 2年ローリングで消える)。軽いので先に確保。
+- ~~**extraデータ取得(消える前に)**~~ ✅ 完了 (2026-08-03)。`fetch_jquants_extra.py --days 760` 実行。
+  成功4件(calendar/earnings_cal/investor_types/master)。空売り残高系5件はプラン制限で403(取得不可)。
 - **今日の発注をverify_fills確認**: `python verify_fills.py --prod`
   (実発注=BT上位の一致・fill率・実損益。cache-lagバグ再発&実運用乖離チェック §18.7)。
 
