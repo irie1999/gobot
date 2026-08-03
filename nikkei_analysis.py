@@ -8703,6 +8703,49 @@ function switchTbd(id, tab) {{
   <td class="{sapc}" style="text-align:right;font-size:0.8rem">{savg:+,.0f}円</td>
 </tr>"""
 
+    # ── BT帯×戦略 クロス分析 (同BT帯内で戦略差がBT分布と独立か検証) ──
+    _strat_list = sorted({str(t.get("strategy", "")) for t in full_year_trades if t.get("strategy")})
+    strat_band_html = ""
+    for lo, hi, lbl_s, col in bt_buckets:
+        _bt_band_tr = [t for t in full_year_trades
+                       if t.get("rec_score") is not None and lo <= t["rec_score"] < hi]
+        if not _bt_band_tr:
+            continue
+        _bn, _bw, _bpnl, _bgp, _bgl, _bpf, _, _, _ = _band_stats(_bt_band_tr)
+        _bpf_s = "∞" if _bpf == float("inf") else f"{_bpf:.2f}"
+        _bpc = "profit" if _bpnl >= 0 else "loss"
+        strat_band_html += f"""<tr style="border-top:2px solid #334155">
+  <td style="color:{col};font-weight:700;text-align:left">{lbl_s}</td>
+  <td style="color:{col};font-weight:700">合計</td>
+  <td style="font-weight:700">{_bn}</td>
+  <td style="font-weight:700">{_bw/_bn*100:.1f}%</td>
+  <td style="font-weight:700">{_bpf_s}</td>
+  <td class="profit" style="text-align:right;font-weight:700">+{_bgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-weight:700">-{_bgl:,.0f}円</td>
+  <td class="{_bpc}"  style="text-align:right;font-weight:700">{_bpnl:+,.0f}円</td>
+</tr>"""
+        _se = []
+        for _strat in _strat_list:
+            _sub = [t for t in _bt_band_tr if str(t.get("strategy", "")) == _strat]
+            if not _sub:
+                continue
+            _sn, _sw, _sp, _sgp, _sgl, _spf, _, _, _ = _band_stats(_sub)
+            _se.append((_strat, _sn, _sw, _sp, _sgp, _sgl, _spf))
+        for _strat, _sn, _sw, _sp, _sgp, _sgl, _spf in sorted(_se, key=lambda x: -x[3]):
+            _spf_s = "∞" if _spf == float("inf") else f"{_spf:.2f}"
+            _spc   = "profit" if _sp >= 0 else "loss"
+            _spf_c = "#4ade80" if _spf >= 1.5 else ("#fbbf24" if _spf >= 1.0 else "#f87171")
+            strat_band_html += f"""<tr style="background:#0f172a">
+  <td></td>
+  <td style="color:#e2e8f0;font-size:0.85rem;font-weight:600;padding-left:16px">{_strat}</td>
+  <td style="color:#94a3b8;font-size:0.85rem">{_sn}</td>
+  <td style="color:#94a3b8;font-size:0.85rem">{_sw/_sn*100:.1f}%</td>
+  <td style="color:{_spf_c};font-size:0.85rem;font-weight:700">{_spf_s}</td>
+  <td class="profit" style="text-align:right;font-size:0.85rem">+{_sgp:,.0f}円</td>
+  <td class="loss"   style="text-align:right;font-size:0.85rem">-{_sgl:,.0f}円</td>
+  <td class="{_spc}"  style="text-align:right;font-size:0.85rem">{_sp:+,.0f}円</td>
+</tr>"""
+
     # ── ③ BT×WF クロス分析 (BT≥60内でWFスコア帯別比較) ──
     bt60_trades = [t for t in full_year_trades if (t.get("score") or 0) >= 60]
     wf_cross_bands = [
@@ -12304,7 +12347,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<div id="analtab_{_dseq}_liq" class="analysis-tab-pane">{_inv_liq}</div>'
             f'<div id="analtab_{_dseq}_moneysim" class="analysis-tab-pane">{_money_pane_body}</div>')
         _inv_analysis_ids = ['guard', 'liq', 'moneysim']
-    _analysis_tab_ids = ['summary', 'score', 'cross', 'rollfwd', 'factors', 'bt6069',
+    _analysis_tab_ids = ['summary', 'score', 'cross', 'strat_band', 'rollfwd', 'factors', 'bt6069',
                          'speed', 'extra'] + _inv_analysis_ids + \
         ['overlap', 'timing', 'preoos', 'maxhold', 'maxhold_cmp', 'pullback',
          'openconfirm', 'filltiming', 'stopwidth', 'opendir', 'drop', 'fadeshort',
@@ -12353,6 +12396,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="analysis-tab-btn active" onclick="switchAnalysisTab({_dseq},'summary')">スクリプト別</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'score')">① ② スコア別実績</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'cross')">③ ④ BT×WF・高BT銘柄</button>
+  <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'strat_band')">★ BT帯×戦略</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'rollfwd')">★ ロールフォワードOOS</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'factors')">★ 効く要素</button>
   <button class="analysis-tab-btn" onclick="switchAnalysisTab({_dseq},'bt6069')">⑤ BT60-69</button>
@@ -12541,6 +12585,28 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 <p class="footnote" style="margin-top:6px">
   <b>純OOS損益</b> = その銘柄を選定に使っていない期間（各holdout設定の直近除外窓）だけのトレード損益。WFと違い選定バイアスが無い唯一の本物のOOS。<br>
   「損益合計プラス・純OOSもプラス」= 本物 / 「損益合計プラスだが純OOSマイナス」= 直近で崩れている。窓(d)が長いほど信頼度が高い。
+</p>
+</div>
+
+<div id="analtab_{_dseq}_strat_band" class="analysis-tab-pane">
+<h2>BTスコア帯×戦略 クロス分析</h2>
+<p style="font-size:0.8rem;color:#64748b;margin-bottom:12px">
+  同BT帯内での戦略間比較。戦略効果がBT分布と独立しているかを検証（BT帯を揃えてもPFに差があれば戦略選別に意味がある）。
+</p>
+<table>
+  <thead><tr>
+    <th style="text-align:left">BT帯</th>
+    <th style="text-align:left">戦略</th>
+    <th>件数</th><th>勝率</th><th>PF</th>
+    <th style="color:#4ade80;text-align:right">利益</th>
+    <th style="color:#f87171;text-align:right">損失</th>
+    <th style="text-align:right">損益合計</th>
+  </tr></thead>
+  <tbody>{"<tr><td colspan='8' style='text-align:center;color:#64748b;padding:12px'>取引データなし</td></tr>" if not strat_band_html else strat_band_html}</tbody>
+</table>
+<p class="footnote" style="margin-top:8px">
+  各BT帯の「合計」行はその帯の全取引。その下の戦略行は同帯内のサブセット（損益降順）。<br>
+  同BT帯内で戦略間のPFに差があれば、戦略選別がBT選別に加えて有効な証拠。
 </p>
 </div>
 
