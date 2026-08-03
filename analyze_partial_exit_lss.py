@@ -72,9 +72,6 @@ def _parse_time(hhmm: str) -> int:
         return 0
 
 
-_mfe_for_trade._warned = False
-
-
 def _mfe_for_trade(row: pd.Series) -> float | None:
     """1トレードのMFE%を5分足から計算。取得失敗時はNone。"""
     sym = str(row.get("symbol", "")).strip()
@@ -124,6 +121,9 @@ def _mfe_for_trade(row: pd.Series) -> float | None:
     mfe = entry_p - min_low   # ショートで下がるほどプラス
     mfe_pct = mfe / target_dist * 100
     return mfe_pct
+
+
+_mfe_for_trade._warned = False
 
 
 def main():
