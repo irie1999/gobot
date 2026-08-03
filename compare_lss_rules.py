@@ -127,6 +127,16 @@ RULES = [
     {"name": "d1+BE@5R+target7R",        "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 5.0, "target_r": 7.0},
     {"name": "d1+sm0.15+BE@3R",          "stop_off": 1, "sm2": 0.15, "gap_skip": None, "be_r": 3.0},
     {"name": "d1+sm0.2+BE@3R",           "stop_off": 1, "sm2": 0.20, "gap_skip": None, "be_r": 3.0},
+
+    # ─── delay1なし + 早期利確 / BE移動ストップ (baseベース) ─────────────
+    # delay1の影響を切り離して、純粋に「早期利確/BE」の効果だけを測る。
+    {"name": "base+target2R",            "stop_off": 0, "sm2": None, "gap_skip": None, "target_r": 2.0},
+    {"name": "base+target3R",            "stop_off": 0, "sm2": None, "gap_skip": None, "target_r": 3.0},
+    {"name": "base+target5R",            "stop_off": 0, "sm2": None, "gap_skip": None, "target_r": 5.0},
+    {"name": "base+target7R",            "stop_off": 0, "sm2": None, "gap_skip": None, "target_r": 7.0},
+    {"name": "base+BE@3R",               "stop_off": 0, "sm2": None, "gap_skip": None, "be_r": 3.0},
+    {"name": "base+BE@5R",               "stop_off": 0, "sm2": None, "gap_skip": None, "be_r": 5.0},
+    {"name": "base+BE@7R",               "stop_off": 0, "sm2": None, "gap_skip": None, "be_r": 7.0},
 ]
 
 # --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
