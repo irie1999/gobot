@@ -282,6 +282,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
     mon = {}  # (rule,month)->pnl (by-month用)
     audit_rows: list = []   # --audit 指定ルールの全トレード(監査用)
     strat_contrib: dict = {}  # 戦略別 base ルール成績(BT合格済みのみ)
+    strat_band_contrib: dict = {}  # (戦略, BT帯下限) → base ルール成績(フィルター前・全BT記録)
     try:
         m5 = load_intraday(sym, days=args.days + 5, source=args.source)
     except Exception:
@@ -423,7 +424,16 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                         "現実−楽観": round(pnl_real - pnl_line, 0),
                     })
         # BTスコアで母集団を絞る(実際に投資する集団)。閾値未満は集計に含めない。
-        if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
+        bt_score_val = _bt_score(bt_trades)
+        # BT帯別記録: bt_min フィルター前に全ペアを帯ごとに集積(戦略効果の独立検証用)
+        _bt_band = (bt_score_val // 20) * 20  # 0/20/40/60/80...
+        _base_s = local["base(v13 sm0.1)"]
+        _band_key = (strat, _bt_band)
+        _sc2 = strat_band_contrib.setdefault(_band_key, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                                                          "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
+        for _k in _sc2:
+            _sc2[_k] += _base_s[_k]
+        if args.bt_min > 0 and bt_score_val < args.bt_min:
             continue
         for rname, a in local.items():
             t2 = agg[rname]
@@ -438,7 +448,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                                                "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
         for k in sc:
             sc[k] += base_s[k]
-    return {"agg": agg, "mon": mon, "audit": audit_rows, "strat_contrib": strat_contrib}
+    return {"agg": agg, "mon": mon, "audit": audit_rows, "strat_contrib": strat_contrib,
+            "strat_band_contrib": strat_band_contrib}
 
 
 def _pf(gp, gl):
@@ -471,7 +482,8 @@ def main():
                          "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon_total: dict = {}
     audit_all: list = []
-    strat_total: dict = {}  # 戦略別 base ルール集計(全銘柄合算)
+    strat_total: dict = {}       # 戦略別 base ルール集計(BT合格済み)
+    strat_band_total: dict = {}  # (戦略, BT帯下限) → base ルール集計(全BT帯)
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, code, v["name"], v["strats"]): code
                 for code, v in syms}
@@ -493,6 +505,11 @@ def main():
             for strat, sc in res.get("strat_contrib", {}).items():
                 s = strat_total.setdefault(strat, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
                                                     "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
+                for k in s:
+                    s[k] += sc[k]
+            for (strat, band), sc in res.get("strat_band_contrib", {}).items():
+                s = strat_band_total.setdefault((strat, band), {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                                                                  "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
                 for k in s:
                     s[k] += sc[k]
             if done % 50 == 0:
@@ -534,6 +551,31 @@ def main():
             print(f"{strat:<12}{s['n']:>6}{wr:>5.0f}%{_pf_s(s['gp'], s['gl']):>7}"
                   f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}"
                   f"{s['pnl_real']:>+13,.0f}")
+
+    # ── BTスコア帯×戦略別内訳 (baseルール, 全BT帯) ──
+    if strat_band_total:
+        print("\n" + "=" * 92)
+        print("【BTスコア帯×戦略別内訳】baseルール — 同BT帯内での戦略差を確認(戦略効果がBT分布と独立か)")
+        print("=" * 92)
+        print(f"{'BT帯':<9}{'戦略':<12}{'件数':>6}{'勝率':>6}{'PF':>7}{'利確':>5}{'損切':>5}{'引け':>5}"
+              f"{'net現実':>13}")
+        bands = sorted({b for (_, b) in strat_band_total})
+        for band in bands:
+            band_label = f"{band}~{band+19}"
+            entries = [(st, strat_band_total[(st, band)])
+                       for (st, b) in strat_band_total if b == band and strat_band_total[(st, band)]["n"] > 0]
+            if not entries:
+                continue
+            entries.sort(key=lambda x: -x[1]["pnl_real"])
+            first = True
+            for strat, s in entries:
+                n = s["n"]
+                wr = s["win"] / n * 100
+                label = band_label if first else ""
+                print(f"{label:<9}{strat:<12}{n:>6}{wr:>5.0f}%{_pf_s(s['gp'], s['gl']):>7}"
+                      f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}{s['pnl_real']:>+13,.0f}")
+                first = False
+            print()
 
     # ── 月別(--by-month) ──
     if args.by_month:
