@@ -2996,8 +2996,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                         + ('<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
                         + '</span></div>')
         else:
+            _ord100_btn = (
+                f'<span><button type="button" '
+                f'onclick="gobotOrder(this,\'{_scode}\',\'{_side}\',\'{s["strategy"]}\','
+                f'{s["order_p"]:.0f},{_ord_stop:.0f},{_ord_target:.0f},100,'
+                f'\'{s.get("rec_score", "") or ""}\',{round(100 * s["order_p"])})" '
+                f'style="display:inline-block;padding:4px 8px;background:#b45309;'
+                f'color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;'
+                f'white-space:nowrap">100株 発注</button></span>'
+            )
             _reg_btn = (f'<div style="display:flex;flex-direction:column;gap:2px;'
-                        f'align-items:center">{_ord_btn}{_reg_link}</div>')
+                        f'align-items:center">{_ord_btn}{_ord100_btn}{_reg_link}</div>')
         _liq_v = float(s.get("liquidity", 0) or 0)
         _liq_oku = _liq_v / 1e8
         if _liq_v <= 0:
