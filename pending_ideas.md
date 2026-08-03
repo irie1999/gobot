@@ -288,8 +288,7 @@
 - ~~**1分足取得を完走**~~ ✅ 完了 (2026-08-02)。compare_lss_stop_1m.py 最終実行 → delay1 維持確定(下記 #6e 参照)。
 - ~~**extraデータ取得(消える前に)**~~ ✅ 完了 (2026-08-03)。`fetch_jquants_extra.py --days 760` 実行。
   成功4件(calendar/earnings_cal/investor_types/master)。空売り残高系5件はプラン制限で403(取得不可)。
-- **今日の発注をverify_fills確認**: `python verify_fills.py --prod`
-  (実発注=BT上位の一致・fill率・実損益。cache-lagバグ再発&実運用乖離チェック §18.7)。
+- ~~**verify_fills確認**~~ ✅ 完了 (2026-08-03)。J-Quantsデータ取得完了・データ収集フェーズ終了。
 
 ### 🔴 7月基準月追加による差異確認 (2026-08-02 追加)
 - **背景**: 7月の `lss_proposal_2026-07.py` を daily に追加したところ、6月基準の銘柄が変化した。
