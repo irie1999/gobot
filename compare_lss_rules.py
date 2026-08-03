@@ -99,6 +99,34 @@ RULES = [
     # (ユーザー案: 一定時間=1本(5分)ラインを超えたら本当に損切る)。利確はタッチのまま。
     {"name": "損切り終値判定(soc)",       "stop_off": 0, "sm2": None, "gap_skip": None, "soc": True},
     {"name": "delay1+損切り終値",         "stop_off": 1, "sm2": None, "gap_skip": None, "soc": True},
+
+    # ─── ターゲット倍率スイープ (delay1ベース) ─────────────────────────
+    # target_r: 損切り幅(stop_dist)の何倍下を利確とするか。現行はsm=0.1,tm=1.0で約10R相当。
+    # 例: target_r=2 → 損切り幅の2倍下で利確(タイト)、target_r=7 → 7倍下(現行の約70%)
+    {"name": "d1+target2R",              "stop_off": 1, "sm2": None, "gap_skip": None, "target_r": 2.0},
+    {"name": "d1+target3R",              "stop_off": 1, "sm2": None, "gap_skip": None, "target_r": 3.0},
+    {"name": "d1+target5R",              "stop_off": 1, "sm2": None, "gap_skip": None, "target_r": 5.0},
+    {"name": "d1+target7R",              "stop_off": 1, "sm2": None, "gap_skip": None, "target_r": 7.0},
+
+    # ─── Break-even 移動ストップ (delay1ベース) ─────────────────────────
+    # be_r: MFEがstop_distのbe_r倍に達したらストップをエントリー価格(BE)に移動する。
+    # 例: be_r=2 → 損切り幅の2倍有利に動いたらBE。その後反転してもBEで脱出。
+    {"name": "d1+BE@2R",                 "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 2.0},
+    {"name": "d1+BE@3R",                 "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 3.0},
+    {"name": "d1+BE@5R",                 "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 5.0},
+    {"name": "d1+BE@7R",                 "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 7.0},
+
+    # ─── 損切り幅スイープ (delay1ベース) ────────────────────────────────
+    # sm2: 現行sm=0.1に対して損切り幅を変える。広いほど損切りが遅くなる。
+    {"name": "d1+sm0.15",                "stop_off": 1, "sm2": 0.15, "gap_skip": None},
+    {"name": "d1+sm0.2",                 "stop_off": 1, "sm2": 0.20, "gap_skip": None},
+    {"name": "d1+sm0.3",                 "stop_off": 1, "sm2": 0.30, "gap_skip": None},
+
+    # ─── 複合ルール ──────────────────────────────────────────────────────
+    {"name": "d1+BE@3R+target5R",        "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 3.0, "target_r": 5.0},
+    {"name": "d1+BE@5R+target7R",        "stop_off": 1, "sm2": None, "gap_skip": None, "be_r": 5.0, "target_r": 7.0},
+    {"name": "d1+sm0.15+BE@3R",          "stop_off": 1, "sm2": 0.15, "gap_skip": None, "be_r": 3.0},
+    {"name": "d1+sm0.2+BE@3R",           "stop_off": 1, "sm2": 0.20, "gap_skip": None, "be_r": 3.0},
 ]
 
 # --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
@@ -174,16 +202,35 @@ _STOP_SLIP = args.stop_slip   # 保守モデルの損切りスリッページ(�
 
 
 def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close,
-          hard_stop_p=None, stop_on_close=None):
+          hard_stop_p=None, stop_on_close=None, be_r=None, entry_fill=None, target_r=None):
     """約定バー ei から利確、stop_from(>=ei) からタイト損切りを first-touch。損切り優先。
     hard_stop_p(保険の広い損切り)を渡すと、約定と同時に(ei から)効く=無保護窓でも青天井を防ぐ。
-    価格上昇時は tight(低い) が先に当たるので、tight未武装(遅延中)のときだけ hard に到達する。
     損切り発火時の買い戻し3通り(line=楽観/real=窓埋め/slip=+スリッページ)。
+
+    be_r: MFEが stop_dist × be_r に達したらストップを entry_fill(BE)に移動する。
+          例: be_r=3 → 損切り幅の3倍分有利に動いたらBE移動。その後反転しても0損失で脱出。
+    entry_fill: 約定価格(be_r / target_r の基準点)。
+    target_r: stop_dist × target_r 下を利確価格とする。現行の target_p を上書き。
+              例: target_r=5 → 損切り幅の5倍下で利確(現行の約50%早め)。
+
     戻り: (reason, ex_line, ex_real, ex_slip, exit_idx)。"""
     n = len(highs)
-    # 損切りだけ終値判定(soc=True): 5分足が"終値"でライン超えたバーで発火=一瞬の上ヒゲでは損切らない。
-    # None=グローバル _ON_CLOSE に従う(既定=タッチ)。利確は従来どおり(_ON_CLOSE)。
     _soc = _ON_CLOSE if stop_on_close is None else stop_on_close
+
+    # be_r / target_r 用の stop_dist(short: stop_p > entry_fill)
+    stop_dist = 0.0
+    if entry_fill is not None and stop_p > entry_fill:
+        stop_dist = stop_p - entry_fill
+
+    # target_r 指定: ターゲット価格を stop_dist × R 下に上書き
+    if target_r is not None and stop_dist > 0 and entry_fill is not None:
+        target_p = float(ceil_to_tick(entry_fill - target_r * stop_dist))
+
+    # be_r: BEに移動するトリガー価格(短: entry_fill - be_r × stop_dist まで下落でBE発動)
+    be_trigger_p = None
+    if be_r is not None and stop_dist > 0 and entry_fill is not None:
+        be_trigger_p = entry_fill - be_r * stop_dist
+    eff_stop_p = stop_p   # BE発動後に entry_fill に更新される
 
     def _stop_fills(px, j):
         line = float(px)
@@ -191,14 +238,19 @@ def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close
         return line, real, real * (1.0 + _STOP_SLIP)
 
     for j in range(ei, n):
-        # タイト損切り(低い): 武装済み(j>=stop_from)なら上昇時に先に当たる
+        # BE移動: lows がトリガーを下抜けたらストップをBE(entry_fill)に引き上げ
+        if be_trigger_p is not None and lows[j] <= be_trigger_p:
+            eff_stop_p = entry_fill   # BEに移動(entry=1000なら損切りも1000)
+            be_trigger_p = None        # 一度だけ発動
+
+        # タイト損切り(eff_stop_p): 武装済み(j>=stop_from)なら上昇時に先に当たる
         if j >= stop_from:
-            sh = closes[j] >= stop_p if _soc else highs[j] >= stop_p
+            sh = closes[j] >= eff_stop_p if _soc else highs[j] >= eff_stop_p
             if sh:
-                px = float(closes[j]) if _soc else stop_p
+                px = float(closes[j]) if _soc else eff_stop_p
                 ln, rl, sl = _stop_fills(px, j)
                 return "stop", ln, rl, sl, j
-        # 保険のハード損切り(広い): ei から常時。tight未武装(無保護窓)で価格が hard に達したら発火
+        # 保険のハード損切り(広い): ei から常時
         if hard_stop_p is not None and highs[j] >= hard_stop_p:
             ln, rl, sl = _stop_fills(hard_stop_p, j)
             return "hardstop", ln, rl, sl, j
@@ -316,7 +368,9 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 hard_p = float(entry_fill * (1.0 + rule["hard"])) if rule.get("hard") else None
                 reason, ex_line, ex_real, ex_slip, exit_idx = _exit(
                     opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close,
-                    hard_stop_p=hard_p, stop_on_close=rule.get("soc"))
+                    hard_stop_p=hard_p, stop_on_close=rule.get("soc"),
+                    be_r=rule.get("be_r"), entry_fill=entry_fill,
+                    target_r=rule.get("target_r"))
                 pnl_line = short_pnl(entry_fill, ex_line, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_real = short_pnl(entry_fill, ex_real, reason, QTY, FEE_ONE_WAY, 0.0)
                 pnl_slip = short_pnl(entry_fill, ex_slip, reason, QTY, FEE_ONE_WAY, 0.0)
