@@ -42,9 +42,11 @@ ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--source", choices=["auto", "local"], default="local")
 args = ap.parse_args()
 
-from daytrade_data import load_intraday, split_by_day
+from daytrade_data import load_intraday, split_by_day, DATA_DIR
 
 THRESHOLDS = [float(x) for x in args.mfe_thresh.split(",") if x.strip()]
+
+print(f"[info] DATA_DIR = {DATA_DIR}  (存在: {DATA_DIR.exists()})", flush=True)
 
 
 def _load_csv() -> pd.DataFrame:
@@ -70,6 +72,9 @@ def _parse_time(hhmm: str) -> int:
         return 0
 
 
+_mfe_for_trade._warned = False
+
+
 def _mfe_for_trade(row: pd.Series) -> float | None:
     """1トレードのMFE%を5分足から計算。取得失敗時はNone。"""
     sym = str(row.get("symbol", "")).strip()
@@ -91,9 +96,15 @@ def _mfe_for_trade(row: pd.Series) -> float | None:
 
     try:
         m5 = load_intraday(sym, days=800, source=args.source)
-    except Exception:
+    except Exception as e:
+        if not _mfe_for_trade._warned:
+            print(f"[debug] load_intraday失敗 sym={sym}: {e}", file=sys.stderr, flush=True)
+            _mfe_for_trade._warned = True
         return None
     if m5 is None or m5.empty:
+        if not _mfe_for_trade._warned:
+            print(f"[debug] データなし sym={sym} date={entry_date_raw}", file=sys.stderr, flush=True)
+            _mfe_for_trade._warned = True
         return None
 
     by_day = split_by_day(m5)
