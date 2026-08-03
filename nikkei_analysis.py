@@ -9312,8 +9312,8 @@ function switchTbd(id, tab) {{
                             _t.get("rec_score", "") if _t.get("rec_score") is not None else _t.get("score", ""),
                             _t.get("wf_score", ""), _t.get("reason", ""),
                             _t.get("order_limit", ""), _t.get("entry_p", ""),
-                            _t.get("exit_p", ""), _t.get("stop_price", ""),
-                            _t.get("target_price", ""), _t.get("qty", ""),
+                            _t.get("exit_p", ""), _t.get("order_stop", _t.get("stop_price", "")),
+                            _t.get("order_target", _t.get("target_price", "")), _t.get("qty", ""),
                             _t.get("hold_days", ""), _t.get("liquidity", ""),
                             _t.get("mode", ""), _t.get("pnl", ""),
                             _t.get("entry_time", ""),   # 約定5分足の開始時刻 HH:MM(#9・約定時刻分析用)
