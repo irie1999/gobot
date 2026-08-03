@@ -362,12 +362,10 @@ def calc_position_size(entry_p: float, stop_p: float,
 
 def split_by_day(df: pd.DataFrame) -> dict:
     """DatetimeIndex の DataFrame を日付ごとに分割。"""
-    result = {}
-    for date in sorted(set(df.index.date)):
-        sub = df[df.index.date == date]
-        if len(sub) >= 5:
-            result[date] = sub
-    return result
+    if df.empty:
+        return {}
+    # groupby は O(n) — 旧実装の O(n_dates × n_rows) より大幅に高速
+    return {date: grp for date, grp in df.groupby(df.index.date) if len(grp) >= 5}
 
 
 def available_local_symbols() -> list[str]:
