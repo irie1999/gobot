@@ -107,6 +107,11 @@ def _mfe_for_trade(row: pd.Series) -> float | None:
     by_day = split_by_day(m5)
     day_bars = by_day.get(entry_date)
     if day_bars is None or day_bars.empty:
+        if not _mfe_for_trade._warned:
+            avail = sorted(by_day.keys())
+            print(f"[debug] 日付不一致 sym={sym} entry_date={entry_date}({type(entry_date).__name__}) "
+                  f"利用可能日={avail[:3]}...{avail[-3:] if len(avail)>3 else ''}", file=sys.stderr, flush=True)
+            _mfe_for_trade._warned = True
         return None
 
     # entry_time 以降のバーに限定(約定前のバーを除外)
