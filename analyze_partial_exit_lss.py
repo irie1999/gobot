@@ -276,11 +276,52 @@ def main():
     print(f"  損切り {total_stops}件中:")
     print(f"    R>=1(損切幅以上有利に動いた) : {cnt_1}件({cnt_1/total_stops*100:.1f}%)  損失: {pnl_1:+,.0f}円")
     print(f"    R>=2(ターゲット到達後に損切り): {cnt_2}件({cnt_2/total_stops*100:.1f}%)  損失: {pnl_2:+,.0f}円")
+    # ── 早期利確シミュレーション ──────────────────────────────────────
+    print("\n" + "=" * 65)
+    print("■ 早期利確シミュレーション（損切りトレードを早期利確に変えたら？）")
+    print("  前提: 各R地点まで達したらそのR倍の利益で確定（手数料誤差を無視）")
+    print("  alt_pnl = R × |actual_loss|  ※ stop_dist × qty = |pnl|を利用")
+    print("=" * 65)
+    print(f"  {'ルール':<22} {'対象件数':>8} {'代替損益合計':>15} {'現在比改善':>13}")
+    print("-" * 64)
+
+    actual_stop_pnl = valid["pnl"].sum()
+
+    for thr in [1.0, 1.2, 1.5, 1.8, 2.0]:
+        reached     = valid[valid["mfe_r"] >= thr]
+        not_reached = valid[valid["mfe_r"] <  thr]
+        alt_reached     = (reached["pnl"].abs() * thr).sum()
+        alt_not_reached = not_reached["pnl"].sum()
+        total_alt  = alt_reached + alt_not_reached
+        improvement = total_alt - actual_stop_pnl
+        label = f"R={thr:.1f}で早期利確"
+        if thr == 2.0:
+            label += "(現行目標)"
+        print(f"  {label:<22} {len(reached):>7}件  {total_alt:>+14,.0f}円  {improvement:>+12,.0f}円")
+
+    # break-even ストップ (R>=1.0 で BE に移動 → 最悪 0 で引き分け)
+    be_trades    = valid[valid["mfe_r"] >= 1.0]
+    no_be_trades = valid[valid["mfe_r"] <  1.0]
+    total_alt_be = no_be_trades["pnl"].sum()   # BE達した分は±0
+    improvement_be = total_alt_be - actual_stop_pnl
+    print(f"  {'R=1.0 BE移動ストップ':<22} {len(be_trades):>7}件  {total_alt_be:>+14,.0f}円  {improvement_be:>+12,.0f}円")
+
+    print(f"\n  ※ 現在の損切り損益合計: {actual_stop_pnl:+,.0f}円")
+    print(f"  ※ 勝ちトレードは含まない（損切り {total_stops} 件のみの試算）")
+
+    print("\n" + "=" * 65)
+    print("■ 実装の難易度")
+    print("=" * 65)
+    print("  A) ターゲット倍率を 2R → 1.5R に下げる（最も簡単）")
+    print("     → scan_lss_universe / nikkei_analysis のパラメータを1行変更")
+    print("     → ただし既存の勝ちトレードも1.5Rで切るので合計効果は別途検証必要")
     print()
-    print("  → R>=2 が多い場合の対策候補:")
-    print("     ・利確を手前(R=1.5-1.8 地点)に引き上げる(部分利確/早期利確)")
-    print("     ・トレーリングストップ: MFE > R1.0 でストップをbreak-evenに移動")
-    print("     ・delay1 の効果で損切りを遅らせる(既に適用済み)")
+    print("  B) R=1.0 到達でストップをBE移動（中程度）")
+    print("     → backtest_limit_entry / sameday5m_firsttouch を改修")
+    print("     → ライブ: lss_exit_watcher に「BE移動」ロジックを追加")
+    print()
+    print("  C) R=1.5 早期利確 + R=0.5でBE移動（最強だが複雑）")
+    print("     → 部分利確は現エンジン非対応。大改修が必要。")
 
 
 def _show_sample_debug(stops: pd.DataFrame, cache: dict) -> None:
