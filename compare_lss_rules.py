@@ -281,6 +281,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                        "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon = {}  # (rule,month)->pnl (by-month用)
     audit_rows: list = []   # --audit 指定ルールの全トレード(監査用)
+    strat_contrib: dict = {}  # 戦略別 base ルール成績(BT合格済みのみ)
     try:
         m5 = load_intraday(sym, days=args.days + 5, source=args.source)
     except Exception:
@@ -431,7 +432,13 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
         for k, v in local_mon.items():
             mon[k] = mon.get(k, 0.0) + v
         audit_rows.extend(local_audit)
-    return {"agg": agg, "mon": mon, "audit": audit_rows}
+        # 戦略別内訳: baseルールの成績をstrat単位で集積
+        base_s = local["base(v13 sm0.1)"]
+        sc = strat_contrib.setdefault(strat, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                                               "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
+        for k in sc:
+            sc[k] += base_s[k]
+    return {"agg": agg, "mon": mon, "audit": audit_rows, "strat_contrib": strat_contrib}
 
 
 def _pf(gp, gl):
@@ -464,6 +471,7 @@ def main():
                          "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon_total: dict = {}
     audit_all: list = []
+    strat_total: dict = {}  # 戦略別 base ルール集計(全銘柄合算)
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(_scan_symbol, code, v["name"], v["strats"]): code
                 for code, v in syms}
@@ -482,6 +490,11 @@ def main():
             for k, v in res["mon"].items():
                 mon_total[k] = mon_total.get(k, 0.0) + v
             audit_all.extend(res.get("audit", []))
+            for strat, sc in res.get("strat_contrib", {}).items():
+                s = strat_total.setdefault(strat, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
+                                                    "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
+                for k in s:
+                    s[k] += sc[k]
             if done % 50 == 0:
                 base = total["base(v13 sm0.1)"]
                 print(f"  ...{done}/{len(syms)}銘柄  base net(現実) {base['pnl_real']:+,.0f}円 "
@@ -507,6 +520,20 @@ def main():
     _pop = f"BT{args.bt_min:.0f}以上(実際に投資する集団)" if args.bt_min > 0 else "全選定ペア(BTフィルタ無し)"
     print(f"※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
           f"base vs delay1 の『net現実』差が期待できる現実的な改善幅。母集団={_pop}。")
+
+    # ── 戦略別内訳 (baseルール) ──
+    if strat_total:
+        print("\n" + "=" * 80)
+        print(f"【戦略別内訳】baseルール / 母集団={_pop}")
+        print("=" * 80)
+        print(f"{'戦略':<12}{'件数':>6}{'勝率':>6}{'PF':>7}{'利確':>5}{'損切':>5}{'引け':>5}"
+              f"{'net現実':>13}")
+        for strat, s in sorted(strat_total.items(), key=lambda x: -x[1]["pnl_real"]):
+            n = s["n"] or 1
+            wr = s["win"] / n * 100
+            print(f"{strat:<12}{s['n']:>6}{wr:>5.0f}%{_pf_s(s['gp'], s['gl']):>7}"
+                  f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}"
+                  f"{s['pnl_real']:>+13,.0f}")
 
     # ── 月別(--by-month) ──
     if args.by_month:
