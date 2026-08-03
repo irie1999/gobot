@@ -3,23 +3,19 @@
 #10: 「下落→利確届かず→反発損切り」= 損切りトレードの中で、ある程度ターゲットに向かって
 から反転して損切りになったものを定量化する。
 
-測定値: MFE%(最大有利変動 / ターゲット距離)
+MFE (Maximum Favorable Excursion) を R倍数で計測:
   lss はショートなので:
-    MFE    = entry_p - min(約定後の5分足 low)   ← 下がるほど有利
-    target_dist = entry_p - target_price         ← ターゲットまでの距離
-    MFE%   = MFE / target_dist * 100
+    MFE      = entry_p - min(約定後の5分足 low)   ← 下がるほど有利
+    stop_dist = exit_p - entry_p                  ← 実際の損切り幅(常に正)
+    MFE_R    = MFE / stop_dist                   ← 何R分有利に動いたか
 
-損切りトレードに対して MFE% を計算し、「X%以上まで達したが損切り」の件数・損失額を集計。
-
-前提: `lss_trades.csv` が存在(.\\daily で LSS_TRADES_CSV=lss_trades.csv して生成済み)。
-      stock_5min フォルダのローカル5分足データが使える環境で実行すること。
+  lss は通常 2R設定(target = 2×stop_dist)なので:
+    MFE_R >= 2.0 → ターゲット到達済みで損切り
+    MFE_R >= 1.0 → 損切り幅と同じだけ有利に動いてから損切り
+    MFE_R < 0    → 最初から逆行(一度も有利にならなかった)
 
 使い方:
-  set LSS_TRADES_CSV=lss_trades.csv
-  python analyze_partial_exit_lss.py
-  python analyze_partial_exit_lss.py lss_trades.csv --bt-min 30
-  python analyze_partial_exit_lss.py lss_trades.csv --bt-min 40 --workers 8
-  python analyze_partial_exit_lss.py lss_trades.csv --mfe-thresh 30,50,70,90
+  python analyze_partial_exit_lss.py lss_trades.csv --bt-min 30 --workers 8
 """
 from __future__ import annotations
 
@@ -31,20 +27,16 @@ from pathlib import Path
 
 import pandas as pd
 
-ap = argparse.ArgumentParser(description="lss損切りトレードのMFE%(利確手前到達度)分析")
+ap = argparse.ArgumentParser(description="lss損切りトレードのMFE R倍数分析")
 ap.add_argument("csv", nargs="?",
                 default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"),
-                help="lss_trades.csv のパス(既定=LSS_TRADES_CSV or lss_trades.csv)")
+                help="lss_trades.csv のパス")
 ap.add_argument("--bt-min", type=float, default=30.0, help="BTスコア下限(既定30)")
-ap.add_argument("--mfe-thresh", type=str, default="20,30,50,70,90",
-                help="集計するMFE%%閾値(カンマ区切り。既定=20,30,50,70,90)")
 ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--source", choices=["auto", "local"], default="local")
 args = ap.parse_args()
 
-from daytrade_data import load_intraday_batch, split_by_day, DATA_DIR
-
-THRESHOLDS = [float(x) for x in args.mfe_thresh.split(",") if x.strip()]
+from daytrade_data import load_intraday, split_by_day, DATA_DIR
 
 print(f"[info] DATA_DIR = {DATA_DIR}  (存在: {DATA_DIR.exists()})", flush=True)
 
@@ -52,19 +44,17 @@ print(f"[info] DATA_DIR = {DATA_DIR}  (存在: {DATA_DIR.exists()})", flush=True
 def _load_csv() -> pd.DataFrame:
     p = Path(args.csv)
     if not p.exists():
-        print(f"[error] {p} が見つかりません。先に .\\daily で LSS_TRADES_CSV=lss_trades.csv を実行してください。",
-              file=sys.stderr)
+        print(f"[error] {p} が見つかりません", file=sys.stderr)
         sys.exit(1)
     df = pd.read_csv(p, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
-    for col in ["entry_p", "stop_price", "target_price", "bt", "pnl"]:
+    for col in ["entry_p", "exit_p", "stop_price", "target_price", "bt", "pnl"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
 def _parse_time(hhmm: str) -> int:
-    """'09:05' -> 545 (minutes since midnight)"""
     try:
         h, m = str(hhmm).strip().split(":")[:2]
         return int(h) * 60 + int(m)
@@ -73,13 +63,9 @@ def _parse_time(hhmm: str) -> int:
 
 
 def _build_cache(symbols: list[str]) -> dict[str, dict]:
-    """銘柄リストの5分足を一括ロードして {sym: {date: DataFrame}} のキャッシュを返す。"""
     print(f"[キャッシュ構築] {len(symbols)}銘柄の5分足を読み込み中...", flush=True)
 
-    # load_intraday_batch はローカルpklをシリアル読込みするが1銘柄1回で済む
-    # 銘柄数が多い場合はThreadPoolExecutorで並列化
     def _load_one(sym: str):
-        from daytrade_data import load_intraday
         return sym, load_intraday(sym, days=800, source=args.source)
 
     raw: dict[str, pd.DataFrame | None] = {}
@@ -97,208 +83,223 @@ def _build_cache(symbols: list[str]) -> dict[str, dict]:
         else:
             failed += 1
 
-    print(f"[info] 5分足ロード完了: {len(cache)}/{len(symbols)}銘柄  "
-          f"(失敗/データなし: {failed}銘柄)", flush=True)
-
+    print(f"[info] 5分足ロード完了: {len(cache)}/{len(symbols)}銘柄  (失敗: {failed}銘柄)", flush=True)
     if cache:
-        # 最初のシンボルで利用可能日範囲を表示
         first_sym = next(iter(cache))
         keys = sorted(cache[first_sym].keys())
         if keys:
-            print(f"[info] データ例 {first_sym}: {keys[0]} 〜 {keys[-1]}  ({len(keys)}日)",
-                  flush=True)
+            print(f"[info] データ例 {first_sym}: {keys[0]} 〜 {keys[-1]}  ({len(keys)}日)", flush=True)
     return cache
 
 
-def _mfe_fast(row: pd.Series, cache: dict[str, dict]) -> float | None:
-    """キャッシュから1トレードのMFE%を計算(I/Oなし)。"""
-    sym = str(row.get("symbol", "")).strip()
-    entry_date_raw = str(row.get("entry_date", "")).strip()
-    entry_p = row.get("entry_p")
-    target_p = row.get("target_price")
-    entry_time = str(row.get("entry_time", "")).strip()
-
-    if not sym or not entry_date_raw or pd.isna(entry_p) or pd.isna(target_p):
-        return None
-
-    target_dist = entry_p - target_p   # ショートなので entry > target
-    if target_dist <= 0:
-        return None
-
+def _day_min_low(sym: str, entry_date_raw: str, entry_time: str, cache: dict) -> float | None:
+    """5分足から約定以降の日中最安値を返す。取得失敗時は None。"""
     by_day = cache.get(sym)
     if by_day is None:
         return None
-
     try:
         entry_date = pd.Timestamp(entry_date_raw).date()
     except Exception:
         return None
-
     day_bars = by_day.get(entry_date)
     if day_bars is None or day_bars.empty:
         return None
 
-    # entry_time 以降のバーに限定(約定前のバーを除外)
-    entry_min = _parse_time(entry_time) if entry_time and ":" in entry_time else 0
+    entry_min = _parse_time(entry_time) if entry_time and ":" in str(entry_time) else 0
     if entry_min > 0:
         bar_times = day_bars.index.map(lambda t: t.hour * 60 + t.minute)
         day_bars = day_bars[bar_times >= entry_min]
     if day_bars.empty:
         return None
 
-    min_low = day_bars["low"].min()
-    mfe = entry_p - min_low   # ショートで下がるほどプラス
-    return mfe / target_dist * 100
+    val = day_bars["low"].min()
+    return float(val) if pd.notna(val) else None
 
 
 def main():
     df = _load_csv()
     print(f"[info] 総トレード数: {len(df)}")
 
-    # BT下限フィルター
     if "bt" in df.columns:
         df = df[df["bt"] >= args.bt_min]
         print(f"[info] BT>={args.bt_min}: {len(df)}件")
 
-    # 損切りトレードのみ
     if "reason" not in df.columns:
         print("[error] reason 列がありません", file=sys.stderr)
         sys.exit(1)
+
     stops = df[df["reason"] == "損切り"].copy()
     all_done = df[~df["reason"].isin(["発注中", "保有中"])].copy()
 
     total_done = len(all_done)
     total_stops = len(stops)
     total_pnl = all_done["pnl"].sum() if "pnl" in all_done.columns else 0
-    stop_pnl = stops["pnl"].sum() if "pnl" in stops.columns else 0
+    stop_pnl  = stops["pnl"].sum()  if "pnl" in stops.columns  else 0
 
     print(f"\n■ 全決済トレード: {total_done}件  総損益: {total_pnl:+,.0f}円")
-    print(f"■ 損切りトレード: {total_stops}件 ({total_stops/total_done*100:.1f}%)  損切り損失計: {stop_pnl:+,.0f}円")
+    print(f"■ 損切りトレード: {total_stops}件 ({total_stops/total_done*100:.1f}%)  "
+          f"損切り損失計: {stop_pnl:+,.0f}円")
 
     if total_stops == 0:
         print("損切りトレードがゼロです。")
         return
 
-    # ── 銘柄別に5分足を一括キャッシュ(高速化の核心) ──
+    # ── 銘柄別5分足キャッシュ ──
     unique_syms = sorted(stops["symbol"].dropna().unique().tolist())
     cache = _build_cache(unique_syms)
-
     if not cache:
-        print("[warn] 5分足データが1銘柄もロードできませんでした。")
-        print(f"       DATA_DIR={DATA_DIR} に *.pkl ファイルが存在するか確認してください。")
+        print(f"[error] 5分足データが0銘柄。DATA_DIR={DATA_DIR} を確認してください。")
         return
 
-    # ── MFE計算(キャッシュ参照のみ、I/Oなし) ──
+    # ── MFE計算 ──────────────────────────────────────────────────────
     print(f"\n[MFE計算] {total_stops}件 × キャッシュ参照...", flush=True)
-    mfe_list: list[float | None] = []
-    date_miss = 0
+
+    mfe_r_list   : list[float | None] = []
+    mfe_abs_list : list[float | None] = []
+    ok = 0
+    fail_no_data = 0
+    fail_no_stop = 0
+
     for row in stops.itertuples(index=False):
-        r = pd.Series(row._asdict())
-        val = _mfe_fast(r, cache)
-        mfe_list.append(val)
-        if val is None:
-            # 5分足はあるが日付が見つからないケース
-            sym = str(row.symbol).strip()
-            if sym in cache:
-                try:
-                    ed = pd.Timestamp(str(row.entry_date)).date()
-                    if ed not in cache[sym]:
-                        date_miss += 1
-                except Exception:
-                    pass
+        sym        = str(getattr(row, "symbol", "")).strip()
+        entry_date = str(getattr(row, "entry_date", "")).strip()
+        entry_p    = float(getattr(row, "entry_p",  0) or 0)
+        exit_p     = float(getattr(row, "exit_p",   0) or 0)
+        entry_time = str(getattr(row, "entry_time", "") or "")
+
+        # stop_dist = 実際の損切り幅(short なので exit > entry → 正)
+        stop_dist = exit_p - entry_p
+
+        min_low = _day_min_low(sym, entry_date, entry_time, cache)
+        if min_low is None or entry_p <= 0:
+            fail_no_data += 1
+            mfe_r_list.append(None)
+            mfe_abs_list.append(None)
+            continue
+
+        mfe = entry_p - min_low   # 下がるほど正(ショート有利)
+
+        if stop_dist <= 0:
+            # exit_p <= entry_p: データ異常(short 損切りなら必ず exit > entry)
+            fail_no_stop += 1
+            mfe_r_list.append(None)
+            mfe_abs_list.append(None)
+            continue
+
+        mfe_r_list.append(mfe / stop_dist)
+        mfe_abs_list.append(mfe / entry_p * 100)
+        ok += 1
 
     stops = stops.copy()
-    stops["mfe_pct"] = mfe_list
-    valid = stops.dropna(subset=["mfe_pct"])
-    print(f"[info] MFE計算成功: {len(valid)}/{total_stops}件")
+    stops["mfe_r"]   = mfe_r_list
+    stops["mfe_pct"] = mfe_abs_list   # entry比%
 
-    if date_miss > 0:
-        print(f"[info] 日付不一致(5分足の期間外): {date_miss}件 "
-              f"(2024-07以前のトレードは5分足データなし)", flush=True)
+    print(f"[info] MFE計算成功: {ok}/{total_stops}件", flush=True)
+    if fail_no_data:
+        print(f"[info]  5分足なし/日付なし: {fail_no_data}件")
+    if fail_no_stop:
+        print(f"[info]  stop_dist異常(exit≤entry): {fail_no_stop}件")
 
+    valid = stops.dropna(subset=["mfe_r"])
     if valid.empty:
-        print("[warn] MFE計算可能なトレードがゼロ。")
-        print("       entry_date が 2024-07 以前か、stock_5min に該当銘柄がない可能性。")
-        # 診断: 最初の数件を表示
-        sample = stops.head(5)
-        print("\n[診断] 最初の5件の損切りトレード:")
-        for _, r in sample.iterrows():
-            sym = str(r.get("symbol", "")).strip()
-            ed_raw = str(r.get("entry_date", ""))
-            in_cache = sym in cache
-            date_ok = False
-            if in_cache:
-                try:
-                    ed = pd.Timestamp(ed_raw).date()
-                    date_ok = ed in cache[sym]
-                except Exception:
-                    pass
-            print(f"  {sym}  {ed_raw}  5分足キャッシュ:{in_cache}  日付OK:{date_ok}")
+        print("[warn] MFE計算できたトレードがゼロ。")
+        _show_sample_debug(stops, cache)
         return
 
-    # ── 全体分布 ──
+    # ── MFE R倍数の分布 ──────────────────────────────────────────────
     print("\n" + "=" * 65)
-    print("■ MFE% 分布 (損切りトレードがターゲット方向に何%進んだか)")
+    print("■ MFE Rレシオ分布  (lss 2R設定: R>=2.0 ≈ターゲット到達済み)")
+    print("  MFE_R = (entry - 日中最安値) / (exit - entry)")
+    print("        R<0: 最初から逆行    R=1: 損切幅と同じ有利動き")
+    print("        R=2: ターゲット相当  R>2: ターゲット超過")
     print("=" * 65)
-    print(f"  平均MFE%  : {valid['mfe_pct'].mean():.1f}%")
-    print(f"  中央値MFE%: {valid['mfe_pct'].median():.1f}%")
-    print(f"  最大MFE%  : {valid['mfe_pct'].max():.1f}%")
-    bins = [-999, 0, 20, 30, 50, 70, 90, 100, 9999]
-    labels = ["<0%(逆行のみ)", "0-20%", "20-30%", "30-50%", "50-70%", "70-90%", "90-100%", ">100%(超過)"]
+    print(f"  平均R  : {valid['mfe_r'].mean():.2f}")
+    print(f"  中央値R: {valid['mfe_r'].median():.2f}")
+    print(f"  最大R  : {valid['mfe_r'].max():.2f}")
+
+    bins   = [-99, 0, 0.5, 1.0, 1.5, 2.0, 3.0, 99]
+    labels = ["R<0(逆行のみ)", "0≤R<0.5", "0.5≤R<1", "1≤R<1.5", "1.5≤R<2", "2≤R<3", "R≥3(大幅超過)"]
     valid = valid.copy()
-    valid["mfe_bin"] = pd.cut(valid["mfe_pct"], bins=bins, labels=labels, right=False)
-    dist = valid.groupby("mfe_bin", observed=True)["pnl"].agg(["count", "sum"])
+    valid["r_bin"] = pd.cut(valid["mfe_r"], bins=bins, labels=labels, right=False)
+    dist = valid.groupby("r_bin", observed=True)["pnl"].agg(["count", "sum"])
     dist.columns = ["件数", "損益計"]
     dist["割合%"] = dist["件数"] / len(valid) * 100
-    print(f"\n{'区分':<18} {'件数':>6} {'割合%':>7} {'損益計':>12}")
+
+    print(f"\n{'区分':<16} {'件数':>6} {'割合%':>7} {'損益計':>13}")
     print("-" * 48)
     for label, row2 in dist.iterrows():
-        print(f"  {str(label):<16} {int(row2['件数']):>6} {row2['割合%']:>6.1f}% {row2['損益計']:>+12,.0f}円")
+        print(f"  {str(label):<14} {int(row2['件数']):>6} {row2['割合%']:>6.1f}% "
+              f"{row2['損益計']:>+12,.0f}円")
 
-    # ── 閾値別集計(「X%以上まで達したが損切り」) ──
+    # ── 閾値別集計 ──────────────────────────────────────────────────
     print("\n" + "=" * 65)
-    print("■ 「MFE >= X% 達したが損切り」= ターゲット手前で反転したトレード")
+    print("■ 「R >= X まで達したが損切り」= 有利に動いてから反転したトレード")
     print("=" * 65)
-    print(f"  {'閾値':>6}  {'件数':>6}  {'全損切%':>8}  {'損失合計':>12}  {'平均損失':>10}")
-    print("-" * 60)
-    for thr in THRESHOLDS:
-        subset = valid[valid["mfe_pct"] >= thr]
-        cnt = len(subset)
-        pct_of_stops = cnt / len(valid) * 100
-        pnl_sum = subset["pnl"].sum()
-        avg_pnl = pnl_sum / cnt if cnt > 0 else 0
-        print(f"  {thr:>5.0f}%  {cnt:>6}  {pct_of_stops:>7.1f}%  {pnl_sum:>+12,.0f}円  {avg_pnl:>+10,.0f}円")
+    print(f"  {'閾値':>6}  {'件数':>6}  {'全損切%':>8}  {'損失合計':>13}  {'平均損失':>10}")
+    print("-" * 62)
+    for thr in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
+        sub = valid[valid["mfe_r"] >= thr]
+        cnt = len(sub)
+        pct = cnt / len(valid) * 100
+        pnl_s = sub["pnl"].sum()
+        avg   = pnl_s / cnt if cnt > 0 else 0
+        label = f"R>={thr:.1f}"
+        label += " ≈目標到達" if thr >= 2.0 else ""
+        print(f"  {label:<16} {cnt:>6}  {pct:>7.1f}%  {pnl_s:>+13,.0f}円  {avg:>+10,.0f}円")
 
-    # ── 戦略別 (MFE>=50%) ──
+    # ── 戦略別 (R>=2.0: ターゲット到達) ──────────────────────────────
     print("\n" + "=" * 65)
-    print("■ 戦略別 (MFE >= 50%以上達して損切り)")
+    print("■ 戦略別 (R >= 2.0 = ターゲット到達済みで損切り)")
     print("=" * 65)
-    subset50 = valid[valid["mfe_pct"] >= 50.0]
-    if not subset50.empty and "strategy" in subset50.columns:
-        sg = subset50.groupby("strategy")["pnl"].agg(["count", "sum", "mean"])
+    sub2 = valid[valid["mfe_r"] >= 2.0]
+    if not sub2.empty and "strategy" in sub2.columns:
+        sg = sub2.groupby("strategy")["pnl"].agg(["count", "sum", "mean"])
         sg.columns = ["件数", "損益計", "平均"]
         sg = sg.sort_values("損益計")
-        print(f"  {'戦略':<10} {'件数':>6} {'損益計':>12} {'平均':>10}")
-        print("-" * 45)
-        for strat, row2 in sg.iterrows():
-            print(f"  {strat:<10} {int(row2['件数']):>6} {row2['損益計']:>+12,.0f}円 {row2['平均']:>+10,.0f}円")
+        print(f"  {'戦略':<10} {'件数':>6} {'損益計':>13} {'平均':>10}")
+        print("-" * 46)
+        for strat, r2 in sg.iterrows():
+            print(f"  {strat:<10} {int(r2['件数']):>6} {r2['損益計']:>+13,.0f}円 "
+                  f"{r2['平均']:>+10,.0f}円")
     else:
-        print("  (MFE>=50%の損切りなし)")
+        print("  (R>=2.0の損切りなし)")
 
-    # ── 結論メモ ──
-    cnt_50 = len(valid[valid["mfe_pct"] >= 50.0])
-    pnl_50 = valid[valid["mfe_pct"] >= 50.0]["pnl"].sum()
+    # ── 要約 ─────────────────────────────────────────────────────────
+    cnt_2 = len(valid[valid["mfe_r"] >= 2.0])
+    pnl_2 = valid[valid["mfe_r"] >= 2.0]["pnl"].sum()
+    cnt_1 = len(valid[valid["mfe_r"] >= 1.0])
+    pnl_1 = valid[valid["mfe_r"] >= 1.0]["pnl"].sum()
+
     print("\n" + "=" * 65)
     print("■ 要約")
     print("=" * 65)
-    print(f"  損切り {total_stops}件中 {cnt_50}件({cnt_50/total_stops*100:.1f}%)が")
-    print(f"  ターゲット距離の50%以上下落後に反転して損切り。")
-    print(f"  その損失合計: {pnl_50:+,.0f}円")
+    print(f"  損切り {total_stops}件中:")
+    print(f"    R>=1(損切幅以上有利に動いた) : {cnt_1}件({cnt_1/total_stops*100:.1f}%)  損失: {pnl_1:+,.0f}円")
+    print(f"    R>=2(ターゲット到達後に損切り): {cnt_2}件({cnt_2/total_stops*100:.1f}%)  損失: {pnl_2:+,.0f}円")
     print()
-    print("  → この数が多い場合の対策候補:")
-    print("     ・利確を手前(50-70%地点)に引き上げる(部分利確)")
+    print("  → R>=2 が多い場合の対策候補:")
+    print("     ・利確を手前(R=1.5-1.8 地点)に引き上げる(部分利確/早期利確)")
+    print("     ・トレーリングストップ: MFE > R1.0 でストップをbreak-evenに移動")
     print("     ・delay1 の効果で損切りを遅らせる(既に適用済み)")
-    print("     ・トレーリングストップ(MFE>X%で損切りをbreak-evenに移動)")
+
+
+def _show_sample_debug(stops: pd.DataFrame, cache: dict) -> None:
+    sample = stops.head(5)
+    print("\n[診断] 最初の5件の損切りトレード:")
+    for _, r in sample.iterrows():
+        sym      = str(r.get("symbol", "")).strip()
+        ed       = str(r.get("entry_date", ""))
+        ep       = r.get("entry_p")
+        xp       = r.get("exit_p")
+        in_cache = sym in cache
+        date_ok  = False
+        if in_cache:
+            try:
+                date_ok = pd.Timestamp(ed).date() in cache[sym]
+            except Exception:
+                pass
+        print(f"  {sym}  {ed}  entry_p={ep!r}  exit_p={xp!r}  "
+              f"cache={in_cache}  date={date_ok}")
 
 
 if __name__ == "__main__":
