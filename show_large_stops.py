@@ -10,7 +10,7 @@ import pandas as pd
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csvfile", nargs="?", default=None)
-    ap.add_argument("--threshold", type=float, default=5.0, help="損切り閾値%(デフォルト5.0)")
+    ap.add_argument("--threshold", type=float, default=5.0, help="損切り閾値%%(デフォルト5.0)")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
