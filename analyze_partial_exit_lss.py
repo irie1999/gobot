@@ -159,6 +159,30 @@ def main():
         print("損切りトレードがゼロです。")
         return
 
+    # ─── 1件目のトレースデバッグ ───────────────────────────────
+    _first = stops.iloc[0]
+    print(f"\n[TRACE] 最初の損切りトレード:")
+    print(f"  columns : {list(stops.columns)}")
+    print(f"  symbol  : {_first.get('symbol')!r}")
+    print(f"  entry_date: {_first.get('entry_date')!r}")
+    print(f"  entry_p : {_first.get('entry_p')!r}")
+    print(f"  target_price: {_first.get('target_price')!r}")
+    print(f"  entry_time: {_first.get('entry_time')!r}")
+    _sym = str(_first.get('symbol', '')).strip()
+    _m5t = load_intraday(_sym, days=800, source=args.source)
+    print(f"  load_intraday: {'OK ' + str(len(_m5t)) + '行' if _m5t is not None and not _m5t.empty else 'FAILED'}")
+    if _m5t is not None and not _m5t.empty:
+        _bdt = split_by_day(_m5t)
+        _keys = sorted(_bdt.keys())
+        print(f"  利用可能日数: {len(_keys)}日  先頭3日: {_keys[:3]}  末尾3日: {_keys[-3:]}")
+        try:
+            _ed = pd.Timestamp(str(_first.get('entry_date', ''))).date()
+            print(f"  entry_date解析: {_ed!r}  データ内に存在: {_ed in _bdt}")
+        except Exception as _e:
+            print(f"  entry_date解析エラー: {_e}")
+    print()
+    # ─── ここまでデバッグ ───────────────────────────────────────
+
     # 5分足でMFEを計算
     print(f"\n[MFE計算] {total_stops}件の損切りトレードについて5分足を読み込み中...")
     mfe_list: list[float | None] = [None] * total_stops
