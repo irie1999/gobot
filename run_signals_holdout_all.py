@@ -949,6 +949,11 @@ _lss_start_dates: dict = {}    # merge時の (code,strat)->OOS開始日。最新
 if _args.long_stop_short and _lss_proposal_file:
     _CANON_STOP = {"MACDTF", "A7", "RSI2"}
     _CANON_BRK  = {"DON", "VOLTF", "MOM"}
+    _lss_exclude = {s.strip().upper() for s in os.environ.get("LSS_EXCLUDE_STRATS", "").split(",") if s.strip()}
+    if _lss_exclude:
+        _CANON_STOP -= _lss_exclude
+        _CANON_BRK  -= _lss_exclude
+        print(f"[lss] 戦略除外(LSS_EXCLUDE_STRATS): {_lss_exclude}")
     _sel = []
     try:
         _pns: dict = {}
