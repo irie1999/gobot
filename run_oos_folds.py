@@ -46,6 +46,8 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--start-from", type=str, default="",
+                    help="訓練に使う最初の基準月 (例: --start-from 2025-09)")
     ap.add_argument("--fold-from", type=str, default="",
                     help="このOOS月以降のフォールドだけ実行 (例: 2026-03)")
     ap.add_argument("--fold-to", type=str, default="",
@@ -57,6 +59,10 @@ def main():
         [(p, extract_ym(p)) for p in Path(".").glob("lss_proposal_????-??.py") if extract_ym(p)],
         key=lambda x: x[1],
     )
+    if args.start_from:
+        dated = [(p, ym) for p, ym in dated if ym >= args.start_from]
+        print(f"--start-from {args.start_from} 以降の {len(dated)} 件を使用")
+
     if len(dated) < 2:
         print("[ERROR] lss_proposal_YYYY-MM.py が2件以上必要です。")
         sys.exit(1)
@@ -98,8 +104,10 @@ def main():
         print(f"[fold {i+1}] 訓練: {dated[0][1]}〜{train_end_ym}  OOS: {oos_ym}  long-base: {long_base}")
 
         # Step 1: merge (daily.bat の1行目と同じ)
+        # 1ファイルの場合は merge_lss_proposals.py が2件必要なので同じファイルを2回渡す
+        merge_files = train_files if len(train_files) >= 2 else train_files * 2
         subprocess.run(
-            [sys.executable, "merge_lss_proposals.py"] + train_files + ["--out", merged],
+            [sys.executable, "merge_lss_proposals.py"] + merge_files + ["--out", merged],
             check=True,
         )
 
