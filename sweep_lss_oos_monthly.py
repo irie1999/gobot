@@ -91,6 +91,10 @@ def _run_backtest(
     # daily.bat と条件を揃える: delay1 ON / BT閾値タブ40
     env.setdefault("LSS_STOP_DELAY_BARS", "1")
     env.setdefault("LSS_BT_TAB_MIN", "40")
+    # daily.bat が明示クリアする変数: 残留値で結果が変わるものを安全のためクリア
+    env.pop("LSS_REALISTIC_ENTRY", None)     # 未設定=True(現実的約定)が既定。=0の残留を防ぐ
+    env.pop("LSS_CLOSESTOP_RESWEEP", None)   # 未設定=重処理スキップ(高速)
+    env.pop("LSS_GUARD_ONLY", None)
     if raw_csv_out:
         env["LSS_OOS_RAW_CSV"] = raw_csv_out
         env["LSS_OOS_MONTH"] = oos_month
