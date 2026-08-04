@@ -77,13 +77,22 @@ def _run_backtest(
     extra_args: list[str],
     min_bt: int = 30,
     bt_tiers: str = "30,60",
+    raw_csv_out: str = "",
+    oos_month: str = "",
+    fold_num: int = 0,
+    train_months_label: str = "",
 ) -> bool:
-    """run_signals_holdout_all.py を実行し、OOS予算CSVを生成。成否を返す。"""
+    """run_signals_holdout_all.py を実行し、OOS予算CSV・生トレードCSVを生成。"""
     env = os.environ.copy()
     env["LSS_OOS_BUDGET_CSV"] = oos_csv_out
     env["LSS_OOS_BUDGET_DAYS"] = str(days)
     env["LSS_BUDGET_MIN_BT"] = str(min_bt)
     env["LSS_OOS_BUDGET_BT_TIERS"] = bt_tiers  # 複数BT層を1スイープで出力
+    if raw_csv_out:
+        env["LSS_OOS_RAW_CSV"] = raw_csv_out
+        env["LSS_OOS_MONTH"] = oos_month
+        env["LSS_OOS_FOLD"] = str(fold_num)
+        env["LSS_OOS_TRAIN_MONTHS"] = train_months_label
 
     cmd = [
         sys.executable,
@@ -193,6 +202,12 @@ def main():
     out_path = Path(out_csv)
     if out_path.exists():
         out_path.unlink()  # 既存ファイルは削除してゼロから書き直す
+    # 生トレードCSV: out_csv の _raw_ 版 (例: oos_sweep_20260804.csv → oos_raw_20260804.csv)
+    _stem = out_path.stem.replace("oos_sweep_", "oos_raw_").replace("sweep_", "raw_")
+    raw_csv = str(out_path.parent / f"{_stem}.csv")
+    raw_path = Path(raw_csv)
+    if raw_path.exists():
+        raw_path.unlink()
 
     # フォールドごとに実行
     all_rows: list[dict] = []
@@ -237,6 +252,7 @@ def main():
 
         # バックテスト実行
         tmp_csv = str(tmp_dir / f"tmp_{fold_label}.csv")
+        train_months_lbl = f"{dated[0][1]}〜{dated[i][1]}"
         ok = _run_backtest(
             proposal_path=merged_path,
             oos_csv_out=tmp_csv,
@@ -247,6 +263,10 @@ def main():
             extra_args=[],
             min_bt=args.min_bt,
             bt_tiers=args.bt_tiers,
+            raw_csv_out=raw_csv,
+            oos_month=oos_month,
+            fold_num=i + 1,
+            train_months_label=train_months_lbl,
         )
         if not ok:
             print(f"[WARN] バックテスト失敗: fold={fold_label}", flush=True)

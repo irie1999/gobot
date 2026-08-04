@@ -9941,6 +9941,71 @@ function switchTbd(id, tab) {{
         except Exception as _oce:
             print(f"[OOS予算CSV] 出力失敗: {_oce}", flush=True)
 
+    # OOS生トレードCSV出力 (env LSS_OOS_RAW_CSV=path)。
+    # BTスコア付き1行1トレードで出力 → sim_oos_budget.py で任意BT閾値をpost-hocに再シミュ可能。
+    # LSS_OOS_MONTH: OOSとして抽出する月(YYYY-MM)。スイープスクリプトが折ごとに設定。
+    # LSS_OOS_FOLD / LSS_OOS_TRAIN_MONTHS: フォールドメタデータ。CSVに列として含む。
+    _oos_raw_path = os.environ.get("LSS_OOS_RAW_CSV", "").strip()
+    _oos_month_filter = os.environ.get("LSS_OOS_MONTH", "").strip()
+    _oos_fold_label = os.environ.get("LSS_OOS_FOLD", "").strip()
+    _oos_train_label = os.environ.get("LSS_OOS_TRAIN_MONTHS", "").strip()
+    if (_oos_raw_path and _LSS_ORDER_MODE and _oos_month_filter and
+            days in _ho_days_set and cfg_filter is None and not symbol_filter and not strategy_filter):
+        try:
+            import csv as _rcsv
+            _rflds = ["fold", "train_months", "oos_month", "entry_date",
+                      "symbol", "name", "strategy", "bt_score", "entry_p", "pnl", "filled"]
+            _raw_rows = []
+            # 約定済みトレード (BT≥30 は _bt30_entry_sorted 構築時に保証済み)
+            for _rt in _bt30_entry_sorted:
+                _rym = str(_rt.get("entry_d_raw") or _rt.get("exit_d_raw") or "")[:7]
+                if _rym != _oos_month_filter:
+                    continue
+                _raw_rows.append({
+                    "fold": _oos_fold_label,
+                    "train_months": _oos_train_label,
+                    "oos_month": _oos_month_filter,
+                    "entry_date": str(_rt.get("entry_d_raw") or ""),
+                    "symbol": _rt.get("symbol", ""),
+                    "name": str(_rt.get("name", "")).replace(",", "、"),
+                    "strategy": _rt.get("strategy", ""),
+                    "bt_score": round(float(_eff_long_bt(_rt)), 1),
+                    "entry_p": round(float(_rt.get("entry_p", 0) or 0), 1),
+                    "pnl": round(float(_rt.get("pnl", 0) or 0), 0),
+                    "filled": 1,
+                })
+            # 不約定トレード(発注枠は消費・損益0)。通常予算モード専用。
+            for _rt in all_nofills:
+                _rym = str(_rt.get("entry_d_raw") or _rt.get("exit_d_raw") or "")[:7]
+                if _rym != _oos_month_filter:
+                    continue
+                _raw_rows.append({
+                    "fold": _oos_fold_label,
+                    "train_months": _oos_train_label,
+                    "oos_month": _oos_month_filter,
+                    "entry_date": str(_rt.get("entry_d_raw") or ""),
+                    "symbol": _rt.get("symbol", ""),
+                    "name": str(_rt.get("name", "")).replace(",", "、"),
+                    "strategy": _rt.get("strategy", ""),
+                    "bt_score": round(float(_eff_long_bt(_rt)), 1),
+                    "entry_p": round(float(_rt.get("entry_p", 0) or 0), 1),
+                    "pnl": 0.0,
+                    "filled": 0,
+                })
+            if _raw_rows:
+                _rappend = os.path.exists(_oos_raw_path)
+                with open(_oos_raw_path, "a" if _rappend else "w",
+                          newline="", encoding="utf-8-sig") as _rf:
+                    _rw = _rcsv.DictWriter(_rf, fieldnames=_rflds)
+                    if not _rappend:
+                        _rw.writeheader()
+                    _rw.writerows(_raw_rows)
+                print(f"[OOS生CSV] {_oos_raw_path} fold={_oos_fold_label} {_oos_month_filter}: "
+                      f"{len(_raw_rows)}行追記 (約定{sum(r['filled'] for r in _raw_rows)}/"
+                      f"不約定{sum(1-r['filled'] for r in _raw_rows)})", flush=True)
+        except Exception as _rce:
+            print(f"[OOS生CSV] 出力失敗: {_rce}", flush=True)
+
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
         from collections import OrderedDict
