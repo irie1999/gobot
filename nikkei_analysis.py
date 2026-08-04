@@ -12925,19 +12925,20 @@ function switchOvBt(uid, key) {{
 }}
 function switchDetailTab(seq, which) {{
   var target = document.getElementById('detail_'+seq+'_'+which);
-  var closing = target && target.classList.contains('active');
-  {_detail_tabs_js}.forEach(function(w) {{
-    var pane = document.getElementById('detail_'+seq+'_'+w);
-    if (pane) pane.classList.toggle('active', (!closing) && (w === which));
+  if (!target) return;
+  var closing = target.classList.contains('active');
+  var allPane = document.getElementById('detail_'+seq+'_all');
+  if (!allPane) return;
+  var container = allPane.parentNode;
+  var pfx = 'detail_'+seq+'_';
+  container.querySelectorAll('[id^="'+pfx+'"]').forEach(function(el) {{
+    el.classList.toggle('active', (!closing) && el === target);
   }});
-  var nav = document.getElementById('detail_'+seq+'_all');
-  if (nav) {{
-    var btns = nav.parentNode.querySelectorAll('.detail-tab-btn');
-    var order = {_detail_tabs_js};
-    btns.forEach(function(b, i) {{
-      b.classList.toggle('active', (!closing) && order[i] === which);
-    }});
-  }}
+  container.querySelectorAll('.detail-tab-btn').forEach(function(b) {{
+    var oc = b.getAttribute('onclick') || '';
+    var m = oc.match(/switchDetailTab\(\d+,'([^']+)'\)/);
+    if (m) b.classList.toggle('active', (!closing) && m[1] === which);
+  }});
 }}
 function toggleMG(hdr) {{
   // 月ヘッダー(this)を起点に、その直後の .mg-body を開閉する。
