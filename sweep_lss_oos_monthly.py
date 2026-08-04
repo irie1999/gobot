@@ -81,6 +81,7 @@ def _run_backtest(
     oos_month: str = "",
     fold_num: int = 0,
     train_months_label: str = "",
+    long_base: str = "2025-12-31",
 ) -> bool:
     """run_signals_holdout_all.py を実行し、OOS予算CSV・生トレードCSVを生成。"""
     env = os.environ.copy()
@@ -101,10 +102,12 @@ def _run_backtest(
         env["LSS_OOS_FOLD"] = str(fold_num)
         env["LSS_OOS_TRAIN_MONTHS"] = train_months_label
 
+    # daily.bat と完全に同一の引数構成
     cmd = [
         sys.executable,
         str(Path(__file__).parent / "run_signals_holdout_all.py"),
-        "--long-stop-short",
+        "--both",              # daily.bat: --both (ロング+lss)
+        "--no-mirror",         # daily.bat: --no-mirror
         "--no-browser",
         "--no-analysis",
         "--no-news",
@@ -113,12 +116,13 @@ def _run_backtest(
         "--force",
         "--days", str(days),
         "--lss-proposal", proposal_path,
+        "--long-base", long_base,  # daily.bat: --long-base 2025-12-31
         "--min-price", str(min_price),
         "--price-ranges", f"{max_price},0",
         "--workers", str(workers),
     ] + extra_args
 
-    print(f"  → run_signals_holdout_all.py --long-stop-short --no-serve --days {days} ...", flush=True)
+    print(f"  → run_signals_holdout_all.py --both --no-mirror --long-base {long_base} --days {days} ...", flush=True)
     # text=False で Windows SJIS コンソールの文字コードエラーを回避
     result = subprocess.run(cmd, env=env)
     return result.returncode == 0
@@ -158,6 +162,8 @@ def main():
                     help="スイープ開始フォールドのOOS月(YYYY-MM)。指定月以降のフォールドだけ実行。")
     ap.add_argument("--fold-to", type=str, default="",
                     help="スイープ終了フォールドのOOS月(YYYY-MM)。指定月以前のフォールドだけ実行。")
+    ap.add_argument("--long-base", type=str, default="2025-12-31",
+                    help="daily.bat の --long-base と同じ値。WF CSV の基準日(既定 2025-12-31)。")
     ap.add_argument("--min-bt", type=int, default=30,
                     help="予算シミュのベースBT下限(既定30)。環境変数 LSS_BUDGET_MIN_BT として渡す。")
     ap.add_argument("--bt-tiers", type=str, default="30,60",
@@ -274,6 +280,7 @@ def main():
             oos_month=oos_month,
             fold_num=i + 1,
             train_months_label=train_months_lbl,
+            long_base=args.long_base,
         )
         if not ok:
             print(f"[WARN] バックテスト失敗: fold={fold_label}", flush=True)
