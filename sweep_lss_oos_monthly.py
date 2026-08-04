@@ -88,6 +88,9 @@ def _run_backtest(
     env["LSS_OOS_BUDGET_DAYS"] = str(days)
     env["LSS_BUDGET_MIN_BT"] = str(min_bt)
     env["LSS_OOS_BUDGET_BT_TIERS"] = bt_tiers  # 複数BT層を1スイープで出力
+    # daily.bat と条件を揃える: delay1 ON / BT閾値タブ40
+    env.setdefault("LSS_STOP_DELAY_BARS", "1")
+    env.setdefault("LSS_BT_TAB_MIN", "40")
     if raw_csv_out:
         env["LSS_OOS_RAW_CSV"] = raw_csv_out
         env["LSS_OOS_MONTH"] = oos_month
