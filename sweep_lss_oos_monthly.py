@@ -89,6 +89,7 @@ def _run_backtest(
         "--no-analysis",
         "--no-news",
         "--no-risk",
+        "--no-serve",          # 発注サーバを起動しない(スイープ中は不要)
         "--force",
         "--days", str(days),
         "--lss-proposal", proposal_path,
@@ -97,8 +98,9 @@ def _run_backtest(
         "--workers", str(workers),
     ] + extra_args
 
-    print(f"  → {' '.join(cmd[:8])} ... (days={days})", flush=True)
-    result = subprocess.run(cmd, env=env, capture_output=False, text=True)
+    print(f"  → run_signals_holdout_all.py --long-stop-short --no-serve --days {days} ...", flush=True)
+    # text=False で Windows SJIS コンソールの文字コードエラーを回避
+    result = subprocess.run(cmd, env=env)
     return result.returncode == 0
 
 
