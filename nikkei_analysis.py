@@ -9870,49 +9870,67 @@ function switchTbd(id, tab) {{
     #   省略時はホールドアウト候補 {30,60,90,120,150,180}。
     _oos_csv_path = os.environ.get("LSS_OOS_BUDGET_CSV", "").strip()
     _oos_days_env = os.environ.get("LSS_OOS_BUDGET_DAYS", "").strip()
+    _oos_bt_tiers_env = os.environ.get("LSS_OOS_BUDGET_BT_TIERS", "").strip()
     _ho_days_set = (
         {int(x) for x in _oos_days_env.split(",") if x.strip().isdigit()}
         if _oos_days_env else {30, 60, 90, 120, 150, 180}
     )
+    # BT閾値リスト: 既定は _BUD_MIN_BT のみ。LSS_OOS_BUDGET_BT_TIERS="30,60" で複数層を1回のスイープで出力可。
+    _oos_bt_tiers = sorted({_BUD_MIN_BT} | (
+        {int(x) for x in _oos_bt_tiers_env.split(",") if x.strip().isdigit()}
+        if _oos_bt_tiers_env else set()
+    ))
     if (_oos_csv_path and _LSS_ORDER_MODE and days in _ho_days_set
             and cfg_filter is None and not symbol_filter and not strategy_filter):
         try:
             import csv as _ocsv
             _cfg_lbl = "/".join(c.get("label", "") for c in _PNL_CONFIGS) if _PNL_CONFIGS else ""
             _oos_rows = []
-            for _osim_name, _osim_trades in [
-                ("通常予算", _budget_entry_sorted),
-                ("約定額ベース", _budget_fill_entry_sorted),
-                ("ループ充填_全戦略", _budget_mlot_entry_sorted),
-                ("ループ充填_絞り", _budget_mlot_narrow_entry_sorted),
-            ]:
-                _oby_ym: dict = {}
-                for _ot in _osim_trades:
-                    if _ot.get("reason") in ("発注中", "保有中"):
-                        continue
-                    _oym = str(_ot.get("entry_d_raw") or _ot.get("exit_d_raw") or "")[:7]
-                    if not _oym:
-                        continue
-                    _oe = _oby_ym.setdefault(_oym, {"n": 0, "wins": 0, "pnl": 0.0})
-                    _oe["n"] += 1
-                    _opv = float(_ot.get("pnl", 0) or 0)
-                    _oe["pnl"] += _opv
-                    if _opv > 0:
-                        _oe["wins"] += 1
-                for _oym, _oe in sorted(_oby_ym.items()):
-                    _owr = round(_oe["wins"] / _oe["n"] * 100, 1) if _oe["n"] else 0.0
-                    _oos_rows.append({
-                        "holdout_days": days,
-                        "config": _cfg_lbl,
-                        "sim_type": _osim_name,
-                        "month": _oym,
-                        "trades": _oe["n"],
-                        "wins": _oe["wins"],
-                        "win_rate_pct": _owr,
-                        "pnl": round(_oe["pnl"], 0),
-                        "budget_man": _budget_man,
-                        "min_bt": _BUD_MIN_BT,
-                    })
+            for _obt in _oos_bt_tiers:
+                # _BUD_MIN_BTより高いBT閾値は再シミュ。低いか同値なら既存結果を使い回す。
+                if _obt > _BUD_MIN_BT:
+                    _e_s = _run_budget_sim(_obt)
+                    _fne_s = _run_budget_sim(_obt, fill_budget=True)
+                    _ml_s = _run_budget_sim(_obt, multi_lot=True)
+                    _mln_s = _run_budget_sim(_obt, strat_set=_STRAT_NARROW, multi_lot=True)
+                else:
+                    _e_s = _budget_entry_sorted
+                    _fne_s = _budget_fill_entry_sorted
+                    _ml_s = _budget_mlot_entry_sorted
+                    _mln_s = _budget_mlot_narrow_entry_sorted
+                for _osim_name, _osim_trades in [
+                    ("通常予算", _e_s),
+                    ("約定額ベース", _fne_s),
+                    ("ループ充填_全戦略", _ml_s),
+                    ("ループ充填_絞り", _mln_s),
+                ]:
+                    _oby_ym: dict = {}
+                    for _ot in _osim_trades:
+                        if _ot.get("reason") in ("発注中", "保有中"):
+                            continue
+                        _oym = str(_ot.get("entry_d_raw") or _ot.get("exit_d_raw") or "")[:7]
+                        if not _oym:
+                            continue
+                        _oe = _oby_ym.setdefault(_oym, {"n": 0, "wins": 0, "pnl": 0.0})
+                        _oe["n"] += 1
+                        _opv = float(_ot.get("pnl", 0) or 0)
+                        _oe["pnl"] += _opv
+                        if _opv > 0:
+                            _oe["wins"] += 1
+                    for _oym, _oe in sorted(_oby_ym.items()):
+                        _owr = round(_oe["wins"] / _oe["n"] * 100, 1) if _oe["n"] else 0.0
+                        _oos_rows.append({
+                            "holdout_days": days,
+                            "config": _cfg_lbl,
+                            "sim_type": _osim_name,
+                            "month": _oym,
+                            "trades": _oe["n"],
+                            "wins": _oe["wins"],
+                            "win_rate_pct": _owr,
+                            "pnl": round(_oe["pnl"], 0),
+                            "budget_man": _budget_man,
+                            "min_bt": _obt,
+                        })
             if _oos_rows:
                 _oflds = ["holdout_days", "config", "sim_type", "month",
                           "trades", "wins", "win_rate_pct", "pnl", "budget_man", "min_bt"]
@@ -9923,7 +9941,7 @@ function switchTbd(id, tab) {{
                     if not _oappend:
                         _ow.writeheader()
                     _ow.writerows(_oos_rows)
-                print(f"[OOS予算CSV] {_oos_csv_path} HO{days}d: {len(_oos_rows)}行追記", flush=True)
+                print(f"[OOS予算CSV] {_oos_csv_path} HO{days}d BT層{_oos_bt_tiers}: {len(_oos_rows)}行追記", flush=True)
         except Exception as _oce:
             print(f"[OOS予算CSV] 出力失敗: {_oce}", flush=True)
 
