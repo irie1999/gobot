@@ -19,6 +19,7 @@ lss提案ファイルを時系列に累積マージし、各月のOOS成績を1�
 """
 from __future__ import annotations
 import argparse
+import calendar
 import csv
 import os
 import re
@@ -36,6 +37,13 @@ def _extract_yyyymm(path: str) -> Optional[str]:
     """ファイル名から YYYY-MM を抽出。"""
     m = re.search(r"(\d{4}-\d{2})", Path(path).name)
     return m.group(1) if m else None
+
+
+def _month_end(yyyymm: str) -> str:
+    """YYYY-MM の月末日を返す。例: 2026-01 → 2026-01-31。"""
+    y, mo = int(yyyymm[:4]), int(yyyymm[5:7])
+    last = calendar.monthrange(y, mo)[1]
+    return f"{y}-{mo:02d}-{last}"
 
 
 def _next_month(yyyymm: str) -> str:
@@ -162,8 +170,9 @@ def main():
                     help="スイープ開始フォールドのOOS月(YYYY-MM)。指定月以降のフォールドだけ実行。")
     ap.add_argument("--fold-to", type=str, default="",
                     help="スイープ終了フォールドのOOS月(YYYY-MM)。指定月以前のフォールドだけ実行。")
-    ap.add_argument("--long-base", type=str, default="2026-06-30",
-                    help="daily.bat の --long-base と同じ値。WF CSV の基準日(既定 2026-06-30)。")
+    ap.add_argument("--long-base", type=str, default="",
+                    help="WF CSV の基準日。省略時はフォールドごとに訓練終了月の月末日を自動計算。"
+                         "例: --long-base 2026-06-30 で全フォールド固定。")
     ap.add_argument("--min-bt", type=int, default=30,
                     help="予算シミュのベースBT下限(既定30)。環境変数 LSS_BUDGET_MIN_BT として渡す。")
     ap.add_argument("--bt-tiers", type=str, default="30,60",
@@ -266,6 +275,9 @@ def main():
         # バックテスト実行
         tmp_csv = str(tmp_dir / f"tmp_{fold_label}.csv")
         train_months_lbl = f"{dated[0][1]}〜{dated[i][1]}"
+        # --long-base: 明示指定があればそれを使い、なければ訓練終了月の月末日を自動計算
+        fold_long_base = args.long_base if args.long_base else _month_end(dated[i][1])
+        print(f"[fold {i+1}] --long-base={fold_long_base}", flush=True)
         ok = _run_backtest(
             proposal_path=merged_path,
             oos_csv_out=tmp_csv,
@@ -280,7 +292,7 @@ def main():
             oos_month=oos_month,
             fold_num=i + 1,
             train_months_label=train_months_lbl,
-            long_base=args.long_base,
+            long_base=fold_long_base,
         )
         if not ok:
             print(f"[WARN] バックテスト失敗: fold={fold_label}", flush=True)
