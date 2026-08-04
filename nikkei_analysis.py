@@ -9864,6 +9864,65 @@ function switchTbd(id, tab) {{
     _budget_mlot_entry_by_date, _sorted_budget_mlot_entry_dates = _build_entry_grid(_budget_mlot_entry_sorted, "qml")
     _budget_mlot_narrow_entry_by_date, _sorted_budget_mlot_narrow_entry_dates = _build_entry_grid(_budget_mlot_narrow_entry_sorted, "qmln")
 
+    # OOS予算シミュCSV出力 (env LSS_OOS_BUDGET_CSV=path)。
+    # _tab5_pnl_html が各ホールドアウト設定(HO30d〜HO180d)で呼ばれるたびに追記する。
+    # days が holdout 候補値 {30,60,90,120,150,180} のいずれかで、
+    # フィルター無しのメイン呼び出しのみを対象にする。
+    _oos_csv_path = os.environ.get("LSS_OOS_BUDGET_CSV", "").strip()
+    _ho_days_set = {30, 60, 90, 120, 150, 180}
+    if (_oos_csv_path and _LSS_ORDER_MODE and days in _ho_days_set
+            and cfg_filter is None and not symbol_filter and not strategy_filter):
+        try:
+            import csv as _ocsv
+            _cfg_lbl = "/".join(c.get("label", "") for c in _PNL_CONFIGS) if _PNL_CONFIGS else ""
+            _oos_rows = []
+            for _osim_name, _osim_trades in [
+                ("通常予算", _budget_entry_sorted),
+                ("約定額ベース", _budget_fill_entry_sorted),
+                ("ループ充填_全戦略", _budget_mlot_entry_sorted),
+                ("ループ充填_絞り", _budget_mlot_narrow_entry_sorted),
+            ]:
+                _oby_ym: dict = {}
+                for _ot in _osim_trades:
+                    if _ot.get("reason") in ("発注中", "保有中"):
+                        continue
+                    _oym = str(_ot.get("entry_d_raw") or _ot.get("exit_d_raw") or "")[:7]
+                    if not _oym:
+                        continue
+                    _oe = _oby_ym.setdefault(_oym, {"n": 0, "wins": 0, "pnl": 0.0})
+                    _oe["n"] += 1
+                    _opv = float(_ot.get("pnl", 0) or 0)
+                    _oe["pnl"] += _opv
+                    if _opv > 0:
+                        _oe["wins"] += 1
+                for _oym, _oe in sorted(_oby_ym.items()):
+                    _owr = round(_oe["wins"] / _oe["n"] * 100, 1) if _oe["n"] else 0.0
+                    _oos_rows.append({
+                        "holdout_days": days,
+                        "config": _cfg_lbl,
+                        "sim_type": _osim_name,
+                        "month": _oym,
+                        "trades": _oe["n"],
+                        "wins": _oe["wins"],
+                        "win_rate_pct": _owr,
+                        "pnl": round(_oe["pnl"], 0),
+                        "budget_man": _budget_man,
+                        "min_bt": _BUD_MIN_BT,
+                    })
+            if _oos_rows:
+                _oflds = ["holdout_days", "config", "sim_type", "month",
+                          "trades", "wins", "win_rate_pct", "pnl", "budget_man", "min_bt"]
+                _oappend = os.path.exists(_oos_csv_path)
+                with open(_oos_csv_path, "a" if _oappend else "w",
+                          newline="", encoding="utf-8-sig") as _of:
+                    _ow = _ocsv.DictWriter(_of, fieldnames=_oflds)
+                    if not _oappend:
+                        _ow.writeheader()
+                    _ow.writerows(_oos_rows)
+                print(f"[OOS予算CSV] {_oos_csv_path} HO{days}d: {len(_oos_rows)}行追記", flush=True)
+        except Exception as _oce:
+            print(f"[OOS予算CSV] 出力失敗: {_oce}", flush=True)
+
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
         from collections import OrderedDict
