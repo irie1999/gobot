@@ -82,6 +82,10 @@ def main():
     ap.add_argument("--min-votes", type=int, default=0,
                     help="K-of-N投票: N個中この数以上のファイルに出た銘柄×戦略のみ採用。"
                          "1=union / N=intersection。0(既定)なら --mode に従う。")
+    ap.add_argument("--oos-all", action="store_true",
+                    help="最新基準月の翌月1日を全銘柄のOOS開始日として設定。"
+                         "例: 9月+10月マージ時 --oos-all → 全銘柄のOOS開始=2024-11-01。"
+                         "省略時(既定)は最新基準月のみで初出の銘柄だけに設定。")
     ap.add_argument("--out", type=str, default="lss_proposal_merged.py", help="出力ファイル名")
     args = ap.parse_args()
 
@@ -152,20 +156,29 @@ def main():
     # BTスコア順は run 側で付くので、ここでは code,strat でソートして安定出力にするだけ
     merged = sorted(merged_keys, key=lambda k: (k[0], k[1]))
 
-    # START_DATES: 最新基準月のみで初めて選ばれた銘柄 → OOS開始日(翌月1日)。
-    # それ以外の銘柄(過去月でも選ばれていた)は制限なし。
-    # 目的: 新基準月を追加しても既存月の取引結果が変わらないようにする。
+    # START_DATES: OOS開始日の設定。
+    # --oos-all: 全銘柄に最新基準月の翌月1日を設定(純粋OOS検証向け)。
+    # 省略時(既定): 最新基準月のみで初出の銘柄だけに設定(累積追加時の遡及防止)。
     _latest_yyyymm = max((_full_base_month(f) for f in args.files if _full_base_month(f)),
                          default=None)
     start_dates: dict = {}
     if _latest_yyyymm:
-        for k in merged:
-            if src_yyyymm.get(k) == _latest_yyyymm:  # 最新基準月が初出 = 新規銘柄
+        _oos_d = _oos_start_date(_latest_yyyymm)
+        if getattr(args, "oos_all", False):
+            # 全銘柄に同一のOOS開始日を設定
+            for k in merged:
                 _cn = str(row_map[k][0]).upper().removesuffix(".T").split(".")[0]
-                start_dates[(_cn, k[1])] = _oos_start_date(_latest_yyyymm)
-    if start_dates:
-        print(f"[START_DATES] 最新基準月({_latest_yyyymm})のみ新規 {len(start_dates)}件 "
-              f"→ OOS開始日 {_oos_start_date(_latest_yyyymm)} 以降のみ集計")
+                start_dates[(_cn, k[1])] = _oos_d
+            print(f"[START_DATES --oos-all] 全{len(start_dates)}件 "
+                  f"→ OOS開始日 {_oos_d} 以降のみ集計 (最新基準月={_latest_yyyymm})")
+        else:
+            for k in merged:
+                if src_yyyymm.get(k) == _latest_yyyymm:  # 最新基準月が初出 = 新規銘柄
+                    _cn = str(row_map[k][0]).upper().removesuffix(".T").split(".")[0]
+                    start_dates[(_cn, k[1])] = _oos_d
+            if start_dates:
+                print(f"[START_DATES] 最新基準月({_latest_yyyymm})のみ新規 {len(start_dates)}件 "
+                      f"→ OOS開始日 {_oos_d} 以降のみ集計")
     n_overlap = sum(1 for k in merged_keys if src_count.get(k, 0) >= 2)
     _crit = (f"min-votes={max(1, min(args.min_votes, n_files))}/{n_files}"
              if (args.min_votes and args.min_votes > 0) else f"mode={args.mode}")
