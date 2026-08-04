@@ -9887,17 +9887,13 @@ function switchTbd(id, tab) {{
             _cfg_lbl = "/".join(c.get("label", "") for c in _PNL_CONFIGS) if _PNL_CONFIGS else ""
             _oos_rows = []
             for _obt in _oos_bt_tiers:
-                # _BUD_MIN_BTより高いBT閾値は再シミュ。低いか同値なら既存結果を使い回す。
-                if _obt > _BUD_MIN_BT:
-                    _e_s = _run_budget_sim(_obt)
-                    _fne_s = _run_budget_sim(_obt, fill_budget=True)
-                    _ml_s = _run_budget_sim(_obt, multi_lot=True)
-                    _mln_s = _run_budget_sim(_obt, strat_set=_STRAT_NARROW, multi_lot=True)
-                else:
-                    _e_s = _budget_entry_sorted
-                    _fne_s = _budget_fill_entry_sorted
-                    _ml_s = _budget_mlot_entry_sorted
-                    _mln_s = _budget_mlot_narrow_entry_sorted
+                # OOS出力は常に _run_budget_sim を直接呼ぶ。
+                # 通常の予算シミュは max(_BUD_MIN_BT, _BT_TAB_MIN) で閾値が引き上がるが、
+                # OOSでは各 BT 層を正確に反映するため _BT_TAB_MIN を介さず直呼び。
+                _e_s = _run_budget_sim(_obt)
+                _fne_s = _run_budget_sim(_obt, fill_budget=True)
+                _ml_s = _run_budget_sim(_obt, multi_lot=True)
+                _mln_s = _run_budget_sim(_obt, strat_set=_STRAT_NARROW, multi_lot=True)
                 for _osim_name, _osim_trades in [
                     ("通常予算", _e_s),
                     ("約定額ベース", _fne_s),

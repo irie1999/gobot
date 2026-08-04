@@ -76,12 +76,14 @@ def _run_backtest(
     workers: int,
     extra_args: list[str],
     min_bt: int = 30,
+    bt_tiers: str = "30,60",
 ) -> bool:
     """run_signals_holdout_all.py を実行し、OOS予算CSVを生成。成否を返す。"""
     env = os.environ.copy()
     env["LSS_OOS_BUDGET_CSV"] = oos_csv_out
     env["LSS_OOS_BUDGET_DAYS"] = str(days)
     env["LSS_BUDGET_MIN_BT"] = str(min_bt)
+    env["LSS_OOS_BUDGET_BT_TIERS"] = bt_tiers  # 複数BT層を1スイープで出力
 
     cmd = [
         sys.executable,
@@ -141,8 +143,11 @@ def main():
     ap.add_argument("--fold-to", type=str, default="",
                     help="スイープ終了フォールドのOOS月(YYYY-MM)。指定月以前のフォールドだけ実行。")
     ap.add_argument("--min-bt", type=int, default=30,
-                    help="予算シミュのBT下限(既定30)。60を指定するとBT≥60の銘柄のみ対象。"
-                         "環境変数 LSS_BUDGET_MIN_BT として子プロセスに渡す。")
+                    help="予算シミュのベースBT下限(既定30)。環境変数 LSS_BUDGET_MIN_BT として渡す。")
+    ap.add_argument("--bt-tiers", type=str, default="30,60",
+                    help="OOS CSVに出力するBT閾値層(カンマ区切り、既定'30,60')。"
+                         "例: '30,50,60' で3層を1スイープで出力。後からCSVでフィルタ可。"
+                         "環境変数 LSS_OOS_BUDGET_BT_TIERS として渡す。")
     ap.add_argument("--keep-tmp", action="store_true",
                     help="一時マージファイル・一時CSVを削除せず残す(デバッグ用)。")
     args = ap.parse_args()
@@ -241,6 +246,7 @@ def main():
             workers=args.workers,
             extra_args=[],
             min_bt=args.min_bt,
+            bt_tiers=args.bt_tiers,
         )
         if not ok:
             print(f"[WARN] バックテスト失敗: fold={fold_label}", flush=True)
