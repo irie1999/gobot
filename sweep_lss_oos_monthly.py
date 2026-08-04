@@ -108,8 +108,8 @@ def _run_backtest(
         str(Path(__file__).parent / "run_signals_holdout_all.py"),
         "--both",              # daily.bat: --both (ロング+lss)
         "--no-mirror",         # daily.bat: --no-mirror
+        "--no-analysis",       # daily.bat: --no-analysis (5分足分析タブをスキップ=高速)
         "--no-browser",
-        "--no-analysis",
         "--no-news",
         "--no-risk",
         "--no-serve",          # 発注サーバを起動しない(スイープ中は不要)
@@ -162,8 +162,8 @@ def main():
                     help="スイープ開始フォールドのOOS月(YYYY-MM)。指定月以降のフォールドだけ実行。")
     ap.add_argument("--fold-to", type=str, default="",
                     help="スイープ終了フォールドのOOS月(YYYY-MM)。指定月以前のフォールドだけ実行。")
-    ap.add_argument("--long-base", type=str, default="2025-12-31",
-                    help="daily.bat の --long-base と同じ値。WF CSV の基準日(既定 2025-12-31)。")
+    ap.add_argument("--long-base", type=str, default="2026-06-30",
+                    help="daily.bat の --long-base と同じ値。WF CSV の基準日(既定 2026-06-30)。")
     ap.add_argument("--min-bt", type=int, default=30,
                     help="予算シミュのベースBT下限(既定30)。環境変数 LSS_BUDGET_MIN_BT として渡す。")
     ap.add_argument("--bt-tiers", type=str, default="30,60",
