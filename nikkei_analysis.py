@@ -9694,9 +9694,12 @@ function switchTbd(id, tab) {{
         _op = float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)
         return _op * float(_t.get("qty", 0) or 0)
 
-    def _run_budget_sim(_min_bt, strat_set=None):
+    def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
+        fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
+          不約定は予算を消費しない。約定価格×株数で累計し、超過したらbreak。
+          不約定でも枠を消費する発注額ベース(=既定)より1日の約定件数が増えやすい。
         """
         _out = []
         if not _LSS_ORDER_MODE:
@@ -9708,30 +9711,43 @@ function switchTbd(id, tab) {{
             if strat_set and _t.get("strategy", "").upper() not in strat_set:
                 continue
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
-        # 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。ただし同一銘柄同日に
-        # 約定注文があれば二重発注しない(1銘柄1注文/日)。
-        _fill_sym_day = {(_t.get("symbol"),
-                          str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
-                         for _t in _bt30_entry_sorted
-                         if not strat_set or _t.get("strategy", "").upper() in strat_set}
-        for _t in all_nofills:
-            if _eff_long_bt(_t) < _min_bt:
-                continue
-            if strat_set and _t.get("strategy", "").upper() not in strat_set:
-                continue
-            _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
-            if (_t.get("symbol"), _dk2) in _fill_sym_day:
-                continue
-            _by_day_bud[_dk2].append(_t)
+        if not fill_budget:
+            # 発注額ベース: 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。
+            # ただし同一銘柄同日に約定注文があれば二重発注しない(1銘柄1注文/日)。
+            _fill_sym_day = {(_t.get("symbol"),
+                              str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
+                             for _t in _bt30_entry_sorted
+                             if not strat_set or _t.get("strategy", "").upper() in strat_set}
+            for _t in all_nofills:
+                if _eff_long_bt(_t) < _min_bt:
+                    continue
+                if strat_set and _t.get("strategy", "").upper() not in strat_set:
+                    continue
+                _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+                if (_t.get("symbol"), _dk2) in _fill_sym_day:
+                    continue
+                _by_day_bud[_dk2].append(_t)
         for _dk in _by_day_bud:
             _cap = 0.0
             for _t in sorted(_by_day_bud[_dk], key=lambda x: -_eff_long_bt(x)):
-                _no = _order_notional(_t)
-                if _no <= 0 or _cap + _no > _budget_yen:
-                    continue   # 予算超過はスキップ(次の安い注文が入るか試す=貪欲)
-                _cap += _no
-                if _t.get("reason") != "約定せず":
-                    _out.append(_t)   # 約定分だけグリッド・損益に計上
+                if fill_budget:
+                    # 約定額ベース: 不約定はスキップ(予算消費なし)、約定価格×株数で管理
+                    if _t.get("reason") == "約定せず":
+                        continue
+                    _no = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
+                    if _no <= 0:
+                        continue
+                    if _cap + _no > _budget_yen:
+                        break  # watch発動→以降の注文をキャンセル
+                    _cap += _no
+                    _out.append(_t)
+                else:
+                    _no = _order_notional(_t)
+                    if _no <= 0 or _cap + _no > _budget_yen:
+                        continue   # 予算超過はスキップ(次の安い注文が入るか試す=貪欲)
+                    _cap += _no
+                    if _t.get("reason") != "約定せず":
+                        _out.append(_t)   # 約定分だけグリッド・損益に計上
         _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
         return _out
 
@@ -9745,6 +9761,9 @@ function switchTbd(id, tab) {{
     # A7/RSI2/VOLTF戦略限定版(決済日別タブの代替)。
     _STRAT_NARROW = {"A7", "RSI2", "VOLTF"}
     _budget_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW) if _LSS_ORDER_MODE else []
+    # 約定額ベース(watchで取り消し方式): 不約定は予算消費しない。全戦略・絞り版。
+    _budget_fill_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), fill_budget=True) if _LSS_ORDER_MODE else []
+    _budget_fill_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW, fill_budget=True) if _LSS_ORDER_MODE else []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -9785,6 +9804,8 @@ function switchTbd(id, tab) {{
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
     _budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates = _build_entry_grid(_budget_narrow_entry_sorted, "qn")
+    _budget_fill_entry_by_date, _sorted_budget_fill_entry_dates = _build_entry_grid(_budget_fill_entry_sorted, "qf")
+    _budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates = _build_entry_grid(_budget_fill_narrow_entry_sorted, "qfn")
 
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
@@ -12307,9 +12328,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _detail_tab_ids.append('budget')
         if _budget50_entry_sorted:
             _detail_tab_ids.append('budget50')
+        if _budget_fill_entry_sorted:
+            _detail_tab_ids.append('budget_fill')
     _detail_tab_ids.append('bt70entry')
     if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
         _detail_tab_ids.append('budget_narrow')
+        if _budget_fill_narrow_entry_sorted:
+            _detail_tab_ids.append('budget_fill_narrow')
     else:
         _detail_tab_ids.append('exit')
     _detail_tab_ids.append('bt70exit')
@@ -12373,6 +12398,46 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'DON/MOMを除いた高効率戦略の実力を確認できます（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget_narrow_entry_sorted)
             + _month_accordion_html(_budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates, _dseq, "qn")
+            + '</div>')
+
+    # 約定額ベース版(全戦略・watchで取り消し方式)。
+    _fill_liq_btn = ""
+    _fill_liq_pane = ""
+    if _LSS_ORDER_MODE and _budget_fill_entry_sorted:
+        _fill_liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_fill\')" '
+            f'style="border-color:#a78bfa">💳 約定{_budget_man}万円・全戦略 '
+            f'<span style="font-size:0.72rem;color:#c4b5fd">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _fill_liq_pane = (
+            f'<div id="detail_{_dseq}_budget_fill" class="detail-tab-pane">'
+            f'<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">'
+            f'💳 <b>約定額ベース（watchで取り消し方式）</b>。BT降順に発注し、'
+            f'累計<b>約定額</b>が<b>{_budget_man}万円</b>に達したら残り注文をキャンセル。'
+            f'<b>不約定の注文は予算消費しない</b>ため、隣の発注額ベースより1日の約定件数が多くなる傾向。'
+            f'左タブ(発注額ベース)との比較で不約定の影響を確認できます（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget_fill_entry_sorted)
+            + _month_accordion_html(_budget_fill_entry_by_date, _sorted_budget_fill_entry_dates, _dseq, "qf")
+            + '</div>')
+
+    # 約定額ベース版(A7/RSI2/VOLTF限定・watchで取り消し方式)。
+    _fill_narrow_liq_btn = ""
+    _fill_narrow_liq_pane = ""
+    if _LSS_ORDER_MODE and _budget_fill_narrow_entry_sorted:
+        _fill_narrow_liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_fill_narrow\')" '
+            f'style="border-color:#f97316">💳 約定{_budget_man}万円×A7/RSI2/VOLTF '
+            f'<span style="font-size:0.72rem;color:#fdba74">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _fill_narrow_liq_pane = (
+            f'<div id="detail_{_dseq}_budget_fill_narrow" class="detail-tab-pane">'
+            f'<p style="color:#fdba74;font-size:0.8rem;margin-bottom:10px">'
+            f'💳 <b>A7/RSI2/VOLTF限定 × 約定額ベース</b>。累計<b>約定額</b>が'
+            f'<b>{_budget_man}万円</b>に達したら残り注文をキャンセル（watch方式）。'
+            f'不約定は予算消費しないので、ギャップダウン不約定が多い日も予算を埋めやすい。'
+            f'隣タブ(発注額ベース)との比較で不約定ロスを定量確認（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget_fill_narrow_entry_sorted)
+            + _month_accordion_html(_budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates, _dseq, "qfn")
             + '</div>')
 
     # lss 調査タブ(⑦終値損切りに集約せず、調査ごとに分割)。ボタン・ペイン・tabs配列を用意。
@@ -12818,8 +12883,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_bt40liq_btn}
   {_bt50liq_btn}
+  {_fill_liq_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_narrow_liq_btn}
+  {_fill_narrow_liq_btn}
   {_exit_tab_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
@@ -12876,12 +12943,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 {_bt40liq_pane}
 {_bt50liq_pane}
+{_fill_liq_pane}
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt70_entry_sorted)}
 {_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
 </div>
 {_narrow_liq_pane}
+{_fill_narrow_liq_pane}
 {_exit_pane_or_narrow}
 <div id="detail_{_dseq}_bt70exit" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　決済日ごとに <b>目標達成 / 損切り / タイムカット</b> 別で表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
