@@ -54,6 +54,9 @@ ap.add_argument("--audit", type=str, default="",
 ap.add_argument("--stop-slip", type=float, default=0.005,
                 help="保守モデルの損切りスリッページ(既定0.5%%)。実スリッページが大きい想定なら "
                      "0.01(1%%)/0.02(2%%)に上げてストレス。② テストより損切りが大きくなる懸念の検証用")
+ap.add_argument("--strategies", type=str, default="",
+                help="カンマ区切りで戦略を絞る。例: A7,RSI2,VOLTF  (空=全戦略)。"
+                     "使用可能: MACD/A7/RSI2/DON/VOL/MOM/MACDTF/VOLTF など")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -164,7 +167,12 @@ def _load_selected() -> list[tuple]:
     if rows is None:
         sys.exit(f"[error] {path} に SELECTED がありません")
     out = [(str(r[0]), str(r[1]) if len(r) >= 3 else "", str(r[-1])) for r in rows if len(r) >= 2]
-    print(f"[選定] {path} から {len(out)} ペア読込")
+    if args.strategies:
+        allowed = {s.strip().upper() for s in args.strategies.split(",")}
+        out = [row for row in out if row[2].upper() in allowed]
+        print(f"[選定] {path} から {len(out)} ペア読込 (戦略フィルター: {args.strategies})")
+    else:
+        print(f"[選定] {path} から {len(out)} ペア読込")
     return out
 
 
