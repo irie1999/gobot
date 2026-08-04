@@ -9866,10 +9866,14 @@ function switchTbd(id, tab) {{
 
     # OOS予算シミュCSV出力 (env LSS_OOS_BUDGET_CSV=path)。
     # _tab5_pnl_html が各ホールドアウト設定(HO30d〜HO180d)で呼ばれるたびに追記する。
-    # days が holdout 候補値 {30,60,90,120,150,180} のいずれかで、
-    # フィルター無しのメイン呼び出しのみを対象にする。
+    # LSS_OOS_BUDGET_DAYS: 出力対象のdays値をカンマ区切りで指定(例: "365,730")。
+    #   省略時はホールドアウト候補 {30,60,90,120,150,180}。
     _oos_csv_path = os.environ.get("LSS_OOS_BUDGET_CSV", "").strip()
-    _ho_days_set = {30, 60, 90, 120, 150, 180}
+    _oos_days_env = os.environ.get("LSS_OOS_BUDGET_DAYS", "").strip()
+    _ho_days_set = (
+        {int(x) for x in _oos_days_env.split(",") if x.strip().isdigit()}
+        if _oos_days_env else {30, 60, 90, 120, 150, 180}
+    )
     if (_oos_csv_path and _LSS_ORDER_MODE and days in _ho_days_set
             and cfg_filter is None and not symbol_filter and not strategy_filter):
         try:
