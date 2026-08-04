@@ -9694,16 +9694,68 @@ function switchTbd(id, tab) {{
         _op = float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)
         return _op * float(_t.get("qty", 0) or 0)
 
-    def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False):
+    def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
           不約定は予算を消費しない。約定価格×株数で累計し、超過したらbreak。
           不約定でも枠を消費する発注額ベース(=既定)より1日の約定件数が増えやすい。
+        multi_lot=True: ループ充填モード。
+          BT降順に100株ずつ1周目を配置後、予算残があれば先頭から再度100株ずつ追加。
+          400万円に限りなく近づくまでループ。出力は株数n×100の合成トレード。
         """
         _out = []
         if not _LSS_ORDER_MODE:
             return _out
+
+        if multi_lot:
+            # ── ループ充填モード ──────────────────────────────────────
+            # 約定済みトレードのみ対象(不約定は実際に買えないので除外)。
+            _by_day_ml: dict = _dd(list)
+            for _t in _bt30_entry_sorted:
+                if _eff_long_bt(_t) < _min_bt:
+                    continue
+                if strat_set and _t.get("strategy", "").upper() not in strat_set:
+                    continue
+                if _t.get("reason") == "約定せず":
+                    continue
+                _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
+                _by_day_ml[_dk].append(_t)
+            for _dk, _day_trades in _by_day_ml.items():
+                _sorted_day = sorted(_day_trades, key=lambda x: -_eff_long_bt(x))
+                if not _sorted_day:
+                    continue
+                # 各トレードの単価(100株あたりコスト)
+                _units = {id(_t): float(_t.get("entry_p", 0) or 0) * 100
+                          for _t in _sorted_day}
+                _lots: dict = {id(_t): 0 for _t in _sorted_day}
+                _cap = 0.0
+                _changed = True
+                while _changed:
+                    _changed = False
+                    for _t in _sorted_day:
+                        _u = _units[id(_t)]
+                        if _u <= 0:
+                            continue
+                        if _cap + _u > _budget_yen:
+                            continue
+                        _lots[id(_t)] += 1
+                        _cap += _u
+                        _changed = True
+                        if _cap >= _budget_yen:
+                            break
+                for _t in _sorted_day:
+                    _n = _lots[id(_t)]
+                    if _n <= 0:
+                        continue
+                    # 株数・損益をnロット分にスケールした合成トレードを生成
+                    _syn = dict(_t)
+                    _syn["qty"] = _n * 100
+                    _syn["pnl"] = float(_t.get("pnl", 0) or 0) * _n
+                    _out.append(_syn)
+            _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
+            return _out
+
         _by_day_bud: dict = _dd(list)
         for _t in _bt30_entry_sorted:
             if _eff_long_bt(_t) < _min_bt:
@@ -9764,6 +9816,9 @@ function switchTbd(id, tab) {{
     # 約定額ベース(watchで取り消し方式): 不約定は予算消費しない。全戦略・絞り版。
     _budget_fill_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), fill_budget=True) if _LSS_ORDER_MODE else []
     _budget_fill_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW, fill_budget=True) if _LSS_ORDER_MODE else []
+    # ループ充填版: BT降順に100株ずつ繰り返し追加し、400万円に限りなく近づける。全戦略・絞り版。
+    _budget_mlot_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), multi_lot=True) if _LSS_ORDER_MODE else []
+    _budget_mlot_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW, multi_lot=True) if _LSS_ORDER_MODE else []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -9806,6 +9861,8 @@ function switchTbd(id, tab) {{
     _budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates = _build_entry_grid(_budget_narrow_entry_sorted, "qn")
     _budget_fill_entry_by_date, _sorted_budget_fill_entry_dates = _build_entry_grid(_budget_fill_entry_sorted, "qf")
     _budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates = _build_entry_grid(_budget_fill_narrow_entry_sorted, "qfn")
+    _budget_mlot_entry_by_date, _sorted_budget_mlot_entry_dates = _build_entry_grid(_budget_mlot_entry_sorted, "qml")
+    _budget_mlot_narrow_entry_by_date, _sorted_budget_mlot_narrow_entry_dates = _build_entry_grid(_budget_mlot_narrow_entry_sorted, "qmln")
 
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
@@ -12330,11 +12387,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _detail_tab_ids.append('budget50')
         if _budget_fill_entry_sorted:
             _detail_tab_ids.append('budget_fill')
+        if _budget_mlot_entry_sorted:
+            _detail_tab_ids.append('budget_mlot')
     _detail_tab_ids.append('bt70entry')
     if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
         _detail_tab_ids.append('budget_narrow')
         if _budget_fill_narrow_entry_sorted:
             _detail_tab_ids.append('budget_fill_narrow')
+        if _budget_mlot_narrow_entry_sorted:
+            _detail_tab_ids.append('budget_mlot_narrow')
     else:
         _detail_tab_ids.append('exit')
     _detail_tab_ids.append('bt70exit')
@@ -12438,6 +12499,46 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'隣タブ(発注額ベース)との比較で不約定ロスを定量確認（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget_fill_narrow_entry_sorted)
             + _month_accordion_html(_budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates, _dseq, "qfn")
+            + '</div>')
+
+    # ループ充填版(全戦略): BT降順に100株ずつ繰り返し追加して400万円に限りなく近づける。
+    _mlot_liq_btn = ""
+    _mlot_liq_pane = ""
+    if _LSS_ORDER_MODE and _budget_mlot_entry_sorted:
+        _mlot_liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_mlot\')" '
+            f'style="border-color:#34d399">🔄 ループ充填・全戦略 '
+            f'<span style="font-size:0.72rem;color:#6ee7b7">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _mlot_liq_pane = (
+            f'<div id="detail_{_dseq}_budget_mlot" class="detail-tab-pane">'
+            f'<p style="color:#6ee7b7;font-size:0.8rem;margin-bottom:10px">'
+            f'🔄 <b>ループ充填モード（全戦略）</b>。BT降順に1銘柄100株ずつ1周目を配置し、'
+            f'予算残があれば先頭から再度100株ずつ追加。<b>{_budget_man}万円</b>に'
+            f'限りなく近づくまで繰り返します。1銘柄に複数ロット入るため、'
+            f'表示の株数はn×100株・損益もn倍スケール。'
+            f'発注額ベース・約定額ベースより確実に予算を埋められます（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget_mlot_entry_sorted)
+            + _month_accordion_html(_budget_mlot_entry_by_date, _sorted_budget_mlot_entry_dates, _dseq, "qml")
+            + '</div>')
+
+    # ループ充填版(A7/RSI2/VOLTF限定)。
+    _mlot_narrow_liq_btn = ""
+    _mlot_narrow_liq_pane = ""
+    if _LSS_ORDER_MODE and _budget_mlot_narrow_entry_sorted:
+        _mlot_narrow_liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_mlot_narrow\')" '
+            f'style="border-color:#f43f5e">🔄 ループ充填×A7/RSI2/VOLTF '
+            f'<span style="font-size:0.72rem;color:#fb7185">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _mlot_narrow_liq_pane = (
+            f'<div id="detail_{_dseq}_budget_mlot_narrow" class="detail-tab-pane">'
+            f'<p style="color:#fb7185;font-size:0.8rem;margin-bottom:10px">'
+            f'🔄 <b>ループ充填モード（A7/RSI2/VOLTF限定）</b>。高効率3戦略に絞って'
+            f'BT降順に100株ずつ繰り返し追加し、<b>{_budget_man}万円</b>に近づけます。'
+            f'1銘柄複数ロット・株数n×100・損益n倍スケール（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget_mlot_narrow_entry_sorted)
+            + _month_accordion_html(_budget_mlot_narrow_entry_by_date, _sorted_budget_mlot_narrow_entry_dates, _dseq, "qmln")
             + '</div>')
 
     # lss 調査タブ(⑦終値損切りに集約せず、調査ごとに分割)。ボタン・ペイン・tabs配列を用意。
@@ -12884,9 +12985,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   {_bt40liq_btn}
   {_bt50liq_btn}
   {_fill_liq_btn}
+  {_mlot_liq_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_narrow_liq_btn}
   {_fill_narrow_liq_btn}
+  {_mlot_narrow_liq_btn}
   {_exit_tab_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
@@ -12944,6 +13047,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_bt40liq_pane}
 {_bt50liq_pane}
 {_fill_liq_pane}
+{_mlot_liq_pane}
 <div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_summary_html(_bt70_entry_sorted)}
@@ -12951,6 +13055,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 {_narrow_liq_pane}
 {_fill_narrow_liq_pane}
+{_mlot_narrow_liq_pane}
 {_exit_pane_or_narrow}
 <div id="detail_{_dseq}_bt70exit" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　決済日ごとに <b>目標達成 / 損切り / タイムカット</b> 別で表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
