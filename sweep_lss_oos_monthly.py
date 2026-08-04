@@ -131,6 +131,9 @@ def main():
     ap.add_argument("--min-price", type=int, default=1000)
     ap.add_argument("--max-price", type=int, default=6000)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--start-from", type=str, default="",
+                    help="訓練に使う最初の基準月(YYYY-MM)。これより前の提案ファイルを無視。"
+                         "例: --start-from 2025-09 → 2025-09以降のファイルのみ訓練に使用。")
     ap.add_argument("--fold-from", type=str, default="",
                     help="スイープ開始フォールドのOOS月(YYYY-MM)。指定月以降のフォールドだけ実行。")
     ap.add_argument("--fold-to", type=str, default="",
@@ -155,11 +158,22 @@ def main():
     dated = [(f, _extract_yyyymm(f)) for f in proposal_files]
     dated = [(f, ym) for f, ym in dated if ym]
     dated.sort(key=lambda x: x[1])
+
+    # --start-from: 指定月より前の提案ファイルを除外
+    if args.start_from:
+        before = [(f, ym) for f, ym in dated if ym < args.start_from]
+        dated = [(f, ym) for f, ym in dated if ym >= args.start_from]
+        if before:
+            print(f"[sweep] --start-from {args.start_from}: 以下を訓練から除外:", flush=True)
+            for f, ym in before:
+                print(f"  (除外) {ym}: {f}", flush=True)
+
     if len(dated) < 2:
-        print(f"[ERROR] フォールド生成には最低2ファイル必要。検出={len(dated)}件", file=sys.stderr)
+        print(f"[ERROR] フォールド生成には最低2ファイル必要。"
+              f"--start-from 適用後={len(dated)}件", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[sweep] 提案ファイル {len(dated)} 件検出:", flush=True)
+    print(f"[sweep] 提案ファイル {len(dated)} 件使用:", flush=True)
     for f, ym in dated:
         print(f"  {ym}: {f}", flush=True)
     print(flush=True)
