@@ -131,6 +131,7 @@ def main():
             "--force",
             "--no-news",
             "--no-risk",
+            "--days", "730",
             "--workers", str(args.workers),
             "--no-browser",
             "--no-serve",
