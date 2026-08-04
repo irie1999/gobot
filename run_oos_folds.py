@@ -62,7 +62,6 @@ def main():
         sys.exit(1)
 
     today_ym = date.today().strftime("%Y-%m")
-    out_raw = f"oos_raw_{date.today().strftime('%Y%m%d')}.csv"
 
     # daily.bat と同一の環境変数
     env = os.environ.copy()
@@ -93,6 +92,7 @@ def main():
         long_base = month_end(train_end_ym)
         train_files = [str(p) for p, _ in dated[:i + 1]]
         merged = f"lss_proposal_fold{i+1:02d}.py"
+        out_raw = f"oos_raw_fold{i+1:02d}_{oos_ym}.csv"
 
         print(f"\n{'='*60}")
         print(f"[fold {i+1}] 訓練: {dated[0][1]}〜{train_end_ym}  OOS: {oos_ym}  long-base: {long_base}")
@@ -131,7 +131,9 @@ def main():
         Path(merged).unlink(missing_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"完了。生トレードCSV: {out_raw}")
+    print("完了。生成されたOOS CSV:")
+    for f in sorted(Path(".").glob("oos_raw_fold*.csv")):
+        print(f"  {f.name}")
 
 
 if __name__ == "__main__":
