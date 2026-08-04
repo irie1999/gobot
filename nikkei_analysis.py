@@ -9694,8 +9694,10 @@ function switchTbd(id, tab) {{
         _op = float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)
         return _op * float(_t.get("qty", 0) or 0)
 
-    def _run_budget_sim(_min_bt):
-        """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。"""
+    def _run_budget_sim(_min_bt, strat_set=None):
+        """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
+        strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
+        """
         _out = []
         if not _LSS_ORDER_MODE:
             return _out
@@ -9703,14 +9705,19 @@ function switchTbd(id, tab) {{
         for _t in _bt30_entry_sorted:
             if _eff_long_bt(_t) < _min_bt:
                 continue
+            if strat_set and _t.get("strategy", "").upper() not in strat_set:
+                continue
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
         # 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。ただし同一銘柄同日に
         # 約定注文があれば二重発注しない(1銘柄1注文/日)。
         _fill_sym_day = {(_t.get("symbol"),
                           str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
-                         for _t in _bt30_entry_sorted}
+                         for _t in _bt30_entry_sorted
+                         if not strat_set or _t.get("strategy", "").upper() in strat_set}
         for _t in all_nofills:
             if _eff_long_bt(_t) < _min_bt:
+                continue
+            if strat_set and _t.get("strategy", "").upper() not in strat_set:
                 continue
             _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
             if (_t.get("symbol"), _dk2) in _fill_sym_day:
@@ -9735,6 +9742,9 @@ function switchTbd(id, tab) {{
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
     _budget50_entry_sorted: list = []   # 予算タブ本体をBT50化したので別タブは廃止
+    # A7/RSI2/VOLTF戦略限定版(決済日別タブの代替)。
+    _STRAT_NARROW = {"A7", "RSI2", "VOLTF"}
+    _budget_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW) if _LSS_ORDER_MODE else []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -9774,6 +9784,7 @@ function switchTbd(id, tab) {{
             print(f"[予算月別CSV] 出力失敗: {_ce}", flush=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
+    _budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates = _build_entry_grid(_budget_narrow_entry_sorted, "qn")
 
     def _group_by_month(sorted_dates):
         """sorted_dates(降順)を月ごとにグループ化。OrderedDict {ym: [dk,...]}"""
@@ -12296,7 +12307,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _detail_tab_ids.append('budget')
         if _budget50_entry_sorted:
             _detail_tab_ids.append('budget50')
-    _detail_tab_ids += ['bt70entry', 'exit', 'bt70exit']
+    _detail_tab_ids.append('bt70entry')
+    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
+        _detail_tab_ids.append('budget_narrow')
+    else:
+        _detail_tab_ids.append('exit')
+    _detail_tab_ids.append('bt70exit')
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
     # 予算固定(400万円/日・BT降順)タブ(lssのみ)。ボタンとペインをここで組み立てる。
@@ -12338,6 +12354,25 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget50_entry_sorted)
             + _month_accordion_html(_budget50_entry_by_date, _sorted_budget50_entry_dates, _dseq, "q5")
+            + '</div>')
+
+    # A7/RSI2/VOLTF戦略限定版予算シミュ(決済日別タブの代替)。
+    _narrow_liq_btn = ""
+    _narrow_liq_pane = ""
+    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
+        _narrow_liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_narrow\')" '
+            f'style="border-color:#f59e0b">💰 {_budget_man}万円×A7/RSI2/VOLTF限定 '
+            f'<span style="font-size:0.72rem;color:#fcd34d">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _narrow_liq_pane = (
+            f'<div id="detail_{_dseq}_budget_narrow" class="detail-tab-pane">'
+            f'<p style="color:#fcd34d;font-size:0.8rem;margin-bottom:10px">'
+            f'💰 <b>A7/RSI2/VOLTF戦略のみ</b>に絞った予算シミュ。毎日BT降順で'
+            f'<b>{_budget_man}万円</b>まで注文した場合の約定トレード。'
+            f'DON/MOMを除いた高効率戦略の実力を確認できます（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget_narrow_entry_sorted)
+            + _month_accordion_html(_budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates, _dseq, "qn")
             + '</div>')
 
     # lss 調査タブ(⑦終値損切りに集約せず、調査ごとに分割)。ボタン・ペイン・tabs配列を用意。
@@ -12393,6 +12428,27 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _sameday5m_tab_btn = (
         f'  <button class="analysis-tab-btn" style="border-color:#0369a1" onclick="switchAnalysisTab({_dseq},\'sameday5m\')">🕔 5分足TP/SL</button>'
         if _SAMEDAY_5M_TAB else "")
+
+    # 決済日別ボタン: lssかつA7/RSI2/VOLTF絞り版があれば非表示(絞り版タブで代替)
+    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
+        _exit_tab_btn = ""
+    else:
+        _exit_tab_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'exit\')">'
+            f'決済日別（目標/損切/TC） '
+            f'<span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+
+    # 決済日別ペイン: lssかつA7/RSI2/VOLTF絞り版があれば非表示(絞り版タブで代替)
+    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
+        _exit_pane_or_narrow = ""
+    else:
+        _exit_pane_or_narrow = (
+            f'<div id="detail_{_dseq}_exit" class="detail-tab-pane">'
+            f'<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">'
+            f'決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b>'
+            f' 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>'
+            + _month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")
+            + '</div>')
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
@@ -12763,7 +12819,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   {_bt40liq_btn}
   {_bt50liq_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'exit')">決済日別（目標/損切/TC） <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  {_narrow_liq_btn}
+  {_exit_tab_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
@@ -12824,10 +12881,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_summary_html(_bt70_entry_sorted)}
 {_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
 </div>
-<div id="detail_{_dseq}_exit" class="detail-tab-pane">
-<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b> 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")}
-</div>
+{_narrow_liq_pane}
+{_exit_pane_or_narrow}
 <div id="detail_{_dseq}_bt70exit" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　決済日ごとに <b>目標達成 / 損切り / タイムカット</b> 別で表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
 {_month_accordion_exit_html(*_build_exit_grid(_bt70_entry_sorted), _dseq, "y")}
