@@ -59,9 +59,9 @@ def _merge_proposals(paths: list[str], oos_all: bool = True, out: str = "") -> s
     if oos_all:
         cmd += ["--oos-all"]
     cmd += ["--out", out]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run(cmd)  # capture_output=False でコンソール文字コード問題を回避
     if result.returncode != 0:
-        print(f"[WARN] merge_lss_proposals 失敗:\n{result.stderr}", flush=True)
+        print(f"[WARN] merge_lss_proposals 失敗 (returncode={result.returncode})", flush=True)
     return out
 
 
