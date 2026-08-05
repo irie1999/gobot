@@ -3037,6 +3037,17 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:center;color:#94a3b8">{_hold_cell}</td>
   <td style="text-align:center;color:#f59e0b">{max_exit}</td>
   <td style="text-align:center">{_reg_btn}</td>
+  {f'''<td style="text-align:center;padding:4px 3px">
+  <div id="lss-st-{i}" style="font-size:0.72rem;min-height:1.2rem;margin-bottom:2px"></div>
+  <div style="background:#0f2040;border:1px solid #1e40af;border-radius:4px;padding:3px 5px;font-size:0.68rem;color:#93c5fd;margin-bottom:4px;line-height:1.4">
+    9:09成行 → 11:30売<br>
+    <span style="color:#64748b">目安 {s.get("signal_price",0) or s.get("order_p",0):,.0f}円</span>
+  </div>
+  <div style="display:flex;gap:2px;justify-content:center">
+    <button onclick="lssMarkStatus(this,{i},'short')" style="padding:2px 5px;background:#450a0a;color:#fca5a5;border:1px solid #7f1d1d;border-radius:3px;font-size:0.63rem;cursor:pointer;white-space:nowrap">📉 SHORT</button>
+    <button onclick="lssMarkStatus(this,{i},'long')" style="padding:2px 5px;background:#0c1a3f;color:#93c5fd;border:1px solid #1e40af;border-radius:3px;font-size:0.63rem;cursor:pointer;white-space:nowrap">📈 転換</button>
+  </div>
+</td>''' if _is_lss_row and _LSS_ORDER_MODE else ('<td></td>' if _LSS_ORDER_MODE else '')}
 </tr>"""
 
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
@@ -3129,12 +3140,55 @@ function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval)
 document.addEventListener('DOMContentLoaded', function(){
   var el = document.getElementById('gobotBudget');
   if(el){ el.addEventListener('input', gobotApplyBudget); gobotApplyBudget(); }
+  lssRestoreStatus();
 });
+
+// ── ロング転換 状況マーカー ─────────────────────────────────────────
+function lssMarkStatus(btn, idx, type){
+  var row = btn.closest('tr');
+  var sd = document.getElementById('lss-st-'+idx);
+  if(type==='short'){
+    row.classList.remove('lss-long'); row.classList.add('lss-short');
+    if(sd) sd.innerHTML='<b style="color:#f87171">📉 SHORT約定</b>';
+  } else {
+    row.classList.remove('lss-short'); row.classList.add('lss-long');
+    if(sd) sd.innerHTML='<b style="color:#60a5fa">📈 ロング転換実行</b>';
+  }
+  var today = new Date().toISOString().slice(0,10);
+  localStorage.setItem('lss_'+today+'_'+idx, type);
+  lssUpdateSummary();
+}
+function lssUpdateSummary(){
+  var today = new Date().toISOString().slice(0,10);
+  var s=0, l=0;
+  Object.keys(localStorage).forEach(function(k){
+    if(k.startsWith('lss_'+today+'_')){
+      localStorage.getItem(k)==='short' ? s++ : l++;
+    }
+  });
+  var box = document.getElementById('lss-status-summary');
+  if(box) box.innerHTML=(s+l>0)
+    ? '本日: <b style="color:#f87171">SHORT約定 '+s+'件</b>  /  <b style="color:#60a5fa">ロング転換 '+l+'件</b>'
+    : '9:05に未約定の銘柄は「📈転換」ボタンを押してください';
+}
+function lssRestoreStatus(){
+  var today = new Date().toISOString().slice(0,10);
+  Object.keys(localStorage).forEach(function(k){
+    if(!k.startsWith('lss_'+today+'_')) return;
+    var idx = k.split('_').pop();
+    var type = localStorage.getItem(k);
+    var row = document.getElementById('lss-st-'+idx);
+    if(row){ lssMarkStatus(null, idx, type); }
+  });
+  lssUpdateSummary();
+}
 </script>
 <style>
 tr.sigrow.inbudget > td { background: rgba(34,197,94,0.10); }
 tr.sigrow.budgetline > td { border-bottom: 2px solid #22c55e; }
 tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
+tr.sigrow.lss-short > td { background: rgba(220,38,38,0.12); border-left: 3px solid #f87171; }
+tr.sigrow.lss-long > td { background: rgba(37,99,235,0.18); border-left: 3px solid #60a5fa; }
 #gobotBudgetBar input { width:150px;padding:6px 8px;border-radius:6px;border:1px solid #475569;
   background:#0f172a;color:#e2e8f0;font-size:0.95rem;text-align:right; }
 #gobotBudgetBar button { padding:6px 10px;border-radius:6px;border:1px solid #475569;
@@ -3205,6 +3259,7 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
   ※ 指値（橙）= ロング:上限(+3%) ギャップアップが大きすぎたらキャンセル / ショート:下限(-3%) ギャップダウンが大きすぎたらキャンセル
 </p>
 {_budget_bar}
+{'<div id="lss-status-bar" style="margin:8px 0;padding:10px 16px;background:#0c1a3f;border:1px solid #1e40af;border-radius:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap"><span style="color:#93c5fd;font-weight:700;font-size:0.88rem">📊 転換状況</span><span id="lss-status-summary" style="color:#cbd5e1;font-size:0.86rem">9:05に未約定の銘柄は「📈転換」ボタンを押してください</span></div>' if _LSS_ORDER_MODE else ''}
 <table>
   <thead><tr>
     <th>順位</th>
@@ -3217,6 +3272,7 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     <th>{'損切り(下)' if _LSS_LONG else ('損切り(上)' if _LSS_ORDER_MODE else '損切り(-)')}</th><th>{'目標(上)' if _LSS_LONG else ('目標(下)' if _LSS_ORDER_MODE else '目標(+)')}</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>
+    {'<th style="color:#93c5fd;min-width:110px">9:05未約定<br><small>ロング転換</small></th>' if _LSS_ORDER_MODE else ''}
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
