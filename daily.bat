@@ -20,10 +20,17 @@ REM   Clears LSS_CLOSESTOP_RESWEEP / LSS_GUARD_ONLY on start (if left set they f
 REM     heavy close-stop compare = hundreds of seconds every run).
 REM   Guard = 3% (verified best for recent base).
 REM
-REM   Pass-through options at the end:
-REM     .\daily --no-long --no-short    (lss only = fastest, for quick ordering)
-REM     .\daily --price-ranges 6000     (6000 only = faster)
+REM   Pass-through options at the end (fastest first):
+REM     .\daily --no-long --no-short --no-symbol-detail --price-ranges 6000
+REM                                     (lss only, 1 pane, no per-symbol tab = FASTEST)
+REM     .\daily --no-symbol-detail      (skip the per-symbol P&L tab: it re-runs the whole
+REM                                      P&L build once PER SIGNAL SYMBOL - 69x on a busy
+REM                                      day. This is by far the biggest cost in a run.)
+REM     .\daily --symbol-detail-limit 20  (keep the tab, top-20 by BT only)
+REM     .\daily --no-long --no-short    (lss only, for quick ordering)
+REM     .\daily --price-ranges 6000     (6000 only = one pane instead of two)
 REM   Notes:
+REM     - The per-symbol detail tab dominates runtime AND memory. Drop it first when slow.
 REM     - Long/short add time; use --no-long --no-short when you only need the order list.
 REM     - First run of a new trading day rebuilds the BT cache (slower once).
 REM     - Run once by ~8:45 so the order list is ready before 9:00.

@@ -9290,8 +9290,12 @@ function switchTbd(id, tab) {{
     # (当月・翌日以降が永久に出ない)。ここでレポート自身の未約定シグナル
     # (all_nofills)から転換を作れば、実行するたびに当日分まで自動で入る。
     # CSV由来と重複する (銘柄,日) はスキップする。
+    # ※ _tab5_pnl_html は銘柄詳細タブで銘柄数ぶん(実測69回)呼ばれる。転換タブは
+    #   メイン呼び出しにしか出ないので、フィルター付き呼び出しでは生成しない
+    #   (毎回5分足を読み直して .\daily が極端に重くなるため)。
     _tenkan_auto: list = []
-    if _LSS_ORDER_MODE and all_nofills:
+    _tk_is_main = (cfg_filter is None and not symbol_filter and not strategy_filter)
+    if _LSS_ORDER_MODE and all_nofills and _tk_is_main:
         try:
             import tenkan_sim as _tks
             _tk_excl = {(str(t.get("symbol")), str(t.get("entry_d_raw") or t.get("exit_d_raw")))
@@ -9301,8 +9305,9 @@ function switchTbd(id, tab) {{
                 min_price=_PNL_ENTRY_MIN_PRICE,
                 max_price=_PNL_ENTRY_MAX_PRICE,
                 exclude_keys=_tk_excl,
-                verbose=(cfg_filter is None and not symbol_filter and not strategy_filter),
+                verbose=True,
             )
+            _tks.release_cache()   # 5分足DataFrameを解放(銘柄詳細ループのメモリを空ける)
         except Exception as _tk_exc:
             print(f"[WARN] 未約定シグナルからの転換生成に失敗: {_tk_exc}", flush=True)
             _tenkan_auto = []

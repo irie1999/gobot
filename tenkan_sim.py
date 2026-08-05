@@ -138,6 +138,12 @@ def simulate(symbol: str, d: "date") -> "dict | None":
     return {"pnl": pnl, "buy_p": b, "sell_p": s, "buy_t": buy_t, "sell_t": sell_t}
 
 
+def release_cache() -> None:
+    """読み込んだ分足DataFrameを破棄してメモリを返す。
+    転換の生成が終わった後に呼ぶ(銘柄詳細タブなど後続処理のメモリを空けるため)。"""
+    _CACHE.clear()
+
+
 def _rank(score: float) -> str:
     if score >= 80:
         return "★★★"
