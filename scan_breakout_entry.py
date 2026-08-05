@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -85,6 +86,24 @@ def calc_vol_breakout(df: pd.DataFrame) -> pd.DataFrame:
 
     df["atr"]       = atr
     df["entry_sig"] = (c > high5) & (v > vol_ma * 1.5)
+    return df
+
+
+def calc_vol_breakout_tf(df: pd.DataFrame) -> pd.DataFrame:
+    """出来高急増ブレイクアウト + トレンドフィルター版 (VOLTF)。
+    VOL は元々トレンド条件が無く、暴落後の底ばいレンジの小反発(falling knife)も
+    拾ってしまう(例: 東洋エンジニアリング)。終値 > MA50 を追加し上昇基調に限定。
+    (DON=MA50超, MOM=MA25>MA75 と揃える主旨)
+    """
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    prev_c = c.shift(1)
+    tr     = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr    = tr.ewm(span=14, adjust=False).mean()
+    high5   = h.rolling(5).max().shift(1)
+    vol_ma  = v.rolling(20).mean()
+    ma50    = c.rolling(50).mean()
+    df["atr"]       = atr
+    df["entry_sig"] = (c > high5) & (v > vol_ma * 1.5) & (c > ma50)
     return df
 
 
@@ -449,7 +468,7 @@ def main() -> None:
     print(f"\nHTMLレポート: {out_path.resolve()}")
 
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
 
 if __name__ == "__main__":

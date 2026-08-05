@@ -71,7 +71,10 @@ def apply_filters(rows: list[dict],
                   max_dd_pct: float,
                   max_consec_losses: int,
                   min_sharpe: float,
-                  max_price: float = 0.0) -> list[dict]:
+                  max_price: float = 0.0,
+                  min_price: float = 0.0,
+                  min_trades: int = 0,
+                  max_avg_hold: float = 0.0) -> list[dict]:
     """フィルターを適用した行のみ返す。"""
     survivors = []
     for r in rows:
@@ -85,11 +88,25 @@ def apply_filters(rows: list[dict],
             continue
         if _float(r.get("total_test_pnl", 0)) <= 0:
             continue
+        # 取引回数フィルター
+        if min_trades > 0 and _int(r.get("total_test_trades", 0)) < min_trades:
+            continue
+        # 平均保有日数フィルター (CSV に avg_hold_days がある場合のみ有効)
+        if max_avg_hold > 0:
+            hold = _float(r.get("avg_hold_days", 0))
+            if hold > 0 and hold > max_avg_hold:
+                continue
         # 価格フィルター: latest_price > max_price の銘柄を除外
         # (CSV に latest_price が無い古いファイルはスキップしない)
         if max_price > 0:
             price = _float(r.get("latest_price", 0))
             if price > 0 and price > max_price:
+                continue
+        # 最低株価フィルター: latest_price < min_price の銘柄を除外
+        # (低位株のtick・流動性・貸借/逆日歩リスク回避用)
+        if min_price > 0:
+            price = _float(r.get("latest_price", 0))
+            if price > 0 and price < min_price:
                 continue
         survivors.append(r)
     return survivors
@@ -134,25 +151,55 @@ def main() -> None:
     parser.add_argument("--max-dd",      type=float, default=15.0,
                         help="MaxDD 上限 (%%) デフォルト15")
     parser.add_argument("--max-consec-losses", type=int, default=5)
-    parser.add_argument("--min-sharpe",  type=float, default=0.0)
+    parser.add_argument("--min-sharpe",    type=float, default=0.0)
+    parser.add_argument("--min-trades",    type=int,   default=0,
+                        help="TEST 期間の最低取引回数 (0=制限なし)")
+    parser.add_argument("--max-avg-hold",  type=float, default=0.0,
+                        help="TEST 期間の平均保有日数 上限 (0=制限なし). "
+                             "scan_walkforward.py を再実行して avg_hold_days カラムが必要")
     parser.add_argument("--max-price",   type=float, default=0.0,
                         help="最新終値の上限 (円/株). 0=制限なし")
+    parser.add_argument("--min-price",   type=float, default=0.0,
+                        help="最新終値の下限 (円/株). 低位株を除外 (例: 1000). "
+                             "tick・流動性・貸借/逆日歩リスク回避用. 再スキャン不要")
     parser.add_argument("--budget",      type=float, default=0.0,
                         help="総予算 (円). 100株買える銘柄のみに絞る。"
                              "--max-price と併用時は --max-price 優先")
+    parser.add_argument("--max-per-sector", type=int, default=0,
+                        help="同一セクターの選定上限 (全戦略横断). 0=制限なし。"
+                             "例: 2 → 金融(銀行)など同セクターは最大2銘柄まで。"
+                             "sector_map.py の証券コード帯分類を使用")
     parser.add_argument("--input-dir",   type=Path, default=Path("walkforward_results"))
     parser.add_argument("--date",        type=str, default=str(TODAY),
                         help="読み込む CSV の日付 (デフォルト本日)")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--aggressive",   action="store_true",
+                            help="Aggressive モードの CSV を読み込む (_aggressive suffix)")
+    mode_group.add_argument("--conservative", action="store_true",
+                            help="Conservative モードの CSV を読み込む (suffix なし, デフォルト)")
+    parser.add_argument("--holdout-days", type=int, default=0,
+                        help="scan_walkforward.py --holdout-days N で生成した CSV を読み込む")
+    parser.add_argument("--embargo-days", type=int, default=0,
+                        help="scan_walkforward_embargo.py --embargo-days N で生成した CSV を読み込む (0=通常の scan_walkforward CSV)")
     args = parser.parse_args()
+
+    mode_suffix    = "_aggressive" if args.aggressive else ""
+    holdout_suffix = f"_holdout{args.holdout_days}d" if args.holdout_days > 0 else ""
+    embargo_suffix = f"_embargo{args.embargo_days}d"  if args.embargo_days > 0 else ""
 
     # budget → max_price 換算 (FIXED_QTY=100 株)
     effective_max_price = args.max_price
     if args.budget > 0 and args.max_price == 0:
         effective_max_price = args.budget / 100.0
 
-    strategies_stop = ["MACD", "A7", "RSI2"]
-    strategies_brk  = ["DON", "VOL", "MOM"]
-    all_strats      = strategies_stop + strategies_brk
+    strategies_stop      = {"MACD", "A7", "RSI2"}
+    strategies_brk       = {"DON", "VOL", "MOM"}
+    strategies_short     = {"A7_S", "MACD_S", "RSI2_S"}
+    strategies_short_brk = {"DON_S", "MOM_S", "GAP_S"}
+    all_strats = (
+        list(strategies_stop) + list(strategies_brk)
+        + list(strategies_short) + list(strategies_short_brk)
+    )
 
     print("=" * 78)
     print(f"WATCHLIST 構築  基準日: {args.date}")
@@ -160,20 +207,29 @@ def main() -> None:
           f"MaxDD<={args.max_dd}%  "
           f"連敗<={args.max_consec_losses}  "
           f"Sharpe>={args.min_sharpe}")
+    if args.min_trades > 0:
+        print(f"  取引回数  : TEST期間 {args.min_trades}回以上")
+    if args.max_avg_hold > 0:
+        print(f"  保有日数  : 平均 {args.max_avg_hold}日以下")
     if effective_max_price > 0:
         budget_str = f" (予算 {args.budget:,.0f}円)" if args.budget > 0 else ""
         print(f"  価格上限  : {effective_max_price:,.0f}円/株{budget_str}")
+    if args.min_price > 0:
+        print(f"  価格下限  : {args.min_price:,.0f}円/株 (低位株除外)")
     print(f"  選定数    : 戦略あたり {args.per_strategy} 銘柄")
     print("=" * 78)
 
-    stop_blocks: list[str] = []
-    brk_blocks:  list[str] = []
+    stop_blocks:      list[str] = []
+    brk_blocks:       list[str] = []
+    short_blocks:     list[str] = []
+    short_brk_blocks: list[str] = []
 
     total_candidates = 0
     total_selected   = 0
+    _sector_count: dict[str, int] = {}   # セクター集中制限用 (全戦略横断カウント)
 
     for strategy in all_strats:
-        csv_path = args.input_dir / f"walkforward_{strategy}_{args.date}.csv"
+        csv_path = args.input_dir / f"walkforward_{strategy}{mode_suffix}{holdout_suffix}{embargo_suffix}_{args.date}.csv"
         rows = load_csv(csv_path)
         if not rows:
             print(f"[WARN] CSV not found: {csv_path}")
@@ -186,28 +242,50 @@ def main() -> None:
             max_consec_losses=args.max_consec_losses,
             min_sharpe=args.min_sharpe,
             max_price=effective_max_price,
+            min_price=args.min_price,
+            min_trades=args.min_trades,
+            max_avg_hold=args.max_avg_hold,
         )
         filtered.sort(key=composite_score, reverse=True)
-        top = filtered[: args.per_strategy]
+
+        # ── セクター集中制限 (全戦略横断でカウント) ──
+        if args.max_per_sector > 0:
+            from sector_map import get_sector
+            top = []
+            for r in filtered:
+                if len(top) >= args.per_strategy:
+                    break
+                sec = get_sector(r["symbol"])
+                if _sector_count.get(sec, 0) >= args.max_per_sector:
+                    continue  # このセクターは上限到達 → スキップ
+                top.append(r)
+                _sector_count[sec] = _sector_count.get(sec, 0) + 1
+        else:
+            top = filtered[: args.per_strategy]
 
         print(f"\n=== {strategy} ===")
         print(f"  全候補={len(rows)}  フィルター通過={len(filtered)}  選定={len(top)}")
 
         if top:
+            has_hold = any(r.get("avg_hold_days") for r in top)
+            hold_hdr = f"{'保有日':>7}" if has_hold else ""
             print(f"  {'銘柄':<10}{'名前':<22}{'株価':>8}{'100株':>10}"
-                  f"{'fld':>5}{'PnL':>12}"
-                  f"{'PF':>7}{'WR':>8}{'DD%':>8}{'連敗':>6}{'Shrp':>7}")
-            print("  " + "-" * 108)
+                  f"{'fld':>5}{'取引':>6}{'PnL':>12}"
+                  f"{'PF':>7}{'WR':>8}{'DD%':>8}{'連敗':>6}{'Shrp':>7}{hold_hdr}")
+            print("  " + "-" * (108 + (7 if has_hold else 0)))
             for r in top:
                 price = _float(r.get("latest_price", 0))
                 cost  = price * 100
+                hold_val = (f"{_float(r.get('avg_hold_days',0)):>7.1f}"
+                            if has_hold else "")
                 print(f"  {r['symbol']:<10}{r['name'][:20]:<22}"
                       f"{price:>8,.0f}{cost:>10,.0f}"
-                      f"{r['folds_passed']:>5}{_float(r['total_test_pnl']):>+12,.0f}"
+                      f"{r['folds_passed']:>5}{_int(r.get('total_test_trades',0)):>6}"
+                      f"{_float(r['total_test_pnl']):>+12,.0f}"
                       f"{r['avg_test_pf']:>7}{r['avg_test_wr']:>7}%"
                       f"{r['max_drawdown_pct']:>8}"
                       f"{r['max_consecutive_losses']:>6}"
-                      f"{r['sharpe']:>7}")
+                      f"{r['sharpe']:>7}{hold_val}")
 
         total_candidates += len(rows)
         total_selected   += len(top)
@@ -215,11 +293,26 @@ def main() -> None:
         block = format_watchlist_block(top, f"{strategy} Walk-forward 上位 {len(top)}")
         if strategy in strategies_stop:
             stop_blocks.append(block)
-        else:
+        elif strategy in strategies_brk:
             brk_blocks.append(block)
+        elif strategy in strategies_short:
+            short_blocks.append(block)
+        elif strategy in strategies_short_brk:
+            short_brk_blocks.append(block)
 
     # ── Python コード出力 ──
-    out_path = Path(f"watchlist_proposal_{args.date}.py")
+    # 価格レンジをファイル名に含める（同日に複数価格帯を実行しても上書きしない）
+    _mn = int(args.min_price) if args.min_price > 0 else 0
+    _mx = int(effective_max_price) if effective_max_price > 0 else 0
+    if _mn > 0 and _mx > 0:
+        price_suffix = f"_p{_mn}-{_mx}"
+    elif _mx > 0:
+        price_suffix = f"_p0-{_mx}"
+    elif _mn > 0:
+        price_suffix = f"_p{_mn}-"
+    else:
+        price_suffix = ""
+    out_path = Path(f"watchlist_proposal{mode_suffix}{holdout_suffix}{price_suffix}_{args.date}.py")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write('"""\n')
         f.write(f"新 WATCHLIST 提案 (生成日: {args.date})\n")
@@ -245,6 +338,20 @@ def main() -> None:
         f.write("# ============================================================\n")
         f.write("BRK_WATCHLIST: list[tuple[str, str, str]] = [\n")
         f.write("\n".join(brk_blocks))
+        f.write("\n]\n\n")
+
+        f.write("# ============================================================\n")
+        f.write("# check_signals_short.py の WATCHLIST に貼り付け (ショート逆指値)\n")
+        f.write("# ============================================================\n")
+        f.write("SHORT_WATCHLIST: list[tuple[str, str, str]] = [\n")
+        f.write("\n".join(short_blocks))
+        f.write("\n]\n\n")
+
+        f.write("# ============================================================\n")
+        f.write("# check_signals_short_breakout.py の WATCHLIST に貼り付け (ショートBRK)\n")
+        f.write("# ============================================================\n")
+        f.write("SHORT_BRK_WATCHLIST: list[tuple[str, str, str]] = [\n")
+        f.write("\n".join(short_brk_blocks))
         f.write("\n]\n")
 
     print(f"\n" + "=" * 78)
@@ -255,6 +362,8 @@ def main() -> None:
     print(f"  1. {out_path.name} を開き、STOP_WATCHLIST / BRK_WATCHLIST を確認")
     print(f"  2. check_signals_stop.py の WATCHLIST を置き換え")
     print(f"  3. check_signals_breakout.py の WATCHLIST を置き換え")
+    print(f"  3b. check_signals_short.py の WATCHLIST を SHORT_WATCHLIST で置き換え")
+    print(f"  3c. check_signals_short_breakout.py の WATCHLIST を SHORT_BRK_WATCHLIST で置き換え")
     print(f"  4. python run_signals.py --days 365 で比較検証")
 
 

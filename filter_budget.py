@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import webbrowser
+from _open_html import open_html
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -308,7 +309,7 @@ def main() -> None:
     print(f"\nHTML出力: {out}")
 
     if not args.no_browser:
-        webbrowser.open(out.resolve().as_uri())
+        open_html(out.resolve().as_uri())
 
 
 if __name__ == "__main__":

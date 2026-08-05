@@ -6,4 +6,47 @@ positions_top10/
 watchlist_*.html
 candidates_*.csv
 report_combined_*.html
+signals_combined_*.html
+signals_combined_aggressive_*.html
+signals_nolimit_*.html
+signals_verification_*.html
 result_summary_*.txt
+daytrade_*_*.html
+
+# downloaded data (too large for git)
+data/
+.jquants_cache/
+
+# credentials (never commit)
+.env
+.env.local
+.env.*.local
+compare_5k_*.html
+regime_verify_*.html
+signals_combined_*.html
+signals_*.html
+select_signals_*.html
+nikkei_trend_*.html
+trend_timing_*.html
+nikkei_analysis_*.html
+
+# line_alert runtime state (daily, auto-generated)
+.line_alert_sent.json
+.line_alert_peaks.json
+.jpx_listed_cache.pkl
+walkforward_results/
+forward_test_log*.csv
+watchlist_proposal_*.py
+
+# runtime caches / generated reports (auto-generated, never commit)
+signal_score_cache.json
+.holdout_bt_cache/
+.risk_check_cache_*.json
+mae_analysis_*.html
+signals_holdout_all*.html
+entry_delay_analysis*.html
+
+# Claude Code agent worktrees (ephemeral, never commit)
+.claude/worktrees/
+.sameday5m_cache/
+.lss_scan_cache/

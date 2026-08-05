@@ -27,6 +27,7 @@ import argparse
 import itertools
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -903,7 +904,7 @@ def main() -> None:
                 _w.writerow(_row)
         print(f"CSV: {_csv_path.resolve()}")
         if not args.no_browser:
-            webbrowser.open(f"file://{path.resolve()}")
+            open_html(f"file://{path.resolve()}")
         return
 
     backtest_days = args.days
@@ -1005,7 +1006,7 @@ def main() -> None:
     print(f"\n  レポート出力: {out_path}")
 
     if not args.no_browser:
-        webbrowser.open(str(out_path.resolve()))
+        open_html(str(out_path.resolve()))
 
 
 if __name__ == "__main__":

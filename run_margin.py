@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -307,7 +308,7 @@ def main() -> None:
 
     # ── ブラウザ起動 ──
     if not args.no_browser:
-        webbrowser.open(out_path.resolve().as_uri())
+        open_html(out_path.resolve().as_uri())
 
     print(f"\n完了。")
     print(f"  現物版と比較: python run_signals.py --days {args.days}")

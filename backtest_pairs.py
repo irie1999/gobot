@@ -27,6 +27,7 @@ import argparse
 import itertools
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -794,7 +795,7 @@ def main() -> None:
     path = build_html(signals, pair_results, backtest_days, args.universe)
     print(f"\n  HTMLレポート保存: {path}")
     if not args.no_browser:
-        webbrowser.open(f"file://{path.resolve()}")
+        open_html(f"file://{path.resolve()}")
 
 
 if __name__ == "__main__":
