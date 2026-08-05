@@ -53,11 +53,57 @@ ap.add_argument("--by-month", action="store_true")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
+from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
 from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
 from daytrade_data import load_intraday, split_by_day
 from sameday5m_core import mod_for
 from sameday5m_firsttouch import short_entry_fill_5m, short_pnl
 import tenkan_sim as _tks
+
+_GAP_LIMIT = getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.03)
+
+
+def _day_ohlc(df_raw, fd):
+    """日足の (始値, 安値, 高値, 終値)。compare_lss_rules と同一。"""
+    try:
+        drow = df_raw.loc[df_raw.index.normalize() == pd.Timestamp(fd)]
+        if len(drow):
+            return (float(drow["open"].iloc[0]), float(drow["low"].iloc[0]),
+                    float(drow["high"].iloc[0]), float(drow["close"].iloc[0]))
+    except Exception:
+        pass
+    return (None, None, None, None)
+
+
+def _prices(order_limit, order_stop, order_target):
+    """注文値を呼値に丸めて (トリガー, 損切り, 目標) にする。compare_lss_rules と同一。"""
+    base = round_to_tick(order_limit)
+    trigger = float(round_to_tick(base - tick_size(base)))
+    stop_p = float(ceil_to_tick(max(order_stop, order_target)))
+    target_p = float(ceil_to_tick(min(order_stop, order_target)))
+    return trigger, stop_p, target_p
+
+
+def _bt_score(trades) -> int:
+    """(約定日, lss損益) から BTスコアを算出。compare_lss_rules._bt_score と同一。"""
+    if not trades:
+        return 0
+    pr = {}
+    for P in _BT_PERIODS:
+        cutoff = TODAY - pd.Timedelta(days=P)
+        sub = [p for (d, p) in trades if pd.Timestamp(d) >= cutoff]
+        if not sub:
+            continue
+        wins = sum(1 for p in sub if p > 0)
+        gp = sum(p for p in sub if p > 0)
+        gl = -sum(p for p in sub if p <= 0)
+        pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+        pr[P] = {"trades": len(sub), "win_rate": wins / len(sub) * 100,
+                 "pf": pf, "total_pnl": sum(sub)}
+    try:
+        return _calc_bt(pr)[0]
+    except Exception:
+        return 0
 
 ble._MIRROR_PNL = False
 ble._ENTRY_TYPE_FORCE = None
@@ -172,33 +218,34 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
         bt_trades: list = []
         local: list[dict] = []
         for t in (r.get("trade_log") or []):
-            fd = t.get("entry_dt") or t.get("signal_dt")
-            if fd is None:
+            if t.get("reason") in ("発注中", "保有中"):
                 continue
-            fd = fd.date() if hasattr(fd, "date") else fd
-            db = by_day.get(str(fd))
-            if db is None or db.empty:
+            edt = t.get("entry_dt")
+            if edt is None:
                 continue
-            trigger = float(t.get("order_limit", 0) or 0)
-            if trigger <= 0:
+            # ※ フィールド名は order_limit / order_stop / order_target。
+            #   stop_price / target_price ではない(ここを間違えると全件0件になる)。
+            olp = float(t.get("order_limit", 0) or 0)
+            osp = float(t.get("order_stop", 0) or 0)
+            otp = float(t.get("order_target", 0) or 0)
+            if olp <= 0 or osp <= 0 or otp <= 0:
                 continue
-            if args.min_price > 0 and trigger < args.min_price:
+            if args.min_price > 0 and olp < args.min_price:
                 continue
-            if args.max_price > 0 and trigger > args.max_price:
+            if args.max_price > 0 and olp > args.max_price:
+                continue
+            fd = edt.date() if hasattr(edt, "date") else edt
+            # ※ by_day のキーは date オブジェクト。str(fd) では引けない。
+            db = by_day.get(fd)
+            if db is None or len(db) < 2:
                 continue
 
-            olp = trigger
-            osp = float(t.get("stop_price", 0) or 0)
-            target_p = float(t.get("target_price", 0) or 0)
-            if osp <= 0 or target_p <= 0:
-                continue
-            d_close = float(t.get("day_close", 0) or 0)
+            trigger, osp, target_p = _prices(olp, osp, otp)
+            d_open, d_low, d_high, d_close = _day_ohlc(df_raw, fd)
 
             entry_fill = short_entry_fill_5m(
-                db, trigger, False, entry_gap_limit=0.03,
-                day_open=float(t.get("day_open", 0) or 0) or None,
-                day_low=float(t.get("day_low", 0) or 0) or None,
-                day_high=float(t.get("day_high", 0) or 0) or None)
+                db, trigger, False, entry_gap_limit=_GAP_LIMIT,
+                day_open=d_open, day_low=d_low, day_high=d_high)
 
             lows = db["low"].to_numpy(dtype=float)
             ei = None
@@ -229,15 +276,14 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
                 "lss_pnl": lss_pnl, "tenkan_pnl": tk_pnl, "trigger": trigger,
             })
 
-        # BTスコアで足切り(compare_lss_rules と同じ考え方)
-        if args.bt_min > 0:
-            try:
-                bt = _calc_bt(bt_trades)[0] if bt_trades else 0
-            except Exception:
-                bt = 0
-            if bt < args.bt_min:
-                continue
+        # BTスコアで足切り(compare_lss_rules と同じ算出)
+        if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
+            continue
         rows.extend(local)
+
+    # この銘柄の5分足はもう使わないので解放する。
+    # (スレッド並列で全銘柄ぶん抱えると SystemError/MemoryError になる)
+    _tks.drop_symbol(sym)
     return rows
 
 

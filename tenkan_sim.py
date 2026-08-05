@@ -85,8 +85,24 @@ def _load_pkl(path: "Path"):
         return None
 
 
+# キャッシュ上限(銘柄数)。分足DataFrameは1銘柄で数十MBになることがあり、
+# 数百銘柄ぶん抱えると Python 3.14 で
+#   SystemError: deallocated bytearray object has exported buffers
+# や MemoryError が出る。古いものから捨てて上限を守る。
+CACHE_MAX_SYMBOLS = 24
+_CACHE_ORDER: list = []
+
+
+def _cache_put(ck, df) -> None:
+    _CACHE[ck] = df
+    _CACHE_ORDER.append(ck)
+    while len(_CACHE_ORDER) > CACHE_MAX_SYMBOLS * 2:   # 1銘柄あたり最大2件(1m/5m)
+        old = _CACHE_ORDER.pop(0)
+        _CACHE.pop(old, None)
+
+
 def _bars_one(symbol: str, minute: int):
-    """minute=1 なら1分足、5 なら5分足。プロセス内キャッシュ。"""
+    """minute=1 なら1分足、5 なら5分足。プロセス内キャッシュ(件数上限あり)。"""
     ck = (symbol, minute)
     if ck in _CACHE:
         return _CACHE[ck]
@@ -96,8 +112,18 @@ def _bars_one(symbol: str, minute: int):
         df = _load_pkl(d1 / f"{code}_1m.pkl") if d1 else None
     else:
         df = _load_pkl(d5 / f"{code}.pkl") if d5 else None
-    _CACHE[ck] = df
+    _cache_put(ck, df)
     return df
+
+
+def drop_symbol(symbol: str) -> None:
+    """指定銘柄の分足をキャッシュから捨てる(処理が終わった銘柄を明示的に解放する用)。"""
+    for m in (1, 5):
+        _CACHE.pop((symbol, m), None)
+        try:
+            _CACHE_ORDER.remove((symbol, m))
+        except ValueError:
+            pass
 
 
 def bars(symbol: str):
@@ -172,6 +198,7 @@ def release_cache() -> None:
     """読み込んだ分足DataFrameを破棄してメモリを返す。
     転換の生成が終わった後に呼ぶ(銘柄詳細タブなど後続処理のメモリを空けるため)。"""
     _CACHE.clear()
+    _CACHE_ORDER.clear()
 
 
 def _rank(score: float) -> str:
@@ -344,9 +371,7 @@ def build_from_nofills(nofills, min_price: float = 0.0, max_price: float = 0.0,
 
         if sym != prev_sym:
             if prev_sym is not None:
-                # キーは (銘柄, 分足種別)。その銘柄ぶんを全部捨てる。
-                for m in (1, 5):
-                    _CACHE.pop((prev_sym, m), None)
+                drop_symbol(prev_sym)   # その銘柄の分足(1m/5m)を捨てる
                 n_sym += 1
                 if n_sym % 50 == 0:
                     gc.collect()
