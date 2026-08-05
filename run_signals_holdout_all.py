@@ -2034,7 +2034,23 @@ if getattr(_args, "long_stop_short", False):
             print(f"[転換] 価格範囲: {_lrv_min_p:g}〜"
                   f"{('無制限' if _lrv_max_p <= 0 else format(_lrv_max_p, 'g'))}円", flush=True)
             _lrv_price_skip = 0
+            # 銘柄順に処理して、銘柄が変わったら前の銘柄の5分足を捨てる。
+            # 全銘柄ぶんの DataFrame をキャッシュに溜めると数百MB〜GB規模になり、
+            # Python 3.14 では unpickle 中に
+            #   SystemError: deallocated bytearray object has exported buffers
+            # や MemoryError が出る。同時に1銘柄しか保持しない設計にする。
+            import gc as _lrv_gc
+            _lrv_unfl_df = _lrv_unfl_df.sort_values(["symbol", "entry_date"])
+            _lrv_prev_sym = None
+            _lrv_done = 0
             for _, _rw in _lrv_unfl_df.iterrows():
+                _cur_sym = str(_rw.get("symbol", ""))
+                if _lrv_prev_sym is not None and _cur_sym != _lrv_prev_sym:
+                    _lrv_cache.pop(_lrv_prev_sym, None)
+                    _lrv_done += 1
+                    if _lrv_done % 50 == 0:
+                        _lrv_gc.collect()
+                _lrv_prev_sym = _cur_sym
                 _oos_ep = float(_rw.get("entry_p", 0) or 0)
                 if _oos_ep > 0:
                     if _lrv_min_p > 0 and _oos_ep < _lrv_min_p:

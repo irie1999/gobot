@@ -199,18 +199,50 @@ def build_from_nofills(nofills, min_price: float = 0.0, max_price: float = 0.0,
                                   / order_limit または entry_p / rec_score
     exclude_keys: 既に生成済みの (symbol, str(date)) 集合。重複を避ける。
     """
+    import gc
+    from collections import defaultdict
+
     out: list[dict] = []
     excl = exclude_keys or set()
     seen: set = set()
     n_price = n_nodata = n_dup = 0
+    # 月別の内訳(なぜその月が出ないかを追えるようにする)
+    m_in: dict = defaultdict(int)     # 入力にあった件数
+    m_out: dict = defaultdict(int)    # 生成できた件数
+    m_nodata: dict = defaultdict(int)  # 分足が無くて落ちた件数
+    m_price: dict = defaultdict(int)   # 価格範囲外で落ちた件数
 
-    for t in nofills or []:
-        sym = str(t.get("symbol") or "")
+    # 銘柄順に処理し、銘柄が変わったら前銘柄の分足を捨てる。
+    # 全銘柄ぶんの DataFrame を抱えると Python 3.14 で
+    #   SystemError: deallocated bytearray object has exported buffers
+    # や MemoryError が出るため、同時に1銘柄しか保持しない。
+    def _key(t):
         d = t.get("entry_d_raw") or t.get("exit_d_raw")
-        if not sym or not d:
-            continue
         if hasattr(d, "date"):
             d = d.date()
+        return (str(t.get("symbol") or ""), str(d))
+
+    items = sorted((t for t in (nofills or []) if _key(t)[0] and _key(t)[1] != "None"),
+                   key=_key)
+    prev_sym = None
+    n_sym = 0
+
+    for t in items:
+        sym = str(t.get("symbol") or "")
+        d = t.get("entry_d_raw") or t.get("exit_d_raw")
+        if hasattr(d, "date"):
+            d = d.date()
+        ym = str(d)[:7]
+        m_in[ym] += 1
+
+        if sym != prev_sym:
+            if prev_sym is not None:
+                _CACHE.pop(prev_sym, None)
+                n_sym += 1
+                if n_sym % 50 == 0:
+                    gc.collect()
+            prev_sym = sym
+
         key = (sym, str(d))
         if key in excl or key in seen:
             n_dup += 1
@@ -218,24 +250,33 @@ def build_from_nofills(nofills, min_price: float = 0.0, max_price: float = 0.0,
 
         ep = float(t.get("order_limit", 0) or 0) or float(t.get("entry_p", 0) or 0)
         if ep > 0:
-            if min_price > 0 and ep < min_price:
+            if (min_price > 0 and ep < min_price) or (max_price > 0 and ep > max_price):
                 n_price += 1
-                continue
-            if max_price > 0 and ep > max_price:
-                n_price += 1
+                m_price[ym] += 1
                 continue
 
         res = simulate(sym, d)
         if res is None:
             n_nodata += 1
+            m_nodata[ym] += 1
             continue
 
         seen.add(key)
+        m_out[ym] += 1
         out.append(make_trade(sym, str(t.get("name") or ""), d, res,
                               float(t.get("rec_score", 0) or 0)))
+
+    _CACHE.clear()
+    gc.collect()
 
     if verbose:
         print(f"[転換/未約定] 生成 {len(out)}件 "
               f"(価格範囲外 {n_price}件 / 分足なし {n_nodata}件 / 重複 {n_dup}件)",
               flush=True)
+        if m_in:
+            print("[転換/未約定] 月別内訳 (入力→生成 / 分足なし / 価格外):", flush=True)
+            for ym in sorted(m_in):
+                print(f"    {ym}  入力{m_in[ym]:>4}件 → 生成{m_out[ym]:>4}件"
+                      f"  (分足なし {m_nodata[ym]:>3} / 価格外 {m_price[ym]:>3})",
+                      flush=True)
     return out
