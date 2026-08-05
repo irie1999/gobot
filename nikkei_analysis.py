@@ -12560,7 +12560,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _detail_tab_ids.append('budget')
         if _budget60_entry_sorted_short:
             _detail_tab_ids.append('budget60')
-    if _LSS_ORDER_MODE and _tenkan_in_sorted:
+    # 転換タブのソース: フィルター(BT下限・予算・直近N日・表示上限)を一切かけず、
+    # 生成された全転換トレード(_EXTRA_TRADES)をそのまま出す。sorted_trades 経由だと
+    # 上流の絞り込みで大半が落ちるため(実測: 264件あるはずが27件しか出ていなかった)。
+    _tenkan_all = [t for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"]
+    if not _tenkan_all:
+        _tenkan_all = list(_tenkan_in_sorted)   # 後方互換フォールバック
+    if _LSS_ORDER_MODE and _tenkan_all:
         _detail_tab_ids.append('tenkan')
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
@@ -12589,24 +12595,55 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
     _tenkan_tab_btn = ""
     _tenkan_tab_pane = ""
-    if _LSS_ORDER_MODE and _tenkan_in_sorted:
+    if _LSS_ORDER_MODE and _tenkan_all:
         _tenkan_entry_sorted = sorted(
-            _tenkan_in_sorted,
+            _tenkan_all,
             key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
             reverse=True,
         )
+        # 転換は「全期間・全件」を出す。_build_entry_grid は strategy=="転換" を
+        # 直近N日カットオフの対象外にしているので、ここでは期間を切らない。
         _tenkan_by_date, _sorted_tenkan_dates = _build_entry_grid(_tenkan_entry_sorted, "tk")
+        _tk_done = [t for t in _tenkan_entry_sorted
+                    if t.get("reason") not in ("発注中", "保有中")]
+        _tk_n = len(_tk_done)
+        _tk_w = sum(1 for t in _tk_done if t.get("pnl", 0) > 0)
+        _tk_pnl = sum(t.get("pnl", 0) for t in _tk_done)
+        _tk_gp = sum(t["pnl"] for t in _tk_done if t.get("pnl", 0) > 0)
+        _tk_gl = abs(sum(t["pnl"] for t in _tk_done if t.get("pnl", 0) < 0))
+        _tk_pf = _tk_gp / _tk_gl if _tk_gl > 0 else float("inf")
+        _tk_pf_s = "∞" if _tk_pf == float("inf") else f"{_tk_pf:.2f}"
+        _tk_wr = _tk_w / _tk_n * 100 if _tk_n else 0
+        _tk_months = sorted({str(t.get("entry_d_raw") or t.get("exit_d_raw"))[:7]
+                             for t in _tenkan_entry_sorted if (t.get("entry_d_raw") or t.get("exit_d_raw"))})
+        _tk_span = f"{_tk_months[0]}〜{_tk_months[-1]}" if _tk_months else "—"
+        _tk_pnl_c = "#4ade80" if _tk_pnl >= 0 else "#f87171"
+        _tk_wr_c = "#4ade80" if _tk_wr >= 55 else ("#facc15" if _tk_wr >= 45 else "#f87171")
         _tenkan_tab_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'tenkan\')" '
             f'style="border-color:#60a5fa">🔄 転換 '
             f'<span style="font-size:0.72rem;color:#93c5fd">'
-            f'({len(_tenkan_in_sorted)}件 直近{_ENTRY_GRID_DAYS}日)</span></button>'
+            f'({len(_tenkan_entry_sorted)}件 全期間)</span></button>'
         )
         _tenkan_tab_pane = (
             f'<div id="detail_{_dseq}_tenkan" class="detail-tab-pane">'
-            f'<p style="color:#60a5fa;font-size:0.8rem;margin-bottom:10px">'
-            f'🔄 <b>転換トレード</b>: lss未約定 → ロング転換（09:09以降最初バー買い / 11:30前最後バー売り）。'
-            f' 全{len(_tenkan_in_sorted)}件。月別サマリー→日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            f'<p style="color:#60a5fa;font-size:0.8rem;margin-bottom:6px">'
+            f'🔄 <b>転換トレード</b>: lss未約定 → ロング転換（09:09以降最初バー買い / '
+            f'11:30前最後バー売り）。<b>フィルターなし・全期間・全{len(_tenkan_entry_sorted)}件</b>'
+            f'（BT下限・予算・直近N日の絞り込みを一切かけていません）。'
+            f'月別サマリー → 日付クリックで取引詳細。</p>'
+            f'<div style="background:#0f1e33;border:1px solid #60a5fa;border-radius:8px;'
+            f'padding:10px 14px;margin:0 0 12px;font-size:0.82rem">'
+            f'<span style="color:#94a3b8">期間 </span><b>{_tk_span}</b>'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">決済 </span><b>{_tk_n}件</b>'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">勝率 </span>'
+            f'<b style="color:{_tk_wr_c}">{_tk_wr:.1f}%</b>'
+            f'&nbsp;({_tk_w}W/{_tk_n - _tk_w}L)'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">PF </span><b>{_tk_pf_s}</b>'
+            f'&nbsp;/&nbsp;<span style="color:#4ade80">+{_tk_gp:,.0f}円</span>'
+            f'&nbsp;<span style="color:#f87171">-{_tk_gl:,.0f}円</span>'
+            f'&nbsp;/&nbsp;<span style="color:#94a3b8">損益 </span>'
+            f'<b style="color:{_tk_pnl_c}">{_tk_pnl:+,.0f}円</b></div>'
             + _month_summary_html(_tenkan_entry_sorted)
             + _month_accordion_html(_tenkan_by_date, _sorted_tenkan_dates, _dseq, "tk",
                                     expand_months=2, expand_tenkan=False)

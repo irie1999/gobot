@@ -2042,10 +2042,81 @@ if getattr(_args, "long_stop_short", False):
                     "order_stop":     0,
                     "order_target":   0,
                 })
-            _na._EXTRA_TRADES = _lrv_extra
-            print(f"転換トレードレコード生成: {len(_lrv_extra)}件 "
+            print(f"転換トレードレコード生成(再シミュ): {len(_lrv_extra)}件 "
                   f"(データ不足スキップ: {_lrv_no_data_e}件 / 価格範囲外スキップ: {_lrv_price_skip}件 "
                   f"[min={_lrv_min_p:g}/max={_lrv_max_p:g}])", flush=True)
+
+            # ── CSV に既に入っている完成済み転換行を取り込む ──────────────────
+            # oos_raw_fold*.csv には run_oos_folds 実行時に計算済みの転換行
+            # (strategy='転換' / filled=1 / pnl あり)が入っている。上の再シミュは
+            # filled=0 行を 5分足で計算し直すので、5分足が手元に無い銘柄・日は
+            # 丸ごと落ちる(実測: 264件あるはずが27件しか出ないケースあり)。
+            # 落ちた分を CSV の完成済み行で補完し、「全転換取引」を欠けなく出す。
+            _lrv_have = {(str(_e.get("symbol")), str(_e.get("entry_d_raw")))
+                         for _e in _lrv_extra}
+            _lrv_csv_tk = _lrv_all_df[_lrv_all_df["strategy"] == "転換"]
+            _lrv_added = 0
+            _lrv_csv_price_skip = 0
+            for _, _rw in _lrv_csv_tk.iterrows():
+                _sym_c = str(_rw.get("symbol", ""))
+                _ed_c = _rw["entry_date"]
+                if (_sym_c, str(_ed_c)) in _lrv_have:
+                    continue
+                _ep_c = float(_rw.get("entry_p", 0) or 0)
+                if _ep_c > 0:
+                    if _lrv_min_p > 0 and _ep_c < _lrv_min_p:
+                        _lrv_csv_price_skip += 1
+                        continue
+                    if _lrv_max_p > 0 and _ep_c > _lrv_max_p:
+                        _lrv_csv_price_skip += 1
+                        continue
+                _pnl_c = float(_rw.get("pnl", 0) or 0)
+                _sc_c = float(_rw.get("bt_score", 0) or 0)
+                if _sc_c >= 80:   _rk_c = "★★★"
+                elif _sc_c >= 60: _rk_c = "★★"
+                elif _sc_c >= 40: _rk_c = "★"
+                else:             _rk_c = "△"
+                _ed_c_str = _ed_c.strftime("%m/%d")
+                # exit_p は CSV に無いので pnl から逆算(100株・コスト込みの近似)。
+                _xp_c = (_ep_c + _pnl_c / _LRV_QTY_E) if _ep_c > 0 else 0.0
+                _lrv_extra.append({
+                    "label":          "転換ロング",
+                    "color":          "#60a5fa",
+                    "symbol":         _sym_c,
+                    "name":           str(_rw.get("name", "")),
+                    "strategy":       "転換",
+                    "score":          _sc_c,
+                    "rank":           _rk_c,
+                    "is_wf":          False,
+                    "wf_score":       0,
+                    "rec_score":      _sc_c,
+                    "preoos_score":   _sc_c,
+                    "signal_dt_raw":  _ed_c,
+                    "bt_type":        "",
+                    "entry_d_raw":    _ed_c,
+                    "exit_d_raw":     _ed_c,
+                    "entry_time":     "09:09",
+                    "pnl":            _pnl_c,
+                    "reason":         "転換決済",
+                    "entry_dt":       _ed_c_str,
+                    "exit_dt":        _ed_c_str,
+                    "entry_p":        _ep_c,
+                    "exit_p":         _xp_c,
+                    "qty":            _LRV_QTY_E,
+                    "hold_days":      0,
+                    "days_neg":       0,
+                    "days_to_fill":   0,
+                    "order_limit":    0,
+                    "order_stop":     0,
+                    "order_target":   0,
+                })
+                _lrv_added += 1
+            print(f"転換トレードレコード補完(CSV既存行): +{_lrv_added}件 "
+                  f"(価格範囲外スキップ: {_lrv_csv_price_skip}件 / "
+                  f"CSV内の転換行 {len(_lrv_csv_tk)}件)", flush=True)
+
+            _na._EXTRA_TRADES = _lrv_extra
+            print(f"転換トレード合計: {len(_lrv_extra)}件", flush=True)
 
             # ── 転換 月別集計を CSV 出力 ──────────────────────────────────────
             if _lrv_extra:
