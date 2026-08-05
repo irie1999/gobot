@@ -9283,9 +9283,6 @@ function switchTbd(id, tab) {{
     # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
     #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
     display_trades = all_trades + _overlap_dropped + list(_EXTRA_TRADES)
-    _extra_in_disp = [t for t in display_trades if t.get("strategy") == "転換"]
-    if _LSS_ORDER_MODE and _extra_in_disp:
-        print(f"[転換診断] display_trades内の転換件数: {len(_extra_in_disp)}", flush=True)
     # 成績に効く要素の分析HTML(詳細分析タブ★効く要素)
     try:
         _factors_html = _factor_analysis_html(display_trades)
@@ -9650,7 +9647,8 @@ function switchTbd(id, tab) {{
         cutoff_d = until - timedelta(days=_ENTRY_GRID_DAYS)
         for _t in trades_list:
             _dk = str(_t.get("entry_d_raw") or _t["exit_d_raw"])
-            if _dk >= str(cutoff_d):
+            # 転換トレードはOOS期間全体を表示するためカットオフを適用しない
+            if _dk >= str(cutoff_d) or _t.get("strategy") == "転換":
                 by_date[_dk].append(_t)
         return by_date, sorted(by_date.keys(), reverse=True)
 
@@ -9677,10 +9675,6 @@ function switchTbd(id, tab) {{
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
-    _extra_in_bt30 = [t for t in _bt30_entry_sorted if t.get("strategy") == "転換"]
-    if _LSS_ORDER_MODE and _extra_in_bt30:
-        print(f"[転換診断] _bt30_entry_sorted内の転換件数: {len(_extra_in_bt30)}", flush=True)
-
     # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の成績。lssのみ。
     #  ・「終値で判断」: 予算に収まるかは注文トリガー価格(order_limit=前日終値ベース)×株数で判定
     #    (約定値ではない=発注時点で確定する必要資金)。
@@ -9816,9 +9810,6 @@ function switchTbd(id, tab) {{
     # 予算タブは _BT_TAB_MIN(既定50)以上のみで発注。BT降順で埋めるので実質高BTのみだが、
     # 下限を明示的に _BT_TAB_MIN に揃える(『BT50以上』表示と一致)。
     _budget_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN))
-    _extra_in_budget = [t for t in _budget_entry_sorted if t.get("strategy") == "転換"]
-    if _LSS_ORDER_MODE:
-        print(f"[転換診断] _budget_entry_sorted内の転換件数: {len(_extra_in_budget)} / 全体: {len(_budget_entry_sorted)}", flush=True)
     # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
@@ -10035,9 +10026,10 @@ function switchTbd(id, tab) {{
         by_month = _group_by_month(sorted_dates)
         html = ""
         for i, (ym, dks) in enumerate(by_month.items()):
-            is_open   = (i < expand_months)
             ym_key    = ym.replace("-", "")
             all_t     = [t for dk in dks for t in by_date[dk]]
+            has_tenkan  = any(t.get("strategy") == "転換" for t in all_t)
+            is_open     = (i < expand_months) or has_tenkan
             done_m    = [t for t in all_t if t.get("reason") not in ("発注中", "保有中")]
             wins_m    = sum(1 for t in done_m if t["pnl"] > 0)
             wr_m      = wins_m / len(done_m) * 100 if done_m else 0
