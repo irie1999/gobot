@@ -57,7 +57,13 @@ ap.add_argument("--stop-slip", type=float, default=0.005,
 ap.add_argument("--strategies", type=str, default="",
                 help="カンマ区切りで戦略を絞る。例: A7,RSI2,VOLTF  (空=全戦略)。"
                      "使用可能: MACD/A7/RSI2/DON/VOL/MOM/MACDTF/VOLTF など")
+ap.add_argument("--legacy-stop-fill", action="store_true",
+                help="net現実の損切り約定を旧モデル(約定バー以外は全バー窓埋め)に戻す。"
+                     "旧モデルは delay 系に構造的不利(約定バーで損切りできないので窓埋めが"
+                     "100%%課される)があり、delay1 を過小評価する。既定は補正版"
+                     "(=損切り注文を新規に置いたバーだけ窓埋め、以降は板の逆指値でライン約定)")
 args = ap.parse_args()
+_LEGACY_STOP_FILL = args.legacy_stop_fill
 
 import backtest_limit_entry as ble
 from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
@@ -259,8 +265,27 @@ def _exit(opens, highs, lows, closes, ei, stop_from, stop_p, target_p, day_close
     eff_stop_p = stop_p   # BE発動後に entry_fill に更新される
 
     def _stop_fills(px, j):
+        """損切り発火時の買い戻し価格3通り(line=楽観 / real=現実 / slip=保守)。
+
+        現実(real)の考え方 — 窓埋め(始値約定)が起きるのは『損切り注文を新規に板へ
+        置いた瞬間、すでに価格がラインを超えていた』ときだけ:
+          ・base(stop_from==ei): 約定と同時に損切りを置く。置いた時点の価格は約定値
+            ≒ラインの下なので、その後の発火は板の逆指値がラインで約定する → line。
+          ・delay1(stop_from==ei+1): 次の5分グリッドで初めて損切りを置く。その瞬間
+            (=バー stop_from の始値)にラインを超えていれば即時成行 → max(line, open)。
+            超えていなければ注文は板に載るので、以降の発火は line。
+        旧実装は『j != ei の全バー』に窓埋めを課していたため、約定バーで損切りできる
+        base はほぼ免除、定義上できない delay1 は全件課金という非対称が生じ、delay1 を
+        構造的に過小評価していた(差 -672万円/1,433件 = 1件4,700円 ≒ 株価1.9%は非現実的)。
+        旧挙動は --legacy-stop-fill で再現できる。
+        """
         line = float(px)
-        real = line if j == ei else max(line, float(opens[j]))   # 次足以降は窓埋め(始値)
+        if _LEGACY_STOP_FILL:
+            real = line if j == ei else max(line, float(opens[j]))
+        else:
+            # 注文を置いた最初のバーだけ窓埋め。base(stop_from==ei)は対象外。
+            real = (max(line, float(opens[j]))
+                    if (j == stop_from and stop_from > ei) else line)
         return line, real, real * (1.0 + _STOP_SLIP)
 
     for j in range(ei, n):
@@ -557,7 +582,14 @@ def main():
               f"{t['tgt']:>5}{t['stop']:>5}{t['close']:>5}"
               f"{t['pnl_line']:>+13,.0f}{t['pnl_real']:>+13,.0f}{t['pnl_slip']:>+13,.0f}"
               f"{d:>+14,.0f}{tag}")
-    print("\n※ net楽観=stopちょうど / net現実=次足損切りは窓埋め(始値約定)・同バーはstop / net保守=現実+0.5%")
+    if _LEGACY_STOP_FILL:
+        print("\n※ net現実=【旧モデル】約定バー以外は全バー窓埋め(始値約定)。"
+              "delay系は約定バーで損切りできないため窓埋めが100%課され、構造的に過小評価される。")
+    else:
+        print("\n※ net現実=【補正版】損切り注文を新規に板へ置いたバーだけ窓埋め(始値約定)。"
+              "以降は板の逆指値がライン約定。base(約定と同時に設置)は窓埋め対象外。"
+              "旧モデルは --legacy-stop-fill。")
+    print("※ net楽観=stopちょうど / net保守=現実+0.5%")
     _pop = f"BT{args.bt_min:.0f}以上(実際に投資する集団)" if args.bt_min > 0 else "全選定ペア(BTフィルタ無し)"
     print(f"※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
           f"base vs delay1 の『net現実』差が期待できる現実的な改善幅。母集団={_pop}。")
