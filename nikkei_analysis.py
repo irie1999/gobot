@@ -9535,7 +9535,15 @@ function switchTbd(id, tab) {{
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
-    trade_rows_all  = _rows_for(sorted_trades, f"直近{days}日に決済した取引なし")
+    # 全取引タブ: 転換トレードは表示上限カット外でも必ず含める
+    _tenkan_in_sorted = [t for t in sorted_trades if t.get("strategy") == "転換"]
+    if _DETAIL_ROW_CAP and len(sorted_trades) > _DETAIL_ROW_CAP and _tenkan_in_sorted:
+        _capped_ids_all = {id(t) for t in sorted_trades[:_DETAIL_ROW_CAP]}
+        _tenkan_extra_all = [t for t in _tenkan_in_sorted if id(t) not in _capped_ids_all]
+        _sorted_trades_for_all = sorted_trades[:_DETAIL_ROW_CAP] + _tenkan_extra_all
+    else:
+        _sorted_trades_for_all = sorted_trades
+    trade_rows_all  = _rows_for(_sorted_trades_for_all, f"直近{days}日に決済した取引なし", cap=0)
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
     trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
 
@@ -13156,6 +13164,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
+{'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;border-left:3px solid #60a5fa;padding-left:8px">🔄 転換トレード(lss未約定→ロング転換): <b>' + str(len(_tenkan_in_sorted)) + '件</b> 含む（直近' + str(_DETAIL_ROW_CAP) + '件上限の外でも追加表示）</p>' if _tenkan_in_sorted else ''}
 <table>
   <thead><tr>
     <th>決済日</th>
