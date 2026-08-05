@@ -9529,6 +9529,7 @@ function switchTbd(id, tab) {{
     # 「BTスコア○以上」タブの下限。既定50(env LSS_BT_TAB_MIN で変更可。30に戻すなら =30)。
     _BT_TAB_MIN = int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
     bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= _BT_TAB_MIN]
+    bt60_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 60]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
         done_trades,
@@ -9551,6 +9552,7 @@ function switchTbd(id, tab) {{
     trade_rows_all  = _rows_for(_sorted_trades_for_all, f"直近{days}日に決済した取引なし", cap=0)
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
     trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
+    trade_rows_bt60 = _rows_for(bt60_trades,   "BT60以上の取引なし")
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -9881,6 +9883,10 @@ function switchTbd(id, tab) {{
     _budget_entry_sorted_short = [t for t in _budget_entry_sorted if t.get("strategy") != "転換"]
     _budget_entry_by_date_short, _sorted_budget_entry_dates_short = _build_entry_grid(_budget_entry_sorted_short, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
+    # BT70以上のみ投資版予算シミュ（高品質集中）。
+    _budget60_entry_sorted = _run_budget_sim(60) if _LSS_ORDER_MODE else []
+    _budget60_entry_sorted_short = [t for t in _budget60_entry_sorted if t.get("strategy") != "転換"]
+    _budget60_entry_by_date_short, _sorted_budget60_entry_dates_short = _build_entry_grid(_budget60_entry_sorted_short, "q6")
     _budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates = _build_entry_grid(_budget_narrow_entry_sorted, "qn")
     _budget_fill_entry_by_date, _sorted_budget_fill_entry_dates = _build_entry_grid(_budget_fill_entry_sorted, "qf")
     _budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates = _build_entry_grid(_budget_fill_narrow_entry_sorted, "qfn")
@@ -12548,17 +12554,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _DETAIL_TAB_SEQ += 1
     _dseq = _DETAIL_TAB_SEQ
 
-    # 取引明細タブのID順(ボタン描画順と一致させる。lssのみ budget を bt40entry の後に挿入)。
-    _detail_tab_ids = ['all', 'bt40', 'bt70', 'entry', 'bt40entry']
+    # 取引明細タブのID順(ボタン描画順と一致させる)。
+    _detail_tab_ids = ['all', 'bt60', 'entry']
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('budget')
-        if _budget50_entry_sorted:
-            _detail_tab_ids.append('budget50')
-        if _budget_fill_entry_sorted:
-            _detail_tab_ids.append('budget_fill')
-        if _budget_mlot_entry_sorted:
-            _detail_tab_ids.append('budget_mlot')
-    # bt70entry / exit / bt70exit は削除済み（タブ整理）
+        if _budget60_entry_sorted_short:
+            _detail_tab_ids.append('budget60')
+    if _LSS_ORDER_MODE and _tenkan_in_sorted:
+        _detail_tab_ids.append('tenkan')
+    _detail_tab_ids.append('bt70entry')
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
     # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
@@ -12609,6 +12613,25 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                     expand_months=2, expand_tenkan=False)
             + '</div>'
         )
+
+    # BT60以上のみ投資版(高品質集中)予算タブ。
+    _bt70liq_btn = ""
+    _bt70liq_pane = ""
+    if _LSS_ORDER_MODE and _budget60_entry_sorted_short:
+        _bt70liq_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget60\')" '
+            f'style="border-color:#a78bfa">💰 {_budget_man}万円×BT降順×日別 (BT60以上) '
+            f'<span style="font-size:0.72rem;color:#c4b5fd">'
+            f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+        _bt70liq_pane = (
+            f'<div id="detail_{_dseq}_budget60" class="detail-tab-pane">'
+            f'<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">'
+            f'💰 <b>BTスコア60以上のみに絞った</b>予算シミュ。毎日BT降順で'
+            f'<b>{_budget_man}万円</b>まで注文した場合の約定トレード（ショートのみ）。'
+            f'日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_budget60_entry_sorted_short)
+            + _month_accordion_html(_budget60_entry_by_date_short, _sorted_budget60_entry_dates_short, _dseq, "q6")
+            + '</div>')
 
     # BT50以上のみ投資版(高品質集中)タブ。
     _bt50liq_btn = ""
@@ -13160,18 +13183,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上 <span style="font-size:0.72rem;color:#86efac">({len(bt40_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70')">BT70以上 <span style="font-size:0.72rem;color:#94a3b8">({len(bt70_trades)})</span></button>
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt60')" style="border-color:#16a34a">🎯 BT60以上 <span style="font-size:0.72rem;color:#86efac">({len(bt60_trades)})</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_bt40liq_btn}
+  {_bt70liq_btn}
   {_tenkan_tab_btn}
-  {_bt50liq_btn}
-  {_fill_liq_btn}
-  {_mlot_liq_btn}
-  {_narrow_liq_btn}
-  {_fill_narrow_liq_btn}
-  {_mlot_narrow_liq_btn}
+  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 {'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;border-left:3px solid #60a5fa;padding-left:8px">🔄 転換トレード(lss未約定→ロング転換): <b>' + str(len(_tenkan_in_sorted)) + '件</b> 含む（直近' + str(_DETAIL_ROW_CAP) + '件上限の外でも追加表示）</p>' if _tenkan_in_sorted else ''}
@@ -13187,9 +13204,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <tbody>{trade_rows_all}</tbody>
 </table>
 </div>
-<div id="detail_{_dseq}_bt40" class="detail-tab-pane">
+<div id="detail_{_dseq}_bt60" class="detail-tab-pane">
 <p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">
-🎯 BTスコア{_BT_TAB_MIN}以上だけを抽出。このレポートのシグナル時BT(表示BTと同一)で判定。{len(bt40_trades)}件。</p>
+🎯 BTスコア60以上だけを抽出。このレポートのシグナル時BT(表示BTと同一)で判定。{len(bt60_trades)}件。</p>
 <table>
   <thead><tr>
     <th>決済日</th>
@@ -13199,20 +13216,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
     <th>損益</th><th>理由</th><th>エントリー</th>
   </tr></thead>
-  <tbody>{trade_rows_bt40}</tbody>
-</table>
-</div>
-<div id="detail_{_dseq}_bt70" class="detail-tab-pane">
-<table>
-  <thead><tr>
-    <th>決済日</th>
-    <th style="text-align:left">銘柄</th>
-    <th>戦略</th>
-    <th>設定</th>
-    <th>約定値<br><small style="color:#94a3b8">逆指値/指値</small></th><th style="color:#f87171">損切り</th><th style="color:#4ade80">目標</th><th>現在値</th><th>決済値</th><th>株数</th><th>保有</th><th>遅延</th>
-    <th>損益</th><th>理由</th><th>エントリー</th>
-  </tr></thead>
-  <tbody>{trade_rows_bt70}</tbody>
+  <tbody>{trade_rows_bt60}</tbody>
 </table>
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
@@ -13220,13 +13224,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_summary_html(entry_sorted_trades)}
 {_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
 </div>
-<div id="detail_{_dseq}_bt40entry" class="detail-tab-pane">
-<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">🎯 BTスコア30以上（赤字の0-29帯を除外）のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_summary_html(_bt40_entry_sorted)}
-{_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
-</div>
 {_bt40liq_pane}
+{_bt70liq_pane}
 {_tenkan_tab_pane}
+<div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
+<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
+{_month_summary_html(_bt70_entry_sorted)}
+{_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
+</div>
 {_bt50liq_pane}
 {_fill_liq_pane}
 {_mlot_liq_pane}
