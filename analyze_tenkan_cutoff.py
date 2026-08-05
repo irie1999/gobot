@@ -50,7 +50,14 @@ ap.add_argument("--symbols-file", type=str, default=None)
 ap.add_argument("--cutoffs", type=str, default="09:05,09:10,09:15,09:20,09:30,10:00,11:00",
                 help="締切時刻のカンマ区切り。この時刻までに約定しなければ転換する")
 ap.add_argument("--by-month", action="store_true")
+ap.add_argument("--bt-window", type=int, default=420,
+                help="BTスコア算出のためにバックテストを何日ぶん余分に回すか(既定420)。"
+                     "小さくすると大幅に速くなるがBTスコアの精度が落ちる。"
+                     "速く回したいときは 90 程度から。--bt-min 0 なら自動で30になる")
 args = ap.parse_args()
+
+# BTフィルターを使わないなら長い窓は不要 → 大幅に速くなる
+_EXTRA = 30 if args.bt_min <= 0 else max(30, args.bt_window)
 
 import backtest_limit_entry as ble
 from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
@@ -194,7 +201,7 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
     if not by_day:
         return rows
     try:
-        df_raw = ble.fetch(sym, args.days + 420)
+        df_raw = ble.fetch(sym, args.days + _EXTRA)
     except Exception:
         return rows
     if df_raw is None or df_raw.empty:
@@ -208,7 +215,7 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
         try:
             df_ind = params[0](df_raw.copy())
             r = ble.run_limit_backtest(sym, name, df_ind, lambda d: d, 0.0,
-                                       args.sm, args.tm, args.days + 420, strat,
+                                       args.sm, args.tm, args.days + _EXTRA, strat,
                                        entry_type="stop_sell", max_hold=0)
         except Exception:
             continue
@@ -286,8 +293,16 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
     return rows
 
 
+import time as _t
+print(f"[窓] バックテスト {args.days + _EXTRA}日 "
+      f"(--days {args.days} + BT用 {_EXTRA}日)  workers={args.workers}", flush=True)
+if _EXTRA >= 400:
+    print("   ※ 重い場合は --bt-window 90 で大幅に短縮できます"
+          "(BTスコアの精度は落ちます)。--limit 100 で試し打ちも可。", flush=True)
+
 ALL: list[dict] = []
 _done = 0
+_t0 = _t.time()
 with ThreadPoolExecutor(max_workers=args.workers) as ex:
     futs = {ex.submit(_scan, s, n, st): s for s, n, st in PAIRS}
     for fu in as_completed(futs):
@@ -296,8 +311,11 @@ with ThreadPoolExecutor(max_workers=args.workers) as ex:
         except Exception:
             pass
         _done += 1
-        if _done % 50 == 0:
-            print(f"  ...{_done}/{len(PAIRS)}銘柄  シグナル{len(ALL)}件", flush=True)
+        if _done % 25 == 0 or _done == len(PAIRS):
+            _el = _t.time() - _t0
+            _eta = _el / _done * (len(PAIRS) - _done)
+            print(f"  ...{_done}/{len(PAIRS)}銘柄  シグナル{len(ALL)}件  "
+                  f"経過{_el / 60:.1f}分 / 残り約{_eta / 60:.1f}分", flush=True)
 
 if not ALL:
     print("[ERROR] シグナルが1件も取れませんでした。--days / --bt-min / 5分足データを確認してください。")
