@@ -1987,7 +1987,18 @@ if getattr(_args, "long_stop_short", False):
                 print(f"[転換] bt_score分布: BT≥40={_sc_ge40}件 / BT≥30={_sc_ge30}件 / 全体={len(_sc_vals)}件", flush=True)
             _lrv_extra = []
             _lrv_no_data_e = 0
+            _lrv_min_p = _args.min_price if _args.min_price and _args.min_price > 0 else 0.0
+            _lrv_max_p = next((p for p in _price_list if p > 0), 0)
+            _lrv_price_skip = 0
             for _, _rw in _lrv_unfl_df.iterrows():
+                _oos_ep = float(_rw.get("entry_p", 0) or 0)
+                if _oos_ep > 0:
+                    if _lrv_min_p > 0 and _oos_ep < _lrv_min_p:
+                        _lrv_price_skip += 1
+                        continue
+                    if _lrv_max_p > 0 and _oos_ep > _lrv_max_p:
+                        _lrv_price_skip += 1
+                        continue
                 _res = _lrv_sim_e(_rw["symbol"], _rw["entry_date"])
                 if _res is None:
                     _lrv_no_data_e += 1
@@ -2033,7 +2044,8 @@ if getattr(_args, "long_stop_short", False):
                 })
             _na._EXTRA_TRADES = _lrv_extra
             print(f"転換トレードレコード生成: {len(_lrv_extra)}件 "
-                  f"(データ不足スキップ: {_lrv_no_data_e}件)", flush=True)
+                  f"(データ不足スキップ: {_lrv_no_data_e}件 / 価格範囲外スキップ: {_lrv_price_skip}件 "
+                  f"[min={_lrv_min_p:g}/max={_lrv_max_p:g}])", flush=True)
 
             # ── 転換 月別集計を CSV 出力 ──────────────────────────────────────
             if _lrv_extra:
