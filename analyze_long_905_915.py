@@ -234,9 +234,11 @@ def main():
     _build_html(ok_df, tot, wr, n, avg, args)
 
 def _build_html(ok_df, tot, wr, n, avg, args):
-    monthly = ok_df.groupby(pd.to_datetime(ok_df["date"]).dt.to_period("M")).agg(
+    ok_df = ok_df.copy()
+    ok_df["_month"] = pd.to_datetime(ok_df["date"]).dt.to_period("M")
+    monthly = ok_df.groupby("_month").agg(
         trades=("pnl", "count"), pnl=("pnl", "sum"), wr=("win", "mean")
-    ).reset_index()
+    ).reset_index().rename(columns={"_month": "month"})
     monthly["wr"] = (monthly["wr"] * 100).round(1)
 
     # BT帯別
