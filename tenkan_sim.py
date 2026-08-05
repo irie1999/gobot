@@ -221,6 +221,83 @@ def make_trade(symbol: str, name: str, d: "date", res: dict,
     }
 
 
+def build_from_orders_csvs(search_dir=".", min_price: float = 0.0,
+                           max_price: float = 0.0, verbose: bool = True):
+    """orders_<yyyyMMdd>.csv (.\\fills が出力) から『実際に約定しなかった売り注文』を
+    拾って転換トレードを作る。
+
+    バックテストの約定判定(約定率≈90%)は実際(実測21%)と大きくズレるため、実注文の
+    記録がある日はそちらが正しい母集団になる。返り値の dates に含まれる日は、
+    バックテスト由来の転換を捨ててこちらで置き換えること。
+
+    Returns: (trades, dates)  dates = 実注文データで置き換えた日付の集合
+    """
+    import csv as _csv
+    from datetime import datetime as _dt
+    from pathlib import Path as _P
+
+    trades: list[dict] = []
+    dates: set = set()
+    files = sorted(_P(search_dir).glob("orders_*.csv"))
+    if not files:
+        return trades, dates
+
+    n_file = 0
+    for fp in files:
+        stem = fp.stem.replace("orders_", "")
+        if len(stem) != 8 or not stem.isdigit():
+            continue
+        try:
+            d = _dt.strptime(stem, "%Y%m%d").date()
+        except Exception:
+            continue
+        try:
+            with open(fp, encoding="utf-8-sig", newline="") as f:
+                rows = list(_csv.DictReader(f))
+        except Exception:
+            continue
+        if not rows:
+            continue
+
+        n_file += 1
+        seen: set = set()
+        made = 0
+        for r in rows:
+            if str(r.get("side", "")).strip() != "売":
+                continue
+            try:
+                if int(float(r.get("cum_qty") or 0)) > 0:
+                    continue          # 約定した = lss成立 → 転換の対象外
+            except Exception:
+                continue
+            code = str(r.get("code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+
+            sym = code if code.endswith(".T") else code + ".T"
+            res = simulate(sym, d)
+            if res is None:
+                continue
+            # 価格レンジは転換の約定値(=当日の買値)で判定する。
+            if min_price > 0 and res["buy_p"] < min_price:
+                continue
+            if max_price > 0 and res["buy_p"] > max_price:
+                continue
+            trades.append(make_trade(sym, str(r.get("name", "")), d, res, 0.0))
+            made += 1
+
+        if made:
+            dates.add(str(d))
+
+    if verbose and n_file:
+        print(f"[転換/実注文] orders_*.csv {n_file}ファイルから {len(trades)}件生成 "
+              f"(対象日 {len(dates)}日: {', '.join(sorted(dates))})", flush=True)
+        print("   ※ この日はバックテスト判定ではなく実際の未約定注文を母集団にします。",
+              flush=True)
+    return trades, dates
+
+
 def build_from_nofills(nofills, min_price: float = 0.0, max_price: float = 0.0,
                        exclude_keys=None, verbose: bool = True) -> list[dict]:
     """未約定シグナル(all_nofills 相当)から転換トレードを生成する。

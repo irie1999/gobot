@@ -9300,6 +9300,13 @@ function switchTbd(id, tab) {{
             import tenkan_sim as _tks
             _tk_excl = {(str(t.get("symbol")), str(t.get("entry_d_raw") or t.get("exit_d_raw")))
                         for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"}
+            # ① 実注文の記録(orders_<日付>.csv)がある日は、そちらが正しい母集団。
+            #    バックテストの約定判定は実際より約定率が高く(90% vs 実測21%)、
+            #    転換の母集団を過小評価するため、実データがある日は置き換える。
+            _tk_real, _tk_real_dates = _tks.build_from_orders_csvs(
+                ".", min_price=_PNL_ENTRY_MIN_PRICE, max_price=_PNL_ENTRY_MAX_PRICE,
+                verbose=True)
+            # ② 残りの日はバックテストの未約定シグナルから作る。
             _tenkan_auto = _tks.build_from_nofills(
                 all_nofills,
                 min_price=_PNL_ENTRY_MIN_PRICE,
@@ -9307,6 +9314,18 @@ function switchTbd(id, tab) {{
                 exclude_keys=_tk_excl,
                 verbose=True,
             )
+            if _tk_real_dates:
+                _before = len(_tenkan_auto)
+                _tenkan_auto = [t for t in _tenkan_auto
+                                if str(t.get("entry_d_raw")) not in _tk_real_dates]
+                # CSV由来(_EXTRA_TRADES)も同じ日は実データで置き換える
+                _EXTRA_TRADES[:] = [t for t in _EXTRA_TRADES
+                                    if not (t.get("strategy") == "転換"
+                                            and str(t.get("entry_d_raw")) in _tk_real_dates)]
+                if _before != len(_tenkan_auto):
+                    print(f"[転換] 実注文データのある{len(_tk_real_dates)}日は"
+                          f"バックテスト由来{_before - len(_tenkan_auto)}件を置換", flush=True)
+            _tenkan_auto = _tk_real + _tenkan_auto
             _tks.release_cache()   # 5分足DataFrameを解放(銘柄詳細ループのメモリを空ける)
         except Exception as _tk_exc:
             print(f"[WARN] 未約定シグナルからの転換生成に失敗: {_tk_exc}", flush=True)
