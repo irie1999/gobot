@@ -9536,13 +9536,18 @@ function switchTbd(id, tab) {{
         reverse=True
     )
     # 全取引タブ: 転換トレードは表示上限カット外でも必ず含める
+    # 「全部」タブは参照用途が主なので通常トレードのキャップを小さく抑える(高速化)。
+    # BT40+タブが主力分析のため全部タブは直近300件＋転換全件で十分。
+    _ALL_TAB_CAP = min(_DETAIL_ROW_CAP, 300)
     _tenkan_in_sorted = [t for t in sorted_trades if t.get("strategy") == "転換"]
-    if _DETAIL_ROW_CAP and len(sorted_trades) > _DETAIL_ROW_CAP and _tenkan_in_sorted:
-        _capped_ids_all = {id(t) for t in sorted_trades[:_DETAIL_ROW_CAP]}
-        _tenkan_extra_all = [t for t in _tenkan_in_sorted if id(t) not in _capped_ids_all]
-        _sorted_trades_for_all = sorted_trades[:_DETAIL_ROW_CAP] + _tenkan_extra_all
-    else:
-        _sorted_trades_for_all = sorted_trades
+    _non_tenkan_sorted = [t for t in sorted_trades if t.get("strategy") != "転換"]
+    _capped_non_tenkan = _non_tenkan_sorted[:_ALL_TAB_CAP]
+    _capped_ids_all = {id(t) for t in _capped_non_tenkan}
+    _tenkan_extra_all = [t for t in _tenkan_in_sorted if id(t) not in _capped_ids_all]
+    _sorted_trades_for_all = sorted(
+        _capped_non_tenkan + _tenkan_extra_all,
+        key=lambda x: x["exit_d_raw"], reverse=True
+    )
     trade_rows_all  = _rows_for(_sorted_trades_for_all, f"直近{days}日に決済した取引なし", cap=0)
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
     trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
@@ -13341,6 +13346,53 @@ function toggleAnalysis(seq) {{
   if (btn) btn.textContent = (show ? '▼ 詳細分析（スクリプト別・スコア別・銘柄別）を隠す'
                                    : '▶ 詳細分析（スクリプト別・スコア別・銘柄別）を表示');
 }}
+
+// === タブ遅延DOM (Lazy Tab DOM) ===
+// 非アクティブな .detail-tab-pane / .tab-pane の DOM ノードを DOMContentLoaded 後に
+// <template> へ退避し、ブラウザが管理するライブDOMを大幅削減。
+// タブ初回クリック時に注入することで描画スループットを維持する。
+(function() {{
+  var _inj = Object.create(null);
+
+  var _orig = switchDetailTab;
+  switchDetailTab = function(seq, which) {{
+    var pid = 'detail_' + seq + '_' + which;
+    if (!_inj[pid]) {{
+      var tpl = document.getElementById('_ltpl_' + pid);
+      var pane = document.getElementById(pid);
+      if (tpl && pane) {{ pane.appendChild(tpl.content); tpl.parentNode.removeChild(tpl); }}
+      _inj[pid] = true;
+    }}
+    _orig(seq, which);
+  }};
+
+  var _origTab = switchTab;
+  switchTab = function(id) {{
+    var tpl = document.getElementById('_ltpl_tab_' + id);
+    var pane = document.getElementById(id);
+    if (tpl && pane) {{ pane.appendChild(tpl.content); tpl.parentNode.removeChild(tpl); }}
+    _origTab(id);
+  }};
+
+  document.addEventListener('DOMContentLoaded', function() {{
+    // 1) 非アクティブ外側タブを退避（最大の削減効果）
+    document.querySelectorAll('.tab-pane:not(.active)').forEach(function(p) {{
+      if (!p.id || !p.firstChild) return;
+      var t = document.createElement('template');
+      t.id = '_ltpl_tab_' + p.id;
+      while (p.firstChild) t.content.appendChild(p.firstChild);
+      p.after(t);
+    }});
+    // 2) アクティブ外側タブ内の非アクティブ内側タブを退避
+    document.querySelectorAll('.detail-tab-pane:not(.active)').forEach(function(p) {{
+      if (!p.id || !p.firstChild) return;
+      var t = document.createElement('template');
+      t.id = '_ltpl_' + p.id;
+      while (p.firstChild) t.content.appendChild(p.firstChild);
+      p.after(t);
+    }});
+  }});
+}})();
 </script>"""
 
 
