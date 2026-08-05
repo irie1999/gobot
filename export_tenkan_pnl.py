@@ -4,7 +4,11 @@ OOS CSV (oos_raw_fold*.csv) の filled=0 行を対象に
 09:09成行買い → 11:30前場引け成行売り のシミュレーションを行い
 tenkan_pnl_{date}.csv を出力する。
 
-使い方:
+使い方（swingtrade フォルダから実行する場合）:
+    python ..\gobot\export_tenkan_pnl.py --oos-dir ..\gobot
+    python ..\gobot\export_tenkan_pnl.py --oos-dir ..\gobot --bt-min 30
+
+使い方（gobot フォルダから実行する場合）:
     python export_tenkan_pnl.py
     python export_tenkan_pnl.py --min-price 1000 --max-price 6000
     python export_tenkan_pnl.py --bt-min 30          # BT30以上のみ
@@ -161,6 +165,8 @@ def main():
                     help="エントリー価格上限 (default: 6000)")
     ap.add_argument("--bt-min", type=float, default=0.0,
                     help="BT スコア下限 (default: 0 = 全件)")
+    ap.add_argument("--oos-dir", type=str, default="",
+                    help="oos_raw_fold*.csv があるディレクトリ (default: カレントディレクトリ)")
     ap.add_argument("--output", type=str, default="",
                     help="出力ファイル名 (default: tenkan_pnl_YYYY-MM-DD.csv)")
     args = ap.parse_args()
@@ -169,10 +175,12 @@ def main():
     out_path = args.output or f"tenkan_pnl_{today_str}.csv"
 
     # OOS CSV 読み込み
-    csvs = sorted(glob.glob("oos_raw_fold*.csv"))
+    oos_dir = Path(args.oos_dir).resolve() if args.oos_dir else Path.cwd()
+    csvs = sorted(oos_dir.glob("oos_raw_fold*.csv"))
     if not csvs:
-        print("[ERROR] oos_raw_fold*.csv が見つかりません。")
-        print("  gobot フォルダで実行してください。")
+        print(f"[ERROR] oos_raw_fold*.csv が見つかりません。(検索先: {oos_dir})")
+        print("  --oos-dir で gobot フォルダを指定してください。")
+        print("  例: python export_tenkan_pnl.py --oos-dir ..\\gobot")
         sys.exit(1)
 
     print(f"OOS CSV: {len(csvs)} 件 読み込み中...", flush=True)
