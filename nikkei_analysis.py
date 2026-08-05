@@ -9877,6 +9877,9 @@ function switchTbd(id, tab) {{
         except Exception as _ce:
             print(f"[予算月別CSV] 出力失敗: {_ce}", flush=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
+    # 400万円タブ用: ショートのみ（転換トレードを除外）
+    _budget_entry_sorted_short = [t for t in _budget_entry_sorted if t.get("strategy") != "転換"]
+    _budget_entry_by_date_short, _sorted_budget_entry_dates_short = _build_entry_grid(_budget_entry_sorted_short, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
     _budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates = _build_entry_grid(_budget_narrow_entry_sorted, "qn")
     _budget_fill_entry_by_date, _sorted_budget_fill_entry_dates = _build_entry_grid(_budget_fill_entry_sorted, "qf")
@@ -10037,14 +10040,14 @@ function switchTbd(id, tab) {{
             result[ym].append(dk)
         return result
 
-    def _month_accordion_html(by_date, sorted_dates, dseq, pfx, expand_months=2):
-        """月折りたたみアコーディオン＋インライン詳細HTML生成。"""
+    def _month_accordion_html(by_date, sorted_dates, dseq, pfx, expand_months=2, expand_tenkan=True):
+        """月折りたたみアコーディオン＋インライン詳細HTML生成。expand_tenkan=False なら転換月を自動展開しない。"""
         by_month = _group_by_month(sorted_dates)
         html = ""
         for i, (ym, dks) in enumerate(by_month.items()):
             ym_key    = ym.replace("-", "")
             all_t     = [t for dk in dks for t in by_date[dk]]
-            has_tenkan  = any(t.get("strategy") == "転換" for t in all_t)
+            has_tenkan  = expand_tenkan and any(t.get("strategy") == "転換" for t in all_t)
             is_open     = (i < expand_months) or has_tenkan
             done_m    = [t for t in all_t if t.get("reason") not in ("発注中", "保有中")]
             wins_m    = sum(1 for t in done_m if t["pnl"] > 0)
@@ -12567,18 +12570,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _detail_tab_ids.append('bt70exit')
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
-    # 予算固定(400万円/日・BT降順)タブ(lssのみ)。ボタンとペインをここで組み立てる。
+    # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
     _bt40liq_btn = ""
     _bt40liq_pane = ""
     if _LSS_ORDER_MODE:
-        _tenkan_in_budget = sum(1 for t in _budget_entry_sorted if t.get("strategy") == "転換")
-        _tenkan_note = (
-            f'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;'
-            f'border-left:3px solid #60a5fa;padding-left:8px">'
-            f'🔄 転換トレード(lss未約定→ロング転換): <b>{_tenkan_in_budget}件</b> 含む '
-            f'<span style="font-weight:400;color:#94a3b8">(↑月別テーブルと日別詳細に混合表示)'
-            f'</span></p>'
-        ) if _tenkan_in_budget > 0 else ""
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
             f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
@@ -12590,12 +12585,39 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'💰 毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が '
             f'<b>{_budget_man}万円</b> に収まるだけ<b>注文</b>した場合の「約定したトレード」を表示'
             f'（同日決済なので予算は毎日リセット）。<b>不約定の注文も発注枠を消費</b>する'
-            f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。日付クリックで詳細'
+            f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。'
+            f'<b>ショートのみ表示</b>（転換は転換タブ参照）。日付クリックで詳細'
             f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
-            + _tenkan_note
-            + _month_summary_html(_budget_entry_sorted)
-            + _month_accordion_html(_budget_entry_by_date, _sorted_budget_entry_dates, _dseq, "q")
+            + _month_summary_html(_budget_entry_sorted_short)
+            + _month_accordion_html(_budget_entry_by_date_short, _sorted_budget_entry_dates_short, _dseq, "q")
             + '</div>')
+
+    # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
+    _tenkan_tab_btn = ""
+    _tenkan_tab_pane = ""
+    if _LSS_ORDER_MODE and _tenkan_in_sorted:
+        _tenkan_entry_sorted = sorted(
+            _tenkan_in_sorted,
+            key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
+            reverse=True,
+        )
+        _tenkan_by_date, _sorted_tenkan_dates = _build_entry_grid(_tenkan_entry_sorted, "tk")
+        _tenkan_tab_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'tenkan\')" '
+            f'style="border-color:#60a5fa">🔄 転換 '
+            f'<span style="font-size:0.72rem;color:#93c5fd">'
+            f'({len(_tenkan_in_sorted)}件 直近{_ENTRY_GRID_DAYS}日)</span></button>'
+        )
+        _tenkan_tab_pane = (
+            f'<div id="detail_{_dseq}_tenkan" class="detail-tab-pane">'
+            f'<p style="color:#60a5fa;font-size:0.8rem;margin-bottom:10px">'
+            f'🔄 <b>転換トレード</b>: lss未約定 → ロング転換（09:09以降最初バー買い / 11:30前最後バー売り）。'
+            f' 全{len(_tenkan_in_sorted)}件。月別サマリー→日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
+            + _month_summary_html(_tenkan_entry_sorted)
+            + _month_accordion_html(_tenkan_by_date, _sorted_tenkan_dates, _dseq, "tk",
+                                    expand_months=2, expand_tenkan=False)
+            + '</div>'
+        )
 
     # BT50以上のみ投資版(高品質集中)タブ。
     _bt50liq_btn = ""
@@ -13158,6 +13180,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt40entry')" style="border-color:#16a34a">🎯 BT{_BT_TAB_MIN}以上×エントリー日別 <span style="font-size:0.72rem;color:#86efac">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_bt40liq_btn}
+  {_tenkan_tab_btn}
   {_bt50liq_btn}
   {_fill_liq_btn}
   {_mlot_liq_btn}
@@ -13221,6 +13244,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_month_accordion_html(_bt40_entry_by_date, _sorted_bt40_entry_dates, _dseq, "c")}
 </div>
 {_bt40liq_pane}
+{_tenkan_tab_pane}
 {_bt50liq_pane}
 {_fill_liq_pane}
 {_mlot_liq_pane}
@@ -13337,6 +13361,7 @@ function showEntryDateC(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateX(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateY(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateQ(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateTK(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
   var btn = document.getElementById('analysis_btn_'+seq);
