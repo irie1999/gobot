@@ -186,6 +186,13 @@ _pre.add_argument("--no-analysis", action="store_true",
                   help="重い解析タブ(詳細分析タブ群・約定タイミング・期間別パネル30/60/…日)"
                        "をスキップして高速化。相場環境・トレンド期間・エントリー分析・"
                        "銘柄詳細の相場コンテキストタブは計算する(シグナル+損益+相場は残る)")
+_pre.add_argument("--no-symbol-detail", action="store_true",
+                  help="銘柄詳細タブ(シグナル銘柄ごとの損益レポート)を生成しない。"
+                       "銘柄数が多いとHTML文字列が巨大化して MemoryError で落ちるので、"
+                       "落ちる場合はこれで回避する(シグナル・損益・転換タブは残る)")
+_pre.add_argument("--symbol-detail-limit", type=int, default=0,
+                  help="銘柄詳細タブを上位N銘柄(BT降順)だけに絞る。0=全件(既定)。"
+                       "MemoryError 回避用。例: --symbol-detail-limit 20")
 _pre.add_argument("--forward-days", type=int, default=0,
                   help="過去検証(--date)で損益タブを『基準日〜基準日+N日』だけ集計する。"
                        "現在まで走らせないので軽量。例: --forward-days 365 で基準月+1年。"
@@ -2654,6 +2661,22 @@ for _sig in _na._last_signals:
 
 _sym_tab_nav   = ""
 _sym_tab_panes = ""
+# 銘柄詳細のHTMLはリストに貯めて最後に join する。
+# 旧実装の `_sym_tab_panes += ...` は連結のたびに巨大な新しい文字列を作るため、
+# 銘柄数が多いとピークメモリが跳ね上がり MemoryError で落ちていた(実測: 69銘柄で死亡)。
+_sym_tab_nav_parts: list[str] = []
+_sym_tab_pane_parts: list[str] = []
+
+# MemoryError 回避: --no-symbol-detail で全スキップ / --symbol-detail-limit N で上位N件に制限。
+if getattr(_args, "no_symbol_detail", False):
+    print(f"銘柄詳細タブ: スキップ (--no-symbol-detail / 対象 {len(_signal_stocks)}銘柄)", flush=True)
+    _signal_stocks = []
+elif getattr(_args, "symbol_detail_limit", 0) and len(_signal_stocks) > _args.symbol_detail_limit:
+    _sd_before = len(_signal_stocks)
+    _signal_stocks = sorted(_signal_stocks, key=lambda x: -(x[2] or 0))[:_args.symbol_detail_limit]
+    print(f"銘柄詳細タブ: 上位{_args.symbol_detail_limit}銘柄に制限 "
+          f"(BT降順 / 全{_sd_before}銘柄)", flush=True)
+
 # 銘柄詳細は「本日シグナルが出た銘柄」だけの相場コンテキストなので --no-analysis でも計算する
 # (重い期間別パネル/詳細分析/約定タイミングだけをスキップする)。
 for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
@@ -2661,7 +2684,7 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
     _active  = "active" if _i == 0 else ""
     _display = "block"  if _i == 0 else "none"
     _short   = _sname[:8] if len(_sname) > 8 else _sname
-    _sym_tab_nav += (
+    _sym_tab_nav_parts.append(
         f'<button class="sym-tab-btn {_active}" onclick="switchSymTab(\'{_tid}\')">'
         f'<span style="font-size:0.8rem;font-weight:700">{_sym}</span>'
         f'<br><span style="font-size:0.68rem;color:#94a3b8">{_short}</span>'
@@ -2671,13 +2694,27 @@ for _i, (_sym, _sname, _bt) in enumerate(_signal_stocks):
     _na._PNL_CONFIGS[:] = _all_configs
     # 本日シグナルが出た戦略(=チップのBT)だけに絞る。取引明細・KPIとも一致させる。
     _today_strats = _sym_today_strats.get(_sym) or None
-    print(f"銘柄詳細生成中: {_sym} {_sname} (戦略={_today_strats or 'all'})...", flush=True)
-    _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym],
-                                  strategy_filter=_today_strats, skip_timing9=True)
-    _sym_tab_panes += (
+    print(f"銘柄詳細生成中: {_i + 1}/{len(_signal_stocks)} {_sym} {_sname} "
+          f"(戦略={_today_strats or 'all'})...", flush=True)
+    try:
+        _sym_pnl = _na._tab5_pnl_html(365, _args.workers, symbol_filter=[_sym],
+                                      strategy_filter=_today_strats, skip_timing9=True)
+    except MemoryError:
+        # ここで落ちるとレポート全体が生成されない。この銘柄だけ諦めて続行する。
+        print(f"  [WARN] {_sym} の銘柄詳細で MemoryError。この銘柄をスキップして続行します。"
+              f"(--no-symbol-detail / --symbol-detail-limit N で回避できます)", flush=True)
+        _sym_tab_nav_parts.pop()
+        continue
+    _sym_tab_pane_parts.append(
         f'<div id="{_tid}" class="sym-tab-pane" style="display:{_display}">'
         f'{_sym_pnl}</div>\n'
     )
+    del _sym_pnl   # 次の銘柄に進む前に解放してピークメモリを抑える
+
+_sym_tab_nav   = "".join(_sym_tab_nav_parts)
+_sym_tab_panes = "".join(_sym_tab_pane_parts)
+_sym_tab_nav_parts.clear()
+_sym_tab_pane_parts.clear()
 
 # 後片付け
 _na._PNL_CONFIGS[:] = _all_configs
