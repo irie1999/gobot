@@ -1864,7 +1864,9 @@ if getattr(_args, "long_stop_short", False):
         from pathlib import Path as _lrv_Path
 
         _lrv_csvs = sorted(_lrv_glob.glob("oos_raw_fold*.csv"))
+        print(f"[転換] OOS CSV: {len(_lrv_csvs)}件 / CWD={os.getcwd()}", flush=True)
         if _lrv_csvs:
+            print(f"  例: {[str(c) for c in _lrv_csvs[:3]]}", flush=True)
             import pandas as _lrv_pd
             _lrv_all_df = _lrv_pd.concat(
                 [_lrv_pd.read_csv(f) for f in _lrv_csvs], ignore_index=True)
@@ -1890,6 +1892,12 @@ if getattr(_args, "long_stop_short", False):
                     except Exception:
                         pass
 
+            _lrv_1m_exists = _LRV_DIR_1M.exists()
+            _lrv_5m_exists = _LRV_DIR_5M.exists() if _LRV_DIR_5M else False
+            print(f"[転換] 1分足DIR: {_LRV_DIR_1M} (存在: {_lrv_1m_exists})", flush=True)
+            print(f"[転換] 5分足DIR: {_LRV_DIR_5M} (存在: {_lrv_5m_exists})", flush=True)
+            if not _lrv_1m_exists and not _lrv_5m_exists:
+                print("[転換] [WARN] 1分足・5分足データディレクトリが見つかりません。転換トレード生成スキップ。", flush=True)
             _lrv_cache: dict = {}
 
             def _lrv_yf2jq_e(sym: str) -> str:
@@ -1969,6 +1977,14 @@ if getattr(_args, "long_stop_short", False):
                         _be2, _se2)
 
             _lrv_unfl_df = _lrv_all_df[_lrv_all_df["filled"] == 0].copy()
+            _lrv_total_rows = len(_lrv_all_df)
+            _lrv_unfl_cnt = len(_lrv_unfl_df)
+            print(f"[転換] OOS全レコード: {_lrv_total_rows}件 / 未約定(filled=0): {_lrv_unfl_cnt}件", flush=True)
+            if _lrv_unfl_cnt > 0 and "bt_score" in _lrv_unfl_df.columns:
+                _sc_vals = _lrv_unfl_df["bt_score"].dropna()
+                _sc_ge40 = (_sc_vals >= 40).sum()
+                _sc_ge30 = (_sc_vals >= 30).sum()
+                print(f"[転換] bt_score分布: BT≥40={_sc_ge40}件 / BT≥30={_sc_ge30}件 / 全体={len(_sc_vals)}件", flush=True)
             _lrv_extra = []
             _lrv_no_data_e = 0
             for _, _rw in _lrv_unfl_df.iterrows():
