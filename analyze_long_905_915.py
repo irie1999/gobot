@@ -9,8 +9,9 @@ analyze_long_905_915.py  — 未約定lssのロング転換: 買い時刻×売�
 
 前提:
   - OOS CSVファイル群が ./oos_raw_fold*.csv にあること
-  - stock_1min フォルダが stock_5min の隣 or MINUTE_1M_DIR 環境変数で指定済み
-  - 1分足がなければ5分足にフォールバック
+  - 1分足: ~/.jquants_cache/minute/{code}_1m.pkl  (jquants_fetch.py と同じ場所)
+    環境変数 MINUTE_1M_DIR で上書き可
+  - 1分足がなければ stock_5min の5分足にフォールバック
 """
 from __future__ import annotations
 
@@ -26,26 +27,29 @@ import pandas as pd
 
 # ─── パス設定 ────────────────────────────────────────────────────────────────
 
-def _resolve_dir(env_var: str, subfolder: str, globs: list[str]) -> Path:
-    env = os.environ.get(env_var)
+# 1分足: ~/.jquants_cache/minute/{code}_1m.pkl  (jquants_fetch.py と同じ規則)
+DATA_DIR_1M = Path(os.environ.get("MINUTE_1M_DIR",
+                                   Path.home() / ".jquants_cache" / "minute"))
+
+def _resolve_5m_dir() -> Path:
+    env = os.environ.get("MINUTE_5M_DIR")
     if env:
         return Path(env)
     here = Path(__file__).resolve().parent
     candidates = [
-        here / "data" / subfolder,
-        here.parent / subfolder,
-        here.parent / subfolder / "data" / subfolder,
+        here / "data" / "stock_5min",
+        here.parent / "stock_5min",
+        here.parent / "stock_5min" / "data" / "stock_5min",
     ]
     for c in candidates:
         try:
-            if c.exists() and any(p for g in globs for p in c.glob(g)):
+            if c.exists() and any(c.glob("*.pkl")):
                 return c
         except Exception:
             continue
-    return candidates[1]  # fallback: 隣接フォルダ
+    return candidates[1]
 
-DATA_DIR_1M = _resolve_dir("MINUTE_1M_DIR", "stock_1min", ["*.pkl"])
-DATA_DIR_5M = _resolve_dir("MINUTE_5M_DIR", "stock_5min", ["*.pkl"])
+DATA_DIR_5M = _resolve_5m_dir()
 
 QTY  = 100
 FEE  = 0.001    # 片道0.1%
@@ -58,9 +62,7 @@ _cache: dict[str, pd.DataFrame | None] = {}
 def _yf_to_jq(sym: str) -> str:
     return sym.upper().replace(".T", "") + "0"
 
-def _load_pkl(sym: str, data_dir: Path) -> pd.DataFrame | None:
-    code = _yf_to_jq(sym)
-    pkl = data_dir / f"{code}.pkl"
+def _load_pkl_file(pkl: Path) -> pd.DataFrame | None:
     if not pkl.exists():
         return None
     try:
@@ -74,18 +76,27 @@ def _load_pkl(sym: str, data_dir: Path) -> pd.DataFrame | None:
             df.index = df.index.tz_convert("Asia/Tokyo")
         return df
     except Exception as e:
-        print(f"  [warn] {sym} load error: {e}", file=sys.stderr)
+        print(f"  [warn] {pkl.name} load error: {e}", file=sys.stderr)
         return None
+
+def _load_1m(sym: str) -> pd.DataFrame | None:
+    """1分足: ~/.jquants_cache/minute/{code}_1m.pkl"""
+    code = _yf_to_jq(sym)
+    return _load_pkl_file(DATA_DIR_1M / f"{code}_1m.pkl")
+
+def _load_5m(sym: str) -> pd.DataFrame | None:
+    """5分足: stock_5min/{code}.pkl"""
+    code = _yf_to_jq(sym)
+    return _load_pkl_file(DATA_DIR_5M / f"{code}.pkl")
 
 def load_bars(sym: str) -> pd.DataFrame | None:
     """1分足を優先し、なければ5分足を使う。"""
-    key = sym
-    if key in _cache:
-        return _cache[key]
-    df = _load_pkl(sym, DATA_DIR_1M)
+    if sym in _cache:
+        return _cache[sym]
+    df = _load_1m(sym)
     if df is None:
-        df = _load_pkl(sym, DATA_DIR_5M)
-    _cache[key] = df
+        df = _load_5m(sym)
+    _cache[sym] = df
     return df
 
 # ─── スイープ定義 ──────────────────────────────────────────────────────────────
@@ -167,7 +178,7 @@ def main():
         unfilled = unfilled[unfilled["bt_score"] >= args.bt_min]
 
     print(f"未約定レコード: {len(unfilled)} 件 (BT≥{args.bt_min})")
-    print(f"1分足DIR: {DATA_DIR_1M}  (存在: {DATA_DIR_1M.exists()})")
+    print(f"1分足DIR: {DATA_DIR_1M}  (存在: {DATA_DIR_1M.exists()}, *.pkl数: {len(list(DATA_DIR_1M.glob('*_1m.pkl'))) if DATA_DIR_1M.exists() else 0})")
     print(f"5分足DIR: {DATA_DIR_5M}  (存在: {DATA_DIR_5M.exists()})")
 
     # シミュレーション
