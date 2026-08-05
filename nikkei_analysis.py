@@ -9285,7 +9285,29 @@ function switchTbd(id, tab) {{
     # 取引するため(例: 北日本銀行を保有中に2回目シグナルで再エントリー)。
     # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
     #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
-    display_trades = all_trades + _overlap_dropped + list(_EXTRA_TRADES)
+    # ── 転換トレードを未約定シグナルから自動生成 ────────────────────────────
+    # _EXTRA_TRADES は oos_raw_fold*.csv 由来なので、CSVが作られた月までしか無い
+    # (当月・翌日以降が永久に出ない)。ここでレポート自身の未約定シグナル
+    # (all_nofills)から転換を作れば、実行するたびに当日分まで自動で入る。
+    # CSV由来と重複する (銘柄,日) はスキップする。
+    _tenkan_auto: list = []
+    if _LSS_ORDER_MODE and all_nofills:
+        try:
+            import tenkan_sim as _tks
+            _tk_excl = {(str(t.get("symbol")), str(t.get("entry_d_raw") or t.get("exit_d_raw")))
+                        for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"}
+            _tenkan_auto = _tks.build_from_nofills(
+                all_nofills,
+                min_price=_PNL_ENTRY_MIN_PRICE,
+                max_price=_PNL_ENTRY_MAX_PRICE,
+                exclude_keys=_tk_excl,
+                verbose=(cfg_filter is None and not symbol_filter and not strategy_filter),
+            )
+        except Exception as _tk_exc:
+            print(f"[WARN] 未約定シグナルからの転換生成に失敗: {_tk_exc}", flush=True)
+            _tenkan_auto = []
+
+    display_trades = all_trades + _overlap_dropped + list(_EXTRA_TRADES) + _tenkan_auto
     # 成績に効く要素の分析HTML(詳細分析タブ★効く要素)
     try:
         _factors_html = _factor_analysis_html(display_trades)
@@ -12566,7 +12588,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 転換タブのソース: フィルター(BT下限・予算・直近N日・表示上限)を一切かけず、
     # 生成された全転換トレード(_EXTRA_TRADES)をそのまま出す。sorted_trades 経由だと
     # 上流の絞り込みで大半が落ちるため(実測: 264件あるはずが27件しか出ていなかった)。
-    _tenkan_all = [t for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"]
+    # CSV由来(_EXTRA_TRADES) + 未約定シグナル由来(_tenkan_auto) の両方を出す。
+    # 後者があるので当月・当日分も毎回自動で入る。
+    _tenkan_all = ([t for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"]
+                   + list(_tenkan_auto))
     if not _tenkan_all:
         _tenkan_all = list(_tenkan_in_sorted)   # 後方互換フォールバック
     # lssモードなら転換タブは常に出す。0件でも「なぜ0件か」を出す(黙って消えると
