@@ -10096,7 +10096,7 @@ function switchTbd(id, tab) {{
                     if _cap_d > 0 else "")
         dk_key = dk.replace("-", "")
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
-                f'onclick="showEntryDate{pfx.upper()}(this,\'{dk_key}\')">'
+                f'onclick="showEntryDateGrid(this,\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
@@ -10166,7 +10166,7 @@ function switchTbd(id, tab) {{
                f'<span style="color:#f87171">損{n_s}</span> '
                f'<span style="color:#94a3b8">T{n_c}</span></span>')
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
-                f'onclick="showEntryDate{pfx.upper()}(this,\'{dk_key}\')">'
+                f'onclick="showEntryDateGrid(this,\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
@@ -13325,12 +13325,23 @@ function _showEntryDateGrid(btn, dk) {{
     btn.classList.add('edate-active');
   }}
 }}
+// 日別カードのクリックはすべてこの共通関数を呼ぶ(prefix 非依存)。
+// prefix ごとに showEntryDate<PFX> を定義する方式は、新タブ(q6 等)追加時に
+// 定義漏れ→クリック無反応になっていたため廃止した。以下の別名は後方互換用。
+function showEntryDateGrid(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateE(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateB(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateC(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateX(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateY(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateQ(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQ5(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQ6(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQN(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQF(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQFN(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQML(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
+function showEntryDateQMLN(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function showEntryDateTK(btn, dk) {{ _showEntryDateGrid(btn, dk); }}
 function toggleAnalysis(seq) {{
   var blk = document.getElementById('analysis_'+seq);
