@@ -73,6 +73,9 @@ _SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLス�
 # run_signals_holdout_all から注入する追加トレードレコード（lss転換ロングなど）。
 # display_trades に結合して月別アコーディオン・日別カードに自然に混合表示される。
 _EXTRA_TRADES: list = []
+# 転換トレードが0件だったときの理由(run_signals_holdout_all が設定)。
+# 空のままタブごと消えると原因が分からないので、HTMLに理由を出すために使う。
+_TENKAN_DIAG: str = ""
 _SAMEDAY_SWEEP_INVERTED = True   # ミラー(符号反転)なら True / ロング銘柄ショートなら False
 _SAMEDAY_5M_TAB = False   # mirror/lss 用: 詳細分析に「5分足TP/SL最適化」タブを出す
 
@@ -12566,7 +12569,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _tenkan_all = [t for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"]
     if not _tenkan_all:
         _tenkan_all = list(_tenkan_in_sorted)   # 後方互換フォールバック
-    if _LSS_ORDER_MODE and _tenkan_all:
+    # lssモードなら転換タブは常に出す。0件でも「なぜ0件か」を出す(黙って消えると
+    # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
+    if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
@@ -12595,6 +12600,30 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
     _tenkan_tab_btn = ""
     _tenkan_tab_pane = ""
+    if _LSS_ORDER_MODE and not _tenkan_all:
+        # 0件でもタブを出して理由を表示する(タブごと消すと原因が分からない)。
+        _tk_diag = (_TENKAN_DIAG or "理由不明（run_signals_holdout_all のログを確認してください）")
+        _tk_diag = (_tk_diag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        _tenkan_tab_btn = (
+            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'tenkan\')" '
+            f'style="border-color:#f87171">🔄 転換 '
+            f'<span style="font-size:0.72rem;color:#fca5a5">(0件)</span></button>'
+        )
+        _tenkan_tab_pane = (
+            f'<div id="detail_{_dseq}_tenkan" class="detail-tab-pane">'
+            f'<div style="background:#2a1518;border:1px solid #f87171;border-radius:8px;'
+            f'padding:14px 18px;margin:6px 0;font-size:0.85rem;line-height:1.8">'
+            f'<div style="color:#f87171;font-weight:700;font-size:0.95rem;margin-bottom:8px">'
+            f'⚠ 転換トレードが 0 件です</div>'
+            f'<div style="color:#e2e8f0">{_tk_diag}</div>'
+            f'<div style="color:#94a3b8;margin-top:10px;font-size:0.8rem">'
+            f'転換は <code style="background:#1e293b;padding:1px 5px;border-radius:3px">'
+            f'oos_raw_fold*.csv</code> を <b>カレントディレクトリ</b>から読みます。'
+            f'ファイルが swingtrade フォルダ直下に無いと 0 件になります。'
+            f'<code style="background:#1e293b;padding:1px 5px;border-radius:3px">'
+            f'python run_oos_folds.py</code> で生成するか、既存の CSV をコピーしてください。'
+            f'</div></div></div>'
+        )
     if _LSS_ORDER_MODE and _tenkan_all:
         _tenkan_entry_sorted = sorted(
             _tenkan_all,

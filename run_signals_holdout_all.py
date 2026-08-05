@@ -1856,6 +1856,9 @@ except Exception as _e:
 # _na._EXTRA_TRADES に転換 trade dict を注入して、損益タブの月別/日別カードに混合表示。
 # filled=0 (lss未約定) の OOS 銘柄を 9:09 成行買い → 11:30 成行売り でシミュレーション。
 _na._EXTRA_TRADES = []
+_na._TENKAN_DIAG = ""
+if not getattr(_args, "long_stop_short", False):
+    _na._TENKAN_DIAG = "lssモードではありません（転換は lss 専用です）。"
 if getattr(_args, "long_stop_short", False):
     try:
         import glob as _lrv_glob
@@ -1865,6 +1868,11 @@ if getattr(_args, "long_stop_short", False):
 
         _lrv_csvs = sorted(_lrv_glob.glob("oos_raw_fold*.csv"))
         print(f"[転換] OOS CSV: {len(_lrv_csvs)}件 / CWD={os.getcwd()}", flush=True)
+        if not _lrv_csvs:
+            _na._TENKAN_DIAG = (
+                f"oos_raw_fold*.csv が見つかりません。"
+                f"検索したディレクトリ: {os.getcwd()}")
+            print(f"[転換] [WARN] {_na._TENKAN_DIAG}", flush=True)
         if _lrv_csvs:
             print(f"  例: {[str(c) for c in _lrv_csvs[:3]]}", flush=True)
             import pandas as _lrv_pd
@@ -1897,7 +1905,12 @@ if getattr(_args, "long_stop_short", False):
             print(f"[転換] 1分足DIR: {_LRV_DIR_1M} (存在: {_lrv_1m_exists})", flush=True)
             print(f"[転換] 5分足DIR: {_LRV_DIR_5M} (存在: {_lrv_5m_exists})", flush=True)
             if not _lrv_1m_exists and not _lrv_5m_exists:
-                print("[転換] [WARN] 1分足・5分足データディレクトリが見つかりません。転換トレード生成スキップ。", flush=True)
+                print("[転換] [WARN] 1分足・5分足データディレクトリが見つかりません。"
+                      "再シミュはできませんが、CSV既存の転換行からは補完されます。", flush=True)
+                _na._TENKAN_DIAG = (
+                    f"分足データディレクトリが見つかりません "
+                    f"(1分足: {_LRV_DIR_1M} / 5分足: {_LRV_DIR_5M})。"
+                    f"CSV既存の転換行での補完も0件でした。")
             _lrv_cache: dict = {}
 
             def _lrv_yf2jq_e(sym: str) -> str:
@@ -2117,6 +2130,11 @@ if getattr(_args, "long_stop_short", False):
 
             _na._EXTRA_TRADES = _lrv_extra
             print(f"転換トレード合計: {len(_lrv_extra)}件", flush=True)
+            if not _lrv_extra:
+                _na._TENKAN_DIAG = (
+                    f"CSVは {len(_lrv_csvs)}件 読めましたが、転換トレードが0件でした。"
+                    f"未約定(filled=0) {_lrv_unfl_cnt}件 / CSV内の転換行 {len(_lrv_csv_tk)}件 / "
+                    f"価格範囲 {_lrv_min_p:g}〜{_lrv_max_p:g}円 で全て除外された可能性があります。")
 
             # ── 転換 月別集計を CSV 出力 ──────────────────────────────────────
             if _lrv_extra:
@@ -2193,6 +2211,8 @@ if getattr(_args, "long_stop_short", False):
         import traceback as _lrv_tb
         print(f"[WARN] 転換トレードレコード生成エラー: {_lrv_exc}\n"
               f"{_lrv_tb.format_exc()}", flush=True)
+        _na._TENKAN_DIAG = (f"転換トレード生成中に例外が発生しました: "
+                            f"{type(_lrv_exc).__name__}: {_lrv_exc}")
 
 # ── 損益タブ HTML: 全設定統合 (_DEFAULT_DAYS) + 期間別 ──────────────────────
 # 全設定統合: _all_configs でデフォルト期間を一括集計 → デフォルト表示
