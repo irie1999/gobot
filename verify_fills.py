@@ -8,7 +8,11 @@
      レポート/バックテストの想定値と突き合わせて実運用の乖離(§18.7)を測れる。
 
 使い方(あなたの機械・本番口座 / KABU_API_PASSWORD 設定済み):
+  .\fills                                          # ← 日常はこれ (= --prod --save)
+  .\fills --date 20260728                          # 指定日
+
   python verify_fills.py --prod                    # 今日の全注文+結果
+  python verify_fills.py --prod --save             # CSV2種を日付つきで自動保存
   python verify_fills.py --prod --date 20260728    # 指定日
   python verify_fills.py --prod --orders-csv orders.csv  # 全注文一覧をCSV保存
   python verify_fills.py --prod --csv fills.csv     # 往復損益サマリーをCSV保存
@@ -45,10 +49,21 @@ ap.add_argument("--fee", type=float, default=0.0, help="片道手数料率(既�
 ap.add_argument("--debug", action="store_true",
                 help="約定が0件のとき等、生の注文/Details構造を先頭数件ダンプして原因調査")
 ap.add_argument("--no-date", action="store_true", help="日付で絞らず全約定を集計")
+ap.add_argument("--save", action="store_true",
+                help="CSV2種を日付つきファイル名で自動保存 "
+                     "(fills_<日付>.csv / orders_<日付>.csv)。--csv/--orders-csv より優先度低")
 args = ap.parse_args()
 
 FEE = args.fee
 _DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
+
+# --save: 明示指定が無い側だけ日付つきの既定名を割り当てる
+if args.save:
+    _d = _DATE if len(str(_DATE)) == 8 else datetime.now(_JST).strftime("%Y%m%d")
+    if not args.csv:
+        args.csv = f"fills_{_d}.csv"
+    if not args.orders_csv:
+        args.orders_csv = f"orders_{_d}.csv"
 
 
 def _digits(s) -> str:
