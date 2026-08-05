@@ -1,0 +1,366 @@
+"""analyze_tenkan_cutoff.py — 「何時までに約定しなければ転換するか」を実測で決める。
+
+運用上の問い:
+  lssシグナルは 約定 / 不約定 に分かれる。不約定なら転換(ロング)したい。
+  しかし「不約定」が確定するのは大引けなので、実運用では締切時刻を決めるしかない。
+  09:05 で切ると、それ以降に約定する『遅れショート』を捨てることになる。
+  → 捨てる遅れショートの損益 vs 拾える転換の損益、どちらが大きいか。
+
+やること:
+  各シグナル日について5分足から
+    ・約定バー(最初に安値<=トリガー)とその時刻
+    ・lssとして持った場合の損益(損切り/利確/引け。delay1対応)
+    ・転換した場合の損益(09:09以降の最初バーOPEN買い → 11:30以前の最後バーOPEN売り)
+  を求め、締切時刻ごとに
+    締切までに約定 → lss / それ以外(遅れ約定・終日不約定) → 転換
+  として合算する。締切なし(=全部lss・現行)も同じ土俵で出す。
+
+使い方(あなたの機械で。5分足データが必要):
+  python analyze_tenkan_cutoff.py --days 240 --bt-min 40
+  python analyze_tenkan_cutoff.py --days 240 --bt-min 40 --by-month
+  python analyze_tenkan_cutoff.py --days 240 --bt-min 40 --workers 8
+出力: コンソール比較表 + analyze_tenkan_cutoff_<date>.csv
+"""
+from __future__ import annotations
+
+import argparse
+import csv as _csv
+import sys
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, time as _time
+from pathlib import Path
+
+import pandas as pd
+
+ap = argparse.ArgumentParser(description="転換の締切時刻を実測で決める")
+ap.add_argument("--days", type=int, default=240)
+ap.add_argument("--sm", type=float, default=0.1)
+ap.add_argument("--tm", type=float, default=1.0)
+ap.add_argument("--min-price", type=float, default=1000.0)
+ap.add_argument("--max-price", type=float, default=6000.0)
+ap.add_argument("--bt-min", type=float, default=40.0,
+                help="BTスコア下限(既定40。実際に投資する集団で判断すること)")
+ap.add_argument("--stop-delay-bars", type=int, default=1,
+                help="lssの損切り遅延(既定1=delay1。本番watchと揃える)")
+ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
+ap.add_argument("--workers", type=int, default=6)
+ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--symbols-file", type=str, default=None)
+ap.add_argument("--cutoffs", type=str, default="09:05,09:10,09:15,09:20,09:30,10:00,11:00",
+                help="締切時刻のカンマ区切り。この時刻までに約定しなければ転換する")
+ap.add_argument("--by-month", action="store_true")
+args = ap.parse_args()
+
+import backtest_limit_entry as ble
+from check_signals_stop import PERIODS as _BT_PERIODS, calc_recommend_score as _calc_bt
+from daytrade_data import load_intraday, split_by_day
+from sameday5m_core import mod_for
+from sameday5m_firsttouch import short_entry_fill_5m, short_pnl
+import tenkan_sim as _tks
+
+ble._MIRROR_PNL = False
+ble._ENTRY_TYPE_FORCE = None
+ble._MAX_HOLD_FORCE = None
+ble._SM_FORCE = None
+ble._TM_FORCE = None
+ble._INTRADAY_5M = False
+
+QTY = ble.FIXED_QTY
+FEE = ble.FEE_PCT_ONE_WAY
+TODAY = pd.Timestamp.today().normalize()
+
+CUTOFFS: list = []
+for _c in args.cutoffs.split(","):
+    _c = _c.strip()
+    if not _c:
+        continue
+    try:
+        hh, mm = _c.split(":")
+        CUTOFFS.append((_c, _time(int(hh), int(mm))))
+    except Exception:
+        print(f"[WARN] 締切時刻を解釈できません: {_c}")
+# 「締切なし」= 現行(不約定だけ転換)も比較対象に入れる
+MODES = [("締切なし(現行)", None)] + CUTOFFS + [("全部転換(lssしない)", _time(0, 0))]
+
+
+# ── 銘柄リスト ──────────────────────────────────────────────────────────────
+def _load_pairs() -> list[tuple[str, str, list[str]]]:
+    path = Path(args.symbols_file or "holdout_selected_symbols.py")
+    if not path.exists():
+        print(f"[ERROR] {path} が見つかりません。先に run_signals_holdout_all.py を実行してください。")
+        sys.exit(1)
+    ns: dict = {}
+    exec(path.read_text(encoding="utf-8"), ns)
+    pairs = ns.get("SELECTED") or ns.get("PAIRS") or ns.get("WATCHLIST") or []
+    by_sym: dict = {}
+    for p in pairs:
+        if isinstance(p, (list, tuple)) and len(p) >= 3:
+            sym, name, strat = str(p[0]), str(p[1]), str(p[2])
+        elif isinstance(p, (list, tuple)) and len(p) == 2:
+            sym, name, strat = str(p[0]), "", str(p[1])
+        else:
+            continue
+        e = by_sym.setdefault(sym, [name, []])
+        if strat not in e[1]:
+            e[1].append(strat)
+    out = [(s, v[0], v[1]) for s, v in by_sym.items()]
+    if args.limit:
+        out = out[:args.limit]
+    return out
+
+
+PAIRS = _load_pairs()
+print(f"[選定] {len(PAIRS)}銘柄 / 遡及{args.days}日 / 価格{args.min_price:g}〜{args.max_price:g}円 "
+      f"/ BT{args.bt_min:g}以上 / delay{args.stop_delay_bars}", flush=True)
+print(f"[締切] {', '.join(m[0] for m in MODES)}", flush=True)
+
+
+def _lss_exit(db, ei, trigger, stop_p, target_p, day_close):
+    """lssとして持った場合の (損益, 理由)。delay は args.stop_delay_bars。
+    損切り約定は『注文を新規に置いたバーだけ窓埋め』(compare_lss_rules の補正版と同じ)。"""
+    opens = db["open"].to_numpy(dtype=float)
+    highs = db["high"].to_numpy(dtype=float)
+    lows = db["low"].to_numpy(dtype=float)
+    closes = db["close"].to_numpy(dtype=float)
+    n = len(highs)
+    stop_from = ei + max(0, int(args.stop_delay_bars))
+    for j in range(ei, n):
+        if j >= stop_from and highs[j] >= stop_p:
+            px = stop_p
+            if j == stop_from and stop_from > ei:
+                px = max(stop_p, float(opens[j]))   # 設置した瞬間に既に超えていた
+            return px, "stop"
+        if lows[j] <= target_p:
+            return target_p, "target"
+    cx = day_close if (day_close and day_close > 0) else float(closes[-1])
+    return cx, "close"
+
+
+def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
+    """1銘柄の全シグナル日について (約定時刻, lss損益, 転換損益) を返す。"""
+    rows: list[dict] = []
+    try:
+        m5 = load_intraday(sym, days=args.days + 5, source=args.source)
+    except Exception:
+        return rows
+    by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
+    if not by_day:
+        return rows
+    try:
+        df_raw = ble.fetch(sym, args.days + 420)
+    except Exception:
+        return rows
+    if df_raw is None or df_raw.empty:
+        return rows
+
+    for strat in strats:
+        mod = mod_for(strat)
+        params = getattr(mod, "STRATEGY_PARAMS", {}).get(strat)
+        if not params:
+            continue
+        try:
+            df_ind = params[0](df_raw.copy())
+            r = ble.run_limit_backtest(sym, name, df_ind, lambda d: d, 0.0,
+                                       args.sm, args.tm, args.days + 420, strat,
+                                       entry_type="stop_sell", max_hold=0)
+        except Exception:
+            continue
+        if not r:
+            continue
+
+        bt_trades: list = []
+        local: list[dict] = []
+        for t in (r.get("trade_log") or []):
+            fd = t.get("entry_dt") or t.get("signal_dt")
+            if fd is None:
+                continue
+            fd = fd.date() if hasattr(fd, "date") else fd
+            db = by_day.get(str(fd))
+            if db is None or db.empty:
+                continue
+            trigger = float(t.get("order_limit", 0) or 0)
+            if trigger <= 0:
+                continue
+            if args.min_price > 0 and trigger < args.min_price:
+                continue
+            if args.max_price > 0 and trigger > args.max_price:
+                continue
+
+            olp = trigger
+            osp = float(t.get("stop_price", 0) or 0)
+            target_p = float(t.get("target_price", 0) or 0)
+            if osp <= 0 or target_p <= 0:
+                continue
+            d_close = float(t.get("day_close", 0) or 0)
+
+            entry_fill = short_entry_fill_5m(
+                db, trigger, False, entry_gap_limit=0.03,
+                day_open=float(t.get("day_open", 0) or 0) or None,
+                day_low=float(t.get("day_low", 0) or 0) or None,
+                day_high=float(t.get("day_high", 0) or 0) or None)
+
+            lows = db["low"].to_numpy(dtype=float)
+            ei = None
+            for j in range(len(lows)):
+                if lows[j] <= trigger:
+                    ei = j
+                    break
+
+            # ── lss として持った場合 ──
+            lss_pnl = None
+            fill_t = None
+            if entry_fill is not None and ei is not None:
+                fill_t = db.index[ei].time()
+                xp, rsn = _lss_exit(db, ei, trigger, osp, target_p, d_close)
+                lss_pnl = short_pnl(entry_fill, xp, rsn, QTY, FEE, 0.0)
+
+            # ── 転換した場合 ──
+            tk = _tks.simulate(sym, fd)
+            tk_pnl = tk["pnl"] if tk else None
+
+            # BTスコア用(base=約定した分のlss損益)
+            if lss_pnl is not None:
+                bt_trades.append((fd, lss_pnl))
+
+            local.append({
+                "date": str(fd), "symbol": sym, "name": name, "strategy": strat,
+                "fill_time": fill_t.strftime("%H:%M") if fill_t else "",
+                "lss_pnl": lss_pnl, "tenkan_pnl": tk_pnl, "trigger": trigger,
+            })
+
+        # BTスコアで足切り(compare_lss_rules と同じ考え方)
+        if args.bt_min > 0:
+            try:
+                bt = _calc_bt(bt_trades)[0] if bt_trades else 0
+            except Exception:
+                bt = 0
+            if bt < args.bt_min:
+                continue
+        rows.extend(local)
+    return rows
+
+
+ALL: list[dict] = []
+_done = 0
+with ThreadPoolExecutor(max_workers=args.workers) as ex:
+    futs = {ex.submit(_scan, s, n, st): s for s, n, st in PAIRS}
+    for fu in as_completed(futs):
+        try:
+            ALL.extend(fu.result() or [])
+        except Exception:
+            pass
+        _done += 1
+        if _done % 50 == 0:
+            print(f"  ...{_done}/{len(PAIRS)}銘柄  シグナル{len(ALL)}件", flush=True)
+
+if not ALL:
+    print("[ERROR] シグナルが1件も取れませんでした。--days / --bt-min / 5分足データを確認してください。")
+    sys.exit(1)
+
+# 窓で絞る
+_cut = (TODAY - pd.Timedelta(days=args.days)).date()
+ALL = [r for r in ALL if str(r["date"]) >= str(_cut)]
+
+n_fill = sum(1 for r in ALL if r["lss_pnl"] is not None)
+n_tk = sum(1 for r in ALL if r["tenkan_pnl"] is not None)
+print(f"\n[集計] シグナル {len(ALL)}件 / lss約定 {n_fill}件({n_fill / len(ALL) * 100:.1f}%) "
+      f"/ 転換計算可 {n_tk}件", flush=True)
+
+
+def _agg(mode_name, cutoff):
+    """締切ごとに lss と 転換 を振り分けて集計する。"""
+    n_l = n_t = 0
+    w = 0
+    pnl = 0.0
+    gp = gl = 0.0
+    mon: dict = defaultdict(float)
+    for r in ALL:
+        use_lss = False
+        if cutoff is None:
+            use_lss = r["lss_pnl"] is not None
+        elif cutoff == _time(0, 0):
+            use_lss = False                       # 全部転換
+        else:
+            use_lss = (r["lss_pnl"] is not None and r["fill_time"]
+                       and r["fill_time"] <= cutoff.strftime("%H:%M"))
+        if use_lss:
+            p = r["lss_pnl"]
+            n_l += 1
+        else:
+            p = r["tenkan_pnl"]
+            if p is None:
+                continue
+            n_t += 1
+        pnl += p
+        mon[str(r["date"])[:7]] += p
+        if p > 0:
+            w += 1
+            gp += p
+        else:
+            gl += -p
+    n = n_l + n_t
+    return {"name": mode_name, "n": n, "lss": n_l, "tenkan": n_t,
+            "wr": (w / n * 100 if n else 0),
+            "pf": (gp / gl if gl > 0 else float("inf")),
+            "pnl": pnl, "mon": mon}
+
+
+RES = [_agg(nm, cu) for nm, cu in MODES]
+_base = RES[0]["pnl"]
+
+print("\n" + "=" * 96)
+print("転換の締切時刻スイープ — この時刻までに約定しなければ転換(ロング)に切替")
+print("=" * 96)
+print(f"{'締切':<22}{'合計':>6}{'lss':>6}{'転換':>6}{'勝率':>7}{'PF':>7}"
+      f"{'総損益':>14}{'現行比':>14}")
+print("-" * 96)
+for r in RES:
+    pf = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
+    d = r["pnl"] - _base
+    mark = "  ←現行" if r["name"].startswith("締切なし") else ""
+    print(f"{r['name']:<22}{r['n']:>6}{r['lss']:>6}{r['tenkan']:>6}"
+          f"{r['wr']:>6.1f}%{pf:>7}{r['pnl']:>13,.0f}円{d:>+13,.0f}円{mark}")
+
+if args.by_month:
+    months = sorted({m for r in RES for m in r["mon"]})
+    print("\n【月別】")
+    print(f"{'締切':<22}" + "".join(f"{m[2:]:>11}" for m in months))
+    for r in RES:
+        print(f"{r['name']:<22}" + "".join(f"{r['mon'].get(m, 0):>10,.0f}" for m in months))
+
+_out = Path(f"analyze_tenkan_cutoff_{datetime.now().strftime('%Y-%m-%d')}.csv")
+with open(_out, "w", newline="", encoding="utf-8-sig") as f:
+    w_ = _csv.writer(f)
+    w_.writerow(["cutoff", "trades", "lss_trades", "tenkan_trades",
+                 "win_rate_pct", "pf", "total_pnl", "vs_current"])
+    for r in RES:
+        pf = 999.0 if r["pf"] == float("inf") else round(r["pf"], 2)
+        w_.writerow([r["name"], r["n"], r["lss"], r["tenkan"], round(r["wr"], 1),
+                     pf, round(r["pnl"], 0), round(r["pnl"] - _base, 0)])
+print(f"\n[出力] {_out}")
+
+# 約定時刻の分布(遅れ約定がどれだけ稼いでいるか)
+print("\n【lss約定時刻 × 損益】遅い約定を捨ててよいかの判断材料")
+print(f"{'約定時刻帯':<14}{'件数':>7}{'勝率':>7}{'lss損益':>14}{'同じ銘柄を転換した場合':>22}")
+print("-" * 66)
+BANDS = [("〜09:05", "09:05"), ("09:06〜09:10", "09:10"), ("09:11〜09:15", "09:15"),
+         ("09:16〜09:30", "09:30"), ("09:31〜10:00", "10:00"),
+         ("10:01〜11:00", "11:00"), ("11:01〜", "99:99")]
+_prev = "00:00"
+for lb, hi in BANDS:
+    g = [r for r in ALL if r["lss_pnl"] is not None and r["fill_time"]
+         and _prev < r["fill_time"] <= hi]
+    _prev = hi
+    if not g:
+        continue
+    lp = sum(r["lss_pnl"] for r in g)
+    tp = sum(r["tenkan_pnl"] for r in g if r["tenkan_pnl"] is not None)
+    wr = sum(1 for r in g if r["lss_pnl"] > 0) / len(g) * 100
+    print(f"{lb:<14}{len(g):>7}{wr:>6.1f}%{lp:>13,.0f}円{tp:>21,.0f}円")
+_nf = [r for r in ALL if r["lss_pnl"] is None]
+if _nf:
+    tp = sum(r["tenkan_pnl"] for r in _nf if r["tenkan_pnl"] is not None)
+    print(f"{'終日不約定':<14}{len(_nf):>7}{'—':>7}{'—':>14}{tp:>21,.0f}円")
+print("-" * 66)
+print("※ 『同じ銘柄を転換した場合』が lss損益 を上回る時刻帯は、その帯で転換に切替える価値がある。")
