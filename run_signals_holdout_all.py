@@ -2451,7 +2451,7 @@ _period_btns = (
 )
 _period_panes = (
     f'<div id="hdall" class="ho-period-pane" style="display:block">'
-    f'{_all_period_html}</div>\n'
+    f'{_all_period_html}<!-- LRV_SLOT --></div>\n'
 )
 for days in _PNL_PERIODS:
     _period_btns += (
@@ -2460,7 +2460,7 @@ for days in _PNL_PERIODS:
     )
     _period_panes += (
         f'<div id="hd{days}" class="ho-period-pane" style="display:none">'
-        f'{_period_pane_htmls[days]}</div>\n'
+        f'{_period_pane_htmls[days]}<!-- LRV_SLOT --></div>\n'
     )
 
 # ── WF歴史検証タブ（常時表示・複数基準日自動生成）────────────────────────────
@@ -2778,13 +2778,16 @@ if getattr(_args, "long_stop_short", False):
 </div>"""
 
             _lrv_monthly_summary = f"""
-<div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:14px 16px;margin-bottom:18px">
+<div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:14px 16px;margin-top:24px">
 {_lrv_body}
 </div>"""
             print(f"転換合算サマリー生成完了 ({_lrv_note2})", flush=True)
     except Exception as _lrv_exc:
         import traceback as _lrv_tb
         print(f"[WARN] 転換合算サマリー生成エラー: {_lrv_exc}\n{_lrv_tb.format_exc()}", flush=True)
+
+# スロット置換: 各ペイン末尾に転換テーブルを注入（lssモード以外はスロットを空文字で除去）
+_period_panes = _period_panes.replace("<!-- LRV_SLOT -->", _lrv_monthly_summary)
 
 # ── フル HTML ─────────────────────────────────────────────────────────────────
 _extra_css = """
@@ -2932,7 +2935,7 @@ html = f"""<!DOCTYPE html>
 </div>
 
 <div id="ho-pnl" class="ho-outer-pane">
-{_lrv_monthly_summary}  <div style="margin:12px 0 16px">
+  <div style="margin:12px 0 16px">
     <span style="color:#94a3b8;font-size:0.8rem;margin-right:8px">分析期間:</span>
     {_period_btns}
   </div>
