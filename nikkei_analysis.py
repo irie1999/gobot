@@ -12558,16 +12558,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _detail_tab_ids.append('budget_fill')
         if _budget_mlot_entry_sorted:
             _detail_tab_ids.append('budget_mlot')
-    _detail_tab_ids.append('bt70entry')
-    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
-        _detail_tab_ids.append('budget_narrow')
-        if _budget_fill_narrow_entry_sorted:
-            _detail_tab_ids.append('budget_fill_narrow')
-        if _budget_mlot_narrow_entry_sorted:
-            _detail_tab_ids.append('budget_mlot_narrow')
-    else:
-        _detail_tab_ids.append('exit')
-    _detail_tab_ids.append('bt70exit')
+    # bt70entry / exit / bt70exit は削除済み（タブ整理）
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
     # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
@@ -13178,12 +13169,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   {_bt50liq_btn}
   {_fill_liq_btn}
   {_mlot_liq_btn}
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70entry')">BT70×エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_narrow_liq_btn}
   {_fill_narrow_liq_btn}
   {_mlot_narrow_liq_btn}
-  {_exit_tab_btn}
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt70exit')">BT70×決済日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 {'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;border-left:3px solid #60a5fa;padding-left:8px">🔄 転換トレード(lss未約定→ロング転換): <b>' + str(len(_tenkan_in_sorted)) + '件</b> 含む（直近' + str(_DETAIL_ROW_CAP) + '件上限の外でも追加表示）</p>' if _tenkan_in_sorted else ''}
@@ -13242,19 +13230,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_bt50liq_pane}
 {_fill_liq_pane}
 {_mlot_liq_pane}
-<div id="detail_{_dseq}_bt70entry" class="detail-tab-pane">
-<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_summary_html(_bt70_entry_sorted)}
-{_month_accordion_html(_bt70_entry_by_date, _sorted_bt70_entry_dates, _dseq, "b")}
-</div>
 {_narrow_liq_pane}
 {_fill_narrow_liq_pane}
 {_mlot_narrow_liq_pane}
-{_exit_pane_or_narrow}
-<div id="detail_{_dseq}_bt70exit" class="detail-tab-pane">
-<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">BT70以上の銘柄のみ　決済日ごとに <b>目標達成 / 損切り / タイムカット</b> 別で表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_accordion_exit_html(*_build_exit_grid(_bt70_entry_sorted), _dseq, "y")}
-</div>
 <script>
 function switchAnalysisTab(seq, which) {{
   var tabs = {_analysis_tabs_js};
