@@ -2549,6 +2549,241 @@ if _args.oos_until:
 </div>"""
         print("OOS検証タブ生成完了")
 
+# ── ロング転換合算タブ (lss モード + oos_raw_fold*.csv 存在時) ─────────────
+_lrv_tab_btn  = ""
+_lrv_tab_pane = ""
+if getattr(_args, "long_stop_short", False):
+    try:
+        import glob as _lrv_glob
+        import pickle as _lrv_pickle
+        from datetime import time as _lrv_dtime
+        from pathlib import Path as _lrv_Path
+
+        _lrv_csvs = sorted(_lrv_glob.glob("oos_raw_fold*.csv"))
+        if _lrv_csvs:
+            import pandas as _lrv_pd
+            _lrv_all_df = _lrv_pd.concat(
+                [_lrv_pd.read_csv(f) for f in _lrv_csvs], ignore_index=True)
+            _lrv_all_df["entry_date"] = _lrv_pd.to_datetime(
+                _lrv_all_df["entry_date"]).dt.date
+
+            # ── 1分足 / 5分足 データローダー ────────────────────────────────
+            _LRV_DIR_1M = _lrv_Path(
+                os.environ.get("MINUTE_1M_DIR",
+                               _lrv_Path.home() / ".jquants_cache" / "minute"))
+            _LRV_DIR_5M: "_lrv_Path | None" = None
+            _env5m = os.environ.get("MINUTE_5M_DIR", "").strip()
+            if _env5m:
+                _LRV_DIR_5M = _lrv_Path(_env5m)
+            if _LRV_DIR_5M is None or not _LRV_DIR_5M.exists():
+                _here5m = _lrv_Path(__file__).resolve().parent
+                for _c5m in [_here5m / "data" / "stock_5min",
+                              _here5m.parent / "stock_5min",
+                              _here5m.parent / "stock_5min" / "data" / "stock_5min"]:
+                    try:
+                        if _c5m.exists() and any(_c5m.glob("*.pkl")):
+                            _LRV_DIR_5M = _c5m
+                            break
+                    except Exception:
+                        pass
+
+            _lrv_cache: dict = {}
+
+            def _lrv_yf2jq(sym: str) -> str:
+                return sym.upper().replace(".T", "") + "0"
+
+            def _lrv_load_pkl(pkl_path: "_lrv_Path") -> "_lrv_pd.DataFrame | None":
+                if not pkl_path.exists():
+                    return None
+                try:
+                    with open(pkl_path, "rb") as _lf:
+                        _ldf = _lrv_pickle.load(_lf)
+                    _ldf.columns = [c.lower() for c in _ldf.columns]
+                    try:
+                        import pytz as _lpytz
+                        if _ldf.index.tzinfo is None:
+                            _ldf.index = _ldf.index.tz_localize("Asia/Tokyo")
+                        else:
+                            _ldf.index = _ldf.index.tz_convert("Asia/Tokyo")
+                    except ImportError:
+                        pass
+                    return _ldf
+                except Exception:
+                    return None
+
+            def _lrv_bars(sym: str) -> "_lrv_pd.DataFrame | None":
+                if sym in _lrv_cache:
+                    return _lrv_cache[sym]
+                _code = _lrv_yf2jq(sym)
+                _df2 = _lrv_load_pkl(_LRV_DIR_1M / f"{_code}_1m.pkl")
+                if _df2 is None and _LRV_DIR_5M:
+                    _df2 = _lrv_load_pkl(_LRV_DIR_5M / f"{_code}.pkl")
+                _lrv_cache[sym] = _df2
+                return _df2
+
+            # ── ロング転換シミュレーション (9:09成行買い → 11:30成行売り) ─
+            _LRV_BUY_T  = _lrv_dtime(9, 9)
+            _LRV_SELL_T = _lrv_dtime(11, 30)
+            _LRV_SLIP   = 0.0005
+            _LRV_FEE    = 0.001
+            _LRV_QTY    = 100
+
+            def _lrv_sim_pnl(sym: str, d) -> "float | None":
+                _df3 = _lrv_bars(sym)
+                if _df3 is None:
+                    return None
+                try:
+                    _day3 = _df3[_df3.index.date == d]
+                except Exception:
+                    return None
+                if len(_day3) < 3:
+                    return None
+                _bp = _sp = None
+                for _t3 in _day3.index:
+                    if _t3.time() == _LRV_BUY_T:
+                        _bp = float(_day3.loc[_t3, "open"])
+                    if _t3.time() == _LRV_SELL_T:
+                        _sp = float(_day3.loc[_t3, "open"])
+                if not _bp or not _sp:
+                    return None
+                _be2 = _bp * (1 + _LRV_SLIP)
+                _se2 = _sp * (1 - _LRV_SLIP)
+                return (_se2 - _be2) * _LRV_QTY - (_be2 + _se2) * _LRV_QTY * _LRV_FEE
+
+            # ── SHORT / 転換 に分けて集計 ────────────────────────────────
+            _lrv_short_df = _lrv_all_df[_lrv_all_df["filled"] == 1].copy()
+            _lrv_unfl_df  = _lrv_all_df[_lrv_all_df["filled"] == 0].copy()
+
+            _lrv_no_data = 0
+            _lrv_pnl_list = []
+            for _, _rw in _lrv_unfl_df.iterrows():
+                _p3 = _lrv_sim_pnl(_rw["symbol"], _rw["entry_date"])
+                _lrv_pnl_list.append(_p3)
+                if _p3 is None:
+                    _lrv_no_data += 1
+            _lrv_unfl_df = _lrv_unfl_df.copy()
+            _lrv_unfl_df["pnl"] = _lrv_pnl_list
+            _lrv_unfl_df = _lrv_unfl_df.dropna(subset=["pnl"])
+
+            def _lrv_month_key(d) -> str:
+                return str(d)[:7]  # "YYYY-MM"
+
+            _lrv_short_df["_month"] = [_lrv_month_key(d)
+                                        for d in _lrv_short_df["entry_date"]]
+            _lrv_unfl_df["_month"]  = [_lrv_month_key(d)
+                                        for d in _lrv_unfl_df["entry_date"]]
+
+            def _lrv_agg(df: "_lrv_pd.DataFrame") -> dict:
+                _res = {}
+                for _mo, _g in df.groupby("_month"):
+                    _res[_mo] = {
+                        "n": len(_g),
+                        "wins": int((_g["pnl"] > 0).sum()),
+                        "total": float(_g["pnl"].sum()),
+                    }
+                return _res
+
+            _lrv_s_mo = _lrv_agg(_lrv_short_df)
+            _lrv_l_mo = _lrv_agg(_lrv_unfl_df)
+            _lrv_months = sorted(set(list(_lrv_s_mo.keys()) + list(_lrv_l_mo.keys())))
+
+            def _pnl_c(v: float) -> str:
+                return "#4ade80" if v > 0 else ("#f87171" if v < 0 else "#94a3b8")
+
+            _lrv_rows_html = ""
+            _ts = _tl = _tsn = _tln = _tsw = _tlw = 0.0
+            for _mo in _lrv_months:
+                _s2 = _lrv_s_mo.get(_mo, {"n": 0, "wins": 0, "total": 0.0})
+                _l2 = _lrv_l_mo.get(_mo, {"n": 0, "wins": 0, "total": 0.0})
+                _cn2 = _s2["n"] + _l2["n"]
+                _cw2 = _s2["wins"] + _l2["wins"]
+                _ct2 = _s2["total"] + _l2["total"]
+                _ts += _s2["total"]; _tl += _l2["total"]
+                _tsn += _s2["n"];    _tln += _l2["n"]
+                _tsw += _s2["wins"]; _tlw += _l2["wins"]
+                _swr2 = f'{_s2["wins"]/_s2["n"]*100:.0f}%' if _s2["n"] else "—"
+                _lwr2 = f'{_l2["wins"]/_l2["n"]*100:.0f}%' if _l2["n"] else "—"
+                _cwr2 = f'{_cw2/_cn2*100:.0f}%' if _cn2 else "—"
+                _lrv_rows_html += (
+                    f'<tr>'
+                    f'<td style="padding:6px 10px">{_mo}</td>'
+                    f'<td style="text-align:right;padding:6px 8px">{_s2["n"]}件</td>'
+                    f'<td style="text-align:center;padding:6px 8px;color:#94a3b8">{_swr2}</td>'
+                    f'<td style="text-align:right;padding:6px 8px;color:{_pnl_c(_s2["total"])};font-weight:700">{_s2["total"]:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:6px 8px;border-left:2px solid #1e293b">{_l2["n"]}件</td>'
+                    f'<td style="text-align:center;padding:6px 8px;color:#94a3b8">{_lwr2}</td>'
+                    f'<td style="text-align:right;padding:6px 8px;color:{_pnl_c(_l2["total"])};font-weight:700">{_l2["total"]:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:6px 8px;border-left:2px solid #334155">{_cn2}件</td>'
+                    f'<td style="text-align:center;padding:6px 8px;color:#fbbf24">{_cwr2}</td>'
+                    f'<td style="text-align:right;padding:6px 8px;color:{_pnl_c(_ct2)};font-weight:700;font-size:1.05em">{_ct2:+,.0f}</td>'
+                    f'</tr>\n'
+                )
+            # 合計行
+            _tt2   = _ts + _tl
+            _tcn2  = int(_tsn + _tln)
+            _tcw2  = int(_tsw + _tlw)
+            _swr_t = f'{int(_tsw)/int(_tsn)*100:.0f}%' if _tsn else "—"
+            _lwr_t = f'{int(_tlw)/int(_tln)*100:.0f}%' if _tln else "—"
+            _cwr_t = f'{_tcw2/_tcn2*100:.0f}%' if _tcn2 else "—"
+            _lrv_rows_html += (
+                f'<tr style="border-top:2px solid #334155;font-weight:700;background:#0f172a">'
+                f'<td style="padding:8px 10px">合計</td>'
+                f'<td style="text-align:right;padding:8px">{int(_tsn)}件</td>'
+                f'<td style="text-align:center;padding:8px;color:#94a3b8">{_swr_t}</td>'
+                f'<td style="text-align:right;padding:8px;color:{_pnl_c(_ts)};font-weight:700">{_ts:+,.0f}</td>'
+                f'<td style="text-align:right;padding:8px;border-left:2px solid #1e293b">{int(_tln)}件</td>'
+                f'<td style="text-align:center;padding:8px;color:#94a3b8">{_lwr_t}</td>'
+                f'<td style="text-align:right;padding:8px;color:{_pnl_c(_tl)};font-weight:700">{_tl:+,.0f}</td>'
+                f'<td style="text-align:right;padding:8px;border-left:2px solid #334155">{_tcn2}件</td>'
+                f'<td style="text-align:center;padding:8px;color:#fbbf24">{_cwr_t}</td>'
+                f'<td style="text-align:right;padding:8px;color:{_pnl_c(_tt2)};font-weight:700;font-size:1.1em">{_tt2:+,.0f}</td>'
+                f'</tr>\n'
+            )
+
+            _lrv_note2 = (
+                f"OOSデータ: {len(_lrv_csvs)}ファイル / 全{len(_lrv_all_df)}件 "
+                f"(SHORT約定 {int(_tsn)}件 / 転換シミュ {int(_tln)}件 / データ不足 {_lrv_no_data}件)"
+            )
+            _lrv_body = f"""
+<p style="color:#94a3b8;font-size:0.82rem;margin:8px 0 4px">
+  <strong style="color:#38bdf8">lss × ロング転換 合算 OOS成績</strong><br>
+  <span style="color:#f87171">📉 SHORT(約定)</span> = lss逆指値空売りが約定した銘柄の損益（OOS）<br>
+  <span style="color:#60a5fa">📈 転換(未約定)</span> = 9:05時点で未約定だった銘柄を <b>9:09成行買い → 11:30成行売り</b> した場合の推計損益
+</p>
+<p style="color:#64748b;font-size:0.78rem;margin-bottom:12px">
+  コスト: スリッページ0.05%/片道・手数料0.1%/片道・100株固定 ／ {_lrv_note2}
+</p>
+<div style="overflow-x:auto">
+<table style="width:100%;border-collapse:collapse;font-size:0.85rem;border:1px solid #1e293b">
+  <thead>
+    <tr style="background:#1e293b;text-align:center">
+      <th rowspan="2" style="padding:8px 12px;text-align:left;border-right:1px solid #334155">月</th>
+      <th colspan="3" style="padding:8px;color:#f87171;border-right:2px solid #334155">📉 SHORT(約定)</th>
+      <th colspan="3" style="padding:8px;color:#60a5fa;border-right:2px solid #334155">📈 転換(未約定→買い)</th>
+      <th colspan="3" style="padding:8px;color:#fbbf24">📊 合算</th>
+    </tr>
+    <tr style="background:#0f172a;text-align:center;font-size:0.78rem;color:#94a3b8">
+      <th style="padding:4px 8px">件数</th><th style="padding:4px 8px">勝率</th>
+      <th style="padding:4px 8px;border-right:2px solid #334155">損益(円)</th>
+      <th style="padding:4px 8px">件数</th><th style="padding:4px 8px">勝率</th>
+      <th style="padding:4px 8px;border-right:2px solid #334155">損益(円)</th>
+      <th style="padding:4px 8px">件数</th><th style="padding:4px 8px">勝率</th>
+      <th style="padding:4px 8px">損益(円)</th>
+    </tr>
+  </thead>
+  <tbody>
+{_lrv_rows_html}
+  </tbody>
+</table>
+</div>"""
+
+            _lrv_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'lrv\')">🔄 転換合算</button>'
+            _lrv_tab_pane = f'\n<div id="ho-lrv" class="ho-outer-pane">\n{_lrv_body}\n</div>'
+            print(f"転換合算タブ生成完了 ({_lrv_note2})", flush=True)
+    except Exception as _lrv_exc:
+        import traceback as _lrv_tb
+        print(f"[WARN] 転換合算タブ生成エラー: {_lrv_exc}\n{_lrv_tb.format_exc()}", flush=True)
+
 # ── フル HTML ─────────────────────────────────────────────────────────────────
 _extra_css = """
 /* run_signals_holdout_all: outer tab overrides */
@@ -2687,7 +2922,7 @@ html = f"""<!DOCTYPE html>
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_wfh_tab_btn}{_oos_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_wfh_tab_btn}{_oos_tab_btn}{_lrv_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -2730,6 +2965,7 @@ html = f"""<!DOCTYPE html>
 {_sym_detail_tab_pane}
 {_wfh_tab_pane}
 {_oos_tab_pane}
+{_lrv_tab_pane}
 <script>
 {_na.JS}
 {_extra_js}
