@@ -85,17 +85,44 @@ def _load_pkl(path: "Path"):
         return None
 
 
-def bars(symbol: str):
-    """銘柄の分足DataFrame(1分足優先→5分足)。プロセス内キャッシュ。"""
-    if symbol in _CACHE:
-        return _CACHE[symbol]
+def _bars_one(symbol: str, minute: int):
+    """minute=1 なら1分足、5 なら5分足。プロセス内キャッシュ。"""
+    ck = (symbol, minute)
+    if ck in _CACHE:
+        return _CACHE[ck]
     d5, d1 = find_minute_dirs()
     code = symbol.upper().replace(".T", "") + "0"
-    df = _load_pkl(d1 / f"{code}_1m.pkl") if d1 else None
-    if df is None and d5:
-        df = _load_pkl(d5 / f"{code}.pkl")
-    _CACHE[symbol] = df
+    if minute == 1:
+        df = _load_pkl(d1 / f"{code}_1m.pkl") if d1 else None
+    else:
+        df = _load_pkl(d5 / f"{code}.pkl") if d5 else None
+    _CACHE[ck] = df
     return df
+
+
+def bars(symbol: str):
+    """互換用: 1分足があればそれ、無ければ5分足。日付の有無は見ない。"""
+    return _bars_one(symbol, 1) or _bars_one(symbol, 5)
+
+
+def _day_bars(symbol: str, d: "date"):
+    """指定日のバーを返す。1分足を優先するが、その日が入っていなければ5分足へ落ちる。
+
+    ※ ここが日付単位のフォールバックになっていないと、1分足キャッシュ
+      (~/.jquants_cache/minute)が古いまま存在する銘柄で「分足なし」と誤判定される。
+      実測: 2026-08 の未約定9件が全て『分足なし』で落ちていた(5分足には入っていた)。
+    """
+    for m in (1, 5):
+        df = _bars_one(symbol, m)
+        if df is None:
+            continue
+        try:
+            day = df[df.index.date == d]
+        except Exception:
+            continue
+        if len(day) >= 3:
+            return day
+    return None
 
 
 def simulate(symbol: str, d: "date") -> "dict | None":
@@ -103,14 +130,8 @@ def simulate(symbol: str, d: "date") -> "dict | None":
 
     返り値: {"pnl", "buy_p", "sell_p", "buy_t", "sell_t"}
     """
-    df = bars(symbol)
-    if df is None:
-        return None
-    try:
-        day = df[df.index.date == d]
-    except Exception:
-        return None
-    if len(day) < 3:
+    day = _day_bars(symbol, d)
+    if day is None:
         return None
 
     times = [t.time() for t in day.index]
@@ -237,7 +258,9 @@ def build_from_nofills(nofills, min_price: float = 0.0, max_price: float = 0.0,
 
         if sym != prev_sym:
             if prev_sym is not None:
-                _CACHE.pop(prev_sym, None)
+                # キーは (銘柄, 分足種別)。その銘柄ぶんを全部捨てる。
+                for m in (1, 5):
+                    _CACHE.pop((prev_sym, m), None)
                 n_sym += 1
                 if n_sym % 50 == 0:
                     gc.collect()
