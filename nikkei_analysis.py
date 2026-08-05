@@ -12639,10 +12639,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget50_entry_by_date, _sorted_budget50_entry_dates, _dseq, "q5")
             + '</div>')
 
-    # A7/RSI2/VOLTF戦略限定版予算シミュ(決済日別タブの代替)。
+    # A7/RSI2/VOLTF戦略限定版予算シミュ(削除済み: 戦略絞りタブは非表示)。
     _narrow_liq_btn = ""
     _narrow_liq_pane = ""
-    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
+    if False and _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
         _narrow_liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_narrow\')" '
             f'style="border-color:#f59e0b">💰 {_budget_man}万円×A7/RSI2/VOLTF限定 '
@@ -12658,10 +12658,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_narrow_entry_by_date, _sorted_budget_narrow_entry_dates, _dseq, "qn")
             + '</div>')
 
-    # 約定額ベース版(全戦略・watchで取り消し方式)。
+    # 約定額ベース版(削除済み: 約定400万円タブは非表示)。
     _fill_liq_btn = ""
     _fill_liq_pane = ""
-    if _LSS_ORDER_MODE and _budget_fill_entry_sorted:
+    if False and _LSS_ORDER_MODE and _budget_fill_entry_sorted:
         _fill_liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_fill\')" '
             f'style="border-color:#a78bfa">💳 約定{_budget_man}万円・全戦略 '
@@ -12678,10 +12678,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_fill_entry_by_date, _sorted_budget_fill_entry_dates, _dseq, "qf")
             + '</div>')
 
-    # 約定額ベース版(A7/RSI2/VOLTF限定・watchで取り消し方式)。
+    # 約定額ベース版(A7/RSI2/VOLTF限定・削除済み: 戦略絞りタブは非表示)。
     _fill_narrow_liq_btn = ""
     _fill_narrow_liq_pane = ""
-    if _LSS_ORDER_MODE and _budget_fill_narrow_entry_sorted:
+    if False and _LSS_ORDER_MODE and _budget_fill_narrow_entry_sorted:
         _fill_narrow_liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_fill_narrow\')" '
             f'style="border-color:#f97316">💳 約定{_budget_man}万円×A7/RSI2/VOLTF '
@@ -12698,10 +12698,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_fill_narrow_entry_by_date, _sorted_budget_fill_narrow_entry_dates, _dseq, "qfn")
             + '</div>')
 
-    # ループ充填版(全戦略): BT降順に100株ずつ繰り返し追加して400万円に限りなく近づける。
+    # ループ充填版(削除済み: ループ充填タブは非表示)。
     _mlot_liq_btn = ""
     _mlot_liq_pane = ""
-    if _LSS_ORDER_MODE and _budget_mlot_entry_sorted:
+    if False and _LSS_ORDER_MODE and _budget_mlot_entry_sorted:
         _mlot_liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_mlot\')" '
             f'style="border-color:#34d399">🔄 ループ充填・全戦略 '
@@ -12719,10 +12719,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_mlot_entry_by_date, _sorted_budget_mlot_entry_dates, _dseq, "qml")
             + '</div>')
 
-    # ループ充填版(A7/RSI2/VOLTF限定)。
+    # ループ充填版(A7/RSI2/VOLTF限定・削除済み: 戦略絞りタブは非表示)。
     _mlot_narrow_liq_btn = ""
     _mlot_narrow_liq_pane = ""
-    if _LSS_ORDER_MODE and _budget_mlot_narrow_entry_sorted:
+    if False and _LSS_ORDER_MODE and _budget_mlot_narrow_entry_sorted:
         _mlot_narrow_liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget_mlot_narrow\')" '
             f'style="border-color:#f43f5e">🔄 ループ充填×A7/RSI2/VOLTF '
@@ -12792,26 +12792,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         f'  <button class="analysis-tab-btn" style="border-color:#0369a1" onclick="switchAnalysisTab({_dseq},\'sameday5m\')">🕔 5分足TP/SL</button>'
         if _SAMEDAY_5M_TAB else "")
 
-    # 決済日別ボタン: lssかつA7/RSI2/VOLTF絞り版があれば非表示(絞り版タブで代替)
-    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
-        _exit_tab_btn = ""
-    else:
-        _exit_tab_btn = (
-            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'exit\')">'
-            f'決済日別（目標/損切/TC） '
-            f'<span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>')
+    # 決済日別ボタン: 常時表示（絞り版タブ削除済みのため条件撤廃）
+    _exit_tab_btn = (
+        f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'exit\')">'
+        f'決済日別（目標/損切/TC） '
+        f'<span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>')
 
-    # 決済日別ペイン: lssかつA7/RSI2/VOLTF絞り版があれば非表示(絞り版タブで代替)
-    if _LSS_ORDER_MODE and _budget_narrow_entry_sorted:
-        _exit_pane_or_narrow = ""
-    else:
-        _exit_pane_or_narrow = (
-            f'<div id="detail_{_dseq}_exit" class="detail-tab-pane">'
-            f'<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">'
-            f'決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b>'
-            f' 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>'
-            + _month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")
-            + '</div>')
+    # 決済日別ペイン: 常時表示
+    _exit_pane_or_narrow = (
+        f'<div id="detail_{_dseq}_exit" class="detail-tab-pane">'
+        f'<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">'
+        f'決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b>'
+        f' 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>'
+        + _month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")
+        + '</div>')
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
