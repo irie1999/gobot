@@ -133,8 +133,12 @@ for _c in args.cutoffs.split(","):
         CUTOFFS.append((_c, _time(int(hh), int(mm))))
     except Exception:
         print(f"[WARN] 締切時刻を解釈できません: {_c}")
-# 「締切なし」= 現行(不約定だけ転換)も比較対象に入れる
-MODES = [("締切なし(現行)", None)] + CUTOFFS + [("全部転換(lssしない)", _time(0, 0))]
+# 比較の基準は『転換を一切しない純lss』。ここを外すと「締切なし(現行)」を
+# ベースラインと誤読してしまう(現行は既に終日不約定を転換している)。
+MODES = ([("純lss(転換なし)", "PURE")]
+         + [("締切なし(現行)", None)]
+         + CUTOFFS
+         + [("全部転換(lssしない)", _time(0, 0))])
 
 
 # ── 銘柄リスト ──────────────────────────────────────────────────────────────
@@ -340,7 +344,12 @@ def _agg(mode_name, cutoff):
     mon: dict = defaultdict(float)
     for r in ALL:
         use_lss = False
-        if cutoff is None:
+        if cutoff == "PURE":
+            # 転換を一切しない。約定したものだけをlssとして計上する。
+            if r["lss_pnl"] is None:
+                continue
+            use_lss = True
+        elif cutoff is None:
             use_lss = r["lss_pnl"] is not None
         elif cutoff == _time(0, 0):
             use_lss = False                       # 全部転換
@@ -370,18 +379,19 @@ def _agg(mode_name, cutoff):
 
 
 RES = [_agg(nm, cu) for nm, cu in MODES]
-_base = RES[0]["pnl"]
+_base = RES[0]["pnl"]   # 純lss(転換なし)を基準にする
 
 print("\n" + "=" * 96)
 print("転換の締切時刻スイープ — この時刻までに約定しなければ転換(ロング)に切替")
 print("=" * 96)
 print(f"{'締切':<22}{'合計':>6}{'lss':>6}{'転換':>6}{'勝率':>7}{'PF':>7}"
-      f"{'総損益':>14}{'現行比':>14}")
+      f"{'総損益':>14}{'純lss比':>15}")
 print("-" * 96)
 for r in RES:
     pf = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
     d = r["pnl"] - _base
-    mark = "  ←現行" if r["name"].startswith("締切なし") else ""
+    mark = ("  ←基準" if r["name"].startswith("純lss")
+            else ("  ←現行" if r["name"].startswith("締切なし") else ""))
     print(f"{r['name']:<22}{r['n']:>6}{r['lss']:>6}{r['tenkan']:>6}"
           f"{r['wr']:>6.1f}%{pf:>7}{r['pnl']:>13,.0f}円{d:>+13,.0f}円{mark}")
 
@@ -396,7 +406,7 @@ _out = Path(f"analyze_tenkan_cutoff_{datetime.now().strftime('%Y-%m-%d')}.csv")
 with open(_out, "w", newline="", encoding="utf-8-sig") as f:
     w_ = _csv.writer(f)
     w_.writerow(["cutoff", "trades", "lss_trades", "tenkan_trades",
-                 "win_rate_pct", "pf", "total_pnl", "vs_current"])
+                 "win_rate_pct", "pf", "total_pnl", "vs_pure_lss"])
     for r in RES:
         pf = 999.0 if r["pf"] == float("inf") else round(r["pf"], 2)
         w_.writerow([r["name"], r["n"], r["lss"], r["tenkan"], round(r["wr"], 1),
