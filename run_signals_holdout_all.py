@@ -2034,6 +2034,60 @@ if getattr(_args, "long_stop_short", False):
             _na._EXTRA_TRADES = _lrv_extra
             print(f"転換トレードレコード生成: {len(_lrv_extra)}件 "
                   f"(データ不足スキップ: {_lrv_no_data_e}件)", flush=True)
+
+            # ── 転換 月別集計をターミナルに出力 ──────────────────────────────
+            if _lrv_extra:
+                from collections import defaultdict as _dd2
+                _tk_by_m: dict = _dd2(list)
+                for _tk in _lrv_extra:
+                    _tkd = _tk.get("entry_d_raw") or _tk.get("exit_d_raw")
+                    if _tkd:
+                        _tk_by_m[str(_tkd)[:7]].append(_tk)
+                _tk_months = sorted(_tk_by_m.keys())
+                _tk_total_n = _tk_total_w = 0
+                _tk_total_pnl = 0.0
+                print("\n" + "=" * 68, flush=True)
+                print(f"【転換トレード 月別集計】  全{len(_lrv_extra)}件", flush=True)
+                print("=" * 68, flush=True)
+                print(f"{'月':<9} {'件数':>5} {'勝率':>7} {'総損益':>11} {'平均損益':>9} {'勝':>4} {'負':>4}", flush=True)
+                print("-" * 68, flush=True)
+                for _tkm in _tk_months:
+                    _tkrs = _tk_by_m[_tkm]
+                    _n  = len(_tkrs)
+                    _w  = sum(1 for t in _tkrs if t["pnl"] > 0)
+                    _p  = sum(t["pnl"] for t in _tkrs)
+                    _wr = _w / _n * 100 if _n else 0
+                    _av = _p / _n if _n else 0
+                    _sg = "+" if _p >= 0 else ""
+                    print(f"{_tkm:<9} {_n:>5} {_wr:>6.1f}% {_sg}{_p:>10,.0f}円 {_av:>+9,.0f}円 {_w:>4} {_n-_w:>4}", flush=True)
+                    _tk_total_n += _n; _tk_total_w += _w; _tk_total_pnl += _p
+                print("-" * 68, flush=True)
+                _tk_total_wr  = _tk_total_w / _tk_total_n * 100 if _tk_total_n else 0
+                _tk_total_avg = _tk_total_pnl / _tk_total_n if _tk_total_n else 0
+                _tk_sg = "+" if _tk_total_pnl >= 0 else ""
+                print(f"{'合計':<9} {_tk_total_n:>5} {_tk_total_wr:>6.1f}% "
+                      f"{_tk_sg}{_tk_total_pnl:>10,.0f}円 {_tk_total_avg:>+9,.0f}円 "
+                      f"{_tk_total_w:>4} {_tk_total_n-_tk_total_w:>4}", flush=True)
+                _tk_win_pnl  = sum(t["pnl"] for t in _lrv_extra if t["pnl"] > 0)
+                _tk_los_pnl  = sum(abs(t["pnl"]) for t in _lrv_extra if t["pnl"] < 0)
+                _tk_pf = _tk_win_pnl / _tk_los_pnl if _tk_los_pnl > 0 else float("inf")
+                print(f"PF: {_tk_pf:.2f}  勝利総益: {_tk_win_pnl:+,.0f}円  損失総損: {-_tk_los_pnl:+,.0f}円", flush=True)
+                # BT帯別
+                print(f"\n{'BT帯':<12} {'件数':>5} {'勝率':>7} {'総損益':>11} {'PF':>6}", flush=True)
+                print("-" * 45, flush=True)
+                for _lo, _hi in [(0,30),(30,40),(40,50),(50,60),(60,70),(70,101)]:
+                    _bs = [t for t in _lrv_extra if _lo <= t.get("score", 0) < _hi]
+                    if not _bs: continue
+                    _bn = len(_bs); _bw = sum(1 for t in _bs if t["pnl"]>0)
+                    _bp = sum(t["pnl"] for t in _bs)
+                    _bwr = _bw/_bn*100 if _bn else 0
+                    _bwp = sum(t["pnl"] for t in _bs if t["pnl"]>0)
+                    _blp = sum(abs(t["pnl"]) for t in _bs if t["pnl"]<0)
+                    _bpf = _bwp/_blp if _blp > 0 else float("inf")
+                    _hi_lbl = "以上" if _hi == 101 else str(_hi)
+                    print(f"BT{_lo:>2}-{_hi_lbl:<5}  {_bn:>5} {_bwr:>6.1f}% {_bp:>+11,.0f}円 {_bpf:>6.2f}", flush=True)
+                print("=" * 68 + "\n", flush=True)
+
     except Exception as _lrv_exc:
         import traceback as _lrv_tb
         print(f"[WARN] 転換トレードレコード生成エラー: {_lrv_exc}\n"
