@@ -9979,7 +9979,7 @@ function switchTbd(id, tab) {{
     _oos_fold_label = os.environ.get("LSS_OOS_FOLD", "").strip()
     _oos_train_label = os.environ.get("LSS_OOS_TRAIN_MONTHS", "").strip()
     if (_oos_raw_path and _LSS_ORDER_MODE and _oos_month_filter and
-            days in _ho_days_set and cfg_filter is None and not symbol_filter and not strategy_filter):
+            cfg_filter is None and not symbol_filter and not strategy_filter):
         try:
             import csv as _rcsv
             _rflds = ["fold", "train_months", "oos_month", "entry_date",
