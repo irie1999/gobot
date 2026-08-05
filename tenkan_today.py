@@ -52,11 +52,11 @@ DIR5, DIR1 = _tks.find_minute_dirs()
 
 def simulate(code: str, d):
     """(結果dict, エラー文字列) を返す。"""
-    if _tks.bars(code) is None:
-        return None, "分足データなし"
     res = _tks.simulate(code, d)
     if res is None:
-        return None, "当日バー不足 / 売買バーが取れない"
+        if not _tks.has_any_bars(code):
+            return None, "分足ファイルなし"
+        return None, f"{d} のバーが無い(未取得/休場)"
     return {"buy": res["buy_p"], "sell": res["sell_p"], "pnl": res["pnl"],
             "bt": res["buy_t"], "st": res["sell_t"]}, ""
 

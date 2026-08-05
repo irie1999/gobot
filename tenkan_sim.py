@@ -101,8 +101,17 @@ def _bars_one(symbol: str, minute: int):
 
 
 def bars(symbol: str):
-    """互換用: 1分足があればそれ、無ければ5分足。日付の有無は見ない。"""
-    return _bars_one(symbol, 1) or _bars_one(symbol, 5)
+    """互換用: 1分足があればそれ、無ければ5分足。日付の有無は見ない。
+    ※ DataFrame は真偽値評価できないので `A or B` は使えない(ValueError)。"""
+    df = _bars_one(symbol, 1)
+    if df is None:
+        df = _bars_one(symbol, 5)
+    return df
+
+
+def has_any_bars(symbol: str) -> bool:
+    """1分足・5分足のどちらかにデータがあるか。"""
+    return _bars_one(symbol, 1) is not None or _bars_one(symbol, 5) is not None
 
 
 def _day_bars(symbol: str, d: "date"):
