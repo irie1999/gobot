@@ -263,7 +263,10 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
                 lss_pnl = short_pnl(entry_fill, xp, rsn, QTY, FEE, 0.0)
 
             # ── 転換した場合 ──
-            tk = _tks.simulate(sym, fd)
+            # ※ 既に load_intraday で読んだ db をそのまま渡す。_tks.simulate() だと
+            #   同じpklをもう一度読むことになり、スレッド並列で pickle.load が競合して
+            #   SystemError: deallocated bytearray object has exported buffers が出る。
+            tk = _tks.simulate_bars(db)
             tk_pnl = tk["pnl"] if tk else None
 
             # BTスコア用(base=約定した分のlss損益)
@@ -280,10 +283,6 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
         if args.bt_min > 0 and _bt_score(bt_trades) < args.bt_min:
             continue
         rows.extend(local)
-
-    # この銘柄の5分足はもう使わないので解放する。
-    # (スレッド並列で全銘柄ぶん抱えると SystemError/MemoryError になる)
-    _tks.drop_symbol(sym)
     return rows
 
 

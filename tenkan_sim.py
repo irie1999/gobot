@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import threading
 from datetime import date, time
 from pathlib import Path
 
@@ -66,12 +67,19 @@ def find_minute_dirs() -> "tuple[Path | None, Path | None]":
     return _DIR5, _DIR1
 
 
+# pickle.load はスレッド並列で走らせると Python 3.14 で
+#   SystemError: deallocated bytearray object has exported buffers
+# を出すことがある。読み込みだけ直列化する(所要時間は支配的でない)。
+_LOAD_LOCK = threading.Lock()
+
+
 def _load_pkl(path: "Path"):
     if not path.exists():
         return None
     try:
-        with open(path, "rb") as f:
-            df = pickle.load(f)
+        with _LOAD_LOCK:
+            with open(path, "rb") as f:
+                df = pickle.load(f)
         df.columns = [c.lower() for c in df.columns]
         try:
             if df.index.tzinfo is None:
@@ -160,13 +168,18 @@ def _day_bars(symbol: str, d: "date"):
     return None
 
 
-def simulate(symbol: str, d: "date") -> "dict | None":
-    """指定日の転換結果。約定不能・データ無しなら None。
+def simulate_bars(day) -> "dict | None":
+    """既に読み込み済みの『その日の分足DataFrame』から転換結果を計算する。
+
+    呼び出し側が daytrade_data.load_intraday / split_by_day で既に分足を持っている
+    場合はこちらを使うこと。simulate() を使うと同じpklをもう一度読むことになり、
+    スレッド並列だと pickle.load が競合して
+      SystemError: deallocated bytearray object has exported buffers
+    が出る(実測: analyze_tenkan_cutoff を workers 6 で回したとき)。
 
     返り値: {"pnl", "buy_p", "sell_p", "buy_t", "sell_t"}
     """
-    day = _day_bars(symbol, d)
-    if day is None:
+    if day is None or len(day) < 3:
         return None
 
     times = [t.time() for t in day.index]
@@ -192,6 +205,12 @@ def simulate(symbol: str, d: "date") -> "dict | None":
     s = sell_p * (1 - SLIP)
     pnl = (s - b) * QTY - (b + s) * QTY * FEE
     return {"pnl": pnl, "buy_p": b, "sell_p": s, "buy_t": buy_t, "sell_t": sell_t}
+
+
+def simulate(symbol: str, d: "date") -> "dict | None":
+    """指定日の転換結果。分足を自分で読み込む版(単発利用向け)。
+    既に分足を持っているなら simulate_bars() を使うこと。"""
+    return simulate_bars(_day_bars(symbol, d))
 
 
 def release_cache() -> None:
