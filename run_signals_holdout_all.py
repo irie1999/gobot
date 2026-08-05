@@ -2035,58 +2035,76 @@ if getattr(_args, "long_stop_short", False):
             print(f"転換トレードレコード生成: {len(_lrv_extra)}件 "
                   f"(データ不足スキップ: {_lrv_no_data_e}件)", flush=True)
 
-            # ── 転換 月別集計をターミナルに出力 ──────────────────────────────
+            # ── 転換 月別集計を CSV 出力 ──────────────────────────────────────
             if _lrv_extra:
+                import csv as _tk_csv
                 from collections import defaultdict as _dd2
+                from datetime import datetime as _dt2
+
                 _tk_by_m: dict = _dd2(list)
                 for _tk in _lrv_extra:
                     _tkd = _tk.get("entry_d_raw") or _tk.get("exit_d_raw")
                     if _tkd:
                         _tk_by_m[str(_tkd)[:7]].append(_tk)
-                _tk_months = sorted(_tk_by_m.keys())
-                _tk_total_n = _tk_total_w = 0
-                _tk_total_pnl = 0.0
-                print("\n" + "=" * 68, flush=True)
-                print(f"【転換トレード 月別集計】  全{len(_lrv_extra)}件", flush=True)
-                print("=" * 68, flush=True)
-                print(f"{'月':<9} {'件数':>5} {'勝率':>7} {'総損益':>11} {'平均損益':>9} {'勝':>4} {'負':>4}", flush=True)
-                print("-" * 68, flush=True)
-                for _tkm in _tk_months:
-                    _tkrs = _tk_by_m[_tkm]
-                    _n  = len(_tkrs)
-                    _w  = sum(1 for t in _tkrs if t["pnl"] > 0)
-                    _p  = sum(t["pnl"] for t in _tkrs)
-                    _wr = _w / _n * 100 if _n else 0
-                    _av = _p / _n if _n else 0
-                    _sg = "+" if _p >= 0 else ""
-                    print(f"{_tkm:<9} {_n:>5} {_wr:>6.1f}% {_sg}{_p:>10,.0f}円 {_av:>+9,.0f}円 {_w:>4} {_n-_w:>4}", flush=True)
-                    _tk_total_n += _n; _tk_total_w += _w; _tk_total_pnl += _p
-                print("-" * 68, flush=True)
-                _tk_total_wr  = _tk_total_w / _tk_total_n * 100 if _tk_total_n else 0
-                _tk_total_avg = _tk_total_pnl / _tk_total_n if _tk_total_n else 0
-                _tk_sg = "+" if _tk_total_pnl >= 0 else ""
-                print(f"{'合計':<9} {_tk_total_n:>5} {_tk_total_wr:>6.1f}% "
-                      f"{_tk_sg}{_tk_total_pnl:>10,.0f}円 {_tk_total_avg:>+9,.0f}円 "
-                      f"{_tk_total_w:>4} {_tk_total_n-_tk_total_w:>4}", flush=True)
-                _tk_win_pnl  = sum(t["pnl"] for t in _lrv_extra if t["pnl"] > 0)
-                _tk_los_pnl  = sum(abs(t["pnl"]) for t in _lrv_extra if t["pnl"] < 0)
-                _tk_pf = _tk_win_pnl / _tk_los_pnl if _tk_los_pnl > 0 else float("inf")
-                print(f"PF: {_tk_pf:.2f}  勝利総益: {_tk_win_pnl:+,.0f}円  損失総損: {-_tk_los_pnl:+,.0f}円", flush=True)
-                # BT帯別
-                print(f"\n{'BT帯':<12} {'件数':>5} {'勝率':>7} {'総損益':>11} {'PF':>6}", flush=True)
-                print("-" * 45, flush=True)
-                for _lo, _hi in [(0,30),(30,40),(40,50),(50,60),(60,70),(70,101)]:
-                    _bs = [t for t in _lrv_extra if _lo <= t.get("score", 0) < _hi]
-                    if not _bs: continue
-                    _bn = len(_bs); _bw = sum(1 for t in _bs if t["pnl"]>0)
-                    _bp = sum(t["pnl"] for t in _bs)
-                    _bwr = _bw/_bn*100 if _bn else 0
-                    _bwp = sum(t["pnl"] for t in _bs if t["pnl"]>0)
-                    _blp = sum(abs(t["pnl"]) for t in _bs if t["pnl"]<0)
-                    _bpf = _bwp/_blp if _blp > 0 else float("inf")
-                    _hi_lbl = "以上" if _hi == 101 else str(_hi)
-                    print(f"BT{_lo:>2}-{_hi_lbl:<5}  {_bn:>5} {_bwr:>6.1f}% {_bp:>+11,.0f}円 {_bpf:>6.2f}", flush=True)
-                print("=" * 68 + "\n", flush=True)
+
+                _tk_date_str = _dt2.now().strftime("%Y-%m-%d")
+                _tk_csv_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    f"tenkan_monthly_{_tk_date_str}.csv",
+                )
+                _tk_detail_csv_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    f"tenkan_detail_{_tk_date_str}.csv",
+                )
+
+                # 月別サマリー CSV
+                with open(_tk_csv_path, "w", newline="", encoding="utf-8-sig") as _tkf:
+                    _tkw = _tk_csv.writer(_tkf)
+                    _tkw.writerow(["month", "trades", "win", "loss", "win_rate_pct",
+                                   "total_pnl", "avg_pnl", "win_pnl", "loss_pnl", "pf"])
+                    _tk_total_n = _tk_total_w = 0
+                    _tk_total_pnl = 0.0
+                    for _tkm in sorted(_tk_by_m.keys()):
+                        _tkrs = _tk_by_m[_tkm]
+                        _n = len(_tkrs); _w = sum(1 for t in _tkrs if t["pnl"] > 0)
+                        _p = sum(t["pnl"] for t in _tkrs)
+                        _wr = round(_w / _n * 100, 1) if _n else 0
+                        _av = round(_p / _n, 0) if _n else 0
+                        _wpt = sum(t["pnl"] for t in _tkrs if t["pnl"] > 0)
+                        _lpt = sum(abs(t["pnl"]) for t in _tkrs if t["pnl"] < 0)
+                        _pf  = round(_wpt / _lpt, 2) if _lpt > 0 else 999.0
+                        _tkw.writerow([_tkm, _n, _w, _n - _w, _wr,
+                                       round(_p, 0), round(_av, 0), round(_wpt, 0), round(-_lpt, 0), _pf])
+                        _tk_total_n += _n; _tk_total_w += _w; _tk_total_pnl += _p
+                    # 合計行
+                    _tk_wr  = round(_tk_total_w / _tk_total_n * 100, 1) if _tk_total_n else 0
+                    _tk_avg = round(_tk_total_pnl / _tk_total_n, 0) if _tk_total_n else 0
+                    _tk_wpt = sum(t["pnl"] for t in _lrv_extra if t["pnl"] > 0)
+                    _tk_lpt = sum(abs(t["pnl"]) for t in _lrv_extra if t["pnl"] < 0)
+                    _tk_pf  = round(_tk_wpt / _tk_lpt, 2) if _tk_lpt > 0 else 999.0
+                    _tkw.writerow(["合計", _tk_total_n, _tk_total_w, _tk_total_n - _tk_total_w,
+                                   _tk_wr, round(_tk_total_pnl, 0), _tk_avg,
+                                   round(_tk_wpt, 0), round(-_tk_lpt, 0), _tk_pf])
+
+                # 明細 CSV（全トレード）
+                with open(_tk_detail_csv_path, "w", newline="", encoding="utf-8-sig") as _tkdf:
+                    _tkdw = _tk_csv.writer(_tkdf)
+                    _tkdw.writerow(["date", "symbol", "name", "bt_score",
+                                    "entry_p", "exit_p", "pnl", "win"])
+                    for _tk in sorted(_lrv_extra, key=lambda x: str(x.get("entry_d_raw") or "")):
+                        _tkdw.writerow([
+                            str(_tk.get("entry_d_raw") or ""),
+                            _tk.get("symbol", ""),
+                            _tk.get("name", ""),
+                            round(_tk.get("score", 0), 1),
+                            round(_tk.get("entry_p", 0), 1),
+                            round(_tk.get("exit_p", 0), 1),
+                            round(_tk.get("pnl", 0), 0),
+                            1 if _tk.get("pnl", 0) > 0 else 0,
+                        ])
+
+                print(f"[転換CSV] 月別: {_tk_csv_path}", flush=True)
+                print(f"[転換CSV] 明細: {_tk_detail_csv_path}", flush=True)
 
     except Exception as _lrv_exc:
         import traceback as _lrv_tb
