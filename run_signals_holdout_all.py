@@ -1931,7 +1931,13 @@ if getattr(_args, "long_stop_short", False):
             _LRV_QTY_E    = 100
 
             def _lrv_sim_e(sym: str, d) -> "tuple | None":
-                """Returns (pnl, entry_p, exit_p) or None if data missing."""
+                """Returns (pnl, entry_p, exit_p) or None if data missing.
+
+                買い: BUY_T_E(09:09)以降の最初バーのOPEN
+                      1分足=09:09, 5分足=09:10 バー → 厳密一致不要
+                売り: SELL_T_E(11:30)以前の最後バーのOPEN (前場引け相当)
+                      11:30バーがあればそれ、なければ最終前場バー(11:25等)のOPEN
+                """
                 _df3 = _lrv_bars_e(sym)
                 if _df3 is None:
                     return None
@@ -1941,12 +1947,19 @@ if getattr(_args, "long_stop_short", False):
                     return None
                 if len(_day3) < 3:
                     return None
-                _bp = _sp = None
-                for _t3 in _day3.index:
-                    if _t3.time() == _LRV_BUY_T_E:
-                        _bp = float(_day3.loc[_t3, "open"])
-                    if _t3.time() == _LRV_SELL_T_E:
-                        _sp = float(_day3.loc[_t3, "open"])
+                _bar_ts = [_t3.time() for _t3 in _day3.index]
+                # 買い: 09:09以降の最初バー
+                _bp = None
+                for _i3, _bt3 in enumerate(_bar_ts):
+                    if _bt3 >= _LRV_BUY_T_E:
+                        _bp = float(_day3.iloc[_i3]["open"])
+                        break
+                # 売り: 11:30以前の最後バー(後場バーを除く)
+                _sp = None
+                for _i3 in range(len(_bar_ts) - 1, -1, -1):
+                    if _bar_ts[_i3] <= _LRV_SELL_T_E:
+                        _sp = float(_day3.iloc[_i3]["open"])
+                        break
                 if not _bp or not _sp:
                     return None
                 _be2 = _bp * (1 + _LRV_SLIP_E)
