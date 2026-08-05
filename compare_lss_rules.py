@@ -81,9 +81,17 @@ TODAY = pd.Timestamp.now().normalize()
 
 # ルール案の定義。stop_off_bars=約定バーから何本 損切りを無効にするか(0=約定バーから有効=base)。
 # sm2=損切りATR倍率(None=args.sm)。gap_skip=このギャップ率(負値)未満のギャップダウンは見送り。
+# gap_ei0=True: 寄りでトリガーを割って約定したトレードの約定バーを先頭バー(#0)に固定する。
+#   既定(False)は『最初に安値<=トリガーのバー』を約定バーにするため、寄りで割った後に
+#   トリガー上へ反発すると約定バーが後ろへズレ、その間の急騰(損切り区間)を取りこぼす。
+#   実運用は寄りで約定済みなので gap_ei0=True の方が現実に近い。差分=取りこぼしの規模。
 RULES = [
     {"name": "base(v13 sm0.1)",       "stop_off": 0, "sm2": None, "gap_skip": None},
     {"name": "delay1(寄1本目stopなし)", "stop_off": 1, "sm2": None, "gap_skip": None},
+    # ─── 寄りギャップ約定バー補正の影響測定 (2026-08-05) ────────────────
+    {"name": "base+寄り約定bar0",       "stop_off": 0, "sm2": None, "gap_skip": None, "gap_ei0": True},
+    {"name": "delay1+寄り約定bar0",     "stop_off": 1, "sm2": None, "gap_skip": None, "gap_ei0": True},
+    {"name": "delay2+寄り約定bar0",     "stop_off": 2, "sm2": None, "gap_skip": None, "gap_ei0": True},
     {"name": "delay2(寄2本目からstop)", "stop_off": 2, "sm2": None, "gap_skip": None},
     {"name": "delay3(寄3本目=15分後)",   "stop_off": 3, "sm2": None, "gap_skip": None},
     {"name": "delay4(寄4本目=20分後)",   "stop_off": 4, "sm2": None, "gap_skip": None},
@@ -384,10 +392,18 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     sp = float(ceil_to_tick(olp + atr * rule["sm2"]))
                 else:
                     sp = stop_p
-                stop_from = ei + rule["stop_off"]
+                # gap_ei0: 寄りでトリガーを割って約定(gap_pct<0)したトレードは、建玉が
+                # 「記録上の先頭バー」から開いている。既定の ei は『最初に安値<=トリガーの
+                # バー』なので、寄りで割った後いったんトリガー上へ反発すると ei が後ろへ
+                # ズレ、その間の急騰(=損切り区間)が丸ごと約定前として無視される。
+                # 例 9042 2026-08-05: 寄り4,500(トリガー4,505割れ)→09:05高値4,541・09:10高値
+                # 4,545 で損切り4,530を突破(実際は09:06に損切り)だが、既定 ei=09:15 のため
+                # delay1 と合わさって損切りが消え『タイムカット+3,404円』と誤計上されていた。
+                _ei_r = 0 if (rule.get("gap_ei0") and gap_pct < 0) else ei
+                stop_from = _ei_r + rule["stop_off"]
                 hard_p = float(entry_fill * (1.0 + rule["hard"])) if rule.get("hard") else None
                 reason, ex_line, ex_real, ex_slip, exit_idx = _exit(
-                    opens, highs, lows, closes, ei, stop_from, sp, target_p, d_close,
+                    opens, highs, lows, closes, _ei_r, stop_from, sp, target_p, d_close,
                     hard_stop_p=hard_p, stop_on_close=rule.get("soc"),
                     be_r=rule.get("be_r"), entry_fill=entry_fill,
                     target_r=rule.get("target_r"))
@@ -413,11 +429,11 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     _ja = {"stop": "損切り", "target": "利確", "close": "引け",
                            "hardstop": "ハード損切り"}.get(reason, reason)
                     # MAE=最大逆行(約定〜決済までに価格がショートに逆行して付けた最大の含み損%)。
-                    _mae_hi = float(highs[ei:exit_idx + 1].max()) if exit_idx >= ei else float(highs[ei])
+                    _mae_hi = float(highs[_ei_r:exit_idx + 1].max()) if exit_idx >= _ei_r else float(highs[_ei_r])
                     _mae_pct = (_mae_hi - entry_fill) / entry_fill * 100 if entry_fill > 0 else 0.0
                     # MFE=最大有利到達点(ショート: どこまで価格が下落したか)。
                     # target_dist = entry→target の距離。MFE_ratio = 何%到達したか(100%=利確水準)。
-                    _mfe_lo = float(lows[ei:exit_idx + 1].min()) if exit_idx >= ei else float(lows[ei])
+                    _mfe_lo = float(lows[_ei_r:exit_idx + 1].min()) if exit_idx >= _ei_r else float(lows[_ei_r])
                     _target_dist = entry_fill - target_p  # ショート: 下方向が有利
                     _mfe_ratio = (entry_fill - _mfe_lo) / _target_dist * 100 if _target_dist > 0 else 0.0
                     local_audit.append({
