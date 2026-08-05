@@ -9393,11 +9393,14 @@ function switchTbd(id, tab) {{
             sc_html = _fmt_score_cell(t, _col)
         else:
             sc_html = ""
+        is_tenkan = t.get("strategy") == "転換"
         if is_overlap:
             # 普通のシグナルと同様に扱う(dimしない)。左帯だけで再エントリーを示す。
             row_style = ' style="border-left:3px solid #7c3aed"'
         elif is_pending:
             row_style = ' style="opacity:0.7;border-left:3px solid #fbbf24"'
+        elif is_tenkan:
+            row_style = ' style="border-left:3px solid #60a5fa;background:rgba(96,165,250,0.06)"'
         else:
             row_style = ""
         pnl_cell  = '—' if is_pending else f'{t["pnl"]:+,.0f}円'
@@ -10235,8 +10238,11 @@ function switchTbd(id, tab) {{
             _reg_lbl, _reg_col = _month_regime(ym)   # その月末の大局レジーム
             # その月に約定した取引の同時保有ピーク資金(=その月を回すのに必要な資金)
             _mc_cap, _mc_pd, _mc_pcnt, _mc_max, _mc_tot = _peak_capital(trades_m)
+            _tenkan_m = sum(1 for t in done_m if t.get("strategy") == "転換")
+            _tenkan_badge = (f'<br><span style="font-size:0.66rem;color:#60a5fa;font-weight:700">'
+                             f'🔄転換{_tenkan_m}件</span>') if _tenkan_m > 0 else ""
             rows += (f'<tr>'
-                     f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}</td>'
+                     f'<td style="font-weight:700;color:#e2e8f0;white-space:nowrap">{ym[:4]}/{mm}{_tenkan_badge}</td>'
                      f'<td style="text-align:center;color:{_reg_col};font-weight:700;white-space:nowrap">{_reg_lbl}</td>'
                      f'<td style="text-align:right;color:#94a3b8">{len(done_m)}件</td>'
                      f'<td style="text-align:right;color:#94a3b8">{wr_m:.0f}%</td>'
@@ -12552,6 +12558,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     _bt40liq_btn = ""
     _bt40liq_pane = ""
     if _LSS_ORDER_MODE:
+        _tenkan_in_budget = sum(1 for t in _budget_entry_sorted if t.get("strategy") == "転換")
+        _tenkan_note = (
+            f'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;'
+            f'border-left:3px solid #60a5fa;padding-left:8px">'
+            f'🔄 転換トレード(lss未約定→ロング転換): <b>{_tenkan_in_budget}件</b> 含む '
+            f'<span style="font-weight:400;color:#94a3b8">(↑月別テーブルと日別詳細に混合表示)'
+            f'</span></p>'
+        ) if _tenkan_in_budget > 0 else ""
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
             f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
@@ -12565,6 +12579,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'（同日決済なので予算は毎日リセット）。<b>不約定の注文も発注枠を消費</b>する'
             f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。日付クリックで詳細'
             f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
+            + _tenkan_note
             + _month_summary_html(_budget_entry_sorted)
             + _month_accordion_html(_budget_entry_by_date, _sorted_budget_entry_dates, _dseq, "q")
             + '</div>')
