@@ -2000,8 +2000,32 @@ if getattr(_args, "long_stop_short", False):
                 print(f"[転換] bt_score分布: BT≥40={_sc_ge40}件 / BT≥30={_sc_ge30}件 / 全体={len(_sc_vals)}件", flush=True)
             _lrv_extra = []
             _lrv_no_data_e = 0
-            _lrv_min_p = _args.min_price if _args.min_price and _args.min_price > 0 else 0.0
-            _lrv_max_p = next((p for p in _price_list if p > 0), 0)
+            # 価格範囲は _args から直接導出する。
+            # ※ _price_list は --both のサブプロセス起動ブロック内のローカル変数で、
+            #   ここからは見えない(参照すると NameError で転換が丸ごと0件になる)。
+            _lrv_min_p = (_args.min_price
+                          if getattr(_args, "min_price", 0) and _args.min_price > 0 else 0.0)
+            _lrv_max_p = 0.0
+            _lrv_pr_raw = getattr(_args, "price_ranges", None)
+            _lrv_pr_given = False
+            if _lrv_pr_raw:
+                try:
+                    _lrv_pr_vals = [float(x.strip())
+                                    for x in str(_lrv_pr_raw).split(",") if x.strip()]
+                    if _lrv_pr_vals:
+                        _lrv_pr_given = True
+                        # 先頭の非ゼロ = 「1,000〜6,000円」タブの上限。
+                        # 0 は無制限タブなので、非ゼロが無ければ上限なし(0)のまま。
+                        _lrv_max_p = next((p for p in _lrv_pr_vals if p > 0), 0.0)
+                except Exception:
+                    _lrv_pr_given = False
+                    _lrv_max_p = 0.0
+            if not _lrv_pr_given and _lrv_max_p <= 0:
+                # --price-ranges 未指定のときだけ --max-price にフォールバック。
+                _lrv_mx = getattr(_args, "max_price", 0.0) or 0.0
+                _lrv_max_p = _lrv_mx if 0 < _lrv_mx < 100000 else 0.0
+            print(f"[転換] 価格範囲: {_lrv_min_p:g}〜"
+                  f"{('無制限' if _lrv_max_p <= 0 else format(_lrv_max_p, 'g'))}円", flush=True)
             _lrv_price_skip = 0
             for _, _rw in _lrv_unfl_df.iterrows():
                 _oos_ep = float(_rw.get("entry_p", 0) or 0)
