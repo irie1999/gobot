@@ -70,6 +70,9 @@ _PNL_BT_MAX = 0.0
 _PNL_BT_MIN = 0.0
 _LONG_BT_REF: dict[tuple, float] = {}   # (symbol, strategy) -> ロングBTスコア
 _SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLスイープ」タブを出す
+# run_signals_holdout_all から注入する追加トレードレコード（lss転換ロングなど）。
+# display_trades に結合して月別アコーディオン・日別カードに自然に混合表示される。
+_EXTRA_TRADES: list = []
 _SAMEDAY_SWEEP_INVERTED = True   # ミラー(符号反転)なら True / ロング銘柄ショートなら False
 _SAMEDAY_5M_TAB = False   # mirror/lss 用: 詳細分析に「5分足TP/SL最適化」タブを出す
 
@@ -9279,7 +9282,7 @@ function switchTbd(id, tab) {{
     # 取引するため(例: 北日本銀行を保有中に2回目シグナルで再エントリー)。
     # ※ 計測(BTスコア/戦略サマリー/上部KPI)は all_trades ベースのままで不変。
     #   display_trades は表示・日別グリッド・月別集計にのみ使われる。
-    display_trades = all_trades + _overlap_dropped
+    display_trades = all_trades + _overlap_dropped + list(_EXTRA_TRADES)
     # 成績に効く要素の分析HTML(詳細分析タブ★効く要素)
     try:
         _factors_html = _factor_analysis_html(display_trades)
