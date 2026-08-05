@@ -2549,9 +2549,9 @@ if _args.oos_until:
 </div>"""
         print("OOS検証タブ生成完了")
 
-# ── ロング転換合算タブ (lss モード + oos_raw_fold*.csv 存在時) ─────────────
-_lrv_tab_btn  = ""
-_lrv_tab_pane = ""
+# ── ロング転換合算 (lss モード + oos_raw_fold*.csv 存在時) ─────────────────
+# 損益タブ (ho-pnl) の先頭に月別合算サマリーを注入する
+_lrv_monthly_summary = ""
 if getattr(_args, "long_stop_short", False):
     try:
         import glob as _lrv_glob
@@ -2777,12 +2777,14 @@ if getattr(_args, "long_stop_short", False):
 </table>
 </div>"""
 
-            _lrv_tab_btn  = '\n  <button class="ho-outer-btn" onclick="switchHoTab(\'lrv\')">🔄 転換合算</button>'
-            _lrv_tab_pane = f'\n<div id="ho-lrv" class="ho-outer-pane">\n{_lrv_body}\n</div>'
-            print(f"転換合算タブ生成完了 ({_lrv_note2})", flush=True)
+            _lrv_monthly_summary = f"""
+<div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:14px 16px;margin-bottom:18px">
+{_lrv_body}
+</div>"""
+            print(f"転換合算サマリー生成完了 ({_lrv_note2})", flush=True)
     except Exception as _lrv_exc:
         import traceback as _lrv_tb
-        print(f"[WARN] 転換合算タブ生成エラー: {_lrv_exc}\n{_lrv_tb.format_exc()}", flush=True)
+        print(f"[WARN] 転換合算サマリー生成エラー: {_lrv_exc}\n{_lrv_tb.format_exc()}", flush=True)
 
 # ── フル HTML ─────────────────────────────────────────────────────────────────
 _extra_css = """
@@ -2922,7 +2924,7 @@ html = f"""<!DOCTYPE html>
   <button class="ho-outer-btn active" onclick="switchHoTab('sig')">📋 シグナル</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('pnl')">💹 損益</button>
   <button class="ho-outer-btn"        onclick="switchHoTab('sym')">📊 銘柄詳細（{len(_signal_stocks)}件）</button>
-  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_wfh_tab_btn}{_oos_tab_btn}{_lrv_tab_btn}
+  <button class="ho-outer-btn"        onclick="switchHoTab('news')">📰 ニュース・情報</button>{_market_tab_btns}{_sym_detail_tab_btn}{_wfh_tab_btn}{_oos_tab_btn}
 </div>
 
 <div id="ho-sig" class="ho-outer-pane active">
@@ -2930,7 +2932,7 @@ html = f"""<!DOCTYPE html>
 </div>
 
 <div id="ho-pnl" class="ho-outer-pane">
-  <div style="margin:12px 0 16px">
+{_lrv_monthly_summary}  <div style="margin:12px 0 16px">
     <span style="color:#94a3b8;font-size:0.8rem;margin-right:8px">分析期間:</span>
     {_period_btns}
   </div>
@@ -2965,7 +2967,6 @@ html = f"""<!DOCTYPE html>
 {_sym_detail_tab_pane}
 {_wfh_tab_pane}
 {_oos_tab_pane}
-{_lrv_tab_pane}
 <script>
 {_na.JS}
 {_extra_js}
