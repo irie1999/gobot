@@ -17,7 +17,10 @@
 
 前提データ:
   fills_<yyyyMMdd>.csv      … .\\fills が残す実約定(往復)。実売値・約定時刻の出どころ。
-  ordered_signals_lss.csv   … 実発注の損切り価格 stop_price / 利確価格 target_price。
+  発注記録                    … 損切り/利確価格。lss_exit_watcher._load_lss_orders を再利用し、
+                              ordered_signals_lss.csv (kabu_send_lss経由) と
+                              placed_orders_<日付>.csv (レポートの発注ボタン=order_server経由)
+                              の両方から読む。実運用は後者なので前者だけでは取れない。
   5分足(stock_5min)          … その日の値動き。
 
 使い方(swingtrade フォルダで):
@@ -49,8 +52,8 @@ ap = argparse.ArgumentParser(
 ap.add_argument("--date", type=str, default=None,
                 help="対象日 YYYY-MM-DD または yyyyMMdd (既定=fills_*.csv の最新)")
 ap.add_argument("--fills-csv", type=str, default=None, help="fills_<日付>.csv を明示指定")
-ap.add_argument("--lss-csv", type=str, default="ordered_signals_lss.csv",
-                help="発注記録(損切り/利確価格の出どころ)")
+# 損切り/利確価格は lss_exit_watcher._load_lss_orders が読む発注記録から取る
+# (ordered_signals_lss.csv と placed_orders_<日付>.csv の両方)。個別指定は不要。
 ap.add_argument("--max-delay", type=int, default=6,
                 help="振る delay の上限(5分足の本数)。既定6=30分まで")
 ap.add_argument("--source", type=str, default=None, help="load_intraday の source")
@@ -113,26 +116,41 @@ if not actual:
     sys.exit(f"[error] {fills_path} に往復完了した取引がありません")
 
 # ── 発注記録から損切り/利確価格を拾う ─────────────────────────
-lss_px: dict[str, dict] = {}
-lp = Path(args.lss_csv)
-if lp.exists():
-    with open(lp, encoding="utf-8-sig", newline="") as f:
-        for r in csv.DictReader(f):
-            if str(r.get("family", "")).strip() != "lss":
-                continue
-            sym = str(r.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
-            sp, tp = _num(r.get("stop_price")), _num(r.get("target_price"))
-            if not sym or sp <= 0 or tp <= 0:
-                continue
-            # 同一銘柄が複数日ぶん並ぶので、対象日に近いものを優先(最後勝ちで十分)
-            d = str(r.get("record_date", ""))[:10]
-            if lss_px.get(sym) and d != str(the_day) and lss_px[sym].get("date") == str(the_day):
-                continue
-            lss_px[sym] = {"stop": sp, "target": tp, "strategy": r.get("strategy", ""),
-                           "date": d}
-else:
-    print(f"[!] {lp} が見つかりません。損切り価格が取れないので終了します。")
+# ★ 発注経路は2つある。watcher の _load_lss_orders が唯一の正しい読み手なので、
+#   自前でCSVを読まずにそれを再利用する:
+#     A) ordered_signals_lss.csv  … kabu_send_lss.py 経由の発注
+#     B) placed_orders_<date>.csv … レポートの「発注」ボタン(order_server)経由 ← 実運用はこちら
+#   自前で A) だけを読んでいたため 2026-08-06 は全銘柄が「損切り価格なし」になった。
+try:
+    from lss_exit_watcher import _load_lss_orders, _match_lss
+except Exception as e:
+    sys.exit(f"[error] lss_exit_watcher の読込に失敗しました: {e}")
+
+lss_map = _load_lss_orders(str(the_day), all_dates=True)
+if not lss_map:
+    print("[!] lss の発注記録が1件も読めませんでした。以下を確認してください:")
+    print("      ・ordered_signals_lss.csv (kabu_send_lss 経由)")
+    print("      ・placed_orders_<日付>.csv (レポートの発注ボタン経由)")
     sys.exit(1)
+_n_src = sum(len(v) for v in lss_map.values())
+print(f"[発注記録] {len(lss_map)}銘柄 / {_n_src}件 を読込")
+
+
+def _lookup(sym: str, entry: float, qty: int) -> dict | None:
+    """実約定(銘柄・平均売値・数量)に対応する発注記録を引く。
+    watcher と同じ _match_lss(数量一致 → 発注日が新しい → 価格が近い)で選ぶ。
+    価格許容を段階的に広げる(実約定は寄りギャップで注文値から離れることがある)。"""
+    for tol in (0.05, 0.10, 0.20, 1.00):
+        rec = _match_lss(sym, entry, qty, lss_map, tol)
+        if rec and _num(rec.get("stop")) > 0 and _num(rec.get("target")) > 0:
+            return rec
+    # 価格を無視して、対象日の記録 → 最新の記録 の順で拾う最終手段
+    cands = [c for c in lss_map.get(sym, [])
+             if _num(c.get("stop")) > 0 and _num(c.get("target")) > 0]
+    if not cands:
+        return None
+    same = [c for c in cands if str(c.get("date", ""))[:10] == str(the_day)]
+    return (same or sorted(cands, key=lambda c: str(c.get("date", ""))))[-1]
 
 
 def _simulate(bars, ei: int, entry: float, stop_p: float, target_p: float,
@@ -167,9 +185,10 @@ missing: list[str] = []
 
 for a in actual:
     sym = a["sym"]
-    px = lss_px.get(sym)
+    px = _lookup(sym, a["entry"], a["qty"])
     if not px:
-        missing.append(f"{sym} {a['name']}(発注記録に損切り価格なし)")
+        _have = len(lss_map.get(sym, []))
+        missing.append(f"{sym} {a['name']}(発注記録に損切り価格なし / 記録{_have}件)")
         continue
     try:
         m5 = load_intraday(sym, days=10, source=args.source)
