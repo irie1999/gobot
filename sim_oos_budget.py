@@ -361,6 +361,66 @@ def print_signal_breakdown(rows: list[dict], bt_min: float) -> None:
 # メイン
 # ─────────────────────────────────────────
 
+def print_strategy_bt_breakdown(rows: list[dict]) -> None:
+    """生CSVから『戦略 × BTスコア帯』の実測を出す(予算制約なし・全約定トレード)。
+
+    compare_lss_rules の【BT帯×戦略別内訳】と同じ見方を、**実運用パイプラインの
+    OOSデータ**で出す。両者がズレる場合、原因は母集団とBTスコアの定義の違い:
+      ・compare_lss_rules … holdout_selected_symbols.py の単一選定 /
+                            BTは「今日時点の直近365日」から算出
+      ・この生CSV        … 基準月ごとに選定し直した累積マージ(=daily.bat) /
+                            BTは「シグナル発生時に凍結したスコア」
+    実運用でどちらが効くかを決めるのは後者。
+    """
+    from collections import defaultdict as _dd
+    band_agg = _dd(lambda: {"n": 0, "pnl": 0.0, "win": 0})
+    strat_agg = _dd(lambda: {"n": 0, "pnl": 0.0, "win": 0})
+    cross = _dd(lambda: {"n": 0, "pnl": 0.0, "win": 0})
+    for r in rows:
+        if r["filled"] != 1:
+            continue                      # 不約定は pnl=0 なので除く
+        st = r["strategy"]
+        if st == "転換":
+            continue                      # 転換はlssではない(§18.5.2)
+        band = int(r["bt_score"] // 20) * 20
+        p = r["pnl"]
+        for k, d in ((band, band_agg), (st, strat_agg), ((st, band), cross)):
+            a = d[k]; a["n"] += 1; a["pnl"] += p; a["win"] += p > 0
+
+    def _line(lbl, v, w=10):
+        return (f"{lbl:<{w}}{v['n']:>7}{v['win'] / v['n'] * 100:>6.0f}%"
+                f"{v['pnl']:>+14,.0f}{v['pnl'] / v['n']:>+11,.0f}")
+
+    print("\n" + "=" * 60)
+    print("【BT帯だけで見る】戦略を混ぜた全体 — BTが効いているかの本体")
+    print("=" * 60)
+    print(f"{'BT帯':<10}{'件数':>7}{'勝率':>7}{'合計損益':>14}{'1件あたり':>11}")
+    for b in sorted(band_agg):
+        print(_line(f"{b}~{b + 19}", band_agg[b]))
+
+    print("\n" + "=" * 60)
+    print("【戦略だけで見る】BT帯を混ぜた全体")
+    print("=" * 60)
+    print(f"{'戦略':<10}{'件数':>7}{'勝率':>7}{'合計損益':>14}{'1件あたり':>11}")
+    for st, v in sorted(strat_agg.items(), key=lambda x: -x[1]["pnl"] / x[1]["n"]):
+        print(_line(st, v))
+
+    print("\n" + "=" * 72)
+    print("【BT帯 × 戦略】同じBT帯の中で戦略差があるか = 戦略別閾値に意味があるか")
+    print("=" * 72)
+    print(f"{'BT帯':<9}{'戦略':<10}{'件数':>7}{'勝率':>7}{'合計損益':>14}{'1件あたり':>11}")
+    for b in sorted(band_agg):
+        ent = sorted([(st, v) for (st, bb), v in cross.items() if bb == b],
+                     key=lambda x: -x[1]["pnl"] / x[1]["n"])
+        first = True
+        for st, v in ent:
+            print(f"{(f'{b}~{b + 19}' if first else ''):<9}" + _line(st, v))
+            first = False
+        print()
+    print("読み方: 『BT帯だけ』が単調なら BT は効いている。『BT帯×戦略』で同じ帯の中の")
+    print("        戦略順位が期間や母集団で入れ替わるなら、戦略別に閾値を分ける根拠はない。")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="生トレードCSVから任意BT閾値で予算シミュを後から実行",
@@ -368,6 +428,9 @@ def main() -> None:
         epilog=__doc__,
     )
     ap.add_argument("--raw", required=True, help="生トレードCSV（oos_raw_*.csv）のパス")
+    ap.add_argument("--by-strategy", action="store_true",
+                    help="『BT帯だけ』『戦略だけ』『BT帯×戦略』の実測内訳を出す(予算制約なし)。"
+                         "戦略別にBT閾値を分ける意味があるかを、実運用パイプラインのOOSデータで確認する")
     ap.add_argument("--bt-mins", default="30",
                     help="BT閾値（カンマ区切り複数可） 例: 30,40,50,60,70  (既定: 30)")
     ap.add_argument("--budget", type=float, default=float(_DEFAULT_BUDGET_MAN),
@@ -412,6 +475,9 @@ def main() -> None:
     print(f"  予算: {budget_man:.0f}万円 / 絞り戦略: {sorted(strat_narrow)}")
     if _lprio is not None:
         print(f"  {_lprio.describe()}")
+
+    if args.by_strategy:
+        print_strategy_bt_breakdown(rows)
 
     all_out_rows: list[dict] = []
     for bt_min in sorted(bt_mins):
