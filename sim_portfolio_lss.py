@@ -57,7 +57,8 @@ ap.add_argument("--multiples", type=str, default="1.0,1.5,2.0,2.5,3.0",
 ap.add_argument("--base-month", type=str, default="2026-01", help="OOS分割(以前=TRAIN、以後=TEST)。空=全期間のみ")
 ap.add_argument("--sm", type=float, default=0.1, help="損切ATR倍(lss=0.1)")
 ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍(lss=1.0)")
-ap.add_argument("--stop-delay-bars", type=int, default=1, help="損切り遅延(本)。lss=delay1=1(5分足)")
+ap.add_argument("--stop-delay-bars", type=int, default=2,
+                help="損切り遅延(5分足の本数)。既定2=delay2=ライブ(watch)と同じ。CLAUDE.md §18.9")
 ap.add_argument("--qty", type=int, default=None, help="株数(既定=FIXED_QTY=100)")
 ap.add_argument("--no-dedupe-symbol", action="store_true",
                 help="同一銘柄が複数戦略で出た日を統合しない(=1銘柄複数ポジション許可)。既定=最高BTの1件に統合")

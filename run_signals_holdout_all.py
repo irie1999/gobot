@@ -1390,9 +1390,10 @@ if not _args.date:
 #   v14: 指値ガードを 3%→2% に試したが、本番エンジンの月別損益で2%は3%より約-1%(微減)と判明。
 #        3%へ差し戻し(2026-07-31)。v13(3%)のキャッシュに戻すのでバージョンも v13 に戻す。
 _BT_LOGIC_VER = "v13"
-# lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
-# 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
-_LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
+# lss損切り遅延(delay1/delay2)はBTキャッシュを別管理(値ごとに衝突しないよう版トークンに
+# sd<N> を付与)。既定は 2 = ライブの lss_exit_watcher --stop-delay-bars 2 と一致
+# (CLAUDE.md §18.9)。engine(backtest_limit_entry)の既定と必ず同じ値にすること。
+_LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "2") or "2")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
 # 指値ガード(深ギャップ約定不可の閾値)を env で上書き可能に(A/B検証用)。既定=3%。

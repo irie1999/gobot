@@ -7,7 +7,7 @@
   2. 各窓について:
        a. merge_lss_proposals.py でマージ → lss_proposal_sweep_<oldest>_<newest>.py
        b. run_signals_holdout_all.py を lss単独(--long-stop-short --lss-proposal)で実行。
-          表示ウィンドウは「その窓の最も古い基準月〜今日」(--days 自動)。delay1(LSS_STOP_DELAY_BARS=1)。
+          表示ウィンドウは「その窓の最も古い基準月〜今日」(--days 自動)。delay2(LSS_STOP_DELAY_BARS=2)。
           環境変数 LSS_BUDGET_MONTHLY_CSV に月別P&Lを書かせる(nikkei_analysis 側で出力)。
   3. 各窓の月別CSVを集約 → 月×窓 の比較表をコンソール表示 + sweep_base_comparison_<date>.csv。
   4. 各窓の本体HTMLを --output-suffix _sweep_<label> で保存(上書き回避)。
@@ -49,7 +49,8 @@ ap.add_argument("--skip-run", action="store_true", help="レポート実行を�
 ap.add_argument("--only", type=str, default="", help="この基準月だけを1マージに(カンマ区切り 例 2025-03,2025-06,2025-09)")
 ap.add_argument("--from", dest="frm", type=str, default="", help="この基準月以降だけを対象(YYYY-MM)。短TRAINの古い月を除外する用 例 2025-09")
 ap.add_argument("--to", dest="to", type=str, default="", help="この基準月まで対象(YYYY-MM)")
-ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(LSS_STOP_DELAY_BARS=0)")
+ap.add_argument("--no-delay", action="store_true",
+                help="損切り遅延を使わない(LSS_STOP_DELAY_BARS=0=base)。既定はライブと同じ delay2")
 ap.add_argument("--no-open", action="store_true", help="生成HTMLをブラウザで自動オープンしない")
 args = ap.parse_args()
 
@@ -107,7 +108,8 @@ def _run_one(win: list[str]) -> Path | None:
     days = args.days if args.days > 0 else _days_from(win[0])
     env = dict(os.environ)
     env["LSS_BUDGET_MONTHLY_CSV"] = str(csv_out)
-    env["LSS_STOP_DELAY_BARS"] = "0" if args.no_delay else "1"
+    # ライブ(lss_exit_watcher --stop-delay-bars 2)と揃える。CLAUDE.md §18.9
+    env["LSS_STOP_DELAY_BARS"] = "0" if args.no_delay else "2"
     cmd = [_PY, "run_signals_holdout_all.py",
            "--long-stop-short", "--lss-proposal", str(merged),
            "--min-price", str(args.min_price), "--max-price", str(args.max_price),

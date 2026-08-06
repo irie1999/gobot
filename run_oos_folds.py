@@ -73,7 +73,7 @@ def main():
     env = os.environ.copy()
     env["LSS_CLOSESTOP_RESWEEP"] = ""
     env["LSS_GUARD_ONLY"] = ""
-    env["LSS_STOP_DELAY_BARS"] = "1"
+    env["LSS_STOP_DELAY_BARS"] = "2"   # ライブと揃える(CLAUDE.md §18.9)
     env["LSS_BT_TAB_MIN"] = "40"
     env.pop("LSS_REALISTIC_ENTRY", None)
 

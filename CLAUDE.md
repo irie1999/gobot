@@ -1298,8 +1298,19 @@ lssの約定を **min(トリガー, その日の始値)** に変更(逆指値売
   引け間際を丸ごと消した d2+14:30 が delay2 とほぼ同値(−1,388)= 優位は朝の通常トレード由来。
 
 **⚠ バックテストとライブは必ず揃える** (§18.9 末尾と同じ鉄則)。
-2026-08-06 以前は `daily.bat` が `LSS_STOP_DELAY_BARS=1`、watcher が `--stop-delay-bars 1`
-で揃っていたが、**engine既定は0** なので env を外すとレポートだけ base に戻る。
+2026-08-06 以前は **engine既定が 0** で、env を設定し忘れたスクリプトだけレポートが base に
+戻る事故のもとだった。**engine既定を 2 に変更して基準を live 側に寄せ、この穴を塞いだ**:
+
+| 場所 | 既定 |
+|---|---|
+| `backtest_limit_entry._LSS_STOP_DELAY_BARS` (エンジン) | **2** |
+| `run_signals_holdout_all._LSS_STOP_DELAY` (レポート/BTキャッシュ版トークン) | **2** |
+| `daily.bat` / `dailyfast.bat` / `sweep_oos.bat` (env) | **2** |
+| `export_merge_trades.py` / `sweep_base_months.py` / `sweep_lss_oos_monthly.py` / `run_oos_folds.py` | **2** |
+| `sim_portfolio_lss` / `analyze_gap_bt` / `analyze_gap_fills` / `analyze_tenkan_cutoff` の `--stop-delay-bars` | **2** |
+| `lss_exit_watcher --stop-delay-bars` (ライブ、`.\watch` が明示) | **2** |
+
+base に戻して比較したいときだけ `set LSS_STOP_DELAY_BARS=0` / `--stop-delay-bars 0` / `--no-delay`。
 値を変えると BTキャッシュ(版トークン `sd<N>`)が無効化されるので、切替後の初回 `.\daily` は遅い。
 
 **1日の実績で判断しないこと。** 2026-08-06 の `.\delay`(実約定12銘柄)は delay2 を
@@ -1363,7 +1374,8 @@ delay3・delay4 は現実で劣化するので **delay2 が頭打ち**。
 
 **実装(バックテスト⇄ライブを一致させる):**
 - バックテスト: `sameday5m_firsttouch.short_exit_5m(stop_delay_bars=K)`。エンジンは環境変数
-  `LSS_STOP_DELAY_BARS`(既定0)で lss(stop_sell)のみに適用。BTキャッシュは版トークンに sd<N> 付与。
+  `LSS_STOP_DELAY_BARS`(**既定2**。2026-08-06 に 0 から変更)で lss(stop_sell)のみに適用。
+  BTキャッシュは版トークンに sd<N> 付与。
 - ライブ: `lss_exit_watcher.py --stop-delay-bars K`(**現行 K=2**)。約定検知した5分足から
   K本ぶんは損切り(①即時成行/②板逆指値)を設置せず、その次の5分グリッドから有効化。
   検知≒約定時刻(寄り約定+寄りから常駐)。**利確・引けはこの間も有効**。既定0=即損切り。

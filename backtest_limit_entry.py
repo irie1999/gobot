@@ -681,11 +681,16 @@ _INTRADAY_5M_ENTRY_DELAY: int = 0      # 寄りから何本(=N×5分)待って�
                                        # 寄り値は遅延後の先頭バー始値を使う。
 _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか。表示窓が長い(基準月スイープ等)
                                        # ときは呼び出し側で増やす(既定400=ライブ用)
-# lss損切り遅延: 約定バーから何本(=N×5分)損切りを効かせないか。0(既定)=現行。
-# 1(delay1)=約定した5分足の中は損切りせず次の足から(寄り1本目のヒゲ刈り回避。lss検証で
-# PF 0.93→1.43)。環境変数 LSS_STOP_DELAY_BARS で切替可(実運用は寄り5分後に逆指値損切りを
-# 設置する運用に対応)。mirror(指値空売り)には適用しない=lss(stop_sell)のみ。
-_LSS_STOP_DELAY_BARS: int = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
+# lss損切り遅延: 約定バーから何本(=N×5分)損切りを効かせないか。
+#   0 = 即損切り(base) / 1 = delay1(約定バーの次の足から) / 2 = delay2(2本後から)
+# **既定は 2 (delay2)。ライブの `lss_exit_watcher --stop-delay-bars 2` と一致させるため**
+# (CLAUDE.md §18.9)。旧既定は 0 だったが、env を設定し忘れたスクリプトだけレポートが
+# base に戻り、ライブと乖離する事故のもとだった。基準を live 側に合わせて潰す。
+# 根拠(compare_lss_rules --bt-min 40 --days 240, net現実): base +1,791,907 /
+# delay1 +2,358,023 / delay2 +2,436,051(ピーク) / delay3 +2,361,226 / delay4 +2,360,525。
+# 環境変数 LSS_STOP_DELAY_BARS で上書き可(0 にすれば旧 base 挙動)。
+# mirror(指値空売り)には適用しない=lss(stop_sell)のみ。
+_LSS_STOP_DELAY_BARS: int = int(os.environ.get("LSS_STOP_DELAY_BARS", "2") or "2")
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
 
 

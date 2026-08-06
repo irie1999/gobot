@@ -41,7 +41,8 @@ ap.add_argument("--base-month", type=str, default="2026-01",
                 help="OOS分割の基準月(この月末以前=TRAIN/in-sample、以後=TEST/OOS)。空=全期間のみ")
 ap.add_argument("--sm", type=float, default=0.1, help="損切ATR倍率(lss既定0.1)")
 ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍率(lss既定1.0)")
-ap.add_argument("--stop-delay-bars", type=int, default=1, help="損切り遅延(既定1=delay1=実運用)")
+ap.add_argument("--stop-delay-bars", type=int, default=2,
+                help="損切り遅延(既定2=delay2=実運用。CLAUDE.md §18.9)")
 ap.add_argument("--days", type=int, default=500, help="遡及日数")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--limit", type=int, default=0, help="先頭Nペアだけ(デバッグ)")

@@ -49,7 +49,8 @@ ap.add_argument("--days", type=int, default=0, help="表示日数。0=各窓の�
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=8)
-ap.add_argument("--no-delay", action="store_true", help="delay1を使わない(LSS_STOP_DELAY_BARS=0)")
+ap.add_argument("--no-delay", action="store_true",
+                help="損切り遅延を使わない(LSS_STOP_DELAY_BARS=0=base)。既定はライブと同じ delay2")
 ap.add_argument("--fast", action="store_true",
                 help="詳細分析タブを省いて高速化(--no-analysis)。既定はフル=いつもの形式のHTML")
 ap.add_argument("--no-html", action="store_true", help="HTMLを出さずCSVだけ(既定はHTMLもout-dirにコピー)")
@@ -107,7 +108,8 @@ def _run_one(win: list[str], out_dir: Path, name_prefix: str = "trades_") -> Pat
     days = args.days if args.days > 0 else _days_from(win[0])
     env = dict(os.environ)
     env["LSS_TRADES_CSV"] = str(csv_out)
-    env["LSS_STOP_DELAY_BARS"] = "0" if args.no_delay else "1"
+    # ライブ(lss_exit_watcher --stop-delay-bars 2)と揃える。CLAUDE.md §18.9
+    env["LSS_STOP_DELAY_BARS"] = "0" if args.no_delay else "2"
     suffix = f"_{name_prefix.rstrip('_')}_{lab}"   # 例 _trades_cumul_2025-09_2026-04
     cmd = [_PY, "run_signals_holdout_all.py",
            "--long-stop-short", "--lss-proposal", str(merged),

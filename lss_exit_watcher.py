@@ -417,7 +417,7 @@ def main() -> int:
         print(f"損切り遅延(delay{args.stop_delay_bars}): 約定検知の5分足の間は損切り無効 → "
               f"次の5分グリッド({args.stop_delay_bars * 5}分後)から損切り有効(寄りヒゲ刈り回避)")
     else:
-        print("損切り遅延: なし(約定検知後すぐ損切り=現行)。delay1にするなら --stop-delay-bars 1")
+        print("損切り遅延: なし(約定検知後すぐ損切り=base)。本番は delay2 → --stop-delay-bars 2")
     print("=" * 66)
 
     # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。

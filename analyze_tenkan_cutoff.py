@@ -41,8 +41,8 @@ ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--bt-min", type=float, default=40.0,
                 help="BTスコア下限(既定40。実際に投資する集団で判断すること)")
-ap.add_argument("--stop-delay-bars", type=int, default=1,
-                help="lssの損切り遅延(既定1=delay1。本番watchと揃える)")
+ap.add_argument("--stop-delay-bars", type=int, default=2,
+                help="lssの損切り遅延(既定2=delay2。本番watchと揃える。CLAUDE.md §18.9)")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--limit", type=int, default=0)
