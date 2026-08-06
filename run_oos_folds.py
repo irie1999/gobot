@@ -14,9 +14,17 @@ daily.bat の実行内容（参考）:
 --long-base は訓練終了月の月末日を自動計算。
 
 使い方:
-  python run_oos_folds.py
-  python run_oos_folds.py --workers 4
-  python run_oos_folds.py --fold-from 2026-03   # 特定フォールドだけ再実行
+  python run_oos_folds.py --workers 8 --lss-only      # ★推奨(最速。lss面1枚だけ)
+  python run_oos_folds.py --workers 8                 # ロング/ショート面も作る(遅い)
+  python run_oos_folds.py --fold-from 2026-03         # 特定フォールドだけ再実行
+
+★ 速度と正確性の注意 (2026-08-06):
+  daily.bat は --both --price-ranges 6000,0 なので、1フォールドあたり最大6面
+  (long/short/lss × 6000/無制限)を作る。しかし検証に使うのは **lss の 6000 面だけ**。
+  さらに悪いことに、生CSV(LSS_OOS_RAW_CSV)は**追記**なので、lss が 6000 と無制限で
+  2回走ると1つのファイルに価格帯の違うシグナルが混ざる(検証データとして不正)。
+  そのため既定を --price-ranges 6000 にし、--lss-only を用意した。
+  この2つを付ければ 1フォールド=1面になり、速度は約6倍・データも正しくなる。
 """
 import argparse
 import calendar
@@ -46,6 +54,11 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--price-ranges", type=str, default="6000",
+                    help="価格帯パネル。既定 6000 = 1,000〜6,000円の1枚だけ(実発注と同じ帯)。"
+                         "★ daily.bat の \"6000,0\" にすると lss 面が2回走り、"
+                         "生CSV(LSS_OOS_RAW_CSV)は**追記**なので価格無制限ぶんが混ざる。"
+                         "検証データが壊れるので、意図が無い限り 6000 のままにすること")
     ap.add_argument("--lss-only", action="store_true",
                     help="ロング/ショート面を作らず lss 面だけ生成する(--no-long --no-short)。"
                          "予算タブ・検証CSVは lss 面で作られるので結果は同一で、"
@@ -117,6 +130,12 @@ def main():
         env["LSS_OOS_BUDGET_BT_TIERS"] = args.bt_tiers
     env.pop("LSS_REALISTIC_ENTRY", None)
 
+    if "," in args.price_ranges:
+        print(f"[!] --price-ranges {args.price_ranges} は価格帯パネルを複数作ります。")
+        print("    lss 面がその回数だけ走り、生CSV(oos_raw_fold*.csv)は追記なので")
+        print("    価格帯の違うシグナルが1ファイルに混ざります(検証データとしては不正)。")
+        print("    検証目的なら --price-ranges 6000 にしてください。")
+
     print(f"提案ファイル {len(dated)} 件検出:")
     for p, ym in dated:
         print(f"  {ym}: {p.name}")
@@ -164,7 +183,7 @@ def main():
             sys.executable, "run_signals_holdout_all.py",
             "--both",
             "--min-price", "1000",
-            "--price-ranges", "6000,0",
+            "--price-ranges", args.price_ranges,
             "--no-analysis",
             "--lss-proposal", merged,
             "--long-base", long_base,
