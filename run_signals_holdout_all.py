@@ -1657,10 +1657,9 @@ else:
 
 # ── 日経相場環境・トレンド・エントリー分析タブ ─────────────────────────────────
 _market_tab1_html = _market_tab2_html = _market_tab3_html = ""
-if getattr(_args, "no_market", False):
-    print("市場分析タブ: スキップ (--no-market)", flush=True)
 try:
     if getattr(_args, "no_market", False):
+        print("市場分析タブ: スキップ (--no-market)", flush=True)
         raise _SkipMarket()
     print("日経平均データ取得中 (市場分析)...", flush=True)
     import pandas as _pd
@@ -1702,6 +1701,8 @@ try:
         print(f"市場分析タブ生成完了 (相場環境={len(_market_tab1_html)}字 "
               f"/ トレンド期間={len(_market_tab2_html)}字 "
               f"/ エントリー分析={len(_market_tab3_html)}字)", flush=True)
+except _SkipMarket:
+    pass          # --no-market の意図的スキップ。traceback は出さない
 except Exception as _me:
     import traceback as _tb_mkt2
     print(f"[WARN] 市場分析スキップ: {_me}\n{_tb_mkt2.format_exc()}", flush=True)

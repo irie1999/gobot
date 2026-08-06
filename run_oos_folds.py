@@ -54,6 +54,13 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--insample", action="store_true",
+                    help="★診断用★ OOS月の提案ファイルも訓練に含める(=その月を選定に使ってから"
+                         "その月を評価する)。これは in-sample なので成績としては無意味だが、"
+                         "**.\\daily の損益タブと同じ条件**になる。"
+                         "daily.bat は全提案(2026-07まで)をマージするので、7月の数字も"
+                         "『7月の選定を使って7月を評価』した in-sample 値。"
+                         "OOS版と並べて差を見るために使う")
     ap.add_argument("--daily-bat", type=str, default="daily.bat",
                     help="この .bat の merge_lss_proposals 行から提案ファイル一覧を読み、"
                          "**本番と完全に同じ構成**でフォールドを組む。"
@@ -188,12 +195,17 @@ def main():
             continue
 
         long_base = month_end(train_end_ym)
-        train_files = [str(p) for p, _ in dated[:i + 1]]
+        # 既定: 訓練は OOS月の1つ前まで(真のOOS)。
+        # --insample: OOS月の提案も含める = daily.bat と同じ条件(in-sample)。
+        _tr_end = i + 2 if args.insample else i + 1
+        train_files = [str(p) for p, _ in dated[:_tr_end]]
         merged = f"lss_proposal_fold{i+1:02d}.py"
         out_raw = f"oos_raw_fold{i+1:02d}_{oos_ym}.csv"
 
         print(f"\n{'='*60}")
-        print(f"[fold {i+1}] 訓練: {dated[0][1]}〜{train_end_ym}  OOS: {oos_ym}  long-base: {long_base}")
+        _tr_lbl = (dated[min(i + 1, len(dated) - 1)][1] if args.insample else train_end_ym)
+        print(f"[fold {i+1}] 訓練: {dated[0][1]}〜{_tr_lbl}  OOS: {oos_ym}  long-base: {long_base}"
+              + ("  ★in-sample(診断用)" if args.insample else ""))
         if args.lss_only:
             print("           (--lss-only: ロング/ショート面はスキップ。lss面の結果は同一)")
 
