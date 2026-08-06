@@ -43,17 +43,12 @@ set "LSS_ENTRY_DELAY_BARS="
 set "LSS_BUDGET_MIN_BT="
 set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
-REM --- delay2 ON by default: the engine skips the stop on the entry 5min bar AND the
-REM     next one, arming it from the grid after that. MUST match watch.bat
-REM     (--stop-delay-bars 2) or the report shows stop-outs the live run avoids.
-REM     Report BT/ranking reflect delay2. NOTE: the P&L tab is OPTIMISTIC here (the
-REM     engine fills the stop at the line); the realistic verdict is
-REM     compare_lss_rules.py net-real (240d BT40+: delay2 +2,436,051 = peak).
-REM     Changing this invalidates the BT cache (version token sd<N>) -> first run slow.
+REM --- delay1 ON by default: engine skips the stop on the entry 5min bar and arms it
+REM     from the next grid (matches watch.bat --stop-delay-bars 1). Report BT/ranking
+REM     reflect delay1. NOTE: the P&L tab under delay1 is OPTIMISTIC (engine fills the
+REM     stop at the line); the realistic verdict is compare_lss_rules.py net-real.
 REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
-REM     Honor an externally set value so you can A/B without editing this file:
-REM       $env:LSS_STOP_DELAY_BARS="1"; .\dailyfast   (PowerShell)
-if not defined LSS_STOP_DELAY_BARS set "LSS_STOP_DELAY_BARS=2"
+set "LSS_STOP_DELAY_BARS=1"
 REM --- BT threshold = 40 for ALL "BTxx-and-above" places: the detail filter tabs
 REM     (BT40+ list / BT40+ x entry-day) AND the 400man x BT-descending budget floor
 REM     (max(_BUD_MIN_BT=30, _BT_TAB_MIN)=40). One env drives them all. Set to 50 to revert.

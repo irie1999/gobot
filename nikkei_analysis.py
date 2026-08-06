@@ -9577,42 +9577,7 @@ function switchTbd(id, tab) {{
         return t.get("rec_score") or 0
     # 「BTスコア○以上」タブの下限。既定50(env LSS_BT_TAB_MIN で変更可。30に戻すなら =30)。
     _BT_TAB_MIN = int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
-
-    # ── 発注優先順位 / 戦略別BT下限 (lss_priority) ──────────────────────
-    # 既定は無効 = 従来どおり「一律BT下限 + BT降順」。LSS_PRIORITY=1 で有効化。
-    # 有効時は戦略ごとにBT下限を変え(A7/RSI2/VOLTF/MACDTF は20、MOM/DON は40)、
-    # 発注順を『戦略×BT帯の1件あたり期待値の降順』にする。
-    # 根拠: 同じBT帯でも戦略で期待値が桁違い(RSI2 BT20-39 +1,876円/件 vs
-    #       DON BT60-79 +627円/件 vs MOM BT20-39 -14,529円/件)。CLAUDE.md §18.5.4。
-    try:
-        import lss_priority as _lprio
-    except Exception:
-        _lprio = None
-
-    def _bt_ok(_t, _min_bt) -> bool:
-        """その取引が発注対象か。優先順位が無効なら従来どおり一律 _min_bt。"""
-        _bt = _eff_long_bt(_t)
-        if _lprio is None:
-            return _bt >= _min_bt
-        return _lprio.is_orderable(_t.get("strategy", ""), _bt, _min_bt)
-
-    def _bt_sort_key(_t):
-        """予算充填の並び順。優先順位が無効なら従来どおりBT降順。"""
-        if _lprio is None:
-            return (0.0, -_eff_long_bt(_t))
-        return _lprio.priority_key(_t.get("strategy", ""), _eff_long_bt(_t))
-
-    # 設定ログは1プロセス1回だけ。_tab5_pnl_html は銘柄詳細タブで
-    # シグナル銘柄ごとに呼ばれるので、素直に出すと数十行の同じログで埋まる。
-    global _LPRIO_LOGGED
-    if _lprio is not None and not globals().get("_LPRIO_LOGGED"):
-        try:
-            print(f"[lss] {_lprio.describe()}")
-            _LPRIO_LOGGED = True
-        except Exception:
-            pass
-
-    bt40_trades = [t for t in sorted_trades if _bt_ok(t, _BT_TAB_MIN)]
+    bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= _BT_TAB_MIN]
     bt60_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 60]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
     entry_sorted_trades = pending_trades + sorted(
@@ -9819,7 +9784,7 @@ function switchTbd(id, tab) {{
             # 約定済みトレードのみ対象(不約定は実際に買えないので除外)。
             _by_day_ml: dict = _dd(list)
             for _t in _bt30_entry_sorted:
-                if not _bt_ok(_t, _min_bt):
+                if _eff_long_bt(_t) < _min_bt:
                     continue
                 if strat_set and _t.get("strategy", "").upper() not in strat_set:
                     continue
@@ -9828,7 +9793,7 @@ function switchTbd(id, tab) {{
                 _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
                 _by_day_ml[_dk].append(_t)
             for _dk, _day_trades in _by_day_ml.items():
-                _sorted_day = sorted(_day_trades, key=_bt_sort_key)
+                _sorted_day = sorted(_day_trades, key=lambda x: -_eff_long_bt(x))
                 if not _sorted_day:
                     continue
                 # 各トレードの単価(100株あたりコスト)
@@ -9864,7 +9829,7 @@ function switchTbd(id, tab) {{
 
         _by_day_bud: dict = _dd(list)
         for _t in _bt30_entry_sorted:
-            if not _bt_ok(_t, _min_bt):
+            if _eff_long_bt(_t) < _min_bt:
                 continue
             if strat_set and _t.get("strategy", "").upper() not in strat_set:
                 continue
@@ -9877,7 +9842,7 @@ function switchTbd(id, tab) {{
                              for _t in _bt30_entry_sorted
                              if not strat_set or _t.get("strategy", "").upper() in strat_set}
             for _t in all_nofills:
-                if not _bt_ok(_t, _min_bt):
+                if _eff_long_bt(_t) < _min_bt:
                     continue
                 if strat_set and _t.get("strategy", "").upper() not in strat_set:
                     continue
@@ -9887,7 +9852,7 @@ function switchTbd(id, tab) {{
                 _by_day_bud[_dk2].append(_t)
         for _dk in _by_day_bud:
             _cap = 0.0
-            for _t in sorted(_by_day_bud[_dk], key=_bt_sort_key):
+            for _t in sorted(_by_day_bud[_dk], key=lambda x: -_eff_long_bt(x)):
                 if fill_budget:
                     # 約定額ベース: 不約定はスキップ(予算消費なし)、約定価格×株数で管理
                     if _t.get("reason") == "約定せず":
