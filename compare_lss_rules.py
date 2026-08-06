@@ -46,6 +46,12 @@ ap.add_argument("--bt-min", type=float, default=0.0,
                 help="BTスコア下限で母集団を絞る(実際に投資する集団)。30=BT30以上/70=BT70以上/0=全部。"
                      "各(銘柄,戦略)の現行base(v13)成績を直近365日で6期間スライスし calc_recommend_score で算出")
 ap.add_argument("--by-month", action="store_true", help="月別内訳も出力")
+ap.add_argument("--bt-min-per-strategy", type=str, default="",
+                help="戦略ごとにBT下限を変える。例 \"MOM=40,DON=40,A7=20,RSI2=20,VOLTF=20,MACDTF=20\"。"
+                     "指定した戦略はその値、未指定の戦略は --bt-min を使う。"
+                     "BT帯×戦略の実測で、同じBT帯でも戦略により期待値が数十倍違うため"
+                     "(delay2 実測 BT20-39: RSI2 +1,876円/件 vs MOM -14,529円/件)。"
+                     "一律閾値だと『RSI2の優良層を捨てて MOM の破滅層を避ける』トレードオフになる")
 ap.add_argument("--audit", type=str, default="",
                 help="指定ルール(例: delay1)の全トレードを1件ずつCSVに監査出力。各トレードの "
                      "楽観(=レポート値)/現実/保守のpnlと理由・MAE(最大逆行)を並べ、『利確が現実でも"
@@ -68,6 +74,24 @@ ap.add_argument("--legacy-stop-fill", action="store_true",
                      "(=損切り注文を新規に置いたバーだけ窓埋め、以降は板の逆指値でライン約定)")
 args = ap.parse_args()
 _LEGACY_STOP_FILL = args.legacy_stop_fill
+
+# 戦略別BT下限。未指定の戦略は args.bt_min。
+_BT_MIN_BY_STRAT: dict[str, float] = {}
+for _kv in (args.bt_min_per_strategy or "").split(","):
+    _kv = _kv.strip()
+    if not _kv:
+        continue
+    if "=" not in _kv:
+        sys.exit(f"[error] --bt-min-per-strategy の書式は STRAT=数値 です: {_kv}")
+    _k, _v = _kv.split("=", 1)
+    try:
+        _BT_MIN_BY_STRAT[_k.strip().upper()] = float(_v)
+    except ValueError:
+        sys.exit(f"[error] --bt-min-per-strategy の値が数値ではありません: {_kv}")
+
+
+def _bt_min_for(strategy: str) -> float:
+    return _BT_MIN_BY_STRAT.get(str(strategy).upper(), args.bt_min)
 
 import backtest_limit_entry as ble
 from backtest_limit_entry import ceil_to_tick, round_to_tick, tick_size
@@ -547,7 +571,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                                                           "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
         for _k in _sc2:
             _sc2[_k] += _base_s[_k]
-        if args.bt_min > 0 and bt_score_val < args.bt_min:
+        _bt_floor = _bt_min_for(strat)
+        if _bt_floor > 0 and bt_score_val < _bt_floor:
             continue
         for rname, a in local.items():
             t2 = agg[rname]
@@ -656,6 +681,8 @@ def main():
               "旧モデルは --legacy-stop-fill。")
     print("※ net楽観=stopちょうど / net保守=現実+0.5%")
     _pop = f"BT{args.bt_min:.0f}以上(実際に投資する集団)" if args.bt_min > 0 else "全選定ペア(BTフィルタ無し)"
+    if _BT_MIN_BY_STRAT:
+        _pop += " / 戦略別下限: " + ", ".join(f"{k}={v:.0f}" for k, v in sorted(_BT_MIN_BY_STRAT.items()))
     print(f"※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
           f"base vs delay1 の『net現実』差が期待できる現実的な改善幅。母集団={_pop}。")
 
@@ -713,18 +740,19 @@ def main():
         rank = [(st, band, v) for (st, band), v in strat_band_total.items() if v["n"] >= 30]
         rank.sort(key=lambda x: -(x[2]["pnl_real"] / x[2]["n"]))
         if rank:
-            def _scope(band: int) -> str:
-                if args.bt_min <= 0:
+            def _scope(band: int, strat: str = "") -> str:
+                floor = _bt_min_for(strat) if strat else args.bt_min
+                if floor <= 0 or band >= floor:
                     return "発注対象"
-                if band >= args.bt_min:
-                    return "発注対象"
-                if band + 19 >= args.bt_min:
+                if band + 19 >= floor:
                     return "一部対象"
                 return "対象外"
 
             print("\n" + "=" * 100)
             print(f"【発注優先順】{_BD_NAME} — 戦略×BT帯を『1件あたり期待値』降順(30件以上のみ)")
-            _lbl = f"BT{args.bt_min:.0f}以上" if args.bt_min > 0 else "全BT"
+            _lbl = (", ".join(f"{k}={v:.0f}" for k, v in sorted(_BT_MIN_BY_STRAT.items()))
+                    + f", 他=BT{args.bt_min:.0f}") if _BT_MIN_BY_STRAT else (
+                    f"BT{args.bt_min:.0f}以上" if args.bt_min > 0 else "全BT")
             print(f"  発注対象 = {_lbl}。それ未満の帯は参考(既に発注していない)。")
             print("  資金が足りない日にどれを優先するかは『発注対象』行の上から順。")
             print("=" * 100)
@@ -734,7 +762,7 @@ def main():
             for i, (st, band, v) in enumerate(rank, 1):
                 per = v["pnl_real"] / v["n"]
                 wr = v["win"] / v["n"] * 100
-                sc = _scope(band)
+                sc = _scope(band, st)
                 if sc == "発注対象":
                     _n_in += 1
                     mark = ("最優先" if per >= 1500 else
@@ -748,7 +776,7 @@ def main():
                       f"{wr:>5.0f}%{_pf_s(v['gp'], v['gl']):>7}{per:>+11,.0f}"
                       f"{v['pnl_real']:>+14,.0f}  {sc:<8}{mark}")
             print("-" * 100)
-            _in = [r for r in rank if _scope(r[1]) == "発注対象"]
+            _in = [r for r in rank if _scope(r[1], r[0]) == "発注対象"]
             _in_neg = [r for r in _in if r[2]["pnl_real"] / r[2]["n"] <= 0]
             _in_sum = sum(r[2]["pnl_real"] for r in _in)
             _in_n = sum(r[2]["n"] for r in _in)
@@ -762,7 +790,7 @@ def main():
             else:
                 print("  → 発注対象の帯は全て期待値プラス。切る層は無い。"
                       "資金が足りない日の『順番』にだけ使うこと。")
-            _out = [r for r in rank if _scope(r[1]) == "対象外"]
+            _out = [r for r in rank if _scope(r[1], r[0]) == "対象外"]
             if _out:
                 _out_neg = sum(1 for r in _out if r[2]["pnl_real"] / r[2]["n"] <= 0)
                 print(f"  参考: 対象外({len(_out)}層, うち期待値マイナス {_out_neg}層)は "
