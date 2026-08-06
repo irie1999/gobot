@@ -130,7 +130,26 @@ def _load_bt_pairs():
         except Exception:
             b = 0.0
         bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
+    if _lprio is not None and _lprio.enabled():
+        # 戦略別のBT下限(A7/RSI2/VOLTF/MACDTF=20, MOM/DON=40)。キーは (sym, strat)。
+        return {k: v for k, v in bt.items()
+                if _lprio.is_orderable(k[1], v, args.bt_min)}
     return {k: v for k, v in bt.items() if v >= args.bt_min}
+
+
+# ── 発注優先順位 / 戦略別BT下限 (lss_priority) ──────────────────────
+# 既定は無効 = 従来どおり「一律 --bt-min + BT降順」。LSS_PRIORITY=1 で有効化。
+try:
+    import lss_priority as _lprio
+except Exception:
+    _lprio = None
+
+
+def _prio_key(rec):
+    """発注順のキー(小さいほど先)。無効なら従来どおりBT降順。"""
+    if _lprio is None:
+        return (0.0, -float(rec.get("bt") or 0))
+    return _lprio.priority_key(rec.get("strat", ""), float(rec.get("bt") or 0))
 
 
 def _load_all_bt() -> dict:
@@ -239,7 +258,7 @@ def _collect(sym_yf, strat, bt):
         order_notional = trigger * QTY
         fill = short_entry_fill_5m(db, trigger, is_rise_trigger=False, entry_gap_limit=GAP_LIMIT,
                                    day_open=d_open, day_low=d_low, day_high=d_high)
-        rec = {"date": pd.Timestamp(edate), "sym": sym, "bt": bt,
+        rec = {"date": pd.Timestamp(edate), "sym": sym, "bt": bt, "strat": strat,
                "order_notional": order_notional, "filled": False,
                "fill_min": None, "exit_min": None, "fill_notional": 0.0, "pnl": 0.0}
         if fill is None:
@@ -260,7 +279,8 @@ def _collect(sym_yf, strat, bt):
 
 # ── ポートフォリオ・シミュレーション ──────────────────────────────
 def _sim(records, mult):
-    """1倍率のポートフォリオ結果を返す。各日: BT降順で M×予算ぶん注文→約定を時刻順→予算到達でキャンセル。"""
+    """1倍率のポートフォリオ結果を返す。各日: 優先順(既定BT降順 / LSS_PRIORITY=1 で
+    戦略×BT帯の期待値降順)で M×予算ぶん注文→約定を時刻順→予算到達でキャンセル。"""
     budget = args.budget
     cap = budget * mult
     by_date = {}
@@ -269,7 +289,7 @@ def _sim(records, mult):
 
     days = []   # per-day dict: date, pnl, deployed, peak, ntaken, fully
     for d, recs in by_date.items():
-        recs = sorted(recs, key=lambda r: r["bt"], reverse=True)
+        recs = sorted(recs, key=_prio_key)
         if not args.no_dedupe_symbol:
             seen = set(); dedup = []
             for r in recs:
@@ -351,6 +371,8 @@ def main():
         pairs = pairs[:args.limit]
 
     mode_label = f"proposal={Path(args.proposal).name}" if args.proposal else f"BT{args.bt_min:.0f}以上"
+    if _lprio is not None:
+        print(f"[lss] {_lprio.describe()}")
     only_month_label = f" / 検証月={args.only_month}" if args.only_month else ""
     print(f"[info] {mode_label} {len(pairs)}ペア / 予算{args.budget/1e4:.0f}万 / "
           f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
