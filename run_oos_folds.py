@@ -86,6 +86,17 @@ def main():
     #    生CSV(LSS_OOS_RAW_CSV)を sim_oos_budget.py で再シミュした値とは経路が違うので、
     #    両者がズレたら **こちらが正**(実際に発注リストを作っているコードだから)。
     if args.budget_csv:
+        # レポートは追記するので、実行前に必ず消す。残っていると前回の行が混ざり、
+        # 集計側(aggregate_oos_budget.py)が『各月の最初の出現』を採る仕様のため
+        # 古いフォールドの値を拾ってしまう。
+        _bp = Path(args.budget_csv)
+        if _bp.exists():
+            if args.fold_from or args.fold_to:
+                print(f"[!] {_bp} が既にあります。--fold-from/--fold-to での部分実行なので"
+                      f"残します(集計時は月の重複に注意)")
+            else:
+                _bp.unlink()
+                print(f"[初期化] 既存の {_bp} を削除(レポートは追記するため)")
         env["LSS_OOS_BUDGET_CSV"] = args.budget_csv
         env["LSS_OOS_BUDGET_DAYS"] = str(args.days)   # days が一致しないと出力されない
         env["LSS_OOS_BUDGET_BT_TIERS"] = args.bt_tiers
