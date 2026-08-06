@@ -51,6 +51,10 @@ ap.add_argument("--audit", type=str, default="",
                      "楽観(=レポート値)/現実/保守のpnlと理由・MAE(最大逆行)を並べ、『利確が現実でも"
                      "プラスか』『損切りが現実でどれだけ悪化するか』『利確に必要な含み損の深さ』を"
                      "全件確認できる。母集団は --bt-min に従う")
+ap.add_argument("--breakdown-rule", type=str, default="delay2",
+                help="【戦略別内訳】【BT帯×戦略別内訳】をどのルールで集計するか(先頭一致)。"
+                     "既定 delay2 = 実運用と同じ。発注の優先順位はこの表で決めるので、"
+                     "live と違うルールで集計すると判断を誤る(2026-08-06 まで base 固定だった)")
 ap.add_argument("--stop-slip", type=float, default=0.005,
                 help="保守モデルの損切りスリッページ(既定0.5%%)。実スリッページが大きい想定なら "
                      "0.01(1%%)/0.02(2%%)に上げてストレス。② テストより損切りが大きくなる懸念の検証用")
@@ -162,6 +166,18 @@ RULES = [
     {"name": "d1+sm0.15+BE@3R",          "stop_off": 1, "sm2": 0.15, "gap_skip": None, "be_r": 3.0},
     {"name": "d1+sm0.2+BE@3R",           "stop_off": 1, "sm2": 0.20, "gap_skip": None, "be_r": 3.0},
 
+    # ─── delay2 ベースの損切り幅スイープ (2026-08-06) ───────────────────
+    # delay2 を本番既定にしたのに sm スイープは delay1 のままだった。
+    # delay1 では sm0.2/0.3 が『net保守』で最良(+1,450,828 / +1,506,902 > delay1 の
+    # +1,256,622)だったので、delay2 でも広い損切りが効くのかを測る。
+    # 保守モデルが効くのは、損切り幅が広いほどスリッページの相対影響が小さくなるため。
+    {"name": "d2+sm0.15",                "stop_off": 2, "sm2": 0.15, "gap_skip": None},
+    {"name": "d2+sm0.2",                 "stop_off": 2, "sm2": 0.20, "gap_skip": None},
+    {"name": "d2+sm0.3",                 "stop_off": 2, "sm2": 0.30, "gap_skip": None},
+    # 本命候補の組み合わせ: delay2 + 13:00カットオフ(採用済み) に sm を足す
+    {"name": "d2+13:00+sm0.2",           "stop_off": 2, "sm2": 0.20, "gap_skip": None, "late_skip": 13 * 60},
+    {"name": "d2+13:00+sm0.3",           "stop_off": 2, "sm2": 0.30, "gap_skip": None, "late_skip": 13 * 60},
+
     # ─── delay1なし + 早期利確 / BE移動ストップ (baseベース) ─────────────
     # delay1の影響を切り離して、純粋に「早期利確/BE」の効果だけを測る。
     {"name": "base+target2R",            "stop_off": 0, "sm2": None, "gap_skip": None, "target_r": 2.0},
@@ -176,6 +192,13 @@ RULES = [
 # --audit で監査するルール名(先頭一致。例 "delay1" → "delay1(寄1本目stopなし)")。
 _AUDIT_NAME = next((ru["name"] for ru in RULES if ru["name"].startswith(args.audit)), None) \
     if args.audit else None
+
+# 【戦略別内訳】【BT帯×戦略別内訳】をどのルールで集計するか。既定 delay2 = 実運用と同じ。
+# ★ 2026-08-06 まで base 固定だった。発注の優先順位(どの戦略/BT帯を先に出すか)はこの表で
+#   決めるので、live と違うルールの成績で並べると判断を誤る。
+_BD_NAME = next((ru["name"] for ru in RULES if ru["name"].startswith(args.breakdown_rule)), None)
+if _BD_NAME is None:
+    sys.exit(f"[error] --breakdown-rule {args.breakdown_rule} に一致するルールがありません")
 
 
 def _load_selected() -> list[tuple]:
@@ -339,8 +362,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                        "tgt": 0, "stop": 0, "close": 0} for r in RULES}
     mon = {}  # (rule,month)->pnl (by-month用)
     audit_rows: list = []   # --audit 指定ルールの全トレード(監査用)
-    strat_contrib: dict = {}  # 戦略別 base ルール成績(BT合格済みのみ)
-    strat_band_contrib: dict = {}  # (戦略, BT帯下限) → base ルール成績(フィルター前・全BT記録)
+    strat_contrib: dict = {}  # 戦略別 _BD_NAME ルール成績(BT合格済みのみ)
+    strat_band_contrib: dict = {}  # (戦略, BT帯下限) → _BD_NAME ルール成績(フィルター前・全BT記録)
     try:
         m5 = load_intraday(sym, days=args.days + 5, source=args.source)
     except Exception:
@@ -503,7 +526,7 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
         bt_score_val = _bt_score(bt_trades)
         # BT帯別記録: bt_min フィルター前に全ペアを帯ごとに集積(戦略効果の独立検証用)
         _bt_band = (bt_score_val // 20) * 20  # 0/20/40/60/80...
-        _base_s = local["base(v13 sm0.1)"]
+        _base_s = local[_BD_NAME]
         _band_key = (strat, _bt_band)
         _sc2 = strat_band_contrib.setdefault(_band_key, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
                                                           "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
@@ -518,8 +541,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
         for k, v in local_mon.items():
             mon[k] = mon.get(k, 0.0) + v
         audit_rows.extend(local_audit)
-        # 戦略別内訳: baseルールの成績をstrat単位で集積
-        base_s = local["base(v13 sm0.1)"]
+        # 戦略別内訳: --breakdown-rule(既定 delay2 = 実運用)の成績を strat 単位で集積
+        base_s = local[_BD_NAME]
         sc = strat_contrib.setdefault(strat, {"n": 0, "win": 0, "gp": 0.0, "gl": 0.0,
                                                "pnl_real": 0.0, "tgt": 0, "stop": 0, "close": 0})
         for k in sc:
@@ -621,27 +644,28 @@ def main():
     print(f"※ 見るポイント: delay1 の『net保守』が base の『net現実』を上回れば、liveでも堅牢。"
           f"base vs delay1 の『net現実』差が期待できる現実的な改善幅。母集団={_pop}。")
 
-    # ── 戦略別内訳 (baseルール) ──
+    # ── 戦略別内訳 (--breakdown-rule) ──
     if strat_total:
         print("\n" + "=" * 80)
-        print(f"【戦略別内訳】baseルール / 母集団={_pop}")
+        print(f"【戦略別内訳】{_BD_NAME} / 母集団={_pop}")
         print("=" * 80)
         print(f"{'戦略':<12}{'件数':>6}{'勝率':>6}{'PF':>7}{'利確':>5}{'損切':>5}{'引け':>5}"
-              f"{'net現実':>13}")
+              f"{'net現実':>13}{'1件あたり':>11}")
         for strat, s in sorted(strat_total.items(), key=lambda x: -x[1]["pnl_real"]):
             n = s["n"] or 1
             wr = s["win"] / n * 100
             print(f"{strat:<12}{s['n']:>6}{wr:>5.0f}%{_pf_s(s['gp'], s['gl']):>7}"
                   f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}"
-                  f"{s['pnl_real']:>+13,.0f}")
+                  f"{s['pnl_real']:>+13,.0f}{s['pnl_real'] / n:>+11,.0f}")
 
-    # ── BTスコア帯×戦略別内訳 (baseルール, 全BT帯) ──
+    # ── BTスコア帯×戦略別内訳 (--breakdown-rule, 全BT帯) ──
     if strat_band_total:
         print("\n" + "=" * 92)
-        print("【BTスコア帯×戦略別内訳】baseルール — 同BT帯内での戦略差を確認(戦略効果がBT分布と独立か)")
+        print(f"【BTスコア帯×戦略別内訳】{_BD_NAME}"
+              " — 同BT帯内での戦略差を確認(戦略効果がBT分布と独立か)")
         print("=" * 92)
         print(f"{'BT帯':<9}{'戦略':<12}{'件数':>6}{'勝率':>6}{'PF':>7}{'利確':>5}{'損切':>5}{'引け':>5}"
-              f"{'net現実':>13}")
+              f"{'net現実':>13}{'1件あたり':>11}")
         bands = sorted({b for (_, b) in strat_band_total})
         for band in bands:
             band_label = f"{band}~{band+19}"
@@ -656,9 +680,45 @@ def main():
                 wr = s["win"] / n * 100
                 label = band_label if first else ""
                 print(f"{label:<9}{strat:<12}{n:>6}{wr:>5.0f}%{_pf_s(s['gp'], s['gl']):>7}"
-                      f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}{s['pnl_real']:>+13,.0f}")
+                      f"{s['tgt']:>5}{s['stop']:>5}{s['close']:>5}{s['pnl_real']:>+13,.0f}"
+                      f"{s['pnl_real'] / n:>+11,.0f}")
                 first = False
             print()
+
+    # ── 発注優先順ランキング (戦略 × BT帯 の 1件あたり期待値 降順) ──
+    # ★ 現行の発注は「BT降順」だが、それは最適ではない。BT帯は銘柄の質の目安に過ぎず、
+    #   戦略ごとに同じBT帯でも期待値が数倍違う(例: RSI2 BT20-39 が DON BT60-79 を上回る)。
+    #   資金が全シグナルを賄えない以上、埋める順番は『1件あたり期待値の降順』が正しい。
+    if strat_band_total:
+        rank = [(st, band, v) for (st, band), v in strat_band_total.items() if v["n"] >= 30]
+        rank.sort(key=lambda x: -(x[2]["pnl_real"] / x[2]["n"]))
+        if rank:
+            print("\n" + "=" * 92)
+            print(f"【発注優先順】{_BD_NAME} — 戦略×BT帯を『1件あたり期待値』降順(30件以上のみ)")
+            print("  現行の発注は単純なBT降順。この表の順に出せば同じ資金でより多くの期待値を拾える。")
+            print("=" * 92)
+            print(f"{'順':>3}{'戦略':<10}{'BT帯':<10}{'件数':>6}{'勝率':>6}{'PF':>7}"
+                  f"{'1件あたり':>11}{'net現実':>13}  判定")
+            _cum_pos = 0.0
+            for i, (st, band, v) in enumerate(rank, 1):
+                per = v["pnl_real"] / v["n"]
+                wr = v["win"] / v["n"] * 100
+                if per > 0:
+                    _cum_pos += v["pnl_real"]
+                mark = ("優先" if per >= 1000 else
+                        "採用" if per > 0 else
+                        "見送り(期待値マイナス)")
+                print(f"{i:>3}{st:<10}{str(band) + '~' + str(band + 19):<10}{v['n']:>6}"
+                      f"{wr:>5.0f}%{_pf_s(v['gp'], v['gl']):>7}{per:>+11,.0f}"
+                      f"{v['pnl_real']:>+13,.0f}  {mark}")
+            _neg = [r for r in rank if r[2]["pnl_real"] / r[2]["n"] <= 0]
+            _neg_sum = sum(r[2]["pnl_real"] for r in _neg)
+            _neg_n = sum(r[2]["n"] for r in _neg)
+            print("-" * 92)
+            print(f"  期待値プラスの層だけ発注した場合の合計: {_cum_pos:>+15,.0f}円")
+            print(f"  期待値マイナスの層({len(_neg)}層 / {_neg_n}件)を切ると: {-_neg_sum:>+15,.0f}円 の改善")
+            print("  ※ この表は事後の期待値。実運用では『その日にどの層が出るか』は選べないので、")
+            print("     使い方は『資金が足りない日にどれを捨てるか』の優先順位。全部出せる日は全部出す。")
 
     # ── 月別(--by-month) ──
     if args.by_month:
