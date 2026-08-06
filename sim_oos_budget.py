@@ -41,6 +41,30 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# ── 発注優先順位 / 戦略別BT下限 (lss_priority) ──────────────────────
+# 既定は無効 = 従来どおり「一律 bt_min + BT降順」。LSS_PRIORITY で opt-in。
+#   LSS_PRIORITY=floors … 戦略別BT下限のみ(並びはBT降順)
+#   LSS_PRIORITY=1      … 下限 + 期待値降順
+# 生CSVは BT>=30 の候補プールなので、ここで下限と並びを差し替えれば
+# フォールド実行をやり直さずに A/B 比較できる。
+try:
+    import lss_priority as _lprio
+except Exception:
+    _lprio = None
+
+
+def _bt_pass(t, bt_min: float) -> bool:
+    if _lprio is None:
+        return t["bt_score"] >= bt_min
+    return _lprio.is_orderable(t.get("strategy", ""), t["bt_score"], bt_min)
+
+
+def _order_key(t):
+    if _lprio is None:
+        return (0.0, -t["bt_score"])
+    return _lprio.priority_key(t.get("strategy", ""), t["bt_score"])
+
+
 # === 定数（OOSスイープと合わせる） ===
 _DEFAULT_BUDGET_MAN = 400      # 万円
 _DEFAULT_STRAT_NARROW = {"A7", "RSI2", "VOLTF"}
@@ -52,7 +76,25 @@ _SIM_TYPES = ["通常予算", "約定額ベース", "ループ充填_全戦略",
 # ─────────────────────────────────────────
 
 def load_raw_csv(path: str) -> list[dict]:
-    """生トレードCSVを読み込んで list[dict] で返す。"""
+    """生トレードCSVを読み込んで list[dict] で返す。
+
+    path はグロブ可(例 "oos_raw_fold*.csv")。run_oos_folds.py はフォールドごとに
+    別ファイルを書くので、まとめて読めないと多フォールド検証ができない。
+    """
+    from glob import glob as _glob
+    paths = sorted(_glob(path)) if any(c in path for c in "*?[") else [path]
+    if not paths:
+        sys.exit(f"[error] {path} に一致するCSVがありません")
+    rows = []
+    for _p in paths:
+        rows.extend(_load_one_raw_csv(_p))
+    if len(paths) > 1:
+        print(f"[入力] {len(paths)}ファイル / {len(rows)}行 を読込 "
+              f"({paths[0]} 〜 {paths[-1]})")
+    return rows
+
+
+def _load_one_raw_csv(path: str) -> list[dict]:
     rows = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -92,14 +134,14 @@ def _sim_one_day(
     strat_set:   None=全戦略 / set=その戦略のみ（ループ充填_絞り）
     """
     # BT閾値フィルター
-    candidates = [t for t in day_trades if t["bt_score"] >= bt_min]
+    candidates = [t for t in day_trades if _bt_pass(t, bt_min)]
 
     # 戦略フィルター（絞り）
     if strat_set is not None:
         candidates = [t for t in candidates if t["strategy"] in strat_set]
 
     # BT降順ソート
-    candidates.sort(key=lambda t: t["bt_score"], reverse=True)
+    candidates.sort(key=_order_key)
 
     if not candidates:
         return 0, 0, 0.0
@@ -244,7 +286,7 @@ def print_table(
     budget = budget_man * 10_000
 
     # fill率の計算（BT閾値フィルタ後）
-    bt_filtered = [r for r in rows if r["bt_score"] >= bt_min]
+    bt_filtered = [r for r in rows if _bt_pass(r, bt_min)]
     n_signals = len(bt_filtered)
     n_filled = sum(1 for r in bt_filtered if r["filled"] == 1)
     fill_rate = n_filled / n_signals * 100 if n_signals else 0.0
@@ -297,7 +339,7 @@ def print_table(
 
 def print_signal_breakdown(rows: list[dict], bt_min: float) -> None:
     """BT閾値フィルタ後の約定/不約定の内訳を表示する。"""
-    bt_filtered = [r for r in rows if r["bt_score"] >= bt_min]
+    bt_filtered = [r for r in rows if _bt_pass(r, bt_min)]
     by_month: dict[str, dict] = defaultdict(lambda: {"signals": 0, "filled": 0, "pnl": 0.0})
     for r in bt_filtered:
         m = r["oos_month"]
@@ -340,11 +382,18 @@ def main() -> None:
     args = ap.parse_args()
 
     raw_path = Path(args.raw)
-    if not raw_path.exists():
+    # --raw はグロブ可(run_oos_folds.py はフォールドごとに別ファイルを書くため)
+    _is_glob = any(c in args.raw for c in "*?[")
+    if not _is_glob and not raw_path.exists():
         print(f"[ERROR] ファイルが見つかりません: {raw_path}", file=sys.stderr)
         sys.exit(1)
+    if _is_glob:
+        from glob import glob as _g
+        if not _g(args.raw):
+            print(f"[ERROR] パターンに一致するファイルがありません: {args.raw}", file=sys.stderr)
+            sys.exit(1)
 
-    rows = load_raw_csv(str(raw_path))
+    rows = load_raw_csv(args.raw)
     if not rows:
         print("[ERROR] CSVが空です", file=sys.stderr)
         sys.exit(1)
@@ -354,13 +403,15 @@ def main() -> None:
     strat_narrow = {s.strip() for s in args.strat_narrow.split(",") if s.strip()}
     budget_man = args.budget
 
-    print(f"\n[sim_oos_budget] {raw_path.name}")
+    print(f"\n[sim_oos_budget] {args.raw}")
     print(f"  総行数: {len(rows)}行 / 約定: {sum(r['filled'] for r in rows)}件 "
           f"/ 不約定: {sum(1 - r['filled'] for r in rows)}件")
     folds = sorted(set(r['fold'] for r in rows))
     months = sorted(set(r['oos_month'] for r in rows))
     print(f"  フォールド: {folds}  OOS月: {months}")
     print(f"  予算: {budget_man:.0f}万円 / 絞り戦略: {sorted(strat_narrow)}")
+    if _lprio is not None:
+        print(f"  {_lprio.describe()}")
 
     all_out_rows: list[dict] = []
     for bt_min in sorted(bt_mins):
