@@ -46,6 +46,13 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--budget-csv", type=str, default="oos_budget_folds.csv",
+                    help="レポート自身の予算タブ(月別P&L)を追記するCSV。**.\\daily と同じ計算経路**"
+                         "なので、生CSVを sim_oos_budget.py で再シミュした値とズレたときの正解はこちら。"
+                         "空文字で無効")
+    ap.add_argument("--bt-tiers", type=str, default="30,40,50,60,70",
+                    help="予算CSVに出すBT閾値(カンマ区切り)。1回の実行で複数層を比較できる")
+    ap.add_argument("--days", type=int, default=730, help="レポートの集計窓(日)")
     ap.add_argument("--start-from", type=str, default="",
                     help="訓練に使う最初の基準月 (例: --start-from 2025-09)")
     ap.add_argument("--fold-from", type=str, default="",
@@ -75,6 +82,13 @@ def main():
     env["LSS_GUARD_ONLY"] = ""
     env["LSS_STOP_DELAY_BARS"] = "2"   # ライブと揃える(CLAUDE.md §18.9)
     env["LSS_BT_TAB_MIN"] = "40"
+    # ★ レポート自身の予算タブ(= .\daily と同じ _run_budget_sim)の月別P&Lを出させる。
+    #    生CSV(LSS_OOS_RAW_CSV)を sim_oos_budget.py で再シミュした値とは経路が違うので、
+    #    両者がズレたら **こちらが正**(実際に発注リストを作っているコードだから)。
+    if args.budget_csv:
+        env["LSS_OOS_BUDGET_CSV"] = args.budget_csv
+        env["LSS_OOS_BUDGET_DAYS"] = str(args.days)   # days が一致しないと出力されない
+        env["LSS_OOS_BUDGET_BT_TIERS"] = args.bt_tiers
     env.pop("LSS_REALISTIC_ENTRY", None)
 
     print(f"提案ファイル {len(dated)} 件検出:")
@@ -131,7 +145,7 @@ def main():
             "--force",
             "--no-news",
             "--no-risk",
-            "--days", "730",
+            "--days", str(args.days),
             "--workers", str(args.workers),
             "--no-browser",
             "--no-serve",
@@ -143,6 +157,9 @@ def main():
     print("完了。生成されたOOS CSV:")
     for f in sorted(Path(".").glob("oos_raw_fold*.csv")):
         print(f"  {f.name}")
+    if args.budget_csv and Path(args.budget_csv).exists():
+        print(f"\n  {args.budget_csv}  ← レポート自身の予算タブ(.\\daily と同じ経路)")
+        print(f"  集計:  python aggregate_oos_budget.py --csv {args.budget_csv}")
 
 
 if __name__ == "__main__":
