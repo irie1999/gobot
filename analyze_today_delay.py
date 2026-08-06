@@ -153,6 +153,55 @@ def _lookup(sym: str, entry: float, qty: int) -> dict | None:
     return (same or sorted(cands, key=lambda c: str(c.get("date", ""))))[-1]
 
 
+def _to_5m(day):
+    """1分足なら5分足へリサンプル(ラベルは区間の始まり=left、5分足pklと同じ並び)。
+    既に5分足ならそのまま返す。"""
+    if day is None or len(day) < 2:
+        return day
+    try:
+        step = pd.Series(day.index).diff().dt.total_seconds().median()
+    except Exception:
+        return day
+    if step is None or step != step or step >= 240:   # 4分以上 → 既に5分足
+        return day
+    out = day.resample("5min", label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last"})
+    return out.dropna(subset=["open", "high", "low", "close"])
+
+
+def _get_day_bars(sym: str, d):
+    """対象日の5分足を返す。取得元は2系統あり、当日分は前者にしか無いことがある。
+
+    ★ daytrade_data.load_intraday だけを見ていると当日分が取れない(2026-08-06 実測:
+      全12銘柄が『対象日の5分足なし』)。.\\tenkan が当日を計算できているのは
+      tenkan_sim._day_bars を使っているため(1分足→5分足の日付単位フォールバック)。
+      同じ経路を第一候補にする。
+    """
+    # 1) tenkan_sim 経路(1分足優先 → 無ければ5分足)。1分足なら5分足へ畳む。
+    try:
+        from tenkan_sim import _day_bars as _tk_day_bars, drop_symbol as _tk_drop
+        day = _tk_day_bars(sym, d)
+        try:
+            _tk_drop(sym)   # 銘柄ごとにキャッシュを解放(分足は1銘柄で数十MB)
+        except Exception:
+            pass
+        day = _to_5m(day)
+        if day is not None and len(day) >= 2:
+            return day, "tenkan_sim"
+    except Exception:
+        pass
+    # 2) daytrade_data 経路(従来)
+    try:
+        m5 = load_intraday(sym, days=10, source=args.source)
+        by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
+        day = by_day.get(d)
+        if day is not None and len(day) >= 2:
+            return day, "daytrade_data"
+    except Exception:
+        pass
+    return None, ""
+
+
 def _simulate(bars, ei: int, entry: float, stop_p: float, target_p: float,
               delay: int, day_close: float):
     """約定バー ei から利確、ei+delay からタイト損切りを first-touch(損切り優先)。
@@ -182,6 +231,7 @@ def _simulate(bars, ei: int, entry: float, stop_p: float, target_p: float,
 rows: list[dict] = []
 delays = list(range(0, max(1, args.max_delay) + 1))
 missing: list[str] = []
+srcs: dict[str, int] = {}   # 分足の取得元(tenkan_sim / daytrade_data)の内訳
 
 for a in actual:
     sym = a["sym"]
@@ -190,16 +240,11 @@ for a in actual:
         _have = len(lss_map.get(sym, []))
         missing.append(f"{sym} {a['name']}(発注記録に損切り価格なし / 記録{_have}件)")
         continue
-    try:
-        m5 = load_intraday(sym, days=10, source=args.source)
-    except Exception as e:
-        missing.append(f"{sym} {a['name']}(5分足読込失敗: {e})")
-        continue
-    by_day = split_by_day(m5) if (m5 is not None and not m5.empty) else {}
-    bars = by_day.get(the_day)
+    bars, src = _get_day_bars(sym, the_day)
     if bars is None or len(bars) < 2:
-        missing.append(f"{sym} {a['name']}(対象日の5分足なし)")
+        missing.append(f"{sym} {a['name']}(対象日の分足なし)")
         continue
+    srcs[src] = srcs.get(src, 0) + 1
 
     # 損切り=上 / 利確=下 (空売り)。compare_lss_rules._prices と同じ呼値丸め。
     stop_p = float(ceil_to_tick(max(px["stop"], px["target"])))
@@ -239,7 +284,13 @@ if not rows:
     print("[error] 計算できた銘柄がありません:")
     for m in missing:
         print("   ", m)
+    print("\n  分足が無い場合の確認:")
+    print("    ・当日分は stock_5min に翌営業日以降しか来ないことがあります")
+    print("    ・`.\\tenkan` が同じ日で動くなら分足はあります(取得元の問題)")
+    print("    ・MINUTE_5M_DIR を明示指定するか --date で前営業日を試してください")
     sys.exit(1)
+if srcs:
+    print("[分足] " + " / ".join(f"{k} {v}銘柄" for k, v in srcs.items()))
 
 # ── 銘柄別 ───────────────────────────────────────────────────
 hdr_d = "".join(f"{('d' + str(k)):>17}" for k in delays)
