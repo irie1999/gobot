@@ -46,6 +46,9 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--manifest", type=str, default="oos_folds_manifest.csv",
+                    help="このrunが作ったフォールドの台帳(fold,train_months,oos_month,raw_csv)。"
+                         "集計側がファイル名から推測せずに済む。空文字で無効")
     ap.add_argument("--budget-csv", type=str, default="oos_budget_folds.csv",
                     help="レポート自身の予算タブ(月別P&L)を追記するCSV。**.\\daily と同じ計算経路**"
                          "なので、生CSVを sim_oos_budget.py で再シミュした値とズレたときの正解はこちら。"
@@ -98,6 +101,13 @@ def main():
                 _bp.unlink()
                 print(f"[初期化] 既存の {_bp} を削除(レポートは追記するため)")
         env["LSS_OOS_BUDGET_CSV"] = args.budget_csv
+    # ★ このrunが作ったフォールドの台帳。集計側はファイル名から推測せずこれを使う。
+    #   同じフォルダに開始月の違う過去実行の oos_raw_fold*.csv が残っていると、
+    #   ファイル名由来の fold→OOS月 対応が壊れる(実測: fold01_2025-01 と
+    #   fold01_2025-10 が同居していた)。
+    manifest = Path(args.manifest) if args.manifest else None
+    if manifest is not None and not (args.fold_from or args.fold_to):
+        manifest.write_text("fold,train_months,oos_month,raw_csv\n", encoding="utf-8")
         env["LSS_OOS_BUDGET_DAYS"] = str(args.days)   # days が一致しないと出力されない
         env["LSS_OOS_BUDGET_BT_TIERS"] = args.bt_tiers
     env.pop("LSS_REALISTIC_ENTRY", None)
@@ -164,6 +174,10 @@ def main():
 
         Path(merged).unlink(missing_ok=True)
 
+        if manifest is not None:
+            with open(manifest, "a", encoding="utf-8") as _mf:
+                _mf.write(f"{i + 1},{dated[0][1]}〜{train_end_ym},{oos_ym},{out_raw}\n")
+
     print(f"\n{'='*60}")
     print("完了。生成されたOOS CSV:")
     for f in sorted(Path(".").glob("oos_raw_fold*.csv")):
@@ -171,6 +185,8 @@ def main():
     if args.budget_csv and Path(args.budget_csv).exists():
         print(f"\n  {args.budget_csv}  ← レポート自身の予算タブ(.\\daily と同じ経路)")
         print(f"  集計:  python aggregate_oos_budget.py --csv {args.budget_csv}")
+    if manifest is not None and manifest.exists():
+        print(f"  台帳:  {manifest}  (このrunのfold→OOS月。古いCSVが混ざっても集計は安全)")
 
 
 if __name__ == "__main__":

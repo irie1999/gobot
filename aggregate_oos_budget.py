@@ -38,8 +38,12 @@ ap.add_argument("--csv", default="oos_budget_folds.csv",
 ap.add_argument("--sim-type", default="",
                 help="シムタイプで絞る(例: 通常予算)。空=全部")
 ap.add_argument("--by-month", action="store_true", help="月別の明細も出す")
+ap.add_argument("--manifest", default="oos_folds_manifest.csv",
+                help="run_oos_folds.py が出す台帳(fold,train_months,oos_month,raw_csv)。"
+                     "**これがあれば最優先で使う**。ファイル名からの推測より確実")
 ap.add_argument("--raw-glob", default="oos_raw_fold*.csv",
-                help="OOS月の対応表を作るための生CSV。fold→oos_month を読む")
+                help="台帳が無いときのフォールバック。ファイル名から fold→oos_month を推測する。"
+                     "⚠ 開始月の違う過去実行のCSVが同居していると誤った月を拾う")
 args = ap.parse_args()
 
 p = Path(args.csv)
@@ -51,12 +55,26 @@ if not p.exists():
 # 予算CSVには fold 列が無い(レポートは自分がどのフォールドか知らない)。
 # 生CSVのファイル名 oos_raw_fold<NN>_<YYYY-MM>.csv から対応を作る。
 oos_months: list[str] = []
-for f in sorted(Path(".").glob(args.raw_glob)):
-    m = re.search(r"fold(\d+)_(\d{4})-?(\d{2})", f.name)
-    if m:
-        oos_months.append(f"{m.group(2)}-{m.group(3)}")
-if not oos_months:
-    print(f"[!] {args.raw_glob} が見つからないので、CSV内の全月を対象にします")
+_mf = Path(args.manifest) if args.manifest else None
+if _mf is not None and _mf.exists():
+    for r in csv.DictReader(open(_mf, encoding="utf-8-sig")):
+        mo = str(r.get("oos_month", "")).strip()
+        if mo:
+            oos_months.append(mo)
+    print(f"[台帳] {_mf} から OOS月 {len(oos_months)}件: {', '.join(oos_months)}")
+else:
+    for f in sorted(Path(".").glob(args.raw_glob)):
+        m = re.search(r"fold(\d+)_(\d{4})-?(\d{2})", f.name)
+        if m:
+            oos_months.append(f"{m.group(2)}-{m.group(3)}")
+    if oos_months:
+        print(f"[!] 台帳 {args.manifest} が無いのでファイル名から推測しました: "
+              f"{', '.join(sorted(set(oos_months)))}")
+        print(f"    開始月の違う過去実行の {args.raw_glob} が残っていると誤った月が混ざります。"
+              f"心当たりがあれば古いCSVを退避してから再集計してください")
+    else:
+        print(f"[!] 台帳も {args.raw_glob} も見つからないので、CSV内の全月を対象にします")
+oos_months = sorted(set(oos_months))
 
 rows = list(csv.DictReader(open(p, encoding="utf-8-sig")))
 if not rows:
