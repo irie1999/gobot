@@ -110,7 +110,14 @@ RULES = [
     {"name": "d1+前場のみ(11:30迄)",    "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 11 * 60 + 30},
     {"name": "d1+寄り30分のみ(9:30迄)", "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 9 * 60 + 30},
     {"name": "base+14:30以降見送り",    "stop_off": 0, "sm2": None, "gap_skip": None, "late_skip": 14 * 60 + 30},
+    # delay2 が既定になった(2026-08-06)ので、カットオフは d2 側でスイープする。
+    # d1 側は 13:00 まで単調に改善したが、d2+14:30 はほぼ中立(-1,388)だった。
+    # d2 でも早い時刻なら効くのかを確認する。
     {"name": "d2+14:30以降見送り",      "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 14 * 60 + 30},
+    {"name": "d2+14:00以降見送り",      "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 14 * 60},
+    {"name": "d2+13:00以降見送り",      "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 13 * 60},
+    {"name": "d2+前場のみ(11:30迄)",    "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 11 * 60 + 30},
+    {"name": "d2+寄り30分のみ(9:30迄)", "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 9 * 60 + 30},
     {"name": "gap<-1.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.010},
     {"name": "gap<-1.5%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.015},
     {"name": "gap<-2.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.020},
