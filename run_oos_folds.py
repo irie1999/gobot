@@ -185,6 +185,9 @@ def main():
             "--min-price", "1000",
             "--price-ranges", args.price_ranges,
             "--no-analysis",
+            # 銘柄詳細タブは **シグナル銘柄1つにつき損益ビルドを丸ごとやり直す**
+            # (88銘柄なら88回)。1フォールドの時間の大半がここ。検証には一切不要。
+            "--no-symbol-detail",
             "--lss-proposal", merged,
             "--long-base", long_base,
             "--no-mirror",

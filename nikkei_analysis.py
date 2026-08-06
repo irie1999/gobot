@@ -9602,9 +9602,13 @@ function switchTbd(id, tab) {{
             return (0.0, -_eff_long_bt(_t))
         return _lprio.priority_key(_t.get("strategy", ""), _eff_long_bt(_t))
 
-    if _lprio is not None:
+    # 設定ログは1プロセス1回だけ。_tab5_pnl_html は銘柄詳細タブで
+    # シグナル銘柄ごとに呼ばれるので、素直に出すと数十行の同じログで埋まる。
+    global _LPRIO_LOGGED
+    if _lprio is not None and not globals().get("_LPRIO_LOGGED"):
         try:
             print(f"[lss] {_lprio.describe()}")
+            _LPRIO_LOGGED = True
         except Exception:
             pass
 
