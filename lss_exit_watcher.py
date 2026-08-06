@@ -395,6 +395,11 @@ def main() -> int:
                          "この額(円)に達したら、未発動のlss新規売り逆指値を全取消する。例3000000=300万で頭打ち。"
                          "0(既定)=無効。予算より多め(BT降順)に発注しておき、同時保有が上限に達したら残りを自動キャンセル。"
                          "決済済みポジションは除外(同時保有金額=一瞬でも閾値超で発動)。--execute時のみ実取消")
+    ap.add_argument("--entry-cutoff", type=str, default=None,
+                    help="引け間際エントリー見送り。HH:MM(例 14:30)以降は未発動のlss新規売り逆指値を"
+                         "取消し、新規を建てない。lssは同日決済なので遅い約定ほど『利確まで走る時間が"
+                         "無いのに損切りだけ効く』非対称になる(2026-08-06 三菱製鋼 14:59約定→15:00"
+                         "損切り -9,600円=当日実損の47%%)。未指定(既定)=OFF。--execute時のみ実取消")
     args = ap.parse_args()
 
     close_at = _parse_hhmm(args.close_at)
@@ -568,13 +573,20 @@ def _run(args, close_at, today) -> int:
     #   同時保有 = 現在の未決済lss売建の (平均約定値×残玉数) の合計。決済済みは除外。
     _budget_sweep = None
     _budget_done: dict = {}
-    if args.budget_cap and args.budget_cap > 0:
+    # 引け間際エントリー見送り(--entry-cutoff HH:MM)。未指定=OFF(従来どおり終日エントリー)。
+    _entry_cutoff = _parse_hhmm(args.entry_cutoff) if args.entry_cutoff else None
+    _cutoff_done_flag = False
+    if (args.budget_cap and args.budget_cap > 0) or _entry_cutoff is not None:
         try:
             from cancel_gap_orders import _budget_sweep as _budget_sweep
-            print(f"  予算上限管理: ON (同時保有 ≥ {args.budget_cap/1e4:.0f}万 で未発動lss逆指値を"
-                  f"全取消{'' if args.execute else ' / dry-run'})")
+            if args.budget_cap and args.budget_cap > 0:
+                print(f"  予算上限管理: ON (同時保有 ≥ {args.budget_cap/1e4:.0f}万 で未発動lss逆指値を"
+                      f"全取消{'' if args.execute else ' / dry-run'})")
+            if _entry_cutoff is not None:
+                print(f"  発注カットオフ: ON ({args.entry_cutoff} 以降は未発動lss逆指値を取消"
+                      f"{'' if args.execute else ' / dry-run'})")
         except Exception as _e:
-            print(f"  [!] 予算上限管理の読込失敗({_e}) → 無効")
+            print(f"  [!] 未発動注文の取消機能の読込失敗({_e}) → 無効")
             _budget_sweep = None
     while True:
         now = datetime.now(JST)
@@ -605,6 +617,22 @@ def _run(args, close_at, today) -> int:
                         print(f"    予算上限取消: 対象{_bt}件 / 送信{_bs}件")
                 except Exception as _e:
                     print(f"  [!] 予算上限取消でエラー(継続): {_e}")
+
+        # 引け間際エントリー見送り: entry_cutoff 以降は未発動の lss 新規売り逆指値を全取消。
+        # lss は同日決済なので、遅い約定ほど「利確まで走る時間が無いのに損切りだけ効く」
+        # 非対称になる(2026-08-06 三菱製鋼 14:59約定→15:00損切り -9,600円 = 当日実損の47%)。
+        if _entry_cutoff is not None and _budget_sweep is not None \
+                and not before_open and now.time() >= _entry_cutoff:
+            if not _cutoff_done_flag:
+                print(f"  {now:%H:%M:%S} 発注カットオフ {args.entry_cutoff} 到達 "
+                      f"→ 未発動lss新規売り逆指値を取消(以降は新規を建てない)")
+            try:
+                _ct, _cs = _budget_sweep(cli, lss_map, _budget_done, dry=not args.execute)
+                if _ct:
+                    print(f"    カットオフ取消: 対象{_ct}件 / 送信{_cs}件")
+            except Exception as _e:
+                print(f"  [!] カットオフ取消でエラー(継続): {_e}")
+            _cutoff_done_flag = True
 
         if shorts and before_open:
             print(f"  {now:%H:%M:%S} 寄り前(9:00前): lss売建 {len(shorts)}件を待機中(発火なし)")

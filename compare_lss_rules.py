@@ -101,6 +101,16 @@ RULES = [
     {"name": "delay2(寄2本目からstop)", "stop_off": 2, "sm2": None, "gap_skip": None},
     {"name": "delay3(寄3本目=15分後)",   "stop_off": 3, "sm2": None, "gap_skip": None},
     {"name": "delay4(寄4本目=20分後)",   "stop_off": 4, "sm2": None, "gap_skip": None},
+    # ─── 引け間際エントリー見送り (2026-08-06) ─────────────────────────
+    # 同日決済なので、約定が遅いほど「利確まで走る時間が無いのに損切りだけ効く」
+    # 非対称が強くなる。late_skip = この時刻(分)以降に約定したトレードは建てない。
+    {"name": "d1+14:30以降見送り",      "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 14 * 60 + 30},
+    {"name": "d1+14:00以降見送り",      "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 14 * 60},
+    {"name": "d1+13:00以降見送り",      "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 13 * 60},
+    {"name": "d1+前場のみ(11:30迄)",    "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 11 * 60 + 30},
+    {"name": "d1+寄り30分のみ(9:30迄)", "stop_off": 1, "sm2": None, "gap_skip": None, "late_skip": 9 * 60 + 30},
+    {"name": "base+14:30以降見送り",    "stop_off": 0, "sm2": None, "gap_skip": None, "late_skip": 14 * 60 + 30},
+    {"name": "d2+14:30以降見送り",      "stop_off": 2, "sm2": None, "gap_skip": None, "late_skip": 14 * 60 + 30},
     {"name": "gap<-1.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.010},
     {"name": "gap<-1.5%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.015},
     {"name": "gap<-2.0%見送り",        "stop_off": 0, "sm2": None, "gap_skip": -0.020},
@@ -403,6 +413,14 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                     ei = 0
                 else:
                     continue
+            # 約定バーの時刻(分)。late_skip ルール(引け間際エントリー見送り)で使う。
+            # 同日決済なので、遅い時刻の約定は「残り持ち時間が短いのに損切りだけ効く」
+            # 非対称になりやすい(2026-08-06 三菱製鋼 14:59約定→15:00損切り -9,600円)。
+            try:
+                _ets = db.index[ei]
+                entry_min = int(_ets.hour) * 60 + int(_ets.minute)
+            except Exception:
+                entry_min = 0
             # BTスコア用: base(現行v13, stopちょうど=engine楽観fill)の pnl を365日ぶん記録
             rb, exl, _, _, _ = _exit(opens, highs, lows, closes, ei, ei, stop_p, target_p, d_close)
             bt_trades.append((fd, short_pnl(entry_fill, exl, rb, QTY, FEE_ONE_WAY, 0.0)))
@@ -413,6 +431,8 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
             for rule in RULES:
                 if rule["gap_skip"] is not None and gap_pct <= rule["gap_skip"]:
                     continue  # ギャップダウン見送り = このトレードは発注しない
+                if rule.get("late_skip") is not None and entry_min >= rule["late_skip"]:
+                    continue  # 引け間際の約定は見送り(建てない)
                 if rule["sm2"] is not None and atr > 0:
                     sp = float(ceil_to_tick(olp + atr * rule["sm2"]))
                 else:
