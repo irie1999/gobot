@@ -202,7 +202,7 @@ def main():
         for o in cand[:3]:
             slim = {k: o.get(k) for k in ("ID", "Symbol", "SymbolName", "Side",
                                           "State", "OrderState", "OrderQty", "CumQty",
-                                          "Price", "RecvTime")}
+                                          "Price", "RecvTime", "ExpireDay", "ExpireDate")}
             print(_json.dumps(slim, ensure_ascii=False))
             for d in (o.get("Details") or []):
                 print("   Detail:", _json.dumps(d, ensure_ascii=False))
@@ -213,13 +213,19 @@ def main():
     names = {}
     order_rows = []
     for o in orders:
-        # 注文日が対象日でなくても、対象日に約定していれば含める。
-        # lssのエントリー逆指値は前営業日の夜に発注されることがあり、注文日だけで
-        # 絞ると『売り注文が1件も無い』状態になって約定率が測れなくなる(実測: 2026-08-06)。
+        # 対象日に「有効だった」注文を全部拾う。判定は3通りのOR:
+        #   ① 注文日(RecvTime)が対象日
+        #   ② 対象日に約定している
+        #   ③ 有効期限(ExpireDay)が対象日  ← 前日夜に発注して翌営業日を期限にした注文
+        # ③が無いと、前日夜に出して当日ずっと約定しなかった注文が丸ごと漏れ、
+        # 約定率が100%と誤表示される(実測: 2026-08-06)。
         if not args.no_date:
             _ok = _match_date(_order_date(o))
             if not _ok:
                 _ok = any(_match_date(t) for _, _, t in _executions(o))
+            if not _ok:
+                _exp = _digits(o.get("ExpireDay") or o.get("ExpireDate") or "")
+                _ok = bool(_exp) and _exp == _DATE_DIG
             if not _ok:
                 continue
         sym = str(o.get("Symbol") or "").split(".")[0]
@@ -245,8 +251,15 @@ def main():
     _n_all = len(order_rows)
     _n_fill = sum(1 for r in order_rows if r["cum_qty"] > 0)
     _n_nofill = _n_all - _n_fill
-    print(f"=== 全注文一覧 (対象日 {_DATE} に出した注文: {_n_all}件 / "
+    # 売り(エントリー)だけの内訳も出す。lssの約定率はこちらが本体。
+    _s_all = [r for r in order_rows if r["side"] == "売"]
+    _s_fill = sum(1 for r in _s_all if r["cum_qty"] > 0)
+    print(f"=== 全注文一覧 (対象日 {_DATE} に有効だった注文: {_n_all}件 / "
           f"約定 {_n_fill}件・未約定 {_n_nofill}件) ===")
+    if _s_all:
+        print(f"  うち売り(エントリー): {len(_s_all)}件 / 約定 {_s_fill}件・"
+              f"未約定 {len(_s_all) - _s_fill}件  → 約定率 "
+              f"{_s_fill / len(_s_all) * 100:.1f}%")
     print(f"{'コード':>6} {'銘柄':<12}{'売買':>4}{'注文株':>7}{'注文値':>9}"
           f"{'発注':>6}{'状態':>14}{'約定株':>7}{'約定値':>9}{'約定':>6}")
     for r in order_rows:
