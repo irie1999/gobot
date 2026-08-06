@@ -186,6 +186,18 @@ _pre.add_argument("--no-analysis", action="store_true",
                   help="重い解析タブ(詳細分析タブ群・約定タイミング・期間別パネル30/60/…日)"
                        "をスキップして高速化。相場環境・トレンド期間・エントリー分析・"
                        "銘柄詳細の相場コンテキストタブは計算する(シグナル+損益+相場は残る)")
+class _SkipMarket(Exception):
+    """--no-market のとき市場分析ブロックを飛ばすための内部シグナル。"""
+
+
+_pre.add_argument("--no-market", action="store_true",
+                  help="市場分析タブ(相場環境/トレンド期間/エントリー分析)と日経平均・参考指標の"
+                       "取得をまるごとスキップ。損益タブ・シグナルタブ・予算タブには影響しない。"
+                       "OOS検証(run_oos_folds)のように損益だけ欲しい用途で使う")
+_pre.add_argument("--no-tenkan", action="store_true",
+                  help="転換トレードの生成をスキップ。oos_raw_fold*.csv があると未約定シグナルを"
+                       "分足から再シミュするため非常に重い(実測2,206件)。損益タブの転換カードが"
+                       "出なくなるだけで、lssの損益・予算タブには影響しない")
 _pre.add_argument("--no-symbol-detail", action="store_true",
                   help="銘柄詳細タブ(シグナル銘柄ごとの損益レポート)を生成しない。"
                        "銘柄数が多いとHTML文字列が巨大化して MemoryError で落ちるので、"
@@ -1644,9 +1656,13 @@ else:
     _mode_label_ja = ""
 
 # ── 日経相場環境・トレンド・エントリー分析タブ ─────────────────────────────────
-print("日経平均データ取得中 (市場分析)...", flush=True)
 _market_tab1_html = _market_tab2_html = _market_tab3_html = ""
+if getattr(_args, "no_market", False):
+    print("市場分析タブ: スキップ (--no-market)", flush=True)
 try:
+    if getattr(_args, "no_market", False):
+        raise _SkipMarket()
+    print("日経平均データ取得中 (市場分析)...", flush=True)
     import pandas as _pd
     _na_years  = 5
     _na_end    = target_date if _args.date else TODAY  # 基準日でN225データを揃える
@@ -1867,7 +1883,10 @@ _na._EXTRA_TRADES = []
 _na._TENKAN_DIAG = ""
 if not getattr(_args, "long_stop_short", False):
     _na._TENKAN_DIAG = "lssモードではありません（転換は lss 専用です）。"
-if getattr(_args, "long_stop_short", False):
+if getattr(_args, "no_tenkan", False):
+    _na._TENKAN_DIAG = "転換の生成をスキップしました (--no-tenkan)。"
+    print("転換トレード生成: スキップ (--no-tenkan)", flush=True)
+elif getattr(_args, "long_stop_short", False):
     try:
         import glob as _lrv_glob
         import pickle as _lrv_pickle
@@ -2274,7 +2293,8 @@ _phase(f"損益タブ({_DEFAULT_DAYS}日/全設定統合)完了")
 # トレンド期間タブの一覧表に損益列を追加（損益計算で得たトレードを使って再生成）
 if _market_tab2_html:
     try:
-        _mkt_trades = getattr(_na, "_LAST_KPI_TRADES", None)
+        _mkt_trades = None if getattr(_args, "no_market", False) else \
+            getattr(_na, "_LAST_KPI_TRADES", None)
         if _mkt_trades:
             _market_tab2_html = _na._tab2_trend_html(
                 _na_close, _na_trend, _na_periods, _na_years, trades=_mkt_trades)

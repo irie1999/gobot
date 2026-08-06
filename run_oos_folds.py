@@ -152,8 +152,13 @@ def main():
     #   ファイル名由来の fold→OOS月 対応が壊れる(実測: fold01_2025-01 と
     #   fold01_2025-10 が同居していた)。
     manifest = Path(args.manifest) if args.manifest else None
-    if manifest is not None and not (args.fold_from or args.fold_to):
-        manifest.write_text("fold,train_months,oos_month,raw_csv\n", encoding="utf-8")
+    if manifest is not None:
+        if not (args.fold_from or args.fold_to):
+            manifest.write_text("fold,train_months,oos_month,raw_csv\n", encoding="utf-8")
+        elif not manifest.exists():
+            # 部分実行でも、ファイルが無ければヘッダから作る。
+            # ヘッダ無しで追記すると集計側の DictReader が1行目を見出しに誤読する。
+            manifest.write_text("fold,train_months,oos_month,raw_csv\n", encoding="utf-8")
         env["LSS_OOS_BUDGET_DAYS"] = str(args.days)   # days が一致しないと出力されない
         env["LSS_OOS_BUDGET_BT_TIERS"] = args.bt_tiers
     env.pop("LSS_REALISTIC_ENTRY", None)
@@ -216,6 +221,10 @@ def main():
             # 銘柄詳細タブは **シグナル銘柄1つにつき損益ビルドを丸ごとやり直す**
             # (88銘柄なら88回)。1フォールドの時間の大半がここ。検証には一切不要。
             "--no-symbol-detail",
+            # 市場分析タブ(相場環境/トレンド/エントリー分析)と転換トレードは
+            # 予算タブ・損益タブに一切影響しないが、非常に重い。
+            "--no-market",
+            "--no-tenkan",
             "--lss-proposal", merged,
             "--long-base", long_base,
             "--no-mirror",
