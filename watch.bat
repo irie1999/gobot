@@ -26,9 +26,19 @@ REM their CSV is dated yesterday. Without --all-dates the watcher would pick up
 REM nothing. If you ever place orders same-morning, that still works (today is a
 REM subset of all-dates). Extra options pass through, e.g. .\watch --poll 3
 REM
-REM --stop-delay-bars 1 (delay1) is ON by default: during the entry 5min bar the
-REM watcher places NO stop, then arms the stop from the next grid (09:05/09:10...).
-REM Avoids getting wicked out by the opening bounce on the tight 0.1ATR stop
-REM (BT30+ realistic: win 48->54%, PF 1.63->1.95). Target/close stay active during
-REM the no-stop window. To disable for one run: .\watch --stop-delay-bars 0
-python lss_exit_watcher.py --execute --prod --all-dates --budget-cap 4000000 --stop-delay-bars 1 %*
+REM --stop-delay-bars 2 (delay2) is ON by default: for the entry 5min bar AND the
+REM next one the watcher places NO stop, then arms the stop from the grid after
+REM that (09:00 fill -> stop armed 09:10). Avoids getting wicked out by the opening
+REM bounce on the tight 0.1ATR stop. Target/close stay active during the no-stop
+REM window. To disable for one run: .\watch --stop-delay-bars 0
+REM   240d BT40+ net(realistic): base +1,791,907 / delay1 +2,358,023 /
+REM   delay2 +2,436,051 (peak; delay3/4 fall back to ~+2,361,000).
+REM   delay2 wins in all 3 fill models and in 7 of 9 months.
+REM
+REM --entry-cutoff 13:00: from 13:00 on, unfilled lss entry stops are cancelled --
+REM lss exits same day, so a late fill has no time to reach target while the stop
+REM stays fully live. 240d BT40+: +26,299 realistic / +49,936 conservative on top
+REM of delay2. The benefit GROWS as the fill model gets more pessimistic, which is
+REM the point: late fills are exactly what the backtest prices worst (2026-08-06
+REM 5632 real -9,600 vs sim -4,552). To disable for one run: .\watch --entry-cutoff ""
+python lss_exit_watcher.py --execute --prod --all-dates --budget-cap 4000000 --stop-delay-bars 2 --entry-cutoff 13:00 %*

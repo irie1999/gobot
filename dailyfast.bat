@@ -26,8 +26,8 @@ set "LSS_ENTRY_DELAY_BARS="
 set "LSS_BUDGET_MIN_BT="
 set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
-REM --- delay1 ON: matches watch.bat --stop-delay-bars 1 (see CLAUDE.md 18.9) ---
-set "LSS_STOP_DELAY_BARS=1"
+REM --- delay2 ON: MUST match watch.bat --stop-delay-bars 2 (see CLAUDE.md 18.9) ---
+set "LSS_STOP_DELAY_BARS=2"
 REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor ---
 set "LSS_BT_TAB_MIN=40"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
