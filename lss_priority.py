@@ -93,8 +93,22 @@ def _env_flag(name: str) -> bool:
 
 
 def enabled() -> bool:
-    """期待値順の発注 + 戦略別BT下限を使うか。既定 False(=従来のBT降順・一律閾値)。"""
+    """戦略別BT下限を使うか。既定 False(=従来の一律閾値)。"""
     return _env_flag("LSS_PRIORITY")
+
+
+def order_enabled() -> bool:
+    """発注順を『期待値降順』にするか。
+
+    LSS_PRIORITY=floors(または floor / bt) のときは **下限だけ有効・並びは従来のBT降順**。
+    ①戦略別BT下限 と ②期待値順 を切り分けて検証するために分けてある:
+      ① は240日/120日/base/delay2 のどの切り口でも一貫していて根拠が強い
+      ② は期間で順位が動くので、単独で効果を測る必要がある
+    """
+    if not enabled():
+        return False
+    v = str(os.environ.get("LSS_PRIORITY", "") or "").strip().lower()
+    return v not in ("floors", "floor", "bt", "btdesc")
 
 
 def _parse_bt_min_env() -> dict[str, float]:
@@ -181,7 +195,7 @@ def priority_key(strategy: str, bt: float):
     表に無い(戦略,BT)は期待値0扱いで最後尾に回る(切るのではなく後回し)。
     """
     b = float(bt or 0)
-    if not enabled():
+    if not order_enabled():
         return (0.0, -b)
     return (-expectancy(strategy, b), -b)
 
@@ -189,7 +203,9 @@ def priority_key(strategy: str, bt: float):
 def describe() -> str:
     """現在の設定を1行で(ログ用)。"""
     if not enabled():
-        return "lss発注順: BT降順(従来) / 戦略別BT下限: 無効 [LSS_PRIORITY=1 で有効化]"
+        return ("lss発注順: BT降順(従来) / 戦略別BT下限: 無効 "
+                "[LSS_PRIORITY=1 で両方有効 / LSS_PRIORITY=floors で下限だけ有効]")
     bm = _BT_MIN_RESOLVED if _BT_MIN_RESOLVED is not None else _parse_bt_min_env()
-    return ("lss発注順: 期待値降順(戦略×BT帯) / 戦略別BT下限: "
+    _ord = "期待値降順(戦略×BT帯)" if order_enabled() else "BT降順(従来・下限のみ変更)"
+    return (f"lss発注順: {_ord} / 戦略別BT下限: "
             + ", ".join(f"{k}={v:.0f}" for k, v in sorted(bm.items())))
