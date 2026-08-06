@@ -196,7 +196,22 @@ _AUDIT_NAME = next((ru["name"] for ru in RULES if ru["name"].startswith(args.aud
 # 【戦略別内訳】【BT帯×戦略別内訳】をどのルールで集計するか。既定 delay2 = 実運用と同じ。
 # ★ 2026-08-06 まで base 固定だった。発注の優先順位(どの戦略/BT帯を先に出すか)はこの表で
 #   決めるので、live と違うルールの成績で並べると判断を誤る。
-_BD_NAME = next((ru["name"] for ru in RULES if ru["name"].startswith(args.breakdown_rule)), None)
+def _resolve_rule(pref: str) -> str | None:
+    """ルール名を前方一致で解決する。素朴な startswith だと RULES の並び順で
+    別物を拾う(実測: "delay2" が "delay2+寄り約定bar0" に当たり、live の
+    "delay2(寄2本目からstop)" ではない方で内訳が集計された)。
+    優先順位: 完全一致 → 直後が"("の候補(命名規約) → 最初の前方一致。"""
+    names = [ru["name"] for ru in RULES]
+    if pref in names:
+        return pref
+    cands = [n for n in names if n.startswith(pref)]
+    if not cands:
+        return None
+    canon = [n for n in cands if len(n) > len(pref) and n[len(pref)] == "("]
+    return (canon or cands)[0]
+
+
+_BD_NAME = _resolve_rule(args.breakdown_rule)
 if _BD_NAME is None:
     sys.exit(f"[error] --breakdown-rule {args.breakdown_rule} に一致するルールがありません")
 
@@ -687,38 +702,73 @@ def main():
 
     # ── 発注優先順ランキング (戦略 × BT帯 の 1件あたり期待値 降順) ──
     # ★ 現行の発注は「BT降順」だが、それは最適ではない。BT帯は銘柄の質の目安に過ぎず、
-    #   戦略ごとに同じBT帯でも期待値が数倍違う(例: RSI2 BT20-39 が DON BT60-79 を上回る)。
-    #   資金が全シグナルを賄えない以上、埋める順番は『1件あたり期待値の降順』が正しい。
+    #   戦略ごとに同じBT帯でも期待値が数倍違う(実測: A7 BT40-59 +1,826円/件 が
+    #   DON BT60-79 +627円/件 を上回る)。資金が全シグナルを賄えない日に
+    #   『どれを捨てるか』の順番は 1件あたり期待値の降順が正しい。
+    #
+    # ⚠ BT帯テーブルは --bt-min フィルターの"前"に集計している(戦略効果の独立検証用)。
+    #   そのため閾値未満の帯は【実際には発注していない】。ここを混ぜて「マイナス層を切れば
+    #   改善する」と読むのは誤り(既に切ってある)。発注対象かどうかを行ごとに明示する。
     if strat_band_total:
         rank = [(st, band, v) for (st, band), v in strat_band_total.items() if v["n"] >= 30]
         rank.sort(key=lambda x: -(x[2]["pnl_real"] / x[2]["n"]))
         if rank:
-            print("\n" + "=" * 92)
+            def _scope(band: int) -> str:
+                if args.bt_min <= 0:
+                    return "発注対象"
+                if band >= args.bt_min:
+                    return "発注対象"
+                if band + 19 >= args.bt_min:
+                    return "一部対象"
+                return "対象外"
+
+            print("\n" + "=" * 100)
             print(f"【発注優先順】{_BD_NAME} — 戦略×BT帯を『1件あたり期待値』降順(30件以上のみ)")
-            print("  現行の発注は単純なBT降順。この表の順に出せば同じ資金でより多くの期待値を拾える。")
-            print("=" * 92)
-            print(f"{'順':>3}{'戦略':<10}{'BT帯':<10}{'件数':>6}{'勝率':>6}{'PF':>7}"
-                  f"{'1件あたり':>11}{'net現実':>13}  判定")
-            _cum_pos = 0.0
+            _lbl = f"BT{args.bt_min:.0f}以上" if args.bt_min > 0 else "全BT"
+            print(f"  発注対象 = {_lbl}。それ未満の帯は参考(既に発注していない)。")
+            print("  資金が足りない日にどれを優先するかは『発注対象』行の上から順。")
+            print("=" * 100)
+            print(f"{'順':>3} {'戦略':<9}{'BT帯':<9}{'件数':>6}{'勝率':>6}{'PF':>7}"
+                  f"{'1件あたり':>11}{'net現実':>14}  {'区分':<8}判定")
+            _n_in = 0
             for i, (st, band, v) in enumerate(rank, 1):
                 per = v["pnl_real"] / v["n"]
                 wr = v["win"] / v["n"] * 100
-                if per > 0:
-                    _cum_pos += v["pnl_real"]
-                mark = ("優先" if per >= 1000 else
-                        "採用" if per > 0 else
-                        "見送り(期待値マイナス)")
-                print(f"{i:>3}{st:<10}{str(band) + '~' + str(band + 19):<10}{v['n']:>6}"
+                sc = _scope(band)
+                if sc == "発注対象":
+                    _n_in += 1
+                    mark = ("最優先" if per >= 1500 else
+                            "優先" if per >= 1000 else
+                            "採用" if per > 0 else "見送り候補(期待値マイナス)")
+                    order = f"{_n_in}"
+                else:
+                    mark = "参考(発注していない)"
+                    order = "-"
+                print(f"{order:>3} {st:<9}{str(band) + '~' + str(band + 19):<9}{v['n']:>6}"
                       f"{wr:>5.0f}%{_pf_s(v['gp'], v['gl']):>7}{per:>+11,.0f}"
-                      f"{v['pnl_real']:>+13,.0f}  {mark}")
-            _neg = [r for r in rank if r[2]["pnl_real"] / r[2]["n"] <= 0]
-            _neg_sum = sum(r[2]["pnl_real"] for r in _neg)
-            _neg_n = sum(r[2]["n"] for r in _neg)
-            print("-" * 92)
-            print(f"  期待値プラスの層だけ発注した場合の合計: {_cum_pos:>+15,.0f}円")
-            print(f"  期待値マイナスの層({len(_neg)}層 / {_neg_n}件)を切ると: {-_neg_sum:>+15,.0f}円 の改善")
-            print("  ※ この表は事後の期待値。実運用では『その日にどの層が出るか』は選べないので、")
-            print("     使い方は『資金が足りない日にどれを捨てるか』の優先順位。全部出せる日は全部出す。")
+                      f"{v['pnl_real']:>+14,.0f}  {sc:<8}{mark}")
+            print("-" * 100)
+            _in = [r for r in rank if _scope(r[1]) == "発注対象"]
+            _in_neg = [r for r in _in if r[2]["pnl_real"] / r[2]["n"] <= 0]
+            _in_sum = sum(r[2]["pnl_real"] for r in _in)
+            _in_n = sum(r[2]["n"] for r in _in)
+            print(f"  発注対象({len(_in)}層 / {_in_n}件) 合計 {_in_sum:>+15,.0f}円 "
+                  f"/ 1件あたり {_in_sum / max(_in_n, 1):>+7,.0f}円")
+            if _in_neg:
+                _neg_sum = sum(r[2]["pnl_real"] for r in _in_neg)
+                _neg_n = sum(r[2]["n"] for r in _in_neg)
+                print(f"  うち期待値マイナスの層({len(_in_neg)}層 / {_neg_n}件)を切ると "
+                      f"{-_neg_sum:>+13,.0f}円 の改善余地")
+            else:
+                print("  → 発注対象の帯は全て期待値プラス。切る層は無い。"
+                      "資金が足りない日の『順番』にだけ使うこと。")
+            _out = [r for r in rank if _scope(r[1]) == "対象外"]
+            if _out:
+                _out_neg = sum(1 for r in _out if r[2]["pnl_real"] / r[2]["n"] <= 0)
+                print(f"  参考: 対象外({len(_out)}層, うち期待値マイナス {_out_neg}層)は "
+                      f"--bt-min {args.bt_min:.0f} で既に除外済み。ここの巨大なマイナスは")
+                print(f"        『低品質シグナルに損切り遅延を掛けると崩壊する』ことを示す"
+                      f"(CLAUDE.md §18.9)。BT閾値を下げてはいけない根拠。")
 
     # ── 月別(--by-month) ──
     if args.by_month:
