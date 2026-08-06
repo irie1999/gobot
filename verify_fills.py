@@ -25,8 +25,10 @@
 from __future__ import annotations
 import argparse
 import csv as _csv
+import os
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from kabu_api import KabuClient
 
@@ -49,6 +51,12 @@ ap.add_argument("--fee", type=float, default=0.0, help="片道手数料率(既�
 ap.add_argument("--debug", action="store_true",
                 help="約定が0件のとき等、生の注文/Details構造を先頭数件ダンプして原因調査")
 ap.add_argument("--no-date", action="store_true", help="日付で絞らず全約定を集計")
+ap.add_argument("--trades-csv", type=str,
+                default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"),
+                help="バックテスト(レポート)の全取引CSV。対象日の取引を実約定と並べて比較する。"
+                     "既定 lss_trades.csv。--no-compare で比較をスキップ")
+ap.add_argument("--no-compare", action="store_true",
+                help="バックテストとの比較セクションを出さない")
 ap.add_argument("--save", action="store_true",
                 help="CSV2種を日付つきファイル名で自動保存 "
                      "(fills_<日付>.csv / orders_<日付>.csv)。--csv/--orders-csv より優先度低")
@@ -320,6 +328,138 @@ def main():
             w.writeheader()
             w.writerows(rows)
         print(f"\n[出力] {args.csv}")
+
+    # ── ③ バックテスト(レポート)の同日取引と突合 ───────────────────────────
+    if not args.no_compare:
+        _compare_with_backtest(rows, order_rows)
+
+
+def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
+    """lss_trades.csv から対象日(entry_date)の取引を読む。無ければ空リスト。"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    want = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    out = []
+    try:
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for r in _csv.DictReader(f):
+                d = str(r.get("entry_date") or "")[:10]
+                if d != want:
+                    continue
+                try:
+                    out.append({
+                        "symbol": str(r.get("symbol", "")).split(".")[0],
+                        "name": str(r.get("name", "")),
+                        "strategy": str(r.get("strategy", "")),
+                        "bt": float(r.get("bt", 0) or 0),
+                        "entry_p": float(r.get("entry_p", 0) or 0),
+                        "exit_p": float(r.get("exit_p", 0) or 0),
+                        "reason": str(r.get("reason", "")),
+                        "pnl": float(r.get("pnl", 0) or 0),
+                        "qty": int(float(r.get("qty", 0) or 0)),
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out
+
+
+def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
+    """実約定 vs バックテスト(レポート)の同日取引を並べて比較する。"""
+    bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
+    print()
+    print("=" * 78)
+    if not bt:
+        print(f"=== バックテスト比較: スキップ ===")
+        print(f"  {args.trades_csv} に {_DATE} の取引が見つかりません。")
+        print(f"  レポート生成時に環境変数 LSS_TRADES_CSV=lss_trades.csv を付けると出力されます:")
+        print(f"    $env:LSS_TRADES_CSV=\"lss_trades.csv\"; .\\dailyfast")
+        return
+
+    # 同一銘柄が複数戦略で出た場合はBT最高の1件に統合(実運用=1銘柄1ポジション)
+    by_sym: dict = {}
+    for t in bt:
+        e = by_sym.get(t["symbol"])
+        if e is None or t["bt"] > e["bt"]:
+            by_sym[t["symbol"]] = t
+
+    print(f"=== バックテスト(レポート)の {_DATE} 取引 : {len(by_sym)}銘柄 ===")
+    print(f"{'コード':>6} {'銘柄':<12}{'戦略':>8}{'BT':>5}{'約定値':>9}{'決済値':>9}"
+          f"{'株数':>5}{'損益':>10}  理由")
+    _bt_tot = 0.0
+    for s in sorted(by_sym):
+        t = by_sym[s]
+        _bt_tot += t["pnl"]
+        print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}{t['bt']:>5.0f}"
+              f"{t['entry_p']:>9,.1f}{t['exit_p']:>9,.1f}{t['qty']:>5}"
+              f"{t['pnl']:>+10,.0f}  {t['reason']}")
+    _bt_w = sum(1 for t in by_sym.values() if t["pnl"] > 0)
+    print(f"\n[テスト 合計] {_bt_tot:+,.0f}円  ({len(by_sym)}銘柄 / 勝ち{_bt_w} 負け{len(by_sym)-_bt_w})")
+
+    # ── 突合 ──
+    real_done = {r["symbol"]: r for r in real_rows if r["qty"] > 0}
+    ordered = {r["code"] for r in order_rows if r.get("side") == "売"}
+    both = sorted(set(real_done) & set(by_sym))
+    real_only = sorted(set(real_done) - set(by_sym))
+    bt_only = sorted(set(by_sym) - set(real_done))
+
+    print()
+    print("=" * 78)
+    print("=== 突合: 実約定 vs テスト ===")
+    if both:
+        print(f"\n▼ 両方にある {len(both)}銘柄 (これが本当の乖離)")
+        print(f"{'コード':>6} {'銘柄':<12}{'実約定値':>10}{'テスト':>9}{'滑り':>8}"
+              f"{'実決済':>10}{'テスト':>9}{'実損益':>10}{'テスト':>10}{'差':>10}")
+        _d_tot = 0.0
+        for s in both:
+            r, t = real_done[s], by_sym[s]
+            slip = ((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100
+                    if t["entry_p"] else 0.0)
+            d = r["pnl"] - t["pnl"]
+            _d_tot += d
+            print(f"{s:>6} {t['name'][:12]:<12}{r['entry(売)']:>10,.1f}{t['entry_p']:>9,.1f}"
+                  f"{slip:>+7.2f}%{r['exit(買戻)']:>10,.1f}{t['exit_p']:>9,.1f}"
+                  f"{r['pnl']:>+10,.0f}{t['pnl']:>+10,.0f}{d:>+10,.0f}")
+        print(f"{'計':>6} {'':<12}{'':>10}{'':>9}{'':>8}{'':>10}{'':>9}"
+              f"{sum(real_done[s]['pnl'] for s in both):>+10,.0f}"
+              f"{sum(by_sym[s]['pnl'] for s in both):>+10,.0f}{_d_tot:>+10,.0f}")
+
+    if bt_only:
+        print(f"\n▼ テストにあるが実約定なし {len(bt_only)}銘柄")
+        _o = _n = 0
+        _p = 0.0
+        for s in bt_only:
+            t = by_sym[s]
+            _p += t["pnl"]
+            tag = "発注済(未約定)" if s in ordered else "発注していない"
+            if s in ordered:
+                _o += 1
+            else:
+                _n += 1
+            print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}{t['bt']:>5.0f}"
+                  f"{t['pnl']:>+10,.0f}  {tag}")
+        print(f"  → 想定損益 {_p:+,.0f}円 を取り逃し "
+              f"(発注済だが未約定 {_o}件 / そもそも発注していない {_n}件)")
+
+    if real_only:
+        print(f"\n▼ 実約定したがテストに無い {len(real_only)}銘柄")
+        for s in real_only:
+            r = real_done[s]
+            print(f"{s:>6} {r['name'][:12]:<12}{r['pnl']:>+10,.0f}")
+        print("  → テストが『約定しない/シグナルなし』と判定した銘柄。実際は約定した。")
+
+    _r_tot = sum(r["pnl"] for r in real_done.values())
+    print()
+    print("-" * 78)
+    print(f"[実約定] {len(real_done)}銘柄 {_r_tot:+,.0f}円   "
+          f"[テスト] {len(by_sym)}銘柄 {_bt_tot:+,.0f}円   "
+          f"[差] {_r_tot - _bt_tot:+,.0f}円")
+    if by_sym:
+        print(f"[約定率] 実 {len(real_done)}/{len(ordered)}件 "
+              f"({len(real_done)/len(ordered)*100:.1f}%)  vs  "
+              f"テスト {len(by_sym)}件が約定判定")
 
 
 if __name__ == "__main__":
