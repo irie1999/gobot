@@ -46,6 +46,11 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--lss-only", action="store_true",
+                    help="ロング/ショート面を作らず lss 面だけ生成する(--no-long --no-short)。"
+                         "予算タブ・検証CSVは lss 面で作られるので結果は同一で、"
+                         "フォールドあたりの時間が大幅に短くなる。"
+                         "既定OFF = daily.bat と完全に同じ構成で走らせる")
     ap.add_argument("--manifest", type=str, default="oos_folds_manifest.csv",
                     help="このrunが作ったフォールドの台帳(fold,train_months,oos_month,raw_csv)。"
                          "集計側がファイル名から推測せずに済む。空文字で無効")
@@ -137,6 +142,8 @@ def main():
 
         print(f"\n{'='*60}")
         print(f"[fold {i+1}] 訓練: {dated[0][1]}〜{train_end_ym}  OOS: {oos_ym}  long-base: {long_base}")
+        if args.lss_only:
+            print("           (--lss-only: ロング/ショート面はスキップ。lss面の結果は同一)")
 
         # Step 1: merge (daily.bat の1行目と同じ)
         # 1ファイルの場合は merge_lss_proposals.py が2件必要なので同じファイルを2回渡す
@@ -170,7 +177,7 @@ def main():
             "--workers", str(args.workers),
             "--no-browser",
             "--no-serve",
-        ], env=fold_env)
+        ] + (["--no-long", "--no-short"] if args.lss_only else []), env=fold_env)
 
         Path(merged).unlink(missing_ok=True)
 
