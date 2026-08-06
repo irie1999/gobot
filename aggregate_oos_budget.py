@@ -62,6 +62,15 @@ if _mf is not None and _mf.exists():
         if mo:
             oos_months.append(mo)
     print(f"[台帳] {_mf} から OOS月 {len(oos_months)}件: {', '.join(oos_months)}")
+    # 途中から再開(--fold-from)した run の台帳は、その回に走らせたフォールドしか
+    # 載らない。気付かずに集計すると『一部の月だけ』の結果を全体だと誤読するので警告。
+    _n_raw = len(list(Path(".").glob(args.raw_glob)))
+    if _n_raw > len(oos_months) + 1:
+        print(f"  [!] 台帳{len(oos_months)}件に対し {args.raw_glob} が {_n_raw}件あります。")
+        print(f"      --fold-from で途中再開した場合、台帳は再開ぶんしか載りません。")
+        print(f"      全フォールドを集計したいなら台帳を消して再実行してください"
+              f"(ファイル名からの推測に切り替わります):")
+        print(f"        del {_mf}  →  python aggregate_oos_budget.py --by-month")
 else:
     for f in sorted(Path(".").glob(args.raw_glob)):
         m = re.search(r"fold(\d+)_(\d{4})-?(\d{2})", f.name)
