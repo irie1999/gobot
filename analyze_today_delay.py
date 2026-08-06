@@ -299,11 +299,26 @@ print("=" * (46 + 17 * len(delays)))
 print(f"銘柄別 delay スイープ  ({the_day} / 実約定 {len(rows)}銘柄)")
 print("  実 = .\\fills の実績。d0=即損切り(base) / d1=5分後から / d2=10分後から …")
 print("=" * (46 + 17 * len(delays)))
-print(f"{'コード':>6} {'銘柄':<12}{'実売値':>9}{'損切ライン':>10}{'約定':>6}{'実損益':>10}" + hdr_d)
+print(f"{'コード':>6} {'銘柄':<12}{'実売値':>9}{'損切ライン':>10}{'実約定':>7}{'足':>6}{'実損益':>10}" + hdr_d)
+_bar_gap: list[str] = []   # 実約定時刻より後のバーしか無い銘柄(寄り1本目が欠けている)
 for r in rows:
     a = r["a"]
+    # 実約定時刻とシミュの約定バーがズレていたら印。ズレ = その時間帯のバーが
+    # 分足に存在しない(例: 09:00約定なのに最初のバーが09:05)。寄り1本目が欠けて
+    # いると delay の効果は正しく測れないので警告を出す。
+    _gap = ""
+    if ":" in a["entry_t"] and a["entry_t"] != r["ei_t"]:
+        try:
+            _eh, _em = (int(x) for x in a["entry_t"].split(":")[:2])
+            _bh, _bm = (int(x) for x in r["ei_t"].split(":")[:2])
+            if _bh * 60 + _bm > _eh * 60 + _em:
+                _gap = "*"
+                _bar_gap.append(f"{a['sym']} {a['name'][:12]} 実約定{a['entry_t']} "
+                                f"→ 最初のバー{r['ei_t']}")
+        except Exception:
+            pass
     line = (f"{a['sym']:>6} {a['name'][:12]:<12}{a['entry']:>9,.1f}"
-            f"{r['stop']:>10,.1f}{r['ei_t']:>6}{a['pnl']:>+10,.0f}")
+            f"{r['stop']:>10,.1f}{a['entry_t']:>7}{(r['ei_t'] + _gap):>6}{a['pnl']:>+10,.0f}")
     for k in delays:
         v = r["res"][k]
         mark = {"損切り": "損", "利確": "利", "引け": "引"}.get(v["reason"], "?")
@@ -381,6 +396,36 @@ for k in delays[1:]:
               f"({vk['pnl'] - v0['pnl']:+,.0f})")
 if not any_worse:
     print("  なし")
+
+if _bar_gap:
+    print()
+    print("=" * 78)
+    print("⚠ 約定バーのズレ (* 印): 実約定時刻のバーが分足に存在しない")
+    print("=" * 78)
+    for g in _bar_gap:
+        print("   ", g)
+    print("  → その時間帯(多くは寄り1本目 09:00-09:05)の値動きがデータに無いため、")
+    print("     d0/d1 の判定が丸ごと1本後ろにズレます。寄り直後の損切りを論じる場合、")
+    print("     この銘柄の delay 効果は信用できません。`--bars <コード>` で確認してください。")
+
+# ── 特定銘柄の寄与を抜いた場合 ────────────────────────────────
+# 1銘柄の大きな差で全体の順位が変わることがあるので、各 delay の d0比に最も
+# 効いている銘柄を特定し、それを除いた合計も出す(結論が1銘柄依存でないか確認)。
+print()
+print("=" * 78)
+print("1銘柄依存チェック: d0比に最も効いている銘柄を除いた合計")
+print("=" * 78)
+for k in delays[1:]:
+    diffs = sorted(rows, key=lambda r: abs(r["res"][k]["pnl"] - r["res"][0]["pnl"]),
+                   reverse=True)
+    top = diffs[0]
+    d_all = sum(r["res"][k]["pnl"] for r in rows) - base_sum
+    ex = [r for r in rows if r is not top]
+    d_ex = (sum(r["res"][k]["pnl"] for r in ex)
+            - sum(r["res"][0]["pnl"] for r in ex))
+    flip = "  ★符号が反転(結論はこの1銘柄依存)" if (d_all > 0) != (d_ex > 0) else ""
+    print(f"  d{k}({k * 5}分): d0比 {d_all:+,.0f}円 → "
+          f"{top['a']['sym']} {top['a']['name'][:10]} を除くと {d_ex:+,.0f}円{flip}")
 
 if missing:
     print("\n[計算できなかった銘柄]")
