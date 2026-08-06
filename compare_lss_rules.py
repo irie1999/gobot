@@ -46,6 +46,12 @@ ap.add_argument("--bt-min", type=float, default=0.0,
                 help="BTスコア下限で母集団を絞る(実際に投資する集団)。30=BT30以上/70=BT70以上/0=全部。"
                      "各(銘柄,戦略)の現行base(v13)成績を直近365日で6期間スライスし calc_recommend_score で算出")
 ap.add_argument("--by-month", action="store_true", help="月別内訳も出力")
+ap.add_argument("--holdout-days", type=int, default=0,
+                help="直近N日を『無かったこと』にして基準日を N日前に戻す。BTスコアの算出期間も"
+                     "一緒に下がるので lookahead が入らない。厳密OOSの作り方: "
+                     "① --holdout-days 120 --days 240 で古い期間から優先順位表を作る "
+                     "② その表を LSS_PRIORITY_TABLE に入れて直近120日で検証する。"
+                     "これをやらないと『検証期間と同じデータで作った順位』を検証することになる")
 ap.add_argument("--bt-min-per-strategy", type=str, default="",
                 help="戦略ごとにBT下限を変える。例 \"MOM=40,DON=40,A7=20,RSI2=20,VOLTF=20,MACDTF=20\"。"
                      "指定した戦略はその値、未指定の戦略は --bt-min を使う。"
@@ -112,6 +118,12 @@ FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY
 _GAP_LIMIT = getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.03)
 _ON_CLOSE = getattr(ble, "_INTRADAY_5M_ON_CLOSE", False)
 TODAY = pd.Timestamp.now().normalize()
+if args.holdout_days and args.holdout_days > 0:
+    # 基準日を N日前へ。以降の窓切り(args.days)もBTスコアの期間スライスも
+    # この TODAY を基準にするので、直近N日のデータは一切参照されない。
+    TODAY = TODAY - pd.Timedelta(days=int(args.holdout_days))
+    print(f"[ホールドアウト] 直近{args.holdout_days}日を除外 → 基準日 {TODAY.date()} "
+          f"(集計窓 {(TODAY - pd.Timedelta(days=args.days)).date()} 〜 {TODAY.date()})")
 
 # ルール案の定義。stop_off_bars=約定バーから何本 損切りを無効にするか(0=約定バーから有効=base)。
 # sm2=損切りATR倍率(None=args.sm)。gap_skip=このギャップ率(負値)未満のギャップダウンは見送り。
@@ -803,6 +815,28 @@ def main():
                 print(f"  ※『サンプル少』の層({len(_thin_in)}層)は優先度が低いという意味ではない。"
                       "期待値は高いが出現頻度が低いだけ。")
                 print("     出たら順位どおり取ること。総額への寄与は小さい。")
+            # ── そのまま貼れる LSS_PRIORITY_TABLE 文字列 ─────────────────
+            # ★ 厳密OOSの手順:
+            #   ① --holdout-days N を付けてこの表を作る(直近N日は未使用)
+            #   ② 下の $env:LSS_PRIORITY_TABLE を設定して直近N日で検証する
+            # これをやらずに同じ期間で作って同じ期間で検証すると必ず良く出る。
+            _tbl = [r for r in rank if _scope(r[1], r[0]) == "発注対象"
+                    and r[2]["pnl_real"] / r[2]["n"] > 0]
+            if _tbl:
+                _spec = ",".join(
+                    f"{st}:{band:.0f}-{band + 20:.0f}={v['pnl_real'] / v['n']:.0f}"
+                    for st, band, v in _tbl)
+                print()
+                print("  【この順位を別期間で検証するには】PowerShell にそのまま貼る:")
+                print(f'    $env:LSS_PRIORITY = "1"')
+                print(f'    $env:LSS_PRIORITY_TABLE = "{_spec}"')
+                if args.holdout_days > 0:
+                    print(f"    # ↑ 直近{args.holdout_days}日を使わずに作った表。"
+                          f"この状態で sim_portfolio_lss を回せば厳密OOSになる")
+                else:
+                    print("    # ⚠ --holdout-days を付けずに作った表なので、"
+                          "同じ期間で検証しても意味がない(必ず良く出る)")
+
             _out = [r for r in rank if _scope(r[1], r[0]) == "対象外"]
             if _out:
                 _out_neg = sum(1 for r in _out if r[2]["pnl_real"] / r[2]["n"] <= 0)
