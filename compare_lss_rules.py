@@ -737,7 +737,11 @@ def main():
     #   そのため閾値未満の帯は【実際には発注していない】。ここを混ぜて「マイナス層を切れば
     #   改善する」と読むのは誤り(既に切ってある)。発注対象かどうかを行ごとに明示する。
     if strat_band_total:
-        rank = [(st, band, v) for (st, band), v in strat_band_total.items() if v["n"] >= 30]
+        # ★ 30件未満を隠すと「優先度が低い」と誤読される(実測: RSI2 BT60-79 は
+        #   17件だが +1,886円/件で RSI2 中トップ。隠したせいで低優先と読まれた)。
+        #   全層を出し、件数が少ないものは判定側に「サンプル少」と明示する。
+        _MIN_N_RELIABLE = 30
+        rank = [(st, band, v) for (st, band), v in strat_band_total.items() if v["n"] > 0]
         rank.sort(key=lambda x: -(x[2]["pnl_real"] / x[2]["n"]))
         if rank:
             def _scope(band: int, strat: str = "") -> str:
@@ -749,7 +753,7 @@ def main():
                 return "対象外"
 
             print("\n" + "=" * 100)
-            print(f"【発注優先順】{_BD_NAME} — 戦略×BT帯を『1件あたり期待値』降順(30件以上のみ)")
+            print(f"【発注優先順】{_BD_NAME} — 戦略×BT帯を『1件あたり期待値』降順")
             _lbl = (", ".join(f"{k}={v:.0f}" for k, v in sorted(_BT_MIN_BY_STRAT.items()))
                     + f", 他=BT{args.bt_min:.0f}") if _BT_MIN_BY_STRAT else (
                     f"BT{args.bt_min:.0f}以上" if args.bt_min > 0 else "全BT")
@@ -763,11 +767,15 @@ def main():
                 per = v["pnl_real"] / v["n"]
                 wr = v["win"] / v["n"] * 100
                 sc = _scope(band, st)
+                _thin = v["n"] < _MIN_N_RELIABLE
                 if sc == "発注対象":
                     _n_in += 1
                     mark = ("最優先" if per >= 1500 else
                             "優先" if per >= 1000 else
                             "採用" if per > 0 else "見送り候補(期待値マイナス)")
+                    if _thin:
+                        # 期待値は高くても滅多に出ない層。優先度は下げず「出たら取る」。
+                        mark += f"(サンプル少 {v['n']}件=年{v['n'] / (args.days / 250):.0f}回程度)"
                     order = f"{_n_in}"
                 else:
                     mark = "参考(発注していない)"
@@ -790,6 +798,11 @@ def main():
             else:
                 print("  → 発注対象の帯は全て期待値プラス。切る層は無い。"
                       "資金が足りない日の『順番』にだけ使うこと。")
+            _thin_in = [r for r in _in if r[2]["n"] < _MIN_N_RELIABLE]
+            if _thin_in:
+                print(f"  ※『サンプル少』の層({len(_thin_in)}層)は優先度が低いという意味ではない。"
+                      "期待値は高いが出現頻度が低いだけ。")
+                print("     出たら順位どおり取ること。総額への寄与は小さい。")
             _out = [r for r in rank if _scope(r[1], r[0]) == "対象外"]
             if _out:
                 _out_neg = sum(1 for r in _out if r[2]["pnl_real"] / r[2]["n"] <= 0)
