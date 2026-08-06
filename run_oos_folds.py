@@ -248,6 +248,11 @@ def main():
             "--workers", str(args.workers),
             "--no-browser",
             "--no-serve",
+            # ★ 出力HTMLに接尾辞を付けて .\daily のレポートを上書きしないようにする。
+            #   既定名は signals_holdout_all_both_<日付>.html で daily と同じなので、
+            #   検証を回すと当日のレポートが消えていた(実測: fold10 の結果が
+            #   .\daily のものだと誤認された)。
+            "--output-suffix", f"_oosfold{i + 1:02d}_{oos_ym}",
         ] + (["--no-long", "--no-short"] if args.lss_only else []), env=fold_env)
 
         Path(merged).unlink(missing_ok=True)
