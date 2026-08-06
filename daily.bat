@@ -51,7 +51,9 @@ REM     engine fills the stop at the line); the realistic verdict is
 REM     compare_lss_rules.py net-real (240d BT40+: delay2 +2,436,051 = peak).
 REM     Changing this invalidates the BT cache (version token sd<N>) -> first run slow.
 REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
-set "LSS_STOP_DELAY_BARS=2"
+REM     Honor an externally set value so you can A/B without editing this file:
+REM       $env:LSS_STOP_DELAY_BARS="1"; .\dailyfast   (PowerShell)
+if not defined LSS_STOP_DELAY_BARS set "LSS_STOP_DELAY_BARS=2"
 REM --- BT threshold = 40 for ALL "BTxx-and-above" places: the detail filter tabs
 REM     (BT40+ list / BT40+ x entry-day) AND the 400man x BT-descending budget floor
 REM     (max(_BUD_MIN_BT=30, _BT_TAB_MIN)=40). One env drives them all. Set to 50 to revert.
