@@ -213,8 +213,15 @@ def main():
     names = {}
     order_rows = []
     for o in orders:
-        if not (args.no_date or _match_date(_order_date(o))):
-            continue
+        # 注文日が対象日でなくても、対象日に約定していれば含める。
+        # lssのエントリー逆指値は前営業日の夜に発注されることがあり、注文日だけで
+        # 絞ると『売り注文が1件も無い』状態になって約定率が測れなくなる(実測: 2026-08-06)。
+        if not args.no_date:
+            _ok = _match_date(_order_date(o))
+            if not _ok:
+                _ok = any(_match_date(t) for _, _, t in _executions(o))
+            if not _ok:
+                continue
         sym = str(o.get("Symbol") or "").split(".")[0]
         names[sym] = str(o.get("SymbolName") or "")
         side = "売" if str(o.get("Side")) == "1" else "買"
