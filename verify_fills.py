@@ -427,21 +427,35 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
               f"{sum(by_sym[s]['pnl'] for s in both):>+10,.0f}{_d_tot:>+10,.0f}")
 
     if bt_only:
-        print(f"\n▼ テストにあるが実約定なし {len(bt_only)}銘柄")
-        _o = _n = 0
-        _p = 0.0
-        for s in bt_only:
+        # BT降順(=発注優先順)で並べる。件数が多いので上位だけ出して残りは要約。
+        _lst = sorted(bt_only, key=lambda s: -by_sym[s]["bt"])
+        _o = sum(1 for s in _lst if s in ordered)
+        _n = len(_lst) - _o
+        _p = sum(by_sym[s]["pnl"] for s in _lst)
+        print(f"\n▼ テストにあるが実約定なし {len(_lst)}銘柄 (BT降順=発注優先順)")
+        _SHOW = 15
+        for s in _lst[:_SHOW]:
             t = by_sym[s]
-            _p += t["pnl"]
             tag = "発注済(未約定)" if s in ordered else "発注していない"
-            if s in ordered:
-                _o += 1
-            else:
-                _n += 1
             print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}{t['bt']:>5.0f}"
                   f"{t['pnl']:>+10,.0f}  {tag}")
+        if len(_lst) > _SHOW:
+            _rest = _lst[_SHOW:]
+            print(f"  ... 他 {len(_rest)}銘柄 (想定損益合計 "
+                  f"{sum(by_sym[s]['pnl'] for s in _rest):+,.0f}円)")
         print(f"  → 想定損益 {_p:+,.0f}円 を取り逃し "
               f"(発注済だが未約定 {_o}件 / そもそも発注していない {_n}件)")
+
+        # BT帯別: どの帯を発注できていないかが分かると予算設計に直結する
+        print(f"\n  【BT帯別の取り逃し】発注枠を増やすとどの帯が拾えるか")
+        print(f"  {'BT帯':<10}{'銘柄':>5}{'想定損益':>12}{'1件あたり':>11}")
+        for lo, hi, lb in [(70, 999, "BT70+"), (60, 69, "BT60-69"), (50, 59, "BT50-59"),
+                           (40, 49, "BT40-49"), (20, 39, "BT20-39"), (0, 19, "BT0-19")]:
+            g = [s for s in _lst if lo <= by_sym[s]["bt"] <= hi]
+            if not g:
+                continue
+            gp = sum(by_sym[s]["pnl"] for s in g)
+            print(f"  {lb:<10}{len(g):>5}{gp:>+11,.0f}円{gp / len(g):>+10,.0f}円")
 
     if real_only:
         print(f"\n▼ 実約定したがテストに無い {len(real_only)}銘柄")
@@ -456,10 +470,16 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     print(f"[実約定] {len(real_done)}銘柄 {_r_tot:+,.0f}円   "
           f"[テスト] {len(by_sym)}銘柄 {_bt_tot:+,.0f}円   "
           f"[差] {_r_tot - _bt_tot:+,.0f}円")
-    if by_sym:
+    if ordered:
         print(f"[約定率] 実 {len(real_done)}/{len(ordered)}件 "
-              f"({len(real_done)/len(ordered)*100:.1f}%)  vs  "
+              f"({len(real_done) / len(ordered) * 100:.1f}%)  vs  "
               f"テスト {len(by_sym)}件が約定判定")
+    else:
+        # エントリーの売り注文が対象日に無い = 前日夜に発注してRecvTimeが前日になっている
+        # ケース。約定率は算出できないので、その旨を出す(0除算で落ちない)。
+        print(f"[約定率] 算出不可: 対象日 {_DATE} に『売り』注文が1件もありません。")
+        print(f"         エントリーの逆指値売りは前営業日の夜に発注されている可能性があります。")
+        print(f"         前日で確認: .\\fills --date <前営業日>  /  日付を見ない: .\\fills --no-date")
 
 
 if __name__ == "__main__":
