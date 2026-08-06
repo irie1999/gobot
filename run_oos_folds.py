@@ -54,6 +54,10 @@ def extract_ym(path: Path) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--daily-bat", type=str, default="daily.bat",
+                    help="この .bat の merge_lss_proposals 行から提案ファイル一覧を読み、"
+                         "**本番と完全に同じ構成**でフォールドを組む。"
+                         "空文字にすると lss_proposal_YYYY-MM.py を全部拾う(構成が本番とズレる)")
     ap.add_argument("--price-ranges", type=str, default="6000",
                     help="価格帯パネル。既定 6000 = 1,000〜6,000円の1枚だけ(実発注と同じ帯)。"
                          "★ daily.bat の \"6000,0\" にすると lss 面が2回走り、"
@@ -87,6 +91,30 @@ def main():
         [(p, extract_ym(p)) for p in Path(".").glob("lss_proposal_????-??.py") if extract_ym(p)],
         key=lambda x: x[1],
     )
+    # ★ 本番(daily.bat)と同じ提案ファイル構成にする。
+    #   glob だと lss_proposal_2024-12.py などの古い提案まで拾い、daily.bat が
+    #   使っていない銘柄が候補に混ざる(実測: 2,074ペア vs 本番相当は約1,400ペア)。
+    #   候補が変われば発注順も結果も変わるので、検証の前提が崩れる。
+    if args.daily_bat:
+        _bp = Path(args.daily_bat)
+        if _bp.exists():
+            _txt = _bp.read_text(encoding="utf-8", errors="replace")
+            _want = re.findall(r"lss_proposal_(\d{4}-\d{2})\.py", _txt)
+            if _want:
+                _wset = set(_want)
+                _before = len(dated)
+                dated = [(p, ym) for p, ym in dated if ym in _wset]
+                print(f"[提案] {_bp.name} の merge 行に合わせて {_before}→{len(dated)}件に絞込")
+                print(f"       ({', '.join(ym for _, ym in dated)})")
+                _missing = sorted(_wset - {ym for _, ym in dated})
+                if _missing:
+                    print(f"  [!] {_bp.name} にあるが見つからない提案: {', '.join(_missing)}")
+            else:
+                print(f"  [!] {_bp.name} に lss_proposal_YYYY-MM.py の記述が見つかりません")
+        else:
+            print(f"  [!] {_bp} が見つかりません。glob で拾った全提案を使います"
+                  f"(本番と構成がズレる可能性)")
+
     if args.start_from:
         dated = [(p, ym) for p, ym in dated if ym >= args.start_from]
         print(f"--start-from {args.start_from} 以降の {len(dated)} 件を使用")
