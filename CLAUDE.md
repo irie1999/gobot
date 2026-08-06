@@ -1403,14 +1403,22 @@ RSI2 +2,327)。だが予算が有限だと **それを追加することでよ�
 | `LSS_PRIORITY=1` | ①+② |
 | `LSS_BT_MIN_PER_STRATEGY` / `LSS_PRIORITY_TABLE` | 上書き |
 
-再検証するなら手順は:
+**★ 再検証は必ずローリング(実運用と同一パイプライン)で行うこと:**
 ```
-# ① 直近N日を除外して順位表を作る(出力末尾に貼り付け用の env が出る)
-python compare_lss_rules.py --bt-min 40 --bt-min-per-strategy "A7=20,RSI2=20,VOLTF=20,MACDTF=20" \
-    --holdout-days 120 --days 240 --min-price 1000 --max-price 6000
-# ② その表で予算シミュ(--base-month は holdout の境界に合わせる)
-python sim_portfolio_lss.py --bt-min 40 --budget 4000000 --base-month 2026-04 --refresh-cache
+# ① フォールドごとの生CSVを作る(基準月ごとに選定し直し+累積マージ=daily.batと同一)
+#    一度作れば発注ルールを変えて何度でも再集計できる(重いのはここだけ)
+python run_oos_folds.py --workers 8
+# → oos_raw_fold01_YYYYMM.csv 〜 oos_raw_foldNN_YYYYMM.csv
+
+# ② 発注ルールだけ差し替えて集計(--raw はグロブ可。全フォールドまとめて読む)
+python sim_oos_budget.py --raw "oos_raw_fold*.csv" --bt-mins 40                              # A 従来
+$env:LSS_PRIORITY="floors"; python sim_oos_budget.py --raw "oos_raw_fold*.csv" --bt-mins 40  # B
+$env:LSS_PRIORITY="1";      python sim_oos_budget.py --raw "oos_raw_fold*.csv" --bt-mins 40  # C
+$env:LSS_PRIORITY=$null
 ```
+順位表を作り直す場合は `compare_lss_rules --holdout-days N`(出力末尾に貼り付け用の
+`$env:LSS_PRIORITY_TABLE` が出る)。**--holdout-days を付けずに作った表で検証しても
+必ず良く出るだけで意味がない。**
 
 #### 副産物として得た確かな知見(こちらは有効)
 - **MOM/DON の BT20-39 は絶対に入れない**。MOM は -14,529円/件。低品質シグナルに
