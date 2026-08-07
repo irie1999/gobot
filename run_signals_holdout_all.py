@@ -839,9 +839,26 @@ def _load_wl_from_csv(csv_path: Path, max_price: float, strategy: str,
 
 
 def _filter_wl_by_price(wl: list, min_price: float, max_price: float) -> list:
-    """フォールバック(現行WATCHLIST)を最新終値で価格フィルタする。
-    CSV経路の latest_price フィルタ相当。価格指定が無ければ素通し。
-    価格取得に失敗した銘柄は安全側で除外する。"""
+    """ユニバースを**最新終値**(=今日の株価)で価格フィルタする。
+
+    ⛔ これは過去の成績評価では先読みになる (2026-08-07 に判明):
+       2025-10 に 3,000円 だった銘柄が今日 8,000円 なら、max=6,000 で
+       **10ヶ月ぶん丸ごと除外**される。当時は普通に発注できた銘柄なのに。
+       lss はショートなので、上昇して上限を超えた銘柄(=ショートが負ける銘柄)が
+       系統的に消える = **有利方向のバイアス**。実測 1,792→1,328(464件除外)。
+
+       発注リスト(今日のシグナル)にとっては正しい挙動("今日100株買えるか")。
+       過去の集計にだけ効く問題なので、取引単位のフィルタ
+       (_PNL_ENTRY_MAX_PRICE / _PNL_ENTRY_MIN_PRICE = 約定値で判定)は残したまま、
+       ユニバース側だけ外して影響を測れるようにした:
+         set LSS_NO_UNIVERSE_PRICE_FILTER=1
+       (BTキャッシュは別キーになる。CLAUDE.md 18.16)
+    """
+    if str(os.environ.get("LSS_NO_UNIVERSE_PRICE_FILTER", "") or "").strip() \
+            not in ("", "0", "false", "no", "off"):
+        print(f"  [価格フィルタ] ユニバース側スキップ ({len(wl)}件そのまま)。"
+              f"約定値ベースの取引フィルタは有効のまま = 先読みなし")
+        return list(wl)
     _has_max = bool(max_price) and 0 < max_price < 100000
     _has_min = bool(min_price) and min_price > 0
     if not _has_max and not _has_min:
@@ -1418,6 +1435,10 @@ if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
 # 手数料を env で戻して比較する場合(LSS_FEE_ONE_WAY=0.001)も別キャッシュにする。
 # 既定0のときはトークンを付けない(v15 がそのまま「手数料0」を意味する)。
+# ユニバース価格フィルタを外した結果は別キャッシュにする(混同防止)。
+if str(os.environ.get("LSS_NO_UNIVERSE_PRICE_FILTER", "") or "").strip() \
+        not in ("", "0", "false", "no", "off"):
+    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}nupf"
 _FEE_NOW = float(getattr(_bte, "FEE_PCT_ONE_WAY", 0.0) or 0.0)
 if abs(_FEE_NOW) > 1e-12:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}fee{int(round(_FEE_NOW * 100000))}"

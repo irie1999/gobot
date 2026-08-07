@@ -1880,3 +1880,67 @@ $env:LSS_OOS_BUDGET_DAYS = "365"
 $env:LSS_OOS_BUDGET_CSV = $null; $env:LSS_OOS_BUDGET_BT_TIERS = $null; $env:LSS_OOS_BUDGET_DAYS = $null
 python aggregate_oos_budget.py --csv bt_tiers_fee0.csv --manifest "" --sim-type 通常予算 --by-month
 ```
+
+---
+
+### 18.16 ⚠ 残っている先読み3件 (2026-08-07 点検)。18.15 の +883,421円 はまだ完全にクリーンではない
+
+18.11〜18.14 で3種類の先読みを除去したが、**点検したらまだ3件残っていた**。
+18.15 の数字を「純OOS」と呼ぶ前に、少なくとも①は測り直す必要がある。
+
+#### ✅ 除去済み
+
+| # | 何 | 確認方法 |
+|---|---|---|
+| as-of BT | 過去の取引に今日のBTを貼っていた | `[BT出所] 今日のスコア=0件` |
+| per-symbol START_DATES | 未来の選定結果で過去を評価 | `[START_DATES per-symbol] 全1908件` |
+| sim_portfolio の START_DATES | 同上(取り残されていた) | `[START_DATES] ... 注文を除外` |
+
+#### ⛔ ① ユニバースの価格フィルタが『今日の株価』(最大の残存バイアス)
+
+`_filter_wl_by_price` は **最新終値**でユニバースを切る。実測 **1,792→1,328(464件除外)**。
+
+2025-10 に 3,000円 だった銘柄が今日 8,000円 なら、max=6,000 で **10ヶ月ぶん丸ごと除外**。
+当時は普通に発注できた銘柄なのに。**lss はショートなので、上昇して上限を超えた銘柄
+(=ショートが負ける銘柄)が系統的に消える = 有利方向のバイアス。**
+
+発注リスト(今日のシグナル)には正しい挙動("今日100株買えるか")。過去の集計だけの問題。
+取引単位のフィルタ(`_PNL_ENTRY_MAX_PRICE` = 約定値で判定)は先読みなしなので、
+ユニバース側だけ外して影響を測れるようにした:
+
+```powershell
+del bt_tiers_nupf.csv
+$env:LSS_NO_UNIVERSE_PRICE_FILTER = "1"
+$env:LSS_OOS_BUDGET_CSV = "bt_tiers_nupf.csv"
+$env:LSS_OOS_BUDGET_BT_TIERS = "0,40"
+$env:LSS_OOS_BUDGET_DAYS = "365"
+.\dailyfast --no-serve --days 365
+$env:LSS_NO_UNIVERSE_PRICE_FILTER = $null
+$env:LSS_OOS_BUDGET_CSV = $null; $env:LSS_OOS_BUDGET_BT_TIERS = $null; $env:LSS_OOS_BUDGET_DAYS = $null
+python aggregate_oos_budget.py --csv bt_tiers_nupf.csv --manifest "" --sim-type 通常予算 --by-month
+```
+
+BTキャッシュは `nupf` トークンで別管理(初回は再構築で遅い)。
+**18.15 の +883,421円(BT40) との差が、このバイアスの大きさ。**
+
+#### ⚠ ② 空売り不可116件を『今日のリスト』で過去から除外
+
+`not_shortable.py` は現時点の可否。当時は空売りできた銘柄かもしれない。
+影響は①より小さいと思われるが方向は不明。`check_shortable.py` の履歴が無いので
+現状は測れない。
+
+#### ⚠ ③ パラメータを全期間の成績を見て選んでいる
+
+delay1 / sm0.1 / tm1.0 / BT40 は、この11ヶ月を含むデータで選ばれた。
+ただし:
+- sm/tm は今日のスイープで「現行が最良、変えない」と結論(=変更していない)
+- delay も同様
+- 選択肢が少ないので過剰適合の余地は限定的
+
+**それでも「11ヶ月の成績を、その11ヶ月を見て選んだ設定で測っている」ことは変わらない。**
+厳密には基準月ごとのローリング(`run_oos_folds.py`)でしか消せない。
+
+#### 結論
+
+**18.15 の +883,421円 は「大部分の先読みを除いた値」であって「純OOS」ではない。**
+①を測れば、どれだけ上振れしているかが分かる。
