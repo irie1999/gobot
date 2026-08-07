@@ -419,7 +419,9 @@ def main():
     _cd = Path(".simportfolio_cache")
     _prop_tag = _h.md5(Path(args.proposal).read_bytes()).hexdigest()[:8] if args.proposal else "nopr"
     _key = _h.md5("|".join(str(x) for x in [
-        "spv2", getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, GAP_LIMIT,
+        # FEE を鍵に含める: 2026-08-07 に既定を 0.001→0 に変えたので、
+        # 含めないと手数料込みの古いキャッシュが再利用されて誤った金額が出る。
+        "spv3", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.sm, args.tm, DELAY, GAP_LIMIT,
         args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
         _prop_tag,
         _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),

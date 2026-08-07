@@ -1405,12 +1405,24 @@ if not _args.date:
 #        なのに+41,901円と計上)。short_exit_5m を常に約定バー(ei)から判定(2026-07-24)
 #   v14: 指値ガードを 3%→2% に試したが、本番エンジンの月別損益で2%は3%より約-1%(微減)と判明。
 #        3%へ差し戻し(2026-07-31)。v13(3%)のキャッシュに戻すのでバージョンも v13 に戻す。
-_BT_LOGIC_VER = "v13"
+#   v15: 手数料を 0 に変更(2026-08-07)。旧既定 FEE_PCT_ONE_WAY=0.001(往復0.2%)は
+#        ユーザーの実口座(信用大口優遇=無料)と合っておらず、株価3,000円x100株で
+#        600円/件を全トレードから引いていた。lss の負けは -62円/件、LDT は -350円/件と
+#        どちらも手数料1件ぶんより小さく、払っていないコストで赤字にしていた。
+#        v13 のキャッシュは手数料込みなので必ず版を分ける。
+_BT_LOGIC_VER = "v15"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
 if _LSS_STOP_DELAY > 0:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}sd{_LSS_STOP_DELAY}"
+# 手数料を env で戻して比較する場合(LSS_FEE_ONE_WAY=0.001)も別キャッシュにする。
+# 既定0のときはトークンを付けない(v15 がそのまま「手数料0」を意味する)。
+_FEE_NOW = float(getattr(_bte, "FEE_PCT_ONE_WAY", 0.0) or 0.0)
+if abs(_FEE_NOW) > 1e-12:
+    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}fee{int(round(_FEE_NOW * 100000))}"
+    print(f"[fee] 手数料 片道{_FEE_NOW:.3%} を適用(env LSS_FEE_ONE_WAY)。"
+          f"既定は0(実口座=信用大口優遇で無料)", flush=True)
 # 指値ガード(深ギャップ約定不可の閾値)を env で上書き可能に(A/B検証用)。既定=3%。
 # 既定と異なる時だけ BTキャッシュキーに g<‰> を付与し、別ガードの結果を混同しない。
 #   例: set LSS_GAP_LIMIT=0.02 & .\daily  → 2%版を別キャッシュで生成。
