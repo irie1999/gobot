@@ -73,6 +73,10 @@ ap.add_argument("--proposal", type=str, default=None,
                      "--bt-min フィルターより優先(提案ファイルが選定基準を持つ)。"
                      "厳密OOS検証: --only-month <翌月> と組み合わせる。"
                      "例: --proposal lss_proposal_2026-06.py --only-month 2026-07")
+ap.add_argument("--start-dates", type=str, default="lss_proposal_cumul.py",
+                help="START_DATES を持つ提案ファイル。各ペアが『いつからWATCHLISTに"
+                     "居たか』で注文を切り、選定の先読みを除く(CLAUDE.md 18.11 と同型)。"
+                     "空文字で無効化(絶対値は上振れするので相対比較専用)")
 ap.add_argument("--only-month", type=str, default=None,
                 help="この月(YYYY-MM)のトレードのみでシミュレーション。"
                      "--proposal と組み合わせて「基準月選定→翌月のみ検証」の厳密OOSを測る。"
@@ -170,6 +174,38 @@ def _load_all_bt() -> dict:
             b = 0.0
         bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
     return bt
+
+
+def _load_start_dates(path: str) -> dict[tuple[str, str], "pd.Timestamp"]:
+    """提案ファイルの START_DATES = {(code, strat): "YYYY-MM-DD"} を読む。
+
+    merge_lss_proposals.py が per-symbol で書き出す『そのペアの初出基準月の翌月1日』。
+    これより前の注文は、当時まだ WATCHLIST に入っていなかったので数えてはいけない。
+    ファイルが無い/キーが無い場合は空 dict を返す(=フィルターしない)。
+    """
+    if not str(path or "").strip():
+        return {}
+    p = Path(path)
+    if not p.exists():
+        print(f"[START_DATES] {p} が無いのでスキップします "
+              f"(.\\daily を1回流すと lss_proposal_cumul.py ができます)")
+        return {}
+    try:
+        ns: dict = {}
+        exec(compile(p.read_text(encoding="utf-8"), str(p), "exec"), ns)
+        raw = ns.get("START_DATES") or {}
+    except Exception as e:
+        print(f"[START_DATES] {p} を読めません: {e}")
+        return {}
+    out: dict = {}
+    for k, v in raw.items():
+        try:
+            code, strat = k
+            out[(str(code).upper().removesuffix(".T").split(".")[0], str(strat))] = \
+                pd.Timestamp(v).normalize()
+        except Exception:
+            continue
+    return out
 
 
 def _load_proposal_pairs(path: str) -> set[tuple[str, str]]:
@@ -420,6 +456,36 @@ def main():
 
     if not records:
         print("[error] 注文0件。5分足/CSVを確認。", file=sys.stderr); return
+
+    # ── START_DATES フィルター (選定の先読み除去) ─────────────────────────
+    # ⛔ なぜ必要か (2026-08-07):
+    #   lss_proposal_cumul.py は 2025-09〜2026-07 の全提案の和集合。ここから
+    #   1,326ペアを取って500日まるごと評価すると、**2026-06 の選定で初めて入った
+    #   銘柄で 2025-04 の取引を評価する**ことになる。2025-04 時点でその銘柄は
+    #   WATCHLIST に存在しない。「6月時点で良かったから選ばれた」= その間の成績が
+    #   良かった、という未来情報で過去を評価していることになる。
+    #   これは as-of BT (CLAUDE.md 18.11) と同じ構造のリークで、merge_lss_proposals
+    #   側は per-symbol START_DATES で修正済み。このツールだけ取り残されていた。
+    #   実測の食い違い: .\daily 予算タブ(リーク除去済み) 11ヶ月 -114,595円 に対し、
+    #   本ツールは +1,226,598円。絶対値がこれだけずれる。
+    #   sm/delay の**相対比較**は同じリークが等しくかかるので有効だが、
+    #   絶対値を見るときは必ずこのフィルターを通すこと。
+    _sd_map = _load_start_dates(args.start_dates)
+    if _sd_map:
+        _b4 = len(records)
+        records = [r for r in records
+                   if r["date"] >= _sd_map.get(
+                       (str(r["sym"]).upper().removesuffix(".T").split(".")[0],
+                        str(r.get("strat", ""))), pd.Timestamp.min)]
+        print(f"[START_DATES] {Path(args.start_dates).name} の {len(_sd_map)}件を適用 → "
+              f"{_b4}注文 → {len(records)}注文 (選定前に遡った注文を除外)")
+        if not records:
+            print("[error] START_DATES で全注文が消えました。--start-dates '' で無効化できます",
+                  file=sys.stderr)
+            return
+    else:
+        print(f"[START_DATES] 未適用。**選定の先読みが残ります**(絶対値は上振れ)。"
+              f" 相対比較にのみ使うこと")
 
     # ── --only-month フィルター ───────────────────────────────────────────
     om_period = None
