@@ -98,6 +98,10 @@ ap.add_argument("--exclude-strat", type=str, default="転換",
                 help="除外する戦略(カンマ区切り)。既定『転換』= lss ではなくロング転換の"
                      "シミュレーションなので lss の分析に混ぜてはいけない。"
                      "空文字を渡すと除外しない")
+ap.add_argument("--t-train-min", type=float, default=1.0,
+                help="TRAIN でこの |t| に届かない帯は候補にしない(既定1.0)。"
+                     "TRAIN で t≒0 なのに TEST だけ有意なものは『TRAINで見つけて"
+                     "TESTで確認した』ことにならない=単なるTEST期間のノイズ")
 ap.add_argument("--out", type=str, default="", help="属性付きの全トレードCSVを書き出す")
 args = ap.parse_args()
 
@@ -396,6 +400,7 @@ def _welch_t(a: np.ndarray, b: np.ndarray,
 
 
 _T_MIN = 2.0            # TEST でこの t値を超えないと候補にしない
+_T_TRAIN_MIN = float(args.t_train_min)   # TRAIN 側の下限(既定1.0)
 _NULL_REPS = 300        # 帰無分布の較正回数
 
 _cands: list[dict] = []
@@ -451,6 +456,10 @@ for col in _COLS:
             mark = "— 向き不一致"
         elif abs(t2) < _T_MIN:
             mark = f"— TEST弱い(t={t2:+.1f})"
+        elif abs(t1) < _T_TRAIN_MIN:
+            # TRAIN で効いていないものは『仮説→検証』になっていない。
+            # TEST だけで有意 = その期間のノイズを拾っただけ。
+            mark = f"— TRAINで無効(t={t1:+.1f})"
         else:
             mark = "◎ 他より良い" if t2 > 0 else "× 他より悪い"
         print(f"  {lbl:<22}{n1:>8}{e1:>+9,.0f}{t1:>+6.1f}"
@@ -458,12 +467,19 @@ for col in _COLS:
         if mark.startswith(("◎", "×")):
             _v2 = np.sort(np.abs(_a2))[::-1]
             _top5 = float(_v2[:5].sum() / np.abs(_a2).sum() * 100) if np.abs(_a2).sum() else 0.0
-            _nd2 = len(np.unique(_D_TE[_m2]))
+            _dd2 = _D_TE[_m2]
+            _nd2 = len(np.unique(_dd2))
+            # 日別の損益合計を作り、上位3日が『帯の合計』の何%を作っているか。
+            # 同日決済なので、少数の日に偏っていれば実質その日数ぶんの証拠しかない。
+            _daysum = np.array([_a2[_dd2 == d].sum() for d in np.unique(_dd2)])
+            _top3d = (float(np.sort(np.abs(_daysum))[::-1][:3].sum()
+                            / np.abs(_daysum).sum() * 100) if np.abs(_daysum).sum() else 0.0)
             _cands.append({"属性": col, "帯": lbl, "timing": _TIMING.get(col, "?"),
                            "向き": "採用" if t2 > 0 else "除外",
                            "TRAIN_n": n1, "TRAIN_1件": e1, "TRAIN_t": t1,
                            "TEST_n": n2, "TEST_1件": e2, "TEST_t": t2, "TEST_合計": p2,
-                           "TEST_日数": _nd2, "上位5件%": _top5, "_mask": _m2})
+                           "TEST_日数": _nd2, "上位5件%": _top5, "上位3日%": _top3d,
+                           "_mask": _m2})
 
 # ── 帰無分布の較正 (多重検定の補正) ──────────────────────────────────
 # 属性13本 × 5帯 = 約65回の検定をしている。何もエッジが無くても、偶然いくつかは
@@ -491,7 +507,7 @@ if _bin_masks:
                 continue
             t1 = _welch_t(s_tr[m1], s_tr[~m1], _D_TR[m1], _D_TR[~m1])
             t2 = _welch_t(s_te[m2], s_te[~m2], _D_TE[m2], _D_TE[~m2])
-            if t1 * t2 > 0 and abs(t2) >= _T_MIN:
+            if t1 * t2 > 0 and abs(t2) >= _T_MIN and abs(t1) >= _T_TRAIN_MIN:
                 c += 1
         _null_counts.append(c)
 
@@ -520,13 +536,13 @@ else:
     _cands.sort(key=lambda x: -abs(x["TEST_t"]))
     print(f"  {'属性':<18}{'帯':<20}{'確定':<5}{'向き':<5}"
           f"{'TRAIN t':>9}{'TEST t':>8}{'TEST 1件':>11}{'TEST件':>7}{'日数':>6}"
-          f"{'上位5件%':>9}{'TEST合計':>12}")
-    print("  " + "-" * 116)
+          f"{'上位5件%':>9}{'上位3日%':>9}{'TEST合計':>12}")
+    print("  " + "-" * 125)
     for c in _cands:
         print(f"  {c['属性']:<18}{c['帯']:<20}{c['timing']:<5}{c['向き']:<5}"
               f"{c['TRAIN_t']:>+9.1f}{c['TEST_t']:>+8.1f}{c['TEST_1件']:>+11,.0f}"
               f"{c['TEST_n']:>7}{c['TEST_日数']:>6}{c['上位5件%']:>8.1f}%"
-              f"{c['TEST_合計']:>+12,.0f}")
+              f"{c['上位3日%']:>8.1f}%{c['TEST_合計']:>+12,.0f}")
 
     # ── 候補同士の重複 ──────────────────────────────────────────────
     # 高ATR・高株価・高5日リターンは同じ銘柄群を指していることが多い。
