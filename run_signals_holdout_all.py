@@ -1235,7 +1235,23 @@ _na._PNL_ENTRY_MAX_PRICE = _args.max_price if (_args.max_price and _args.max_pri
 _na._PNL_ENTRY_MIN_PRICE = _args.min_price if (_args.min_price and _args.min_price > 0) else 0.0
 # 損益タブの月別グリッドを全期間表示する窓(日)。--days が365超なら過去まで表示。
 # 365以下(既定/ライブ)なら None 相当で従来どおり(挙動不変)。
-_na._BT_WINDOW_DAYS = max(_PNL_PERIODS) if max(_PNL_PERIODS) > 365 else None
+# ── as-of BT (先読みなしのBTスコア) ─────────────────────────────────────────
+# 既定OFF。LSS_ASOF_BT=1 で有効化。
+# OFF のとき: full_trade_log は表示窓>365日のときしか作られないので、.\daily(180日)では
+#   凍結キャッシュに無い過去の取引のBTが『今日のスコア』になる。今日儲かった銘柄は
+#   2月の取引にも高BTが付き、予算タブのBT降順が未来を知って選ぶ(先読みバイアス)。
+# ON のとき: 窓に関係なく full_trade_log を作り、各取引のBTを「その時点で決済済みの
+#   取引だけ」から算出する。過去月の成績は下がるはずだが、それが正しい姿。
+#   代償: 全ペアで表示窓+400日のバックテストを追加実行するので重くなる。
+_ASOF_BT_FORCE = str(os.environ.get("LSS_ASOF_BT", "") or "").strip().lower() \
+    not in ("", "0", "false", "no", "off")
+_na._ASOF_BT_FORCE = _ASOF_BT_FORCE
+_na._BT_WINDOW_DAYS = (max(_PNL_PERIODS)
+                       if (max(_PNL_PERIODS) > 365 or _ASOF_BT_FORCE) else None)
+if _ASOF_BT_FORCE:
+    print(f"[as-of BT] ON (LSS_ASOF_BT) — 各取引のBTを『その時点で決済済みの取引だけ』から"
+          f"算出します(先読みなし)。窓={_na._BT_WINDOW_DAYS}日 + 400日のバックテストを"
+          f"追加実行するため時間がかかります", flush=True)
 # --forward-days/--back-days: 損益タブを『基準日-back 〜 基準日+forward』で打ち切る(軽量化)。
 if (_args.forward_days > 0 or _args.back_days > 0) and _args.date:
     from datetime import date as _fwd_date_cls

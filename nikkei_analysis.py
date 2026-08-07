@@ -48,6 +48,14 @@ _PNL_CONFIGS: list[dict] = []
 # None/365以下 → 従来どおり直近365日のみ。run_signals_holdout_all が --days に応じて設定。
 # backtest_one(スコア計算・ライブ)は一切変えず、表示用の全期間 trade_log だけ別途取得する。
 _BT_WINDOW_DAYS: int | None = None
+# ★ as-of BT の強制ON (env LSS_ASOF_BT=1 → run_signals_holdout_all が注入)。
+#   既定では full_trade_log は「表示窓>365日」か過去検証モードのときしか作られず、
+#   .\daily(表示180日)では作られない。その結果、凍結キャッシュに無い過去の取引の
+#   BTが『今日のスコア』にフォールバックし、**未来を知った状態**で
+#   予算タブのBT降順・BT40フィルタが動いていた(先読みバイアス)。
+#   True にすると窓の長さに関係なく full_trade_log を作り、各取引のBTを
+#   「その時点で決済済みの取引だけ」から算出する(_asof_bt_score)。
+_ASOF_BT_FORCE: bool = False
 # 過去検証で損益タブを「基準日〜基準日+N日」だけ集計する(現在まで走らせず軽量化)。
 # _REPORT_END を date に設定すると until をそこにし、全期間trade_logも同日でトリムする。
 _REPORT_START = None   # 基準日 (date)。全期間バックテストの下限側(warmup)の起点に使う。
@@ -7493,7 +7501,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
             # backtest_one のスコアは365日のまま（＝ライブと同一）。ここで別途、
             # 指定窓(_BT_WINDOW_DAYS)の全期間バックテストを回し full_trade_log を付与する。
             # _set_sig_params(cfg["mode"]) はこの時点で有効なので con/agg も正しく反映。
-            if (_BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365) or _REPORT_END is not None:
+            if ((_BT_WINDOW_DAYS and _BT_WINDOW_DAYS > 365)
+                    or _REPORT_END is not None or _ASOF_BT_FORCE):
                 import pandas as _pd_fl
                 from backtest_limit_entry import (
                     fetch as _fw_fetch, run_limit_backtest as _fw_rbt)
