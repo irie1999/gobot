@@ -54,6 +54,16 @@ REM     (BT40+ list / BT40+ x entry-day) AND the 400man x BT-descending budget f
 REM     (max(_BUD_MIN_BT=30, _BT_TAB_MIN)=40). One env drives them all. Set to 50 to revert.
 REM     (Note: after the #9 revert the old LSS_BUDGET_FLOOR_BT env is no longer read; use this.)
 set "LSS_BT_TAB_MIN=40"
+REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
+REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT
+REM     (measured 2026-08-07: frozen 866 / today 12,849). BT is built from the last
+REM     365 days and the PnL tab shows the last 180, so a stock that made money since
+REM     February got a high BT and the budget tab's BT-descending order picked it
+REM     knowing the outcome (lookahead). See CLAUDE.md.
+REM     Today's SIGNAL list is unaffected - only how past results are scored.
+REM     Costs one extra backtest per pair (window+400d), so the PnL tab is ~2x slower.
+REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
+if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*

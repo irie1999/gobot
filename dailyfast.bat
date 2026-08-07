@@ -30,6 +30,14 @@ REM --- delay1 ON: matches watch.bat --stop-delay-bars 1 (see CLAUDE.md 18.9) --
 set "LSS_STOP_DELAY_BARS=1"
 REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor ---
 set "LSS_BT_TAB_MIN=40"
+REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
+REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT.
+REM     BT is built from the last 365 days, and the PnL tab shows the last 180 days,
+REM     so a stock that made money since February got a high BT and the budget tab's
+REM     BT-descending order picked it knowing the outcome (lookahead). See CLAUDE.md.
+REM     Today's SIGNAL list is unaffected - only how past results are scored.
+REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
+if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
