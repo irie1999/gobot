@@ -10,6 +10,44 @@ from __future__ import annotations
 import pandas as pd
 
 
+# ── 損切り約定の現実化 (2026-08-07) ─────────────────────────────────────────
+# ⛔ これまで損切りは **stop価格ちょうど** で約定させていた = 楽観。
+#    逆指値(stop)注文はトリガーで**成行**になるので、実際はそのバーの始値近辺で約定する。
+#    特に stop_delay_bars>0(delay1/2) では、無保護窓のあいだに価格が損切りを大きく
+#    通過し、武装した瞬間の成行で遠くの値を掴む。
+#
+#    実測 (.\fills 3営業日25件, CLAUDE.md 18.17): 決済滑りの99%が6件に集中し、
+#    **6件すべてが損切り武装バーでの約定**だった。
+#      4911 資生堂 08/07  損切り3,410 → 実約定 3,536.5 (3.7%超過)
+#      5632 三菱製鋼 08/07 損切り2,315 → 実約定 2,360
+#      5632 三菱製鋼 08/06 14:59約定→15:00武装 → 実約定 2,335 (テストは2,280と判定)
+#      他3件も同様。残り19件の決済滑りは合計 -290円(-15円/件)でほぼ完璧に一致。
+#
+#    正しいモデル: **fill = max(stop, そのバーの始値)** (ロングは min)。
+#      ・板に置きっぱなしの逆指値 → 通常 opens[j] < stop なので stop 約定(従来と同じ)
+#      ・バーが損切りを飛び越えて開く / 武装した瞬間に既に超えている → 始値約定
+#    つまり従来の挙動を悪化させるのではなく、**取りこぼしていたケースだけを拾う**。
+#
+#    LSS_OPTIMISTIC_STOP_FILL=1 で旧挙動(stopちょうど)に戻せる(A/B用)。
+_OPTIMISTIC_STOP_FILL: bool = str(
+    __import__("os").environ.get("LSS_OPTIMISTIC_STOP_FILL", "") or "").strip() \
+    not in ("", "0", "false", "no", "off")
+
+
+def _stop_fill_short(stop_p: float, bar_open: float) -> float:
+    """空売りの損切り(買い戻し)約定値。始値が損切りを超えていれば始値=不利。"""
+    if _OPTIMISTIC_STOP_FILL:
+        return float(stop_p)
+    return float(max(float(stop_p), float(bar_open)))
+
+
+def _stop_fill_long(stop_p: float, bar_open: float) -> float:
+    """ロングの損切り(売り)約定値。始値が損切りを下回っていれば始値=不利。"""
+    if _OPTIMISTIC_STOP_FILL:
+        return float(stop_p)
+    return float(min(float(stop_p), float(bar_open)))
+
+
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
                   no_target=False, no_stop=False, include_entry_bar=False,
@@ -57,6 +95,7 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     highs = day_bars["high"].to_numpy(dtype=float)
     lows = day_bars["low"].to_numpy(dtype=float)
     closes = day_bars["close"].to_numpy(dtype=float)
+    _opens = day_bars["open"].to_numpy(dtype=float)
     times = day_bars.index
     n = len(highs)
 
@@ -108,7 +147,10 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
         if not no_stop and j >= _stop_start:  # no_stop=True or 遅延中(j<_stop_start)は損切りを見ない
             stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
             if stop_hit:              # 上抜け=損切(同時タッチも優先)
-                return (float(closes[j]) if soc else stop_p), "stop", ent_ts, times[j]
+                # 逆指値はトリガーで成行 → そのバーの始値が損切りを超えていれば始値約定。
+                # 武装バー(delay明け)で価格が既に走っているケースを拾う(上の説明参照)。
+                return ((float(closes[j]) if soc else _stop_fill_short(stop_p, _opens[j])),
+                        "stop", ent_ts, times[j])
         if not no_target:             # no_target=True なら利確を見ない(引けまで持つ)
             tgt_hit = (closes[j] <= target_p) if toc else (lows[j] <= target_p)
             if tgt_hit:               # 下抜け=利確
@@ -264,6 +306,7 @@ def long_exit_5m(day_bars, entry_p, stop_p, target_p,
     highs = day_bars["high"].to_numpy(dtype=float)
     lows = day_bars["low"].to_numpy(dtype=float)
     closes = day_bars["close"].to_numpy(dtype=float)
+    _lopens = day_bars["open"].to_numpy(dtype=float)
     times = day_bars.index
     n = len(highs)
     # 約定バー(上昇してトリガー到達)
@@ -283,7 +326,7 @@ def long_exit_5m(day_bars, entry_p, stop_p, target_p,
     for j in range(_start, n):
         if not no_stop and j >= _stop_start:
             if lows[j] <= stop_p:          # 下抜け=損切(同バー優先)
-                return stop_p, "stop", ent_ts, times[j]
+                return (_stop_fill_long(stop_p, _lopens[j]), "stop", ent_ts, times[j])
         if not no_target:
             if highs[j] >= target_p:       # 上抜け=利確
                 return target_p, "target", ent_ts, times[j]

@@ -1427,7 +1427,13 @@ if not _args.date:
 #        600円/件を全トレードから引いていた。lss の負けは -62円/件、LDT は -350円/件と
 #        どちらも手数料1件ぶんより小さく、払っていないコストで赤字にしていた。
 #        v13 のキャッシュは手数料込みなので必ず版を分ける。
-_BT_LOGIC_VER = "v15"
+#   v16: 損切り約定を現実化(2026-08-07)。従来は stop価格ちょうどで約定させていたが、
+#        逆指値はトリガーで成行になるので実際はそのバーの始値近辺で約定する。
+#        fill = max(stop, opens[j]) (ロングは min) に変更。実測(.\fills 3営業日25件)で
+#        決済滑りの99%がこのケースで、資生堂08/07は実約定3,536.5に対し新モデル3,536.0と
+#        40円差で一致した。v15 のキャッシュは楽観なので必ず版を分ける。
+#        LSS_OPTIMISTIC_STOP_FILL=1 で旧挙動に戻せる(その場合も版トークンで別キャッシュ)。
+_BT_LOGIC_VER = "v16"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
@@ -1439,6 +1445,11 @@ if _LSS_STOP_DELAY > 0:
 if str(os.environ.get("LSS_NO_UNIVERSE_PRICE_FILTER", "") or "").strip() \
         not in ("", "0", "false", "no", "off"):
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}nupf"
+# 損切り約定を楽観(stopちょうど)に戻した結果は別キャッシュにする。
+if str(os.environ.get("LSS_OPTIMISTIC_STOP_FILL", "") or "").strip() \
+        not in ("", "0", "false", "no", "off"):
+    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}optstop"
+    print("[stop約定] 楽観モデル(stopちょうど)で実行 (LSS_OPTIMISTIC_STOP_FILL)", flush=True)
 _FEE_NOW = float(getattr(_bte, "FEE_PCT_ONE_WAY", 0.0) or 0.0)
 if abs(_FEE_NOW) > 1e-12:
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}fee{int(round(_FEE_NOW * 100000))}"
