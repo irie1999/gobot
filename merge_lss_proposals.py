@@ -85,7 +85,10 @@ def main():
     ap.add_argument("--oos-all", action="store_true",
                     help="最新基準月の翌月1日を全銘柄のOOS開始日として設定。"
                          "例: 9月+10月マージ時 --oos-all → 全銘柄のOOS開始=2024-11-01。"
-                         "省略時(既定)は最新基準月のみで初出の銘柄だけに設定。")
+                         "純粋OOS検証用。--oos-per-symbol より厳しい(最新月以降しか残らない)")
+    ap.add_argument("--legacy-latest-only", action="store_true",
+                    help="旧挙動: 最新基準月で初出の銘柄だけにOOS開始日を設定する。"
+                         "**過去の成績評価に先読みが入る**ので比較目的以外では使わないこと")
     ap.add_argument("--out", type=str, default="lss_proposal_merged.py", help="出力ファイル名")
     args = ap.parse_args()
 
@@ -156,9 +159,23 @@ def main():
     # BTスコア順は run 側で付くので、ここでは code,strat でソートして安定出力にするだけ
     merged = sorted(merged_keys, key=lambda k: (k[0], k[1]))
 
-    # START_DATES: OOS開始日の設定。
-    # --oos-all: 全銘柄に最新基準月の翌月1日を設定(純粋OOS検証向け)。
-    # 省略時(既定): 最新基準月のみで初出の銘柄だけに設定(累積追加時の遡及防止)。
+    # ── START_DATES: 各ペアを「いつから集計してよいか」──────────────────────
+    # ⛔ なぜ既定を変えたか (2026-08-07):
+    #   旧既定は『最新基準月で初出の銘柄だけ』にOOS開始日を付けていた。つまり
+    #   2026-06 の選定で初めて入った銘柄が、2026-02 の取引の評価に使われていた。
+    #   2月時点ではその銘柄はWATCHLISTに存在しない。「6月時点で良かったから選ばれた」
+    #   = 2〜6月の成績が良かった、という**未来情報**で過去を評価していたことになる。
+    #   これは as-of BT (CLAUDE.md 18.11) と完全に同じ構造のリーク。
+    #
+    #   新既定 (per-symbol): 各ペアに『初出の基準月の翌月1日』を設定する。
+    #   2025-12 の提案で初めて入ったペアは 2026-01-01 以降しか集計しない。
+    #   これで「その時点で実際に持っていたWATCHLIST」だけで過去を評価できる。
+    #
+    #   --oos-all           … 全ペアに最新基準月の翌月1日(最も厳しい・純粋OOS)
+    #   --legacy-latest-only … 旧挙動(先読みあり。比較用のみ)
+    #
+    #   ※ START_DATES は**過去の集計フィルタ**であって、今日のシグナル生成には
+    #     影響しない(発注リストは1銘柄も変わらない)。
     _latest_yyyymm = max((_full_base_month(f) for f in args.files if _full_base_month(f)),
                          default=None)
     start_dates: dict = {}
@@ -171,14 +188,28 @@ def main():
                 start_dates[(_cn, k[1])] = _oos_d
             print(f"[START_DATES --oos-all] 全{len(start_dates)}件 "
                   f"→ OOS開始日 {_oos_d} 以降のみ集計 (最新基準月={_latest_yyyymm})")
-        else:
+        elif getattr(args, "legacy_latest_only", False):
             for k in merged:
                 if src_yyyymm.get(k) == _latest_yyyymm:  # 最新基準月が初出 = 新規銘柄
                     _cn = str(row_map[k][0]).upper().removesuffix(".T").split(".")[0]
                     start_dates[(_cn, k[1])] = _oos_d
-            if start_dates:
-                print(f"[START_DATES] 最新基準月({_latest_yyyymm})のみ新規 {len(start_dates)}件 "
-                      f"→ OOS開始日 {_oos_d} 以降のみ集計")
+            print(f"[START_DATES --legacy-latest-only] 最新基準月({_latest_yyyymm})のみ新規 "
+                  f"{len(start_dates)}件 → ⛔ 他のペアは過去に遡って集計される(先読みあり)")
+        else:
+            # 既定: ペアごとに「初出の基準月の翌月1日」
+            _by_month: dict = {}
+            for k in merged:
+                _ym = src_yyyymm.get(k)
+                if not _ym:
+                    continue
+                _cn = str(row_map[k][0]).upper().removesuffix(".T").split(".")[0]
+                _sd = _oos_start_date(_ym)
+                start_dates[(_cn, k[1])] = _sd
+                _by_month[_sd] = _by_month.get(_sd, 0) + 1
+            print(f"[START_DATES per-symbol] 全{len(start_dates)}件に"
+                  f"『初出基準月の翌月1日』を設定 (先読み防止)")
+            for _sd in sorted(_by_month):
+                print(f"    {_sd} 以降のみ集計: {_by_month[_sd]:>5}件")
     n_overlap = sum(1 for k in merged_keys if src_count.get(k, 0) >= 2)
     _crit = (f"min-votes={max(1, min(args.min_votes, n_files))}/{n_files}"
              if (args.min_votes and args.min_votes > 0) else f"mode={args.mode}")
