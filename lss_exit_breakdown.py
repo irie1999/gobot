@@ -45,6 +45,9 @@ ap.add_argument("--split", type=str, default="0.5",
 ap.add_argument("--exclude-strat", type=str, default="転換",
                 help="除外する戦略。既定『転換』= lss ではない(CLAUDE.md 18.5.3)")
 ap.add_argument("--by-month", action="store_true", help="月別の理由構成も出す")
+ap.add_argument("--fee-rate", type=float, default=0.001,
+                help="バックテストが引いている片道手数料率(既定0.001=往復0.2%%)。"
+                     "backtest_limit_entry.FEE_PCT_ONE_WAY と揃えること")
 args = ap.parse_args()
 
 p = Path(args.csv)
@@ -112,6 +115,39 @@ def _breakdown(d: pd.DataFrame, title: str) -> None:
 
 
 _breakdown(df, "全期間")
+
+# ── 手数料の寄与 ──────────────────────────────────────────────────────
+# ⛔ なぜ見るべきか (2026-08-07):
+#   バックテストは FEE_PCT_ONE_WAY=0.001(往復0.2%)を全トレードから引いている。
+#   株価3,000円 x 100株なら (3000+3000) x 100 x 0.001 = **600円/件**。
+#   ところが lss の実測は -62円/件、LDT は -350円/件。**どちらも手数料1件ぶんより
+#   小さい**。つまり手数料を抜けば粗利はプラスの可能性がある。
+#   そして verify_fills.py の --fee 既定は 0(「信用大口優遇プランは手数料無料」)。
+#   実口座が本当に無料なら、バックテストは払っていないコストを引いていることになる。
+#   pnl = 粗利 - fee で fee=(entry_p+exit_p)*qty*rate なので、CSVから正確に復元できる
+#   (再実行不要)。
+if {"entry_p", "exit_p", "qty"} <= set(df.columns):
+    _ep = pd.to_numeric(df["entry_p"], errors="coerce").fillna(0.0)
+    _xp = pd.to_numeric(df["exit_p"], errors="coerce").fillna(0.0)
+    _q = pd.to_numeric(df["qty"], errors="coerce").fillna(100.0)
+    _fee = (_ep + _xp) * _q * args.fee_rate
+    _gross = df["pnl"] + _fee
+    print(f"\n{'=' * 88}")
+    print(f"■ 手数料の寄与 (片道 {args.fee_rate:.3%} = 往復 {args.fee_rate * 2:.2%} と仮定)")
+    print(f"{'=' * 88}")
+    print(f"  {'':<20}{'合計':>16}{'1件あたり':>13}")
+    print("  " + "-" * 50)
+    print(f"  {'ネット(現在の表示)':<20}{df['pnl'].sum():>+16,.0f}{df['pnl'].mean():>+13,.0f}")
+    print(f"  {'差し引かれた手数料':<20}{-_fee.sum():>+16,.0f}{-_fee.mean():>+13,.0f}")
+    print(f"  {'粗利(手数料を戻す)':<20}{_gross.sum():>+16,.0f}{_gross.mean():>+13,.0f}")
+    print()
+    if _gross.sum() > 0 >= df["pnl"].sum():
+        print("  ★ **粗利はプラス、ネットはマイナス。負けているのは手数料のぶんだけ。**")
+        print("     実口座の手数料が本当に0(信用大口優遇)なら、この戦略の実力は粗利側。")
+        print("     ただし『滑り』は別途かかる。実測(.\\fills の slip_daily_log.csv)と")
+        print("     突き合わせて、手数料ゼロ化の利得が滑りを上回るか確認すること。")
+    print(f"  ※ backtest_limit_entry.FEE_PCT_ONE_WAY = 0.001 が現在の設定。")
+    print(f"     実口座が無料なら 0 に、別プランなら実レートに合わせる必要がある。")
 
 # ── 前半 / 後半 ────────────────────────────────────────────────────
 try:
