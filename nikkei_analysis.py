@@ -3254,6 +3254,13 @@ _pnl_bt_cache: dict = {}         # cfg_key -> items_per_cfg (バックテスト�
 _preoos_tab5_score_cache: dict = {}  # (sym, strat, cutoff_days) -> score
 _ASOF_BT_CACHE: dict = {}  # (sym, strat, mode, sig_date, window) -> シグナル日時点BTスコア
 
+# 各取引のBTスコアが「どこから来たか」の内訳(診断用・挙動には影響しない)。
+#   frozen   … signal_score_cache_lss.json の日付つき凍結スコア = シグナル発生時の値。正しい
+#   asof     … full_trade_log から当時の決済実績だけで再計算 = 先読みなし。正しい
+#   today    … 今日のスコア(rec_score2)にフォールバック = **先読みバイアス**
+# today が多いほど「過去の取引を未来のスコアで並べ替えていた」ことになる。
+_BT_SRC_COUNT: dict = {"frozen": 0, "asof": 0, "today": 0}
+
 
 def _asof_bt_score(full_log, mod, asof_date, periods=(30, 90, 180, 365)):
     """full_trade_log から asof_date 時点のBTスコアを計算(先読みなし)。
@@ -7700,8 +7707,12 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     # 当時の決済実績が無い(履歴不足)→ 0=未実証 として扱い先読みを避ける
                     if _sig_sc is None:
                         _sig_sc = 0
+                    _BT_SRC_COUNT["asof"] += 1
+                elif _sig_sc is not None:
+                    _BT_SRC_COUNT["frozen"] += 1
                 if _sig_sc is None:
                     _sig_sc = rec_score2
+                    _BT_SRC_COUNT["today"] += 1   # ← ここに落ちた取引だけが先読みバイアス
                 # signal_score からランクを決定
                 if _sig_sc >= 80: _sig_rank = "★★★"
                 elif _sig_sc >= 60: _sig_rank = "★★"
@@ -7809,6 +7820,17 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
     if _short is not None:
         _short.STRATEGY_PARAMS.update(_CON_SHORT)
         _sbrk.STRATEGY_PARAMS.update(_CON_SBRK)
+
+    # ── BTスコアの出所内訳(診断) ────────────────────────────────────────
+    # today= が多いほど、過去の取引を『今日のスコア』で並べ替えていた = 先読みバイアス。
+    # LSS_ASOF_BT=1 なら today= はほぼ0になるはず。
+    _bs_tot = sum(_BT_SRC_COUNT.values())
+    if _bs_tot:
+        _bs_today = _BT_SRC_COUNT["today"]
+        print(f"  [BT出所] 凍結={_BT_SRC_COUNT['frozen']:,}件 / "
+              f"as-of={_BT_SRC_COUNT['asof']:,}件 / "
+              f"今日のスコア={_bs_today:,}件 ({_bs_today / _bs_tot * 100:.1f}%)"
+              + ("  ← 先読みバイアス" if _bs_today else ""), flush=True)
 
     # ── cfg_filter: 対象configのみに絞り込み ──
     if cfg_filter:
