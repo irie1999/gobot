@@ -8,41 +8,63 @@ BTスコアには識別力が無いことが確定した(CLAUDE.md 18.12)。先�
 
 このツールがやること
 --------------------
-compare_lss_rules.py --audit が出す全トレードCSVを読み、各トレードに
-**発注時点で入手可能な属性だけ**を付けて層別する。
+全トレードCSVを読み、各トレードに **発注時点で入手可能な属性だけ** を付けて層別する。
 
   ⛔ MAE/MFE/損益のような『結果を見ないと分からない値』は絶対に使わない。
      それで層別すると必ず綺麗な表が出るが、実運用では再現できない(今日の先読みと同じ)。
 
-そして **必ず TRAIN と TEST を並べて出す**。TRAIN だけ良い仕切りは過剰適合なので、
-片方だけの数字を見て判断できないようにしてある。
+入力CSV (自動検出。優先順)
+  1. lss_trades.csv      … .\daily / .\dailyfast が毎回出す。先読み除去済み
+                            (as-of BT + per-symbol START_DATES) で **約定時刻つき**
+  2. lss_audit_*.csv     … compare_lss_rules --audit。3つの約定モデル(楽観/現実/保守)つき
 
 属性の『使えるタイミング』
 --------------------------
   前夜  … 発注を出す時点で分かる。そのまま発注ルールにできる
-  寄り  … 当日09:00の寄り値が要る。cancel_gap_orders で寄り後に取消すなら使える
-どちらかを表に出す。「寄り」の仕切りを採用するなら取消の実装が要る。
+  寄り  … 当日09:00の寄り値が要る。寄り後に取消す運用(cancel_gap_orders)なら使える
+  取消  … 約定時刻。発注前には分からないが、指定時刻に未約定注文を取消せば
+          『その時刻以降の約定を作らない』ことはできる
+          (lss_exit_watcher --entry-cutoff。CLAUDE.md 18.9 の13:00カットオフの再検証)
+
+過剰適合と多重検定への対策 (ここが本体)
+----------------------------------------
+1. TRAIN の分位点で境界を決め、**その境界のまま TEST に当てて**両方を並べる。
+   TEST 側で切り直すと『TESTを見て決めた』ことになり検証にならない。
+2. 判定は「平均がプラスか」ではなく Welch の t で **「他の帯と違うか」**。
+   全体がプラスなら全部の帯が平均プラスになり、選別の根拠にならない。
+3. ★ 帰無較正: 損益ラベルをシャッフルして300回判定し直し、
+   **『偶然でも出る候補数』を実測して並べて表示する**。
+   これを入れる前は、完全な乱数データでも「両方プラス」が20個以上出た。
+   属性13本 x 5帯 = 65回の検定をしているので当然で、BTで踏んだのと同じ罠。
 
 使い方
 ------
-  # 1) 監査CSVを作る (compare_lss_rules 側。ルール名は実運用に合わせる)
-  python compare_lss_rules.py --days 240 --min-price 1000 --max-price 6000 \
-      --bt-min 0 --audit delay1
-  # → lss_audit_delay1_<date>.csv
+  # レポートを1回流せば lss_trades.csv ができるので、それだけで動く
+  .\dailyfast --no-serve
+  python find_lss_edge.py
 
-  # 2) エッジ探索
-  python find_lss_edge.py                       # 最新の lss_audit_*.csv を自動検出
-  python find_lss_edge.py --audit lss_audit_delay1_2026-08-07.csv
   python find_lss_edge.py --split 2026-04-01    # TRAIN/TEST の境目を明示
+  python find_lss_edge.py --split 0.35          # 切り方を変えて再現するか見る
   python find_lss_edge.py --bins 4 --min-n 40   # 分位数と最小サンプル
   python find_lss_edge.py --no-market           # 日経の取得を省く(オフライン時)
+  python find_lss_edge.py --out attrs.csv       # 属性付き全トレードを書き出す
 
-読み方
-------
-  ・TRAIN と TEST で **符号が揃っている** 帯だけが候補。
-  ・片方だけ大きい/符号が反転する属性はノイズ。採用しない。
-  ・最後の【候補】に、両方で生き残った仕切りだけが出る。ここが空なら
-    「発注時点で分かる属性では選別できない」= 全部取るのが正解、という結論。
+  # 選定バイアスゼロのデータで見たいとき (make_lss_universe.py で作る)
+  python compare_lss_rules.py --symbols-file lss_universe_random400.py \
+      --days 240 --min-price 1000 --max-price 6000 --bt-min 0 --audit delay1
+  python find_lss_edge.py --audit lss_audit_delay1_<date>.csv
+
+読み方 (この順に見る)
+---------------------
+  1. 【候補】の冒頭の帰無較正。実際の候補数がシャッフルの95パーセンタイルを
+     超えていなければ、**下の表は全部ノイズ**。ここで終わり。
+  2. 超えていたら、候補表の TRAIN t と TEST t が同じ向きで TEST |t|>=2 のものを見る。
+  3. --split を3通り変えて、同じ帯が残るか確認する。
+  4. 残ったものだけ sim_portfolio_lss.py(予算・上限キャンセル込み)で検証する。
+     単体の期待値がプラスでも、予算が有限だと機会費用でマイナスになる(CLAUDE.md 18.10)。
+
+  候補が空なら「発注時点で分かる属性では選別できない」= 全部取って予算で
+  制限するのが正しい、という結論。それはそれで有用な答え。
 """
 from __future__ import annotations
 
@@ -71,26 +93,60 @@ args = ap.parse_args()
 # ── 監査CSVの読込 ──────────────────────────────────────────────────────
 _path = Path(args.audit) if args.audit else None
 if _path is None:
-    cands = sorted(Path(".").glob("lss_audit_*.csv"))
-    if not cands:
-        sys.exit("[error] lss_audit_*.csv がありません。先に compare_lss_rules を "
-                 "--audit 付きで実行してください:\n"
-                 "  python compare_lss_rules.py --days 240 --min-price 1000 "
-                 "--max-price 6000 --bt-min 0 --audit delay1")
-    _path = cands[-1]
-    print(f"[監査CSV] 自動検出: {_path.name}")
+    # 優先順位: lss_trades.csv(レポートが毎回出す。先読み除去済み・約定時刻つき)
+    #        → lss_audit_*.csv(compare_lss_rules --audit。3つの約定モデルつき)
+    if Path("lss_trades.csv").exists():
+        _path = Path("lss_trades.csv")
+    else:
+        cands = sorted(Path(".").glob("lss_audit_*.csv"))
+        if not cands:
+            sys.exit("[error] 入力CSVがありません。どちらかを用意してください:\n"
+                     "  A) .\\daily か .\\dailyfast を1回流す → lss_trades.csv\n"
+                     "  B) python compare_lss_rules.py --days 240 --min-price 1000 "
+                     "--max-price 6000 --bt-min 0 --audit delay1 → lss_audit_*.csv")
+        _path = cands[-1]
+    print(f"[入力] 自動検出: {_path.name}")
 if not _path.exists():
     sys.exit(f"[error] {_path} がありません")
 
 df_t = pd.read_csv(_path, encoding="utf-8-sig")
-if args.pnl_col not in df_t.columns:
-    sys.exit(f"[error] 損益列 {args.pnl_col} がありません。候補: "
+
+
+def _pick(*names):
+    for n in names:
+        if n in df_t.columns:
+            return n
+    return None
+
+
+# lss_trades.csv と lss_audit_*.csv で列名が違うので吸収する
+_c_date = _pick("date", "entry_date")
+_c_sym = _pick("sym", "symbol")
+_c_strat = _pick("strat", "strategy")
+if not (_c_date and _c_sym):
+    sys.exit(f"[error] 日付/銘柄の列が見つかりません。列: {list(df_t.columns)[:20]}")
+_c_pnl = args.pnl_col if args.pnl_col in df_t.columns else _pick("pnl_現実", "pnl")
+if _c_pnl is None:
+    sys.exit(f"[error] 損益列がありません。候補: "
              f"{[c for c in df_t.columns if str(c).startswith('pnl')]}")
+if _c_pnl != args.pnl_col:
+    print(f"[入力] 損益列 {args.pnl_col} が無いので {_c_pnl} を使います")
+
+df_t = df_t.rename(columns={_c_date: "date", _c_sym: "sym"}
+                   | ({_c_strat: "strat"} if _c_strat else {}))
+if "strat" not in df_t.columns:
+    df_t["strat"] = ""
 df_t["date"] = pd.to_datetime(df_t["date"], errors="coerce")
 df_t = df_t.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-df_t["pnl"] = pd.to_numeric(df_t[args.pnl_col], errors="coerce").fillna(0.0)
-print(f"[監査CSV] {len(df_t):,}トレード / {df_t['date'].min().date()} 〜 "
-      f"{df_t['date'].max().date()} / 損益列={args.pnl_col} 合計 {df_t['pnl'].sum():+,.0f}円")
+df_t["pnl"] = pd.to_numeric(df_t[_c_pnl], errors="coerce").fillna(0.0)
+# 未決済(発注中/保有中)は損益が確定していないので除外
+if "reason" in df_t.columns:
+    _n0 = len(df_t)
+    df_t = df_t[~df_t["reason"].astype(str).isin(["発注中", "保有中"])].reset_index(drop=True)
+    if len(df_t) != _n0:
+        print(f"[入力] 未決済 {_n0 - len(df_t)}件を除外")
+print(f"[入力] {len(df_t):,}トレード / {df_t['date'].min().date()} 〜 "
+      f"{df_t['date'].max().date()} / 損益列={_c_pnl} 合計 {df_t['pnl'].sum():+,.0f}円")
 
 # ── 日足データを取得(属性計算用) ──────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -214,6 +270,25 @@ if _N is not None:
     df["日経_前日リターン%"] = _dts.map(nmap_r)
     df["日経_寄りギャップ%"] = _dts.map(nmap_g)
 
+# 約定時刻 (lss_trades.csv のみ)。09:00からの経過分。
+#   区分「取消」= 発注前には分からないが、指定時刻に未約定の注文を取消せば
+#   『その時刻以降の約定を作らない』ことはできる(lss_exit_watcher --entry-cutoff)。
+#   CLAUDE.md 18.9 の 13:00 カットオフを、先読みなしのデータで測り直すための軸。
+if "entry_time" in df.columns:
+    def _mins(s):
+        try:
+            hh, mm = str(s).split(":")[:2]
+            return int(hh) * 60 + int(mm) - 9 * 60
+        except Exception:
+            return np.nan
+    df["約定時刻_分"] = df["entry_time"].map(_mins)
+    _ok = df["約定時刻_分"].notna().sum()
+    print(f"[属性] 約定時刻を {_ok:,}件で取得 (09:00からの経過分)")
+
+# 戦略 (カテゴリ)。DON が最弱という既存の見立てを先読みなしで検証する。
+if "strat" in df.columns and df["strat"].astype(str).str.len().max() > 0:
+    df["戦略"] = df["strat"].astype(str)
+
 if _miss:
     print(f"[!] 属性を計算できなかったトレード {_miss}件 (日足が無い/日付が合わない)。集計から除外")
 
@@ -238,10 +313,12 @@ _TIMING = {
     "株価": "前夜", "ATR%": "前夜", "前日リターン%": "前夜", "5日リターン%": "前夜",
     "20日リターン%": "前夜", "出来高比": "前夜", "売買代金_億": "前夜",
     "20日レンジ位置": "前夜", "連続上昇日数": "前夜", "曜日": "前夜",
-    "日経_前日リターン%": "前夜",
+    "日経_前日リターン%": "前夜", "戦略": "前夜",
     "寄りギャップ%": "寄り", "日経_寄りギャップ%": "寄り",
+    "約定時刻_分": "取消",
 }
 _COLS = [c for c in _TIMING if c in df.columns]
+_CATEGORICAL = {"曜日", "戦略"}
 
 _DOW = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
 
@@ -272,10 +349,14 @@ _NULL_REPS = 300        # 帰無分布の較正回数
 _cands: list[dict] = []
 _bin_masks: list[tuple] = []   # (col, lbl, mask_tr, mask_te) — 帰無較正で使い回す
 for col in _COLS:
-    if col == "曜日":
+    if col in _CATEGORICAL:
         edges = None
-        keys = sorted(set(tr[col].dropna().astype(int)) | set(te[col].dropna().astype(int)))
-        bands = [(k, _DOW.get(k, str(k))) for k in keys]
+        if col == "曜日":
+            keys = sorted(set(tr[col].dropna().astype(int)) | set(te[col].dropna().astype(int)))
+            bands = [(k, _DOW.get(k, str(k))) for k in keys]
+        else:
+            keys = sorted(set(tr[col].dropna().astype(str)) | set(te[col].dropna().astype(str)))
+            bands = [(k, str(k)) for k in keys]
     else:
         v = tr[col].replace([np.inf, -np.inf], np.nan).dropna()
         if len(v) < args.bins * 10:
@@ -294,7 +375,7 @@ for col in _COLS:
           f"{'TEST件':>8}{'勝率':>7}{'合計':>12}{'1件':>9}{'t':>6}  判定")
     print("  " + "-" * 100)
     for bi, lbl in bands:
-        if col == "曜日":
+        if col in _CATEGORICAL:
             m_tr, m_te = tr[col] == bi, te[col] == bi
         else:
             m_tr = (tr[col] >= edges[bi]) & (tr[col] < edges[bi + 1])
