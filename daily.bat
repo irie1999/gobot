@@ -64,6 +64,11 @@ REM     Today's SIGNAL list is unaffected - only how past results are scored.
 REM     Costs one extra backtest per pair (window+400d), so the PnL tab is ~2x slower.
 REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
+REM --- dump every settled trade so .\fills can reconcile real fills against the test.
+REM     Cheap (one CSV write). Without it .\fills skips its section 3 and the daily
+REM     divergence (real vs test) never accumulates - that number decides whether the
+REM     strategy is profitable after slippage. See CLAUDE.md 18.12 / A1.
+if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*

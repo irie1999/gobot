@@ -38,6 +38,9 @@ REM     BT-descending order picked it knowing the outcome (lookahead). See CLAUD
 REM     Today's SIGNAL list is unaffected - only how past results are scored.
 REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
+REM --- dump every settled trade so .\fills can reconcile real fills against the test.
+REM     Without it .\fills skips its section 3 and the daily divergence never accumulates.
+if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*

@@ -60,6 +60,11 @@ ap.add_argument("--no-compare", action="store_true",
 ap.add_argument("--save", action="store_true",
                 help="CSV2種を日付つきファイル名で自動保存 "
                      "(fills_<日付>.csv / orders_<日付>.csv)。--csv/--orders-csv より優先度低")
+ap.add_argument("--slip-log", type=str, default="slip_daily_log.csv",
+                help="実約定とテストの乖離を1日1行で貯める累積ログ(既定 slip_daily_log.csv)。"
+                     "同じ日を再実行してもその行が上書きされるだけで重複しない")
+ap.add_argument("--no-slip-log", action="store_true",
+                help="累積ログを書かない(表示のみ)")
 args = ap.parse_args()
 
 FEE = args.fee
@@ -394,8 +399,10 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     if not bt:
         print(f"=== バックテスト比較: スキップ ===")
         print(f"  {args.trades_csv} に {_DATE} の取引が見つかりません。")
-        print(f"  レポート生成時に環境変数 LSS_TRADES_CSV=lss_trades.csv を付けると出力されます:")
-        print(f"    $env:LSS_TRADES_CSV=\"lss_trades.csv\"; .\\dailyfast")
+        print(f"  daily.bat / dailyfast.bat は LSS_TRADES_CSV=lss_trades.csv を既定で設定します。")
+        print(f"  出ていない場合は git pull してから .\\daily を1回流してください")
+        print(f"  (対象日の取引はレポート生成時点までしか入りません。当日ぶんが要るなら"
+              f"引け後に .\\daily → .\\fills の順で)。")
         return
 
     # 同一銘柄が複数戦略で出た場合はBT最高の1件に統合(実運用=1銘柄1ポジション)
@@ -500,6 +507,125 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
         print(f"[約定率] 算出不可: 対象日 {_DATE} に『売り』注文が1件もありません。")
         print(f"         エントリーの逆指値売りは前営業日の夜に発注されている可能性があります。")
         print(f"         前日で確認: .\\fills --date <前営業日>  /  日付を見ない: .\\fills --no-date")
+
+    if not args.no_slip_log:
+        _append_slip_log(both, real_done, by_sym, ordered, _r_tot, _bt_tot)
+
+
+# ── 乖離の日次累積ログ ────────────────────────────────────────────────────
+# なぜ必要か: 1日の突合だけでは「たまたま悪い2件があった」のか「毎日そうなのか」が
+# 分からない。lss の月の期待値は +37,647円(CLAUDE.md 18.12)しかないので、1日
+# -2,900円 の乖離が常態なら月 -58,000円 になり期待値が消える。10営業日ぶん貯めれば
+# それが確定する。tenkan_daily_log.csv と同じ思想(1日1行・同じ日は上書き)。
+_SLIP_COLS = ["date", "突合", "実損益", "テスト損益", "差",
+              "エントリー滑り", "決済滑り", "平均エントリー滑り%",
+              "実件数", "実損益_全", "テスト件数", "テスト損益_全", "差_全",
+              "発注件数", "約定率%"]
+
+
+def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
+    """当日の乖離を1行にして累積ログへ upsert し、2日以上あれば累計を表示する。
+
+    差の内訳(空売りなので符号に注意):
+      エントリー滑り = (実売値 - テスト売値) x 株数   高く売れていればプラス
+      決済滑り       = (テスト買戻値 - 実買戻値) x 株数 安く買い戻せていればプラス
+    どちらが効いているかで打ち手が変わる(エントリー=発注価格、決済=損切りの出し方)。
+    """
+    _e_slip = _x_slip = 0.0
+    _r_both = _t_both = 0.0
+    _pcts: list[float] = []
+    for s in both:
+        r, t = real_done[s], by_sym[s]
+        q = r["qty"] or 100
+        if t["entry_p"]:
+            _e_slip += (r["entry(売)"] - t["entry_p"]) * q
+            _pcts.append((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100)
+        if t["exit_p"]:
+            _x_slip += (t["exit_p"] - r["exit(買戻)"]) * q
+        _r_both += r["pnl"]
+        _t_both += t["pnl"]
+
+    _ymd = f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}" if len(_DATE_DIG) == 8 else str(_DATE)
+    row = {
+        "date": _ymd,
+        "突合": len(both),
+        "実損益": round(_r_both),
+        "テスト損益": round(_t_both),
+        "差": round(_r_both - _t_both),
+        "エントリー滑り": round(_e_slip),
+        "決済滑り": round(_x_slip),
+        "平均エントリー滑り%": round(sum(_pcts) / len(_pcts), 3) if _pcts else 0.0,
+        "実件数": len(real_done),
+        "実損益_全": round(r_tot),
+        "テスト件数": len(by_sym),
+        "テスト損益_全": round(bt_tot),
+        "差_全": round(r_tot - bt_tot),
+        "発注件数": len(ordered),
+        "約定率%": round(len(real_done) / len(ordered) * 100, 1) if ordered else 0.0,
+    }
+
+    p = Path(args.slip_log)
+    hist: dict = {}
+    if p.exists():
+        try:
+            with open(p, encoding="utf-8-sig", newline="") as f:
+                for r0 in _csv.DictReader(f):
+                    if r0.get("date"):
+                        hist[r0["date"]] = r0
+        except Exception:
+            hist = {}
+    hist[_ymd] = row            # 同じ日を再実行したら上書き(重複しない)
+    try:
+        with open(p, "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=_SLIP_COLS, extrasaction="ignore")
+            w.writeheader()
+            for d in sorted(hist):
+                w.writerow(hist[d])
+    except Exception as e:
+        print(f"\n[!] 累積ログを書けませんでした: {e}")
+        return
+
+    def _f(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    print()
+    print("=" * 78)
+    print(f"=== 累積: 実約定 vs テストの乖離 ({p.name} / {len(hist)}営業日) ===")
+    print(f"  {'日付':<12}{'突合':>5}{'実損益':>10}{'テスト':>10}{'差':>10}"
+          f"{'エントリ滑り':>12}{'決済滑り':>10}{'約定率':>8}")
+    for d in sorted(hist):
+        h = hist[d]
+        print(f"  {d:<12}{int(_f(h.get('突合'))):>5}{_f(h.get('実損益')):>+10,.0f}"
+              f"{_f(h.get('テスト損益')):>+10,.0f}{_f(h.get('差')):>+10,.0f}"
+              f"{_f(h.get('エントリー滑り')):>+12,.0f}{_f(h.get('決済滑り')):>+10,.0f}"
+              f"{_f(h.get('約定率%')):>7.1f}%")
+
+    n_d = len(hist)
+    n_b = sum(int(_f(h.get("突合"))) for h in hist.values())
+    d_tot = sum(_f(h.get("差")) for h in hist.values())
+    e_tot = sum(_f(h.get("エントリー滑り")) for h in hist.values())
+    x_tot = sum(_f(h.get("決済滑り")) for h in hist.values())
+    print("  " + "-" * 76)
+    print(f"  {'合計':<12}{n_b:>5}{sum(_f(h.get('実損益')) for h in hist.values()):>+10,.0f}"
+          f"{sum(_f(h.get('テスト損益')) for h in hist.values()):>+10,.0f}{d_tot:>+10,.0f}"
+          f"{e_tot:>+12,.0f}{x_tot:>+10,.0f}")
+    print()
+    print(f"  1日あたりの乖離   {d_tot / n_d:>+12,.0f}円"
+          f"   → 月20営業日換算 {d_tot / n_d * 20:>+12,.0f}円")
+    if n_b:
+        print(f"  1件あたりの乖離   {d_tot / n_b:>+12,.0f}円   (突合 {n_b}件)")
+    print(f"  内訳: エントリー {e_tot / n_d:>+10,.0f}円/日   決済 {x_tot / n_d:>+10,.0f}円/日")
+    print()
+    if n_d < 10:
+        print(f"  ※ まだ {n_d}営業日。10営業日ぶん貯まるまでは判断材料になりません"
+              f"(1件の外れ値で符号が反転します)")
+    else:
+        print(f"  ※ 月20営業日換算の乖離を lss の月期待値(+37,647円 / CLAUDE.md 18.12)と"
+              f"比べてください。")
+        print(f"     これを超えているなら、バックテストが黒字でも実運用は赤字です。")
 
 
 if __name__ == "__main__":
