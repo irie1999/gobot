@@ -209,14 +209,15 @@ for phase in ("TRAIN", "TEST"):
 #    「sm は両方で単調、tm は逆向き」なら **sm だけ変えて tm は据え置く** のが正しい。
 #    実測(2026-08-07): sm は TRAIN/TEST 全列で単調増加、tm は TRAIN=1.5最良 /
 #    TEST=1.0最良 と逆。tm を TRAIN に合わせて変えていたら OOS で損をしていた。
-def _axis(vals_by_key, axis_vals, other_vals, axis_is_sm: bool):
-    """軸の平均値を TRAIN/TEST で出し、順位が一致するかを返す。"""
+def _axis(vals_by_key, axis_vals, other_vals, axis_is_sm: bool, col: str):
+    """軸の平均値を TRAIN/TEST で出す。"""
     out = {}
     for ph in ("TRAIN", "TEST"):
         means = []
         for a in axis_vals:
-            xs = [float(vals_by_key[(a, o, ph)]["net_real"])
-                  for o in other_vals if (a, o, ph) in vals_by_key] if axis_is_sm else                  [float(vals_by_key[(o, a, ph)]["net_real"])
+            xs = [float(vals_by_key[(a, o, ph)][col])
+                  for o in other_vals if (a, o, ph) in vals_by_key] if axis_is_sm else \
+                 [float(vals_by_key[(o, a, ph)][col])
                   for o in other_vals if (o, a, ph) in vals_by_key]
             means.append(sum(xs) / len(xs) if xs else float("nan"))
         out[ph] = means
@@ -231,26 +232,69 @@ def _rank(xs):
     return r
 
 
+def _spearman(a, b) -> float:
+    ra, rb = _rank(a), _rank(b)
+    n = len(a)
+    if n < 3:
+        return 0.0
+    d2 = sum((ra[i] - rb[i]) ** 2 for i in range(n))
+    return 1 - 6 * d2 / (n * (n * n - 1))
+
+
+_PLATEAU = 0.10   # 最良値からこの割合以内は「同等」とみなす
+
 print(f"\n{'=' * 92}")
 print("■ 軸ごとの TRAIN/TEST 一致 (ここが判断の本体)")
 print(f"{'=' * 92}")
-for name, av, ov, is_sm in (("sm(損切り)", SMS, TMS, True), ("tm(利確)", TMS, SMS, False)):
-    m = _axis(idx, av, ov, is_sm)
+for name, av, ov, is_sm, cur in (("sm(損切り)", SMS, TMS, True, 0.1),
+                                 ("tm(利確)", TMS, SMS, False, 1.0)):
+    if len(av) < 3:
+        print(f"\n  {name}: 水準が{len(av)}個しかないので判定しません"
+              f"(3個以上のグリッドで回してください)")
+        continue
+    m = _axis(idx, av, ov, is_sm, "net_real")
+    mc = _axis(idx, av, ov, is_sm, "net_cons")
     if any(x != x for x in m["TRAIN"] + m["TEST"]):
         continue
-    agree = _rank(m["TRAIN"]) == _rank(m["TEST"])
-    print(f"\n  {name}  (もう一方の軸で平均した net現実)")
-    print(f"    {'値':<10}" + "".join(f"{v:>16.2f}" for v in av))
-    print(f"    {'TRAIN':<10}" + "".join(f"{x:>+16,.0f}" for x in m["TRAIN"]))
-    print(f"    {'TEST':<10}" + "".join(f"{x:>+16,.0f}" for x in m["TEST"]))
-    _best_tr, _best_te = av[m["TRAIN"].index(max(m["TRAIN"]))], av[m["TEST"].index(max(m["TEST"]))]
-    if agree:
-        print(f"    → **順位が完全に一致**。この軸は本物。最良 TRAIN={_best_tr} TEST={_best_te}")
-        if _best_tr in (av[0], av[-1]):
-            print(f"    ⚠ 最良がグリッドの端({_best_tr})。**さらに広げて確かめること**")
+    rho = _spearman(m["TRAIN"], m["TEST"])
+    print(f"\n  {name}  (もう一方の軸で平均)")
+    print(f"    {'値':<12}" + "".join(f"{v:>14.2f}" for v in av))
+    print(f"    {'TRAIN 現実':<12}" + "".join(f"{x:>+14,.0f}" for x in m["TRAIN"]))
+    print(f"    {'TEST  現実':<12}" + "".join(f"{x:>+14,.0f}" for x in m["TEST"]))
+    print(f"    {'TRAIN 保守':<12}" + "".join(f"{x:>+14,.0f}" for x in mc["TRAIN"]))
+    print(f"    {'TEST  保守':<12}" + "".join(f"{x:>+14,.0f}" for x in mc["TEST"]))
+
+    # ⛔ 順位の完全一致で判定してはいけない。TEST が平坦(=どれも同等)なとき、
+    #    わずかな順位差を「不一致=ノイズ」と誤読する。実測 2026-08-07 の sm が
+    #    まさにそれで、TEST は 0.5〜1.5 が 3.5% 以内に収まる平坦域だったのに
+    #    「ノイズなので変えるな」と誤った判定を出した。
+    #    正しい読み方: TEST が『どこから上は同等か』を見て、その範囲の中で
+    #    TRAIN が最良の点を採る。
+    te_max = max(m["TEST"])
+    plateau = [av[i] for i, x in enumerate(m["TEST"])
+               if te_max > 0 and x >= te_max * (1 - _PLATEAU)]
+    print(f"    順位相関(Spearman) = {rho:+.2f}", end="")
+    if rho >= 0.7:
+        print("  → **TRAIN と TEST が同じ向き。この軸は本物**")
+    elif rho <= -0.7:
+        print("  → 逆向き。**採用してはいけない**")
     else:
-        print(f"    → 順位が不一致 (TRAIN最良={_best_tr} / TEST最良={_best_te})。"
-              f"**この軸はノイズ。現行値のまま変えないこと**")
+        print("  → 弱い。平坦域を見て判断する")
+    if plateau:
+        print(f"    TEST の平坦域(最良から{_PLATEAU:.0%}以内): {plateau}")
+        cand = [(av[i], m["TRAIN"][i]) for i in range(len(av)) if av[i] in plateau]
+        pick = max(cand, key=lambda kv: kv[1])[0] if cand else None
+        cur_i = av.index(cur) if cur in av else None
+        if pick is not None:
+            print(f"    → **推奨 {pick}** (TEST が同等な範囲の中で TRAIN が最良の点)")
+            if cur_i is not None:
+                print(f"       現行 {cur}: TRAIN {m['TRAIN'][cur_i]:+,.0f} / "
+                      f"TEST {m['TEST'][cur_i]:+,.0f} / TEST保守 {mc['TEST'][cur_i]:+,.0f}")
+                pi = av.index(pick)
+                print(f"       推奨 {pick}: TRAIN {m['TRAIN'][pi]:+,.0f} / "
+                      f"TEST {m['TEST'][pi]:+,.0f} / TEST保守 {mc['TEST'][pi]:+,.0f}")
+            if pick == av[-1] or pick == av[0]:
+                print(f"    ⚠ 推奨がグリッドの端。さらに広げて確かめること")
 
 # TRAIN の最良点が TEST でどうなるか
 tr = [(k, v) for k, v in idx.items() if k[2] == "TRAIN"]
