@@ -30,12 +30,19 @@ BTスコアには識別力が無いことが確定した(CLAUDE.md 18.12)。先�
 ----------------------------------------
 1. TRAIN の分位点で境界を決め、**その境界のまま TEST に当てて**両方を並べる。
    TEST 側で切り直すと『TESTを見て決めた』ことになり検証にならない。
-2. 判定は「平均がプラスか」ではなく Welch の t で **「他の帯と違うか」**。
+2. 判定は「平均がプラスか」ではなく t で **「他の帯と違うか」**。
    全体がプラスなら全部の帯が平均プラスになり、選別の根拠にならない。
-3. ★ 帰無較正: 損益ラベルをシャッフルして300回判定し直し、
-   **『偶然でも出る候補数』を実測して並べて表示する**。
+3. ★ 日クラスタ頑健な t。lss は同日決済なので、相場が下げた日は全銘柄がまとめて
+   勝つ。トレードは独立ではないので、件数で普通の t を計算すると実効サンプル数を
+   「件数」と誤認して t が過大になる(実際は「日数」に近い)。
+   2026-08-07 実測: 曜日『火』が t=+4.9 と出たが、火曜の特定の数日に勝ちが
+   集中していただけで、独立な573件の証拠ではなかった。
+4. ★ 帰無較正: 損益を**巡回シフト**(日ブロックを保ったまま属性との対応だけ切る)して
+   300回判定し直し、**『偶然でも出る候補数』を実測して並べて表示する**。
+   完全シャッフルだと日内相関が壊れて帰無分布が狭くなりすぎる(偽陽性の過小評価)。
    これを入れる前は、完全な乱数データでも「両方プラス」が20個以上出た。
-   属性13本 x 5帯 = 65回の検定をしているので当然で、BTで踏んだのと同じ罠。
+5. ★ 集中度と重複。TEST合計の何%が上位5件か、候補同士が同じトレードを見ていないか。
+   「12個の発見」に見えて実は1つの現象の12通りの見え方、ということが起きる。
 
 使い方
 ------
@@ -87,6 +94,10 @@ ap.add_argument("--bins", type=int, default=5, help="分位数の数(既定5=五
 ap.add_argument("--min-n", type=int, default=30, help="この件数未満の帯は『サンプル少』印を付ける")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--no-market", action="store_true", help="日経(^N225)を取らない")
+ap.add_argument("--exclude-strat", type=str, default="転換",
+                help="除外する戦略(カンマ区切り)。既定『転換』= lss ではなくロング転換の"
+                     "シミュレーションなので lss の分析に混ぜてはいけない。"
+                     "空文字を渡すと除外しない")
 ap.add_argument("--out", type=str, default="", help="属性付きの全トレードCSVを書き出す")
 args = ap.parse_args()
 
@@ -145,6 +156,13 @@ if "reason" in df_t.columns:
     df_t = df_t[~df_t["reason"].astype(str).isin(["発注中", "保有中"])].reset_index(drop=True)
     if len(df_t) != _n0:
         print(f"[入力] 未決済 {_n0 - len(df_t)}件を除外")
+if args.exclude_strat.strip():
+    _ex = {s.strip() for s in args.exclude_strat.split(",") if s.strip()}
+    _hit = df_t["strat"].astype(str).isin(_ex)
+    if _hit.any():
+        print(f"[入力] 戦略 {'/'.join(sorted(_ex))} を除外: {int(_hit.sum())}件 "
+              f"({df_t.loc[_hit, 'pnl'].sum():+,.0f}円) — lss ではないので混ぜない")
+        df_t = df_t[~_hit].reset_index(drop=True)
 print(f"[入力] {len(df_t):,}トレード / {df_t['date'].min().date()} 〜 "
       f"{df_t['date'].max().date()} / 損益列={_c_pnl} 合計 {df_t['pnl'].sum():+,.0f}円")
 
@@ -306,6 +324,12 @@ print(f"\n[分割] TRAIN {len(tr):,}件 ({df['date'].min().date()}〜{_cut.date(
 if len(tr) < 100 or len(te) < 100:
     print("[!] どちらかが100件未満です。--split を調整するか期間を延ばしてください")
 
+# 日クラスタ頑健な検定に使う『日ID』。lss は同日決済なので同じ日の損益は強く相関する。
+_D_TR = tr["date"].values.astype("datetime64[D]").astype(np.int64)
+_D_TE = te["date"].values.astype("datetime64[D]").astype(np.int64)
+print(f"[クラスタ] TRAIN {len(np.unique(_D_TR))}日 / TEST {len(np.unique(_D_TE))}日 "
+      f"— 検定の実効サンプルは『件数』ではなく『日数』に近い")
+
 # ── 属性ごとの層別 ────────────────────────────────────────────────────
 # 「前夜」= 発注時点で確定。そのまま発注ルールにできる。
 # 「寄り」= 当日09:00の値が要る。寄り後に取消す運用(cancel_gap_orders)なら使える。
@@ -332,15 +356,43 @@ def _stat(s: pd.DataFrame) -> tuple:
     return n, w / n * 100, p, p / n
 
 
-def _welch_t(a: np.ndarray, b: np.ndarray) -> float:
-    """帯(a) と それ以外(b) の1件あたり損益の差の t値(Welch)。
+def _cluster_var(x: np.ndarray, day: np.ndarray, mu: float) -> float:
+    """平均 mu の**日クラスタ頑健**な分散。
+
+    ⛔ なぜ必要か: lss は同日決済なので、相場が下げた日は全銘柄がまとめて勝つ。
+       トレードは独立ではない。件数で普通の t を計算すると、実効サンプル数を
+       「件数」と誤認して t が大きく出る(実際は「日数」に近い)。
+       2026-08-07 実測: 曜日『火』が t=+4.9 と出たが、これは火曜の特定の数日に
+       勝ちが集中していただけで、独立な573件の証拠ではなかった。
+    Var(mean) = (1/n^2) * Σ_日 ( Σ_その日(x - mu) )^2
+    """
+    n = len(x)
+    if n == 0:
+        return np.inf
+    r = x - mu
+    s = 0.0
+    for d in np.unique(day):
+        s += float(r[day == d].sum()) ** 2
+    return s / (n * n)
+
+
+def _welch_t(a: np.ndarray, b: np.ndarray,
+             da: np.ndarray | None = None, db: np.ndarray | None = None) -> float:
+    """帯(a) と それ以外(b) の1件あたり損益の差の t値。
+    日付配列(da/db)を渡すと**日クラスタ頑健**に計算する(既定の使い方)。
     『帯の平均がプラス』ではなく『他と違う』を測る。全体がプラスなら
     どの帯も平均プラスになるので、そのままでは選別の根拠にならない。"""
     if len(a) < 5 or len(b) < 5:
         return 0.0
-    va, vb = a.var(ddof=1), b.var(ddof=1)
-    se = np.sqrt(va / len(a) + vb / len(b))
-    return float((a.mean() - b.mean()) / se) if se > 0 else 0.0
+    ma, mb = a.mean(), b.mean()
+    if da is None or db is None:
+        va = a.var(ddof=1) / len(a)
+        vb = b.var(ddof=1) / len(b)
+    else:
+        va = _cluster_var(a, da, ma)
+        vb = _cluster_var(b, db, mb)
+    se = np.sqrt(va + vb)
+    return float((ma - mb) / se) if se > 0 and np.isfinite(se) else 0.0
 
 
 _T_MIN = 2.0            # TEST でこの t値を超えないと候補にしない
@@ -386,8 +438,10 @@ for col in _COLS:
             continue
         _a1 = tr.loc[m_tr, "pnl"].to_numpy(); _b1 = tr.loc[~m_tr, "pnl"].to_numpy()
         _a2 = te.loc[m_te, "pnl"].to_numpy(); _b2 = te.loc[~m_te, "pnl"].to_numpy()
-        t1, t2 = _welch_t(_a1, _b1), _welch_t(_a2, _b2)
-        _bin_masks.append((col, lbl, m_tr.to_numpy(), m_te.to_numpy()))
+        _m1, _m2 = m_tr.to_numpy(), m_te.to_numpy()
+        t1 = _welch_t(_a1, _b1, _D_TR[_m1], _D_TR[~_m1])
+        t2 = _welch_t(_a2, _b2, _D_TE[_m2], _D_TE[~_m2])
+        _bin_masks.append((col, lbl, _m1, _m2))
         # 判定: 「他の帯と違う」が TRAIN/TEST で同じ向きに出ていて、
         #        かつ TEST 側で t>=2 (偶然では説明しにくい水準) のときだけ候補。
         #        平均がプラスかどうかでは判定しない(全体がプラスなら全部プラスになる)。
@@ -402,10 +456,14 @@ for col in _COLS:
         print(f"  {lbl:<22}{n1:>8}{e1:>+9,.0f}{t1:>+6.1f}"
               f"{n2:>8}{w2:>6.1f}%{p2:>+12,.0f}{e2:>+9,.0f}{t2:>+6.1f}  {mark}")
         if mark.startswith(("◎", "×")):
+            _v2 = np.sort(np.abs(_a2))[::-1]
+            _top5 = float(_v2[:5].sum() / np.abs(_a2).sum() * 100) if np.abs(_a2).sum() else 0.0
+            _nd2 = len(np.unique(_D_TE[_m2]))
             _cands.append({"属性": col, "帯": lbl, "timing": _TIMING.get(col, "?"),
                            "向き": "採用" if t2 > 0 else "除外",
                            "TRAIN_n": n1, "TRAIN_1件": e1, "TRAIN_t": t1,
-                           "TEST_n": n2, "TEST_1件": e2, "TEST_t": t2, "TEST_合計": p2})
+                           "TEST_n": n2, "TEST_1件": e2, "TEST_t": t2, "TEST_合計": p2,
+                           "TEST_日数": _nd2, "上位5件%": _top5, "_mask": _m2})
 
 # ── 帰無分布の較正 (多重検定の補正) ──────────────────────────────────
 # 属性13本 × 5帯 = 約65回の検定をしている。何もエッジが無くても、偶然いくつかは
@@ -419,17 +477,20 @@ if _bin_masks:
     _rng = np.random.default_rng(12345)
     _p_tr = tr["pnl"].to_numpy()
     _p_te = te["pnl"].to_numpy()
-    print(f"\n[帰無較正] 損益をシャッフルして {_NULL_REPS}回 判定し直します"
-          f"(検定数 {len(_bin_masks)})...", flush=True)
+    # ⛔ 完全シャッフルは日内の相関を壊すので帰無分布が狭くなりすぎる(=偽陽性を
+    #    過小に見積もる)。日付順に並べたまま**巡回シフト**すれば、同日ブロックは
+    #    ほぼ保たれたまま属性との対応だけが切れる。
+    print(f"\n[帰無較正] 損益を巡回シフト(日ブロック保持)して {_NULL_REPS}回 "
+          f"判定し直します(検定数 {len(_bin_masks)})...", flush=True)
     for _ in range(_NULL_REPS):
-        s_tr = _rng.permutation(_p_tr)
-        s_te = _rng.permutation(_p_te)
+        s_tr = np.roll(_p_tr, int(_rng.integers(1, max(2, len(_p_tr)))))
+        s_te = np.roll(_p_te, int(_rng.integers(1, max(2, len(_p_te)))))
         c = 0
         for _col, _lbl, m1, m2 in _bin_masks:
             if m1.sum() < args.min_n or m2.sum() < args.min_n:
                 continue
-            t1 = _welch_t(s_tr[m1], s_tr[~m1])
-            t2 = _welch_t(s_te[m2], s_te[~m2])
+            t1 = _welch_t(s_tr[m1], s_tr[~m1], _D_TR[m1], _D_TR[~m1])
+            t2 = _welch_t(s_te[m2], s_te[~m2], _D_TE[m2], _D_TE[~m2])
             if t1 * t2 > 0 and abs(t2) >= _T_MIN:
                 c += 1
         _null_counts.append(c)
@@ -458,12 +519,36 @@ if not _cands:
 else:
     _cands.sort(key=lambda x: -abs(x["TEST_t"]))
     print(f"  {'属性':<18}{'帯':<20}{'確定':<5}{'向き':<5}"
-          f"{'TRAIN t':>9}{'TEST t':>8}{'TEST 1件':>11}{'TEST件':>7}{'TEST合計':>12}")
-    print("  " + "-" * 100)
+          f"{'TRAIN t':>9}{'TEST t':>8}{'TEST 1件':>11}{'TEST件':>7}{'日数':>6}"
+          f"{'上位5件%':>9}{'TEST合計':>12}")
+    print("  " + "-" * 116)
     for c in _cands:
         print(f"  {c['属性']:<18}{c['帯']:<20}{c['timing']:<5}{c['向き']:<5}"
               f"{c['TRAIN_t']:>+9.1f}{c['TEST_t']:>+8.1f}{c['TEST_1件']:>+11,.0f}"
-              f"{c['TEST_n']:>7}{c['TEST_合計']:>+12,.0f}")
+              f"{c['TEST_n']:>7}{c['TEST_日数']:>6}{c['上位5件%']:>8.1f}%"
+              f"{c['TEST_合計']:>+12,.0f}")
+
+    # ── 候補同士の重複 ──────────────────────────────────────────────
+    # 高ATR・高株価・高5日リターンは同じ銘柄群を指していることが多い。
+    # 重複が大きい候補は「独立な発見」ではなく1つの現象の別の見え方。
+    if len(_cands) >= 2:
+        print()
+        print("  【重複】候補同士が同じトレードを見ていないか (Jaccard%。70%超は実質同じ)")
+        _lab = [f"{c['属性'][:8]}:{c['帯'][:10]}" for c in _cands]
+        _W = 14
+        print("       " + "".join(f"{i:>4}" for i in range(len(_cands))))
+        for i, ci in enumerate(_cands):
+            row = ""
+            for j, cj in enumerate(_cands):
+                if j <= i:
+                    row += "    "
+                    continue
+                a, b = ci["_mask"], cj["_mask"]
+                u = (a | b).sum()
+                row += f"{((a & b).sum() / u * 100 if u else 0):>4.0f}"
+            print(f"  {i:>3} {_lab[i][:_W]:<{_W}}{row}")
+        for i, l in enumerate(_lab):
+            print(f"      {i:>2} = {l}")
     print()
     print("  ⚠ ここに出ても確定ではありません。採用する前に必ず:")
     print("    1. --split を変えて(別の切り方でも)同じ帯が残るか")
