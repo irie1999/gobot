@@ -204,6 +204,54 @@ for phase in ("TRAIN", "TEST"):
             cells += f"{float(r['net_real']):>+16,.0f}" if r else f"{'—':>16}"
         print(f"  {sm:<10.2f}{cells}")
 
+# ── 軸ごとに TRAIN/TEST が一致しているか ────────────────────────────
+# ⛔ ここが判断の本体。グリッドの最良点1つを選ぶのは in-sample フィット。
+#    「sm は両方で単調、tm は逆向き」なら **sm だけ変えて tm は据え置く** のが正しい。
+#    実測(2026-08-07): sm は TRAIN/TEST 全列で単調増加、tm は TRAIN=1.5最良 /
+#    TEST=1.0最良 と逆。tm を TRAIN に合わせて変えていたら OOS で損をしていた。
+def _axis(vals_by_key, axis_vals, other_vals, axis_is_sm: bool):
+    """軸の平均値を TRAIN/TEST で出し、順位が一致するかを返す。"""
+    out = {}
+    for ph in ("TRAIN", "TEST"):
+        means = []
+        for a in axis_vals:
+            xs = [float(vals_by_key[(a, o, ph)]["net_real"])
+                  for o in other_vals if (a, o, ph) in vals_by_key] if axis_is_sm else                  [float(vals_by_key[(o, a, ph)]["net_real"])
+                  for o in other_vals if (o, a, ph) in vals_by_key]
+            means.append(sum(xs) / len(xs) if xs else float("nan"))
+        out[ph] = means
+    return out
+
+
+def _rank(xs):
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    r = [0] * len(xs)
+    for pos, i in enumerate(order):
+        r[i] = pos
+    return r
+
+
+print(f"\n{'=' * 92}")
+print("■ 軸ごとの TRAIN/TEST 一致 (ここが判断の本体)")
+print(f"{'=' * 92}")
+for name, av, ov, is_sm in (("sm(損切り)", SMS, TMS, True), ("tm(利確)", TMS, SMS, False)):
+    m = _axis(idx, av, ov, is_sm)
+    if any(x != x for x in m["TRAIN"] + m["TEST"]):
+        continue
+    agree = _rank(m["TRAIN"]) == _rank(m["TEST"])
+    print(f"\n  {name}  (もう一方の軸で平均した net現実)")
+    print(f"    {'値':<10}" + "".join(f"{v:>16.2f}" for v in av))
+    print(f"    {'TRAIN':<10}" + "".join(f"{x:>+16,.0f}" for x in m["TRAIN"]))
+    print(f"    {'TEST':<10}" + "".join(f"{x:>+16,.0f}" for x in m["TEST"]))
+    _best_tr, _best_te = av[m["TRAIN"].index(max(m["TRAIN"]))], av[m["TEST"].index(max(m["TEST"]))]
+    if agree:
+        print(f"    → **順位が完全に一致**。この軸は本物。最良 TRAIN={_best_tr} TEST={_best_te}")
+        if _best_tr in (av[0], av[-1]):
+            print(f"    ⚠ 最良がグリッドの端({_best_tr})。**さらに広げて確かめること**")
+    else:
+        print(f"    → 順位が不一致 (TRAIN最良={_best_tr} / TEST最良={_best_te})。"
+              f"**この軸はノイズ。現行値のまま変えないこと**")
+
 # TRAIN の最良点が TEST でどうなるか
 tr = [(k, v) for k, v in idx.items() if k[2] == "TRAIN"]
 if tr:
