@@ -77,6 +77,19 @@ ap.add_argument("--start-dates", type=str, default="lss_proposal_cumul.py",
                 help="START_DATES を持つ提案ファイル。各ペアが『いつからWATCHLISTに"
                      "居たか』で注文を切り、選定の先読みを除く(CLAUDE.md 18.11 と同型)。"
                      "空文字で無効化(絶対値は上振れするので相対比較専用)")
+ap.add_argument("--universe", type=str, default="selected",
+                choices=["selected", "all"],
+                help="発注候補の母集団。selected(既定)=lss_trades.csv の選定済みペア。"
+                     "all=5分足のある全銘柄×全6戦略(WF選定を捨てる。18.20で選定は"
+                     "何も足していないと確定したため、母集団を約2.5倍に広げられる)")
+ap.add_argument("--rank", type=str, default="bt",
+                choices=["bt", "liquidity", "random"],
+                help="予算内で上から埋める順番。bt(既定)=BT降順。"
+                     "liquidity=前日売買代金の大きい順(=執行コストの小さい順)。"
+                     "random=対照(順序に意味があるか自体を検証する)。"
+                     "18.12/18.13でリターンは予測できないと確定しているので、"
+                     "予測できるコストで並べるのが liquidity の狙い。")
+ap.add_argument("--rank-seed", type=int, default=42, help="--rank random の再現用シード")
 ap.add_argument("--only-month", type=str, default=None,
                 help="この月(YYYY-MM)のトレードのみでシミュレーション。"
                      "--proposal と組み合わせて「基準月選定→翌月のみ検証」の厳密OOSを測る。"
@@ -150,7 +163,21 @@ except Exception:
 
 
 def _prio_key(rec):
-    """発注順のキー(小さいほど先)。無効なら従来どおりBT降順。"""
+    """発注順のキー(小さいほど先)。
+
+    ⛔ 18.12/18.13 で BT も銘柄属性も『将来リターンの識別力ゼロ』と確定した。
+       リターンが予測できずコストは予測できる以上、**執行コストの小さい順**
+       (=流動性の高い順)に並べるのが合理的。--rank liquidity がそれ。
+       --rank random は対照: これと差が無ければ『並び順そのものに意味が無い』
+       =予算上限は単なるランダム抽出、と分かる。
+    """
+    if args.rank == "liquidity":
+        # 前日売買代金(円)の降順。同値は銘柄コードで安定化。
+        return (0.0, -float(rec.get("liq") or 0.0), rec.get("sym", ""))
+    if args.rank == "random":
+        import hashlib as _hh
+        _k = f"{args.rank_seed}|{rec.get('sym','')}|{rec.get('strat','')}|{rec.get('date')}"
+        return (0.0, int(_hh.md5(_k.encode()).hexdigest()[:8], 16), "")
     if _lprio is None:
         return (0.0, -float(rec.get("bt") or 0))
     return _lprio.priority_key(rec.get("strat", ""), float(rec.get("bt") or 0))
@@ -294,7 +321,13 @@ def _collect(sym_yf, strat, bt):
         order_notional = trigger * QTY
         fill = short_entry_fill_5m(db, trigger, is_rise_trigger=False, entry_gap_limit=GAP_LIMIT,
                                    day_open=d_open, day_low=d_low, day_high=d_high)
+        # 前日売買代金 = 発注前に分かる値なので先読みではない。--rank liquidity で使う。
+        try:
+            _liq = float(row.get("volume", 0) or 0) * prev_close
+        except Exception:
+            _liq = 0.0
         rec = {"date": pd.Timestamp(edate), "sym": sym, "bt": bt, "strat": strat,
+               "liq": _liq,
                "order_notional": order_notional, "filled": False,
                "fill_min": None, "exit_min": None, "fill_notional": 0.0, "pnl": 0.0}
         if fill is None:
@@ -397,6 +430,23 @@ def main():
         keep = {pair: all_bt.get(pair, 0.0) for pair in prop_pairs}
         print(f"[info] --proposal {Path(args.proposal).name}: {len(keep)}ペア "
               f"(bt-min フィルター無効・BT順ソートのみ lss_trades.csv 参照)")
+    elif args.universe == "all":
+        # 選定を捨てて全銘柄×全6戦略。18.20 で『信号のみ』(選定なし)が
+        # 『信号+選定+予算』とほぼ同じ期待値だと確定したため、母集団を広げる方が
+        # 容量・維持コストとも良い。BT値は並び順(--rank bt)のためだけに引く。
+        from daytrade_data import available_local_symbols as _als
+        all_bt = _load_all_bt()
+        _strats = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+        _seen = set(); keep = {}
+        for _s5 in _als():
+            _c = _norm(_jq_to_yf(_s5))
+            if _c in _seen:
+                continue
+            _seen.add(_c)
+            for _t in _strats:
+                keep[(_c, _t)] = all_bt.get((_c, _t), 0.0)
+        print(f"[info] --universe all: 全{len(_seen)}銘柄 × {len(_strats)}戦略 "
+              f"= {len(keep)}ペア (WF選定を使わない / --bt-min は無視)")
     else:
         keep = _load_bt_pairs()
         if not keep:
@@ -414,6 +464,8 @@ def main():
           f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
           f"sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
           f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}{only_month_label}")
+    print(f"[info] 母集団={args.universe} / 発注順={args.rank}"
+          f"{f'(seed{args.rank_seed})' if args.rank == 'random' else ''}")
 
     import hashlib as _h, pickle as _pk
     _cd = Path(".simportfolio_cache")
@@ -422,7 +474,7 @@ def main():
         # FEE を鍵に含める: 2026-08-07 に既定を 0.001→0 に変えたので、
         # 含めないと手数料込みの古いキャッシュが再利用されて誤った金額が出る。
         # 損切り約定モデル(v16: max(stop, bar_open))も鍵に含める。
-        "spv4", getattr(ble, "_BT_LOGIC_VER", "?"), FEE,
+        "spv5", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.universe,
         getattr(__import__("sameday5m_firsttouch"), "_OPTIMISTIC_STOP_FILL", None),
         args.sm, args.tm, DELAY, GAP_LIMIT,
         args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
