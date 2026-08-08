@@ -247,6 +247,27 @@ for H in HOLDOUTS:
             print(f"  {sm:<10.2f}{cells}")
 
 
+# ── サニティチェック: TRAIN が窓をまたいで同一なら分割が壊れている ────
+# 2026-08-08 に実際に起きた。compare_lss_rules の --holdout-days が下限しか
+# 動かしておらず、TRAIN に直近期間が丸ごと残っていた(TRAIN ⊇ TEST)。
+# その状態では「全窓で一致」は当たり前で、判定に意味が無い。
+if not _SINGLE:
+    _bad = []
+    for sm in SMS:
+        for tm in TMS:
+            vs = [_get(sm, tm, "TRAIN", H) for H in HOLDOUTS]
+            vs = [v for v in vs if v is not None]
+            if len(vs) > 1 and len(set(round(v, 2) for v in vs)) == 1:
+                _bad.append((sm, tm))
+    if _bad:
+        print(f"\n{'!' * 92}")
+        print("⛔ TRAIN の値が TEST窓をまたいで**完全に同一**です "
+              f"({len(_bad)}/{len(SMS) * len(TMS)}点)。")
+        print("   TRAIN/TEST の分割が成立していません(TEST が TRAIN の部分集合 = in-sample)。")
+        print("   compare_lss_rules の --holdout-days が効いているか確認してください。")
+        print("   この状態の『全窓で一致』は当たり前なので、判定は無効です。")
+        print(f"{'!' * 92}")
+
 # ── 軸ごとに TRAIN/TEST が一致しているか ────────────────────────────
 # ⛔ ここが判断の本体。グリッドの最良点1つを選ぶのは in-sample フィット。
 #    「sm は両方で単調、tm は逆向き」なら **sm だけ変えて tm は据え置く** のが正しい。

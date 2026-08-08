@@ -118,10 +118,15 @@ FEE_ONE_WAY = ble.FEE_PCT_ONE_WAY
 _GAP_LIMIT = getattr(ble, "_INTRADAY_5M_ENTRY_GAP_LIMIT", 0.03)
 _ON_CLOSE = getattr(ble, "_INTRADAY_5M_ON_CLOSE", False)
 TODAY = pd.Timestamp.now().normalize()
+# ホールドアウトの上限。None = 上限なし(直近まで全部使う)。
+# ⛔ これが無かったせいで --holdout-days は下限しか動かしておらず、
+#    「直近N日を除外」になっていなかった(:468 の修正参照)。
+_HOLDOUT_CUT = None
 if args.holdout_days and args.holdout_days > 0:
     # 基準日を N日前へ。以降の窓切り(args.days)もBTスコアの期間スライスも
     # この TODAY を基準にするので、直近N日のデータは一切参照されない。
     TODAY = TODAY - pd.Timedelta(days=int(args.holdout_days))
+    _HOLDOUT_CUT = TODAY
     print(f"[ホールドアウト] 直近{args.holdout_days}日を除外 → 基準日 {TODAY.date()} "
           f"(集計窓 {(TODAY - pd.Timedelta(days=args.days)).date()} 〜 {TODAY.date()})")
 
@@ -465,6 +470,16 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
             if olp <= 0 or osp <= 0 or otp <= 0 or olp < args.min_price or olp > args.max_price:
                 continue
             fd = edt.date() if hasattr(edt, "date") else edt
+            # ⛔ 2026-08-08 修正: ここは下限しか見ておらず、--holdout-days を付けても
+            #    **直近N日のトレードが TRAIN に丸ごと残っていた**(TRAIN ⊇ TEST)。
+            #    そのため sweep_lss_smtm の TRAIN/TEST 分割は成立しておらず、TEST は
+            #    TRAIN の部分集合(in-sample)だった。実害の証拠: --holdout-days を
+            #    60/120/180 と変えても TRAIN が 13,805件 +4,981,237円 と1円まで同一。
+            #    :123 のコメント「直近N日のデータは一切参照されない」が実装されていなかった。
+            #    BTスコア用の bt_trades もこの下で作るので、上限はここで掛ける
+            #    (BTが未来の決済結果を見るのも防ぐ)。
+            if _HOLDOUT_CUT is not None and pd.Timestamp(fd) > _HOLDOUT_CUT:
+                continue
             if pd.Timestamp(fd) < TODAY - pd.Timedelta(days=_bt_window):
                 continue
             db = by_day.get(fd)
