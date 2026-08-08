@@ -3210,14 +3210,19 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     else:
         _analysis_warn = ""
 
-    # ── 過去日を今日再生成したときの先読み警告 ──────────────────────────
-    # ⛔ シグナルタブのBTは **常に実行日(今日)までの365日** から計算される
-    #    (check_signals_stop.py:334 `today = datetime.now(JST).date()` /
-    #     :337 `cutoff = today - timedelta(days=days)`)。signal_dt では切らない。
-    #    → 当日の発注リストとして使う限り正しい(その日のシグナルはまだ決済していない)。
-    #    → **過去日を今日再生成すると、その日以降の決済結果を含んだBTで並ぶ = 先読み。**
-    #    損益タブは as-of BT(LSS_ASOF_BT)で修正済みだが、この並びは対象外。
-    #    CLAUDE.md 18.11 の「発注リストは無傷」は *当日実行* に限った話であることに注意。
+    # ── 過去日を今日再生成したときの警告 ────────────────────────────────
+    # BTの出所は2通り (`_check_one` :2323-2330):
+    #   (a) 凍結あり  → `_FROZEN_BT_SCORES[(sym, strat)]` で上書き。ただしこの辞書は
+    #       **signal_date を持たず (sym,strat) の最新シグナル日の値**を入れている
+    #       (run_signals_holdout_all.py:1652-1667 `_cached_latest`)。
+    #       → 過去日を再生成すると **表示日より後のシグナル日の凍結値**が出うる。
+    #   (b) 凍結なし  → `calc_recommend_score` = **実行日までの365日**で計算
+    #       (check_signals_stop.py:334 `today = datetime.now(JST).date()`)。
+    #       → その日以降の決済結果込み = 先読み。
+    # 当日実行ならどちらも正しい(その日のシグナルはまだ決済していない)。
+    # さらに `_filter_wl_by_price` が **最新終値**でユニバースを切るため(18.16)、
+    # 当時は対象だった銘柄が再生成では丸ごと消えることがある = 行そのものの欠落。
+    # 当時の並びは `python show_frozen_signals.py --date <その日>` で復元できる。
     _asof_warn = ""
     try:
         _td = pd.to_datetime(str(target_date)).date() if target_date else None
@@ -3228,13 +3233,16 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
             '<div style="margin:10px 0;padding:12px 16px;background:#422006;'
             'border:1px solid #b45309;border-radius:8px;color:#fed7aa;'
             'font-size:0.86rem;line-height:1.6">'
-            f'⚠ <b>この並び順は先読みを含みます（{_td} のシグナルを {_TODAY} に生成）。</b><br>'
-            f'BTスコアは<b>常に実行日({_TODAY})までの365日</b>から計算されるため、'
-            f'下表のBTは <b>{_td} 以降の決済結果を織り込んだ値</b>で、'
-            f'{_td} 当日に見えていた値ではありません。<br>'
-            '<b>「この順で発注していれば良かったか」の判断には使えません。</b>'
-            'その用途には損益タブ（as-of BT で修正済み）を見てください。'
-            '当日朝に生成した発注リストは正しい値です。</div>')
+            f'⚠ <b>この並びは {_td} 当日に見えていたものと一致しない場合があります'
+            f'（{_TODAY} に再生成）。</b><br>'
+            '① BTが凍結済みの銘柄は当時の値だが、凍結辞書は (銘柄,戦略) 単位で'
+            '<b>最新シグナル日</b>の値を持つため、表示日より後の値が出ることがある。<br>'
+            f'② 凍結が無い銘柄は<b>実行日({_TODAY})までの365日</b>で再計算される'
+            f'＝{_td} 以降の決済結果込み（先読み）。<br>'
+            '③ ユニバースの価格フィルタは<b>最新終値</b>で切るため、当時は対象だった'
+            '銘柄が<b>行ごと消える</b>ことがある。<br>'
+            f'当時の並びの正本は <code>python show_frozen_signals.py --date {_td}</code>、'
+            '実発注の正本は <code>orders_&lt;日付&gt;.csv</code>（<code>.\\fills</code>）です。</div>')
 
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
