@@ -153,7 +153,7 @@ def main():
     #    後者は致命的で、18.11 の実測では6ヶ月の損益が +2,270,229 → +276,975(-88%)動いた。
     #    このスクリプトの過去の出力(oos_raw_fold*.csv)は全部その状態で作られている。
     env["LSS_STOP_DELAY_BARS"] = "1"   # ライブ(watch.bat --stop-delay-bars 1)と揃える
-    env["LSS_BT_TAB_MIN"] = "40"
+    env["LSS_BT_TAB_MIN"] = "30"   # 2026-08-08: 40→30 (18.24)。daily.bat と揃える
     env.setdefault("LSS_ASOF_BT", "1") # 先読みなしのBT (18.11)。daily.bat と同じ
     # 発注順は lss_order_rank の既定(流動性順)を継承する。比較用に旧BT降順で回すなら
     # 呼び出し前に set LSS_ORDER_RANK=bt (18.21: BT降順はランダム6本すべてを下回る)。

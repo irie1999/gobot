@@ -29,10 +29,18 @@ lss の決済は 損切ATR=0.1 / 利確ATR=1.0 = 名目 1:10。ところが実�
 
 使い方
 ------
-  python sweep_lss_smtm.py                       # 既定グリッド(4x3=12点)
-  python sweep_lss_smtm.py --sm-list 0.1,0.2,0.3,0.5 --tm-list 1.0,1.5,2.0
+  # ★ 推奨: TEST窓を3本回して、全窓で同じ推奨が出るときだけ採用する
+  python sweep_lss_smtm.py --sm-list 0.1,0.2,0.3,0.5 --tm-list 1.0,1.5,2.0 \
+                           --holdout-list 60,120,180 --workers 8
+
+  python sweep_lss_smtm.py                       # 既定グリッド(4x3=12点)・窓1本
   python sweep_lss_smtm.py --holdout-days 120    # TEST に使う直近日数
   python sweep_lss_smtm.py --dry-run             # 実行せずコマンドだけ表示
+
+⛔ TEST窓1本の結果で採用を決めないこと。ローリングOOSの実測では月次σが月平均の
+   2.7倍あり、10ヶ月でも t=+1.18 しか出ない(CLAUDE.md 18.24)。窓を1つ変えるだけで
+   順位はひっくり返る。**全窓で同じ推奨が出ること**が最低条件。
+   さらに採用前に sim_portfolio_lss.py(予算・上限キャンセル込み)で再検証する(18.10)。
 
 途中で止めても、結果は sweep_lss_smtm_results.csv に都度追記されるので
 **再実行すれば済んだ組み合わせは飛ばす**(重いので再開できるようにしてある)。
@@ -54,6 +62,13 @@ ap.add_argument("--tm-list", type=str, default="1.0,1.5,2.0",
 ap.add_argument("--train-days", type=int, default=365, help="TRAIN の遡及日数")
 ap.add_argument("--holdout-days", type=int, default=120,
                 help="TEST に回す直近日数。TRAIN からはこの日数が除外される")
+ap.add_argument("--holdout-list", type=str, default="",
+                help="TEST 窓を複数指定(例 60,120,180)。指定すると窓ごとに "
+                     "TRAIN/TEST を回し、**全窓で向きが一致するか**で判定する。"
+                     "1窓だけの結果はノイズと区別できない(CLAUDE.md 18.24)")
+ap.add_argument("--bt-min", type=float, default=0.0,
+                help="compare_lss_rules に渡すBT下限。既定0=全件。"
+                     "実機は BT30(=プールの床=実質フィルタなし)なので 0 と同義")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=6)
@@ -64,6 +79,12 @@ args = ap.parse_args()
 
 SMS = [float(x) for x in args.sm_list.split(",") if x.strip()]
 TMS = [float(x) for x in args.tm_list.split(",") if x.strip()]
+# TEST 窓。--holdout-list があればそちら、無ければ --holdout-days 1本。
+# ⛔ 1本だけの結果を信じてはいけない。ローリングOOSの実測で月次σが月平均の
+#    2.7倍あり、10ヶ月でも t=+1.18 しか出ない(CLAUDE.md 18.24)。窓を1つ変えるだけで
+#    順位は簡単にひっくり返る。**全窓で向きが一致するか**だけが判断材料。
+HOLDOUTS = ([int(x) for x in args.holdout_list.split(",") if x.strip()]
+            if args.holdout_list.strip() else [args.holdout_days])
 OUT = Path(args.out)
 
 _COLS = ["sm", "tm", "phase", "trades", "win_rate", "pf",
@@ -89,16 +110,16 @@ def _save(rows: list[dict]) -> None:
             w.writerow(r)
 
 
-def _run(sm: float, tm: float, phase: str) -> dict | None:
+def _run(sm: float, tm: float, phase: str, holdout: int) -> dict | None:
     """compare_lss_rules を1回走らせ、base 行の成績を返す。"""
     cmd = [sys.executable, "compare_lss_rules.py",
            "--min-price", str(args.min_price), "--max-price", str(args.max_price),
-           "--bt-min", "0", "--workers", str(args.workers),
+           "--bt-min", str(args.bt_min), "--workers", str(args.workers),
            "--sm", str(sm), "--tm", str(tm)]
-    if phase == "TRAIN":
-        cmd += ["--days", str(args.train_days), "--holdout-days", str(args.holdout_days)]
+    if phase.startswith("TRAIN"):
+        cmd += ["--days", str(args.train_days), "--holdout-days", str(holdout)]
     else:
-        cmd += ["--days", str(args.holdout_days)]
+        cmd += ["--days", str(holdout)]
     if args.extra.strip():
         cmd += args.extra.split()
 
@@ -167,61 +188,69 @@ def _run(sm: float, tm: float, phase: str) -> dict | None:
 
 done = _load_done()
 rows = list(done.values())
-print(f"[スイープ] sm {SMS} × tm {TMS} = {len(SMS) * len(TMS)}点 × TRAIN/TEST = "
-      f"{len(SMS) * len(TMS) * 2}回")
-print(f"  TRAIN: 直近{args.holdout_days}日を除いた{args.train_days}日")
-print(f"  TEST : 直近{args.holdout_days}日")
+print(f"[スイープ] sm {SMS} × tm {TMS} = {len(SMS) * len(TMS)}点 × TEST窓 {HOLDOUTS} "
+      f"× TRAIN/TEST = {len(SMS) * len(TMS) * len(HOLDOUTS) * 2}回")
+for _H in HOLDOUTS:
+    print(f"  窓{_H}日 … TRAIN: 直近{_H}日を除いた{args.train_days}日 / TEST: 直近{_H}日")
+print(f"  BT下限: {args.bt_min:.0f} (実機は BT30=プールの床=実質フィルタなし)")
 if done:
     print(f"  済み {len(done)}件は飛ばします ({OUT})")
 
 for sm in SMS:
     for tm in TMS:
-        for phase in ("TRAIN", "TEST"):
-            if (str(sm), str(tm), phase) in done:
-                continue
-            r = _run(sm, tm, phase)
-            if r:
-                rows.append(r)
-                _save(rows)
+        for H in HOLDOUTS:
+            for _ph in ("TRAIN", "TEST"):
+                # 窓が1本のときは従来の "TRAIN"/"TEST" のまま(既存CSVと互換)
+                phase = _ph if len(HOLDOUTS) == 1 else f"{_ph}{H}"
+                if (str(sm), str(tm), phase) in done:
+                    continue
+                r = _run(sm, tm, phase, H)
+                if r:
+                    rows.append(r)
+                    _save(rows)
 
 if args.dry_run:
     sys.exit(0)
 
 # ── 結果表 ────────────────────────────────────────────────────────────
 idx = {(float(r["sm"]), float(r["tm"]), r["phase"]): r for r in rows}
-print(f"\n{'=' * 92}")
-print("■ sm/tm スイープ結果 (base ルールの net現実)")
-print(f"{'=' * 92}")
-for phase in ("TRAIN", "TEST"):
-    print(f"\n  [{phase}]")
-    _hdr = "sm＼tm"
-    print(f"  {_hdr:<10}" + "".join(f"{t:>16.1f}" for t in TMS))
-    print("  " + "-" * (10 + 16 * len(TMS)))
-    for sm in SMS:
-        cells = ""
-        for tm in TMS:
-            r = idx.get((sm, tm, phase))
-            cells += f"{float(r['net_real']):>+16,.0f}" if r else f"{'—':>16}"
-        print(f"  {sm:<10.2f}{cells}")
+_SINGLE = len(HOLDOUTS) == 1
+
+
+def _ph(kind: str, H: int) -> str:
+    return kind if _SINGLE else f"{kind}{H}"
+
+
+def _get(sm, tm, kind, H, col="net_real"):
+    r = idx.get((sm, tm, _ph(kind, H)))
+    if not r:
+        return None
+    try:
+        return float(r[col])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+for H in HOLDOUTS:
+    print(f"\n{'=' * 92}")
+    print(f"■ sm/tm スイープ結果 (base ルールの net現実) — TEST窓 {H}日")
+    print(f"{'=' * 92}")
+    for kind in ("TRAIN", "TEST"):
+        print(f"\n  [{kind}]")
+        print(f"  {'sm＼tm':<10}" + "".join(f"{t:>16.1f}" for t in TMS))
+        print("  " + "-" * (10 + 16 * len(TMS)))
+        for sm in SMS:
+            cells = ""
+            for tm in TMS:
+                v = _get(sm, tm, kind, H)
+                cells += f"{v:>+16,.0f}" if v is not None else f"{'—':>16}"
+            print(f"  {sm:<10.2f}{cells}")
+
 
 # ── 軸ごとに TRAIN/TEST が一致しているか ────────────────────────────
 # ⛔ ここが判断の本体。グリッドの最良点1つを選ぶのは in-sample フィット。
 #    「sm は両方で単調、tm は逆向き」なら **sm だけ変えて tm は据え置く** のが正しい。
-#    実測(2026-08-07): sm は TRAIN/TEST 全列で単調増加、tm は TRAIN=1.5最良 /
-#    TEST=1.0最良 と逆。tm を TRAIN に合わせて変えていたら OOS で損をしていた。
-def _axis(vals_by_key, axis_vals, other_vals, axis_is_sm: bool, col: str):
-    """軸の平均値を TRAIN/TEST で出す。"""
-    out = {}
-    for ph in ("TRAIN", "TEST"):
-        means = []
-        for a in axis_vals:
-            xs = [float(vals_by_key[(a, o, ph)][col])
-                  for o in other_vals if (a, o, ph) in vals_by_key] if axis_is_sm else \
-                 [float(vals_by_key[(o, a, ph)][col])
-                  for o in other_vals if (o, a, ph) in vals_by_key]
-            means.append(sum(xs) / len(xs) if xs else float("nan"))
-        out[ph] = means
-    return out
+_PLATEAU = 0.10   # 最良値からこの割合以内は「同等」とみなす
 
 
 def _rank(xs):
@@ -241,81 +270,98 @@ def _spearman(a, b) -> float:
     return 1 - 6 * d2 / (n * (n * n - 1))
 
 
-_PLATEAU = 0.10   # 最良値からこの割合以内は「同等」とみなす
+def _axis_means(axis_vals, other_vals, axis_is_sm, kind, H, col):
+    """軸の各水準について、もう一方の軸で平均した値を返す。"""
+    out = []
+    for a in axis_vals:
+        xs = []
+        for o in other_vals:
+            v = _get(a, o, kind, H, col) if axis_is_sm else _get(o, a, kind, H, col)
+            if v is not None:
+                xs.append(v)
+        out.append(sum(xs) / len(xs) if xs else float("nan"))
+    return out
 
-print(f"\n{'=' * 92}")
-print("■ 軸ごとの TRAIN/TEST 一致 (ここが判断の本体)")
-print(f"{'=' * 92}")
+
+# 窓ごとの推奨を貯めて、最後に一致を見る
+_picks: dict = {}
+
 for name, av, ov, is_sm, cur in (("sm(損切り)", SMS, TMS, True, 0.1),
                                  ("tm(利確)", TMS, SMS, False, 1.0)):
     if len(av) < 3:
         print(f"\n  {name}: 水準が{len(av)}個しかないので判定しません"
               f"(3個以上のグリッドで回してください)")
         continue
-    m = _axis(idx, av, ov, is_sm, "net_real")
-    mc = _axis(idx, av, ov, is_sm, "net_cons")
-    if any(x != x for x in m["TRAIN"] + m["TEST"]):
-        continue
-    rho = _spearman(m["TRAIN"], m["TEST"])
-    print(f"\n  {name}  (もう一方の軸で平均)")
-    print(f"    {'値':<12}" + "".join(f"{v:>14.2f}" for v in av))
-    print(f"    {'TRAIN 現実':<12}" + "".join(f"{x:>+14,.0f}" for x in m["TRAIN"]))
-    print(f"    {'TEST  現実':<12}" + "".join(f"{x:>+14,.0f}" for x in m["TEST"]))
-    print(f"    {'TRAIN 保守':<12}" + "".join(f"{x:>+14,.0f}" for x in mc["TRAIN"]))
-    print(f"    {'TEST  保守':<12}" + "".join(f"{x:>+14,.0f}" for x in mc["TEST"]))
-
-    # ⛔ 順位の完全一致で判定してはいけない。TEST が平坦(=どれも同等)なとき、
-    #    わずかな順位差を「不一致=ノイズ」と誤読する。実測 2026-08-07 の sm が
-    #    まさにそれで、TEST は 0.5〜1.5 が 3.5% 以内に収まる平坦域だったのに
-    #    「ノイズなので変えるな」と誤った判定を出した。
-    #    正しい読み方: TEST が『どこから上は同等か』を見て、その範囲の中で
-    #    TRAIN が最良の点を採る。
-    te_max = max(m["TEST"])
-    plateau = [av[i] for i, x in enumerate(m["TEST"])
-               if te_max > 0 and x >= te_max * (1 - _PLATEAU)]
-    print(f"    順位相関(Spearman) = {rho:+.2f}", end="")
-    if rho >= 0.7:
-        print("  → **TRAIN と TEST が同じ向き。この軸は本物**")
-    elif rho <= -0.7:
-        print("  → 逆向き。**採用してはいけない**")
-    else:
-        print("  → 弱い。平坦域を見て判断する")
-    if plateau:
-        print(f"    TEST の平坦域(最良から{_PLATEAU:.0%}以内): {plateau}")
-        cand = [(av[i], m["TRAIN"][i]) for i in range(len(av)) if av[i] in plateau]
-        pick = max(cand, key=lambda kv: kv[1])[0] if cand else None
-        cur_i = av.index(cur) if cur in av else None
+    print(f"\n{'=' * 92}")
+    print(f"■ {name} — 軸ごとの TRAIN/TEST 一致 (ここが判断の本体)")
+    print(f"{'=' * 92}")
+    for H in HOLDOUTS:
+        tr = _axis_means(av, ov, is_sm, "TRAIN", H, "net_real")
+        te = _axis_means(av, ov, is_sm, "TEST", H, "net_real")
+        tc = _axis_means(av, ov, is_sm, "TEST", H, "net_cons")
+        if any(x != x for x in tr + te):
+            print(f"\n  窓{H}日: 未完了の組み合わせがあるので判定を飛ばします")
+            continue
+        rho = _spearman(tr, te)
+        print(f"\n  窓{H}日  (もう一方の軸で平均)")
+        print(f"    {'値':<12}" + "".join(f"{v:>14.2f}" for v in av))
+        print(f"    {'TRAIN 現実':<12}" + "".join(f"{x:>+14,.0f}" for x in tr))
+        print(f"    {'TEST  現実':<12}" + "".join(f"{x:>+14,.0f}" for x in te))
+        print(f"    {'TEST  保守':<12}" + "".join(f"{x:>+14,.0f}" for x in tc))
+        print(f"    順位相関(Spearman) = {rho:+.2f}", end="")
+        if rho >= 0.7:
+            print("  → TRAIN と TEST が同じ向き")
+        elif rho <= -0.7:
+            print("  → 逆向き。**この窓では採用してはいけない**")
+        else:
+            print("  → 弱い。平坦域で判断")
+        # TEST が平坦なとき、わずかな順位差を「不一致」と誤読しないための平坦域判定。
+        te_max = max(te)
+        plateau = [av[i] for i, x in enumerate(te)
+                   if te_max > 0 and x >= te_max * (1 - _PLATEAU)]
+        pick = None
+        if plateau:
+            cand = [(av[i], tr[i]) for i in range(len(av)) if av[i] in plateau]
+            pick = max(cand, key=lambda kv: kv[1])[0] if cand else None
+            print(f"    TEST の平坦域(最良から{_PLATEAU:.0%}以内): {plateau}")
         if pick is not None:
-            print(f"    → **推奨 {pick}** (TEST が同等な範囲の中で TRAIN が最良の点)")
-            if cur_i is not None:
-                print(f"       現行 {cur}: TRAIN {m['TRAIN'][cur_i]:+,.0f} / "
-                      f"TEST {m['TEST'][cur_i]:+,.0f} / TEST保守 {mc['TEST'][cur_i]:+,.0f}")
-                pi = av.index(pick)
-                print(f"       推奨 {pick}: TRAIN {m['TRAIN'][pi]:+,.0f} / "
-                      f"TEST {m['TEST'][pi]:+,.0f} / TEST保守 {mc['TEST'][pi]:+,.0f}")
-            if pick == av[-1] or pick == av[0]:
-                print(f"    ⚠ 推奨がグリッドの端。さらに広げて確かめること")
+            print(f"    → この窓の推奨: {pick}"
+                  f"{'  ⚠ グリッドの端。広げて確かめること' if pick in (av[0], av[-1]) else ''}")
+            _picks.setdefault(name, []).append((H, pick))
+        if cur in av:
+            i = av.index(cur)
+            print(f"    現行 {cur}: TRAIN {tr[i]:+,.0f} / TEST {te[i]:+,.0f} / "
+                  f"TEST保守 {tc[i]:+,.0f}")
 
-# TRAIN の最良点が TEST でどうなるか
-tr = [(k, v) for k, v in idx.items() if k[2] == "TRAIN"]
-if tr:
-    best = max(tr, key=lambda kv: float(kv[1]["net_real"]))
-    bsm, btm, _ = best[0]
-    te = idx.get((bsm, btm, "TEST"))
-    cur = idx.get((0.1, 1.0, "TEST"))
-    print(f"\n{'─' * 92}")
-    print(f"  TRAIN の最良点: sm={bsm} tm={btm}  → TRAIN {float(best[1]['net_real']):+,.0f}円")
-    if te:
-        print(f"                                  → TEST  {float(te['net_real']):+,.0f}円 "
-              f"(net保守 {float(te['net_cons']):+,.0f}円)")
-    if cur:
-        print(f"  現行 sm=0.1 tm=1.0 の TEST      → {float(cur['net_real']):+,.0f}円")
-        if te:
-            _d = float(te["net_real"]) - float(cur["net_real"])
-            print(f"  差                              → {_d:+,.0f}円 "
-                  f"{'✅ 改善' if _d > 0 else '❌ 悪化'}")
-    print()
-    print("  ⚠ TEST の表が『どこも似た値』ならパラメータに意味は無い(ノイズ)。")
-    print("    TRAIN の最良点だけ TEST でも突出しているときにだけ採用を検討する。")
-    print("    採用前に sim_portfolio_lss.py(予算・上限キャンセル込み)で必ず再検証すること。")
-    print("    単体の期待値がプラスでも予算が有限だと機会費用でマイナスになる(CLAUDE.md 18.10)。")
+# ── 窓をまたいだ一致 (ここを通らないものは採用しない) ─────────────
+print(f"\n{'=' * 92}")
+print("■ 判定")
+print(f"{'=' * 92}")
+if _SINGLE:
+    print("\n  ⚠ TEST窓が1本しかありません。**この結果だけで採用を決めないこと。**")
+    print("     ローリングOOSの実測では月次σが月平均の2.7倍あり、10ヶ月でも t=+1.18"
+          "(CLAUDE.md 18.24)。")
+    print("     窓を1つ変えるだけで順位はひっくり返ります。")
+    print("     → --holdout-list 60,120,180 で回し直して、全窓で同じ推奨が出るか"
+          "確かめてください。")
+else:
+    for name, ps in _picks.items():
+        vals = [v for _, v in ps]
+        agree = len(set(vals)) == 1
+        detail = " / ".join(f"窓{h}日→{v}" for h, v in ps)
+        print(f"\n  {name}: {detail}")
+        if agree and len(ps) == len(HOLDOUTS):
+            print(f"    → **全{len(ps)}窓で一致 ({vals[0]})。この軸は本物の可能性がある**")
+        else:
+            print(f"    → 窓ごとにバラける。**ノイズ。この軸は変えない**")
+    for name in ("sm(損切り)", "tm(利確)"):
+        if name not in _picks:
+            print(f"\n  {name}: 判定できるデータがありません")
+
+print("\n  ⛔ 採用前に必ずやること:")
+print("     1. sim_portfolio_lss.py(予算・上限キャンセル込み)で再検証する。")
+print("        単体の期待値がプラスでも、予算が有限だと機会費用でマイナスになる"
+      "(CLAUDE.md 18.10)。")
+print("     2. 差がノイズ帯を超えているか確かめる。ローリングOOSの実測で"
+      "発注順の入れ替えだけで σ=124,660円/10ヶ月 動く(18.24)。")
+print("        それ未満の改善は『測れていない』のであって『改善した』ではない。")

@@ -49,11 +49,15 @@ REM     reflect delay1. NOTE: the P&L tab under delay1 is OPTIMISTIC (engine fil
 REM     stop at the line); the realistic verdict is compare_lss_rules.py net-real.
 REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
 set "LSS_STOP_DELAY_BARS=1"
-REM --- BT threshold = 40 for ALL "BTxx-and-above" places: the detail filter tabs
-REM     (BT40+ list / BT40+ x entry-day) AND the 400man x BT-descending budget floor
-REM     (max(_BUD_MIN_BT=30, _BT_TAB_MIN)=40). One env drives them all. Set to 50 to revert.
-REM     (Note: after the #9 revert the old LSS_BUDGET_FLOOR_BT env is no longer read; use this.)
-set "LSS_BT_TAB_MIN=40"
+REM --- BT threshold = 30 (2026-08-08: lowered from 40). 30 equals the budget-sim
+REM     candidate pool floor (_BUD_MIN_BT is hard-clamped to >=30), so this is
+REM     effectively NO BT filter. One env drives every "BTxx-and-above" place:
+REM     the detail filter tabs AND the 400man budget floor (max(_BUD_MIN_BT, this)).
+REM     Why: BT has no discriminative power (CLAUDE.md 18.12) and the rolling-OOS
+REM     tier sweep is non-monotonic with BT30 best (18.24). BT40 also HALVES the
+REM     measurable signal: 9 months to t=2 at BT30 vs 29 months at BT40.
+REM     Set to 40 or 50 to revert.
+set "LSS_BT_TAB_MIN=30"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT
 REM     (measured 2026-08-07: frozen 866 / today 12,849). BT is built from the last

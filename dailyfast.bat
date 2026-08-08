@@ -28,8 +28,10 @@ set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
 REM --- delay1 ON: matches watch.bat --stop-delay-bars 1 (see CLAUDE.md 18.9) ---
 set "LSS_STOP_DELAY_BARS=1"
-REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor ---
-set "LSS_BT_TAB_MIN=40"
+REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor.
+REM     30 = the pool floor = effectively no BT filter (2026-08-08, CLAUDE.md 18.24).
+REM     Keep this in sync with daily.bat.
+set "LSS_BT_TAB_MIN=30"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT.
 REM     BT is built from the last 365 days, and the PnL tab shows the last 180 days,

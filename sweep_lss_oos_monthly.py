@@ -97,9 +97,10 @@ def _run_backtest(
     env["LSS_OOS_BUDGET_DAYS"] = str(days)
     env["LSS_BUDGET_MIN_BT"] = str(min_bt)
     env["LSS_OOS_BUDGET_BT_TIERS"] = bt_tiers  # 複数BT層を1スイープで出力
-    # daily.bat / ライブと条件を揃える: delay2 ON / BT閾値タブ40 (CLAUDE.md §18.9)
-    env.setdefault("LSS_STOP_DELAY_BARS", "2")
-    env.setdefault("LSS_BT_TAB_MIN", "40")
+    # daily.bat / ライブと条件を揃える (CLAUDE.md §18.9 / §18.24)
+    # ⚠ delay は実機(daily.bat・watch.bat)が 1。ここだけ 2 だと条件が食い違う。
+    env.setdefault("LSS_STOP_DELAY_BARS", "1")
+    env.setdefault("LSS_BT_TAB_MIN", "30")
     # daily.bat が明示クリアする変数: 残留値で結果が変わるものを安全のためクリア
     env.pop("LSS_REALISTIC_ENTRY", None)     # 未設定=True(現実的約定)が既定。=0の残留を防ぐ
     env.pop("LSS_CLOSESTOP_RESWEEP", None)   # 未設定=重処理スキップ(高速)
