@@ -2516,8 +2516,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         for _s in signals:
             _s["liquidity"] = 0.0
 
-    # 主: BTスコア降順 / 副: 売買代金降順(BTが同点なら流動性の高い銘柄を上に)
-    signals.sort(key=lambda x: (-(x.get("rec_score") or 0), -(x.get("liquidity") or 0)))
+    # 発注順は lss_order_rank に集約(レポートと lss_budget_cap で食い違わせないため)。
+    # 既定=流動性降順。旧既定のBT降順は 18.21 でランダム6本すべてを下回ると実測(z=-2.22)。
+    try:
+        import lss_order_rank as _lor
+        signals.sort(key=lambda x: _lor.sort_key(x.get("rec_score"), x.get("liquidity")))
+        print(f"  [{_lor.describe()}]", flush=True)
+    except Exception as _le:                       # 保険: 落ちるくらいなら旧挙動
+        print(f"  [warn] lss_order_rank 不可({_le}) → BT降順にフォールバック", flush=True)
+        signals.sort(key=lambda x: (-(x.get("rec_score") or 0), -(x.get("liquidity") or 0)))
     _last_signals.clear()
     _last_signals.extend(signals)
     if cfg_filter:

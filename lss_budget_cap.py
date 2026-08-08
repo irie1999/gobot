@@ -156,9 +156,18 @@ def main() -> int:
     if not signals:
         print("本日の lss シグナル(条件内)なし。終了します。")
         return 0
-    signals.sort(key=lambda s: s["bt"], reverse=True)
+    # 発注順は lss_order_rank に集約(レポートと同じ並びになるようにする)。
+    # 既定=流動性(売買代金)降順。旧既定のBT降順は 18.21 でランダム6本すべてを
+    # 下回ると実測(z=-2.22)。LSS_ORDER_RANK=bt で旧挙動に戻せる。
+    try:
+        import lss_order_rank as _lor
+        signals = _lor.sort_signals(signals)
+        print(f"[{_lor.describe()}]")
+    except Exception as _le:
+        print(f"[warn] lss_order_rank 不可({_le}) → BT降順にフォールバック")
+        signals.sort(key=lambda s: s["bt"], reverse=True)
 
-    # ── over-subscribe: 注文額の累計が cap に達するまで BT降順で採用 ──
+    # ── over-subscribe: 注文額の累計が cap に達するまで上位から採用 ──
     plan = []
     placed_not = 0.0
     for s in signals:

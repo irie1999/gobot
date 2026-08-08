@@ -163,11 +163,18 @@ def _lss_signal_today(sym: str, name: str, strat: str,
         # yf_sym(4911.T)はバックテスト取得用で、発注時は数値コードでないと
         # 「銘柄が見つからない」(Code 4002001)になる。
         kabu_code = yf_sym.upper().removesuffix(".T").split(".")[0]
+        # 平均日次売買代金(直近120日)。lss_budget_cap の流動性順発注で使う。
+        # レポート(nikkei_analysis:2510)と同じ定義に揃えてある。
+        try:
+            import lss_order_rank as _lor
+            _liq = _lor.daily_turnover(df)
+        except Exception:
+            _liq = 0.0
         return {
             "symbol": kabu_code, "name": name, "strategy": strat,
             "family": "lss",
             "order_price": lp, "stop_price": sp, "target_price": tp,
-            "signal_date": str(sd),
+            "signal_date": str(sd), "liquidity": _liq,
         }
     return None
 

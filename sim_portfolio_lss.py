@@ -89,9 +89,11 @@ ap.add_argument("--universe", type=str, default="selected",
                 help="発注候補の母集団。selected(既定)=lss_trades.csv の選定済みペア。"
                      "all=5分足のある全銘柄×全6戦略(WF選定を捨てる。18.20で選定は"
                      "何も足していないと確定したため、母集団を約2.5倍に広げられる)")
-ap.add_argument("--rank", type=str, default="bt",
+ap.add_argument("--rank", type=str, default="liquidity",
                 choices=["bt", "liquidity", "random"],
-                help="予算内で上から埋める順番。bt(既定)=BT降順。"
+                help="予算内で上から埋める順番。**既定=liquidity でライブ"
+                     "(lss_order_rank / lss_budget_cap / レポート)と揃えてある**。"
+                     "bt=旧既定。18.21 でランダム6本すべてを下回ると実測(z=-2.22)。"
                      "liquidity=前日売買代金の大きい順(=執行コストの小さい順)。"
                      "random=対照(順序に意味があるか自体を検証する)。"
                      "18.12/18.13でリターンは予測できないと確定しているので、"
