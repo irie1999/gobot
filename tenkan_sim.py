@@ -20,10 +20,34 @@ import threading
 from datetime import date, time
 from pathlib import Path
 
-BUY_TIME = time(9, 9)
-SELL_TIME = time(11, 30)
+def _env_time(name: str, default: time) -> time:
+    """HH:MM の環境変数を time に。壊れていれば既定に落とす。"""
+    import os
+    v = str(os.environ.get(name, "") or "").strip()
+    if not v:
+        return default
+    try:
+        h, m = (int(x) for x in v.split(":")[:2])
+        return time(h, m)
+    except Exception:
+        return default
+
+
+# 買い/売り時刻は env で動かせる。既定は現行(09:09買い→11:30売り)。
+#   ⛔ 09:09 買いは『不約定が確定する前』に入るので、成績を後から集計すると
+#      look-ahead になる (CLAUDE.md 18.5.3)。実装可能な唯一の締切 09:05 は
+#      純lss比 −272万。**現行の転換は実績記録用であって発注ルールではない。**
+#   → 18.5.3 が唯一「未検証」と書いた案 = **エントリーを遅らせる**
+#      (11:30買い→引け売り / 後場寄り買い→引け売り)。不約定がほぼ確定してから
+#      入るので look-ahead をほぼ消せる。それを試せるように env 化した。
+#        set TENKAN_BUY_TIME=11:30 & set TENKAN_SELL_TIME=15:25
+BUY_TIME = _env_time("TENKAN_BUY_TIME", time(9, 9))
+SELL_TIME = _env_time("TENKAN_SELL_TIME", time(11, 30))
 SLIP = 0.0005
-FEE = 0.001
+# 手数料は実口座に合わせて既定0(信用大口優遇プランは無料)。CLAUDE.md 18.14 で
+# backtest_limit_entry.FEE_PCT_ONE_WAY を 0 にしたのと同じ理由。
+# 旧既定(片道0.1%)で比較したいときだけ set LSS_FEE_ONE_WAY=0.001。
+FEE = float(__import__("os").environ.get("LSS_FEE_ONE_WAY", "0") or "0")
 QTY = 100
 
 _DIR5: "Path | None" = None
