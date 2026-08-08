@@ -1799,8 +1799,16 @@ for _sig in _na._last_signals:
 
     if _skey not in _score_cache:
         # 新規シグナル: 現在のBTスコアで保存
+        # first_seen_ts (時刻つき) も残す。first_seen は日付だけなので
+        # 「--date S を S+1 の引け後に再生成した」= 汚染 を audit_score_cache.py が
+        # 判別できない(S+1 は翌営業日なので日付だけでは正常と区別がつかない)。
+        # 引け(15:30 JST)より後に凍結されたかどうかは時刻でしか分からない。
         _real_bt = _sig.get("rec_score", 0)
-        _score_cache[_skey] = {"bt_score": _real_bt, "first_seen": str(TODAY)}
+        _score_cache[_skey] = {
+            "bt_score": _real_bt,
+            "first_seen": str(TODAY),
+            "first_seen_ts": datetime.now(JST).isoformat(timespec="seconds"),
+        }
         if _cached and _cached["signal_date"] != _ssigdt:
             # signal_dateが変わった → 古い凍結スコアを使っているので再生成が必要
             _na._FROZEN_BT_SCORES[(_ssym, _sstrat)] = _real_bt

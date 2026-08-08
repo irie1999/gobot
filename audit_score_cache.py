@@ -48,8 +48,12 @@ import json
 import shutil
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+
+# 東証の大引け(2024/11以降 15:30)。翌営業日のこれ以降に凍結された = その日の
+# 約定・同日決済がBTに入っている = 汚染。
+CLOSE_TIME = time(15, 30)
 
 ap = argparse.ArgumentParser(description="凍結BTキャッシュの先読み監査")
 ap.add_argument("--json", type=str, default="signal_score_cache_lss.json")
@@ -96,8 +100,22 @@ for k, v in cache.items():
     lag_days = (seen_d - sig_d).days
     # 許容 = シグナル日 と その翌営業日 まで
     ok = seen_d <= _next_bday(sig_d)
+    # 隙間ふさぎ: 翌営業日でも **引け後(15:30 JST以降)** に凍結されていれば、
+    # その日に約定・同日決済した取引がBTに入っている = 汚染。日付だけでは判別できず、
+    # first_seen_ts (2026-08-08 以降の書き込みにのみ存在) があるときだけ判定できる。
+    late_close = False
+    if ok and seen_d == _next_bday(sig_d):
+        _ts = str(v.get("first_seen_ts", "") or "")
+        if len(_ts) >= 16:
+            try:
+                if datetime.fromisoformat(_ts).time() >= CLOSE_TIME:
+                    ok, late_close = False, True
+            except Exception:
+                pass
     rows.append({"key": k, "sym": sym, "strat": strat, "sig": sig_d,
-                 "seen": seen_d, "lag": lag_days, "bt": bt, "ok": ok})
+                 "seen": seen_d, "lag": lag_days, "bt": bt, "ok": ok,
+                 "late_close": late_close,
+                 "ts": str(v.get("first_seen_ts", "") or "")})
     if not ok:
         bad.append(rows[-1])
 
@@ -111,10 +129,16 @@ print(f"{'=' * 78}")
 print(f"  {'区分':<34}{'件数':>9}{'割合':>8}")
 print("  " + "-" * 51)
 _tot = len(rows) + len(no_meta)
-for label, n in [("✅ 正しい凍結 (当日〜翌営業日)", n_ok),
-                 ("⛔ 汚染 (翌々営業日以降に凍結)", len(bad)),
+_n_late = sum(1 for r in bad if r.get("late_close"))
+for label, n in [("✅ 正しい凍結 (翌営業日の引け前まで)", n_ok),
+                 ("⛔ 汚染 (翌々営業日以降に凍結)", len(bad) - _n_late),
+                 ("⛔ 汚染 (翌営業日だが引け後に凍結)", _n_late),
                  ("? first_seen/日付が読めない", len(no_meta))]:
     print(f"  {label:<34}{n:>9,}{(n / _tot * 100 if _tot else 0):>7.1f}%")
+_n_ts = sum(1 for r in rows if r.get("ts"))
+if _n_ts < len(rows):
+    print(f"  ※ {len(rows) - _n_ts:,}件は first_seen_ts(時刻)が無い古い書き込み。"
+          f"『翌営業日の引け後』の判定ができません(日付だけで正常扱い)。")
 print("  " + "-" * 51)
 print(f"  {'合計':<34}{_tot:>9,}")
 
