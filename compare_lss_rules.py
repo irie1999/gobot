@@ -297,6 +297,19 @@ def _day_ohlc(df_raw, fd):
     return (None, None, None, None)
 
 
+try:
+    from intraday_integrity import day_scale_ok as _integrity_ok
+except Exception:                       # 単体でも動くようにフォールバック
+    def _integrity_ok(day_bars, daily_close, max_dev=0.30):
+        if day_bars is None or len(day_bars) == 0 or not (daily_close and daily_close > 0):
+            return True
+        try:
+            med = float(day_bars["close"].median())
+        except Exception:
+            return True
+        return med > 0 and abs(med / daily_close - 1.0) <= max_dev
+
+
 def _prices(order_limit, order_stop, order_target):
     base = round_to_tick(order_limit)
     trigger = float(round_to_tick(base - tick_size(base)))
@@ -487,6 +500,15 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> dict:
                 continue
             trigger, stop_p, target_p = _prices(olp, osp, otp)
             d_open, d_low, d_high, d_close = _day_ohlc(df_raw, fd)
+            # ⛔ 5分足と日足の価格基準ズレ(株式分割の未調整)を弾く。
+            #    5分足は保存時のまま、日足(yfinance)は分割を遡及調整するので、
+            #    分割銘柄の分割前の日は「5分足 = 日足 × 分割比」になる。
+            #    注文値は日足由来なので、混ぜると max(line, bar_open) 形の窓埋めが
+            #    片側にだけ効いて巨大な偽の損失になる
+            #    (実測 7013.T 2025-08-14: 1件 -1,424,500円 / MAE 601% = 1日で7倍)。
+            #    base は opens[] を読まないので無傷 → delay 系だけが壊れて見えた。
+            if not _integrity_ok(db, d_close):
+                continue
             entry_fill = short_entry_fill_5m(db, trigger, False, entry_gap_limit=_GAP_LIMIT,
                                              day_open=d_open, day_low=d_low, day_high=d_high)
             if entry_fill is None:

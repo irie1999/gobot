@@ -1433,7 +1433,13 @@ if not _args.date:
 #        決済滑りの99%がこのケースで、資生堂08/07は実約定3,536.5に対し新モデル3,536.0と
 #        40円差で一致した。v15 のキャッシュは楽観なので必ず版を分ける。
 #        LSS_OPTIMISTIC_STOP_FILL=1 で旧挙動に戻せる(その場合も版トークンで別キャッシュ)。
-_BT_LOGIC_VER = "v16"
+# v17 (2026-08-08): 5分足と日足の価格基準ズレ(株式分割の未調整)を弾くガードを追加。
+#        5分足は保存時のまま、日足(yfinance)は分割を遡及調整するため、分割銘柄の
+#        分割前の日は「5分足 = 日足 × 分割比」。注文値は日足由来なので混ぜると
+#        max(stop, bar_open) が片側にだけ効いて偽の巨大損失になる
+#        (実測 7013.T 2025-08-14 で1件 -1,424,500円 / MAE 601% = 1日で7倍)。
+#        v16 のキャッシュは汚染された日を含むので必ず版を分ける。
+_BT_LOGIC_VER = "v17"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
@@ -1446,6 +1452,11 @@ if str(os.environ.get("LSS_NO_UNIVERSE_PRICE_FILTER", "") or "").strip() \
         not in ("", "0", "false", "no", "off"):
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}nupf"
 # 損切り約定を楽観(stopちょうど)に戻した結果は別キャッシュにする。
+if str(os.environ.get("LSS_NO_INTEGRITY_GUARD", "") or "").strip() \
+        not in ("", "0", "false", "no", "off"):
+    _BT_LOGIC_VER = f"{_BT_LOGIC_VER}noig"
+    print("[整合性ガード] OFF — 5分足/日足の価格基準ズレを弾きません "
+          "(LSS_NO_INTEGRITY_GUARD)", flush=True)
 if str(os.environ.get("LSS_OPTIMISTIC_STOP_FILL", "") or "").strip() \
         not in ("", "0", "false", "no", "off"):
     _BT_LOGIC_VER = f"{_BT_LOGIC_VER}optstop"

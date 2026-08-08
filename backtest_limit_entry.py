@@ -694,6 +694,25 @@ _INTRADAY_5M_DAYS: int = 400           # 5分足を何日分ロードするか�
 # PF 0.93→1.43)。環境変数 LSS_STOP_DELAY_BARS で切替可(実運用は寄り5分後に逆指値損切りを
 # 設置する運用に対応)。mirror(指値空売り)には適用しない=lss(stop_sell)のみ。
 _LSS_STOP_DELAY_BARS: int = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
+
+# ── 5分足と日足の価格基準ズレ(株式分割の未調整)ガード ────────────────────
+# 5分足(stock_5min)は保存時のまま、日足(yfinance)は分割を遡及調整するため、
+# 分割銘柄の分割前の日は「5分足 = 日足 × 分割比」になる。注文値は日足由来なので、
+# 混ぜると _stop_fill_short = max(stop, bar_open) が片側にだけ効いて偽の巨大損失になる。
+# 既定ON。比較のため切るなら set LSS_NO_INTEGRITY_GUARD=1
+_INTEGRITY_GUARD: bool = not (
+    str(os.environ.get("LSS_NO_INTEGRITY_GUARD", "") or "").strip() in ("1", "true", "True"))
+try:
+    from intraday_integrity import day_scale_ok as _integrity_ok
+except Exception:
+    def _integrity_ok(day_bars, daily_close, max_dev=0.30):
+        if day_bars is None or len(day_bars) == 0 or not (daily_close and daily_close > 0):
+            return True
+        try:
+            med = float(day_bars["close"].median())
+        except Exception:
+            return True
+        return med > 0 and abs(med / daily_close - 1.0) <= max_dev
 _INTRADAY_5M_CACHE: dict = {}          # symbol -> {date: 5分足DataFrame} (プロセス内キャッシュ)
 
 
@@ -1243,6 +1262,21 @@ def run_limit_backtest(
             #  ・始値: 約定価格の寄り基準。 ・安値/高値: トリガー到達の最終判定(欠落バー救済)。
             #  ・終値: タイムカット(引け成行MOC)の決済価格=公式終値(引け値)。
             _day_open = _day_low = _day_high = _day_close = None
+            # ⛔ 5分足と日足の価格基準ズレ(株式分割の未調整)を弾く。
+            #    5分足(stock_5min)は保存時のまま。日足(yfinance)は分割を**遡及調整**する。
+            #    そのため分割銘柄の分割前の日は「5分足 = 日足 × 分割比」になる。
+            #    注文値(トリガー/損切り/利確)は日足由来なので、混ぜると
+            #    _stop_fill_short = max(stop, bar_open) が片側にだけ効いて巨大な偽損失になる。
+            #    実測(2026-08-08): 7013.T 2025-08-14 で1件 -1,424,500円 / MAE 601%
+            #    (= 1日で株価7倍。値幅制限があるので物理的に不可能)。
+            #    切り戻すなら set LSS_NO_INTEGRITY_GUARD=1
+            if _INTEGRITY_GUARD:
+                try:
+                    _drow0 = df.loc[df.index.normalize() == pd.Timestamp(_fd)]
+                    if len(_drow0) and not _integrity_ok(_db, float(_drow0["close"].iloc[0])):
+                        continue
+                except Exception:
+                    pass
             # 現実的な約定価格(ギャップ考慮): 寄りが既にトリガーを割って始まると始値約定。
             # ギャップが指値ガード(±_INTRADAY_5M_ENTRY_GAP_LIMIT)超なら約定不可でスキップ。
             if _INTRADAY_5M_REALISTIC_ENTRY:
