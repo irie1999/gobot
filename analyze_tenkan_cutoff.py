@@ -67,13 +67,18 @@ ap.add_argument("--buy-mode", choices=["cutoff", "fixed"], default="cutoff",
 ap.add_argument("--tk-buy", type=str, default="09:09",
                 help="--buy-mode fixed のときの買い時刻。cutoff モードでも"
                      "『締切なし/全部転換』の行はこの時刻を使う")
-ap.add_argument("--tk-sell", type=str, default="11:30",
-                help="転換の売り時刻(この時刻以前の最後バーOPEN)。引けまで持つなら 15:25")
-ap.add_argument("--tk-sm", type=float, default=0.0,
-                help="転換(ロング)の損切りATR倍率。0=損切りを置かない(時間決済のみ)。"
-                     "**これは一度も試されていない**(転換は常に時間決済だった)")
-ap.add_argument("--tk-tm", type=float, default=0.0,
-                help="転換(ロング)の利確ATR倍率。0=利確を置かない")
+ap.add_argument("--tk-exits", type=str,
+                default="0/0@11:30,0/0@15:25,0.1/1.0@15:25,0.3/1.5@15:25",
+                help="転換の決済ルールを **複数並べて比較** する。書式 sm/tm@HH:MM を"
+                     "カンマ区切り。sm=tm=0 は時間決済のみ(OCOなし)。"
+                     "時刻はOCOに触れなかったときの手仕舞い(時間backstop)。"
+                     "例 0/0@11:30(前場引け) / 0/0@15:25(大引け) / 0.1/1.0@15:25(lssの鏡像)")
+ap.add_argument("--tk-sell", type=str, default=None,
+                help="[単発指定] 売り時刻。--tk-sm/--tk-tm と併せて使うと決済ルールを1本に固定する")
+ap.add_argument("--tk-sm", type=float, default=None,
+                help="[単発指定] 転換(ロング)の損切りATR倍率")
+ap.add_argument("--tk-tm", type=float, default=None,
+                help="[単発指定] 転換(ロング)の利確ATR倍率")
 ap.add_argument("--by-month", action="store_true")
 ap.add_argument("--bt-window", type=int, default=420,
                 help="BTスコア算出のためにバックテストを何日ぶん余分に回すか(既定420)。"
@@ -133,7 +138,34 @@ def _prices(order_limit, order_stop, order_target):
 # 拡張版をローカルに持つ。ルールが違うので別実装にしてある。
 _TK_SLIP = 0.0005            # tenkan_sim と同じ
 _TK_BUY = _parse_hhmm(args.tk_buy, _time(9, 9))
-_TK_SELL = _parse_hhmm(args.tk_sell, _time(11, 30))
+
+
+def _parse_exits(spec: str) -> list:
+    """'sm/tm@HH:MM,...' を [(ラベル, sm, tm, 売り時刻)] にする。"""
+    out = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            smtm, hhmm = item.split("@")
+            _sm, _tm = (float(x) for x in smtm.split("/"))
+            out.append((item, _sm, _tm, _parse_hhmm(hhmm, _time(11, 30))))
+        except Exception:
+            print(f"[WARN] 決済ルールを解釈できません: {item}")
+    return out
+
+
+# --tk-sm/--tk-tm/--tk-sell のどれかが指定されていれば決済ルールは1本に固定する
+if any(v is not None for v in (args.tk_sm, args.tk_tm, args.tk_sell)):
+    _s = args.tk_sm or 0.0
+    _t = args.tk_tm or 0.0
+    _h = args.tk_sell or "11:30"
+    EXITS = [(f"{_s:g}/{_t:g}@{_h}", _s, _t, _parse_hhmm(_h, _time(11, 30)))]
+else:
+    EXITS = _parse_exits(args.tk_exits)
+if not EXITS:
+    sys.exit("[error] 決済ルールが1つもありません (--tk-exits)")
 
 
 def _atr_of(olp: float, osp: float, otp: float) -> float:
@@ -150,7 +182,8 @@ def _atr_of(olp: float, osp: float, otp: float) -> float:
     return v if v == v and v > 0 else 0.0
 
 
-def _tenkan(db, buy_t, atr: float) -> "float | None":
+def _tenkan(db, buy_t, atr: float, tk_sm: float, tk_tm: float,
+            sell_t) -> "float | None":
     """転換(ロング)の損益。buy_t 以降の最初バーOPENで買う。
 
     OCO(--tk-sm / --tk-tm)を置いた場合は先にタッチしたほうで決済し、
@@ -176,7 +209,7 @@ def _tenkan(db, buy_t, atr: float) -> "float | None":
     # 時間決済の足(これ以降は建てない)
     li = None
     for i in range(len(times) - 1, -1, -1):
-        if times[i] <= _TK_SELL:
+        if times[i] <= sell_t:
             li = i
             break
     if li is None or li <= bi:
@@ -184,9 +217,9 @@ def _tenkan(db, buy_t, atr: float) -> "float | None":
 
     b = buy_raw * (1 + _TK_SLIP)
     sell_raw = None
-    if atr > 0 and (args.tk_sm > 0 or args.tk_tm > 0):
-        stop_p = buy_raw - atr * args.tk_sm if args.tk_sm > 0 else None
-        tgt_p = buy_raw + atr * args.tk_tm if args.tk_tm > 0 else None
+    if atr > 0 and (tk_sm > 0 or tk_tm > 0):
+        stop_p = buy_raw - atr * tk_sm if tk_sm > 0 else None
+        tgt_p = buy_raw + atr * tk_tm if tk_tm > 0 else None
         lows = db["low"].to_numpy(dtype=float)
         highs = db["high"].to_numpy(dtype=float)
         opens = db["open"].to_numpy(dtype=float)
@@ -398,12 +431,16 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
             #    『まだ知らないこと(その時刻まで約定しなかった)』を使って09:09に買う
             #    = 時間逆行。実装可能なのは締切<=買い時刻の行だけだった。
             _atr = _atr_of(olp, osp, otp)
-            tk_fixed = _tenkan(db, _TK_BUY, _atr)
-            tk_by_cut: dict = {}
-            for _lbl, _ct in CUTOFFS:
-                tk_by_cut[_lbl] = (_tenkan(db, _ct, _atr)
-                                   if args.buy_mode == "cutoff" else tk_fixed)
-            tk_pnl = tk_fixed
+            # キーは (締切ラベル or None, 決済ルールラベル)。
+            # 締切=買い時刻なので、締切を変えると転換の損益も変わる。
+            tk_by: dict = {}
+            for _xl, _xsm, _xtm, _xsell in EXITS:
+                _fx = _tenkan(db, _TK_BUY, _atr, _xsm, _xtm, _xsell)
+                tk_by[(None, _xl)] = _fx          # 締切なし/全部転換 用(買い固定)
+                for _cl, _ct in CUTOFFS:
+                    tk_by[(_cl, _xl)] = (
+                        _tenkan(db, _ct, _atr, _xsm, _xtm, _xsell)
+                        if args.buy_mode == "cutoff" else _fx)
 
             # BTスコア用(base=約定した分のlss損益)
             if lss_pnl is not None:
@@ -412,8 +449,7 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
             local.append({
                 "date": str(fd), "symbol": sym, "name": name, "strategy": strat,
                 "fill_time": fill_t.strftime("%H:%M") if fill_t else "",
-                "lss_pnl": lss_pnl, "tenkan_pnl": tk_pnl, "trigger": trigger,
-                "tk_cut": tk_by_cut,
+                "lss_pnl": lss_pnl, "trigger": trigger, "tk": tk_by,
             })
 
         # BTスコアで足切り(compare_lss_rules と同じ算出)
@@ -456,12 +492,13 @@ _cut = (TODAY - pd.Timedelta(days=args.days)).date()
 ALL = [r for r in ALL if str(r["date"]) >= str(_cut)]
 
 n_fill = sum(1 for r in ALL if r["lss_pnl"] is not None)
-n_tk = sum(1 for r in ALL if r["tenkan_pnl"] is not None)
+_REF_X = EXITS[0][0]          # 帯テーブル用の参考決済ルール(先頭)
+n_tk = sum(1 for r in ALL if r["tk"].get((None, _REF_X)) is not None)
 print(f"\n[集計] シグナル {len(ALL)}件 / lss約定 {n_fill}件({n_fill / len(ALL) * 100:.1f}%) "
       f"/ 転換計算可 {n_tk}件", flush=True)
 
 
-def _agg(mode_name, cutoff, label=None):
+def _agg(mode_name, cutoff, label=None, exit_label=""):
     """締切ごとに lss と 転換 を振り分けて集計する。
 
     転換の損益は **その締切時刻に買った場合**の値を使う(label 経由)。
@@ -490,8 +527,7 @@ def _agg(mode_name, cutoff, label=None):
             p = r["lss_pnl"]
             n_l += 1
         else:
-            p = (r["tk_cut"].get(label) if label is not None
-                 else r["tenkan_pnl"])
+            p = r["tk"].get((label, exit_label))
             if p is None:
                 continue
             n_t += 1
@@ -509,58 +545,96 @@ def _agg(mode_name, cutoff, label=None):
             "pnl": pnl, "mon": mon}
 
 
-RES = [_agg(nm, cu, nm if (nm, cu) in CUTOFFS else None) for nm, cu in MODES]
-_base = RES[0]["pnl"]   # 純lss(転換なし)を基準にする
+# 純lss は決済ルールに依存しない(転換を1件もしない)ので1回だけ計算する。
+_PURE = _agg("純lss(転換なし)", "PURE")
+_base = _PURE["pnl"]
+
+# (締切 × 決済ルール) の全組み合わせ
+GRID: dict = {}
+for _xl, _xsm, _xtm, _xsell in EXITS:
+    for nm, cu in MODES[1:]:                    # 純lss を除く
+        _cl = nm if (nm, cu) in CUTOFFS else None
+        GRID[(nm, _xl)] = _agg(nm, cu, _cl, _xl)
 
 print("\n" + "=" * 96)
 print("転換の締切時刻スイープ — この時刻までに約定しなければ転換(ロング)に切替")
 print("=" * 96)
-_oco = (f"損切ATR{args.tk_sm} / 利確ATR{args.tk_tm}"
-        if (args.tk_sm > 0 or args.tk_tm > 0) else "OCOなし(時間決済のみ)")
-print(f"  転換ルール: 買い={'締切時刻' if args.buy_mode == 'cutoff' else args.tk_buy} / "
-      f"売り={args.tk_sell}以前の最後バー / {_oco}")
+print(f"  買い時刻: {'締切時刻(実運用と時間整合)' if args.buy_mode == 'cutoff' else args.tk_buy + ' 固定'}")
+print(f"  決済ルール: {len(EXITS)}本 (sm/tm@時刻。sm=tm=0 は時間決済のみ)")
 print(f"  母集団: BT>={args.bt_min:.0f} / 価格 {args.min_price:.0f}-{args.max_price:.0f} / "
       f"delay{args.stop_delay_bars} / 直近{args.days}日")
 if args.buy_mode == "fixed":
     print("  " + "!" * 86)
-    print("  ⛔ --buy-mode fixed: 買いは常に " + args.tk_buy + " です。")
+    print(f"  ⛔ --buy-mode fixed: 買いは常に {args.tk_buy} です。")
     print("     それより後の締切行は『その時刻まで約定しなかった』という"
           "**まだ知らない情報**を使って買うことになります(時間逆行)。")
-    print("     実装可能なのは 締切 <= 買い時刻 の行だけです。")
     print("  " + "!" * 86)
-print("-" * 96)
-print(f"{'締切':<22}{'合計':>6}{'lss':>6}{'転換':>6}{'勝率':>7}{'PF':>7}"
-      f"{'総損益':>14}{'純lss比':>15}")
-print("-" * 96)
-for r in RES:
-    pf = "∞" if r["pf"] == float("inf") else f"{r['pf']:.2f}"
-    d = r["pnl"] - _base
-    mark = ("  ←基準" if r["name"].startswith("純lss")
-            else ("  ←現行" if r["name"].startswith("締切なし") else ""))
-    print(f"{r['name']:<22}{r['n']:>6}{r['lss']:>6}{r['tenkan']:>6}"
-          f"{r['wr']:>6.1f}%{pf:>7}{r['pnl']:>13,.0f}円{d:>+13,.0f}円{mark}")
+
+# ── マトリクス: 純lss比 ──────────────────────────────────────────────
+_W = max(16, max(len(x[0]) for x in EXITS) + 2)
+print(f"\n【純lss比(円)】 基準 = 純lss(転換なし) {_base:+,.0f}円 / {_PURE['n']:,}件 "
+      f"勝率{_PURE['wr']:.1f}%")
+print(f"  {'締切(=買い時刻)':<22}" + "".join(f"{x[0]:>{_W}}" for x in EXITS))
+print("  " + "-" * (22 + _W * len(EXITS)))
+for nm, cu in MODES[1:]:
+    cells = ""
+    for _xl, *_ in EXITS:
+        g = GRID.get((nm, _xl))
+        cells += f"{g['pnl'] - _base:>+{_W},.0f}" if g else f"{'—':>{_W}}"
+    mark = "  ←現行" if nm.startswith("締切なし") else ""
+    print(f"  {nm:<22}{cells}{mark}")
+print("\n  ※ 『締切なし(現行)』は終日不約定を転換した値 = 大引けまで待たないと分からない"
+      "\n     ので実装できません(18.5.3)。プラスでも採用不可。基準は純lssです。")
+
+# ── 最良セルの内訳 ────────────────────────────────────────────────────
+_cands = [(k, g) for k, g in GRID.items() if not k[0].startswith("締切なし")
+          and not k[0].startswith("全部転換")]
+if _cands:
+    (_bn, _bx), _bg = max(_cands, key=lambda kv: kv[1]["pnl"])
+    print(f"\n【実装可能な中での最良】締切 {_bn} × 決済 {_bx}")
+    print(f"  {_bg['n']:,}件 (lss {_bg['lss']:,} / 転換 {_bg['tenkan']:,}) "
+          f"勝率{_bg['wr']:.1f}% PF{_bg['pf']:.2f}")
+    print(f"  総損益 {_bg['pnl']:+,.0f}円   純lss比 {_bg['pnl'] - _base:+,.0f}円")
+    if _bg["pnl"] <= _base:
+        print("  → **純lssを上回っていません。転換は採用しない。**")
+    else:
+        _cells = len(_cands)
+        print(f"  → 純lssを上回った。ただし **{_cells}セルの中の最良** なので、"
+              f"そのぶん偶然に良く出ている。")
+        print("     採用前に必ず: ①--by-month で月別の一貫性(半分以上の月でプラスか)")
+        print("                  ②予算シミュ(sim_portfolio_lss)で機会費用込みの検証(18.10)")
+        print("                  ③別期間(--days を変える)でも同じセルが選ばれるか")
 
 if args.by_month:
-    months = sorted({m for r in RES for m in r["mon"]})
-    print("\n【月別】")
-    print(f"{'締切':<22}" + "".join(f"{m[2:]:>11}" for m in months))
-    for r in RES:
-        print(f"{r['name']:<22}" + "".join(f"{r['mon'].get(m, 0):>10,.0f}" for m in months))
+    for _xl, *_ in EXITS:
+        months = sorted({m for nm, cu in MODES[1:] for m in GRID[(nm, _xl)]["mon"]}
+                        | set(_PURE["mon"]))
+        print(f"\n【月別 — 決済 {_xl}】(純lss比)")
+        print(f"  {'締切':<22}" + "".join(f"{m[2:]:>11}" for m in months))
+        for nm, cu in MODES[1:]:
+            g = GRID[(nm, _xl)]
+            print(f"  {nm:<22}" + "".join(
+                f"{g['mon'].get(m, 0) - _PURE['mon'].get(m, 0):>10,.0f}" for m in months))
 
 _out = Path(f"analyze_tenkan_cutoff_{datetime.now().strftime('%Y-%m-%d')}.csv")
 with open(_out, "w", newline="", encoding="utf-8-sig") as f:
     w_ = _csv.writer(f)
-    w_.writerow(["cutoff", "trades", "lss_trades", "tenkan_trades",
+    w_.writerow(["cutoff", "exit_rule", "trades", "lss_trades", "tenkan_trades",
                  "win_rate_pct", "pf", "total_pnl", "vs_pure_lss"])
-    for r in RES:
-        pf = 999.0 if r["pf"] == float("inf") else round(r["pf"], 2)
-        w_.writerow([r["name"], r["n"], r["lss"], r["tenkan"], round(r["wr"], 1),
-                     pf, round(r["pnl"], 0), round(r["pnl"] - _base, 0)])
+    w_.writerow([_PURE["name"], "-", _PURE["n"], _PURE["lss"], _PURE["tenkan"],
+                 round(_PURE["wr"], 1),
+                 999.0 if _PURE["pf"] == float("inf") else round(_PURE["pf"], 2),
+                 round(_PURE["pnl"], 0), 0])
+    for (nm, _xl), g in GRID.items():
+        pf = 999.0 if g["pf"] == float("inf") else round(g["pf"], 2)
+        w_.writerow([nm, _xl, g["n"], g["lss"], g["tenkan"], round(g["wr"], 1),
+                     pf, round(g["pnl"], 0), round(g["pnl"] - _base, 0)])
 print(f"\n[出力] {_out}")
 
 # 約定時刻の分布(遅れ約定がどれだけ稼いでいるか)
 print(f"\n【lss約定時刻 × 損益】遅い約定を捨ててよいかの判断材料"
-      f"  ※転換列は {args.tk_buy} 買い固定の参考値")
+      f"\n  ※転換列は {args.tk_buy} 買い固定 × 決済 {_REF_X} の参考値"
+      f"(実装可能な数字ではない)")
 print(f"{'約定時刻帯':<14}{'件数':>7}{'勝率':>7}{'lss損益':>14}{'同じ銘柄を転換した場合':>22}")
 print("-" * 66)
 BANDS = [("〜09:05", "09:05"), ("09:06〜09:10", "09:10"), ("09:11〜09:15", "09:15"),
@@ -574,12 +648,14 @@ for lb, hi in BANDS:
     if not g:
         continue
     lp = sum(r["lss_pnl"] for r in g)
-    tp = sum(r["tenkan_pnl"] for r in g if r["tenkan_pnl"] is not None)
+    tp = sum(r["tk"][(None, _REF_X)] for r in g
+             if r["tk"].get((None, _REF_X)) is not None)
     wr = sum(1 for r in g if r["lss_pnl"] > 0) / len(g) * 100
     print(f"{lb:<14}{len(g):>7}{wr:>6.1f}%{lp:>13,.0f}円{tp:>21,.0f}円")
 _nf = [r for r in ALL if r["lss_pnl"] is None]
 if _nf:
-    tp = sum(r["tenkan_pnl"] for r in _nf if r["tenkan_pnl"] is not None)
+    tp = sum(r["tk"][(None, _REF_X)] for r in _nf
+             if r["tk"].get((None, _REF_X)) is not None)
     print(f"{'終日不約定':<14}{len(_nf):>7}{'—':>7}{'—':>14}{tp:>21,.0f}円")
 print("-" * 66)
 print("※ 『同じ銘柄を転換した場合』が lss損益 を上回る時刻帯は、その帯で転換に切替える価値がある。")
