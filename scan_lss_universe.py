@@ -368,6 +368,15 @@ def main():
           f"{len(universe)*len(strats)}ペア候補")
     print(f"[info] 基準月: {', '.join(base_list)} / sm={args.sm} tm={args.tm} / "
           f"{'摩擦なし' if (args.slip==0 and FEE_ONE_WAY==0) else f'slip{args.slip*100:.2f}%/手数料{FEE_ONE_WAY*100:.2f}%'}")
+    # ⛔ delay と価格フィルタは既定値のままだと live/他ツールと食い違う。表示していなかった
+    #    ために、2026-08-08 に analyze_uncond_break(delay1 / 1000-6000円) と
+    #    本ツール(delay0 / フィルタなし)を並べて誤った比較をしかけた。必ず目に見える形で出す。
+    _pf_lo = f"{args.min_price:,.0f}" if args.min_price > 0 else "下限なし"
+    _pf_hi = f"{args.max_price:,.0f}" if args.max_price < 1e8 else "上限なし"
+    print(f"[info] 損切り遅延 stop_delay_bars={args.stop_delay_bars}"
+          f"{'  ⚠live(watch.bat)は1' if args.stop_delay_bars != 1 else ''}"
+          f" / 価格フィルタ {_pf_lo}〜{_pf_hi}")
+    print(f"[info] 他ツールと数字を比べるときは delay と価格フィルタを必ず揃えること")
     if multi:
         print(f"[info] 一括モード: 取引ログを1回だけ計算し、{len(base_list)}基準月に振り分けて出力(高速)")
 
