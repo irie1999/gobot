@@ -10145,8 +10145,11 @@ function switchTbd(id, tab) {{
             cfg_filter is None and not symbol_filter and not strategy_filter):
         try:
             import csv as _rcsv
+            # liquidity(平均日次売買代金)を入れる。sim_oos_budget が発注順
+            # (流動性順・18.21)を再現するのに必要。無いと BT降順にしか戻せない。
             _rflds = ["fold", "train_months", "oos_month", "entry_date",
-                      "symbol", "name", "strategy", "bt_score", "entry_p", "pnl", "filled"]
+                      "symbol", "name", "strategy", "bt_score", "entry_p", "pnl",
+                      "filled", "liquidity"]
             _raw_rows = []
             # 約定済みトレード (BT≥30 は _bt30_entry_sorted 構築時に保証済み)
             for _rt in _bt30_entry_sorted:
@@ -10165,6 +10168,7 @@ function switchTbd(id, tab) {{
                     "entry_p": round(float(_rt.get("entry_p", 0) or 0), 1),
                     "pnl": round(float(_rt.get("pnl", 0) or 0), 0),
                     "filled": 1,
+                    "liquidity": round(_liquidity_of(str(_rt.get("symbol", ""))), 0),
                 })
             # 不約定トレード(発注枠は消費・損益0)。通常予算モード専用。
             for _rt in all_nofills:
@@ -10183,6 +10187,7 @@ function switchTbd(id, tab) {{
                     "entry_p": round(float(_rt.get("entry_p", 0) or 0), 1),
                     "pnl": 0.0,
                     "filled": 0,
+                    "liquidity": round(_liquidity_of(str(_rt.get("symbol", ""))), 0),
                 })
             if _raw_rows:
                 _rappend = os.path.exists(_oos_raw_path)

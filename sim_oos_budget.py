@@ -59,10 +59,49 @@ def _bt_pass(t, bt_min: float) -> bool:
     return _lprio.is_orderable(t.get("strategy", ""), t["bt_score"], bt_min)
 
 
+# ── 発注順 ──────────────────────────────────────────────────────────
+# ライブ(lss_budget_cap)・レポート(nikkei_analysis)・検証(sim_portfolio_lss)と
+# 同じ lss_order_rank を経由する。既定=流動性(売買代金)降順。
+# 18.21: BT降順はランダム6本すべてを下回る(z=-2.22)ので使わない。
+try:
+    import lss_order_rank as _lor
+except Exception:
+    _lor = None
+
+_LIQ_CACHE: dict = {}
+
+
+def _liq_of(sym: str) -> float:
+    """銘柄の平均日次売買代金。生CSVに liquidity 列があればそちらが優先。
+
+    ⚠ ここで算出する値は『今日から遡って120日』なので、古いフォールドにとっては
+      厳密には as-of ではない。ただし **リターンではなくコスト(板の厚さ)の代理**
+      なので、順位付けに使う限り実害は小さい。
+      2026-08-08 以降に生成した生CSVは liquidity 列を持つので、この経路は使われない。
+    """
+    if sym in _LIQ_CACHE:
+        return _LIQ_CACHE[sym]
+    v = 0.0
+    try:
+        from backtest_limit_entry import fetch as _fq
+        if _lor is not None:
+            v = _lor.daily_turnover(_fq(sym, 200))
+    except Exception:
+        v = 0.0
+    _LIQ_CACHE[sym] = v
+    return v
+
+
 def _order_key(t):
-    if _lprio is None:
+    if _lor is None:
         return (0.0, -t["bt_score"])
-    return _lprio.priority_key(t.get("strategy", ""), t["bt_score"])
+    # BT降順モードでは liquidity を見ないので取りに行かない(ネット取得を避ける)。
+    if _lor.mode() == "bt":
+        return _lor.sort_key(t["bt_score"], 0.0)
+    _liq = t.get("liquidity")
+    if _liq in (None, "", 0, 0.0):
+        _liq = _liq_of(str(t.get("symbol", "")))
+    return _lor.sort_key(t["bt_score"], _liq)
 
 
 # === 定数（OOSスイープと合わせる） ===
@@ -133,8 +172,11 @@ def _sim_one_day(
     multi_lot:   True=ループ充填（同一銘柄でも複数回投資可）
     strat_set:   None=全戦略 / set=その戦略のみ（ループ充填_絞り）
     """
-    # BT閾値フィルター
-    candidates = [t for t in day_trades if _bt_pass(t, bt_min)]
+    # ⛔ 転換は lss ではない(18.5.3: 09:09時点で不約定が確定せず systematic に
+    #    再現できないと確定済み)。含めると損益が押し上がる(18.13: 349件 +451,094円)。
+    #    内訳セクション(:383)は除外していたのに、**予算シミュ本体が除外していなかった**。
+    candidates = [t for t in day_trades
+                  if t.get("strategy") != "転換" and _bt_pass(t, bt_min)]
 
     # 戦略フィルター（絞り）
     if strat_set is not None:
@@ -474,7 +516,11 @@ def main() -> None:
     print(f"  フォールド: {folds}  OOS月: {months}")
     print(f"  予算: {budget_man:.0f}万円 / 絞り戦略: {sorted(strat_narrow)}")
     if _lprio is not None:
-        print(f"  {_lprio.describe()}")
+        print(f"  BT下限ルール: {_lprio.describe()}")
+    # 実際に使っている発注順を必ず印字する(18.21 の条件取り違え対策)。
+    if _lor is not None:
+        print(f"  {_lor.describe()}")
+    print(f"  転換は除外(18.5.3: 09:09時点で不約定が確定せず実装不可)")
 
     if args.by_strategy:
         print_strategy_bt_breakdown(rows)
