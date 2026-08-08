@@ -72,7 +72,14 @@ ap.add_argument("--bt-min", type=float, default=0.0,
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=6)
-ap.add_argument("--out", type=str, default="sweep_lss_smtm_results.csv")
+ap.add_argument("--rule", type=str, default="delay1",
+                help="compare_lss_rules のどのルール行を読むか(前方一致)。"
+                     "**既定 delay1 = 実機(watch.bat --stop-delay-bars 1)**。"
+                     "base は delay0 なので実機と条件が違う(2026-08-08 まで base を読んでいた)")
+ap.add_argument("--reparse", action="store_true",
+                help="再計算せず sweep_smtm/ の保存済みCSVから読み直す。"
+                     "--rule を変えたときはこれで済む(1点あたり50秒の再実行が不要)")
+ap.add_argument("--out", type=str, default="")
 ap.add_argument("--dry-run", action="store_true", help="実行せずコマンドだけ表示")
 ap.add_argument("--extra", type=str, default="", help="compare_lss_rules に渡す追加引数")
 args = ap.parse_args()
@@ -85,7 +92,9 @@ TMS = [float(x) for x in args.tm_list.split(",") if x.strip()]
 #    順位は簡単にひっくり返る。**全窓で向きが一致するか**だけが判断材料。
 HOLDOUTS = ([int(x) for x in args.holdout_list.split(",") if x.strip()]
             if args.holdout_list.strip() else [args.holdout_days])
-OUT = Path(args.out)
+_RULE = args.rule.strip()
+# ルールごとに別ファイル。混ざると「base の数字を delay1 だと思って読む」事故になる。
+OUT = Path(args.out.strip() or f"sweep_lss_smtm_results_{_RULE}.csv")
 
 _COLS = ["sm", "tm", "phase", "trades", "win_rate", "pf",
          "target", "stop", "close", "net_real", "net_cons"]
@@ -108,6 +117,29 @@ def _save(rows: list[dict]) -> None:
         w.writeheader()
         for r in rows:
             w.writerow(r)
+
+
+def _pick_rule(csv_p) -> dict | None:
+    """compare_lss_rules の出力CSVから --rule に前方一致する行を返す。"""
+    try:
+        for r in csv.DictReader(open(csv_p, encoding="utf-8-sig")):
+            if str(r.get("rule", "")).startswith(_RULE):
+                return r
+    except Exception as e:
+        print(f"  [error] {csv_p} を読めません: {e}")
+    return None
+
+
+def _row_from(rec: dict, sm: float, tm: float, phase: str) -> dict:
+    def _f(k):
+        try:
+            return float(str(rec.get(k, 0)).replace(",", "") or 0)
+        except ValueError:
+            return 0.0
+    return {"sm": sm, "tm": tm, "phase": phase,
+            "trades": int(_f("trades")), "win_rate": _f("win_rate"), "pf": _f("pf"),
+            "target": int(_f("target")), "stop": int(_f("stop")), "close": int(_f("close")),
+            "net_real": _f("net_realistic_gap"), "net_cons": _f("net_conservative_slip")}
 
 
 def _run(sm: float, tm: float, phase: str, holdout: int) -> dict | None:
@@ -149,20 +181,7 @@ def _run(sm: float, tm: float, phase: str, holdout: int) -> dict | None:
         return None
     csv_p = max(cands, key=lambda p: p.stat().st_mtime)
 
-    base = None
-    try:
-        for r in csv.DictReader(open(csv_p, encoding="utf-8-sig")):
-            if str(r.get("rule", "")).startswith("base("):
-                base = r
-                break
-    except Exception as e:
-        print(f"  [error] {csv_p} を読めません: {e}")
-        return None
-    if base is None:
-        print(f"  [error] {csv_p} に base 行がありません")
-        return None
-
-    # 上書きされないよう (sm, tm, phase) 付きで退避
+    # 上書きされないよう (sm, tm, phase) 付きで退避。--reparse はこれを読む。
     keep = Path(f"sweep_smtm/{csv_p.stem}_sm{sm}_tm{tm}_{phase}.csv")
     keep.parent.mkdir(exist_ok=True)
     try:
@@ -170,24 +189,51 @@ def _run(sm: float, tm: float, phase: str, holdout: int) -> dict | None:
     except Exception:
         pass
 
-    def _f(k):
-        try:
-            return float(str(base.get(k, 0)).replace(",", "") or 0)
-        except ValueError:
-            return 0.0
+    base = _pick_rule(csv_p)
+    if base is None:
+        print(f"  [error] {csv_p} に『{_RULE}』で始まる行がありません")
+        return None
 
-    row = {"sm": sm, "tm": tm, "phase": phase,
-           "trades": int(_f("trades")), "win_rate": _f("win_rate"), "pf": _f("pf"),
-           "target": int(_f("target")), "stop": int(_f("stop")), "close": int(_f("close")),
-           "net_real": _f("net_realistic_gap"), "net_cons": _f("net_conservative_slip")}
+    row = _row_from(base, sm, tm, phase)
     print(f"  → {int(row['trades']):,}件 勝率{row['win_rate']:.0f}% PF{row['pf']:.2f} "
           f"net現実 {row['net_real']:+,.0f} / net保守 {row['net_cons']:+,.0f}  "
           f"({time.time() - t0:.0f}秒)", flush=True)
     return row
 
 
-done = _load_done()
-rows = list(done.values())
+def _reparse() -> list[dict]:
+    """再計算せず sweep_smtm/ の保存済みCSVから --rule の行を読み直す。
+
+    compare_lss_rules は1回の実行で全ルールを出力しているので、
+    ルールを変えるだけなら再実行(1点50秒)は不要。
+    """
+    import re as _re
+    pat = _re.compile(r"_sm([0-9.]+)_tm([0-9.]+)_((?:TRAIN|TEST)\d*)\.csv$")
+    out, miss = [], 0
+    for f in sorted(Path("sweep_smtm").glob("*.csv")):
+        m = pat.search(f.name)
+        if not m:
+            continue
+        rec = _pick_rule(f)
+        if rec is None:
+            miss += 1
+            continue
+        out.append(_row_from(rec, float(m.group(1)), float(m.group(2)), m.group(3)))
+    print(f"[再解析] sweep_smtm/ から {len(out)}点を『{_RULE}』で読み直しました"
+          + (f" (該当行なし {miss}件)" if miss else ""))
+    return out
+
+
+if args.reparse:
+    rows = _reparse()
+    if not rows:
+        sys.exit("[error] sweep_smtm/ に読める結果がありません。まず通常実行してください")
+    _save(rows)
+    done = {(str(r["sm"]), str(r["tm"]), r["phase"]): r for r in rows}
+else:
+    done = _load_done()
+    rows = list(done.values())
+print(f"[ルール] {_RULE} → {OUT}")
 print(f"[スイープ] sm {SMS} × tm {TMS} = {len(SMS) * len(TMS)}点 × TEST窓 {HOLDOUTS} "
       f"× TRAIN/TEST = {len(SMS) * len(TMS) * len(HOLDOUTS) * 2}回")
 for _H in HOLDOUTS:
@@ -196,7 +242,7 @@ print(f"  BT下限: {args.bt_min:.0f} (実機は BT30=プールの床=実質フ�
 if done:
     print(f"  済み {len(done)}件は飛ばします ({OUT})")
 
-for sm in SMS:
+for sm in (SMS if not args.reparse else []):
     for tm in TMS:
         for H in HOLDOUTS:
             for _ph in ("TRAIN", "TEST"):
@@ -303,9 +349,18 @@ def _axis_means(axis_vals, other_vals, axis_is_sm, kind, H, col):
         out.append(sum(xs) / len(xs) if xs else float("nan"))
     return out
 
-
-# 窓ごとの推奨を貯めて、最後に一致を見る
-_picks: dict = {}
+# ⛔ 判定は『窓ごとの argmax』では**やってはいけない**。
+#    平坦域の中で TRAIN を tie-break に使うと、TRAIN の argmax が安定している限り
+#    どの窓でも同じ値が選ばれ、「全窓で一致」が自動的に成立してしまう。
+#    それは TEST の証拠ではなく TRAIN の意見をコピーしているだけ。
+#    2026-08-08 に実際にこれで tm=1.5 を「本物」と誤判定した(TEST は2窓で 1.0 が最良)。
+#
+#    正しくは **平坦域(=TESTで同等な範囲)そのものを窓間で比べる**:
+#      ・現行値が全窓の平坦域に入っている → 変える理由が無い
+#      ・現行値がどの窓の平坦域にも入っていない → **動かすべき**。
+#        移動先は全窓の平坦域の共通集合から選ぶ(その中のどれを選ぶかは決められない)
+_plateaus: dict = {}
+_curstat: dict = {}
 
 for name, av, ov, is_sm, cur in (("sm(損切り)", SMS, TMS, True, 0.1),
                                  ("tm(利確)", TMS, SMS, False, 1.0)):
@@ -340,19 +395,23 @@ for name, av, ov, is_sm, cur in (("sm(損切り)", SMS, TMS, True, 0.1),
         te_max = max(te)
         plateau = [av[i] for i, x in enumerate(te)
                    if te_max > 0 and x >= te_max * (1 - _PLATEAU)]
-        pick = None
-        if plateau:
-            cand = [(av[i], tr[i]) for i in range(len(av)) if av[i] in plateau]
-            pick = max(cand, key=lambda kv: kv[1])[0] if cand else None
-            print(f"    TEST の平坦域(最良から{_PLATEAU:.0%}以内): {plateau}")
-        if pick is not None:
-            print(f"    → この窓の推奨: {pick}"
-                  f"{'  ⚠ グリッドの端。広げて確かめること' if pick in (av[0], av[-1]) else ''}")
-            _picks.setdefault(name, []).append((H, pick))
+        # 保守モデルの平坦域も出す。タイトな損切りは損切り発火が多く滑りを買うので、
+        # 現実モデルより保守モデルのほうが差が出やすい(18.17 の実測と同じ向き)。
+        tc_max = max(tc)
+        plateau_c = [av[i] for i, x in enumerate(tc)
+                     if tc_max > 0 and x >= tc_max * (1 - _PLATEAU)]
+        print(f"    TEST現実 の平坦域(最良から{_PLATEAU:.0%}以内): {plateau}")
+        print(f"    TEST保守 の平坦域: {plateau_c if plateau_c else '(全域マイナス)'}")
+        _plateaus.setdefault(name, []).append((H, plateau))
         if cur in av:
             i = av.index(cur)
+            _in = cur in plateau
             print(f"    現行 {cur}: TRAIN {tr[i]:+,.0f} / TEST {te[i]:+,.0f} / "
-                  f"TEST保守 {tc[i]:+,.0f}")
+                  f"TEST保守 {tc[i]:+,.0f}   → 平坦域に{'入っている' if _in else '**入っていない**'}")
+            if not _in and te_max > 0:
+                print(f"       現行は平坦域の水準の {te[i] / te_max * 100:.0f}% "
+                      f"(差 {te_max - te[i]:+,.0f}円)")
+            _curstat.setdefault(name, []).append((H, _in))
 
 # ── 窓をまたいだ一致 (ここを通らないものは採用しない) ─────────────
 print(f"\n{'=' * 92}")
@@ -360,24 +419,28 @@ print("■ 判定")
 print(f"{'=' * 92}")
 if _SINGLE:
     print("\n  ⚠ TEST窓が1本しかありません。**この結果だけで採用を決めないこと。**")
-    print("     ローリングOOSの実測では月次σが月平均の2.7倍あり、10ヶ月でも t=+1.18"
-          "(CLAUDE.md 18.24)。")
-    print("     窓を1つ変えるだけで順位はひっくり返ります。")
-    print("     → --holdout-list 60,120,180 で回し直して、全窓で同じ推奨が出るか"
-          "確かめてください。")
+    print("     --holdout-list 60,120,180 で回し直してください。")
 else:
-    for name, ps in _picks.items():
-        vals = [v for _, v in ps]
-        agree = len(set(vals)) == 1
-        detail = " / ".join(f"窓{h}日→{v}" for h, v in ps)
-        print(f"\n  {name}: {detail}")
-        if agree and len(ps) == len(HOLDOUTS):
-            print(f"    → **全{len(ps)}窓で一致 ({vals[0]})。この軸は本物の可能性がある**")
+    for name, ps in _plateaus.items():
+        sets = [set(pl) for _, pl in ps]
+        inter = set.intersection(*sets) if sets else set()
+        cur = 0.1 if name.startswith("sm") else 1.0
+        print(f"\n  {name}")
+        for H, pl in ps:
+            print(f"    窓{H}日の平坦域: {sorted(pl)}")
+        print(f"    共通集合: {sorted(inter) if inter else '(なし)'}")
+        ins = [b for _, b in _curstat.get(name, [])]
+        if not inter:
+            print(f"    → 窓ごとに平坦域が食い違う。**ノイズ。この軸は変えない**")
+        elif all(ins) and ins:
+            print(f"    → 現行 {cur} は全窓の平坦域の中。**変える理由が無い**")
+        elif not any(ins) and ins:
+            print(f"    → ⚠ 現行 {cur} は **どの窓の平坦域にも入っていない**。")
+            print(f"       全窓でTESTが同等に良いのは {sorted(inter)}。この範囲へ動かす根拠がある。")
+            print(f"       ※ この中のどれを選ぶかは決められない(TESTでは同等)。"
+                  f"TRAINで選ぶと TRAIN の意見をコピーするだけになる。")
         else:
-            print(f"    → 窓ごとにバラける。**ノイズ。この軸は変えない**")
-    for name in ("sm(損切り)", "tm(利確)"):
-        if name not in _picks:
-            print(f"\n  {name}: 判定できるデータがありません")
+            print(f"    → 現行 {cur} は窓によって平坦域に入ったり入らなかったり。**判断保留**")
 
 print("\n  ⛔ 採用前に必ずやること:")
 print("     1. sim_portfolio_lss.py(予算・上限キャンセル込み)で再検証する。")
@@ -386,3 +449,5 @@ print("        単体の期待値がプラスでも、予算が有限だと機�
 print("     2. 差がノイズ帯を超えているか確かめる。ローリングOOSの実測で"
       "発注順の入れ替えだけで σ=124,660円/10ヶ月 動く(18.24)。")
 print("        それ未満の改善は『測れていない』のであって『改善した』ではない。")
+print(f"     3. 読んだルールは **{_RULE}**。実機(watch.bat --stop-delay-bars)と"
+      "一致しているか確認する。")
