@@ -359,6 +359,45 @@ def _spearman(a, b) -> float:
     return 1 - 6 * d2 / (n * (n * n - 1))
 
 
+def _axis_per_trade(axis_vals, other_vals, axis_is_sm, kind, H):
+    """軸の各水準の **1件あたり** 損益(合計pnl / 合計件数)。
+
+    ⛔ 総額だけを比べてはいけない。--bt-min は『そのとき測っている sm で計算した
+       BTスコア』で母集団を切るので、sm を広げると勝率が上がってBTが上がり、
+       **フィルタを通るペアが増える**。総額はそのぶん増えるが、実運用は予算400万で
+       1日十数件しか建てられないので、候補が増えても買える枠は増えない。
+       実測(2026-08-08): sm0.1→1.0 で件数 +34〜44% / 1件あたりは +1〜3%(4窓中3窓)。
+       総額だけ見ると「2倍良い」と誤読する。
+    """
+    out = []
+    for a in axis_vals:
+        tot = n = 0.0
+        for o in other_vals:
+            r = idx.get((a, o, _ph(kind, H))) if axis_is_sm else idx.get((o, a, _ph(kind, H)))
+            if r:
+                try:
+                    tot += float(r["net_real"]); n += float(r["trades"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        out.append(tot / n if n else float("nan"))
+    return out
+
+
+def _axis_trades(axis_vals, other_vals, axis_is_sm, kind, H):
+    out = []
+    for a in axis_vals:
+        n = 0.0
+        for o in other_vals:
+            r = idx.get((a, o, _ph(kind, H))) if axis_is_sm else idx.get((o, a, _ph(kind, H)))
+            if r:
+                try:
+                    n += float(r["trades"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        out.append(n)
+    return out
+
+
 def _axis_means(axis_vals, other_vals, axis_is_sm, kind, H, col):
     """軸の各水準について、もう一方の軸で平均した値を返す。"""
     out = []
@@ -432,6 +471,24 @@ for name, av, ov, is_sm, cur in (("sm(損切り)", SMS, TMS, True, 0.1),
         print(f"    {'TRAIN 現実':<12}" + "".join(f"{x:>+14,.0f}" for x in tr))
         print(f"    {'TEST  現実':<12}" + "".join(f"{x:>+14,.0f}" for x in te))
         print(f"    {'TEST  保守':<12}" + "".join(f"{x:>+14,.0f}" for x in tc))
+        # ★ 総額は母集団サイズに引きずられる。1件あたりと件数を必ず併記する。
+        pt_tr = _axis_per_trade(av, ov, is_sm, "TRAIN", H)
+        pt_te = _axis_per_trade(av, ov, is_sm, "TEST", H)
+        n_te = _axis_trades(av, ov, is_sm, "TEST", H)
+        print(f"    {'TRAIN 円/件':<12}" + "".join(f"{x:>+14,.0f}" for x in pt_tr))
+        print(f"    {'TEST  円/件':<12}" + "".join(f"{x:>+14,.0f}" for x in pt_te))
+        _b = n_te[0] if n_te and n_te[0] else 1.0
+        print(f"    {'TEST  件数':<12}" + "".join(f"{x:>10,.0f}({x / _b * 100:>3.0f}%)"
+                                                 for x in n_te))
+        _pt_gain = (max(pt_te) / pt_te[0] - 1) * 100 if pt_te and pt_te[0] else 0.0
+        _n_gain = (max(n_te) / _b - 1) * 100
+        if _n_gain > 15 and _pt_gain < _n_gain / 2:
+            print(f"    ⚠ 総額の改善は **件数の増加({_n_gain:+.0f}%)** が主因。"
+                  f"1件あたりは {_pt_gain:+.0f}% しか動いていない。")
+            print(f"       --bt-min はその水準で計算したBTで母集団を切るので、"
+                  f"水準ごとに母集団が違う。")
+            print(f"       予算400万は1日十数件で飽和するため、候補が増えても"
+                  f"**実運用の利益は増えない**(18.10)。")
         print(f"    順位相関(Spearman) = {rho:+.2f}", end="")
         if rho >= 0.7:
             print("  → TRAIN と TEST が同じ向き")
