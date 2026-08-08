@@ -1,22 +1,34 @@
 @echo off
 REM ============================================================
-REM  .\ldt = LDT (Long DayTrade: 逆指値買い=上ブレイク・同日決済) のレポート
+REM  .\ldt = LDT report (Long DayTrade: stop-buy on upside break, same-day exit)
 REM
-REM  なぜ .bat が要るか (2026-08-08):
-REM    run_signals_holdout_all.py を素の python で叩くと、daily.bat が渡している
-REM    環境変数が **一切効かない**。実際に事故った組み合わせ:
-REM      LSS_ASOF_BT       既定OFF → 過去の取引を『今日のBT』で並べる = 先読み
-REM      LSS_STOP_DELAY_BARS 既定0 → live(watch.bat = 1)と食い違う
-REM    どちらも損益タブの金額を大きく動かす。だから daily.bat と同じ土俵を
-REM    このファイルで固定する。**LDT を測るときは必ず .\ldt を使うこと。**
+REM  RULES FOR THIS FILE (learned the hard way, 2026-08-08):
+REM   1. ASCII ONLY. cmd.exe reads .bat in the OEM codepage (932 on a Japanese
+REM      Windows), so UTF-8 Japanese becomes mojibake, and some CP932 second
+REM      bytes are 0x7C or 0x26, which cmd treats as operators. It then splits
+REM      the REM line and tries to run the fragment as a command.
+REM   2. No redirection or pipe characters in REM lines either. REM does NOT
+REM      protect them: "REM foo (gt) bar" really creates a file named bar.
+REM      So: no greater-than, no less-than, no pipe, no ampersand, no caret.
+REM   Every other .bat here follows both rules. Keep it that way.
 REM
-REM  使い方:
-REM    .\ldt                      直近180日表示 / 365日バックテスト
-REM    .\ldt --days 365           表示窓を伸ばす
+REM  Why a .bat at all:
+REM    Running run_signals_holdout_all.py with bare python applies NONE of the
+REM    env that daily.bat sets. Actually observed on the first LDT run:
+REM      LSS_ASOF_BT         default OFF, so past trades get ranked by TODAY's
+REM                          BT. That is lookahead. Win rate came out at 79 pct.
+REM      LSS_STOP_DELAY_BARS default 0, disagreeing with live (watch.bat is 1)
+REM      LSS_BT_TAB_MIN      default 30, a different budget-sim BT floor
+REM    All of them move the P and L tab a lot. This file pins the same ground
+REM    as daily.bat. ALWAYS measure LDT through .\ldt, never bare python.
+REM
+REM  Usage:
+REM    .\ldt                  180d display window, 365d backtest
+REM    .\ldt --days 365       widen the display window
 REM    .\ldt --no-browser
 REM
-REM  前提: long_watchlist_proposal_*.py (scan_long_daytrade.py が出力) が必要。
-REM        無ければ既存WATCHLISTにフォールバックする(選定の質は落ちる)。
+REM  Needs long_watchlist_proposal_*.py (from scan_long_daytrade.py). Without it
+REM  it falls back to the existing WATCHLIST, which is a weaker selection.
 REM ============================================================
 cd /d "%~dp0"
 REM --- clear heavy research flags ---
@@ -26,14 +38,14 @@ set "LSS_ENTRY_DELAY_BARS="
 set "LSS_BUDGET_MIN_BT="
 set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
-REM --- live (watch.bat) と揃える。LDT にも適用される
-REM     (backtest_limit_entry.py:1282 `_sd_bars = _LSS_STOP_DELAY_BARS if (_dt_long or ...)`)
+REM --- match live (watch.bat). Applies to LDT too, see backtest_limit_entry.py
+REM     line 1282: _sd_bars uses _LSS_STOP_DELAY_BARS when _dt_long is set.
 set "LSS_STOP_DELAY_BARS=1"
-REM --- BT閾値は lss と同じ 40 に揃える(比較可能にするため)
+REM --- same BT floor as lss so the two reports are comparable
 set "LSS_BT_TAB_MIN=40"
-REM --- ★ as-of BT: これが無いと過去の取引が『今日のBT』で並び、先読みになる。
-REM     lss では勝率が 55-66% → 41% に落ちた。LDT でも同じことが起きる。
+REM --- as-of BT: without this the PnL tab ranks past trades by TODAY's BT.
+REM     On lss that inflated the win rate from 41 pct to 55-66 pct. Same trap.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
-REM --- 実約定との突合用に決済トレードを吐く (lss とはファイルを分ける)
+REM --- dump settled trades to a SEPARATE csv so lss and ldt never mix
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=ldt_trades.csv"
 python run_signals_holdout_all.py --long-daytrade --ldt-proposal auto --min-price 1000 --max-price 6000 --force --days 365 --no-news --no-risk --workers 8 %*
