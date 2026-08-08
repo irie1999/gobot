@@ -134,6 +134,27 @@ def _lookup_signal_date_bt(sym: str, strat: str, sig_date_str: str | None):
     return None
 
 
+_LIQ_CACHE: dict = {}
+
+
+def _liquidity_of(sym: str) -> float:
+    """銘柄の平均日次売買代金(直近120日)。取れなければ 0.0。銘柄あたり1回だけ計算。
+
+    予算シミュの発注順(流動性降順)で使う。シグナルタブ(:2510)と同じ定義。
+    """
+    if sym in _LIQ_CACHE:
+        return _LIQ_CACHE[sym]
+    v = 0.0
+    try:
+        from backtest_limit_entry import fetch as _fq
+        import lss_order_rank as _lor
+        v = _lor.daily_turnover(_fq(sym, 200))
+    except Exception:
+        v = 0.0
+    _LIQ_CACHE[sym] = v
+    return v
+
+
 def _lookup_frozen_bt(sym: str, strat: str):
     """(sym, strat) の凍結BTスコアを返す。TF別名でも探す。無ければ None。"""
     v = _FROZEN_BT_SCORES.get((sym, strat))
@@ -9838,6 +9859,15 @@ function switchTbd(id, tab) {{
         _op = float(_t.get("order_limit", 0) or 0) or float(_t.get("entry_p", 0) or 0)
         return _op * float(_t.get("qty", 0) or 0)
 
+    def _bud_order_key(_t):
+        """予算シミュの発注順キー。ライブ(lss_order_rank)と同じ並びにする。"""
+        try:
+            import lss_order_rank as _lor
+            return _lor.sort_key(_eff_long_bt(_t),
+                                 _liquidity_of(str(_t.get("symbol", ""))))
+        except Exception:
+            return (-float(_eff_long_bt(_t) or 0), 0.0)
+
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
@@ -9866,7 +9896,7 @@ function switchTbd(id, tab) {{
                 _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
                 _by_day_ml[_dk].append(_t)
             for _dk, _day_trades in _by_day_ml.items():
-                _sorted_day = sorted(_day_trades, key=lambda x: -_eff_long_bt(x))
+                _sorted_day = sorted(_day_trades, key=_bud_order_key)
                 if not _sorted_day:
                     continue
                 # 各トレードの単価(100株あたりコスト)
@@ -9925,7 +9955,10 @@ function switchTbd(id, tab) {{
                 _by_day_bud[_dk2].append(_t)
         for _dk in _by_day_bud:
             _cap = 0.0
-            for _t in sorted(_by_day_bud[_dk], key=lambda x: -_eff_long_bt(x)):
+            # 発注順は lss_order_rank に集約(シグナルタブ・lss_budget_cap と同じ並び)。
+            # 既定=流動性降順。BT降順は 18.21 でランダム6本すべてを下回ると実測(z=-2.22)。
+            # ここを揃えないと『レポートの金額』と『実際の発注』が食い違う(18.9 の鉄則)。
+            for _t in sorted(_by_day_bud[_dk], key=_bud_order_key):
                 if fill_budget:
                     # 約定額ベース: 不約定はスキップ(予算消費なし)、約定価格×株数で管理
                     if _t.get("reason") == "約定せず":
