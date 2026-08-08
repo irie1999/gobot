@@ -3209,9 +3209,36 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
             'そのため発注ボタンは無効化しています。</div>')
     else:
         _analysis_warn = ""
+
+    # ── 過去日を今日再生成したときの先読み警告 ──────────────────────────
+    # ⛔ シグナルタブのBTは **常に実行日(今日)までの365日** から計算される
+    #    (check_signals_stop.py:334 `today = datetime.now(JST).date()` /
+    #     :337 `cutoff = today - timedelta(days=days)`)。signal_dt では切らない。
+    #    → 当日の発注リストとして使う限り正しい(その日のシグナルはまだ決済していない)。
+    #    → **過去日を今日再生成すると、その日以降の決済結果を含んだBTで並ぶ = 先読み。**
+    #    損益タブは as-of BT(LSS_ASOF_BT)で修正済みだが、この並びは対象外。
+    #    CLAUDE.md 18.11 の「発注リストは無傷」は *当日実行* に限った話であることに注意。
+    _asof_warn = ""
+    try:
+        _td = pd.to_datetime(str(target_date)).date() if target_date else None
+    except Exception:
+        _td = None
+    if _td is not None and _td < _TODAY:
+        _asof_warn = (
+            '<div style="margin:10px 0;padding:12px 16px;background:#422006;'
+            'border:1px solid #b45309;border-radius:8px;color:#fed7aa;'
+            'font-size:0.86rem;line-height:1.6">'
+            f'⚠ <b>この並び順は先読みを含みます（{_td} のシグナルを {_TODAY} に生成）。</b><br>'
+            f'BTスコアは<b>常に実行日({_TODAY})までの365日</b>から計算されるため、'
+            f'下表のBTは <b>{_td} 以降の決済結果を織り込んだ値</b>で、'
+            f'{_td} 当日に見えていた値ではありません。<br>'
+            '<b>「この順で発注していれば良かったか」の判断には使えません。</b>'
+            'その用途には損益タブ（as-of BT で修正済み）を見てください。'
+            '当日朝に生成した発注リストは正しい値です。</div>')
+
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
-{_analysis_warn}
+{_asof_warn}{_analysis_warn}
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが高い順に並んでいます。
 </p>
