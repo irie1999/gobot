@@ -36,6 +36,7 @@ BTは lss_trades.csv の bt列(=レポート一致)、BT>=--bt-min。同一銘�
 from __future__ import annotations
 
 import argparse
+import bisect as _bisect
 import csv
 import os
 import sys
@@ -138,19 +139,29 @@ def _mins(ts):
         return 0
 
 
-# ── as-of BT: (sym, strat, 注文日) → その時点のBT ───────────────────────
+# ── as-of BT: (sym, strat) の時系列から『その注文日までに分かっていたBT』を引く ──
 # ⛔ 2026-08-08 まで sim は `max()` で期間全体の最大BTを取り、それを全日の
 #    発注順・BT下限に使っていた。「6月にBT80になったペアが1月の注文でも最優先」
 #    = 先読み。lss_trades.csv は entry_date ごとに as-of BT を持っているので、
 #    日付キーで引けば先読みなしにできる。
-_BT_BY_DATE: dict = {}
+_BT_SERIES: dict = {}          # (sym, strat) -> (日付リスト昇順, BTリスト)
 
 
-def _load_bt_by_date() -> dict:
+def _load_bt_series() -> dict:
+    """(sym, strat) ごとに (日付, as-of BT) の時系列を作る。
+
+    ⛔ 2026-08-08 に踏んだバグ: lss_trades.csv は **決済済みトレードだけ** を持つ。
+       日付を完全一致で引くと **未約定注文にBTが付かず 0 扱いで全部落ちる**。
+       実際に約定率が 80% → 99% に跳ね、「未約定も発注枠を消費する」という
+       sim の核心が壊れた(TRAIN も消えた)。
+    → 完全一致ではなく **その日以前で最も新しい as-of BT を引き継ぐ(carry forward)**。
+       BTは日々ほとんど動かないので、直近に計算された値を使うのが正しい『as-of』。
+       過去の値を使うだけなので先読みにはならない。履歴が全く無ければ 0(=未実証)。
+    """
     p = Path(args.trades_csv)
     if not p.exists():
         return {}
-    out = {}
+    tmp: dict = {}
     for r in csv.DictReader(open(p, encoding="utf-8-sig")):
         sym = _norm(r.get("symbol") or r.get("code") or "")
         strat = str(r.get("strategy") or "").strip()
@@ -158,17 +169,28 @@ def _load_bt_by_date() -> dict:
         if not (sym and strat and ed):
             continue
         try:
-            out[(sym, strat, ed)] = float(r.get("bt") or 0)
+            b = float(r.get("bt") or 0)
         except Exception:
-            pass
+            continue
+        # 同じ日に複数行あれば最後(=同値のはず)で上書き
+        tmp.setdefault((sym, strat), {})[ed] = b
+    out = {}
+    for k, m in tmp.items():
+        ds = sorted(m.keys())
+        out[k] = (ds, [m[d] for d in ds])
     return out
 
 
 def _bt_for(sym: str, strat: str, edate, static_bt: float) -> float:
-    """その注文日のBT。asof モードで履歴が無ければ 0(=未実証) として先読みを避ける。"""
+    """その注文日に『すでに分かっていた』BT。履歴が無ければ 0(=未実証)。"""
     if args.bt_mode != "asof":
         return static_bt
-    return _BT_BY_DATE.get((sym, strat, str(edate)[:10]), 0.0)
+    ser = _BT_SERIES.get((sym, strat))
+    if not ser:
+        return 0.0
+    ds, bs = ser
+    i = _bisect.bisect_right(ds, str(edate)[:10])
+    return bs[i - 1] if i > 0 else 0.0
 
 
 def _load_bt_pairs():
@@ -506,11 +528,12 @@ def main():
           f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
           f"sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
           f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}{only_month_label}")
-    global _BT_BY_DATE
+    global _BT_SERIES
     if args.bt_mode == "asof":
-        _BT_BY_DATE = _load_bt_by_date()
-        print(f"[info] BT取り方=asof: {len(_BT_BY_DATE):,}件の(銘柄,戦略,日付)別BTを読み込み"
-              f" (先読みなし)")
+        _BT_SERIES = _load_bt_series()
+        _n_pts = sum(len(v[0]) for v in _BT_SERIES.values())
+        print(f"[info] BT取り方=asof: {len(_BT_SERIES):,}ペア / {_n_pts:,}時点のBT時系列"
+              f" (その日以前の最新値を引き継ぐ = 先読みなし)")
     else:
         print(f"[info] ⚠ BT取り方=static: 期間最大BTを全日に適用します = **先読み**")
     print(f"[info] 母集団={args.universe} / 発注順={args.rank}"
@@ -523,7 +546,7 @@ def main():
         # FEE を鍵に含める: 2026-08-07 に既定を 0.001→0 に変えたので、
         # 含めないと手数料込みの古いキャッシュが再利用されて誤った金額が出る。
         # 損切り約定モデル(v16: max(stop, bar_open))も鍵に含める。
-        "spv6", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.universe, args.bt_mode,
+        "spv7", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.universe, args.bt_mode,
         getattr(__import__("sameday5m_firsttouch"), "_OPTIMISTIC_STOP_FILL", None),
         args.sm, args.tm, DELAY, GAP_LIMIT,
         args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
