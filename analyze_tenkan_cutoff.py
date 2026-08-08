@@ -504,7 +504,7 @@ def _agg(mode_name, cutoff, label=None, exit_label=""):
     転換の損益は **その締切時刻に買った場合**の値を使う(label 経由)。
     label が None の行(締切なし/全部転換)は --tk-buy 固定の値。
     """
-    n_l = n_t = 0
+    n_l = n_t = n_d = 0
     w = 0
     pnl = 0.0
     gp = gl = 0.0
@@ -529,6 +529,7 @@ def _agg(mode_name, cutoff, label=None, exit_label=""):
         else:
             p = r["tk"].get((label, exit_label))
             if p is None:
+                n_d += 1          # 転換できない(売り時刻 <= 買い時刻 等) = 建てない
                 continue
             n_t += 1
         pnl += p
@@ -539,7 +540,7 @@ def _agg(mode_name, cutoff, label=None, exit_label=""):
         else:
             gl += -p
     n = n_l + n_t
-    return {"name": mode_name, "n": n, "lss": n_l, "tenkan": n_t,
+    return {"name": mode_name, "n": n, "lss": n_l, "tenkan": n_t, "drop": n_d,
             "wr": (w / n * 100 if n else 0),
             "pf": (gp / gl if gl > 0 else float("inf")),
             "pnl": pnl, "mon": mon}
@@ -580,19 +581,30 @@ for nm, cu in MODES[1:]:
     cells = ""
     for _xl, *_ in EXITS:
         g = GRID.get((nm, _xl))
-        cells += f"{g['pnl'] - _base:>+{_W},.0f}" if g else f"{'—':>{_W}}"
+        if not g:
+            cells += f"{'—':>{_W}}"
+        else:
+            # 転換0件 = 売り時刻が買い時刻以前で建てられない。これは転換の成績ではなく
+            # 『締切以降に約定した lss を捨てただけ』の値。混同すると読み違える。
+            _s = f"{g['pnl'] - _base:+,.0f}" + ("*" if g["tenkan"] == 0 else "")
+            cells += f"{_s:>{_W}}"
     mark = "  ←現行" if nm.startswith("締切なし") else ""
     print(f"  {nm:<22}{cells}{mark}")
-print("\n  ※ 『締切なし(現行)』は終日不約定を転換した値 = 大引けまで待たないと分からない"
+print("\n  * = 転換0件のセル。売り時刻が買い時刻以前で建てられないため、"
+      "\n      『締切以降に約定した lss を捨てただけ』の値です(転換の成績ではない)。")
+print("  ※ 『締切なし(現行)』は終日不約定を転換した値 = 大引けまで待たないと分からない"
       "\n     ので実装できません(18.5.3)。プラスでも採用不可。基準は純lssです。")
 
 # ── 最良セルの内訳 ────────────────────────────────────────────────────
 _cands = [(k, g) for k, g in GRID.items() if not k[0].startswith("締切なし")
-          and not k[0].startswith("全部転換")]
+          and not k[0].startswith("全部転換") and g["tenkan"] > 0]
+_degen = [(k, g) for k, g in GRID.items() if not k[0].startswith("締切なし")
+          and not k[0].startswith("全部転換") and g["tenkan"] == 0]
 if _cands:
     (_bn, _bx), _bg = max(_cands, key=lambda kv: kv[1]["pnl"])
     print(f"\n【実装可能な中での最良】締切 {_bn} × 決済 {_bx}")
-    print(f"  {_bg['n']:,}件 (lss {_bg['lss']:,} / 転換 {_bg['tenkan']:,}) "
+    print(f"  {_bg['n']:,}件 (lss {_bg['lss']:,} / 転換 {_bg['tenkan']:,}"
+          + (f" / 建てず {_bg['drop']:,}" if _bg["drop"] else "") + ") "
           f"勝率{_bg['wr']:.1f}% PF{_bg['pf']:.2f}")
     print(f"  総損益 {_bg['pnl']:+,.0f}円   純lss比 {_bg['pnl'] - _base:+,.0f}円")
     if _bg["pnl"] <= _base:
@@ -604,6 +616,17 @@ if _cands:
         print("     採用前に必ず: ①--by-month で月別の一貫性(半分以上の月でプラスか)")
         print("                  ②予算シミュ(sim_portfolio_lss)で機会費用込みの検証(18.10)")
         print("                  ③別期間(--days を変える)でも同じセルが選ばれるか")
+
+if _degen:
+    print("\n【参考: 転換0件のセル】= 締切以降に約定した lss を **捨てただけ** の効果")
+    print("  (転換とは別の問い。§18.9 の --entry-cutoff と同じ話)")
+    _seen = set()
+    for (nm, _xl), g in sorted(_degen, key=lambda kv: kv[1]["pnl"], reverse=True):
+        if nm in _seen:
+            continue
+        _seen.add(nm)
+        print(f"  締切 {nm:<8} 捨てた {g['drop']:>4,}件 → 純lss比 {g['pnl'] - _base:>+11,.0f}円")
+    print("  → プラスなら『遅い約定は建てない』が有利。マイナスなら捨てないほうが良い。")
 
 if args.by_month:
     for _xl, *_ in EXITS:
