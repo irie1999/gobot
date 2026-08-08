@@ -9829,6 +9829,14 @@ function switchTbd(id, tab) {{
         reverse=True
     )
     _bt40_entry_by_date, _sorted_bt40_entry_dates = _build_entry_grid(_bt40_entry_sorted, "c")
+    # 発注順のラベル。実態(lss_order_rank)とHTMLの表記がズレると、毎日見る画面で
+    # 「BT降順で並んでいる」と誤解する。2026-08-08 に実際にズレたので動的にする。
+    try:
+        import lss_order_rank as _lor_lbl
+        _ORD_LBL = "BT降順" if _lor_lbl.mode() == "bt" else "流動性順"
+    except Exception:
+        _ORD_LBL = "BT降順"
+
     # 予算シミュ専用の候補プール(BT30固定・表示閾値 _BT_TAB_MIN とは独立)。予算はBT降順で埋める
     # ため実質高BTのみ約定するが、プールは従来どおりBT30から用意して挙動を変えない。
     _bt30_entry_sorted = pending_trades + sorted(
@@ -12736,13 +12744,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
-            f'style="border-color:#38bdf8">💰 {_budget_man}万円×BT降順×日別 (BT{_BT_TAB_MIN}以上) '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×{_ORD_LBL}×日別 (BT{_BT_TAB_MIN}以上) '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
             f'<div id="detail_{_dseq}_budget" class="detail-tab-pane">'
             f'<p style="color:#7dd3fc;font-size:0.8rem;margin-bottom:10px">'
-            f'💰 毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が '
+            f'💰 毎日その日の{_ORD_LBL}で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が '
             f'<b>{_budget_man}万円</b> に収まるだけ<b>注文</b>した場合の「約定したトレード」を表示'
             f'（同日決済なので予算は毎日リセット）。<b>不約定の注文も発注枠を消費</b>する'
             f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。'
@@ -12840,13 +12848,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE and _budget60_entry_sorted_short:
         _bt70liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget60\')" '
-            f'style="border-color:#a78bfa">💰 {_budget_man}万円×BT降順×日別 (BT60以上) '
+            f'style="border-color:#a78bfa">💰 {_budget_man}万円×{_ORD_LBL}×日別 (BT60以上) '
             f'<span style="font-size:0.72rem;color:#c4b5fd">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt70liq_pane = (
             f'<div id="detail_{_dseq}_budget60" class="detail-tab-pane">'
             f'<p style="color:#c4b5fd;font-size:0.8rem;margin-bottom:10px">'
-            f'💰 <b>BTスコア60以上のみに絞った</b>予算シミュ。毎日BT降順で'
+            f'💰 <b>BTスコア60以上のみに絞った</b>予算シミュ。毎日{_ORD_LBL}で'
             f'<b>{_budget_man}万円</b>まで注文した場合の約定トレード（ショートのみ）。'
             f'日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget60_entry_sorted_short)
@@ -12859,14 +12867,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE and _budget50_entry_sorted:
         _bt50liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget50\')" '
-            f'style="border-color:#22c55e">💰 {_budget_man}万円×BT降順×日別 (BT50以上) '
+            f'style="border-color:#22c55e">💰 {_budget_man}万円×{_ORD_LBL}×日別 (BT50以上) '
             f'<span style="font-size:0.72rem;color:#86efac">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt50liq_pane = (
             f'<div id="detail_{_dseq}_budget50" class="detail-tab-pane">'
             f'<p style="color:#86efac;font-size:0.8rem;margin-bottom:10px">'
             f'💰 上の予算シミュと同条件だが <b>BTスコア50以上のみに投資</b>（高品質集中版）。'
-            f'毎日その日のBT降順で、必要資金(注文トリガー価格×100株)の累計が '
+            f'毎日その日の{_ORD_LBL}で、必要資金(注文トリガー価格×100株)の累計が '
             f'<b>{_budget_man}万円</b> に収まるだけ注文（同日決済＝予算は毎日リセット）。'
             f'日付クリックで詳細（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget50_entry_sorted)
@@ -12885,7 +12893,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _narrow_liq_pane = (
             f'<div id="detail_{_dseq}_budget_narrow" class="detail-tab-pane">'
             f'<p style="color:#fcd34d;font-size:0.8rem;margin-bottom:10px">'
-            f'💰 <b>A7/RSI2/VOLTF戦略のみ</b>に絞った予算シミュ。毎日BT降順で'
+            f'💰 <b>A7/RSI2/VOLTF戦略のみ</b>に絞った予算シミュ。毎日{_ORD_LBL}で'
             f'<b>{_budget_man}万円</b>まで注文した場合の約定トレード。'
             f'DON/MOMを除いた高効率戦略の実力を確認できます（直近{_ENTRY_GRID_DAYS}日）。</p>'
             + _month_summary_html(_budget_narrow_entry_sorted)
