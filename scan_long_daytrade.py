@@ -57,6 +57,9 @@ ap.add_argument("--select-top", type=int, default=0, help="提案の上限件数
 ap.add_argument("--out", type=str, default=None, help="提案ファイル名(既定=long_watchlist_proposal_<date>.py)")
 ap.add_argument("--no-cache", action="store_true", help="取引ログキャッシュを使わない")
 ap.add_argument("--refresh-cache", action="store_true", help="キャッシュ無視で再計算・上書き")
+ap.add_argument("--aggregate", action="store_true",
+                help="【診断】選定せず全ペアの生の同日期待値をTRAIN/TESTで集計。"
+                     "LDTコンセプト自体の地力を測る(選定overfitと切り分け)。キャッシュ利用で数秒。")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -254,6 +257,58 @@ def _select_and_write(results: list[dict], base_month: str, multi: bool):
     print(f"  [出力] {out_path.resolve()}")
 
 
+def _aggregate_report(results: list[dict], base_list: list[str]):
+    """選定なし=全ペアの生取引を TRAIN/TEST に割り、LDTコンセプトの地力を測る。
+
+    なぜ必要か (scan_mirror_daytrade の同名関数からの移植):
+      選定後(TRAIN合格ペア)がOOSで負けたとき、原因は2つに分かれる。
+        * 全ペアの地力が **負** → 方向・コンセプトが間違い。選定を変えても救えない=却下。
+        * 全ペアの地力が **正** → コンセプトにはエッジ有。選定方法がoverfitしているだけ
+                                  =選定を作り直す価値あり(lssで scan_lss_universe を
+                                    作ったのと同じ道)。
+      #7 鏡像はこの一手で「方向が根本的に逆」と確定して却下された(CLAUDE.md 18.x)。
+      LDT も同じ手順で閉じる。
+    """
+    def _fmt(s):
+        if not s:
+            return "取引なし"
+        _pf_s = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+        return (f"{s['n']:>7,}件 損益{s['pnl']:>+14,.0f} PF{_pf_s:>5} "
+                f"勝率{s['wr']:>4.0f}% 期待値{s['exp']:>+8,.0f}/件")
+
+    print("\n" + "#" * 96)
+    print("【集計診断】選定なし=全ペア(全ロング戦略×全銘柄)の生の同日期待値。LDTコンセプトの地力。")
+    print("  TESTが負 → 方向が根本的に負けEV(却下) / TESTが正 → 選定方法のoverfit(作り直す価値)")
+    print("#" * 96)
+    for bm in base_list:
+        be = pd.Period(bm, "M").end_time.normalize()
+        train = []; test = []
+        for r in results:
+            for (fd, p) in r["trades"]:
+                (train if fd <= be else test).append(p)
+        print(f"\n■ [{bm}] 全ペア地力")
+        print(f"    TRAIN(≤{be.date()}): {_fmt(_stat(train))}")
+        print(f"    TEST (>{be.date()}): {_fmt(_stat(test))}")
+
+    # 単一カットオフ(中央付近)で戦略別の地力も見る(どのロング戦略も効かないか確認)。
+    _mid = base_list[len(base_list) // 2]
+    _be = pd.Period(_mid, "M").end_time.normalize()
+    print("\n" + "-" * 96)
+    print(f"■ 戦略別の全ペア地力 (カットオフ {_be.date()} / TRAIN≤ vs TEST>)")
+    by_strat_tr: dict = {}; by_strat_te: dict = {}
+    for r in results:
+        s = r["strat"]
+        for (fd, p) in r["trades"]:
+            (by_strat_tr if fd <= _be else by_strat_te).setdefault(s, []).append(p)
+    for s in _strategies():
+        print(f"    {s:<7} TRAIN {_fmt(_stat(by_strat_tr.get(s, [])))}")
+        print(f"    {s:<7} TEST  {_fmt(_stat(by_strat_te.get(s, [])))}")
+    print("\n" + "-" * 96)
+    print("読み方: TESTの『期待値/件』が判定の核心。lss(ショート)の粗利は +538円/件、")
+    print("        LDTのネットは -350円/件(手数料0.2%込み)= 粗利 +250円/件 だった(18.14)。")
+    print("        ここが負なら、選定をどう作り直してもロング同日決済は成立しない。")
+
+
 def main():
     _seen = set(); universe = []
     for _s in available_local_symbols():
@@ -317,6 +372,10 @@ def main():
                 print(f"[cache] 取引ログを保存: {_cache_f} ({len(results)}ペア)", flush=True)
             except Exception as _ce:
                 print(f"[cache] 保存失敗({_ce})", flush=True)
+
+    if args.aggregate:
+        _aggregate_report(results, base_list)
+        return
 
     for bm in base_list:
         _select_and_write(results, bm, multi)
