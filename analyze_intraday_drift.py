@@ -92,6 +92,11 @@ ap.add_argument("--by-dow", action="store_true", help="曜日別")
 ap.add_argument("--by-price", action="store_true", help="価格帯別")
 ap.add_argument("--qty", type=int, default=100, help="1トレードの株数(既定100)")
 ap.add_argument("--csv", type=str, default="", help="日次×銘柄の生データをCSV保存")
+ap.add_argument("--index-symbols", type=str, default="",
+                help="指数プロキシを『個別に』測る (例 1321.T,1306.T)。"
+                     "先物版を検討するときに使う。ユニバース平均(等ウェイト)とは"
+                     "別物なので分けて出す。stock_5min に無ければ --source auto で"
+                     "yfinance にフォールバック(5分足は直近60日まで)")
 args = ap.parse_args()
 
 
@@ -302,7 +307,64 @@ def _report(d: pd.DataFrame, title: str) -> None:
               f"二桁で初めて意味を持つ。")
 
 
+def _equity(d: pd.DataFrame, seg: str, title: str, per_day: bool = True) -> None:
+    """『1日1トレード』としての資産曲線サマリー。
+
+    先物版(指数を寄りで売って引けで買い戻す)は **1日1トレード** なので、
+    1件あたりの期待値ではなく **日次損益の系列** で評価しないと意味がない。
+    per_day=True: その日の全銘柄の等ウェイト平均を『その日の1トレード』とみなす
+                  (= 指数を売ったのと同じ)。
+    """
+    col = f"y_{seg}"
+    d2 = d.dropna(subset=[col])
+    if d2.empty:
+        return
+    daily = d2.groupby("date")[col].mean() if per_day else d2.set_index("date")[col]
+    if len(daily) < 20:
+        return
+    cum = daily.cumsum()
+    dd = cum - cum.cummax()
+    mu, sd = float(daily.mean()), float(daily.std(ddof=1))
+    sharpe = mu / sd * math.sqrt(250) if sd > 0 else float("nan")
+    print(f"\n  ── {title} を『毎日1トレード』でやった場合 ──")
+    print(f"     日数 {len(daily):,} / 累積 {float(cum.iloc[-1]):+,.0f}円 "
+          f"/ 平均 {mu:+,.0f}円/日")
+    print(f"     最大DD {float(dd.min()):,.0f}円 / Sharpe(年率) {sharpe:.2f} "
+          f"/ 勝日 {float((daily > 0).mean() * 100):.1f}%")
+    _m = daily.groupby(daily.index.to_period("M")).sum()
+    print(f"     月別プラス {int((_m > 0).sum())}/{len(_m)}ヶ月 "
+          f"/ 最悪月 {float(_m.min()):+,.0f}円 / 最良月 {float(_m.max()):+,.0f}円")
+    if sharpe == sharpe and sharpe < 0.5:
+        print(f"     ⚠ Sharpe {sharpe:.2f} は低い。ドリフトはあっても"
+              f"日々のブレが大きすぎて実運用に耐えない水準")
+
+
 _report(px, "全期間")
+_equity(px, "intraday", "ユニバース等ウェイト(寄り→引けショート)")
+
+# ── 指数プロキシを個別に測る (先物版の判定材料) ──────────────────────
+# ⚠ ユニバースの等ウェイト平均と、日経平均(株価加重)は別物。先物が追うのは後者なので、
+#    先物版を検討するなら 1321 等の指数連動ETFを **単体で** 測る必要がある。
+if args.index_symbols.strip():
+    _idx = [s.strip().upper() for s in args.index_symbols.split(",") if s.strip()]
+    _idx = [s if s.endswith(".T") else f"{s}.T" for s in _idx]
+    print(f"\n{'=' * 100}")
+    print(f"■ 指数プロキシ (先物版の判定材料) — {', '.join(_idx)}")
+    print(f"{'=' * 100}")
+    for _s in _idx:
+        _r = _one_symbol(_s)
+        if _r is None or _r.empty:
+            print(f"  {_s}: データなし "
+                  f"(stock_5min に無い場合は --source auto を試す)")
+            continue
+        _r["date"] = pd.to_datetime(_r["date"])
+        for seg, a, b in SEGMENTS:
+            _sv, _ev = _r[a if a in ("prev_close", "open", "close") else a], \
+                       _r[b if b in ("prev_close", "open", "close") else b]
+            _r[f"r_{seg}"] = (_ev.astype(float) - _sv.astype(float)) / _sv.astype(float)
+            _r[f"y_{seg}"] = -(_ev.astype(float) - _sv.astype(float)) * args.qty
+        _report(_r, f"{_s} 単体")
+        _equity(_r, "intraday", f"{_s} (寄り→引けショート)", per_day=False)
 
 # ── TRAIN / TEST ────────────────────────────────────────────────────
 if args.split:
