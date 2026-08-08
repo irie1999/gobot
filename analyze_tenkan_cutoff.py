@@ -6,6 +6,16 @@
   09:05 で切ると、それ以降に約定する『遅れショート』を捨てることになる。
   → 捨てる遅れショートの損益 vs 拾える転換の損益、どちらが大きいか。
 
+⛔ 2026-08-08 まで、転換の買いは常に 09:09 固定だった。締切 09:10 以降の行は
+   『その時刻まで約定しなかった』という **その時点では未知の情報** を使って
+   09:09 に買う = 時間逆行で、実装できないルールを測っていた。
+   → --buy-mode cutoff (既定) で **締切時刻に買う** ようにした。これなら実運用と
+     時間整合が取れる。旧挙動は --buy-mode fixed。
+
+⛔ 転換の決済は「時間が来たら売る」だけで、**利確/損切りは一度も試されていなかった**。
+   → --tk-sm / --tk-tm で OCO を置けるようにした。売却時刻も --tk-sell で動かせる
+     (前場引け 11:30 が既定。大引けまで持つなら 15:25)。
+
 やること:
   各シグナル日について5分足から
     ・約定バー(最初に安値<=トリガー)とその時刻
@@ -41,14 +51,29 @@ ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--bt-min", type=float, default=40.0,
                 help="BTスコア下限(既定40。実際に投資する集団で判断すること)")
-ap.add_argument("--stop-delay-bars", type=int, default=2,
-                help="lssの損切り遅延(既定2=delay2。本番watchと揃える。CLAUDE.md §18.9)")
+ap.add_argument("--stop-delay-bars", type=int, default=1,
+                help="lssの損切り遅延(既定1=delay1。**実機 watch.bat --stop-delay-bars 1**"
+                     "と揃える。CLAUDE.md 18.10.1『実機が正』)")
 ap.add_argument("--source", choices=["auto", "local", "yfinance"], default="local")
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--limit", type=int, default=0)
 ap.add_argument("--symbols-file", type=str, default=None)
 ap.add_argument("--cutoffs", type=str, default="09:05,09:10,09:15,09:20,09:30,10:00,11:00",
                 help="締切時刻のカンマ区切り。この時刻までに約定しなければ転換する")
+ap.add_argument("--buy-mode", choices=["cutoff", "fixed"], default="cutoff",
+                help="転換の買い時刻。**既定 cutoff = 締切時刻に買う**(実運用と時間整合)。"
+                     "fixed は --tk-buy 固定で、締切がそれより後だと『まだ知らないこと』を"
+                     "使って買うことになる(look-ahead)。2026-08-08 まで fixed 相当だった")
+ap.add_argument("--tk-buy", type=str, default="09:09",
+                help="--buy-mode fixed のときの買い時刻。cutoff モードでも"
+                     "『締切なし/全部転換』の行はこの時刻を使う")
+ap.add_argument("--tk-sell", type=str, default="11:30",
+                help="転換の売り時刻(この時刻以前の最後バーOPEN)。引けまで持つなら 15:25")
+ap.add_argument("--tk-sm", type=float, default=0.0,
+                help="転換(ロング)の損切りATR倍率。0=損切りを置かない(時間決済のみ)。"
+                     "**これは一度も試されていない**(転換は常に時間決済だった)")
+ap.add_argument("--tk-tm", type=float, default=0.0,
+                help="転換(ロング)の利確ATR倍率。0=利確を置かない")
 ap.add_argument("--by-month", action="store_true")
 ap.add_argument("--bt-window", type=int, default=420,
                 help="BTスコア算出のためにバックテストを何日ぶん余分に回すか(既定420)。"
@@ -82,6 +107,16 @@ def _day_ohlc(df_raw, fd):
     return (None, None, None, None)
 
 
+def _parse_hhmm(v: str, default):
+    """'HH:MM' を time に。壊れていれば既定に落とす。"""
+    try:
+        hh, mm = str(v).strip().split(":")[:2]
+        return _time(int(hh), int(mm))
+    except Exception:
+        print(f"[WARN] 時刻を解釈できません: {v} → {default} を使います")
+        return default
+
+
 def _prices(order_limit, order_stop, order_target):
     """注文値を呼値に丸めて (トリガー, 損切り, 目標) にする。compare_lss_rules と同一。"""
     base = round_to_tick(order_limit)
@@ -89,6 +124,87 @@ def _prices(order_limit, order_stop, order_target):
     stop_p = float(ceil_to_tick(max(order_stop, order_target)))
     target_p = float(ceil_to_tick(min(order_stop, order_target)))
     return trigger, stop_p, target_p
+
+
+# ── 転換(ロング)のシミュレーション ────────────────────────────────────
+# tenkan_sim.simulate_bars はレポートと共用なので触らない。ここでは
+#   ・買い時刻を締切に連動できる
+#   ・利確/損切り(OCO)を置ける
+# 拡張版をローカルに持つ。ルールが違うので別実装にしてある。
+_TK_SLIP = 0.0005            # tenkan_sim と同じ
+_TK_BUY = _parse_hhmm(args.tk_buy, _time(9, 9))
+_TK_SELL = _parse_hhmm(args.tk_sell, _time(11, 30))
+
+
+def _atr_of(olp: float, osp: float, otp: float) -> float:
+    """注文値から ATR を逆算する。lssショートは
+         order_stop   = 基準 + atr*sm
+         order_target = 基準 - atr*tm
+       なので (osp - olp)/sm で出る。sm が0なら tm 側から。"""
+    if args.sm > 0:
+        v = (osp - olp) / args.sm
+    elif args.tm > 0:
+        v = (olp - otp) / args.tm
+    else:
+        return 0.0
+    return v if v == v and v > 0 else 0.0
+
+
+def _tenkan(db, buy_t, atr: float) -> "float | None":
+    """転換(ロング)の損益。buy_t 以降の最初バーOPENで買う。
+
+    OCO(--tk-sm / --tk-tm)を置いた場合は先にタッチしたほうで決済し、
+    どちらも触れなければ --tk-sell 以前の最後バーOPENで手仕舞う。
+    同一バーで両方タッチしたら **損切り優先**(悲観側)。
+    約定値は lss 側(v16)と同じ考え方:
+      ロングの損切り(逆指値売り) → 窓を開けて下に飛べば不利 = min(stop, その足の始値)
+      ロングの利確(指値売り)     → 窓を開けて上に飛べば有利 = max(target, その足の始値)
+    """
+    if db is None or len(db) < 3:
+        return None
+    times = [t.time() for t in db.index]
+    bi = None
+    for i, t in enumerate(times):
+        if t >= buy_t:
+            bi = i
+            break
+    if bi is None:
+        return None
+    buy_raw = float(db.iloc[bi]["open"])
+    if buy_raw <= 0:
+        return None
+    # 時間決済の足(これ以降は建てない)
+    li = None
+    for i in range(len(times) - 1, -1, -1):
+        if times[i] <= _TK_SELL:
+            li = i
+            break
+    if li is None or li <= bi:
+        return None
+
+    b = buy_raw * (1 + _TK_SLIP)
+    sell_raw = None
+    if atr > 0 and (args.tk_sm > 0 or args.tk_tm > 0):
+        stop_p = buy_raw - atr * args.tk_sm if args.tk_sm > 0 else None
+        tgt_p = buy_raw + atr * args.tk_tm if args.tk_tm > 0 else None
+        lows = db["low"].to_numpy(dtype=float)
+        highs = db["high"].to_numpy(dtype=float)
+        opens = db["open"].to_numpy(dtype=float)
+        for j in range(bi, li + 1):
+            hit_s = stop_p is not None and lows[j] <= stop_p
+            hit_t = tgt_p is not None and highs[j] >= tgt_p
+            if hit_s:                       # 同一バー両方タッチは損切り優先(悲観)
+                sell_raw = min(stop_p, opens[j])
+                break
+            if hit_t:
+                sell_raw = max(tgt_p, opens[j])
+                break
+    if sell_raw is None:
+        sell_raw = float(db.iloc[li]["open"])
+    if sell_raw <= 0:
+        return None
+    s = sell_raw * (1 - _TK_SLIP)
+    return (s - b) * QTY - (b + s) * QTY * FEE
 
 
 def _bt_score(trades) -> int:
@@ -277,8 +393,17 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
             # ※ 既に load_intraday で読んだ db をそのまま渡す。_tks.simulate() だと
             #   同じpklをもう一度読むことになり、スレッド並列で pickle.load が競合して
             #   SystemError: deallocated bytearray object has exported buffers が出る。
-            tk = _tks.simulate_bars(db)
-            tk_pnl = tk["pnl"] if tk else None
+            # 締切ごとに買い時刻を変えて計算する。
+            # ⛔ 2026-08-08 まで買いは常に 09:09 固定だった。締切 09:10 以降の行は
+            #    『まだ知らないこと(その時刻まで約定しなかった)』を使って09:09に買う
+            #    = 時間逆行。実装可能なのは締切<=買い時刻の行だけだった。
+            _atr = _atr_of(olp, osp, otp)
+            tk_fixed = _tenkan(db, _TK_BUY, _atr)
+            tk_by_cut: dict = {}
+            for _lbl, _ct in CUTOFFS:
+                tk_by_cut[_lbl] = (_tenkan(db, _ct, _atr)
+                                   if args.buy_mode == "cutoff" else tk_fixed)
+            tk_pnl = tk_fixed
 
             # BTスコア用(base=約定した分のlss損益)
             if lss_pnl is not None:
@@ -288,6 +413,7 @@ def _scan(sym: str, name: str, strats: list[str]) -> list[dict]:
                 "date": str(fd), "symbol": sym, "name": name, "strategy": strat,
                 "fill_time": fill_t.strftime("%H:%M") if fill_t else "",
                 "lss_pnl": lss_pnl, "tenkan_pnl": tk_pnl, "trigger": trigger,
+                "tk_cut": tk_by_cut,
             })
 
         # BTスコアで足切り(compare_lss_rules と同じ算出)
@@ -335,8 +461,12 @@ print(f"\n[集計] シグナル {len(ALL)}件 / lss約定 {n_fill}件({n_fill / 
       f"/ 転換計算可 {n_tk}件", flush=True)
 
 
-def _agg(mode_name, cutoff):
-    """締切ごとに lss と 転換 を振り分けて集計する。"""
+def _agg(mode_name, cutoff, label=None):
+    """締切ごとに lss と 転換 を振り分けて集計する。
+
+    転換の損益は **その締切時刻に買った場合**の値を使う(label 経由)。
+    label が None の行(締切なし/全部転換)は --tk-buy 固定の値。
+    """
     n_l = n_t = 0
     w = 0
     pnl = 0.0
@@ -360,7 +490,8 @@ def _agg(mode_name, cutoff):
             p = r["lss_pnl"]
             n_l += 1
         else:
-            p = r["tenkan_pnl"]
+            p = (r["tk_cut"].get(label) if label is not None
+                 else r["tenkan_pnl"])
             if p is None:
                 continue
             n_t += 1
@@ -378,12 +509,26 @@ def _agg(mode_name, cutoff):
             "pnl": pnl, "mon": mon}
 
 
-RES = [_agg(nm, cu) for nm, cu in MODES]
+RES = [_agg(nm, cu, nm if (nm, cu) in CUTOFFS else None) for nm, cu in MODES]
 _base = RES[0]["pnl"]   # 純lss(転換なし)を基準にする
 
 print("\n" + "=" * 96)
 print("転換の締切時刻スイープ — この時刻までに約定しなければ転換(ロング)に切替")
 print("=" * 96)
+_oco = (f"損切ATR{args.tk_sm} / 利確ATR{args.tk_tm}"
+        if (args.tk_sm > 0 or args.tk_tm > 0) else "OCOなし(時間決済のみ)")
+print(f"  転換ルール: 買い={'締切時刻' if args.buy_mode == 'cutoff' else args.tk_buy} / "
+      f"売り={args.tk_sell}以前の最後バー / {_oco}")
+print(f"  母集団: BT>={args.bt_min:.0f} / 価格 {args.min_price:.0f}-{args.max_price:.0f} / "
+      f"delay{args.stop_delay_bars} / 直近{args.days}日")
+if args.buy_mode == "fixed":
+    print("  " + "!" * 86)
+    print("  ⛔ --buy-mode fixed: 買いは常に " + args.tk_buy + " です。")
+    print("     それより後の締切行は『その時刻まで約定しなかった』という"
+          "**まだ知らない情報**を使って買うことになります(時間逆行)。")
+    print("     実装可能なのは 締切 <= 買い時刻 の行だけです。")
+    print("  " + "!" * 86)
+print("-" * 96)
 print(f"{'締切':<22}{'合計':>6}{'lss':>6}{'転換':>6}{'勝率':>7}{'PF':>7}"
       f"{'総損益':>14}{'純lss比':>15}")
 print("-" * 96)
@@ -414,7 +559,8 @@ with open(_out, "w", newline="", encoding="utf-8-sig") as f:
 print(f"\n[出力] {_out}")
 
 # 約定時刻の分布(遅れ約定がどれだけ稼いでいるか)
-print("\n【lss約定時刻 × 損益】遅い約定を捨ててよいかの判断材料")
+print(f"\n【lss約定時刻 × 損益】遅い約定を捨ててよいかの判断材料"
+      f"  ※転換列は {args.tk_buy} 買い固定の参考値")
 print(f"{'約定時刻帯':<14}{'件数':>7}{'勝率':>7}{'lss損益':>14}{'同じ銘柄を転換した場合':>22}")
 print("-" * 66)
 BANDS = [("〜09:05", "09:05"), ("09:06〜09:10", "09:10"), ("09:11〜09:15", "09:15"),
