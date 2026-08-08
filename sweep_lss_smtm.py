@@ -29,13 +29,24 @@ lss の決済は 損切ATR=0.1 / 利確ATR=1.0 = 名目 1:10。ところが実�
 
 使い方
 ------
-  # ★ 推奨: TEST窓を3本回して、全窓で同じ推奨が出るときだけ採用する
-  python sweep_lss_smtm.py --sm-list 0.1,0.2,0.3,0.5 --tm-list 1.0,1.5,2.0 \
-                           --holdout-list 60,120,180 --workers 8
+  # ★ 推奨: TEST窓を3本回して、全窓で平坦域が一致するときだけ採用を検討する
+  python sweep_lss_smtm.py --sm-list 0.1,0.2,0.3,0.5,0.7,1.0 --tm-list 1.0,1.5,2.0 \
+                           --holdout-list 60,120,180 --bt-min 30 --workers 8
+
+  # ルールを変えるだけなら再計算不要(sweep_smtm/ の保存済みCSVを読み直す)
+  python sweep_lss_smtm.py --sm-list ... --tm-list ... --holdout-list ... --reparse
 
   python sweep_lss_smtm.py                       # 既定グリッド(4x3=12点)・窓1本
   python sweep_lss_smtm.py --holdout-days 120    # TEST に使う直近日数
   python sweep_lss_smtm.py --dry-run             # 実行せずコマンドだけ表示
+
+⛔ **--bt-min は 30 以上**。0 にすると低品質シグナル込みの母集団になり、
+   delay 系が構造的に崩壊する(18.9.1: フィルター前 delay1 = -18M)。
+   compare_lss_rules の BT は『スキャン全宇宙に対する自前のスコア』で、
+   sim_oos_budget のプール床(選定済み提案)とは別物なので混同しないこと。
+
+⛔ **--rule は実機と合わせる**(既定 delay1 = watch.bat --stop-delay-bars 1)。
+   base 行は delay0 なので実機と条件が違う。
 
 ⛔ TEST窓1本の結果で採用を決めないこと。ローリングOOSの実測では月次σが月平均の
    2.7倍あり、10ヶ月でも t=+1.18 しか出ない(CLAUDE.md 18.24)。窓を1つ変えるだけで
@@ -66,9 +77,13 @@ ap.add_argument("--holdout-list", type=str, default="",
                 help="TEST 窓を複数指定(例 60,120,180)。指定すると窓ごとに "
                      "TRAIN/TEST を回し、**全窓で向きが一致するか**で判定する。"
                      "1窓だけの結果はノイズと区別できない(CLAUDE.md 18.24)")
-ap.add_argument("--bt-min", type=float, default=0.0,
-                help="compare_lss_rules に渡すBT下限。既定0=全件。"
-                     "実機は BT30(=プールの床=実質フィルタなし)なので 0 と同義")
+ap.add_argument("--bt-min", type=float, default=30.0,
+                help="compare_lss_rules に渡すBT下限。**既定30**。"
+                     "⛔ 0 にしてはいけない。compare_lss_rules の BT は"
+                     "『スキャン全宇宙に対する自前のスコア』で、sim_oos_budget の"
+                     "プール床(選定済み提案)とは別物。0 = 低品質シグナル込みの母集団で、"
+                     "そこでは delay 系が構造的に崩壊する(CLAUDE.md 18.9.1: "
+                     "フィルター前 delay1 = -18M / 「必ず BT30以上で判断すること」)")
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--workers", type=int, default=6)
@@ -238,7 +253,14 @@ print(f"[スイープ] sm {SMS} × tm {TMS} = {len(SMS) * len(TMS)}点 × TEST�
       f"× TRAIN/TEST = {len(SMS) * len(TMS) * len(HOLDOUTS) * 2}回")
 for _H in HOLDOUTS:
     print(f"  窓{_H}日 … TRAIN: 直近{_H}日を除いた{args.train_days}日 / TEST: 直近{_H}日")
-print(f"  BT下限: {args.bt_min:.0f} (実機は BT30=プールの床=実質フィルタなし)")
+print(f"  BT下限: {args.bt_min:.0f}")
+if args.bt_min < 30:
+    print("  " + "!" * 86)
+    print("  ⛔ --bt-min が 30 未満です。低品質シグナルを含む母集団になります。")
+    print("     CLAUDE.md 18.9.1: 『フィルター前(低品質)では delay1 は崩壊(-18M)。")
+    print("     BT30以上では delay1 が勝つ。**必ず BT30以上で判断すること**』")
+    print("     この設定の結果で決済パラメータを決めてはいけません。")
+    print("  " + "!" * 86)
 if done:
     print(f"  済み {len(done)}件は飛ばします ({OUT})")
 
@@ -279,7 +301,7 @@ def _get(sm, tm, kind, H, col="net_real"):
 
 for H in HOLDOUTS:
     print(f"\n{'=' * 92}")
-    print(f"■ sm/tm スイープ結果 (base ルールの net現実) — TEST窓 {H}日")
+    print(f"■ sm/tm スイープ結果 ({_RULE} ルールの net現実) — TEST窓 {H}日")
     print(f"{'=' * 92}")
     for kind in ("TRAIN", "TEST"):
         print(f"\n  [{kind}]")
@@ -348,6 +370,32 @@ def _axis_means(axis_vals, other_vals, axis_is_sm, kind, H, col):
                 xs.append(v)
         out.append(sum(xs) / len(xs) if xs else float("nan"))
     return out
+
+# ── サニティチェック: TRAIN と TEST の1件あたりが桁違いなら母集団を疑う ──
+# 2026-08-08 に実際に起きた。--bt-min 0(低品質込み)で delay1 を測ったら
+# TRAIN -9,181円/件 / TEST +727円/件 と符号すら合わなかった。
+# 隣接する期間で1件あたり1万円ずれるのはレジームでは説明できない。
+_sane = []
+for H in HOLDOUTS:
+    for sm in SMS:
+        for tm in TMS:
+            a, b = _get(sm, tm, "TRAIN", H), _get(sm, tm, "TEST", H)
+            na, nb = _get(sm, tm, "TRAIN", H, "trades"), _get(sm, tm, "TEST", H, "trades")
+            if None in (a, b, na, nb) or not (na and nb):
+                continue
+            pa, pb = a / na, b / nb
+            if pa * pb < 0 and abs(pa - pb) > 2000:
+                _sane.append((H, sm, tm, pa, pb))
+if _sane:
+    print(f"\n{'!' * 92}")
+    print(f"⛔ TRAIN と TEST で1件あたりの符号が逆かつ差が大きい点が {len(_sane)}件あります。")
+    for H, sm, tm, pa, pb in _sane[:5]:
+        print(f"   窓{H}日 sm={sm} tm={tm}: TRAIN {pa:+,.0f}円/件 / TEST {pb:+,.0f}円/件")
+    if len(_sane) > 5:
+        print(f"   ... 他 {len(_sane) - 5}件")
+    print("   隣接する期間でこれはレジームでは説明できません。母集団(--bt-min)を疑ってください。")
+    print("   CLAUDE.md 18.9.1: delay 系は BT30未満の低品質シグナルを含めると構造的に崩壊する。")
+    print(f"{'!' * 92}")
 
 # ⛔ 判定は『窓ごとの argmax』では**やってはいけない**。
 #    平坦域の中で TRAIN を tie-break に使うと、TRAIN の argmax が安定している限り
