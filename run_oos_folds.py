@@ -136,8 +136,20 @@ def main():
     env = os.environ.copy()
     env["LSS_CLOSESTOP_RESWEEP"] = ""
     env["LSS_GUARD_ONLY"] = ""
-    env["LSS_STOP_DELAY_BARS"] = "2"   # ライブと揃える(CLAUDE.md §18.9)
+    # ⛔ ここは daily.bat / watch.bat と1文字でも食い違わせないこと。
+    #    2026-08-08 点検で2件ズレていた:
+    #      LSS_STOP_DELAY_BARS  ここ=2 / 実機(daily.bat・watch.bat)=1
+    #      LSS_ASOF_BT          未設定(=OFF) → 過去の取引を『今日のBT』で並べる = **先読み**
+    #    後者は致命的で、18.11 の実測では6ヶ月の損益が +2,270,229 → +276,975(-88%)動いた。
+    #    このスクリプトの過去の出力(oos_raw_fold*.csv)は全部その状態で作られている。
+    env["LSS_STOP_DELAY_BARS"] = "1"   # ライブ(watch.bat --stop-delay-bars 1)と揃える
     env["LSS_BT_TAB_MIN"] = "40"
+    env.setdefault("LSS_ASOF_BT", "1") # 先読みなしのBT (18.11)。daily.bat と同じ
+    # 発注順は lss_order_rank の既定(流動性順)を継承する。比較用に旧BT降順で回すなら
+    # 呼び出し前に set LSS_ORDER_RANK=bt (18.21: BT降順はランダム6本すべてを下回る)。
+    _rank = env.get("LSS_ORDER_RANK", "") or "(既定=流動性順)"
+    print(f"[env] stop_delay=1 / BT_TAB_MIN=40 / as-of BT={env['LSS_ASOF_BT']} / "
+          f"発注順={_rank}")
     # ★ レポート自身の予算タブ(= .\daily と同じ _run_budget_sim)の月別P&Lを出させる。
     #    生CSV(LSS_OOS_RAW_CSV)を sim_oos_budget.py で再シミュした値とは経路が違うので、
     #    両者がズレたら **こちらが正**(実際に発注リストを作っているコードだから)。
