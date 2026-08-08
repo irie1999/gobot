@@ -48,4 +48,8 @@ REM     On lss that inflated the win rate from 41 pct to 55-66 pct. Same trap.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
 REM --- dump settled trades to a SEPARATE csv so lss and ldt never mix
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=ldt_trades.csv"
-python run_signals_holdout_all.py --long-daytrade --ldt-proposal auto --min-price 1000 --max-price 6000 --force --days 365 --no-news --no-risk --workers 8 %*
+REM --- ALWAYS --no-serve. LDT is analysis only. Without it the script starts the
+REM     LIVE order server against the PRODUCTION account (18080, long margin new).
+REM     It also fights .\daily and .\watch for the single kabu token (401).
+REM     Happened once on 2026-08-08. Do not remove this flag.
+python run_signals_holdout_all.py --long-daytrade --ldt-proposal auto --min-price 1000 --max-price 6000 --force --days 365 --no-news --no-risk --workers 8 --no-serve %*
