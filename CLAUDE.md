@@ -1590,6 +1590,42 @@ daily.bat / dailyfast.bat:  if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
 
 対応: 過去日を指定して生成した場合、レポート上部に**橙色の警告帯を出す**ようにした
 (`nikkei_analysis.py` の `_asof_warn`)。当日実行では出ない。
+
+##### ⛔⛔ さらに悪い: 過去日の再生成は『間違った値で永久凍結』する (2026-08-08)
+
+凍結キャッシュ `signal_score_cache_lss.json` は **書き込み1回きり**
+(`run_signals_holdout_all.py:1800-1803`):
+
+```python
+if _skey not in _score_cache:                    # ← 既にあれば上書きしない(正しい値は守られる)
+    _real_bt = _sig.get("rec_score", 0)          # ← **その実行時点**のBTスコア
+    _score_cache[_skey] = {"bt_score": _real_bt, "first_seen": str(TODAY)}
+```
+
+**まだ凍結されていないシグナルを、過去日指定で再生成すると、決済結果を織り込んだBTが
+『発生時スコア』として永久に凍結される。**
+
+そして損益タブは **凍結 → as-of → 今日のスコア** の順に引き、凍結が見つかればそこで確定する
+(`nikkei_analysis.py:7722`)。つまり **汚染された凍結値は、正しい as-of 計算を上書きする。**
+`LSS_ASOF_BT=1` でも直らない。3経路の中で最もたちが悪い。
+
+| 凍結タイミング | 判定 | 理由 |
+|---|---|---|
+| シグナル日 〜 翌営業日 | ✅ 正しい | lss は翌営業日に約定・同日決済。まだ決済していない |
+| 翌々営業日以降 | ⛔ **汚染** | その取引の決済結果がBTに入っている |
+
+**監査ツール: `audit_score_cache.py`**（`first_seen` と `signal_date` を突き合わせる）
+
+```
+python audit_score_cache.py                 # 内訳を出す
+python audit_score_cache.py --list          # 汚染エントリ一覧
+python audit_score_cache.py --purge         # 汚染分だけ削除(.bak を自動作成)
+```
+
+削除すると as-of BT(正しい再計算)に落ちるので**消して損はしない**。
+出力の「平均BT — 汚染 vs 正しい凍結」で、汚染側が高ければ先読みが効いている兆候。
+
+**★ `--date` で過去日を再生成したあとは必ずこのツールを流すこと。**
 - 代償: 全ペアで `表示窓+400日` のバックテストを追加実行するので損益タブが約2倍遅くなる
   (実測 36.2s → 62.9s)。`full_trade_log` の窓が765日あるので、数ヶ月前の取引にも
   『当時の直近1年』が揃い as-of BT は正しく算出される(履歴不足なら 0=未実証 として除外)。
