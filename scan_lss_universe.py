@@ -73,6 +73,9 @@ ap.add_argument("--no-cache", action="store_true",
                 help="母集団取引ログのキャッシュを使わない(常に再計算)")
 ap.add_argument("--refresh-cache", action="store_true",
                 help="キャッシュを無視して再計算し、上書き保存する")
+ap.add_argument("--aggregate", action="store_true",
+                help="【診断】選定せず全ペアの生の同日期待値をTRAIN/TESTで集計。"
+                     "『信号だけ』の地力を測る(選定・予算の寄与と分離)。キャッシュ利用で数秒。")
 args = ap.parse_args()
 
 import backtest_limit_entry as ble
@@ -213,6 +216,62 @@ def _scan_symbol(sym: str, name: str, strats: list[str]) -> list[dict]:
 
 def _pf(x):
     return "∞" if x == float("inf") else f"{x:.2f}"
+
+
+def _aggregate_report(results: list[dict], base_list: list[str]):
+    """選定なし=全ペアの生取引を TRAIN/TEST に割り、『信号だけ』の地力を測る。
+
+    なぜ必要か (2026-08-08):
+      analyze_uncond_break.py が『信号なし・全銘柄×全営業日』を測ったところ
+      **-18円/件**(全期間・t=-3.29)だった。一方 lss の実績は +418円/件。
+      だが +418 は『信号 + WF選定 + 予算上限』の合計なので、どこが効いているか
+      分離できていない。本関数は **信号だけ**(選定なし・予算なし)を出す。
+
+        信号なし          : analyze_uncond_break.py     -18円/件
+        信号のみ          : ここで測る                   ← 未知
+        信号+選定+予算    : 予算タブ                    +418円/件
+
+      選定は 18.12/18.13 で識別力ゼロと確定しているので、『信号のみ』が +418 に
+      近ければ **エッジは信号にある**。-18 に近ければ **信号も効いておらず、
+      +418 は予算上限の切り捨て方(または期間)によるもの**ということになる。
+    """
+    def _fmt(s):
+        if not s:
+            return "取引なし"
+        _pf_s = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+        return (f"{s['n']:>7,}件 損益{s['pnl']:>+14,.0f} PF{_pf_s:>5} "
+                f"勝率{s['wr']:>4.0f}% 期待値{s['exp']:>+8,.0f}/件")
+
+    print("\n" + "#" * 96)
+    print("【集計診断】選定なし=全ペア(全ロング信号×全銘柄)を逆指値ショート。『信号だけ』の地力。")
+    print("  比較対象: 信号なし -18円/件 (analyze_uncond_break) / 信号+選定+予算 +418円/件 (18.15)")
+    print("#" * 96)
+    for bm in base_list:
+        be = pd.Period(bm, "M").end_time.normalize()
+        train = []; test = []
+        for r in results:
+            for (fd, p) in r["trades"]:
+                (train if fd <= be else test).append(p)
+        print(f"\n■ [{bm}] 全ペア地力")
+        print(f"    TRAIN(≤{be.date()}): {_fmt(_stat(train))}")
+        print(f"    TEST (>{be.date()}): {_fmt(_stat(test))}")
+
+    _mid = base_list[len(base_list) // 2]
+    _be = pd.Period(_mid, "M").end_time.normalize()
+    print("\n" + "-" * 96)
+    print(f"■ 戦略別の全ペア地力 (カットオフ {_be.date()} / TRAIN≤ vs TEST>)")
+    by_tr: dict = {}; by_te: dict = {}
+    for r in results:
+        s = r["strat"]
+        for (fd, p) in r["trades"]:
+            (by_tr if fd <= _be else by_te).setdefault(s, []).append(p)
+    for s in _strategies():
+        print(f"    {s:<7} TRAIN {_fmt(_stat(by_tr.get(s, [])))}")
+        print(f"    {s:<7} TEST  {_fmt(_stat(by_te.get(s, [])))}")
+    print("\n" + "-" * 96)
+    print("読み方: 『信号のみ』が +418 に近い → エッジは信号にある(選定は捨ててよい)。")
+    print("        -18 に近い → 信号も効いておらず、+418 は予算上限の切り捨て方か期間の産物。")
+    print("        戦略別で差が大きければ、効いている信号だけに絞る余地がある。")
 
 
 def _select_and_write(results: list[dict], base_month: str, multi: bool):
@@ -360,6 +419,10 @@ def main():
                       f"→ 次回同条件は即ロード", flush=True)
             except Exception as _ce:
                 print(f"[cache] 保存失敗({_ce})", flush=True)
+
+    if args.aggregate:
+        _aggregate_report(results, base_list)
+        return
 
     # ── 各基準月で TRAIN/TEST に振り分けて選定・出力 ──
     for bm in base_list:
