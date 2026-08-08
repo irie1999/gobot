@@ -77,6 +77,12 @@ ap.add_argument("--start-dates", type=str, default="lss_proposal_cumul.py",
                 help="START_DATES を持つ提案ファイル。各ペアが『いつからWATCHLISTに"
                      "居たか』で注文を切り、選定の先読みを除く(CLAUDE.md 18.11 と同型)。"
                      "空文字で無効化(絶対値は上振れするので相対比較専用)")
+ap.add_argument("--bt-mode", type=str, default="asof", choices=["asof", "static"],
+                help="発注順/下限に使うBTの取り方。asof(既定)=lss_trades.csv の"
+                     "**その注文日**の as-of BT を使う(先読みなし)。"
+                     "static=(銘柄,戦略)ごとの期間最大値を全日に適用する旧挙動。"
+                     "旧挙動は『6月にBT80になったペアを1月の注文でも最優先』にするので"
+                     "先読み。2026-08-08 まで static だった。")
 ap.add_argument("--universe", type=str, default="selected",
                 choices=["selected", "all"],
                 help="発注候補の母集団。selected(既定)=lss_trades.csv の選定済みペア。"
@@ -130,6 +136,39 @@ def _mins(ts):
         return t.hour * 60 + t.minute
     except Exception:
         return 0
+
+
+# ── as-of BT: (sym, strat, 注文日) → その時点のBT ───────────────────────
+# ⛔ 2026-08-08 まで sim は `max()` で期間全体の最大BTを取り、それを全日の
+#    発注順・BT下限に使っていた。「6月にBT80になったペアが1月の注文でも最優先」
+#    = 先読み。lss_trades.csv は entry_date ごとに as-of BT を持っているので、
+#    日付キーで引けば先読みなしにできる。
+_BT_BY_DATE: dict = {}
+
+
+def _load_bt_by_date() -> dict:
+    p = Path(args.trades_csv)
+    if not p.exists():
+        return {}
+    out = {}
+    for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        sym = _norm(r.get("symbol") or r.get("code") or "")
+        strat = str(r.get("strategy") or "").strip()
+        ed = str(r.get("entry_date") or "").strip()[:10]
+        if not (sym and strat and ed):
+            continue
+        try:
+            out[(sym, strat, ed)] = float(r.get("bt") or 0)
+        except Exception:
+            pass
+    return out
+
+
+def _bt_for(sym: str, strat: str, edate, static_bt: float) -> float:
+    """その注文日のBT。asof モードで履歴が無ければ 0(=未実証) として先読みを避ける。"""
+    if args.bt_mode != "asof":
+        return static_bt
+    return _BT_BY_DATE.get((sym, strat, str(edate)[:10]), 0.0)
 
 
 def _load_bt_pairs():
@@ -326,7 +365,10 @@ def _collect(sym_yf, strat, bt):
             _liq = float(row.get("volume", 0) or 0) * prev_close
         except Exception:
             _liq = 0.0
-        rec = {"date": pd.Timestamp(edate), "sym": sym, "bt": bt, "strat": strat,
+        _bt_here = _bt_for(sym, strat, edate, bt)
+        if args.bt_mode == "asof" and args.universe != "all" and _bt_here < args.bt_min:
+            continue        # その日のas-of BTが下限未満 = 当時は発注対象でなかった
+        rec = {"date": pd.Timestamp(edate), "sym": sym, "bt": _bt_here, "strat": strat,
                "liq": _liq,
                "order_notional": order_notional, "filled": False,
                "fill_min": None, "exit_min": None, "fill_notional": 0.0, "pnl": 0.0}
@@ -464,6 +506,13 @@ def main():
           f"倍率{MULTIPLES} / 価格{args.min_price:.0f}-{args.max_price:.0f}円 / "
           f"sm{args.sm} tm{args.tm} delay{DELAY} 株数{QTY} 指値ガード{GAP_LIMIT*100:.0f}% slip0 "
           f"/ 銘柄統合{'OFF' if args.no_dedupe_symbol else 'ON'}{only_month_label}")
+    global _BT_BY_DATE
+    if args.bt_mode == "asof":
+        _BT_BY_DATE = _load_bt_by_date()
+        print(f"[info] BT取り方=asof: {len(_BT_BY_DATE):,}件の(銘柄,戦略,日付)別BTを読み込み"
+              f" (先読みなし)")
+    else:
+        print(f"[info] ⚠ BT取り方=static: 期間最大BTを全日に適用します = **先読み**")
     print(f"[info] 母集団={args.universe} / 発注順={args.rank}"
           f"{f'(seed{args.rank_seed})' if args.rank == 'random' else ''}")
 
@@ -474,7 +523,7 @@ def main():
         # FEE を鍵に含める: 2026-08-07 に既定を 0.001→0 に変えたので、
         # 含めないと手数料込みの古いキャッシュが再利用されて誤った金額が出る。
         # 損切り約定モデル(v16: max(stop, bar_open))も鍵に含める。
-        "spv5", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.universe,
+        "spv6", getattr(ble, "_BT_LOGIC_VER", "?"), FEE, args.universe, args.bt_mode,
         getattr(__import__("sameday5m_firsttouch"), "_OPTIMISTIC_STOP_FILL", None),
         args.sm, args.tm, DELAY, GAP_LIMIT,
         args.days, args.bt_min, args.limit, QTY, args.min_price, args.max_price,
