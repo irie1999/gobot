@@ -37,6 +37,7 @@ OOSスイープを1回実行すれば、何度でも閾値を変えて結果を�
 
 import argparse
 import csv
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -92,7 +93,23 @@ def _liq_of(sym: str) -> float:
     return v
 
 
+# ランダム順の『ノイズ帯』用。18.21 の教訓: 単一シードで流動性順とBT降順を
+# 比べても、その差がノイズなのか実力なのか分からない。必ず複数シードのランダムを
+# 回して帯を作り、その中か外かで判定する。
+_RANK_MODE = "env"      # env / random
+_RANK_SEED = 0
+
+
+def _rand_key(t) -> float:
+    """(seed, 日付, 銘柄, 戦略) の決定論的ハッシュ。実行のたびに変わらない。"""
+    import hashlib
+    s = f"{_RANK_SEED}|{t.get('entry_date')}|{t.get('symbol')}|{t.get('strategy')}"
+    return int(hashlib.md5(s.encode()).hexdigest()[:12], 16)
+
+
 def _order_key(t):
+    if _RANK_MODE == "random":
+        return (_rand_key(t),)
     if _lor is None:
         return (0.0, -t["bt_score"])
     # BT降順モードでは liquidity を見ないので取りに行かない(ネット取得を避ける)。
@@ -149,6 +166,11 @@ def _load_one_raw_csv(path: str) -> list[dict]:
                 "entry_p":      float(row.get("entry_p") or 0),
                 "pnl":          float(row.get("pnl") or 0),
                 "filled":       int(row.get("filled") or 0),
+                # ⛔ 2026-08-08: ここで読み落としていた。liquidity が入らないと
+                #    sort_key が全件 liq=0 になり「最後尾 → BT降順」で並ぶ、つまり
+                #    LSS_ORDER_RANK=liquidity のつもりで **BT降順で走る**。
+                #    (旧CSVには列が無いので、その場合だけ _liq_of にフォールバック)
+                "liquidity":    float(row.get("liquidity") or 0),
             })
     return rows
 
@@ -484,7 +506,17 @@ def main() -> None:
     ap.add_argument("--signal-breakdown", action="store_true",
                     help="OOS月別のシグナル/約定内訳を表示")
     ap.add_argument("--out", help="集計結果をCSV出力するパス（省略可）")
+    ap.add_argument("--rank", choices=["liquidity", "bt", "random"],
+                    help="発注順を上書き。random は複数シードで『ノイズ帯』を作るため用 "
+                         "(18.21: 単一シードの比較では実力かノイズか判別できない)")
+    ap.add_argument("--rank-seed", type=int, default=42, help="--rank random のシード")
     args = ap.parse_args()
+
+    if args.rank == "random":
+        globals()["_RANK_MODE"] = "random"
+        globals()["_RANK_SEED"] = args.rank_seed
+    elif args.rank:
+        os.environ["LSS_ORDER_RANK"] = args.rank
 
     raw_path = Path(args.raw)
     # --raw はグロブ可(run_oos_folds.py はフォールドごとに別ファイルを書くため)
