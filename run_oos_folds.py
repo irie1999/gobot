@@ -134,8 +134,18 @@ def main():
 
     # daily.bat と同一の環境変数
     env = os.environ.copy()
+    # env = os.environ.copy() なので、シェルに残った研究用フラグがそのまま漏れる。
+    # daily.bat は毎回これらを明示クリアしている。**1つでも欠けると条件が変わる**ので
+    # daily.bat の 40-45 行と1対1で対応させること(2026-08-08 点検で4つ欠けていた)。
     env["LSS_CLOSESTOP_RESWEEP"] = ""
     env["LSS_GUARD_ONLY"] = ""
+    env["LSS_ENTRY_DELAY_BARS"] = ""
+    env["LSS_BUDGET_MIN_BT"] = ""
+    env["LSS_MONTH_FROM"] = ""
+    env["LSS_REALISTIC_ENTRY"] = ""
+    # 本番の lss_trades.csv をフォールドごとに10回上書きしてしまうのを防ぐ。
+    # 検証に不要なうえ、.\fills の突合相手が壊れる。
+    env["LSS_TRADES_CSV"] = ""
     # ⛔ ここは daily.bat / watch.bat と1文字でも食い違わせないこと。
     #    2026-08-08 点検で2件ズレていた:
     #      LSS_STOP_DELAY_BARS  ここ=2 / 実機(daily.bat・watch.bat)=1
