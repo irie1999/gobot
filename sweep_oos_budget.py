@@ -1,0 +1,172 @@
+r"""sweep_oos_budget.py — 予算(建てられる件数)のスイープを、判定に必要な形で出す。
+
+なぜ必要か
+----------
+`sim_oos_budget.py --budget N` を手で並べると合計損益しか見えない。予算を上げれば
+取引が増えるので合計は必ず増える。**増えたぶんが本当に価値があるのか**を決めるには
+3つが要る:
+
+  ① 月次の t / 95%CI     … 10ヶ月の月次σは10万円規模(18.24)。合計の差だけでは
+                            判定できない
+  ② 限界トレードの 円/件 … 予算を上げて **新たに入った取引だけ** を取り出す。
+                            合計ではなく、この限界の質が投資判断そのもの
+  ③ 限界トレードの bp     … このシムは slip=0(18.21)。流動性降順で埋めるので
+                            **増えたぶんは必ず薄い側**。限界の 円/件 を建値で
+                            割って往復 bp に直し、現実のスプレッドと比べる
+
+さらに **証拠金のピーク**(同時保有の最大)も出す。予算を上げるとは口座に
+その額を置くことなので、月平均の増加だけ見て決めてはいけない。
+
+使い方
+------
+  python sweep_oos_budget.py --raw "oos_raw_fold*.csv"
+  python sweep_oos_budget.py --raw "oos_raw_fold*.csv" --budgets 400,600,800,1200
+  python sweep_oos_budget.py --raw "oos_raw_fold*.csv" --bt-min 30 --spread-bp 30
+
+⚠ 発注順・BT下限・転換の扱いは `sim_oos_budget` と同一の関数を使う(乖離防止)。
+   シムタイプは実運用に最も近い **通常予算**(不約定も枠を消費)のみ。
+"""
+from __future__ import annotations
+
+import argparse
+import glob as _glob
+import statistics as _st
+import sys
+from collections import defaultdict
+
+try:
+    from sim_oos_budget import _bt_pass, _liq_of, _order_key, load_raw_csv
+except Exception as e:  # pragma: no cover
+    sys.exit(f"[error] sim_oos_budget を import できません: {e}")
+
+
+def _liq(t) -> float:
+    """発注順と同じ経路で流動性を引く(古い生CSVには liquidity 列が無い)。"""
+    v = t.get("liquidity")
+    if v in (None, "", 0, 0.0):
+        v = _liq_of(str(t.get("symbol", "")))
+    return float(v or 0.0)
+
+ap = argparse.ArgumentParser(description="予算スイープを限界トレード込みで判定する")
+ap.add_argument("--raw", required=True, help="生トレードCSV(グロブ可)")
+ap.add_argument("--budgets", default="400,600,800,1200,1600",
+                help="万円。カンマ区切り")
+ap.add_argument("--bt-min", type=float, default=30.0)
+ap.add_argument("--spread-bp", type=float, default=30.0,
+                help="薄い銘柄の往復スプレッド想定(bp)。限界が これを下回れば棄却")
+a = ap.parse_args()
+
+files = sorted(_glob.glob(a.raw)) if any(c in a.raw for c in "*?[") else [a.raw]
+if not files:
+    sys.exit(f"[error] {a.raw} に一致するファイルがありません")
+rows: list[dict] = []
+for f in files:
+    rows.extend(load_raw_csv(f))
+print(f"[入力] {len(files)}ファイル / {len(rows):,}行  ({files[0]} 〜 {files[-1]})")
+
+# fold × OOS月 × 日 でグルーピング(sim_oos_budget.run_sim と同じ切り方)
+groups: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+for r in rows:
+    groups[(r["fold"], r["train_months"], r["oos_month"])][r["entry_date"]].append(r)
+
+
+def _sim(budget: float) -> dict:
+    """通常予算(不約定も枠消費)。選ばれた取引そのものを返す。"""
+    picked: list[dict] = []
+    by_month: dict[str, float] = defaultdict(float)
+    peaks: list[float] = []
+    for key, by_date in groups.items():
+        for dstr, day in by_date.items():
+            cand = [t for t in day
+                    if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)]
+            cand.sort(key=_order_key)
+            used = held = 0.0
+            for t in cand:
+                cost = t["entry_p"] * 100
+                if cost <= 0:
+                    cost = budget
+                if used + cost > budget:
+                    break
+                used += cost
+                if t["filled"] == 1:
+                    picked.append(t)
+                    by_month[key[2]] += t["pnl"]
+                    held += cost        # 実際に建った額 = 証拠金の実需
+            peaks.append(held)
+    peaks.sort()
+    return {"picked": picked, "by_month": dict(by_month),
+            "peak": peaks[-1] if peaks else 0.0,
+            "p95": peaks[int(len(peaks) * 0.95)] if peaks else 0.0}
+
+
+def _key(t) -> tuple:
+    return (t["fold"], t["oos_month"], t["entry_date"], t["symbol"], t["strategy"])
+
+
+budgets = [float(x) for x in a.budgets.split(",") if x.strip()]
+res = {b: _sim(b * 10_000) for b in budgets}
+
+print(f"\n■ 予算スイープ (BT>={a.bt_min:.0f} / 通常予算 / 転換除外 / "
+      f"{len(next(iter(res.values()))['by_month'])}ヶ月)")
+print(f"  {'予算':>7}{'取引':>7}{'勝率':>7}{'合計':>13}{'月平均':>11}"
+      f"{'月次t':>7}{'95%CI(月)':>26}{'建玉P95':>10}{'建玉最大':>10}")
+for b in budgets:
+    r = res[b]
+    pk = r["picked"]
+    m = list(r["by_month"].values())
+    mu = _st.mean(m) if m else 0.0
+    sd = _st.stdev(m) if len(m) > 1 else 0.0
+    se = sd / (len(m) ** 0.5) if len(m) > 1 else 0.0
+    t = mu / se if se > 0 else 0.0
+    lo, hi = mu - 1.96 * se, mu + 1.96 * se
+    wr = sum(1 for x in pk if x["pnl"] > 0) / len(pk) * 100 if pk else 0.0
+    print(f"  {b:>6,.0f}万{len(pk):>7,}{wr:>6.1f}%{sum(m):>+13,.0f}{mu:>+11,.0f}"
+          f"{t:>+7.2f}{f'{lo:+,.0f} 〜 {hi:+,.0f}':>26}"
+          f"{r['p95']/10_000:>8,.0f}万{r['peak']/10_000:>8,.0f}万")
+
+# ── 限界トレード: 予算を上げて **新たに入った取引だけ** ────────────────
+print(f"\n■ 限界トレード (1段上げて新たに入ったぶんだけ)")
+print(f"  {'区間':>14}{'件数':>7}{'勝率':>7}{'損益':>13}{'円/件':>9}"
+      f"{'建値平均':>11}{'往復bp':>9}{'流動性中央':>12}")
+_verdicts = []
+for i in range(1, len(budgets)):
+    lo_b, hi_b = budgets[i - 1], budgets[i]
+    base = {_key(t) for t in res[lo_b]["picked"]}
+    marg = [t for t in res[hi_b]["picked"] if _key(t) not in base]
+    if not marg:
+        print(f"  {f'{lo_b:,.0f}→{hi_b:,.0f}万':>14}{0:>7}   (増分なし)")
+        continue
+    pnl = sum(t["pnl"] for t in marg)
+    per = pnl / len(marg)
+    ep = sum(t["entry_p"] for t in marg) / len(marg)
+    bp = per / max(ep * 100, 1) * 10_000
+    wr = sum(1 for t in marg if t["pnl"] > 0) / len(marg) * 100
+    liq = sorted(_liq(t) for t in marg)
+    lq = liq[len(liq) // 2] / 1e8
+    print(f"  {f'{lo_b:,.0f}→{hi_b:,.0f}万':>14}{len(marg):>7,}{wr:>6.1f}%"
+          f"{pnl:>+13,.0f}{per:>+9,.0f}{ep:>10,.0f}円{bp:>8.1f}{lq:>10,.0f}億")
+    _verdicts.append((lo_b, hi_b, per, bp))
+
+print(f"\n■ 判定 (想定スプレッド 往復 {a.spread_bp:.0f}bp)")
+for lo_b, hi_b, per, bp in _verdicts:
+    if per <= 0:
+        v = "⛔ 限界がマイナス。この増額は損"
+    elif bp < a.spread_bp:
+        v = f"⛔ {bp:.1f}bp < {a.spread_bp:.0f}bp。**スプレッドで消える**"
+    elif bp < a.spread_bp * 2:
+        v = f"△ {bp:.1f}bp。余裕が2倍未満。実測(.\\fills)で確かめるまで動かない"
+    else:
+        v = f"✅ {bp:.1f}bp。スプレッド想定の{bp/a.spread_bp:.1f}倍の余裕"
+    print(f"  {lo_b:,.0f}→{hi_b:,.0f}万  {v}")
+
+print(f"\n{'─'*78}")
+print("■ 読み方")
+print(f"{'─'*78}")
+print("  ・合計は予算を上げれば必ず増える。**限界トレードの 円/件 と bp** で判断する。")
+print("  ・流動性降順で埋めるので、増えたぶんは必ず薄い側。このシムは slip=0 なので")
+print("    その執行コストが一切入っていない(18.21)。bp がスプレッド想定を下回るなら")
+print("    バックテスト上の増分は現実には存在しない。")
+print("  ・証拠金ピークは口座に置く必要のある額。月平均の増加と必ず並べて見ること。")
+print("  ・月次tが2に届かないなら、その水準自体がまだ実証されていない(18.24)。")
+print("  ⚠ 実測のスプレッドは .\\fills の slip_daily_log.csv からしか出ない。")
+print("    --spread-bp は想定値であって測定値ではない。")
