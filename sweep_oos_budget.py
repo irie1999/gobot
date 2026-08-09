@@ -54,6 +54,9 @@ ap.add_argument("--budgets", default="400,600,800,1200,1600",
 ap.add_argument("--bt-min", type=float, default=30.0)
 ap.add_argument("--spread-bp", type=float, default=30.0,
                 help="薄い銘柄の往復スプレッド想定(bp)。限界が これを下回れば棄却")
+ap.add_argument("--liq-floors", default="",
+                help="選定に流動性の足切りを入れた場合(億円, カンマ区切り)。"
+                     "例 1,3,5,10。指定すると --budgets の先頭1つで比較する")
 a = ap.parse_args()
 
 files = sorted(_glob.glob(a.raw)) if any(c in a.raw for c in "*?[") else [a.raw]
@@ -70,8 +73,12 @@ for r in rows:
     groups[(r["fold"], r["train_months"], r["oos_month"])][r["entry_date"]].append(r)
 
 
-def _sim(budget: float) -> dict:
-    """通常予算(不約定も枠消費)。選ばれた取引そのものを返す。"""
+def _sim(budget: float, liq_floor: float = 0.0) -> dict:
+    """通常予算(不約定も枠消費)。選ばれた取引そのものを返す。
+
+    liq_floor > 0 なら、**候補に入る前に** 売買代金がその額未満の銘柄を落とす。
+    = 選定の段階で流動性の足切りを入れた場合の再現(発注順の変更とは別物)。
+    """
     picked: list[dict] = []
     by_month: dict[str, float] = defaultdict(float)
     peaks: list[float] = []
@@ -79,6 +86,8 @@ def _sim(budget: float) -> dict:
         for dstr, day in by_date.items():
             cand = [t for t in day
                     if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)]
+            if liq_floor > 0:
+                cand = [t for t in cand if _liq(t) >= liq_floor]
             cand.sort(key=_order_key)
             used = held = 0.0
             for t in cand:
@@ -158,6 +167,41 @@ for lo_b, hi_b, per, bp in _verdicts:
     else:
         v = f"✅ {bp:.1f}bp。スプレッド想定の{bp/a.spread_bp:.1f}倍の余裕"
     print(f"  {lo_b:,.0f}→{hi_b:,.0f}万  {v}")
+
+# ── 選定に流動性の足切りを入れた場合 ─────────────────────────────
+if a.liq_floors.strip():
+    b0 = budgets[0]
+    base_r = res[b0]
+    base_keys = {_key(t) for t in base_r["picked"]}
+    base_pnl = sum(t["pnl"] for t in base_r["picked"])
+    _allpairs = {(t["symbol"], t["strategy"]) for t in rows
+                 if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)}
+    print(f"\n■ 選定に流動性の足切りを入れた場合 (予算{b0:,.0f}万 固定)")
+    print(f"  ⚠ 現行の選定は上限が無い(18.2: --lss-top なし)ので、足切りは"
+          f"**純粋な引き算**。")
+    print(f"     液体な良銘柄が繰り上がって入ってくることはない。")
+    print(f"  {'足切り':>8}{'候補ペア':>10}{'取引':>7}{'合計':>13}{'現行差':>12}"
+          f"{'落ちた取引':>10}{'落ちた分の円/件':>16}{'必要bp':>9}")
+    print(f"  {'なし':>8}{len(_allpairs):>10,}{len(base_r['picked']):>7,}"
+          f"{base_pnl:>+13,.0f}{'—':>12}{'—':>10}{'—':>16}{'—':>9}")
+    for _f in [float(x) for x in a.liq_floors.split(",") if x.strip()]:
+        fl = _f * 1e8
+        r = _sim(b0 * 10_000, liq_floor=fl)
+        pnl = sum(t["pnl"] for t in r["picked"])
+        drop = [t for t in base_r["picked"] if _liq(t) < fl]
+        npairs = len({(t["symbol"], t["strategy"]) for t in rows
+                      if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)
+                      and _liq(t) >= fl})
+        dper = (sum(t["pnl"] for t in drop) / len(drop)) if drop else 0.0
+        dep = (sum(t["entry_p"] for t in drop) / len(drop)) if drop else 0.0
+        dbp = dper / max(dep * 100, 1) * 10_000
+        print(f"  {_f:>6,.0f}億{npairs:>10,}{len(r['picked']):>7,}{pnl:>+13,.0f}"
+              f"{pnl - base_pnl:>+12,.0f}{len(drop):>10,}{dper:>+16,.0f}{dbp:>9.1f}")
+    print(f"  → 『落ちた分の円/件』がプラスなら足切りは**損**。ただしその優位が"
+          f"『必要bp』で、")
+    print(f"     薄い銘柄の実スプレッドがそれを超えるなら、"
+          f"**そもそも存在しない利益**を捨てるだけ(18.21)。")
+    print(f"  → 『候補ペア』の減少はスキャン計算量の削減。成績とは別の価値。")
 
 print(f"\n{'─'*78}")
 print("■ 読み方")
