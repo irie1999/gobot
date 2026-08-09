@@ -71,8 +71,37 @@ for c in ("pnl", "entry_p", "liquidity"):
     d[c] = pd.to_numeric(d[c], errors="coerce")
 d["date"] = pd.to_datetime(d["entry_date"], errors="coerce")
 d = d[d["date"].notna() & d["pnl"].notna() & (d["entry_p"] > 0)].copy()
-d["liquidity"] = d["liquidity"].fillna(0.0)
 d["pair"] = d["symbol"].astype(str) + "|" + d["strategy"].astype(str)
+
+# ⛔ liquidity 列が空だと『流動性順に並べたつもりが、CSVの行順で埋めていた』
+#    という事故になる(2026-08-09 に実際に起きた。分位表が空になって気づいた)。
+#    黙って 0 埋めせず、日足から計算し直す。それも無理なら中断する。
+_have = int((d["liquidity"].fillna(0) > 0).sum())
+print(f"[流動性] CSVに値がある行 {_have:,}/{len(d):,} ({_have/len(d)*100:.1f}%)")
+if _have < len(d) * 0.5:
+    print("[流動性] 不足 → 日足から売買代金(直近120日平均)を計算します(初回は時間がかかります)")
+    try:
+        from backtest_limit_entry import fetch as _fq
+        from lss_order_rank import daily_turnover as _dt
+    except Exception as e:
+        sys.exit(f"[error] 流動性を計算できません: {e}\n"
+                 f"        .\\daily を回し直して lss_trades.csv に liquidity 列を"
+                 f"入れてから再実行してください。")
+    _cache: dict = {}
+    for _i, _sym in enumerate(sorted(d["symbol"].astype(str).unique()), 1):
+        try:
+            _cache[_sym] = float(_dt(_fq(_sym, 200)))
+        except Exception:
+            _cache[_sym] = 0.0
+        if _i % 200 == 0:
+            print(f"  ...{_i}銘柄", flush=True)
+    d["liquidity"] = d["symbol"].astype(str).map(_cache).fillna(0.0)
+    _have2 = int((d["liquidity"] > 0).sum())
+    print(f"[流動性] 補完後 {_have2:,}/{len(d):,} ({_have2/len(d)*100:.1f}%)")
+    if _have2 < len(d) * 0.5:
+        sys.exit("[error] 半数以上で流動性が取れませんでした。中断します"
+                 "(この状態で並べても流動性順になりません)。")
+d["liquidity"] = d["liquidity"].fillna(0.0)
 
 # ── 実運用と同じ: その日の流動性降順で予算まで埋める ────────────────
 # 流動性0は最後尾(lss_order_rank と同じ規則)
@@ -124,9 +153,13 @@ try:
     g["q"] = pd.qcut(g["liq"], args.bins, labels=False, duplicates="drop")
 except Exception:
     g["q"] = 0
+_qs = sorted(g["q"].dropna().unique())
+if not _qs:
+    print("  ⛔ 分位を作れません(流動性が全て同値/欠損)。**この出力の並び順は"
+          "流動性順になっていません。** 結果を使わないでください。")
 print(f"  {'分位':<8}{'ペア':>7}{'売買代金中央値':>18}{'発注率':>9}"
       f"{'枠内損益':>14}{'枠外損益':>14}")
-for q in sorted(g["q"].dropna().unique()):
+for q in _qs:
     s = g[g["q"] == q]
     print(f"  {int(q)+1}/{args.bins:<6}{len(s):>7,}{s['liq'].median()/1e8:>15,.0f}億"
           f"{s['inb'].sum()/max(s['sig'].sum(),1)*100:>8.1f}%"

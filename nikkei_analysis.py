@@ -9513,7 +9513,15 @@ function switchTbd(id, tab) {{
                             _t.get("order_limit", ""), _t.get("entry_p", ""),
                             _t.get("exit_p", ""), _t.get("order_stop", _t.get("stop_price", "")),
                             _t.get("order_target", _t.get("target_price", "")), _t.get("qty", ""),
-                            _t.get("hold_days", ""), _t.get("liquidity", ""),
+                            _t.get("hold_days", ""),
+                            # ⛔ トレード dict は liquidity を持たないので、空のまま
+                            #    書き出していた。予算タブ本体は _liquidity_of() を
+                            #    直接呼ぶので正しいが、CSV だけ列が空になり
+                            #    「流動性順で並べたつもりが並んでいない」分析事故に
+                            #    なる(2026-08-09 analyze_selection_liquidity で発覚)。
+                            #    sim_oos_budget の liquidity フォールバックも死ぬ。
+                            (_t.get("liquidity")
+                             or round(_liquidity_of(str(_t.get("symbol", ""))), 0)),
                             _t.get("mode", ""), _t.get("pnl", ""),
                             _t.get("entry_time", ""),   # 約定5分足の開始時刻 HH:MM(#9・約定時刻分析用)
                         ])
