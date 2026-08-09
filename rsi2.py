@@ -23,6 +23,7 @@ elif hasattr(sys.stdout, "buffer"):
 import argparse
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -869,7 +870,7 @@ def main() -> None:
         print_result(sym, trades, days, label)
         path = generate_html(sym, trades, days, label)
         print(f"  HTMLレポート保存: {path}")
-        webbrowser.open(f"file://{path.resolve()}")
+        open_html(f"file://{path.resolve()}")
         return
 
     # ── 255銘柄スキャンモード ────────────────────────────────
@@ -919,7 +920,7 @@ def main() -> None:
     print_ranking(results, days, label, top=args.top, mkt=mkt)
     path = generate_html_scan(results, days, label, top=args.top, mkt=mkt)
     print(f"  HTMLレポート保存: {path}")
-    webbrowser.open(f"file://{path.resolve()}")
+    open_html(f"file://{path.resolve()}")
 
 
 if __name__ == "__main__":

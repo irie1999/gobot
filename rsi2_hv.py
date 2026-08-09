@@ -35,6 +35,7 @@ elif hasattr(sys.stdout, "buffer"):
 import argparse
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1151,7 +1152,7 @@ def main() -> None:
 
         html_path = generate_signal_html_rsi2(sig, mode_label, params)
         print(f"  HTMLレポート: {html_path.resolve()}")
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
         print()
         return
 
@@ -1214,7 +1215,7 @@ def main() -> None:
         print_result(sym, trades, days, label, params, mode_label, flags)
         path = generate_html_hv(sym, trades, days, label, params, mode_label, flags)
         print(f"  HTMLレポート保存: {path}")
-        webbrowser.open(f"file://{path.resolve()}")
+        open_html(f"file://{path.resolve()}")
         return
 
     # ── 全銘柄スキャンモード ─────────────────────────────────
@@ -1260,7 +1261,7 @@ def main() -> None:
     path = generate_html_scan_hv(results, days, label, args.top, params,
                                   mode_label, flags, mkt)
     print(f"  HTMLレポート保存: {path}")
-    webbrowser.open(f"file://{path.resolve()}")
+    open_html(f"file://{path.resolve()}")
 
 
 if __name__ == "__main__":

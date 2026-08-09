@@ -1,0 +1,2 @@
+record_date,symbol,name,strategy,family,signal_date,signal_price,order_price,stop_price,target_price,status,fill_date,fill_price,exit_date,exit_price,pnl,updated_date,side,qty,cash_margin,bt_score
+2026-06-24,7203,7203,TEST,,2026-06-24,,3030,2820,3270,holding,2026-06-23,3000.0,,,,2026-06-24,long,100,3,

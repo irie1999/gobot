@@ -1,0 +1,14 @@
+{
+  "updated": "2026-06-07",
+  "regimes": {
+    "up_high": {},
+    "up_mid": {},
+    "up_low": {},
+    "sideways_high": {},
+    "sideways_mid": {},
+    "sideways_low": {},
+    "down_high": {},
+    "down_mid": {},
+    "down_low": {}
+  }
+}
