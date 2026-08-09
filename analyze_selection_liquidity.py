@@ -1,0 +1,171 @@
+r"""analyze_selection_liquidity.py — 選定した銘柄が、実際に発注されているのかを測る。
+
+問題意識
+--------
+現行は工程ごとに基準が違う:
+
+  選定 (scan_lss_universe)  … TRAIN期待値で選ぶ。**流動性は一切見ていない**
+  発注 (予算400万)          … **流動性降順**で上から埋める。1日十数件で打ち止め
+
+つまり「選ばれたが流動性が低く、毎日 最後尾に回って一度も発注されない」ペアが
+存在しうる。候補は約1,900ペアあるのに1日13件しか建てないので、下位はかなり厚いはず。
+
+これが本当なら2つ問題がある:
+  ① 選定の労力が無駄。発注されないペアを選ぶために計算している
+  ② より本質的: 「全体から最良を選んで後で流動性で切る」より
+     **「流動性のある銘柄の中から最良を選ぶ」**ほうが、同じ発注枠に対して
+     良い集団になるはず。現状は『良いが薄い銘柄』を選んで枠に入れていない
+
+やること
+--------
+`lss_trades.csv`(全トレード)に対して、実運用と同じ
+「その日の流動性降順で予算400万まで埋める」を再現し、
+
+  ・ペア別の発注率(枠内に入った日数 / シグナルが出た日数)
+  ・一度も枠に入らなかったペアが何本あるか
+  ・流動性分位ごとの発注率と損益
+  ・予算が飽和した日の割合(飽和していない日は薄い銘柄も枠に入る)
+
+を出す。**枠外ペアの損益**も出すので、「切り捨てている利益/避けている損失」も分かる。
+
+⚠ 注意
+  lss_trades.csv は決済済みトレードのみ。実運用では不約定の注文も枠を消費する
+  (§18.5.4)ので、ここで再現する枠は実際よりやや緩い(=枠内と判定される件数が多め)。
+  傾向を見る用途には十分だが、絶対値は sim_oos_budget を正とすること。
+
+使い方
+------
+  python analyze_selection_liquidity.py
+  python analyze_selection_liquidity.py --budget 4000000 --proposal lss_proposal_cumul.py
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+ap = argparse.ArgumentParser(description="選定銘柄が実際に発注されているかを測る")
+ap.add_argument("--trades", default="lss_trades.csv")
+ap.add_argument("--proposal", default="lss_proposal_cumul.py",
+                help="選定ファイル。選ばれたが1件もトレードが出なかったペアを数えるのに使う")
+ap.add_argument("--budget", type=float, default=4_000_000.0)
+ap.add_argument("--qty", type=int, default=100)
+ap.add_argument("--exclude-strat", default="転換")
+ap.add_argument("--bins", type=int, default=5, help="流動性の分位数")
+args = ap.parse_args()
+
+p = Path(args.trades)
+if not p.exists():
+    sys.exit(f"[error] {p} が見つかりません。先に .\\daily を実行してください。")
+d = pd.read_csv(p, encoding="utf-8-sig")
+if args.exclude_strat.strip() and "strategy" in d.columns:
+    _ex = {s.strip() for s in args.exclude_strat.split(",") if s.strip()}
+    d = d[~d["strategy"].astype(str).isin(_ex)]
+if "reason" in d.columns:
+    d = d[d["reason"].astype(str) != "約定せず"]
+for c in ("pnl", "entry_p", "liquidity"):
+    if c not in d.columns:
+        sys.exit(f"[error] {p} に列 {c} がありません")
+    d[c] = pd.to_numeric(d[c], errors="coerce")
+d["date"] = pd.to_datetime(d["entry_date"], errors="coerce")
+d = d[d["date"].notna() & d["pnl"].notna() & (d["entry_p"] > 0)].copy()
+d["liquidity"] = d["liquidity"].fillna(0.0)
+d["pair"] = d["symbol"].astype(str) + "|" + d["strategy"].astype(str)
+
+# ── 実運用と同じ: その日の流動性降順で予算まで埋める ────────────────
+# 流動性0は最後尾(lss_order_rank と同じ規則)
+d["_ord0"] = (d["liquidity"] <= 0).astype(int)
+d = d.sort_values(["date", "_ord0", "liquidity"], ascending=[True, True, False])
+d["rank"] = d.groupby("date").cumcount() + 1
+d["cost"] = d["entry_p"] * args.qty
+d["cum"] = d.groupby("date")["cost"].cumsum()
+d["in_budget"] = d["cum"] <= args.budget
+# その日の予算が埋まったか(埋まらない日は薄い銘柄も枠に入る)
+_day = d.groupby("date").agg(need=("cost", "sum"), n=("pnl", "size"),
+                             used=("cost", lambda s: s.cumsum().where(
+                                 s.cumsum() <= args.budget).max()))
+_sat = (_day["need"] >= args.budget)
+
+print(f"[入力] {p.name}: {len(d):,}トレード / {d['date'].nunique():,}営業日 "
+      f"/ {d['pair'].nunique():,}ペア")
+print(f"       予算 {args.budget:,.0f}円 / {args.qty}株固定 / 流動性(売買代金)降順")
+print(f"\n■ 予算は毎日埋まっているか")
+print(f"  飽和した日 {int(_sat.sum()):,} / {len(_sat):,}日 ({_sat.mean()*100:.1f}%)")
+print(f"  枠内に入ったトレード {int(d['in_budget'].sum()):,} / {len(d):,} "
+      f"({d['in_budget'].mean()*100:.1f}%)")
+print(f"  1日あたり 枠内 {d['in_budget'].sum()/d['date'].nunique():.1f}件 "
+      f"/ 候補 {len(d)/d['date'].nunique():.1f}件")
+
+# ── ペア別の発注率 ──────────────────────────────────────────────
+g = d.groupby("pair").agg(sig=("pnl", "size"), inb=("in_budget", "sum"),
+                          liq=("liquidity", "median"),
+                          pnl_in=("pnl", lambda s: s[d.loc[s.index, "in_budget"]].sum()),
+                          pnl_out=("pnl", lambda s: s[~d.loc[s.index, "in_budget"]].sum()))
+g["rate"] = g["inb"] / g["sig"]
+never = g[g["inb"] == 0]
+print(f"\n■ ペア別の発注率 (枠内日数 / シグナル日数)")
+print(f"  トレードが出たペア        {len(g):,}")
+print(f"  **一度も枠に入らないペア  {len(never):,} ({len(never)/len(g)*100:.1f}%)**")
+print(f"    そのシグナル {int(never['sig'].sum()):,}件 / 損益 {never['pnl_out'].sum():+,.0f}円")
+print(f"    (= 選定したが実運用では一度も発注されない = 選定の無駄打ち)")
+for lo, hi, lab in ((0.0, 0.001, "0%(常に枠外)"), (0.001, 0.25, "0-25%"),
+                    (0.25, 0.5, "25-50%"), (0.5, 0.75, "50-75%"),
+                    (0.75, 1.001, "75-100%")):
+    sub = g[(g["rate"] >= lo) & (g["rate"] < hi)]
+    if len(sub):
+        print(f"    発注率 {lab:<14}{len(sub):>5}ペア  シグナル{int(sub['sig'].sum()):>6,}件"
+              f"  枠内損益 {sub['pnl_in'].sum():>+12,.0f}円")
+
+# ── 流動性分位 ──────────────────────────────────────────────────
+print(f"\n■ 流動性(売買代金 中央値)の分位別")
+try:
+    g["q"] = pd.qcut(g["liq"], args.bins, labels=False, duplicates="drop")
+except Exception:
+    g["q"] = 0
+print(f"  {'分位':<8}{'ペア':>7}{'売買代金中央値':>18}{'発注率':>9}"
+      f"{'枠内損益':>14}{'枠外損益':>14}")
+for q in sorted(g["q"].dropna().unique()):
+    s = g[g["q"] == q]
+    print(f"  {int(q)+1}/{args.bins:<6}{len(s):>7,}{s['liq'].median()/1e8:>15,.0f}億"
+          f"{s['inb'].sum()/max(s['sig'].sum(),1)*100:>8.1f}%"
+          f"{s['pnl_in'].sum():>+14,.0f}{s['pnl_out'].sum():>+14,.0f}")
+
+# ── 選定ファイルとの突合 ────────────────────────────────────────
+pf = Path(args.proposal)
+if pf.exists():
+    ns: dict = {}
+    try:
+        exec(pf.read_text(encoding="utf-8"), ns)
+        sel = list(ns.get("SELECTED") or [])
+    except Exception as e:
+        sel = []
+        print(f"\n[warn] {pf} を読めません: {e}")
+    if sel:
+        def _k(t):
+            c = str(t[0]).upper()
+            c = c if c.endswith(".T") else c + ".T"
+            return c + "|" + str(t[2] if len(t) > 2 else "")
+        selset = {_k(t) for t in sel}
+        traded = set(g.index)
+        inb = set(g[g["inb"] > 0].index)
+        print(f"\n■ 選定ファイル {pf.name} との突合")
+        print(f"  選定ペア                    {len(selset):,}")
+        print(f"  うち窓内でトレードが出た    {len(selset & traded):,}")
+        print(f"  **うち一度でも発注された    {len(selset & inb):,} "
+              f"({len(selset & inb)/len(selset)*100:.1f}%)**")
+        print(f"  → 残り {len(selset) - len(selset & inb):,}ペア "
+              f"({(1-len(selset & inb)/len(selset))*100:.1f}%) は"
+              f"**この窓では一度も発注されていない**")
+
+print(f"\n{'─' * 78}")
+print("■ 読み方")
+print(f"{'─' * 78}")
+print("  ・『一度も発注されないペア』が多いなら、選定は発注に反映されていない。")
+print("    流動性で足切りしてから選定するほうが、同じ計算量で密度が上がる。")
+print("  ・ただし **枠外ペアの損益がプラスなら『取りこぼし』**、マイナスなら")
+print("    『流動性順が結果的に悪い銘柄を避けている』。符号を必ず見ること。")
+print("  ・予算の飽和率が低いなら薄い銘柄も枠に入るので、足切りは効かない。")
+print("  ⚠ lss_trades.csv は決済済みのみ。実運用は不約定注文も枠を消費するので")
+print("    ここの枠はやや緩い。絶対値は sim_oos_budget を正とすること。")
