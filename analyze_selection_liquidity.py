@@ -231,6 +231,45 @@ print(f"    → 薄い銘柄が現行より **この bp ぶん余計に** 執行
 print(f"      小型株のスプレッドは片道 20〜50bp が普通なので、"
       f"往復で 20bp 未満の優位は追う価値がない。")
 
+# ── 枠内/枠外の差は『銘柄』か『日』か ────────────────────────────
+# 反実仮想(上)で並べ替えても総額が動かないのに、枠内と枠外の 円/件 が大きく違う
+# ことがある。その場合、差は銘柄の選び方ではなく **日の構成** で作られている:
+#   枠内は毎日ほぼ一定件数(予算で頭打ち) → 全営業日に均等に重みが乗る
+#   枠外はシグナルが多い日に偏る         → その日の性質が濃く出る
+# 日ごとに対応をとって比べれば分離できる。日内で差が消えるなら日の構成が原因。
+print(f"\n■ 枠内と枠外の差は『銘柄の選び方』か『日の構成』か")
+_dm = pd.DataFrame({"n_in": d.groupby("date")["in_budget"].sum()})
+_dm["m_in"] = d[d["in_budget"]].groupby("date")["pnl"].mean()
+_dm["m_out"] = d[~d["in_budget"]].groupby("date")["pnl"].mean()
+_both = _dm[(_dm["n_in"] > 0) & _dm["m_out"].notna()]
+_diff = (_both["m_out"] - _both["m_in"]).astype(float)
+_t = (_diff.mean() / (_diff.std(ddof=1) / (len(_diff) ** 0.5))) if len(_diff) > 1 else 0.0
+print(f"  日ごとに対応をとった差 (枠外平均 − 枠内平均)  {len(_diff)}日")
+print(f"    平均 {_diff.mean():+,.0f}円/件   t={_t:+.2f}"
+      f"   プラスの日 {int((_diff > 0).sum())}/{len(_diff)}")
+print(f"  プール全体の差                              "
+      f"{_po/max(_no,1) - _pi/max(_ni,1):+,.0f}円/件")
+if abs(_t) < 2:
+    print(f"  → **日内では差が無い**。プールの差は『シグナルが多い日ほど1件あたりが"
+          f"良い』という")
+    print(f"     日の重み付けで作られている。**並べ替えでは取れない。予算(建てられる"
+          f"件数)の問題。**")
+else:
+    print(f"  → 日内でも差が残る。銘柄の選び方に原因がある可能性(ただし反実仮想の"
+          f"z も見ること)")
+print(f"\n  同日候補数の帯ごと (1件あたり)")
+print(f"    {'候補数':<12}{'日数':>6}{'全体':>10}{'枠内':>10}{'枠外':>10}")
+d["_cand"] = d.groupby("date")["pnl"].transform("size")
+for _lo, _hi, _lb in ((0, 15, "〜14件"), (15, 25, "15〜24件"), (25, 40, "25〜39件"),
+                      (40, 60, "40〜59件"), (60, 10 ** 9, "60件〜")):
+    s = d[(d["_cand"] >= _lo) & (d["_cand"] < _hi)]
+    if not len(s):
+        continue
+    si, so = s[s["in_budget"]], s[~s["in_budget"]]
+    print(f"    {_lb:<12}{s['date'].nunique():>6}{s['pnl'].mean():>+10,.0f}"
+          f"{(si['pnl'].mean() if len(si) else 0):>+10,.0f}"
+          f"{(so['pnl'].mean() if len(so) else 0):>+10,.0f}")
+
 # ── 選定ファイルとの突合 ────────────────────────────────────────
 pf = Path(args.proposal)
 if pf.exists():
