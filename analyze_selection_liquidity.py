@@ -126,6 +126,10 @@ print(f"  枠内に入ったトレード {int(d['in_budget'].sum()):,} / {len(d)
       f"({d['in_budget'].mean()*100:.1f}%)")
 print(f"  1日あたり 枠内 {d['in_budget'].sum()/d['date'].nunique():.1f}件 "
       f"/ 候補 {len(d)/d['date'].nunique():.1f}件")
+_ni, _no = int(d["in_budget"].sum()), int((~d["in_budget"]).sum())
+_pi, _po = d.loc[d["in_budget"], "pnl"].sum(), d.loc[~d["in_budget"], "pnl"].sum()
+print(f"  枠内 {_ni:>5,}件 {_pi:>+12,.0f}円 ({_pi/max(_ni,1):+,.0f}円/件)")
+print(f"  枠外 {_no:>5,}件 {_po:>+12,.0f}円 ({_po/max(_no,1):+,.0f}円/件)")
 
 # ── ペア別の発注率 ──────────────────────────────────────────────
 g = d.groupby("pair").agg(sig=("pnl", "size"), inb=("in_budget", "sum"),
@@ -158,12 +162,74 @@ if not _qs:
     print("  ⛔ 分位を作れません(流動性が全て同値/欠損)。**この出力の並び順は"
           "流動性順になっていません。** 結果を使わないでください。")
 print(f"  {'分位':<8}{'ペア':>7}{'売買代金中央値':>18}{'発注率':>9}"
-      f"{'枠内損益':>14}{'枠外損益':>14}")
+      f"{'枠内損益':>14}{'枠内/件':>10}{'枠外損益':>14}{'枠外/件':>10}")
 for q in _qs:
     s = g[g["q"] == q]
+    _i, _o = int(s["inb"].sum()), int(s["sig"].sum() - s["inb"].sum())
     print(f"  {int(q)+1}/{args.bins:<6}{len(s):>7,}{s['liq'].median()/1e8:>15,.0f}億"
           f"{s['inb'].sum()/max(s['sig'].sum(),1)*100:>8.1f}%"
-          f"{s['pnl_in'].sum():>+14,.0f}{s['pnl_out'].sum():>+14,.0f}")
+          f"{s['pnl_in'].sum():>+14,.0f}{s['pnl_in'].sum()/max(_i,1):>+10,.0f}"
+          f"{s['pnl_out'].sum():>+14,.0f}{s['pnl_out'].sum()/max(_o,1):>+10,.0f}")
+
+# ── 発注順の反実仮想 (同じトレード集合・同じ予算で、並べ方だけ変える) ─────
+# 18.24 の作法: **ランダム順の帯を作ってから**判定する。2条件を1回ずつ比べない。
+import numpy as _np
+
+_INF = float("inf")
+_liq = d["liquidity"].to_numpy(dtype=float)
+_cost = d["cost"].to_numpy(dtype=float)
+
+
+def _sim(key: "_np.ndarray") -> tuple:
+    """key の昇順で日ごとに予算まで埋め、(件数, 損益, 平均建値) を返す"""
+    t = d.assign(_k=key).sort_values(["date", "_k"], kind="mergesort")
+    inb = t.groupby("date")["cost"].cumsum() <= args.budget
+    return (int(inb.sum()), float(t.loc[inb, "pnl"].sum()),
+            float(t.loc[inb, "entry_p"].mean()))
+
+
+_rules = {
+    "流動性 降順(現行)": _np.where(_liq > 0, -_liq, _INF),
+    "流動性 昇順(薄い順)": _np.where(_liq > 0, _liq, _INF),
+    "建値 昇順(安い順)": d["entry_p"].to_numpy(dtype=float),
+}
+_base = _sim(_rules["流動性 降順(現行)"])
+
+_rand = []
+for _sd in (42, 1, 7, 99, 123, 2024, 31337, 5, 77, 808, 2718, 1618,
+            3, 11, 17, 23, 29, 37, 41, 53, 59, 61, 67, 71):
+    _rand.append(_sim(_np.random.default_rng(_sd).random(len(d))))
+_rp = _np.array([r[1] for r in _rand], dtype=float)
+_rmu, _rsd = float(_rp.mean()), float(_rp.std(ddof=1))
+
+print(f"\n■ 発注順の反実仮想 (同じトレード集合・同じ予算・並べ方だけ変える)")
+print(f"  {'ルール':<22}{'件数':>7}{'損益':>14}{'円/件':>10}{'z':>8}{'帯内順位':>12}")
+_rn = float(_np.mean([r[0] for r in _rand]))
+print(f"  {'ランダム×' + str(len(_rand)) + '(帯)':<22}{_rn:>7,.0f}{_rmu:>+14,.0f}"
+      f"{_rmu / max(_rn, 1):>+10,.0f}{'σ=' + format(_rsd, ',.0f'):>12}"
+      f"   [{_rp.min():+,.0f} 〜 {_rp.max():+,.0f}]")
+for _lbl, _k in _rules.items():
+    _n, _v, _ep = _sim(_k)
+    _z = (_v - _rmu) / _rsd if _rsd > 0 else 0.0
+    _beat = int((_rp < _v).sum())
+    print(f"  {_lbl:<22}{_n:>7,}{_v:>+14,.0f}{_v/max(_n,1):>+10,.0f}{_z:>+8.2f}"
+          f"{str(_beat) + '/' + str(len(_rp)):>12}"
+          f"{'  ← 帯の外' if _beat in (0, len(_rp)) else ''}")
+
+print(f"\n  ■ 損益差を消すのに必要な『執行コストの差』(このシムは slip=0)")
+print(f"    {'ルール':<22}{'現行との差':>13}{'円/件':>9}{'必要な往復コスト差':>20}")
+for _lbl, _k in _rules.items():
+    if _lbl.startswith("流動性 降順"):
+        continue
+    _n, _v, _ep = _sim(_k)
+    _dv, _per = _v - _base[1], (_v - _base[1]) / max(_n, 1)
+    _bp = _per / max(_ep * args.qty, 1) * 10000.0
+    print(f"    {_lbl:<22}{_dv:>+13,.0f}{_per:>+9,.0f}{_bp:>17.1f}bp"
+          f"   (建値平均 {_ep:,.0f}円)")
+print(f"    → 薄い銘柄が現行より **この bp ぶん余計に** 執行コストを払うなら、"
+      f"優位はゼロになる。")
+print(f"      小型株のスプレッドは片道 20〜50bp が普通なので、"
+      f"往復で 20bp 未満の優位は追う価値がない。")
 
 # ── 選定ファイルとの突合 ────────────────────────────────────────
 pf = Path(args.proposal)
@@ -199,6 +265,10 @@ print("  ・『一度も発注されないペア』が多いなら、選定は�
 print("    流動性で足切りしてから選定するほうが、同じ計算量で密度が上がる。")
 print("  ・ただし **枠外ペアの損益がプラスなら『取りこぼし』**、マイナスなら")
 print("    『流動性順が結果的に悪い銘柄を避けている』。符号を必ず見ること。")
+print("  ・**符号だけで動かないこと**。反実仮想の z が ±1 に収まっていれば")
+print("    ランダム順と区別できていない(18.24: 発注順は σ 12万円/10ヶ月 動く)。")
+print("  ・帯の外に出ていても、必要な往復コスト差が 20bp 未満なら、")
+print("    薄い銘柄のスプレッドで消える。このシムは slip=0 で執行コストに盲目(18.21)。")
 print("  ・予算の飽和率が低いなら薄い銘柄も枠に入るので、足切りは効かない。")
 print("  ⚠ lss_trades.csv は決済済みのみ。実運用は不約定注文も枠を消費するので")
 print("    ここの枠はやや緩い。絶対値は sim_oos_budget を正とすること。")
