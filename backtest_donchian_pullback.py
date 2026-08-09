@@ -27,6 +27,7 @@ elif hasattr(sys.stdout, "buffer"):
 import argparse
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -982,7 +983,7 @@ def main() -> None:
                 _w.writerow(_row)
         print(f"CSV: {_csv_path.resolve()}")
         if not args.no_browser:
-            webbrowser.open(f"file://{path.resolve()}")
+            open_html(f"file://{path.resolve()}")
         return
 
     # ── 1銘柄モード ──────────────────────────────────────────
@@ -1054,7 +1055,7 @@ def main() -> None:
         path = build_html(sigs_list, [result_entry], backtest_days, "single")
         print(f"\n  HTMLレポート保存: {path}")
         if not args.no_browser:
-            webbrowser.open(f"file://{path.resolve()}")
+            open_html(f"file://{path.resolve()}")
         return
 
     # ── スキャンモード ───────────────────────────────────────
@@ -1115,7 +1116,7 @@ def main() -> None:
     path = build_html(signals, scan_results, backtest_days, args.universe)
     print(f"\n  レポート出力: {path}")
     if not args.no_browser:
-        webbrowser.open(f"file://{path.resolve()}")
+        open_html(f"file://{path.resolve()}")
 
 
 if __name__ == "__main__":

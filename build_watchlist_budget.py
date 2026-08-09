@@ -24,6 +24,7 @@ import argparse
 import math
 import pickle
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -478,7 +479,7 @@ def main() -> None:
     print(f"  HTML出力: {out_html}")
 
     if not args.no_browser:
-        webbrowser.open(out_html.resolve().as_uri())
+        open_html(out_html.resolve().as_uri())
 
     print(f"\n{'='*65}\n")
 

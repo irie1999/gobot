@@ -34,6 +34,10 @@ forward_test.py  ―  シグナルのフォワードテスト (紙トレード) 
   exit_price    : 決済価格 (未決済時は空)
   pnl           : 損益 (円, スリッページ+手数料込み)
   updated_date  : 最終更新日
+  --- メタモデル用特徴量 (§C) ---
+  regime        : シグナル日の N225 レジーム (up / flat / down)
+  atr_ratio     : シグナル日の ATR/終値 (例: 0.0312)
+  vol_ratio     : シグナル日の出来高 / 過去20日平均出来高 (例: 1.45)
 
 【使い方】
   python forward_test.py --record            # 記録 (毎日実行)
@@ -64,7 +68,7 @@ import check_signals_breakout as _brk
 from backtest_limit_entry import (
     fetch,
     SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
-    ENTRY_EXPIRE, MAX_HOLD, FIXED_QTY, INITIAL_CASH,
+    ENTRY_EXPIRE, MAX_HOLD, default_max_hold, FIXED_QTY, INITIAL_CASH,
 )
 
 JST   = timezone(timedelta(hours=9))
@@ -80,6 +84,8 @@ FIELDS = [
     "signal_date", "signal_price", "order_price", "stop_price", "target_price",
     "status", "fill_date", "fill_price", "exit_date", "exit_price",
     "pnl", "updated_date",
+    # メタモデル用特徴量 — 後から build_meta_dataset.py で訓練データに変換する
+    "regime", "atr_ratio", "vol_ratio",
 ]
 
 
@@ -99,9 +105,38 @@ def save_log(rows: list[dict]) -> None:
             writer.writerow({k: r.get(k, "") for k in FIELDS})
 
 
+# ── メタモデル用特徴量ヘルパー ─────────────────────────────────
+# 特徴量の定義は meta_features.py に集約 (build_meta_dataset_bt.py と共通)。
+# N225 DataFrame は一度だけ取得してキャッシュ (スレッド起動前に _prefetch_n225()).
+import meta_features as _mf
+
+_n225_df_cache: list = []
+
+
+def _prefetch_n225() -> None:
+    """N225 DataFrame をメインスレッドで事前取得。"""
+    if not _n225_df_cache:
+        _n225_df_cache.append(fetch("^N225", 400))
+
+
+def _regime_at(signal_date: str) -> str:
+    """N225 MA25/MA75 によるシグナル日のレジーム: up / flat / down"""
+    n225 = _n225_df_cache[0] if _n225_df_cache else None
+    return _mf.compute_regime(n225, signal_date)
+
+
+def _stock_meta_features(symbol: str, signal_date: str) -> tuple[str, str]:
+    """シグナル日時点の (atr_ratio, vol_ratio)。取得不能なら ('', '')。"""
+    df = fetch(symbol, 400)
+    atr_ratio, vol_ratio = _mf.compute_atr_vol(df, signal_date)
+    return ("" if atr_ratio is None else str(atr_ratio),
+            "" if vol_ratio is None else str(vol_ratio))
+
+
 # ── シグナル収集 (今日時点) ──────────────────────────────────────
 def collect_today_signals() -> list[dict]:
     """check_signals_stop / breakout の全 WATCHLIST で今日のシグナルを収集。"""
+    _prefetch_n225()   # メタモデル特徴量用: N225 を先取り
     signals: list[dict] = []
 
     def _scan_group(mod, family: str):
@@ -118,6 +153,7 @@ def collect_today_signals() -> list[dict]:
                     sig = None
                 if not sig:
                     continue
+                atr_ratio, vol_ratio = _stock_meta_features(sym, sig["signal_date"])
                 out.append(dict(
                     record_date=str(TODAY),
                     symbol=sym, name=name, strategy=strat, family=family,
@@ -131,6 +167,9 @@ def collect_today_signals() -> list[dict]:
                     exit_date="", exit_price="",
                     pnl="",
                     updated_date=str(TODAY),
+                    regime=_regime_at(sig["signal_date"]),
+                    atr_ratio=atr_ratio,
+                    vol_ratio=vol_ratio,
                 ))
         return out
 
@@ -249,7 +288,7 @@ def evaluate_entry(row: dict) -> dict:
             elif lo <= stop_price:
                 exit_price = stop_price * (1.0 - SLIPPAGE_STOP_PCT)
                 exit_reason = "stop"
-            elif hold_days >= MAX_HOLD:
+            elif hold_days >= default_max_hold(row.get("strategy", "")):
                 exit_price = cl
                 exit_reason = "timeout"
             if exit_reason:

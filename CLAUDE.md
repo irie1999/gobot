@@ -1,14 +1,84 @@
 # gobot 逆指値シグナル運用メモ
 
 このドキュメントは Claude Code が gobot リポジトリを扱う際の前提知識です。
-主軸は **`run_signals.py` (逆指値シグナル統合レポート)** の運用・改修です。
+主軸は **`nikkei_analysis_holdout_2config.py` (ホールドアウト2設定分析レポート)** の運用・改修です。
 今後の修正は原則このファイルを起点に考えてください。
 
 ---
 
-## 1. エントリーポイント
+## ★ データ場所メモ (毎回忘れないこと)
 
-**`run_signals.py`** = 日々の運用コマンド。以下を1コマンドで実行します。
+- **J-Quants の「完璧な」5分足データは `stock_5min` フォルダにある**。
+  swingtrade リポジトリ内 (`data/minute_5m/`) には **無い**。
+  - Windows実体: `C:\Users\to732\OneDrive\ドキュメント\kabu station\stock_5min`
+    (swingtrade と stock_5min は "kabu station" 直下の兄弟フォルダ)
+  - `daytrade_data.py` の `DATA_DIR` は自動検出する (`_resolve_data_dir`):
+    環境変数 `MINUTE_5M_DIR` → `data/minute_5m` → 隣接 `stock_5min` の順。
+  - 明示指定するなら各スクリプトの `--data-dir` か `set MINUTE_5M_DIR=...` で固定。
+- 日足のスイング用データは `.rsi2_cache/` (yfinance永続キャッシュ)。こちらは別物。
+
+---
+
+## 0. メイン分析ツール（最重要）
+
+### `nikkei_analysis_holdout_2config.py` = バックテスト分析のメインコマンド
+
+ホールドアウト期間（直近N日）を除外したWF選定WATCHLISTで conservative / aggressive の
+2設定を比較分析するHTMLレポートを生成します。
+
+```
+# 標準的な使い方（ホールドアウト180日、直近180日の損益確認）
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180
+
+# 直近30日だけ確認したい場合
+python nikkei_analysis_holdout_2config.py --holdout-days 30 --days 30
+
+# 予算フィルター（60万円で100株買える銘柄のみ）
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --budget 600000
+
+# 株価上限指定
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --max-price 5000
+
+# ブラウザを開かず HTML だけ生成
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --no-browser
+
+# 並列数を増やして高速化
+python nikkei_analysis_holdout_2config.py --holdout-days 180 --days 180 --workers 8
+```
+
+**出力**: `nikkei_analysis_holdout2cfg_{N}d_{date}.html`
+
+### レポートのタブ構成
+
+| タブ | 内容 |
+|---|---|
+| タブ1 | シグナル判定（相場環境・今日使うべきスクリプト）|
+| タブ2 | トレンド期間統計 |
+| タブ3 | エントリー分析（上昇何日目に入るか）|
+| タブ5 | 損益レポート — スクリプト別サマリー / スコア別実績 / ③BT×WFクロス分析 / ④高BT銘柄別成績 / 取引明細 |
+| タブ7 | トレンド×相性バックテスト（conservative vs aggressive） |
+
+### タブ5の主要セクション（分析の核心）
+
+- **スコア別実績（② BTスコア軸）**: BTスコア帯ごとの勝率・PF・損益。BT≥60がプラスの境界線
+- **③ BT×WFクロス分析**: BT≥60の中でWFスコア帯別に分割。WFがBT内でさらに識別力を持つか確認
+- **④ 高BT銘柄別成績**: BT≥60の銘柄ごとの損益集計（損益降順）。損失の出ている特定銘柄を特定できる
+  - 赤枠 = 損失-3万超 → スキップ候補
+  - 緑枠 = 利益+5万超 → 優先銘柄
+
+### 実運用でのフィルター基準（ホールドアウト検証で確認済み）
+
+| 基準 | 内容 |
+|---|---|
+| **BTスコア≥60** | 全期間（30〜180日ホールドアウト）で一貫してプラス。最重要フィルター |
+| **conservative優先** | 中長期ではconservativeがaggressive より安定 |
+| **WFスコアは参考程度** | BTスコアの識別力の方が高い。WFのみで選ぶのは危険 |
+
+---
+
+## 1. エントリーポイント（サブコマンド）
+
+**`run_signals.py`** = 今日のシグナル確認コマンド（日々の発注判断用）。
 
 ```
 python run_signals.py                    # 全期間(365日) HTMLレポート
@@ -101,7 +171,7 @@ run_signals.py
 
 ```
 ENTRY_EXPIRE      = 3         # 指値/逆指値の有効日数 (シグナル発生から3営業日)
-MAX_HOLD          = 15        # 最大保有日数 (超えたら "タイムカット" で終値決済)
+MAX_HOLD          = 10        # 最大保有日数 (超えたら "タイムカット" で終値決済)。全戦略10日・約定日基準 (2026-07-07: ⑬回復分析で10日が最良)。_TIMECUT_ENABLED=False で無効化可
 FIXED_QTY         = 100       # 常に100株固定 (取引数量)
 INITIAL_CASH      = 500_000
 POSITION_SIZE     = 100_000
@@ -251,13 +321,75 @@ WATCHLIST を更新するときは:
 
 ---
 
-## 12. 参考: kabu station (別件)
+## 12. kabu station 連携 (発注パイプライン)
 
-`kabu_token.py` は kabuステーション REST API トークン取得用のスタンドアロン
-スクリプト。現状 `run_signals.py` とは **未連携**。将来、逆指値シグナルを
-そのまま kabu API に流し込む場合は、`check_signal_on_date` の返り値
-(`order_price` / `stop_price` / `target_price`) をそのまま `sendorder` に渡せる
-設計になっていることを押さえておいてください。接続先は デモ `18081` / 本番 `18080`。
+逆指値シグナルを kabuステーション REST API に流し込んで自動発注する仕組み。
+
+### 12.1 ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| `kabu_token.py` | トークン取得のみのスタンドアロン (旧)。互換のため残置 |
+| `kabu_api.py` | **連携の中核** `KabuClient`。トークン/時価/建玉/余力/発注/取消を集約 |
+| `kabu_send_signals.py` | 今日の逆指値シグナルを **逆指値買い** で発注 (エントリー入口) |
+| `close_stop_guard.py` | close 方式の損切りを **引け成行(MOC)** で自動決済 (§16 と対) |
+
+### 12.2 KabuClient (kabu_api.py)
+
+```python
+from kabu_api import KabuClient
+cli = KabuClient(prod=False, dry_run=True)  # 既定: デモ(18081) + dry-run
+cli.connect()                                # トークン取得
+cli.get_current_price(7203)                  # 時価
+cli.send_stop_buy(7203, qty=100, trigger_price=3000)   # 逆指値買い(FOT=30,以上)
+cli.send_moc(7203, qty=100, side="sell")               # 引け成行(FOT=16)
+cli.send_stop_sell(7203, qty=100, trigger_price=2850)  # 損切り逆指値(FOT=30,以下)
+```
+
+- **dry_run=True** なら発注系は API を叩かず内容を print するだけ (安全)。
+- 現物 `CashMargin=1` / 信用新規 `=2` / 信用返済 `=3` を引数で切替。
+- `check_signal_on_date` の返り値 (`order_price`/`stop_price`/`target_price`) を
+  そのまま `send_stop_buy` / `send_stop_sell` の trigger_price に渡せる設計。
+
+### 12.3 運用フロー
+
+```
+# エントリー (寄り前 or 引け後): 今日のシグナルを逆指値買いで発注
+python kabu_send_signals.py                  # dry-run
+python kabu_send_signals.py --execute        # デモ口座に発注
+python kabu_send_signals.py --execute --prod # 本番口座 (要明示)
+python kabu_send_signals.py --with-stop      # 損切り逆指値も同時 (intraday運用)
+
+# 損切り (毎営業日 14:50-14:55): close 方式の引け成行ガード
+python close_stop_guard.py                   # dry-run (判定だけ)
+python close_stop_guard.py --execute         # デモ口座に引け成行発注
+python close_stop_guard.py --execute --prod  # 本番口座 (要明示)
+```
+
+### 12.4 安全設計 (誤発注防止)
+
+- **全スクリプト デフォルト dry-run**。`--execute` のときだけ実発注。
+- `--execute` でも接続先は **既定デモ(18081)**。本番(18080)は `--prod` 明示必須。
+- API パスワードは環境変数 `KABU_API_PASSWORD` から読む (コード埋め込みしない)。
+
+### 12.5 close 方式と intraday 方式の発注の違い (重要)
+
+§16 の損切りモードと対応:
+- **close (既定)**: エントリー時は損切り逆指値を出さない (`kabu_send_signals.py`
+  を `--with-stop` なしで実行)。損切りは `close_stop_guard.py` が引け前に判定して
+  引け成行で決済。ヒゲ刈り回避。
+- **intraday**: エントリー時に損切り逆指値も同時に置く (`--with-stop`)。
+  置きっぱなしで放置できるが、ザラ場のヒゲで刈られる。
+
+### 12.6 既知の制約 / TODO
+
+- **保有管理は forward_test_log.csv 依存**: `close_stop_guard.py` は
+  `forward_test.py --record` で蓄積した CSV の filled/holding 行を保有とみなす。
+  kabu の実建玉 (`get_positions`) との突合は未実装 (将来の整合チェック候補)。
+- **信用返済の建玉指定**: `send_moc` の信用返済は `CashMargin=3` だが、
+  返済建玉 (ClosePositions) の明示指定は未対応。現状は現物決済を想定。
+- **スケジュール実行**: cron / タスクスケジューラは別途設定が必要 (スクリプト側は持たない)。
+- **約定確認・リトライ**: 発注後の約定監視や部分約定処理は未実装。
 
 ---
 
@@ -663,3 +795,282 @@ python forward_test.py --report --aggressive   # aggressive 実績
 ```
 
 実運用のどちらが優秀かは **バックテストではなく フォワードテストの実績** で判断してください。
+
+---
+
+## 16. BTスコア改修 TODO（未実装・要リマインド）
+
+### 16.1 現状の暫定対応（実装済み）
+
+`score_speed_patch.py` — import するだけで BTスコアに速度ボーナス最大+10点を追加。
+既存コードを変更せずモンキーパッチで適用。
+
+```python
+import score_speed_patch  # check_signals_stop/breakout の calc_recommend_score を差し替える
+```
+
+速度ボーナス = `max(0, 1 - avg_target_days / 15) × 10点`
+
+### 16.2 将来の抜本改修（未実装）
+
+ユーザーの要望: BTスコア・WFスコア・安定型優先・目標達成速度を全て正しく反映した銘柄選定。
+
+**設計方針:**
+1. **BTスコア刷新** — 年率期待値ベースに変更
+   ```
+   年率期待値 = (勝率×平均利益 - 負け率×平均損失) / 平均保有日数 × 250日
+   ```
+   これにより勝率・PF・速さを1本の指標に統合できる。
+
+2. **安定型をフィルター条件化** — スコア加算ではなく選定の前提条件に
+   ```
+   安定性スコア ≥ 閾値 の銘柄のみを選定対象にする（スコア化しない）
+   ```
+
+3. **scan_walkforward.py の composite_score** — 年率期待値ベースに変更
+
+4. **build_watchlist.py** — `--min-stability` オプション追加
+
+**変更ファイル:**
+- `backtest_limit_entry.py` — `avg_target_days`, `avg_win_pnl`, `avg_loss_pnl` を返り値に追加
+- `check_signals_stop.py` / `check_signals_breakout.py` — `calc_recommend_score` 刷新
+- `scan_walkforward.py` — `composite_score` 変更、CSVカラム追加
+- `build_watchlist.py` — `--min-stability` オプション追加
+
+**注意:** 変更後は過去CSVのスコアと直接比較不可。`scan_walkforward.py` の再実行が必要。
+
+---
+
+## 16. 損切り評価モード (stop_mode) — close 既定化 (2026-06)
+
+ストップ狩り(ヒゲ刈り)対策として、損切りの評価方式を選べるようにしました。
+実測 (`analyze_stop_hunt.py`) の結果、**終値判定 (close) が既定** です。
+
+### 16.1 定義 (`backtest_limit_entry.py`)
+
+```python
+# default_stop_mode(strategy_name, is_short)
+#   "intraday" = ザラ場の安値/高値が損切り価格にタッチで約定 (ヒゲでも発火) ← 旧既定
+#   "close"    = 終値が損切り価格を超えたときだけ約定 (引け判定・引け成行)  ← 新既定
+```
+
+`run_limit_backtest(..., stop_mode=None)` は未指定時 `default_stop_mode` で自動決定。
+明示指定すれば上書き可 (分析・比較用)。
+
+### 16.2 ポリシー (実測に基づく)
+
+| 戦略 | stop_mode | 理由 |
+|------|-----------|------|
+| **全戦略 (ロング/ショート全部)** | `close` | ヒゲ刈り回避。**実運用 close_stop_guard が終値ベースのため統一** |
+
+> **2026-07-07 変更**: 旧ポリシーは MOM ロングのみ `intraday`（§16.2 実測で close だと悪化したため据え置き）だったが、
+> 実運用の `close_stop_guard` は終値ベースで、MOM だけバックテストとライブが乖離していた
+> (終値では損切り未達なのにレポートは損切り表示)。ザラ場逆指値を実際には置かない運用に合わせ、
+> **MOM も close に統一**（`default_stop_mode` の MOM 例外を削除）。MOM のザラ場優位を取り戻したい場合は
+> `kabu_send_signals --with-stop` でザラ場逆指値を実際に置く運用に切り替える必要がある。
+
+### 16.3 実測エビデンス (365日, in-sample, analyze_stop_hunt.py)
+
+| 推奨ポリシー改善 | conservative | aggressive |
+|---|---|---|
+| 全体 | +594,751円 | +804,544円 |
+| ロング(MOM除く) | +145,067 | +403,495 |
+| ショート | +449,684 | +401,050 |
+| 時期分割(前半/後半) | 全6区分 ✓改善 | 全6区分 ✓改善 |
+
+- ショートが特に効く(踏み上げの上ヒゲ刈り回避)。conservative ショート PF 1.45→1.62。
+- 代償は最大単発損失が約2万円深くなる程度。2万損件数はむしろ減少。
+- **hybrid(終値+ザラ場ハード損切り)は棄却**: 深いヒゲで勝ちを刈る副作用があり、
+  尾リスクをほとんど低減できなかった。
+
+### 16.4 実運用上の意味 (重要)
+
+- close 損切りは **引け(大引け近辺/MOC)で成行決済** する運用。ザラ場の逆指値据え置き
+  ではない。kabu 発注では「終値が損切り価格を超えたら翌寄りor当日引け成行」で対応。
+- **過去の CSV/HTML 数字は新ルールで上書きされ、旧 intraday の数字とは直接比較不可**
+  (§14.1 と同じ注意)。`scan_walkforward.py` 等は再実行で新 CSV を得ること。
+- 旧挙動に戻したい場合は呼び出しで `stop_mode="intraday"` を明示。
+
+### 16.5 影響範囲
+
+`run_limit_backtest` は唯一の約定ロジックなので、`run_signals.py` /
+`verify_watchlist.py` / `forward_test.py` / `scan_walkforward.py` /
+`nikkei_analysis*.py` すべてに自動反映される。
+
+---
+
+## 17. BTスコア・WFテスト・In-sample/OOSの関係（重要）
+
+### 17.1 日次運用コマンド（最重要）
+
+```bash
+# ロング+ショート統合（1コマンド）
+python run_signals_holdout_all.py --both --max-price 6000 --min-price 1000 --force --days 365
+```
+
+出力: `signals_holdout_all_both_YYYY-MM-DD.html`（ロング/ショートタブ切替）
+
+個別実行:
+```bash
+python run_signals_holdout_all.py --max-price 6000 --min-price 1000 --force --days 365
+python run_signals_holdout_all.py --short --max-price 6000 --min-price 1000 --force --days 365
+```
+
+### 17.2 BTスコアの計算方法
+
+**BTスコアは WATCHLIST内の銘柄×戦略ごとに1つ**（ホールドアウト設定とは独立）。
+
+`check_signals_stop.calc_recommend_score` / `check_signals_breakout.calc_recommend_score`
+（2ファイルに同一実装）
+
+```
+BTスコア (0〜100) =
+  直近365日バックテストを 30/60/90/120/150/180日 の6期間にスライス
+  ↓ 全期間の平均で以下を算出
+  平均勝率        × 0.4   → 最大40点
+  平均PF ÷ 10    × 30   → 最大30点 (PF=10以上でキャップ、∞は10扱い)
+  期間安定性      × 20   → 最大20点 (プラス期間数 / 有効期間数)
+  取引回数補正    × 10   → 最大10点 (合計20取引で満点)
+
+ランク: ★★★≥80, ★★≥60, ★≥40, △<40
+```
+
+ATRペナルティ (`apply_atr_penalty`):
+- 損切り幅≤7%: ペナルティなし
+- 損切り幅>7%: スコア × max(0.5, 1 - (損切り幅-7%) / 30)
+- 損切り幅≥37%: スコア × 0.5（最大50%減）
+
+### 17.3 WalkForward の銘柄選定とIn-sample/OOSの関係
+
+```
+時間軸（過去 → 今日）
+
+│←── WF訓練+テスト期間（銘柄選定に使用）────→│←ホールドアウト N日→│ 今日
+│  Fold1: [TRAIN 12M][TEST 6M]              │                   │
+│          Fold2: [TRAIN 12M][TEST 6M]      │                   │
+│                                           │                   │
+│ ← scan_walkforward.py がここで銘柄選定 →  │←── OOS検証領域 ───│
+└───────────────────────────────────────────────────────────────┘
+```
+
+**6ホールドアウト設定（HO30d〜HO180d）それぞれが異なる銘柄セット（WATCHLIST）を持つ**：
+- HO30d: 直近30日を除いた期間でスキャン → 直近30日がOOS
+- HO180d: 直近180日を除いた期間でスキャン → 直近180日がOOS
+
+### 17.4 BTスコアのIn-sample biasに注意
+
+BTスコアは直近365日（= WF訓練期間 + ホールドアウト期間）を全部使って計算される。
+**つまりBTスコアには銘柄選定に使ったIn-sample期間も含まれており、Biasがある。**
+
+| 区分 | WF銘柄選定 | BTスコアに含まれるか |
+|------|-----------|---------------------|
+| WF訓練+テスト期間 | 使った（In-sample） | **含まれる ← Bias** |
+| ホールドアウト期間 | 使っていない（OOS） | 含まれる（純粋OOS部分）|
+
+**実運用での解釈指針**:
+- BTスコアは「直近1年の実績」の参考値として使う（銘柄選定の根拠にはしない）
+- 銘柄選定の信頼性は WF テスト期間の成績（scan_walkforward CSV の `total_test_pnl`）で判断
+- **損益タブ**（ホールドアウト設定別のPnL）が最も信頼できるOOS検証。HO180dで安定してプラスなら本物
+- BTスコア≥60 は「直近1年で機能していた」という意味であり、「これからも機能する」保証ではない
+
+### 17.5 トレンド継続日数の計算（2026-06-15改修済み）
+
+`nikkei_analysis.py` の `extract_periods` / `_append_up`:
+- **旧**: `(end_date - start_date).days` → 土日祝を含む暦日数
+- **新**: `end_idx - start_idx` → yfinanceデータのバー数 = 土日祝を除く営業日数
+
+表示ラベルは「日」（「営業日」ではない）。統計・分布・継続予測はすべて営業日ベースで再計算済み。
+
+---
+
+## 18. lss (ロング銘柄ショート) 運用まとめ (2026-07-18 セッション確定)
+
+lss = 長候補株を逆指値空売り・同日決済。検証はほぼ結論が出ている。以下は確定事項。
+
+### 18.1 決済ルールは「現行(両方タッチ)」が最善 (再検討不要)
+`nikkei_analysis.py` ⑦損切りタブの「終値損切り比較」(BT30以上・2025-12基準・180日OOS)で検証:
+- 現行(損切=逆指値タッチ / 利確=タッチ): 基準
+- 損切りを日足終値(引けまで持つ): **−21%(−405万) 論外**。損失が引けまで走る。タイトな逆指値損切りは必須。
+- 利確を日足終値(引けまで持つ): **+1.66%(+31.8万) ≒ 誤差**。実スリッページで消える水準。
+- 5分足終値の利確: +100万相当だが、live実装(watcherの5分足終値監視)が必要でスリッページ懸念。採用せず。
+→ **決済は現行のまま変えない**。この比較は既定スキップ(LSS_CLOSESTOP_RESWEEP=1 のときだけ計算・キャッシュ)。
+
+### 18.2 銘柄選定の運用ルール (確定)
+- **top指定なし**(`--lss-top` なし)。テスト合格・空売り可・価格レンジ内の全銘柄をシグナル化。
+- **BT30以上・BT降順で、資金の許す範囲で投資**(BT0-29が唯一の負け帯)。
+- 発注は必ず**シグナルタブ(発注リスト)**に従う(ライブ判定 check_signal_on_date = 実発注と同経路)。
+  損益タブの取引明細は過去実績用(発注中は非表示済み)。
+- 空売り不可は not_shortable.py で選定時に除外済み(top指定なし版でも除外。check_shortable.py で月1更新)。
+
+### 18.3 空売り固有リスク (結論: ほぼ対策済み)
+- **逆日歩**: 同日決済なら基本かからない(持ち越さない限り無関係)。
+- **貸株在庫**: 静的な非貸借は not_shortable で除外済み。動的な在庫切れ(稀)だけ残リスク。
+  kabu の一般信用(デイトレ)=MarginTradeType 3 が在庫・コスト面で有利。
+- **空売り価格規制(51円/アップティック)**: lssは「前日終値-1ティック」の小トリガー+−3%指値下限ガードで
+  −10%規制の手前で約定するため実質無関係。
+
+### 18.4 引け決済(タイムカット)の運用鉄則
+- 通常は **lss_exit_watcher.py(監視モード)** が日中OCO+引け決済まで自動。15:20にMOC切替→**大引け15:30**まで
+  リトライ(東証2024/11以降15:30)。**watcherを15:30まで止めないこと**(途中終了で決済取りこぼし=過去メドレー事例)。
+- **発注サーバ(order_server)とwatcherを同時起動しない**。kabuの有効トークンは1つで401の取り合いになる。
+  朝はレポートの「発注→監視に切替」ボタンで片方ずつ。
+- close_lss_guard.py は watcher を動かさない日のバックアップ(常駐日は実行しない=二重決済防止)。
+
+### 18.5 daily コマンド (現行)
+`.\daily` = `run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --lss-proposal auto
+--long-base 2025-12-31 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8`
+- lss主タブ。ロング/ショートは日別成績確認用に軽量(--no-analysis)で併存。
+- --no-news/--no-risk で高速化。--workers 8(no-topで~3200ペア)。
+
+### 18.6 データ・バックアップ
+- 5分足(stock_5min)は J-Quants プラン上限で **2024-07 が最古**(分足アドオンは全プラン2年ローリング)。
+  基準月スイープの最古は 2024-12(それ以前はTRAINに5分足が無く選定不可)。
+- `backup_all.bat [dest]` でコード履歴(git bundle)+研究データ(stock_5min/forward_test/WF/proposals/.env)を
+  一括バックアップ。コードはGitHub、データはUSB/別クラウドへ(.env は秘密・公開厳禁)。
+
+### 18.7 残る唯一の重要課題 = フォワードテストで実運用乖離を測る
+検証(OOS)は最良クラス(PF2.23/13ヶ月連続プラス)。あとは実約定・実スリッページ・fill率・実現勝率を
+`forward_test.py --record` で貯めて、バックテストからの劣化を定量化するのが最後の確認。
+
+### 18.8 約定モデルを現実化 (2026-07-19) — 楽観バイアス除去
+lssの約定を **min(トリガー, その日の始値)** に変更(逆指値売りは寄りがトリガーを割って
+始まると始値約定=空売りに不利)。−3%指値ガード(`_INTRADAY_5M_ENTRY_GAP_LIMIT`)を超える
+ギャップダウンは約定不可。エンジン(run_limit_backtest)・選定(scan_lss_universe)・比較タブを統一。
+- 旧モデル(常にトリガー約定)は楽観的だった。現実化で全lss数値が下がるが、これが本当の水準。
+- それでもBT30以上は全月プラスを維持(OOS)。再エントリー分はPF≈1.0(=1銘柄1ポジション運用が正解)。
+- 実装: sameday5m_firsttouch.short_entry_fill_5m。旧挙動は _INTRADAY_5M_REALISTIC_ENTRY=False。
+- BTキャッシュは _BT_LOGIC_VER で版管理(約定/決済ロジック変更時は版を上げて自動無効化)。
+- ⑦タブに指値ガード%スイープ(2/3/5/10/無制限)を追加し3%の妥当性を検証可能(RESWEEP時のみ計算)。
+- 残改良余地: 寄りが大きく割れた銘柄は不利約定なので、見送り/優先度低下のルールを将来検討。
+
+### 18.9 損切り遅延 delay1 (2026-07-24) — 寄り1本目のヒゲ刈り回避
+
+lssの損失の大半(BT30以上でも)は「約定直後の寄り付近で、逆行の反発に0.1ATR(≈+0.7%)の
+タイト損切りが刈られる」もの。**約定した5分足の間は損切りを効かせず、次の5分グリッド
+(09:05/09:10…)から損切りを有効化**すると、一瞬のヒゲを回避して本来の下げを取れる。
+
+**検証(compare_lss_rules.py --bt-min 30, 現実的な約定モデル):**
+- BT30以上(実際に投資する集団)で base vs delay1: **勝率48→54% / PF1.63→1.95 / +48%(現実モデル)**。
+- **楽観/現実/保守の全fillモデルで delay1 が勝つ**(楽観→現実の目減り9%だけ=頑健)。
+
+**重要: 母集団で結論が正反対**:
+- フィルター前(低品質)= だまし下げ→**持続反発**が多く、無保護窓で走り上がられ delay1 は崩壊(−18M)。
+- BT30以上(本物の下げtrend)= 反発は一瞬のヒゲ→delay1 が勝つ。**必ず BT30以上で判断すること**。
+
+**約定モデルの注意(楽観 vs 現実):**
+- エンジン(短時間足決済)は損切りを **stopちょうど**で約定させる=**楽観**。delay1では「無保護窓で
+  価格が損切りを通過→5分後に損切りを置いた瞬間に走り上がった値で成行約定」の悲観を捕捉できない。
+- 現実的な下限は `compare_lss_rules.py` の **net現実/net保守**(損切り発火足=`max(stop,始値)`+0.5%)でのみ測れる。
+  レポート(.\daily)の delay1 数字は楽観なので過大評価。判断は compare_lss_rules の現実モデルで。
+
+**実装(バックテスト⇄ライブを一致させる):**
+- バックテスト: `sameday5m_firsttouch.short_exit_5m(stop_delay_bars=K)`。エンジンは環境変数
+  `LSS_STOP_DELAY_BARS`(既定0)で lss(stop_sell)のみに適用。BTキャッシュは版トークンに sd<N> 付与。
+- ライブ: `lss_exit_watcher.py --stop-delay-bars 1`。約定検知した5分足の間は損切り(①即時成行/
+  ②板逆指値)を設置せず、次の5分グリッドから有効化。検知≒約定時刻(寄り約定+寄りから常駐)。
+  **利確・引けはこの間も有効**。既定0=現行(即損切り)。
+- **両者を必ず揃える**(バックテストON+ライブOFFだと「レポートは勝つがliveは寄りで刈られる」乖離)。
+
+**現状 = フォワード検証段階**: バックテスト(現実モデル)では十分堅牢。残る未知数は実スリッページ・
+fill率・空売り在庫・watcherタイミングで、**実発注(デモ/小ロット)+forward_test で実測**して確定する。
+恒久既定化(env/flag無しでON)は forward の実績を見てから。

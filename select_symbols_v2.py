@@ -29,6 +29,7 @@ import argparse
 import importlib
 import importlib.util
 import webbrowser
+from _open_html import open_html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -1328,7 +1329,7 @@ def main() -> None:
                                    {}, {}, {}, watchlist=None, ver=_ver)
         print(f"\n  HTMLレポート: {html_path.resolve()}")
         if not args.no_browser:
-            webbrowser.open(html_path.resolve().as_uri())
+            open_html(html_path.resolve().as_uri())
         print()
         return
 
@@ -1445,7 +1446,7 @@ def main() -> None:
                                watchlist, ver=_ver)
     print(f"\n  HTMLレポート: {html_path.resolve()}")
     if not args.no_browser:
-        webbrowser.open(html_path.resolve().as_uri())
+        open_html(html_path.resolve().as_uri())
     print()
 
 
