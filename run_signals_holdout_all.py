@@ -970,7 +970,10 @@ if _using_fallback:
 _lss_proposal_file = getattr(_args, "lss_proposal", None)
 _lss_source_bases: dict = {}   # merge時の (code,strat)->基準月ラベル。import後に _na へ流す
 _lss_start_dates: dict = {}    # merge時の (code,strat)->OOS開始日。最新基準月のみ銘柄の遡及防止。
-if _args.long_stop_short and _lss_proposal_file:
+# --mirror(指値空売り=戻り売り)も同じ候補集合で評価できるようにする。
+# lss(逆指値空売り=下ブレイク追随)と候補が違うと『どちらのトリガーが効くか』を
+# 比較できない。mirror もショートなので空売り不可の除外も同じ経路で効く。
+if (_args.long_stop_short or getattr(_args, "mirror", False)) and _lss_proposal_file:
     _CANON_STOP = {"MACDTF", "A7", "RSI2"}
     _CANON_BRK  = {"DON", "VOLTF", "MOM"}
     _lss_exclude = {s.strip().upper() for s in os.environ.get("LSS_EXCLUDE_STRATS", "").split(",") if s.strip()}
@@ -1295,8 +1298,13 @@ _na._ANALYSIS_ONLY = _analysis_only
 # ロングデイトレ(--long-daytrade)は同日決済レポートの骨格(月別/BT50/予算400万タブ)を
 # lss と共有するため _LSS_ORDER_MODE を立て、向きだけ _LSS_LONG=True で反転する
 # (発注は当面 分析専用=ロング用の同日決済watcherが未整備のため)。
-_na._LSS_ORDER_MODE = bool((_args.long_stop_short or getattr(_args, "long_daytrade", False))
-                           and not _args.mirror)
+# --mirror(指値空売り=戻り売り)も同じ骨格(月別/BT帯/予算400万×流動性順)で出す。
+# lss(逆指値空売り=下ブレイク追随)と同じ土俵で比べないと、どちらのトリガーが
+# 効くのかを判定できない。mirror もショートなので _LSS_LONG は False のまま。
+# (旧: mirror は予算タブを出さなかったため lss と比較できなかった)
+_na._LSS_ORDER_MODE = bool(_args.long_stop_short
+                           or getattr(_args, "long_daytrade", False)
+                           or _args.mirror)
 _na._LSS_LONG = bool(getattr(_args, "long_daytrade", False) and not _args.mirror)
 # lss の損切/利確ATR倍率(既定0.1/1.0)をレポートの表示計算へ渡す(実際の注文内容に合わせる)。
 _na._LSS_SM = _bte._SM_FORCE if getattr(_bte, "_SM_FORCE", None) is not None else 0.1
