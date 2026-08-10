@@ -98,6 +98,19 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         _h_ticks = int(os.environ.get("LSS_H_LIMIT_TICKS", "0") or 0)
     except Exception:
         _h_ticks = 0
+    # H を **寄指(寄付のみ有効)** にする。板寄せで約定しなければ建てない。
+    #   ⛔ なぜ選べるようにしたか (2026-08-10):
+    #      H の約定は2種類あり、質がまったく違う。
+    #        板寄せ  (寄り>=指値)  = 9:00の板寄せで確実に約定。BTと現実が一致
+    #        ザラ場到達            = 価格が上がってきて指値に当たった
+    #                              = **上昇中に空売りを建てている**
+    #      実測(hsweep): ザラ場の 円/件 は板寄せの 1/4〜1/11。指値+1では TEST で
+    #      マイナス(-173円/件)。損切りは0.1ATR(株価の約0.3%)しかないので勢いが
+    #      続けばすぐ刈られ、delay1 の無保護窓も上昇の真っ最中に当たる(18.17)。
+    #      さらにザラ場分は『高値がタッチ=約定』の仮定に乗っており板の待ち行列が
+    #      考慮されていない(18.33)。→ 取らないという選択肢が要る。
+    _h_auction_only = str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() \
+        in ("1", "true", "True", "yes")
 
     base: dict = {}
     rows: dict = {}      # (銘柄,日) -> [元トレード,...] 出力はこの数だけ作る
@@ -128,6 +141,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     _nrow = sum(len(v) for v in rows.values())
     log(f"[E/H] 重複: {'畳む(LSS_EH_DEDUPE=1)' if _dedupe else '畳まない=現行タブと同じ'} "
         f"→ 出力 {_nrow:,}件 / {len(base):,}銘柄日")
+    if _h_auction_only:
+        log("[E/H] ⚠ H は **寄指(寄付のみ)** です (LSS_H_AUCTION_ONLY)。"
+            "板寄せで約定しなければ建てません = ザラ場到達を一切取りません")
     if _h_ticks:
         log(f"[E/H] ⚠ H の指値を前日終値から {_h_ticks:+d}ティック ずらしています "
             f"(LSS_H_LIMIT_TICKS)。既定0と比較するときは条件を揃えること")
@@ -272,7 +288,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         for key, ep, ok in (
                 ("E", o1, not (gap_guard > 0 and o1 < pc * (1 - gap_guard))),
                 ("H", (o1 if o1 >= _hl else _hl),
-                 not (gap_guard > 0 and o1 > _hl * (1 + gap_guard)))):
+                 (not (gap_guard > 0 and o1 > _hl * (1 + gap_guard))
+                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
+                  and (o1 >= _hl if _h_auction_only else True)))):
             order_p = _hl if key == "H" else o1
             if not ok or ep <= 0:
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",

@@ -226,15 +226,20 @@ for sym, dstr in sorted(pairs):
         st["pnl"] += pnl
         # 板寄せ(確実に約定) と ザラ場到達(タッチ=約定の仮定) を**分けて**貯める。
         # H の利益がどちらに乗っているかで、実運用で取れる額がまったく変わる(18.33)。
-        if o1 >= lim:
+        _auc = o1 >= lim
+        if _auc:
             st["n_auction"] += 1
             st["pnl_auction"] += pnl
         else:
             st["pnl_intra"] += pnl
         if pnl > 0:
             st["win"] += 1
+            st["win_auction" if _auc else "win_intra"] += 1
         if why == "stop":
             st["stop"] += 1
+            # ザラ場到達は『上昇中に建てる』ので損切り率が高いはず。
+            # delay1 の無保護窓も上昇の真っ最中に当たる(18.17)。型ごとに出す。
+            st["stop_auction" if _auc else "stop_intra"] += 1
 
 print(f"[除外] データ不足/価格外 {_skip:,}銘柄日\n")
 
@@ -274,8 +279,9 @@ for sp in _splits:
     #    板寄せ分は現実と一致する = **これが確実に取れる額**。
     #    ザラ場分は『高値がタッチ=約定』の仮定に乗っているので、実運用では
     #    待ち行列で取れないことがある。合計だけ見ると差を読み違える。
-    print(f"  {'指値':>6}{'板寄せ件':>10}{'板寄せ損益':>14}{'ザラ場件':>10}"
-          f"{'ザラ場損益':>14}{'ザラ場依存%':>12}")
+    print(f"  {'指値':>6}{'板寄せ件':>10}{'板寄せ損益':>14}{'円/件':>10}"
+          f"{'勝率':>7}{'損切%':>7}"
+          f"{'ザラ場件':>10}{'ザラ場損益':>14}{'円/件':>10}{'勝率':>7}{'損切%':>7}")
     for off in OFFS:
         s2 = stat[off][sp]
         nf = int(s2["n_fill"])
@@ -284,10 +290,18 @@ for sp in _splits:
         na = int(s2["n_auction"])
         pa, pi = s2["pnl_auction"], s2["pnl_intra"]
         dep = (pi / (pa + pi) * 100) if (pa + pi) else 0.0
-        print(f"  {off:>+6}{na:>10,}{pa:>+14,.0f}{nf - na:>10,}{pi:>+14,.0f}"
-              f"{dep:>11.0f}%" + ("  ←現行" if off == 0 else ""))
-    print("  ※ ザラ場依存% = 利益のうち『タッチ=約定』の仮定に乗っている割合。"
-          "低いほど実運用で取れる")
+        ni = nf - na
+        print(f"  {off:>+6}{na:>10,}{pa:>+14,.0f}{(pa/na if na else 0):>+10,.0f}"
+              f"{(s2['win_auction']/na*100 if na else 0):>7.0f}%"
+              f"{(s2['stop_auction']/na*100 if na else 0):>7.0f}%"
+              f"{ni:>10,}{pi:>+14,.0f}{(pi/ni if ni else 0):>+10,.0f}"
+              f"{(s2['win_intra']/ni*100 if ni else 0):>7.0f}%"
+              f"{(s2['stop_intra']/ni*100 if ni else 0):>7.0f}%"
+              + ("  ←現行" if off == 0 else ""))
+    print("  ※ 板寄せ = 寄り>=指値。9:00の板寄せで**確実に約定**する(現実と一致)。")
+    print("     ザラ場 = 価格が上がってきて指値に当たった = **上昇中に建てている**。")
+    print("     『タッチ=約定』の仮定に依存するうえ、損切り0.1ATR(株価の約0.3%)では")
+    print("     勢いが続けばすぐ刈られる。delay1 の無保護窓も上昇の真っ最中に当たる(18.17)。")
     print()
 
 if _ho is not None:
@@ -310,5 +324,10 @@ print("─" * W)
 print("  ・指値を上げると 円/件 は上がるが約定率が落ちる。**合計**で見ること。")
 print("  ・板寄せ% が下がるほど『タッチ＝約定』の仮定に寄りかかる(18.33)。")
 print("    円/件 が少し良くても板寄せ%が大きく落ちるなら、実運用では取れない。")
-print("  ⚠ ここは**予算制約なし**。良いオフセットが出たら必ず")
-print("     set LSS_H_LIMIT_TICKS=N → .\\daily → 予算400万のE/Hタブ で確認(18.10)。")
+print("  ・**寄指(寄付のみ)** という選択肢: 板寄せ列だけを取り、ザラ場到達を捨てる。")
+print("    板の待ち行列リスクも『上昇中に建てる』パターンも消える。上の板寄せ損益が")
+print("    そのまま成績になる。PowerShell で試すには:")
+print("      $env:LSS_H_AUCTION_ONLY = \"1\"; $env:LSS_H_LIMIT_TICKS = \"-2\"")
+print("      .\\dailyfast --no-serve --days 365     (戻すときは両方 $null)")
+print("  ⚠ ここは**予算制約なし**。良いオフセットが出たら必ず上のように")
+print("     レポートを回して 予算400万のE/Hタブ で確認すること(18.10)。")
