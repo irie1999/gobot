@@ -590,15 +590,20 @@ class KabuClient:
                     "上書きされていないか確認してください。")
             body["FrontOrderType"] = FOT_LIMIT_MOO
             body["Price"] = round(price)
-            # 市場と有効期限は寄成(MOO)と同じ扱いにする。
-            #   Exchange: MOO は SOR(9) で通らないため東証+(27)。寄指も寄付の
-            #     板寄せに乗せる注文なので同じと**仮定**している(仕様書に明記なし)。
-            #   ExpireDay: 仕様上 0 は「引け後なら翌営業日」と解釈されるが、MOO で
-            #     実際にエラーになった経緯があるので翌営業日を明示する。
-            # ⚠ どちらも仕様書ではなく既存 MOO の実測知見に倣ったもの。
-            #   4001005 等で弾かれたらここを疑うこと。
+            # Exchange: 東証+(27)。寄指は**東証の寄付の板寄せ**に乗せる注文で、
+            #   SOR(9) だと複数市場に回りうる = 板寄せという前提が崩れる。
+            #   既存の寄成(MOO)も SOR では通らず 27 を使っている。
             body["Exchange"] = EXCHANGE_TOKYO_PLUS
-            body["ExpireDay"] = _next_trading_day_int()
+            # ⛔ ExpireDay に _next_trading_day_int() を使ってはいけない。
+            #    あれは時刻を見ずに「今日+1営業日」を返すので、**朝に発注すると
+            #    翌日の寄り**になり当日に間に合わない(lss は朝8:45発注)。
+            #    仕様では 0 が「引けまでの間=当日 / 引け後=翌取引所営業日」を
+            #    自動判定する(API リファレンス v1.5)。寄り前に出す H では 0 が正しい。
+            #    ⚠ ザラ場中に出すとその日の寄りは既に終わっているので、当日扱いだと
+            #      約定機会が無い。発注は必ず寄り前(または引け後)に行うこと。
+            #    呼び出し側が expire_day を明示した場合はそれを尊重する。
+            if expire_day is None:
+                body["ExpireDay"] = 0
             label = f"寄指売り {symbol} x{qty} @{round(price)}"
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
