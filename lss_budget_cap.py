@@ -178,24 +178,54 @@ def main() -> int:
         print(f"[warn] lss_order_rank 不可({_le}) → BT降順にフォールバック")
         signals.sort(key=lambda s: s["bt"], reverse=True)
 
+    # ── 実際に出す注文価格を先に確定させる ────────────────────────
+    # dry-run のプランと実発注が食い違うと「何を出すか」を事前に確認できない。
+    # (2026-08-10: auction のとき表示は前日終値のまま、発注だけ -5tick ずれていた)
+    #   stop    : 前日終値。発注直前に現値と比べて -1tick 下げることがある(即約定回避)
+    #   auction : 前日終値 + limit_ticks × 呼値。現値は見ない(寄指はザラ場で約定しない)
+    for s in signals:
+        _pc = float(s["order_price"])
+        s["_ord_p"] = float(round_to_tick(
+            _pc + args.limit_ticks * tick_size(_pc)) if _auction else round_to_tick(_pc))
+
     # ── over-subscribe: 注文額の累計が cap に達するまで上位から採用 ──
     plan = []
     placed_not = 0.0
     for s in signals:
         if placed_not >= cap:
             break
-        note = s["order_price"] * args.qty
+        note = s["_ord_p"] * args.qty
         plan.append(s)
         placed_not += note
 
-    print(f"\nシグナル {len(signals)}件 → over-subscribe 発注プラン {len(plan)}件 "
+    print(f"\nシグナル {len(signals)}件 → "
+          f"{'発注プラン' if _auction else 'over-subscribe 発注プラン'} {len(plan)}件 "
           f"(注文額累計 {placed_not/1e4:.0f}万 / 枠 {cap/1e4:.0f}万)")
+    if _auction:
+        print(f"エントリー方式: **寄指(寄付の板寄せのみ)** 指値 = 前日終値{args.limit_ticks:+d}ティック")
     print("-" * 72)
     for i, s in enumerate(plan, 1):
+        if _auction:
+            # 寄指の OCO は **実約定価格(寄り値)基準** で watcher が組み直す。
+            # 前日終値基準の stop/target をそのまま出すと誤解を招くので幅で表示。
+            _a = float(s.get("atr", 0) or 0)
+            _oco = (f"損切+{_a*args.sm:,.0f}/利確-{_a*args.tm:,.0f}(約定値から)"
+                    if _a > 0 else "損切/利確=約定値から再計算")
+            _px = f"@寄指{s['_ord_p']:,.0f}"
+        else:
+            _oco = f"損切¥{s['stop_price']:,.0f}/利確¥{s['target_price']:,.0f}"
+            _px = f"@≤{s['_ord_p']:,.0f}"
         print(f"  {i:>2}. BT{s['bt']:>3.0f} {s['symbol']} {s['name']} [{s['strategy']}] "
-              f"@≤{s['order_price']:,.0f} 損切¥{s['stop_price']:,.0f}/利確¥{s['target_price']:,.0f} "
-              f"(注文額 {s['order_price']*args.qty/1e4:.0f}万)")
+              f"{_px} {_oco} (注文額 {s['_ord_p']*args.qty/1e4:.0f}万)")
     print("-" * 72)
+    if _auction and args.budget_multiple > 1.0:
+        print(f"⚠ **寄指で倍率{args.budget_multiple:.1f}は危険です。**")
+        print("   寄指は寄付の板寄せで**一斉に約定**します。逆指値のように日中かけて順次")
+        print("   発動するわけではないので、『約定累計が予算に達したら残りを取消す』という")
+        print(f"   over-subscribe の前提が成り立たず、最大 {cap/1e4:.0f}万 が同時に建ちえます。")
+        print("   バックテスト(E/Hタブ)も発注額ベースで予算ぶんしか出さない = 倍率1.0相当。")
+        print("   → 寄指では --budget-multiple 1.0 を推奨します。")
+        print("-" * 72)
 
     if not args.execute:
         print("dry-run のため発注・監視しません。--execute で発注+上限監視を行います。")
@@ -213,17 +243,16 @@ def main() -> int:
     placed = []   # {order_id, symbol, trigger, qty, notional}
     for s in plan:
         sym = _norm(s["symbol"])
-        pc = float(s["order_price"])          # em=0.0 なので order_price = 前日終値
+        # 注文価格はプラン作成時に確定済み(dry-run の表示と一致させるため)。
+        trig = float(s["_ord_p"])
         if _auction:
             # ── H案: 寄指売り(寄付の板寄せのみ) ──────────────────
             # 現値との比較(即約定回避)はしない。寄指はザラ場では約定しないので
             # 「現値より上の指値」を出すのがむしろ正しい。
             # 下限ガード(after_hit_price)も逆指値専用なので無い。
-            trig = round_to_tick(pc + args.limit_ticks * tick_size(pc))
             res = cli.send_sell(sym, qty=args.qty, price=trig,
                                 order_type="limit_moo", cash_margin=CASH_MARGIN_OPEN)
         else:
-            trig = round_to_tick(pc)
             # 即約定回避: トリガーが現値以上だと弾かれる → 現値-1ティックに引下げ
             try:
                 cur = cli.get_current_price(sym)
