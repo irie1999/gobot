@@ -81,6 +81,10 @@ _SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLス�
 # run_signals_holdout_all から注入する追加トレードレコード（lss転換ロングなど）。
 # display_trades に結合して月別アコーディオン・日別カードに自然に混合表示される。
 _EXTRA_TRADES: list = []
+# E/H(エントリー方式の比較) のトレード。run_signals_holdout_all が算出して注入する。
+# {"E": [trade,...], "H": [...], "約定せず": {"E": [...], "H": [...]}}
+# **空なら E/H タブは一切生成されず、レポートは従来と完全に同一**(追加のみ・全ガード付き)。
+_EH_TRADES: dict = {}
 # 転換トレードが0件だったときの理由(run_signals_holdout_all が設定)。
 # 空のままタブごと消えると原因が分からないので、HTMLに理由を出すために使う。
 _TENKAN_DIAG: str = ""
@@ -9907,12 +9911,16 @@ function switchTbd(id, tab) {{
         except Exception:
             return (-float(_eff_long_bt(_t) or 0), 0.0)
 
-    def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False):
+    def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
+                        src=None, nofills=None):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
           不約定は予算を消費しない。約定価格×株数で累計し、超過したらbreak。
           不約定でも枠を消費する発注額ベース(=既定)より1日の約定件数が増えやすい。
+        src / nofills: 対象トレードを差し替える(既定は lss 本体の
+          _bt30_entry_sorted / all_nofills)。E/H タブが**同じ予算規則**で
+          回すために使う。渡さなければ従来と完全に同じ挙動。
         multi_lot=True: ループ充填モード。
           BT降順に100株ずつ1周目を配置後、予算残があれば先頭から再度100株ずつ追加。
           400万円に限りなく近づくまでループ。出力は株数n×100の合成トレード。
@@ -9969,8 +9977,10 @@ function switchTbd(id, tab) {{
             _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
             return _out
 
+        _SRC_T = _bt30_entry_sorted if src is None else src
+        _SRC_NF = all_nofills if nofills is None else nofills
         _by_day_bud: dict = _dd(list)
-        for _t in _bt30_entry_sorted:
+        for _t in _SRC_T:
             if _eff_long_bt(_t) < _min_bt:
                 continue
             if strat_set and _t.get("strategy", "").upper() not in strat_set:
@@ -9981,9 +9991,9 @@ function switchTbd(id, tab) {{
             # ただし同一銘柄同日に約定注文があれば二重発注しない(1銘柄1注文/日)。
             _fill_sym_day = {(_t.get("symbol"),
                               str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
-                             for _t in _bt30_entry_sorted
+                             for _t in _SRC_T
                              if not strat_set or _t.get("strategy", "").upper() in strat_set}
-            for _t in all_nofills:
+            for _t in _SRC_NF:
                 if _eff_long_bt(_t) < _min_bt:
                     continue
                 if strat_set and _t.get("strategy", "").upper() not in strat_set:
@@ -10077,6 +10087,30 @@ function switchTbd(id, tab) {{
     _budget_entry_sorted_short = [t for t in _budget_entry_sorted if t.get("strategy") != "転換"]
     _budget_entry_by_date_short, _sorted_budget_entry_dates_short = _build_entry_grid(_budget_entry_sorted_short, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
+
+    # ── E/H(エントリー方式の比較) タブ ─────────────────────────────
+    #   _EH_TRADES が空なら**何も作らない**(従来と完全に同一)。
+    #   400万円タブと**同じ _run_budget_sim / _build_entry_grid** を通すので、
+    #   月テーブル・日チップ・明細の体裁が他タブと完全に一致する。
+    _eh_sorted: dict = {}
+    _eh_grid: dict = {}
+    if _LSS_ORDER_MODE and _EH_TRADES:
+        _EH_NF = _EH_TRADES.get("約定せず") or {}
+        for _ehk, _ehpfx in (("E", "he"), ("H", "hh")):
+            _src = _EH_TRADES.get(_ehk) or []
+            if not _src:
+                continue
+            try:
+                _ss = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), src=_src,
+                                      nofills=(_EH_NF.get(_ehk) or []))
+                _eh_sorted[_ehk] = _ss
+                _eh_grid[_ehk] = _build_entry_grid(_ss, _ehpfx)
+                print(f"[E/H] {_ehk}: 予算内 {len(_ss)}件 / 母集団 {len(_src)}件",
+                      flush=True)
+            except Exception as _ehe:
+                print(f"[E/H] {_ehk} の予算シミュ失敗(タブは出しません): {_ehe}",
+                      flush=True)
+
     # BT70以上のみ投資版予算シミュ（高品質集中）。
     _budget60_entry_sorted = _run_budget_sim(60) if _LSS_ORDER_MODE else []
     _budget60_entry_sorted_short = [t for t in _budget60_entry_sorted if t.get("strategy") != "転換"]
@@ -12772,6 +12806,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
+    for _ehk in ("E", "H"):
+        if _eh_grid.get(_ehk):
+            _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
 
     # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
@@ -12794,6 +12831,39 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
             + _month_summary_html(_budget_entry_sorted_short)
             + _month_accordion_html(_budget_entry_by_date_short, _sorted_budget_entry_dates_short, _dseq, "q")
+            + '</div>')
+
+    # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
+    _eh_btn = ""
+    _eh_pane = ""
+    _EH_LBL = {"E": ("E 寄成", "#a78bfa", "#c4b5fd",
+                     "翌朝9:00の<b>寄成売り</b>(板寄せでほぼ必ず約定)"),
+               "H": ("H 前日終値の指値", "#f0abfc", "#f5d0fe",
+                     "<b>前日終値の指値売り</b>(上がって到達したら約定。"
+                     "寄りが既に上なら板寄せ。届かなければ建てない)")}
+    for _ehk in ("E", "H"):
+        _g = _eh_grid.get(_ehk)
+        if not _g:
+            continue
+        _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
+        _ss = _eh_sorted.get(_ehk) or []
+        _eh_btn += (
+            f'<button class="detail-tab-btn" '
+            f'onclick="switchDetailTab({_dseq},\'eh{_ehk}\')" '
+            f'style="border-color:{_bc}">🔁 {_lbl} '
+            f'<span style="font-size:0.72rem;color:{_tc}">({len(_ss)}件)</span></button>')
+        _eh_pane += (
+            f'<div id="detail_{_dseq}_eh{_ehk}" class="detail-tab-pane">'
+            f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
+            f'🔁 <b>エントリー方式 {_ehk}</b>: {_desc}。'
+            f'シグナル・銘柄選定・発注順・決済(損切/利確/引け成行)は'
+            f'<b>現行とまったく同一</b>で、違うのは<b>注文の出し方だけ</b>。'
+            f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
+            f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
+            f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。'
+            f'<b>現行との比較は同じ条件のその左のタブと見比べること。</b></p>'
+            + _month_summary_html(_ss)
+            + _month_accordion_html(_g[0], _g[1], _dseq, "he" if _ehk == "E" else "hh")
             + '</div>')
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
@@ -13452,6 +13522,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   {_bt40liq_btn}
   {_bt70liq_btn}
   {_tenkan_tab_btn}
+  {_eh_btn}
 </div>
 <div id="detail_{_dseq}_all" class="detail-tab-pane active">
 {'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;border-left:3px solid #60a5fa;padding-left:8px">🔄 転換トレード(lss未約定→ロング転換): <b>' + str(len(_tenkan_in_sorted)) + '件</b> 含む（直近' + str(_DETAIL_ROW_CAP) + '件上限の外でも追加表示）</p>' if _tenkan_in_sorted else ''}
@@ -13490,6 +13561,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_bt40liq_pane}
 {_bt70liq_pane}
 {_tenkan_tab_pane}
+{_eh_pane}
 {_bt50liq_pane}
 {_fill_liq_pane}
 {_mlot_liq_pane}
