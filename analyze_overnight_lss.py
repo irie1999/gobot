@@ -134,6 +134,12 @@ if a.exclude_months.strip():
 # lss が実際に約定したか(=トリガーに届いたか)。E の内訳を割るのに使う。
 _fill_any = (d.groupby(["symbol", "entry_date"])["filled"].max()
              if "filled" in d.columns else None)
+# lss の実際の約定値 = min(トリガー, 始値)(§18.8)。E との建値差を出すのに使う。
+_lss_ep = None
+if "filled" in d.columns and "entry_p" in d.columns:
+    _f1 = d[d["filled"] == 1]
+    if len(_f1):
+        _lss_ep = _f1.groupby(["symbol", "entry_date"])["entry_p"].max()
 u = d.drop_duplicates(subset=["symbol", "entry_date"])[
     ["symbol", "entry_date", "oos_month"]].copy()
 print(f"[入力] {len(files)}ファイル / シグナル {len(d):,}件 "
@@ -244,6 +250,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "始値差bp": None,
         "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
         "bar0": "",
+        "lss建値": (float(_lss_ep.get((sym, ed), 0) or 0)
+                    if _lss_ep is not None else 0.0),
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -452,6 +460,39 @@ if "始値差bp" in r.columns and r["始値差bp"].notna().any():
               f"計上している可能性がある。F を正とすること。**")
     else:
         print(f"  → ズレは無視できる。E と F の差も小さいはず。")
+
+# ── なぜ E は現行より良いのか: 建値の差 と 持ち時間の差 に分ける ───────
+if not a.no_oco and "lss建値" in r.columns:
+    g = r[(r["lss建値"] > 0) & r["E_翌寄り+OCO"].notna()]
+    if len(g):
+        # ① 建値の差。現行の約定は min(トリガー, 始値) なので、E(始値)は必ず同じか高い。
+        #    ショートは高く売るほど有利なので、この差は E の純粋な取り分。
+        _pdiff = (g["_o1"] - g["lss建値"])
+        _pyen = _pdiff * a.qty
+        _pbp = (_pdiff / g["lss建値"] * 10_000)
+        print(f"\n■ なぜ E は現行より良いのか ({len(g):,}件 = 両方が建てた取引)")
+        print(f"  ① 建値の差 (E の始値 − 現行の約定値)")
+        print(f"     平均 {_pdiff.mean():+.1f}円 = {_pbp.mean():+.1f}bp"
+              f"  → **{_pyen.mean():+,.0f}円/件**")
+        print(f"     E のほうが高く売れた割合 {(_pdiff > 0).mean()*100:.1f}%"
+              f" / 同値 {(_pdiff.abs() < 0.01).mean()*100:.1f}%")
+        # ② 残り = 持ち時間の差(9:00から持てる) + 決済経路の違い
+        _eg = g["E_翌寄り+OCO"].mean()
+        _cur_g = _cur.set_index(["symbol", "entry_date"])["pnl"] \
+            if not _cur.empty else None
+        _cm = g.apply(lambda x: float(_cur_g.get((x["symbol"], x["date"]), 0))
+                      if _cur_g is not None else 0.0, axis=1)
+        print(f"  ② 全体の差")
+        print(f"     E {_eg:+,.0f}円/件  −  現行 {_cm.mean():+,.0f}円/件"
+              f"  = **{_eg - _cm.mean():+,.0f}円/件**")
+        print(f"  ③ 内訳")
+        print(f"     建値の差で説明できる  {_pyen.mean():+,.0f}円/件"
+              f"  ({_pyen.mean() / max(_eg - _cm.mean(), 1e-9) * 100:.0f}%)")
+        print(f"     残り(=9:00から持てる持ち時間の差) "
+              f"{_eg - _cm.mean() - _pyen.mean():+,.0f}円/件")
+        print(f"  → 現行はトリガーに触れて初めて建玉が生まれるので、遅い約定ほど")
+        print(f"     利確1.0ATRまでの残り時間が短い(§18.26: 〜09:05の約定 +1,517円/件 vs")
+        print(f"     11:01〜 +505円/件)。E は9:00から日中ドリフトを丸ごと使える。")
 
 # ── 対照実験: シグナルが出ていない日に同じ OCO を当てる ──────────────
 # 「利確・損切を置けば何でも良く見えるのでは」への答え。損切0.1ATR/利確1.0ATR は
