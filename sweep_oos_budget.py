@@ -11,8 +11,10 @@ r"""sweep_oos_budget.py — 予算(建てられる件数)のスイープを、�
   ② 限界トレードの 円/件 … 予算を上げて **新たに入った取引だけ** を取り出す。
                             合計ではなく、この限界の質が投資判断そのもの
   ③ 限界トレードの bp     … このシムは slip=0(18.21)。流動性降順で埋めるので
-                            **増えたぶんは必ず薄い側**。限界の 円/件 を建値で
-                            割って往復 bp に直し、現実のスプレッドと比べる
+                            **増えたぶんは必ず薄い側**。限界の 円/件 を建玉で
+                            割って bp に直し、**東証の呼値**(制度上の最小刻み)と
+                            比べる。想定スプレッドではなく制度値を基準にするのは、
+                            推測値で結論を動かさないため
 
 さらに **証拠金のピーク**(同時保有の最大)も出す。予算を上げるとは口座に
 その額を置くことなので、月平均の増加だけ見て決めてはいけない。
@@ -21,7 +23,7 @@ r"""sweep_oos_budget.py — 予算(建てられる件数)のスイープを、�
 ------
   python sweep_oos_budget.py --raw "oos_raw_fold*.csv"
   python sweep_oos_budget.py --raw "oos_raw_fold*.csv" --budgets 400,600,800,1200
-  python sweep_oos_budget.py --raw "oos_raw_fold*.csv" --bt-min 30 --spread-bp 30
+  python sweep_oos_budget.py --raw "oos_raw_fold*.csv" --bt-min 30 --liq-floors 1,3,5,10
 
 ⚠ 発注順・BT下限・転換の扱いは `sim_oos_budget` と同一の関数を使う(乖離防止)。
    シムタイプは実運用に最も近い **通常予算**(不約定も枠を消費)のみ。
@@ -40,6 +42,17 @@ except Exception as e:  # pragma: no cover
     sys.exit(f"[error] sim_oos_budget を import できません: {e}")
 
 
+def _tick(price: float) -> float:
+    """東証の呼値の単位(通常銘柄)。TOPIX100 の特例は無視(こちらのほうが保守的)。"""
+    if price <= 3_000:
+        return 1.0
+    if price <= 5_000:
+        return 5.0
+    if price <= 30_000:
+        return 10.0
+    return 50.0
+
+
 def _liq(t) -> float:
     """発注順と同じ経路で流動性を引く(古い生CSVには liquidity 列が無い)。"""
     v = t.get("liquidity")
@@ -52,8 +65,8 @@ ap.add_argument("--raw", required=True, help="生トレードCSV(グロブ可)")
 ap.add_argument("--budgets", default="400,600,800,1200,1600",
                 help="万円。カンマ区切り")
 ap.add_argument("--bt-min", type=float, default=30.0)
-ap.add_argument("--spread-bp", type=float, default=30.0,
-                help="薄い銘柄の往復スプレッド想定(bp)。限界が これを下回れば棄却")
+ap.add_argument("--spread-bp", type=float, default=0.0,
+                help="往復スプレッドの想定(bp)。既定0=使わない(判定は東証の呼値で行う)")
 ap.add_argument("--liq-floors", default="",
                 help="選定に流動性の足切りを入れた場合(億円, カンマ区切り)。"
                      "例 1,3,5,10。指定すると --budgets の先頭1つで比較する")
@@ -154,18 +167,28 @@ for i in range(1, len(budgets)):
     lq = liq[len(liq) // 2] / 1e8
     print(f"  {f'{lo_b:,.0f}→{hi_b:,.0f}万':>14}{len(marg):>7,}{wr:>6.1f}%"
           f"{pnl:>+13,.0f}{per:>+9,.0f}{ep:>10,.0f}円{bp:>8.1f}{lq:>10,.0f}億")
-    _verdicts.append((lo_b, hi_b, per, bp))
+    _verdicts.append((lo_b, hi_b, per, bp, ep))
 
-print(f"\n■ 判定 (想定スプレッド 往復 {a.spread_bp:.0f}bp)")
-for lo_b, hi_b, per, bp in _verdicts:
+print(f"\n■ 判定")
+print(f"  基準は**東証の呼値**から出す(想定値ではなく制度上の最小値)。"
+      f"往復で板を1回ずつ叩くと 2ティック、")
+print(f"  常に不利側で約定すると 4ティック。限界の bp がこれを下回るなら、"
+      f"バックテスト上の増分は板の刻みに埋もれる。")
+for lo_b, hi_b, per, bp, ep in _verdicts:
+    tk = _tick(ep) / max(ep, 1) * 10_000          # 1ティック = 何bp
     if per <= 0:
         v = "⛔ 限界がマイナス。この増額は損"
-    elif bp < a.spread_bp:
-        v = f"⛔ {bp:.1f}bp < {a.spread_bp:.0f}bp。**スプレッドで消える**"
-    elif bp < a.spread_bp * 2:
-        v = f"△ {bp:.1f}bp。余裕が2倍未満。実測(.\\fills)で確かめるまで動かない"
+    elif bp < tk * 2:
+        v = f"⛔ {bp:.1f}bp < 2ティック({tk*2:.1f}bp)。**板の刻みに埋もれる**"
+    elif bp < tk * 4:
+        v = (f"△ {bp:.1f}bp。2ティック({tk*2:.1f}bp)は超えるが "
+             f"4ティック({tk*4:.1f}bp)未満。実測で確かめてから")
     else:
-        v = f"✅ {bp:.1f}bp。スプレッド想定の{bp/a.spread_bp:.1f}倍の余裕"
+        v = (f"✅ {bp:.1f}bp。4ティック({tk*4:.1f}bp)の"
+             f"{bp/(tk*4):.1f}倍。板の刻みでは説明できない")
+    if a.spread_bp > 0:
+        v += f"  [--spread-bp {a.spread_bp:.0f} なら " \
+             + ("可" if bp >= a.spread_bp else "不可") + "]"
     print(f"  {lo_b:,.0f}→{hi_b:,.0f}万  {v}")
 
 # ── 選定に流動性の足切りを入れた場合 ─────────────────────────────
