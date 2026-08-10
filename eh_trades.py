@@ -67,7 +67,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
       失敗時は {}。
     """
     try:
-        from backtest_limit_entry import fetch as _fetch
+        from backtest_limit_entry import (fetch as _fetch, round_to_tick as _r2t,
+                                          tick_size as _tsz)
         from daytrade_data import load_intraday as _li, split_by_day as _sbd
         from intraday_integrity import day_scale_ok as _ig_ok
         from sameday5m_firsttouch import short_exit_5m as _x5
@@ -91,6 +92,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #    その差が『エントリー方式の効果』に化ける(2026-08-10 に発覚)。
     #    既定は畳まない=現行と同じ。LSS_EH_DEDUPE=1 で旧挙動(畳む)。
     _dedupe = str(os.environ.get("LSS_EH_DEDUPE", "0")).strip() in ("1", "true", "True", "yes")
+    # H の指値位置(前日終値からのティック数)。既定0=前日終値ちょうど。
+    # +1 なら1ティック上 = より高く売れるが約定率が落ちる。掃くのは sweep_h_limit.py。
+    try:
+        _h_ticks = int(os.environ.get("LSS_H_LIMIT_TICKS", "0") or 0)
+    except Exception:
+        _h_ticks = 0
 
     base: dict = {}
     rows: dict = {}      # (銘柄,日) -> [元トレード,...] 出力はこの数だけ作る
@@ -121,6 +128,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     _nrow = sum(len(v) for v in rows.values())
     log(f"[E/H] 重複: {'畳む(LSS_EH_DEDUPE=1)' if _dedupe else '畳まない=現行タブと同じ'} "
         f"→ 出力 {_nrow:,}件 / {len(base):,}銘柄日")
+    if _h_ticks:
+        log(f"[E/H] ⚠ H の指値を前日終値から {_h_ticks:+d}ティック ずらしています "
+            f"(LSS_H_LIMIT_TICKS)。既定0と比較するときは条件を揃えること")
     log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します "
         f"(sm={sm} tm={tm} 損切り遅延={stop_delay_bars}本 "
         f"ガード±{gap_guard * 100:.0f}% {qty}株 / **決済条件は現行と同一**)")
@@ -255,12 +265,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 continue
 
         # ── E: 寄成。寄りが −gap_guard を割るギャップダウンは約定不可 ──
-        # ── H: 前日終値の指値。寄りが既に上なら板寄せ(=始値)で約定 ────
+        # ── H: 指値。既定は前日終値。LSS_H_LIMIT_TICKS で上下にずらせる ──
+        #      上げる = より高く売れるが約定率が落ちる / 下げる = 逆。
+        #      H 固有の唯一のパラメータで、掃くなら sweep_h_limit.py。
+        _hl = float(_r2t(pc + _h_ticks * _tsz(pc))) if _h_ticks else pc
         for key, ep, ok in (
                 ("E", o1, not (gap_guard > 0 and o1 < pc * (1 - gap_guard))),
-                ("H", (o1 if o1 >= pc else pc),
-                 not (gap_guard > 0 and o1 > pc * (1 + gap_guard)))):
-            order_p = pc if key == "H" else o1
+                ("H", (o1 if o1 >= _hl else _hl),
+                 not (gap_guard > 0 and o1 > _hl * (1 + gap_guard)))):
+            order_p = _hl if key == "H" else o1
             if not ok or ep <= 0:
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
