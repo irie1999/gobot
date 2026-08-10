@@ -89,6 +89,10 @@ def main():
                     help="訓練に使う最初の基準月 (例: --start-from 2025-09)")
     ap.add_argument("--fold-from", type=str, default="",
                     help="このOOS月以降のフォールドだけ実行 (例: 2026-03)")
+    ap.add_argument("--include-current", action="store_true",
+                    help="**当月**もフォールドに含める(既定は除外)。月が終わっていないので"
+                         "営業日数が揃わず、月次の平均・検定には使えない。"
+                         "レポートで当月の日別を見たいときだけ使う")
     ap.add_argument("--fold-to", type=str, default="",
                     help="このOOS月以前のフォールドだけ実行 (例: 2026-06)")
     args = ap.parse_args()
@@ -206,9 +210,14 @@ def main():
         train_end_ym = dated[i][1]
         oos_ym = next_month(train_end_ym)
 
-        if oos_ym >= today_ym:
-            print(f"\n[fold {i+1}] OOS={oos_ym} は今月以降のためスキップ")
+        if oos_ym > today_ym or (oos_ym == today_ym and not args.include_current):
+            _why = ("今月以降" if oos_ym > today_ym
+                    else "今月(未完了。--include-current で含める)")
+            print(f"\n[fold {i+1}] OOS={oos_ym} は{_why}のためスキップ")
             continue
+        if oos_ym == today_ym:
+            print(f"\n[fold {i+1}] OOS={oos_ym} は**今月(未完了)**。"
+                  f"営業日が揃っていないので月次の集計には使わないこと")
         if args.fold_from and oos_ym < args.fold_from:
             print(f"[fold {i+1}] OOS={oos_ym} < --fold-from={args.fold_from} スキップ")
             continue
