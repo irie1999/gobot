@@ -2937,10 +2937,22 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 # 代表は BT(rec_score)最大の行に差し替え(一致情報は保持)
                 if (_s.get("rec_score") or 0) > (_r.get("rec_score") or 0):
                     _r = dict(_s); _r["_agree_strats"] = _sset; _dd[_k] = _r
-        signals = sorted(_dd.values(), key=lambda x: -(x.get("rec_score") or 0))
+        # ⛔ ここで BT降順に並べ直していたため、:2544 の発注順(既定=流動性降順)が
+        #    **毎回 上書きされていた**。18.21 で発注順を流動性順に統一したつもりが、
+        #    lss の発注リストだけ BT降順のまま出続けていた(2026-08-10 発覚。
+        #    レポートの売買代金列が 1億/1億/38億/11億/1億 と無秩序、BTは 84/81/76/71/71
+        #    ときれいな降順、という形で見つかる)。デデュープは1銘柄1行にするための
+        #    処理であって、並び順を決める場所ではない。必ず lss_order_rank を通す。
+        try:
+            import lss_order_rank as _lor_dd
+            signals = sorted(_dd.values(),
+                             key=lambda x: _lor_dd.sort_key(x.get("rec_score"),
+                                                            x.get("liquidity")))
+        except Exception:
+            signals = sorted(_dd.values(), key=lambda x: -(x.get("rec_score") or 0))
 
     rows = ""
-    _cum_cap = 0   # 予算表示用: BT降順の累計必要額(この行まで全部発注したら合計いくら)
+    _cum_cap = 0   # 予算表示用: 発注順の累計必要額(この行まで全部発注したら合計いくら)
     for i, s in enumerate(signals, 1):
         col      = col_map.get(s["rank"], "#94a3b8")
         stop_pct = (s["order_p"] - s["stop_p"])  / s["order_p"] * 100 if s["order_p"] else 0
@@ -3272,11 +3284,22 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
             f'当時の並びの正本は <code>python show_frozen_signals.py --date {_td}</code>、'
             '実発注の正本は <code>orders_&lt;日付&gt;.csv</code>（<code>.\\fills</code>）です。</div>')
 
+    # 見出しは実際の並び順に合わせる(表記と実態がズレると誤解のもと。18.21 と同じ轍)。
+    try:
+        import lss_order_rank as _lor_h
+        _sig_ord_lbl = ("BTスコア降順" if _lor_h.mode() == "bt"
+                        else "流動性(売買代金)降順")
+        _sig_ord_note = ("BTスコアが高い順に並んでいます。"
+                         if _lor_h.mode() == "bt" else
+                         "売買代金(直近120日平均)の大きい順に並んでいます"
+                         "(同値はBT降順)。")
+    except Exception:
+        _sig_ord_lbl, _sig_ord_note = "BTスコア降順", "BTスコアが高い順に並んでいます。"
     return score_section + _order_js + f"""
-<h2>{sig_label} のシグナル一覧 — BTスコア降順 {min_note}</h2>
+<h2>{sig_label} のシグナル一覧 — {_sig_ord_lbl} {min_note}</h2>
 {_asof_warn}{_analysis_warn}
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
-  全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。BTスコアが高い順に並んでいます。
+  全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。{_sig_ord_note}
 </p>
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">
   ※ 逆指値注文（青）= ロング:翌日高値がこの価格以上で発動 / ショート:翌日安値がこの価格以下で発動<br>
