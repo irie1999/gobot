@@ -12884,6 +12884,182 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + _month_accordion_html(_budget_entry_by_date_short, _sorted_budget_entry_dates_short, _dseq, "q")
             + '</div>')
 
+    def _eh_compare_html():
+        """現行 / E / H を月ごとに並べ、対応のある検定まで **HTML の中に**出す。
+
+        なぜ HTML に入れるか: 外部ツール(compare_eh_months.py)と画面を突き合わせる
+        運用にすると、『どのファイル・どの実行を見ているか』が毎回わからなくなる
+        (2026-08-10 に実際に混乱した)。**同じ _run_budget_sim の出力から、その場で
+        作る**ので、定義上ズレようがない。
+        """
+        import statistics as _sti
+        _sets = [("現行", _budget_entry_sorted_short)]
+        for _k in ("E", "H"):
+            _v = _eh_sorted.get(_k)
+            if _v:
+                _sets.append((_k, _v))
+        if len(_sets) < 2:
+            return ""
+
+        def _by_month(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k2) < 7:
+                    continue
+                _e2 = _m.setdefault(_k2, {"n": 0, "w": 0, "p": 0.0})
+                _e2["n"] += 1
+                _pv = float(_t.get("pnl", 0) or 0)
+                _e2["p"] += _pv
+                if _pv > 0:
+                    _e2["w"] += 1
+            return _m
+
+        _agg = {k: _by_month(v) for k, v in _sets}
+        _months = sorted({m for d in _agg.values() for m in d})
+        if len(_months) < 3:
+            return ""
+        # 当月は営業日が揃わないので検定から外す(表には出すが薄字)。
+        _cur = _TODAY.strftime("%Y-%m")
+        _use = [m for m in _months if m != _cur]
+
+        _hd = "".join(f'<th colspan="3" style="text-align:center;color:#cbd5e1;'
+                      f'font-size:0.78rem;padding:3px 8px;border-left:1px solid #334155">'
+                      f'{k}</th>' for k, _ in _sets)
+        _sub = "".join('<th style="color:#64748b;font-size:0.72rem;padding:2px 6px;'
+                       'border-left:1px solid #334155">件</th>'
+                       '<th style="color:#64748b;font-size:0.72rem;padding:2px 6px">勝率</th>'
+                       '<th style="color:#64748b;font-size:0.72rem;padding:2px 6px">損益</th>'
+                       for _ in _sets)
+        _rows = ""
+        for m in sorted(_months, reverse=True):
+            _dim = ' style="opacity:.45"' if m == _cur else ""
+            _tds = ""
+            for k, _ in _sets:
+                d = _agg[k].get(m)
+                if not d:
+                    _tds += ('<td style="border-left:1px solid #334155;color:#475569;'
+                             'text-align:center" colspan="3">—</td>')
+                    continue
+                _c = "#4ade80" if d["p"] >= 0 else "#f87171"
+                _tds += (f'<td style="text-align:right;color:#94a3b8;padding:2px 6px;'
+                         f'border-left:1px solid #334155">{d["n"]}</td>'
+                         f'<td style="text-align:right;color:#94a3b8;padding:2px 6px">'
+                         f'{d["w"] / d["n"] * 100:.0f}%</td>'
+                         f'<td style="text-align:right;color:{_c};font-weight:700;'
+                         f'padding:2px 6px">{d["p"]:+,.0f}</td>')
+            _rows += (f'<tr{_dim}><td style="color:#e2e8f0;font-weight:700;padding:2px 8px;'
+                      f'white-space:nowrap">{m}'
+                      + ('<span style="color:#f59e0b;font-size:0.68rem"> 当月</span>'
+                         if m == _cur else "") + f'</td>{_tds}</tr>')
+        # 合計行(当月を除く)
+        _tds = ""
+        _stat = {}
+        for k, _ in _sets:
+            _vals = [_agg[k][m]["p"] for m in _use if m in _agg[k]]
+            n = sum(_agg[k][m]["n"] for m in _use if m in _agg[k])
+            w = sum(_agg[k][m]["w"] for m in _use if m in _agg[k])
+            p = sum(_vals)
+            mu = _sti.mean(_vals) if _vals else 0.0
+            sd = _sti.stdev(_vals) if len(_vals) > 1 else 0.0
+            se = sd / (len(_vals) ** 0.5) if len(_vals) > 1 else 0.0
+            _stat[k] = (n, w, p, mu, sd, (mu / se if se > 0 else 0.0),
+                        sum(1 for v in _vals if v > 0), len(_vals))
+            _c = "#4ade80" if p >= 0 else "#f87171"
+            _tds += (f'<td style="text-align:right;color:#e2e8f0;font-weight:700;'
+                     f'padding:3px 6px;border-left:1px solid #334155">{n:,}</td>'
+                     f'<td style="text-align:right;color:#e2e8f0;padding:3px 6px">'
+                     f'{(w / n * 100 if n else 0):.0f}%</td>'
+                     f'<td style="text-align:right;color:{_c};font-weight:700;'
+                     f'padding:3px 6px">{p:+,.0f}</td>')
+        _rows += (f'<tr style="border-top:2px solid #475569">'
+                  f'<td style="color:#e2e8f0;font-weight:700;padding:3px 8px;'
+                  f'white-space:nowrap">合計<br>'
+                  f'<span style="font-size:0.68rem;color:#64748b">当月除く</span></td>'
+                  f'{_tds}</tr>')
+
+        # 水準
+        _lv = ""
+        for k, _ in _sets:
+            n, w, p, mu, sd, t, pos, nm = _stat[k]
+            _lv += (f'<tr><td style="padding:2px 8px;color:#e2e8f0;font-weight:700">{k}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{n:,}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{(p / n if n else 0):+,.0f}円</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">{mu:+,.0f}円</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{sd:,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{t:+.2f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{pos}/{nm}</td></tr>')
+
+        # 対応のある検定
+        _pr = ""
+        for x, y in (("E", "現行"), ("H", "現行"), ("H", "E")):
+            if x not in _agg or y not in _agg:
+                continue
+            ms = [m for m in _use if m in _agg[x] and m in _agg[y]]
+            ds = [_agg[x][m]["p"] - _agg[y][m]["p"] for m in ms]
+            if len(ds) < 2:
+                continue
+            mu = _sti.mean(ds)
+            sd = _sti.stdev(ds)
+            se = sd / (len(ds) ** 0.5)
+            t = mu / se if se > 0 else 0.0
+            lo, hi = mu - 1.96 * se, mu + 1.96 * se
+            _v = ("<b style='color:#4ade80'>CI全域プラス → 優れている</b>" if lo > 0 else
+                  "<b style='color:#f87171'>CI全域マイナス → 劣る</b>" if hi < 0 else
+                  "<span style='color:#94a3b8'>CIがゼロをまたぐ → <b>差を検出できていない</b></span>")
+            _pr += (f'<tr><td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
+                    f'white-space:nowrap">{x} vs {y}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">{mu:+,.0f}円</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{t:+.2f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                    f'white-space:nowrap">{lo:+,.0f} 〜 {hi:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{sum(1 for d in ds if d > 0)}/{len(ds)}</td>'
+                    f'<td style="padding:2px 8px;font-size:0.78rem">{_v}</td></tr>')
+
+        _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
+        return (
+            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
+            f'padding:12px 14px;margin:0 0 14px">'
+            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
+            f'⚖ 現行 / E / H の比較（同一プール・同一予算・同一発注順・同一決済）</div>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'3方式とも同じ <code>_run_budget_sim</code>（{_budget_man}万円 / BT{_BT_TAB_MIN}以上 / '
+            f'{_ORD_LBL} / 不約定も枠を消費）で作った同じリストを集計しています。'
+            f'<b>違うのは注文の出し方だけ</b>。当月は営業日が揃わないので合計・検定から除外。<br>'
+            f'⚠ <b>単月で判断しないこと</b>。月次σは10万円規模あるので、単月の差はノイズです。'
+            f'⚠ このシムは slip=0。E/H は損切り比率が高いぶん実運用では成行の滑りを多く払います。</p>'
+            f'<table style="border-collapse:collapse;width:auto;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">月</th>{_hd}</tr>'
+            f'<tr><th></th>{_sub}</tr></thead><tbody>{_rows}</tbody></table>'
+            f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;margin:10px 0 4px">水準（当月除く）</div>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">円/件</th>'
+            f'<th style="{_th}">月平均</th><th style="{_th}">月次σ</th>'
+            f'<th style="{_th}">t</th><th style="{_th}">プラス月</th></tr></thead>'
+            f'<tbody>{_lv}</tbody></table>'
+            f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;margin:10px 0 4px">'
+            f'対応のある検定（月ごとの差。相場全体の上下は差し引きで消える）</div>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">比較</th>'
+            f'<th style="{_th}">平均差/月</th><th style="{_th}">t</th>'
+            f'<th style="{_th}">95%CI(月)</th><th style="{_th}">勝ち月</th>'
+            f'<th style="{_th};text-align:left">判定</th></tr></thead>'
+            f'<tbody>{_pr}</tbody></table></div>')
+
+    try:
+        _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
+    except Exception as _ehce:
+        print(f"[E/H] 比較ブロック生成に失敗: {_ehce}", flush=True)
+        _EH_CMP_HTML = ""
+
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
     _eh_pane = ""
@@ -12912,7 +13088,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
             f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
             f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。'
-            f'<b>現行との比較は同じ条件のその左のタブと見比べること。</b></p>'
+            f'<b>比較は下の「⚖ 現行 / E / H」表を見ること</b>'
+            f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。</p>'
+            + _EH_CMP_HTML
             + _month_summary_html(_ss)
             + _month_accordion_html(_g[0], _g[1], _dseq, "he" if _ehk == "E" else "hh")
             + '</div>')
