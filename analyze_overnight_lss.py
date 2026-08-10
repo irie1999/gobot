@@ -93,6 +93,9 @@ ap.add_argument("--control", type=int, default=0,
                      "E の成績はエッジではなく OCO の払い出し形状の産物。"
                      "推奨: シグナル件数と同程度(例 4000)")
 ap.add_argument("--control-seed", type=int, default=42)
+ap.add_argument("--require-open-bar", action="store_true",
+                help="5分足の先頭バーが 09:00 の日だけ使う。寄り成行で入るのに"
+                     "先頭が 09:05 だと寄り直後の逆行が測られず、損切りが過小に出る")
 ap.add_argument("--out-raw", default="",
                 help="E の損益を生CSV形式(oos_raw と同じ列)で書き出す。"
                      "sim_oos_budget.py に食わせて**予算制約下**で現行と比較するため"
@@ -226,6 +229,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "D_引け+OCO": None,
         "E_翌寄り+OCO": None,
         "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
+        "bar0": "",
     }
     # ── D/E: 現行と同じ OCO で決済 ──
     if not a.no_oco:
@@ -244,9 +248,14 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
             #    entry_p に +inf を渡して ei=0 を強制し、必ず寄りから判定させる。
             #    stop_p / target_p は別引数なので、これで値は一切歪まない。
             try:
-                _bar0[str(pd.Timestamp(day5.index[0]).strftime("%H:%M"))] += 1
+                _b0 = str(pd.Timestamp(day5.index[0]).strftime("%H:%M"))
             except Exception:
-                pass
+                _b0 = "??:??"
+            _bar0[_b0] += 1
+            rec["bar0"] = _b0
+            if a.require_open_bar and _b0 != "09:00":
+                _recs.append(rec)
+                continue
             _INF = float("inf")
             _dl, _dh = float(df["l"].iloc[pos]), float(df["h"].iloc[pos])
             # 現行と同じ指値下限ガード: 寄りが前日終値×(1-guard)を下回るギャップ
@@ -401,9 +410,18 @@ if _bar0:
           f"寄り直後の値動きが測れていない)")
     for k, v in sorted(_bar0.items(), key=lambda x: -x[1])[:5]:
         print(f"    {k}  {v:,}件 ({v / _tb * 100:.1f}%)")
-    if not str(sorted(_bar0.items(), key=lambda x: -x[1])[0][0]).startswith("09:00"):
-        print(f"    ⚠ 先頭が 09:00 でない = 寄り〜先頭バーまでの区間が未測定。"
-              f"E の損切りが過小に出る。")
+    if not a.no_oco and "bar0" in r.columns:
+        print(f"\n  E を先頭バー時刻で分解 (09:00 以外は寄り直後が未測定)")
+        print(f"    {'先頭バー':<10}{'件数':>7}{'勝率':>7}{'円/件':>9}")
+        for _lab, _sel in (("09:00", r["bar0"] == "09:00"),
+                           ("09:00 以外", (r["bar0"] != "09:00") & (r["bar0"] != ""))):
+            v = r.loc[_sel, "E_翌寄り+OCO"].dropna()
+            if v.empty:
+                continue
+            print(f"    {_lab:<10}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%"
+                  f"{v.mean():>+9,.0f}")
+        print(f"    → 09:00 以外が明らかに良いなら、寄り直後の逆行を取りこぼしている。"
+              f"--require-open-bar で 09:00 のみに絞って再測定すること。")
 
 # ── 診断② lss が約定した/しなかった で E を割る ────────────────
 if "lss約定" in r.columns and (r["lss約定"] >= 0).any() and not a.no_oco:
