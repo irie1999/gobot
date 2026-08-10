@@ -88,6 +88,10 @@ _EH_TRADES: dict = {}
 # 転換トレードが0件だったときの理由(run_signals_holdout_all が設定)。
 # 空のままタブごと消えると原因が分からないので、HTMLに理由を出すために使う。
 _TENKAN_DIAG: str = ""
+# 締切(TENKAN_CUTOFF)が**実際に適用されたか**。None=未実行 / True=適用 / False=失敗。
+# ⛔ 例外を握りつぶしたまま『✅実装可能』と表示して、旧(look-ahead)の数字を
+#    実装可能な成績だと誤認しかけた(2026-08-10)。表示は必ずこのフラグに従うこと。
+_TENKAN_CUT_APPLIED = None
 _SAMEDAY_SWEEP_INVERTED = True   # ミラー(符号反転)なら True / ロング銘柄ショートなら False
 _SAMEDAY_5M_TAB = False   # mirror/lss 用: 詳細分析に「5分足TP/SL最適化」タブを出す
 
@@ -9414,6 +9418,7 @@ function switchTbd(id, tab) {{
     # ※ _tab5_pnl_html は銘柄詳細タブで銘柄数ぶん(実測69回)呼ばれる。転換タブは
     #   メイン呼び出しにしか出ないので、フィルター付き呼び出しでは生成しない
     #   (毎回5分足を読み直して .\daily が極端に重くなるため)。
+    global _TENKAN_CUT_APPLIED
     _tenkan_auto: list = []
     _tk_is_main = (cfg_filter is None and not symbol_filter and not strategy_filter)
     if _LSS_ORDER_MODE and all_nofills and _tk_is_main:
@@ -9426,17 +9431,29 @@ function switchTbd(id, tab) {{
             _tk_cut = getattr(_tks, "CUTOFF", None)
             _tk_late: list = []
             if _tk_cut is not None:
-                # 締切後に約定した lss トレード = その時刻には未約定だった注文。
-                # 転換は除く(転換自身は lss の注文ではない)。
-                _tk_late = [t for t in _bt30_entry_sorted
+                # 締切後に約定した lss 注文 = その時刻には未約定だった注文。
+                # ⛔ ここは _bt30_entry_sorted より **前** なので使えない
+                #    (2026-08-10: 使って NameError で転換生成が丸ごと落ちていた)。
+                #    発注した注文そのもの = all_trades(約定・1銘柄1ポジ後) +
+                #    _overlap_dropped(同銘柄の再エントリー。注文は出している)。
+                _tk_filled_src = list(all_trades) + list(_overlap_dropped or [])
+                _tk_late = [t for t in _tk_filled_src
                             if t.get("strategy") != "転換"
                             and t.get("reason") not in ("約定せず", "発注中")
                             and not _tks.filled_by_cutoff(t, _tk_cut)]
+                _n_et = sum(1 for t in _tk_filled_src if str(t.get("entry_time") or ""))
                 print(f"[転換] 締切 {_tks.cutoff_label()}: 終日不約定 {len(all_nofills):,}件 + "
                       f"締切後に約定 {len(_tk_late):,}件 = 母集団 "
-                      f"{len(all_nofills) + len(_tk_late):,}件", flush=True)
+                      f"{len(all_nofills) + len(_tk_late):,}件"
+                      f" (約定{len(_tk_filled_src):,}件中 約定時刻あり {_n_et:,}件)", flush=True)
                 print("   ※ 締切後に約定した注文は『その時点では未約定』なので実運用では"
                       "転換の対象になる。これを含めるのが実装可能な形(18.26)。", flush=True)
+                if not _tk_late:
+                    # 実測(18.26)では 5,208件中 約1,000件が 09:06 以降に約定する。
+                    # 0件は「entry_time が乗っていない」等の不具合を強く示唆する。
+                    print("   ⚠ **締切後に約定が0件**。entry_time が取れていない可能性。"
+                          "この状態だと母集団は旧(終日不約定のみ=look-ahead)と同じです。",
+                          flush=True)
             _tk_excl = {(str(t.get("symbol")), str(t.get("entry_d_raw") or t.get("exit_d_raw")))
                         for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"}
             if _tk_cut is not None:
@@ -9482,9 +9499,14 @@ function switchTbd(id, tab) {{
                     print(f"[転換] 実注文データのある{len(_tk_real_dates)}日は"
                           f"バックテスト由来{_before - len(_tenkan_auto)}件を置換", flush=True)
             _tenkan_auto = _tk_real + _tenkan_auto
+            if _tk_cut is not None:
+                _TENKAN_CUT_APPLIED = bool(_tk_late)
             _tks.release_cache()   # 5分足DataFrameを解放(銘柄詳細ループのメモリを空ける)
         except Exception as _tk_exc:
             print(f"[WARN] 未約定シグナルからの転換生成に失敗: {_tk_exc}", flush=True)
+            print("   ⛔ 締切は適用されていません。転換タブは旧(終日不約定=look-ahead)"
+                  "のままです。数字を実装可能な成績として扱わないこと。", flush=True)
+            _TENKAN_CUT_APPLIED = False
             _tenkan_auto = []
 
     display_trades = all_trades + _overlap_dropped + list(_EXTRA_TRADES) + _tenkan_auto
@@ -13236,7 +13258,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                if _TK_CUT_LBL != "終日(look-ahead)" else
                f'<div style="background:#2a1518;border:1px solid #f87171;border-radius:8px;'
                f'padding:10px 14px;margin:0 0 10px;font-size:0.8rem;line-height:1.75">'
-               f'<b style="color:#f87171">⛔ 締切なし＝終日不約定のみ（look-ahead）</b><br>'
+               f'<b style="color:#f87171">⛔ '
+               f'{"締切の適用に失敗（旧＝終日不約定のまま。ログの [WARN] を確認）" if _TENKAN_CUT_APPLIED is False else "締切後に約定した注文が0件（実質 旧＝終日不約定）" if _TENKAN_CUT_APPLIED is not None else "締切なし＝終日不約定のみ（look-ahead）"}'
+               f'</b><br>'
                f'<span style="color:#cbd5e1">「終日約定しなかった」が分かるのは<b>大引け</b>'
                f'ですが、買うのは 09:09 です。<b>この母集団は09:09時点では選べません。</b>'
                f'実測では実装可能な締切にすると純lss比 −436万円（18.26）。'
