@@ -242,8 +242,12 @@ for sym, dstr in sorted(pairs):
         lim = _limit_of(pc, atr, off)
         st = stat[off][split]
         st["n_order"] += 1
-        if a.gap_guard > 0 and o1 > lim * (1 + a.gap_guard):
-            continue                       # ギャップアップでガード
+        # ⛔ ガードの基準は **前日終値**。ずらした指値を基準にすると、指値を下げる
+        #    ほどガードのラインも下がり、前日終値近辺で寄った日まで弾いてしまう
+        #    (2026-08-10 実測: -20tick で約定率27% = 本来増えるはずが逆)。
+        #    ±3%ガードの目的は『異常なギャップを避ける』なので基準は pc が正しい。
+        if a.gap_guard > 0 and o1 > pc * (1 + a.gap_guard):
+            continue                       # 異常なギャップアップでガード
         ep = o1 if o1 >= lim else lim
         xp, why, _e, _x = _x5(d5, ep, ep + atr * a.sm, ep - atr * a.tm, True,
                               day_low=dl, day_high=dh, day_close=c1,

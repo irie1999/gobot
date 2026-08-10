@@ -288,7 +288,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         for key, ep, ok in (
                 ("E", o1, not (gap_guard > 0 and o1 < pc * (1 - gap_guard))),
                 ("H", (o1 if o1 >= _hl else _hl),
-                 (not (gap_guard > 0 and o1 > _hl * (1 + gap_guard))
+                 # ガードの基準は **前日終値**。ずらした指値を基準にすると
+                 # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
+                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                   # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                   and (o1 >= _hl if _h_auction_only else True)))):
             order_p = _hl if key == "H" else o1
