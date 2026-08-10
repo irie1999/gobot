@@ -10183,12 +10183,31 @@ function switchTbd(id, tab) {{
                 _fne_s = _run_budget_sim(_obt, fill_budget=True)
                 _ml_s = _run_budget_sim(_obt, multi_lot=True)
                 _mln_s = _run_budget_sim(_obt, strat_set=_STRAT_NARROW, multi_lot=True)
+                # E/H も **レポート自身の _run_budget_sim** で出す。
+                # これが無いと E/H のローリングOOSは sim_oos_budget(生CSVの再シミュ)
+                # でしか測れず、経路の違い(注文額 vs 約定額 / 予算超過時に
+                # continue(貪欲) vs break / 不約定の重複排除)が
+                # 『エントリー方式の差』に混ざる。run_oos_folds の docstring どおり
+                # **ズレたときの正解はレポート側**なので、同じ経路の値を必ず残す。
+                _eh_sims = []
+                _ehnf_o = (_EH_TRADES or {}).get("約定せず") or {}
+                for _ehk in ("E", "H"):
+                    _ehsrc = (_EH_TRADES or {}).get(_ehk) or []
+                    if not _ehsrc:
+                        continue
+                    try:
+                        _eh_sims.append(
+                            (f"通常予算_{_ehk}",
+                             _run_budget_sim(_obt, src=_ehsrc,
+                                             nofills=(_ehnf_o.get(_ehk) or []))))
+                    except Exception:
+                        pass
                 for _osim_name, _osim_trades in [
                     ("通常予算", _e_s),
                     ("約定額ベース", _fne_s),
                     ("ループ充填_全戦略", _ml_s),
                     ("ループ充填_絞り", _mln_s),
-                ]:
+                ] + _eh_sims:
                     _oby_ym: dict = {}
                     for _ot in _osim_trades:
                         if _ot.get("reason") in ("発注中", "保有中"):
