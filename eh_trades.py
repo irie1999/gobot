@@ -97,7 +97,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         return {}
 
     syms = sorted({k[0] for k in base})
-    log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します")
+    log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します "
+        f"(sm={sm} tm={tm} 損切り遅延={stop_delay_bars}本 "
+        f"ガード±{gap_guard * 100:.0f}% {qty}株 / **決済条件は現行と同一**)")
 
     # ── 日足(始値・ATR) と 5分足 ───────────────────────────────────
     def _load_d(sym):

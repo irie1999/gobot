@@ -9891,10 +9891,19 @@ function switchTbd(id, tab) {{
             not in ("0", "false", "False", "no")):
         try:
             import eh_trades as _eht
+            # ⛔ 損切り遅延は**エンジンの実効値**を読む。env の既定を "1" と
+            #    ベタ書きすると、env 未設定の環境で現行(エンジン既定0)と
+            #    食い違う(18.10.1: エンジン既定0 / daily.bat が 1 を設定)。
+            #    現行と E/H で決済条件を揃えるのが大前提(18.9 の鉄則)。
+            try:
+                import backtest_limit_entry as _bte_d
+                _eh_delay = int(getattr(_bte_d, "_LSS_STOP_DELAY_BARS", 0) or 0)
+            except Exception:
+                _eh_delay = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or 0)
             _EH_TRADES = _eht.build(
                 _bt30_entry_sorted, all_nofills,
                 sm=_LSS_SM, tm=_LSS_TM,
-                stop_delay_bars=int(os.environ.get("LSS_STOP_DELAY_BARS", "1") or 1),
+                stop_delay_bars=_eh_delay,
                 gap_guard=0.03, qty=100,
                 workers=int(os.environ.get("LSS_EH_WORKERS", "6") or 6),
             ) or {}
