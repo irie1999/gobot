@@ -391,18 +391,43 @@ if _ho is not None:
     _bt = max(OFFS, key=lambda o: stat[o]["TRAIN"]["pnl"])
     _be = max(OFFS, key=lambda o: stat[o]["TEST"]["pnl"])
     print("─" * W)
-    print(f"  TRAIN最良 {_bt:+g}{_UNIT} → TEST 円/件 "
+    # ── ① 寄指(板寄せのみ)前提での判定 ──────────────────────────
+    # 実際に採用するのは寄指(LSS_H_AUCTION_ONLY=1)なので、**ザラ場到達を含む合計で
+    # 判定すると誤誘導になる**。実測(2026-08-10): 合計では TRAIN -5 / TEST 0 と
+    # 割れるのに、板寄せだけなら -5 が両窓とも 0 を上回っていた。
+    # 寄指で捨てる部分の順位で「再現していない」と警告してはいけない。
+    _at = max(OFFS, key=lambda o: stat[o]["TRAIN"]["pnl_auction"])
+    _ae = max(OFFS, key=lambda o: stat[o]["TEST"]["pnl_auction"])
+    print(f"  【寄指(板寄せのみ) = 実際に使う形】")
+    print(f"    TRAIN最良 {_at:+g}{_UNIT} (+{stat[_at]['TRAIN']['pnl_auction']:,.0f}) / "
+          f"TEST最良 {_ae:+g}{_UNIT} (+{stat[_ae]['TEST']['pnl_auction']:,.0f})")
+    if _at == _ae:
+        print(f"    → **両窓で一致 = {_at:+g}{_UNIT} を採用してよい。**次は予算400万で確認:")
+        print(f"       $env:LSS_H_AUCTION_ONLY = \"1\"; "
+              f"$env:LSS_H_LIMIT_TICKS = \"{_at:g}\"")
+        print(f"       .\\dailyfast --no-serve --days 365   → E/H タブの「⚖」表")
+    else:
+        # 一致しなくても、片方が両窓で他方を上回るなら実質決まっている。
+        _w = [o for o in (_at, _ae)
+              if all(stat[o][s]["pnl_auction"] >= stat[p][s]["pnl_auction"]
+                     for s in ("TRAIN", "TEST") for p in (_at, _ae))]
+        if _w:
+            print(f"    → 最良は割れたが {_w[0]:+g}{_UNIT} が両窓で上回っている。")
+        else:
+            print("    → **両窓で最良が違う = 順位が再現していない**(18.28)。採用しないこと。")
+    print()
+    print(f"  【参考: 板寄せ+ザラ場到達の合計】")
+    print(f"    TRAIN最良 {_bt:+g}{_UNIT} → TEST 円/件 "
           f"{(stat[_bt]['TEST']['pnl'] / stat[_bt]['TEST']['n_fill'] if stat[_bt]['TEST']['n_fill'] else 0):+,.0f}"
           f" (TEST最良は {_be:+g}{_UNIT})")
     if _bt != _be:
-        print("  → **TRAIN と TEST で最良が違う = 順位が再現していない**(18.28)。")
-        print("     全窓で一致するオフセットだけ採用すること。--holdout-days を変えて再確認を。")
+        print("    → 合計では最良が割れている。ただし**寄指ならザラ場は捨てる**ので、")
+        print("       採否は上の①で判断すること。ザラ場込みで採用するなら 18.28 のとおり見送り。")
     else:
-        print("  → TRAIN/TEST で最良が一致。次は予算400万で確かめること:")
-        print(f"     $env:LSS_H_LIMIT_TICKS = \"{_bt:g}\"  →  .\\dailyfast  → E/H タブの H を比較")
-        if a.offset_mode != "ticks":
-            print("     ⚠ レポート側の LSS_H_LIMIT_TICKS は**ティック単位**です。"
-                  "pct/atr で出した最良は換算が要ります。")
+        print("    → 合計でも TRAIN/TEST の最良が一致。")
+    if a.offset_mode != "ticks":
+        print("  ⚠ レポート側の LSS_H_LIMIT_TICKS は**ティック単位**です。"
+              "pct/atr で出した最良は換算が要ります。")
 
 print("─" * W)
 print("■ 読み方")
