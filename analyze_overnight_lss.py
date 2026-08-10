@@ -252,6 +252,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "bar0": "",
         "lss建値": (float(_lss_ep.get((sym, ed), 0) or 0)
                     if _lss_ep is not None else 0.0),
+        "E0_9時から建値は現行": None,
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -323,6 +324,18 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     continue
                 rec[_tag] = ((float(xp) - _ep) if _long else (_ep - float(xp))) * q
                 _reasons[(_tag[0], why)] += 1
+            # E0: **09:00から持つ**が、建値もバリアも**現行の約定値**から取る。
+            #  現行 → E0  = 露出時刻だけの差(建値は同じ)
+            #  E0   → E   = 建値だけの差(露出は同じ)
+            #  この2段なら加算できる。建値とバリアが一緒に動く効果を混ぜない。
+            _le = rec.get("lss建値") or 0.0
+            if _le > 0:
+                xp0, why0, _, _ = _x5(
+                    day5, _INF, _le + atr * a.sm, _le - atr * a.tm, False,
+                    day_low=_dl, day_high=_dh, day_close=c1,
+                    stop_delay_bars=a.stop_delay_bars)
+                if xp0 is not None and why0 not in ("no_5m", "no_entry"):
+                    rec["E0_9時から建値は現行"] = (_le - float(xp0)) * q
     _recs.append(rec)
 if _no5:
     print(f"[warn] 5分足/ATRが揃わず D を計算できず {_no5:,}件")
@@ -482,17 +495,39 @@ if not a.no_oco and "lss建値" in r.columns:
             if not _cur.empty else None
         _cm = g.apply(lambda x: float(_cur_g.get((x["symbol"], x["date"]), 0))
                       if _cur_g is not None else 0.0, axis=1)
-        print(f"  ② 全体の差")
-        print(f"     E {_eg:+,.0f}円/件  −  現行 {_cm.mean():+,.0f}円/件"
-              f"  = **{_eg - _cm.mean():+,.0f}円/件**")
-        print(f"  ③ 内訳")
-        print(f"     建値の差で説明できる  {_pyen.mean():+,.0f}円/件"
-              f"  ({_pyen.mean() / max(_eg - _cm.mean(), 1e-9) * 100:.0f}%)")
-        print(f"     残り(=9:00から持てる持ち時間の差) "
-              f"{_eg - _cm.mean() - _pyen.mean():+,.0f}円/件")
-        print(f"  → 現行はトリガーに触れて初めて建玉が生まれるので、遅い約定ほど")
-        print(f"     利確1.0ATRまでの残り時間が短い(§18.26: 〜09:05の約定 +1,517円/件 vs")
-        print(f"     11:01〜 +505円/件)。E は9:00から日中ドリフトを丸ごと使える。")
+        print(f"     ⚠ この 円/件 は**そのぶん儲かる額ではない**。建値が変わると")
+        print(f"        損切り・利確も同じだけ動くので、利確で終わればどちらも +1.0ATR")
+        print(f"        ちょうどで差は消える。建値の差は『どの決済が発火するか』を")
+        print(f"        変える形で効く。加算できないので下の2段で分ける。")
+        print(f"  ② 2段の分解 (加算できる形)")
+        _e0 = g["E0_9時から建値は現行"].dropna()
+        if len(_e0):
+            g0 = g.loc[_e0.index]
+            _cm0 = g0.apply(lambda x: float(_cur_g.get((x["symbol"], x["date"]), 0))
+                            if _cur_g is not None else 0.0, axis=1)
+            _eg0 = g0["E_翌寄り+OCO"].mean()
+            print(f"     現行            {_cm0.mean():>+9,.0f}円/件")
+            print(f"     ↓ 露出時刻だけ変える(9:00から持つ。建値・バリアは現行のまま)")
+            print(f"     E0              {_e0.mean():>+9,.0f}円/件"
+                  f"   差 {_e0.mean() - _cm0.mean():>+9,.0f}")
+            print(f"     ↓ 建値だけ変える(始値で入る。露出は同じ)")
+            print(f"     E               {_eg0:>+9,.0f}円/件"
+                  f"   差 {_eg0 - _e0.mean():>+9,.0f}")
+            print(f"     合計                        "
+                  f"{_eg0 - _cm0.mean():>+9,.0f}円/件")
+            _d1, _d2 = _e0.mean() - _cm0.mean(), _eg0 - _e0.mean()
+            print(f"  ③ どちらが効いているか")
+            if _d1 > 0 and _d2 > 0:
+                print(f"     両方プラス。露出 {_d1:+,.0f} / 建値 {_d2:+,.0f}")
+            elif _d1 <= 0 < _d2:
+                print(f"     **建値だけが効いている**({_d2:+,.0f})。9:00から持つこと自体は")
+                print(f"     {_d1:+,.0f} で**不利**。朝の戻りで刈られるぶん、現行が待つのは")
+                print(f"     理にかなっている。E の優位はまるごと『高く売れる』ことから来る。")
+            elif _d2 <= 0 < _d1:
+                print(f"     **露出時刻だけが効いている**({_d1:+,.0f})。建値の差は"
+                      f"{_d2:+,.0f}。")
+            else:
+                print(f"     両方マイナス。E が勝つ理由が説明できない = 要精査。")
 
 # ── 対照実験: シグナルが出ていない日に同じ OCO を当てる ──────────────
 # 「利確・損切を置けば何でも良く見えるのでは」への答え。損切0.1ATR/利確1.0ATR は
