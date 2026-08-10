@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""kabu の執行条件 (FrontOrderType) の番号を **実データから** 確定する。照会のみ。
+"""kabu の執行条件 (FrontOrderType) を実データで確認する。照会のみ。
 
-なぜ必要か
-----------
-H案(前日終値の指値・寄付のみ有効 = 寄指)を実発注するには FrontOrderType の
-番号が要る。kabu_api.py が持っているのは以下の5つだけで、**寄指は未定義**:
+⚠ 2026-08-10: **番号は仕様表で確定済み**(kabuステーションAPI リファレンス v1.5
+   「注文発注（現物・信用）」)。寄指(前場)=21。kabu_api.FOT_LIMIT_MOO に設定済み。
 
-    10=成行 / 13=寄成 / 16=引成 / 20=指値 / 30=逆指値
+    10=成行  13=寄成(前場) 14=寄成(後場) 15=引成(前場) 16=引成(後場) 17=IOC成行
+    20=指値  21=寄指(前場) 22=寄指(後場) 23=引指(前場) 24=引指(後場)
+    25=不成(前場) 26=不成(後場) 27=IOC指値 / 30=逆指値
 
-CLAUDE.md の方針どおり **番号は推測しない**。ここで実際の kabu から取る。
+このツールは以下の用途で残している:
+  ・実際に出した注文がどの執行条件で通ったかを **実データで** 突き合わせる
+    (寄指の発注が本当に 21 で受理され、板寄せで約定しているかの確認)
+  ・kabu 側の仕様変更・kabuステーションのバージョン差を検知する
 
 やること (上から順に試す。どれか1つ当たれば確定)
 -------------------------------------------------
@@ -38,17 +41,29 @@ import sys
 
 import requests
 
-from kabu_api import (KabuClient, DEMO_URL, PROD_URL,
-                      FOT_MARKET, FOT_MOO, FOT_MOC, FOT_LIMIT, FOT_STOP)
+from kabu_api import KabuClient, DEMO_URL, PROD_URL, FOT_LIMIT_MOO
 
-# kabu_api.py が現に使っている番号。ここに無いものが「未確定」。
+# kabuステーションAPI リファレンス v1.5「注文発注（現物・信用）」の全一覧。
 KNOWN = {
-    FOT_MARKET: "成行",
-    FOT_MOO: "寄成",
-    FOT_MOC: "引成",
-    FOT_LIMIT: "指値",
-    FOT_STOP: "逆指値",
+    10: "成行",
+    13: "寄成(前場)",
+    14: "寄成(後場)",
+    15: "引成(前場)",
+    16: "引成(後場)",
+    17: "IOC成行",
+    20: "指値",
+    21: "寄指(前場)",
+    22: "寄指(後場)",
+    23: "引指(前場)",
+    24: "引指(後場)",
+    25: "不成(前場)",
+    26: "不成(後場)",
+    27: "IOC指値",
+    30: "逆指値",
 }
+# gobot が実際に使っているもの(それ以外は参照用)。
+USED = {10: "成行", 13: "寄成", 16: "引成(close損切り)", 20: "指値",
+        30: "逆指値(現行lssのエントリー)", FOT_LIMIT_MOO: "寄指 ← H案の新規売り"}
 
 # swagger のどこに置かれているか分からないので候補を順に試す。
 SWAGGER_PATHS = [
@@ -206,10 +221,16 @@ def main() -> int:
           f"  {'本番' if a.prod else 'デモ'}")
     print("  ⛔ 照会のみ。発注は一切しません。")
     print("=" * 74)
-    print("\n【kabu_api.py が現に使っている番号】")
+    print("\n【執行条件の一覧 (API リファレンス v1.5)】")
     for k in sorted(KNOWN):
-        print(f"  {k:>4} = {KNOWN[k]}")
-    print("  ※ **寄指(寄付のみ有効な指値)は未定義**。これを確定するのが目的です。\n")
+        mark = f"   ← gobot: {USED[k]}" if k in USED else ""
+        print(f"  {k:>4} = {KNOWN[k]}{mark}")
+    print(f"\n  kabu_api.FOT_LIMIT_MOO = {FOT_LIMIT_MOO} "
+          f"({KNOWN.get(FOT_LIMIT_MOO, '**一覧にない番号**')})")
+    if FOT_LIMIT_MOO != 21:
+        print("  ⚠ 既定は 21=寄指(前場)。環境変数 KABU_FOT_LIMIT_MOO で"
+              "上書きされています。")
+    print()
 
     ok = try_swagger(base)
     found = {} if a.no_orders else try_orders(a.prod)
@@ -217,26 +238,19 @@ def main() -> int:
     unknown = sorted(k for k in found if k not in KNOWN)
     print("── 結論 ───────────────────────────────────────────────────")
     if unknown:
-        print(f"  未知の番号を検出: {unknown}")
-        print("  この中に寄指があるかは、その注文を kabu ステーションの注文照会画面で")
-        print("  見て執行条件を突き合わせれば確定します。")
+        print(f"  ⚠ **一覧にない番号を検出: {unknown}**")
+        print("     kabuステーションのバージョンで執行条件が増えている可能性。")
+        print("     リファレンスを確認してください。")
+    if FOT_LIMIT_MOO in found:
+        print(f"  ✅ 寄指({FOT_LIMIT_MOO}) の注文が {found[FOT_LIMIT_MOO]}件 通っています。")
+        print("     H案の発注が実際に受理されていることの確認になります。")
+    elif found:
+        print(f"  ・寄指({FOT_LIMIT_MOO}) の注文はまだありません(H案は未発注)。")
     if ok:
-        print("  swagger に定義が出ています。上の enum / description を正としてください。")
-    if not ok and not unknown:
-        print("  ⚠ **確定できませんでした。**")
-        print()
-        print("  ③ 手動で1件出して読む(最も確実。数分で終わります):")
-        print("     1. kabuステーションの通常の発注画面で、**約定しない価格**の")
-        print("        寄指を1件入れる(例: 現値からかけ離れた指値の売り)。")
-        print("        ⚠ 板寄せで約定しうるので、必ず現値から十分離すこと。")
-        print("     2. python check_front_order_type.py"
-              f"{' --prod' if a.prod else ''}")
-        print("        → ②の表に **未知の番号** が1つ増える。それが寄指。")
-        print("     3. kabuステーションの画面からその注文を取消す。")
-        print("     4. 出た番号を kabu_api.py の FOT_LIMIT_MOO に設定する。")
+        print("  ・swagger からも定義を取得できました(上の enum を参照)。")
     print()
-    print("  参考: 執行条件の一覧は kabuステーションAPIリファレンスに載っています。")
-    print("        https://kabucom.github.io/kabusapi/reference/index.html")
+    print("  出典: kabuステーションAPI リファレンス v1.5「注文発注（現物・信用）」")
+    print("        https://kabucom.github.io/kabusapi/ptal/index.html")
     return 0
 
 

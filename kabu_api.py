@@ -66,17 +66,23 @@ CASH_MARGIN_OPEN = 2         # 信用新規
 CASH_MARGIN_CLOSE = 3        # 信用返済
 
 # 執行条件 (FrontOrderType)
+# 出典: kabuステーションAPI リファレンス v1.5「注文発注（現物・信用）」
+#   https://kabucom.github.io/kabusapi/ptal/index.html
+#   10=成行 13=寄成(前場) 14=寄成(後場) 15=引成(前場) 16=引成(後場) 17=IOC成行
+#   20=指値 21=寄指(前場) 22=寄指(後場) 23=引指(前場) 24=引指(後場)
+#   25=不成(前場) 26=不成(後場) 27=IOC指値 / 30=逆指値
+#   ※ 成行系は Price=0、指値系は Price=発注したい金額、逆指値は AfterHitPrice で指定。
 FOT_MARKET = 10              # 成行
-FOT_MOO = 13                 # 寄成
-FOT_MOC = 16                 # 引成 (引け成行) ← close 損切りで使用
-FOT_LIMIT = 20               # 指値
-FOT_STOP = 30                # 逆指値 ← エントリーで使用
-# 寄指 (寄付のみ有効な指値)。H案(前日終値の指値売り・板寄せのみ)の発注で使う。
-# ⛔ **番号は推測しない**。実機で確認してから設定すること:
-#       python check_front_order_type.py [--prod]
-#    確定したら環境変数 KABU_FOT_LIMIT_MOO に入れる(またはここを直接書き換える)。
-#    0 のままなら send_sell(order_type="limit_moo") は発注せず例外を出す。
-FOT_LIMIT_MOO = int(os.environ.get("KABU_FOT_LIMIT_MOO", "0") or 0)
+FOT_MOO = 13                 # 寄成 (前場)
+FOT_MOC = 16                 # 引成 (後場の引け成行) ← close 損切りで使用
+FOT_LIMIT = 20               # 指値 (ザラ場でも約定する通常の指値)
+FOT_STOP = 30                # 逆指値 ← 現行 lss のエントリーで使用
+# 寄指(前場) = **寄付の板寄せだけで約定し、寄らなければ失効する指値**。
+# H案(前日終値±Nティックの指値売り・板寄せのみ)の新規売りで使う。
+# 通常の指値(20)で代用してはいけない: そちらはザラ場でも約定してしまい、
+# ザラ場到達ぶんは実測で板寄せの1/4〜1/5しか稼がない(2026-08-10 の .\hsweep)。
+# 環境変数 KABU_FOT_LIMIT_MOO で上書き可(後場の 22 を試す等)。
+FOT_LIMIT_MOO = int(os.environ.get("KABU_FOT_LIMIT_MOO", "21") or 21)
 
 # 逆指値 (ReverseLimitOrder) 用
 TRIGGER_AFTER_ORDER = 1      # TriggerSec: 1=発注後
@@ -580,14 +586,16 @@ class KabuClient:
             if not FOT_LIMIT_MOO:
                 raise RuntimeError(
                     "寄指の FrontOrderType が未設定です(FOT_LIMIT_MOO=0)。\n"
-                    "  番号は推測しないでください。実機から確認します:\n"
-                    "      python check_front_order_type.py [--prod]\n"
-                    "  確定したら環境変数 KABU_FOT_LIMIT_MOO に設定してください。")
+                    "  仕様では 21=寄指(前場)。環境変数 KABU_FOT_LIMIT_MOO で"
+                    "上書きされていないか確認してください。")
             body["FrontOrderType"] = FOT_LIMIT_MOO
             body["Price"] = round(price)
-            # ⚠ 寄成(MOO)と同じ制約を**仮定**している: SOR(9)非対応 / ExpireDay は
-            #   当日(0)は不可で翌営業日を明示。寄指も寄付板寄せに乗せる注文なので
-            #   同じ扱いのはずだが、**実機で1件通して確認するまでは仮**。
+            # 市場と有効期限は寄成(MOO)と同じ扱いにする。
+            #   Exchange: MOO は SOR(9) で通らないため東証+(27)。寄指も寄付の
+            #     板寄せに乗せる注文なので同じと**仮定**している(仕様書に明記なし)。
+            #   ExpireDay: 仕様上 0 は「引け後なら翌営業日」と解釈されるが、MOO で
+            #     実際にエラーになった経緯があるので翌営業日を明示する。
+            # ⚠ どちらも仕様書ではなく既存 MOO の実測知見に倣ったもの。
             #   4001005 等で弾かれたらここを疑うこと。
             body["Exchange"] = EXCHANGE_TOKYO_PLUS
             body["ExpireDay"] = _next_trading_day_int()
@@ -627,7 +635,10 @@ class KabuClient:
                     return {"Result": -1, "Message": "建玉なし"}
                 # cp is None (取得失敗): ClosePositions を付けず自動割当てに任せる
 
-        kind = "信用返済" if cash_margin == CASH_MARGIN_CLOSE else "現物売"
+        # 信用新規(2)が「現物売」と表示されていた(表示のみのバグ)。lss/H は信用新規売り
+        # なので、発注ログでどちらか読み違えないよう区別する。
+        kind = ("信用返済" if cash_margin == CASH_MARGIN_CLOSE else
+                "信用新規売" if cash_margin == CASH_MARGIN_OPEN else "現物売")
         return self._post_order(body, f"{label} ({kind})", quiet=quiet)
 
     def send_stop_sell(self, symbol: int | str, qty: int, trigger_price: float,
