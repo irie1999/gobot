@@ -890,6 +890,11 @@ if a.html.strip() or a.inject_html.strip():
     #   月テーブル(nikkei_analysis.py:10482 と同じ列・同じ色)＋
     #   月ブロック(.mg-block / .mg-header / toggleMG)＋日チップ(.edate-btn)。
     #   クラスはレポート側の CSS をそのまま使うので追加スタイルは最小限。
+    # 当月は営業日が揃っていないので月テーブルで「未完了」と明示する
+    # (件数・損益をそのまま他の月と並べると誤読される)
+    from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+    _CUR_YM = _dt2.now(_tz2(_td2(hours=9))).strftime("%Y-%m")
+
     def _mtable(col):
         """方式1つぶんの月テーブル。列は既存の予算タブに合わせる。"""
         rows = ""
@@ -912,7 +917,10 @@ if a.html.strip() or a.inject_html.strip():
                 _cap = max(_cap, float((_gd["entry_p"] * a.qty).sum()))
             rows += (
                 f'<tr><td style="font-weight:700;color:#e2e8f0;white-space:nowrap">'
-                f'{ym[:4]}/{ym[5:7]}月</td>'
+                f'{ym[:4]}/{ym[5:7]}月'
+                + ('<br><span style="font-size:0.64rem;color:#fbbf24;'
+                   'font-weight:700">未完了</span>' if ym == _CUR_YM else "")
+                + '</td>'
                 f'<td style="text-align:right;color:#94a3b8">{len(v)}件</td>'
                 f'<td style="text-align:right;color:#94a3b8">{wr:.0f}%</td>'
                 f'<td style="text-align:right;color:#4ade80">+{gp:,.0f}円</td>'
