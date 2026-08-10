@@ -58,6 +58,18 @@ REM     tier sweep is non-monotonic with BT30 best (18.24). BT40 also HALVES the
 REM     measurable signal: 9 months to t=2 at BT30 vs 29 months at BT40.
 REM     Set to 40 or 50 to revert.
 set "LSS_BT_TAB_MIN=30"
+REM --- H (limit sell at prev close -5 ticks) is the entry method under evaluation.
+REM     Keep the report's H tab on the SAME setting the live orders use, or the
+REM     screen you read every morning shows a different H than what you send
+REM     (CLAUDE.md 18.9: backtest and live must always match).
+REM     -5 ticks won on 10-month OOS AND was picked by walk-forward every month
+REM     from Nov onward (99.5% of the fixed best), so the choice is not a
+REM     10-month hindsight pick. Zara-ba fills are kept (LSS_H_AUCTION_ONLY unset)
+REM     because walk-forward kept choosing them: +94,324 over 10 months.
+REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
+REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
+REM                 once, so over-subscribe cannot be cancelled in time)
+if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT
 REM     (measured 2026-08-07: frozen 866 / today 12,849). BT is built from the last

@@ -32,6 +32,18 @@ REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor.
 REM     30 = the pool floor = effectively no BT filter (2026-08-08, CLAUDE.md 18.24).
 REM     Keep this in sync with daily.bat.
 set "LSS_BT_TAB_MIN=30"
+REM --- H (limit sell at prev close -5 ticks) is the entry method under evaluation.
+REM     Keep the report's H tab on the SAME setting the live orders use, or the
+REM     screen you read every morning shows a different H than what you send
+REM     (CLAUDE.md 18.9: backtest and live must always match).
+REM     -5 ticks won on 10-month OOS AND was picked by walk-forward every month
+REM     from Nov onward (99.5% of the fixed best), so the choice is not a
+REM     10-month hindsight pick. Zara-ba fills are kept (LSS_H_AUCTION_ONLY unset)
+REM     because walk-forward kept choosing them: +94,324 over 10 months.
+REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
+REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
+REM                 once, so over-subscribe cannot be cancelled in time)
+if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT.
 REM     BT is built from the last 365 days, and the PnL tab shows the last 180 days,
