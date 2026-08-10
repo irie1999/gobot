@@ -990,7 +990,9 @@ if a.html.strip() or a.inject_html.strip():
                 _w = (_gd[col] > 0).mean() * 100
                 _c = "#4ade80" if _p >= 0 else "#f87171"
                 _cap = float((_gd["entry_p"] * a.qty).sum())
-                chips += (f'<button class="edate-btn" style="cursor:default">'
+                _dk = _d.replace("-", "")
+                chips += (f'<button class="edate-btn ehchip" '
+                          f'onclick="ehDay(this,\'{_dk}\')" style="cursor:pointer">'
                           f'<span class="edate-mm">{_d[5:7]}/{_d[8:10]}</span>'
                           f'<span class="edate-stat">{len(_gd)}件 {_w:.0f}%</span>'
                           f'<span style="color:{_c};font-weight:700">{_p:+,.0f}</span>'
@@ -1008,6 +1010,44 @@ if a.html.strip() or a.inject_html.strip():
                     f'style="display:{"block" if op else "none"}">'
                     f'<div class="edate-grid">{chips}</div></div></div>\n')
         return out
+
+    # 日別の明細は **1日1個だけ**作る(3方式ぶん複製すると3倍になる)。
+    # クリック時に JS が clicked chip の .mg-body へ move して表示するので、
+    # 既存タブと同じ「その月の下に出る」挙動になる。
+    _dayd = ""
+    for _d, _gd in sorted(r.groupby("日"), reverse=True):
+        _rws = ""
+        for _, t in _gd.sort_values("symbol").iterrows():
+            _rws += (
+                f'<tr><td class="ehk">{_hesc.escape(str(t["symbol"]))}</td>'
+                f'<td>{_f(t["entry_p"], 1)}</td>{_pn(t["現行"])}'
+                f'<td>{_f(t["E建値"], 1)}</td><td>{_f(t["E決済"], 1)}</td>'
+                f'<td class="ehmut">{t["E理由"] or "—"}</td>'
+                f'<td class="ehmut">{t["E時刻"] or "—"}</td>{_pn(t["E_翌寄り+OCO"])}'
+                f'<td>{_f(t["H建値"], 1)}</td><td>{_f(t["H決済"], 1)}</td>'
+                f'<td class="ehmut">{t["H理由"] or "—"}</td>'
+                f'<td class="ehmut">{t["H時刻"] or "—"}</td>'
+                f'{_pn(t["H_前日終値で指値売り"])}</tr>')
+        _sm = ""
+        for _c2, _l2 in _V:
+            _v2 = _gd[_c2].dropna()
+            if len(_v2):
+                _sm += (f'<span style="margin-right:14px">{_l2} '
+                        f'<b style="color:{"#4ade80" if _v2.sum() >= 0 else "#f87171"}">'
+                        f'{_v2.sum():+,.0f}円</b> '
+                        f'<span class="ehmut">({len(_v2)}件 '
+                        f'{(_v2 > 0).mean() * 100:.0f}%)</span></span>')
+        _dayd += (
+            f'<div class="ehday" id="ehd_{_d.replace("-", "")}" style="display:none">'
+            f'<div style="color:#93c5fd;font-size:.82rem;font-weight:700;'
+            f'margin:8px 0 6px">{_d} — {_sm}</div>'
+            f'<div style="overflow:auto;max-height:52vh"><table><thead>'
+            f'<tr><th class="ehk" rowspan="2">銘柄</th><th rowspan="2">前日終値</th>'
+            f'<th rowspan="2">現行</th><th colspan="5">E (寄成)</th>'
+            f'<th colspan="5">H (前日終値の指値)</th></tr>'
+            f'<tr><th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th>'
+            f'<th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>'
+            f'</thead><tbody>{_rws}</tbody></table></div></div>')
 
     _blocks = ""
     for _bi, (_col, _lab) in enumerate(_V):
@@ -1038,6 +1078,17 @@ if a.html.strip() or a.inject_html.strip():
 .ehfold .ehk{text-align:left;color:#cbd5e1}
 .ehfold .ehp{color:#4ade80} .ehfold .ehn{color:#f87171} .ehmut{color:#64748b}
 .ehbox{overflow:auto;max-height:70vh;margin-top:8px}
+.ehchip.on{border-color:#a78bfa!important;box-shadow:0 0 0 1px #a78bfa inset}
+.ehday{background:#0b1220;border:1px solid #24365c;border-radius:6px;
+ padding:6px 10px 10px;margin-top:8px}
+.ehday table{border-collapse:collapse;width:100%;font-size:.76rem;
+ font-variant-numeric:tabular-nums}
+.ehday th,.ehday td{padding:4px 8px;text-align:right;
+ border-bottom:1px solid #16233c;white-space:nowrap}
+.ehday thead th{position:sticky;top:0;background:#0f1b30;color:#93c5fd;font-size:.7rem}
+.ehday thead tr:nth-child(2) th{top:22px}
+.ehday .ehk{text-align:left;color:#cbd5e1}
+.ehday .ehp{color:#4ade80} .ehday .ehn{color:#f87171}
 </style>"""
 
     # ── 月ごとの対応のある検定 (現行 vs E / 現行 vs H / E vs H) ──────
@@ -1087,6 +1138,7 @@ if a.html.strip() or a.inject_html.strip():
 <button class="on" onclick="ehSel(this,2)">H (前日終値の指値)</button>
 </div>
 {_blocks}
+<div id="ehdays" style="display:none">{_dayd}</div>
 <details class="ehfold"><summary>📊 統計 — 月ごとに対応をとった検定</summary>
 <p style="color:#94a3b8;font-size:.78rem;line-height:1.7">
 同じ月・同じ銘柄集団なので、相場全体の上下は両方に同じだけ効いて差し引きで消える
@@ -1107,8 +1159,26 @@ compare_budget_raw.py(予算400万)が正</span></p>
 <div class="ehbox"><pre style="margin:0;color:#cbd5e1;font-size:.74rem;
 line-height:1.5;white-space:pre">{_console}</pre></div></details>
 <script>
+function ehDay(el, dk){{
+  var pane = el.closest('.detail-tab-pane') || el.closest('.ho-outer-pane')
+             || el.closest('body');
+  var d = pane.querySelector('#ehd_' + dk);
+  if (!d) return;
+  var body = el.closest('.mg-body');
+  var open = (d.style.display !== 'none') && (d.parentNode === body);
+  pane.querySelectorAll('.ehday').forEach(function(x){{ x.style.display='none'; }});
+  pane.querySelectorAll('.ehchip').forEach(function(c){{ c.classList.remove('on'); }});
+  if (open) return;                       // 同じチップの2回目クリックで閉じる
+  body.appendChild(d);                    // クリックした月の下へ移す
+  d.style.display = 'block';
+  el.classList.add('on');
+}}
 function ehSel(el, i){{
   var p = el.parentNode.parentNode;
+  // 方式を切り替えたら開いていた日別明細とチップの選択は畳む
+  // (隠れたブロックの中に残ると、戻ったとき選択状態だけ残って紛らわしい)
+  p.querySelectorAll('.ehday').forEach(function(x){{ x.style.display='none'; }});
+  p.querySelectorAll('.ehchip').forEach(function(c){{ c.classList.remove('on'); }});
   p.querySelectorAll('.ehsel button').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
   p.querySelectorAll('.ehblk').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
 }}
