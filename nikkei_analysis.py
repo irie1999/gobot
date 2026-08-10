@@ -13496,8 +13496,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
         _best = max([r for r in _out if not r[0].startswith("▶")],
                     key=lambda r: r[2])[0] if _out else ""
+        # 前半/後半の順位。金額だけだと「どっちが上か」が読み取れない。
+        _fx = [r for r in _out if not r[0].startswith("▶")]
+        _o1 = {r[0]: i + 1 for i, r in enumerate(
+            sorted(_fx, key=lambda r: -r[9]))}
+        _o2 = {r[0]: i + 1 for i, r in enumerate(
+            sorted(_fx, key=lambda r: -r[10]))}
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm) in _out:
+            _rk1, _rk2 = _o1.get(_v, "—"), _o2.get(_v, "—")
             _wfr = _v.startswith("▶")
             _mark = (' style="background:#1e293b;border-top:2px solid #64748b"' if _wfr
                      else ' style="background:#132a1a"' if _v == _best else "")
@@ -13521,11 +13528,41 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                 f'white-space:nowrap;font-size:0.76rem">{_lo:+,.0f} 〜 {_hi:+,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_w}/{_nm}</td>'
-                f'<td style="padding:2px 8px;font-size:0.76rem;color:{_c}">{_vd}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
-                f'border-left:1px solid #334155;white-space:nowrap">{_f1:+,.0f}</td>'
+                f'border-left:1px solid #334155;white-space:nowrap">'
+                f'{_f1:+,.0f}<span style="color:#64748b;font-size:0.72rem"> '
+                f'{_rk1}位</span></td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
-                f'white-space:nowrap">{_f2:+,.0f}</td></tr>')
+                f'white-space:nowrap">{_f2:+,.0f}'
+                f'<span style="color:#64748b;font-size:0.72rem"> {_rk2}位</span></td></tr>')
+
+        # ── 結論を先に1行で ──────────────────────────────────────
+        # 列の多い表を読ませる前に「何が最良で、それは信用できるのか」を出す。
+        _bb = next((r for r in _out if r[0] == _best), None)
+        _wr = next((r for r in _out if r[0].startswith("▶")), None)
+        _concl = ""
+        if _bb:
+            _ratio = (_wr[2] / _bb[2] * 100) if (_wr and _bb[2]) else 0.0
+            if _wr and _bb[2] > 0 and _wr[2] >= _bb[2] * 0.95:
+                _wtxt = (f'<b>walk-forward でも同じ設定が選ばれ続け</b>、'
+                         f'固定最良の <b>{_ratio:.1f}%</b> に達しました'
+                         f'（{_wr[2]:+,.0f}円）。'
+                         f'<span style="color:#94a3b8">= 10ヶ月を見てから選んだのでは'
+                         f'なく、早い段階で先頭だった。設定選択のリークはほぼ無い。</span>')
+            elif _wr:
+                _wtxt = (f'⚠ <b>walk-forward は固定最良の {_ratio:.1f}% どまり</b>'
+                         f'（{_wr[2]:+,.0f}円）。'
+                         f'<span style="color:#f87171">= 設定を選ぶこと自体に価値が'
+                         f'ない。既定のまま動かさないのが正解(18.10)。</span>')
+            else:
+                _wtxt = ""
+            _concl = (
+                f'<div style="background:#132a1a;border:1px solid #4ade80;'
+                f'border-radius:6px;padding:8px 12px;margin:0 0 10px;'
+                f'color:#e2e8f0;font-size:0.84rem;line-height:1.9">'
+                f'<b style="color:#4ade80">結論</b>: 最良は <b>{_bb[0]}</b>'
+                f'（{_bb[2]:+,.0f}円 / 現行との差 <b>{_bb[3]:+,.0f}円/月</b>・'
+                f't={_bb[4]:+.2f}・{_bb[7]}/{_bb[8]}勝）。<br>{_wtxt}</div>')
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
@@ -13533,7 +13570,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'padding:12px 14px;margin:0 0 14px">'
             f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
             f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）</div>'
-            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            + _concl
+            + f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'H の唯一のパラメータは<b>指値をどこに置くか</b>と<b>ザラ場到達を取るか</b>です。'
             f'差/月 と t は<b>現行との対応検定</b>（同じ月どうしを引き算）。<br>'
             f'⛔ <b>設定ごとにレポートを回して比べてはいけません</b>(18.24)。実行が変われば'
@@ -13549,9 +13587,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
             f'<th style="{_th}">円/件</th><th style="{_th}">差/月</th>'
             f'<th style="{_th}">t</th><th style="{_th}">95%CI(月)</th>'
-            f'<th style="{_th}">勝ち月</th><th style="{_th};text-align:left">判定</th>'
-            f'<th style="{_th};border-left:1px solid #334155">前半</th>'
-            f'<th style="{_th}">後半</th></tr></thead>'
+            f'<th style="{_th}">勝ち月</th>'
+            f'<th style="{_th};border-left:1px solid #334155">前半(順位)</th>'
+            f'<th style="{_th}">後半(順位)</th></tr></thead>'
             f'<tbody>{_rows}</tbody></table>'
             f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.8">'
             f'<b>▶ walk-forward 選択</b> = 各月について<b>その月より前のデータだけ</b>で'
