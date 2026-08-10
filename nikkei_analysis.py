@@ -9937,11 +9937,24 @@ function switchTbd(id, tab) {{
 
     # 予算シミュ専用の候補プール(BT30固定・表示閾値 _BT_TAB_MIN とは独立)。予算はBT降順で埋める
     # ため実質高BTのみ約定するが、プールは従来どおりBT30から用意して挙動を変えない。
+    # ⛔ 転換はプールに入れない。転換は**発注しない記録専用**(18.26b: 実装可能な
+    #    70升すべてが純lssにマイナス)なのに、プールに混ざると予算400万の枠を消費して
+    #    lss 本体の注文を押し出す。表示は _budget_entry_sorted_short で除外していたが、
+    #    それは**枠を使い切った後**なので手遅れだった。
+    #    2026-08-10 実測: 転換の母集団を『終日不約定』→『終日不約定+締切後に約定』へ
+    #    広げた(793c399)ところ、現行が 2,235件 +1,039,535円 → 1,817件 +689,250円 に
+    #    落ちた。E/H は別プールなので影響を受けず、比較の基準線だけが縮んでいた。
+    #    転換タブは _EXTRA_TRADES + _tenkan_auto を直接読むので、ここで外しても無傷。
     _bt30_entry_sorted = pending_trades + sorted(
-        [t for t in done_trades if _eff_long_bt(t) >= 30],
+        [t for t in done_trades
+         if t.get("strategy") != "転換" and _eff_long_bt(t) >= 30],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
+    _n_tk_pool = sum(1 for t in done_trades if t.get("strategy") == "転換")
+    if _LSS_ORDER_MODE and _n_tk_pool:
+        print(f"[予算] 転換 {_n_tk_pool:,}件を予算シミュのプールから除外"
+              f"(発注しないので枠を消費させない / 18.26b)", flush=True)
     # ── E/H(エントリー方式の比較)トレードを組み立てる ──────────────
     #   ここで作るのは**追加タブ用のトレードだけ**。既存の集計・出力には触らない。
     #   失敗しても空にして続行する(タブが出ないだけ)。無効化: set LSS_EH_TAB=0
@@ -10178,7 +10191,9 @@ function switchTbd(id, tab) {{
         except Exception as _ce:
             print(f"[予算月別CSV] 出力失敗: {_ce}", flush=True)
     _budget_entry_by_date, _sorted_budget_entry_dates = _build_entry_grid(_budget_entry_sorted, "q")
-    # 400万円タブ用: ショートのみ（転換トレードを除外）
+    # 400万円タブ用: ショートのみ（転換トレードを除外）。
+    # ※ プール(_bt30_entry_sorted)側で既に除いているので通常は 0 件しか落ちない。
+    #   ここは二重の安全弁として残す(CSV由来などプール外から混ざった場合の保険)。
     _budget_entry_sorted_short = [t for t in _budget_entry_sorted if t.get("strategy") != "転換"]
     _budget_entry_by_date_short, _sorted_budget_entry_dates_short = _build_entry_grid(_budget_entry_sorted_short, "q")
     _budget50_entry_by_date, _sorted_budget50_entry_dates = _build_entry_grid(_budget50_entry_sorted, "q5")
