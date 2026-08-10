@@ -13665,6 +13665,116 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                          for m, p in _picks)
             + '</p></div>')
 
+    def _age_html():
+        """選定(初出基準月)からの経過月数で層別する。**累積マージの是非**を測る。
+
+        .\\daily は基準月 2025-09〜2026-07 を毎回まとめてマージしている(累積)。
+        その根拠は daily.bat に「広いプールなら BT降順タブが毎日いちばん高いBTの
+        注文を選べる」と書いてあるが、18.21 で発注順を流動性順に変えたので
+        **この理屈は失効している**。
+
+        累積の是非は結局「古い選定は劣化するか」に帰着する。per-symbol
+        START_DATES があるので、各トレードが『選定から何ヶ月目か』は既存データで
+        そのまま出せる(新しいスキャンも別プールも要らない)。
+
+          経過が長いほど悪化 → 古い基準月を落とす(累積をやめる)
+          フラット           → 累積のままでよい(プールが広いほど候補が増える)
+
+        ⚠ lss は同日決済なので**同じ日の取引は全部まとめて勝つ/負ける**。件数で
+          t を作ると実効サンプルを誤認する(18.13)。日ごとに畳んでから t を出す。
+        """
+        import statistics as _sti
+        if not _LSS_START_DATES:
+            return ""
+        _sets = [("現行", _budget_entry_sorted_short)]
+        for _k in ("E", "H"):
+            _v = _eh_sorted.get(_k)
+            if _v:
+                _sets.append((_k, _v))
+        _BANDS = [(0, 2, "0-1ヶ月"), (2, 4, "2-3ヶ月"),
+                  (4, 7, "4-6ヶ月"), (7, 10**6, "7ヶ月〜")]
+
+        def _mo(_t):
+            """選定からの経過月数。取れなければ None。"""
+            _s = str(_t.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
+            _sd = _LSS_START_DATES.get((_s, _t.get("strategy")))
+            _ed = _t.get("entry_d_raw") or _t.get("exit_d_raw")
+            if not _sd or not _ed:
+                return None
+            try:
+                _a, _b = pd.Timestamp(str(_sd)), pd.Timestamp(str(_ed))
+            except Exception:
+                return None
+            return (_b.year - _a.year) * 12 + (_b.month - _a.month)
+
+        _rows = ""
+        for _nm, _lst in _sets:
+            _bd: dict = {b[2]: {} for b in _BANDS}   # 帯 -> 日 -> pnl合計
+            _cnt: dict = {b[2]: 0 for b in _BANDS}
+            _nomatch = 0
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _m = _mo(_t)
+                if _m is None:
+                    _nomatch += 1
+                    continue
+                _lbl = next((b[2] for b in _BANDS if b[0] <= _m < b[1]), None)
+                if not _lbl:
+                    continue
+                _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw"))[:10]
+                _bd[_lbl][_dk] = _bd[_lbl].get(_dk, 0.0) + float(_t.get("pnl", 0) or 0)
+                _cnt[_lbl] += 1
+            _cells = ""
+            for _b in _BANDS:
+                _lbl = _b[2]
+                _dv = list(_bd[_lbl].values())
+                _n, _p = _cnt[_lbl], sum(_dv)
+                if _n == 0:
+                    _cells += ('<td style="text-align:center;color:#475569;'
+                               'padding:2px 8px;border-left:1px solid #334155">—</td>')
+                    continue
+                # 日クラスタ頑健 t(同日決済なので日ごとに畳んでから)
+                _t2 = 0.0
+                if len(_dv) > 1:
+                    _se = _sti.stdev(_dv) / (len(_dv) ** 0.5)
+                    _t2 = (_sti.mean(_dv) / _se) if _se > 0 else 0.0
+                _pc = _p / _n
+                _c = "#4ade80" if _pc > 0 else "#f87171"
+                _cells += (f'<td style="text-align:right;padding:2px 8px;'
+                           f'border-left:1px solid #334155;white-space:nowrap">'
+                           f'<b style="color:{_c}">{_pc:+,.0f}</b>円/件'
+                           f'<br><span style="color:#64748b;font-size:0.72rem">'
+                           f'{_n:,}件 t={_t2:+.2f}</span></td>')
+            _rows += (f'<tr><td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
+                      f'white-space:nowrap">{_nm}'
+                      + (f'<br><span style="color:#64748b;font-size:0.7rem">'
+                         f'選定日不明 {_nomatch:,}件</span>' if _nomatch else "")
+                      + f'</td>{_cells}</tr>')
+
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
+            f'padding:12px 14px;margin:0 0 14px">'
+            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
+            f'🕰 選定からの経過月数（累積マージを続けてよいか）</div>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'<code>.\\daily</code> は基準月 2025-09〜 を毎回まとめてマージしています（累積）。'
+            f'その根拠は「広いプールなら<b>BT降順</b>タブが毎日いちばん高いBTを選べる」でしたが、'
+            f'18.21 で発注順を<b>流動性順</b>に変えたので<b>この理屈は失効しています</b>。<br>'
+            f'累積の是非は「<b>古い選定は劣化するか</b>」に帰着します。'
+            f'<b style="color:#f87171">経過が長いほど悪化</b>するなら古い基準月を落とす、'
+            f'<b style="color:#4ade80">フラット</b>なら累積のままでよい（プールが広いほど候補が増える）。<br>'
+            f'⚠ lss は同日決済で<b>同じ日の取引はまとめて勝つ/負ける</b>ので、件数で t を'
+            f'作ると実効サンプルを誤認します(18.13)。<b>日ごとに畳んでから</b> t を出しています。<br>'
+            f'⚠ 15軸を掃いて候補ゼロだった前例があります(18.13)。'
+            f'ここもフラットに出る可能性が高く、その場合は<b>累積を続ける根拠が実測で得られた</b>と読みます。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+            + "".join(f'<th style="{_th};border-left:1px solid #334155">{b[2]}</th>'
+                      for b in _BANDS)
+            + f'</tr></thead><tbody>{_rows}</tbody></table></div>')
+
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
     except Exception as _ehce:
@@ -13689,6 +13799,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 print(f"[H設定] 比較ブロックを生成 ({_hvt.time() - _t0:.1f}s)", flush=True)
     except Exception as _hvce:
         print(f"[H設定] 比較ブロック生成に失敗: {_hvce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            _EH_CMP_HTML += _age_html()
+    except Exception as _agce:
+        print(f"[経過月数] ブロック生成に失敗: {_agce}", flush=True)
 
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
