@@ -553,7 +553,10 @@ if _args.both and not _args.short:
 
     import time as _time_mod
     _cache_bust = int(_time_mod.time())
-    for _dir in ("long", "short", "mirror", "lss"):
+    # ⛔ ここを固定リストにすると、方向を足したときに**iframe だけ作られず**
+    #    タブを押しても何も出ない(2026-08-10: "h" を追加したときに実際に踏んだ)。
+    #    生成対象そのもの(_DIRECTIONS)から回すこと。
+    for _dir in [d[0] for d in _DIRECTIONS]:
         if _dir in _skip_dirs:
             continue
         for _i, _mp in enumerate(_price_list):
