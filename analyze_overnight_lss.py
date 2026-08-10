@@ -112,6 +112,9 @@ ap.add_argument("--sweep-tm", default="",
                 help="tm(利確ATR倍)のスイープ。例 0.3,0.5,1.0,1.5,2.0。"
                      "--sweep-sm と併せて E(ショート)/G(ロング)の 円/件 表を出す。"
                      "『ロングは別のパラメータなら勝てるのでは』を直接確かめる用")
+ap.add_argument("--html", default="",
+                help="E/H の成績をHTMLで出力するパス(例 eh_report.html)。"
+                     "サマリー/月別/日別/取引明細のタブ付き")
 ap.add_argument("--no-oco", action="store_true",
                 help="D(引け+OCO)を計算しない。5分足が無い環境向け")
 a = ap.parse_args()
@@ -257,6 +260,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "E0_9時から建値は現行": None,
         "H_前日終値で指値売り": None,
         "D2_夜間損切りが効く場合": None,
+        "E建値": None, "E決済": None, "E理由": "", "E時刻": "",
+        "H建値": None, "H決済": None, "H理由": "", "H時刻": "",
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -328,6 +333,12 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     continue
                 rec[_tag] = ((float(xp) - _ep) if _long else (_ep - float(xp))) * q
                 _reasons[(_tag[0], why)] += 1
+                if _tag.startswith("E_"):
+                    rec["E建値"], rec["E決済"], rec["E理由"] = _ep, float(xp), why
+                    try:
+                        rec["E時刻"] = pd.Timestamp(_x5t).strftime("%H:%M")
+                    except Exception:
+                        pass
             # D2: **夜間の損切りが完璧に効いた場合の上限値**(PTS等で夜に返済できる想定)。
             #   D は寄りが損切りを超えて始まると max(stop, 始値) の不利約定になる。
             #   夜間に損切りできれば stop ちょうどで止められる、という最良ケース。
@@ -346,12 +357,17 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
             #   ガードは mirror 側の鏡像(+3%超のギャップアップはスキップ / §18.8)。
             if not (a.gap_guard > 0 and o1 > pc * (1.0 + a.gap_guard)):
                 _hp = o1 if o1 >= pc else pc      # 寄りが上なら板寄せ約定=始値
-                xph, whyh, _, _ = _x5(
+                xph, whyh, _, _xht = _x5(
                     day5, _hp, _hp + atr * a.sm, _hp - atr * a.tm, True,
                     day_low=_dl, day_high=_dh, day_close=c1,
                     stop_delay_bars=a.stop_delay_bars)
                 if xph is not None and whyh not in ("no_5m", "no_entry"):
                     rec["H_前日終値で指値売り"] = (_hp - float(xph)) * q
+                    rec["H建値"], rec["H決済"], rec["H理由"] = _hp, float(xph), whyh
+                    try:
+                        rec["H時刻"] = pd.Timestamp(_xht).strftime("%H:%M")
+                    except Exception:
+                        pass
                     _reasons[("H", whyh)] += 1
             # E0: **09:00から持つ**が、建値もバリアも**現行の約定値**から取る。
             #  現行 → E0  = 露出時刻だけの差(建値は同じ)
@@ -767,3 +783,147 @@ print("  ・D2 は『寄りが損切りを超えて始まったら stop ちょ�
 print("    **達成不可能な上限**。ギャップの主因はニュースで、PTS の気配も同時に飛ぶので")
 print("    夜間に逆指値を置いても飛んだ後の値段で約定する = 実際は D に近い。")
 print("    D2 と D の差(=夜間ギャップのコスト)の大きさを見るためだけの数字。")
+
+# ── HTML 出力 (サマリー / 月別 / 日別 / 取引明細) ──────────────────
+if a.html.strip():
+    import html as _hesc
+
+    _cg = (_cur.set_index(["symbol", "entry_date"])["pnl"].astype(float)
+           if not _cur.empty else None)
+    r["現行"] = [float(_cg.get((sm, dt), float("nan"))) if _cg is not None
+                 else float("nan") for sm, dt in zip(r["symbol"], r["date"])]
+    r["日"] = r["date"].dt.strftime("%Y-%m-%d")
+    _V = [("現行", "現行"), ("E_翌寄り+OCO", "E"), ("H_前日終値で指値売り", "H")]
+
+    def _agg(g):
+        """(件数, 勝率, 損益, 円/件) を方式ごとに返す"""
+        o = {}
+        for col, lab in _V:
+            v = g[col].dropna()
+            o[lab] = (len(v), (v > 0).mean() * 100 if len(v) else 0.0,
+                      v.sum(), v.mean() if len(v) else 0.0)
+        return o
+
+    def _cells(o):
+        t = ""
+        for _, lab in _V:
+            n, wr, tot, per = o[lab]
+            c = "p" if tot > 0 else ("n" if tot < 0 else "")
+            t += (f'<td>{n:,}</td><td>{wr:.0f}%</td>'
+                  f'<td class="{c}">{tot:+,.0f}</td><td class="{c}">{per:+,.0f}</td>')
+        return t
+
+    _all = _agg(r)
+    _hd = "".join(f'<th colspan="4">{lab}</th>' for _, lab in _V)
+    _sub = "".join('<th>件数</th><th>勝率</th><th>損益</th><th>円/件</th>'
+                   for _ in _V)
+
+    # 月別
+    _mrows = "".join(
+        f'<tr><td class="k">{m}</td>{_cells(_agg(g))}</tr>'
+        for m, g in r.groupby("month"))
+    # 日別
+    _drows = "".join(
+        f'<tr><td class="k">{dt}</td>{_cells(_agg(g))}</tr>'
+        for dt, g in r.groupby("日"))
+
+    # 取引明細
+    def _f(x, n=0):
+        return "—" if x != x or x is None else f"{x:,.{n}f}"
+
+    _trows = []
+    for _, t in r.sort_values(["日", "symbol"]).iterrows():
+        def _pn(v):
+            if v != v or v is None:
+                return '<td class="mut">—</td>'
+            return f'<td class="{"p" if v > 0 else "n"}">{v:+,.0f}</td>'
+        _trows.append(
+            f'<tr><td class="k">{t["日"]}</td><td>{_hesc.escape(str(t["symbol"]))}</td>'
+            f'<td>{_f(t["entry_p"], 1)}</td>'
+            f'{_pn(t["現行"])}'
+            f'<td>{_f(t["E建値"], 1)}</td><td>{_f(t["E決済"], 1)}</td>'
+            f'<td class="mut">{t["E理由"] or "—"}</td>'
+            f'<td class="mut">{t["E時刻"] or "—"}</td>{_pn(t["E_翌寄り+OCO"])}'
+            f'<td>{_f(t["H建値"], 1)}</td><td>{_f(t["H決済"], 1)}</td>'
+            f'<td class="mut">{t["H理由"] or "—"}</td>'
+            f'<td class="mut">{t["H時刻"] or "—"}</td>'
+            f'{_pn(t["H_前日終値で指値売り"])}</tr>')
+
+    _html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>E/H 成績 — lss エントリー方式の比較</title><style>
+:root{{color-scheme:dark}}
+body{{background:#0b1220;color:#e2e8f0;font-family:"Segoe UI",Meiryo,sans-serif;
+margin:0;padding:18px 22px;font-size:13px}}
+h1{{font-size:1.15rem;margin:0 0 4px}}
+.sub{{color:#94a3b8;font-size:.8rem;margin-bottom:14px;line-height:1.7}}
+.tabs{{display:flex;gap:6px;margin:14px 0 10px;flex-wrap:wrap}}
+.tab{{padding:7px 16px;background:#111c33;border:1px solid #24365c;border-radius:7px;
+cursor:pointer;color:#cbd5e1}}
+.tab.on{{background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:700}}
+.pane{{display:none}} .pane.on{{display:block}}
+.wrap{{overflow-x:auto;max-height:78vh;overflow-y:auto;border:1px solid #1e293b;
+border-radius:8px}}
+table{{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}}
+th,td{{padding:5px 9px;text-align:right;border-bottom:1px solid #16233c;
+white-space:nowrap}}
+thead th{{position:sticky;top:0;background:#0f1b30;z-index:2;color:#93c5fd;
+font-size:.76rem}}
+thead tr:nth-child(2) th{{top:26px}}
+td.k,th.k{{text-align:left;color:#cbd5e1}}
+.p{{color:#4ade80}} .n{{color:#f87171}} .mut{{color:#64748b}}
+tbody tr:hover{{background:#111c33}}
+.cards{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}}
+.card{{background:#111c33;border:1px solid #24365c;border-radius:10px;
+padding:12px 18px;min-width:180px}}
+.card .t{{color:#93c5fd;font-size:.78rem}} .card .v{{font-size:1.35rem;font-weight:700}}
+.card .s{{color:#94a3b8;font-size:.72rem}}
+.note{{background:#111c33;border-left:3px solid #3b82f6;padding:10px 14px;
+border-radius:0 7px 7px 0;color:#cbd5e1;line-height:1.8;margin-bottom:14px}}
+</style></head><body>
+<h1>E / H 成績 — lss のエントリー方式の比較</h1>
+<div class="sub">
+{r['日'].min()} 〜 {r['日'].max()} / {r['date'].nunique():,}営業日 /
+{len(r):,}銘柄日 / {a.qty}株固定 / 摩擦なし(slip=0)<br>
+シグナル・銘柄選定・発注順・決済(損切 {a.sm}ATR / 利確 {a.tm}ATR / 引け成行)は
+<b>3方式とも同一</b>。違うのは注文の出し方だけ。
+</div>
+<div class="note">
+<b>現行</b> 逆指値売り(前日終値−1ティック)。株価が<b>下がったら</b>約定。届かなければ建てない<br>
+<b>E</b> 寄成売り。9:00の板寄せで<b>必ず</b>約定<br>
+<b>H</b> 指値売り(前日終値)。株価が<b>上がったら</b>約定。寄りが既に上なら板寄せで約定。届かなければ建てない<br>
+<span class="mut">※ 予算制約は入っていない(全シグナルを建てた場合)。予算400万での比較は
+compare_budget_raw.py を参照</span>
+</div>
+<div class="cards">
+{"".join(f'''<div class="card"><div class="t">{lab}</div>
+<div class="v {"p" if _all[lab][2] > 0 else "n"}">{_all[lab][2]:+,.0f}円</div>
+<div class="s">{_all[lab][0]:,}件 / 勝率 {_all[lab][1]:.1f}% /
+<b>{_all[lab][3]:+,.0f}円/件</b></div></div>''' for _, lab in _V)}
+</div>
+<div class="tabs">
+<div class="tab on" onclick="sw(0)">月別</div>
+<div class="tab" onclick="sw(1)">日別</div>
+<div class="tab" onclick="sw(2)">取引明細 ({len(_trows):,}件)</div>
+</div>
+<div class="pane on"><div class="wrap"><table>
+<thead><tr><th class="k" rowspan="2">月</th>{_hd}</tr><tr>{_sub}</tr></thead>
+<tbody>{_mrows}</tbody></table></div></div>
+<div class="pane"><div class="wrap"><table>
+<thead><tr><th class="k" rowspan="2">日付</th>{_hd}</tr><tr>{_sub}</tr></thead>
+<tbody>{_drows}</tbody></table></div></div>
+<div class="pane"><div class="wrap"><table><thead>
+<tr><th class="k" rowspan="2">日付</th><th rowspan="2">銘柄</th>
+<th rowspan="2">前日終値</th><th rowspan="2">現行 損益</th>
+<th colspan="5">E (寄成)</th><th colspan="5">H (前日終値の指値)</th></tr>
+<tr><th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th>
+<th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>
+</thead><tbody>{"".join(_trows)}</tbody></table></div></div>
+<script>
+function sw(i){{
+  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('on',j===i));
+  document.querySelectorAll('.pane').forEach((p,j)=>p.classList.toggle('on',j===i));
+}}
+</script></body></html>"""
+    from pathlib import Path as _P
+    _P(a.html).write_text(_html, encoding="utf-8")
+    print(f"\n[HTML] {_P(a.html).resolve()}  ({len(_trows):,}行)")
