@@ -26,10 +26,18 @@ r"""analyze_overnight_lss.py — 「終値で入って翌日売る」を lss の
   C 翌寄り→翌引け: D+1始値で空売り → D+1終値で買い戻し (トリガー無しの日中)
   D 引け+OCO     : D終値で空売り → D+1を**現行と同じ決済**で処理
                    (損切 +sm×ATR / 利確 -tm×ATR / 未達なら引けタイムカット)
+  E 翌寄り+OCO   : D+1始値で空売り → 同じ決済。**実装できるのはこちら**
 
 A/B/C は無条件決済なので、そのままでは現行と比べられない(現行はOCOで決済している)。
-**D がフェアな比較**で、エントリーだけを『トリガー約定』から『前日引け成行』に
-置き換えたもの。A/B/C は D の内訳を読むための分解として残す。
+決済を揃えた D/E で判断する。A/B/C は内訳(夜 / 日中)を読むための分解。
+
+⛔⛔ **D は実装できない(look-ahead)**
+   lss のシグナルは **D の終値**で判定する(§6 引け後運用)。その終値で入るには
+   終値が出る前に注文を出す必要があり、順序が成立しない。
+   近似するなら 14:55 時点の値でシグナルを仮判定して MOC を出すことになるが、
+   本ツールの D は『終値を見たうえで終値で約定する』完全な先読みを含む。
+   **D は上限値であって、実現可能な成績ではない。**
+   実装できるのは E(シグナルは D の終値で確定 → 翌朝の寄り成行)。
 
 ⚠ D は夜間のギャップを損切りできない。D+1 が損切りの上に飛んで始まったら
    `max(stop, バー始値)`(v16)で不利約定になる。これは現行(同日決済)には無い
@@ -64,7 +72,12 @@ ap.add_argument("--by-month", action="store_true")
 ap.add_argument("--sm", type=float, default=0.1, help="損切ATR倍(現行0.1)")
 ap.add_argument("--tm", type=float, default=1.0, help="利確ATR倍(現行1.0)")
 ap.add_argument("--stop-delay-bars", type=int, default=1,
-                help="損切り遅延(現行 live=1)。D の判定に使う")
+                help="E(翌寄り成行)の損切り遅延。寄り約定→最初の5分足が閉じてから"
+                     "逆指値を置くので live と同じ 1 が既定")
+ap.add_argument("--d-stop-delay", dest="d_stop_delay", type=int, default=0,
+                help="D(引け+OCO)の損切り遅延。前日引けから建玉があるので逆指値は"
+                     "**寄り前に置ける** → 0 が既定(delay1 は約定バーに置けない"
+                     "という機構的理由なので D には当てはまらない)")
 ap.add_argument("--no-oco", action="store_true",
                 help="D(引け+OCO)を計算しない。5分足が無い環境向け")
 a = ap.parse_args()
@@ -183,8 +196,9 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "B_引け→翌引け": (pc - c1) * q,
         "C_翌寄り→翌引け": (o1 - c1) * q,
         "D_引け+OCO": None,
+        "E_翌寄り+OCO": None,
     }
-    # ── D: 引けで空売り → D+1 を現行と同じ OCO で決済 ──
+    # ── D/E: 現行と同じ OCO で決済 ──
     if not a.no_oco:
         atr = float(df["atr"].iloc[pos - 1])       # D 時点の ATR
         day5 = _i5.get(str(sym), {}).get(pd.Timestamp(ed).date())
@@ -193,19 +207,25 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         elif not _ig_ok(day5, c1):                 # 5分足の分割未調整(18.27)
             _no5 += 1
         else:
-            stop_p = pc + atr * a.sm               # ショートの損切は上
-            tgt_p = pc - atr * a.tm                # 利確は下
-            # 引けで既に建玉を持っているのでトリガー待ちは無い。
-            # day_high/day_low に D+1 の値を渡して「寄りから建玉あり」として扱わせる。
-            xp, why, _e5, _x5t = _x5(
-                day5, pc, stop_p, tgt_p, False,
-                day_low=float(df["l"].iloc[pos]), day_high=float(df["h"].iloc[pos]),
-                day_close=c1, stop_delay_bars=a.stop_delay_bars)
-            if xp is None or why in ("no_5m", "no_entry"):
-                _no5 += 1
-            else:
-                rec["D_引け+OCO"] = (pc - float(xp)) * q
-                _reasons[why] += 1
+            # ⛔ short_exit_5m は『トリガーで約定する』前提で、_start=ei
+            #    (=最初に安値が entry_p に達したバー)から損切り・利確を見る。
+            #    D/E は **寄りから建玉がある** ので、そのまま渡すと
+            #    「寄りが建値より上に飛んで昼に戻ってきた」ケースで
+            #    **朝の含み損の区間が丸ごと飛ばされる** = 負けだけが消える。
+            #    entry_p に +inf を渡して ei=0 を強制し、必ず寄りから判定させる。
+            #    stop_p / target_p は別引数なので、これで値は一切歪まない。
+            _INF = float("inf")
+            _dl, _dh = float(df["l"].iloc[pos]), float(df["h"].iloc[pos])
+            for _tag, _ep, _dly in (("D_引け+OCO", pc, a.d_stop_delay),
+                                    ("E_翌寄り+OCO", o1, a.stop_delay_bars)):
+                xp, why, _e5, _x5t = _x5(
+                    day5, _INF, _ep + atr * a.sm, _ep - atr * a.tm, False,
+                    day_low=_dl, day_high=_dh, day_close=c1,
+                    stop_delay_bars=_dly)
+                if xp is None or why in ("no_5m", "no_entry"):
+                    continue
+                rec[_tag] = (_ep - float(xp)) * q
+                _reasons[(_tag[0], why)] += 1
     _recs.append(rec)
 if _no5:
     print(f"[warn] 5分足/ATRが揃わず D を計算できず {_no5:,}件")
@@ -229,7 +249,7 @@ print(f"  {'現行 lss (参考)':<18}{len(_cur_pnl):>7,}"
 _res = {}
 _cols = ["A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け"]
 if not a.no_oco:
-    _cols.append("D_引け+OCO")
+    _cols += ["D_引け+OCO", "E_翌寄り+OCO"]
 for col in _cols:
     v = r[col].dropna()
     if v.empty:
@@ -239,14 +259,17 @@ for col in _cols:
     dm = sub.assign(_v=v).groupby("date")["_v"].mean()
     t = (dm.mean() / (dm.std(ddof=1) / (len(dm) ** 0.5))) if len(dm) > 1 else 0.0
     _res[col] = (v.sum(), v.mean(), bp, t)
-    _mark = "  ← 現行と同じ決済" if col.startswith("D_") else ""
+    _mark = ("  ← 引け成行(要 look-ahead)" if col.startswith("D_") else
+             "  ← 寄り成行(実装可能)" if col.startswith("E_") else "")
     print(f"  {col:<18}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%{v.sum():>+14,.0f}"
           f"{v.mean():>+9,.0f}{bp:>+8.1f}{t:>+11.2f}{_mark}")
-if _reasons:
-    _tot5 = sum(_reasons.values())
-    print(f"\n  D の決済理由: " + " / ".join(
-        f"{k} {v:,}件({v/_tot5*100:.0f}%)" for k, v in
-        sorted(_reasons.items(), key=lambda x: -x[1])))
+for _tag in ("D", "E"):
+    _rs = {k[1]: v for k, v in _reasons.items() if k[0] == _tag}
+    if _rs:
+        _tot5 = sum(_rs.values())
+        print(f"  {_tag} の決済理由: " + " / ".join(
+            f"{k} {v:,}件({v / _tot5 * 100:.0f}%)" for k, v in
+            sorted(_rs.items(), key=lambda x: -x[1])))
 
 _a, _b, _c = (_res["A_引け→翌寄り"][1], _res["B_引け→翌引け"][1],
               _res["C_翌寄り→翌引け"][1])
@@ -273,11 +296,11 @@ print("■ 読み方")
 print(f"{'─'*78}")
 print("  ・A(夜だけ) が §18.19 の overnight と同じ向き(ゼロ近傍)なら、")
 print("    lss のシグナルで条件付けても夜に取れるものは無い、が確認できる。")
-print("  ・**判断は D(引け+OCO) で行う**。A/B/C は決済ルールが現行と違うので、")
-print("    そのまま現行と比べられない。D はエントリーだけを『トリガー約定』から")
-print("    『前日引け成行』に置き換えたもの = フェアな比較。")
-print("  ・D が現行 lss に届かないなら、**トリガー(下ブレイク待ち)がエッジ**という")
-print("    §18.19/18.20 の結論どおり。終値で入ると条件を捨てることになる。")
+print("  ・**判断は E(翌寄り+OCO) で行う**。D は終値を見てから終値で約定する")
+print("    先読みを含むので実装できない(シグナルは D の終値で決まる)。")
+print("    D は『上限値』として、E との差 = 先読みの寄与を読むために置いてある。")
+print("  ・E が現行 lss に届かないなら、**トリガー(下ブレイク待ち)がエッジ**という")
+print("    §18.19/18.20 の結論どおり。寄りで入ると条件を捨てることになる。")
 print("  ・D の決済理由も見ること。stop の比率が現行より大幅に高いなら、")
 print("    それは夜間ギャップで損切りラインを飛び越えられている(現行には無いリスク)。")
 print("  ・日クラスタ t で見ること。同日決済でない B/C も、日ごとに相関する。")
