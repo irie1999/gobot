@@ -13339,8 +13339,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<td style="text-align:right;padding:2px 8px;color:#64748b;'
                 f'white-space:nowrap">σ {_sti.stdev(_rp2) if len(_rp2) > 1 else 0:,.0f}</td></tr>')
             # ② 各候補
+            _cmon: dict = {}          # 候補名 -> 月別 pnl (walk-forward 用)
             for _cn, _ck in _cands:
                 _n, _p, _mp = _run(_src, _nof, _ck)
+                _cmon[_cn] = _mp
                 _z, _out = _zband(_rp, _p)
                 _p1, _p2 = _halves(_mp)
                 _z1, _o1 = _zband(_rp1, _p1)
@@ -13374,6 +13376,55 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'white-space:nowrap">'
                     f'{_p2:+,.0f} <span style="font-size:0.72rem">z{_z2:+.2f}</span></td></tr>')
 
+            # ③ walk-forward: 各月、**その月より前だけ**で最良の順序を選んで適用する。
+            #    順序選択のリークを消した形。ランダムは実運用で選べないので候補に
+            #    入れない(候補 = 実際に運用しうる4つ)。
+            #    固定最良を下回るなら「順序を選ぶこと自体に価値がない」。
+            _cw = {k: v for k, v in _cmon.items() if v}
+            if len(_cw) >= 2:
+                _msa = sorted({m for d in _cw.values() for m in d})
+                _cum2 = {k: 0.0 for k in _cw}
+                _wfm2: dict = {}
+                _pk2 = []
+                for _i2, _m2 in enumerate(_msa):
+                    _p2k = (_cands[0][0] if _i2 == 0
+                            else max(_cw, key=lambda k: _cum2[k]))
+                    _wfm2[_m2] = _cw[_p2k].get(_m2, 0.0)
+                    _pk2.append((_m2, _p2k))
+                    for _k2 in _cw:
+                        _cum2[_k2] += _cw[_k2].get(_m2, 0.0)
+                _wp2 = sum(_wfm2.values())
+                _zw, _ow = _zband(_rp, _wp2)
+                _h2 = len(_msa) // 2
+                _w1 = sum(_wfm2[m] for m in _msa[:_h2])
+                _w2 = sum(_wfm2[m] for m in _msa[_h2:])
+                _zw1, _ = _zband(_rp1, _w1)
+                _zw2, _ = _zband(_rp2, _w2)
+                _fixb = max(_cw, key=lambda k: sum(_cw[k].values()))
+                _fixv = sum(_cw[_fixb].values())
+                _rows += (
+                    f'<tr style="background:#1e293b;border-top:1px solid #64748b">'
+                    f'<td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
+                    f'white-space:nowrap">▶ walk-forward 選択</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{_wp2:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                    f'{_ow}/{_NSEED}本より下</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{_zw:+.2f}</td>'
+                    f'<td style="padding:2px 8px;font-size:0.76rem;color:#94a3b8">'
+                    f'固定最良({_fixb} {_fixv:+,.0f})の '
+                    f'<b>{(_wp2 / _fixv * 100 if _fixv else 0):.0f}%</b>'
+                    f' / 選択: '
+                    + " → ".join(f'{m[5:]}:{p}' for m, p in _pk2) + '</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_zw1)};'
+                    f'border-left:1px solid #334155;white-space:nowrap">'
+                    f'{_w1:+,.0f} <span style="font-size:0.72rem">z{_zw1:+.2f}</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_zw2)};'
+                    f'white-space:nowrap">{_w2:+,.0f} '
+                    f'<span style="font-size:0.72rem">z{_zw2:+.2f}</span></td></tr>')
+
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
             f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
@@ -13402,7 +13453,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'前半/後半は同じ帯を期間で割ったもの(それぞれ{_NSEED}本のランダムに対する z)。'
             f'<b>順序の効果は期間で再現しなければ意味がありません</b>(18.28)。'
             f'両方が同じ向きに |z|≥1 で出たものに <span style="color:#4ade80;font-weight:700">✓</span> '
-            f'を付けています。片方だけ大きいものは、その期間のノイズを拾っているだけです。</p></div>')
+            f'を付けています。片方だけ大きいものは、その期間のノイズを拾っているだけです。<br>'
+            f'<b>▶ walk-forward 選択</b> = 各月について<b>その月より前のデータだけ</b>で'
+            f'最良の順序を選び、その月に適用する（初月は既定）。'
+            f'<b>順序選択のリークを消した形</b>です。ランダムは実運用で選べないので'
+            f'候補に入れていません。<br>'
+            f'⚠ <b>walk-forward が固定最良を下回るなら、順序を選ぶこと自体に価値が'
+            f'ありません</b>。その場合は既定(流動性順)のまま動かさないのが正解です。'
+            f'このシムは slip=0 なので、そこで差が付かないなら'
+            f'<b>執行コスト(成行の滑り)で選ぶ</b>ことになります(18.21)。</p></div>')
 
     def _h_variant_html():
         """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
