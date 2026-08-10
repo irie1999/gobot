@@ -392,7 +392,9 @@ if a.by_month:
 if a.sweep_sm.strip() and a.sweep_tm.strip() and not a.no_oco:
     _sms = [float(x) for x in a.sweep_sm.split(",") if x.strip()]
     _tms = [float(x) for x in a.sweep_tm.split(",") if x.strip()]
-    print(f"\n■ sm/tm スイープ (円/件 / {len(r):,}銘柄日 / 摩擦なし)")
+    print(f"\n■ sm/tm スイープ (円/件 / 母集団 {len(r):,}銘柄日 / 摩擦なし)")
+    print(f"  ※ 5分足とATRが揃った行のみ評価。--require-open-bar 指定時は"
+          f"09:00始まりの日だけ(本体の E/G と同じ母集団)。")
     for _lab, _long in (("E ショート", False), ("G ロング", True)):
         print(f"\n  {_lab}   {'sm＼tm':>8}" +
               "".join(f"{t:>10.1f}" for t in _tms))
