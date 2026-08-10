@@ -9879,6 +9879,29 @@ function switchTbd(id, tab) {{
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
+    # ── E/H(エントリー方式の比較)トレードを組み立てる ──────────────
+    #   ここで作るのは**追加タブ用のトレードだけ**。既存の集計・出力には触らない。
+    #   失敗しても空にして続行する(タブが出ないだけ)。無効化: set LSS_EH_TAB=0
+    #   元トレードの dict をコピーして約定・決済だけ差し替えるので、銘柄名・
+    #   BT/WFスコア・ランク・設定ラベルがそのまま残り、明細が他タブと同一になる。
+    _EH_TRADES = {}
+    if (_LSS_ORDER_MODE and cfg_filter is None
+            and not symbol_filter and not strategy_filter
+            and str(os.environ.get("LSS_EH_TAB", "1")).strip()
+            not in ("0", "false", "False", "no")):
+        try:
+            import eh_trades as _eht
+            _EH_TRADES = _eht.build(
+                _bt30_entry_sorted, all_nofills,
+                sm=_LSS_SM, tm=_LSS_TM,
+                stop_delay_bars=int(os.environ.get("LSS_STOP_DELAY_BARS", "1") or 1),
+                gap_guard=0.03, qty=100,
+                workers=int(os.environ.get("LSS_EH_WORKERS", "6") or 6),
+            ) or {}
+        except Exception as _ehe:
+            print(f"[E/H] トレード生成に失敗(タブは出しません): {_ehe}", flush=True)
+            _EH_TRADES = {}
+
     # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の成績。lssのみ。
     #  ・「終値で判断」: 予算に収まるかは注文トリガー価格(order_limit=前日終値ベース)×株数で判定
     #    (約定値ではない=発注時点で確定する必要資金)。
