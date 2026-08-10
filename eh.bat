@@ -22,11 +22,16 @@ REM   Pass-through: .\eh --exclude-months 2026-03   /   .\eh --html eh_report.ht
 REM ============================================================
 cd /d "%~dp0"
 
-if not exist "oos_raw_fold01_*.csv" (
-  echo [error] oos_raw_fold*.csv not found.
-  echo         Run: python run_oos_folds.py --workers 8 --lss-only
+REM Prefer the report's own trade log: same window as the P&L tab, current month
+REM included. Fall back to the rolling-OOS raw data (no current month).
+set "EHSRC=lss_trades.csv"
+if not exist "lss_trades.csv" set "EHSRC=oos_raw_fold*.csv"
+if not exist "lss_trades.csv" if not exist "oos_raw_fold01_*.csv" (
+  echo [error] neither lss_trades.csv nor oos_raw_fold*.csv found.
+  echo         Run .\dailyfast first, or: python run_oos_folds.py --workers 8 --lss-only
   exit /b 1
 )
+echo [source] %EHSRC%
 
 set "TARGET="
 REM The tab lives in the lss pane file. signals_holdout_all_both_*.html is only an
@@ -42,4 +47,4 @@ if not defined TARGET (
   exit /b 1
 )
 echo [target] %TARGET%
-python analyze_overnight_lss.py --raw "oos_raw_fold*.csv" --workers 8 --require-open-bar --inject-html "%TARGET%" %*
+python analyze_overnight_lss.py --raw "%EHSRC%" --workers 8 --require-open-bar --inject-html "%TARGET%" %*

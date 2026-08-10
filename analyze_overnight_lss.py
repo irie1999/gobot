@@ -151,6 +151,26 @@ files = sorted(_glob.glob(a.raw)) if any(c in a.raw for c in "*?[") else [a.raw]
 if not files:
     sys.exit(f"[error] {a.raw} に一致するファイルがありません")
 d = pd.concat([pd.read_csv(f, encoding="utf-8-sig") for f in files], ignore_index=True)
+# ── lss_trades.csv(レポート自身の取引ログ)も読めるようにする ──────────
+#   oos_raw_fold*.csv は run_oos_folds.py が作るローリングOOSの生データで、
+#   当月は含まれない(月が終わっていないため)。レポートの損益タブと同じ母集団・
+#   同じ窓(当月込み)で見たいときは lss_trades.csv を渡す。
+#   列が違うので正規化する:
+#     filled     : reason が「約定せず」以外なら 1
+#     oos_month  : entry_date の YYYY-MM
+#     bt_score   : bt 列
+#   ⚠ どちらを渡したかで母集団が変わる。lss_trades.csv はレポートの表示窓
+#     (既定180日)ぶんしか無いので、10ヶ月の検定には oos_raw を使うこと。
+_SRC = "oos_raw"
+if "filled" not in d.columns and "reason" in d.columns:
+    _SRC = "lss_trades"
+    d["filled"] = (d["reason"].astype(str) != "約定せず").astype(int)
+    if "oos_month" not in d.columns:
+        d["oos_month"] = d["entry_date"].astype(str).str[:7]
+    if "bt_score" not in d.columns and "bt" in d.columns:
+        d["bt_score"] = pd.to_numeric(d["bt"], errors="coerce").fillna(0)
+    print(f"[入力] lss_trades.csv 形式として読み込み "
+          f"(約定 {int(d['filled'].sum()):,} / 不約定 {int((d['filled']==0).sum()):,})")
 if "strategy" in d.columns:
     d = d[d["strategy"].astype(str) != "転換"]        # lss ではない(18.5.3)
 if a.bt_min > 0 and "bt_score" in d.columns:
@@ -1056,7 +1076,7 @@ if a.html.strip() or a.inject_html.strip():
 </p>
 <div class="ehsub">
 {r['日'].min()} 〜 {r['日'].max()} / {r['date'].nunique():,}営業日 / {len(r):,}銘柄日 /
-{a.qty}株固定 / 摩擦なし(slip=0)　
+{a.qty}株固定 / 摩擦なし(slip=0) / 出所 <b>{_SRC}</b>　
 <span class="ehmut">※ このタブは<b>予算制約なし</b>(全シグナルを建てた場合)。
 隣の「{"{}".format("400万円×流動性順×日別")}」は予算込みなので直接は比較できない。
 予算込みの E/H 比較は compare_budget_raw.py</span>
