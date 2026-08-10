@@ -48,10 +48,8 @@ set "LSS_TRADES_CSV=lss_trades_oos11.csv"
 
 REM --- merge ONLY the bases up to 2025-11 ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py --out lss_proposal_cumul_to202511.py
-if errorlevel 1 (
-  echo [error] merge failed. Check that lss_proposal_2025-09/10/11.py exist.
-  exit /b 1
-)
+if errorlevel 1 echo [error] merge failed. Check that lss_proposal_2025-09/10/11.py exist.
+if errorlevel 1 exit /b 1
 
 REM --- how many pairs did we keep vs the full cumulative pool? ---
 if exist lss_proposal_cumul.py python diff_proposals.py lss_proposal_cumul.py lss_proposal_cumul_to202511.py
