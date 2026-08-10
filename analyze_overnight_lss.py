@@ -27,6 +27,10 @@ r"""analyze_overnight_lss.py — 「終値で入って翌日売る」を lss の
   D 引け+OCO     : D終値で空売り → D+1を**現行と同じ決済**で処理
                    (損切 +sm×ATR / 利確 -tm×ATR / 未達なら引けタイムカット)
   E 翌寄り+OCO   : D+1始値で空売り → 同じ決済。**実装できるのはこちら**
+  F 5分足寄り+OCO: E と同じだが 5分足の先頭バー始値で入る(データ整合の確認用)
+  G 翌寄りロング  : D+1始値で **買い** → 損切-sm×ATR / 利確+tm×ATR。E の鏡像。
+                   §18.18 の LDT はトリガー付き(前日終値+1ティックの逆指値買い)
+                   だったので別物。トリガー無しのロングは未測定だった。
 
 A/B/C は無条件決済なので、そのままでは現行と比べられない(現行はOCOで決済している)。
 決済を揃えた D/E で判断する。A/B/C は内訳(夜 / 日中)を読むための分解。
@@ -177,6 +181,7 @@ if not a.no_oco:
     try:
         from daytrade_data import load_intraday as _li, split_by_day as _sbd
         from sameday5m_firsttouch import short_exit_5m as _x5
+        from sameday5m_firsttouch import long_exit_5m as _l5
         from intraday_integrity import day_scale_ok as _ig_ok   # 18.27 分割未調整ガード
     except Exception as e:
         print(f"[warn] 5分足の経路が使えません({e}) → D(引け+OCO)はスキップ")
@@ -229,6 +234,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "D_引け+OCO": None,
         "E_翌寄り+OCO": None,
         "F_5分足寄り+OCO": None,
+        "G_翌寄りロング+OCO": None,
         "始値差bp": None,
         "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
         "bar0": "",
@@ -273,20 +279,33 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                 _o5 = 0.0
             if _o5 > 0:
                 rec["始値差bp"] = (o1 - _o5) / _o5 * 10_000
-            for _tag, _ep, _dly in (("D_引け+OCO", pc, a.d_stop_delay),
-                                    ("E_翌寄り+OCO", o1, a.stop_delay_bars),
-                                    ("F_5分足寄り+OCO", _o5, a.stop_delay_bars)):
+            # ロング側のガードは鏡像(+3%を超えるギャップアップは約定不可)
+            _gap_ng_l = (a.gap_guard > 0 and o1 > pc * (1.0 + a.gap_guard))
+            for _tag, _ep, _dly, _long in (
+                    ("D_引け+OCO", pc, a.d_stop_delay, False),
+                    ("E_翌寄り+OCO", o1, a.stop_delay_bars, False),
+                    ("F_5分足寄り+OCO", _o5, a.stop_delay_bars, False),
+                    ("G_翌寄りロング+OCO", o1, a.stop_delay_bars, True)):
                 if _ep <= 0:
                     continue
-                if _gap_ng and not _tag.startswith("D_"):
+                if not _long and _gap_ng and not _tag.startswith("D_"):
                     continue                      # 寄り約定はガードが効く
-                xp, why, _e5, _x5t = _x5(
-                    day5, _INF, _ep + atr * a.sm, _ep - atr * a.tm, False,
-                    day_low=_dl, day_high=_dh, day_close=c1,
-                    stop_delay_bars=_dly)
+                if _long and _gap_ng_l:
+                    continue
+                if _long:
+                    # ロング: 損切=下 / 利確=上。entry_p に -inf を渡して ei=0 を強制
+                    # (寄りから建玉がある。short 側と同じ理由 = §18.32 のバグ①)
+                    xp, why, _e5, _x5t = _l5(
+                        day5, -_INF, _ep - atr * a.sm, _ep + atr * a.tm,
+                        day_high=_dh, day_close=c1, stop_delay_bars=_dly)
+                else:
+                    xp, why, _e5, _x5t = _x5(
+                        day5, _INF, _ep + atr * a.sm, _ep - atr * a.tm, False,
+                        day_low=_dl, day_high=_dh, day_close=c1,
+                        stop_delay_bars=_dly)
                 if xp is None or why in ("no_5m", "no_entry"):
                     continue
-                rec[_tag] = (_ep - float(xp)) * q
+                rec[_tag] = ((float(xp) - _ep) if _long else (_ep - float(xp))) * q
                 _reasons[(_tag[0], why)] += 1
     _recs.append(rec)
 if _no5:
@@ -311,7 +330,8 @@ print(f"  {'現行 lss (参考)':<18}{len(_cur_pnl):>7,}"
 _res = {}
 _cols = ["A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け"]
 if not a.no_oco:
-    _cols += ["D_引け+OCO", "E_翌寄り+OCO", "F_5分足寄り+OCO"]
+    _cols += ["D_引け+OCO", "E_翌寄り+OCO", "F_5分足寄り+OCO",
+              "G_翌寄りロング+OCO"]
 for col in _cols:
     v = r[col].dropna()
     if v.empty:
@@ -323,10 +343,11 @@ for col in _cols:
     _res[col] = (v.sum(), v.mean(), bp, t)
     _mark = ("  ← 引け成行(要 look-ahead)" if col.startswith("D_") else
              "  ← 寄り成行(日足の始値)" if col.startswith("E_") else
-             "  ← 寄り成行(5分足の始値)" if col.startswith("F_") else "")
+             "  ← 寄り成行(5分足の始値)" if col.startswith("F_") else
+             "  ← **ロング**(E の鏡像)" if col.startswith("G_") else "")
     print(f"  {col:<18}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%{v.sum():>+14,.0f}"
           f"{v.mean():>+9,.0f}{bp:>+8.1f}{t:>+11.2f}{_mark}")
-for _tag in ("D", "E", "F"):
+for _tag in ("D", "E", "F", "G"):
     _rs = {k[1]: v for k, v in _reasons.items() if k[0] == _tag}
     if _rs:
         _tot5 = sum(_rs.values())
@@ -380,7 +401,7 @@ if a.control > 0 and not a.no_oco:
     _rg = _rnd.Random(a.control_seed)
     _sig_set = {(str(x), pd.Timestamp(y).date())
                 for x, y in zip(u["symbol"], u["entry_date"])}
-    _cv, _cd, _tried = [], [], 0
+    _cv, _cd, _clv, _tried = [], [], [], 0
     _cands = [(sm, list(dd.keys())) for sm, dd in _i5.items() if dd]
     while len(_cv) < a.control and _tried < a.control * 60 and _cands:
         _tried += 1
@@ -415,6 +436,12 @@ if a.control > 0 and not a.no_oco:
             continue
         _cv.append((o_ - float(xp)) * a.qty)
         _cd.append(pd.Timestamp(dt))
+        if not (a.gap_guard > 0 and o_ > pc_ * (1.0 + a.gap_guard)):
+            xl, wl, _, _ = _l5(day5, -float("inf"), o_ - atr_ * a.sm,
+                               o_ + atr_ * a.tm, day_high=float(df["h"].iloc[pos]),
+                               day_close=c_, stop_delay_bars=a.stop_delay_bars)
+            if xl is not None and wl not in ("no_5m", "no_entry"):
+                _clv.append((float(xl) - o_) * a.qty)
     if _cv:
         cs = pd.Series(_cv)
         cdm = pd.DataFrame({"d": _cd, "v": _cv}).groupby("d")["v"].mean()
@@ -429,6 +456,13 @@ if a.control > 0 and not a.no_oco:
               f"{(cs > 0).mean()*100:>6.1f}%{cs.mean():>+9,.0f}{ct:>+11.2f}")
         print(f"  差 (E − 対照)                              "
               f"{_ev.mean() - cs.mean():>+9,.0f}円/件")
+        if _clv:
+            _gvv = r["G_翌寄りロング+OCO"].dropna()
+            cl = pd.Series(_clv)
+            print(f"  {'G ロング(シグナルあり)':<26}{len(_gvv):>7,}"
+                  f"{(_gvv > 0).mean()*100:>6.1f}%{_gvv.mean():>+9,.0f}")
+            print(f"  {'対照ロング(シグナルなし)':<26}{len(cl):>7,}"
+                  f"{(cl > 0).mean()*100:>6.1f}%{cl.mean():>+9,.0f}")
         if abs(cs.mean()) > abs(_ev.mean()) * 0.5:
             print(f"  ⛔ **対照でも同じだけ出ている。E の数字はシグナルのエッジではなく、")
             print(f"     0.1/1.0 という OCO の払い出し形状(と測定の非対称)の産物。**")
@@ -506,6 +540,9 @@ print("    §18.19/18.20 の結論どおり。寄りで入ると条件を捨て�
 print("  ・D の決済理由も見ること。stop の比率が現行より大幅に高いなら、")
 print("    それは夜間ギャップで損切りラインを飛び越えられている(現行には無いリスク)。")
 print("  ・日クラスタ t で見ること。同日決済でない B/C も、日ごとに相関する。")
+print("  ・G(ロング)は E の鏡像。無条件のドリフトはゼロ(§18.19)なので、E がプラスで")
+print("    G もプラスなら **OCO の払い出しが両方向で有利に出ている** = どこかに")
+print("    測定の非対称がある。片方だけプラスが正常な形。")
 print("  ⛔ **配当落ち**: 日本株は3月期末・9月中間に権利落ちが集中する。空売りは")
 print("     配当落調整金を払うので、夜またぎ(A/B/D)がその分だけ現実には存在しない")
 print("     利益を計上している。--exclude-months 2026-03 等で影響を測ること。")
