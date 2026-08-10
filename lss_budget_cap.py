@@ -192,9 +192,16 @@ def main() -> int:
     plan = []
     placed_not = 0.0
     for s in signals:
-        if placed_not >= cap:
-            break
         note = s["_ord_p"] * args.qty
+        if _auction:
+            # ⛔ 寄指は寄付で**一斉に約定**するので、枠を超えた分を後から取り消せない。
+            #    逆指値のように「1件だけ超過を許す」と、その超過がそのまま建玉になる
+            #    (実測 2026-08-10: 枠400万に対し注文額累計 433万)。
+            #    超えるものは入れずに次へ(安い銘柄ならまだ枠に入るので break しない)。
+            if placed_not + note > cap:
+                continue
+        elif placed_not >= cap:
+            break
         plan.append(s)
         placed_not += note
 
