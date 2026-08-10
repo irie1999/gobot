@@ -50,3 +50,20 @@ entry_delay_analysis*.html
 .claude/worktrees/
 .sameday5m_cache/
 .lss_scan_cache/
+
+# ── 実行のたびに作られる生成物(2026-08-10: 誤って commit して pull が壊れた) ──
+# これらが追跡されていると、各PCで再生成されるたびに「ローカル変更」になり
+# git pull が Aborting する。中身は毎回作り直されるので履歴に残す意味は無い。
+signals_*.json
+holdout_selected_symbols.py
+signals_holdout_all*.html
+lss_trades*.csv
+placed_orders_*.csv
+ordered_signals_lss.csv*
+fills_*.csv
+orders_*.csv
+tenkan_*.csv
+slip_daily_log.csv
+signal_score_cache_lss.json*
+bt_v*.pkl
+holdings_latest.html
