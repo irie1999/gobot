@@ -1019,37 +1019,90 @@ function ehSw(el, i){{
         print(f"\n[HTML] {_P(a.html).resolve()}  ({len(_trows):,}行)")
 
     if a.inject_html.strip():
+        import re as _re
         _tgt = _P(a.inject_html)
         if not _tgt.exists():
             print(f"[error] {_tgt} が見つかりません")
         else:
-            _doc = _tgt.read_text(encoding="utf-8")
-            _BTN = ('\n  <button class="ho-outer-btn" onclick="switchHoTab(\'eh\')">'
-                    '&#x1F501; E/H 比較</button>')
-            # ⚠ 除去は**コメントマーカー**で挟む。div の対応で削ろうとすると、
-            #    中身にも "\n</div>\n" が現れるので非貪欲マッチが途中で止まり、
-            #    <script> と閉じ div が取り残される(実際に踏んだ)。
-            _S, _E = "<!--EH-TAB-START-->", "<!--EH-TAB-END-->"
-            _PANE = (f'\n{_S}\n<div id="ho-eh" class="ho-outer-pane">\n'
-                     f'{_EH_BODY}\n</div>\n{_E}\n')
-            if _S in _doc:                # 既に差し込み済みなら丸ごと入れ替える
-                _a0, _b0 = _doc.find(_S), _doc.find(_E)
-                if _a0 >= 0 and _b0 > _a0:
-                    _doc = _doc[:_a0].rstrip("\n") + "\n" + _doc[_b0 + len(_E):]
-                _doc = _doc.replace(_BTN, "")
-            _nav = '<div class="ho-outer-nav">'
-            _i = _doc.find(_nav)
-            _j = _doc.find("</div>", _i) if _i >= 0 else -1
-            if _i < 0 or _j < 0:
-                print("[error] ho-outer-nav が見つかりません。"
-                      "レポートのタブ構造が変わった可能性があります")
-            else:
-                _doc = _doc[:_j] + _BTN + "\n" + _doc[_j:]
-                _k = _doc.rfind("</body>")
-                _doc = (_doc[:_k] + _PANE + _doc[_k:]) if _k > 0 else (_doc + _PANE)
-                _tgt.with_suffix(_tgt.suffix + ".bak").write_text(
-                    _P(a.inject_html).read_text(encoding="utf-8"), encoding="utf-8")
+            _orig = _tgt.read_text(encoding="utf-8")
+            _doc = _orig
+            # ── 既存の差し込みを除去(冪等) ─────────────────────────
+            #    ⚠ div の対応で削ると中身の "\n</div>\n" で非貪欲マッチが途中で
+            #      止まり <script> と閉じ div が取り残される。マーカーで挟む。
+            for _s0, _e0 in (("<!--EH-BTN-START-->", "<!--EH-BTN-END-->"),
+                             ("<!--EH-PANE-START-->", "<!--EH-PANE-END-->"),
+                             ("<!--EH-TAB-START-->", "<!--EH-TAB-END-->")):
+                while _s0 in _doc:
+                    _a0, _b0 = _doc.find(_s0), _doc.find(_e0)
+                    if _a0 < 0 or _b0 < _a0:
+                        break
+                    _doc = _doc[:_a0] + _doc[_b0 + len(_e0):]
+            _doc = _re.sub(
+                r'\n?\s*<button class="ho-outer-btn" onclick="switchHoTab.eh.>'
+                r'.*?</button>', "", _doc, flags=_re.S)
+
+            # ── ① 損益タブの中(転換の隣)に入れる ────────────────────
+            #    ボタン: <button class="detail-tab-btn"
+            #             onclick="switchDetailTab(<seq>,'tenkan')">…</button>
+            #    ペイン: <div id="detail_<seq>_tenkan" class="detail-tab-pane">
+            #    switchDetailTab は id の接頭辞で走査するので登録は不要
+            #    (nikkei_analysis.py:13535)。ペインは同じ親に居ればよいので、
+            #    転換ペインの**直前**に差し込む(閉じ div を探さずに済む)。
+            _m = (_re.search(r"switchDetailTab\((\d+),'tenkan'\)", _doc)
+                  or _re.search(r"switchDetailTab\((\d+),'all'\)", _doc))
+            _done = False
+            if _m:
+                _seq = _m.group(1)
+                _anch = (f"switchDetailTab({_seq},'tenkan')"
+                         if f"switchDetailTab({_seq},'tenkan')" in _doc
+                         else f"switchDetailTab({_seq},'all')")
+                _bi = _doc.find(_anch)
+                _be = _doc.find("</button>", _bi)
+                _pk = (f'<div id="detail_{_seq}_tenkan" class="detail-tab-pane">'
+                       if f'id="detail_{_seq}_tenkan"' in _doc
+                       else f'<div id="detail_{_seq}_all" class="detail-tab-pane')
+                _pi = _doc.find(_pk)
+                if _be > 0 and _pi > 0:
+                    _btn = ('<!--EH-BTN-START-->'
+                            f'<button class="detail-tab-btn" '
+                            f'onclick="switchDetailTab({_seq},\'eh\')" '
+                            f'style="border-color:#a78bfa">&#x1F501; E/H 比較 '
+                            f'<span style="font-size:0.72rem;color:#c4b5fd">'
+                            f'({len(_trows):,}件)</span></button>'
+                            '<!--EH-BTN-END-->')
+                    _pane = ('\n<!--EH-PANE-START-->\n'
+                             f'<div id="detail_{_seq}_eh" class="detail-tab-pane">\n'
+                             f'{_EH_BODY}\n</div>\n<!--EH-PANE-END-->\n')
+                    _doc = _doc[:_pi] + _pane + _doc[_pi:]
+                    _be2 = _doc.find("</button>", _doc.find(_anch)) + len("</button>")
+                    _doc = _doc[:_be2] + _btn + _doc[_be2:]
+                    _done = True
+                    _where = f"損益タブ内(転換の隣) / detail_{_seq}_eh"
+
+            # ── ② 見つからなければ外側タブにフォールバック ──────────
+            if not _done:
+                _nav = '<div class="ho-outer-nav">'
+                _i2 = _doc.find(_nav)
+                _j2 = _doc.find("</div>", _i2) if _i2 >= 0 else -1
+                if _i2 < 0 or _j2 < 0:
+                    print("[error] タブ構造が見つかりません。"
+                          "レポートの生成コードが変わった可能性があります")
+                    _tgt = None
+                else:
+                    _BTN = ('\n  <button class="ho-outer-btn" '
+                            'onclick="switchHoTab(\'eh\')">&#x1F501; E/H 比較</button>')
+                    _doc = _doc[:_j2] + _BTN + "\n" + _doc[_j2:]
+                    _k2 = _doc.rfind("</body>")
+                    _pane = (f'\n<!--EH-TAB-START-->\n'
+                             f'<div id="ho-eh" class="ho-outer-pane">\n{_EH_BODY}\n'
+                             f'</div>\n<!--EH-TAB-END-->\n')
+                    _doc = (_doc[:_k2] + _pane + _doc[_k2:]) if _k2 > 0 else _doc + _pane
+                    _done = True
+                    _where = "外側タブ (ho-eh) ※損益タブ内が見つからず"
+
+            if _done and _tgt is not None:
+                _P(str(_tgt) + ".bak").write_text(_orig, encoding="utf-8")
                 _tgt.write_text(_doc, encoding="utf-8")
                 print(f"\n[差し込み] {_tgt.resolve()}")
-                print(f"  タブ『🔁 E/H 比較』を追加しました ({len(_trows):,}行)")
+                print(f"  {_where}  ({len(_trows):,}行)")
                 print(f"  元のファイルは {_tgt.name}.bak に退避")
