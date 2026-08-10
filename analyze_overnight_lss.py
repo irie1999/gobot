@@ -253,6 +253,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "lss建値": (float(_lss_ep.get((sym, ed), 0) or 0)
                     if _lss_ep is not None else 0.0),
         "E0_9時から建値は現行": None,
+        "H_前日終値で指値売り": None,
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -324,6 +325,20 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     continue
                 rec[_tag] = ((float(xp) - _ep) if _long else (_ep - float(xp))) * q
                 _reasons[(_tag[0], why)] += 1
+            # H(mirror): **前日終値で指値空売り**。上昇して前日終値に到達したら約定。
+            #   寄りが既に前日終値以上なら板寄せで約定(=始値。前日終値より高い=有利)。
+            #   到達しなければ**建てない**(=強い下げの日を取り逃がす。ここが弱点)。
+            #   分解の示唆(『待つのは正しい』+『高く売るのが効く』)を両立させる形。
+            #   ガードは mirror 側の鏡像(+3%超のギャップアップはスキップ / §18.8)。
+            if not (a.gap_guard > 0 and o1 > pc * (1.0 + a.gap_guard)):
+                _hp = o1 if o1 >= pc else pc      # 寄りが上なら板寄せ約定=始値
+                xph, whyh, _, _ = _x5(
+                    day5, _hp, _hp + atr * a.sm, _hp - atr * a.tm, True,
+                    day_low=_dl, day_high=_dh, day_close=c1,
+                    stop_delay_bars=a.stop_delay_bars)
+                if xph is not None and whyh not in ("no_5m", "no_entry"):
+                    rec["H_前日終値で指値売り"] = (_hp - float(xph)) * q
+                    _reasons[("H", whyh)] += 1
             # E0: **09:00から持つ**が、建値もバリアも**現行の約定値**から取る。
             #  現行 → E0  = 露出時刻だけの差(建値は同じ)
             #  E0   → E   = 建値だけの差(露出は同じ)
@@ -360,7 +375,7 @@ _res = {}
 _cols = ["A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け"]
 if not a.no_oco:
     _cols += ["D_引け+OCO", "E_翌寄り+OCO", "F_5分足寄り+OCO",
-              "G_翌寄りロング+OCO"]
+              "G_翌寄りロング+OCO", "H_前日終値で指値売り"]
 for col in _cols:
     v = r[col].dropna()
     if v.empty:
@@ -373,10 +388,11 @@ for col in _cols:
     _mark = ("  ← 引け成行(要 look-ahead)" if col.startswith("D_") else
              "  ← 寄り成行(日足の始値)" if col.startswith("E_") else
              "  ← 寄り成行(5分足の始値)" if col.startswith("F_") else
-             "  ← **ロング**(E の鏡像)" if col.startswith("G_") else "")
+             "  ← **ロング**(E の鏡像)" if col.startswith("G_") else
+             "  ← mirror(待って高く売る)" if col.startswith("H_") else "")
     print(f"  {col:<18}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%{v.sum():>+14,.0f}"
           f"{v.mean():>+9,.0f}{bp:>+8.1f}{t:>+11.2f}{_mark}")
-for _tag in ("D", "E", "F", "G"):
+for _tag in ("D", "E", "F", "G", "H"):
     _rs = {k[1]: v for k, v in _reasons.items() if k[0] == _tag}
     if _rs:
         _tot5 = sum(_rs.values())
