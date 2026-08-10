@@ -13275,13 +13275,28 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                  src=src, nofills=nof, order_key=key)
             _mp = _months_pnl(_r)
             _n = sum(1 for _t in _r if _t.get("reason") not in ("発注中", "保有中"))
-            return _n, sum(_mp.values()), list(_mp.values())
+            return _n, sum(_mp.values()), _mp
+
+        def _halves(_mp):
+            """月別 pnl を前半/後半に割る。順序の効果が期間で再現するかを見る。"""
+            _ms = sorted(_mp)
+            _h = len(_ms) // 2
+            return (sum(_mp[m] for m in _ms[:_h]),
+                    sum(_mp[m] for m in _ms[_h:]))
+
+        def _zband(vals, v):
+            _mu = _sti.mean(vals)
+            _sd = _sti.stdev(vals) if len(vals) > 1 else 0.0
+            return ((v - _mu) / _sd if _sd > 0 else 0.0,
+                    sum(1 for x in vals if x > v))
 
         _rows = ""
         for _name, _src, _nof in _srcs:
             # ① ランダム帯
             _rs = [_run(_src, _nof, _rand_key(i)) for i in range(_NSEED)]
             _rp = [r[1] for r in _rs]
+            _rh = [_halves(r[2]) for r in _rs]      # 各シードの (前半, 後半)
+            _rp1, _rp2 = [h[0] for h in _rh], [h[1] for h in _rh]
             _mu, _sd = _sti.mean(_rp), (_sti.stdev(_rp) if len(_rp) > 1 else 0.0)
             _rows += (
                 f'<tr style="border-top:1px solid #475569">'
@@ -13296,20 +13311,32 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<td style="text-align:right;padding:2px 8px;color:#64748b">σ {_sd:,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
                 f'<td style="padding:2px 8px;font-size:0.76rem;color:#64748b">'
-                f'最小 {min(_rp):+,.0f} / 最大 {max(_rp):+,.0f}</td></tr>')
+                f'最小 {min(_rp):+,.0f} / 最大 {max(_rp):+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b;'
+                f'border-left:1px solid #334155;white-space:nowrap">σ {_sti.stdev(_rp1) if len(_rp1) > 1 else 0:,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b;'
+                f'white-space:nowrap">σ {_sti.stdev(_rp2) if len(_rp2) > 1 else 0:,.0f}</td></tr>')
             # ② 各候補
             for _cn, _ck in _cands:
-                _n, _p, _ = _run(_src, _nof, _ck)
-                _z = (_p - _mu) / _sd if _sd > 0 else 0.0
-                _out = sum(1 for v in _rp if v > _p)      # 帯の中での順位
+                _n, _p, _mp = _run(_src, _nof, _ck)
+                _z, _out = _zband(_rp, _p)
+                _p1, _p2 = _halves(_mp)
+                _z1, _o1 = _zband(_rp1, _p1)
+                _z2, _o2 = _zband(_rp2, _p2)
                 if _z >= 2:
                     _v, _c = "帯の外(上) → 有意に良い", "#4ade80"
                 elif _z <= -2:
                     _v, _c = "帯の外(下) → 有意に悪い", "#f87171"
                 else:
                     _v, _c = "帯の中 → ランダムと区別できない", "#94a3b8"
+                # 前半/後半で同じ向きに出るか。片方だけなら期間のノイズ。
+                def _hc(z):
+                    return "#4ade80" if z >= 1 else "#f87171" if z <= -1 else "#94a3b8"
+                _rep = ("✓" if (_z1 >= 1 and _z2 >= 1) or (_z1 <= -1 and _z2 <= -1)
+                        else "")
                 _rows += (
-                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_cn}</td>'
+                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_cn}'
+                    f'<span style="color:#4ade80;font-weight:700"> {_rep}</span></td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_n:,}</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
                     f'font-weight:700">{_p:+,.0f}</td>'
@@ -13317,7 +13344,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'{_out}/{_NSEED}本より下</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:{_c};'
                     f'font-weight:700">{_z:+.2f}</td>'
-                    f'<td style="padding:2px 8px;font-size:0.76rem;color:{_c}">{_v}</td></tr>')
+                    f'<td style="padding:2px 8px;font-size:0.76rem;color:{_c}">{_v}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_z1)};'
+                    f'border-left:1px solid #334155;white-space:nowrap">'
+                    f'{_p1:+,.0f} <span style="font-size:0.72rem">z{_z1:+.2f}</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_z2)};'
+                    f'white-space:nowrap">'
+                    f'{_p2:+,.0f} <span style="font-size:0.72rem">z{_z2:+.2f}</span></td></tr>')
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
@@ -13339,8 +13372,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th};text-align:left">発注順</th>'
             f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
             f'<th style="{_th}">帯の位置</th><th style="{_th}">z</th>'
-            f'<th style="{_th};text-align:left">判定</th></tr></thead>'
-            f'<tbody>{_rows}</tbody></table></div>')
+            f'<th style="{_th};text-align:left">判定</th>'
+            f'<th style="{_th};border-left:1px solid #334155">前半</th>'
+            f'<th style="{_th}">後半</th></tr></thead>'
+            f'<tbody>{_rows}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.7">'
+            f'前半/後半は同じ帯を期間で割ったもの(それぞれ{_NSEED}本のランダムに対する z)。'
+            f'<b>順序の効果は期間で再現しなければ意味がありません</b>(18.28)。'
+            f'両方が同じ向きに |z|≥1 で出たものに <span style="color:#4ade80;font-weight:700">✓</span> '
+            f'を付けています。片方だけ大きいものは、その期間のノイズを拾っているだけです。</p></div>')
 
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
