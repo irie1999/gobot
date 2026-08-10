@@ -100,7 +100,7 @@ def main() -> int:
     ap.add_argument("--prod", action="store_true", help="本番(18080)。未指定=デモ(18081)")
     ap.add_argument("--budget", type=float, default=4_000_000.0, help="予算(円)。約定累計がこれに達したら残り注文を取消")
     ap.add_argument("--budget-multiple", type=float, default=2.0,
-                    help="予算の何倍ぶん注文を出すか(over-subscribe)。実測fill率~50%なら2.0で予算ちょうど埋まる")
+                    help="予算の何倍ぶん注文を出すか(over-subscribe)。実測fill率~50%%なら2.0で予算ちょうど埋まる")
     ap.add_argument("--min-price", type=float, default=1000.0, help="対象最低株価(実運用 daily=1000)")
     ap.add_argument("--max-price", type=float, default=6000.0, help="対象最高株価(実運用 daily=6000)")
     ap.add_argument("--bt-min", type=float, default=0.0, help="BT下限(§18.2は BT30以上・降順。既定0=全件をBT降順)")

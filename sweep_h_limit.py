@@ -49,7 +49,7 @@ ap.add_argument("--offset-mode", choices=["ticks", "pct", "atr"], default="ticks
                      "ticks=呼値の個数(既定) / pct=前日終値に対する%% / "
                      "atr=前日ATRの倍数。"
                      "⛔ ticks は**株価によって意味が5倍変わる**"
-                     "(1,000円株の-2tick=-1.00% vs 4,900円株の-2tick=-0.20%)。"
+                     "(1,000円株の-2tick=-1.00%% vs 4,900円株の-2tick=-0.20%%)。"
                      "この価格帯の呼値は 1,000-4,999円=5円 / 5,000円以上=10円 で固定。"
                      "揃えて比べるなら pct か atr を使うこと")
 ap.add_argument("--sm", type=float, default=0.1)
