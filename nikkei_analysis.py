@@ -13077,20 +13077,40 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                     f'{pos}/{nm}</td></tr>')
 
-        # 対応のある検定
-        _pr = ""
-        for x, y in (("E", "現行"), ("H", "現行"), ("H", "E")):
+        # ── 対応のある検定 ────────────────────────────────────────────
+        # ⛔ CI は **t分布**で作ること。正規近似(1.96)は月数が少ないほど CI を
+        #    狭く見せて『有意』を作ってしまう。実測(2026-08-10): n=10 / t=+2.02 は
+        #    1.96 なら全域プラスだが、正しい 2.262 ではゼロをまたぐ。
+        #    前半/後半に割ると n=5(臨界値 2.776)なので影響はさらに大きい。
+        _TCRIT = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+                  7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+                  13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110,
+                  18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074,
+                  23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052,
+                  28: 2.048, 29: 2.045, 30: 2.042}
+
+        def _paired(x, y, months):
+            """月ごとに対応をとった差の (平均, t, CI下, CI上, 勝ち月, 月数)。"""
             if x not in _agg or y not in _agg:
-                continue
-            ms = [m for m in _use if m in _agg[x] and m in _agg[y]]
+                return None
+            ms = [m for m in months if m in _agg[x] and m in _agg[y]]
             ds = [_agg[x][m]["p"] - _agg[y][m]["p"] for m in ms]
             if len(ds) < 2:
-                continue
+                return None
             mu = _sti.mean(ds)
-            sd = _sti.stdev(ds)
-            se = sd / (len(ds) ** 0.5)
-            t = mu / se if se > 0 else 0.0
-            lo, hi = mu - 1.96 * se, mu + 1.96 * se
+            se = _sti.stdev(ds) / (len(ds) ** 0.5)
+            c = _TCRIT.get(len(ds) - 1, 1.96)
+            return (mu, (mu / se if se > 0 else 0.0),
+                    mu - c * se, mu + c * se,
+                    sum(1 for d in ds if d > 0), len(ds))
+
+        _PAIRS = (("E", "現行"), ("H", "現行"), ("H", "E"))
+        _pr = ""
+        for x, y in _PAIRS:
+            _r = _paired(x, y, _use)
+            if not _r:
+                continue
+            mu, t, lo, hi, win, nn = _r
             _v = ("<b style='color:#4ade80'>CI全域プラス → 優れている</b>" if lo > 0 else
                   "<b style='color:#f87171'>CI全域マイナス → 劣る</b>" if hi < 0 else
                   "<span style='color:#94a3b8'>CIがゼロをまたぐ → <b>差を検出できていない</b></span>")
@@ -13102,8 +13122,38 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                     f'white-space:nowrap">{lo:+,.0f} 〜 {hi:+,.0f}</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                    f'{sum(1 for d in ds if d > 0)}/{len(ds)}</td>'
+                    f'{win}/{nn}</td>'
                     f'<td style="padding:2px 8px;font-size:0.78rem">{_v}</td></tr>')
+
+        # ── 期間を2つに割った検定(擬似OOS) ────────────────────────────
+        # H の指値位置・寄指は **この窓全体**を見て選んでいる = not OOS。
+        # 前半だけで決めたと仮定して後半を見るのが、手元でできる唯一の分割。
+        # ⚠ 各5ヶ月では t の検出力はほぼ無い。**符号と勝ち月**を見ること。
+        _sp = ""
+        _ord_use = sorted(_use)
+        _hlf = len(_ord_use) // 2
+        _seg = [("前半（設定を決めるのに使った側）", _ord_use[:_hlf]),
+                ("後半（決定に使っていない側）", _ord_use[_hlf:])]
+        if _hlf >= 2:
+            for _sname, _sms in _seg:
+                _cells = ""
+                for x, y in _PAIRS:
+                    _r = _paired(x, y, _sms)
+                    if not _r:
+                        _cells += ('<td style="text-align:center;color:#475569;'
+                                   'padding:2px 8px;border-left:1px solid #334155">—</td>')
+                        continue
+                    mu, t, lo, hi, win, nn = _r
+                    _c = "#4ade80" if mu > 0 else "#f87171"
+                    _cells += (f'<td style="text-align:right;padding:2px 8px;'
+                               f'border-left:1px solid #334155;white-space:nowrap">'
+                               f'<b style="color:{_c}">{mu:+,.0f}</b>'
+                               f'<span style="color:#64748b;font-size:0.72rem"> '
+                               f't={t:+.2f} {win}/{nn}勝</span></td>')
+                _sp += (f'<tr><td style="padding:2px 8px;color:#e2e8f0;'
+                        f'white-space:nowrap">{_sname}<br>'
+                        f'<span style="color:#64748b;font-size:0.7rem">'
+                        f'{_sms[0]}〜{_sms[-1]}</span></td>{_cells}</tr>')
 
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
@@ -13125,6 +13175,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                f'損切り遅延 <b>{int(getattr(_bte_mod, "_LSS_STOP_DELAY_BARS", 0) or 0)}</b>本 ・ '
                f'損切 <b>{_LSS_SM}</b>ATR / 利確 <b>{_LSS_TM}</b>ATR ・ '
                f'手数料 <b>{getattr(_bte_mod, "FEE_PCT_ONE_WAY", 0) * 100:.3f}%</b>片道 ・ '
+               # H の設定を必ず刻む。ここが無いと後から見て何の設定か分からない。
+               f'H の指値 <b>前日終値{int(os.environ.get("LSS_H_LIMIT_TICKS", "0") or 0):+d}</b>tick'
+               f'/<b>{"寄指(板寄せのみ)" if str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() in ("1", "true", "True", "yes") else "板寄せ+ザラ場到達"}</b> ・ '
                f'生成 <b>{_TODAY}</b>'
                f'<br>⚠ 窓や予算が違う別ファイルの数字と見比べないこと。t は月数で変わります。</p>')
             + f'<table style="border-collapse:collapse;width:auto;font-size:0.8rem">'
@@ -13144,7 +13197,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">平均差/月</th><th style="{_th}">t</th>'
             f'<th style="{_th}">95%CI(月)</th><th style="{_th}">勝ち月</th>'
             f'<th style="{_th};text-align:left">判定</th></tr></thead>'
-            f'<tbody>{_pr}</tbody></table></div>')
+            f'<tbody>{_pr}</tbody></table>'
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:12px 0 4px">期間を2つに割った検定（擬似OOS）</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'⛔ <b>H の指値位置と寄指は、この窓<u>全体</u>を見て選んでいます（＝OOSではない）。</b>'
+                f'前半だけで決めたと仮定して後半を見るのが、手元のデータでできる唯一の分割です。'
+                f'<br>⚠ 各{_hlf}ヶ月では t の検出力はほとんどありません。'
+                f'<b>金額の符号と勝ち月</b>を見てください。前半で勝って後半で負けるなら、'
+                f'その差は期間に合わせ込んだものです。'
+                f'<br>※ E は調整するつまみが1つも無い（翌朝の寄成で売るだけ）ので、'
+                f'E vs 現行 はこの分割に関係なく最初からOOSです。</p>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th};text-align:left">期間</th>'
+                + "".join(f'<th style="{_th};border-left:1px solid #334155">{x} vs {y}</th>'
+                          for x, y in _PAIRS)
+                + f'</tr></thead><tbody>{_sp}</tbody></table>') if _sp else "")
+            + '</div>')
 
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
