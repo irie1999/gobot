@@ -23,6 +23,15 @@ REM   COST: it runs the whole lss pass a SECOND time, so this is roughly 2x slow
 REM   daily.bat keeps it off so the 8:45 order list is never delayed. Drop --h-tab
 REM   here too if you want the old speed back.
 REM
+REM   --no-tenkan / --no-market pay for that second pass:
+REM     --no-tenkan  the long-conversion tab. CLAUDE.md 18.26b settled it as
+REM                  "record only, never part of the order rules", and building it
+REM                  re-simulates several hundred trades off 5-minute bars.
+REM     --no-market  the regime / trend-period / entry-analysis tabs. They pull the
+REM                  Nikkei and emit 200k+ characters of HTML, and none of it feeds
+REM                  the lss or H order decision.
+REM   Add them back for one run if you actually need those tabs.
+REM
 REM   When you DO want the full report, run .\daily instead.
 REM   Middle ground: .\daily --symbol-detail-limit 20   (keeps the tab, top-20 by BT)
 REM ============================================================
@@ -65,4 +74,4 @@ REM     Without it .\fills skips its section 3 and the daily divergence never ac
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --h-tab --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*

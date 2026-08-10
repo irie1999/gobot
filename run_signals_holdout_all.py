@@ -147,6 +147,14 @@ _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
                   help="出力HTMLファイル名にサフィックスを付ける (内部用・--bothから自動設定)")
+_pre.add_argument("--no-tenkan", action="store_true",
+                  help="転換(ロング転換)タブを作らない。18.26b で『発注ルールに"
+                       "組み込まない・記録専用』と確定済みで、生成には5分足の再シミュを"
+                       "数百〜千件ぶん回す。要らない日は付けると速い")
+_pre.add_argument("--no-market", action="store_true",
+                  help="相場環境 / トレンド期間 / エントリー分析 タブを作らない。"
+                       "日経平均の取得と大きなHTML生成(20万字超)が省ける。"
+                       "lss/H の発注判断には使わないタブ")
 _pre.add_argument("--h-tab", action="store_true",
                   help="方向タブに『H 指値ショート』を追加する。lss と同じシグナル・"
                        "銘柄・決済で、注文だけ前日終値-5ティックの指値売りにしたもの。"
@@ -1761,8 +1769,18 @@ try:
     import pandas as _pd
     _na_years  = 5
     _na_end    = target_date if _args.date else TODAY  # 基準日でN225データを揃える
-    _na_close  = _na.fetch_n225(_na_years, end_date=_na_end)
-    _na_close  = _na_close[_na_close.index <= _pd.Timestamp(_na_end)]
+    # --no-market: 相場環境 / トレンド期間 / エントリー分析 は lss/H の発注判断に
+    # 使わない。日経の取得と 20万字超のHTML生成が省ける。空Seriesにすると
+    # 下の「if not _na_close.empty」ブロックがまるごと通らない。
+    _MARKET_OFF = (getattr(_args, "no_market", False)
+                   or str(os.environ.get("LSS_NO_MARKET", "")).strip()
+                   in ("1", "true", "yes"))
+    if _MARKET_OFF:
+        print("市場分析タブ: スキップ (--no-market)", flush=True)
+        _na_close = _pd.Series(dtype=float)
+    else:
+        _na_close = _na.fetch_n225(_na_years, end_date=_na_end)
+        _na_close = _na_close[_na_close.index <= _pd.Timestamp(_na_end)]
     if not _na_close.empty:
         _na_trend     = _na.label_trend(_na_close)
         _na_r         = _na.get_regime(_na_close)
@@ -1986,7 +2004,16 @@ _na._EXTRA_TRADES = []
 _na._TENKAN_DIAG = ""
 if not getattr(_args, "long_stop_short", False):
     _na._TENKAN_DIAG = "lssモードではありません（転換は lss 専用です）。"
-if getattr(_args, "long_stop_short", False):
+# 転換は 18.26b で「発注ルールに組み込まない・タブは記録専用」と確定済み。
+# 生成は 5分足の再シミュ(数百〜千件)を回すので毎回それなりに時間を食う。
+# --no-tenkan で丸ごと止める(既定は従来どおり生成)。
+_TENKAN_OFF = (getattr(_args, "no_tenkan", False)
+               or str(os.environ.get("LSS_NO_TENKAN", "")).strip() in ("1", "true", "yes"))
+if _TENKAN_OFF:
+    _na._TENKAN_DIAG = ("--no-tenkan で無効化されています（18.26b: 転換は発注ルールに"
+                        "組み込まないと確定済み。記録が要るときだけ外してください）。")
+    print("[転換] スキップ (--no-tenkan)", flush=True)
+if getattr(_args, "long_stop_short", False) and not _TENKAN_OFF:
     try:
         import glob as _lrv_glob
         import pickle as _lrv_pickle

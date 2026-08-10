@@ -9522,6 +9522,12 @@ function switchTbd(id, tab) {{
     global _TENKAN_CUT_APPLIED
     _tenkan_auto: list = []
     _tk_is_main = (cfg_filter is None and not symbol_filter and not strategy_filter)
+    # 転換は 18.26b で「発注ルールに組み込まない・記録専用」と確定済み。
+    # 未約定シグナルからの再シミュは 5分足を数百件ぶん読むので、要らないなら止める。
+    if str(os.environ.get("LSS_NO_TENKAN", "")).strip() in ("1", "true", "yes"):
+        _tk_is_main = False
+        globals()["_TENKAN_DIAG"] = ("--no-tenkan で無効化されています"
+                                     "（18.26b: 発注ルールに組み込まないと確定済み）。")
     if _LSS_ORDER_MODE and all_nofills and _tk_is_main:
         try:
             import tenkan_sim as _tks
