@@ -208,8 +208,13 @@ for sym, dstr in sorted(pairs):
         pnl = (ep - float(xp)) * a.qty - fee
         st["n_fill"] += 1
         st["pnl"] += pnl
+        # 板寄せ(確実に約定) と ザラ場到達(タッチ=約定の仮定) を**分けて**貯める。
+        # H の利益がどちらに乗っているかで、実運用で取れる額がまったく変わる(18.33)。
         if o1 >= lim:
-            st["n_auction"] += 1           # 板寄せ = 現実と一致
+            st["n_auction"] += 1
+            st["pnl_auction"] += pnl
+        else:
+            st["pnl_intra"] += pnl
         if pnl > 0:
             st["win"] += 1
         if why == "stop":
@@ -249,6 +254,24 @@ for sp in _splits:
     if _best:
         print(f"  → {sp} 最良: {_best[0]:+d}ティック  合計 {_best[1]:+,.0f}  "
               f"円/件 {_best[2]:+,.0f}")
+    # ── 板寄せ / ザラ場到達 に分けた内訳 ────────────────────────────────
+    #    板寄せ分は現実と一致する = **これが確実に取れる額**。
+    #    ザラ場分は『高値がタッチ=約定』の仮定に乗っているので、実運用では
+    #    待ち行列で取れないことがある。合計だけ見ると差を読み違える。
+    print(f"  {'指値':>6}{'板寄せ件':>10}{'板寄せ損益':>14}{'ザラ場件':>10}"
+          f"{'ザラ場損益':>14}{'ザラ場依存%':>12}")
+    for off in OFFS:
+        s2 = stat[off][sp]
+        nf = int(s2["n_fill"])
+        if not nf:
+            continue
+        na = int(s2["n_auction"])
+        pa, pi = s2["pnl_auction"], s2["pnl_intra"]
+        dep = (pi / (pa + pi) * 100) if (pa + pi) else 0.0
+        print(f"  {off:>+6}{na:>10,}{pa:>+14,.0f}{nf - na:>10,}{pi:>+14,.0f}"
+              f"{dep:>11.0f}%" + ("  ←現行" if off == 0 else ""))
+    print("  ※ ザラ場依存% = 利益のうち『タッチ=約定』の仮定に乗っている割合。"
+          "低いほど実運用で取れる")
     print()
 
 if _ho is not None:
