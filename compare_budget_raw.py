@@ -84,6 +84,28 @@ A, B = _load(a.a), _load(a.b)
 print(f"[入力] {a.label_a}: {len(A):,}行 (BT>={a.bt_min_a:.0f})  /  "
       f"{a.label_b}: {len(B):,}行 (BT>={a.bt_min_b:.0f})")
 
+# ⚠ 比較の非対称を必ず表に出す。黙っていると『エントリー方式の差』として読まれる。
+if abs(a.bt_min_a - a.bt_min_b) > 1e-9:
+    print(f"[WARN] BT下限が左右で違う (A={a.bt_min_a:.0f} / B={a.bt_min_b:.0f})。"
+          f"差の一部は**BTフィルタの有無**であってエントリー方式ではない。"
+          f"揃えるなら --bt-min-b {a.bt_min_a:.0f}。")
+
+
+def _dupe_rate(rows: list[dict]) -> float:
+    """同じ (銘柄, エントリー日) が複数行あるか。1.0=完全にユニーク。"""
+    if not rows:
+        return 1.0
+    keys = {(r.get("symbol"), r.get("entry_date")) for r in rows}
+    return len(keys) / len(rows)
+
+
+_da, _db = _dupe_rate(A), _dupe_rate(B)
+if abs(_da - _db) > 0.02:
+    print(f"[WARN] 銘柄×日のユニーク率が左右で違う (A={_da:.1%} / B={_db:.1%})。"
+          f"低いほう(A)は**同じ銘柄が同じ日に複数戦略で発注され、予算枠を余分に消費**する。"
+          f"高いほう(B)は1銘柄1注文なので同じ400万でより多くの銘柄に分散できる。"
+          f"→ 差の一部は**重複排除の有無**であってエントリー方式ではない。")
+
 for bstr in [x for x in a.budgets.split(",") if x.strip()]:
     bm = float(bstr)
     ra = _sim_by_month(A, bm * 10_000, a.bt_min_a)
