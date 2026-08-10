@@ -104,6 +104,12 @@ ap.add_argument("--out-raw", default="",
                 help="E の損益を生CSV形式(oos_raw と同じ列)で書き出す。"
                      "sim_oos_budget.py に食わせて**予算制約下**で現行と比較するため"
                      "(18.10: 全部買えるなら得 と 予算内でどれを買うか は別問題)")
+ap.add_argument("--sweep-sm", default="",
+                help="sm(損切ATR倍)のスイープ。例 0.1,0.3,0.5,1.0")
+ap.add_argument("--sweep-tm", default="",
+                help="tm(利確ATR倍)のスイープ。例 0.3,0.5,1.0,1.5,2.0。"
+                     "--sweep-sm と併せて E(ショート)/G(ロング)の 円/件 表を出す。"
+                     "『ロングは別のパラメータなら勝てるのでは』を直接確かめる用")
 ap.add_argument("--no-oco", action="store_true",
                 help="D(引け+OCO)を計算しない。5分足が無い環境向け")
 a = ap.parse_args()
@@ -238,6 +244,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "始値差bp": None,
         "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
         "bar0": "",
+        "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
     if not a.no_oco:
@@ -266,6 +273,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                 continue
             _INF = float("inf")
             _dl, _dh = float(df["l"].iloc[pos]), float(df["h"].iloc[pos])
+            rec["_dl"], rec["_dh"], rec["_atr"] = _dl, _dh, atr
             # 現行と同じ指値下限ガード: 寄りが前日終値×(1-guard)を下回るギャップ
             # ダウンは約定不可(現行 lss も同じ理由でスキップする)。
             _gap_ng = (a.gap_guard > 0 and o1 < pc * (1.0 - a.gap_guard))
@@ -374,6 +382,58 @@ if a.by_month:
               f"{(f'{cur:+,.0f}' if cur == cur else '—'):>10}"
               + "".join(f"{g[c].mean():>+10,.0f}" for c in
                         ("A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け")))
+
+# ── sm/tm スイープ (E ショート / G ロング) ────────────────────────
+# 「ロングは別のパラメータなら勝てるのでは」への直接の答え。
+# ⚠ 理屈の上では、条件付きの日中ドリフトが負なら **任意の停止則でロングの期待値は
+#    0以下**(optional stopping)。バリアは分布の形を変えるだけで平均の符号は変えない。
+#    ただしそれは「1日通して平均が負」の話なので、午前に上げて午後に下げる形なら
+#    早い利確で取れる余地は残る。だから実際に掃く。
+if a.sweep_sm.strip() and a.sweep_tm.strip() and not a.no_oco:
+    _sms = [float(x) for x in a.sweep_sm.split(",") if x.strip()]
+    _tms = [float(x) for x in a.sweep_tm.split(",") if x.strip()]
+    print(f"\n■ sm/tm スイープ (円/件 / {len(r):,}銘柄日 / 摩擦なし)")
+    for _lab, _long in (("E ショート", False), ("G ロング", True)):
+        print(f"\n  {_lab}   {'sm＼tm':>8}" +
+              "".join(f"{t:>10.1f}" for t in _tms))
+        for sm_ in _sms:
+            line = f"  {'':<10}{sm_:>8.1f}"
+            for tm_ in _tms:
+                vals = []
+                for _rc in _recs:
+                    day5 = _i5.get(str(_rc["symbol"]), {}).get(_rc["date"].date())
+                    if day5 is None or len(day5) == 0:
+                        continue
+                    _ep = _rc["_o1"]
+                    _atr = _rc["_atr"]
+                    if not (_ep > 0 and _atr > 0):
+                        continue
+                    if _long:
+                        if a.gap_guard > 0 and _ep > _rc["entry_p"] * (1 + a.gap_guard):
+                            continue
+                        xp, why, _, _ = _l5(day5, -float("inf"), _ep - _atr * sm_,
+                                            _ep + _atr * tm_, day_high=_rc["_dh"],
+                                            day_close=_rc["_c1"],
+                                            stop_delay_bars=a.stop_delay_bars)
+                    else:
+                        if a.gap_guard > 0 and _ep < _rc["entry_p"] * (1 - a.gap_guard):
+                            continue
+                        xp, why, _, _ = _x5(day5, float("inf"), _ep + _atr * sm_,
+                                            _ep - _atr * tm_, False,
+                                            day_low=_rc["_dl"], day_high=_rc["_dh"],
+                                            day_close=_rc["_c1"],
+                                            stop_delay_bars=a.stop_delay_bars)
+                    if xp is None or why in ("no_5m", "no_entry"):
+                        continue
+                    vals.append(((float(xp) - _ep) if _long else (_ep - float(xp)))
+                                * a.qty)
+                line += f"{(sum(vals) / len(vals)) if vals else 0:>+10,.0f}"
+            print(line)
+    print(f"\n  → **G(ロング)がどの升目でもマイナスなら、パラメータの問題ではなく")
+    print(f"     方向の問題**。C(バリア無しの素の測定)が日中 -29bp と言っているので、")
+    print(f"     劣マルチンゲールでは任意の停止則でロングの期待値は0以下になる。")
+    print(f"  ⚠ 一部の升目だけプラスでも採用しない。掃いた中の最良は必ず良く出る"
+          f"(18.28 と同じ罠)。")
 
 # ── 診断: 日足の始値 vs 5分足の先頭バーの始値 ──────────────────
 if "始値差bp" in r.columns and r["始値差bp"].notna().any():
