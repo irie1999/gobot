@@ -43,6 +43,61 @@ def _env_time(name: str, default: time) -> time:
 #        set TENKAN_BUY_TIME=11:30 & set TENKAN_SELL_TIME=15:25
 BUY_TIME = _env_time("TENKAN_BUY_TIME", time(9, 9))
 SELL_TIME = _env_time("TENKAN_SELL_TIME", time(11, 30))
+
+
+def _env_cutoff():
+    """転換の母集団を決める『判断時刻』。既定 09:09 = 買いと同時刻 = **実装可能**。
+
+    ⛔ 既定を 09:09 にした理由 (2026-08-10):
+       これまでの母集団は『**終日**約定しなかった注文』だった。それが分かるのは
+       大引けなので、09:09 に買う転換には **look-ahead** が入っていた
+       (CLAUDE.md 18.5.3 / 18.26)。締切を買い時刻に一致させれば、
+       『その瞬間にまだ約定していない注文を全部ロングにする』= 実際に発注できる。
+
+       代償: 締切時点で未約定でも**その後 約定する**注文(=これから前日終値を割る
+       =下げる銘柄)が母集団に混ざる。実測ではそれが致命的で、09:05締切は
+       純lss比 −436万円(18.26)。**数字が悪くなるのが正しい姿**であって、
+       良く見えていた旧既定のほうが間違っていた。
+
+       TENKAN_CUTOFF=off で旧挙動(終日不約定のみ = look-ahead)に戻せる。
+    """
+    v = str(os.environ.get("TENKAN_CUTOFF", "") or "").strip().lower()
+    if v in ("off", "none", "eod", "-"):
+        return None                       # 終日(旧挙動・look-ahead)
+    if not v:
+        return time(9, 9)                 # 既定 = 買いと同時刻
+    try:
+        h, m = (int(x) for x in v.split(":")[:2])
+        return time(h, m)
+    except Exception:
+        return time(9, 9)
+
+
+CUTOFF = _env_cutoff()
+
+
+def filled_by_cutoff(t, cutoff=None) -> bool:
+    """その注文は締切時刻までに約定していたか。
+
+    entry_time は**約定した5分足の開始時刻**(HH:MM)。実際の約定は
+    [entry_time, entry_time+5分) の窓内なので、bar開始 < 締切 を『約定済み』とみなす
+    (=わずかに楽観。09:05のバーは09:05〜09:10のどこかで約定するが、09:09締切では
+     約定済み扱いになる)。cutoff=None なら常に True(=終日約定した扱い)。
+    """
+    if cutoff is None:
+        return True
+    s = str(t.get("entry_time", "") or "").strip()
+    if not s or ":" not in s:
+        return True        # 時刻不明は『約定済み』側に倒す(母集団を膨らませない)
+    try:
+        h, m = (int(x) for x in s.split(":")[:2])
+    except Exception:
+        return True
+    return (h, m) < (cutoff.hour, cutoff.minute)
+
+
+def cutoff_label() -> str:
+    return "終日(look-ahead)" if CUTOFF is None else CUTOFF.strftime("%H:%M")
 SLIP = 0.0005
 # 手数料は実口座に合わせて既定0(信用大口優遇プランは無料)。CLAUDE.md 18.14 で
 # backtest_limit_entry.FEE_PCT_ONE_WAY を 0 にしたのと同じ理由。

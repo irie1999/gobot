@@ -9419,17 +9419,52 @@ function switchTbd(id, tab) {{
     if _LSS_ORDER_MODE and all_nofills and _tk_is_main:
         try:
             import tenkan_sim as _tks
+            # ── 締切モード: 『その時刻にまだ約定していない注文』を母集団にする ──
+            #    既定 09:09 = 買いと同時刻なので **実際に発注できる**。
+            #    旧挙動(終日不約定のみ)は大引けまで分からない = look-ahead。
+            #    TENKAN_CUTOFF=off で旧挙動に戻せる。
+            _tk_cut = getattr(_tks, "CUTOFF", None)
+            _tk_late: list = []
+            if _tk_cut is not None:
+                # 締切後に約定した lss トレード = その時刻には未約定だった注文。
+                # 転換は除く(転換自身は lss の注文ではない)。
+                _tk_late = [t for t in _bt30_entry_sorted
+                            if t.get("strategy") != "転換"
+                            and t.get("reason") not in ("約定せず", "発注中")
+                            and not _tks.filled_by_cutoff(t, _tk_cut)]
+                print(f"[転換] 締切 {_tks.cutoff_label()}: 終日不約定 {len(all_nofills):,}件 + "
+                      f"締切後に約定 {len(_tk_late):,}件 = 母集団 "
+                      f"{len(all_nofills) + len(_tk_late):,}件", flush=True)
+                print("   ※ 締切後に約定した注文は『その時点では未約定』なので実運用では"
+                      "転換の対象になる。これを含めるのが実装可能な形(18.26)。", flush=True)
             _tk_excl = {(str(t.get("symbol")), str(t.get("entry_d_raw") or t.get("exit_d_raw")))
                         for t in (_EXTRA_TRADES or []) if t.get("strategy") == "転換"}
+            if _tk_cut is not None:
+                # ⛔ CSV由来(_EXTRA_TRADES)は『終日不約定』で作られており entry_time を
+                #    持たないので締切を適用できない。窓365日ならレポート自身の
+                #    トレードが同じ期間を覆うので、締切モードでは CSV由来を捨てる
+                #    (条件の違うものを混ぜない)。
+                _n_drop = sum(1 for t in _EXTRA_TRADES if t.get("strategy") == "転換")
+                if _n_drop:
+                    _EXTRA_TRADES[:] = [t for t in _EXTRA_TRADES
+                                        if t.get("strategy") != "転換"]
+                    print(f"[転換] CSV由来の転換 {_n_drop:,}件を除外"
+                          f"(終日不約定で作られており締切を適用できないため)", flush=True)
+                _tk_excl = set()
             # ① 実注文の記録(orders_<日付>.csv)がある日は、そちらが正しい母集団。
             #    バックテストの約定判定は実際より約定率が高く(90% vs 実測21%)、
             #    転換の母集団を過小評価するため、実データがある日は置き換える。
-            _tk_real, _tk_real_dates = _tks.build_from_orders_csvs(
-                ".", min_price=_PNL_ENTRY_MIN_PRICE, max_price=_PNL_ENTRY_MAX_PRICE,
-                verbose=True)
+            #    ⛔ 締切モードでは使わない: orders CSV は**引け後の状態**しか持たず
+            #       「09:09時点で未約定だったか」が分からない(条件が混ざる)。
+            if _tk_cut is None:
+                _tk_real, _tk_real_dates = _tks.build_from_orders_csvs(
+                    ".", min_price=_PNL_ENTRY_MIN_PRICE, max_price=_PNL_ENTRY_MAX_PRICE,
+                    verbose=True)
+            else:
+                _tk_real, _tk_real_dates = [], set()
             # ② 残りの日はバックテストの未約定シグナルから作る。
             _tenkan_auto = _tks.build_from_nofills(
-                all_nofills,
+                list(all_nofills) + _tk_late,
                 min_price=_PNL_ENTRY_MIN_PRICE,
                 max_price=_PNL_ENTRY_MAX_PRICE,
                 exclude_keys=_tk_excl,
@@ -13110,6 +13145,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + '</div>')
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
+    try:
+        import tenkan_sim as _tks_lbl
+        _TK_CUT_LBL = _tks_lbl.cutoff_label()
+    except Exception:
+        _TK_CUT_LBL = "終日(look-ahead)"
     _tenkan_tab_btn = ""
     _tenkan_tab_pane = ""
     if _LSS_ORDER_MODE and not _tenkan_all:
@@ -13164,7 +13204,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'tenkan\')" '
             f'style="border-color:#60a5fa">🔄 転換 '
             f'<span style="font-size:0.72rem;color:#93c5fd">'
-            f'({len(_tenkan_entry_sorted)}件 全期間)</span></button>'
+            f'({len(_tenkan_entry_sorted)}件 / 締切{_TK_CUT_LBL})</span></button>'
         )
         _tenkan_tab_pane = (
             f'<div id="detail_{_dseq}_tenkan" class="detail-tab-pane">'
@@ -13173,7 +13213,30 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'11:30前最後バー売り）。<b>フィルターなし・全期間・全{len(_tenkan_entry_sorted)}件</b>'
             f'（BT下限・予算・直近N日の絞り込みを一切かけていません）。'
             f'月別サマリー → 日付クリックで取引詳細。</p>'
-            f'<div style="background:#0f1e33;border:1px solid #60a5fa;border-radius:8px;'
+            + (f'<div style="background:#0f2a1a;border:1px solid #4ade80;border-radius:8px;'
+               f'padding:10px 14px;margin:0 0 10px;font-size:0.8rem;line-height:1.75">'
+               f'<b style="color:#4ade80">✅ 締切 {_TK_CUT_LBL}（実装可能）</b><br>'
+               f'<span style="color:#cbd5e1">母集団は「<b>{_TK_CUT_LBL} の時点でまだ約定して'
+               f'いなかった注文</b>」です。買いと同時刻なので、その場で判定して発注できます。'
+               f'締切後に約定した注文（＝これから前日終値を割る銘柄）も含まれるため、'
+               f'旧表示より数字は悪くなります。<b>それが実際に取れた成績です。</b><br>'
+               f'⚠ lss 側の損益は変わりません（同じ注文が lss では約定扱いのまま）。'
+               f'転換は<b>それとは別に</b>同じ銘柄をロングした場合の記録です。<br>'
+               f'旧表示（終日不約定のみ＝大引けまで分からない = look-ahead）に戻すには '
+               f'<code style="background:#1e293b;padding:1px 5px;border-radius:3px">'
+               f'set TENKAN_CUTOFF=off</code></span></div>'
+               if _TK_CUT_LBL != "終日(look-ahead)" else
+               f'<div style="background:#2a1518;border:1px solid #f87171;border-radius:8px;'
+               f'padding:10px 14px;margin:0 0 10px;font-size:0.8rem;line-height:1.75">'
+               f'<b style="color:#f87171">⛔ 締切なし＝終日不約定のみ（look-ahead）</b><br>'
+               f'<span style="color:#cbd5e1">「終日約定しなかった」が分かるのは<b>大引け</b>'
+               f'ですが、買うのは 09:09 です。<b>この母集団は09:09時点では選べません。</b>'
+               f'実測では実装可能な締切にすると純lss比 −436万円（18.26）。'
+               f'<b>この数字を戦略の成績として扱わないでください。</b><br>'
+               f'実装可能な形にするには '
+               f'<code style="background:#1e293b;padding:1px 5px;border-radius:3px">'
+               f'set TENKAN_CUTOFF=09:09</code></span></div>')
+            + f'<div style="background:#0f1e33;border:1px solid #60a5fa;border-radius:8px;'
             f'padding:10px 14px;margin:0 0 12px;font-size:0.82rem">'
             f'<span style="color:#94a3b8">期間 </span><b>{_tk_span}</b>'
             f'&nbsp;/&nbsp;<span style="color:#94a3b8">決済 </span><b>{_tk_n}件</b>'
