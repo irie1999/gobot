@@ -244,6 +244,16 @@ _ANALYSIS_ONLY: bool = False
 # (同日引けの買戻しは手動 or close_stop_guard で対応)。mirror(却下)は対象外。
 _LSS_ORDER_MODE: bool = False
 
+# H案(前日終値-5ティックの**指値**売り)タブ。run_signals_holdout_all --h-tab が
+# 子プロセスに LSS_H_ENTRY=1 を渡す。lss とシグナル・銘柄・決済は完全に同一で、
+# 違うのは注文の出し方だけ:
+#   lss: 前日終値-1tick に逆指値(下がってきたら約定)
+#   H  : 前日終値-5tick に指値  (上がってきたら/寄りが上なら約定)
+# ⛔ 発注ボタンは**無効化する**。order_server は逆指値でしか送れないので、
+#    H の値を押すと「指値のつもりが逆指値」になり、まったく別の注文が出る。
+#    H の実発注は lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
+_LSS_H_ENTRY: bool = str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes")
+
 # _LSS_ORDER_MODE の「向き」フラグ。False(既定)=lss(逆指値空売り・売り建玉)。
 # True=ロングデイトレ(逆指値買い=上ブレイク・同日決済/買い建玉)。同日決済レポートの
 # 骨格(月別/BT50/予算400万タブ)は共通で使い、発注side・損切(下)/利確(上)・ラベルだけ
@@ -2473,6 +2483,11 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     sig["h_ticks"] = _hk
                     sig["h_stop_w"] = float(_atr * _LSS_SM)   # 約定値 + これ = 損切
                     sig["h_target_w"] = float(_atr * _LSS_TM)  # 約定値 - これ = 利確
+                    if _LSS_H_ENTRY:
+                        # H タブ: 発注価格そのものを指値に差し替える。
+                        # 指値下限(-3%)は逆指値が発動した後のガードなので H には無い。
+                        order_p = sig["h_order_price"]
+                        _lss_limit = 0.0
                     _lss_hold  = "同日"                          # 同日決済(max_hold=0)
                     try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
                         _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
@@ -3065,14 +3080,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
                      f'white-space:nowrap">📥 登録</a>')
-        if _ANALYSIS_ONLY and (not _LSS_ORDER_MODE or _LSS_LONG):
+        if _LSS_H_ENTRY or (_ANALYSIS_ONLY and (not _LSS_ORDER_MODE or _LSS_LONG)):
             # mirror(却下済): 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
             # ロングデイトレ(_LSS_LONG): 値は正しいロング逆指値買いだが、同日決済の自動決済
             # (ロング用watcher)が未整備なので、当面は分析専用として発注を無効化する。
             # どちらも分析専用なので無効化し、注意書きに置き換える。
             _reg_btn = ('<div style="text-align:center;color:#f87171;font-size:0.7rem;'
                         'line-height:1.3">🚫 発注不可<br><span style="color:#94a3b8">分析専用'
-                        + ('<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
+                        + ('<br>(H は指値。ボタンは逆指値でしか送れない)' if _LSS_H_ENTRY
+                           else '<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
                         + '</span></div>')
         else:
             _ord100_btn = (
@@ -3274,6 +3290,27 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
             '⚠ 同日決済の自動決済(ロング用watcher)が未整備のため、'
             '<b>このタブからの発注は当面無効化</b>しています(検証・銘柄確認用)。'
             'lss が強い相場(5-7月)の裏で、ロング有利な相場(1月など)を取るための鏡像戦略です。</div>')
+    elif _LSS_H_ENTRY:
+        # H タブ: 値は指値売り。order_server は逆指値でしか送れないので発注は無効。
+        _analysis_warn = (
+            '<div style="margin:10px 0;padding:12px 16px;background:#2a1533;'
+            'border:1px solid #a855f7;border-radius:8px;color:#f0abfc;'
+            'font-size:0.86rem;line-height:1.6">'
+            '🎯 <b>このタブは H（前日終値-5ティックの指値売り・同日決済）です。</b><br>'
+            'シグナル・銘柄選定・発注順・決済（損切0.1ATR上／利確1.0ATR下／引け成行）は'
+            '<b>隣の「ロング銘柄ショート」タブとまったく同一</b>で、'
+            '違うのは<b>注文の出し方だけ</b>です。<br>'
+            '　現行: 前日終値-1ティックに<b>逆指値</b>（<b>下がって</b>きたら約定）<br>'
+            '　H　: 前日終値-5ティックに<b>指値</b>（<b>上がって</b>きたら／寄りが既に上なら約定）<br>'
+            '⚠ <b>損切り・利確は実約定価格（寄り値）基準</b>です。板寄せの約定値は指値以上に'
+            'なるので、発注時点では確定しません。表の値は前日終値基準の目安で、'
+            '実際は lss_exit_watcher が建玉の平均約定値から組み直します。<br>'
+            '🚫 <b>発注ボタンは無効です。</b>order_server は逆指値でしか送れないため、'
+            '押すと「指値のつもりが逆指値」というまったく別の注文になります。'
+            'H の実発注はこちらから:<br>'
+            '<code>python lss_budget_cap.py --entry-mode limit --limit-ticks -5 '
+            '--budget-multiple 1.0 --prod</code><br>'
+            '（倍率1.0は寄りで一斉に約定するため。2.0だと最大800万が同時に建ちます）</div>')
     elif _LSS_ORDER_MODE:
         # lss タブ: 発注ボタンは『信用新規売りの逆指値』として正しく送られる。
         _analysis_warn = (

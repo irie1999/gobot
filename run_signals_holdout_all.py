@@ -147,8 +147,14 @@ _pre.add_argument("--price-ranges", type=str, default=None,
                   help="複数の株価上限をカンマ区切りで指定 (例: 6000,10000). --bothと組み合わせて使用")
 _pre.add_argument("--output-suffix", type=str, default="",
                   help="出力HTMLファイル名にサフィックスを付ける (内部用・--bothから自動設定)")
+_pre.add_argument("--h-tab", action="store_true",
+                  help="方向タブに『H 指値ショート』を追加する。lss と同じシグナル・"
+                       "銘柄・決済で、注文だけ前日終値-5ティックの指値売りにしたもの。"
+                       "lss をもう1回フル計算するので実行時間が約2倍になる。"
+                       "発注ボタンは無効(order_server が未対応で、押すと現行の逆指値が"
+                       "出てしまうため)。H の実発注は lss_budget_cap --entry-mode limit から")
 _pre.add_argument("--default-tab", type=str, default="long",
-                  choices=["long", "short", "mirror", "lss"],
+                  choices=["long", "short", "mirror", "lss", "h"],
                   help="統合レポートを開いたとき最初に表示する方向タブ (既定 long)。"
                        "lss検証スイープでは lss を指定すると『ロング銘柄ショート』が最初に開く")
 _pre.add_argument("--rolling", type=int, default=0,
@@ -427,11 +433,17 @@ if _args.both and not _args.short:
         _skip_dirs.add("short")
     if getattr(_args, "no_long", False):
         _skip_dirs.add("long")
+    if not getattr(_args, "h_tab", False):
+        _skip_dirs.add("h")   # 既定OFF: lss をもう1回フル計算する(時間が約2倍)
     _DIRECTIONS = [d for d in [
         ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
         ("short",  "ショート",           _short_dargs,                   "signals_holdout_all_short"),
         ("mirror", "ロングミラー",       ["--mirror"],                   "signals_holdout_all_mirror"),
         ("lss",    "ロング銘柄ショート", _lss_dargs,                     "signals_holdout_all_lss"),
+        # H案(前日終値-5tickの指値売り)。lss とシグナル・銘柄・決済は完全に同一で、
+        # 違うのは注文の出し方だけ。**lss をもう1回フル計算する**ので実行時間が
+        # 約2倍になる。既定OFF(--h-tab で明示的にON)。
+        ("h",      "H 指値ショート",     _lss_dargs,                     "signals_holdout_all_lss"),
     ] if d[0] not in _skip_dirs]
     # 最初に開く方向タブ(--default-tab)。生成されない方向を指定したら、生成される
     # 先頭の方向にフォールバック(--no-long 等で long 自体を省くケースに対応)。
@@ -448,11 +460,21 @@ if _args.both and not _args.short:
         _cargs_mp = _base_cargs_no_price + ["--max-price", str(_mp_cap),
                                             "--output-suffix", _mp_suffix + _BASE_SUFFIX]
         for _dk, _dlabel, _dargs, _dprefix in _DIRECTIONS:
-            _df = Path(f"{_dprefix}_{_bd}{_mp_suffix}{_BASE_SUFFIX}.html")
+            # h は lss と同じ prefix なので、出力名を分けないと**上書きされる**。
+            _dsfx = _mp_suffix + _BASE_SUFFIX + ("_h" if _dk == "h" else "")
+            _df = Path(f"{_dprefix}_{_bd}{_dsfx}.html")
             print("=" * 65)
             print(f"=== {_dlabel}シグナル生成中 ({'価格無制限' if _mp == 0 else f'〜{_mp:,}円'}) ===")
             print("=" * 65)
-            _sp.run([sys.executable, __file__] + _cargs_mp + _dargs)
+            _denv = dict(os.environ)
+            if _dk == "h":
+                # 子プロセスの nikkei_analysis がこれを見て、発注価格を
+                # H(指値)に差し替え、発注ボタンを無効化する(order_server が
+                # 未対応なので、押すと現行の逆指値が出てしまう)。
+                _denv["LSS_H_ENTRY"] = "1"
+            _sp.run([sys.executable, __file__] + _base_cargs_no_price
+                    + ["--max-price", str(_mp_cap), "--output-suffix", _dsfx]
+                    + _dargs, env=_denv)
             if not _df.exists():
                 print(f"[ERROR] {_dlabel}HTMLの生成に失敗しました (max-price={_mp})")
                 sys.exit(1)
@@ -481,6 +503,7 @@ if _args.both and not _args.short:
         ("short",  "📉 ショート",         "sb"),
         ("mirror", "🪞 ロングミラー",     "mb"),
         ("lss",    "🔻 ロング銘柄ショート", "xb"),
+        ("h",      "🎯 H 指値ショート",       "xb"),
     ]:
         if _dir in _skip_dirs:
             continue
