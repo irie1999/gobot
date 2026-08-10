@@ -256,6 +256,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     if _lss_ep is not None else 0.0),
         "E0_9時から建値は現行": None,
         "H_前日終値で指値売り": None,
+        "D2_夜間損切りが効く場合": None,
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -327,6 +328,17 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     continue
                 rec[_tag] = ((float(xp) - _ep) if _long else (_ep - float(xp))) * q
                 _reasons[(_tag[0], why)] += 1
+            # D2: **夜間の損切りが完璧に効いた場合の上限値**(PTS等で夜に返済できる想定)。
+            #   D は寄りが損切りを超えて始まると max(stop, 始値) の不利約定になる。
+            #   夜間に損切りできれば stop ちょうどで止められる、という最良ケース。
+            #   これでも H に届かないなら、PTS を調べる価値は無い。
+            #   ⚠ 実際には PTS の板が薄いので stop ちょうどで返済できる保証は無い。
+            #      あくまで**上限**であって実現値ではない。
+            _stop_d = pc + atr * a.sm
+            if o1 >= _stop_d:
+                rec["D2_夜間損切りが効く場合"] = (pc - _stop_d) * q   # = -sm×ATR×株数
+                _reasons[("2", "stop夜間")] += 1
+            # (o1 < stop なら D と同じ扱い。下の D の計算結果を後で流用する)
             # H(mirror): **前日終値で指値空売り**。上昇して前日終値に到達したら約定。
             #   寄りが既に前日終値以上なら板寄せで約定(=始値。前日終値より高い=有利)。
             #   到達しなければ**建てない**(=強い下げの日を取り逃がす。ここが弱点)。
@@ -353,6 +365,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                     stop_delay_bars=a.stop_delay_bars)
                 if xp0 is not None and why0 not in ("no_5m", "no_entry"):
                     rec["E0_9時から建値は現行"] = (_le - float(xp0)) * q
+    if rec.get("D2_夜間損切りが効く場合") is None:
+        rec["D2_夜間損切りが効く場合"] = rec.get("D_引け+OCO")
     _recs.append(rec)
 if _no5:
     print(f"[warn] 5分足/ATRが揃わず D を計算できず {_no5:,}件")
@@ -376,8 +390,8 @@ print(f"  {'現行 lss (参考)':<18}{len(_cur_pnl):>7,}"
 _res = {}
 _cols = ["A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け"]
 if not a.no_oco:
-    _cols += ["D_引け+OCO", "E_翌寄り+OCO", "F_5分足寄り+OCO",
-              "G_翌寄りロング+OCO", "H_前日終値で指値売り"]
+    _cols += ["D_引け+OCO", "D2_夜間損切りが効く場合", "E_翌寄り+OCO",
+              "F_5分足寄り+OCO", "G_翌寄りロング+OCO", "H_前日終値で指値売り"]
 for col in _cols:
     v = r[col].dropna()
     if v.empty:
@@ -388,6 +402,7 @@ for col in _cols:
     t = (dm.mean() / (dm.std(ddof=1) / (len(dm) ** 0.5))) if len(dm) > 1 else 0.0
     _res[col] = (v.sum(), v.mean(), bp, t)
     _mark = ("  ← 引け成行(要 look-ahead)" if col.startswith("D_") else
+             "  ← D+夜間損切り(PTS想定の**上限**)" if col.startswith("D2") else
              "  ← 寄り成行(日足の始値)" if col.startswith("E_") else
              "  ← 寄り成行(5分足の始値)" if col.startswith("F_") else
              "  ← **ロング**(E の鏡像)" if col.startswith("G_") else
