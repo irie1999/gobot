@@ -232,9 +232,14 @@ for sym, dstr in sorted(pairs):
             st["pnl_auction"] += pnl
         else:
             st["pnl_intra"] += pnl
+        # 平均利益/平均損失/PF を型ごとに出す。『勝率が低いのになぜプラスか』は
+        # ペイオフ比を見ないと分からない(勝ち3.4回ぶん = 負け1回、等)。
         if pnl > 0:
             st["win"] += 1
             st["win_auction" if _auc else "win_intra"] += 1
+            st["gp_auction" if _auc else "gp_intra"] += pnl
+        else:
+            st["gl_auction" if _auc else "gl_intra"] += -pnl
         if why == "stop":
             st["stop"] += 1
             # ザラ場到達は『上昇中に建てる』ので損切り率が高いはず。
@@ -298,6 +303,28 @@ for sp in _splits:
               f"{(s2['win_intra']/ni*100 if ni else 0):>7.0f}%"
               f"{(s2['stop_intra']/ni*100 if ni else 0):>7.0f}%"
               + ("  ←現行" if off == 0 else ""))
+    # ── ペイオフの内訳 ────────────────────────────────────────────────
+    print(f"  {'指値':>6}{'型':>8}{'平均利益':>11}{'平均損失':>11}{'ペイオフ比':>11}"
+          f"{'勝率':>7}{'PF':>7}{'円/件':>10}")
+    for off in OFFS:
+        s3 = stat[off][sp]
+        for _ty, _k in (("板寄せ", "auction"), ("ザラ場", "intra")):
+            _n = int(s3["n_auction"]) if _k == "auction" else int(s3["n_fill"] - s3["n_auction"])
+            if not _n:
+                continue
+            _w = int(s3[f"win_{_k}"])
+            _gp, _gl = s3[f"gp_{_k}"], s3[f"gl_{_k}"]
+            _aw = _gp / _w if _w else 0.0
+            _al = _gl / (_n - _w) if (_n - _w) else 0.0
+            print(f"  {off:>+6}{_ty:>8}{_aw:>+11,.0f}{-_al:>+11,.0f}"
+                  f"{(_aw / _al if _al else 0):>10.2f}:1"
+                  f"{(_w / _n * 100):>6.0f}%{(_gp / _gl if _gl else 0):>7.2f}"
+                  f"{((_gp - _gl) / _n):>+10,.0f}"
+                  + ("  ←現行" if off == 0 and _k == "auction" else ""))
+    print("  ※ 勝率が3割でもプラスになるのは**ペイオフ比**が効いているから。")
+    print("     負け=損切0.1ATR(小さく刻む) / 勝ち=利確1.0ATR(大きく取る)。")
+    print("     『上に行って損切り』は想定内で、その頻度と損失幅は既に織り込まれている。")
+    print()
     print("  ※ 板寄せ = 寄り>=指値。9:00の板寄せで**確実に約定**する(現実と一致)。")
     print("     ザラ場 = 価格が上がってきて指値に当たった = **上昇中に建てている**。")
     print("     『タッチ=約定』の仮定に依存するうえ、損切り0.1ATR(株価の約0.3%)では")
