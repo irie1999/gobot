@@ -174,7 +174,10 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                     continue
                 _add(r.get("symbol"), _num(r.get("entry")),
                      int(_num(r.get("qty")) or 100), strat, r.get("name", ""),
-                     _num(r.get("stop")), _num(r.get("target")), date=d)
+                     _num(r.get("stop")), _num(r.get("target")), date=d,
+                     mode=(r.get("entry_mode") or "stop"),
+                     atr=_num(r.get("atr")), sm=_num(r.get("sm")),
+                     tm=_num(r.get("tm")))
         except Exception:
             continue
 

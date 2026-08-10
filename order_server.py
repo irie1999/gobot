@@ -141,10 +141,24 @@ def _log_placed_order(rec: dict) -> None:
     from pathlib import Path
     d = datetime.now(JST).strftime("%Y-%m-%d")
     path = Path(__file__).resolve().parent / f"placed_orders_{d}.csv"
+    # entry_mode/atr/sm/tm は H案(指値売り)用。H は板寄せの約定値が指値**以上**に
+    # なるので、注文価格基準の損切りは約定値より下に来て建てた瞬間に発火する。
+    # lss_exit_watcher がこれらを読んで**実約定価格から OCO を組み直す**。
     cols = ["placed_at", "symbol", "name", "strategy", "side", "qty",
-            "entry", "stop", "target", "bt", "env"]
+            "entry", "stop", "target", "bt", "env",
+            "entry_mode", "atr", "sm", "tm"]
     new = not path.exists()
     try:
+        # 列が増えたとき、ヘッダが古いままだと行がズレる。既存を読み直して揃える。
+        if not new:
+            with path.open(newline="", encoding="utf-8") as f:
+                _rows = list(csv.DictReader(f))
+            if _rows and [c for c in cols if c not in _rows[0]]:
+                with path.open("w", newline="", encoding="utf-8") as f:
+                    _w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+                    _w.writeheader()
+                    for _r in _rows:
+                        _w.writerow({c: _r.get(c, "") for c in cols})
         with path.open("a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=cols)
             if new:
@@ -156,9 +170,19 @@ def _log_placed_order(rec: dict) -> None:
 
 def place_order(symbol: str, entry: float, qty: int, side: str,
                 strat: str = "", target: float = 0.0,
-                stop: float = 0.0, name: str = "", bt: str = "") -> str:
-    """逆指値エントリーを発注し、結果メッセージを返す。
-    target>0 かつ実発注なら、約定監視に登録して約定後に利確指値を自動発注する。"""
+                stop: float = 0.0, name: str = "", bt: str = "",
+                entry_mode: str = "stop", atr: float = 0.0,
+                sm: float = 0.0, tm: float = 0.0) -> str:
+    """エントリーを発注し、結果メッセージを返す。
+    target>0 かつ実発注なら、約定監視に登録して約定後に利確指値を自動発注する。
+
+    entry_mode:
+      "stop"  = 現行。逆指値(ショートなら下がってきたら約定)。
+      "limit" = H案。**指値売り**(上がってきたら/寄りが既に上なら約定)。ショート専用。
+                現値との比較(即約定回避)も -3%下限ガードも**しない**:
+                指値売りはザラ場で即約定しても構わないし(むしろ高く売れる)、
+                下限ガードは逆指値が発動した後の話なので指値には存在しない。
+    """
     symbol = (symbol or "").split(".")[0].strip()
     side = "short" if side == "short" else "long"
     if not symbol or entry <= 0 or qty <= 0:
@@ -202,7 +226,7 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     #   即約定弾きを避けるため 1ティック ずらしておく(引け後は現値=終値のため)。
     adj_note = ""
     if EXECUTE:
-        cur = cli.get_current_price(symbol)
+        cur = cli.get_current_price(symbol) if entry_mode != "limit" else 0
         if cur and cur > 0:
             tick = tick_size(cur)
             if side == "long" and entry <= cur:
@@ -240,7 +264,17 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
         limit_p = round(entry * _mult)
 
     try:
-        if side == "short":
+        if side == "short" and entry_mode == "limit":
+            # H案: 前日終値-5ティックの**指値売り**。寄りが既に上なら板寄せで、
+            # そうでなければ日中に上がってきたときに約定する。
+            # ⚠ 損切り・利確は**実約定価格(寄り値)基準**で組み直す必要がある
+            #   (板寄せの約定値は指値以上になるので、指値基準の損切りは約定値より
+            #    下に来て建てた瞬間に発火する)。lss_exit_watcher が
+            #    ordered_signals_lss.csv の entry_mode/atr/sm/tm を見て再計算する。
+            res = cli.send_sell(symbol, qty=qty, price=entry,
+                                order_type="limit", cash_margin=cash_margin)
+            dir_label = f"指値売り(信用新規) @{entry:,.0f} [H案]"
+        elif side == "short":
             res = cli.send_stop_sell(symbol, qty=qty, trigger_price=entry,
                                      cash_margin=cash_margin, after_hit_price=limit_p)
             dir_label = f"逆指値売り→指値(信用新規) 発動≤{entry:,.0f}/指値≥{limit_p:,.0f}{adj_note}"
@@ -274,6 +308,8 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 "symbol": symbol, "name": name, "strategy": strat, "side": side,
                 "qty": qty, "entry": f"{entry:.0f}", "stop": f"{stop:.0f}" if stop else "",
                 "target": f"{target:.0f}" if target else "", "bt": str(bt or ""), "env": env,
+                "entry_mode": entry_mode, "atr": (f"{atr:.2f}" if atr else ""),
+                "sm": (f"{sm}" if sm else ""), "tm": (f"{tm}" if tm else ""),
             })
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
                 f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
@@ -922,6 +958,9 @@ class Handler(BaseHTTPRequestHandler):
                 stop=_f(form.get("stop")),
                 name=form.get("name", ""),
                 bt=form.get("bt", ""),
+                # H タブのボタンが entry_mode=limit を付けて送る。無ければ従来どおり逆指値。
+                entry_mode=(form.get("entry_mode") or "stop"),
+                atr=_f(form.get("atr")), sm=_f(form.get("sm")), tm=_f(form.get("tm")),
             )
         except Exception as e:
             msg = f"エラー: {e}"

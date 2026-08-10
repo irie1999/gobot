@@ -3064,7 +3064,8 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         _ord_btn = (f"<button type=\"button\" "
                     f"onclick=\"gobotOrder(this,'{_scode}','{_side}','{s['strategy']}',"
                     f"{s['order_p']:.0f},{_ord_stop:.0f},{_ord_target:.0f},{qty},"
-                    f"'{s.get('rec_score', '') or ''}',{pos_val})\" "
+                    f"'{s.get('rec_score', '') or ''}',{pos_val},"
+                    f"{float(s.get('h_atr', 0) or 0):.2f})\" "
                     f"style=\"display:inline-block;padding:4px 8px;background:#dc2626;"
                     f"color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;"
                     f"white-space:nowrap;margin-bottom:3px\">🚀 発注</button>")
@@ -3080,15 +3081,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                      f'style="display:inline-block;padding:4px 8px;background:#2d6cdf;'
                      f'color:#fff;border-radius:5px;font-size:12px;text-decoration:none;'
                      f'white-space:nowrap">📥 登録</a>')
-        if _LSS_H_ENTRY or (_ANALYSIS_ONLY and (not _LSS_ORDER_MODE or _LSS_LONG)):
+        if _ANALYSIS_ONLY and (not _LSS_ORDER_MODE or _LSS_LONG):
             # mirror(却下済): 発注/登録ボタンはロング逆指値買いの値を送ってしまう(=誤発注)。
             # ロングデイトレ(_LSS_LONG): 値は正しいロング逆指値買いだが、同日決済の自動決済
             # (ロング用watcher)が未整備なので、当面は分析専用として発注を無効化する。
             # どちらも分析専用なので無効化し、注意書きに置き換える。
             _reg_btn = ('<div style="text-align:center;color:#f87171;font-size:0.7rem;'
                         'line-height:1.3">🚫 発注不可<br><span style="color:#94a3b8">分析専用'
-                        + ('<br>(H は指値。ボタンは逆指値でしか送れない)' if _LSS_H_ENTRY
-                           else '<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
+                        + ('<br>(ロングデイトレ)' if _LSS_LONG else '<br>(値はロング)')
                         + '</span></div>')
         else:
             _ord100_btn = (
@@ -3164,6 +3164,9 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     min_note = f"（スコア{min_score}点以上のみ）" if min_score > 0 else ""
     _order_js = """
 <script>
+// エントリー方式。H タブ(LSS_H_ENTRY=1)なら 'limit' が入り、order_server が
+// send_sell(order_type="limit") で **指値売り** を出す。既定は従来の逆指値。
+var gobotEntryMode = '__ENTRY_MODE__';
 var gobotOrderedTotal = 0;   // 発注済み合計額(円)
 var gobotOrderedCount = 0;   // 発注済み件数
 function gobotYen(n){ return Math.round(n).toLocaleString('ja-JP'); }
@@ -3213,16 +3216,24 @@ function gobotResetOrdered(){
   gobotUpdateOrdered();
 }
 
-function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval){
+// atr は H案(指値売り)専用。**実約定価格から損切り・利確を組み直す**ために
+// order_server -> placed_orders_*.csv -> lss_exit_watcher と受け渡す。
+// H は板寄せの約定値が指値以上になるので、注文価格基準の損切りは約定値より
+// 下に来て建てた瞬間に発火してしまう。
+function gobotOrder(btn, sym, side, strat, entry, stop, target, qty, bt, posval, atr){
   // ボタン隣接の株数入力(.gobotqty)があればその値で発注(100株単位で減らせる)。想定額も再計算。
   var qin = btn ? (btn.parentNode && btn.parentNode.querySelector('.gobotqty')) : null;
   if(qin){ var qv = parseInt(qin.value,10); if(qv>0){ qty = qv; posval = Math.round(entry*qv); } }
-  var lbl = (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
+  var em = (typeof gobotEntryMode !== 'undefined') ? gobotEntryMode : 'stop';
+  var lbl = (em==='limit') ? ('\\u6307\\u5024\\u58f2\\u308a(\\u4fe1\\u7528\\u65b0\\u898f) @'+entry+' [H]')
+          : (side==='short') ? ('逆指値売り(信用新規) @\\u2264'+entry) : ('逆指値買い @\\u2265'+entry);
   if(!confirm('\\u3010\\u767a\\u6ce8\\u78ba\\u8a8d\\u3011\\n'+sym+' '+strat+' ('+side+')\\n'+lbl
       +'\\n\\u682a\\u6570: '+qty+'\\u682a\\n\\n\\u767a\\u6ce8\\u30b5\\u30fc\\u30d0(order_server:8765)\\u3078\\u767a\\u6ce8\\u30ea\\u30af\\u30a8\\u30b9\\u30c8\\u3092\\u9001\\u308a\\u307e\\u3059\\u3002'
       +'\\n\\u5b9f\\u767a\\u6ce8/dry-run\\u30fb\\u30c7\\u30e2/\\u672c\\u756a\\u306f\\u30b5\\u30fc\\u30d0\\u8d77\\u52d5\\u30aa\\u30d7\\u30b7\\u30e7\\u30f3\\u306b\\u5f93\\u3044\\u307e\\u3059\\u3002\\n\\n\\u3088\\u308d\\u3057\\u3044\\u3067\\u3059\\u304b\\uff1f')) return;
   var body = new URLSearchParams({symbol:sym,entry:entry,stop:stop,target:target,
-                                  strategy:strat,side:side,qty:qty,bt:(bt||'')});
+                                  strategy:strat,side:side,qty:qty,bt:(bt||''),
+                                  entry_mode:em,atr:(atr||0),
+                                  sm:__LSS_SM__,tm:__LSS_TM__});
   fetch('http://127.0.0.1:8765/order',{method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.text();})
@@ -3305,12 +3316,15 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
             '⚠ <b>損切り・利確は実約定価格（寄り値）基準</b>です。板寄せの約定値は指値以上に'
             'なるので、発注時点では確定しません。表の値は前日終値基準の目安で、'
             '実際は lss_exit_watcher が建玉の平均約定値から組み直します。<br>'
-            '🚫 <b>発注ボタンは無効です。</b>order_server は逆指値でしか送れないため、'
-            '押すと「指値のつもりが逆指値」というまったく別の注文になります。'
-            'H の実発注はこちらから:<br>'
-            '<code>python lss_budget_cap.py --entry-mode limit --limit-ticks -5 '
-            '--budget-multiple 1.0 --prod</code><br>'
-            '（倍率1.0は寄りで一斉に約定するため。2.0だと最大800万が同時に建ちます）</div>')
+            '🚀 <b>発注ボタンはこのタブ専用に「指値売り」で送られます</b>'
+            '（order_server が entry_mode=limit を受けて '
+            '<code>send_sell(order_type="limit")</code> を呼びます）。'
+            '逆指値ではないので、即約定回避の1ティック引下げも -3%下限ガードも掛かりません'
+            '（どちらも逆指値のための仕組みです）。<br>'
+            '⚠ <b>寄りで一斉に約定します。</b>逆指値のように日中かけて順次発動しないので、'
+            '「約定を見ながら残りを取り消す」over-subscribe が効きません。'
+            'まとめて出すなら <code>lss_budget_cap.py --entry-mode limit --limit-ticks -5 '
+            '--budget-multiple 1.0</code>（倍率1.0）を使ってください。</div>')
     elif _LSS_ORDER_MODE:
         # lss タブ: 発注ボタンは『信用新規売りの逆指値』として正しく送られる。
         _analysis_warn = (
@@ -3384,6 +3398,11 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
                          "(同値はBT降順)。")
     except Exception:
         _sig_ord_lbl, _sig_ord_note = "BTスコア降順", "BTスコアが高い順に並んでいます。"
+    # H タブなら発注ボタンが指値売りとして送るようにする(order_server が entry_mode を見る)。
+    _order_js = (_order_js.replace("__ENTRY_MODE__",
+                                   "limit" if _LSS_H_ENTRY else "stop")
+                 .replace("__LSS_SM__", f"{_LSS_SM}")
+                 .replace("__LSS_TM__", f"{_LSS_TM}"))
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — {_sig_ord_lbl} {min_note}</h2>
 {_asof_warn}{_analysis_warn}
