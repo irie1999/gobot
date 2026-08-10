@@ -148,11 +148,20 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             return sym, None
 
     def _load_5(sym):
-        try:
-            m5 = _li(sym, days=900, source="local")
-            return sym, (_sbd(m5) if m5 is not None and len(m5) else {})
-        except Exception:
-            return sym, {}
+        # ⛔ 並列読込は稀に SystemError('deallocated bytearray object has exported
+        #    buffers') で失敗し、その銘柄が丸ごと落ちる。SystemError は Exception の
+        #    サブクラスなので黙って {} になり、集計から消える。
+        #    実測(2026-08-10): 同じ日・同じデータで .\ehm を3回走らせたら
+        #    データ不足 636 / 646 / 569、E合計が ±9万円ぶれた。現行タブは
+        #    このローダを使わないので3回とも1円まで同一だった。
+        #    → 失敗したらこの場で直列リトライする(下の再読込パスでも拾う)。
+        for _try in range(2):
+            try:
+                m5 = _li(sym, days=900, source="local")
+                return sym, (_sbd(m5) if m5 is not None and len(m5) else {})
+            except Exception:
+                continue
+        return sym, {}
 
     daily, i5 = {}, {}
     try:
@@ -168,24 +177,50 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         log(f"[E/H] データ取得に失敗: {e}")
         return {}
 
+    # ── 並列で落ちた銘柄を **直列で** 拾い直す(再現性のため) ──────────────
+    #    ここを入れないと実行ごとに母集団が変わり、月別損益が数万円ぶれる。
+    _miss = [s for s in syms if not i5.get(s)]
+    for _p in range(2):
+        if not _miss:
+            break
+        log(f"[E/H] 5分足を再読込(直列) {len(_miss):,}銘柄 …")
+        _still = []
+        for s in _miss:
+            _, v = _load_5(s)
+            if v:
+                i5[s] = v
+            else:
+                _still.append(s)
+        if len(_still) == len(_miss):
+            break          # 直列でも取れない = 本当にデータが無い
+        _miss = _still
+    _n5d = sum(len(v) for v in i5.values() if v)
+    _n5s = sum(1 for v in i5.values() if v)
+    log(f"[E/H] 5分足 {_n5d:,}銘柄日 / {_n5s:,}銘柄 読込"
+        + (f" (読めず {len(_miss):,}銘柄)" if _miss else "")
+        + "  ← **実行ごとにこの数が変われば再現性の問題**"
+          "(LSS_EH_WORKERS=1 で直列化して切り分け)")
+
     out = {"E": [], "H": []}
     nf = {"E": [], "H": []}
-    _skip = 0
+    # データ不足の内訳。合計だけだと実行ごとのブレの原因が追えない(2026-08-10)。
+    _sk = {"日足なし": 0, "日足に該当日なし": 0, "5分足なし": 0,
+           "分割ガード": 0, "先頭バーが09:00でない": 0, "価格/ATR異常": 0}
     for (sym, dstr), src in base.items():
         _srcs = rows.get((sym, dstr)) or [src]
         df = daily.get(sym)
         if df is None:
-            _skip += 1
+            _sk["日足なし"] += 1
             continue
         try:
             ts = pd.Timestamp(dstr[:10])
         except Exception:
-            _skip += 1
+            _sk["日足に該当日なし"] += 1
             continue
         idx = df.index
         pos = idx.searchsorted(ts)
         if pos <= 0 or pos >= len(idx) or idx[pos] != ts:
-            _skip += 1
+            _sk["日足に該当日なし"] += 1
             continue
         pc = float(df["c"].iloc[pos - 1])          # 前日終値
         o1 = float(df["o"].iloc[pos])              # 当日始値
@@ -194,18 +229,21 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         atr = float(df["atr"].iloc[pos - 1])
         day5 = (i5.get(sym) or {}).get(ts.date())
         if not (pc > 0 and o1 > 0 and c1 > 0 and atr == atr and atr > 0):
-            _skip += 1
+            _sk["価格/ATR異常"] += 1
             continue
-        if day5 is None or len(day5) == 0 or not _ig_ok(day5, c1):
-            _skip += 1
+        if day5 is None or len(day5) == 0:
+            _sk["5分足なし"] += 1
+            continue
+        if not _ig_ok(day5, c1):
+            _sk["分割ガード"] += 1
             continue
         if require_open_bar:
             try:
                 if pd.Timestamp(day5.index[0]).strftime("%H:%M") != "09:00":
-                    _skip += 1
+                    _sk["先頭バーが09:00でない"] += 1
                     continue
             except Exception:
-                _skip += 1
+                _sk["先頭バーが09:00でない"] += 1
                 continue
 
         # ── E: 寄成。寄りが −gap_guard を割るギャップダウンは約定不可 ──
@@ -244,8 +282,11 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             out[key].extend(_mk(s, order_p, ep, float(xp),
                                 _REASON.get(why, why), _t,
                                 pc, atr, sm, tm, qty, key) for s in _srcs)
+    _skip = sum(_sk.values())
     log(f"[E/H] 約定 E={len(out['E']):,} H={len(out['H']):,} / "
         f"不約定 E={len(nf['E']):,} H={len(nf['H']):,} / データ不足 {_skip:,}")
+    log("[E/H] データ不足の内訳: "
+        + " / ".join(f"{k} {v:,}" for k, v in _sk.items() if v))
     return {"E": out["E"], "H": out["H"], "約定せず": nf}
 
 

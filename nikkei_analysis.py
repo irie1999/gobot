@@ -13860,7 +13860,7 @@ function switchDetailTab(seq, which) {{
   }});
   container.querySelectorAll('.detail-tab-btn').forEach(function(b) {{
     var oc = b.getAttribute('onclick') || '';
-    var m = oc.match(/switchDetailTab\(\d+,'([^']+)'\)/);
+    var m = oc.match(/switchDetailTab\\(\\d+,'([^']+)'\\)/);
     if (m) b.classList.toggle('active', (!closing) && m[1] === which);
   }});
 }}
