@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import glob as _glob
+import os
 import statistics as _st
 import sys
 from collections import defaultdict
@@ -309,7 +310,9 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "H_前日終値で指値売り": None,
         "D2_夜間損切りが効く場合": None,
         "E建値": None, "E決済": None, "E理由": "", "E時刻": "",
+        "E損切": None, "E目標": None,
         "H建値": None, "H決済": None, "H理由": "", "H時刻": "",
+        "H損切": None, "H目標": None,
         "_o1": o1, "_c1": c1, "_dl": 0.0, "_dh": 0.0, "_atr": 0.0,
     }
     # ── D/E: 現行と同じ OCO で決済 ──
@@ -383,6 +386,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                 _reasons[(_tag[0], why)] += 1
                 if _tag.startswith("E_"):
                     rec["E建値"], rec["E決済"], rec["E理由"] = _ep, float(xp), why
+                    rec["E損切"] = _ep + atr * a.sm
+                    rec["E目標"] = _ep - atr * a.tm
                     try:
                         rec["E時刻"] = pd.Timestamp(_x5t).strftime("%H:%M")
                     except Exception:
@@ -412,6 +417,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                 if xph is not None and whyh not in ("no_5m", "no_entry"):
                     rec["H_前日終値で指値売り"] = (_hp - float(xph)) * q
                     rec["H建値"], rec["H決済"], rec["H理由"] = _hp, float(xph), whyh
+                    rec["H損切"] = _hp + atr * a.sm
+                    rec["H目標"] = _hp - atr * a.tm
                     try:
                         rec["H時刻"] = pd.Timestamp(_xht).strftime("%H:%M")
                     except Exception:
@@ -910,16 +917,71 @@ if a.html.strip() or a.inject_html.strip():
     #   月テーブル(nikkei_analysis.py:10482 と同じ列・同じ色)＋
     #   月ブロック(.mg-block / .mg-header / toggleMG)＋日チップ(.edate-btn)。
     #   クラスはレポート側の CSS をそのまま使うので追加スタイルは最小限。
+    # ── 予算シミュ (他タブと同じ 400万円/日) ─────────────────────────
+    #   nikkei_analysis.py:9990 の _run_budget_sim と同じ規則:
+    #     ・日ごとに **流動性降順**(lss_order_rank と同じ並び)で上から注文
+    #     ・注文額 = 注文価格 × 株数。注文価格は E=前日終値(寄成の基準) /
+    #       H=前日終値(指値そのもの) / 現行=order_limit(トリガー)
+    #     ・注文額ベース(既定): **不約定も枠を消費**する。超過はスキップ(貪欲)
+    #     ・約定額ベース      : 不約定は枠を消費しない。超過したら break
+    #   同日決済なので予算は毎日リセット。
+    _BUDGET = float(os.environ.get("LSS_BUDGET_MAN", "400")) * 10_000
+
+    def _budget_pick(col, fill_budget=False):
+        """予算内に収まった行の index 集合を返す。"""
+        keep = set()
+        for _d, _gd in r.groupby("日"):
+            _g2 = _gd.assign(_liq=_gd["symbol"].map(_LIQ)).sort_values(
+                ["_liq"], ascending=False, kind="mergesort")
+            cap = 0.0
+            for _ix, _t in _g2.iterrows():
+                _op = float(_t["entry_p"] or 0)      # 注文価格 = 前日終値
+                _no = _op * a.qty
+                _filled = _t[col] == _t[col]         # NaN でなければ約定
+                if fill_budget:
+                    if not _filled:
+                        continue
+                    if _no <= 0 or cap + _no > _BUDGET:
+                        break
+                    cap += _no
+                    keep.add(_ix)
+                else:
+                    if _no <= 0 or cap + _no > _BUDGET:
+                        continue
+                    cap += _no
+                    if _filled:
+                        keep.add(_ix)
+        return keep
+
+    # 流動性: 生CSVにあればそれ、無ければ日足から(発注順を live と揃えるため)
+    _LIQ = {}
+    if "liquidity" in d.columns:
+        for _s3, _l3 in zip(d["symbol"].astype(str),
+                            pd.to_numeric(d["liquidity"], errors="coerce").fillna(0)):
+            _LIQ.setdefault(_s3, float(_l3))
+    for _s3 in r["symbol"].astype(str).unique():
+        _LIQ.setdefault(_s3, 0.0)
+
+    _BUD = {}
+    for _c4, _l4 in _V:
+        if _c4 == "現行":
+            continue
+        _BUD[(_l4, "order")] = _budget_pick(_c4, False)
+        _BUD[(_l4, "fill")] = _budget_pick(_c4, True)
+    _BUD[("現行", "order")] = _budget_pick("現行", False)
+    _BUD[("現行", "fill")] = _budget_pick("現行", True)
+
     # 当月は営業日が揃っていないので月テーブルで「未完了」と明示する
     # (件数・損益をそのまま他の月と並べると誤読される)
     from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
     _CUR_YM = _dt2.now(_tz2(_td2(hours=9))).strftime("%Y-%m")
 
-    def _mtable(col):
+    def _mtable(col, keep=None):
         """方式1つぶんの月テーブル。列は既存の予算タブに合わせる。"""
         rows = ""
-        for ym in sorted(r["month"].unique(), reverse=True):
-            g = r[r["month"] == ym]
+        _rr = r if keep is None else r.loc[sorted(keep)]
+        for ym in sorted(_rr["month"].unique(), reverse=True):
+            g = _rr[_rr["month"] == ym]
             v = g[col].dropna()
             if not len(v):
                 continue
@@ -972,11 +1034,12 @@ if a.html.strip() or a.inject_html.strip():
                 f'同日建玉ピーク</small></th>'
                 f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
-    def _mblocks(col, key):
+    def _mblocks(col, key, keep=None):
         """月ごとの折りたたみ + 日チップ。レポートの .mg-* / .edate-* をそのまま使う。"""
         out = ""
-        for _i, ym in enumerate(sorted(r["month"].unique(), reverse=True)):
-            g = r[r["month"] == ym]
+        _rr = r if keep is None else r.loc[sorted(keep)]
+        for _i, ym in enumerate(sorted(_rr["month"].unique(), reverse=True)):
+            g = _rr[_rr["month"] == ym]
             v = g[col].dropna()
             if not len(v):
                 continue
@@ -1049,16 +1112,25 @@ if a.html.strip() or a.inject_html.strip():
             f'<th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>'
             f'</thead><tbody>{_rws}</tbody></table></div></div>')
 
+    _SC = [("all", "予算なし(全シグナル)", None),
+           ("order", f"{_BUDGET/10000:,.0f}万×注文額ベース", "order"),
+           ("fill", f"{_BUDGET/10000:,.0f}万×約定額ベース", "fill")]
     _blocks = ""
-    for _bi, (_col, _lab) in enumerate(_V):
-        _n, _wr, _tot, _per = _all[_lab]
-        _blocks += (
-            f'<div class="ehblk{" on" if _lab == "H" else ""}">'
-            f'<p style="color:#c4b5fd;font-size:0.8rem;margin:2px 0 8px">'
-            f'<b>{_lab}</b> — {_n:,}件 / 勝率 {_wr:.1f}% / '
-            f'<b style="color:{"#4ade80" if _tot >= 0 else "#f87171"}">{_tot:+,.0f}円</b>'
-            f' / <b>{_per:+,.0f}円/件</b></p>'
-            f'{_mtable(_col)}{_mblocks(_col, _bi)}</div>')
+    for _si, (_sk, _slab, _smode) in enumerate(_SC):
+        for _bi, (_col, _lab) in enumerate(_V):
+            _keep = None if _smode is None else _BUD[(_lab, _smode)]
+            _vv = (r if _keep is None else r.loc[sorted(_keep)])[_col].dropna()
+            _n, _tot = len(_vv), _vv.sum()
+            _wr = (_vv > 0).mean() * 100 if _n else 0.0
+            _per = _vv.mean() if _n else 0.0
+            _on = " on" if (_si == 1 and _lab == "H") else ""
+            _blocks += (
+                f'<div class="ehblk{_on}" data-sc="{_si}" data-m="{_bi}">'
+                f'<p style="color:#c4b5fd;font-size:0.8rem;margin:2px 0 8px">'
+                f'<b>{_lab}</b> / {_slab} — {_n:,}件 / 勝率 {_wr:.1f}% / '
+                f'<b style="color:{"#4ade80" if _tot >= 0 else "#f87171"}">{_tot:+,.0f}円</b>'
+                f' / <b>{_per:+,.0f}円/件</b></p>'
+                f'{_mtable(_col, _keep)}{_mblocks(_col, f"{_si}{_bi}", _keep)}</div>')
 
     _EH_CSS = """<style>
 .ehsel{display:flex;gap:6px;margin:10px 0 12px;flex-wrap:wrap}
@@ -1132,10 +1204,14 @@ if a.html.strip() or a.inject_html.strip():
 隣の「{"{}".format("400万円×流動性順×日別")}」は予算込みなので直接は比較できない。
 予算込みの E/H 比較は compare_budget_raw.py</span>
 </div>
-<div class="ehsel">
-<button onclick="ehSel(this,0)">現行</button>
-<button onclick="ehSel(this,1)">E (寄成)</button>
-<button class="on" onclick="ehSel(this,2)">H (前日終値の指値)</button>
+<div class="ehsel" data-kind="sc">
+{"".join(f'<button class="{"on" if _i == 1 else ""}" onclick="ehSel(this)">{_l}</button>'
+         for _i, (_k, _l, _m) in enumerate(_SC))}
+</div>
+<div class="ehsel" data-kind="m">
+<button onclick="ehSel(this)">現行</button>
+<button onclick="ehSel(this)">E (寄成)</button>
+<button class="on" onclick="ehSel(this)">H (前日終値の指値)</button>
 </div>
 {_blocks}
 <div id="ehdays" style="display:none">{_dayd}</div>
@@ -1173,14 +1249,25 @@ function ehDay(el, dk){{
   d.style.display = 'block';
   el.classList.add('on');
 }}
-function ehSel(el, i){{
-  var p = el.parentNode.parentNode;
-  // 方式を切り替えたら開いていた日別明細とチップの選択は畳む
+function ehSel(el){{
+  var row = el.parentNode, p = row.parentNode;
+  var i = Array.prototype.indexOf.call(row.children, el);
+  row.querySelectorAll('button').forEach(function(b,j){{ b.classList.toggle('on', j===i); }});
+  // 切り替えたら開いていた日別明細とチップの選択は畳む
   // (隠れたブロックの中に残ると、戻ったとき選択状態だけ残って紛らわしい)
   p.querySelectorAll('.ehday').forEach(function(x){{ x.style.display='none'; }});
   p.querySelectorAll('.ehchip').forEach(function(c){{ c.classList.remove('on'); }});
-  p.querySelectorAll('.ehsel button').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
-  p.querySelectorAll('.ehblk').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
+  var sc = 0, m = 0;
+  p.querySelectorAll('.ehsel').forEach(function(r2){{
+    var k = r2.getAttribute('data-kind');
+    r2.querySelectorAll('button').forEach(function(b,j){{
+      if (b.classList.contains('on')) {{ if (k==='sc') sc=j; else m=j; }}
+    }});
+  }});
+  p.querySelectorAll('.ehblk').forEach(function(b){{
+    b.classList.toggle('on', b.getAttribute('data-sc')==String(sc)
+                          && b.getAttribute('data-m')==String(m));
+  }});
 }}
 </script>"""
 
