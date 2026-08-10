@@ -9636,7 +9636,12 @@ function switchTbd(id, tab) {{
         # 損切/利確のリスク幅は前日終値基準(§18検証モデル)でライン直上ティック(ceil)。
         # -1tickは約定用の小細工なので損切りには反映しない(不必要にタイトにしない)。
         # 例:応用地質 トリガー2,825 / 損切2,835 / 利確2,785。
-        if _LSS_ORDER_MODE and olp > 0 and osp > 0 and otp > 0:
+        # ⛔ 転換は『09:09 に成行で買うロング』なので、lss の呼値調整
+        #    (トリガー=前日終値-1tick / 損切利確を ceil)を当ててはいけない。
+        #    order_limit=買値 / order_stop=損切(下) / order_target=利確(上) を
+        #    そのまま出す。逆指値・指値ガードの副表示も出さない。
+        _is_tenkan_row = (t.get("strategy") == "転換")
+        if _LSS_ORDER_MODE and not _is_tenkan_row and olp > 0 and osp > 0 and otp > 0:
             from backtest_limit_entry import (round_to_tick as _r2t2,
                                               ceil_to_tick as _c2t2,
                                               tick_size as _tsz2)
@@ -9659,7 +9664,8 @@ function switchTbd(id, tab) {{
             _lim_entry  = olp * ((1.0 - 0.03) if _is_short_t else (1.0 + 0.03))
             _lim_lbl    = "指値下限≥" if _is_short_t else "指値上限≤"
             _lim_pct    = "-3.0%" if _is_short_t else "+3.0%"
-            olp_sub   = (f'<br><span style="font-size:0.71rem;color:#38bdf8">逆:{olp:,.0f}</span>'
+            olp_sub = ("" if _is_tenkan_row else
+                       f'<br><span style="font-size:0.71rem;color:#38bdf8">逆:{olp:,.0f}</span>'
                          f'<br><span style="font-size:0.71rem;color:#f59e0b">{_lim_lbl}{_lim_entry:,.0f}'
                          f'<span style="color:#64748b">({_lim_pct})</span></span>')
             # 現在値: 保有中のみ表示（現在株価・損切りまで・目標まで）
@@ -13148,8 +13154,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     try:
         import tenkan_sim as _tks_lbl
         _TK_CUT_LBL = _tks_lbl.cutoff_label()
+        _TK_OCO_LBL = _tks_lbl.oco_label()
     except Exception:
         _TK_CUT_LBL = "終日(look-ahead)"
+        _TK_OCO_LBL = "時間決済のみ"
     _tenkan_tab_btn = ""
     _tenkan_tab_pane = ""
     if _LSS_ORDER_MODE and not _tenkan_all:
@@ -13210,7 +13218,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<div id="detail_{_dseq}_tenkan" class="detail-tab-pane">'
             f'<p style="color:#60a5fa;font-size:0.8rem;margin-bottom:6px">'
             f'🔄 <b>転換トレード</b>: lss未約定 → ロング転換（09:09以降最初バー買い / '
-            f'11:30前最後バー売り）。<b>フィルターなし・全期間・全{len(_tenkan_entry_sorted)}件</b>'
+            f'決済 <b>{_TK_OCO_LBL}</b> / 時間決済は11:30前最後バー）。<b>フィルターなし・全期間・全{len(_tenkan_entry_sorted)}件</b>'
             f'（BT下限・予算・直近N日の絞り込みを一切かけていません）。'
             f'月別サマリー → 日付クリックで取引詳細。</p>'
             + (f'<div style="background:#0f2a1a;border:1px solid #4ade80;border-radius:8px;'

@@ -75,6 +75,77 @@ def _env_cutoff():
 
 CUTOFF = _env_cutoff()
 
+# ── 転換ロングの OCO(損切・利確) ─────────────────────────────────────────
+#   既定は lss と同じ 損切0.1ATR / 利確1.0ATR。ロングなので向きは鏡写し:
+#     損切 = 買値 − atr*SM (下)   /   利確 = 買値 + atr*TM (上)
+#   どちらにも触れなければ SELL_TIME で時間決済(従来どおり)。
+#
+#   ⛔ なぜ既定ONか (2026-08-10):
+#      締切を 09:09 にしたことで『締切後に約定する注文』=これから前日終値を割る
+#      =下げる銘柄 が母集団に入る。損切り無しだと11:30まで下げに付き合うことになる。
+#      18.26 の実測(09:05締切)でも OCO 付きが最もマシだった:
+#        時間決済のみ −4,361,866 / OCO(0.1,1.0) −2,342,093 (損失が半減)
+#   TENKAN_SM=0 かつ TENKAN_TM=0 で OCO を切れる(=旧挙動の時間決済のみ)。
+SM = float(os.environ.get("TENKAN_SM", "0.1") or 0)
+TM = float(os.environ.get("TENKAN_TM", "1.0") or 0)
+
+
+def oco_label() -> str:
+    if SM <= 0 and TM <= 0:
+        return "時間決済のみ"
+    return f"損切{SM}ATR / 利確{TM}ATR + 時間決済"
+
+
+_ATR_CACHE: dict = {}
+_ATR_LOCK = threading.Lock()
+
+
+def atr_of(symbol: str, d) -> float:
+    """その日の**前日**ATR(EMA14 of TR)。エンジン・E/H とまったく同じ定義。
+
+    日足は backtest_limit_entry.fetch(永続キャッシュ)から取るので、
+    同じ実行内で E/H が既に読んでいれば追加コストはほぼ無い。
+    取れなければ 0.0 を返す(呼び出し側は OCO を諦めて時間決済にする)。
+    """
+    sym = str(symbol or "")
+    if not sym:
+        return 0.0
+    with _ATR_LOCK:
+        s = _ATR_CACHE.get(sym, False)
+    if s is False:
+        s = None
+        try:
+            import pandas as _pd
+            from backtest_limit_entry import fetch as _fetch
+            df = _fetch(sym, 900)
+            if df is not None and not df.empty:
+                c = {str(x).lower(): x for x in df.columns}
+                if all(c.get(x) for x in ("high", "low", "close")):
+                    h = df[c["high"]].astype(float)
+                    lo = df[c["low"]].astype(float)
+                    cl = df[c["close"]].astype(float)
+                    pc = cl.shift(1)
+                    tr = _pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()],
+                                    axis=1).max(axis=1)
+                    s = tr.ewm(span=14, adjust=False).mean()
+                    s.index = _pd.to_datetime(df.index).normalize()
+        except Exception:
+            s = None
+        with _ATR_LOCK:
+            _ATR_CACHE[sym] = s
+    if s is None:
+        return 0.0
+    try:
+        import pandas as _pd
+        ts = _pd.Timestamp(str(d)[:10])
+        pos = s.index.searchsorted(ts)
+        if pos <= 0 or pos > len(s.index):
+            return 0.0
+        v = float(s.iloc[pos - 1])          # 前日ATR
+        return v if v == v and v > 0 else 0.0
+    except Exception:
+        return 0.0
+
 
 def filled_by_cutoff(t, cutoff=None) -> bool:
     """その注文は締切時刻までに約定していたか。
@@ -247,7 +318,7 @@ def _day_bars(symbol: str, d: "date"):
     return None
 
 
-def simulate_bars(day) -> "dict | None":
+def simulate_bars(day, atr: float = 0.0) -> "dict | None":
     """既に読み込み済みの『その日の分足DataFrame』から転換結果を計算する。
 
     呼び出し側が daytrade_data.load_intraday / split_by_day で既に分足を持っている
@@ -281,15 +352,52 @@ def simulate_bars(day) -> "dict | None":
         return None
 
     b = buy_p * (1 + SLIP)
-    s = sell_p * (1 - SLIP)
+
+    # ── OCO(損切・利確)。ロングなので 損切=下 / 利確=上 ────────────────
+    #    買ったバーから SELL_TIME までを first-touch で見る。どちらにも
+    #    触れなければ従来どおり SELL_TIME の始値で時間決済。
+    reason = "時間"
+    stop_p = tgt_p = 0.0
+    if atr and atr > 0 and (SM > 0 or TM > 0):
+        stop_p = (b - atr * SM) if SM > 0 else 0.0
+        tgt_p = (b + atr * TM) if TM > 0 else 0.0
+        bi = next((i for i, t in enumerate(times) if t >= BUY_TIME), None)
+        si = next((i for i in range(len(times) - 1, -1, -1)
+                   if times[i] <= SELL_TIME), None)
+        if bi is not None and si is not None:
+            hi = day["high"].astype(float).to_numpy()
+            lo = day["low"].astype(float).to_numpy()
+            op = day["open"].astype(float).to_numpy()
+            for j in range(bi, si + 1):
+                hit_t = tgt_p > 0 and hi[j] >= tgt_p
+                hit_s = stop_p > 0 and lo[j] <= stop_p
+                if hit_t and hit_s:
+                    # 同一バーで両方 → 悲観側(損切り)を採る
+                    hit_t = False
+                if hit_s:
+                    # 逆指値売りは成行になるので、バーが損切りを飛び越えて
+                    # 開いたら始値約定(不利)。sameday5m_firsttouch と同じ扱い。
+                    sell_p = min(stop_p, op[j])
+                    sell_t = times[j].strftime("%H:%M")
+                    reason = "損切り"
+                    break
+                if hit_t:
+                    sell_p = tgt_p
+                    sell_t = times[j].strftime("%H:%M")
+                    reason = "利確"
+                    break
+
+    # 利確は指値なので滑らせない。損切り(成行)と時間決済は不利側に滑らせる。
+    s = sell_p if reason == "利確" else sell_p * (1 - SLIP)
     pnl = (s - b) * QTY - (b + s) * QTY * FEE
-    return {"pnl": pnl, "buy_p": b, "sell_p": s, "buy_t": buy_t, "sell_t": sell_t}
+    return {"pnl": pnl, "buy_p": b, "sell_p": s, "buy_t": buy_t, "sell_t": sell_t,
+            "reason": reason, "stop_p": stop_p, "target_p": tgt_p}
 
 
 def simulate(symbol: str, d: "date") -> "dict | None":
     """指定日の転換結果。分足を自分で読み込む版(単発利用向け)。
     既に分足を持っているなら simulate_bars() を使うこと。"""
-    return simulate_bars(_day_bars(symbol, d))
+    return simulate_bars(_day_bars(symbol, d), atr_of(symbol, d))
 
 
 def release_cache() -> None:
@@ -330,8 +438,11 @@ def make_trade(symbol: str, name: str, d: "date", res: dict,
         "entry_d_raw": d,
         "exit_d_raw": d,
         "entry_time": res.get("buy_t") or "09:09",
+        "exit_time": res.get("sell_t") or "",
         "pnl": res["pnl"],
-        "reason": "転換決済",
+        # 決済理由は OCO の結果を出す(他タブと同じ語彙)。時間決済だけ「転換決済」。
+        "reason": {"損切り": "損切り", "利確": "目標達成"}.get(
+            res.get("reason", ""), "転換決済"),
         "entry_dt": ds,
         "exit_dt": ds,
         "entry_p": res["buy_p"],
@@ -340,9 +451,11 @@ def make_trade(symbol: str, name: str, d: "date", res: dict,
         "hold_days": 0,
         "days_neg": 0,
         "days_to_fill": 0,
-        "order_limit": 0,
-        "order_stop": 0,
-        "order_target": 0,
+        # 明細の 損切り/目標 列に出す。ロングなので 損切=下 / 目標=上。
+        # order_limit は買値(=成行なので指値ではないが、明細の基準価格として使う)。
+        "order_limit": round(float(res.get("buy_p", 0) or 0), 1),
+        "order_stop": round(float(res.get("stop_p", 0) or 0), 1),
+        "order_target": round(float(res.get("target_p", 0) or 0), 1),
     }
 
 
