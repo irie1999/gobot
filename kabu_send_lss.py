@@ -170,19 +170,34 @@ def _lss_signal_today(sym: str, name: str, strat: str,
             _liq = _lor.daily_turnover(df)
         except Exception:
             _liq = 0.0
+        # ATR(前日)。stop = order + atr*sm (ショート)なので逆算できる。
+        # H案(寄指)は **実約定価格(寄り値)基準** で OCO を組み直すので、
+        # watcher が再計算するために必要(現行の逆指値は注文価格基準なので不要)。
+        _atr = (sp - lp) / sm if sm else 0.0
         return {
             "symbol": kabu_code, "name": name, "strategy": strat,
             "family": "lss",
             "order_price": lp, "stop_price": sp, "target_price": tp,
             "signal_date": str(sd), "liquidity": _liq,
+            "atr": _atr, "sm": sm, "tm": tm,
         }
     return None
 
 
-def _log_ordered(sig: dict, prod: bool, qty: int) -> None:
-    """実発注に成功した lss シグナルを ordered_signals_lss.csv に追記する。"""
+def _log_ordered(sig: dict, prod: bool, qty: int,
+                 entry_mode: str = "stop", order_price: float | None = None) -> None:
+    """実発注に成功した lss シグナルを ordered_signals_lss.csv に追記する。
+
+    entry_mode:
+      "stop"    = 現行の逆指値売り。OCO は **注文価格基準**(発注時に確定)。
+      "auction" = H案の寄指売り。板寄せの約定値は指値以上になるので、OCO は
+                  **実約定価格基準**で組み直す必要がある。そのため atr/sm/tm を
+                  一緒に残し、lss_exit_watcher が建玉の平均約定値から再計算する。
+    order_price: 実際に出した注文価格(寄指ならずらした後の指値)。省略時は sig の値。
+    """
     import csv
     now = datetime.now(JST)
+    _op = float(sig.get("order_price", 0) or 0) if order_price is None else float(order_price)
     row = {
         "record_date": now.strftime("%Y-%m-%d"),
         "ordered_at":  now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -191,23 +206,61 @@ def _log_ordered(sig: dict, prod: bool, qty: int) -> None:
         "strategy":    sig.get("strategy", ""),
         "family":      "lss",
         "side":        "short",
-        "order_price": round(float(sig.get("order_price", 0) or 0)),
+        "order_price": round(_op),
         "stop_price":  round(float(sig.get("stop_price", 0) or 0)),
         "target_price": round(float(sig.get("target_price", 0) or 0)),
         "qty":         qty,
         "prod":        int(bool(prod)),
         "cash_margin": CASH_MARGIN_OPEN,
+        # ↓ 2026-08-10 追加。既存ファイルには無いので下でヘッダを合わせる。
+        "entry_mode":  entry_mode,
+        "atr":         round(float(sig.get("atr", 0) or 0), 2),
+        "sm":          float(sig.get("sm", 0) or 0),
+        "tm":          float(sig.get("tm", 0) or 0),
     }
     p = Path(ORDERED_LOG)
-    new = not p.exists()
     try:
+        _ensure_header(p, list(row.keys()))
         with open(p, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(row.keys()))
-            if new:
-                w.writeheader()
-            w.writerow(row)
+            csv.DictWriter(f, fieldnames=list(row.keys())).writerow(row)
     except Exception as e:
         print(f"  ⚠ 発注記録の書き込み失敗 ({e})")
+
+
+def _ensure_header(p: Path, cols: list[str]) -> None:
+    """CSV のヘッダを cols に揃える。列が増えたら既存行を保ったまま書き直す。
+
+    ⛔ DictWriter に新しい列を渡すと、ヘッダが古いままの既存ファイルでは
+       行の列数がズレる(あるいは ValueError)。列を増やしたときは必ずここを通す。
+       既存行の新列は空欄になる = 読む側は「値なし」として扱えばよい。
+    """
+    import csv
+    if not p.exists():
+        with open(p, "w", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=cols).writeheader()
+        return
+    with open(p, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+        old = list(rows[0].keys()) if rows else None
+    if old is None:
+        with open(p, newline="", encoding="utf-8") as f:
+            old = next(csv.reader(f), [])
+    if list(old) == cols:
+        return
+    missing = [c for c in cols if c not in old]
+    if not missing:
+        return          # 列が減るケースは触らない(既存の並びを尊重)
+    bak = p.with_suffix(p.suffix + ".bak")
+    try:
+        bak.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in cols})
+    print(f"  ℹ {p.name} に列を追加しました: {missing} (旧ファイルは {bak.name})")
 
 
 def main() -> int:

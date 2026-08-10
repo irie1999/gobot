@@ -127,13 +127,18 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {}
 
-    def _add(sym, entry, qty, strat, name, stop, target, date=""):
+    def _add(sym, entry, qty, strat, name, stop, target, date="",
+             mode="stop", atr=0.0, sm=0.0, tm=0.0):
+        """mode/atr/sm/tm は H案(寄指)用。stop/target を実約定価格から組み直すのに使う。
+        既存の CSV(列が無い)は mode="stop" のまま = 従来どおり注文価格基準。"""
         sym = str(sym).upper().removesuffix(".T").split(".")[0]
         if not sym:
             return
         out.setdefault(sym, []).append(
             {"entry": entry, "qty": qty, "strategy": strat, "name": name,
-             "stop": stop, "target": target, "date": str(date)[:10]})
+             "stop": stop, "target": target, "date": str(date)[:10],
+             "mode": str(mode or "stop"), "atr": float(atr or 0.0),
+             "sm": float(sm or 0.0), "tm": float(tm or 0.0)})
 
     # A) ordered_signals_lss.csv (kabu_send_lss)
     p = _BASE / "ordered_signals_lss.csv"
@@ -148,7 +153,10 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                 _add(r.get("symbol"), _num(r.get("order_price")),
                      int(_num(r.get("qty")) or 100), r.get("strategy", ""),
                      r.get("name", ""), _num(r.get("stop_price")),
-                     _num(r.get("target_price")), date=d)
+                     _num(r.get("target_price")), date=d,
+                     mode=(r.get("entry_mode") or "stop"),
+                     atr=_num(r.get("atr")), sm=_num(r.get("sm")),
+                     tm=_num(r.get("tm")))
         except Exception as e:
             print(f"  [!] ordered_signals_lss.csv 読込失敗 ({e})")
 
@@ -272,6 +280,30 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         rec = _match_lss(sym, avg, qty, lss_map, tol)
         if rec is None:
             continue   # lss記録に一致しない売建(メインショート等) → 触らない
+        # ── H案(寄指)は OCO を **実約定価格(寄り値)基準** で組み直す ──────────
+        # 板寄せの約定値は指値**以上**になる(寄りが指値より上なら始値で売れる)。
+        # 指値基準の stop をそのまま使うと約定値より下に来てしまい、建てた瞬間に
+        # 損切り条件を満たす。バックテスト(eh_trades)も ep 基準:
+        #     stop = ep + atr*sm  /  target = ep - atr*tm
+        # 現行の逆指値(mode="stop")は注文価格基準のままでよい(約定値は
+        # トリガー以下 = 損切りは必ず上に来るので破綻しない)。
+        if str(rec.get("mode", "stop")) == "auction":
+            _atr, _sm, _tm = (float(rec.get("atr", 0) or 0),
+                              float(rec.get("sm", 0) or 0),
+                              float(rec.get("tm", 0) or 0))
+            if avg > 0 and _atr > 0 and _sm > 0 and _tm > 0:
+                rec = dict(rec)
+                _os, _ot = rec.get("stop", 0.0), rec.get("target", 0.0)
+                rec["stop"] = avg + _atr * _sm
+                rec["target"] = avg - _atr * _tm
+                print(f"  [寄指] {sym} 実約定{avg:,.0f} から OCO を再計算: "
+                      f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
+                      f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
+                      f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
+            else:
+                print(f"  [!] {sym} 寄指だが ATR/sm/tm が取れません"
+                      f"(atr={_atr} sm={_sm} tm={_tm}) → 注文価格基準のまま使います。"
+                      f"ordered_signals_lss.csv を確認してください")
         # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。損切≤平均約定=逆側/陳腐化した
         # 注文の疑い → その損切りは無効化して誤決済を防ぐ(利確・引けは有効のまま)。マッチ改善後も
         # なお不整合な場合の最終防波堤。0.1ATRのタイト損切りでも avg より上なので通常は発火しない。

@@ -55,7 +55,8 @@ import backtest_limit_entry as ble                                  # noqa: E402
 from kabu_api import KabuClient, CASH_MARGIN_OPEN                   # noqa: E402
 from backtest_limit_entry import tick_size, round_to_tick          # noqa: E402
 # lss シグナル収集は kabu_send_lss と完全共有(ロジック二重化を避ける)
-from kabu_send_lss import _load_symbols, _lss_signal_today, _jq_to_yf, DEFAULT_SM, DEFAULT_TM  # noqa: E402
+from kabu_send_lss import (_load_symbols, _lss_signal_today, _jq_to_yf,   # noqa: E402
+                           _log_ordered, DEFAULT_SM, DEFAULT_TM)
 
 JST = timezone(timedelta(hours=9))
 FIXED_QTY = ble.FIXED_QTY
@@ -119,9 +120,19 @@ def main() -> int:
     ap.add_argument("--poll-sec", type=float, default=10.0, help="約定監視の間隔秒(既定10)")
     ap.add_argument("--monitor-until", type=str, default="10:30",
                     help="監視を打ち切る時刻 HH:MM(既定10:30)。予算到達か この時刻で監視終了")
+    # ── エントリー方式 (2026-08-10 追加) ──────────────────────────
+    ap.add_argument("--entry-mode", choices=["stop", "auction"], default="stop",
+                    help="stop=現行の逆指値売り(前日終値を割ったら売る) / "
+                         "auction=H案の**寄指売り**(寄付の板寄せだけで約定。"
+                         "寄らなければ建てない)。既定 stop")
+    ap.add_argument("--limit-ticks", type=int, default=-5,
+                    help="auction のとき、指値を前日終値から何ティックずらすか"
+                         "(既定 -5)。下げるほど約定は増えるが売り値は不利。"
+                         "TRAIN/TEST とも -10..-1 が平坦で 0 以上は明確に劣る(.\\hsweep)")
     ap.add_argument("--aggressive", action="store_true")
     ap.add_argument("--conservative", action="store_true")
     args = ap.parse_args()
+    _auction = (args.entry_mode == "auction")
 
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注+監視★" if args.execute else "dry-run(プラン表示のみ)"
@@ -202,25 +213,46 @@ def main() -> int:
     placed = []   # {order_id, symbol, trigger, qty, notional}
     for s in plan:
         sym = _norm(s["symbol"])
-        trig = round_to_tick(float(s["order_price"]))
-        # 即約定回避: トリガーが現値以上だと弾かれる → 現値-1ティックに引下げ
-        try:
-            cur = cli.get_current_price(sym)
-        except Exception:
-            cur = None
-        if cur and cur > 0:
-            if trig >= cur:
-                trig = round_to_tick(cur - tick_size(cur))
+        pc = float(s["order_price"])          # em=0.0 なので order_price = 前日終値
+        if _auction:
+            # ── H案: 寄指売り(寄付の板寄せのみ) ──────────────────
+            # 現値との比較(即約定回避)はしない。寄指はザラ場では約定しないので
+            # 「現値より上の指値」を出すのがむしろ正しい。
+            # 下限ガード(after_hit_price)も逆指値専用なので無い。
+            trig = round_to_tick(pc + args.limit_ticks * tick_size(pc))
+            res = cli.send_sell(sym, qty=args.qty, price=trig,
+                                order_type="limit_moo", cash_margin=CASH_MARGIN_OPEN)
         else:
-            trig = round_to_tick(trig - tick_size(trig))
-        after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
-        res = cli.send_stop_sell(sym, qty=args.qty, trigger_price=trig,
-                                 cash_margin=CASH_MARGIN_OPEN, after_hit_price=after)
+            trig = round_to_tick(pc)
+            # 即約定回避: トリガーが現値以上だと弾かれる → 現値-1ティックに引下げ
+            try:
+                cur = cli.get_current_price(sym)
+            except Exception:
+                cur = None
+            if cur and cur > 0:
+                if trig >= cur:
+                    trig = round_to_tick(cur - tick_size(cur))
+            else:
+                trig = round_to_tick(trig - tick_size(trig))
+            after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
+            res = cli.send_stop_sell(sym, qty=args.qty, trigger_price=trig,
+                                     cash_margin=CASH_MARGIN_OPEN, after_hit_price=after)
         oid = res.get("OrderId")
         if res.get("Result") == 0 and oid:
             placed.append({"order_id": oid, "symbol": sym, "trigger": float(trig),
                            "qty": args.qty, "notional": float(trig) * args.qty})
-            print(f"  ✓ {sym} {s['name']} 発注 OrderId={oid} @≤{trig:,.0f}")
+            print(f"  ✓ {sym} {s['name']} 発注 OrderId={oid} "
+                  f"{'@寄指' if _auction else '@≤'}{trig:,.0f}")
+            # watcher(.\watch) が決済できるよう ordered_signals_lss.csv に残す。
+            # ⛔ auction は OCO を **実約定価格(寄り値)基準** で組み直す必要がある
+            #    (板寄せの約定値は指値以上になるので、指値基準の stop だと
+            #     約定値より下に来て即損切りになる)。そのため atr/sm/tm も一緒に
+            #    書き、watcher 側で再計算する。
+            try:
+                _log_ordered(s, args.prod, args.qty,
+                             entry_mode=args.entry_mode, order_price=trig)
+            except Exception as _le:
+                print(f"    ⚠ 発注記録の書き込み失敗(決済は建玉から拾えます): {_le}")
         else:
             print(f"  ✗ {sym} {s['name']} 発注失敗: {res}")
 
