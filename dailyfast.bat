@@ -15,6 +15,14 @@ REM
 REM   Everything that matters for ordering stays: signal tab, P&L tab, budget tabs,
 REM   and the tenkan tab (now auto-built from unfilled signals, so it includes today).
 REM
+REM   --h-tab is ON here (but NOT in daily.bat). It adds the "H limit short" direction
+REM   tab next to "long-stock short": same signals, same names, same exits, the only
+REM   difference is the order type (limit sell at prev close -5 ticks instead of a
+REM   stop sell at -1 tick). Its order button really does send a LIMIT sell.
+REM   COST: it runs the whole lss pass a SECOND time, so this is roughly 2x slower.
+REM   daily.bat keeps it off so the 8:45 order list is never delayed. Drop --h-tab
+REM   here too if you want the old speed back.
+REM
 REM   When you DO want the full report, run .\daily instead.
 REM   Middle ground: .\daily --symbol-detail-limit 20   (keeps the tab, top-20 by BT)
 REM ============================================================
@@ -57,4 +65,4 @@ REM     Without it .\fills skips its section 3 and the daily divergence never ac
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
