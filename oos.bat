@@ -19,6 +19,7 @@ REM   Output: signals_holdout_all_*_oosYYYYMM_<date>.html   (daily report untouc
 REM
 REM   What is identical to .\daily (do NOT change - 18.10.1):
 REM     LSS_STOP_DELAY_BARS=1 / LSS_BT_TAB_MIN=30 / LSS_ASOF_BT=1
+REM     LSS_H_LIMIT_TICKS=-5 (H's limit offset)
 REM     price range 1000-6000 / order rank = liquidity / fee 0 / v17 split guard
 REM
 REM   What is different:
@@ -57,6 +58,9 @@ REM --- must match daily.bat / watch.bat exactly ---
 set "LSS_STOP_DELAY_BARS=1"
 set "LSS_BT_TAB_MIN=30"
 set "LSS_ASOF_BT=1"
+REM --- H's limit offset must match daily.bat too, or the H tab in this OOS report
+REM     evaluates a different entry method than the one under evaluation.
+if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 
 REM --- keep the production trade log intact (.\fills reads lss_trades.csv) ---
 set "LSS_TRADES_CSV=lss_trades_oos%TAG%.csv"
