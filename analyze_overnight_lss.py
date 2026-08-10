@@ -82,6 +82,21 @@ ap.add_argument("--exclude-months", default="",
                 help="除外する月(YYYY-MM, カンマ区切り)。配当落ちの影響を外す用途。"
                      "日本株は3月期末・9月中間に権利落ちが集中し、空売りは配当落調整金を"
                      "払うので、夜またぎの利益はその分だけ現実には存在しない")
+ap.add_argument("--gap-guard", type=float, default=0.03,
+                help="現行と同じ指値下限ガード。寄りが前日終値×(1-これ)を下回る"
+                     "ギャップダウンは約定不可としてスキップ"
+                     "(backtest_limit_entry._INTRADAY_5M_ENTRY_GAP_LIMIT=0.03 と同値)。"
+                     "0=ガード無し")
+ap.add_argument("--control", type=int, default=0,
+                help="対照実験の件数。同じ銘柄・**シグナルが出ていない日**に同じ"
+                     "OCOで寄り成行ショートする。ここでも同じだけ稼げるなら、"
+                     "E の成績はエッジではなく OCO の払い出し形状の産物。"
+                     "推奨: シグナル件数と同程度(例 4000)")
+ap.add_argument("--control-seed", type=int, default=42)
+ap.add_argument("--out-raw", default="",
+                help="E の損益を生CSV形式(oos_raw と同じ列)で書き出す。"
+                     "sim_oos_budget.py に食わせて**予算制約下**で現行と比較するため"
+                     "(18.10: 全部買えるなら得 と 予算内でどれを買うか は別問題)")
 ap.add_argument("--no-oco", action="store_true",
                 help="D(引け+OCO)を計算しない。5分足が無い環境向け")
 a = ap.parse_args()
@@ -234,8 +249,13 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
                 pass
             _INF = float("inf")
             _dl, _dh = float(df["l"].iloc[pos]), float(df["h"].iloc[pos])
+            # 現行と同じ指値下限ガード: 寄りが前日終値×(1-guard)を下回るギャップ
+            # ダウンは約定不可(現行 lss も同じ理由でスキップする)。
+            _gap_ng = (a.gap_guard > 0 and o1 < pc * (1.0 - a.gap_guard))
             for _tag, _ep, _dly in (("D_引け+OCO", pc, a.d_stop_delay),
                                     ("E_翌寄り+OCO", o1, a.stop_delay_bars)):
+                if _gap_ng and _tag.startswith("E_"):
+                    continue                      # E は寄り約定なのでガードが効く
                 xp, why, _e5, _x5t = _x5(
                     day5, _INF, _ep + atr * a.sm, _ep - atr * a.tm, False,
                     day_low=_dl, day_high=_dh, day_close=c1,
@@ -309,6 +329,71 @@ if a.by_month:
               + "".join(f"{g[c].mean():>+10,.0f}" for c in
                         ("A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け")))
 
+# ── 対照実験: シグナルが出ていない日に同じ OCO を当てる ──────────────
+# 「利確・損切を置けば何でも良く見えるのでは」への答え。損切0.1ATR/利確1.0ATR は
+# 10:1 の宝くじ型なので、ドリフトが無くても払い出しの形だけで数字が動く余地がある。
+# **同じ銘柄・同じ決済・シグナルが出ていない日**でも同じだけ稼げるなら、
+# E の成績はエッジではなく OCO の形状(と測定の非対称)の産物ということになる。
+if a.control > 0 and not a.no_oco:
+    import random as _rnd
+    _rg = _rnd.Random(a.control_seed)
+    _sig_set = {(str(x), pd.Timestamp(y).date())
+                for x, y in zip(u["symbol"], u["entry_date"])}
+    _cv, _cd, _tried = [], [], 0
+    _cands = [(sm, list(dd.keys())) for sm, dd in _i5.items() if dd]
+    while len(_cv) < a.control and _tried < a.control * 60 and _cands:
+        _tried += 1
+        sm, days = _cands[_rg.randrange(len(_cands))]
+        if not days:
+            continue
+        dt = days[_rg.randrange(len(days))]
+        if (sm, dt) in _sig_set:
+            continue
+        df = _bars.get(sm)
+        if df is None:
+            continue
+        idx = df.index
+        pos = idx.searchsorted(pd.Timestamp(dt))
+        if pos <= 0 or pos >= len(idx) or idx[pos] != pd.Timestamp(dt):
+            continue
+        pc_ = float(df["c"].iloc[pos - 1]); o_ = float(df["o"].iloc[pos])
+        c_ = float(df["c"].iloc[pos]); atr_ = float(df["atr"].iloc[pos - 1])
+        if not (pc_ > 0 and o_ > 0 and c_ > 0 and atr_ == atr_ and atr_ > 0):
+            continue
+        if a.gap_guard > 0 and o_ < pc_ * (1.0 - a.gap_guard):
+            continue
+        day5 = _i5[sm].get(dt)
+        if day5 is None or len(day5) == 0 or not _ig_ok(day5, c_):
+            continue
+        xp, why, _e5, _x5t = _x5(day5, float("inf"), o_ + atr_ * a.sm,
+                                 o_ - atr_ * a.tm, False,
+                                 day_low=float(df["l"].iloc[pos]),
+                                 day_high=float(df["h"].iloc[pos]),
+                                 day_close=c_, stop_delay_bars=a.stop_delay_bars)
+        if xp is None or why in ("no_5m", "no_entry"):
+            continue
+        _cv.append((o_ - float(xp)) * a.qty)
+        _cd.append(pd.Timestamp(dt))
+    if _cv:
+        cs = pd.Series(_cv)
+        cdm = pd.DataFrame({"d": _cd, "v": _cv}).groupby("d")["v"].mean()
+        ct = (cdm.mean() / (cdm.std(ddof=1) / (len(cdm) ** 0.5))) if len(cdm) > 1 else 0.0
+        _ev = r["E_翌寄り+OCO"].dropna()
+        print(f"\n■ 対照実験 — シグナルが出ていない日に同じ OCO で寄り成行ショート")
+        print(f"  {'区分':<26}{'件数':>7}{'勝率':>7}{'円/件':>9}{'日クラスタt':>11}")
+        print(f"  {'E(シグナルあり)':<26}{len(_ev):>7,}"
+              f"{(_ev > 0).mean()*100:>6.1f}%{_ev.mean():>+9,.0f}"
+              f"{_res.get('E_翌寄り+OCO', (0,0,0,0))[3]:>+11.2f}")
+        print(f"  {'対照(シグナルなしの日)':<26}{len(cs):>7,}"
+              f"{(cs > 0).mean()*100:>6.1f}%{cs.mean():>+9,.0f}{ct:>+11.2f}")
+        print(f"  差 (E − 対照)                              "
+              f"{_ev.mean() - cs.mean():>+9,.0f}円/件")
+        if abs(cs.mean()) > abs(_ev.mean()) * 0.5:
+            print(f"  ⛔ **対照でも同じだけ出ている。E の数字はシグナルのエッジではなく、")
+            print(f"     0.1/1.0 という OCO の払い出し形状(と測定の非対称)の産物。**")
+        else:
+            print(f"  → 対照はほぼゼロ。E の数字は OCO の形状では説明できない。")
+
 # ── 診断① 5分足の先頭バー時刻 ────────────────────────────────
 if _bar0:
     _tb = sum(_bar0.values())
@@ -338,6 +423,25 @@ if "lss約定" in r.columns and (r["lss約定"] >= 0).any() and not a.no_oco:
     print(f"  → 『lss は不約定だった』側にも同じだけ乗っているなら、E のエッジは"
           f"トリガーとは無関係。")
     print(f"     『lss も約定した』側に偏っているなら、E は現行の焼き直しに近い。")
+
+if a.out_raw.strip():
+    _o = r[r["E_翌寄り+OCO"].notna()].copy()
+    _o = _o.assign(fold=1, train_months="", oos_month=_o["month"],
+                   entry_date=_o["date"].dt.strftime("%Y-%m-%d"),
+                   name="", strategy="E", bt_score=99.0,
+                   entry_p=_o["entry_p"].round(1),
+                   pnl=_o["E_翌寄り+OCO"].round(0), filled=1)
+    _liqmap = (d.drop_duplicates(subset=["symbol"]).set_index("symbol")["liquidity"]
+               if "liquidity" in d.columns else None)
+    _o["liquidity"] = (_o["symbol"].map(_liqmap).fillna(0)
+                       if _liqmap is not None else 0)
+    _o[["fold", "train_months", "oos_month", "entry_date", "symbol", "name",
+        "strategy", "bt_score", "entry_p", "pnl", "filled", "liquidity"]].to_csv(
+        a.out_raw, index=False, encoding="utf-8-sig")
+    print(f"\n[出力] {a.out_raw} ({len(_o):,}行)")
+    print(f"  → python sim_oos_budget.py --raw {a.out_raw} --bt-mins 0 --budget 400")
+    print(f"     で**予算制約下**の現行との比較ができる(18.10: 全部買えるなら得 と")
+    print(f"     予算内でどれを買うか は別問題)。")
 
 print(f"\n{'─'*78}")
 print("■ 読み方")
