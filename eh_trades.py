@@ -206,6 +206,14 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     # データ不足の内訳。合計だけだと実行ごとのブレの原因が追えない(2026-08-10)。
     _sk = {"日足なし": 0, "日足に該当日なし": 0, "5分足なし": 0,
            "分割ガード": 0, "先頭バーが09:00でない": 0, "価格/ATR異常": 0}
+    # H の約定の内訳。**ライブでの信頼度がまったく違う**ので必ず出す:
+    #   板寄せ  = 寄りが既に前日終値以上 → 9:00の板寄せで前日終値以上の値がつく。
+    #             指値売りは必ず約定する(始値で約定)。バックテストと現実が一致。
+    #   ザラ場  = 寄りは下だったが日中に前日終値まで戻って約定。
+    #             ⚠ バックテストは「高値が指値に触れたら約定」とみなすが、実際は
+    #             **板の待ち行列**があり、触れただけでは約定しないことがある。
+    #             ここの比率が高いほど H の数字は楽観側に寄る。
+    _hfill = {"板寄せ": 0, "ザラ場到達": 0}
     for (sym, dstr), src in base.items():
         _srcs = rows.get((sym, dstr)) or [src]
         df = daily.get(sym)
@@ -274,6 +282,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
+            if key == "H":
+                _hfill["板寄せ" if o1 >= pc else "ザラ場到達"] += len(_srcs)
             _t = ""
             try:
                 _t = pd.Timestamp(_x).strftime("%H:%M")
@@ -287,6 +297,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         f"不約定 E={len(nf['E']):,} H={len(nf['H']):,} / データ不足 {_skip:,}")
     log("[E/H] データ不足の内訳: "
         + " / ".join(f"{k} {v:,}" for k, v in _sk.items() if v))
+    _ht = sum(_hfill.values())
+    if _ht:
+        _zr = _hfill["ザラ場到達"]
+        log(f"[E/H] H の約定内訳: 板寄せ {_hfill['板寄せ']:,}件 "
+            f"({_hfill['板寄せ'] / _ht * 100:.0f}%) / "
+            f"ザラ場到達 {_zr:,}件 ({_zr / _ht * 100:.0f}%)")
+        log("      ⚠ ザラ場到達分は『高値が指値に触れたら約定』とみなしている。"
+            "実際は板の待ち行列があり触れただけでは約定しないことがあるので、"
+            "この比率が高いほど H の数字は楽観側に寄る(板寄せ分は現実と一致)。")
     return {"E": out["E"], "H": out["H"], "約定せず": nf}
 
 
