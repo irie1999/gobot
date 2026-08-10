@@ -228,6 +228,8 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "C_翌寄り→翌引け": (o1 - c1) * q,
         "D_引け+OCO": None,
         "E_翌寄り+OCO": None,
+        "F_5分足寄り+OCO": None,
+        "始値差bp": None,
         "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
         "bar0": "",
     }
@@ -261,10 +263,23 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
             # 現行と同じ指値下限ガード: 寄りが前日終値×(1-guard)を下回るギャップ
             # ダウンは約定不可(現行 lss も同じ理由でスキップする)。
             _gap_ng = (a.gap_guard > 0 and o1 < pc * (1.0 - a.gap_guard))
+            # ⛔ E のエントリーは日足(yfinance)の始値、決済判定は5分足(J-Quants)。
+            #    出所が違うので、この2つがずれていると差額がそのまま利益になる。
+            #    F = 5分足の先頭バーの始値で入る版。E と F が乖離するなら、
+            #    E の一部は『データ間のズレ』を拾っているだけ。
+            try:
+                _o5 = float(day5["open"].iloc[0])
+            except Exception:
+                _o5 = 0.0
+            if _o5 > 0:
+                rec["始値差bp"] = (o1 - _o5) / _o5 * 10_000
             for _tag, _ep, _dly in (("D_引け+OCO", pc, a.d_stop_delay),
-                                    ("E_翌寄り+OCO", o1, a.stop_delay_bars)):
-                if _gap_ng and _tag.startswith("E_"):
-                    continue                      # E は寄り約定なのでガードが効く
+                                    ("E_翌寄り+OCO", o1, a.stop_delay_bars),
+                                    ("F_5分足寄り+OCO", _o5, a.stop_delay_bars)):
+                if _ep <= 0:
+                    continue
+                if _gap_ng and not _tag.startswith("D_"):
+                    continue                      # 寄り約定はガードが効く
                 xp, why, _e5, _x5t = _x5(
                     day5, _INF, _ep + atr * a.sm, _ep - atr * a.tm, False,
                     day_low=_dl, day_high=_dh, day_close=c1,
@@ -296,7 +311,7 @@ print(f"  {'現行 lss (参考)':<18}{len(_cur_pnl):>7,}"
 _res = {}
 _cols = ["A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け"]
 if not a.no_oco:
-    _cols += ["D_引け+OCO", "E_翌寄り+OCO"]
+    _cols += ["D_引け+OCO", "E_翌寄り+OCO", "F_5分足寄り+OCO"]
 for col in _cols:
     v = r[col].dropna()
     if v.empty:
@@ -307,10 +322,11 @@ for col in _cols:
     t = (dm.mean() / (dm.std(ddof=1) / (len(dm) ** 0.5))) if len(dm) > 1 else 0.0
     _res[col] = (v.sum(), v.mean(), bp, t)
     _mark = ("  ← 引け成行(要 look-ahead)" if col.startswith("D_") else
-             "  ← 寄り成行(実装可能)" if col.startswith("E_") else "")
+             "  ← 寄り成行(日足の始値)" if col.startswith("E_") else
+             "  ← 寄り成行(5分足の始値)" if col.startswith("F_") else "")
     print(f"  {col:<18}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%{v.sum():>+14,.0f}"
           f"{v.mean():>+9,.0f}{bp:>+8.1f}{t:>+11.2f}{_mark}")
-for _tag in ("D", "E"):
+for _tag in ("D", "E", "F"):
     _rs = {k[1]: v for k, v in _reasons.items() if k[0] == _tag}
     if _rs:
         _tot5 = sum(_rs.values())
@@ -337,6 +353,22 @@ if a.by_month:
               f"{(f'{cur:+,.0f}' if cur == cur else '—'):>10}"
               + "".join(f"{g[c].mean():>+10,.0f}" for c in
                         ("A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け")))
+
+# ── 診断: 日足の始値 vs 5分足の先頭バーの始値 ──────────────────
+if "始値差bp" in r.columns and r["始値差bp"].notna().any():
+    _gd = r["始値差bp"].dropna()
+    _e_, _f_ = r["E_翌寄り+OCO"].dropna(), r["F_5分足寄り+OCO"].dropna()
+    print(f"\n■ 始値の出所ちがい (E=日足/yfinance の始値, F=5分足/J-Quants の先頭バー始値)")
+    print(f"  差 (日足始値 − 5分足始値)  平均 {_gd.mean():+.1f}bp / "
+          f"中央 {_gd.median():+.1f}bp / 一致 {(_gd.abs() < 1).mean()*100:.1f}%")
+    if len(_e_) and len(_f_):
+        print(f"  E {_e_.mean():+,.0f}円/件  vs  F {_f_.mean():+,.0f}円/件   "
+              f"差 {_e_.mean() - _f_.mean():+,.0f}円/件")
+    if abs(_gd.mean()) > 2:
+        print(f"  ⛔ **平均で {_gd.mean():+.1f}bp ずれている。E はこのズレを利益として"
+              f"計上している可能性がある。F を正とすること。**")
+    else:
+        print(f"  → ズレは無視できる。E と F の差も小さいはず。")
 
 # ── 対照実験: シグナルが出ていない日に同じ OCO を当てる ──────────────
 # 「利確・損切を置けば何でも良く見えるのでは」への答え。損切0.1ATR/利確1.0ATR は
