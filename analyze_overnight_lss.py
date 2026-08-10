@@ -78,6 +78,10 @@ ap.add_argument("--d-stop-delay", dest="d_stop_delay", type=int, default=0,
                 help="D(引け+OCO)の損切り遅延。前日引けから建玉があるので逆指値は"
                      "**寄り前に置ける** → 0 が既定(delay1 は約定バーに置けない"
                      "という機構的理由なので D には当てはまらない)")
+ap.add_argument("--exclude-months", default="",
+                help="除外する月(YYYY-MM, カンマ区切り)。配当落ちの影響を外す用途。"
+                     "日本株は3月期末・9月中間に権利落ちが集中し、空売りは配当落調整金を"
+                     "払うので、夜またぎの利益はその分だけ現実には存在しない")
 ap.add_argument("--no-oco", action="store_true",
                 help="D(引け+OCO)を計算しない。5分足が無い環境向け")
 a = ap.parse_args()
@@ -94,6 +98,14 @@ d["entry_date"] = pd.to_datetime(d["entry_date"], errors="coerce")
 d = d[d["entry_date"].notna()].copy()
 # 同じ(銘柄,日)は戦略が違っても同じ1トレードになる(トリガー/決済が同一)。
 # 持ち越し案も同じなので、重複を排して1銘柄1日1件にする。
+if a.exclude_months.strip():
+    _ex = {m.strip() for m in a.exclude_months.split(",") if m.strip()}
+    _n0 = len(d)
+    d = d[~d["oos_month"].astype(str).isin(_ex)]
+    print(f"[除外] 月 {sorted(_ex)} → {_n0:,}→{len(d):,}件")
+# lss が実際に約定したか(=トリガーに届いたか)。E の内訳を割るのに使う。
+_fill_any = (d.groupby(["symbol", "entry_date"])["filled"].max()
+             if "filled" in d.columns else None)
 u = d.drop_duplicates(subset=["symbol", "entry_date"])[
     ["symbol", "entry_date", "oos_month"]].copy()
 print(f"[入力] {len(files)}ファイル / シグナル {len(d):,}件 "
@@ -168,6 +180,7 @@ if not a.no_oco:
             if i % 200 == 0:
                 print(f"  ...{i}/{len(_syms)}", flush=True)
 
+_bar0: dict = defaultdict(int)
 _recs = []
 _miss = 0
 _no5 = 0
@@ -197,6 +210,7 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
         "C_翌寄り→翌引け": (o1 - c1) * q,
         "D_引け+OCO": None,
         "E_翌寄り+OCO": None,
+        "lss約定": (int(_fill_any.get((sym, ed), 0)) if _fill_any is not None else -1),
     }
     # ── D/E: 現行と同じ OCO で決済 ──
     if not a.no_oco:
@@ -214,6 +228,10 @@ for sym, ed, om in u[["symbol", "entry_date", "oos_month"]].itertuples(index=Fal
             #    **朝の含み損の区間が丸ごと飛ばされる** = 負けだけが消える。
             #    entry_p に +inf を渡して ei=0 を強制し、必ず寄りから判定させる。
             #    stop_p / target_p は別引数なので、これで値は一切歪まない。
+            try:
+                _bar0[str(pd.Timestamp(day5.index[0]).strftime("%H:%M"))] += 1
+            except Exception:
+                pass
             _INF = float("inf")
             _dl, _dh = float(df["l"].iloc[pos]), float(df["h"].iloc[pos])
             for _tag, _ep, _dly in (("D_引け+OCO", pc, a.d_stop_delay),
@@ -291,6 +309,36 @@ if a.by_month:
               + "".join(f"{g[c].mean():>+10,.0f}" for c in
                         ("A_引け→翌寄り", "B_引け→翌引け", "C_翌寄り→翌引け")))
 
+# ── 診断① 5分足の先頭バー時刻 ────────────────────────────────
+if _bar0:
+    _tb = sum(_bar0.values())
+    print(f"\n■ 5分足の先頭バー時刻 (E は寄り約定なので、ここが 09:00 でないと"
+          f"寄り直後の値動きが測れていない)")
+    for k, v in sorted(_bar0.items(), key=lambda x: -x[1])[:5]:
+        print(f"    {k}  {v:,}件 ({v / _tb * 100:.1f}%)")
+    if not str(sorted(_bar0.items(), key=lambda x: -x[1])[0][0]).startswith("09:00"):
+        print(f"    ⚠ 先頭が 09:00 でない = 寄り〜先頭バーまでの区間が未測定。"
+              f"E の損切りが過小に出る。")
+
+# ── 診断② lss が約定した/しなかった で E を割る ────────────────
+if "lss約定" in r.columns and (r["lss約定"] >= 0).any() and not a.no_oco:
+    print(f"\n■ E を『lss がトリガーに届いたか』で分解")
+    print(f"  {'区分':<22}{'件数':>7}{'勝率':>7}{'合計':>14}{'円/件':>9}"
+          f"{'日クラスタt':>11}")
+    for _lab, _sel in (("lss も約定した", r["lss約定"] == 1),
+                       ("lss は不約定だった", r["lss約定"] == 0)):
+        g = r[_sel]
+        v = g["E_翌寄り+OCO"].dropna()
+        if v.empty:
+            continue
+        dm = g.loc[v.index].assign(_v=v).groupby("date")["_v"].mean()
+        t = (dm.mean() / (dm.std(ddof=1) / (len(dm) ** 0.5))) if len(dm) > 1 else 0.0
+        print(f"  {_lab:<22}{len(v):>7,}{(v > 0).mean()*100:>6.1f}%"
+              f"{v.sum():>+14,.0f}{v.mean():>+9,.0f}{t:>+11.2f}")
+    print(f"  → 『lss は不約定だった』側にも同じだけ乗っているなら、E のエッジは"
+          f"トリガーとは無関係。")
+    print(f"     『lss も約定した』側に偏っているなら、E は現行の焼き直しに近い。")
+
 print(f"\n{'─'*78}")
 print("■ 読み方")
 print(f"{'─'*78}")
@@ -304,6 +352,10 @@ print("    §18.19/18.20 の結論どおり。寄りで入ると条件を捨て�
 print("  ・D の決済理由も見ること。stop の比率が現行より大幅に高いなら、")
 print("    それは夜間ギャップで損切りラインを飛び越えられている(現行には無いリスク)。")
 print("  ・日クラスタ t で見ること。同日決済でない B/C も、日ごとに相関する。")
+print("  ⛔ **配当落ち**: 日本株は3月期末・9月中間に権利落ちが集中する。空売りは")
+print("     配当落調整金を払うので、夜またぎ(A/B/D)がその分だけ現実には存在しない")
+print("     利益を計上している。--exclude-months 2026-03 等で影響を測ること。")
+print("     E は寄り後に入るので配当落ちの影響を受けない。")
 print("  ⚠ 持ち越しには測定に出ないコストがある:")
 print("     逆日歩 / 一般信用デイトレ(MarginTradeType 3)が使えない /")
 print("     夜間のギャップで損切りが効かない / 証拠金が2日拘束され資本回転が半減。")
