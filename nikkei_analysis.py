@@ -2456,6 +2456,23 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                         _lss_stop   = _c2t(_close_ref + _atr * _LSS_SM)   # 損切=前日終値+atr*sm(上)
                         _lss_target = _c2t(_close_ref - _atr * _LSS_TM)   # 目標=前日終値-atr*tm(下)
                     _lss_limit = _r2t(order_p * (1.0 - 0.03))          # 発動後の指値下限(トリガー基準-3%)
+                    # ── H案(指値売り)の注文値も同じ検出結果から作る ──────────
+                    # シグナル・銘柄・決済ルールは現行とまったく同一で、違うのは
+                    # 注文の出し方だけ。だからシグナル検出をやり直す必要はない。
+                    #   現行: 前日終値-1tick に**逆指値**(下がってきたら約定)
+                    #   H   : 前日終値-5tick に**指値**  (上がってきたら/寄りが上なら約定)
+                    # ⚠ H の損切り・利確は**実約定価格(寄り値)基準**で、発注時点では
+                    #    確定しない(板寄せの約定値は指値以上になる)。watcher が建玉の
+                    #    平均約定値から組み直すので、ここでは ATR 幅だけ持たせる。
+                    try:
+                        _hk = int(os.environ.get("LSS_H_LIMIT_TICKS", "-5") or -5)
+                    except Exception:
+                        _hk = -5
+                    sig["h_order_price"] = float(_r2t(_close_ref + _hk * _tsz(_close_ref)))
+                    sig["h_atr"] = float(_atr)
+                    sig["h_ticks"] = _hk
+                    sig["h_stop_w"] = float(_atr * _LSS_SM)   # 約定値 + これ = 損切
+                    sig["h_target_w"] = float(_atr * _LSS_TM)  # 約定値 - これ = 利確
                     _lss_hold  = "同日"                          # 同日決済(max_hold=0)
                     try:  # 決済日 = 約定日(=シグナル翌営業日)。同日引けで決済
                         _lss_exit = _pd.bdate_range(start=_pd.to_datetime(sig_dt),
@@ -3081,6 +3098,32 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                          f'<br><span style="font-size:0.64rem;color:#4ade80">厚</span>')
         else:
             _liq_cell = f'<span style="color:#cbd5e1">{_liq_oku:,.0f}億</span>'
+        # ── H案(指値売り)の注文値。**表示のみ**で発注ボタンには入らない ──────
+        # 現行の逆指値と同じシグナル・同じ銘柄・同じ決済で、違うのは注文の出し方だけ。
+        # 発注は python lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
+        # ⚠ 損切り・利確は**実約定価格(寄り値)基準**なので発注時点では確定しない
+        #    (板寄せの約定値は指値以上になる)。watcher が建玉の平均約定値から
+        #    組み直すので、ここでは ATR 幅(±いくら)だけ出す。
+        _h_cell = ""
+        if _LSS_ORDER_MODE:
+            _hop = float(s.get("h_order_price", 0) or 0)
+            if _hop > 0:
+                _hsw = float(s.get("h_stop_w", 0) or 0)
+                _htw = float(s.get("h_target_w", 0) or 0)
+                _hsp = float(s.get("signal_price", 0) or 0)
+                _hd = ((_hop / _hsp - 1) * 100) if _hsp > 0 else 0.0
+                _h_cell = (
+                    f'<td style="text-align:right;color:#f0abfc;font-weight:700;'
+                    f'border-left:2px solid #a855f7;white-space:nowrap">'
+                    f'{_hop:,.0f}円'
+                    f'<br><span style="font-size:0.7rem;color:#c084fc">'
+                    f'{_hd:+.2f}% / {int(s.get("h_ticks", 0)):+d}tick</span>'
+                    + (f'<br><span style="font-size:0.68rem;color:#64748b">'
+                       f'損切+{_hsw:,.0f} 利確-{_htw:,.0f}</span>'
+                       if _hsw > 0 else "") + '</td>')
+            else:
+                _h_cell = ('<td style="text-align:center;color:#475569;'
+                           'border-left:2px solid #a855f7">—</td>')
         rows += f"""<tr class="sigrow" data-posval="{pos_val}" data-cum="{_cum_cap}">
   <td style="text-align:center;font-weight:700">{i}</td>
   <td class="sym" style="text-align:left">{s["symbol"]}<br>
@@ -3092,6 +3135,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
   <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
+  {_h_cell}
   <td style="text-align:right;color:#f87171">{_stop_cell}</td>
   <td style="text-align:right;color:#4ade80">{_tgt_cell}</td>
   <td style="text-align:right;color:#e2e8f0">{qty}株{_agree_badge}<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span>
@@ -3323,6 +3367,7 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     <th>シグナル日<br>時株価</th>
     <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
     <th style="color:#f59e0b">{'指値上限<br>(+3%)' if _LSS_LONG else ('指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)')}</th>
+    {'<th style="color:#f0abfc;border-left:2px solid #a855f7">H 指値<br><small>(検討中)</small></th>' if _LSS_ORDER_MODE else ''}
     <th>{'損切り(下)' if _LSS_LONG else ('損切り(上)' if _LSS_ORDER_MODE else '損切り(-)')}</th><th>{'目標(上)' if _LSS_LONG else ('目標(下)' if _LSS_ORDER_MODE else '目標(+)')}</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>
