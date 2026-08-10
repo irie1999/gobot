@@ -689,12 +689,27 @@ if "lss約定" in r.columns and (r["lss約定"] >= 0).any() and not a.no_oco:
 if a.out_raw.strip():
     _vcol = {"E": "E_翌寄り+OCO", "H": "H_前日終値で指値売り",
              "D": "D_引け+OCO", "F": "F_5分足寄り+OCO"}[a.out_variant]
-    _o = r[r[_vcol].notna()].copy()
+    # ⛔ **約定した行だけ書いてはいけない。** sim_oos_budget の『通常予算』は
+    #    不約定の注文も枠を消費するモデル(fill_budget=False)。約定分しか無いと
+    #    「どれが約定するかを事前に知っていた」ことになり、空いた枠で他の銘柄を
+    #    詰められてしまう = H(約定率73.8%)に大きく有利な先読みになる。
+    #    5分足とATRが揃った行はすべて出し、未約定は filled=0 / pnl=0 とする。
+    #    entry_p は**注文価格**(H=前日終値 / E,F=始値 / D=前日終値)。枠の消費は
+    #    注文価格×100 で計算されるので、ここを実約定値ではなく注文値にする。
+    _o = r[r["_atr"] > 0].copy()
+    _ordp = (_o["entry_p"] if a.out_variant in ("H", "D") else _o["_o1"])
+    _o = _o[_ordp > 0].copy()
+    _ordp = _ordp[_ordp > 0]
+    _o["_filled"] = _o[_vcol].notna().astype(int)
+    _o["_pnl"] = _o[_vcol].fillna(0.0)
+    _o["_ordp"] = _ordp
+    print(f"  [out-raw] 注文 {len(_o):,}件 / 約定 {int(_o['_filled'].sum()):,}件 "
+          f"({_o['_filled'].mean() * 100:.1f}%)  ※不約定も枠を消費する形で書き出す")
     _o = _o.assign(fold=1, train_months="", oos_month=_o["month"],
                    entry_date=_o["date"].dt.strftime("%Y-%m-%d"),
                    name="", strategy=a.out_variant, bt_score=99.0,
-                   entry_p=_o["entry_p"].round(1),
-                   pnl=_o[_vcol].round(0), filled=1)
+                   entry_p=_o["_ordp"].round(1),
+                   pnl=_o["_pnl"].round(0), filled=_o["_filled"])
     _liqmap = (d.drop_duplicates(subset=["symbol"]).set_index("symbol")["liquidity"]
                if "liquidity" in d.columns else None)
     _o["liquidity"] = (_o["symbol"].map(_liqmap).fillna(0)
