@@ -12893,6 +12893,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         作る**ので、定義上ズレようがない。
         """
         import statistics as _sti
+        try:
+            import backtest_limit_entry as _bte_mod
+        except Exception:
+            _bte_mod = None
         _sets = [("現行", _budget_entry_sorted_short)]
         for _k in ("E", "H"):
             _v = _eh_sorted.get(_k)
@@ -13035,7 +13039,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<b>違うのは注文の出し方だけ</b>。当月は営業日が揃わないので合計・検定から除外。<br>'
             f'⚠ <b>単月で判断しないこと</b>。月次σは10万円規模あるので、単月の差はノイズです。'
             f'⚠ このシムは slip=0。E/H は損切り比率が高いぶん実運用では成行の滑りを多く払います。</p>'
-            f'<table style="border-collapse:collapse;width:auto;font-size:0.8rem">'
+            # ── どの実行の数字かを刻む。別ファイル・別条件を見比べて混乱するのを防ぐ
+            #    (2026-08-10 に実際に何度も起きた)。t は月数で変わるので窓は必須。
+            + (f'<p style="color:#64748b;font-size:0.7rem;margin:0 0 8px;line-height:1.6">'
+               f'この表の条件: 窓 <b>{days}日</b>({len(_use)}ヶ月で検定 / 当月除く) ・ '
+               f'予算 <b>{_budget_man}万円</b> ・ BT<b>{_BT_TAB_MIN}</b>以上 ・ 発注順 <b>{_ORD_LBL}</b> ・ '
+               f'損切り遅延 <b>{int(getattr(_bte_mod, "_LSS_STOP_DELAY_BARS", 0) or 0)}</b>本 ・ '
+               f'損切 <b>{_LSS_SM}</b>ATR / 利確 <b>{_LSS_TM}</b>ATR ・ '
+               f'手数料 <b>{getattr(_bte_mod, "FEE_PCT_ONE_WAY", 0) * 100:.3f}%</b>片道 ・ '
+               f'生成 <b>{_TODAY}</b>'
+               f'<br>⚠ 窓や予算が違う別ファイルの数字と見比べないこと。t は月数で変わります。</p>')
+            + f'<table style="border-collapse:collapse;width:auto;font-size:0.8rem">'
             f'<thead><tr><th style="{_th};text-align:left">月</th>{_hd}</tr>'
             f'<tr><th></th>{_sub}</tr></thead><tbody>{_rows}</tbody></table>'
             f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;margin:10px 0 4px">水準（当月除く）</div>'
