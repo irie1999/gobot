@@ -886,43 +886,138 @@ if a.html.strip() or a.inject_html.strip():
             f'<td class="ehmut">{t["H時刻"] or "—"}</td>'
             f'{_pn(t["H_前日終値で指値売り"])}</tr>')
 
+    # ── レポートの他タブと同じ体裁で組む ────────────────────────────
+    #   月テーブル(nikkei_analysis.py:10482 と同じ列・同じ色)＋
+    #   月ブロック(.mg-block / .mg-header / toggleMG)＋日チップ(.edate-btn)。
+    #   クラスはレポート側の CSS をそのまま使うので追加スタイルは最小限。
+    def _mtable(col):
+        """方式1つぶんの月テーブル。列は既存の予算タブに合わせる。"""
+        rows = ""
+        for ym in sorted(r["month"].unique(), reverse=True):
+            g = r[r["month"] == ym]
+            v = g[col].dropna()
+            if not len(v):
+                continue
+            gp = v[v > 0].sum()
+            gl = abs(v[v <= 0].sum())
+            pn = v.sum()
+            wr = (v > 0).mean() * 100
+            col_ = "#4ade80" if pn >= 0 else "#f87171"
+            bw = min(abs(pn) / 300000 * 100, 100)
+            bc = ("rgba(74,222,128,0.25)" if pn >= 0 else "rgba(248,113,113,0.25)")
+            # 必要資金 = その月で最大の「同日の建玉合計」(同日決済なので当日分の合計)
+            _cap = 0.0
+            _sub = g.loc[v.index]
+            for _d, _gd in _sub.groupby("日"):
+                _cap = max(_cap, float((_gd["entry_p"] * a.qty).sum()))
+            rows += (
+                f'<tr><td style="font-weight:700;color:#e2e8f0;white-space:nowrap">'
+                f'{ym[:4]}/{ym[5:7]}月</td>'
+                f'<td style="text-align:right;color:#94a3b8">{len(v)}件</td>'
+                f'<td style="text-align:right;color:#94a3b8">{wr:.0f}%</td>'
+                f'<td style="text-align:right;color:#4ade80">+{gp:,.0f}円</td>'
+                f'<td style="text-align:right;color:#f87171">-{gl:,.0f}円</td>'
+                f'<td style="width:160px;position:relative;padding:4px 8px">'
+                f'<div style="position:absolute;top:4px;bottom:4px;'
+                f'left:{"50%" if pn >= 0 else f"calc(50% - {bw / 2:.1f}%)"};'
+                f'width:{bw / 2:.1f}%;background:{bc};border-radius:2px"></div>'
+                f'<span style="position:relative;font-weight:700;color:{col_}">'
+                f'{pn:+,.0f}円</span></td>'
+                f'<td style="text-align:right;font-weight:700;color:{col_}">'
+                f'{v.mean():+,.0f}円</td>'
+                f'<td style="text-align:right;color:#38bdf8;font-weight:700;'
+                f'white-space:nowrap">{_cap:,.0f}円</td></tr>')
+        return (f'<div style="margin-bottom:14px"><table '
+                f'style="border-collapse:collapse;width:auto"><thead><tr>'
+                f'<th style="text-align:left;color:#94a3b8;font-size:0.78rem;'
+                f'padding:3px 8px">月</th>'
+                f'<th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">件数</th>'
+                f'<th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px">勝率</th>'
+                f'<th style="color:#4ade80;font-size:0.78rem;padding:3px 8px">利益</th>'
+                f'<th style="color:#f87171;font-size:0.78rem;padding:3px 8px">損失</th>'
+                f'<th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;'
+                f'text-align:center">損益合計</th>'
+                f'<th style="color:#94a3b8;font-size:0.78rem;padding:3px 8px;'
+                f'text-align:right">円/件</th>'
+                f'<th style="color:#38bdf8;font-size:0.78rem;padding:3px 8px;'
+                f'text-align:right">必要資金<br><small style="color:#64748b">'
+                f'同日建玉ピーク</small></th>'
+                f'</tr></thead><tbody>{rows}</tbody></table></div>')
+
+    def _mblocks(col, key):
+        """月ごとの折りたたみ + 日チップ。レポートの .mg-* / .edate-* をそのまま使う。"""
+        out = ""
+        for _i, ym in enumerate(sorted(r["month"].unique(), reverse=True)):
+            g = r[r["month"] == ym]
+            v = g[col].dropna()
+            if not len(v):
+                continue
+            _sub = g.loc[v.index]
+            pn = v.sum()
+            pc = "#4ade80" if pn >= 0 else "#f87171"
+            op = _i < 1
+            chips = ""
+            for _d, _gd in sorted(_sub.groupby("日"), reverse=True):
+                _p = _gd[col].sum()
+                _w = (_gd[col] > 0).mean() * 100
+                _c = "#4ade80" if _p >= 0 else "#f87171"
+                _cap = float((_gd["entry_p"] * a.qty).sum())
+                chips += (f'<button class="edate-btn" style="cursor:default">'
+                          f'<span class="edate-mm">{_d[5:7]}/{_d[8:10]}</span>'
+                          f'<span class="edate-stat">{len(_gd)}件 {_w:.0f}%</span>'
+                          f'<span style="color:{_c};font-weight:700">{_p:+,.0f}</span>'
+                          f'<span style="color:#38bdf8;font-size:0.6rem">'
+                          f'要¥{_cap:,.0f}</span></button>')
+            out += (f'<div class="mg-block"><div class="mg-header" '
+                    f'onclick="toggleMG(this)">'
+                    f'<span class="mg-arrow">{"▼" if op else "▶"}</span>'
+                    f'<span class="mg-ym">{ym[:4]}/{ym[5:7]}月</span>'
+                    f'<span class="mg-stats">{len(v)}件&nbsp;'
+                    f'{(v > 0).mean() * 100:.0f}%&nbsp;'
+                    f'<span style="color:{pc};font-weight:700">{pn:+,.0f}円</span>'
+                    f'</span></div>'
+                    f'<div class="mg-body" id="mgb_eh{key}_{ym}" '
+                    f'style="display:{"block" if op else "none"}">'
+                    f'<div class="edate-grid">{chips}</div></div></div>\n')
+        return out
+
+    _blocks = ""
+    for _bi, (_col, _lab) in enumerate(_V):
+        _n, _wr, _tot, _per = _all[_lab]
+        _blocks += (
+            f'<div class="ehblk{" on" if _lab == "H" else ""}">'
+            f'<p style="color:#c4b5fd;font-size:0.8rem;margin:2px 0 8px">'
+            f'<b>{_lab}</b> — {_n:,}件 / 勝率 {_wr:.1f}% / '
+            f'<b style="color:{"#4ade80" if _tot >= 0 else "#f87171"}">{_tot:+,.0f}円</b>'
+            f' / <b>{_per:+,.0f}円/件</b></p>'
+            f'{_mtable(_col)}{_mblocks(_col, _bi)}</div>')
+
     _EH_CSS = """<style>
-.ehwrap{font-variant-numeric:tabular-nums}
-.ehwrap .ehsub{color:#94a3b8;font-size:.8rem;line-height:1.8;margin:4px 0 12px}
-.ehwrap .ehnote{background:#111c33;border-left:3px solid #3b82f6;padding:10px 14px;
- border-radius:0 7px 7px 0;color:#cbd5e1;line-height:1.9;margin-bottom:14px;font-size:.82rem}
-.ehwrap .ehcards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-.ehwrap .ehcard{background:#111c33;border:1px solid #24365c;border-radius:10px;
- padding:12px 18px;min-width:190px}
-.ehwrap .ehcard .t{color:#93c5fd;font-size:.78rem}
-.ehwrap .ehcard .v{font-size:1.3rem;font-weight:700}
-.ehwrap .ehcard .s{color:#94a3b8;font-size:.72rem}
-.ehwrap .ehtabs{display:flex;gap:6px;margin:12px 0 10px;flex-wrap:wrap}
-.ehwrap .ehtab{padding:7px 16px;background:#1e293b;border:1px solid #334155;
+.ehsel{display:flex;gap:6px;margin:10px 0 12px;flex-wrap:wrap}
+.ehsel button{padding:6px 18px;background:#1e293b;border:1px solid #334155;
  border-radius:6px;cursor:pointer;color:#94a3b8;font-size:.85rem}
-.ehwrap .ehtab.on{background:#0f172a;border-color:#60a5fa;color:#60a5fa;font-weight:700}
-.ehwrap .ehpane{display:none} .ehwrap .ehpane.on{display:block}
-.ehwrap .ehbox{overflow:auto;max-height:74vh;border:1px solid #1e293b;border-radius:8px}
-.ehwrap table{border-collapse:collapse;width:100%;font-size:.8rem}
-.ehwrap th,.ehwrap td{padding:5px 9px;text-align:right;border-bottom:1px solid #16233c;
+.ehsel button.on{background:#0f172a;border-color:#a78bfa;color:#c4b5fd;font-weight:700}
+.ehblk{display:none} .ehblk.on{display:block}
+.ehsub{color:#94a3b8;font-size:.78rem;line-height:1.8;margin:4px 0 10px}
+.ehfold{margin-top:14px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;
+ padding:8px 12px}
+.ehfold>summary{cursor:pointer;color:#93c5fd;font-size:.84rem;font-weight:700}
+.ehfold table{border-collapse:collapse;width:100%;font-size:.78rem;margin-top:8px;
+ font-variant-numeric:tabular-nums}
+.ehfold th,.ehfold td{padding:4px 8px;text-align:right;border-bottom:1px solid #16233c;
  white-space:nowrap}
-.ehwrap thead th{position:sticky;top:0;background:#0f1b30;z-index:2;color:#93c5fd;
- font-size:.74rem}
-.ehwrap thead tr:nth-child(2) th{top:25px}
-.ehwrap .ehk{text-align:left;color:#cbd5e1}
-.ehwrap .ehp{color:#4ade80} .ehwrap .ehn{color:#f87171} .ehwrap .ehmut{color:#64748b}
-.ehwrap tbody tr:hover{background:#111c33}
+.ehfold thead th{position:sticky;top:0;background:#0f1b30;color:#93c5fd;font-size:.72rem}
+.ehfold .ehk{text-align:left;color:#cbd5e1}
+.ehfold .ehp{color:#4ade80} .ehfold .ehn{color:#f87171} .ehmut{color:#64748b}
+.ehbox{overflow:auto;max-height:70vh;margin-top:8px}
 </style>"""
 
-    # ── 月別の対応のある検定 (現行 vs E / 現行 vs H / E vs H) ──────
+    # ── 月ごとの対応のある検定 (現行 vs E / 現行 vs H / E vs H) ──────
     #    同じ月・同じ銘柄集団なので paired が最も検出力が高い。
-    #    ⚠ ここは**予算制約なし**。実運用の判定は compare_budget_raw.py が正。
+    #    ⚠ 予算制約なし。実運用の判定は compare_budget_raw.py が正。
     _mon = sorted(r["month"].unique())
-
-    def _msum(col):
-        return [float(r.loc[r["month"] == m, col].dropna().sum()) for m in _mon]
-
-    _MS = {lab: _msum(col) for col, lab in _V}
+    _MS = {lab: [float(r.loc[r["month"] == m, col].dropna().sum()) for m in _mon]
+           for col, lab in _V}
     _prows = ""
     for _x, _y in (("現行", "E"), ("現行", "H"), ("E", "H")):
         dd = [b - a2 for a2, b in zip(_MS[_x], _MS[_y])]
@@ -941,70 +1036,53 @@ if a.html.strip() or a.inject_html.strip():
                    f'<td>{sd:,.0f}</td><td><b>{tt:+.2f}</b></td>'
                    f'<td>{lo:+,.0f} 〜 {hi:+,.0f}</td>'
                    f'<td>{win}/{n}</td><td class="ehk">{_v}</td></tr>')
-
     _console = _hesc.escape("".join(_TEE.buf))
 
     _EH_BODY = f"""{_EH_CSS}
-<div class="ehwrap">
+<p style="color:#a78bfa;font-size:0.82rem;margin-bottom:8px">
+🔁 <b>エントリー方式の比較</b>。シグナル・銘柄選定・発注順・決済(損切 {a.sm}ATR /
+利確 {a.tm}ATR / 引け成行)は<b>3方式とも同一</b>で、違うのは<b>注文の出し方だけ</b>。
+<b>現行</b>=逆指値売り(前日終値−1ティック。下がったら約定) /
+<b>E</b>=寄成売り(9:00の板寄せで必ず約定) /
+<b>H</b>=指値売り(前日終値。上がったら約定。届かなければ建てない)。
+</p>
 <div class="ehsub">
 {r['日'].min()} 〜 {r['日'].max()} / {r['date'].nunique():,}営業日 / {len(r):,}銘柄日 /
-{a.qty}株固定 / 摩擦なし(slip=0)<br>
-シグナル・銘柄選定・発注順・決済(損切 {a.sm}ATR / 利確 {a.tm}ATR / 引け成行)は
-<b>3方式とも同一</b>。違うのは注文の出し方だけ。
+{a.qty}株固定 / 摩擦なし(slip=0)　
+<span class="ehmut">※ このタブは<b>予算制約なし</b>(全シグナルを建てた場合)。
+隣の「{"{}".format("400万円×流動性順×日別")}」は予算込みなので直接は比較できない。
+予算込みの E/H 比較は compare_budget_raw.py</span>
 </div>
-<div class="ehnote">
-<b>現行</b> 逆指値売り(前日終値−1ティック)。株価が<b>下がったら</b>約定。届かなければ建てない<br>
-<b>E</b> 寄成売り。9:00の板寄せで<b>必ず</b>約定<br>
-<b>H</b> 指値売り(前日終値)。株価が<b>上がったら</b>約定。寄りが既に上なら板寄せで約定。届かなければ建てない<br>
-<span class="ehmut">※ ここは<b>予算制約なし</b>(全シグナルを建てた場合)。予算400万での判定は
-compare_budget_raw.py を見ること(18.10: 全部買えるなら得 と 予算内でどれを買うか は別問題)</span>
+<div class="ehsel">
+<button onclick="ehSel(this,0)">現行</button>
+<button onclick="ehSel(this,1)">E (寄成)</button>
+<button class="on" onclick="ehSel(this,2)">H (前日終値の指値)</button>
 </div>
-<div class="ehcards">
-{"".join(f'''<div class="ehcard"><div class="t">{lab}</div>
-<div class="v {"ehp" if _all[lab][2] > 0 else "ehn"}">{_all[lab][2]:+,.0f}円</div>
-<div class="s">{_all[lab][0]:,}件 / 勝率 {_all[lab][1]:.1f}% /
-<b>{_all[lab][3]:+,.0f}円/件</b></div></div>''' for _, lab in _V)}
-</div>
-<div class="ehtabs">
-<div class="ehtab on" onclick="ehSw(this,0)">月別</div>
-<div class="ehtab" onclick="ehSw(this,1)">日別 ({r['date'].nunique():,}日)</div>
-<div class="ehtab" onclick="ehSw(this,2)">取引明細 ({len(_trows):,}件)</div>
-<div class="ehtab" onclick="ehSw(this,3)">統計 (対応検定)</div>
-<div class="ehtab" onclick="ehSw(this,4)">実行ログ</div>
-</div>
-<div class="ehpane on"><div class="ehbox"><table>
-<thead><tr><th class="ehk" rowspan="2">月</th>{_hd}</tr><tr>{_sub}</tr></thead>
-<tbody>{_mrows}</tbody></table></div></div>
-<div class="ehpane"><div class="ehbox"><table>
-<thead><tr><th class="ehk" rowspan="2">日付</th>{_hd}</tr><tr>{_sub}</tr></thead>
-<tbody>{_drows}</tbody></table></div></div>
-<div class="ehpane"><div class="ehbox"><table><thead>
+{_blocks}
+<details class="ehfold"><summary>📊 統計 — 月ごとに対応をとった検定</summary>
+<p style="color:#94a3b8;font-size:.78rem;line-height:1.7">
+同じ月・同じ銘柄集団なので、相場全体の上下は両方に同じだけ効いて差し引きで消える
+= 独立比較より検出力が高い。<span class="ehmut">⚠ 予算制約なし。採否の判定は
+compare_budget_raw.py(予算400万)が正</span></p>
+<table><thead><tr><th class="ehk">比較</th><th>月あたりの差</th><th>σ</th><th>t</th>
+<th>95%CI(月)</th><th>勝ち月</th><th class="ehk">判定</th></tr></thead>
+<tbody>{_prows}</tbody></table></details>
+<details class="ehfold"><summary>📋 取引明細 ({len(_trows):,}件)</summary>
+<div class="ehbox"><table><thead>
 <tr><th class="ehk" rowspan="2">日付</th><th class="ehk" rowspan="2">銘柄</th>
 <th rowspan="2">前日終値</th><th rowspan="2">現行 損益</th>
 <th colspan="5">E (寄成)</th><th colspan="5">H (前日終値の指値)</th></tr>
 <tr><th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th>
 <th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>
-</thead><tbody>{"".join(_trows)}</tbody></table></div></div>
-<div class="ehpane">
-<div class="ehnote">
-月ごとに対応をとった検定。同じ月・同じ銘柄集団を扱うので、相場全体の上下は
-両方に同じだけ効いて差し引きで消える = 独立比較より検出力が高い。<br>
-<span class="ehmut">⚠ ここは<b>予算制約なし</b>。実運用は1日十数件で飽和するので、
-採否の判定は compare_budget_raw.py(予算400万)が正。18.10 の罠を避けること。</span>
-</div>
-<div class="ehbox"><table><thead><tr>
-<th class="ehk">比較</th><th>月あたりの差</th><th>σ</th><th>t</th>
-<th>95%CI(月)</th><th>勝ち月</th><th class="ehk">判定</th>
-</tr></thead><tbody>{_prows}</tbody></table></div></div>
-<div class="ehpane"><div class="ehbox">
-<pre style="margin:0;padding:12px 14px;color:#cbd5e1;font-size:.76rem;
-line-height:1.55;white-space:pre">{_console}</pre></div></div>
-</div>
+</thead><tbody>{"".join(_trows)}</tbody></table></div></details>
+<details class="ehfold"><summary>🖥 実行ログ</summary>
+<div class="ehbox"><pre style="margin:0;color:#cbd5e1;font-size:.74rem;
+line-height:1.5;white-space:pre">{_console}</pre></div></details>
 <script>
-function ehSw(el, i){{
-  var w = el.closest('.ehwrap');
-  w.querySelectorAll('.ehtab').forEach(function(t,j){{t.classList.toggle('on', j===i);}});
-  w.querySelectorAll('.ehpane').forEach(function(p,j){{p.classList.toggle('on', j===i);}});
+function ehSel(el, i){{
+  var p = el.parentNode.parentNode;
+  p.querySelectorAll('.ehsel button').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
+  p.querySelectorAll('.ehblk').forEach(function(b,j){{b.classList.toggle('on', j===i);}});
 }}
 </script>"""
 
@@ -1013,7 +1091,25 @@ function ehSw(el, i){{
             '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
             '<title>E/H 成績</title><style>:root{color-scheme:dark}'
             'body{background:#0b1220;color:#e2e8f0;font-family:"Segoe UI",Meiryo,'
-            'sans-serif;margin:0;padding:18px 22px}</style></head><body>'
+            'sans-serif;margin:0;padding:18px 22px}'
+            # 単体HTMLにはレポート側のCSSが無いので、使っているクラスだけ最小限で補う
+            '.mg-block{margin:8px 0;border:1px solid #1e293b;border-radius:6px}'
+            '.mg-header{padding:7px 12px;cursor:pointer;background:#111c33;'
+            'display:flex;gap:12px;align-items:center;border-radius:6px}'
+            '.mg-arrow{color:#60a5fa}.mg-ym{font-weight:700}'
+            '.mg-stats{color:#94a3b8;font-size:.82rem}'
+            '.mg-body{padding:8px 12px}'
+            '.edate-grid{display:flex;gap:6px;flex-wrap:wrap}'
+            '.edate-btn{display:flex;flex-direction:column;gap:1px;padding:5px 9px;'
+            'background:#0f172a;border:1px solid #334155;border-radius:5px;'
+            'color:#cbd5e1;font-size:.72rem;text-align:center}'
+            '.edate-mm{font-weight:700}.edate-stat{color:#94a3b8;font-size:.66rem}'
+            'table{font-variant-numeric:tabular-nums}'
+            '</style>'
+            '<script>function toggleMG(h){var b=h.nextElementSibling;'
+            'if(!b)return;var o=b.style.display!=="none";b.style.display=o?"none":"block";'
+            'var a=h.querySelector(".mg-arrow");if(a)a.textContent=o?"\u25B6":"\u25BC";}'
+            '</script></head><body>'
             '<h2 style="margin:0 0 6px">E / H 成績 — lss のエントリー方式の比較</h2>'
             + _EH_BODY + "</body></html>", encoding="utf-8")
         print(f"\n[HTML] {_P(a.html).resolve()}  ({len(_trows):,}行)")
