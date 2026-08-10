@@ -112,6 +112,11 @@ ap.add_argument("--sweep-tm", default="",
                 help="tm(利確ATR倍)のスイープ。例 0.3,0.5,1.0,1.5,2.0。"
                      "--sweep-sm と併せて E(ショート)/G(ロング)の 円/件 表を出す。"
                      "『ロングは別のパラメータなら勝てるのでは』を直接確かめる用")
+ap.add_argument("--inject-html", default="",
+                help="**既存のレポートHTMLにタブとして差し込む**。例: "
+                     "--inject-html signals_holdout_all_both_2026-08-07.html。"
+                     "レポート生成側は触らないので .\\dailyfast は重くならない。"
+                     "元ファイルは .bak に退避。再実行すると差し替え")
 ap.add_argument("--html", default="",
                 help="E/H の成績をHTMLで出力するパス(例 eh_report.html)。"
                      "サマリー/月別/日別/取引明細のタブ付き")
@@ -784,9 +789,20 @@ print("    **達成不可能な上限**。ギャップの主因はニュース�
 print("    夜間に逆指値を置いても飛んだ後の値段で約定する = 実際は D に近い。")
 print("    D2 と D の差(=夜間ギャップのコスト)の大きさを見るためだけの数字。")
 
-# ── HTML 出力 (サマリー / 月別 / 日別 / 取引明細) ──────────────────
-if a.html.strip():
+# ── E/H 成績セクションの HTML ────────────────────────────────────
+# --html        : 単体HTMLとして書き出す
+# --inject-html : **既存のレポート(signals_holdout_all_both_*.html)にタブとして差し込む**
+#   レポート生成側(run_signals_holdout_all.py / nikkei_analysis.py)は一切触らない。
+#   .\dailyfast を重くしないため、また毎朝使う発注リストを壊さないため。
+#   差し込み先の構造(run_signals_holdout_all.py:3212-3217, :3135):
+#     ナビ  <div class="ho-outer-nav"> ... <button class="ho-outer-btn"
+#            onclick="switchHoTab('xxx')">…</button> ... </div>
+#     ペイン <div id="ho-xxx" class="ho-outer-pane">…</div>
+#     切替  switchHoTab(tab) が .ho-outer-pane の .active を付け替える
+#   CSS/JS の衝突を避けるため、内側のタブは eh- 接頭辞で名前空間を分ける。
+if a.html.strip() or a.inject_html.strip():
     import html as _hesc
+    from pathlib import Path as _P
 
     _cg = (_cur.set_index(["symbol", "entry_date"])["pnl"].astype(float)
            if not _cur.empty else None)
@@ -796,10 +812,9 @@ if a.html.strip():
     _V = [("現行", "現行"), ("E_翌寄り+OCO", "E"), ("H_前日終値で指値売り", "H")]
 
     def _agg(g):
-        """(件数, 勝率, 損益, 円/件) を方式ごとに返す"""
         o = {}
         for col, lab in _V:
-            v = g[col].dropna()
+            v = g[col].dropna() if col in g.columns else g.get(col, pd.Series(dtype=float))
             o[lab] = (len(v), (v > 0).mean() * 100 if len(v) else 0.0,
                       v.sum(), v.mean() if len(v) else 0.0)
         return o
@@ -808,122 +823,159 @@ if a.html.strip():
         t = ""
         for _, lab in _V:
             n, wr, tot, per = o[lab]
-            c = "p" if tot > 0 else ("n" if tot < 0 else "")
+            c = "ehp" if tot > 0 else ("ehn" if tot < 0 else "")
             t += (f'<td>{n:,}</td><td>{wr:.0f}%</td>'
                   f'<td class="{c}">{tot:+,.0f}</td><td class="{c}">{per:+,.0f}</td>')
         return t
 
     _all = _agg(r)
     _hd = "".join(f'<th colspan="4">{lab}</th>' for _, lab in _V)
-    _sub = "".join('<th>件数</th><th>勝率</th><th>損益</th><th>円/件</th>'
-                   for _ in _V)
+    _sub = "".join('<th>件数</th><th>勝率</th><th>損益</th><th>円/件</th>' for _ in _V)
+    _mrows = "".join(f'<tr><td class="ehk">{m}</td>{_cells(_agg(g))}</tr>'
+                     for m, g in r.groupby("month"))
+    _drows = "".join(f'<tr><td class="ehk">{dt}</td>{_cells(_agg(g))}</tr>'
+                     for dt, g in r.groupby("日"))
 
-    # 月別
-    _mrows = "".join(
-        f'<tr><td class="k">{m}</td>{_cells(_agg(g))}</tr>'
-        for m, g in r.groupby("month"))
-    # 日別
-    _drows = "".join(
-        f'<tr><td class="k">{dt}</td>{_cells(_agg(g))}</tr>'
-        for dt, g in r.groupby("日"))
-
-    # 取引明細
     def _f(x, n=0):
-        return "—" if x != x or x is None else f"{x:,.{n}f}"
+        return "—" if x is None or x != x else f"{x:,.{n}f}"
+
+    def _pn(v):
+        if v is None or v != v:
+            return '<td class="ehmut">—</td>'
+        return f'<td class="{"ehp" if v > 0 else "ehn"}">{v:+,.0f}</td>'
 
     _trows = []
     for _, t in r.sort_values(["日", "symbol"]).iterrows():
-        def _pn(v):
-            if v != v or v is None:
-                return '<td class="mut">—</td>'
-            return f'<td class="{"p" if v > 0 else "n"}">{v:+,.0f}</td>'
         _trows.append(
-            f'<tr><td class="k">{t["日"]}</td><td>{_hesc.escape(str(t["symbol"]))}</td>'
-            f'<td>{_f(t["entry_p"], 1)}</td>'
-            f'{_pn(t["現行"])}'
+            f'<tr><td class="ehk">{t["日"]}</td>'
+            f'<td class="ehk">{_hesc.escape(str(t["symbol"]))}</td>'
+            f'<td>{_f(t["entry_p"], 1)}</td>{_pn(t["現行"])}'
             f'<td>{_f(t["E建値"], 1)}</td><td>{_f(t["E決済"], 1)}</td>'
-            f'<td class="mut">{t["E理由"] or "—"}</td>'
-            f'<td class="mut">{t["E時刻"] or "—"}</td>{_pn(t["E_翌寄り+OCO"])}'
+            f'<td class="ehmut">{t["E理由"] or "—"}</td>'
+            f'<td class="ehmut">{t["E時刻"] or "—"}</td>{_pn(t["E_翌寄り+OCO"])}'
             f'<td>{_f(t["H建値"], 1)}</td><td>{_f(t["H決済"], 1)}</td>'
-            f'<td class="mut">{t["H理由"] or "—"}</td>'
-            f'<td class="mut">{t["H時刻"] or "—"}</td>'
+            f'<td class="ehmut">{t["H理由"] or "—"}</td>'
+            f'<td class="ehmut">{t["H時刻"] or "—"}</td>'
             f'{_pn(t["H_前日終値で指値売り"])}</tr>')
 
-    _html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<title>E/H 成績 — lss エントリー方式の比較</title><style>
-:root{{color-scheme:dark}}
-body{{background:#0b1220;color:#e2e8f0;font-family:"Segoe UI",Meiryo,sans-serif;
-margin:0;padding:18px 22px;font-size:13px}}
-h1{{font-size:1.15rem;margin:0 0 4px}}
-.sub{{color:#94a3b8;font-size:.8rem;margin-bottom:14px;line-height:1.7}}
-.tabs{{display:flex;gap:6px;margin:14px 0 10px;flex-wrap:wrap}}
-.tab{{padding:7px 16px;background:#111c33;border:1px solid #24365c;border-radius:7px;
-cursor:pointer;color:#cbd5e1}}
-.tab.on{{background:#1d4ed8;border-color:#3b82f6;color:#fff;font-weight:700}}
-.pane{{display:none}} .pane.on{{display:block}}
-.wrap{{overflow-x:auto;max-height:78vh;overflow-y:auto;border:1px solid #1e293b;
-border-radius:8px}}
-table{{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}}
-th,td{{padding:5px 9px;text-align:right;border-bottom:1px solid #16233c;
-white-space:nowrap}}
-thead th{{position:sticky;top:0;background:#0f1b30;z-index:2;color:#93c5fd;
-font-size:.76rem}}
-thead tr:nth-child(2) th{{top:26px}}
-td.k,th.k{{text-align:left;color:#cbd5e1}}
-.p{{color:#4ade80}} .n{{color:#f87171}} .mut{{color:#64748b}}
-tbody tr:hover{{background:#111c33}}
-.cards{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}}
-.card{{background:#111c33;border:1px solid #24365c;border-radius:10px;
-padding:12px 18px;min-width:180px}}
-.card .t{{color:#93c5fd;font-size:.78rem}} .card .v{{font-size:1.35rem;font-weight:700}}
-.card .s{{color:#94a3b8;font-size:.72rem}}
-.note{{background:#111c33;border-left:3px solid #3b82f6;padding:10px 14px;
-border-radius:0 7px 7px 0;color:#cbd5e1;line-height:1.8;margin-bottom:14px}}
-</style></head><body>
-<h1>E / H 成績 — lss のエントリー方式の比較</h1>
-<div class="sub">
-{r['日'].min()} 〜 {r['日'].max()} / {r['date'].nunique():,}営業日 /
-{len(r):,}銘柄日 / {a.qty}株固定 / 摩擦なし(slip=0)<br>
+    _EH_CSS = """<style>
+.ehwrap{font-variant-numeric:tabular-nums}
+.ehwrap .ehsub{color:#94a3b8;font-size:.8rem;line-height:1.8;margin:4px 0 12px}
+.ehwrap .ehnote{background:#111c33;border-left:3px solid #3b82f6;padding:10px 14px;
+ border-radius:0 7px 7px 0;color:#cbd5e1;line-height:1.9;margin-bottom:14px;font-size:.82rem}
+.ehwrap .ehcards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.ehwrap .ehcard{background:#111c33;border:1px solid #24365c;border-radius:10px;
+ padding:12px 18px;min-width:190px}
+.ehwrap .ehcard .t{color:#93c5fd;font-size:.78rem}
+.ehwrap .ehcard .v{font-size:1.3rem;font-weight:700}
+.ehwrap .ehcard .s{color:#94a3b8;font-size:.72rem}
+.ehwrap .ehtabs{display:flex;gap:6px;margin:12px 0 10px;flex-wrap:wrap}
+.ehwrap .ehtab{padding:7px 16px;background:#1e293b;border:1px solid #334155;
+ border-radius:6px;cursor:pointer;color:#94a3b8;font-size:.85rem}
+.ehwrap .ehtab.on{background:#0f172a;border-color:#60a5fa;color:#60a5fa;font-weight:700}
+.ehwrap .ehpane{display:none} .ehwrap .ehpane.on{display:block}
+.ehwrap .ehbox{overflow:auto;max-height:74vh;border:1px solid #1e293b;border-radius:8px}
+.ehwrap table{border-collapse:collapse;width:100%;font-size:.8rem}
+.ehwrap th,.ehwrap td{padding:5px 9px;text-align:right;border-bottom:1px solid #16233c;
+ white-space:nowrap}
+.ehwrap thead th{position:sticky;top:0;background:#0f1b30;z-index:2;color:#93c5fd;
+ font-size:.74rem}
+.ehwrap thead tr:nth-child(2) th{top:25px}
+.ehwrap .ehk{text-align:left;color:#cbd5e1}
+.ehwrap .ehp{color:#4ade80} .ehwrap .ehn{color:#f87171} .ehwrap .ehmut{color:#64748b}
+.ehwrap tbody tr:hover{background:#111c33}
+</style>"""
+
+    _EH_BODY = f"""{_EH_CSS}
+<div class="ehwrap">
+<div class="ehsub">
+{r['日'].min()} 〜 {r['日'].max()} / {r['date'].nunique():,}営業日 / {len(r):,}銘柄日 /
+{a.qty}株固定 / 摩擦なし(slip=0)<br>
 シグナル・銘柄選定・発注順・決済(損切 {a.sm}ATR / 利確 {a.tm}ATR / 引け成行)は
 <b>3方式とも同一</b>。違うのは注文の出し方だけ。
 </div>
-<div class="note">
+<div class="ehnote">
 <b>現行</b> 逆指値売り(前日終値−1ティック)。株価が<b>下がったら</b>約定。届かなければ建てない<br>
 <b>E</b> 寄成売り。9:00の板寄せで<b>必ず</b>約定<br>
 <b>H</b> 指値売り(前日終値)。株価が<b>上がったら</b>約定。寄りが既に上なら板寄せで約定。届かなければ建てない<br>
-<span class="mut">※ 予算制約は入っていない(全シグナルを建てた場合)。予算400万での比較は
-compare_budget_raw.py を参照</span>
+<span class="ehmut">※ ここは<b>予算制約なし</b>(全シグナルを建てた場合)。予算400万での判定は
+compare_budget_raw.py を見ること(18.10: 全部買えるなら得 と 予算内でどれを買うか は別問題)</span>
 </div>
-<div class="cards">
-{"".join(f'''<div class="card"><div class="t">{lab}</div>
-<div class="v {"p" if _all[lab][2] > 0 else "n"}">{_all[lab][2]:+,.0f}円</div>
+<div class="ehcards">
+{"".join(f'''<div class="ehcard"><div class="t">{lab}</div>
+<div class="v {"ehp" if _all[lab][2] > 0 else "ehn"}">{_all[lab][2]:+,.0f}円</div>
 <div class="s">{_all[lab][0]:,}件 / 勝率 {_all[lab][1]:.1f}% /
 <b>{_all[lab][3]:+,.0f}円/件</b></div></div>''' for _, lab in _V)}
 </div>
-<div class="tabs">
-<div class="tab on" onclick="sw(0)">月別</div>
-<div class="tab" onclick="sw(1)">日別</div>
-<div class="tab" onclick="sw(2)">取引明細 ({len(_trows):,}件)</div>
+<div class="ehtabs">
+<div class="ehtab on" onclick="ehSw(this,0)">月別</div>
+<div class="ehtab" onclick="ehSw(this,1)">日別 ({r['date'].nunique():,}日)</div>
+<div class="ehtab" onclick="ehSw(this,2)">取引明細 ({len(_trows):,}件)</div>
 </div>
-<div class="pane on"><div class="wrap"><table>
-<thead><tr><th class="k" rowspan="2">月</th>{_hd}</tr><tr>{_sub}</tr></thead>
+<div class="ehpane on"><div class="ehbox"><table>
+<thead><tr><th class="ehk" rowspan="2">月</th>{_hd}</tr><tr>{_sub}</tr></thead>
 <tbody>{_mrows}</tbody></table></div></div>
-<div class="pane"><div class="wrap"><table>
-<thead><tr><th class="k" rowspan="2">日付</th>{_hd}</tr><tr>{_sub}</tr></thead>
+<div class="ehpane"><div class="ehbox"><table>
+<thead><tr><th class="ehk" rowspan="2">日付</th>{_hd}</tr><tr>{_sub}</tr></thead>
 <tbody>{_drows}</tbody></table></div></div>
-<div class="pane"><div class="wrap"><table><thead>
-<tr><th class="k" rowspan="2">日付</th><th rowspan="2">銘柄</th>
+<div class="ehpane"><div class="ehbox"><table><thead>
+<tr><th class="ehk" rowspan="2">日付</th><th class="ehk" rowspan="2">銘柄</th>
 <th rowspan="2">前日終値</th><th rowspan="2">現行 損益</th>
 <th colspan="5">E (寄成)</th><th colspan="5">H (前日終値の指値)</th></tr>
 <tr><th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th>
 <th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>
 </thead><tbody>{"".join(_trows)}</tbody></table></div></div>
+</div>
 <script>
-function sw(i){{
-  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('on',j===i));
-  document.querySelectorAll('.pane').forEach((p,j)=>p.classList.toggle('on',j===i));
+function ehSw(el, i){{
+  var w = el.closest('.ehwrap');
+  w.querySelectorAll('.ehtab').forEach(function(t,j){{t.classList.toggle('on', j===i);}});
+  w.querySelectorAll('.ehpane').forEach(function(p,j){{p.classList.toggle('on', j===i);}});
 }}
-</script></body></html>"""
-    from pathlib import Path as _P
-    _P(a.html).write_text(_html, encoding="utf-8")
-    print(f"\n[HTML] {_P(a.html).resolve()}  ({len(_trows):,}行)")
+</script>"""
+
+    if a.html.strip():
+        _P(a.html).write_text(
+            '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+            '<title>E/H 成績</title><style>:root{color-scheme:dark}'
+            'body{background:#0b1220;color:#e2e8f0;font-family:"Segoe UI",Meiryo,'
+            'sans-serif;margin:0;padding:18px 22px}</style></head><body>'
+            '<h2 style="margin:0 0 6px">E / H 成績 — lss のエントリー方式の比較</h2>'
+            + _EH_BODY + "</body></html>", encoding="utf-8")
+        print(f"\n[HTML] {_P(a.html).resolve()}  ({len(_trows):,}行)")
+
+    if a.inject_html.strip():
+        _tgt = _P(a.inject_html)
+        if not _tgt.exists():
+            print(f"[error] {_tgt} が見つかりません")
+        else:
+            _doc = _tgt.read_text(encoding="utf-8")
+            _BTN = ('\n  <button class="ho-outer-btn" onclick="switchHoTab(\'eh\')">'
+                    '&#x1F501; E/H 比較</button>')
+            # ⚠ 除去は**コメントマーカー**で挟む。div の対応で削ろうとすると、
+            #    中身にも "\n</div>\n" が現れるので非貪欲マッチが途中で止まり、
+            #    <script> と閉じ div が取り残される(実際に踏んだ)。
+            _S, _E = "<!--EH-TAB-START-->", "<!--EH-TAB-END-->"
+            _PANE = (f'\n{_S}\n<div id="ho-eh" class="ho-outer-pane">\n'
+                     f'{_EH_BODY}\n</div>\n{_E}\n')
+            if _S in _doc:                # 既に差し込み済みなら丸ごと入れ替える
+                _a0, _b0 = _doc.find(_S), _doc.find(_E)
+                if _a0 >= 0 and _b0 > _a0:
+                    _doc = _doc[:_a0].rstrip("\n") + "\n" + _doc[_b0 + len(_E):]
+                _doc = _doc.replace(_BTN, "")
+            _nav = '<div class="ho-outer-nav">'
+            _i = _doc.find(_nav)
+            _j = _doc.find("</div>", _i) if _i >= 0 else -1
+            if _i < 0 or _j < 0:
+                print("[error] ho-outer-nav が見つかりません。"
+                      "レポートのタブ構造が変わった可能性があります")
+            else:
+                _doc = _doc[:_j] + _BTN + "\n" + _doc[_j:]
+                _k = _doc.rfind("</body>")
+                _doc = (_doc[:_k] + _PANE + _doc[_k:]) if _k > 0 else (_doc + _PANE)
+                _tgt.with_suffix(_tgt.suffix + ".bak").write_text(
+                    _P(a.inject_html).read_text(encoding="utf-8"), encoding="utf-8")
+                _tgt.write_text(_doc, encoding="utf-8")
+                print(f"\n[差し込み] {_tgt.resolve()}")
+                print(f"  タブ『🔁 E/H 比較』を追加しました ({len(_trows):,}行)")
+                print(f"  元のファイルは {_tgt.name}.bak に退避")
