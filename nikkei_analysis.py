@@ -13459,12 +13459,48 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _f1 = sum(_m[k] - _base[k] for k in _ms[:_h])
             _f2 = sum(_m[k] - _base[k] for k in _ms[_h:])
             _out.append((_v, _n, sum(_m.values()), _mu, _t, _lo, _hi, _w,
-                         len(_ds), _f1, _f2))
+                         len(_ds), _f1, _f2, _m))
 
-        _best = max(_out, key=lambda r: r[2])[0] if _out else ""
+        # ── walk-forward 設定選択(設定選択のリークを消した唯一の形) ──────
+        # 各月について、**その月より前のデータだけ**で最良の設定を選び、その月に
+        # 適用する。ローリングOOSは銘柄選定とBTのリークを消すが、
+        # 『6設定から最良を選ぶ』リークは消さない。消せるのはこの形だけ。
+        # 固定最良を下回るなら「設定を選ぶこと自体に価値がない」= 既定でよい。
+        _mmap = {r[0]: r[11] for r in _out}
+        _msa = sorted(set(_base))
+        _cum = {v: 0.0 for v in _mmap}
+        _wfm: dict = {}
+        _picks = []
+        for _i, _mn in enumerate(_msa):
+            _pk = _vs[0] if _i == 0 else max(_mmap, key=lambda v: _cum[v])
+            _wfm[_mn] = _mmap[_pk].get(_mn, 0.0)
+            _picks.append((_mn, _pk))
+            for _v2 in _mmap:
+                _cum[_v2] += _mmap[_v2].get(_mn, 0.0)
+        _wds = [_wfm[m] - _base[m] for m in _msa if m in _base]
+        if len(_wds) > 1:
+            _wmu = _sti.mean(_wds)
+            _wse = _sti.stdev(_wds) / (len(_wds) ** 0.5)
+            _wt = _wmu / _wse if _wse > 0 else 0.0
+            _wc = _TC.get(len(_wds) - 1, 1.96)
+            _wlo, _whi = _wmu - _wc * _wse, _wmu + _wc * _wse
+            _ww = sum(1 for d in _wds if d > 0)
+        else:
+            _wmu = _wt = _wlo = _whi = 0.0
+            _ww = 0
+        _wh = len(_msa) // 2
+        _wf1 = sum(_wfm[m] - _base[m] for m in _msa[:_wh] if m in _base)
+        _wf2 = sum(_wfm[m] - _base[m] for m in _msa[_wh:] if m in _base)
+        _out.append(("▶ walk-forward 選択", 0, sum(_wfm.values()), _wmu, _wt,
+                     _wlo, _whi, _ww, len(_wds), _wf1, _wf2, _wfm))
+
+        _best = max([r for r in _out if not r[0].startswith("▶")],
+                    key=lambda r: r[2])[0] if _out else ""
         _rows = ""
-        for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2) in _out:
-            _mark = ' style="background:#132a1a"' if _v == _best else ""
+        for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm) in _out:
+            _wfr = _v.startswith("▶")
+            _mark = (' style="background:#1e293b;border-top:2px solid #64748b"' if _wfr
+                     else ' style="background:#132a1a"' if _v == _best else "")
             _c = "#4ade80" if _lo > 0 else "#f87171" if _hi < 0 else "#94a3b8"
             _vd = ("CI全域プラス" if _lo > 0 else
                    "CI全域マイナス" if _hi < 0 else "ゼロをまたぐ")
@@ -13473,11 +13509,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<tr{_mark}><td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
                 f'white-space:nowrap">{"★ " if _v == _best else ""}{_v}'
                 f'<span style="color:#4ade80"> {_rep}</span></td>'
-                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_n:,}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{("—" if _wfr else f"{_n:,}")}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
                 f'font-weight:700">{_p:+,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                f'{(_p / _n if _n else 0):+,.0f}円</td>'
+                f'{("—" if _wfr else f"{(_p / _n if _n else 0):+,.0f}円")}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">{_mu:+,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:{_c};'
                 f'font-weight:700">{_t:+.2f}</td>'
@@ -13515,7 +13552,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">勝ち月</th><th style="{_th};text-align:left">判定</th>'
             f'<th style="{_th};border-left:1px solid #334155">前半</th>'
             f'<th style="{_th}">後半</th></tr></thead>'
-            f'<tbody>{_rows}</tbody></table></div>')
+            f'<tbody>{_rows}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.8">'
+            f'<b>▶ walk-forward 選択</b> = 各月について<b>その月より前のデータだけ</b>で'
+            f'最良の設定を選び、その月に適用する（初月は既定）。'
+            f'<b>設定選択のリークを消した唯一の形</b>です。<br>'
+            f'ローリングOOSは銘柄選定とBTのリークを消しますが、'
+            f'『6設定から最良を選ぶ』リークは消しません（10ヶ月ぶんの結果を見てから'
+            f'選ぶなら同じことだからです）。<br>'
+            f'⚠ <b>walk-forward が固定最良を下回るなら、設定を選ぶこと自体に価値が'
+            f'ありません</b>。その場合は既定のまま動かさないのが正解です（18.10 で'
+            f'戦略別BT閾値を棄却したときと同じ形）。<br>'
+            f'月ごとの選択: '
+            + " → ".join(f'<span style="color:#cbd5e1">{m[5:]}</span>:{p}'
+                         for m, p in _picks)
+            + '</p></div>')
 
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
