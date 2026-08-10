@@ -71,6 +71,12 @@ FOT_MOO = 13                 # 寄成
 FOT_MOC = 16                 # 引成 (引け成行) ← close 損切りで使用
 FOT_LIMIT = 20               # 指値
 FOT_STOP = 30                # 逆指値 ← エントリーで使用
+# 寄指 (寄付のみ有効な指値)。H案(前日終値の指値売り・板寄せのみ)の発注で使う。
+# ⛔ **番号は推測しない**。実機で確認してから設定すること:
+#       python check_front_order_type.py [--prod]
+#    確定したら環境変数 KABU_FOT_LIMIT_MOO に入れる(またはここを直接書き換える)。
+#    0 のままなら send_sell(order_type="limit_moo") は発注せず例外を出す。
+FOT_LIMIT_MOO = int(os.environ.get("KABU_FOT_LIMIT_MOO", "0") or 0)
 
 # 逆指値 (ReverseLimitOrder) 用
 TRIGGER_AFTER_ORDER = 1      # TriggerSec: 1=発注後
@@ -550,6 +556,7 @@ class KabuClient:
 
         order_type:
           "market" = 成行 / "limit" = 指値 (price 必須) / "moo" = 寄成
+          "limit_moo" = 寄指 (寄付のみ有効な指値。price 必須) ← H案の新規売り
         expire_day: 0=当日 / YYYYMMDD=指定日 / None=デフォルト(0)
         omit_close_positions: True にすると ClosePositions を送らず API の自動割当てに任せる
         """
@@ -562,6 +569,29 @@ class KabuClient:
             body["FrontOrderType"] = FOT_LIMIT
             body["Price"] = round(price)
             label = f"指値売り {symbol} x{qty} @{round(price)}"
+        elif order_type == "limit_moo":
+            # 寄指 = 寄付の板寄せだけで約定し、寄らなければ失効する指値。
+            # H案は「前日終値(±Nティック)で売れたら建てる、寄らなければ建てない」
+            # なので、ザラ場到達で約定する通常の指値(FOT_LIMIT)では**別物**になる。
+            # ザラ場到達ぶんは実測で板寄せの1/4〜1/5しか稼がず、条件によっては
+            # マイナス(2026-08-10 の hsweep)。必ずこちらを使うこと。
+            if price is None:
+                raise ValueError("order_type='limit_moo' には price が必要です。")
+            if not FOT_LIMIT_MOO:
+                raise RuntimeError(
+                    "寄指の FrontOrderType が未設定です(FOT_LIMIT_MOO=0)。\n"
+                    "  番号は推測しないでください。実機から確認します:\n"
+                    "      python check_front_order_type.py [--prod]\n"
+                    "  確定したら環境変数 KABU_FOT_LIMIT_MOO に設定してください。")
+            body["FrontOrderType"] = FOT_LIMIT_MOO
+            body["Price"] = round(price)
+            # ⚠ 寄成(MOO)と同じ制約を**仮定**している: SOR(9)非対応 / ExpireDay は
+            #   当日(0)は不可で翌営業日を明示。寄指も寄付板寄せに乗せる注文なので
+            #   同じ扱いのはずだが、**実機で1件通して確認するまでは仮**。
+            #   4001005 等で弾かれたらここを疑うこと。
+            body["Exchange"] = EXCHANGE_TOKYO_PLUS
+            body["ExpireDay"] = _next_trading_day_int()
+            label = f"寄指売り {symbol} x{qty} @{round(price)}"
         elif order_type == "moo":
             body["FrontOrderType"] = FOT_MOO
             body["Price"] = 0
