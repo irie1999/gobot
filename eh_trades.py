@@ -86,7 +86,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         return float(t.get("rec_score") or t.get("bt") or 0)
 
     base: dict = {}
+    _tk = 0
     for t in list(trades or []) + list(nofills or []):
+        # ⛔ 転換(lss未約定→ロング転換)は **lss ではない**(18.5.3/18.26 で棄却済み)。
+        #    隣の 400万円タブも「ショートのみ表示(転換は転換タブ参照)」なので、
+        #    ここに混ぜると比較対象が揃わない。転換は全期間ぶん出力されるため、
+        #    混ぜると表示窓より古い月が「転換だけの月」として並んでしまう。
+        if t.get("strategy") == "転換":
+            _tk += 1
+            continue
         k = (str(t.get("symbol") or ""), _dk(t))
         if not k[0] or len(k[1]) < 10:
             continue
@@ -97,6 +105,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         return {}
 
     syms = sorted({k[0] for k in base})
+    if _tk:
+        log(f"[E/H] 転換 {_tk:,}件を母集団から除外(ショートのみ / 転換タブ参照)")
     log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します "
         f"(sm={sm} tm={tm} 損切り遅延={stop_delay_bars}本 "
         f"ガード±{gap_guard * 100:.0f}% {qty}株 / **決済条件は現行と同一**)")
