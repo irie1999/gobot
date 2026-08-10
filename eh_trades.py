@@ -28,6 +28,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 _REASON = {"stop": "損切り", "target": "目標達成", "close": "タイムカット"}
 
 
+def _fmt_md(d) -> str:
+    """entry_d_raw(date でも 'YYYY-MM-DD' 文字列でも) を 'MM/DD' にする。"""
+    try:
+        return d.strftime("%m/%d")
+    except Exception:
+        s = str(d or "")
+        return f"{s[5:7]}/{s[8:10]}" if len(s) >= 10 else s
+
+
 def _tick(price: float) -> float:
     """東証の呼値(通常銘柄)。H の指値=前日終値 を作るのに使う。"""
     if price <= 3_000:
@@ -233,8 +242,17 @@ def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
     t["pnl"] = (round((float(entry_p) - float(exit_p)) * qty, 0)
                 if reason != "約定せず" else 0.0)
     t["hold_days"] = 0
-    t["exit_dt"] = t.get("entry_dt") or t.get("exit_dt")
-    t["exit_d_raw"] = t.get("entry_d_raw") or t.get("exit_d_raw")
+    # ⛔ _build_trade_row は entry_dt / exit_dt / exit_d_raw / name / pnl を
+    #    **t["..."] で直接**引く(.get ではない)。不約定シグナル由来の行には
+    #    entry_dt が無いことがあり、そのまま渡すと KeyError で落ちる。
+    #    同日決済なので entry_dt = exit_dt。entry_d_raw から必ず作る。
+    _raw = t.get("entry_d_raw") or t.get("exit_d_raw")
+    t["entry_d_raw"] = _raw
+    t["exit_d_raw"] = _raw
+    _md = t.get("entry_dt") or t.get("exit_dt") or _fmt_md(_raw)
+    t["entry_dt"] = _md
+    t["exit_dt"] = _md
+    t["name"] = t.get("name") or ""
     t["entry_time"] = "09:00"
     t["exit_time"] = exit_time
     t["days_to_fill"] = 0
