@@ -100,6 +100,8 @@ ap.add_argument("--control-seed", type=int, default=42)
 ap.add_argument("--require-open-bar", action="store_true",
                 help="5分足の先頭バーが 09:00 の日だけ使う。寄り成行で入るのに"
                      "先頭が 09:05 だと寄り直後の逆行が測られず、損切りが過小に出る")
+ap.add_argument("--out-variant", default="E", choices=["E", "H", "D", "F"],
+                help="--out-raw で書き出す方式(既定 E)。H=mirror(前日終値で指値売り)")
 ap.add_argument("--out-raw", default="",
                 help="E の損益を生CSV形式(oos_raw と同じ列)で書き出す。"
                      "sim_oos_budget.py に食わせて**予算制約下**で現行と比較するため"
@@ -623,6 +625,28 @@ if a.control > 0 and not a.no_oco:
         else:
             print(f"  → 対照はほぼゼロ。E の数字は OCO の形状では説明できない。")
 
+# ── H(mirror) の約定率 ─────────────────────────────────────────
+if not a.no_oco and "H_前日終値で指値売り" in r.columns:
+    _hv = r["H_前日終値で指値売り"]
+    _hn, _tot = int(_hv.notna().sum()), len(r)
+    print(f"\n■ H(mirror = 前日終値で指値空売り) の約定率")
+    print(f"  約定 {_hn:,}/{_tot:,} ({_hn / max(_tot, 1) * 100:.1f}%)"
+          f"   ※ E は寄りで必ず建つので実質100%")
+    _miss = r[_hv.isna() & r["E_翌寄り+OCO"].notna()]
+    if len(_miss):
+        _mv = _miss["E_翌寄り+OCO"]
+        print(f"  **H が取り逃がした日**  {len(_mv):,}件   "
+              f"E ならこの日は {_mv.mean():+,.0f}円/件 稼げていた")
+        print(f"    (合計 {_mv.sum():+,.0f}円)")
+        print(f"    → 前日終値まで戻らない日 = そのまま下げ続けた日。")
+        print(f"       高く売れるのと引き換えに、**一番おいしい日を落としている**。")
+    _both = r[_hv.notna() & r["E_翌寄り+OCO"].notna()]
+    if len(_both):
+        print(f"  両方が建てた日 {len(_both):,}件   "
+              f"H {_both['H_前日終値で指値売り'].mean():+,.0f} vs "
+              f"E {_both['E_翌寄り+OCO'].mean():+,.0f} 円/件")
+        print(f"    → ここが『高く売れる』ぶんの純粋な差。")
+
 # ── 診断① 5分足の先頭バー時刻 ────────────────────────────────
 if _bar0:
     _tb = sum(_bar0.values())
@@ -663,12 +687,14 @@ if "lss約定" in r.columns and (r["lss約定"] >= 0).any() and not a.no_oco:
     print(f"     『lss も約定した』側に偏っているなら、E は現行の焼き直しに近い。")
 
 if a.out_raw.strip():
-    _o = r[r["E_翌寄り+OCO"].notna()].copy()
+    _vcol = {"E": "E_翌寄り+OCO", "H": "H_前日終値で指値売り",
+             "D": "D_引け+OCO", "F": "F_5分足寄り+OCO"}[a.out_variant]
+    _o = r[r[_vcol].notna()].copy()
     _o = _o.assign(fold=1, train_months="", oos_month=_o["month"],
                    entry_date=_o["date"].dt.strftime("%Y-%m-%d"),
-                   name="", strategy="E", bt_score=99.0,
+                   name="", strategy=a.out_variant, bt_score=99.0,
                    entry_p=_o["entry_p"].round(1),
-                   pnl=_o["E_翌寄り+OCO"].round(0), filled=1)
+                   pnl=_o[_vcol].round(0), filled=1)
     _liqmap = (d.drop_duplicates(subset=["symbol"]).set_index("symbol")["liquidity"]
                if "liquidity" in d.columns else None)
     _o["liquidity"] = (_o["symbol"].map(_liqmap).fillna(0)
@@ -676,7 +702,7 @@ if a.out_raw.strip():
     _o[["fold", "train_months", "oos_month", "entry_date", "symbol", "name",
         "strategy", "bt_score", "entry_p", "pnl", "filled", "liquidity"]].to_csv(
         a.out_raw, index=False, encoding="utf-8-sig")
-    print(f"\n[出力] {a.out_raw} ({len(_o):,}行)")
+    print(f"\n[出力] {a.out_raw} ({len(_o):,}行 / 方式 {a.out_variant})")
     print(f"  → python sim_oos_budget.py --raw {a.out_raw} --bt-mins 0 --budget 400")
     print(f"     で**予算制約下**の現行との比較ができる(18.10: 全部買えるなら得 と")
     print(f"     予算内でどれを買うか は別問題)。")
