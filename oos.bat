@@ -37,7 +37,13 @@ cd /d "%~dp0"
 set "CUT=%~1"
 if "%CUT%"=="" set "CUT=2025-11"
 set "TAG=%CUT:-=%"
-echo [oos] cutoff = %CUT%   (everything after %CUT% is out-of-sample)
+REM --- lower bound MUST match daily.bat, which merges from 2025-09 only.
+REM     Without it the glob also picks up lss_proposal_2024-12 / 2025-03 / 2025-06
+REM     and the pool stops being comparable to the daily report (hit 2026-08-10:
+REM     3 bases vs 8 bases, +140k swing in one month that looked like a real effect).
+REM     Override for one run:  set OOS_SINCE=2024-12
+if not defined OOS_SINCE set "OOS_SINCE=2025-09"
+echo [oos] bases %OOS_SINCE% .. %CUT%   (everything after %CUT% is out-of-sample)
 
 REM --- clear heavy research flags (same as daily.bat) ---
 set "LSS_CLOSESTOP_RESWEEP="
@@ -56,7 +62,7 @@ REM --- keep the production trade log intact (.\fills reads lss_trades.csv) ---
 set "LSS_TRADES_CSV=lss_trades_oos%TAG%.csv"
 
 REM --- merge ONLY the bases up to the cutoff (auto-collected by --until) ---
-python merge_lss_proposals.py --until %CUT% --out lss_proposal_cumul_to%TAG%.py
+python merge_lss_proposals.py --since %OOS_SINCE% --until %CUT% --out lss_proposal_cumul_to%TAG%.py
 if errorlevel 1 echo [error] merge failed. Check that lss_proposal_YYYY-MM.py files exist.
 if errorlevel 1 exit /b 1
 

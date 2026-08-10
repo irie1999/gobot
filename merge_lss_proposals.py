@@ -26,10 +26,15 @@
 
   # (union = --min-votes 1 と同じ / intersection = --min-votes N と同じ)
 
-  # --until: 基準月がその月以前の lss_proposal_YYYY-MM.py を**自動収集**してマージ。
+  # --since / --until: 基準月がその範囲の lss_proposal_YYYY-MM.py を**自動収集**してマージ。
   # 単一分割OOS用。ファイル名を書き並べなくてよいので .bat の引数だけで切替できる。
-  python merge_lss_proposals.py --until 2026-01 --out lss_proposal_cumul_to202601.py
-  #   → 2025-09..2026-01 を採用 / 2026-02 以降を除外 / 2026-02-01 以降が単一分割OOS
+  python merge_lss_proposals.py --since 2025-09 --until 2026-01 \
+      --out lss_proposal_cumul_to202601.py
+  #   → 2025-09..2026-01 を採用 / それ以外を除外 / 2026-02-01 以降が単一分割OOS
+  #
+  # ⛔ --since を省略すると 2024-12 / 2025-03 / 2025-06 など**古い基準月まで拾う**。
+  #    daily.bat は 2025-09 からしか使わないので、daily と比較する測定では必ず
+  #    --since 2025-09 を付けること(2026-08-10 にこれで比較を1本無駄にした)。
 
   その後:
   python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 \
@@ -82,6 +87,11 @@ def main():
     ap = argparse.ArgumentParser(description="lss proposal を union/intersection でマージ")
     ap.add_argument("files", nargs="*", help="マージする proposal ファイル(2つ以上)。"
                                             "省略時は --until が必須")
+    ap.add_argument("--since", type=str, default=None, metavar="YYYY-MM",
+                    help="--until の下限。**daily.bat は 2025-09 からしか使わない**ので、"
+                         "比較するときは --since 2025-09 を必ず付けること。"
+                         "省略すると 2024-12 / 2025-03 / 2025-06 など古い基準月まで拾い、"
+                         "daily.bat と別のプールになる(2026-08-10 に実際に踏んだ)。")
     ap.add_argument("--until", type=str, default=None, metavar="YYYY-MM",
                     help="基準月がこの月以前の lss_proposal_YYYY-MM.py を**自動で集めて**"
                          "マージする(files を書き並べなくてよい)。単一分割OOS用: "
@@ -106,31 +116,37 @@ def main():
     # --until: 基準月がその月以前の proposal を自動収集する。
     # 単一分割OOS(『N月までで選んで、N+1月以降を検証する』)を .bat の引数だけで
     # 切り替えられるようにするためのもの。files を書き並べる必要がなくなる。
-    if args.until:
-        if not re.fullmatch(r"\d{4}-\d{2}", args.until):
-            raise SystemExit(f"[ERROR] --until は YYYY-MM 形式で指定してください: {args.until}")
+    if args.until or args.since:
+        for _lbl, _v in (("--until", args.until), ("--since", args.since)):
+            if _v and not re.fullmatch(r"\d{4}-\d{2}", _v):
+                raise SystemExit(f"[ERROR] {_lbl} は YYYY-MM 形式で指定してください: {_v}")
+        _lo = args.since or "0000-00"
+        _hi = args.until or "9999-99"
+        _rng = f"[{_lo} 〜 {_hi}]"
         _pool = args.files or sorted(
             str(p) for p in Path(".").glob("lss_proposal_[0-9][0-9][0-9][0-9]-[0-9][0-9].py"))
         _kept, _dropped = [], []
         for f in _pool:
             _ym = _full_base_month(f)
-            if _ym and _ym <= args.until:
+            if _ym and _lo <= _ym <= _hi:
                 _kept.append(f)
             else:
                 _dropped.append(f)
         args.files = sorted(_kept, key=lambda f: _full_base_month(f) or "")
-        print(f"[--until {args.until}] 採用 {len(_kept)}件: "
+        print(f"{_rng} 採用 {len(_kept)}件: "
               f"{', '.join(_full_base_month(f) or f for f in args.files)}")
         if _dropped:
-            print(f"[--until {args.until}] 除外 {len(_dropped)}件: "
+            print(f"{_rng} 除外 {len(_dropped)}件: "
                   f"{', '.join(sorted(_full_base_month(f) or f for f in _dropped))}")
+        if not args.since:
+            print("[WARN] --since 未指定。daily.bat は 2025-09 からしか使わないので、"
+                  "daily と比べるなら --since 2025-09 を付けること。")
         # per-symbol START_DATES は「初出基準月の翌月1日」なので、最も遅い採用月の
         # 翌月から先は **どのペアも選定に使っていない**期間になる。
-        if args.files:
-            print(f"[--until {args.until}] → "
-                  f"{_oos_start_date(args.until)} 以降が単一分割OOS")
+        if args.files and args.until:
+            print(f"{_rng} → {_oos_start_date(args.until)} 以降が単一分割OOS")
     elif not args.files:
-        raise SystemExit("[ERROR] files も --until も指定されていません")
+        raise SystemExit("[ERROR] files も --until/--since も指定されていません")
 
     # 存在するファイルだけ使う(欠損は警告してスキップ=累積の1基準月が未生成でも daily を止めない)。
     _existing = []
