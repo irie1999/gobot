@@ -170,38 +170,111 @@ for lo_b, hi_b, per, bp in _verdicts:
 
 # ── 選定に流動性の足切りを入れた場合 ─────────────────────────────
 if a.liq_floors.strip():
+    _floors = [float(x) for x in a.liq_floors.split(",") if x.strip()]
+
+    # ① 予算 × 足切り の行列。足切りは候補を減らすので予算の効き方も変える。
+    #    片方ずつ動かして決めると、相互作用を見落とす。
+    print(f"\n■ 予算 × 流動性足切り (合計損益 / 10ヶ月)")
+    print(f"  {'予算':>8}{'足切りなし':>13}" +
+          "".join(f"{f'{f:,.0f}億':>13}" for f in _floors))
+    _mat: dict[tuple, dict] = {}
+    for b in budgets:
+        line = f"  {b:>6,.0f}万{sum(t['pnl'] for t in res[b]['picked']):>+13,.0f}"
+        for f in _floors:
+            rr = _sim(b * 10_000, liq_floor=f * 1e8)
+            _mat[(b, f)] = rr
+            line += f"{sum(t['pnl'] for t in rr['picked']):>+13,.0f}"
+        print(line)
+    _best = max([(sum(t["pnl"] for t in res[b]["picked"]), b, 0.0) for b in budgets]
+                + [(sum(t["pnl"] for t in _mat[(b, f)]["picked"]), b, f)
+                   for b in budgets for f in _floors])
+    print(f"  → 最良 予算{_best[1]:,.0f}万 × 足切り"
+          f"{('なし' if _best[2] == 0 else f'{_best[2]:,.0f}億')}  {_best[0]:+,.0f}円")
+    print(f"  ⚠ 18.24 のノイズ帯は σ=124,660円/10ヶ月。この表の差がそれ未満なら"
+          f"『測れていない』。")
+
+    # ② 流動性の帯ごとに、実際に建った取引を分解する。
+    #    ⛔ 円/件 だけ見てはいけない。100株固定なので値がさ株ほど建玉が大きく、
+    #       同じ%の値動きでも円が大きく出る。**bp(建玉比)を必ず併記する。**
     b0 = budgets[0]
     base_r = res[b0]
-    base_keys = {_key(t) for t in base_r["picked"]}
-    base_pnl = sum(t["pnl"] for t in base_r["picked"])
-    _allpairs = {(t["symbol"], t["strategy"]) for t in rows
-                 if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)}
-    print(f"\n■ 選定に流動性の足切りを入れた場合 (予算{b0:,.0f}万 固定)")
-    print(f"  ⚠ 現行の選定は上限が無い(18.2: --lss-top なし)ので、足切りは"
-          f"**純粋な引き算**。")
-    print(f"     液体な良銘柄が繰り上がって入ってくることはない。")
-    print(f"  {'足切り':>8}{'候補ペア':>10}{'取引':>7}{'合計':>13}{'現行差':>12}"
-          f"{'落ちた取引':>10}{'落ちた分の円/件':>16}{'必要bp':>9}")
-    print(f"  {'なし':>8}{len(_allpairs):>10,}{len(base_r['picked']):>7,}"
-          f"{base_pnl:>+13,.0f}{'—':>12}{'—':>10}{'—':>16}{'—':>9}")
-    for _f in [float(x) for x in a.liq_floors.split(",") if x.strip()]:
-        fl = _f * 1e8
-        r = _sim(b0 * 10_000, liq_floor=fl)
-        pnl = sum(t["pnl"] for t in r["picked"])
-        drop = [t for t in base_r["picked"] if _liq(t) < fl]
-        npairs = len({(t["symbol"], t["strategy"]) for t in rows
-                      if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)
-                      and _liq(t) >= fl})
-        dper = (sum(t["pnl"] for t in drop) / len(drop)) if drop else 0.0
-        dep = (sum(t["entry_p"] for t in drop) / len(drop)) if drop else 0.0
-        dbp = dper / max(dep * 100, 1) * 10_000
-        print(f"  {_f:>6,.0f}億{npairs:>10,}{len(r['picked']):>7,}{pnl:>+13,.0f}"
-              f"{pnl - base_pnl:>+12,.0f}{len(drop):>10,}{dper:>+16,.0f}{dbp:>9.1f}")
-    print(f"  → 『落ちた分の円/件』がプラスなら足切りは**損**。ただしその優位が"
-          f"『必要bp』で、")
-    print(f"     薄い銘柄の実スプレッドがそれを超えるなら、"
-          f"**そもそも存在しない利益**を捨てるだけ(18.21)。")
-    print(f"  → 『候補ペア』の減少はスキャン計算量の削減。成績とは別の価値。")
+    print(f"\n■ 流動性の帯ごとの成績 (予算{b0:,.0f}万で実際に建った取引を分解)")
+    print(f"  {'売買代金':>12}{'件数':>7}{'損益':>13}{'円/件':>9}{'bp/件':>8}"
+          f"{'建値平均':>11}{'勝率':>7}{'日クラスタt':>11}")
+    _edges = [0.0] + [f * 1e8 for f in _floors] + [float("inf")]
+    _lbls = ([f"〜{_floors[0]:,.0f}億"]
+             + [f"{_floors[i]:,.0f}〜{_floors[i+1]:,.0f}億"
+                for i in range(len(_floors) - 1)]
+             + [f"{_floors[-1]:,.0f}億〜"])
+    _bands = []
+    for _i, _lb in enumerate(_lbls):
+        sub = [t for t in base_r["picked"]
+               if _edges[_i] <= _liq(t) < _edges[_i + 1]]
+        if not sub:
+            continue
+        pnl = sum(t["pnl"] for t in sub)
+        per = pnl / len(sub)
+        ep = sum(t["entry_p"] for t in sub) / len(sub)
+        bp = per / max(ep * 100, 1) * 10_000
+        wr = sum(1 for t in sub if t["pnl"] > 0) / len(sub) * 100
+        # 日クラスタ頑健 t: lss は同日決済なので下げた日は全銘柄まとめて勝つ。
+        # 件数で t を出すと実効サンプルを誤認する(18.13 の作法)。
+        byd: dict[str, list] = defaultdict(list)
+        for t in sub:
+            byd[t["entry_date"]].append(t["pnl"])
+        dm = [sum(v) / len(v) for v in byd.values()]
+        tt = (_st.mean(dm) / (_st.stdev(dm) / (len(dm) ** 0.5))
+              if len(dm) > 1 and _st.stdev(dm) > 0 else 0.0)
+        _bands.append((_lb, len(sub), per, bp, tt))
+        print(f"  {_lb:>12}{len(sub):>7,}{pnl:>+13,.0f}{per:>+9,.0f}{bp:>+8.1f}"
+              f"{ep:>10,.0f}円{wr:>6.1f}%{tt:>+11.2f}")
+    print(f"  ⚠ 円/件 は建玉の大きさに比例する(100株固定)。**bp/件 が単調でなければ"
+          f"、円/件 の単調は建値の単調にすぎない。**")
+
+    # ③ 帰無較正: 日ごとに流動性ラベルだけシャッフルする。
+    #    日内の相関(その日の相場)は保ったまま「流動性と損益の対応」だけ壊す。
+    _obs = _bands[-1][3] - _bands[0][3] if len(_bands) >= 2 else 0.0
+    import random as _rnd
+    _null = []
+    _byday: dict[str, list] = defaultdict(list)
+    for t in base_r["picked"]:
+        _byday[t["entry_date"]].append(t)
+    for _s in range(200):
+        rg = _rnd.Random(_s)
+        lo_v, hi_v = [], []
+        for day in _byday.values():
+            liqs = [_liq(t) for t in day]
+            rg.shuffle(liqs)
+            for t, lq in zip(day, liqs):
+                r_ = t["pnl"] / max(t["entry_p"] * 100, 1) * 10_000
+                (lo_v if lq < _edges[1] else hi_v).append(r_)
+        if lo_v and hi_v:
+            _null.append(sum(hi_v) / len(hi_v) - sum(lo_v) / len(lo_v))
+    if _null:
+        _null.sort()
+        # ⛔ 帰無は 0 中心ではない。流動性降順で埋めているため、薄い帯の取引は
+        #    『予算が飽和しなかった日』からしか出てこない。その日の偏り(= 18.24 で
+        #    確認した日の重み付け)だけで差が生まれる。だから 0 との比較ではなく
+        #    **帰無分布の中での位置**で判定する。
+        _ge = sum(1 for x in _null if x >= _obs) / len(_null)
+        _p = 2 * min(_ge, 1 - _ge)
+        print(f"\n  帰無較正 (日ごとに流動性ラベルだけシャッフル ×{len(_null)})")
+        print(f"    実測の差 (最上位帯 − 最下位帯, bp/件)  {_obs:+.1f}bp")
+        print(f"    帰無 (日の構成だけで出る差)  中央 {_null[len(_null)//2]:+.1f}bp"
+              f"   90%区間 [{_null[int(len(_null)*0.05)]:+.1f} 〜 "
+              f"{_null[int(len(_null)*0.95)]:+.1f}]")
+        print(f"    **実測は帰無の上位 {_ge*100:.1f}% / 両側p = {_p:.3f}**  "
+              + ("→ 偶然では出ない。流動性に識別力がある"
+                 if _p < 0.05 else
+                 "→ 偶然でも出る。18.13/18.24 の『候補ゼロ』と矛盾しない"))
+
+    # ④ 候補ペア数(スキャン計算量)
+    print(f"\n  足切りごとの候補ペア数 (= スキャン計算量。成績とは別の価値)")
+    for f in [0.0] + _floors:
+        n = len({(t["symbol"], t["strategy"]) for t in rows
+                 if t.get("strategy") != "転換" and _bt_pass(t, a.bt_min)
+                 and _liq(t) >= f * 1e8})
+        print(f"    {('なし' if f == 0 else f'{f:,.0f}億'):>8}  {n:>6,}ペア")
 
 print(f"\n{'─'*78}")
 print("■ 読み方")
