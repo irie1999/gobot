@@ -89,7 +89,23 @@ with open(a.trades, encoding="utf-8-sig") as f:
 if not pairs:
     sys.exit(f"[error] {a.trades} から (銘柄,日) を取れませんでした")
 syms = sorted({s for s, _ in pairs})
-print(f"[母集団] {len(pairs):,}銘柄日 / {len(syms):,}銘柄  ({a.trades})")
+_d0, _d1 = min(d for _, d in pairs), max(d for _, d in pairs)
+print(f"[母集団] {len(pairs):,}銘柄日 / {len(syms):,}銘柄  {_d0}〜{_d1}  ({a.trades})")
+# ⛔ lss_trades.csv はレポートの表示窓ぶんしか書かれない。--days 180 で作った CSV に
+#    120日のホールドアウトを切ると TRAIN が60日しか残らず、TRAIN/TEST の比較が
+#    成立しない(2026-08-10 に実際に踏んだ: TRAIN 898件 vs TEST 1,950件)。
+if a.holdout_days > 0:
+    import datetime as _dt
+    try:
+        _span = (_dt.date.fromisoformat(_d1) - _dt.date.fromisoformat(_d0)).days
+        _train_days = _span - a.holdout_days
+        if _train_days < a.holdout_days:
+            print(f"  ⛔ **TRAIN が {_train_days}日 / TEST が {a.holdout_days}日 で不均衡です。**")
+            print(f"     {a.trades} の窓が {_span}日しかありません。1年ぶんで取り直してください:")
+            print(f"       .\\dailyfast --no-serve --days 365")
+            print(f"     (このまま進めても TRAIN/TEST の一致・不一致は判断材料になりません)")
+    except Exception:
+        pass
 print(f"[条件] sm={a.sm} tm={a.tm} 損切り遅延={_DLY}本 ガード±{a.gap_guard*100:.0f}% "
       f"{a.qty}株 / 価格{a.min_price:,.0f}〜{a.max_price:,.0f} / 手数料"
       f"{B.FEE_PCT_ONE_WAY*100:.3f}%片道")
