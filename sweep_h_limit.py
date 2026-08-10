@@ -43,7 +43,15 @@ ap = argparse.ArgumentParser(description="H の指値位置(前日終値±Nテ�
 ap.add_argument("--trades", default="lss_trades.csv",
                 help="レポートが出す全取引CSV(母集団の (銘柄,日) を取る)")
 ap.add_argument("--offsets", default="-3,-2,-1,0,1,2,3,5",
-                help="前日終値からのティック数。0=現行(前日終値ちょうど)")
+                help="前日終値からのオフセット。単位は --offset-mode に従う。0=現行")
+ap.add_argument("--offset-mode", choices=["ticks", "pct", "atr"], default="ticks",
+                help="オフセットの単位。"
+                     "ticks=呼値の個数(既定) / pct=前日終値に対する%% / "
+                     "atr=前日ATRの倍数。"
+                     "⛔ ticks は**株価によって意味が5倍変わる**"
+                     "(1,000円株の-2tick=-1.00% vs 4,900円株の-2tick=-0.20%)。"
+                     "この価格帯の呼値は 1,000-4,999円=5円 / 5,000円以上=10円 で固定。"
+                     "揃えて比べるなら pct か atr を使うこと")
 ap.add_argument("--sm", type=float, default=0.1)
 ap.add_argument("--tm", type=float, default=1.0)
 ap.add_argument("--gap-guard", type=float, default=0.03)
@@ -69,10 +77,29 @@ except Exception as e:
 
 _DLY = (a.stop_delay_bars if a.stop_delay_bars is not None
         else int(getattr(B, "_LSS_STOP_DELAY_BARS", 0) or 0))
-OFFS = [int(x) for x in a.offsets.split(",") if x.strip().lstrip("+-").isdigit()]
-if 0 not in OFFS:
-    OFFS.append(0)
-OFFS.sort()
+def _num(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+OFFS = [v for v in (_num(x) for x in a.offsets.split(",")) if v is not None]
+if 0.0 not in OFFS:
+    OFFS.append(0.0)
+OFFS = sorted(set(OFFS))
+_UNIT = {"ticks": "tick", "pct": "%", "atr": "ATR"}[a.offset_mode]
+
+
+def _limit_of(pc: float, atr: float, off: float) -> float:
+    """前日終値 pc からオフセット off ぶんずらした指値。呼値に丸める。"""
+    if not off:
+        return pc
+    if a.offset_mode == "ticks":
+        return float(_r2t(pc + off * _tsz(pc)))
+    if a.offset_mode == "pct":
+        return float(_r2t(pc * (1.0 + off / 100.0)))
+    return float(_r2t(pc + off * atr))          # atr
 
 # ── 母集団 (銘柄, 日) ────────────────────────────────────────────────────
 if not os.path.exists(a.trades):
@@ -109,7 +136,10 @@ if a.holdout_days > 0:
 print(f"[条件] sm={a.sm} tm={a.tm} 損切り遅延={_DLY}本 ガード±{a.gap_guard*100:.0f}% "
       f"{a.qty}株 / 価格{a.min_price:,.0f}〜{a.max_price:,.0f} / 手数料"
       f"{B.FEE_PCT_ONE_WAY*100:.3f}%片道")
-print(f"[掃く] 指値オフセット {OFFS} ティック (0=現行)")
+print(f"[掃く] 指値オフセット {OFFS} {_UNIT} (0=現行) / mode={a.offset_mode}")
+if a.offset_mode == "ticks":
+    print("  ⚠ ticks は株価で意味が変わる(1,000円株の-2tick=-1.00% / "
+          "4,900円株の-2tick=-0.20%)。揃えるなら --offset-mode pct か atr")
 
 
 def _load(sym):
@@ -209,7 +239,7 @@ for sym, dstr in sorted(pairs):
 
     split = "TRAIN" if (_ho is None or ts.date() < _ho) else "TEST"
     for off in OFFS:
-        lim = float(_r2t(pc + off * _tsz(pc))) if off else pc
+        lim = _limit_of(pc, atr, off)
         st = stat[off][split]
         st["n_order"] += 1
         if a.gap_guard > 0 and o1 > lim * (1 + a.gap_guard):
@@ -272,13 +302,13 @@ for sp in _splits:
         if _best is None or s["pnl"] > _best[1]:
             _best = (off, s["pnl"], cpt)
         mark = " ←現行" if off == 0 else ""
-        print(f"  {off:>+6}{no:>8,}{nf:>8,}{(nf/no*100 if no else 0):>7.1f}%"
+        print(f"  {off:>+6g}{no:>8,}{nf:>8,}{(nf/no*100 if no else 0):>7.1f}%"
               f"{(s['n_auction']/nf*100 if nf else 0):>8.0f}%"
               f"{(s['win']/nf*100 if nf else 0):>6.0f}%"
               f"{(s['stop']/nf*100 if nf else 0):>6.0f}%"
               f"{cpt:>+10,.0f}{s['pnl']:>+14,.0f}{mark}")
     if _best:
-        print(f"  → {sp} 最良: {_best[0]:+d}ティック  合計 {_best[1]:+,.0f}  "
+        print(f"  → {sp} 最良: {_best[0]:+g}{_UNIT}  合計 {_best[1]:+,.0f}  "
               f"円/件 {_best[2]:+,.0f}")
     # ── 板寄せ / ザラ場到達 に分けた内訳 ────────────────────────────────
     #    板寄せ分は現実と一致する = **これが確実に取れる額**。
@@ -296,7 +326,7 @@ for sp in _splits:
         pa, pi = s2["pnl_auction"], s2["pnl_intra"]
         dep = (pi / (pa + pi) * 100) if (pa + pi) else 0.0
         ni = nf - na
-        print(f"  {off:>+6}{na:>10,}{pa:>+14,.0f}{(pa/na if na else 0):>+10,.0f}"
+        print(f"  {off:>+6g}{na:>10,}{pa:>+14,.0f}{(pa/na if na else 0):>+10,.0f}"
               f"{(s2['win_auction']/na*100 if na else 0):>7.0f}%"
               f"{(s2['stop_auction']/na*100 if na else 0):>7.0f}%"
               f"{ni:>10,}{pi:>+14,.0f}{(pi/ni if ni else 0):>+10,.0f}"
@@ -316,7 +346,7 @@ for sp in _splits:
             _gp, _gl = s3[f"gp_{_k}"], s3[f"gl_{_k}"]
             _aw = _gp / _w if _w else 0.0
             _al = _gl / (_n - _w) if (_n - _w) else 0.0
-            print(f"  {off:>+6}{_ty:>8}{_aw:>+11,.0f}{-_al:>+11,.0f}"
+            print(f"  {off:>+6g}{_ty:>8}{_aw:>+11,.0f}{-_al:>+11,.0f}"
                   f"{(_aw / _al if _al else 0):>10.2f}:1"
                   f"{(_w / _n * 100):>6.0f}%{(_gp / _gl if _gl else 0):>7.2f}"
                   f"{((_gp - _gl) / _n):>+10,.0f}"
@@ -335,15 +365,18 @@ if _ho is not None:
     _bt = max(OFFS, key=lambda o: stat[o]["TRAIN"]["pnl"])
     _be = max(OFFS, key=lambda o: stat[o]["TEST"]["pnl"])
     print("─" * W)
-    print(f"  TRAIN最良 {_bt:+d}ティック → TEST 円/件 "
+    print(f"  TRAIN最良 {_bt:+g}{_UNIT} → TEST 円/件 "
           f"{(stat[_bt]['TEST']['pnl'] / stat[_bt]['TEST']['n_fill'] if stat[_bt]['TEST']['n_fill'] else 0):+,.0f}"
-          f" (TEST最良は {_be:+d})")
+          f" (TEST最良は {_be:+g}{_UNIT})")
     if _bt != _be:
         print("  → **TRAIN と TEST で最良が違う = 順位が再現していない**(18.28)。")
         print("     全窓で一致するオフセットだけ採用すること。--holdout-days を変えて再確認を。")
     else:
         print("  → TRAIN/TEST で最良が一致。次は予算400万で確かめること:")
-        print(f"     set LSS_H_LIMIT_TICKS={_bt}  →  .\\daily  → E/H タブの H を比較")
+        print(f"     $env:LSS_H_LIMIT_TICKS = \"{_bt:g}\"  →  .\\dailyfast  → E/H タブの H を比較")
+        if a.offset_mode != "ticks":
+            print("     ⚠ レポート側の LSS_H_LIMIT_TICKS は**ティック単位**です。"
+                  "pct/atr で出した最良は換算が要ります。")
 
 print("─" * W)
 print("■ 読み方")
