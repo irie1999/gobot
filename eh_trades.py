@@ -85,7 +85,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     def _bt(t):
         return float(t.get("rec_score") or t.get("bt") or 0)
 
+    # ⚠ 重複の扱いは**隣の400万円タブと必ず揃える**こと。
+    #    現行タブは同じ銘柄が同日に複数戦略で出れば2件とも予算枠を消費する。
+    #    E/H だけ (銘柄,日) で1件に畳むと、同じ400万でより多くの銘柄に分散でき、
+    #    その差が『エントリー方式の効果』に化ける(2026-08-10 に発覚)。
+    #    既定は畳まない=現行と同じ。LSS_EH_DEDUPE=1 で旧挙動(畳む)。
+    _dedupe = str(os.environ.get("LSS_EH_DEDUPE", "0")).strip() in ("1", "true", "True", "yes")
+
     base: dict = {}
+    rows: dict = {}      # (銘柄,日) -> [元トレード,...] 出力はこの数だけ作る
     _tk = 0
     for t in list(trades or []) + list(nofills or []):
         # ⛔ 転換(lss未約定→ロング転換)は **lss ではない**(18.5.3/18.26 で棄却済み)。
@@ -100,6 +108,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             continue
         if k not in base or _bt(t) > _bt(base[k]):
             base[k] = t
+        rows.setdefault(k, []).append(t)
+    if _dedupe:
+        rows = {k: [v] for k, v in base.items()}
     if not base:
         log("[E/H] 母集団が空です")
         return {}
@@ -107,6 +118,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     syms = sorted({k[0] for k in base})
     if _tk:
         log(f"[E/H] 転換 {_tk:,}件を母集団から除外(ショートのみ / 転換タブ参照)")
+    _nrow = sum(len(v) for v in rows.values())
+    log(f"[E/H] 重複: {'畳む(LSS_EH_DEDUPE=1)' if _dedupe else '畳まない=現行タブと同じ'} "
+        f"→ 出力 {_nrow:,}件 / {len(base):,}銘柄日")
     log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します "
         f"(sm={sm} tm={tm} 損切り遅延={stop_delay_bars}本 "
         f"ガード±{gap_guard * 100:.0f}% {qty}株 / **決済条件は現行と同一**)")
@@ -158,6 +172,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     nf = {"E": [], "H": []}
     _skip = 0
     for (sym, dstr), src in base.items():
+        _srcs = rows.get((sym, dstr)) or [src]
         df = daily.get(sym)
         if df is None:
             _skip += 1
@@ -201,8 +216,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                  not (gap_guard > 0 and o1 > pc * (1 + gap_guard)))):
             order_p = pc if key == "H" else o1
             if not ok or ep <= 0:
-                nf[key].append(_mk(src, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, sm, tm, qty, key))
+                nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
+                                   pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
             if key == "H":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
@@ -218,17 +233,17 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=stop_delay_bars)
             if xp is None or why in ("no_5m", "no_entry"):
-                nf[key].append(_mk(src, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, sm, tm, qty, key))
+                nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
+                                   pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
             _t = ""
             try:
                 _t = pd.Timestamp(_x).strftime("%H:%M")
             except Exception:
                 pass
-            out[key].append(_mk(src, order_p, ep, float(xp),
+            out[key].extend(_mk(s, order_p, ep, float(xp),
                                 _REASON.get(why, why), _t,
-                                pc, atr, sm, tm, qty, key))
+                                pc, atr, sm, tm, qty, key) for s in _srcs)
     log(f"[E/H] 約定 E={len(out['E']):,} H={len(out['H']):,} / "
         f"不約定 E={len(nf['E']):,} H={len(nf['H']):,} / データ不足 {_skip:,}")
     return {"E": out["E"], "H": out["H"], "約定せず": nf}
