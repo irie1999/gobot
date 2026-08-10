@@ -80,6 +80,11 @@ ap.add_argument("--tk-sm", type=float, default=None,
 ap.add_argument("--tk-tm", type=float, default=None,
                 help="[単発指定] 転換(ロング)の利確ATR倍率")
 ap.add_argument("--by-month", action="store_true")
+ap.add_argument("--holdout-days", type=int, default=0,
+                help="直近N日を TEST に取り分け、それ以前を TRAIN にして両方出す。"
+                     "**単一窓で最良の升を選ぶのは過剰適合**(18.28)。"
+                     "TRAIN で最良だった升が TEST でも上位かを必ず確認すること。"
+                     "0(既定)=分割しない")
 ap.add_argument("--bt-window", type=int, default=420,
                 help="BTスコア算出のためにバックテストを何日ぶん余分に回すか(既定420)。"
                      "小さくすると大幅に速くなるがBTスコアの精度が落ちる。"
@@ -491,6 +496,26 @@ if not ALL:
 _cut = (TODAY - pd.Timedelta(days=args.days)).date()
 ALL = [r for r in ALL if str(r["date"]) >= str(_cut)]
 
+# ── TRAIN/TEST 分割 ────────────────────────────────────────────────────────
+# ⛔ 単一窓で最良の升を選ぶのは過剰適合(18.28)。--holdout-days N で直近N日を
+#    TEST に取り分け、TRAIN(それ以前)で選んだ升が TEST でも生きるかを見る。
+#    18.25 の事故を繰り返さないため、**上限で切る**(下限をずらすだけでは
+#    TRAIN ⊇ TEST になり分割が成立しない)。TRAIN の数字が窓ごとに動くか必ず確認。
+_SPLIT = None
+if getattr(args, "holdout_days", 0):
+    _ho = (TODAY - pd.Timedelta(days=args.holdout_days)).date()
+    _tr = [r for r in ALL if str(r["date"]) < str(_ho)]
+    _te = [r for r in ALL if str(r["date"]) >= str(_ho)]
+    if len(_tr) < 50 or len(_te) < 50:
+        print(f"[WARN] 分割の片側が小さすぎます (TRAIN {len(_tr)} / TEST {len(_te)})。"
+              f"--days を伸ばすか --holdout-days を減らしてください。分割せず全体で集計します。")
+    else:
+        _SPLIT = (_tr, _te, str(_ho))
+        print(f"[分割] TRAIN {len(_tr):,}件 (〜{_ho} の手前)  /  "
+              f"TEST {len(_te):,}件 ({_ho} 以降)")
+        print("       ⚠ TRAIN で最良だった升が TEST でも上位でなければ、それは"
+              "その期間のノイズです。全窓で一致する升だけ採用すること(18.28)。")
+
 n_fill = sum(1 for r in ALL if r["lss_pnl"] is not None)
 _REF_X = EXITS[0][0]          # 帯テーブル用の参考決済ルール(先頭)
 n_tk = sum(1 for r in ALL if r["tk"].get((None, _REF_X)) is not None)
@@ -498,7 +523,7 @@ print(f"\n[集計] シグナル {len(ALL)}件 / lss約定 {n_fill}件({n_fill / 
       f"/ 転換計算可 {n_tk}件", flush=True)
 
 
-def _agg(mode_name, cutoff, label=None, exit_label=""):
+def _agg(mode_name, cutoff, label=None, exit_label="", rows=None):
     """締切ごとに lss と 転換 を振り分けて集計する。
 
     転換の損益は **その締切時刻に買った場合**の値を使う(label 経由)。
@@ -509,7 +534,7 @@ def _agg(mode_name, cutoff, label=None, exit_label=""):
     pnl = 0.0
     gp = gl = 0.0
     mon: dict = defaultdict(float)
-    for r in ALL:
+    for r in (ALL if rows is None else rows):
         use_lss = False
         if cutoff == "PURE":
             # 転換を一切しない。約定したものだけをlssとして計上する。
@@ -556,6 +581,43 @@ for _xl, _xsm, _xtm, _xsell in EXITS:
     for nm, cu in MODES[1:]:                    # 純lss を除く
         _cl = nm if (nm, cu) in CUTOFFS else None
         GRID[(nm, _xl)] = _agg(nm, cu, _cl, _xl)
+
+# ── TRAIN/TEST を分けたときの升テーブル(過剰適合の検出用) ────────────────
+if _SPLIT is not None:
+    _tr_rows, _te_rows, _ho_s = _SPLIT
+    print("\n" + "=" * 96)
+    print(f"TRAIN/TEST 分割 — TRAIN(〜{_ho_s} 手前) vs TEST({_ho_s} 以降)。純lss比 円")
+    print("=" * 96)
+    _tr_pure = _agg("PURE", "PURE", rows=_tr_rows)["pnl"]
+    _te_pure = _agg("PURE", "PURE", rows=_te_rows)["pnl"]
+    print(f"  純lss(転換なし)   TRAIN {_tr_pure:+,.0f}   TEST {_te_pure:+,.0f}")
+    _hdr = f"  {'締切':<12}"
+    for _xl, *_ in EXITS:
+        _hdr += f"{_xl:>26}"
+    print(_hdr)
+    print(f"  {'':<12}" + "".join(f"{'TRAIN':>13}{'TEST':>13}" for _ in EXITS))
+    _best_tr, _best_te = None, None
+    for nm, cu in MODES[1:]:
+        _cl = nm if (nm, cu) in CUTOFFS else None
+        _line = f"  {nm:<12}"
+        for _xl, *_ in EXITS:
+            a = _agg(nm, cu, _cl, _xl, rows=_tr_rows)["pnl"] - _tr_pure
+            b = _agg(nm, cu, _cl, _xl, rows=_te_rows)["pnl"] - _te_pure
+            if _best_tr is None or a > _best_tr[0]:
+                _best_tr = (a, nm, _xl, b)
+            if _best_te is None or b > _best_te[0]:
+                _best_te = (b, nm, _xl, a)
+            _line += f"{a:>+13,.0f}{b:>+13,.0f}"
+        print(_line)
+    if _best_tr and _best_te:
+        print(f"\n  TRAIN最良: {_best_tr[1]} x {_best_tr[2]}  "
+              f"TRAIN {_best_tr[0]:+,.0f} → **TEST {_best_tr[3]:+,.0f}**")
+        print(f"  TEST最良 : {_best_te[1]} x {_best_te[2]}  "
+              f"TEST {_best_te[0]:+,.0f} (そのTRAIN {_best_te[3]:+,.0f})")
+        if _best_tr[3] <= 0:
+            print("  → **TRAIN最良の升は TEST で純lssに勝てていない。採用しないこと。**")
+        if (_best_tr[1], _best_tr[2]) != (_best_te[1], _best_te[2]):
+            print("  → TRAIN と TEST で最良の升が違う = **順位が再現していない**(18.28)。")
 
 print("\n" + "=" * 96)
 print("転換の締切時刻スイープ — この時刻までに約定しなければ転換(ロング)に切替")
