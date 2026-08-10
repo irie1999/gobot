@@ -67,6 +67,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
+
+class _Tee:
+    """コンソール出力をそのまま保持して HTML にも載せるための tee。
+    ターミナルで見た内容と HTML の内容が食い違わないようにするのが目的。"""
+
+    def __init__(self, base):
+        self._b, self.buf = base, []
+
+    def write(self, x):
+        self._b.write(x)
+        self.buf.append(x)
+        return len(x)
+
+    def flush(self):
+        self._b.flush()
+
+    def isatty(self):
+        return getattr(self._b, "isatty", lambda: False)()
+
+
+_TEE = _Tee(sys.stdout)
+sys.stdout = _TEE
+
 ap = argparse.ArgumentParser(description="lss シグナルでの持ち越しを測る")
 ap.add_argument("--raw", required=True, help="生トレードCSV(グロブ可)")
 ap.add_argument("--qty", type=int, default=100)
@@ -804,10 +827,15 @@ if a.html.strip() or a.inject_html.strip():
     import html as _hesc
     from pathlib import Path as _P
 
-    _cg = (_cur.set_index(["symbol", "entry_date"])["pnl"].astype(float)
-           if not _cur.empty else None)
-    r["現行"] = [float(_cg.get((sm, dt), float("nan"))) if _cg is not None
-                 else float("nan") for sm, dt in zip(r["symbol"], r["date"])]
+    # (銘柄, 日) -> 現行の損益。dict にするのは、重複キーがあると Series が返って
+    # float() が落ちるため(_cur は dedup 済みだが、入力次第で崩れうる)。
+    _cg = {}
+    if not _cur.empty:
+        for _s2, _d2, _p2 in zip(_cur["symbol"], _cur["entry_date"],
+                                 pd.to_numeric(_cur["pnl"], errors="coerce")):
+            _cg.setdefault((str(_s2), pd.Timestamp(_d2)), float(_p2))
+    r["現行"] = [_cg.get((str(sm), pd.Timestamp(dt)), float("nan"))
+                 for sm, dt in zip(r["symbol"], r["date"])]
     r["日"] = r["date"].dt.strftime("%Y-%m-%d")
     _V = [("現行", "現行"), ("E_翌寄り+OCO", "E"), ("H_前日終値で指値売り", "H")]
 
@@ -886,6 +914,36 @@ if a.html.strip() or a.inject_html.strip():
 .ehwrap tbody tr:hover{background:#111c33}
 </style>"""
 
+    # ── 月別の対応のある検定 (現行 vs E / 現行 vs H / E vs H) ──────
+    #    同じ月・同じ銘柄集団なので paired が最も検出力が高い。
+    #    ⚠ ここは**予算制約なし**。実運用の判定は compare_budget_raw.py が正。
+    _mon = sorted(r["month"].unique())
+
+    def _msum(col):
+        return [float(r.loc[r["month"] == m, col].dropna().sum()) for m in _mon]
+
+    _MS = {lab: _msum(col) for col, lab in _V}
+    _prows = ""
+    for _x, _y in (("現行", "E"), ("現行", "H"), ("E", "H")):
+        dd = [b - a2 for a2, b in zip(_MS[_x], _MS[_y])]
+        n = len(dd)
+        mu = _st.mean(dd) if n else 0.0
+        sd = _st.stdev(dd) if n > 1 else 0.0
+        se = sd / (n ** 0.5) if n > 1 else 0.0
+        tt = mu / se if se > 0 else 0.0
+        lo, hi = mu - 1.96 * se, mu + 1.96 * se
+        win = sum(1 for x in dd if x > 0)
+        _v = ("<b class='ehp'>有意にプラス</b>" if lo > 0 else
+              ("<b class='ehn'>有意にマイナス</b>" if hi < 0 else
+               "<span class='ehmut'>差を検出できず</span>"))
+        _prows += (f'<tr><td class="ehk">{_y} − {_x}</td>'
+                   f'<td class="{"ehp" if mu > 0 else "ehn"}">{mu:+,.0f}</td>'
+                   f'<td>{sd:,.0f}</td><td><b>{tt:+.2f}</b></td>'
+                   f'<td>{lo:+,.0f} 〜 {hi:+,.0f}</td>'
+                   f'<td>{win}/{n}</td><td class="ehk">{_v}</td></tr>')
+
+    _console = _hesc.escape("".join(_TEE.buf))
+
     _EH_BODY = f"""{_EH_CSS}
 <div class="ehwrap">
 <div class="ehsub">
@@ -911,6 +969,8 @@ compare_budget_raw.py を見ること(18.10: 全部買えるなら得 と 予算
 <div class="ehtab on" onclick="ehSw(this,0)">月別</div>
 <div class="ehtab" onclick="ehSw(this,1)">日別 ({r['date'].nunique():,}日)</div>
 <div class="ehtab" onclick="ehSw(this,2)">取引明細 ({len(_trows):,}件)</div>
+<div class="ehtab" onclick="ehSw(this,3)">統計 (対応検定)</div>
+<div class="ehtab" onclick="ehSw(this,4)">実行ログ</div>
 </div>
 <div class="ehpane on"><div class="ehbox"><table>
 <thead><tr><th class="ehk" rowspan="2">月</th>{_hd}</tr><tr>{_sub}</tr></thead>
@@ -925,6 +985,20 @@ compare_budget_raw.py を見ること(18.10: 全部買えるなら得 と 予算
 <tr><th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th>
 <th>建値</th><th>決済</th><th>理由</th><th>時刻</th><th>損益</th></tr>
 </thead><tbody>{"".join(_trows)}</tbody></table></div></div>
+<div class="ehpane">
+<div class="ehnote">
+月ごとに対応をとった検定。同じ月・同じ銘柄集団を扱うので、相場全体の上下は
+両方に同じだけ効いて差し引きで消える = 独立比較より検出力が高い。<br>
+<span class="ehmut">⚠ ここは<b>予算制約なし</b>。実運用は1日十数件で飽和するので、
+採否の判定は compare_budget_raw.py(予算400万)が正。18.10 の罠を避けること。</span>
+</div>
+<div class="ehbox"><table><thead><tr>
+<th class="ehk">比較</th><th>月あたりの差</th><th>σ</th><th>t</th>
+<th>95%CI(月)</th><th>勝ち月</th><th class="ehk">判定</th>
+</tr></thead><tbody>{_prows}</tbody></table></div></div>
+<div class="ehpane"><div class="ehbox">
+<pre style="margin:0;padding:12px 14px;color:#cbd5e1;font-size:.76rem;
+line-height:1.55;white-space:pre">{_console}</pre></div></div>
 </div>
 <script>
 function ehSw(el, i){{
