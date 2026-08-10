@@ -287,7 +287,7 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         #     stop = ep + atr*sm  /  target = ep - atr*tm
         # 現行の逆指値(mode="stop")は注文価格基準のままでよい(約定値は
         # トリガー以下 = 損切りは必ず上に来るので破綻しない)。
-        if str(rec.get("mode", "stop")) == "auction":
+        if str(rec.get("mode", "stop")) in ("auction", "limit"):
             _atr, _sm, _tm = (float(rec.get("atr", 0) or 0),
                               float(rec.get("sm", 0) or 0),
                               float(rec.get("tm", 0) or 0))
@@ -296,12 +296,12 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
                 _os, _ot = rec.get("stop", 0.0), rec.get("target", 0.0)
                 rec["stop"] = avg + _atr * _sm
                 rec["target"] = avg - _atr * _tm
-                print(f"  [寄指] {sym} 実約定{avg:,.0f} から OCO を再計算: "
+                print(f"  [{rec.get('mode')}] {sym} 実約定{avg:,.0f} から OCO を再計算: "
                       f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
                       f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
                       f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
             else:
-                print(f"  [!] {sym} 寄指だが ATR/sm/tm が取れません"
+                print(f"  [!] {sym} H({rec.get('mode')})だが ATR/sm/tm が取れません"
                       f"(atr={_atr} sm={_sm} tm={_tm}) → 注文価格基準のまま使います。"
                       f"ordered_signals_lss.csv を確認してください")
         # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。損切≤平均約定=逆側/陳腐化した

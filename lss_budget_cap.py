@@ -121,18 +121,24 @@ def main() -> int:
     ap.add_argument("--monitor-until", type=str, default="10:30",
                     help="監視を打ち切る時刻 HH:MM(既定10:30)。予算到達か この時刻で監視終了")
     # ── エントリー方式 (2026-08-10 追加) ──────────────────────────
-    ap.add_argument("--entry-mode", choices=["stop", "auction"], default="stop",
+    ap.add_argument("--entry-mode", choices=["stop", "limit", "auction"], default="stop",
                     help="stop=現行の逆指値売り(前日終値を割ったら売る) / "
-                         "auction=H案の**寄指売り**(寄付の板寄せだけで約定。"
-                         "寄らなければ建てない)。既定 stop")
+                         "limit=H案の**指値売り**(寄りが上なら板寄せ、日中に上がって"
+                         "きても約定。10ヶ月OOSで最良・walk-forwardでも選ばれ続けた) / "
+                         "auction=H案の**寄指売り**(寄付の板寄せだけ。ザラ場到達を捨てる"
+                         "ぶんバックテストと現実が一致する)。既定 stop")
     ap.add_argument("--limit-ticks", type=int, default=-5,
-                    help="auction のとき、指値を前日終値から何ティックずらすか"
+                    help="limit / auction のとき、指値を前日終値から何ティックずらすか"
                          "(既定 -5)。下げるほど約定は増えるが売り値は不利。"
                          "TRAIN/TEST とも -10..-1 が平坦で 0 以上は明確に劣る(.\\hsweep)")
     ap.add_argument("--aggressive", action="store_true")
     ap.add_argument("--conservative", action="store_true")
     args = ap.parse_args()
-    _auction = (args.entry_mode == "auction")
+    # H の2形態。どちらも「前日終値±Nティックの指値売り」で、違いは
+    # **ザラ場到達を取るか**だけ。OCO はどちらも実約定価格基準(watcher が再計算)。
+    _auction = (args.entry_mode == "auction")   # 寄指(21) = 寄付の板寄せのみ
+    _limit = (args.entry_mode == "limit")       # 指値(20) = ザラ場でも約定
+    _isH = _auction or _limit
 
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注+監視★" if args.execute else "dry-run(プラン表示のみ)"
@@ -186,14 +192,14 @@ def main() -> int:
     for s in signals:
         _pc = float(s["order_price"])
         s["_ord_p"] = float(round_to_tick(
-            _pc + args.limit_ticks * tick_size(_pc)) if _auction else round_to_tick(_pc))
+            _pc + args.limit_ticks * tick_size(_pc)) if _isH else round_to_tick(_pc))
 
     # ── over-subscribe: 注文額の累計が cap に達するまで上位から採用 ──
     plan = []
     placed_not = 0.0
     for s in signals:
         note = s["_ord_p"] * args.qty
-        if _auction:
+        if _isH:
             # ⛔ 寄指は寄付で**一斉に約定**するので、枠を超えた分を後から取り消せない。
             #    逆指値のように「1件だけ超過を許す」と、その超過がそのまま建玉になる
             #    (実測 2026-08-10: 枠400万に対し注文額累計 433万)。
@@ -206,26 +212,27 @@ def main() -> int:
         placed_not += note
 
     print(f"\nシグナル {len(signals)}件 → "
-          f"{'発注プラン' if _auction else 'over-subscribe 発注プラン'} {len(plan)}件 "
+          f"{'発注プラン' if _isH else 'over-subscribe 発注プラン'} {len(plan)}件 "
           f"(注文額累計 {placed_not/1e4:.0f}万 / 枠 {cap/1e4:.0f}万)")
-    if _auction:
-        print(f"エントリー方式: **寄指(寄付の板寄せのみ)** 指値 = 前日終値{args.limit_ticks:+d}ティック")
+    if _isH:
+        print(f"エントリー方式: **{'寄指(寄付の板寄せのみ)' if _auction else '指値(板寄せ+ザラ場到達)'}** "
+              f"指値 = 前日終値{args.limit_ticks:+d}ティック")
     print("-" * 72)
     for i, s in enumerate(plan, 1):
-        if _auction:
-            # 寄指の OCO は **実約定価格(寄り値)基準** で watcher が組み直す。
+        if _isH:
+            # H の OCO は **実約定価格(寄り値)基準** で watcher が組み直す。
             # 前日終値基準の stop/target をそのまま出すと誤解を招くので幅で表示。
             _a = float(s.get("atr", 0) or 0)
             _oco = (f"損切+{_a*args.sm:,.0f}/利確-{_a*args.tm:,.0f}(約定値から)"
                     if _a > 0 else "損切/利確=約定値から再計算")
-            _px = f"@寄指{s['_ord_p']:,.0f}"
+            _px = f"@{'寄指' if _auction else '指値'}{s['_ord_p']:,.0f}"
         else:
             _oco = f"損切¥{s['stop_price']:,.0f}/利確¥{s['target_price']:,.0f}"
             _px = f"@≤{s['_ord_p']:,.0f}"
         print(f"  {i:>2}. BT{s['bt']:>3.0f} {s['symbol']} {s['name']} [{s['strategy']}] "
               f"{_px} {_oco} (注文額 {s['_ord_p']*args.qty/1e4:.0f}万)")
     print("-" * 72)
-    if _auction and args.budget_multiple > 1.0:
+    if _isH and args.budget_multiple > 1.0:
         print(f"⚠ **寄指で倍率{args.budget_multiple:.1f}は危険です。**")
         print("   寄指は寄付の板寄せで**一斉に約定**します。逆指値のように日中かけて順次")
         print("   発動するわけではないので、『約定累計が予算に達したら残りを取消す』という")
@@ -257,8 +264,11 @@ def main() -> int:
             # 現値との比較(即約定回避)はしない。寄指はザラ場では約定しないので
             # 「現値より上の指値」を出すのがむしろ正しい。
             # 下限ガード(after_hit_price)も逆指値専用なので無い。
+            #   auction = 寄指(21): 寄付の板寄せだけ。寄らなければ失効
+            #   limit   = 指値(20): 寄りが上なら板寄せ、日中に上がってきても約定
             res = cli.send_sell(sym, qty=args.qty, price=trig,
-                                order_type="limit_moo", cash_margin=CASH_MARGIN_OPEN)
+                                order_type=("limit_moo" if _auction else "limit"),
+                                cash_margin=CASH_MARGIN_OPEN)
         else:
             # 即約定回避: トリガーが現値以上だと弾かれる → 現値-1ティックに引下げ
             try:
