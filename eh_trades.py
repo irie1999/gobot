@@ -50,7 +50,7 @@ def _tick(price: float) -> float:
 
 def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
           gap_guard: float = 0.03, qty: int = 100, workers: int = 6,
-          require_open_bar: bool = True, log=print) -> dict:
+          require_open_bar: bool = True, variants=None, log=print) -> dict:
     """E/H のトレード dict を作る。
 
     Args:
@@ -111,6 +111,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #      考慮されていない(18.33)。→ 取らないという選択肢が要る。
     _h_auction_only = str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() \
         in ("1", "true", "True", "yes")
+    # ── H のバリアント ────────────────────────────────────────────
+    # ⛔ 設定ごとに .\daily を回して1回ずつ比べてはいけない(18.24)。実行が変わると
+    #    比較相手(現行)の数字まで動くうえ、ノイズ帯も作れない。**1回の読込で
+    #    複数の設定を同時に評価する**(5分足は共通なので追加コストはほぼゼロ)。
+    # variants: [(表示名, 指値ティック, 寄指か), ...]。None なら env の設定1つ。
+    if not variants:
+        variants = [("H", _h_ticks, _h_auction_only)]
+    _HV = [(str(n), int(t), bool(a)) for n, t, a in variants]
+    _HKEYS = [n for n, _, _ in _HV]
 
     base: dict = {}
     rows: dict = {}      # (銘柄,日) -> [元トレード,...] 出力はこの数だけ作る
@@ -227,8 +236,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         + "  ← **実行ごとにこの数が変われば再現性の問題**"
           "(LSS_EH_WORKERS=1 で直列化して切り分け)")
 
-    out = {"E": [], "H": []}
-    nf = {"E": [], "H": []}
+    out = {"E": []} | {k: [] for k in _HKEYS}
+    nf = {"E": []} | {k: [] for k in _HKEYS}
     # データ不足の内訳。合計だけだと実行ごとのブレの原因が追えない(2026-08-10)。
     _sk = {"日足なし": 0, "日足に該当日なし": 0, "5分足なし": 0,
            "分割ガード": 0, "先頭バーが09:00でない": 0, "価格/ATR異常": 0}
@@ -239,7 +248,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #             ⚠ バックテストは「高値が指値に触れたら約定」とみなすが、実際は
     #             **板の待ち行列**があり、触れただけでは約定しないことがある。
     #             ここの比率が高いほど H の数字は楽観側に寄る。
-    _hfill = {"板寄せ": 0, "ザラ場到達": 0}
+    _hfill = {k: {"板寄せ": 0, "ザラ場到達": 0} for k in _HKEYS}
     for (sym, dstr), src in base.items():
         _srcs = rows.get((sym, dstr)) or [src]
         df = daily.get(sym)
@@ -284,21 +293,23 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ── H: 指値。既定は前日終値。LSS_H_LIMIT_TICKS で上下にずらせる ──
         #      上げる = より高く売れるが約定率が落ちる / 下げる = 逆。
         #      H 固有の唯一のパラメータで、掃くなら sweep_h_limit.py。
-        _hl = float(_r2t(pc + _h_ticks * _tsz(pc))) if _h_ticks else pc
-        for key, ep, ok in (
-                ("E", o1, not (gap_guard > 0 and o1 < pc * (1 - gap_guard))),
-                ("H", (o1 if o1 >= _hl else _hl),
-                 # ガードの基準は **前日終値**。ずらした指値を基準にすると
-                 # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
-                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
-                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
-                  and (o1 >= _hl if _h_auction_only else True)))):
-            order_p = _hl if key == "H" else o1
+        # ガードの基準は **前日終値**。ずらした指値を基準にすると
+        # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
+        _cases = [("E", o1, o1,
+                   not (gap_guard > 0 and o1 < pc * (1 - gap_guard)))]
+        for _hn, _ht_, _ha in _HV:
+            _hl = float(_r2t(pc + _ht_ * _tsz(pc))) if _ht_ else pc
+            _cases.append((
+                _hn, _hl, (o1 if o1 >= _hl else _hl),
+                (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
+                 # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
+                 and (o1 >= _hl if _ha else True))))
+        for key, order_p, ep, ok in _cases:
             if not ok or ep <= 0:
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
-            if key == "H":
+            if key != "E":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
                 xp, why, _e, _x = _x5(day5, ep, ep + atr * sm, ep - atr * tm, True,
                                       day_low=dl, day_high=dh, day_close=c1,
@@ -315,8 +326,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
-            if key == "H":
-                _hfill["板寄せ" if o1 >= pc else "ザラ場到達"] += len(_srcs)
+            if key != "E":
+                _hfill[key]["板寄せ" if o1 >= pc else "ザラ場到達"] += len(_srcs)
             _t = ""
             try:
                 _t = pd.Timestamp(_x).strftime("%H:%M")
@@ -326,20 +337,31 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                 _REASON.get(why, why), _t,
                                 pc, atr, sm, tm, qty, key) for s in _srcs)
     _skip = sum(_sk.values())
-    log(f"[E/H] 約定 E={len(out['E']):,} H={len(out['H']):,} / "
-        f"不約定 E={len(nf['E']):,} H={len(nf['H']):,} / データ不足 {_skip:,}")
+    log("[E/H] 約定 " + " / ".join(
+        f"{k}={len(out[k]):,}" for k in ["E"] + _HKEYS)
+        + " / 不約定 " + " / ".join(f"{k}={len(nf[k]):,}" for k in ["E"] + _HKEYS)
+        + f" / データ不足 {_skip:,}")
     log("[E/H] データ不足の内訳: "
         + " / ".join(f"{k} {v:,}" for k, v in _sk.items() if v))
-    _ht = sum(_hfill.values())
-    if _ht:
-        _zr = _hfill["ザラ場到達"]
-        log(f"[E/H] H の約定内訳: 板寄せ {_hfill['板寄せ']:,}件 "
-            f"({_hfill['板寄せ'] / _ht * 100:.0f}%) / "
+    for _k in _HKEYS:
+        _ht = sum(_hfill[_k].values())
+        if not _ht:
+            continue
+        _zr = _hfill[_k]["ザラ場到達"]
+        log(f"[E/H] {_k} の約定内訳: 板寄せ {_hfill[_k]['板寄せ']:,}件 "
+            f"({_hfill[_k]['板寄せ'] / _ht * 100:.0f}%) / "
             f"ザラ場到達 {_zr:,}件 ({_zr / _ht * 100:.0f}%)")
+    if any(_hfill[k]["ザラ場到達"] for k in _HKEYS):
         log("      ⚠ ザラ場到達分は『高値が指値に触れたら約定』とみなしている。"
             "実際は板の待ち行列があり触れただけでは約定しないことがあるので、"
             "この比率が高いほど H の数字は楽観側に寄る(板寄せ分は現実と一致)。")
-    return {"E": out["E"], "H": out["H"], "約定せず": nf}
+    # 後方互換: 呼び出し側が dict["H"] を見るので、先頭バリアントを "H" にも入れる。
+    _res = {"E": out["E"], "約定せず": nf} | {k: out[k] for k in _HKEYS}
+    if "H" not in _res and _HKEYS:
+        _res["H"] = out[_HKEYS[0]]
+        nf["H"] = nf[_HKEYS[0]]
+    _res["_h_variants"] = _HKEYS
+    return _res
 
 
 def _mk(src, order_p, entry_p, exit_p, reason, exit_time,

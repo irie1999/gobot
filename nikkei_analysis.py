@@ -9976,12 +9976,34 @@ function switchTbd(id, tab) {{
                 _eh_delay = int(getattr(_bte_d, "_LSS_STOP_DELAY_BARS", 0) or 0)
             except Exception:
                 _eh_delay = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or 0)
+            # ── H のバリアントを **1回の読込で** まとめて作る ──────────
+            # ⛔ 設定ごとに .\daily を回して1回ずつ比べてはいけない(18.24)。
+            #    実行が変わると比較相手(現行)の数字まで動き、ノイズ帯も作れない。
+            #    5分足は共通なので、指値位置と寄指の組み合わせを足しても
+            #    追加コストはほぼゼロ(決済判定を数回やり直すだけ)。
+            # 先頭は env の設定 = タブに出る "H"。以降は比較表専用。
+            try:
+                _hte = int(os.environ.get("LSS_H_LIMIT_TICKS", "0") or 0)
+            except Exception:
+                _hte = 0
+            _hae = str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() \
+                in ("1", "true", "True", "yes")
+            _hvars = [("H", _hte, _hae)]
+            if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
+                    not in ("0", "false", "no"):
+                for _vt, _va in ((0, False), (-5, False),
+                                 (0, True), (-2, True), (-5, True), (-10, True)):
+                    if (_vt, _va) == (_hte, _hae):
+                        continue          # 既定と同じものは二重に計算しない
+                    _hvars.append((f"{_vt:+d}tick "
+                                   f"{'寄指' if _va else 'ザラ場込'}", _vt, _va))
             _EH_TRADES = _eht.build(
                 _bt30_entry_sorted, all_nofills,
                 sm=_LSS_SM, tm=_LSS_TM,
                 stop_delay_bars=_eh_delay,
                 gap_guard=0.03, qty=100,
                 workers=int(os.environ.get("LSS_EH_WORKERS", "6") or 6),
+                variants=_hvars,
             ) or {}
         except Exception as _ehe:
             print(f"[E/H] トレード生成に失敗(タブは出しません): {_ehe}", flush=True)
@@ -13382,6 +13404,119 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'両方が同じ向きに |z|≥1 で出たものに <span style="color:#4ade80;font-weight:700">✓</span> '
             f'を付けています。片方だけ大きいものは、その期間のノイズを拾っているだけです。</p></div>')
 
+    def _h_variant_html():
+        """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
+
+        ⛔ 設定ごとにレポートを回して1回ずつ比べてはいけない(18.24)。実行が変われば
+           比較相手(現行)の数字まで動く。実際 2026-08-10 に、指値-5tick と 0tick を
+           別々の実行で比べていて、その間に現行が 2,235件→1,817件→1,947件 と動いた。
+           ここは同じ1回の実行・同じ現行・同じ予算規則で並べる。
+        """
+        import statistics as _sti
+        _vs = [k for k in ((_EH_TRADES or {}).get("_h_variants") or [])
+               if (_EH_TRADES or {}).get(k)]
+        if len(_vs) < 2:
+            return ""
+        _TC = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+               7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+               13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+               19: 2.093, 20: 2.086}
+        _nfv = (_EH_TRADES or {}).get("約定せず") or {}
+        _cm = _TODAY.strftime("%Y-%m")
+
+        def _mp(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k) < 7 or _k == _cm:
+                    continue
+                _m[_k] = _m.get(_k, 0.0) + float(_t.get("pnl", 0) or 0)
+            return _m
+
+        _base = _mp(_budget_entry_sorted_short)     # 比較の基準 = 現行
+        _out = []
+        for _v in _vs:
+            _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
+                                 src=(_EH_TRADES or {}).get(_v) or [],
+                                 nofills=(_nfv.get(_v) or []))
+            _m = _mp(_r)
+            _n = sum(1 for t in _r if t.get("reason") not in ("発注中", "保有中"))
+            _ms = sorted(set(_m) & set(_base))
+            _ds = [_m[k] - _base[k] for k in _ms]
+            if len(_ds) > 1:
+                _mu = _sti.mean(_ds)
+                _se = _sti.stdev(_ds) / (len(_ds) ** 0.5)
+                _t = _mu / _se if _se > 0 else 0.0
+                _c = _TC.get(len(_ds) - 1, 1.96)
+                _lo, _hi = _mu - _c * _se, _mu + _c * _se
+                _w = sum(1 for d in _ds if d > 0)
+            else:
+                _mu = _t = _lo = _hi = 0.0
+                _w = 0
+            _h = len(_ms) // 2
+            _f1 = sum(_m[k] - _base[k] for k in _ms[:_h])
+            _f2 = sum(_m[k] - _base[k] for k in _ms[_h:])
+            _out.append((_v, _n, sum(_m.values()), _mu, _t, _lo, _hi, _w,
+                         len(_ds), _f1, _f2))
+
+        _best = max(_out, key=lambda r: r[2])[0] if _out else ""
+        _rows = ""
+        for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2) in _out:
+            _mark = ' style="background:#132a1a"' if _v == _best else ""
+            _c = "#4ade80" if _lo > 0 else "#f87171" if _hi < 0 else "#94a3b8"
+            _vd = ("CI全域プラス" if _lo > 0 else
+                   "CI全域マイナス" if _hi < 0 else "ゼロをまたぐ")
+            _rep = ("✓" if (_f1 > 0 and _f2 > 0) or (_f1 < 0 and _f2 < 0) else "")
+            _rows += (
+                f'<tr{_mark}><td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
+                f'white-space:nowrap">{"★ " if _v == _best else ""}{_v}'
+                f'<span style="color:#4ade80"> {_rep}</span></td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_n:,}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                f'font-weight:700">{_p:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{(_p / _n if _n else 0):+,.0f}円</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">{_mu:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                f'font-weight:700">{_t:+.2f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                f'white-space:nowrap;font-size:0.76rem">{_lo:+,.0f} 〜 {_hi:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_w}/{_nm}</td>'
+                f'<td style="padding:2px 8px;font-size:0.76rem;color:{_c}">{_vd}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                f'border-left:1px solid #334155;white-space:nowrap">{_f1:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                f'white-space:nowrap">{_f2:+,.0f}</td></tr>')
+
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
+            f'padding:12px 14px;margin:0 0 14px">'
+            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
+            f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）</div>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'H の唯一のパラメータは<b>指値をどこに置くか</b>と<b>ザラ場到達を取るか</b>です。'
+            f'差/月 と t は<b>現行との対応検定</b>（同じ月どうしを引き算）。<br>'
+            f'⛔ <b>設定ごとにレポートを回して比べてはいけません</b>(18.24)。実行が変われば'
+            f'比較相手の現行まで動きます（実測: 2,235→1,817→1,947件）。ここは同じ1回の実行で並べています。<br>'
+            f'⚠ <b>この順位はこの10ヶ月を見て選ぶことになる = OOSではありません。</b>'
+            f'前半/後半が同じ符号のものに <span style="color:#4ade80;font-weight:700">✓</span>。'
+            f'片方だけなら期間に合わせ込んだものです。<br>'
+            f'⚠ <b>寄指(板寄せのみ)はバックテストと現実が一致</b>します（始値&gt;指値なら全量約定）。'
+            f'ザラ場込みは『高値が触れたら約定』の仮定に乗るので、'
+            f'同じ数字でも<b>実運用で取れる確実性が違います</b>。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">設定</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
+            f'<th style="{_th}">円/件</th><th style="{_th}">差/月</th>'
+            f'<th style="{_th}">t</th><th style="{_th}">95%CI(月)</th>'
+            f'<th style="{_th}">勝ち月</th><th style="{_th};text-align:left">判定</th>'
+            f'<th style="{_th};border-left:1px solid #334155">前半</th>'
+            f'<th style="{_th}">後半</th></tr></thead>'
+            f'<tbody>{_rows}</tbody></table></div>')
+
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
     except Exception as _ehce:
@@ -13396,6 +13531,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             print(f"[発注順] 比較ブロックを生成 ({_ort.time() - _t0:.1f}s)", flush=True)
     except Exception as _orce:
         print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            import time as _hvt
+            _t0 = _hvt.time()
+            _hv_html = _h_variant_html()
+            if _hv_html:
+                _EH_CMP_HTML = _hv_html + _EH_CMP_HTML
+                print(f"[H設定] 比較ブロックを生成 ({_hvt.time() - _t0:.1f}s)", flush=True)
+    except Exception as _hvce:
+        print(f"[H設定] 比較ブロック生成に失敗: {_hvce}", flush=True)
 
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
