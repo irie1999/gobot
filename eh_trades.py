@@ -151,7 +151,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ⛔ 並列読込は稀に SystemError('deallocated bytearray object has exported
         #    buffers') で失敗し、その銘柄が丸ごと落ちる。SystemError は Exception の
         #    サブクラスなので黙って {} になり、集計から消える。
-        #    実測(2026-08-10): 同じ日・同じデータで .\ehm を3回走らせたら
+        #    実測(2026-08-10): 同じ日・同じデータでレポートを3回走らせたら
         #    データ不足 636 / 646 / 569、E合計が ±9万円ぶれた。現行タブは
         #    このローダを使わないので3回とも1円まで同一だった。
         #    → 失敗したらこの場で直列リトライする(下の再読込パスでも拾う)。
