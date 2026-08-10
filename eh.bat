@@ -3,6 +3,10 @@ REM ============================================================
 REM eh.bat - inject the "E/H compare" tab into the newest daily report
 REM   Usage:  .\dailyfast --no-serve      (generate the report first)
 REM           .\eh                        (then inject)
+REM
+REM   NOTE: .\daily / .\dailyfast now inject the tab automatically (LSS_EH_TAB=0
+REM         disables it). This bat is for re-injecting with different options,
+REM         e.g. .\eh --exclude-months 2026-03
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
 REM
 REM   Why a separate step:
@@ -25,13 +29,15 @@ if not exist "oos_raw_fold01_*.csv" (
 )
 
 set "TARGET="
-for /f "delims=" %%f in ('dir /b /o-d signals_holdout_all_both_*.html 2^>nul') do (
+REM The tab lives in the lss pane file. signals_holdout_all_both_*.html is only an
+REM iframe wrapper and has no ho-outer-nav, so injecting there fails.
+for /f "delims=" %%f in ('dir /b /o-d signals_holdout_all_lss_*.html 2^>nul') do (
   set "TARGET=%%f"
   goto :found
 )
 :found
 if not defined TARGET (
-  echo [error] signals_holdout_all_both_*.html not found.
+  echo [error] signals_holdout_all_lss_*.html not found.
   echo         Run .\dailyfast --no-serve first.
   exit /b 1
 )

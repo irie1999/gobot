@@ -544,6 +544,33 @@ if _args.both and not _args.short:
             _frames += f'<iframe id="{_frame_id}" class="ls-frame{_active_fr}" data-src="{_src}"></iframe>\n'
     _frames += '<iframe id="holdings-frame" class="hold-frame" data-src="holdings_latest.html"></iframe>\n'
 
+    # ── E/H 比較タブを lss ペインに差し込む ────────────────────────────
+    #   タブ本体は iframe の中身(signals_holdout_all_lss_*.html)にある。
+    #   _bout はラッパーなので差し込み先はこちら。
+    #   レポート生成のコードには触らず、生成済みHTMLに後付けする方式
+    #   (analyze_overnight_lss.py --inject-html)。失敗しても日次処理は止めない。
+    #   無効化: set LSS_EH_TAB=0
+    _eh_tgt = _generated.get(("lss", _price_list[0]))
+    if _eh_tgt is not None and str(os.environ.get("LSS_EH_TAB", "1")).strip() \
+            not in ("0", "false", "False", "no"):
+        import glob as _g_eh
+        if _g_eh.glob("oos_raw_fold*.csv"):
+            print("=" * 65)
+            print("=== E/H 比較タブを差し込み中 (無効化: set LSS_EH_TAB=0) ===")
+            print("=" * 65)
+            try:
+                _sp.run([sys.executable,
+                         str(Path(__file__).resolve().parent / "analyze_overnight_lss.py"),
+                         "--raw", "oos_raw_fold*.csv",
+                         "--workers", str(_args.workers),
+                         "--require-open-bar",
+                         "--inject-html", str(_eh_tgt)], timeout=2400)
+            except Exception as _ehe:
+                print(f"[E/H] 差し込み失敗(無視して続行): {_ehe}")
+        else:
+            print("[E/H] oos_raw_fold*.csv が無いのでスキップ。"
+                  "作るには: python run_oos_folds.py --workers 8 --lss-only")
+
     _bout.write_text(f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
