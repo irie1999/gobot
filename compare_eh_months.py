@@ -51,6 +51,9 @@ ap.add_argument("--holdout-days", type=int, default=None,
                 help="holdout_days を1つに絞る。省略時はCSVにある最大値")
 ap.add_argument("--drop-months", default="",
                 help="除外する月(カンマ区切り)。当月など営業日が揃わない月に使う 例: 2026-08")
+ap.add_argument("--drop-current", action="store_true",
+                help="**当月**を自動で除外する。月が終わっていないので営業日数が揃わず、"
+                     "月次の平均・検定に混ぜると水準を壊す。.bat から使う用")
 a = ap.parse_args()
 
 try:
@@ -76,6 +79,9 @@ _hd = (a.holdout_days if a.holdout_days is not None
 _bts = sorted({_f(r.get("min_bt")) for r in rows})
 _bt = a.min_bt if a.min_bt is not None else (_bts[0] if _bts else 0.0)
 _drop = {x.strip() for x in a.drop_months.split(",") if x.strip()}
+if a.drop_current:
+    from datetime import date as _date
+    _drop.add(_date.today().strftime("%Y-%m"))
 rows = [r for r in rows
         if int(_f(r.get("holdout_days"))) == _hd and _f(r.get("min_bt")) == _bt
         and r.get("month") not in _drop]
