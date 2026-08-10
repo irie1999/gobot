@@ -10020,7 +10020,7 @@ function switchTbd(id, tab) {{
             return (-float(_eff_long_bt(_t) or 0), 0.0)
 
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
-                        src=None, nofills=None):
+                        src=None, nofills=None, order_key=None):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
@@ -10051,7 +10051,7 @@ function switchTbd(id, tab) {{
                 _dk = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
                 _by_day_ml[_dk].append(_t)
             for _dk, _day_trades in _by_day_ml.items():
-                _sorted_day = sorted(_day_trades, key=_bud_order_key)
+                _sorted_day = sorted(_day_trades, key=(order_key or _bud_order_key))
                 if not _sorted_day:
                     continue
                 # 各トレードの単価(100株あたりコスト)
@@ -10115,7 +10115,7 @@ function switchTbd(id, tab) {{
             # 発注順は lss_order_rank に集約(シグナルタブ・lss_budget_cap と同じ並び)。
             # 既定=流動性降順。BT降順は 18.21 でランダム6本すべてを下回ると実測(z=-2.22)。
             # ここを揃えないと『レポートの金額』と『実際の発注』が食い違う(18.9 の鉄則)。
-            for _t in sorted(_by_day_bud[_dk], key=_bud_order_key):
+            for _t in sorted(_by_day_bud[_dk], key=(order_key or _bud_order_key)):
                 if fill_budget:
                     # 約定額ベース: 不約定はスキップ(予算消費なし)、約定価格×株数で管理
                     if _t.get("reason") == "約定せず":
@@ -13215,11 +13215,147 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + f'</tr></thead><tbody>{_sp}</tbody></table>') if _sp else "")
             + '</div>')
 
+    def _order_rank_html():
+        """発注順(何から買うか)を、**ランダムのノイズ帯**と並べて比較する。
+
+        ⛔ 2条件を1回ずつ比べて差を語ってはいけない(18.24)。発注順を入れ替える
+           だけで10ヶ月合計は σ≈12万円 動く。それ未満の差は『測れていない』。
+           そこでランダム順を複数シード回して帯を作り、各候補が帯の外に出るかで
+           判定する。
+
+        安い: _run_budget_sim は**既にあるトレードを並べ替えて予算で切るだけ**。
+        5分足の読込もバックテストもやり直さないので、12シードでも一瞬で終わる。
+        """
+        import statistics as _sti
+        import zlib as _zl
+
+        _srcs = [("現行", None, None)]
+        _ehnf_r = (_EH_TRADES or {}).get("約定せず") or {}
+        for _k in ("E", "H"):
+            _v = (_EH_TRADES or {}).get(_k) or []
+            if _v:
+                _srcs.append((_k, _v, _ehnf_r.get(_k) or []))
+        if not _srcs:
+            return ""
+
+        def _tkey(_t):
+            return (f"{_t.get('symbol')}|{_t.get('strategy')}|"
+                    f"{_t.get('entry_d_raw') or _t.get('exit_d_raw')}")
+
+        def _rand_key(seed):
+            # プロセス間で安定した擬似乱数(hash() は起動ごとに変わるので使わない)。
+            return lambda _t: (_zl.crc32(f"{seed}|{_tkey(_t)}".encode()) & 0xffffffff,)
+
+        def _price_key(asc):
+            def k(_t):
+                v = float(_t.get("order_limit", 0) or _t.get("entry_p", 0) or 0)
+                return (v if asc else -v, )
+            return k
+
+        _NSEED = int(os.environ.get("LSS_ORDER_RANK_SEEDS", "12") or 12)
+        _cands = [("流動性順(既定)", None),          # None = _bud_order_key
+                  ("BT降順", lambda _t: (-float(_eff_long_bt(_t) or 0),
+                                         _tkey(_t))),
+                  ("建値 安い順", _price_key(True)),
+                  ("建値 高い順", _price_key(False))]
+
+        def _months_pnl(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k2) < 7 or _k2 == _TODAY.strftime("%Y-%m"):
+                    continue          # 当月は営業日が揃わないので除外(⚖表と同じ)
+                _m[_k2] = _m.get(_k2, 0.0) + float(_t.get("pnl", 0) or 0)
+            return _m
+
+        def _run(src, nof, key):
+            _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
+                                 src=src, nofills=nof, order_key=key)
+            _mp = _months_pnl(_r)
+            _n = sum(1 for _t in _r if _t.get("reason") not in ("発注中", "保有中"))
+            return _n, sum(_mp.values()), list(_mp.values())
+
+        _rows = ""
+        for _name, _src, _nof in _srcs:
+            # ① ランダム帯
+            _rs = [_run(_src, _nof, _rand_key(i)) for i in range(_NSEED)]
+            _rp = [r[1] for r in _rs]
+            _mu, _sd = _sti.mean(_rp), (_sti.stdev(_rp) if len(_rp) > 1 else 0.0)
+            _rows += (
+                f'<tr style="border-top:1px solid #475569">'
+                f'<td rowspan="{len(_cands) + 1}" style="padding:3px 8px;color:#e2e8f0;'
+                f'font-weight:700;vertical-align:top;border-right:1px solid #334155">{_name}</td>'
+                f'<td style="padding:2px 8px;color:#94a3b8">ランダム×{_NSEED}<br>'
+                f'<span style="font-size:0.7rem;color:#64748b">= ノイズ帯</span></td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                f'{int(_sti.mean([r[0] for r in _rs])):,}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_mu:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">σ {_sd:,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                f'<td style="padding:2px 8px;font-size:0.76rem;color:#64748b">'
+                f'最小 {min(_rp):+,.0f} / 最大 {max(_rp):+,.0f}</td></tr>')
+            # ② 各候補
+            for _cn, _ck in _cands:
+                _n, _p, _ = _run(_src, _nof, _ck)
+                _z = (_p - _mu) / _sd if _sd > 0 else 0.0
+                _out = sum(1 for v in _rp if v > _p)      # 帯の中での順位
+                if _z >= 2:
+                    _v, _c = "帯の外(上) → 有意に良い", "#4ade80"
+                elif _z <= -2:
+                    _v, _c = "帯の外(下) → 有意に悪い", "#f87171"
+                else:
+                    _v, _c = "帯の中 → ランダムと区別できない", "#94a3b8"
+                _rows += (
+                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_cn}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_n:,}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{_p:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                    f'{_out}/{_NSEED}本より下</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                    f'font-weight:700">{_z:+.2f}</td>'
+                    f'<td style="padding:2px 8px;font-size:0.76rem;color:{_c}">{_v}</td></tr>')
+
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
+            f'padding:12px 14px;margin:0 0 14px">'
+            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
+            f'🔀 発注順の比較（どれから建てるか / 同じトレード集合を並べ替えるだけ）</div>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'予算{_budget_man}万は1日十数件で埋まるので、<b>どの順に埋めるか</b>で入る顔ぶれが変わります。'
+            f'決済も銘柄選定も同じ。変えるのは順序だけです。<br>'
+            f'⛔ <b>2条件を1回ずつ比べて差を語らないこと</b>(18.24)。順序を入れ替えるだけで'
+            f'合計は σ の幅で動きます。そこで<b>ランダム順を{_NSEED}本回して帯を作り</b>、'
+            f'各候補がその外に出るかで判定します。|z|&lt;2 は「測れていない」であって「同じ」ではありません。<br>'
+            f'⚠ このシムは <b>slip=0</b>。流動性順の利点(成行の滑りが小さい)は'
+            f'<b>ここには映りません</b>。帯の中なら下振れしないので、'
+            f'映らない部分で得をする流動性順を既定にしています(18.21)。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+            f'<th style="{_th};text-align:left">発注順</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
+            f'<th style="{_th}">帯の位置</th><th style="{_th}">z</th>'
+            f'<th style="{_th};text-align:left">判定</th></tr></thead>'
+            f'<tbody>{_rows}</tbody></table></div>')
+
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
     except Exception as _ehce:
         print(f"[E/H] 比較ブロック生成に失敗: {_ehce}", flush=True)
         _EH_CMP_HTML = ""
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted and str(
+                os.environ.get("LSS_ORDER_RANK_TAB", "1")).strip() not in ("0", "false", "no"):
+            import time as _ort
+            _t0 = _ort.time()
+            _EH_CMP_HTML += _order_rank_html()
+            print(f"[発注順] 比較ブロックを生成 ({_ort.time() - _t0:.1f}s)", flush=True)
+    except Exception as _orce:
+        print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
 
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
