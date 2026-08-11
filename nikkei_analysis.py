@@ -10161,9 +10161,32 @@ function switchTbd(id, tab) {{
         except Exception:
             return (-float(_eff_long_bt(_t) or 0), 0.0)
 
+    def _size_lots(_t, mode, target):
+        """100株単位で、建玉(円) または リスク(円) を target に近づけるロット数。
+
+        現状は FIXED_QTY=100 固定なので、建玉が 10万円(1,000円株)〜60万円(6,000円株)と
+        **6倍ばらついている**(§18.30)。高い株が走った日の損失だけが突出する。
+        揃えれば期待値は変えずに**分散だけ**縮む(はず)ので、それを測る。
+          "yen" : 建玉(株価×株数)を target に近づける
+          "atr" : リスク(損切り幅×株数)を target に近づける = volatility parity
+        1〜10ロット(100〜1,000株)に制限する。0ロットにすると母集団が変わって
+        比較にならないので、下限は1ロット。
+        """
+        _p = float(_t.get("order_limit", 0) or _t.get("entry_p", 0) or 0)
+        if _p <= 0:
+            return 1
+        if mode == "yen":
+            _unit = _p * 100
+            return max(1, min(10, int(round(target / _unit)))) if _unit > 0 else 1
+        if mode == "atr":
+            _sp = float(_t.get("order_stop", 0) or 0)
+            _risk = abs(_sp - _p) * 100
+            return max(1, min(10, int(round(target / _risk)))) if _risk > 0 else 1
+        return 1
+
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
                         src=None, nofills=None, order_key=None,
-                        one_per_symbol=False):
+                        one_per_symbol=False, size_mode=None, size_target=0.0):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
@@ -10283,12 +10306,21 @@ function switchTbd(id, tab) {{
                     _cap += _no
                     _out.append(_t)
                 else:
-                    _no = _order_notional(_t)
+                    _lot = (1 if not size_mode
+                            else _size_lots(_t, size_mode, size_target))
+                    _no = _order_notional(_t) * _lot
                     if _no <= 0 or _cap + _no > _budget_yen:
                         continue   # 予算超過はスキップ(次の安い注文が入るか試す=貪欲)
                     _cap += _no
                     if _t.get("reason") != "約定せず":
-                        _out.append(_t)   # 約定分だけグリッド・損益に計上
+                        if _lot == 1:
+                            _out.append(_t)   # 約定分だけグリッド・損益に計上
+                        else:
+                            # 株数を n ロットにスケールした合成トレード(損益も n 倍)
+                            _syn = dict(_t)
+                            _syn["qty"] = int(_t.get("qty", 100) or 100) * _lot
+                            _syn["pnl"] = float(_t.get("pnl", 0) or 0) * _lot
+                            _out.append(_syn)
         _out.sort(key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"], reverse=True)
         return _out
 
@@ -13634,15 +13666,27 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         # 実例(2026-07-23): 4092.T が4戦略で同時に出て224万円を占め、
         # その日の損失 -97,050円 の 91% を作った。絞れば -31,050円 だった。
         # ただし勝つ日も4倍取れなくなるので、全期間で測らないと決められない。
-        _vs2 = [(v, False) for v in _vs] + [(_vs[0], True)]
+        # (設定名, 1銘柄1件か, サイズ方式, サイズ目標)
+        # サイズ均等は 100株固定(建玉が 10万〜60万 と6倍ばらつく)の代案。
+        # 期待値ではなく**分散**に効くはずなので、合計だけでなく月次σも見ること。
+        _SZ_YEN = _budget_yen / 13.0     # 1日13件で予算を使い切る想定の1件あたり建玉
+        _vs2 = ([(v, False, None, 0.0) for v in _vs]
+                + [(_vs[0], True, None, 0.0),
+                   (_vs[0], False, "yen", _SZ_YEN),
+                   (_vs[0], False, "atr", 1200.0)])
         _out = []
-        for _v, _ops in _vs2:
+        for _v, _ops, _szm, _szt in _vs2:
             _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
                                  src=(_EH_TRADES or {}).get(_v) or [],
                                  nofills=(_nfv.get(_v) or []),
-                                 one_per_symbol=_ops)
+                                 one_per_symbol=_ops,
+                                 size_mode=_szm, size_target=_szt)
             if _ops:
                 _v = f"{_v} ◆1銘柄1件"
+            elif _szm == "yen":
+                _v = f"{_v} ◆金額均等{_SZ_YEN / 1e4:.0f}万"
+            elif _szm == "atr":
+                _v = f"{_v} ◆ATR均等"
             _m = _mp(_r)
             _n = sum(1 for t in _r if t.get("reason") not in ("発注中", "保有中"))
             _ms = sorted(set(_m) & set(_base))
