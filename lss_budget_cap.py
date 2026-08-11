@@ -131,6 +131,13 @@ def main() -> int:
                     help="limit / auction のとき、指値を前日終値から何ティックずらすか"
                          "(既定 -5)。下げるほど約定は増えるが売り値は不利。"
                          "TRAIN/TEST とも -10..-1 が平坦で 0 以上は明確に劣る(.\\hsweep)")
+    ap.add_argument("--size-mode", choices=["fixed", "atr"], default="fixed",
+                    help="fixed=100株固定(現行) / atr=**ATR均等**。損切りで失う額"
+                         "(損切り幅×株数)を --size-target 円に揃える。100株固定だと建玉が"
+                         "10万〜60万と6倍ばらつき、高い株が走った日だけ損失が突出する。"
+                         "10ヶ月OOSで 円件 +747→+775 / 前半2位・後半2位で安定")
+    ap.add_argument("--size-target", type=float, default=1200.0,
+                    help="atr のとき、1銘柄で損切りにかかったときに失う額の目標(円)。既定1200")
     ap.add_argument("--aggressive", action="store_true")
     ap.add_argument("--conservative", action="store_true")
     args = ap.parse_args()
@@ -193,12 +200,21 @@ def main() -> int:
         _pc = float(s["order_price"])
         s["_ord_p"] = float(round_to_tick(
             _pc + args.limit_ticks * tick_size(_pc)) if _isH else round_to_tick(_pc))
+        # ATR均等: リスク(損切り幅×株数)を --size-target に揃える。
+        # ⚠ 単元100株なので高い株は減らせない(1ロットが既に目標超)。1〜10ロット。
+        _q = args.qty
+        if args.size_mode == "atr":
+            _a = float(s.get("atr", 0) or 0)
+            _r1 = _a * args.sm * 100
+            if _r1 > 0:
+                _q = 100 * max(1, min(10, int(round(args.size_target / _r1))))
+        s["_qty"] = int(_q)
 
     # ── over-subscribe: 注文額の累計が cap に達するまで上位から採用 ──
     plan = []
     placed_not = 0.0
     for s in signals:
-        note = s["_ord_p"] * args.qty
+        note = s["_ord_p"] * s["_qty"]
         if _isH:
             # ⛔ 寄指は寄付で**一斉に約定**するので、枠を超えた分を後から取り消せない。
             #    逆指値のように「1件だけ超過を許す」と、その超過がそのまま建玉になる
@@ -230,7 +246,7 @@ def main() -> int:
             _oco = f"損切¥{s['stop_price']:,.0f}/利確¥{s['target_price']:,.0f}"
             _px = f"@≤{s['_ord_p']:,.0f}"
         print(f"  {i:>2}. BT{s['bt']:>3.0f} {s['symbol']} {s['name']} [{s['strategy']}] "
-              f"{_px} {_oco} (注文額 {s['_ord_p']*args.qty/1e4:.0f}万)")
+              f"{_px} {_oco} ({s['_qty']}株 / 注文額 {s['_ord_p']*s['_qty']/1e4:.0f}万)")
     print("-" * 72)
     if _isH and args.budget_multiple > 1.0:
         print(f"⚠ **寄指で倍率{args.budget_multiple:.1f}は危険です。**")
@@ -266,7 +282,7 @@ def main() -> int:
             # 下限ガード(after_hit_price)も逆指値専用なので無い。
             #   auction = 寄指(21): 寄付の板寄せだけ。寄らなければ失効
             #   limit   = 指値(20): 寄りが上なら板寄せ、日中に上がってきても約定
-            res = cli.send_sell(sym, qty=args.qty, price=trig,
+            res = cli.send_sell(sym, qty=s["_qty"], price=trig,
                                 order_type=("limit_moo" if _auction else "limit"),
                                 cash_margin=CASH_MARGIN_OPEN)
         else:
@@ -281,12 +297,12 @@ def main() -> int:
             else:
                 trig = round_to_tick(trig - tick_size(trig))
             after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
-            res = cli.send_stop_sell(sym, qty=args.qty, trigger_price=trig,
+            res = cli.send_stop_sell(sym, qty=s["_qty"], trigger_price=trig,
                                      cash_margin=CASH_MARGIN_OPEN, after_hit_price=after)
         oid = res.get("OrderId")
         if res.get("Result") == 0 and oid:
             placed.append({"order_id": oid, "symbol": sym, "trigger": float(trig),
-                           "qty": args.qty, "notional": float(trig) * args.qty})
+                           "qty": s["_qty"], "notional": float(trig) * s["_qty"]})
             print(f"  ✓ {sym} {s['name']} 発注 OrderId={oid} "
                   f"{'@寄指' if _auction else '@≤'}{trig:,.0f}")
             # watcher(.\watch) が決済できるよう ordered_signals_lss.csv に残す。
@@ -295,7 +311,7 @@ def main() -> int:
             #     約定値より下に来て即損切りになる)。そのため atr/sm/tm も一緒に
             #    書き、watcher 側で再計算する。
             try:
-                _log_ordered(s, args.prod, args.qty,
+                _log_ordered(s, args.prod, s["_qty"],
                              entry_mode=args.entry_mode, order_price=trig)
             except Exception as _le:
                 print(f"    ⚠ 発注記録の書き込み失敗(決済は建玉から拾えます): {_le}")

@@ -253,6 +253,13 @@ _LSS_ORDER_MODE: bool = False
 #    H の値を押すと「指値のつもりが逆指値」になり、まったく別の注文が出る。
 #    H の実発注は lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
 _LSS_H_ENTRY: bool = str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes")
+# ポジションサイズ方式。"atr" = リスク(損切り幅×株数)を _SIZE_TARGET 円に揃える。
+# 既定 "" = 従来どおり100株固定。H タブのシグナル株数と lss_budget_cap で使う。
+_SIZE_MODE: str = str(os.environ.get("LSS_SIZE_MODE", "")).strip().lower()
+try:
+    _SIZE_TARGET: float = float(os.environ.get("LSS_SIZE_TARGET", "1200") or 1200)
+except Exception:
+    _SIZE_TARGET = 1200.0
 
 # _LSS_ORDER_MODE の「向き」フラグ。False(既定)=lss(逆指値空売り・売り建玉)。
 # True=ロングデイトレ(逆指値買い=上ブレイク・同日決済/買い建玉)。同日決済レポートの
@@ -3006,6 +3013,20 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         tgt_pct  = (s["target_p"] - s["order_p"]) / s["order_p"] * 100 if s["order_p"] else 0
         _agree   = len(s.get("_agree_strats", ())) or 1   # 一致した戦略数(lssのみ>1あり)
         qty      = (_calc_qty(s["order_p"], s["stop_p"]) if s["order_p"] else 0) * _agree
+        # ── ATR均等 (H タブのみ) ──────────────────────────────────
+        # 100株固定だと建玉が 10万(1,000円株)〜60万(6,000円株)と6倍ばらつき、
+        # 高い株が走った日だけ損失が突出する(§18.30)。損切りで失う額
+        #   リスク = 損切り幅(0.1ATR) × 株数
+        # を揃えると、10ヶ月の実測で 円/件 +747 → +775、t +3.88 → +3.68、
+        # 前半2位/後半2位で安定した(2026-08-11)。walk-forward でも選ばれ続ける。
+        # ⚠ 単元100株なので**高い株は減らせない**(1ロットが既に目標超)。
+        #    効くのは「安い株を厚くする」側で、予算枠が有限なぶん集中が下がる。
+        if _LSS_H_ENTRY and _SIZE_MODE == "atr":
+            _a = float(s.get("h_atr", 0) or 0)
+            _r1 = _a * _LSS_SM * 100          # 1ロット(100株)で失う額
+            if _r1 > 0:
+                _lot = max(1, min(10, int(round(_SIZE_TARGET / _r1))))
+                qty = 100 * _lot * _agree
         _agree_badge = (f' <span style="font-size:0.62rem;color:#a78bfa;font-weight:700">'
                         f'{_agree}戦略一致</span>' if _agree > 1 else "")
         pos_val  = round(s["order_p"] * qty)
