@@ -10156,7 +10156,8 @@ function switchTbd(id, tab) {{
             return (-float(_eff_long_bt(_t) or 0), 0.0)
 
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
-                        src=None, nofills=None, order_key=None):
+                        src=None, nofills=None, order_key=None,
+                        one_per_symbol=False):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
@@ -10251,7 +10252,19 @@ function switchTbd(id, tab) {{
             # 発注順は lss_order_rank に集約(シグナルタブ・lss_budget_cap と同じ並び)。
             # 既定=流動性降順。BT降順は 18.21 でランダム6本すべてを下回ると実測(z=-2.22)。
             # ここを揃えないと『レポートの金額』と『実際の発注』が食い違う(18.9 の鉄則)。
+            # one_per_symbol: 同じ日に同じ銘柄が複数戦略で出たとき、**先頭の1件だけ**建てる。
+            # 実例(2026-07-23): 4092.T 日本化学工業が DON/VOLTF/MACDTF/MOM の4戦略で
+            # 同時に出て、224万円(予算400万の56%)が1銘柄に集中。そこが寄り後に走って
+            # 4件そろって -22,000円 = その日の損失 -97,050円 の 91% になった。
+            # §18.8 の「1銘柄1ポジションが正解」は再エントリーの話だったが、
+            # **同日に別戦略が同じ銘柄を出すケース**は絞られていなかった。
+            _seen_sym: set = set()
             for _t in sorted(_by_day_bud[_dk], key=(order_key or _bud_order_key)):
+                if one_per_symbol:
+                    _sy = str(_t.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
+                    if _sy in _seen_sym:
+                        continue
+                    _seen_sym.add(_sy)
                 if fill_budget:
                     # 約定額ベース: 不約定はスキップ(予算消費なし)、約定価格×株数で管理
                     if _t.get("reason") == "約定せず":
@@ -13611,11 +13624,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return _m
 
         _base = _mp(_budget_entry_sorted_short)     # 比較の基準 = 現行
+        # 同じ日に同じ銘柄が複数戦略で出たとき1件に絞る案も並べる。
+        # 実例(2026-07-23): 4092.T が4戦略で同時に出て224万円を占め、
+        # その日の損失 -97,050円 の 91% を作った。絞れば -31,050円 だった。
+        # ただし勝つ日も4倍取れなくなるので、全期間で測らないと決められない。
+        _vs2 = [(v, False) for v in _vs] + [(_vs[0], True)]
         _out = []
-        for _v in _vs:
+        for _v, _ops in _vs2:
             _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
                                  src=(_EH_TRADES or {}).get(_v) or [],
-                                 nofills=(_nfv.get(_v) or []))
+                                 nofills=(_nfv.get(_v) or []),
+                                 one_per_symbol=_ops)
+            if _ops:
+                _v = f"{_v} ◆1銘柄1件"
             _m = _mp(_r)
             _n = sum(1 for t in _r if t.get("reason") not in ("発注中", "保有中"))
             _ms = sorted(set(_m) & set(_base))
