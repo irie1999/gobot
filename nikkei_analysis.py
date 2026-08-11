@@ -13293,10 +13293,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
-            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
-            f'padding:12px 14px;margin:0 0 14px">'
-            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
-            f'⚖ 現行 / E / H の比較（同一プール・同一予算・同一発注順・同一決済）</div>'
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">'
+            f'⚖ 現行 / E / H の比較（同一プール・同一予算・同一発注順・同一決済）</summary>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'3方式とも同じ <code>_run_budget_sim</code>（{_budget_man}万円 / BT{_BT_TAB_MIN}以上 / '
             f'{_ORD_LBL} / 不約定も枠を消費）で作った同じリストを集計しています。'
@@ -13349,7 +13350,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + "".join(f'<th style="{_th};border-left:1px solid #334155">{x} vs {y}</th>'
                           for x, y in _PAIRS)
                 + f'</tr></thead><tbody>{_sp}</tbody></table>') if _sp else "")
-            + '</div>')
+            + '</details>')
 
     def _order_rank_html():
         """発注順(何から買うか)を、**ランダムのノイズ帯**と並べて比較する。
@@ -13541,10 +13542,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
-            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
-            f'padding:12px 14px;margin:0 0 14px">'
-            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
-            f'🔀 発注順の比較（どれから建てるか / 同じトレード集合を並べ替えるだけ）</div>'
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">'
+            f'🔀 発注順の比較（どれから建てるか / 同じトレード集合を並べ替えるだけ）</summary>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'予算{_budget_man}万は1日十数件で埋まるので、<b>どの順に埋めるか</b>で入る顔ぶれが変わります。'
             f'決済も銘柄選定も同じ。変えるのは順序だけです。<br>'
@@ -13575,7 +13577,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'⚠ <b>walk-forward が固定最良を下回るなら、順序を選ぶこと自体に価値が'
             f'ありません</b>。その場合は既定(流動性順)のまま動かさないのが正解です。'
             f'このシムは slip=0 なので、そこで差が付かないなら'
-            f'<b>執行コスト(成行の滑り)で選ぶ</b>ことになります(18.21)。</p></div>')
+            f'<b>執行コスト(成行の滑り)で選ぶ</b>ことになります(18.21)。</p></details>')
 
     def _h_variant_html():
         """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
@@ -13739,10 +13741,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
-            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
-            f'padding:12px 14px;margin:0 0 14px">'
-            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
-            f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）</div>'
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">'
+            f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）</summary>'
             + _concl
             + f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'H の唯一のパラメータは<b>指値をどこに置くか</b>と<b>ザラ場到達を取るか</b>です。'
@@ -13777,7 +13780,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'月ごとの選択: '
             + " → ".join(f'<span style="color:#cbd5e1">{m[5:]}</span>:{p}'
                          for m, p in _picks)
-            + '</p></div>')
+            + '</p></details>')
 
     def _age_html():
         """選定(初出基準月)からの経過月数で層別する。**累積マージの是非**を測る。
@@ -13868,10 +13871,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         return (
-            f'<div style="background:#0f172a;border:1px solid #475569;border-radius:8px;'
-            f'padding:12px 14px;margin:0 0 14px">'
-            f'<div style="color:#e2e8f0;font-weight:700;font-size:0.9rem;margin-bottom:6px">'
-            f'🕰 選定からの経過月数（累積マージを続けてよいか）</div>'
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">'
+            f'🕰 選定からの経過月数（累積マージを続けてよいか）</summary>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'<code>.\\daily</code> は基準月 2025-09〜 を毎回まとめてマージしています（累積）。'
             f'その根拠は「広いプールなら<b>BT降順</b>タブが毎日いちばん高いBTを選べる」でしたが、'
@@ -13887,7 +13891,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<thead><tr><th style="{_th};text-align:left">方式</th>'
             + "".join(f'<th style="{_th};border-left:1px solid #334155">{b[2]}</th>'
                       for b in _BANDS)
-            + f'</tr></thead><tbody>{_rows}</tbody></table></div>')
+            + f'</tr></thead><tbody>{_rows}</tbody></table></details>')
 
     def _findings_html():
         """H の採用に至った調査の結論を、折りたたんで残す。
