@@ -260,6 +260,13 @@ try:
     _SIZE_TARGET: float = float(os.environ.get("LSS_SIZE_TARGET", "1200") or 1200)
 except Exception:
     _SIZE_TARGET = 1200.0
+# ⛔ env が子プロセスに届いていないと、H タブが現行とまったく同じ中身になる
+#    (逆指値のまま・株数100のまま)。無言で同じものが出ると気づけないので、
+#    読めた値を必ず1行出す(2026-08-11 に実際に切り分けできず往復した)。
+if _LSS_H_ENTRY or _SIZE_MODE:
+    print(f"[H設定] LSS_H_ENTRY={_LSS_H_ENTRY} / "
+          f"LSS_SIZE_MODE={_SIZE_MODE or '(未設定=100株固定)'} / "
+          f"目標リスク={_SIZE_TARGET:,.0f}円", flush=True)
 
 # _LSS_ORDER_MODE の「向き」フラグ。False(既定)=lss(逆指値空売り・売り建玉)。
 # True=ロングデイトレ(逆指値買い=上ブレイク・同日決済/買い建玉)。同日決済レポートの
