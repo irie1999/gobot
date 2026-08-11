@@ -477,9 +477,21 @@ if _args.both and not _args.short:
             _denv = dict(os.environ)
             if _dk == "h":
                 # 子プロセスの nikkei_analysis がこれを見て、発注価格を
-                # H(指値)に差し替え、発注ボタンを無効化する(order_server が
-                # 未対応なので、押すと現行の逆指値が出てしまう)。
+                # H(指値売り)に差し替え、発注ボタンを entry_mode=limit で送る。
                 _denv["LSS_H_ENTRY"] = "1"
+                # ⛔ 研究用CSVは H タブに書かせない。
+                #    H は lss と**同じ prefix / 同じ env** で回る2周目なので、
+                #    そのままだと lss タブが書いた CSV を上書き(LSS_TRADES_CSV /
+                #    LSS_BUDGET_MONTHLY_CSV)、または二重に追記(LSS_OOS_BUDGET_CSV)する。
+                #    H の損益タブは現行と同一のバックテスト結果なので中身は同じだが、
+                #    ・.\fills が読む本番 lss_trades.csv を2回書く無駄
+                #    ・LSS_OOS_BUDGET_CSV は追記なので**行が倍**になり集計が壊れる
+                #    の2点で害しかない。lss タブ(1周目)の出力を正とする。
+                for _csv_env in ("LSS_TRADES_CSV", "LSS_BUDGET_MONTHLY_CSV",
+                                 "LSS_OOS_BUDGET_CSV"):
+                    if _denv.pop(_csv_env, None):
+                        print(f"[H] {_csv_env} は H タブでは出力しません"
+                              f"(lss タブの出力を正とする)", flush=True)
             _sp.run([sys.executable, __file__] + _base_cargs_no_price
                     + ["--max-price", str(_mp_cap), "--output-suffix", _dsfx]
                     + _dargs, env=_denv)
