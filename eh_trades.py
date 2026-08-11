@@ -115,11 +115,19 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     # ⛔ 設定ごとに .\daily を回して1回ずつ比べてはいけない(18.24)。実行が変わると
     #    比較相手(現行)の数字まで動くうえ、ノイズ帯も作れない。**1回の読込で
     #    複数の設定を同時に評価する**(5分足は共通なので追加コストはほぼゼロ)。
-    # variants: [(表示名, 指値ティック, 寄指か), ...]。None なら env の設定1つ。
+    # variants: [(表示名, 指値ティック, 寄指か[, 損切り遅延本数]), ...]。
+    #   None なら env の設定1つ。第4要素を省くと build の stop_delay_bars。
+    # ⚠ 損切り遅延(delay)を H で掃くための第4要素。delay1 の根拠(18.9)は
+    #   「逆指値はバーの**どこで**約定したか分からないので、そのバーの間は
+    #    損切りを置けない」という機構的な理由。H は板寄せ約定なら 09:00 に
+    #   約定価格が確定するので、その理由は H には当てはまらない可能性がある。
+    #   = H の最適な delay は現行と違いうる。だから測る。
     if not variants:
         variants = [("H", _h_ticks, _h_auction_only)]
-    _HV = [(str(n), int(t), bool(a)) for n, t, a in variants]
-    _HKEYS = [n for n, _, _ in _HV]
+    _HV = [(str(v[0]), int(v[1]), bool(v[2]),
+            (int(v[3]) if len(v) > 3 and v[3] is not None else int(stop_delay_bars)))
+           for v in variants]
+    _HKEYS = [v[0] for v in _HV]
 
     base: dict = {}
     rows: dict = {}      # (銘柄,日) -> [元トレード,...] 出力はこの数だけ作る
@@ -296,15 +304,17 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ガードの基準は **前日終値**。ずらした指値を基準にすると
         # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
         _cases = [("E", o1, o1,
-                   not (gap_guard > 0 and o1 < pc * (1 - gap_guard)))]
-        for _hn, _ht_, _ha in _HV:
+                   not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
+                   int(stop_delay_bars))]
+        for _hn, _ht_, _ha, _hd in _HV:
             _hl = float(_r2t(pc + _ht_ * _tsz(pc))) if _ht_ else pc
             _cases.append((
                 _hn, _hl, (o1 if o1 >= _hl else _hl),
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
-                 and (o1 >= _hl if _ha else True))))
-        for key, order_p, ep, ok in _cases:
+                 and (o1 >= _hl if _ha else True)),
+                _hd))
+        for key, order_p, ep, ok, _dly in _cases:
             if not ok or ep <= 0:
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
@@ -313,7 +323,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
                 xp, why, _e, _x = _x5(day5, ep, ep + atr * sm, ep - atr * tm, True,
                                       day_low=dl, day_high=dh, day_close=c1,
-                                      stop_delay_bars=stop_delay_bars)
+                                      stop_delay_bars=_dly)
             else:
                 # 寄りから建玉があるので ei=0 を強制する(+inf を渡す)。
                 # そのまま渡すと「寄りが上に飛び昼に建値へ戻った」日の朝の
@@ -321,7 +331,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 xp, why, _e, _x = _x5(day5, float("inf"),
                                       ep + atr * sm, ep - atr * tm, False,
                                       day_low=dl, day_high=dh, day_close=c1,
-                                      stop_delay_bars=stop_delay_bars)
+                                      stop_delay_bars=_dly)
             if xp is None or why in ("no_5m", "no_entry"):
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
