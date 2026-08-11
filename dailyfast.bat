@@ -61,20 +61,20 @@ REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
 REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
 REM                 once, so over-subscribe cannot be cancelled in time)
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
-REM --- ATR parity sizing for the H tab (2026-08-11).
-REM     FIXED_QTY=100 makes the position size follow the share price: a 1,000 yen
-REM     name is 100k yen while a 6,000 yen name is 600k - a 6x spread, so the day a
-REM     pricey name runs is the day the loss spikes (CLAUDE.md 18.30).
-REM     "atr" sizes each name so the loss AT THE STOP is the same: 
-REM         risk = stop distance (0.1 ATR) x shares  ->  LSS_SIZE_TARGET yen
-REM     10-month OOS: yen/trade +747 -> +775, 2nd place in BOTH halves, and
-REM     walk-forward keeps picking it. Only the H tab uses this; the current lss
-REM     tab stays on 100 shares.
-REM     Note: the 100-share lot means EXPENSIVE names cannot be reduced (one lot is
-REM     already over target). What it really does is size UP the cheap names, which
-REM     crowds out the pricey ones because the budget is finite.
-set "LSS_SIZE_MODE=atr"
-set "LSS_SIZE_TARGET=1200"
+REM --- Sizing: 100 shares for EVERY name (user decision, 2026-08-11).
+REM     ATR parity was tried and rolled back. It moved yen/trade +747 -> +775
+REM     (+3.7%), which is INSIDE the noise band: reshuffling the order alone moves
+REM     the 10-month total by sigma=124,660 yen (CLAUDE.md 18.24). It was also 2nd
+REM     place in BOTH halves, i.e. it lost to flat 100 shares in each of them.
+REM     The remaining argument was variance, not profit (18.30: 94% of the daily
+REM     sigma is name-specific and FIXED_QTY=100 makes the position 100k..600k yen,
+REM     a 6x spread). That claim is now measurable: the H comparison table prints
+REM     "monthly sigma" and "mean/sigma" per variant. Turn this back on ONLY if the
+REM     ATR-parity row actually shows a lower sigma there.
+REM     Cost of turning it on: cheap names get sized UP to 10 lots, which raises the
+REM     margin peak and crowds out other names because the budget is finite.
+REM   set "LSS_SIZE_MODE=atr"
+REM   set "LSS_SIZE_TARGET=1200"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT.
 REM     BT is built from the last 365 days, and the PnL tab shows the last 180 days,
