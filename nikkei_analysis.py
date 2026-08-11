@@ -3155,8 +3155,14 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         # ⚠ 損切り・利確は**実約定価格(寄り値)基準**なので発注時点では確定しない
         #    (板寄せの約定値は指値以上になる)。watcher が建玉の平均約定値から
         #    組み直すので、ここでは ATR 幅(±いくら)だけ出す。
+        # H タブ(_LSS_H_ENTRY)では本体の注文列が既に H の指値なので、
+        # 「指値下限(-3%)」(逆指値が発動した後のガード=指値売りには存在しない)と
+        # 「H 指値」(本体列と同じ値)の2列は出さない。
+        _lim_cell = "" if _LSS_H_ENTRY else (
+            f'<td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%'
+            f'<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>')
         _h_cell = ""
-        if _LSS_ORDER_MODE:
+        if _LSS_ORDER_MODE and not _LSS_H_ENTRY:
             _hop = float(s.get("h_order_price", 0) or 0)
             if _hop > 0:
                 _hsw = float(s.get("h_stop_w", 0) or 0)
@@ -3185,8 +3191,7 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
   <td style="text-align:right;font-size:0.78rem">{_liq_cell}</td>
   <td style="text-align:right;color:#94a3b8">{s.get("signal_date","")}<br><span style="font-size:0.72rem">{s.get("signal_price",0):,.0f}円</span></td>
   <td style="text-align:right;color:#38bdf8;font-weight:700">{s["order_p"]:,.0f}円</td>
-  <td style="text-align:right;color:#f59e0b">{lim_pct:+.1f}%<br><span style="font-size:0.72rem">{s["limit_p"]:,.0f}円</span></td>
-  {_h_cell}
+  {_lim_cell}{_h_cell}
   <td style="text-align:right;color:#f87171">{_stop_cell}</td>
   <td style="text-align:right;color:#4ade80">{_tgt_cell}</td>
   <td style="text-align:right;color:#e2e8f0">{qty}株{_agree_badge}<br><span style="font-size:0.72rem;color:#94a3b8">{pos_val:,.0f}円</span>
@@ -3456,16 +3461,16 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     <th>戦略</th><th>スコア</th>
     <th>売買代金<br><small>/日</small></th>
     <th>シグナル日<br>時株価</th>
-    <th style="color:#38bdf8">逆指値<br>(トリガー)</th>
-    <th style="color:#f59e0b">{'指値上限<br>(+3%)' if _LSS_LONG else ('指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)')}</th>
-    {'<th style="color:#f0abfc;border-left:2px solid #a855f7">H 指値<br><small>(検討中)</small></th>' if _LSS_ORDER_MODE else ''}
+    <th style="color:#38bdf8">{'指値<br>(売り)' if _LSS_H_ENTRY else '逆指値<br>(トリガー)'}</th>
+    {'' if _LSS_H_ENTRY else '<th style="color:#f59e0b">' + ('指値上限<br>(+3%)' if _LSS_LONG else ('指値下限<br>(-3%)' if _LSS_ORDER_MODE else '指値上限/下限<br>(±3%)')) + '</th>'}
+    {'<th style="color:#f0abfc;border-left:2px solid #a855f7">H 指値<br><small>(検討中)</small></th>' if (_LSS_ORDER_MODE and not _LSS_H_ENTRY) else ''}
     <th>{'損切り(下)' if _LSS_LONG else ('損切り(上)' if _LSS_ORDER_MODE else '損切り(-)')}</th><th>{'目標(上)' if _LSS_LONG else ('目標(下)' if _LSS_ORDER_MODE else '目標(+)')}</th>
     <th>株数<br><small>想定額</small></th>
     <th>最大保有</th><th>最大決済日</th><th>登録</th>
   </tr></thead>
   <tbody>{rows}</tbody>
 </table>
-<p class="footnote">{'※ lss は同日決済: 逆指値売りが約定した当日の引け成行で買戻し(close_lss_guard.py)。損切り=上/目標=下は5分足OCOの基準値で、実発注はエントリーのみ(利確・損切りは引け決済)。' if _LSS_ORDER_MODE else '※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日'}</p>"""
+<p class="footnote">{('※ H は同日決済: 指値売りが約定した当日の引け成行で買戻し。損切り=上/目標=下は前日終値基準の目安で、実際は約定値基準に組み直されます(指値売りに -3%下限ガードは無いので列も出しません)。' if _LSS_H_ENTRY else '※ lss は同日決済: 逆指値売りが約定した当日の引け成行で買戻し(close_lss_guard.py)。損切り=上/目標=下は5分足OCOの基準値で、実発注はエントリーのみ(利確・損切りは引け決済)。') if _LSS_ORDER_MODE else '※ 最大決済日 = シグナル日 + 約定期限3営業日 + 最大保有15日'}</p>"""
 
 
 _DETAIL_TAB_SEQ = 0  # 取引明細タブの DOM id 衝突回避用カウンタ
