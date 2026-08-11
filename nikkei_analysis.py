@@ -2528,6 +2528,13 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                     "signal_price": (_lss_sigprice if (_LSS_ORDER_MODE and _lss_sigprice) else sig.get("signal_price", 0)),
                     "order_p":      order_p,
                     "limit_p":      _lss_limit if _LSS_ORDER_MODE else limit_p,
+                    # H案(指値売り)の注文値。ここに載せ替えないと表示側に届かない
+                    # (シグナルタブは sig をそのまま使わず、この dict に詰め直している)。
+                    "h_order_price": sig.get("h_order_price", 0),
+                    "h_atr":         sig.get("h_atr", 0),
+                    "h_ticks":       sig.get("h_ticks", 0),
+                    "h_stop_w":      sig.get("h_stop_w", 0),
+                    "h_target_w":    sig.get("h_target_w", 0),
                     "stop_p":       sig.get("stop_price",  0),
                     "target_p":     sig.get("target_price", 0),
                     "is_lss":       _LSS_ORDER_MODE,
