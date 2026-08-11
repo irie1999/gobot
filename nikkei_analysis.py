@@ -10075,7 +10075,13 @@ function switchTbd(id, tab) {{
     #   元トレードの dict をコピーして約定・決済だけ差し替えるので、銘柄名・
     #   BT/WFスコア・ランク・設定ラベルがそのまま残り、明細が他タブと同一になる。
     _EH_TRADES = {}
-    if (_LSS_ORDER_MODE and cfg_filter is None
+    # ⛔ H タブ(LSS_H_ENTRY)では E/H 比較を作らない。隣の lss タブが**まったく同じ計算**を
+    #    済ませており、5分足を 25万銘柄日ぶん読み直すのは丸ごと無駄
+    #    (2026-08-11: --h-tab で実行時間がほぼ倍になっていた原因の一つ)。
+    #    比較表は lss タブで見る。
+    if _LSS_H_ENTRY:
+        print("[E/H] スキップ (H タブ: 比較は隣の lss タブで生成済み)", flush=True)
+    if (_LSS_ORDER_MODE and not _LSS_H_ENTRY and cfg_filter is None
             and not symbol_filter and not strategy_filter
             and str(os.environ.get("LSS_EH_TAB", "1")).strip()
             not in ("0", "false", "False", "no")):

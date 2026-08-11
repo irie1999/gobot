@@ -2012,6 +2012,10 @@ _TENKAN_OFF = (getattr(_args, "no_tenkan", False)
 if _TENKAN_OFF:
     _na._TENKAN_DIAG = ("--no-tenkan で無効化されています（18.26b: 転換は発注ルールに"
                         "組み込まないと確定済み。記録が要るときだけ外してください）。")
+    # ⛔ nikkei_analysis 側(未約定シグナルからの再シミュ)は **env でしか見ない**。
+    #    ここで立てないと、OOS CSV 由来だけ止まって 1,490件の再シミュが走り続ける
+    #    (2026-08-11 に実際に起きた: 「[転換] スキップ」の直後に「[転換/未約定] 生成」)。
+    os.environ["LSS_NO_TENKAN"] = "1"
     print("[転換] スキップ (--no-tenkan)", flush=True)
 if getattr(_args, "long_stop_short", False) and not _TENKAN_OFF:
     try:
