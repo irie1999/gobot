@@ -13784,6 +13784,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm) in _out:
             _rk1, _rk2 = _o1.get(_v, "—"), _o2.get(_v, "—")
+            # ── 月次σ と 安定度(月平均/σ) ────────────────────────────
+            # サイズ均等(◆金額均等/◆ATR均等)の狙いは期待値ではなく**分散**
+            # (§18.30: 日次σの94%が銘柄固有 / 100株固定だと建玉が6倍ばらつく)。
+            # その狙いを測る列が無かったので、合計と一緒に必ず出す。
+            # σ が下がらないなら、サイズを揃える理由は数字の上には無い。
+            _mv = [_mm.get(m, 0.0) for m in _msa]
+            if len(_mv) > 1:
+                _sg = _sti.stdev(_mv)
+                _st = (_sti.mean(_mv) / _sg) if _sg > 0 else 0.0
+            else:
+                _sg = _st = 0.0
             _wfr = _v.startswith("▶")
             _mark = (' style="background:#1e293b;border-top:2px solid #64748b"' if _wfr
                      else ' style="background:#132a1a"' if _v == _best else "")
@@ -13801,6 +13812,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'font-weight:700">{_p:+,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{("—" if _wfr else f"{(_p / _n if _n else 0):+,.0f}円")}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_sg:,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#cbd5e1;'
+                f'font-weight:700">{_st:+.2f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">{_mu:+,.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:{_c};'
                 f'font-weight:700">{_t:+.2f}</td>'
@@ -13861,11 +13876,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'片方だけなら期間に合わせ込んだものです。<br>'
             f'⚠ <b>寄指(板寄せのみ)はバックテストと現実が一致</b>します（始値&gt;指値なら全量約定）。'
             f'ザラ場込みは『高値が触れたら約定』の仮定に乗るので、'
-            f'同じ数字でも<b>実運用で取れる確実性が違います</b>。</p>'
+            f'同じ数字でも<b>実運用で取れる確実性が違います</b>。<br>'
+            f'⚠ <b>◆金額均等 / ◆ATR均等 の狙いは合計ではなく分散です</b>'
+            f'（§18.30: 日次σの94%が銘柄固有 / 100株固定だと建玉が10万〜60万と6倍ばらつく）。'
+            f'見るのは <b>月次σ</b> と <b>月平均/σ</b> で、'
+            f'<b>σ が下がっていないなら揃える理由は数字の上にはありません</b>。</p>'
             f'<table style="border-collapse:collapse;font-size:0.8rem">'
             f'<thead><tr><th style="{_th};text-align:left">設定</th>'
             f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
-            f'<th style="{_th}">円/件</th><th style="{_th}">差/月</th>'
+            f'<th style="{_th}">円/件</th>'
+            f'<th style="{_th}">月次σ</th><th style="{_th}">月平均/σ</th>'
+            f'<th style="{_th}">差/月</th>'
             f'<th style="{_th}">t</th><th style="{_th}">95%CI(月)</th>'
             f'<th style="{_th}">勝ち月</th>'
             f'<th style="{_th};border-left:1px solid #334155">前半(順位)</th>'
