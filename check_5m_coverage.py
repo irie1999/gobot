@@ -41,6 +41,10 @@ ap.add_argument("--symbols-file", default="holdout_selected_symbols.py",
 ap.add_argument("--symbols", default="", help="カンマ区切りで直接指定")
 ap.add_argument("--date", default="", help="この日のバーの有無と先頭時刻も見る YYYY-MM-DD")
 ap.add_argument("--list-missing", type=int, default=20, help="欠損の流動性上位N件を列挙")
+ap.add_argument("--first-bar-hist", type=int, default=0,
+                help="指定銘柄について直近N営業日の『先頭バー時刻』を数える。"
+                     "『いつも09:05』なのか『最近だけ』なのかを切り分ける"
+                     "(--symbols と併用)")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -162,3 +166,34 @@ if tgt is not None:
         print("  先頭が09:00でない銘柄(寄り直後の逆行が判定から抜けるので E/H は落とす):")
         for s, liq, _h, _l, _t, first in sorted(late, key=lambda r: -r[1])[:15]:
             print(f"    {s}  {liq / 1e8:>7,.1f}億  先頭 {first}")
+
+
+# ── 先頭バー時刻の履歴。systematic か 最近だけか を切り分ける ────────────
+# require_open_bar は「先頭バーが09:00でない銘柄日」を E/H の母集団から落とす
+# (18.32: 寄り直後の逆行が判定から抜けて損切りが過小に出るため)。
+# それが **いつもそう** なら、その銘柄は構造的に検証対象外ということになる。
+# **最近だけ** なら、単なるデータ取得の問題で埋められる。
+if args.first_bar_hist > 0 and args.symbols:
+    print(f"\n■ 先頭バー時刻の履歴 (直近{args.first_bar_hist}営業日)")
+    for s_ in syms:
+        try:
+            m = _li(s_, 400, source="local")
+            days = _sbd(m) if m is not None and not m.empty else {}
+        except Exception as e:
+            print(f"  {s_}: 読めません ({e})")
+            continue
+        if not days:
+            print(f"  {s_}: 5分足なし")
+            continue
+        ks = sorted(days)[-args.first_bar_hist:]
+        cnt: dict = {}
+        for k in ks:
+            try:
+                t_ = days[k].index[0].strftime("%H:%M")
+            except Exception:
+                t_ = "?"
+            cnt[t_] = cnt.get(t_, 0) + 1
+        line = " / ".join(f"{t_}:{c}日" for t_, c in sorted(cnt.items()))
+        print(f"  {s_}  {line}")
+        print(f"       直近5日: " + ", ".join(
+            f"{k}({days[k].index[0].strftime('%H:%M')})" for k in ks[-5:]))
