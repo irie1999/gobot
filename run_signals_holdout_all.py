@@ -1500,7 +1500,11 @@ if not _args.date:
 #        max(stop, bar_open) が片側にだけ効いて偽の巨大損失になる
 #        (実測 7013.T 2025-08-14 で1件 -1,424,500円 / MAE 601% = 1日で7倍)。
 #        v16 のキャッシュは汚染された日を含むので必ず版を分ける。
-_BT_LOGIC_VER = "v17"
+# v18 (2026-08-12): yfinance の幻バー(出来高0・OHLC同値=前日終値)を読み込み時に除去。
+#   これが残っていると require_open_bar が『幻の有無』で母集団を選び、
+#   delay1 の起点も銘柄で1本ずれていた(daytrade_data.normalize_minute_df 参照)。
+#   幻を消すと全銘柄が同じ先頭バーで揃うので、過去のキャッシュとは非互換。
+_BT_LOGIC_VER = "v18"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")

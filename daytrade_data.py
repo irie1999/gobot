@@ -149,6 +149,28 @@ def normalize_minute_df(df: pd.DataFrame) -> pd.DataFrame:
         out.index = out.index.tz_convert("Asia/Tokyo").tz_localize(None)
 
     out = out.dropna(subset=["close"])
+
+    # ── 幻のバー(出来高0 かつ OHLC が全部同値)を捨てる ────────────────────
+    # yfinance の日本株分足は、寄り前後に **出来高0・OHLCすべて前日終値** の
+    # 合成バーを出す(2026-08-12 実測: 4208 の 09:00 が O=H=L=C=3,554 / V=0)。
+    # これは取引ではないので、残しておくと3つの害がある:
+    #   ① eh_trades.require_open_bar が「先頭バーが09:00か」で母集団を選ぶので、
+    #      **幻のバーがある銘柄だけ通過**する(寄りは見えていないのに)。
+    #      実測でこれが 633銘柄中355件の除外を左右していた。
+    #   ② stop_delay_bars(delay1) の起点が1本ずれる。幻ありは09:05武装、
+    #      幻なしは09:10武装 = **同じ delay1 が別の処理**になっていた(18.9)。
+    #      その差が 18.32 の「+1,583円/件・2.7倍」の説明になりうる。
+    #   ③ 存在しない価格(前日終値)で損切り/利確の判定が走りうる。
+    # 取引が1件も無いバーなので、落として失う情報は無い。
+    # 切り戻し: set LSS_KEEP_PHANTOM_BARS=1
+    if str(os.environ.get("LSS_KEEP_PHANTOM_BARS", "")).strip() not in ("1", "true", "yes"):
+        _ph = ((out["volume"].fillna(0) <= 0)
+               & (out["open"] == out["high"])
+               & (out["open"] == out["low"])
+               & (out["open"] == out["close"]))
+        if bool(_ph.any()):
+            out = out[~_ph]
+
     out.index.name = "DateTime"
     return out.sort_index()
 
