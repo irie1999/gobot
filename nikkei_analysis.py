@@ -9832,8 +9832,14 @@ function switchTbd(id, tab) {{
         #    損切り・利確は eh_trades が **実約定値基準**で作った正しい値なので、
         #    ここで触ってはいけない(H の損切りは 実約定+atr*sm であって
         #    前日終値+atr*sm ではない)。
+        # ⛔ E/H のトレードは t["eh"] を持つ(eh_trades._mk)。**lss タブの中の
+        #    E/H ペイン**では _LSS_H_ENTRY が False なので、グローバルフラグで
+        #    判定すると効かない(2026-08-12: H ペインの明細が 逆:3,525 のまま
+        #    = H指値3,530 からさらに1ティック下がった値が出ていた)。
+        #    トレード自身に付いた印で判定する。
+        _eh_kind = str(t.get("eh") or "")
         if (_LSS_ORDER_MODE and not _is_tenkan_row and not _LSS_H_ENTRY
-                and olp > 0 and osp > 0 and otp > 0):
+                and not _eh_kind and olp > 0 and osp > 0 and otp > 0):
             from backtest_limit_entry import (round_to_tick as _r2t2,
                                               ceil_to_tick as _c2t2,
                                               tick_size as _tsz2)
@@ -9863,7 +9869,10 @@ function switchTbd(id, tab) {{
             #    H の約定は 寄り >= 指値 なら板寄せ = **指値以上**で約定するのが正常。
             if _is_tenkan_row:
                 olp_sub = ""
-            elif _LSS_H_ENTRY:
+            elif _eh_kind == "E":
+                olp_sub = (f'<br><span style="font-size:0.71rem;color:#a78bfa">'
+                           f'寄成(板寄せ)</span>')
+            elif _LSS_H_ENTRY or _eh_kind:
                 olp_sub = (f'<br><span style="font-size:0.71rem;color:#f0abfc">'
                            f'指値:{olp:,.0f}</span>'
                            f'<br><span style="font-size:0.68rem;color:#64748b">'
