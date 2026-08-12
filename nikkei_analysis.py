@@ -10208,10 +10208,26 @@ function switchTbd(id, tab) {{
     _budget_man = int(_budget_yen / 1e4)
     # 予算シミュのBT下限(既定30)。LSS_BUDGET_MIN_BT=70 で「全取引をBT70以上に集中」できる。
     # 複数基準月をunionマージした大きなプールと組み合わせると、高BTだけで枠が埋まりやすくなる。
+    # ⛔ 以前は max(30, ...) でハードクランプしていた。そのせいで:
+    #    ・ライブ(lss_budget_cap --bt-min 既定0)と**食い違う**。実発注はBTで
+    #      絞らないのに、レポートの予算タブだけ BT30未満を捨てていた。
+    #      実測(2026-08-12): 流動性上位25件のうち **14件** が BT30未満で消えており、
+    #      その中には最も流動性の高い オリエンタルランド(BT15)/オリンパス(BT12) が入る。
+    #    ・BT層スイープ(LSS_OOS_BUDGET_BT_TIERS)で BT0/20/30 が**同じ数字**になる。
+    #      18.12 はこれを「3層は等価」と読んだが、実際はクランプが下の層を
+    #      黙って30に潰していただけ = **BT30未満は一度も測られていない**。
+    #    BTに識別力は無い(18.12/18.24)のだから、床を残す積極的な理由も無い。
+    #    既定は30のまま(数字を黙って変えないため)。env を明示したらその値を使う。
+    _bud_bt_env = os.environ.get("LSS_BUDGET_MIN_BT", "").strip()
     try:
-        _BUD_MIN_BT = max(30, int(os.environ.get("LSS_BUDGET_MIN_BT", "30")))
+        _BUD_MIN_BT = int(_bud_bt_env) if _bud_bt_env else 30
     except Exception:
         _BUD_MIN_BT = 30
+    # env 明示時は _BT_TAB_MIN(明細フィルタ用の別 env)にも引きずられない。
+    _BUD_FLOOR = _BUD_MIN_BT if _bud_bt_env else max(_BUD_MIN_BT, _BT_TAB_MIN)
+    if _bud_bt_env:
+        print(f"[予算タブ] BT下限を env で {_BUD_MIN_BT} に設定"
+              f"(既定30 / ライブ lss_budget_cap --bt-min は既定0)", flush=True)
 
     def _order_notional(_t):
         # 注文時の必要資金 = 注文トリガー価格(終値ベース) × 株数。約定値ではない。
@@ -10392,20 +10408,20 @@ function switchTbd(id, tab) {{
 
     # 予算タブは _BT_TAB_MIN(既定50)以上のみで発注。BT降順で埋めるので実質高BTのみだが、
     # 下限を明示的に _BT_TAB_MIN に揃える(『BT50以上』表示と一致)。
-    _budget_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN))
+    _budget_entry_sorted = _run_budget_sim(_BUD_FLOOR)
     # 400万×BT降順(BT50以上)版。予算はBT降順で埋めるため多くの日はBT30版と同一になるが、
     # 薄い日(BT50候補が予算に満たない日)はBT30-49の穴埋めが無くなるぶん差が出る。
     # _BUD_MIN_BT が既に50以上なら重複するので作らない。
     _budget50_entry_sorted: list = []   # 予算タブ本体をBT50化したので別タブは廃止
     # A7/RSI2/VOLTF戦略限定版(決済日別タブの代替)。
     _STRAT_NARROW = {"A7", "RSI2", "VOLTF"}
-    _budget_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW) if _LSS_ORDER_MODE else []
+    _budget_narrow_entry_sorted = _run_budget_sim(_BUD_FLOOR, strat_set=_STRAT_NARROW) if _LSS_ORDER_MODE else []
     # 約定額ベース(watchで取り消し方式): 不約定は予算消費しない。全戦略・絞り版。
-    _budget_fill_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), fill_budget=True) if _LSS_ORDER_MODE else []
-    _budget_fill_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW, fill_budget=True) if _LSS_ORDER_MODE else []
+    _budget_fill_entry_sorted = _run_budget_sim(_BUD_FLOOR, fill_budget=True) if _LSS_ORDER_MODE else []
+    _budget_fill_narrow_entry_sorted = _run_budget_sim(_BUD_FLOOR, strat_set=_STRAT_NARROW, fill_budget=True) if _LSS_ORDER_MODE else []
     # ループ充填版: BT降順に100株ずつ繰り返し追加し、400万円に限りなく近づける。全戦略・絞り版。
-    _budget_mlot_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), multi_lot=True) if _LSS_ORDER_MODE else []
-    _budget_mlot_narrow_entry_sorted = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), strat_set=_STRAT_NARROW, multi_lot=True) if _LSS_ORDER_MODE else []
+    _budget_mlot_entry_sorted = _run_budget_sim(_BUD_FLOOR, multi_lot=True) if _LSS_ORDER_MODE else []
+    _budget_mlot_narrow_entry_sorted = _run_budget_sim(_BUD_FLOOR, strat_set=_STRAT_NARROW, multi_lot=True) if _LSS_ORDER_MODE else []
     # 基準月スイープ用: 400万×BT予算フィルター後の月別P&LをCSV出力(env LSS_BUDGET_MONTHLY_CSV=path)。
     # 複数の基準月マージを1つずつ回して、この月別成績を比較する用途(sweep_base_months.py)。
     # ※ _tab5_pnl_html は「メインタブ」以外に「銘柄詳細(symbol_filter)」「期間パネル(短い days)」でも
@@ -10464,7 +10480,7 @@ function switchTbd(id, tab) {{
             if not _src:
                 continue
             try:
-                _ss = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN), src=_src,
+                _ss = _run_budget_sim(_BUD_FLOOR, src=_src,
                                       nofills=(_EH_NF.get(_ehk) or []))
                 _eh_sorted[_ehk] = _ss
                 _eh_grid[_ehk] = _build_entry_grid(_ss, _ehpfx)
@@ -10508,7 +10524,7 @@ function switchTbd(id, tab) {{
             _oos_rows = []
             for _obt in _oos_bt_tiers:
                 # OOS出力は常に _run_budget_sim を直接呼ぶ。
-                # 通常の予算シミュは max(_BUD_MIN_BT, _BT_TAB_MIN) で閾値が引き上がるが、
+                # 通常の予算シミュは _BUD_FLOOR で閾値が引き上がるが、
                 # OOSでは各 BT 層を正確に反映するため _BT_TAB_MIN を介さず直呼び。
                 _e_s = _run_budget_sim(_obt)
                 _fne_s = _run_budget_sim(_obt, fill_budget=True)
@@ -13525,7 +13541,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return _m
 
         def _run(src, nof, key):
-            _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
+            _r = _run_budget_sim(_BUD_FLOOR,
                                  src=src, nofills=nof, order_key=key)
             _mp = _months_pnl(_r)
             _n = sum(1 for _t in _r if _t.get("reason") not in ("発注中", "保有中"))
@@ -13742,7 +13758,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    (_vs[0], False, "atr", 1200.0)])
         _out = []
         for _v, _ops, _szm, _szt in _vs2:
-            _r = _run_budget_sim(max(_BUD_MIN_BT, _BT_TAB_MIN),
+            _r = _run_budget_sim(_BUD_FLOOR,
                                  src=(_EH_TRADES or {}).get(_v) or [],
                                  nofills=(_nfv.get(_v) or []),
                                  one_per_symbol=_ops,
