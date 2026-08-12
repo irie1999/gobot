@@ -9833,10 +9833,22 @@ function switchTbd(id, tab) {{
             _lim_entry  = olp * ((1.0 - 0.03) if _is_short_t else (1.0 + 0.03))
             _lim_lbl    = "指値下限≥" if _is_short_t else "指値上限≤"
             _lim_pct    = "-3.0%" if _is_short_t else "+3.0%"
-            olp_sub = ("" if _is_tenkan_row else
-                       f'<br><span style="font-size:0.71rem;color:#38bdf8">逆:{olp:,.0f}</span>'
-                         f'<br><span style="font-size:0.71rem;color:#f59e0b">{_lim_lbl}{_lim_entry:,.0f}'
-                         f'<span style="color:#64748b">({_lim_pct})</span></span>')
+            # ⛔ H タブ(_LSS_H_ENTRY)では注文は **指値売り** で、-3%下限ガードも無い。
+            #    ここを現行タブのまま「逆:」「指値下限≥」と出すと、
+            #    『約定値 > 逆指値』という逆指値では起こり得ない行が並び、
+            #    「シグナルと結果が一致しない」という誤読を招く(2026-08-12 に実際に発生)。
+            #    H の約定は 寄り >= 指値 なら板寄せ = **指値以上**で約定するのが正常。
+            if _is_tenkan_row:
+                olp_sub = ""
+            elif _LSS_H_ENTRY:
+                olp_sub = (f'<br><span style="font-size:0.71rem;color:#f0abfc">'
+                           f'指値:{olp:,.0f}</span>'
+                           f'<br><span style="font-size:0.68rem;color:#64748b">'
+                           f'板寄せなら指値以上で約定</span>')
+            else:
+                olp_sub = (f'<br><span style="font-size:0.71rem;color:#38bdf8">逆:{olp:,.0f}</span>'
+                           f'<br><span style="font-size:0.71rem;color:#f59e0b">{_lim_lbl}{_lim_entry:,.0f}'
+                           f'<span style="color:#64748b">({_lim_pct})</span></span>')
             # 現在値: 保有中のみ表示（現在株価・損切りまで・目標まで）
             cur = t.get("exit_p", 0)
             if t.get("reason") == "保有中" and cur > 0 and osp > 0 and otp > 0:
