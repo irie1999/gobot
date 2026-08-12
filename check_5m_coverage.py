@@ -54,6 +54,10 @@ ap.add_argument("--raw-dump", type=int, default=0,
 ap.add_argument("--check-1m", action="store_true",
                 help="--symbols --date と併用。**1分足**に 09:00-09:05 があるかを見る。"
                      "あれば欠けている5分足の1本を実データで埋められる")
+ap.add_argument("--yf", action="store_true",
+                help="--symbols --date と併用。**yfinance の5分足**を取りに行き、"
+                     "09:00のバーがあるかをローカル(J-Quants)と並べて比べる。"
+                     "yfinance の5分足は直近60日しか無いので、過去は埋められない")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -349,3 +353,34 @@ if args.check_1m and args.symbols and tgt is not None:
                       f"= **この1本を5分足に足せば穴が埋まる**")
             else:
                 print("      → 09:00-09:04 は1分足にも無い")
+
+
+# ── yfinance に 09:00 のバーがあるか。J-Quants の欠損を埋められるか ──────
+# ⚠ yfinance の5分足は **直近60日** が上限(_load_yfinance_batch が明示的に丸める)。
+#    10ヶ月のバックテストは埋められない。埋められるのは直近と、今後の運用ぶん。
+if args.yf and args.symbols and tgt is not None:
+    print(f"\n■ yfinance の5分足に 09:00 があるか ({tgt})")
+    print("  ⚠ yfinance の5分足は直近60日まで。過去のバックテストは埋められません")
+    for s_ in syms:
+        try:
+            y = _li(f"{s_}.T", 30, source="yfinance")
+        except Exception as e:
+            print(f"  {s_}: 取得失敗 ({e})"); continue
+        if y is None or y.empty:
+            print(f"  {s_}: yfinance から取れません"); continue
+        d = y[y.index.normalize() == pd.Timestamp(tgt)]
+        if d.empty:
+            print(f"  {s_}: {tgt} のバーなし (直近: "
+                  f"{', '.join(str(x) for x in sorted({t.date() for t in y.index})[-3:])})")
+            continue
+        cm = {str(x).lower(): x for x in d.columns}
+        print(f"  {s_}: {len(d)}本 / 先頭 {d.index[0].strftime('%H:%M')} "
+              f"/ 末尾 {d.index[-1].strftime('%H:%M')}")
+        for ts, r in d.head(3).iterrows():
+            print(f"      {ts.strftime('%H:%M')} O{float(r[cm['open']]):,.1f} "
+                  f"H{float(r[cm['high']]):,.1f} L{float(r[cm['low']]):,.1f} "
+                  f"C{float(r[cm['close']]):,.1f} V{float(r[cm['volume']]):,.0f}")
+        if d.index[0].strftime("%H:%M") == "09:00":
+            print("      → **09:00のバーあり。J-Quants の欠損を埋められる**")
+        else:
+            print("      → yfinance も09:00なし。埋められない")
