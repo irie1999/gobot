@@ -36,6 +36,14 @@ REM   When you DO want the full report, run .\daily instead.
 REM   Middle ground: .\daily --symbol-detail-limit 20   (keeps the tab, top-20 by BT)
 REM ============================================================
 cd /d "%~dp0"
+REM --- help: -h / --help / /?  The Japanese text lives in daily_help.py, because a
+REM     .bat is read in CP932 and multibyte comments break cmd parsing (18.10.1). ---
+for %%a in (%*) do (
+  if /i "%%~a"=="-h"     goto :help
+  if /i "%%~a"=="--help" goto :help
+  if /i "%%~a"=="/?"     goto :help
+)
+
 REM --- clear heavy research flags so the run stays light ---
 set "LSS_CLOSESTOP_RESWEEP="
 set "LSS_GUARD_ONLY="
@@ -89,3 +97,8 @@ if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
 python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+goto :eof
+
+:help
+python daily_help.py fast
+goto :eof
