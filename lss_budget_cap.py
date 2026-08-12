@@ -137,12 +137,15 @@ def main() -> int:
     ap.add_argument("--monitor-until", type=str, default="10:30",
                     help="監視を打ち切る時刻 HH:MM(既定10:30)。予算到達か この時刻で監視終了")
     # ── エントリー方式 (2026-08-10 追加) ──────────────────────────
-    ap.add_argument("--entry-mode", choices=["stop", "limit", "auction"], default="stop",
-                    help="stop=現行の逆指値売り(前日終値を割ったら売る) / "
-                         "limit=H案の**指値売り**(寄りが上なら板寄せ、日中に上がって"
-                         "きても約定。10ヶ月OOSで最良・walk-forwardでも選ばれ続けた) / "
-                         "auction=H案の**寄指売り**(寄付の板寄せだけ。ザラ場到達を捨てる"
-                         "ぶんバックテストと現実が一致する)。既定 stop")
+    ap.add_argument("--entry-mode", choices=["stop", "limit", "auction"], default="limit",
+                    help="limit=**既定/採用中のH案**の指値売り(寄りが上なら板寄せ、日中に"
+                         "上がってきても約定。10ヶ月OOSで最良・walk-forwardでも選ばれ続けた) / "
+                         "auction=H案の寄指売り(寄付の板寄せだけ) / "
+                         "stop=旧lssの逆指値売り。⛔ lssからは発注しない方針なので、"
+                         "stop で --execute するには --allow-stop-entry が必要")
+    ap.add_argument("--allow-stop-entry", action="store_true",
+                    help="⛔ 旧lss(逆指値売り)で実発注することを明示的に許可する。"
+                         "通常は使わない(採用しているのは H だけ)")
     ap.add_argument("--limit-ticks", type=int, default=-5,
                     help="limit / auction のとき、指値を前日終値から何ティックずらすか"
                          "(既定 -5)。下げるほど約定は増えるが売り値は不利。"
@@ -162,6 +165,14 @@ def main() -> int:
     _auction = (args.entry_mode == "auction")   # 寄指(21) = 寄付の板寄せのみ
     _limit = (args.entry_mode == "limit")       # 指値(20) = ザラ場でも約定
     _isH = _auction or _limit
+
+    # ⛔ lss(逆指値売り)からは発注しない (2026-08-12 ユーザー決定)。
+    if args.execute and not _isH and not args.allow_stop_entry:
+        print("⛔ 発注中止: --entry-mode stop は旧lss(逆指値売り)です。")
+        print("   採用しているのは H(指値売り)だけなので、既定の --entry-mode limit を"
+              "使ってください。")
+        print("   どうしても逆指値で出す日だけ --allow-stop-entry を付けます。")
+        return 1
 
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
     mode_label = "★実発注+監視★" if args.execute else "dry-run(プラン表示のみ)"
@@ -305,8 +316,14 @@ def main() -> int:
         sym = _norm(s["symbol"])
         # 注文価格はプラン作成時に確定済み(dry-run の表示と一致させるため)。
         trig = float(s["_ord_p"])
-        if _auction:
-            # ── H案: 寄指売り(寄付の板寄せのみ) ──────────────────
+        # ⛔ ここは _auction ではなく _isH で分岐する(2026-08-12 修正)。
+        #    旧コードは `if _auction:` だったので、--entry-mode limit が else に落ちて
+        #    **逆指値売り(send_stop_sell)** で発注されていた。プラン表示は「指値」なのに
+        #    実際は現行lssと同じ注文が飛ぶ = H を試したつもりで lss を出す事故。
+        #    直下の order_type が ("limit_moo" if _auction else "limit") になっている
+        #    とおり、この分岐はもともと両方を通す想定だった。
+        if _isH:
+            # ── H案: 寄指売り(寄付の板寄せのみ) / 指値売り(板寄せ+ザラ場) ────
             # 現値との比較(即約定回避)はしない。寄指はザラ場では約定しないので
             # 「現値より上の指値」を出すのがむしろ正しい。
             # 下限ガード(after_hit_price)も逆指値専用なので無い。

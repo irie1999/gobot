@@ -21,6 +21,7 @@ position_server.py を経由せず、これ単体で kabu に逆指値エント�
 """
 
 import argparse
+import os
 import sys
 import threading
 import time as _time
@@ -201,6 +202,18 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     _is_lss = (side == "short" and not str(strat).upper().endswith("_S"))
     _margin_type = 3 if _is_lss else 1
 
+    # ⛔ lss(逆指値売り)からは発注しない (2026-08-12 ユーザー決定)。
+    #    採用しているのは H(前日終値-5ティックの**指値**売り)だけ。
+    #    「ロング銘柄ショート」タブの発注ボタンを誤って押しても、ここで必ず止まる。
+    #    どうしても旧lssで出したい日だけ、発注サーバを LSS_H_ONLY=0 で起動する。
+    _H_ONLY = str(os.environ.get("LSS_H_ONLY", "1")).strip().lower() \
+        not in ("0", "false", "no", "off")
+    if _is_lss and _H_ONLY and entry_mode not in ("limit", "auction"):
+        return (f"⛔ 発注中止: {symbol} {strat} は **lss(逆指値売り)** の注文です。"
+                "lss からは発注しない設定になっています(H 指値ショートのみ)。"
+                "『H 指値ショート』タブの発注ボタンを使ってください。"
+                " ※ 旧lssで出す日は発注サーバを LSS_H_ONLY=0 で起動")
+
     try:
         from kabu_api import KabuClient
         cli = KabuClient(prod=PROD, dry_run=not EXECUTE, margin_type=_margin_type)
@@ -224,9 +237,17 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
     # 現在値=前日終値なので、ショートのトリガーを終値ちょうどにすると必ず弾かれる。
     # → 現在値以上(買いは以下)なら現値±1ティックに調整する。現在値が取れない場合も
     #   即約定弾きを避けるため 1ティック ずらしておく(引け後は現値=終値のため)。
+    #
+    # ⛔ H案(entry_mode=limit/auction)には**適用しない**(2026-08-12 修正)。
+    #    普通の指値売りは現在値以下でも合法で、Code 100217 は逆指値だけの話。
+    #    旧コードは cur=0 を「現在値が取れない」と誤判定して else に落ち、
+    #    指値を黙って1ティック下げていた(レポート3,690 → 実発注3,685)。
+    #    H の発注メッセージには adj_note を出していないのでログにも残らず、
+    #    レポートとライブが食い違ったまま気付けない状態だった(18.9 の鉄則違反)。
     adj_note = ""
-    if EXECUTE:
-        cur = cli.get_current_price(symbol) if entry_mode != "limit" else 0
+    _is_limit_entry = entry_mode in ("limit", "auction")
+    if EXECUTE and not _is_limit_entry:
+        cur = cli.get_current_price(symbol)
         if cur and cur > 0:
             tick = tick_size(cur)
             if side == "long" and entry <= cur:
