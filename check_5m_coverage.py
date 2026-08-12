@@ -58,6 +58,10 @@ ap.add_argument("--yf", action="store_true",
                 help="--symbols --date と併用。**yfinance の5分足**を取りに行き、"
                      "09:00のバーがあるかをローカル(J-Quants)と並べて比べる。"
                      "yfinance の5分足は直近60日しか無いので、過去は埋められない")
+ap.add_argument("--open-bar-timeline", action="store_true",
+                help="--symbols と併用。全期間を月別に『09:00の本物バー / 出来高0のダミー / "
+                     "09:00なし』で分類する。J-Quants→yfinance に取得元が切り替わった"
+                     "境界を特定するため")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -384,3 +388,39 @@ if args.yf and args.symbols and tgt is not None:
             print("      → **09:00のバーあり。J-Quants の欠損を埋められる**")
         else:
             print("      → yfinance も09:00なし。埋められない")
+
+
+# ── 09:00バーの月別内訳。取得元が切り替わった境界を特定する ────────────────
+# J-Quants のサブスクが切れて daily_fetch_minute が yfinance に切り替わっている
+# (既定 source="yfinance")。yfinance の5分足は 09:00 が無い or 出来高0のダミー。
+# 古い日(J-Quants製)には本物の09:00があるはずなので、月別に見れば境界が出る。
+# → その境界以降だけが「寄りの見えない期間」= require_open_bar の除外が増えた原因。
+if args.open_bar_timeline and args.symbols:
+    print("\n■ 09:00バーの月別内訳  本物=出来高>0 / ダミー=出来高0 / なし")
+    for s_ in syms:
+        try:
+            m = _li(s_, 4000, source="local")
+        except Exception as e:
+            print(f"  {s_}: 読めません ({e})"); continue
+        if m is None or m.empty:
+            print(f"  {s_}: 5分足なし"); continue
+        days = _sbd(m)
+        cm = {str(x).lower(): x for x in m.columns}
+        by: dict = {}
+        for k in sorted(days):
+            g = days[k]
+            ym = str(k)[:7]
+            e = by.setdefault(ym, [0, 0, 0])      # 本物 / ダミー / なし
+            first = g.index[0]
+            if first.strftime("%H:%M") != "09:00":
+                e[2] += 1
+            elif float(g.iloc[0][cm["volume"]]) > 0:
+                e[0] += 1
+            else:
+                e[1] += 1
+        print(f"\n  {s_}  ({len(days)}営業日)")
+        print(f"    {'月':<9}{'本物':>7}{'ダミー':>8}{'なし':>7}")
+        for ym in sorted(by):
+            a, b, c = by[ym]
+            mark = "  <- 切替?" if (a > 0 and (b + c) > a) else ""
+            print(f"    {ym:<9}{a:>7}{b:>8}{c:>7}{mark}")
