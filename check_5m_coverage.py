@@ -51,6 +51,9 @@ ap.add_argument("--dump", type=int, default=0,
 ap.add_argument("--raw-dump", type=int, default=0,
                 help="--symbols --date と併用。**正規化前の pickle そのもの** を先頭N行出す。"
                      "09:00の行が元データに無いのか、読み込みで消えているのかを切り分ける")
+ap.add_argument("--check-1m", action="store_true",
+                help="--symbols --date と併用。**1分足**に 09:00-09:05 があるかを見る。"
+                     "あれば欠けている5分足の1本を実データで埋められる")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -303,3 +306,40 @@ if args.raw_dump > 0 and args.symbols and tgt is not None:
             #    そこが欠けていると決済価格が実際とズレる。
             print("  ... 末尾3行 ...")
             print(sub.tail(3).to_string())
+
+
+# ── 1分足に 09:00-09:05 があるか。あれば5分足の欠損を実データで埋められる ──
+if args.check_1m and args.symbols and tgt is not None:
+    print(f"\n■ 1分足に 09:00-09:05 があるか ({tgt})")
+    try:
+        from tenkan_sim import _bars_one, find_minute_dirs
+        _d5, _d1 = find_minute_dirs()
+    except Exception as e:
+        print(f"  tenkan_sim を読めません: {e}")
+        _d1 = None
+    if _d1 is None or not _d1.exists():
+        print("  1分足ディレクトリがありません(fetch_1m_all.py / MINUTE_1M_DIR)")
+    else:
+        print(f"  1分足: {_d1}")
+        for s_ in syms:
+            try:
+                b = _bars_one(s_, str(tgt), _d1)
+            except Exception as e:
+                print(f"  {s_}: 読めません ({e})"); continue
+            if b is None or len(b) == 0:
+                print(f"  {s_}: {tgt} の1分足なし"); continue
+            head = b.head(6)
+            print(f"  {s_}: {len(b)}本 / 先頭 {b.index[0].strftime('%H:%M')} "
+                  f"/ 末尾 {b.index[-1].strftime('%H:%M')}")
+            cm = {str(x).lower(): x for x in b.columns}
+            for ts, r in head.iterrows():
+                print(f"      {ts.strftime('%H:%M')} "
+                      f"O{float(r[cm['open']]):,.1f} H{float(r[cm['high']]):,.1f} "
+                      f"L{float(r[cm['low']]):,.1f} C{float(r[cm['close']]):,.1f}")
+            w = b[(b.index.strftime('%H:%M') >= '09:00') & (b.index.strftime('%H:%M') < '09:05')]
+            if len(w):
+                print(f"      → 09:00-09:04 は {len(w)}本あり "
+                      f"高値{float(w[cm['high']].max()):,.1f} / 安値{float(w[cm['low']].min()):,.1f} "
+                      f"= **この1本を5分足に足せば穴が埋まる**")
+            else:
+                print("      → 09:00-09:04 は1分足にも無い")
