@@ -9810,7 +9810,16 @@ function switchTbd(id, tab) {{
         #    order_limit=買値 / order_stop=損切(下) / order_target=利確(上) を
         #    そのまま出す。逆指値・指値ガードの副表示も出さない。
         _is_tenkan_row = (t.get("strategy") == "転換")
-        if _LSS_ORDER_MODE and not _is_tenkan_row and olp > 0 and osp > 0 and otp > 0:
+        # ⛔ H タブでは order_limit は **すでに H の指値**(前日終値-5tick)。
+        #    ここで lss の呼値調整(前日終値とみなして -1tick)を当てると
+        #    **さらに1ティック下がった値**が表示される。実測(2026-08-12):
+        #      ＵＢＥ 前日終値3,554 → H指値3,530 なのに明細は 3,525
+        #      山善   前日終値1,900 → H指値1,875 なのに明細は 1,870
+        #    損切り・利確は eh_trades が **実約定値基準**で作った正しい値なので、
+        #    ここで触ってはいけない(H の損切りは 実約定+atr*sm であって
+        #    前日終値+atr*sm ではない)。
+        if (_LSS_ORDER_MODE and not _is_tenkan_row and not _LSS_H_ENTRY
+                and olp > 0 and osp > 0 and otp > 0):
             from backtest_limit_entry import (round_to_tick as _r2t2,
                                               ceil_to_tick as _c2t2,
                                               tick_size as _tsz2)
