@@ -253,6 +253,20 @@ _LSS_ORDER_MODE: bool = False
 #    H の値を押すと「指値のつもりが逆指値」になり、まったく別の注文が出る。
 #    H の実発注は lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
 _LSS_H_ENTRY: bool = str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes")
+# ── BTフィルタを丸ごと外す1スイッチ (LSS_NO_BT_FILTER=1) ────────────────
+# BTの床は **3箇所** にあり、しかも2つは .bat が上書き/消去するので、env を
+# 個別に立てても効かない(2026-08-12 に実際にハマった):
+#   ① _POOL_MIN_BT   予算シミュの候補プール(_bt30_entry_sorted)     LSS_POOL_MIN_BT
+#   ② _BUD_MIN_BT    予算シミュのBT下限                             LSS_BUDGET_MIN_BT ← .bat が消す
+#   ③ _BT_TAB_MIN    「BT○以上」明細タブ + _BUD_FLOOR に合成        LSS_BT_TAB_MIN    ← .bat が上書き
+# 3つ揃わないと外れないので、まとめて0にするスイッチを用意する。
+# BTが効くという証拠は6回測って6回とも出ていない(18.12/18.13/18.21/18.24 と
+# 2026-08-12)ので、これは『外した場合』を測るための正規の出口。
+_NO_BT_FILTER: bool = str(os.environ.get("LSS_NO_BT_FILTER", "")).strip() \
+    in ("1", "true", "True", "yes")
+if _NO_BT_FILTER:
+    print("[BTフィルタ] 全部OFF (LSS_NO_BT_FILTER=1): "
+          "プール床 / 予算下限 / 明細タブ閾値 をすべて 0 にします", flush=True)
 # ポジションサイズ方式。"atr" = リスク(損切り幅×株数)を _SIZE_TARGET 円に揃える。
 # 既定 "" = 従来どおり100株固定。H タブのシグナル株数と lss_budget_cap で使う。
 _SIZE_MODE: str = str(os.environ.get("LSS_SIZE_MODE", "")).strip().lower()
@@ -9936,7 +9950,7 @@ function switchTbd(id, tab) {{
     def _eff_long_bt(t) -> float:
         return t.get("rec_score") or 0
     # 「BTスコア○以上」タブの下限。既定50(env LSS_BT_TAB_MIN で変更可。30に戻すなら =30)。
-    _BT_TAB_MIN = int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
+    _BT_TAB_MIN = 0 if _NO_BT_FILTER else int(os.environ.get("LSS_BT_TAB_MIN", "50") or "50")
     bt40_trades = [t for t in sorted_trades if _eff_long_bt(t) >= _BT_TAB_MIN]
     bt60_trades = [t for t in sorted_trades if _eff_long_bt(t) >= 60]
     # エントリー日降順（発注中を先頭、それ以外はエントリー日降順）
@@ -10123,6 +10137,8 @@ function switchTbd(id, tab) {{
         _POOL_MIN_BT = float(os.environ.get("LSS_POOL_MIN_BT", "30") or 30)
     except Exception:
         _POOL_MIN_BT = 30.0
+    if _NO_BT_FILTER:
+        _POOL_MIN_BT = 0.0
     if abs(_POOL_MIN_BT - 30) > 1e-9:
         print(f"[予算プール] BT下限を env で {_POOL_MIN_BT:g} に設定 (既定30)", flush=True)
     _bt30_entry_sorted = pending_trades + sorted(
@@ -10237,6 +10253,9 @@ function switchTbd(id, tab) {{
         _BUD_MIN_BT = 30
     # env 明示時は _BT_TAB_MIN(明細フィルタ用の別 env)にも引きずられない。
     _BUD_FLOOR = _BUD_MIN_BT if _bud_bt_env else max(_BUD_MIN_BT, _BT_TAB_MIN)
+    if _NO_BT_FILTER:
+        _BUD_MIN_BT = 0
+        _BUD_FLOOR = 0
     if _bud_bt_env:
         print(f"[予算タブ] BT下限を env で {_BUD_MIN_BT} に設定"
               f"(既定30 / ライブ lss_budget_cap --bt-min は既定0)", flush=True)
