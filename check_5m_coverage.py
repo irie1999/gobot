@@ -323,10 +323,13 @@ if args.check_1m and args.symbols and tgt is not None:
         print(f"  1分足: {_d1}")
         for s_ in syms:
             try:
-                b = _bars_one(s_, str(tgt), _d1)
+                b = _bars_one(s_, 1)          # minute=1 で1分足(全期間)
             except Exception as e:
                 print(f"  {s_}: 読めません ({e})"); continue
             if b is None or len(b) == 0:
+                print(f"  {s_}: 1分足なし"); continue
+            b = b[b.index.normalize() == pd.Timestamp(tgt)]
+            if len(b) == 0:
                 print(f"  {s_}: {tgt} の1分足なし"); continue
             head = b.head(6)
             print(f"  {s_}: {len(b)}本 / 先頭 {b.index[0].strftime('%H:%M')} "
