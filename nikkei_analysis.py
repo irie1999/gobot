@@ -10113,9 +10113,21 @@ function switchTbd(id, tab) {{
     #    広げた(793c399)ところ、現行が 2,235件 +1,039,535円 → 1,817件 +689,250円 に
     #    落ちた。E/H は別プールなので影響を受けず、比較の基準線だけが縮んでいた。
     #    転換タブは _EXTRA_TRADES + _tenkan_auto を直接読むので、ここで外しても無傷。
+    # ⛔ プール自体の BT30 は env の外にあり、LSS_BUDGET_MIN_BT を 0 にしても効かない。
+    #    実測(2026-08-12): BT層スイープで BT0/10/20/30 が **1円まで同一**
+    #    (1,946件 +609,450)。18.12 の「BT0/20/30 は等価」もこれが原因で、
+    #    **BT30未満は一度も測られていない**。ライブ(lss_budget_cap --bt-min 既定0)は
+    #    BTで絞らないので、レポートだけが別の戦略を測っていることになる。
+    #    既定は30のまま(黙って数字を変えない)。LSS_POOL_MIN_BT=0 で外して測れる。
+    try:
+        _POOL_MIN_BT = float(os.environ.get("LSS_POOL_MIN_BT", "30") or 30)
+    except Exception:
+        _POOL_MIN_BT = 30.0
+    if abs(_POOL_MIN_BT - 30) > 1e-9:
+        print(f"[予算プール] BT下限を env で {_POOL_MIN_BT:g} に設定 (既定30)", flush=True)
     _bt30_entry_sorted = pending_trades + sorted(
         [t for t in done_trades
-         if t.get("strategy") != "転換" and _eff_long_bt(t) >= 30],
+         if t.get("strategy") != "転換" and _eff_long_bt(t) >= _POOL_MIN_BT],
         key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
         reverse=True
     )
