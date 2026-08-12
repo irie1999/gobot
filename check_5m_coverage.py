@@ -281,3 +281,8 @@ if args.raw_dump > 0 and args.symbols and tgt is not None:
         print(f"  {tgt} の行数: {len(sub):,}")
         with pd.option_context("display.width", 200, "display.max_columns", 20):
             print(sub.head(args.raw_dump).to_string())
+            # ⚠ 引けも見る。東証は2024/11から15:30引けなので、末尾が15:20だと
+            #    **引けの10分が無い**ことになる。lss/H は引け成行決済なので、
+            #    そこが欠けていると決済価格が実際とズレる。
+            print("  ... 末尾3行 ...")
+            print(sub.tail(3).to_string())
