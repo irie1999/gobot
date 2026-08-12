@@ -2,13 +2,13 @@
 
 背景(sim_portfolio_lss.py の検証結果, 2026-08-01):
   予算400万に対し金額ベース約定率が低く(実測~50%)、平均約定額<予算=予算が遊んでいる。
-  BT降順で M×予算ぶん注文を出し、約定累計が予算に達したら残りの未発動逆指値をキャンセルすると、
+  流動性降順で M×予算ぶん注文を出し、約定累計が予算に達したら残りの未発動逆指値をキャンセルすると、
   平常日は予算ぴったり埋まり(=稼働率↑・OOS損益↑)、急落日だけ上限で頭打ちになる。
   → 本スクリプトはその「発注 + 上限キャンセル監視」を live で行う。
 
 方式:
-  1) 今日の lss シグナルを収集(kabu_send_lss と同一ロジック)。lss_trades.csv の bt を付与し BT降順。
-  2) 価格レンジ(既定1000-6000=実運用 daily と統一)で絞り、BT降順に信用新規売り逆指値を発注。
+  1) 今日の lss シグナルを収集(kabu_send_lss と同一ロジック)。並びは lss_order_rank(流動性降順)。
+  2) 価格レンジ(既定1000-6000=実運用 daily と統一)で絞り、**流動性降順**に信用新規売りを発注。
      注文額(トリガー×株数)の累計が『予算 × --budget-multiple』に達するまで出す(over-subscribe)。
   3) 監視ループ: get_orders で自分の注文の約定数量(CumQty)を集計。約定額の累計が『予算』に達したら
      まだ約定していない(CumQty=0)未発動注文をキャンセル(=上限管理)。予算未達なら注文は残す。
@@ -114,14 +114,13 @@ def main() -> int:
                     help="予算の何倍ぶん注文を出すか(over-subscribe)。実測fill率~50%%なら2.0で予算ちょうど埋まる")
     ap.add_argument("--min-price", type=float, default=1000.0, help="対象最低株価(実運用 daily=1000)")
     ap.add_argument("--max-price", type=float, default=6000.0, help="対象最高株価(実運用 daily=6000)")
-    # 既定30 = **レポートの予算タブと同じ床**(_bt30_entry_sorted / LSS_POOL_MIN_BT)。
-    # 以前は0で、実発注だけBTで絞らずレポートだけ30で絞る食い違いがあった
-    # (2026-08-12 に発覚)。記録された実績はすべてBT30下のものなので、
-    # 実績を根拠に使うならライブも30に揃える。0にするなら --bt-min 0 を明示。
-    # ⚠ BT30が良いという証拠は弱い(BT0との差は t=0.96・勝ち月6/10)。据え置きの
-    #    理由は『動かす根拠が無い』であって『30が優れている』ではない。
-    ap.add_argument("--bt-min", type=float, default=30.0,
-                    help="BT下限(既定30=レポートの予算タブと同じ床)。0で無効")
+    # ⛔ 既定0 = **BTで絞らない**(2026-08-12 確定)。BTは8回測って8回とも
+    #    識別力ゼロだった(勝率フラット / 閾値に対して非単調 / 閾値の walk-forward は
+    #    固定最良の24.9%・勝ち月1/10)。効いて見えた唯一の場面は先読みだった。
+    #    レポート側も LSS_NO_BT_FILTER=1 で床を外してあるので、これで
+    #    『シグナルタブに出た銘柄=発注する銘柄=検証している銘柄』が一致する。
+    ap.add_argument("--bt-min", type=float, default=0.0,
+                    help="BT下限。既定0=絞らない(BTに識別力が無いため)")
     ap.add_argument("--trades-csv", type=str, default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"),
                     help="BT付与元CSV(=レポート一致)")
     ap.add_argument("--symbols-file", default=None, help="(code,name,strategy) の SELECTED を持つ .py")

@@ -53,10 +53,18 @@ set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
 REM --- delay1 ON: matches watch.bat --stop-delay-bars 1 (see CLAUDE.md 18.9) ---
 set "LSS_STOP_DELAY_BARS=1"
-REM --- BT threshold for the "BTxx-and-above" tabs and the budget floor.
-REM     30 = the pool floor = effectively no BT filter (2026-08-08, CLAUDE.md 18.24).
-REM     Keep this in sync with daily.bat.
-set "LSS_BT_TAB_MIN=30"
+REM --- BT filter: OFF (2026-08-12, user decision).
+REM     BT was measured 8 times and showed zero discriminative power every time:
+REM     win rate flat across all tiers, non-monotonic totals, BT-descending order
+REM     inside the random band, and walk-forward threshold selection reaching only
+REM     24.9% of the fixed best (1/10 winning months). The one time it looked strong
+REM     it was lookahead (see the as-of BT fix).
+REM     Turning it off also removes a real inconsistency: the signal tab (= what you
+REM     actually order) never filtered by BT, while the P&L/budget tabs floored at 30.
+REM     The most liquid name of the day was ranked #1 to order yet was absent from
+REM     the evaluation. Now: signal tab = what you order = what is evaluated.
+REM     To restore the old floor for one run: set LSS_NO_BT_FILTER=0 & set LSS_BT_TAB_MIN=30
+if not defined LSS_NO_BT_FILTER set "LSS_NO_BT_FILTER=1"
 REM --- H (limit sell at prev close -5 ticks) is the entry method under evaluation.
 REM     Keep the report's H tab on the SAME setting the live orders use, or the
 REM     screen you read every morning shows a different H than what you send
@@ -68,9 +76,9 @@ REM     because walk-forward kept choosing them: +94,324 over 10 months.
 REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
 REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
 REM                 once, so over-subscribe cannot be cancelled in time)
-REM     --bt-min defaults to 30 = the SAME floor the budget tab uses. Live used to
-REM     default to 0, so the report scored a strategy we did not actually trade
-REM     (found 2026-08-12). Pass --bt-min 0 to disable.
+REM     No --bt-min: the live order script does not filter by BT at all, matching
+REM     the report above (BT filter OFF). Signal tab = what you order = what is
+REM     evaluated. Do NOT re-add --bt-min 30 from an older note.
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- Sizing: 100 shares for EVERY name (user decision, 2026-08-11).
 REM     ATR parity was tried and rolled back. It moved yen/trade +747 -> +775

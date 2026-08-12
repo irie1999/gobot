@@ -118,7 +118,7 @@ def _order_key(t):
     _liq = t.get("liquidity")
     if _liq in (None, "", 0, 0.0):
         _liq = _liq_of(str(t.get("symbol", "")))
-    return _lor.sort_key(t["bt_score"], _liq)
+    return _lor.sort_key(t["bt_score"], _liq, str(t.get("symbol", "")))
 
 
 # === 定数（OOSスイープと合わせる） ===
@@ -495,8 +495,10 @@ def main() -> None:
     ap.add_argument("--by-strategy", action="store_true",
                     help="『BT帯だけ』『戦略だけ』『BT帯×戦略』の実測内訳を出す(予算制約なし)。"
                          "戦略別にBT閾値を分ける意味があるかを、実運用パイプラインのOOSデータで確認する")
-    ap.add_argument("--bt-mins", default="30",
-                    help="BT閾値（カンマ区切り複数可） 例: 30,40,50,60,70  (既定: 30)")
+    ap.add_argument("--bt-mins", default="0",
+                    help="BT閾値（カンマ区切り複数可） 既定 0 = フィルタなし。"
+                         "⛔ 2026-08-12 にBTはアルゴリズムから外した(8回測って8回とも"
+                         "識別力ゼロ)。層を切りたいときだけ 30,40,... を明示する")
     ap.add_argument("--budget", type=float, default=float(_DEFAULT_BUDGET_MAN),
                     help=f"1日あたりの予算（万円） (既定: {_DEFAULT_BUDGET_MAN})")
     ap.add_argument("--strat-narrow", default=",".join(sorted(_DEFAULT_STRAT_NARROW)),

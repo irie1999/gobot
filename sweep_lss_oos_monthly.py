@@ -100,7 +100,9 @@ def _run_backtest(
     # daily.bat / ライブと条件を揃える (CLAUDE.md §18.9 / §18.24)
     # ⚠ delay は実機(daily.bat・watch.bat)が 1。ここだけ 2 だと条件が食い違う。
     env.setdefault("LSS_STOP_DELAY_BARS", "1")
-    env.setdefault("LSS_BT_TAB_MIN", "30")
+    # ⛔ BTフィルタは 2026-08-12 にアルゴリズムから外した。daily.bat と揃える。
+    env.setdefault("LSS_NO_BT_FILTER", "1")
+    env.setdefault("LSS_BT_TAB_MIN", "0")
     # daily.bat が明示クリアする変数: 残留値で結果が変わるものを安全のためクリア
     env.pop("LSS_REALISTIC_ENTRY", None)     # 未設定=True(現実的約定)が既定。=0の残留を防ぐ
     env.pop("LSS_CLOSESTOP_RESWEEP", None)   # 未設定=重処理スキップ(高速)

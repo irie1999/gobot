@@ -16,8 +16,9 @@ set "LSS_MONTH_FROM="
 set "LSS_REALISTIC_ENTRY="
 REM Keep these identical to daily.bat, or the sweep measures a different strategy.
 REM   delay1 = live watcher --stop-delay-bars 1 (CLAUDE.md 18.9)
-REM   BT 30  = the pool floor = effectively no BT filter (CLAUDE.md 18.24)
+REM   BT filter OFF (2026-08-12 user decision) - same as daily.bat
 set "LSS_STOP_DELAY_BARS=1"
-set "LSS_BT_TAB_MIN=30"
+if not defined LSS_NO_BT_FILTER set "LSS_NO_BT_FILTER=1"
+set "LSS_BT_TAB_MIN=0"
 REM --- run the OOS sweep ---
 python sweep_lss_oos_monthly.py --workers 8 %*

@@ -57,15 +57,18 @@ REM     reflect delay1. NOTE: the P&L tab under delay1 is OPTIMISTIC (engine fil
 REM     stop at the line); the realistic verdict is compare_lss_rules.py net-real.
 REM     To disable for one run: set LSS_STOP_DELAY_BARS=0 before calling, or edit here.
 set "LSS_STOP_DELAY_BARS=1"
-REM --- BT threshold = 30 (2026-08-08: lowered from 40). 30 equals the budget-sim
-REM     candidate pool floor (_BUD_MIN_BT is hard-clamped to >=30), so this is
-REM     effectively NO BT filter. One env drives every "BTxx-and-above" place:
-REM     the detail filter tabs AND the 400man budget floor (max(_BUD_MIN_BT, this)).
-REM     Why: BT has no discriminative power (CLAUDE.md 18.12) and the rolling-OOS
-REM     tier sweep is non-monotonic with BT30 best (18.24). BT40 also HALVES the
-REM     measurable signal: 9 months to t=2 at BT30 vs 29 months at BT40.
-REM     Set to 40 or 50 to revert.
-set "LSS_BT_TAB_MIN=30"
+REM --- BT filter: OFF (2026-08-12, user decision).
+REM     BT was measured 8 times and showed zero discriminative power every time:
+REM     win rate flat across all tiers, non-monotonic totals, BT-descending order
+REM     inside the random band, and walk-forward threshold selection reaching only
+REM     24.9% of the fixed best (1/10 winning months). The one time it looked strong
+REM     it was lookahead (see the as-of BT fix).
+REM     Turning it off also removes a real inconsistency: the signal tab (= what you
+REM     actually order) never filtered by BT, while the P&L/budget tabs floored at 30.
+REM     The most liquid name of the day was ranked #1 to order yet was absent from
+REM     the evaluation. Now: signal tab = what you order = what is evaluated.
+REM     To restore the old floor for one run: set LSS_NO_BT_FILTER=0 & set LSS_BT_TAB_MIN=30
+if not defined LSS_NO_BT_FILTER set "LSS_NO_BT_FILTER=1"
 REM --- H (limit sell at prev close -5 ticks) is the entry method under evaluation.
 REM     Keep the report's H tab on the SAME setting the live orders use, or the
 REM     screen you read every morning shows a different H than what you send
@@ -77,9 +80,9 @@ REM     because walk-forward kept choosing them: +94,324 over 10 months.
 REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
 REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
 REM                 once, so over-subscribe cannot be cancelled in time)
-REM     --bt-min defaults to 30 = the SAME floor the budget tab uses. Live used to
-REM     default to 0, so the report scored a strategy we did not actually trade
-REM     (found 2026-08-12). Pass --bt-min 0 to disable.
+REM     No --bt-min: the live order script does not filter by BT at all, matching
+REM     the report above (BT filter OFF). Signal tab = what you order = what is
+REM     evaluated. Do NOT re-add --bt-min 30 from an older note.
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT

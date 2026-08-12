@@ -24,10 +24,12 @@ r"""lss_order_rank.py — lss の『発注順』を1箇所に集約する。
 
 切り替え
 --------
-  set LSS_ORDER_RANK=liquidity   (既定) 売買代金の大きい順。同値はBT降順で安定化
+  set LSS_ORDER_RANK=liquidity   (既定) 売買代金の大きい順。同値は銘柄コード順
   set LSS_ORDER_RANK=bt          旧既定。**有意に悪いと実測済み**。比較用にのみ残す
 
-⚠ BTフィルタ(--bt-min)は**並び順とは別の話**なので、ここでは触らない。
+⛔ 2026-08-12 (ユーザー決定): BTはアルゴリズム(フィルタ・並び順・タイブレーク)から
+   完全に外した。既定経路では BT を一切読まない。`bt` モードは過去の測定を
+   再現するためだけに残してある。
 """
 from __future__ import annotations
 
@@ -47,11 +49,10 @@ def describe() -> str:
     if m == "bt":
         return ("lss発注順: **BT降順** ⚠ 18.21 でランダム6本すべてを下回ると実測"
                 "(z=-2.22)。比較用。既定に戻すには LSS_ORDER_RANK を未設定に")
-    return ("lss発注順: 流動性(売買代金)降順 / 同値はBT降順 "
-            "[LSS_ORDER_RANK=bt で旧BT降順に戻す]")
+    return "lss発注順: 流動性(売買代金)降順 / 同値は銘柄コード順 (BTは使わない)"
 
 
-def sort_key(bt, liquidity):
+def sort_key(bt, liquidity, sym=""):
     """発注順のソートキー(小さいほど先)。
 
     liquidity が取れていない(0/None)銘柄は最後尾に回す。板の薄さが分からない銘柄を
@@ -61,13 +62,18 @@ def sort_key(bt, liquidity):
     _liq = float(liquidity or 0)
     if mode() == "bt":
         return (-_bt, -_liq)
-    return (0 if _liq > 0 else 1, -_liq, -_bt)
+    # ⛔ 同値のタイブレークも BT を使わない(2026-08-12 ユーザー決定)。
+    #    BTは8回測って8回とも識別力ゼロだったので、アルゴリズムから外す。
+    #    再現性のために銘柄コードで決定的に並べる(意味は無いが安定する)。
+    return (0 if _liq > 0 else 1, -_liq, str(sym))
 
 
-def sort_signals(signals: list, bt_key="bt", liq_key="liquidity") -> list:
+def sort_signals(signals: list, bt_key="bt", liq_key="liquidity",
+                 sym_key="symbol") -> list:
     """シグナル(dict)のリストを発注順に並べ替えて返す(非破壊)。"""
     return sorted(signals,
-                  key=lambda s: sort_key(s.get(bt_key), s.get(liq_key)))
+                  key=lambda s: sort_key(s.get(bt_key), s.get(liq_key),
+                                         s.get(sym_key, "")))
 
 
 def daily_turnover(df, window: int = 120) -> float:

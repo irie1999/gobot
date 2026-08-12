@@ -49,7 +49,9 @@ import pandas as pd
 
 ap = argparse.ArgumentParser(description="lss over-subscribe ポートフォリオ検証(予算上限キャンセル再現)")
 ap.add_argument("--trades-csv", type=str, default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"))
-ap.add_argument("--bt-min", type=float, default=40.0)
+ap.add_argument("--bt-min", type=float, default=0.0,
+                help="BT下限。既定0=フィルタなし。⛔ 2026-08-12 にBTはアルゴリズムから"
+                     "外した(8回測って8回とも識別力ゼロ)。層を切るときだけ明示する")
 ap.add_argument("--budget", type=float, default=4_000_000.0, help="予算(円)。約定累計がこれに達したら残り注文をキャンセル")
 ap.add_argument("--min-price", type=float, default=1000.0, help="対象銘柄の最低株価(実運用 daily と揃える。既定1000)")
 ap.add_argument("--max-price", type=float, default=6000.0, help="対象銘柄の最高株価(実運用 daily=6000 と揃える。既定6000)")

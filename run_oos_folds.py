@@ -89,11 +89,12 @@ def main():
                          "必ず同時に変えること(18.9)。BTキャッシュは sd<N> で別管理"
                          "なので、切り替えた初回は作り直しで遅い")
     ap.add_argument("--no-bt-filter", action="store_true",
-                    help="BTの床を3箇所すべて0にして回す(LSS_NO_BT_FILTER=1)。"
-                         "生CSVにBT30未満の取引が入るので、sim_oos_budget で "
-                         "--bt-mins 0 が測れるようになる。既定の生CSVはプール床30で"
-                         "作られており、後からBT0を測ることはできない")
-    ap.add_argument("--bt-tiers", type=str, default="30,40,50,60,70",
+                    help="(既定。互換のため残置) BTの床を3箇所すべて0にして回す")
+    ap.add_argument("--bt-floor", type=int, default=0,
+                    help="BTの床を復活させる(既定0=フィルタなし)。過去の測定を再現"
+                         "したいときだけ 30 などを指定。⛔ 2026-08-12 にBTはアルゴリズム"
+                         "から外した(8回測って8回とも識別力ゼロ)ので、通常は使わない")
+    ap.add_argument("--bt-tiers", type=str, default="0,10,20,30,40",
                     help="予算CSVに出すBT閾値(カンマ区切り)。1回の実行で複数層を比較できる")
     ap.add_argument("--days", type=int, default=730, help="レポートの集計窓(日)")
     ap.add_argument("--start-from", type=str, default="",
@@ -172,21 +173,25 @@ def main():
     if int(args.stop_delay_bars) != 1:
         print(f"[env] ★ 損切り遅延を {args.stop_delay_bars} で測ります "
               f"(ライブは watch.bat = 1)。採用するなら両方揃えること")
-    env["LSS_BT_TAB_MIN"] = "30"   # 2026-08-08: 40→30 (18.24)。daily.bat と揃える
-    if args.no_bt_filter:
-        # BTの床は3箇所にあり、うち2つはここで上書き/消去している。
-        # まとめて0にするスイッチを子プロセスへ渡す(nikkei_analysis 側で解釈)。
+    # ⛔ BTフィルタは既定OFF (2026-08-12 / daily.bat と揃える)。
+    #    BTの床は3箇所(プール床 / 予算下限 / 明細タブ閾値)にあるので、
+    #    まとめて0にするスイッチを子プロセスへ渡す(nikkei_analysis 側で解釈)。
+    _bt_floor = max(0, int(args.bt_floor))
+    if _bt_floor > 0:
+        env["LSS_BT_TAB_MIN"] = str(_bt_floor)
+        env["LSS_NO_BT_FILTER"] = ""
+        print(f"[env] ⚠ BTの床を {_bt_floor} で復活させて回します (--bt-floor)。"
+              f"実機(daily.bat)はフィルタなし")
+    else:
+        env["LSS_BT_TAB_MIN"] = "0"
         env["LSS_NO_BT_FILTER"] = "1"
-        if args.bt_tiers == "30,40,50,60,70":     # 既定のままなら0を含める
-            args.bt_tiers = "0,10,20,30,40"
-        print("[env] ★ BTフィルタ全部OFF (--no-bt-filter): "
-              "プール床 / 予算下限 / 明細タブ閾値 = 0")
+        print("[env] BTフィルタ全部OFF(既定): プール床 / 予算下限 / 明細タブ閾値 = 0")
     env.setdefault("LSS_ASOF_BT", "1") # 先読みなしのBT (18.11)。daily.bat と同じ
     # 発注順は lss_order_rank の既定(流動性順)を継承する。比較用に旧BT降順で回すなら
     # 呼び出し前に set LSS_ORDER_RANK=bt (18.21: BT降順はランダム6本すべてを下回る)。
     _rank = env.get("LSS_ORDER_RANK", "") or "(既定=流動性順)"
-    print(f"[env] stop_delay={env['LSS_STOP_DELAY_BARS']} / BT_TAB_MIN={env['LSS_BT_TAB_MIN']}"
-          f"{' (無効化)' if args.no_bt_filter else ''} / "
+    print(f"[env] stop_delay={env['LSS_STOP_DELAY_BARS']} / "
+          f"BTフィルタ={'床' + str(_bt_floor) if _bt_floor > 0 else 'なし'} / "
           f"as-of BT={env['LSS_ASOF_BT']} / 発注順={_rank}")
     # ★ レポート自身の予算タブ(= .\daily と同じ _run_budget_sim)の月別P&Lを出させる。
     #    生CSV(LSS_OOS_RAW_CSV)を sim_oos_budget.py で再シミュした値とは経路が違うので、
