@@ -10308,12 +10308,16 @@ function switchTbd(id, tab) {{
 
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
                         src=None, nofills=None, order_key=None,
-                        one_per_symbol=False, size_mode=None, size_target=0.0):
+                        one_per_symbol=False, size_mode=None, size_target=0.0,
+                        keep=None):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
           不約定は予算を消費しない。約定価格×株数で累計し、超過したらbreak。
           不約定でも枠を消費する発注額ベース(=既定)より1日の約定件数が増えやすい。
+        keep: トレード1件を受けて True なら残す述語。戦略の leave-one-out と、
+          その帰無較正(同数をランダムに落とす)で使う。strat_set と違い
+          **約定・不約定の両方**に同じ基準で効くので、母集団を歪めない。
         src / nofills: 対象トレードを差し替える(既定は lss 本体の
           _bt30_entry_sorted / all_nofills)。E/H タブが**同じ予算規則**で
           回すために使う。渡さなければ従来と完全に同じ挙動。
@@ -10333,6 +10337,8 @@ function switchTbd(id, tab) {{
                 if _eff_long_bt(_t) < _min_bt:
                     continue
                 if strat_set and _t.get("strategy", "").upper() not in strat_set:
+                    continue
+                if keep is not None and not keep(_t):
                     continue
                 if _t.get("reason") == "約定せず":
                     continue
@@ -10381,6 +10387,8 @@ function switchTbd(id, tab) {{
                 continue
             if strat_set and _t.get("strategy", "").upper() not in strat_set:
                 continue
+            if keep is not None and not keep(_t):
+                continue
             _by_day_bud[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
         if not fill_budget:
             # 発注額ベース: 不約定も同日バケットへ(枠は消費するが損益0・グリッド非表示)。
@@ -10388,11 +10396,14 @@ function switchTbd(id, tab) {{
             _fill_sym_day = {(_t.get("symbol"),
                               str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""))
                              for _t in _SRC_T
-                             if not strat_set or _t.get("strategy", "").upper() in strat_set}
+                             if (not strat_set or _t.get("strategy", "").upper() in strat_set)
+                             and (keep is None or keep(_t))}
             for _t in _SRC_NF:
                 if _eff_long_bt(_t) < _min_bt:
                     continue
                 if strat_set and _t.get("strategy", "").upper() not in strat_set:
+                    continue
+                if keep is not None and not keep(_t):
                     continue
                 _dk2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")
                 if (_t.get("symbol"), _dk2) in _fill_sym_day:
@@ -13752,6 +13763,266 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'このシムは slip=0 なので、そこで差が付かないなら'
             f'<b>執行コスト(成行の滑り)で選ぶ</b>ことになります(18.21)。</p></details>')
 
+    def _strategy_loo_html():
+        """戦略を1つ外したら合計がどう動くかを、**同数をランダムに落とした帯**と比べる。
+
+        なぜ『その戦略の損益』を見るだけでは駄目か (18.10 / 18.21 の教訓)
+        --------------------------------------------------------------
+        予算400万は1日十数件で埋まる。ある戦略を外すとその枠は**別の銘柄で埋まる**
+        ので、外した効果は「その戦略の損益」ではなく「入れ替わった顔ぶれとの差」。
+        18.10 では戦略別BT閾値が『全部買えるなら +161万』に見えたのに、予算を固定
+        したら -82万だった。**必ず予算シミュを通して測る**(compare 系の総額比較は不可)。
+
+        なぜランダム帯が要るか (18.24)
+        -------------------------------
+        戦略を外すと件数が減るので合計は必ず動く。その動きが『その戦略だから』なのか
+        『同じ件数を減らせば誰でもそうなる』のかは、**同数をランダムに落とした帯**と
+        比べないと分からない。落とす件数を揃えるのがこの帰無の肝。
+        """
+        import statistics as _sti
+        import zlib as _zl
+
+        _srcs = [("現行", None, None)]
+        _ehnf_l = (_EH_TRADES or {}).get("約定せず") or {}
+        for _k in ("E", "H"):
+            _v = (_EH_TRADES or {}).get(_k) or []
+            if _v:
+                _srcs.append((_k, _v, _ehnf_l.get(_k) or []))
+
+        def _tk(_t):
+            return (f"{_t.get('symbol')}|{_t.get('strategy')}|"
+                    f"{_t.get('entry_d_raw') or _t.get('exit_d_raw')}")
+
+        def _mon(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k2) < 7 or _k2 == _TODAY.strftime("%Y-%m"):
+                    continue          # 当月は営業日が揃わないので除外(他の表と同じ)
+                _m[_k2] = _m.get(_k2, 0.0) + float(_t.get("pnl", 0) or 0)
+            return _m
+
+        def _halves(_mp, _ms):
+            _h = len(_ms) // 2
+            return (sum(_mp.get(m, 0.0) for m in _ms[:_h]),
+                    sum(_mp.get(m, 0.0) for m in _ms[_h:]))
+
+        def _z(vals, v):
+            if len(vals) < 2:
+                return 0.0
+            _sd = _sti.stdev(vals)
+            return ((v - _sti.mean(vals)) / _sd) if _sd > 0 else 0.0
+
+        _NS = int(os.environ.get("LSS_STRAT_LOO_SEEDS", "8") or 8)
+        _rows = ""
+        for _name, _src, _nof in _srcs:
+            _pool = [t for t in ((_bt30_entry_sorted if _src is None else _src)
+                                 + (all_nofills if _nof is None else _nof))
+                     if _eff_long_bt(t) >= _BUD_FLOOR]
+            _strats = sorted({str(t.get("strategy", "")).upper()
+                              for t in _pool
+                              if t.get("strategy") and t.get("strategy") != "転換"})
+            if len(_strats) < 2:
+                continue
+            _base = _run_budget_sim(_BUD_FLOOR, src=_src, nofills=_nof)
+            _bm = _mon(_base)
+            _ms = sorted(_bm)
+            _bt_tot = sum(_bm.values())
+            _b1, _b2 = _halves(_bm, _ms)
+            _nb = sum(1 for t in _base if t.get("reason") not in ("発注中", "保有中"))
+
+            # 建った取引のうち、その戦略ぶんの素の成績(参考値。判断には使わない)
+            _own: dict = {}
+            for _t in _base:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _s = str(_t.get("strategy", "")).upper()
+                _a = _own.setdefault(_s, [0, 0.0])
+                _a[0] += 1
+                _a[1] += float(_t.get("pnl", 0) or 0)
+
+            # 落とす件数を揃えた帰無帯。n件のランダム除外を _NS 本。
+            _band_cache: dict = {}
+
+            def _rand_band(n):
+                if n in _band_cache:
+                    return _band_cache[n]
+                _ds, _d1s, _d2s = [], [], []
+                for _sd in range(_NS):
+                    _rk = sorted(_pool,
+                                 key=lambda t, s=_sd: _zl.crc32(
+                                     f"{s}|{_tk(t)}".encode()) & 0xffffffff)
+                    _drop = {_tk(t) for t in _rk[:n]}
+                    _rm = _mon(_run_budget_sim(
+                        _BUD_FLOOR, src=_src, nofills=_nof,
+                        keep=lambda t, d=_drop: _tk(t) not in d))
+                    _h1, _h2 = _halves(_rm, _ms)
+                    _ds.append(sum(_rm.values()) - _bt_tot)
+                    _d1s.append(_h1 - _b1)
+                    _d2s.append(_h2 - _b2)
+                _band_cache[n] = (_ds, _d1s, _d2s)
+                return _band_cache[n]
+
+            _res = []
+            for _s in _strats:
+                _n = sum(1 for t in _pool
+                         if str(t.get("strategy", "")).upper() == _s)
+                _lm = _mon(_run_budget_sim(
+                    _BUD_FLOOR, src=_src, nofills=_nof,
+                    keep=lambda t, s=_s: str(t.get("strategy", "")).upper() != s))
+                _l1, _l2 = _halves(_lm, _ms)
+                _dl = sum(_lm.values()) - _bt_tot
+                _ds, _d1s, _d2s = _rand_band(_n)
+                _res.append((_s, _n, _dl, _z(_ds, _dl),
+                             _l1 - _b1, _z(_d1s, _l1 - _b1),
+                             _l2 - _b2, _z(_d2s, _l2 - _b2), _lm))
+            _res.sort(key=lambda r: r[2])       # 外すと最も損する順(=価値がある順)
+
+            _rows += (
+                f'<tr style="border-top:1px solid #475569">'
+                f'<td rowspan="{len(_res) + 1}" style="padding:3px 8px;color:#e2e8f0;'
+                f'font-weight:700;vertical-align:top;border-right:1px solid #334155">'
+                f'{_name}</td>'
+                f'<td style="padding:2px 8px;color:#e2e8f0;font-weight:700">'
+                f'全戦略(基準)</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{_nb:,}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                f'font-weight:700">{_bt_tot:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                f'<td style="padding:2px 8px;color:#64748b;font-size:0.76rem">'
+                f'ランダム除外×{_NS}本と比較</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b;'
+                f'border-left:1px solid #334155">{_b1:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                f'{_b2:+,.0f}</td></tr>')
+
+            def _hc(z):
+                return "#4ade80" if z >= 1 else ("#f87171" if z <= -1 else "#94a3b8")
+
+            for _s, _n, _dl, _zz, _dd1, _zz1, _dd2, _zz2, _ in _res:
+                if _zz <= -2:
+                    _v, _c = "帯の外(下) → 残すべき", "#4ade80"
+                elif _zz >= 2:
+                    _v, _c = "帯の外(上) → 外したほうがよい", "#f87171"
+                else:
+                    _v, _c = "帯の中 → 測れていない", "#94a3b8"
+                _ok = (_zz1 * _zz2 > 0) and min(abs(_zz1), abs(_zz2)) >= 1
+                _oc, _op = _own.get(_s, [0, 0.0])
+                _rows += (
+                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_s} を外す'
+                    + (' <span style="color:#4ade80;font-weight:700">✓</span>'
+                       if _ok else '') + '</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'-{_n:,}<br><span style="font-size:0.7rem;color:#64748b">'
+                    f'建{_oc:,}件 {_op:+,.0f}</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#cbd5e1">'
+                    f'{_bt_tot + _dl:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                    f'font-weight:700">{_dl:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                    f'{_sti.mean(_rand_band(_n)[0]):+,.0f}<br>'
+                    f'<span style="font-size:0.7rem">σ '
+                    f'{(_sti.stdev(_rand_band(_n)[0]) if _NS > 1 else 0):,.0f}</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                    f'font-weight:700">{_zz:+.2f}</td>'
+                    f'<td style="padding:2px 8px;color:{_c};font-size:0.78rem">{_v}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(-_zz1)};'
+                    f'border-left:1px solid #334155;white-space:nowrap">{_dd1:+,.0f} '
+                    f'<span style="font-size:0.72rem">z{_zz1:+.2f}</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(-_zz2)};'
+                    f'white-space:nowrap">{_dd2:+,.0f} '
+                    f'<span style="font-size:0.72rem">z{_zz2:+.2f}</span></td></tr>')
+
+            # ── walk-forward: 毎月『それまでで外すのが最も得だった戦略』を1つ外す ──
+            #    戦略を絞ることに価値があるかを、選択のリークを消して見る。
+            #    近似: 各戦略の月別 delta は単独 leave-one-out から取る(月ごとに
+            #    別戦略を外した合成なので厳密な再シミュではない)。向きの判定には十分。
+            if len(_ms) >= 3:
+                _wf, _pk = 0.0, []
+                for _i, _m in enumerate(_ms):
+                    if _i == 0:
+                        _wf += _bm.get(_m, 0.0)
+                        _pk.append((_m, "全戦略"))
+                        continue
+                    _prev = _ms[:_i]
+                    _best, _bv = None, 0.0
+                    for _s, _n, _dl, _zz, _a, _b, _c2, _d2, _lm in _res:
+                        _gain = sum(_lm.get(p, 0.0) - _bm.get(p, 0.0) for p in _prev)
+                        if _gain > _bv:
+                            _best, _bv = _s, _gain
+                    if _best is None:
+                        _wf += _bm.get(_m, 0.0)
+                        _pk.append((_m, "全戦略"))
+                    else:
+                        _lm2 = next(r[8] for r in _res if r[0] == _best)
+                        _wf += _lm2.get(_m, 0.0)
+                        _pk.append((_m, f"-{_best}"))
+                _rows += (
+                    f'<tr style="background:#1e293b;border-top:1px solid #64748b">'
+                    f'<td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
+                    f'white-space:nowrap">▶ walk-forward 除外</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{_wf:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;'
+                    f'color:{"#4ade80" if _wf > _bt_tot else "#f87171"};font-weight:700">'
+                    f'{_wf - _bt_tot:+,.0f}</td>'
+                    f'<td colspan="2" style="text-align:right;padding:2px 8px;'
+                    f'color:#64748b">—</td>'
+                    f'<td colspan="3" style="padding:2px 8px;color:#94a3b8;'
+                    f'font-size:0.76rem">'
+                    + ("<b>全戦略を下回る → 戦略を絞る価値なし</b>"
+                       if _wf <= _bt_tot else
+                       "<b>全戦略を上回る</b>(要追試)")
+                    + " / 選択: "
+                    + " → ".join(f'{m[5:]}:{p}' for m, p in _pk) + '</td></tr>')
+
+        if not _rows:
+            return ""
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">🧩 戦略別（1つ外したら合計はどう動くか / 予算込み）</summary>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'⛔ <b>「その戦略がいくら稼いだか」で判断してはいけません</b>。予算{_budget_man}万は'
+            f'1日十数件で埋まるので、ある戦略を外した枠は<b>別の銘柄で埋まります</b>。'
+            f'見るべきは「外したときに合計がどう動くか」だけです'
+            f'(18.10: 資金制約なしなら +161万に見えた戦略別閾値が、予算を固定したら -82万でした)。<br>'
+            f'⛔ <b>件数が減れば合計は必ず動く</b>ので、'
+            f'<b>同じ件数をランダムに落とした帯</b>({_NS}本)と比べます。'
+            f'|z|&lt;2 は「測れていない」であって「同じ」ではありません(18.24)。<br>'
+            f'<b>差が大きなマイナス = 外すと損する = その戦略は残すべき</b>。'
+            f'プラスなら外したほうがよい候補です。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+            f'<th style="{_th};text-align:left">操作</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
+            f'<th style="{_th}">差</th><th style="{_th}">ランダム除外</th>'
+            f'<th style="{_th}">z</th><th style="{_th};text-align:left">判定</th>'
+            f'<th style="{_th};border-left:1px solid #334155">前半の差</th>'
+            f'<th style="{_th}">後半の差</th></tr></thead>'
+            f'<tbody>{_rows}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.7">'
+            f'「建N件 ±円」= その戦略が<b>実際に建った</b>ぶんの素の成績。参考値であって'
+            f'<b>判断には使いません</b>(枠の奪い合いが入っていないため)。<br>'
+            f'前半/後半の差も<b>それぞれ同数ランダム除外の帯に対する z</b>。'
+            f'両方が同じ向きに |z|≥1 のものに <span style="color:#4ade80;font-weight:700">✓</span>。'
+            f'片方だけ大きいものはその期間のノイズです(18.28)。<br>'
+            f'<b>▶ walk-forward 除外</b> = 各月について<b>その月より前だけ</b>を見て'
+            f'「外すのが最も得だった戦略」を1つ外す。'
+            f'⚠ 月ごとの delta を単独 leave-one-out から合成した<b>近似</b>です'
+            f'(厳密な再シミュではない)。向きの判定用。<br>'
+            f'⚠ 18.20 では <b>TRAIN の戦略順位は TEST で再現しませんでした</b>'
+            f'(TRAIN最良の DON が TEST で5位)。18.23 でも絞り版(A7/RSI2/VOLTF)は'
+            f'全戦略版に大きく劣ります。<b>既定は6戦略とも使う</b>で、'
+            f'この表で ✓ かつ z≥2 が安定して出ない限り動かさないこと。</p></details>')
+
     def _h_variant_html():
         """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
 
@@ -14240,6 +14511,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             print(f"[発注順] 比較ブロックを生成 ({_ort.time() - _t0:.1f}s)", flush=True)
     except Exception as _orce:
         print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted and str(
+                os.environ.get("LSS_STRAT_LOO_TAB", "1")).strip() not in ("0", "false", "no"):
+            import time as _slt
+            _t0 = _slt.time()
+            _EH_CMP_HTML += _strategy_loo_html()
+            print(f"[戦略別] 比較ブロックを生成 ({_slt.time() - _t0:.1f}s)", flush=True)
+    except Exception as _slce:
+        print(f"[戦略別] 比較ブロック生成に失敗: {_slce}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted:
             import time as _hvt
