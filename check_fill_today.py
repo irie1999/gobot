@@ -66,12 +66,42 @@ if args.from_html:
     if not p.exists():
         print(f"[error] {p} がありません")
         sys.exit(1)
+
+    # ⛔ signals_holdout_all_both_*.html は **方向タブの入れ物**で、シグナル表は
+    #    iframe の中(signals_holdout_all_lss_*.html 等)にある。親だけ読むと
+    #    銘柄が0件になる(2026-08-12 に実際に起きた)。iframe を辿る。
+    def _texts(path: Path, depth: int = 0) -> list[tuple[str, str]]:
+        try:
+            body = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            print(f"[warn] {path.name} を読めません: {e}")
+            return []
+        out = [(path.name, body)]
+        if depth >= 2:
+            return out
+        for m in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', body, re.I):
+            src = m.group(1).split("?")[0].split("#")[0]
+            if not src.lower().endswith(".html"):
+                continue
+            child = (path.parent / src)
+            if child.exists() and child.resolve() != path.resolve():
+                out += _texts(child, depth + 1)
+        return out
+
     seen = set()
-    for m in re.finditer(r"\b(\d{4})\.T\b", p.read_text(encoding="utf-8", errors="ignore")):
-        if m.group(1) not in seen:
-            seen.add(m.group(1))
-            syms.append(m.group(1))
-    print(f"[info] {p.name} から {len(syms)}銘柄を抽出")
+    for _name, _body in _texts(p):
+        _n0 = len(syms)
+        for m in re.finditer(r"\b(\d{4})\.T\b", _body):
+            if m.group(1) not in seen:
+                seen.add(m.group(1))
+                syms.append(m.group(1))
+        if len(syms) > _n0:
+            print(f"[info] {_name} から {len(syms) - _n0}銘柄")
+    print(f"[info] 合計 {len(syms)}銘柄を抽出")
+    if not syms:
+        print("[!] 0件でした。方向タブの実体ファイルを直接指定してください:")
+        for _c in sorted(p.parent.glob("signals_holdout_all_lss_*.html")):
+            print(f"      --from-html {_c.name}")
 syms += [s.strip().upper().removesuffix(".T")
          for s in args.symbols.split(",") if s.strip()]
 # 重複除去(順序は保つ)
