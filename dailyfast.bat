@@ -68,6 +68,9 @@ REM     because walk-forward kept choosing them: +94,324 over 10 months.
 REM     Live order: python lss_budget_cap.py --entry-mode limit --limit-ticks -5
 REM                 --budget-multiple 1.0   (1.0 because H fills at the open all at
 REM                 once, so over-subscribe cannot be cancelled in time)
+REM     --bt-min defaults to 30 = the SAME floor the budget tab uses. Live used to
+REM     default to 0, so the report scored a strategy we did not actually trade
+REM     (found 2026-08-12). Pass --bt-min 0 to disable.
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- Sizing: 100 shares for EVERY name (user decision, 2026-08-11).
 REM     ATR parity was tried and rolled back. It moved yen/trade +747 -> +775

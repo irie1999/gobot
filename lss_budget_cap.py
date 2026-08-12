@@ -72,7 +72,13 @@ def _load_bt(trades_csv: str) -> dict:
     if not p.exists():
         print(f"[warn] BTソースCSVが無い: {p}（BT=0 として全シグナルを末尾扱い）", file=sys.stderr)
         return {}
-    bt = {}
+    # ⛔ 以前は (sym,strat) ごとの **期間最大** を採っていた。半年前に60だが今は10、
+    #    というペアが 60 で通ってしまう。レポートの予算タブは各取引の as-of BT
+    #    (その時点までの実績)で判定するので、今日の発注に使うべきは **最新** の値。
+    #    (18.21 で sim_portfolio_lss の同じ実装を先読みとして直したのと同じ話。
+    #     こちらは全部過去データなので先読みではないが、レポートと食い違う)
+    bt: dict = {}
+    seen: dict = {}
     for r in csv.DictReader(open(p, encoding="utf-8-sig")):
         sym = _norm(r.get("symbol") or r.get("code") or "")
         strat = str(r.get("strategy") or "").strip()
@@ -82,7 +88,11 @@ def _load_bt(trades_csv: str) -> dict:
             b = float(r.get("bt") or 0)
         except Exception:
             b = 0.0
-        bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
+        d = str(r.get("entry_date") or r.get("exit_date") or "")
+        k = (sym, strat)
+        if k not in seen or d >= seen[k]:
+            seen[k] = d
+            bt[k] = b
     return bt
 
 
@@ -104,7 +114,14 @@ def main() -> int:
                     help="予算の何倍ぶん注文を出すか(over-subscribe)。実測fill率~50%%なら2.0で予算ちょうど埋まる")
     ap.add_argument("--min-price", type=float, default=1000.0, help="対象最低株価(実運用 daily=1000)")
     ap.add_argument("--max-price", type=float, default=6000.0, help="対象最高株価(実運用 daily=6000)")
-    ap.add_argument("--bt-min", type=float, default=0.0, help="BT下限(§18.2は BT30以上・降順。既定0=全件をBT降順)")
+    # 既定30 = **レポートの予算タブと同じ床**(_bt30_entry_sorted / LSS_POOL_MIN_BT)。
+    # 以前は0で、実発注だけBTで絞らずレポートだけ30で絞る食い違いがあった
+    # (2026-08-12 に発覚)。記録された実績はすべてBT30下のものなので、
+    # 実績を根拠に使うならライブも30に揃える。0にするなら --bt-min 0 を明示。
+    # ⚠ BT30が良いという証拠は弱い(BT0との差は t=0.96・勝ち月6/10)。据え置きの
+    #    理由は『動かす根拠が無い』であって『30が優れている』ではない。
+    ap.add_argument("--bt-min", type=float, default=30.0,
+                    help="BT下限(既定30=レポートの予算タブと同じ床)。0で無効")
     ap.add_argument("--trades-csv", type=str, default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"),
                     help="BT付与元CSV(=レポート一致)")
     ap.add_argument("--symbols-file", default=None, help="(code,name,strategy) の SELECTED を持つ .py")
@@ -163,8 +180,18 @@ def main() -> int:
     # ── シグナル収集 → BT付与 → 価格フィルタ → BT降順 ──
     pairs = _load_symbols(args.symbols_file)
     bt_map = _load_bt(args.trades_csv)
+    # ⛔ BTソースが無いのに --bt-min>0 だと、全シグナルが BT=0 で落ちて
+    #    **1件も発注しない**。朝の発注でこれを黙ってやられると気づけないので、
+    #    ここで止める(--bt-min 0 を明示すれば従来どおり全件を出せる)。
+    if args.bt_min > 0 and not bt_map:
+        print(f"[中止] BTソース {args.trades_csv} が読めないのに --bt-min "
+              f"{args.bt_min:.0f} が指定されています。全シグナルが BT=0 で落ちます。\n"
+              f"  対処: .\\daily を先に実行して {args.trades_csv} を作るか、"
+              f"--bt-min 0 で BT フィルタを外してください。", file=sys.stderr)
+        return 1
     print("本日の lss シグナルを収集中...")
     signals = []
+    _bt_cut = 0        # BT下限で落とした件数(黙って減らさない)
     for (code, name, strat) in pairs:
         sig = _lss_signal_today(code, name, strat, args.sm, args.tm, args.days)
         if not sig:
@@ -174,9 +201,13 @@ def main() -> int:
             continue
         sig["bt"] = bt_map.get((_norm(sig["symbol"]), strat), 0.0)
         if sig["bt"] < args.bt_min:
+            _bt_cut += 1
             continue
         signals.append(sig)
 
+    if _bt_cut:
+        print(f"  BT<{args.bt_min:.0f} で {_bt_cut}件を除外 "
+              f"(残り{len(signals)}件)。--bt-min 0 で外せます")
     if not signals:
         print("本日の lss シグナル(条件内)なし。終了します。")
         return 0
