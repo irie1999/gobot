@@ -50,7 +50,7 @@ def _tick(price: float) -> float:
 
 def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
           gap_guard: float = 0.03, qty: int = 100, workers: int = 6,
-          require_open_bar: bool = True, variants=None, log=print) -> dict:
+          require_open_bar: bool | None = None, variants=None, log=print) -> dict:
     """E/H のトレード dict を作る。
 
     Args:
@@ -59,8 +59,20 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
       sm / tm : 損切・利確の ATR 倍率(現行と同じ値を渡すこと)
       stop_delay_bars : 損切り遅延(live と同じ 1)
       gap_guard : 寄りのギャップ上限(0.03=±3%)。現行と同じ
-      require_open_bar : 5分足の先頭バーが 09:00 の日だけ使う
-        (09:05 始まりだと寄り直後の逆行が判定から抜けて損切りが過小に出る)
+      require_open_bar : 5分足の先頭バーが 09:00 の日だけ使う。
+        **既定 False**(2026-08-12 に変更。env LSS_REQUIRE_OPEN_BAR=1 で戻せる)。
+        ⛔ 元の意図は「寄り直後の逆行が判定から抜けて損切りが過小に出るのを防ぐ」
+           だったが、実測で前提が2つとも崩れた:
+           ① yfinance は 09:00-09:05 を **どの銘柄にも** 持っていない
+              (1分足でも無い / 板寄せを分足系列に入れない仕様)。
+              通っていたのは **出来高0の幻バーがある銘柄だけ** で、
+              そちらも寄りは見えていなかった。幻バーは v18 で除去済み。
+           ② E/H の約定は 09:00 の板寄せ。delay1 の無保護窓が 09:00-09:05 と
+              **ちょうど一致**するので、その足が見えなくても損切り判定に
+              影響しない(元から損切りを置かない区間)。
+              残る誤差は「その5分で利確(1.0ATR)に届いた場合」だけで、
+              5分で2〜3%動く必要があり稀。
+        ON にすると(幻バー除去後は)全銘柄が落ちるので注意。
 
     Returns:
       {"E": [trade,...], "H": [...], "約定せず": {"E": [...], "H": [...]}}
@@ -92,6 +104,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #    その差が『エントリー方式の効果』に化ける(2026-08-10 に発覚)。
     #    既定は畳まない=現行と同じ。LSS_EH_DEDUPE=1 で旧挙動(畳む)。
     _dedupe = str(os.environ.get("LSS_EH_DEDUPE", "0")).strip() in ("1", "true", "True", "yes")
+    if require_open_bar is None:
+        require_open_bar = str(os.environ.get("LSS_REQUIRE_OPEN_BAR", "0")).strip() \
+            in ("1", "true", "True", "yes")
     # H の指値位置(前日終値からのティック数)。既定0=前日終値ちょうど。
     # +1 なら1ティック上 = より高く売れるが約定率が落ちる。掃くのは sweep_h_limit.py。
     try:
@@ -164,6 +179,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     if _h_ticks:
         log(f"[E/H] ⚠ H の指値を前日終値から {_h_ticks:+d}ティック ずらしています "
             f"(LSS_H_LIMIT_TICKS)。既定0と比較するときは条件を揃えること")
+    log(f"[E/H] 先頭バー09:00の要求: {'ON(LSS_REQUIRE_OPEN_BAR)' if require_open_bar else 'OFF(既定)'}"
+        f" / 09:00が無い日は delay を1本前倒し(無保護窓=09:00-09:05 と一致するため)")
     log(f"[E/H] 母集団 {len(base):,}銘柄日 / {len(syms):,}銘柄 を計算します "
         f"(sm={sm} tm={tm} 損切り遅延={stop_delay_bars}本 "
         f"ガード±{gap_guard * 100:.0f}% {qty}株 / **決済条件は現行と同一**)")
@@ -288,14 +305,14 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         if not _ig_ok(day5, c1):
             _sk["分割ガード"] += 1
             continue
-        if require_open_bar:
-            try:
-                if pd.Timestamp(day5.index[0]).strftime("%H:%M") != "09:00":
-                    _sk["先頭バーが09:00でない"] += 1
-                    continue
-            except Exception:
-                _sk["先頭バーが09:00でない"] += 1
-                continue
+        # 先頭バー時刻は require_open_bar が OFF でも要る(delay の数え直しに使う)
+        try:
+            _first_hm = pd.Timestamp(day5.index[0]).strftime("%H:%M")
+        except Exception:
+            _first_hm = ""
+        if require_open_bar and _first_hm != "09:00":
+            _sk["先頭バーが09:00でない"] += 1
+            continue
 
         # ── E: 寄成。寄りが −gap_guard を割るギャップダウンは約定不可 ──
         # ── H: 指値。既定は前日終値。LSS_H_LIMIT_TICKS で上下にずらせる ──
@@ -314,7 +331,20 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                  and (o1 >= _hl if _ha else True)),
                 _hd))
+        # ── 09:00のバーが無い日は delay を1本ぶん前倒しする ────────────────
+        # E/H の約定は **09:00 の板寄せ**。delay1 は「約定した5分足の間は損切りを
+        # 置かない」なので、無保護窓は 09:00-09:05 = ちょうど欠けている足。
+        # つまり **その足が見えなくても損切り判定には影響しない**(元から置かない)。
+        # 問題は数え方で、先頭が09:05だと ei=0 がその足になり、delay1 で
+        # 09:10武装 = 意図した delay1 が実質 delay2 になる(2026-08-12 発覚)。
+        # 欠けている1本を「消費済み」とみなして1本減らせば、09:05武装に揃う。
+        # ⚠ 板寄せ約定(寄りから建玉がある)のときだけ。ザラ場到達で建てた場合は
+        #    約定足が日中なので、寄りの欠落は delay の数えに関係しない。
+        _no_open_bar = _first_hm != "09:00"
         for key, order_p, ep, ok, _dly in _cases:
+            _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
+            if _no_open_bar and _at_open and _dly > 0:
+                _dly -= 1
             if not ok or ep <= 0:
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
