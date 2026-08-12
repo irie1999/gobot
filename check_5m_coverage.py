@@ -231,20 +231,37 @@ if args.dump > 0 and args.symbols and tgt is not None:
             print(f"  {ts.strftime('%H:%M'):<7}"
                   + "".join(f"{float(r[cmap[c]]):>9,.1f}" for c in cols if c != "volume")
                   + (f"{float(r[cmap['volume']]):>12,.0f}" if "volume" in cmap else ""))
-        # 日足の始値と突き合わせる。5分足の先頭が寄り値と一致するかで
-        # 「09:00のバーが欠けている」のか「単にラベルが09:05始まり」なのかが分かる。
+        # ★ 日足と5分足の 始値/高値/安値/終値 を全部突き合わせる。
+        #   高値・安値が一致するなら、5分足は **その日の値動きを全部カバー** して
+        #   いる(=寄りの板寄せ価格が open 欄に入っていないだけ)。その場合
+        #   require_open_bar の除外は **過剰** で、母集団を半分捨てていることになる。
+        #   高値か安値が5分足に無いなら、その時間帯は本当に見えていない。
         try:
             d = _fetch(f"{s_}.T", 200)
             d.index = pd.to_datetime(d.index).normalize()
             if pd.Timestamp(tgt) in d.index:
                 dc = {str(x).lower(): x for x in d.columns}
-                o = float(d.loc[pd.Timestamp(tgt), dc["open"]])
-                f0 = float(day.iloc[0][cmap["open"]])
-                print(f"  日足の始値 {o:,.1f} vs 5分足の先頭始値 {f0:,.1f} → "
-                      + ("一致(=寄りは入っている。ラベルが09:05なだけ)" if abs(o - f0) < 0.51
-                         else "不一致(=寄りのバーが欠けている)"))
-        except Exception:
-            pass
+                dd = d.loc[pd.Timestamp(tgt)]
+                do, dh, dl, dcl = (float(dd[dc["open"]]), float(dd[dc["high"]]),
+                                   float(dd[dc["low"]]), float(dd[dc["close"]]))
+                mo = float(day.iloc[0][cmap["open"]])
+                mh = float(day[cmap["high"]].max())
+                ml = float(day[cmap["low"]].min())
+                mc = float(day.iloc[-1][cmap["close"]])
+                print(f"\n  {'':<6}{'日足':>10}{'5分足':>10}{'判定':>8}")
+                for lab, a, b in (("始値", do, mo), ("高値", dh, mh),
+                                  ("安値", dl, ml), ("終値", dcl, mc)):
+                    ok = abs(a - b) < 0.51
+                    print(f"  {lab:<6}{a:>10,.1f}{b:>10,.1f}{'一致' if ok else '不一致':>8}")
+                if abs(dh - mh) < 0.51 and abs(dl - ml) < 0.51:
+                    print("  → 高値・安値が一致 = **5分足はその日の値動きを全部カバーしている**。")
+                    print("     寄りの板寄せ価格が open 欄に無いだけで、9:00-9:05 の値動きは")
+                    print("     高値/安値に含まれている。require_open_bar の除外は過剰の疑い。")
+                else:
+                    print("  → 高値または安値が5分足に無い = その時間帯は本当に見えていない。")
+                    print("     require_open_bar の除外は正しい。データを取り直す必要がある。")
+        except Exception as _e:
+            print(f"  (日足との突合に失敗: {_e})")
 
 
 # ── 正規化前の pickle をそのまま見る。ここが最後の切り分け ──────────────
