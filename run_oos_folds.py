@@ -82,6 +82,11 @@ def main():
                     help="レポート自身の予算タブ(月別P&L)を追記するCSV。**.\\daily と同じ計算経路**"
                          "なので、生CSVを sim_oos_budget.py で再シミュした値とズレたときの正解はこちら。"
                          "空文字で無効")
+    ap.add_argument("--no-bt-filter", action="store_true",
+                    help="BTの床を3箇所すべて0にして回す(LSS_NO_BT_FILTER=1)。"
+                         "生CSVにBT30未満の取引が入るので、sim_oos_budget で "
+                         "--bt-mins 0 が測れるようになる。既定の生CSVはプール床30で"
+                         "作られており、後からBT0を測ることはできない")
     ap.add_argument("--bt-tiers", type=str, default="30,40,50,60,70",
                     help="予算CSVに出すBT閾値(カンマ区切り)。1回の実行で複数層を比較できる")
     ap.add_argument("--days", type=int, default=730, help="レポートの集計窓(日)")
@@ -158,12 +163,21 @@ def main():
     #    このスクリプトの過去の出力(oos_raw_fold*.csv)は全部その状態で作られている。
     env["LSS_STOP_DELAY_BARS"] = "1"   # ライブ(watch.bat --stop-delay-bars 1)と揃える
     env["LSS_BT_TAB_MIN"] = "30"   # 2026-08-08: 40→30 (18.24)。daily.bat と揃える
+    if args.no_bt_filter:
+        # BTの床は3箇所にあり、うち2つはここで上書き/消去している。
+        # まとめて0にするスイッチを子プロセスへ渡す(nikkei_analysis 側で解釈)。
+        env["LSS_NO_BT_FILTER"] = "1"
+        if args.bt_tiers == "30,40,50,60,70":     # 既定のままなら0を含める
+            args.bt_tiers = "0,10,20,30,40"
+        print("[env] ★ BTフィルタ全部OFF (--no-bt-filter): "
+              "プール床 / 予算下限 / 明細タブ閾値 = 0")
     env.setdefault("LSS_ASOF_BT", "1") # 先読みなしのBT (18.11)。daily.bat と同じ
     # 発注順は lss_order_rank の既定(流動性順)を継承する。比較用に旧BT降順で回すなら
     # 呼び出し前に set LSS_ORDER_RANK=bt (18.21: BT降順はランダム6本すべてを下回る)。
     _rank = env.get("LSS_ORDER_RANK", "") or "(既定=流動性順)"
-    print(f"[env] stop_delay=1 / BT_TAB_MIN=40 / as-of BT={env['LSS_ASOF_BT']} / "
-          f"発注順={_rank}")
+    print(f"[env] stop_delay=1 / BT_TAB_MIN={env['LSS_BT_TAB_MIN']}"
+          f"{' (無効化)' if args.no_bt_filter else ''} / "
+          f"as-of BT={env['LSS_ASOF_BT']} / 発注順={_rank}")
     # ★ レポート自身の予算タブ(= .\daily と同じ _run_budget_sim)の月別P&Lを出させる。
     #    生CSV(LSS_OOS_RAW_CSV)を sim_oos_budget.py で再シミュした値とは経路が違うので、
     #    両者がズレたら **こちらが正**(実際に発注リストを作っているコードだから)。
