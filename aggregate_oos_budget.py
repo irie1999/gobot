@@ -37,7 +37,11 @@ ap.add_argument("--csv", default="oos_budget_folds.csv",
                 help="run_oos_folds.py --budget-csv で出したCSV")
 ap.add_argument("--sim-type", default="",
                 help="シムタイプで絞る(例: 通常予算)。空=全部")
-ap.add_argument("--by-month", action="store_true", help="月別の明細も出す")
+ap.add_argument("--by-month", action="store_true", help="月別の明細も出す(損益のみ・BT層を横並び)")
+ap.add_argument("--detail-bt", type=str, default="",
+                help="指定BT層の月別成績を **件数/勝率/損益/円件/累計** で出す。"
+                     "カンマ区切りで複数可。'all' で全層。損益だけの --by-month より"
+                     "月ごとの中身が分かる(件数が減っているのか、1件あたりが悪いのか)")
 ap.add_argument("--manifest", default="oos_folds_manifest.csv",
                 help="run_oos_folds.py が出す台帳(fold,train_months,oos_month,raw_csv)。"
                      "**これがあれば最優先で使う**。ファイル名からの推測より確実")
@@ -158,6 +162,42 @@ if args.by_month:
         print("  " + "-" * (9 + 14 * len(bts)))
         tot = {b: sum(by_mo[m].get(b, 0) for m in by_mo) for b in bts}
         print(f"  {'合計':<9}" + "".join(f"{tot[b]:>+14,.0f}" for b in bts))
+
+if args.detail_bt:
+    _want = (bts if args.detail_bt.strip().lower() == "all"
+             else [int(x) for x in args.detail_bt.split(",") if x.strip().lstrip("-").isdigit()])
+    for st in sim_types:
+        for bt in _want:
+            sub = {r["month"]: r for r in picked
+                   if r.get("sim_type") == st and int(_f(r.get("min_bt"))) == bt}
+            if not sub:
+                continue
+            print(f"\n■ 月別成績: {st} / BT>={bt}")
+            print(f"  {'月':<9}{'件数':>7}{'勝率':>8}{'損益':>13}{'円/件':>9}{'累計':>14}")
+            print("  " + "-" * 60)
+            _cum = 0.0
+            _ns = []
+            for mo in sorted(sub):
+                r = sub[mo]
+                n = int(_f(r.get("trades"))); w = int(_f(r.get("wins")))
+                v = _f(r.get("pnl")); _cum += v; _ns.append(v)
+                print(f"  {mo:<9}{n:>7}{(w / n * 100 if n else 0):>7.1f}%"
+                      f"{v:>+13,.0f}{(v / n if n else 0):>+9,.0f}{_cum:>+14,.0f}")
+            print("  " + "-" * 60)
+            _n = len(_ns)
+            _mu = sum(_ns) / _n if _n else 0.0
+            _sg = (sum((x - _mu) ** 2 for x in _ns) / (_n - 1)) ** 0.5 if _n > 1 else 0.0
+            _t = _mu / (_sg / _n ** 0.5) if _sg > 0 else 0.0
+            _tc = {9: 2.262, 8: 2.306, 7: 2.365, 6: 2.447, 5: 2.571}.get(_n - 1, 1.96)
+            _se = _sg / _n ** 0.5 if _n else 0.0
+            print(f"  月平均 {_mu:+,.0f} / 月次sigma {_sg:,.0f} / t={_t:+.2f} / "
+                  f"95%CI {_mu - _tc * _se:+,.0f} 〜 {_mu + _tc * _se:+,.0f} / "
+                  f"プラス月 {sum(1 for x in _ns if x > 0)}/{_n}")
+            if _t < 2:
+                _need = int(round((_sg * 2 / _mu) ** 2)) if _mu > 0 else 0
+                print(f"  [!] t<2 = まだ有意ではありません。"
+                      + (f"この平均とsigmaのままなら t=2 に **約{_need}ヶ月** 必要。"
+                         if _mu > 0 else "月平均がマイナスなので t=2 には到達しません。"))
 
 print("\n" + "─" * 84)
 print("※ この数字が `.\\daily` の損益タブと一致するはず。ズレる場合はレポート側の設定"
