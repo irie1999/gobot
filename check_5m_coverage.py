@@ -45,6 +45,9 @@ ap.add_argument("--first-bar-hist", type=int, default=0,
                 help="指定銘柄について直近N営業日の『先頭バー時刻』を数える。"
                      "『いつも09:05』なのか『最近だけ』なのかを切り分ける"
                      "(--symbols と併用)")
+ap.add_argument("--dump", type=int, default=0,
+                help="--symbols --date と併用。その日の5分足を先頭N本そのまま出す。"
+                     "09:00のバーが本当に無いのかを目で確認する用")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -197,3 +200,45 @@ if args.first_bar_hist > 0 and args.symbols:
         print(f"  {s_}  {line}")
         print(f"       直近5日: " + ", ".join(
             f"{k}({days[k].index[0].strftime('%H:%M')})" for k in ks[-5:]))
+
+
+# ── その日の5分足をそのまま出す。推測せず現物を見る ────────────────────
+if args.dump > 0 and args.symbols and tgt is not None:
+    for s_ in syms:
+        print(f"\n■ {s_} の {tgt} 5分足 (先頭{args.dump}本)")
+        try:
+            m = _li(s_, 400, source="local")
+        except Exception as e:
+            print(f"  読めません ({e})"); continue
+        if m is None or m.empty:
+            print("  5分足なし"); continue
+        day = m[m.index.normalize() == pd.Timestamp(tgt)]
+        if day.empty:
+            print(f"  {tgt} のバーが1本もありません")
+            _near = sorted({d.date() for d in m.index})[-5:]
+            print(f"  この銘柄の直近5営業日: {', '.join(str(d) for d in _near)}")
+            continue
+        cols = [c for c in ("open", "high", "low", "close", "volume")
+                if c in {str(x).lower(): x for x in day.columns}]
+        cmap = {str(x).lower(): x for x in day.columns}
+        print(f"  バー数 {len(day)}本 / 先頭 {day.index[0].strftime('%H:%M')} "
+              f"/ 末尾 {day.index[-1].strftime('%H:%M')}")
+        print(f"  {'時刻':<7}{'始値':>9}{'高値':>9}{'安値':>9}{'終値':>9}{'出来高':>12}")
+        for ts, r in day.head(args.dump).iterrows():
+            print(f"  {ts.strftime('%H:%M'):<7}"
+                  + "".join(f"{float(r[cmap[c]]):>9,.1f}" for c in cols if c != "volume")
+                  + (f"{float(r[cmap['volume']]):>12,.0f}" if "volume" in cmap else ""))
+        # 日足の始値と突き合わせる。5分足の先頭が寄り値と一致するかで
+        # 「09:00のバーが欠けている」のか「単にラベルが09:05始まり」なのかが分かる。
+        try:
+            d = _fetch(f"{s_}.T", 200)
+            d.index = pd.to_datetime(d.index).normalize()
+            if pd.Timestamp(tgt) in d.index:
+                dc = {str(x).lower(): x for x in d.columns}
+                o = float(d.loc[pd.Timestamp(tgt), dc["open"]])
+                f0 = float(day.iloc[0][cmap["open"]])
+                print(f"  日足の始値 {o:,.1f} vs 5分足の先頭始値 {f0:,.1f} → "
+                      + ("一致(=寄りは入っている。ラベルが09:05なだけ)" if abs(o - f0) < 0.51
+                         else "不一致(=寄りのバーが欠けている)"))
+        except Exception:
+            pass
