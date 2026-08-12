@@ -48,6 +48,9 @@ ap.add_argument("--first-bar-hist", type=int, default=0,
 ap.add_argument("--dump", type=int, default=0,
                 help="--symbols --date と併用。その日の5分足を先頭N本そのまま出す。"
                      "09:00のバーが本当に無いのかを目で確認する用")
+ap.add_argument("--raw-dump", type=int, default=0,
+                help="--symbols --date と併用。**正規化前の pickle そのもの** を先頭N行出す。"
+                     "09:00の行が元データに無いのか、読み込みで消えているのかを切り分ける")
 ap.add_argument("--workers", type=int, default=8)
 args = ap.parse_args()
 
@@ -242,3 +245,39 @@ if args.dump > 0 and args.symbols and tgt is not None:
                          else "不一致(=寄りのバーが欠けている)"))
         except Exception:
             pass
+
+
+# ── 正規化前の pickle をそのまま見る。ここが最後の切り分け ──────────────
+# ローダ(normalize_minute_df / resample_to_5m)は先頭バーを落とさない
+# (既に5分足なら素通し)。それでも09:00が無いなら **元データに無い**。
+if args.raw_dump > 0 and args.symbols and tgt is not None:
+    import pickle as _pk
+    from daytrade_data import DATA_DIR as _DD, yf_to_jquants as _y2j
+    for s_ in syms:
+        print(f"\n■ {s_} の pickle 生データ ({tgt} 先頭{args.raw_dump}行)")
+        fp = _DD / f"{_y2j(s_)}.pkl"
+        if not fp.exists():
+            print(f"  {fp} がありません"); continue
+        try:
+            raw = _pk.loads(fp.read_bytes())
+        except Exception as e:
+            print(f"  読めません ({e})"); continue
+        print(f"  ファイル: {fp.name} / 行数 {len(raw):,} / 列 {list(raw.columns)[:10]}")
+        # 日付列を探して当日ぶんに絞る
+        sub = None
+        for c in ("Date", "date"):
+            if c in raw.columns:
+                sub = raw[raw[c].astype(str).str[:10] == str(tgt)]
+                break
+        if sub is None:
+            for c in ("DateTime", "datetime"):
+                if c in raw.columns:
+                    sub = raw[raw[c].astype(str).str[:10] == str(tgt)]
+                    break
+        if sub is None and isinstance(raw.index, pd.DatetimeIndex):
+            sub = raw[raw.index.normalize() == pd.Timestamp(tgt)]
+        if sub is None or len(sub) == 0:
+            print(f"  {tgt} の行が見つかりません"); continue
+        print(f"  {tgt} の行数: {len(sub):,}")
+        with pd.option_context("display.width", 200, "display.max_columns", 20):
+            print(sub.head(args.raw_dump).to_string())
