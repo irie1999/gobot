@@ -82,6 +82,12 @@ def main():
                     help="レポート自身の予算タブ(月別P&L)を追記するCSV。**.\\daily と同じ計算経路**"
                          "なので、生CSVを sim_oos_budget.py で再シミュした値とズレたときの正解はこちら。"
                          "空文字で無効")
+    ap.add_argument("--stop-delay-bars", type=int, default=1,
+                    help="損切り遅延(既定1=watch.bat と一致)。2 にすると delay2 の"
+                         "ローリングOOSが測れる。⚠ 採用するならライブ(watch.bat "
+                         "--stop-delay-bars)とレポート(daily.bat LSS_STOP_DELAY_BARS)を"
+                         "必ず同時に変えること(18.9)。BTキャッシュは sd<N> で別管理"
+                         "なので、切り替えた初回は作り直しで遅い")
     ap.add_argument("--no-bt-filter", action="store_true",
                     help="BTの床を3箇所すべて0にして回す(LSS_NO_BT_FILTER=1)。"
                          "生CSVにBT30未満の取引が入るので、sim_oos_budget で "
@@ -161,7 +167,11 @@ def main():
     #      LSS_ASOF_BT          未設定(=OFF) → 過去の取引を『今日のBT』で並べる = **先読み**
     #    後者は致命的で、18.11 の実測では6ヶ月の損益が +2,270,229 → +276,975(-88%)動いた。
     #    このスクリプトの過去の出力(oos_raw_fold*.csv)は全部その状態で作られている。
-    env["LSS_STOP_DELAY_BARS"] = "1"   # ライブ(watch.bat --stop-delay-bars 1)と揃える
+    # ⚠ 既定1 = ライブ(watch.bat --stop-delay-bars 1)と揃える。--stop-delay-bars で変更可。
+    env["LSS_STOP_DELAY_BARS"] = str(int(args.stop_delay_bars))
+    if int(args.stop_delay_bars) != 1:
+        print(f"[env] ★ 損切り遅延を {args.stop_delay_bars} で測ります "
+              f"(ライブは watch.bat = 1)。採用するなら両方揃えること")
     env["LSS_BT_TAB_MIN"] = "30"   # 2026-08-08: 40→30 (18.24)。daily.bat と揃える
     if args.no_bt_filter:
         # BTの床は3箇所にあり、うち2つはここで上書き/消去している。
@@ -175,7 +185,7 @@ def main():
     # 発注順は lss_order_rank の既定(流動性順)を継承する。比較用に旧BT降順で回すなら
     # 呼び出し前に set LSS_ORDER_RANK=bt (18.21: BT降順はランダム6本すべてを下回る)。
     _rank = env.get("LSS_ORDER_RANK", "") or "(既定=流動性順)"
-    print(f"[env] stop_delay=1 / BT_TAB_MIN={env['LSS_BT_TAB_MIN']}"
+    print(f"[env] stop_delay={env['LSS_STOP_DELAY_BARS']} / BT_TAB_MIN={env['LSS_BT_TAB_MIN']}"
           f"{' (無効化)' if args.no_bt_filter else ''} / "
           f"as-of BT={env['LSS_ASOF_BT']} / 発注順={_rank}")
     # ★ レポート自身の予算タブ(= .\daily と同じ _run_budget_sim)の月別P&Lを出させる。
