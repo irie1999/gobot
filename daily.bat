@@ -86,6 +86,17 @@ REM     No --bt-min: the live order script does not filter by BT at all, matchin
 REM     the report above (BT filter OFF). Signal tab = what you order = what is
 REM     evaluated. Do NOT re-add --bt-min 30 from an older note.
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
+REM --- H setting sweep: OFF for the daily run (2026-08-13).
+REM     The "H setting comparison" table prices TEN variants (limit position x
+REM     auction-only x stop delay x sizing) off the 5-minute bars, and that is
+REM     the single biggest cost of the P&L tab. CLAUDE.md 18.36 settled the
+REM     settings: walk-forward lost to "change nothing" in all three blocks,
+REM     so there is nothing to decide from it on a daily basis.
+REM     The other three comparison blocks (current/E/H, order rank, per-strategy,
+REM     pre-open market) stay ON - they are cheap and they are what you read.
+REM     Re-measure roughly monthly, or whenever a rule changes:
+REM       set LSS_H_VARIANT_TAB=1 & .\daily --days 365
+if not defined LSS_H_VARIANT_TAB set "LSS_H_VARIANT_TAB=0"
 REM --- as-of BT ON: score every PAST trade with the BT it had AT SIGNAL TIME.
 REM     Without this, 93.7% of the trades in the PnL tab were scored with TODAY's BT
 REM     (measured 2026-08-07: frozen 866 / today 12,849). BT is built from the last

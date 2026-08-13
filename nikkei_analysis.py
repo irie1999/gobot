@@ -10314,7 +10314,12 @@ function switchTbd(id, tab) {{
                 in ("1", "true", "True", "yes")
             _hvars = [("H", _hte, _hae)]
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
-                    not in ("0", "false", "no"):
+                    in ("0", "false", "no"):
+                print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
+                      "10通りの設定を5分足から作り直すのが損益タブ最大の負荷で、"
+                      "18.36 で『設定は変えない』と決まっているので日次では不要。"
+                      "測り直すときは set LSS_H_VARIANT_TAB=1", flush=True)
+            else:
                 for _vt, _va in ((0, False), (-5, False),
                                  (0, True), (-2, True), (-5, True), (-10, True)):
                     if (_vt, _va) == (_hte, _hae):
