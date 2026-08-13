@@ -254,19 +254,32 @@ _LSS_ORDER_MODE: bool = False
 #    H の実発注は lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
 _LSS_H_ENTRY: bool = str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes")
 # ── BTフィルタを丸ごと外す1スイッチ (LSS_NO_BT_FILTER=1) ────────────────
-# BTの床は **3箇所** にあり、しかも2つは .bat が上書き/消去するので、env を
+# BTの床は **4箇所** にあり、しかも2つは .bat が上書き/消去するので、env を
 # 個別に立てても効かない(2026-08-12 に実際にハマった):
-#   ① _POOL_MIN_BT   予算シミュの候補プール(_bt30_entry_sorted)     LSS_POOL_MIN_BT
-#   ② _BUD_MIN_BT    予算シミュのBT下限                             LSS_BUDGET_MIN_BT ← .bat が消す
-#   ③ _BT_TAB_MIN    「BT○以上」明細タブ + _BUD_FLOOR に合成        LSS_BT_TAB_MIN    ← .bat が上書き
-# 3つ揃わないと外れないので、まとめて0にするスイッチを用意する。
+#   ① _POOL_MIN_BT    予算シミュの候補プール(_bt30_entry_sorted)    LSS_POOL_MIN_BT
+#   ② _BUD_MIN_BT     予算シミュのBT下限                            LSS_BUDGET_MIN_BT ← .bat が消す
+#   ③ _BT_TAB_MIN     「BT○以上」明細タブ + _BUD_FLOOR に合成       LSS_BT_TAB_MIN    ← .bat が上書き
+#   ④ _NOFILL_MIN_BT  不約定プール(all_nofills)                     ← **ベタ書き30だった**
+# 4つ揃わないと外れないので、まとめて0にするスイッチを用意する。
+# ④ は 2026-08-13 に発覚。実発注した 5844/7186/9508 が『テストの母集団に無い』
+# 状態を作っていた(E/H の母集団は _bt30_entry_sorted + all_nofills なので、
+# ここで捨てられると H の約定判定にすら到達しない)。
 # BTが効くという証拠は6回測って6回とも出ていない(18.12/18.13/18.21/18.24 と
 # 2026-08-12)ので、これは『外した場合』を測るための正規の出口。
 _NO_BT_FILTER: bool = str(os.environ.get("LSS_NO_BT_FILTER", "")).strip() \
     in ("1", "true", "True", "yes")
 if _NO_BT_FILTER:
     print("[BTフィルタ] 全部OFF (LSS_NO_BT_FILTER=1): "
-          "プール床 / 予算下限 / 明細タブ閾値 をすべて 0 にします", flush=True)
+          "プール床 / 予算下限 / 明細タブ閾値 / 不約定プール "
+          "をすべて 0 にします", flush=True)
+# 不約定(nofill)プールの BT 下限。**4つ目の床**で、env で外せずベタ書きの 30 だった。
+# ⛔ 2026-08-13: 実発注した 5844/7186/9508 が『テストの母集団に無い』となった原因。
+#    lss がトリガー未達で不約定 → nofill プール行き → ここで BT30 未満として捨てられ、
+#    E/H の母集団(= _bt30_entry_sorted + all_nofills)にも入らなかった。
+#    H は自前の約定判定(寄りが指値以上なら板寄せ)を持つのに、lss 側の BT 床で
+#    評価対象から消えていた。BT はアルゴリズムから外す決定(2026-08-12)の取り残し。
+_NOFILL_MIN_BT: float = 0.0 if _NO_BT_FILTER else float(
+    os.environ.get("LSS_POOL_MIN_BT", "30") or 30)
 # ポジションサイズ方式。"atr" = リスク(損切り幅×株数)を _SIZE_TARGET 円に揃える。
 # 既定 "" = 従来どおり100株固定。H タブのシグナル株数と lss_budget_cap で使う。
 _SIZE_MODE: str = str(os.environ.get("LSS_SIZE_MODE", "")).strip().lower()
@@ -8053,8 +8066,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                             _n_sc = 0
                     if _n_sc is None:
                         _n_sc = rec_score2
-                    if _n_sc < 30:
-                        continue   # BT30未満は注文しない → 枠も消費しない
+                    if _NOFILL_MIN_BT > 0 and _n_sc < _NOFILL_MIN_BT:
+                        continue   # 床未満は注文しない → 枠も消費しない
+                        #  ⛔ ここは以前ベタ書きの 30 で、LSS_NO_BT_FILTER が
+                        #     効かない**4つ目の床**だった(2026-08-13 発覚)。
                     all_nofills.append({
                         "symbol": sym, "name": name, "strategy": strat,
                         "rec_score": _n_sc, "score": _n_sc,
