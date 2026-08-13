@@ -139,8 +139,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #   = H の最適な delay は現行と違いうる。だから測る。
     if not variants:
         variants = [("H", _h_ticks, _h_auction_only)]
+    # v = (ラベル, 指値ティック, 寄指か, [損切り遅延], [損切りアンカー])
+    #   損切りアンカー: "fill"(既定/実約定基準) | "max"(max(実約定,前日終値)基準)
+    #   ⛔ 実約定基準は **寄りが指値より上で約定するケースに必須**(前日終値基準だと
+    #      損切りが約定値より下に来て、建てた瞬間に成立する)。だが **指値〜前日終値の
+    #      間で約定したケースでは不要**で、そこだけ損切りが不必要にタイトになる。
+    #      max(実約定, 前日終値) なら前者は今と同じ、後者だけ広がって破綻もしない。
     _HV = [(str(v[0]), int(v[1]), bool(v[2]),
-            (int(v[3]) if len(v) > 3 and v[3] is not None else int(stop_delay_bars)))
+            (int(v[3]) if len(v) > 3 and v[3] is not None else int(stop_delay_bars)),
+            (str(v[4]) if len(v) > 4 and v[4] else "fill"))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -322,15 +329,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
         _cases = [("E", o1, o1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
-                   int(stop_delay_bars))]
-        for _hn, _ht_, _ha, _hd in _HV:
+                   int(stop_delay_bars), "fill")]
+        for _hn, _ht_, _ha, _hd, _hanc in _HV:
             _hl = float(_r2t(pc + _ht_ * _tsz(pc))) if _ht_ else pc
             _cases.append((
                 _hn, _hl, (o1 if o1 >= _hl else _hl),
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                  and (o1 >= _hl if _ha else True)),
-                _hd))
+                _hd, _hanc))
         # ── 09:00のバーが無い日は delay を1本ぶん前倒しする ────────────────
         # E/H の約定は **09:00 の板寄せ**。delay1 は「約定した5分足の間は損切りを
         # 置かない」なので、無保護窓は 09:00-09:05 = ちょうど欠けている足。
@@ -341,7 +348,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ⚠ 板寄せ約定(寄りから建玉がある)のときだけ。ザラ場到達で建てた場合は
         #    約定足が日中なので、寄りの欠落は delay の数えに関係しない。
         _no_open_bar = _first_hm != "09:00"
-        for key, order_p, ep, ok, _dly in _cases:
+        for key, order_p, ep, ok, _dly, _anc in _cases:
             _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
@@ -351,15 +358,17 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 continue
             if key != "E":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
-                xp, why, _e, _x = _x5(day5, ep, ep + atr * sm, ep - atr * tm, True,
+                _sa = max(ep, pc) if _anc == "max" else ep      # 損切りアンカー
+                xp, why, _e, _x = _x5(day5, ep, _sa + atr * sm, _sa - atr * tm, True,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             else:
                 # 寄りから建玉があるので ei=0 を強制する(+inf を渡す)。
                 # そのまま渡すと「寄りが上に飛び昼に建値へ戻った」日の朝の
                 # 含み損が判定から丸ごと抜け、負けだけが系統的に消える(18.32)。
+                _sa = ep                                        # E は寄成なので常に実約定
                 xp, why, _e, _x = _x5(day5, float("inf"),
-                                      ep + atr * sm, ep - atr * tm, False,
+                                      _sa + atr * sm, _sa - atr * tm, False,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             if xp is None or why in ("no_5m", "no_entry"):
@@ -375,7 +384,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 pass
             out[key].extend(_mk(s, order_p, ep, float(xp),
                                 _REASON.get(why, why), _t,
-                                pc, atr, sm, tm, qty, key) for s in _srcs)
+                                pc, atr, sm, tm, qty, key, _sa) for s in _srcs)
     _skip = sum(_sk.values())
     log("[E/H] 約定 " + " / ".join(
         f"{k}={len(out[k]):,}" for k in ["E"] + _HKEYS)
@@ -405,7 +414,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
 
 
 def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
-        pc, atr, sm, tm, qty, key):
+        pc, atr, sm, tm, qty, key, stop_anchor=None):
     """元トレードをコピーして約定・決済まわりだけ差し替える。
 
     銘柄名・BT/WFスコア・ランク・設定ラベル等はそのまま残すので、
@@ -415,8 +424,9 @@ def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
     t["entry_p"] = round(float(entry_p), 1)
     t["exit_p"] = round(float(exit_p), 1)
     t["order_limit"] = round(float(order_p), 1)
-    t["order_stop"] = round(float(entry_p + atr * sm), 1) if entry_p else 0.0
-    t["order_target"] = round(float(entry_p - atr * tm), 1) if entry_p else 0.0
+    _sa = float(stop_anchor if stop_anchor else entry_p or 0.0)
+    t["order_stop"] = round(float(_sa + atr * sm), 1) if entry_p else 0.0
+    t["order_target"] = round(float(_sa - atr * tm), 1) if entry_p else 0.0
     t["stop_price"] = t["order_stop"]
     t["target_price"] = t["order_target"]
     t["qty"] = qty
