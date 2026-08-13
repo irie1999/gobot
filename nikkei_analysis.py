@@ -10429,7 +10429,11 @@ function switchTbd(id, tab) {{
     # 母集団は約定・不約定の全候補 = シグナルタブに並ぶものと同じ。
     try:
         _rk_day: dict = _dd(list)
-        for _t in list(_bt30_entry_sorted) + list(all_nofills):
+        # ⛔ _eh_pending(当日ぶんの未決着シグナル)も入れる。入れないと当日の行に
+        #    順位が付かず、しかも残りの順位が繰り上がって**シグナルタブとズレる**
+        #    (2026-08-13: 4023 が実際は#8 なのに #2 と表示された)。
+        for _t in (list(_bt30_entry_sorted) + list(all_nofills)
+                   + list(_eh_pending)):
             if _t.get("strategy") == "転換":
                 continue
             _rk_day[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
