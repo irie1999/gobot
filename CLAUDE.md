@@ -43,6 +43,18 @@
   - `daytrade_data.py` の `DATA_DIR` は自動検出する (`_resolve_data_dir`):
     環境変数 `MINUTE_5M_DIR` → `data/minute_5m` → 隣接 `stock_5min` の順。
   - 明示指定するなら各スクリプトの `--data-dir` か `set MINUTE_5M_DIR=...` で固定。
+- **1分足は別の場所にある。`stock_5min` には無い。**
+  - Windows実体: `C:\Users\to732\.jquants_cache\minute\<コード>_1m.pkl` (銘柄ごとに1ファイル)
+  - 解決は `tenkan_sim.find_minute_dirs()`: 環境変数 `MINUTE_1M_DIR` → 無ければ
+    `~/.jquants_cache/minute`。**5分足とは解決ロジックも置き場も別**なので混同しないこと。
+  - 取得は `python fetch_1m_all.py` (既定760日≒2年ローリング上限 / 中断→再開可 /
+    `--refetch` で取り直し)。J-Quants の分足アドオンは全プラン2年ローリングなので
+    5分足と同じく **2024-07 が最古**。
+  - 在庫確認は `python check_minute_data.py`。
+  - 用途: `verify_stop_fill_1m.py` (5分足モデルの検証 / §18.22) など。
+    **1分足で測れるのは「1分以上保有する」戦略まで**。1分足の中の値動きの順序
+    (高値と安値のどちらが先か) は分からないので、同一足内でエントリー→決済する
+    戦略は測れない。板・歩み値・ティックの履歴は**存在しない**。
 - 日足のスイング用データは `.rsi2_cache/` (yfinance永続キャッシュ)。こちらは別物。
 
 ---
