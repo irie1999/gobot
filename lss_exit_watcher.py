@@ -304,9 +304,33 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
                       f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
                       f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
             else:
-                print(f"  [!] {sym} H({rec.get('mode')})だが ATR/sm/tm が取れません"
-                      f"(atr={_atr} sm={_sm} tm={_tm}) → 注文価格基準のまま使います。"
-                      f"ordered_signals_lss.csv を確認してください")
+                # ⛔ ATR が無くても『注文価格基準のまま』にしてはいけない(2026-08-12 事故)。
+                #    H は寄りが指値より上で約定するので、注文価格基準の損切りは
+                #    ほぼ必ず約定値より下に来る → 直後の安全ガードで**損切りが丸ごと
+                #    無効化**される(= 無防備で引けまで持つ)。実際 2026-08-13 の寄りで
+                #    4銘柄すべてがこの状態になった。
+                #    ATR が無くても、記録にある (注文価格, 損切, 利確) の**差分**は
+                #    そのまま使える。元が stop = 注文価格 + ATR*sm で作られている以上、
+                #    差分を実約定値に平行移動すれば ATR 基準の再計算と完全に一致する。
+                _ep0 = float(rec.get("entry", 0) or 0)
+                _os, _ot = (float(rec.get("stop", 0) or 0),
+                            float(rec.get("target", 0) or 0))
+                if avg > 0 and _ep0 > 0 and _os > _ep0 and 0 < _ot < _ep0:
+                    rec = dict(rec)
+                    rec["stop"] = avg + (_os - _ep0)
+                    rec["target"] = avg - (_ep0 - _ot)
+                    print(f"  [{rec.get('mode')}] {sym} ATR不明 → 注文価格{_ep0:,.0f}からの"
+                          f"**差分**を実約定{avg:,.0f}へ平行移動: "
+                          f"損切 {_os:,.0f}→{rec['stop']:,.0f} "
+                          f"(+{_os - _ep0:,.0f}) / "
+                          f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
+                          f"(-{_ep0 - _ot:,.0f})")
+                else:
+                    print(f"  [!] {sym} H({rec.get('mode')})だが ATR も 注文価格/損切/利確 も"
+                          f"取れません(atr={_atr} sm={_sm} tm={_tm} "
+                          f"entry={_ep0} stop={_os} target={_ot}) → "
+                          f"注文価格基準のまま。**損切りが無効化される可能性が高いので"
+                          f"手動で逆指値買いを置いてください**")
         # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。損切≤平均約定=逆側/陳腐化した
         # 注文の疑い → その損切りは無効化して誤決済を防ぐ(利確・引けは有効のまま)。マッチ改善後も
         # なお不整合な場合の最終防波堤。0.1ATRのタイト損切りでも avg より上なので通常は発火しない。
