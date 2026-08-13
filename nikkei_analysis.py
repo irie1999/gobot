@@ -9756,13 +9756,23 @@ function switchTbd(id, tab) {{
     def _sig_d(t):
         _s = t.get("signal_dt")
         return _s.date() if hasattr(_s, "date") else _s
-    _pend_sigs = [d for d in (_sig_d(t) for t in _eh_pend_all) if d]
+    #    ⛔ さらに、レポートは引け後に回すので **当日の終値で出たシグナル**(=翌営業日
+    #       に建てるもの)も『発注中』に入る。しかも entry_dt は一律で最終バーなので、
+    #       そのまま使うと『まだ相場が来ていない注文』を当日の寄りで建てたことになる。
+    #       → シグナル日が最終バー **未満** のものだけを対象にし、その中の最新日を採る。
+    #         最終バーが 08-13 なら、採用するのは 08-12 のシグナル(=08-13 に建てる)。
+    _pend_ent = [d for d in (t.get("entry_d_raw") for t in _eh_pend_all) if d]
+    _last_bar = max(_pend_ent) if _pend_ent else None
+    _pend_sigs = [d for d in (_sig_d(t) for t in _eh_pend_all)
+                  if d and (_last_bar is None or str(d) < str(_last_bar))]
     _pend_last = max(_pend_sigs) if _pend_sigs else None
-    _eh_pending = [t for t in _eh_pend_all if _sig_d(t) == _pend_last] if _pend_last else []
-    if _eh_pend_all and len(_eh_pending) != len(_eh_pend_all):
-        print(f"[E/H] 発注中 {len(_eh_pend_all)}件 のうち、最新シグナル日"
-              f"({_pend_last}) の {len(_eh_pending)}件だけを母集団に入れます"
-              f"(H は寄り1回で判定。期限3日の持ち越しは無い)", flush=True)
+    _eh_pending = ([t for t in _eh_pend_all if _sig_d(t) == _pend_last]
+                   if _pend_last else [])
+    if _eh_pend_all:
+        print(f"[E/H] 発注中 {len(_eh_pend_all)}件 → シグナル日 {_pend_last} の "
+              f"{len(_eh_pending)}件だけを母集団に入れます"
+              f"(最終バー={_last_bar}。H は寄り1回で判定し、期限3日の持ち越しが"
+              f"無いので、それ以前のシグナルと翌営業日ぶんは除く)", flush=True)
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
     # 全取引CSV(env LSS_TRADES_CSV=path): done_trades(全決済済み・全BT・切り捨て無し)を丸ごと出力。
