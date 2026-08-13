@@ -122,6 +122,9 @@ SUM = np.zeros((NSIG, len(NS), NZ, NBMAX, _MAXDAY), dtype=np.float64)
 CNT = np.zeros((NSIG, len(NS), NZ, NBMAX, _MAXDAY), dtype=np.float64)
 # 1銘柄日あたりの機会数を数えるため、銘柄日数も持つ
 NSYMDAY = [0]
+# 建玉の計算に使う実価格(採用銘柄の最終終値)。--only のとき価格帯フィルタの
+# 値を流用すると ETF の実価格とずれるので、実際に採用したものを覚えておく。
+_PRICES: list = []
 
 
 def _day_index(day: str) -> int:
@@ -368,6 +371,7 @@ def main() -> int:
                                 nday += 1
                                 NSYMDAY[0] += 1
                         nsym += 1
+                        _PRICES.append(px)
         except Exception as e:
             why["エラー"] += 1
             if len(errs) < 3:
@@ -383,7 +387,8 @@ def main() -> int:
             print(f"    {e}")
         sys.exit("[error] 観測が0件。")
     print()
-    print(f"  採用 {nsym}銘柄 / {nday:,}銘柄日 / {nobs:,}観測 / {len(_DAYIDX)}営業日")
+    print(f"  採用 {nsym}銘柄 / {nday:,}銘柄日 / {nobs:,}観測 / {len(_DAYIDX)}営業日"
+          + (f" / 価格中央値 {np.median(_PRICES):,.0f}円" if _PRICES else ""))
     print()
 
     allmask = np.zeros(_MAXDAY, dtype=bool)
@@ -441,7 +446,8 @@ def main() -> int:
     hit.sort(key=lambda r: -abs(r["bp"]))
     nsd = max(1, NSYMDAY[0])
     ndays = max(1, len(_DAYIDX))
-    px = max(args.min_price, 1.0) if args.min_price > 0 else 3000.0
+    px = (float(np.median(_PRICES)) if _PRICES
+          else (max(args.min_price, 1.0) if args.min_price > 0 else 3000.0))
     lot = px * args.qty
     slots = max(1.0, args.budget / lot)
     out_rows = []
