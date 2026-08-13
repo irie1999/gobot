@@ -1787,7 +1787,17 @@ if _na._PNL_BT_MAX > 0 or _na._PNL_BT_MIN > 0:
 if _args.mirror:
     _mode_label_ja = f"（ロングミラー・指値空売り/同日決済{_bt_flt_lbl}）"
 elif _args.long_stop_short:
-    _mode_label_ja = f"（ロング銘柄ショート・逆指値空売り/同日決済{_bt_flt_lbl}）"
+    # ⛔ 実際に出しているのは H(前日終値-5tick の**指値**売り)。LSS_H_ENTRY のときに
+    #    「逆指値空売り」と書くと、毎朝見る画面が実態と食い違う(2026-08-13 指摘)。
+    if str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes"):
+        try:
+            _htk = int(os.environ.get("LSS_H_LIMIT_TICKS", "-5") or -5)
+        except Exception:
+            _htk = -5
+        _mode_label_ja = (f"（H 指値ショート・前日終値{_htk:+d}ティックの指値売り"
+                          f"/同日決済{_bt_flt_lbl}）")
+    else:
+        _mode_label_ja = f"（ロング銘柄ショート・逆指値空売り/同日決済{_bt_flt_lbl}）"
 elif getattr(_args, "long_daytrade", False):
     _mode_label_ja = f"（ロングデイトレ・逆指値買い/同日決済{_bt_flt_lbl}）"
 elif _args.short:

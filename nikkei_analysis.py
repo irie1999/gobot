@@ -13447,6 +13447,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
     _bt40liq_btn = ""
     _bt40liq_pane = ""
+    # ⛔ BTを画面に出さない方針(2026-08-13)。BT60以上タブも落とす。LSS_SHOW_BT=1 で復活。
+    _bt60_btn = ('' if not _SHOW_BT else
+                 f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'
+                 f'\'bt60\')" style="border-color:#16a34a">🎯 BT60以上 '
+                 f'<span style="font-size:0.72rem;color:#86efac">'
+                 f'({len(bt60_trades)})</span></button>')
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
@@ -15063,7 +15069,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # BT60以上のみ投資版(高品質集中)予算タブ。
     _bt70liq_btn = ""
     _bt70liq_pane = ""
-    if _LSS_ORDER_MODE and _budget60_entry_sorted_short:
+    # ⛔ BT60以上の予算タブも落とす(2026-08-13: BTは画面に出さない)。
+    if _LSS_ORDER_MODE and _budget60_entry_sorted_short and _SHOW_BT:
         _bt70liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget60\')" '
             f'style="border-color:#a78bfa">💰 {_budget_man}万円×{_ORD_LBL}×日別 (BT60以上) '
@@ -15629,7 +15636,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
   <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'bt60')" style="border-color:#16a34a">🎯 BT60以上 <span style="font-size:0.72rem;color:#86efac">({len(bt60_trades)})</span></button>
+  {_bt60_btn}
   <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
   {_bt40liq_btn}
   {_bt70liq_btn}
