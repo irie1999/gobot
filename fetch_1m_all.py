@@ -43,6 +43,9 @@ ap = argparse.ArgumentParser(description="J-Quants 1分足を取れるだけ全�
 ap.add_argument("--days", type=int, default=760, help="遡及日数(既定760≒2年ローリング上限)")
 ap.add_argument("--interval", default="1m", choices=["1m", "5m", "15m"])
 ap.add_argument("--universe", default="local", choices=["local", "prime", "all"])
+ap.add_argument("--only", default=None,
+                help="銘柄を明示指定(カンマ区切り)。ETF など stock_5min に無いものを"
+                     "直接取りに行く用。指定時は --universe を無視する")
 ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(0=全部)")
 ap.add_argument("--sleep", type=float, default=0.2, help="銘柄間の小休止秒")
 ap.add_argument("--retry", type=int, default=4, help="レート制限/エラー時のリトライ回数")
@@ -51,6 +54,9 @@ args = ap.parse_args()
 
 
 def universe() -> list[str]:
+    if args.only:
+        # stock_5min に無い銘柄(ETF など)を直接指定して取りに行く。
+        return [_jq_to_yf(x) for x in str(args.only).split(",") if x.strip()]
     if args.universe == "local":
         return [_jq_to_yf(s) for s in available_local_symbols()]
     if args.universe == "prime":
