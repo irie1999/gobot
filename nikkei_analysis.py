@@ -9745,7 +9745,24 @@ function switchTbd(id, tab) {{
     #    **その日に出たシグナル全部**でなければならない。ここを落とすと、
     #    当日の実発注が『テストの母集団に無い』になる(2026-08-13 に発生)。
     #    HTML明細に出さない方針(幽霊表示防止)はそのまま = pending_trades は空のまま。
-    _eh_pending = [t for t in display_trades if t.get("reason") == "発注中"]
+    _eh_pend_all = [t for t in display_trades if t.get("reason") == "発注中"]
+    # ⛔ ただし『発注中』は **未発動の注文を全部** 最終バーの日付で記録している
+    #    (backtest_limit_entry:1181-1190 が entry_dt=df.index[-1] を一律で入れる)。
+    #    つまり数日前のシグナルで、まだ有効期限内なだけの注文まで混ざる。
+    #    H は寄りで一度だけ判定して終わり(期限3日の持ち越しが無い)ので、
+    #    **最新のシグナル日のぶんだけ** を母集団に入れる。
+    #    これを外すと 2026-08-13 の母集団が 38→100件 に膨らみ、ライブの
+    #    シグナル一覧(51件)より多くなった。
+    def _sig_d(t):
+        _s = t.get("signal_dt")
+        return _s.date() if hasattr(_s, "date") else _s
+    _pend_sigs = [d for d in (_sig_d(t) for t in _eh_pend_all) if d]
+    _pend_last = max(_pend_sigs) if _pend_sigs else None
+    _eh_pending = [t for t in _eh_pend_all if _sig_d(t) == _pend_last] if _pend_last else []
+    if _eh_pend_all and len(_eh_pending) != len(_eh_pend_all):
+        print(f"[E/H] 発注中 {len(_eh_pend_all)}件 のうち、最新シグナル日"
+              f"({_pend_last}) の {len(_eh_pending)}件だけを母集団に入れます"
+              f"(H は寄り1回で判定。期限3日の持ち越しは無い)", flush=True)
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
     # 全取引CSV(env LSS_TRADES_CSV=path): done_trades(全決済済み・全BT・切り捨て無し)を丸ごと出力。
