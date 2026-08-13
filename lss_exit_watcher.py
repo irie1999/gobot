@@ -90,7 +90,15 @@ MARKET_END = dtime(15, 30)    # 大引け(東証, 2024/11/5以降は15:30)。こ
 # ショートで損切り無しは青天井なので、0 にしない限り必ず何かしらの損切りを置く。
 _EMERG_STOP_PCT = 0.01
 
+# H の指値を前日終値から何ティックずらしたか。前日終値の復元に使う(--h-limit-ticks)。
+# レポート/発注側の LSS_H_LIMIT_TICKS と必ず同じ値にすること。
+_H_LIMIT_TICKS = -5
+
 _LOCK = _BASE / ".lss_watcher.lock"
+# 建玉の初回検知時刻を日付つきで残す。**場中に再起動しても delay の窓を作り直さない**
+# ため(2026-08-13: 09:06 に再起動したら武装が 09:05→09:10 に後ろ倒しになり、
+# 無保護窓が5分→10分に伸びた)。
+_SEEN = _BASE / ".lss_watcher_seen.json"
 _LOCK_STALE = 180
 
 
@@ -113,6 +121,46 @@ def _touch_lock() -> None:
 def _release_lock() -> None:
     try:
         _LOCK.unlink()
+    except Exception:
+        pass
+
+
+def _tick(p: float) -> float:
+    """東証の呼値。取れなければ 1 円(安全側=前日終値の復元幅を小さめに見積もる)。"""
+    try:
+        from backtest_limit_entry import tick_size
+        return float(tick_size(float(p)))
+    except Exception:
+        return 1.0
+
+
+def _ceil_tick(p: float) -> float:
+    """ライン直上のティック(レポートの _c2t と同じ)。"""
+    import math
+    t = _tick(p)
+    try:
+        return math.ceil(float(p) / t) * t
+    except Exception:
+        return float(p)
+
+
+def _load_seen(today: str) -> dict:
+    """前回起動が残した『初回検知時刻』を読む(今日ぶんだけ)。"""
+    import json
+    try:
+        d = json.loads(_SEEN.read_text(encoding="utf-8"))
+        return {k: datetime.fromisoformat(v)
+                for k, v in (d.get(today) or {}).items()}
+    except Exception:
+        return {}
+
+
+def _save_seen(today: str, seen: dict) -> None:
+    import json
+    try:
+        _SEEN.write_text(json.dumps(
+            {today: {k: v.isoformat() for k, v in seen.items()}},
+            ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -307,6 +355,31 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
                       f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
                       f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
                       f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
+            elif avg > 0 and _sm > 0 and _tm > 0:
+                # ── ATR が記録に無いとき: **前日終値を復元して** ATR を逆算する ──
+                # レポートの損切/利確は **前日終値基準** (nikkei_analysis:2493-2495):
+                #     損切 = ceil_tick(前日終値 + ATR*sm) / 利確 = ceil_tick(前日終値 - ATR*tm)
+                # H の指値は 前日終値 + h_ticks*tick なので、逆に足せば前日終値に戻せる。
+                # ⛔ 2026-08-13 の初版は差分を**指値**から測っていたため、
+                #    5ティック(=25円)ぶん損切りが広がった。sm=0.1 の幅は 5〜12円しか
+                #    ないので、幅が実質3倍になり sm≈0.3 相当で回っていた。
+                _ep0 = float(rec.get("entry", 0) or 0)
+                _os, _ot = (float(rec.get("stop", 0) or 0),
+                            float(rec.get("target", 0) or 0))
+                _cl = _ep0 - _H_LIMIT_TICKS * _tick(_ep0) if _ep0 > 0 else 0.0
+                _sw, _tw = (_os - _cl), (_cl - _ot)
+                if _cl > 0 and _sw > 0 and _tw > 0:
+                    rec = dict(rec)
+                    rec["stop"] = _ceil_tick(avg + _sw)
+                    rec["target"] = _ceil_tick(avg - _tw)
+                    print(f"  [{rec.get('mode')}] {sym} ATR不明 → 指値{_ep0:,.0f}から"
+                          f"前日終値{_cl:,.0f}を復元({-_H_LIMIT_TICKS}tick戻し)して"
+                          f"実約定{avg:,.0f}基準に: "
+                          f"損切 {_os:,.0f}→{rec['stop']:,.0f} (幅{_sw:,.1f}) / "
+                          f"利確 {_ot:,.0f}→{rec['target']:,.0f} (幅{_tw:,.1f})")
+                else:
+                    print(f"  [!] {sym} 前日終値を復元できません"
+                          f"(指値={_ep0} 損切={_os} 利確={_ot}) → 注文価格基準のまま")
             else:
                 # ⛔ ATR が無くても『注文価格基準のまま』にしてはいけない(2026-08-12 事故)。
                 #    H は寄りが指値より上で約定するので、注文価格基準の損切りは
@@ -496,10 +569,17 @@ def main() -> int:
                          "(2026-08-13 事故: 4銘柄すべて無防備)、ショートの損切り無しは青天井なので"
                          "**必ず引き上げる**。記録に (注文価格,損切) の差分があればそちらを優先し、"
                          "無いときだけこの%%を使う。0=旧挙動(無効化)")
+    ap.add_argument("--h-limit-ticks", type=int,
+                    default=int(os.environ.get("LSS_H_LIMIT_TICKS", "-5") or -5),
+                    help="H の指値を前日終値から何ティックずらして出したか(既定 -5 / "
+                         "env LSS_H_LIMIT_TICKS)。発注記録に ATR が無いとき、指値から"
+                         "前日終値を復元して損切/利確の幅を測るのに使う。⛔ レポート・発注側と"
+                         "必ず同じ値にすること(ズレるとその分だけ損切り幅がずれる)")
     args = ap.parse_args()
 
-    global _EMERG_STOP_PCT
+    global _EMERG_STOP_PCT, _H_LIMIT_TICKS
     _EMERG_STOP_PCT = max(0.0, float(args.emergency_stop_pct)) / 100.0
+    _H_LIMIT_TICKS = int(args.h_limit_ticks)
 
     close_at = _parse_hhmm(args.close_at)
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
@@ -639,9 +719,16 @@ def _run(args, close_at, today) -> int:
     moc_placed: set = set()    # 引けMOCを出した銘柄(pkey)。引けは銘柄ごとに1回だけ(重複キュー防止)。
     close_cool: dict = {}      # pkey(銘柄) -> 直近に成行決済を送った時刻(unix秒)。部分約定の
                                #   残玉を再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
-    first_seen: dict = {}      # pkey -> この建玉を最初に検知した時刻(datetime)。delay1の損切り
+    first_seen: dict = _load_seen(today)
+                               # pkey -> この建玉を最初に検知した時刻(datetime)。delay1の損切り
                                #   設置開始時刻(次の5分グリッド)の起点。lssは寄り約定+watcherは
                                #   寄りから常駐なので検知≒約定時刻。決済で消して再エントリーに備える。
+                               # ★ 場中に再起動しても窓を作り直さないよう、ファイルから復元する
+                               #   (2026-08-13: 09:06 再起動で武装が 09:05→09:10 に後ろ倒しになり、
+                               #    無保護窓が5分→10分に伸びた)。
+    if first_seen:
+        print(f"  前回起動の初回検知時刻を復元: "
+              + " / ".join(f"{k}={v:%H:%M}" for k, v in sorted(first_seen.items())))
     _CLOSE_COOLDOWN = 20.0     # 秒。成行決済を送ったら同じ建玉にはこの秒数だけ再送しない
                                #   (約定 or 取消の確定待ち)。残玉が残ればクールダウン後に再決済。
     _hcycle = 0                # 保有タブ更新用のサイクルカウンタ
@@ -772,6 +859,7 @@ def _run(args, close_at, today) -> int:
                 #   利確(③)・引けはこの間も有効。検知≒約定時刻(lssは寄り約定+寄りから常駐)。
                 if pk not in first_seen:
                     first_seen[pk] = now
+                    _save_seen(today, first_seen)   # 再起動しても窓を作り直さない
                 _stop_armed = True
                 if args.stop_delay_bars > 0:
                     _arm = _stop_arm_time(first_seen[pk], args.stop_delay_bars)
