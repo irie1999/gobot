@@ -15,10 +15,14 @@ REM
 REM   Everything that matters for ordering stays: signal tab, P&L tab, budget tabs,
 REM   and the tenkan tab (now auto-built from unfilled signals, so it includes today).
 REM
-REM   --h-tab --no-lss : H (limit sell at prev close -5 ticks) is the ONLY direction
-REM   tab. That is the method actually being ordered, so the stop-sell tab is not
-REM   generated at all (user decision 2026-08-13). Only one pass runs, so this is
-REM   back to the pre-h-tab speed.
+REM   TWO direction tabs: "long-stock short" (the tab you have always read - all the
+REM   comparison blocks live there) and "H limit short" (the method actually ordered:
+REM   limit sell at prev close -5 ticks). Same signals / names / exits; only the order
+REM   type differs. --default-tab lss opens on the one you are used to; click over to
+REM   H to place orders. The stop-sell order buttons are hard-blocked, so a misclick
+REM   on the first tab cannot send anything (LSS_H_ONLY in order_server).
+REM   COST: it runs the whole pass TWICE. Add --no-lss for one run to drop the
+REM   stop-sell tab and halve the time (you lose the comparison blocks with it).
 REM
 REM   --no-tenkan / --no-market keep it light:
 REM     --no-tenkan  the long-conversion tab. CLAUDE.md 18.26b settled it as
@@ -104,7 +108,7 @@ REM     Without it .\fills skips its section 3 and the daily divergence never ac
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --h-tab --no-lss --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab h --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help

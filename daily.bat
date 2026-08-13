@@ -1,10 +1,12 @@
 @echo off
 REM ============================================================
-REM daily.bat - morning report: long + short + H, order server
+REM daily.bat - morning report: long + short + lss + H, order server
 REM   Usage (swingtrade folder):  .\daily   (PowerShell)  /  daily  (cmd)
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
-REM   Directions: long + short + H (mirror and stop-sell skipped). H is the default tab.
+REM   Directions: long + short + lss + H (mirror skipped). lss is the default tab
+REM   (the one you have always read; all comparison blocks live there). Orders are
+REM   placed from the "H limit short" tab - stop-sell buttons are hard-blocked.
 REM     - long / short: WF-holdout selection fixed to 2026-06 as-of via --long-base
 REM       (--long-base now applies to BOTH long and short so they share the base).
 REM     - lss: CUMULATIVE proposal = union of ALL bases 2025-09 .. 2026-06.
@@ -101,7 +103,7 @@ REM     strategy is profitable after slippage. See CLAUDE.md 18.12 / A1.
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --h-tab --no-lss --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab h --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help
