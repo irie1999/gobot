@@ -35,16 +35,27 @@ for _s in (sys.stdout, sys.stderr):
 JST = timezone(timedelta(hours=9))
 _BASE = Path(__file__).resolve().parent
 
-ap = argparse.ArgumentParser(description="発注記録を寄り前に検算する(CSVのみ・照会なし)")
-ap.add_argument("--date", type=str, default=None, help="対象日 YYYY-MM-DD(既定=今日JST)")
-ap.add_argument("--csv", type=str, default="ordered_signals_lss.csv")
-ap.add_argument("--budget", type=float, default=4_000_000.0, help="予算(円)。超過を警告")
-ap.add_argument("--limit-ticks", type=int,
-                default=int(os.environ.get("LSS_H_LIMIT_TICKS", "-5") or -5),
-                help="H の指値を前日終値から何ティックずらしたか(既定 -5)")
-args = ap.parse_args()
+def _parse_args():
+    """⛔ **トップレベルで parse_args しないこと。**
 
-_DATE = args.date or datetime.now(JST).strftime("%Y-%m-%d")
+    このモジュールは order_server(発注ボタン) と lss_budget_cap から
+    `from check_orders import verify_row` で import される。トップレベルに
+    argparse を置くと、import した瞬間に呼び出し側の sys.argv を parse しようと
+    して SystemExit(2) で **相手のプロセスごと落ちる**。
+    2026-08-13 に実際に発生: 発注は成功した直後に発注サーバが
+    `unrecognized arguments: --execute --prod` で即死した。
+    """
+    ap = argparse.ArgumentParser(
+        description="発注記録を寄り前に検算する(CSVのみ・照会なし)")
+    ap.add_argument("--date", type=str, default=None,
+                    help="対象日 YYYY-MM-DD(既定=今日JST)")
+    ap.add_argument("--csv", type=str, default="ordered_signals_lss.csv")
+    ap.add_argument("--budget", type=float, default=4_000_000.0,
+                    help="予算(円)。超過を警告")
+    ap.add_argument("--limit-ticks", type=int,
+                    default=int(os.environ.get("LSS_H_LIMIT_TICKS", "-5") or -5),
+                    help="H の指値を前日終値から何ティックずらしたか(既定 -5)")
+    return ap.parse_args()
 
 
 def _f(v) -> float:
@@ -140,6 +151,8 @@ def _load_rows(date_s: str, csv_path: str) -> list[dict]:
 
 
 def main() -> int:
+    args = _parse_args()
+    _DATE = args.date or datetime.now(JST).strftime("%Y-%m-%d")
     rows = _load_rows(_DATE, args.csv)
     print(f"■ 発注記録の検算  {_DATE}")
     print("=" * 78)
