@@ -9740,6 +9740,12 @@ function switchTbd(id, tab) {{
     # 決済済み(＋保有中)のみを出す。pending_trades は空にして先頭付加を止める。
     pending_trades = []
     done_trades    = [t for t in display_trades if t.get("reason") != "発注中"]
+    # ★ H の母集団には『当日ぶんの未決着シグナル』も渡す。
+    #    H は自前の約定判定(寄りが指値以上なら板寄せ)を持つので、母集団は
+    #    **その日に出たシグナル全部**でなければならない。ここを落とすと、
+    #    当日の実発注が『テストの母集団に無い』になる(2026-08-13 に発生)。
+    #    HTML明細に出さない方針(幽霊表示防止)はそのまま = pending_trades は空のまま。
+    _eh_pending = [t for t in display_trades if t.get("reason") == "発注中"]
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
     # 全取引CSV(env LSS_TRADES_CSV=path): done_trades(全決済済み・全BT・切り捨て無し)を丸ごと出力。
@@ -10262,8 +10268,11 @@ function switchTbd(id, tab) {{
                     _hvars.append((f"{_hte:+d}tick "
                                    f"{'寄指' if _hae else 'ザラ場込'} delay{_dv}",
                                    _hte, _hae, _dv))
+            if _eh_pending:
+                print(f"[E/H] 当日ぶんの未決着シグナル {len(_eh_pending)}件も母集団に"
+                      f"入れます(H は自前の約定判定を持つため)", flush=True)
             _EH_TRADES = _eht.build(
-                _bt30_entry_sorted, all_nofills,
+                _bt30_entry_sorted + _eh_pending, all_nofills,
                 sm=_LSS_SM, tm=_LSS_TM,
                 stop_delay_bars=_eh_delay,
                 gap_guard=0.03, qty=100,
