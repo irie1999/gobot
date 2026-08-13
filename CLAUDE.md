@@ -4178,9 +4178,14 @@ H の経過月数別 円/件: 0-1ヶ月 **+752** / 2-3ヶ月 **+839** / 4-6ヶ�
 .\daily        # 朝(〜8:45)。H タブのみ。--h-tab --no-lss --default-tab h
 .\dailyfast    # 同上の軽量版
 python lss_budget_cap.py --execute --prod --entry-mode limit --limit-ticks -5 --budget-multiple 1.0
+.\chk          # ★発注直後に必ず。発注記録を寄り前に検算(CSVのみ・kabuを叩かない)
 .\watch        # 寄り前〜15:30。--stop-delay-bars 1
 .\fills        # 引け後。lss_trades_H.csv と突合(lss へフォールバックしない)
 ```
+
+⛔ **`.\chk` を飛ばさないこと。** 初日の6件の不具合は**全部 実弾が動いた後**に
+見つかった。とくに atr 欠落は4銘柄すべてを無防備にしたが、発注直後に CSV を
+1行見れば分かるものだった。寄りまでに気付けば出し直せる。
 
 ⛔ **lss(逆指値)からは発注できない**ようにコードで塞いである:
 - `order_server`: lssショートで entry_mode が limit/auction でなければ発注中止(`LSS_H_ONLY=0` で解除)
