@@ -253,6 +253,10 @@ _LSS_ORDER_MODE: bool = False
 #    H の値を押すと「指値のつもりが逆指値」になり、まったく別の注文が出る。
 #    H の実発注は lss_budget_cap.py --entry-mode limit --limit-ticks -5 から。
 _LSS_H_ENTRY: bool = str(os.environ.get("LSS_H_ENTRY", "")).strip() in ("1", "true", "True", "yes")
+# H タブが唯一のタブ(--no-lss)かどうか。隣に lss タブが無いので、E/H の比較ブロックと
+# 研究用CSVは H タブ自身が作る。
+_H_PRIMARY: bool = str(os.environ.get("LSS_H_PRIMARY", "")).strip() \
+    in ("1", "true", "True", "yes")
 # ── BTフィルタを丸ごと外す1スイッチ (LSS_NO_BT_FILTER=1) ────────────────
 # BTの床は **4箇所** にあり、しかも2つは .bat が上書き/消去するので、env を
 # 個別に立てても効かない(2026-08-12 に実際にハマった):
@@ -10254,7 +10258,9 @@ function switchTbd(id, tab) {{
     #    済ませており、5分足を 25万銘柄日ぶん読み直すのは丸ごと無駄
     #    (2026-08-11: --h-tab で実行時間がほぼ倍になっていた原因の一つ)。
     #    比較表は lss タブで見る。
-    if _LSS_H_ENTRY:
+    #    ★ ただし --no-lss で lss タブを作らない運用(2026-08-13 ユーザー指示)では
+    #      隣のタブが存在しないので、H タブ自身が作る(LSS_H_PRIMARY=1)。
+    if _LSS_H_ENTRY and not _H_PRIMARY:
         print("[E/H] スキップ (H タブ: 比較は隣の lss タブで生成済み)", flush=True)
     if (_LSS_ORDER_MODE and not _LSS_H_ENTRY and cfg_filter is None
             and not symbol_filter and not strategy_filter

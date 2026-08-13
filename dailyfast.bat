@@ -4,32 +4,29 @@ REM dailyfast.bat - the fast form of daily.bat (same order list, far less work)
 REM   Usage (swingtrade folder):  .\dailyfast
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
-REM   Same lss selection / same BT ranking / same order list as .\daily.
+REM   Same selection / same order list as .\daily.
 REM   What it drops (none of it changes which orders you place):
 REM     --no-symbol-detail  the per-symbol P&L tab. That tab rebuilds the WHOLE P&L
 REM                         once PER SIGNAL SYMBOL (69x on a busy day) and is by far
 REM                         the biggest cost in a run, in both time and memory.
-REM     --no-long --no-short  the long / short panes. lss is the tab you order from.
+REM     --no-long --no-short  the long / short panes. H is the tab you order from.
 REM     --price-ranges 6000   one pane (1,000-6,000) instead of two.
 REM
 REM   Everything that matters for ordering stays: signal tab, P&L tab, budget tabs,
 REM   and the tenkan tab (now auto-built from unfilled signals, so it includes today).
 REM
-REM   --h-tab is ON here (but NOT in daily.bat). It adds the "H limit short" direction
-REM   tab next to "long-stock short": same signals, same names, same exits, the only
-REM   difference is the order type (limit sell at prev close -5 ticks instead of a
-REM   stop sell at -1 tick). Its order button really does send a LIMIT sell.
-REM   COST: it runs the whole lss pass a SECOND time, so this is roughly 2x slower.
-REM   daily.bat keeps it off so the 8:45 order list is never delayed. Drop --h-tab
-REM   here too if you want the old speed back.
+REM   --h-tab --no-lss : H (limit sell at prev close -5 ticks) is the ONLY direction
+REM   tab. That is the method actually being ordered, so the stop-sell tab is not
+REM   generated at all (user decision 2026-08-13). Only one pass runs, so this is
+REM   back to the pre-h-tab speed.
 REM
-REM   --no-tenkan / --no-market pay for that second pass:
+REM   --no-tenkan / --no-market keep it light:
 REM     --no-tenkan  the long-conversion tab. CLAUDE.md 18.26b settled it as
 REM                  "record only, never part of the order rules", and building it
 REM                  re-simulates several hundred trades off 5-minute bars.
 REM     --no-market  the regime / trend-period / entry-analysis tabs. They pull the
 REM                  Nikkei and emit 200k+ characters of HTML, and none of it feeds
-REM                  the lss or H order decision.
+REM                  the H order decision.
 REM   Add them back for one run if you actually need those tabs.
 REM
 REM   When you DO want the full report, run .\daily instead.
@@ -107,7 +104,7 @@ REM     Without it .\fills skips its section 3 and the daily divergence never ac
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --no-lss --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab h --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help

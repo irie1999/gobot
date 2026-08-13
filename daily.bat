@@ -1,10 +1,10 @@
 @echo off
 REM ============================================================
-REM daily.bat - morning report: long + short + lss, order server
+REM daily.bat - morning report: long + short + H, order server
 REM   Usage (swingtrade folder):  .\daily   (PowerShell)  /  daily  (cmd)
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
-REM   Directions: long + short + lss (mirror skipped). lss is the default tab.
+REM   Directions: long + short + H (mirror and stop-sell skipped). H is the default tab.
 REM     - long / short: WF-holdout selection fixed to 2026-06 as-of via --long-base
 REM       (--long-base now applies to BOTH long and short so they share the base).
 REM     - lss: CUMULATIVE proposal = union of ALL bases 2025-09 .. 2026-06.
@@ -22,12 +22,12 @@ REM   Guard = 3% (verified best for recent base).
 REM
 REM   Pass-through options at the end (fastest first):
 REM     .\daily --no-long --no-short --no-symbol-detail --price-ranges 6000
-REM                                     (lss only, 1 pane, no per-symbol tab = FASTEST)
+REM                                     (H only, 1 pane, no per-symbol tab = FASTEST)
 REM     .\daily --no-symbol-detail      (skip the per-symbol P&L tab: it re-runs the whole
 REM                                      P&L build once PER SIGNAL SYMBOL - 69x on a busy
 REM                                      day. This is by far the biggest cost in a run.)
 REM     .\daily --symbol-detail-limit 20  (keep the tab, top-20 by BT only)
-REM     .\daily --no-long --no-short    (lss only, for quick ordering)
+REM     .\daily --no-long --no-short    (H only, for quick ordering)
 REM     .\daily --price-ranges 6000     (6000 only = one pane instead of two)
 REM   Notes:
 REM     - The per-symbol detail tab dominates runtime AND memory. Drop it first when slow.
@@ -101,7 +101,7 @@ REM     strategy is profitable after slippage. See CLAUDE.md 18.12 / A1.
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+python run_signals_holdout_all.py --both --h-tab --no-lss --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab h --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help

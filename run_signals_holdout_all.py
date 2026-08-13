@@ -155,6 +155,11 @@ _pre.add_argument("--no-market", action="store_true",
                   help="相場環境 / トレンド期間 / エントリー分析 タブを作らない。"
                        "日経平均の取得と大きなHTML生成(20万字超)が省ける。"
                        "lss/H の発注判断には使わないタブ")
+_pre.add_argument("--no-lss", action="store_true",
+                  help="lss(逆指値ショート)タブを作らない。実際に発注しているのは "
+                       "H(指値ショート)だけなので既定の運用ではこちらでよい。"
+                       "--h-tab と併用したときだけ有効(H が唯一のタブになる)。"
+                       "実行時間がほぼ半分になる")
 _pre.add_argument("--h-tab", action="store_true",
                   help="方向タブに『H 指値ショート』を追加する。lss と同じシグナル・"
                        "銘柄・決済で、注文だけ前日終値-5ティックの指値売りにしたもの。"
@@ -443,6 +448,11 @@ if _args.both and not _args.short:
         _skip_dirs.add("long")
     if not getattr(_args, "h_tab", False):
         _skip_dirs.add("h")   # 既定OFF: lss をもう1回フル計算する(時間が約2倍)
+    # --no-lss: 実際に発注しているのは H だけなので、lss タブは作らない
+    #           (2026-08-13 ユーザー指示)。実行時間がほぼ半分になる。
+    _H_ONLY_RUN = getattr(_args, "no_lss", False) and getattr(_args, "h_tab", False)
+    if getattr(_args, "no_lss", False):
+        _skip_dirs.add("lss")
     _DIRECTIONS = [d for d in [
         ("long",   "ロング",             _long_dargs,                    "signals_holdout_all"),
         ("short",  "ショート",           _short_dargs,                   "signals_holdout_all_short"),
@@ -479,6 +489,12 @@ if _args.both and not _args.short:
                 # 子プロセスの nikkei_analysis がこれを見て、発注価格を
                 # H(指値売り)に差し替え、発注ボタンを entry_mode=limit で送る。
                 _denv["LSS_H_ENTRY"] = "1"
+                if _H_ONLY_RUN:
+                    # lss タブが無いので、E/H の比較ブロックと研究用CSVは
+                    # H タブ自身が作る。CSVの取り上げ(下)もしない。
+                    _denv["LSS_H_PRIMARY"] = "1"
+                    print("[H] --no-lss: H タブが唯一のタブなので、"
+                          "E/H比較ブロックと研究用CSVはここで生成します", flush=True)
                 # ⛔ 研究用CSVは H タブに書かせない。
                 #    H は lss と**同じ prefix / 同じ env** で回る2周目なので、
                 #    そのままだと lss タブが書いた CSV を上書き(LSS_TRADES_CSV /
@@ -487,8 +503,9 @@ if _args.both and not _args.short:
                 #    ・.\fills が読む本番 lss_trades.csv を2回書く無駄
                 #    ・LSS_OOS_BUDGET_CSV は追記なので**行が倍**になり集計が壊れる
                 #    の2点で害しかない。lss タブ(1周目)の出力を正とする。
-                for _csv_env in ("LSS_TRADES_CSV", "LSS_BUDGET_MONTHLY_CSV",
-                                 "LSS_OOS_BUDGET_CSV"):
+                for _csv_env in (() if _H_ONLY_RUN else
+                                 ("LSS_TRADES_CSV", "LSS_BUDGET_MONTHLY_CSV",
+                                  "LSS_OOS_BUDGET_CSV")):
                     if _denv.pop(_csv_env, None):
                         print(f"[H] {_csv_env} は H タブでは出力しません"
                               f"(lss タブの出力を正とする)", flush=True)
