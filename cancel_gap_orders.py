@@ -89,7 +89,16 @@ def _sweep(cli, lss_map, gap, done, dry) -> tuple[int, int]:
         sym = str(o.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
         recs = lss_map.get(sym)
         if not recs:
-            continue   # lss記録に無い銘柄 → 触らない(メインショート/手動等の保護)
+            continue   # 記録に無い銘柄 → 触らない(メインショート/手動等の保護)
+        # ⛔ H(指値売り)には適用しない(2026-08-13)。
+        #    この取消は『逆指値売りが寄りでトリガーを大きく割って始まると、
+        #    -3%下限指値が残って不利約定になる』ための対策。
+        #    H の指値売りは **上がってきたら約定** するので、寄りが指値より下でも
+        #    ただ板に残るだけで不利約定にならない。むしろバックテストは
+        #    『日中に高値が指値へ届いたら約定』を **48%** 数えているので、
+        #    ここで取り消すと live だけ約定が半減してレポートと食い違う。
+        if any(str(r.get("mode", "stop")) in ("limit", "auction") for r in recs):
+            continue
         trigger = _trigger_for(recs)
         if trigger <= 0:
             continue
