@@ -14235,6 +14235,154 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'全戦略版に大きく劣ります。<b>既定は6戦略とも使う</b>で、'
             f'この表で ✓ かつ z≥2 が安定して出ない限り動かさないこと。</p></details>')
 
+    def _preopen_day_html():
+        """寄り前に確定している **市場全体** の変数で『その日を建てるか』を測る(§18.34)。
+
+        ⛔ 18.13(15軸) も 18.24(7属性) も **銘柄属性** しか掃いていない。
+           市場全体の寄り前変数は一度も測っていないので、「候補ゼロが続いている」
+           という前例はここには当てはまらない。
+        ⛔ 判定は「その分位の日を建てなかったら合計がどう動くか」。
+           日数が減れば合計は必ず動くので、**同じ日数をランダムに落とした帯**と比べる。
+        ⛔ リーク: preopen_market は『日付 < D の最新バー』しか使わない(当日は不使用)。
+        """
+        import statistics as _sti
+        import zlib as _zl
+        try:
+            import preopen_market as _pm
+        except Exception as _pe:
+            return f'<!-- preopen: {_pe} -->'
+
+        _src = (_EH_TRADES or {}).get("H") or []
+        _nof = ((_EH_TRADES or {}).get("約定せず") or {}).get("H") or []
+        if not _src:
+            return ""
+        _base = _run_budget_sim(_BUD_FLOOR, src=_src, nofills=_nof)
+        _day: dict = {}
+        for _t in _base:
+            if _t.get("reason") in ("発注中", "保有中"):
+                continue
+            _d = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:10]
+            if len(_d) < 10 or _d[:7] == _TODAY.strftime("%Y-%m"):
+                continue          # 当月は営業日が揃わないので除外(他の表と同じ)
+            _a = _day.setdefault(_d, [0, 0, 0.0])
+            _a[0] += 1
+            _a[1] += 1 if float(_t.get("pnl", 0) or 0) > 0 else 0
+            _a[2] += float(_t.get("pnl", 0) or 0)
+        _days = sorted(_day)
+        if len(_days) < 40:
+            return ('<p style="color:#64748b;font-size:0.78rem">寄り前フィルタ: '
+                    f'営業日が{len(_days)}日しかないので測りません(最低40日)。</p>')
+        _feat = _pm.preopen_features(_days)
+        _tot = sum(_day[d][2] for d in _days)
+
+        _NS = int(os.environ.get("LSS_PREOPEN_SEEDS", "16") or 16)
+        _TTBL = {5: 2.571, 6: 2.447, 7: 2.365, 9: 2.262, 11: 2.201,
+                 15: 2.131, 19: 2.093, 23: 2.069, 31: 2.040}
+        _TC = 1.96
+        for _df in sorted(_TTBL):
+            if _NS - 1 <= _df:
+                _TC = _TTBL[_df]
+                break
+
+        def _band(n):
+            """n 日をランダムに落としたときの合計の変化。_NS 本。"""
+            _o = []
+            for _sd in range(_NS):
+                _rk = sorted(_days, key=lambda d, s=_sd:
+                             _zl.crc32(f"{s}|{d}".encode()) & 0xffffffff)
+                _drop = set(_rk[:n])
+                _o.append(sum(_day[d][2] for d in _days if d not in _drop) - _tot)
+            return _o
+
+        _bcache: dict = {}
+        _rows = ""
+        _nkeys = [k for k in ("fut_gap", "vix_chg", "vix", "sp500_ret", "nasdaq_ret",
+                              "usdjpy_ret", "n225_ret", "n225_5d")
+                  if sum(1 for d in _days if k in _feat.get(d, {})) >= len(_days) * 0.8]
+        if not _nkeys:
+            return ('<p style="color:#64748b;font-size:0.78rem">寄り前フィルタ: '
+                    '市場データを取得できませんでした(yfinance)。</p>')
+        for _k in _nkeys:
+            _have = [d for d in _days if _k in _feat.get(d, {})]
+            _sorted_d = sorted(_have, key=lambda d: _feat[d][_k])
+            _q = max(1, len(_sorted_d) // 5)
+            _cells = ""
+            _best = None
+            for _i in range(5):
+                _lo = _i * _q
+                _hi = (_i + 1) * _q if _i < 4 else len(_sorted_d)
+                _grp = _sorted_d[_lo:_hi]
+                if not _grp:
+                    continue
+                _p = sum(_day[d][2] for d in _grp)
+                _n = sum(_day[d][0] for d in _grp)
+                _v0, _v1 = _feat[_grp[0]][_k], _feat[_grp[-1]][_k]
+                _c = "#4ade80" if _p >= 0 else "#f87171"
+                _cells += (f'<td style="text-align:right;padding:2px 8px;color:{_c}">'
+                           f'{_p:+,.0f}<br><span style="font-size:0.68rem;color:#64748b">'
+                           f'{_v0:+.2f}〜{_v1:+.2f} / {len(_grp)}日 {_n}件</span></td>')
+                if _best is None or _p < _best[0]:
+                    _best = (_p, _grp, f"{_v0:+.2f}〜{_v1:+.2f}")
+            # 最悪分位を『建てない』ときの効果 vs 同数ランダム除外
+            _dl, _z, _vd = 0.0, 0.0, "—"
+            if _best:
+                _nn = len(_best[1])
+                if _nn not in _bcache:
+                    _bcache[_nn] = _band(_nn)
+                _bd = _bcache[_nn]
+                _dl = -_best[0]
+                _sd2 = _sti.stdev(_bd) if len(_bd) > 1 else 0.0
+                _z = ((_dl - _sti.mean(_bd)) / _sd2) if _sd2 > 0 else 0.0
+                _vd = ("帯の外(上) → 効果あり" if _z >= _TC else
+                       ("帯の外(下)" if _z <= -_TC else "帯の中 → 測れていない"))
+            _zc = "#4ade80" if _z >= _TC else ("#f87171" if _z <= -_TC else "#94a3b8")
+            _rows += (f'<tr style="border-top:1px solid #334155">'
+                      f'<td style="padding:2px 8px;color:#e2e8f0">{_pm.LABELS.get(_k, _k)}</td>'
+                      f'{_cells}'
+                      f'<td style="text-align:right;padding:2px 8px;color:{_zc};'
+                      f'font-weight:700">{_dl:+,.0f}</td>'
+                      f'<td style="text-align:right;padding:2px 8px;color:{_zc};'
+                      f'font-weight:700">{_z:+.2f}</td>'
+                      f'<td style="padding:2px 8px;color:{_zc};font-size:0.78rem">{_vd}'
+                      f'<br><span style="font-size:0.68rem;color:#64748b">'
+                      f'最悪分位 {_best[2] if _best else "—"}</span></td></tr>')
+
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">🌅 寄り前の市場変数（その日を建てるか / §18.34）</summary>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'09:00 より前に確定している市場全体の値だけを使います。日本の営業日 D には'
+            f'<b>「日付 &lt; D の最新バー」しか見ません</b>(当日のバーは未来なので不使用)。<br>'
+            f'⛔ 18.13(15軸)・18.24(7属性)は<b>銘柄属性</b>しか掃いていません。'
+            f'<b>市場全体の寄り前変数は一度も測っていない</b>ので、'
+            f'「候補ゼロが続いている」という前例はここには当てはまりません。<br>'
+            f'見るのは平均ではなく<b>裾</b>です。18.24 で「最悪5日を除くと木曜の劣位が消える」'
+            f'= <b>少数の日が損益を支配している</b>と分かっています。<br>'
+            f'各セルは<b>分位ごとの合計損益</b>。右端は<b>その最悪分位の日を建てなかったら'
+            f'合計がどう動くか</b>で、<b>同じ日数をランダムに落とした帯</b>({_NS}本)と'
+            f'比べています。|z|&lt;{_TC:.2f} は「測れていない」であって「同じ」ではありません。<br>'
+            f'⚠ {len(_nkeys)}変数を同時に見ているので、帰無でも |z|≥{_TC:.2f} が'
+            f'1つ弱は出ます。1つ超えただけでは根拠になりません。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">変数</th>'
+            f'<th style="{_th}">最小20%</th><th style="{_th}">20-40%</th>'
+            f'<th style="{_th}">40-60%</th><th style="{_th}">60-80%</th>'
+            f'<th style="{_th}">最大20%</th>'
+            f'<th style="{_th};border-left:1px solid #334155">最悪分位を捨てる</th>'
+            f'<th style="{_th}">z</th><th style="{_th};text-align:left">判定</th>'
+            f'</tr></thead><tbody>{_rows}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.7">'
+            f'全{len(_days)}営業日 / 合計 {_tot:+,.0f}円。当月は除外。<br>'
+            f'⚠ 18.30 で市場βは有意(t=-2.83)でしたが <b>R²=0.063</b>。'
+            f'平均を動かす力は弱いので、狙うのは裾の除去だけです。<br>'
+            f'⚠ ここで候補が出ても、採用する前に<b>予算シミュを通し</b>(18.10)、'
+            f'<b>walk-forward で毎月選び直しても勝つか</b>を確認すること。'
+            f'「その日を建てない」は他の日に振り替えられないので機会費用は無い一方、'
+            f'件数が減って t は落ちます。</p></details>')
+
     def _h_variant_html():
         """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
 
@@ -14732,6 +14880,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             print(f"[戦略別] 比較ブロックを生成 ({_slt.time() - _t0:.1f}s)", flush=True)
     except Exception as _slce:
         print(f"[戦略別] 比較ブロック生成に失敗: {_slce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted and str(
+                os.environ.get("LSS_PREOPEN_TAB", "1")).strip() not in ("0", "false", "no"):
+            import time as _pot
+            _t0 = _pot.time()
+            _EH_CMP_HTML += _preopen_day_html()
+            print(f"[寄り前] 市場変数ブロックを生成 ({_pot.time() - _t0:.1f}s)", flush=True)
+    except Exception as _poce:
+        print(f"[寄り前] 市場変数ブロック生成に失敗: {_poce}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted:
             import time as _hvt
