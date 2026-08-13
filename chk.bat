@@ -1,6 +1,8 @@
 @echo off
 REM ============================================================
-REM chk.bat - verify tonight's order records BEFORE the open.
+REM chk.bat - OPTIONAL manual audit of tonight's order records.
+REM   NOT part of the daily routine (user decision 2026-08-13): the same check
+REM   already runs automatically inside the order path, so nothing to run by hand.
 REM   Usage:  .\chk            (today)   /   .\chk --date 2026-08-13
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd).
 REM
