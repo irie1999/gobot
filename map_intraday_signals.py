@@ -60,6 +60,8 @@ JST = timezone(timedelta(hours=9))
 
 ap = argparse.ArgumentParser(description="1日に何回転もできる日中シグナルを探す")
 ap.add_argument("--symbols", type=int, default=300, help="ランダムに何銘柄(0=全部)")
+ap.add_argument("--only", default=None,
+                help="銘柄を明示指定(カンマ区切り)。ETF・低コスト銘柄を直接測る用。\n                     指定時は --symbols と価格帯フィルタを無視する")
 ap.add_argument("--days", type=int, default=365)
 ap.add_argument("--split", default=None, help="TRAIN/TEST 境界 YYYY-MM-DD")
 ap.add_argument("--min-price", type=float, default=3000.0, help="0=フィルタなし")
@@ -147,6 +149,10 @@ def _jq_to_yf(code: str) -> str:
 
 
 def universe() -> list[str]:
+    if args.only:
+        # ⛔ 明示指定のときは価格帯フィルタを掛けない(ETFは価格帯がばらばらで、
+        #    3万円の日経レバも1万円台のTOPIXも同じ土俵で見たいため)。
+        return [_jq_to_yf(x) for x in str(args.only).split(",") if x.strip()]
     try:
         from daytrade_data import available_local_symbols
         syms = [_jq_to_yf(s) for s in available_local_symbols()]
@@ -340,8 +346,9 @@ def main() -> int:
                     why["期間内バーなし"] += 1
                 else:
                     px = float(d["close"].iloc[-1])
-                    if not ((args.min_price <= 0 or px >= args.min_price) and
-                            (args.max_price <= 0 or px <= args.max_price)):
+                    if not (args.only or
+                            ((args.min_price <= 0 or px >= args.min_price) and
+                             (args.max_price <= 0 or px <= args.max_price))):
                         why["価格帯外"] += 1
                     else:
                         dates = np.array([ts.date() for ts in d.index])
