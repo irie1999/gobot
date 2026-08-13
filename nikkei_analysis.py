@@ -9772,49 +9772,11 @@ function switchTbd(id, tab) {{
                         ])
                 print(f"[全取引CSV] {_trades_csv} に {len(_rows_out)}件を出力", flush=True)
 
-                # ── H(指値売り)の明細も別ファイルに出す ────────────────────
-                # ⛔ 実発注は H なのに、.\fills は lss(逆指値)の明細と突合していた
-                #    (2026-08-13 発覚)。lss は『前日終値-1tick まで下がったら約定』
-                #    なので、寄りで上に飛んで戻らなかった銘柄は**約定しない**。
-                #    実際 7186/9508/5844 は H では寄りで約定したのに lss 明細には
-                #    存在せず、『テストに無い』と誤って報告されていた。
-                #    1605 も lss 3,710 と H 3,730 を比べて滑り +0.54% と出ていたが、
-                #    これは滑りではなく**エントリー方式の違い**。
-                try:
-                    _hsrc = (_EH_TRADES or {}).get("H") or []
-                    if _hsrc:
-                        _hp = Path(_trades_csv)
-                        _hout = str(_hp.with_name(_hp.stem + "_H" + _hp.suffix))
-                        _hrows = sorted(
-                            [t for t in _hsrc if t.get("reason") != "約定せず"],
-                            key=lambda x: (str(x.get("exit_d_raw") or ""),
-                                           str(x.get("symbol") or "")))
-                        with open(_hout, "w", newline="",
-                                  encoding="utf-8-sig") as _f3:
-                            _w3 = _csvmod2.writer(_f3)
-                            _w3.writerow(_cols)
-                            for _t in _hrows:
-                                _w3.writerow([
-                                    _t.get("entry_d_raw", ""), _t.get("exit_d_raw", ""),
-                                    _t.get("symbol", ""), _t.get("name", ""),
-                                    _t.get("strategy", "") or _t.get("strat", ""),
-                                    _t.get("rec_score", "") if _t.get("rec_score") is not None
-                                    else _t.get("score", ""),
-                                    _t.get("wf_score", ""), _t.get("reason", ""),
-                                    _t.get("order_limit", ""), _t.get("entry_p", ""),
-                                    _t.get("exit_p", ""),
-                                    _t.get("order_stop", _t.get("stop_price", "")),
-                                    _t.get("order_target", _t.get("target_price", "")),
-                                    _t.get("qty", ""), _t.get("hold_days", ""),
-                                    (_t.get("liquidity")
-                                     or round(_liquidity_of(str(_t.get("symbol", ""))), 0)),
-                                    "limit", _t.get("pnl", ""),
-                                    _t.get("entry_time", ""),
-                                ])
-                        print(f"[全取引CSV] {_hout} に {len(_hrows)}件を出力 "
-                              f"(H=指値売り。.\\fills はこちらと突合する)", flush=True)
-                except Exception as _he:
-                    print(f"[全取引CSV] H の出力失敗: {_he}", flush=True)
+                # H(指値売り)の明細は _EH_TRADES が出来てから書く。
+                # ⛔ ここで書こうとすると _EH_TRADES はこの関数の**後方で**
+                #    代入されるローカル変数なので UnboundLocalError になる
+                #    (2026-08-13: 『cannot access local variable』で出力失敗)。
+                _H_CSV_PENDING = (_trades_csv, list(_cols))
         except Exception as _te:
             print(f"[全取引CSV] 出力失敗: {_te}", flush=True)
 
@@ -10296,6 +10258,50 @@ function switchTbd(id, tab) {{
         except Exception as _ehe:
             print(f"[E/H] トレード生成に失敗(タブは出しません): {_ehe}", flush=True)
             _EH_TRADES = {}
+
+    # ── H(指値売り)の明細CSV ────────────────────────────────────────────────
+    # ⛔ 実発注は H なのに、.\fills は lss(逆指値)の明細と突合していた(2026-08-13)。
+    #    lss は『前日終値-1tick まで下がったら約定』なので、寄りで上に飛んで戻らな
+    #    かった銘柄は約定しない。7186/9508/5844 はまさにそれで、H では寄りで約定
+    #    したのに lss 明細に無く『テストに無い』と誤報告された。1605 も lss 3,710
+    #    と H 3,730 を比べて滑り +0.54% と出ていたが、これは方式の差。
+    # ★ 書き出しは **_EH_TRADES が出来てから**。上の全取引CSVの位置では
+    #    _EH_TRADES がまだ未代入で UnboundLocalError になる。
+    try:
+        _hpend = locals().get("_H_CSV_PENDING")
+        _hsrc = (_EH_TRADES or {}).get("H") or []
+        if _hpend and _hsrc:
+            import csv as _csvmod3
+            _hcsv, _hcols = _hpend
+            _hp = Path(_hcsv)
+            _hout = str(_hp.with_name(_hp.stem + "_H" + _hp.suffix))
+            _hrows = sorted([t for t in _hsrc if t.get("reason") != "約定せず"],
+                            key=lambda x: (str(x.get("exit_d_raw") or ""),
+                                           str(x.get("symbol") or "")))
+            with open(_hout, "w", newline="", encoding="utf-8-sig") as _f3:
+                _w3 = _csvmod3.writer(_f3)
+                _w3.writerow(_hcols)
+                for _t in _hrows:
+                    _w3.writerow([
+                        _t.get("entry_d_raw", ""), _t.get("exit_d_raw", ""),
+                        _t.get("symbol", ""), _t.get("name", ""),
+                        _t.get("strategy", "") or _t.get("strat", ""),
+                        (_t.get("rec_score", "") if _t.get("rec_score") is not None
+                         else _t.get("score", "")),
+                        _t.get("wf_score", ""), _t.get("reason", ""),
+                        _t.get("order_limit", ""), _t.get("entry_p", ""),
+                        _t.get("exit_p", ""),
+                        _t.get("order_stop", _t.get("stop_price", "")),
+                        _t.get("order_target", _t.get("target_price", "")),
+                        _t.get("qty", ""), _t.get("hold_days", ""),
+                        (_t.get("liquidity")
+                         or round(_liquidity_of(str(_t.get("symbol", ""))), 0)),
+                        "limit", _t.get("pnl", ""), _t.get("entry_time", ""),
+                    ])
+            print(f"[全取引CSV] {_hout} に {len(_hrows)}件を出力 "
+                  f"(H=指値売り。.\\fills はこちらと突合する)", flush=True)
+    except Exception as _he:
+        print(f"[全取引CSV] H の出力失敗: {_he}", flush=True)
 
     # 予算固定シミュ: 毎日その日のBT降順で、予算(既定400万円)まで注文した場合の成績。lssのみ。
     #  ・「終値で判断」: 予算に収まるかは注文トリガー価格(order_limit=前日終値ベース)×株数で判定
