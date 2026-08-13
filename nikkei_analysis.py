@@ -9754,7 +9754,10 @@ function switchTbd(id, tab) {{
     #    これを外すと 2026-08-13 の母集団が 38→100件 に膨らみ、ライブの
     #    シグナル一覧(51件)より多くなった。
     def _sig_d(t):
-        _s = t.get("signal_dt")
+        # ⛔ display_trades の行が持つのは **signal_dt_raw**(nikkei_analysis:7990)。
+        #    signal_dt を見に行くと全件 None になり、発注中が1件も採用されない
+        #    (2026-08-13: 直したつもりで母集団が 38件のまま戻らなかった)。
+        _s = t.get("signal_dt_raw") or t.get("signal_dt")
         return _s.date() if hasattr(_s, "date") else _s
     #    ⛔ さらに、レポートは引け後に回すので **当日の終値で出たシグナル**(=翌営業日
     #       に建てるもの)も『発注中』に入る。しかも entry_dt は一律で最終バーなので、
@@ -9768,6 +9771,12 @@ function switchTbd(id, tab) {{
     _pend_last = max(_pend_sigs) if _pend_sigs else None
     _eh_pending = ([t for t in _eh_pend_all if _sig_d(t) == _pend_last]
                    if _pend_last else [])
+    if _eh_pend_all and not _eh_pending:
+        print(f"[E/H] ⚠ 発注中 {len(_eh_pend_all)}件 あるのに **1件も採用できません**"
+              f"(最終バー={_last_bar} / シグナル日が取れた件数="
+              f"{sum(1 for t in _eh_pend_all if _sig_d(t))})。"
+              f"当日の実発注が『テストの母集団に無い』になるので原因を調べること",
+              flush=True)
     if _eh_pend_all:
         print(f"[E/H] 発注中 {len(_eh_pend_all)}件 → シグナル日 {_pend_last} の "
               f"{len(_eh_pending)}件だけを母集団に入れます"
