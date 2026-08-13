@@ -9774,6 +9774,27 @@ function switchTbd(id, tab) {{
         except Exception as _te:
             print(f"[全取引CSV] 出力失敗: {_te}", flush=True)
 
+    # ── 発注順の順位(その日の中で上から何番目か) ──────────────────────────
+    # シグナルタブ(発注リスト)と同じ並び = lss_order_rank(既定:流動性降順)。
+    # 明細を見たときに『何番目の注文だったか』が分からないと、実際に出した注文
+    # (=シグナルタブの順位)と突き合わせられない(2026-08-13 ユーザー指摘)。
+    # ⚠ 母集団はその日の**全候補**(約定+不約定)。予算で切る前の順位なので、
+    #    シグナルタブの「順位」列と一致する。
+    _day_rank: dict = {}
+
+    def _rk_key(t):
+        return (str(t.get("symbol", "")).upper(), str(t.get("strategy", "")),
+                str(t.get("entry_d_raw") or t.get("exit_d_raw") or ""))
+
+    def _rank_badge(t) -> str:
+        _r = _day_rank.get(_rk_key(t))
+        if not _r:
+            return ""
+        return (f'<span style="display:inline-block;min-width:1.6em;text-align:center;'
+                f'background:#334155;color:#cbd5e1;font-size:0.68rem;font-weight:700;'
+                f'padding:0 4px;border-radius:3px;margin-right:4px" '
+                f'title="発注順(その日の全候補中/流動性降順)">#{_r}</span>')
+
     def _build_trade_row(t, entry_first=False) -> str:
         is_pending = t.get("reason") == "発注中"
         is_overlap = bool(t.get("_overlap"))
@@ -9910,7 +9931,7 @@ function switchTbd(id, tab) {{
                      if entry_first else f'<td style="color:#94a3b8">{t["entry_dt"]}{_etime_sub}</td>')
         return f"""<tr{row_style}>
   {first_col}
-  <td class="sym" style="text-align:left">{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
+  <td class="sym" style="text-align:left">{_rank_badge(t)}{t["symbol"]} {sc_html}<br><span style="color:#64748b;font-size:0.75rem">{t["name"]}</span>{_stop_warn(t.get("symbol",""), t.get("entry_d_raw"))}</td>
   <td style="text-align:center">{tag}</td>
   <td style="text-align:center">{cfg_badge}</td>
   <td style="text-align:right">{t["entry_p"]:,.0f}{olp_sub}</td>
@@ -10279,9 +10300,24 @@ function switchTbd(id, tab) {{
         try:
             import lss_order_rank as _lor
             return _lor.sort_key(_eff_long_bt(_t),
-                                 _liquidity_of(str(_t.get("symbol", ""))))
+                                 _liquidity_of(str(_t.get("symbol", ""))),
+                                 str(_t.get("symbol", "")))
         except Exception:
             return (-float(_eff_long_bt(_t) or 0), 0.0)
+
+    # 明細に出す『その日の発注順』を先に確定させる(_rank_badge が読む)。
+    # 母集団は約定・不約定の全候補 = シグナルタブに並ぶものと同じ。
+    try:
+        _rk_day: dict = _dd(list)
+        for _t in list(_bt30_entry_sorted) + list(all_nofills):
+            if _t.get("strategy") == "転換":
+                continue
+            _rk_day[str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")].append(_t)
+        for _dk, _lst in _rk_day.items():
+            for _i, _t in enumerate(sorted(_lst, key=_bud_order_key), 1):
+                _day_rank.setdefault(_rk_key(_t), _i)
+    except Exception as _rke:
+        print(f"[発注順] 明細の順位づけに失敗(表示は省略): {_rke}", flush=True)
 
     def _size_lots(_t, mode, target):
         """100株単位で、建玉(円) または リスク(円) を target に近づけるロット数。
