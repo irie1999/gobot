@@ -38,12 +38,26 @@ JST = timezone(timedelta(hours=9))
 
 # 系列名 -> (yfinance ティッカー, 説明)。取れなかったものは黙って落とす。
 _SERIES = {
-    "sp500":  ("^GSPC",  "S&P500"),
-    "nasdaq": ("^IXIC",  "NASDAQ"),
-    "vix":    ("^VIX",   "VIX"),
-    "usdjpy": ("JPY=X",  "USDJPY"),
-    "n225":   ("^N225",  "日経平均"),
-    "nkfut":  ("NKD=F",  "日経225先物(CME)"),
+    # 米国(05:00 JST 確定)
+    "sp500":  ("^GSPC",     "S&P500"),
+    "nasdaq": ("^IXIC",     "NASDAQ"),
+    "sox":    ("^SOX",      "SOX半導体"),      # 日本株は半導体比重が高い
+    "vix":    ("^VIX",      "VIX"),
+    "us10y":  ("^TNX",      "米10年債利回り"),
+    # 欧州(00:30〜01:30 JST 確定)
+    "dax":    ("^GDAXI",    "DAX"),
+    "sx5e":   ("^STOXX50E", "ユーロSTOXX50"),
+    # アジア(前日の引け)。⚠ 東京が最も早く開くので、当日の情報にはならない
+    "kospi":  ("^KS11",     "KOSPI(前日)"),
+    # 為替・商品・先物(ほぼ24時間)
+    "usdjpy": ("JPY=X",     "USDJPY"),
+    "dxy":    ("DX-Y.NYB",  "ドル指数"),
+    "oil":    ("CL=F",      "WTI原油"),
+    "gold":   ("GC=F",      "金"),
+    "esfut":  ("ES=F",      "S&P500先物"),
+    # 日本
+    "n225":   ("^N225",     "日経平均"),
+    "nkfut":  ("NKD=F",     "日経225先物(CME)"),
 }
 
 _CACHE: dict = {}
@@ -93,7 +107,8 @@ def preopen_features(days: list[str]) -> dict:
     out: dict = {}
     for d in days:
         f: dict = {}
-        for k in ("sp500", "nasdaq", "usdjpy", "n225"):
+        for k in ("sp500", "nasdaq", "sox", "usdjpy", "n225",
+                  "dax", "sx5e", "kospi", "dxy", "oil", "gold", "esfut"):
             b = _prev_bars(ser.get(k) or {}, d, 2)
             if b:
                 f[f"{k}_ret"] = (b[0] / b[1] - 1.0) * 100.0
@@ -112,6 +127,18 @@ def preopen_features(days: list[str]) -> dict:
         nb = _prev_bars(ser.get("n225") or {}, d, 1)
         if fb and nb:
             f["fut_gap"] = (fb[0] / nb[0] - 1.0) * 100.0
+        # 米10年債は水準(%)そのものと前日差(bp)
+        b = _prev_bars(ser.get("us10y") or {}, d, 2)
+        if b:
+            f["us10y_chg"] = (b[0] - b[1]) * 100.0      # bp
+        # ★ 文献由来: ノイズトレーダーの**過剰反応 → 日中の反転**なので、
+        #   効くとしたら符号ではなく **ショックの大きさ** かもしれない。
+        #   (Chen et al. 2026: 前日S&P500が高いほど寄り30分のリターンは低い /
+        #    反転は金融危機時には弱まる = 大きさに非線形)
+        if "sp500_ret" in f:
+            f["sp500_abs"] = abs(f["sp500_ret"])
+        if "fut_gap" in f:
+            f["futgap_abs"] = abs(f["fut_gap"])
         try:
             f["dow"] = float(datetime.fromisoformat(d).weekday())   # 0=月
         except Exception:
@@ -122,12 +149,23 @@ def preopen_features(days: list[str]) -> dict:
 
 # 表示用のラベル(呼び出し側で使う)
 LABELS = {
-    "sp500_ret":  "S&P500 前日%",
-    "nasdaq_ret": "NASDAQ 前日%",
+    "fut_gap":    "先物-現物% (寄りギャップ予想)",
+    "futgap_abs": "|先物-現物%| (ギャップの大きさ)",
     "vix":        "VIX 水準",
     "vix_chg":    "VIX 変化%",
+    "sp500_ret":  "S&P500 前日%",
+    "sp500_abs":  "|S&P500 前日%| (ショックの大きさ)",
+    "nasdaq_ret": "NASDAQ 前日%",
+    "sox_ret":    "SOX半導体 前日%",
+    "us10y_chg":  "米10年債 前日差(bp)",
+    "dax_ret":    "DAX 前日%",
+    "sx5e_ret":   "ユーロSTOXX50 前日%",
+    "kospi_ret":  "KOSPI 前日%",
     "usdjpy_ret": "USDJPY 前日%",
+    "dxy_ret":    "ドル指数 前日%",
+    "oil_ret":    "WTI原油 前日%",
+    "gold_ret":   "金 前日%",
+    "esfut_ret":  "S&P500先物 前日%",
     "n225_ret":   "日経 前日%",
     "n225_5d":    "日経 5日%",
-    "fut_gap":    "先物-現物% (寄りギャップ予想)",
 }
