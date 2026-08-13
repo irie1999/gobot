@@ -70,7 +70,13 @@ ap.add_argument("--quantile", type=float, default=0.05, help="上位/下位 何�
 ap.add_argument("--cost-bp", type=float, default=8.0, help="往復コスト(呼値4ティック)")
 ap.add_argument("--qty", type=int, default=100)
 ap.add_argument("--budget", type=float, default=4_000_000.0, help="1日あたり使える資金")
-ap.add_argument("--null-shifts", type=int, default=16, help="帰無較正の本数")
+ap.add_argument("--zones", choices=["jp", "fx"], default="jp",
+                help="時間帯の区切り。jp=東証(9:00-15:30) / "
+                     "fx=24時間(深夜・早朝・東京・欧州・NY)")
+ap.add_argument("--null-reps", type=int, default=0,
+                help="⚠ 未完成。合成データで帰無が実測を上回る(ゾーン内シャッフルでも"
+                     "ゾーン間の構造が残るため)。**判定には使わないこと**。"
+                     "多重検定の判定は --split の TRAIN/TEST で行う")
 ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--csv", default=None)
 args = ap.parse_args()
@@ -106,10 +112,17 @@ SIGS = [
     ("volz15", "直近15分の出来高比", 15, _E_VL),
 ]
 NS = [1, 2, 3, 5, 10, 15, 30]
-# ゾーンは **排他** にする(昼休みを除けば取引時間をちょうど覆う)。
-# 「全時間」はこの4つの和なので集計しない — 集計を1回の bincount に畳めて5倍速い。
-ZONES = [("寄り30分", 540, 570), ("前場", 570, 690),
-         ("後場前半", 750, 870), ("引け60分", 870, 930)]
+# ゾーンは **排他** にする(取引時間をちょうど覆う)。
+# 「全時間」はこの和なので集計しない — 集計を1回の bincount に畳めて5倍速い。
+if args.zones == "fx":
+    # FXは平日24時間。日をまたぐNYセッションは 21-24時 と 0-6時 に割る
+    # (日跨ぎのゾーンを作ると「日」の定義が壊れて日クラスタ t が出せない)。
+    ZONES = [("深夜0-6時", 0, 360), ("早朝6-9時", 360, 540),
+             ("東京9-15時", 540, 900), ("欧州15-21時", 900, 1260),
+             ("NY21-24時", 1260, 1440)]
+else:
+    ZONES = [("寄り30分", 540, 570), ("前場", 570, 690),
+             ("後場前半", 750, 870), ("引け60分", 870, 930)]
 NZ = len(ZONES)
 ZALL = -1                     # _tail に渡すと4ゾーンの和 = 全時間
 NSIG = len(SIGS)
@@ -122,6 +135,11 @@ SUM = np.zeros((NSIG, len(NS), NZ, NBMAX, _MAXDAY), dtype=np.float64)
 CNT = np.zeros((NSIG, len(NS), NZ, NBMAX, _MAXDAY), dtype=np.float64)
 # 1銘柄日あたりの機会数を数えるため、銘柄日数も持つ
 NSYMDAY = [0]
+# 帰無用の集計器。シグナルとリターンの対応だけを壊した世界。
+NREP = max(0, args.null_reps)
+NSUM = (np.zeros((NREP,) + SUM.shape, dtype=np.float64) if NREP else None)
+NCNT = (np.zeros((NREP,) + CNT.shape, dtype=np.float64) if NREP else None)
+_NRNG = [np.random.default_rng(args.seed + 1000 + i) for i in range(NREP)]
 # 建玉の計算に使う実価格(採用銘柄の最終終値)。--only のとき価格帯フィルタの
 # 値を流用すると ETF の実価格とずれるので、実際に採用したものを覚えておく。
 _PRICES: list = []
@@ -246,11 +264,25 @@ def accumulate(c: np.ndarray, v: np.ndarray, mins: np.ndarray, di: int) -> int:
             if not ok.any():
                 continue
             # (ゾーン, ビン) を複合indexに畳んで bincount 1回で済ませる
-            idx = z[ok] * NBMAX + np.digitize(xs[ok], edges)
-            s = np.bincount(idx, weights=rf[ok], minlength=NZ * NBMAX)
+            zo, rfo = z[ok], rf[ok]
+            idx = zo * NBMAX + np.digitize(xs[ok], edges)
+            s = np.bincount(idx, weights=rfo, minlength=NZ * NBMAX)
             k = np.bincount(idx, minlength=NZ * NBMAX).astype(np.float64)
             SUM[si, ni] [:, :, di] += s[:NZ * NBMAX].reshape(NZ, NBMAX)
             CNT[si, ni] [:, :, di] += k[:NZ * NBMAX].reshape(NZ, NBMAX)
+            # ── 帰無: 同じゾーンの中でリターンだけを入れ替える ──────────
+            #    シグナル(ビン割り当て)は動かさないので分布はそのまま、
+            #    「どのシグナルの後にどのリターンが来たか」の対応だけが壊れる。
+            #    日もゾーンもまたがないので、日ブロック構造は保たれる(18.13)。
+            for _rep in range(NREP):
+                rf2 = rfo.copy()
+                for _zi in range(NZ):
+                    mz = np.where(zo == _zi)[0]
+                    if len(mz) > 1:
+                        rf2[mz] = rfo[_NRNG[_rep].permutation(mz)]
+                ns = np.bincount(idx, weights=rf2, minlength=NZ * NBMAX)
+                NSUM[_rep, si, ni][:, :, di] += ns[:NZ * NBMAX].reshape(NZ, NBMAX)
+                NCNT[_rep, si, ni][:, :, di] += k[:NZ * NBMAX].reshape(NZ, NBMAX)
             used += int(ok.sum())
     return used
 
@@ -261,13 +293,13 @@ def _slab(A: np.ndarray, si: int, ni: int, zi: int) -> np.ndarray:
 
 
 def _tail(si: int, ni: int, zi: int, upper: bool, dmask: np.ndarray,
-          shift: int = 0):
+          rep: int = -1):
     """上位(下位) quantile のビン群の r_fut 平均(bp)と日クラスタ t。
 
-    shift>0 のときは **日ラベルを巡回シフト** して t だけを帰無化する
-    (bp は日順序に依らないので変わらない)。
+    rep>=0 のときは **帰無の集計器** を見る(ゾーン内でリターンを入れ替えた世界)。
     """
-    _S, _C = _slab(SUM, si, ni, zi), _slab(CNT, si, ni, zi)
+    _A, _B = ((SUM, CNT) if rep < 0 else (NSUM[rep], NCNT[rep]))
+    _S, _C = _slab(_A, si, ni, zi), _slab(_B, si, ni, zi)
     cnt = _C[:, dmask].sum(axis=1)
     tot = cnt.sum()
     if tot < 1000:
@@ -289,36 +321,44 @@ def _tail(si: int, ni: int, zi: int, upper: bool, dmask: np.ndarray,
     k = dk.sum()
     if k <= 0:
         return None
-    live = dk > 0
-    dv = (ds[live] / dk[live]) * 1e4
-    if shift:
-        dv = np.roll(dv, shift)
+    # ⛔ t は「0と異なるか」ではなく **「その日・そのゾーンの全体平均と異なるか」**
+    #    で測る。そうしないと、その日全体が下げただけで全升の t が大きく出る
+    #    (シグナルに予測力が無い帰無の世界でも、全升が同じ日次ドリフトを共有して
+    #     一斉にヒットしてしまう。実際そうなって帰無が実測を上回った)。
+    ads = _S[:, dmask].sum(axis=0)          # そのゾーンの全観測(= 分位で切る前)
+    adk = _C[:, dmask].sum(axis=0)
+    live = (dk > 0) & (adk > 0)
+    dv = (ds[live] / dk[live] - ads[live] / adk[live]) * 1e4
     nd = int(live.sum())
     t = 0.0
     if nd > 2:
         sd = dv.std(ddof=1)
         if sd > 0:
             t = float(dv.mean() / (sd / math.sqrt(nd)))
-    return {"bp": float(ds.sum() / k * 1e4), "n": float(k), "t": t, "days": nd}
+    base = (ads.sum() / adk.sum() * 1e4) if adk.sum() > 0 else 0.0
+    return {"bp": float(ds.sum() / k * 1e4),          # 取引の期待値(絶対)
+            "exc": float(ds.sum() / k * 1e4 - base),  # シグナルの効果(超過)
+            "n": float(k), "t": t, "days": nd}
 
 
-_ZLIST = [(ZALL, "全時間", 540, 930)] + [(i, z[0], z[1], z[2])
-                                        for i, z in enumerate(ZONES)]
+_ZALL_SPAN = (ZONES[0][1], ZONES[-1][2])
+_ZLIST = [(ZALL, "全時間", _ZALL_SPAN[0], _ZALL_SPAN[1])] + [
+    (i, z[0], z[1], z[2]) for i, z in enumerate(ZONES)]
 
 
-def scan(dmask: np.ndarray, shift: int = 0) -> list[dict]:
+def scan(dmask: np.ndarray, rep: int = -1) -> list[dict]:
     out = []
     for si, (key, lab, M, _e) in enumerate(SIGS):
         for ni, N in enumerate(NS):
             for zi, zn, _a, _b in _ZLIST:
                 for updown, upper in (("上位", True), ("下位", False)):
-                    r = _tail(si, ni, zi, upper, dmask, shift)
+                    r = _tail(si, ni, zi, upper, dmask, rep)
                     if r is None:
                         continue
                     out.append({"sig": key, "label": lab, "N": N,
                                 "zone": zn, "side": updown,
-                                "bp": r["bp"], "t": r["t"], "n": r["n"],
-                                "days": r["days"]})
+                                "bp": r["bp"], "exc": r["exc"], "t": r["t"],
+                                "n": r["n"], "days": r["days"]})
     return out
 
 
@@ -414,23 +454,23 @@ def main() -> int:
 
     # ── 帰無較正(日ブロック巡回シフト) ───────────────────────────────
     hit = [r for r in rows if abs(r["bp"]) >= args.cost_bp and abs(r["t"]) >= 2.0]
-    nd_all = len(_DAYIDX)
-    null_counts = []
-    for s in range(1, args.null_shifts + 1):
-        sh = int(s * nd_all / (args.null_shifts + 1)) or 1
-        nr = scan(allmask, shift=sh)
-        null_counts.append(sum(1 for r in nr
-                               if abs(r["bp"]) >= args.cost_bp
-                               and abs(r["t"]) >= 2.0))
-    nc = np.array(null_counts, dtype=float)
     print("  【判定】")
     print(f"  全 {len(rows)} 升 / コスト {args.cost_bp}bp 超 かつ |日t|>=2 = "
           f"**{len(hit)} 升**")
-    print(f"  帰無(日ブロック巡回シフト {args.null_shifts}本): "
-          f"平均 {nc.mean():.1f} 升 / 最大 {nc.max():.0f} 升 / "
-          f"実測はこの帯の{'外' if len(hit) > nc.max() else '中'}")
-    if len(hit) <= nc.mean():
-        print("  ⛔ **実測が帰無平均以下。構造がある証拠にならない。**")
+    if NREP:
+        nc = np.array([sum(1 for r in scan(allmask, rep=i)
+                           if abs(r["bp"]) >= args.cost_bp and abs(r["t"]) >= 2.0)
+                       for i in range(NREP)], dtype=float)
+        print(f"  帰無(ゾーン内でリターンを入れ替え {NREP}本): "
+              f"{' / '.join(f'{int(x)}' for x in nc)} 升 → 平均 {nc.mean():.1f}")
+        if len(hit) <= nc.max():
+            print("  ⛔ **実測が帰無の帯の中。構造がある証拠にならない。**")
+        else:
+            print(f"  ✅ 実測が帰無の最大({nc.max():.0f})を上回る")
+    else:
+        print("  ⚠ 升は互いに強く相関するので『偶然なら5%』という素朴な期待値は"
+              "当てになりません。\n     多重検定の判定は --split の TRAIN/TEST で"
+              "行ってください(符号一致かつ TEST でもコスト超)。")
 
     if not hit:
         print()
