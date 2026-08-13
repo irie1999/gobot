@@ -132,15 +132,30 @@ def _day_index(day: str) -> int:
     return di
 
 
+def _jq_to_yf(code: str) -> str:
+    """J-Quants の5桁(末尾0)を yfinance 表記へ。'72030' -> '7203.T'
+
+    ⛔ available_local_symbols() は stock_5min の **ファイル名(=J-Quants 5桁)** を
+       返す。そのまま '.T' を足すと '72030.T' になり、_bars_one が内部でさらに
+       '0' を足して '720300_1m.pkl' を探しに行く(=全件ファイルなし)。
+       fetch_1m_all.py と同じ変換をここでも通すこと。
+    """
+    c = str(code).strip().upper()
+    if c.endswith(".T"):
+        return c
+    if len(c) == 5 and c[-1] == "0" and c[:4].isalnum():
+        return c[:4] + ".T"
+    return c + ".T"
+
+
 def universe() -> list[str]:
     try:
         from daytrade_data import available_local_symbols
-        syms = [s if str(s).endswith(".T") else f"{s}.T"
-                for s in available_local_symbols()]
-    except Exception:
-        syms = []
+        syms = [_jq_to_yf(s) for s in available_local_symbols()]
+    except Exception as e:
+        sys.exit(f"[error] ユニバースが取れません: {e}")
     if not syms:
-        sys.exit("[error] ユニバースが取れません(daytrade_data.available_local_symbols)")
+        sys.exit("[error] ユニバースが空です(daytrade_data.available_local_symbols)")
     rng = random.Random(args.seed)
     rng.shuffle(syms)
     return syms if args.symbols <= 0 else syms[:args.symbols]
@@ -272,17 +287,25 @@ def main() -> int:
           f"|t|>=2 が {len(MS) * len(NS) * NZ * 2 * 0.05:.0f} 個前後は偶然でも出る。")
     print()
 
+    # ⛔ 例外を握りつぶすと「0採用」の原因が分からなくなる。理由を数える。
+    why = {"1分足なし": 0, "期間内バーなし": 0, "価格帯外": 0, "エラー": 0}
+    errs: list[str] = []
     nsym = nday = nobs = 0
     for i, sym in enumerate(syms, 1):
         try:
             df = _bars_one(sym, 1)
-            if df is not None and not getattr(df, "empty", True) \
-                    and "close" in df.columns:
+            if df is None or getattr(df, "empty", True) or "close" not in df.columns:
+                why["1分足なし"] += 1
+            else:
                 d = df[df.index.date >= cut]
-                if len(d) > 0:
+                if len(d) == 0:
+                    why["期間内バーなし"] += 1
+                else:
                     px = float(d["close"].iloc[-1])
-                    if ((args.min_price <= 0 or px >= args.min_price) and
+                    if not ((args.min_price <= 0 or px >= args.min_price) and
                             (args.max_price <= 0 or px <= args.max_price)):
+                        why["価格帯外"] += 1
+                    else:
                         dates = np.array([ts.date() for ts in d.index])
                         cl = d["close"].to_numpy(dtype=float)
                         mn = np.array([ts.hour * 60 + ts.minute
@@ -296,15 +319,26 @@ def main() -> int:
                                 nobs += got
                                 nday += 1
                         nsym += 1
-        except Exception:
-            pass
+        except Exception as e:
+            why["エラー"] += 1
+            if len(errs) < 3:
+                errs.append(f"{sym}: {type(e).__name__}: {e}")
         drop_symbol(sym)
         if i % 25 == 0:
             print(f"    {i}/{len(syms)}銘柄 … {nsym}採用 / {nday:,}銘柄日 / "
                   f"{nobs:,}観測", flush=True)
 
     if nobs == 0:
-        sys.exit("[error] 観測が0件。1分足の在庫を check_minute_data.py で確認してください。")
+        print()
+        print("  【0件の内訳】 " + " / ".join(f"{k} {v}" for k, v in why.items()))
+        for e in errs:
+            print(f"    {e}")
+        print(f"    1分足DIR: {_d1}")
+        print(f"    例: {syms[0]} → {str(syms[0]).replace('.T', '')}0_1m.pkl を探します")
+        sys.exit("[error] 観測が0件。上の内訳と、python check_minute_data.py を確認してください。")
+    if sum(why.values()):
+        print(f"    [info] 除外: " + " / ".join(f"{k} {v}" for k, v in why.items()
+                                                if v))
     if _OVERFLOW[0]:
         print(f"    [warn] 日数上限({_MAXDAY})を超えた銘柄日 {_OVERFLOW[0]} 件を捨てました。"
               f"--days を減らすか _MAXDAY を上げてください。")

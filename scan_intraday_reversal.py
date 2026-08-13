@@ -136,10 +136,20 @@ def load_control(sig_days: dict) -> dict:
     """{日付: set(銘柄)} — 同じ日に1分足があり、信号が出ていない銘柄からランダム。"""
     if args.control <= 0:
         return {}
+    def _jq_to_yf(code: str) -> str:
+        # ⛔ available_local_symbols() は J-Quants の5桁(末尾0)を返す。そのまま
+        #    '.T' を足すと _bars_one が内部でさらに '0' を足して探しに行き、
+        #    全件ファイルなしになる。fetch_1m_all.py と同じ変換を通すこと。
+        c = str(code).strip().upper()
+        if c.endswith(".T"):
+            return c
+        if len(c) == 5 and c[-1] == "0" and c[:4].isalnum():
+            return c[:4] + ".T"
+        return c + ".T"
+
     try:
         from daytrade_data import available_local_symbols
-        pool = [s if s.endswith(".T") else f"{s}.T"
-                for s in available_local_symbols()]
+        pool = [_jq_to_yf(s) for s in available_local_symbols()]
     except Exception:
         pool = sorted({s for v in sig_days.values() for s in v})
     rng = random.Random(args.seed)
