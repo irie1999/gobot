@@ -57,6 +57,12 @@ ap.add_argument("--trades-csv", type=str,
                      "既定 lss_trades.csv。--no-compare で比較をスキップ")
 ap.add_argument("--no-compare", action="store_true",
                 help="バックテストとの比較セクションを出さない")
+ap.add_argument("--lss-compare", action="store_true",
+                help="突合相手を **現行lss(逆指値)** の明細に固定する。既定は "
+                     "<csv>_H.csv (H=指値売り) があればそちらを優先する。"
+                     "実発注が H なのに lss と突合すると、寄りで上に飛んで戻らなかった"
+                     "銘柄が『テストに無い』と誤報告され、エントリー方式の差が"
+                     "『滑り』として計上される(2026-08-13)")
 ap.add_argument("--save", action="store_true",
                 help="CSV2種を日付つきファイル名で自動保存 "
                      "(fills_<日付>.csv / orders_<日付>.csv)。--csv/--orders-csv より優先度低")
@@ -393,9 +399,32 @@ def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
 
 def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     """実約定 vs バックテスト(レポート)の同日取引を並べて比較する。"""
-    bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
+    # ⛔ 突合相手は **実際に出している注文方式** の明細でなければ意味がない。
+    #    実発注は H(前日終値-5tick の指値売り)なのに、既定の lss_trades.csv は
+    #    現行lss(逆指値売り)の明細だった(2026-08-13 発覚)。lss は『前日終値-1tick
+    #    まで下がったら約定』なので、寄りで上に飛んで戻らなかった銘柄は約定しない。
+    #    実際 7186/9508/5844 は H では寄りで約定したのに lss 明細に無く、
+    #    『テストに無い』と誤報告された。1605 も lss 3,710 vs H 3,730 を比べて
+    #    滑り +0.54% と出ていたが、これは滑りではなくエントリー方式の差。
+    _tp = Path(args.trades_csv)
+    _hp = _tp.with_name(_tp.stem + "_H" + _tp.suffix)
+    _src_label = args.trades_csv
+    bt = []
+    if not args.lss_compare and _hp.exists():
+        bt = _bt_trades_for_date(str(_hp), _DATE_DIG)
+        if bt:
+            _src_label = f"{_hp.name} (H=指値売り。実発注と同じ方式)"
+    if not bt:
+        bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
+        if bt and not args.lss_compare:
+            _src_label = (f"{args.trades_csv} ⚠ **lss(逆指値)の明細**。"
+                          f"H で発注しているなら方式が違うので、"
+                          f"『テストに無い』『滑り』は当てになりません。"
+                          f"git pull して .\\daily を1回流すと {_hp.name} が出ます")
     print()
     print("=" * 78)
+    if bt:
+        print(f"[突合相手] {_src_label}")
     if not bt:
         print(f"=== バックテスト比較: スキップ ===")
         print(f"  {args.trades_csv} に {_DATE} の取引が見つかりません。")
