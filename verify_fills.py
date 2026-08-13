@@ -443,6 +443,16 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
               f"引け後に .\\daily → .\\fills の順で)。")
         return
 
+    # ★ 『約定せず』は合計・一覧から外すが、診断用に控えておく。
+    #    実約定したのにテストに無い銘柄が
+    #      (a) テストは母集団に持っていて「約定しない」と判定した  → 約定モデルの誤り
+    #      (b) そもそも母集団に無い(バックテストがシグナルを出していない)
+    #    のどちらなのかで、直す場所がまったく違う(2026-08-13)。
+    _nofill = {t["symbol"]: t for t in bt if str(t.get("reason")) == "約定せず"}
+    bt = [t for t in bt if str(t.get("reason")) != "約定せず"]
+    if _nofill:
+        print(f"  (うち H が『約定せず』と判定 {len(_nofill)}件 は合計から除外)")
+
     # 同一銘柄が複数戦略で出た場合はBT最高の1件に統合(実運用=1銘柄1ポジション)
     by_sym: dict = {}
     for t in bt:
@@ -524,10 +534,29 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
 
     if real_only:
         print(f"\n▼ 実約定したがテストに無い {len(real_only)}銘柄")
+        _n_model, _n_pop = 0, 0
         for s in real_only:
             r = real_done[s]
-            print(f"{s:>6} {r['name'][:12]:<12}{r['pnl']:>+10,.0f}")
-        print("  → テストが『約定しない/シグナルなし』と判定した銘柄。実際は約定した。")
+            _nf = _nofill.get(s)
+            if _nf:
+                _n_model += 1
+                _why = (f"H は『約定せず』と判定 "
+                        f"(指値{_nf.get('entry_p') or '-'}) ← **約定モデルの誤り**")
+            else:
+                _n_pop += 1
+                _why = "テストの母集団に無い(バックテストがシグナルを出していない)"
+            print(f"{s:>6} {r['name'][:12]:<12}{r['pnl']:>+10,.0f}  {_why}")
+        if _n_model:
+            print(f"  ・{_n_model}件: **H の約定判定が実際とズレている**。"
+                  f"寄りが指値以上なら板寄せで約定するはずなので、"
+                  f"ギャップガード(±3%)や5分足の欠落を疑う")
+        if _n_pop:
+            print(f"  ・{_n_pop}件: **損益タブの母集団に無い**。シグナルタブ(ライブ判定 "
+                  f"check_signal_on_date)は出したのに、損益タブ(バックテスト "
+                  f"run_limit_backtest)が当日の取引として持っていない。")
+            print(f"    当日ぶんは決着していないと『発注中』扱いで明細から外れる"
+                  f"(nikkei_analysis: pending_trades=[])。翌営業日に .\\daily を"
+                  f"流し直すと入るはずなので、まずそれで消えるか確認すること。")
 
     _r_tot = sum(r["pnl"] for r in real_done.values())
     print()

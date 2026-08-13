@@ -10275,7 +10275,11 @@ function switchTbd(id, tab) {{
             _hcsv, _hcols = _hpend
             _hp = Path(_hcsv)
             _hout = str(_hp.with_name(_hp.stem + "_H" + _hp.suffix))
-            _hrows = sorted([t for t in _hsrc if t.get("reason") != "約定せず"],
+            # ★ 約定せず も書く。.\fills が『H は約定しないと判定した』のか
+            #   『そもそも母集団に無い(バックテストがシグナルを出していない)』のかを
+            #   区別できないと、原因の切り分けができない(2026-08-13)。
+            #   verify_fills 側で reason=約定せず は合計から除外する。
+            _hrows = sorted(_hsrc,
                             key=lambda x: (str(x.get("exit_d_raw") or ""),
                                            str(x.get("symbol") or "")))
             with open(_hout, "w", newline="", encoding="utf-8-sig") as _f3:
