@@ -74,6 +74,7 @@ ap.add_argument("--no-slip-log", action="store_true",
 args = ap.parse_args()
 
 FEE = args.fee
+_CMP_MODE = "H"   # 突合相手の方式(H / lss)。累積ログに残す
 _DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
 
 # --save: 明示指定が無い側だけ日付つきの既定名を割り当てる
@@ -408,23 +409,31 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     #    滑り +0.54% と出ていたが、これは滑りではなくエントリー方式の差。
     _tp = Path(args.trades_csv)
     _hp = _tp.with_name(_tp.stem + "_H" + _tp.suffix)
-    _src_label = args.trades_csv
-    bt = []
-    if not args.lss_compare and _hp.exists():
-        bt = _bt_trades_for_date(str(_hp), _DATE_DIG)
-        if bt:
-            _src_label = f"{_hp.name} (H=指値売り。実発注と同じ方式)"
-    if not bt:
+    global _CMP_MODE
+    if args.lss_compare:
+        _CMP_MODE = "lss"
         bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
-        if bt and not args.lss_compare:
-            _src_label = (f"{args.trades_csv} ⚠ **lss(逆指値)の明細**。"
-                          f"H で発注しているなら方式が違うので、"
-                          f"『テストに無い』『滑り』は当てになりません。"
-                          f"git pull して .\\daily を1回流すと {_hp.name} が出ます")
+        _src_label = f"{_tp.name} ⚠ 現行lss(逆指値)。--lss-compare 指定"
+    else:
+        _CMP_MODE = "H"
+        bt = _bt_trades_for_date(str(_hp), _DATE_DIG) if _hp.exists() else []
+        _src_label = f"{_hp.name} (H=指値売り。実発注と同じ方式)"
+        if not bt:
+            # ⛔ lss へフォールバックしない。方式が違う明細と突合すると
+            #    『テストに無い』『滑り』が全部でたらめになる(2026-08-13)。
+            print()
+            print("=" * 78)
+            print("=== バックテスト比較: スキップ (H の明細がありません) ===")
+            print(f"  {_hp.name} が見つからない、または {_DATE} の取引がありません。")
+            print( "  実発注は H(前日終値-5tick の指値売り)なので、lss(逆指値)の明細と")
+            print( "  突合しても意味がありません(方式が違うので別の銘柄・別の約定値になる)。")
+            print( "  → git pull してから .\\daily か .\\dailyfast を1回流してください。")
+            print(f"     LSS_TRADES_CSV が設定されていれば {_hp.name} も一緒に出ます。")
+            print( "  どうしても lss と比べたいときだけ .\\fills --lss-compare")
+            return
     print()
     print("=" * 78)
-    if bt:
-        print(f"[突合相手] {_src_label}")
+    print(f"[突合相手] {_src_label}")
     if not bt:
         print(f"=== バックテスト比較: スキップ ===")
         print(f"  {args.trades_csv} に {_DATE} の取引が見つかりません。")
@@ -546,7 +555,7 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
 # 分からない。lss の月の期待値は +37,647円(CLAUDE.md 18.12)しかないので、1日
 # -2,900円 の乖離が常態なら月 -58,000円 になり期待値が消える。10営業日ぶん貯めれば
 # それが確定する。tenkan_daily_log.csv と同じ思想(1日1行・同じ日は上書き)。
-_SLIP_COLS = ["date", "突合", "実損益", "テスト損益", "差",
+_SLIP_COLS = ["date", "方式", "突合", "実損益", "テスト損益", "差",
               "エントリー滑り", "決済滑り", "平均エントリー滑り%",
               "実件数", "実損益_全", "テスト件数", "テスト損益_全", "差_全",
               "発注件数", "約定率%"]
@@ -577,6 +586,7 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
     _ymd = f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}" if len(_DATE_DIG) == 8 else str(_DATE)
     row = {
         "date": _ymd,
+        "方式": _CMP_MODE,
         "突合": len(both),
         "実損益": round(_r_both),
         "テスト損益": round(_t_both),
@@ -622,24 +632,44 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
 
     print()
     print("=" * 78)
-    print(f"=== 累積: 実約定 vs テストの乖離 ({p.name} / {len(hist)}営業日) ===")
-    print(f"  {'日付':<12}{'突合':>5}{'実損益':>10}{'テスト':>10}{'差':>10}"
+    # ⛔ 集計は **いまの方式(H)の行だけ**。08/05〜08/07 は lss(逆指値)の実発注を
+    #    v16前の楽観モデルと突合したもので、混ぜると『決済滑り -10,012円/日』の
+    #    ような、いまのモデルとは無関係な数字が出る(2026-08-13)。
+    #    方式列が無い古い行は lss(旧) 扱いにして集計から外す。
+    def _mode_of(h) -> str:
+        return str(h.get("方式") or "").strip() or "lss(旧)"
+
+    _cur = [d for d in sorted(hist) if _mode_of(hist[d]) == _CMP_MODE]
+    _old = [d for d in sorted(hist) if _mode_of(hist[d]) != _CMP_MODE]
+    print(f"=== 累積: 実約定 vs テストの乖離 ({p.name} / {_CMP_MODE} {len(_cur)}営業日) ===")
+    print(f"  {'日付':<12}{'方式':>8}{'突合':>5}{'実損益':>10}{'テスト':>10}{'差':>10}"
           f"{'エントリ滑り':>12}{'決済滑り':>10}{'約定率':>8}")
     for d in sorted(hist):
         h = hist[d]
-        print(f"  {d:<12}{int(_f(h.get('突合'))):>5}{_f(h.get('実損益')):>+10,.0f}"
+        _m = _mode_of(h)
+        _mk = "" if _m == _CMP_MODE else "  ← 集計対象外"
+        print(f"  {d:<12}{_m:>8}{int(_f(h.get('突合'))):>5}{_f(h.get('実損益')):>+10,.0f}"
               f"{_f(h.get('テスト損益')):>+10,.0f}{_f(h.get('差')):>+10,.0f}"
               f"{_f(h.get('エントリー滑り')):>+12,.0f}{_f(h.get('決済滑り')):>+10,.0f}"
-              f"{_f(h.get('約定率%')):>7.1f}%")
+              f"{_f(h.get('約定率%')):>7.1f}%{_mk}")
+    if _old:
+        print(f"  ※ {len(_old)}日ぶんは別方式(または v16前)なので集計から除外: "
+              f"{', '.join(_old)}")
+    if not _cur:
+        print(f"  {_CMP_MODE} の行がまだありません。累計は次回から出ます。")
+        print()
+        return
 
-    n_d = len(hist)
-    n_b = sum(int(_f(h.get("突合"))) for h in hist.values())
-    d_tot = sum(_f(h.get("差")) for h in hist.values())
-    e_tot = sum(_f(h.get("エントリー滑り")) for h in hist.values())
-    x_tot = sum(_f(h.get("決済滑り")) for h in hist.values())
+    _cv = [hist[d] for d in _cur]
+    n_d = len(_cv)
+    n_b = sum(int(_f(h.get("突合"))) for h in _cv)
+    d_tot = sum(_f(h.get("差")) for h in _cv)
+    e_tot = sum(_f(h.get("エントリー滑り")) for h in _cv)
+    x_tot = sum(_f(h.get("決済滑り")) for h in _cv)
     print("  " + "-" * 76)
-    print(f"  {'合計':<12}{n_b:>5}{sum(_f(h.get('実損益')) for h in hist.values()):>+10,.0f}"
-          f"{sum(_f(h.get('テスト損益')) for h in hist.values()):>+10,.0f}{d_tot:>+10,.0f}"
+    print(f"  {'合計(' + _CMP_MODE + ')':<12}{'':>8}{n_b:>5}"
+          f"{sum(_f(h.get('実損益')) for h in _cv):>+10,.0f}"
+          f"{sum(_f(h.get('テスト損益')) for h in _cv):>+10,.0f}{d_tot:>+10,.0f}"
           f"{e_tot:>+12,.0f}{x_tot:>+10,.0f}")
     print()
     print(f"  1日あたりの乖離   {d_tot / n_d:>+12,.0f}円"
