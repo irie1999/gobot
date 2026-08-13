@@ -3180,7 +3180,11 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 f'<span><button type="button" '
                 f'onclick="gobotOrder(this,\'{_scode}\',\'{_side}\',\'{s["strategy"]}\','
                 f'{s["order_p"]:.0f},{_ord_stop:.0f},{_ord_target:.0f},100,'
-                f'\'{s.get("rec_score", "") or ""}\',{round(100 * s["order_p"])})" '
+                f'\'{s.get("rec_score", "") or ""}\',{round(100 * s["order_p"])},'
+                # ⛔ atr を渡し忘れると発注記録の atr=0 になり、watcher が実約定価格から
+                #    OCO を組み直せない(2026-08-13: 4銘柄すべて損切りが無効化された)。
+                #    🚀発注 側は渡していたが、こちらだけ抜けていた。
+                f'{float(s.get("h_atr", 0) or 0):.2f})" '
                 f'style="display:inline-block;padding:4px 8px;background:#b45309;'
                 f'color:#fff;border:none;border-radius:5px;font-size:12px;cursor:pointer;'
                 f'white-space:nowrap">100株 発注</button></span>'
