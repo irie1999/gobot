@@ -284,6 +284,11 @@ if _NO_BT_FILTER:
 #    評価対象から消えていた。BT はアルゴリズムから外す決定(2026-08-12)の取り残し。
 _NOFILL_MIN_BT: float = 0.0 if _NO_BT_FILTER else float(
     os.environ.get("LSS_POOL_MIN_BT", "30") or 30)
+# BTスコアを **画面に出すか**。既定 OFF (2026-08-13 ユーザー指示)。
+# アルゴリズムから外した以上、画面に残っていると「BTが高いから優先」と
+# 誤読するもとになる。比較・デバッグ用に LSS_SHOW_BT=1 で復活できる。
+_SHOW_BT: bool = str(os.environ.get("LSS_SHOW_BT", "")).strip() \
+    in ("1", "true", "True", "yes")
 # ポジションサイズ方式。"atr" = リスク(損切り幅×株数)を _SIZE_TARGET 円に揃える。
 # 既定 "" = 従来どおり100株固定。H タブのシグナル株数と lss_budget_cap で使う。
 _SIZE_MODE: str = str(os.environ.get("LSS_SIZE_MODE", "")).strip().lower()
@@ -2161,6 +2166,16 @@ def _fmt_score_cell(s: dict, col: str) -> str:
         s.get("symbol") or s.get("sym"), s.get("strategy") or s.get("strat"))
     _src_badge = (f'<span style="font-size:0.62rem;color:#38bdf8;font-weight:700;display:block;'
                   f'margin-top:1px" title="選定基準月">基&nbsp;{_sb}</span>') if _sb else ""
+    # ⛔ BTスコアは HTML にも出さない(2026-08-13 ユーザー指示)。
+    #    アルゴリズムから外した(2026-08-12)うえ、画面に残っていると
+    #    「BTが高いから優先」と読んでしまう。BT由来のバッジ(bt_type/取引件数)も
+    #    同じ理由で消す。復活させるなら LSS_SHOW_BT=1。
+    if not _SHOW_BT:
+        _wf = s.get("wf_score")
+        _head = (f'<span style="color:{col};font-weight:700">WF&nbsp;{_wf}</span>'
+                 if (s.get("is_wf") and _wf is not None) else
+                 f'<span style="color:#64748b">—</span>')
+        return f'{_head}{_oos_badge}{_src_badge}'
     if s.get("is_wf") and s.get("wf_score") is not None:
         rec = s.get("rec_score", "—")
         return (
@@ -2997,6 +3012,10 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             '（クリックで展開）</summary>' + score_section + '</details>')
     # 戦略別優先度を上、スコア帯別(折りたたみ)を下に
     score_section = _strat_pri_html + score_section
+    # ⛔ どちらも BTスコアを軸にしたブロック(優先度=BT70以上で集計 / スコア帯別)。
+    #    BT は画面にも出さない方針(2026-08-13)なので丸ごと落とす。LSS_SHOW_BT=1 で復活。
+    if not _SHOW_BT:
+        score_section = ""
 
     sig_label = str(target_date) if target_date else str(_TODAY)
     if not signals:
@@ -3466,7 +3485,7 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
         _sig_ord_note = ("BTスコアが高い順に並んでいます。"
                          if _lor_h.mode() == "bt" else
                          "売買代金(直近120日平均)の大きい順に並んでいます"
-                         "(同値はBT降順)。")
+                         "(同値は銘柄コード順)。")
     except Exception:
         _sig_ord_lbl, _sig_ord_note = "BTスコア降順", "BTスコアが高い順に並んでいます。"
     # H タブなら発注ボタンが指値売りとして送るようにする(order_server が entry_mode を見る)。
@@ -11966,11 +11985,12 @@ function switchTbd(id, tab) {{
                       f'<td style="text-align:right;padding:4px 10px;color:#64748b">—</td>'
                       f'</tr>')
             return (
-                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日BT降順で {_bud_man}万円まで注文した場合（月次）'
-                + (f'<span style="color:#fbbf24">［BT{_BUD_MIN_BT}以上のみ］</span>' if _BUD_MIN_BT > 30 else '')
+                f'<h4 style="color:#cbd5e1;margin:18px 0 6px">💰 予算固定シミュ: 毎日{_ORD_LBL}で {_bud_man}万円まで注文した場合（月次）'
+                + (f'<span style="color:#fbbf24">［BT{_BUD_MIN_BT}以上のみ］</span>'
+                   if (_SHOW_BT and _BUD_MIN_BT > 30) else '')
                 + (f'<span style="color:#38bdf8">［{_mfrom}以降=OOS］</span>' if _mfrom else '')
                 + '</h4>'
-                f'<p class="footnote">毎日その日のBT降順で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が'
+                f'<p class="footnote">毎日その日の{_ORD_LBL}で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が'
                 f'<b>{_bud_man}万円</b>に収まるだけ<b>注文</b>する（同日決済なので予算は毎日リセット）。'
                 f'<b>不約定(トリガー未達・ギャップ過大)の注文も発注枠を消費</b>する（＝その下のBTの約定を締め出す）。'
                 f'損益・件数は約定分のみ計上。この価格帯タブ(表示中の価格上限)の銘柄のみ。'
@@ -13426,7 +13446,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
-            f'style="border-color:#38bdf8">💰 {_budget_man}万円×{_ORD_LBL}×日別 (BT{_BT_TAB_MIN}以上) '
+            f'style="border-color:#38bdf8">💰 {_budget_man}万円×{_ORD_LBL}×日別'
+            + (f' (BT{_BT_TAB_MIN}以上)' if (_SHOW_BT and _BT_TAB_MIN > 0) else '') + ' '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
