@@ -86,6 +86,10 @@ MARKET_END = dtime(15, 30)    # 大引け(東証, 2024/11/5以降は15:30)。こ
 # ── 多重起動防止(タスクスケジューラの重複起動・手動起動が重なっても1つだけ動かす) ──
 # lock ファイルの mtime を各ループで更新(ハートビート)。_LOCK_STALE 秒より古い lock は
 # 「死んだインスタンス」とみなして無視する(クラッシュ後の残骸で永久ブロックしない)。
+# 損切りが不整合(平均約定値以下)になったときの緊急幅。--emergency-stop-pct で変更。
+# ショートで損切り無しは青天井なので、0 にしない限り必ず何かしらの損切りを置く。
+_EMERG_STOP_PCT = 0.01
+
 _LOCK = _BASE / ".lss_watcher.lock"
 _LOCK_STALE = 180
 
@@ -331,14 +335,40 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
                           f"entry={_ep0} stop={_os} target={_ot}) → "
                           f"注文価格基準のまま。**損切りが無効化される可能性が高いので"
                           f"手動で逆指値買いを置いてください**")
-        # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。損切≤平均約定=逆側/陳腐化した
-        # 注文の疑い → その損切りは無効化して誤決済を防ぐ(利確・引けは有効のまま)。マッチ改善後も
-        # なお不整合な場合の最終防波堤。0.1ATRのタイト損切りでも avg より上なので通常は発火しない。
+        # 安全ガード: 売建(ショート)の損切は必ず平均約定値より上。
+        # ⛔ 2026-08-13 事故を受けて **fail-open をやめた**。
+        #    旧実装は不整合なら損切りを 0 にして黙って無効化していた。ショートで
+        #    損切り無しは上方向に青天井なので、『誤決済を防ぐ』ために『無防備で
+        #    引けまで持つ』のは取り違えた優先順位だった。
+        #    H(limit/auction) は寄りが指値より上で約定するのが**正常**なので、
+        #    この不整合は日常的に起きうる。よって無効化ではなく **持ち上げる**。
         _stop_v = _num(rec.get("stop", 0.0))
-        if _stop_v and avg > 0 and _stop_v <= avg:
-            print(f"  [!] {sym} 損切{_stop_v:,.0f} が平均約定{avg:,.0f}以下(ショート逆側/古い注文の疑い) "
-                  f"→ この損切りは無効化(利確・引けのみ)。注文記録を確認してください")
-            rec = dict(rec); rec["stop"] = 0.0
+        if avg > 0 and (not _stop_v or _stop_v <= avg):
+            if str(rec.get("mode", "stop")) in ("auction", "limit"):
+                _ep0 = float(rec.get("entry", 0) or 0)
+                _off = (_stop_v - _ep0) if (_stop_v and _ep0 and _stop_v > _ep0) else 0.0
+                _emg = avg * _EMERG_STOP_PCT
+                _new = avg + max(_off, _emg)
+                _why = (f"記録の差分 +{_off:,.0f}" if _off >= _emg and _off > 0
+                        else f"緊急幅 +{_EMERG_STOP_PCT * 100:.1f}%")
+                rec = dict(rec)
+                if _new <= avg:      # --emergency-stop-pct 0 かつ差分も無い = 旧挙動
+                    print(f"  [!] {sym} 損切{_stop_v:,.0f} が平均約定{avg:,.0f}以下だが"
+                          f"引き上げ幅が0 → 無効化(利確・引けのみ)。"
+                          f"--emergency-stop-pct を 0 にしていませんか")
+                    rec["stop"] = 0.0
+                else:
+                    print(f"  [!] {sym} 損切{_stop_v:,.0f} が平均約定{avg:,.0f}以下 → "
+                          f"**無効化せず {_new:,.0f} に引き上げ**({_why})。"
+                          f"ショートで損切り無しは青天井なので、無防備にはしない")
+                    rec["stop"] = _new
+            elif _stop_v:
+                # 旧lss(逆指値)は約定値がトリガー以下になるので、ここに来るのは
+                # 本当に逆側/陳腐化した注文。従来どおり無効化する。
+                print(f"  [!] {sym} 損切{_stop_v:,.0f} が平均約定{avg:,.0f}以下"
+                      f"(ショート逆側/古い注文の疑い) → この損切りは無効化"
+                      f"(利確・引けのみ)。注文記録を確認してください")
+                rec = dict(rec); rec["stop"] = 0.0
         a = agg.get(sym)
         if a is None:
             agg[sym] = {
@@ -459,7 +489,17 @@ def main() -> int:
                          "取消し、新規を建てない。lssは同日決済なので遅い約定ほど『利確まで走る時間が"
                          "無いのに損切りだけ効く』非対称になる(2026-08-06 三菱製鋼 14:59約定→15:00"
                          "損切り -9,600円=当日実損の47%%)。未指定(既定)=OFF。--execute時のみ実取消")
+    ap.add_argument("--emergency-stop-pct", type=float, default=1.0,
+                    help="損切りが平均約定値以下になったときに引き上げる緊急幅(%%)。既定1.0。"
+                         "H(指値売り)は寄りが指値より上で約定するのが正常なので、注文価格基準の"
+                         "損切りは約定値より下に来る。旧実装はそれを黙って無効化していたが"
+                         "(2026-08-13 事故: 4銘柄すべて無防備)、ショートの損切り無しは青天井なので"
+                         "**必ず引き上げる**。記録に (注文価格,損切) の差分があればそちらを優先し、"
+                         "無いときだけこの%%を使う。0=旧挙動(無効化)")
     args = ap.parse_args()
+
+    global _EMERG_STOP_PCT
+    _EMERG_STOP_PCT = max(0.0, float(args.emergency_stop_pct)) / 100.0
 
     close_at = _parse_hhmm(args.close_at)
     env_label = "本番(18080)" if args.prod else "デモ(18081)"
