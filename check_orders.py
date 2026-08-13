@@ -73,6 +73,32 @@ def _tick(p: float) -> float:
         return 1.0
 
 
+def _prev_close_candidates(order_price: float, limit_ticks: int) -> list[float]:
+    """指値から前日終値を復元する候補を返す。
+
+    ⛔ **指値の呼値で逆算してはいけない。** 前日終値が呼値テーブルの境界にあると
+       指値が別の帯に落ちる。_TICK_TABLE は `price < threshold` 判定なので
+       5,000円ちょうどは「5,000円以下(5円)」ではなく次の帯(10円)になる。
+
+       実例 (2026-08-13 5844 京都フィナンシャル):
+         前日終値 5,000 (呼値10) → 指値 5,000 - 5x10 = 4,950   ← 発注は正しい
+         検算が tick(4,950)=5 で逆算 → 前日終値を4,975と誤認
+         → 正常な発注に「損切幅ズレ/利確幅ズレ」の警告を出した。
+
+    そこで呼値の候補を総当たりし、**自己整合する(復元値の呼値が候補と一致する)**
+    ものを全部返す。境界では複数が整合しうるので、呼び出し側は
+    「どれかで幅が合えば正常」と判定する。
+    """
+    out, seen = [], set()
+    for t in sorted({1, 5, 10, 50, 100, 500, 1000, 5000, 10000,
+                     int(_tick(order_price))}):
+        cl = order_price - limit_ticks * t
+        if cl > 0 and int(_tick(cl)) == t and cl not in seen:
+            seen.add(cl)
+            out.append(cl)
+    return out or [order_price - limit_ticks * _tick(order_price)]
+
+
 def verify_row(order_price: float, stop: float, target: float,
                atr: float, sm: float, tm: float, qty: int,
                entry_mode: str, limit_ticks: int = -5) -> list[str]:
@@ -93,13 +119,23 @@ def verify_row(order_price: float, stop: float, target: float,
     if not (stop > order_price > target > 0):
         bad.append(f"向きが不正: 損切{stop:,.0f} > 指値{order_price:,.0f} > "
                    f"利確{target:,.0f} でない")
-    if atr > 0 and sm > 0 and tm > 0 and order_price > 0:
-        cl = order_price - limit_ticks * _tick(order_price)   # 指値から前日終値を復元
-        t = _tick(order_price)
-        if abs((stop - cl) - atr * sm) > t + 0.51:
-            bad.append(f"損切幅ズレ: 実{stop - cl:,.1f} vs ATR×sm {atr * sm:,.1f}")
-        if abs((cl - target) - atr * tm) > t + 0.51:
-            bad.append(f"利確幅ズレ: 実{cl - target:,.1f} vs ATR×tm {atr * tm:,.1f}")
+    if atr > 0 and sm > 0 and tm > 0 and order_price > 0 and stop > 0 and target > 0:
+        # 許容誤差は3つの呼値の最大。損切/利確は ceil_to_tick / 丸めが掛かるので、
+        # 指値の呼値だけで測ると足りない(境界をまたぐと1帯ぶんずれる)。
+        tol = max(_tick(order_price), _tick(stop), _tick(target)) + 0.51
+        okc, first = False, None
+        for cl in _prev_close_candidates(order_price, limit_ticks):
+            ds, dt = abs((stop - cl) - atr * sm), abs((cl - target) - atr * tm)
+            if ds <= tol and dt <= tol:
+                okc = True
+                break
+            if first is None:
+                first = (cl, stop - cl, cl - target)
+        if not okc and first:
+            cl, ws, wt = first
+            bad.append(f"損切幅ズレ: 実{ws:,.1f} vs ATR×sm {atr * sm:,.1f}"
+                       f"(前日終値を{cl:,.0f}と仮定)")
+            bad.append(f"利確幅ズレ: 実{wt:,.1f} vs ATR×tm {atr * tm:,.1f}")
     if qty <= 0:
         bad.append("株数が0")
     return bad
