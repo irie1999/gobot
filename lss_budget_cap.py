@@ -369,6 +369,25 @@ def main() -> int:
         print("発注成功0件。監視を行いません。")
         return 1
     print(f"\n発注完了 {len(placed)}件。約定累計が {args.budget/1e4:.0f}万 到達で残りを取消。監視開始…")
+    # ★ 発注直後に検算(.\chk と同じ関数)。ここで気付けば寄りまでに出し直せる。
+    try:
+        from check_orders import verify_row as _vr
+        _ng = 0
+        for _p2 in placed:
+            _s3 = next((x for x in plan if _norm(x["symbol"]) == _p2["symbol"]), None)
+            if _s3 is None:
+                continue
+            _bad = _vr(float(_p2["trigger"]), float(_s3.get("stop_price", 0) or 0),
+                       float(_s3.get("target_price", 0) or 0),
+                       float(_s3.get("atr", 0) or 0), float(args.sm), float(args.tm),
+                       int(_p2["qty"]), args.entry_mode, args.limit_ticks)
+            if _bad:
+                _ng += 1
+                print(f"  ⛔ {_p2['symbol']}: " + " / ".join(_bad))
+        print("  [検算] 異常なし" if _ng == 0 else
+              f"  [検算] ⛔ {_ng}件に問題。寄りまでに出し直すこと")
+    except Exception as _ve:
+        print(f"  [検算] スキップ({_ve})")
 
     # ── 上限監視ループ ──
     until = _parse_hhmm(args.monitor_until, dtime(10, 30))

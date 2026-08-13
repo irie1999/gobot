@@ -332,8 +332,24 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 "entry_mode": entry_mode, "atr": (f"{atr:.2f}" if atr else ""),
                 "sm": (f"{sm}" if sm else ""), "tm": (f"{tm}" if tm else ""),
             })
+        # ★ 発注した瞬間に検算して、問題があればボタンの応答にそのまま出す。
+        #   初日(2026-08-13)の6件は全部『実弾が動いた後』に見つかった。とくに
+        #   atr 欠落は4銘柄すべてを無防備にしたが、この1行があれば click 時に
+        #   分かっていた。.\chk と同じ関数を共用する(片方だけ直す事故を防ぐ)。
+        _vwarn = ""
+        if EXECUTE and _is_lss:
+            try:
+                from check_orders import verify_row as _vr
+                _bad = _vr(float(entry), float(stop or 0), float(target or 0),
+                           float(atr or 0), float(sm or 0), float(tm or 0),
+                           int(qty), entry_mode)
+                if _bad:
+                    _vwarn = ("  ⛔ 発注記録に問題: " + " / ".join(_bad)
+                              + "  → 寄りまでに出し直してください")
+            except Exception as _ve:
+                _vwarn = f"  ⚠ 検算できませんでした({_ve})"
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
-                f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}")
+                f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}{_vwarn}")
     # ── 想定内のリジェクトは分かりやすいスキップにする(一括発注を止めない・パニックしない) ──
     _code = res.get("Code")
     try:

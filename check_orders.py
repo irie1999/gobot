@@ -62,92 +62,125 @@ def _tick(p: float) -> float:
         return 1.0
 
 
+def verify_row(order_price: float, stop: float, target: float,
+               atr: float, sm: float, tm: float, qty: int,
+               entry_mode: str, limit_ticks: int = -5) -> list[str]:
+    """発注1件を検算して、問題があれば日本語のメッセージ一覧を返す(空=OK)。
+
+    ⛔ order_server(発注ボタン) / lss_budget_cap(コマンド) / .\chk の**3経路で共用**する。
+       別々に書くと片方だけ直して片方が漏れる(初日はまさにそれで、
+       🚀発注 は atr を渡していたのに『100株 発注』だけ渡していなかった)。
+    """
+    bad = []
+    if entry_mode not in ("limit", "auction"):
+        bad.append(f"方式が {entry_mode} = **逆指値**。H は limit のはず")
+    if atr <= 0:
+        bad.append("**ATR が 0** → watcher が実約定価格から OCO を組み直せない"
+                   "(損切りが無効化される)")
+    if sm <= 0 or tm <= 0:
+        bad.append(f"sm/tm が不正 ({sm}/{tm})")
+    if not (stop > order_price > target > 0):
+        bad.append(f"向きが不正: 損切{stop:,.0f} > 指値{order_price:,.0f} > "
+                   f"利確{target:,.0f} でない")
+    if atr > 0 and sm > 0 and tm > 0 and order_price > 0:
+        cl = order_price - limit_ticks * _tick(order_price)   # 指値から前日終値を復元
+        t = _tick(order_price)
+        if abs((stop - cl) - atr * sm) > t + 0.51:
+            bad.append(f"損切幅ズレ: 実{stop - cl:,.1f} vs ATR×sm {atr * sm:,.1f}")
+        if abs((cl - target) - atr * tm) > t + 0.51:
+            bad.append(f"利確幅ズレ: 実{cl - target:,.1f} vs ATR×tm {atr * tm:,.1f}")
+    if qty <= 0:
+        bad.append("株数が0")
+    return bad
+
+
+def _load_rows(date_s: str, csv_path: str) -> list[dict]:
+    """発注記録を **watcher と同じ2つのソース** から読む。
+
+    ⛔ ordered_signals_lss.csv だけ見てはいけない。レポートの発注ボタン
+       (order_server)は placed_orders_<date>.csv に書くので、ボタンで出した
+       注文が丸ごと漏れる(2026-08-13 の初日ぶんがまさにこれ)。
+       lss_exit_watcher._load_lss_orders と同じ2経路を見る。
+    """
+    import glob as _glob
+    out = []
+    p = Path(csv_path)
+    if p.exists():
+        with open(p, encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                if str(r.get("record_date", ""))[:10] != date_s:
+                    continue
+                if str(r.get("family", "")).strip() != "lss":
+                    continue
+                out.append({"src": p.name, "symbol": r.get("symbol", ""),
+                            "mode": r.get("entry_mode", "") or "stop",
+                            "op": _f(r.get("order_price")), "sp": _f(r.get("stop_price")),
+                            "tp": _f(r.get("target_price")), "atr": _f(r.get("atr")),
+                            "sm": _f(r.get("sm")), "tm": _f(r.get("tm")),
+                            "qty": int(_f(r.get("qty")) or 0)})
+    for fp in sorted(_glob.glob(str(_BASE / "placed_orders_*.csv"))):
+        try:
+            with open(fp, encoding="utf-8", newline="") as f:
+                for r in csv.DictReader(f):
+                    if str(r.get("side", "")).strip() != "short":
+                        continue
+                    if str(r.get("placed_at", ""))[:10] != date_s:
+                        continue
+                    if str(r.get("strategy", "")).strip().upper().endswith("_S"):
+                        continue     # メインショート(多日保有)は対象外
+                    out.append({"src": Path(fp).name, "symbol": r.get("symbol", ""),
+                                "mode": r.get("entry_mode", "") or "stop",
+                                "op": _f(r.get("entry")), "sp": _f(r.get("stop")),
+                                "tp": _f(r.get("target")), "atr": _f(r.get("atr")),
+                                "sm": _f(r.get("sm")), "tm": _f(r.get("tm")),
+                                "qty": int(_f(r.get("qty")) or 0)})
+        except Exception:
+            continue
+    return out
+
+
 def main() -> int:
-    p = Path(args.csv)
-    if not p.exists():
-        print(f"[!] {args.csv} がありません。まだ発注していないか、別の場所です。")
-        return 1
-    rows = []
-    with open(p, encoding="utf-8", newline="") as f:
-        for r in csv.DictReader(f):
-            if str(r.get("record_date", ""))[:10] != _DATE:
-                continue
-            if str(r.get("family", "")).strip() != "lss":
-                continue
-            rows.append(r)
-    print(f"■ 発注記録の検算  {_DATE}  ({args.csv})")
-    print("=" * 74)
+    rows = _load_rows(_DATE, args.csv)
+    print(f"■ 発注記録の検算  {_DATE}")
+    print("=" * 78)
     if not rows:
-        print(f"  {_DATE} の記録がありません。")
-        print("  発注していないか、発注記録の書き込みに失敗しています")
-        print("  (発注は通っているのに記録だけ失敗するケースがあるので、")
-        print("   kabu ステーションの注文一覧も必ず目視すること)。")
+        print(f"  {_DATE} の記録がありません(ordered_signals_lss.csv / placed_orders_*.csv)。")
+        print("  発注していないか、発注記録の書き込みに失敗しています。")
+        print("  ⚠ 発注は通っているのに記録だけ失敗するケースがあるので、")
+        print("     kabu ステーションの注文一覧も必ず目視すること。")
         return 1
 
     err, warn = [], []
     total = 0.0
     seen: dict = {}
     print(f"{'コード':<7}{'方式':>8}{'指値':>9}{'損切':>9}{'利確':>9}"
-          f"{'ATR':>8}{'株':>5}  判定")
+          f"{'ATR':>8}{'株':>5}  {'出所':<22}判定")
     for r in rows:
-        sym = str(r.get("symbol", "")).strip()
-        mode = str(r.get("entry_mode", "") or "stop").strip()
-        op, sp, tp = _f(r.get("order_price")), _f(r.get("stop_price")), _f(r.get("target_price"))
-        atr, sm, tm = _f(r.get("atr")), _f(r.get("sm")), _f(r.get("tm"))
-        qty = int(_f(r.get("qty")) or 0)
-        bad = []
-
-        # ① 注文方式。H 以外は出さない運用(2026-08-13)
-        if mode not in ("limit", "auction"):
-            bad.append(f"方式が {mode} = **逆指値**。H は limit のはず")
-
-        # ② ATR/sm/tm。欠けると watcher が実約定価格から OCO を組み直せない
-        #    → 注文価格基準の損切りが約定値より下に来て**無効化**される(初日の事故)
-        if atr <= 0:
-            bad.append("**ATR が 0** → watcher が OCO を組み直せない(損切り無効化の原因)")
-        if sm <= 0 or tm <= 0:
-            bad.append(f"sm/tm が不正 ({sm}/{tm})")
-
-        # ③ ショートの向き
-        if not (sp > op > tp > 0):
-            bad.append(f"向きが不正: 損切{sp:,.0f} > 指値{op:,.0f} > 利確{tp:,.0f} でない")
-
-        # ④ 幅が ATR×sm / ATR×tm と整合するか(前日終値基準・±1ティック許容)
-        if atr > 0 and sm > 0 and tm > 0 and op > 0:
-            cl = op - args.limit_ticks * _tick(op)      # 指値から前日終値を復元
-            t = _tick(op)
-            if abs((sp - cl) - atr * sm) > t + 0.51:
-                bad.append(f"損切幅ズレ: 実{sp - cl:,.1f} vs ATR×sm {atr * sm:,.1f}")
-            if abs((cl - tp) - atr * tm) > t + 0.51:
-                bad.append(f"利確幅ズレ: 実{cl - tp:,.1f} vs ATR×tm {atr * tm:,.1f}")
-
-        if qty <= 0:
-            bad.append("株数が0")
+        sym = str(r["symbol"]).strip()
+        bad = verify_row(r["op"], r["sp"], r["tp"], r["atr"], r["sm"], r["tm"],
+                         r["qty"], str(r["mode"]).strip(), args.limit_ticks)
         if sym in seen:
             warn.append(f"{sym}: 同じ銘柄が{seen[sym] + 1}件(枠を重複して使う)")
         seen[sym] = seen.get(sym, 0) + 1
-        total += op * qty
-
-        mark = "OK" if not bad else "NG"
-        print(f"{sym:<7}{mode:>8}{op:>9,.0f}{sp:>9,.0f}{tp:>9,.0f}"
-              f"{atr:>8,.1f}{qty:>5}  {mark}")
+        total += r["op"] * r["qty"]
+        print(f"{sym:<7}{r['mode']:>8}{r['op']:>9,.0f}{r['sp']:>9,.0f}{r['tp']:>9,.0f}"
+              f"{r['atr']:>8,.1f}{r['qty']:>5}  {r['src'][:22]:<22}"
+              f"{'OK' if not bad else 'NG'}")
         for b in bad:
             print(f"        └ {b}")
             err.append(f"{sym}: {b}")
 
-    print("-" * 74)
+    print("-" * 78)
     print(f"  {len(rows)}件 / 想定額 {total:,.0f}円 (予算 {args.budget:,.0f}円)")
     if total > args.budget:
         warn.append(f"想定額が予算を {total - args.budget:,.0f}円 超過")
-
     for w in warn:
         print(f"  [warn] {w}")
     print()
     if err:
         print(f"⛔ **{len(err)}件の異常**。寄りまでに注文を出し直してください。")
-        print("   ATR が 0 のときは、レポートの『100株 発注』ではなく")
-        print("   python lss_budget_cap.py --execute --prod --entry-mode limit "
-              "--limit-ticks -5 --budget-multiple 1.0 で出し直すのが確実です。")
+        print("   ATR が 0 のときは python lss_budget_cap.py --execute --prod")
+        print("   --entry-mode limit --limit-ticks -5 --budget-multiple 1.0 が確実です。")
         return 1
     print("✅ 異常なし。watcher は実約定価格から OCO を組み直せます。")
     print("   次: .\\watch を寄り前に起動し、15:30 まで止めないこと。")
