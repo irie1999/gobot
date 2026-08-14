@@ -412,7 +412,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
             if key != "E":
-                _hfill[key]["板寄せ" if o1 >= pc else "ザラ場到達"] += len(_srcs)
+                # ⛔ 判定は **指値(order_p)** であって前日終値(pc)ではない
+                #    (2026-08-14 修正)。H の指値は前日終値-5ティックなので、
+                #    寄りが「指値以上・前日終値未満」の帯は **板寄せで約定している**
+                #    のに『ザラ場到達』と誤分類していた。実測が2営業日 8/8 すべて
+                #    09:00 板寄せだったのに、レポートが 48% をザラ場と表示して
+                #    食い違って見えたのはこれが原因。
+                #    ep = (o1 if o1 >= order_p else order_p) なので
+                #    板寄せ ⟺ o1 >= order_p。
+                _hfill[key]["板寄せ" if o1 >= order_p else "ザラ場到達"] += len(_srcs)
             _t = ""
             try:
                 _t = pd.Timestamp(_x).strftime("%H:%M")
