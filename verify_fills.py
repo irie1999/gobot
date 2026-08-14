@@ -385,6 +385,9 @@ def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
                         "name": str(r.get("name", "")),
                         "strategy": str(r.get("strategy", "")),
                         "bt": float(r.get("bt", 0) or 0),
+                        # 発注順は **流動性(売買代金)降順**(18.21/18.37)。BTは
+                        # アルゴリズムから外したので並びにも使わない。
+                        "liq": float(r.get("liquidity", 0) or 0),
                         "entry_p": float(r.get("entry_p", 0) or 0),
                         "exit_p": float(r.get("exit_p", 0) or 0),
                         "reason": str(r.get("reason", "")),
@@ -453,21 +456,44 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     if _nofill:
         print(f"  (うち H が『約定せず』と判定 {len(_nofill)}件 は合計から除外)")
 
-    # 同一銘柄が複数戦略で出た場合はBT最高の1件に統合(実運用=1銘柄1ポジション)
+    # ⛔ 並び・統合に BT を使わない(18.21 で BT降順はランダム帯の外=有意に悪いと
+    #    実測 / 18.37 で「BTは一切使わない」に確定 / 2026-08-12 ユーザー決定)。
+    #    実発注(lss_budget_cap → lss_order_rank)とまったく同じキーで並べる。
+    #    ここがズレると「発注していない銘柄」を見て誤った予算判断をする
+    #    (2026-08-14: BT88 の銘柄が未発注と出て、枠不足に見えた)。
+    try:
+        import lss_order_rank as _lor
+        def _ordk(t):
+            return _lor.sort_key(t.get("bt"), t.get("liq"), t.get("symbol", ""))
+        _ord_lbl = _lor.describe()
+    except Exception:
+        def _ordk(t):
+            return (0 if float(t.get("liq") or 0) > 0 else 1,
+                    -float(t.get("liq") or 0), str(t.get("symbol", "")))
+        _ord_lbl = "lss発注順: 流動性(売買代金)降順(フォールバック)"
+
+    # 同一銘柄が複数戦略で出たら発注順が先の1件に統合(実運用=1銘柄1ポジション)
     by_sym: dict = {}
     for t in bt:
         e = by_sym.get(t["symbol"])
-        if e is None or t["bt"] > e["bt"]:
+        if e is None or _ordk(t) < _ordk(e):
             by_sym[t["symbol"]] = t
+    # その日の発注順位(#1 が最優先)。実発注のリストと同じ並びになる。
+    _rank = {s: i + 1 for i, s in
+             enumerate(sorted(by_sym, key=lambda s: _ordk(by_sym[s])))}
 
     print(f"=== バックテスト(レポート)の {_DATE} 取引 : {len(by_sym)}銘柄 ===")
-    print(f"{'コード':>6} {'銘柄':<12}{'戦略':>8}{'BT':>5}{'約定値':>9}{'決済値':>9}"
-          f"{'株数':>5}{'損益':>10}  理由")
+    print(f"  {_ord_lbl}")
+    print(f"{'コード':>6} {'銘柄':<12}{'戦略':>8}{'発注順':>6}{'売買代金':>10}"
+          f"{'約定値':>9}{'決済値':>9}{'株数':>5}{'損益':>10}  理由")
     _bt_tot = 0.0
-    for s in sorted(by_sym):
+    for s in sorted(by_sym, key=lambda x: _rank[x]):
         t = by_sym[s]
         _bt_tot += t["pnl"]
-        print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}{t['bt']:>5.0f}"
+        _lq = float(t.get("liq") or 0)
+        print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}"
+              f"{('#' + str(_rank[s])):>6}"
+              f"{(f'{_lq / 1e8:,.1f}億' if _lq else '—'):>10}"
               f"{t['entry_p']:>9,.1f}{t['exit_p']:>9,.1f}{t['qty']:>5}"
               f"{t['pnl']:>+10,.0f}  {t['reason']}")
     _bt_w = sum(1 for t in by_sym.values() if t["pnl"] > 0)
@@ -502,17 +528,18 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
               f"{sum(by_sym[s]['pnl'] for s in both):>+10,.0f}{_d_tot:>+10,.0f}")
 
     if bt_only:
-        # BT降順(=発注優先順)で並べる。件数が多いので上位だけ出して残りは要約。
-        _lst = sorted(bt_only, key=lambda s: -by_sym[s]["bt"])
+        # 発注順(=流動性降順)で並べる。件数が多いので上位だけ出して残りは要約。
+        _lst = sorted(bt_only, key=lambda s: _rank[s])
         _o = sum(1 for s in _lst if s in ordered)
         _n = len(_lst) - _o
         _p = sum(by_sym[s]["pnl"] for s in _lst)
-        print(f"\n▼ テストにあるが実約定なし {len(_lst)}銘柄 (BT降順=発注優先順)")
+        print(f"\n▼ テストにあるが実約定なし {len(_lst)}銘柄 (発注順)")
         _SHOW = 15
         for s in _lst[:_SHOW]:
             t = by_sym[s]
             tag = "発注済(未約定)" if s in ordered else "発注していない"
-            print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}{t['bt']:>5.0f}"
+            print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}"
+                  f"{('#' + str(_rank[s])):>6}"
                   f"{t['pnl']:>+10,.0f}  {tag}")
         if len(_lst) > _SHOW:
             _rest = _lst[_SHOW:]
@@ -521,16 +548,20 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
         print(f"  → 想定損益 {_p:+,.0f}円 を取り逃し "
               f"(発注済だが未約定 {_o}件 / そもそも発注していない {_n}件)")
 
-        # BT帯別: どの帯を発注できていないかが分かると予算設計に直結する
-        print(f"\n  【BT帯別の取り逃し】発注枠を増やすとどの帯が拾えるか")
-        print(f"  {'BT帯':<10}{'銘柄':>5}{'想定損益':>12}{'1件あたり':>11}")
-        for lo, hi, lb in [(70, 999, "BT70+"), (60, 69, "BT60-69"), (50, 59, "BT50-59"),
-                           (40, 49, "BT40-49"), (20, 39, "BT20-39"), (0, 19, "BT0-19")]:
-            g = [s for s in _lst if lo <= by_sym[s]["bt"] <= hi]
+        # 発注順位帯別: 枠を増やすと **次に何が入るか** が分かる。
+        # ⛔ BT帯では出さない。BTは発注順に一切使っていないので、BTで束ねても
+        #    「枠を増やしたら拾える集団」にならない(18.12/18.21/18.37)。
+        #    枠は発注順で上から埋まるので、順位で束ねるのが唯一正しい切り方。
+        print(f"\n  【発注順位帯別の取り逃し】枠を増やすと上から順に拾える")
+        print(f"  {'順位帯':<10}{'銘柄':>5}{'想定損益':>12}{'1件あたり':>11}")
+        _n_all = len(by_sym)
+        for lo, hi in [(1, 10), (11, 20), (21, 30), (31, 50), (51, 10**6)]:
+            g = [s for s in _lst if lo <= _rank[s] <= hi]
             if not g:
                 continue
             gp = sum(by_sym[s]["pnl"] for s in g)
-            print(f"  {lb:<10}{len(g):>5}{gp:>+11,.0f}円{gp / len(g):>+10,.0f}円")
+            _lb = f"#{lo}-{min(hi, _n_all)}" if hi < 10**6 else f"#{lo}以降"
+            print(f"  {_lb:<10}{len(g):>5}{gp:>+11,.0f}円{gp / len(g):>+10,.0f}円")
 
     if real_only:
         print(f"\n▼ 実約定したがテストに無い {len(real_only)}銘柄")
