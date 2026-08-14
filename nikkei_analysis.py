@@ -13871,10 +13871,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             執行コストで消える。呼値は制度上の最小刻みなので推測が入らない(18.31)。
         """
         import statistics as _sti
+        # ⛔ tick_size(価格だけ)は古い粗い表で、実測より5〜10倍大きい呼値を返す。
+        #    それで判定すると「呼値に届かず」が5〜10倍出やすくなる(2026-08-14 に
+        #    実際そうなった)。銘柄ごとの実測値(ticks.json)を使うこと。
         try:
-            from backtest_limit_entry import tick_size as _tks
+            from backtest_limit_entry import tick_size_sym as _tkss
         except Exception:
-            _tks = lambda p: 1.0
+            try:
+                from backtest_limit_entry import tick_size as _t0
+                def _tkss(p, sym=None):
+                    return float(_t0(p))
+            except Exception:
+                def _tkss(p, sym=None):
+                    return 1.0
         _TT = {2: 12.71, 3: 4.303, 4: 3.182, 5: 2.776, 6: 2.571, 7: 2.447,
                8: 2.365, 9: 2.306, 10: 2.262, 11: 2.201, 12: 2.179, 13: 2.160,
                14: 2.145, 15: 2.131, 20: 2.086, 25: 2.060, 30: 2.042}
@@ -14019,7 +14028,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _apx = (sum(_px) / len(_px)) if _px else 0.0
                 _per = sum(_p) / len(_p)
                 _bp = (_per / (_apx * 100) * 1e4) if _apx > 0 else 0.0
-                _t2 = (_tks(_apx) / _apx * 1e4) if _apx > 0 else 0.0
+                # 呼値は **銘柄ごと** に違う(同じ価格帯で 0.5/1/5/10円 が混在)。
+                # トレード1件ずつ実測呼値を bp に直して平均する。
+                _tb = []
+                for _t3 in _add:
+                    _e3 = float(_t3.get("entry_p", 0) or 0)
+                    if _e3 > 0:
+                        _tb.append(_tkss(_e3, str(_t3.get("symbol", ""))) / _e3 * 1e4)
+                _t2 = (sum(_tb) / len(_tb)) if _tb else 0.0
                 _c2, _c4 = _t2 * 2, _t2 * 4
                 _jd, _jc = (("✅ 4tick超", "#4ade80") if _bp >= _c4 else
                             ("△ 2tick超", "#fbbf24") if _bp >= _c2 else
