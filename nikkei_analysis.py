@@ -15812,7 +15812,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return _band[_key]
 
         _rows = ""
-        _hits = 0
+        _hits = 0            # ✓ かつ **外すと得する** = 実際に使えるフィルタ候補
+        _hits_all = 0        # ✓ の総数(「残すべき」を含む。参考)
         _ntest = 0
         for _an, _fn, _note in _AXES:
             _grp: dict = {}
@@ -15843,8 +15844,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _zz, _z1, _z2 = _z(_ds, _dl), _z(_d1s, _l1), _z(_d2s, _l2)
                 _ok = abs(_zz) >= _TC and (_z1 > 0) == (_z2 > 0) and abs(_z1) >= 0.5 \
                     and abs(_z2) >= 0.5
+                # ⛔ ✓ のうち **外すと得する(=フィルタになる)** ものだけを候補に数える。
+                #    「外すと損する=残すべき」も ✓ が付くが、それはフィルタではない。
+                #    旧実装は両方を数えて「候補5個 / 偶然より多い」と出していたが、
+                #    実際に使えるのは1個で偶然の期待(3.1個)を下回っていた
+                #    (2026-08-14 に実際に誤読しかけた)。
                 if _ok:
-                    _hits += 1
+                    _hits_all += 1
+                    if _dl > 0:
+                        _hits += 1
                 _c = "#4ade80" if _zz >= _TC else ("#f87171" if _zz <= -_TC else "#94a3b8")
 
                 def _hc(z):
@@ -15871,10 +15879,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return ""
         _exp = _ntest * 0.05
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        _vc = "#4ade80" if _hits > _exp + 1 else "#94a3b8"
         _verdict = (
-            f'<b style="color:#4ade80">候補 {_hits}個</b>（{_ntest}検定 / '
-            f'偶然の期待 {_exp:.1f}個）。'
-            + ('偶然の範囲です。<b>採用しないこと。</b>' if _hits <= _exp + 1 else
+            f'<b style="color:{_vc}">使えるフィルタ候補 {_hits}個</b>'
+            f'（{_ntest}検定 / 偶然の期待 <b>{_exp:.1f}個</b>）'
+            f'<span style="color:#64748b">　※ ✓は全部で {_hits_all}個ですが、'
+            f'「外すと損する=残すべき」はフィルタになりません</span><br>'
+            + ('<b>偶然の範囲です。採用しないこと。</b>' if _hits <= _exp + 1 else
                '偶然より多い。ただし採用前に <code>.\\hvar</code> 相当の walk-forward で'
                '『毎月その時点で選ぶ』価値があるかを確認すること(18.36 の判定ルール)。'))
         return (
