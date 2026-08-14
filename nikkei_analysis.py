@@ -14499,13 +14499,36 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # 一致数の多い順。同数なら既定(流動性順)にそのまま委ねる。
             return (-_ally_n(_t),) + tuple(_bud_order_key(_t))
 
+        # ── ATR%(建値比)で並べる ────────────────────────────────────
+        # ★ 2026-08-14 のフィルタ探索で、利益源が **ATR% Q4(最もボラが大きい群)**
+        #   にあると分かった(その群を外すと -486,508円)。予算は候補の約1/3しか
+        #   建てられないので、**ボラの大きい順に買えば利益源を先に確保できる**。
+        #   ATR は日足から作るので **前夜に分かる** = 発注順に使える。
+        #   ⚠ 同じく利益源だった『寄りギャップ Q4』は 09:00 にならないと
+        #     分からないので発注順には使えない(前夜に発注するため)。
+        #   ⚠ 高ATRに寄せると1件あたりのリスクが上がる。合計だけでなく
+        #     **月次σ** も見ること(18.30: σ削減が唯一効くレバー)。
+        def _atrp_key(desc=True):
+            def _k(_t):
+                _a = _t.get("h_atr_pct")
+                if _a is None:
+                    _ap = float(_t.get("h_atr") or _t.get("atr") or 0)
+                    _ep = float(_t.get("entry_p") or _t.get("order_limit") or 0)
+                    _a = (_ap / _ep * 100.0) if (_ap > 0 and _ep > 0) else None
+                if _a is None:                 # 取れない銘柄は最後尾(既定に委ねる)
+                    return (1, 0.0, _tkey(_t))
+                return (0, -float(_a) if desc else float(_a), _tkey(_t))
+            return _k
+
         _NSEED = int(os.environ.get("LSS_ORDER_RANK_SEEDS", "12") or 12)
         _cands = [("流動性順(既定)", None),          # None = _bud_order_key
                   ("★戦略一致 多い順", _ally_key),
                   ("BT降順", lambda _t: (-float(_eff_long_bt(_t) or 0),
                                          _tkey(_t))),
                   ("建値 安い順", _price_key(True)),
-                  ("建値 高い順", _price_key(False))]
+                  ("建値 高い順", _price_key(False)),
+                  ("★ATR% 大きい順", _atrp_key(True)),
+                  ("ATR% 小さい順", _atrp_key(False))]
 
         def _months_pnl(_lst):
             _m: dict = {}
