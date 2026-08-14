@@ -11151,8 +11151,7 @@ function switchTbd(id, tab) {{
             try:
                 _ss = _run_budget_sim(_BUD_FLOOR, src=_src,
                                       nofills=(_EH_NF.get(_ehk) or []))
-                _eh_sorted[_ehk] = _ss
-                _eh_grid[_ehk] = _build_entry_grid(_ss, _ehpfx)
+                _eh_sorted[_ehk] = _ss        # ← 集計用。**切らない**
                 # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
                 #   見たい」用。予算内タブ(上)は毎日 流動性順に400万で切るので、
                 #   下位の銘柄が丸ごと落ちる。ここはそれを含む母集団そのもの。
@@ -11163,10 +11162,32 @@ function switchTbd(id, tab) {{
                     key=lambda x: str(x.get("entry_d_raw")
                                       or x.get("exit_d_raw") or ""),
                     reverse=True)
-                _eh_all[_ehk] = _ss_all
-                _eh_all_grid[_ehk] = _build_entry_grid(_ss_all, _ehpfx + "A")
-                print(f"[E/H] {_ehk}: 予算内 {len(_ss)}件 / 母集団 {len(_src)}件 "
-                      f"/ 全取引タブ {len(_ss_all)}件", flush=True)
+                # ⛔ **行数の上限が掛かっていなかった**(2026-08-15 に MemoryError)。
+                #    --days 365 にすると全取引タブが 8,081件 になり、E/H 合わせて
+                #    1.6万行の日チップ+明細を HTML 文字列に積むところで落ちた。
+                #    集計(月別・水準・検定)は打ち切り前の全件で別に計算しているので
+                #    **数字は変わらない**。変わるのは画面に描く明細の行数だけ。
+                #    全件描きたいときは DETAIL_ROW_CAP=0。
+                # ⛔ **集計に使うリスト(_eh_sorted)は絶対に切らない**。
+                #    _eh_compare_html / 予算スイープ / 検定がこれを合計するので、
+                #    切ると月別も水準も t も全部変わってしまう。
+                #    切ってよいのは **画面に描く用のリスト** だけ。
+                _ncut, _nb_cut = len(_ss_all), len(_ss)
+                _ss_all_view = (_ss_all[:_DETAIL_ROW_CAP]
+                                if _DETAIL_ROW_CAP > 0 and _ncut > _DETAIL_ROW_CAP
+                                else _ss_all)
+                _ss_view = (_ss[:_DETAIL_ROW_CAP]
+                            if _DETAIL_ROW_CAP > 0 and _nb_cut > _DETAIL_ROW_CAP
+                            else _ss)
+                _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
+                _eh_all[_ehk] = _ss_all_view
+                _eh_all_grid[_ehk] = _build_entry_grid(_ss_all_view, _ehpfx + "A")
+                print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件 / 母集団 {len(_src)}件 "
+                      f"/ 全取引タブ {_ncut}件"
+                      + (f"  ← 明細は直近{_DETAIL_ROW_CAP}件で打ち切り"
+                         f"(集計は全件。DETAIL_ROW_CAP=0 で全部描画)"
+                         if (_ncut > _DETAIL_ROW_CAP or _nb_cut > _DETAIL_ROW_CAP)
+                         and _DETAIL_ROW_CAP > 0 else ""), flush=True)
             except Exception as _ehe:
                 print(f"[E/H] {_ehk} の予算シミュ失敗(タブは出しません): {_ehe}",
                       flush=True)
