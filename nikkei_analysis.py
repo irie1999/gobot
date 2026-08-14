@@ -15475,6 +15475,261 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             'H で発注できるのは上のコマンドだけ。</p>'
             '</details>')
 
+    def _filter_scan_html():
+        """BT に代わるフィルタ候補を **予算シミュ + ランダム帯 + 前後半** で掃く。
+
+        なぜ必要か
+        ----------
+        BT はアルゴリズムから外した(18.12〜18.24)。代わりに使える軸があるかを
+        探すが、**これまで 100検定以上やって候補ゼロ**。なので作法を守らないと
+        必ず偽陽性が出る:
+          ① 予算シミュを通す(18.10)。枠を空ければ別の銘柄が入るので、
+             『その群の損益』ではなく『入れ替わった顔ぶれとの差』を見る
+          ② **同数をランダムに落とした帯**と比べる(18.24)。件数が減れば
+             合計は必ず動く。その動きが群のせいかを分離する
+          ③ 閾値は 1.96 ではなく **t(seeds-1)**
+          ④ 前半・後半で符号が一致しなければ期間に合わせ込んだだけ
+
+        掃く軸(**エントリー時点で分かるものだけ**)
+        ------------------------------------------
+          約定タイプ : 板寄せ(寄り>=指値) / ザラ場到達。18.32 の実測で
+                       ザラ場の 円/件 は板寄せの 1/4〜1/11。**最有力**。
+                       これが効くなら『寄指(--entry-mode auction)』が答えになる
+          寄りギャップ: 寄りが指値をどれだけ上回ったか(bp)。板寄せの中の強弱
+          ATR%       : ATR/建値。損切り0.1ATR の実効幅そのもの
+          セクター    : sectors.json。選定軸としては一度も測っていない
+          直近の結果  : その銘柄の前回トレードが勝ちか負けか(BTのような合成でない素の値)
+        """
+        import statistics as _sti
+        import zlib as _zl
+        if str(os.environ.get("LSS_FILTER_SCAN", "1")).strip() in ("0", "false", "no"):
+            return ""
+        _src = (_EH_TRADES or {}).get("H") or None
+        _nof = ((_EH_TRADES or {}).get("約定せず") or {}).get("H") or None
+        if not _src:
+            return ""
+        _pool = [t for t in (_src + (_nof or []))
+                 if _eff_long_bt(t) >= _BUD_FLOOR]
+        if len(_pool) < 200:
+            return ""
+
+        def _tk(_t):
+            return (f"{_t.get('symbol')}|{_t.get('strategy')}|"
+                    f"{_t.get('entry_d_raw') or _t.get('exit_d_raw')}")
+
+        def _mon(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k2) < 7 or _k2 == _TODAY.strftime("%Y-%m"):
+                    continue
+                _m[_k2] = _m.get(_k2, 0.0) + float(_t.get("pnl", 0) or 0)
+            return _m
+
+        def _z(vals, v):
+            if len(vals) < 2:
+                return 0.0
+            _sd = _sti.stdev(vals)
+            return ((v - _sti.mean(vals)) / _sd) if _sd > 0 else 0.0
+
+        # ── 軸の定義: トレード → 群ラベル(None ならその軸の対象外) ──────
+        _sec: dict = {}
+        try:
+            import json as _js
+            with open(Path("sectors.json"), encoding="utf-8") as _f:
+                _sec = {k.upper().removesuffix(".T").split(".")[0]:
+                        (v.get("industry") or v.get("sector") or "")
+                        for k, v in (_js.load(_f) or {}).items()}
+        except Exception:
+            _sec = {}
+
+        # 直近の同銘柄トレード結果(日付順に走査して1つ前の pnl の符号を持たせる)
+        _prev: dict = {}
+        _last: dict = {}
+        for _t in sorted(_pool, key=lambda x: str(x.get("entry_d_raw") or "")):
+            _s = str(_t.get("symbol", ""))
+            _prev[_tk(_t)] = _last.get(_s)
+            if _t.get("reason") not in ("発注中", "保有中", "約定せず"):
+                _last[_s] = float(_t.get("pnl", 0) or 0)
+
+        def _q_label(vals, v, n=4):
+            """v が vals の何分位かを 'Q1(最小)' 形式で返す。"""
+            if v is None or not vals:
+                return None
+            _sv = sorted(vals)
+            for _i in range(1, n):
+                if v < _sv[int(len(_sv) * _i / n)]:
+                    return f"Q{_i}"
+            return f"Q{n}"
+
+        _gaps = [float(t["h_gap_bp"]) for t in _pool if t.get("h_gap_bp") is not None]
+        _atrp = [float(t["h_atr_pct"]) for t in _pool if t.get("h_atr_pct") is not None]
+
+        def _ax_fill(t):
+            return t.get("h_fill")
+
+        def _ax_gap(t):
+            return (_q_label(_gaps, float(t["h_gap_bp"]))
+                    if t.get("h_gap_bp") is not None else None)
+
+        def _ax_atr(t):
+            return (_q_label(_atrp, float(t["h_atr_pct"]))
+                    if t.get("h_atr_pct") is not None else None)
+
+        def _ax_sec(t):
+            if not _sec:
+                return None
+            _v = _sec.get(str(t.get("symbol", "")).upper()
+                          .removesuffix(".T").split(".")[0])
+            return _v or None
+
+        def _ax_prev(t):
+            _p = _prev.get(_tk(t))
+            return "初回" if _p is None else ("前回勝ち" if _p > 0 else "前回負け")
+
+        _AXES = [("約定タイプ", _ax_fill, "寄り>=指値なら板寄せ。18.32 でザラ場は板寄せの1/4〜1/11"),
+                 ("寄りギャップ(bp)", _ax_gap, "寄りが指値をどれだけ上回ったか。Q1=小さい"),
+                 ("ATR%(建値比)", _ax_atr, "損切り0.1ATRの実効幅。Q1=タイト"),
+                 ("セクター", _ax_sec, "選定軸として未測定(sectors.json)"),
+                 ("直近の同銘柄結果", _ax_prev, "前回トレードの勝敗。BTのような合成でない素の値")]
+
+        _NS = int(os.environ.get("LSS_FILTER_SCAN_SEEDS", "12") or 12)
+        _TTBL = {2: 12.71, 3: 4.303, 4: 3.182, 5: 2.776, 6: 2.571, 7: 2.447,
+                 8: 2.365, 9: 2.306, 10: 2.262, 11: 2.228, 12: 2.201,
+                 15: 2.131, 19: 2.093, 23: 2.069, 31: 2.040}
+        _TC = 1.96
+        for _df in sorted(_TTBL):
+            if _NS - 1 <= _df:
+                _TC = _TTBL[_df]
+                break
+
+        _base = _run_budget_sim(_BUD_FLOOR, src=_src, nofills=_nof)
+        _bm = _mon(_base)
+        _ms = sorted(_bm)
+        _tot = sum(_bm.values())
+        _hf = len(_ms) // 2
+        _b1 = sum(_bm.get(m, 0.0) for m in _ms[:_hf])
+        _b2 = sum(_bm.get(m, 0.0) for m in _ms[_hf:])
+        _nb = sum(1 for t in _base if t.get("reason") not in ("発注中", "保有中"))
+        if not _ms or _hf < 2:
+            return ""
+
+        _band: dict = {}
+
+        def _rand_band(n):
+            """n件をランダムに落としたときの (合計差, 前半差, 後半差) を _NS 本。"""
+            _key = max(1, int(round(n / 25.0)))    # 25件刻みで丸めて使い回す
+            if _key in _band:
+                return _band[_key]
+            _ds, _d1, _d2 = [], [], []
+            for _sd in range(_NS):
+                _rk = sorted(_pool, key=lambda t, s=_sd: _zl.crc32(
+                    f"{s}|{_tk(t)}".encode()) & 0xffffffff)
+                _drop = {_tk(t) for t in _rk[:n]}
+                _rm = _mon(_run_budget_sim(
+                    _BUD_FLOOR, src=_src, nofills=_nof,
+                    keep=lambda t, d=_drop: _tk(t) not in d))
+                _ds.append(sum(_rm.values()) - _tot)
+                _d1.append(sum(_rm.get(m, 0.0) for m in _ms[:_hf]) - _b1)
+                _d2.append(sum(_rm.get(m, 0.0) for m in _ms[_hf:]) - _b2)
+            _band[_key] = (_ds, _d1, _d2)
+            return _band[_key]
+
+        _rows = ""
+        _hits = 0
+        _ntest = 0
+        for _an, _fn, _note in _AXES:
+            _grp: dict = {}
+            for _t in _pool:
+                _g = _fn(_t)
+                if _g:
+                    _grp.setdefault(str(_g), []).append(_t)
+            # 小さすぎる群は落とさない(帯が作れない / 多重検定を無駄に増やす)
+            _grp = {k: v for k, v in _grp.items() if len(v) >= 30}
+            if len(_grp) < 2:
+                continue
+            _rows += (f'<tr style="border-top:1px solid #475569">'
+                      f'<td colspan="8" style="padding:4px 8px;color:#93c5fd;'
+                      f'font-weight:700">{_an}'
+                      f'<span style="color:#64748b;font-weight:400;font-size:0.74rem">'
+                      f'　{_note}</span></td></tr>')
+            for _g, _ts in sorted(_grp.items(), key=lambda x: -len(x[1])):
+                _ntest += 1
+                _n = len(_ts)
+                _dk = {_tk(t) for t in _ts}
+                _lm = _mon(_run_budget_sim(
+                    _BUD_FLOOR, src=_src, nofills=_nof,
+                    keep=lambda t, d=_dk: _tk(t) not in d))
+                _dl = sum(_lm.values()) - _tot
+                _l1 = sum(_lm.get(m, 0.0) for m in _ms[:_hf]) - _b1
+                _l2 = sum(_lm.get(m, 0.0) for m in _ms[_hf:]) - _b2
+                _ds, _d1s, _d2s = _rand_band(_n)
+                _zz, _z1, _z2 = _z(_ds, _dl), _z(_d1s, _l1), _z(_d2s, _l2)
+                _ok = abs(_zz) >= _TC and (_z1 > 0) == (_z2 > 0) and abs(_z1) >= 0.5 \
+                    and abs(_z2) >= 0.5
+                if _ok:
+                    _hits += 1
+                _c = "#4ade80" if _zz >= _TC else ("#f87171" if _zz <= -_TC else "#94a3b8")
+
+                def _hc(z):
+                    return "#4ade80" if z > 0 else ("#f87171" if z < 0 else "#64748b")
+                _rows += (
+                    f'<tr><td style="padding:2px 8px 2px 24px;color:#e2e8f0">{_g}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{_n:,}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                    f'font-weight:700">{_dl:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_c}">'
+                    f'{_zz:+.2f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_z1)};'
+                    f'border-left:1px solid #334155">{_z1:+.2f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:{_hc(_z2)}">'
+                    f'{_z2:+.2f}</td>'
+                    f'<td style="text-align:center;padding:2px 8px">'
+                    f'{"<b style=color:#4ade80>✓</b>" if _ok else ""}</td>'
+                    f'<td style="padding:2px 8px;color:#64748b;font-size:0.74rem">'
+                    f'{"外すと損する=残すべき" if _dl < 0 else "外すと得する=**フィルタ候補**"}'
+                    f'</td></tr>')
+
+        if not _rows:
+            return ""
+        _exp = _ntest * 0.05
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        _verdict = (
+            f'<b style="color:#4ade80">候補 {_hits}個</b>（{_ntest}検定 / '
+            f'偶然の期待 {_exp:.1f}個）。'
+            + ('偶然の範囲です。<b>採用しないこと。</b>' if _hits <= _exp + 1 else
+               '偶然より多い。ただし採用前に <code>.\\hvar</code> 相当の walk-forward で'
+               '『毎月その時点で選ぶ』価値があるかを確認すること(18.36 の判定ルール)。'))
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">🔍 BTに代わるフィルタ候補（予算シミュ＋ランダム帯）'
+            f'</summary>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'各群を<b>外したら合計がどう動くか</b>を、'
+            f'<b>同数をランダムに落とした帯（{_NS}本）</b>と比べています。'
+            f'枠を空ければ別の銘柄が入るので、見ているのは「その群の損益」ではなく'
+            f'<b>「入れ替わった顔ぶれとの差」</b>です（18.10）。<br>'
+            f'<b>外すと得する（差がプラス）= フィルタ候補</b>。'
+            f'ただし |z| ≥ <b>{_TC:.2f}</b>（= t({_NS - 1})）かつ'
+            f'<b>前半・後半の符号が一致</b>して初めて ✓ が付きます（18.24）。<br>'
+            f'⚠ これまで 100検定以上で候補ゼロです。1つ2つ ✓ が付いても'
+            f'<b>多重検定の偶然</b>を疑ってください。<br>'
+            f'基準: {_nb:,}件 / {_tot:+,.0f}円（{_ms[0]}〜{_ms[-1]} / 当月除く）</p>'
+            f'<p style="color:#e2e8f0;font-size:0.8rem;margin:0 0 8px">{_verdict}</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th};text-align:left">群</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">外した差</th>'
+            f'<th style="{_th}">z</th>'
+            f'<th style="{_th};border-left:1px solid #334155">前半z</th>'
+            f'<th style="{_th}">後半z</th><th style="{_th}">判定</th>'
+            f'<th style="{_th};text-align:left">読み方</th></tr></thead>'
+            f'<tbody>{_rows}</tbody></table></details>')
+
     def _eh_diag_html():
         """E/H が **母集団から落とした銘柄日** を画面に出す。
 
@@ -15567,6 +15822,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _EH_CMP_HTML += _eh_diag_html()
     except Exception as _ehde:
         print(f"[E/H] 診断ブロック生成に失敗: {_ehde}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            import time as _fst
+            _t0 = _fst.time()
+            _fs = _filter_scan_html()
+            if _fs:
+                _EH_CMP_HTML += _fs
+                print(f"[フィルタ探索] 候補スキャンを生成 "
+                      f"({_fst.time() - _t0:.1f}s)", flush=True)
+    except Exception as _fsce:
+        print(f"[フィルタ探索] 生成に失敗: {_fsce}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_ORDER_RANK_TAB", "1")).strip() not in ("0", "false", "no"):

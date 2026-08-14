@@ -428,7 +428,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 pass
             out[key].extend(_mk(s, order_p, ep, float(xp),
                                 _REASON.get(why, why), _t,
-                                pc, atr, sm, tm, qty, key, _sa) for s in _srcs)
+                                pc, atr, sm, tm, qty, key, _sa, o1) for s in _srcs)
     _skip = sum(_sk.values())
     log("[E/H] 約定 " + " / ".join(
         f"{k}={len(out[k]):,}" for k in ["E"] + _HKEYS)
@@ -463,7 +463,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
 
 
 def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
-        pc, atr, sm, tm, qty, key, stop_anchor=None):
+        pc, atr, sm, tm, qty, key, stop_anchor=None, day_open=None):
     """元トレードをコピーして約定・決済まわりだけ差し替える。
 
     銘柄名・BT/WFスコア・ランク・設定ラベル等はそのまま残すので、
@@ -480,6 +480,20 @@ def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
     t["target_price"] = t["order_target"]
     t["qty"] = qty
     t["reason"] = reason
+    # ── 新しいフィルタ候補を測るための素材 (2026-08-14) ──────────────
+    #   BT に代わる軸を探すため、**エントリー時点で分かる**属性だけを残す。
+    #   h_fill : 板寄せ(寄りが指値以上=09:00約定) / ザラ場到達(日中に上がってきた)
+    #            18.32 の実測でザラ場は板寄せの 1/4〜1/11 しかない。最有力の軸。
+    #   h_gap_bp: 寄りが指値をどれだけ上回ったか(bp)。板寄せの中の強弱。
+    #   h_atr_pct: ATR/建値(%)。損切り0.1ATR の実効幅そのもの。
+    t["h_atr"] = float(atr or 0)
+    if entry_p and float(entry_p) > 0:
+        t["h_atr_pct"] = float(atr or 0) / float(entry_p) * 100.0
+    if day_open is not None and order_p and float(order_p) > 0:
+        _o1 = float(day_open)
+        t["h_open"] = _o1
+        t["h_fill"] = "板寄せ" if _o1 >= float(order_p) else "ザラ場到達"
+        t["h_gap_bp"] = (_o1 - float(order_p)) / float(order_p) * 1e4
     t["pnl"] = (round((float(entry_p) - float(exit_p)) * qty, 0)
                 if reason != "約定せず" else 0.0)
     t["hold_days"] = 0
