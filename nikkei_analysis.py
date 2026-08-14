@@ -13822,6 +13822,71 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         f'<span style="color:#64748b;font-size:0.7rem">'
                         f'{_sms[0]}〜{_sms[-1]}</span></td>{_cells}</tr>')
 
+        # ── 呼値ベースの執行コスト下限（このシムは slip=0）─────────────
+        #   決済のうち **成行になるもの** は板の反対側を叩くので必ず払う:
+        #     損切り      → 無保護窓明けの即時成行 / 板に置いた逆指値
+        #     タイムカット → 引け MOC
+        #   払わないもの: エントリー(指値売り=受動側。2026-08-13 実測 4/4 で
+        #   滑り +0.00%) と 目標達成(指値の買い戻し)。
+        #   呼値は **銘柄ごとの実測値**(ticks.json / probe_tick_size --save)。
+        #   価格帯テーブル(tick_size)は実測より 5〜10倍粗いので使わない。
+        #   ⚠ これは **下限**。1ティックで済む保証はない。1/2ティックの帯で出し、
+        #     .\fills の実測がどこに入るかを見るための物差しにする。
+        _MKT_EXIT = ("損切り", "タイムカット")
+        _sprd = ""
+        try:
+            from backtest_limit_entry import _load_sym_ticks as _lst_t
+            from backtest_limit_entry import tick_size_sym as _tks
+            _n_ticks_json = len(_lst_t() or {})
+        except Exception:
+            _tks, _n_ticks_json = None, 0
+        if _tks and _use:
+            _nm = max(1, len(_use))
+            for _k, _lset in _sets:
+                _n = _nmkt = 0
+                _tk1 = _pnl = 0.0
+                for _t in _lset:
+                    if _t.get("reason") in ("発注中", "保有中", "約定せず"):
+                        continue
+                    if str(_t.get("entry_d_raw") or _t.get("exit_d_raw")
+                           or "")[:7] not in _use:
+                        continue
+                    _n += 1
+                    _pnl += float(_t.get("pnl", 0) or 0)
+                    if _t.get("reason") not in _MKT_EXIT:
+                        continue
+                    _nmkt += 1
+                    try:
+                        _tk1 += float(_tks(float(_t.get("exit_p") or 0),
+                                           str(_t.get("symbol") or ""))) \
+                            * float(_t.get("qty") or 100)
+                    except Exception:
+                        pass
+                if not _n:
+                    continue
+                _c2 = "#4ade80" if (_pnl - 2 * _tk1) > 0 else "#f87171"
+                _sprd += (
+                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{_n:,}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{_nmkt:,}<span style="color:#64748b;font-size:0.72rem"> '
+                    f'({_nmkt / _n * 100:.0f}%)</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#fbbf24">'
+                    f'-{_tk1:,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#fb923c">'
+                    f'-{2 * _tk1:,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                    f'white-space:nowrap">{_pnl / _n:+,.0f} → '
+                    f'{(_pnl - _tk1) / _n:+,.0f} → '
+                    f'<b style="color:{_c2}">{(_pnl - 2 * _tk1) / _n:+,.0f}</b></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                    f'white-space:nowrap">{_pnl / _nm:+,.0f} → '
+                    f'<b style="color:{_c2}">{(_pnl - 2 * _tk1) / _nm:+,.0f}</b>'
+                    f'<span style="color:#64748b;font-size:0.72rem"> '
+                    f'({(_pnl - 2 * _tk1) / _pnl * 100:.0f}%残)</span></td></tr>'
+                ) if _pnl else ""
+
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
             f'<details style="background:#0f172a;border:1px solid #475569;'
@@ -13881,6 +13946,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + "".join(f'<th style="{_th};border-left:1px solid #334155">{x} vs {y}</th>'
                           for x, y in _PAIRS)
                 + f'</tr></thead><tbody>{_sp}</tbody></table>') if _sp else "")
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:12px 0 4px">呼値ベースの執行コスト下限（このシムは slip=0）</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'決済のうち <b>成行になるもの</b>（損切り＝無保護窓明けの即時成行・板の逆指値 / '
+                f'タイムカット＝引けMOC）は板の反対側を叩くので必ずスプレッドを払います。'
+                f'<b>エントリー（指値売り＝受動側）と目標達成（指値の買い戻し）は払いません</b>'
+                f'（2026-08-13 の実測もエントリー滑り 4/4 で +0.00%）。<br>'
+                f'呼値は <b>銘柄ごとの実測値</b>（ticks.json / {_n_ticks_json:,}銘柄）を使用。'
+                f'価格帯テーブルは実測より5〜10倍粗いので使いません。<br>'
+                f'⚠ <b>これは下限です。</b>1ティックで済む保証はありません。'
+                f'2ティック列がスプレッドを常に不利側で払った場合。'
+                f'<code>.\\fills</code> の実測（slip_daily_log.csv）がこの帯のどこに'
+                f'入るかを見るための物差しです。</p>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+                f'<th style="{_th}">決済</th><th style="{_th}">うち成行</th>'
+                f'<th style="{_th}">呼値1tick</th><th style="{_th}">呼値2tick</th>'
+                f'<th style="{_th}">円/件（素→1t→2t）</th>'
+                f'<th style="{_th}">月平均（素→2t）</th></tr></thead>'
+                f'<tbody>{_sprd}</tbody></table>') if _sprd else "")
             + '</details>')
 
     def _budget_sweep_html():
