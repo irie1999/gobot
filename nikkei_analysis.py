@@ -3603,6 +3603,68 @@ _ASOF_BT_CACHE: dict = {}  # (sym, strat, mode, sig_date, window) -> シグナ�
 # as-of BT は 15,000回以上呼ばれるので、ここが支配的なら結果をディスクに
 # 逃がす価値がある(lssタブとHタブが同じ計算を2回している)。
 _ASOF_BT_STAT = {'n': 0, 'sec': 0.0}
+# ── as-of BT のディスクキャッシュ ────────────────────────────────────────
+# ⛔ _ASOF_BT_CACHE は **プロセス内だけ**だったので、lssタブ と Hタブ(別プロセス)が
+#    同じ 15,000回超の計算を2回していた(2026-08-14 実測: 181秒のうち約70秒が重複)。
+#    as-of BT は full_trade_log の純関数なので、**同じ決済ロジック版・同じ最新バー日**
+#    なら結果も同じ。BTキャッシュ本体とまったく同じトークンで版管理する。
+_ASOF_CACHE_TOKEN = ""      # run_signals_holdout_all が "v18sd1_2026-08-14" 等を入れる
+_ASOF_CACHE_LOADED = False
+_ASOF_CACHE_N0 = 0          # 読み込んだ時点の件数(増えた分だけ保存する判定に使う)
+
+
+def _asof_cache_path():
+    if not _ASOF_CACHE_TOKEN:
+        return None
+    _d = Path(".asof_bt_cache")
+    return _d / f"asof_{_ASOF_CACHE_TOKEN}.pkl"
+
+
+def asof_cache_load():
+    """ディスクの as-of BT を読み込む。1プロセス1回だけ。"""
+    global _ASOF_CACHE_LOADED, _ASOF_CACHE_N0
+    if _ASOF_CACHE_LOADED:
+        return
+    _ASOF_CACHE_LOADED = True
+    _p = _asof_cache_path()
+    if not _p or not _p.exists():
+        return
+    if str(os.environ.get("LSS_ASOF_CACHE", "1")).strip() in ("0", "false", "no"):
+        return
+    try:
+        import pickle as _pk
+        with open(_p, "rb") as _f:
+            _d = _pk.load(_f)
+        if isinstance(_d, dict):
+            _ASOF_BT_CACHE.update(_d)
+            _ASOF_CACHE_N0 = len(_ASOF_BT_CACHE)
+            print(f"  [as-of BTキャッシュ] {len(_d):,}件をディスクから復元 "
+                  f"({_p.name})", flush=True)
+    except Exception as _e:
+        print(f"  [as-of BTキャッシュ] 読込失敗({_e}) → 計算し直します", flush=True)
+
+
+def asof_cache_save():
+    """増えた分があればディスクに書き戻す。"""
+    _p = _asof_cache_path()
+    if not _p or len(_ASOF_BT_CACHE) <= _ASOF_CACHE_N0:
+        return
+    if str(os.environ.get("LSS_ASOF_CACHE", "1")).strip() in ("0", "false", "no"):
+        return
+    try:
+        import pickle as _pk
+        _p.parent.mkdir(exist_ok=True)
+        with open(_p, "wb") as _f:
+            _pk.dump(_ASOF_BT_CACHE, _f, protocol=4)
+        print(f"  [as-of BTキャッシュ] {len(_ASOF_BT_CACHE):,}件を保存 "
+              f"(+{len(_ASOF_BT_CACHE) - _ASOF_CACHE_N0:,}件 / {_p.name})。"
+              f"次のタブ・次の実行は読むだけになります", flush=True)
+        # 古い版を掃除(トークンが変われば別ファイルなので溜まる)
+        for _old in sorted(_p.parent.glob("asof_*.pkl"),
+                           key=lambda x: x.stat().st_mtime, reverse=True)[6:]:
+            _old.unlink(missing_ok=True)
+    except Exception as _e:
+        print(f"  [as-of BTキャッシュ] 保存失敗: {_e}", flush=True)
 
 # 各取引のBTスコアが「どこから来たか」の内訳(診断用・挙動には影響しない)。
 #   frozen   … signal_score_cache_lss.json の日付つき凍結スコア = シグナル発生時の値。正しい
@@ -8189,6 +8251,7 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
               f"as-of={_BT_SRC_COUNT['asof']:,}件 / "
               f"今日のスコア={_bs_today:,}件 ({_bs_today / _bs_tot * 100:.1f}%)"
               + ("  ← 先読みバイアス" if _bs_today else ""), flush=True)
+        asof_cache_save()
         if _ASOF_BT_STAT["n"]:
             print(f"  [as-of BT 実計算] {_ASOF_BT_STAT['n']:,}回 / "
                   f"{_ASOF_BT_STAT['sec']:.1f}s "

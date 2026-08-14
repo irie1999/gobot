@@ -1591,6 +1591,17 @@ if _LSS_GAP_ENV:
     except ValueError:
         print(f"[gap] LSS_GAP_LIMIT='{_LSS_GAP_ENV}' を解釈できず → 既定3%のまま", flush=True)
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
+# ── as-of BT のディスクキャッシュも **同じトークン**で版管理する ──────────
+# ⛔ _ASOF_BT_CACHE はプロセス内だけだったので、lssタブ と Hタブ(別プロセス)が
+#    同じ 15,000回超の計算を2回していた(2026-08-14 実測: 181秒中 約70秒が重複)。
+#    as-of BT は full_trade_log の純関数なので、決済ロジック版と最新バー日が
+#    同じなら結果も同じ = BTキャッシュ本体とまったく同じ条件で再利用してよい。
+#    無効化: set LSS_ASOF_CACHE=0
+_na._ASOF_CACHE_TOKEN = f"{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}".lstrip("_")
+try:
+    _na.asof_cache_load()
+except Exception as _ace:
+    print(f"  [as-of BTキャッシュ] 初期化に失敗({_ace}) → 計算し直します", flush=True)
 # 鮮度スタンプ: このキャッシュが「どのデータ日付で作られたか」を隣に記録する。
 _bt_asof_file  = _bt_cache_file.with_suffix(".pkl.asof")
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは

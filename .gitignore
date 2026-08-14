@@ -68,3 +68,4 @@ signal_score_cache_lss.json*
 bt_v*.pkl
 holdings_latest.html
 .eh_cache/
+.asof_bt_cache/
