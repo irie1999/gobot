@@ -64,6 +64,12 @@ _REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)ま�
 # 損益タブ: 約定値(entry_p)で取引を弾く予算フィルタ。0=無効。
 # 選定時の latest_price フィルタと違い「約定時に予算内で買えた取引だけ」に絞る。
 # (選定時は安かったが約定時に急騰した銘柄=100株買えない取引を明細/集計から除外)
+# 比較表に **逆指値(旧方式)** の列を出すか。既定 OFF (2026-08-15 ユーザー指示)。
+# 逆指値は 2026-08-13 に H へ切り替えて以降まったく使っておらず、
+# 10ヶ月の実測でも呼値2tickを引くと月 -59,339円 で沈む。比較の基準としての
+# 役目は終わったので既定では出さない。戻すなら set LSS_SHOW_STOP_BASELINE=1
+_SHOW_STOP_BASE = str(os.environ.get("LSS_SHOW_STOP_BASELINE", "0")).strip() \
+    not in ("", "0", "false", "no", "off")
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
@@ -13944,7 +13950,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             import backtest_limit_entry as _bte_mod
         except Exception:
             _bte_mod = None
-        _sets = [("逆指値(旧)", _budget_entry_sorted_short)]
+        _sets = ([("逆指値(旧)", _budget_entry_sorted_short)]
+                 if _SHOW_STOP_BASE else [])
         for _k in ("E", "H"):
             _v = _eh_sorted.get(_k)
             if _v:
@@ -14093,7 +14100,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         #   呼値2tick を引くと H +89,773 / H寄指 +109,070 で H寄指が21%良い。
         #   素の差が有意かどうかは対応検定でしか分からないので並べる。
         #   さらに H指値+Nbp寄指 も自動で拾う(ギャップを指値で取る版)。
-        _PAIRS = [("E", "逆指値(旧)"), ("H", "逆指値(旧)"), ("H", "E")]
+        _PAIRS = ([("E", "逆指値(旧)"), ("H", "逆指値(旧)")]
+                  if _SHOW_STOP_BASE else []) + [("H", "E")]
         _have = {k for k, _ in _sets}
         if "H寄指" in _have:
             _PAIRS.append(("H寄指", "H"))
@@ -14233,10 +14241,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'line-height:1.7;background:#1e293b;border-left:3px solid #38bdf8;'
             f'padding:6px 10px;border-radius:4px">'
             f'★ <b>実運用は「H」です</b>（前日終値−5ティックの<b>指値</b>売り。'
-            f'env から作るので実発注とまったく同じ設定）。<br>'
-            f'<b>「逆指値(旧)」は運用していません</b> — 前日終値−1ティックの'
-            f'<b>逆指値</b>売りで、2026-08-13 に H へ切り替える前の方式です。'
-            f'比較の基準として置いてあります。</p>'
+            f'env から作るので実発注とまったく同じ設定）。'
+            + ('<br><b>「逆指値(旧)」は運用していません</b>（2026-08-13 に H へ'
+               '切替済み）。比較の基準として表示しています。'
+               if _SHOW_STOP_BASE else
+               '<br>逆指値(旧方式)の列は既定で出しません'
+               '（2026-08-15 ユーザー指示。戻すなら '
+               '<code>set LSS_SHOW_STOP_BASELINE=1</code>）。')
+            + f'</p>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'3方式とも同じ <code>_run_budget_sim</code>（{_budget_man}万円 / BT{_BT_TAB_MIN}以上 / '
             f'{_ORD_LBL} / 不約定も枠を消費）で作った同じリストを集計しています。'
@@ -14355,7 +14367,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if str(x).strip().isdigit()]
         if len(_MANS) < 2:
             return ""
-        _srcs = [("逆指値(旧)", None, None)]
+        _srcs = ([("逆指値(旧)", None, None)]
+                 if _SHOW_STOP_BASE else [])
         _nf = (_EH_TRADES or {}).get("約定せず") or {}
         _keys = ["E", "H", "H寄指"] + [k for k in ((_EH_TRADES or {}).get(
             "_h_variants") or []) if str(k).startswith(("H寄り確認", "H指値"))]
@@ -14540,7 +14553,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         import zlib as _zl
 
-        _srcs = [("逆指値(旧)", None, None)]
+        _srcs = ([("逆指値(旧)", None, None)]
+                 if _SHOW_STOP_BASE else [])
         _ehnf_r = (_EH_TRADES or {}).get("約定せず") or {}
         for _k in ("E", "H"):
             _v = (_EH_TRADES or {}).get(_k) or []
@@ -14813,7 +14827,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         import zlib as _zl
 
-        _srcs = [("逆指値(旧)", None, None)]
+        _srcs = ([("逆指値(旧)", None, None)]
+                 if _SHOW_STOP_BASE else [])
         _ehnf_l = (_EH_TRADES or {}).get("約定せず") or {}
         for _k in ("E", "H"):
             _v = (_EH_TRADES or {}).get(_k) or []
@@ -15560,7 +15575,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         if not _LSS_START_DATES:
             return ""
-        _sets = [("逆指値(旧)", _budget_entry_sorted_short)]
+        _sets = ([("逆指値(旧)", _budget_entry_sorted_short)]
+                 if _SHOW_STOP_BASE else [])
         for _k in ("E", "H"):
             _v = _eh_sorted.get(_k)
             if _v:
