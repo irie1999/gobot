@@ -90,14 +90,14 @@ def _tab_on(_env: str, _default: str = "0") -> bool:
 
 
 # ── 取引明細のどのタブを出すか (2026-08-15 ユーザー指示で既定OFF) ────────
-#   実際に見るのは「💰予算内」「🔁H」「🔁G(資金均等)」と ⚖比較 だけ。
+#   実際に見るのは「💰予算内」「🔁H」「🔁J(資金均等)」と ⚖比較 だけ。
 #   残りは HTML を重くするだけなので既定で描かない。
 #   ⚠ 集計・検定の数字はここに一切影響されない(集計は打ち切り前の全件で別計算)。
 #   戻すときは対応する env を 1 にするだけ:
 #     LSS_TAB_ALL=1     … 「全部（決済日順）」
 #     LSS_TAB_ENTRY=1   … 「エントリー日別」
 #     LSS_TAB_TENKAN=1  … 「転換」
-#     LSS_TAB_EH_ALL=1  … 「H/G の全取引(予算の制約なし)」
+#     LSS_TAB_EH_ALL=1  … 「H/J の全取引(予算の制約なし)」
 #   ※ LSS_BASE_DETAIL=1 は中身とタブの両方を戻す(片方だけ戻しても意味がない)。
 _SHOW_TAB_ALL = _tab_on("LSS_TAB_ALL") or _SHOW_BASE_DETAIL
 _SHOW_TAB_ENTRY = _tab_on("LSS_TAB_ENTRY") or _SHOW_BASE_DETAIL
@@ -11236,7 +11236,7 @@ function switchTbd(id, tab) {{
         _EH_NF = _EH_TRADES.get("約定せず") or {}
         _EH_PAIRS = [("E", "he"), ("H", "hh")]
         if _EH_TRADES.get(_EQ_TAB_KEY):
-            _EH_PAIRS.append(("G", "hg"))
+            _EH_PAIRS.append(("J", "hj"))
         else:
             print(f"[E/H] 資金均等タブ: キー '{_EQ_TAB_KEY}' が見つかりません"
                   f"(候補: "
@@ -11244,7 +11244,7 @@ function switchTbd(id, tab) {{
                               if str(k).endswith("資金均等"))
                   + ")。set LSS_EQ_TAB_KEY=... で指定", flush=True)
         for _ehk, _ehpfx in _EH_PAIRS:
-            _srck = _EQ_TAB_KEY if _ehk == "G" else _ehk
+            _srck = _EQ_TAB_KEY if _ehk == "J" else _ehk
             _src = _EH_TRADES.get(_srck) or []
             if not _src:
                 continue
@@ -14094,15 +14094,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
-    for _ehk in ("E", "H", "G"):
+    for _ehk in ("E", "H", "J"):
         if _eh_grid.get(_ehk):
             _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
     # 既定で開くタブ。「全部（決済日順）」を隠したので、代わりに最初に見たいもの
-    # (G=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
+    # (J=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
     # detail_<seq>_all の存在を前提にコンテナを探すので、**all の div は残す**
     # (中身だけ空にする)。
-    _DEF_TAB = next((x for x in ("ehG", "ehH", "budget", "all")
+    _DEF_TAB = next((x for x in ("ehJ", "ehH", "budget", "all")
                      if x in _detail_tab_ids), "all")
     # 隠してよいのは「他に着地できるタブがあるとき」だけ。ロング/ショートの
     # レポートには E/H も予算タブも無いので、そこでは従来どおり全部出す
@@ -16802,17 +16802,24 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
     _eh_pane = ""
+    # ⛔ 方式の記号は analyze_overnight_lss.py と共通の台帳。使用済みは
+    #      A 引け→翌寄り / B 引け→翌引け / C 翌寄り→翌引け / D 引け+OCO /
+    #      D2 夜間損切りが効く場合 / E 翌寄り+OCO / E0 9時から建値は現行 /
+    #      F 5分足寄り+OCO / **G 翌寄りロング**(E の鏡像・棄却済み) /
+    #      H 前日終値で指値売り
+    #    新しい方式に **G を使い回さないこと**(棄却した負け方式と混ざる)。
+    #    I は数字の1と紛れるので飛ばし、次は J。
     _EH_LBL = {"E": ("E 寄成", "#a78bfa", "#c4b5fd",
                      "翌朝9:00の<b>寄成売り</b>(板寄せでほぼ必ず約定)"),
                "H": ("H 前日終値の指値", "#f0abfc", "#f5d0fe",
                      "<b>前日終値の指値売り</b>(上がって到達したら約定。"
                      "寄りが既に上なら板寄せ。届かなければ建てない)"),
-               "G": (f"G {_EQ_TAB_LBL}", "#facc15", "#fde68a",
+               "J": (f"J {_EQ_TAB_LBL}", "#facc15", "#fde68a",
                      "09:00 の<b>始値</b>を見て、前日終値比のギャップが"
                      f"<b>{_EQ_TAB_GAP}</b>以上の銘柄だけを合格とし、"
                      "<b>その日の合格銘柄に予算を均等割り</b>して即成行売り"
                      "(約定は始値で近似)")}
-    for _ehk in ("E", "H", "G"):
+    for _ehk in ("E", "H", "J"):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)
@@ -16821,7 +16828,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
         # ⛔ _ehpfx はこのループでは定義されない(上の別ループの残り値が入り、
         #    E でも "hh" になって DOM id が H と衝突する)。ここで作り直す。
-        _ehpfx = {"E": "he", "H": "hh", "G": "hg"}[_ehk]
+        _ehpfx = {"E": "he", "H": "hh", "J": "hj"}[_ehk]
         _ss = _eh_sorted.get(_ehk) or []
         _eh_btn += (
             f'<button class="detail-tab-btn{_act("eh" + _ehk)}" '
@@ -16876,7 +16883,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                '<code>.\\fills</code> の実約定で確認するまで未検証です。'
                '<br>⚠ 不約定はありません（ギャップを確認してから発注するので、'
                '<b>発注枠を空振りに使わない</b>）。これも H との構造的な違いです。'
-               if _ehk == "G" else
+               if _ehk == "J" else
                f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
                f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
                f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。')
@@ -17571,7 +17578,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
-{'' if not _CAN_HIDE else '<p style="color:#64748b;font-size:0.72rem;margin:-6px 0 8px">見ないタブは既定で出していません（HTMLを軽くするため / 2026-08-15）。戻すには <code>set LSS_TAB_ALL=1</code>（全部・決済日順）／<code>LSS_TAB_ENTRY=1</code>（エントリー日別）／<code>LSS_TAB_TENKAN=1</code>（転換）／<code>LSS_TAB_EH_ALL=1</code>（H・Gの全取引）。<b>集計・検定の数字はこの設定に影響されません</b>。</p>'}
+{'' if not _CAN_HIDE else '<p style="color:#64748b;font-size:0.72rem;margin:-6px 0 8px">見ないタブは既定で出していません（HTMLを軽くするため / 2026-08-15）。戻すには <code>set LSS_TAB_ALL=1</code>（全部・決済日順）／<code>LSS_TAB_ENTRY=1</code>（エントリー日別）／<code>LSS_TAB_TENKAN=1</code>（転換）／<code>LSS_TAB_EH_ALL=1</code>（H・Jの全取引）。<b>集計・検定の数字はこの設定に影響されません</b>。</p>'}
 {_bt_filter_banner_html()}
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
