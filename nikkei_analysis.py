@@ -13944,10 +13944,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             import backtest_limit_entry as _bte_mod
         except Exception:
             _bte_mod = None
-        _sets = [("現行", _budget_entry_sorted_short)]
+        _sets = [("逆指値(旧)", _budget_entry_sorted_short)]
         for _k in ("E", "H"):
             _v = _eh_sorted.get(_k)
             if _v:
+                # ⛔ ここのラベルは **キーとして _PAIRS から引かれる**ので飾らない。
+                #    どれが実運用かは説明文で示す(H = env から作る = 実発注と同じ)。
                 _sets.append((_k, _v))
         # 寄指はタブを持たない(変種)ので、ここで予算シミュを通して並べる。
         for _hk in (["H寄指"] + [k for k in ((_EH_TRADES or {}).get("_h_variants")
@@ -14091,7 +14093,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         #   呼値2tick を引くと H +89,773 / H寄指 +109,070 で H寄指が21%良い。
         #   素の差が有意かどうかは対応検定でしか分からないので並べる。
         #   さらに H指値+Nbp寄指 も自動で拾う(ギャップを指値で取る版)。
-        _PAIRS = [("E", "現行"), ("H", "現行"), ("H", "E")]
+        _PAIRS = [("E", "逆指値(旧)"), ("H", "逆指値(旧)"), ("H", "E")]
         _have = {k for k, _ in _sets}
         if "H寄指" in _have:
             _PAIRS.append(("H寄指", "H"))
@@ -14226,7 +14228,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
             f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
             f'cursor:pointer">'
-            f'⚖ 現行 / E / H の比較（同一プール・同一予算・同一発注順・同一決済）</summary>'
+            f'⚖ 注文方式の比較（同一プール・同一予算・同一発注順・同一決済）</summary>'
+            f'<p style="color:#e2e8f0;font-size:0.78rem;margin:0 0 8px;'
+            f'line-height:1.7;background:#1e293b;border-left:3px solid #38bdf8;'
+            f'padding:6px 10px;border-radius:4px">'
+            f'★ <b>実運用は「H」です</b>（前日終値−5ティックの<b>指値</b>売り。'
+            f'env から作るので実発注とまったく同じ設定）。<br>'
+            f'<b>「逆指値(旧)」は運用していません</b> — 前日終値−1ティックの'
+            f'<b>逆指値</b>売りで、2026-08-13 に H へ切り替える前の方式です。'
+            f'比較の基準として置いてあります。</p>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'3方式とも同じ <code>_run_budget_sim</code>（{_budget_man}万円 / BT{_BT_TAB_MIN}以上 / '
             f'{_ORD_LBL} / 不約定も枠を消費）で作った同じリストを集計しています。'
@@ -14345,7 +14355,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if str(x).strip().isdigit()]
         if len(_MANS) < 2:
             return ""
-        _srcs = [("現行", None, None)]
+        _srcs = [("逆指値(旧)", None, None)]
         _nf = (_EH_TRADES or {}).get("約定せず") or {}
         _keys = ["E", "H", "H寄指"] + [k for k in ((_EH_TRADES or {}).get(
             "_h_variants") or []) if str(k).startswith(("H寄り確認", "H指値"))]
@@ -14530,7 +14540,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         import zlib as _zl
 
-        _srcs = [("現行", None, None)]
+        _srcs = [("逆指値(旧)", None, None)]
         _ehnf_r = (_EH_TRADES or {}).get("約定せず") or {}
         for _k in ("E", "H"):
             _v = (_EH_TRADES or {}).get(_k) or []
@@ -14803,7 +14813,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         import zlib as _zl
 
-        _srcs = [("現行", None, None)]
+        _srcs = [("逆指値(旧)", None, None)]
         _ehnf_l = (_EH_TRADES or {}).get("約定せず") or {}
         for _k in ("E", "H"):
             _v = (_EH_TRADES or {}).get(_k) or []
@@ -15550,10 +15560,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         import statistics as _sti
         if not _LSS_START_DATES:
             return ""
-        _sets = [("現行", _budget_entry_sorted_short)]
+        _sets = [("逆指値(旧)", _budget_entry_sorted_short)]
         for _k in ("E", "H"):
             _v = _eh_sorted.get(_k)
             if _v:
+                # ⛔ ここのラベルは **キーとして _PAIRS から引かれる**ので飾らない。
+                #    どれが実運用かは説明文で示す(H = env から作る = 実発注と同じ)。
                 _sets.append((_k, _v))
         _BANDS = [(0, 2, "0-1ヶ月"), (2, 4, "2-3ヶ月"),
                   (4, 7, "4-6ヶ月"), (7, 10**6, "7ヶ月〜")]
