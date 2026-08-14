@@ -934,22 +934,49 @@ def _filter_wl_by_price(wl: list, min_price: float, max_price: float) -> list:
     if not _has_max and not _has_min:
         return list(wl)
     import backtest_limit_entry as _ble
+    # ★ 既定は **窓のどこかで一度でも範囲内なら残す** (2026-08-14 ユーザー指示)。
+    #   最新終値だけで切ると「当時は買えたのに今は上限を超えた」銘柄が
+    #   過去の集計から丸ごと消える = 先読み。実例: 5838 楽天銀行は 2026-08-14 に
+    #   6,042円で引けたため、その日の -10,050円 の負けトレードごと消えていた。
+    #   ⚠ 残すのはユニバースだけ。**発注リストは今日の注文値で別途絞る**
+    #     (nikkei_analysis の [発注リストの価格フィルタ])ので、
+    #     今日買えない銘柄が発注リストに出ることはない。
+    #   旧挙動に戻す: set LSS_UNIVERSE_PRICE_LATEST=1
+    _latest_only = str(os.environ.get("LSS_UNIVERSE_PRICE_LATEST", "") or "").strip() \
+        not in ("", "0", "false", "no", "off")
     out: list = []
     dropped = 0
+    saved = 0                    # 旧ルールなら落ちていたが窓ルールで残ったもの
     for item in wl:
         code = item[0] if item else ""
+        px = lo = hi = None
         try:
             df = _ble.fetch(code, 400)
-            px = float(df["close"].iloc[-1]) if df is not None and len(df) else None
+            if df is not None and len(df):
+                _c = df["close"]
+                px, lo, hi = float(_c.iloc[-1]), float(_c.min()), float(_c.max())
         except Exception:
-            px = None
-        if px is None or (_has_max and px > max_price) or (_has_min and px < min_price):
+            pass
+        if px is None:
             dropped += 1
             continue
+        _ng_latest = (_has_max and px > max_price) or (_has_min and px < min_price)
+        # 窓ルール: 一度でも上限以下になり、かつ一度でも下限以上になったか
+        _ng_window = (_has_max and lo > max_price) or (_has_min and hi < min_price)
+        if (_ng_latest if _latest_only else _ng_window):
+            dropped += 1
+            continue
+        if _ng_latest and not _ng_window:
+            saved += 1
         out.append(item)
-    if dropped:
+    if dropped or saved:
         print(f"  [価格フィルタ] 現行WATCHLIST {len(wl)}→{len(out)}件 "
-              f"(min={min_price:g}/max={max_price:g} で {dropped}件除外)")
+              f"(min={min_price:g}/max={max_price:g} で {dropped}件除外 / "
+              f"判定={'最新終値のみ(旧)' if _latest_only else '窓内で一度でも範囲内'})")
+        if saved:
+            print(f"    ↳ {saved}件は今は範囲外だが**当時は範囲内**だったので残しました"
+                  f"(過去の集計から消さないため / 18.16)。"
+                  f"発注リストには今日の注文値で別途フィルタが掛かります")
     return out
 
 # ── PNL_CONFIGS 構築 ──────────────────────────────────────────────────────────

@@ -2652,6 +2652,35 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
 
     _set_sig_params("conservative")
 
+    # ── 発注リストの価格フィルタ: **そのシグナル自身の注文値**で判定 ──────────
+    # ⛔ ユニバース側(_filter_wl_by_price)は **最新終値** で銘柄ごと落とすので、
+    #    過去の集計から「当時は買えたのに今は上限を超えた」銘柄が丸ごと消える
+    #    = 先読み(18.16)。2026-08-14 に 5838 楽天銀行が今日 6,042円 で引けた
+    #    ため、当日の -10,050円 の負けトレードごと母集団から消えた。
+    # ★ 対策: ユニバースからは落とさず、**発注リストだけ**をここで絞る。
+    #    判定に使うのは今日の注文値なので、今日の発注リストの中身は従来と同じ。
+    #    損益タブ側は約定値ベースのフィルタ(_PNL_ENTRY_*)が既にあり先読みなし。
+    if _PNL_ENTRY_MAX_PRICE > 0 or _PNL_ENTRY_MIN_PRICE > 0:
+        _before = len(signals)
+        _kept = []
+        for _s in signals:
+            _op = float(_s.get("order_price", 0) or 0)
+            if _op <= 0:                     # 注文値が取れないものは従来どおり残す
+                _kept.append(_s)
+                continue
+            if _PNL_ENTRY_MAX_PRICE > 0 and _op > _PNL_ENTRY_MAX_PRICE:
+                continue
+            if _PNL_ENTRY_MIN_PRICE > 0 and _op < _PNL_ENTRY_MIN_PRICE:
+                continue
+            _kept.append(_s)
+        signals = _kept
+        if _before != len(signals):
+            print(f"  [発注リストの価格フィルタ] 注文値で {_before}→{len(signals)}件 "
+                  f"({_before - len(signals)}件除外 / "
+                  f"{_PNL_ENTRY_MIN_PRICE:,.0f}〜{_PNL_ENTRY_MAX_PRICE:,.0f}円)。"
+                  f"⚠ 判定は**今日の注文値**。過去の集計はユニバースから落とさない"
+                  f"(18.16 の先読み対策)", flush=True)
+
     # 流動性(平均日次売買代金=出来高×終値)を各シグナルに付与。
     # 検証で「厚い銘柄ほど1件あたり利益が大きい」と分かったため、BT同点時は厚い方を優先。
     try:
