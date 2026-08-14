@@ -54,6 +54,8 @@ ap.add_argument("--days", type=int, default=90, help="直近何日ぶんの分�
 ap.add_argument("--limit", type=int, default=300, help="銘柄数の上限(0=全部)")
 ap.add_argument("--min-days", type=int, default=5, help="推定に要る最低銘柄日数")
 ap.add_argument("--propose", action="store_true", help="呼値テーブル案を出す")
+ap.add_argument("--save", default="ticks.json",
+                help="銘柄ごとの実測呼値をJSONに保存(空文字で保存しない)。backtest_limit_entry.tick_size がこれを読む")
 args = ap.parse_args()
 
 try:
@@ -234,6 +236,17 @@ def main() -> int:
               "一度も試していません。")
     else:
         print("  ✅ コードの呼値は実測とおおむね一致しています。")
+
+    if args.save:
+        import json as _js
+        _out = {k: v[0] for k, v in per_sym.items() if v[0] > 0}
+        with open(_BASE / args.save, "w", encoding="utf-8") as _f:
+            _js.dump(_out, _f, ensure_ascii=False, indent=0, sort_keys=True)
+        print()
+        print(f"  → {args.save} に {len(_out)}銘柄を保存しました。")
+        print("     backtest_limit_entry.tick_size(price, symbol) がこれを読みます。")
+        print("     ⚠ 呼値は価格帯だけでは決まらない(同じ帯で 0.5/1/5/10円 が混在)ので、")
+        print("        **銘柄ごとの実測値**を使うのが唯一正確なやり方です。")
 
     if args.propose:
         print()

@@ -139,8 +139,85 @@ _TICK_TABLE = [
     (float("inf"), 10_000),
 ]
 
+# ── 銘柄ごとの実測呼値 (probe_tick_size.py --save が作る ticks.json) ──────
+# ⛔ _TICK_TABLE は古い(粗い)表で、実測と 5〜10倍ずれている(2026-08-14 に kabu の
+#    板で確認: 8331 千葉銀行 2,858円は実際 0.5円 / 表は 5円)。しかも東証の呼値
+#    細分化は銘柄単位なので、**同じ価格帯でも銘柄によって違う**
+#    (実測: 3,000〜5,000円帯で 5円が55銘柄・1円が40銘柄)。
+#    したがって価格帯テーブルでは原理的に正しくならない。
+#
+# ⛔ 既存の tick_size()/round_to_tick() は **触らない**。発注経路が int を
+#    期待しており、0.5円刻みを返すと壊れる。銘柄対応が要るところだけ
+#    *_sym() を使うこと。
+_SYM_TICKS: dict = {}
+_SYM_TICKS_LOADED = [False]
+
+
+def _load_sym_ticks() -> dict:
+    global _SYM_TICKS
+    if _SYM_TICKS_LOADED[0]:
+        return _SYM_TICKS
+    _SYM_TICKS_LOADED[0] = True
+    try:
+        import json as _js
+        from pathlib import Path as _P
+        _f = _P(__file__).resolve().parent / "ticks.json"
+        if _f.exists():
+            with open(_f, encoding="utf-8") as _fh:
+                _SYM_TICKS = {str(k).upper(): float(v)
+                              for k, v in _js.load(_fh).items() if float(v) > 0}
+    except Exception:
+        _SYM_TICKS = {}
+    return _SYM_TICKS
+
+
+def _norm_sym(symbol) -> str:
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return ""
+    if s.endswith(".T"):
+        return s
+    if len(s) == 5 and s.isdigit() and s[-1] == "0":
+        return s[:4] + ".T"
+    return s + ".T"
+
+
+def tick_size_sym(price: float, symbol=None) -> float:
+    """呼値。**銘柄の実測値があればそれを使う**(無ければ従来の価格帯テーブル)。
+
+    戻り値は float(0.5円刻みがあるため)。int を期待する既存経路では
+    tick_size() のままにすること。
+    """
+    if symbol:
+        _t = _load_sym_ticks().get(_norm_sym(symbol))
+        if _t:
+            return float(_t)
+    return float(tick_size(float(price)))
+
+
+def round_to_tick_sym(price: float, symbol=None) -> float:
+    t = tick_size_sym(price, symbol)
+    return round(round(float(price) / t) * t, 1)
+
+
+def ceil_to_tick_sym(price: float, symbol=None) -> float:
+    import math as _m
+    t = tick_size_sym(price, symbol)
+    return round(_m.ceil(float(price) / t) * t, 1)
+
+
+def floor_to_tick_sym(price: float, symbol=None) -> float:
+    import math as _m
+    t = tick_size_sym(price, symbol)
+    return round(_m.floor(float(price) / t) * t, 1)
+
+
 def tick_size(price: float) -> int:
-    """価格に対応する呼値単位を返す"""
+    """価格に対応する呼値単位を返す(**古い価格帯テーブル**・int)。
+
+    ⚠ 実測より 5〜10倍粗い。銘柄ごとの正しい呼値が要るときは
+      tick_size_sym(price, symbol) を使うこと。
+    """
     for threshold, tick in _TICK_TABLE:
         if price < threshold:
             return tick

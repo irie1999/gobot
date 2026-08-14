@@ -10350,6 +10350,20 @@ function switchTbd(id, tab) {{
                 _hvars.append((f"{_hte:+d}tick "
                                f"{'寄指' if _hae else 'ザラ場込'} 損切=max(約定,前日終値)",
                                _hte, _hae, _eh_delay, "max"))
+                # ── ★ 指値の深さを **bp** で掃く (2026-08-14) ────────────
+                # ⛔ _TICK_TABLE は実測より 5〜10倍粗く、しかも呼値は銘柄ごとに
+                #    違う(実測: 3,000〜5,000円帯で 5円55銘柄・1円40銘柄)。
+                #    そのため「-5ティック」は板の上では -50ティック相当(千葉銀行
+                #    なら -25円 = 約 -90bp)になっていた。つまり
+                #    **『板で数ティックだけ下』を一度も試していない**。
+                #    18.32 で E(寄成=0)と H(-25円)を比べて H が勝ったが、
+                #    その中間は空白のまま。bp 指定なら呼値に依存せず掃ける。
+                for _bp in [float(x) for x in str(os.environ.get(
+                        "LSS_H_BP_SWEEP", "0,-10,-25,-50")).split(",")
+                        if str(x).strip().lstrip("+-").replace(".", "").isdigit()]:
+                    _hvars.append((f"指値 {_bp:+.0f}bp(前日終値比) "
+                                   f"{'寄指' if _hae else 'ザラ場込'}",
+                                   0, _hae, _eh_delay, "fill", _bp))
             if _eh_pending:
                 print(f"[E/H] 当日ぶんの未決着シグナル {len(_eh_pending)}件も母集団に"
                       f"入れます(H は自前の約定判定を持つため)", flush=True)

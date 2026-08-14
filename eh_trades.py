@@ -81,6 +81,10 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     try:
         from backtest_limit_entry import (fetch as _fetch, round_to_tick as _r2t,
                                           tick_size as _tsz)
+        try:   # 銘柄ごとの実測呼値(ticks.json)。無ければ従来の丸めに落ちる
+            from backtest_limit_entry import round_to_tick_sym as _r2ts
+        except Exception:
+            _r2ts = None
         from daytrade_data import load_intraday as _li, split_by_day as _sbd
         from intraday_integrity import day_scale_ok as _ig_ok
         from sameday5m_firsttouch import short_exit_5m as _x5
@@ -145,9 +149,15 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #      損切りが約定値より下に来て、建てた瞬間に成立する)。だが **指値〜前日終値の
     #      間で約定したケースでは不要**で、そこだけ損切りが不必要にタイトになる。
     #      max(実約定, 前日終値) なら前者は今と同じ、後者だけ広がって破綻もしない。
+    # (表示名, 指値ティック, 寄指か, 損切り遅延, 損切りアンカー, 指値bp)
+    # ⛔ 6要素目の bp を入れると **ティック指定より優先** する。
+    #    _TICK_TABLE は実測より 5〜10倍粗く、しかも呼値は銘柄ごとに違うので
+    #    「-5ティック」が板の上では -50ティックになっていた(2026-08-14)。
+    #    bp 指定なら呼値テーブルに依存せず連続的に探索できる。
     _HV = [(str(v[0]), int(v[1]), bool(v[2]),
             (int(v[3]) if len(v) > 3 and v[3] is not None else int(stop_delay_bars)),
-            (str(v[4]) if len(v) > 4 and v[4] else "fill"))
+            (str(v[4]) if len(v) > 4 and v[4] else "fill"),
+            (float(v[5]) if len(v) > 5 and v[5] is not None else None))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -330,8 +340,14 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         _cases = [("E", o1, o1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
                    int(stop_delay_bars), "fill")]
-        for _hn, _ht_, _ha, _hd, _hanc in _HV:
-            _hl = float(_r2t(pc + _ht_ * _tsz(pc))) if _ht_ else pc
+        for _hn, _ht_, _ha, _hd, _hanc, _hbp in _HV:
+            if _hbp is not None:
+                # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める
+                # (無ければ従来の丸めに落ちる)。
+                _raw = pc * (1.0 + _hbp / 1e4)
+                _hl = float(_r2ts(_raw, sym)) if _r2ts else float(_r2t(_raw))
+            else:
+                _hl = float(_r2t(pc + _ht_ * _tsz(pc))) if _ht_ else pc
             _cases.append((
                 _hn, _hl, (o1 if o1 >= _hl else _hl),
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
