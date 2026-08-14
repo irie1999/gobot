@@ -10785,9 +10785,22 @@ function switchTbd(id, tab) {{
     # ⚠ 資金を1〜3銘柄に集中させるので σ は跳ねる。18.30 で「σ削減が唯一効く
     #    レバー」と出ているので、**合計だけでなく必ず月次σを見ること**。
     # ⚠ 単元100株。1件あたり最低100株、最大は予算/件数/建値で決まる。
-    _EQ_MAX_LOT = 10          # 先に置く。try の中で落ちても下の描画が参照する
+    # ⛔ 上限を「単元」で切るのは設計として間違い(2026-08-15 実測で判明)。
+    #    10単元は 1,000円株なら100万、4,000円株なら**400万=予算全額**。
+    #    株価帯 1,000〜6,000円 なので同じ設定が6倍ぶれる。実測でも
+    #    「1銘柄 最大 397万」= 予算のほぼ全額が1銘柄に入っていた。
+    #    金額で切る LSS_EQ_MAX_YEN(万円) を用意する。0=無効(従来どおり)。
+    #    ⚠ これは**リスク管理**であってリターンの最適化ではない。入れて損益が
+    #      ノイズ帯の中なら入れる、というのが正しい判断のしかた(18.24)。
+    # ★ 資金均等は E/H キャッシュより **後** に掛かるので、LSS_EQ_MAX_YEN を
+    #    変えてもキャッシュは無効化されない = 上限のスイープは軽い。
+    # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
+    _EQ_MAX_LOT = 10
+    _EQ_MAX_YEN = 0.0
+    _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
     try:
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
+        _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
 
         def _size_equal_by_day(_ts, _budget):
             """その日の件数で予算を均等割りし、100株単位で建て直す。
@@ -10805,9 +10818,14 @@ function switchTbd(id, tab) {{
             _out = []
             _amts: list = []          # 1銘柄あたりの建玉額
             _cnts: list = []          # 1日あたりの件数
-            _capped = 0               # 単元上限に当たった件数
+            _capped = 0               # 単元上限(株数)に当たった件数
+            _ycap = 0                 # 金額上限で削った件数
             for _d, _lst in _by.items():
                 _per = _budget / max(1, len(_lst))
+                # ★ 金額上限。単元上限(株数)は株価で意味が6倍変わるので、
+                #   本来はこちらで切るべき。0=無効。
+                if _EQ_MAX_YEN > 0:
+                    _per = min(_per, _EQ_MAX_YEN)
                 _cnts.append(len(_lst))
                 for _t in _lst:
                     _ep = float(_t.get("entry_p", 0) or 0)
@@ -10818,6 +10836,11 @@ function switchTbd(id, tab) {{
                     _lot = max(1, min(_EQ_MAX_LOT, _raw))
                     if _raw > _EQ_MAX_LOT:
                         _capped += 1
+                    # 金額上限を **100株1単元でも超える**銘柄は、削りようが無い
+                    # (1単元が最小)。件数として出して、上限が絵に描いた餅に
+                    # なっていないかを見えるようにする。
+                    if _EQ_MAX_YEN > 0 and _lot * 100 * _ep > _EQ_MAX_YEN:
+                        _ycap += 1
                     _n = dict(_t)
                     _n["qty"] = _lot * 100
                     _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
@@ -10839,6 +10862,7 @@ function switchTbd(id, tab) {{
                 "amt_p95": _q(_amts, 0.95),
                 "amt_max": (_amts[-1] if _amts else 0.0),
                 "capped": _capped,
+                "ycap": _ycap,
                 "n": len(_out),
             }
             return _out, _st
@@ -10853,7 +10877,6 @@ function switchTbd(id, tab) {{
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
                     if str(k).startswith("H寄り確認")
                     or (str(k).startswith("H指値") and str(k).endswith("寄指"))]
-        _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
             if not _v:
@@ -14494,6 +14517,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 continue
             _cc = "#f87171" if _st["amt_p95"] >= 2.0e6 else (
                 "#fbbf24" if _st["amt_p95"] >= 1.2e6 else "#94a3b8")
+            # 予算に対する比を主軸にする。円だけだと予算を変えたときに
+            # 読み直せないし、集中度は本質的に「何割を 1 銘柄に入れたか」。
+            _pc95 = _st["amt_p95"] / max(1.0, _EQ_BUD) * 100
+            _pcmx = _st["amt_max"] / max(1.0, _EQ_BUD) * 100
             _conc += (
                 f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
@@ -14503,12 +14530,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["amt_med"] / 1e4:,.0f}万</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
-                f'<b>{_st["amt_p95"] / 1e4:,.0f}万</b></td>'
+                f'<b>{_st["amt_p95"] / 1e4:,.0f}万</b>'
+                f'<span style="color:#64748b;font-size:0.72rem"> '
+                f'({_pc95:.0f}%)</span></td>'
                 f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
-                f'{_st["amt_max"] / 1e4:,.0f}万</td>'
+                f'{_st["amt_max"] / 1e4:,.0f}万'
+                f'<span style="color:#64748b;font-size:0.72rem"> '
+                f'({_pcmx:.0f}%)</span></td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["capped"]:,}<span style="color:#64748b;font-size:0.72rem">'
-                f' ({_st["capped"] / max(1, _st["n"]) * 100:.0f}%)</span></td></tr>')
+                f' ({_st["capped"] / max(1, _st["n"]) * 100:.0f}%)</span>'
+                + (f'<br><span style="color:#fbbf24;font-size:0.7rem">'
+                   f'金額上限超え {_st.get("ycap", 0):,}</span>'
+                   if _EQ_MAX_YEN > 0 and _st.get("ycap") else "")
+                + '</td></tr>')
 
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
@@ -14616,14 +14651,27 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'月次σ は日次の<u>合計</u>で測るので、この「1銘柄に寄せたこと」自体は'
                 f'見えません。<b>t が高いことは集中していないことを意味しません。</b><br>'
                 f'⚠ シグナルが少ない日ほど寄ります（<b>最少</b>列がその日の件数）。'
-                f'1単元の上限は {_EQ_MAX_LOT} 単元（'
-                f'<code>set LSS_EQ_MAX_LOT=N</code> で変更）。'
-                f'上限に当たった割合が高いほど、実際には均等割りできていません。</p>'
+                f'括弧内は<b>予算({_EQ_BUD / 1e4:,.0f}万)に対する比</b>。<br>'
+                f'⛔ <b>株数の上限({_EQ_MAX_LOT}単元)は株価で意味が6倍変わります</b>。'
+                f'10単元は 1,000円株なら100万、4,000円株なら<b>400万＝予算全額</b>。'
+                f'価格帯が1,000〜6,000円なので、株数で切るのは本来おかしい。'
+                + (f'いまは <b>金額上限 {_EQ_MAX_YEN / 1e4:,.0f}万/銘柄</b> が入っています。'
+                   if _EQ_MAX_YEN > 0 else
+                   f'金額で切るには <code>set LSS_EQ_MAX_YEN=100</code>（万円/銘柄・0=無効）。')
+                + f'<br>⚠ これは<b>リスク管理であってリターンの最適化ではありません</b>。'
+                f'入れて損益がノイズ帯（月次σ ≒ 12〜13万）の中に収まるなら入れる、'
+                f'というのが正しい判断のしかたです。'
+                f'<br>「単元上限に当たった」の割合が高いほど、実際には均等割りできず'
+                f'<b>資金が遊んでいます</b>。</p>'
                 f'<table style="border-collapse:collapse;font-size:0.8rem">'
                 f'<thead><tr><th style="{_th};text-align:left">方式</th>'
                 f'<th style="{_th}">件数/日 中央</th><th style="{_th}">最少</th>'
-                f'<th style="{_th}">1銘柄 中央</th><th style="{_th}">95%点</th>'
-                f'<th style="{_th}">最大</th><th style="{_th}">単元上限に当たった</th>'
+                f'<th style="{_th}">1銘柄 中央</th>'
+                f'<th style="{_th}">95%点<br><span style="font-weight:400;'
+                f'font-size:0.68rem">(予算比)</span></th>'
+                f'<th style="{_th}">最大<br><span style="font-weight:400;'
+                f'font-size:0.68rem">(予算比)</span></th>'
+                f'<th style="{_th}">単元上限に当たった</th>'
                 f'</tr></thead><tbody>{_conc}</tbody></table>') if _conc else "")
             + '</details>')
 
