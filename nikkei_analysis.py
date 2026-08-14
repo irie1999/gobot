@@ -10724,6 +10724,8 @@ function switchTbd(id, tab) {{
     #   月テーブル・日チップ・明細の体裁が他タブと完全に一致する。
     _eh_sorted: dict = {}
     _eh_grid: dict = {}
+    _eh_all: dict = {}          # 予算で切る前の全件(全取引タブ用)
+    _eh_all_grid: dict = {}
     if _LSS_ORDER_MODE and _EH_TRADES:
         _EH_NF = _EH_TRADES.get("約定せず") or {}
         for _ehk, _ehpfx in (("E", "he"), ("H", "hh")):
@@ -10735,8 +10737,20 @@ function switchTbd(id, tab) {{
                                       nofills=(_EH_NF.get(_ehk) or []))
                 _eh_sorted[_ehk] = _ss
                 _eh_grid[_ehk] = _build_entry_grid(_ss, _ehpfx)
-                print(f"[E/H] {_ehk}: 予算内 {len(_ss)}件 / 母集団 {len(_src)}件",
-                      flush=True)
+                # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
+                #   見たい」用。予算内タブ(上)は毎日 流動性順に400万で切るので、
+                #   下位の銘柄が丸ごと落ちる。ここはそれを含む母集団そのもの。
+                # ⛔ _date は別関数の中でしか import されていないのでここでは使えない。
+                #    日付は ISO(YYYY-MM-DD)なので文字列比較で順序は同じ。
+                _ss_all = sorted(
+                    [_t for _t in _src if _t.get("reason") != "約定せず"],
+                    key=lambda x: str(x.get("entry_d_raw")
+                                      or x.get("exit_d_raw") or ""),
+                    reverse=True)
+                _eh_all[_ehk] = _ss_all
+                _eh_all_grid[_ehk] = _build_entry_grid(_ss_all, _ehpfx + "A")
+                print(f"[E/H] {_ehk}: 予算内 {len(_ss)}件 / 母集団 {len(_src)}件 "
+                      f"/ 全取引タブ {len(_ss_all)}件", flush=True)
             except Exception as _ehe:
                 print(f"[E/H] {_ehk} の予算シミュ失敗(タブは出しません): {_ehe}",
                       flush=True)
@@ -15088,12 +15102,44 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         if not _g:
             continue
         _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
+        # ⛔ _ehpfx はこのループでは定義されない(上の別ループの残り値が入り、
+        #    E でも "hh" になって DOM id が H と衝突する)。ここで作り直す。
+        _ehpfx = "he" if _ehk == "E" else "hh"
         _ss = _eh_sorted.get(_ehk) or []
         _eh_btn += (
             f'<button class="detail-tab-btn" '
             f'onclick="switchDetailTab({_dseq},\'eh{_ehk}\')" '
             f'style="border-color:{_bc}">🔁 {_lbl} '
             f'<span style="font-size:0.72rem;color:{_tc}">({len(_ss)}件)</span></button>')
+        # ── 予算で切る前の「全取引」タブ ─────────────────────────────
+        _ga = _eh_all_grid.get(_ehk)
+        _sa = _eh_all.get(_ehk) or []
+        if _ga and _sa:
+            _eh_btn += (
+                f'<button class="detail-tab-btn" '
+                f'onclick="switchDetailTab({_dseq},\'ehA{_ehk}\')" '
+                f'style="border-color:{_bc};border-style:dashed">'
+                f'📋 {_lbl} <b>全取引</b> '
+                f'<span style="font-size:0.72rem;color:{_tc}">'
+                f'({len(_sa)}件)</span></button>')
+            _eh_pane += (
+                f'<div id="detail_{_dseq}_ehA{_ehk}" class="detail-tab-pane">'
+                f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
+                f'📋 <b>{_lbl} の全取引（予算の制約なし）</b>: {_desc}。'
+                f'シグナルが出て<b>約定したものを全部</b>並べます。'
+                f'上の「🔁 {_lbl}」タブは毎日 {_ORD_LBL}で注文額の累計が'
+                f'<b>{_budget_man}万円</b>に収まるところで切るので、'
+                f'その日の下位にいた銘柄が丸ごと落ちています。'
+                f'ここはそれを含む<b>母集団そのもの</b>（{len(_sa):,}件 '
+                f'vs 予算内 {len(_ss):,}件）。'
+                f'<br>⚠ <b>実運用ではこれを全部は建てられません</b>'
+                f'（400万では1日十数件が上限）。'
+                f'「全部買えるなら得か」と「予算内でどれを買うか」は別問題なので、'
+                f'発注ルールの判断は必ず予算内タブで行ってください。'
+                f'必要資金の列を見ると、この母集団を全部建てるのに'
+                f'いくら要るかが分かります。</p>'
+                + _dup_toggle_html(_sa, _ga[0], _ga[1], _dseq, _ehpfx + "A")
+                + '</div>')
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" class="detail-tab-pane">'
             f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
