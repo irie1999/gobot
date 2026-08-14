@@ -14086,7 +14086,25 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     mu - c * se, mu + c * se,
                     sum(1 for d in ds if d > 0), len(ds))
 
-        _PAIRS = (("E", "現行"), ("H", "現行"), ("H", "E"))
+        # ★ H寄指 vs H を必ず入れる(2026-08-15)。10ヶ月の実測で
+        #   素の月平均は H +176,607 / H寄指 +176,012 とほぼ同点だが、
+        #   呼値2tick を引くと H +89,773 / H寄指 +109,070 で H寄指が21%良い。
+        #   素の差が有意かどうかは対応検定でしか分からないので並べる。
+        #   さらに H指値+Nbp寄指 も自動で拾う(ギャップを指値で取る版)。
+        _PAIRS = [("E", "現行"), ("H", "現行"), ("H", "E")]
+        _have = {k for k, _ in _sets}
+        if "H寄指" in _have:
+            _PAIRS.append(("H寄指", "H"))
+        for _k in sorted(_have):
+            # 同じギャップ条件の「指値」と「寄り確認」を1対1で並べる。
+            # 建てる条件は同一で、違うのは約定価格(寄り値 / 09:05)だけ。
+            if str(_k).startswith("H指値") and str(_k).endswith("寄指"):
+                _g = str(_k)[3:-2]                      # 例 "+50bp"
+                _cf = f"H寄り確認{_g}"
+                if _cf in _have:
+                    _PAIRS.append((_k, _cf))
+                _PAIRS.append((_k, "H寄指"))
+        _PAIRS = tuple(_PAIRS)
         _pr = ""
         for x, y in _PAIRS:
             _r = _paired(x, y, _use)
