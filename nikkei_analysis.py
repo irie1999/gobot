@@ -10509,7 +10509,7 @@ function switchTbd(id, tab) {{
     def _run_budget_sim(_min_bt, strat_set=None, fill_budget=False, multi_lot=False,
                         src=None, nofills=None, order_key=None,
                         one_per_symbol=False, size_mode=None, size_target=0.0,
-                        keep=None):
+                        keep=None, budget_yen=None):
         """毎日その日のBT降順で予算まで注文したときの『約定トレード』を返す(BT下限=_min_bt)。
         strat_set: 戦略名のセット(例: {"A7","RSI2","VOLTF"})。Noneなら全戦略。
         fill_budget=True: 約定額ベース(kabuステーションwatch取り消し方式)。
@@ -10525,6 +10525,9 @@ function switchTbd(id, tab) {{
           BT降順に100株ずつ1周目を配置後、予算残があれば先頭から再度100株ずつ追加。
           400万円に限りなく近づくまでループ。出力は株数n×100の合成トレード。
         """
+        # ★ 予算はここで決める。budget_yen を渡せば一時的に上書きできる
+        #   (予算スイープ用)。渡さなければ従来どおり LSS_BUDGET_MAN。
+        _BY = float(budget_yen) if budget_yen else _budget_yen
         _out = []
         if not _LSS_ORDER_MODE:
             return _out
@@ -10560,12 +10563,12 @@ function switchTbd(id, tab) {{
                         _u = _units[id(_t)]
                         if _u <= 0:
                             continue
-                        if _cap + _u > _budget_yen:
+                        if _cap + _u > _BY:
                             continue
                         _lots[id(_t)] += 1
                         _cap += _u
                         _changed = True
-                        if _cap >= _budget_yen:
+                        if _cap >= _BY:
                             break
                 for _t in _sorted_day:
                     _n = _lots[id(_t)]
@@ -10634,7 +10637,7 @@ function switchTbd(id, tab) {{
                     _no = float(_t.get("entry_p", 0) or 0) * float(_t.get("qty", 0) or 0)
                     if _no <= 0:
                         continue
-                    if _cap + _no > _budget_yen:
+                    if _cap + _no > _BY:
                         break  # watch発動→以降の注文をキャンセル
                     _cap += _no
                     _out.append(_t)
@@ -10642,7 +10645,7 @@ function switchTbd(id, tab) {{
                     _lot = (1 if not size_mode
                             else _size_lots(_t, size_mode, size_target))
                     _no = _order_notional(_t) * _lot
-                    if _no <= 0 or _cap + _no > _budget_yen:
+                    if _no <= 0 or _cap + _no > _BY:
                         continue   # 予算超過はスキップ(次の安い注文が入るか試す=貪欲)
                     _cap += _no
                     if _t.get("reason") != "約定せず":
@@ -13839,6 +13842,203 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + f'</tr></thead><tbody>{_sp}</tbody></table>') if _sp else "")
             + '</details>')
 
+    def _budget_sweep_html():
+        """予算をいくらにするか。**同じ実行の中で** 400/600/800/1200万 を並べる。
+
+        ⛔ env(LSS_BUDGET_MAN)を変えて2回回してはいけない。設定ごとにレポートを
+           回すと比較相手(トレード集合・選定)まで動く(18.36)。ここは同じ
+           _run_budget_sim に budget_yen を渡すだけなので、変わるのは予算だけ。
+
+        見るもの:
+          ・月次 t と 95%CI(**t分布**で作る。正規近似1.96は月数が少ないと狭すぎる)
+          ・建玉ピーク(その予算を回すのに実際に要る証拠金)
+          ・**限界トレード** = 1段上げて新たに入ったぶんだけの 円/件 と bp。
+            これが呼値(往復2/4ティック)を超えていなければ、増やしても
+            執行コストで消える。呼値は制度上の最小刻みなので推測が入らない(18.31)。
+        """
+        import statistics as _sti
+        try:
+            from backtest_limit_entry import tick_size as _tks
+        except Exception:
+            _tks = lambda p: 1.0
+        _TT = {2: 12.71, 3: 4.303, 4: 3.182, 5: 2.776, 6: 2.571, 7: 2.447,
+               8: 2.365, 9: 2.306, 10: 2.262, 11: 2.201, 12: 2.179, 13: 2.160,
+               14: 2.145, 15: 2.131, 20: 2.086, 25: 2.060, 30: 2.042}
+
+        def _tc(n):
+            # ⛔ _TT のキーは **標本数 n**(値は df=n-1 の両側5%臨界値)。
+            #    df を計算してから引くと二重に引いてしまう。
+            #    n に満たないキーのうち最大を使う(= 臨界値が大きめ＝保守側)。
+            _ks = [_k for _k in sorted(_TT) if _k <= n]
+            return _TT[_ks[-1]] if _ks else 12.71
+
+        _MANS = [int(x) for x in str(
+            os.environ.get("LSS_BUDGET_SWEEP", "400,600,800,1200")).split(",")
+            if str(x).strip().isdigit()]
+        if len(_MANS) < 2:
+            return ""
+        _srcs = [("現行", None, None)]
+        _nf = (_EH_TRADES or {}).get("約定せず") or {}
+        for _k in ("E", "H"):
+            _v = (_EH_TRADES or {}).get(_k) or []
+            if _v:
+                _srcs.append((_k, _v, _nf.get(_k) or []))
+
+        def _mpnl(_lst):
+            _m: dict = {}
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                _k2 = str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+                if len(_k2) < 7 or _k2 == _TODAY.strftime("%Y-%m"):
+                    continue          # 当月は営業日が揃わないので除外(他の表と同じ)
+                _m[_k2] = _m.get(_k2, 0.0) + float(_t.get("pnl", 0) or 0)
+            return _m
+
+        def _tkey2(_t):
+            return (f"{_t.get('symbol')}|{_t.get('strategy')}|"
+                    f"{_t.get('entry_d_raw') or _t.get('exit_d_raw')}")
+
+        _html = ('<details style="margin:14px 0"><summary style="cursor:pointer;'
+                 'font-weight:700;color:#38bdf8;font-size:0.95rem">'
+                 '💰 予算をいくらにするか（同じ実行の中で比較）</summary>'
+                 '<div style="font-size:0.8rem;color:#94a3b8;margin:8px 0 12px;'
+                 'max-width:1000px">'
+                 '予算だけを変えて同じ予算シミュを回します（トレード集合・選定・'
+                 '決済・発注順はすべて同じ）。<b>限界トレード</b>＝1段上げて'
+                 '新たに入ったぶんだけの成績で、これが<b>呼値の往復</b>を'
+                 '超えていなければ増やしても執行コストで消えます。'
+                 '呼値は制度上の最小刻みなので推測が入りません。'
+                 '<br>⚠ このシムは slip=0。建玉ピークは<b>その予算を回すのに'
+                 '実際に要る証拠金</b>です。</div>')
+
+        for _nm, _src, _nfl in _srcs:
+            _res = {}
+            for _man in _MANS:
+                try:
+                    _r = _run_budget_sim(_BUD_FLOOR, src=_src, nofills=_nfl,
+                                         budget_yen=_man * 1e4)
+                except Exception:
+                    continue
+                _done = [_t for _t in _r
+                         if _t.get("reason") not in ("発注中", "保有中")]
+                _mp = _mpnl(_r)
+                _res[_man] = (_r, _done, _mp)
+            if len(_res) < 2:
+                continue
+            _html += (f'<div style="margin:10px 0 4px;font-weight:700;'
+                      f'color:#e2e8f0">▼ {_nm}</div>'
+                      f'<table style="border-collapse:collapse;font-size:0.8rem;'
+                      f'margin-bottom:6px"><thead><tr>'
+                      + "".join(f'<th style="padding:3px 9px;color:#94a3b8;'
+                                f'text-align:right">{_h}</th>'
+                                for _h in ("予算", "取引", "勝率", "合計", "月平均",
+                                           "σ", "月次t", "95%CI(月)", "建玉ピーク",
+                                           "円/建玉万円"))
+                      + '</tr></thead><tbody>')
+            for _man in _MANS:
+                if _man not in _res:
+                    continue
+                _r, _done, _mp = _res[_man]
+                _v = list(_mp.values())
+                _n = len(_v)
+                _mu = _sti.mean(_v) if _v else 0.0
+                _sd = _sti.stdev(_v) if _n > 1 else 0.0
+                _t = (_mu / (_sd / (_n ** 0.5))) if (_n > 1 and _sd > 0) else 0.0
+                _hw = (_tc(_n) * _sd / (_n ** 0.5)) if (_n > 1 and _sd > 0) else 0.0
+                _pk = _peak_capital(_done)[0]
+                _wr = (sum(1 for _t2 in _done if float(_t2.get("pnl", 0) or 0) > 0)
+                       / len(_done) * 100) if _done else 0
+                _tot = sum(_v)
+                _eff = (_tot / (_pk / 1e4)) if _pk > 0 else 0
+                _ok = (_mu - _hw) > 0
+                _cic = "#4ade80" if _ok else "#94a3b8"
+                _html += (
+                    f'<tr>'
+                    f'<td style="padding:3px 9px;text-align:right;font-weight:700;'
+                    f'color:#e2e8f0">{_man}万</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#94a3b8">'
+                    f'{len(_done):,}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#94a3b8">'
+                    f'{_wr:.0f}%</td>'
+                    f'<td style="padding:3px 9px;text-align:right;font-weight:700;'
+                    f'color:{"#4ade80" if _tot >= 0 else "#f87171"}">'
+                    f'{_tot:+,.0f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#cbd5e1">'
+                    f'{_mu:+,.0f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#64748b">'
+                    f'{_sd:,.0f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;font-weight:700;'
+                    f'color:{"#4ade80" if _t >= 2 else "#94a3b8"}">{_t:+.2f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:{_cic}">'
+                    f'{_mu - _hw:+,.0f} 〜 {_mu + _hw:+,.0f}'
+                    f'{" ✓" if _ok else ""}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#38bdf8">'
+                    f'{_pk:,.0f}円</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#a78bfa;'
+                    f'font-weight:700">{_eff:,.0f}</td>'
+                    f'</tr>')
+            _html += '</tbody></table>'
+
+            # ── 限界トレード(1段上げて新たに入ったぶん) ─────────────────
+            _html += ('<div style="font-size:0.78rem;color:#94a3b8;margin:4px 0 4px">'
+                      '限界トレード＝1段上げて<b>新たに入ったぶんだけ</b>。'
+                      '呼値の往復を超えなければ増やす意味がない</div>'
+                      '<table style="border-collapse:collapse;font-size:0.78rem;'
+                      'margin-bottom:14px"><thead><tr>'
+                      + "".join(f'<th style="padding:3px 9px;color:#94a3b8;'
+                                f'text-align:right">{_h}</th>'
+                                for _h in ("区間", "件数", "勝率", "円/件", "bp",
+                                           "建値平均", "呼値2tick", "呼値4tick",
+                                           "判定"))
+                      + '</tr></thead><tbody>')
+            for _a, _b in zip(_MANS, _MANS[1:]):
+                if _a not in _res or _b not in _res:
+                    continue
+                _ka = {_tkey2(_t) for _t in _res[_a][1]}
+                _add = [_t for _t in _res[_b][1] if _tkey2(_t) not in _ka]
+                if not _add:
+                    continue
+                _p = [float(_t.get("pnl", 0) or 0) for _t in _add]
+                _px = [float(_t.get("entry_p", 0) or 0) for _t in _add
+                       if float(_t.get("entry_p", 0) or 0) > 0]
+                _apx = (sum(_px) / len(_px)) if _px else 0.0
+                _per = sum(_p) / len(_p)
+                _bp = (_per / (_apx * 100) * 1e4) if _apx > 0 else 0.0
+                _t2 = (_tks(_apx) / _apx * 1e4) if _apx > 0 else 0.0
+                _c2, _c4 = _t2 * 2, _t2 * 4
+                _jd, _jc = (("✅ 4tick超", "#4ade80") if _bp >= _c4 else
+                            ("△ 2tick超", "#fbbf24") if _bp >= _c2 else
+                            ("⛔ 呼値に届かず", "#f87171"))
+                _html += (
+                    f'<tr><td style="padding:3px 9px;text-align:right;'
+                    f'color:#e2e8f0">{_a}→{_b}万</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#94a3b8">'
+                    f'{len(_add):,}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#94a3b8">'
+                    f'{sum(1 for x in _p if x > 0) / len(_p) * 100:.0f}%</td>'
+                    f'<td style="padding:3px 9px;text-align:right;font-weight:700;'
+                    f'color:{"#4ade80" if _per >= 0 else "#f87171"}">{_per:+,.0f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#cbd5e1">'
+                    f'{_bp:+.1f}</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#64748b">'
+                    f'{_apx:,.0f}円</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#64748b">'
+                    f'{_c2:.1f}bp</td>'
+                    f'<td style="padding:3px 9px;text-align:right;color:#64748b">'
+                    f'{_c4:.1f}bp</td>'
+                    f'<td style="padding:3px 9px;text-align:right;font-weight:700;'
+                    f'color:{_jc}">{_jd}</td></tr>')
+            _html += '</tbody></table>'
+        _html += ('<div style="font-size:0.78rem;color:#64748b;max-width:1000px">'
+                  '⚠ 呼値は<b>下限</b>です。実際のスプレッドはこれ以上になるので、'
+                  '超えていても「確実」ではありません。実測は .\\fills の '
+                  'slip_daily_log.csv からしか出ません(18.31)。'
+                  '<br>⚠ 予算を上げると建玉ピークもそのぶん必要になります。'
+                  '「円/建玉万円」は資本効率で、これが落ちるところが頭打ちです。'
+                  '</div></details>')
+        return _html
+
     def _order_rank_html():
         """発注順(何から買うか)を、**ランダムのノイズ帯**と並べて比較する。
 
@@ -15049,6 +15249,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             print(f"[発注順] 比較ブロックを生成 ({_ort.time() - _t0:.1f}s)", flush=True)
     except Exception as _orce:
         print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted and str(
+                os.environ.get("LSS_BUDGET_SWEEP_TAB", "1")).strip() \
+                not in ("0", "false", "no"):
+            import time as _bst
+            _t1 = _bst.time()
+            _EH_CMP_HTML += _budget_sweep_html()
+            print(f"[予算] スイープを生成 ({_bst.time() - _t1:.1f}s)", flush=True)
+    except Exception as _bsce:
+        print(f"[予算] スイープ生成に失敗: {_bsce}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_STRAT_LOO_TAB", "1")).strip() not in ("0", "false", "no"):
