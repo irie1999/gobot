@@ -390,6 +390,12 @@ def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
                         "liq": float(r.get("liquidity", 0) or 0),
                         "entry_p": float(r.get("entry_p", 0) or 0),
                         "exit_p": float(r.get("exit_p", 0) or 0),
+                        # 指値そのもの。**約定の滑りと分けて見る**ために要る。
+                        # 指値が違えば約定値も違うが、それは滑りではなく
+                        # 『ライブとバックテストで注文が別物』という別の問題
+                        # (2026-08-14: 3197 で実 3,205 / テスト 3,230 と 25円ズレ、
+                        #  それを『エントリー滑り -0.77%』と誤表示していた)。
+                        "order_limit": float(r.get("order_limit", 0) or 0),
                         "reason": str(r.get("reason", "")),
                         "pnl": float(r.get("pnl", 0) or 0),
                         "qty": int(float(r.get("qty", 0) or 0)),
@@ -526,6 +532,34 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
         print(f"{'計':>6} {'':<12}{'':>10}{'':>9}{'':>8}{'':>10}{'':>9}"
               f"{sum(real_done[s]['pnl'] for s in both):>+10,.0f}"
               f"{sum(by_sym[s]['pnl'] for s in both):>+10,.0f}{_d_tot:>+10,.0f}")
+
+        # ── 指値そのもののズレ ────────────────────────────────────
+        # ⛔ 上の「滑り」は (実約定値 - テスト約定値) なので、**指値が違う**だけでも
+        #    滑りとして出てしまう。それは執行の問題ではなく『ライブとバックテストで
+        #    注文が別物』という設定・データの問題で、直す場所がまったく違う
+        #    (2026-08-14: 3197 が実 3,205 / テスト 3,230 の 25円ズレなのに
+        #     『エントリー滑り -0.77%』と表示され、約定モデルの問題に見えた)。
+        _ordp = {r["code"]: r["order_price"] for r in order_rows
+                 if r.get("side") == "売" and float(r.get("order_price") or 0) > 0}
+        _mis = []
+        for s in both:
+            _rl = float(_ordp.get(s) or 0)
+            _tl = float(by_sym[s].get("order_limit") or 0)
+            if _rl > 0 and _tl > 0 and abs(_rl - _tl) >= 0.5:
+                _mis.append((s, _rl, _tl))
+        if _mis:
+            print(f"\n  ⛔ 【指値のズレ】{len(_mis)}銘柄 — ライブとバックテストで"
+                  f"**注文そのものが別物**です(滑りではありません)")
+            print(f"  {'コード':>6} {'銘柄':<12}{'実際の指値':>10}{'テスト':>9}"
+                  f"{'差':>8}{'株数ぶん':>10}")
+            for s, _rl, _tl in _mis:
+                print(f"  {s:>6} {by_sym[s]['name'][:12]:<12}{_rl:>10,.1f}"
+                      f"{_tl:>9,.1f}{_rl - _tl:>+8,.1f}"
+                      f"{(_rl - _tl) * by_sym[s]['qty']:>+10,.0f}円")
+            print(f"  → 前日終値・呼値・LSS_H_LIMIT_TICKS のどれかが食い違っています。"
+                  f"§18.9 の鉄則(バックテストとライブを揃える)に反するので要調査。")
+        elif _ordp:
+            print(f"\n  ✅ 指値は全銘柄で一致(ライブとバックテストが同じ注文を出している)")
 
     if bt_only:
         # 発注順(=流動性降順)で並べる。件数が多いので上位だけ出して残りは要約。
