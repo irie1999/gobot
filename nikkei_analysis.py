@@ -11179,6 +11179,86 @@ function switchTbd(id, tab) {{
 
     global _DETAIL_TAB_SEQ
     # ── 目標達成速度分析 ──────────────────────────────────────────
+    def _drop_overlap(trades_list, by_date):
+        """重複保有(同じ銘柄を保有中に出た2本目以降)を除いた集合を返す。
+
+        `_overlap` は建玉の重なりを見て立つフラグ(「既にオープンポジションあり
+        → 計測には入れずスキップ」の箇所)。そこでいったん除外したものを表示用に
+        戻しているので、ここで落とせば **1銘柄1ポジション** 運用の成績になる
+        (CLAUDE.md §18.8「再エントリー分はPF≈1.0」)。
+        """
+        nl = [t for t in (trades_list or []) if not t.get("_overlap")]
+        nb = {}
+        for dk, ts in (by_date or {}).items():
+            keep = [t for t in ts if not t.get("_overlap")]
+            if keep:
+                nb[dk] = keep
+        return nl, nb, sorted(nb.keys(), reverse=True)
+
+    def _dup_toggle_html(trades_list, by_date, sorted_dates, dseq, pfx,
+                         expand_months=2, expand_tenkan=True):
+        """「全件 / 重複保有なし」を切り替えられる 月別サマリー + 日別アコーディオン。
+
+        同じ銘柄が複数の戦略で同時にシグナルを出すと、いまは100株ずつ **別建てで
+        重ねて** 持つ(例: 7013 IHI が MOM と MACDTF の両方で点灯 → 200株)。
+        それを1本だけにしたら成績がどうなるかを、月別・日別の両方で並べて見る。
+
+        ⛔ 片方だけ切り替わると誤読するので、月別サマリーと日別アコーディオンを
+           **同じ div に入れて丸ごと差し替える**。アコーディオンの DOM id は
+           pfx を変えて衝突を避ける。
+        """
+        _nl, _nb, _ndates = _drop_overlap(trades_list, by_date)
+
+        def _done(lst):
+            return [t for t in (lst or [])
+                    if t.get("reason") not in ("発注中", "保有中")]
+        _da, _dn = _done(trades_list), _done(_nl)
+        _pa = sum(t["pnl"] for t in _da)
+        _pn = sum(t["pnl"] for t in _dn)
+        _wa = (sum(1 for t in _da if t["pnl"] > 0) / len(_da) * 100) if _da else 0
+        _wn = (sum(1 for t in _dn if t["pnl"] > 0) / len(_dn) * 100) if _dn else 0
+        _ndup = len(_da) - len(_dn)
+        if _ndup <= 0:
+            # ⛔ 重複保有が1件も無いペインで切替ボタンを出すと「押しても変わらない=
+            #    壊れている」と誤読される。従来どおりの表示に落とす。
+            return (_month_summary_html(trades_list)
+                    + _month_accordion_html(by_date, sorted_dates, dseq, pfx,
+                                            expand_months, expand_tenkan))
+        _dif = _pn - _pa
+        _dcol = "#4ade80" if _dif >= 0 else "#f87171"
+        _uid = f"{pfx}{dseq}"
+        _q = chr(39)
+        return (
+            f'<div style="margin:10px 0 8px">'
+            f'<button class="dup-btn dup-on" id="dupb_{_uid}_all" '
+            f'onclick="switchDup({_q}{_uid}{_q},{_q}all{_q})">'
+            f'全件（重複保有あり）&nbsp;{len(_da)}件 {_wa:.0f}% '
+            f'{_pa:+,.0f}円</button>'
+            f'<button class="dup-btn" id="dupb_{_uid}_nd" '
+            f'onclick="switchDup({_q}{_uid}{_q},{_q}nd{_q})">'
+            f'重複保有なし（1銘柄1ポジション）&nbsp;{len(_dn)}件 {_wn:.0f}% '
+            f'{_pn:+,.0f}円</button>'
+            f'<span style="margin-left:10px;font-size:0.82rem;color:{_dcol};'
+            f'font-weight:700">差 {_dif:+,.0f}円</span>'
+            f'<span style="margin-left:8px;font-size:0.78rem;color:#a78bfa">'
+            f'（重複 {_ndup}件を除外）</span>'
+            f'<div style="font-size:0.76rem;color:#64748b;margin-top:5px;'
+            f'max-width:920px">同じ銘柄が複数の戦略で同時にシグナルを出すと、'
+            f'いまは100株ずつ<b>別建てで重ねて</b>持つ。「重複保有なし」はその'
+            f'2本目以降を落として<b>1銘柄1ポジション</b>にした場合の成績。'
+            f'<b>月別サマリーと日別カードの両方が切り替わる。</b></div>'
+            f'</div>'
+            f'<div id="dup_{_uid}_all">'
+            + _month_summary_html(trades_list)
+            + _month_accordion_html(by_date, sorted_dates, dseq, pfx,
+                                    expand_months, expand_tenkan)
+            + '</div>'
+            f'<div id="dup_{_uid}_nd" style="display:none">'
+            + _month_summary_html(_nl)
+            + _month_accordion_html(_nb, _ndates, dseq, pfx + "N",
+                                    expand_months, expand_tenkan)
+            + '</div>')
+
     def _speed_analysis_html(trades_list):
         """戦略×con/agg別 目標達成速度テーブルを生成。"""
         from collections import defaultdict as _dd3
@@ -13486,8 +13566,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'（＝その下のBTの約定を締め出す）ので、実運用「予算内で上から注文」に最も近い。'
             f'<b>ショートのみ表示</b>（転換は転換タブ参照）。日付クリックで詳細'
             f'（直近{_ENTRY_GRID_DAYS}日）。予算は環境変数 LSS_BUDGET_MAN(万,既定400)で変更可。</p>'
-            + _month_summary_html(_budget_entry_sorted_short)
-            + _month_accordion_html(_budget_entry_by_date_short, _sorted_budget_entry_dates_short, _dseq, "q")
+            + _dup_toggle_html(_budget_entry_sorted_short,
+                               _budget_entry_by_date_short,
+                               _sorted_budget_entry_dates_short, _dseq, "q")
             + '</div>')
 
     def _eh_compare_html():
@@ -15733,8 +15814,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_month_summary_html(entry_sorted_trades)}
-{_month_accordion_html(_entry_by_date, _sorted_entry_dates, _dseq, "e")}
+{_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e")}
 </div>
 {_bt40liq_pane}
 {_bt70liq_pane}
@@ -15780,6 +15860,14 @@ function switchOvBt(uid, key) {{
     if (blk) blk.style.display = (k === key) ? 'block' : 'none';
     var btn = document.getElementById('ovbtn_'+uid+'_'+k);
     if (btn) btn.classList.toggle('active', k === key);
+  }});
+}}
+function switchDup(uid, mode) {{
+  ['all','nd'].forEach(function(m) {{
+    var p = document.getElementById('dup_' + uid + '_' + m);
+    if (p) p.style.display = (m === mode ? 'block' : 'none');
+    var b = document.getElementById('dupb_' + uid + '_' + m);
+    if (b) b.className = 'dup-btn' + (m === mode ? ' dup-on' : '');
   }});
 }}
 function switchDetailTab(seq, which) {{
@@ -15983,6 +16071,11 @@ h2 { color:#60a5fa; font-size:1.05rem; margin:26px 0 11px;
 
 /* 月アコーディオン */
 .mg-block  { border:1px solid #1e293b; border-radius:6px; margin-bottom:6px; overflow:hidden; }
+.dup-btn { background:#1e293b; color:#94a3b8; border:1px solid #334155;
+  border-radius:6px; padding:6px 13px; margin-right:7px; cursor:pointer;
+  font-size:0.8rem; font-weight:700; font-family:inherit; }
+.dup-btn:hover { border-color:#7c3aed; color:#c4b5fd; }
+.dup-btn.dup-on { background:#7c3aed; color:#fff; border-color:#7c3aed; }
 .mg-header { display:flex; align-items:center; gap:10px; padding:7px 12px;
              background:#1a2744; cursor:pointer; user-select:none; }
 .mg-header:hover { background:#263349; }
