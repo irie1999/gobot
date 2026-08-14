@@ -154,10 +154,17 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #    _TICK_TABLE は実測より 5〜10倍粗く、しかも呼値は銘柄ごとに違うので
     #    「-5ティック」が板の上では -50ティックになっていた(2026-08-14)。
     #    bp 指定なら呼値テーブルに依存せず連続的に探索できる。
+    # 7要素目 = **寄り確認モード**のギャップ閾値(bp / 前日終値比)。
+    # ⛔ 板寄せは 09:00 の一瞬で終わるので、**寄り値を見てから寄り値では売れない**。
+    #    「ギャップを確認してから発注する」を正直に再現すると、約定は
+    #    **最初の5分足の終値(09:05)** になる。前夜の指値(=寄り値で約定)より
+    #    5分ぶん遅く、その間の値動きは取り逃がす。その差を測るための変種。
+    #    None ならこのモードを使わない(従来どおり)。
     _HV = [(str(v[0]), int(v[1]), bool(v[2]),
             (int(v[3]) if len(v) > 3 and v[3] is not None else int(stop_delay_bars)),
             (str(v[4]) if len(v) > 4 and v[4] else "fill"),
-            (float(v[5]) if len(v) > 5 and v[5] is not None else None))
+            (float(v[5]) if len(v) > 5 and v[5] is not None else None),
+            (float(v[6]) if len(v) > 6 and v[6] is not None else None))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -359,8 +366,23 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
         _cases = [("E", o1, o1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
-                   int(stop_delay_bars), "fill")]
-        for _hn, _ht_, _ha, _hd, _hanc, _hbp in _HV:
+                   int(stop_delay_bars), "fill", "")]
+        for _hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap in _HV:
+            if _hgap is not None:
+                # ── 寄り確認モード ────────────────────────────────
+                # 09:00 の寄り値を見て、前日終値比のギャップが閾値以上なら
+                # **その場で成行売り**。約定は最初の5分足の終値(09:05)。
+                # 判定は次のバー(09:05-)から = 建玉を持っている区間と一致。
+                _g_ok = (o1 > 0 and pc > 0
+                         and (o1 - pc) / pc * 1e4 >= _hgap
+                         and not (gap_guard > 0 and o1 > pc * (1 + gap_guard)))
+                try:
+                    _ep_c = float(day5["close"].iloc[0])
+                except Exception:
+                    _ep_c = 0.0
+                _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
+                               0, _hanc, "confirm"))
+                continue
             if _hbp is not None:
                 # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める
                 # (無ければ従来の丸めに落ちる)。
@@ -373,7 +395,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                  and (o1 >= _hl if _ha else True)),
-                _hd, _hanc))
+                _hd, _hanc, ""))
         # ── 09:00のバーが無い日は delay を1本ぶん前倒しする ────────────────
         # E/H の約定は **09:00 の板寄せ**。delay1 は「約定した5分足の間は損切りを
         # 置かない」なので、無保護窓は 09:00-09:05 = ちょうど欠けている足。
@@ -384,7 +406,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ⚠ 板寄せ約定(寄りから建玉がある)のときだけ。ザラ場到達で建てた場合は
         #    約定足が日中なので、寄りの欠落は delay の数えに関係しない。
         _no_open_bar = _first_hm != "09:00"
-        for key, order_p, ep, ok, _dly, _anc in _cases:
+        for key, order_p, ep, ok, _dly, _anc, _mode in _cases:
             _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
@@ -392,12 +414,29 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
-            if key != "E":
+            if key != "E" and _mode != "confirm":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
                 _sa = max(ep, pc) if _anc == "max" else ep      # 損切りアンカー
                 xp, why, _e, _x = _x5(day5, ep, _sa + atr * sm, _sa - atr * tm, True,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
+            elif _mode == "confirm":
+                # ── 寄り確認モード ────────────────────────────────
+                # 09:05(最初の5分足の終値)で成行売り。したがって建玉を
+                # 持っているのは **2本目のバー以降**。そこだけを判定対象に
+                # 切り出し、+inf で ei=0 を強制する。
+                # ⛔ 18.32 の教訓: 建玉を持っている区間の一部が判定から抜けると
+                #    **必ず利益方向に出る**。ここは「1本目は建てていないので
+                #    判定しない」であって、抜けているのではない。
+                _d2 = day5.iloc[1:]
+                if len(_d2) == 0:
+                    xp, why, _e, _x = None, "no_5m", None, None
+                else:
+                    _sa = ep
+                    xp, why, _e, _x = _x5(_d2, float("inf"),
+                                          _sa + atr * sm, _sa - atr * tm, False,
+                                          day_low=None, day_high=None, day_close=c1,
+                                          stop_delay_bars=_dly)
             else:
                 # 寄りから建玉があるので ei=0 を強制する(+inf を渡す)。
                 # そのまま渡すと「寄りが上に飛び昼に建値へ戻った」日の朝の
@@ -411,7 +450,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
                                    pc, atr, sm, tm, qty, key) for s in _srcs)
                 continue
-            if key != "E":
+            if key != "E" and _mode != "confirm":
                 # ⛔ 判定は **指値(order_p)** であって前日終値(pc)ではない
                 #    (2026-08-14 修正)。H の指値は前日終値-5ティックなので、
                 #    寄りが「指値以上・前日終値未満」の帯は **板寄せで約定している**

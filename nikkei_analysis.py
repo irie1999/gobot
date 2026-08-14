@@ -10538,6 +10538,18 @@ function switchTbd(id, tab) {{
             #   追加コストは決済判定1回ぶんだけ(5分足は共通で読み済み)。
             if not _hae:
                 _hvars.append(("H寄指", _hte, True, _eh_delay, "fill"))
+            # ★ 寄り確認モード: 09:00 の寄り値を見て、前日終値比のギャップが
+            #   閾値以上なら **その場で成行売り**(約定は最初の5分足の終値=09:05)。
+            #   ⛔ 板寄せは 09:00 の一瞬で終わるので、**寄り値を見てから寄り値では
+            #      売れない**。前夜の指値なら寄り値で約定するが、確認してから
+            #      発注すると5分遅れる。その差が『確認できる利点』を上回るかを測る。
+            #   ⚠ 損切り遅延は 0。成行なので約定価格が確定しており、delay1 の
+            #      機構的な根拠(18.9)が当てはまらない。
+            for _gv in [float(x) for x in str(os.environ.get(
+                    "LSS_H_CONFIRM_GAPS", "0,50,100")).split(",")
+                    if str(x).strip().lstrip("+-").replace(".", "").isdigit()]:
+                _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
+                               0, "fill", None, _gv))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -13925,13 +13937,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if _v:
                 _sets.append((_k, _v))
         # 寄指はタブを持たない(変種)ので、ここで予算シミュを通して並べる。
-        _hax = (_EH_TRADES or {}).get("H寄指") or []
-        if _hax:
+        for _hk in (["H寄指"] + [k for k in ((_EH_TRADES or {}).get("_h_variants")
+                                             or []) if str(k).startswith("H寄り確認")]):
+            _hax = (_EH_TRADES or {}).get(_hk) or []
+            if not _hax:
+                continue
             try:
-                _sets.append(("H寄指", _run_budget_sim(
+                _sets.append((_hk, _run_budget_sim(
                     _BUD_FLOOR, src=_hax,
                     nofills=((_EH_TRADES or {}).get("約定せず") or {})
-                    .get("H寄指") or [])))
+                    .get(_hk) or [])))
             except Exception:
                 pass
         if len(_sets) < 2:
@@ -14301,7 +14316,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return ""
         _srcs = [("現行", None, None)]
         _nf = (_EH_TRADES or {}).get("約定せず") or {}
-        for _k in ("E", "H", "H寄指"):
+        _keys = ["E", "H", "H寄指"] + [k for k in ((_EH_TRADES or {}).get(
+            "_h_variants") or []) if str(k).startswith("H寄り確認")]
+        for _k in _keys:
             _v = (_EH_TRADES or {}).get(_k) or []
             if _v:
                 _srcs.append((_k, _v, _nf.get(_k) or []))
