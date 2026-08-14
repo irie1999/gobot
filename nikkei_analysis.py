@@ -10750,30 +10750,63 @@ function switchTbd(id, tab) {{
     # ⚠ 資金を1〜3銘柄に集中させるので σ は跳ねる。18.30 で「σ削減が唯一効く
     #    レバー」と出ているので、**合計だけでなく必ず月次σを見ること**。
     # ⚠ 単元100株。1件あたり最低100株、最大は予算/件数/建値で決まる。
+    _EQ_MAX_LOT = 10          # 先に置く。try の中で落ちても下の描画が参照する
     try:
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
 
         def _size_equal_by_day(_ts, _budget):
-            """その日の件数で予算を均等割りし、100株単位で建て直す。"""
+            """その日の件数で予算を均等割りし、100株単位で建て直す。
+
+            返り値は (トレード列, 集中度の統計)。統計は「1銘柄にいくら
+            突っ込むことになるか」を見るためのもの。閾値を上げると件数が
+            減り、1銘柄あたりの建玉が膨らむ。月次σ や t には現れない
+            **単一銘柄のリスク**なので、必ず併記して判断する。
+            """
             _by: dict = {}
             for _t in _ts:
                 if _t.get("reason") in ("約定せず",):
                     continue
                 _by.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
             _out = []
+            _amts: list = []          # 1銘柄あたりの建玉額
+            _cnts: list = []          # 1日あたりの件数
+            _capped = 0               # 単元上限に当たった件数
             for _d, _lst in _by.items():
                 _per = _budget / max(1, len(_lst))
+                _cnts.append(len(_lst))
                 for _t in _lst:
                     _ep = float(_t.get("entry_p", 0) or 0)
                     _xp = float(_t.get("exit_p", 0) or 0)
                     if _ep <= 0:
                         continue
-                    _lot = max(1, min(_EQ_MAX_LOT, int(_per // (_ep * 100))))
+                    _raw = int(_per // (_ep * 100))
+                    _lot = max(1, min(_EQ_MAX_LOT, _raw))
+                    if _raw > _EQ_MAX_LOT:
+                        _capped += 1
                     _n = dict(_t)
                     _n["qty"] = _lot * 100
                     _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
                     _out.append(_n)
-            return _out
+                    _amts.append(_lot * 100 * _ep)
+            _amts.sort()
+            _cnts.sort()
+
+            def _q(_a, _p):
+                if not _a:
+                    return 0.0
+                return float(_a[min(len(_a) - 1, int(len(_a) * _p))])
+
+            _st = {
+                "days": len(_cnts),
+                "per_day_med": _q(_cnts, 0.5),
+                "per_day_min": (_cnts[0] if _cnts else 0),
+                "amt_med": _q(_amts, 0.5),
+                "amt_p95": _q(_amts, 0.95),
+                "amt_max": (_amts[-1] if _amts else 0.0),
+                "capped": _capped,
+                "n": len(_out),
+            }
+            return _out, _st
 
         # ★ 資金均等は **始値約定版(H指値+Nbp寄指)にも掛ける**(2026-08-15)。
         #   ユーザー方針: 寄り付き直後に完全自動で発注するので、約定価格は
@@ -10791,7 +10824,8 @@ function switchTbd(id, tab) {{
             if not _v:
                 continue
             _nk = f"{_k}資金均等"
-            _EH_TRADES[_nk] = _size_equal_by_day(_v, _EQ_BUD)
+            _EH_TRADES[_nk], _eq_st = _size_equal_by_day(_v, _EQ_BUD)
+            _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
             _EH_TRADES.setdefault("約定せず", {})[_nk] = []
             _EH_TRADES["_h_variants"] = list(
                 _EH_TRADES.get("_h_variants") or []) + [_nk]
@@ -14356,6 +14390,32 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'({(_pnl - 2 * _tk1) / _pnl * 100:.0f}%残)</span></td></tr>'
                 ) if _pnl else ""
 
+        # ── 集中度(資金均等だけ) ───────────────────────────────────────────
+        # 閾値を上げると件数が減り、1銘柄あたりの建玉が膨らむ。
+        # **月次σ にも t にも現れないリスク**(σ は日次の合計で測るので、
+        # 1銘柄に寄せたことそのものは見えない)。閾値を選ぶときはここを必ず見る。
+        _conc = ""
+        for _k, _st in sorted((_EH_TRADES.get("_eq_conc") or {}).items()):
+            if not _st or not _st.get("n"):
+                continue
+            _cc = "#f87171" if _st["amt_p95"] >= 2.0e6 else (
+                "#fbbf24" if _st["amt_p95"] >= 1.2e6 else "#94a3b8")
+            _conc += (
+                f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_st["per_day_med"]:.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_st["per_day_min"]:.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_st["amt_med"] / 1e4:,.0f}万</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
+                f'<b>{_st["amt_p95"] / 1e4:,.0f}万</b></td>'
+                f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
+                f'{_st["amt_max"] / 1e4:,.0f}万</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{_st["capped"]:,}<span style="color:#64748b;font-size:0.72rem">'
+                f' ({_st["capped"] / max(1, _st["n"]) * 100:.0f}%)</span></td></tr>')
+
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
             f'<details style="background:#0f172a;border:1px solid #475569;'
@@ -14454,6 +14514,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<th style="{_th}">円/件（素→1t→2t）</th>'
                 f'<th style="{_th}">月平均（素→2t）</th></tr></thead>'
                 f'<tbody>{_sprd}</tbody></table>') if _sprd else "")
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:12px 0 4px">集中度（資金均等だけ）— σ にも t にも出ないリスク</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'資金均等は <b>予算 ÷ その日の件数</b> なので、'
+                f'<b>閾値を上げて件数が減るほど1銘柄あたりの建玉が膨らみます</b>。'
+                f'月次σ は日次の<u>合計</u>で測るので、この「1銘柄に寄せたこと」自体は'
+                f'見えません。<b>t が高いことは集中していないことを意味しません。</b><br>'
+                f'⚠ シグナルが少ない日ほど寄ります（<b>最少</b>列がその日の件数）。'
+                f'1単元の上限は {_EQ_MAX_LOT} 単元（'
+                f'<code>set LSS_EQ_MAX_LOT=N</code> で変更）。'
+                f'上限に当たった割合が高いほど、実際には均等割りできていません。</p>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th};text-align:left">方式</th>'
+                f'<th style="{_th}">件数/日 中央</th><th style="{_th}">最少</th>'
+                f'<th style="{_th}">1銘柄 中央</th><th style="{_th}">95%点</th>'
+                f'<th style="{_th}">最大</th><th style="{_th}">単元上限に当たった</th>'
+                f'</tr></thead><tbody>{_conc}</tbody></table>') if _conc else "")
             + '</details>')
 
     def _budget_sweep_html():
