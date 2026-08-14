@@ -26,6 +26,7 @@ import argparse
 import os
 import copy as _copy
 import importlib as _importlib
+import time as _time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _asc
 from datetime import timedelta, timezone, datetime
@@ -3598,6 +3599,10 @@ _OOS_BT_SCORES: dict = {}  # (sym, strat) -> rec_score, populated by _tab5_pnl_h
 _pnl_bt_cache: dict = {}         # cfg_key -> items_per_cfg (バックテスト結果キャッシュ)
 _preoos_tab5_score_cache: dict = {}  # (sym, strat, cutoff_days) -> score
 _ASOF_BT_CACHE: dict = {}  # (sym, strat, mode, sig_date, window) -> シグナル日時点BTスコア
+# 損益タブの ~70秒がどこに掛かっているかを切り分けるための計測(2026-08-14)。
+# as-of BT は 15,000回以上呼ばれるので、ここが支配的なら結果をディスクに
+# 逃がす価値がある(lssタブとHタブが同じ計算を2回している)。
+_ASOF_BT_STAT = {'n': 0, 'sec': 0.0}
 
 # 各取引のBTスコアが「どこから来たか」の内訳(診断用・挙動には影響しない)。
 #   frozen   … signal_score_cache_lss.json の日付つき凍結スコア = シグナル発生時の値。正しい
@@ -8047,7 +8052,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     if _ak in _ASOF_BT_CACHE:
                         _sig_sc = _ASOF_BT_CACHE[_ak]
                     else:
+                        _t_ab = _time.perf_counter()
                         _sig_sc = _asof_bt_score(it["full_trade_log"], _mod_for(strat), _sd_for_key)
+                        _ASOF_BT_STAT["n"] += 1
+                        _ASOF_BT_STAT["sec"] += _time.perf_counter() - _t_ab
                         _ASOF_BT_CACHE[_ak] = _sig_sc
                     # 当時の決済実績が無い(履歴不足)→ 0=未実証 として扱い先読みを避ける
                     if _sig_sc is None:
@@ -8143,7 +8151,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         if _ak2 in _ASOF_BT_CACHE:
                             _n_sc = _ASOF_BT_CACHE[_ak2]
                         else:
+                            _t_ab = _time.perf_counter()
                             _n_sc = _asof_bt_score(it["full_trade_log"], _mod_for(strat), _n_sd)
+                            _ASOF_BT_STAT["n"] += 1
+                            _ASOF_BT_STAT["sec"] += _time.perf_counter() - _t_ab
                             _ASOF_BT_CACHE[_ak2] = _n_sc
                         if _n_sc is None:
                             _n_sc = 0
@@ -8178,6 +8189,11 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
               f"as-of={_BT_SRC_COUNT['asof']:,}件 / "
               f"今日のスコア={_bs_today:,}件 ({_bs_today / _bs_tot * 100:.1f}%)"
               + ("  ← 先読みバイアス" if _bs_today else ""), flush=True)
+        if _ASOF_BT_STAT["n"]:
+            print(f"  [as-of BT 実計算] {_ASOF_BT_STAT['n']:,}回 / "
+                  f"{_ASOF_BT_STAT['sec']:.1f}s "
+                  f"(キャッシュ命中 {_BT_SRC_COUNT['asof'] - _ASOF_BT_STAT['n']:,}回)",
+                  flush=True)
 
     # ── cfg_filter: 対象configのみに絞り込み ──
     if cfg_filter:
