@@ -10574,9 +10574,14 @@ function switchTbd(id, tab) {{
             _gaps = [float(x) for x in str(os.environ.get(
                 "LSS_H_CONFIRM_GAPS", "0,50,100")).split(",")
                 if str(x).strip().lstrip("+-").replace(".", "").isdigit()]
-            for _gv in _gaps:
-                _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
-                               0, "fill", None, _gv))
+            # 09:05約定版(保守側の下限)。ユーザー方針で「5分遅れることはない」と
+            # 確定したので既定OFF(2026-08-15)。閾値を増やして掃くときに変種が
+            # 倍になるのを避ける。戻すなら set LSS_H_CONFIRM_SLOW=1
+            if str(os.environ.get("LSS_H_CONFIRM_SLOW", "0")).strip() \
+                    not in ("", "0", "false", "no", "off"):
+                for _gv in _gaps:
+                    _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
+                                   0, "fill", None, _gv))
             # ★★ 同じギャップ条件を **指値** で取る版 (2026-08-15)
             #   指値を pc*(1+g) に置いた寄指は、建てる条件が寄り確認とまったく
             #   同じ(寄り >= その値)。違うのは **約定価格** だけ:
