@@ -11276,9 +11276,17 @@ function switchTbd(id, tab) {{
                 _ss_all_view = (_ss_all[:_DETAIL_ROW_CAP]
                                 if _DETAIL_ROW_CAP > 0 and _ncut > _DETAIL_ROW_CAP
                                 else _ss_all)
-                _ss_view = (_ss[:_DETAIL_ROW_CAP]
-                            if _DETAIL_ROW_CAP > 0 and _nb_cut > _DETAIL_ROW_CAP
-                            else _ss)
+                # ★ 予算内タブ(H / J)は **打ち切らない** (2026-08-15 ユーザー指示)。
+                #   ここを切ると、上の月別サマリー(全件で計算)と下の日別カード
+                #   (切った側)が食い違う。実際 2026/06 が「150件 +659,690円」なのに
+                #   カードは「11件 +54,550円」と出て読めなかった。
+                #   MemoryError の原因は 8,081件の『全取引』タブ×2本であって、
+                #   予算内(365日でも約2,200件)ではない。全取引タブは既定OFF
+                #   (LSS_TAB_EH_ALL)にしたので、こちらは全件描いて余裕がある。
+                #   どうしても切りたいときだけ LSS_EH_ROW_CAP=N。
+                _EH_CAP = int(os.environ.get("LSS_EH_ROW_CAP", "0") or 0)
+                _ss_view = (_ss[:_EH_CAP]
+                            if _EH_CAP > 0 and _nb_cut > _EH_CAP else _ss)
                 if _ehk == "E" and not _SHOW_E_TABS:
                     # ⚖比較の E 列は _eh_sorted から作るので残る。
                     # 描画用のグリッドだけ作らない(HTMLもメモリも節約)。
@@ -11289,12 +11297,17 @@ function switchTbd(id, tab) {{
                         _eh_all[_ehk] = _ss_all_view
                         _eh_all_grid[_ehk] = _build_entry_grid(
                             _ss_all_view, _ehpfx + "A")
-                print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件 / 母集団 {len(_src)}件 "
-                      f"/ 全取引タブ {_ncut}件"
-                      + (f"  ← 明細は直近{_DETAIL_ROW_CAP}件で打ち切り"
-                         f"(集計は全件。DETAIL_ROW_CAP=0 で全部描画)"
-                         if (_ncut > _DETAIL_ROW_CAP or _nb_cut > _DETAIL_ROW_CAP)
-                         and _DETAIL_ROW_CAP > 0 else ""), flush=True)
+                print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件"
+                      + (f"(明細は直近{_EH_CAP}件で打ち切り)"
+                         if _EH_CAP > 0 and _nb_cut > _EH_CAP
+                         else "(明細も全件)")
+                      + f" / 母集団 {len(_src)}件"
+                      + (f" / 全取引タブ {_ncut}件"
+                         + (f"  ← 明細は直近{_DETAIL_ROW_CAP}件で打ち切り"
+                            f"(集計は全件。DETAIL_ROW_CAP=0 で全部描画)"
+                            if _DETAIL_ROW_CAP > 0 and _ncut > _DETAIL_ROW_CAP
+                            else "")
+                         if _SHOW_TAB_EH_ALL else ""), flush=True)
             except Exception as _ehe:
                 print(f"[E/H] {_ehk} の予算シミュ失敗(タブは出しません): {_ehe}",
                       flush=True)
