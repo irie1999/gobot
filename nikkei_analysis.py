@@ -10750,8 +10750,16 @@ function switchTbd(id, tab) {{
                     _out.append(_n)
             return _out
 
+        # ★ 資金均等は **始値約定版(H指値+Nbp寄指)にも掛ける**(2026-08-15)。
+        #   ユーザー方針: 寄り付き直後に完全自動で発注するので、約定価格は
+        #   **始値で近似してよい**。すると 09:00確認方式は
+        #     価格 = 始値(=指値版と同じ) / サイズ = 予算÷件数(確認方式だけの利点)
+        #   になる。つまり実運用の姿は **指値版 + 資金均等**。
+        #   09:05版は「発注が5分遅れた場合」の **保守側の下限** として残す。
+        #   真の値はこの2つの間にあり、.\fills の実約定で確定する。
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
-                    if str(k).startswith("H寄り確認")]
+                    if str(k).startswith("H寄り確認")
+                    or (str(k).startswith("H指値") and str(k).endswith("寄指"))]
         _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
@@ -14314,6 +14322,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                '<br>逆指値(旧方式)の列は既定で出しません'
                '（2026-08-15 ユーザー指示。戻すなら '
                '<code>set LSS_SHOW_STOP_BASELINE=1</code>）。')
+            + '<br>★ <b>09:00確認方式の読み方</b>：'
+              '<b>H指値+Nbp寄指資金均等</b> ＝ 寄り付き直後に自動発注できた場合'
+              '（約定は<b>始値</b>で近似・<b>楽観側</b>）／'
+              '<b>H寄り確認+Nbp資金均等</b> ＝ 発注が09:05まで遅れた場合'
+              '（<b>保守側の下限</b>）。'
+              '<b>実際はこの2つの間</b>に入り、<code>.\\fills</code> の実約定'
+              '（実約定値 vs 始値）で確定します。'
             + f'</p>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'3方式とも同じ <code>_run_budget_sim</code>（{_budget_man}万円 / BT{_BT_TAB_MIN}以上 / '
