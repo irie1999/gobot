@@ -83,6 +83,31 @@ _SHOW_E_TABS = str(os.environ.get("LSS_E_TABS", "0")).strip() \
     not in ("", "0", "false", "no", "off")
 
 
+def _eq_gap_of(_t) -> float:
+    """その日の中での『ギャップの大きさ』。大きいほど上位。
+
+    h_gap_bp = (始値 - 指値) / 指値 x 1e4 (eh_trades._mk)。同じ変種の中では
+    指値 = 前日終値x(1+閾値) なので、前日終値比のギャップとは定数ぶんずれる
+    だけ = 日内の順位は同じ。取れない行は最下位に落とす(順位を付けられない
+    ものを上位に入れると『大きいギャップに寄せる』狙いが崩れる)。
+    """
+    _v = _t.get("h_gap_bp")
+    return float(_v) if _v is not None else -9e9
+
+
+def _eq_order_key(_t):
+    """09:00確認方式(資金均等)の発注順キー。ギャップ降順。
+
+    ⛔ H/lss の発注順は流動性降順(18.21)。理由は『リターンは予測できないが
+       執行コストは予測できる』から。だが 09:00確認方式では **発注時点で
+       ギャップが分かっている**。ギャップは 186検定で唯一 単調だった軸
+       (利確率 6.8%→14.9% / 外れ率 8.1%→3.8%)なので、予測できるものが
+       ある以上そちらを使う。
+    ⚠ 流動性に戻すには set LSS_EQ_ORDER=liq。
+    """
+    return (-_eq_gap_of(_t), str(_t.get("symbol", "")))
+
+
 def _tab_on(_env: str, _default: str = "0") -> bool:
     """取引明細のタブを出すか。既定OFFのものを env 1本で戻せるようにする。"""
     return str(os.environ.get(_env, _default)).strip() \
@@ -103,6 +128,8 @@ _SHOW_TAB_ALL = _tab_on("LSS_TAB_ALL") or _SHOW_BASE_DETAIL
 _SHOW_TAB_ENTRY = _tab_on("LSS_TAB_ENTRY") or _SHOW_BASE_DETAIL
 _SHOW_TAB_TENKAN = _tab_on("LSS_TAB_TENKAN")
 _SHOW_TAB_EH_ALL = _tab_on("LSS_TAB_EH_ALL")
+# 09:00確認(資金均等)の発注順。既定 gap=ギャップ降順 / liq=流動性降順(H と同じ)。
+_EQ_ORDER = str(os.environ.get("LSS_EQ_ORDER", "gap")).strip().lower()
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
@@ -10794,6 +10821,22 @@ function switchTbd(id, tab) {{
     #      ノイズ帯の中なら入れる、というのが正しい判断のしかた(18.24)。
     # ★ 資金均等は E/H キャッシュより **後** に掛かるので、LSS_EQ_MAX_YEN を
     #    変えてもキャッシュは無効化されない = 上限のスイープは軽い。
+    # ★ J = 09:00確認方式(ギャップ+Nbp を合格として、その日の合格銘柄に
+    #   予算を均等割り)。H の隣にタブとして出す。どの変種を出すかは env で
+    #   差し替えられる(閾値/上位N絞りを変えて比べたいとき)。
+    #   例: set LSS_EQ_TAB_KEY=H指値+50bp寄指資金均等上位5
+    _EQ_TAB_KEY = str(os.environ.get(
+        "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
+    # 元になる変種名(資金均等・上位N を剥がしたもの)。上位N版をどの閾値に
+    # 付けるかの判定に使う。
+    _EQ_TAB_BASE = _EQ_TAB_KEY.split("資金均等")[0]
+    _EQ_TAB_GAP = "".join(
+        _c for _c in _EQ_TAB_BASE.split("bp")[0][-5:] if _c.isdigit()) or "50"
+    _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
+    _EQ_TAB_TOP = "".join(_c for _c in _EQ_TAB_KEY.split("上位")[-1]
+                          if _c.isdigit()) if "上位" in _EQ_TAB_KEY else ""
+    _EQ_TAB_LBL = (f"09:00確認{_EQ_TAB_GAP} 資金均等"
+                   + (f" 上位{_EQ_TAB_TOP}集中" if _EQ_TAB_TOP else ""))
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
@@ -10802,8 +10845,18 @@ function switchTbd(id, tab) {{
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
         _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
 
-        def _size_equal_by_day(_ts, _budget):
+        def _size_equal_by_day(_ts, _budget, _top=0):
             """その日の件数で予算を均等割りし、100株単位で建て直す。
+
+            _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
+            均等割りする(残りは建てない)。閾値を上げるのとは別物で、
+            絞り具合が『その日の中の相対順位』で決まるため、合格が少ない日は
+            そのまま全部建て、多い日だけ強く絞れる。
+
+            ⛔ ギャップは 186検定で唯一 単調だった軸(利確率 6.8%→14.9% /
+               外れ率 8.1%→3.8%)。BT・流動性・株価・ATR%・セクター・曜日・
+               戦略は全部ヌル(18.12/18.13/18.24/18.31)なので、
+               **『高品質』の運用可能な定義はいまのところこれしかない**。
 
             返り値は (トレード列, 集中度の統計)。統計は「1銘柄にいくら
             突っ込むことになるか」を見るためのもの。閾値を上げると件数が
@@ -10817,10 +10870,16 @@ function switchTbd(id, tab) {{
                 _by.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
             _out = []
             _amts: list = []          # 1銘柄あたりの建玉額
-            _cnts: list = []          # 1日あたりの件数
+            _cnts: list = []          # 1日あたりの件数(絞ったあと)
+            _cnts_raw: list = []      # 同(絞る前)。どれだけ捨てたかを見る
             _capped = 0               # 単元上限(株数)に当たった件数
             _ycap = 0                 # 金額上限で削った件数
+            _dropped = 0              # 上位N絞りで建てなかった件数
             for _d, _lst in _by.items():
+                _cnts_raw.append(len(_lst))
+                if _top > 0 and len(_lst) > _top:
+                    _lst = sorted(_lst, key=lambda t: -_eq_gap_of(t))[:_top]
+                    _dropped += len(_by[_d]) - len(_lst)
                 _per = _budget / max(1, len(_lst))
                 # ★ 金額上限。単元上限(株数)は株価で意味が6倍変わるので、
                 #   本来はこちらで切るべき。0=無効。
@@ -10854,10 +10913,13 @@ function switchTbd(id, tab) {{
                     return 0.0
                 return float(_a[min(len(_a) - 1, int(len(_a) * _p))])
 
+            _cnts_raw.sort()
             _st = {
                 "days": len(_cnts),
                 "per_day_med": _q(_cnts, 0.5),
                 "per_day_min": (_cnts[0] if _cnts else 0),
+                "per_day_raw_med": _q(_cnts_raw, 0.5),
+                "dropped": _dropped,
                 "amt_med": _q(_amts, 0.5),
                 "amt_p95": _q(_amts, 0.95),
                 "amt_max": (_amts[-1] if _amts else 0.0),
@@ -10877,19 +10939,39 @@ function switchTbd(id, tab) {{
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
                     if str(k).startswith("H寄り確認")
                     or (str(k).startswith("H指値") and str(k).endswith("寄指"))]
+        # ★ その日のギャップ上位N件に集中する版 (2026-08-15 ユーザー提案)。
+        #   合格が多い日は 予算÷件数 が 26万 まで下がり、どの銘柄も 100株 =
+        #   **資金均等が 100株固定に縮退**していた(実測: 件数/日 中央 15件)。
+        #   ギャップは唯一 単調だった軸なので、そこで絞って集中する。
+        #   ⚠ 資金均等は E/H キャッシュより後の純粋な後処理(5分足を触らない)
+        #     なので、変種を足しても計算はほぼ増えない。
+        #   ⛔ ただし**同じ10ヶ月でNを選ぶと過剰適合**(18.28)。判定は必ず
+        #     擬似OOS(前半/後半)と walk-forward で。
+        _EQ_TOPS = [int(x) for x in str(os.environ.get(
+            "LSS_EQ_TOPS", "3,5,8")).split(",")
+            if str(x).strip().isdigit() and int(x) > 0]
+        _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
             if not _v:
                 continue
-            _nk = f"{_k}資金均等"
-            _EH_TRADES[_nk], _eq_st = _size_equal_by_day(_v, _EQ_BUD)
-            _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
-            _EH_TRADES.setdefault("約定せず", {})[_nk] = []
-            _EH_TRADES["_h_variants"] = list(
-                _EH_TRADES.get("_h_variants") or []) + [_nk]
+            # 上位N版は **タブに出す閾値だけ**に付ける(全閾値に付けると
+            # ⚖表の列が倍々に増えて読めなくなる)。
+            _tops = [0] + (_EQ_TOPS if _k == _EQ_TAB_BASE else [])
+            for _tp in _tops:
+                _nk = f"{_k}資金均等" + (f"上位{_tp}" if _tp else "")
+                _EH_TRADES[_nk], _eq_st = _size_equal_by_day(_v, _EQ_BUD, _tp)
+                _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
+                _EH_TRADES.setdefault("約定せず", {})[_nk] = []
+                _EH_TRADES["_h_variants"] = list(
+                    _EH_TRADES.get("_h_variants") or []) + [_nk]
+                _n_eq += 1
         if _EQ_KEYS:
-            print(f"[E/H] 資金均等版を {len(_EQ_KEYS)}本 追加 "
-                  f"(予算{_EQ_BUD / 1e4:.0f}万 ÷ その日の件数 / 最大{_EQ_MAX_LOT}単元)。"
+            print(f"[E/H] 資金均等版を {_n_eq}本 追加 "
+                  f"(予算{_EQ_BUD / 1e4:.0f}万 ÷ その日の件数 / 最大{_EQ_MAX_LOT}単元"
+                  + (f" / 金額上限{_EQ_MAX_YEN / 1e4:.0f}万" if _EQ_MAX_YEN > 0 else "")
+                  + f")。うち上位N絞り {len(_EQ_TOPS)}本 (N={_EQ_TOPS} / "
+                  f"対象 {_EQ_TAB_BASE})。"
                   f"09:00 に件数が分かる方式だけが使える割り当て", flush=True)
     except Exception as _eqe:
         print(f"[E/H] 資金均等版の生成に失敗: {_eqe}", flush=True)
@@ -11259,15 +11341,6 @@ function switchTbd(id, tab) {{
     _eh_grid: dict = {}
     _eh_all: dict = {}          # 予算で切る前の全件(全取引タブ用)
     _eh_all_grid: dict = {}
-    # ★ G = 09:00確認方式(ギャップ+Nbp を合格として、その日の合格銘柄に
-    #   予算を均等割り)。H の隣にタブとして出す。どの変種を出すかは env で
-    #   差し替えられる(閾値を変えて比べたいとき)。
-    _EQ_TAB_KEY = str(os.environ.get(
-        "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
-    _EQ_TAB_GAP = "".join(
-        _c for _c in _EQ_TAB_KEY.split("bp")[0][-5:] if _c.isdigit()) or "50"
-    _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
-    _EQ_TAB_LBL = f"09:00確認{_EQ_TAB_GAP} 資金均等"
     if _LSS_ORDER_MODE and _EH_TRADES:
         _EH_NF = _EH_TRADES.get("約定せず") or {}
         _EH_PAIRS = [("E", "he"), ("H", "hh")]
@@ -11285,7 +11358,12 @@ function switchTbd(id, tab) {{
             if not _src:
                 continue
             try:
-                _ss = _run_budget_sim(_BUD_FLOOR, src=_src,
+                # J(資金均等)は発注時点でギャップが分かるので、予算で切る
+                # 順番もギャップ降順にする(⚖比較の同名列と同じキー)。
+                _ok = (_eq_order_key
+                       if ("資金均等" in str(_srck) and _EQ_ORDER != "liq")
+                       else None)
+                _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
                                       nofills=(_EH_NF.get(_srck) or []))
                 _eh_sorted[_ehk] = _ss        # ← 集計用。**切らない**
                 # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
@@ -14232,8 +14310,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if not _hax:
                 continue
             try:
+                # ⛔ 予算超過で切るときの順番。資金均等(09:00確認)は
+                #    **発注時点でギャップが分かっている**ので、切る順も
+                #    ギャップ降順にする。ここを流動性順のままにすると、
+                #    サイズだけギャップで決めて、削る相手は別の軸で選ぶ、
+                #    という一貫しない模型になる(2026-08-15 指摘)。
+                _ok = (_eq_order_key
+                       if ("資金均等" in str(_hk) and _EQ_ORDER != "liq")
+                       else None)
                 _sets.append((_hk, _run_budget_sim(
-                    _BUD_FLOOR, src=_hax,
+                    _BUD_FLOOR, src=_hax, order_key=_ok,
                     nofills=((_EH_TRADES or {}).get("約定せず") or {})
                     .get(_hk) or [])))
             except Exception:
@@ -14386,11 +14472,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         #   09:00確認だけが 予算÷件数 で割り切れる。100株固定で比べると
         #   その唯一の利点が消えるので、資金均等版を H と直接ぶつける。
         for _k in sorted(_have):
-            if str(_k).endswith("資金均等"):
-                _PAIRS.append((_k, "H"))
-                _b = str(_k)[:-4]
-                if _b in _have:
-                    _PAIRS.append((_k, _b))
+            if "資金均等" not in str(_k):
+                continue
+            _PAIRS.append((_k, "H"))
+            _b = str(_k).split("資金均等")[0]
+            if _b in _have:
+                _PAIRS.append((_k, _b))       # 100株固定 vs 資金均等
+            # ★ 上位N絞り vs 絞りなし。ここが「均等に配るか / 良いものに
+            #   寄せるか」の直接比較。同じ日・同じ予算・同じ決済なので
+            #   対応検定が最も効く形になる。
+            if "上位" in str(_k):
+                _e0 = str(_k).split("上位")[0]
+                if _e0 in _have:
+                    _PAIRS.append((_k, _e0))
         _PAIRS = tuple(_PAIRS)
         _pr = ""
         for x, y in _PAIRS:
@@ -14524,7 +14618,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _conc += (
                 f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                f'{_st["per_day_med"]:.0f}</td>'
+                f'{_st["per_day_med"]:.0f}'
+                + (f'<span style="color:#64748b;font-size:0.72rem"> '
+                   f'({_st.get("per_day_raw_med", 0):.0f})</span>'
+                   if _st.get("per_day_raw_med", 0) > _st["per_day_med"] else "")
+                + f'</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["per_day_min"]:.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
@@ -14662,10 +14760,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'入れて損益がノイズ帯（月次σ ≒ 12〜13万）の中に収まるなら入れる、'
                 f'というのが正しい判断のしかたです。'
                 f'<br>「単元上限に当たった」の割合が高いほど、実際には均等割りできず'
-                f'<b>資金が遊んでいます</b>。</p>'
+                f'<b>資金が遊んでいます</b>。'
+                f'<br>★ <b>上位N</b> の行は、その日の<b>ギャップ降順で上位N件だけ</b>に'
+                f'絞ってから均等割りしたもの（残りは建てない）。件数/日の括弧内が'
+                f'<b>絞る前</b>の件数です。閾値を上げるのと違い、'
+                f'<b>絞り具合がその日の中の相対順位で決まる</b>ので、'
+                f'合格が少ない日はそのまま全部建てます。'
+                f'<br>発注順(予算で切る順)は資金均等だけ '
+                f'<b>{"ギャップ降順" if _EQ_ORDER != "liq" else "流動性降順"}</b>'
+                f'（<code>set LSS_EQ_ORDER=liq</code> で H と同じ流動性順に戻せます）。'
+                f'⛔ N を<b>この10ヶ月で選ぶと過剰適合</b>です(18.28)。'
+                f'判定は必ず擬似OOS(前半/後半)と walk-forward で。</p>'
                 f'<table style="border-collapse:collapse;font-size:0.8rem">'
                 f'<thead><tr><th style="{_th};text-align:left">方式</th>'
-                f'<th style="{_th}">件数/日 中央</th><th style="{_th}">最少</th>'
+                f'<th style="{_th}">件数/日 中央<br><span style="font-weight:400;'
+                f'font-size:0.68rem">(絞る前)</span></th><th style="{_th}">最少</th>'
                 f'<th style="{_th}">1銘柄 中央</th>'
                 f'<th style="{_th}">95%点<br><span style="font-weight:400;'
                 f'font-size:0.68rem">(予算比)</span></th>'
