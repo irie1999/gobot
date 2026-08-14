@@ -16034,6 +16034,78 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _TC = _TTBL[_df]
                 break
 
+        # ── 「当たり/外れ」率で測る材料 ────────────────────────────
+        # ⛔ 合計損益は **裾に支配される**(上位1%で利益の43% / 2026-08-14 実測)。
+        #    つまりLOOの合計差はノイズだらけで検出力が低い。
+        #    当たり率(上位5%に入る率)・外れ率(下位5%)・利確到達率は **二項** なので
+        #    分散が小さく、同じデータ量でずっと細かい差を拾える。
+        #    ⚠ 同日決済なので下げた日は全銘柄がまとめて当たる。帰無は
+        #      **日ごとに群ラベルをシャッフル**して作る(日構造と日別の群サイズを保つ)。
+        _st_all = [t for t in _pool
+                   if t.get("reason") not in ("発注中", "保有中", "約定せず")]
+        _hitset: set = set()
+        _misset: set = set()
+        _byday_all: dict = {}
+        if len(_st_all) >= 200:
+            _sp = sorted(_st_all, key=lambda t: -float(t.get("pnl", 0) or 0))
+            _k5 = max(1, int(len(_sp) * 0.05))
+            _hitset = {_tk(t) for t in _sp[:_k5]}
+            _misset = {_tk(t) for t in _sp[-_k5:]}
+            for _t in _st_all:
+                _byday_all.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
+
+        def _rate_z(_ts, _flag):
+            """群 _ts の _flag 率と、日内シャッフル帯との z を返す。"""
+            _in = [t for t in _ts if t.get("reason")
+                   not in ("発注中", "保有中", "約定せず")]
+            if len(_in) < 30 or not _byday_all:
+                return None
+            _obs = sum(1 for t in _in if _flag(t)) / len(_in)
+            _cnt: dict = {}
+            for _t in _in:
+                _d = str(_t.get("entry_d_raw") or "")
+                _cnt[_d] = _cnt.get(_d, 0) + 1
+            _perm = []
+            _NP = int(os.environ.get("LSS_HIT_PERM", "120") or 120)
+            for _r in range(_NP):
+                _h2 = _n2 = 0
+                for _d, _k in _cnt.items():
+                    _pd = _byday_all.get(_d) or []
+                    if not _pd:
+                        continue
+                    _sh = sorted(_pd, key=lambda t, _s=_r, _dd=_d: _zl.crc32(
+                        f"{_s}|{_dd}|{_tk(t)}".encode()) & 0xffffffff)[:_k]
+                    _h2 += sum(1 for t in _sh if _flag(t))
+                    _n2 += len(_sh)
+                if _n2:
+                    _perm.append(_h2 / _n2)
+            if len(_perm) < 3:
+                return None
+            _mu = _sti.mean(_perm)
+            _sd = _sti.stdev(_perm)
+            return (_obs, _mu, ((_obs - _mu) / _sd) if _sd > 0 else 0.0)
+
+        def _rate_cells(_ts):
+            """当たり率 / 外れ率 / 利確率 の3セル。z は日内シャッフル帯との差。"""
+            _out = ""
+            for _fl in (lambda t: _tk(t) in _hitset,
+                        lambda t: _tk(t) in _misset,
+                        lambda t: t.get("reason") == "目標達成"):
+                _r = _rate_z(_ts, _fl)
+                if not _r:
+                    _out += ('<td style="text-align:right;padding:2px 8px;'
+                             'color:#475569;border-left:1px solid #334155">—</td>')
+                    continue
+                _o, _m2, _zr = _r
+                _cc = ("#4ade80" if _zr >= 2.0 else
+                       ("#f87171" if _zr <= -2.0 else "#94a3b8"))
+                _out += (f'<td style="text-align:right;padding:2px 8px;color:{_cc};'
+                         f'border-left:1px solid #334155;white-space:nowrap">'
+                         f'{_o * 100:.1f}%'
+                         f'<span style="color:#64748b;font-size:0.72rem"> '
+                         f'z{_zr:+.1f}</span></td>')
+            return _out
+
         _base = _run_budget_sim(_BUD_FLOOR, src=_src, nofills=_nof)
         _bm = _mon(_base)
         _ms = sorted(_bm)
@@ -16081,7 +16153,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if len(_grp) < 2:
                 continue
             _rows += (f'<tr style="border-top:1px solid #475569">'
-                      f'<td colspan="8" style="padding:4px 8px;color:#93c5fd;'
+                      f'<td colspan="11" style="padding:4px 8px;color:#93c5fd;'
                       f'font-weight:700">{_an}'
                       f'<span style="color:#64748b;font-weight:400;font-size:0.74rem">'
                       f'　{_note}</span></td></tr>')
@@ -16128,7 +16200,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'{"<b style=color:#4ade80>✓</b>" if _ok else ""}</td>'
                     f'<td style="padding:2px 8px;color:#64748b;font-size:0.74rem">'
                     f'{"外すと損する=残すべき" if _dl < 0 else "外すと得する=**フィルタ候補**"}'
-                    f'</td></tr>')
+                    f'</td>' + _rate_cells(_ts) + '</tr>')
 
         if not _rows:
             return ""
@@ -16167,7 +16239,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">z</th>'
             f'<th style="{_th};border-left:1px solid #334155">前半z</th>'
             f'<th style="{_th}">後半z</th><th style="{_th}">判定</th>'
-            f'<th style="{_th};text-align:left">読み方</th></tr></thead>'
+            f'<th style="{_th};text-align:left">読み方</th>'
+            f'<th style="{_th};border-left:1px solid #334155">当たり率</th>'
+            f'<th style="{_th}">外れ率</th><th style="{_th}">利確率</th>'
+            f'</tr></thead>'
             f'<tbody>{_rows}</tbody></table></details>')
 
     def _eh_diag_html():
