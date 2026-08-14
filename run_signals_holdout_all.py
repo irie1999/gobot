@@ -1602,6 +1602,13 @@ try:
     _na.asof_cache_load()
 except Exception as _ace:
     print(f"  [as-of BTキャッシュ] 初期化に失敗({_ace}) → 計算し直します", flush=True)
+# ⛔ 損益タブの ~70秒の本体は as-of BT ではなく、その材料を作る
+#    **765日窓バックテスト(1,631ペア)** だった(2026-08-14 実測:
+#    as-of BT の実計算は 15,733回で 0.6s しか掛かっていない)。
+try:
+    _na.fulllog_cache_load()
+except Exception as _fce:
+    print(f"  [全期間BTキャッシュ] 初期化に失敗({_fce}) → 計算し直します", flush=True)
 # 鮮度スタンプ: このキャッシュが「どのデータ日付で作られたか」を隣に記録する。
 _bt_asof_file  = _bt_cache_file.with_suffix(".pkl.asof")
 # 同一 最新確定バー日付 の間だけ再利用（--force はHTML再生成のみ強制、BTキャッシュは

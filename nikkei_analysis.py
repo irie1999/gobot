@@ -3613,6 +3613,67 @@ _ASOF_CACHE_LOADED = False
 _ASOF_CACHE_N0 = 0          # 読み込んだ時点の件数(増えた分だけ保存する判定に使う)
 
 
+_FULLLOG_CACHE: dict = {}   # (sym, strat, mode, win) -> (trade_log, nofill_log)
+_FULLLOG_N0 = 0
+
+
+def _fulllog_cache_path():
+    if not _ASOF_CACHE_TOKEN:
+        return None
+    return Path(".asof_bt_cache") / f"fulllog_{_ASOF_CACHE_TOKEN}.pkl"
+
+
+def fulllog_cache_load():
+    """765日窓バックテスト(full_trade_log)をディスクから復元する。
+
+    ⛔ これが損益タブの ~70秒の本体(2026-08-14 実測)。1,631ペアすべてに
+       `run_limit_backtest` を765日窓で回しており、lssタブ と Hタブ(別プロセス)で
+       **同じ計算を2回**していた。as-of BT のスコア計算自体は 0.6s しか
+       掛かっておらず、重いのは材料を作るこちら。
+       決済ロジック版と最新バー日が同じなら結果も同じなので、BTキャッシュ本体と
+       同じトークンで版管理する。無効化: set LSS_FULLLOG_CACHE=0
+    """
+    global _FULLLOG_N0
+    _p = _fulllog_cache_path()
+    if (not _p or not _p.exists()
+            or str(os.environ.get("LSS_FULLLOG_CACHE", "1")).strip()
+            in ("0", "false", "no")):
+        return
+    try:
+        import pickle as _pk
+        with open(_p, "rb") as _f:
+            _d = _pk.load(_f)
+        if isinstance(_d, dict):
+            _FULLLOG_CACHE.update(_d)
+            _FULLLOG_N0 = len(_FULLLOG_CACHE)
+            print(f"  [全期間BTキャッシュ] {len(_d):,}ペアをディスクから復元 "
+                  f"({_p.name})", flush=True)
+    except Exception as _e:
+        print(f"  [全期間BTキャッシュ] 読込失敗({_e}) → 計算し直します", flush=True)
+
+
+def fulllog_cache_save():
+    _p = _fulllog_cache_path()
+    if (not _p or len(_FULLLOG_CACHE) <= _FULLLOG_N0
+            or str(os.environ.get("LSS_FULLLOG_CACHE", "1")).strip()
+            in ("0", "false", "no")):
+        return
+    try:
+        import pickle as _pk
+        _p.parent.mkdir(exist_ok=True)
+        with open(_p, "wb") as _f:
+            _pk.dump(_FULLLOG_CACHE, _f, protocol=4)
+        _mb = _p.stat().st_size / 1e6
+        print(f"  [全期間BTキャッシュ] {len(_FULLLOG_CACHE):,}ペアを保存 "
+              f"(+{len(_FULLLOG_CACHE) - _FULLLOG_N0:,} / {_mb:.0f}MB / {_p.name})。"
+              f"次のタブ・次の実行は読むだけになります", flush=True)
+        for _old in sorted(_p.parent.glob("fulllog_*.pkl"),
+                           key=lambda x: x.stat().st_mtime, reverse=True)[4:]:
+            _old.unlink(missing_ok=True)
+    except Exception as _e:
+        print(f"  [全期間BTキャッシュ] 保存失敗: {_e}", flush=True)
+
+
 def _asof_cache_path():
     if not _ASOF_CACHE_TOKEN:
         return None
@@ -7939,7 +8000,23 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 else:
                     _score_win = _BT_WINDOW_DAYS + 400
 
-                def _full_log(_sym, _name, _strat):
+                # 765日窓のバックテストは重い(1,631ペア = 損益タブの ~70秒の本体)。
+                # 同じ決済ロジック版・同じ最新バー日なら結果も同じなのでディスクに残す。
+                # ⚠ _REPORT_END 指定時は窓の意味が変わるのでキャッシュしない。
+                _fl_ck = (_REPORT_END is None
+                          and str(os.environ.get("LSS_FULLLOG_CACHE", "1")).strip()
+                          not in ("0", "false", "no"))
+
+                def _full_log(_sym, _name, _strat, _md=cfg["mode"], _w=_score_win):
+                    _ck = (str(_sym), str(_strat), str(_md), int(_w))
+                    if _fl_ck and _ck in _FULLLOG_CACHE:
+                        return _FULLLOG_CACHE[_ck]
+                    _r = _full_log_calc(_sym, _name, _strat)
+                    if _fl_ck and _r is not None:
+                        _FULLLOG_CACHE[_ck] = _r
+                    return _r
+
+                def _full_log_calc(_sym, _name, _strat):
                     try:
                         _mod = _mod_for(_strat)
                         _p = _mod.STRATEGY_PARAMS.get(_strat)
@@ -7979,6 +8056,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                                 _it["full_nofill_log"] = _fl[1]
                         except Exception:
                             pass
+
+                fulllog_cache_save()
 
             _cached_items_per_cfg[cfg["label"]] = items
         _pnl_bt_cache[_cfg_cache_key] = _cached_items_per_cfg
@@ -10526,14 +10605,22 @@ function switchTbd(id, tab) {{
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
                            "LSS_NO_INTEGRITY_GUARD", "LSS_SIZE_MODE"):
                     _sig.append(f"{_e}={os.environ.get(_e, '')}")
-                for _t in (_bt30_entry_sorted + _eh_pending + list(all_nofills)):
-                    _sig.append("|".join((
+                # ⛔ **必ずソートする**(2026-08-14 修正)。all_nofills は
+                #    ThreadPoolExecutor の as_completed で積むのでリスト順が
+                #    実行ごとに変わる。そのまま連結するとまったく同じ入力でも
+                #    毎回ちがう鍵になり、キャッシュが一度も命中しない
+                #    (実測: 同じ日に2回回して eh_091ee… → eh_c485d… と別キー)。
+                _rows_sig = sorted(
+                    "|".join((
                         str(_t.get("symbol", "")),
                         str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""),
                         str(_t.get("strategy", "")),
                         f'{float(_t.get("order_limit") or 0):.1f}',
                         f'{float(_t.get("entry_p") or 0):.1f}',
-                        str(_t.get("reason", "")))))
+                        str(_t.get("reason", ""))))
+                    for _t in (_bt30_entry_sorted + _eh_pending + list(all_nofills)))
+                _sig.append(f"n={len(_rows_sig)}")
+                _sig.extend(_rows_sig)
                 _eh_key = _hl.sha1("\n".join(_sig).encode()).hexdigest()[:16]
                 _eh_cdir = Path(".eh_cache")
                 _eh_cdir.mkdir(exist_ok=True)
