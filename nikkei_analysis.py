@@ -15790,16 +15790,71 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 if len(_res) == 3:
                     _hi, _lo = _res[0][4], _res[-1][4]
                     _mono = _res[0][4] >= _res[1][4] >= _res[2][4]
+                    # ── 上位 − 下位 を **日ごとに引き算** して検定する ──────
+                    # ⛔ 各群が0と違うかを見てはいけない(2026-08-14 修正)。
+                    #    後半が良い相場なら3群とも揃ってプラスになり、実際
+                    #    上位+2,189 / 中位+1,198 / 下位+897 と全部プラスで t も
+                    #    1.2〜1.9 と似た値になった = 相場の共通要因を見ていただけ。
+                    #    同じ日の上位と下位を引き算すれば共通要因は完全に消える
+                    #    (18.30 の市場β分析と同じ発想)。
+                    def _byday(_syms):
+                        _m: dict = {}
+                        for _t in _done:
+                            if (_mk(_t) in _te_m
+                                    and str(_t.get("symbol", "")) in _syms):
+                                _m.setdefault(str(_t.get("entry_d_raw") or ""),
+                                              []).append(float(_t.get("pnl", 0) or 0))
+                        return {k: sum(v) / len(v) for k, v in _m.items() if v}
+
+                    def _paired_t(_a, _b):
+                        _d = [_a[k] - _b[k] for k in (set(_a) & set(_b))]
+                        if len(_d) < 5:
+                            return None
+                        _m2 = _sti.mean(_d)
+                        _s2 = _sti.stdev(_d) if len(_d) > 1 else 0.0
+                        return (_m2, (_m2 / (_s2 / (len(_d) ** 0.5))) if _s2 > 0 else 0.0,
+                                len(_d))
+
+                    _hi_d = _byday(_grp["前半 上位1/3"])
+                    _lo_d = _byday(_grp["前半 下位1/3"])
+                    _pt = _paired_t(_hi_d, _lo_d)
+                    # 帰無: 銘柄ラベルをシャッフルして同じ検定を回す。
+                    # (どの銘柄がどの群かをランダムにするだけ。日構造は保つ)
+                    _perm = []
+                    try:
+                        import zlib as _zl2
+                        _allsym = [k for k, _ in _rk]
+                        for _sd in range(int(os.environ.get(
+                                "LSS_PROFIT_SRC_SEEDS", "24") or 24)):
+                            _sh = sorted(_allsym, key=lambda x, _s=_sd: _zl2.crc32(
+                                f"{_s}|{x}".encode()) & 0xffffffff)
+                            _r2 = _paired_t(_byday(set(_sh[:_t3])),
+                                            _byday(set(_sh[2 * _t3:])))
+                            if _r2:
+                                _perm.append(_r2[0])
+                    except Exception:
+                        _perm = []
+                    _z = 0.0
+                    if _pt and len(_perm) > 2:
+                        _ps = _sti.stdev(_perm)
+                        _z = ((_pt[0] - _sti.mean(_perm)) / _ps) if _ps > 0 else 0.0
+                    _sig = bool(_pt and _mono and abs(_pt[1]) >= 2.0 and abs(_z) >= 2.0)
                     _verdict = (
-                        f'<b style="color:{"#4ade80" if (_mono and _res[0][5] >= 2.0) else "#f87171"}">'
+                        f'<b style="color:{"#4ade80" if _sig else "#f87171"}">'
                         f'前半上位 {_hi:+,.0f}円/件 ⇄ 前半下位 {_lo:+,.0f}円/件'
                         f'（差 {_hi - _lo:+,.0f}）</b><br>'
-                        + ('順位が後半でも保たれており、t も出ています。'
+                        + (f'<b>同じ日で引き算した差: {_pt[0]:+,.0f}円/件 '
+                           f't={_pt[1]:+.2f}（{_pt[2]}日）／ '
+                           f'銘柄ラベルをシャッフルした帯との z={_z:+.2f}</b><br>'
+                           if _pt else '')
+                        + ('順位が後半でも保たれ、同じ日で引き算しても差が残り、'
+                           'シャッフル帯の外に出ています。'
                            '<b>銘柄を選ぶ根拠になりえます</b>。次は walk-forward。'
-                           if (_mono and _res[0][5] >= 2.0) else
-                           '<b>前半の順位は後半で再現していません。</b>'
-                           '「利益が出ている銘柄」は事後にしか分からない'
-                           '＝銘柄を選ぶ根拠になりません。'))
+                           if _sig else
+                           '<b>銘柄を選ぶ根拠にはなりません。</b>'
+                           + ('順位は単調ですが、' if _mono else '順位が再現せず、')
+                           + '同じ日で引き算するか銘柄ラベルをシャッフルすると差が'
+                           '消えます＝見ていたのは相場の共通要因です。'))
         if not _crow and not _prow:
             return ""
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
