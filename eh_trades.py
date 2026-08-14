@@ -283,6 +283,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     # データ不足の内訳。合計だけだと実行ごとのブレの原因が追えない(2026-08-10)。
     _sk = {"日足なし": 0, "日足に該当日なし": 0, "5分足なし": 0,
            "分割ガード": 0, "先頭バーが09:00でない": 0, "価格/ATR異常": 0}
+    # ⛔ 件数だけだと『実発注した銘柄がテストの母集団に無い』ときに原因を追えない
+    #    (2026-08-14: 3197/6323/6965 の3件が消え、当日の損失のほぼ全部だった)。
+    #    **どの銘柄がどの日に落ちたか**を残す。レポートの H ペインに出すので
+    #    コンソールのスクロールバックを探さなくてよい。
+    _sk_syms: dict = {k: [] for k in _sk}
+    _SK_CAP = 400                     # 1理由あたりの保持上限(HTMLが肥大しない程度)
     # H の約定の内訳。**ライブでの信頼度がまったく違う**ので必ず出す:
     #   板寄せ  = 寄りが既に前日終値以上 → 9:00の板寄せで前日終値以上の値がつく。
     #             指値売りは必ず約定する(始値で約定)。バックテストと現実が一致。
@@ -296,16 +302,22 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         df = daily.get(sym)
         if df is None:
             _sk["日足なし"] += 1
+            if len(_sk_syms["日足なし"]) < _SK_CAP:
+                _sk_syms["日足なし"].append((str(dstr), str(sym)))
             continue
         try:
             ts = pd.Timestamp(dstr[:10])
         except Exception:
             _sk["日足に該当日なし"] += 1
+            if len(_sk_syms["日足に該当日なし"]) < _SK_CAP:
+                _sk_syms["日足に該当日なし"].append((str(dstr), str(sym)))
             continue
         idx = df.index
         pos = idx.searchsorted(ts)
         if pos <= 0 or pos >= len(idx) or idx[pos] != ts:
             _sk["日足に該当日なし"] += 1
+            if len(_sk_syms["日足に該当日なし"]) < _SK_CAP:
+                _sk_syms["日足に該当日なし"].append((str(dstr), str(sym)))
             continue
         pc = float(df["c"].iloc[pos - 1])          # 前日終値
         o1 = float(df["o"].iloc[pos])              # 当日始値
@@ -315,12 +327,18 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         day5 = (i5.get(sym) or {}).get(ts.date())
         if not (pc > 0 and o1 > 0 and c1 > 0 and atr == atr and atr > 0):
             _sk["価格/ATR異常"] += 1
+            if len(_sk_syms["価格/ATR異常"]) < _SK_CAP:
+                _sk_syms["価格/ATR異常"].append((str(dstr), str(sym)))
             continue
         if day5 is None or len(day5) == 0:
             _sk["5分足なし"] += 1
+            if len(_sk_syms["5分足なし"]) < _SK_CAP:
+                _sk_syms["5分足なし"].append((str(dstr), str(sym)))
             continue
         if not _ig_ok(day5, c1):
             _sk["分割ガード"] += 1
+            if len(_sk_syms["分割ガード"]) < _SK_CAP:
+                _sk_syms["分割ガード"].append((str(dstr), str(sym)))
             continue
         # 先頭バー時刻は require_open_bar が OFF でも要る(delay の数え直しに使う)
         try:
@@ -329,6 +347,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             _first_hm = ""
         if require_open_bar and _first_hm != "09:00":
             _sk["先頭バーが09:00でない"] += 1
+            if len(_sk_syms["先頭バーが09:00でない"]) < _SK_CAP:
+                _sk_syms["先頭バーが09:00でない"].append((str(dstr), str(sym)))
             continue
 
         # ── E: 寄成。寄りが −gap_guard を割るギャップダウンは約定不可 ──
@@ -426,6 +446,11 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         _res["H"] = out[_HKEYS[0]]
         nf["H"] = nf[_HKEYS[0]]
     _res["_h_variants"] = _HKEYS
+    # レポート(H ペイン)に出すための診断。コンソールのスクロールバックを
+    # 探さなくても『どの銘柄がどの日に落ちたか』が画面で分かるようにする。
+    _res["_diag"] = {"skip": dict(_sk), "skip_syms": _sk_syms,
+                     "fill_mix": {k: dict(v) for k, v in _hfill.items()},
+                     "n_base": len(base), "cap": _SK_CAP}
     return _res
 
 

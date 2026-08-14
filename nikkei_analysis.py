@@ -15377,11 +15377,98 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             'H で発注できるのは上のコマンドだけ。</p>'
             '</details>')
 
+    def _eh_diag_html():
+        """E/H が **母集団から落とした銘柄日** を画面に出す。
+
+        ⛔ これはコンソールにしか出ていなかったので、実発注との突合で
+           『テストの母集団に無い』が出るたびにスクロールバックを探す必要があった
+           (2026-08-14: 3197/6323/6965 の3件が消え、当日の損失のほぼ全部だった)。
+           落ちる銘柄が系統的に悪い/良いなら、バックテスト全体のバイアスになる。
+        """
+        _d = (_EH_TRADES or {}).get("_diag") or {}
+        _sk = {k: v for k, v in (_d.get("skip") or {}).items() if v}
+        _mix = _d.get("fill_mix") or {}
+        if not _sk and not _mix:
+            return ""
+        _nb = int(_d.get("n_base") or 0)
+        _tot = sum(_sk.values())
+        _syms = _d.get("skip_syms") or {}
+        # 直近日 = 実発注と突き合わせる日。ここが最重要なので単独で出す。
+        _last = ""
+        for _v in _syms.values():
+            for _dt, _sy in _v:
+                if _dt > _last:
+                    _last = _dt
+        _rows = ""
+        for _k, _n in sorted(_sk.items(), key=lambda x: -x[1]):
+            _lst = _syms.get(_k) or []
+            _tod = sorted({_sy for _dt, _sy in _lst if _dt == _last})
+            _pct = (f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                    f'{_n / _nb * 100:.1f}%</td>') if _nb else ''
+            _more = f"… 他{len(_tod) - 20}件" if len(_tod) > 20 else ""
+            _rows += (
+                f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#fbbf24">'
+                f'{_n:,}</td>' + _pct
+                + f'<td style="padding:2px 8px;color:#94a3b8;font-size:0.74rem">'
+                f'{"、".join(_tod[:20]) if _tod else "—"}{_more}</td></tr>')
+        _mixr = ""
+        for _k, _v in _mix.items():
+            _a, _z = int(_v.get("板寄せ", 0)), int(_v.get("ザラ場到達", 0))
+            if not (_a + _z):
+                continue
+            _mixr += (f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_k}</td>'
+                      f'<td style="text-align:right;padding:2px 8px;color:#4ade80">'
+                      f'{_a:,} ({_a / (_a + _z) * 100:.0f}%)</td>'
+                      f'<td style="text-align:right;padding:2px 8px;color:#fbbf24">'
+                      f'{_z:,} ({_z / (_a + _z) * 100:.0f}%)</td></tr>')
+        _th2 = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">🩺 母集団から落ちた銘柄日（{_tot:,}件 / '
+            f'{_nb:,}銘柄日）</summary>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'ここに載った銘柄日は <b>E/H の集計に入っていません</b>。'
+            f'実発注した銘柄がここに居ると、<code>.\\fills</code> で'
+            f'「テストの母集団に無い」と出ます。<br>'
+            f'⚠ <b>落ちる銘柄が系統的に良い/悪いなら、バックテスト全体のバイアスです。</b>'
+            f'実発注と突き合わせて方向を確認すること。'
+            + (f'<br>直近日 <b>{_last}</b> の銘柄を右列に出しています。'
+               if _last else '')
+            + f'</p>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th2};text-align:left">理由</th>'
+            f'<th style="{_th2}">件数</th>'
+            + (f'<th style="{_th2}">割合</th>' if _nb else '')
+            + f'<th style="{_th2};text-align:left">直近日に落ちた銘柄</th>'
+            f'</tr></thead><tbody>{_rows}</tbody></table>'
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:10px 0 4px">H の約定の内訳</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'<b>板寄せ</b>＝寄りが既に指値以上。9:00 の板寄せで必ず約定するので'
+                f'バックテストと現実が一致します（実測でも 9/9 が滑り +0.00%）。<br>'
+                f'<b>ザラ場到達</b>＝寄りは下だったが日中に指値まで戻った。'
+                f'バックテストは「高値が触れたら約定」とみなしますが、実際は'
+                f'<b>板の待ち行列</b>があり触れただけでは約定しません。'
+                f'<b>この比率が高いほど数字は楽観側</b>です。</p>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th2};text-align:left">設定</th>'
+                f'<th style="{_th2}">板寄せ</th><th style="{_th2}">ザラ場到達</th>'
+                f'</tr></thead><tbody>{_mixr}</tbody></table>') if _mixr else "")
+            + '</details>')
+
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
     except Exception as _ehce:
         print(f"[E/H] 比較ブロック生成に失敗: {_ehce}", flush=True)
         _EH_CMP_HTML = ""
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            _EH_CMP_HTML += _eh_diag_html()
+    except Exception as _ehde:
+        print(f"[E/H] 診断ブロック生成に失敗: {_ehde}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_ORDER_RANK_TAB", "1")).strip() not in ("0", "false", "no"):
