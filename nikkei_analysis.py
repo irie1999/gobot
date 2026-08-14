@@ -15088,8 +15088,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<b>比較は下の「⚖ 現行 / E / H」表を見ること</b>'
             f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。</p>'
             + _EH_CMP_HTML
-            + _month_summary_html(_ss)
-            + _month_accordion_html(_g[0], _g[1], _dseq, "he" if _ehk == "E" else "hh")
+            + _dup_toggle_html(_ss, _g[0], _g[1], _dseq,
+                               "he" if _ehk == "E" else "hh")
             + '</div>')
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
