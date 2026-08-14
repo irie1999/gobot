@@ -14605,10 +14605,33 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         # 閾値を上げると件数が減り、1銘柄あたりの建玉が膨らむ。
         # **月次σ にも t にも現れないリスク**(σ は日次の合計で測るので、
         # 1銘柄に寄せたことそのものは見えない)。閾値を選ぶときはここを必ず見る。
+        # ★ 予算が実際に効いた日 = 発注順が結果を変えうる日。
+        #   合格を全部1単元ずつ建てても予算に収まる日は、どう並べ替えても
+        #   1円も変わらない。「順番をどうするか」を調べる前に、**そもそも
+        #   どれだけ余地があるのか**を出しておく(2026-08-15)。
+        _bud_hit: dict = {}
+        for _k2, _lset2 in _sets:
+            if "資金均等" not in str(_k2):
+                continue
+            _pre = _EH_TRADES.get(_k2) or []
+            _dpre: dict = {}
+            _dpost: dict = {}
+            for _t2 in _pre:
+                _dpre[str(_t2.get("entry_d_raw") or "")] = \
+                    _dpre.get(str(_t2.get("entry_d_raw") or ""), 0) + 1
+            for _t2 in _lset2:
+                _dpost[str(_t2.get("entry_d_raw") or "")] = \
+                    _dpost.get(str(_t2.get("entry_d_raw") or ""), 0) + 1
+            _nd = len(_dpre) or 1
+            _hit = sum(1 for _d2, _c2 in _dpre.items()
+                       if _dpost.get(_d2, 0) < _c2)
+            _bud_hit[_k2] = (_hit, _nd, len(_pre) - len(_lset2))
+
         _conc = ""
         for _k, _st in sorted((_EH_TRADES.get("_eq_conc") or {}).items()):
             if not _st or not _st.get("n"):
                 continue
+            _bh = _bud_hit.get(_k)
             _cc = "#f87171" if _st["amt_p95"] >= 2.0e6 else (
                 "#fbbf24" if _st["amt_p95"] >= 1.2e6 else "#94a3b8")
             # 予算に対する比を主軸にする。円だけだと予算を変えたときに
@@ -14641,7 +14664,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + (f'<br><span style="color:#fbbf24;font-size:0.7rem">'
                    f'金額上限超え {_st.get("ycap", 0):,}</span>'
                    if _EQ_MAX_YEN > 0 and _st.get("ycap") else "")
-                + '</td></tr>')
+                + '</td>'
+                + (f'<td style="text-align:right;padding:2px 8px;'
+                   f'color:{"#fbbf24" if _bh[0] / max(1, _bh[1]) >= 0.3 else "#94a3b8"}">'
+                   f'<b>{_bh[0] / max(1, _bh[1]) * 100:.0f}%</b>'
+                   f'<span style="color:#64748b;font-size:0.72rem"> '
+                   f'{_bh[0]}/{_bh[1]}日<br>-{_bh[2]:,}件</span></td>'
+                   if _bh else '<td style="text-align:right;padding:2px 8px;'
+                   'color:#64748b">—</td>')
+                + '</tr>')
 
         _th = ('color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right')
         return (
@@ -14770,7 +14801,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<b>{"ギャップ降順" if _EQ_ORDER != "liq" else "流動性降順"}</b>'
                 f'（<code>set LSS_EQ_ORDER=liq</code> で H と同じ流動性順に戻せます）。'
                 f'⛔ N を<b>この10ヶ月で選ぶと過剰適合</b>です(18.28)。'
-                f'判定は必ず擬似OOS(前半/後半)と walk-forward で。</p>'
+                f'判定は必ず擬似OOS(前半/後半)と walk-forward で。'
+                f'<br>★ <b>「予算が効いた日」が発注順を調べる余地そのもの</b>です。'
+                f'合格を全部1単元ずつ建てても予算に収まる日は、どう並べ替えても'
+                f'<b>1円も変わりません</b>。この割合が小さいなら、順番をいくら'
+                f'いじっても全体は動きません。</p>'
                 f'<table style="border-collapse:collapse;font-size:0.8rem">'
                 f'<thead><tr><th style="{_th};text-align:left">方式</th>'
                 f'<th style="{_th}">件数/日 中央<br><span style="font-weight:400;'
@@ -14781,6 +14816,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<th style="{_th}">最大<br><span style="font-weight:400;'
                 f'font-size:0.68rem">(予算比)</span></th>'
                 f'<th style="{_th}">単元上限に当たった</th>'
+                f'<th style="{_th}">予算が効いた日<br><span style="font-weight:400;'
+                f'font-size:0.68rem">(=順番が結果を変えうる日)</span></th>'
                 f'</tr></thead><tbody>{_conc}</tbody></table>') if _conc else "")
             + '</details>')
 
