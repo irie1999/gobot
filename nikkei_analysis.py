@@ -15812,6 +15812,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'</tr></thead><tbody>{_mixr}</tbody></table>') if _mixr else "")
             + '</details>')
 
+    # ── 分析ブロック群の一括スイッチ ─────────────────────────────
+    # 朝の発注に要るのは **シグナルタブ**と ⚖比較 だけ。下の4ブロックは
+    # 予算シミュを何十回も回すので重く、毎日見るものでもない。
+    #   set LSS_HEAVY_BLOCKS=0  → 発注順 / 予算スイープ / 戦略別 / フィルタ探索 を飛ばす
+    # ⚖比較・母集団診断・寄り前(2.3s) は軽いので常に出す。
+    _HEAVY_OK = str(os.environ.get("LSS_HEAVY_BLOCKS", "1")).strip() \
+        not in ("0", "false", "no")
+    if not _HEAVY_OK:
+        print("[分析ブロック] スキップ (LSS_HEAVY_BLOCKS=0): 発注順 / 予算スイープ / "
+              "戦略別 / フィルタ探索。⚖比較と母集団診断は出します", flush=True)
     try:
         _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
     except Exception as _ehce:
@@ -15823,7 +15833,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     except Exception as _ehde:
         print(f"[E/H] 診断ブロック生成に失敗: {_ehde}", flush=True)
     try:
-        if _LSS_ORDER_MODE and _eh_sorted:
+        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
             import time as _fst
             _t0 = _fst.time()
             _fs = _filter_scan_html()
@@ -15834,7 +15844,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     except Exception as _fsce:
         print(f"[フィルタ探索] 生成に失敗: {_fsce}", flush=True)
     try:
-        if _LSS_ORDER_MODE and _eh_sorted and str(
+        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_ORDER_RANK_TAB", "1")).strip() not in ("0", "false", "no"):
             import time as _ort
             _t0 = _ort.time()
@@ -15843,7 +15853,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     except Exception as _orce:
         print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
     try:
-        if _LSS_ORDER_MODE and _eh_sorted and str(
+        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_BUDGET_SWEEP_TAB", "1")).strip() \
                 not in ("0", "false", "no"):
             import time as _bst
@@ -15853,7 +15863,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     except Exception as _bsce:
         print(f"[予算] スイープ生成に失敗: {_bsce}", flush=True)
     try:
-        if _LSS_ORDER_MODE and _eh_sorted and str(
+        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted and str(
                 os.environ.get("LSS_STRAT_LOO_TAB", "1")).strip() not in ("0", "false", "no"):
             import time as _slt
             _t0 = _slt.time()
