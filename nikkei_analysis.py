@@ -13862,8 +13862,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 return (v if asc else -v, )
             return k
 
+        # ★ その日その銘柄に何本のシグナルが立ったか(= 何戦略が一致したか)。
+        #   重複保有の正体。同じ銘柄が複数戦略で点灯すると 100株ずつ別建てになる。
+        #   ⛔ src(現行/E/H)が変わっても銘柄・日は同じ(同じシグナルから作る)ので、
+        #      現行プールで数えた表を全 src で使ってよい。
+        from collections import Counter as _Cnt
+        _ALLY = _Cnt((str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""),
+                      str(_t.get("symbol", "")))
+                     for _t in _bt30_entry_sorted)
+
+        def _ally_n(_t) -> int:
+            return _ALLY.get((str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""),
+                              str(_t.get("symbol", ""))), 1)
+
+        def _ally_key(_t):
+            # 一致数の多い順。同数なら既定(流動性順)にそのまま委ねる。
+            return (-_ally_n(_t),) + tuple(_bud_order_key(_t))
+
         _NSEED = int(os.environ.get("LSS_ORDER_RANK_SEEDS", "12") or 12)
         _cands = [("流動性順(既定)", None),          # None = _bud_order_key
+                  ("★戦略一致 多い順", _ally_key),
                   ("BT降順", lambda _t: (-float(_eff_long_bt(_t) or 0),
                                          _tkey(_t))),
                   ("建値 安い順", _price_key(True)),
