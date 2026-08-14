@@ -10545,11 +10545,24 @@ function switchTbd(id, tab) {{
             #      発注すると5分遅れる。その差が『確認できる利点』を上回るかを測る。
             #   ⚠ 損切り遅延は 0。成行なので約定価格が確定しており、delay1 の
             #      機構的な根拠(18.9)が当てはまらない。
-            for _gv in [float(x) for x in str(os.environ.get(
-                    "LSS_H_CONFIRM_GAPS", "0,50,100")).split(",")
-                    if str(x).strip().lstrip("+-").replace(".", "").isdigit()]:
+            _gaps = [float(x) for x in str(os.environ.get(
+                "LSS_H_CONFIRM_GAPS", "0,50,100")).split(",")
+                if str(x).strip().lstrip("+-").replace(".", "").isdigit()]
+            for _gv in _gaps:
                 _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
                                0, "fill", None, _gv))
+            # ★★ 同じギャップ条件を **指値** で取る版 (2026-08-15)
+            #   指値を pc*(1+g) に置いた寄指は、建てる条件が寄り確認とまったく
+            #   同じ(寄り >= その値)。違うのは **約定価格** だけ:
+            #     寄り確認 … 09:05 の価格(寄りから5分遅れる)
+            #     高い指値 … **寄り値**(板寄せ。その値以上で売れる)
+            #   つまりギャップを取るなら待つ必要はなく、指値を上げればよい
+            #   はず。ここを直接比較して確かめる。
+            #   ⚠ これまで測った指値は全部マイナス方向(-5/-10tick / -25〜-90bp)。
+            #      +0tick より上は一度も測っていない。
+            for _gv in _gaps:
+                _hvars.append((f"H指値{_gv:+.0f}bp寄指", 0, True,
+                               _eh_delay, "fill", _gv))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -13938,7 +13951,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _sets.append((_k, _v))
         # 寄指はタブを持たない(変種)ので、ここで予算シミュを通して並べる。
         for _hk in (["H寄指"] + [k for k in ((_EH_TRADES or {}).get("_h_variants")
-                                             or []) if str(k).startswith("H寄り確認")]):
+                                             or []) if str(k).startswith(("H寄り確認", "H指値"))]):
             _hax = (_EH_TRADES or {}).get(_hk) or []
             if not _hax:
                 continue
@@ -14317,7 +14330,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _srcs = [("現行", None, None)]
         _nf = (_EH_TRADES or {}).get("約定せず") or {}
         _keys = ["E", "H", "H寄指"] + [k for k in ((_EH_TRADES or {}).get(
-            "_h_variants") or []) if str(k).startswith("H寄り確認")]
+            "_h_variants") or []) if str(k).startswith(("H寄り確認", "H指値"))]
         for _k in _keys:
             _v = (_EH_TRADES or {}).get(_k) or []
             if _v:
