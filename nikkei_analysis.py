@@ -10714,6 +10714,62 @@ function switchTbd(id, tab) {{
             print(f"[E/H] トレード生成に失敗(タブは出しません): {_ehe}", flush=True)
             _EH_TRADES = {}
 
+    # ── ★ 資金均等版(09:00 に件数が分かる方式だけが使える) ────────────────
+    # ⛔ **事前の指値と 09:00確認では資金の使い方がまったく違う**(2026-08-15)。
+    #    事前の高い指値: どれが約定するかは 09:00 まで分からない。寄指は板寄せで
+    #      **一斉に約定**するので over-subscribe が成り立たず(18.36)、
+    #      最悪ケース(全部約定)でサイズを決めるしかない = 平均的に資金が遊ぶ。
+    #    09:00確認: 該当銘柄が確定してから発注するので **予算 ÷ 件数** で
+    #      割り切れる = 常に満額。
+    #    100株固定で比べると、この唯一の利点を潰してしまう。
+    # ⚠ 資金を1〜3銘柄に集中させるので σ は跳ねる。18.30 で「σ削減が唯一効く
+    #    レバー」と出ているので、**合計だけでなく必ず月次σを見ること**。
+    # ⚠ 単元100株。1件あたり最低100株、最大は予算/件数/建値で決まる。
+    try:
+        _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
+
+        def _size_equal_by_day(_ts, _budget):
+            """その日の件数で予算を均等割りし、100株単位で建て直す。"""
+            _by: dict = {}
+            for _t in _ts:
+                if _t.get("reason") in ("約定せず",):
+                    continue
+                _by.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
+            _out = []
+            for _d, _lst in _by.items():
+                _per = _budget / max(1, len(_lst))
+                for _t in _lst:
+                    _ep = float(_t.get("entry_p", 0) or 0)
+                    _xp = float(_t.get("exit_p", 0) or 0)
+                    if _ep <= 0:
+                        continue
+                    _lot = max(1, min(_EQ_MAX_LOT, int(_per // (_ep * 100))))
+                    _n = dict(_t)
+                    _n["qty"] = _lot * 100
+                    _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
+                    _out.append(_n)
+            return _out
+
+        _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
+                    if str(k).startswith("H寄り確認")]
+        _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
+        for _k in _EQ_KEYS:
+            _v = _EH_TRADES.get(_k) or []
+            if not _v:
+                continue
+            _nk = f"{_k}資金均等"
+            _EH_TRADES[_nk] = _size_equal_by_day(_v, _EQ_BUD)
+            _EH_TRADES.setdefault("約定せず", {})[_nk] = []
+            _EH_TRADES["_h_variants"] = list(
+                _EH_TRADES.get("_h_variants") or []) + [_nk]
+        if _EQ_KEYS:
+            print(f"[E/H] 資金均等版を {len(_EQ_KEYS)}本 追加 "
+                  f"(予算{_EQ_BUD / 1e4:.0f}万 ÷ その日の件数 / 最大{_EQ_MAX_LOT}単元)。"
+                  f"09:00 に件数が分かる方式だけが使える割り当て", flush=True)
+    except Exception as _eqe:
+        print(f"[E/H] 資金均等版の生成に失敗: {_eqe}", flush=True)
+
+
     # ── H(指値売り)の明細CSV ────────────────────────────────────────────────
     # ⛔ 実発注は H なのに、.\fills は lss(逆指値)の明細と突合していた(2026-08-13)。
     #    lss は『前日終値-1tick まで下がったら約定』なので、寄りで上に飛んで戻らな
@@ -14114,6 +14170,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 if _cf in _have:
                     _PAIRS.append((_k, _cf))
                 _PAIRS.append((_k, "H寄指"))
+        # ★ 資金均等版 vs H。**これが本命の比較**(2026-08-15)。
+        #   事前の指値は「どれが約定するか分からない」ので資金を集中できない。
+        #   09:00確認だけが 予算÷件数 で割り切れる。100株固定で比べると
+        #   その唯一の利点が消えるので、資金均等版を H と直接ぶつける。
+        for _k in sorted(_have):
+            if str(_k).endswith("資金均等"):
+                _PAIRS.append((_k, "H"))
+                _b = str(_k)[:-4]
+                if _b in _have:
+                    _PAIRS.append((_k, _b))
         _PAIRS = tuple(_PAIRS)
         _pr = ""
         for x, y in _PAIRS:
