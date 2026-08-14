@@ -2164,8 +2164,35 @@ def _fmt_score_cell(s: dict, col: str) -> str:
     # どの基準月由来かを見分けられるようにする(例 「基 12/6」)。
     _sb = s.get("src_base") or _lss_src_base_of(
         s.get("symbol") or s.get("sym"), s.get("strategy") or s.get("strat"))
-    _src_badge = (f'<span style="font-size:0.62rem;color:#38bdf8;font-weight:700;display:block;'
-                  f'margin-top:1px" title="選定基準月">基&nbsp;{_sb}</span>') if _sb else ""
+    # ⚠ 効いているのは **先頭(初出)** で、末尾ではない。
+    #   「基 10/11/12/1/…/7」の "7" を見て「7月のデータで選んでいる」と
+    #   読み違える(2026-08-14 に2度)。START_DATES は初出しか見ない
+    #   (merge_lss_proposals:198 は最古のみ保持)ので、後ろの月は
+    #   『その基準月でも生き残った』という履歴でしかない。
+    #   初出を強調し、解禁月(= 初出の翌月)も並べて出す。
+    _src_badge = ""
+    if _sb:
+        _parts = [p for p in str(_sb).split("/") if p]
+        _head = (f'<b style="color:#7dd3fc">{_parts[0]}</b>'
+                 + ("/" + "/".join(_parts[1:]) if len(_parts) > 1 else ""))
+        _sd_lab = ""
+        try:
+            _cn2 = str(s.get("symbol") or s.get("sym") or "").upper() \
+                .removesuffix(".T").split(".")[0]
+            _sd2 = _LSS_START_DATES.get(
+                (_cn2, s.get("strategy") or s.get("strat")))
+            if _sd2:
+                _sd_lab = (f'<span style="color:#94a3b8;font-weight:400">'
+                           f'&nbsp;解禁{str(_sd2)[2:7]}</span>')
+        except Exception:
+            pass
+        _src_badge = (
+            f'<span style="font-size:0.62rem;color:#38bdf8;font-weight:700;'
+            f'display:block;margin-top:1px" title="選定基準月。'
+            f'先頭=初出で、その翌月1日から集計対象になる(START_DATES)。'
+            f'後ろの月は『その基準月でも生き残った』という履歴で、'
+            f'集計にも発注順にも使わない。">'
+            f'基&nbsp;{_head}{_sd_lab}</span>')
     # ⛔ BTスコアは HTML にも出さない(2026-08-13 ユーザー指示)。
     #    アルゴリズムから外した(2026-08-12)うえ、画面に残っていると
     #    「BTが高いから優先」と読んでしまう。BT由来のバッジ(bt_type/取引件数)も
