@@ -10527,6 +10527,17 @@ function switchTbd(id, tab) {{
             _hae = str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() \
                 in ("1", "true", "True", "yes")
             _hvars = [("H", _hte, _hae)]
+            # ★ 寄指(板寄せのみ=ザラ場到達を取らない)を **常に** 併走させる。
+            #   2026-08-14 の当たり/外れ率で、186検定のうち **単調に並んだのは
+            #   『寄りが指値をどれだけ上回ったか』だけ** だった:
+            #     ザラ場到達      利確率  6.8%(z-4.5) / 外れ率 8.1%(z+4.9)
+            #     寄りギャップQ4  利確率 14.9%(z+3.4) / 外れ率 3.8%
+            #   合計損益では z=+2.05 で閾値未満だったが、それは合計が裾に
+            #   支配される(上位1%で利益の43%)ため。率で見ると明確に出る。
+            #   ザラ場到達を切るのが寄指なので、予算スイープで直接比較する。
+            #   追加コストは決済判定1回ぶんだけ(5分足は共通で読み済み)。
+            if not _hae:
+                _hvars.append(("H寄指", _hte, True, _eh_delay, "fill"))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -10538,6 +10549,8 @@ function switchTbd(id, tab) {{
                                  (0, True), (-2, True), (-5, True), (-10, True)):
                     if (_vt, _va) == (_hte, _hae):
                         continue          # 既定と同じものは二重に計算しない
+                    if (_vt, _va) == (_hte, True) and not _hae:
+                        continue          # 上で "H寄指" として既に足している
                     _hvars.append((f"{_vt:+d}tick "
                                    f"{'寄指' if _va else 'ザラ場込'}", _vt, _va))
                 # ── 損切り遅延(delay)を H で掃く ───────────────────────
@@ -13911,6 +13924,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _v = _eh_sorted.get(_k)
             if _v:
                 _sets.append((_k, _v))
+        # 寄指はタブを持たない(変種)ので、ここで予算シミュを通して並べる。
+        _hax = (_EH_TRADES or {}).get("H寄指") or []
+        if _hax:
+            try:
+                _sets.append(("H寄指", _run_budget_sim(
+                    _BUD_FLOOR, src=_hax,
+                    nofills=((_EH_TRADES or {}).get("約定せず") or {})
+                    .get("H寄指") or [])))
+            except Exception:
+                pass
         if len(_sets) < 2:
             return ""
 
@@ -14278,7 +14301,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             return ""
         _srcs = [("現行", None, None)]
         _nf = (_EH_TRADES or {}).get("約定せず") or {}
-        for _k in ("E", "H"):
+        for _k in ("E", "H", "H寄指"):
             _v = (_EH_TRADES or {}).get(_k) or []
             if _v:
                 _srcs.append((_k, _v, _nf.get(_k) or []))
