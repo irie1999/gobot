@@ -10394,14 +10394,83 @@ function switchTbd(id, tab) {{
             if _eh_pending:
                 print(f"[E/H] 当日ぶんの未決着シグナル {len(_eh_pending)}件も母集団に"
                       f"入れます(H は自前の約定判定を持つため)", flush=True)
-            _EH_TRADES = _eht.build(
-                _bt30_entry_sorted + _eh_pending, all_nofills,
-                sm=_LSS_SM, tm=_LSS_TM,
-                stop_delay_bars=_eh_delay,
-                gap_guard=0.03, qty=100,
-                workers=int(os.environ.get("LSS_EH_WORKERS", "6") or 6),
-                variants=_hvars,
-            ) or {}
+            # ── 同じ入力なら結果も同じなのでディスクに残す ──────────────
+            # メインのバックテストは既にキャッシュ済み([BTキャッシュ]…復元)なのに、
+            # E/H だけ毎回 1,343銘柄 × 900日 の5分足を読み直していた。
+            # 同じ日に2回目以降を回すときの最大の無駄なので、**入力の指紋**で
+            # キャッシュする。
+            # ⛔ 日付ではなく **入力そのもの** を鍵にする。日付を鍵にすると
+            #    「朝に回した結果」を引け後の実行が拾ってしまう(データが違うのに)。
+            #    母集団の (銘柄, 日, 注文値, 約定値) が1つでも変われば別キーになる。
+            _eh_key = _eh_cdir = None
+            try:
+                import hashlib as _hl
+                import pickle as _pk
+                # 決済/約定ロジックの版。run_signals_holdout_all が組み立てた
+                # 実効値(sd1 / noig / fee… を含む)を **既に読み込まれたモジュールから**
+                # 引く。ここで import すると循環するので sys.modules を見るだけ。
+                import sys as _sysm
+                _blv = str(getattr(_sysm.modules.get("run_signals_holdout_all"),
+                                   "_BT_LOGIC_VER", "") or "?")
+                _sig = ["v1", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                        f"d{_eh_delay}", repr(_hvars)]
+                for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
+                           "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
+                           "LSS_NO_INTEGRITY_GUARD", "LSS_SIZE_MODE"):
+                    _sig.append(f"{_e}={os.environ.get(_e, '')}")
+                for _t in (_bt30_entry_sorted + _eh_pending + list(all_nofills)):
+                    _sig.append("|".join((
+                        str(_t.get("symbol", "")),
+                        str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or ""),
+                        str(_t.get("strategy", "")),
+                        f'{float(_t.get("order_limit") or 0):.1f}',
+                        f'{float(_t.get("entry_p") or 0):.1f}',
+                        str(_t.get("reason", "")))))
+                _eh_key = _hl.sha1("\n".join(_sig).encode()).hexdigest()[:16]
+                _eh_cdir = Path(".eh_cache")
+                _eh_cdir.mkdir(exist_ok=True)
+                _eh_cf = _eh_cdir / f"eh_{_eh_key}.pkl"
+                if (str(os.environ.get("LSS_EH_CACHE", "1")).strip()
+                        not in ("0", "false", "no")) and _eh_cf.exists():
+                    import time as _eht0
+                    _tc = _eht0.time()
+                    with open(_eh_cf, "rb") as _f:
+                        _EH_TRADES = _pk.load(_f)
+                    print(f"[E/H] キャッシュから復元 ({_eht0.time() - _tc:.1f}s / "
+                          f"{_eh_cf.name})。5分足の読み直しを飛ばしました。"
+                          f"作り直すなら set LSS_EH_CACHE=0", flush=True)
+            except Exception as _ehke:
+                print(f"[E/H] キャッシュ判定をスキップ: {_ehke}", flush=True)
+                _eh_key = None
+            if not _EH_TRADES:
+                import time as _eht1
+                _tb = _eht1.time()
+                _EH_TRADES = _eht.build(
+                    _bt30_entry_sorted + _eh_pending, all_nofills,
+                    sm=_LSS_SM, tm=_LSS_TM,
+                    stop_delay_bars=_eh_delay,
+                    gap_guard=0.03, qty=100,
+                    workers=int(os.environ.get("LSS_EH_WORKERS", "6") or 6),
+                    variants=_hvars,
+                ) or {}
+                print(f"[E/H] トレード生成 ({_eht1.time() - _tb:.1f}s)", flush=True)
+                if _eh_key and _EH_TRADES and str(
+                        os.environ.get("LSS_EH_CACHE", "1")).strip() \
+                        not in ("0", "false", "no"):
+                    try:
+                        import pickle as _pk2
+                        with open(_eh_cdir / f"eh_{_eh_key}.pkl", "wb") as _f:
+                            _pk2.dump(_EH_TRADES, _f, protocol=4)
+                        # 古いものを掃除(更新時刻の新しい12個だけ残す)
+                        _old = sorted(_eh_cdir.glob("eh_*.pkl"),
+                                      key=lambda p: p.stat().st_mtime,
+                                      reverse=True)[12:]
+                        for _p in _old:
+                            _p.unlink(missing_ok=True)
+                        print(f"[E/H] キャッシュ保存 eh_{_eh_key}.pkl "
+                              f"(同じ入力なら次回は読み直さない)", flush=True)
+                    except Exception as _ehse:
+                        print(f"[E/H] キャッシュ保存に失敗: {_ehse}", flush=True)
         except Exception as _ehe:
             print(f"[E/H] トレード生成に失敗(タブは出しません): {_ehe}", flush=True)
             _EH_TRADES = {}
