@@ -8344,9 +8344,19 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                         continue   # 床未満は注文しない → 枠も消費しない
                         #  ⛔ ここは以前ベタ書きの 30 で、LSS_NO_BT_FILTER が
                         #     効かない**4つ目の床**だった(2026-08-13 発覚)。
+                    # ⛔ ここは以前 label/color/WF を入れ忘れており、E/H/J タブで
+                    #    この行だけ「設定」バッジが空・WFスコアも基準月バッジも
+                    #    無しで出ていた(2026-08-15 発覚)。E/H/J は不約定シグナルも
+                    #    **建てる**ので明細に出る。約定した行と同じ素性を持たせる。
                     all_nofills.append({
+                        "label": cfg["label"], "color": cfg["color"],
                         "symbol": sym, "name": name, "strategy": strat,
                         "rec_score": _n_sc, "score": _n_sc,
+                        "rank": ("★★★" if _n_sc >= 80 else "★★" if _n_sc >= 60
+                                 else "★" if _n_sc >= 40 else "△"),
+                        "is_wf": is_wf2, "wf_score": wf_score2,
+                        "bt_type": bt_type2,
+                        "signal_dt_raw": _n_sd,
                         "entry_d_raw": _n_ed, "exit_d_raw": _n_ed,
                         "order_limit": _n_lp, "entry_p": _n_lp,
                         "qty": _nt.get("qty", 0), "reason": "約定せず", "pnl": 0.0,
@@ -10690,7 +10700,10 @@ function switchTbd(id, tab) {{
                 import sys as _sysm
                 _blv = str(getattr(_sysm.modules.get("run_signals_holdout_all"),
                                    "_BT_LOGIC_VER", "") or "?")
-                _sig = ["v1", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                # v2: 不約定シグナルに label/color/WF/rank を持たせた
+                #     (2026-08-15)。トレード dict の中身が変わるので、
+                #     古いキャッシュを引くと 設定バッジが空のままになる。
+                _sig = ["v2", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
