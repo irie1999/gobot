@@ -15712,13 +15712,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _sec = {}
 
         # 直近の同銘柄トレード結果(日付順に走査して1つ前の pnl の符号を持たせる)
+        # ⛔ **同日は使わない**(2026-08-14 修正)。lss/H は同日決済なので、同じ銘柄が
+        #    同じ日に複数戦略でシグナルを出すと損益が同一になり、『前回』として
+        #    自分自身の結果を見てしまう = 09:00 には分からない情報 = 先読み。
+        #    直前の結果は **エントリー日より前に決済したもの** に限る。
         _prev: dict = {}
-        _last: dict = {}
+        _last: dict = {}          # sym -> (決済日, pnl)
         for _t in sorted(_pool, key=lambda x: str(x.get("entry_d_raw") or "")):
             _s = str(_t.get("symbol", ""))
-            _prev[_tk(_t)] = _last.get(_s)
+            _d = str(_t.get("entry_d_raw") or "")
+            _pv = _last.get(_s)
+            _prev[_tk(_t)] = (_pv[1] if (_pv and _pv[0] < _d) else None)
             if _t.get("reason") not in ("発注中", "保有中", "約定せず"):
-                _last[_s] = float(_t.get("pnl", 0) or 0)
+                _xd = str(_t.get("exit_d_raw") or _d)
+                if not _pv or _xd >= _pv[0]:
+                    _last[_s] = (_xd, float(_t.get("pnl", 0) or 0))
 
         def _q_label(vals, v, n=4):
             """v が vals の何分位かを 'Q1(最小)' 形式で返す。"""
