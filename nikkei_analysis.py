@@ -81,6 +81,28 @@ _SHOW_BASE_DETAIL = str(os.environ.get("LSS_BASE_DETAIL", "0")).strip() \
     not in ("", "0", "false", "no", "off")
 _SHOW_E_TABS = str(os.environ.get("LSS_E_TABS", "0")).strip() \
     not in ("", "0", "false", "no", "off")
+
+
+def _tab_on(_env: str, _default: str = "0") -> bool:
+    """取引明細のタブを出すか。既定OFFのものを env 1本で戻せるようにする。"""
+    return str(os.environ.get(_env, _default)).strip() \
+        not in ("", "0", "false", "no", "off")
+
+
+# ── 取引明細のどのタブを出すか (2026-08-15 ユーザー指示で既定OFF) ────────
+#   実際に見るのは「💰予算内」「🔁H」「🔁G(資金均等)」と ⚖比較 だけ。
+#   残りは HTML を重くするだけなので既定で描かない。
+#   ⚠ 集計・検定の数字はここに一切影響されない(集計は打ち切り前の全件で別計算)。
+#   戻すときは対応する env を 1 にするだけ:
+#     LSS_TAB_ALL=1     … 「全部（決済日順）」
+#     LSS_TAB_ENTRY=1   … 「エントリー日別」
+#     LSS_TAB_TENKAN=1  … 「転換」
+#     LSS_TAB_EH_ALL=1  … 「H/G の全取引(予算の制約なし)」
+#   ※ LSS_BASE_DETAIL=1 は中身とタブの両方を戻す(片方だけ戻しても意味がない)。
+_SHOW_TAB_ALL = _tab_on("LSS_TAB_ALL") or _SHOW_BASE_DETAIL
+_SHOW_TAB_ENTRY = _tab_on("LSS_TAB_ENTRY") or _SHOW_BASE_DETAIL
+_SHOW_TAB_TENKAN = _tab_on("LSS_TAB_TENKAN")
+_SHOW_TAB_EH_ALL = _tab_on("LSS_TAB_EH_ALL")
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
@@ -11201,15 +11223,34 @@ function switchTbd(id, tab) {{
     _eh_grid: dict = {}
     _eh_all: dict = {}          # 予算で切る前の全件(全取引タブ用)
     _eh_all_grid: dict = {}
+    # ★ G = 09:00確認方式(ギャップ+Nbp を合格として、その日の合格銘柄に
+    #   予算を均等割り)。H の隣にタブとして出す。どの変種を出すかは env で
+    #   差し替えられる(閾値を変えて比べたいとき)。
+    _EQ_TAB_KEY = str(os.environ.get(
+        "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
+    _EQ_TAB_GAP = "".join(
+        _c for _c in _EQ_TAB_KEY.split("bp")[0][-5:] if _c.isdigit()) or "50"
+    _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
+    _EQ_TAB_LBL = f"09:00確認{_EQ_TAB_GAP} 資金均等"
     if _LSS_ORDER_MODE and _EH_TRADES:
         _EH_NF = _EH_TRADES.get("約定せず") or {}
-        for _ehk, _ehpfx in (("E", "he"), ("H", "hh")):
-            _src = _EH_TRADES.get(_ehk) or []
+        _EH_PAIRS = [("E", "he"), ("H", "hh")]
+        if _EH_TRADES.get(_EQ_TAB_KEY):
+            _EH_PAIRS.append(("G", "hg"))
+        else:
+            print(f"[E/H] 資金均等タブ: キー '{_EQ_TAB_KEY}' が見つかりません"
+                  f"(候補: "
+                  + ", ".join(k for k in (_EH_TRADES.get("_h_variants") or [])
+                              if str(k).endswith("資金均等"))
+                  + ")。set LSS_EQ_TAB_KEY=... で指定", flush=True)
+        for _ehk, _ehpfx in _EH_PAIRS:
+            _srck = _EQ_TAB_KEY if _ehk == "G" else _ehk
+            _src = _EH_TRADES.get(_srck) or []
             if not _src:
                 continue
             try:
                 _ss = _run_budget_sim(_BUD_FLOOR, src=_src,
-                                      nofills=(_EH_NF.get(_ehk) or []))
+                                      nofills=(_EH_NF.get(_srck) or []))
                 _eh_sorted[_ehk] = _ss        # ← 集計用。**切らない**
                 # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
                 #   見たい」用。予算内タブ(上)は毎日 流動性順に400万で切るので、
@@ -11244,9 +11285,10 @@ function switchTbd(id, tab) {{
                     pass
                 else:
                     _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
-                    _eh_all[_ehk] = _ss_all_view
-                    _eh_all_grid[_ehk] = _build_entry_grid(_ss_all_view,
-                                                           _ehpfx + "A")
+                    if _SHOW_TAB_EH_ALL:
+                        _eh_all[_ehk] = _ss_all_view
+                        _eh_all_grid[_ehk] = _build_entry_grid(
+                            _ss_all_view, _ehpfx + "A")
                 print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件 / 母集団 {len(_src)}件 "
                       f"/ 全取引タブ {_ncut}件"
                       + (f"  ← 明細は直近{_DETAIL_ROW_CAP}件で打ち切り"
@@ -14052,14 +14094,40 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
-    for _ehk in ("E", "H"):
+    for _ehk in ("E", "H", "G"):
         if _eh_grid.get(_ehk):
             _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
+    # 既定で開くタブ。「全部（決済日順）」を隠したので、代わりに最初に見たいもの
+    # (G=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
+    # detail_<seq>_all の存在を前提にコンテナを探すので、**all の div は残す**
+    # (中身だけ空にする)。
+    _DEF_TAB = next((x for x in ("ehG", "ehH", "budget", "all")
+                     if x in _detail_tab_ids), "all")
+    # 隠してよいのは「他に着地できるタブがあるとき」だけ。ロング/ショートの
+    # レポートには E/H も予算タブも無いので、そこでは従来どおり全部出す
+    # (隠すとボタンが1つも無くなって切り替え不能になる)。
+    _CAN_HIDE = _DEF_TAB != "all"
+
+    def _act(_tid: str) -> str:
+        return " active" if _tid == _DEF_TAB else ""
 
     # 予算固定(400万円/日・BT降順)タブ(lssのみ、ショートのみ)。ボタンとペインをここで組み立てる。
     _bt40liq_btn = ""
     _bt40liq_pane = ""
+    # 「全部（決済日順）」「エントリー日別」のボタン。既定OFF(2026-08-15)。
+    # ⛔ ペインの div は消さない。JS の switchDetailTab が detail_<seq>_all を
+    #    起点にコンテナを探すので、消すとタブ切替が全部動かなくなる。
+    _all_btn = ('' if (_CAN_HIDE and not _SHOW_TAB_ALL) else
+                f'<button class="detail-tab-btn{_act("all")}" '
+                f'onclick="switchDetailTab({_dseq},\'all\')">全部（決済日順） '
+                f'<span style="font-size:0.72rem;color:#94a3b8">'
+                f'({len(sorted_trades)})</span></button>')
+    _entry_btn = ('' if (_CAN_HIDE and not _SHOW_TAB_ENTRY) else
+                  f'<button class="detail-tab-btn{_act("entry")}" '
+                  f'onclick="switchDetailTab({_dseq},\'entry\')">エントリー日別 '
+                  f'<span style="font-size:0.72rem;color:#94a3b8">'
+                  f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
     # ⛔ BTを画面に出さない方針(2026-08-13)。BT60以上タブも落とす。LSS_SHOW_BT=1 で復活。
     _bt60_btn = ('' if not _SHOW_BT else
                  f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'
@@ -14068,13 +14136,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                  f'({len(bt60_trades)})</span></button>')
     if _LSS_ORDER_MODE:
         _bt40liq_btn = (
-            f'<button class="detail-tab-btn" onclick="switchDetailTab({_dseq},\'budget\')" '
+            f'<button class="detail-tab-btn{_act("budget")}" onclick="switchDetailTab({_dseq},\'budget\')" '
             f'style="border-color:#38bdf8">💰 {_budget_man}万円×{_ORD_LBL}×日別'
             + (f' (BT{_BT_TAB_MIN}以上)' if (_SHOW_BT and _BT_TAB_MIN > 0) else '') + ' '
             f'<span style="font-size:0.72rem;color:#7dd3fc">'
             f'(直近{_ENTRY_GRID_DAYS}日)</span></button>')
         _bt40liq_pane = (
-            f'<div id="detail_{_dseq}_budget" class="detail-tab-pane">'
+            f'<div id="detail_{_dseq}_budget" class="detail-tab-pane{_act("budget")}">'
             f'<p style="color:#7dd3fc;font-size:0.8rem;margin-bottom:10px">'
             f'💰 毎日その日の{_ORD_LBL}で、必要資金(<b>注文トリガー価格＝前日終値ベース</b>×100株)の累計が '
             f'<b>{_budget_man}万円</b> に収まるだけ<b>注文</b>した場合の「約定したトレード」を表示'
@@ -16738,8 +16806,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "翌朝9:00の<b>寄成売り</b>(板寄せでほぼ必ず約定)"),
                "H": ("H 前日終値の指値", "#f0abfc", "#f5d0fe",
                      "<b>前日終値の指値売り</b>(上がって到達したら約定。"
-                     "寄りが既に上なら板寄せ。届かなければ建てない)")}
-    for _ehk in ("E", "H"):
+                     "寄りが既に上なら板寄せ。届かなければ建てない)"),
+               "G": (f"G {_EQ_TAB_LBL}", "#facc15", "#fde68a",
+                     "09:00 の<b>始値</b>を見て、前日終値比のギャップが"
+                     f"<b>{_EQ_TAB_GAP}</b>以上の銘柄だけを合格とし、"
+                     "<b>その日の合格銘柄に予算を均等割り</b>して即成行売り"
+                     "(約定は始値で近似)")}
+    for _ehk in ("E", "H", "G"):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)
@@ -16748,10 +16821,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
         # ⛔ _ehpfx はこのループでは定義されない(上の別ループの残り値が入り、
         #    E でも "hh" になって DOM id が H と衝突する)。ここで作り直す。
-        _ehpfx = "he" if _ehk == "E" else "hh"
+        _ehpfx = {"E": "he", "H": "hh", "G": "hg"}[_ehk]
         _ss = _eh_sorted.get(_ehk) or []
         _eh_btn += (
-            f'<button class="detail-tab-btn" '
+            f'<button class="detail-tab-btn{_act("eh" + _ehk)}" '
             f'onclick="switchDetailTab({_dseq},\'eh{_ehk}\')" '
             f'style="border-color:{_bc}">🔁 {_lbl} '
             f'<span style="font-size:0.72rem;color:{_tc}">({len(_ss)}件)</span></button>')
@@ -16785,19 +16858,32 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + _dup_toggle_html(_sa, _ga[0], _ga[1], _dseq, _ehpfx + "A")
                 + '</div>')
         _eh_pane += (
-            f'<div id="detail_{_dseq}_eh{_ehk}" class="detail-tab-pane">'
+            f'<div id="detail_{_dseq}_eh{_ehk}" '
+            f'class="detail-tab-pane{_act("eh" + _ehk)}">'
             f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
             f'🔁 <b>エントリー方式 {_ehk}</b>: {_desc}。'
             f'シグナル・銘柄選定・発注順・決済(損切/利確/引け成行)は'
             f'<b>現行とまったく同一</b>で、違うのは<b>注文の出し方だけ</b>。'
-            f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
-            f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
-            f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。'
-            f'<b>比較は下の「⚖ 注文方式の比較」表を見ること</b>'
+            + ('株数だけが違います（H は100株固定 / G は '
+               f'<b>{_budget_man}万円 ÷ その日の合格件数</b> を100株単位に'
+               f'切り下げ・最大{_EQ_MAX_LOT}単元）。'
+               f'<br>この数字は下の ⚖ 表の '
+               f'<b>「{_EQ_TAB_KEY}」</b>列と同一です'
+               f'（同じ <code>_run_budget_sim</code> の出力）。'
+               '<br>⚠ <b>まだ実運用していません</b>（実運用は H）。'
+               '09:00 に始値を見てから発注する自動化が必要で、'
+               '約定価格を<b>始値で近似</b>している点は '
+               '<code>.\\fills</code> の実約定で確認するまで未検証です。'
+               '<br>⚠ 不約定はありません（ギャップを確認してから発注するので、'
+               '<b>発注枠を空振りに使わない</b>）。これも H との構造的な違いです。'
+               if _ehk == "G" else
+               f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
+               f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
+               f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。')
+            + f'<b>比較は下の「⚖ 注文方式の比較」表を見ること</b>'
             f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。</p>'
             + _EH_CMP_HTML
-            + _dup_toggle_html(_ss, _g[0], _g[1], _dseq,
-                               "he" if _ehk == "E" else "hh")
+            + _dup_toggle_html(_ss, _g[0], _g[1], _dseq, _ehpfx)
             + '</div>')
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
@@ -16810,7 +16896,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _TK_OCO_LBL = "時間決済のみ"
     _tenkan_tab_btn = ""
     _tenkan_tab_pane = ""
-    if _LSS_ORDER_MODE and not _tenkan_all:
+    # 転換は 18.26b で「発注ルールに組み込まない・記録専用」と確定済み。
+    # 見ないタブなので既定OFF(2026-08-15)。戻すなら set LSS_TAB_TENKAN=1
+    # ⚠ 明細グリッドの構築ごと止める(HTMLとメモリのため)。転換トレード自体は
+    #    生成されたままなので、他タブの集計・⚖比較の数字は変わらない。
+    _TK_TAB_OK = (not _CAN_HIDE) or _SHOW_TAB_TENKAN
+    if _TK_TAB_OK and _LSS_ORDER_MODE and not _tenkan_all:
         # 0件でもタブを出して理由を表示する(タブごと消すと原因が分からない)。
         _tk_diag = (_TENKAN_DIAG or "理由不明（run_signals_holdout_all のログを確認してください）")
         _tk_diag = (_tk_diag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -16834,7 +16925,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'python run_oos_folds.py</code> で生成するか、既存の CSV をコピーしてください。'
             f'</div></div></div>'
         )
-    if _LSS_ORDER_MODE and _tenkan_all:
+    if _TK_TAB_OK and _LSS_ORDER_MODE and _tenkan_all:
         _tenkan_entry_sorted = sorted(
             _tenkan_all,
             key=lambda x: x.get("entry_d_raw") or x["exit_d_raw"],
@@ -17480,18 +17571,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 {_trend_breakdown_html}
 
 <h2>取引明細</h2>
+{'' if not _CAN_HIDE else '<p style="color:#64748b;font-size:0.72rem;margin:-6px 0 8px">見ないタブは既定で出していません（HTMLを軽くするため / 2026-08-15）。戻すには <code>set LSS_TAB_ALL=1</code>（全部・決済日順）／<code>LSS_TAB_ENTRY=1</code>（エントリー日別）／<code>LSS_TAB_TENKAN=1</code>（転換）／<code>LSS_TAB_EH_ALL=1</code>（H・Gの全取引）。<b>集計・検定の数字はこの設定に影響されません</b>。</p>'}
 {_bt_filter_banner_html()}
 {_overlap_kpi_html}
 <div class="detail-tab-nav">
-  <button class="detail-tab-btn active" onclick="switchDetailTab({_dseq},'all')">全部（決済日順） <span style="font-size:0.72rem;color:#94a3b8">({len(sorted_trades)})</span></button>
+  {_all_btn}
   {_bt60_btn}
-  <button class="detail-tab-btn" onclick="switchDetailTab({_dseq},'entry')">エントリー日別 <span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>
+  {_entry_btn}
   {_bt40liq_btn}
   {_bt70liq_btn}
   {_tenkan_tab_btn}
   {_eh_btn}
 </div>
-<div id="detail_{_dseq}_all" class="detail-tab-pane active">
+<div id="detail_{_dseq}_all" class="detail-tab-pane{_act('all')}">
 {'<p style="color:#60a5fa;font-size:0.82rem;font-weight:700;margin:4px 0 10px;border-left:3px solid #60a5fa;padding-left:8px">🔄 転換トレード(lss未約定→ロング転換): <b>' + str(len(_tenkan_in_sorted)) + '件</b> 含む（直近' + str(_DETAIL_ROW_CAP) + '件上限の外でも追加表示）</p>' if _tenkan_in_sorted else ''}
 <table>
   <thead><tr>
@@ -17520,7 +17612,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
   <tbody>{trade_rows_bt60}</tbody>
 </table>
 </div>
-<div id="detail_{_dseq}_entry" class="detail-tab-pane">
+<div id="detail_{_dseq}_entry" class="detail-tab-pane{_act('entry')}">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
 {_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e") if _SHOW_BASE_DETAIL else '<p style="color:#64748b;padding:14px">この明細は既定で非表示です（HTMLを軽くするため）。<code>set LSS_BASE_DETAIL=1</code> で表示。<b>集計・検定の数字は影響されません</b>。</p>'}
 </div>
