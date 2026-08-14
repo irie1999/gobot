@@ -15664,6 +15664,183 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             'H で発注できるのは上のコマンドだけ。</p>'
             '</details>')
 
+    def _profit_source_html():
+        """利益がどこから来ているかを2つの角度から見る。
+
+        ① 集中度 — 上位何件で利益の何割かを占めるか。
+           sm0.1 / tm1.0 は **10:1 の宝くじ型**なので、当たりは少数に集中する
+           はず。集中しているほど「法則を見つける」= 少数の当たりを事前に
+           当てる、という難しい問題になる。まず問題の形を知る。
+
+        ② 銘柄の持続性 — **これが『利益が出ている銘柄がある』の直接の検定**。
+           前半の実績で銘柄を3群に分け、**後半**の成績を見る。
+           後から見て勝った銘柄を挙げるのは簡単だが、それが事前に選べるかは別。
+           前半上位が後半も上位なら『銘柄を選ぶ』が成立する。
+           ⚠ 日クラスタ頑健で判定する(18.13)。lss/H は同日決済なので、
+             下げた日は全銘柄がまとめて勝つ。件数ベースの t は実効サンプルを
+             大きく誤認する。
+        """
+        import statistics as _sti
+        if str(os.environ.get("LSS_PROFIT_SRC", "1")).strip() in ("0", "false", "no"):
+            return ""
+        _src = (_EH_TRADES or {}).get("H") or None
+        if not _src:
+            return ""
+        _cur = _TODAY.strftime("%Y-%m")
+
+        def _mk(_t):
+            return str(_t.get("entry_d_raw") or _t.get("exit_d_raw") or "")[:7]
+
+        _done = [t for t in _src
+                 if t.get("reason") not in ("発注中", "保有中", "約定せず")
+                 and len(_mk(t)) == 7 and _mk(t) != _cur]
+        if len(_done) < 300:
+            return ""
+        _bud = [t for t in _run_budget_sim(_BUD_FLOOR, src=_src,
+                                           nofills=((_EH_TRADES or {}).get("約定せず")
+                                                    or {}).get("H"))
+                if t.get("reason") not in ("発注中", "保有中")
+                and len(_mk(t)) == 7 and _mk(t) != _cur]
+        if len(_bud) < 100:
+            _bud = _done
+
+        # ── ① 集中度 ────────────────────────────────────────────────
+        _p = sorted((float(t.get("pnl", 0) or 0) for t in _bud), reverse=True)
+        _tot = sum(_p)
+        _n = len(_p)
+        _crow = ""
+        if _tot > 0:
+            for _pc in (1, 5, 10, 20, 50):
+                _k = max(1, int(_n * _pc / 100))
+                _sub = sum(_p[:_k])
+                _crow += (
+                    f'<tr><td style="padding:2px 8px;color:#e2e8f0">上位{_pc}%'
+                    f'<span style="color:#64748b">（{_k:,}件）</span></td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#4ade80">'
+                    f'{_sub:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#fbbf24;'
+                    f'font-weight:700">{_sub / _tot * 100:.0f}%</td>'
+                    f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                    f'{_tot - _sub:+,.0f}</td></tr>')
+            _nw = sum(1 for x in _p if x > 0)
+            _crow += (
+                f'<tr style="border-top:1px solid #475569">'
+                f'<td style="padding:2px 8px;color:#94a3b8">勝ちトレード全体'
+                f'<span style="color:#64748b">（{_nw:,}件 / '
+                f'{_nw / _n * 100:.0f}%）</span></td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#4ade80">'
+                f'{sum(x for x in _p if x > 0):+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#64748b">—</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#f87171">'
+                f'{sum(x for x in _p if x < 0):+,.0f}</td></tr>')
+
+        # ── ② 銘柄の持続性 (前半で分けて後半を見る) ──────────────────
+        _ms = sorted({_mk(t) for t in _done})
+        _h = len(_ms) // 2
+        _tr_m, _te_m = set(_ms[:_h]), set(_ms[_h:])
+        _prow = ""
+        _verdict = ""
+        if _h >= 2:
+            _tr: dict = {}
+            for _t in _done:
+                if _mk(_t) in _tr_m:
+                    _a = _tr.setdefault(str(_t.get("symbol", "")), [0, 0.0])
+                    _a[0] += 1
+                    _a[1] += float(_t.get("pnl", 0) or 0)
+            _MINN = int(os.environ.get("LSS_PROFIT_SRC_MINN", "5") or 5)
+            _rk = sorted(((k, v[1] / v[0]) for k, v in _tr.items() if v[0] >= _MINN),
+                         key=lambda x: -x[1])
+            if len(_rk) >= 30:
+                _t3 = len(_rk) // 3
+                _grp = {"前半 上位1/3": {k for k, _ in _rk[:_t3]},
+                        "前半 中位1/3": {k for k, _ in _rk[_t3:2 * _t3]},
+                        "前半 下位1/3": {k for k, _ in _rk[2 * _t3:]}}
+                # TEST(後半)を日ごとに集計 → 日クラスタ頑健な t
+                _res = []
+                for _g, _syms in _grp.items():
+                    _byd: dict = {}
+                    _nn = 0
+                    _trn = sum(v for k, v in _rk if k in _syms) / max(1, len(_syms))
+                    for _t in _done:
+                        if _mk(_t) in _te_m and str(_t.get("symbol", "")) in _syms:
+                            _d = str(_t.get("entry_d_raw") or "")
+                            _byd.setdefault(_d, []).append(float(_t.get("pnl", 0) or 0))
+                            _nn += 1
+                    if _nn < 20:
+                        continue
+                    _dm = [sum(v) / len(v) for v in _byd.values()]
+                    _mu = _sti.mean(_dm)
+                    _sd = _sti.stdev(_dm) if len(_dm) > 1 else 0.0
+                    _tv = (_mu / (_sd / (len(_dm) ** 0.5))) if _sd > 0 else 0.0
+                    _res.append((_g, len(_syms), _trn, _nn, _mu, _tv))
+                for _g, _ns, _trn, _nn, _mu, _tv in _res:
+                    _c = "#4ade80" if _mu > 0 else "#f87171"
+                    _prow += (
+                        f'<tr><td style="padding:2px 8px;color:#e2e8f0">{_g}</td>'
+                        f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                        f'{_ns:,}銘柄</td>'
+                        f'<td style="text-align:right;padding:2px 8px;color:#64748b">'
+                        f'{_trn:+,.0f}</td>'
+                        f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                        f'{_nn:,}</td>'
+                        f'<td style="text-align:right;padding:2px 8px;color:{_c};'
+                        f'font-weight:700">{_mu:+,.0f}</td>'
+                        f'<td style="text-align:right;padding:2px 8px;color:{_c}">'
+                        f'{_tv:+.2f}</td></tr>')
+                if len(_res) == 3:
+                    _hi, _lo = _res[0][4], _res[-1][4]
+                    _mono = _res[0][4] >= _res[1][4] >= _res[2][4]
+                    _verdict = (
+                        f'<b style="color:{"#4ade80" if (_mono and _res[0][5] >= 2.0) else "#f87171"}">'
+                        f'前半上位 {_hi:+,.0f}円/件 ⇄ 前半下位 {_lo:+,.0f}円/件'
+                        f'（差 {_hi - _lo:+,.0f}）</b><br>'
+                        + ('順位が後半でも保たれており、t も出ています。'
+                           '<b>銘柄を選ぶ根拠になりえます</b>。次は walk-forward。'
+                           if (_mono and _res[0][5] >= 2.0) else
+                           '<b>前半の順位は後半で再現していません。</b>'
+                           '「利益が出ている銘柄」は事後にしか分からない'
+                           '＝銘柄を選ぶ根拠になりません。'))
+        if not _crow and not _prow:
+            return ""
+        _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">💰 利益はどこから来ているか（集中度 / 銘柄の持続性）'
+            f'</summary>'
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:4px 0">① 利益の集中度（予算内 {_n:,}件 / 合計 {_tot:+,.0f}円）</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'損切0.1ATR / 利確1.0ATR は <b>10:1 の宝くじ型</b>なので、当たりは'
+                f'少数に集中します。<b>集中しているほど「法則を見つける」＝少数の当たりを'
+                f'事前に当てる</b>という難しい問題になります。</p>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th};text-align:left">区分</th>'
+                f'<th style="{_th}">損益</th><th style="{_th}">合計に占める割合</th>'
+                f'<th style="{_th}">残り全部</th></tr></thead>'
+                f'<tbody>{_crow}</tbody></table>') if _crow else "")
+            + ((f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+                f'margin:12px 0 4px">② 銘柄の持続性（前半で分けて<b>後半</b>を見る）</div>'
+                f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 6px;line-height:1.7">'
+                f'<b>これが「利益が出ている銘柄がある」の直接の検定</b>です。'
+                f'前半の 円/件 で銘柄を3群に分け、<b>後半</b>の成績を見ます。'
+                f'後から見て勝った銘柄を挙げるのは簡単ですが、それを<b>事前に選べるか</b>は'
+                f'別の問題です。<br>'
+                f'⚠ t は<b>日ごとに集計してから</b>算出しています。lss/H は同日決済なので、'
+                f'下げた日は全銘柄がまとめて勝ちます。件数ベースの t は実効サンプルを'
+                f'大きく誤認します（18.13）。</p>'
+                + (f'<p style="color:#e2e8f0;font-size:0.8rem;margin:0 0 8px">'
+                   f'{_verdict}</p>' if _verdict else "")
+                + f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<thead><tr><th style="{_th};text-align:left">群</th>'
+                f'<th style="{_th}">銘柄数</th>'
+                f'<th style="{_th}">前半 円/件</th>'
+                f'<th style="{_th}">後半 件数</th>'
+                f'<th style="{_th}">後半 円/件</th><th style="{_th}">t(日)</th>'
+                f'</tr></thead><tbody>{_prow}</tbody></table>') if _prow else "")
+            + '</details>')
+
     def _filter_scan_html():
         """BT に代わるフィルタ候補を **予算シミュ + ランダム帯 + 前後半** で掃く。
 
@@ -16040,6 +16217,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _EH_CMP_HTML += _eh_diag_html()
     except Exception as _ehde:
         print(f"[E/H] 診断ブロック生成に失敗: {_ehde}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            _EH_CMP_HTML += _profit_source_html()
+    except Exception as _pse:
+        print(f"[利益の源泉] ブロック生成に失敗: {_pse}", flush=True)
     try:
         if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
             import time as _fst
