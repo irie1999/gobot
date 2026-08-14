@@ -70,6 +70,17 @@ _REPORT_END = None     # 集計終了日 (date)。None なら現在(_TODAY)ま�
 # 役目は終わったので既定では出さない。戻すなら set LSS_SHOW_STOP_BASELINE=1
 _SHOW_STOP_BASE = str(os.environ.get("LSS_SHOW_STOP_BASELINE", "0")).strip() \
     not in ("", "0", "false", "no", "off")
+# ── 重い明細タブを既定で出さない (2026-08-15 ユーザー指示) ──────────────
+#   --days 365 で HTML が巨大になり MemoryError / ブラウザが他アプリを巻き込んで
+#   落ちる状態だった。実際に見るのは H の予算内タブと ⚖比較 だけなので、
+#   使っていない明細は既定で描かない。**集計・検定の数字には一切影響しない**
+#   (集計は打ち切り前の全件で別計算)。
+#     LSS_BASE_DETAIL=1  … 逆指値(旧)の『全部(決済日順)』『エントリー日別』を出す
+#     LSS_E_TABS=1       … E(寄成)の明細タブを出す(⚖比較のE列は常に出る)
+_SHOW_BASE_DETAIL = str(os.environ.get("LSS_BASE_DETAIL", "0")).strip() \
+    not in ("", "0", "false", "no", "off")
+_SHOW_E_TABS = str(os.environ.get("LSS_E_TABS", "0")).strip() \
+    not in ("", "0", "false", "no", "off")
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
@@ -10312,10 +10323,19 @@ function switchTbd(id, tab) {{
         _capped_non_tenkan + _tenkan_extra_all,
         key=lambda x: x["exit_d_raw"], reverse=True
     )
-    trade_rows_all  = _rows_for(_sorted_trades_for_all, f"直近{days}日に決済した取引なし", cap=0)
+    _HIDDEN_NOTE = ('<tr><td colspan="15" style="padding:14px;color:#64748b;'
+                    'text-align:center">この明細は既定で非表示です'
+                    '（HTMLを軽くするため / 2026-08-15）。'
+                    '<code>set LSS_BASE_DETAIL=1</code> で表示。'
+                    '<b>集計・検定の数字はこの設定に影響されません</b>'
+                    '（全件で別計算）。</td></tr>')
+    trade_rows_all = (_rows_for(_sorted_trades_for_all,
+                                f"直近{days}日に決済した取引なし", cap=0)
+                      if _SHOW_BASE_DETAIL else _HIDDEN_NOTE)
     trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
     trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
-    trade_rows_bt60 = _rows_for(bt60_trades,   "BT60以上の取引なし")
+    trade_rows_bt60 = (_rows_for(bt60_trades, "BT60以上の取引なし")
+                       if _SHOW_BASE_DETAIL else _HIDDEN_NOTE)
 
     # ── ㉒ シグナル数別 成績（その日のBT70シグナル数と成績の関係）──
     from collections import defaultdict as _dd_b
@@ -11179,9 +11199,15 @@ function switchTbd(id, tab) {{
                 _ss_view = (_ss[:_DETAIL_ROW_CAP]
                             if _DETAIL_ROW_CAP > 0 and _nb_cut > _DETAIL_ROW_CAP
                             else _ss)
-                _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
-                _eh_all[_ehk] = _ss_all_view
-                _eh_all_grid[_ehk] = _build_entry_grid(_ss_all_view, _ehpfx + "A")
+                if _ehk == "E" and not _SHOW_E_TABS:
+                    # ⚖比較の E 列は _eh_sorted から作るので残る。
+                    # 描画用のグリッドだけ作らない(HTMLもメモリも節約)。
+                    pass
+                else:
+                    _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
+                    _eh_all[_ehk] = _ss_all_view
+                    _eh_all_grid[_ehk] = _build_entry_grid(_ss_all_view,
+                                                           _ehpfx + "A")
                 print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件 / 母集団 {len(_src)}件 "
                       f"/ 全取引タブ {_ncut}件"
                       + (f"  ← 明細は直近{_DETAIL_ROW_CAP}件で打ち切り"
@@ -16632,6 +16658,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "<b>前日終値の指値売り</b>(上がって到達したら約定。"
                      "寄りが既に上なら板寄せ。届かなければ建てない)")}
     for _ehk in ("E", "H"):
+        if _ehk == "E" and not _SHOW_E_TABS:
+            continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)
         if not _g:
             continue
@@ -17412,7 +17440,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e")}
+{_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e") if _SHOW_BASE_DETAIL else '<p style="color:#64748b;padding:14px">この明細は既定で非表示です（HTMLを軽くするため）。<code>set LSS_BASE_DETAIL=1</code> で表示。<b>集計・検定の数字は影響されません</b>。</p>'}
 </div>
 {_bt40liq_pane}
 {_bt70liq_pane}
