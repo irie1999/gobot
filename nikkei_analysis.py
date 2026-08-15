@@ -10974,22 +10974,18 @@ function switchTbd(id, tab) {{
         return (f"09:00確認+{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
                 + (f" 上位{_tp}集中" if _tp else "")
-                + (f" 1銘柄上限{_ym}万" if _ym else "")
+                + (" 1銘柄上限なし" if "上限なし" in str(_k) else
+                   (f" 1銘柄上限{_ym}万" if _ym else ""))
                 + (" 充填" if str(_k).endswith("充填") else "")
                 + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
 
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
-    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4 + 1銘柄上限100万)。
-    #   J の隣に出す。空文字にすれば出さない。
-    # ★ 上限100万 = **ユーザー判断**(2026-08-15)。1銘柄への最大露出を
-    #   397万(予算の99%) → 100万(25%)に落とす。ショートは損失に上限が無く、
-    #   delay4 は最初の20分 損切りが効かないため、テールを直接切りに行く。
-    # ⚠ これは **測れないコストではない**。月 -90,187円(利益の19% / 0.87σ)を
-    #   実際に払う。上限が効く日が16%あり、その日は予算の26%(103万/日)が
-    #   使われず寝るため。**リターンの最適化ではなくリスク管理**として選んだ。
-    #   損益だけで選ぶなら 上限200万(-19,847円/月 = 0.19σ)か上限なし。
+    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4)。J の隣に出す。
+    #   1銘柄の金額上限100万は **_EQ_MAX_YEN の既定**として全変種に掛かるので、
+    #   タブキーに 上限N万 のサフィックスは付けない(付けると sm/tm 変種と
+    #   つまみが2つずれる)。空文字にすれば出さない。
     _EQ_TAB_KEY2 = str(os.environ.get(
-        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等上限100万")).strip()
+        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
@@ -10999,7 +10995,12 @@ function switchTbd(id, tab) {{
     _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
     try:
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
-        _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
+        # ★ 1銘柄の金額上限は **全変種に共通で掛ける**(2026-08-15)。
+        # ⛔ 基準だけに掛けて sm/tm/delay の変種に掛けないと、比較が
+        #    「上限あり sm0.1」vs「**上限なし** sm0.5」= つまみ2つ になり、
+        #    sm/tm が一斉に ✅ に見える(実際そうなった)。上限の是非は
+        #    『上限なし / 150 / 200』の変種で測る。
+        _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "100") or 0) * 1e4
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0):
@@ -11037,7 +11038,9 @@ function switchTbd(id, tab) {{
             _idle: list = []          # 1日あたりの遊んだ金額
 
             # 変種ごとの金額上限(_ymax)があればそれを優先。無ければ env の全体設定。
-            _yc = _ymax if _ymax > 0 else _EQ_MAX_YEN
+            # ⛔ _ymax < 0 は「この変種だけ上限を外す」の意(=『上限なし』の行)。
+            #    0 と区別すること。0 は「指定なし=env に従う」。
+            _yc = 0.0 if _ymax < 0 else (_ymax if _ymax > 0 else _EQ_MAX_YEN)
 
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
@@ -11222,10 +11225,16 @@ function switchTbd(id, tab) {{
             #      **最悪ケースを直せるのは金額上限だけ**。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
                 _eq_modes.append((0, False, True, 0.0))
+                # ★ 金額上限は _EQ_MAX_YEN(既定100万)で **全変種に掛かっている**。
+                #   ここで作るのは「その上限を動かした版」。0 = 上限なし
+                #   (_size_equal_by_day には負値で渡して env の既定を無効化する)。
                 for _eqy in [float(x) for x in str(os.environ.get(
-                        "LSS_EQ_MAX_YENS", "100,150,200")).split(",")
+                        "LSS_EQ_MAX_YENS", "0,150,200")).split(",")
                         if str(x).strip().replace(".", "").isdigit()]:
-                    _eq_modes.append((0, False, False, _eqy * 1e4))
+                    if _eqy * 1e4 == _EQ_MAX_YEN:
+                        continue          # 既定と同じ = 基準そのもの
+                    _eq_modes.append((0, False, False,
+                                      (_eqy * 1e4) if _eqy > 0 else -1.0))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
@@ -11235,7 +11244,8 @@ function switchTbd(id, tab) {{
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
-                         + (f"上限{_eqym / 1e4:g}万" if _eqym else ""))
+                         + ("上限なし" if _eqym < 0 else
+                            (f"上限{_eqym / 1e4:g}万" if _eqym else "")))
                 if _eqnk in _EH_TRADES:
                     continue
                 _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
@@ -16517,8 +16527,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   (期間への合わせ込み)は、どちらの経路でも通さない。
                 _same = (_d1 >= 0) == (_d2 >= 0)
                 _sgdn = (_bsg - _sg2) / _bsg if _bsg > 0 else 0.0
+                # ⛔ **つまみが2つ動いていないか**を機械的に確かめる(2026-08-15)。
+                #   基準に金額上限を付けたのに sm/tm 変種には付いておらず、
+                #   「上限あり sm0.1」vs「**上限なし** sm0.5」を比べて sm/tm が
+                #   一斉に ✅ になった。1銘柄の最大露出が基準と大きく違うのに
+                #   つまみ名が集中に関係ないなら、その行は比較不能。
+                _cnb = ((_EH_TRADES.get("_eq_conc") or {}).get(_bk) or {})
+                _cnv = ((_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
+                _mxb, _mxv = _cnb.get("sym_max", 0.0), _cnv.get("sym_max", 0.0)
+                _conc_knob = any(_t3 in str(_kn)
+                                 for _t3 in ("上限", "1銘柄1件", "上位", "充填"))
+                _mixed = (not _is_b and not _conc_knob and _mxb > 0 and _mxv > 0
+                          and (max(_mxb, _mxv) / min(_mxb, _mxv)) > 1.5)
                 if _is_b:
                     _vd2, _vc = "—", "#94a3b8"
+                elif _mixed:
+                    _vd2, _vc = ("⛔ 比較不能（1銘柄の最大露出が基準と違う"
+                                 "＝つまみが2つ動いている）", "#f87171")
                 elif not _same:
                     _vd2, _vc = "❌ 不採用（前半と後半で符号が逆＝期間依存）", "#f87171"
                 elif _sg2 > _bsg and _st2 < _bst:
