@@ -11094,6 +11094,7 @@ function switchTbd(id, tab) {{
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
+    _EQ_CAP_N = 3      # try の中で env から読み直す(落ちても未定義にしない)
     # ⚠ 下の _budget_yen と同じ値。ここで先に要るので同じ式で作る
     #   (ズレると集中度・稼働率の『予算比』が予算タブと食い違う)。
     _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
@@ -11112,6 +11113,10 @@ function switchTbd(id, tab) {{
         #   150万 +652,740/σ-14% → 200万 +675,791/σ-19%)。50万はさらに下がる。
         #   これはリターンの最適化ではなくリスク許容度の宣言。
         _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "50") or 0) * 1e4
+        # ★ 上限を効かせる『合格件数の上限』(2026-08-15 ユーザー指定)。
+        #   3 = 合格3件以下の日だけ 1銘柄50万に絞り、4件以上は 予算÷件数。
+        #   0 = 常に効かせる(フラット。4〜7件の日も絞るので σ が膨らむ)。
+        _EQ_CAP_N = int(os.environ.get("LSS_EQ_CAP_MAX_N", "3") or 0)
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0):
@@ -11151,10 +11156,18 @@ function switchTbd(id, tab) {{
             # 変種ごとの金額上限(_ymax)があればそれを優先。無ければ env の全体設定。
             # ⛔ _ymax < 0 は「この変種だけ上限を外す」の意(=『上限なし』の行)。
             #    0 と区別すること。0 は「指定なし=env に従う」。
-            _yc = 0.0 if _ymax < 0 else (_ymax if _ymax > 0 else _EQ_MAX_YEN)
+            _yc0 = 0.0 if _ymax < 0 else (_ymax if _ymax > 0 else _EQ_MAX_YEN)
 
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
+                # ★ 金額上限を **合格が少ない日だけ** に効かせる(2026-08-15)。
+                #   フラットに掛けると 4〜7件の日まで絞ってしまい、資金が寝て
+                #   σ が膨らむ(上限50万 で σ +39% / 月 −11.4万 と実測)。
+                #   ⚠ この形だと **1銘柄の最大は上限額ではない**。
+                #     3件以下=50万 だが 4件の日は 予算/4 = 100万 になる。
+                #     下げられるのは「上限額に達する頻度」であって「額」ではない。
+                _yc = (_yc0 if (_EQ_CAP_N <= 0 or len(_lst) <= _EQ_CAP_N)
+                       else 0.0)
                 # ★ 1銘柄1件: 同じ銘柄が同日に複数戦略で出たら**ギャップ最大の
                 #   1本だけ**にする。⛔ **予算を割る前に**落とすこと。
                 #   後で落とすと、その枠のぶんの資金が丸ごと遊び、
@@ -11376,7 +11389,10 @@ function switchTbd(id, tab) {{
         if _EQ_KEYS:
             print(f"[E/H] 資金均等版を {_n_eq}本 追加 "
                   f"(予算{_EQ_BUD / 1e4:.0f}万 ÷ その日の件数 / 最大{_EQ_MAX_LOT}単元"
-                  + (f" / 金額上限{_EQ_MAX_YEN / 1e4:.0f}万" if _EQ_MAX_YEN > 0 else "")
+                  + (f" / 金額上限{_EQ_MAX_YEN / 1e4:.0f}万"
+                     + (f"(合格{_EQ_CAP_N}件以下の日だけ)" if _EQ_CAP_N > 0
+                        else "(常時)")
+                     if _EQ_MAX_YEN > 0 else "")
                   + f")。うち上位N絞り {len(_EQ_TOPS)}本 (N={_EQ_TOPS} / "
                   f"対象 {_EQ_TAB_BASE})。"
                   f"09:00 に件数が分かる方式だけが使える割り当て", flush=True)
@@ -15303,7 +15319,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'⛔ <b>株数の上限({_EQ_MAX_LOT}単元)は株価で意味が6倍変わります</b>。'
                 f'10単元は 1,000円株なら100万、4,000円株なら<b>400万＝予算全額</b>。'
                 f'価格帯が1,000〜6,000円なので、株数で切るのは本来おかしい。'
-                + (f'いまは <b>金額上限 {_EQ_MAX_YEN / 1e4:,.0f}万/銘柄</b> が入っています。'
+                + (f'いまは <b>金額上限 {_EQ_MAX_YEN / 1e4:,.0f}万/銘柄</b>'
+                   + (f'（<b>合格{_EQ_CAP_N}件以下の日だけ</b>。4件以上は '
+                      f'予算÷件数で満額）' if _EQ_CAP_N > 0 else '（常時）')
+                   + 'が入っています。'
+                   + (f'<br>⛔ この形だと <b>1銘柄の最大は上限額ではありません</b>。'
+                      f'{_EQ_CAP_N}件以下は {_EQ_MAX_YEN / 1e4:,.0f}万ですが、'
+                      f'{_EQ_CAP_N + 1}件の日は 予算÷{_EQ_CAP_N + 1} = '
+                      f'{_EQ_BUD / (_EQ_CAP_N + 1) / 1e4:,.0f}万 になります。'
+                      f'下げられるのは<b>上限額に達する頻度</b>であって'
+                      f'<b>額そのものではありません</b>。'
+                      if _EQ_CAP_N > 0 else '')
                    if _EQ_MAX_YEN > 0 else
                    f'金額で切るには <code>set LSS_EQ_MAX_YEN=100</code>（万円/銘柄・0=無効）。')
                 + f'<br>⚠ これは<b>リスク管理であってリターンの最適化ではありません</b>。'
