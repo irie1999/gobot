@@ -10967,7 +10967,8 @@ function switchTbd(id, tab) {{
         return (f"09:00確認+{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
                 + (f" 上位{_tp}集中" if _tp else "")
-                + (" 充填" if str(_k).endswith("充填") else ""))
+                + (" 充填" if str(_k).endswith("充填") else "")
+                + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
 
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
     # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4)。J の隣に出す。
@@ -10985,7 +10986,7 @@ function switchTbd(id, tab) {{
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
         _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
 
-        def _size_equal_by_day(_ts, _budget, _top=0, _fill=False):
+        def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
@@ -11028,6 +11029,21 @@ function switchTbd(id, tab) {{
 
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
+                # ★ 1銘柄1件: 同じ銘柄が同日に複数戦略で出たら**ギャップ最大の
+                #   1本だけ**にする。⛔ **予算を割る前に**落とすこと。
+                #   後で落とすと、その枠のぶんの資金が丸ごと遊び、
+                #   『リスクを減らしたコスト』と『資金を遊ばせた損』が混ざる
+                #   (2026-08-15 に実際そうなっていた)。
+                if _dedup:
+                    _bysym0: dict = {}
+                    for _t in _lst:
+                        _sy0 = str(_t.get("symbol", "")).upper() \
+                            .removesuffix(".T").split(".")[0]
+                        _cur = _bysym0.get(_sy0)
+                        if _cur is None or _eq_gap_of(_t) > _eq_gap_of(_cur):
+                            _bysym0[_sy0] = _t
+                    _dropped += len(_lst) - len(_bysym0)
+                    _lst = list(_bysym0.values())
                 if _top > 0 and len(_lst) > _top:
                     _lst = sorted(_lst, key=lambda t: -_eq_gap_of(t))[:_top]
                     _dropped += len(_by[_d]) - len(_lst)
@@ -11153,13 +11169,23 @@ function switchTbd(id, tab) {{
             # 上位N版・充填版は **タブに出す変種だけ**に付ける(全部に付けると
             # ⚖表の列が倍々に増えて読めなくなる)。delay版をタブに出したいときは
             # set LSS_EQ_TAB_KEY=H指値+50bp寄指d0資金均等 のように指定する。
-            _tops = [(0, False)] + ([(0, True)] + [(_t2, False) for _t2 in _EQ_TOPS]
-                                    if _k == _EQ_TAB_BASE else [])
-            for _tp, _fl in _tops:
+            # (上位N, 充填, 1銘柄1件)
+            _tops = [(0, False, False)]
+            if _k == _EQ_TAB_BASE:
+                _tops += [(0, True, False)] + [(_t2, False, False)
+                                               for _t2 in _EQ_TOPS]
+            # ★ 1銘柄1件は **推奨タブ(K)の変種にも**付ける。重複保有は
+            #   その銘柄への露出を2倍にするので、delay で20分無防備な構成では
+            #   いちばん危ない形になる(2026-08-15)。
+            if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
+                _tops.append((0, False, True))
+            for _tp, _fl, _dd in _tops:
                 _nk = (f"{_k}資金均等" + (f"上位{_tp}" if _tp else "")
-                       + ("充填" if _fl else ""))
+                       + ("充填" if _fl else "") + ("1銘柄1件" if _dd else ""))
+                if _nk in _EH_TRADES:
+                    continue
                 _EH_TRADES[_nk], _eq_st = _size_equal_by_day(
-                    _v, _EQ_BUD, _tp, _fl)
+                    _v, _EQ_BUD, _tp, _fl, _dd)
                 _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_nk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -14748,6 +14774,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _e1 = str(_k)[:-2]
                 if _e1 in _have:
                     _PAIRS.append((_k, _e1))
+            # ★ 1銘柄1件(重複保有を外す) vs 素。リスク低減の直接比較。
+            if str(_k).endswith("1銘柄1件"):
+                _e2 = str(_k)[:-5]
+                if _e2 in _have:
+                    _PAIRS.append((_k, _e2))
             # ★ 閾値どうしの直接比較(資金均等の素どうし)。
             #   「合格を増やして100株ずつ」(+0bp・15件/日) と
             #   「絞って複数単元」(+50bp・7件/日) はどちらが良いか。
@@ -15101,7 +15132,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'同じ銘柄が2枠取ると<b>その銘柄への露出は2倍</b>になります'
                 f'（実測 1,378件中 251件が重複）。上段のトレード単位の値は'
                 f'<b>集中を過小評価</b>しているので、リスクは銘柄計で見てください。'
-                f'<br>★ <b>充填</b> の行は、<b>余った予算をギャップ降順で1単元ずつ'
+                f'<br>★ <b>1銘柄1件</b> の行は、同じ銘柄が同日に複数戦略で出たとき'
+                f'<b>ギャップ最大の1本だけ</b>にしたもの。'
+                f'⛔ <b>予算を割る前に</b>落としているので、浮いた枠は'
+                f'残りの銘柄に配り直されます（後で落とすと、その枠のぶんの資金が'
+                f'丸ごと遊び、「リスクを減らしたコスト」と「資金を遊ばせた損」が'
+                f'混ざります）。<br>★ <b>充填</b> の行は、<b>余った予算をギャップ降順で1単元ずつ'
                 f'配り切った</b>もの。素の均等割りは <code>予算÷件数</code> を'
                 f'1単元の値段で割って<b>切り捨てる</b>ので必ず端数が残ります'
                 f'（「遊び」列がその額）。'
