@@ -14589,6 +14589,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _e1 = str(_k)[:-2]
                 if _e1 in _have:
                     _PAIRS.append((_k, _e1))
+            # ★ 閾値どうしの直接比較(資金均等の素どうし)。
+            #   「合格を増やして100株ずつ」(+0bp・15件/日) と
+            #   「絞って複数単元」(+50bp・7件/日) はどちらが良いか。
+            #   H 経由の差では CI が出ないので、直接ペアにする。
+            if (str(_k).startswith("H指値") and str(_k).endswith("資金均等")
+                    and _k != _EQ_TAB_KEY and _EQ_TAB_KEY in _have):
+                _PAIRS.append((_EQ_TAB_KEY, _k))
         _PAIRS = tuple(_PAIRS)
         _pr = ""
         for x, y in _PAIRS:
