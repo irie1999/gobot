@@ -17754,8 +17754,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _EH_CMP_HTML += _profit_source_html()
     except Exception as _pse:
         print(f"[利益の源泉] ブロック生成に失敗: {_pse}", flush=True)
+    # ⛔ フィルタ探索は **実行時間の 91.8%** を単独で食う(2026-08-15 実測:
+    #    303.3s / 全体 351.0s)。しかも §18.13(15軸78検定) §18.24(7軸)
+    #    §18.31(流動性) と **3回とも候補ゼロ**で、発注判断には一切使わない。
+    #    既定OFF。掘り直したいときだけ set LSS_FILTER_SCAN=1。
+    # ⚠ 母集団に比例して重くなる。選定を直してペアが2倍(1,328→3,054)に
+    #    なったぶん、ここも2倍になった。
+    _FSCAN_OK = str(os.environ.get("LSS_FILTER_SCAN", "0")).strip() \
+        not in ("0", "false", "no")
+    if not _FSCAN_OK:
+        print("[フィルタ探索] スキップ (既定OFF)。実行時間の9割を占めるうえ、"
+              "3回とも候補ゼロ。掘るなら set LSS_FILTER_SCAN=1", flush=True)
     try:
-        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
+        if _FSCAN_OK and _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
             import time as _fst
             _t0 = _fst.time()
             with _ptimer("フィルタ探索"):

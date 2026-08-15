@@ -82,11 +82,14 @@ REM     the report above (BT filter OFF). Signal tab = what you order = what is
 REM     evaluated. Do NOT re-add --bt-min 30 from an older note.
 if not defined LSS_H_LIMIT_TICKS set "LSS_H_LIMIT_TICKS=-5"
 REM --- H setting sweep: OFF for the daily run (2026-08-13).
-REM     The "H setting comparison" table prices TEN variants (limit position x
-REM     auction-only x stop delay x sizing) off the 5-minute bars, and that is
-REM     the single biggest cost of the P&L tab. CLAUDE.md 18.36 settled the
-REM     settings: walk-forward lost to "change nothing" in all three blocks,
-REM     so there is nothing to decide from it on a daily basis.
+REM     CLAUDE.md 18.36 settled the settings: walk-forward lost to "change
+REM     nothing" in all three blocks, so there is nothing to decide from it on
+REM     a daily basis. That is the reason - NOT cost.
+REM     CORRECTION (2026-08-15, measured): this used to claim the sweep was
+REM     "the single biggest cost of the P&L tab". Measured, it is 1.7s = 0.5%
+REM     of a 351s run. The filter scan was 303.3s (91.8%); it is off by default
+REM     now (LSS_FILTER_SCAN=1 to dig again). The run prints a phase-time
+REM     summary at the end - read it instead of guessing.
 REM     The other three comparison blocks (current/E/H, order rank, per-strategy,
 REM     pre-open market) stay ON - they are cheap and they are what you read.
 REM     Re-measure roughly monthly, or whenever a rule changes:

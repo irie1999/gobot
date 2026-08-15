@@ -5,11 +5,14 @@ REM
 REM   Usage:  .\hvar                 (365-day window, no order server)
 REM           .\hvar --days 180
 REM
-REM   The daily run keeps LSS_H_VARIANT_TAB=0 because pricing TEN variants
-REM   (limit position x auction-only x stop delay x stop anchor x sizing) off
-REM   the 5-minute bars is the single biggest cost of the P&L tab, and
-REM   CLAUDE.md 18.36 already settled the settings (walk-forward lost to
-REM   "change nothing" in all three blocks). This bat is the way to re-measure.
+REM   The daily run keeps LSS_H_VARIANT_TAB=0 because CLAUDE.md 18.36 already
+REM   settled the settings (walk-forward lost to "change nothing" in all three
+REM   blocks), so there is nothing to decide from it daily. This bat re-measures.
+REM
+REM   CORRECTION (2026-08-15, measured): this used to say the variant sweep was
+REM   "the single biggest cost of the P&L tab". It is not - it is 1.7s, 0.5% of
+REM   a 351s run. The filter scan was 303.3s (91.8%) and is now off by default.
+REM   Do not guess where the time goes; the run prints a phase-time summary.
 REM
 REM   Do this roughly monthly, or whenever a rule changes.
 REM
