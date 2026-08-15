@@ -24,9 +24,18 @@ REM     3. only then the diff/month and t.
 REM
 REM   Uses dailyfast (lighter, same comparison blocks) and --no-serve so it
 REM   never fights the watcher for the kabu token.
+REM
+REM   --no-h-tab: dailyfast always passes --h-tab, and that runs the WHOLE pass
+REM   a second time (lss again, only the order type differs) - about 2x the wall
+REM   clock. Every block this bat exists to read (the setting-audit board, the
+REM   current/E/H/J/K comparison, concentration) lives in the "long-stock short"
+REM   pane, so the H pane is pure cost here. Ordering still happens from .\daily.
+REM
+REM   The run now ends with a phase-time summary (slowest first). Read it before
+REM   trying to make anything faster - do not guess where the time goes.
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
 REM ============================================================
 cd /d "%~dp0"
 set "LSS_H_VARIANT_TAB=1"
-call dailyfast.bat --days 365 --no-serve %*
+call dailyfast.bat --days 365 --no-serve --no-h-tab %*
 set "LSS_H_VARIANT_TAB="

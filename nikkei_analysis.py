@@ -148,6 +148,46 @@ _SAMEDAY_SWEEP_TAB = False   # mirror/lss 用: 詳細分析に「同日TP/SLス�
 # run_signals_holdout_all から注入する追加トレードレコード（lss転換ロングなど）。
 # display_trades に結合して月別アコーディオン・日別カードに自然に混合表示される。
 _EXTRA_TRADES: list = []
+
+# ── 工程別の所要時間 ────────────────────────────────────────────────────────
+# ⛔ 「遅くなった」を推測で潰さないための計測。ブロック単位の秒数は既に
+#    出していたが、その手前(BT収集 / as-of BT / 資金均等の変種生成 /
+#    方式ごとの予算シミュ)が測れておらず、どこが重いか分からなかった。
+#    最後に **降順で総括**を出すので、切る場所を数字で決められる。
+_PHASE_SEC: dict = {}
+
+
+class _ptimer:
+    """with _ptimer("名前"): ... で経過を _PHASE_SEC に足す(入れ子可)。"""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        self._t = _time.time()
+        return self
+
+    def __exit__(self, *_a):
+        _PHASE_SEC[self.name] = _PHASE_SEC.get(self.name, 0.0) + (
+            _time.time() - self._t)
+        return False
+
+
+def _phase_summary(top: int = 12) -> None:
+    """所要時間の総括を降順で出す。合計の何%かも併記する。"""
+    if not _PHASE_SEC:
+        return
+    _tot = sum(_PHASE_SEC.values())
+    print(f"\n[⏱ 工程別 所要時間]  計測分 合計 {_tot:6.1f}s", flush=True)
+    for _n, _s in sorted(_PHASE_SEC.items(), key=lambda kv: -kv[1])[:top]:
+        if _s < 0.05:
+            continue
+        print(f"    {_s:7.1f}s  ({_s / max(_tot, 1e-9) * 100:4.1f}%)  {_n}",
+              flush=True)
+    print("  ※ ここに出ない時間は HTML 生成・yfinance 取得・I/O です。",
+          flush=True)
+
+
 # E/H(エントリー方式の比較) のトレード。run_signals_holdout_all が算出して注入する。
 # {"E": [trade,...], "H": [...], "約定せず": {"E": [...], "H": [...]}}
 # **空なら E/H タブは一切生成されず、レポートは従来と完全に同一**(追加のみ・全ガード付き)。
@@ -11248,8 +11288,9 @@ function switchTbd(id, tab) {{
                             (f"上限{_eqym / 1e4:g}万" if _eqym else "")))
                 if _eqnk in _EH_TRADES:
                     continue
-                _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
-                    _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym)
+                with _ptimer("資金均等の変種生成"):
+                    _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
+                        _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -11658,8 +11699,9 @@ function switchTbd(id, tab) {{
                 _ok = (_eq_order_key
                        if ("資金均等" in str(_srck) and _EQ_ORDER != "liq")
                        else None)
-                _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
-                                      nofills=(_EH_NF.get(_srck) or []))
+                with _ptimer("方式ごとの予算シミュ(E/H/J/K)"):
+                    _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
+                                          nofills=(_EH_NF.get(_srck) or []))
                 _eh_sorted[_ehk] = _ss        # ← 集計用。**切らない**
                 # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
                 #   見たい」用。予算内タブ(上)は毎日 流動性順に400万で切るので、
@@ -11701,11 +11743,12 @@ function switchTbd(id, tab) {{
                     # 描画用のグリッドだけ作らない(HTMLもメモリも節約)。
                     pass
                 else:
-                    _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
-                    if _SHOW_TAB_EH_ALL:
-                        _eh_all[_ehk] = _ss_all_view
-                        _eh_all_grid[_ehk] = _build_entry_grid(
-                            _ss_all_view, _ehpfx + "A")
+                    with _ptimer("明細グリッドの描画(E/H/J/K)"):
+                        _eh_grid[_ehk] = _build_entry_grid(_ss_view, _ehpfx)
+                        if _SHOW_TAB_EH_ALL:
+                            _eh_all[_ehk] = _ss_all_view
+                            _eh_all_grid[_ehk] = _build_entry_grid(
+                                _ss_all_view, _ehpfx + "A")
                 print(f"[E/H] {_ehk}: 予算内 {_nb_cut}件"
                       + (f"(明細は直近{_EH_CAP}件で打ち切り)"
                          if _EH_CAP > 0 and _nb_cut > _EH_CAP
@@ -17695,7 +17738,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         print("[分析ブロック] スキップ (LSS_HEAVY_BLOCKS=0): 発注順 / 予算スイープ / "
               "戦略別 / フィルタ探索。⚖比較と母集団診断は出します", flush=True)
     try:
-        _EH_CMP_HTML = _eh_compare_html() if (_LSS_ORDER_MODE and _eh_sorted) else ""
+        with _ptimer("⚖比較ブロック"):
+            _EH_CMP_HTML = (_eh_compare_html()
+                            if (_LSS_ORDER_MODE and _eh_sorted) else "")
     except Exception as _ehce:
         print(f"[E/H] 比較ブロック生成に失敗: {_ehce}", flush=True)
         _EH_CMP_HTML = ""
@@ -17713,7 +17758,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
             import time as _fst
             _t0 = _fst.time()
-            _fs = _filter_scan_html()
+            with _ptimer("フィルタ探索"):
+                _fs = _filter_scan_html()
             if _fs:
                 _EH_CMP_HTML += _fs
                 print(f"[フィルタ探索] 候補スキャンを生成 "
@@ -17725,7 +17771,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 os.environ.get("LSS_ORDER_RANK_TAB", "1")).strip() not in ("0", "false", "no"):
             import time as _ort
             _t0 = _ort.time()
-            _EH_CMP_HTML += _order_rank_html()
+            with _ptimer("発注順ブロック"):
+                _EH_CMP_HTML += _order_rank_html()
             print(f"[発注順] 比較ブロックを生成 ({_ort.time() - _t0:.1f}s)", flush=True)
     except Exception as _orce:
         print(f"[発注順] 比較ブロック生成に失敗: {_orce}", flush=True)
@@ -17735,7 +17782,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 not in ("0", "false", "no"):
             import time as _bst
             _t1 = _bst.time()
-            _EH_CMP_HTML += _budget_sweep_html()
+            with _ptimer("予算スイープ"):
+                _EH_CMP_HTML += _budget_sweep_html()
             print(f"[予算] スイープを生成 ({_bst.time() - _t1:.1f}s)", flush=True)
     except Exception as _bsce:
         print(f"[予算] スイープ生成に失敗: {_bsce}", flush=True)
@@ -17744,7 +17792,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 os.environ.get("LSS_STRAT_LOO_TAB", "1")).strip() not in ("0", "false", "no"):
             import time as _slt
             _t0 = _slt.time()
-            _EH_CMP_HTML += _strategy_loo_html()
+            with _ptimer("戦略別LOO"):
+                _EH_CMP_HTML += _strategy_loo_html()
             print(f"[戦略別] 比較ブロックを生成 ({_slt.time() - _t0:.1f}s)", flush=True)
     except Exception as _slce:
         print(f"[戦略別] 比較ブロック生成に失敗: {_slce}", flush=True)
@@ -17753,7 +17802,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 os.environ.get("LSS_PREOPEN_TAB", "1")).strip() not in ("0", "false", "no"):
             import time as _pot
             _t0 = _pot.time()
-            _EH_CMP_HTML += _preopen_day_html()
+            with _ptimer("寄り前の市場変数"):
+                _EH_CMP_HTML += _preopen_day_html()
             print(f"[寄り前] 市場変数ブロックを生成 ({_pot.time() - _t0:.1f}s)", flush=True)
     except Exception as _poce:
         print(f"[寄り前] 市場変数ブロック生成に失敗: {_poce}", flush=True)
@@ -17766,7 +17816,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         if _LSS_ORDER_MODE and _eh_sorted:
             import time as _hvt
             _t0 = _hvt.time()
-            _hv_html = _h_variant_html()
+            with _ptimer("H設定の比較ブロック(=変種スイープ)"):
+                _hv_html = _h_variant_html()
             if _hv_html:
                 _EH_CMP_HTML = _hv_html + _EH_CMP_HTML
                 print(f"[H設定] 比較ブロックを生成 ({_hvt.time() - _t0:.1f}s)", flush=True)

@@ -166,6 +166,11 @@ _pre.add_argument("--h-tab", action="store_true",
                        "lss をもう1回フル計算するので実行時間が約2倍になる。"
                        "発注ボタンは無効(order_server が未対応で、押すと現行の逆指値が"
                        "出てしまうため)。H の実発注は lss_budget_cap --entry-mode limit から")
+_pre.add_argument("--no-h-tab", action="store_true",
+                  help="--h-tab を打ち消す。dailyfast.bat は --h-tab を常に付けるので、"
+                       "そこから呼ぶ調査系(.\\hvar 等)で H ペインを落として"
+                       "実行時間を半分にするためのもの。⚖比較・設定監査ボードは "
+                       "lss ペインにあるので、これを付けても読める")
 _pre.add_argument("--default-tab", type=str, default="long",
                   choices=["long", "short", "mirror", "lss", "h"],
                   help="統合レポートを開いたとき最初に表示する方向タブ (既定 long)。"
@@ -446,7 +451,10 @@ if _args.both and not _args.short:
         _skip_dirs.add("short")
     if getattr(_args, "no_long", False):
         _skip_dirs.add("long")
-    if not getattr(_args, "h_tab", False):
+    # ⛔ --no-h-tab は --h-tab に**勝つ**。dailyfast.bat が --h-tab を常に
+    #    付けるので、そこから呼ぶ調査系(.\hvar)で落とせる唯一の方法。
+    if (not getattr(_args, "h_tab", False)
+            or getattr(_args, "no_h_tab", False)):
         _skip_dirs.add("h")   # 既定OFF: lss をもう1回フル計算する(時間が約2倍)
     # --no-lss: 実際に発注しているのは H だけなので、lss タブは作らない
     #           (2026-08-13 ユーザー指示)。実行時間がほぼ半分になる。
@@ -3439,6 +3447,12 @@ with open(out_path, "w", encoding="utf-8", newline="") as _f:
 del html   # 後続(--both統合ラッパー等)のためにメモリを解放
 print(f"\nレポート生成完了: {out_path.resolve()}")
 print(_data_freshness_line())
+# ★ 「遅くなった」を推測で潰さないための総括(降順)。切る場所を数字で決める。
+try:
+    _na._phase_summary()
+    print(f"    {_time.time() - _T0:7.1f}s  (100.0%)  ★ 全体", flush=True)
+except Exception:
+    pass
 
 if not _args.no_browser:
     from _open_html import open_html
