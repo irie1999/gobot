@@ -124,18 +124,18 @@ print("=" * 100)
 print(f"{'基準月':<9}{'ペア':>7}{'銘柄':>7}{'中央比':>8}  {'前月からの増減':>14}  生成日時")
 print("-" * 100)
 
+# ⛔ 「中央値の半分未満」で判定してはいけない(2026-08-15 の誤検出)。
+#    5分足は 2024-07 が最古(18.6)なので、**古い基準月ほど TRAIN が短く、
+#    `取引>=8` を満たすペアが少ないのが正常**(2024-12 は約6ヶ月しかない)。
+#    TRAIN は累積なので、本当の異常は「前月より減ったこと」だけ。
 _prev = None
 _bad: list[dict] = []
 for r in _rows:
     _ratio = r["n"] / max(1, _med)
     _dn = "" if _prev is None else f"{r['n'] - _prev['n']:+,}"
-    # ⛔ TRAIN は基準月が進むほど増えるので、**前月より減っていたら異常**。
     _flag = ""
-    if _ratio < 0.5:
-        _flag = " ⛔ 中央値の半分未満"
-        _bad.append(r)
-    elif _prev is not None and r["n"] < _prev["n"] * 0.8:
-        _flag = " ⚠ 前月から2割以上 減少"
+    if _prev is not None and r["n"] < _prev["n"] * 0.8:
+        _flag = " ⛔ 前月から2割以上 減少（TRAIN は累積なので起きないはず）"
         _bad.append(r)
     import datetime as _dt
     _ts = _dt.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")
@@ -143,6 +143,8 @@ for r in _rows:
     _prev = r          # ⛔ これを忘れて「増減」列が全行 空だった(2026-08-15)
 
 print("-" * 100)
+print("  ※ 古い基準月ほど件数が少ないのは正常。5分足は 2024-07 が最古(18.6)なので")
+print("     TRAIN が短く、`取引>=8` を満たすペアが少ないだけ。判定は前月比で行う。")
 
 # ── 生成条件。★ 文言ではなく **効くパラメータだけ**を突き合わせる ─────────────
 #    (「TEST は選定に未使用」のような注記の揺れを条件差と誤検出しないため)
@@ -191,19 +193,33 @@ print("\n■ 前月ペアの引き継ぎ率 (TRAIN は累積なので、正常�
 for _i in range(1, len(_rows)):
     _a, _b = _rows[_i - 1], _rows[_i]
     _keep = len(_a["pairs"] & _b["pairs"]) / max(1, len(_a["pairs"]))
-    _mk = " ⛔" if _keep < 0.5 else ("  ⚠" if _keep < 0.75 else "")
-    print(f"  {_a['base']} → {_b['base']}: {_keep:>6.0%} "
+    # ⚠ 基準月が四半期おきの区間は、間が空くぶん入れ替わって当然。
+    #   隣接月(gap=1)のときだけ低さを異常とみなす。
+    _gap = ((int(_b["base"][:4]) - int(_a["base"][:4])) * 12
+            + int(_b["base"][5:]) - int(_a["base"][5:]))
+    _mk = ""
+    if _gap <= 1:
+        _mk = " ⛔" if _keep < 0.5 else ("  ⚠" if _keep < 0.75 else "")
+    print(f"  {_a['base']} → {_b['base']} ({_gap}ヶ月): {_keep:>6.0%} "
           f"({len(_a['pairs'] & _b['pairs']):,}/{len(_a['pairs']):,}){_mk}")
 
-if _bad:
-    _bl = ",".join(r["base"] for r in _bad)
+_ok_cond = (len(_sigs) == 1 and not _ng)
+if _bad or not _ok_cond:
+    # ⛔ 作り直しコマンドには **--stop-delay-bars を必ず入れる**。
+    #   これを付け忘れて既定0で回したのが 2026-07 が150件だった原因(#9)。
+    _dly = os.environ.get("LSS_STOP_DELAY_BARS", "1")
+    _bl = ",".join(r["base"] for r in _bad) if _bad else \
+        ",".join(r["base"] for r in _rows)
     print("\n" + "=" * 100)
     print(f"⛔ 作り直しが要る基準月: {_bl}")
     print("=" * 100)
-    print("  多数派と同じ引数で、その月だけ作り直します(--base-months はカンマ区切りで一括可):")
-    print(f"\n    python scan_lss_universe.py --base-months {_bl} --workers 8\n")
-    print("  ⚠ 上の『生成条件』の多数派と同じ sm/tm/slip/しきい値になるよう、")
-    print("     足りない引数は多数派の行から写して付けること。")
+    if not _ok_cond and not _bad:
+        print("  (件数は正常だが **生成条件が実機と揃っていない**ので全月やり直し)")
+    print(f"\n    python scan_lss_universe.py --base-months {_bl}"
+          f" --stop-delay-bars {_dly} --workers 8\n")
+    print(f"  ⛔ --stop-delay-bars {_dly} は必須。既定は 0 で、付け忘れると")
+    print("     選定が薄くなります(2026-07 が150件だった原因)。")
+    print("  ⚠ fee は --fee を付けなければエンジンの既定(=0)を使います。")
     print("  ⚠ 作り直したら merge_lss_proposals が読み直すので、次の .\\daily は")
     print("     BTキャッシュ再構築で遅くなります。")
 else:
