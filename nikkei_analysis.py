@@ -11069,12 +11069,32 @@ function switchTbd(id, tab) {{
                if "上限" in str(_k) else "")
         _ap = ("".join(_c for _c in str(_b).split("ap")[-1] if _c.isdigit())
                if "ap" in str(_b) else "")
+        # ⛔ **sm/tm と金額上限もラベルに出す**(2026-08-15)。sm はタブキーに、
+        #    上限は env(_EQ_MAX_YEN) にあり、どちらも出ていなかったので
+        #    「09:00確認+50bp 資金均等 delay4」としか表示されず、実際には
+        #    sm0.5・上限50万 で走っているのが画面から分からなかった。
+        #    毎日見る画面で表記と実態がズレると誤解のもとになる(§18.21)。
+        import re as _re_lb
+        _smL = ("損切なし" if "損切なし" in str(_b) else
+                (f"損切{_m.group(1)}ATR"
+                 if (_m := _re_lb.search(r"sm([\d.]+)", _b)) else ""))
+        _tmL = (f"利確{_m2.group(1)}ATR"
+                if (_m2 := _re_lb.search(r"tm([\d.]+)", _b)) else "")
+        # 明示の上限が無ければ env の既定(全変種に共通で掛かっている)を出す
+        _ymL = (("なし" if "上限なし" in str(_k) else f"{_ym}万") if
+                ("上限" in str(_k)) else
+                (f"{float(os.environ.get('LSS_EQ_MAX_YEN', '50') or 0):g}万"
+                 if float(os.environ.get("LSS_EQ_MAX_YEN", "50") or 0) > 0
+                 else ""))
+        _capN = int(os.environ.get("LSS_EQ_CAP_MAX_N", "0") or 0)
         return (f"09:00確認+{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
+                + (f" {_smL}" if _smL else "")
+                + (f" {_tmL}" if _tmL else "")
                 + (f" ATR{_ap}日" if _ap else "")
                 + (f" 上位{_tp}集中" if _tp else "")
-                + (" 1銘柄上限なし" if "上限なし" in str(_k) else
-                   (f" 1銘柄上限{_ym}万" if _ym else ""))
+                + (f" 1銘柄上限{_ymL}" if _ymL else "")
+                + (f"({_capN}件以下の日だけ)" if _ymL and _capN > 0 else "")
                 + (" 充填" if str(_k).endswith("充填") else "")
                 + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
 
