@@ -16370,6 +16370,70 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             sorted(_fx, key=lambda r: -r[9]))}
         _o2 = {r[0]: i + 1 for i, r in enumerate(
             sorted(_fx, key=lambda r: -r[10]))}
+        # ── ☑ 設定監査ボード ────────────────────────────────────────
+        # 毎回「どこを見ればいいか」を探さなくて済むように、**判定を先に出す**。
+        # 基準 = 推奨タブの設定(K)。そこから **つまみを1つだけ**動かした変種
+        # (…sm* / …tm* / ◆1銘柄1件)を並べ、事前に宣言した基準で自動判定する。
+        # ⛔ 判定基準は 18.38 のチェックリストで先に決めたもの。後付けしない:
+        #     σ が増えて 月平均/σ が下がった            → ❌ 不採用
+        #     月平均/σ が基準超 かつ 前半・後半が同符号  → ✅ 検討する
+        #     それ以外                                  → — 測れていない
+        def _sig_of(_mm):
+            _mv = [_mm.get(m, 0.0) for m in _msa]
+            if len(_mv) < 2:
+                return 0.0, 0.0
+            _s2 = _sti.stdev(_mv)
+            return _s2, ((_sti.mean(_mv) / _s2) if _s2 > 0 else 0.0)
+
+        _audit = ""
+        _bk = _EQ_TAB_KEY2 if _EQ_TAB_KEY2 in {r[0] for r in _out} else ""
+        if _bk:
+            _brow = next(r for r in _out if r[0] == _bk)
+            _bsg, _bst = _sig_of(_brow[11])
+            _bpre = str(_bk).split("資金均等")[0]      # 例 "H指値+50bp寄指d4"
+            _cands = [r for r in _out
+                      if r[0] != _bk and str(r[0]).startswith(_bpre)
+                      and not str(r[0]).startswith("▶")]
+            # 基準行を先頭に
+            for _r in [_brow] + _cands:
+                _v2 = _r[0]
+                _sg2, _st2 = _sig_of(_r[11])
+                _is_b = (_v2 == _bk)
+                # つまみ名(基準からの差分)を抜き出す
+                _kn = ("基準（現在の推奨）" if _is_b else
+                       (str(_v2).replace(_bpre, "").replace("資金均等", "").strip()
+                        or str(_v2)))
+                # ⛔ 表の「前半/後半」列は **現行H比**。監査では
+                #    **基準(K)からどれだけ動いたか**を見たいので差を取り直す。
+                _d1 = _r[9] - _brow[9]
+                _d2 = _r[10] - _brow[10]
+                if _is_b:
+                    _vd2, _vc = "—", "#94a3b8"
+                elif _sg2 > _bsg and _st2 < _bst:
+                    _vd2, _vc = "❌ 不採用（σ が増えて安定度が落ちた）", "#f87171"
+                elif _st2 > _bst and _d1 > 0 and _d2 > 0:
+                    _vd2, _vc = "✅ 検討する（安定度↑・前半後半とも改善）", "#4ade80"
+                else:
+                    _vd2, _vc = "— 測れていない", "#94a3b8"
+                _audit += (
+                    f'<tr{" style=background:#132a1a" if _is_b else ""}>'
+                    f'<td style="padding:3px 8px;color:#e2e8f0;font-weight:700;'
+                    f'white-space:nowrap">{_kn}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#94a3b8">'
+                    f'{_r[1]:,}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#e2e8f0">'
+                    f'{_r[2] / max(1, len(_msa)):+,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:'
+                    f'{"#f87171" if (not _is_b and _sg2 > _bsg) else "#94a3b8"}">'
+                    f'{_sg2:,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#e2e8f0;'
+                    f'font-weight:700">{_st2:+.2f}</td>'
+                    f'<td style="text-align:right;padding:3px 8px;color:#94a3b8;'
+                    f'white-space:nowrap;font-size:0.76rem">'
+                    f'{"—" if _is_b else f"{_d1:+,.0f} / {_d2:+,.0f}"}</td>'
+                    f'<td style="padding:3px 8px;color:{_vc};font-weight:700">'
+                    f'{_vd2}</td></tr>')
+
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm, _rc) in _out:
             _rk1, _rk2 = _o1.get(_v, "—"), _o2.get(_v, "—")
@@ -16479,12 +16543,44 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f't={_bb[4]:+.2f}・{_bb[7]}/{_bb[8]}勝）。<br>{_wtxt}</div>')
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        # ★ 監査ボードは **折りたたまない**。毎回ここだけ見れば済むようにする。
+        _abd = ("" if not _audit else (
+            f'<div style="background:#0f172a;border:2px solid #22d3ee;'
+            f'border-radius:8px;padding:12px 16px;margin:0 0 14px">'
+            f'<div style="color:#22d3ee;font-weight:700;font-size:0.95rem;'
+            f'margin-bottom:6px">☑ 設定監査ボード — <b>まずここだけ見てください</b></div>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
+            f'基準は<b>いま推奨している設定</b>（緑の行）。そこから'
+            f'<b>つまみを1つだけ</b>動かした版を並べています。'
+            f'判定は 18.38 のチェックリストで<b>先に決めた基準</b>で自動計算しており、'
+            f'後付けではありません：<br>'
+            f'　<span style="color:#f87171">❌ 不採用</span> = σ が増えて 月平均/σ が落ちた'
+            f'　/　<span style="color:#4ade80">✅ 検討する</span> = 月平均/σ が基準超 '
+            f'<b>かつ</b> 前半・後半が同符号'
+            f'　/　— 測れていない = それ以外<br>'
+            f'⚠ <b>✅ が付いても即採用ではありません。</b>下の表で walk-forward が'
+            f'現状を下回っていないかを必ず確認してください（18.36）。'
+            f'差が月次σ（≒12万）より小さいものも「測れていない」と同じです。</p>'
+            f'<table style="border-collapse:collapse;font-size:0.82rem">'
+            f'<thead><tr><th style="{_th};text-align:left">動かしたつまみ</th>'
+            f'<th style="{_th}">件数</th><th style="{_th}">月平均</th>'
+            f'<th style="{_th}">月次σ</th>'
+            f'<th style="{_th}">月平均/σ<br><span style="font-weight:400;'
+            f'font-size:0.66rem">これが主指標</span></th>'
+            f'<th style="{_th}">前半 / 後半<br><span style="font-weight:400;'
+            f'font-size:0.66rem">基準との差</span></th>'
+            f'<th style="{_th};text-align:left">判定</th></tr></thead>'
+            f'<tbody>{_audit}</tbody></table></div>'))
         return (
-            f'<details style="background:#0f172a;border:1px solid #475569;'
+            _abd
+            + f'<details style="background:#0f172a;border:1px solid #475569;'
             f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
             f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
             f'cursor:pointer">'
-            f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）</summary>'
+            f'🎯 H の設定比較（指値位置 × 寄指か / 同じ1回の実行・同じ現行）'
+            f'<span style="color:#64748b;font-weight:400;font-size:0.76rem">'
+            f' — 全設定の一覧。監査ボードで気になった行の詳細を見るとき用</span>'
+            f'</summary>'
             + _concl
             + f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'H のパラメータは<b>指値をどこに置くか</b>・<b>ザラ場到達を取るか</b>・'
