@@ -10791,10 +10791,15 @@ function switchTbd(id, tab) {{
                 except Exception:
                     _eqg4, _eqd4, _eqb4 = _eqg0, _eh_delay, ""
                 if _eqb4:
+                    # ⛔ **端で止めない**(18.38 の delay と同じ失敗)。2026-08-15 の
+                    #   実測で d4 の sm は 0.05→0.5 が単調増加(月平均/σ 4.51→5.60)
+                    #   で、0.5 がスイープ範囲の**端**だった。端は最適点ではない。
+                    #   99 = 損切なし(上限側の端を必ず含める)。
                     for _eqsm in [float(x) for x in str(os.environ.get(
-                            "LSS_EQ_SMS2", "0.05,0.2,0.3,0.5")).split(",")
+                            "LSS_EQ_SMS2", "0.05,0.2,0.3,0.5,0.7,1.0,99")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
-                        _hvars.append((f"{_eqb4}sm{_eqsm:g}", 0, True,
+                        _eqsl4 = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
+                        _hvars.append((f"{_eqb4}{_eqsl4}", 0, True,
                                        _eqd4, "fill", _eqg4, None, _eqsm))
                     for _eqtm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
