@@ -10968,17 +10968,24 @@ function switchTbd(id, tab) {{
             _d += _c
         _tp = ("".join(_c for _c in str(_k).split("上位")[-1] if _c.isdigit())
                if "上位" in str(_k) else "")
+        _ym = ("".join(_c for _c in str(_k).split("上限")[-1]
+                       if _c.isdigit() or _c == ".")
+               if "上限" in str(_k) else "")
         return (f"09:00確認+{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
                 + (f" 上位{_tp}集中" if _tp else "")
+                + (f" 1銘柄上限{_ym}万" if _ym else "")
                 + (" 充填" if str(_k).endswith("充填") else "")
                 + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
 
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
-    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4)。J の隣に出す。
-    #   空文字にすれば出さない。
+    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4 + 1銘柄上限200万)。
+    #   J の隣に出す。空文字にすれば出さない。
+    #   上限200万の根拠(18.38): 損益 -19,847円/月 = 月次σ の 0.19倍で
+    #   ノイズ帯の内側。その対価に **1銘柄への最大露出が 397万→200万** に半減。
+    #   主指標(月平均/σ)も 4.58→4.83 と唯一 基準を上回った。
     _EQ_TAB_KEY2 = str(os.environ.get(
-        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
+        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等上限200万")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
@@ -16489,9 +16496,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _sg2, _st2 = _sig_of(_r[11])
                 _is_b = (_v2 == _bk)
                 # つまみ名(基準からの差分)を抜き出す
+                # 基準が「上限200万」のようにサフィックス付きのとき、
+                # サフィックスの無い行は『そのつまみを外した版』。空文字に
+                # なってフルキーが出ると読めないので、外した名前で表示する。
+                _sfx_b = str(_bk).split("資金均等")[-1].strip()
                 _kn = ("基準（現在の推奨）" if _is_b else
                        (str(_v2).replace(_bpre, "").replace("資金均等", "").strip()
-                        or str(_v2)))
+                        or (f"{_sfx_b}なし" if _sfx_b else str(_v2))))
                 # ⛔ 表の「前半/後半」列は **現行H比**。監査では
                 #    **基準(K)からどれだけ動いたか**を見たいので差を取り直す。
                 _d1 = _r[9] - _brow[9]
