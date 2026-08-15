@@ -16604,7 +16604,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _m5 = _re_kn.search(r"上位(\d+)", _s)
             _k2["top"] = int(_m5.group(1)) if _m5 else 0
             _k2["fill"] = "充填" in _s
-            _k2["dedup"] = "1銘柄1件" in _s
+            # ⛔ ◆1銘柄1件(株数を決めた**後**に落とす版)と 1銘柄1件(予算を割る
+            #    **前**に畳む版)は別物。同じつまみ名で2行出て見分けが付かなかった
+            #    (2026-08-15)。◆ の有無で分ける。
+            _k2["dedup_post"] = "◆1銘柄1件" in _s
+            _k2["dedup"] = ("1銘柄1件" in _s) and not _k2["dedup_post"]
             # 発注方式そのもの(ギャップ閾値 / 寄指か / 資金均等か)は
             # **つまみではなく別の方式**なので、揃っていない行は兄弟にしない。
             _m6 = _re_kn.search(r"H指値([+-]\d+)bp", _s)
@@ -16619,7 +16623,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
-            _KN_KEYS = ["delay", "sm", "tm", "cap", "top", "fill", "dedup"]
+            _KN_KEYS = ["delay", "sm", "tm", "cap", "top", "fill",
+                        "dedup", "dedup_post"]
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。"""
@@ -16628,14 +16633,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     if _kk[_f] != _bkn[_f]:
                         return None
                 return [_f for _f in _KN_KEYS if _kk[_f] != _bkn[_f]]
-            # ★ 2つ以上違う行も **隠さずに出して ⛔比較不能 と書く**。
-            #   黙って消すと「掃いたはずの設定が表に無い」ことになり、
-            #   掃き直しの必要に気づけない(delay/tm は sm0.1 の土台で
-            #   作られているので、基準が sm0.5 になった時点で2つずれる)。
+            # ★ 読めるのは **ちょうど1つだけ違う行**。2つ以上違う行は
+            #   古い土台(sm0.1 など)で作った残りで、判定に使えない。
+            #   ⛔ ただし **黙って消さない**。件数だけ必ず出す。消すと
+            #     「掃いたはずの設定が表に無い」ことに気づけない。
             _cands = [r for r in _out
                       if r[0] != _bk and not str(r[0]).startswith("▶")
-                      and (_n_diff(r[0]) or []) and _n_diff(r[0]) is not None]
-            _cands.sort(key=lambda r: (len(_n_diff(r[0])), str(r[0])))
+                      and (_n_diff(r[0]) or None) is not None]
+            _stale = [r for r in _cands if len(_n_diff(r[0])) > 1]
+            _cands = [r for r in _cands if len(_n_diff(r[0])) == 1]
+            _cands.sort(key=lambda r: (str(_knobs(r[0])), str(r[0])))
             # 基準行を先頭に
             for _r in [_brow] + _cands:
                 _v2 = _r[0]
@@ -16651,7 +16658,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     _LBLN = {"delay": "損切り遅延", "sm": "損切ATR",
                              "tm": "利確ATR", "cap": "1銘柄の金額上限",
                              "top": "上位N絞り", "fill": "余りを配り切る",
-                             "dedup": "1銘柄1件"}
+                             "dedup": "1銘柄1件(予算を割る前に畳む)",
+                             "dedup_post": "◆1銘柄1件(株数決定後に落とす)"}
 
                     def _fmt_kn(_f, _v3):
                         if _f == "cap":
@@ -16660,7 +16668,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "損切なし"
                         if _f == "top":
                             return "なし" if not _v3 else f"上位{_v3:g}"
-                        if _f in ("fill", "dedup"):
+                        if _f in ("fill", "dedup", "dedup_post"):
                             return "する" if _v3 else "しない"
                         return f"{_v3:g}"
                     _dfs = [_f for _f in _KN_KEYS if _kk2[_f] != _bkn[_f]]
@@ -16692,7 +16700,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _cnv = ((_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
                 _mxb, _mxv = _cnb.get("sym_max", 0.0), _cnv.get("sym_max", 0.0)
                 _conc_knob = (not _is_b) and any(
-                    _f in ("cap", "top", "fill", "dedup") for _f in _dfs)
+                    _f in ("cap", "top", "fill", "dedup", "dedup_post")
+                    for _f in _dfs)
                 _mixed = (not _is_b and not _conc_knob and _mxb > 0 and _mxv > 0
                           and (max(_mxb, _mxv) / min(_mxb, _mxv)) > 1.5)
                 if _is_b:
@@ -16750,6 +16759,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         (_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
                     + f'<td style="padding:3px 8px;color:{_vc};font-weight:700">'
                     f'{_vd2}</td></tr>')
+            # ⛔ 古い土台の残り(2つ以上違う)は判定に使えないが、**件数は必ず出す**。
+            #   黙って消すと「掃いたはずの設定が表に無い」ことに気づけない。
+            if _stale:
+                _ex = "、".join(sorted({
+                    "/".join(_n_diff(r[0])) for r in _stale})[:4])
+                _audit += (
+                    f'<tr style="background:#1a1a2e"><td colspan="8" '
+                    f'style="padding:6px 8px;color:#fbbf24;font-size:0.78rem">'
+                    f'⛔ ほかに <b>{len(_stale)}行</b>が「つまみが2つ以上違う」ため'
+                    f'判定から外れています（古い土台で作った残り: {_ex}）。'
+                    f'読みたいなら、その土台の上で掃き直してください。'
+                    f'いま確定している設定なら掃き直す必要はありません'
+                    f'</td></tr>')
 
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm, _rc) in _out:
