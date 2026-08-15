@@ -10675,9 +10675,15 @@ function switchTbd(id, tab) {{
                 _b = str(_k).split("資金均等")[0]
                 _g = float("".join(_c for _c in _b.split("bp")[0][-5:]
                                    if _c.isdigit()) or 50)
-                _d = (int("".join(_c for _c in _b.split("寄指d")[-1]
-                                  if _c.isdigit()) or _eh_delay)
-                      if "寄指d" in _b else int(_eh_delay))
+                # ⛔ "寄指d4sm0.2" のような後続サフィックスの数字を拾わないよう、
+                #    **先頭の連続数字だけ**を取る(2026-08-15 に 402 と誤読した)。
+                _tail = _b.split("寄指d")[-1] if "寄指d" in _b else ""
+                _ds = ""
+                for _c in _tail:
+                    if not _c.isdigit():
+                        break
+                    _ds += _c
+                _d = int(_ds) if _ds else int(_eh_delay)
                 return _g, _d, _b
 
             _eqg0 = 50.0
@@ -10727,6 +10733,31 @@ function switchTbd(id, tab) {{
                     _slbl = "損切なし" if _sv >= 90 else f"sm{_sv:g}"
                     _hvars.append((f"H指値{_eqg0:+.0f}bp寄指{_slbl}", 0, True,
                                    _eh_delay, "fill", _eqg0, None, _sv))
+                # ★★ 確定した delay(タブ2 = d4)の下で sm/tm を掃き直す
+                #   (2026-08-15 の設定監査)。
+                #   ⛔ 上の sm スイープは **delay1 固定**で回している。
+                #      §18.27 に「sm と delay は代替関係」と書いてあるのに
+                #      混ぜたままだった。delay を変えた以上、最適な sm は動きうる。
+                #   ⛔ **tm は lss(逆指値)から継承したまま一度も掃いていない**。
+                #      delay を伸ばして利確到達が 68件→138件 と2倍になったので、
+                #      最適な利確幅は以前と違いうる。§18.28 の「tm は変えない」は
+                #      lss・delay1 での結論であって、J には引き継げない。
+                try:
+                    _g4, _d4, _b4 = _eq_parse(os.environ.get(
+                        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等"))
+                except Exception:
+                    _g4, _d4, _b4 = _eqg0, _eh_delay, ""
+                if _b4:
+                    for _sv in [float(x) for x in str(os.environ.get(
+                            "LSS_EQ_SMS2", "0.05,0.2,0.3,0.5")).split(",")
+                            if str(x).strip().replace(".", "").isdigit()]:
+                        _hvars.append((f"{_b4}sm{_sv:g}", 0, True,
+                                       _d4, "fill", _g4, None, _sv))
+                    for _tv in [float(x) for x in str(os.environ.get(
+                            "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
+                            if str(x).strip().replace(".", "").isdigit()]:
+                        _hvars.append((f"{_b4}tm{_tv:g}", 0, True,
+                                       _d4, "fill", _g4, None, None, _tv))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -10810,7 +10841,7 @@ function switchTbd(id, tab) {{
                 # v2: 不約定シグナルに label/color/WF/rank を持たせた
                 #     (2026-08-15)。トレード dict の中身が変わるので、
                 #     古いキャッシュを引くと 設定バッジが空のままになる。
-                _sig = ["v4", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                _sig = ["v5", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
@@ -10915,16 +10946,22 @@ function switchTbd(id, tab) {{
     _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
     _EQ_TAB_TOP = "".join(_c for _c in _EQ_TAB_KEY.split("上位")[-1]
                           if _c.isdigit()) if "上位" in _EQ_TAB_KEY else ""
-    _EQ_TAB_DLY = ("".join(_c for _c in _EQ_TAB_BASE.split("寄指d")[-1]
-                           if _c.isdigit())
-                   if "寄指d" in _EQ_TAB_BASE else "")
+    _EQ_TAB_DLY = ""
+    for _c in (_EQ_TAB_BASE.split("寄指d")[-1] if "寄指d" in _EQ_TAB_BASE else ""):
+        if not _c.isdigit():
+            break
+        _EQ_TAB_DLY += _c
 
     def _eq_lbl_of(_k):
         """タブキーから表示ラベルを作る。"""
         _b = str(_k).split("資金均等")[0]
         _g = "".join(_c for _c in _b.split("bp")[0][-5:] if _c.isdigit()) or "50"
-        _d = ("".join(_c for _c in _b.split("寄指d")[-1] if _c.isdigit())
-              if "寄指d" in _b else "")
+        _tl = _b.split("寄指d")[-1] if "寄指d" in _b else ""
+        _d = ""
+        for _c in _tl:                      # 先頭の連続数字だけ(sm/tm を拾わない)
+            if not _c.isdigit():
+                break
+            _d += _c
         _tp = ("".join(_c for _c in str(_k).split("上位")[-1] if _c.isdigit())
                if "上位" in str(_k) else "")
         return (f"09:00確認+{_g}bp 資金均等"
@@ -16226,9 +16263,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         # サイズ均等は 100株固定(建玉が 10万〜60万 と6倍ばらつく)の代案。
         # 期待値ではなく**分散**に効くはずなので、合計だけでなく月次σも見ること。
         _SZ_YEN = _budget_yen / 13.0     # 1日13件で予算を使い切る想定の1件あたり建玉
+        # ⛔ ◆1銘柄1件 / ◆金額均等 / ◆ATR均等 は **H にしか付けていなかった**
+        #    (_vs[0])。2026-08-15 の設定監査で、推奨タブ(K)にも要ると判明:
+        #    同じ銘柄が同日に複数戦略で出ると資金均等は2枠取り、その銘柄への
+        #    露出が2倍になる(実測 1,378件中 251件 / 重複を外すと -1,442,320円)。
+        #    リスクを倍にして稼いでいるので、外した版と必ず並べる。
+        _dup_tg = [_vs[0]] + ([_EQ_TAB_KEY2] if (_EQ_TAB_KEY2 in _vs) else [])
         _vs2 = ([(v, False, None, 0.0) for v in _vs]
-                + [(_vs[0], True, None, 0.0),
-                   (_vs[0], False, "yen", _SZ_YEN),
+                + [(v, True, None, 0.0) for v in _dup_tg]
+                + [(_vs[0], False, "yen", _SZ_YEN),
                    (_vs[0], False, "atr", 1200.0)])
         _out = []
         for _v, _ops, _szm, _szt in _vs2:

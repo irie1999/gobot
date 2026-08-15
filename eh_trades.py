@@ -174,7 +174,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             (str(v[4]) if len(v) > 4 and v[4] else "fill"),
             (float(v[5]) if len(v) > 5 and v[5] is not None else None),
             (float(v[6]) if len(v) > 6 and v[6] is not None else None),
-            (float(v[7]) if len(v) > 7 and v[7] is not None else None))
+            (float(v[7]) if len(v) > 7 and v[7] is not None else None),
+            # 9要素目 = **利確幅(tm)の上書き**。ATR倍率。None なら build の tm。
+            # ⛔ tm は lss(逆指値)から継承したまま **一度も掃いていない**
+            #    (2026-08-15 の監査で判明)。delay を伸ばしたことで利確到達が
+            #    68件→138件 と2倍になっており、最適な利確幅は以前と違いうる。
+            #    §18.28 の「tm は変えない」は lss・delay1 での結論。
+            (float(v[8]) if len(v) > 8 and v[8] is not None else None))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -376,9 +382,10 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
         _cases = [("E", o1, o1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
-                   int(stop_delay_bars), "fill", "", sm)]
-        for _hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm in _HV:
+                   int(stop_delay_bars), "fill", "", sm, tm)]
+        for _hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm, _htm in _HV:
             _sm_v = sm if _hsm is None else _hsm
+            _tm_v = tm if _htm is None else _htm
             if _hgap is not None:
                 # ── 寄り確認モード ────────────────────────────────
                 # 09:00 の寄り値を見て、前日終値比のギャップが閾値以上なら
@@ -392,7 +399,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 except Exception:
                     _ep_c = 0.0
                 _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
-                               0, _hanc, "confirm", _sm_v))
+                               0, _hanc, "confirm", _sm_v, _tm_v))
                 continue
             if _hbp is not None:
                 # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める
@@ -406,7 +413,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                  and (o1 >= _hl if _ha else True)),
-                _hd, _hanc, "", _sm_v))
+                _hd, _hanc, "", _sm_v, _tm_v))
         # ── 09:00のバーが無い日は delay を1本ぶん前倒しする ────────────────
         # E/H の約定は **09:00 の板寄せ**。delay1 は「約定した5分足の間は損切りを
         # 置かない」なので、無保護窓は 09:00-09:05 = ちょうど欠けている足。
@@ -417,7 +424,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ⚠ 板寄せ約定(寄りから建玉がある)のときだけ。ザラ場到達で建てた場合は
         #    約定足が日中なので、寄りの欠落は delay の数えに関係しない。
         _no_open_bar = _first_hm != "09:00"
-        for key, order_p, ep, ok, _dly, _anc, _mode, _smv in _cases:
+        for key, order_p, ep, ok, _dly, _anc, _mode, _smv, _tmv in _cases:
             _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
@@ -426,13 +433,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 #   要る。「寄りが閾値をどれだけ下回ったか」が分からないと、
                 #   8:59気配で前倒し判定したときに何件ひっくり返るかを測れない。
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, _smv, tm, qty, key,
+                                   pc, atr, _smv, _tmv, qty, key,
                                    day_open=o1) for s in _srcs)
                 continue
             if key != "E" and _mode != "confirm":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
                 _sa = max(ep, pc) if _anc == "max" else ep      # 損切りアンカー
-                xp, why, _e, _x = _x5(day5, ep, _sa + atr * _smv, _sa - atr * tm, True,
+                xp, why, _e, _x = _x5(day5, ep, _sa + atr * _smv, _sa - atr * _tmv, True,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             elif _mode == "confirm":
@@ -449,7 +456,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 else:
                     _sa = ep
                     xp, why, _e, _x = _x5(_d2, float("inf"),
-                                          _sa + atr * _smv, _sa - atr * tm, False,
+                                          _sa + atr * _smv, _sa - atr * _tmv, False,
                                           day_low=None, day_high=None, day_close=c1,
                                           stop_delay_bars=_dly)
             else:
@@ -458,7 +465,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 # 含み損が判定から丸ごと抜け、負けだけが系統的に消える(18.32)。
                 _sa = ep                                        # E は寄成なので常に実約定
                 xp, why, _e, _x = _x5(day5, float("inf"),
-                                      _sa + atr * _smv, _sa - atr * tm, False,
+                                      _sa + atr * _smv, _sa - atr * _tmv, False,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             if xp is None or why in ("no_5m", "no_entry"):
@@ -466,7 +473,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 #   要る。「寄りが閾値をどれだけ下回ったか」が分からないと、
                 #   8:59気配で前倒し判定したときに何件ひっくり返るかを測れない。
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, _smv, tm, qty, key,
+                                   pc, atr, _smv, _tmv, qty, key,
                                    day_open=o1) for s in _srcs)
                 continue
             if key != "E" and _mode != "confirm":
@@ -486,7 +493,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 pass
             out[key].extend(_mk(s, order_p, ep, float(xp),
                                 _REASON.get(why, why), _t,
-                                pc, atr, _smv, tm, qty, key, _sa, o1) for s in _srcs)
+                                pc, atr, _smv, _tmv, qty, key, _sa, o1) for s in _srcs)
     _skip = sum(_sk.values())
     log("[E/H] 約定 " + " / ".join(
         f"{k}={len(out[k]):,}" for k in ["E"] + _HKEYS)
