@@ -10734,11 +10734,23 @@ function switchTbd(id, tab) {{
                 # ⛔ この関数の body 直下では **汎用的な短い名前を使わない**。
                 #    _dd(defaultdict)をループ変数で潰して損益タブが丸ごと落ちた
                 #    (2026-08-15)。以降 _eq* 接頭辞で固有名にする。
+                _eqsm2 = _eqtm2 = None
                 _eqk2 = str(os.environ.get(
-                    "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
+                    "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等")).strip()
                 if _eqk2:
                     _eqg2, _eqd2, _eqb2 = _eq_parse(_eqk2)
-                    _hvars.append((_eqb2, 0, True, _eqd2, "fill", _eqg2))
+                    # ⛔ 推奨キーが sm/tm を含むとき、ここで**上書き値を渡さない**と
+                    #    名前は sm0.5 なのに中身は global(0.1) で計算される。
+                    #    _hvars は名前で先勝ち重複排除するので、後段の sm
+                    #    スイープでは直らない(こちらが先に入る)。
+                    import re as _re_k2
+                    _m2sm = _re_k2.search(r"sm([\d.]+)", _eqb2)
+                    _m2tm = _re_k2.search(r"tm([\d.]+)", _eqb2)
+                    _eqsm2 = (99.0 if "損切なし" in _eqb2 else
+                              (float(_m2sm.group(1)) if _m2sm else None))
+                    _eqtm2 = float(_m2tm.group(1)) if _m2tm else None
+                    _hvars.append((_eqb2, 0, True, _eqd2, "fill", _eqg2,
+                                   None, _eqsm2, _eqtm2))
             except Exception as _eqe0:
                 print(f"[E/H] タブ変種の解決に失敗: {_eqe0}", flush=True)
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
@@ -10759,6 +10771,17 @@ function switchTbd(id, tab) {{
                         continue      # 既定と同じ = 上で作ってある
                     _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}", 0, True,
                                    _dv, "fill", _eqg0))
+                    # ★ 推奨(タブ2)が sm を持つなら、**その sm の上でも**
+                    #   delay を掃く。持たない土台の delay 行は基準と
+                    #   つまみが2つずれて『比較不能』になるため。
+                    #   sm と delay はどちらも損切りに効くので、sm を変えたら
+                    #   最適な delay も動きうる(§18.38 の代替関係)。
+                    if _eqsm2:
+                        _dsl = ("損切なし" if _eqsm2 >= 90
+                                else f"sm{_eqsm2:g}")
+                        _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}{_dsl}",
+                                       0, True, _dv, "fill", _eqg0,
+                                       None, _eqsm2))
                 # ★★ 損切り幅(sm)を掃く — delay と切り分けるための本命 (2026-08-15)
                 #   ⛔ delay は d0<d1<d2<d3<d4<d5 と**単調に良くなり続け**、
                 #      増分は逓減していた(+669/+498/+250/+169/+49 円/件)。
@@ -10785,9 +10808,14 @@ function switchTbd(id, tab) {{
                 #      delay を伸ばして利確到達が 68件→138件 と2倍になったので、
                 #      最適な利確幅は以前と違いうる。§18.28 の「tm は変えない」は
                 #      lss・delay1 での結論であって、J には引き継げない。
+                # ⛔ スイープの土台は **推奨キーから sm/tm を外した形**にする。
+                #    推奨が "…d4sm0.5資金均等" になったあと推奨キーをそのまま
+                #    土台にすると "…d4sm0.5sm0.2" という壊れた名前になる。
                 try:
                     _eqg4, _eqd4, _eqb4 = _eq_parse(os.environ.get(
-                        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等"))
+                        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等"))
+                    import re as _re_b4
+                    _eqb4 = _re_b4.sub(r"(sm[\d.]+|tm[\d.]+|損切なし)", "", _eqb4)
                 except Exception:
                     _eqg4, _eqd4, _eqb4 = _eqg0, _eh_delay, ""
                 if _eqb4:
@@ -10804,8 +10832,13 @@ function switchTbd(id, tab) {{
                     for _eqtm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
-                        _hvars.append((f"{_eqb4}tm{_eqtm:g}", 0, True,
-                                       _eqd4, "fill", _eqg4, None, None,
+                        # ★ 推奨が sm を持つなら tm も **その sm の上で**掃く
+                        #   (でないと基準とつまみが2つずれて比較不能になる)
+                        _tsl = ("" if not _eqsm2 else
+                                ("損切なし" if _eqsm2 >= 90
+                                 else f"sm{_eqsm2:g}"))
+                        _hvars.append((f"{_eqb4}{_tsl}tm{_eqtm:g}", 0, True,
+                                       _eqd4, "fill", _eqg4, None, _eqsm2,
                                        _eqtm))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
@@ -11025,12 +11058,17 @@ function switchTbd(id, tab) {{
                 + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
 
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
-    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4)。J の隣に出す。
+    # ★ タブ2(K) = 2026-08-15 に確定した推奨設定。J の隣に出す。
+    #   delay4 + 損切 0.5ATR。sm0.5 は §18.38 #2 の再測定で 月平均/σ が
+    #   単峰の頂点(4.54→5.60。0.7=5.16 / 1.0=5.07 / 損切なし=4.22 と落ちる)。
+    #   件数は全行 2,049 で固定なので §18.28 の「件数増で総額が増えただけ」
+    #   には当たらない。勝ち月 10/10(前半5/5・後半5/5)。
     #   1銘柄の金額上限100万は **_EQ_MAX_YEN の既定**として全変種に掛かるので、
-    #   タブキーに 上限N万 のサフィックスは付けない(付けると sm/tm 変種と
-    #   つまみが2つずれる)。空文字にすれば出さない。
+    #   タブキーに 上限N万 のサフィックスは付けない(付けると比較が2つずれる)。
+    #   空文字にすれば出さない。旧設定に戻すなら
+    #   set LSS_EQ_TAB_KEY2=H指値+50bp寄指d4資金均等
     _EQ_TAB_KEY2 = str(os.environ.get(
-        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
+        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
@@ -16538,33 +16576,100 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _s2 = _sti.stdev(_mv)
             return _s2, ((_sti.mean(_mv) / _s2) if _s2 > 0 else 0.0)
 
+        # ★ つまみを機械的に読み取る。**prefix 一致では足りない**(2026-08-15)。
+        #   基準が「d4sm0.5資金均等」のようにつまみを2つ持つと、prefix では
+        #   d4sm0.2 等の兄弟が拾えず、逆に緩めると2つ以上違う行が混ざる。
+        #   名前から (遅延, 損切, 利確, 金額上限, 上位N, 充填, 1銘柄1件) を
+        #   復元して、**ちょうど1つだけ違う行**を兄弟とする。
+        import re as _re_kn
+
+        def _knobs(_nm: str) -> dict:
+            _s = str(_nm)
+            _k2: dict = {}
+            _m1 = _re_kn.search(r"寄指d(\d+)", _s)
+            _k2["delay"] = (int(_m1.group(1)) if _m1
+                            else int(os.environ.get("LSS_STOP_DELAY_BARS", "1") or 1))
+            if "損切なし" in _s:
+                _k2["sm"] = 99.0
+            else:
+                _m2 = _re_kn.search(r"sm([\d.]+)", _s)
+                _k2["sm"] = float(_m2.group(1)) if _m2 else float(_LSS_SM)
+            _m3 = _re_kn.search(r"tm([\d.]+)", _s)
+            _k2["tm"] = float(_m3.group(1)) if _m3 else float(_LSS_TM)
+            if "上限なし" in _s:
+                _k2["cap"] = 0.0
+            else:
+                _m4 = _re_kn.search(r"上限([\d.]+)万", _s)
+                _k2["cap"] = (float(_m4.group(1)) * 1e4 if _m4 else _EQ_MAX_YEN)
+            _m5 = _re_kn.search(r"上位(\d+)", _s)
+            _k2["top"] = int(_m5.group(1)) if _m5 else 0
+            _k2["fill"] = "充填" in _s
+            _k2["dedup"] = "1銘柄1件" in _s
+            # 発注方式そのもの(ギャップ閾値 / 寄指か / 資金均等か)は
+            # **つまみではなく別の方式**なので、揃っていない行は兄弟にしない。
+            _m6 = _re_kn.search(r"H指値([+-]\d+)bp", _s)
+            _k2["_gap"] = _m6.group(1) if _m6 else "—"
+            _k2["_eq"] = "資金均等" in _s
+            _k2["_auc"] = "寄指" in _s
+            return _k2
+
         _audit = ""
         _bk = _EQ_TAB_KEY2 if _EQ_TAB_KEY2 in {r[0] for r in _out} else ""
         if _bk:
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
-            _bpre = str(_bk).split("資金均等")[0]      # 例 "H指値+50bp寄指d4"
-            # ⛔ prefix 一致だけだと **100株固定版**(資金均等が付かない同名)も
-            #    拾ってしまい、件数636 の行が混ざる(2026-08-15 に実際そうなった)。
-            #    サイズ方式を揃えないと比較にならないので、基準と同じく
-            #    「資金均等」を含む行だけにする。
+            _bkn = _knobs(_bk)
+            _KN_KEYS = ["delay", "sm", "tm", "cap", "top", "fill", "dedup"]
+
+            def _n_diff(_nm: str):
+                """方式が同じなら違うつまみの一覧、違えば None。"""
+                _kk = _knobs(_nm)
+                for _f in ("_gap", "_eq", "_auc"):
+                    if _kk[_f] != _bkn[_f]:
+                        return None
+                return [_f for _f in _KN_KEYS if _kk[_f] != _bkn[_f]]
+            # ★ 2つ以上違う行も **隠さずに出して ⛔比較不能 と書く**。
+            #   黙って消すと「掃いたはずの設定が表に無い」ことになり、
+            #   掃き直しの必要に気づけない(delay/tm は sm0.1 の土台で
+            #   作られているので、基準が sm0.5 になった時点で2つずれる)。
             _cands = [r for r in _out
-                      if r[0] != _bk and str(r[0]).startswith(_bpre)
-                      and ("資金均等" in str(r[0])) == ("資金均等" in str(_bk))
-                      and not str(r[0]).startswith("▶")]
+                      if r[0] != _bk and not str(r[0]).startswith("▶")
+                      and (_n_diff(r[0]) or []) and _n_diff(r[0]) is not None]
+            _cands.sort(key=lambda r: (len(_n_diff(r[0])), str(r[0])))
             # 基準行を先頭に
             for _r in [_brow] + _cands:
                 _v2 = _r[0]
                 _sg2, _st2 = _sig_of(_r[11])
                 _is_b = (_v2 == _bk)
-                # つまみ名(基準からの差分)を抜き出す
-                # 基準が「上限200万」のようにサフィックス付きのとき、
-                # サフィックスの無い行は『そのつまみを外した版』。空文字に
-                # なってフルキーが出ると読めないので、外した名前で表示する。
-                _sfx_b = str(_bk).split("資金均等")[-1].strip()
-                _kn = ("基準（現在の推奨）" if _is_b else
-                       (str(_v2).replace(_bpre, "").replace("資金均等", "").strip()
-                        or (f"{_sfx_b}なし" if _sfx_b else str(_v2))))
+                # ★ つまみ名は **実際に違っている1つ**を名前で出す。
+                #   文字列の差分だと基準が2つ以上のつまみを持つとき読めない。
+                _dfs: list = []
+                if _is_b:
+                    _kn = "基準（現在の推奨）"
+                else:
+                    _kk2 = _knobs(_v2)
+                    _LBLN = {"delay": "損切り遅延", "sm": "損切ATR",
+                             "tm": "利確ATR", "cap": "1銘柄の金額上限",
+                             "top": "上位N絞り", "fill": "余りを配り切る",
+                             "dedup": "1銘柄1件"}
+
+                    def _fmt_kn(_f, _v3):
+                        if _f == "cap":
+                            return "なし" if not _v3 else f"{_v3 / 1e4:g}万"
+                        if _f == "sm" and _v3 >= 90:
+                            return "損切なし"
+                        if _f == "top":
+                            return "なし" if not _v3 else f"上位{_v3:g}"
+                        if _f in ("fill", "dedup"):
+                            return "する" if _v3 else "しない"
+                        return f"{_v3:g}"
+                    _dfs = [_f for _f in _KN_KEYS if _kk2[_f] != _bkn[_f]]
+                    _kn = " / ".join(
+                        f"{_LBLN[_f]} {_fmt_kn(_f, _bkn[_f])}"
+                        f"→<b>{_fmt_kn(_f, _kk2[_f])}</b>" for _f in _dfs) \
+                        or str(_v2)
+                    if len(_dfs) > 1:
+                        _kn = ('<span style="color:#f87171">⛔ </span>' + _kn)
                 # ⛔ 表の「前半/後半」列は **現行H比**。監査では
                 #    **基準(K)からどれだけ動いたか**を見たいので差を取り直す。
                 _d1 = _r[9] - _brow[9]
@@ -16580,15 +16685,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   「上限あり sm0.1」vs「**上限なし** sm0.5」を比べて sm/tm が
                 #   一斉に ✅ になった。1銘柄の最大露出が基準と大きく違うのに
                 #   つまみ名が集中に関係ないなら、その行は比較不能。
+                #   ★ 兄弟の選定自体が『ちょうど1つだけ違う』を要求するように
+                #     なったので二重の保険だが、命名規則が変わったときに
+                #     黙って壊れないよう残す。
                 _cnb = ((_EH_TRADES.get("_eq_conc") or {}).get(_bk) or {})
                 _cnv = ((_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
                 _mxb, _mxv = _cnb.get("sym_max", 0.0), _cnv.get("sym_max", 0.0)
-                _conc_knob = any(_t3 in str(_kn)
-                                 for _t3 in ("上限", "1銘柄1件", "上位", "充填"))
+                _conc_knob = (not _is_b) and any(
+                    _f in ("cap", "top", "fill", "dedup") for _f in _dfs)
                 _mixed = (not _is_b and not _conc_knob and _mxb > 0 and _mxv > 0
                           and (max(_mxb, _mxv) / min(_mxb, _mxv)) > 1.5)
                 if _is_b:
                     _vd2, _vc = "—", "#94a3b8"
+                elif len(_dfs) > 1:
+                    _vd2, _vc = (f"⛔ 比較不能（つまみが{len(_dfs)}つ違う）"
+                                 "。この土台で掃き直すこと", "#f87171")
                 elif _mixed:
                     _vd2, _vc = ("⛔ 比較不能（1銘柄の最大露出が基準と違う"
                                  "＝つまみが2つ動いている）", "#f87171")
