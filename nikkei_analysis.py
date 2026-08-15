@@ -10691,11 +10691,14 @@ function switchTbd(id, tab) {{
                 _eqg0, _, _ = _eq_parse(os.environ.get(
                     "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等"))
                 # タブ2(既定 = 確定した推奨設定 d4)。空文字で無効化できる。
-                _k2 = str(os.environ.get(
+                # ⛔ この関数の body 直下では **汎用的な短い名前を使わない**。
+                #    _dd(defaultdict)をループ変数で潰して損益タブが丸ごと落ちた
+                #    (2026-08-15)。以降 _eq* 接頭辞で固有名にする。
+                _eqk2 = str(os.environ.get(
                     "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
-                if _k2:
-                    _g2, _d2, _b2 = _eq_parse(_k2)
-                    _hvars.append((_b2, 0, True, _d2, "fill", _g2))
+                if _eqk2:
+                    _eqg2, _eqd2, _eqb2 = _eq_parse(_eqk2)
+                    _hvars.append((_eqb2, 0, True, _eqd2, "fill", _eqg2))
             except Exception as _eqe0:
                 print(f"[E/H] タブ変種の解決に失敗: {_eqe0}", flush=True)
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
@@ -10727,12 +10730,12 @@ function switchTbd(id, tab) {{
                 #        sm    … 常に損切りあり・**幅が広い**(必ず切れる)
                 #      同じ効果なら sm のほうが尾リスクの意味で健全。
                 #   ⚠ 比較を成立させるため delay は **ライブと同じ本数**に固定する。
-                for _sv in [float(x) for x in str(os.environ.get(
+                for _eqsm in [float(x) for x in str(os.environ.get(
                         "LSS_EQ_SMS", "0.3,0.5,1.0,99")).split(",")
                         if str(x).strip().replace(".", "").isdigit()]:
-                    _slbl = "損切なし" if _sv >= 90 else f"sm{_sv:g}"
-                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指{_slbl}", 0, True,
-                                   _eh_delay, "fill", _eqg0, None, _sv))
+                    _eqsl = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
+                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指{_eqsl}", 0, True,
+                                   _eh_delay, "fill", _eqg0, None, _eqsm))
                 # ★★ 確定した delay(タブ2 = d4)の下で sm/tm を掃き直す
                 #   (2026-08-15 の設定監査)。
                 #   ⛔ 上の sm スイープは **delay1 固定**で回している。
@@ -10743,21 +10746,22 @@ function switchTbd(id, tab) {{
                 #      最適な利確幅は以前と違いうる。§18.28 の「tm は変えない」は
                 #      lss・delay1 での結論であって、J には引き継げない。
                 try:
-                    _g4, _d4, _b4 = _eq_parse(os.environ.get(
+                    _eqg4, _eqd4, _eqb4 = _eq_parse(os.environ.get(
                         "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等"))
                 except Exception:
-                    _g4, _d4, _b4 = _eqg0, _eh_delay, ""
-                if _b4:
-                    for _sv in [float(x) for x in str(os.environ.get(
+                    _eqg4, _eqd4, _eqb4 = _eqg0, _eh_delay, ""
+                if _eqb4:
+                    for _eqsm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_SMS2", "0.05,0.2,0.3,0.5")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
-                        _hvars.append((f"{_b4}sm{_sv:g}", 0, True,
-                                       _d4, "fill", _g4, None, _sv))
-                    for _tv in [float(x) for x in str(os.environ.get(
+                        _hvars.append((f"{_eqb4}sm{_eqsm:g}", 0, True,
+                                       _eqd4, "fill", _eqg4, None, _eqsm))
+                    for _eqtm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
-                        _hvars.append((f"{_b4}tm{_tv:g}", 0, True,
-                                       _d4, "fill", _g4, None, None, _tv))
+                        _hvars.append((f"{_eqb4}tm{_eqtm:g}", 0, True,
+                                       _eqd4, "fill", _eqg4, None, None,
+                                       _eqtm))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -11170,26 +11174,32 @@ function switchTbd(id, tab) {{
             # ⚖表の列が倍々に増えて読めなくなる)。delay版をタブに出したいときは
             # set LSS_EQ_TAB_KEY=H指値+50bp寄指d0資金均等 のように指定する。
             # (上位N, 充填, 1銘柄1件)
-            _tops = [(0, False, False)]
+            _eq_modes = [(0, False, False)]
             if _k == _EQ_TAB_BASE:
-                _tops += [(0, True, False)] + [(_t2, False, False)
-                                               for _t2 in _EQ_TOPS]
+                _eq_modes += [(0, True, False)] + [(_t2, False, False)
+                                                   for _t2 in _EQ_TOPS]
             # ★ 1銘柄1件は **推奨タブ(K)の変種にも**付ける。重複保有は
             #   その銘柄への露出を2倍にするので、delay で20分無防備な構成では
             #   いちばん危ない形になる(2026-08-15)。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
-                _tops.append((0, False, True))
-            for _tp, _fl, _dd in _tops:
-                _nk = (f"{_k}資金均等" + (f"上位{_tp}" if _tp else "")
-                       + ("充填" if _fl else "") + ("1銘柄1件" if _dd else ""))
-                if _nk in _EH_TRADES:
+                _eq_modes.append((0, False, True))
+            # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
+            #    `from collections import defaultdict as _dd` を使っており、
+            #    代入した瞬間に **_tab5_pnl_html のローカル**になって
+            #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
+            #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
+            for _eqtp, _eqfl, _eqdp in _eq_modes:
+                _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
+                         + ("充填" if _eqfl else "")
+                         + ("1銘柄1件" if _eqdp else ""))
+                if _eqnk in _EH_TRADES:
                     continue
-                _EH_TRADES[_nk], _eq_st = _size_equal_by_day(
-                    _v, _EQ_BUD, _tp, _fl, _dd)
-                _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
-                _EH_TRADES.setdefault("約定せず", {})[_nk] = []
+                _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
+                    _v, _EQ_BUD, _eqtp, _eqfl, _eqdp)
+                _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
+                _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
-                    _EH_TRADES.get("_h_variants") or []) + [_nk]
+                    _EH_TRADES.get("_h_variants") or []) + [_eqnk]
                 _n_eq += 1
         if _EQ_KEYS:
             print(f"[E/H] 資金均等版を {_n_eq}本 追加 "
