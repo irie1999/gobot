@@ -10829,6 +10829,24 @@ function switchTbd(id, tab) {{
                         _eqsl4 = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
                         _hvars.append((f"{_eqb4}{_eqsl4}", 0, True,
                                        _eqd4, "fill", _eqg4, None, _eqsm))
+                    # ★★ ATR期間を掃く (2026-08-15 の監査で最後に残った継承値)
+                    #   ⛔ 14 は **スイング戦略(10日保有)からの継承**。sm/tm は
+                    #      すべて ATR 倍率なので、この期間が損切り・利確の
+                    #      **絶対幅そのもの**を決める。同日決済(数時間保有)に
+                    #      日足14日が適切かは一度も検証していない。
+                    #   ⚠ 短くする = 直近の値動きに追随(当日のボラに近い)
+                    #      長くする = 安定するが当日の地合いを反映しない
+                    for _eqap in [int(x) for x in str(os.environ.get(
+                            "LSS_EQ_ATRS", "3,5,7,10,20,30")).split(",")
+                            if str(x).strip().isdigit()]:
+                        if _eqap == 14:
+                            continue          # 既定 = 基準そのもの
+                        _asl = ("" if not _eqsm2 else
+                                ("損切なし" if _eqsm2 >= 90
+                                 else f"sm{_eqsm2:g}"))
+                        _hvars.append((f"{_eqb4}{_asl}ap{_eqap}", 0, True,
+                                       _eqd4, "fill", _eqg4, None, _eqsm2,
+                                       None, _eqap))
                     for _eqtm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
@@ -11049,8 +11067,11 @@ function switchTbd(id, tab) {{
         _ym = ("".join(_c for _c in str(_k).split("上限")[-1]
                        if _c.isdigit() or _c == ".")
                if "上限" in str(_k) else "")
+        _ap = ("".join(_c for _c in str(_b).split("ap")[-1] if _c.isdigit())
+               if "ap" in str(_b) else "")
         return (f"09:00確認+{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
+                + (f" ATR{_ap}日" if _ap else "")
                 + (f" 上位{_tp}集中" if _tp else "")
                 + (" 1銘柄上限なし" if "上限なし" in str(_k) else
                    (f" 1銘柄上限{_ym}万" if _ym else ""))
@@ -16614,6 +16635,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             else:
                 _m4 = _re_kn.search(r"上限([\d.]+)万", _s)
                 _k2["cap"] = (float(_m4.group(1)) * 1e4 if _m4 else _EQ_MAX_YEN)
+            _m45 = _re_kn.search(r"ap(\d+)", _s)
+            _k2["atr"] = int(_m45.group(1)) if _m45 else 14
             _m5 = _re_kn.search(r"上位(\d+)", _s)
             _k2["top"] = int(_m5.group(1)) if _m5 else 0
             _k2["fill"] = "充填" in _s
@@ -16636,7 +16659,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
-            _KN_KEYS = ["delay", "sm", "tm", "cap", "top", "fill",
+            _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
                         "dedup", "dedup_post"]
 
             def _n_diff(_nm: str):
@@ -16669,7 +16692,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 else:
                     _kk2 = _knobs(_v2)
                     _LBLN = {"delay": "損切り遅延", "sm": "損切ATR",
-                             "tm": "利確ATR", "cap": "1銘柄の金額上限",
+                             "tm": "利確ATR", "atr": "ATR期間(日)",
+                             "cap": "1銘柄の金額上限",
                              "top": "上位N絞り", "fill": "余りを配り切る",
                              "dedup": "1銘柄1件(予算を割る前に畳む)",
                              "dedup_post": "◆1銘柄1件(株数決定後に落とす)"}

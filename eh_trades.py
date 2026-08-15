@@ -28,6 +28,41 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 _REASON = {"stop": "損切り", "target": "目標達成", "close": "タイムカット"}
 
 
+
+# ★ ATR期間のスイープ用(2026-08-15)。既定の 14 は **スイング戦略からの継承値**で、
+#   同日決済に適切かは未検証だった。sm/tm はすべて ATR 倍率なので、この期間が
+#   損切り・利確の絶対幅を直接決める。
+# ⛔ 作る列と掃く期間がズレると、無い列は黙って既定(14)に落ちて
+#    「ap5 と書いてあるのに中身は14」になる。両方の env を **合併**して作る。
+_ATR_PERIODS = tuple(sorted(
+    {int(x) for x in str(os.environ.get(
+        "LSS_ATR_PERIODS", "3,5,7,10,14,20,30")).split(",")
+     if str(x).strip().isdigit()}
+    | {int(x) for x in str(os.environ.get(
+        "LSS_EQ_ATRS", "3,5,7,10,20,30")).split(",")
+       if str(x).strip().isdigit()}))
+_ATR_MISS: set = set()
+
+
+def _atr_of(df, pos, period=None):
+    """前日の ATR。period=None なら既定(14日)の列を使う。"""
+    try:
+        if not period:
+            return float(df["atr"].iloc[pos - 1])
+        _col = f"atr{int(period)}"
+        if _col not in df.columns:
+            # ⛔ 黙って14に落とすと嘘の行が出る。1回だけ大きく警告する。
+            if period not in _ATR_MISS:
+                _ATR_MISS.add(period)
+                print(f"⛔ [E/H] ATR{period}日 の列がありません。"
+                      f"LSS_ATR_PERIODS に {period} を足してください。"
+                      f"この変種は計算しません", flush=True)
+            return float("nan")
+        return float(df[_col].iloc[pos - 1])
+    except Exception:
+        return float("nan")
+
+
 def _fmt_md(d) -> str:
     """entry_d_raw(date でも 'YYYY-MM-DD' 文字列でも) を 'MM/DD' にする。"""
     try:
@@ -180,7 +215,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             #    (2026-08-15 の監査で判明)。delay を伸ばしたことで利確到達が
             #    68件→138件 と2倍になっており、最適な利確幅は以前と違いうる。
             #    §18.28 の「tm は変えない」は lss・delay1 での結論。
-            (float(v[8]) if len(v) > 8 and v[8] is not None else None))
+            (float(v[8]) if len(v) > 8 and v[8] is not None else None),
+            # 10要素目 = **ATR期間の上書き**(日足の EWM span)。None なら既定14。
+            # ⛔ 14 は **スイング戦略からの継承値**で、同日決済(数時間保有)に
+            #    適切かは一度も検証していない(2026-08-15 の監査で判明)。
+            #    sm/tm はすべて ATR 倍率なので、この期間が損切り・利確の
+            #    **絶対幅そのもの**を決める。
+            (int(v[9]) if len(v) > 9 and v[9] is not None else None))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -242,7 +283,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             pc = o["c"].shift(1)
             tr = pd.concat([o["h"] - o["l"], (o["h"] - pc).abs(),
                             (o["l"] - pc).abs()], axis=1).max(axis=1)
+            # ★ ATR期間は **スイング戦略からの継承値(日足14日)**。sm/tm は
+            #   すべて ATR 倍率なので、この14が損切り・利確の絶対幅を決める。
+            #   同日決済(数時間保有)に日足14日が適切かは未検証だったので、
+            #   掃けるように期間ごとの列を持つ(2026-08-15)。
             o["atr"] = tr.ewm(span=14, adjust=False).mean()
+            for _ap in _ATR_PERIODS:
+                o[f"atr{_ap}"] = tr.ewm(span=_ap, adjust=False).mean()
             return sym, o
         except Exception:
             return sym, None
@@ -382,8 +429,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # 指値を下げるほどガードも下がり、正常な日まで弾く(2026-08-10)。
         _cases = [("E", o1, o1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
-                   int(stop_delay_bars), "fill", "", sm, tm)]
-        for _hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm, _htm in _HV:
+                   int(stop_delay_bars), "fill", "", sm, tm, None)]
+        for (_hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm, _htm,
+             _hap) in _HV:
             _sm_v = sm if _hsm is None else _hsm
             _tm_v = tm if _htm is None else _htm
             if _hgap is not None:
@@ -399,7 +447,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 except Exception:
                     _ep_c = 0.0
                 _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
-                               0, _hanc, "confirm", _sm_v, _tm_v))
+                               0, _hanc, "confirm", _sm_v, _tm_v, _hap))
                 continue
             if _hbp is not None:
                 # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める
@@ -413,7 +461,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 (not (gap_guard > 0 and o1 > pc * (1 + gap_guard))
                  # 寄指: 寄りが指値に届かなければ板寄せで約定しない = 建てない
                  and (o1 >= _hl if _ha else True)),
-                _hd, _hanc, "", _sm_v, _tm_v))
+                _hd, _hanc, "", _sm_v, _tm_v, _hap))
         # ── 09:00のバーが無い日は delay を1本ぶん前倒しする ────────────────
         # E/H の約定は **09:00 の板寄せ**。delay1 は「約定した5分足の間は損切りを
         # 置かない」なので、無保護窓は 09:00-09:05 = ちょうど欠けている足。
@@ -424,7 +472,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         # ⚠ 板寄せ約定(寄りから建玉がある)のときだけ。ザラ場到達で建てた場合は
         #    約定足が日中なので、寄りの欠落は delay の数えに関係しない。
         _no_open_bar = _first_hm != "09:00"
-        for key, order_p, ep, ok, _dly, _anc, _mode, _smv, _tmv in _cases:
+        for (key, order_p, ep, ok, _dly, _anc, _mode, _smv, _tmv,
+             _apv) in _cases:
+            # ★ 変種ごとの ATR期間。None = 既定(日足14日)
+            atr = _atr_of(df, pos, _apv)
+            if not (atr == atr and atr > 0):
+                continue
             _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
