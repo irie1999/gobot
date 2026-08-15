@@ -10973,7 +10973,8 @@ function switchTbd(id, tab) {{
                     continue
                 _by.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
             _out = []
-            _amts: list = []          # 1銘柄あたりの建玉額
+            _amts: list = []          # 1トレードあたりの建玉額
+            _samts: list = []         # **銘柄単位**に合算した建玉額(重複保有込み)
             _cnts: list = []          # 1日あたりの件数(絞ったあと)
             _cnts_raw: list = []      # 同(絞る前)。どれだけ捨てたかを見る
             _capped = 0               # 単元上限(株数)に当たった件数
@@ -11040,13 +11041,22 @@ function switchTbd(id, tab) {{
                             _used += _u
                             _moved = True
                 _idle.append(max(0.0, _budget - _used))
+                # ⛔ 同じ銘柄が同日に複数戦略で出ると **2枠取る** ので、その銘柄
+                #    への露出は2倍になる(実測 251件/1,378件)。トレード単位の
+                #    _amts はそれを見落とすので、**銘柄単位でも合算**して持つ。
+                _bysym: dict = {}
                 for _t, _ep, _xp, _lot in _day:
+                    _sy = str(_t.get("symbol", "")).upper() \
+                        .removesuffix(".T").split(".")[0]
+                    _bysym[_sy] = _bysym.get(_sy, 0.0) + _lot * 100 * _ep
                     _n = dict(_t)
                     _n["qty"] = _lot * 100
                     _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
                     _out.append(_n)
                     _amts.append(_lot * 100 * _ep)
+                _samts.extend(_bysym.values())
             _amts.sort()
+            _samts.sort()
             _cnts.sort()
 
             def _q(_a, _p):
@@ -11065,6 +11075,9 @@ function switchTbd(id, tab) {{
                 "amt_med": _q(_amts, 0.5),
                 "amt_p95": _q(_amts, 0.95),
                 "amt_max": (_amts[-1] if _amts else 0.0),
+                "sym_p95": _q(_samts, 0.95),
+                "sym_max": (_samts[-1] if _samts else 0.0),
+                "dup": len(_amts) - len(_samts),
                 "idle_med": _q(_idle, 0.5),
                 "capped": _capped,
                 "ycap": _ycap,
@@ -14870,14 +14883,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'{_st["per_day_min"]:.0f}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["amt_med"] / 1e4:,.0f}万</td>'
-                f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
+                f'<td style="text-align:right;padding:2px 8px;color:{_cc};'
+                f'white-space:nowrap">'
                 f'<b>{_st["amt_p95"] / 1e4:,.0f}万</b>'
                 f'<span style="color:#64748b;font-size:0.72rem"> '
-                f'({_pc95:.0f}%)</span></td>'
-                f'<td style="text-align:right;padding:2px 8px;color:{_cc}">'
+                f'({_pc95:.0f}%)</span>'
+                + (f'<br><span style="color:#fbbf24;font-size:0.7rem">'
+                   f'銘柄計 {_st["sym_p95"] / 1e4:,.0f}万 '
+                   f'({_st["sym_p95"] / max(1.0, _EQ_BUD) * 100:.0f}%)</span>'
+                   if _st.get("sym_p95") else "")
+                + '</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:{_cc};'
+                f'white-space:nowrap">'
                 f'{_st["amt_max"] / 1e4:,.0f}万'
                 f'<span style="color:#64748b;font-size:0.72rem"> '
-                f'({_pcmx:.0f}%)</span></td>'
+                f'({_pcmx:.0f}%)</span>'
+                + (f'<br><span style="color:#fbbf24;font-size:0.7rem">'
+                   f'銘柄計 {_st["sym_max"] / 1e4:,.0f}万 '
+                   f'({_st["sym_max"] / max(1.0, _EQ_BUD) * 100:.0f}%)</span>'
+                   if _st.get("sym_max") else "")
+                + '</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["capped"]:,}<span style="color:#64748b;font-size:0.72rem">'
                 f' ({_st["capped"] / max(1, _st["n"]) * 100:.0f}%)</span>'
@@ -15034,6 +15059,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<b>絞る前</b>の件数です。閾値を上げるのと違い、'
                 f'<b>絞り具合がその日の中の相対順位で決まる</b>ので、'
                 f'合格が少ない日はそのまま全部建てます。'
+                f'<br>⛔ <b>「銘柄計」は同じ銘柄が同日に複数戦略で出たぶんを合算</b>'
+                f'した値です。資金均等は <code>予算÷件数</code> で割るので、'
+                f'同じ銘柄が2枠取ると<b>その銘柄への露出は2倍</b>になります'
+                f'（実測 1,378件中 251件が重複）。上段のトレード単位の値は'
+                f'<b>集中を過小評価</b>しているので、リスクは銘柄計で見てください。'
                 f'<br>★ <b>充填</b> の行は、<b>余った予算をギャップ降順で1単元ずつ'
                 f'配り切った</b>もの。素の均等割りは <code>予算÷件数</code> を'
                 f'1単元の値段で割って<b>切り捨てる</b>ので必ず端数が残ります'
