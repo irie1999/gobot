@@ -10686,6 +10686,23 @@ function switchTbd(id, tab) {{
                         continue      # 既定と同じ = 上で作ってある
                     _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}", 0, True,
                                    _dv, "fill", _eqg0))
+                # ★★ 損切り幅(sm)を掃く — delay と切り分けるための本命 (2026-08-15)
+                #   ⛔ delay は d0<d1<d2<d3<d4<d5 と**単調に良くなり続け**、
+                #      増分は逓減していた(+669/+498/+250/+169/+49 円/件)。
+                #      これは「delay が効く」ではなく **「0.1ATR の損切りが
+                #      効いていない」** ことの現れかもしれない。delay→∞ は
+                #      『損切りなし』に収束するので、その極限を直接測る。
+                #   ★ delay と sm は代替関係だが **運用上の意味が違う**:
+                #        delay … 一定時間 **損切りゼロ**(悪材料が出ても切れない)
+                #        sm    … 常に損切りあり・**幅が広い**(必ず切れる)
+                #      同じ効果なら sm のほうが尾リスクの意味で健全。
+                #   ⚠ 比較を成立させるため delay は **ライブと同じ本数**に固定する。
+                for _sv in [float(x) for x in str(os.environ.get(
+                        "LSS_EQ_SMS", "0.3,0.5,1.0,99")).split(",")
+                        if str(x).strip().replace(".", "").isdigit()]:
+                    _slbl = "損切なし" if _sv >= 90 else f"sm{_sv:g}"
+                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指{_slbl}", 0, True,
+                                   _eh_delay, "fill", _eqg0, None, _sv))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -10763,7 +10780,7 @@ function switchTbd(id, tab) {{
                 # v2: 不約定シグナルに label/color/WF/rank を持たせた
                 #     (2026-08-15)。トレード dict の中身が変わるので、
                 #     古いキャッシュを引くと 設定バッジが空のままになる。
-                _sig = ["v3", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                _sig = ["v4", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
