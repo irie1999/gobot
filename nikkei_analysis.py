@@ -15955,10 +15955,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    (_vs[0], False, "atr", 1200.0)])
         _out = []
         for _v, _ops, _szm, _szt in _vs2:
+            # ⛔ 資金均等(09:00確認)は予算で切る順もギャップ降順。⚖表と揃える
+            #    (ここだけ流動性順だと walk-forward の判定が別物になる)。
             _r = _run_budget_sim(_BUD_FLOOR,
                                  src=(_EH_TRADES or {}).get(_v) or [],
                                  nofills=(_nfv.get(_v) or []),
                                  one_per_symbol=_ops,
+                                 order_key=(_eq_order_key
+                                            if ("資金均等" in str(_v)
+                                                and _EQ_ORDER != "liq")
+                                            else None),
                                  size_mode=_szm, size_target=_szt)
             if _ops:
                 _v = f"{_v} ◆1銘柄1件"
