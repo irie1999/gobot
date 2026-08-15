@@ -10679,8 +10679,11 @@ function switchTbd(id, tab) {{
                 #    ⛔ delay3 は **15分間 損切りを置かない**。1銘柄に最大397万
                 #      入る日があるので、伸ばすほどテールリスクが増える。
                 #      数字が良くても、その点は別に判断すること。
+                # ⚠ 2026-08-15 実測: 資金均等の 月平均/σ は d4=4.30 がピークで
+                #    d5=3.98 と落ちる(σ が 123,130→143,592)。頭打ちの確認に
+                #    d6/d8 まで見る。合計だけ見ると d5>d4 なので注意。
                 for _dv in [int(x) for x in str(os.environ.get(
-                        "LSS_EQ_DELAYS", "0,2,3,4,5")).split(",")
+                        "LSS_EQ_DELAYS", "0,2,3,4,5,6,8")).split(",")
                         if str(x).strip().isdigit()]:
                     if _dv == _eh_delay:
                         continue      # 既定と同じ = 上で作ってある
