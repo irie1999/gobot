@@ -411,8 +411,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
             if not ok or ep <= 0:
+                # ★ day_open を渡す(2026-08-15)。不約定側にも h_gap_bp が
+                #   要る。「寄りが閾値をどれだけ下回ったか」が分からないと、
+                #   8:59気配で前倒し判定したときに何件ひっくり返るかを測れない。
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, sm, tm, qty, key) for s in _srcs)
+                                   pc, atr, sm, tm, qty, key,
+                                   day_open=o1) for s in _srcs)
                 continue
             if key != "E" and _mode != "confirm":
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
@@ -447,8 +451,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             if xp is None or why in ("no_5m", "no_entry"):
+                # ★ day_open を渡す(2026-08-15)。不約定側にも h_gap_bp が
+                #   要る。「寄りが閾値をどれだけ下回ったか」が分からないと、
+                #   8:59気配で前倒し判定したときに何件ひっくり返るかを測れない。
                 nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, sm, tm, qty, key) for s in _srcs)
+                                   pc, atr, sm, tm, qty, key,
+                                   day_open=o1) for s in _srcs)
                 continue
             if key != "E" and _mode != "confirm":
                 # ⛔ 判定は **指値(order_p)** であって前日終値(pc)ではない
@@ -533,6 +541,10 @@ def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
         t["h_open"] = _o1
         t["h_fill"] = "板寄せ" if _o1 >= float(order_p) else "ザラ場到達"
         t["h_gap_bp"] = (_o1 - float(order_p)) / float(order_p) * 1e4
+    if reason == "約定せず":
+        # ⛔ h_fill は「寄りが指値以上か」で決めるので、不約定行では意味が無い。
+        #    そのままにすると『ザラ場到達』と表示されて誤読される。
+        t["h_fill"] = "不約定"
     t["pnl"] = (round((float(entry_p) - float(exit_p)) * qty, 0)
                 if reason != "約定せず" else 0.0)
     t["hold_days"] = 0

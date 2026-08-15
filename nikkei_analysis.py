@@ -10730,7 +10730,7 @@ function switchTbd(id, tab) {{
                 # v2: 不約定シグナルに label/color/WF/rank を持たせた
                 #     (2026-08-15)。トレード dict の中身が変わるので、
                 #     古いキャッシュを引くと 設定バッジが空のままになる。
-                _sig = ["v2", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                _sig = ["v3", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
@@ -15916,6 +15916,137 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'「その日を建てない」は他の日に振り替えられないので機会費用は無い一方、'
             f'件数が減って t は落ちます。</p></details>')
 
+    def _preopen_margin_html():
+        """8:59 の気配値で判定を前倒しできるか = 閾値からのマージンを見る。
+
+        ⛔ 気配値の履歴はどのデータにも無い(§18.35)ので、「気配がどれくらい
+           当たるか」は測れない。**測れるのは『どれだけ外れても判定が変わらないか』**。
+           合格銘柄の寄りが閾値をどれだけ上回っているかを見れば、
+           気配が X bp ずれたときに何件ひっくり返るかが直接分かる。
+
+        ★ 指値(前日終値+Nbp)で出す限り、判定を外しても損はしない
+           (約定しないだけ)。コストは『枠が遊ぶ』と『取り逃す』の2つで、
+           どちらもここで件数が出る。
+        """
+        _bk = _EQ_TAB_BASE                       # 例 "H指値+50bp寄指"
+        _fl = (_EH_TRADES or {}).get(_bk) or []
+        _nf = ((_EH_TRADES or {}).get("約定せず") or {}).get(_bk) or []
+        try:
+            _thr = float(_EQ_TAB_GAP.replace("bp", "").replace("+", ""))
+        except Exception:
+            _thr = 50.0
+        _cm = _TODAY.strftime("%Y-%m")
+
+        def _gaps(_lst, _want_fill):
+            """(前日終値比ギャップ bp, 損益) の列。h_gap_bp は指値比なので閾値を足す。"""
+            _o = []
+            for _t in _lst:
+                if _t.get("reason") in ("発注中", "保有中"):
+                    continue
+                if str(_t.get("entry_d_raw") or _t.get("exit_d_raw")
+                       or "")[:7] == _cm:
+                    continue
+                _g = _t.get("h_gap_bp")
+                if _g is None:
+                    continue
+                _o.append((float(_g) + _thr, float(_t.get("pnl", 0) or 0)))
+            return _o
+
+        _in = _gaps(_fl, True)                   # 合格(約定)
+        _out = _gaps(_nf, False)                 # 不合格(約定せず)
+        if len(_in) < 20:
+            return ""
+        _in.sort(key=lambda x: x[0])
+        _out.sort(key=lambda x: x[0])
+
+        def _q(_a, _p):
+            if not _a:
+                return 0.0
+            return _a[min(len(_a) - 1, int(len(_a) * _p))][0]
+
+        # 気配が m bp ずれたときにひっくり返る件数
+        _rows = ""
+        for _m in (10, 25, 50, 100, 200):
+            # 気配が低く出た(実際より弱い)→ 合格を取り逃す
+            _lose = [x for x in _in if x[0] < _thr + _m]
+            # 気配が高く出た(実際より強い)→ 不合格を建ててしまう …が
+            # 指値なので **約定しない**。枠が遊ぶだけ。
+            _idle = [x for x in _out if x[0] >= _thr - _m]
+            _lp = sum(x[1] for x in _lose)
+            _rows += (
+                f'<tr><td style="padding:2px 8px;color:#e2e8f0;font-weight:700">'
+                f'±{_m}bp</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:'
+                f'{"#f87171" if len(_lose) / len(_in) >= 0.3 else "#94a3b8"}">'
+                f'<b>{len(_lose):,}</b>'
+                f'<span style="color:#64748b;font-size:0.72rem"> '
+                f'({len(_lose) / len(_in) * 100:.0f}%)</span></td>'
+                f'<td style="text-align:right;padding:2px 8px;color:'
+                f'{"#f87171" if _lp > 0 else "#4ade80"}">{_lp:+,.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+                f'{len(_idle):,}'
+                + (f'<span style="color:#64748b;font-size:0.72rem"> '
+                   f'({len(_idle) / len(_out) * 100:.0f}%)</span>' if _out else "")
+                + '</td></tr>')
+
+        _th2 = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
+        return (
+            f'<details style="background:#0f172a;border:1px solid #475569;'
+            f'border-radius:8px;padding:10px 14px;margin:0 0 14px">'
+            f'<summary style="color:#e2e8f0;font-weight:700;font-size:0.88rem;'
+            f'cursor:pointer">'
+            f'🕗 判定マージン（8:59 の気配で前倒し判定できるか）</summary>'
+            f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.75">'
+            f'東証は <b>08:00 から気配値（想定約定価格＝予想始値）</b>を配信します。'
+            f'09:00 の始値を見てから発注すると板寄せに間に合わないので、'
+            f'約定は始値より後の値になります。08:59 の気配で判定できれば'
+            f'<b>板寄せに参加でき、モデルどおり「始値で約定」が実現</b>します。<br>'
+            f'⛔ <b>気配値の履歴はどのデータにも無い</b>ので「気配がどれくらい'
+            f'当たるか」はここでは測れません（§18.35。貯めるしかない）。'
+            f'測れるのは <b>「どれだけ外れても判定が変わらないか」</b>だけです。<br>'
+            f'★ 指値（前日終値{_EQ_TAB_GAP}）で出す限り、'
+            f'<b>判定を外しても損はしません</b>（約定しないだけ）。'
+            f'コストは「取り逃す」と「枠が遊ぶ」の2つで、どちらも下の表に出ます。</p>'
+            f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+            f'margin:8px 0 4px">合格銘柄の寄りギャップ（前日終値比 bp）</div>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th2}">件数</th><th style="{_th2}">5%点</th>'
+            f'<th style="{_th2}">25%点</th><th style="{_th2}">中央</th>'
+            f'<th style="{_th2}">75%点</th><th style="{_th2}">95%点</th>'
+            f'</tr></thead><tbody><tr>'
+            f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">'
+            f'{len(_in):,}</td>'
+            f'<td style="text-align:right;padding:2px 8px;color:#fbbf24">'
+            f'<b>+{_q(_in, 0.05):.0f}</b></td>'
+            f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+            f'+{_q(_in, 0.25):.0f}</td>'
+            f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0">'
+            f'<b>+{_q(_in, 0.5):.0f}</b></td>'
+            f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+            f'+{_q(_in, 0.75):.0f}</td>'
+            f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
+            f'+{_q(_in, 0.95):.0f}</td></tr></tbody></table>'
+            f'<p style="color:#64748b;font-size:0.72rem;margin:4px 0 8px">'
+            f'閾値は <b>+{_thr:.0f}bp</b>。中央が閾値からどれだけ離れているかが'
+            f'そのまま余裕です。</p>'
+            f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;'
+            f'margin:10px 0 4px">気配が m bp ずれたら何件ひっくり返るか</div>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<thead><tr><th style="{_th2};text-align:left">気配の誤差</th>'
+            f'<th style="{_th2}">取り逃す<br><span style="font-weight:400;'
+            f'font-size:0.68rem">(合格なのに建てない)</span></th>'
+            f'<th style="{_th2}">その損益</th>'
+            f'<th style="{_th2}">枠が遊ぶ<br><span style="font-weight:400;'
+            f'font-size:0.68rem">(建てようとして不約定)</span></th>'
+            f'</tr></thead><tbody>{_rows}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.72rem;margin:6px 0 0;line-height:1.7">'
+            f'「その損益」が<b>プラス</b>なら、取り逃す銘柄は<b>勝っていた</b>ので'
+            f'誤差が痛い。<b>マイナス</b>なら、むしろ落として得だったということです。<br>'
+            f'⚠ 「枠が遊ぶ」は資金均等の分母を狂わせます（実際より多い件数で'
+            f'割ってしまう）。件数が多いなら、8:59 判定では'
+            f'<b>予算÷件数 を少し強気に見積もる</b>必要があります。</p>'
+            f'</details>')
+
     def _h_variant_html():
         """H の設定(指値位置 × 寄指か)を **1回の実行の中で** 並べて比較する。
 
@@ -17135,6 +17266,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             print(f"[寄り前] 市場変数ブロックを生成 ({_pot.time() - _t0:.1f}s)", flush=True)
     except Exception as _poce:
         print(f"[寄り前] 市場変数ブロック生成に失敗: {_poce}", flush=True)
+    try:
+        if _LSS_ORDER_MODE and _eh_sorted:
+            _EH_CMP_HTML += _preopen_margin_html()
+    except Exception as _pmce:
+        print(f"[判定マージン] ブロック生成に失敗: {_pmce}", flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted:
             import time as _hvt
