@@ -10673,8 +10673,14 @@ function switchTbd(id, tab) {{
                 _eqg0 = 50.0
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     not in ("0", "false", "no"):
+                # ⚠ 2026-08-15 実測: d0 < d1 < d2 < d3 と **単調増加**
+                #    (資金均等 月平均 +234,973 / +397,328 / +463,019 / +503,331)。
+                #    端で止める理由が無いので d4/d5 まで伸ばす。
+                #    ⛔ delay3 は **15分間 損切りを置かない**。1銘柄に最大397万
+                #      入る日があるので、伸ばすほどテールリスクが増える。
+                #      数字が良くても、その点は別に判断すること。
                 for _dv in [int(x) for x in str(os.environ.get(
-                        "LSS_EQ_DELAYS", "0,2,3")).split(",")
+                        "LSS_EQ_DELAYS", "0,2,3,4,5")).split(",")
                         if str(x).strip().isdigit()]:
                     if _dv == _eh_delay:
                         continue      # 既定と同じ = 上で作ってある
