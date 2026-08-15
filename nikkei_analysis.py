@@ -16391,8 +16391,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
             _bpre = str(_bk).split("資金均等")[0]      # 例 "H指値+50bp寄指d4"
+            # ⛔ prefix 一致だけだと **100株固定版**(資金均等が付かない同名)も
+            #    拾ってしまい、件数636 の行が混ざる(2026-08-15 に実際そうなった)。
+            #    サイズ方式を揃えないと比較にならないので、基準と同じく
+            #    「資金均等」を含む行だけにする。
             _cands = [r for r in _out
                       if r[0] != _bk and str(r[0]).startswith(_bpre)
+                      and ("資金均等" in str(r[0])) == ("資金均等" in str(_bk))
                       and not str(r[0]).startswith("▶")]
             # 基準行を先頭に
             for _r in [_brow] + _cands:
@@ -16407,12 +16412,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #    **基準(K)からどれだけ動いたか**を見たいので差を取り直す。
                 _d1 = _r[9] - _brow[9]
                 _d2 = _r[10] - _brow[10]
+                # ★ リスク低減系(◆1銘柄1件 など)は **総額が下がるのが前提**。
+                #   18.38 で「見るのは σ が下がったか」と先に宣言してあるので、
+                #   その経路を別に持つ。ただし前半・後半で符号が割れるもの
+                #   (期間への合わせ込み)は、どちらの経路でも通さない。
+                _same = (_d1 >= 0) == (_d2 >= 0)
+                _sgdn = (_bsg - _sg2) / _bsg if _bsg > 0 else 0.0
                 if _is_b:
                     _vd2, _vc = "—", "#94a3b8"
+                elif not _same:
+                    _vd2, _vc = "❌ 不採用（前半と後半で符号が逆＝期間依存）", "#f87171"
                 elif _sg2 > _bsg and _st2 < _bst:
                     _vd2, _vc = "❌ 不採用（σ が増えて安定度が落ちた）", "#f87171"
                 elif _st2 > _bst and _d1 > 0 and _d2 > 0:
                     _vd2, _vc = "✅ 検討する（安定度↑・前半後半とも改善）", "#4ade80"
+                elif _st2 > _bst and _sgdn >= 0.10:
+                    _vd2, _vc = (f"✅ 検討する（リスク低減：σ −{_sgdn * 100:.0f}%・"
+                                 f"安定度↑。総額は下がる）", "#4ade80")
                 else:
                     _vd2, _vc = "— 測れていない", "#94a3b8"
                 _audit += (
@@ -16424,8 +16440,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<td style="text-align:right;padding:3px 8px;color:#e2e8f0">'
                     f'{_r[2] / max(1, len(_msa)):+,.0f}</td>'
                     f'<td style="text-align:right;padding:3px 8px;color:'
-                    f'{"#f87171" if (not _is_b and _sg2 > _bsg) else "#94a3b8"}">'
-                    f'{_sg2:,.0f}</td>'
+                    f'{"#f87171" if (not _is_b and _sg2 > _bsg) else "#94a3b8"};'
+                    f'white-space:nowrap">{_sg2:,.0f}'
+                    + ("" if _is_b else
+                       f'<br><span style="font-size:0.7rem;color:'
+                       f'{"#4ade80" if _sgdn > 0 else "#f87171"}">'
+                       f'{-_sgdn * 100:+.0f}%</span>')
+                    + '</td>'
                     f'<td style="text-align:right;padding:3px 8px;color:#e2e8f0;'
                     f'font-weight:700">{_st2:+.2f}</td>'
                     f'<td style="text-align:right;padding:3px 8px;color:#94a3b8;'
@@ -16557,7 +16578,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'　<span style="color:#f87171">❌ 不採用</span> = σ が増えて 月平均/σ が落ちた'
             f'　/　<span style="color:#4ade80">✅ 検討する</span> = 月平均/σ が基準超 '
             f'<b>かつ</b> 前半・後半が同符号'
+            f'　/　<span style="color:#4ade80">✅ 検討する（リスク低減）</span> = '
+            f'総額は下がるが <b>σ が10%以上下がり</b> 安定度が上がった'
             f'　/　— 測れていない = それ以外<br>'
+            f'⛔ <b>前半と後半で符号が逆のものは、どちらの経路でも通しません</b>'
+            f'（期間への合わせ込み）。<br>'
             f'⚠ <b>✅ が付いても即採用ではありません。</b>下の表で walk-forward が'
             f'現状を下回っていないかを必ず確認してください（18.36）。'
             f'差が月次σ（≒12万）より小さいものも「測れていない」と同じです。</p>'
