@@ -10653,6 +10653,33 @@ function switchTbd(id, tab) {{
             for _gv in _gaps:
                 _hvars.append((f"H指値{_gv:+.0f}bp寄指", 0, True,
                                _eh_delay, "fill", _gv))
+            # ★★ J(09:00確認+資金均等)の delay を掃く (2026-08-15 ユーザー依頼)
+            #   ⛔ delay1 の根拠(18.9)は「**逆指値**はバーのどこで約定したか
+            #      分からないので、そのバーの間は損切りを置けない」という
+            #      **機構的な理由**。J は 09:00 の板寄せ/寄り直後に約定し、
+            #      **約定価格も時刻もその場で確定する**ので、損切りは即座に
+            #      置ける = この根拠が当てはまらない。
+            #      §18.32 でも D(引け+OCO)について同じ指摘をしている。
+            #   ⚠ 掃くのは **タブに出す閾値だけ**。全閾値×全delay にすると
+            #      5分足の決済判定をやり直す回数が3倍になり、損益タブが重くなる。
+            #      (資金均等と違って、これは後処理では作れない)
+            try:
+                _eqk0 = str(os.environ.get(
+                    "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
+                _eqb0 = _eqk0.split("資金均等")[0]
+                _eqg0 = float("".join(_c for _c in _eqb0.split("bp")[0][-5:]
+                                      if _c.isdigit()) or 50)
+            except Exception:
+                _eqg0 = 50.0
+            if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
+                    not in ("0", "false", "no"):
+                for _dv in [int(x) for x in str(os.environ.get(
+                        "LSS_EQ_DELAYS", "0,2,3")).split(",")
+                        if str(x).strip().isdigit()]:
+                    if _dv == _eh_delay:
+                        continue      # 既定と同じ = 上で作ってある
+                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}", 0, True,
+                                   _dv, "fill", _eqg0))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -10835,7 +10862,11 @@ function switchTbd(id, tab) {{
     _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
     _EQ_TAB_TOP = "".join(_c for _c in _EQ_TAB_KEY.split("上位")[-1]
                           if _c.isdigit()) if "上位" in _EQ_TAB_KEY else ""
+    _EQ_TAB_DLY = ("".join(_c for _c in _EQ_TAB_BASE.split("寄指d")[-1]
+                           if _c.isdigit())
+                   if "寄指d" in _EQ_TAB_BASE else "")
     _EQ_TAB_LBL = (f"09:00確認{_EQ_TAB_GAP} 資金均等"
+                   + (f" delay{_EQ_TAB_DLY}" if _EQ_TAB_DLY else "")
                    + (f" 上位{_EQ_TAB_TOP}集中" if _EQ_TAB_TOP else "")
                    + (" 充填" if _EQ_TAB_KEY.endswith("充填") else ""))
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
@@ -10979,9 +11010,11 @@ function switchTbd(id, tab) {{
         #   になる。つまり実運用の姿は **指値版 + 資金均等**。
         #   09:05版は「発注が5分遅れた場合」の **保守側の下限** として残す。
         #   真の値はこの2つの間にあり、.\fills の実約定で確定する。
+        # ⚠ "H指値+50bp寄指d0" のような delay 版も拾う(末尾一致では落ちる)。
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
-                    if str(k).startswith("H寄り確認")
-                    or (str(k).startswith("H指値") and str(k).endswith("寄指"))]
+                    if "資金均等" not in str(k)
+                    and (str(k).startswith("H寄り確認")
+                         or (str(k).startswith("H指値") and "寄指" in str(k)))]
         # ★ その日のギャップ上位N件に集中する版 (2026-08-15 ユーザー提案)。
         #   合格が多い日は 予算÷件数 が 26万 まで下がり、どの銘柄も 100株 =
         #   **資金均等が 100株固定に縮退**していた(実測: 件数/日 中央 15件)。
@@ -10998,8 +11031,9 @@ function switchTbd(id, tab) {{
             _v = _EH_TRADES.get(_k) or []
             if not _v:
                 continue
-            # 上位N版は **タブに出す閾値だけ**に付ける(全閾値に付けると
-            # ⚖表の列が倍々に増えて読めなくなる)。
+            # 上位N版・充填版は **タブに出す変種だけ**に付ける(全部に付けると
+            # ⚖表の列が倍々に増えて読めなくなる)。delay版をタブに出したいときは
+            # set LSS_EQ_TAB_KEY=H指値+50bp寄指d0資金均等 のように指定する。
             _tops = [(0, False)] + ([(0, True)] + [(_t2, False) for _t2 in _EQ_TOPS]
                                     if _k == _EQ_TAB_BASE else [])
             for _tp, _fl in _tops:
