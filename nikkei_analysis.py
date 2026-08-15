@@ -11028,13 +11028,6 @@ function switchTbd(id, tab) {{
             # 変種ごとの金額上限(_ymax)があればそれを優先。無ければ env の全体設定。
             _yc = _ymax if _ymax > 0 else _EQ_MAX_YEN
 
-            def _lot_cap(_ep):
-                """1銘柄に置ける単元数の上限(株数上限と金額上限の小さい方)。"""
-                _c = _EQ_MAX_LOT
-                if _yc > 0:
-                    _c = min(_c, int(_yc // (_ep * 100)))
-                return max(1, _c)
-
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
                 # ★ 1銘柄1件: 同じ銘柄が同日に複数戦略で出たら**ギャップ最大の
@@ -11064,21 +11057,39 @@ function switchTbd(id, tab) {{
                 # ── ① 金額均等(切り捨て)。最低1単元は必ず置く ────────────
                 _day: list = []       # (trade, entry_p, exit_p, lots)
                 _used = 0.0
+                # ⛔ 金額上限は **銘柄単位**で持つ(2026-08-15 修正)。
+                #    トレード単位で切ると、同じ銘柄が3枠取ったとき
+                #    上限100万 × 3 = 300万 になり、上限がまったく効かない
+                #    (実測: 上限100万でも 銘柄計 最大が予算の74%だった)。
+                _symyen: dict = {}
                 for _t in _lst:
                     _ep = float(_t.get("entry_p", 0) or 0)
                     _xp = float(_t.get("exit_p", 0) or 0)
                     if _ep <= 0:
                         continue
+                    _sy1 = str(_t.get("symbol", "")).upper() \
+                        .removesuffix(".T").split(".")[0]
+                    _had = _symyen.get(_sy1, 0.0)
                     _raw = int(_per // (_ep * 100))
-                    _lot = max(1, min(_EQ_MAX_LOT, _raw))
+                    _lot = min(_EQ_MAX_LOT, _raw)
+                    if _yc > 0:
+                        # その銘柄に残っている枠ぶんだけ
+                        _lot = min(_lot, int(max(0.0, _yc - _had) // (_ep * 100)))
+                    # 1件目は最低1単元を建てる(建てないと機会そのものを失う)。
+                    # 2件目以降(同じ銘柄)は上限に収まらなければ建てない。
+                    _lot = max(1, _lot) if _had <= 0 else max(0, _lot)
+                    if _lot <= 0:
+                        _ycap += 1        # 上限に当たって建てられなかった重複
+                        continue
                     if _raw > _EQ_MAX_LOT:
                         _capped += 1
                     # 金額上限を **100株1単元でも超える**銘柄は、削りようが無い
                     # (1単元が最小)。件数として出して、上限が絵に描いた餅に
                     # なっていないかを見えるようにする。
-                    if _yc > 0 and _lot * 100 * _ep > _yc:
+                    if _yc > 0 and _had + _lot * 100 * _ep > _yc:
                         _ycap += 1
                     _day.append([_t, _ep, _xp, _lot])
+                    _symyen[_sy1] = _had + _lot * 100 * _ep
                     _used += _lot * 100 * _ep
                 # ── ② 余りをギャップ降順で1単元ずつ配り切る ──────────────
                 #   ①は切り捨てなので必ず端数が残る。1周ずつ回して、
@@ -11093,11 +11104,17 @@ function switchTbd(id, tab) {{
                         for _i in _order:
                             _ep = _day[_i][1]
                             _u = _ep * 100
-                            if _day[_i][3] + 1 > _lot_cap(_ep):
+                            if _day[_i][3] + 1 > _EQ_MAX_LOT:
                                 continue
                             if _u > _rem:
                                 continue
+                            # 金額上限も **銘柄単位**で見る
+                            _sy2 = str(_day[_i][0].get("symbol", "")).upper() \
+                                .removesuffix(".T").split(".")[0]
+                            if _yc > 0 and _symyen.get(_sy2, 0.0) + _u > _yc:
+                                continue
                             _day[_i][3] += 1
+                            _symyen[_sy2] = _symyen.get(_sy2, 0.0) + _u
                             _rem -= _u
                             _used += _u
                             _moved = True
@@ -11131,6 +11148,11 @@ function switchTbd(id, tab) {{
                 "days": len(_cnts),
                 "per_day_med": _q(_cnts, 0.5),
                 "per_day_min": (_cnts[0] if _cnts else 0),
+                # 合格が少ない日がどれくらいあるか(集中が起きる日の頻度)。
+                "d1": sum(1 for c in _cnts if c <= 1),
+                "d2": sum(1 for c in _cnts if c <= 2),
+                "d3": sum(1 for c in _cnts if c <= 3),
+                "d5": sum(1 for c in _cnts if c <= 5),
                 "per_day_raw_med": _q(_cnts_raw, 0.5),
                 "dropped": _dropped,
                 "amt_med": _q(_amts, 0.5),
@@ -14968,8 +14990,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    f'({_st.get("per_day_raw_med", 0):.0f})</span>'
                    if _st.get("per_day_raw_med", 0) > _st["per_day_med"] else "")
                 + f'</td>'
-                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                f'{_st["per_day_min"]:.0f}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                f'white-space:nowrap">{_st["per_day_min"]:.0f}'
+                + (f'<br><span style="color:#64748b;font-size:0.68rem">'
+                   f'1件{_st.get("d1", 0)}日 / 2件以下{_st.get("d2", 0)}日'
+                   f'<br>3件以下{_st.get("d3", 0)}日 / 5件以下{_st.get("d5", 0)}日'
+                   f'</span>' if _st.get("days") else "")
+                + '</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{_st["amt_med"] / 1e4:,.0f}万</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:{_cc};'
