@@ -10990,7 +10990,8 @@ function switchTbd(id, tab) {{
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
         _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
 
-        def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False):
+        def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
+                               _ymax=0.0):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
@@ -11024,11 +11025,14 @@ function switchTbd(id, tab) {{
             _dropped = 0              # 上位N絞りで建てなかった件数
             _idle: list = []          # 1日あたりの遊んだ金額
 
+            # 変種ごとの金額上限(_ymax)があればそれを優先。無ければ env の全体設定。
+            _yc = _ymax if _ymax > 0 else _EQ_MAX_YEN
+
             def _lot_cap(_ep):
                 """1銘柄に置ける単元数の上限(株数上限と金額上限の小さい方)。"""
                 _c = _EQ_MAX_LOT
-                if _EQ_MAX_YEN > 0:
-                    _c = min(_c, int(_EQ_MAX_YEN // (_ep * 100)))
+                if _yc > 0:
+                    _c = min(_c, int(_yc // (_ep * 100)))
                 return max(1, _c)
 
             for _d, _lst in _by.items():
@@ -11054,8 +11058,8 @@ function switchTbd(id, tab) {{
                 _per = _budget / max(1, len(_lst))
                 # ★ 金額上限。単元上限(株数)は株価で意味が6倍変わるので、
                 #   本来はこちらで切るべき。0=無効。
-                if _EQ_MAX_YEN > 0:
-                    _per = min(_per, _EQ_MAX_YEN)
+                if _yc > 0:
+                    _per = min(_per, _yc)
                 _cnts.append(len(_lst))
                 # ── ① 金額均等(切り捨て)。最低1単元は必ず置く ────────────
                 _day: list = []       # (trade, entry_p, exit_p, lots)
@@ -11072,7 +11076,7 @@ function switchTbd(id, tab) {{
                     # 金額上限を **100株1単元でも超える**銘柄は、削りようが無い
                     # (1単元が最小)。件数として出して、上限が絵に描いた餅に
                     # なっていないかを見えるようにする。
-                    if _EQ_MAX_YEN > 0 and _lot * 100 * _ep > _EQ_MAX_YEN:
+                    if _yc > 0 and _lot * 100 * _ep > _yc:
                         _ycap += 1
                     _day.append([_t, _ep, _xp, _lot])
                     _used += _lot * 100 * _ep
@@ -11173,29 +11177,36 @@ function switchTbd(id, tab) {{
             # 上位N版・充填版は **タブに出す変種だけ**に付ける(全部に付けると
             # ⚖表の列が倍々に増えて読めなくなる)。delay版をタブに出したいときは
             # set LSS_EQ_TAB_KEY=H指値+50bp寄指d0資金均等 のように指定する。
-            # (上位N, 充填, 1銘柄1件)
-            _eq_modes = [(0, False, False)]
+            # (上位N, 充填, 1銘柄1件, 金額上限[円])
+            _eq_modes = [(0, False, False, 0.0)]
             if _k == _EQ_TAB_BASE:
-                _eq_modes += [(0, True, False)] + [(_t2, False, False)
-                                                   for _t2 in _EQ_TOPS]
-            # ★ 1銘柄1件は **推奨タブ(K)の変種にも**付ける。重複保有は
-            #   その銘柄への露出を2倍にするので、delay で20分無防備な構成では
-            #   いちばん危ない形になる(2026-08-15)。
+                _eq_modes += ([(0, True, False, 0.0)]
+                              + [(_t2, False, False, 0.0) for _t2 in _EQ_TOPS])
+            # ★ 1銘柄1件・金額上限は **推奨タブ(K)の変種にも**付ける。
+            #   ⛔ 1銘柄1件は 95%点(41%→33%)は下げるが **最大(予算の99%)は
+            #      1ミリも直さない**(2026-08-15 実測)。最大は「その日の合格が
+            #      1銘柄しかない日」に出るので、重複を外しても対象が無い。
+            #      **最悪ケースを直せるのは金額上限だけ**。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
-                _eq_modes.append((0, False, True))
+                _eq_modes.append((0, False, True, 0.0))
+                for _eqy in [float(x) for x in str(os.environ.get(
+                        "LSS_EQ_MAX_YENS", "100,150,200")).split(",")
+                        if str(x).strip().replace(".", "").isdigit()]:
+                    _eq_modes.append((0, False, False, _eqy * 1e4))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
             #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
             #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
-            for _eqtp, _eqfl, _eqdp in _eq_modes:
+            for _eqtp, _eqfl, _eqdp, _eqym in _eq_modes:
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
-                         + ("1銘柄1件" if _eqdp else ""))
+                         + ("1銘柄1件" if _eqdp else "")
+                         + (f"上限{_eqym / 1e4:g}万" if _eqym else ""))
                 if _eqnk in _EH_TRADES:
                     continue
                 _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
-                    _v, _EQ_BUD, _eqtp, _eqfl, _eqdp)
+                    _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -16498,7 +16509,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<td style="text-align:right;padding:3px 8px;color:#94a3b8;'
                     f'white-space:nowrap;font-size:0.76rem">'
                     f'{"—" if _is_b else f"{_d1:+,.0f} / {_d2:+,.0f}"}</td>'
-                    f'<td style="padding:3px 8px;color:{_vc};font-weight:700">'
+                    # ★ リスク側(集中度)を同じ行に出す。σ にも t にも出ない
+                    #   ので、ここに無いと「リターンだけ見て決める」ことになる。
+                    + (lambda _cc2: (
+                        f'<td style="text-align:right;padding:3px 8px;color:'
+                        f'{"#f87171" if _cc2.get("sym_p95", 0) >= _EQ_BUD * 0.4 else "#94a3b8"};'
+                        f'white-space:nowrap">'
+                        f'{_cc2.get("sym_p95", 0) / max(1.0, _EQ_BUD) * 100:.0f}%'
+                        f'<br><span style="font-size:0.7rem;color:'
+                        f'{"#f87171" if _cc2.get("sym_max", 0) >= _EQ_BUD * 0.8 else "#94a3b8"}">'
+                        f'最大 {_cc2.get("sym_max", 0) / max(1.0, _EQ_BUD) * 100:.0f}%'
+                        f'</span></td>')
+                       if _cc2 else '<td style="padding:3px 8px;color:#64748b">—</td>')(
+                        (_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
+                    + f'<td style="padding:3px 8px;color:{_vc};font-weight:700">'
                     f'{_vd2}</td></tr>')
 
         _rows = ""
@@ -16631,7 +16655,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'（期間への合わせ込み）。<br>'
             f'⚠ <b>✅ が付いても即採用ではありません。</b>下の表で walk-forward が'
             f'現状を下回っていないかを必ず確認してください（18.36）。'
-            f'差が月次σ（≒12万）より小さいものも「測れていない」と同じです。</p>'
+            f'差が月次σ（≒12万）より小さいものも「測れていない」と同じです。<br>'
+            f'⛔ <b>walk-forward はリスク管理の採否には使えません</b>（合計で選ぶので'
+            f'必ずリスク低減を落とします）。<b>「1銘柄の集中」列</b>は σ にも t にも'
+            f'出ないので、リスク管理の判断はそちらで行ってください。'
+            f'<b>最大</b>は「その日の合格が1銘柄しかない日」に出るので、'
+            f'<b>重複を外しても上位Nで絞っても下がりません。金額上限だけが下げられます</b>。</p>'
             f'<table style="border-collapse:collapse;font-size:0.82rem">'
             f'<thead><tr><th style="{_th};text-align:left">動かしたつまみ</th>'
             f'<th style="{_th}">件数</th><th style="{_th}">月平均</th>'
@@ -16640,6 +16669,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'font-size:0.66rem">これが主指標</span></th>'
             f'<th style="{_th}">前半 / 後半<br><span style="font-weight:400;'
             f'font-size:0.66rem">基準との差</span></th>'
+            f'<th style="{_th}">1銘柄の集中<br><span style="font-weight:400;'
+            f'font-size:0.66rem">銘柄計95%点 / 最大（予算比）</span></th>'
             f'<th style="{_th};text-align:left">判定</th></tr></thead>'
             f'<tbody>{_audit}</tbody></table></div>'))
         return (
