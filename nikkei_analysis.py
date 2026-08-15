@@ -10836,7 +10836,8 @@ function switchTbd(id, tab) {{
     _EQ_TAB_TOP = "".join(_c for _c in _EQ_TAB_KEY.split("上位")[-1]
                           if _c.isdigit()) if "上位" in _EQ_TAB_KEY else ""
     _EQ_TAB_LBL = (f"09:00確認{_EQ_TAB_GAP} 資金均等"
-                   + (f" 上位{_EQ_TAB_TOP}集中" if _EQ_TAB_TOP else ""))
+                   + (f" 上位{_EQ_TAB_TOP}集中" if _EQ_TAB_TOP else "")
+                   + (" 充填" if _EQ_TAB_KEY.endswith("充填") else ""))
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
@@ -10847,18 +10848,19 @@ function switchTbd(id, tab) {{
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
         _EQ_MAX_YEN = float(os.environ.get("LSS_EQ_MAX_YEN", "0") or 0) * 1e4
 
-        def _size_equal_by_day(_ts, _budget, _top=0):
-            """その日の件数で予算を均等割りし、100株単位で建て直す。
+        def _size_equal_by_day(_ts, _budget, _top=0, _fill=False):
+            """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
-            均等割りする(残りは建てない)。閾値を上げるのとは別物で、
-            絞り具合が『その日の中の相対順位』で決まるため、合格が少ない日は
-            そのまま全部建て、多い日だけ強く絞れる。
+            配る(残りは建てない)。閾値を上げるのとは別物で、絞り具合が
+            『その日の中の相対順位』で決まるため、合格が少ない日はそのまま
+            全部建て、多い日だけ強く絞れる。
 
-            ⛔ ギャップは 186検定で唯一 単調だった軸(利確率 6.8%→14.9% /
-               外れ率 8.1%→3.8%)。BT・流動性・株価・ATR%・セクター・曜日・
-               戦略は全部ヌル(18.12/18.13/18.24/18.31)なので、
-               **『高品質』の運用可能な定義はいまのところこれしかない**。
+            _fill=True なら **余った予算をギャップ降順で1単元ずつ配り切る**。
+            ⛔ 素の均等割りは `予算÷件数` を1単元の値段で割って**切り捨てる**
+               ので、必ず端数が残る。実測(2026-08-15)で稼働率 87% = 400万の
+               うち 52万/日 が毎日遊んでいた。しかもこの取りこぼしは
+               月次σ にも t にも出ない。
 
             返り値は (トレード列, 集中度の統計)。統計は「1銘柄にいくら
             突っ込むことになるか」を見るためのもの。閾値を上げると件数が
@@ -10877,6 +10879,15 @@ function switchTbd(id, tab) {{
             _capped = 0               # 単元上限(株数)に当たった件数
             _ycap = 0                 # 金額上限で削った件数
             _dropped = 0              # 上位N絞りで建てなかった件数
+            _idle: list = []          # 1日あたりの遊んだ金額
+
+            def _lot_cap(_ep):
+                """1銘柄に置ける単元数の上限(株数上限と金額上限の小さい方)。"""
+                _c = _EQ_MAX_LOT
+                if _EQ_MAX_YEN > 0:
+                    _c = min(_c, int(_EQ_MAX_YEN // (_ep * 100)))
+                return max(1, _c)
+
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
                 if _top > 0 and len(_lst) > _top:
@@ -10888,6 +10899,9 @@ function switchTbd(id, tab) {{
                 if _EQ_MAX_YEN > 0:
                     _per = min(_per, _EQ_MAX_YEN)
                 _cnts.append(len(_lst))
+                # ── ① 金額均等(切り捨て)。最低1単元は必ず置く ────────────
+                _day: list = []       # (trade, entry_p, exit_p, lots)
+                _used = 0.0
                 for _t in _lst:
                     _ep = float(_t.get("entry_p", 0) or 0)
                     _xp = float(_t.get("exit_p", 0) or 0)
@@ -10902,6 +10916,31 @@ function switchTbd(id, tab) {{
                     # なっていないかを見えるようにする。
                     if _EQ_MAX_YEN > 0 and _lot * 100 * _ep > _EQ_MAX_YEN:
                         _ycap += 1
+                    _day.append([_t, _ep, _xp, _lot])
+                    _used += _lot * 100 * _ep
+                # ── ② 余りをギャップ降順で1単元ずつ配り切る ──────────────
+                #   ①は切り捨てなので必ず端数が残る。1周ずつ回して、
+                #   入らなくなったら終わり(予算は絶対に超えない)。
+                if _fill and _day:
+                    _order = sorted(range(len(_day)),
+                                    key=lambda i: -_eq_gap_of(_day[i][0]))
+                    _rem = _budget - _used
+                    _moved = True
+                    while _moved and _rem > 0:
+                        _moved = False
+                        for _i in _order:
+                            _ep = _day[_i][1]
+                            _u = _ep * 100
+                            if _day[_i][3] + 1 > _lot_cap(_ep):
+                                continue
+                            if _u > _rem:
+                                continue
+                            _day[_i][3] += 1
+                            _rem -= _u
+                            _used += _u
+                            _moved = True
+                _idle.append(max(0.0, _budget - _used))
+                for _t, _ep, _xp, _lot in _day:
                     _n = dict(_t)
                     _n["qty"] = _lot * 100
                     _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
@@ -10916,6 +10955,7 @@ function switchTbd(id, tab) {{
                 return float(_a[min(len(_a) - 1, int(len(_a) * _p))])
 
             _cnts_raw.sort()
+            _idle.sort()
             _st = {
                 "days": len(_cnts),
                 "per_day_med": _q(_cnts, 0.5),
@@ -10925,6 +10965,7 @@ function switchTbd(id, tab) {{
                 "amt_med": _q(_amts, 0.5),
                 "amt_p95": _q(_amts, 0.95),
                 "amt_max": (_amts[-1] if _amts else 0.0),
+                "idle_med": _q(_idle, 0.5),
                 "capped": _capped,
                 "ycap": _ycap,
                 "n": len(_out),
@@ -10959,10 +11000,13 @@ function switchTbd(id, tab) {{
                 continue
             # 上位N版は **タブに出す閾値だけ**に付ける(全閾値に付けると
             # ⚖表の列が倍々に増えて読めなくなる)。
-            _tops = [0] + (_EQ_TOPS if _k == _EQ_TAB_BASE else [])
-            for _tp in _tops:
-                _nk = f"{_k}資金均等" + (f"上位{_tp}" if _tp else "")
-                _EH_TRADES[_nk], _eq_st = _size_equal_by_day(_v, _EQ_BUD, _tp)
+            _tops = [(0, False)] + ([(0, True)] + [(_t2, False) for _t2 in _EQ_TOPS]
+                                    if _k == _EQ_TAB_BASE else [])
+            for _tp, _fl in _tops:
+                _nk = (f"{_k}資金均等" + (f"上位{_tp}" if _tp else "")
+                       + ("充填" if _fl else ""))
+                _EH_TRADES[_nk], _eq_st = _size_equal_by_day(
+                    _v, _EQ_BUD, _tp, _fl)
                 _EH_TRADES.setdefault("_eq_conc", {})[_nk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_nk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -14539,6 +14583,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _e0 = str(_k).split("上位")[0]
                 if _e0 in _have:
                     _PAIRS.append((_k, _e0))
+            # ★ 充填(余りを配り切る) vs 素(切り捨てたまま)。
+            #   「合格にちゃんと割り振れているか」の直接比較。
+            if str(_k).endswith("充填"):
+                _e1 = str(_k)[:-2]
+                if _e1 in _have:
+                    _PAIRS.append((_k, _e1))
         _PAIRS = tuple(_PAIRS)
         _pr = ""
         for x, y in _PAIRS:
@@ -14718,6 +14768,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 + (f'<br><span style="color:#fbbf24;font-size:0.7rem">'
                    f'金額上限超え {_st.get("ycap", 0):,}</span>'
                    if _EQ_MAX_YEN > 0 and _st.get("ycap") else "")
+                + (f'<br><span style="color:'
+                   f'{"#fbbf24" if _st.get("idle_med", 0) >= _EQ_BUD * 0.1 else "#64748b"};'
+                   f'font-size:0.7rem">遊び {_st.get("idle_med", 0) / 1e4:,.0f}万/日</span>'
+                   if _st.get("idle_med") is not None else "")
                 + '</td>'
                 + (f'<td style="text-align:right;padding:2px 8px;'
                    f'color:{"#fbbf24" if _bh[0] / max(1, _bh[1]) >= 0.3 else "#94a3b8"}">'
@@ -14864,6 +14918,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<b>絞る前</b>の件数です。閾値を上げるのと違い、'
                 f'<b>絞り具合がその日の中の相対順位で決まる</b>ので、'
                 f'合格が少ない日はそのまま全部建てます。'
+                f'<br>★ <b>充填</b> の行は、<b>余った予算をギャップ降順で1単元ずつ'
+                f'配り切った</b>もの。素の均等割りは <code>予算÷件数</code> を'
+                f'1単元の値段で割って<b>切り捨てる</b>ので必ず端数が残ります'
+                f'（「遊び」列がその額）。'
                 f'<br>発注順(予算で切る順)は資金均等だけ '
                 f'<b>{"ギャップ降順" if _EQ_ORDER != "liq" else "流動性降順"}</b>'
                 f'（<code>set LSS_EQ_ORDER=liq</code> で H と同じ流動性順に戻せます）。'
