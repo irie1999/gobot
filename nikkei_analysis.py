@@ -10840,6 +10840,8 @@ function switchTbd(id, tab) {{
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
+    # ⚠ 下の _budget_yen と同じ値。ここで先に要るので同じ式で作る
+    #   (ズレると集中度・稼働率の『予算比』が予算タブと食い違う)。
     _EQ_BUD = float(os.environ.get("LSS_BUDGET_MAN", "400") or 400) * 1e4
     try:
         _EQ_MAX_LOT = int(os.environ.get("LSS_EQ_MAX_LOT", "10") or 10)
@@ -14406,10 +14408,49 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                   f'<span style="font-size:0.68rem;color:#64748b">当月除く</span></td>'
                   f'{_tds}</tr>')
 
+        # ── 資金の稼働率と単元の分布 ──────────────────────────────────
+        # ⛔ 「予算 ÷ 件数」で割り振っても、**1単元の値段で割り切れないと
+        #    100株のまま**になる(int の切り捨て)。合格7件・建値3,000円なら
+        #    _per=57万 に対し1単元=30万 → 57万//30万 = 1単元。
+        #    つまり資金均等が **100株固定に縮退**し、しかも 400万-210万 = 190万が
+        #    そのまま遊ぶ。これは月次σ にも t にも出ない(2026-08-15)。
+        #    ここで「本当に割り振りが起きているか」と「予算のうち何割を
+        #    実際に使ったか」を全方式について出す。
+        _util: dict = {}
+        for _k3, _ls3 in _sets:
+            _dep: dict = {}
+            _lots = [0, 0, 0]        # 1単元 / 2単元 / 3単元以上
+            for _t3 in _ls3:
+                if _t3.get("reason") in ("発注中", "保有中"):
+                    continue
+                _m3 = str(_t3.get("entry_d_raw") or _t3.get("exit_d_raw") or "")
+                if _m3[:7] not in _use:
+                    continue
+                _q3 = int(_t3.get("qty", 0) or 0)
+                _op3 = (float(_t3.get("order_limit", 0) or 0)
+                        or float(_t3.get("entry_p", 0) or 0))
+                _dep[_m3] = _dep.get(_m3, 0.0) + _op3 * _q3
+                _l3 = max(1, _q3 // 100)
+                _lots[0 if _l3 == 1 else (1 if _l3 == 2 else 2)] += 1
+            if not _dep:
+                continue
+            _dv = sorted(_dep.values())
+            _nl = sum(_lots) or 1
+            _util[_k3] = {
+                "days": len(_dv),
+                "med": _dv[len(_dv) // 2],
+                "mean": sum(_dv) / len(_dv),
+                "lot1": _lots[0] / _nl * 100,
+                "lot2": _lots[1] / _nl * 100,
+                "lot3": _lots[2] / _nl * 100,
+                "multi": (_lots[1] + _lots[2]) / _nl * 100,
+            }
+
         # 水準
         _lv = ""
         for k, _ in _sets:
             n, w, p, mu, sd, t, pos, nm = _stat[k]
+            _ut = _util.get(k)
             _lv += (f'<tr><td style="padding:2px 8px;color:#e2e8f0;font-weight:700">{k}</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">{n:,}</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
@@ -14419,7 +14460,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
                     f'font-weight:700">{t:+.2f}</td>'
                     f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                    f'{pos}/{nm}</td></tr>')
+                    f'{pos}/{nm}</td>'
+                    + (f'<td style="text-align:right;padding:2px 8px;color:'
+                       f'{"#fbbf24" if _ut["med"] / max(1.0, _EQ_BUD) < 0.7 else "#94a3b8"}">'
+                       f'<b>{_ut["med"] / max(1.0, _EQ_BUD) * 100:.0f}%</b>'
+                       f'<span style="color:#64748b;font-size:0.72rem"> '
+                       f'{_ut["med"] / 1e4:,.0f}万/日</span></td>'
+                       f'<td style="text-align:right;padding:2px 8px;color:'
+                       f'{"#4ade80" if _ut["multi"] >= 20 else "#94a3b8"}">'
+                       f'<b>{_ut["multi"]:.0f}%</b>'
+                       f'<span style="color:#64748b;font-size:0.72rem"> '
+                       f'2単元{_ut["lot2"]:.0f} / 3+{_ut["lot3"]:.0f}</span></td>'
+                       if _ut else '<td style="padding:2px 8px;color:#64748b">—</td>'
+                                   '<td style="padding:2px 8px;color:#64748b">—</td>')
+                    + '</tr>')
 
         # ── 対応のある検定 ────────────────────────────────────────────
         # ⛔ CI は **t分布**で作ること。正規近似(1.96)は月数が少ないほど CI を
@@ -14727,8 +14781,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<thead><tr><th style="{_th};text-align:left">方式</th>'
             f'<th style="{_th}">件数</th><th style="{_th}">円/件</th>'
             f'<th style="{_th}">月平均</th><th style="{_th}">月次σ</th>'
-            f'<th style="{_th}">t</th><th style="{_th}">プラス月</th></tr></thead>'
+            f'<th style="{_th}">t</th><th style="{_th}">プラス月</th>'
+            f'<th style="{_th}">稼働率<br><span style="font-weight:400;'
+            f'font-size:0.68rem">(1日の投入額/予算)</span></th>'
+            f'<th style="{_th}">2単元以上<br><span style="font-weight:400;'
+            f'font-size:0.68rem">(=割り振りが起きた)</span></th></tr></thead>'
             f'<tbody>{_lv}</tbody></table>'
+            f'<p style="color:#94a3b8;font-size:0.72rem;margin:2px 0 0;line-height:1.7">'
+            f'★ <b>稼働率</b>＝その日に実際に注文した金額（注文価格×株数）の中央値 ÷ '
+            f'予算{_EQ_BUD / 1e4:,.0f}万。<b>2単元以上</b>＝100株を超えて建てられた'
+            f'トレードの割合（＝資金の割り振りが実際に起きた割合）。<br>'
+            f'⛔ 資金均等でも <b>1単元の値段で割り切れないと100株のまま</b>です'
+            f'（切り捨て）。合格7件・建値3,000円なら 1件あたり57万に対し1単元30万 → '
+            f'<b>57万÷30万＝1単元</b>。このとき残り190万は<b>そのまま遊びます</b>。'
+            f'2単元以上の割合が低く稼働率も低いなら、資金均等は'
+            f'<b>100株固定に縮退している</b>ということです。</p>'
             f'<div style="color:#cbd5e1;font-weight:700;font-size:0.82rem;margin:10px 0 4px">'
             f'対応のある検定（月ごとの差。相場全体の上下は差し引きで消える）</div>'
             f'<table style="border-collapse:collapse;font-size:0.8rem">'
