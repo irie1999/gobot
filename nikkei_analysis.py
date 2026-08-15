@@ -16786,6 +16786,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                  f"安定度↑。総額は下がる）", "#4ade80")
                 else:
                     _vd2, _vc = "— 測れていない", "#94a3b8"
+                # ★ 資本効率 = 月平均 ÷ 実際に投入した額(月利%)。
+                #   ⛔ 金額上限の比較を σ で見てはいけない。上限は薄い日に
+                #     資金を寝かせるので、その月に薄い日が何日あったかという
+                #     **偶然**が月次損益のばらつきに乗る。σ が増えるのは
+                #     リスクが増えたからではなく投入額が揃わなくなっただけ。
+                #   ⚠ _r[3] は『現行H との平均差/月』で月平均ではない。
+                #     月平均は月別 dict(_r[11]) の平均。
+                def _ceff_of(_row):
+                    _mvx = [_row[11].get(_m4, 0.0) for _m4 in _msa]
+                    if not _mvx:
+                        return 0.0
+                    _c1 = ((_EH_TRADES.get("_eq_conc") or {}).get(_row[0]) or {})
+                    _dp = max(0.0, _EQ_BUD - float(_c1.get("idle_med", 0) or 0))
+                    return (_sti.mean(_mvx) / _dp * 100.0) if _dp > 0 else 0.0
+                _ceff, _ceffb = _ceff_of(_r), _ceff_of(_brow)
                 _audit += (
                     f'<tr{" style=background:#132a1a" if _is_b else ""}>'
                     f'<td style="padding:3px 8px;color:#e2e8f0;font-weight:700;'
@@ -16804,7 +16819,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     + '</td>'
                     f'<td style="text-align:right;padding:3px 8px;color:#e2e8f0;'
                     f'font-weight:700">{_st2:+.2f}</td>'
-                    f'<td style="text-align:right;padding:3px 8px;color:#94a3b8;'
+                    + (f'<td style="text-align:right;padding:3px 8px;'
+                       f'color:#fbbf24;font-weight:700;white-space:nowrap">'
+                       f'{_ceff:.2f}%'
+                       + ("" if _is_b or _ceffb <= 0 else
+                          f'<br><span style="font-size:0.7rem;color:'
+                          f'{"#4ade80" if _ceff >= _ceffb else "#f87171"}">'
+                          f'{_ceff - _ceffb:+.2f}pt</span>')
+                       + '</td>')
+                    + f'<td style="text-align:right;padding:3px 8px;color:#94a3b8;'
                     f'white-space:nowrap;font-size:0.76rem">'
                     f'{"—" if _is_b else f"{_d1:+,.0f} / {_d2:+,.0f}"}</td>'
                     # ★ リスク側(集中度)を同じ行に出す。σ にも t にも出ない
@@ -16828,7 +16851,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _ex = "、".join(sorted({
                     "/".join(_n_diff(r[0])) for r in _stale})[:4])
                 _audit += (
-                    f'<tr style="background:#1a1a2e"><td colspan="8" '
+                    f'<tr style="background:#1a1a2e"><td colspan="9" '
                     f'style="padding:6px 8px;color:#fbbf24;font-size:0.78rem">'
                     f'⛔ ほかに <b>{len(_stale)}行</b>が「つまみが2つ以上違う」ため'
                     f'判定から外れています（古い土台で作った残り: {_ex}）。'
@@ -16972,12 +16995,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'出ないので、リスク管理の判断はそちらで行ってください。'
             f'<b>最大</b>は「その日の合格が1銘柄しかない日」に出るので、'
             f'<b>重複を外しても上位Nで絞っても下がりません。金額上限だけが下げられます</b>。</p>'
+            f'<p style="color:#fbbf24;font-size:0.74rem;margin:0 0 8px;line-height:1.7">'
+            f'★ <b>金額上限の行だけは「月平均/σ」で判断してはいけません。</b>'
+            f'上限を入れると<b>薄い日に資金が寝る</b>ので、その月に薄い日が'
+            f'何日あったかという<b>偶然</b>が月次損益のばらつきに乗ります。'
+            f'σ が増えるのはリスクが増えたからではなく、<b>投入額が月ごとに'
+            f'揃わなくなっただけ</b>です。<br>'
+            f'→ <b>「資本効率」列</b>（月平均 ÷ 実際に投入した額）で比べてください。'
+            f'これが上限の有無でほぼ同じなら、損益の差は<b>単にレバレッジを'
+            f'落としたぶん</b>で、リスク当たりでは損していません。'
+            f'⛔ そもそも <b>薄い日ほど1件あたりの期待値が良いという事実はありません</b>'
+            f'（§18.13 で『同日発注数』を掃いて候補ゼロ、TESTはむしろ少ない日ほど悪い）。'
+            f'つまり薄い日に大きく張るのは<b>同じエッジへのレバレッジ</b>です。</p>'
             f'<table style="border-collapse:collapse;font-size:0.82rem">'
             f'<thead><tr><th style="{_th};text-align:left">動かしたつまみ</th>'
             f'<th style="{_th}">件数</th><th style="{_th}">月平均</th>'
             f'<th style="{_th}">月次σ</th>'
             f'<th style="{_th}">月平均/σ<br><span style="font-weight:400;'
             f'font-size:0.66rem">これが主指標</span></th>'
+            f'<th style="{_th}">資本効率<br><span style="font-weight:400;'
+            f'font-size:0.66rem">月平均÷実投入額</span></th>'
             f'<th style="{_th}">前半 / 後半<br><span style="font-weight:400;'
             f'font-size:0.66rem">基準との差</span></th>'
             f'<th style="{_th}">1銘柄の集中<br><span style="font-weight:400;'
