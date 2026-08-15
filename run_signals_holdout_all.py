@@ -1094,7 +1094,25 @@ if (_args.long_stop_short or getattr(_args, "mirror", False)) and _lss_proposal_
         _lss_source_bases = dict(_pns.get("SOURCE_BASES") or {})
         _lss_start_dates = dict(_pns.get("START_DATES") or {})
     except Exception as _e:
-        print(f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e} → 既存選定のまま")
+        # ⛔ **黙って落とさない**(2026-08-15 に半日溶かした)。
+        #   --lss-proposal を明示したのにファイルが無いと、組み込みの旧
+        #   WATCHLIST(265ペア)にフォールバックして走り、3,054ペアのつもりが
+        #   1/12 の母集団で「もっともらしいが全く別のレポート」が出た。
+        #   ⚠ 自動検出(auto)で見つからなかった場合だけはフォールバックが正しい。
+        _auto = str(getattr(_args, "lss_proposal", "")).strip().lower() == "auto"
+        _msg = f"[lss] 提案ファイル読み込み失敗 {_lss_proposal_file}: {_e}"
+        if _auto:
+            print(_msg + " → 既存選定のまま(自動検出なので続行)")
+        else:
+            print("=" * 70, flush=True)
+            print(_msg, flush=True)
+            print("⛔ --lss-proposal を明示したのに読めませんでした。"
+                  "既存選定(旧WATCHLIST 265ペア)で走ると、母集団が別物のまま"
+                  "もっともらしいレポートが出ます。中止します。", flush=True)
+            print("   全ペア(選定なし)を作るなら: python make_full_proposal.py",
+                  flush=True)
+            print("=" * 70, flush=True)
+            raise SystemExit(2)
     if _sel:
         # 提案はTRAIN期待値の高い順に整列済み。その順序を保ったまま:
         #   1) レポート対応6戦略(MACDTF/A7/RSI2/DON/VOLTF/MOM)だけ残す(MACD/VOL除外)
