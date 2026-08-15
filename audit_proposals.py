@@ -45,8 +45,33 @@ def _read(path: str) -> dict:
     base = re.search(r"(\d{4}-\d{2})", Path(path).name).group(1)
     # ヘッダ(docstring)は最初の """ ... """
     head = txt.split('"""')[1] if txt.count('"""') >= 2 else ""
-    # ("7203", "MACDTF") 形式のペアを拾う
-    pairs = set(re.findall(r'\(\s*"([0-9A-Za-z.]+)"\s*,\s*"([A-Za-z0-9]+)"\s*\)', txt))
+    # ⛔ 実際の形式は **3要素・シングルクォート**:
+    #     ('7203.T', '銘柄名', 'MACDTF'),  # TRAIN ...
+    #    銘柄名にカンマやクォートが入りうるので、行ごとに
+    #    「# より前の引用符付きトークン」を拾って 先頭=コード / 末尾=戦略 とする。
+    pairs = set()
+    for _ln in txt.splitlines():
+        _s = _ln.strip()
+        if not _s.startswith("("):
+            continue
+        _s = _s.split("#")[0]
+        _tok = re.findall(r"'([^']*)'|\"([^\"]*)\"", _s)
+        _tok = [a or b for a, b in _tok]
+        if len(_tok) >= 2:
+            pairs.add((_tok[0], _tok[-1]))
+    # ★ ヘッダの「合格 Nペア」を突き合わせる。パースが壊れたときに
+    #   「0件」を本物の異常と読み違えないための保険(2026-08-15 に実際やった)。
+    _m = re.search(r"合格\s*([\d,]+)\s*ペア", head)
+    n_head = int(_m.group(1).replace(",", "")) if _m else None
+    # ★ 効くパラメータだけを名前で抜く。文言の揺れ(「TEST は選定に未使用」等)を
+    #   条件差として誤検出しないため、比較はこの辞書で行う。
+    par = {}
+    for _k2, _re in (("sm", r"sm=([\d.]+)"), ("tm", r"tm=([\d.]+)"),
+                     ("slip", r"slip=([\d.]+)"), ("fee", r"fee=([\d.]+)"),
+                     ("delay", r"stop_delay_bars=(\d+)"),
+                     ("PF", r"PF>=([\d.]+)"), ("取引", r"取引>=(\d+)")):
+        _mm = re.search(_re, head)
+        par[_k2] = _mm.group(1) if _mm else "—"
     # ⛔ ヘッダには基準月・件数・TRAIN終端日が入るので、そのまま比べると
     #    全ファイルが「別条件」になる。**実行パラメータだけ**を残して正規化する。
     _cond = []
@@ -67,6 +92,8 @@ def _read(path: str) -> dict:
         "base": base,
         "path": path,
         "n": len(pairs),
+        "n_head": n_head,
+        "par": par,
         "pairs": pairs,
         "syms": {p[0] for p in pairs},
         "head": " / ".join(_cond),
@@ -75,8 +102,21 @@ def _read(path: str) -> dict:
 
 
 _rows = [_read(f) for f in _files]
+
+# ⛔ パースが壊れると全月0件になり、本物の異常と見分けがつかない。
+#    ヘッダの「合格 Nペア」と突き合わせて、食い違ったらそこで止める。
+_mis = [r for r in _rows if r["n_head"] is not None and r["n"] != r["n_head"]]
+if _mis:
+    print("⛔ 本文のパース結果とヘッダの『合格 Nペア』が食い違っています。")
+    print("   SELECTED の書式が変わった可能性があります(このツール側のバグ)。")
+    for r in _mis[:5]:
+        print(f"   {r['base']}: 本文 {r['n']}件 / ヘッダ {r['n_head']}件  {r['path']}")
+    raise SystemExit(1)
+
 _ns = [r["n"] for r in _rows]
 _med = sorted(_ns)[len(_ns) // 2]
+if _med <= 0:
+    raise SystemExit("⛔ 全ファイルが0件です。選定そのものが失敗しています。")
 
 print("=" * 100)
 print(f"■ lss_proposal 監査 — {len(_rows)}ファイル / 件数の中央値 {_med}")
@@ -100,29 +140,51 @@ for r in _rows:
     import datetime as _dt
     _ts = _dt.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")
     print(f"{r['base']:<9}{r['n']:>7,}{len(r['syms']):>7,}{_ratio:>7.0%}  {_dn:>14}  {_ts}{_flag}")
+    _prev = r          # ⛔ これを忘れて「増減」列が全行 空だった(2026-08-15)
 
 print("-" * 100)
 
-# ── 生成条件(ヘッダ)を突き合わせる。ここが違えば「別実行」が確定 ──────────────
-_heads: dict = {}
+# ── 生成条件。★ 文言ではなく **効くパラメータだけ**を突き合わせる ─────────────
+#    (「TEST は選定に未使用」のような注記の揺れを条件差と誤検出しないため)
+_KEYS = ["sm", "tm", "slip", "fee", "delay", "PF", "取引"]
+print(f"\n■ 生成条件(効くパラメータだけ抜粋)")
+print(f"  {'基準月':<9}" + "".join(f"{_k2:>9}" for _k2 in _KEYS))
+print("  " + "-" * (9 + 9 * len(_KEYS)))
 for r in _rows:
-    _heads.setdefault(r["head"], []).append(r["base"])
-_maxn = max(len(v) for v in _heads.values())
-print(f"\n■ 生成条件(ファイル先頭の引数。基準月・件数は除いて比較) — {len(_heads)}通り")
-for _h, _bs in sorted(_heads.items(), key=lambda kv: -len(kv[1])):
-    _mark = "★ 多数派" if len(_bs) == _maxn else "⛔ 少数派"
-    print(f"\n  [{_mark}] 基準月 {', '.join(_bs)}")
-    for _line in _h.split(" / "):
-        print(f"      {_line}")
+    print(f"  {r['base']:<9}" + "".join(f"{r['par'][_k2]:>9}" for _k2 in _KEYS))
 
-if len(_heads) > 1:
-    print("\n  ⛔ 生成条件が揃っていません。少数派の月は **別実行** で作られています。")
-    print("     sm/tm/slip/fee/しきい値 が違えば母集団の意味が変わるので、")
-    print("     多数派と同じ引数で作り直してください。")
+_sigs: dict = {}
+for r in _rows:
+    _sigs.setdefault(tuple(r["par"][_k2] for _k2 in _KEYS), []).append(r["base"])
+if len(_sigs) > 1:
+    _maxn = max(len(v) for v in _sigs.values())
+    print(f"\n  ⛔ 条件が {len(_sigs)}通りに割れています。少数派は **別実行**:")
+    for _sg, _bs in sorted(_sigs.items(), key=lambda kv: -len(kv[1])):
+        _mark = "★ 多数派" if len(_bs) == _maxn else "⛔ 少数派"
+        print(f"     [{_mark}] "
+              + " ".join(f"{_k2}={_v}" for _k2, _v in zip(_KEYS, _sg))
+              + f"  ← {', '.join(_bs)}")
 else:
     print("\n  ✅ 全月おなじ条件で生成されています。")
     print("     → 件数が落ちているなら、原因は引数ではなく **実行そのもの**")
     print("        (中断 / ユニバースが小さい / 5分足の在庫不足)。")
+
+# ── ★ 実機の設定と合っているか。合っていないと『別の戦略で選んだ銘柄』になる ──
+_LIVE = {"fee": ("0", "18.14 実口座は信用大口優遇プランで手数料無料"),
+         "delay": (os.environ.get("LSS_STOP_DELAY_BARS", "1"),
+                   "daily.bat / watch.bat と揃える(18.9 の鉄則)")}
+_ng = []
+for _k2, (_want, _why) in _LIVE.items():
+    _got = {r["par"][_k2] for r in _rows}
+    _bad2 = {g for g in _got if g != "—" and float(g or 0) != float(_want)}
+    if _bad2:
+        _ng.append((_k2, _want, sorted(_got), _why))
+if _ng:
+    print("\n  ⛔ 実機の設定と食い違っています(選定そのものが別条件で行われている):")
+    for _k2, _want, _got, _why in _ng:
+        print(f"     {_k2}: 提案ファイル {_got} / 実機 {_want}  — {_why}")
+    print("     ⚠ 選定は『どの銘柄×戦略を使うか』を決める工程なので、ここが違うと")
+    print("        母集団そのものが別物になります。#4〜#8 を測る前に揃えること。")
 
 # ── 包含関係。TRAIN は累積なので、後の月は前の月をほぼ含むはず ────────────────
 print("\n■ 前月ペアの引き継ぎ率 (TRAIN は累積なので、正常なら高い)")
