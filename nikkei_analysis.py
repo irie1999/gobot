@@ -10663,14 +10663,35 @@ function switchTbd(id, tab) {{
             #   ⚠ 掃くのは **タブに出す閾値だけ**。全閾値×全delay にすると
             #      5分足の決済判定をやり直す回数が3倍になり、損益タブが重くなる。
             #      (資金均等と違って、これは後処理では作れない)
+            # ★ タブに出す変種は **必ず生成する**(LSS_H_VARIANT_TAB に関係なく)。
+            #   d4 は 2026-08-15 に確定した推奨設定なので、日次の .\daily でも
+            #   タブとして見られないと意味がない。
+            def _eq_parse(_k):
+                """タブキー -> (ギャップbp, 遅延本数, 変種名)。
+
+                例 "H指値+50bp寄指d4資金均等" -> (50.0, 4, "H指値+50bp寄指d4")
+                   "H指値+50bp寄指資金均等"   -> (50.0, 既定, "H指値+50bp寄指")
+                """
+                _b = str(_k).split("資金均等")[0]
+                _g = float("".join(_c for _c in _b.split("bp")[0][-5:]
+                                   if _c.isdigit()) or 50)
+                _d = (int("".join(_c for _c in _b.split("寄指d")[-1]
+                                  if _c.isdigit()) or _eh_delay)
+                      if "寄指d" in _b else int(_eh_delay))
+                return _g, _d, _b
+
+            _eqg0 = 50.0
             try:
-                _eqk0 = str(os.environ.get(
-                    "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
-                _eqb0 = _eqk0.split("資金均等")[0]
-                _eqg0 = float("".join(_c for _c in _eqb0.split("bp")[0][-5:]
-                                      if _c.isdigit()) or 50)
-            except Exception:
-                _eqg0 = 50.0
+                _eqg0, _, _ = _eq_parse(os.environ.get(
+                    "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等"))
+                # タブ2(既定 = 確定した推奨設定 d4)。空文字で無効化できる。
+                _k2 = str(os.environ.get(
+                    "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
+                if _k2:
+                    _g2, _d2, _b2 = _eq_parse(_k2)
+                    _hvars.append((_b2, 0, True, _d2, "fill", _g2))
+            except Exception as _eqe0:
+                print(f"[E/H] タブ変種の解決に失敗: {_eqe0}", flush=True)
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     not in ("0", "false", "no"):
                 # ⚠ 2026-08-15 実測: d0 < d1 < d2 < d3 と **単調増加**
@@ -10770,6 +10791,12 @@ function switchTbd(id, tab) {{
             # ⛔ 日付ではなく **入力そのもの** を鍵にする。日付を鍵にすると
             #    「朝に回した結果」を引け後の実行が拾ってしまう(データが違うのに)。
             #    母集団の (銘柄, 日, 注文値, 約定値) が1つでも変われば別キーになる。
+            # ⛔ 同じ変種名が二重に入ると 5分足の判定を2回やって無駄になり、
+            #    ⚖表にも同じ列が2本出る。名前で先勝ちの重複排除をする
+            #    (タブ2の d4 と delay スイープの d4 が衝突する)。
+            _seen_hv: set = set()
+            _hvars = [v for v in _hvars
+                      if not (str(v[0]) in _seen_hv or _seen_hv.add(str(v[0])))]
             _eh_key = _eh_cdir = None
             try:
                 import hashlib as _hl
@@ -10891,10 +10918,26 @@ function switchTbd(id, tab) {{
     _EQ_TAB_DLY = ("".join(_c for _c in _EQ_TAB_BASE.split("寄指d")[-1]
                            if _c.isdigit())
                    if "寄指d" in _EQ_TAB_BASE else "")
-    _EQ_TAB_LBL = (f"09:00確認{_EQ_TAB_GAP} 資金均等"
-                   + (f" delay{_EQ_TAB_DLY}" if _EQ_TAB_DLY else "")
-                   + (f" 上位{_EQ_TAB_TOP}集中" if _EQ_TAB_TOP else "")
-                   + (" 充填" if _EQ_TAB_KEY.endswith("充填") else ""))
+
+    def _eq_lbl_of(_k):
+        """タブキーから表示ラベルを作る。"""
+        _b = str(_k).split("資金均等")[0]
+        _g = "".join(_c for _c in _b.split("bp")[0][-5:] if _c.isdigit()) or "50"
+        _d = ("".join(_c for _c in _b.split("寄指d")[-1] if _c.isdigit())
+              if "寄指d" in _b else "")
+        _tp = ("".join(_c for _c in str(_k).split("上位")[-1] if _c.isdigit())
+               if "上位" in str(_k) else "")
+        return (f"09:00確認+{_g}bp 資金均等"
+                + (f" delay{_d}" if _d else "")
+                + (f" 上位{_tp}集中" if _tp else "")
+                + (" 充填" if str(_k).endswith("充填") else ""))
+
+    _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
+    # ★ タブ2 = 2026-08-15 に確定した推奨設定(delay4)。J の隣に出す。
+    #   空文字にすれば出さない。
+    _EQ_TAB_KEY2 = str(os.environ.get(
+        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4資金均等")).strip()
+    _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
@@ -11452,14 +11495,20 @@ function switchTbd(id, tab) {{
         _EH_PAIRS = [("E", "he"), ("H", "hh")]
         if _EH_TRADES.get(_EQ_TAB_KEY):
             _EH_PAIRS.append(("J", "hj"))
-        else:
+        if _EQ_TAB_KEY2 and _EH_TRADES.get(_EQ_TAB_KEY2):
+            _EH_PAIRS.append(("K", "hk"))
+        elif _EQ_TAB_KEY2:
+            print(f"[E/H] 推奨タブ: キー '{_EQ_TAB_KEY2}' が見つかりません。"
+                  f"set LSS_EQ_TAB_KEY2=... で指定 / 空にすると出しません",
+                  flush=True)
+        if not _EH_TRADES.get(_EQ_TAB_KEY):
             print(f"[E/H] 資金均等タブ: キー '{_EQ_TAB_KEY}' が見つかりません"
                   f"(候補: "
                   + ", ".join(k for k in (_EH_TRADES.get("_h_variants") or [])
                               if str(k).endswith("資金均等"))
                   + ")。set LSS_EQ_TAB_KEY=... で指定", flush=True)
         for _ehk, _ehpfx in _EH_PAIRS:
-            _srck = _EQ_TAB_KEY if _ehk == "J" else _ehk
+            _srck = ({"J": _EQ_TAB_KEY, "K": _EQ_TAB_KEY2}).get(_ehk, _ehk)
             _src = _EH_TRADES.get(_srck) or []
             if not _src:
                 continue
@@ -14327,7 +14376,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
-    for _ehk in ("E", "H", "J"):
+    for _ehk in ("E", "H", "J", "K"):
         if _eh_grid.get(_ehk):
             _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
@@ -14335,7 +14384,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # (J=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
     # detail_<seq>_all の存在を前提にコンテナを探すので、**all の div は残す**
     # (中身だけ空にする)。
-    _DEF_TAB = next((x for x in ("ehJ", "ehH", "budget", "all")
+    _DEF_TAB = next((x for x in ("ehK", "ehJ", "ehH", "budget", "all")
                      if x in _detail_tab_ids), "all")
     # 隠してよいのは「他に着地できるタブがあるとき」だけ。ロング/ショートの
     # レポートには E/H も予算タブも無いので、そこでは従来どおり全部出す
@@ -17416,8 +17465,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "09:00 の<b>始値</b>を見て、前日終値比のギャップが"
                      f"<b>{_EQ_TAB_GAP}</b>以上の銘柄だけを合格とし、"
                      "<b>その日の合格銘柄に予算を均等割り</b>して即成行売り"
-                     "(約定は始値で近似)")}
-    for _ehk in ("E", "H", "J"):
+                     "(約定は始値で近似)"),
+               # ★ K = 2026-08-15 に確定した推奨設定。J との違いは
+               #   **損切りを武装するまでの本数だけ**(delay1 → delay4)。
+               "K": (f"K {_EQ_TAB_LBL2} ★推奨", "#22d3ee", "#a5f3fc",
+                     "J とまったく同じ発注・同じ銘柄で、"
+                     "<b>損切りを武装するまでの時間だけ</b>が違います"
+                     "(09:00約定なら <b>09:20</b> から損切り有効。利確と引けは"
+                     "最初から有効)。2026-08-15 の設定比較で"
+                     "<b>月平均/σ が最大</b>だった設定")}
+    for _ehk in ("E", "H", "J", "K"):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)
@@ -17426,7 +17483,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
         # ⛔ _ehpfx はこのループでは定義されない(上の別ループの残り値が入り、
         #    E でも "hh" になって DOM id が H と衝突する)。ここで作り直す。
-        _ehpfx = {"E": "he", "H": "hh", "J": "hj"}[_ehk]
+        _ehpfx = {"E": "he", "H": "hh", "J": "hj", "K": "hk"}[_ehk]
+        # ⛔ _srck は上の別ループのローカル。ここで作り直さないと前の値が
+        #    残り、説明文が別の変種名を指す。
+        _srck = ({"J": _EQ_TAB_KEY, "K": _EQ_TAB_KEY2}).get(_ehk, _ehk)
         _ss = _eh_sorted.get(_ehk) or []
         _eh_btn += (
             f'<button class="detail-tab-btn{_act("eh" + _ehk)}" '
@@ -17469,25 +17529,38 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'🔁 <b>エントリー方式 {_ehk}</b>: {_desc}。'
             f'シグナル・銘柄選定・発注順・決済(損切/利確/引け成行)は'
             f'<b>現行とまったく同一</b>で、違うのは<b>注文の出し方だけ</b>。'
-            + ('株数だけが違います（H は100株固定 / G は '
+            + (f'株数だけが違います（H は100株固定 / {_ehk} は '
                f'<b>{_budget_man}万円 ÷ その日の合格件数</b> を100株単位に'
                f'切り下げ・最大{_EQ_MAX_LOT}単元）。'
                f'<br>この数字は下の ⚖ 表の '
-               f'<b>「{_EQ_TAB_KEY}」</b>列と同一です'
+               f'<b>「{_srck}」</b>列と同一です'
                f'（同じ <code>_run_budget_sim</code> の出力）。'
-               '<br>⚠ <b>まだ実運用していません</b>（実運用は H）。'
+               + ('<br>★ <b>J との違いは損切りを武装するまでの時間だけ</b>です'
+                  '（J=5分後 / K=<b>20分後</b>）。銘柄・株数・指値・利確・引けは'
+                  '1つも変わりません。'
+                  if _ehk == "K" else
+                  f'<br>★ 隣の <b>K</b> が 2026-08-15 に確定した推奨設定です'
+                  f'（損切りの武装を 5分後 → <b>20分後</b>に）。'
+                  if _EQ_TAB_KEY2 else '')
+               + '<br>⚠ <b>まだ実運用していません</b>（実運用は H）。'
                '09:00 に始値を見てから発注する自動化が必要で、'
                '約定価格を<b>始値で近似</b>している点は '
                '<code>.\\fills</code> の実約定で確認するまで未検証です。'
                '<br>⚠ 不約定はありません（ギャップを確認してから発注するので、'
                '<b>発注枠を空振りに使わない</b>）。これも H との構造的な違いです。'
-               if _ehk == "J" else
+               if _ehk in ("J", "K") else
                f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
                f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
                f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。')
             + f'<b>比較は下の「⚖ 注文方式の比較」表を見ること</b>'
             f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。</p>'
-            + _EH_CMP_HTML
+            # ⛔ ⚖比較 + H設定比較は巨大なので、**既定で開くタブにだけ**入れる。
+            #    E/H/J/K の全ペインに積むと HTML が数倍になる(2026-08-15)。
+            + (_EH_CMP_HTML if ("eh" + _ehk) == _DEF_TAB else
+               f'<p style="color:#64748b;font-size:0.76rem;margin:0 0 10px">'
+               f'⚖ 注文方式の比較・🎯 H の設定比較は、既定で開くタブ'
+               f'（{_EH_LBL.get(_DEF_TAB[2:], ("",))[0] or _DEF_TAB}）にまとめて'
+               f'置いています。HTML を軽くするためです。</p>')
             + _dup_toggle_html(_ss, _g[0], _g[1], _dseq, _ehpfx)
             + '</div>')
 
