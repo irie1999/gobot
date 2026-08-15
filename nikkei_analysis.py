@@ -16187,8 +16187,25 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _h = len(_ms) // 2
             _f1 = sum(_m[k] - _base[k] for k in _ms[:_h])
             _f2 = sum(_m[k] - _base[k] for k in _ms[_h:])
+            # ★ 決済理由の内訳 (2026-08-15)。「なぜその設定が良いのか」は
+            #   合計だけ見ても分からない。損切りを緩める系(delay/sm/損切なし)は
+            #   **損切りで確定していた損を引けまで持ち越す**ので、
+            #   『損切りの損失が減った額』と『引け決済の損益が悪化した額』の
+            #   差し引きが効果の正体になる。ここを出さないと推論のままになる。
+            _rc = {"利確": [0, 0.0], "損切り": [0, 0.0], "引け": [0, 0.0]}
+            for _t3 in _r:
+                if _t3.get("reason") in ("発注中", "保有中"):
+                    continue
+                if str(_t3.get("entry_d_raw") or _t3.get("exit_d_raw")
+                       or "")[:7] not in _ms:
+                    continue
+                _rn = str(_t3.get("reason") or "")
+                _kk = ("利確" if "目標" in _rn or "利確" in _rn
+                       else "損切り" if "損切" in _rn else "引け")
+                _rc[_kk][0] += 1
+                _rc[_kk][1] += float(_t3.get("pnl", 0) or 0)
             _out.append((_v, _n, sum(_m.values()), _mu, _t, _lo, _hi, _w,
-                         len(_ds), _f1, _f2, _m))
+                         len(_ds), _f1, _f2, _m, _rc))
 
         # ── walk-forward 設定選択(設定選択のリークを消した唯一の形) ──────
         # 各月について、**その月より前のデータだけ**で最良の設定を選び、その月に
@@ -16221,7 +16238,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _wf1 = sum(_wfm[m] - _base[m] for m in _msa[:_wh] if m in _base)
         _wf2 = sum(_wfm[m] - _base[m] for m in _msa[_wh:] if m in _base)
         _out.append(("▶ walk-forward 選択", 0, sum(_wfm.values()), _wmu, _wt,
-                     _wlo, _whi, _ww, len(_wds), _wf1, _wf2, _wfm))
+                     _wlo, _whi, _ww, len(_wds), _wf1, _wf2, _wfm, None))
 
         _best = max([r for r in _out if not r[0].startswith("▶")],
                     key=lambda r: r[2])[0] if _out else ""
@@ -16232,7 +16249,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _o2 = {r[0]: i + 1 for i, r in enumerate(
             sorted(_fx, key=lambda r: -r[10]))}
         _rows = ""
-        for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm) in _out:
+        for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm, _rc) in _out:
             _rk1, _rk2 = _o1.get(_v, "—"), _o2.get(_v, "—")
             # ── 月次σ と 安定度(月平均/σ) ────────────────────────────
             # サイズ均等(◆金額均等/◆ATR均等)の狙いは期待値ではなく**分散**
@@ -16256,10 +16273,24 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<tr{_mark}><td style="padding:2px 8px;color:#e2e8f0;font-weight:700;'
                 f'white-space:nowrap">{"★ " if _v == _best else ""}{_v}'
                 f'<span style="color:#4ade80"> {_rep}</span></td>'
-                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
-                f'{("—" if _wfr else f"{_n:,}")}</td>'
+                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                f'white-space:nowrap">'
+                f'{("—" if _wfr else f"{_n:,}")}'
+                + ("" if (_wfr or not _rc or not _n) else
+                   f'<br><span style="color:#64748b;font-size:0.68rem">'
+                   f'<span style="color:#4ade80">利{_rc["利確"][0]}</span>/'
+                   f'<span style="color:#f87171">損{_rc["損切り"][0]}</span>/'
+                   f'引{_rc["引け"][0]}</span>')
+                + '</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#e2e8f0;'
-                f'font-weight:700">{_p:+,.0f}</td>'
+                f'font-weight:700;white-space:nowrap">{_p:+,.0f}'
+                + ("" if (_wfr or not _rc) else
+                   f'<br><span style="font-weight:400;font-size:0.68rem">'
+                   f'<span style="color:#4ade80">{_rc["利確"][1] / 1e4:+,.0f}万</span>/'
+                   f'<span style="color:#f87171">{_rc["損切り"][1] / 1e4:+,.0f}万</span>/'
+                   f'<span style="color:#94a3b8">{_rc["引け"][1] / 1e4:+,.0f}万</span>'
+                   f'</span>')
+                + '</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
                 f'{("—" if _wfr else f"{(_p / _n if _n else 0):+,.0f}円")}</td>'
                 f'<td style="text-align:right;padding:2px 8px;color:#94a3b8">'
@@ -16355,9 +16386,22 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'（§18.30: 日次σの94%が銘柄固有 / 100株固定だと建玉が10万〜60万と6倍ばらつく）。'
             f'見るのは <b>月次σ</b> と <b>月平均/σ</b> で、'
             f'<b>σ が下がっていないなら揃える理由は数字の上にはありません</b>。</p>'
+            f'<p style="color:#94a3b8;font-size:0.74rem;margin:0 0 8px;line-height:1.7">'
+            f'★ <b>件数と合計の2段目は決済理由の内訳</b>（<span style="color:#4ade80">'
+            f'利確</span>/<span style="color:#f87171">損切り</span>/引けMOC）。'
+            f'損切りを緩める系（delay・sm・損切なし）が良く見える理由はここに出ます：'
+            f'<b>損切りで確定していた損を引けまで持ち越す</b>ので、'
+            f'「損切りの損失が減った額」と「引け決済が悪化した額」の差し引きが効果の'
+            f'正体です。<br>⚠ この戦略は<b>同日決済</b>なので、損切りが無くても引けで'
+            f'必ず閉じます＝<b>バックテスト上は損失が有界</b>。実運用では'
+            f'ストップ高で買い戻せない・TOBで翌日も飛ぶ、という形でこの前提が崩れます。'
+            f'損切なしの数字はその分だけ楽観です。</p>'
             f'<table style="border-collapse:collapse;font-size:0.8rem">'
             f'<thead><tr><th style="{_th};text-align:left">設定</th>'
-            f'<th style="{_th}">件数</th><th style="{_th}">合計</th>'
+            f'<th style="{_th}">件数<br><span style="font-weight:400;'
+            f'font-size:0.66rem">利/損/引</span></th>'
+            f'<th style="{_th}">合計<br><span style="font-weight:400;'
+            f'font-size:0.66rem">利確/損切/引け</span></th>'
             f'<th style="{_th}">円/件</th>'
             f'<th style="{_th}">月次σ</th><th style="{_th}">月平均/σ</th>'
             f'<th style="{_th}">差/月</th>'
