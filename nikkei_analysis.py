@@ -11384,16 +11384,29 @@ function switchTbd(id, tab) {{
         "LSS_EQ_TAB_KEY2",
         _eq_pref_of(50) + "d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
-    # ★★ J/K タブの中身 (2026-08-16 ユーザー依頼)。
-    #   J = 実装版(選定あり + watch50)   ← いま kabu だけで作れる形
-    #   K = 理想版(選定なし + watch無制限) ← 全候補の始値が読めたら
+    # ★★ J/L/K タブの中身 (2026-08-16 ユーザー依頼)。
+    #   J = 実装版  (選定あり + watch50)     ← いま kabu だけで作れる形
+    #   L = 中間版  (選定なし + watch50)     ← 提案ファイルを差し替えるだけ = タダ
+    #   K = 理想版  (選定なし + watch無制限) ← 全候補の始値が読めたら
     #   同じ実行から作るので、月別を並べればそのまま比較になる(18.24)。
+    #
+    #   ★★ L を出す理由 (2026-08-16): K は **選定なし** と **watch無制限** を
+    #     同時に変えているので、K−J の差がどちらの寄与か分からなかった。
+    #     L を挟めば分離できる:
+    #        L − J = 選定をやめた効果   ← **タダで取れる**(設定1つ)
+    #        K − L = 読める数を増やす効果 ← ⛔ 50件の壁を破る必要がある
+    #     L−J がほぼ全部なら、明日のバッチ回し・気配ログは不要になる。
+    #
     #   ⚠ 監査ボードの基準(_EQ_TAB_KEY2)は動かさない。動かすとつまみが
     #     2つずれて全行『比較不能』になる。
+    #   ★ L の中身は **基準そのもの**(_EQ_TAB_KEY2 = 接尾辞なし = pool 無し ×
+    #     watch50)。既に計算済みなので、タブに出すだけで計算は増えない。
     #   ⛔ **_EQ_TAB_KEY2 より後ろに置くこと**。前に置くと
     #      UnboundLocalError で損益タブが丸ごと落ちる(2026-08-16 に実際に発生)。
     _EQ_TAB_J = os.environ.get(
         "LSS_EQ_TAB_J", _EQ_TAB_KEY2 + "実装版").strip() or _EQ_TAB_KEY
+    _EQ_TAB_L = os.environ.get(
+        "LSS_EQ_TAB_L", _EQ_TAB_KEY2).strip() or _EQ_TAB_KEY2
     _EQ_TAB_K = os.environ.get(
         "LSS_EQ_TAB_K", _EQ_TAB_KEY2 + "理想版").strip() or _EQ_TAB_KEY2
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
@@ -12176,6 +12189,10 @@ function switchTbd(id, tab) {{
         # ★ H だけでなく **推奨(K)** も出す(2026-08-16)。09:00 の発注速度が
         #   どれだけ利益を左右するかを 1分足で測る(measure_entry_decay.py)には、
         #   K が実際にどの銘柄をどの日に建てたかが要る。
+        # ⚠ この "_K.csv" の中身は **基準(_EQ_TAB_KEY2 = 選定なし×watch50)**
+        #    で、タブの『K 理想版』(watch無制限)ではなく **L 中間版**と同じ。
+        #    ファイル名は下流(.\fills の突合 / measure_entry_decay)が参照して
+        #    いるので変えない。中身は「実装できる形」なので用途としては正しい。
         _hdumps = [("H", (_EH_TRADES or {}).get("H") or [])]
         if _EQ_TAB_KEY2:
             _hdumps.append(("K", (_EH_TRADES or {}).get(_EQ_TAB_KEY2) or []))
@@ -12538,8 +12555,12 @@ function switchTbd(id, tab) {{
     if _LSS_ORDER_MODE and _EH_TRADES:
         _EH_NF = _EH_TRADES.get("約定せず") or {}
         _EH_PAIRS = [("E", "he"), ("H", "hh")]
-        if _EH_TRADES.get(_EQ_TAB_KEY):
+        if _EH_TRADES.get(_EQ_TAB_J):
             _EH_PAIRS.append(("J", "hj"))
+        # ★ L = 中間版(選定なし × watch50)。J と K の差を分離するための行。
+        #   中身は基準(_EQ_TAB_KEY2)そのものなので計算は増えない。
+        if _EQ_TAB_L and _EH_TRADES.get(_EQ_TAB_L):
+            _EH_PAIRS.append(("L", "hl"))
         if _EQ_TAB_KEY2 and _EH_TRADES.get(_EQ_TAB_KEY2):
             _EH_PAIRS.append(("K", "hk"))
         elif _EQ_TAB_KEY2:
@@ -12553,7 +12574,8 @@ function switchTbd(id, tab) {{
                               if str(k).endswith("資金均等"))
                   + ")。set LSS_EQ_TAB_KEY=... で指定", flush=True)
         for _ehk, _ehpfx in _EH_PAIRS:
-            _srck = ({"J": _EQ_TAB_J, "K": _EQ_TAB_K}).get(_ehk, _ehk)
+            _srck = ({"J": _EQ_TAB_J, "L": _EQ_TAB_L,
+                      "K": _EQ_TAB_K}).get(_ehk, _ehk)
             _src = _EH_TRADES.get(_srck) or []
             if not _src:
                 continue
@@ -15427,7 +15449,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # 原因調査ができない。実際 oos_raw_fold*.csv が CWD に無くて全滅した事故あり)。
     if _LSS_ORDER_MODE:
         _detail_tab_ids.append('tenkan')
-    for _ehk in ("E", "H", "J", "K"):
+    for _ehk in ("E", "H", "J", "L", "K"):
         if _eh_grid.get(_ehk):
             _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
@@ -15435,7 +15457,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # (J=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
     # detail_<seq>_all の存在を前提にコンテナを探すので、**all の div は残す**
     # (中身だけ空にする)。
-    _DEF_TAB = next((x for x in ("ehK", "ehJ", "ehH", "budget", "all")
+    _DEF_TAB = next((x for x in ("ehK", "ehL", "ehJ", "ehH", "budget", "all")
                      if x in _detail_tab_ids), "all")
     # 隠してよいのは「他に着地できるタブがあるとき」だけ。ロング/ショートの
     # レポートには E/H も予算タブも無いので、そこでは従来どおり全部出す
@@ -19128,6 +19150,22 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "<b>予算を均等割り</b>。"
                      "⛔ kabu の銘柄登録は50件が上限で、候補は中央49件・"
                      "最大277件なので<b>47%の日は一部を捨てています</b>"),
+               # ★★ L = 中間版 (2026-08-16 ユーザー依頼)。K は『選定なし』と
+               #   『watch無制限』を同時に変えているので、K−J がどちらの寄与か
+               #   分からなかった。L を挟むと分離できる:
+               #      L − J = 選定をやめた効果   ← **タダ**(提案ファイルの差し替え)
+               #      K − L = 読める数を増やす効果 ← ⛔ 50件の壁を破る必要
+               "L": (f"L 中間版（選定なし・watch{_WATCH_CAP}件）",
+                     "#4ade80", "#bbf7d0",
+                     "<b>銘柄選定だけをやめた形</b>です。"
+                     "全ペアを対象にしつつ、09:00 に読むのは"
+                     f"<b>流動性上位{_WATCH_CAP}件</b>まで(＝kabu の登録上限を守る)。"
+                     "決済設定は J・K とまったく同じ。"
+                     "★ <b>これは今日から実装できます</b>"
+                     "(提案ファイルを full に差し替えるだけ)。"
+                     "<b>L−J が『選定をやめた効果』、K−L が『読める数を"
+                     "増やした効果』</b>で、K−J をこの2つに分解するための行です。"
+                     "L−J がほぼ全部なら、<b>50件の壁を破る調査は不要</b>になります"),
                "K": (f"K 理想版（選定なし・watch無制限）", "#22d3ee", "#a5f3fc",
                      "<b>全候補の始値が読めたら</b>の形です。"
                      "銘柄選定をせず(全ペアを対象)、"
@@ -19137,7 +19175,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "⛔ 候補は中央154件・最大614件なので、kabu 単体では"
                      "<b>実装できません</b>(登録上限50件 / 平均4バッチ必要)。"
                      "楽天RSS 等の多銘柄ソースか、50件ずつの回し読みが要ります")}
-    for _ehk in ("E", "H", "J", "K"):
+    for _ehk in ("E", "H", "J", "L", "K"):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)
@@ -19146,10 +19184,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _lbl, _bc, _tc, _desc = _EH_LBL[_ehk]
         # ⛔ _ehpfx はこのループでは定義されない(上の別ループの残り値が入り、
         #    E でも "hh" になって DOM id が H と衝突する)。ここで作り直す。
-        _ehpfx = {"E": "he", "H": "hh", "J": "hj", "K": "hk"}[_ehk]
+        _ehpfx = {"E": "he", "H": "hh", "J": "hj",
+                  "L": "hl", "K": "hk"}[_ehk]
         # ⛔ _srck は上の別ループのローカル。ここで作り直さないと前の値が
         #    残り、説明文が別の変種名を指す。
-        _srck = ({"J": _EQ_TAB_KEY, "K": _EQ_TAB_KEY2}).get(_ehk, _ehk)
+        # ⛔ ここは上の生成ループ(_EH_PAIRS)と **同じ対応表**でなければならない。
+        #    以前 J に _EQ_TAB_KEY を当てていて、説明文の「〜列と同一です」が
+        #    実際に描いている列(_EQ_TAB_J)と食い違っていた(2026-08-16 修正)。
+        _srck = ({"J": _EQ_TAB_J, "L": _EQ_TAB_L,
+                  "K": _EQ_TAB_K}).get(_ehk, _ehk)
         _ss = _eh_sorted.get(_ehk) or []
         _eh_btn += (
             f'<button class="detail-tab-btn{_act("eh" + _ehk)}" '
@@ -19417,16 +19460,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                f'<br>この数字は下の ⚖ 表の '
                f'<b>「{_srck}」</b>列と同一です'
                f'（同じ <code>_run_budget_sim</code> の出力）。'
-               # ⛔ 「違いは武装までの時間だけ」と書いていたが、K は sm も
-               #    違う(J=既定sm / K=推奨sm)。ラベルから実際の差を出す。
-               + (f'<br>★ <b>J との違いは決済の設定だけ</b>です'
-                  f'（J: {_eq_lbl_of(_EQ_TAB_J)} ／ K: {_eq_lbl_of(_EQ_TAB_K)}）。'
-                  f'決済設定は同一で、違うのは<b>母集団</b>と'
-                  f'<b>09:00 に読める銘柄数</b>だけです。'
-                  if _ehk == "K" else
-                  f'<br>★ 隣の <b>K(理想版)</b> は「全候補の始値が読めたら」の'
-                  f'上限値です（{_eq_lbl_of(_EQ_TAB_K)}）。'
-                  if _EQ_TAB_KEY2 else '')
+               # ★★ J / L / K は **決済設定がまったく同じ**で、違うのは
+               #    ①母集団(選定あり/なし) ②09:00 に読める銘柄数 の2つだけ。
+               #    L はその2つを1つずつ動かすための中間点(2026-08-16)。
+               + ((f'<br>★ <b>J・L・K は決済設定がまったく同じ</b>です'
+                   f'（{_eq_lbl_of(_EQ_TAB_K)}）。違うのは2つだけ:'
+                   f'<br>　<b>J</b> 選定あり × watch{_WATCH_CAP}'
+                   f'　→　<b>L</b> 選定<b>なし</b> × watch{_WATCH_CAP}'
+                   f'　→　<b>K</b> 選定なし × watch<b>無制限</b>'
+                   f'<br>　したがって <b>L−J = 選定をやめた効果</b>（提案ファイルを'
+                   f'差し替えるだけ＝<b>今日から実装できる</b>）、'
+                   f'<b>K−L = 読める数を増やした効果</b>'
+                   f'（⛔ kabu の登録上限50件を破る必要がある）。'
+                   f'<br>　<b>L−J がほぼ全部なら、50件の壁を破る調査は不要</b>です。')
+                  if _ehk in ("J", "L", "K") and _EQ_TAB_KEY2 else '')
                + '<br>⚠ <b>まだ実運用していません</b>（実運用は H）。'
                # ⛔ 2026-08-16 修正: ここは「09:00に始値を見てから発注する」
                #    「不約定はない」と書いてあったが、**前夜指値のときは両方とも
@@ -19490,7 +19537,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                   '<br>→ <b>この方式は構造的に集中できません。</b>'
                   '集中できるのは 09:00確認方式だけです'
                   '（<code>set LSS_EQ_METHOD=confirm</code>）。')
-               if _ehk in ("J", "K") else
+               if _ehk in ("J", "L", "K") else
                f'表示条件は左の「{_budget_man}万円×{_ORD_LBL}×日別」タブと同じ'
                f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
                f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。')
