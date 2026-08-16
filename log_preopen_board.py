@@ -33,6 +33,19 @@ K が気配に求めるのは値そのものではなく **「+50bp 以上か」
 の **反転率**。レポートの「🕗 判定マージン」ブロックが「気配が m bp ずれたら
 何件ひっくり返るか」を既に出しているので、ここで m の分布が分かれば即答が出る。
 
+■ ★ 母集団は広く取る (2026-08-16 ユーザー提案)
+
+  気配→始値の関係は **「発注候補であること」を必要としない**。どの銘柄でも
+  同じように測れるので、母集団を広げるほど1日で取れる件数が増え、判定に要る
+  500〜1,000件に **早く届く**(50件/日なら1ヶ月 / 500件/日なら2営業日)。
+
+  既定の母集団は `lss_proposal_full.py`(選定なしの全候補・価格1,000〜6,000で
+  空売り可のフィルタ済み / §18.38 #8)。無ければ cumul → holdout → prime の順。
+  `--max-symbols` の既定は **0 = 無制限**。
+
+  ⛔ ただし **締切(--until)を越えない**。バッチごとに時刻を見て打ち切る。
+     カーソルは周をまたいで持ち越すので、読み切れなくても取りこぼしが偏らない。
+
 ■ 使い方
 
   # 毎朝 08:45〜08:59 に走らせる(既定は 08:59 まで2分おきにループ)
@@ -68,9 +81,10 @@ ap = argparse.ArgumentParser(
 ap.add_argument("--prod", action="store_true", help="本番(18080)。既定はデモ(18081)")
 ap.add_argument("--symbols", type=str, default="", help="カンマ区切りの銘柄コード")
 ap.add_argument("--symbols-file", type=str, default="",
-                help="銘柄を読むファイル(既定 holdout_selected_symbols.py)")
-ap.add_argument("--max-symbols", type=int, default=300,
-                help="読む銘柄数の上限(50件バッチで回す)")
+                help="銘柄を読むファイル(既定は下記の自動検出)")
+ap.add_argument("--max-symbols", type=int, default=0,
+                help="読む銘柄数の上限。**0=無制限**(既定)。"
+                     "母集団が大きいほど検証が早く終わる")
 ap.add_argument("--batch", type=int, default=50, help="1バッチの件数(kabu の登録上限)")
 ap.add_argument("--workers", type=int, default=2,
                 help="並列数。⛔ 上げても速くならず429が増えるだけ(実測)")
@@ -86,7 +100,7 @@ ap.add_argument("--glob", type=str, default="preopen_board_*.csv",
                 help="--verify: 読むログのグロブ")
 args = ap.parse_args()
 
-_COLS = ["date", "ts", "hm", "symbol", "bid", "ask", "mid",
+_COLS = ["date", "ts", "hm", "symbol", "is_cand", "bid", "ask", "mid",
          "bid_sign", "ask_sign", "mkt_sell_qty", "mkt_buy_qty",
          "current_price", "prev_close", "gap_bp"]
 
@@ -147,7 +161,7 @@ def _verify() -> None:
         _g_act = (_o - _pc) / _pc * 1e4          # 実際のギャップ(bp)
         _by_hm.setdefault(str(r.get("hm") or "?"), []).append(
             (_g_pre, _g_act, str(r.get("bid_sign") or ""),
-             str(r.get("ask_sign") or "")))
+             str(r.get("ask_sign") or ""), str(r.get("is_cand") or "")))
     if not _by_hm:
         sys.exit(f"[error] 5分足と突合できた行がありません(未突合 {_miss:,}行)。"
                  f"5分足が最新まで揃っているか確認してください")
@@ -158,24 +172,42 @@ def _verify() -> None:
     print(f"{'='*84}")
     print(f"{'時刻':>6}{'件数':>8}{'誤差中央':>10}{'90%点':>9}{'95%点':>9}"
           f"{'相関':>7}{'反転':>8}{'誤建て':>8}{'取逃し':>8}")
-    for _hm in sorted(_by_hm):
-        _v = _by_hm[_hm]
-        _err = sorted(abs(a - b) for a, b, _, _ in _v)
+    def _line(_lbl: str, _v: list) -> None:
         _n = len(_v)
+        if _n == 0:
+            return
+        _err = sorted(abs(a - b) for a, b, *_ in _v)
 
         def _q(p):
             return _err[min(_n - 1, int(_n * p))]
-        _mp = sum(a for a, _, _, _ in _v) / _n
-        _ma = sum(b for _, b, _, _ in _v) / _n
-        _sp = math.sqrt(sum((a - _mp) ** 2 for a, _, _, _ in _v) / max(1, _n - 1))
-        _sa = math.sqrt(sum((b - _ma) ** 2 for _, b, _, _ in _v) / max(1, _n - 1))
-        _cov = sum((a - _mp) * (b - _ma) for a, b, _, _ in _v) / max(1, _n - 1)
+        _mp = sum(a for a, *_ in _v) / _n
+        _ma = sum(b for _, b, *_ in _v) / _n
+        _sp = math.sqrt(sum((a - _mp) ** 2 for a, *_ in _v) / max(1, _n - 1))
+        _sa = math.sqrt(sum((b - _ma) ** 2 for _, b, *_ in _v) / max(1, _n - 1))
+        _cov = sum((a - _mp) * (b - _ma) for a, b, *_ in _v) / max(1, _n - 1)
         _r = _cov / (_sp * _sa) if _sp > 0 and _sa > 0 else float("nan")
-        _fp = sum(1 for a, b, _, _ in _v if a >= _th and b < _th)   # 誤って建てる
-        _fn = sum(1 for a, b, _, _ in _v if a < _th and b >= _th)   # 取り逃す
-        print(f"{_hm:>6}{_n:>8,}{_q(0.5):>9.1f}bp{_q(0.9):>8.1f}bp"
+        _fp = sum(1 for a, b, *_ in _v if a >= _th and b < _th)   # 誤って建てる
+        _fn = sum(1 for a, b, *_ in _v if a < _th and b >= _th)   # 取り逃す
+        print(f"{_lbl:>6}{_n:>8,}{_q(0.5):>9.1f}bp{_q(0.9):>8.1f}bp"
               f"{_q(0.95):>8.1f}bp{_r:>7.3f}"
               f"{(_fp + _fn) / _n * 100:>7.1f}%{_fp:>8,}{_fn:>8,}")
+
+    for _hm in sorted(_by_hm):
+        _line(_hm, _by_hm[_hm])
+
+    # ★ 母集団を広げているので、**発注候補だけ**の反転率も必ず並べる。
+    #   候補はシグナルが出た銘柄なので気配の付き方が違いうる。ここが大きく
+    #   食い違うなら、全銘柄で測った反転率を判断に使ってはいけない。
+    _all = [t for _v in _by_hm.values() for t in _v]
+    _cand = [t for t in _all if str(t[4] if len(t) > 4 else "") == "1"]
+    print(f"  {'-' * 76}")
+    _line("全体", _all)
+    if _cand:
+        _line("候補", _cand)
+        _line("候補外",
+              [t for t in _all if str(t[4] if len(t) > 4 else "") != "1"])
+    else:
+        print("  ⚠ is_cand=1 の行がありません(古いログ / 候補ファイルが無かった)")
 
     print(f"\n  ※ 未突合 {_miss:,}行(5分足が無い / 気配が取れていない)")
     print(f"""
@@ -196,9 +228,14 @@ def _verify() -> None:
 
 ■ ⛔ 判定に足りるサンプル数
 
-  反転率を ±2ポイントで測るには 500〜1,000件は要る。50件/日なら **1ヶ月**。
+  反転率を ±2ポイントで測るには 500〜1,000件は要る。母集団を広く取れば
+  1日で数百件貯まるので **数営業日**で届く(発注候補50件だけなら1ヶ月)。
   ⛔ 貯まる前に何度も覗くと、実質的に全期間 in-sample になる。
-     **「N日貯まるまで見ない」と先に決めてから始めること**(18.35)。
+     **「N件貯まるまで見ない」と先に決めてから始めること**(18.35)。
+
+  ⚠ 母集団を広げたぶん、**発注候補と同じ性質かは別に確かめる**こと。
+    候補はシグナルが出た銘柄なので気配の付き方が違いうる。判定に使う前に
+    `--symbols-file lss_trades_K.csv` で候補だけに絞った反転率も見ること。
 """)
 
 
@@ -210,32 +247,23 @@ if args.verify:
 # ══════════════════════════════════════════════════════════════════════
 #  収集モード (既定)
 # ══════════════════════════════════════════════════════════════════════
-def _load_symbols() -> list[str]:
-    if args.symbols:
-        return [s.strip().upper().removesuffix(".T").split(".")[0]
-                for s in args.symbols.split(",") if s.strip()]
-    _p = args.symbols_file or "holdout_selected_symbols.py"
+def _codes_in(_p: str) -> list[str]:
+    """1ファイルから銘柄コードを拾う。出現順を保ったまま重複排除する。"""
     if not Path(_p).exists():
-        sys.exit(f"[error] {_p} がありません。--symbols で明示指定してください")
+        return []
     import re
-    _txt = Path(_p).read_text(encoding="utf-8")
+    _txt = Path(_p).read_text(encoding="utf-8", errors="ignore")
     # .py  … ('7203.T', '銘柄名', 'MACDTF') / ("7203.T", ...) の両方
-    # .csv … symbol 列(lss_trades_K.csv など)。出現順=発注順を保つ
     _codes = re.findall(r"""['"](\d{4}[A-Z0-9]?)\.T['"]""", _txt)
+    # .csv … symbol 列(lss_trades_K.csv など)。出現順=発注順を保つ
     if not _codes and str(_p).lower().endswith(".csv"):
-        for r in _csv.DictReader(open(_p, encoding="utf-8-sig")):
-            _s = str(r.get("symbol") or "").upper().removesuffix(".T")
-            if _s:
-                _codes.append(_s.split(".")[0])
-    if not _codes:
-        sys.exit(
-            f"[error] {_p} から銘柄コードを拾えません(0件)。\n"
-            f"  ⚠ holdout_selected_symbols.py が **空** になっていることが"
-            f"あります(研究実行が上書きする / §18.38)。\n"
-            f"     `.\\daily` を1回流して作り直すか、\n"
-            f"     --symbols-file lss_trades_K.csv / --symbols 7203,6758 "
-            f"で指定してください")
-    # 出現順を保ったまま重複排除(発注順=流動性降順を尊重する)
+        try:
+            for r in _csv.DictReader(open(_p, encoding="utf-8-sig")):
+                _s = str(r.get("symbol") or "").upper().removesuffix(".T")
+                if _s:
+                    _codes.append(_s.split(".")[0])
+        except Exception:
+            return []
     _seen: set = set()
     _out = []
     for c in _codes:
@@ -245,12 +273,75 @@ def _load_symbols() -> list[str]:
     return _out
 
 
+# ★ 既定の母集団は **広いほうから**採る (2026-08-16 ユーザー提案)。
+#   気配→始値の関係は「発注候補であること」を必要としない。母集団を広げれば
+#   1日で数百件取れるので、判定に要る 500〜1,000件が **1ヶ月→数日**に縮む。
+#   lss_proposal_full.py = 選定なしの全ペア(価格1,000〜6,000・空売り可で
+#   フィルタ済み / §18.38 #8)。判定にそのまま使える唯一の広い母集団。
+_SRC_CHAIN = [
+    ("lss_proposal_full.py", "選定なしの全候補"),
+    ("lss_proposal_cumul.py", "累積マージ(選定あり)"),
+    ("holdout_selected_symbols.py", "レポートの選定銘柄"),
+    ("symbols_listed_prime.py", "プライム全銘柄"),
+]
+
+
+# ★ 今日の発注候補は **先に**読む。時間切れで一巡できなくても、いちばん
+#   知りたい銘柄は必ず取れる。加えて `is_cand` 列に印を付けておくことで、
+#   後から「候補だけの反転率」と「全銘柄の反転率」を切り分けられる
+#   (候補はシグナルが出た銘柄なので気配の付き方が違う可能性がある)。
+_CAND: set = set()
+
+
+def _today_candidates() -> list[str]:
+    for _p in (f"k_signals_{_dt.date.today():%Y%m%d}.csv", "lss_trades_K.csv"):
+        _c = _codes_in(_p)
+        if _c:
+            print(f"[preopen] 今日の候補: {_p} {len(_c):,}銘柄 → 先頭に置きます")
+            return _c
+    return []
+
+
+def _load_symbols() -> list[str]:
+    if args.symbols:
+        return [s.strip().upper().removesuffix(".T").split(".")[0]
+                for s in args.symbols.split(",") if s.strip()]
+    if args.symbols_file:
+        # ⛔ 明示指定で読めなかったら中止する。黙って別ソースに落ちると
+        #    「別の母集団で測っていた」事故になる(§18.38 #8 で実際に踏んだ)。
+        _c = _codes_in(args.symbols_file)
+        if not _c:
+            sys.exit(f"[error] {args.symbols_file} から銘柄コードを拾えません(0件)")
+        print(f"[preopen] 母集団: {args.symbols_file} (明示指定) {len(_c):,}銘柄")
+        return _c
+    _pri = _today_candidates()
+    _CAND.update(_pri)
+    for _p, _lbl in _SRC_CHAIN:
+        _c = _codes_in(_p)
+        if _c:
+            print(f"[preopen] 母集団: {_p} — {_lbl} {len(_c):,}銘柄")
+            _seen = set(_pri)
+            return _pri + [x for x in _c if x not in _seen]
+    if _pri:
+        print("[preopen] ⚠ 広い母集団が見つからないので候補だけで走ります")
+        return _pri
+    sys.exit(
+        "[error] 銘柄ソースが1つも見つかりません。\n"
+        f"  探した先: {', '.join(p for p, _ in _SRC_CHAIN)}\n"
+        "  ⚠ holdout_selected_symbols.py は研究実行が **空** に上書きすること"
+        "があります(§18.38)。\n"
+        "     `.\\daily` を1回流して作り直すか、--symbols 7203,6758 で"
+        "明示指定してください")
+
+
 try:
     from kabu_api import KabuClient
 except Exception as _e:
     sys.exit(f"[error] kabu_api を読めません: {_e}")
 
-_syms = _load_symbols()[:max(1, args.max_symbols)]
+_syms = _load_symbols()
+if args.max_symbols > 0:
+    _syms = _syms[:args.max_symbols]
 _out_path = args.out or f"preopen_board_{_dt.date.today():%Y%m%d}.csv"
 _new_file = not Path(_out_path).exists()
 
@@ -263,55 +354,58 @@ cli = KabuClient(prod=args.prod, dry_run=True)
 cli.connect()
 
 
-def _snap() -> int:
-    """1周ぶん。全バッチを読んで CSV に追記し、書いた行数を返す。"""
+def _snap_batch(_b: list[str]) -> list[dict]:
+    """1バッチ(=登録上限50件)ぶん読んで行を返す。"""
     from concurrent.futures import ThreadPoolExecutor
     _now = _dt.datetime.now()
     _rows: list[dict] = []
-    for _i in range(0, len(_syms), args.batch):
-        _b = _syms[_i:_i + args.batch]
-        try:
-            cli.unregister_all()
-        except Exception:
-            pass
-        _res = cli.register_many(_b)
-        _ok = len((_res or {}).get("RegistList") or [])
-        if _ok < len(_b):
-            print(f"  ⚠ 登録 {_ok}/{len(_b)}件 しか受理されませんでした "
-                  f"(kabu の上限は50件)", flush=True)
+    try:
+        cli.unregister_all()
+    except Exception:
+        pass
+    _res = cli.register_many(_b)
+    _ok = len((_res or {}).get("RegistList") or [])
+    if _ok < len(_b):
+        print(f"  ⚠ 登録 {_ok}/{len(_b)}件 しか受理されませんでした "
+              f"(kabu の上限は50件)", flush=True)
 
-        def _one(s):
-            try:
-                return s, cli.get_board(s)
-            except Exception:
-                return s, {}
-        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-            for _s, _bd in ex.map(_one, _b):
-                if not _bd:
-                    continue
-                _bid = float(_bd.get("BidPrice") or 0)
-                _ask = float(_bd.get("AskPrice") or 0)
-                # 気配の代表値。片側しか無ければあるほうを使う
-                # (特別気配は片側だけ出ることがある)。
-                _mid = ((_bid + _ask) / 2 if _bid > 0 and _ask > 0
-                        else (_bid or _ask or 0))
-                _pc = float(_bd.get("PreviousClose") or 0)
-                _rows.append({
-                    "date": f"{_now:%Y-%m-%d}", "ts": f"{_now:%H:%M:%S}",
-                    "hm": f"{_now:%H:%M}", "symbol": str(_s),
-                    "bid": _bid, "ask": _ask, "mid": _mid,
-                    # ★ 特別気配 / 連続約定気配のフラグ。実現ギャップには
-                    #   畳み込まれて消える情報で、狙うならここ(18.35)。
-                    "bid_sign": _bd.get("BidSign") or "",
-                    "ask_sign": _bd.get("AskSign") or "",
-                    # ★ 板寄せ前の需給不均衡。同上。
-                    "mkt_sell_qty": _bd.get("MarketOrderSellQty") or 0,
-                    "mkt_buy_qty": _bd.get("MarketOrderBuyQty") or 0,
-                    "current_price": _bd.get("CurrentPrice") or 0,
-                    "prev_close": _pc,
-                    "gap_bp": (round((_mid - _pc) / _pc * 1e4, 1)
-                               if _mid > 0 and _pc > 0 else ""),
-                })
+    def _one(s):
+        try:
+            return s, cli.get_board(s)
+        except Exception:
+            return s, {}
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        for _s, _bd in ex.map(_one, _b):
+            if not _bd:
+                continue
+            _bid = float(_bd.get("BidPrice") or 0)
+            _ask = float(_bd.get("AskPrice") or 0)
+            # 気配の代表値。片側しか無ければあるほうを使う
+            # (特別気配は片側だけ出ることがある)。
+            _mid = ((_bid + _ask) / 2 if _bid > 0 and _ask > 0
+                    else (_bid or _ask or 0))
+            _pc = float(_bd.get("PreviousClose") or 0)
+            _rows.append({
+                "date": f"{_now:%Y-%m-%d}", "ts": f"{_now:%H:%M:%S}",
+                "hm": f"{_now:%H:%M}", "symbol": str(_s),
+                "is_cand": 1 if str(_s) in _CAND else 0,
+                "bid": _bid, "ask": _ask, "mid": _mid,
+                # ★ 特別気配 / 連続約定気配のフラグ。実現ギャップには
+                #   畳み込まれて消える情報で、狙うならここ(18.35)。
+                "bid_sign": _bd.get("BidSign") or "",
+                "ask_sign": _bd.get("AskSign") or "",
+                # ★ 板寄せ前の需給不均衡。同上。
+                "mkt_sell_qty": _bd.get("MarketOrderSellQty") or 0,
+                "mkt_buy_qty": _bd.get("MarketOrderBuyQty") or 0,
+                "current_price": _bd.get("CurrentPrice") or 0,
+                "prev_close": _pc,
+                "gap_bp": (round((_mid - _pc) / _pc * 1e4, 1)
+                           if _mid > 0 and _pc > 0 else ""),
+            })
+    return _rows
+
+
+def _write(_rows: list[dict]) -> int:
     if not _rows:
         return 0
     global _new_file
@@ -330,28 +424,55 @@ except Exception:
     _hh, _mm = 8, 59
 _deadline = _dt.datetime.now().replace(hour=_hh, minute=_mm, second=0,
                                        microsecond=0)
-_n_snap = 0
+
+# ⛔ 締切の判定は **バッチごと**に行う。母集団が大きいと1周が数十分かかるので、
+#   周と周のあいだでしか見ないと 09:00 を大きく越え、K の測定と発注枠を
+#   食いつぶす(トークンは1つ / §18.5.1)。
+# ★ カーソルは周をまたいで持ち越す。母集団が1周ぶん読み切れなくても、
+#   次の周が続きから読むので取りこぼしが偏らない。
+_cursor = 0
+_lap = 0
+_tot = 0
+_nb = -(-len(_syms) // max(1, args.batch))
 while True:
     _t0 = time.time()
-    _n = _snap()
-    _n_snap += 1
-    print(f"  [{_dt.datetime.now():%H:%M:%S}] {_n:,}行 追記 "
-          f"({time.time() - _t0:.1f}秒 / 通算{_n_snap}周)", flush=True)
-    if args.once or _dt.datetime.now() >= _deadline:
+    _b = _syms[_cursor:_cursor + args.batch]
+    if not _b:
         break
-    _sleep = max(0.0, args.every - (time.time() - _t0))
-    if _dt.datetime.now() + _dt.timedelta(seconds=_sleep) > _deadline:
-        _sleep = max(0.0, (_deadline - _dt.datetime.now()).total_seconds())
-        if _sleep <= 0:
-            break
-    time.sleep(_sleep)
+    _i0 = _cursor
+    _tot += _write(_snap_batch(_b))
+    _cursor += args.batch
+    _wrapped = _cursor >= len(_syms)
+    if _wrapped:
+        _cursor = 0
+        _lap += 1
+    print(f"  [{_dt.datetime.now():%H:%M:%S}] "
+          f"{_i0 + 1:,}〜{min(_i0 + args.batch, len(_syms)):,}"
+          f"/{len(_syms):,}銘柄 ({_i0 // max(1, args.batch) + 1}/{_nb}バッチ) "
+          f"{time.time() - _t0:.1f}秒 / 通算{_tot:,}行"
+          + (f" ★{_lap}周目 完了" if _wrapped else ""), flush=True)
+    if args.once and _wrapped:
+        break
+    if _dt.datetime.now() >= _deadline:
+        print(f"  [{_dt.datetime.now():%H:%M:%S}] 締切 {args.until} に到達。"
+              f"ここで打ち切ります", flush=True)
+        break
+    if _wrapped:
+        # 一巡したので --every まで待つ。読み切れていない間は待たずに続ける
+        # (時間はすべて「まだ読んでいない銘柄」に使う)。
+        _sleep = max(0.0, args.every - (time.time() - _t0))
+        _sleep = min(_sleep,
+                     max(0.0, (_deadline - _dt.datetime.now()).total_seconds()))
+        if _sleep > 0:
+            time.sleep(_sleep)
 
 try:
     cli.unregister_all()
     print("[preopen] 登録を全解除しました(後続の発注に枠を残す)")
 except Exception:
     pass
-print(f"[preopen] 完了 → {_out_path}\n"
+print(f"[preopen] 完了 → {_out_path} (今朝 {_tot:,}行 / {_lap}周)\n"
       f"  貯まったら: python log_preopen_board.py --verify\n"
-      f"  ⛔ 反転率を ±2ポイントで測るには 500〜1,000件(50件/日なら約1ヶ月)。\n"
-      f"     **貯まる前に何度も覗かないこと**(実質 in-sample になる / 18.35)")
+      f"  ★ 反転率を ±2ポイントで測るには 500〜1,000件。"
+      f"今朝のペースなら約{max(1, -(-1000 // max(1, _tot)))}営業日で届きます。\n"
+      f"  ⛔ **届く前に何度も覗かないこと**(実質 in-sample になる / 18.35)")
