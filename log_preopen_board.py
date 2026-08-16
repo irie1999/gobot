@@ -46,6 +46,23 @@ K が気配に求めるのは値そのものではなく **「+50bp 以上か」
   ⛔ ただし **締切(--until)を越えない**。バッチごとに時刻を見て打ち切る。
      カーソルは周をまたいで持ち越すので、読み切れなくても取りこぼしが偏らない。
 
+■ ★★ 気配は **寄りに近いほど当たる**。だから最後の周を候補に充てる
+
+  母集団を広げると1周に数十分かかるので、先頭の銘柄は 08:30 の古い気配、
+  末尾は 08:55 の新しい気配、というムラが出る。これを是正するため:
+
+  ・`--final-from`(既定 **08:50**)以降は **直前スイープ**。間隔を空けずに
+    回し続け、カーソルを **先頭(=今日の候補)に戻す**。いちばん知りたい銘柄が
+    いちばん新しい気配で上書きされる。
+  ・`to_open_s`(寄りまでの残り秒)を全行に記録する。精度は「何時に読んだか」
+    ではなく **「寄りまで何秒か」の関数**として見る。
+  ・`--verify` は ①時刻別 ②**残り時間別**(本命) ③**各銘柄の最新気配だけ**
+    (= 実運用の精度) の3つを出す。
+
+  ★ 決めるのは1点だけ: **「反転率が許せる範囲に収まる いちばん早い時刻」**。
+    そこから 09:00 までの秒数 × 6.5件/秒 = カバーできる銘柄数。
+    精度とカバー範囲は直接トレードオフになっている。
+
 ■ 使い方
 
   # 毎朝 08:45〜08:59 に走らせる(既定は 08:59 まで2分おきにループ)
@@ -90,6 +107,11 @@ ap.add_argument("--workers", type=int, default=2,
                 help="並列数。⛔ 上げても速くならず429が増えるだけ(実測)")
 ap.add_argument("--every", type=int, default=120, help="スナップショットの間隔(秒)")
 ap.add_argument("--until", type=str, default="08:59", help="この時刻まで繰り返す")
+ap.add_argument("--final-from", type=str, default="08:50",
+                help="★ この時刻以降は『直前スイープ』。間隔を空けずに回し続け、"
+                     "カーソルを先頭(=今日の候補)に戻す。空文字で無効")
+ap.add_argument("--open-at", type=str, default="09:00",
+                help="板寄せの時刻。to_open_s(寄りまでの秒)の基準")
 ap.add_argument("--once", action="store_true", help="1回だけ取って終了")
 ap.add_argument("--out", type=str, default="", help="出力CSV(既定 preopen_board_<日付>.csv)")
 ap.add_argument("--verify", action="store_true",
@@ -100,7 +122,8 @@ ap.add_argument("--glob", type=str, default="preopen_board_*.csv",
                 help="--verify: 読むログのグロブ")
 args = ap.parse_args()
 
-_COLS = ["date", "ts", "hm", "symbol", "is_cand", "bid", "ask", "mid",
+_COLS = ["date", "ts", "hm", "to_open_s", "symbol", "is_cand",
+         "bid", "ask", "mid",
          "bid_sign", "ask_sign", "mkt_sell_qty", "mkt_buy_qty",
          "current_price", "prev_close", "gap_bp"]
 
@@ -145,6 +168,7 @@ def _verify() -> None:
 
     # ── 時刻(hm)ごとに集計 ──────────────────────────────────────────
     _by_hm: dict = {}
+    _recs: list = []          # (寄りまでの残り秒, (date, symbol), タプル)
     _miss = 0
     for r in _rows:
         _k = (str(r["date"]), str(r["symbol"]))
@@ -159,9 +183,22 @@ def _verify() -> None:
             continue
         _g_pre = (_mid - _pc) / _pc * 1e4        # 気配から見たギャップ(bp)
         _g_act = (_o - _pc) / _pc * 1e4          # 実際のギャップ(bp)
-        _by_hm.setdefault(str(r.get("hm") or "?"), []).append(
-            (_g_pre, _g_act, str(r.get("bid_sign") or ""),
-             str(r.get("ask_sign") or ""), str(r.get("is_cand") or "")))
+        _cd = str(r.get("is_cand") or "")
+        _t = (_g_pre, _g_act, str(r.get("bid_sign") or ""),
+              str(r.get("ask_sign") or ""), _cd)
+        _by_hm.setdefault(str(r.get("hm") or "?"), []).append(_t)
+        # ★ 寄りまでの残り秒。古いログには無いので ts から復元する。
+        try:
+            _ts = int(r.get("to_open_s") or 0)
+        except Exception:
+            _ts = 0
+        if not _ts:
+            try:
+                _h, _m, _s = (int(x) for x in str(r.get("ts") or "").split(":"))
+                _ts = 9 * 3600 - (_h * 3600 + _m * 60 + _s)
+            except Exception:
+                _ts = 0
+        _recs.append((_ts, _k, _t))
     if not _by_hm:
         sys.exit(f"[error] 5分足と突合できた行がありません(未突合 {_miss:,}行)。"
                  f"5分足が最新まで揃っているか確認してください")
@@ -195,6 +232,47 @@ def _verify() -> None:
     for _hm in sorted(_by_hm):
         _line(_hm, _by_hm[_hm])
 
+    # ★★ 寄りまでの残り時間で切る。**気配は寄りに近いほど当たる**ので、
+    #    精度は「何時に読んだか」ではなく「寄りまで何秒か」の関数。
+    #    ここが『何分前まで遡れるか』= 何銘柄カバーできるかを決める。
+    _BK = [(0, 60, "〜1分前"), (60, 180, "1〜3分"), (180, 300, "3〜5分"),
+           (300, 600, "5〜10分"), (600, 1200, "10〜20分"),
+           (1200, 1800, "20〜30分"), (1800, 10 ** 9, "30分〜")]
+    _by_lead: dict = {}
+    for _ts, _k2, _t in _recs:
+        for _lo, _hi, _lbl in _BK:
+            if _lo <= _ts < _hi:
+                _by_lead.setdefault(_lbl, []).append(_t)
+                break
+    if _by_lead:
+        print(f"\n  ── 寄りまでの残り時間で切る（★ここが本命）"
+              f"{'─' * 32}")
+        for _lo, _hi, _lbl in _BK:
+            _line(_lbl, _by_lead.get(_lbl, []))
+
+    # ★ 実運用で使うのは「その銘柄について持っている**いちばん新しい**気配」。
+    #   平均ではなくこれが本番の精度になる。
+    _fresh: dict = {}
+    for _ts, _k2, _t in _recs:
+        _p = _fresh.get(_k2)
+        if _p is None or _ts < _p[0]:
+            _fresh[_k2] = (_ts, _t)
+    if _fresh:
+        _fv = [t for _, t in _fresh.values()]
+        _lead = sorted(ts for ts, _ in _fresh.values())
+        _med = _lead[len(_lead) // 2]
+        print(f"\n  ── 各銘柄の**最新**の気配だけ（= 実運用の精度）"
+              f"{'─' * 30}")
+        _line("最新", _fv)
+        _fc = [t for _, t in _fresh.values()
+               if str(t[4] if len(t) > 4 else "") == "1"]
+        if _fc:
+            _line("├候補", _fc)
+            _line("└候補外", [t for _, t in _fresh.values()
+                              if str(t[4] if len(t) > 4 else "") != "1"])
+        print(f"    ※ 最新気配の『寄りまでの残り』中央値 {_med // 60}分{_med % 60}秒。"
+              f"これが短いほど当たる")
+
     # ★ 母集団を広げているので、**発注候補だけ**の反転率も必ず並べる。
     #   候補はシグナルが出た銘柄なので気配の付き方が違いうる。ここが大きく
     #   食い違うなら、全銘柄で測った反転率を判断に使ってはいけない。
@@ -223,8 +301,17 @@ def _verify() -> None:
   ⛔ 反転が10%を超えるなら気配では判定できない。09:00 の始値方式を維持し、
     候補は前夜に流動性上位50件へ絞るしかない。
 
-  ⚠ 早い時刻でも精度が足りるなら、その分だけ多くのバッチを回せる。
-    時刻ごとの行を見て **「何時まで遡れるか」** を決めること。
+  ★★ **精度とカバー範囲は直接トレードオフ**。寄りに近いほど当たるが、
+    近い時間帯ほど読める銘柄は少ない(6.5件/秒)。決めるのはこの1点:
+
+        「反転率が許せる範囲に収まる **いちばん早い時刻**」
+
+    そこから 09:00 までの秒数 × 6.5件/秒 = **カバーできる銘柄数**。
+    例) 08:55 まで遡れるなら 300秒 × 6.5 ≒ 1,900銘柄 → 上限50件の制約は消える
+        08:59 しか使えないなら 60秒 × 6.5 ≒ 390銘柄 → それでも50件よりは広い
+
+  ⚠ 「各銘柄の最新の気配だけ」の行が **本番の精度**。時刻ごとの行は
+    「何分前まで遡れるか」を決めるためのもので、そのまま本番値ではない。
 
 ■ ⛔ 判定に足りるサンプル数
 
@@ -358,6 +445,9 @@ def _snap_batch(_b: list[str]) -> list[dict]:
     """1バッチ(=登録上限50件)ぶん読んで行を返す。"""
     from concurrent.futures import ThreadPoolExecutor
     _now = _dt.datetime.now()
+    # ★ 寄りまでの残り秒。**気配は寄りに近いほど当たる**ので、精度は
+    #   「何時に読んだか」ではなく「寄りまで何秒か」の関数として見る。
+    _t_open = int((_OPEN_AT - _now).total_seconds())
     _rows: list[dict] = []
     try:
         cli.unregister_all()
@@ -387,7 +477,8 @@ def _snap_batch(_b: list[str]) -> list[dict]:
             _pc = float(_bd.get("PreviousClose") or 0)
             _rows.append({
                 "date": f"{_now:%Y-%m-%d}", "ts": f"{_now:%H:%M:%S}",
-                "hm": f"{_now:%H:%M}", "symbol": str(_s),
+                "hm": f"{_now:%H:%M}", "to_open_s": _t_open,
+                "symbol": str(_s),
                 "is_cand": 1 if str(_s) in _CAND else 0,
                 "bid": _bid, "ask": _ask, "mid": _mid,
                 # ★ 特別気配 / 連続約定気配のフラグ。実現ギャップには
@@ -418,12 +509,24 @@ def _write(_rows: list[dict]) -> int:
     return len(_rows)
 
 
-try:
-    _hh, _mm = (int(x) for x in str(args.until).split(":"))
-except Exception:
-    _hh, _mm = 8, 59
-_deadline = _dt.datetime.now().replace(hour=_hh, minute=_mm, second=0,
-                                       microsecond=0)
+def _at(_s: str, _dh: int, _dm: int) -> _dt.datetime:
+    try:
+        _h, _m = (int(x) for x in str(_s).split(":"))
+    except Exception:
+        _h, _m = _dh, _dm
+    return _dt.datetime.now().replace(hour=_h, minute=_m, second=0,
+                                      microsecond=0)
+
+
+_deadline = _at(args.until, 8, 59)
+_OPEN_AT = _at(args.open_at, 9, 0)
+# ★ 直前スイープ。ここから先は間隔を空けずに回し続け、カーソルを先頭
+#   (=今日の候補)に戻す。気配は寄りに近いほど当たるので、**最後の周を
+#   いちばん知りたい銘柄に充てる**。
+_FINAL = _at(args.final_from, 8, 50) if str(args.final_from).strip() else None
+if _FINAL:
+    print(f"[preopen] 直前スイープ: {args.final_from} から間隔なしで回します"
+          f"(カーソルを先頭に戻す)")
 
 # ⛔ 締切の判定は **バッチごと**に行う。母集団が大きいと1周が数十分かかるので、
 #   周と周のあいだでしか見ないと 09:00 を大きく越え、K の測定と発注枠を
@@ -433,9 +536,16 @@ _deadline = _dt.datetime.now().replace(hour=_hh, minute=_mm, second=0,
 _cursor = 0
 _lap = 0
 _tot = 0
+_in_final = False
 _nb = -(-len(_syms) // max(1, args.batch))
 while True:
     _t0 = time.time()
+    if _FINAL and not _in_final and _dt.datetime.now() >= _FINAL:
+        # 直前スイープに入る。読みかけの周は捨てて先頭(=候補)から読み直す。
+        _in_final = True
+        _cursor = 0
+        print(f"  [{_dt.datetime.now():%H:%M:%S}] ★ 直前スイープ開始 — "
+              f"先頭に戻して寄りまで回し続けます", flush=True)
     _b = _syms[_cursor:_cursor + args.batch]
     if not _b:
         break
@@ -457,9 +567,10 @@ while True:
         print(f"  [{_dt.datetime.now():%H:%M:%S}] 締切 {args.until} に到達。"
               f"ここで打ち切ります", flush=True)
         break
-    if _wrapped:
+    if _wrapped and not _in_final:
         # 一巡したので --every まで待つ。読み切れていない間は待たずに続ける
         # (時間はすべて「まだ読んでいない銘柄」に使う)。
+        # ⛔ 直前スイープ中は待たない。**寄りに近い読みほど価値がある**。
         _sleep = max(0.0, args.every - (time.time() - _t0))
         _sleep = min(_sleep,
                      max(0.0, (_deadline - _dt.datetime.now()).total_seconds()))
