@@ -13,6 +13,11 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
 
 ■ 何を測るか (実行順)
 
+  0. シグナル収集   k_open_confirm --collect   ← **kabu を使わない。最初にやる**
+       WATCHLIST 全部ではなく **今日シグナルが出た銘柄** を集める
+       (実発注 lss_budget_cap と同じ _lss_signal_today を使う)。
+       yfinance のバックテストなので数分かかる。09:00 より前に終わらせる。
+
   1. バッチ回し     check_board_limits --rotate 100
        50件ずつ回して100銘柄読めるか。**2周目が速ければ kabu は購読を覚えている**
        = 寄り前に全バッチを空読みしておけば 09:00 は全部ウォームで回せる。
@@ -130,6 +135,7 @@ print(f"""
     → `.\\watch` も発注も不要。トークンの取り合いが起きないので測定に集中できます。
 
   手順:
+    0. シグナル収集 kabu不要      {'(スキップ)' if args.no_kpaper else ''}
     1. バッチ回し   --rotate {args.rotate}      {'(スキップ)' if args.skip_rotate else ''}
     2. 気配ログ     〜{args.preopen_until}          {'(スキップ)' if args.skip_preopen else ''}
     3. ウォームUP   {args.warmup_at}
@@ -138,6 +144,18 @@ print(f"""
 """, flush=True)
 
 _res: list[tuple] = []
+
+# ── 0. 今日のシグナル収集 (kabu を使わない / 一番先にやる) ──────────────────
+# ⛔⛔ 候補は **WATCHLIST 全部ではなく「今日シグナルが出た銘柄」**。
+#    yfinance のバックテストを回すので数分かかるが、kabu を一切触らないので
+#    他の測定と競合しない。**09:00より前に終わらせる必要がある**ので最初に置く。
+if not args.no_kpaper:
+    _cmd0 = _PY + ["k_open_confirm.py", "--collect"]
+    if args.symbols_file:
+        _cmd0 += ["--symbols-file", args.symbols_file]
+    _res.append(("0. シグナル収集", _run(
+        "0. 今日のシグナル収集 (k_signals_<日付>.csv / kabu 不要・数分かかる)",
+        _cmd0)))
 
 # ── 1. バッチ回し (一番先。登録/解除を繰り返すので後続に429を残さない) ──────
 if not args.skip_rotate:

@@ -81,6 +81,14 @@ ap.add_argument("--poll-until", type=str, default="09:30",
 ap.add_argument("--every", type=int, default=10, help="--poll の間隔(秒)")
 ap.add_argument("--now-polls", type=int, default=3,
                 help="--now --poll のとき何周だけ回すか(動作確認用)")
+ap.add_argument("--collect", action="store_true",
+                help="⛔ kabu を使わず、**今日のシグナルだけ**を収集して "
+                     "k_signals_<日付>.csv に書き出す(09:00より前に走らせる)")
+ap.add_argument("--signals-csv", type=str, default="",
+                help="--collect の出力/入力(既定 k_signals_<日付>.csv)")
+ap.add_argument("--sm", type=float, default=0.5, help="--collect の損切ATR")
+ap.add_argument("--tm", type=float, default=1.0, help="--collect の利確ATR")
+ap.add_argument("--days", type=int, default=365, help="--collect の窓")
 ap.add_argument("--g1", type=float, default=0.8,
                 help="第1グループ(09:00の板寄せ)に配る予算の割合。"
                      "以降のグループは残り予算。⛔端数配分はしない")
@@ -105,18 +113,81 @@ def _codes_from(path: str) -> list[str]:
     return [x for x in _c if not (x in _seen or _seen.add(x))]
 
 
+_sig_csv = args.signals_csv or f"k_signals_{_dt.date.today():%Y%m%d}.csv"
+
+# ══════════════════════════════════════════════════════════════════════
+#  --collect : 今日のシグナルだけを収集する (kabu を使わない)
+# ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ 候補は **WATCHLIST 全部ではなく「今日シグナルが出た銘柄」**。
+#    2026-08-16 に holdout_selected_symbols.py(3,054ペア)を候補にしていて
+#    誤りだった。実発注(lss_budget_cap.py)は _lss_signal_today で当日の
+#    シグナルを1件ずつ拾うので、**同じ関数を使って揃える**。
+#    ⚠ 収集は yfinance のバックテストなので数分かかる。**09:00より前に**
+#      走らせること(kabu は一切触らないので他の測定と競合しない)。
+if args.collect:
+    try:
+        from kabu_send_lss import _load_symbols, _lss_signal_today
+    except Exception as _e:
+        sys.exit(f"[error] kabu_send_lss を読めません: {_e}")
+    _pairs = _load_symbols(args.symbols_file or None)
+    print(f"[collect] {len(_pairs):,}ペアから今日のシグナルを収集します"
+          f"(実発注と同じ経路 / kabu は使いません)", flush=True)
+    _out: list = []
+    for _i, (_c, _n, _st) in enumerate(_pairs):
+        if _i and _i % 500 == 0:
+            print(f"  … {_i:,}/{len(_pairs):,} ({len(_out)}件)", flush=True)
+        try:
+            _sg = _lss_signal_today(_c, _n, _st, args.sm, args.tm, args.days)
+        except Exception:
+            _sg = None
+        if not _sg:
+            continue
+        _cd = str(_sg.get("symbol") or _c).upper() \
+            .removesuffix(".T").split(".")[0]
+        _out.append({"symbol": _cd, "name": _n, "strategy": _st,
+                     "order_price": _sg.get("order_price", 0),
+                     "prev_close": _sg.get("prev_close",
+                                           _sg.get("close_prev", 0)),
+                     "atr": _sg.get("atr", 0)})
+    # 重複銘柄は残す(複数戦略で出る)。登録は銘柄単位で重複排除する。
+    with open(_sig_csv, "w", newline="", encoding="utf-8-sig") as f:
+        w = _csv.DictWriter(f, fieldnames=["symbol", "name", "strategy",
+                                           "order_price", "prev_close", "atr"])
+        w.writeheader()
+        w.writerows(_out)
+    _uq = len({r["symbol"] for r in _out})
+    print(f"[collect] シグナル {len(_out):,}件 / **{_uq:,}銘柄** → {_sig_csv}\n"
+          f"  ⛔ 発注していません。09:00 の判定はこの銘柄だけを読みます。", flush=True)
+    if _uq > args.batch:
+        print(f"  ⚠ {_uq}銘柄は kabu の登録上限({args.batch})を超えます。"
+              f"流動性上位{args.batch}件に絞られます", flush=True)
+    sys.exit(0)
+
+# ── 候補の決定 ────────────────────────────────────────────────────────
 if args.symbols:
     _syms = [s.strip().upper().removesuffix(".T").split(".")[0]
              for s in args.symbols.split(",") if s.strip()]
+elif Path(_sig_csv).exists():
+    # ★ --collect が作った「今日のシグナル」を使う(これが正しい候補)
+    _syms = []
+    for r in _csv.DictReader(open(_sig_csv, encoding="utf-8-sig")):
+        _s0 = str(r.get("symbol") or "").upper().removesuffix(".T").split(".")[0]
+        if _s0 and _s0 not in _syms:
+            _syms.append(_s0)
+    print(f"[候補] {_sig_csv} から **今日のシグナル {len(_syms):,}銘柄**",
+          flush=True)
 else:
     _p = args.symbols_file or "holdout_selected_symbols.py"
     if not Path(_p).exists():
-        sys.exit(f"[error] {_p} がありません。--symbols で明示指定してください")
+        sys.exit(f"[error] {_sig_csv} も {_p} もありません。\n"
+                 f"  先に `python k_open_confirm.py --collect` を"
+                 f"09:00より前に走らせてください")
+    print(f"⛔ {_sig_csv} がありません。{_p}(WATCHLIST)で代用しますが、"
+          f"**これは今日のシグナルではありません**。\n"
+          f"   正しくは先に --collect を走らせること", flush=True)
     _syms = _codes_from(_p)
     if not _syms:
-        sys.exit(f"[error] {_p} から銘柄を拾えません(0件)。\n"
-                 f"  ⚠ 研究実行が上書きして **空** になっていることがあります。\n"
-                 f"     `.\\daily` を1回流して作り直してください")
+        sys.exit(f"[error] {_p} から銘柄を拾えません(0件)")
 _syms = _syms[:max(1, args.max_symbols)]
 
 # J の母集団(in_j 列用)
