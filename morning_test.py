@@ -65,6 +65,7 @@ import argparse
 import datetime as _dt
 import subprocess
 import sys
+from pathlib import Path
 import time
 
 ap = argparse.ArgumentParser(description="明日の朝の測定を順番に回す(照会のみ)")
@@ -79,6 +80,12 @@ ap.add_argument("--symbols-file", type=str, default="",
 #   09:00 に間に合わせるには 08:47 には空読みを始めていないといけない。
 #   旧設定(気配ログ 08:57まで → K は09:00過ぎに起動)だと K の登録が
 #   まるごとコールドで、09:00 の始値スナップショットが5分遅れていた。
+# ⛔ 早く起動しすぎたときのガード (2026-08-17)。気配ログは締切まで回し続ける
+#    ので、深夜に起動すると **何時間も無駄に kabu を叩く**(寄り前の気配が
+#    出るのは 08:00 前後から)。ここまで待ってから始める。
+#    ⚠ 既に過ぎていれば待たないので、08:30 起動でも影響しない。
+ap.add_argument("--preopen-from", type=str, default="08:00",
+                help="気配ログを始める時刻。これより早く起動したら待つ")
 ap.add_argument("--preopen-until", type=str, default="08:45")
 ap.add_argument("--k-warm-at", type=str, default="08:47",
                 help="K の空読み開始。候補6バッチ×コールド48秒 ≒ 5分を見込む")
@@ -96,6 +103,8 @@ ap.add_argument("--poll-until", type=str, default="09:30",
                 help="K記録のポーリング締切")
 ap.add_argument("--poll-every", type=int, default=10,
                 help="K記録のポーリング間隔(秒)")
+ap.add_argument("--force-collect", action="store_true",
+                help="k_signals_<日付>.csv が既にあっても作り直す")
 ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終了")
 args = ap.parse_args()
 
@@ -151,7 +160,7 @@ print(f"""
   手順:
     0. シグナル収集 kabu不要      {'(スキップ)' if args.no_kpaper else ''}
     1. バッチ回し   --rotate {args.rotate}      {'(スキップ)' if args.skip_rotate else ''}
-    2. 気配ログ     〜{args.preopen_until}          {'(スキップ)' if args.skip_preopen else ''}
+    2. 気配ログ     {args.preopen_from}〜{args.preopen_until}     {'(スキップ)' if args.skip_preopen else ''}
     3+4. 対照測定   {args.warmup_at}/{args.open_at}   {'' if (args.with_board_speed or args.no_kpaper) else '(スキップ: --with-board-speed で有効)'}
     5. K記録        {args.k_warm_at} 空読み → {args.open_at} 本番 → {args.poll_until} まで {'(スキップ)' if args.no_kpaper else ''}
 
@@ -166,7 +175,15 @@ _res: list[tuple] = []
 # ⛔⛔ 候補は **WATCHLIST 全部ではなく「今日シグナルが出た銘柄」**。
 #    yfinance のバックテストを回すので数分かかるが、kabu を一切触らないので
 #    他の測定と競合しない。**09:00より前に終わらせる必要がある**ので最初に置く。
-if not args.no_kpaper:
+# ★ 既に今日ぶんが出来ていれば飛ばす (2026-08-17)。--collect は yfinance で
+#   8,898ペアを回すので5〜10分かかる。朝の残り時間を食うので、手で先に
+#   走らせてあるなら再実行しない。作り直したいときは --force-collect。
+_sig_today = Path(f"k_signals_{_dt.date.today():%Y%m%d}.csv")
+if not args.no_kpaper and _sig_today.exists() and not args.force_collect:
+    print(f"\n[手順0] {_sig_today} が既にあるのでスキップします"
+          f"(作り直すなら --force-collect)", flush=True)
+    _res.append(("0. シグナル収集", True))
+elif not args.no_kpaper:
     _cmd0 = _PY + ["k_open_confirm.py", "--collect"]
     if args.symbols_file:
         _cmd0 += ["--symbols-file", args.symbols_file]
@@ -190,6 +207,9 @@ if not args.skip_preopen:
     # ⛔ 直前スイープ(--final-from)は締切より前でないと一度も走らない。
     #    log_preopen_board の既定は 08:50 だが、K のウォームアップを
     #    08:47 に始めるため締切を 08:45 に前倒ししている。締切の8分前に合わせる。
+    if not args.dry_run:
+        _wait_until(_hm(args.preopen_from),
+                    "寄り前の気配が出るのはこの頃から。早く回しても無駄打ちになる")
     _fin = (_hm(args.preopen_until) - _dt.timedelta(minutes=8)).strftime("%H:%M")
     _cmd = (_PY + ["log_preopen_board.py"] + _P
             + ["--until", args.preopen_until, "--every", "120",
