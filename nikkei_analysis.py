@@ -11251,7 +11251,7 @@ function switchTbd(id, tab) {{
         _EQ_CAP_N = int(os.environ.get("LSS_EQ_CAP_MAX_N", "0") or 0)
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
-                               _ymax=0.0, _nf=None):
+                               _ymax=0.0, _nf=None, _div_cand=False, _watch=0):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -11309,6 +11309,7 @@ function switchTbd(id, tab) {{
             _ords: list = []          # 実際に注文を出せた件数/日(前夜方式だけ)
             _ncand: list = []         # その日の候補数(同上)
             _noord = 0                # 発注枠が尽きて注文を出せなかった候補
+            _unseen = 0               # 登録上限で 09:00 に見られなかった合格
             _capped = 0               # 単元上限(株数)に当たった件数
             _ycap = 0                 # 金額上限で削った件数
             _dropped = 0              # 上位N絞りで建てなかった件数
@@ -11322,6 +11323,7 @@ function switchTbd(id, tab) {{
             # ── 候補数(=前夜に注文を置く件数)。指値方式のときだけ使う ──────
             _cand_n: dict = {}
             _cd: dict = {}
+            _allow: dict = {}     # 日 -> 09:00に見られる銘柄(登録上限で切った後)
             if _nf is not None:
                 for _t in list(_ts) + list(_nf or []):
                     _d0 = str(_t.get("entry_d_raw") or "")
@@ -11334,8 +11336,36 @@ function switchTbd(id, tab) {{
                             .removesuffix(".T").split(".")[0] for _t in _l0})
                     else:
                         _cand_n[_d0] = len(_l0)
+                # ⛔⛔ kabu の**銘柄登録は50件が上限**(2026-08-16 実測。51件以上は
+                #    400 でリクエストごと失敗し、部分受理されない)。09:00確認方式は
+                #    登録した銘柄しか /board を読めないので、**その日 見られるのは
+                #    50銘柄まで**。実測で 47% の日が超える(中央49 / 最大277)。
+                #    どれを見るかは **前夜に決める**ので、ギャップでは選べない
+                #    (09:00まで不明=先読み)。→ **流動性降順**(18.21 と同じ理屈)。
+                #    ⚠ バックテストとライブを必ず揃える(18.9)。
+                if _watch > 0:
+                    for _d0, _l0 in _cd.items():
+                        _bys: dict = {}
+                        for _t in _l0:
+                            _s0 = str(_t.get("symbol", "")).upper() \
+                                .removesuffix(".T").split(".")[0]
+                            _lq = float(_t.get("liquidity") or 0)
+                            if _s0 and _lq >= _bys.get(_s0, (-1.0,))[0]:
+                                _bys[_s0] = (_lq, _s0)
+                        _rk = sorted(_bys.values(), key=lambda x: (-x[0], x[1]))
+                        _allow[_d0] = {x[1] for x in _rk[:_watch]}
 
             for _d, _lst in _by.items():
+                # ★ 登録上限で見られなかった銘柄は建てられない(09:00に始値を
+                #   読めないので判定そのものができない)。
+                if _watch > 0 and _d in _allow:
+                    _n0 = len(_lst)
+                    _lst = [_t for _t in _lst
+                            if str(_t.get("symbol", "")).upper()
+                            .removesuffix(".T").split(".")[0] in _allow[_d]]
+                    _unseen += _n0 - len(_lst)
+                    if not _lst:
+                        continue
                 _cnts_raw.append(len(_lst))
                 # ★ 金額上限を **合格が少ない日だけ** に効かせる(2026-08-15)。
                 #   フラットに掛けると 4〜7件の日まで絞ってしまい、資金が寝て
@@ -11367,7 +11397,7 @@ function switchTbd(id, tab) {{
                 #    上位N絞りを併用する場合、前夜に置く注文は最大でも N 本
                 #    なので min(_top, 候補数) が置いた件数になる。
                 _den = len(_lst)
-                if _nf is not None:
+                if _div_cand:
                     _den = _cand_n.get(_d, len(_lst))
                     if _top > 0:
                         _den = min(_den, _top)
@@ -11394,7 +11424,7 @@ function switchTbd(id, tab) {{
                 #    **流動性降順**(H と同じ / 18.21)で埋める。
                 #    ここで作った lots を、約定した行にだけ適用する。
                 _lots_pre: dict = {}
-                if _nf is not None:
+                if _div_cand:
                     _all = list(_cd.get(_d) or _lst)
                     if _dedup:
                         _bd: dict = {}
@@ -11446,7 +11476,7 @@ function switchTbd(id, tab) {{
                     _sy1 = str(_t.get("symbol", "")).upper() \
                         .removesuffix(".T").split(".")[0]
                     _had = _symyen.get(_sy1, 0.0)
-                    if _nf is not None:
+                    if _div_cand:
                         # 前夜に決めた株数をそのまま使う。注文を出せなかった
                         # 候補は約定しても建たない(そもそも注文が無い)。
                         _lp = _lots_pre.get(id(_t), 0)
@@ -11482,7 +11512,7 @@ function switchTbd(id, tab) {{
                 #   入らなくなったら終わり(予算は絶対に超えない)。
                 # ⛔ 前夜に注文を置く方式では「余りを配り切る」ができない
                 #    (板寄せが終わってからでは株数を足せない)。
-                if _fill and _day and _nf is None:
+                if _fill and _day and not _div_cand:
                     _order = sorted(range(len(_day)),
                                     key=lambda i: -_eq_gap_of(_day[i][0]))
                     _rem = _budget - _used
@@ -11546,7 +11576,9 @@ function switchTbd(id, tab) {{
                 #   約定数との差がそのまま『使えない資金』になる。
                 #   fill_pct が低いほど資金が遊ぶ = 集中できない。
                 "den_med": _q(sorted(_dens), 0.5),
-                "den_is_cand": (_nf is not None),
+                "den_is_cand": bool(_div_cand),
+                "unseen": _unseen,
+                "watch": int(_watch),
                 "fill_pct": (sum(_cnts) / max(1, sum(_dens)) * 100.0),
                 # 前夜方式だけ: 候補のうち実際に注文を出せた割合。
                 # 発注枠(=予算)が尽きて出せなかったぶんは機会そのものが無い。
@@ -11594,6 +11626,12 @@ function switchTbd(id, tab) {{
         # 不約定行(= その日 注文は置いたが約定しなかった候補)。指値方式の
         # 分母に要る。⛔ この時点で既に埋まっていること(eh_trades が作る)。
         _EH_NF_SRC = (_EH_TRADES or {}).get("約定せず") or {}
+        # ⛔⛔ kabu の銘柄登録上限。09:00確認方式は登録した銘柄しか /board を
+        #    読めないので、**その日 見られるのはこの件数まで**。
+        #    実測(2026-08-16): 上限50件 / 51件以上は 400 でリクエストごと失敗 /
+        #    候補は中央49件・最大277件で **47% の日が超える**。
+        #    0 で無効化(上限が無い世界を測りたいとき)。
+        _WATCH_CAP = int(os.environ.get("LSS_WATCH_CAP", "50") or 0)
         _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
@@ -11660,7 +11698,9 @@ function switchTbd(id, tab) {{
                 with _ptimer("資金均等の変種生成"):
                     _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
                         _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym,
-                        (_EH_NF_SRC.get(_k) or []) if _eqcd else None)
+                        # 候補ビューは **常に**渡す(登録上限の適用に要る)。
+                        # 分母に使うかどうかは _div_cand で別に決める。
+                        _EH_NF_SRC.get(_k) or [], _eqcd, _WATCH_CAP)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -15463,6 +15503,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                          if _st.get("no_order") else "")
                       if _st.get("den_is_cand")
                       else f'約定数<br>fill {_st.get("fill_pct", 100):.0f}%')
+                   # ★ 登録上限で 09:00 に見られなかった合格(=建てられない)
+                   + (f'<br><span style="color:#f87171">登録上限'
+                      f'{_st.get("watch", 0)}件で見られず '
+                      f'{_st.get("unseen", 0):,}件</span>'
+                      if _st.get("unseen") else "")
                    + '</span></td>')
                 + f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                 f'white-space:nowrap">{_st["per_day_min"]:.0f}'
@@ -15668,6 +15713,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'約定数で割るのは<b>先読み</b>です。比較用に'
                 f'<code>…約定数割</code> の行を1本だけ出しているので、'
                 f'<b>その差が先読みの大きさ</b>です。<br>'
+                f'⛔⛔ <b>kabu の銘柄登録は50件が上限</b>です（2026-08-16 実測。'
+                f'51件以上は <b>400 でリクエストごと失敗</b>し、部分受理されません）。'
+                f'09:00確認方式は<b>登録した銘柄しか始値を読めない</b>ので、'
+                f'その日 見られるのは50銘柄まで。実測では候補が'
+                f'<b>中央49件・最大277件で 47% の日が超えます</b>。'
+                f'どれを見るかは<b>前夜に決める</b>のでギャップでは選べず'
+                f'（09:00まで不明）、<b>流動性降順</b>で上位50件にしています。'
+                f'「登録上限で見られず N件」がそのぶんの取りこぼしです'
+                f'（<code>set LSS_WATCH_CAP=0</code> で上限なしの世界と比較できます）。<br>'
                 f'⛔ さらに <b>注文の総額そのものが予算を超えられません</b>'
                 f'（委託保証金は発注時に要る）。候補が多い日は'
                 f'<code>予算÷候補数</code>が1単元の値段に届かないので、'
