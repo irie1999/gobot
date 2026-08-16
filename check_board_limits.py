@@ -41,6 +41,11 @@ ap.add_argument("--symbols", type=str, default="",
 ap.add_argument("--n", type=int, default=41,
                 help="測る銘柄数(既定41 = 選定なしの1日の候補数)")
 ap.add_argument("--workers", type=int, default=8, help="並列数")
+ap.add_argument("--serial", action="store_true",
+                help="直列でも測る(41件で2分以上かかるので既定OFF)")
+ap.add_argument("--sweep", type=str, default="2,4,6,8,12,16",
+                help="並列数スイープ。429が出ない最大の並列数を探す。"
+                     "空文字でスキップ")
 ap.add_argument("--no-unregister", action="store_true",
                 help="終了時に登録解除しない(次回の登録済み状態を残す)")
 args = ap.parse_args()
@@ -99,16 +104,30 @@ def _one(sym):
         return sym, (time.time() - _s), None, e
 
 
-print("\n[3] /board を **直列** で全件")
-_t = time.time()
-_ser = [_one(s) for s in _syms]
-_t_ser = time.time() - _t
-_lat = sorted(x[1] for x in _ser)
-_err = [x for x in _ser if x[3] is not None]
-print(f"    合計 {_t_ser:.2f}s / 1件あたり 中央 {_lat[len(_lat) // 2] * 1000:.0f}ms"
-      f" / 最遅 {_lat[-1] * 1000:.0f}ms")
-if _err:
-    print(f"    ⛔ エラー {len(_err)}件: {_err[0][3]}")
+_t_ser = 0.0
+if args.serial:
+    print("\n[3] /board を **直列** で全件")
+    _t = time.time()
+    _ser = [_one(s) for s in _syms]
+    _t_ser = time.time() - _t
+    _lat = sorted(x[1] for x in _ser)
+    _err = [x for x in _ser if x[3] is not None]
+    print(f"    合計 {_t_ser:.2f}s / 1件あたり "
+          f"中央 {_lat[len(_lat) // 2] * 1000:.0f}ms"
+          f" / 最遅 {_lat[-1] * 1000:.0f}ms")
+    if _err:
+        print(f"    ⛔ エラー {len(_err)}件: {_err[0][3]}")
+    # ⛔ 2026-08-16(日)の実測で **1件あたり 5005ms(中央) / 最遅 5039ms** と
+    #    出た。全件がほぼ同じ5秒で、429 は1件も出ていない。localhost で
+    #    5秒は説明がつかず、並列だと1件あたり実質0.2秒で終わることとも
+    #    矛盾する。**原因不明のまま数字を信じないこと**。休日で kabu が
+    #    バックエンドに繋がらず待たされている可能性があるので、平日に
+    #    測り直して同じ値なら本物。
+    if _lat and _lat[len(_lat) // 2] > 2.0:
+        print("    ⛔ 1件あたりが2秒を超えています。localhost では異常です。"
+              "休日/場外の可能性があるので **平日に測り直してください**")
+else:
+    print("\n[3] 直列: スキップ (--serial で測る。41件で2分以上かかります)")
 
 # ── /board を並列で全件 ───────────────────────────────────────────────────
 print(f"\n[4] /board を **並列({args.workers})** で全件")
@@ -117,10 +136,38 @@ with ThreadPoolExecutor(max_workers=args.workers) as ex:
     _par = list(ex.map(_one, _syms))
 _t_par = time.time() - _t
 _err2 = [x for x in _par if x[3] is not None]
-print(f"    合計 {_t_par:.2f}s  (直列比 {_t_ser / max(_t_par, 1e-9):.1f}倍速)")
+print(f"    合計 {_t_par:.2f}s"
+      + (f"  (直列比 {_t_ser / max(_t_par, 1e-9):.1f}倍速)" if _t_ser else ""))
 if _err2:
     print(f"    ⛔ エラー {len(_err2)}件: {_err2[0][3]}")
     print("       → レート制限に当たっている可能性。--workers を下げて再測定")
+
+# ── 並列数のスイープ (429 が出ない最大を探す) ─────────────────────────────
+# ★ 本番の並列数は「429 が出ない最大」で決めるしかない。429 が出ると
+#   1.5〜4.5秒の待ちが入るので、**並列を上げすぎると逆に遅くなる**。
+_sw = [int(x) for x in str(args.sweep).split(",") if str(x).strip().isdigit()]
+if _sw:
+    print("\n[4b] 並列数スイープ — 429 が出ない最大を探す")
+    print(f"     {'並列':>4}{'秒':>8}{'429回':>8}  判定")
+    cli.quiet_429 = True
+    _best = None
+    for _w in _sw:
+        cli.n_429 = 0
+        _t = time.time()
+        with ThreadPoolExecutor(max_workers=_w) as ex:
+            list(ex.map(_one, _syms))
+        _el, _n4 = time.time() - _t, getattr(cli, "n_429", 0)
+        _ok = (_n4 == 0)
+        if _ok:
+            _best = _w
+        print(f"     {_w:>4}{_el:>8.2f}{_n4:>8}  "
+              + ("✅ 429なし" if _ok else "⚠ 429が出た(待ちが入る)"))
+    cli.quiet_429 = False
+    if _best:
+        print(f"     → **429 が出ない最大は 並列{_best}**。本番はこれ以下で")
+    else:
+        print("     → どの並列数でも429。**直列に近い運用が必要**か、"
+              "PUSH配信(WebSocket)を検討")
 
 # ── 中身の確認 (始値が取れているか) ────────────────────────────────────────
 print("\n[5] 取れた中身 (先頭5件)")

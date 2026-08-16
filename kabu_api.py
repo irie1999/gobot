@@ -184,8 +184,14 @@ class KabuClient:
                 r.raise_for_status()
                 return r.json()
             last = r
+            # ★ 429 の回数を数える。並列数をいくつにすべきかは
+            #   「429 が出ない最大の並列数」で決めるしかないので、
+            #   数えられないと測定できない(2026-08-16)。
+            self.n_429 = getattr(self, "n_429", 0) + 1
             wait = 1.5 * (i + 1)
-            print(f"  ⚠ 429 レート制限: {wait:.1f}秒待って再試行 ({i+1}/{retries}) {url}")
+            if not getattr(self, "quiet_429", False):
+                print(f"  ⚠ 429 レート制限: {wait:.1f}秒待って再試行 "
+                      f"({i+1}/{retries}) {url}")
             time.sleep(wait)
         # ここに来たら最後まで 429。呼び出し側で扱えるよう送出。
         if last is not None:
