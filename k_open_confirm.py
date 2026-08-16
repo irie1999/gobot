@@ -93,6 +93,12 @@ ap.add_argument("--signals-csv", type=str, default="",
 ap.add_argument("--sm", type=float, default=0.5, help="--collect の損切ATR")
 ap.add_argument("--tm", type=float, default=1.0, help="--collect の利確ATR")
 ap.add_argument("--days", type=int, default=365, help="--collect の窓")
+# ★ レポート(dailyfast.bat の --min-price 1000 --price-ranges 6000)と揃える。
+#   提案ファイルはフィルタ前なので、ここで落とさないと J/L/K と母集団が違う。
+ap.add_argument("--min-price", type=float, default=1000.0,
+                help="--collect の価格下限(注文値で判定)")
+ap.add_argument("--max-price", type=float, default=6000.0,
+                help="--collect の価格上限(注文値で判定)")
 ap.add_argument("--g1", type=float, default=0.8,
                 help="第1グループ(09:00の板寄せ)に配る予算の割合。"
                      "以降のグループは残り予算。⛔端数配分はしない")
@@ -145,12 +151,35 @@ if args.collect:
                 _src = _c
                 break
     _pairs = _load_symbols(_src or None)
+    # ⛔ 提案ファイルは **フィルタ前**(9,240ペア)。レポートは読み込み時に
+    #    ①空売り不可 ②価格帯(1,000〜6,000円) を落として 8,106ペアにしている。
+    #    ここで揃えないと、レポートでは建てない銘柄まで 09:00 に読むことになり、
+    #    ・kabu の読込時間を無駄に使う(登録上限50件の測定が不正確になる)
+    #    ・J/L/K タブと母集団が食い違う
+    #    (2026-08-17: 9,240ペア→703シグナル/416銘柄 と出て発覚)
+    _ns: set = set()
+    try:
+        _nsp = Path(__file__).resolve().parent / "not_shortable.py"
+        if _nsp.exists():
+            _nsns: dict = {}
+            exec(_nsp.read_text(encoding="utf-8"), _nsns)
+            _ns = {str(x).upper().removesuffix(".T").split(".")[0]
+                   for x in _nsns.get("NOT_SHORTABLE", [])}
+    except Exception as _e:
+        print(f"  ⚠ not_shortable.py 読み込み失敗: {_e} → 除外なしで続行")
+    _n0 = len(_pairs)
+    if _ns:
+        _pairs = [p for p in _pairs
+                  if str(p[0]).upper().removesuffix(".T").split(".")[0] not in _ns]
     print(f"[collect] 母集団: {_src or '(自動検出)'} → {len(_pairs):,}ペア"
+          + (f" (空売り不可 {_n0 - len(_pairs):,}除外)" if _n0 != len(_pairs) else "")
+          + f" / 価格 {args.min_price:,.0f}〜{args.max_price:,.0f}円"
           f"。今日のシグナルを収集します(kabu は使いません)", flush=True)
     if _src != "lss_proposal_full.py":
         print(f"  ⚠ レポートの土台は lss_proposal_full.py です。"
               f"別ファイルだと J/L/K タブと母集団が食い違います", flush=True)
     _out: list = []
+    _n_px = 0          # 価格帯で落とした件数
     for _i, (_c, _n, _st) in enumerate(_pairs):
         if _i and _i % 500 == 0:
             print(f"  … {_i:,}/{len(_pairs):,} ({len(_out)}件)", flush=True)
@@ -159,6 +188,12 @@ if args.collect:
         except Exception:
             _sg = None
         if not _sg:
+            continue
+        # ★ 価格帯フィルタ。レポート側と同じく **注文値**で判定する
+        #   (前日終値ではない。100株買えるかは注文値で決まる)。
+        _px = float(_sg.get("order_price") or 0)
+        if _px > 0 and not (args.min_price <= _px <= args.max_price):
+            _n_px += 1
             continue
         _cd = str(_sg.get("symbol") or _c).upper() \
             .removesuffix(".T").split(".")[0]
@@ -174,11 +209,17 @@ if args.collect:
         w.writeheader()
         w.writerows(_out)
     _uq = len({r["symbol"] for r in _out})
-    print(f"[collect] シグナル {len(_out):,}件 / **{_uq:,}銘柄** → {_sig_csv}\n"
-          f"  ⛔ 発注していません。09:00 の判定はこの銘柄だけを読みます。", flush=True)
+    print(f"[collect] シグナル {len(_out):,}件 / **{_uq:,}銘柄** → {_sig_csv}"
+          + (f" (価格帯外 {_n_px:,}件を除外)" if _n_px else "")
+          + f"\n  ⛔ 発注していません。09:00 の判定はこの銘柄だけを読みます。",
+          flush=True)
     if _uq > args.batch:
-        print(f"  ⚠ {_uq}銘柄は kabu の登録上限({args.batch})を超えます。"
-              f"流動性上位{args.batch}件に絞られます", flush=True)
+        # ⚠ これは **J(実装版)** の話。K の記録は _read_all() が
+        #   50件バッチで全部読むので、この件数がそのまま対象になる。
+        #   むしろ「何件を何秒で読めるか」が明日の測定の本体。
+        print(f"  ★ {_uq}銘柄 = {-(-_uq // args.batch)}バッチ。"
+              f"K はこれを全部読みます(バッチ回しの実測が本番)。"
+              f"J は流動性上位{args.watch_j}件だけを見ます", flush=True)
     sys.exit(0)
 
 # ── 候補の決定 ────────────────────────────────────────────────────────
