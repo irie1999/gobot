@@ -114,7 +114,28 @@ REM     strategy is profitable after slippage. See CLAUDE.md 18.12 / A1.
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
 REM --- rebuild the CUMULATIVE lss proposal (union of ALL bases 2025-09 .. 2026-06) ---
 python merge_lss_proposals.py lss_proposal_2025-09.py lss_proposal_2025-10.py lss_proposal_2025-11.py lss_proposal_2025-12.py lss_proposal_2026-01.py lss_proposal_2026-02.py lss_proposal_2026-03.py lss_proposal_2026-04.py lss_proposal_2026-05.py lss_proposal_2026-06.py lss_proposal_2026-07.py --out lss_proposal_cumul.py
-python run_signals_holdout_all.py --both --h-tab --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_cumul.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+REM ============================================================
+REM   POOL (2026-08-16): run the P&L on the WIDE pool (no selection) and filter
+REM   the ORDER LIST back to the selected pool. Selected is a subset of
+REM   no-selection, so one run can produce both tabs:
+REM     J = implemented  : selected pool  + watch 50 (what kabu can do today)
+REM     K = ideal        : no selection   + watch unlimited
+REM   LSS_SIGNAL_POOL keeps the signal tab (= what you actually order) on the
+REM   selected pool, so the live order list is UNCHANGED by this. The run prints
+REM     [order list] <file> filtered: N -> M pairs
+REM   Check that line every morning; if it is missing the order list widened.
+REM   COST: the wide pool reads ~653k symbol-days of 5-min bars, so a cold run
+REM   takes minutes instead of ~40s. The E/H cache makes repeat runs much faster.
+REM   To go back to the old behaviour for one run:
+REM     .\daily --lss-proposal lss_proposal_cumul.py
+REM ============================================================
+if not exist "lss_proposal_full.py" (
+  echo [pool] lss_proposal_full.py not found - generating it now...
+  python make_full_proposal.py
+)
+if not defined LSS_SIGNAL_POOL set "LSS_SIGNAL_POOL=lss_proposal_cumul.py"
+if not defined LSS_IMPL_PROPOSAL set "LSS_IMPL_PROPOSAL=lss_proposal_cumul.py"
+python run_signals_holdout_all.py --both --h-tab --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_full.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help

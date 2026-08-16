@@ -150,6 +150,42 @@ _EQ_METHOD_CONF = str(os.environ.get("LSS_EQ_METHOD", "confirm")) \
 _WATCH_CAP = int(os.environ.get("LSS_WATCH_CAP", "50") or 0)
 
 
+def _load_pool(path: str):
+    """提案ファイルから (許可ペア集合, 解禁日dict) を読む。無ければ None。
+
+    ★ 『選定なしで回して、選定ありを切り出す』ために使う(2026-08-16)。
+      母集団は --lss-proposal で1つしか読めないので、**広いほうで回して
+      狭いほうを切り出す**しかない。選定あり ⊂ 選定なし なので成立する。
+    """
+    try:
+        _p = Path(path)
+        if not _p.exists():
+            return None
+        _ns: dict = {}
+        exec(_p.read_text(encoding="utf-8"), _ns)
+
+        def _c4(x):
+            return str(x).upper().removesuffix(".T").split(".")[0]
+        _ok = {(_c4(_c), str(_st)) for (_c, _n, _st) in (_ns.get("SELECTED") or [])}
+        if not _ok:
+            return None
+        _sd = {(_c4(_k[0]), str(_k[1])): str(_v)
+               for _k, _v in (_ns.get("START_DATES") or {}).items()}
+        return (_ok, _sd)
+    except Exception as _e:
+        print(f"[pool] {path} を読めません: {_e}", flush=True)
+        return None
+
+
+# ★★ 発注リスト(シグナルタブ)だけを別の母集団に絞る (2026-08-16)。
+#   ⛔ 損益タブは --lss-proposal の母集団(広いほう=選定なし)で回しつつ、
+#     **発注リストは選定あり**に保つためのもの。これが無いと、両方のタブを
+#     出すために母集団を広げた瞬間に **live の発注銘柄が変わる**。
+#   空 or ファイル無し = 絞らない(従来どおり)。
+_SIGNAL_POOL_FILE = os.environ.get("LSS_SIGNAL_POOL", "").strip()
+_SIGNAL_POOL = _load_pool(_SIGNAL_POOL_FILE) if _SIGNAL_POOL_FILE else None
+
+
 def _eq_pref_of(_g, _conf=None, _slow=False) -> str:
     """ギャップ閾値から資金均等の変種名の頭を作る(方式で形が違う)。
 
@@ -2550,6 +2586,25 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             ki = (sym, strat, False)
             if ki not in seen:
                 seen.add(ki); all_items.append((sym, name, strat, False)); primary_cfg[ki] = cfg
+
+    # ★★ 発注リストだけ別母集団に絞る (2026-08-16)。損益タブは広い母集団
+    #   (選定なし)で回しつつ、**発注する銘柄は選定あり**に保つ。
+    #   ⛔ これが効いていないと live の発注銘柄が黙って変わるので、
+    #     必ず件数を印字して目視できるようにする。
+    if _SIGNAL_POOL:
+        _ok_pool = _SIGNAL_POOL[0]
+
+        def _pool_ok(_sym, _strat):
+            return (str(_sym).upper().removesuffix(".T").split(".")[0],
+                    str(_strat)) in _ok_pool
+        _n_before = len(all_items)
+        all_items = [it for it in all_items if _pool_ok(it[0], it[2])]
+        source_map = {k: v for k, v in source_map.items() if _pool_ok(k[0], k[1])}
+        primary_cfg = {k: v for k, v in primary_cfg.items()
+                       if _pool_ok(k[0], k[2])}
+        print(f"  [発注リスト] {_SIGNAL_POOL_FILE} で絞り込み: "
+              f"{_n_before:,} → {len(all_items):,}ペア "
+              f"(損益タブは絞り込み前の母集団のまま)", flush=True)
 
     # configごとにパラメータを設定して並列実行（パラメータ競合を避けるため順次処理）
     signals: list[dict] = []
@@ -11691,27 +11746,16 @@ function switchTbd(id, tab) {{
         #   ⛔ START_DATES(解禁日)も一緒に読む。入れないと選定の先読みになる。
         _SEL_POOL = None
         _sel_pf = os.environ.get("LSS_IMPL_PROPOSAL", "lss_proposal_cumul.py")
-        try:
-            _pp = Path(_sel_pf)
-            if _pp.exists():
-                _ns: dict = {}
-                exec(_pp.read_text(encoding="utf-8"), _ns)
-                _ok = {(str(_c).upper().removesuffix(".T").split(".")[0], str(_st))
-                       for (_c, _nm, _st) in (_ns.get("SELECTED") or [])}
-                _sd = {(str(_k[0]).upper().removesuffix(".T").split(".")[0],
-                        str(_k[1])): str(_v)
-                       for _k, _v in (_ns.get("START_DATES") or {}).items()}
-                if _ok:
-                    _SEL_POOL = (_ok, _sd)
-                    print(f"[E/H] 実装版の母集団: {_sel_pf} から {len(_ok):,}ペア"
-                          f"(解禁日 {len(_sd):,}件)。"
-                          f"『実装版』タブはこの母集団 + watch{_WATCH_CAP}件、"
-                          f"『理想版』タブは選定なし + watch無制限", flush=True)
-            else:
-                print(f"[E/H] ⚠ {_sel_pf} が無いので『実装版』タブは作れません"
-                      f"(set LSS_IMPL_PROPOSAL=... で指定)", flush=True)
-        except Exception as _pe:
-            print(f"[E/H] ⚠ 実装版の母集団を読めません: {_pe}", flush=True)
+        _SEL_POOL = _load_pool(_sel_pf)
+        if _SEL_POOL:
+            print(f"[E/H] 実装版の母集団: {_sel_pf} から {len(_SEL_POOL[0]):,}ペア"
+                  f"(解禁日 {len(_SEL_POOL[1]):,}件)。"
+                  f"『J 実装版』= この母集団 + watch{_WATCH_CAP}件 / "
+                  f"『K 理想版』= 絞らない + watch無制限", flush=True)
+        else:
+            print(f"[E/H] ⚠ {_sel_pf} が読めないので『J 実装版』タブは"
+                  f"『K 理想版』と同じ中身になります"
+                  f"(set LSS_IMPL_PROPOSAL=... で指定)", flush=True)
         _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []

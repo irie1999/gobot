@@ -55,10 +55,6 @@ REM   Override for one run:  .\hvar --lss-proposal lss_proposal_cumul.py
 REM   COST: ~5 minutes instead of ~40s (reads 653k symbol-days of 5-min bars).
 REM   Regenerate the pool when the universe changes:  python make_full_proposal.py
 REM ============================================================
-if not exist "lss_proposal_full.py" (
-  echo [hvar] lss_proposal_full.py not found - generating it now...
-  python make_full_proposal.py
-)
 REM Keep the research run from clobbering lss_trades.csv, which .\fills reconciles
 REM against the live H orders (CLAUDE.md 18.29).
 set "LSS_TRADES_CSV=lss_trades_hvar.csv"
@@ -68,7 +64,7 @@ REM no-selection pool overwrote it with 8,106 pairs on 2026-08-16 - the next
 REM morning's order list would silently have been a different universe.
 set "LSS_SELECTED_OUT=holdout_selected_symbols_hvar.py"
 set "LSS_H_VARIANT_TAB=1"
-call dailyfast.bat --days 365 --no-serve --no-h-tab --lss-proposal lss_proposal_full.py %*
+call dailyfast.bat --days 365 --no-serve --no-h-tab %*
 set "LSS_H_VARIANT_TAB="
 set "LSS_TRADES_CSV="
 set "LSS_SELECTED_OUT="

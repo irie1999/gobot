@@ -1237,13 +1237,35 @@ print(f"設定数: {len(_all_configs)}件 / アイテム合計: {n_items_total}�
 # con/agg はエントリー(em=0)が同一なので (code, strat) で重複排除。
 # デイトレ側 verify_sameday_short_intraday.py --symbols-file で読み込む。
 try:
+    # ⛔⛔ **発注リストと同じ母集団に絞る**(2026-08-16)。
+    #    損益タブを広い母集団(選定なし)で回すようにしたので、ここを絞らないと
+    #    ライブが読むこのファイルだけが広いままになり、翌朝の発注銘柄が
+    #    黙って別物になる。LSS_SIGNAL_POOL はシグナルタブと同じ env。
+    _sel_pool = None
+    try:
+        _spf = os.environ.get("LSS_SIGNAL_POOL", "").strip()
+        if _spf and Path(_spf).exists():
+            _sns: dict = {}
+            exec(Path(_spf).read_text(encoding="utf-8"), _sns)
+            _sel_pool = {(str(_c0).upper().removesuffix(".T").split(".")[0],
+                          str(_s0))
+                         for (_c0, _n0, _s0) in (_sns.get("SELECTED") or [])} or None
+    except Exception as _spe:
+        print(f"[export] ⚠ LSS_SIGNAL_POOL を読めません: {_spe}")
+
     _sel_seen: set = set()
     _sel: list[tuple] = []
+    _sel_dropped = 0
     for _c in _all_configs:
         for _code, _name, _strat in list(_c["stop_wl"]) + list(_c["brk_wl"]):
             _k = (_code, _strat)
             if _code and _k not in _sel_seen:
                 _sel_seen.add(_k)
+                if _sel_pool is not None and (
+                        str(_code).upper().removesuffix(".T").split(".")[0],
+                        str(_strat)) not in _sel_pool:
+                    _sel_dropped += 1
+                    continue
                 _sel.append((_code, _name, _strat))
     _sel_suffix = "_short" if _args.short else ""
     # ⛔⛔ **このファイルはライブの発注経路が読む**(kabu_send_lss._load_symbols)。
@@ -1271,6 +1293,8 @@ try:
     else:
         _sel_path.write_text("\n".join(_sel_lines), encoding="utf-8")
         print(f"[export] holdout選定 {len(_sel)}ペア → {_sel_path}"
+              + (f" (LSS_SIGNAL_POOL で {_sel_dropped}ペア除外)"
+                 if _sel_dropped else "")
               + ("  ⚠ **ライブの発注経路が読むファイルです**"
                  if not _sel_env else "  (研究用の別名)"))
 except Exception as _e:
