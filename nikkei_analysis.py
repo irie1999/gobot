@@ -11685,12 +11685,18 @@ function switchTbd(id, tab) {{
     #    _EH_TRADES がまだ未代入で UnboundLocalError になる。
     try:
         _hpend = locals().get("_H_CSV_PENDING")
-        _hsrc = (_EH_TRADES or {}).get("H") or []
-        if _hpend and _hsrc:
+        # ★ H だけでなく **推奨(K)** も出す(2026-08-16)。09:00 の発注速度が
+        #   どれだけ利益を左右するかを 1分足で測る(measure_entry_decay.py)には、
+        #   K が実際にどの銘柄をどの日に建てたかが要る。
+        _hdumps = [("H", (_EH_TRADES or {}).get("H") or [])]
+        if _EQ_TAB_KEY2:
+            _hdumps.append(("K", (_EH_TRADES or {}).get(_EQ_TAB_KEY2) or []))
+        for _hsfx, _hsrc in _hdumps:
+          if _hpend and _hsrc:
             import csv as _csvmod3
             _hcsv, _hcols = _hpend
             _hp = Path(_hcsv)
-            _hout = str(_hp.with_name(_hp.stem + "_H" + _hp.suffix))
+            _hout = str(_hp.with_name(_hp.stem + "_" + _hsfx + _hp.suffix))
             # ★ 約定せず も書く。.\fills が『H は約定しないと判定した』のか
             #   『そもそも母集団に無い(バックテストがシグナルを出していない)』のかを
             #   区別できないと、原因の切り分けができない(2026-08-13)。
@@ -11719,7 +11725,9 @@ function switchTbd(id, tab) {{
                         "limit", _t.get("pnl", ""), _t.get("entry_time", ""),
                     ])
             print(f"[全取引CSV] {_hout} に {len(_hrows)}件を出力 "
-                  f"(H=指値売り。.\\fills はこちらと突合する)", flush=True)
+                  + ("(H=指値売り。.\\fills はこちらと突合する)" if _hsfx == "H"
+                     else f"({_EQ_TAB_KEY2} = 推奨K。"
+                          f"measure_entry_decay.py がこれを読む)"), flush=True)
     except Exception as _he:
         print(f"[全取引CSV] H の出力失敗: {_he}", flush=True)
 
