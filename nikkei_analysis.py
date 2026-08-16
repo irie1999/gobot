@@ -11205,11 +11205,20 @@ function switchTbd(id, tab) {{
                              約定数で割るのは **先読み**。注文を置いた
                              **候補数**(=約定+不約定)で割るのが正しい。
 
-               _nf に不約定行を渡すと候補数で割る。渡さなければ従来どおり
-               約定数で割る(= 確認方式か、比較用の『約定数割』行)。
+               _nf に不約定行を渡すと **前夜に注文を置く方式**として計算する。
+               渡さなければ従来どおり約定数で割る(= 確認方式か、比較用の
+               『約定数割』行)。
+
+               ⛔⛔ さらに強い制約(2026-08-16 ユーザー指摘):
+                 **注文の総額そのものが予算を超えられない**(信用の委託保証金は
+                 発注時に要る)。候補が多い日は `予算÷候補数` が1単元の値段に
+                 届かないので、**注文を出せない候補が出る**。どれを出すかは
+                 前夜に決めるのでギャップでは並べられない(09:00まで分からない)
+                 → **流動性降順**(H と同じ / 18.21)で埋め、枠が尽きたら打ち切る。
+                 「余りを配り切る」(充填)も板寄せ後には足せないので無効。
 
                ⚠ §18.37 は予算倍率 1.0(寄りで一斉約定するので over-subscribe が
-                 成立しない)と確定済み。候補数で割るのはこれと同じ理屈。
+                 成立しない)と確定済み。これと同じ理屈。
 
             _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
             配る(残りは建てない)。閾値を上げるのとは別物で、絞り具合が
@@ -11238,6 +11247,9 @@ function switchTbd(id, tab) {{
             _cnts: list = []          # 1日あたりの件数(絞ったあと)
             _cnts_raw: list = []      # 同(絞る前)。どれだけ捨てたかを見る
             _dens: list = []          # 実際に割った分母(候補数 or 約定数)
+            _ords: list = []          # 実際に注文を出せた件数/日(前夜方式だけ)
+            _ncand: list = []         # その日の候補数(同上)
+            _noord = 0                # 発注枠が尽きて注文を出せなかった候補
             _capped = 0               # 単元上限(株数)に当たった件数
             _ycap = 0                 # 金額上限で削った件数
             _dropped = 0              # 上位N絞りで建てなかった件数
@@ -11250,8 +11262,8 @@ function switchTbd(id, tab) {{
 
             # ── 候補数(=前夜に注文を置く件数)。指値方式のときだけ使う ──────
             _cand_n: dict = {}
+            _cd: dict = {}
             if _nf is not None:
-                _cd: dict = {}
                 for _t in list(_ts) + list(_nf or []):
                     _d0 = str(_t.get("entry_d_raw") or "")
                     if _d0:
@@ -11315,6 +11327,58 @@ function switchTbd(id, tab) {{
                 #    上限100万 × 3 = 300万 になり、上限がまったく効かない
                 #    (実測: 上限100万でも 銘柄計 最大が予算の74%だった)。
                 _symyen: dict = {}
+                # ⛔⛔ 前夜に注文を置く方式(_nf あり)は、**注文の総額そのものが
+                #    予算を超えられない**(信用の委託保証金は発注時に必要)。
+                #    候補が多い日は「予算÷候補数」が1単元の値段に届かないので、
+                #    **注文を出せない候補が出る**。どれを出すかは前夜に決めるので
+                #    ギャップでは並べられない(09:00まで分からない) →
+                #    **流動性降順**(H と同じ / 18.21)で埋める。
+                #    ここで作った lots を、約定した行にだけ適用する。
+                _lots_pre: dict = {}
+                if _nf is not None:
+                    _all = list(_cd.get(_d) or _lst)
+                    if _dedup:
+                        _bd: dict = {}
+                        for _t in _all:
+                            _s0 = str(_t.get("symbol", "")).upper() \
+                                .removesuffix(".T").split(".")[0]
+                            _bd.setdefault(_s0, _t)
+                        _all = list(_bd.values())
+                    _all.sort(key=lambda t: (-float(t.get("liquidity") or 0),
+                                             str(t.get("symbol", ""))))
+                    if _top > 0:
+                        _all = _all[:_top]
+                    _placed = 0.0
+                    _n_ord = 0
+                    _pre_sym: dict = {}
+                    for _t in _all:
+                        # 注文値 = 前夜に置く指値。約定行では entry_p と一致
+                        # しないことがある(寄りが指値より上なら寄り値約定)ので、
+                        # **枠の計算は注文値**で行う。
+                        _op = float(_t.get("order_limit", 0) or 0) \
+                            or float(_t.get("entry_p", 0) or 0)
+                        if _op <= 0:
+                            continue
+                        _u0 = _op * 100
+                        _s0 = str(_t.get("symbol", "")).upper() \
+                            .removesuffix(".T").split(".")[0]
+                        _h0 = _pre_sym.get(_s0, 0.0)
+                        _l0 = min(_EQ_MAX_LOT, int(_per // _u0))
+                        if _yc > 0:
+                            _l0 = min(_l0, int(max(0.0, _yc - _h0) // _u0))
+                        _l0 = max(1, _l0) if _h0 <= 0 else max(0, _l0)
+                        # 予算(=発注枠)に収まるまで削る。0 なら注文を出せない。
+                        while _l0 > 0 and _placed + _l0 * _u0 > _budget:
+                            _l0 -= 1
+                        if _l0 <= 0:
+                            _noord += 1       # 発注枠が尽きて注文を出せない
+                            continue
+                        _placed += _l0 * _u0
+                        _n_ord += 1
+                        _pre_sym[_s0] = _h0 + _l0 * _u0
+                        _lots_pre[id(_t)] = _l0
+                    _ords.append(_n_ord)
+                    _ncand.append(len(_all))
                 for _t in _lst:
                     _ep = float(_t.get("entry_p", 0) or 0)
                     _xp = float(_t.get("exit_p", 0) or 0)
@@ -11323,6 +11387,16 @@ function switchTbd(id, tab) {{
                     _sy1 = str(_t.get("symbol", "")).upper() \
                         .removesuffix(".T").split(".")[0]
                     _had = _symyen.get(_sy1, 0.0)
+                    if _nf is not None:
+                        # 前夜に決めた株数をそのまま使う。注文を出せなかった
+                        # 候補は約定しても建たない(そもそも注文が無い)。
+                        _lp = _lots_pre.get(id(_t), 0)
+                        if _lp <= 0:
+                            continue
+                        _day.append([_t, _ep, _xp, _lp])
+                        _symyen[_sy1] = _had + _lp * 100 * _ep
+                        _used += _lp * 100 * _ep
+                        continue
                     _raw = int(_per // (_ep * 100))
                     _lot = min(_EQ_MAX_LOT, _raw)
                     if _yc > 0:
@@ -11347,7 +11421,9 @@ function switchTbd(id, tab) {{
                 # ── ② 余りをギャップ降順で1単元ずつ配り切る ──────────────
                 #   ①は切り捨てなので必ず端数が残る。1周ずつ回して、
                 #   入らなくなったら終わり(予算は絶対に超えない)。
-                if _fill and _day:
+                # ⛔ 前夜に注文を置く方式では「余りを配り切る」ができない
+                #    (板寄せが終わってからでは株数を足せない)。
+                if _fill and _day and _nf is None:
                     _order = sorted(range(len(_day)),
                                     key=lambda i: -_eq_gap_of(_day[i][0]))
                     _rem = _budget - _used
@@ -11413,6 +11489,11 @@ function switchTbd(id, tab) {{
                 "den_med": _q(sorted(_dens), 0.5),
                 "den_is_cand": (_nf is not None),
                 "fill_pct": (sum(_cnts) / max(1, sum(_dens)) * 100.0),
+                # 前夜方式だけ: 候補のうち実際に注文を出せた割合。
+                # 発注枠(=予算)が尽きて出せなかったぶんは機会そのものが無い。
+                "ord_med": _q(sorted(_ords), 0.5),
+                "cand_med": _q(sorted(_ncand), 0.5),
+                "no_order": _noord,
                 "dropped": _dropped,
                 "amt_med": _q(_amts, 0.5),
                 "amt_p95": _q(_amts, 0.95),
@@ -15298,8 +15379,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    f'{"#fbbf24" if _st.get("den_is_cand") else "#94a3b8"}">'
                    f'{_st.get("den_med", 0):.0f}'
                    f'<br><span style="font-size:0.68rem;color:#64748b">'
-                   + ("候補数<br>約定" if _st.get("den_is_cand") else "約定数<br>fill")
-                   + f' {_st.get("fill_pct", 100):.0f}%</span></td>')
+                   + (f'候補数<br>注文 {_st.get("ord_med", 0):.0f}件 / '
+                      f'約定 {_st.get("fill_pct", 100):.0f}%'
+                      + (f'<br><span style="color:#f87171">枠切れ '
+                         f'{_st.get("no_order", 0):,}件</span>'
+                         if _st.get("no_order") else "")
+                      if _st.get("den_is_cand")
+                      else f'約定数<br>fill {_st.get("fill_pct", 100):.0f}%')
+                   + '</span></td>')
                 + f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                 f'white-space:nowrap">{_st["per_day_min"]:.0f}'
                 + (f'<br><span style="color:#64748b;font-size:0.68rem">'
@@ -15504,6 +15591,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'約定数で割るのは<b>先読み</b>です。比較用に'
                 f'<code>…約定数割</code> の行を1本だけ出しているので、'
                 f'<b>その差が先読みの大きさ</b>です。<br>'
+                f'⛔ さらに <b>注文の総額そのものが予算を超えられません</b>'
+                f'（委託保証金は発注時に要る）。候補が多い日は'
+                f'<code>予算÷候補数</code>が1単元の値段に届かないので、'
+                f'<b>注文を出せない候補</b>が出ます（「枠切れ」）。'
+                f'どれを出すかは前夜に決めるのでギャップでは並べられず'
+                f'（09:00まで分からない）、<b>流動性降順</b>で埋めています。'
+                f'「充填」も板寄せ後には足せないので無効です。<br>'
                 f'一方 <b>H寄り確認</b> は 09:00 に始値を見て件数が確定してから'
                 f'発注するので <b>約定数で割ってよい＝集中できます</b>。'
                 f'代わりに約定は 09:05（寄り値より不利）。'
