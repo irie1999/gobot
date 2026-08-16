@@ -95,6 +95,11 @@ ap.add_argument("--open", dest="at_open", action="store_true",
                      "コールド読み・上限プローブ・並列スイープは全部やらない")
 ap.add_argument("--log", type=str, default="board_speed_log.csv",
                 help="--open の結果を追記するCSV(朝ごとに貯まる)")
+ap.add_argument("--ws", action="store_true",
+                help="PUSH配信(WebSocket)に繋がるかだけ確かめる。照会のみ・"
+                     "場外でも実行できる。REST が遅かった場合の逃げ道の下調べ")
+ap.add_argument("--ws-seconds", type=int, default=20,
+                help="--ws で待つ秒数(場外は配信が来ないので接続可否だけ見る)")
 ap.add_argument("--cap-probe", type=str, default="",
                 help="登録上限を実測する。カンマ区切りの件数 (例 40,50,60,80,120)。"
                      "毎回 全解除 → その件数を一括登録 → 受理数を数える")
@@ -180,6 +185,69 @@ def _board_one(_cli, sym):
         return sym, (time.time() - _s0), _cli.get_board(sym), None
     except Exception as e:
         return sym, (time.time() - _s0), None, e
+
+# ── PUSH配信(WebSocket)の疎通確認 (--ws) ─────────────────────────────────
+# ⛔ REST は 6.5件/秒で頭打ち(並列を上げても変わらない)。1回読むだけなら
+#    41銘柄6秒で足りるはずだが、板寄せ直後に膨らむなら PUSH に逃げる。
+#    PUSH は /register した銘柄の板更新が**向こうから飛んでくる**ので、
+#    ポーリングが要らない = 件数に比例した待ち時間が消える。
+#    さらに「まだ寄っていない」を待つのではなく **寄った瞬間に届く**ので、
+#    遅寄り銘柄の締切ルール(09:0Xまでに寄ったものだけ)が自然に書ける。
+# ⚠ ここでやるのは **接続できるかどうか**だけ。場外では配信が来ないので
+#    「0件受信」でも異常ではない。平日のザラ場中に流せば実データが流れる。
+if args.ws:
+    _wsurl = cli.base_url.replace("http://", "ws://") + "/kabusapi/websocket"
+    print(f"\n[ws] PUSH配信の疎通確認: {_wsurl}")
+    try:
+        import websocket as _wsmod          # pip install websocket-client
+    except Exception:
+        print("  ⛔ websocket-client が入っていません。"
+              "確認するなら: pip install websocket-client")
+        raise SystemExit(1)
+    _r = cli.register_many(_syms[:5])
+    print(f"  登録(先頭5件): 受理 {len((_r or {}).get('RegistList') or [])}件")
+    _got = {"n": 0, "syms": set(), "first": None, "err": None}
+
+    def _on_msg(_w, _m):
+        import json as _j
+        _got["n"] += 1
+        if _got["first"] is None:
+            _got["first"] = time.time()
+        try:
+            _d = _j.loads(_m)
+            _got["syms"].add(str(_d.get("Symbol") or ""))
+        except Exception:
+            pass
+
+    def _on_err(_w, _e):
+        _got["err"] = _e
+
+    _t0 = time.time()
+    _ws = _wsmod.WebSocketApp(_wsurl, on_message=_on_msg, on_error=_on_err)
+    import threading as _th
+    _th.Thread(target=lambda: _ws.run_forever(), daemon=True).start()
+    while time.time() - _t0 < max(1, args.ws_seconds):
+        time.sleep(0.5)
+        if _got["n"] >= 50:
+            break
+    try:
+        _ws.close()
+    except Exception:
+        pass
+    if _got["err"]:
+        print(f"  ⛔ 接続できません: {_got['err']}")
+        print("     kabu ステーションの API 設定で PUSH配信 が有効か確認してください")
+    elif _got["n"]:
+        print(f"  ✅ **接続OK。{args.ws_seconds}秒で {_got['n']}件受信** "
+              f"({len(_got['syms'])}銘柄)。初回まで "
+              f"{(_got['first'] - _t0):.2f}s")
+        print("     → REST が遅かったら PUSH に移行できます")
+    else:
+        print(f"  ⚠ 接続はできたが {args.ws_seconds}秒で受信0件。"
+              f"**場外なら正常**(板が動いていない)。"
+              f"平日ザラ場中にもう一度流して確かめてください")
+    cli.unregister_all()
+    raise SystemExit(0)
 
 # ── 【08:5x】ウォームアップ ────────────────────────────────────────────────
 # ⛔ 登録直後の初回 /board は 48〜142秒(実測)。kabu がその銘柄の板を購読しに
