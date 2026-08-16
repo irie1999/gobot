@@ -11431,7 +11431,7 @@ function switchTbd(id, tab) {{
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0, _nf=None, _div_cand=False, _watch=0,
-                               _pool=None, _keep_late=False):
+                               _pool=None, _keep_late=False, _g1=0.0):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -11714,8 +11714,19 @@ function switchTbd(id, tab) {{
 
                 for _w, _mem, _nw in _plan:
                     if _w is not None:
-                        # その段に配る額 → その段の合格件数で割る
-                        _alloc = _R * _nw / max(1, _U) if _U > 0 else _R
+                        # ★★ _g1 > 0 なら **固定の上限**で配る(2026-08-16
+                        #   ユーザー判断「1回の合格グループについてマックスの
+                        #   投資額を決めたほうがいい」)。
+                        #   動的配分(残り予算 × その段の候補数 ÷ 未判定候補数)は
+                        #   ライブで「未寄が何件あるか」を毎回数える必要があり
+                        #   壊れやすい。固定比率なら前夜に決まる=実装が単純。
+                        #     第1グループ(09:00の板寄せ) … 予算 × _g1
+                        #     以降の各グループ           … 残り予算
+                        if _g1 > 0:
+                            _alloc = (_budget * _g1 if _w == _plan[0][0] else _R)
+                        else:
+                            _alloc = _R * _nw / max(1, _U) if _U > 0 else _R
+                        _alloc = min(_alloc, _R)
                         if _yc > 0:
                             _per = min(_alloc / max(1, len(_mem)), _yc)
                         else:
@@ -11992,6 +12003,22 @@ function switchTbd(id, tab) {{
             _pre = (str(_k).startswith("H指値") or str(_k) in ("H", "H寄指"))
             # (上位N, 充填, 1銘柄1件, 金額上限[円], 候補数で割るか)
             _eq_modes = [(0, False, False, 0.0, _pre, _WATCH_CAP, None, False)]
+            # ★★ 「1回の合格グループに配る額を固定上限で決める」版
+            #   (2026-08-16 ユーザー判断)。動的配分(残り予算 × その段の候補数
+            #   ÷ 未判定候補数)は **毎回 未寄件数を数える**必要があって
+            #   ライブで壊れやすい。固定比率なら **前夜に決まる**ので単純。
+            #     第1グループ(09:00の板寄せ) … 予算 × X%
+            #     以降の各グループ           … 残り予算
+            #   ⛔ 段階モード(w…c…)の変種にしか意味が無い
+            #      (グループが1つしか無ければ配分は同じ)。
+            import re as _re_g1
+            if _re_g1.search(r"w\d+c\d+", str(_k)):
+                for _g1v in [float(x) for x in str(os.environ.get(
+                        "LSS_EQ_G1", "0.7,0.8,0.9")).split(",")
+                        if str(x).strip().replace(".", "").isdigit()]:
+                    if 0 < _g1v < 1:
+                        _eq_modes.append((0, False, False, 0.0, _pre,
+                                          _WATCH_CAP, None, False, _g1v))
             if _k == _EQ_TAB_BASE:
                 _eq_modes += ([(0, True, False, 0.0, _pre, _WATCH_CAP, None, False)]
                               + [(_t2, False, False, 0.0, _pre, _WATCH_CAP, None, False)
@@ -12015,6 +12042,7 @@ function switchTbd(id, tab) {{
                 #   理由の内訳でもある(遅寄り = 特別気配 = ギャップが大きい)。
                 _eq_modes.append((0, False, False, 0.0, _pre,
                                   _WATCH_CAP, None, True))
+
                 # ★ 旧挙動(約定数で割る=先読み)を **1行だけ**残す。消すと
                 #   「これまでの K の数字がどれだけ上振れていたか」が測れない。
                 if _pre:
@@ -12071,7 +12099,13 @@ function switchTbd(id, tab) {{
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
             #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
             #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
-            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd, _eqwc, _eqpl, _eqkl in _eq_modes:
+            for _eqm in _eq_modes:
+                # ⛔ 9要素目(第1グループの上限比率)は **後から足した**ので
+                #    可変長で受ける。既存の8要素タプルを全部書き換えると
+                #    どこか1つ落として静かに壊れる(2026-08-16)。
+                (_eqtp, _eqfl, _eqdp, _eqym, _eqcd,
+                 _eqwc, _eqpl, _eqkl) = _eqm[:8]
+                _eqg1 = float(_eqm[8]) if len(_eqm) > 8 else 0.0
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
@@ -12087,7 +12121,9 @@ function switchTbd(id, tab) {{
                          # タブ用の2本だけ名前で区別する
                          + ("実装版" if (_eqpl and _eqpl != "IDEAL") else
                             ("理想版" if _eqpl == "IDEAL" else ""))
-                         + ("遅寄り込み" if _eqkl else ""))
+                         + ("遅寄り込み" if _eqkl else "")
+                         # 第1グループの上限比率(段階モードのみ意味を持つ)
+                         + (f"G1_{_eqg1 * 100:.0f}" if _eqg1 > 0 else ""))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
@@ -12097,7 +12133,7 @@ function switchTbd(id, tab) {{
                         # 分母に使うかどうかは _div_cand で別に決める。
                         _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc,
                         None if (_eqpl in (None, "IDEAL")) else _eqpl,
-                        _eqkl)
+                        _eqkl, _eqg1)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -17531,6 +17567,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _k2["div"] = "約定数割" in _s
             # 09:00 に寄らなかった銘柄を建てるか(既定は建てない)
             _k2["late"] = "遅寄り込み" in _s
+            # ★ 第1グループ(09:00の板寄せ)に配る予算の割合。
+            #   無印 = 動的配分(残り予算 × その段の候補数 ÷ 未判定候補数)。
+            _mg1 = _re_kn.search(r"G1_(\d+)", _s)
+            _k2["g1"] = int(_mg1.group(1)) if _mg1 else 0
             # ★ 段階/締切 (2026-08-16)。"w10c10"=2段階(09:00/09:10) /
             #   "c10"=一括締切10分 / 無印=09:00 の一発判定。
             _mwv = _re_kn.search(r"(?:w(\d+))?c(\d+)(?![\d])", _s)
@@ -17588,7 +17628,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _bkn = _knobs(_bk)
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
                         "dedup", "dedup_post", "div", "watch", "late", "wave",
-                        "method"]
+                        "method", "g1"]
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。
@@ -17642,6 +17682,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "late": "09:00に寄らない銘柄",
                              "wave": "判定のタイミング",
                              "method": "発注方式",
+                             "g1": "1グループの上限(予算比)",
                              "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_wave(_v3):
@@ -17678,6 +17719,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "建てる(⛔実装不可)" if _v3 else "建てない"
                         if _f == "wave":
                             return _fmt_wave(_v3)
+                        if _f == "g1":
+                            return ("動的（残り予算×候補数÷未判定数）"
+                                    if not _v3 else f"09:00に予算の{_v3}%まで")
                         if _f == "method":
                             return ("前夜 寄付指値(枠切れあり/板読み不要)"
                                     if _v3 == "指値" else
