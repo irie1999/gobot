@@ -130,6 +130,23 @@ _SHOW_TAB_TENKAN = _tab_on("LSS_TAB_TENKAN")
 _SHOW_TAB_EH_ALL = _tab_on("LSS_TAB_EH_ALL")
 # 09:00確認(資金均等)の発注順。既定 gap=ギャップ降順 / liq=流動性降順(H と同じ)。
 _EQ_ORDER = str(os.environ.get("LSS_EQ_ORDER", "gap")).strip().lower()
+# ★★ 資金均等の発注方式 (2026-08-16)。
+#   confirm(既定) = 09:00 に始値を見てギャップ判定 → その場で発注(約定09:05)。
+#                   合格件数が確定してから発注するので **予算÷約定数** で
+#                   割り切れる = **集中できる**。09:00 に板を読む実装が要る。
+#   limit         = 前夜に寄付指値。約定は寄り値(有利)だが、委託保証金は
+#                   発注時に要るので **注文の総額が予算を超えられず**、
+#                   候補が多い日は集中できない(§18.38)。
+#   set LSS_EQ_METHOD=limit で前夜指値に戻す。
+_EQ_METHOD_CONF = str(os.environ.get("LSS_EQ_METHOD", "confirm")) \
+    .strip().lower().startswith("conf")
+
+
+def _eq_pref_of(_g, _conf=None) -> str:
+    """ギャップ閾値から資金均等の変種名の頭を作る(方式で形が違う)。"""
+    return (f"H寄り確認{float(_g):+.0f}bp"
+            if (_EQ_METHOD_CONF if _conf is None else _conf)
+            else f"H指値{float(_g):+.0f}bp寄指")
 _PNL_ENTRY_MIN_PRICE = 0.0
 _PNL_ENTRY_MAX_PRICE = 0.0
 # 予算月別CSV(LSS_BUDGET_MONTHLY_CSV)出力: これまでに書いた最多月数。_tab5_pnl_html は
@@ -10733,20 +10750,46 @@ function switchTbd(id, tab) {{
                     if not _c.isdigit():
                         break
                     _ds += _c
+                if not _ds and "bpd" in _b:
+                    # 確認方式(H寄り確認+50bpd4sm0.5)は "寄指d" を持たない
+                    for _c in _b.split("bpd")[-1]:
+                        if not _c.isdigit():
+                            break
+                        _ds += _c
                 _d = int(_ds) if _ds else int(_eh_delay)
                 return _g, _d, _b
+
+            # ★★ 方式を1本のつまみにした (2026-08-16)
+            #   confirm = 09:00 に始値を見て発注(約定09:05)。**予算を約定数で
+            #             割れる = 集中できる**。板を読む実装が要る。
+            #   limit   = 前夜に寄付指値。約定は寄り値(有利)だが、発注枠の
+            #             制約で **集中できない**(§18.38)。
+            #   set LSS_EQ_METHOD=limit で前夜指値に戻す。
+            _EQ_CONF = _EQ_METHOD_CONF
+            _eq_pref = _eq_pref_of
+
+            def _eq_var(_nm, _d, _g, _sm=None, _tm=None, _ap=None):
+                """変種タプルを作る。**名前で方式を決める**ので取り違えない。
+
+                確認方式: 寄指=False / 指値bp=None / 確認ギャップ=_g
+                指値方式: 寄指=True  / 指値bp=_g   / 確認ギャップ=None
+                """
+                if str(_nm).startswith("H寄り確認"):
+                    return (_nm, 0, False, _d, "fill", None, _g, _sm, _tm, _ap)
+                return (_nm, 0, True, _d, "fill", _g, None, _sm, _tm, _ap)
 
             _eqg0 = 50.0
             try:
                 _eqg0, _, _ = _eq_parse(os.environ.get(
-                    "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等"))
+                    "LSS_EQ_TAB_KEY", _eq_pref(50) + "資金均等"))
                 # タブ2(既定 = 確定した推奨設定 d4)。空文字で無効化できる。
                 # ⛔ この関数の body 直下では **汎用的な短い名前を使わない**。
                 #    _dd(defaultdict)をループ変数で潰して損益タブが丸ごと落ちた
                 #    (2026-08-15)。以降 _eq* 接頭辞で固有名にする。
                 _eqsm2 = _eqtm2 = None
                 _eqk2 = str(os.environ.get(
-                    "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等")).strip()
+                    "LSS_EQ_TAB_KEY2",
+                    _eq_pref(50) + "d4sm0.5資金均等")).strip()
                 if _eqk2:
                     _eqg2, _eqd2, _eqb2 = _eq_parse(_eqk2)
                     # ⛔ 推奨キーが sm/tm を含むとき、ここで**上書き値を渡さない**と
@@ -10759,8 +10802,8 @@ function switchTbd(id, tab) {{
                     _eqsm2 = (99.0 if "損切なし" in _eqb2 else
                               (float(_m2sm.group(1)) if _m2sm else None))
                     _eqtm2 = float(_m2tm.group(1)) if _m2tm else None
-                    _hvars.append((_eqb2, 0, True, _eqd2, "fill", _eqg2,
-                                   None, _eqsm2, _eqtm2))
+                    _hvars.append(_eq_var(_eqb2, _eqd2, _eqg2,
+                                          _eqsm2, _eqtm2))
             except Exception as _eqe0:
                 print(f"[E/H] タブ変種の解決に失敗: {_eqe0}", flush=True)
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
@@ -10779,8 +10822,8 @@ function switchTbd(id, tab) {{
                         if str(x).strip().isdigit()]:
                     if _dv == _eh_delay:
                         continue      # 既定と同じ = 上で作ってある
-                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}", 0, True,
-                                   _dv, "fill", _eqg0))
+                    _hvars.append(_eq_var(f"{_eq_pref(_eqg0)}d{_dv}",
+                                          _dv, _eqg0))
                     # ★ 推奨(タブ2)が sm を持つなら、**その sm の上でも**
                     #   delay を掃く。持たない土台の delay 行は基準と
                     #   つまみが2つずれて『比較不能』になるため。
@@ -10789,9 +10832,9 @@ function switchTbd(id, tab) {{
                     if _eqsm2:
                         _dsl = ("損切なし" if _eqsm2 >= 90
                                 else f"sm{_eqsm2:g}")
-                        _hvars.append((f"H指値{_eqg0:+.0f}bp寄指d{_dv}{_dsl}",
-                                       0, True, _dv, "fill", _eqg0,
-                                       None, _eqsm2))
+                        _hvars.append(_eq_var(
+                            f"{_eq_pref(_eqg0)}d{_dv}{_dsl}",
+                            _dv, _eqg0, _eqsm2))
                 # ★★ 損切り幅(sm)を掃く — delay と切り分けるための本命 (2026-08-15)
                 #   ⛔ delay は d0<d1<d2<d3<d4<d5 と**単調に良くなり続け**、
                 #      増分は逓減していた(+669/+498/+250/+169/+49 円/件)。
@@ -10807,8 +10850,8 @@ function switchTbd(id, tab) {{
                         "LSS_EQ_SMS", "0.3,0.5,1.0,99")).split(",")
                         if str(x).strip().replace(".", "").isdigit()]:
                     _eqsl = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
-                    _hvars.append((f"H指値{_eqg0:+.0f}bp寄指{_eqsl}", 0, True,
-                                   _eh_delay, "fill", _eqg0, None, _eqsm))
+                    _hvars.append(_eq_var(f"{_eq_pref(_eqg0)}{_eqsl}",
+                                          _eh_delay, _eqg0, _eqsm))
                 # ★★ 確定した delay(タブ2 = d4)の下で sm/tm を掃き直す
                 #   (2026-08-15 の設定監査)。
                 #   ⛔ 上の sm スイープは **delay1 固定**で回している。
@@ -10823,7 +10866,8 @@ function switchTbd(id, tab) {{
                 #    土台にすると "…d4sm0.5sm0.2" という壊れた名前になる。
                 try:
                     _eqg4, _eqd4, _eqb4 = _eq_parse(os.environ.get(
-                        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等"))
+                        "LSS_EQ_TAB_KEY2",
+                        _eq_pref_of(50) + "d4sm0.5資金均等"))
                     import re as _re_b4
                     _eqb4 = _re_b4.sub(r"(sm[\d.]+|tm[\d.]+|損切なし)", "", _eqb4)
                 except Exception:
@@ -10837,8 +10881,8 @@ function switchTbd(id, tab) {{
                             "LSS_EQ_SMS2", "0.05,0.2,0.3,0.5,0.7,1.0,99")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
                         _eqsl4 = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
-                        _hvars.append((f"{_eqb4}{_eqsl4}", 0, True,
-                                       _eqd4, "fill", _eqg4, None, _eqsm))
+                        _hvars.append(_eq_var(f"{_eqb4}{_eqsl4}",
+                                              _eqd4, _eqg4, _eqsm))
                     # ★★ ギャップ閾値を **推奨の delay/sm の上で**掃く
                     #   (2026-08-15)。上の `H指値{G}bp寄指` は delay/sm を
                     #   持たないので、基準(d4sm0.5)とつまみが3つずれて
@@ -10851,19 +10895,18 @@ function switchTbd(id, tab) {{
                     for _eqg5 in _gaps:
                         if abs(_eqg5 - _eqg4) < 1e-9:
                             continue          # 基準と同じ
-                        _hvars.append((
-                            f"H指値{_eqg5:+.0f}bp寄指d{_eqd4}{_gsl}",
-                            0, True, _eqd4, "fill", _eqg5, None, _eqsm2))
-                    # ★★ 09:00確認版を **推奨とまったく同じ delay/sm で**出す
-                    #   (2026-08-16)。この2方式は『予算の割り方』が構造的に
-                    #   違うので、そこだけを比べたい:
-                    #     指値  = 価格は寄り値(有利) / 分母は候補数(集中できない)
-                    #     確認  = 価格は09:05(不利)   / 分母は約定数(集中できる)
+                        _hvars.append(_eq_var(
+                            f"{_eq_pref(_eqg5)}d{_eqd4}{_gsl}",
+                            _eqd4, _eqg5, _eqsm2))
+                    # ★★ **もう一方の方式**を、推奨とまったく同じ delay/sm で
+                    #   出す(2026-08-16)。2方式は『予算の割り方』が構造的に違う:
+                    #     前夜指値 = 価格は寄り値(有利) / 発注枠で集中できない
+                    #     09:00確認 = 価格は09:05(不利) / 約定数で割れる=集中できる
                     #   delay/sm を揃えないと3つずれて比較にならない。
                     for _eqg6 in _gaps:
-                        _hvars.append((
-                            f"H寄り確認{_eqg6:+.0f}bpd{_eqd4}{_gsl}",
-                            0, False, _eqd4, "fill", None, _eqg6, _eqsm2))
+                        _hvars.append(_eq_var(
+                            f"{_eq_pref(_eqg6, not _EQ_CONF)}d{_eqd4}{_gsl}",
+                            _eqd4, _eqg6, _eqsm2))
                     # ★★ ATR期間を掃く (2026-08-15 の監査で最後に残った継承値)
                     #   ⛔ 14 は **スイング戦略(10日保有)からの継承**。sm/tm は
                     #      すべて ATR 倍率なので、この期間が損切り・利確の
@@ -10879,9 +10922,9 @@ function switchTbd(id, tab) {{
                         _asl = ("" if not _eqsm2 else
                                 ("損切なし" if _eqsm2 >= 90
                                  else f"sm{_eqsm2:g}"))
-                        _hvars.append((f"{_eqb4}{_asl}ap{_eqap}", 0, True,
-                                       _eqd4, "fill", _eqg4, None, _eqsm2,
-                                       None, _eqap))
+                        _hvars.append(_eq_var(f"{_eqb4}{_asl}ap{_eqap}",
+                                              _eqd4, _eqg4, _eqsm2,
+                                              None, _eqap))
                     for _eqtm in [float(x) for x in str(os.environ.get(
                             "LSS_EQ_TMS", "0.5,1.5,2,3")).split(",")
                             if str(x).strip().replace(".", "").isdigit()]:
@@ -10890,9 +10933,8 @@ function switchTbd(id, tab) {{
                         _tsl = ("" if not _eqsm2 else
                                 ("損切なし" if _eqsm2 >= 90
                                  else f"sm{_eqsm2:g}"))
-                        _hvars.append((f"{_eqb4}{_tsl}tm{_eqtm:g}", 0, True,
-                                       _eqd4, "fill", _eqg4, None, _eqsm2,
-                                       _eqtm))
+                        _hvars.append(_eq_var(f"{_eqb4}{_tsl}tm{_eqtm:g}",
+                                              _eqd4, _eqg4, _eqsm2, _eqtm))
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
                     in ("0", "false", "no"):
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
@@ -11072,7 +11114,7 @@ function switchTbd(id, tab) {{
     #   差し替えられる(閾値/上位N絞りを変えて比べたいとき)。
     #   例: set LSS_EQ_TAB_KEY=H指値+50bp寄指資金均等上位5
     _EQ_TAB_KEY = str(os.environ.get(
-        "LSS_EQ_TAB_KEY", "H指値+50bp寄指資金均等")).strip()
+        "LSS_EQ_TAB_KEY", _eq_pref_of(50) + "資金均等")).strip()
     # 元になる変種名(資金均等・上位N を剥がしたもの)。上位N版をどの閾値に
     # 付けるかの判定に使う。
     _EQ_TAB_BASE = _EQ_TAB_KEY.split("資金均等")[0]
@@ -11082,7 +11124,9 @@ function switchTbd(id, tab) {{
     _EQ_TAB_TOP = "".join(_c for _c in _EQ_TAB_KEY.split("上位")[-1]
                           if _c.isdigit()) if "上位" in _EQ_TAB_KEY else ""
     _EQ_TAB_DLY = ""
-    for _c in (_EQ_TAB_BASE.split("寄指d")[-1] if "寄指d" in _EQ_TAB_BASE else ""):
+    for _c in (_EQ_TAB_BASE.split("寄指d")[-1] if "寄指d" in _EQ_TAB_BASE
+               else (_EQ_TAB_BASE.split("bpd")[-1]
+                     if "bpd" in _EQ_TAB_BASE else "")):
         if not _c.isdigit():
             break
         _EQ_TAB_DLY += _c
@@ -11156,7 +11200,8 @@ function switchTbd(id, tab) {{
     #   空文字にすれば出さない。旧設定に戻すなら
     #   set LSS_EQ_TAB_KEY2=H指値+50bp寄指d4資金均等
     _EQ_TAB_KEY2 = str(os.environ.get(
-        "LSS_EQ_TAB_KEY2", "H指値+50bp寄指d4sm0.5資金均等")).strip()
+        "LSS_EQ_TAB_KEY2",
+        _eq_pref_of(50) + "d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
@@ -11619,8 +11664,13 @@ function switchTbd(id, tab) {{
                   f"\n      ⛔ 分母: `H指値…寄指`(前夜に寄付指値)は **候補数**"
                   f"(約定+不約定)で割る。株数を前夜に決めるしかないので"
                   f"約定数で割るのは先読み。`H寄り確認`(09:00に見てから発注)"
-                  f"だけが約定数で割ってよい。比較用に『約定数割』も1本出す",
-                  flush=True)
+                  f"だけが約定数で割ってよい。比較用に『約定数割』も1本出す"
+                  f"\n      ★ 方式: "
+                  + ("**09:00確認**(始値を見てから発注 / 約定09:05)"
+                     if _EQ_METHOD_CONF else "**前夜 寄付指値**(約定は寄り値)")
+                  + f" ← set LSS_EQ_METHOD="
+                  + ("limit" if _EQ_METHOD_CONF else "confirm")
+                  + " で切替", flush=True)
     except Exception as _eqe:
         print(f"[E/H] 資金均等版の生成に失敗: {_eqe}", flush=True)
 
@@ -12014,8 +12064,11 @@ function switchTbd(id, tab) {{
             try:
                 # J(資金均等)は発注時点でギャップが分かるので、予算で切る
                 # 順番もギャップ降順にする(⚖比較の同名列と同じキー)。
+                # ⛔ ただし **前夜指値(H指値…寄指)は09:00までギャップが
+                #    分からない** ので、そちらは流動性順で切る(2026-08-16)。
                 _ok = (_eq_order_key
-                       if ("資金均等" in str(_srck) and _EQ_ORDER != "liq")
+                       if ("資金均等" in str(_srck) and _EQ_ORDER != "liq"
+                           and not str(_srck).startswith("H指値"))
                        else None)
                 with _ptimer("方式ごとの予算シミュ(E/H/J/K)"):
                     _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
@@ -14971,8 +15024,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #    ギャップ降順にする。ここを流動性順のままにすると、
                 #    サイズだけギャップで決めて、削る相手は別の軸で選ぶ、
                 #    という一貫しない模型になる(2026-08-15 指摘)。
+                # ⛔ 前夜指値はギャップで並べられない(09:00まで不明)。
                 _ok = (_eq_order_key
-                       if ("資金均等" in str(_hk) and _EQ_ORDER != "liq")
+                       if ("資金均等" in str(_hk) and _EQ_ORDER != "liq"
+                           and not str(_hk).startswith("H指値"))
                        else None)
                 _sets.append((_hk, _run_budget_sim(
                     _BUD_FLOOR, src=_hax, order_key=_ok,
@@ -16939,10 +16994,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _k2["div"] = "約定数割" in _s
             # 発注方式そのもの(ギャップ閾値 / 寄指か / 資金均等か)は
             # **つまみではなく別の方式**なので、揃っていない行は兄弟にしない。
-            _m6 = _re_kn.search(r"H指値([+-]\d+)bp", _s)
+            # ⚠ 確認方式(H寄り確認+50bpd4)の閾値も拾う(2026-08-16)。拾わないと
+            #   +0bp と +50bp が『つまみ0個違い』になり、閾値を判定できない。
+            _m6 = _re_kn.search(r"H(?:指値|寄り確認)([+-]\d+)bp", _s)
             _k2["_gap"] = _m6.group(1) if _m6 else "—"
             _k2["_eq"] = "資金均等" in _s
-            _k2["_auc"] = "寄指" in _s
+            # 方式そのもの。寄指(前夜指値) / 確認(09:00に見てから) は別物。
+            _k2["_auc"] = ("確認" if "H寄り確認" in _s
+                           else ("寄指" if "寄指" in _s else ""))
             return _k2
 
         _audit = ""
