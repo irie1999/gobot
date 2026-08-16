@@ -104,6 +104,31 @@ for lo, hi in _bins:
     print(f"    {_lbl:>10}  {n:>4}日  "
           f"{'█' * max(1, int(n / max(1, len(_days)) * 50))}{_mark}")
 
+# ── 必要バッチ数 (登録上限で割る) ───────────────────────────────────────
+print(f"\n  必要バッチ数（登録上限{args.cap}件で割った回数）:")
+_bt = {}
+for d in _days:
+    _nb = -(-len(_by_day[d]) // args.cap)      # 切り上げ
+    _bt[_nb] = _bt.get(_nb, 0) + 1
+_cum = 0
+for _nb in sorted(_bt):
+    _cum += _bt[_nb]
+    print(f"    {_nb}バッチ  {_bt[_nb]:>4}日 "
+          f"({_bt[_nb] / len(_days) * 100:>4.0f}%)  累積 "
+          f"{_cum / len(_days) * 100:>3.0f}%")
+_avg_b = sum(_nb * n for _nb, n in _bt.items()) / len(_days)
+print(f"    平均 {_avg_b:.2f}バッチ/日")
+print(f"\n  ★ バッチ回しが成立した場合の所要時間の目安"
+      f"(1バッチ ≒ 読み6秒 + 待ち1秒 = 7秒):")
+for _lbl, _nb in (("中央", -(-_q(0.5) // args.cap)),
+                  ("75%点", -(-_q(0.75) // args.cap)),
+                  ("95%点", -(-_q(0.95) // args.cap)),
+                  ("最大", -(-_cnt[-1] // args.cap))):
+    print(f"    {_lbl:>5}  {_nb}バッチ = 約 {_nb * 7:>3}秒")
+print(f"    平均 約 {_avg_b * 7:.0f}秒")
+print("    ⚠ ただし **再登録がウォームなら**の話。毎回コールドなら1バッチ125秒。"
+      "\n       確かめるのは check_board_limits.py --rotate 100")
+
 print("\n" + "=" * 70)
 print("■ 判定")
 print("=" * 70)
