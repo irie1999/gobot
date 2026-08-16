@@ -62,7 +62,13 @@ if not exist "lss_proposal_full.py" (
 REM Keep the research run from clobbering lss_trades.csv, which .\fills reconciles
 REM against the live H orders (CLAUDE.md 18.29).
 set "LSS_TRADES_CSV=lss_trades_hvar.csv"
+REM Keep the research run from clobbering holdout_selected_symbols.py, which the
+REM LIVE order path reads (kabu_send_lss._load_symbols). Switching this bat to the
+REM no-selection pool overwrote it with 8,106 pairs on 2026-08-16 - the next
+REM morning's order list would silently have been a different universe.
+set "LSS_SELECTED_OUT=holdout_selected_symbols_hvar.py"
 set "LSS_H_VARIANT_TAB=1"
 call dailyfast.bat --days 365 --no-serve --no-h-tab --lss-proposal lss_proposal_full.py %*
 set "LSS_H_VARIANT_TAB="
 set "LSS_TRADES_CSV="
+set "LSS_SELECTED_OUT="

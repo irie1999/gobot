@@ -1246,7 +1246,15 @@ try:
                 _sel_seen.add(_k)
                 _sel.append((_code, _name, _strat))
     _sel_suffix = "_short" if _args.short else ""
-    _sel_path = Path(f"holdout_selected_symbols{_sel_suffix}.py")
+    # ⛔⛔ **このファイルはライブの発注経路が読む**(kabu_send_lss._load_symbols)。
+    #    研究用の実行(別の母集団・別の提案ファイル)で上書きすると、
+    #    翌朝の発注リストが黙って別物になる。2026-08-16 に .\hvar を
+    #    『選定なし』へ切り替えた際、8,106ペアで上書きしてしまった。
+    #    → 研究の実行は LSS_SELECTED_OUT で **別名に逃がす**こと
+    #      (hvar.bat が設定済み)。空文字にすれば出力そのものを止められる。
+    _sel_env = os.environ.get("LSS_SELECTED_OUT")
+    _sel_path = Path(str(_sel_env).strip() if _sel_env
+                     else f"holdout_selected_symbols{_sel_suffix}.py")
     _sel_lines = [
         '"""holdout_selected_symbols.py — run_signals_holdout_all が選定した',
         f'(銘柄, 名前, 戦略) の重複なし一覧。{TODAY} 自動生成。',
@@ -1258,8 +1266,13 @@ try:
     for _code, _name, _strat in _sel:
         _sel_lines.append(f"    ({_code!r}, {_name!r}, {_strat!r}),")
     _sel_lines.append("]")
-    _sel_path.write_text("\n".join(_sel_lines), encoding="utf-8")
-    print(f"[export] holdout選定 {len(_sel)}ペア → {_sel_path}")
+    if _sel_env is not None and not str(_sel_env).strip():
+        print("[export] holdout選定: 出力しません (LSS_SELECTED_OUT が空)")
+    else:
+        _sel_path.write_text("\n".join(_sel_lines), encoding="utf-8")
+        print(f"[export] holdout選定 {len(_sel)}ペア → {_sel_path}"
+              + ("  ⚠ **ライブの発注経路が読むファイルです**"
+                 if not _sel_env else "  (研究用の別名)"))
 except Exception as _e:
     print(f"[export] holdout_selected_symbols 出力失敗: {_e}")
 
