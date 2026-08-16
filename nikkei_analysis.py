@@ -2598,13 +2598,33 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
             return (str(_sym).upper().removesuffix(".T").split(".")[0],
                     str(_strat)) in _ok_pool
         _n_before = len(all_items)
-        all_items = [it for it in all_items if _pool_ok(it[0], it[2])]
-        source_map = {k: v for k, v in source_map.items() if _pool_ok(k[0], k[1])}
-        primary_cfg = {k: v for k, v in primary_cfg.items()
-                       if _pool_ok(k[0], k[2])}
-        print(f"  [発注リスト] {_SIGNAL_POOL_FILE} で絞り込み: "
-              f"{_n_before:,} → {len(all_items):,}ペア "
-              f"(損益タブは絞り込み前の母集団のまま)", flush=True)
+        # ⛔⛔ キーの並びが2種類ある。取り違えると **シグナルが全滅する**
+        #    (2026-08-16 に実際に発生):
+        #      all_items   … (sym, name, strat, is_stop) → 戦略は [2]
+        #      source_map  … (sym, strat)                → 戦略は [1]
+        #      primary_cfg … (sym, strat, is_stop)       → 戦略は **[1]**
+        #    primary_cfg で [2](= is_stop の bool)を渡していたため
+        #    ("7203", "True") を探すことになり **1件も一致せず空**に。
+        #    _check_one は primary_cfg に無い銘柄を「重複」とみなして
+        #    check_signal_on_date を呼ばないので、発注リストが丸ごと消えた
+        #    (シグナルタブ 0.2s = 全件 即 return していた)。
+        _ai2 = [it for it in all_items if _pool_ok(it[0], it[2])]
+        _sm2 = {k: v for k, v in source_map.items() if _pool_ok(k[0], k[1])}
+        _pc2 = {k: v for k, v in primary_cfg.items() if _pool_ok(k[0], k[1])}
+        # ★ 絞った結果が空なら **絞り込みを捨てて続行する**。黙って進むと
+        #   「シグナルなし」が正常に見えてしまう(上のバグがまさにそれ)。
+        if not _ai2 or not _pc2:
+            print(f"  ⛔ 発注リストが空になりました "
+                  f"(all_items={len(_ai2):,} / primary_cfg={len(_pc2):,})。"
+                  f"{_SIGNAL_POOL_FILE} の銘柄コード・戦略名が WATCHLIST と"
+                  f"噛み合っていません。**絞り込みを外して続行します**",
+                  flush=True)
+        else:
+            all_items, source_map, primary_cfg = _ai2, _sm2, _pc2
+            print(f"  [発注リスト] {_SIGNAL_POOL_FILE} で絞り込み: "
+                  f"{_n_before:,} → {len(all_items):,}ペア "
+                  f"(発注判定 {len(primary_cfg):,}件 / "
+                  f"損益タブは絞り込み前の母集団のまま)", flush=True)
 
     # configごとにパラメータを設定して並列実行（パラメータ競合を避けるため順次処理）
     signals: list[dict] = []
@@ -3269,8 +3289,19 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     sig_label = str(target_date) if target_date else str(_TODAY)
     if not signals:
         note = f"（スコア{min_score}点以上）" if min_score > 0 else ""
+        # ⛔ 「シグナルなし」は **本当に無い** ときと **絞り込みで消えた**
+        #    ときの区別が付かない(2026-08-16 に primary_cfg のキー取り違えで
+        #    全滅し、正常な表示に見えていた)。判定した件数を必ず出す。
         return (score_section +
-                f'<div style="color:#64748b;padding:30px;text-align:center">{sig_label} のシグナルなし {note}</div>')
+                f'<div style="color:#64748b;padding:30px;text-align:center">'
+                f'{sig_label} のシグナルなし {note}'
+                f'<div style="font-size:0.78rem;color:#475569;margin-top:8px">'
+                f'判定対象 {len(primary_cfg):,}ペア / 母集団 {len(all_items):,}ペア'
+                + (f' / 発注リスト絞り込み: <b>{_SIGNAL_POOL_FILE}</b>'
+                   if _SIGNAL_POOL else '')
+                + f'<br>⚠ 判定対象が 0 なら絞り込みの不整合です'
+                f'（本当にシグナルが無いのとは別）。'
+                f'土日・祝日は直近の営業日の引けで判定します</div></div>')
 
     col_map = {"★★★": "#4ade80", "★★": "#60a5fa", "★": "#fbbf24", "△": "#f87171"}
     try:
