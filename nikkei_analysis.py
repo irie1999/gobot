@@ -11237,6 +11237,7 @@ function switchTbd(id, tab) {{
             _samts: list = []         # **銘柄単位**に合算した建玉額(重複保有込み)
             _cnts: list = []          # 1日あたりの件数(絞ったあと)
             _cnts_raw: list = []      # 同(絞る前)。どれだけ捨てたかを見る
+            _dens: list = []          # 実際に割った分母(候補数 or 約定数)
             _capped = 0               # 単元上限(株数)に当たった件数
             _ycap = 0                 # 金額上限で削った件数
             _dropped = 0              # 上位N絞りで建てなかった件数
@@ -11299,6 +11300,7 @@ function switchTbd(id, tab) {{
                     _den = _cand_n.get(_d, len(_lst))
                     if _top > 0:
                         _den = min(_den, _top)
+                _dens.append(_den)
                 _per = _budget / max(1, _den)
                 # ★ 金額上限。単元上限(株数)は株価で意味が6倍変わるので、
                 #   本来はこちらで切るべき。0=無効。
@@ -11405,6 +11407,12 @@ function switchTbd(id, tab) {{
                 "d3": sum(1 for c in _cnts if c <= 3),
                 "d5": sum(1 for c in _cnts if c <= 5),
                 "per_day_raw_med": _q(_cnts_raw, 0.5),
+                # ★ 分母(2026-08-16)。指値方式は **候補数**で割るので、
+                #   約定数との差がそのまま『使えない資金』になる。
+                #   fill_pct が低いほど資金が遊ぶ = 集中できない。
+                "den_med": _q(sorted(_dens), 0.5),
+                "den_is_cand": (_nf is not None),
+                "fill_pct": (sum(_cnts) / max(1, sum(_dens)) * 100.0),
                 "dropped": _dropped,
                 "amt_med": _q(_amts, 0.5),
                 "amt_p95": _q(_amts, 0.95),
@@ -11419,13 +11427,14 @@ function switchTbd(id, tab) {{
             }
             return _out, _st
 
-        # ★ 資金均等は **始値約定版(H指値+Nbp寄指)にも掛ける**(2026-08-15)。
-        #   ユーザー方針: 寄り付き直後に完全自動で発注するので、約定価格は
-        #   **始値で近似してよい**。すると 09:00確認方式は
-        #     価格 = 始値(=指値版と同じ) / サイズ = 予算÷件数(確認方式だけの利点)
-        #   になる。つまり実運用の姿は **指値版 + 資金均等**。
-        #   09:05版は「発注が5分遅れた場合」の **保守側の下限** として残す。
-        #   真の値はこの2つの間にあり、.\fills の実約定で確定する。
+        # ★ 資金均等は 指値版(H指値+Nbp寄指) にも 確認版(H寄り確認) にも掛ける。
+        # ⛔ **訂正 (2026-08-16)**: ここには「実運用の姿は 指値版 + 資金均等」と
+        #    書いてあったが誤り。指値版は **前夜に注文を置く**ので株数も前夜に
+        #    決めるしかなく、予算を **約定数**で割ることはできない(先読み)。
+        #    分母は候補数。集中できるのは確認版だけ。
+        #      指値版 = 価格 寄り値(有利) / 分母 候補数(集中できない)
+        #      確認版 = 価格 09:05(不利)  / 分母 約定数(集中できる)
+        #    どちらが勝つかは測らないと分からないので **両方出す**。
         # ⚠ "H指値+50bp寄指d0" のような delay 版も拾う(末尾一致では落ちる)。
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
                     if "資金均等" not in str(k)
@@ -15282,7 +15291,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    f'({_st.get("per_day_raw_med", 0):.0f})</span>'
                    if _st.get("per_day_raw_med", 0) > _st["per_day_med"] else "")
                 + f'</td>'
-                f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
+                # ★ 分母(2026-08-16)。指値方式は候補数で割るしかないので、
+                #   約定率がそのまま『使えない資金の割合』になる。
+                + (f'<td style="text-align:right;padding:2px 8px;'
+                   f'white-space:nowrap;color:'
+                   f'{"#fbbf24" if _st.get("den_is_cand") else "#94a3b8"}">'
+                   f'{_st.get("den_med", 0):.0f}'
+                   f'<br><span style="font-size:0.68rem;color:#64748b">'
+                   + ("候補数<br>約定" if _st.get("den_is_cand") else "約定数<br>fill")
+                   + f' {_st.get("fill_pct", 100):.0f}%</span></td>')
+                + f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                 f'white-space:nowrap">{_st["per_day_min"]:.0f}'
                 + (f'<br><span style="color:#64748b;font-size:0.68rem">'
                    f'1件{_st.get("d1", 0)}日 / 2件以下{_st.get("d2", 0)}日'
@@ -15477,6 +15495,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<b>絞る前</b>の件数です。閾値を上げるのと違い、'
                 f'<b>絞り具合がその日の中の相対順位で決まる</b>ので、'
                 f'合格が少ない日はそのまま全部建てます。'
+                f'<br>⛔⛔ <b>「分母」列が方式の本質です</b>（2026-08-16）。'
+                f'<b>H指値…寄指</b> は <b>前夜に寄付指値を置く</b>ので株数も前夜に'
+                f'決めるしかなく、どれが約定するかは 09:00 まで分かりません。'
+                f'したがって予算は <b>候補数（約定+不約定）</b>で割るしかなく、'
+                f'<b>約定しなかったぶんの資金は丸ごと遊びます</b>'
+                f'（約定率がそのまま稼働率の上限）。'
+                f'約定数で割るのは<b>先読み</b>です。比較用に'
+                f'<code>…約定数割</code> の行を1本だけ出しているので、'
+                f'<b>その差が先読みの大きさ</b>です。<br>'
+                f'一方 <b>H寄り確認</b> は 09:00 に始値を見て件数が確定してから'
+                f'発注するので <b>約定数で割ってよい＝集中できます</b>。'
+                f'代わりに約定は 09:05（寄り値より不利）。'
+                f'<b>価格は指値が有利・割り当ては確認が有利</b>で、'
+                f'どちらが勝つかはこの表で比べてください。'
                 f'<br>⛔ <b>「銘柄計」は同じ銘柄が同日に複数戦略で出たぶんを合算</b>'
                 f'した値です。資金均等は <code>予算÷件数</code> で割るので、'
                 f'同じ銘柄が2枠取ると<b>その銘柄への露出は2倍</b>になります'
@@ -15503,7 +15535,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'<table style="border-collapse:collapse;font-size:0.8rem">'
                 f'<thead><tr><th style="{_th};text-align:left">方式</th>'
                 f'<th style="{_th}">件数/日 中央<br><span style="font-weight:400;'
-                f'font-size:0.68rem">(絞る前)</span></th><th style="{_th}">最少</th>'
+                f'font-size:0.68rem">(絞る前)</span></th>'
+                f'<th style="{_th}">分母<br><span style="font-weight:400;'
+                f'font-size:0.68rem">(予算を割った数)</span></th>'
+                f'<th style="{_th}">最少</th>'
                 f'<th style="{_th}">1銘柄 中央</th>'
                 f'<th style="{_th}">95%点<br><span style="font-weight:400;'
                 f'font-size:0.68rem">(予算比)</span></th>'
