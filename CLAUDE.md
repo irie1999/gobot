@@ -6096,3 +6096,29 @@ env は `LSS_EQ_TAB_L`(既定 = `_EQ_TAB_KEY2`)。
 | 4 | 50件の壁を破る(バッチ回し・気配) | ↓ 上限 +9%。2 の結果次第でゼロ |
 
 **#1 のリスク(優位の半分が消える)が #2〜#4 の利得(+9%)を圧倒している。**
+
+---
+
+### 18.43 ⛔ argparse の help に生の `%` を書かない (2026-08-16)
+
+**`ValueError: badly formed help string` で スクリプトが起動すらしない。**
+
+```python
+help="これを超えるギャップは見送り(現行の±3%ガード)"    # ⛔ 落ちる
+help="これを超えるギャップは見送り(現行の±3%%ガード)"   # ✅
+```
+
+argparse は help を `help % params` で展開する。**Python 3.14 から
+`add_argument()` の時点で検証される**ので、生の `%` があると
+実行前に例外になる(3.13 までは `--help` を出したときだけ落ちた)。
+
+日本語だと `%ガ` のように**次の文字がマルチバイト**になり、
+`unsupported format character '?' (0x30ac)` という読みにくいエラーが出る。
+
+- リテラルの `%` は必ず **`%%`**
+- 正当なのは `%%` と `%(default)s` などの `%(` だけ
+- **f-string の help も同じ**(argparse は展開後の文字列に % 書式を掛ける)
+
+全 340ファイルを AST で走査して該当は `k_open_confirm.py` の2件のみ。修正済み。
+再走査するときは `add_argument` の `help`/`metavar` と `ArgumentParser` の
+`description`/`epilog` を見ること。

@@ -65,7 +65,11 @@ ap.add_argument("--workers", type=int, default=2,
                 help="⛔ 上げても速くならず429が増えるだけ(実測)")
 ap.add_argument("--gap-bp", type=float, default=50.0, help="合格とするギャップ(bp)")
 ap.add_argument("--guard-bp", type=float, default=300.0,
-                help="これを超えるギャップは見送り(現行の±3%ガード)")
+                # ⛔ argparse の help は % 書式として展開される。Python 3.14 は
+                #    add_argument の時点で検証するので、生の % があると
+                #    ValueError: badly formed help string で **起動すらしない**。
+                #    リテラルの % は必ず %% と書くこと(2026-08-16 に実際に落ちた)。
+                help="これを超えるギャップは見送り(現行の±3%%ガード)")
 ap.add_argument("--budget", type=float, default=400.0, help="予算(万円)")
 ap.add_argument("--max-yen", type=float, default=50.0, help="1銘柄の上限(万円)")
 ap.add_argument("--max-lot", type=int, default=10, help="1銘柄の最大単元")
@@ -77,7 +81,7 @@ ap.add_argument("--now", action="store_true", help="待たずに いま1回読�
 ap.add_argument("--poll", action="store_true",
                 help="09:00 以降も回し続け、**寄った銘柄から順に**拾う")
 ap.add_argument("--poll-until", type=str, default="09:30",
-                help="--poll の締切(実測: 遅寄りの93%が09:06までに寄る)")
+                help="--poll の締切(実測: 遅寄りの93%%が09:06までに寄る)")
 ap.add_argument("--every", type=int, default=10, help="--poll の間隔(秒)")
 ap.add_argument("--now-polls", type=int, default=3,
                 help="--now --poll のとき何周だけ回すか(動作確認用)")
