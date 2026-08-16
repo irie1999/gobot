@@ -11263,9 +11263,12 @@ function switchTbd(id, tab) {{
                 + (f"({_capN}件以下の日だけ)" if _ymL and _capN > 0 else "")
                 + (" 充填" if str(_k).endswith("充填") else "")
                 + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else "")
-                # ⛔ 分母。無印(候補数割)が実装できる形。約定数割は先読み。
+                # ⛔ 分母は **方式で違う**(2026-08-16 修正)。確認方式は 09:00 に
+                #    合格数が確定するので約定数で割ってよい。前夜指値だけが
+                #    候補数で割るしかない(約定数割は先読み)。
                 + (" ⛔約定数で割る(先読み)" if "約定数割" in str(_k)
-                   else " 予算÷候補数"))
+                   else (" 予算÷約定数" if str(_b).startswith("H寄り確認")
+                         else " 予算÷候補数")))
 
     # ★★ J/K タブの中身 (2026-08-16 ユーザー依頼)。
     #   J = 実装版(選定あり + watch50)   ← いま kabu だけで作れる形
@@ -17602,12 +17605,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f't={_bb[4]:+.2f}・{_bb[7]}/{_bb[8]}勝）。<br>{_wtxt}</div>')
 
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
-        # ★ 監査ボードは **折りたたまない**。毎回ここだけ見れば済むようにする。
+        # ★ 監査ボードは **既定で閉じる**(2026-08-16 ユーザー指示)。
+        #   縦に長く、毎日見るものではない(つまみを掃くときだけ)。
         _abd = ("" if not _audit else (
-            f'<div style="background:#0f172a;border:2px solid #22d3ee;'
+            f'<details style="background:#0f172a;border:2px solid #22d3ee;'
             f'border-radius:8px;padding:12px 16px;margin:0 0 14px">'
-            f'<div style="color:#22d3ee;font-weight:700;font-size:0.95rem;'
-            f'margin-bottom:6px">☑ 設定監査ボード — <b>まずここだけ見てください</b></div>'
+            f'<summary style="color:#22d3ee;font-weight:700;font-size:0.95rem;'
+            f'margin-bottom:6px;cursor:pointer">'
+            f'☑ 設定監査ボード（つまみを1つだけ動かした版・クリックで展開）</summary>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'基準は<b>いま推奨している設定</b>（緑の行）。そこから'
             f'<b>つまみを1つだけ</b>動かした版を並べています。'
@@ -17654,7 +17659,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">1銘柄の集中<br><span style="font-weight:400;'
             f'font-size:0.66rem">銘柄計95%点 / 最大（予算比）</span></th>'
             f'<th style="{_th};text-align:left">判定</th></tr></thead>'
-            f'<tbody>{_audit}</tbody></table></div>'))
+            f'<tbody>{_audit}</tbody></table></details>'))
         return (
             _abd
             + f'<details style="background:#0f172a;border:1px solid #475569;'
@@ -18807,8 +18812,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" '
             f'class="detail-tab-pane{_act("eh" + _ehk)}">'
-            f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
-            f'🔁 <b>エントリー方式 {_ehk}</b>: {_desc}。'
+            # ★ 説明は既定で閉じる(2026-08-16 ユーザー指示)。縦に長く、
+            #   毎日読むものではない。要点(方式名)は summary に出す。
+            f'<details style="margin-bottom:10px">'
+            f'<summary style="color:{_tc};font-size:0.8rem;cursor:pointer">'
+            f'🔁 <b>エントリー方式 {_ehk}</b> — {_lbl}（説明を開く）</summary>'
+            f'<p style="color:{_tc};font-size:0.8rem;margin:6px 0 0">'
+            f'{_desc}。'
             f'シグナル・銘柄選定・発注順・決済(損切/利確/引け成行)は'
             f'<b>現行とまったく同一</b>で、違うのは<b>注文の出し方だけ</b>。'
             + (f'株数だけが違います（H は100株固定 / {_ehk} は '
@@ -18873,7 +18883,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                f'(毎日 {_ORD_LBL}で注文額の累計が{_budget_man}万円に収まるだけ注文 / '
                f'不約定も発注枠を消費 / 同日決済なので予算は毎日リセット)。')
             + f'<b>比較は下の「⚖ 注文方式の比較」表を見ること</b>'
-            f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。</p>'
+            f'（同じ計算から作っているので、外部ツールと突き合わせる必要はありません）。'
+            f'</p></details>'
             # ⛔ ⚖比較 + H設定比較は巨大なので、**既定で開くタブにだけ**入れる。
             #    E/H/J/K の全ペインに積むと HTML が数倍になる(2026-08-15)。
             + (_EH_CMP_HTML if ("eh" + _ehk) == _DEF_TAB else
