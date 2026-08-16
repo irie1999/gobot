@@ -111,6 +111,10 @@ ap.add_argument("--rotate", type=int, default=0,
                 help="【重要】N銘柄を50件ずつ **バッチで回して** 全部読めるかを測る。"
                      "登録→読み→全解除 を2周し、2周目が速ければ kabu が購読を"
                      "覚えている = 分割して読める。遅ければ毎回コールドで不可")
+ap.add_argument("--batch-wait", type=float, default=1.0,
+                help="--rotate のバッチ間で待つ秒数。/register にもレート制限が"
+                     "あるので連打すると429になる。**本番でも必要な待ち**なので"
+                     "合計秒に含めて測る")
 ap.add_argument("--batch", type=int, default=50,
                 help="--rotate の1バッチの件数(kabu の登録上限。既定50)")
 ap.add_argument("--ws", action="store_true",
@@ -242,6 +246,10 @@ if args.rotate > 0:
             _got = sum(1 for x in _res if x[2])
             cli.unregister_all()
             _det.append((_bi, len(_b), _nok, _got, _t1 - _t0, _t2 - _t1))
+            # ⛔ register のレート制限。バッチを連続で回すと 429 になる。
+            #    ⚠ この待ちは **本番でも必要**なので、09:00 のバッチ回しの
+            #      所要時間にはこのぶんも乗る(合計秒には含めて測っている)。
+            time.sleep(args.batch_wait)
         _tot = time.time() - _tr
         _rounds.append((_tot, _det))
         print(f"\n  ── {_rd}周目: 合計 {_tot:.2f}s ──")
@@ -483,6 +491,10 @@ if args.cap_probe.strip():
                  f"⛔ **総登録数の上限が {_last_ok}件**"
                  f"(既に{_last_ok}件あると1件も足せない)"))
     cli.unregister_all()
+    # ⛔ /register にもレート制限がある(2026-08-16 実測)。プローブで連打した
+    #    直後にそのまま次へ進むと 429 になり、以降の測定が全部壊れる。
+    print("     (register のレート制限を避けるため 5秒待ちます)")
+    time.sleep(5.0)
     if _cap_found is None:
         print(f"     → 試した範囲({max(_probe)}件)では上限に当たりませんでした")
     else:

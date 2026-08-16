@@ -254,13 +254,32 @@ class KabuClient:
         url = f"{self.base_url}/kabusapi/register"
         body = {"Symbols": [{"Symbol": str(s), "Exchange": exchange}
                             for s in _new]}
-        try:
-            r = requests.put(url, headers=self._headers(with_content=True),
-                             json=body, timeout=self.timeout)
-            r.raise_for_status()
-            _data = r.json() if r.content else {}
-        except Exception as e:
-            print(f"  ⚠ 銘柄一括登録(register)失敗 ({len(_new)}件): {e}")
+        # ⛔ **/register にもレート制限がある**(2026-08-16 実測)。上限プローブの
+        #    直後に登録すると 429 が返り、そこから連鎖して以降の測定が全部
+        #    壊れた。登録→全解除を短時間で繰り返す用途(バッチ回し)では必ず出る。
+        #    ⚠ 400(上限超過など)は**再試行しても無駄**なので即あきらめる。
+        _data = {}
+        for _try in range(5):
+            try:
+                r = requests.put(url, headers=self._headers(with_content=True),
+                                 json=body, timeout=self.timeout)
+                if r.status_code == 429:
+                    _w = 1.0 * (_try + 1)
+                    print(f"  ⚠ register レート制限(429): {_w:.1f}秒待って再試行 "
+                          f"({_try + 1}/5)")
+                    time.sleep(_w)
+                    continue
+                r.raise_for_status()
+                _data = r.json() if r.content else {}
+                break
+            except Exception as e:
+                if "429" in str(e) and _try < 4:
+                    time.sleep(1.0 * (_try + 1))
+                    continue
+                print(f"  ⚠ 銘柄一括登録(register)失敗 ({len(_new)}件): {e}")
+                return {}
+        else:
+            print(f"  ⛔ register が 429 のまま5回失敗しました ({len(_new)}件)")
             return {}
         # 実際に受理されたものだけをキャッシュに入れる(上限で切られる可能性)
         _ok = {str(x.get("Symbol")) for x in (_data.get("RegistList") or [])}
