@@ -517,6 +517,23 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                             continue      # 締切までに寄らなかった = 建てない
                     else:
                         _wv = int(_hcut)  # 一括: 全員 締切時刻で建てる
+                    # ★★ 『即時』版 (2026-08-16 ユーザー指摘)。
+                    #   1分ポーリングで寄りを検知できるなら、**判定は各銘柄の
+                    #   始値でできる**(判定に件数は要らない)。件数が要るのは
+                    #   **サイズ決定**だけ。この版は
+                    #     約定価格 … 自分の始値(=検知即発注)
+                    #     サイズ   … 段の配分(件数が確定してから)
+                    #   に分けたときの上限を測る。段の値で建てる版との差が
+                    #   そのまま **執行速度の価値** になる。
+                    #   ⚠ そのままでは実装できない(サイズが決まる前に発注する
+                    #     ことになる)。100株だけ即建てて段で積み増す形なら
+                    #     部分的に実現できる。
+                    if "即時" in str(_hn):
+                        _cases.append((_hn, float(o1 or 0.0), float(o1 or 0.0),
+                                       bool(_g_ok and (o1 or 0) > 0),
+                                       int(_hd), _hanc, f"cut0w{_wv}",
+                                       _sm_v, _tm_v, _hap))
+                        continue
                     _cut_i = None
                     try:
                         for _bi2 in range(len(day5)):
@@ -590,7 +607,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             if _is_late:
                 _n_late[key] = _n_late.get(key, 0) + 1
                 _late_hm[_first_hm] = _late_hm.get(_first_hm, 0) + 1
-            if _no_open_bar and _at_open and _dly > 0:
+            # ⚠ この補正は「建玉が **その日の先頭バーから** 始まる」ときだけ。
+            #   段階/締切モードで先頭より後のバーから建てる場合、スライスの
+            #   先頭は実在するバーなので欠落補正は要らない(2026-08-16)。
+            _from0 = (not str(_mode).startswith("cut")) \
+                or str(_mode)[3:].split("w")[0] in ("", "0")
+            if _no_open_bar and _at_open and _from0 and _dly > 0:
                 _dly -= 1
             if not ok or ep <= 0:
                 # ★ day_open を渡す(2026-08-15)。不約定側にも h_gap_bp が
