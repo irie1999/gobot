@@ -16965,7 +16965,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         def _knobs(_nm: str) -> dict:
             _s = str(_nm)
             _k2: dict = {}
-            _m1 = _re_kn.search(r"寄指d(\d+)", _s)
+            # ⛔ 確認方式(H寄り確認+50bpd4)は "寄指d" を持たない(2026-08-16)。
+            #    拾わないと **delay の行が全部 delay=既定 と読まれ**、
+            #    名前に sm が無いことと合わさって「損切ATR 0.5→0.1」が
+            #    delay の本数ぶん並ぶ(実際にそうなった)。
+            _m1 = _re_kn.search(r"(?:寄指d|bpd)(\d+)", _s)
             _k2["delay"] = (int(_m1.group(1)) if _m1
                             else int(os.environ.get("LSS_STOP_DELAY_BARS", "1") or 1))
             if "損切なし" in _s:
