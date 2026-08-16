@@ -39,6 +39,30 @@ REM   trying to make anything faster - do not guess where the time goes.
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
 REM ============================================================
 cd /d "%~dp0"
+REM ============================================================
+REM   POOL: no-selection (lss_proposal_full.py), settled 2026-08-16.
+REM   Same-window paired test over 11 months (compare_pools.py):
+REM     no-selection minus selection = +124,013 yen/month
+REM     t=+2.92 / 95%% CI +29,408..+218,617 / wins 10 of 11 months
+REM     primary metric (mean/sigma) also flips 1.56 -> 1.72
+REM     first half +145,225 (6-0) / second half +98,558 (4-1)
+REM   Selection picks pairs by PAST performance, which mean-reverts; it also
+REM   forces START_DATES, which shortens the measurable window by 2 months.
+REM   RESEARCH ONLY. daily.bat (the live order list) still uses the cumulative
+REM   selection - do not switch that until the remaining checks pass
+REM   (regime over 730 days, budget-constrained re-measure, walk-forward).
+REM   Override for one run:  .\hvar --lss-proposal lss_proposal_cumul.py
+REM   COST: ~5 minutes instead of ~40s (reads 653k symbol-days of 5-min bars).
+REM   Regenerate the pool when the universe changes:  python make_full_proposal.py
+REM ============================================================
+if not exist "lss_proposal_full.py" (
+  echo [hvar] lss_proposal_full.py not found - generating it now...
+  python make_full_proposal.py
+)
+REM Keep the research run from clobbering lss_trades.csv, which .\fills reconciles
+REM against the live H orders (CLAUDE.md 18.29).
+set "LSS_TRADES_CSV=lss_trades_hvar.csv"
 set "LSS_H_VARIANT_TAB=1"
-call dailyfast.bat --days 365 --no-serve --no-h-tab %*
+call dailyfast.bat --days 365 --no-serve --no-h-tab --lss-proposal lss_proposal_full.py %*
 set "LSS_H_VARIANT_TAB="
+set "LSS_TRADES_CSV="
