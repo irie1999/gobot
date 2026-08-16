@@ -30,14 +30,31 @@
   (6.1〜9.1s)、429 だけが 8→40回 に増える。**並列を上げる意味がない**。
   推奨は並列2。
 
-使い方:
-  python check_board_limits.py --prod --n 41
-  python check_board_limits.py --prod --cap-probe 40,50,60,80,120   # 登録上限を実測
-  python check_board_limits.py --prod --symbols-file lss_trades_K.csv --n 60
-  python check_board_limits.py --prod --symbols 7203,6758,9984
+★★ 本番の測り方 — **2段階**。これが実運用の手順そのもの。
 
-★ **09:00 直後に1回**測ること(場外の数字は参考値)。板寄せ直後がいちばん混む。
-  そのとき初めて OpeningPrice が入っているかも確認できる。
+  08:5x)  python check_board_limits.py --prod --warmup --n 41
+          → 登録して1回空読みし、**登録を残して**終了(この空読みが140秒級)
+
+  09:00)  python check_board_limits.py --prod --open --n 41
+          → 登録済み前提で **本番の1回だけ**を測る。開始/終了の実時刻・
+            所要秒・始値の有無・**09:00 に寄っていない銘柄**を出し、
+            board_speed_log.csv に追記する(朝ごとに貯まる)
+
+  ⛔ この間 watcher / 発注サーバを起動しないこと(kabu の有効トークンは1つ)。
+  ⛔ --warmup を飛ばして --open だけ流すと、登録直後の初回になるので
+     140秒級の数字が出る。**手順を守らないと測定にならない**。
+
+その他:
+  python check_board_limits.py --prod --cap-probe 40,50,60,80,120   # 登録上限
+  python check_board_limits.py --prod --symbols-file lss_trades_K.csv --n 50
+  python check_board_limits.py --prod --n 41                        # 全部入り(場外用)
+
+★★ 2026-08-16 の実測で確定したこと:
+  ・**登録上限は 50件**。51件以上は **400 でリクエストごと失敗**する
+    (部分受理されない)。候補が多い日は前夜に流動性上位50件へ絞ること。
+  ・kabu は **OpeningPriceTime を返す** → 「まだ寄っていない」を確実に判別できる
+    (実測: 9984 は 09:06 に寄っていた)。09:00 に寄らない銘柄は建てない
+    (LSS_SKIP_LATE_OPEN=1)。
 
 ⚠ kabu の有効トークンは1つ。**watcher / 発注サーバを止めてから**実行すること
   (401 の取り合いになる)。
@@ -70,6 +87,14 @@ ap.add_argument("--no-unregister", action="store_true",
 ap.add_argument("--symbols-file", type=str, default="",
                 help="実際の候補リストを使う。lss_trades_K.csv / orders_*.csv の "
                      "symbol 列、または SELECTED を持つ提案 .py を読む")
+ap.add_argument("--warmup", action="store_true",
+                help="【08:5x に実行】登録して1回だけ空読みし、**登録を残して**終了。"
+                     "これをやっておかないと 09:00 の初回が140秒級になる")
+ap.add_argument("--open", dest="at_open", action="store_true",
+                help="【09:00 に実行】登録済み前提で **本番の1回だけ**を測る。"
+                     "コールド読み・上限プローブ・並列スイープは全部やらない")
+ap.add_argument("--log", type=str, default="board_speed_log.csv",
+                help="--open の結果を追記するCSV(朝ごとに貯まる)")
 ap.add_argument("--cap-probe", type=str, default="",
                 help="登録上限を実測する。カンマ区切りの件数 (例 40,50,60,80,120)。"
                      "毎回 全解除 → その件数を一括登録 → 受理数を数える")
@@ -145,6 +170,108 @@ cli = KabuClient(prod=args.prod, dry_run=True)
 _t = time.time()
 cli.connect()
 print(f"\n[1] トークン取得: {time.time() - _t:.2f}s")
+
+
+def _board_one(_cli, sym):
+    """1銘柄の /board を取り、(銘柄, 秒, 中身, 例外) を返す。
+    ⚠ warmup / open の両モードから使うので、_one より前に置くこと。"""
+    _s0 = time.time()
+    try:
+        return sym, (time.time() - _s0), _cli.get_board(sym), None
+    except Exception as e:
+        return sym, (time.time() - _s0), None, e
+
+# ── 【08:5x】ウォームアップ ────────────────────────────────────────────────
+# ⛔ 登録直後の初回 /board は 48〜142秒(実測)。kabu がその銘柄の板を購読しに
+#    行くため。09:00 に登録して即読むと絶対に間に合わない。
+if args.warmup:
+    _t = time.time()
+    _r = cli.register_many(_syms)
+    _ok = len((_r or {}).get("RegistList") or [])
+    print(f"\n[warmup] 登録: 要求 {len(_syms)}件 → 受理 {_ok}件 "
+          f"({time.time() - _t:.2f}s)")
+    if _ok < len(_syms):
+        print(f"    ⛔ **{len(_syms) - _ok}件 登録できていません**。"
+              f"kabu の登録上限は50件で、超えると 400 でリクエストごと失敗します。"
+              f"候補を流動性上位50件に絞ってください")
+    _t = time.time()
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        _w = list(ex.map(lambda x: _board_one(cli, x), _syms))
+    _nw = sum(1 for x in _w if x[2])
+    print(f"[warmup] 空読み(コールド): {time.time() - _t:.2f}s / "
+          f"取得できた {_nw}/{len(_syms)}件")
+    print("\n✅ 登録を残したまま終了します。**09:00 ちょうどに次を実行**:")
+    print(f"   python check_board_limits.py {'--prod ' if args.prod else ''}--open"
+          + (f" --symbols-file {args.symbols_file}" if args.symbols_file else "")
+          + f" --n {len(_syms)}")
+    print("⚠ この間 watcher / 発注サーバを起動しないこと(トークンは1つ)")
+    raise SystemExit(0)
+
+# ── 【09:00】本番の1回だけを測る ──────────────────────────────────────────
+if args.at_open:
+    from datetime import datetime as _dt
+    _t0 = _dt.now()
+    _t = time.time()
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        _o = list(ex.map(lambda x: _board_one(cli, x), _syms))
+    _el = time.time() - _t
+    _t1 = _dt.now()
+    _ok = [x for x in _o if x[2]]
+    _ng = [x for x in _o if x[2] is None]
+    _lat = sorted(x[1] for x in _o)
+    # 始値が入っているか / 何時に寄ったか
+    _has = [x for x in _ok if (x[2] or {}).get("OpeningPrice")]
+    _times = [str((x[2] or {}).get("OpeningPriceTime") or "") for x in _has]
+    _at9 = sum(1 for t in _times if t[11:16] == "09:00")
+    _late = [(x[0], str((x[2] or {}).get("OpeningPriceTime") or "")[11:16])
+             for x in _has
+             if str((x[2] or {}).get("OpeningPriceTime") or "")[11:16] != "09:00"]
+    print("\n" + "=" * 70)
+    print("■ 09:00 本番の実測 (照会のみ)")
+    print("=" * 70)
+    print(f"  開始 {_t0.strftime('%H:%M:%S.%f')[:-3]} → "
+          f"終了 {_t1.strftime('%H:%M:%S.%f')[:-3]}")
+    print(f"  **{len(_syms)}銘柄を {_el:.2f}s** (並列{args.workers} / "
+          f"1件あたり中央 {_lat[len(_lat) // 2] * 1000:.0f}ms / "
+          f"最遅 {_lat[-1] * 1000:.0f}ms)")
+    print(f"  取得成功 {len(_ok)}/{len(_syms)}件"
+          + (f" ⛔ 失敗 {len(_ng)}件: {_ng[0][3]}" if _ng else ""))
+    print(f"  **始値あり {len(_has)}件** / うち 09:00 ちょうど {_at9}件 / "
+          f"**09:00 でない {len(_late)}件**")
+    for _sy, _hm in _late[:10]:
+        print(f"      ⚠ {_sy} は {_hm} に寄っている → **建てない**"
+              f"(LSS_SKIP_LATE_OPEN=1 と同じ判定)")
+    _miss = len(_ok) - len(_has)
+    if _miss:
+        print(f"  ⚠ **始値がまだ入っていない {_miss}件**。"
+              f"寄っていないので同じく建てない")
+    print("\n  判定:")
+    if _el <= 10:
+        print(f"  ✅ {_el:.1f}s なら 09:00 の判定→発注に間に合う")
+    elif _el <= 30:
+        print(f"  ⚠ {_el:.1f}s。発注そのものの時間が別に乗る。要検討")
+    else:
+        print(f"  ⛔ {_el:.1f}s は遅すぎる。PUSH配信(WebSocket)を検討")
+    if args.log:
+        import csv as _cl
+        import os as _os
+        _new = not _os.path.exists(args.log)
+        with open(args.log, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _cl.writer(_f)
+            if _new:
+                _w.writerow(["date", "start", "end", "n", "workers", "sec",
+                             "ok", "ng", "has_open", "at0900", "late",
+                             "median_ms", "max_ms"])
+            _w.writerow([_t0.strftime("%Y-%m-%d"),
+                         _t0.strftime("%H:%M:%S.%f")[:-3],
+                         _t1.strftime("%H:%M:%S.%f")[:-3],
+                         len(_syms), args.workers, round(_el, 3),
+                         len(_ok), len(_ng), len(_has), _at9, len(_late),
+                         round(_lat[len(_lat) // 2] * 1000),
+                         round(_lat[-1] * 1000)])
+        print(f"\n[log] {args.log} に追記しました(朝ごとに貯めて比較できます)")
+    print("\n⚠ 登録は **残したまま**にします(解除すると次が140秒級になる)")
+    raise SystemExit(0)
 
 # ── 登録上限のプローブ (--cap-probe) ─────────────────────────────────────
 # ⛔ K は「その日の候補を全部登録して始値を読む」ので、候補数が上限を
