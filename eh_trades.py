@@ -446,8 +446,12 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                     _ep_c = float(day5["close"].iloc[0])
                 except Exception:
                     _ep_c = 0.0
+                # ★ 損切り遅延は **第4要素を尊重する**(2026-08-16)。以前は 0
+                #   固定だったので、確認方式を推奨(d4)と並べて比べられなかった。
+                #   ⚠ 建てるのが 09:05 なので、同じ N でも武装は指値版より
+                #     5分遅い。厳密に時刻を揃えたいなら N-1 を渡すこと。
                 _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
-                               0, _hanc, "confirm", _sm_v, _tm_v, _hap))
+                               int(_hd), _hanc, "confirm", _sm_v, _tm_v, _hap))
                 continue
             if _hbp is not None:
                 # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める

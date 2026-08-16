@@ -10676,10 +10676,17 @@ function switchTbd(id, tab) {{
             _gaps = [float(x) for x in str(os.environ.get(
                 "LSS_H_CONFIRM_GAPS", "0,25,50,75,100")).split(",")
                 if str(x).strip().lstrip("+-").replace(".", "").isdigit()]
-            # 09:05約定版(保守側の下限)。ユーザー方針で「5分遅れることはない」と
-            # 確定したので既定OFF(2026-08-15)。閾値を増やして掃くときに変種が
-            # 倍になるのを避ける。戻すなら set LSS_H_CONFIRM_SLOW=1
-            if str(os.environ.get("LSS_H_CONFIRM_SLOW", "0")).strip() \
+            # 09:05約定版。★ **既定ONに戻した**(2026-08-16)。
+            # ⛔ 一度 OFF にしたのは「5分遅れることはない」という理由だったが、
+            #    それは約定価格の話でしかなかった。**資金均等の分母**を見ると
+            #    立場が逆転する:
+            #      H指値…寄指 = 前夜に注文 → 株数も前夜に決める
+            #                   → 予算は **候補数**で割るしかない
+            #      H寄り確認  = 09:00 に件数を見てから発注
+            #                   → 予算を **約定数**で割れる(集中できる)
+            #    価格は指値が有利、割り当ては確認が有利。**どちらが勝つかは
+            #    測らないと分からない**。両方出さないと比較できない。
+            if str(os.environ.get("LSS_H_CONFIRM_SLOW", "1")).strip() \
                     not in ("", "0", "false", "no", "off"):
                 for _gv in _gaps:
                     _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
@@ -10847,6 +10854,16 @@ function switchTbd(id, tab) {{
                         _hvars.append((
                             f"H指値{_eqg5:+.0f}bp寄指d{_eqd4}{_gsl}",
                             0, True, _eqd4, "fill", _eqg5, None, _eqsm2))
+                    # ★★ 09:00確認版を **推奨とまったく同じ delay/sm で**出す
+                    #   (2026-08-16)。この2方式は『予算の割り方』が構造的に
+                    #   違うので、そこだけを比べたい:
+                    #     指値  = 価格は寄り値(有利) / 分母は候補数(集中できない)
+                    #     確認  = 価格は09:05(不利)   / 分母は約定数(集中できる)
+                    #   delay/sm を揃えないと3つずれて比較にならない。
+                    for _eqg6 in _gaps:
+                        _hvars.append((
+                            f"H寄り確認{_eqg6:+.0f}bpd{_eqd4}{_gsl}",
+                            0, False, _eqd4, "fill", None, _eqg6, _eqsm2))
                     # ★★ ATR期間を掃く (2026-08-15 の監査で最後に残った継承値)
                     #   ⛔ 14 は **スイング戦略(10日保有)からの継承**。sm/tm は
                     #      すべて ATR 倍率なので、この期間が損切り・利確の
@@ -11074,7 +11091,10 @@ function switchTbd(id, tab) {{
         """タブキーから表示ラベルを作る。"""
         _b = str(_k).split("資金均等")[0]
         _g = "".join(_c for _c in _b.split("bp")[0][-5:] if _c.isdigit()) or "50"
-        _tl = _b.split("寄指d")[-1] if "寄指d" in _b else ""
+        # ⚠ 確認方式(H寄り確認…bpd4)は "寄指d" を持たないので、bp の直後の
+        #   d<数字> も拾う(2026-08-16)。
+        _tl = (_b.split("寄指d")[-1] if "寄指d" in _b
+               else (_b.split("bpd")[-1] if "bpd" in _b else ""))
         _d = ""
         for _c in _tl:                      # 先頭の連続数字だけ(sm/tm を拾わない)
             if not _c.isdigit():
@@ -11105,7 +11125,13 @@ function switchTbd(id, tab) {{
                  if float(os.environ.get("LSS_EQ_MAX_YEN", "50") or 0) > 0
                  else ""))
         _capN = int(os.environ.get("LSS_EQ_CAP_MAX_N", "0") or 0)
-        return (f"09:00確認+{_g}bp 資金均等"
+        # ⛔ 方式名を正しく出す(2026-08-16)。`H指値…寄指` は **前夜に寄付指値を
+        #    置く**方式で、09:00 に何かを確認するわけではない。ずっと
+        #    「09:00確認」と表示していたので、実装イメージがズレていた。
+        _meth = ("前夜 寄付指値" if str(_b).startswith("H指値")
+                 else ("09:00確認→09:05成行" if str(_b).startswith("H寄り確認")
+                       else "09:00確認"))
+        return (f"{_meth} +{_g}bp 資金均等"
                 + (f" delay{_d}" if _d else "")
                 + (f" {_smL}" if _smL else "")
                 + (f" {_tmL}" if _tmL else "")
@@ -11114,7 +11140,10 @@ function switchTbd(id, tab) {{
                 + (f" 1銘柄上限{_ymL}" if _ymL else "")
                 + (f"({_capN}件以下の日だけ)" if _ymL and _capN > 0 else "")
                 + (" 充填" if str(_k).endswith("充填") else "")
-                + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else ""))
+                + (" 1銘柄1件" if str(_k).endswith("1銘柄1件") else "")
+                # ⛔ 分母。無印(候補数割)が実装できる形。約定数割は先読み。
+                + (" ⛔約定数で割る(先読み)" if "約定数割" in str(_k)
+                   else " 予算÷候補数"))
 
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
     # ★ タブ2(K) = 2026-08-15 に確定した推奨設定。J の隣に出す。
@@ -11163,8 +11192,24 @@ function switchTbd(id, tab) {{
         _EQ_CAP_N = int(os.environ.get("LSS_EQ_CAP_MAX_N", "0") or 0)
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
-                               _ymax=0.0):
+                               _ymax=0.0, _nf=None):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
+
+            ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
+               実装できない成績が出る。
+
+               `H寄り確認`  = 09:00 の始値を見てから発注する。その時点で
+                             合格件数が確定しているので **約定数で割ってよい**。
+               `H指値…寄指` = 前夜に 寄付指値 を置く。**株数は前夜に決めるしか
+                             ない**のに、どれが約定するかは 09:00 まで分からない。
+                             約定数で割るのは **先読み**。注文を置いた
+                             **候補数**(=約定+不約定)で割るのが正しい。
+
+               _nf に不約定行を渡すと候補数で割る。渡さなければ従来どおり
+               約定数で割る(= 確認方式か、比較用の『約定数割』行)。
+
+               ⚠ §18.37 は予算倍率 1.0(寄りで一斉約定するので over-subscribe が
+                 成立しない)と確定済み。候補数で割るのはこれと同じ理屈。
 
             _top > 0 なら **その日のギャップ上位 _top 件だけ**に絞ってから
             配る(残りは建てない)。閾値を上げるのとは別物で、絞り具合が
@@ -11202,6 +11247,22 @@ function switchTbd(id, tab) {{
             #    0 と区別すること。0 は「指定なし=env に従う」。
             _yc0 = 0.0 if _ymax < 0 else (_ymax if _ymax > 0 else _EQ_MAX_YEN)
 
+            # ── 候補数(=前夜に注文を置く件数)。指値方式のときだけ使う ──────
+            _cand_n: dict = {}
+            if _nf is not None:
+                _cd: dict = {}
+                for _t in list(_ts) + list(_nf or []):
+                    _d0 = str(_t.get("entry_d_raw") or "")
+                    if _d0:
+                        _cd.setdefault(_d0, []).append(_t)
+                for _d0, _l0 in _cd.items():
+                    if _dedup:
+                        _cand_n[_d0] = len({
+                            str(_t.get("symbol", "")).upper()
+                            .removesuffix(".T").split(".")[0] for _t in _l0})
+                    else:
+                        _cand_n[_d0] = len(_l0)
+
             for _d, _lst in _by.items():
                 _cnts_raw.append(len(_lst))
                 # ★ 金額上限を **合格が少ない日だけ** に効かせる(2026-08-15)。
@@ -11230,7 +11291,15 @@ function switchTbd(id, tab) {{
                 if _top > 0 and len(_lst) > _top:
                     _lst = sorted(_lst, key=lambda t: -_eq_gap_of(t))[:_top]
                     _dropped += len(_by[_d]) - len(_lst)
-                _per = _budget / max(1, len(_lst))
+                # ⛔ 分母。指値方式(_nf あり)は **候補数**で割る(先読み防止)。
+                #    上位N絞りを併用する場合、前夜に置く注文は最大でも N 本
+                #    なので min(_top, 候補数) が置いた件数になる。
+                _den = len(_lst)
+                if _nf is not None:
+                    _den = _cand_n.get(_d, len(_lst))
+                    if _top > 0:
+                        _den = min(_den, _top)
+                _per = _budget / max(1, _den)
                 # ★ 金額上限。単元上限(株数)は株価で意味が6倍変わるので、
                 #   本来はこちらで切るべき。0=無効。
                 if _yc > 0:
@@ -11373,6 +11442,9 @@ function switchTbd(id, tab) {{
         _EQ_TOPS = [int(x) for x in str(os.environ.get(
             "LSS_EQ_TOPS", "3,5,8")).split(",")
             if str(x).strip().isdigit() and int(x) > 0]
+        # 不約定行(= その日 注文は置いたが約定しなかった候補)。指値方式の
+        # 分母に要る。⛔ この時点で既に埋まっていること(eh_trades が作る)。
+        _EH_NF_SRC = (_EH_TRADES or {}).get("約定せず") or {}
         _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
@@ -11381,18 +11453,28 @@ function switchTbd(id, tab) {{
             # 上位N版・充填版は **タブに出す変種だけ**に付ける(全部に付けると
             # ⚖表の列が倍々に増えて読めなくなる)。delay版をタブに出したいときは
             # set LSS_EQ_TAB_KEY=H指値+50bp寄指d0資金均等 のように指定する。
-            # (上位N, 充填, 1銘柄1件, 金額上限[円])
-            _eq_modes = [(0, False, False, 0.0)]
+            # ⛔ 分母(2026-08-16)。`H指値…寄指` は **前夜に寄付指値を置く**ので
+            #    株数も前夜に決めるしかない。約定数で割るのは先読み。候補数
+            #    (=約定+不約定)で割る。`H寄り確認` は 09:00 に件数が見えるので
+            #    約定数で割ってよい。詳細は _size_equal_by_day の docstring。
+            _pre = str(_k).startswith("H指値")
+            # (上位N, 充填, 1銘柄1件, 金額上限[円], 候補数で割るか)
+            _eq_modes = [(0, False, False, 0.0, _pre)]
             if _k == _EQ_TAB_BASE:
-                _eq_modes += ([(0, True, False, 0.0)]
-                              + [(_t2, False, False, 0.0) for _t2 in _EQ_TOPS])
+                _eq_modes += ([(0, True, False, 0.0, _pre)]
+                              + [(_t2, False, False, 0.0, _pre)
+                                 for _t2 in _EQ_TOPS])
             # ★ 1銘柄1件・金額上限は **推奨タブ(K)の変種にも**付ける。
             #   ⛔ 1銘柄1件は 95%点(41%→33%)は下げるが **最大(予算の99%)は
             #      1ミリも直さない**(2026-08-15 実測)。最大は「その日の合格が
             #      1銘柄しかない日」に出るので、重複を外しても対象が無い。
             #      **最悪ケースを直せるのは金額上限だけ**。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
-                _eq_modes.append((0, False, True, 0.0))
+                _eq_modes.append((0, False, True, 0.0, _pre))
+                # ★ 旧挙動(約定数で割る=先読み)を **1行だけ**残す。消すと
+                #   「これまでの K の数字がどれだけ上振れていたか」が測れない。
+                if _pre:
+                    _eq_modes.append((0, False, False, 0.0, False))
                 # ★ 金額上限は _EQ_MAX_YEN(既定100万)で **全変種に掛かっている**。
                 #   ここで作るのは「その上限を動かした版」。0 = 上限なし
                 #   (_size_equal_by_day には負値で渡して env の既定を無効化する)。
@@ -11408,23 +11490,28 @@ function switchTbd(id, tab) {{
                     if _eqy * 1e4 == _EQ_MAX_YEN:
                         continue          # 既定と同じ = 基準そのもの
                     _eq_modes.append((0, False, False,
-                                      (_eqy * 1e4) if _eqy > 0 else -1.0))
+                                      (_eqy * 1e4) if _eqy > 0 else -1.0,
+                                      _pre))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
             #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
             #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
-            for _eqtp, _eqfl, _eqdp, _eqym in _eq_modes:
+            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd in _eq_modes:
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
                          + ("上限なし" if _eqym < 0 else
-                            (f"上限{_eqym / 1e4:g}万" if _eqym else "")))
+                            (f"上限{_eqym / 1e4:g}万" if _eqym else ""))
+                         # 指値方式で **約定数**で割った版だけ名前を分ける。
+                         # 既定(候補数割)は無印 = 実装できる形。
+                         + ("約定数割" if (_pre and not _eqcd) else ""))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
                     _EH_TRADES[_eqnk], _eq_st = _size_equal_by_day(
-                        _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym)
+                        _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym,
+                        (_EH_NF_SRC.get(_k) or []) if _eqcd else None)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -11439,7 +11526,11 @@ function switchTbd(id, tab) {{
                      if _EQ_MAX_YEN > 0 else "")
                   + f")。うち上位N絞り {len(_EQ_TOPS)}本 (N={_EQ_TOPS} / "
                   f"対象 {_EQ_TAB_BASE})。"
-                  f"09:00 に件数が分かる方式だけが使える割り当て", flush=True)
+                  f"\n      ⛔ 分母: `H指値…寄指`(前夜に寄付指値)は **候補数**"
+                  f"(約定+不約定)で割る。株数を前夜に決めるしかないので"
+                  f"約定数で割るのは先読み。`H寄り確認`(09:00に見てから発注)"
+                  f"だけが約定数で割ってよい。比較用に『約定数割』も1本出す",
+                  flush=True)
     except Exception as _eqe:
         print(f"[E/H] 資金均等版の生成に失敗: {_eqe}", flush=True)
 
@@ -16715,6 +16806,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             #    (2026-08-15)。◆ の有無で分ける。
             _k2["dedup_post"] = "◆1銘柄1件" in _s
             _k2["dedup"] = ("1銘柄1件" in _s) and not _k2["dedup_post"]
+            # 予算を割る分母。無印=候補数(実装できる形) / 約定数割=旧挙動(先読み)
+            _k2["div"] = "約定数割" in _s
             # 発注方式そのもの(ギャップ閾値 / 寄指か / 資金均等か)は
             # **つまみではなく別の方式**なので、揃っていない行は兄弟にしない。
             _m6 = _re_kn.search(r"H指値([+-]\d+)bp", _s)
@@ -16730,7 +16823,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
-                        "dedup", "dedup_post"]
+                        "dedup", "dedup_post", "div"]
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。
