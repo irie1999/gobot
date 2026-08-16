@@ -165,6 +165,10 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #      考慮されていない(18.33)。→ 取らないという選択肢が要る。
     _h_auction_only = str(os.environ.get("LSS_H_AUCTION_ONLY", "0")).strip() \
         in ("1", "true", "True", "yes")
+    # ★ 09:00確認方式で「09:00 に寄らなかった銘柄」を建てるか。
+    #   既定 **スキップ**(2026-08-16 ユーザー判断)。set LSS_SKIP_LATE_OPEN=0 で建てる。
+    _SKIP_LATE_OPEN = str(os.environ.get("LSS_SKIP_LATE_OPEN", "1")).strip() \
+        not in ("0", "false", "no", "off")
     # ── H のバリアント ────────────────────────────────────────────
     # ⛔ 設定ごとに .\daily を回して1回ずつ比べてはいけない(18.24)。実行が変わると
     #    比較相手(現行)の数字まで動くうえ、ノイズ帯も作れない。**1回の読込で
@@ -358,6 +362,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #    **どの銘柄がどの日に落ちたか**を残す。レポートの H ペインに出すので
     #    コンソールのスクロールバックを探さなくてよい。
     _sk_syms: dict = {k: [] for k in _sk}
+    _n_late: dict = {}     # 09:00に寄らずスキップした件数(確認方式のみ)
     _SK_CAP = 400                     # 1理由あたりの保持上限(HTMLが肥大しない程度)
     # H の約定の内訳。**ライブでの信頼度がまったく違う**ので必ず出す:
     #   板寄せ  = 寄りが既に前日終値以上 → 9:00の板寄せで前日終値以上の値がつく。
@@ -495,6 +500,18 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             if not (atr == atr and atr > 0):
                 continue
             _at_open = (key == "E") or (o1 >= ep)      # 寄り(板寄せ)で建てたか
+            # ★★ 09:00 に寄らない銘柄はスキップ (2026-08-16 ユーザー判断)
+            #   K は 09:00 に **件数を確定させないとサイズを決められない**。
+            #   ところが 09:00 に寄らない銘柄がある(実測: 9984 は 09:06)。
+            #   待つと件数が確定せず、混ぜるとサイズが後から狂う。
+            #   → 寄らなかった銘柄は建てない、が唯一一貫するルール。
+            #   ライブは kabu の OpeningPriceTime で同じ判定ができる。
+            #   ⛔ **バックテストとライブを必ず揃える**(18.9)。ここを外すと
+            #      「レポートには居るのに実運用では建てられない」ズレになる。
+            #   確認方式だけに掛ける(前夜指値は寄らなくても指値が板にある)。
+            if (_SKIP_LATE_OPEN and _mode == "confirm0" and _no_open_bar):
+                ok = False
+                _n_late[key] = _n_late.get(key, 0) + 1
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
             if not ok or ep <= 0:
@@ -581,6 +598,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         + f" / データ不足 {_skip:,}")
     log("[E/H] データ不足の内訳: "
         + " / ".join(f"{k} {v:,}" for k, v in _sk.items() if v))
+    if _n_late:
+        _tot_late = sum(_n_late.values())
+        _per = max(_n_late.values())
+        log(f"[E/H] 09:00に寄らずスキップ: 変種あたり最大 {_per:,}銘柄日 "
+            f"(全変種計 {_tot_late:,})。K は 09:00 に件数を確定させないと"
+            f"サイズを決められないので建てない(ライブは OpeningPriceTime で同判定)。"
+            f"建てたいなら set LSS_SKIP_LATE_OPEN=0")
     for _k in _HKEYS:
         _ht = sum(_hfill[_k].values())
         if not _ht:

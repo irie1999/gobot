@@ -161,6 +161,7 @@ if args.cap_probe.strip():
               f"{max(_probe)}件は測れないので --symbols-file で足してください")
     print(f"     {'要求':>6} {'受理':>6} {'秒':>7}  判定")
     _cap_found = None
+    _last_ok = 0
     for _nq in _probe:
         if _nq > len(_pool):
             continue
@@ -169,17 +170,40 @@ if args.cap_probe.strip():
         _r0 = cli.register_many(_pool[:_nq])
         _s0 = time.time() - _t0
         _ok0 = len((_r0 or {}).get("RegistList") or [])
-        _v = ("✅ 全部通った" if _ok0 >= _nq else
-              f"⛔ **{_nq - _ok0}件 弾かれた = 上限 {_ok0}件**")
-        if _ok0 < _nq and _cap_found is None:
-            _cap_found = _ok0
+        # ⛔ 上限超過は **部分受理ではなく 400 でリクエストごと失敗**する
+        #    (2026-08-16 実測: 60件で 400 Bad Request → 受理0件)。
+        #    「50件受理される」ではないので、呼ぶ側が **必ず事前に絞る**必要がある。
+        if _ok0 >= _nq:
+            _v = "✅ 全部通った"
+            _last_ok = max(_last_ok, _nq)
+        elif _ok0 == 0:
+            _v = "⛔ **400 でリクエストごと拒否**(部分受理されない)"
+            if _cap_found is None:
+                _cap_found = _last_ok
+        else:
+            _v = f"⚠ 部分受理 {_ok0}件"
+            if _cap_found is None:
+                _cap_found = _ok0
         print(f"     {_nq:>6} {_ok0:>6} {_s0:>7.2f}  {_v}")
+    # ★ 「50件登録済みの状態から さらに足せるか」= 総数の上限か1回の上限か
+    if _last_ok > 0 and len(_pool) > _last_ok:
+        cli.unregister_all()
+        cli.register_many(_pool[:_last_ok])
+        _r1 = cli.register_many(_pool[_last_ok:_last_ok + 1])
+        _ok1 = len((_r1 or {}).get("RegistList") or [])
+        print(f"     追加  {_ok1:>6}       -  "
+              + ("⚠ **1回のリクエスト上限**であって総数の上限ではない"
+                 if _ok1 else
+                 f"⛔ **総登録数の上限が {_last_ok}件**"
+                 f"(既に{_last_ok}件あると1件も足せない)"))
     cli.unregister_all()
     if _cap_found is None:
         print(f"     → 試した範囲({max(_probe)}件)では上限に当たりませんでした")
     else:
-        print(f"     → **登録上限 = {_cap_found}件**。候補がこれを超える日は"
-              f"流動性上位{_cap_found}件に絞る必要があります")
+        print(f"     → **登録上限 = {_cap_found}件**。"
+              f"⛔ 超えると **400 でリクエストごと失敗**するので、"
+              f"候補が多い日は **前夜に流動性上位{_cap_found}件へ絞っておく**こと"
+              f"(1件でも超えたら全滅する)")
 
 # ── 一括登録 ──────────────────────────────────────────────────────────────
 _t = time.time()
@@ -303,6 +327,24 @@ _no_open = sum(1 for _s, _l, b, _e in _par if b and not b.get("OpeningPrice"))
 if _no_open:
     print(f"    ⚠ OpeningPrice が空/0 のもの {_no_open}件"
           f"(寄り前なら正常。ザラ場中なら要調査)")
+
+# ★★ 遅寄りの判別 (2026-08-16)。K は 09:00 に件数を確定させないとサイズを
+#    決められないが、**09:00 に寄らない銘柄がある**(実測 9984 は 09:06)。
+#    OpeningPriceTime があれば「まだ寄っていない」を確実に判別できるので、
+#    『09:0X までに寄った銘柄だけで確定する』ルールが実装できる。
+_ot = [(str(_s), str((b or {}).get("OpeningPriceTime") or ""))
+       for _s, _l, b, _e in _par if b]
+_late = [(x, t) for x, t in _ot if t and t[11:16] not in ("09:00",)]
+print(f"\n    [始値時刻] 取得できた {len(_ot)}件 / "
+      f"09:00 ちょうど {len(_ot) - len(_late) - sum(1 for _x, t in _ot if not t)}件"
+      f" / **09:00 でない {len(_late)}件**"
+      + (f" / 時刻なし {sum(1 for _x, t in _ot if not t)}件"
+         if any(not t for _x, t in _ot) else ""))
+for _x, _t in _late[:5]:
+    print(f"      ⚠ {_x} は {_t[11:16]} に寄っている")
+if _late:
+    print("      → **OpeningPriceTime で『まだ寄っていない』を判別できる**。"
+          "09:0X までに寄った銘柄だけで件数を確定するルールが組める")
 
 # ── 判定 ──────────────────────────────────────────────────────────────────
 print("\n" + "=" * 70)
