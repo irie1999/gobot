@@ -437,21 +437,33 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             if _hgap is not None:
                 # ── 寄り確認モード ────────────────────────────────
                 # 09:00 の寄り値を見て、前日終値比のギャップが閾値以上なら
-                # **その場で成行売り**。約定は最初の5分足の終値(09:05)。
-                # 判定は次のバー(09:05-)から = 建玉を持っている区間と一致。
+                # **その場で成行売り**。
+                #
+                # ★ 約定価格は2通りある。**既定は始値**(2026-08-15 ユーザー決定:
+                #   「寄り付き直後に完全自動で発注するので始値で近似してよい」)。
+                #   ⛔ 2026-08-16 に既定を 09:05 にしてしまったが、これは
+                #     その決定を無断で戻すものだった。始値に戻す。
+                #     名前に『5分』が入る変種だけが 09:05 = **保守側の下限**。
+                #   実際の執行は 08:5x に板を暖めておけば 09:00 + 十数秒なので、
+                #   真の値はこの2つの間。差は measure_entry_decay.py で測る。
                 _g_ok = (o1 > 0 and pc > 0
                          and (o1 - pc) / pc * 1e4 >= _hgap
                          and not (gap_guard > 0 and o1 > pc * (1 + gap_guard)))
-                try:
-                    _ep_c = float(day5["close"].iloc[0])
-                except Exception:
-                    _ep_c = 0.0
+                _slow = "5分" in str(_hn)
+                if _slow:
+                    try:
+                        _ep_c = float(day5["close"].iloc[0])
+                    except Exception:
+                        _ep_c = 0.0
+                else:
+                    _ep_c = float(o1 or 0.0)
                 # ★ 損切り遅延は **第4要素を尊重する**(2026-08-16)。以前は 0
                 #   固定だったので、確認方式を推奨(d4)と並べて比べられなかった。
-                #   ⚠ 建てるのが 09:05 なので、同じ N でも武装は指値版より
-                #     5分遅い。厳密に時刻を揃えたいなら N-1 を渡すこと。
+                #   ⚠ 09:05版は建てるのが5分遅いので、同じ N でも武装が5分遅い。
                 _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
-                               int(_hd), _hanc, "confirm", _sm_v, _tm_v, _hap))
+                               int(_hd), _hanc,
+                               "confirm" if _slow else "confirm0",
+                               _sm_v, _tm_v, _hap))
                 continue
             if _hbp is not None:
                 # bp 指定: 前日終値からの相対。銘柄の実測呼値で丸める
@@ -493,10 +505,21 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                    pc, atr, _smv, _tmv, qty, key,
                                    day_open=o1) for s in _srcs)
                 continue
-            if key != "E" and _mode != "confirm":
+            if key != "E" and not str(_mode).startswith("confirm"):
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
                 _sa = max(ep, pc) if _anc == "max" else ep      # 損切りアンカー
                 xp, why, _e, _x = _x5(day5, ep, _sa + atr * _smv, _sa - atr * _tmv, True,
+                                      day_low=dl, day_high=dh, day_close=c1,
+                                      stop_delay_bars=_dly)
+            elif _mode == "confirm0":
+                # ── 寄り確認・**始値約定**(既定) ──────────────────
+                # 09:00 の板寄せ値で売れたとみなす。建玉は寄りからあるので
+                # E と同じく **1本目のバーから**判定する(+inf で ei=0 を強制)。
+                # ⛔ 18.32 の教訓: 建玉を持っている区間の一部が判定から抜けると
+                #    **必ず利益方向に出る**。ここを day5.iloc[1:] にしてはいけない。
+                _sa = ep
+                xp, why, _e, _x = _x5(day5, float("inf"),
+                                      _sa + atr * _smv, _sa - atr * _tmv, False,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
             elif _mode == "confirm":
@@ -533,7 +556,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                                    pc, atr, _smv, _tmv, qty, key,
                                    day_open=o1) for s in _srcs)
                 continue
-            if key != "E" and _mode != "confirm":
+            if key != "E" and not str(_mode).startswith("confirm"):
                 # ⛔ 判定は **指値(order_p)** であって前日終値(pc)ではない
                 #    (2026-08-14 修正)。H の指値は前日終値-5ティックなので、
                 #    寄りが「指値以上・前日終値未満」の帯は **板寄せで約定している**
