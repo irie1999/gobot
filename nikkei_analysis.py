@@ -10830,14 +10830,18 @@ function switchTbd(id, tab) {{
             _EQ_CONF = _EQ_METHOD_CONF
             _eq_pref = _eq_pref_of
 
-            def _eq_var(_nm, _d, _g, _sm=None, _tm=None, _ap=None):
+            def _eq_var(_nm, _d, _g, _sm=None, _tm=None, _ap=None,
+                        _cut=None, _wv=None):
                 """変種タプルを作る。**名前で方式を決める**ので取り違えない。
 
                 確認方式: 寄指=False / 指値bp=None / 確認ギャップ=_g
                 指値方式: 寄指=True  / 指値bp=_g   / 確認ギャップ=None
+
+                _cut = 締切(分) / _wv = 段の刻み(分)。段階モードは確認方式のみ。
                 """
                 if str(_nm).startswith("H寄り確認"):
-                    return (_nm, 0, False, _d, "fill", None, _g, _sm, _tm, _ap)
+                    return (_nm, 0, False, _d, "fill", None, _g, _sm, _tm,
+                            _ap, _cut, _wv)
                 return (_nm, 0, True, _d, "fill", _g, None, _sm, _tm, _ap)
 
             _eqg0 = 50.0
@@ -10866,6 +10870,37 @@ function switchTbd(id, tab) {{
                     _eqtm2 = float(_m2tm.group(1)) if _m2tm else None
                     _hvars.append(_eq_var(_eqb2, _eqd2, _eqg2,
                                           _eqsm2, _eqtm2))
+                    # ★★ 段階モード / 一括締切 (2026-08-16 ユーザー依頼)
+                    #   「09:00 に寄らない銘柄(15.7%)を捨てているが、
+                    #     順次取得して段階的に建てられないか」。
+                    #   ⚠ 確認方式のときだけ。前夜指値は寄らなくても板に
+                    #     注文があるので、この問題自体が無い。
+                    #   ⛔ **5分足なので刻みの下限は5分**。1分刻みは測れない
+                    #     (先頭バーが09:05の銘柄が実際に何分に寄ったかが
+                    #      分からないため)。1分足で測るなら別実装が要る。
+                    if _eqb2.startswith("H寄り確認"):
+                        # 一括締切: 全員その時刻で建てる(09:00組も待たせる)
+                        for _cv in [int(x) for x in str(os.environ.get(
+                                "LSS_EQ_CUTS", "10")).split(",")
+                                if str(x).strip().isdigit()]:
+                            _hvars.append(_eq_var(
+                                f"{_eqb2}c{_cv}", _eqd2, _eqg2,
+                                _eqsm2, _eqtm2, None, _cv, None))
+                        # 段階: "刻み:締切" (10:10 = 2段階 09:00/09:10)
+                        for _wv0 in str(os.environ.get(
+                                "LSS_EQ_WAVES", "10:10,5:30,10:30")).split(","):
+                            try:
+                                _ws, _wc = (int(x) for x in _wv0.split(":"))
+                            except Exception:
+                                continue
+                            if _ws < 5:
+                                print(f"[E/H] 段階 {_wv0} を無視: "
+                                      f"**5分足なので刻みの下限は5分**",
+                                      flush=True)
+                                continue
+                            _hvars.append(_eq_var(
+                                f"{_eqb2}w{_ws}c{_wc}", _eqd2, _eqg2,
+                                _eqsm2, _eqtm2, None, _wc, _ws))
             except Exception as _eqe0:
                 print(f"[E/H] タブ変種の解決に失敗: {_eqe0}", flush=True)
             if str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip() \
@@ -11253,7 +11288,16 @@ function switchTbd(id, tab) {{
                  else ("09:00確認→09:05成行(保守)" if str(_b).startswith("H寄り確認5分")
                        else "09:00確認→始値" if str(_b).startswith("H寄り確認")
                        else "09:00確認"))
+        # ★ 段階/締切(2026-08-16)。w10c10 = 2段階(09:00 / 09:10)。
+        _wvL = ""
+        if (_mv := _re_lb.search(r"(?:w(\d+))?c(\d+)(?![\d])", str(_b))):
+            if _mv.group(1):
+                _wvL = (f" {int(_mv.group(2)) // int(_mv.group(1)) + 1}段階"
+                        f"({_mv.group(1)}分刻み)")
+            else:
+                _wvL = f" 一括締切09:{int(_mv.group(2)):02d}"
         return (f"{_meth} +{_g}bp 資金均等"
+                + _wvL
                 + (f" delay{_d}" if _d else "")
                 + (f" {_smL}" if _smL else "")
                 + (f" {_tmL}" if _tmL else "")
@@ -11270,16 +11314,6 @@ function switchTbd(id, tab) {{
                    else (" 予算÷約定数" if str(_b).startswith("H寄り確認")
                          else " 予算÷候補数")))
 
-    # ★★ J/K タブの中身 (2026-08-16 ユーザー依頼)。
-    #   J = 実装版(選定あり + watch50)   ← いま kabu だけで作れる形
-    #   K = 理想版(選定なし + watch無制限) ← 全候補の始値が読めたら
-    #   同じ実行から作るので、月別を並べればそのまま比較になる(18.24)。
-    #   ⚠ 監査ボードの基準(_EQ_TAB_KEY2)は動かさない。動かすとつまみが
-    #     2つずれて全行『比較不能』になる。
-    _EQ_TAB_J = os.environ.get(
-        "LSS_EQ_TAB_J", _EQ_TAB_KEY2 + "実装版").strip() or _EQ_TAB_KEY
-    _EQ_TAB_K = os.environ.get(
-        "LSS_EQ_TAB_K", _EQ_TAB_KEY2 + "理想版").strip() or _EQ_TAB_KEY2
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
     # ★ タブ2(K) = 2026-08-15 に確定した推奨設定。J の隣に出す。
     #   delay4 + 損切 0.5ATR。sm0.5 は §18.38 #2 の再測定で 月平均/σ が
@@ -11294,6 +11328,18 @@ function switchTbd(id, tab) {{
         "LSS_EQ_TAB_KEY2",
         _eq_pref_of(50) + "d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
+    # ★★ J/K タブの中身 (2026-08-16 ユーザー依頼)。
+    #   J = 実装版(選定あり + watch50)   ← いま kabu だけで作れる形
+    #   K = 理想版(選定なし + watch無制限) ← 全候補の始値が読めたら
+    #   同じ実行から作るので、月別を並べればそのまま比較になる(18.24)。
+    #   ⚠ 監査ボードの基準(_EQ_TAB_KEY2)は動かさない。動かすとつまみが
+    #     2つずれて全行『比較不能』になる。
+    #   ⛔ **_EQ_TAB_KEY2 より後ろに置くこと**。前に置くと
+    #      UnboundLocalError で損益タブが丸ごと落ちる(2026-08-16 に実際に発生)。
+    _EQ_TAB_J = os.environ.get(
+        "LSS_EQ_TAB_J", _EQ_TAB_KEY2 + "実装版").strip() or _EQ_TAB_KEY
+    _EQ_TAB_K = os.environ.get(
+        "LSS_EQ_TAB_K", _EQ_TAB_KEY2 + "理想版").strip() or _EQ_TAB_KEY2
     # 先に置く。try の中で落ちても下の描画(集中度の表)が参照する。
     _EQ_MAX_LOT = 10
     _EQ_MAX_YEN = 0.0
@@ -11425,6 +11471,8 @@ function switchTbd(id, tab) {{
             # ── 候補数(=前夜に注文を置く件数)。指値方式のときだけ使う ──────
             _cand_n: dict = {}
             _cd: dict = {}
+            _wcand: dict = {}     # 日 -> {段(分): 候補数} 段階モードのみ
+            _wsp: dict = {}       # 段(分) -> [建てた件数, 使った額] 全日合計
             _allow: dict = {}     # 日 -> 09:00に見られる銘柄(登録上限で切った後)
             if _nf is not None:
                 for _t in list(_ts) + list(_nf or []):
@@ -11447,6 +11495,24 @@ function switchTbd(id, tab) {{
                 #    どれを見るかは **前夜に決める**ので、ギャップでは選べない
                 #    (09:00まで不明=先読み)。→ **流動性降順**(18.21 と同じ理屈)。
                 #    ⚠ バックテストとライブを必ず揃える(18.9)。
+                # ★★ 段階モードの候補数(段ごと) — 2026-08-16 ユーザー依頼。
+                #   「09:00 で寄っている銘柄を建て、09:10 で遅寄りを追加」。
+                #   何段目にいくら配るかは **その段で判定する候補数の割合**で
+                #   決める。これは 09:00 の時点で分かる(寄ったか / まだか は
+                #   板を見れば確定する)ので **先読みにならない**。
+                #   ⚠ 締切までに一度も寄らなかった候補はデータに出て来ないので
+                #     分母から漏れる。そのぶん前段の配分がわずかに大きくなる
+                #     (遅寄りは 09:02〜09:06 に集中しており、締切10分なら
+                #      漏れはごく僅か)。
+                for _d0, _l0 in _cd.items():
+                    _m0: dict = {}
+                    for _t in _l0:
+                        _w0 = _t.get("wave")
+                        if _w0 is None:
+                            continue
+                        _m0[int(_w0)] = _m0.get(int(_w0), 0) + 1
+                    if _m0:
+                        _wcand[_d0] = _m0
                 if _watch > 0:
                     for _d0, _l0 in _cd.items():
                         _bys: dict = {}
@@ -11572,45 +11638,82 @@ function switchTbd(id, tab) {{
                         _lots_pre[id(_t)] = _l0
                     _ords.append(_n_ord)
                     _ncand.append(len(_all))
-                for _t in _lst:
-                    _ep = float(_t.get("entry_p", 0) or 0)
-                    _xp = float(_t.get("exit_p", 0) or 0)
-                    if _ep <= 0:
-                        continue
-                    _sy1 = str(_t.get("symbol", "")).upper() \
-                        .removesuffix(".T").split(".")[0]
-                    _had = _symyen.get(_sy1, 0.0)
-                    if _div_cand:
-                        # 前夜に決めた株数をそのまま使う。注文を出せなかった
-                        # 候補は約定しても建たない(そもそも注文が無い)。
-                        _lp = _lots_pre.get(id(_t), 0)
-                        if _lp <= 0:
+                # ★★ 段階モード(2026-08-16)。**予算を段ごとに分けて配る**。
+                #   09:00 に寄った銘柄は 09:00 の値で建て、遅寄りは次の段で
+                #   拾う。各段の配分 = 残り予算 × その段の候補数 ÷ 未判定候補数。
+                #   最終段では 未判定=その段 なので残り全額を使い切る。
+                #   ⛔ 段ごとに **実際に使った額**を引くこと。見込みで引くと
+                #     最終段が予算を超える(委託保証金は発注時に要る / 18.38)。
+                _wmap = (_wcand.get(_d) or {}) if not _div_cand else {}
+                if _wmap and len(_wmap) > 1:
+                    _R, _U = _budget, sum(_wmap.values())
+                    _plan = []
+                    for _w in sorted(_wmap):
+                        _mem = [_t for _t in _lst
+                                if int(_t.get("wave") or 0) == _w]
+                        _plan.append((_w, _mem, _wmap[_w]))
+                else:
+                    _plan = [(None, list(_lst), 0)]
+                    _R, _U = _budget, 0
+
+                for _w, _mem, _nw in _plan:
+                    if _w is not None:
+                        # その段に配る額 → その段の合格件数で割る
+                        _alloc = _R * _nw / max(1, _U) if _U > 0 else _R
+                        if _yc > 0:
+                            _per = min(_alloc / max(1, len(_mem)), _yc)
+                        else:
+                            _per = _alloc / max(1, len(_mem))
+                        _u_before = _used
+                    for _t in _mem:
+                        _ep = float(_t.get("entry_p", 0) or 0)
+                        _xp = float(_t.get("exit_p", 0) or 0)
+                        if _ep <= 0:
                             continue
-                        _day.append([_t, _ep, _xp, _lp])
-                        _symyen[_sy1] = _had + _lp * 100 * _ep
-                        _used += _lp * 100 * _ep
-                        continue
-                    _raw = int(_per // (_ep * 100))
-                    _lot = min(_EQ_MAX_LOT, _raw)
-                    if _yc > 0:
-                        # その銘柄に残っている枠ぶんだけ
-                        _lot = min(_lot, int(max(0.0, _yc - _had) // (_ep * 100)))
-                    # 1件目は最低1単元を建てる(建てないと機会そのものを失う)。
-                    # 2件目以降(同じ銘柄)は上限に収まらなければ建てない。
-                    _lot = max(1, _lot) if _had <= 0 else max(0, _lot)
-                    if _lot <= 0:
-                        _ycap += 1        # 上限に当たって建てられなかった重複
-                        continue
-                    if _raw > _EQ_MAX_LOT:
-                        _capped += 1
-                    # 金額上限を **100株1単元でも超える**銘柄は、削りようが無い
-                    # (1単元が最小)。件数として出して、上限が絵に描いた餅に
-                    # なっていないかを見えるようにする。
-                    if _yc > 0 and _had + _lot * 100 * _ep > _yc:
-                        _ycap += 1
-                    _day.append([_t, _ep, _xp, _lot])
-                    _symyen[_sy1] = _had + _lot * 100 * _ep
-                    _used += _lot * 100 * _ep
+                        _sy1 = str(_t.get("symbol", "")).upper() \
+                            .removesuffix(".T").split(".")[0]
+                        _had = _symyen.get(_sy1, 0.0)
+                        if _div_cand:
+                            # 前夜に決めた株数をそのまま使う。注文を出せなかった
+                            # 候補は約定しても建たない(そもそも注文が無い)。
+                            _lp = _lots_pre.get(id(_t), 0)
+                            if _lp <= 0:
+                                continue
+                            _day.append([_t, _ep, _xp, _lp])
+                            _symyen[_sy1] = _had + _lp * 100 * _ep
+                            _used += _lp * 100 * _ep
+                            continue
+                        _raw = int(_per // (_ep * 100))
+                        _lot = min(_EQ_MAX_LOT, _raw)
+                        if _yc > 0:
+                            # その銘柄に残っている枠ぶんだけ
+                            _lot = min(_lot,
+                                       int(max(0.0, _yc - _had) // (_ep * 100)))
+                        # 1件目は最低1単元を建てる(建てないと機会そのものを失う)。
+                        # 2件目以降(同じ銘柄)は上限に収まらなければ建てない。
+                        _lot = max(1, _lot) if _had <= 0 else max(0, _lot)
+                        if _lot <= 0:
+                            _ycap += 1    # 上限に当たって建てられなかった重複
+                            continue
+                        if _raw > _EQ_MAX_LOT:
+                            _capped += 1
+                        # 金額上限を **100株1単元でも超える**銘柄は、削りようが無い
+                        # (1単元が最小)。件数として出して、上限が絵に描いた餅に
+                        # なっていないかを見えるようにする。
+                        if _yc > 0 and _had + _lot * 100 * _ep > _yc:
+                            _ycap += 1
+                        _day.append([_t, _ep, _xp, _lot])
+                        _symyen[_sy1] = _had + _lot * 100 * _ep
+                        _used += _lot * 100 * _ep
+                    # ── 段の締め: 実際に使った額だけ残り予算から引く ────────
+                    if _w is not None:
+                        _sp = _used - _u_before
+                        _R = max(0.0, _R - _sp)
+                        _U = max(0, _U - _nw)
+                        _r0 = _wsp.setdefault(_w, [0, 0.0, 0])
+                        _r0[0] += len(_mem)
+                        _r0[1] += _sp
+                        _r0[2] += 1
                 # ── ② 余りをギャップ降順で1単元ずつ配り切る ──────────────
                 #   ①は切り捨てなので必ず端数が残る。1周ずつ回して、
                 #   入らなくなったら終わり(予算は絶対に超えない)。
@@ -11681,6 +11784,8 @@ function switchTbd(id, tab) {{
                 #   fill_pct が低いほど資金が遊ぶ = 集中できない。
                 "den_med": _q(sorted(_dens), 0.5),
                 "den_is_cand": bool(_div_cand),
+                # ★ 段階モード: 段ごとの (建てた件数, 使った額, 日数)
+                "waves": {int(_k0): list(_v0) for _k0, _v0 in _wsp.items()},
                 "unseen": _unseen,
                 "watch": int(_watch),
                 "fill_pct": (sum(_cnts) / max(1, sum(_dens)) * 100.0),
@@ -15695,6 +15800,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                       f'{_st.get("watch", 0)}件で見られず '
                       f'{_st.get("unseen", 0):,}件</span>'
                       if _st.get("unseen") else "")
+                   # ★ 段階モード: 何段目に何件・いくら入ったか(2026-08-16)。
+                   #   後段の取り分が小さすぎるなら段を増やす意味が無い。
+                   + ("".join(
+                       f'<br><span style="color:#38bdf8">09:{_w9:02d} '
+                       f'{_v9[0]:,}件 / 平均'
+                       f'{(_v9[1] / max(1, _v9[2]) / 1e4):.0f}万</span>'
+                       for _w9, _v9 in sorted(
+                           (_st.get("waves") or {}).items()))
+                      if _st.get("waves") else "")
                    + '</span></td>')
                 + f'<td style="text-align:right;padding:2px 8px;color:#94a3b8;'
                 f'white-space:nowrap">{_st["per_day_min"]:.0f}'
@@ -17269,6 +17383,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _k2["div"] = "約定数割" in _s
             # 09:00 に寄らなかった銘柄を建てるか(既定は建てない)
             _k2["late"] = "遅寄り込み" in _s
+            # ★ 段階/締切 (2026-08-16)。"w10c10"=2段階(09:00/09:10) /
+            #   "c10"=一括締切10分 / 無印=09:00 の一発判定。
+            _mwv = _re_kn.search(r"(?:w(\d+))?c(\d+)(?![\d])", _s)
+            _k2["wave"] = (f"w{_mwv.group(1)}c{_mwv.group(2)}"
+                           if (_mwv and _mwv.group(1))
+                           else (f"c{_mwv.group(2)}" if _mwv else "—"))
             # 09:00 に見られる銘柄数(kabu の登録上限)。上限そのものが
             # 集中を成立させている可能性があるので、つまみとして掃く。
             if "watch無制限" in _s:
@@ -17307,7 +17427,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
-                        "dedup", "dedup_post", "div", "watch", "late"]
+                        "dedup", "dedup_post", "div", "watch", "late", "wave"]
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。
@@ -17359,7 +17479,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "div": "予算を割る分母",
                              "watch": "09:00に見る銘柄数(登録上限)",
                              "late": "09:00に寄らない銘柄",
+                             "wave": "判定のタイミング",
                              "gap": "ギャップ閾値(bp)"}
+
+                    def _fmt_wave(_v3):
+                        _s3 = str(_v3)
+                        if _s3 == "—":
+                            return "09:00 の一発(遅寄りは捨てる)"
+                        if _s3.startswith("w"):
+                            _st3, _ct3 = _s3[1:].split("c")
+                            _n3 = int(_ct3) // int(_st3) + 1
+                            return (f"{_n3}段階({_st3}分刻み・締切09:"
+                                    f"{int(_ct3):02d})")
+                        return f"一括締切 09:{int(_s3[1:]):02d}(全員そこで建てる)"
 
                     def _fmt_kn(_f, _v3):
                         if _f == "cap":
@@ -17378,6 +17510,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "無制限" if not _v3 else f"{_v3:g}件"
                         if _f == "late":
                             return "建てる(⛔実装不可)" if _v3 else "建てない"
+                        if _f == "wave":
+                            return _fmt_wave(_v3)
                         return f"{_v3:g}"
                     # ⛔ つまみを足したのに _LBLN へ入れ忘れると KeyError で
                     #    **監査ボードが丸ごと落ちる**(2026-08-16 に watch で発生)。
@@ -18883,6 +19017,19 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                   '決められないため。ライブは kabu の <code>OpeningPriceTime</code> で'
                   '同じ判定ができます。'
                   '<code>set LSS_SKIP_LATE_OPEN=0</code> で建てる側に戻せます。'
+                  '<br>★★ <b>段階版を測れるようにしました</b>'
+                  '（2026-08-16 ユーザー依頼「せめて2段階にしてほしい」）。'
+                  '監査ボードの「判定のタイミング」の行を見てください：'
+                  '<b>2段階(10分刻み)</b> = 09:00 で寄っている銘柄を建て、'
+                  '09:10 で遅寄り銘柄を追加。予算は'
+                  '<b>その段で判定する候補数の割合</b>で分けます'
+                  '（寄ったか／まだかは板で確定するので<b>先読みになりません</b>）。'
+                  '<b>一括締切</b> = 全員その時刻まで待ってから建てる版。'
+                  '<br>⛔ <b>1分刻みの判定は5分足では測れません</b>。'
+                  '先頭バーが09:05の銘柄が実際に何分に寄ったかが分からないためで、'
+                  '<b>刻みの下限は5分</b>です（保守側に「そのバーが終わるまで'
+                  '確定しない」と扱っています）。1分刻みを測るなら1分足'
+                  '（<code>~/.jquants_cache/minute</code>）を使う別実装が要ります。'
                   if _EQ_METHOD_CONF else
                   '<b>前夜に寄付指値を置く</b>方式です（約定は寄り値）。'
                   '09:00 に何かを見て発注するわけではありません。'

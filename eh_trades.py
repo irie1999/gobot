@@ -220,12 +220,30 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             #    68件→138件 と2倍になっており、最適な利確幅は以前と違いうる。
             #    §18.28 の「tm は変えない」は lss・delay1 での結論。
             (float(v[8]) if len(v) > 8 and v[8] is not None else None),
+            # 11要素目 = **締切(分)**。09:00 からの経過分。None なら現行(始値約定)。
+            # ★★ 2026-08-16 ユーザー発案「09:00から順次取得していけないか」。
+            #   遅寄り銘柄(15.7%)は 09:02〜09:06 に集中しているので、
+            #   **09:10 まで待てばほぼ全部の始値が出揃う**。出揃ってから
+            #   件数を確定させれば `予算÷件数` が計算でき、遅寄りも建てられる。
+            #   代償は「09:00 に寄った銘柄も締切時刻の値で建てる」こと。
+            #   どちらが得かは測らないと分からないので変種にする。
             # 10要素目 = **ATR期間の上書き**(日足の EWM span)。None なら既定14。
             # ⛔ 14 は **スイング戦略からの継承値**で、同日決済(数時間保有)に
             #    適切かは一度も検証していない(2026-08-15 の監査で判明)。
             #    sm/tm はすべて ATR 倍率なので、この期間が損切り・利確の
             #    **絶対幅そのもの**を決める。
-            (int(v[9]) if len(v) > 9 and v[9] is not None else None))
+            (int(v[9]) if len(v) > 9 and v[9] is not None else None),
+            (int(v[10]) if len(v) > 10 and v[10] is not None else None),
+            # 12要素目 = **段階の刻み(分)**。11要素目(締切)と併用する。
+            # ★★ 2026-08-16 ユーザー発案「せめて2段階とかにしてほしい」。
+            #   一括締切(11要素目だけ)は 09:00 に寄った銘柄まで締切時刻まで
+            #   待たせるので、そのぶんの値動きを丸ごと捨てる。段階にすれば
+            #   **09:00組は09:00の値で建て、遅寄り組だけ後の回で拾える**。
+            #   刻み=10・締切=10 → 2段階(09:00 / 09:10)。
+            #   ⚠ **5分足なので刻みの下限は5分**。1分刻みの判定はこのデータ
+            #     では測れない(先頭バーが09:05の銘柄が実際に何分に寄ったかが
+            #     分からない)。測るには1分足(CLAUDE.md「データ場所メモ」)が要る。
+            (int(v[11]) if len(v) > 11 and v[11] is not None else None))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -437,7 +455,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
                    int(stop_delay_bars), "fill", "", sm, tm, None)]
         for (_hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm, _htm,
-             _hap) in _HV:
+             _hap, _hcut, _hwv) in _HV:
             _sm_v = sm if _hsm is None else _hsm
             _tm_v = tm if _htm is None else _htm
             if _hgap is not None:
@@ -466,6 +484,59 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 # ★ 損切り遅延は **第4要素を尊重する**(2026-08-16)。以前は 0
                 #   固定だったので、確認方式を推奨(d4)と並べて比べられなかった。
                 #   ⚠ 09:05版は建てるのが5分遅いので、同じ N でも武装が5分遅い。
+                # ★★ 締切モード(2026-08-16)。09:00 から順次読んで、締切時刻に
+                #   出揃った始値で一括判定する。**遅寄り銘柄も建てられる**。
+                #   約定は「締切時刻以降の最初の5分足の始値」。
+                #   ⚠ **時刻で選ぶこと**(インデックスではない)。遅寄り銘柄は
+                #     先頭バーが09:05/09:06 なので、index だと時刻がずれる。
+                # ★★ 段階モード(_hwv)= 09:00 から刻みごとに判定して建てる。
+                #   一括締切(_hwv なし)は 09:00 組まで締切時刻まで待たせるが、
+                #   段階なら **09:00組は09:00の値・遅寄り組は後の回**で建つ。
+                #   資金の配分(何段目にいくら使うか)は後処理
+                #   (_size_equal_by_day)が `wave` を見て決める。
+                if _hcut:
+                    try:
+                        _b0 = day5.index[0]
+                        _bm0 = _b0.hour * 60 + _b0.minute - 540
+                    except Exception:
+                        continue
+                    if _hwv:
+                        # ⛔ 5分足なので「先頭バーが09:05」の銘柄が実際に何分に
+                        #    寄ったかは分からない。**そのバーが終わるまでは
+                        #    確定しない**とみなす(保守側)。09:00バーだけは
+                        #    板寄せなので 0 でよい。
+                        _need = 0 if _bm0 <= 0 else _bm0 + 5
+                        _wv = None
+                        _w0 = 0
+                        while _w0 <= int(_hcut):
+                            if _w0 >= _need:
+                                _wv = _w0
+                                break
+                            _w0 += int(_hwv)
+                        if _wv is None:
+                            continue      # 締切までに寄らなかった = 建てない
+                    else:
+                        _wv = int(_hcut)  # 一括: 全員 締切時刻で建てる
+                    _cut_i = None
+                    try:
+                        for _bi2 in range(len(day5)):
+                            _ts2 = day5.index[_bi2]
+                            if _ts2.hour * 60 + _ts2.minute - 540 >= _wv:
+                                _cut_i = _bi2
+                                break
+                    except Exception:
+                        _cut_i = None
+                    if _cut_i is None:
+                        continue          # その日は締切以降のバーが無い
+                    try:
+                        _ep_k = float(day5["open"].iloc[_cut_i])
+                    except Exception:
+                        continue
+                    _cases.append((_hn, _ep_k, _ep_k,
+                                   bool(_g_ok and _ep_k > 0),
+                                   int(_hd), _hanc, f"cut{_cut_i}w{_wv}",
+                                   _sm_v, _tm_v, _hap))
+                    continue
                 _cases.append((_hn, _ep_c, _ep_c, bool(_g_ok and _ep_c > 0),
                                int(_hd), _hanc,
                                "confirm" if _slow else "confirm0",
@@ -514,6 +585,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             #   落とすのは後処理(_size_equal_by_day)に任せる。こうすると
             #   「捨てているぶんが何時に寄って、いくらだったか」を同じ実行の
             #   中で測れる(遅寄り込みの変種も後処理だけで作れる)。
+            # ⚠ 締切モード(cutN)は遅寄りでも建てられるので印を付けない。
             _is_late = (_mode == "confirm0" and _no_open_bar)
             if _is_late:
                 _n_late[key] = _n_late.get(key, 0) + 1
@@ -524,9 +596,20 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 # ★ day_open を渡す(2026-08-15)。不約定側にも h_gap_bp が
                 #   要る。「寄りが閾値をどれだけ下回ったか」が分からないと、
                 #   8:59気配で前倒し判定したときに何件ひっくり返るかを測れない。
-                nf[key].extend(_mk(s, order_p, 0.0, 0.0, "約定せず", "",
-                                   pc, atr, _smv, _tmv, qty, key,
-                                   day_open=o1) for s in _srcs)
+                for s in _srcs:
+                    _nr = _mk(s, order_p, 0.0, 0.0, "約定せず", "",
+                              pc, atr, _smv, _tmv, qty, key, day_open=o1)
+                    # ★ 段階モード: 不約定(=ギャップ不合格)の候補も
+                    #   「何段目で判定したか」を持たせる。予算をその段に
+                    #   いくら配るかは『その段で判定する候補数』で決まるので、
+                    #   合格分だけ数えると分母が過小になる。
+                    if str(_mode).startswith("cut") and "w" in str(_mode):
+                        _nr["wave"] = int(str(_mode).split("w")[-1] or 0)
+                        _nr["open_hm"] = _first_hm
+                    elif _is_late:
+                        _nr["late_open"] = True
+                        _nr["open_hm"] = _first_hm
+                    nf[key].append(_nr)
                 continue
             if key != "E" and not str(_mode).startswith("confirm"):
                 # 指値売りなので「上昇して到達」。寄りが上なら ei=0 で始値約定。
@@ -534,6 +617,21 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 xp, why, _e, _x = _x5(day5, ep, _sa + atr * _smv, _sa - atr * _tmv, True,
                                       day_low=dl, day_high=dh, day_close=c1,
                                       stop_delay_bars=_dly)
+            elif str(_mode).startswith("cut"):
+                # ── 締切モード: 締切バーから建玉を持つ ────────────────
+                # ⛔ 18.32 の教訓: 建玉を持っている区間の一部が判定から抜けると
+                #    **必ず利益方向に出る**。締切バーの始値で建てるので、
+                #    そのバー自身から判定する(+inf で ei=0 を強制)。
+                _ci = int(str(_mode)[3:].split("w")[0] or 0)
+                _d3 = day5.iloc[_ci:]
+                if len(_d3) == 0:
+                    xp, why, _e, _x = None, "no_5m", None, None
+                else:
+                    _sa = ep
+                    xp, why, _e, _x = _x5(_d3, float("inf"),
+                                          _sa + atr * _smv, _sa - atr * _tmv,
+                                          False, day_low=None, day_high=None,
+                                          day_close=c1, stop_delay_bars=_dly)
             elif _mode == "confirm0":
                 # ── 寄り確認・**始値約定**(既定) ──────────────────
                 # 09:00 の板寄せ値で売れたとみなす。建玉は寄りからあるので
@@ -603,6 +701,11 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 #   「捨てているぶんがいくらだったか」を測れない。
                 if _is_late:
                     _tr["late_open"] = True
+                    _tr["open_hm"] = _first_hm
+                # ★ 段階モード: 何段目(09:00からの経過分)で建てたか。
+                #   後処理が予算をこの段ごとに配る。
+                if str(_mode).startswith("cut") and "w" in str(_mode):
+                    _tr["wave"] = int(str(_mode).split("w")[-1] or 0)
                     _tr["open_hm"] = _first_hm
                 out[key].append(_tr)
     _skip = sum(_sk.values())
