@@ -19009,12 +19009,100 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'いくら要るかが分かります。</p>'
                 + _dup_toggle_html(_sa, _ga[0], _ga[1], _dseq, _ehpfx + "A")
                 + '</div>')
+        # ★★ 母集団の月別診断 (2026-08-16 ユーザー指摘)。
+        #   §18.38 #9 で `lss_proposal_2026-07.py` が 150件しか無く
+        #   (--stop-delay-bars の付け忘れ)、**7月だけ薄い**という事故があった。
+        #   「ある月だけ成績が悪い」を見たとき、
+        #     ① 候補そのものが消えている  = 設定/データの事故
+        #     ② 候補はあるが合格が少ない  = 相場(上げが弱い月)
+        #   のどちらかを **数字で切り分けられないと同じ議論を繰り返す**。
+        #   候補 = 合格 + 不約定(その日 判定した銘柄日)。
+        _diag = ""
+        try:
+            _bkey = str(_srck).split("資金均等")[0]
+            _nfl = ((_EH_TRADES or {}).get("約定せず") or {}).get(_bkey) or []
+            _okl = (_EH_TRADES or {}).get(_bkey) or []
+            _mm: dict = {}
+            for _src, _ix in ((_okl, 1), (_nfl, 0)):
+                for _t9 in _src:
+                    _d9 = str(_t9.get("entry_d_raw") or "")[:7]
+                    if not _d9:
+                        continue
+                    _r9 = _mm.setdefault(_d9, [0, 0, set(), 0, set()])
+                    _r9[0] += 1                       # 候補
+                    _r9[1] += _ix                     # 合格
+                    _r9[2].add(str(_t9.get("entry_d_raw"))[:10])
+            for _t9 in (_eh_sorted.get(_ehk) or []):
+                _d9 = str(_t9.get("entry_d_raw") or "")[:7]
+                if _d9 in _mm:
+                    _mm[_d9][3] += 1                  # 建てた
+                    _mm[_d9][4].add(str(_t9.get("entry_d_raw"))[:10])
+            if len(_mm) >= 3:
+                _ks9 = sorted(_mm)
+                _cd9 = [len(_mm[k][2]) for k in _ks9[:-1]]   # 当月は半端なので除く
+                _md9 = sorted(_cd9)[len(_cd9) // 2] if _cd9 else 0
+                _bad = [k for k in _ks9[:-1]
+                        if _md9 and len(_mm[k][2]) < _md9 * 0.7]
+                _rows9 = ""
+                for k in reversed(_ks9):
+                    _c9, _o9, _ds9, _b9, _bd9 = _mm[k]
+                    _hit = (k in _bad)
+                    _rows9 += (
+                        f'<tr style="color:'
+                        f'{"#f87171" if _hit else "#94a3b8"}">'
+                        f'<td style="text-align:left;padding:2px 8px">{k}'
+                        + ("　⛔" if _hit else "") + '</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{len(_ds9)}日</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{_c9:,}</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{_o9:,}<span style="color:#64748b;font-size:0.7rem">'
+                        f'({_o9 / max(1, _c9) * 100:.0f}%)</span></td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{_b9:,}</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{len(_bd9)}日</td></tr>')
+                _diag = (
+                    f'<details style="margin:0 0 10px">'
+                    f'<summary style="color:'
+                    f'{"#f87171" if _bad else "#64748b"};font-size:0.78rem;'
+                    f'cursor:pointer">🔎 <b>母集団の月別診断</b>'
+                    + (f'　⛔ <b>候補が少ない月: {", ".join(_bad)}</b>'
+                       f'（中央値の7割未満）' if _bad
+                       else '　✅ 候補が極端に少ない月はありません')
+                    + '（クリックで展開）</summary>'
+                    f'<p style="color:#94a3b8;font-size:0.74rem;'
+                    f'margin:6px 0;line-height:1.7">'
+                    f'ある月だけ成績が悪いとき、<b>候補そのものが消えている'
+                    f'（設定・データの事故）</b>のか、'
+                    f'<b>候補はあるが合格が少ない（相場が上げなかった）</b>'
+                    f'のかを切り分けるための表です。<br>'
+                    f'⛔ 実際に 2026-07 の提案ファイルが 150件しか無く'
+                    f'（<code>--stop-delay-bars</code> の付け忘れ）'
+                    f'7月だけ薄くなっていた事故があります（§18.38 #9）。'
+                    f'<b>候補日数</b>がその月の営業日数（概ね19〜22日）を'
+                    f'大きく下回っていたら、まずデータ・設定を疑ってください。'
+                    f'</p>'
+                    f'<table style="font-size:0.74rem;border-collapse:collapse">'
+                    f'<thead><tr style="color:#64748b">'
+                    f'<th style="text-align:left;padding:2px 8px">月</th>'
+                    f'<th style="padding:2px 8px">候補日数</th>'
+                    f'<th style="padding:2px 8px">候補</th>'
+                    f'<th style="padding:2px 8px">合格</th>'
+                    f'<th style="padding:2px 8px">建てた</th>'
+                    f'<th style="padding:2px 8px">建てた日数</th>'
+                    f'</tr></thead><tbody>{_rows9}</tbody></table></details>')
+        except Exception as _de9:
+            _diag = (f'<p style="color:#f87171;font-size:0.74rem">'
+                     f'母集団の月別診断を作れませんでした: {_de9}</p>')
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" '
             f'class="detail-tab-pane{_act("eh" + _ehk)}">'
+            + _diag
             # ★ 説明は既定で閉じる(2026-08-16 ユーザー指示)。縦に長く、
             #   毎日読むものではない。要点(方式名)は summary に出す。
-            f'<details style="margin-bottom:10px">'
+            + f'<details style="margin-bottom:10px">'
             f'<summary style="color:{_tc};font-size:0.8rem;cursor:pointer">'
             f'🔁 <b>エントリー方式 {_ehk}</b> — {_lbl}（説明を開く）</summary>'
             f'<p style="color:{_tc};font-size:0.8rem;margin:6px 0 0">'
