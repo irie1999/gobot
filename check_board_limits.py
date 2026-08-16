@@ -44,8 +44,20 @@
   ⛔ --warmup を飛ばして --open だけ流すと、登録直後の初回になるので
      140秒級の数字が出る。**手順を守らないと測定にならない**。
 
+★★ 「50件しか読めないのか」を確かめる (2026-08-16 の最重要課題):
+
+  python check_board_limits.py --prod --cap-probe 40,50,60
+      → 50件は **1回のリクエストの上限**か **総登録数の上限**か
+        (前者なら分けて登録すれば何件でも watch できる)
+
+  python check_board_limits.py --prod --rotate 100
+      → 総数の上限だった場合に **50件ずつ回して全部読めるか**。
+        登録→読み→全解除 を2周し、**2周目が速ければ kabu は購読を覚えている**
+        = 寄り前に全バッチを空読みしておけば 09:00 は全部ウォームで回せる。
+        2周目も遅ければ毎回コールドなので不可能。
+
 その他:
-  python check_board_limits.py --prod --cap-probe 40,50,60,80,120   # 登録上限
+  python check_board_limits.py --prod --ws                          # PUSH配信
   python check_board_limits.py --prod --symbols-file lss_trades_K.csv --n 50
   python check_board_limits.py --prod --n 41                        # 全部入り(場外用)
 
@@ -95,6 +107,12 @@ ap.add_argument("--open", dest="at_open", action="store_true",
                      "コールド読み・上限プローブ・並列スイープは全部やらない")
 ap.add_argument("--log", type=str, default="board_speed_log.csv",
                 help="--open の結果を追記するCSV(朝ごとに貯まる)")
+ap.add_argument("--rotate", type=int, default=0,
+                help="【重要】N銘柄を50件ずつ **バッチで回して** 全部読めるかを測る。"
+                     "登録→読み→全解除 を2周し、2周目が速ければ kabu が購読を"
+                     "覚えている = 分割して読める。遅ければ毎回コールドで不可")
+ap.add_argument("--batch", type=int, default=50,
+                help="--rotate の1バッチの件数(kabu の登録上限。既定50)")
 ap.add_argument("--ws", action="store_true",
                 help="PUSH配信(WebSocket)に繋がるかだけ確かめる。照会のみ・"
                      "場外でも実行できる。REST が遅かった場合の逃げ道の下調べ")
@@ -185,6 +203,79 @@ def _board_one(_cli, sym):
         return sym, (time.time() - _s0), _cli.get_board(sym), None
     except Exception as e:
         return sym, (time.time() - _s0), None, e
+
+# ── 【重要】50件ずつバッチで回せるか (--rotate) ────────────────────────────
+# ⛔ 実測で候補は中央49件・最大277件、**47%の日が50件を超える**
+#    (check_daily_universe.py)。登録上限が50件なら、超えたぶんは 09:00 に
+#    始値を読めない = 建てられない。
+#    → 「50件ずつ登録し直して2回読む」ができれば制約が消える。
+#
+# 分かれ目は **再登録がウォームか**:
+#    登録直後の初回 /board は 48〜142秒(kabu が板を購読しに行くため)。
+#    毎回コールドなら 09:00 のバッチ回しは不可能。
+#    kabu が一度購読した銘柄を覚えているなら、**寄り前に全バッチを一度
+#    空読みしておけば** 09:00 は全部ウォームで回せる。
+#
+# このテストは 同じ銘柄で 登録→読み→全解除 を **2周**する。
+#    2周目が1周目より大幅に速い → 覚えている = **バッチ回しできる**
+#    2周目も同じだけ遅い       → 毎回コールド = **できない**
+if args.rotate > 0:
+    _pool = _syms if len(_syms) >= args.rotate else [str(x) for x in _DEFAULT]
+    _pool = _pool[:args.rotate]
+    _bs = max(1, args.batch)
+    _batches = [_pool[i:i + _bs] for i in range(0, len(_pool), _bs)]
+    print(f"\n[rotate] {len(_pool)}銘柄 を {len(_batches)}バッチ"
+          f"({_bs}件ずつ)で回します")
+    _rounds = []
+    for _rd in (1, 2):
+        cli.unregister_all()
+        _tr = time.time()
+        _det = []
+        for _bi, _b in enumerate(_batches, 1):
+            _t0 = time.time()
+            _r = cli.register_many(_b)
+            _nok = len((_r or {}).get("RegistList") or [])
+            _t1 = time.time()
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                _res = list(ex.map(lambda x: _board_one(cli, x), _b))
+            _t2 = time.time()
+            _got = sum(1 for x in _res if x[2])
+            cli.unregister_all()
+            _det.append((_bi, len(_b), _nok, _got, _t1 - _t0, _t2 - _t1))
+        _tot = time.time() - _tr
+        _rounds.append((_tot, _det))
+        print(f"\n  ── {_rd}周目: 合計 {_tot:.2f}s ──")
+        print(f"     {'batch':>6} {'要求':>5} {'登録':>5} {'取得':>5} "
+              f"{'登録s':>7} {'読みs':>8}")
+        for _bi, _nb, _nok, _got, _sreg, _srd in _det:
+            print(f"     {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} "
+                  f"{_sreg:>7.2f} {_srd:>8.2f}")
+    _r1, _r2 = _rounds[0][0], _rounds[1][0]
+    print("\n" + "=" * 70)
+    print("■ 判定: 50件ずつ分けて読めるか")
+    print("=" * 70)
+    print(f"  1周目 {_r1:.2f}s → 2周目 {_r2:.2f}s "
+          f"({_r1 / max(_r2, 1e-9):.1f}倍速)")
+    if _r2 <= max(3.0, _r1 * 0.4):
+        print(f"  ✅ **2周目が大幅に速い = kabu は購読を覚えています**")
+        print(f"     → **寄り前に全バッチを一度空読みしておけば、09:00 は"
+              f"{_r2:.1f}s で {len(_pool)}銘柄 全部読めます**")
+        print(f"     → 登録上限50件の制約は **回避できます**"
+              f"(LSS_WATCH_CAP=0 にしてよい)")
+    elif _r2 <= _r1 * 0.8:
+        print(f"  ⚠ 多少速いが劇的ではありません。09:00 に {_r2:.1f}s かかります。"
+              f"許容できるかは decay 次第")
+    else:
+        print(f"  ⛔ **2周目も同じだけ遅い = 毎回コールド**。"
+              f"09:00 のバッチ回しは不可能です")
+        print(f"     → 登録上限50件が効きます(LSS_WATCH_CAP=50 のまま)。"
+              f"前夜に流動性上位50件へ絞るしかありません")
+    print(f"\n  ⚠ 実運用の候補は **中央49件・最大277件**"
+          f"(check_daily_universe.py)。最大日は "
+          f"{-(-277 // _bs)}バッチ = 2周目換算で "
+          f"{_r2 / max(1, len(_batches)) * -(-277 // _bs):.1f}s の見込み")
+    cli.unregister_all()
+    raise SystemExit(0)
 
 # ── PUSH配信(WebSocket)の疎通確認 (--ws) ─────────────────────────────────
 # ⛔ REST は 6.5件/秒で頭打ち(並列を上げても変わらない)。1回読むだけなら
