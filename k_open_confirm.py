@@ -133,9 +133,23 @@ if args.collect:
         from kabu_send_lss import _load_symbols, _lss_signal_today
     except Exception as _e:
         sys.exit(f"[error] kabu_send_lss を読めません: {_e}")
-    _pairs = _load_symbols(args.symbols_file or None)
-    print(f"[collect] {len(_pairs):,}ペアから今日のシグナルを収集します"
-          f"(実発注と同じ経路 / kabu は使いません)", flush=True)
+    # ⛔ kabu_send_lss._load_symbols は `lss_watchlist_proposal_*.py`(**旧命名**)
+    #    を自動検出する。放っておくと数ヶ月前の古い提案を拾い、レポートの
+    #    J/L/K とは **別の母集団** で記録することになる(2026-08-17 に実際に
+    #    lss_watchlist_proposal_2026-07-15.py 5,639ペアを拾った)。
+    #    レポートの土台(dailyfast.bat が渡す lss_proposal_full.py)に揃える。
+    _src = args.symbols_file
+    if not _src:
+        for _c in ("lss_proposal_full.py", "lss_proposal_cumul.py"):
+            if Path(_c).exists():
+                _src = _c
+                break
+    _pairs = _load_symbols(_src or None)
+    print(f"[collect] 母集団: {_src or '(自動検出)'} → {len(_pairs):,}ペア"
+          f"。今日のシグナルを収集します(kabu は使いません)", flush=True)
+    if _src != "lss_proposal_full.py":
+        print(f"  ⚠ レポートの土台は lss_proposal_full.py です。"
+              f"別ファイルだと J/L/K タブと母集団が食い違います", flush=True)
     _out: list = []
     for _i, (_c, _n, _st) in enumerate(_pairs):
         if _i and _i % 500 == 0:
