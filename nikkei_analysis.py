@@ -11212,6 +11212,16 @@ function switchTbd(id, tab) {{
                 + (" ⛔約定数で割る(先読み)" if "約定数割" in str(_k)
                    else " 予算÷候補数"))
 
+    # ★★ J/K タブの中身 (2026-08-16 ユーザー依頼)。
+    #   J = 実装版(選定あり + watch50)   ← いま kabu だけで作れる形
+    #   K = 理想版(選定なし + watch無制限) ← 全候補の始値が読めたら
+    #   同じ実行から作るので、月別を並べればそのまま比較になる(18.24)。
+    #   ⚠ 監査ボードの基準(_EQ_TAB_KEY2)は動かさない。動かすとつまみが
+    #     2つずれて全行『比較不能』になる。
+    _EQ_TAB_J = os.environ.get(
+        "LSS_EQ_TAB_J", _EQ_TAB_KEY2 + "実装版").strip() or _EQ_TAB_KEY
+    _EQ_TAB_K = os.environ.get(
+        "LSS_EQ_TAB_K", _EQ_TAB_KEY2 + "理想版").strip() or _EQ_TAB_KEY2
     _EQ_TAB_LBL = _eq_lbl_of(_EQ_TAB_KEY)
     # ★ タブ2(K) = 2026-08-15 に確定した推奨設定。J の隣に出す。
     #   delay4 + 損切 0.5ATR。sm0.5 は §18.38 #2 の再測定で 月平均/σ が
@@ -11260,7 +11270,8 @@ function switchTbd(id, tab) {{
         _EQ_CAP_N = int(os.environ.get("LSS_EQ_CAP_MAX_N", "0") or 0)
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
-                               _ymax=0.0, _nf=None, _div_cand=False, _watch=0):
+                               _ymax=0.0, _nf=None, _div_cand=False, _watch=0,
+                               _pool=None):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -11304,9 +11315,28 @@ function switchTbd(id, tab) {{
             減り、1銘柄あたりの建玉が膨らむ。月次σ や t には現れない
             **単一銘柄のリスク**なので、必ず併記して判断する。
             """
+            # ★ 母集団フィルタ(2026-08-16)。_pool = (許可ペア集合, 解禁日dict)。
+            #   **選定なしの実行から『選定あり』を切り出す**ために使う。
+            #   同じ1回の実行で両方を出せるので、比較が別実行にならない(18.24)。
+            #   ⛔ START_DATES(解禁日)も必ず適用すること。選定は過去成績で選ぶので、
+            #     解禁前の取引を入れると先読みになる。
+            def _in_pool(_t) -> bool:
+                if not _pool:
+                    return True
+                _ok, _sd = _pool
+                _c = str(_t.get("symbol", "")).upper() \
+                    .removesuffix(".T").split(".")[0]
+                _st = str(_t.get("strategy") or _t.get("strat") or "")
+                if (_c, _st) not in _ok:
+                    return False
+                _d0 = _sd.get((_c, _st))
+                return not (_d0 and str(_t.get("entry_d_raw") or "") < str(_d0))
+
             _by: dict = {}
             for _t in _ts:
                 if _t.get("reason") in ("約定せず",):
+                    continue
+                if not _in_pool(_t):
                     continue
                 _by.setdefault(str(_t.get("entry_d_raw") or ""), []).append(_t)
             _out = []
@@ -11336,7 +11366,9 @@ function switchTbd(id, tab) {{
             if _nf is not None:
                 for _t in list(_ts) + list(_nf or []):
                     _d0 = str(_t.get("entry_d_raw") or "")
-                    if _d0:
+                    # 候補(=09:00に読む銘柄)も同じ母集団に絞る。絞らないと
+                    # watch の上位50件が選定外の銘柄で埋まってしまう。
+                    if _d0 and _in_pool(_t):
                         _cd.setdefault(_d0, []).append(_t)
                 for _d0, _l0 in _cd.items():
                     if _dedup:
@@ -11651,6 +11683,35 @@ function switchTbd(id, tab) {{
         #    実測(2026-08-16): 上限50件 / 51件以上は 400 でリクエストごと失敗 /
         #    候補は中央49件・最大277件で **47% の日が超える**。
         #    0 で無効化(上限が無い世界を測りたいとき)。モジュール先頭で定義。
+        # ★★ 『実装版』と『理想版』を **同じ実行から** 作る (2026-08-16)。
+        #   選定あり(3,508ペア) ⊂ 選定なし(9,240ペア) なので、選定なしで回した
+        #   結果から選定ありを切り出せる。別実行で比べると比較相手まで動く(18.24)。
+        #     実装版 = 選定あり + watch50   ← いま kabu だけで作れる形
+        #     理想版 = 選定なし + watch無制限 ← 全候補の始値が読めたら
+        #   ⛔ START_DATES(解禁日)も一緒に読む。入れないと選定の先読みになる。
+        _SEL_POOL = None
+        _sel_pf = os.environ.get("LSS_IMPL_PROPOSAL", "lss_proposal_cumul.py")
+        try:
+            _pp = Path(_sel_pf)
+            if _pp.exists():
+                _ns: dict = {}
+                exec(_pp.read_text(encoding="utf-8"), _ns)
+                _ok = {(str(_c).upper().removesuffix(".T").split(".")[0], str(_st))
+                       for (_c, _nm, _st) in (_ns.get("SELECTED") or [])}
+                _sd = {(str(_k[0]).upper().removesuffix(".T").split(".")[0],
+                        str(_k[1])): str(_v)
+                       for _k, _v in (_ns.get("START_DATES") or {}).items()}
+                if _ok:
+                    _SEL_POOL = (_ok, _sd)
+                    print(f"[E/H] 実装版の母集団: {_sel_pf} から {len(_ok):,}ペア"
+                          f"(解禁日 {len(_sd):,}件)。"
+                          f"『実装版』タブはこの母集団 + watch{_WATCH_CAP}件、"
+                          f"『理想版』タブは選定なし + watch無制限", flush=True)
+            else:
+                print(f"[E/H] ⚠ {_sel_pf} が無いので『実装版』タブは作れません"
+                      f"(set LSS_IMPL_PROPOSAL=... で指定)", flush=True)
+        except Exception as _pe:
+            print(f"[E/H] ⚠ 実装版の母集団を読めません: {_pe}", flush=True)
         _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
@@ -11665,10 +11726,10 @@ function switchTbd(id, tab) {{
             #    約定数で割ってよい。詳細は _size_equal_by_day の docstring。
             _pre = (str(_k).startswith("H指値") or str(_k) in ("H", "H寄指"))
             # (上位N, 充填, 1銘柄1件, 金額上限[円], 候補数で割るか)
-            _eq_modes = [(0, False, False, 0.0, _pre, _WATCH_CAP)]
+            _eq_modes = [(0, False, False, 0.0, _pre, _WATCH_CAP, None)]
             if _k == _EQ_TAB_BASE:
-                _eq_modes += ([(0, True, False, 0.0, _pre, _WATCH_CAP)]
-                              + [(_t2, False, False, 0.0, _pre, _WATCH_CAP)
+                _eq_modes += ([(0, True, False, 0.0, _pre, _WATCH_CAP, None)]
+                              + [(_t2, False, False, 0.0, _pre, _WATCH_CAP, None)
                                  for _t2 in _EQ_TOPS])
             # ★ 1銘柄1件・金額上限は **推奨タブ(K)の変種にも**付ける。
             #   ⛔ 1銘柄1件は 95%点(41%→33%)は下げるが **最大(予算の99%)は
@@ -11676,11 +11737,16 @@ function switchTbd(id, tab) {{
             #      1銘柄しかない日」に出るので、重複を外しても対象が無い。
             #      **最悪ケースを直せるのは金額上限だけ**。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
-                _eq_modes.append((0, False, True, 0.0, _pre, _WATCH_CAP))
+                _eq_modes.append((0, False, True, 0.0, _pre, _WATCH_CAP, None))
+                # ★ タブ用: 実装版(選定あり+watch50) / 理想版(選定なし+watch無制限)
+                if _SEL_POOL:
+                    _eq_modes.append((0, False, False, 0.0, _pre,
+                                      _WATCH_CAP, _SEL_POOL))
+                _eq_modes.append((0, False, False, 0.0, _pre, 0, "IDEAL"))
                 # ★ 旧挙動(約定数で割る=先読み)を **1行だけ**残す。消すと
                 #   「これまでの K の数字がどれだけ上振れていたか」が測れない。
                 if _pre:
-                    _eq_modes.append((0, False, False, 0.0, False, _WATCH_CAP))
+                    _eq_modes.append((0, False, False, 0.0, False, _WATCH_CAP, None))
                 # ★★ 登録上限を **外した**版 (2026-08-16)。
                 #   ⛔ 上限50件は制約に見えるが、実は **集中を成立させている**
                 #     可能性がある: 集中が起きるのは 合格数 < 予算÷1単元(≒13件)
@@ -11689,12 +11755,12 @@ function switchTbd(id, tab) {{
                 #   → 「読める数を増やすと良くなる」は自明ではない。同じ実行の
                 #     中で並べて確かめる(18.24: 別実行で比べない)。
                 if _WATCH_CAP > 0:
-                    _eq_modes.append((0, False, False, 0.0, _pre, 0))
+                    _eq_modes.append((0, False, False, 0.0, _pre, 0, None))
                     for _wc in [int(x) for x in str(os.environ.get(
                             "LSS_WATCH_CAPS", "25,100")).split(",")
                             if str(x).strip().isdigit() and int(x) > 0]:
                         if _wc != _WATCH_CAP:
-                            _eq_modes.append((0, False, False, 0.0, _pre, _wc))
+                            _eq_modes.append((0, False, False, 0.0, _pre, _wc, None))
                     # ★★ 「多く**建てる**」ではなく「多くから**選ぶ**」版
                     #   (2026-08-16)。上限を外して全候補を読み、その中から
                     #   **ギャップ上位N件だけ**建てる。
@@ -11710,7 +11776,7 @@ function switchTbd(id, tab) {{
                     for _wt in [int(x) for x in str(os.environ.get(
                             "LSS_WATCH_FREE_TOPS", "8,13,20")).split(",")
                             if str(x).strip().isdigit() and int(x) > 0]:
-                        _eq_modes.append((_wt, False, False, 0.0, _pre, 0))
+                        _eq_modes.append((_wt, False, False, 0.0, _pre, 0, None))
                 # ★ 金額上限は _EQ_MAX_YEN(既定100万)で **全変種に掛かっている**。
                 #   ここで作るのは「その上限を動かした版」。0 = 上限なし
                 #   (_size_equal_by_day には負値で渡して env の既定を無効化する)。
@@ -11727,13 +11793,13 @@ function switchTbd(id, tab) {{
                         continue          # 既定と同じ = 基準そのもの
                     _eq_modes.append((0, False, False,
                                       (_eqy * 1e4) if _eqy > 0 else -1.0,
-                                      _pre, _WATCH_CAP))
+                                      _pre, _WATCH_CAP, None))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
             #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
             #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
-            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd, _eqwc in _eq_modes:
+            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd, _eqwc, _eqpl in _eq_modes:
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
@@ -11743,8 +11809,12 @@ function switchTbd(id, tab) {{
                          # 既定(候補数割)は無印 = 実装できる形。
                          + ("約定数割" if (_pre and not _eqcd) else "")
                          # 登録上限を動かした版だけ名前を分ける
-                         + ("" if _eqwc == _WATCH_CAP else
-                            ("watch無制限" if _eqwc <= 0 else f"watch{_eqwc}")))
+                         + ("" if (_eqwc == _WATCH_CAP or _eqpl == "IDEAL")
+                            else ("watch無制限" if _eqwc <= 0
+                                  else f"watch{_eqwc}"))
+                         # タブ用の2本だけ名前で区別する
+                         + ("実装版" if (_eqpl and _eqpl != "IDEAL") else
+                            ("理想版" if _eqpl == "IDEAL" else "")))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
@@ -11752,7 +11822,8 @@ function switchTbd(id, tab) {{
                         _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym,
                         # 候補ビューは **常に**渡す(登録上限の適用に要る)。
                         # 分母に使うかどうかは _div_cand で別に決める。
-                        _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc)
+                        _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc,
+                        None if (_eqpl in (None, "IDEAL")) else _eqpl)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -12172,7 +12243,7 @@ function switchTbd(id, tab) {{
                               if str(k).endswith("資金均等"))
                   + ")。set LSS_EQ_TAB_KEY=... で指定", flush=True)
         for _ehk, _ehpfx in _EH_PAIRS:
-            _srck = ({"J": _EQ_TAB_KEY, "K": _EQ_TAB_KEY2}).get(_ehk, _ehk)
+            _srck = ({"J": _EQ_TAB_J, "K": _EQ_TAB_K}).get(_ehk, _ehk)
             _src = _EH_TRADES.get(_srck) or []
             if not _src:
                 continue
@@ -17155,7 +17226,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # ⚠ H 本体(前日終値-5tick 指値)は +Nbp 寄指とも確認方式とも別。
             #    同じ扱いにすると兄弟判定が混ざる(2026-08-16)。
             _b0 = _s.split("資金均等")[0]
-            _k2["_auc"] = ("H本体" if _b0 in ("H", "H寄指")
+            # ⚠ 実装版/理想版は **母集団が違う**(選定あり/なし)。つまみではなく
+            #    別の方式なので、監査ボードの兄弟判定から外す(2026-08-16)。
+            #    外さないと『つまみ0個違い』として基準と同一に見えてしまう。
+            _k2["_auc"] = ("実装版" if "実装版" in _s
+                           else "理想版" if "理想版" in _s
+                           else "H本体" if _b0 in ("H", "H寄指")
                            else "確認5分" if "H寄り確認5分" in _s
                            else "確認" if "H寄り確認" in _s
                            else ("寄指" if "寄指" in _s else ""))
@@ -18613,19 +18689,29 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                "H": ("H 前日終値の指値", "#f0abfc", "#f5d0fe",
                      "<b>前日終値の指値売り</b>(上がって到達したら約定。"
                      "寄りが既に上なら板寄せ。届かなければ建てない)"),
-               "J": (f"J {_EQ_TAB_LBL}", "#facc15", "#fde68a",
-                     "09:00 の<b>始値</b>を見て、前日終値比のギャップが"
-                     f"<b>{_EQ_TAB_GAP}</b>以上の銘柄だけを合格とし、"
-                     "<b>その日の合格銘柄に予算を均等割り</b>して即成行売り"
-                     "(約定は始値で近似)"),
-               # ★ K = 2026-08-15 に確定した推奨設定。J との違いは
-               #   **損切りを武装するまでの本数だけ**(delay1 → delay4)。
-               "K": (f"K {_EQ_TAB_LBL2} ★推奨", "#22d3ee", "#a5f3fc",
-                     "J とまったく同じ発注・同じ銘柄で、"
-                     "<b>損切りを武装するまでの時間だけ</b>が違います"
-                     "(09:00約定なら <b>09:20</b> から損切り有効。利確と引けは"
-                     "最初から有効)。2026-08-15 の設定比較で"
-                     "<b>月平均/σ が最大</b>だった設定")}
+               # ★★ J = 実装版 / K = 理想版 (2026-08-16)。**同じ1回の実行**から
+               #   作っているので、月別サマリーを並べればそのまま比較になる。
+               #   決済設定(delay/sm/tm/ATR/上限)は両者まったく同じ。
+               #   違うのは **母集団** と **09:00 に読める銘柄数** の2つだけ。
+               "J": (f"J 実装版（選定あり・watch{_WATCH_CAP}件）",
+                     "#facc15", "#fde68a",
+                     "<b>いま kabu だけで作れる形</b>です。"
+                     "前夜に銘柄選定(累積マージ)で候補を作り、"
+                     f"そこから<b>流動性上位{_WATCH_CAP}件</b>だけを登録して"
+                     "09:00 に始値を読み、"
+                     f"ギャップ<b>{_EQ_TAB_GAP}</b>以上を合格として"
+                     "<b>予算を均等割り</b>。"
+                     "⛔ kabu の銘柄登録は50件が上限で、候補は中央49件・"
+                     "最大277件なので<b>47%の日は一部を捨てています</b>"),
+               "K": (f"K 理想版（選定なし・watch無制限）", "#22d3ee", "#a5f3fc",
+                     "<b>全候補の始値が読めたら</b>の形です。"
+                     "銘柄選定をせず(全ペアを対象)、"
+                     "その日のシグナル<b>全部</b>の始値を 09:00 に読んで判定します。"
+                     "決済設定は J とまったく同じで、違うのは"
+                     "<b>母集団</b>と<b>読める銘柄数</b>だけ。"
+                     "⛔ 候補は中央154件・最大614件なので、kabu 単体では"
+                     "<b>実装できません</b>(登録上限50件 / 平均4バッチ必要)。"
+                     "楽天RSS 等の多銘柄ソースか、50件ずつの回し読みが要ります")}
     for _ehk in ("E", "H", "J", "K"):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
@@ -18690,10 +18776,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                # ⛔ 「違いは武装までの時間だけ」と書いていたが、K は sm も
                #    違う(J=既定sm / K=推奨sm)。ラベルから実際の差を出す。
                + (f'<br>★ <b>J との違いは決済の設定だけ</b>です'
-                  f'（J: {_EQ_TAB_LBL} ／ K: {_EQ_TAB_LBL2}）。'
-                  f'銘柄・株数・注文の出し方・引けは1つも変わりません。'
+                  f'（J: {_eq_lbl_of(_EQ_TAB_J)} ／ K: {_eq_lbl_of(_EQ_TAB_K)}）。'
+                  f'決済設定は同一で、違うのは<b>母集団</b>と'
+                  f'<b>09:00 に読める銘柄数</b>だけです。'
                   if _ehk == "K" else
-                  f'<br>★ 隣の <b>K</b> が推奨設定です（{_EQ_TAB_LBL2}）。'
+                  f'<br>★ 隣の <b>K(理想版)</b> は「全候補の始値が読めたら」の'
+                  f'上限値です（{_eq_lbl_of(_EQ_TAB_K)}）。'
                   if _EQ_TAB_KEY2 else '')
                + '<br>⚠ <b>まだ実運用していません</b>（実運用は H）。'
                # ⛔ 2026-08-16 修正: ここは「09:00に始値を見てから発注する」
