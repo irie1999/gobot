@@ -19039,28 +19039,53 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     _mm[_d9][4].add(str(_t9.get("entry_d_raw"))[:10])
             if len(_mm) >= 3:
                 _ks9 = sorted(_mm)
-                _cd9 = [len(_mm[k][2]) for k in _ks9[:-1]]   # 当月は半端なので除く
+                # ⛔ **窓の両端は半端な月**なので判定から外す(2026-08-16 修正)。
+                #    末尾しか外していなかったため、先頭月(表示窓の切り口)が
+                #    毎回 ⛔ になっていた(2025-08 が10日で誤検知)。
+                _mid9 = _ks9[1:-1] if len(_ks9) >= 3 else _ks9
+                _cd9 = [len(_mm[k][2]) for k in _mid9]
                 _md9 = sorted(_cd9)[len(_cd9) // 2] if _cd9 else 0
-                _bad = [k for k in _ks9[:-1]
+                _bad = [k for k in _mid9
                         if _md9 and len(_mm[k][2]) < _md9 * 0.7]
+                # ★ 建てた/合格 の中央値。ここが極端に低い月は
+                #   「候補が消えた」ではなく **予算で切り捨てた** 月。
+                _rt9 = sorted((_mm[k][3] / max(1, _mm[k][1]) * 100)
+                              for k in _mid9)
+                _rtm = _rt9[len(_rt9) // 2] if _rt9 else 0.0
+                _cut = [k for k in _mid9
+                        if _rtm and (_mm[k][3] / max(1, _mm[k][1]) * 100)
+                        < _rtm * 0.5]
                 _rows9 = ""
                 for k in reversed(_ks9):
                     _c9, _o9, _ds9, _b9, _bd9 = _mm[k]
                     _hit = (k in _bad)
+                    _cut9 = (k in _cut)
+                    _edge = (k in (_ks9[0], _ks9[-1]))
+                    _rt = _b9 / max(1, _o9) * 100
                     _rows9 += (
                         f'<tr style="color:'
-                        f'{"#f87171" if _hit else "#94a3b8"}">'
+                        f'{"#f87171" if _hit else "#fbbf24" if _cut9 else "#94a3b8"}">'
                         f'<td style="text-align:left;padding:2px 8px">{k}'
-                        + ("　⛔" if _hit else "") + '</td>'
+                        + ("　⛔" if _hit else "")
+                        + ('　<span style="color:#64748b;font-size:0.7rem">'
+                           '(窓の端)</span>' if _edge else '') + '</td>'
                         f'<td style="text-align:right;padding:2px 8px">'
                         f'{len(_ds9)}日</td>'
                         f'<td style="text-align:right;padding:2px 8px">'
-                        f'{_c9:,}</td>'
+                        f'{_c9:,}<span style="color:#64748b;font-size:0.7rem">'
+                        f'<br>{_c9 / max(1, len(_ds9)):.0f}/日</span></td>'
                         f'<td style="text-align:right;padding:2px 8px">'
                         f'{_o9:,}<span style="color:#64748b;font-size:0.7rem">'
-                        f'({_o9 / max(1, _c9) * 100:.0f}%)</span></td>'
+                        f'<br>{_o9 / max(1, _c9) * 100:.0f}% / '
+                        f'{_o9 / max(1, len(_ds9)):.0f}/日</span></td>'
                         f'<td style="text-align:right;padding:2px 8px">'
-                        f'{_b9:,}</td>'
+                        f'{_b9:,}<span style="color:#64748b;font-size:0.7rem">'
+                        f'<br>{_b9 / max(1, len(_bd9)):.1f}/日</span></td>'
+                        # ★ ここが低い月 = 候補が消えたのではなく **予算で
+                        #   切り捨てた** 月。7月がまさにこれだった。
+                        f'<td style="text-align:right;padding:2px 8px;'
+                        f'font-weight:{"700" if _cut9 else "400"}">'
+                        f'{_rt:.1f}%' + ("　⚠" if _cut9 else "") + '</td>'
                         f'<td style="text-align:right;padding:2px 8px">'
                         f'{len(_bd9)}日</td></tr>')
                 _diag = (
@@ -19071,6 +19096,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     + (f'　⛔ <b>候補が少ない月: {", ".join(_bad)}</b>'
                        f'（中央値の7割未満）' if _bad
                        else '　✅ 候補が極端に少ない月はありません')
+                    + (f'　⚠ <b>予算で切り捨てた月: {", ".join(_cut)}</b>'
+                       f'（建てた/合格 が中央値の半分未満）' if _cut else '')
                     + '（クリックで展開）</summary>'
                     f'<p style="color:#94a3b8;font-size:0.74rem;'
                     f'margin:6px 0;line-height:1.7">'
@@ -19083,7 +19110,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'7月だけ薄くなっていた事故があります（§18.38 #9）。'
                     f'<b>候補日数</b>がその月の営業日数（概ね19〜22日）を'
                     f'大きく下回っていたら、まずデータ・設定を疑ってください。'
-                    f'</p>'
+                    f'<br>★★ <b>「建てた/合格」列がいちばん効きます</b>'
+                    f'（2026-08-16 に実際これで判明）。候補も合格も多いのに'
+                    f'ここが低い月は、<b>相場が悪かったのではなく'
+                    f'予算400万で取りこぼした</b>月です。'
+                    f'実測: 2026-07 は候補が13ヶ月で最多・合格率も平均以上'
+                    f'なのに <b>建てた/合格 が 9.4%</b>（中央値 28.7%）で、'
+                    f'成績が低かった原因は<b>予算制約</b>でした。'
+                    f'<br>⚠ <b>窓の両端の月は半端</b>（表示窓の切り口 / 当月）'
+                    f'なので判定から外しています。</p>'
                     f'<table style="font-size:0.74rem;border-collapse:collapse">'
                     f'<thead><tr style="color:#64748b">'
                     f'<th style="text-align:left;padding:2px 8px">月</th>'
@@ -19091,6 +19126,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<th style="padding:2px 8px">候補</th>'
                     f'<th style="padding:2px 8px">合格</th>'
                     f'<th style="padding:2px 8px">建てた</th>'
+                    f'<th style="padding:2px 8px">建てた/合格</th>'
                     f'<th style="padding:2px 8px">建てた日数</th>'
                     f'</tr></thead><tbody>{_rows9}</tbody></table></details>')
         except Exception as _de9:
