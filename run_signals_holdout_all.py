@@ -1157,6 +1157,11 @@ if (_args.long_stop_short or getattr(_args, "mirror", False)) and _lss_proposal_
         }
         for days in _PNL_PERIODS:
             _period_configs[days] = [_lss_cfg]
+        # ★ レポートに『どの母集団で回したか』を刻むための受け渡し
+        #   (2026-08-16)。実行ごとに J/L/K の件数が変わったとき、
+        #   コンソールのスクロールバックを探さなくても HTML で分かるようにする。
+        os.environ["LSS_POOL_SRC"] = (f"{Path(_lss_proposal_file).name}:"
+                                      f"{len(_canon)}")
         print(f"[lss] 新選定で上書き: {Path(_lss_proposal_file).name} → "
               f"価格≤{_args.max_price:,.0f}円で {len(_canon)}ペア"
               + (f"(上位{_lss_top}) " if _lss_top > 0 else " ")

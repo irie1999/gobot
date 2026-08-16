@@ -11992,6 +11992,25 @@ function switchTbd(id, tab) {{
                           f"(J は過小評価になっていません)", flush=True)
         except Exception as _spe:
             print(f"[E/H] ⚠ 選定の被覆チェックに失敗: {_spe}", flush=True)
+        # ★★ 条件スタンプ (2026-08-16 ユーザー指摘「結果が変わっている」)。
+        #   J/L/K の件数は **土台(--lss-proposal)** が変わると大きく動く。
+        #   実行ごとに何が違ったのか後から分からなくなるので、HTML に刻む。
+        #   ⚠ 5分足の並列読込は稀に SystemError で銘柄が落ちる(§18.33)。
+        #     『データ不足』件数も一緒に出しておけば、ブレの原因を切り分けられる。
+        try:
+            _dg0 = (_EH_TRADES or {}).get("_diag") or {}
+            _EH_TRADES["_cond"] = {
+                "pool": os.environ.get("LSS_POOL_SRC", "") or "(既定/未指定)",
+                "sel": f"{_sel_pf}:{len(_SEL_POOL[0]) if _SEL_POOL else 0}",
+                "watch": _WATCH_CAP,
+                "skip": sum((_dg0.get("skip") or {}).values()),
+                "nbase": _dg0.get("n_base") or 0,
+                # ⛔ `_dt` はこの巨大関数の別の場所で datetime クラスに
+                #    再束縛されている。モジュール先頭の datetime を使う。
+                "gen": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+        except Exception as _ce:
+            print(f"[E/H] ⚠ 条件スタンプを作れませんでした: {_ce}", flush=True)
         if _SEL_POOL:
             print(f"[E/H] 実装版の母集団: {_sel_pf} から {len(_SEL_POOL[0]):,}ペア"
                   f"(解禁日 {len(_SEL_POOL[1]):,}件)。"
@@ -19441,9 +19460,40 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         except Exception as _de8:
             _diag += (f'<p style="color:#f87171;font-size:0.74rem">'
                       f'合格件数の帯別を作れませんでした: {_de8}</p>')
+        # ★★ 条件スタンプ (2026-08-16 ユーザー指摘「さっきから結果が変わっている」)。
+        #   J/L/K の件数は **土台(--lss-proposal)** が変わると大きく動く。
+        #   実行ごとの差が後から追えないと、別々の実行を比べる事故(§18.24)に
+        #   直結するので、その実行の条件を **画面に刻む**。
+        _cond = (_EH_TRADES or {}).get("_cond") or {}
+        _stamp = ''
+        if _cond and _ehk in ("J", "L", "K"):
+            _sk_n = int(_cond.get("skip") or 0)
+            _nb_n = int(_cond.get("nbase") or 0)
+            _stamp = (
+                f'<div style="border:1px solid #334155;border-radius:6px;'
+                f'padding:5px 9px;margin:0 0 8px;background:#0b1220;'
+                f'color:#94a3b8;font-size:0.72rem;line-height:1.6">'
+                f'🧾 <b>この実行の条件</b>（別の実行の数字と混ぜないこと / §18.24）'
+                # ★ 変種キーが最重要の識別子。方式(指値/確認)・delay・sm/tm・
+                #   上限・watch が全部ここに入っている。
+                f'<br>変種 <b style="color:#e2e8f0">{_srck}</b>'
+                f'<br>母集団(土台) <b style="color:#e2e8f0">'
+                f'{_cond.get("pool", "?")}</b>'
+                f' ／ 選定 <b style="color:#e2e8f0">{_cond.get("sel", "?")}</b>'
+                f' ／ watch上限 <b style="color:#e2e8f0">'
+                f'{_cond.get("watch", "?")}</b>'
+                f' ／ 窓 <b style="color:#e2e8f0">{days}日</b>'
+                f' ／ 生成 {_cond.get("gen", "?")}'
+                + (f'<br>⚠ 5分足の<b>データ不足 {_sk_n:,}銘柄日</b>'
+                   f'（読み込み対象 {_nb_n:,}）。'
+                   f'並列読込は稀に落ちるので、同じ条件でも数%ぶれます'
+                   f'（§18.33。直列化は <code>set LSS_EH_WORKERS=1</code>）'
+                   if _sk_n else '')
+                + f'</div>')
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" '
             f'class="detail-tab-pane{_act("eh" + _ehk)}">'
+            + _stamp
             + _diag
             # ★ 説明は既定で閉じる(2026-08-16 ユーザー指示)。縦に長く、
             #   毎日読むものではない。要点(方式名)は summary に出す。
