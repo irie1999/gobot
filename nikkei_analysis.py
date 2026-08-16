@@ -17650,7 +17650,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "09:00 の一発(遅寄りは捨てる)"
                         _fast = _s3.endswith("即時")
                         _s3 = _s3.removesuffix("即時")
-                        _sfx = ("・約定は自分の始値=⛔速度の上限" if _fast
+                        _sfx = ("・約定は自分の始値=逐次配分なら実装可" if _fast
                                 else "")
                         if _s3.startswith("w"):
                             _st3, _ct3 = _s3[1:].split("c")
