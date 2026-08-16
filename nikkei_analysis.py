@@ -11185,7 +11185,8 @@ function switchTbd(id, tab) {{
         # ⛔ 方式名を正しく出す(2026-08-16)。`H指値…寄指` は **前夜に寄付指値を
         #    置く**方式で、09:00 に何かを確認するわけではない。ずっと
         #    「09:00確認」と表示していたので、実装イメージがズレていた。
-        _meth = ("前夜 寄付指値" if str(_b).startswith("H指値")
+        _meth = ("前夜 指値(H)" if str(_b) in ("H", "H寄指")
+                 else "前夜 寄付指値" if str(_b).startswith("H指値")
                  else ("09:00確認→09:05成行(保守)" if str(_b).startswith("H寄り確認5分")
                        else "09:00確認→始値" if str(_b).startswith("H寄り確認")
                        else "09:00確認"))
@@ -11608,10 +11609,21 @@ function switchTbd(id, tab) {{
         #      確認版 = 価格 09:05(不利)  / 分母 約定数(集中できる)
         #    どちらが勝つかは測らないと分からないので **両方出す**。
         # ⚠ "H指値+50bp寄指d0" のような delay 版も拾う(末尾一致では落ちる)。
+        # ★★ H 本体にも資金均等を掛ける (2026-08-16)。
+        #   ⛔ これまで H は 100株固定でしか測っていなかった。理由は
+        #      「前夜指値は約定数を前夜に知れないので集中できない」だったが、
+        #      それは **約定率が低い +50bp 指値** の話。H の指値は前日終値-5tick で
+        #      **約定率 88〜100%** なので 候補数 ≒ 約定数 になり、
+        #      `予算÷候補数` でほぼ設計どおりに集中できる。
+        #   ★ これが成立すると **09:00 に始値を読む必要が消える**。
+        #      登録上限50件も、遅寄りスキップも、板読みの実装も全部要らなくなる。
+        #      K の複雑さは全部『始値を09:00に読む』ことに由来しているので、
+        #      同等の成績が H+資金均等 で出るなら K を採る理由が無い。
         _EQ_KEYS = [k for k in (_EH_TRADES.get("_h_variants") or [])
                     if "資金均等" not in str(k)
                     and (str(k).startswith("H寄り確認")
-                         or (str(k).startswith("H指値") and "寄指" in str(k)))]
+                         or (str(k).startswith("H指値") and "寄指" in str(k))
+                         or str(k) in ("H", "H寄指"))]
         # ★ その日のギャップ上位N件に集中する版 (2026-08-15 ユーザー提案)。
         #   合格が多い日は 予算÷件数 が 26万 まで下がり、どの銘柄も 100株 =
         #   **資金均等が 100株固定に縮退**していた(実測: 件数/日 中央 15件)。
@@ -11644,7 +11656,7 @@ function switchTbd(id, tab) {{
             #    株数も前夜に決めるしかない。約定数で割るのは先読み。候補数
             #    (=約定+不約定)で割る。`H寄り確認` は 09:00 に件数が見えるので
             #    約定数で割ってよい。詳細は _size_equal_by_day の docstring。
-            _pre = str(_k).startswith("H指値")
+            _pre = (str(_k).startswith("H指値") or str(_k) in ("H", "H寄指"))
             # (上位N, 充填, 1銘柄1件, 金額上限[円], 候補数で割るか)
             _eq_modes = [(0, False, False, 0.0, _pre)]
             if _k == _EQ_TAB_BASE:
@@ -12130,7 +12142,8 @@ function switchTbd(id, tab) {{
                 #    分からない** ので、そちらは流動性順で切る(2026-08-16)。
                 _ok = (_eq_order_key
                        if ("資金均等" in str(_srck) and _EQ_ORDER != "liq"
-                           and not str(_srck).startswith("H指値"))
+                           and not str(_srck).startswith("H指値")
+                           and str(_srck).split("資金均等")[0] not in ("H", "H寄指"))
                        else None)
                 with _ptimer("方式ごとの予算シミュ(E/H/J/K)"):
                     _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
@@ -15089,7 +15102,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 # ⛔ 前夜指値はギャップで並べられない(09:00まで不明)。
                 _ok = (_eq_order_key
                        if ("資金均等" in str(_hk) and _EQ_ORDER != "liq"
-                           and not str(_hk).startswith("H指値"))
+                           and not str(_hk).startswith("H指値")
+                           and str(_hk).split("資金均等")[0] not in ("H", "H寄指"))
                        else None)
                 _sets.append((_hk, _run_budget_sim(
                     _BUD_FLOOR, src=_hax, order_key=_ok,
@@ -17082,7 +17096,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # 方式そのもの。寄指(前夜指値) / 確認(09:00に見てから) は別物。
             # ⚠ 09:05約定版(『5分』)は **別の方式**。始値版と同じ扱いにすると
             #    つまみ0個違いになって表から消える(2026-08-16)。
-            _k2["_auc"] = ("確認5分" if "H寄り確認5分" in _s
+            # ⚠ H 本体(前日終値-5tick 指値)は +Nbp 寄指とも確認方式とも別。
+            #    同じ扱いにすると兄弟判定が混ざる(2026-08-16)。
+            _b0 = _s.split("資金均等")[0]
+            _k2["_auc"] = ("H本体" if _b0 in ("H", "H寄指")
+                           else "確認5分" if "H寄り確認5分" in _s
                            else "確認" if "H寄り確認" in _s
                            else ("寄指" if "寄指" in _s else ""))
             return _k2
