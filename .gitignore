@@ -69,3 +69,4 @@ bt_v*.pkl
 holdings_latest.html
 .eh_cache/
 .asof_bt_cache/
+report_conditions_log.csv

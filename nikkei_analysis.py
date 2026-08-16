@@ -19143,6 +19143,62 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
     _eh_btn = ""
     _eh_pane = ""
+    # ★★ 実行条件のログ (2026-08-16 ユーザー指摘「さっきと結果が変わっている」)。
+    #   HTML は毎回上書きされるので、**条件と件数を1行ずつ追記**しておき、
+    #   実行の最後に **前回との差分**をコンソールに出す。
+    #   これが無いと「何が変わったのか」を後から追えず、別々の実行を比べる
+    #   事故(§18.24)に直結する。⛔ 数字ではなく **条件** を残すのが目的。
+    try:
+        import csv as _rcsv
+        import sys as _rsys          # ⛔ このモジュールは sys を import していない
+        _cnd = (_EH_TRADES or {}).get("_cond") or {}
+        _row = {
+            "ts": _cnd.get("gen", ""),
+            "days": days,
+            "argv": " ".join(_rsys.argv[1:])[:400],
+            "pool": _cnd.get("pool", ""),
+            "sel": _cnd.get("sel", ""),
+            "watch": _cnd.get("watch", ""),
+            "skip5m": _cnd.get("skip", ""),
+            "nbase": _cnd.get("nbase", ""),
+            "key_base": _EQ_TAB_KEY2,
+            "n_H": len((_EH_TRADES or {}).get("H") or []),
+            "n_J": len((_EH_TRADES or {}).get(_EQ_TAB_J) or []),
+            "n_L": len((_EH_TRADES or {}).get(_EQ_TAB_L) or []),
+            "n_K": len((_EH_TRADES or {}).get(_EQ_TAB_K) or []),
+            "env": " ".join(f"{_e}={os.environ[_e]}" for _e in sorted(os.environ)
+                            if _e.startswith("LSS_"))[:600],
+        }
+        _rlog = Path("report_conditions_log.csv")
+        _prev = None
+        if _rlog.exists():
+            try:
+                _all = list(_rcsv.DictReader(open(_rlog, encoding="utf-8-sig")))
+                _prev = _all[-1] if _all else None
+            except Exception:
+                _prev = None
+        with open(_rlog, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _rcsv.DictWriter(_f, fieldnames=list(_row))
+            if not _rlog.stat().st_size:
+                _w.writeheader()
+            _w.writerow(_row)
+        if _prev:
+            _dif = [(_k2, _prev.get(_k2, ""), str(_row[_k2]))
+                    for _k2 in _row
+                    if _k2 != "ts" and str(_prev.get(_k2, "")) != str(_row[_k2])]
+            if _dif:
+                print(f"\n[実行条件] ⚠ 前回の実行({_prev.get('ts', '?')})から "
+                      f"**{len(_dif)}項目 変わっています**", flush=True)
+                for _k2, _a2, _b2 in _dif:
+                    print(f"  {_k2:<10} 前回: {_a2[:150]}\n"
+                          f"  {'':<10} 今回: {_b2[:150]}", flush=True)
+                print(f"  → 別々の実行の数字を比べないこと(§18.24)。"
+                      f"履歴は {_rlog}", flush=True)
+            else:
+                print(f"\n[実行条件] ✅ 前回の実行と同じ条件です"
+                      f"({_prev.get('ts', '?')})", flush=True)
+    except Exception as _rle:
+        print(f"[実行条件] ⚠ ログを書けませんでした: {_rle}", flush=True)
     # ⛔ 方式の記号は analyze_overnight_lss.py と共通の台帳。使用済みは
     #      A 引け→翌寄り / B 引け→翌引け / C 翌寄り→翌引け / D 引け+OCO /
     #      D2 夜間損切りが効く場合 / E 翌寄り+OCO / E0 9時から建値は現行 /
