@@ -140,6 +140,14 @@ _EQ_ORDER = str(os.environ.get("LSS_EQ_ORDER", "gap")).strip().lower()
 #   set LSS_EQ_METHOD=limit で前夜指値に戻す。
 _EQ_METHOD_CONF = str(os.environ.get("LSS_EQ_METHOD", "confirm")) \
     .strip().lower().startswith("conf")
+# ⛔⛔ kabu の銘柄登録上限(実測50件)。09:00確認方式は登録した銘柄しか
+#    /board を読めないので、その日 見られるのはこの件数まで。
+#    ★ 上限は制約に見えて **集中を成立させている** 可能性がある:
+#      集中が起きるのは 合格数 < 予算÷1単元(≒13件) のときだけ。
+#      50件に絞ると合格7〜11件で複数単元建てられるが、154件読むと
+#      合格23件で1単元未満になり集中が消える。→ つまみとして掃く。
+#    0 で無効化。LSS_WATCH_CAPS で追加の水準(既定 25,100)。
+_WATCH_CAP = int(os.environ.get("LSS_WATCH_CAP", "50") or 0)
 
 
 def _eq_pref_of(_g, _conf=None, _slow=False) -> str:
@@ -11642,8 +11650,7 @@ function switchTbd(id, tab) {{
         #    読めないので、**その日 見られるのはこの件数まで**。
         #    実測(2026-08-16): 上限50件 / 51件以上は 400 でリクエストごと失敗 /
         #    候補は中央49件・最大277件で **47% の日が超える**。
-        #    0 で無効化(上限が無い世界を測りたいとき)。
-        _WATCH_CAP = int(os.environ.get("LSS_WATCH_CAP", "50") or 0)
+        #    0 で無効化(上限が無い世界を測りたいとき)。モジュール先頭で定義。
         _n_eq = 0
         for _k in _EQ_KEYS:
             _v = _EH_TRADES.get(_k) or []
@@ -11658,10 +11665,10 @@ function switchTbd(id, tab) {{
             #    約定数で割ってよい。詳細は _size_equal_by_day の docstring。
             _pre = (str(_k).startswith("H指値") or str(_k) in ("H", "H寄指"))
             # (上位N, 充填, 1銘柄1件, 金額上限[円], 候補数で割るか)
-            _eq_modes = [(0, False, False, 0.0, _pre)]
+            _eq_modes = [(0, False, False, 0.0, _pre, _WATCH_CAP)]
             if _k == _EQ_TAB_BASE:
-                _eq_modes += ([(0, True, False, 0.0, _pre)]
-                              + [(_t2, False, False, 0.0, _pre)
+                _eq_modes += ([(0, True, False, 0.0, _pre, _WATCH_CAP)]
+                              + [(_t2, False, False, 0.0, _pre, _WATCH_CAP)
                                  for _t2 in _EQ_TOPS])
             # ★ 1銘柄1件・金額上限は **推奨タブ(K)の変種にも**付ける。
             #   ⛔ 1銘柄1件は 95%点(41%→33%)は下げるが **最大(予算の99%)は
@@ -11669,11 +11676,25 @@ function switchTbd(id, tab) {{
             #      1銘柄しかない日」に出るので、重複を外しても対象が無い。
             #      **最悪ケースを直せるのは金額上限だけ**。
             if _k in (_EQ_TAB_BASE, str(_EQ_TAB_KEY2).split("資金均等")[0]):
-                _eq_modes.append((0, False, True, 0.0, _pre))
+                _eq_modes.append((0, False, True, 0.0, _pre, _WATCH_CAP))
                 # ★ 旧挙動(約定数で割る=先読み)を **1行だけ**残す。消すと
                 #   「これまでの K の数字がどれだけ上振れていたか」が測れない。
                 if _pre:
-                    _eq_modes.append((0, False, False, 0.0, False))
+                    _eq_modes.append((0, False, False, 0.0, False, _WATCH_CAP))
+                # ★★ 登録上限を **外した**版 (2026-08-16)。
+                #   ⛔ 上限50件は制約に見えるが、実は **集中を成立させている**
+                #     可能性がある: 集中が起きるのは 合格数 < 予算÷1単元(≒13件)
+                #     のときだけ。50件に絞ると合格が7〜11件に減って複数単元
+                #     建てられるが、154件読むと合格23件で1単元未満になる。
+                #   → 「読める数を増やすと良くなる」は自明ではない。同じ実行の
+                #     中で並べて確かめる(18.24: 別実行で比べない)。
+                if _WATCH_CAP > 0:
+                    _eq_modes.append((0, False, False, 0.0, _pre, 0))
+                    for _wc in [int(x) for x in str(os.environ.get(
+                            "LSS_WATCH_CAPS", "25,100")).split(",")
+                            if str(x).strip().isdigit() and int(x) > 0]:
+                        if _wc != _WATCH_CAP:
+                            _eq_modes.append((0, False, False, 0.0, _pre, _wc))
                 # ★ 金額上限は _EQ_MAX_YEN(既定100万)で **全変種に掛かっている**。
                 #   ここで作るのは「その上限を動かした版」。0 = 上限なし
                 #   (_size_equal_by_day には負値で渡して env の既定を無効化する)。
@@ -11690,13 +11711,13 @@ function switchTbd(id, tab) {{
                         continue          # 既定と同じ = 基準そのもの
                     _eq_modes.append((0, False, False,
                                       (_eqy * 1e4) if _eqy > 0 else -1.0,
-                                      _pre))
+                                      _pre, _WATCH_CAP))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
             #    _run_budget_sim(クロージャ)の _dd(list) が bool を呼ぶ。
             #    2026-08-15 に実際 TypeError で損益タブが丸ごと落ちた。
-            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd in _eq_modes:
+            for _eqtp, _eqfl, _eqdp, _eqym, _eqcd, _eqwc in _eq_modes:
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
@@ -11704,7 +11725,10 @@ function switchTbd(id, tab) {{
                             (f"上限{_eqym / 1e4:g}万" if _eqym else ""))
                          # 指値方式で **約定数**で割った版だけ名前を分ける。
                          # 既定(候補数割)は無印 = 実装できる形。
-                         + ("約定数割" if (_pre and not _eqcd) else ""))
+                         + ("約定数割" if (_pre and not _eqcd) else "")
+                         # 登録上限を動かした版だけ名前を分ける
+                         + ("" if _eqwc == _WATCH_CAP else
+                            ("watch無制限" if _eqwc <= 0 else f"watch{_eqwc}")))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
@@ -11712,7 +11736,7 @@ function switchTbd(id, tab) {{
                         _v, _EQ_BUD, _eqtp, _eqfl, _eqdp, _eqym,
                         # 候補ビューは **常に**渡す(登録上限の適用に要る)。
                         # 分母に使うかどうかは _div_cand で別に決める。
-                        _EH_NF_SRC.get(_k) or [], _eqcd, _WATCH_CAP)
+                        _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -15735,7 +15759,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 f'どれを見るかは<b>前夜に決める</b>のでギャップでは選べず'
                 f'（09:00まで不明）、<b>流動性降順</b>で上位50件にしています。'
                 f'「登録上限で見られず N件」がそのぶんの取りこぼしです'
-                f'（<code>set LSS_WATCH_CAP=0</code> で上限なしの世界と比較できます）。<br>'
+                f'（同じ表に <b>watch無制限 / watch25 / watch100</b> の行を'
+                f'出しています）。<br>'
+                f'⛔⛔ <b>ただし上限50件は「制約」ではなく「集中を成立させている仕組み」'
+                f'かもしれません。</b>集中が起きるのは'
+                f'<b>合格数 &lt; 予算÷1単元（≒13件）</b>のときだけ。'
+                f'50件に絞ると合格が7〜11件に減って複数単元建てられますが、'
+                f'154件読むと合格23件で1単元未満になり<b>集中が消えます</b>。'
+                f'「読める数を増やせば良くなる」は自明ではないので、'
+                f'watch の行で必ず確かめてください。<br>'
                 f'⛔ さらに <b>注文の総額そのものが予算を超えられません</b>'
                 f'（委託保証金は発注時に要る）。候補が多い日は'
                 f'<code>予算÷候補数</code>が1単元の値段に届かないので、'
@@ -17086,6 +17118,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _k2["dedup"] = ("1銘柄1件" in _s) and not _k2["dedup_post"]
             # 予算を割る分母。無印=候補数(実装できる形) / 約定数割=旧挙動(先読み)
             _k2["div"] = "約定数割" in _s
+            # 09:00 に見られる銘柄数(kabu の登録上限)。上限そのものが
+            # 集中を成立させている可能性があるので、つまみとして掃く。
+            if "watch無制限" in _s:
+                _k2["watch"] = 0
+            else:
+                _mw = _re_kn.search(r"watch(\d+)", _s)
+                _k2["watch"] = int(_mw.group(1)) if _mw else _WATCH_CAP
             # 発注方式そのもの(ギャップ閾値 / 寄指か / 資金均等か)は
             # **つまみではなく別の方式**なので、揃っていない行は兄弟にしない。
             # ⚠ 確認方式(H寄り確認+50bpd4)の閾値も拾う(2026-08-16)。拾わないと
@@ -17112,7 +17151,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
-                        "dedup", "dedup_post", "div"]
+                        "dedup", "dedup_post", "div", "watch"]
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。
