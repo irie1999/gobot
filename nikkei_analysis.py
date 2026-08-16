@@ -11918,12 +11918,24 @@ function switchTbd(id, tab) {{
                     if not isinstance(_src, list):
                         continue
                     for _t in _src:
+                        # ⛔ _EH_TRADES には "_h_variants"(str のリスト)など
+                        #    トレードでない値も入っている(2026-08-16 に
+                        #    'str' object has no attribute 'get' で落ちた)。
+                        if not isinstance(_t, dict):
+                            break
                         _c1 = str(_t.get("symbol", "")).upper() \
                             .removesuffix(".T").split(".")[0]
                         _s1 = str(_t.get("strategy") or _t.get("strat") or "")
                         if _c1:
                             _have.add((_c1, _s1))
                 _miss = {p for p in _SEL_POOL[0] if p not in _have}
+                # ⛔ H タブでは E/H を作り直さない(skip)ので _have が空になる。
+                #    そのまま数えると「100%欠けている」と誤報する
+                #    (2026-08-16 に実際そう出た)。母集団が無いときは黙る。
+                if not _have:
+                    _miss = set()
+                    print("[E/H] （被覆チェックはスキップ: この経路では"
+                          "E/H を作り直していません）", flush=True)
                 if _miss:
                     print(f"[E/H] ⛔ 選定(cumul)の {len(_miss):,}/"
                           f"{len(_SEL_POOL[0]):,}ペア "
