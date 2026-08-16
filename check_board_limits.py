@@ -32,8 +32,12 @@
 
 使い方:
   python check_board_limits.py --prod --n 41
+  python check_board_limits.py --prod --cap-probe 40,50,60,80,120   # 登録上限を実測
+  python check_board_limits.py --prod --symbols-file lss_trades_K.csv --n 60
   python check_board_limits.py --prod --symbols 7203,6758,9984
-  python check_board_limits.py --prod --n 60      # 上限を超えさせて挙動を見る
+
+★ **09:00 直後に1回**測ること(場外の数字は参考値)。板寄せ直後がいちばん混む。
+  そのとき初めて OpeningPrice が入っているかも確認できる。
 
 ⚠ kabu の有効トークンは1つ。**watcher / 発注サーバを止めてから**実行すること
   (401 の取り合いになる)。
@@ -63,6 +67,12 @@ ap.add_argument("--sweep", type=str, default="2,4,6,8,12,16",
                      "空文字でスキップ")
 ap.add_argument("--no-unregister", action="store_true",
                 help="終了時に登録解除しない(次回の登録済み状態を残す)")
+ap.add_argument("--symbols-file", type=str, default="",
+                help="実際の候補リストを使う。lss_trades_K.csv / orders_*.csv の "
+                     "symbol 列、または SELECTED を持つ提案 .py を読む")
+ap.add_argument("--cap-probe", type=str, default="",
+                help="登録上限を実測する。カンマ区切りの件数 (例 40,50,60,80,120)。"
+                     "毎回 全解除 → その件数を一括登録 → 受理数を数える")
 args = ap.parse_args()
 
 # 既定リスト: 流動性の高い主力。上限テスト用に多めに持つ。
@@ -73,11 +83,51 @@ _DEFAULT = [
     6981, 7735, 4519, 6503, 6702, 8801, 8802, 3382, 2914, 4901,
     5108, 7269, 6752, 4543, 4578, 6178, 8766, 8750, 9022, 9020,
     4452, 6981, 7013, 5401, 5406, 3407, 4021, 4188, 2802, 2502,
+    # ── 以下は **登録上限プローブ用**の追加分(50件を超えさせるため) ──
+    2801, 2871, 3086, 3099, 3105, 3401, 3402, 3405, 3436, 3861,
+    3863, 4004, 4005, 4042, 4043, 4061, 4183, 4208, 4324, 4507,
+    4523, 4528, 4536, 4587, 4612, 4631, 4689, 4704, 4751, 4755,
+    4911, 5019, 5020, 5101, 5201, 5202, 5214, 5232, 5233, 5301,
+    5332, 5333, 5411, 5486, 5541, 5631, 5632, 5703, 5706, 5711,
+    5713, 5714, 5801, 5802, 5803, 5901, 6103, 6113, 6136, 6141,
 ]
 # 重複を除いて順序は保つ(--n で先頭から取るため)
 _DEFAULT = list(dict.fromkeys(_DEFAULT))
 
-if args.symbols.strip():
+def _load_symbols_file(path: str) -> list:
+    """候補リストを読む。CSV(symbol列) でも 提案.py(SELECTED) でも可。"""
+    import re as _re
+    _txt = open(path, encoding="utf-8-sig").read()
+    _out: list = []
+    if path.lower().endswith(".csv"):
+        import csv as _c
+        import io as _io
+        for _r in _c.DictReader(_io.StringIO(_txt)):
+            _v = str(_r.get("symbol") or _r.get("Symbol") or "").strip()
+            if _v:
+                _out.append(_v)
+    else:
+        # 提案ファイル: ('7203.T', '銘柄名', 'MACDTF'), の1要素目
+        for _m in _re.finditer(r"[(\[]\s*['\"]([0-9A-Za-z]{4}(?:\.T)?)['\"]", _txt):
+            _out.append(_m.group(1))
+    # 4桁コードに正規化して重複を除く(順序は保つ)
+    _seen, _fin = set(), []
+    for _v in _out:
+        _c4 = _v.upper().removesuffix(".T").split(".")[0]
+        if _c4 and _c4 not in _seen:
+            _seen.add(_c4)
+            _fin.append(_c4)
+    return _fin
+
+
+if args.symbols_file.strip():
+    _syms = _load_symbols_file(args.symbols_file.strip())
+    if not _syms:
+        raise SystemExit(f"[error] {args.symbols_file} から銘柄を読めません")
+    if args.n > 0:
+        _syms = _syms[:args.n]
+    print(f"[候補リスト] {args.symbols_file} から {len(_syms)}銘柄")
+elif args.symbols.strip():
     _syms = [s.strip() for s in args.symbols.split(",") if s.strip()]
 else:
     _syms = [str(x) for x in _DEFAULT][:args.n]
@@ -95,6 +145,41 @@ cli = KabuClient(prod=args.prod, dry_run=True)
 _t = time.time()
 cli.connect()
 print(f"\n[1] トークン取得: {time.time() - _t:.2f}s")
+
+# ── 登録上限のプローブ (--cap-probe) ─────────────────────────────────────
+# ⛔ K は「その日の候補を全部登録して始値を読む」ので、候補数が上限を
+#    超えるかどうかが実装の分かれ目。コードには50件と書いてあるが
+#    **実機で確かめていない**。毎回 全解除してから測る(前の残りが混ざると
+#    数が合わない)。
+if args.cap_probe.strip():
+    _probe = [int(x) for x in args.cap_probe.split(",")
+              if str(x).strip().isdigit() and int(x) > 0]
+    _pool = [str(x) for x in _DEFAULT]
+    print("\n[1b] 登録上限のプローブ (全解除 → 一括登録 → 受理数)")
+    if max(_probe) > len(_pool):
+        print(f"     ⚠ 既定リストは {len(_pool)}銘柄しかありません。"
+              f"{max(_probe)}件は測れないので --symbols-file で足してください")
+    print(f"     {'要求':>6} {'受理':>6} {'秒':>7}  判定")
+    _cap_found = None
+    for _nq in _probe:
+        if _nq > len(_pool):
+            continue
+        cli.unregister_all()
+        _t0 = time.time()
+        _r0 = cli.register_many(_pool[:_nq])
+        _s0 = time.time() - _t0
+        _ok0 = len((_r0 or {}).get("RegistList") or [])
+        _v = ("✅ 全部通った" if _ok0 >= _nq else
+              f"⛔ **{_nq - _ok0}件 弾かれた = 上限 {_ok0}件**")
+        if _ok0 < _nq and _cap_found is None:
+            _cap_found = _ok0
+        print(f"     {_nq:>6} {_ok0:>6} {_s0:>7.2f}  {_v}")
+    cli.unregister_all()
+    if _cap_found is None:
+        print(f"     → 試した範囲({max(_probe)}件)では上限に当たりませんでした")
+    else:
+        print(f"     → **登録上限 = {_cap_found}件**。候補がこれを超える日は"
+              f"流動性上位{_cap_found}件に絞る必要があります")
 
 # ── 一括登録 ──────────────────────────────────────────────────────────────
 _t = time.time()

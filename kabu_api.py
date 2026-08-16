@@ -283,6 +283,25 @@ class KabuClient:
         finally:
             self._registered.discard(key)
 
+    def unregister_all(self) -> bool:
+        """登録銘柄を **全解除** (PUT /unregister/all)。
+
+        登録上限を実測するとき、前の試行の残りが混ざると数が合わない。
+        1件ずつ解除すると往復が銘柄数ぶん要るので専用APIを使う。
+        成功したら True。
+        """
+        url = f"{self.base_url}/kabusapi/unregister/all"
+        try:
+            r = requests.put(url, headers=self._headers(with_content=True),
+                             timeout=self.timeout)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  ⚠ 全解除(unregister/all)失敗: {e}")
+            return False
+        finally:
+            self._registered.clear()
+        return True
+
     def get_board(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
         """時価情報 (CurrentPrice 等) を取得。事前に銘柄登録を行う。"""
         self.register(symbol, exchange)

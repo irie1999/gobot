@@ -10699,18 +10699,11 @@ function switchTbd(id, tab) {{
             _gaps = [float(x) for x in str(os.environ.get(
                 "LSS_H_CONFIRM_GAPS", "0,25,50,75,100")).split(",")
                 if str(x).strip().lstrip("+-").replace(".", "").isdigit()]
-            # 09:05約定版。★ **既定ONに戻した**(2026-08-16)。
-            # ⛔ 一度 OFF にしたのは「5分遅れることはない」という理由だったが、
-            #    それは約定価格の話でしかなかった。**資金均等の分母**を見ると
-            #    立場が逆転する:
-            #      H指値…寄指 = 前夜に注文 → 株数も前夜に決める
-            #                   → 予算は **候補数**で割るしかない
-            #      H寄り確認  = 09:00 に件数を見てから発注
-            #                   → 予算を **約定数**で割れる(集中できる)
-            #    価格は指値が有利、割り当ては確認が有利。**どちらが勝つかは
-            #    測らないと分からない**。両方出さないと比較できない。
-            if str(os.environ.get("LSS_H_CONFIRM_SLOW", "1")).strip() \
-                    not in ("", "0", "false", "no", "off"):
+            # 確認方式(始値約定)のギャップ掃き。方式が confirm のときだけ。
+            # ⛔ ここは以前 LSS_H_CONFIRM_SLOW で制御していたが、名前と中身が
+            #    合わなくなった(2026-08-16 に約定を始値へ戻したので、この行は
+            #    もう "slow" ではない)。SLOW は下の『5分(保守)』行だけを制御する。
+            if _EQ_METHOD_CONF:
                 for _gv in _gaps:
                     _hvars.append((f"H寄り確認{_gv:+.0f}bp", 0, False,
                                    0, "fill", None, _gv))
@@ -10917,7 +10910,12 @@ function switchTbd(id, tab) {{
                     #   既定の始値約定は「08:5x に板を暖めておけば 09:00+十数秒で
                     #   発注できる」という前提(2026-08-15 ユーザー決定)。その前提が
                     #   崩れた場合いくらになるかを、同じ表の中に必ず置いておく。
-                    if _EQ_CONF:
+                    # ⚠ 既定 OFF。2026-08-15 のユーザー決定「5分遅れることは
+                    #    ない」に従う。前提を疑うときだけ
+                    #    set LSS_H_CONFIRM_SLOW=1 で下限を並べる。
+                    if _EQ_CONF and str(os.environ.get(
+                            "LSS_H_CONFIRM_SLOW", "0")).strip() \
+                            not in ("", "0", "false", "no", "off"):
                         for _eqg7 in _gaps:
                             _hvars.append(_eq_var(
                                 f"{_eq_pref_of(_eqg7, True, True)}d{_eqd4}{_gsl}",
