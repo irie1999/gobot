@@ -59,7 +59,11 @@ ap.add_argument("--symbols-file", type=str, default="",
 ap.add_argument("--symbols", type=str, default="", help="カンマ区切りで明示指定")
 ap.add_argument("--pool", type=str, default="lss_proposal_cumul.py",
                 help="J(実装版)の母集団。in_j 列の判定に使う")
-ap.add_argument("--max-symbols", type=int, default=300)
+# ⛔ 既定300で **黙って切っていた**。候補は日によって変わるので、上限に
+#    当たったことに気づけないとデータが欠ける(2026-08-17: 299銘柄で紙一重)。
+#    0=無制限を既定にし、切るときは必ず警告を出す。
+ap.add_argument("--max-symbols", type=int, default=0,
+                help="読む銘柄数の上限。**0=無制限**(既定)")
 ap.add_argument("--batch", type=int, default=50, help="1バッチ(kabu の登録上限)")
 ap.add_argument("--workers", type=int, default=2,
                 help="⛔ 上げても速くならず429が増えるだけ(実測)")
@@ -247,7 +251,11 @@ else:
     _syms = _codes_from(_p)
     if not _syms:
         sys.exit(f"[error] {_p} から銘柄を拾えません(0件)")
-_syms = _syms[:max(1, args.max_symbols)]
+if args.max_symbols > 0 and len(_syms) > args.max_symbols:
+    print(f"  ⚠ 候補 {len(_syms):,}銘柄 を --max-symbols {args.max_symbols} で"
+          f"切ります（{len(_syms) - args.max_symbols:,}銘柄は読みません）",
+          flush=True)
+    _syms = _syms[:args.max_symbols]
 
 # J の母集団(in_j 列用)
 _jpool: set = set()

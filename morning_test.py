@@ -25,20 +25,21 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
        ⚠ 登録/解除を繰り返すので **一番先にやる**(429 が後続に波及しないよう
           最後にクールダウンを置く)。
 
-  2. 気配ログ       log_preopen_board --prod
-       08:45〜08:57 の気配を貯める。**初日**。1ヶ月貯めて初めて判定できる。
+  2. 気配ログ       log_preopen_board --prod   ← **〜08:45**
+       母集団を広く取って気配を貯める。**初日**。1,000件貯めて初めて判定できる。
+       ⛔ K のウォームアップ(08:47)より前に終える。トークンは1つ。
 
-  3. ウォームアップ  check_board_limits --warmup
-       09:00 の測定を「登録直後の初回(48〜142秒)」にしないための空読み。
-       ⛔ これを飛ばすと 09:00 の数字が測定にならない。
+  3+4. 対照測定     check_board_limits --warmup / --open   ← **既定OFF**
+       41銘柄の対照。K のウォームアップ時間を奪うので、要るときだけ
+       --with-board-speed。K記録(5)自体が本番速度の実測になる。
 
-  4. 本番の速度     check_board_limits --open   ← **09:00 ちょうど**
-       板寄せ直後の実測。board_speed_log.csv に追記される。
-       これまでの実測は全部 **場外**で、本番の09:00は一度も測っていない。
-
-  5. K の記録       k_open_confirm --now   ← 4 の直後(登録がウォームなので速い)
+  5. K の記録       k_open_confirm --poll   ← **08:47 空読み → 09:00 本番**
+       ⛔⛔ ここが最重要。候補は数百銘柄(=6バッチ級)で、**コールドだと
+          1バッチ48秒 → 全部で約5分**。09:00 に間に合わせるには 08:47 には
+          空読みを始めていないといけない。旧設定(09:00過ぎに起動)では
+          登録がまるごとコールドで、始値スナップショットが5分遅れていた。
        全候補の始値を取り、+50bp判定 → 合格件数 → 予算÷件数 で株数まで出して
-       k_paper_<日付>.csv に書く。**その朝 K なら何を建てたか**の記録。
+       k_paper_<日付>.csv に書く。09:30 まで10秒ごとに回して遅寄りも拾う。
        ⛔ 発注しない(k_open_confirm は売買系を import すらしていない)。
 
 ■ 使い方
@@ -51,10 +52,12 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
 
 ■ ⛔ 注意
 
-  ・**開始は 08:30 まで**。1(バッチ回し)に数分かかる。
-  ・実行中は発注サーバを起動しない(kabu の有効トークンは1つ)。
-  ・⚠ 候補リストが要るので、**前日の引け後か当日の朝に `.\daily` を1回**
-    流しておくこと(holdout_selected_symbols.py が候補のソース)。
+  ・**開始は 08:00**。0(シグナル収集)と1(バッチ回し)で10分前後かかり、
+    残りを 2(気配ログ)に充てたい。08:30 開始でも 09:00 の測定は守られるが、
+    気配ログのカバー範囲が削られる。
+  ・実行中は発注サーバ / watcher を起動しない(kabu の有効トークンは1つ)。
+  ・候補は 0(--collect)が lss_proposal_full.py から自前で作るので、
+    `.\daily` を先に流す必要は**ない**。
 """
 from __future__ import annotations
 
@@ -70,12 +73,23 @@ ap.add_argument("--n", type=int, default=41, help="速度測定の銘柄数")
 ap.add_argument("--rotate", type=int, default=100, help="バッチ回しで読む銘柄数")
 ap.add_argument("--symbols-file", type=str, default="",
                 help="気配ログの銘柄ソース(既定 holdout_selected_symbols.py)")
-ap.add_argument("--preopen-until", type=str, default="08:57")
+# ⛔⛔ 気配ログは **K のウォームアップの前に終える**こと (2026-08-17)。
+#   kabu の有効トークンは1つなので同時に走らせられない。そして K の候補は
+#   299銘柄=6バッチあり、**コールドだと1バッチ48秒 → 全部で約5分**かかる。
+#   09:00 に間に合わせるには 08:47 には空読みを始めていないといけない。
+#   旧設定(気配ログ 08:57まで → K は09:00過ぎに起動)だと K の登録が
+#   まるごとコールドで、09:00 の始値スナップショットが5分遅れていた。
+ap.add_argument("--preopen-until", type=str, default="08:45")
+ap.add_argument("--k-warm-at", type=str, default="08:47",
+                help="K の空読み開始。候補6バッチ×コールド48秒 ≒ 5分を見込む")
 ap.add_argument("--warmup-at", type=str, default="08:58")
 ap.add_argument("--open-at", type=str, default="09:00")
 ap.add_argument("--skip-rotate", action="store_true")
 ap.add_argument("--skip-preopen", action="store_true")
 ap.add_argument("--no-open", action="store_true", help="09:00 の測定をしない")
+ap.add_argument("--with-board-speed", action="store_true",
+                help="41銘柄の対照測定(check_board_limits)も挟む。"
+                     "⛔ K のウォームアップ時間を奪うので既定OFF")
 ap.add_argument("--no-kpaper", action="store_true",
                 help="K のペーパー記録をしない")
 ap.add_argument("--poll-until", type=str, default="09:30",
@@ -138,9 +152,12 @@ print(f"""
     0. シグナル収集 kabu不要      {'(スキップ)' if args.no_kpaper else ''}
     1. バッチ回し   --rotate {args.rotate}      {'(スキップ)' if args.skip_rotate else ''}
     2. 気配ログ     〜{args.preopen_until}          {'(スキップ)' if args.skip_preopen else ''}
-    3. ウォームUP   {args.warmup_at}
-    4. 本番速度     {args.open_at}          {'(スキップ)' if args.no_open else ''}
-    5. K記録        4の直後       {'(スキップ)' if args.no_kpaper else ''}
+    3+4. 対照測定   {args.warmup_at}/{args.open_at}   {'' if (args.with_board_speed or args.no_kpaper) else '(スキップ: --with-board-speed で有効)'}
+    5. K記録        {args.k_warm_at} 空読み → {args.open_at} 本番 → {args.poll_until} まで {'(スキップ)' if args.no_kpaper else ''}
+
+  ⛔ K の候補は数百銘柄(=6バッチ級)。**コールドだと1バッチ48秒**なので、
+     09:00 に間に合わせるには {args.k_warm_at} には空読みを始める必要があります。
+     だから気配ログを {args.preopen_until} で切っています(トークンは1つ)。
 """, flush=True)
 
 _res: list[tuple] = []
@@ -170,8 +187,13 @@ if not args.skip_rotate:
 
 # ── 2. 気配ログ ────────────────────────────────────────────────────────
 if not args.skip_preopen:
+    # ⛔ 直前スイープ(--final-from)は締切より前でないと一度も走らない。
+    #    log_preopen_board の既定は 08:50 だが、K のウォームアップを
+    #    08:47 に始めるため締切を 08:45 に前倒ししている。締切の8分前に合わせる。
+    _fin = (_hm(args.preopen_until) - _dt.timedelta(minutes=8)).strftime("%H:%M")
     _cmd = (_PY + ["log_preopen_board.py"] + _P
-            + ["--until", args.preopen_until, "--every", "120"])
+            + ["--until", args.preopen_until, "--every", "120",
+               "--final-from", _fin])
     if args.symbols_file:
         _cmd += ["--symbols-file", args.symbols_file]
     _res.append(("2. 気配ログ", _run(
@@ -179,7 +201,11 @@ if not args.skip_preopen:
         f" ★母集団は広く取る。締切まで回し続けます", _cmd)))
 
 # ── 3. ウォームアップ ──────────────────────────────────────────────────
-if not args.no_open:
+# ⛔ K記録(手順5)と **同時に走らせられない**(トークンは1つ)。K の候補は
+#    数百銘柄あり自前で空読み→09:00 に読むので、41銘柄の対照測定を挟むと
+#    K のウォームアップ時間を奪う。既定では K を優先し、対照が要るときだけ
+#    --with-board-speed を付ける(2026-08-17)。
+if not args.no_open and (args.with_board_speed or args.no_kpaper):
     if not args.dry_run:
         _wait_until(_hm(args.warmup_at), "登録して1回空読み(初回は140秒級)")
     _res.append(("3. ウォームUP", _run(
@@ -202,14 +228,19 @@ if not args.no_kpaper:
     # ★★ ポーリング版 (2026-08-16)。09:00 以降に寄る銘柄も拾い、
     #   **寄り時刻の実データ**を貯める。これが「即時」(§18.41)の検証に直結。
     #   ⛔ 発注はしない(k_open_confirm は売買系を import すらしていない)。
+    # ⛔ `--now` を付けない。付けると 08:47 に起動した瞬間に本番読みを始めて
+    #    しまう。k_open_confirm 自身が --warm-at で空読み → --open-at まで
+    #    待つので、**09:00 前に起動して待たせる**のが正しい(2026-08-17)。
     _cmd5 = (_PY + ["k_open_confirm.py"] + _P
-             + ["--poll", "--now", "--poll-until", args.poll_until,
+             + ["--poll", "--poll-until", args.poll_until,
+                "--warm-at", args.k_warm_at, "--open-at", args.open_at,
                 "--every", str(args.poll_every), "--now-polls", "999"])
     if args.symbols_file:
         _cmd5 += ["--symbols-file", args.symbols_file]
     _res.append(("5. K記録", _run(
-        f"5. K のペーパー記録 — **{args.poll_every}秒ごとに{args.poll_until}まで"
-        f"ポーリング** (k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
+        f"5. K のペーパー記録 — {args.k_warm_at} に空読み → {args.open_at} に"
+        f"本番 → {args.poll_every}秒ごとに{args.poll_until}までポーリング "
+        f"(k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
 
 print(f"""
 {'=' * 74}
@@ -236,12 +267,13 @@ print(f"""
          気配→始値の関係は発注候補である必要がないので、広げるほど1日の
          件数が増え、判定に要る 500〜1,000件に **数営業日**で届く。
          今日の候補は先頭に置き、`is_cand` 列で後から切り分けられる。
-       ★ **08:50 から直前スイープ**(間隔なしで回し続け、先頭=候補に戻る)。
+       ★ **締切の8分前から直前スイープ**(間隔なしで回し続け、先頭=候補に戻る)。
          気配は寄りに近いほど当たるので、いちばん知りたい銘柄がいちばん
          新しい気配で上書きされる。全行に `to_open_s`(寄りまでの残り秒)。
        ⛔ **1,000件 貯まるまで --verify を覗かないこと**(実質 in-sample になる)。
-    4. 本番速度  … 場外の 6.3秒 と比べる。板寄せ直後で遅くなっていないか。
-       5分遅れると K の優位は消えるので、**数十秒以内**なら合格。
+    5(本番読み) … ★ここが最重要。09:00 の1周が **何秒で終わるか**。
+       候補299銘柄=6バッチをウォームで読めるなら 6.5件/秒 ≒ 46秒の見込み。
+       数分かかるなら K は成立しない(5分遅れで優位が半減)。
     5. K記録     … k_paper_<日付>.csv。見るのは3つ:
        ①**09:00に未寄の割合**(BTの実測15.7%と合うか)
        ②**グループの一覧**(何時に何件寄ったか) ← 「即時」(§18.41)の実データ
