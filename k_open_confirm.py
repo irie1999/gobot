@@ -73,13 +73,23 @@ ap.add_argument("--watch-j", type=int, default=50, help="J が09:00に読める�
 ap.add_argument("--open-at", type=str, default="09:00")
 ap.add_argument("--warm-at", type=str, default="08:55")
 ap.add_argument("--now", action="store_true", help="待たずに いま1回読む")
+# ★★ ポーリング (2026-08-16 ユーザー提案)
+ap.add_argument("--poll", action="store_true",
+                help="09:00 以降も回し続け、**寄った銘柄から順に**拾う")
+ap.add_argument("--poll-until", type=str, default="09:30",
+                help="--poll の締切(実測: 遅寄りの93%が09:06までに寄る)")
+ap.add_argument("--every", type=int, default=10, help="--poll の間隔(秒)")
+ap.add_argument("--now-polls", type=int, default=3,
+                help="--now --poll のとき何周だけ回すか(動作確認用)")
+ap.add_argument("--g1", type=float, default=0.8,
+                help="第1グループ(09:00の板寄せ)に配る予算の割合。"
+                     "以降のグループは残り予算。⛔端数配分はしない")
 ap.add_argument("--out", type=str, default="")
 args = ap.parse_args()
 
-_COLS = ["date", "read_ts", "symbol", "in_j", "rank_liq", "liquidity",
+_COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          "prev_close", "open_p", "open_time", "current_price", "gap_bp",
-         "late", "pass_gap", "guard_ng",
-         "lots_j", "yen_j", "lots_k", "yen_k"]
+         "late", "pass_gap", "guard_ng", "lots_k", "yen_k"]
 
 
 # ── 候補の読み込み ─────────────────────────────────────────────────────
@@ -193,28 +203,14 @@ def _wait(hm: str, why: str) -> None:
         time.sleep(min(10.0, _r))
 
 
-# ── ① ウォームアップ (登録直後の初回は48〜142秒かかる / §18.38) ───────────
-if not args.now:
-    _wait(args.warm_at, "登録して1回空読み(これを飛ばすと09:00が数分かかる)")
-print("\n▶ ウォームアップ（空読み。値は使いません）", flush=True)
-_read_all("warm")
-
-# ── ② 09:00 の本番読み ────────────────────────────────────────────────
-if not args.now:
-    _wait(args.open_at, "★ここが本番。板寄せ直後の始値を取る")
-print("\n▶ 本番の読み取り", flush=True)
-_read_ts = f"{_dt.datetime.now():%H:%M:%S}"
-_bd_all = _read_all("open")
-
-# ── ③ 判定 ───────────────────────────────────────────────────────────
-_rows: list[dict] = []
-for _s in _syms:
-    _bd = _bd_all.get(_s) or {}
+def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
+    """板1件 → 記録用の1行。判定(合格/遅寄り/ガード)もここで済ませる。"""
     _pc = float(_bd.get("PreviousClose") or 0)
     _op = float(_bd.get("OpeningPrice") or 0)
     _ot = str(_bd.get("OpeningPriceTime") or "")
-    # ★ 09:00 に寄ったか。OpeningPrice が無い or 時刻が 09:00台の1分以降なら
-    #   「まだ寄っていない」= 現行のバックテストでは建てない扱い(15.7%)。
+    # ★ 09:00 に寄ったか。OpeningPrice が無い or 時刻が 09:00 より後なら遅寄り。
+    #   ⚠ --poll では遅寄りも **建てる**(グループを分けて配分する)ので、
+    #      late は記録用のフラグでしかない。
     _late = 0
     if _op <= 0:
         _late = 1
@@ -224,70 +220,175 @@ for _s in _syms:
             _late = 1
     _gap = ((_op - _pc) / _pc * 1e4) if (_op > 0 and _pc > 0) else None
     _guard = 1 if (_gap is not None and _gap > args.guard_bp) else 0
+    # ⛔ --poll では late を不合格にしない(遅寄りを拾うのが目的)。
+    _lt_ng = 0 if args.poll else _late
     _pass = 1 if (_gap is not None and _gap >= args.gap_bp
-                  and not _guard and not _late) else 0
-    _rows.append({
-        "date": f"{_dt.date.today()}", "read_ts": _read_ts, "symbol": _s,
-        "in_j": 1 if _s in _jpool else 0,
-        "rank_liq": 0, "liquidity": _liq.get(_s, 0),
-        "prev_close": _pc, "open_p": _op, "open_time": _ot,
-        "current_price": _bd.get("CurrentPrice") or 0,
-        "gap_bp": (round(_gap, 1) if _gap is not None else ""),
-        "late": _late, "pass_gap": _pass, "guard_ng": _guard,
-        "lots_j": 0, "yen_j": 0, "lots_k": 0, "yen_k": 0})
-
-# 流動性降順の順位(発注順 / §18.21)。0 は最後尾。
-_rows.sort(key=lambda r: (-float(r["liquidity"] or 0), str(r["symbol"])))
-for _i, r in enumerate(_rows):
-    r["rank_liq"] = _i + 1
+                  and not _guard and not _lt_ng) else 0
+    return {"date": f"{_dt.date.today()}", "seen_ts": _ts, "grp": _grp,
+            "symbol": _s, "in_j": 1 if _s in _jpool else 0,
+            "rank_liq": 0, "liquidity": _liq.get(_s, 0),
+            "prev_close": _pc, "open_p": _op, "open_time": _ot,
+            "current_price": _bd.get("CurrentPrice") or 0,
+            "gap_bp": (round(_gap, 1) if _gap is not None else ""),
+            "late": _late, "pass_gap": _pass, "guard_ng": _guard,
+            "lots_k": 0, "yen_k": 0}
 
 
-def _size(sel: list[dict], key: str) -> tuple:
-    """予算 ÷ 合格件数。1銘柄上限・最大単元・最低1単元は現行と同じ。"""
-    if not sel:
-        return 0, 0.0
+def _dump(_rows: list) -> None:
+    """途中で落ちてもデータを失わないよう、毎周 書き出す。"""
+    try:
+        with open(_out_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=_COLS)
+            w.writeheader()
+            w.writerows(_rows)
+    except Exception as e:
+        print(f"  ⚠ CSV を書けません: {e}", flush=True)
+
+
+def _size_groups(_rows: list) -> None:
+    """グループごとに **固定上限** で配る (2026-08-16 ユーザー判断)。
+
+    第1グループ(09:00の板寄せ) … 予算 × --g1
+    以降の各グループ           … 残り予算
+    ⛔ 端数配分はしない。締切までに寄らなかった候補ぶんの予算は使わない
+       (§18.38 の充填と同じで、配り切るとリスク調整後は悪化する)。
+    """
+    # 流動性降順の順位(発注順 / §18.21)。0 は最後尾。
+    _rows.sort(key=lambda r: (-float(r["liquidity"] or 0), str(r["symbol"])))
+    for _i, r in enumerate(_rows):
+        r["rank_liq"] = _i + 1
     _bud, _cap = args.budget * 1e4, args.max_yen * 1e4
-    _per = min(_bud / len(sel), _cap) if _cap > 0 else _bud / len(sel)
-    _used, _n = 0.0, 0
-    for r in sel:
-        _u = float(r["open_p"]) * 100
-        if _u <= 0:
+    _R = _bud
+    for _g in sorted({int(r["grp"]) for r in _rows}):
+        _sel = [r for r in _rows if int(r["grp"]) == _g and r["pass_gap"]]
+        if not _sel:
             continue
-        _lot = min(args.max_lot, int(_per // _u))
-        if _cap > 0:
-            _lot = min(_lot, int(_cap // _u))
-        _lot = max(1, _lot)              # 1件目は最低1単元(現行と同じ)
-        r[f"lots_{key}"] = _lot
-        r[f"yen_{key}"] = round(_lot * _u, 0)
-        _used += _lot * _u
-        _n += 1
-    return _n, _used
+        _alloc = min(_bud * args.g1, _R) if _g == 0 else _R
+        _per = min(_alloc / len(_sel), _cap) if _cap > 0 else _alloc / len(_sel)
+        _used = 0.0
+        for r in _sel:
+            _u = float(r["open_p"]) * 100
+            if _u <= 0:
+                continue
+            _lot = min(args.max_lot, int(_per // _u))
+            if _cap > 0:
+                _lot = min(_lot, int(_cap // _u))
+            _lot = max(1, _lot)          # 1件目は最低1単元(現行と同じ)
+            # 残り予算を超えないところで打ち切る
+            while _lot > 0 and _used + _lot * _u > _R:
+                _lot -= 1
+            if _lot <= 0:
+                continue
+            r["lots_k"] = _lot
+            r["yen_k"] = round(_lot * _u, 0)
+            _used += _lot * _u
+        _R = max(0.0, _R - _used)
 
 
-# K = 全候補 / J = 選定あり かつ 流動性上位 watch_j 件だけ読めた前提
+# ── ① ウォームアップ (登録直後の初回は48〜142秒かかる / §18.38) ───────────
+if not args.now:
+    _wait(args.warm_at, "登録して1回空読み(これを飛ばすと09:00が数分かかる)")
+print("\n▶ ウォームアップ（空読み。値は使いません）", flush=True)
+_read_all("warm")
+
+# ══════════════════════════════════════════════════════════════════════
+#  ポーリング (--poll) — 09:00 以降に寄る銘柄も拾う
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 2026-08-16 ユーザー提案「9:06に寄り付いたらそこからすぐ注文を出せばいい」。
+#   寄った銘柄から順に処理すれば、全部が寄るまで待つ必要が無い。
+#   配分は **固定上限**(第1グループに 予算×G1、以降は残り予算)。
+#   動的配分(残り予算 × 候補数 ÷ 未判定数)は毎回 未寄件数を数える必要があり
+#   ライブで壊れやすい、というユーザー判断による。
+#   ⛔ 端数配分はしない(§18.38 の充填と同じでリスク調整後は悪化)。
+_rows: list = []
+_seen: dict = {}          # symbol -> 最初に寄りを検知した時刻
+_groups: list = []        # [(検知時刻, [銘柄...]), ...]
+_read_ts = ""
+
+if args.poll:
+    _h9, _m9 = (int(x) for x in str(args.open_at).split(":"))
+    _t_open = _dt.datetime.now().replace(hour=_h9, minute=_m9,
+                                         second=0, microsecond=0)
+    _he, _me = (int(x) for x in str(args.poll_until).split(":"))
+    _t_end = _dt.datetime.now().replace(hour=_he, minute=_me,
+                                        second=0, microsecond=0)
+    if not args.now:
+        _wait(args.open_at, "★ここから本番。寄った銘柄から順に拾う")
+    print(f"\n▶ ポーリング開始（{args.every}秒ごと / {args.poll_until} まで）",
+          flush=True)
+    _n_poll = 0
+    while True:
+        _t0 = time.time()
+        _n_poll += 1
+        _bd_all = _read_all(f"poll{_n_poll}")
+        _now_s = f"{_dt.datetime.now():%H:%M:%S}"
+        _new = []
+        for _s, _bd in _bd_all.items():
+            if _s in _seen:
+                continue
+            _op = float(_bd.get("OpeningPrice") or 0)
+            if _op <= 0:
+                continue          # まだ寄っていない
+            _seen[_s] = _now_s
+            _new.append((_s, _bd))
+        if _new:
+            _groups.append((_now_s, [x[0] for x in _new]))
+            for _s, _bd in _new:
+                _rows.append(_mk_row(_s, _bd, _now_s,
+                                     len(_groups) - 1))
+            print(f"  [{_now_s}] **新たに寄った {len(_new)}件** "
+                  f"(通算 {len(_seen)}/{len(_syms)}) "
+                  f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
+        else:
+            print(f"  [{_now_s}] 新規なし (通算 {len(_seen)}/{len(_syms)}) "
+                  f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
+        # ★ 途中で落ちてもデータを失わないよう毎回書き出す
+        _dump(_rows)
+        if args.now and _n_poll >= max(1, args.now_polls):
+            break
+        if _dt.datetime.now() >= _t_end or len(_seen) >= len(_syms):
+            break
+        _sl = max(0.0, args.every - (time.time() - _t0))
+        if _sl > 0:
+            time.sleep(_sl)
+    _read_ts = f"{_dt.datetime.now():%H:%M:%S}"
+else:
+    # ── 従来: 09:00 に1回だけ読む ──────────────────────────────────
+    if not args.now:
+        _wait(args.open_at, "★ここが本番。板寄せ直後の始値を取る")
+    print("\n▶ 本番の読み取り（09:00 の1回だけ）", flush=True)
+    _read_ts = f"{_dt.datetime.now():%H:%M:%S}"
+    _bd_all = _read_all("open")
+    _groups.append((_read_ts, list(_bd_all)))
+    for _s in _syms:
+        _bd = _bd_all.get(_s) or {}
+        if float(_bd.get("OpeningPrice") or 0) > 0:
+            _seen[_s] = _read_ts
+        _rows.append(_mk_row(_s, _bd, _read_ts, 0))
+
+# ── 配分 (固定上限。第1グループ=予算×G1 / 以降=残り予算) ─────────────
+_size_groups(_rows)
+_dump(_rows)
+
+_got = sum(1 for r in _rows if float(r["open_p"] or 0) > 0)
+_late_n = sum(1 for r in _rows if r["late"])
 _pass_k = [r for r in _rows if r["pass_gap"]]
 _j_seen = [r for r in _rows if r["in_j"]][:args.watch_j]
 _pass_j = [r for r in _j_seen if r["pass_gap"]]
-_nk, _yk = _size(_pass_k, "k")
-_nj, _yj = _size(_pass_j, "j")
-
-with open(_out_path, "w", newline="", encoding="utf-8-sig") as f:
-    w = _csv.DictWriter(f, fieldnames=_COLS)
-    w.writeheader()
-    w.writerows(_rows)
-
-_got = sum(1 for r in _rows if float(r["open_p"] or 0) > 0)
-_late_n = sum(r["late"] for r in _rows)
 print(f"""
 {'=' * 74}
 ■ 結果 — {_out_path}
 {'=' * 74}
-  読めた       {_got:,}/{len(_rows):,}銘柄   (取得時刻 {_read_ts})
+  読めた       {_got:,}/{len(_rows):,}銘柄   (最終 {_read_ts})
   09:00に未寄  {_late_n:,}銘柄 ({_late_n / max(1, len(_rows)) * 100:.1f}%)
                ⚠ バックテストの実測は15.7%。大きく違うなら要調査
-
-  K(全候補)      合格 {len(_pass_k):,}件 → 建てる {_nk:,}件 / 投入 {_yk / 1e4:,.0f}万
-  J(選定あり上位{args.watch_j})  合格 {len(_pass_j):,}件 → 建てる {_nj:,}件 / 投入 {_yj / 1e4:,.0f}万
+  グループ     {len(_groups)}回""")
+for _gi, (_gt, _gs) in enumerate(_groups):
+    print(f"    {_gi + 1}. {_gt}  {len(_gs)}銘柄")
+print(f"""
+  合格 {len(_pass_k):,}件 → 建てる {sum(1 for r in _rows if r['lots_k'])}件 / """
+      f"""投入 {sum(float(r['yen_k'] or 0) for r in _rows) / 1e4:,.0f}万
+  うちJ(選定あり上位{args.watch_j}) 合格 {len(_pass_j):,}件
 
   ⛔ **発注していません**。この CSV は「その朝 K なら何を建てたか」の記録です。
   ★ 貯めたら 5分足の始値と突合して、**板の始値 = 5分足の始値** かを確認する

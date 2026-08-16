@@ -73,6 +73,10 @@ ap.add_argument("--skip-preopen", action="store_true")
 ap.add_argument("--no-open", action="store_true", help="09:00 の測定をしない")
 ap.add_argument("--no-kpaper", action="store_true",
                 help="K のペーパー記録をしない")
+ap.add_argument("--poll-until", type=str, default="09:30",
+                help="K記録のポーリング締切")
+ap.add_argument("--poll-every", type=int, default=10,
+                help="K記録のポーリング間隔(秒)")
 ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終了")
 args = ap.parse_args()
 
@@ -176,11 +180,17 @@ if not args.no_open:
 #   ⛔ 発注しない。k_open_confirm.py は売買系を import すらしていない。
 #   4 の直後に走らせる(登録がまだウォームなので速い)。
 if not args.no_kpaper:
-    _cmd5 = _PY + ["k_open_confirm.py"] + _P + ["--now"]
+    # ★★ ポーリング版 (2026-08-16)。09:00 以降に寄る銘柄も拾い、
+    #   **寄り時刻の実データ**を貯める。これが「即時」(§18.41)の検証に直結。
+    #   ⛔ 発注はしない(k_open_confirm は売買系を import すらしていない)。
+    _cmd5 = (_PY + ["k_open_confirm.py"] + _P
+             + ["--poll", "--now", "--poll-until", args.poll_until,
+                "--every", str(args.poll_every), "--now-polls", "999"])
     if args.symbols_file:
         _cmd5 += ["--symbols-file", args.symbols_file]
     _res.append(("5. K記録", _run(
-        "5. K のペーパー記録 (k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
+        f"5. K のペーパー記録 — **{args.poll_every}秒ごとに{args.poll_until}まで"
+        f"ポーリング** (k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
 
 print(f"""
 {'=' * 74}
@@ -206,7 +216,9 @@ print(f"""
        ⛔ **1ヶ月貯めるまで --verify を覗かないこと**(実質 in-sample になる)。
     4. 本番速度  … 場外の 6.3秒 と比べる。板寄せ直後で遅くなっていないか。
        5分遅れると K の優位は消えるので、**数十秒以内**なら合格。
-    5. K記録     … k_paper_<日付>.csv。**09:00に未寄の割合**を見ること。
-       バックテストの実測は15.7%。大きく違うならモデルの前提が崩れている。
+    5. K記録     … k_paper_<日付>.csv。見るのは3つ:
+       ①**09:00に未寄の割合**(BTの実測15.7%と合うか)
+       ②**グループの一覧**(何時に何件寄ったか) ← 「即時」(§18.41)の実データ
+       ③**1周の読込秒数**が間隔(10秒)に収まっているか
        ⛔ 発注していません。「その朝 K なら何を建てたか」の記録です。
 """)
