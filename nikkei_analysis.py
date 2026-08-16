@@ -11900,6 +11900,46 @@ function switchTbd(id, tab) {{
         _SEL_POOL = None
         _sel_pf = os.environ.get("LSS_IMPL_PROPOSAL", "lss_proposal_cumul.py")
         _SEL_POOL = _load_pool(_sel_pf)
+        # ⛔⛔ **「選定あり ⊂ 選定なし」は成り立たない**(2026-08-16 発覚)。
+        #    選定(cumul)は過去の基準月で選んだペアなので、いま
+        #      ・価格レンジ(1,000〜6,000円)から外れた
+        #      ・空売り不可になった
+        #      ・上場廃止・データ欠損
+        #    銘柄を含む。それらは 選定なし(full) の側で **最初から計算されない**。
+        #    → full を土台にして後から pool で絞ると、**その差分が丸ごと消える**。
+        #    朝(cumul 土台)の『選定あり+watch50』1,960件 と
+        #    今(full 土台)の『J 実装版』1,433件 が 27% 違ったのはこれが原因の候補。
+        #    ⚠ 取りこぼしが大きいなら、J の数字は**過小評価**になっている。
+        try:
+            if _SEL_POOL:
+                _have: set = set()
+                for _src in (list((_EH_TRADES or {}).values())
+                             + list(_EH_NF_SRC.values())):
+                    if not isinstance(_src, list):
+                        continue
+                    for _t in _src:
+                        _c1 = str(_t.get("symbol", "")).upper() \
+                            .removesuffix(".T").split(".")[0]
+                        _s1 = str(_t.get("strategy") or _t.get("strat") or "")
+                        if _c1:
+                            _have.add((_c1, _s1))
+                _miss = {p for p in _SEL_POOL[0] if p not in _have}
+                if _miss:
+                    print(f"[E/H] ⛔ 選定(cumul)の {len(_miss):,}/"
+                          f"{len(_SEL_POOL[0]):,}ペア "
+                          f"({len(_miss) / max(1, len(_SEL_POOL[0])) * 100:.0f}%)"
+                          f" が **土台({_sel_pf} ではない方)に存在しません**。"
+                          f"価格レンジ外・空売り不可・データ欠損で "
+                          f"lss_proposal_full.py 側から落ちたぶんです。"
+                          f"\n      → **J(実装版)はそのぶん過小評価**になります。"
+                          f"正確に測るなら土台を選定ありにしてください: "
+                          f"`.\\dailyfast --lss-proposal {_sel_pf}`",
+                          flush=True)
+                else:
+                    print(f"[E/H] ✅ 選定(cumul)の全ペアが土台に含まれています"
+                          f"(J は過小評価になっていません)", flush=True)
+        except Exception as _spe:
+            print(f"[E/H] ⚠ 選定の被覆チェックに失敗: {_spe}", flush=True)
         if _SEL_POOL:
             print(f"[E/H] 実装版の母集団: {_sel_pf} から {len(_SEL_POOL[0]):,}ペア"
                   f"(解禁日 {len(_SEL_POOL[1]):,}件)。"
