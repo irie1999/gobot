@@ -16600,6 +16600,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<b>順序の効果は期間で再現しなければ意味がありません</b>(18.28)。'
             f'両方が同じ向きに |z|≥1 で出たものに <span style="color:#4ade80;font-weight:700">✓</span> '
             f'を付けています。片方だけ大きいものは、その期間のノイズを拾っているだけです。<br>'
+            f'⛔ <b>実装できない設定は候補から外しています</b>'
+            f'（即時 / 遅寄り込み / 約定数割 / watch無制限 / 理想版 / '
+            f'watch を現状より増やす版）。2026-08-16 の実測で walk-forward は'
+            f'<b>『上位20watch無制限』を8ヶ月・『上限なし』を3ヶ月</b>選びましたが、'
+            f'watch無制限は kabu の登録上限50件では不可能です'
+            f'（候補は中央154件・最大614件）。'
+            f'<b>選べない設定を選ぶ walk-forward は採否に使えません。</b>'
+            f'全部込みで見るなら <code>set LSS_WF_ALL=1</code>。<br>'
             f'<b>▶ walk-forward 選択</b> = 各月について<b>その月より前のデータだけ</b>で'
             f'最良の順序を選び、その月に適用する（初月は既定）。'
             f'<b>順序選択のリークを消した形</b>です。ランダムは実運用で選べないので'
@@ -17330,13 +17338,42 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         # 『6設定から最良を選ぶ』リークは消さない。消せるのはこの形だけ。
         # 固定最良を下回るなら「設定を選ぶこと自体に価値がない」= 既定でよい。
         _mmap = {r[0]: r[11] for r in _out}
+        # ⛔⛔ **実装できない変種を候補から外す**(2026-08-16)。
+        #    2026-08-16 の実測で walk-forward が選んだのは
+        #      『上位20watch無制限』(8ヶ月) と『上限なし』(3ヶ月)
+        #    だったが、watch無制限は **kabu の登録上限50件では不可能**
+        #    (候補は中央154件・最大614件)。実装できない選択肢を含めた
+        #    walk-forward は「選べない設定を選んでいる」ので採否に使えない。
+        #    → 既定で外す。全部込みで見たいときだけ LSS_WF_ALL=1。
+        _WF_NG = ("即時", "遅寄り込み", "約定数割", "watch無制限", "理想版")
+        _wf_all = str(os.environ.get("LSS_WF_ALL", "0")).strip() in ("1", "true")
+        import re as _re_wf
+
+        def _wf_ok(_k) -> bool:
+            _s = str(_k)
+            if any(_x in _s for _x in _WF_NG):
+                return False
+            # watch を **増やす**版は --rotate が成立するまで実装不可。
+            # watch25 のように減らす版は実装できるので残す。
+            _m0 = _re_wf.search(r"watch(\d+)", _s)
+            if _m0 and _WATCH_CAP > 0 and int(_m0.group(1)) > _WATCH_CAP:
+                return False
+            return True
+        _wf_ng_n = 0
+        if not _wf_all:
+            _mm2 = {k: v for k, v in _mmap.items() if _wf_ok(k)}
+            if _mm2:
+                _wf_ng_n = len(_mmap) - len(_mm2)
+                _mmap = _mm2
         _msa = sorted(set(_base))
         _cum = {v: 0.0 for v in _mmap}
         _wfm: dict = {}
         _picks = []
+        _first = _vs[0] if _vs and _vs[0] in _mmap else (
+            next(iter(_mmap)) if _mmap else "")
         for _i, _mn in enumerate(_msa):
-            _pk = _vs[0] if _i == 0 else max(_mmap, key=lambda v: _cum[v])
-            _wfm[_mn] = _mmap[_pk].get(_mn, 0.0)
+            _pk = _first if _i == 0 else max(_mmap, key=lambda v: _cum[v])
+            _wfm[_mn] = _mmap.get(_pk, {}).get(_mn, 0.0)
             _picks.append((_mn, _pk))
             for _v2 in _mmap:
                 _cum[_v2] += _mmap[_v2].get(_mn, 0.0)
@@ -17354,7 +17391,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _wh = len(_msa) // 2
         _wf1 = sum(_wfm[m] - _base[m] for m in _msa[:_wh] if m in _base)
         _wf2 = sum(_wfm[m] - _base[m] for m in _msa[_wh:] if m in _base)
-        _out.append(("▶ walk-forward 選択", 0, sum(_wfm.values()), _wmu, _wt,
+        _out.append((("▶ walk-forward 選択"
+                      + ("（全設定）" if _wf_all
+                         else f"（実装できる設定だけ / 除外{_wf_ng_n}本）")),
+                     0, sum(_wfm.values()), _wmu, _wt,
                      _wlo, _whi, _ww, len(_wds), _wf1, _wf2, _wfm, None))
 
         _best = max([r for r in _out if not r[0].startswith("▶")],
@@ -17918,6 +17958,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'<th style="{_th}">後半(順位)</th></tr></thead>'
             f'<tbody>{_rows}</tbody></table>'
             f'<p style="color:#94a3b8;font-size:0.74rem;margin:8px 0 0;line-height:1.8">'
+            f'⛔ <b>実装できない設定は候補から外しています</b>'
+            f'（即時 / 遅寄り込み / 約定数割 / watch無制限 / 理想版 / '
+            f'watch を現状より増やす版）。2026-08-16 の実測で walk-forward は'
+            f'<b>『上位20watch無制限』を8ヶ月・『上限なし』を3ヶ月</b>選びましたが、'
+            f'watch無制限は kabu の登録上限50件では不可能です'
+            f'（候補は中央154件・最大614件）。'
+            f'<b>選べない設定を選ぶ walk-forward は採否に使えません。</b>'
+            f'全部込みで見るなら <code>set LSS_WF_ALL=1</code>。<br>'
             f'<b>▶ walk-forward 選択</b> = 各月について<b>その月より前のデータだけ</b>で'
             f'最良の設定を選び、その月に適用する（初月は既定）。'
             f'<b>設定選択のリークを消した唯一の形</b>です。<br>'
