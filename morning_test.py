@@ -2,12 +2,14 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
 
 ⛔ **発注しない**。register / board / unregister しか叩かない。
 
+★ 2026-08-16 ユーザー決定: **現行Hは実行しない。J/K のデータ取得に専念する。**
+   → `.\watch` も発注も不要。トークンの取り合いが起きないので測定に集中できる。
+
 ■ なぜ1本にまとめたか
 
-明日の朝に測りたいものが4つあり、**どれも時刻が決まっていて順番も決まっている**。
+朝に測りたいものが5つあり、**どれも時刻が決まっていて順番も決まっている**。
 手で順に叩くと必ず取り違える(§18.38 で実際に --warmup を飛ばして140秒級の
-数字を出した)。しかも **kabu の有効トークンは1つ**なので、`.\watch` や
-発注サーバと重なると401の取り合いになる。
+数字を出した)。
 
 ■ 何を測るか (実行順)
 
@@ -29,22 +31,25 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
        板寄せ直後の実測。board_speed_log.csv に追記される。
        これまでの実測は全部 **場外**で、本番の09:00は一度も測っていない。
 
+  5. K の記録       k_open_confirm --now   ← 4 の直後(登録がウォームなので速い)
+       全候補の始値を取り、+50bp判定 → 合格件数 → 予算÷件数 で株数まで出して
+       k_paper_<日付>.csv に書く。**その朝 K なら何を建てたか**の記録。
+       ⛔ 発注しない(k_open_confirm は売買系を import すらしていない)。
+
 ■ 使い方
 
     .\mtest            (= python morning_test.py --prod)
     python morning_test.py --prod --skip-rotate    # バッチ回しを飛ばす
     python morning_test.py --prod --no-open        # 09:00 の測定をしない
+    python morning_test.py --prod --no-kpaper      # K の記録をしない
     python morning_test.py --dry-run               # 手順だけ表示して終了
 
-■ ⛔ 運用との衝突について (必ず読むこと)
+■ ⛔ 注意
 
   ・**開始は 08:30 まで**。1(バッチ回し)に数分かかる。
-  ・実行中は `.\watch` / 発注サーバを **起動しない**(トークンは1つ)。
-  ・09:00 の測定は6秒ほど。**delay1 なので 09:00〜09:05 は元々損切りを
-    置かない**ため、この6秒を失っても実害はない(利確が寄り直後6秒で
-    1.0ATR に届くことはまずない)。
-  ・終わったら **すぐ `.\watch` を起動**すること。最後に画面に出す。
-  ・⚠ H の発注(`.\daily` → 発注ボタン)は **このスクリプトの前に**済ませる。
+  ・実行中は発注サーバを起動しない(kabu の有効トークンは1つ)。
+  ・⚠ 候補リストが要るので、**前日の引け後か当日の朝に `.\daily` を1回**
+    流しておくこと(holdout_selected_symbols.py が候補のソース)。
 """
 from __future__ import annotations
 
@@ -66,6 +71,8 @@ ap.add_argument("--open-at", type=str, default="09:00")
 ap.add_argument("--skip-rotate", action="store_true")
 ap.add_argument("--skip-preopen", action="store_true")
 ap.add_argument("--no-open", action="store_true", help="09:00 の測定をしない")
+ap.add_argument("--no-kpaper", action="store_true",
+                help="K のペーパー記録をしない")
 ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終了")
 args = ap.parse_args()
 
@@ -115,14 +122,15 @@ print(f"""
 {'=' * 74}
   接続先: {'★本番(18080)' if args.prod else 'デモ(18081)'}
   ⛔ 照会のみ。発注しません。
-  ⛔ 実行中は .\\watch / 発注サーバを起動しないこと(トークンは1つ)。
-  ⚠ H の発注は **これより前に** 済ませてください。
+  ★ 現行Hは実行しません(2026-08-16 決定)。**J/K のデータ取得に専念**します。
+    → `.\\watch` も発注も不要。トークンの取り合いが起きないので測定に集中できます。
 
   手順:
     1. バッチ回し   --rotate {args.rotate}      {'(スキップ)' if args.skip_rotate else ''}
     2. 気配ログ     〜{args.preopen_until}          {'(スキップ)' if args.skip_preopen else ''}
     3. ウォームUP   {args.warmup_at}
     4. 本番速度     {args.open_at}          {'(スキップ)' if args.no_open else ''}
+    5. K記録        4の直後       {'(スキップ)' if args.no_kpaper else ''}
 """, flush=True)
 
 _res: list[tuple] = []
@@ -164,6 +172,16 @@ if not args.no_open:
         _PY + ["check_board_limits.py"] + _P
         + ["--open", "--n", str(args.n)])))
 
+# ── 5. K のペーパー記録 (2026-08-16 ユーザー決定: 現行Hは止め、J/K に専念) ──
+#   ⛔ 発注しない。k_open_confirm.py は売買系を import すらしていない。
+#   4 の直後に走らせる(登録がまだウォームなので速い)。
+if not args.no_kpaper:
+    _cmd5 = _PY + ["k_open_confirm.py"] + _P + ["--now"]
+    if args.symbols_file:
+        _cmd5 += ["--symbols-file", args.symbols_file]
+    _res.append(("5. K記録", _run(
+        "5. K のペーパー記録 (k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
+
 print(f"""
 {'=' * 74}
 ■ 結果
@@ -173,9 +191,11 @@ for _s, _ok in _res:
 
 print(f"""
 {'=' * 74}
-▶▶ **いますぐ `.\\watch` を起動してください**
+▶▶ 終了。kabu の登録は解除済みです
 {'=' * 74}
-  kabu の登録は解除済みです。発注枠は空いています。
+  ★ 2026-08-16 のユーザー決定により **現行Hは実行しません**。
+    したがって `.\\watch` も不要です(建玉が無いので監視対象がない)。
+    トークンの取り合いも起きないので、測定に専念できます。
 
   ★ 見るところ:
     1. バッチ回し … **2周目が1周目より速いか**。速ければ kabu は購読を
@@ -186,4 +206,7 @@ print(f"""
        ⛔ **1ヶ月貯めるまで --verify を覗かないこと**(実質 in-sample になる)。
     4. 本番速度  … 場外の 6.3秒 と比べる。板寄せ直後で遅くなっていないか。
        5分遅れると K の優位は消えるので、**数十秒以内**なら合格。
+    5. K記録     … k_paper_<日付>.csv。**09:00に未寄の割合**を見ること。
+       バックテストの実測は15.7%。大きく違うならモデルの前提が崩れている。
+       ⛔ 発注していません。「その朝 K なら何を建てたか」の記録です。
 """)
