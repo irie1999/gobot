@@ -212,6 +212,39 @@ class KabuClient:
         except Exception as e:
             print(f"  ⚠ {symbol}: 銘柄登録(register)失敗 ({e})")
 
+    def register_many(self, symbols, exchange: int = EXCHANGE_TOSHO) -> dict:
+        """複数銘柄を **1回の PUT で** まとめて登録する。
+
+        ⛔ register() は1銘柄ずつ往復するので、41銘柄なら41回のHTTP往復に
+           なる。K(09:00の始値確認)は数秒が勝負なので、そこで数秒使うと
+           エッジがそのまま削れる。API の Symbols は配列なので1回で済む。
+
+        返り値: API のレスポンス(登録済み一覧)。失敗時は {}。
+        ⚠ 登録上限(50銘柄)を超えるぶんは API 側で弾かれる。何件受理されたかは
+           返り値の RegistList の長さで確認すること(黙って切られても
+           気づけるように、呼び出し側で必ず数えること)。
+        """
+        _new = [s for s in symbols if (str(s), exchange) not in self._registered]
+        if not _new:
+            return {}
+        url = f"{self.base_url}/kabusapi/register"
+        body = {"Symbols": [{"Symbol": str(s), "Exchange": exchange}
+                            for s in _new]}
+        try:
+            r = requests.put(url, headers=self._headers(with_content=True),
+                             json=body, timeout=self.timeout)
+            r.raise_for_status()
+            _data = r.json() if r.content else {}
+        except Exception as e:
+            print(f"  ⚠ 銘柄一括登録(register)失敗 ({len(_new)}件): {e}")
+            return {}
+        # 実際に受理されたものだけをキャッシュに入れる(上限で切られる可能性)
+        _ok = {str(x.get("Symbol")) for x in (_data.get("RegistList") or [])}
+        for s in _new:
+            if not _ok or str(s) in _ok:
+                self._registered.add((str(s), exchange))
+        return _data
+
     def unregister(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
         """銘柄登録を解除 (PUT /unregister)。登録上限(50銘柄)対策で使う。"""
         key = (str(symbol), exchange)
