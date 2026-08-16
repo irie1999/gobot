@@ -19180,6 +19180,96 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         except Exception as _de9:
             _diag = (f'<p style="color:#f87171;font-size:0.74rem">'
                      f'母集団の月別診断を作れませんでした: {_de9}</p>')
+
+        # ★★ 📉 合格が多い日は質が落ちるか (2026-08-16)
+        #   2026-07 は候補も合格も13ヶ月で最多クラスだったのに、予算400万で
+        #   9割を切り捨てて 147件しか建てられず、損益が伸びなかった。
+        #   「予算を増やせば取れた」と言えるかどうかは
+        #   **合格が多い日の1件あたりが落ちていないか**で決まる。
+        #   月単位の Spearman は -0.64(n=13)だったが、月は粗すぎる。
+        #   ⛔ ここは **日を1観測**として測る。取引単位で測ると同日相関で
+        #      実効サンプルを誤認する(18.13)。日に畳めばその問題は消える。
+        try:
+            _pop = _eh_all.get(_ehk) or []
+            _dg: dict = {}
+            for _t8 in _pop:
+                _d8 = str(_t8.get("entry_d_raw") or "")[:10]
+                if not _d8:
+                    continue
+                _q8 = float(_t8.get("qty") or 100) or 100
+                _r8 = _dg.setdefault(_d8, [0, 0.0])
+                _r8[0] += 1
+                # 100株換算にそろえる(資金均等は日で株数が変わるため)
+                _r8[1] += float(_t8.get("pnl") or 0) / _q8 * 100
+            _dl = sorted(_dg.items())
+            if len(_dl) >= 25:
+                _srt = sorted(_dl, key=lambda x: x[1][0])
+                _k5 = max(1, len(_srt) // 5)
+                _qs = [_srt[_i:_i + _k5] for _i in range(0, len(_srt), _k5)][:5]
+                _rw8 = ""
+                _cpts = []
+                for _qi, _q in enumerate(_qs):
+                    _n8 = sum(v[0] for _, v in _q)
+                    _p8 = sum(v[1] for _, v in _q)
+                    _lo8 = _q[0][1][0]
+                    _hi8 = _q[-1][1][0]
+                    _cpt = _p8 / max(1, _n8)
+                    _cpts.append(_cpt)
+                    # 日を1観測とした t (日ごとの 円/件 の平均・標準誤差)
+                    _dv = [v[1] / max(1, v[0]) for _, v in _q]
+                    _mu8 = sum(_dv) / len(_dv)
+                    _sd8 = (sum((x - _mu8) ** 2 for x in _dv)
+                            / max(1, len(_dv) - 1)) ** 0.5
+                    _se8 = _sd8 / (len(_dv) ** 0.5) if _dv else 0
+                    _t8v = _mu8 / _se8 if _se8 > 0 else 0.0
+                    _rw8 += (
+                        f'<tr><td style="text-align:left;padding:2px 8px">'
+                        f'Q{_qi + 1}　{_lo8}〜{_hi8}件/日</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{len(_q)}日</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{_n8:,}</td>'
+                        f'<td style="text-align:right;padding:2px 8px;'
+                        f'color:{"#4ade80" if _cpt >= 0 else "#f87171"};'
+                        f'font-weight:700">{_cpt:+,.0f}円</td>'
+                        f'<td style="text-align:right;padding:2px 8px">'
+                        f'{_t8v:+.2f}</td></tr>')
+                _mono = (all(_cpts[_i] >= _cpts[_i + 1]
+                             for _i in range(len(_cpts) - 1))
+                         and _cpts[0] - _cpts[-1] > 300)
+                _diag += (
+                    f'<details style="margin:0 0 10px">'
+                    f'<summary style="color:'
+                    f'{"#fbbf24" if _mono else "#64748b"};font-size:0.78rem;'
+                    f'cursor:pointer">📉 <b>合格が多い日は質が落ちるか</b>'
+                    + ('　⚠ <b>単調に落ちています</b>' if _mono
+                       else '　✅ 単調な低下はありません')
+                    + '（クリックで展開）</summary>'
+                    f'<p style="color:#94a3b8;font-size:0.74rem;margin:6px 0;'
+                    f'line-height:1.7">'
+                    f'その日の<b>合格件数</b>で日を5等分し、'
+                    f'<b>1件あたり(100株換算・予算で切る前)</b>を並べます。'
+                    f'<br>★ これは <b>「予算を増やせば取れたのか」</b>に直接答えます。'
+                    f'Q5(合格が多い日)が落ちているなら、'
+                    f'予算400万で切り捨てているのは<b>質の低い日</b>で、'
+                    f'増やしても効率は上がりません'
+                    f'（実際 watch を増やすと資本効率は 14.32%→12.4〜13.5% に下がる）。'
+                    f'<br>⛔ <b>日を1観測</b>として測っています。取引単位で測ると'
+                    f'同日相関で実効サンプルを誤認します(§18.13)。'
+                    f'<br>⚠ §18.13 では『同日発注数』を掃いて<b>候補ゼロ</b>でした'
+                    f'（ただし lss(逆指値)の母集団）。ここは K(+50bp合格)の母集団'
+                    f'なので別物です。単調でも n が小さいので確定ではありません。</p>'
+                    f'<table style="font-size:0.74rem;border-collapse:collapse">'
+                    f'<thead><tr style="color:#64748b">'
+                    f'<th style="text-align:left;padding:2px 8px">帯</th>'
+                    f'<th style="padding:2px 8px">日数</th>'
+                    f'<th style="padding:2px 8px">件数</th>'
+                    f'<th style="padding:2px 8px">円/件</th>'
+                    f'<th style="padding:2px 8px">t(日)</th>'
+                    f'</tr></thead><tbody>{_rw8}</tbody></table></details>')
+        except Exception as _de8:
+            _diag += (f'<p style="color:#f87171;font-size:0.74rem">'
+                      f'合格件数の帯別を作れませんでした: {_de8}</p>')
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" '
             f'class="detail-tab-pane{_act("eh" + _ehk)}">'
