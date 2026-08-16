@@ -40,7 +40,9 @@ ap.add_argument("--symbols", type=str, default="",
                 help="カンマ区切りの銘柄コード。省略時は --n 件を既定リストから")
 ap.add_argument("--n", type=int, default=41,
                 help="測る銘柄数(既定41 = 選定なしの1日の候補数)")
-ap.add_argument("--workers", type=int, default=8, help="並列数")
+ap.add_argument("--workers", type=int, default=2,
+                help="並列数。⛔ 上げても速くならない(kabu側でスループットが"
+                     "固定)。実測では 2〜16 で秒数が変わらず429だけ増えた")
 ap.add_argument("--serial", action="store_true",
                 help="直列でも測る(41件で2分以上かかるので既定OFF)")
 ap.add_argument("--sweep", type=str, default="2,4,6,8,12,16",
@@ -148,26 +150,37 @@ if _err2:
 _sw = [int(x) for x in str(args.sweep).split(",") if str(x).strip().isdigit()]
 if _sw:
     print("\n[4b] 並列数スイープ — 429 が出ない最大を探す")
-    print(f"     {'並列':>4}{'秒':>8}{'429回':>8}  判定")
+    print(f"     {'並列':>4}{'秒':>8}{'429回':>8}{'timeout':>8}{'失敗':>8}")
     cli.quiet_429 = True
-    _best = None
+    _rows = []
     for _w in _sw:
         cli.n_429 = 0
+        cli.n_timeout = 0
         _t = time.time()
-        with ThreadPoolExecutor(max_workers=_w) as ex:
-            list(ex.map(_one, _syms))
-        _el, _n4 = time.time() - _t, getattr(cli, "n_429", 0)
-        _ok = (_n4 == 0)
-        if _ok:
-            _best = _w
-        print(f"     {_w:>4}{_el:>8.2f}{_n4:>8}  "
-              + ("✅ 429なし" if _ok else "⚠ 429が出た(待ちが入る)"))
+        _r = list(ThreadPoolExecutor(max_workers=_w).map(_one, _syms))
+        _el = time.time() - _t
+        _n4, _nt = getattr(cli, "n_429", 0), getattr(cli, "n_timeout", 0)
+        _ng = sum(1 for x in _r if x[3] is not None)
+        _rows.append((_w, _el, _n4, _nt, _ng))
+        print(f"     {_w:>4}{_el:>8.2f}{_n4:>8}{_nt:>8}{_ng:>8}")
     cli.quiet_429 = False
-    if _best:
-        print(f"     → **429 が出ない最大は 並列{_best}**。本番はこれ以下で")
-    else:
-        print("     → どの並列数でも429。**直列に近い運用が必要**か、"
-              "PUSH配信(WebSocket)を検討")
+    # ⛔ 判定基準を『429がゼロ』にしてはいけない(2026-08-17 に読み違えた)。
+    #   実測では 並列2→16 で **秒数がほぼ変わらず(6.1〜7.6s)、429だけが
+    #   8→41回に増えた**。kabu 側でスループットが固定されているので、
+    #   並列を上げても1秒も速くならない。
+    #   → 正しい基準は「**同じ速さなら 429/失敗が最少の並列数**」。
+    if _rows:
+        _tmin = min(r[1] for r in _rows)
+        # 最速から10%以内を「同じ速さ」とみなし、その中で429+失敗が最少
+        _cand = [r for r in _rows if r[1] <= _tmin * 1.10]
+        _pick = min(_cand, key=lambda r: (r[2] + r[4], r[0]))
+        print(f"\n     最速 {_tmin:.2f}s / スループット "
+              f"約 {len(_syms) / max(_tmin, 1e-9):.1f}件/秒")
+        if max(r[1] for r in _rows) <= _tmin * 1.3:
+            print("     ⛔ **並列を上げても速くなっていません**"
+                  "(kabu側でスループットが固定)。上げるだけ429が増えます")
+        print(f"     → **推奨は 並列{_pick[0]}** "
+              f"({_pick[1]:.2f}s / 429 {_pick[2]}回 / 失敗 {_pick[4]}件)")
 
 # ── 中身の確認 (始値が取れているか) ────────────────────────────────────────
 print("\n[5] 取れた中身 (先頭5件)")

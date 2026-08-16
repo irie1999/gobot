@@ -177,9 +177,25 @@ class KabuClient:
         ここで待って再試行する。最終的に失敗したら raise_for_status で送出する。
         """
         last = None
+        last_exc = None
         for i in range(retries):
-            r = requests.get(url, headers=self._headers(),
-                             params=params, timeout=self.timeout)
+            try:
+                r = requests.get(url, headers=self._headers(),
+                                 params=params, timeout=self.timeout)
+            except requests.exceptions.RequestException as _re:
+                # ⛔ **タイムアウト/接続断もリトライする**(2026-08-17 追加)。
+                #    以前は 429 しか再試行しておらず、read timeout はそのまま
+                #    送出していた。実測(41銘柄・並列8)で **24件が read timeout**
+                #    になり、その銘柄は丸ごと取れなかった。K は 09:00 の始値を
+                #    全候補ぶん取れないと判定できないので、ここで落ちるのは致命的。
+                last_exc = _re
+                self.n_timeout = getattr(self, "n_timeout", 0) + 1
+                wait = 0.5 * (i + 1)
+                if not getattr(self, "quiet_429", False):
+                    print(f"  ⚠ 通信エラー: {wait:.1f}秒待って再試行 "
+                          f"({i+1}/{retries}) {url} — {_re.__class__.__name__}")
+                time.sleep(wait)
+                continue
             if r.status_code != 429:
                 r.raise_for_status()
                 return r.json()
@@ -193,9 +209,11 @@ class KabuClient:
                 print(f"  ⚠ 429 レート制限: {wait:.1f}秒待って再試行 "
                       f"({i+1}/{retries}) {url}")
             time.sleep(wait)
-        # ここに来たら最後まで 429。呼び出し側で扱えるよう送出。
+        # ここに来たら最後まで 429 か 通信エラー。呼び出し側で扱えるよう送出。
         if last is not None:
             last.raise_for_status()
+        if last_exc is not None:
+            raise last_exc
         raise RuntimeError(f"GET 失敗: {url}")
 
     # ── 情報取得 (GET) ───────────────────────────────────────
