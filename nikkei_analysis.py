@@ -10670,8 +10670,11 @@ function switchTbd(id, tab) {{
             #      発注すると5分遅れる。その差が『確認できる利点』を上回るかを測る。
             #   ⚠ 損切り遅延は 0。成行なので約定価格が確定しており、delay1 の
             #      機構的な根拠(18.9)が当てはまらない。
+            # ★ 25/75 を足した(2026-08-15)。選定を外すと候補が3倍になるので、
+            #   閾値を上げても件数が確保できる。50 が頂点かどうかは母集団が
+            #   変わると変わりうる(sm/tm は実際に変わった)。端で止めないこと。
             _gaps = [float(x) for x in str(os.environ.get(
-                "LSS_H_CONFIRM_GAPS", "0,50,100")).split(",")
+                "LSS_H_CONFIRM_GAPS", "0,25,50,75,100")).split(",")
                 if str(x).strip().lstrip("+-").replace(".", "").isdigit()]
             # 09:05約定版(保守側の下限)。ユーザー方針で「5分遅れることはない」と
             # 確定したので既定OFF(2026-08-15)。閾値を増やして掃くときに変種が
@@ -10829,6 +10832,21 @@ function switchTbd(id, tab) {{
                         _eqsl4 = "損切なし" if _eqsm >= 90 else f"sm{_eqsm:g}"
                         _hvars.append((f"{_eqb4}{_eqsl4}", 0, True,
                                        _eqd4, "fill", _eqg4, None, _eqsm))
+                    # ★★ ギャップ閾値を **推奨の delay/sm の上で**掃く
+                    #   (2026-08-15)。上の `H指値{G}bp寄指` は delay/sm を
+                    #   持たないので、基準(d4sm0.5)とつまみが3つずれて
+                    #   『比較不能』になり、閾値だけを判定できなかった。
+                    #   ⚠ 選定を外すと候補が3倍になるので、閾値を上げても
+                    #     件数が確保できる。50 が頂点かは母集団依存
+                    #     (sm/tm は実際に母集団で変わった)。
+                    _gsl = ("" if not _eqsm2 else
+                            ("損切なし" if _eqsm2 >= 90 else f"sm{_eqsm2:g}"))
+                    for _eqg5 in _gaps:
+                        if abs(_eqg5 - _eqg4) < 1e-9:
+                            continue          # 基準と同じ
+                        _hvars.append((
+                            f"H指値{_eqg5:+.0f}bp寄指d{_eqd4}{_gsl}",
+                            0, True, _eqd4, "fill", _eqg5, None, _eqsm2))
                     # ★★ ATR期間を掃く (2026-08-15 の監査で最後に残った継承値)
                     #   ⛔ 14 は **スイング戦略(10日保有)からの継承**。sm/tm は
                     #      すべて ATR 倍率なので、この期間が損切り・利確の
@@ -16715,12 +16733,24 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         "dedup", "dedup_post"]
 
             def _n_diff(_nm: str):
-                """方式が同じなら違うつまみの一覧、違えば None。"""
+                """方式が同じなら違うつまみの一覧、違えば None。
+
+                ★ ギャップ閾値は **両方が『H指値Nbp寄指』のときだけ つまみ**
+                  として扱う(2026-08-15)。片方が E/H のような別方式なら
+                  比較対象にしない。以前は常に方式identityにしていたので、
+                  +0bp / +100bp が監査ボードに出ず、閾値だけ判定できなかった。
+                """
                 _kk = _knobs(_nm)
-                for _f in ("_gap", "_eq", "_auc"):
+                for _f in ("_eq", "_auc"):
                     if _kk[_f] != _bkn[_f]:
                         return None
-                return [_f for _f in _KN_KEYS if _kk[_f] != _bkn[_f]]
+                _both_gap = (_kk["_gap"] != "—" and _bkn["_gap"] != "—")
+                if not _both_gap and _kk["_gap"] != _bkn["_gap"]:
+                    return None
+                _dl = [_f for _f in _KN_KEYS if _kk[_f] != _bkn[_f]]
+                if _both_gap and _kk["_gap"] != _bkn["_gap"]:
+                    _dl = ["gap"] + _dl
+                return _dl
             # ★ 読めるのは **ちょうど1つだけ違う行**。2つ以上違う行は
             #   古い土台(sm0.1 など)で作った残りで、判定に使えない。
             #   ⛔ ただし **黙って消さない**。件数だけ必ず出す。消すと
@@ -16748,7 +16778,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "cap": "1銘柄の金額上限",
                              "top": "上位N絞り", "fill": "余りを配り切る",
                              "dedup": "1銘柄1件(予算を割る前に畳む)",
-                             "dedup_post": "◆1銘柄1件(株数決定後に落とす)"}
+                             "dedup_post": "◆1銘柄1件(株数決定後に落とす)",
+                             "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_kn(_f, _v3):
                         if _f == "cap":
@@ -16759,8 +16790,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "なし" if not _v3 else f"上位{_v3:g}"
                         if _f in ("fill", "dedup", "dedup_post"):
                             return "する" if _v3 else "しない"
+                        if _f == "gap":
+                            return f"{_v3}"
                         return f"{_v3:g}"
                     _dfs = [_f for _f in _KN_KEYS if _kk2[_f] != _bkn[_f]]
+                    if _kk2["_gap"] != _bkn["_gap"]:
+                        _dfs = ["gap"] + _dfs
+                        _bkn.setdefault("gap", _bkn["_gap"])
+                        _kk2["gap"] = _kk2["_gap"]
+                        _bkn["gap"] = _bkn["_gap"]
                     _kn = " / ".join(
                         f"{_LBLN[_f]} {_fmt_kn(_f, _bkn[_f])}"
                         f"→<b>{_fmt_kn(_f, _kk2[_f])}</b>" for _f in _dfs) \
