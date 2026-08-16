@@ -362,7 +362,8 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     #    **どの銘柄がどの日に落ちたか**を残す。レポートの H ペインに出すので
     #    コンソールのスクロールバックを探さなくてよい。
     _sk_syms: dict = {k: [] for k in _sk}
-    _n_late: dict = {}     # 09:00に寄らずスキップした件数(確認方式のみ)
+    _n_late: dict = {}     # 09:00に寄らなかった件数(確認方式のみ)
+    _late_hm: dict = {}    # その寄り時刻の分布 (HH:MM -> 件数)
     _SK_CAP = 400                     # 1理由あたりの保持上限(HTMLが肥大しない程度)
     # H の約定の内訳。**ライブでの信頼度がまったく違う**ので必ず出す:
     #   板寄せ  = 寄りが既に前日終値以上 → 9:00の板寄せで前日終値以上の値がつく。
@@ -509,9 +510,14 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             #   ⛔ **バックテストとライブを必ず揃える**(18.9)。ここを外すと
             #      「レポートには居るのに実運用では建てられない」ズレになる。
             #   確認方式だけに掛ける(前夜指値は寄らなくても指値が板にある)。
-            if (_SKIP_LATE_OPEN and _mode == "confirm0" and _no_open_bar):
-                ok = False
+            # ★ 2026-08-16 変更: ここで落とさず **印を付けて通す**。
+            #   落とすのは後処理(_size_equal_by_day)に任せる。こうすると
+            #   「捨てているぶんが何時に寄って、いくらだったか」を同じ実行の
+            #   中で測れる(遅寄り込みの変種も後処理だけで作れる)。
+            _is_late = (_mode == "confirm0" and _no_open_bar)
+            if _is_late:
                 _n_late[key] = _n_late.get(key, 0) + 1
+                _late_hm[_first_hm] = _late_hm.get(_first_hm, 0) + 1
             if _no_open_bar and _at_open and _dly > 0:
                 _dly -= 1
             if not ok or ep <= 0:
@@ -588,9 +594,17 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                 _t = pd.Timestamp(_x).strftime("%H:%M")
             except Exception:
                 pass
-            out[key].extend(_mk(s, order_p, ep, float(xp),
-                                _REASON.get(why, why), _t,
-                                pc, atr, _smv, _tmv, qty, key, _sa, o1) for s in _srcs)
+            for _s0 in _srcs:
+                _tr = _mk(_s0, order_p, ep, float(xp),
+                          _REASON.get(why, why), _t,
+                          pc, atr, _smv, _tmv, qty, key, _sa, o1)
+                # ★ 09:00 に寄らなかった銘柄日に印を付ける(2026-08-16)。
+                #   落とすのは後処理(_size_equal_by_day)。ここで落とすと
+                #   「捨てているぶんがいくらだったか」を測れない。
+                if _is_late:
+                    _tr["late_open"] = True
+                    _tr["open_hm"] = _first_hm
+                out[key].append(_tr)
     _skip = sum(_sk.values())
     log("[E/H] 約定 " + " / ".join(
         f"{k}={len(out[k]):,}" for k in ["E"] + _HKEYS)
@@ -598,13 +612,21 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
         + f" / データ不足 {_skip:,}")
     log("[E/H] データ不足の内訳: "
         + " / ".join(f"{k} {v:,}" for k, v in _sk.items() if v))
+    if _late_hm:
+        _tot_hm = sum(_late_hm.values())
+        log("[E/H] 09:00に寄らなかった銘柄日の **寄り時刻** (変種ぶん合算): "
+            + " / ".join(f"{_h} {_c:,}件({_c / max(1, _tot_hm) * 100:.0f}%)"
+                         for _h, _c in sorted(_late_hm.items(),
+                                              key=lambda x: -x[1])[:8]))
     if _n_late:
         _tot_late = sum(_n_late.values())
         _per = max(_n_late.values())
-        log(f"[E/H] 09:00に寄らずスキップ: 変種あたり最大 {_per:,}銘柄日 "
+        log(f"[E/H] 09:00に寄らなかった: 変種あたり最大 {_per:,}銘柄日 "
             f"(全変種計 {_tot_late:,})。K は 09:00 に件数を確定させないと"
-            f"サイズを決められないので建てない(ライブは OpeningPriceTime で同判定)。"
-            f"建てたいなら set LSS_SKIP_LATE_OPEN=0")
+            f"サイズを決められないので **既定では建てない**"
+            f"(ライブは OpeningPriceTime で同判定)。"
+            f"⚠ 印を付けて通してあるので、"
+            f"レポートの『…遅寄り込み』の行でいくら捨てているか測れる")
     for _k in _HKEYS:
         _ht = sum(_hfill[_k].values())
         if not _ht:
