@@ -11772,7 +11772,8 @@ function switchTbd(id, tab) {{
                   f"約定数で割るのは先読み。`H寄り確認`(09:00に見てから発注)"
                   f"だけが約定数で割ってよい。比較用に『約定数割』も1本出す"
                   f"\n      ★ 方式: "
-                  + ("**09:00確認**(始値を見てから発注 / 約定09:05)"
+                  + ("**09:00確認**(始値を見てから発注 / 約定は**始値**。"
+                     "09:05版の下限は set LSS_H_CONFIRM_SLOW=1)"
                      if _EQ_METHOD_CONF else "**前夜 寄付指値**(約定は寄り値)")
                   + f" ← set LSS_EQ_METHOD="
                   + ("limit" if _EQ_METHOD_CONF else "confirm")
@@ -17216,6 +17217,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "top": "上位N絞り", "fill": "余りを配り切る",
                              "dedup": "1銘柄1件(予算を割る前に畳む)",
                              "dedup_post": "◆1銘柄1件(株数決定後に落とす)",
+                             "div": "予算を割る分母",
+                             "watch": "09:00に見る銘柄数(登録上限)",
                              "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_kn(_f, _v3):
@@ -17229,7 +17232,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "する" if _v3 else "しない"
                         if _f == "gap":
                             return f"{_v3}"
+                        if _f == "div":
+                            return "約定数割(先読み)" if _v3 else "候補数割"
+                        if _f == "watch":
+                            return "無制限" if not _v3 else f"{_v3:g}件"
                         return f"{_v3:g}"
+                    # ⛔ つまみを足したのに _LBLN へ入れ忘れると KeyError で
+                    #    **監査ボードが丸ごと落ちる**(2026-08-16 に watch で発生)。
+                    #    落とさずに気づけるよう、名前が無ければキー名で代替する。
+                    _miss = [_f for _f in _KN_KEYS if _f not in _LBLN]
+                    for _f in _miss:
+                        _LBLN[_f] = f"⚠{_f}(表示名 未登録)"
                     _dfs = [_f for _f in _KN_KEYS if _kk2[_f] != _bkn[_f]]
                     if _kk2["_gap"] != _bkn["_gap"]:
                         _dfs = ["gap"] + _dfs
