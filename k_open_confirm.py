@@ -132,6 +132,9 @@ _sig_csv = args.signals_csv or f"k_signals_{_dt.date.today():%Y%m%d}.csv"
 # 銘柄 -> ATR。K の OCO は **実約定価格(始値)** を基準に置くので、
 # 損切り/利確は 09:00 に始値が出て初めて確定する。
 _ATR: dict = {}
+# 銘柄 -> 流動性(直近120日の平均売買代金)。**読む順=発注順**を決める。
+# ⛔ ここが空だと --max-symbols が銘柄コード順に切ってしまう(2026-08-17)。
+_SIG_LIQ: dict = {}
 
 # ══════════════════════════════════════════════════════════════════════
 #  --collect : 今日のシグナルだけを収集する (kabu を使わない)
@@ -205,10 +208,13 @@ if args.collect:
             continue
         _cd = str(_sg.get("symbol") or _c).upper() \
             .removesuffix(".T").split(".")[0]
+        # ⛔⛔ liquidity を落としていた(2026-08-17)。これが無いと poll 側で
+        #    流動性順に並べられず、--max-symbols が **銘柄コード順**に切ってしまう。
+        #    実際 7936 アシックス(+204bp・4戦略)を読まずに取り逃した。
+        #    発注順は流動性降順(§18.21)なので、ここは必ず持ち回す。
         _out.append({"symbol": _cd, "name": _n, "strategy": _st,
                      "order_price": _sg.get("order_price", 0),
-                     "prev_close": _sg.get("prev_close",
-                                           _sg.get("close_prev", 0)),
+                     "liquidity": _sg.get("liquidity", 0),
                      "atr": _sg.get("atr", 0)})
     # 重複銘柄は残す(複数戦略で出る)。登録は銘柄単位で重複排除する。
     with open(_sig_csv, "w", newline="", encoding="utf-8-sig") as f:
@@ -251,6 +257,12 @@ elif Path(_sig_csv).exists():
         # 同じ銘柄が複数戦略で出る。ATR は銘柄固有なので最初の非ゼロを採る。
         if _a0 > 0 and not _ATR.get(_s0):
             _ATR[_s0] = _a0
+        try:
+            _l0 = float(r.get("liquidity") or 0)
+        except Exception:
+            _l0 = 0.0
+        if _l0 > 0 and _l0 > _SIG_LIQ.get(_s0, 0):
+            _SIG_LIQ[_s0] = _l0
         if _s0 not in _syms:
             _syms.append(_s0)
     print(f"[候補] {_sig_csv} から **今日のシグナル {len(_syms):,}銘柄**",
@@ -267,6 +279,40 @@ else:
     _syms = _codes_from(_p)
     if not _syms:
         sys.exit(f"[error] {_p} から銘柄を拾えません(0件)")
+
+# ── 流動性(=読む順=発注順)を確定させる ────────────────────────────────
+# ⛔⛔ **--max-symbols で切る前に**並べ替えること。以前は切った後に
+#    並べ替えていて意味が無く、実質「銘柄コードの小さい順」で読んでいた。
+#    2026-08-17 に 7936 アシックス(+204bp・4戦略)を取り逃して発覚。
+_liq: dict = dict(_SIG_LIQ)
+if not _liq:
+    for _lf in ("lss_trades_K.csv", "lss_trades_H.csv", "lss_trades.csv"):
+        if not Path(_lf).exists():
+            continue
+        try:
+            for r in _csv.DictReader(open(_lf, encoding="utf-8-sig")):
+                _s = str(r.get("symbol") or "").upper() \
+                    .removesuffix(".T").split(".")[0]
+                _v = float(r.get("liquidity") or 0)
+                if _s and _v > _liq.get(_s, 0):
+                    _liq[_s] = _v
+        except Exception:
+            pass
+        if _liq:
+            print(f"  [並び] {_lf} の liquidity で代用します"
+                  f"(k_signals に列が無い古い版)", flush=True)
+            break
+if _liq:
+    # 流動性が取れない銘柄は最後尾(板の薄さが分からないものを上位に入れない / §18.21)
+    _syms.sort(key=lambda s: (-_liq.get(s, 0.0), s))
+    print(f"  [並び] **流動性(売買代金)降順**に並べ替えました"
+          f"(流動性あり {sum(1 for s in _syms if _liq.get(s, 0) > 0):,}"
+          f"/{len(_syms):,}銘柄)", flush=True)
+else:
+    print(f"  ⛔ liquidity が1件も取れません。**銘柄コード順のまま**読みます。"
+          f"\n     --collect を最新版で回し直してください"
+          f"(古い k_signals は liquidity 列を持っていません)", flush=True)
+
 if args.max_symbols > 0 and len(_syms) > args.max_symbols:
     print(f"  ⚠ 候補 {len(_syms):,}銘柄 を --max-symbols {args.max_symbols} で"
           f"切ります（{len(_syms) - args.max_symbols:,}銘柄は読みません）",
@@ -278,21 +324,6 @@ _jpool: set = set()
 if Path(args.pool).exists():
     _jpool = set(_codes_from(args.pool))
 
-# 流動性(発注順)。無ければ候補ファイルの出現順を使う(=既に流動性降順のはず)
-_liq: dict = {}
-for _f in ("lss_trades_K.csv", "lss_trades_H.csv", "lss_trades.csv"):
-    if not Path(_f).exists():
-        continue
-    try:
-        for r in _csv.DictReader(open(_f, encoding="utf-8-sig")):
-            _s = str(r.get("symbol") or "").upper().removesuffix(".T").split(".")[0]
-            _v = float(r.get("liquidity") or 0)
-            if _s and _v > _liq.get(_s, 0):
-                _liq[_s] = _v
-    except Exception:
-        pass
-    if _liq:
-        break
 
 try:
     from kabu_api import KabuClient
