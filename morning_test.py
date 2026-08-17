@@ -116,6 +116,15 @@ ap.add_argument("--poll-every", type=int, default=10,
 ap.add_argument("--force-collect", action="store_true",
                 help="k_signals_<日付>.csv が既にあっても作り直す")
 ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終了")
+# ★★ 実発注 (2026-08-17)。既定OFF。付けない限り手順5は記録だけ。
+ap.add_argument("--execute", action="store_true",
+                help="⚠ 手順5で **実発注する**(J)。既定は記録のみ")
+ap.add_argument("--budget", type=float, default=50.0,
+                help="--execute の予算(万円)。既定50万 = 少額から始める")
+ap.add_argument("--max-notional", type=float, default=0.0,
+                help="--execute の発注総額ハード上限(万円)。0=--budget と同じ")
+ap.add_argument("--stop-delay-bars", type=int, default=4,
+                help="発注後に案内する watcher の損切り遅延(J は 4)")
 args = ap.parse_args()
 
 _P = ["--prod"] if args.prod else []
@@ -158,14 +167,26 @@ def _run(step: str, cmd: list[str]) -> bool:
     return _ok
 
 
+# ⛔ f-string の式に **バックスラッシュを入れられない**(Python 3.11)。
+#   `.\watch` のような文字列は必ず先に作ってから埋め込む。
+_HDR_MODE = ("🚀 手順5で **実発注します**(それ以外は照会のみ)" if args.execute
+             else "⛔ 照会のみ。発注しません。")
+_HDR_NOTE = ("→ 終わったら **すぐ watcher を起動**(--stop-delay-bars "
+             f"{args.stop_delay_bars})。" if args.execute
+             else "→ `.\\watch` も発注も不要。"
+                  "トークンの取り合いが起きないので測定に集中できます。")
+_TAIL_LBL = "J発注" if args.execute else "K記録"
+_TAIL_NOTE = ("★ ordered / order_limit 列に実発注が残ります(`.\\fills` で突合)"
+              if args.execute else "⛔ 発注していません。記録だけです")
+
 print(f"""
 {'=' * 74}
 ■ 朝の測定 — {_dt.date.today()} {'(dry-run)' if args.dry_run else ''}
 {'=' * 74}
   接続先: {'★本番(18080)' if args.prod else 'デモ(18081)'}
-  ⛔ 照会のみ。発注しません。
+  {_HDR_MODE}
   ★ 現行Hは実行しません(2026-08-16 決定)。**J/K のデータ取得に専念**します。
-    → `.\\watch` も発注も不要。トークンの取り合いが起きないので測定に集中できます。
+    {_HDR_NOTE}
 
   手順:
     0. シグナル収集 kabu不要      {'(スキップ)' if args.no_kpaper else ''}
@@ -267,10 +288,20 @@ if not args.no_kpaper:
                 "--every", str(args.poll_every), "--now-polls", "999"])
     if args.symbols_file:
         _cmd5 += ["--symbols-file", args.symbols_file]
-    _res.append(("5. K記録", _run(
-        f"5. K のペーパー記録 — {args.k_warm_at} に空読み → {args.open_at} に"
-        f"本番 → {args.poll_every}秒ごとに{args.poll_until}までポーリング "
-        f"(k_paper_<日付>.csv / ⛔発注しない)", _cmd5)))
+    # ★★ 実発注 (2026-08-17)。--execute のときだけ。既定は記録のみ。
+    #   少額から始める。--budget も --max-notional も万円。
+    if args.execute:
+        _cmd5 += ["--execute", "--budget", f"{args.budget:g}",
+                  "--max-notional",
+                  f"{(args.max_notional or args.budget):g}"]
+    _res.append((("5. J発注" if args.execute else "5. K記録"), _run(
+        f"5. {'J の実発注' if args.execute else 'K のペーパー記録'} — "
+        f"{args.k_warm_at} に空読み → {args.open_at} に本番 → "
+        f"{args.poll_every}秒ごとに{args.poll_until}までポーリング"
+        + (f" / 🚀 **実発注** 予算{args.budget:g}万 "
+           f"(上限{(args.max_notional or args.budget):g}万)"
+           if args.execute else " (k_paper_<日付>.csv / ⛔発注しない)"),
+        _cmd5)))
 
 print(f"""
 {'=' * 74}
@@ -283,9 +314,18 @@ print(f"""
 {'=' * 74}
 ▶▶ 終了。kabu の登録は解除済みです
 {'=' * 74}
-  ★ 2026-08-16 のユーザー決定により **現行Hは実行しません**。
-    したがって `.\\watch` も不要です(建玉が無いので監視対象がない)。
-    トークンの取り合いも起きないので、測定に専念できます。
+""" + (f"""  🚀 **J を実発注しました**（予算 {args.budget:g}万）。
+
+  ▶▶ **いますぐ これを起動してください**（起動しないと引けまで持ちっぱなし）:
+
+      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars}
+
+    ⛔ J は delay{args.stop_delay_bars}。バックテストとライブを必ず揃える(§18.9)。
+    ⛔ 15:30(大引け)まで止めないこと。途中で切ると決済を取りこぼします(§18.4)。
+
+  ▶ 引け後: `.\\fills` で実約定と突合 → **実滑りがここで初めて測れます**。
+""" if args.execute else f"""  ★ **発注していません**（記録のみ）。出すなら `.\\jorder`。
+    `.\\watch` も不要です(建玉が無いので監視対象がない)。""") + f"""
 
   ★ 見るところ:
     1. バッチ回し … **2周目が1周目より速いか**。速ければ kabu は購読を
@@ -304,9 +344,9 @@ print(f"""
     5(本番読み) … ★ここが最重要。09:00 の1周が **何秒で終わるか**。
        候補299銘柄=6バッチをウォームで読めるなら 6.5件/秒 ≒ 46秒の見込み。
        数分かかるなら K は成立しない(5分遅れで優位が半減)。
-    5. K記録     … k_paper_<日付>.csv。見るのは3つ:
+    5. {_TAIL_LBL}     … k_paper_<日付>.csv。見るのは3つ:
        ①**09:00に未寄の割合**(BTの実測15.7%と合うか)
        ②**グループの一覧**(何時に何件寄ったか) ← 「即時」(§18.41)の実データ
        ③**1周の読込秒数**が間隔(10秒)に収まっているか
-       ⛔ 発注していません。「その朝 K なら何を建てたか」の記録です。
+       {_TAIL_NOTE}
 """)

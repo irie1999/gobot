@@ -1,18 +1,37 @@
-r"""k_open_confirm.py — K(09:00確認方式)を **記録だけ** する (ペーパー)
+r"""k_open_confirm.py — J(09:00確認方式)の記録 と 実発注
 
-⛔⛔ **発注機能を持たせていません**。このファイルは kabu の
-   register / board / unregister しか呼びません。売買系の関数は import も
-   していないので、引数を間違えても発注は起こりません。
+⛔ **既定は記録だけ**。`--execute` を付けない限り1件も発注しません
+   (kabu_api を dry_run で作るので、発注系は内容を print するだけ)。
+   本番口座に出すには `--execute --prod` の **両方**が必要です。
 
-■ 何をするか (2026-08-16 ユーザー決定: 現行Hは止め、明日から J/K のデータ取得に専念)
+■ 何をするか
 
     08:5x  候補を50件バッチで登録し、**1回空読み**してウォームにする
-    09:00  全候補の /board を読み、**始値**を取る
-           → 前日終値比のギャップを計算し、+50bp 以上を合格とする
-           → 合格件数が確定 → 予算400万 ÷ 件数 で株数を決める
+    09:00〜 --poll で回し続け、**寄った銘柄から順に**始値を取る
+           → 前日終値比のギャップが +50bp 以上なら合格
+           → そのグループに配って(第1グループ=予算×g1 / 以降=残り予算)
+           → --execute なら **保護指値売り @ 始値×(1-50bp)** で即発注
            → k_paper_<日付>.csv に全部書く
 
-  これが K の朝の手順そのもの。**発注だけしない**版です。
+  ★ 全部が寄るのを待ちません。1分待つと -15.8bp 逃げます(§18.44)。
+
+■ 発注の作り (§18.37 改訂 / §18.38)
+
+  ・注文は **指値売り**。⛔ 成行にしない — 板が飛んだときに掴まされる。
+    指値売りは「指値以上」で約定するので、板が正常なら成行と同じ値で即約定し、
+    急落しているときだけ約定しない。
+  ・決済は `lss_exit_watcher` が **実約定価格基準**で OCO を組み直す。
+    そのため ordered_signals_lss.csv に atr / sm / tm を書く
+    (entry_mode="auction" = 実約定価格基準で再計算する印)。
+  ・⚠ watcher は **--stop-delay-bars 4** で起動すること(J は delay4)。
+    バックテストとライブを必ず揃える(§18.9 の鉄則)。
+
+■ 少額で試すとき
+
+    python k_open_confirm.py --prod --poll --execute --budget 50 --max-notional 50
+
+  --budget = 配分に使う予算 / --max-notional = 発注総額のハード上限(別枠)。
+  どちらも万円。超えたらそこで発注を止めます。
 
 ■ 母集団は **J に揃える** (2026-08-17 変更)
 
@@ -32,16 +51,14 @@ r"""k_open_confirm.py — K(09:00確認方式)を **記録だけ** する (ペ�
   ⚠ in_j は **ペア単位(銘柄×戦略)** で判定する。「その銘柄が cumul にあるか」
     ではない。cumul に A7 だけ載っている銘柄が MACDTF でシグナルを出しても
     J は建てないので、銘柄単位だと過大評価になる(2026-08-17 に 7936 で発覚)。
-  ⚠ in_j は **ペア単位(銘柄×戦略)** で判定する。「その銘柄が cumul にあるか」
-    ではない。cumul に A7 だけ載っている銘柄が MACDTF でシグナルを出しても
-    J は建てないので、銘柄単位だと過大評価になる(2026-08-17 に 7936 で発覚)。
 
 ■ 使い方
 
-    python k_open_confirm.py --prod                  # 08:5x に起動 → 09:00 に読む
-    python k_open_confirm.py --prod --now            # いますぐ1回読む(動作確認用)
-    python k_open_confirm.py --prod --gap-bp 50 --budget 400
-    python k_open_confirm.py --symbols-file lss_trades_K.csv
+    python k_open_confirm.py --collect                    # 前夜/早朝: 今日の候補を作る
+    python k_open_confirm.py --prod --poll                 # 記録のみ(発注しない)
+    python k_open_confirm.py --prod --poll --execute \
+           --budget 50 --max-notional 50                  # ★少額で実発注
+    python k_open_confirm.py --prod --poll --now --now-polls 1   # 動作確認(場中でも可)
 
 ■ ⚠ 注意
 
@@ -66,7 +83,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ap = argparse.ArgumentParser(
-    description="K(09:00確認方式)を記録だけする。⛔発注しない")
+    description="J(09:00確認方式)の記録と実発注。⛔ --execute を付けない限り発注しない")
 ap.add_argument("--prod", action="store_true", help="本番(18080)。既定はデモ(18081)")
 ap.add_argument("--symbols-file", type=str, default="",
                 help="候補のソース(既定 holdout_selected_symbols.py)")
@@ -88,6 +105,15 @@ ap.add_argument("--guard-bp", type=float, default=300.0,
                 #    ValueError: badly formed help string で **起動すらしない**。
                 #    リテラルの % は必ず %% と書くこと(2026-08-16 に実際に落ちた)。
                 help="これを超えるギャップは見送り(現行の±3%%ガード)")
+# ★★ 実発注 (2026-08-17)。既定OFF。付けない限り1件も発注しない。
+ap.add_argument("--execute", action="store_true",
+                help="⚠ **実発注する**。既定は記録のみ。--prod を付けない限りデモ口座")
+ap.add_argument("--limit-slip-bp", type=float, default=50.0,
+                help="保護指値の下げ幅(bp)。始値×(1-これ) で売る。"
+                     "成行にしないのは板が飛んだときに掴まされないため(18.38)")
+ap.add_argument("--max-notional", type=float, default=0.0,
+                help="発注総額の上限(万円)。0=--budget と同じ。"
+                     "**予算とは別のハード上限**で、超えたらそこで発注を止める")
 ap.add_argument("--budget", type=float, default=400.0, help="予算(万円)")
 ap.add_argument("--max-yen", type=float, default=50.0, help="1銘柄の上限(万円)")
 ap.add_argument("--max-lot", type=int, default=10, help="1銘柄の最大単元")
@@ -126,7 +152,9 @@ args = ap.parse_args()
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          "prev_close", "open_p", "open_time", "current_price", "gap_bp",
          "late", "pass_gap", "guard_ng", "lots_k", "yen_k",
-         "atr", "stop_k", "target_k"]
+         "atr", "stop_k", "target_k",
+         # ★ 実発注したか(--execute)。dry-run では 0 のまま。
+         "ordered", "order_limit"]
 
 
 # ── 候補の読み込み ─────────────────────────────────────────────────────
@@ -408,11 +436,20 @@ except Exception as _e:
     sys.exit(f"[error] kabu_api を読めません: {_e}")
 
 _out_path = args.out or f"k_paper_{_dt.date.today():%Y%m%d}.csv"
+# ★ 発注するかどうかを **見出しで言い切る**。取り違えたら実弾なので、
+#   dry-run と実発注が同じ見た目になってはいけない。
+_mode_note = (
+    (f"🚀 **実発注します**（{'本番口座 18080' if args.prod else 'デモ口座 18081'}"
+     f" / 総額上限 {(args.max_notional or args.budget):.0f}万"
+     f" / 保護指値 始値-{args.limit_slip_bp:.0f}bp）"
+     + ("" if args.prod else "  ※ --prod が無いのでデモです"))
+    if args.execute else
+    "⛔ **発注しません**（記録のみ。出すなら --execute）")
 print(f"""
 {'=' * 74}
-■ K(09:00確認方式) の記録 — {_dt.date.today()}
+■ J(09:00確認方式) — {_dt.date.today()}
 {'=' * 74}
-  ⛔ **発注しません**(register / board / unregister のみ)
+  {_mode_note}
   候補 {len(_syms):,}銘柄 / {args.batch}件バッチ × {-(-len(_syms) // args.batch)}回
   合格 = 始値が前日終値 {args.gap_bp:+.0f}bp 以上（{args.guard_bp:+.0f}bp 超は見送り）
   予算 {args.budget:.0f}万 / 1銘柄上限 {args.max_yen:.0f}万 / 最大{args.max_lot}単元
@@ -421,8 +458,128 @@ print(f"""
   → {_out_path}
 """, flush=True)
 
-cli = KabuClient(prod=args.prod, dry_run=True)
+# ⛔ dry_run は **--execute を付けたときだけ** False。付けなければ発注系は
+#   API を叩かず内容を print するだけ(kabu_api の設計 / §12.4)。
+cli = KabuClient(prod=args.prod, dry_run=not args.execute)
 cli.connect()
+
+# ══════════════════════════════════════════════════════════════════════
+#  実発注 (--execute)
+# ══════════════════════════════════════════════════════════════════════
+# ★ 方式 = J(§18.37 改訂版):
+#     09:00 以降、**寄った銘柄から順に** 始値を見て +50bp 以上なら建てる。
+#     注文は **保護指値売り @ 始値 × (1 - limit_slip_bp)**。
+#     ⛔ 成行にしない。板が飛んだときに掴まされる(§18.38)。指値売りは
+#       「指値以上」で約定するので、板が正常なら成行と同じ値で即約定し、
+#       急落しているときだけ約定しない = 掴まされない。
+#     決済は lss_exit_watcher が **実約定価格基準**で OCO を組み直す
+#     (ordered_signals_lss.csv の atr/sm/tm を読む / §18.32)。
+_EX = {"left": args.budget * 1e4, "n": 0, "yen": 0.0, "ng": 0,
+       "cap": (args.max_notional or args.budget) * 1e4}
+_ORDER_LOG = None
+if args.execute:
+    try:
+        from kabu_send_lss import _log_ordered as _ORDER_LOG
+    except Exception as _le:
+        print(f"  ⚠ _log_ordered を読めません({_le})。"
+              f"**発注は行いますが ordered_signals_lss.csv に残りません** "
+              f"→ watcher が決済できないので手動決済が必要です", flush=True)
+try:
+    from backtest_limit_entry import floor_to_tick as _floor_tick
+except Exception:
+    def _floor_tick(p):                     # 保険(呼値表が無くても動く)
+        return float(int(p))
+
+
+def _verify(_r, _lim: float, _qty: int) -> str:
+    """発注直前の検算。異常なら理由を返す(空文字なら OK)。
+
+    ⛔ 2026-08-13 の H 初日は ATR が記録に無く **損切りが丸ごと無効化**された。
+      同じことを起こさないため、発注前に必ず全部そろっているか見る。
+    """
+    _op = float(_r.get("open_p") or 0)
+    _atr = float(_r.get("atr") or 0)
+    _sk = float(_r.get("stop_k") or 0)
+    _tk = float(_r.get("target_k") or 0)
+    if _op <= 0:
+        return "始値が0"
+    if _atr <= 0:
+        return "ATRが無い(損切りが無効化される)"
+    if not (_sk > 0 and _tk > 0):
+        return "損切/利確が無い"
+    if not (_sk > _op > _tk):
+        return f"ショートの向きが逆(損切{_sk:,.1f} > 約定{_op:,.1f} > 利確{_tk:,.1f} でない)"
+    if _qty <= 0 or _qty % 100:
+        return f"株数が不正({_qty})"
+    if not (0 < _lim <= _op):
+        return f"保護指値が始値より上({_lim:,.1f} > {_op:,.1f})"
+    return ""
+
+
+def _order_rows(_sel: list) -> None:
+    """このグループの合格銘柄を発注する。--execute のときだけ実発注。"""
+    if not _sel:
+        return
+    for _r in sorted(_sel, key=lambda x: -float(x.get("gap_bp") or 0)):
+        _lot = int(_r.get("lots_k") or 0)
+        if _lot <= 0:
+            continue
+        _qty = _lot * 100
+        _op = float(_r.get("open_p") or 0)
+        _lim = float(_floor_tick(_op * (1.0 - args.limit_slip_bp / 1e4)))
+        _why = _verify(_r, _lim, _qty)
+        if _why:
+            _EX["ng"] += 1
+            print(f"  ⛔ {_r['symbol']} 発注中止: {_why}", flush=True)
+            continue
+        _need = _qty * _op
+        if _EX["yen"] + _need > _EX["cap"]:
+            print(f"  ⛔ {_r['symbol']} 発注中止: 総額上限 "
+                  f"{_EX['cap'] / 1e4:,.0f}万 を超えます"
+                  f"(既発注 {_EX['yen'] / 1e4:,.0f}万 + {_need / 1e4:,.0f}万)",
+                  flush=True)
+            continue
+        try:
+            _res = cli.send_sell(int(_r["symbol"]), qty=_qty, price=_lim,
+                                 cash_margin=2,          # 信用新規(売建)
+                                 order_type="limit",
+                                 omit_close_positions=True)
+        except Exception as _oe:
+            _EX["ng"] += 1
+            print(f"  ⛔ {_r['symbol']} 発注で例外: {_oe}", flush=True)
+            continue
+        _ok = (not args.execute) or (str(_res.get("Result", "")) == "0")
+        if not _ok:
+            _EX["ng"] += 1
+            print(f"  ⛔ {_r['symbol']} 発注失敗: {_res}", flush=True)
+            continue
+        _EX["n"] += 1
+        _EX["yen"] += _need
+        _r["ordered"] = 1
+        _r["order_limit"] = _lim
+        print(f"  {'✓ 発注' if args.execute else '(dry-run)'} "
+              f"{_r['symbol']} {_qty:,}株 保護指値 {_lim:,.0f}"
+              f"(始値 {_op:,.1f} / -{args.limit_slip_bp:.0f}bp) "
+              f"損切 {float(_r['stop_k']):,.1f} / 利確 {float(_r['target_k']):,.1f}"
+              f" / 累計 {_EX['yen'] / 1e4:,.0f}万", flush=True)
+        # ★ watcher が決済できるよう ordered_signals_lss.csv に残す。
+        #   ⛔ entry_mode="auction" にすると watcher が **実約定価格基準**で
+        #     OCO を組み直す(§18.32 / lss_exit_watcher:355-)。J も同じ扱いで正しい。
+        if _ORDER_LOG and args.execute:
+            try:
+                _ORDER_LOG({"symbol": _r["symbol"], "name": _r.get("name", ""),
+                            "strategy": _r.get("strategy", ""),
+                            "order_price": _lim,
+                            "stop_price": float(_r["stop_k"]),
+                            "target_price": float(_r["target_k"]),
+                            "atr": float(_r["atr"]), "sm": args.sm,
+                            "tm": args.tm},
+                           args.prod, _qty, entry_mode="auction",
+                           order_price=_lim)
+            except Exception as _we:
+                print(f"    ⚠ 発注記録の書き込み失敗({_we})。"
+                      f"**watcher が決済できません** → 手動で買い戻すこと",
+                      flush=True)
 
 
 def _read_all(tag: str) -> dict:
@@ -499,7 +656,8 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             #   シグナル時点の stop/target(逆指値トリガー基準)とは別物。
             "atr": round(_atr, 2) if (_atr := float(_ATR.get(_s, 0) or 0)) else "",
             "stop_k": round(_op + _atr * args.sm, 1) if (_atr and _op > 0) else "",
-            "target_k": round(_op - _atr * args.tm, 1) if (_atr and _op > 0) else ""}
+            "target_k": round(_op - _atr * args.tm, 1) if (_atr and _op > 0) else "",
+            "ordered": 0, "order_limit": ""}
 
 
 def _dump(_rows: list) -> None:
@@ -511,6 +669,38 @@ def _dump(_rows: list) -> None:
             w.writerows(_rows)
     except Exception as e:
         print(f"  ⚠ CSV を書けません: {e}", flush=True)
+
+
+def _size_group_live(_g: int, _sel: list) -> None:
+    """1グループぶんだけ配る (発注と同時に走らせる版 / 2026-08-17)。
+
+    _size_groups と同じ式(第1グループ=予算×g1 / 以降=残り予算)だが、
+    **寄った瞬間に配って即発注する**ために切り出した。残り予算は _EX["left"]
+    で持ち越す。
+    ⛔ 未寄件数で割る動的配分にはしない(ユーザー判断: ライブで壊れやすい)。
+    """
+    if not _sel:
+        return
+    _bud, _cap = args.budget * 1e4, args.max_yen * 1e4
+    _alloc = min(_bud * args.g1, _EX["left"]) if _g == 0 else _EX["left"]
+    _per = min(_alloc / len(_sel), _cap) if _cap > 0 else _alloc / len(_sel)
+    _used = 0.0
+    for r in sorted(_sel, key=lambda x: -float(x.get("gap_bp") or 0)):
+        _u = float(r["open_p"] or 0) * 100
+        if _u <= 0:
+            continue
+        _lot = min(args.max_lot, int(_per // _u))
+        if _cap > 0:
+            _lot = min(_lot, int(_cap // _u))
+        _lot = max(1, _lot)
+        while _lot > 0 and _used + _lot * _u > _EX["left"]:
+            _lot -= 1
+        if _lot <= 0:
+            continue
+        r["lots_k"] = _lot
+        r["yen_k"] = round(_lot * _u, 0)
+        _used += _lot * _u
+    _EX["left"] = max(0.0, _EX["left"] - _used)
 
 
 def _size_groups(_rows: list) -> None:
@@ -607,6 +797,14 @@ if args.poll:
             print(f"  [{_now_s}] **新たに寄った {len(_new)}件** "
                   f"(通算 {len(_seen)}/{len(_syms)}) "
                   f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
+            # ★★ 寄った瞬間に配って発注する(= §18.38 の『即時』)。
+            #   全部が寄るのを待たない。待つと 1分で -15.8bp 逃げる(§18.44)。
+            _gi_now = len(_groups) - 1
+            _sel_now = [r for r in _rows
+                        if int(r["grp"]) == _gi_now and r["pass_gap"]]
+            if _sel_now:
+                _size_group_live(_gi_now, _sel_now)
+                _order_rows(_sel_now)
         else:
             print(f"  [{_now_s}] 新規なし (通算 {len(_seen)}/{len(_syms)}) "
                   f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
@@ -635,7 +833,14 @@ else:
         _rows.append(_mk_row(_s, _bd, _read_ts, 0))
 
 # ── 配分 (固定上限。第1グループ=予算×G1 / 以降=残り予算) ─────────────
-_size_groups(_rows)
+# ⛔ --poll では **寄った瞬間に配って発注済み**なので、ここで配り直すと
+#   CSV の株数が実際に出した注文と食い違う。順位だけ振り直す。
+if args.poll:
+    _rows.sort(key=lambda r: (-float(r["liquidity"] or 0), str(r["symbol"])))
+    for _i, r in enumerate(_rows):
+        r["rank_liq"] = _i + 1
+else:
+    _size_groups(_rows)
 _dump(_rows)
 
 _got = sum(1 for r in _rows if float(r["open_p"] or 0) > 0)
@@ -692,10 +897,24 @@ if _pass_k:
     if _ng:
         print(f"  ⚠ ガード超過({args.guard_bp:+.0f}bp 超)で見送り {len(_ng)}件: "
               + ", ".join(r["symbol"] for r in _ng[:10]))
-print(f"""
-  ⛔ **発注していません**。この CSV は「その朝 K なら何を建てたか」の記録です。
+if args.execute:
+    print(f"""
+  🚀 **発注しました** {_EX['n']}件 / 総額 {_EX['yen'] / 1e4:,.1f}万"""
+          + (f" / 中止 {_EX['ng']}件" if _EX["ng"] else "")
+          + f"""
+  ▶ 次に **必ず** これを起動して決済させる（J は delay4）:
+      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars 4
+    ⛔ 起動しないと **引けまで持ちっぱなし**になります。
+    ⛔ kabu の有効トークンは1つ。このスクリプトが終わってから起動すること。
+  ▶ 引け後: .\\fills で実約定と突合（実滑りがここで初めて測れます）
+""")
+    if _EX["ng"]:
+        print(f"  ⚠ 中止 {_EX['ng']}件あり。理由は上のログ(⛔行)を確認してください。")
+else:
+    print(f"""
+  ⛔ **発注していません**（記録のみ）。出すなら --execute を付けます。
   ★ 貯めたら 5分足の始値と突合して、**板の始値 = 5分足の始値** かを確認する
-    (バックテストの前提そのもの)。ズレるなら K の全数字が影響を受けます。
+    (バックテストの前提そのもの)。ズレるなら J の全数字が影響を受けます。
 """)
 try:
     cli.unregister_all()
