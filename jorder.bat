@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM jorder.bat - J (09:00 confirm) SMALL-LOT LIVE ORDERING
-REM   Usage:  .\jorder                 (budget 50 (man-yen), production account)
+REM   Usage:  .\jorder                 (budget 60 (man-yen), production account)
 REM           .\jorder --budget 100     (raise the budget)
 REM           .\jorder --dry-run        (print the schedule and exit)
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
@@ -20,8 +20,12 @@ REM        size it and place a PROTECTIVE LIMIT SELL at open x (1 - 50bp).
 REM        Names that open late (09:02-09:06) are picked up as they come.
 REM
 REM DEFAULTS ON PURPOSE
-REM   budget 50 and the same value as a hard notional cap. Start small:
-REM   slippage is the last unmeasured factor and only real fills can show it.
+REM   budget 60 (man-yen) and the same value as a hard notional cap.
+REM   60 is the SMALLEST amount that can still buy one lot of a 6,000-yen name,
+REM   which is the top of the price band. At 50 those names silently size to
+REM   zero lots, so the sample would lose every high-priced stock - bad when
+REM   the whole point is measuring slippage. Start small otherwise: slippage
+REM   is the last unmeasured factor and only real fills can show it.
 REM
 REM WHY THE POLL STOPS AT 09:10 (not 09:30)
 REM   kabu allows exactly one live token, so the watcher cannot start until
@@ -32,7 +36,8 @@ REM   (measured, 18.44), so 09:10 is enough. morning_test enforces this.
 REM
 REM   4. the exit watcher starts AUTOMATICALLY right after ordering ends,
 REM      with --stop-delay-bars 4 (J is delay4; 18.9 says the backtest and the
-REM      live side must always match). It runs until 15:30.
+REM      live side must always match) and --entry-cutoff 09:15 as a safety net
+REM      that sweeps any entry limit that never filled. It runs until 15:30.
 REM      *** DO NOT CLOSE THE WINDOW BEFORE 15:30 *** - closing it early means
 REM      missed exits (18.4). Use .\jorder --no-watch to start it by hand.
 REM
@@ -48,7 +53,7 @@ for %%a in (%*) do (
 )
 echo ============================================================
 echo  J SMALL-LOT LIVE ORDERING - production account
-echo    default budget 50 (man-yen), hard cap the same
+echo    default budget 60 (man-yen), hard cap the same
 echo    start this by 07:50 so the pre-open log covers 08:00-08:45
 echo    the exit watcher starts by itself after ordering and runs to 15:30
 echo    *** DO NOT CLOSE THIS WINDOW BEFORE 15:30 ***
@@ -58,7 +63,7 @@ python morning_test.py --prod --execute --stop-delay-bars 4 %*
 goto :eof
 
 :help
-echo .\jorder [--budget 50] [--max-notional 50] [--dry-run]
+echo .\jorder [--budget 60] [--max-notional 60] [--dry-run]
 echo   Places REAL J orders on the production account, small lot by default.
 echo   Runs: collect -^> pre-open quote log -^> warm read -^> 09:00 poll+order.
 echo   The exit watcher (--stop-delay-bars 4) starts automatically and runs

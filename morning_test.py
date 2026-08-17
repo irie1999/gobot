@@ -134,6 +134,12 @@ ap.add_argument("--stop-delay-bars", type=int, default=4,
                 help="watcher の損切り遅延(J は 4)")
 ap.add_argument("--no-watch", action="store_true",
                 help="--execute でも watcher を自動起動しない(手で起動する)")
+# ★ watcher に渡す保険。J の保護指値が寄りで刺さらないと板に残り、昼に値が
+#   戻ったところで約定しうる(モデルに無い時刻・値段の建玉になる)。
+#   k_open_confirm が自分で取り消すが、そこで落ちた場合に残る。
+#   ポーリング締切(09:10)の直後に watcher 側でも掃く。
+ap.add_argument("--entry-cutoff", type=str, default="09:15",
+                help="watcher が未約定の新規売りを取り消す時刻(保険)")
 args = ap.parse_args()
 
 # ⛔⛔ 実発注するときはポーリングを早く切る (2026-08-17)。
@@ -222,7 +228,8 @@ print(f"""
     1. バッチ回し   --rotate {args.rotate}      {'' if (args.with_rotate and not args.skip_rotate) else '(スキップ: 結論済み / --with-rotate で有効)'}
     2. 気配ログ     {args.preopen_from}〜{args.preopen_until}     {'(スキップ)' if args.skip_preopen else ''}
     3+4. 対照測定   {args.warmup_at}/{args.open_at}   {'' if (args.with_board_speed or args.no_kpaper) else '(スキップ: --with-board-speed で有効)'}
-    5. K記録        {args.k_warm_at} 空読み → {args.open_at} 本番 → {args.poll_until} まで {'(スキップ)' if args.no_kpaper else ''}
+    5. {'🚀 J実発注' if args.execute else 'K記録   '}    {args.k_warm_at} 空読み → {args.open_at} 本番 → {args.poll_until} まで {'(スキップ)' if args.no_kpaper else ''}
+    6. 決済watcher  {'自動起動 → 15:30 まで' if (args.execute and not args.no_watch) else '(起動しません)'}
 
   ⛔ K の候補は数百銘柄(=6バッチ級)。**コールドだと1バッチ48秒**なので、
      09:00 に間に合わせるには {args.k_warm_at} には空読みを始める必要があります。
@@ -356,7 +363,7 @@ print(f"""
 
   ▶▶ **いますぐ これを起動してください**（起動しないと引けまで持ちっぱなし）:
 
-      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars}
+      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars} --entry-cutoff {args.entry_cutoff}
 
     ⛔ J は delay{args.stop_delay_bars}。バックテストとライブを必ず揃える(§18.9)。
     ⛔ 15:30(大引け)まで止めないこと。途中で切ると決済を取りこぼします(§18.4)。
@@ -410,8 +417,15 @@ if args.execute and not args.no_watch:
                 if str(r.get("record_date") or "")[:10] == _today6)
     except Exception as _e6:
         print(f"  ⚠ ordered_signals_lss.csv を読めません({_e6})", flush=True)
+    # ★ --entry-cutoff は **保険**。J の保護指値は寄りで刺さらないと板に残り、
+    #   昼に値が戻ったところで約定しうる(モデルに無い時刻・値段の建玉になる)。
+    #   k_open_confirm が発注ループの後に自分で取り消すが、そこで落ちた場合に
+    #   残ってしまう。watcher 側でも未発動(CumQty==0)の lss 新規売りを掃く。
+    #   09:15 = ポーリング締切(09:10)の直後。それ以前に掃くと、まだ約定判定が
+    #   終わっていない注文を消しかねない。
     _wcmd = (_PY + ["lss_exit_watcher.py", "--execute"] + _P
-             + ["--all-dates", "--stop-delay-bars", str(args.stop_delay_bars)])
+             + ["--all-dates", "--stop-delay-bars", str(args.stop_delay_bars),
+                "--entry-cutoff", args.entry_cutoff])
     print(f"""
 {'=' * 74}
 ▶ 6. 決済 watcher を起動します（J = delay{args.stop_delay_bars}）
@@ -438,5 +452,5 @@ if args.execute and not args.no_watch:
 elif args.execute:
     print(f"""
   ⚠ --no-watch なので watcher を起動していません。**手で起動してください**:
-      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars}
+      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars} --entry-cutoff {args.entry_cutoff}
 """, flush=True)
