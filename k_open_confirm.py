@@ -21,6 +21,9 @@ r"""k_open_confirm.py — K(09:00確認方式)を **記録だけ** する (ペ�
 
   読むのは1回で済むので、**同じ朝のデータから両方を切り出す**。
   CSV に in_j / rank_liq を持たせてあるので、後から何通りにも再集計できる。
+  ⚠ in_j は **ペア単位(銘柄×戦略)** で判定する。「その銘柄が cumul にあるか」
+    ではない。cumul に A7 だけ載っている銘柄が MACDTF でシグナルを出しても
+    J は建てないので、銘柄単位だと過大評価になる(2026-08-17 に 7936 で発覚)。
 
 ■ 使い方
 
@@ -320,9 +323,47 @@ if args.max_symbols > 0 and len(_syms) > args.max_symbols:
     _syms = _syms[:args.max_symbols]
 
 # J の母集団(in_j 列用)
-_jpool: set = set()
+# ⛔⛔ **ペア単位(銘柄×戦略)で判定する** (2026-08-17 発覚)。
+#    以前は「その銘柄が cumul にあるか」の銘柄単位だったため、
+#    7936 アシックスのように **cumul には A7 だけ載っていて、今日シグナルを
+#    出したのは MACDTF/DON/VOLTF/MOM** という銘柄を in_j=1 と数えてしまう。
+#    実際の J はペア単位で絞るので、この銘柄は J では1件も建てない。
+#    → in_j は「**その銘柄で J の候補ペアが今日シグナルを出したか**」にする。
+_jpool: set = set()          # J が建てうる銘柄(ペアで交差した銘柄だけ)
+_jpairs: set = set()         # (銘柄, 戦略) の集合
 if Path(args.pool).exists():
-    _jpool = set(_codes_from(args.pool))
+    try:
+        _pt = Path(args.pool).read_text(encoding="utf-8")
+        # ("7936.T", "アシックス", "A7"), の3要素タプル(引用符は ' も " も可)
+        for _m in re.finditer(
+                r"""\(\s*['"](\d{4}[A-Z0-9]?)(?:\.T)?['"]\s*,"""
+                r"""\s*['"][^'"]*['"]\s*,\s*['"]([A-Za-z0-9_]+)['"]\s*\)""", _pt):
+            _jpairs.add((_m.group(1), _m.group(2)))
+    except Exception as _je:
+        print(f"  ⚠ {args.pool} のペア抽出に失敗: {_je}", flush=True)
+    # 今日のシグナル(銘柄×戦略)と交差させる。k_signals が無い場合は
+    # 銘柄単位にフォールバック(旧挙動。ただし過大評価になる旨を出す)。
+    _sig_pairs: set = set()
+    if Path(_sig_csv).exists():
+        try:
+            for r in _csv.DictReader(open(_sig_csv, encoding="utf-8-sig")):
+                _s1 = str(r.get("symbol") or "").upper() \
+                    .removesuffix(".T").split(".")[0]
+                _t1 = str(r.get("strategy") or "").strip()
+                if _s1 and _t1:
+                    _sig_pairs.add((_s1, _t1))
+        except Exception:
+            pass
+    if _jpairs and _sig_pairs:
+        _jpool = {s for (s, t) in (_jpairs & _sig_pairs)}
+        print(f"  [J] {args.pool} と今日のシグナルを **ペア単位**で交差: "
+              f"{len(_jpairs & _sig_pairs):,}ペア / {len(_jpool):,}銘柄"
+              f"（銘柄単位なら {len({s for s, _ in _jpairs} & {s for s, _ in _sig_pairs}):,}銘柄"
+              f" = 過大）", flush=True)
+    else:
+        _jpool = set(_codes_from(args.pool))
+        print(f"  ⚠ [J] ペア交差できないので **銘柄単位**で判定します"
+              f"({len(_jpool):,}銘柄)。in_j は過大評価になります", flush=True)
 
 
 try:
