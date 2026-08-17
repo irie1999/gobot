@@ -127,6 +127,26 @@ ap.add_argument("--stop-delay-bars", type=int, default=4,
                 help="発注後に案内する watcher の損切り遅延(J は 4)")
 args = ap.parse_args()
 
+# ⛔⛔ 実発注するときはポーリングを早く切る (2026-08-17)。
+#   kabu の有効トークンは1つなので、**このスクリプトが終わるまで watcher を
+#   起動できない**。既定の 09:30 まで回すと、09:00 に建てた建玉が30分間
+#   無防備になる。J は delay4 = **09:20 に損切りを武装する**設計なので、
+#   watcher が 09:30 起動では間に合わない。
+#   遅寄りは実測で 09:06 までに93%(§18.44)なので 09:10 で十分。
+_POLL_CAP = "09:10"
+if args.execute and str(args.poll_until) > _POLL_CAP:
+    print(f"[jorder] ポーリング締切を {args.poll_until} → **{_POLL_CAP}** に"
+          f"早めます。\n"
+          f"  理由: トークンは1つなので、このスクリプトが終わるまで watcher を"
+          f"起動できません。\n"
+          f"  09:30 まで回すと 09:00 の建玉が30分無防備になり、"
+          f"delay{args.stop_delay_bars}(={args.stop_delay_bars * 5}分後=09:"
+          f"{args.stop_delay_bars * 5:02d} に武装)に間に合いません。\n"
+          f"  遅寄りは実測で09:06までに93%(§18.44)なので {_POLL_CAP} で足ります。"
+          f"\n  変えるなら --poll-until を明示してください（自己責任）",
+          flush=True)
+    args.poll_until = _POLL_CAP
+
 _P = ["--prod"] if args.prod else []
 _PY = [sys.executable]
 

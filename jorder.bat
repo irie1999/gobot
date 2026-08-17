@@ -14,7 +14,7 @@ REM   0. collect today's signal candidates (yfinance only, no kabu)
 REM   1. log pre-open quotes 08:00-08:45   -> preopen_board_<date>.csv
 REM        This is the opening-price study (18.35). It keeps running daily.
 REM   2. 08:47 warm read (skipping this makes 09:00 take 40-140s)
-REM   3. 09:00 onward, poll every 10s until 09:30:
+REM   3. 09:00 onward, poll every 10s until 09:10:
 REM        for each name that opens, if open >= prev close + 50bp,
 REM        size it and place a PROTECTIVE LIMIT SELL at open x (1 - 50bp).
 REM        Names that open late (09:02-09:06) are picked up as they come.
@@ -22,6 +22,13 @@ REM
 REM DEFAULTS ON PURPOSE
 REM   budget 50 and the same value as a hard notional cap. Start small:
 REM   slippage is the last unmeasured factor and only real fills can show it.
+REM
+REM WHY THE POLL STOPS AT 09:10 (not 09:30)
+REM   kabu allows exactly one live token, so the watcher cannot start until
+REM   this script exits. J is delay4 = the stop is armed 20 min after entry
+REM   (09:20 for a 09:00 fill). Polling to 09:30 would leave the position
+REM   unprotected past its arming time. Late opens are 93% done by 09:06
+REM   (measured, 18.44), so 09:10 is enough. morning_test enforces this.
 REM
 REM AFTER IT FINISHES - DO THIS IMMEDIATELY
 REM   python lss_exit_watcher.py --execute --prod --all-dates --stop-delay-bars 4
