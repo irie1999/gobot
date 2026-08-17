@@ -14,13 +14,24 @@ r"""k_open_confirm.py — K(09:00確認方式)を **記録だけ** する (ペ�
 
   これが K の朝の手順そのもの。**発注だけしない**版です。
 
-■ J と K を同時に記録する
+■ 母集団は **J に揃える** (2026-08-17 変更)
 
-  J(実装版) = 選定あり(lss_proposal_cumul.py) の **流動性上位50件**だけ読む
-  K(理想版) = 全候補を読む(バッチ回しが成立すれば)
+  既定の収集元 = --pool (lss_proposal_cumul.py = 選定あり) の **流動性上位50件**。
+  これで J タブ(cumul × watch50)と **母集団も切り方も一致**する。
 
-  読むのは1回で済むので、**同じ朝のデータから両方を切り出す**。
-  CSV に in_j / rank_liq を持たせてあるので、後から何通りにも再集計できる。
+  ⛔ それまでは full(選定なし)を読んでいたが、K は §18.45 で棄却済み
+    (kabu の登録上限50件は REST でも WebSocket でも同じ / 299銘柄の読取に
+     3.6分かかり、その間の減衰 -30bp が利得 +35,258円/月 を食い潰す)。
+    full を読むと 299銘柄のうち50件しか読めず、**その50件が J の候補とは
+    限らない**。実測 2026-08-17:
+      朝の合格 5件 = 1515 / 1762 / 2270 / 2432 / 3105  (full から)
+      J タブ   4件 = 1762 / 3864 / 4776 / 5632         (cumul から)
+      重なりは **1762 だけ**。同じ日の記録なのに突合できなかった。
+
+  CSV には in_j / rank_liq が残るので後から再集計できる。
+  ⚠ in_j は **ペア単位(銘柄×戦略)** で判定する。「その銘柄が cumul にあるか」
+    ではない。cumul に A7 だけ載っている銘柄が MACDTF でシグナルを出しても
+    J は建てないので、銘柄単位だと過大評価になる(2026-08-17 に 7936 で発覚)。
   ⚠ in_j は **ペア単位(銘柄×戦略)** で判定する。「その銘柄が cumul にあるか」
     ではない。cumul に A7 だけ載っている銘柄が MACDTF でシグナルを出しても
     J は建てないので、銘柄単位だと過大評価になる(2026-08-17 に 7936 で発覚)。
@@ -158,10 +169,21 @@ if args.collect:
     #    J/L/K とは **別の母集団** で記録することになる(2026-08-17 に実際に
     #    lss_watchlist_proposal_2026-07-15.py 5,639ペアを拾った)。
     #    レポートの土台(dailyfast.bat が渡す lss_proposal_full.py)に揃える。
+    # ★★ 既定は **J の母集団(cumul)** (2026-08-17 変更)。
+    #   ⛔ それまでは full(選定なし)を既定にしていたが、K は §18.45 で
+    #     「kabu では技術的にも経済的にも成立しない」と棄却済み。full を読むと
+    #     299銘柄のうち **50件しか読めず、しかもその50件が J の候補とは限らない**。
+    #     実測 2026-08-17:
+    #       朝の合格 5件 = 1515 / 1762 / 2270 / 2432 / 3105  (full から)
+    #       J タブ   4件 = 1762 / 3864 / 4776 / 5632         (cumul から)
+    #       重なりは **1762 だけ**。同じ日の記録なのに突合できなかった。
+    #   ★ cumul の流動性上位50件を読めば、J タブ(cumul × watch50)と
+    #     **母集団も切り方も一致**する。
+    #   K/L を測りたいときだけ --symbols-file lss_proposal_full.py。
     _src = args.symbols_file
     if not _src:
-        for _c in ("lss_proposal_full.py", "lss_proposal_cumul.py"):
-            if Path(_c).exists():
+        for _c in (args.pool, "lss_proposal_cumul.py", "lss_proposal_full.py"):
+            if _c and Path(_c).exists():
                 _src = _c
                 break
     _pairs = _load_symbols(_src or None)
@@ -189,9 +211,14 @@ if args.collect:
           + (f" (空売り不可 {_n0 - len(_pairs):,}除外)" if _n0 != len(_pairs) else "")
           + f" / 価格 {args.min_price:,.0f}〜{args.max_price:,.0f}円"
           f"。今日のシグナルを収集します(kabu は使いません)", flush=True)
-    if _src != "lss_proposal_full.py":
-        print(f"  ⚠ レポートの土台は lss_proposal_full.py です。"
-              f"別ファイルだと J/L/K タブと母集団が食い違います", flush=True)
+    if _src == args.pool:
+        print(f"  ✅ J タブ({args.pool} × 流動性上位{args.batch}件)と"
+              f"**同じ母集団**で記録します", flush=True)
+    else:
+        print(f"  ⚠ J の母集団は {args.pool} です。{_src} で収集すると、"
+              f"読める{args.batch}件が J の候補とは限らず、朝の記録と"
+              f"J タブが突合できません(2026-08-17 は重なり1件だった)",
+              flush=True)
     _out: list = []
     _n_px = 0          # 価格帯で落とした件数
     for _i, (_c, _n, _st) in enumerate(_pairs):
