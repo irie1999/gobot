@@ -10470,11 +10470,19 @@ function switchTbd(id, tab) {{
             elif _eh_kind == "E":
                 olp_sub = (f'<br><span style="font-size:0.71rem;color:#a78bfa">'
                            f'寄成(板寄せ)</span>')
-            elif _eh_kind in ("J", "L", "K") and _EQ_METHOD_CONF:
+            elif _eh_kind.startswith("H寄り確認"):
                 # ⛔ J/L/K は **09:00確認方式**(始値を見てから発注)。ここを H と
                 #    同じ「指値:X / 板寄せなら指値以上で約定」と出すと、
                 #    『前夜に指値を置いた』という誤読を招く(2026-08-17 に指摘)。
                 #    確認方式に指値は存在せず、約定価格は **始値そのもの**。
+                # ⛔⛔ 判定は **t["eh"] の中身**で行うこと(2026-08-17 再修正)。
+                #    eh_trades._mk が入れるのは変種キー(例
+                #    "H寄り確認+50bpd4sm0.5資金均等実装版")で、タブの文字
+                #    ("J"/"L"/"K")ではない。`_eh_kind in ("J","L","K")` と
+                #    書いていたので **一度も成立せず**、J の明細に H の
+                #    「指値」表記が出続けていた。
+                #    キーの頭 = 方式なので、LSS_EQ_METHOD=limit のときは
+                #    "H指値…" になり自動的に下の指値表記へ落ちる。
                 olp_sub = (f'<br><span style="font-size:0.71rem;color:#facc15">'
                            f'09:00の始値で約定</span>'
                            f'<br><span style="font-size:0.68rem;color:#64748b">'
