@@ -10362,12 +10362,44 @@ function switchTbd(id, tab) {{
     # ⚠ 母集団はその日の**全候補**(約定+不約定)。予算で切る前の順位なので、
     #    シグナルタブの「順位」列と一致する。
     _day_rank: dict = {}
+    # ★★ J/L/K 用: **発注リスト(cumul)の中での流動性順位**(銘柄単位)
+    #   (2026-08-17 ユーザー提案)。_day_rank は lss タブの土台(=選定なし
+    #   7,974ペア)を母集団にした **ペア単位**の順位なので、
+    #   「watch50 に入るか」の判定には使えない。実測で 2.1倍ずれる:
+    #     8346 東邦銀行  J明細 #131 / 発注リスト #63
+    #     8370 紀陽銀行  J明細 #135 / 発注リスト #65
+    #   watch50 は **銘柄数**で切るので、同じ土俵の番号が要る。
+    #   これが watch を超えていたら **ライブでは登録すらしない銘柄**なので、
+    #   赤で出して一目で分かるようにする。
+    _watch_rank: dict = {}        # (日, 銘柄) -> cumul 内の流動性順位
+    _WATCH_CAP_DISP = _WATCH_CAP  # モジュール先頭で env から読んだ値をそのまま使う
 
     def _rk_key(t):
         return (str(t.get("symbol", "")).upper(), str(t.get("strategy", "")),
                 str(t.get("entry_d_raw") or t.get("exit_d_raw") or ""))
 
+    def _wr_key(t):
+        return (str(t.get("entry_d_raw") or t.get("exit_d_raw") or ""),
+                str(t.get("symbol", "")).upper().removesuffix(".T").split(".")[0])
+
     def _rank_badge(t) -> str:
+        # J/L/K(09:00確認)は **登録できるか**が本質なので、cumul 内の
+        # 銘柄順位を出す。E/H(前夜指値)は全銘柄に注文を置けるので従来どおり。
+        if str(t.get("eh") or "").startswith("H寄り確認"):
+            _w = _watch_rank.get(_wr_key(t))
+            if _w:
+                _over = _WATCH_CAP_DISP > 0 and _w > _WATCH_CAP_DISP
+                _bg = "#7f1d1d" if _over else "#334155"
+                _fg = "#fecaca" if _over else "#cbd5e1"
+                _ti = (f"発注リスト(選定あり)の流動性順位 #{_w}"
+                       + (f" ⛔ watch{_WATCH_CAP_DISP} を超えています"
+                          "(ライブでは登録すらしない銘柄)" if _over
+                          else f" (watch{_WATCH_CAP_DISP} の圏内)"))
+                return (f'<span style="display:inline-block;min-width:1.6em;'
+                        f'text-align:center;background:{_bg};color:{_fg};'
+                        f'font-size:0.68rem;font-weight:700;padding:0 4px;'
+                        f'border-radius:3px;margin-right:4px" '
+                        f'title="{_ti}">#{_w}{"⛔" if _over else ""}</span>')
         _r = _day_rank.get(_rk_key(t))
         if not _r:
             return ""
@@ -12453,6 +12485,35 @@ function switchTbd(id, tab) {{
         for _dk, _lst in _rk_day.items():
             for _i, _t in enumerate(sorted(_lst, key=_bud_order_key), 1):
                 _day_rank.setdefault(_rk_key(_t), _i)
+        # ★★ J/L/K 用の順位 (2026-08-17 ユーザー提案)。
+        #   ・母集団は **発注リストと同じ cumul**(_IMPL_POOL で絞る)
+        #   ・watch は **銘柄数**で切るので、銘柄単位に畳んでから順位を振る
+        #   ・登録は前夜に決めるので **遅寄りも枠を消費する**(落とさない)
+        #   これで「#63 → watch50 の圏外 → ライブでは登録すらしない」が
+        #   明細を見た瞬間に分かる。
+        _wr_syms: dict = _dd(dict)     # 日 -> {銘柄: 流動性}
+        for _dk, _lst in _rk_day.items():
+            for _t in _lst:
+                _c9 = str(_t.get("symbol", "")).upper() \
+                    .removesuffix(".T").split(".")[0]
+                if not _c9:
+                    continue
+                if _IMPL_POOL:
+                    _ok9, _sd9 = _IMPL_POOL
+                    _st9 = str(_t.get("strategy") or _t.get("strat") or "")
+                    if (_c9, _st9) not in _ok9:
+                        continue
+                    _d9 = _sd9.get((_c9, _st9))
+                    if _d9 and str(_t.get("entry_d_raw") or "") < str(_d9):
+                        continue
+                _lq9 = float(_t.get("liquidity") or 0) or _liquidity_of(
+                    str(_t.get("symbol", "")))
+                if _lq9 > _wr_syms[_dk].get(_c9, -1.0):
+                    _wr_syms[_dk][_c9] = _lq9
+        for _dk, _m9 in _wr_syms.items():
+            for _i, (_c9, _lq9) in enumerate(
+                    sorted(_m9.items(), key=lambda kv: (-kv[1], kv[0])), 1):
+                _watch_rank[(_dk, _c9)] = _i
     except Exception as _rke:
         print(f"[発注順] 明細の順位づけに失敗(表示は省略): {_rke}", flush=True)
 
