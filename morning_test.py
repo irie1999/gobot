@@ -18,15 +18,16 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
        (実発注 lss_budget_cap と同じ _lss_signal_today を使う)。
        yfinance のバックテストなので数分かかる。09:00 より前に終わらせる。
 
-  1. バッチ回し     check_board_limits --rotate 100
-       50件ずつ回して100銘柄読めるか。**2周目が速ければ kabu は購読を覚えている**
-       = 寄り前に全バッチを空読みしておけば 09:00 は全部ウォームで回せる。
-       ⛔ ここが本命。成立すれば K の「登録上限50件」制約が消える。
-       ⚠ 登録/解除を繰り返すので **一番先にやる**(429 が後続に波及しないよう
-          最後にクールダウンを置く)。
+  1. バッチ回し     check_board_limits --rotate 100   ← **既定OFF(結論済み)**
+       ⛔ 2026-08-17 に決着(§18.44)。寄り前/場中は **0.3〜0.6件/秒**で、
+          2周目も速くならない = バッチ回しでは 50件の壁を破れない。
+          5〜8分かかって気配ログの時間を奪うので既定OFF。--with-rotate で復活。
 
-  2. 気配ログ       log_preopen_board --prod   ← **〜08:45**
-       母集団を広く取って気配を貯める。**初日**。1,000件貯めて初めて判定できる。
+  2. 気配ログ       log_preopen_board --prod   ← **08:00〜08:45**
+       **今日の候補(k_signals_<日付>.csv・数百銘柄)** の気配を貯める。
+       ⛔ 母集団を広げない。実測 0.3〜0.6件/秒 なので 1,500銘柄だと1周50分で
+          1周も終わらない(§18.44 で前提が崩れた)。候補なら1周10分で4周取れ、
+          300件/日 = 判定に要る1,000件に **4営業日**で届く。
        ⛔ K のウォームアップ(08:47)より前に終える。トークンは1つ。
 
   3+4. 対照測定     check_board_limits --warmup / --open   ← **既定OFF**
@@ -45,16 +46,17 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
 ■ 使い方
 
     .\mtest            (= python morning_test.py --prod)
-    python morning_test.py --prod --skip-rotate    # バッチ回しを飛ばす
+    python morning_test.py --prod --with-rotate    # バッチ回しも測る(結論済み)
     python morning_test.py --prod --no-open        # 09:00 の測定をしない
     python morning_test.py --prod --no-kpaper      # K の記録をしない
     python morning_test.py --dry-run               # 手順だけ表示して終了
 
 ■ ⛔ 注意
 
-  ・**開始は 08:00**。0(シグナル収集)と1(バッチ回し)で10分前後かかり、
-    残りを 2(気配ログ)に充てたい。08:30 開始でも 09:00 の測定は守られるが、
-    気配ログのカバー範囲が削られる。
+  ・**開始は 08:00**。0(シグナル収集)に5〜10分かかり、残りを 2(気配ログ)に
+    充てたい。08:30 開始でも 09:00 の測定は守られるが、気配ログが削られる。
+    前夜/早朝に `python k_open_confirm.py --collect` を済ませてあれば 0 は
+    自動スキップされるので、08:20 開始でも足りる。
   ・実行中は発注サーバ / watcher を起動しない(kabu の有効トークンは1つ)。
   ・候補は 0(--collect)が lss_proposal_full.py から自前で作るので、
     `.\daily` を先に流す必要は**ない**。
@@ -91,7 +93,13 @@ ap.add_argument("--k-warm-at", type=str, default="08:47",
                 help="K の空読み開始。候補6バッチ×コールド48秒 ≒ 5分を見込む")
 ap.add_argument("--warmup-at", type=str, default="08:58")
 ap.add_argument("--open-at", type=str, default="09:00")
-ap.add_argument("--skip-rotate", action="store_true")
+# ⛔ 2026-08-17 に結論が出た(§18.44): 場中/寄り前は 0.3〜0.6件/秒で、
+#    2周目も速くならない = バッチ回しでは壁を破れない。毎朝やる意味が
+#    無くなったので **既定OFF**。5〜8分かかり、気配ログの時間を奪う。
+ap.add_argument("--skip-rotate", action="store_true",
+                help="(既定で飛ばします。--with-rotate で有効化)")
+ap.add_argument("--with-rotate", action="store_true",
+                help="バッチ回しを測り直す。⛔結論は出ている(§18.44)")
 ap.add_argument("--skip-preopen", action="store_true")
 ap.add_argument("--no-open", action="store_true", help="09:00 の測定をしない")
 ap.add_argument("--with-board-speed", action="store_true",
@@ -159,7 +167,7 @@ print(f"""
 
   手順:
     0. シグナル収集 kabu不要      {'(スキップ)' if args.no_kpaper else ''}
-    1. バッチ回し   --rotate {args.rotate}      {'(スキップ)' if args.skip_rotate else ''}
+    1. バッチ回し   --rotate {args.rotate}      {'' if (args.with_rotate and not args.skip_rotate) else '(スキップ: 結論済み / --with-rotate で有効)'}
     2. 気配ログ     {args.preopen_from}〜{args.preopen_until}     {'(スキップ)' if args.skip_preopen else ''}
     3+4. 対照測定   {args.warmup_at}/{args.open_at}   {'' if (args.with_board_speed or args.no_kpaper) else '(スキップ: --with-board-speed で有効)'}
     5. K記録        {args.k_warm_at} 空読み → {args.open_at} 本番 → {args.poll_until} まで {'(スキップ)' if args.no_kpaper else ''}
@@ -192,7 +200,7 @@ elif not args.no_kpaper:
         _cmd0)))
 
 # ── 1. バッチ回し (一番先。登録/解除を繰り返すので後続に429を残さない) ──────
-if not args.skip_rotate:
+if args.with_rotate and not args.skip_rotate:
     _res.append(("1. バッチ回し", _run(
         f"1. バッチ回し ({args.rotate}銘柄を{args.rotate // 50}バッチ×2周)",
         _PY + ["check_board_limits.py"] + _P
