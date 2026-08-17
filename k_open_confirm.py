@@ -575,6 +575,34 @@ def _verify(_r, _lim: float, _qty: int) -> str:
     return ""
 
 
+def _reject(_sym: str, _res: dict) -> str:
+    """発注リジェクトを分類する。order_server と**同じ扱い**にする。
+
+    ・100302 売建規制 … 当日限りの動的規制。恒久除外はしない
+    ・4002013 一般信用デイトレ売り非対応 … 銘柄固有で安定するので
+      not_shortable.py に恒久追加し、次回からシグナル・発注の両方で事前除外
+    ⛔ ここを持たないと「毎朝同じ銘柄で失敗し続ける」ことになる。
+    """
+    _c = _res.get("Code")
+    try:
+        _ci = int(_c)
+    except Exception:
+        _ci = None
+    _msg = str(_res.get("Message", ""))
+    if _ci == 100302 or "売建規制" in _msg:
+        return (f"本日『売建規制』(100302)。当日限りなので恒久除外はしません")
+    if _ci == 4002013 or "MarginTradeType" in _msg:
+        try:
+            from order_server import _append_not_shortable
+            _append_not_shortable(_sym, "一般デイトレ売り非対応(4002013)")
+            return ("一般信用デイトレ売り非対応(4002013)。"
+                    "not_shortable.py に追加しました(次回から事前除外)")
+        except Exception as _ae:
+            return (f"一般信用デイトレ売り非対応(4002013)。"
+                    f"⚠ not_shortable への追記に失敗({_ae}) → 手で追加してください")
+    return str(_res)
+
+
 def _order_rows(_sel: list) -> None:
     """このグループの合格銘柄を発注する。--execute のときだけ実発注。"""
     if not _sel:
@@ -609,10 +637,15 @@ def _order_rows(_sel: list) -> None:
             _EX["ng"] += 1
             print(f"  ⛔ {_r['symbol']} 発注で例外: {_oe}", flush=True)
             continue
-        _ok = (not args.execute) or (str(_res.get("Result", "")) == "0")
+        # 成功判定は lss_budget_cap と揃える(Result==0 かつ OrderId あり)。
+        # OrderId が無いのに Result=0 のケースを通すと、発注できていないのに
+        # ordered_signals_lss.csv に残って watcher が空振りする。
+        _ok = (not args.execute) or (str(_res.get("Result", "")) == "0"
+                                     and bool(_res.get("OrderId")))
         if not _ok:
             _EX["ng"] += 1
-            print(f"  ⛔ {_r['symbol']} 発注失敗: {_res}", flush=True)
+            print(f"  ⛔ {_r['symbol']} 発注失敗: {_reject(_r['symbol'], _res)}",
+                  flush=True)
             continue
         _EX["n"] += 1
         _EX["yen"] += _need
@@ -969,6 +1002,49 @@ if _pass_k:
         print(f"  ⚠ ガード超過({args.guard_bp:+.0f}bp 超)で見送り {len(_ng)}件: "
               + ", ".join(r["symbol"] for r in _ng[:10]))
 if args.execute:
+    # ══════════════════════════════════════════════════════════════════
+    #  ★ 未約定の新規売り指値を **必ず取り消す** (2026-08-17)
+    # ══════════════════════════════════════════════════════════════════
+    # バックテストの J は「09:00 の始値で建てる。建たなければその日は無し」。
+    # ところが保護指値(始値×0.995)は **板に残る**ので、寄り直後に急落して
+    # 刺さらなかった注文が、昼に値が戻ってきたところで約定しうる。
+    # そうなると『始値で建てた』ことになっていないポジションを、モデルに
+    # 無い時刻・無い値段で持つことになる(§18.9 の鉄則違反)。
+    # ⛔ 一部約定(CumQty>0)は残す。取り消すと建玉だけ残って watcher が
+    #    決済できなくなる。cancel_gap_orders._budget_sweep と同じ方針。
+    if _EX["n"]:
+        _ACTIVE = {1, 2, 3, 4}          # 5=終了 は対象外
+        try:
+            _mine = {str(r["symbol"]) for r in _rows if int(r.get("ordered") or 0)}
+            _n_cxl = _n_keep = 0
+            for _o in (cli.get_orders() or []):
+                _sy = str(_o.get("Symbol", "")).upper() \
+                    .removesuffix(".T").split(".")[0]
+                if _sy not in _mine:
+                    continue            # 自分が今朝出した注文だけ触る
+                if int(_o.get("CashMargin") or 0) != 2:
+                    continue            # 信用新規売りのみ
+                if int(_o.get("OrderState") or _o.get("State") or 0) not in _ACTIVE:
+                    continue
+                if float(_o.get("CumQty", 0) or 0) > 0:
+                    _n_keep += 1
+                    continue            # 一部約定は残す
+                _rr = cli.cancel_order(_o.get("ID", ""))
+                _n_cxl += 1
+                print(f"  ✂ {_sy} 未約定の新規売り指値を取消"
+                      f"（始値で刺さらなかったため / Result={_rr.get('Result')}）",
+                      flush=True)
+            if _n_cxl or _n_keep:
+                print(f"  [取消] 未約定 {_n_cxl}件を取消 / 一部約定 {_n_keep}件は保持",
+                      flush=True)
+            else:
+                print(f"  [取消] 未約定の新規売り指値はありません（全部 約定済み）",
+                      flush=True)
+        except Exception as _ce:
+            print(f"  ⛔ 未約定注文の取消に失敗: {_ce}\n"
+                  f"    **板に指値が残っています**。kabuステーションで手動取消を"
+                  f"確認してください（昼に約定するとモデル外の建玉になります）",
+                  flush=True)
     print(f"""
   🚀 **発注しました** {_EX['n']}件 / 総額 {_EX['yen'] / 1e4:,.1f}万"""
           + (f" / 中止 {_EX['ng']}件" if _EX["ng"] else "")
