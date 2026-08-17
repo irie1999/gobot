@@ -12472,8 +12472,9 @@ function switchTbd(id, tab) {{
 
     # 明細に出す『その日の発注順』を先に確定させる(_rank_badge が読む)。
     # 母集団は約定・不約定の全候補 = シグナルタブに並ぶものと同じ。
+    # ⚠ _rk_day は下の J/L/K 用ブロックからも読むので try の外で作る。
+    _rk_day: dict = _dd(list)
     try:
-        _rk_day: dict = _dd(list)
         # ⛔ _eh_pending(当日ぶんの未決着シグナル)も入れる。入れないと当日の行に
         #    順位が付かず、しかも残りの順位が繰り上がって**シグナルタブとズレる**
         #    (2026-08-13: 4023 が実際は#8 なのに #2 と表示された)。
@@ -12485,15 +12486,25 @@ function switchTbd(id, tab) {{
         for _dk, _lst in _rk_day.items():
             for _i, _t in enumerate(sorted(_lst, key=_bud_order_key), 1):
                 _day_rank.setdefault(_rk_key(_t), _i)
-        # ★★ J/L/K 用の順位 (2026-08-17 ユーザー提案)。
-        #   ・母集団は **発注リストと同じ cumul**(_IMPL_POOL で絞る)
-        #   ・watch は **銘柄数**で切るので、銘柄単位に畳んでから順位を振る
-        #   ・登録は前夜に決めるので **遅寄りも枠を消費する**(落とさない)
-        #   これで「#63 → watch50 の圏外 → ライブでは登録すらしない」が
-        #   明細を見た瞬間に分かる。
+    except Exception as _rke:
+        print(f"[発注順] 明細の順位づけに失敗(表示は省略): {_rke}", flush=True)
+
+    # ★★ J/L/K 用の順位 (2026-08-17 ユーザー提案)。
+    #   ・母集団は **発注リストと同じ cumul**(_IMPL_POOL で絞る)
+    #   ・watch は **銘柄数**で切るので、銘柄単位に畳んでから順位を振る
+    #   ・登録は前夜に決めるので **遅寄りも枠を消費する**(落とさない)
+    #   これで「#63 → watch50 の圏外 → ライブでは登録すらしない」が
+    #   明細を見た瞬間に分かる。
+    # ⛔ **_day_rank とは別の try に分ける**(2026-08-17)。同じ try に入れると、
+    #   ここで例外が出たときに _day_rank だけが埋まった状態になり、バッジが
+    #   黙って旧番号にフォールバックする = **「前と同じ画面」に見えて失敗に
+    #   気づけない**。実際 1回それで切り分けに往復した。
+    try:
         _wr_syms: dict = _dd(dict)     # 日 -> {銘柄: 流動性}
+        _wr_seen = _wr_out = 0
         for _dk, _lst in _rk_day.items():
             for _t in _lst:
+                _wr_seen += 1
                 _c9 = str(_t.get("symbol", "")).upper() \
                     .removesuffix(".T").split(".")[0]
                 if not _c9:
@@ -12502,9 +12513,11 @@ function switchTbd(id, tab) {{
                     _ok9, _sd9 = _IMPL_POOL
                     _st9 = str(_t.get("strategy") or _t.get("strat") or "")
                     if (_c9, _st9) not in _ok9:
+                        _wr_out += 1
                         continue
                     _d9 = _sd9.get((_c9, _st9))
                     if _d9 and str(_t.get("entry_d_raw") or "") < str(_d9):
+                        _wr_out += 1
                         continue
                 _lq9 = float(_t.get("liquidity") or 0) or _liquidity_of(
                     str(_t.get("symbol", "")))
@@ -12514,8 +12527,20 @@ function switchTbd(id, tab) {{
             for _i, (_c9, _lq9) in enumerate(
                     sorted(_m9.items(), key=lambda kv: (-kv[1], kv[0])), 1):
                 _watch_rank[(_dk, _c9)] = _i
-    except Exception as _rke:
-        print(f"[発注順] 明細の順位づけに失敗(表示は省略): {_rke}", flush=True)
+        _wovr = sum(1 for _v in _watch_rank.values()
+                    if _WATCH_CAP_DISP > 0 and _v > _WATCH_CAP_DISP)
+        print(f"[発注順] J/L/K 用の順位: {len(_watch_rank):,}件"
+              f"(候補 {_wr_seen:,} / {_IMPL_POOL_FILE} 外 {_wr_out:,} 除外 / "
+              f"うち watch{_WATCH_CAP_DISP} 超 {_wovr:,}件は明細で **赤⛔**)",
+              flush=True)
+        if not _watch_rank:
+            print(f"  ⛔ 0件です。J/L/K の明細は **旧番号(lss土台のペア順位)** に"
+                  f"戻ります。{_IMPL_POOL_FILE} が読めているか確認してください",
+                  flush=True)
+    except Exception as _wre:
+        import traceback as _wtb
+        print(f"[発注順] ⛔ J/L/K 用の順位づけに失敗: {_wre}\n"
+              f"{_wtb.format_exc()}", flush=True)
 
     def _size_lots(_t, mode, target):
         """100株単位で、建玉(円) または リスク(円) を target に近づけるロット数。
