@@ -380,6 +380,24 @@ else:
           f"\n     --collect を最新版で回し直してください"
           f"(古い k_signals は liquidity 列を持っていません)", flush=True)
 
+# ⛔⛔ **実発注のときは watch50 で切る** (2026-08-17 発覚)。
+#   バックテストの J は `cumul × watch50`(流動性上位50銘柄)。ところが
+#   --max-symbols の既定は 0=無制限 で、--watch-j は **in_j の集計にしか
+#   使っていなかった**(_j_seen)。つまり --execute すると候補を全部読んで
+#   全部から建てることになり、**バックテストと別物**になる:
+#     ・候補は中央154銘柄(§18.44 実測) = J の3倍の母集団
+#     ・154銘柄は4バッチ。09:00 の読み取りが 2〜5分かかり、その間に
+#       -30bp 逃げる(§18.44)。50銘柄36.5秒 は実測済みだが154は未測定
+#   §18.9 の鉄則「バックテストとライブを必ず揃える」に従い、
+#   --execute のときは --watch-j(=50) を上限にする。
+#   記録だけの実行(K の研究)は従来どおり無制限のままでよい。
+if args.execute and args.max_symbols <= 0:
+    args.max_symbols = args.watch_j
+    print(f"  ★ --execute なので読む銘柄を **流動性上位{args.watch_j}件**に"
+          f"絞ります（= バックテストの J と同じ watch{args.watch_j}）。\n"
+          f"    ⛔ 絞らないと候補全部(中央154銘柄)から建てることになり、"
+          f"バックテストと別物になります(§18.9)。\n"
+          f"    変えるなら --max-symbols を明示（自己責任）", flush=True)
 if args.max_symbols > 0 and len(_syms) > args.max_symbols:
     print(f"  ⚠ 候補 {len(_syms):,}銘柄 を --max-symbols {args.max_symbols} で"
           f"切ります（{len(_syms) - args.max_symbols:,}銘柄は読みません）",
