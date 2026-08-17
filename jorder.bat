@@ -30,12 +30,11 @@ REM   (09:20 for a 09:00 fill). Polling to 09:30 would leave the position
 REM   unprotected past its arming time. Late opens are 93% done by 09:06
 REM   (measured, 18.44), so 09:10 is enough. morning_test enforces this.
 REM
-REM AFTER IT FINISHES - DO THIS IMMEDIATELY
-REM   python lss_exit_watcher.py --execute --prod --all-dates --stop-delay-bars 4
-REM   Without the watcher the position is held to the close with no stop.
-REM   J is delay4, so the watcher MUST use --stop-delay-bars 4 (18.9: the
-REM   backtest and the live side must always match).
-REM   Do not start it while this script is still running (one token only).
+REM   4. the exit watcher starts AUTOMATICALLY right after ordering ends,
+REM      with --stop-delay-bars 4 (J is delay4; 18.9 says the backtest and the
+REM      live side must always match). It runs until 15:30.
+REM      *** DO NOT CLOSE THE WINDOW BEFORE 15:30 *** - closing it early means
+REM      missed exits (18.4). Use .\jorder --no-watch to start it by hand.
 REM
 REM AFTER THE CLOSE
 REM   .\fills     -> real fills vs the test. This is where real slippage
@@ -51,6 +50,8 @@ echo ============================================================
 echo  J SMALL-LOT LIVE ORDERING - production account
 echo    default budget 50 (man-yen), hard cap the same
 echo    start this by 07:50 so the pre-open log covers 08:00-08:45
+echo    the exit watcher starts by itself after ordering and runs to 15:30
+echo    *** DO NOT CLOSE THIS WINDOW BEFORE 15:30 ***
 echo    do NOT run .\watch or the order server at the same time
 echo ============================================================
 python morning_test.py --prod --execute --stop-delay-bars 4 %*
@@ -60,6 +61,7 @@ goto :eof
 echo .\jorder [--budget 50] [--max-notional 50] [--dry-run]
 echo   Places REAL J orders on the production account, small lot by default.
 echo   Runs: collect -^> pre-open quote log -^> warm read -^> 09:00 poll+order.
-echo   After it ends, start the watcher with --stop-delay-bars 4.
+echo   The exit watcher (--stop-delay-bars 4) starts automatically and runs
+echo   until 15:30. Add --no-watch to start it by hand instead.
 echo   For a no-order paper run use .\mtest instead.
 goto :eof

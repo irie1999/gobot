@@ -124,7 +124,9 @@ ap.add_argument("--budget", type=float, default=50.0,
 ap.add_argument("--max-notional", type=float, default=0.0,
                 help="--execute の発注総額ハード上限(万円)。0=--budget と同じ")
 ap.add_argument("--stop-delay-bars", type=int, default=4,
-                help="発注後に案内する watcher の損切り遅延(J は 4)")
+                help="watcher の損切り遅延(J は 4)")
+ap.add_argument("--no-watch", action="store_true",
+                help="--execute でも watcher を自動起動しない(手で起動する)")
 args = ap.parse_args()
 
 # ⛔⛔ 実発注するときはポーリングを早く切る (2026-08-17)。
@@ -370,3 +372,55 @@ print(f"""
        ③**1周の読込秒数**が間隔(10秒)に収まっているか
        {_TAIL_NOTE}
 """)
+
+# ══════════════════════════════════════════════════════════════════════
+#  6. 決済 watcher (--execute のときだけ / 2026-08-17 ユーザー依頼)
+# ══════════════════════════════════════════════════════════════════════
+# ⛔ ここで **必ず** 起動する。起動しないと建玉は引けまで無防備。
+#   トークンは1つなので、手順5(k_open_confirm)が完全に終わってから。
+#   k_open_confirm は最後に unregister_all() してから抜けるので安全。
+# ⚠ このプロセスは **15:30 まで動き続ける**。ターミナルは占有される。
+#   途中で閉じると決済を取りこぼす(§18.4)。
+# ⚠ 手順5 が失敗していても起動する。一部だけ約定している可能性があるため。
+if args.execute and not args.no_watch:
+    _n_today = 0
+    try:
+        import csv as _csv6
+        _p6 = Path("ordered_signals_lss.csv")
+        if _p6.exists():
+            _today6 = f"{_dt.date.today()}"
+            _n_today = sum(
+                1 for r in _csv6.DictReader(open(_p6, encoding="utf-8"))
+                if str(r.get("record_date") or "")[:10] == _today6)
+    except Exception as _e6:
+        print(f"  ⚠ ordered_signals_lss.csv を読めません({_e6})", flush=True)
+    _wcmd = (_PY + ["lss_exit_watcher.py", "--execute"] + _P
+             + ["--all-dates", "--stop-delay-bars", str(args.stop_delay_bars)])
+    print(f"""
+{'=' * 74}
+▶ 6. 決済 watcher を起動します（J = delay{args.stop_delay_bars}）
+{'=' * 74}
+  今日の発注記録: {_n_today}件 (ordered_signals_lss.csv)
+  $ {' '.join(_wcmd[1:])}
+
+  ⛔ **15:30(大引け)まで閉じないこと**。途中で切ると決済を取りこぼします(§18.4)。
+  ⛔ この間は発注サーバ / 別の kabu スクリプトを起動しないこと(トークンは1つ)。
+  ★ 損切りは約定の{args.stop_delay_bars * 5}分後に武装します(delay{args.stop_delay_bars})。
+    それまでは利確と引け決済だけが有効です(設計どおり)。
+  ▶ 引け後: `.\\fills` で実約定と突合 → **実滑りがここで初めて測れます**
+{'=' * 74}
+""", flush=True)
+    if _n_today == 0:
+        print("  ⚠ 今日の発注記録が **0件** です。合格銘柄が無かったか、"
+              "発注が中止されています。\n"
+              "    建玉が無ければ watcher は何もしません(起動しても無害)。",
+              flush=True)
+    if not args.dry_run:
+        _run("6. 決済watcher", _wcmd)
+    else:
+        print("  (dry-run: 起動しません)", flush=True)
+elif args.execute:
+    print(f"""
+  ⚠ --no-watch なので watcher を起動していません。**手で起動してください**:
+      python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars}
+""", flush=True)
