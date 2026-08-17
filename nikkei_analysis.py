@@ -185,6 +185,46 @@ def _load_pool(path: str):
 _SIGNAL_POOL_FILE = os.environ.get("LSS_SIGNAL_POOL", "").strip()
 _SIGNAL_POOL = _load_pool(_SIGNAL_POOL_FILE) if _SIGNAL_POOL_FILE else None
 
+# ★★ E / H タブも **発注リストと同じ母集団**に保つ (2026-08-17)。
+#   ⛔ 2026-08-16 に土台を lss_proposal_full.py(選定なし)へ広げたとき、
+#     発注リストは _SIGNAL_POOL で守ったが **E/H の損益は full のまま**だった。
+#     H の確定設定(§18.37)は「選定=累積マージ(cumul)」なので、H タブが
+#     H を再現しなくなっていた。実測(2026-08-17): H は 7件 +109,384 と出たが、
+#     うち 4件 +95,184(87%) は cumul に無い 7936 で、**発注リストに1度も
+#     出ない銘柄**。本来の H は 3件 +14,200。
+#   ★ 選定なしを見たいときは L(watch50) / K(watch無制限) がある。
+#     『選定なし』は L と K だけ、が設計。
+#   空 or ファイル無し = 絞らない。
+_IMPL_POOL_FILE = os.environ.get("LSS_IMPL_PROPOSAL", "lss_proposal_cumul.py").strip()
+_IMPL_POOL = _load_pool(_IMPL_POOL_FILE) if _IMPL_POOL_FILE else None
+
+
+def _pool_keep(_ts, _pool):
+    """(許可ペア集合, 解禁日dict) で取引リストを絞る。
+
+    ⛔ START_DATES(解禁日)も必ず適用する。選定は過去成績で選ぶので、
+      解禁前の取引を入れると先読みになる(§18.29)。
+    ⚠ _size_equal_by_day の _in_pool と同じ判定だが、あちらが持つ
+      late_open(09:00に寄らなかった銘柄を落とす)は **付けない**。
+      E/H は前夜指値/寄成で、09:00 に件数を数える必要が無いため。
+    """
+    if not _pool or not _ts:
+        return _ts
+    _ok, _sd = _pool
+    _out = []
+    for _t in _ts:
+        if not isinstance(_t, dict):
+            continue
+        _c = str(_t.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
+        _st = str(_t.get("strategy") or _t.get("strat") or "")
+        if (_c, _st) not in _ok:
+            continue
+        _d0 = _sd.get((_c, _st))
+        if _d0 and str(_t.get("entry_d_raw") or "") < str(_d0):
+            continue
+        _out.append(_t)
+    return _out
+
 
 def _eq_pref_of(_g, _conf=None, _slow=False) -> str:
     """ギャップ閾値から資金均等の変種名の頭を作る(方式で形が違う)。
@@ -12221,7 +12261,11 @@ function switchTbd(id, tab) {{
         #    で、タブの『K 理想版』(watch無制限)ではなく **L 中間版**と同じ。
         #    ファイル名は下流(.\fills の突合 / measure_entry_decay)が参照して
         #    いるので変えない。中身は「実装できる形」なので用途としては正しい。
-        _hdumps = [("H", (_EH_TRADES or {}).get("H") or [])]
+        # ⛔ H は **発注リストと同じ母集団**で書く(2026-08-17)。絞らないと
+        #   .\fills が「発注リストに1度も出ない銘柄」と実約定を突合してしまい、
+        #   乖離の数字が意味を失う(タブ側と同じ 2026-08-16 の取りこぼし)。
+        _hdumps = [("H", _pool_keep((_EH_TRADES or {}).get("H") or [],
+                                    _IMPL_POOL))]
         if _EQ_TAB_KEY2:
             _hdumps.append(("K", (_EH_TRADES or {}).get(_EQ_TAB_KEY2) or []))
         for _hsfx, _hsrc in _hdumps:
@@ -12605,6 +12649,19 @@ function switchTbd(id, tab) {{
             _srck = ({"J": _EQ_TAB_J, "L": _EQ_TAB_L,
                       "K": _EQ_TAB_K}).get(_ehk, _ehk)
             _src = _EH_TRADES.get(_srck) or []
+            _nof = _EH_NF.get(_srck) or []
+            # ★★ E / H は **発注リストと同じ母集団(選定あり)** に絞る
+            #   (2026-08-17)。J/L/K は _size_equal_by_day の _pool で
+            #   すでに絞られている(J=選定あり / L・K=選定なし)ので触らない。
+            #   ⛔ ここを絞らないと H タブが §18.37 の H を再現しない。
+            if _ehk in ("E", "H") and _IMPL_POOL:
+                _n_b4, _nf_b4 = len(_src), len(_nof)
+                _src = _pool_keep(_src, _IMPL_POOL)
+                _nof = _pool_keep(_nof, _IMPL_POOL)
+                print(f"[E/H] {_ehk}: {_IMPL_POOL_FILE} で絞り込み "
+                      f"{_n_b4:,}→{len(_src):,}件"
+                      f"(不約定 {_nf_b4:,}→{len(_nof):,}件)。"
+                      f"選定なしは L / K タブで見ます", flush=True)
             if not _src:
                 continue
             try:
@@ -12619,7 +12676,7 @@ function switchTbd(id, tab) {{
                        else None)
                 with _ptimer("方式ごとの予算シミュ(E/H/J/K)"):
                     _ss = _run_budget_sim(_BUD_FLOOR, src=_src, order_key=_ok,
-                                          nofills=(_EH_NF.get(_srck) or []))
+                                          nofills=_nof)
                 _eh_sorted[_ehk] = _ss        # ← 集計用。**切らない**
                 # ★ 予算で切る **前** の全件。「シグナルとして出た取引が全部
                 #   見たい」用。予算内タブ(上)は毎日 流動性順に400万で切るので、
