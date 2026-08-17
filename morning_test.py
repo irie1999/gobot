@@ -43,7 +43,8 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
           登録がまるごとコールドで、始値スナップショットが5分遅れていた。
        全候補の始値を取り、+50bp判定 → 合格件数 → 予算÷件数 で株数まで出して
        k_paper_<日付>.csv に書く。09:30 まで10秒ごとに回して遅寄りも拾う。
-       ⛔ 発注しない(k_open_confirm は売買系を import すらしていない)。
+       ⛔ 既定は **発注しない**(記録だけ)。`.\jorder`(= --execute)を付けた
+          ときだけ、合格銘柄を **保護指値売り @ 始値×(1-50bp)** で実発注する。
 
 ■ 使い方
 
@@ -60,8 +61,10 @@ r"""morning_test.py — 明日の朝に測るものを **1コマンド** で順�
     前夜/早朝に `python k_open_confirm.py --collect` を済ませてあれば 0 は
     自動スキップされるので、08:20 開始でも足りる。
   ・実行中は発注サーバ / watcher を起動しない(kabu の有効トークンは1つ)。
-  ・候補は 0(--collect)が lss_proposal_full.py から自前で作るので、
-    `.\daily` を先に流す必要は**ない**。
+  ・候補は 0(--collect)が **holdout_selected_symbols.py**(= レポートの
+    発注リストと同じ母集団)から作る。⛔ そのファイルは `.\daily` が書くので、
+    **前日に `.\daily` を回しておくこと**。無いと cumul にフォールバックし、
+    価格・空売り可否のフィルタが掛かっていない母集団になる。
 """
 from __future__ import annotations
 
@@ -119,8 +122,12 @@ ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終
 # ★★ 実発注 (2026-08-17)。既定OFF。付けない限り手順5は記録だけ。
 ap.add_argument("--execute", action="store_true",
                 help="⚠ 手順5で **実発注する**(J)。既定は記録のみ")
-ap.add_argument("--budget", type=float, default=50.0,
-                help="--execute の予算(万円)。既定50万 = 少額から始める")
+# ⛔ 既定は **60万**。価格帯の上限は6,000円なので 1単元=60万 必要。
+#   50万にすると 5,000円超の銘柄が「0単元」で黙って落ちる(実測)。
+#   滑りを測るのが目的なのに、値がさ株だけ母集団から消えると偏る。
+ap.add_argument("--budget", type=float, default=60.0,
+                help="--execute の予算(万円)。"
+                     "既定60万 = 6,000円株1単元がちょうど建てられる最小額")
 ap.add_argument("--max-notional", type=float, default=0.0,
                 help="--execute の発注総額ハード上限(万円)。0=--budget と同じ")
 ap.add_argument("--stop-delay-bars", type=int, default=4,
@@ -295,12 +302,12 @@ if not args.no_open and (args.with_board_speed or args.no_kpaper):
         + ["--open", "--n", str(args.n)])))
 
 # ── 5. K のペーパー記録 (2026-08-16 ユーザー決定: 現行Hは止め、J/K に専念) ──
-#   ⛔ 発注しない。k_open_confirm.py は売買系を import すらしていない。
+#   ⛔ 発注は --execute のときだけ。既定は記録のみ。
 #   4 の直後に走らせる(登録がまだウォームなので速い)。
 if not args.no_kpaper:
     # ★★ ポーリング版 (2026-08-16)。09:00 以降に寄る銘柄も拾い、
     #   **寄り時刻の実データ**を貯める。これが「即時」(§18.41)の検証に直結。
-    #   ⛔ 発注はしない(k_open_confirm は売買系を import すらしていない)。
+    #   ⛔ 発注は --execute のときだけ(既定は記録のみ)。
     # ⛔ `--now` を付けない。付けると 08:47 に起動した瞬間に本番読みを始めて
     #    しまう。k_open_confirm 自身が --warm-at で空読み → --open-at まで
     #    待つので、**09:00 前に起動して待たせる**のが正しい(2026-08-17)。

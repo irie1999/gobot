@@ -114,6 +114,10 @@ ap.add_argument("--limit-slip-bp", type=float, default=50.0,
 ap.add_argument("--max-notional", type=float, default=0.0,
                 help="発注総額の上限(万円)。0=--budget と同じ。"
                      "**予算とは別のハード上限**で、超えたらそこで発注を止める")
+ap.add_argument("--margin-type", type=int, default=3,
+                help="信用区分 3=一般デイトレ(既定) / 1=制度。"
+                     "⛔ 制度(1)は空売りが貸借銘柄限定なので、非貸借銘柄も売る "
+                     "J では 3 でないと MarginTradeType 不正で弾かれる")
 ap.add_argument("--budget", type=float, default=400.0, help="予算(万円)")
 ap.add_argument("--max-yen", type=float, default=50.0, help="1銘柄の上限(万円)")
 ap.add_argument("--max-lot", type=int, default=10, help="1銘柄の最大単元")
@@ -177,6 +181,12 @@ _ATR: dict = {}
 # 銘柄 -> 流動性(直近120日の平均売買代金)。**読む順=発注順**を決める。
 # ⛔ ここが空だと --max-symbols が銘柄コード順に切ってしまう(2026-08-17)。
 _SIG_LIQ: dict = {}
+# 銘柄 -> その銘柄で今日シグナルが出た **戦略の本数**。
+# ⛔ バックテストの J は (銘柄×戦略) を1件ずつ数えて `予算 ÷ 合格件数` で配り、
+#    そのうえで銘柄ごとに --max-yen で頭を切る(§18.38 #3b)。ライブは銘柄単位に
+#    重複排除して1本だけ発注するので、**戦略の本数で割らないと配分がズレる**
+#    (7936 のように4戦略出る銘柄で大きく食い違う)。§18.9 の鉄則に従って揃える。
+_NPAIR: dict = {}
 
 # ══════════════════════════════════════════════════════════════════════
 #  --collect : 今日のシグナルだけを収集する (kabu を使わない)
@@ -239,6 +249,13 @@ if args.collect:
                    for x in _nsns.get("NOT_SHORTABLE", [])}
     except Exception as _e:
         print(f"  ⚠ not_shortable.py 読み込み失敗: {_e} → 除外なしで続行")
+    # --symbols を指定したらそこに絞る(動作確認用)。指定しなければ全ペア。
+    if args.symbols:
+        _pick = {s.strip().upper().removesuffix(".T").split(".")[0]
+                 for s in args.symbols.split(",") if s.strip()}
+        _pairs = [p for p in _pairs
+                  if str(p[0]).upper().removesuffix(".T").split(".")[0] in _pick]
+        print(f"[collect] --symbols で {len(_pairs):,}ペアに絞りました", flush=True)
     _n0 = len(_pairs)
     if _ns:
         _pairs = [p for p in _pairs
@@ -285,8 +302,12 @@ if args.collect:
                      "atr": _sg.get("atr", 0)})
     # 重複銘柄は残す(複数戦略で出る)。登録は銘柄単位で重複排除する。
     with open(_sig_csv, "w", newline="", encoding="utf-8-sig") as f:
+        # ⛔ liquidity を fieldnames に入れ忘れると DictWriter が
+        #   ValueError("dict contains fields not in fieldnames") で落ちる
+        #   = 手順0 でクラッシュして朝が止まる(2026-08-17 に実際に踏んだ)。
         w = _csv.DictWriter(f, fieldnames=["symbol", "name", "strategy",
-                                           "order_price", "prev_close", "atr"])
+                                           "order_price", "prev_close", "atr",
+                                           "liquidity"])
         w.writeheader()
         w.writerows(_out)
     _uq = len({r["symbol"] for r in _out})
@@ -330,6 +351,7 @@ elif Path(_sig_csv).exists():
             _l0 = 0.0
         if _l0 > 0 and _l0 > _SIG_LIQ.get(_s0, 0):
             _SIG_LIQ[_s0] = _l0
+        _NPAIR[_s0] = _NPAIR.get(_s0, 0) + 1
         if _s0 not in _syms:
             _syms.append(_s0)
     print(f"[候補] {_sig_csv} から **今日のシグナル {len(_syms):,}銘柄**",
@@ -391,6 +413,20 @@ else:
 #   §18.9 の鉄則「バックテストとライブを必ず揃える」に従い、
 #   --execute のときは --watch-j(=50) を上限にする。
 #   記録だけの実行(K の研究)は従来どおり無制限のままでよい。
+# ⛔ 予算が「価格帯の上限 × 100株」に届かないと、値がさ株が **黙って0単元で
+#   落ちる**(実測: 予算50万だと6,000円株は建てられない)。滑りを測るのが目的
+#   なのに値がさ株だけ母集団から消えると偏るので、必ず知らせる。
+if args.execute:
+    _need1 = args.max_price * 100
+    if args.budget * 1e4 < _need1:
+        print(f"  ⛔ 予算 {args.budget:.0f}万 では "
+              f"**{args.max_price:,.0f}円台の銘柄が建てられません**"
+              f"(1単元 {_need1 / 1e4:.0f}万 必要)。\n"
+              f"    合格しても0単元で落ちるので、値がさ株だけ母集団から"
+              f"消えて偏ります。\n"
+              f"    → --budget {_need1 / 1e4:.0f} 以上にしてください",
+              flush=True)
+
 if args.execute and args.max_symbols <= 0:
     args.max_symbols = args.watch_j
     print(f"  ★ --execute なので読む銘柄を **流動性上位{args.watch_j}件**に"
@@ -478,7 +514,12 @@ print(f"""
 
 # ⛔ dry_run は **--execute を付けたときだけ** False。付けなければ発注系は
 #   API を叩かず内容を print するだけ(kabu_api の設計 / §12.4)。
-cli = KabuClient(prod=args.prod, dry_run=not args.execute)
+#   margin_type=3 (一般信用デイトレ) が必須。kabu_api の既定は 1(制度信用)で、
+#   制度は空売りが貸借銘柄限定なので非貸借銘柄が MarginTradeType 不正で弾かれる。
+#   他のライブ経路(kabu_send_lss / lss_budget_cap / lss_exit_watcher / order_server)
+#   は全部 3 を渡しており、ここだけ漏れていた。
+cli = KabuClient(prod=args.prod, dry_run=not args.execute,
+                 margin_type=args.margin_type)
 cli.connect()
 
 # ══════════════════════════════════════════════════════════════════════
@@ -539,6 +580,8 @@ def _order_rows(_sel: list) -> None:
     if not _sel:
         return
     for _r in sorted(_sel, key=lambda x: -float(x.get("gap_bp") or 0)):
+        if int(_r.get("ordered") or 0):
+            continue          # 二重発注の保険(グループは1回しか通らないが念のため)
         _lot = int(_r.get("lots_k") or 0)
         if _lot <= 0:
             continue
@@ -701,13 +744,19 @@ def _size_group_live(_g: int, _sel: list) -> None:
         return
     _bud, _cap = args.budget * 1e4, args.max_yen * 1e4
     _alloc = min(_bud * args.g1, _EX["left"]) if _g == 0 else _EX["left"]
-    _per = min(_alloc / len(_sel), _cap) if _cap > 0 else _alloc / len(_sel)
+    # 分母は **戦略の本数**(バックテストと揃える / _NPAIR のコメント参照)
+    _np = sum(max(1, _NPAIR.get(str(r["symbol"]), 1)) for r in _sel)
+    _per = _alloc / max(1, _np)
     _used = 0.0
     for r in sorted(_sel, key=lambda x: -float(x.get("gap_bp") or 0)):
         _u = float(r["open_p"] or 0) * 100
         if _u <= 0:
             continue
-        _lot = min(args.max_lot, int(_per // _u))
+        # その銘柄の枠 = 1戦略ぶん × 本数。上限(--max-yen)で頭を切る。
+        _sy = _per * max(1, _NPAIR.get(str(r["symbol"]), 1))
+        if _cap > 0:
+            _sy = min(_sy, _cap)
+        _lot = min(args.max_lot, int(_sy // _u))
         if _cap > 0:
             _lot = min(_lot, int(_cap // _u))
         _lot = max(1, _lot)
@@ -740,13 +789,17 @@ def _size_groups(_rows: list) -> None:
         if not _sel:
             continue
         _alloc = min(_bud * args.g1, _R) if _g == 0 else _R
-        _per = min(_alloc / len(_sel), _cap) if _cap > 0 else _alloc / len(_sel)
+        _np = sum(max(1, _NPAIR.get(str(r["symbol"]), 1)) for r in _sel)
+        _per = _alloc / max(1, _np)
         _used = 0.0
         for r in _sel:
             _u = float(r["open_p"]) * 100
             if _u <= 0:
                 continue
-            _lot = min(args.max_lot, int(_per // _u))
+            _sy = _per * max(1, _NPAIR.get(str(r["symbol"]), 1))
+            if _cap > 0:
+                _sy = min(_sy, _cap)
+            _lot = min(args.max_lot, int(_sy // _u))
             if _cap > 0:
                 _lot = min(_lot, int(_cap // _u))
             _lot = max(1, _lot)          # 1件目は最低1単元(現行と同じ)
