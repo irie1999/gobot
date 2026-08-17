@@ -357,6 +357,15 @@ elif Path(_sig_csv).exists():
     print(f"[候補] {_sig_csv} から **今日のシグナル {len(_syms):,}銘柄**",
           flush=True)
 else:
+    # ⛔⛔ 実発注のときは **代用してはいけない**。WATCHLIST は「今日シグナルが
+    #    出た銘柄」ではないので、代用するとシグナルの無い銘柄を建てにいく。
+    #    (ATR が無いので _verify が全部止めるはずだが、そこに頼らない)
+    if args.execute:
+        sys.exit(f"[error] {_sig_csv} がありません。\n"
+                 f"  ⛔ --execute では WATCHLIST で代用しません"
+                 f"（今日のシグナルではないので、無関係の銘柄を建てます）。\n"
+                 f"  先に `python k_open_confirm.py --collect` を"
+                 f"09:00より前に走らせてください")
     _p = args.symbols_file or "holdout_selected_symbols.py"
     if not Path(_p).exists():
         sys.exit(f"[error] {_sig_csv} も {_p} もありません。\n"
@@ -1045,6 +1054,56 @@ if args.execute:
                   f"    **板に指値が残っています**。kabuステーションで手動取消を"
                   f"確認してください（昼に約定するとモデル外の建玉になります）",
                   flush=True)
+    # ══════════════════════════════════════════════════════════════════
+    #  ★ 損切りの武装時刻を **寄り時刻** に固定する (2026-08-17)
+    # ══════════════════════════════════════════════════════════════════
+    # watcher の delay は「**建玉を初めて検知した時刻**の5分足」を基準に武装する
+    # (lss_exit_watcher._stop_arm_time / first_seen)。ところが J は watcher を
+    # 09:05〜09:10 に起動するので、09:00 に建てた玉でも first_seen が 09:10 に
+    # なり、delay4 の武装が 09:20 → **09:30 と10分ずれる**。
+    # → .lss_watcher_seen.json に **その銘柄が寄った時刻** を先に書いておく。
+    #   これは watcher が「場中の再起動で無保護窓が伸びる」のを防ぐために
+    #   持っている仕組み(§18.37)で、そこに正しい始点を入れるだけ。
+    if _EX["n"]:
+        try:
+            import json as _json
+            _sp = Path(__file__).resolve().parent / ".lss_watcher_seen.json"
+            _today = f"{_dt.date.today():%Y-%m-%d}"
+            _cur: dict = {}
+            if _sp.exists():
+                try:
+                    _cur = (_json.loads(_sp.read_text(encoding="utf-8"))
+                            .get(_today) or {})
+                except Exception:
+                    _cur = {}
+            _n_seed = 0
+            for _r in _rows:
+                if not int(_r.get("ordered") or 0):
+                    continue
+                _sy = str(_r["symbol"])
+                if _sy in _cur:
+                    continue          # watcher が既に書いていたら尊重する
+                _m = re.search(r"T?(\d{2}):(\d{2}):?(\d{2})?",
+                               str(_r.get("open_time") or ""))
+                if _m:
+                    _t = _dt.datetime.now().replace(
+                        hour=int(_m.group(1)), minute=int(_m.group(2)),
+                        second=int(_m.group(3) or 0), microsecond=0)
+                else:
+                    _h, _mi = (int(x) for x in str(args.open_at).split(":"))
+                    _t = _dt.datetime.now().replace(hour=_h, minute=_mi,
+                                                    second=0, microsecond=0)
+                _cur[_sy] = _t.isoformat()
+                _n_seed += 1
+            _sp.write_text(_json.dumps({_today: _cur}, ensure_ascii=False),
+                           encoding="utf-8")
+            print(f"  [武装] 損切りの起点を **寄り時刻** で {_n_seed}件 記録しました"
+                  f"（{_sp.name}）。watcher はここから delay 本数ぶん後に武装します。\n"
+                  f"    ⛔ これが無いと watcher の起動時刻が起点になり、"
+                  f"無保護窓が10分伸びます", flush=True)
+        except Exception as _se:
+            print(f"  ⚠ 武装時刻の記録に失敗({_se})。watcher の起動時刻が起点に"
+                  f"なるので、無保護窓が最大10分伸びます", flush=True)
     print(f"""
   🚀 **発注しました** {_EX['n']}件 / 総額 {_EX['yen'] / 1e4:,.1f}万"""
           + (f" / 中止 {_EX['ng']}件" if _EX["ng"] else "")

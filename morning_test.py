@@ -247,9 +247,18 @@ elif not args.no_kpaper:
     _cmd0 = _PY + ["k_open_confirm.py", "--collect"]
     if args.symbols_file:
         _cmd0 += ["--symbols-file", args.symbols_file]
-    _res.append(("0. シグナル収集", _run(
-        "0. 今日のシグナル収集 (k_signals_<日付>.csv / kabu 不要・数分かかる)",
-        _cmd0)))
+    _ok0 = _run("0. 今日のシグナル収集 (k_signals_<日付>.csv / kabu 不要・数分かかる)",
+                _cmd0)
+    _res.append(("0. シグナル収集", _ok0))
+    # ⛔ 実発注のときは、シグナルが作れていないのに先へ進まない。
+    #   代用(WATCHLIST)で09:00を迎えると、今日シグナルの出ていない銘柄を
+    #   読みにいくことになる。k_open_confirm 側でも止めるが、ここで気配ログの
+    #   45分を無駄にしないよう先に落とす。
+    if args.execute and not args.dry_run and not (
+            _ok0 and _sig_today.exists()):
+        sys.exit("\n⛔ 手順0(シグナル収集)に失敗しました。実発注は中止します。\n"
+                 "   `python k_open_confirm.py --collect` を手で走らせて"
+                 "原因を確認してください。")
 
 # ── 1. バッチ回し (一番先。登録/解除を繰り返すので後続に429を残さない) ──────
 if args.with_rotate and not args.skip_rotate:
