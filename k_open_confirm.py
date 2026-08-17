@@ -527,7 +527,34 @@ print(f"""
   合格 {len(_pass_k):,}件 → 建てる {sum(1 for r in _rows if r['lots_k'])}件 / """
       f"""投入 {sum(float(r['yen_k'] or 0) for r in _rows) / 1e4:,.0f}万
   うちJ(選定あり上位{args.watch_j}) 合格 {len(_pass_j):,}件
+""")
 
+# ★ 合格銘柄の一覧 (2026-08-17 ユーザー要望)。CSV を開かなくても分かるように。
+#   ⛔ 発注リストではない。あくまで「その朝 K なら何を建てたか」の記録。
+if _pass_k:
+    print(f"  ── 合格銘柄 ({len(_pass_k)}件) "
+          f"{'─' * 46}\n"
+          f"  {'銘柄':<8}{'J':>3}{'ギャップ':>10}{'前日終値':>10}"
+          f"{'始値':>10}{'寄り時刻':>10}{'株数':>8}{'投入額':>12}")
+    for _r in sorted(_pass_k, key=lambda x: -float(x.get("gap_bp") or 0)):
+        # ⛔ OpeningPriceTime は "2026-08-17T09:00:03+09:00" 形式。
+        #    末尾スライスだと "03+09" になるので必ず正規表現で抜く。
+        _mt = re.search(r"(\d{2}:\d{2}:\d{2})", str(_r.get("open_time") or ""))
+        _tm = _mt.group(1) if _mt else ("遅寄" if str(_r.get("late")) == "1"
+                                        else "-")
+        print(f"  {_r['symbol']:<8}"
+              f"{'✓' if str(_r.get('in_j')) == '1' else '':>3}"
+              f"{float(_r['gap_bp'] or 0):>+9.0f}bp"
+              f"{float(_r['prev_close'] or 0):>10,.0f}"
+              f"{float(_r['open_p'] or 0):>10,.0f}"
+              f"{_tm:>10}"
+              f"{int(_r['lots_k'] or 0) * 100:>7,}株"
+              f"{float(_r['yen_k'] or 0):>11,.0f}円")
+    _ng = [r for r in _rows if r.get("guard_ng")]
+    if _ng:
+        print(f"  ⚠ ガード超過({args.guard_bp:+.0f}bp 超)で見送り {len(_ng)}件: "
+              + ", ".join(r["symbol"] for r in _ng[:10]))
+print(f"""
   ⛔ **発注していません**。この CSV は「その朝 K なら何を建てたか」の記録です。
   ★ 貯めたら 5分足の始値と突合して、**板の始値 = 5分足の始値** かを確認する
     (バックテストの前提そのもの)。ズレるなら K の全数字が影響を受けます。
