@@ -198,6 +198,10 @@ _SIGNAL_POOL = _load_pool(_SIGNAL_POOL_FILE) if _SIGNAL_POOL_FILE else None
 _IMPL_POOL_FILE = os.environ.get("LSS_IMPL_PROPOSAL", "lss_proposal_cumul.py").strip()
 _IMPL_POOL = _load_pool(_IMPL_POOL_FILE) if _IMPL_POOL_FILE else None
 
+# watch 上限の診断ログを1回だけ出すための既出セット。_size_equal_by_day は
+# 変種ごとに呼ばれる(実測 69回)ので、素直に print すると同じ行が69本出る。
+_WATCH_DIAG_SEEN: set = set()
+
 
 def _pool_keep(_ts, _pool):
     """(許可ペア集合, 解禁日dict) で取引リストを絞る。
@@ -11691,7 +11695,9 @@ function switchTbd(id, tab) {{
                         _nsym_day.append(len(_bys))
                     # 流動性が1件も取れないと **黙って銘柄コード順**に落ちる。
                     # 静かに壊れる種類なので必ず知らせる。
-                    if _nliq and _nzero > _nliq * 0.2:
+                    if (_nliq and _nzero > _nliq * 0.2
+                            and ("zero", int(_watch)) not in _WATCH_DIAG_SEEN):
+                        _WATCH_DIAG_SEEN.add(("zero", int(_watch)))
                         print(f"  ⛔ watch{_watch}: 流動性が取れない候補が "
                               f"{_nzero:,}/{_nliq:,}件。その分は **銘柄コード順**"
                               f"に落ちるので、読む50件がライブと食い違います",
@@ -11705,11 +11711,15 @@ function switchTbd(id, tab) {{
                         _ns = sorted(_nsym_day)
                         _nmed = _ns[len(_ns) // 2]
                         _ncut = sum(1 for x in _ns if x > _watch)
-                        print(f"  [watch{_watch}] 登録候補(銘柄/日): 中央 {_nmed}"
-                              f" / 最大 {_ns[-1]} / 上限超えの日 {_ncut}/{len(_ns)}"
-                              f" ({_ncut / len(_ns) * 100:.0f}%)"
-                              f"  ← 発注リストの件数と合うか確認",
-                              flush=True)
+                        _dk = ("cand", int(_watch), _nmed, _ns[-1], len(_ns))
+                        if _dk not in _WATCH_DIAG_SEEN:
+                            _WATCH_DIAG_SEEN.add(_dk)
+                            print(f"  [watch{_watch}] 登録候補(銘柄/日): 中央 "
+                                  f"{_nmed} / 最大 {_ns[-1]} / 上限超えの日 "
+                                  f"{_ncut}/{len(_ns)} "
+                                  f"({_ncut / len(_ns) * 100:.0f}%)"
+                                  f"  ← 発注リストの件数と合うか確認",
+                                  flush=True)
 
             for _d, _lst in _by.items():
                 # ★ 登録上限で見られなかった銘柄は建てられない(09:00に始値を
@@ -19227,8 +19237,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     except Exception as _bsce:
         print(f"[予算] スイープ生成に失敗: {_bsce}", flush=True)
     try:
-        if _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted and str(
-                os.environ.get("LSS_STRAT_LOO_TAB", "1")).strip() not in ("0", "false", "no"):
+        # ★ 既定OFF (2026-08-17)。実測 54.8s = 損益タブの **58.9%** を占める
+        #   単独最大の負荷なのに、§18.36 で「6戦略とも使う」と決着している
+        #   (walk-forward が現状を下回った)。フィルタ探索と同じ扱いにする。
+        #   掘り直すときだけ set LSS_STRAT_LOO_TAB=1。
+        if str(os.environ.get("LSS_STRAT_LOO_TAB", "0")).strip() in ("0", "false", "no"):
+            print("[戦略別] スキップ (既定OFF)。損益タブの約6割を占める最重量"
+                  "ブロックで、18.36 で『6戦略とも使う』と決着済み。"
+                  "掘るなら set LSS_STRAT_LOO_TAB=1", flush=True)
+        elif _HEAVY_OK and _LSS_ORDER_MODE and _eh_sorted:
             import time as _slt
             _t0 = _slt.time()
             with _ptimer("戦略別LOO"):
