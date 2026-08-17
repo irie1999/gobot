@@ -10430,6 +10430,15 @@ function switchTbd(id, tab) {{
             elif _eh_kind == "E":
                 olp_sub = (f'<br><span style="font-size:0.71rem;color:#a78bfa">'
                            f'寄成(板寄せ)</span>')
+            elif _eh_kind in ("J", "L", "K") and _EQ_METHOD_CONF:
+                # ⛔ J/L/K は **09:00確認方式**(始値を見てから発注)。ここを H と
+                #    同じ「指値:X / 板寄せなら指値以上で約定」と出すと、
+                #    『前夜に指値を置いた』という誤読を招く(2026-08-17 に指摘)。
+                #    確認方式に指値は存在せず、約定価格は **始値そのもの**。
+                olp_sub = (f'<br><span style="font-size:0.71rem;color:#facc15">'
+                           f'09:00の始値で約定</span>'
+                           f'<br><span style="font-size:0.68rem;color:#64748b">'
+                           f'始値を見てから発注(指値は置かない)</span>')
             elif _LSS_H_ENTRY or _eh_kind:
                 olp_sub = (f'<br><span style="font-size:0.71rem;color:#f0abfc">'
                            f'指値:{olp:,.0f}</span>'
