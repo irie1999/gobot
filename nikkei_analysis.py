@@ -11550,12 +11550,15 @@ function switchTbd(id, tab) {{
             #   同じ1回の実行で両方を出せるので、比較が別実行にならない(18.24)。
             #   ⛔ START_DATES(解禁日)も必ず適用すること。選定は過去成績で選ぶので、
             #     解禁前の取引を入れると先読みになる。
-            def _in_pool(_t) -> bool:
-                # ★ 09:00 に寄らなかった銘柄日(2026-08-16)。既定で落とす。
-                #   09:00 に件数を確定できないとサイズが決められないため。
-                #   _keep_late=True の変種で「捨てているぶん」を測れる。
-                if _t.get("late_open") and not _keep_late:
-                    return False
+            def _pair_ok(_t) -> bool:
+                """ペアと解禁日だけを見る。**late_open は見ない。**
+
+                ⛔ kabu への銘柄登録は **前夜**に決める(2026-08-17)。
+                  「その銘柄が翌朝09:00に寄るか」は前夜には分からないので、
+                  登録候補(=watch の母集団)からは外せない。
+                  外すと watch50 の切り口が **実際より深くまで届く**ことになり、
+                  ライブでは登録すらしない銘柄をバックテストが建ててしまう。
+                """
                 if not _pool:
                     return True
                 _ok, _sd = _pool
@@ -11566,6 +11569,19 @@ function switchTbd(id, tab) {{
                     return False
                 _d0 = _sd.get((_c, _st))
                 return not (_d0 and str(_t.get("entry_d_raw") or "") < str(_d0))
+
+            def _in_pool(_t) -> bool:
+                """建てられるか。ペア/解禁日に加えて **09:00に寄ったか**も見る。
+
+                ★ 09:00 に寄らなかった銘柄日(2026-08-16)。既定で落とす。
+                  09:00 に件数を確定できないとサイズが決められないため。
+                  _keep_late=True の変種で「捨てているぶん」を測れる。
+                ⛔ **登録候補(_cd)には使わないこと**。登録は前夜に決めるので、
+                  遅寄りを先に落とすと watch の切り口がずれる(_pair_ok を使う)。
+                """
+                if _t.get("late_open") and not _keep_late:
+                    return False
+                return _pair_ok(_t)
 
             _by: dict = {}
             for _t in _ts:
@@ -11603,9 +11619,14 @@ function switchTbd(id, tab) {{
             if _nf is not None:
                 for _t in list(_ts) + list(_nf or []):
                     _d0 = str(_t.get("entry_d_raw") or "")
-                    # 候補(=09:00に読む銘柄)も同じ母集団に絞る。絞らないと
-                    # watch の上位50件が選定外の銘柄で埋まってしまう。
-                    if _d0 and _in_pool(_t):
+                    # 候補(=前夜に登録し 09:00 に読む銘柄)も同じ母集団に絞る。
+                    # 絞らないと watch の上位50件が選定外の銘柄で埋まる。
+                    # ⛔⛔ ここは **_pair_ok**(遅寄りを落とさない)を使う
+                    #   (2026-08-17)。_in_pool だと late_open を先に捨てるので
+                    #   登録候補が実際より減り、watch50 の切り口が **深くまで
+                    #   届いてしまう**。前夜には「翌朝寄るか」は分からないので、
+                    #   遅寄り銘柄も必ず登録枠を1つ消費する。
+                    if _d0 and _pair_ok(_t):
                         _cd.setdefault(_d0, []).append(_t)
                 for _d0, _l0 in _cd.items():
                     if _dedup:
@@ -11650,6 +11671,7 @@ function switchTbd(id, tab) {{
                     #   → k_open_confirm の --max-symbols と **同じバグ**(449a7ab)。
                     #   liquidity が無ければ _liquidity_of() で引く(銘柄単位でキャッシュ)。
                     _nliq = _nzero = 0
+                    _nsym_day: list = []      # 日ごとの候補銘柄数(登録対象)
                     for _d0, _l0 in _cd.items():
                         _bys: dict = {}
                         for _t in _l0:
@@ -11666,12 +11688,27 @@ function switchTbd(id, tab) {{
                                 _bys[_s0] = (_lq, _s0)
                         _rk = sorted(_bys.values(), key=lambda x: (-x[0], x[1]))
                         _allow[_d0] = {x[1] for x in _rk[:_watch]}
+                        _nsym_day.append(len(_bys))
                     # 流動性が1件も取れないと **黙って銘柄コード順**に落ちる。
                     # 静かに壊れる種類なので必ず知らせる。
                     if _nliq and _nzero > _nliq * 0.2:
                         print(f"  ⛔ watch{_watch}: 流動性が取れない候補が "
                               f"{_nzero:,}/{_nliq:,}件。その分は **銘柄コード順**"
                               f"に落ちるので、読む50件がライブと食い違います",
+                              flush=True)
+                    # ★ 登録候補の数を出す(2026-08-17)。発注リストの件数と
+                    #   突き合わせられないと「watch50 が本当に効いているか」が
+                    #   分からない。ここが発注リストより **少ない** なら、
+                    #   5分足データ不足などでバックテスト側から先に消えた銘柄が
+                    #   あり、その分だけ切り口が深くまで届いている。
+                    if _nsym_day:
+                        _ns = sorted(_nsym_day)
+                        _nmed = _ns[len(_ns) // 2]
+                        _ncut = sum(1 for x in _ns if x > _watch)
+                        print(f"  [watch{_watch}] 登録候補(銘柄/日): 中央 {_nmed}"
+                              f" / 最大 {_ns[-1]} / 上限超えの日 {_ncut}/{len(_ns)}"
+                              f" ({_ncut / len(_ns) * 100:.0f}%)"
+                              f"  ← 発注リストの件数と合うか確認",
                               flush=True)
 
             for _d, _lst in _by.items():
