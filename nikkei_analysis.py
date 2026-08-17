@@ -2968,6 +2968,22 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
         signals.sort(key=lambda x: (-(x.get("rec_score") or 0), -(x.get("liquidity") or 0)))
     _last_signals.clear()
     _last_signals.extend(signals)
+    # ★★ その日の発注リストを保存する (2026-08-17 ユーザー依頼)。
+    #   「昨日のシグナルの順番を確認したい」が頻発するが、**過去日を再生成して
+    #   確認してはいけない**(18.11: 価格フィルタが最新終値で切るので順位がズレる)。
+    #   → その日に見えていたものを、その日に保存しておくしかない。
+    #   ⛔ 保存は **1日1回だけ**。既にあれば上書きしない(signal_history.save)。
+    #     過去日を再生成しても記録は壊れない。
+    try:
+        import signal_history as _sh
+        _sd0 = ""
+        for _s0 in signals:
+            _sd0 = str(_s0.get("signal_date") or "")[:10]
+            if _sd0:
+                break
+        _sh.save(signals, _sd0 or str(_TODAY)[:10], saved_on=str(_TODAY)[:10])
+    except Exception as _she:
+        print(f"  [発注リスト履歴] 保存に失敗(表示は続行): {_she}", flush=True)
     if cfg_filter:
         signals = [s for s in signals if s.get("cfg_label") == cfg_filter]
 
@@ -3821,9 +3837,17 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
                                    "limit" if _LSS_H_ENTRY else "stop")
                  .replace("__LSS_SM__", f"{_LSS_SM}")
                  .replace("__LSS_TM__", f"{_LSS_TM}"))
+    # ★ 前日までの発注リスト(当日に保存した正本)を折りたたみで出す。
+    #   過去日を再生成すると順位がズレる(18.11)ので、確認はここで済ませる。
+    try:
+        import signal_history as _sh2
+        _sig_hist_html = _sh2.render_html(watch_cap=_WATCH_CAP)
+    except Exception as _she2:
+        _sig_hist_html = ""
+        print(f"  [発注リスト履歴] 表示に失敗: {_she2}", flush=True)
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — {_sig_ord_lbl} {min_note}</h2>
-{_asof_warn}{_analysis_warn}
+{_asof_warn}{_analysis_warn}{_sig_hist_html}
 <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
   全WATCHLIST {len(all_items)}件から {sig_label} のエントリーシグナルを抽出。{_sig_ord_note}
 </p>

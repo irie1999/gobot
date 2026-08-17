@@ -70,3 +70,6 @@ holdings_latest.html
 .eh_cache/
 .asof_bt_cache/
 report_conditions_log.csv
+
+# 発注リストの日別スナップショット(その日に見えていた正本 / 直近3日だけ)
+signal_history/
