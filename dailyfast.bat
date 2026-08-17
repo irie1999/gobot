@@ -143,7 +143,13 @@ if not exist "lss_proposal_full.py" (
 )
 if not defined LSS_SIGNAL_POOL set "LSS_SIGNAL_POOL=lss_proposal_cumul.py"
 if not defined LSS_IMPL_PROPOSAL set "LSS_IMPL_PROPOSAL=lss_proposal_cumul.py"
-python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal lss_proposal_full.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+REM --- BASE pool (the --lss-proposal the P&L tabs run on).
+REM     Do NOT append a second --lss-proposal on the command line: this .bat
+REM     already passes one, and the duplicate is what broke the run on
+REM     2026-08-17. Override with the env var instead, or use .\jfast which
+REM     sets it to the selected pool (see jfast.bat).
+if not defined LSS_BASE_POOL set "LSS_BASE_POOL=lss_proposal_full.py"
+python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal %LSS_BASE_POOL% --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help
