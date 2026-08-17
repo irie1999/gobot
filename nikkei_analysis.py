@@ -10387,6 +10387,19 @@ function switchTbd(id, tab) {{
         # 銘柄順位を出す。E/H(前夜指値)は全銘柄に注文を置けるので従来どおり。
         if str(t.get("eh") or "").startswith("H寄り確認"):
             _w = _watch_rank.get(_wr_key(t))
+            # ⛔ **黙って旧番号に落ちないこと**(2026-08-17)。落ちると画面が
+            #   「前と同じ」になり、pull漏れ・例外・キー不一致の区別が付かない。
+            #   3往復これで潰したので、橙色の ⚠ を出して画面だけで分かるようにする。
+            if not _w:
+                _r0 = _day_rank.get(_rk_key(t)) or "?"
+                return (f'<span style="display:inline-block;min-width:1.6em;'
+                        f'text-align:center;background:#78350f;color:#fed7aa;'
+                        f'font-size:0.68rem;font-weight:700;padding:0 4px;'
+                        f'border-radius:3px;margin-right:4px" '
+                        f'title="⚠ 発注リスト(選定あり)内の流動性順位が取れて'
+                        f'いません。表示は旧番号(lss土台のペア順位) #{_r0} です。'
+                        f'コンソールの [発注順] J/L/K 用の順位 を確認してください'
+                        f'">#{_r0}⚠</span>')
             if _w:
                 _over = _WATCH_CAP_DISP > 0 and _w > _WATCH_CAP_DISP
                 _bg = "#7f1d1d" if _over else "#334155"
@@ -12502,27 +12515,37 @@ function switchTbd(id, tab) {{
     try:
         _wr_syms: dict = _dd(dict)     # 日 -> {銘柄: 流動性}
         _wr_seen = _wr_out = 0
+        _wr_err = 0
         for _dk, _lst in _rk_day.items():
             for _t in _lst:
                 _wr_seen += 1
-                _c9 = str(_t.get("symbol", "")).upper() \
-                    .removesuffix(".T").split(".")[0]
-                if not _c9:
-                    continue
-                if _IMPL_POOL:
-                    _ok9, _sd9 = _IMPL_POOL
-                    _st9 = str(_t.get("strategy") or _t.get("strat") or "")
-                    if (_c9, _st9) not in _ok9:
-                        _wr_out += 1
+                # ⛔ 1件の異常で丸ごと落とさない。落ちると _watch_rank が空になり
+                #   バッジが旧番号にフォールバックして「何も変わらない」に見える。
+                try:
+                    _c9 = str(_t.get("symbol", "")).upper() \
+                        .removesuffix(".T").split(".")[0]
+                    if not _c9:
                         continue
-                    _d9 = _sd9.get((_c9, _st9))
-                    if _d9 and str(_t.get("entry_d_raw") or "") < str(_d9):
-                        _wr_out += 1
-                        continue
-                _lq9 = float(_t.get("liquidity") or 0) or _liquidity_of(
-                    str(_t.get("symbol", "")))
-                if _lq9 > _wr_syms[_dk].get(_c9, -1.0):
-                    _wr_syms[_dk][_c9] = _lq9
+                    if _IMPL_POOL:
+                        _ok9, _sd9 = _IMPL_POOL
+                        _st9 = str(_t.get("strategy") or _t.get("strat") or "")
+                        if (_c9, _st9) not in _ok9:
+                            _wr_out += 1
+                            continue
+                        _d9 = _sd9.get((_c9, _st9))
+                        if _d9 and str(_t.get("entry_d_raw") or "") < str(_d9):
+                            _wr_out += 1
+                            continue
+                    _lq9 = float(_t.get("liquidity") or 0) or _liquidity_of(
+                        str(_t.get("symbol", "")))
+                    if _lq9 > _wr_syms[_dk].get(_c9, -1.0):
+                        _wr_syms[_dk][_c9] = _lq9
+                except Exception as _wre1:
+                    _wr_err += 1
+                    if _wr_err <= 3:
+                        print(f"  ⚠ 順位づけで1件スキップ "
+                              f"({_t.get('symbol')}/{_t.get('strategy')}): "
+                              f"{_wre1}", flush=True)
         for _dk, _m9 in _wr_syms.items():
             for _i, (_c9, _lq9) in enumerate(
                     sorted(_m9.items(), key=lambda kv: (-kv[1], kv[0])), 1):
@@ -12530,9 +12553,20 @@ function switchTbd(id, tab) {{
         _wovr = sum(1 for _v in _watch_rank.values()
                     if _WATCH_CAP_DISP > 0 and _v > _WATCH_CAP_DISP)
         print(f"[発注順] J/L/K 用の順位: {len(_watch_rank):,}件"
-              f"(候補 {_wr_seen:,} / {_IMPL_POOL_FILE} 外 {_wr_out:,} 除外 / "
-              f"うち watch{_WATCH_CAP_DISP} 超 {_wovr:,}件は明細で **赤⛔**)",
+              f"(候補 {_wr_seen:,} / {_IMPL_POOL_FILE} 外 {_wr_out:,} 除外"
+              + (f" / エラー {_wr_err:,}" if _wr_err else "")
+              + f" / うち watch{_WATCH_CAP_DISP} 超 {_wovr:,}件は明細で **赤⛔**)",
               flush=True)
+        # ★ その日ぶんの確認用。発注リストの順位と直接見比べられるようにする。
+        try:
+            _dlast = max(_wr_syms) if _wr_syms else ""
+            if _dlast:
+                _tod = sorted(((_v, _k[1]) for _k, _v in _watch_rank.items()
+                               if _k[0] == _dlast))[:12]
+                print(f"  [{_dlast}] 上位: "
+                      + " ".join(f"#{_r}:{_s}" for _r, _s in _tod), flush=True)
+        except Exception:
+            pass
         if not _watch_rank:
             print(f"  ⛔ 0件です。J/L/K の明細は **旧番号(lss土台のペア順位)** に"
                   f"戻ります。{_IMPL_POOL_FILE} が読めているか確認してください",
