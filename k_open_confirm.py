@@ -111,7 +111,8 @@ args = ap.parse_args()
 
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          "prev_close", "open_p", "open_time", "current_price", "gap_bp",
-         "late", "pass_gap", "guard_ng", "lots_k", "yen_k"]
+         "late", "pass_gap", "guard_ng", "lots_k", "yen_k",
+         "atr", "stop_k", "target_k"]
 
 
 # ── 候補の読み込み ─────────────────────────────────────────────────────
@@ -128,6 +129,9 @@ def _codes_from(path: str) -> list[str]:
 
 
 _sig_csv = args.signals_csv or f"k_signals_{_dt.date.today():%Y%m%d}.csv"
+# 銘柄 -> ATR。K の OCO は **実約定価格(始値)** を基準に置くので、
+# 損切り/利確は 09:00 に始値が出て初めて確定する。
+_ATR: dict = {}
 
 # ══════════════════════════════════════════════════════════════════════
 #  --collect : 今日のシグナルだけを収集する (kabu を使わない)
@@ -232,10 +236,22 @@ if args.symbols:
              for s in args.symbols.split(",") if s.strip()]
 elif Path(_sig_csv).exists():
     # ★ --collect が作った「今日のシグナル」を使う(これが正しい候補)
+    #   ATR も一緒に持つ。K は **実約定価格(=始値)** を基準に OCO を置くので、
+    #   損切り/利確はここで初めて確定する(シグナル時点の逆指値トリガー基準の
+    #   stop/target とは別物)。§18.32 の「OCO の基準を実約定価格に変える」。
     _syms = []
     for r in _csv.DictReader(open(_sig_csv, encoding="utf-8-sig")):
         _s0 = str(r.get("symbol") or "").upper().removesuffix(".T").split(".")[0]
-        if _s0 and _s0 not in _syms:
+        if not _s0:
+            continue
+        try:
+            _a0 = float(r.get("atr") or 0)
+        except Exception:
+            _a0 = 0.0
+        # 同じ銘柄が複数戦略で出る。ATR は銘柄固有なので最初の非ゼロを採る。
+        if _a0 > 0 and not _ATR.get(_s0):
+            _ATR[_s0] = _a0
+        if _s0 not in _syms:
             _syms.append(_s0)
     print(f"[候補] {_sig_csv} から **今日のシグナル {len(_syms):,}銘柄**",
           flush=True)
@@ -369,7 +385,13 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "current_price": _bd.get("CurrentPrice") or 0,
             "gap_bp": (round(_gap, 1) if _gap is not None else ""),
             "late": _late, "pass_gap": _pass, "guard_ng": _guard,
-            "lots_k": 0, "yen_k": 0}
+            "lots_k": 0, "yen_k": 0,
+            # ★ OCO は **実約定価格(=始値)** を基準に置く (§18.32)。
+            #   ショートなので 損切りは上、利確は下。
+            #   シグナル時点の stop/target(逆指値トリガー基準)とは別物。
+            "atr": round(_atr, 2) if (_atr := float(_ATR.get(_s, 0) or 0)) else "",
+            "stop_k": round(_op + _atr * args.sm, 1) if (_atr and _op > 0) else "",
+            "target_k": round(_op - _atr * args.tm, 1) if (_atr and _op > 0) else ""}
 
 
 def _dump(_rows: list) -> None:
@@ -535,21 +557,29 @@ if _pass_k:
     print(f"  ── 合格銘柄 ({len(_pass_k)}件) "
           f"{'─' * 46}\n"
           f"  {'銘柄':<8}{'J':>3}{'ギャップ':>10}{'前日終値':>10}"
-          f"{'始値':>10}{'寄り時刻':>10}{'株数':>8}{'投入額':>12}")
+          f"{'約定(始値)':>12}{'損切':>10}{'利確':>10}"
+          f"{'株数':>8}{'投入額':>12}{'寄り時刻':>10}")
     for _r in sorted(_pass_k, key=lambda x: -float(x.get("gap_bp") or 0)):
         # ⛔ OpeningPriceTime は "2026-08-17T09:00:03+09:00" 形式。
         #    末尾スライスだと "03+09" になるので必ず正規表現で抜く。
         _mt = re.search(r"(\d{2}:\d{2}:\d{2})", str(_r.get("open_time") or ""))
         _tm = _mt.group(1) if _mt else ("遅寄" if str(_r.get("late")) == "1"
                                         else "-")
+        # ⛔ f-string の式に引用符を入れ子にしない(Python 3.11 では
+        #    バックスラッシュ不可でSyntaxError)。先に文字列を作る。
+        _sk = f"{float(_r['stop_k']):,.1f}" if _r.get("stop_k") else "-"
+        _tk = f"{float(_r['target_k']):,.1f}" if _r.get("target_k") else "-"
         print(f"  {_r['symbol']:<8}"
               f"{'✓' if str(_r.get('in_j')) == '1' else '':>3}"
               f"{float(_r['gap_bp'] or 0):>+9.0f}bp"
-              f"{float(_r['prev_close'] or 0):>10,.0f}"
-              f"{float(_r['open_p'] or 0):>10,.0f}"
-              f"{_tm:>10}"
+              f"{float(_r['prev_close'] or 0):>10,.1f}"
+              f"{float(_r['open_p'] or 0):>12,.1f}"
+              f"{_sk:>10}{_tk:>10}"
               f"{int(_r['lots_k'] or 0) * 100:>7,}株"
-              f"{float(_r['yen_k'] or 0):>11,.0f}円")
+              f"{float(_r['yen_k'] or 0):>11,.0f}円"
+              f"{_tm:>10}")
+    print(f"    ※ 損切 = 始値 + {args.sm}ATR / 利確 = 始値 − {args.tm}ATR"
+          f"（ショートなので損切が上）。**実約定価格を基準に置く**(§18.32)")
     _ng = [r for r in _rows if r.get("guard_ng")]
     if _ng:
         print(f"  ⚠ ガード超過({args.guard_bp:+.0f}bp 超)で見送り {len(_ng)}件: "
