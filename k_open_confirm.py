@@ -180,9 +180,17 @@ if args.collect:
     #   ★ cumul の流動性上位50件を読めば、J タブ(cumul × watch50)と
     #     **母集団も切り方も一致**する。
     #   K/L を測りたいときだけ --symbols-file lss_proposal_full.py。
+    # ★★ 正本は **holdout_selected_symbols.py** (2026-08-17)。
+    #   これはレポートが LSS_SIGNAL_POOL(選定あり)+価格+空売り可で絞って
+    #   書き出したファイルで、**画面の発注リストと1対1で対応する**。
+    #   ライブの発注(kabu_send_lss._load_symbols)も同じものを読む。
+    #   ⛔ ここで別のファイル(lss_proposal_cumul.py など)を読むと、価格・
+    #     空売り可否のフィルタが掛かっていない 3,508ペアになり、朝の記録と
+    #     発注リストが食い違う(2026-08-17: cumul 3,508 vs holdout 3,025)。
     _src = args.symbols_file
     if not _src:
-        for _c in (args.pool, "lss_proposal_cumul.py", "lss_proposal_full.py"):
+        for _c in ("holdout_selected_symbols.py", args.pool,
+                   "lss_proposal_cumul.py", "lss_proposal_full.py"):
             if _c and Path(_c).exists():
                 _src = _c
                 break
@@ -211,14 +219,15 @@ if args.collect:
           + (f" (空売り不可 {_n0 - len(_pairs):,}除外)" if _n0 != len(_pairs) else "")
           + f" / 価格 {args.min_price:,.0f}〜{args.max_price:,.0f}円"
           f"。今日のシグナルを収集します(kabu は使いません)", flush=True)
-    if _src == args.pool:
-        print(f"  ✅ J タブ({args.pool} × 流動性上位{args.batch}件)と"
-              f"**同じ母集団**で記録します", flush=True)
+    # ★ 正本かどうかを毎朝ここで言う。食い違いは画面では気づけない。
+    _CANON = "holdout_selected_symbols.py"
+    if Path(_src or "").name == _CANON:
+        print(f"  ✅ **レポートの発注リストと同じ母集団**です"
+              f"(ライブの kabu_send_lss も同じファイルを読みます)", flush=True)
     else:
-        print(f"  ⚠ J の母集団は {args.pool} です。{_src} で収集すると、"
-              f"読める{args.batch}件が J の候補とは限らず、朝の記録と"
-              f"J タブが突合できません(2026-08-17 は重なり1件だった)",
-              flush=True)
+        print(f"  ⛔ 正本({_CANON})ではありません。読める{args.batch}件が"
+              f"発注リストの上位{args.batch}件と一致しない可能性があります。"
+              f"先に `.\\daily` を回して正本を作ってください", flush=True)
     _out: list = []
     _n_px = 0          # 価格帯で落とした件数
     for _i, (_c, _n, _st) in enumerate(_pairs):

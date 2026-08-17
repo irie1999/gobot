@@ -84,14 +84,30 @@ def _jq_to_yf(code: str) -> str:
 
 
 def _load_symbols(symbols_file: str | None) -> list[tuple]:
-    """(code, name, strategy) の一覧。--symbols-file → lss提案 → holdout → WATCHLIST。"""
+    """(code, name, strategy) の一覧。--symbols-file → **holdout** → WATCHLIST。
+
+    ⛔⛔ **`lss_watchlist_proposal_*.py`(旧命名)の自動検出をやめた** (2026-08-17)。
+
+      それまでの優先順位は `--symbols-file → lss提案(glob) → holdout` で、
+      **旧命名の提案ファイルが holdout より先**だった。フォルダに
+      `lss_watchlist_proposal_2026-07-15.py`(5,639ペア)が残っていたため、
+      `lss_budget_cap --execute` は **7月15日の古い提案から発注する**状態
+      だった。レポートが毎回
+
+          [export] holdout選定 3,025ペア → holdout_selected_symbols.py
+                   ⚠ ライブの発注経路が読むファイルです
+
+      と表示しているのに、実際には読んでいなかった = **発注リストと実発注が
+      別の母集団**。2026-08-17 に k_open_confirm で同じ罠を踏んで発覚した。
+
+    ★ 正本は `holdout_selected_symbols.py` ただ1つ。これはレポートが
+      LSS_SIGNAL_POOL(選定あり)+価格+空売り可で絞って書き出したもので、
+      **画面の発注リストと1対1で対応する**。
+      別の母集団で出したい日だけ `--symbols-file` で明示する。
+    """
     cand: list[str] = []
     if symbols_file:
         cand.append(symbols_file)
-    # 最新の lss 提案ファイルを自動検出
-    props = sorted(Path(".").glob("lss_watchlist_proposal_*.py"))
-    if props:
-        cand.append(str(props[-1]))
     cand.append("holdout_selected_symbols.py")
     for path in cand:
         p = Path(path)
@@ -106,13 +122,37 @@ def _load_symbols(symbols_file: str | None) -> list[tuple]:
         sel = ns.get("SELECTED")
         if sel:
             out = [(c, n, s) for (c, n, s) in sel]
-            print(f"[info] {path} から {len(out)}ペア読み込み")
+            # ★ 何を読んだかは毎回必ず出す。正本でなければ警告する。
+            #   「発注リストと実発注が別の母集団」は画面では気づけないので、
+            #   ここで言わないと分からない(2026-08-17 に実際そうなっていた)。
+            _canon = "holdout_selected_symbols.py"
+            if Path(path).name != _canon:
+                _age = ""
+                try:
+                    import datetime as _dtm
+                    _mt = _dtm.date.fromtimestamp(p.stat().st_mtime)
+                    _age = f" / 更新 {_mt}"
+                except Exception:
+                    pass
+                print(f"[info] {path} から {len(out)}ペア読み込み{_age}")
+                print(f"  ⛔ **正本({_canon})ではありません**。"
+                      f"レポートの発注リストと母集団が食い違います。"
+                      f"意図した指定でなければ --symbols-file を外してください",
+                      file=sys.stderr)
+            else:
+                print(f"[info] {path} から {len(out)}ペア読み込み"
+                      f"(✅ レポートの発注リストと同じ母集団)")
             return out
     # フォールバック: WATCHLIST
+    # ⛔ ここに落ちるのは holdout_selected_symbols.py が無いとき = レポートを
+    #   一度も回していない日。組み込みWATCHLIST(265ペア)は**今日の選定ではない**。
     import check_signals_stop as _stop
     import check_signals_breakout as _brk
     out = list(_stop.WATCHLIST) + list(_brk.WATCHLIST)
     print(f"[info] WATCHLIST から {len(out)}ペア(フォールバック)")
+    print(f"  ⛔ **holdout_selected_symbols.py がありません**。"
+          f"組み込みWATCHLISTは今日の選定ではないので、"
+          f"先に `.\\daily` を回してください", file=sys.stderr)
     return out
 
 
