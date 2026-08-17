@@ -11640,16 +11640,39 @@ function switchTbd(id, tab) {{
                     if _m0:
                         _wcand[_d0] = _m0
                 if _watch > 0:
+                    # ⛔⛔ **eh_trades は liquidity を入れない**(2026-08-17 発覚)。
+                    #   `_t.get("liquidity")` は常に None なので _lq が全件 0 になり、
+                    #   ソートキー (-0.0, 銘柄コード) が同値 → **銘柄コード昇順の
+                    #   上位50件** が選ばれていた。「流動性上位50件」ではない。
+                    #   実証: 2026-08-17 の J は 1762/3864/4776/5632 を建てたが、
+                    #   発注リスト(流動性降順)では 1762=#103 / 5632=#106 で、
+                    #   流動性順なら50件に入らない。コード順なら入る。
+                    #   → k_open_confirm の --max-symbols と **同じバグ**(449a7ab)。
+                    #   liquidity が無ければ _liquidity_of() で引く(銘柄単位でキャッシュ)。
+                    _nliq = _nzero = 0
                     for _d0, _l0 in _cd.items():
                         _bys: dict = {}
                         for _t in _l0:
                             _s0 = str(_t.get("symbol", "")).upper() \
                                 .removesuffix(".T").split(".")[0]
                             _lq = float(_t.get("liquidity") or 0)
+                            if _lq <= 0:
+                                _lq = _liquidity_of(str(_t.get("symbol", "")))
+                                if _lq > 0:
+                                    _t["liquidity"] = _lq
+                            _nliq += 1
+                            _nzero += 1 if _lq <= 0 else 0
                             if _s0 and _lq >= _bys.get(_s0, (-1.0,))[0]:
                                 _bys[_s0] = (_lq, _s0)
                         _rk = sorted(_bys.values(), key=lambda x: (-x[0], x[1]))
                         _allow[_d0] = {x[1] for x in _rk[:_watch]}
+                    # 流動性が1件も取れないと **黙って銘柄コード順**に落ちる。
+                    # 静かに壊れる種類なので必ず知らせる。
+                    if _nliq and _nzero > _nliq * 0.2:
+                        print(f"  ⛔ watch{_watch}: 流動性が取れない候補が "
+                              f"{_nzero:,}/{_nliq:,}件。その分は **銘柄コード順**"
+                              f"に落ちるので、読む50件がライブと食い違います",
+                              flush=True)
 
             for _d, _lst in _by.items():
                 # ★ 登録上限で見られなかった銘柄は建てられない(09:00に始値を
