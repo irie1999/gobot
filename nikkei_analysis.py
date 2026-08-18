@@ -11805,7 +11805,7 @@ function switchTbd(id, tab) {{
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0, _nf=None, _div_cand=False, _watch=0,
-                               _pool=None, _keep_late=False, _g1=0.0):
+                               _pool=None, _keep_late=False, _g1=0.0, _lbl=""):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -12049,6 +12049,21 @@ function switchTbd(id, tab) {{
                                 print(f"  ⚠ watch 軸の評価に失敗: {_are}",
                                       flush=True)
 
+            # ★★ 日別の『どこで消えたか』(2026-08-18 ユーザー指摘
+            #   「今日はシグナルから合格もして、実際に約定もした。それで
+            #    レポートに今日の結果が無いのはおかしい」)。
+            #   合計しか出していないと、ある日が丸ごと抜けた理由が分からない。
+            #   候補 → 合格 → 遅寄り除外 → watch上限 → 予算内 を日ごとに出す。
+            #   ⛔ 全変種で出すと大量になるので **推奨変種だけ**。
+            _funnel = (str(_lbl or "") == str(_EQ_TAB_KEY2 or "")
+                       and str(os.environ.get("LSS_DAY_FUNNEL", "1")).strip()
+                       not in ("0", "false", "no"))
+            _fn_pass: dict = {}     # 日 -> 合格(=_by に入った数)
+            for _d0, _l0 in _by.items():
+                _fn_pass[_d0] = len(_l0)
+            _fn_watch: dict = {}
+            _fn_out: dict = {}
+
             for _d, _lst in _by.items():
                 # ★ 登録上限で見られなかった銘柄は建てられない(09:00に始値を
                 #   読めないので判定そのものができない)。
@@ -12058,8 +12073,11 @@ function switchTbd(id, tab) {{
                             if str(_t.get("symbol", "")).upper()
                             .removesuffix(".T").split(".")[0] in _allow[_d]]
                     _unseen += _n0 - len(_lst)
+                    _fn_watch[_d] = len(_lst)
                     if not _lst:
                         continue
+                else:
+                    _fn_watch[_d] = len(_lst)
                 _cnts_raw.append(len(_lst))
                 # ★ 金額上限を **合格が少ない日だけ** に効かせる(2026-08-15)。
                 #   フラットに掛けると 4〜7件の日まで絞ってしまい、資金が寝て
@@ -12291,6 +12309,7 @@ function switchTbd(id, tab) {{
                     _n["qty"] = _lot * 100
                     _n["pnl"] = round((_ep - _xp) * _lot * 100, 0)
                     _out.append(_n)
+                    _fn_out[_d] = _fn_out.get(_d, 0) + 1
                     _amts.append(_lot * 100 * _ep)
                 _samts.extend(_bysym.values())
             _amts.sort()
@@ -12341,6 +12360,34 @@ function switchTbd(id, tab) {{
                 "ycap": _ycap,
                 "n": len(_out),
             }
+            # ★★ 日別ファンネル (2026-08-18)。ある日が丸ごと抜けたときに
+            #   **どの段で消えたか** を言う。合計だけだと分からない。
+            if _funnel:
+                _alld = sorted(set(_cd) | set(_by) | set(_fn_out))[-10:]
+                print(f"\n  [日別ファンネル] {_lbl}"
+                      f"  ← 直近10営業日。0 になった段が原因", flush=True)
+                print(f"    {'日付':<12}{'候補':>6}{'合格':>6}"
+                      f"{'watch後':>8}{'予算内':>7}", flush=True)
+                for _d0 in _alld:
+                    _c0 = len({str(_t.get("symbol", "")).upper()
+                               .removesuffix(".T").split(".")[0]
+                               for _t in (_cd.get(_d0) or [])})
+                    _p0 = _fn_pass.get(_d0, 0)
+                    _w0 = _fn_watch.get(_d0, 0)
+                    _o0 = _fn_out.get(_d0, 0)
+                    _why = ""
+                    if _c0 and not _p0:
+                        _why = "  ⛔ **合格ゼロ**(ギャップ未達 or 遅寄りで除外)"
+                    elif _p0 and not _w0:
+                        _why = f"  ⛔ **watch{_watch}で全部落ちた**"
+                    elif _w0 and not _o0:
+                        _why = "  ⛔ **予算で全部落ちた**"
+                    print(f"    {_d0:<12}{_c0:>6}{_p0:>6}{_w0:>8}{_o0:>7}{_why}",
+                          flush=True)
+                print(f"    ※ 候補=その日シグナルが出た銘柄 / "
+                      f"合格=ギャップ通過かつ遅寄りでない / "
+                      f"watch後=09:00に読める{_watch}件に入った / "
+                      f"予算内=実際に建てた", flush=True)
             return _out, _st
 
         # ★ 資金均等は 指値版(H指値+Nbp寄指) にも 確認版(H寄り確認) にも掛ける。
@@ -12620,7 +12667,7 @@ function switchTbd(id, tab) {{
                         # 分母に使うかどうかは _div_cand で別に決める。
                         _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc,
                         None if (_eqpl in (None, "IDEAL")) else _eqpl,
-                        _eqkl, _eqg1)
+                        _eqkl, _eqg1, _eqnk)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
