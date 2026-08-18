@@ -74,7 +74,10 @@ ap.add_argument("--no-slip-log", action="store_true",
 args = ap.parse_args()
 
 FEE = args.fee
-_CMP_MODE = "H"   # 突合相手の方式(H / lss)。累積ログに残す
+# 突合相手の方式(J / H / lss)。累積ログに残し、**方式ごとに別集計**する
+# (§18.24: 別々の条件の数字を混ぜない)。2026-08-18 に実発注が H → J に
+# 変わったので、それ以前の H の行とは合算しない。
+_CMP_MODE = "H"
 _DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
 
 # --save: 明示指定が無い側だけ日付つきの既定名を割り当てる
@@ -418,26 +421,41 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     #    滑り +0.54% と出ていたが、これは滑りではなくエントリー方式の差。
     _tp = Path(args.trades_csv)
     _hp = _tp.with_name(_tp.stem + "_H" + _tp.suffix)
+    # ★★ 実発注は **J(09:00確認)** に変わった (2026-08-18)。突合相手も J に
+    #   しないと意味がない。J の明細はレポートが lss_trades_K.csv に出す
+    #   (推奨変種 = H寄り確認…資金均等。ファイル名の K は歴史的な名前で、
+    #    中身は J の推奨設定)。⛔ H(前日終値-5tick の指値)とは **建てる条件も
+    #   約定値も違う**ので、H と突合すると滑りが全部でたらめになる。
+    #   J → H → (--lss-compare のときだけ lss) の順に探す。
+    _jp = _tp.with_name(_tp.stem + "_K" + _tp.suffix)
     global _CMP_MODE
     if args.lss_compare:
         _CMP_MODE = "lss"
         bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
         _src_label = f"{_tp.name} ⚠ 現行lss(逆指値)。--lss-compare 指定"
     else:
-        _CMP_MODE = "H"
-        bt = _bt_trades_for_date(str(_hp), _DATE_DIG) if _hp.exists() else []
-        _src_label = f"{_hp.name} (H=指値売り。実発注と同じ方式)"
+        bt = _bt_trades_for_date(str(_jp), _DATE_DIG) if _jp.exists() else []
+        if bt:
+            _CMP_MODE = "J"
+            _src_label = f"{_jp.name} (J=09:00確認。**実発注と同じ方式**)"
+        else:
+            _CMP_MODE = "H"
+            bt = _bt_trades_for_date(str(_hp), _DATE_DIG) if _hp.exists() else []
+            _src_label = f"{_hp.name} (H=指値売り) ⚠ 実発注は J なので参考値"
         if not bt:
             # ⛔ lss へフォールバックしない。方式が違う明細と突合すると
             #    『テストに無い』『滑り』が全部でたらめになる(2026-08-13)。
             print()
             print("=" * 78)
-            print("=== バックテスト比較: スキップ (H の明細がありません) ===")
-            print(f"  {_hp.name} が見つからない、または {_DATE} の取引がありません。")
-            print( "  実発注は H(前日終値-5tick の指値売り)なので、lss(逆指値)の明細と")
-            print( "  突合しても意味がありません(方式が違うので別の銘柄・別の約定値になる)。")
-            print( "  → git pull してから .\\daily か .\\dailyfast を1回流してください。")
-            print(f"     LSS_TRADES_CSV が設定されていれば {_hp.name} も一緒に出ます。")
+            print("=== バックテスト比較: スキップ (J/H の明細がありません) ===")
+            print(f"  {_jp.name} も {_hp.name} も無い、または {_DATE} の取引が")
+            print( "  ありません。実発注は **J(09:00確認 / 始値を見てから発注)** なので、")
+            print( "  lss(逆指値)や H(前日終値-5tick)の明細と突合しても意味がありません")
+            print( "  (方式が違うので別の銘柄・別の約定値になる)。")
+            print( "  → git pull してから .\\jfast を1回流してください。")
+            print(f"     J の明細は {_jp.name} に出ます")
+            print( "     ⛔ LSS_TRADES_CSV を別名に逃がして走らせた場合は、その名前の")
+            print( "        _K.csv を --trades-csv で指してください")
             print( "  どうしても lss と比べたいときだけ .\\fills --lss-compare")
             return
     print()
