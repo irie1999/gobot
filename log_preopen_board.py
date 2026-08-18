@@ -177,6 +177,7 @@ def _verify() -> None:
     _by_hm: dict = {}
     _recs: list = []          # (寄りまでの残り秒, (date, symbol), タプル)
     _miss = 0
+    _late = 0   # 寄り後に取った行(誤実行ぶん)
     for r in _rows:
         _k = (str(r["date"]), str(r["symbol"]))
         _o = _open.get(_k)
@@ -191,9 +192,6 @@ def _verify() -> None:
         _g_pre = (_mid - _pc) / _pc * 1e4        # 気配から見たギャップ(bp)
         _g_act = (_o - _pc) / _pc * 1e4          # 実際のギャップ(bp)
         _cd = str(r.get("is_cand") or "")
-        _t = (_g_pre, _g_act, str(r.get("bid_sign") or ""),
-              str(r.get("ask_sign") or ""), _cd)
-        _by_hm.setdefault(str(r.get("hm") or "?"), []).append(_t)
         # ★ 寄りまでの残り秒。古いログには無いので ts から復元する。
         try:
             _ts = int(r.get("to_open_s") or 0)
@@ -205,7 +203,25 @@ def _verify() -> None:
                 _ts = 9 * 3600 - (_h * 3600 + _m * 60 + _s)
             except Exception:
                 _ts = 0
+        # ⛔⛔ **寄り後に取った行は捨てる** (2026-08-18)。
+        #   .\jorder を引け後に誤実行すると 15:3x の気配が同じファイルに
+        #   追記される(実際に50行入った)。それは『寄り前の気配』ではなく
+        #   ザラ場/引けの値なので、混ぜると「気配は始値をよく当てる」という
+        #   **逆向きに強い偽の結論**が出る(始値は既に確定しているのだから
+        #   当たって当然)。to_open_s <= 0 は寄り以降。
+        # ⛔ **_by_hm より前で落とすこと**。後ろに置くと時刻別の表にだけ
+        #   残ってしまう(2026-08-18 に一度そう書いた)。
+        if _ts <= 0:
+            _late += 1
+            continue
+        _t = (_g_pre, _g_act, str(r.get("bid_sign") or ""),
+              str(r.get("ask_sign") or ""), _cd)
+        _by_hm.setdefault(str(r.get("hm") or "?"), []).append(_t)
         _recs.append((_ts, _k, _t))
+    if _late:
+        print(f"⚠ 寄り後({args.open_at}以降)に取った {_late:,}行を除外しました"
+              f"（引け後の誤実行ぶん。始値が確定した後の値なので混ぜると"
+              f"『気配はよく当たる』という偽の結論になります）")
     if not _by_hm:
         sys.exit(f"[error] 5分足と突合できた行がありません(未突合 {_miss:,}行)。"
                  f"5分足が最新まで揃っているか確認してください")
