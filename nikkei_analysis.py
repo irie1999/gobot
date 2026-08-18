@@ -16282,16 +16282,27 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         if _eh_grid.get(_ehk):
             _detail_tab_ids.append('eh' + _ehk)
     _detail_tabs_js = "[" + ",".join(f"'{x}'" for x in _detail_tab_ids) + "]"
-    # 既定で開くタブ。「全部（決済日順）」を隠したので、代わりに最初に見たいもの
-    # (J=資金均等 → H → 予算内 → 全部) を開く。⛔ JS の switchDetailTab は
-    # detail_<seq>_all の存在を前提にコンテナを探すので、**all の div は残す**
-    # (中身だけ空にする)。
-    _DEF_TAB = next((x for x in ("ehK", "ehL", "ehJ", "ehH", "budget", "all")
-                     if x in _detail_tab_ids), "all")
     # 隠してよいのは「他に着地できるタブがあるとき」だけ。ロング/ショートの
     # レポートには E/H も予算タブも無いので、そこでは従来どおり全部出す
     # (隠すとボタンが1つも無くなって切り替え不能になる)。
-    _CAN_HIDE = _DEF_TAB != "all"
+    # ⛔ 以前は `_DEF_TAB != "all"` で判定していたが、既定タブを entry に
+    #    変えると循環して中身がまた隠れる。**タブの有無から直接決める**。
+    _CAN_HIDE = any(x in _detail_tab_ids
+                    for x in ("ehK", "ehL", "ehJ", "ehH", "budget"))
+    # 既定で開くタブ。lss/J のレポートは E/H → 予算。
+    # ★ ロング/ショートのレポートは **entry(月別サマリー + 日別カード)** を開く
+    #   (2026-08-18)。all は 3,000行超と重いので中身を出しておらず、開いても
+    #   『既定で非表示です』しか見えなかった。見たいのは月別と日別なので、
+    #   それを持っている entry を既定にする。
+    # ⛔ JS の switchDetailTab は detail_<seq>_all の存在を前提にコンテナを
+    #   探すので、**all の div は残す**(中身だけ空にする)。
+    _DEF_TAB = next((x for x in ("ehK", "ehL", "ehJ", "ehH", "budget")
+                     if x in _detail_tab_ids),
+                    "all" if _SHOW_BASE_DETAIL else "entry")
+    # ★ 中身の側にも _CAN_HIDE を適用する。ボタンだけ出して中身を
+    #   _SHOW_BASE_DETAIL で隠していたため、ロングのレポートは
+    #   「エントリー日別」を押しても『既定で非表示です』しか出なかった。
+    #   重いのは日別カードの中の明細行のほうで、月別サマリーは軽い。
 
     def _act(_tid: str) -> str:
         return " active" if _tid == _DEF_TAB else ""
@@ -21226,7 +21237,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 </div>
 <div id="detail_{_dseq}_entry" class="detail-tab-pane{_act('entry')}">
 <p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">日付をクリックで詳細表示（直近{_ENTRY_GRID_DAYS}日）</p>
-{_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e") if _SHOW_BASE_DETAIL else '<p style="color:#64748b;padding:14px">この明細は既定で非表示です（HTMLを軽くするため）。<code>set LSS_BASE_DETAIL=1</code> で表示。<b>集計・検定の数字は影響されません</b>。</p>'}
+{_dup_toggle_html(entry_sorted_trades, _entry_by_date, _sorted_entry_dates, _dseq, "e") if (_SHOW_BASE_DETAIL or not _CAN_HIDE) else '<p style="color:#64748b;padding:14px">この明細は既定で非表示です（HTMLを軽くするため）。<code>set LSS_BASE_DETAIL=1</code> で表示。<b>集計・検定の数字は影響されません</b>。</p>'}
 </div>
 {_bt40liq_pane}
 {_bt70liq_pane}
