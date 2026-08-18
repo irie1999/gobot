@@ -395,6 +395,13 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
     _sk_syms: dict = {k: [] for k in _sk}
     _n_late: dict = {}     # 09:00に寄らなかった件数(確認方式のみ)
     _late_hm: dict = {}    # その寄り時刻の分布 (HH:MM -> 件数)
+    # ★★ **日付ごと**の先頭バー時刻 (2026-08-18 ユーザー質問「今日の結果が
+    #   ないのはなぜ？」)。J(09:00確認)は 09:00 バーの始値が要るので、その日の
+    #   5分足に 09:00 が無いと **その日は丸ごと1件も建たない**。
+    #   yfinance で埋めた日は 09:00-09:05 を持たない(§18.38)ので全滅する。
+    #   合計だけ出していると「なぜか直近の日が抜けている」としか見えないので、
+    #   日付別に出して原因を名指しできるようにする。
+    _day_bar: dict = {}    # 日付 -> {先頭バー時刻 -> 銘柄数}
     _SK_CAP = 400                     # 1理由あたりの保持上限(HTMLが肥大しない程度)
     # H の約定の内訳。**ライブでの信頼度がまったく違う**ので必ず出す:
     #   板寄せ  = 寄りが既に前日終値以上 → 9:00の板寄せで前日終値以上の値がつく。
@@ -452,6 +459,9 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             _first_hm = pd.Timestamp(day5.index[0]).strftime("%H:%M")
         except Exception:
             _first_hm = ""
+        if _first_hm:
+            _day_bar.setdefault(str(dstr)[:10], {})[_first_hm] = \
+                _day_bar.setdefault(str(dstr)[:10], {}).get(_first_hm, 0) + 1
         if require_open_bar and _first_hm != "09:00":
             _sk["先頭バーが09:00でない"] += 1
             if len(_sk_syms["先頭バーが09:00でない"]) < _SK_CAP:
@@ -767,6 +777,30 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             + " / ".join(f"{_h} {_c:,}件({_c / max(1, _tot_hm) * 100:.0f}%)"
                          for _h, _c in sorted(_late_hm.items(),
                                               key=lambda x: -x[1])[:8]))
+    # ★★ 直近10営業日の『09:00バーがある銘柄数』。J が建てられるかを日別に見る。
+    if _day_bar:
+        _dd = sorted(_day_bar)[-10:]
+        _bad = [d for d in _dd
+                if _day_bar[d].get("09:00", 0) < sum(_day_bar[d].values()) * 0.5]
+        log("[E/H] 直近10営業日の **09:00バーがある銘柄数** "
+            "(J はこれが無いと1件も建たない):")
+        for _d in _dd:
+            _m = _day_bar[_d]
+            _tot = sum(_m.values())
+            _ok = _m.get("09:00", 0)
+            _top = sorted(_m.items(), key=lambda x: -x[1])[:3]
+            log(f"    {_d}  09:00あり {_ok:>5,}/{_tot:>5,}銘柄 "
+                f"({_ok / max(1, _tot) * 100:>3.0f}%)"
+                + ("  ⛔ **この日は J が建たない**" if _ok < _tot * 0.5 else "")
+                + "   先頭バー: "
+                + " / ".join(f"{h} {c:,}" for h, c in _top))
+        if _bad:
+            log(f"    ⛔ {len(_bad)}日が 09:00バー不足: {', '.join(_bad)}")
+            log( "       → その日の5分足を **yfinance で埋めた**可能性が高い。")
+            log( "         yfinance は 09:00-09:05 のバーを持たない(§18.38)ので、")
+            log( "         全銘柄が『遅寄り』扱いになり J/E/H の確認方式が全滅する。")
+            log( "       → J-Quants の5分足を取り直してから流し直すこと")
+            log( "         (stock_5min。CLAUDE.md『データ場所メモ』)")
     if _n_late:
         _tot_late = sum(_n_late.values())
         _per = max(_n_late.values())
