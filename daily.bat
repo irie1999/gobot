@@ -135,7 +135,11 @@ if not exist "lss_proposal_full.py" (
 )
 if not defined LSS_SIGNAL_POOL set "LSS_SIGNAL_POOL=lss_proposal_cumul.py"
 if not defined LSS_IMPL_PROPOSAL set "LSS_IMPL_PROPOSAL=lss_proposal_cumul.py"
-python run_signals_holdout_all.py --both --h-tab --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal lss_proposal_full.py --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
+REM BASE POOL = the SELECTED list, same as dailyfast (2026-08-18). See the long
+REM note there. Short version: the wide pool drops 29%% of the selected pairs,
+REM so J was measured on a population that does not match what gets ordered.
+if not defined LSS_BASE_POOL set "LSS_BASE_POOL=lss_proposal_cumul.py"
+python run_signals_holdout_all.py --both --h-tab --min-price 1000 --price-ranges 6000,0 --no-analysis --lss-proposal %LSS_BASE_POOL% --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
 :help

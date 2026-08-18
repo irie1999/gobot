@@ -40,7 +40,11 @@ REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
 REM ============================================================
 cd /d "%~dp0"
 REM ============================================================
-REM   POOL: no-selection (lss_proposal_full.py), settled 2026-08-16.
+REM   POOL: the SELECTED list (lss_proposal_cumul.py) - the default base
+REM         everywhere since 2026-08-18. The wide pool drops 29%% of the
+REM         selected pairs, so settings were being swept on a population that
+REM         does not match what gets ordered. Override for one run with
+REM         set LSS_BASE_POOL=lss_proposal_full.py
 REM   Same-window paired test over 11 months (compare_pools.py):
 REM     no-selection minus selection = +124,013 yen/month
 REM     t=+2.92 / 95%% CI +29,408..+218,617 / wins 10 of 11 months

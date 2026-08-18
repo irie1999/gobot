@@ -148,7 +148,20 @@ REM     Do NOT append a second --lss-proposal on the command line: this .bat
 REM     already passes one, and the duplicate is what broke the run on
 REM     2026-08-17. Override with the env var instead, or use .\jfast which
 REM     sets it to the selected pool (see jfast.bat).
-if not defined LSS_BASE_POOL set "LSS_BASE_POOL=lss_proposal_full.py"
+REM BASE POOL = the SELECTED list (2026-08-18). It used to be the wide pool
+REM (lss_proposal_full.py) so that one run could also produce the L and K tabs
+REM (no-selection). Both of those reasons are now gone:
+REM   K  rejected outright - CLAUDE.md 18.45 (kabu cannot read 300+ names at
+REM      09:00, and the decay eats the gain even if it could).
+REM   L  only exists to split "selection effect" from "read-more effect", which
+REM      is a research question, not a daily one.
+REM Meanwhile the wide pool DROPS 29%% of the selected pairs (price range /
+REM not-shortable / missing 5-min bars), so J was measured on a population that
+REM does not match what actually gets ordered, and watch50 cut DEEPER than 50.
+REM Having two bases also meant two report files that look identical - that
+REM cost half a day on 2026-08-16 (18.40b).
+REM   Research the wide pool with:  set LSS_BASE_POOL=lss_proposal_full.py
+if not defined LSS_BASE_POOL set "LSS_BASE_POOL=lss_proposal_cumul.py"
 python run_signals_holdout_all.py --both --h-tab --no-tenkan --no-market --no-long --no-short --no-symbol-detail --min-price 1000 --price-ranges 6000 --no-analysis --lss-proposal %LSS_BASE_POOL% --long-base 2026-06-30 --no-mirror --default-tab lss --force --no-news --no-risk --workers 8 %*
 goto :eof
 
