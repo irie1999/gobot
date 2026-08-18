@@ -11818,7 +11818,8 @@ function switchTbd(id, tab) {{
 
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0, _nf=None, _div_cand=False, _watch=0,
-                               _pool=None, _keep_late=False, _g1=0.0, _lbl=""):
+                               _pool=None, _keep_late=False, _g1=0.0, _lbl="",
+                               _pmax=0.0):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -11923,6 +11924,18 @@ function switchTbd(id, tab) {{
                 os.environ.get("LSS_DROP_ARTIFACT_DAYS", "")).strip()
                 in ("1", "true", "yes") else set())
 
+            # ★ 建値の上限(2026-08-18)。**1単元が予算に対して大きすぎる銘柄を
+            #   建てない**ための道具。`--max-yen`(金額上限)は「1件目は最低1単元」
+            #   ルールに突破されて値がさ株に効かないので、そこを直接切る。
+            #   ⛔ これはエッジの最適化ではない。建値には識別力が無いと4回
+            #     確認済み(§18.13/§18.24/§18.31/§18.38)。**資金に対する
+            #     1銘柄の比率を決めるリスク宣言**として見ること。
+            def _price_ok(_t) -> bool:
+                if _pmax <= 0:
+                    return True
+                _ep = float(_t.get("entry_p") or _t.get("order_limit") or 0)
+                return _ep <= 0 or _ep <= _pmax
+
             def _in_pool(_t) -> bool:
                 """建てられるか。ペア/解禁日に加えて **その日の寄りに間に合ったか**。
 
@@ -11934,6 +11947,8 @@ function switchTbd(id, tab) {{
                 ⛔ **データの欠落を遅寄りと数えない**(2026-08-18)。その日の
                   最頻の先頭バーより後に始まった銘柄だけが本当の遅寄り。
                 """
+                if not _price_ok(_t):
+                    return False
                 if _drop_art and str(_t.get("entry_d_raw") or "") in _drop_art:
                     return False
                 if _t.get("late_open") and not _keep_late:
@@ -11988,7 +12003,10 @@ function switchTbd(id, tab) {{
                     #   登録候補が実際より減り、watch50 の切り口が **深くまで
                     #   届いてしまう**。前夜には「翌朝寄るか」は分からないので、
                     #   遅寄り銘柄も必ず登録枠を1つ消費する。
-                    if _d0 and _pair_ok(_t):
+                    # ★ 建値上限は **登録候補にも掛ける**(2026-08-18)。
+                    #   買えない値段の銘柄を watch 枠に入れる意味が無いので、
+                    #   前夜の登録段階で落とすのが実運用と一致する。
+                    if _d0 and _pair_ok(_t) and _price_ok(_t):
                         _cd.setdefault(_d0, []).append(_t)
                 for _d0, _l0 in _cd.items():
                     if _dedup:
@@ -12857,6 +12875,22 @@ function switchTbd(id, tab) {{
                     _eq_modes.append((0, False, False,
                                       (_eqy * 1e4) if _eqy > 0 else -1.0,
                                       _pre, _WATCH_CAP, None, False))
+                # ★★ 建値の上限スイープ (2026-08-18 ユーザー依頼)。
+                #   §18.38 の監査チェックリスト #6『価格帯 1,000〜6,000円 =
+                #   lss継承・未検証』を埋める。
+                #   ⛔ **エッジの最適化ではない**。建値には識別力が無いと4回
+                #     確認済み(§18.13/§18.24/§18.31/§18.38)。見るのは
+                #     『1銘柄が資金の何%を占めるか』と 月平均÷σ。
+                #   ⛔ 上に伸ばせないことに注意: プールは既にレポートの
+                #     --max-price(既定6,000)で切ってあるので、6,000超を測るには
+                #     `.\jfast --max-price 10000` で **別の実行**が要る(§18.24)。
+                for _epm in [float(x) for x in str(os.environ.get(
+                        "LSS_EQ_PRICE_MAXES", "2000,3000,4000,5000")).split(",")
+                        if str(x).strip().replace(".", "").isdigit()]:
+                    if _epm <= 0:
+                        continue
+                    _eq_modes.append((0, False, False, 0.0, _pre,
+                                      _WATCH_CAP, None, False, 0.0, _epm))
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
@@ -12869,6 +12903,7 @@ function switchTbd(id, tab) {{
                 (_eqtp, _eqfl, _eqdp, _eqym, _eqcd,
                  _eqwc, _eqpl, _eqkl) = _eqm[:8]
                 _eqg1 = float(_eqm[8]) if len(_eqm) > 8 else 0.0
+                _eqpm = float(_eqm[9]) if len(_eqm) > 9 else 0.0
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
@@ -12886,7 +12921,9 @@ function switchTbd(id, tab) {{
                             ("理想版" if _eqpl == "IDEAL" else ""))
                          + ("遅寄り込み" if _eqkl else "")
                          # 第1グループの上限比率(段階モードのみ意味を持つ)
-                         + (f"G1_{_eqg1 * 100:.0f}" if _eqg1 > 0 else ""))
+                         + (f"G1_{_eqg1 * 100:.0f}" if _eqg1 > 0 else "")
+                         # 建値の上限(1単元が資金の何%になるかを決めるつまみ)
+                         + (f"価格{_eqpm:g}円" if _eqpm > 0 else ""))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
@@ -12896,7 +12933,7 @@ function switchTbd(id, tab) {{
                         # 分母に使うかどうかは _div_cand で別に決める。
                         _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc,
                         None if (_eqpl in (None, "IDEAL")) else _eqpl,
-                        _eqkl, _eqg1, _eqnk)
+                        _eqkl, _eqg1, _eqnk, _eqpm)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -18443,6 +18480,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             #   無印 = 動的配分(残り予算 × その段の候補数 ÷ 未判定候補数)。
             _mg1 = _re_kn.search(r"G1_(\d+)", _s)
             _k2["g1"] = int(_mg1.group(1)) if _mg1 else 0
+            # 建値の上限。無印 = レポートの --max-price(既定6,000)そのまま。
+            _mpm = _re_kn.search(r"価格(\d+)円", _s)
+            _k2["pmax"] = int(_mpm.group(1)) if _mpm else 0
             # ★ 段階/締切 (2026-08-16)。"w10c10"=2段階(09:00/09:10) /
             #   "c10"=一括締切10分 / 無印=09:00 の一発判定。
             _mwv = _re_kn.search(r"(?:w(\d+))?c(\d+)(?![\d])", _s)
@@ -18561,6 +18601,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "wave": "判定のタイミング",
                              "method": "発注方式",
                              "g1": "1グループの上限(予算比)",
+                             "pmax": "建値の上限(1単元の重さ)",
                              "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_wave(_v3):
@@ -18603,6 +18644,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             return "約定数割(先読み)" if _v3 else "候補数割"
                         if _f == "watch":
                             return "無制限" if not _v3 else f"{_v3:g}件"
+                        if _f == "pmax":
+                            # 1単元(100株)が予算の何%になるかを併記する。
+                            # 判定はここ。損益ではない(建値に識別力は無い)。
+                            return ("上限なし(6,000円)" if not _v3 else
+                                    f"{_v3:,}円 (1単元{_v3 / 100:.0f}万="
+                                    f"予算の{_v3 * 100 / max(1e4, float(os.environ.get('LSS_BUDGET_MAN', '400') or 400) * 1e4) * 100:.0f}%)")
                         if _f == "late":
                             return "建てる(⛔実装不可)" if _v3 else "建てない"
                         if _f == "wave":
