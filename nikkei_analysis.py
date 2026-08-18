@@ -18679,7 +18679,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         if _f == "pmax":
                             # 1単元(100株)が予算の何%になるかを併記する。
                             # 判定はここ。損益ではない(建値に識別力は無い)。
-                            return ("上限なし(6,000円)" if not _v3 else
+                            # 「上限なし」= その実行のユニバース上限そのもの。
+                            # 6,000 決め打ちだと .\pxsweep(10,000)で嘘になる。
+                            return (f"上限なし({_PNL_ENTRY_MAX_PRICE:,.0f}円)"
+                                    if not _v3 else
                                     f"{_v3:,}円 (1単元{_v3 / 100:.0f}万="
                                     f"予算の{_v3 * 100 / max(1e4, float(os.environ.get('LSS_BUDGET_MAN', '400') or 400) * 1e4) * 100:.0f}%)")
                         if _f == "late":
@@ -18734,8 +18737,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _cnb = ((_EH_TRADES.get("_eq_conc") or {}).get(_bk) or {})
                 _cnv = ((_EH_TRADES.get("_eq_conc") or {}).get(_v2) or {})
                 _mxb, _mxv = _cnb.get("sym_max", 0.0), _cnv.get("sym_max", 0.0)
+                # ★ 集中度を動かすのが **目的** のつまみは、この誤爆ガードから
+                #   外す。pmax(建値の上限)は 1単元の大きさを直接切るので、
+                #   最大露出が変わって当然(2026-08-18 に ⛔比較不能 が全行に
+                #   出て判定できなかった)。
                 _conc_knob = (not _is_b) and any(
-                    _f in ("cap", "top", "fill", "dedup", "dedup_post")
+                    _f in ("cap", "top", "fill", "dedup", "dedup_post", "pmax")
                     for _f in _dfs)
                 _mixed = (not _is_b and not _conc_knob and _mxb > 0 and _mxv > 0
                           and (max(_mxb, _mxv) / min(_mxb, _mxv)) > 1.5)
