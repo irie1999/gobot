@@ -303,11 +303,39 @@ def _auto_update_minute():
     except Exception as _e:
         print(f"  ⚠ 5分足自動更新スキップ (import失敗: {_e})", flush=True)
         return
+    # ⛔⛔ **J-Quants を優先する** (2026-08-18)。
+    #   yfinance の5分足は **09:00-09:05 のバーを持たない**(§18.38)。
+    #   J(09:00確認)は 09:00 バーの始値で判定するので、yfinance で埋めた日は
+    #   全銘柄が『遅寄り』扱いになり **その日は1件も建たない**。
+    #   実測(2026-08-18 / check_open_bar.py / 198銘柄):
+    #       08-10(月) 189/198 (95%)  ← J-Quants で取れていた日
+    #       08-17(月) 198/198 (100%) ← 同上
+    #       08-18      4/198  (2%)   ⛔ yfinance で埋めた日
+    #       08-04〜14 も 1〜3%
+    #   レポートの日別カードは **09:00バーがある日しか出ない**。08-13 が
+    #   「1件」だったのは 09:00 を持つ銘柄がちょうど1つだったから。
+    #   → 鍵があるなら必ず J-Quants。無いときだけ yfinance に落ちて **大きく警告**。
+    _src = "jquants" if os.environ.get("JQUANTS_API_KEY") else "yfinance"
     print("=" * 65)
-    print("5分足(stock_5min)を自動更新中 (yfinance・本日初回のみ)...", flush=True)
+    print(f"5分足(stock_5min)を自動更新中 ({_src}・本日初回のみ)...", flush=True)
+    if _src == "yfinance":
+        print("  ⚠ JQUANTS_API_KEY が無いので yfinance で埋めます"
+              "(J-Quants 未契約なら これが通常)。", flush=True)
+        print("     yfinance は **09:00-09:05 のバーを持ちません**(§18.38)。",
+              flush=True)
+        print("     ・ギャップ判定は **日足の始値** を使うので正しく動きます",
+              flush=True)
+        print("     ・その日の全銘柄が 09:05 始まりになるので、"
+              "『データの欠落』として", flush=True)
+        print("       遅寄り除外から自動で外します(2026-08-18 修正)。",
+              flush=True)
+        print("     ・残る影響は **09:00-09:05 の利確を取りこぼす**ことだけ。",
+              flush=True)
+        print("       損切りは delay1 の無保護窓と一致するので影響しません。",
+              flush=True)
     print("=" * 65)
     try:
-        _res = run_update(source="yfinance", verbose=True)
+        _res = run_update(source=_src, verbose=True)
         _flag.write_text("ok", encoding="utf-8")   # 成功時のみフラグ
         print(f"  5分足更新完了: +{_res.get('bars', 0):,}バー / "
               f"{_res.get('updated', 0)}銘柄", flush=True)

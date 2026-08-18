@@ -11874,17 +11874,55 @@ function switchTbd(id, tab) {{
                 _d0 = _sd.get((_c, _st))
                 return not (_d0 and str(_t.get("entry_d_raw") or "") < str(_d0))
 
+            # ★★ その日の『市場全体の先頭バー時刻』(2026-08-18)。
+            #   ⛔ late_open は 5分足の先頭バーが 09:00 かどうかで決めているが、
+            #     それは「その銘柄が遅寄りした」の **代用** でしかない。
+            #     データ源に 09:00 バーが無い日は **全銘柄が late になる**。
+            #     それは市場の事実ではなく **データの欠落**。
+            #   実測(2026-08-18 / check_open_bar.py / 198銘柄):
+            #       08-10 189/198(95%) / 08-17 198/198(100%)  ← 09:00 あり
+            #       08-18   4/198( 2%) / 08-04〜14 も 1〜3%    ⛔ 09:00 なし
+            #     レポートの日別カードは 09:00 がある日しか出ず、08-13 が
+            #     「1件」だったのは 09:00 を持つ銘柄がちょうど1つだったから。
+            #   ★ ギャップ判定に使う始値(o1)は **日足**から取るので、5分足に
+            #     09:00 が無くても判定自体は正しくできる。落ちているのはこの
+            #     代用判定だけ。→ **その日の最頻の先頭バー**を『その日の寄り』
+            #     とみなし、それより後に始まった銘柄だけを本当の遅寄りとする。
+            #   ⚠ 代償: 09:00-09:05 の値動きが5分足に無いので、その区間の
+            #     利確・損切りは見えない。delay1 の無保護窓と一致するので
+            #     損切りには影響しない(§18.38)。利確の取りこぼしだけ残る。
+            _day_first: dict = {}
+            for _t0 in list(_ts) + list(_nf or []):
+                _hm0 = str(_t0.get("open_hm") or "")
+                if not _hm0:
+                    continue
+                _d1 = str(_t0.get("entry_d_raw") or "")
+                _day_first.setdefault(_d1, {})[_hm0] = \
+                    _day_first.setdefault(_d1, {}).get(_hm0, 0) + 1
+            # 日 -> その日の寄り(最頻の先頭バー時刻)
+            _day_open_hm = {_d1: max(_c1.items(), key=lambda x: x[1])[0]
+                            for _d1, _c1 in _day_first.items() if _c1}
+            _artifact = sorted(_d1 for _d1, _hm1 in _day_open_hm.items()
+                               if _hm1 != "09:00")
+
             def _in_pool(_t) -> bool:
-                """建てられるか。ペア/解禁日に加えて **09:00に寄ったか**も見る。
+                """建てられるか。ペア/解禁日に加えて **その日の寄りに間に合ったか**。
 
                 ★ 09:00 に寄らなかった銘柄日(2026-08-16)。既定で落とす。
                   09:00 に件数を確定できないとサイズが決められないため。
                   _keep_late=True の変種で「捨てているぶん」を測れる。
                 ⛔ **登録候補(_cd)には使わないこと**。登録は前夜に決めるので、
                   遅寄りを先に落とすと watch の切り口がずれる(_pair_ok を使う)。
+                ⛔ **データの欠落を遅寄りと数えない**(2026-08-18)。その日の
+                  最頻の先頭バーより後に始まった銘柄だけが本当の遅寄り。
                 """
                 if _t.get("late_open") and not _keep_late:
-                    return False
+                    _hm = str(_t.get("open_hm") or "")
+                    _base = _day_open_hm.get(str(_t.get("entry_d_raw") or ""))
+                    # その日の寄りと同じ時刻に始まっているならデータの都合。
+                    # 取れないときだけ従来どおり落とす(安全側)。
+                    if not (_hm and _base and _hm == _base):
+                        return False
                 return _pair_ok(_t)
 
             _by: dict = {}
@@ -12055,6 +12093,17 @@ function switchTbd(id, tab) {{
             #   合計しか出していないと、ある日が丸ごと抜けた理由が分からない。
             #   候補 → 合格 → 遅寄り除外 → watch上限 → 予算内 を日ごとに出す。
             #   ⛔ 全変種で出すと大量になるので **推奨変種だけ**。
+            if _artifact and str(_lbl or "") == str(_EQ_TAB_KEY2 or ""):
+                print(f"  [5分足] **09:00バーが無い日 {len(_artifact)}日**を"
+                      f"『データの欠落』として扱い、遅寄り除外から外しました。\n"
+                      f"    直近: "
+                      + " / ".join(f"{_d2}({_day_open_hm[_d2]}始まり)"
+                                   for _d2 in _artifact[-5:]) + "\n"
+                      f"    ⛔ yfinance は 09:00-09:05 を持ちません(§18.38)。"
+                      f"ギャップ判定は日足の始値を使うので正しく動きますが、\n"
+                      f"       その5分間の利確・損切りは見えません"
+                      f"(delay1 の無保護窓と一致するので損切りには影響しない)。",
+                      flush=True)
             _funnel = (str(_lbl or "") == str(_EQ_TAB_KEY2 or "")
                        and str(os.environ.get("LSS_DAY_FUNNEL", "1")).strip()
                        not in ("0", "false", "no"))
