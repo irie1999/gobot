@@ -504,6 +504,9 @@ _SRC_CHAIN = [
 #   後から「候補だけの反転率」と「全銘柄の反転率」を切り分けられる
 #   (候補はシグナルが出た銘柄なので気配の付き方が違う可能性がある)。
 _CAND: set = set()
+# kabu が登録を受け付けなかったコード。一括登録は all-or-nothing なので、
+# 一度弾かれたものを次のバッチに混ぜると **また50件まるごと落ちる**。
+_SKIP_CODES: set = set()
 # 銘柄 -> 売買代金。用途B(登録する50件を気配で選べるか)の比較相手が
 # 『流動性降順』なので、同じログに持っておかないと同じ土俵で測れない。
 _LIQ: dict = {}
@@ -606,9 +609,37 @@ def _snap_batch(_b: list[str]) -> list[dict]:
         pass
     _res = cli.register_many(_b)
     _ok = len((_res or {}).get("RegistList") or [])
+    # ⛔⛔ **一括登録は all-or-nothing**(2026-08-19 に実測)。1銘柄でも kabu が
+    #   受け付けないコード(上場廃止 / 別市場 / ETF 等)が混ざると 400 で
+    #   **50件まるごと落ちる**。その後 get_board は全部 ReadTimeout になり、
+    #   再試行(5回×バックオフ)で1バッチに数分かかる = 気配ログが全滅する。
+    #   母集団を選定なしの1,540銘柄に広げた初日に発生した。
+    #   → **1件ずつ登録し直して、悪いコードだけ捨てる**。
+    if _ok == 0 and len(_b) > 1:
+        print(f"  ⚠ 一括登録が 0件。**1件ずつ登録し直します**"
+              f"(1銘柄でも不正なコードがあると50件まるごと 400 になるため)",
+              flush=True)
+        _good, _bad = [], []
+        for _s1 in _b:
+            try:
+                cli.register(_s1)
+                _good.append(_s1)
+            except Exception:
+                _bad.append(_s1)
+        _ok = len(_good)
+        _b = _good
+        if _bad:
+            _SKIP_CODES.update(_bad)
+            print(f"  ⚠ 登録できない {len(_bad)}銘柄を以後スキップします: "
+                  f"{', '.join(map(str, _bad[:10]))}"
+                  + (" …" if len(_bad) > 10 else ""), flush=True)
     if _ok < len(_b):
         print(f"  ⚠ 登録 {_ok}/{len(_b)}件 しか受理されませんでした "
               f"(kabu の上限は50件)", flush=True)
+    if _ok == 0:
+        print(f"  ⛔ このバッチは1件も登録できませんでした。板は読まずに次へ"
+              f"(全件 ReadTimeout で数分溶かすのを避ける)", flush=True)
+        return _rows
 
     def _one(s):
         try:
@@ -700,9 +731,16 @@ while True:
         _cursor = 0
         print(f"  [{_dt.datetime.now():%H:%M:%S}] ★ 直前スイープ開始 — "
               f"先頭に戻して寄りまで回し続けます", flush=True)
-    _b = _syms[_cursor:_cursor + args.batch]
+    # ⛔ 一度 kabu に弾かれたコードを次のバッチに混ぜると、一括登録が
+    #   all-or-nothing なので **また50件まるごと 400** になる(2026-08-19)。
+    _b = [x for x in _syms[_cursor:_cursor + args.batch]
+          if str(x) not in _SKIP_CODES]
     if not _b:
-        break
+        _cursor += args.batch
+        if _cursor >= len(_syms):
+            _cursor = 0
+            _lap += 1
+        continue
     _i0 = _cursor
     _tot += _write(_snap_batch(_b))
     _cursor += args.batch
