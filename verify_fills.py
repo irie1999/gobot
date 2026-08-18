@@ -369,6 +369,42 @@ def main():
         _compare_with_backtest(rows, order_rows)
 
 
+def _j_missing_reason(p: Path, ymd: str) -> list[str]:
+    """J の明細に対象日が無い理由を、推測ではなく **中身を見て** 説明する。"""
+    _out = []
+    if not p.exists():
+        return [f"{p.name} がありません。.\\dailyfast を1回流してください"]
+    _ds: set = set()
+    _n = 0
+    try:
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for r in _csv.DictReader(f):
+                _n += 1
+                _d = str(r.get("entry_date") or "")[:10]
+                if _d:
+                    _ds.add(_d)
+    except Exception as e:
+        return [f"{p.name} を読めません: {e}"]
+    _sd = sorted(_ds)
+    _out.append(f"ファイルは {_n:,}行 / 日付 {len(_sd)}日ぶん"
+                + (f"（最新 {_sd[-1]}）" if _sd else ""))
+    _want = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    if _sd and _sd[-1] < _want:
+        _out.append(f"⛔ **当日({_want})の行がまだありません**。")
+        _out.append("   J(09:00確認)は **5分足の09:00バー** から始値を取ります。")
+        _out.append("   当日ぶんの5分足を yfinance で埋めた場合、yfinance は")
+        _out.append("   09:00-09:05 のバーを持たない(§18.38)ので、全銘柄が")
+        _out.append("   『遅寄り』扱いになり J は1件も建てません。")
+        _out.append("   → **翌営業日に J-Quants の5分足が入ってから** "
+                    ".\\dailyfast を流し直すと突合できます。")
+    elif _want in _ds:
+        _out.append(f"⚠ {_want} の行はあるのに拾えていません。列名を確認してください")
+    else:
+        _out.append(f"⚠ {_want} だけが抜けています(前後の日はあります)。"
+                    "その日の5分足か合格判定を確認してください")
+    return _out
+
+
 def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
     """lss_trades.csv から対象日(entry_date)の取引を読む。無ければ空リスト。"""
     p = Path(path)
@@ -439,9 +475,22 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
             _CMP_MODE = "J"
             _src_label = f"{_jp.name} (J=09:00確認。**実発注と同じ方式**)"
         else:
-            _CMP_MODE = "H"
+            # ⛔ **なぜ J が使えないのか**を必ず言う。黙って H に落ちると、
+            #   H の指値(前日終値-5tick)と J の指値(始値×0.995)を比べて
+            #   『指値のズレ』という誤警告が出る(2026-08-18 に実際に出た:
+            #    9107 実1,100 vs テスト3,045 と表示されたが、J の指値は
+            #    3,119×0.995=3,103→3,100 で **ライブが正しかった**)。
+            _CMP_MODE = "H(J実発注)"
             bt = _bt_trades_for_date(str(_hp), _DATE_DIG) if _hp.exists() else []
             _src_label = f"{_hp.name} (H=指値売り) ⚠ 実発注は J なので参考値"
+            _why = _j_missing_reason(_jp, _DATE_DIG)
+            print()
+            print("=" * 78)
+            print(f"⛔ J の明細({_jp.name})に {_DATE} の取引がありません。")
+            for _ln in _why:
+                print(f"   {_ln}")
+            print( "   → 下の『指値のズレ』は **H の指値と比べたもの**なので")
+            print( "     無視してください(方式が違うだけで、ライブは正しい)。")
         if not bt:
             # ⛔ lss へフォールバックしない。方式が違う明細と突合すると
             #    『テストに無い』『滑り』が全部でたらめになる(2026-08-13)。
