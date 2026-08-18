@@ -257,6 +257,28 @@ def _maybe_serve_orders():
     Ctrl+C で停止するまでブロックする。"""
     if not getattr(_args, "serve", False):
         return
+    # ⛔⛔ **研究用の実行では絶対に発注サーバを立てない**(2026-08-18)。
+    #   --serve は既定ON なので、`--no-serve` を付け忘れた研究スクリプトが
+    #   **本番口座の実発注サーバ**を起動してしまう(long.bat の初回で実際に
+    #   起動した)。約定監視が勝手に利確指値を出すうえ、kabu の有効トークンは
+    #   1つなので .\watch とトークンを取り合う(18.4)。
+    #   出力先を研究用へ逃がしている実行(LSS_SELECTED_OUT を別名にした /
+    #   LSS_SIGNALS_OUT='' で書き出しを止めた)は **定義上 研究用**なので、
+    #   フラグの付け忘れに関係なく止める。
+    _res = []
+    _so = os.environ.get("LSS_SELECTED_OUT")
+    if _so is not None and str(_so).strip() not in (
+            "", "holdout_selected_symbols.py", "holdout_selected_symbols_short.py"):
+        _res.append(f"LSS_SELECTED_OUT={_so}")
+    _gi = os.environ.get("LSS_SIGNALS_OUT")
+    if _gi is not None and not str(_gi).strip():
+        _res.append("LSS_SIGNALS_OUT=''")
+    if _res:
+        print("\n⛔ 発注サーバは起動しません: **研究用の実行**です "
+              f"({' / '.join(_res)})。\n"
+              "   実発注サーバを立てたいなら、その env を外して "
+              "`.\\daily` から起動してください。", flush=True)
+        return
     import subprocess as _sp2
     from pathlib import Path as _P2
     _srv = _P2(__file__).resolve().parent / "order_server.py"

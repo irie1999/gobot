@@ -53,7 +53,12 @@ set "LSS_H_VARIANT_TAB="
 set "LSS_EQ_METHOD="
 set "LSS_PRIORITY="
 
-python run_signals_holdout_all.py --min-price 1000 --max-price 6000 --days 365 --force --no-tenkan --no-market --no-news --no-risk --no-symbol-detail --workers 8 --output-suffix _long %*
+REM --no-serve is MANDATORY here. Without it the script starts order_server.py
+REM with --execute --prod at the end: a LIVE production order server that also
+REM runs fill-monitoring (it places take-profit limits by itself) and holds the
+REM single kabu token, which then fights .\watch for it (18.4). A research
+REM report must never do that. This bit me on 2026-08-18, the first run.
+python run_signals_holdout_all.py --min-price 1000 --max-price 6000 --days 365 --force --no-serve --no-tenkan --no-market --no-news --no-risk --no-symbol-detail --workers 8 --output-suffix _long %*
 
 REM --- put the shell back the way it was ----------------------
 set "LSS_SELECTED_OUT="
