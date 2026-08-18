@@ -2148,7 +2148,18 @@ try:
             "rank":        _s.get("rank", ""),
             "qty":         _qty,
         })
-    _sig_out = Path("signals_latest_short.json" if _args.short else "signals_latest.json")
+    # ⛔ このファイルは実発注経路(kabu_send_signals)が読む。研究用の実行で
+    #    上書きしないよう、LSS_SIGNALS_OUT で別名に逃がせるようにした
+    #    (holdout_selected_symbols と同じ思想 / 2026-08-18)。
+    #    空文字を渡すと **書き出しそのものを止める**。
+    _sig_env = os.environ.get("LSS_SIGNALS_OUT")
+    if _sig_env is not None and not str(_sig_env).strip():
+        print("[INFO] LSS_SIGNALS_OUT='' なので signals_latest.json は"
+              "書き出しません(研究用の実行)", flush=True)
+        raise _AnalysisOnlySkip()
+    _sig_out = Path(str(_sig_env).strip() if _sig_env else
+                    ("signals_latest_short.json" if _args.short
+                     else "signals_latest.json"))
 
     # 同日に複数の価格レンジで実行した場合はマージ（symbol+strategy でデdup）
     _existing: list[dict] = []
