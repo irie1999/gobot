@@ -810,6 +810,19 @@ def _mk(src, order_p, entry_p, exit_p, reason, exit_time,
         t["h_open"] = _o1
         t["h_fill"] = "板寄せ" if _o1 >= float(order_p) else "ザラ場到達"
         t["h_gap_bp"] = (_o1 - float(order_p)) / float(order_p) * 1e4
+    # ★★ watch50 の切り方を測るための3つ (2026-08-18 ユーザー質問
+    #    「どの50をwatchするかはかなり重要だと思います」)。
+    #    watch50 に必要なのは「儲かる順」ではなく
+    #    **『翌朝 +50bp ギャップする銘柄』を上位50件に集められるか**。
+    #    ⛔ confirm(09:00確認)方式では order_p = 始値 なので h_gap_bp が
+    #      恒等的に 0 になり使えない。**前日終値基準**が要る。
+    #      h_gap_pc_bp = 合格ラベルそのもの(>= +50bp なら合格)
+    #      h_pc / h_atr_pct_pc = **前夜に分かる**特徴量(軸の候補)
+    if pc and float(pc) > 0:
+        t["h_pc"] = float(pc)
+        t["h_atr_pct_pc"] = float(atr or 0) / float(pc) * 100.0
+        if day_open is not None and float(day_open) > 0:
+            t["h_gap_pc_bp"] = (float(day_open) - float(pc)) / float(pc) * 1e4
     if reason == "約定せず":
         # ⛔ h_fill は「寄りが指値以上か」で決めるので、不約定行では意味が無い。
         #    そのままにすると『ザラ場到達』と表示されて誤読される。

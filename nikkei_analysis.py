@@ -193,6 +193,118 @@ def _watch_sorted(_vals, _day: str) -> list:
     return sorted(_v, key=lambda x: (-x[0], x[1]))
 
 
+def _watch_axis_report(_cd: dict, _watch: int, _gap_bp: float = 50.0) -> str:
+    """watch の『切り方』を **合格の捕捉率** で評価する (2026-08-18)。
+
+    ⛔ これまで軸を「儲かる順」で評価していたのが誤り。watch は
+      **09:00 にどの N 銘柄を読むか**なので、必要なのは
+
+        『翌朝 +gap_bp ギャップする銘柄』を上位 N 件にどれだけ集められるか
+
+      であって、建てた後の円/件ではない。合格率は約9%(実測)なので、
+      ランダムに N 件読むと合格の N/候補数 しか拾えない。
+      軸に予測力があれば **同じ N 件で捕捉率を上げられる**。
+
+    ⚠ 候補が N 件以下の日は、どの軸でも全部読むので評価から外す
+      (実測で 47% の日しか上限に当たらない / §18.38)。
+    ⚠ 軸に使ってよいのは **前夜に分かる値だけ**。始値・ギャップ・当日の
+      成績を混ぜたら先読みになる(それは『答えを見て並べる』)。
+    """
+    _AX = [
+        ("流動性 降順 (現行)", lambda t: -_wf(t.get("liquidity"))),
+        ("流動性 昇順", lambda t: _wf(t.get("liquidity"))),
+        ("銘柄コード 昇順", lambda t: str(t.get("symbol", ""))),
+        ("ATR% 降順", lambda t: -_wf(t.get("h_atr_pct_pc"))),
+        ("ATR% 昇順", lambda t: _wf(t.get("h_atr_pct_pc"))),
+        ("前日終値 降順", lambda t: -_wf(t.get("h_pc"))),
+        ("前日終値 昇順", lambda t: _wf(t.get("h_pc"))),
+    ]
+    _days = {d: l for d, l in _cd.items() if len({_wsym(t) for t in l}) > _watch}
+    if len(_days) < 20:
+        return ""
+    # 銘柄単位に畳む(登録は銘柄単位)。合格 = その銘柄で1つでも合格ペアがある
+    _by: dict = {}
+    for _d, _l in _days.items():
+        _m: dict = {}
+        for _t in _l:
+            _s = _wsym(_t)
+            if not _s:
+                continue
+            _g = _t.get("h_gap_pc_bp")
+            _c = _m.setdefault(_s, {"symbol": _s, "liquidity": 0.0,
+                                    "h_atr_pct_pc": 0.0, "h_pc": 0.0,
+                                    "pass": False})
+            _c["liquidity"] = max(_c["liquidity"], _wf(_t.get("liquidity")))
+            _c["h_atr_pct_pc"] = _c["h_atr_pct_pc"] or _wf(_t.get("h_atr_pct_pc"))
+            _c["h_pc"] = _c["h_pc"] or _wf(_t.get("h_pc"))
+            if _g is not None and _wf(_g) >= _gap_bp:
+                _c["pass"] = True
+        _by[_d] = list(_m.values())
+    _tot = sum(sum(1 for c in v if c["pass"]) for v in _by.values())
+    if _tot < 30:
+        return ""
+
+    def _cap(keyf) -> float:
+        _hit = 0
+        for _d, _v in _by.items():
+            for _c in sorted(_v, key=keyf)[:_watch]:
+                _hit += 1 if _c["pass"] else 0
+        return _hit / _tot * 100.0
+
+    # ランダムの帯(§18.24 の作法)。ここが『何もしない』の基準線
+    import hashlib
+    _rnd = sorted(_cap(lambda c, s=s: hashlib.md5(
+        f"{s}|{c['symbol']}".encode()).hexdigest()) for s in range(12))
+    _rm = sum(_rnd) / len(_rnd)
+    _sd = (sum((x - _rm) ** 2 for x in _rnd) / max(1, len(_rnd) - 1)) ** 0.5
+    _res = [(n, _cap(f)) for n, f in _AX]
+    _res.sort(key=lambda x: -x[1])
+
+    _z = {n: ((c - _rm) / _sd if _sd > 0 else 0.0) for n, c in _res}
+    _o = [f"\n  [watch{_watch} の切り方] 上限に当たる {len(_by)}日 / 合格 {_tot:,}件",
+          f"    ランダム12本: 平均 {_rm:.1f}% (σ {_sd:.2f})  ← 何もしない基準線"]
+    for _n, _c in _res:
+        _o.append(f"    {_n:<22} 捕捉 {_c:5.1f}%  z={_z[_n]:+5.2f}"
+                  + ("  ★帯の外" if abs(_z[_n]) >= 2.2 else ""))
+    # ★★ 多重検定の始末 (2026-08-18)。7軸も試せば |z|>=2.2 は偶然でも
+    #   0.35本出る(対照実験で実際に1本出た)。本物なら **降順と昇順が
+    #   反対向きに両方とも外れる**(鏡像)。片側だけならノイズ。
+    #   §18.13「多重検定: 偶然でも出る個数を較正してから並べる」の実装。
+    _mir = []
+    for _base in ("流動性", "ATR%", "前日終値"):
+        _d, _a = f"{_base} 降順", f"{_base} 昇順"
+        _d = next((n for n in _z if n.startswith(f"{_base} 降順")), None)
+        _a = next((n for n in _z if n.startswith(f"{_base} 昇順")), None)
+        if not (_d and _a):
+            continue
+        if _z[_d] >= 2.2 and _z[_a] <= -2.2:
+            _mir.append(f"{_base} 降順")
+        elif _z[_a] >= 2.2 and _z[_d] <= -2.2:
+            _mir.append(f"{_base} 昇順")
+    _o.append("    ※ 捕捉率 = watch内に入った合格 / その日の全合格。"
+              "|z|>=2.2 (12本=t(11)) が帯の外")
+    _o.append("    ⛔ 7軸も試せば偶然でも 0.35本は外れる。**本物なら降順と昇順が"
+              "反対向きに両方とも外れる**(鏡像)。片側だけならノイズ")
+    _o.append(f"    ▶ 鏡像で残った軸: "
+              + ("**" + " / ".join(_mir) + "** ← 切り方を変える価値あり"
+                 if _mir else
+                 "**なし**。どの軸で切っても合格の拾い方は変わらない"
+                 f"(=ランダムと同じ {_rm:.0f}%)。"
+                 "効くのは軸ではなく **読める件数** (§18.38: 25/50/100/無制限 で単調)"))
+    return "\n".join(_o)
+
+
+def _wf(v, d=0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return d
+
+
+def _wsym(t) -> str:
+    return str(t.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
+
+
 def _load_pool(path: str):
     """提案ファイルから (許可ペア集合, 解禁日dict) を読む。無ければ None。
 
@@ -11863,6 +11975,17 @@ function switchTbd(id, tab) {{
                                   f"候補はその **{_ratio}** = 合格前の全シグナル"
                                   f"に watch{_watch} を掛けている(先読みなし)",
                                   flush=True)
+                            # ★★ 切り方そのものの評価 (2026-08-18)。
+                            #   「どの50を読むか」は重要なのに、これまで軸を
+                            #   『儲かる順』でしか測っていなかった。正しい目標は
+                            #   **合格(ギャップ通過)をどれだけ拾えるか**。
+                            try:
+                                _ar = _watch_axis_report(_cd, int(_watch))
+                                if _ar:
+                                    print(_ar, flush=True)
+                            except Exception as _are:
+                                print(f"  ⚠ watch 軸の評価に失敗: {_are}",
+                                      flush=True)
                             if _pmed and _nmed <= _pmed * 1.2:
                                 print(f"  ⛔ 登録候補({_nmed})が合格({_pmed})と"
                                       f"ほぼ同数です。**合格側に watch を掛けて"
