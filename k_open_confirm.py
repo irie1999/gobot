@@ -737,20 +737,43 @@ def _order_rows(_sel: list) -> None:
                       flush=True)
 
 
+# ★★ いま kabu に登録されている銘柄 (2026-08-18)。
+#   ⛔ これまで **毎ポーリングで unregister_all + register_many** していた。
+#     同じ50銘柄を10秒ごとに登録し直していたので、せっかく温まった購読を
+#     毎回捨てていた。実測(2026-08-18 本番): 同じ50銘柄なのに
+#       poll1 50.5s → poll2 55.0s → poll3 63.1s → poll6 64.3s
+#     と **周を追うごとに遅くなる**(場外のウォーム実測は 41銘柄 6.3秒 =
+#     6.5件/秒 なので6分の1)。温まっているなら速くなるはずで、逆に
+#     なっているのは登録し直しが原因の可能性が高い。
+#   → **銘柄集合が変わらない限り登録し直さない**。バッチが1つ(=50件以下)
+#     なら、2周目以降は登録が一度も走らない。
+#   ⚠ 100銘柄(2バッチ)にすると A/B の切替で毎周2回の登録が要る。まずは
+#     50件のまま『登録しなければ何秒になるか』を測ること。そこが速ければ
+#     2バッチぶんの時間が空く。
+_REGISTERED: list = []
+
+
 def _read_all(tag: str) -> dict:
     """全候補を50件バッチで読む。symbol -> board。"""
     _t0 = time.time()
     _out: dict = {}
+    _n_reg = 0
     for _i in range(0, len(_syms), args.batch):
         _b = _syms[_i:_i + args.batch]
-        try:
-            cli.unregister_all()
-        except Exception:
-            pass
-        _res = cli.register_many(_b)
-        _ok = len((_res or {}).get("RegistList") or [])
-        if _ok < len(_b):
-            print(f"  ⚠ 登録 {_ok}/{len(_b)}件 (kabu の上限は50件)", flush=True)
+        if _REGISTERED != _b:
+            # 1バッチ運用なら初回だけ通る。複数バッチなら切替のたび。
+            try:
+                cli.unregister_all()
+            except Exception:
+                pass
+            _res = cli.register_many(_b)
+            _REGISTERED[:] = list(_b)
+            _n_reg += 1
+            _ok = len((_res or {}).get("RegistList") or [])
+            if _ok < len(_b):
+                print(f"  ⚠ 登録 {_ok}/{len(_b)}件 (kabu の上限は50件)",
+                      flush=True)
+                _REGISTERED.clear()       # 失敗したら次回やり直す
 
         def _one(s):
             try:
@@ -761,8 +784,12 @@ def _read_all(tag: str) -> dict:
             for _s, _bd in ex.map(_one, _b):
                 if _bd:
                     _out[_s] = _bd
-    print(f"  [{tag}] {len(_out):,}/{len(_syms):,}銘柄 を "
-          f"{time.time() - _t0:.1f}秒 で取得", flush=True)
+    # ★ 登録が何回走ったかを出す。0 = 登録し直していない(=期待どおり)。
+    #   毎周 1以上なら銘柄集合が動いているので、その理由を疑うこと。
+    _el = time.time() - _t0
+    print(f"  [{tag}] {len(_out):,}/{len(_syms):,}銘柄 を {_el:.1f}秒 で取得"
+          f" ({len(_out) / max(0.1, _el):.1f}件/秒 / 登録 {_n_reg}回)",
+          flush=True)
     return _out
 
 
