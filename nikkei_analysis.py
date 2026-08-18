@@ -12136,8 +12136,54 @@ function switchTbd(id, tab) {{
                     print(f"      → 差 {_v[1] - _v[0]:+,.0f}円/件"
                           + ("  ✅ 同水準(欠落は無害)"
                              if abs(_v[1] - _v[0]) < 300 else
-                             "  ⚠ **差が大きい**。欠落日を除いた数字も見ること"
-                             " (set LSS_DROP_ARTIFACT_DAYS=1)"), flush=True)
+                             "  ⚠ **差が大きい**"), flush=True)
+                    # ⛔⛔ 差が出ても『欠落のせい』とは限らない。5分足を
+                    #   yfinance で埋めたのは **直近だけ**なので、欠落日と
+                    #   正常日は時期がきれいに分かれる。CLAUDE.md §18.20 に
+                    #   「最初の14ヶ月はほぼゼロ、直近11ヶ月が良かった」と
+                    #   あるとおり、**時期の効果を欠落の効果と読み違える**。
+                    #   → 月別に並べて、同じ月に両方あるかを必ず見ること。
+                    if abs(_v[1] - _v[0]) >= 300:
+                        _mn: dict = {}
+                        for _d3, _tl3 in _by.items():
+                            _k4 = "欠落" if _d3 in _agp else "正常"
+                            _a4 = _mn.setdefault(str(_d3)[:7], {})
+                            _b4 = _a4.setdefault(_k4, [0, 0.0, 0])
+                            _b4[0] += len(_tl3)
+                            _b4[1] += sum(float(_t3.get("pnl") or 0) for _t3 in _tl3)
+                            _b4[2] += 1
+                        _mix = [_m4 for _m4, _a4 in _mn.items() if len(_a4) == 2]
+                        print(f"      月別(件数 / 円/件)  ← **同じ月に両方ある月**"
+                              f"だけが欠落の効果を測れる")
+                        for _m4 in sorted(_mn):
+                            _a4 = _mn[_m4]
+                            _cs = []
+                            for _k4 in ("正常", "欠落"):
+                                _b4 = _a4.get(_k4)
+                                _cs.append(f"{_k4} {_b4[2]:>2}日 {_b4[0]:>4}件 "
+                                           f"{_b4[1] / max(1, _b4[0]):>+7,.0f}"
+                                           if _b4 else f"{_k4} {'—':>19}")
+                            print(f"        {_m4}  " + "   ".join(_cs)
+                                  + ("  ← 両方あり" if len(_a4) == 2 else ""))
+                        if not _mix:
+                            print(f"      ⛔ **両方ある月がゼロ**。欠落日と正常日は"
+                                  f"時期が完全に分かれているので、\n"
+                                  f"         この差は『欠落の影響』ではなく"
+                                  f"**時期の違い**です(§18.20)。切り分け不能。\n"
+                                  f"         → 数字は使ってよいが『欠落が有利に"
+                                  f"働いている』とは読まないこと。")
+                        else:
+                            _dm = [(_mn[_m4]["欠落"][1] / max(1, _mn[_m4]["欠落"][0])
+                                    - _mn[_m4]["正常"][1] / max(1, _mn[_m4]["正常"][0]))
+                                   for _m4 in _mix]
+                            print(f"      ★ 両方ある {len(_mix)}ヶ月だけで見た差: "
+                                  f"{sum(_dm) / len(_dm):+,.0f}円/件"
+                                  f"  (月ごと: "
+                                  + " / ".join(f"{_x:+,.0f}" for _x in _dm) + ")\n"
+                                  f"         ← **これが欠落の真の効果**。全体の差"
+                                  f"({_v[1] - _v[0]:+,.0f})との開きは時期の効果です。")
+                        print(f"      欠落日を落として測り直すなら "
+                              f"set LSS_DROP_ARTIFACT_DAYS=1", flush=True)
             _funnel = (str(_lbl or "") == str(_EQ_TAB_KEY2 or "")
                        and str(os.environ.get("LSS_DAY_FUNNEL", "1")).strip()
                        not in ("0", "false", "no"))
@@ -18413,10 +18459,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         _s3 = str(_v3)
                         if _s3 == "—":
                             return "09:00 の一発(遅寄りは捨てる)"
+                        # ⛔ 接尾辞は **数字を取り出す前に全部剥がす**。
+                        #    2026-08-18 に『現値判定』を足したとき、ここを直し
+                        #    忘れて int("10現値判定") で落ち、**H設定の比較
+                        #    ブロックと監査ボードが丸ごと出なくなった**
+                        #    (「比較ブロック生成に失敗」の1行だけが出る)。
+                        #    新しい接尾辞を足すときは必ずここに追加すること。
+                        _now = _s3.endswith("現値判定")
+                        _s3 = _s3.removesuffix("現値判定")
                         _fast = _s3.endswith("即時")
                         _s3 = _s3.removesuffix("即時")
                         _sfx = ("・約定は自分の始値=逐次配分なら実装可" if _fast
                                 else "")
+                        if _now:
+                            _sfx += "・判定は**締切時刻の現在値**(始値を使わない=50件の壁が外れる)"
                         if _s3.startswith("w"):
                             _st3, _ct3 = _s3[1:].split("c")
                             _n3 = int(_ct3) // int(_st3) + 1
@@ -19817,7 +19873,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _EH_CMP_HTML = _hv_html + _EH_CMP_HTML
                 print(f"[H設定] 比較ブロックを生成 ({_hvt.time() - _t0:.1f}s)", flush=True)
     except Exception as _hvce:
-        print(f"[H設定] 比較ブロック生成に失敗: {_hvce}", flush=True)
+        # ⛔ 1行だけ出して黙ると『監査ボードが無い』としか見えない
+        #    (2026-08-18 に実際そうなった)。**どこで落ちたかを必ず出す**。
+        import traceback as _hvtb
+        print(f"[H設定] ⛔ 比較ブロック生成に失敗: {_hvce}\n"
+              f"    → **☑ 設定監査ボード と 🎯 H の設定比較 が出ません**。\n"
+              + "".join(_hvtb.format_exc().splitlines(True)[-6:]), flush=True)
     try:
         if _LSS_ORDER_MODE and _eh_sorted:
             _EH_CMP_HTML += _age_html()
