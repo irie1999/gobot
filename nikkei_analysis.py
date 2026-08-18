@@ -11904,6 +11904,11 @@ function switchTbd(id, tab) {{
                             for _d1, _c1 in _day_first.items() if _c1}
             _artifact = sorted(_d1 for _d1, _hm1 in _day_open_hm.items()
                                if _hm1 != "09:00")
+            # 検算用: 欠落日を丸ごと落として数字を作り直す。下の[欠落日の検算]で
+            # 差が大きかったときだけ使う(既定は落とさない=全日を使う)。
+            _drop_art = (set(_artifact) if str(
+                os.environ.get("LSS_DROP_ARTIFACT_DAYS", "")).strip()
+                in ("1", "true", "yes") else set())
 
             def _in_pool(_t) -> bool:
                 """建てられるか。ペア/解禁日に加えて **その日の寄りに間に合ったか**。
@@ -11916,6 +11921,8 @@ function switchTbd(id, tab) {{
                 ⛔ **データの欠落を遅寄りと数えない**(2026-08-18)。その日の
                   最頻の先頭バーより後に始まった銘柄だけが本当の遅寄り。
                 """
+                if _drop_art and str(_t.get("entry_d_raw") or "") in _drop_art:
+                    return False
                 if _t.get("late_open") and not _keep_late:
                     _hm = str(_t.get("open_hm") or "")
                     _base = _day_open_hm.get(str(_t.get("entry_d_raw") or ""))
@@ -12104,6 +12111,33 @@ function switchTbd(id, tab) {{
                       f"       その5分間の利確・損切りは見えません"
                       f"(delay1 の無保護窓と一致するので損切りには影響しない)。",
                       flush=True)
+                # ★★ **欠落日の成績が違わないか**を必ず確かめる(2026-08-18)。
+                #   約定価格は日足の始値なので欠落の影響を受けない。損切りも
+                #   delay で武装前なので影響しない(_dly を1本ぶん減らして
+                #   時刻を合わせてある)。**利確の取りこぼしだけ**が残るので、
+                #   欠落日が明確に悪ければそれはエッジではなくアーティファクト。
+                #   同水準なら「データの欠落は無害」と確定できる。
+                _agp = set(_artifact)
+                _sp: dict = {}
+                for _d3, _tl3 in _by.items():
+                    _k3 = "09:05〜(欠落)" if _d3 in _agp else "09:00(正常)"
+                    _a3 = _sp.setdefault(_k3, [0, 0.0, 0])
+                    _a3[0] += len(_tl3)
+                    _a3[1] += sum(float(_t3.get("pnl") or 0) for _t3 in _tl3)
+                    _a3[2] += 1
+                if len(_sp) == 2:
+                    print(f"    [欠落日の検算] 予算前・プール内の 円/件")
+                    for _k3 in ("09:00(正常)", "09:05〜(欠落)"):
+                        _n3, _p3, _dd3 = _sp[_k3]
+                        print(f"      {_k3:<14}{_dd3:>4}日 {_n3:>6,}件 "
+                              f"{_p3 / max(1, _n3):>+8,.0f}円/件  計 {_p3:>+12,.0f}円")
+                    _v = [_sp[_k3][1] / max(1, _sp[_k3][0])
+                          for _k3 in ("09:00(正常)", "09:05〜(欠落)")]
+                    print(f"      → 差 {_v[1] - _v[0]:+,.0f}円/件"
+                          + ("  ✅ 同水準(欠落は無害)"
+                             if abs(_v[1] - _v[0]) < 300 else
+                             "  ⚠ **差が大きい**。欠落日を除いた数字も見ること"
+                             " (set LSS_DROP_ARTIFACT_DAYS=1)"), flush=True)
             _funnel = (str(_lbl or "") == str(_EQ_TAB_KEY2 or "")
                        and str(os.environ.get("LSS_DAY_FUNNEL", "1")).strip()
                        not in ("0", "false", "no"))
