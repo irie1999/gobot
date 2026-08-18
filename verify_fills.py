@@ -583,22 +583,48 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     print("=" * 78)
     print("=== 突合: 実約定 vs テスト ===")
     if both:
+        # ⛔ **損益の額を直接引き算してはいけない**(2026-08-18)。
+        #    テストは予算400万の資金均等(300株など)、少額テストの実運用は
+        #    予算60万で100株。株数が違えば損益の額も当然違うので、その差は
+        #    『乖離』ではなく『サイズの差』。比較していいのは **1株あたり**だけ。
+        #    (この日: 2734 テスト -3,600円/300株 = -12円/株 に対し
+        #     実運用 -1,200円/100株 = -12円/株 で **完全一致**。額だけ見ると
+        #     2,400円ズレて見える)
+        _ps = lambda v, q: (float(v) / q if q else 0.0)     # noqa: E731
+        _qmix = any(int(real_done[s]["qty"]) != int(by_sym[s]["qty"]) for s in both)
         print(f"\n▼ 両方にある {len(both)}銘柄 (これが本当の乖離)")
-        print(f"{'コード':>6} {'銘柄':<12}{'実約定値':>10}{'テスト':>9}{'滑り':>8}"
-              f"{'実決済':>10}{'テスト':>9}{'実損益':>10}{'テスト':>10}{'差':>10}")
-        _d_tot = 0.0
+        print(f"  ★ 損益は **1株あたり** で比べます(株数が違うと額は比較できません)")
+        print(f"{'コード':>6} {'銘柄':<12}{'株数実/テ':>11}{'実約定値':>10}{'テスト':>9}"
+              f"{'滑り':>8}{'実決済':>10}{'テスト':>9}"
+              f"{'実円/株':>9}{'テ円/株':>9}{'差/株':>8}")
+        _d_ps = 0.0
         for s in both:
             r, t = real_done[s], by_sym[s]
             slip = ((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100
                     if t["entry_p"] else 0.0)
-            d = r["pnl"] - t["pnl"]
-            _d_tot += d
-            print(f"{s:>6} {t['name'][:12]:<12}{r['entry(売)']:>10,.1f}{t['entry_p']:>9,.1f}"
+            _rq, _tq = int(r["qty"] or 0), int(t["qty"] or 0)
+            _rp, _tp = _ps(r["pnl"], _rq), _ps(t["pnl"], _tq)
+            _d_ps += _rp - _tp
+            print(f"{s:>6} {t['name'][:12]:<12}"
+                  f"{(str(_rq) + '/' + str(_tq)):>11}"
+                  f"{r['entry(売)']:>10,.1f}{t['entry_p']:>9,.1f}"
                   f"{slip:>+7.2f}%{r['exit(買戻)']:>10,.1f}{t['exit_p']:>9,.1f}"
-                  f"{r['pnl']:>+10,.0f}{t['pnl']:>+10,.0f}{d:>+10,.0f}")
-        print(f"{'計':>6} {'':<12}{'':>10}{'':>9}{'':>8}{'':>10}{'':>9}"
-              f"{sum(real_done[s]['pnl'] for s in both):>+10,.0f}"
-              f"{sum(by_sym[s]['pnl'] for s in both):>+10,.0f}{_d_tot:>+10,.0f}")
+                  f"{_rp:>+9,.1f}{_tp:>+9,.1f}{_rp - _tp:>+8,.1f}")
+        print(f"{'平均':>6} {'':<12}{'':>11}{'':>10}{'':>9}{'':>8}{'':>10}{'':>9}"
+              f"{sum(_ps(real_done[s]['pnl'], real_done[s]['qty']) for s in both) / len(both):>+9,.1f}"
+              f"{sum(_ps(by_sym[s]['pnl'], by_sym[s]['qty']) for s in both) / len(both):>+9,.1f}"
+              f"{_d_ps / len(both):>+8,.1f}")
+        print(f"  (参考: 額の合計 実 {sum(real_done[s]['pnl'] for s in both):+,.0f}円 / "
+              f"テスト {sum(by_sym[s]['pnl'] for s in both):+,.0f}円"
+              + ("  ⛔ **株数が違うので この2つは比較できません**" if _qmix else "")
+              + ")")
+        if _qmix:
+            print(f"  → 少額テスト(予算60万)は 100株、レポート(予算400万)は資金均等。")
+            print(f"    ⛔ **少額テストの実損益をレポートの損益と比べないでください。**")
+            print(f"    値がさ株は少額では1単元も建たないので、銘柄の顔ぶれ自体が"
+                  f"違います(構造バイアス)。比較できるのは上の 円/株 だけ。")
+        # 差/株 の合計は乖離の総量。0 に近ければ約定モデルは正しい。
+        _d_tot = _d_ps
 
         # ── 指値そのもののズレ ────────────────────────────────────
         # ⛔ 上の「滑り」は (実約定値 - テスト約定値) なので、**指値が違う**だけでも
@@ -716,7 +742,12 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
 # 分からない。lss の月の期待値は +37,647円(CLAUDE.md 18.12)しかないので、1日
 # -2,900円 の乖離が常態なら月 -58,000円 になり期待値が消える。10営業日ぶん貯めれば
 # それが確定する。tenkan_daily_log.csv と同じ思想(1日1行・同じ日は上書き)。
+#
+# ⛔ **額の列(実損益/テスト損益/差/エントリー滑り/決済滑り)は株数に比例する**。
+#    少額テスト(100株)と本番サイズ(資金均等)を混ぜて足すと意味を失うので、
+#    日をまたいで比べるときは **/株** の列を見ること(2026-08-18 に追加)。
 _SLIP_COLS = ["date", "方式", "突合", "実損益", "テスト損益", "差",
+              "差/株", "エントリー滑り/株", "決済滑り/株",
               "エントリー滑り", "決済滑り", "平均エントリー滑り%",
               "実件数", "実損益_全", "テスト件数", "テスト損益_全", "差_全",
               "発注件数", "約定率%"]
@@ -731,6 +762,7 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
     どちらが効いているかで打ち手が変わる(エントリー=発注価格、決済=損切りの出し方)。
     """
     _e_slip = _x_slip = 0.0
+    _e_ps = _x_ps = _d_ps = 0.0
     _r_both = _t_both = 0.0
     _pcts: list[float] = []
     for s in both:
@@ -738,11 +770,15 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
         q = r["qty"] or 100
         if t["entry_p"]:
             _e_slip += (r["entry(売)"] - t["entry_p"]) * q
+            _e_ps += r["entry(売)"] - t["entry_p"]
             _pcts.append((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100)
         if t["exit_p"]:
             _x_slip += (t["exit_p"] - r["exit(買戻)"]) * q
+            _x_ps += t["exit_p"] - r["exit(買戻)"]
+        _d_ps += (r["pnl"] / q) - (t["pnl"] / (t["qty"] or 100))
         _r_both += r["pnl"]
         _t_both += t["pnl"]
+    _n_b = max(1, len(both))
 
     _ymd = f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}" if len(_DATE_DIG) == 8 else str(_DATE)
     row = {
@@ -752,6 +788,10 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
         "実損益": round(_r_both),
         "テスト損益": round(_t_both),
         "差": round(_r_both - _t_both),
+        # ★ 株数に依存しない列。日をまたいだ比較はこちらで行う。
+        "差/株": round(_d_ps / _n_b, 2),
+        "エントリー滑り/株": round(_e_ps / _n_b, 2),
+        "決済滑り/株": round(_x_ps / _n_b, 2),
         "エントリー滑り": round(_e_slip),
         "決済滑り": round(_x_slip),
         "平均エントリー滑り%": round(sum(_pcts) / len(_pcts), 3) if _pcts else 0.0,
@@ -833,6 +873,19 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
           f"{sum(_f(h.get('テスト損益')) for h in _cv):>+10,.0f}{d_tot:>+10,.0f}"
           f"{e_tot:>+12,.0f}{x_tot:>+10,.0f}")
     print()
+    # ★★ **株数に依存しない集計**。少額テストと本番サイズが混ざっても意味を保つ。
+    #    額の列は株数に比例するので、サイズを変えた日をまたぐと足せない。
+    _wb = [(int(_f(h.get("突合"))), _f(h.get("差/株")),
+            _f(h.get("エントリー滑り/株")), _f(h.get("決済滑り/株")))
+           for h in _cv if int(_f(h.get("突合"))) > 0 and h.get("差/株") not in (None, "")]
+    if _wb:
+        _nb2 = sum(w[0] for w in _wb)
+        print(f"  ★ 1株あたり(サイズ非依存 / 突合 {_nb2}件・{len(_wb)}営業日)")
+        print(f"     乖離        {sum(w[0] * w[1] for w in _wb) / _nb2:>+9,.2f} 円/株")
+        print(f"     エントリー  {sum(w[0] * w[2] for w in _wb) / _nb2:>+9,.2f} 円/株"
+              f"   決済 {sum(w[0] * w[3] for w in _wb) / _nb2:>+9,.2f} 円/株")
+        print()
+    print(f"  【額】※ 株数が同じ日どうしでしか比べられません")
     print(f"  1日あたりの乖離   {d_tot / n_d:>+12,.0f}円"
           f"   → 月20営業日換算 {d_tot / n_d * 20:>+12,.0f}円")
     if n_b:
