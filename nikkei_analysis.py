@@ -220,8 +220,12 @@ def _watch_axis_report(_cd: dict, _watch: int, _gap_bp: float = 50.0) -> str:
         ("前日終値 昇順", lambda t: _wf(t.get("h_pc"))),
     ]
     _days = {d: l for d, l in _cd.items() if len({_wsym(t) for t in l}) > _watch}
+    # ⛔ 黙って空を返さない。出ない理由が分からないと『測ったのに何も無かった』
+    #   と『そもそも走っていない』を取り違える(このリポジトリで何度も踏んだ形)。
     if len(_days) < 20:
-        return ""
+        return (f"\n  [watch{_watch} の切り方] 上限に当たる日が {len(_days)}日 "
+                f"しかないので評価しません(20日以上必要)。"
+                f"窓を伸ばすか --days を増やしてください")
     # 銘柄単位に畳む(登録は銘柄単位)。合格 = その銘柄で1つでも合格ペアがある
     _by: dict = {}
     for _d, _l in _days.items():
@@ -233,7 +237,9 @@ def _watch_axis_report(_cd: dict, _watch: int, _gap_bp: float = 50.0) -> str:
             _g = _t.get("h_gap_pc_bp")
             _c = _m.setdefault(_s, {"symbol": _s, "liquidity": 0.0,
                                     "h_atr_pct_pc": 0.0, "h_pc": 0.0,
-                                    "pass": False})
+                                    "pass": False, "_gap_seen": False})
+            if _g is not None:
+                _c["_gap_seen"] = True
             _c["liquidity"] = max(_c["liquidity"], _wf(_t.get("liquidity")))
             _c["h_atr_pct_pc"] = _c["h_atr_pct_pc"] or _wf(_t.get("h_atr_pct_pc"))
             _c["h_pc"] = _c["h_pc"] or _wf(_t.get("h_pc"))
@@ -242,7 +248,12 @@ def _watch_axis_report(_cd: dict, _watch: int, _gap_bp: float = 50.0) -> str:
         _by[_d] = list(_m.values())
     _tot = sum(sum(1 for c in v if c["pass"]) for v in _by.values())
     if _tot < 30:
-        return ""
+        _has = sum(1 for v in _by.values() for c in v if c.get("_gap_seen"))
+        return (f"\n  [watch{_watch} の切り方] 合格が {_tot}件 しか拾えないので"
+                f"評価しません(30件以上必要)。\n"
+                f"    ⛔ ギャップを持つ候補が {_has:,}件。0 なら "
+                f"**E/Hキャッシュが古い**(h_gap_pc_bp が無い版)。\n"
+                f"       set LSS_EH_CACHE=0 で作り直すか、.eh_cache を消してください")
 
     def _cap(keyf) -> float:
         _hit = 0
@@ -11476,7 +11487,13 @@ function switchTbd(id, tab) {{
                 # v2: 不約定シグナルに label/color/WF/rank を持たせた
                 #     (2026-08-15)。トレード dict の中身が変わるので、
                 #     古いキャッシュを引くと 設定バッジが空のままになる。
-                _sig = ["v5", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                # ⛔⛔ **トレード dict にフィールドを足したら必ず上げること**。
+                #   この鍵は「入力シグナルの一覧」から作るので、_mk が出す
+                #   **中身**を変えてもキーが変わらない。古いキャッシュがそのまま
+                #   復元され、新しい列が無いまま集計が **黙って空になる**。
+                #   v6: h_pc / h_gap_pc_bp / h_atr_pct_pc を追加(2026-08-18)。
+                #       watch の切り方を『合格の捕捉率』で測るのに要る。
+                _sig = ["v6", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
