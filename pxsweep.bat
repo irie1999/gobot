@@ -18,7 +18,7 @@ REM   10,000-yen universe. If that leaked, TOMORROW'S ORDER LIST would silently
 REM   include 9,000-yen names. Every shared file is redirected below.
 REM
 REM WHAT TO LOOK AT (decide before running - 18.38 checklist #6)
-REM   The audit board row "建値の上限". Judge on:
+REM   The audit board row for the price cap ("kenne no jougen"). Judge on:
 REM     1. mean/sigma  (NOT total yen - price has no edge, proven 4x:
 REM                     18.13 / 18.24 / 18.31 / 18.38)
 REM     2. the concentration table: what % of the budget one name takes
