@@ -39,6 +39,14 @@ set "LSS_SELECTED_OUT=holdout_selected_symbols_long.py"
 set "LSS_SIGNALS_OUT="
 set "LSS_TRADES_CSV=lss_trades_long.csv"
 
+REM --- show the monthly summary + per-day cards ----------------
+REM The base tabs ("all" / "entry") hide their body by default to keep the
+REM daily HTML small (2026-08-15). .\daily builds long AND short panes too, so
+REM do NOT un-hide this globally - set it here, for this report only.
+REM With it on, the report also opens on "entry" (monthly + daily) instead of
+REM "all" (3,000+ rows, unreadable).
+set "LSS_BASE_DETAIL=1"
+
 REM --- clear research flags that may linger in the shell -------
 set "LSS_BUDGET_SWEEP="
 set "LSS_OOS_BUDGET_CSV="
@@ -64,3 +72,4 @@ REM --- put the shell back the way it was ----------------------
 set "LSS_SELECTED_OUT="
 set "LSS_SIGNALS_OUT="
 set "LSS_TRADES_CSV="
+set "LSS_BASE_DETAIL="
