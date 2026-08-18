@@ -73,3 +73,7 @@ report_conditions_log.csv
 
 # 発注リストの日別スナップショット(その日に見えていた正本 / 直近3日だけ)
 signal_history/
+
+# 朝の J 記録(k_morning_archive.py)。取り直せないのでローカルに残す
+k_morning/
+k_morning_log.csv

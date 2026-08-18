@@ -245,6 +245,21 @@ _res: list[tuple] = []
 # ★ 既に今日ぶんが出来ていれば飛ばす (2026-08-17)。--collect は yfinance で
 #   8,898ペアを回すので5〜10分かかる。朝の残り時間を食うので、手で先に
 #   走らせてあるなら再実行しない。作り直したいときは --force-collect。
+# ★ まず、手元に残っている過去の朝を保存し直す (2026-08-18)。
+#   k_paper_*.csv がまだ消えていない日で、未保存のぶんだけ作る。上書きはしない。
+#   これを **先頭**でやるのは、この後の --collect が k_signals_<今日>.csv を
+#   上書きしうるため(今日を先に固めておく必要はないが、昨日以前の取りこぼしを
+#   ここで拾える)。kabu を触らないので他の測定と競合しない。
+if not args.dry_run:
+    try:
+        import k_morning_archive as _kma0
+        _n_bf = _kma0.backfill(quiet=False)
+        if _n_bf:
+            print(f"[k_morning] 未保存だった朝 {_n_bf}日ぶんを保存しました",
+                  flush=True)
+    except Exception as _bfe:
+        print(f"  ⚠ 朝の記録の保存に失敗({_bfe})", flush=True)
+
 _sig_today = Path(f"k_signals_{_dt.date.today():%Y%m%d}.csv")
 if not args.no_kpaper and _sig_today.exists() and not args.force_collect:
     print(f"\n[手順0] {_sig_today} が既にあるのでスキップします"

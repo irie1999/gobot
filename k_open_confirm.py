@@ -1150,3 +1150,15 @@ try:
     print("[k_paper] 登録を全解除しました")
 except Exception:
     pass
+
+# ★ その朝を丸ごと保存する (2026-08-18 ユーザー依頼)。
+#   k_signals / k_paper は同じ日にもう一度回すと上書きされるが、板・気配の
+#   履歴はどのデータにも無い(§18.35)ので失うと復元できない。
+#   **書き込みは1回だけ**。既にあれば触らない(signal_history と同じ方針)。
+try:
+    import k_morning_archive as _kma
+    _kma.archive()
+except Exception as _ae:
+    print(f"  ⚠ 朝の記録の保存に失敗({_ae})。"
+          f"k_signals_*.csv / k_paper_*.csv は残っているので、"
+          f"`python k_morning_archive.py --backfill` で作り直せます", flush=True)

@@ -3845,6 +3845,13 @@ tr.sigrow.ordered > td { background: rgba(220,38,38,0.14); }
     except Exception as _she2:
         _sig_hist_html = ""
         print(f"  [発注リスト履歴] 表示に失敗: {_she2}", flush=True)
+    # ★ 朝の J 記録(09:00 に板で見た始値・合格・発注)。取り直せないので
+    #   毎日ここから見られるようにしておく(2026-08-18 ユーザー依頼)。
+    try:
+        import k_morning_archive as _kma2
+        _sig_hist_html += _kma2.render_html()
+    except Exception as _kme2:
+        print(f"  [朝のJ記録] 表示に失敗: {_kme2}", flush=True)
     return score_section + _order_js + f"""
 <h2>{sig_label} のシグナル一覧 — {_sig_ord_lbl} {min_note}</h2>
 {_asof_warn}{_analysis_warn}{_sig_hist_html}
