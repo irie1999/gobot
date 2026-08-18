@@ -3117,10 +3117,20 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
     #    損益タブ側は約定値ベースのフィルタ(_PNL_ENTRY_*)が既にあり先読みなし。
     if _PNL_ENTRY_MAX_PRICE > 0 or _PNL_ENTRY_MIN_PRICE > 0:
         _before = len(signals)
-        _kept = []
+        _kept, _nokey = [], 0
         for _s in signals:
-            _op = float(_s.get("order_price", 0) or 0)
+            # ⛔⛔ **キー名は "order_p"**(:3071 で詰め直している)。2026-08-14 に
+            #    このフィルタを書いたとき "order_price" で読んでいたため、常に 0
+            #    → 「注文値が取れない」扱いで **全部素通り**していた。しかも
+            #    件数が減らないので下の診断行も出ず、4日間 気づかなかった
+            #    (2026-08-18 ユーザーが「6,000円以上の銘柄がある」と指摘)。
+            # ★ H(指値売り)は実際に出す値が h_order_price なので、あればそちらで
+            #    判定する。無ければ逆指値のトリガー order_p。
+            _op = float(_s.get("h_order_price", 0) or 0) \
+                or float(_s.get("order_p", 0) or 0) \
+                or float(_s.get("order_price", 0) or 0)
             if _op <= 0:                     # 注文値が取れないものは従来どおり残す
+                _nokey += 1
                 _kept.append(_s)
                 continue
             if _PNL_ENTRY_MAX_PRICE > 0 and _op > _PNL_ENTRY_MAX_PRICE:
@@ -3129,12 +3139,15 @@ def _tab4_signals_html(workers: int, min_score: int = 0, target_date=None,
                 continue
             _kept.append(_s)
         signals = _kept
-        if _before != len(signals):
-            print(f"  [発注リストの価格フィルタ] 注文値で {_before}→{len(signals)}件 "
-                  f"({_before - len(signals)}件除外 / "
-                  f"{_PNL_ENTRY_MIN_PRICE:,.0f}〜{_PNL_ENTRY_MAX_PRICE:,.0f}円)。"
-                  f"⚠ 判定は**今日の注文値**。過去の集計はユニバースから落とさない"
-                  f"(18.16 の先読み対策)", flush=True)
+        # ⛔ **0件除外でも必ず出す**。前は「減ったときだけ」出していたので、
+        #    キー名を間違えて1件も落ちていない状態が黙って続いた(上記)。
+        print(f"  [発注リストの価格フィルタ] 注文値で {_before}→{len(signals)}件 "
+              f"({_before - len(signals)}件除外 / "
+              f"{_PNL_ENTRY_MIN_PRICE:,.0f}〜{_PNL_ENTRY_MAX_PRICE:,.0f}円)。"
+              f"⚠ 判定は**今日の注文値**。過去の集計はユニバースから落とさない"
+              f"(18.16 の先読み対策)"
+              + (f"\n    ⚠ うち {_nokey}件は注文値が取れず素通り"
+                 if _nokey else ""), flush=True)
 
     # 流動性(平均日次売買代金=出来高×終値)を各シグナルに付与。
     # 検証で「厚い銘柄ほど1件あたり利益が大きい」と分かったため、BT同点時は厚い方を優先。
