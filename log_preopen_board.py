@@ -125,6 +125,8 @@ ap.add_argument("--verify", action="store_true",
                 help="貯めたログと5分足の始値を突合する(ネットワーク不要)")
 ap.add_argument("--gap-bp", type=float, default=50.0,
                 help="--verify: 合格とみなすギャップ閾値(bp)")
+ap.add_argument("--watch", type=int, default=50,
+                help="用途B(登録する何件を選ぶか)の N。既定50=kabu の登録上限")
 ap.add_argument("--glob", type=str, default="preopen_board_*.csv",
                 help="--verify: 読むログのグロブ")
 args = ap.parse_args()
@@ -132,7 +134,10 @@ args = ap.parse_args()
 _COLS = ["date", "ts", "hm", "to_open_s", "symbol", "is_cand",
          "bid", "ask", "mid",
          "bid_sign", "ask_sign", "mkt_sell_qty", "mkt_buy_qty",
-         "current_price", "prev_close", "gap_bp"]
+         "current_price", "prev_close", "gap_bp",
+         # ★ 用途B(登録する50件を気配で選べるか)の比較相手が要る。
+         #   いまのやり方=流動性降順 と同じ土俵で捕捉率を出すため(2026-08-18)。
+         "liquidity"]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -176,6 +181,7 @@ def _verify() -> None:
     # ── 時刻(hm)ごとに集計 ──────────────────────────────────────────
     _by_hm: dict = {}
     _recs: list = []          # (寄りまでの残り秒, (date, symbol), タプル)
+    _liqs: dict = {}          # (date, symbol) -> 売買代金(古いログには無い)
     _miss = 0
     _late = 0   # 寄り後に取った行(誤実行ぶん)
     for r in _rows:
@@ -218,6 +224,12 @@ def _verify() -> None:
               str(r.get("ask_sign") or ""), _cd)
         _by_hm.setdefault(str(r.get("hm") or "?"), []).append(_t)
         _recs.append((_ts, _k, _t))
+        try:
+            _lq = float(r.get("liquidity") or 0)
+        except Exception:
+            _lq = 0.0
+        if _lq > 0:
+            _liqs[_k] = max(_liqs.get(_k, 0.0), _lq)
     if _late:
         print(f"⚠ 寄り後({args.open_at}以降)に取った {_late:,}行を除外しました"
               f"（引け後の誤実行ぶん。始値が確定した後の値なので混ぜると"
@@ -311,27 +323,110 @@ def _verify() -> None:
         print("  ⚠ is_cand=1 の行がありません(古いログ / 候補ファイルが無かった)")
 
     print(f"\n  ※ 未突合 {_miss:,}行(5分足が無い / 気配が取れていない)")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 本命の問い: 気配は『登録する50件を選ぶ』のに使えるか (2026-08-18)
+    # ══════════════════════════════════════════════════════════════════
+    # ⛔ 上の反転率は **「気配だけで判定して発注する」(用途A)** の精度。
+    #    A は誤建てがそのまま損になるので数%の精度が要る → 30% で棄却。
+    #
+    # ★ しかし実際にやりたいのは **「登録する50件を気配で選ぶ」(用途B)**。
+    #    最終判定は 09:00 の**実際の始値**なので、
+    #      ・誤建て(気配は合格・実際は不合格) → 09:00 で弾かれる = **ほぼ無料**
+    #      ・取逃し(気配は不合格・実際は合格) → これだけが本当の損失
+    #    そして比較相手は『完璧』ではなく **いまのやり方(流動性降順)** で、
+    #    それ自体が 38.7% を取り逃している(捕捉率 61.3% / 2026-08-18 実測)。
+    #    → **反転率が高くても、捕捉率で勝てば採用する価値がある。**
+    #
+    # 判定は §18.24 の作法どおり **ランダム12本の帯**と比べる。
+    _dsym: dict = {}          # 日 -> [(気配gap, 実gap, symbol, liq)]
+    for _ts0, (_d0, _s0), _t0 in _recs:
+        _e = _dsym.setdefault(_d0, {})
+        # 同じ銘柄が複数時刻にあるので **寄りに最も近い1本**を採る(実運用と同じ)
+        if _s0 not in _e or _ts0 < _e[_s0][0]:
+            _e[_s0] = (_ts0, _t0[0], _t0[1], _liqs.get((_d0, _s0), 0.0))
+    _NCAP = int(args.watch or 50)
+
+    def _cap(_key, _seed=None) -> tuple:
+        """上位N件に入った『実際の合格』の割合(捕捉率)と、その分母。"""
+        import random as _rnd
+        _hit = _tot = 0
+        for _d0, _e in _dsym.items():
+            _ok = [s for s, v in _e.items() if v[2] >= _th]
+            if not _ok:
+                continue
+            _tot += len(_ok)
+            _lst = list(_e.items())
+            if _seed is not None:
+                _rnd.Random(f"{_seed}:{_d0}").shuffle(_lst)
+            else:
+                _lst.sort(key=lambda kv: _key(kv[1]), reverse=True)
+            _top = {s for s, _ in _lst[:_NCAP]}
+            _hit += sum(1 for s in _ok if s in _top)
+        return (_hit / _tot * 100 if _tot else 0.0), _tot
+
+    _rc = [_cap(None, _sd)[0] for _sd in range(12)]
+    _rm = sum(_rc) / len(_rc)
+    _rs = (sum((x - _rm) ** 2 for x in _rc) / max(1, len(_rc) - 1)) ** 0.5
+    _pre, _ntot = _cap(lambda v: v[1])
+    _nday = len([1 for _e in _dsym.values()
+                 if any(v[2] >= _th for v in _e.values())])
+    print(f"\n{'=' * 84}")
+    print(f"■ ★★ 本命: 気配で『登録する{_NCAP}件』を選べるか (用途B)")
+    print(f"{'=' * 84}")
+    print(f"  最終判定は 09:00 の実際の始値なので、**誤建ては 09:00 で弾かれる**。")
+    print(f"  効くのは取逃しだけ。比較相手は『完璧』ではなく **いまのやり方**。")
+    print(f"  対象: {_nday}営業日 / 実際の合格 {_ntot}件 / "
+          f"1日あたり平均 {len(_dsym) and sum(len(_e) for _e in _dsym.values()) // len(_dsym)}銘柄を読んだ想定\n")
+    print(f"  {'切り方':<22}{'捕捉率':>8}{'z':>8}   判定")
+    print(f"  {'ランダム12本(基準線)':<22}{_rm:>7.1f}%{'':>8}   σ={_rs:.2f}")
+    _rows_ax = [("**気配のギャップ降順**", _pre)]
+    if any(v[3] for _e in _dsym.values() for v in _e.values()):
+        _rows_ax.append(("流動性 降順(現行)", _cap(lambda v: v[3])[0]))
+    else:
+        print(f"  {'流動性 降順(現行)':<22}{'—':>8}{'':>8}   "
+              f"⚠ ログに liquidity 列が無い(次回から入ります)")
+    for _lbl, _v in _rows_ax:
+        _z = (_v - _rm) / _rs if _rs > 0 else 0.0
+        print(f"  {_lbl:<22}{_v:>7.1f}%{_z:>+8.2f}   "
+              + ("★帯の外" if abs(_z) >= 2.2 else "帯の中(=効果なし)"))
+    print(f"\n  ※ |z|>=2.2 (12本=t(11)) が帯の外。捕捉率は **中間指標**で、"
+          f"§18.38 の傾き\n"
+          f"    (捕捉+19.1pt = +126,768円/月)で円換算してから月次σ(15万)と"
+          f"比べること。")
+    if _nday < 15:
+        print(f"  ⛔ **まだ {_nday}営業日しかありません**。捕捉率は日ごとの"
+              f"ばらつきが大きいので、\n"
+              f"     15〜20営業日は貯めてから判断すること"
+              f"(いま見えている値はノイズです)。")
     print(f"""
-■ 読み方 — **値のズレではなく『判定の反転』を見ること**
+■ 読み方 — **上の反転率は「用途A」の話。判断は「用途B」の捕捉率でする**
 
-  K が気配に求めるのは「{_th:+.0f}bp 以上か」の判定だけ。値が数bpずれても
-  余裕のある銘柄は判定が変わらない。危ないのは閾値の際どい銘柄だけ。
+  ⛔⛔ 2026-08-18 に一度読み違えた。反転率だけ見て『気配は使えない』と
+     結論しかけたが、**測っていた問いが違った**:
 
-  ★ **反転率が数%なら、寄り前の気配で判定してよい**。そうすれば 08:00〜09:00 の
-    1時間を使えるので、50件バッチを何周も回せる = **登録上限が事実上消える**。
-    (09:00 は数秒しか無いので50件が天井。ここが K 最大の制約 / §18.38)
+    用途A: 気配だけで判定して発注する
+           → 誤建てがそのまま損。数%の精度が要る
+           → 実測 反転率 30.5% で **棄却**(これは確定)
 
-  ⛔ 反転が10%を超えるなら気配では判定できない。09:00 の始値方式を維持し、
-    候補は前夜に流動性上位50件へ絞るしかない。
+    用途B: 気配で **登録する {_th:.0f}件を選ぶ** (最終判定は 09:00 の実際の始値)
+           → 誤建ては 09:00 で弾かれる = **ほぼ無料**
+           → 取逃しだけが損。しかも比較相手は『完璧』ではなく
+             **いまのやり方(流動性降順)**で、それ自体が約4割 取り逃している
+           → **反転率が高くても捕捉率で勝てば採用する価値がある**
+
+  ★ したがって判断材料は上の「■ ★★ 本命」ブロックの **捕捉率と z**。
+    反転率の表は「気配だけで発注できるか」を否定するためだけのもの。
 
   ★★ **精度とカバー範囲は直接トレードオフ**。寄りに近いほど当たるが、
-    近い時間帯ほど読める銘柄は少ない(6.5件/秒)。決めるのはこの1点:
-
-        「反転率が許せる範囲に収まる **いちばん早い時刻**」
-
-    そこから 09:00 までの秒数 × 6.5件/秒 = **カバーできる銘柄数**。
+    近い時間帯ほど読める銘柄は少ない(6.5件/秒)。
+        そこから 09:00 までの秒数 × 6.5件/秒 = **カバーできる銘柄数**。
     例) 08:55 まで遡れるなら 300秒 × 6.5 ≒ 1,900銘柄 → 上限50件の制約は消える
-        08:59 しか使えないなら 60秒 × 6.5 ≒ 390銘柄 → それでも50件よりは広い
+
+  ⚠ ただし **watch を増やす価値そのものが 50 で飽和する**(2026-08-18 実測):
+        25→50 +84,692円/月 / 50→100 +24,177 / 100→無制限 +4,357
+    予算400万が律速で、1日13〜18件しか建てられないため(§18.42)。
+    **予算を上げないと、気配で壁を破っても取り分は月+28,534円が天井。**
 
   ⚠ 「各銘柄の最新の気配だけ」の行が **本番の精度**。時刻ごとの行は
     「何分前まで遡れるか」を決めるためのもので、そのまま本番値ではない。
@@ -409,6 +504,30 @@ _SRC_CHAIN = [
 #   後から「候補だけの反転率」と「全銘柄の反転率」を切り分けられる
 #   (候補はシグナルが出た銘柄なので気配の付き方が違う可能性がある)。
 _CAND: set = set()
+# 銘柄 -> 売買代金。用途B(登録する50件を気配で選べるか)の比較相手が
+# 『流動性降順』なので、同じログに持っておかないと同じ土俵で測れない。
+_LIQ: dict = {}
+
+
+def _load_liq(_p: str) -> None:
+    """候補CSVの liquidity 列を拾う(無ければ何もしない)。"""
+    try:
+        import csv as _c2
+        with open(_p, encoding="utf-8-sig", newline="") as _f:
+            for _r in _c2.DictReader(_f):
+                _s = str(_r.get("symbol") or "").upper() \
+                    .removesuffix(".T").split(".")[0]
+                try:
+                    _v = float(_r.get("liquidity") or 0)
+                except Exception:
+                    _v = 0.0
+                if _s and _v > 0:
+                    _LIQ[_s] = max(_LIQ.get(_s, 0.0), _v)
+    except Exception:
+        pass
+    if _LIQ:
+        print(f"[preopen] 売買代金 {len(_LIQ):,}銘柄を {_p} から読みました"
+              f"(用途Bの比較相手=流動性降順)")
 
 
 def _today_candidates() -> list[str]:
@@ -416,6 +535,7 @@ def _today_candidates() -> list[str]:
         _c = _codes_in(_p)
         if _c:
             print(f"[preopen] 今日の候補: {_p} {len(_c):,}銘柄 → 先頭に置きます")
+            _load_liq(_p)
             return _c
     return []
 
@@ -523,6 +643,9 @@ def _snap_batch(_b: list[str]) -> list[dict]:
                 "prev_close": _pc,
                 "gap_bp": (round((_mid - _pc) / _pc * 1e4, 1)
                            if _mid > 0 and _pc > 0 else ""),
+                # ★ 用途B の比較相手(いまのやり方=流動性降順)を同じ土俵で
+                #   測るために要る。取れない銘柄は 0 = 最後尾扱い(18.21)。
+                "liquidity": _LIQ.get(str(_s), 0.0),
             })
     return _rows
 
