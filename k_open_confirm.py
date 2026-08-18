@@ -157,7 +157,35 @@ ap.add_argument("--g1", type=float, default=0.8,
                 help="第1グループ(09:00の板寄せ)に配る予算の割合。"
                      "以降のグループは残り予算。⛔端数配分はしない")
 ap.add_argument("--out", type=str, default="")
+# ⛔⛔ 時間外の実発注ガード (2026-08-18)。
+#   2026-08-18 15:30 に `.\jorder` が誤って再実行され、**実発注を4件試みた**。
+#   /board は引け後も当日の OpeningPrice を返し続けるので、判定はそのまま通ってしまう。
+#   救われたのは kabu が ExpireDay=0 を『正しい有効期限を設定してください』
+#   (Code 5) で弾いたからで、**ザラ場中に再実行していたら通っていた**。
+#   保護指値は 始値×0.995 なので、14:00 に出せば現値より遥か下 = 即約定し、
+#   モデルに無い建玉ができる。
+ap.add_argument("--allow-late-orders", action="store_true",
+                help="⛔ 時間外でも発注する。事故のもとなので通常は使わない")
 args = ap.parse_args()
+
+# ── 実発注は 09:00 前後の窓の中だけ ───────────────────────────────────
+#   窓 = [--open-at の20分前, --poll-until の20分後]。外なら **起動時に落とす**
+#   (読み終わってから気づくのでは遅い)。記録だけ取りたいなら --execute を外す。
+if args.execute and not args.allow_late_orders:
+    def _hm2m(_s: str) -> int:
+        _h, _m = (int(x) for x in str(_s).split(":"))
+        return _h * 60 + _m
+    _now_m = _dt.datetime.now().hour * 60 + _dt.datetime.now().minute
+    _lo, _hi = _hm2m(args.open_at) - 20, _hm2m(args.poll_until) + 20
+    if not (_lo <= _now_m <= _hi):
+        sys.exit(
+            f"[error] いま {_dt.datetime.now():%H:%M} は発注の窓の外です"
+            f"（{_lo // 60:02d}:{_lo % 60:02d}〜{_hi // 60:02d}:{_hi % 60:02d}）。\n"
+            f"  ⛔ **実発注しません**。/board は引け後も当日の始値を返し続けるので、\n"
+            f"     時間外に走らせると『朝と同じ判定』で注文が飛びます"
+            f"（2026-08-18 15:30 に実際に4件試みた）。\n"
+            f"  ・記録だけ取り直す → --execute を外してください\n"
+            f"  ・それでも出す     → --allow-late-orders（自己責任）")
 
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          "prev_close", "open_p", "open_time", "current_price", "gap_bp",
@@ -504,7 +532,17 @@ try:
 except Exception as _e:
     sys.exit(f"[error] kabu_api を読めません: {_e}")
 
+# ⛔ 時間外に読み直すと、朝の k_paper_<日付>.csv を **上書きしてしまう**
+#   (2026-08-18 15:39 の誤実行で実際に潰れた。k_morning の write-once に
+#    救われたが、作業用ファイルは失われた)。窓の外なら別名にする。
 _out_path = args.out or f"k_paper_{_dt.date.today():%Y%m%d}.csv"
+if not args.out:
+    _h0, _m0 = (int(x) for x in str(args.poll_until).split(":"))
+    if (_dt.datetime.now().hour * 60 + _dt.datetime.now().minute) > _h0 * 60 + _m0 + 20:
+        _out_path = (f"k_paper_{_dt.date.today():%Y%m%d}"
+                     f"_late{_dt.datetime.now():%H%M}.csv")
+        print(f"  ⚠ 発注の窓の外なので、朝のファイルを守るため "
+              f"**{_out_path}** に書きます", flush=True)
 # ★ 発注するかどうかを **見出しで言い切る**。取り違えたら実弾なので、
 #   dry-run と実発注が同じ見た目になってはいけない。
 _mode_note = (
