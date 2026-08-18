@@ -11790,12 +11790,31 @@ function switchTbd(id, tab) {{
                         _dk = ("cand", int(_watch), _nmed, _ns[-1], len(_ns))
                         if _dk not in _WATCH_DIAG_SEEN:
                             _WATCH_DIAG_SEEN.add(_dk)
+                            # ★★ 合格数と並べて出す (2026-08-18 ユーザー質問
+                            #   「合格した銘柄の順で切っていた可能性は?」)。
+                            #   watch50 は **合格判定より前** の全シグナルに
+                            #   掛けるのが正しい(どの50銘柄を 09:00 に読むかは
+                            #   前夜に決めるので、合格は分からない=先読み)。
+                            #   ⛔ もし合格側に掛けていたら、この2つが同じ桁に
+                            #     なる。候補が合格の数倍あることが健全性の証拠。
+                            _pd = sorted(len(v) for v in _by.values()) or [0]
+                            _pmed = _pd[len(_pd) // 2]
+                            _ratio = (f"{_nmed / _pmed:.0f}倍" if _pmed
+                                      else "—")
                             print(f"  [watch{_watch}] 登録候補(銘柄/日): 中央 "
                                   f"{_nmed} / 最大 {_ns[-1]} / 上限超えの日 "
                                   f"{_ncut}/{len(_ns)} "
                                   f"({_ncut / len(_ns) * 100:.0f}%)"
-                                  f"  ← 発注リストの件数と合うか確認",
+                                  f"  ← 発注リストの件数と合うか確認\n"
+                                  f"    ↳ 合格(ギャップ通過)は中央 {_pmed}件/日。"
+                                  f"候補はその **{_ratio}** = 合格前の全シグナル"
+                                  f"に watch{_watch} を掛けている(先読みなし)",
                                   flush=True)
+                            if _pmed and _nmed <= _pmed * 1.2:
+                                print(f"  ⛔ 登録候補({_nmed})が合格({_pmed})と"
+                                      f"ほぼ同数です。**合格側に watch を掛けて"
+                                      f"いる疑い**(=先読み)。_cd の作り方を"
+                                      f"確認してください", flush=True)
 
             for _d, _lst in _by.items():
                 # ★ 登録上限で見られなかった銘柄は建てられない(09:00に始値を
