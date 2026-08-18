@@ -18554,9 +18554,31 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
+            # ⛔⛔ **つまみを足したら必ずここにも足すこと**(2026-08-18)。
+            #   _knobs() と _LBLN にだけ追加して _KN_KEYS を忘れると、
+            #   差分ループがそのつまみを見ないので「基準と0個違い」になり、
+            #   **その変種は表から丸ごと消える**(件数も判定も出ない)。
+            #   建値の上限(pmax)を足したとき実際にそうなり、生成は出来ている
+            #   のに監査ボードに1行も出ない、という形で30分溶かした。
+            #   → 直下の _miss チェックが _LBLN 側の漏れを見るので、
+            #     こちらの漏れも検知できるよう **両方向**で確認する。
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
                         "dedup", "dedup_post", "div", "watch", "late", "wave",
-                        "method", "g1"]
+                        "method", "g1", "pmax"]
+
+            # ⛔ 逆向きの漏れ(_knobs にあるのに _KN_KEYS に無い)を検知する。
+            #   こちらは例外にならず **変種が黙って消える**ので、下の _miss
+            #   チェックより見つけにくい。起動時に1回だけ警告する。
+            try:
+                _kn_extra = [_f for _f in _knobs("基準")
+                             if not str(_f).startswith("_")
+                             and _f not in _KN_KEYS]
+                if _kn_extra:
+                    print(f"  ⛔ [監査ボード] つまみ {_kn_extra} が _KN_KEYS に"
+                          f"ありません。差分に出ないので、そのつまみだけを"
+                          f"動かした変種は **表から消えます**", flush=True)
+            except Exception:
+                pass
 
             def _n_diff(_nm: str):
                 """方式が同じなら違うつまみの一覧、違えば None。
