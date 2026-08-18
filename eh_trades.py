@@ -243,7 +243,20 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
             #   ⚠ **5分足なので刻みの下限は5分**。1分刻みの判定はこのデータ
             #     では測れない(先頭バーが09:05の銘柄が実際に何分に寄ったかが
             #     分からない)。測るには1分足(CLAUDE.md「データ場所メモ」)が要る。
-            (int(v[11]) if len(v) > 11 and v[11] is not None else None))
+            (int(v[11]) if len(v) > 11 and v[11] is not None else None),
+            # 13要素目 = **判定に使う価格**。True なら『締切バーの値』で
+            #   ギャップを判定する(既定 False = 始値で判定)。
+            # ★★ 2026-08-18 ユーザー発案「始値だけに囚われてたけど、寄り付き後の
+            #   株価で判定できないのか」。これが効くと **50銘柄の壁が消える**:
+            #     09:00 の始値で判定 … 板寄せ直後の数十秒しか無い → 50銘柄
+            #     09:10 の現在値で判定 … 600秒使える → ローテーションで数百銘柄
+            #   ⛔ 既存の締切変種(cN)は **判定は始値のまま**で建てる時刻だけを
+            #     ずらすものだった。だから始値が要り、50件制限が残っていた。
+            #     こちらは始値を一切使わないので制限が外れる。
+            #   代償: 09:00〜締切の値動きを判定に取り込むので、合格する銘柄の
+            #     顔ぶれが変わる(寄り後に伸びた銘柄が入り、萎んだ銘柄が落ちる)。
+            #     どちらが良いかは測らないと分からない。
+            (bool(v[12]) if len(v) > 12 else False))
            for v in variants]
     _HKEYS = [v[0] for v in _HV]
 
@@ -455,7 +468,7 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                    not (gap_guard > 0 and o1 < pc * (1 - gap_guard)),
                    int(stop_delay_bars), "fill", "", sm, tm, None)]
         for (_hn, _ht_, _ha, _hd, _hanc, _hbp, _hgap, _hsm, _htm,
-             _hap, _hcut, _hwv) in _HV:
+             _hap, _hcut, _hwv, _hjc) in _HV:
             _sm_v = sm if _hsm is None else _hsm
             _tm_v = tm if _htm is None else _htm
             if _hgap is not None:
@@ -549,8 +562,19 @@ def build(trades, nofills, sm: float, tm: float, stop_delay_bars: int = 1,
                         _ep_k = float(day5["open"].iloc[_cut_i])
                     except Exception:
                         continue
+                    # ★★ 判定を『締切バーの値』で行う版 (2026-08-18)。
+                    #   始値を使わないので、09:00 に全銘柄を読む必要が無くなる
+                    #   = kabu の登録上限50件の制約が外れる。
+                    #   ⚠ ガードも同じ価格で見る(寄り後に+3%超まで伸びた銘柄は
+                    #     見送り。始値基準のままだと基準がちぐはぐになる)。
+                    _ok_k = _g_ok
+                    if _hjc:
+                        _ok_k = (_ep_k > 0 and pc > 0
+                                 and (_ep_k - pc) / pc * 1e4 >= _hgap
+                                 and not (gap_guard > 0
+                                          and _ep_k > pc * (1 + gap_guard)))
                     _cases.append((_hn, _ep_k, _ep_k,
-                                   bool(_g_ok and _ep_k > 0),
+                                   bool(_ok_k and _ep_k > 0),
                                    int(_hd), _hanc, f"cut{_cut_i}w{_wv}",
                                    _sm_v, _tm_v, _hap))
                     continue

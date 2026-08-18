@@ -11197,7 +11197,7 @@ function switchTbd(id, tab) {{
             _eq_pref = _eq_pref_of
 
             def _eq_var(_nm, _d, _g, _sm=None, _tm=None, _ap=None,
-                        _cut=None, _wv=None):
+                        _cut=None, _wv=None, _jc=False):
                 """変種タプルを作る。**名前で方式を決める**ので取り違えない。
 
                 確認方式: 寄指=False / 指値bp=None / 確認ギャップ=_g
@@ -11207,7 +11207,7 @@ function switchTbd(id, tab) {{
                 """
                 if str(_nm).startswith("H寄り確認"):
                     return (_nm, 0, False, _d, "fill", None, _g, _sm, _tm,
-                            _ap, _cut, _wv)
+                            _ap, _cut, _wv, _jc)
                 return (_nm, 0, True, _d, "fill", _g, None, _sm, _tm, _ap)
 
             _eqg0 = 50.0
@@ -11263,11 +11263,30 @@ function switchTbd(id, tab) {{
                     if _eqb2.startswith("H寄り確認"):
                         # 一括締切: 全員その時刻で建てる(09:00組も待たせる)
                         for _cv in [int(x) for x in str(os.environ.get(
-                                "LSS_EQ_CUTS", "10")).split(",")
+                                "LSS_EQ_CUTS", "10,30")).split(",")
                                 if str(x).strip().isdigit()]:
                             _hvars.append(_eq_var(
                                 f"{_eqb2}c{_cv}", _eqd2, _eqg2,
                                 _eqsm2, _eqtm2, None, _cv, None))
+                            # ★★★ 『現値判定』= 締切時刻の**現在値**で
+                            #   ギャップを判定する (2026-08-18 ユーザー発案
+                            #   「始値だけに囚われてたけど、寄り付き後の株価で
+                            #    判定できないのか」)。
+                            #   ⛔ 上の cN は **判定は始値のまま**で建てる時刻
+                            #     だけずらすもの。だから 09:00 に全銘柄の始値を
+                            #     読む必要があり、kabu の登録上限50件に縛られる。
+                            #   ★ こちらは始値を一切使わない:
+                            #       09:00 の始値で判定 … 数十秒しかない → 50銘柄
+                            #       09:10 の現在値で判定 … 600秒使える → 数百銘柄
+                            #     watch を 50→100 にできれば捕捉率 61%→78%
+                            #     (§18.38 換算で月 +110,830円)。軸をいじるより
+                            #     5倍効くので、成立するなら最大の打ち手。
+                            #   代償: 09:00〜締切の値動きが判定に入るので合格の
+                            #     顔ぶれが変わる(寄り後に伸びた銘柄が入り、
+                            #     萎んだ銘柄が落ちる)。良し悪しは測って決める。
+                            _hvars.append(_eq_var(
+                                f"{_eqb2}c{_cv}現値判定", _eqd2, _eqg2,
+                                _eqsm2, _eqtm2, None, _cv, None, True))
                         # 段階: "刻み:締切" (10:10 = 2段階 09:00/09:10)
                         for _wv0 in str(os.environ.get(
                                 "LSS_EQ_WAVES", "10:10,5:30,10:30")).split(","):
@@ -11525,7 +11544,8 @@ function switchTbd(id, tab) {{
                 #   復元され、新しい列が無いまま集計が **黙って空になる**。
                 #   v6: h_pc / h_gap_pc_bp / h_atr_pct_pc を追加(2026-08-18)。
                 #       watch の切り方を『合格の捕捉率』で測るのに要る。
-                _sig = ["v6", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                #   v7: 変種タプルに13要素目(現値判定)を追加(2026-08-18)。
+                _sig = ["v7", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
