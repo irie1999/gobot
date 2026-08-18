@@ -149,6 +149,49 @@ _EQ_METHOD_CONF = str(os.environ.get("LSS_EQ_METHOD", "confirm")) \
 #    0 で無効化。LSS_WATCH_CAPS で追加の水準(既定 25,100)。
 _WATCH_CAP = int(os.environ.get("LSS_WATCH_CAP", "50") or 0)
 
+# ★★ watch50 の **切り方** (2026-08-18 ユーザー質問
+#    「銘柄コード順でも結果が変わらないなら流動性順に意味が無いのでは?」)。
+#
+#   watch50 は「09:00 にどの50銘柄を読むか」で、**前夜に決める**もの。
+#   ギャップでは選べない(09:00 まで不明=先読み)ので、前夜に分かる値で並べる。
+#
+#   ⚠ リターン上の優位は無い。流動性は §18.13 / §18.24 / §18.31 で
+#     3回とも識別力ゼロと出ており、コード順との差も 0.02σ で測れない。
+#     残す理由は **バックテストが盲目な2点**(§18.21 と同じ理屈):
+#       ① 執行コスト … シムは slip=0。J は決済の約7割が損切り=成行買戻し
+#       ② kabu の読み取り … 低流動性が混ざると ReadTimeout が増える
+#     帯の中=下振れしないので、映らない部分で得をする方を選ぶ。
+#
+#   ⛔ 「バックテストが支持している」と書いてはいけない。支持していない。
+#
+#   比較したいときだけ切り替える(§18.24 の作法: 帯を作ってから判定する):
+#     LSS_WATCH_ORDER=liq     流動性(売買代金)降順 ← 既定・ライブと一致
+#     LSS_WATCH_ORDER=code    銘柄コード昇順(2026-08-17 まで事故で入っていた形)
+#     LSS_WATCH_ORDER=rand42  シード42の擬似ランダム(帯を作る用。数字を変える)
+#   ⚠ rand は **日ごとに独立**だが同じシードなら再現する(日付を種に混ぜる)。
+_WATCH_ORDER = str(os.environ.get("LSS_WATCH_ORDER", "liq") or "liq").lower()
+
+
+def _watch_sorted(_vals, _day: str) -> list:
+    """(流動性, 銘柄) の集合を『09:00 に読む順』に並べる。
+
+    ⛔ ここで使ってよいのは **前夜に分かる値だけ**。ギャップ・始値・当日の
+      成績を混ぜたら先読みになる。
+    """
+    _v = list(_vals)
+    if _WATCH_ORDER.startswith("rand"):
+        import hashlib
+        _seed = _WATCH_ORDER[4:] or "0"
+
+        def _h(x) -> str:
+            return hashlib.md5(
+                f"{_seed}|{_day}|{x[1]}".encode()).hexdigest()
+        return sorted(_v, key=_h)
+    if _WATCH_ORDER == "code":
+        return sorted(_v, key=lambda x: x[1])
+    # 既定: 流動性降順。取れない銘柄(0)は最後尾(§18.21)、同値は銘柄コード順
+    return sorted(_v, key=lambda x: (-x[0], x[1]))
+
 
 def _load_pool(path: str):
     """提案ファイルから (許可ペア集合, 解禁日dict) を読む。無ければ None。
@@ -11766,7 +11809,7 @@ function switchTbd(id, tab) {{
                             _nzero += 1 if _lq <= 0 else 0
                             if _s0 and _lq >= _bys.get(_s0, (-1.0,))[0]:
                                 _bys[_s0] = (_lq, _s0)
-                        _rk = sorted(_bys.values(), key=lambda x: (-x[0], x[1]))
+                        _rk = _watch_sorted(_bys.values(), _d0)
                         _allow[_d0] = {x[1] for x in _rk[:_watch]}
                         _nsym_day.append(len(_bys))
                     # 流動性が1件も取れないと **黙って銘柄コード順**に落ちる。
@@ -11801,6 +11844,16 @@ function switchTbd(id, tab) {{
                             _pmed = _pd[len(_pd) // 2]
                             _ratio = (f"{_nmed / _pmed:.0f}倍" if _pmed
                                       else "—")
+                            # ★ どの順で切ったかを必ず出す。黙って別の順で
+                            #   走ると、比較相手を取り違える(§18.40b で半日)。
+                            _wo = {"liq": "流動性(売買代金)降順 ← ライブと一致",
+                                   "code": "銘柄コード昇順 ⛔ ライブと不一致"
+                                   }.get(_WATCH_ORDER,
+                                         f"{_WATCH_ORDER} ⛔ ライブと不一致")
+                            print(f"  [watch{_watch}] 切り方: **{_wo}**"
+                                  + ("" if _WATCH_ORDER == "liq" else
+                                     "  (LSS_WATCH_ORDER で切替中)"),
+                                  flush=True)
                             print(f"  [watch{_watch}] 登録候補(銘柄/日): 中央 "
                                   f"{_nmed} / 最大 {_ns[-1]} / 上限超えの日 "
                                   f"{_ncut}/{len(_ns)} "
