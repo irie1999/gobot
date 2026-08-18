@@ -12884,13 +12884,23 @@ function switchTbd(id, tab) {{
                 #   ⛔ 上に伸ばせないことに注意: プールは既にレポートの
                 #     --max-price(既定6,000)で切ってあるので、6,000超を測るには
                 #     `.\jfast --max-price 10000` で **別の実行**が要る(§18.24)。
-                for _epm in [float(x) for x in str(os.environ.get(
-                        "LSS_EQ_PRICE_MAXES", "2000,3000,4000,5000")).split(",")
-                        if str(x).strip().replace(".", "").isdigit()]:
+                _pxs = [float(x) for x in str(os.environ.get(
+                    "LSS_EQ_PRICE_MAXES", "2000,3000,4000,5000")).split(",")
+                    if str(x).strip().replace(".", "").isdigit()]
+                for _epm in _pxs:
                     if _epm <= 0:
                         continue
                     _eq_modes.append((0, False, False, 0.0, _pre,
                                       _WATCH_CAP, None, False, 0.0, _epm))
+                # ⛔ 生成したかどうかを**必ず印字する**。2026-08-18 に
+                #   『監査ボードに建値の上限の行が無い』となったとき、
+                #   env が届いていないのか / 変種は出来ていて表の側で
+                #   落ちているのかを切り分けられなかった。
+                print(f"  [建値の上限スイープ] {_k}: "
+                      + (", ".join(f"{x:g}円" for x in _pxs if x > 0)
+                         or "なし(LSS_EQ_PRICE_MAXES が空)")
+                      + f"  → 変種 {sum(1 for x in _pxs if x > 0)}本を追加",
+                      flush=True)
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
