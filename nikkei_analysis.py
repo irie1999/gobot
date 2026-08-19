@@ -11819,7 +11819,7 @@ function switchTbd(id, tab) {{
         def _size_equal_by_day(_ts, _budget, _top=0, _fill=False, _dedup=False,
                                _ymax=0.0, _nf=None, _div_cand=False, _watch=0,
                                _pool=None, _keep_late=False, _g1=0.0, _lbl="",
-                               _pmax=0.0):
+                               _pmax=0.0, _pmin=0.0):
             """その日の合格銘柄に予算を配り、100株単位で建て直す。
 
             ⛔⛔ **割る分母は方式で違う**(2026-08-16 修正)。ここを間違えると
@@ -11930,11 +11930,29 @@ function switchTbd(id, tab) {{
             #   ⛔ これはエッジの最適化ではない。建値には識別力が無いと4回
             #     確認済み(§18.13/§18.24/§18.31/§18.38)。**資金に対する
             #     1銘柄の比率を決めるリスク宣言**として見ること。
+            #
+            # ★ 下限(_pmin)も同じ道具で測れるようにした(2026-08-19 ユーザー依頼)。
+            #   §18.38 #6 で掃いたのは **上限だけ**で、下限は一度も測っていない。
+            #   「安い株は利益が小さいのでは」という直感には根拠がある:
+            #     ・資金均等は `予算 ÷ 件数`。1,000円株は1単元10万なので
+            #       割当(≒28万)に対して端数が出にくく、逆に 5,000円株は
+            #       「1件目は最低1単元」ルールで割当を超えて50万入る。
+            #       → **安い株ほど実際の投入額が小さくなりやすい**
+            #     ・呼値は 1,000円台も 3,000円台も1円。**bp で見ると安い株ほど
+            #       スプレッドが厚い**(1,000円で1円=10bp / 3,000円で1円=3.3bp)。
+            #       今朝の実測(-26.5bp)がスプレッド由来なら、ここが効く
+            #   ⛔ ただし建値に識別力が無いことは4回確認済み(§18.13/§18.24/
+            #     §18.31/§18.38)。**総額ではなく 月平均÷σ と資本効率**で見ること。
+            #     安い株を切れば件数が減り、その資金が他に回るだけかもしれない。
             def _price_ok(_t) -> bool:
-                if _pmax <= 0:
+                if _pmax <= 0 and _pmin <= 0:
                     return True
                 _ep = float(_t.get("entry_p") or _t.get("order_limit") or 0)
-                return _ep <= 0 or _ep <= _pmax
+                if _ep <= 0:
+                    return True                    # 建値不明は落とさない
+                if _pmax > 0 and _ep > _pmax:
+                    return False
+                return not (_pmin > 0 and _ep < _pmin)
 
             def _in_pool(_t) -> bool:
                 """建てられるか。ペア/解禁日に加えて **その日の寄りに間に合ったか**。
@@ -12930,6 +12948,25 @@ function switchTbd(id, tab) {{
                          or "なし(LSS_EQ_PRICE_MAXES が空)")
                       + f"  → 変種 {sum(1 for x in _pxs if x > 0)}本を追加",
                       flush=True)
+                # ★★ 建値の **下限** スイープ (2026-08-19 ユーザー依頼)。
+                #   §18.38 #6 で掃いたのは上限だけ。「1,000〜2,000円の株は
+                #   利益が小さいのでは」という問いは一度も測っていない。
+                #   ⛔ 見るのは総額ではなく **月平均÷σ と資本効率**。安い株を
+                #     切れば件数が減り、その資金が他に回るだけかもしれない
+                #     (§18.28 の『件数増で総額が増えただけ』の裏返し)。
+                _pxn = [float(x) for x in str(os.environ.get(
+                    "LSS_EQ_PRICE_MINS", "1500,2000,2500,3000")).split(",")
+                    if str(x).strip().replace(".", "").isdigit()]
+                for _epn in _pxn:
+                    if _epn <= 0:
+                        continue
+                    _eq_modes.append((0, False, False, 0.0, _pre,
+                                      _WATCH_CAP, None, False, 0.0, 0.0, _epn))
+                print(f"  [建値の下限スイープ] {_k}: "
+                      + (", ".join(f"{x:g}円" for x in _pxn if x > 0)
+                         or "なし(LSS_EQ_PRICE_MINS が空)")
+                      + f"  → 変種 {sum(1 for x in _pxn if x > 0)}本を追加",
+                      flush=True)
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
@@ -12943,6 +12980,7 @@ function switchTbd(id, tab) {{
                  _eqwc, _eqpl, _eqkl) = _eqm[:8]
                 _eqg1 = float(_eqm[8]) if len(_eqm) > 8 else 0.0
                 _eqpm = float(_eqm[9]) if len(_eqm) > 9 else 0.0
+                _eqpn = float(_eqm[10]) if len(_eqm) > 10 else 0.0
                 _eqnk = (f"{_k}資金均等" + (f"上位{_eqtp}" if _eqtp else "")
                          + ("充填" if _eqfl else "")
                          + ("1銘柄1件" if _eqdp else "")
@@ -12962,7 +13000,9 @@ function switchTbd(id, tab) {{
                          # 第1グループの上限比率(段階モードのみ意味を持つ)
                          + (f"G1_{_eqg1 * 100:.0f}" if _eqg1 > 0 else "")
                          # 建値の上限(1単元が資金の何%になるかを決めるつまみ)
-                         + (f"価格{_eqpm:g}円" if _eqpm > 0 else ""))
+                         + (f"価格{_eqpm:g}円" if _eqpm > 0 else "")
+                         # 建値の下限(安い株を切る。上限とは別のつまみ)
+                         + (f"下限{_eqpn:g}円" if _eqpn > 0 else ""))
                 if _eqnk in _EH_TRADES:
                     continue
                 with _ptimer("資金均等の変種生成"):
@@ -12972,7 +13012,7 @@ function switchTbd(id, tab) {{
                         # 分母に使うかどうかは _div_cand で別に決める。
                         _EH_NF_SRC.get(_k) or [], _eqcd, _eqwc,
                         None if (_eqpl in (None, "IDEAL")) else _eqpl,
-                        _eqkl, _eqg1, _eqnk, _eqpm)
+                        _eqkl, _eqg1, _eqnk, _eqpm, _eqpn)
                 _EH_TRADES.setdefault("_eq_conc", {})[_eqnk] = _eq_st
                 _EH_TRADES.setdefault("約定せず", {})[_eqnk] = []
                 _EH_TRADES["_h_variants"] = list(
@@ -18522,6 +18562,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # 建値の上限。無印 = レポートの --max-price(既定6,000)そのまま。
             _mpm = _re_kn.search(r"価格(\d+)円", _s)
             _k2["pmax"] = int(_mpm.group(1)) if _mpm else 0
+            # 建値の下限。無印 = レポートの --min-price(既定1,000)そのまま。
+            _mpn = _re_kn.search(r"下限(\d+)円", _s)
+            _k2["pmin"] = int(_mpn.group(1)) if _mpn else 0
             # ★ 段階/締切 (2026-08-16)。"w10c10"=2段階(09:00/09:10) /
             #   "c10"=一括締切10分 / 無印=09:00 の一発判定。
             _mwv = _re_kn.search(r"(?:w(\d+))?c(\d+)(?![\d])", _s)
@@ -18593,7 +18636,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             #     こちらの漏れも検知できるよう **両方向**で確認する。
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
                         "dedup", "dedup_post", "div", "watch", "late", "wave",
-                        "method", "g1", "pmax"]
+                        "method", "g1", "pmax", "pmin"]
 
             # ⛔ 逆向きの漏れ(_knobs にあるのに _KN_KEYS に無い)を検知する。
             #   こちらは例外にならず **変種が黙って消える**ので、下の _miss
@@ -18663,6 +18706,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "method": "発注方式",
                              "g1": "1グループの上限(予算比)",
                              "pmax": "建値の上限(1単元の重さ)",
+                             "pmin": "建値の下限(安い株を切る)",
                              "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_wave(_v3):
@@ -18714,6 +18758,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                     if not _v3 else
                                     f"{_v3:,}円 (1単元{_v3 / 100:.0f}万="
                                     f"予算の{_v3 * 100 / max(1e4, float(os.environ.get('LSS_BUDGET_MAN', '400') or 400) * 1e4) * 100:.0f}%)")
+                        if _f == "pmin":
+                            # 1単元(100株)がいくらになるかを併記する。
+                            # 安い株ほど呼値1円が bp で厚い(1,000円=10bp /
+                            # 3,000円=3.3bp)ので、切る根拠はそこ。
+                            return ("下限なし(1,000円)" if not _v3 else
+                                    f"{_v3:,}円未満を除外 (1単元"
+                                    f"{_v3 / 100:.0f}万〜 / 呼値1円="
+                                    f"{1e4 / _v3:.1f}bp)")
                         if _f == "late":
                             return "建てる(⛔実装不可)" if _v3 else "建てない"
                         if _f == "wave":
@@ -18771,7 +18823,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   最大露出が変わって当然(2026-08-18 に ⛔比較不能 が全行に
                 #   出て判定できなかった)。
                 _conc_knob = (not _is_b) and any(
-                    _f in ("cap", "top", "fill", "dedup", "dedup_post", "pmax")
+                    _f in ("cap", "top", "fill", "dedup", "dedup_post",
+                           "pmax", "pmin")
                     for _f in _dfs)
                 _mixed = (not _is_b and not _conc_knob and _mxb > 0 and _mxv > 0
                           and (max(_mxb, _mxv) / min(_mxb, _mxv)) > 1.5)
