@@ -324,6 +324,42 @@ def _minute_status(**kw) -> None:
         pass
 
 
+_MIN_LATEST: dict = {}
+
+
+def _minute_latest_date(_quiet: bool = True) -> str:
+    """ローカル5分足(stock_5min)の **最新バー日付** を返す ("YYYY-MM-DD" / 不明は "")。
+
+    ⛔⛔ **BTキャッシュの版トークンに要る**(2026-08-19)。
+      レポートは同日決済を5分足で再現するので、日足が同じでも
+      **5分足がどこまで入っているかで結果が変わる**。ところがキャッシュは
+      日足の日付だけで鍵を作っていたため、5分足に当日が無い状態で一度でも
+      回すと、その日はずっと『当日0件』の結果が復元され続けた
+      (2026-08-19 に実際に発生。5分足を入れ直しても直らなかった)。
+    """
+    if "d" in _MIN_LATEST:
+        return _MIN_LATEST["d"]
+    _got = ""
+    try:
+        import daytrade_data as _dd5
+        for _sy5 in _dd5.available_local_symbols()[:20]:
+            try:
+                _df5 = _dd5._load_local(_sy5, days=10)
+            except Exception:
+                continue
+            if _df5 is None or len(_df5) == 0:
+                continue
+            _d5 = str(_df5.index[-1])[:10]
+            if _d5 > _got:
+                _got = _d5
+    except Exception as _e5:
+        if not _quiet:
+            print(f"  ⚠ 5分足の最新日を確認できません({_e5})", flush=True)
+        return ""                                  # 未確定 → 呼び元が判断する
+    _MIN_LATEST["d"] = _got
+    return _got
+
+
 def _auto_update_minute():
     """stock_5min の5分足を最新化する(1日1回・自動・非致命)。
 
@@ -451,22 +487,8 @@ def _auto_update_minute():
     #   埋まらず、損益タブから 1日まるごと消える。実際 08-18 / 08-19 と
     #   2日続けて『今日の結果が出ない』になった。
     _want = str(_report_date())
-    _got = ""
-    try:
-        import daytrade_data as _dd5
-        _cands = _dd5.available_local_symbols()[:20]
-        for _sy5 in _cands:
-            try:
-                _df5 = _dd5._load_local(_sy5, days=10)
-            except Exception:
-                continue
-            if _df5 is None or len(_df5) == 0:
-                continue
-            _d5 = str(_df5.index[-1])[:10]
-            if _d5 > _got:
-                _got = _d5
-    except Exception as _e5:
-        print(f"  ⚠ 5分足の最新日を確認できません({_e5})", flush=True)
+    _got = _minute_latest_date(_quiet=False)
+    if not _got:
         return                                     # 分からない → フラグを書かない
     print(f"  5分足の最新日: {_got or '不明'} / 期待 {_want}", flush=True)
     _minute_status(ran=True, source=_src, want=_want, got=_got,
@@ -1835,6 +1857,31 @@ if _LSS_GAP_ENV:
                 _BT_LOGIC_VER = f"{_BT_LOGIC_VER}g{int(round(_gv * 1000))}"
     except ValueError:
         print(f"[gap] LSS_GAP_LIMIT='{_LSS_GAP_ENV}' を解釈できず → 既定3%のまま", flush=True)
+# ⛔⛔ **5分足の最新日も版トークンに入れる**(2026-08-19)。
+#   レポートは同日決済を5分足で再現するので、日足が同じでも
+#   **5分足がどこまで入っているかで結果が変わる**。ところが従来のトークンは
+#   日足の日付(_bt_bar_tok)しか見ておらず、5分足に当日が無い状態で一度でも
+#   回すと、その日は 4つのキャッシュ(BT / as-of / 全期間 / E-H)すべてが
+#   『当日0件』で固まり、**5分足を入れ直しても直らなかった**。
+#   (2026-08-19 実際に発生: 20:21 の実行が当日欠落のまま固定し、
+#    21:00 に5分足が入っても日別カードが出なかった)
+#   ★ **常に付ける**(「5分足が遅れている時だけ」ではない)。遅れている時だけ
+#     付けると、5分足が追いついた後のトークンが**汚染された古いキャッシュと
+#     同じ名前**になり、まさにその汚染分を引いてしまう。常に付ければ
+#     5分足が進んだ瞬間に鍵が変わるので、**手で消さなくても自己修復する**。
+#   ⚠ この変更で既存キャッシュは一度だけ全部作り直しになります(初回だけ遅い)。
+try:
+    _min_tok = _minute_latest_date()
+    if _min_tok:
+        _BT_LOGIC_VER = f"{_BT_LOGIC_VER}m{_min_tok.replace('-', '')[4:]}"
+        if _min_tok < str(_bt_bar_tok):
+            print(f"[BTキャッシュ] ⚠ 5分足は {_min_tok} までしか入っていません"
+                  f"(日足 {_bt_bar_tok})。この日の取引は作れません。"
+                  f"5分足が入った後に回し直せば**自動で作り直します**",
+                  flush=True)
+except Exception as _mte:
+    print(f"[BTキャッシュ] 5分足の最新日を確認できません({_mte}) → "
+          f"トークンは付けません", flush=True)
 _bt_cache_file = _bt_cache_dir / f"bt{_cache_short}_{_BT_LOGIC_VER}_{_bt_bar_tok}.pkl"
 # ── as-of BT のディスクキャッシュも **同じトークン**で版管理する ──────────
 # ⛔ _ASOF_BT_CACHE はプロセス内だけだったので、lssタブ と Hタブ(別プロセス)が
