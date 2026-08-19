@@ -193,18 +193,24 @@ def _wait_until(t: _dt.datetime, why: str) -> None:
         time.sleep(min(10.0, _r))
 
 
+_LAST_RC = {"rc": 0}      # 直前の _run の終了コード(watcher の再起動判定に使う)
+
+
 def _run(step: str, cmd: list[str]) -> bool:
     """1ステップ。**失敗しても止めない**(朝は先に進むほうが大事)。"""
     print(f"\n{'=' * 74}\n▶ {step}\n  $ {' '.join(cmd[1:])}\n{'=' * 74}",
           flush=True)
     if args.dry_run:
+        _LAST_RC["rc"] = 0
         return True
     _t0 = time.time()
     try:
         _r = subprocess.run(cmd)
+        _LAST_RC["rc"] = int(_r.returncode)
         _ok = (_r.returncode == 0)
     except Exception as e:
         print(f"  ⛔ 起動できませんでした: {e}", flush=True)
+        _LAST_RC["rc"] = -1
         _ok = False
     print(f"  {'✅' if _ok else '⛔'} {step} — {time.time() - _t0:.0f}秒",
           flush=True)
@@ -497,8 +503,20 @@ if args.execute and not args.no_watch:
             _tries += 1
             _run(f"6. 決済watcher{'' if _tries == 1 else f' (再起動 {_tries - 1}回目)'}",
                  _wcmd)
+            _rc = _LAST_RC["rc"]
             if _dt.datetime.now().time() >= _MKT_END:
                 break            # 大引けまで生き延びた = 正常終了
+            # ⛔ rc=3 は「別インスタンスが稼働中(lockあり)」。強制終了で残った
+            #   古い lock は _LOCK_STALE(180秒) で無効になるので、**試行回数を
+            #   消費せずに待つ**。ここを普通の失敗として数えると、lock が
+            #   生きている3分間で再起動の枠を食い潰してしまう(2026-08-19 発見)。
+            if _rc == 3:
+                _tries -= 1      # 数えない
+                print("  ⏳ 別の watcher が稼働中(lock)。30秒待って確認します。"
+                      "\n     本当に別ウィンドウで動いているなら、そちらが"
+                      "決済します(このプロセスは不要)。", flush=True)
+                time.sleep(30)
+                continue
             # ⛔ **記録が0件でも再起動する**(2026-08-19 見直し)。
             #   _n_today は ordered_signals_lss.csv の行数で、『建玉があるか』
             #   ではない。記録の書き出しに失敗した日 / 手で建てた日は 0 になり、
