@@ -12591,6 +12591,14 @@ function switchTbd(id, tab) {{
             #   **どの段で消えたか** を言う。合計だけだと分からない。
             if _funnel:
                 _alld = sorted(set(_cd) | set(_by) | set(_fn_out))[-10:]
+                # ★★ **最終営業日を必ず行に出す**(2026-08-19)。
+                #   その日が候補にも取引にも1つも無いと、上の集合和に現れず
+                #   **表から丸ごと消える**。「今日の結果が出ない」がこれで、
+                #   2日続けて同じ形で報告された(08-18 / 08-19)。
+                #   0件でも行として出し、理由を名指しする。
+                _exp = str(until) if until else ""
+                if _exp and _exp not in _alld:
+                    _alld = (_alld + [_exp])[-11:]
                 print(f"\n  [日別ファンネル] {_lbl}"
                       f"  ← 直近10営業日。0 になった段が原因", flush=True)
                 print(f"    {'日付':<12}{'候補':>6}{'合格':>6}"
@@ -12603,7 +12611,10 @@ function switchTbd(id, tab) {{
                     _w0 = _fn_watch.get(_d0, 0)
                     _o0 = _fn_out.get(_d0, 0)
                     _why = ""
-                    if _c0 and not _p0:
+                    if not _c0 and not _p0 and not _o0:
+                        _why = ("  ⛔⛔ **この日は1件も入っていません**"
+                                + ("  ← 最終営業日" if _d0 == _exp else ""))
+                    elif _c0 and not _p0:
                         _why = "  ⛔ **合格ゼロ**(ギャップ未達 or 遅寄りで除外)"
                     elif _p0 and not _w0:
                         _why = f"  ⛔ **watch{_watch}で全部落ちた**"
@@ -12615,6 +12626,24 @@ function switchTbd(id, tab) {{
                       f"合格=ギャップ通過かつ遅寄りでない / "
                       f"watch後=09:00に読める{_watch}件に入った / "
                       f"予算内=実際に建てた", flush=True)
+                # ⛔⛔ 最終営業日が丸ごと無いときは **原因を名指しする**。
+                #   黙って消えると「今日の結果が出ない」としか分からない。
+                if _exp and not (_cd.get(_exp) or _by.get(_exp)
+                                 or _fn_out.get(_exp)):
+                    print(f"""
+    {'=' * 66}
+    ⛔⛔ **最終営業日 {_exp} が損益タブに1行も出ていません**
+    {'=' * 66}
+      原因は2つのどちらかです:
+        ① **5分足に {_exp} がまだ無い** ← いちばん多い
+           レポートは5分足で同日決済を再現するので、その日のバーが無いと
+           取引が1件も作れません。
+           → python check_open_bar.py --date {_exp}
+             『{_exp} のデータが1銘柄もありません』なら①で確定。
+           → 直し方: 5分足を取り込んでから .\daily を回し直す
+        ② 前営業日にシグナルが1件も無かった(=候補ゼロ)
+           → シグナルタブ / k_signals_<日付>.csv の件数を確認
+    {'=' * 66}""", flush=True)
             return _out, _st
 
         # ★ 資金均等は 指値版(H指値+Nbp寄指) にも 確認版(H寄り確認) にも掛ける。
@@ -20327,8 +20356,31 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         f'{_rt:.1f}%' + ("　⚠" if _cut9 else "") + '</td>'
                         f'<td style="text-align:right;padding:2px 8px">'
                         f'{len(_bd9)}日</td></tr>')
+                # ★★ **最終営業日が損益タブに出ているか**を画面にも出す
+                #   (2026-08-19)。ターミナルを見ないと分からない状態だと
+                #   「今日の結果が出ない」に毎回なる。実際2日続いた。
+                _last_d = str(until) if until else ""
+                _has_last = bool(_last_d and any(
+                    str(_t.get("entry_d_raw") or "")[:10] == _last_d
+                    for _t in (_ss or [])))
+                _lastbar_html = "" if (not _last_d or _has_last) else (
+                    f'<div style="background:#7f1d1d;border:2px solid #f87171;'
+                    f'border-radius:8px;padding:10px 14px;margin:0 0 10px;'
+                    f'color:#fecaca;font-size:0.82rem;line-height:1.8">'
+                    f'⛔⛔ <b>最終営業日 {_last_d} の取引が1件もありません</b>'
+                    f'（この日のカードは出ません）<br>'
+                    f'原因は2つのどちらかです：<br>'
+                    f'　① <b>5分足に {_last_d} がまだ無い</b>（いちばん多い）— '
+                    f'レポートは5分足で同日決済を再現するので、'
+                    f'その日のバーが無いと取引を1件も作れません。<br>'
+                    f'　　→ <code>python check_open_bar.py --date {_last_d}</code>'
+                    f' で確定。5分足を取り込んでから <code>.\daily</code> を回し直す<br>'
+                    f'　② 前営業日にシグナルが1件も無かった（候補ゼロ）<br>'
+                    f'　　→ シグナルタブ / <code>k_signals_&lt;日付&gt;.csv</code> の件数を確認'
+                    f'</div>')
                 _diag = (
-                    f'<details style="margin:0 0 10px">'
+                    _lastbar_html
+                    + f'<details style="margin:0 0 10px">'
                     f'<summary style="color:'
                     f'{"#f87171" if _bad else "#64748b"};font-size:0.78rem;'
                     f'cursor:pointer">🔎 <b>母集団の月別診断</b>'
