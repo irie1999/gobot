@@ -130,6 +130,19 @@ ap.add_argument("--budget", type=float, default=60.0,
                      "既定60万 = 6,000円株1単元がちょうど建てられる最小額")
 ap.add_argument("--max-notional", type=float, default=0.0,
                 help="--execute の発注総額ハード上限(万円)。0=--budget と同じ")
+# ★ サイジングの2つ(1銘柄の金額上限 / 建値の下限)を k_open_confirm へ通す。
+#   2026-08-19 の実測で、この2つは **セットでしか意味が無い**と分かった:
+#     上限50万のまま下限だけ入れる  → 月平均/σ 2.72 → 2.58 (悪化)
+#     上限200万にして下限2,500円    → 月平均/σ 2.72 → 6.17 / σ -45%
+#   上限があると安い株はもともと枚数を削られているので、消しても件数が減る
+#   だけ。上限を緩めて初めて安い株に大きく入るようになり、切る意味が出る。
+#   ⛔ 変えるならレポート側(LSS_EQ_MAX_YEN / --min-price)も同じ値に揃えること
+#     (§18.9 の鉄則: バックテストとライブを必ず一致させる)。
+#   既定は現行のまま(50万 / 1,000円)なので、指定しない限り挙動は変わらない。
+ap.add_argument("--max-yen", type=float, default=None,
+                help="1銘柄の金額上限(万円)。既定=k_open_confirm の 50")
+ap.add_argument("--min-price", type=float, default=None,
+                help="建値の下限(円)。既定=k_open_confirm の 1000")
 ap.add_argument("--stop-delay-bars", type=int, default=4,
                 help="watcher の損切り遅延(J は 4)")
 ap.add_argument("--no-watch", action="store_true",
@@ -348,6 +361,12 @@ if not args.no_kpaper:
                 "--every", str(args.poll_every), "--now-polls", "999"])
     if args.symbols_file:
         _cmd5 += ["--symbols-file", args.symbols_file]
+    # ★ サイジングの上書き。**記録のみのときも通す**(k_paper に残る株数が
+    #   実発注と食い違うと、後から突合できなくなるため)。
+    if args.max_yen is not None:
+        _cmd5 += ["--max-yen", f"{args.max_yen:g}"]
+    if args.min_price is not None:
+        _cmd5 += ["--min-price", f"{args.min_price:g}"]
     # ★★ 実発注 (2026-08-17)。--execute のときだけ。既定は記録のみ。
     #   少額から始める。--budget も --max-notional も万円。
     if args.execute:
@@ -360,7 +379,11 @@ if not args.no_kpaper:
         f"{args.poll_every}秒ごとに{args.poll_until}までポーリング"
         + (f" / 🚀 **実発注** 予算{args.budget:g}万 "
            f"(上限{(args.max_notional or args.budget):g}万)"
-           if args.execute else " (k_paper_<日付>.csv / ⛔発注しない)"),
+           if args.execute else " (k_paper_<日付>.csv / ⛔発注しない)")
+        + (f" / 1銘柄上限{args.max_yen:g}万"
+           if args.max_yen is not None else "")
+        + (f" / 建値下限{args.min_price:,.0f}円"
+           if args.min_price is not None else ""),
         _cmd5)))
 
 print(f"""
