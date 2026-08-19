@@ -738,6 +738,30 @@ def _order_rows(_sel: list) -> None:
                   f"(既発注 {_EX['yen'] / 1e4:,.0f}万 + {_need / 1e4:,.0f}万)",
                   flush=True)
             continue
+        # ⛔⛔ **記録を先に書く**(2026-08-19)。旧実装は発注が成功してから
+        #   記録していた。その間にプロセスが落ちると **注文だけが板に残り、
+        #   watcher はそれを知らない** = 今日の実損と同じ無防備状態になる。
+        #   記録が余分に残るのは無害(watcher が建玉を探して見つからないだけ)。
+        #   失敗したら下で "failed" を追記して打ち消す。
+        def _log(_st):
+            if not (_ORDER_LOG and args.execute):
+                return
+            try:
+                _ORDER_LOG({"symbol": _r["symbol"], "name": _r.get("name", ""),
+                            "strategy": _r.get("strategy", ""),
+                            "order_price": _lim,
+                            "stop_price": float(_r["stop_k"]),
+                            "target_price": float(_r["target_k"]),
+                            "atr": float(_r["atr"]), "sm": args.sm,
+                            "tm": args.tm},
+                           args.prod, _qty, entry_mode="auction",
+                           order_price=_lim, status=_st)
+            except Exception as _we:
+                print(f"    ⚠ 発注記録({_st})の書き込み失敗({_we})。"
+                      f"**watcher が決済できません** → 手動で買い戻すこと",
+                      flush=True)
+
+        _log("pending")
         try:
             _res = cli.send_sell(int(_r["symbol"]), qty=_qty, price=_lim,
                                  cash_margin=2,          # 信用新規(売建)
@@ -746,6 +770,11 @@ def _order_rows(_sel: list) -> None:
         except Exception as _oe:
             _EX["ng"] += 1
             print(f"  ⛔ {_r['symbol']} 発注で例外: {_oe}", flush=True)
+            # ⚠ 例外の中身によっては **注文が通っている**可能性がある
+            #   (送信後にタイムアウト等)。打ち消さずに pending のまま残し、
+            #   watcher に守らせる。余分な記録は無害。
+            print(f"     (記録は pending のまま残します。注文が通っていた場合に"
+                  f"watcher が守れるように)", flush=True)
             continue
         # 成功判定は lss_budget_cap と揃える(Result==0 かつ OrderId あり)。
         # OrderId が無いのに Result=0 のケースを通すと、発注できていないのに
@@ -756,6 +785,7 @@ def _order_rows(_sel: list) -> None:
             _EX["ng"] += 1
             print(f"  ⛔ {_r['symbol']} 発注失敗: {_reject(_r['symbol'], _res)}",
                   flush=True)
+            _log("failed")     # 上で書いた pending を打ち消す
             continue
         _EX["n"] += 1
         _EX["yen"] += _need
@@ -770,24 +800,11 @@ def _order_rows(_sel: list) -> None:
               f"(始値 {_op:,.1f} / -{args.limit_slip_bp:.0f}bp) "
               f"損切 {float(_r['stop_k']):,.1f} / 利確 {float(_r['target_k']):,.1f}"
               f" / 累計 {_EX['yen'] / 1e4:,.0f}万", flush=True)
-        # ★ watcher が決済できるよう ordered_signals_lss.csv に残す。
+        # ★ 発注が通ったことを記録する(pending → ordered)。
         #   ⛔ entry_mode="auction" にすると watcher が **実約定価格基準**で
         #     OCO を組み直す(§18.32 / lss_exit_watcher:355-)。J も同じ扱いで正しい。
-        if _ORDER_LOG and args.execute:
-            try:
-                _ORDER_LOG({"symbol": _r["symbol"], "name": _r.get("name", ""),
-                            "strategy": _r.get("strategy", ""),
-                            "order_price": _lim,
-                            "stop_price": float(_r["stop_k"]),
-                            "target_price": float(_r["target_k"]),
-                            "atr": float(_r["atr"]), "sm": args.sm,
-                            "tm": args.tm},
-                           args.prod, _qty, entry_mode="auction",
-                           order_price=_lim)
-            except Exception as _we:
-                print(f"    ⚠ 発注記録の書き込み失敗({_we})。"
-                      f"**watcher が決済できません** → 手動で買い戻すこと",
-                      flush=True)
+        #   ⚠ ここが失敗しても pending が残っているので watcher は守れる。
+        _log("ordered")
 
 
 # ★★ いま kabu に登録されている銘柄 (2026-08-18)。

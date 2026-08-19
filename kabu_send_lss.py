@@ -225,8 +225,24 @@ def _lss_signal_today(sym: str, name: str, strat: str,
 
 
 def _log_ordered(sig: dict, prod: bool, qty: int,
-                 entry_mode: str = "stop", order_price: float | None = None) -> None:
-    """実発注に成功した lss シグナルを ordered_signals_lss.csv に追記する。
+                 entry_mode: str = "stop", order_price: float | None = None,
+                 status: str = "ordered") -> None:
+    """lss の発注を ordered_signals_lss.csv に追記する。
+
+    status:
+      "pending" = **これから発注する**。発注の直前に書く。
+      "ordered" = 発注が通った。
+      "failed"  = 発注が通らなかった(同じ pending を打ち消す)。
+
+    ⛔⛔ **記録は発注より先に書く**(2026-08-19)。
+      旧実装は『発注が成功してから記録』だった。その間にプロセスが落ちると
+      **注文だけが板に残り、watcher はそれを知らない**。今日の実損
+      (無防備で引けまで + 強制決済手数料)と同じ状態になる。
+      非対称なので順序は決まる:
+        記録が無くて注文がある … **無防備**(実損)
+        記録があって注文が無い … 無害(watcher が建玉を探して見つからないだけ)
+      よって先に書く。失敗したら "failed" を追記して打ち消す。
+
 
     entry_mode:
       "stop"    = 現行の逆指値売り。OCO は **注文価格基準**(発注時に確定)。
@@ -257,6 +273,8 @@ def _log_ordered(sig: dict, prod: bool, qty: int,
         "atr":         round(float(sig.get("atr", 0) or 0), 2),
         "sm":          float(sig.get("sm", 0) or 0),
         "tm":          float(sig.get("tm", 0) or 0),
+        # ↓ 2026-08-19 追加。既存ファイルには無い = 空欄は "ordered" 扱い(後方互換)。
+        "status":      str(status or "ordered"),
     }
     p = Path(ORDERED_LOG)
     try:

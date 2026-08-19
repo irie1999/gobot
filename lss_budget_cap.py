@@ -312,6 +312,19 @@ def main() -> int:
         return 1
 
     placed = []   # {order_id, symbol, trigger, qty, notional}
+
+    # ⛔⛔ **記録は発注より先に書く**(2026-08-19)。旧実装は発注が成功してから
+    #   書いていたので、その間にプロセスが落ちると **注文だけが板に残り
+    #   watcher はそれを知らない** = 無防備で引けまで(今日の実損と同じ型)。
+    #   非対称: 記録が無くて注文がある=実損 / 記録があって注文が無い=無害。
+    def _log_st(s, trig, st):
+        try:
+            _log_ordered(s, args.prod, s["_qty"],
+                         entry_mode=args.entry_mode, order_price=trig,
+                         status=st)
+        except Exception as _le:
+            print(f"    ⚠ 発注記録({st})の書き込み失敗: {_le}")
+
     for s in plan:
         sym = _norm(s["symbol"])
         # 注文価格はプラン作成時に確定済み(dry-run の表示と一致させるため)。
@@ -329,6 +342,7 @@ def main() -> int:
             # 下限ガード(after_hit_price)も逆指値専用なので無い。
             #   auction = 寄指(21): 寄付の板寄せだけ。寄らなければ失効
             #   limit   = 指値(20): 寄りが上なら板寄せ、日中に上がってきても約定
+            _log_st(s, trig, "pending")
             res = cli.send_sell(sym, qty=s["_qty"], price=trig,
                                 order_type=("limit_moo" if _auction else "limit"),
                                 cash_margin=CASH_MARGIN_OPEN)
@@ -344,6 +358,8 @@ def main() -> int:
             else:
                 trig = round_to_tick(trig - tick_size(trig))
             after = None if args.no_gap_guard else round_to_tick(trig * (1.0 - args.gap_guard))
+            # trig はここで確定するので、記録はこの直前に書く
+            _log_st(s, trig, "pending")
             res = cli.send_stop_sell(sym, qty=s["_qty"], trigger_price=trig,
                                      cash_margin=CASH_MARGIN_OPEN, after_hit_price=after)
         oid = res.get("OrderId")
@@ -357,13 +373,10 @@ def main() -> int:
             #    (板寄せの約定値は指値以上になるので、指値基準の stop だと
             #     約定値より下に来て即損切りになる)。そのため atr/sm/tm も一緒に
             #    書き、watcher 側で再計算する。
-            try:
-                _log_ordered(s, args.prod, s["_qty"],
-                             entry_mode=args.entry_mode, order_price=trig)
-            except Exception as _le:
-                print(f"    ⚠ 発注記録の書き込み失敗(決済は建玉から拾えます): {_le}")
+            _log_st(s, trig, "ordered")
         else:
             print(f"  ✗ {sym} {s['name']} 発注失敗: {res}")
+            _log_st(s, trig, "failed")   # 上で書いた pending を打ち消す
 
     if not placed:
         print("発注成功0件。監視を行いません。")

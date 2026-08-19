@@ -212,8 +212,16 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
              "sm": float(sm or 0.0), "tm": float(tm or 0.0)})
 
     # A) ordered_signals_lss.csv (kabu_send_lss)
+    # ⛔⛔ **status を尊重する**(2026-08-19)。発注は『記録 → 発注』の順に
+    #   変わった(k_open_confirm)。途中で落ちても注文が守られるようにするため。
+    #     "pending" = 発注直前に書いた。注文が通っている可能性がある → 守る
+    #     "ordered" = 通った → 守る
+    #     "failed"  = 通らなかった → **同じ (銘柄, 注文価格) の pending を消す**
+    #   空欄は "ordered" 扱い(2026-08-19 より前の記録との後方互換)。
     p = _BASE / "ordered_signals_lss.csv"
     if p.exists():
+        _rows: list = []
+        _failed: set = set()
         try:
             for r in csv.DictReader(open(p, encoding="utf-8")):
                 if str(r.get("family", "")).strip() != "lss":
@@ -221,10 +229,30 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                 d = str(r.get("record_date", "")).strip()
                 if not all_dates and d != today:
                     continue
+                _st = (str(r.get("status", "")).strip() or "ordered").lower()
+                _key = (str(r.get("symbol", "")).upper().removesuffix(".T"),
+                        round(_num(r.get("order_price"))),
+                        int(_num(r.get("qty")) or 100), d)
+                if _st in ("failed", "cancelled", "canceled"):
+                    _failed.add(_key)
+                    continue
+                _rows.append((_key, r))
+        except Exception as e:
+            print(f"  [!] ordered_signals_lss.csv 読込失敗 ({e})")
+            _rows = []
+        # failed で打ち消されたものを落とし、同一キーの重複(pending+ordered)を1本に
+        _seen_k: set = set()
+        try:
+            for _key, r in _rows:
+                if _key in _failed or _key in _seen_k:
+                    continue
+                _seen_k.add(_key)
+                # ⛔ date は **その行の record_date**(_key[3])を使う。1つ目の
+                #   ループの変数 d を使うと最後の行の日付が全行に付く。
                 _add(r.get("symbol"), _num(r.get("order_price")),
                      int(_num(r.get("qty")) or 100), r.get("strategy", ""),
                      r.get("name", ""), _num(r.get("stop_price")),
-                     _num(r.get("target_price")), date=d,
+                     _num(r.get("target_price")), date=_key[3],
                      mode=(r.get("entry_mode") or "stop"),
                      atr=_num(r.get("atr")), sm=_num(r.get("sm")),
                      tm=_num(r.get("tm")))
