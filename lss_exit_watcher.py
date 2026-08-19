@@ -81,6 +81,12 @@ JST = timezone(timedelta(hours=9))
 _BASE = Path(__file__).resolve().parent
 MARKET_START = dtime(9, 0)    # 寄り(東証)。これより前は成行が通らないので発火しない
 MARKET_END = dtime(15, 30)    # 大引け(東証, 2024/11/5以降は15:30)。これを過ぎたらループ終了
+# ⛔ この時刻を過ぎても MOC の**発注に成功していない**銘柄は、即時成行に切り替える。
+#   クロージング・オークションは 15:25 開始。そこまでに板に乗っていない注文を
+#   待ち続けると、通らないまま大引けになり **デイトレ信用を持ち越す**
+#   (2,200円/銘柄 + 夜間ギャップ)。成行の代償は数ティックなので比較にならない。
+#   ★ MOC の発注に成功している銘柄には効かない(板で待っているものを触ると二重決済)。
+_MOC_GIVEUP = dtime(15, 24)
                               # ※15:25-15:30はクロージング・オークション
 
 # ── 多重起動防止(タスクスケジューラの重複起動・手動起動が重なっても1つだけ動かす) ──
@@ -820,6 +826,7 @@ def _run(args, close_at, today) -> int:
     stop_placed: set = set()   # 板逆指値を設置済みの銘柄(pkey=銘柄)。銘柄単位で合計数量に
                                #   1本だけ置く(同一銘柄200株=2建玉でも1本で全建玉をカバー)。
     moc_placed: set = set()    # 引けMOCを出した銘柄(pkey)。引けは銘柄ごとに1回だけ(重複キュー防止)。
+    moc_fail: dict = {}        # pkey -> MOC発注の連続失敗回数。3回で即時成行に切替。
     close_cool: dict = {}      # pkey(銘柄) -> 直近に成行決済を送った時刻(unix秒)。部分約定の
                                #   残玉を再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
     first_seen: dict = _load_seen(today)
@@ -975,9 +982,36 @@ def _run(args, close_at, today) -> int:
                             close_cool[pk] = now.timestamp()
                             stop_placed.discard(pk)
                     elif pk not in moc_placed:
+                        # ⛔⛔ **MOC が通らないまま大引けを迎えさせない**
+                        #   (2026-08-19 の見直しで見つけた穴)。
+                        #   旧実装は失敗しても次の周でまた MOC を試すだけで、
+                        #   最後まで通らなければ **黙って持ち越し**になった。
+                        #   デイトレ信用の持ち越しは 2,200円/銘柄 + 夜間ギャップ。
+                        #   成行に切り替える代償は数ティックなので比較にならない。
+                        #   ★ 切り替えるのは **MOC の発注に成功していない**とき
+                        #     だけ。成功していれば板で待っているので触らない
+                        #     (触ると二重決済になる)。
+                        _mf = moc_fail.get(pk, 0)
+                        _late = now.time() >= _MOC_GIVEUP
+                        if _mf >= 3 or _late:
+                            if _cooling:
+                                continue
+                            print(f"  ⛔ [引け] {sym} {p['name']} 売建{qty} — "
+                                  f"MOCが{'通らない(%d回失敗)' % _mf if _mf >= 3 else ''}"
+                                  f"{'/' if (_mf >= 3 and _late) else ''}"
+                                  f"{'%s を過ぎた' % _MOC_GIVEUP.strftime('%H:%M') if _late else ''}"
+                                  f" → **即時成行**に切り替えて買い戻します",
+                                  flush=True)
+                            if _close_buy(cli, sym, qty, hid, "引け(成行切替)"):
+                                close_cool[pk] = now.timestamp()
+                                stop_placed.discard(pk)
+                            continue
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
                         if _close_moc(cli, sym, qty, hid):
                             moc_placed.add(pk)   # MOCは建玉ごとに1回(重複キュー防止)
+                            moc_fail.pop(pk, None)
+                        else:
+                            moc_fail[pk] = _mf + 1
                     continue
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
