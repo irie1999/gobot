@@ -318,6 +318,13 @@ def _auto_update_minute():
     _mk = Path(".holdout_bt_cache")
     _mk.mkdir(exist_ok=True)
     _flag = _mk / f".minute_updated_{_report_date()}"
+    # 古いフラグは掃除する(溜まると『いつのフラグが効いているか』が分からなくなる)
+    try:
+        for _old in _mk.glob(".minute_updated_*"):
+            if _old.name != _flag.name:
+                _old.unlink()
+    except Exception:
+        pass
     if _flag.exists():
         return                                  # 本日更新済み → スキップ
     try:
@@ -358,11 +365,50 @@ def _auto_update_minute():
     print("=" * 65)
     try:
         _res = run_update(source=_src, verbose=True)
-        _flag.write_text("ok", encoding="utf-8")   # 成功時のみフラグ
         print(f"  5分足更新完了: +{_res.get('bars', 0):,}バー / "
               f"{_res.get('updated', 0)}銘柄", flush=True)
     except Exception as _e:
         print(f"  ⚠ 5分足自動更新スキップ ({_e})", flush=True)
+        return                                     # 失敗 → フラグを書かない
+    # ⛔⛔ **フラグは「実行した」ではなく「最新営業日まで取れた」で立てる**
+    #   (2026-08-19)。以前は run_update が成功しさえすればフラグを書いていた。
+    #   引け前に一度でも動くと(朝の実行など)その日のフラグが立ち、
+    #   **引け後の実行が丸ごとスキップ**される。結果その日の5分足が永久に
+    #   埋まらず、損益タブから 1日まるごと消える。実際 08-18 / 08-19 と
+    #   2日続けて『今日の結果が出ない』になった。
+    _want = str(_report_date())
+    _got = ""
+    try:
+        import daytrade_data as _dd5
+        _cands = _dd5.available_local_symbols()[:20]
+        for _sy5 in _cands:
+            try:
+                _df5 = _dd5._load_local(_sy5, days=10)
+            except Exception:
+                continue
+            if _df5 is None or len(_df5) == 0:
+                continue
+            _d5 = str(_df5.index[-1])[:10]
+            if _d5 > _got:
+                _got = _d5
+    except Exception as _e5:
+        print(f"  ⚠ 5分足の最新日を確認できません({_e5})", flush=True)
+        return                                     # 分からない → フラグを書かない
+    print(f"  5分足の最新日: {_got or '不明'} / 期待 {_want}", flush=True)
+    if _got and _got >= _want:
+        _flag.write_text("ok", encoding="utf-8")   # ここまで取れて初めて完了
+        return
+    print(f"""
+{'=' * 65}
+⛔⛔ **5分足に {_want} がまだ入っていません**(最新 {_got or '不明'})
+{'=' * 65}
+  レポートは5分足で同日決済を再現するので、**その日の取引が1件も作れません**。
+  損益タブの日別カードにも {_want} は出ません。
+  ・引け直後は yfinance 側にまだ出ていないことがあります。
+    **少し待ってから もう一度 .\daily を回してください**(フラグは立てていない
+    ので、次の実行でちゃんと再取得します)。
+  ・何度やっても入らないなら: python check_open_bar.py --date {_want}
+{'=' * 65}""", flush=True)
 
 
 # 日次コマンドの一部として5分足を自動更新(1日1回)。--no-minute-update で無効化。
