@@ -188,7 +188,16 @@ if args.execute and not args.allow_late_orders:
             f"  ・それでも出す     → --allow-late-orders（自己責任）")
 
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
-         "prev_close", "open_p", "open_time", "current_price", "gap_bp",
+         "prev_close", "open_p", "open_time", "current_price",
+         # ⛔⛔ **売りは最良買い気配に当てる**(2026-08-19)。バックテストは
+         #   「約定=始値」を仮定しているが、実発注は保護指値 @始値×(1-50bp) を
+         #   板にぶつけるので、**その瞬間の最良買い気配**で約定する。
+         #   2026-08-19 の実測は8件すべて始値より下(-16〜-47bp / 平均-26.5bp)で、
+         #   これは丸ごとバックテストに載っていないコスト。
+         #   ただし内訳が「スプレッド(構造的)」なのか「読取〜発注の数秒の値動き」
+         #   なのかは、板を残していないと**分けられない**。だから残す。
+         "bid", "ask", "bid_qty", "ask_qty",
+         "gap_bp",
          "late", "pass_gap", "guard_ng", "lots_k", "yen_k",
          "atr", "stop_k", "target_k",
          # ★ 実発注したか(--execute)。dry-run では 0 のまま。
@@ -874,6 +883,11 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "rank_liq": 0, "liquidity": _liq.get(_s, 0),
             "prev_close": _pc, "open_p": _op, "open_time": _ot,
             "current_price": _bd.get("CurrentPrice") or 0,
+            # 売り注文が当たる先 = 最良買い気配(Bid)。数量も残すと板の厚さが分かる。
+            "bid": _bd.get("BidPrice") or 0,
+            "ask": _bd.get("AskPrice") or 0,
+            "bid_qty": _bd.get("BidQty") or 0,
+            "ask_qty": _bd.get("AskQty") or 0,
             "gap_bp": (round(_gap, 1) if _gap is not None else ""),
             "late": _late, "pass_gap": _pass, "guard_ng": _guard,
             "lots_k": 0, "yen_k": 0,
