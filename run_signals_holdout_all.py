@@ -377,11 +377,9 @@ def _auto_update_minute():
     #   「1件」だったのは 09:00 を持つ銘柄がちょうど1つだったから。
     #   → 鍵があるなら必ず J-Quants。無いときだけ yfinance に落ちて **大きく警告**。
     _src = "jquants" if os.environ.get("JQUANTS_API_KEY") else "yfinance"
-    print("=" * 65)
-    print(f"5分足(stock_5min)を自動更新中 ({_src}・本日初回のみ)...", flush=True)
-    if _src == "yfinance":
-        print("  ⚠ JQUANTS_API_KEY が無いので yfinance で埋めます"
-              "(J-Quants 未契約なら これが通常)。", flush=True)
+
+    def _warn_yf(_why):
+        print(f"  ⚠ {_why}yfinance で埋めます。", flush=True)
         print("     yfinance は **09:00-09:05 のバーを持ちません**(§18.38)。",
               flush=True)
         print("     ・ギャップ判定は **日足の始値** を使うので正しく動きます",
@@ -394,14 +392,42 @@ def _auto_update_minute():
               flush=True)
         print("       損切りは delay1 の無保護窓と一致するので影響しません。",
               flush=True)
+
     print("=" * 65)
-    try:
-        _res = run_update(source=_src, verbose=True)
-        print(f"  5分足更新完了: +{_res.get('bars', 0):,}バー / "
-              f"{_res.get('updated', 0)}銘柄", flush=True)
-    except Exception as _e:
-        print(f"  ⚠ 5分足自動更新スキップ ({_e})", flush=True)
-        _minute_status(ran=True, source=_src, note=f"更新に失敗しました: {_e}")
+    print(f"5分足(stock_5min)を自動更新中 ({_src}・本日初回のみ)...", flush=True)
+    if _src == "yfinance":
+        _warn_yf("JQUANTS_API_KEY が無いので(J-Quants 未契約なら これが通常)")
+    print("=" * 65)
+    # ⛔⛔ **『鍵があるか』ではなく『実際に取れたか』で判断する**(2026-08-19)。
+    #   2026-08-18 に「J-Quants を優先」に変えたが、**契約が切れていても
+    #   .env に鍵が残っていれば jquants を選ぶ**ので、0バーのまま
+    #   yfinance に落ちなくなった。その結果その日の5分足が丸ごと入らず、
+    #   損益タブから1日消えた(実際 08-19 がこれ)。
+    #   → jquants が0バーなら **必ず yfinance で取り直す**。
+    def _try(_source):
+        try:
+            _r = run_update(source=_source, verbose=True)
+            print(f"  5分足更新完了({_source}): +{_r.get('bars', 0):,}バー / "
+                  f"{_r.get('updated', 0)}銘柄", flush=True)
+            return _r, ""
+        except Exception as _e2:
+            print(f"  ⚠ {_source} での更新に失敗 ({_e2})", flush=True)
+            return {"bars": 0, "updated": 0}, str(_e2)
+
+    _res, _err = _try(_src)
+    if _src == "jquants" and int(_res.get("bars", 0) or 0) == 0:
+        print(f"""
+{'=' * 65}
+⚠ J-Quants から **1バーも取れませんでした**（契約切れ / 鍵が古い等）。
+   JQUANTS_API_KEY が残っているだけで jquants を選んでいました。
+   **yfinance で取り直します。**
+   ※ 恒久的に yfinance にするなら .env の JQUANTS_API_KEY を消してください。
+{'=' * 65}""", flush=True)
+        _src = "yfinance"
+        _warn_yf("J-Quants が0バーだったので ")
+        _res, _err = _try(_src)
+    if int(_res.get("bars", 0) or 0) == 0 and _err:
+        _minute_status(ran=True, source=_src, note=f"更新に失敗しました: {_err}")
         return                                     # 失敗 → フラグを書かない
     # ⛔⛔ **フラグは「実行した」ではなく「最新営業日まで取れた」で立てる**
     #   (2026-08-19)。以前は run_update が成功しさえすればフラグを書いていた。
