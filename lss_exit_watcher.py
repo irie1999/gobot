@@ -314,9 +314,19 @@ def _stop_arm_time(first_seen: datetime, delay_bars: int) -> datetime:
     return floored + timedelta(minutes=5 * max(1, delay_bars))
 
 
-def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
+def _lss_shorts(cli, lss_map: dict, tol: float,
+                unmatched: list | None = None) -> list[dict]:
     """kabu建玉から、対象の lss 売建(未決済)を抽出。毎回 kabu の実建玉を読むので、
-    部分約定で減った残玉(LeavesQty)もそのまま拾える(=残玉を監視し続ける)。"""
+    部分約定で減った残玉(LeavesQty)もそのまま拾える(=残玉を監視し続ける)。
+
+    ⛔⛔ **拾えなかった売建を unmatched に必ず入れる**(2026-08-19)。
+      旧実装は記録に一致しない売建を **黙って continue** していた。すると
+      ・記録ファイルが壊れた/消えた
+      ・--all-dates を付け忘れた(持ち越し玉)
+      ・平均約定値が許容(±tol)から外れた
+      のどれでも、watcher は**正常に見えたまま何も守らない**。呼び元が
+      毎周これを表示するので、『対象なし』が嘘にならない。
+    """
     try:
         positions = cli.get_positions(product=2)   # 信用建玉
     except Exception as e:
@@ -347,6 +357,23 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         avg = _num(kp.get("AveragePrice") or kp.get("Price"))
         rec = _match_lss(sym, avg, qty, lss_map, tol)
         if rec is None:
+            # ⛔ 触らないのは正しい(メインショート等の誤決済を防ぐ)が、
+            #   **黙って落とさない**。理由まで添えて呼び元に返す。
+            if unmatched is not None:
+                _c = lss_map.get(sym) or []
+                if not _c:
+                    _why = "発注記録に無い"
+                else:
+                    _near = min((abs(avg - float(c.get("entry", 0) or 0))
+                                 / max(1.0, float(c.get("entry", 0) or 0))
+                                 for c in _c), default=9.9)
+                    _why = (f"記録はあるが平均約定{avg:,.0f}が許容±{tol*100:.0f}%"
+                            f"から外れる(最小乖離{_near*100:.1f}%)")
+                unmatched.append({
+                    "sym": sym, "qty": qty, "avg": avg,
+                    "name": kp.get("SymbolName") or sym,
+                    "margin_type": int(kp.get("MarginTradeType") or 0),
+                    "why": _why})
             continue   # lss記録に一致しない売建(メインショート等) → 触らない
         # ── H案(寄指)は OCO を **実約定価格(寄り値)基準** で組み直す ──────────
         # 板寄せの約定値は指値**以上**になる(寄りが指値より上なら始値で売れる)。
@@ -469,6 +496,62 @@ def _lss_shorts(cli, lss_map: dict, tol: float) -> list[dict]:
         else:
             a["qty"] += qty   # 同一銘柄の複数建玉を合算(200株=1回で決済)
     return list(agg.values())
+
+
+def _final_position_check(cli, why: str = "") -> int:
+    """⛔⛔ **終了する前に必ず建玉を数える**(2026-08-19)。
+
+    今日の実損は「落ちたこと」ではなく「**引け決済が飛んだこと**」で出た。
+    watcher はどの経路で終わっても、それまで一度も『建玉が残っている』と
+    言わなかった。大引けで抜けるときも、Ctrl+C のときも、黙って
+    『終了しました。』とだけ出す。
+
+    一般信用(デイトレ)は当日返済が前提で、持ち越すと 1銘柄につき
+    2,200円(税込)の強制決済手数料がかかる(2026-08-19 に8銘柄=17,600円)。
+    **終了時に残玉があるなら、それが最後に知らせる機会**。
+
+    返り値: 残っている売建の件数(取得できなければ -1)。
+    """
+    try:
+        _ps = cli.get_positions(product=2)
+    except Exception as _e:
+        print(f"\n  ⛔ 終了時の建玉確認に失敗しました({_e})。\n"
+              f"     **kabuステーションで建玉を必ず目視確認してください**",
+              flush=True)
+        return -1
+    _left = [p for p in _ps
+             if str(p.get("Side", "")) == "1"
+             and int(p.get("LeavesQty") or p.get("Qty") or 0) > 0]
+    if not _left:
+        print("  ✅ 信用売建は残っていません(全決済済み)。", flush=True)
+        return 0
+    _daytrade = [p for p in _left if str(p.get("MarginTradeType") or "") == "3"]
+    _amt = sum(_num(p.get("AveragePrice") or p.get("Price"))
+               * int(p.get("LeavesQty") or p.get("Qty") or 0) for p in _left)
+    print(f"""
+{'=' * 74}
+⛔⛔ **信用売建が {len(_left)}件 残ったまま watcher が終了します**{(' — ' + why) if why else ''}
+{'=' * 74}
+  建玉総額 約 {_amt:,.0f}円""", flush=True)
+    for _p in _left:
+        _s = str(_p.get("Symbol", ""))
+        _q = int(_p.get("LeavesQty") or _p.get("Qty") or 0)
+        _mt = {"1": "制度", "2": "一般(長期)", "3": "一般(デイトレ)"}.get(
+            str(_p.get("MarginTradeType") or ""), "?")
+        print(f"    {_s} {_p.get('SymbolName') or ''} 売建{_q}株 "
+              f"平均{_num(_p.get('AveragePrice') or _p.get('Price')):,.1f} [{_mt}]",
+              flush=True)
+    if _daytrade:
+        print(f"""
+  ⛔⛔ うち **{len(_daytrade)}件が一般信用(デイトレ)** です。当日返済が前提の
+      建玉なので、持ち越すと **1銘柄につき 2,200円(税込)** の強制決済手数料が
+      かかります(この{len(_daytrade)}件なら {len(_daytrade) * 2200:,}円)。
+      ★ 返済期日が当日なので **寄成は出せません**(注文期限が翌営業日になり
+        Code45『注文期日指定が返済期日を超過』で弾かれます)。
+        大引け前なら **成行(注文期限=当日)** で今すぐ返済してください。""",
+              flush=True)
+    print("=" * 74, flush=True)
+    return len(_left)
 
 
 def _place_stop_buy(cli, sym: str, qty: int, hold_id: str, stop_p: float) -> str:
@@ -815,7 +898,20 @@ def _run(args, close_at, today) -> int:
                 _gap_sweep(cli, lss_map, _gap_pct, _gap_done, dry=not args.execute)
             except Exception as _e:
                 print(f"  [!] 深ギャップ取消でエラー(継続): {_e}")
-        shorts = _lss_shorts(cli, lss_map, args.tol) if lss_map else []
+        # ⛔⛔ **lss_map が空でも建玉は読む**(2026-08-19)。
+        #   旧実装は `if lss_map else []` で、記録が1件も無いと kabu を
+        #   一度も見なかった。記録が壊れた日は建玉があっても『対象なし』と
+        #   表示して終日回り続ける = 今日と同じ「無防備で引けまで」になる。
+        _unmatched: list = []
+        shorts = _lss_shorts(cli, lss_map, args.tol, _unmatched)
+        if _unmatched:
+            print(f"  ⛔⛔ **watcher が守っていない信用売建が "
+                  f"{len(_unmatched)}件 あります**", flush=True)
+            for _u in _unmatched:
+                print(f"       {_u['sym']} {_u['name']} 売建{_u['qty']}株 "
+                      f"平均{_u['avg']:,.1f} — {_u['why']}", flush=True)
+            print(f"       → 記録が正しければ --all-dates / --tol を見直す。"
+                  f"意図しない建玉なら **手で返済**してください", flush=True)
 
         # 予算上限管理: 同時保有lss売建の合計時価(平均約定値×残玉数)が --budget-cap に達したら、
         #   未発動のlss新規売り逆指値を全取消。決済済みポジションは除外(同時保有ベース)。終日有効。
@@ -981,8 +1077,15 @@ def _run(args, close_at, today) -> int:
         _touch_lock()
         _time.sleep(max(1.0, args.poll))
 
+    # ⛔⛔ **どの経路で抜けても建玉を数えてから終わる**(2026-08-19)。
+    #   大引け / Ctrl+C / 連続エラー / --once / dry-run のどれでも通る。
+    #   dry-run は発注しないので残っていて当然 → 確認しない。
+    _left_n = _final_position_check(cli, "監視終了") if args.execute else 0
     print("終了しました。")
-    return 0
+    # 残玉ありは **異常終了として返す**。呼び元(morning_test の再起動ループ)が
+    # 「正常に終わった」と誤認しないように。
+    # ⚠ --once は1周だけの診断モードなので、残玉があって当然 = 0 を返す。
+    return 2 if (_left_n > 0 and not args.once) else 0
 
 
 if __name__ == "__main__":
