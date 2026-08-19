@@ -20363,21 +20363,51 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _has_last = bool(_last_d and any(
                     str(_t.get("entry_d_raw") or "")[:10] == _last_d
                     for _t in (_ss or [])))
+                # ★ **推測を並べない**。5分足更新が実際に何をしたかを読む
+                #   (.minute_status.json / 2026-08-19)。ユーザー指摘:
+                #   「5分足を取り込んでから .\\daily を回し直す」は .\\daily 自身が
+                #   取り込むので、案内として意味を成していなかった。
+                _mst: dict = {}
+                try:
+                    import json as _mjs
+                    _mp = Path(".holdout_bt_cache") / ".minute_status.json"
+                    if _mp.exists():
+                        _mst = _mjs.loads(_mp.read_text(encoding="utf-8"))
+                except Exception:
+                    _mst = {}
+                _mnote = str(_mst.get("note") or "")
+                _mgot = str(_mst.get("got") or "")
+                if _mgot and _last_d and _mgot < _last_d:
+                    _cause = ('<b>5分足が ' + _mgot + ' までしかありません</b>（'
+                              + (_mnote or "更新で " + _last_d + " が取れていない")
+                              + '）。レポートは5分足で同日決済を再現するので、'
+                              'その日のバーが無いと取引を1件も作れません。<br>'
+                              '　→ <b>時間をおいて <code>.\\daily</code> をもう一度</b>'
+                              '（取得元の反映待ちのことがあります。更新済みフラグは'
+                              '立てていないので、次の実行で必ず再取得します）')
+                elif _mst.get("ran") is False:
+                    _cause = ('<b>5分足の自動更新がスキップされました</b>（'
+                              + _mnote + '）。<br>　→ '
+                              '<code>.holdout_bt_cache\\.minute_updated_*</code>'
+                              ' を消してから <code>.\\daily</code> を回し直す')
+                elif _mnote:
+                    _cause = '<b>5分足の更新で問題がありました</b>: ' + _mnote
+                else:
+                    _cause = ('5分足に ' + _last_d + ' が無いか、前営業日のシグナルが'
+                              'ゼロです。<br>　→ <code>python check_open_bar.py '
+                              '--date ' + _last_d + '</code> でどちらかを確定できます')
                 _lastbar_html = "" if (not _last_d or _has_last) else (
-                    f'<div style="background:#7f1d1d;border:2px solid #f87171;'
-                    f'border-radius:8px;padding:10px 14px;margin:0 0 10px;'
-                    f'color:#fecaca;font-size:0.82rem;line-height:1.8">'
-                    f'⛔⛔ <b>最終営業日 {_last_d} の取引が1件もありません</b>'
-                    f'（この日のカードは出ません）<br>'
-                    f'原因は2つのどちらかです：<br>'
-                    f'　① <b>5分足に {_last_d} がまだ無い</b>（いちばん多い）— '
-                    f'レポートは5分足で同日決済を再現するので、'
-                    f'その日のバーが無いと取引を1件も作れません。<br>'
-                    f'　　→ <code>python check_open_bar.py --date {_last_d}</code>'
-                    f' で確定。5分足を取り込んでから <code>.\daily</code> を回し直す<br>'
-                    f'　② 前営業日にシグナルが1件も無かった（候補ゼロ）<br>'
-                    f'　　→ シグナルタブ / <code>k_signals_&lt;日付&gt;.csv</code> の件数を確認'
-                    f'</div>')
+                    '<div style="background:#7f1d1d;border:2px solid #f87171;'
+                    'border-radius:8px;padding:10px 14px;margin:0 0 10px;'
+                    'color:#fecaca;font-size:0.82rem;line-height:1.8">'
+                    '⛔⛔ <b>最終営業日 ' + _last_d + ' の取引が1件もありません</b>'
+                    '（この日のカードは出ません）<br>' + _cause
+                    + ('<br><span style="color:#fca5a5;font-size:0.74rem">'
+                       '5分足の更新: ' + str(_mst.get("at", "")) + ' / '
+                       + str(_mst.get("source", "?")) + ' / 追加 '
+                       + str(_mst.get("bars", "?")) + 'バー / 最新 '
+                       + (_mgot or "?") + '</span>' if _mst else '')
+                    + '</div>')
                 _diag = (
                     _lastbar_html
                     + f'<details style="margin:0 0 10px">'

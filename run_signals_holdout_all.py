@@ -308,6 +308,22 @@ def _maybe_serve_orders():
         pass
 
 
+_MIN_STATUS = Path(".holdout_bt_cache") / ".minute_status.json"
+
+
+def _minute_status(**kw) -> None:
+    """5分足更新の結果を1ファイルに残す。レポートの警告帯がこれを読んで
+    **実際に起きたこと**を表示する(推測を並べない / 2026-08-19)。"""
+    try:
+        import json as _js
+        _MIN_STATUS.parent.mkdir(exist_ok=True)
+        kw["at"] = f"{datetime.now(_JST_TZ):%Y-%m-%d %H:%M}"
+        _MIN_STATUS.write_text(_js.dumps(kw, ensure_ascii=False),
+                               encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _auto_update_minute():
     """stock_5min の5分足を最新化する(1日1回・自動・非致命)。
 
@@ -326,6 +342,9 @@ def _auto_update_minute():
     except Exception:
         pass
     if _flag.exists():
+        _minute_status(ran=False,
+                       note=f"本日({_report_date()})は更新済みフラグがあるので"
+                            f"スキップしました")
         return                                  # 本日更新済み → スキップ
     try:
         from daily_fetch_minute import run_update
@@ -369,6 +388,7 @@ def _auto_update_minute():
               f"{_res.get('updated', 0)}銘柄", flush=True)
     except Exception as _e:
         print(f"  ⚠ 5分足自動更新スキップ ({_e})", flush=True)
+        _minute_status(ran=True, source=_src, note=f"更新に失敗しました: {_e}")
         return                                     # 失敗 → フラグを書かない
     # ⛔⛔ **フラグは「実行した」ではなく「最新営業日まで取れた」で立てる**
     #   (2026-08-19)。以前は run_update が成功しさえすればフラグを書いていた。
@@ -395,6 +415,13 @@ def _auto_update_minute():
         print(f"  ⚠ 5分足の最新日を確認できません({_e5})", flush=True)
         return                                     # 分からない → フラグを書かない
     print(f"  5分足の最新日: {_got or '不明'} / 期待 {_want}", flush=True)
+    _minute_status(ran=True, source=_src, want=_want, got=_got,
+                   bars=int(_res.get("bars", 0) or 0),
+                   updated=int(_res.get("updated", 0) or 0),
+                   note=("" if (_got and _got >= _want) else
+                         f"{_src} が {_want} のバーを返しませんでした"
+                         f"(最新 {_got or '不明'} / 追加 "
+                         f"{_res.get('bars', 0):,}バー)"))
     if _got and _got >= _want:
         _flag.write_text("ok", encoding="utf-8")   # ここまで取れて初めて完了
         return
