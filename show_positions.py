@@ -196,8 +196,32 @@ def main():
             total_pnl += pnl_val
             has_total  = True
 
+        # ── 信用区分と建玉日 ────────────────────────────────────────
+        # ⛔⛔ **一般信用(デイトレ)=3 は当日中の反対売買が前提**の建玉。
+        #   J/H の新規売りは margin_type=3 で出している(kabu_api:105-127 /
+        #   order_server:203 / lss_budget_cap:307)ので、**持ち越した時点で
+        #   異常**。翌営業日を期限とする注文(寄成=ExpireDay 翌営業日)が
+        #   出せないのもこれが理由(2026-08-19 に実際に発生)。
+        #   → 建玉日が今日でないデイトレ建玉は最上段で警告する。
+        _mtt = str(pos.get("MarginTradeType") or "")
+        _mtt_lbl = {"1": "制度信用", "2": "一般信用(長期)",
+                    "3": "一般信用(デイトレ)"}.get(_mtt, f"区分{_mtt}" if _mtt else "")
+        _exd = str(pos.get("ExecutionDay") or "")
+        _exd_s = (f"{_exd[:4]}-{_exd[4:6]}-{_exd[6:8]}"
+                  if len(_exd) == 8 and _exd.isdigit() else _exd)
+        _today_s = datetime.now(JST).strftime("%Y-%m-%d")
+        _carried = bool(_exd_s) and _exd_s < _today_s
+
         print()
         print(f"  ┌─ {sym}  {name}  [{side_str}]  戦略: {strategy}  シグナル日: {sig_date}")
+        if _mtt_lbl or _exd_s:
+            print(f"  │  信用区分 : {_mtt_lbl or '—'}"
+                  + (f"   建玉日: {_exd_s}" if _exd_s else ""))
+        if _mtt == "3" and _carried:
+            print(f"  │  ⛔⛔ **一般信用(デイトレ)を持ち越しています**"
+                  f"(建玉日 {_exd_s})。この区分は当日返済が前提なので、")
+            print(f"  │      翌営業日を期限とする注文(寄成など)は出せません。"
+                  f"**成行で返済**するか証券会社に確認してください。")
         print(f"  │  約定値   : {avg_price:>9,.1f} 円")
         if current is not None:
             pct_now = _pct(current, avg_price)
