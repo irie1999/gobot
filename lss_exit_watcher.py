@@ -724,8 +724,15 @@ def _run(args, close_at, today) -> int:
             _time.sleep(30)
 
     # 制御サーバ(8766)を起動: レポートの『🚀発注に切替』ボタンで発注サーバへ戻せる。
+    # ⛔ ポートが塞がっている(古い watcher が残っている等)と bind で例外が飛び、
+    #   **監視ループに入る前に watcher が死ぬ**。決済より優先されるものではない
+    #   ので、失敗しても続行する(2026-08-19)。
     if not args.once:
-        _start_control_server(args.prod)
+        try:
+            _start_control_server(args.prod)
+        except Exception as _cse:
+            print(f"  [!] 制御サーバを起動できませんでした({_cse}) → 続行します"
+                  f"(『🚀発注に切替』ボタンが使えないだけ)", flush=True)
 
     stop_placed: set = set()   # 板逆指値を設置済みの銘柄(pkey=銘柄)。銘柄単位で合計数量に
                                #   1本だけ置く(同一銘柄200株=2建玉でも1本で全建玉をカバー)。

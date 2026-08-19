@@ -461,7 +461,42 @@ if args.execute and not args.no_watch:
               "    建玉が無ければ watcher は何もしません(起動しても無害)。",
               flush=True)
     if not args.dry_run:
-        _run("6. 決済watcher", _wcmd)
+        # ⛔⛔ **死んだら再起動する**(2026-08-19)。
+        #   2026-08-19、watcher が naive/aware の比較1つで起動2秒で落ち、
+        #   ここが一発起動だったので誰も気づかず **8建玉が終日ノーガード＋
+        #   持ち越し**になった。損切りも利確も一度も置かれていない。
+        #   決済プロセスのバグは必ずいつか出るので、
+        #   「1回起動して終わり」という構造そのものを直す。
+        _MKT_END = _dt.time(15, 30)
+        _tries = 0
+        while True:
+            _tries += 1
+            _run(f"6. 決済watcher{'' if _tries == 1 else f' (再起動 {_tries - 1}回目)'}",
+                 _wcmd)
+            if _dt.datetime.now().time() >= _MKT_END:
+                break            # 大引けまで生き延びた = 正常終了
+            if _n_today == 0:
+                break            # 建玉が無いので再起動する意味がない
+            if _tries >= 40:
+                print("  ⛔⛔ watcher が 40回 落ちました。**手で対処してください**",
+                      flush=True)
+                break
+            print(f"\n  ⛔⛔ **watcher が大引け前に終了しました** "
+                  f"({_dt.datetime.now():%H:%M:%S})。\n"
+                  f"     建玉 {_n_today}件 が無防備です。10秒後に再起動します。\n"
+                  f"     ⚠ 何度も出るなら kabuステーションで建玉を確認し、"
+                  f"手で返済してください。", flush=True)
+            time.sleep(10)
+        # 大引け後: 建玉が残っていないかを最後に必ず知らせる
+        if _n_today:
+            print(f"""
+{'=' * 74}
+▶ 決済の確認 — **必ず kabuステーションで建玉照会を見てください**
+{'=' * 74}
+  今日の発注 {_n_today}件。引け成行(MOC)が通っていれば建玉は 0 のはずです。
+  ⛔ 残っていたら **一般信用デイトレは当日返済が原則**です。
+     翌営業日の寄成で返済を予約するか、その場で返済してください。
+{'=' * 74}""", flush=True)
     else:
         print("  (dry-run: 起動しません)", flush=True)
 elif args.execute:
