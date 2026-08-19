@@ -341,11 +341,24 @@ def _auto_update_minute():
                 _old.unlink()
     except Exception:
         pass
+    # ⛔⛔ **フラグの中身は「どこまで取れたか」の日付**(2026-08-19)。
+    #   旧コードは中身 "ok" を無条件に書いていたので、引け前に一度動くと
+    #   その日のフラグが立ち、引け後の実行が丸ごとスキップされた。
+    #   名前だけ見ると『今日のフラグ』なので掃除でも消えず、修正後も
+    #   前の実行が残した "ok" が効き続けてしまった(実際そうなった)。
+    #   → 日付として読めない/期待日に足りないフラグは **信用せず再取得**する。
     if _flag.exists():
-        _minute_status(ran=False,
-                       note=f"本日({_report_date()})は更新済みフラグがあるので"
-                            f"スキップしました")
-        return                                  # 本日更新済み → スキップ
+        try:
+            _prev = _flag.read_text(encoding="utf-8").strip()
+        except Exception:
+            _prev = ""
+        if len(_prev) == 10 and _prev >= str(_report_date()):
+            _minute_status(ran=False, got=_prev,
+                           note=f"{_prev} まで取得済みのフラグがあるので"
+                                f"スキップしました")
+            return                              # 本当に取れている → スキップ
+        print(f"  (古い形式の更新フラグ '{_prev or 'なし'}' を無視して"
+              f"取り直します)", flush=True)
     try:
         from daily_fetch_minute import run_update
     except Exception as _e:
@@ -423,9 +436,9 @@ def _auto_update_minute():
                          f"(最新 {_got or '不明'} / 追加 "
                          f"{_res.get('bars', 0):,}バー)"))
     if _got and _got >= _want:
-        _flag.write_text("ok", encoding="utf-8")   # ここまで取れて初めて完了
+        _flag.write_text(_got, encoding="utf-8")   # ★ 到達した日付を書く
         return
-    print(f"""
+    print(rf"""
 {'=' * 65}
 ⛔⛔ **5分足に {_want} がまだ入っていません**(最新 {_got or '不明'})
 {'=' * 65}

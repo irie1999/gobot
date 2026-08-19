@@ -12630,7 +12630,7 @@ function switchTbd(id, tab) {{
                 #   黙って消えると「今日の結果が出ない」としか分からない。
                 if _exp and not (_cd.get(_exp) or _by.get(_exp)
                                  or _fn_out.get(_exp)):
-                    print(f"""
+                    print(rf"""
     {'=' * 66}
     ⛔⛔ **最終営業日 {_exp} が損益タブに1行も出ていません**
     {'=' * 66}
