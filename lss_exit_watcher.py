@@ -149,8 +149,21 @@ def _load_seen(today: str) -> dict:
     import json
     try:
         d = json.loads(_SEEN.read_text(encoding="utf-8"))
-        return {k: datetime.fromisoformat(v)
-                for k, v in (d.get(today) or {}).items()}
+        # ⛔⛔ **tz を必ず付ける**(2026-08-19)。このファイルは watcher 自身
+        #   (aware) だけでなく k_open_confirm._seed_arm も書く。そちらが
+        #   naive で書いていたため `now >= _arm` が TypeError になり、
+        #   **watcher が起動2秒で落ちて建玉が引けまで残った**。
+        #   書き手を直すだけでは足りない: ここで受け側を頑健にしておく。
+        _out = {}
+        for k, v in (d.get(today) or {}).items():
+            try:
+                _dtv = datetime.fromisoformat(str(v))
+            except Exception:
+                continue
+            if _dtv.tzinfo is None:
+                _dtv = _dtv.replace(tzinfo=JST)
+            _out[k] = _dtv
+        return _out
     except Exception:
         return {}
 
@@ -774,7 +787,16 @@ def _run(args, close_at, today) -> int:
         except Exception as _e:
             print(f"  [!] 未発動注文の取消機能の読込失敗({_e}) → 無効")
             _budget_sweep = None
+    # ⛔⛔ **1周が落ちても監視を止めない**(2026-08-19)。
+    #   naive/aware の比較1つで TypeError が出て watcher が起動2秒で死に、
+    #   建玉8件が引けまで残った(実損)。決済ロジックのバグは必ずいつか出るので、
+    #   「落ちたら引け決済ごと消える」構造そのものを直す。
+    #   ・例外は握りつぶさず毎周 traceback を出す(気づけないと直せない)
+    #   ・大引けまでは何があっても回り続ける
+    #   ・連続で落ち続けるときだけ、目立つ警告を出す
+    _err_streak = 0
     while True:
+      try:
         now = datetime.now(JST)
         before_open = now.time() < MARKET_START      # 寄り前は成行/逆指値が通らないので発火しない
         after_close = now.time() >= close_at
@@ -790,7 +812,10 @@ def _run(args, close_at, today) -> int:
 
         # 予算上限管理: 同時保有lss売建の合計時価(平均約定値×残玉数)が --budget-cap に達したら、
         #   未発動のlss新規売り逆指値を全取消。決済済みポジションは除外(同時保有ベース)。終日有効。
-        if _budget_sweep is not None and not before_open and not after_close:
+        # ⛔ --budget-cap 0 は「無効」。0 のまま比較すると毎周『上限0万 ★到達』
+        #    になり、未発動注文を取り消し続ける(2026-08-19 のログで確認)。
+        if (_budget_sweep is not None and args.budget_cap > 0
+                and not before_open and not after_close):
             filled_notional = sum(_num(p.get("avg", 0)) * int(p.get("qty", 0))
                                   for p in shorts if _num(p.get("avg", 0)) > 0)
             _reached = filled_notional >= args.budget_cap
@@ -928,6 +953,25 @@ def _run(args, close_at, today) -> int:
             print("dry-run のため1巡で終了します。--execute で常時監視+決済します。")
             break
         _touch_lock()   # ハートビート(多重起動防止のlockを更新)
+        _err_streak = 0
+        _time.sleep(max(1.0, args.poll))
+      except KeyboardInterrupt:
+        print("\n中断されました(Ctrl+C)。⛔ 建玉が残っていれば手で返済してください。")
+        break
+      except Exception as _loop_e:
+        import traceback as _tb
+        _err_streak += 1
+        print(f"\n  ⛔ 監視ループでエラー({_err_streak}回連続): {_loop_e}", flush=True)
+        print("".join(_tb.format_exc().splitlines(True)[-4:]), flush=True)
+        if _err_streak >= 3:
+            print("  ⛔⛔ **3回以上連続で落ちています**。決済が機能していない"
+                  "可能性があります。\n"
+                  "     kabuステーションで建玉を確認し、必要なら手で返済して"
+                  "ください。", flush=True)
+        if datetime.now(JST).time() >= MARKET_END:
+            print("  大引けを過ぎたので監視を終了します。", flush=True)
+            break
+        _touch_lock()
         _time.sleep(max(1.0, args.poll))
 
     print("終了しました。")

@@ -653,15 +653,21 @@ def _seed_arm(_sym: str, _open_time: str) -> None:
                 _cur = {}
         if str(_sym) in _cur:
             return                      # watcher が既に書いていたら尊重する
+        # ⛔⛔ **tz-aware で書くこと**(2026-08-19)。watcher は
+        #   `datetime.now(JST)` (aware) と比較するので、naive を書くと
+        #   `can't compare offset-naive and offset-aware datetimes` で
+        #   **watcher が起動2秒で落ち、建玉が引けまで残る**。実際に起きた。
+        _JST = _dt.timezone(_dt.timedelta(hours=9))
+        _now_j = _dt.datetime.now(_JST)
         _m = re.search(r"T?(\d{2}):(\d{2}):?(\d{2})?", str(_open_time or ""))
         if _m:
-            _t = _dt.datetime.now().replace(
+            _t = _now_j.replace(
                 hour=int(_m.group(1)), minute=int(_m.group(2)),
                 second=int(_m.group(3) or 0), microsecond=0)
         else:
             _h, _mi = (int(x) for x in str(args.open_at).split(":"))
-            _t = _dt.datetime.now().replace(hour=_h, minute=_mi,
-                                            second=0, microsecond=0)
+            _t = _now_j.replace(hour=_h, minute=_mi,
+                                second=0, microsecond=0)
         _cur[str(_sym)] = _t.isoformat()
         _sp.write_text(_json.dumps({_today: _cur}, ensure_ascii=False),
                        encoding="utf-8")
