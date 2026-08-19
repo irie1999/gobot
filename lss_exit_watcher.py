@@ -260,7 +260,13 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
             print(f"  [!] ordered_signals_lss.csv 読込失敗 ({e})")
 
     # B) placed_orders_<date>.csv (レポート発注ボタン = order_server)
+    # ⛔ 旧実装は `except Exception: continue` で **読み込み失敗を黙って捨てて**
+    #   いた(2026-08-19 発見)。CSVが壊れた日は、その日の発注が丸ごと watcher から
+    #   見えなくなるのに何も表示されない = 無防備なのに気づけない。必ず出す。
+    # ⛔ status も A) と同じ規則で尊重する(pending は守る / failed は打ち消す)。
     for fp in sorted(glob.glob(str(_BASE / "placed_orders_*.csv"))):
+        _rowsB: list = []
+        _failedB: set = set()
         try:
             for r in csv.DictReader(open(fp, encoding="utf-8")):
                 if str(r.get("side", "")).strip() != "short":
@@ -271,14 +277,29 @@ def _load_lss_orders(today: str, all_dates: bool) -> dict[str, list[dict]]:
                 d = str(r.get("placed_at", "")).strip()[:10]
                 if not all_dates and d != today:
                     continue
-                _add(r.get("symbol"), _num(r.get("entry")),
-                     int(_num(r.get("qty")) or 100), strat, r.get("name", ""),
-                     _num(r.get("stop")), _num(r.get("target")), date=d,
-                     mode=(r.get("entry_mode") or "stop"),
-                     atr=_num(r.get("atr")), sm=_num(r.get("sm")),
-                     tm=_num(r.get("tm")))
-        except Exception:
+                _st = (str(r.get("status", "")).strip() or "ordered").lower()
+                _k = (str(r.get("symbol", "")).upper().removesuffix(".T"),
+                      round(_num(r.get("entry"))),
+                      int(_num(r.get("qty")) or 100), d)
+                if _st in ("failed", "cancelled", "canceled"):
+                    _failedB.add(_k)
+                    continue
+                _rowsB.append((_k, strat, r))
+        except Exception as e:
+            print(f"  [!] {Path(fp).name} 読込失敗 ({e}) — "
+                  f"**この日の発注が watcher から見えません**")
             continue
+        _seenB: set = set()
+        for _k, strat, r in _rowsB:
+            if _k in _failedB or _k in _seenB:
+                continue
+            _seenB.add(_k)
+            _add(r.get("symbol"), _num(r.get("entry")),
+                 int(_num(r.get("qty")) or 100), strat, r.get("name", ""),
+                 _num(r.get("stop")), _num(r.get("target")), date=_k[3],
+                 mode=(r.get("entry_mode") or "stop"),
+                 atr=_num(r.get("atr")), sm=_num(r.get("sm")),
+                 tm=_num(r.get("tm")))
 
     return out
 

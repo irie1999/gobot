@@ -145,9 +145,11 @@ def _log_placed_order(rec: dict) -> None:
     # entry_mode/atr/sm/tm は H案(指値売り)用。H は板寄せの約定値が指値**以上**に
     # なるので、注文価格基準の損切りは約定値より下に来て建てた瞬間に発火する。
     # lss_exit_watcher がこれらを読んで**実約定価格から OCO を組み直す**。
+    # status は 2026-08-19 追加。pending = 発注の直前に書いた / ordered = 通った /
+    # failed = 通らなかった(同じ pending を打ち消す)。空欄は ordered 扱い(後方互換)。
     cols = ["placed_at", "symbol", "name", "strategy", "side", "qty",
             "entry", "stop", "target", "bt", "env",
-            "entry_mode", "atr", "sm", "tm"]
+            "entry_mode", "atr", "sm", "tm", "status"]
     new = not path.exists()
     try:
         # 列が増えたとき、ヘッダが古いままだと行がズレる。既存を読み直して揃える。
@@ -285,6 +287,29 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
         limit_p = round(entry * _mult)
 
     try:
+        # ⛔⛔ **記録は発注より先に書く**(2026-08-19)。旧実装は『送信 → 成功したら
+        #   記録』で、その間に落ちると **注文だけが板に残り watcher が知らない**
+        #   = 無防備で引けまで(今日の実損と同じ型)。記録が余分に残るのは無害。
+        #   ⚠ lss(ショート)だけが watcher の対象。ロングは対象外なので書かない。
+        def _log_st(_st):
+            if not (EXECUTE and _is_lss):
+                return
+            try:
+                _log_placed_order({
+                    "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                    "symbol": symbol, "name": name, "strategy": strat,
+                    "side": side, "qty": qty, "entry": f"{entry:.0f}",
+                    "stop": f"{stop:.0f}" if stop else "",
+                    "target": f"{target:.0f}" if target else "",
+                    "bt": str(bt or ""), "env": ("本番" if PROD else "デモ"),
+                    "entry_mode": entry_mode,
+                    "atr": (f"{atr:.2f}" if atr else ""),
+                    "sm": (f"{sm}" if sm else ""),
+                    "tm": (f"{tm}" if tm else ""), "status": _st})
+            except Exception as _le:
+                print(f"  ⚠ 発注記録({_st})の書き込み失敗: {_le}", flush=True)
+
+        _log_st("pending")
         if side == "short" and entry_mode == "limit":
             # H案: 前日終値-5ティックの**指値売り**。寄りが既に上なら板寄せで、
             # そうでなければ日中に上がってきたときに約定する。
@@ -305,7 +330,11 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
             kind = "信用新規" if cash_margin == 2 else "現物"
             dir_label = f"逆指値買い→指値({kind}) 発動≥{entry:,.0f}/指値≤{limit_p:,.0f}{adj_note}"
     except Exception as e:
-        return f"発注失敗: {symbol} ({e})"
+        # ⚠ 打ち消さない。送信後のタイムアウト等で **注文が通っている**可能性が
+        #   あるので、pending のまま残して watcher に守らせる(余分な記録は無害)。
+        return (f"発注失敗: {symbol} ({e})"
+                + (" / 記録は pending のまま残しました(注文が通っていた場合に"
+                   "watcher が守れるように)" if (EXECUTE and _is_lss) else ""))
 
     env = "本番" if PROD else "デモ"
     if not EXECUTE:
@@ -324,14 +353,19 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
         elif _is_lss:
             watch_note = " / lss決済は lss_exit_watcher.py が監視(利確下・損切上・先着で成行)"
         if EXECUTE:
-            _log_placed_order({
-                "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
-                "symbol": symbol, "name": name, "strategy": strat, "side": side,
-                "qty": qty, "entry": f"{entry:.0f}", "stop": f"{stop:.0f}" if stop else "",
-                "target": f"{target:.0f}" if target else "", "bt": str(bt or ""), "env": env,
-                "entry_mode": entry_mode, "atr": (f"{atr:.2f}" if atr else ""),
-                "sm": (f"{sm}" if sm else ""), "tm": (f"{tm}" if tm else ""),
-            })
+            if _is_lss:
+                _log_st("ordered")     # 上で書いた pending を確定させる
+            else:
+                # ロングは watcher の対象外なので pending を書いていない。
+                # 保有銘柄タブのソースとして従来どおり1行だけ残す。
+                _log_placed_order({
+                    "placed_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                    "symbol": symbol, "name": name, "strategy": strat, "side": side,
+                    "qty": qty, "entry": f"{entry:.0f}", "stop": f"{stop:.0f}" if stop else "",
+                    "target": f"{target:.0f}" if target else "", "bt": str(bt or ""), "env": env,
+                    "entry_mode": entry_mode, "atr": (f"{atr:.2f}" if atr else ""),
+                    "sm": (f"{sm}" if sm else ""), "tm": (f"{tm}" if tm else ""),
+                })
         # ★ 発注した瞬間に検算して、問題があればボタンの応答にそのまま出す。
         #   初日(2026-08-13)の6件は全部『実弾が動いた後』に見つかった。とくに
         #   atr 欠落は4銘柄すべてを無防備にしたが、この1行があれば click 時に
@@ -350,6 +384,11 @@ def place_order(symbol: str, entry: float, qty: int, side: str,
                 _vwarn = f"  ⚠ 検算できませんでした({_ve})"
         return (f"🚀 発注完了: {symbol} {strat} {dir_label} x{qty}株 "
                 f"({env}口座) OrderId={res.get('OrderId','')}{watch_note}{_vwarn}")
+    # ── ここから下は **発注が通らなかった** 経路 ──────────────────────────
+    #   kabu が明示的に拒否した(=注文は板に無い)ので、上で書いた pending を
+    #   打ち消す。送信で例外が出たケース(注文が通っている可能性がある)とは違い、
+    #   ここは res が返っているので「通っていない」が確定している。
+    _log_st("failed")
     # ── 想定内のリジェクトは分かりやすいスキップにする(一括発注を止めない・パニックしない) ──
     _code = res.get("Code")
     try:
