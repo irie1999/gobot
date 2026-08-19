@@ -375,8 +375,23 @@ def _auto_update_minute():
     #       08-04〜14 も 1〜3%
     #   レポートの日別カードは **09:00バーがある日しか出ない**。08-13 が
     #   「1件」だったのは 09:00 を持つ銘柄がちょうど1つだったから。
-    #   → 鍵があるなら必ず J-Quants。無いときだけ yfinance に落ちて **大きく警告**。
-    _src = "jquants" if os.environ.get("JQUANTS_API_KEY") else "yfinance"
+    #
+    # ⛔⛔ **ただし 2026-08-19 に既定を yfinance へ戻した。**
+    #   J-Quants は **未契約**なので、上の「鍵があれば jquants」は
+    #   『.env に古い鍵が残っているか』を見ているだけで、実際には
+    #   1バーも取れない。その結果その日の5分足が丸ごと入らず、
+    #   損益タブから当日が消えた(08-19 が実際にこれ)。
+    #   → **既定は yfinance**。J-Quants を使うのは契約を再開して
+    #     `LSS_MINUTE_SRC=jquants` を明示したときだけ。
+    #   ★ yfinance で落ちるのは **09:00-09:05 の5分足バーだけ**で、
+    #     - ギャップ判定(建てるか)  → **日足の始値**を使うので影響なし
+    #     - 遅寄り判定             → その日の最頻の先頭バーを基準にする
+    #                                (2026-08-18 修正)ので影響なし
+    #     - 損切り                 → J は delay4(20分)なので そもそも
+    #                                この区間に損切りは置かれない
+    #     残るのは **寄り5分以内の利確を取りこぼす**ことだけ = 保守側にズレる。
+    _src = (os.environ.get("LSS_MINUTE_SRC")
+            or ("jquants" if os.environ.get("LSS_MINUTE_JQ") else "yfinance"))
 
     def _warn_yf(_why):
         print(f"  ⚠ {_why}yfinance で埋めます。", flush=True)
@@ -388,15 +403,15 @@ def _auto_update_minute():
               "『データの欠落』として", flush=True)
         print("       遅寄り除外から自動で外します(2026-08-18 修正)。",
               flush=True)
-        print("     ・残る影響は **09:00-09:05 の利確を取りこぼす**ことだけ。",
-              flush=True)
-        print("       損切りは delay1 の無保護窓と一致するので影響しません。",
-              flush=True)
+        print("     ・残る影響は **09:00-09:05 の利確を取りこぼす**ことだけ"
+              "(= 保守側にズレる)。", flush=True)
+        print("       損切りは J が delay4(20分)なので、この区間には"
+              "そもそも置かれません。", flush=True)
 
     print("=" * 65)
     print(f"5分足(stock_5min)を自動更新中 ({_src}・本日初回のみ)...", flush=True)
     if _src == "yfinance":
-        _warn_yf("JQUANTS_API_KEY が無いので(J-Quants 未契約なら これが通常)")
+        _warn_yf("J-Quants は未契約なので(既定・正常) ")
     print("=" * 65)
     # ⛔⛔ **『鍵があるか』ではなく『実際に取れたか』で判断する**(2026-08-19)。
     #   2026-08-18 に「J-Quants を優先」に変えたが、**契約が切れていても
@@ -419,9 +434,9 @@ def _auto_update_minute():
         print(f"""
 {'=' * 65}
 ⚠ J-Quants から **1バーも取れませんでした**（契約切れ / 鍵が古い等）。
-   JQUANTS_API_KEY が残っているだけで jquants を選んでいました。
    **yfinance で取り直します。**
-   ※ 恒久的に yfinance にするなら .env の JQUANTS_API_KEY を消してください。
+   ※ 既定は yfinance です。jquants を選んだのは LSS_MINUTE_SRC / LSS_MINUTE_JQ
+     が設定されているからなので、契約が無いなら その env を消してください。
 {'=' * 65}""", flush=True)
         _src = "yfinance"
         _warn_yf("J-Quants が0バーだったので ")
