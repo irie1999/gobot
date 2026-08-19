@@ -370,7 +370,8 @@ def _stop_arm_time(first_seen: datetime, delay_bars: int) -> datetime:
 
 
 def _lss_shorts(cli, lss_map: dict, tol: float,
-                unmatched: list | None = None) -> list[dict]:
+                unmatched: list | None = None,
+                errs: list | None = None) -> list[dict]:
     """kabu建玉から、対象の lss 売建(未決済)を抽出。毎回 kabu の実建玉を読むので、
     部分約定で減った残玉(LeavesQty)もそのまま拾える(=残玉を監視し続ける)。
 
@@ -394,9 +395,17 @@ def _lss_shorts(cli, lss_map: dict, tol: float,
                 positions = cli.get_positions(product=2)
             except Exception as e2:
                 print(f"  [!] 建玉取得失敗(再接続後も): {e2}")
+                # ⛔ 「建玉が無い」と区別できるようにする(2026-08-19)。
+                #   旧実装は [] を返すだけで、呼び元は直後に『対象のlss売建なし』
+                #   と表示していた。**取得できていないだけ**なのに「無い」と
+                #   言うのは、今日と同じ『気づけない無防備』の入口。
+                if errs is not None:
+                    errs.append(f"建玉取得失敗(再接続後も): {e2}")
                 return []
         else:
             print(f"  [!] 建玉取得失敗: {e}")
+            if errs is not None:
+                errs.append(f"建玉取得失敗: {e}")
             return []
     # 銘柄単位で合算する。kabuの信用返済は『銘柄単位で建玉を自動選択し、発注時に既存の
     # 返済注文を取消す』ため、建玉ごとに決済すると片方の返済注文(MOC/逆指値)がもう片方の
@@ -985,7 +994,8 @@ def _run(args, close_at, today) -> int:
         #   一度も見なかった。記録が壊れた日は建玉があっても『対象なし』と
         #   表示して終日回り続ける = 今日と同じ「無防備で引けまで」になる。
         _unmatched: list = []
-        shorts = _lss_shorts(cli, lss_map, args.tol, _unmatched)
+        _poserr: list = []
+        shorts = _lss_shorts(cli, lss_map, args.tol, _unmatched, _poserr)
         if _unmatched:
             print(f"  ⛔⛔ **watcher が守っていない信用売建が "
                   f"{len(_unmatched)}件 あります**", flush=True)
@@ -1144,6 +1154,15 @@ def _run(args, close_at, today) -> int:
                     _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
                     _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
                     print(f"  [監視] {sym} {p['name']} 現在{_curs} ({_st} / {_tg})")
+        elif _poserr:
+            # ⛔ 「無い」ではなく「**見えていない**」。決済が一切できない状態なので、
+            #   『対象なし』と同じ顔をさせない(2026-08-19)。
+            print(f"  ⛔⛔ {now:%H:%M:%S} **建玉を取得できていません** — "
+                  f"{_poserr[0]}", flush=True)
+            print(f"       建玉が有るか無いかも分かりません。"
+                  f"決済は一切できていない状態です。\n"
+                  f"       kabuステーションの起動・ログイン・トークンの取り合い"
+                  f"(発注サーバ等)を確認してください。", flush=True)
         else:
             print(f"  {now:%H:%M:%S} 対象のlss売建なし(未約定 or 全決済済み)")
 
