@@ -176,6 +176,14 @@ ap.add_argument("--out", type=str, default="")
 #   モデルに無い建玉ができる。
 ap.add_argument("--allow-late-orders", action="store_true",
                 help="⛔ 時間外でも発注する。事故のもとなので通常は使わない")
+# ★★ 終了直前に引け成行(MOC)を板へ置く (2026-08-20)。既定ON。
+#   09:00 に建てた玉は、このスクリプトが終わる 09:10 まで板に何も乗らない
+#   (トークンが1つなので watcher を並走できない)。2026-08-19 はその直後に
+#   watcher が即死して6時間半 無防備 → 持ち越し → 強制決済になった。
+#   MOC は朝に出しても大引けで約定するので、**手放す前に置く**のが正しい。
+ap.add_argument("--no-moc-on-exit", action="store_true",
+                help="⛔ 終了前に引け成行(MOC)を置かない。"
+                     "置かないと watcher が起動するまで板が空になる")
 args = ap.parse_args()
 
 # ── 実発注は 09:00 前後の窓の中だけ ───────────────────────────────────
@@ -1244,6 +1252,63 @@ if args.execute:
                       f" delay 本数ぶん後に武装します", flush=True)
         except Exception as _se:
             print(f"  ⚠ 武装時刻の確認に失敗({_se})", flush=True)
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★ トークンを手放す前に『引け成行(MOC)』を板へ置く (2026-08-20)
+    # ══════════════════════════════════════════════════════════════════
+    # ⛔ ここが 2026-08-19 の事故の分かれ目だった。
+    #   09:00 に建てた玉は、このスクリプトが終わる 09:10 まで **板に何も
+    #   乗っていない**(kabu のトークンは1つなので watcher を並走できない)。
+    #   そして 09:10 に起動した watcher が naive/aware の比較1つで即死し、
+    #   **その後6時間半ずっと無防備 → 持ち越し → 強制決済**になった。
+    # ★ MOC は朝に出しても大引けで約定する。**終了する前に置いてしまえば**、
+    #   この後 watcher が一度も起動しなくても『その日のうちに閉じる』。
+    #   watcher が正常なら 15:20 に自分の MOC を出す前にこれを見つける
+    #   (moc_placed 相当の重複は kabu 側で建玉拘束になるだけで無害)。
+    # ⚠ 損切り逆指値は置かない。板は1本しか使えないので、**確実に閉じる方**を
+    #   優先する(損切りは watcher のポーリングが担う)。
+    if not args.no_moc_on_exit:
+        print(f"\n  ── 引け成行(MOC)を板に置きます "
+              f"{'─' * 40}\n"
+              f"  ⛔ ここで置かないと、watcher が起動するまで板は空です。"
+              f"2026-08-19 はそこで持ち越しました", flush=True)
+        _mn = _mok = 0
+        try:
+            for _p in cli.get_positions(product=2):
+                if str(_p.get("Side", "")) != "1":
+                    continue
+                _q = int(_p.get("LeavesQty") or _p.get("Qty") or 0)
+                if _q <= 0:
+                    continue
+                # 一般信用デイトレ(3)だけ。制度・一般長期の売建は多日保有が
+                # ありうるので触らない(panic_close と同じ絞り方)。
+                if str(_p.get("MarginTradeType") or "") != "3":
+                    continue
+                _ps = str(_p.get("Symbol", ""))
+                _mn += 1
+                try:
+                    _r = cli.send_moc(_ps, qty=_q, side="buy", cash_margin=3)
+                except Exception as _me:
+                    print(f"    ⛔ {_ps} MOC 発注で例外: {_me}", flush=True)
+                    continue
+                if _r.get("Result") == 0 or _r.get("_dry_run"):
+                    _mok += 1
+                    print(f"    ✅ {_ps} {_p.get('SymbolName') or ''} "
+                          f"{_q}株 引け成行を設置", flush=True)
+                else:
+                    print(f"    ⛔ {_ps} MOC 設置失敗: {_r}", flush=True)
+        except Exception as _mne:
+            print(f"    ⛔ 建玉を取得できず MOC を置けません({_mne})", flush=True)
+        if _mn == 0:
+            print("    (対象の売建がありません。約定していない可能性があります)",
+                  flush=True)
+        elif _mok < _mn:
+            print(f"\n  ⛔⛔ **{_mn - _mok}件 は MOC を置けませんでした**。"
+                  f"watcher が落ちると持ち越しになります。\n"
+                  f"     kabu の注文照会で確認し、必要なら手で引け成行を"
+                  f"出してください", flush=True)
+        else:
+            print(f"  ✅ {_mok}件すべてに引け成行を設置。**watcher が起動しなくても"
+                  f"大引けで決済されます**", flush=True)
     print(f"""
   🚀 **発注しました** {_EX['n']}件 / 総額 {_EX['yen'] / 1e4:,.1f}万"""
           + (f" / 中止 {_EX['ng']}件" if _EX["ng"] else "")
