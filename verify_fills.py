@@ -619,7 +619,15 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     print(f"\n[テスト 合計] {_bt_tot:+,.0f}円  ({len(by_sym)}銘柄 / 勝ち{_bt_w} 負け{len(by_sym)-_bt_w})")
 
     # ── 突合 ──
-    real_done = {r["symbol"]: r for r in real_rows if r["qty"] > 0}
+    # ⛔ **持ち越し決済(carried)は突合から外す**(2026-08-20)。
+    #    建てたのは前営業日以前なので、対象日のテスト明細と突き合わせても
+    #    必ず食い違う。実際 08-20 は 08-19 に建てた8銘柄が
+    #    『テストの母集団に無い(バックテストがシグナルを出していない)』と
+    #    誤報告された(バックテストは 08-19 側にちゃんと持っている)。
+    #    同じ銘柄が両日に出ていれば『両方にある』に化けて滑りまで捏造する。
+    real_all = {r["symbol"]: r for r in real_rows if r["qty"] > 0}
+    carried = {s: r for s, r in real_all.items() if r.get("carried")}
+    real_done = {s: r for s, r in real_all.items() if not r.get("carried")}
     ordered = {r["code"] for r in order_rows if r.get("side") == "売"}
     both = sorted(set(real_done) & set(by_sym))
     real_only = sorted(set(real_done) - set(by_sym))
@@ -628,6 +636,13 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     print()
     print("=" * 78)
     print("=== 突合: 実約定 vs テスト ===")
+    if carried:
+        _cd = sorted({r["entry_t"] for r in carried.values()})
+        print(f"\n⛔ 持ち越し決済 {len(carried)}銘柄 は突合から除外しました "
+              f"(建てたのは {'/'.join(_cd)})")
+        print(f"   {' '.join(sorted(carried))}")
+        print(f"   → この銘柄の突合は建てた日で見ること: "
+              f".\\fills --date <建てた日>")
     if both:
         # ⛔ **損益の額を直接引き算してはいけない**(2026-08-18)。
         #    テストは予算400万の資金均等(300株など)、少額テストの実運用は
@@ -768,6 +783,11 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
     print(f"[実約定] {len(real_done)}銘柄 {_r_tot:+,.0f}円   "
           f"[テスト] {len(by_sym)}銘柄 {_bt_tot:+,.0f}円   "
           f"[差] {_r_tot - _bt_tot:+,.0f}円")
+    if carried:
+        _ct = sum(r["pnl"] for r in carried.values())
+        print(f"         ※ 上の[実約定]に **持ち越し {len(carried)}銘柄 "
+              f"{_ct:+,.0f}円 は含みません**(突合の対象外)。"
+              f"当日の実損益の総額は上の『[実損益 合計]』を見ること")
     if ordered:
         print(f"[約定率] 実 {len(real_done)}/{len(ordered)}件 "
               f"({len(real_done) / len(ordered) * 100:.1f}%)  vs  "
