@@ -13287,6 +13287,40 @@ function switchTbd(id, tab) {{
             print(f"  ⛔ 0件です。J/L/K の明細は **旧番号(lss土台のペア順位)** に"
                   f"戻ります。{_IMPL_POOL_FILE} が読めているか確認してください",
                   flush=True)
+        # ══════════════════════════════════════════════════════════════
+        #  ⛔⛔ watch フィルタの整合チェック (2026-08-20)
+        # ══════════════════════════════════════════════════════════════
+        # J タブの watch50 は **E/H の候補ビュー(_cd)** の中で流動性順に切る。
+        # 一方この _watch_rank は **シグナルが出た全銘柄(lss土台)** の中の順位で、
+        # ライブ(k_open_confirm --collect → 流動性降順 → 上限50)と同じ母集団。
+        # _cd は 5分足が無い等で E/H のトレードにならなかった銘柄を含まないので、
+        # **_cd の中の50位 は 実際の50位より深い**ことがある。
+        #   → その日ライブでは登録すらしない銘柄を、レポートは建てている。
+        # どれだけ混ざっているかを数える。少なければ無視してよいし、多ければ
+        # J の成績が過大評価されている(フィルタを _watch_rank 基準に直す必要がある)。
+        try:
+            _kk = str(_EQ_TAB_KEY2 or "")
+            _built = list((_EH_TRADES or {}).get(_kk) or [])
+            if _built and _watch_rank and _WATCH_CAP_DISP > 0:
+                _ov = [t for t in _built
+                       if (_watch_rank.get(_wr_key(t)) or 0) > _WATCH_CAP_DISP]
+                _pct = len(_ov) / max(1, len(_built)) * 100
+                _mark = "⛔" if _pct >= 10 else ("⚠" if _pct >= 3 else "✅")
+                print(f"  {_mark} [watch整合] 建てた {len(_built):,}件 のうち "
+                      f"**{len(_ov):,}件 ({_pct:.1f}%)** は、ライブの母集団では "
+                      f"watch{_WATCH_CAP_DISP} 圏外です", flush=True)
+                if _ov:
+                    print(f"       J の watch は E/H 候補ビューの中で切るので、"
+                          f"5分足が無い等でビューに入らなかった銘柄のぶん"
+                          f"**実際より深く届きます**。", flush=True)
+                    print(f"       ライブは『その日シグナルが出た全銘柄』を流動性順に"
+                          f"50件登録するので、この{len(_ov):,}件は"
+                          f"**登録すらされません**。", flush=True)
+                    if _pct >= 3:
+                        print(f"       → この割合ぶん J の成績は過大評価です。"
+                              f"明細では赤⛔で確認できます。", flush=True)
+        except Exception as _wce:
+            print(f"  ⚠ [watch整合] 数えられませんでした: {_wce}", flush=True)
     except Exception as _wre:
         import traceback as _wtb
         print(f"[発注順] ⛔ J/L/K 用の順位づけに失敗: {_wre}\n"
