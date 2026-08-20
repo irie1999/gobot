@@ -71,6 +71,10 @@ ap.add_argument("--slip-log", type=str, default="slip_daily_log.csv",
                      "同じ日を再実行してもその行が上書きされるだけで重複しない")
 ap.add_argument("--no-slip-log", action="store_true",
                 help="累積ログを書かない(表示のみ)")
+# ⛔ 持ち越し決済のあった日は既定で累積ログに入れない(§18.37 の測定が壊れるため)。
+#   それでも記録したいときだけ明示する。
+ap.add_argument("--force-slip-log", action="store_true",
+                help="持ち越し決済があっても累積ログに記録する(既定は除外)")
 args = ap.parse_args()
 
 FEE = args.fee
@@ -295,12 +299,26 @@ def main():
     # 銘柄×売買 で約定を集約(対象日のみ)
     sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
     buys = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
+    # ⛔⛔ **日跨ぎの決済(持ち越し→翌日返済)も往復として拾う**(2026-08-20)。
+    #   旧実装は『同じ対象日に 売り と 買い が両方ある』ときだけ往復とみなし、
+    #   前日に建てて当日返済した取引を **qty=0 → 損益 +0円** として黙って
+    #   捨てていた。2026-08-19 の watcher 障害で8銘柄を持ち越し、翌朝
+    #   強制決済(寄成)されたとき、実損 -13,120円 が **+0円 と表示**された。
+    #   損失が数字に出ない = 今日の一連の障害とまったく同じ形なので直す。
+    #   → 対象日より **前** の売り約定も別に集めておき、当日 買いだけの銘柄は
+    #     そちらを建値として突き合わせる。
+    prev_sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
     for o in orders:
         sym = str(o.get("Symbol") or "").split(".")[0]
         names[sym] = str(o.get("SymbolName") or "")
         side = str(o.get("Side"))            # "1"=売 "2"=買
         for px, qty, t in _executions(o):
             if not _match_date(t):
+                # 対象日より前の売り = 持ち越し玉の建値候補
+                if side == "1" and _digits(t) and _digits(t)[:8] < _DATE_DIG:
+                    prev_sells[sym]["qty"] += qty
+                    prev_sells[sym]["notional"] += px * qty
+                    prev_sells[sym]["times"].append(t)
                 continue
             book = sells if side == "1" else buys
             book[sym]["qty"] += qty
@@ -311,12 +329,23 @@ def main():
 
     rows = []
     tot_net = 0.0
+    n_carry = 0
     for sym in sorted(set(sells) | set(buys)):
         s, b = sells.get(sym), buys.get(sym)
+        # ★ 当日に売りが無く買いだけある = **前日以前に建てた玉の返済**。
+        #   前日以前の売り約定を建値として使う(持ち越し決済)。
+        _carried = False
+        if (not s or not s["qty"]) and b and b["qty"] and prev_sells.get(sym, {}).get("qty"):
+            s = prev_sells[sym]
+            _carried = True
+            n_carry += 1
         avg_sell = (s["notional"] / s["qty"]) if (s and s["qty"]) else 0.0
         avg_buy = (b["notional"] / b["qty"]) if (b and b["qty"]) else 0.0
         qty = min(s["qty"] if s else 0, b["qty"] if b else 0)
         et = _hhmm(min(s["times"])) if (s and s["times"]) else "—"   # 売り=エントリー時刻
+        if _carried and s["times"]:
+            _d = _digits(min(s["times"]))[:8]
+            et = f"{_d[4:6]}/{_d[6:8]}"       # 建てた日を出す(当日でないと分かるように)
         xt = _hhmm(max(b["times"])) if (b and b["times"]) else "—"   # 買戻し=決済時刻
         if qty > 0:                                # 往復完了(lssショート: 売り→買戻し)
             gross = (avg_sell - avg_buy) * qty
@@ -328,7 +357,8 @@ def main():
             net = pct = 0.0
         rows.append({"symbol": sym, "name": names.get(sym, ""), "qty": int(qty),
                      "entry(売)": round(avg_sell, 1), "exit(買戻)": round(avg_buy, 1),
-                     "entry_t": et, "exit_t": xt, "pnl": round(net, 0), "pct": round(pct, 2)})
+                     "entry_t": et, "exit_t": xt, "pnl": round(net, 0),
+                     "pct": round(pct, 2), "carried": int(_carried)})
 
     # 表示
     print("=== 結果 (上の注文のうち 約定して決済まで済んだ取引の実損益) ===")
@@ -337,7 +367,8 @@ def main():
     for r in rows:
         line = (f"{r['symbol']:>6} {r['name'][:12]:<12}{r['qty']:>5}"
                 f"{r['entry(売)']:>9,.1f}{r['exit(買戻)']:>9,.1f}"
-                f"{r['entry_t']:>6}{r['exit_t']:>6}{r['pnl']:>+10,.0f}{r['pct']:>+6.2f}%")
+                f"{r['entry_t']:>6}{r['exit_t']:>6}{r['pnl']:>+10,.0f}{r['pct']:>+6.2f}%"
+                + ("  ⛔持越決済" if r.get("carried") else ""))
         if exp:
             e = exp.get(r["symbol"], {})
             ep = e.get("pnl")
@@ -346,6 +377,21 @@ def main():
         print(line)
 
     print(f"\n[実損益 合計] {tot_net:+,.0f}円  (往復完了 {sum(1 for r in rows if r['qty']>0)}銘柄)")
+    if n_carry:
+        _cn = sum(r["pnl"] for r in rows if r.get("carried"))
+        print(f"""
+{'=' * 78}
+⛔⛔ **持ち越し決済が {n_carry}銘柄 あります** (前日以前に建てて当日返済)
+{'=' * 78}
+  この {n_carry}銘柄の実損益: {_cn:+,.0f}円
+  ⚠ J は **同日決済**の戦略です。持ち越しは設計外 = 何かが起きた日です
+    (watcher が落ちた / 引け決済が飛んだ 等)。
+  ⛔ **一般信用(デイトレ)を持ち越した場合は 強制決済手数料 2,200円/銘柄**が
+     別途かかります(この {n_carry}銘柄なら {n_carry * 2200:,}円)。上の実損益には
+     **含まれていません**。
+  ⛔ **この日の数字を J の成績・スリッページ測定に混ぜないでください。**
+     戦略の損益ではなく事故の費用です(§18.37 の測定が壊れます)。
+{'=' * 78}""")
     if exp:
         matched = [(r, exp[r["symbol"]]) for r in rows
                    if r["symbol"] in exp and "pnl" in exp[r["symbol"]] and r["qty"] > 0]
@@ -733,7 +779,18 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
         print(f"         エントリーの逆指値売りは前営業日の夜に発注されている可能性があります。")
         print(f"         前日で確認: .\\fills --date <前営業日>  /  日付を見ない: .\\fills --no-date")
 
-    if not args.no_slip_log:
+    # ⛔⛔ **持ち越し決済のあった日は乖離ログに入れない**(2026-08-20)。
+    #   slip_daily_log.csv は「J の実運用がバックテストからどれだけ劣化するか」を
+    #   測るためのもの(§18.37)。持ち越し = 同日決済という設計が破れた日なので、
+    #   混ぜると測定そのものが壊れる。事故の費用は戦略の損益ではない。
+    _n_carry = sum(1 for r in real_rows if r.get("carried"))
+    if _n_carry:
+        print(f"\n⛔ 持ち越し決済 {_n_carry}銘柄 があるので "
+              f"**この日は slip_daily_log.csv に記録しません**。\n"
+              f"   J は同日決済の戦略なので、持ち越した日の数字を混ぜると"
+              f"実スリッページの測定(§18.37)が壊れます。\n"
+              f"   どうしても記録するなら --force-slip-log。")
+    if not args.no_slip_log and (not _n_carry or args.force_slip_log):
         _append_slip_log(both, real_done, by_sym, ordered, _r_tot, _bt_tot)
 
 
