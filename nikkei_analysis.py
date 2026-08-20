@@ -13302,13 +13302,37 @@ function switchTbd(id, tab) {{
             _kk = str(_EQ_TAB_KEY2 or "")
             _built = list((_EH_TRADES or {}).get(_kk) or [])
             if _built and _watch_rank and _WATCH_CAP_DISP > 0:
-                _ov = [t for t in _built
-                       if (_watch_rank.get(_wr_key(t)) or 0) > _WATCH_CAP_DISP]
+                # ⛔⛔ **順位が取れない件数を別に数える**(2026-08-20)。
+                #   初版は `(_watch_rank.get(k) or 0) > cap` と書いていたので、
+                #   キーが無い(=ライブ母集団に見つからない)行が **0 に化けて
+                #   『圏内』に数えられて**いた。明細では #57⛔ が出ているのに
+                #   ここが 0件 と表示され、矛盾に気づけなかった。
+                #   今日ずっと直していた『欠損を正常に見せる』のと同じ形。
+                _ov, _in, _nr = [], 0, []
+                for t in _built:
+                    _w9 = _watch_rank.get(_wr_key(t))
+                    if not _w9:
+                        _nr.append(t)          # 順位そのものが無い
+                    elif _w9 > _WATCH_CAP_DISP:
+                        _ov.append(t)
+                    else:
+                        _in += 1
                 _pct = len(_ov) / max(1, len(_built)) * 100
-                _mark = "⛔" if _pct >= 10 else ("⚠" if _pct >= 3 else "✅")
-                print(f"  {_mark} [watch整合] 建てた {len(_built):,}件 のうち "
-                      f"**{len(_ov):,}件 ({_pct:.1f}%)** は、ライブの母集団では "
-                      f"watch{_WATCH_CAP_DISP} 圏外です", flush=True)
+                _pnr = len(_nr) / max(1, len(_built)) * 100
+                _mark = "⛔" if (_pct >= 10 or _pnr >= 10) else (
+                    "⚠" if (_pct >= 3 or _pnr >= 3) else "✅")
+                print(f"  {_mark} [watch整合] 建てた {len(_built):,}件: "
+                      f"圏内 {_in:,} / **圏外 {len(_ov):,} ({_pct:.1f}%)** / "
+                      f"順位なし {len(_nr):,} ({_pnr:.1f}%)", flush=True)
+                if _nr:
+                    _ex = " ".join(
+                        f"{str(t.get('symbol',''))}@{str(t.get('entry_d_raw',''))}"
+                        for t in _nr[:5])
+                    print(f"       ⛔ **順位なし = ライブの母集団に見つからない**"
+                          f"行です。watch の判定ができていません。\n"
+                          f"          例: {_ex}\n"
+                          f"          明細では #番号⚠(橙)で出ます。"
+                          f"0件に化けないよう別に数えています", flush=True)
                 if _ov:
                     print(f"       J の watch は E/H 候補ビューの中で切るので、"
                           f"5分足が無い等でビューに入らなかった銘柄のぶん"
