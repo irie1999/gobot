@@ -703,6 +703,22 @@ def main() -> int:
                     help="保有タブ(holdings_latest.html)の定期更新をしない")
     ap.add_argument("--immediate", action="store_true",
                     help="引けの決済を即時成行にする(既定は引け成行MOC=15:30終値約定)")
+    # ★★ 建玉を検知したらすぐ引け成行(MOC)を板に置く (2026-08-20 ユーザー提案)。
+    #   ⛔ 現行の保護は **09:20〜15:20 の損切り逆指値だけ**が板に乗っている。
+    #     その前(delay の無保護窓)と後(引け)は watcher が生きている前提で、
+    #     2026-08-19 は 09:10 に死んだので **どちらも一度も置かれなかった**
+    #     → 終日ノーガード＋持ち越し(実損 -36,800円)。
+    #   ★ MOC は **朝に出しても大引けで約定する**ので、先に置いてしまえば
+    #     watcher がいつ死んでも「その日のうちに閉じる」が保証される。
+    #   ⚠ 建玉拘束のため **板に置ける返済注文は1本だけ**。MOC を置く=
+    #     損切り逆指値は置けない。損切りは既存の①ポーリング成行(5秒間隔)が担う。
+    #     モデルは5分足の粒度なので、5秒ポーリングは劣化にならない。
+    #   ⛔ 既定OFF。kabu が 09:00 の MOC を受け付けるかは **未検証**なので、
+    #     まず小ロットの日に試すこと。
+    ap.add_argument("--moc-first", action="store_true",
+                    help="建玉を検知したらすぐ引け成行(MOC)を板に置く。"
+                         "損切りはポーリング成行になる(板の逆指値は置かない)。"
+                         "watcher が死んでも必ず引けで決済される")
     ap.add_argument("--stop-delay-bars", type=int, default=0,
                     help="損切り遅延(delay1)。約定した5分足の間は損切りを設置せず、次の5分グリッド"
                          "(09:05/09:10…)から損切りを有効にする。1=約定バーの次足から(寄り1本目の"
@@ -752,6 +768,17 @@ def main() -> int:
     print(f"モード: {mode_label} / 接続先: {env_label} / 損切(上)・利確(下) 先着で成行買戻し")
     _close_kind = "即時成行" if args.immediate else "引け成行(MOC)"
     print(f"引け決済({_close_kind})発注: {args.close_at} / ポーリング: {args.poll}秒 / 一致許容: ±{args.tol*100:.0f}%")
+    if args.moc_first:
+        print("★ MOC先置き(--moc-first): 建玉を検知したらすぐ引け成行を板に置きます。"
+              "\n   watcher が落ちても **必ずその日の引けで決済** されます。"
+              "\n   代わりに損切りは板の逆指値ではなく "
+              f"**{args.poll:.0f}秒ごとのポーリング成行**になります(建玉拘束のため両立不可)。")
+    else:
+        print("⚠ MOC先置きは OFF。板に乗るのは "
+              + (f"損切り逆指値({args.stop_delay_bars * 5}分後〜{args.close_at})"
+                 if args.stop_delay_bars > 0 else f"損切り逆指値(〜{args.close_at})")
+              + " だけで、\n   その前後は watcher が生きていることが前提です"
+              "(2026-08-19 はここで持ち越し)。→ --moc-first で塞げます")
     if args.stop_delay_bars > 0:
         print(f"損切り遅延(delay{args.stop_delay_bars}): 約定検知の5分足の間は損切り無効 → "
               f"次の5分グリッド({args.stop_delay_bars * 5}分後)から損切り有効(寄りヒゲ刈り回避)")
@@ -1098,6 +1125,20 @@ def _run(args, close_at, today) -> int:
                         else:
                             moc_fail[pk] = _mf + 1
                     continue
+                # ★★ MOC を先に板へ置く(--moc-first)。ここは after_close より前、
+                #    かつ現在値が取れなくても実行する(値に依存しない注文なので)。
+                #    ⛔ **失敗しても即時成行に切り替えない**。引け前に成行を出したら
+                #      その場で決済してしまう(15:24以降の切替は after_close 側だけ)。
+                if args.moc_first and pk not in moc_placed:
+                    if _close_moc(cli, sym, qty, hid):
+                        moc_placed.add(pk)
+                        print(f"  [引け予約] {sym} {p['name']} 売建{qty} "
+                              f"→ 引け成行(MOC)を板に置きました。"
+                              f"watcher が落ちても大引けで決済されます", flush=True)
+                    else:
+                        print(f"  [引け予約] {sym} {p['name']} MOCを置けません"
+                              f"(次の周で再試行)。⛔ 置けないまま watcher が"
+                              f"落ちると持ち越しになります", flush=True)
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
                     continue
@@ -1127,11 +1168,19 @@ def _run(args, close_at, today) -> int:
                         if _close_buy(cli, sym, qty, hid, "損切"):
                             close_cool[pk] = now.timestamp()
                             stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
+                            # ⛔ 成行決済は板の MOC を取り消して出す。部分約定で残玉が
+                            #   出たら **MOC を置き直す**(--moc-first)。置き直さないと
+                            #   残玉が引けに無防備になる。
+                            moc_placed.discard(pk)
                         continue
                     # ② 損切(上): 現在値 < 損切 のときだけ逆指値買いを建玉に置きっぱなし。
                     #    設置できれば板側で自動発火(遅延ゼロ)。失敗しても①のポーリング成行が担保する。
                     #    部分約定で取消された残玉は stop_placed から外れているので再設置される。
-                    if p["stop"] and pk not in stop_placed:
+                    # ⛔ --moc-first のときは板に MOC が乗っているので、逆指値を
+                    #   置こうとしても建玉拘束(4001005)で必ず失敗する。無駄な
+                    #   API 呼び出しとログを避けるためスキップし、損切りは
+                    #   上の①(ポーリング成行)に任せる。
+                    if p["stop"] and pk not in stop_placed and not args.moc_first:
                         stop_placed.add(pk)
                         _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
                         if _r in ("ok", "exists"):
@@ -1150,6 +1199,10 @@ def _run(args, close_at, today) -> int:
                     if _close_buy(cli, sym, qty, hid, "利確"):
                         close_cool[pk] = now.timestamp()
                         stop_placed.discard(pk)   # 部分約定の残玉は次サイクルで板逆指値を再設置
+                        # ⛔ 成行決済は板の MOC を取り消して出す。部分約定で残玉が
+                        #   出たら **MOC を置き直す**(--moc-first)。置き直さないと
+                        #   残玉が引けに無防備になる。
+                        moc_placed.discard(pk)
                 else:
                     _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
                     _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
