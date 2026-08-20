@@ -1132,13 +1132,23 @@ def _run(args, close_at, today) -> int:
                 if args.moc_first and pk not in moc_placed:
                     if _close_moc(cli, sym, qty, hid):
                         moc_placed.add(pk)
+                        moc_fail.pop(pk, None)
                         print(f"  [引け予約] {sym} {p['name']} 売建{qty} "
                               f"→ 引け成行(MOC)を板に置きました。"
                               f"watcher が落ちても大引けで決済されます", flush=True)
                     else:
-                        print(f"  [引け予約] {sym} {p['name']} MOCを置けません"
-                              f"(次の周で再試行)。⛔ 置けないまま watcher が"
-                              f"落ちると持ち越しになります", flush=True)
+                        # ⛔ 5秒ごとに全建玉ぶん出すとログが埋まり、**他の異常が
+                        #   見えなくなる**。最初の3回と、以降は5分に1回だけ出す。
+                        #   (回数は数え続けるので 15:24 以降の成行切替は正しく効く)
+                        _mf0 = moc_fail.get(pk, 0) + 1
+                        moc_fail[pk] = _mf0
+                        _iv = max(1, int(60 / max(1.0, args.poll)) * 5)
+                        if _mf0 <= 3 or _mf0 % _iv == 0:
+                            print(f"  ⛔ [引け予約] {sym} {p['name']} MOCを置けません"
+                                  f"({_mf0}回目 / 次の周で再試行)。"
+                                  f"このまま watcher が落ちると **持ち越し**に"
+                                  f"なります。kabu の注文照会を確認してください",
+                                  flush=True)
                 if cur is None or cur <= 0:
                     print(f"  [監視] {sym} {p['name']} 現在値取得不可 → 次回再試行")
                     continue
