@@ -432,12 +432,17 @@ print(f"""
 {'=' * 74}
 ▶▶ 終了。kabu の登録は解除済みです
 {'=' * 74}
-""" + (f"""  🚀 **J を実発注しました**（予算 {args.budget:g}万）。
-
-  ▶▶ **いますぐ これを起動してください**（起動しないと引けまで持ちっぱなし）:
+""" + ((f"""  （dry-run なので **1件も発注していません**。本番なら予算 {args.budget:g}万で
+    ここに発注結果が出ます）
+""" if args.dry_run else f"""  🚀 **J を実発注しました**（予算 {args.budget:g}万）。
+""") + f"""
+  ▶▶ **いますぐ これを起動してください**:
 
       python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars {args.stop_delay_bars} --entry-cutoff {args.entry_cutoff}
 
+    ★ 引け成行(MOC)は上の手順5が **終了前に板へ置いています**(2026-08-20)。
+      なので watcher が起動しなくても大引けで決済されます。ただし
+      **利確・損切りは watcher にしかありません**。必ず起動すること。
     ⛔ J は delay{args.stop_delay_bars}。バックテストとライブを必ず揃える(§18.9)。
     ⛔ 15:30(大引け)まで止めないこと。途中で切ると決済を取りこぼします(§18.4)。
 
