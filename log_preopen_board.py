@@ -619,13 +619,37 @@ def _snap_batch(_b: list[str]) -> list[dict]:
         print(f"  ⚠ 一括登録が 0件。**1件ずつ登録し直します**"
               f"(1銘柄でも不正なコードがあると50件まるごと 400 になるため)",
               flush=True)
-        _good, _bad = [], []
+        # ⛔⛔ **429 は『不正なコード』ではない**(2026-08-21 実測)。
+        #   母集団を1,540銘柄(31バッチ)に広げた初日、register を叩きすぎて
+        #   kabu のレート制限に入り、一括が 400 → 1件ずつ50連打 → **全部 429**。
+        #   旧コードはそれを全部 _SKIP_CODES に入れていたので、
+        #   **健全な50銘柄が丸ごと以後スキップ**になっていた。
+        #   さらに悪いことに、レート制限の最中に50回連打するのは
+        #   **制限を悪化させる**。同じトークンを使う 09:00 の発注(k_open_confirm)
+        #   まで巻き添えにするので、429 を見たらフォールバックを打ち切る。
+        _good, _bad, _rate = [], [], 0
         for _s1 in _b:
             try:
                 cli.register(_s1)
                 _good.append(_s1)
-            except Exception:
-                _bad.append(_s1)
+                _rate = 0
+            except Exception as _re1:
+                if "429" in str(_re1):
+                    _rate += 1
+                    if _rate >= 3:
+                        print(f"  ⛔ **レート制限(429)が続くのでフォールバックを"
+                              f"中止**します。残り {len(_b) - len(_good) - len(_bad)}"
+                              f"銘柄はスキップコードに入れません"
+                              f"(銘柄のせいではないため)。\n"
+                              f"     ⚠ register を叩きすぎています。母集団を"
+                              f"減らすか --every を延ばしてください。\n"
+                              f"     ⚠ 同じトークンを使う 09:00 の発注まで"
+                              f"巻き添えになります", flush=True)
+                        time.sleep(5.0)       # 少しだけ冷ます
+                        break
+                else:
+                    _rate = 0
+                    _bad.append(_s1)          # 本当に登録できないコードだけ
         _ok = len(_good)
         _b = _good
         if _bad:
