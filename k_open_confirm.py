@@ -216,7 +216,7 @@ _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          #   なのかは、板を残していないと**分けられない**。だから残す。
          "bid", "ask", "bid_qty", "ask_qty",
          "gap_bp",
-         "late", "pass_gap", "guard_ng", "lots_k", "yen_k",
+         "late", "pass_gap", "guard_ng", "stale_open", "lots_k", "yen_k",
          "atr", "stop_k", "target_k",
          # ★ 実発注したか(--execute)。dry-run では 0 のまま。
          "ordered", "order_limit"]
@@ -902,6 +902,21 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
     _pc = float(_bd.get("PreviousClose") or 0)
     _op = float(_bd.get("OpeningPrice") or 0)
     _ot = str(_bd.get("OpeningPriceTime") or "")
+    # ⛔⛔ **OpeningPriceTime の日付を必ず見る** (2026-08-20)。
+    #   /board は引け後も当日の OpeningPrice を返し続ける(:172)。つまり 09:00 に
+    #   まだ寄っていない銘柄は **前日の** OpeningPrice / OpeningPriceTime
+    #   ("2026-08-19T09:00:03+09:00") を返しうる。時刻だけ見ると "09:00" なので
+    #   遅寄りにならず、**前日の始値 vs 前日終値**(=前日の日中変動)で合格判定して
+    #   しまう。起動時の時間窓ガード(:170)はスクリプト単位なので、この
+    #   **銘柄単位**の取り違えは防げない。
+    #   日付が今日でない / そもそも取れない ものは『まだ寄っていない』とみなす。
+    #   建てないコストは0、誤って建てるコストは実損なので厳しい側に倒す。
+    _stale = 0
+    if _op > 0:
+        _md = re.search(r"(\d{4})-(\d{2})-(\d{2})", _ot)
+        if not _md or _md.group(0) != f"{_dt.date.today()}":
+            _stale = 1
+            _op = 0.0                      # 当日の始値ではない = 未取得と同じ
     # ★ 09:00 に寄ったか。OpeningPrice が無い or 時刻が 09:00 より後なら遅寄り。
     #   ⚠ --poll では遅寄りも **建てる**(グループを分けて配分する)ので、
     #      late は記録用のフラグでしかない。
@@ -930,6 +945,7 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "ask_qty": _bd.get("AskQty") or 0,
             "gap_bp": (round(_gap, 1) if _gap is not None else ""),
             "late": _late, "pass_gap": _pass, "guard_ng": _guard,
+            "stale_open": _stale,
             "lots_k": 0, "yen_k": 0,
             # ★ OCO は **実約定価格(=始値)** を基準に置く (§18.32)。
             #   ショートなので 損切りは上、利確は下。
@@ -1146,6 +1162,15 @@ print(f"""
   09:00に未寄  {_late_n:,}銘柄 ({_late_n / max(1, len(_rows)) * 100:.1f}%)
                ⚠ バックテストの実測は15.7%。大きく違うなら要調査
   グループ     {len(_groups)}回""")
+# ⛔ 前日の OpeningPrice を掴んだ銘柄。1〜2件なら「まだ寄っていないだけ」で正常。
+#   大半がこれなら kabu の書式が変わった等で **全件が黙ってスキップ**されている。
+_stale_n = sum(1 for r in _rows if r.get("stale_open"))
+if _stale_n:
+    print(f"  ⛔ 前日の始値 {_stale_n:,}銘柄 — OpeningPriceTime が今日でないので"
+          f"『未寄り』として除外しました")
+    if _stale_n > len(_rows) * 0.5:
+        print(f"     ⛔⛔ **過半数がこれ**。kabu の OpeningPriceTime の書式が"
+              f"変わった可能性。CSV の open_time 列を確認すること")
 for _gi, (_gt, _gs) in enumerate(_groups):
     print(f"    {_gi + 1}. {_gt}  {len(_gs)}銘柄")
 print(f"""
