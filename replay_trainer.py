@@ -1,12 +1,5 @@
 """replay_trainer.py — 手持ちの分足でデイトレを「手で」練習するリプレイツール。
 
-⚠⚠ 未完成 (WIP)。**まだ動きません。**
-    実装済み : データ解決 / pkl ローダー / 出題の組み立て / 約定判定 / 集計レポート (--report)
-    未実装   : ローカルHTTPサーバー / ブラウザUI / main() / argparse
-    2026-08-21、練習の優先順位が「過去足リプレイ」から「kabu API の板PUSH を使った
-    リアルタイム紙トレード」に変わったため、ここで中断している (DAYTRADE.md 参照)。
-    再開する場合は下の設計メモの通りサーバーを足すこと。
-
 コードに売買させない。あなたが1本ずつ足を送り、自分で建てて、自分で決済する。
 未来の足はサーバ側に留めてブラウザへ送らないので、覗き見はできない。
 
@@ -388,3 +381,333 @@ def report(days: int) -> None:
     for name, g in df.groupby("exit_reason"):
         print(block(str(name), g))
     print()
+
+
+# ────────────────────────────────────────────────────────────
+# ブラウザUI (ローカルHTTPサーバー)
+# ────────────────────────────────────────────────────────────
+
+HTML_PAGE = r"""<!doctype html>
+<meta charset="utf-8"><title>replay trainer</title>
+<style>
+ :root{--bg:#12151c;--fg:#e8ecf2;--dim:#8a93a3;--up:#26a69a;--dn:#ef5350;--line:#2a3040}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 -apple-system,"Segoe UI",sans-serif}
+ header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line)}
+ header b{font-size:15px}
+ .dim{color:var(--dim)}
+ canvas{display:block;width:100%;background:#0d1017}
+ #bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--line)}
+ button{background:#222836;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:7px 13px;font:inherit;cursor:pointer}
+ button:hover{background:#2c3446}
+ button.buy{background:#14524b;border-color:#1c6f65}
+ button.sell{background:#5c2422;border-color:#7d302d}
+ button.flat{background:#4a4326;border-color:#6b6136}
+ input,select{background:#1a1f2b;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:6px;font:inherit}
+ input[type=number]{width:62px}
+ #pos{padding:8px 12px;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+ #log{max-height:150px;overflow:auto;padding:6px 12px;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+ #log div{padding:1px 0}
+ .win{color:var(--up)} .loss{color:var(--dn)}
+ kbd{background:#222836;border:1px solid var(--line);border-radius:3px;padding:1px 5px;font-size:11px}
+</style>
+<header>
+  <b id="sym">-</b><span class="dim" id="meta"></span>
+  <span class="dim">|</span>
+  <label class="dim">損切 <input type="number" id="sm" value="1.5" step="0.1" min="0.1"></label>
+  <label class="dim">利確 <input type="number" id="tm" value="3.0" step="0.1" min="0.1"></label>
+  <span class="dim">×ATR</span>
+  <label class="dim">型 <select id="pattern">
+    <option>前日終値ブレイク</option><option>下ブレイク(lss型)</option><option>ORB</option>
+    <option>VWAP乖離</option><option>VWAP反発</option><option>前日高安ブレイク</option><option>その他</option>
+  </select></label>
+  <span class="dim" id="clock"></span>
+</header>
+<canvas id="cv" height="430"></canvas>
+<div id="bar">
+  <button id="next">次の足 <kbd>→</kbd></button>
+  <button id="run">連続 <kbd>R</kbd></button>
+  <button class="buy" id="buy">買い <kbd>B</kbd></button>
+  <button class="sell" id="sell">売り <kbd>S</kbd></button>
+  <button class="flat" id="flat">決済 <kbd>X</kbd></button>
+  <button id="again">次の出題 <kbd>N</kbd></button>
+  <span class="dim">未来の足はサーバ側にあり、覗けません</span>
+</div>
+<div id="pos" class="dim">ノーポジション</div>
+<div id="log"></div>
+<script>
+let M=null,B=[],pos=null,done=false,timer=null;
+const $=id=>document.getElementById(id);
+const f=n=>n==null?'-':n.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1});
+
+async function api(p,body){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(body||{})});return r.json();}
+
+async function load(){const d=await api('/api/new');M=d.meta;B=[];pos=null;done=false;
+  $('sym').textContent=M.symbol;
+  $('meta').textContent=`${M.trade_date}  ${M.interval}分足  前日終値 ${f(M.prev_close)}  前日高 ${f(M.prev_high)} / 安 ${f(M.prev_low)}`;
+  $('pos').textContent='ノーポジション';$('pos').className='dim';
+  for(let i=0;i<3;i++) await next();}
+
+async function next(){
+  if(done) return;
+  const d=await api('/api/next');
+  if(d.end){done=true;stopRun();$('clock').textContent='大引け。'+(pos?'':'次の出題へ');return;}
+  B.push(d.bar); $('clock').textContent=d.bar.t;
+  if(d.exit) closed(d.exit);
+  if(pos) updatePos(d.bar);
+  draw();
+}
+
+function updatePos(b){
+  const s=pos.side==='long'?1:-1, up=(b.c-pos.entry_px)*s*pos.qty;
+  $('pos').innerHTML=`<b>${pos.side==='long'?'買い':'売り'}</b> ${pos.qty}株 @${f(pos.entry_px)}　`+
+    `損切 ${f(pos.stop_px)}　利確 ${f(pos.target_px)}　`+
+    `<span class="${up>=0?'win':'loss'}">含み ${up>=0?'+':''}${Math.round(up).toLocaleString()}円</span>　${pos.pattern}`;
+  $('pos').className='';
+}
+
+async function enter(side){
+  if(pos||done) return;
+  const d=await api('/api/enter',{side,sm:+$('sm').value,tm:+$('tm').value,pattern:$('pattern').value});
+  if(d.error){alert(d.error);return;} pos=d.trade; updatePos(B[B.length-1]); draw();
+}
+
+async function flat(){ if(!pos) return; const d=await api('/api/exit'); if(d.exit) closed(d.exit); draw(); }
+
+function closed(t){
+  pos=null; $('pos').textContent='ノーポジション'; $('pos').className='dim';
+  const ok=confirm(`決済: ${t.exit_reason} ${f(t.exit_px)}  損益 ${Math.round(t.pnl).toLocaleString()}円 (${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R)\n\n`+
+    `決めたルール通りに実行できましたか？\n[OK]=はい  [キャンセル]=いいえ(損切りをずらした/根拠なく入った 等)`);
+  api('/api/annotate',{rule_ok:ok?'Y':'N'});
+  const e=document.createElement('div');
+  e.className=t.pnl>=0?'win':'loss';
+  e.textContent=`${t.entry_time}→${t.exit_time} ${t.side==='long'?'買':'売'} ${f(t.entry_px)}→${f(t.exit_px)} `+
+    `${t.exit_reason} ${Math.round(t.pnl).toLocaleString()}円 ${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R ${ok?'':'⚠ルール違反'}`;
+  $('log').prepend(e);
+}
+
+function startRun(){ if(timer)return; timer=setInterval(next,600); $('run').textContent='停止 R'; }
+function stopRun(){ if(timer)clearInterval(timer); timer=null; $('run').textContent='連続 R'; }
+
+function draw(){
+  const cv=$('cv'),ctx=cv.getContext('2d');
+  const w=cv.width=cv.clientWidth*devicePixelRatio, h=cv.height=430*devicePixelRatio;
+  ctx.scale(1,1); ctx.clearRect(0,0,w,h);
+  if(!B.length) return;
+  const padL=8*devicePixelRatio,padR=66*devicePixelRatio,padT=8*devicePixelRatio;
+  const volH=h*0.18, ch=h-padT-volH-8*devicePixelRatio;
+  // 開示済みバーだけでスケール(未来を漏らさない)
+  let lo=Math.min(...B.map(b=>b.l),M.prev_close), hi=Math.max(...B.map(b=>b.h),M.prev_close);
+  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+  const n=Math.max(B.length,30), bw=(w-padL-padR)/n;
+  const Y=p=>padT+(hi-p)/(hi-lo)*ch;
+  const line=(p,col,dash)=>{ctx.save();ctx.strokeStyle=col;ctx.setLineDash(dash||[]);ctx.lineWidth=devicePixelRatio;
+    ctx.beginPath();ctx.moveTo(padL,Y(p));ctx.lineTo(w-padR,Y(p));ctx.stroke();
+    ctx.fillStyle=col;ctx.font=`${11*devicePixelRatio}px sans-serif`;ctx.fillText(f(p),w-padR+4*devicePixelRatio,Y(p)+4*devicePixelRatio);ctx.restore();};
+  line(M.prev_close,'#7a8399',[4,4]);
+  const vmax=Math.max(...B.map(b=>b.v))||1;
+  B.forEach((b,i)=>{
+    const x=padL+i*bw+bw/2, up=b.c>=b.o;
+    ctx.strokeStyle=ctx.fillStyle=up?'#26a69a':'#ef5350';
+    ctx.lineWidth=devicePixelRatio;
+    ctx.beginPath();ctx.moveTo(x,Y(b.h));ctx.lineTo(x,Y(b.l));ctx.stroke();
+    const y1=Y(Math.max(b.o,b.c)),y2=Y(Math.min(b.o,b.c));
+    ctx.fillRect(x-bw*0.32,y1,Math.max(bw*0.64,1),Math.max(y2-y1,devicePixelRatio));
+    ctx.globalAlpha=.45;ctx.fillRect(x-bw*0.32,h-b.v/vmax*volH,Math.max(bw*0.64,1),b.v/vmax*volH);ctx.globalAlpha=1;
+  });
+  ctx.strokeStyle='#c9a227';ctx.lineWidth=devicePixelRatio;ctx.beginPath();
+  B.forEach((b,i)=>{const x=padL+i*bw+bw/2;i?ctx.lineTo(x,Y(b.vwap)):ctx.moveTo(x,Y(b.vwap));});ctx.stroke();
+  if(pos){line(pos.stop_px,'#ef5350',[2,3]);line(pos.target_px,'#26a69a',[2,3]);line(pos.entry_px,'#e8ecf2',[1,4]);}
+}
+
+$('next').onclick=()=>next(); $('buy').onclick=()=>enter('long'); $('sell').onclick=()=>enter('short');
+$('flat').onclick=flat; $('again').onclick=()=>{stopRun();load();};
+$('run').onclick=()=>timer?stopRun():startRun();
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();
+  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+  if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();next();}
+  else if(k==='b')enter('long'); else if(k==='s')enter('short');
+  else if(k==='x')flat(); else if(k==='n'){stopRun();load();} else if(k==='r')timer?stopRun():startRun();});
+addEventListener('resize',draw);
+load();
+</script>
+"""
+
+
+class TrainerState:
+    def __init__(self, args):
+        self.args = args
+        self.q: Question | None = None
+        self.pos: dict | None = None
+        self.last: dict | None = None      # 直近に決済したトレード (annotate 用)
+        self.lock = threading.Lock()
+
+    def new_question(self) -> dict:
+        self.q = build_question(self.args.symbol, self.args.interval,
+                                self.args.date, self.args.days, self.args.demo)
+        self.pos = None
+        self.last = None
+        return {"meta": self.q.meta()}
+
+    # ── 1本進める。開示直後に保有中ポジションの損切/利確/タイムカットを判定 ──
+    def step(self) -> dict:
+        bar = self.q.reveal()
+        if bar is None:
+            if self.pos:                                   # データ終端は終値で強制決済
+                return {"end": True, "exit": self._close(self.q.n - 1,
+                                                         float(self.q.bar(self.q.n - 1)["close"]), "timecut")}
+            return {"end": True}
+        out = {"bar": bar}
+        if self.pos:
+            i = bar["i"]
+            hit = check_exit(self.pos["side"], self.q.bar(i),
+                             self.pos["stop_px"], self.pos["target_px"])
+            if hit:
+                out["exit"] = self._close(i, hit[0], hit[1])
+            elif bar["past_end"]:
+                out["exit"] = self._close(i, float(self.q.bar(i)["close"]), "timecut")
+        return out
+
+    def enter(self, side: str, sm: float, tm: float, pattern: str) -> dict:
+        if self.pos:
+            return {"error": "すでに建玉があります"}
+        i = self.q.i
+        if i < 0:
+            return {"error": "まだ足が出ていません"}
+        px = float(self.q.bar(i)["close"])
+        atr = float(self.q.atr.iloc[i]) or px * 0.003
+        sgn = 1 if side == "long" else -1
+        self.pos = {
+            "side": side, "qty": self.args.qty, "pattern": pattern,
+            "entry_i": i, "entry_time": self.q.time_at(i), "entry_px": round(px, 2),
+            "stop_px": round(px - sgn * atr * sm, 2),
+            "target_px": round(px + sgn * atr * tm, 2),
+            "atr": round(atr, 2),
+        }
+        return {"trade": self.pos}
+
+    def manual_exit(self) -> dict:
+        if not self.pos:
+            return {}
+        i = self.q.i
+        return {"exit": self._close(i, float(self.q.bar(i)["close"]), "manual")}
+
+    def _close(self, i: int, px: float, reason: str) -> dict:
+        p = self.pos
+        sgn = 1 if p["side"] == "long" else -1
+        pnl = (px - p["entry_px"]) * sgn * p["qty"]
+        risk = abs(p["entry_px"] - p["stop_px"]) * p["qty"]
+        t = {
+            "practiced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": self.q.symbol, "trade_date": str(self.q.trade_date),
+            "interval": self.q.interval, "side": p["side"],
+            "entry_time": p["entry_time"], "entry_px": p["entry_px"],
+            "stop_px": p["stop_px"], "target_px": p["target_px"],
+            "exit_time": self.q.time_at(i), "exit_px": round(px, 2),
+            "exit_reason": reason, "qty": p["qty"], "pnl": round(pnl, 1),
+            "r_multiple": round(pnl / risk, 3) if risk > 0 else 0.0,
+            "atr_at_entry": p["atr"], "bars_held": i - p["entry_i"],
+            "pattern": p["pattern"], "rule_ok": "", "note": "",
+        }
+        self.pos = None
+        self.last = t
+        return t
+
+    def annotate(self, rule_ok: str) -> dict:
+        if self.last is None:
+            return {}
+        self.last["rule_ok"] = "Y" if str(rule_ok).upper().startswith("Y") else "N"
+        append_log(self.last)
+        self.last = None
+        return {"saved": True}
+
+
+def serve(args) -> None:
+    state = TrainerState(args)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):            # アクセスログは黙らせる
+            pass
+
+        def _send(self, obj):
+            body = json.dumps(obj, ensure_ascii=False, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path != "/":
+                self.send_error(404)
+                return
+            body = HTML_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                data = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                data = {}
+            with state.lock:
+                try:
+                    if self.path == "/api/new":
+                        self._send(state.new_question())
+                    elif self.path == "/api/next":
+                        self._send(state.step())
+                    elif self.path == "/api/enter":
+                        self._send(state.enter(data.get("side", "long"),
+                                               float(data.get("sm", 1.5)),
+                                               float(data.get("tm", 3.0)),
+                                               str(data.get("pattern", ""))))
+                    elif self.path == "/api/exit":
+                        self._send(state.manual_exit())
+                    elif self.path == "/api/annotate":
+                        self._send(state.annotate(data.get("rule_ok", "N")))
+                    else:
+                        self.send_error(404)
+                except Exception as e:            # ブラウザを固まらせない
+                    self._send({"error": f"{type(e).__name__}: {e}"})
+
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("127.0.0.1", args.port), Handler) as srv:
+        url = f"http://127.0.0.1:{args.port}/"
+        print(f"リプレイ練習を開始します: {url}")
+        print("  →/Space=次の足  B=買い  S=売り  X=決済  N=次の出題  R=連続再生")
+        print(f"  記録先: {LOG_PATH}")
+        print("  Ctrl+C で終了")
+        if not args.no_browser:
+            threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            print("\n終了しました。`python replay_trainer.py --report` で集計できます。")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="手持ちの分足でデイトレを手で練習するリプレイツール")
+    ap.add_argument("--symbol", help="銘柄 (例 7203.T)。省略でランダム")
+    ap.add_argument("--date", help="日付 YYYY-MM-DD。省略でランダム")
+    ap.add_argument("--interval", type=int, default=5, choices=[1, 5], help="足種 (既定5分足)")
+    ap.add_argument("--days", type=int, default=0, help="直近N営業日から出題 (0=全期間)")
+    ap.add_argument("--qty", type=int, default=DEFAULT_QTY, help="株数 (既定100)")
+    ap.add_argument("--port", type=int, default=8777)
+    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--demo", action="store_true", help="データが無い環境でも動く合成足")
+    ap.add_argument("--report", action="store_true", help="練習ログを集計して表示")
+    args = ap.parse_args()
+
+    if args.report:
+        report(args.days)
+        return
+    serve(args)
+
+
+if __name__ == "__main__":
+    main()
