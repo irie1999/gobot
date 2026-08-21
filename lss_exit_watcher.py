@@ -1102,6 +1102,8 @@ def _run(args, close_at, today) -> int:
         if shorts and before_open:
             print(f"  {now:%H:%M:%S} 寄り前(9:00前): lss売建 {len(shorts)}件を待機中(発火なし)")
         elif shorts:
+            _upnl_tot = 0.0        # この周の含み損益の合計(監視中の建玉ぶん)
+            _upnl_n = 0
             for p in shorts:
                 sym, qty, hid = p["sym"], p["qty"], p["hold_id"]
                 pk = p["pkey"]   # 建玉単位の管理キー(HoldID優先)
@@ -1261,7 +1263,26 @@ def _run(args, close_at, today) -> int:
                 else:
                     _st = f"損切{p['stop']:,.0f}" if p['stop'] else "損切-"
                     _tg = f"利確{p['target']:,.0f}" if p['target'] else "利確-"
-                    print(f"  [監視] {sym} {p['name']} 現在{_curs} ({_st} / {_tg})")
+                    # ★ 含み損益を出す (2026-08-21 ユーザー要望)。
+                    #   ショートなので (実約定 − 現在値) × 株数。avg は建玉の実約定
+                    #   平均単価(_lss_shorts が kabu から取る)。取れない銘柄は '—'。
+                    _avg = float(p.get("avg", 0) or 0)
+                    if _avg > 0 and cur > 0:
+                        _upl = (_avg - cur) * qty
+                        _upnl_tot += _upl
+                        _upnl_n += 1
+                        _upl_s = (f" 含み{_upl:+,.0f}円"
+                                  f"({(_avg - cur) / _avg * 100:+.2f}%)")
+                    else:
+                        _upl_s = " 含み—"
+                    print(f"  [監視] {sym} {p['name']} 現在{_curs} "
+                          f"({_st} / {_tg}){_upl_s}")
+            # ★ 1周の締めに合計。銘柄別だけだと足し算を目でやることになる。
+            #   ⛔ **決済済みの実現損益は含まない**(建玉が消えているので watcher は
+            #     見えない)。当日の確定額は引け後の `.\fills` で出す。
+            if _upnl_n:
+                print(f"  ── 含み損益 合計 {_upnl_tot:+,.0f}円 "
+                      f"(監視中 {_upnl_n}件 / 決済済みは含まず)")
         elif _poserr:
             # ⛔ 「無い」ではなく「**見えていない**」。決済が一切できない状態なので、
             #   『対象なし』と同じ顔をさせない(2026-08-19)。
