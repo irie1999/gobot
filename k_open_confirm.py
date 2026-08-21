@@ -125,7 +125,19 @@ ap.add_argument("--margin-type", type=int, default=3,
                      "⛔ 制度(1)は空売りが貸借銘柄限定なので、非貸借銘柄も売る "
                      "J では 3 でないと MarginTradeType 不正で弾かれる")
 ap.add_argument("--budget", type=float, default=400.0, help="予算(万円)")
-ap.add_argument("--max-yen", type=float, default=50.0, help="1銘柄の上限(万円)")
+# ★★ 1銘柄の金額上限 = **予算の50%** (2026-08-21 ユーザー承認)。
+#   旧既定は 50万 固定(2026-08-15)。予算400万での比較で
+#     上限50万  月平均/σ 2.76 (σ 165,068)
+#     上限200万 月平均/σ 4.23 (σ 132,749)  ← 予算の50%
+#     上限なし  月平均/σ 4.23 (σ 139,780)  ← 1銘柄に予算の99%が入りうる
+#   上限なしと 200万 はリスク調整後で同値(差は月2.9万=0.2σ)。集中度が半分の
+#   200万を採る。**比率で持つ**ので予算を変えても勝手にズレない(300万→150万)。
+#   ⚠ 効くのは『合格が少ない日』だけ。7〜8件の日は 予算÷件数 が上限に届かない。
+#   ⛔ §18.9 の鉄則: レポート側(LSS_EQ_MAX_YEN)と必ず揃えること。
+ap.add_argument("--max-yen", type=float, default=0.0,
+                help="1銘柄の上限(万円)。**0=予算の --max-yen-pct%%**(既定)")
+ap.add_argument("--max-yen-pct", type=float, default=50.0,
+                help="--max-yen が0のとき、予算の何%%を1銘柄の上限にするか")
 ap.add_argument("--max-lot", type=int, default=10, help="1銘柄の最大単元")
 ap.add_argument("--watch-j", type=int, default=50, help="J が09:00に読める件数")
 ap.add_argument("--open-at", type=str, default="09:00")
@@ -185,6 +197,16 @@ ap.add_argument("--no-moc-on-exit", action="store_true",
                 help="⛔ 終了前に引け成行(MOC)を置かない。"
                      "置かないと watcher が起動するまで板が空になる")
 args = ap.parse_args()
+
+# ★ 1銘柄の上限を **比率**から解決する (2026-08-21)。
+#   0 = 予算 × --max-yen-pct%。明示した値があればそれを使う。
+#   ⛔ ここで args.max_yen を確定させるので、下流(_size_groups / 表示 / 検算)は
+#     従来どおり args.max_yen を読むだけでよい。分散させない。
+if args.max_yen <= 0 and args.max_yen_pct > 0:
+    args.max_yen = round(args.budget * args.max_yen_pct / 100.0, 1)
+    print(f"[上限] 1銘柄の上限を **予算{args.budget:g}万 × "
+          f"{args.max_yen_pct:g}% = {args.max_yen:g}万** にしました"
+          f"(--max-yen で固定値を明示できます)", flush=True)
 
 # ── 実発注は 09:00 前後の窓の中だけ ───────────────────────────────────
 #   窓 = [--open-at の20分前, --poll-until の20分後]。外なら **起動時に落とす**
