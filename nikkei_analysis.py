@@ -12974,9 +12974,28 @@ function switchTbd(id, tab) {{
                 #   → もっときつくしたくなったら 60万が下限。掃くなら
                 #      set LSS_EQ_MAX_YENS=0,60,75,150,200
                 #   (2026-08-15: 上限は100万で確定。これ以上は掘らない)
-                for _eqy in [float(x) for x in str(os.environ.get(
-                        "LSS_EQ_MAX_YENS", "0,150,200")).split(",")
-                        if str(x).strip().replace(".", "").isdigit()]:
+                # ★★ 上限は **予算に対する比率**で掃く (2026-08-21)。
+                #   上限自体が予算の50%(比率)になったので、絶対額で掃くと
+                #   予算を変えた瞬間に意味がずれる(予算600万で「上限150万」は
+                #   25%だが、400万なら37.5%)。
+                #   ⛔ **下側(25%以下)を一度も掃いていなかった**。50%という
+                #     水準に根拠が無い状態だったので、0/12.5/25/37.5/75 を足す。
+                #   ★ 上限が効くのは『合格が1件(または全部同じ銘柄)の日』だけ
+                #     (18日/192日 = 9.4%)。普通の日は1銘柄 予算の7.7%なので、
+                #     上限50%は **薄い日だけ6.5倍張る**ルールになっている。
+                #     §18.13 で「薄い日ほど期待値が良い事実は無い」と確定済み。
+                #   判定は **資本効率**で(月平均/σ では上限を比べられない)。
+                _eq_yens_env = str(os.environ.get("LSS_EQ_MAX_YENS", "")).strip()
+                if _eq_yens_env:          # 絶対額を明示したときはそれを使う
+                    _eq_cap_list = [float(x) for x in _eq_yens_env.split(",")
+                                    if str(x).strip().replace(".", "").isdigit()]
+                else:
+                    _eq_cap_list = [
+                        (_EQ_BUD * float(_p) / 100.0 / 1e4) if float(_p) > 0 else 0.0
+                        for _p in str(os.environ.get(
+                            "LSS_EQ_MAX_PCTS", "0,12.5,25,37.5,75")).split(",")
+                        if str(_p).strip().replace(".", "").isdigit()]
+                for _eqy in _eq_cap_list:
                     if _eqy * 1e4 == _EQ_MAX_YEN:
                         continue          # 既定と同じ = 基準そのもの
                     _eq_modes.append((0, False, False,
@@ -20792,6 +20811,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 # ★ 変種キーが最重要の識別子。方式(指値/確認)・delay・sm/tm・
                 #   上限・watch が全部ここに入っている。
                 f'<br>変種 <b style="color:#e2e8f0">{_srck}</b>'
+                # ⛔ **予算を必ず出す** (2026-08-21)。LSS_BUDGET_MAN は既定400万で、
+                #   .bat が何も設定していなかったため、ライブ300万との食い違いに
+                #   丸一日気づかなかった。見えない既定値は必ず事故になる。
+                f'<br>予算 <b style="color:#fbbf24">'
+                f'{float(os.environ.get("LSS_BUDGET_MAN", "400") or 400):g}万</b>'
+                f'<span style="color:#64748b"> ← <code>.\\jorder --budget</code> と'
+                f'揃っているか確認（§18.9）</span>'
                 f'<br>母集団(土台) <b style="color:#e2e8f0">'
                 f'{_cond.get("pool", "?")}</b>'
                 f' ／ 選定 <b style="color:#e2e8f0">{_cond.get("sel", "?")}</b>'

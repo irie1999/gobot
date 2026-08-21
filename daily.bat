@@ -107,6 +107,12 @@ REM     Today's SIGNAL list is unaffected - only how past results are scored.
 REM     Costs one extra backtest per pair (window+400d), so the PnL tab is ~2x slower.
 REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
+REM --- BUDGET: must match `.\jorder --budget`. There is no auto-link between
+REM     the report and the live script, so an unset value silently defaults to
+REM     400 while the live side runs something else (that happened 2026-08-21).
+REM     The 1-name cap follows this as a ratio (LSS_EQ_MAX_PCT, default 50%),
+REM     so raising the budget raises the cap too - that is intended.
+if not defined LSS_BUDGET_MAN set "LSS_BUDGET_MAN=300"
 REM --- dump every settled trade so .\fills can reconcile real fills against the test.
 REM     Cheap (one CSV write). Without it .\fills skips its section 3 and the daily
 REM     divergence (real vs test) never accumulates - that number decides whether the
