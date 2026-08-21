@@ -11694,15 +11694,6 @@ function switchTbd(id, tab) {{
     # 元になる変種名(資金均等・上位N を剥がしたもの)。上位N版をどの閾値に
     # 付けるかの判定に使う。
     _EQ_TAB_BASE = _EQ_TAB_KEY.split("資金均等")[0]
-    # ⛔⛔ **推奨設定(タブ2)にも 充填/上位N を付ける** (2026-08-21)。
-    #   これまで 充填・上位N は _EQ_TAB_BASE(= LSS_EQ_TAB_KEY = 素の
-    #   `H寄り確認+50bp`)にしか付いておらず、**実際に運用している推奨設定
-    #   (d4sm0.5)では一度も測られていなかった**。
-    #   ユーザーの「余りを配れないのか」に答えるには、推奨設定の上での
-    #   『素 vs 充填』が要る(別の土台の数字で判断すると §18.24 違反)。
-    _EQ_TAB_BASE2 = str(os.environ.get(
-        "LSS_EQ_TAB_KEY2",
-        "")).split("資金均等")[0].strip()
     _EQ_TAB_GAP = "".join(
         _c for _c in _EQ_TAB_BASE.split("bp")[0][-5:] if _c.isdigit()) or "50"
     _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
@@ -11803,6 +11794,13 @@ function switchTbd(id, tab) {{
         "LSS_EQ_TAB_KEY2",
         _eq_pref_of(50) + "d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
+    # ⛔⛔ **推奨設定(タブ2)にも 充填/上位N を付ける** (2026-08-21)。
+    #   充填・上位N は _EQ_TAB_BASE(= LSS_EQ_TAB_KEY = 素の `H寄り確認+50bp`)
+    #   にしか付いておらず、**実運用している推奨設定(d4sm0.5)では一度も
+    #   測られていなかった**。別土台の数字で採否を決めるのは §18.24 違反。
+    #   ⛔ **必ず _EQ_TAB_KEY2 の後に置くこと**。前に置いて既定値を "" に
+    #     したせいで初回の修正が丸ごと効かなかった(2026-08-21)。
+    _EQ_TAB_BASE2 = _EQ_TAB_KEY2.split("資金均等")[0].strip()
     # ★★ J/L/K タブの中身 (2026-08-16 ユーザー依頼)。
     #   J = 実装版  (選定あり + watch50)     ← いま kabu だけで作れる形
     #   L = 中間版  (選定なし + watch50)     ← 提案ファイルを差し替えるだけ = タダ
@@ -13128,8 +13126,10 @@ function switchTbd(id, tab) {{
                      + (f"(合格{_EQ_CAP_N}件以下の日だけ)" if _EQ_CAP_N > 0
                         else "(常時)")
                      if _EQ_MAX_YEN > 0 else "")
-                  + f")。うち上位N絞り {len(_EQ_TOPS)}本 (N={_EQ_TOPS} / "
-                  f"対象 {_EQ_TAB_BASE})。"
+                  + f")。うち上位N絞り {len(_EQ_TOPS)}本×"
+                  f"{len({_EQ_TAB_BASE, _EQ_TAB_BASE2} - {''})}土台 "
+                  f"(N={_EQ_TOPS} / 対象 "
+                  f"{' + '.join(sorted({_EQ_TAB_BASE, _EQ_TAB_BASE2} - {''}))})。"
                   f"\n      ⛔ 分母: `H指値…寄指`(前夜に寄付指値)は **候補数**"
                   f"(約定+不約定)で割る。株数を前夜に決めるしかないので"
                   f"約定数で割るのは先読み。`H寄り確認`(09:00に見てから発注)"
