@@ -428,6 +428,22 @@ def _pool_keep(_ts, _pool):
     return _out
 
 
+# ★★ 推奨のギャップ閾値 (2026-08-22: +50 → **+75bp**)。
+#   予算400万/300万の **両方** で 月平均÷σ の頂点。7点(0/25/50/75/100/125/150)
+#   の単峰で、+125/+150 では σ が +23〜48% に増えて崩れる。
+#     400万: 4.23(+50) → 5.04(+75) → 4.38(+100)   σ −4%
+#     300万: 3.84(+50) → 5.22(+75) → 4.76(+100)   σ −19%
+#   ★ **σ が下がるのは +75 だけ**。他の候補(充填/上位N/損切ATR緩和)は
+#     全部 σ が増える = 同じエッジへの重ね張りだった。+75 は取引を21%減らして
+#     質を上げる形。固定 +75 は walk-forward の総額(+6,060,521)をも上回る
+#     (+6,418,420) = 毎月選び直す価値が無い。
+#   ⚠ 1銘柄の集中は 95%点 23%→35% に上がるが、**最大は 50%(上限)のまま**。
+#     上がるのは日常の水準で、テールは変わらない。
+#   ⛔ ライブ(k_open_confirm --gap-bp)と必ず揃えること(§18.9)。
+#   戻すなら set LSS_EQ_GAP_BP=50
+_EQ_GAP_BP = float(os.environ.get("LSS_EQ_GAP_BP", "75") or 75)
+
+
 def _eq_pref_of(_g, _conf=None, _slow=False) -> str:
     """ギャップ閾値から資金均等の変種名の頭を作る(方式で形が違う)。
 
@@ -11237,7 +11253,7 @@ function switchTbd(id, tab) {{
             _eqg0 = 50.0
             try:
                 _eqg0, _, _ = _eq_parse(os.environ.get(
-                    "LSS_EQ_TAB_KEY", _eq_pref(50) + "資金均等"))
+                    "LSS_EQ_TAB_KEY", _eq_pref(_EQ_GAP_BP) + "資金均等"))
                 # タブ2(既定 = 確定した推奨設定 d4)。空文字で無効化できる。
                 # ⛔ この関数の body 直下では **汎用的な短い名前を使わない**。
                 #    _dd(defaultdict)をループ変数で潰して損益タブが丸ごと落ちた
@@ -11245,7 +11261,7 @@ function switchTbd(id, tab) {{
                 _eqsm2 = _eqtm2 = None
                 _eqk2 = str(os.environ.get(
                     "LSS_EQ_TAB_KEY2",
-                    _eq_pref(50) + "d4sm0.5資金均等")).strip()
+                    _eq_pref(_EQ_GAP_BP) + "d4sm0.5資金均等")).strip()
                 if _eqk2:
                     _eqg2, _eqd2, _eqb2 = _eq_parse(_eqk2)
                     # ⛔ 推奨キーが sm/tm を含むとき、ここで**上書き値を渡さない**と
@@ -11420,7 +11436,7 @@ function switchTbd(id, tab) {{
                 try:
                     _eqg4, _eqd4, _eqb4 = _eq_parse(os.environ.get(
                         "LSS_EQ_TAB_KEY2",
-                        _eq_pref_of(50) + "d4sm0.5資金均等"))
+                        _eq_pref_of(_EQ_GAP_BP) + "d4sm0.5資金均等"))
                     import re as _re_b4
                     _eqb4 = _re_b4.sub(r"(sm[\d.]+|tm[\d.]+|損切なし)", "", _eqb4)
                 except Exception:
@@ -11699,7 +11715,7 @@ function switchTbd(id, tab) {{
     #   差し替えられる(閾値/上位N絞りを変えて比べたいとき)。
     #   例: set LSS_EQ_TAB_KEY=H指値+50bp寄指資金均等上位5
     _EQ_TAB_KEY = str(os.environ.get(
-        "LSS_EQ_TAB_KEY", _eq_pref_of(50) + "資金均等")).strip()
+        "LSS_EQ_TAB_KEY", _eq_pref_of(_EQ_GAP_BP) + "資金均等")).strip()
     # 元になる変種名(資金均等・上位N を剥がしたもの)。上位N版をどの閾値に
     # 付けるかの判定に使う。
     _EQ_TAB_BASE = _EQ_TAB_KEY.split("資金均等")[0]
@@ -11801,7 +11817,7 @@ function switchTbd(id, tab) {{
     #   set LSS_EQ_TAB_KEY2=H指値+50bp寄指d4資金均等
     _EQ_TAB_KEY2 = str(os.environ.get(
         "LSS_EQ_TAB_KEY2",
-        _eq_pref_of(50) + "d4sm0.5資金均等")).strip()
+        _eq_pref_of(_EQ_GAP_BP) + "d4sm0.5資金均等")).strip()
     _EQ_TAB_LBL2 = _eq_lbl_of(_EQ_TAB_KEY2) if _EQ_TAB_KEY2 else ""
     # ⛔⛔ **推奨設定(タブ2)にも 充填/上位N を付ける** (2026-08-21)。
     #   充填・上位N は _EQ_TAB_BASE(= LSS_EQ_TAB_KEY = 素の `H寄り確認+50bp`)

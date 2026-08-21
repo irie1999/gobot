@@ -104,7 +104,17 @@ ap.add_argument("--max-symbols", type=int, default=0,
 ap.add_argument("--batch", type=int, default=50, help="1バッチ(kabu の登録上限)")
 ap.add_argument("--workers", type=int, default=2,
                 help="⛔ 上げても速くならず429が増えるだけ(実測)")
-ap.add_argument("--gap-bp", type=float, default=50.0, help="合格とするギャップ(bp)")
+# ★★ 合格とするギャップ (2026-08-22: +50 → **+75bp**)。
+#   レポートの監査ボードで、予算400万/300万の **両方** で 月平均÷σ の頂点。
+#   7点(0/25/50/75/100/125/150)の単峰で +125/+150 は σ が増えて崩れる。
+#     400万: 4.23(+50) → 5.04(+75) → 4.38(+100)   σ −4%
+#     300万: 3.84(+50) → 5.22(+75) → 4.76(+100)   σ −19%
+#   ★ **σ が下がるのは +75 だけ**。取引を21%減らして質を上げる形。
+#   ⚠ 1日の建玉は 約7件 → 約5.5件 に減る。1銘柄の集中(95%点)は 23%→35%
+#     に上がるが、**最大は上限50%のまま**(テールは変わらない)。
+#   ⛔ レポート(LSS_EQ_GAP_BP)と必ず揃えること(§18.9)。戻すなら --gap-bp 50
+ap.add_argument("--gap-bp", type=float, default=75.0,
+                help="合格とするギャップ(bp)。既定75 (2026-08-22 に 50 から変更)")
 ap.add_argument("--guard-bp", type=float, default=300.0,
                 # ⛔ argparse の help は % 書式として展開される。Python 3.14 は
                 #    add_argument の時点で検証するので、生の % があると
