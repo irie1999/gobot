@@ -18912,6 +18912,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                     if _v3 == "指値" else
                                     "09:00確認(枠制約なし/板読み必要)"
                                     if _v3 == "確認" else str(_v3))
+                        if _f == "xhm":
+                            # 決済の締切。引け成行はクロージング・オークション
+                            # (終値ちょうど)、締切決済はその5分足の終値。
+                            return ("引け成行(15:30の終値)" if _v3 == "引け"
+                                    else f"{_v3} に成行で手仕舞う")
+                        # ⛔ **文字列のつまみを :g に通さない**(2026-08-21)。
+                        #   xhm("15:20") を足したとき ValueError で
+                        #   『設定監査ボードと H の設定比較が丸ごと出ない』に
+                        #   なった。以後 文字列つまみを足しても落ちないようにする。
+                        if not isinstance(_v3, (int, float)) or isinstance(_v3, bool):
+                            return str(_v3)
                         return f"{_v3:g}"
                     # ⛔ つまみを足したのに _LBLN へ入れ忘れると KeyError で
                     #    **監査ボードが丸ごと落ちる**(2026-08-16 に watch で発生)。
@@ -20877,8 +20888,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             + (('<p style="color:#f59e0b;font-size:0.76rem;margin:0 0 10px">'
                 '🎯 <b>H の設定比較は この実行では作っていません</b>'
                 '（LSS_H_VARIANT_TAB=0）。決済の締切・損切ATR・利確ATR・'
-                'ATR期間・遅延の比較を見るには <code>.\hvar</code> で流し直して'
-                'ください（<code>.\dailyfast</code> / <code>.\daily</code> では'
+                'ATR期間・遅延の比較を見るには <code>.\\hvar</code> で流し直して'
+                'ください（<code>.\\dailyfast</code> / <code>.\\daily</code> では'
                 '既定OFF）。</p>')
                if (("eh" + _ehk) == _DEF_TAB
                    and str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip()
