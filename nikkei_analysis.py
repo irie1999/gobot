@@ -11498,7 +11498,7 @@ function switchTbd(id, tab) {{
                 print("[E/H] H設定スイープ: スキップ (LSS_H_VARIANT_TAB=0)。"
                       "10通りの設定を5分足から作り直すのが損益タブ最大の負荷で、"
                       "18.36 で『設定は変えない』と決まっているので日次では不要。"
-                      "測り直すときは set LSS_H_VARIANT_TAB=1", flush=True)
+                      "測り直すときは **.\\hvar** で流し直してください(set LSS_H_VARIANT_TAB=1 でも可)", flush=True)
             else:
                 for _vt, _va in ((0, False), (-5, False),
                                  (0, True), (-2, True), (-5, True), (-10, True)):
@@ -20871,6 +20871,18 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                f'⚖ 注文方式の比較・🎯 H の設定比較は、既定で開くタブ'
                f'（{_EH_LBL.get(_DEF_TAB[2:], ("",))[0] or _DEF_TAB}）にまとめて'
                f'置いています。HTML を軽くするためです。</p>')
+            # ⛔ ブロックが **無い理由** を画面に出す (2026-08-21)。
+            #   `.\dailyfast` は LSS_H_VARIANT_TAB=0 なので設定比較を作らない。
+            #   何も書かないと「どこ？」と探すことになる(実際そうなった)。
+            + (('<p style="color:#f59e0b;font-size:0.76rem;margin:0 0 10px">'
+                '🎯 <b>H の設定比較は この実行では作っていません</b>'
+                '（LSS_H_VARIANT_TAB=0）。決済の締切・損切ATR・利確ATR・'
+                'ATR期間・遅延の比較を見るには <code>.\hvar</code> で流し直して'
+                'ください（<code>.\dailyfast</code> / <code>.\daily</code> では'
+                '既定OFF）。</p>')
+               if (("eh" + _ehk) == _DEF_TAB
+                   and str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip()
+                   in ("0", "false", "no")) else '')
             + _dup_toggle_html(_ss, _g[0], _g[1], _dseq, _ehpfx)
             + '</div>')
 
