@@ -11694,6 +11694,15 @@ function switchTbd(id, tab) {{
     # 元になる変種名(資金均等・上位N を剥がしたもの)。上位N版をどの閾値に
     # 付けるかの判定に使う。
     _EQ_TAB_BASE = _EQ_TAB_KEY.split("資金均等")[0]
+    # ⛔⛔ **推奨設定(タブ2)にも 充填/上位N を付ける** (2026-08-21)。
+    #   これまで 充填・上位N は _EQ_TAB_BASE(= LSS_EQ_TAB_KEY = 素の
+    #   `H寄り確認+50bp`)にしか付いておらず、**実際に運用している推奨設定
+    #   (d4sm0.5)では一度も測られていなかった**。
+    #   ユーザーの「余りを配れないのか」に答えるには、推奨設定の上での
+    #   『素 vs 充填』が要る(別の土台の数字で判断すると §18.24 違反)。
+    _EQ_TAB_BASE2 = str(os.environ.get(
+        "LSS_EQ_TAB_KEY2",
+        "")).split("資金均等")[0].strip()
     _EQ_TAB_GAP = "".join(
         _c for _c in _EQ_TAB_BASE.split("bp")[0][-5:] if _c.isdigit()) or "50"
     _EQ_TAB_GAP = f"+{_EQ_TAB_GAP}bp"
@@ -12900,7 +12909,7 @@ function switchTbd(id, tab) {{
                     if 0 < _g1v < 1:
                         _eq_modes.append((0, False, False, 0.0, _pre,
                                           _WATCH_CAP, None, False, _g1v))
-            if _k == _EQ_TAB_BASE:
+            if _k in (_EQ_TAB_BASE, _EQ_TAB_BASE2) and _k:
                 _eq_modes += ([(0, True, False, 0.0, _pre, _WATCH_CAP, None, False)]
                               + [(_t2, False, False, 0.0, _pre, _WATCH_CAP, None, False)
                                  for _t2 in _EQ_TOPS])
