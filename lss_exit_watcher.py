@@ -107,6 +107,24 @@ _LOCK = _BASE / ".lss_watcher.lock"
 _SEEN = _BASE / ".lss_watcher_seen.json"
 _LOCK_STALE = 180
 
+# ⛔⛔ **状態を毎ポーリング print しない**(2026-08-21)。
+#   このウォッチャーは5秒ごとに回る。7銘柄あると [auction]/[損切待機]/[監視] で
+#   1周21行 = **252行/分**、大引けまでで約10万行になる。そうなると損切り・利確・
+#   発注失敗といった **本当に見たい1行が埋もれる**。
+#   c2b01d4(--moc-first の失敗ログがポーリングごとに出て他の異常を埋めた)と
+#   同じ失敗なので、状態が変わったときだけ出す共通ヘルパを置く。
+#   ★ 例外は [監視](現在値が動く=毎回 情報がある)。これは残す。
+_ONCE: dict = {}
+
+
+def _once(key: str, *state) -> bool:
+    """key の状態が前回と違うときだけ True。同じなら False(= print しない)。"""
+    _v = tuple(state)
+    if _ONCE.get(key) == _v:
+        return False
+    _ONCE[key] = _v
+    return True
+
 
 def _lock_alive() -> bool:
     if not _LOCK.exists():
@@ -455,10 +473,15 @@ def _lss_shorts(cli, lss_map: dict, tol: float,
                 _os, _ot = rec.get("stop", 0.0), rec.get("target", 0.0)
                 rec["stop"] = avg + _atr * _sm
                 rec["target"] = avg - _atr * _tm
-                print(f"  [{rec.get('mode')}] {sym} 実約定{avg:,.0f} から OCO を再計算: "
-                      f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
-                      f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
-                      f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
+                # ⛔ この再計算は毎ポーリング(5秒)走るが、値は建玉が変わらない限り
+                #   同じ。毎回 print すると 2026-08-21 のように **7銘柄 × 12回/分 =
+                #   84行/分** が流れ、本当のイベント(損切り・利確・失敗)が埋もれる。
+                #   c2b01d4(--moc-first の失敗ログ)と同じ失敗。値が変わったときだけ出す。
+                if _once(f"oco:{sym}", round(rec["stop"], 1), round(rec["target"], 1)):
+                    print(f"  [{rec.get('mode')}] {sym} 実約定{avg:,.0f} から OCO を再計算: "
+                          f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
+                          f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
+                          f"(ATR{_atr:,.1f} sm{_sm} tm{_tm})")
             elif avg > 0 and _sm > 0 and _tm > 0:
                 # ── ATR が記録に無いとき: **前日終値を復元して** ATR を逆算する ──
                 # レポートの損切/利確は **前日終値基準** (nikkei_analysis:2493-2495):
@@ -774,16 +797,25 @@ def main() -> int:
               "\n   代わりに損切りは板の逆指値ではなく "
               f"**{args.poll:.0f}秒ごとのポーリング成行**になります(建玉拘束のため両立不可)。")
     else:
-        print("⚠ MOC先置きは OFF。板に乗るのは "
-              + (f"損切り逆指値({args.stop_delay_bars * 5}分後〜{args.close_at})"
-                 if args.stop_delay_bars > 0 else f"損切り逆指値(〜{args.close_at})")
-              + " だけで、\n   その前後は watcher が生きていることが前提です"
-              "(2026-08-19 はここで持ち越し)。→ --moc-first で塞げます")
+        # ⛔ 「板は空」と決めつけない(2026-08-21)。`.\jorder`(k_open_confirm)は
+        #   925adaf 以降、**終了前に引け成行(MOC)を板へ置く**。その場合ここで
+        #   「板に乗るのは損切り逆指値だけ」と出すのは嘘になる。
+        #   さらに MOC が建玉を拘束する(4001005)ので、逆指値はそもそも置けず、
+        #   損切りはポーリング成行が担う。どちらかは起動時には分からないので、
+        #   **断定せず、確かめる場所を案内する**。
+        print(f"・この watcher 自身は MOC を先置きしません(--moc-first で ON)。")
+        print(f"  ただし `.\\jorder` は終了前に MOC を板へ置きます。置かれていれば")
+        print(f"  **watcher が落ちても引けで決済**され、代わりに建玉拘束で逆指値が")
+        print(f"  置けないので損切りは {args.poll:.0f}秒ポーリングの成行になります。")
+        print(f"  → どちらかは `.\\jorder` の「引け成行(MOC)を N件 設置しました」で確認")
     if args.stop_delay_bars > 0:
         print(f"損切り遅延(delay{args.stop_delay_bars}): 約定検知の5分足の間は損切り無効 → "
               f"次の5分グリッド({args.stop_delay_bars * 5}分後)から損切り有効(寄りヒゲ刈り回避)")
     else:
-        print("損切り遅延: なし(約定検知後すぐ損切り=base)。本番は delay2 → --stop-delay-bars 2")
+        # ⛔ ここに「本番は delay2」と書いてあったが実機と食い違う(18.10.1: 実機が正)。
+        #   J は delay4(.\jorder / .\jwatch が --stop-delay-bars 4 を渡す)。
+        print("損切り遅延: なし(約定検知後すぐ損切り=base)。"
+              "⛔ J の本番は **delay4**。`.\\jwatch` で起動し直してください")
     print("=" * 66)
 
     # 多重起動防止: 既に別インスタンスが稼働中(新鮮なlock)なら何もせず終了。
@@ -1162,7 +1194,9 @@ def _run(args, close_at, today) -> int:
                 if args.stop_delay_bars > 0:
                     _arm = _stop_arm_time(first_seen[pk], args.stop_delay_bars)
                     _stop_armed = now >= _arm
-                    if not _stop_armed:
+                    # 武装時刻は建玉ごとに固定なので、変わるまで1回だけ出す
+                    # (毎ポーリング出すと [監視] と合わせて 1銘柄2行 × 12回/分 になる)
+                    if not _stop_armed and _once(f"wait:{sym}", f"{_arm:%H:%M}"):
                         print(f"  [損切待機] {sym} {p['name']} 現在{_curs} "
                               f"寄り{args.stop_delay_bars * 5}分は損切り無効 → {_arm:%H:%M} から有効"
                               f"(利確・引けは有効)")
@@ -1193,9 +1227,20 @@ def _run(args, close_at, today) -> int:
                     if p["stop"] and pk not in stop_placed and not args.moc_first:
                         stop_placed.add(pk)
                         _r = _place_stop_buy(cli, sym, qty, hid, p["stop"])
-                        if _r in ("ok", "exists"):
-                            print(f"  [損切設置] {sym} {p['name']} 売建{qty} 逆指値買い @>={p['stop']:,.0f} を設置"
-                                  f"{'(既存)' if _r == 'exists' else ''} → 以降は自動で損切")
+                        if _r == "ok":
+                            print(f"  [損切設置] {sym} {p['name']} 売建{qty} "
+                                  f"逆指値買い @>={p['stop']:,.0f} を設置 → 以降は板が自動で損切")
+                        elif _r == "exists":
+                            # ⛔ 4001005(建玉拘束) を「損切りが既にある」と読んではいけない
+                            #   (2026-08-21)。k_open_confirm が終了前に置く **引け成行(MOC)**
+                            #   でも建玉は拘束される。板に置ける返済注文は建玉ごとに1本なので、
+                            #   MOC がある限り逆指値は置けない = **板の損切りは存在しない**。
+                            #   実際に守っているのは下の①(5秒ポーリングの成行)。
+                            #   発火時は send_buy(close_positions=None) が MOC を自動取消して
+                            #   から買い戻すので二重決済にはならない。
+                            print(f"  [損切] {sym} {p['name']} 建玉拘束のため逆指値は置けません"
+                                  f"(引け成行が板にあるため) → **{args.poll:.0f}秒ポーリングの成行**"
+                                  f"で損切ります @>={p['stop']:,.0f}")
                         else:
                             print(f"  [損切] {sym} {p['name']} 逆指値設置不可 → ポーリング成行で損切を担保")
                 # ③ 利確(下): ポーリングで到達したら成行買戻し(send_buy が損切逆指値を自動取消)。
