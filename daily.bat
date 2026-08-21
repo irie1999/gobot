@@ -112,7 +112,13 @@ REM     the report and the live script, so an unset value silently defaults to
 REM     400 while the live side runs something else (that happened 2026-08-21).
 REM     The 1-name cap follows this as a ratio (LSS_EQ_MAX_PCT, default 50%),
 REM     so raising the budget raises the cap too - that is intended.
-if not defined LSS_BUDGET_MAN set "LSS_BUDGET_MAN=300"
+REM   *** 400 here vs 300 live is a DELIBERATE mismatch (user, 2026-08-22). ***
+REM     Research stays on 400 so the numbers stay comparable across days.
+REM     BEFORE applying any winner to the live side, re-check it at the live
+REM     budget: a smaller budget runs out sooner, so "filter harder" is worth
+REM     MORE at 300 than at 400 - the optimum can move.
+REM       set LSS_BUDGET_MAN=300 & .\hvar
+if not defined LSS_BUDGET_MAN set "LSS_BUDGET_MAN=400"
 REM --- dump every settled trade so .\fills can reconcile real fills against the test.
 REM     Cheap (one CSV write). Without it .\fills skips its section 3 and the daily
 REM     divergence (real vs test) never accumulates - that number decides whether the
