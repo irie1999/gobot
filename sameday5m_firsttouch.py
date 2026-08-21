@@ -51,7 +51,8 @@ def _stop_fill_long(stop_p: float, bar_open: float) -> float:
 def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
                   on_close=False, stop_on_close=None, target_on_close=None,
                   no_target=False, no_stop=False, include_entry_bar=False,
-                  day_low=None, day_high=None, day_close=None, stop_delay_bars=0):
+                  day_low=None, day_high=None, day_close=None, stop_delay_bars=0,
+                  exit_hm=None):
     """約定日の5分足からショートの決済(価格・理由・時刻)を first-touch で求める。
 
     Args:
@@ -141,9 +142,31 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     #    寄り1本目の一瞬のヒゲで刈られるのを回避する(lss検証で PF 0.93→1.43 に改善)。
     #    利確・引けは約定バーから通常どおり。実運用は「約定→その5分足が閉じたら逆指値損切りを
     #    設置」に対応(lss_exit_watcher)。K=0(既定)なら現行と完全一致。
+    # ★ 決済締切 (exit_hm)。既定 None = 大引け(現行)。
+    #   "15:20" を渡すと **そのバーまでしか判定せず、届かなければその足の終値**で
+    #   買い戻す(= 15:20 に成行で手仕舞う運用)。引け成行との比較用。
+    #   ⛔ 引け値(day_close)は使わない。締切決済は大引けのクロージング・
+    #     オークションを通らないので、公式終値で約定させると先読みになる。
+    _last = n - 1
+    if exit_hm:
+        _lim = None
+        for j in range(n):
+            try:
+                _hm = f"{times[j]:%H:%M}"
+            except Exception:
+                break
+            if _hm <= str(exit_hm):
+                _lim = j
+            else:
+                break
+        if _lim is None:
+            return None, "no_5m", None, None   # 締切より前のバーが無い
+        _last = _lim
     _start = ei
+    if _start > _last:
+        return None, "no_entry", None, None    # 締切より後に約定 = 建てられない
     _stop_start = ei + max(0, int(stop_delay_bars))   # 損切りが効き始めるバー(遅延中は損切り無効)
-    for j in range(_start, n):
+    for j in range(_start, _last + 1):
         if not no_stop and j >= _stop_start:  # no_stop=True or 遅延中(j<_stop_start)は損切りを見ない
             stop_hit = (closes[j] >= stop_p) if soc else (highs[j] >= stop_p)
             if stop_hit:              # 上抜け=損切(同時タッチも優先)
@@ -159,6 +182,10 @@ def short_exit_5m(day_bars, entry_p, stop_p, target_p, is_rise_trigger,
     #    (引け値)で買戻すため、5分足の最終足終値ではなく日足の確定終値(day_close)を優先する。
     #    引けの寄成/引成が最終足とギャップすること・当日5分足が未同期(場中/部分)なことを吸収。
     #    day_close が無ければ5分足最終足にフォールバック(従来挙動)。
+    if exit_hm:
+        # 締切決済は大引けのオークションを通らないので、公式終値ではなく
+        # **その5分足の終値**で手仕舞う(day_close を使うと先読みになる)。
+        return float(closes[_last]), "close", ent_ts, times[_last]
     _close_px = float(day_close) if (day_close is not None and day_close > 0) else float(closes[-1])
     return _close_px, "close", ent_ts, times[-1]
 

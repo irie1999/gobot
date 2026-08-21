@@ -11210,18 +11210,20 @@ function switchTbd(id, tab) {{
             _eq_pref = _eq_pref_of
 
             def _eq_var(_nm, _d, _g, _sm=None, _tm=None, _ap=None,
-                        _cut=None, _wv=None, _jc=False):
+                        _cut=None, _wv=None, _jc=False, _xh=None):
                 """変種タプルを作る。**名前で方式を決める**ので取り違えない。
 
                 確認方式: 寄指=False / 指値bp=None / 確認ギャップ=_g
                 指値方式: 寄指=True  / 指値bp=_g   / 確認ギャップ=None
 
                 _cut = 締切(分) / _wv = 段の刻み(分)。段階モードは確認方式のみ。
+                _xh  = 決済の締切 "HH:MM"(None=大引け)。
                 """
                 if str(_nm).startswith("H寄り確認"):
                     return (_nm, 0, False, _d, "fill", None, _g, _sm, _tm,
-                            _ap, _cut, _wv, _jc)
-                return (_nm, 0, True, _d, "fill", _g, None, _sm, _tm, _ap)
+                            _ap, _cut, _wv, _jc, _xh)
+                return (_nm, 0, True, _d, "fill", _g, None, _sm, _tm, _ap,
+                        None, None, False, _xh)
 
             _eqg0 = 50.0
             try:
@@ -11354,6 +11356,29 @@ function switchTbd(id, tab) {{
                         _hvars.append(_eq_var(
                             f"{_eq_pref(_eqg0)}d{_dv}{_dsl}",
                             _dv, _eqg0, _eqsm2))
+                # ★★ 決済の締切を掃く (2026-08-21 ユーザー質問)
+                #   「引け成行だと4,000円マイナスだった。15:20 で買い戻したほうが
+                #     利益が出るか調べてほしい」
+                #   ⛔ 1日の実績では判断できない(§18.9: 2026-08-06 に .\delay の
+                #      12銘柄で delay2 を否定しかけ、1銘柄を除くと反転した)。
+                #      変種にして walk-forward と前半/後半で判定する(§18.36)。
+                #   ★ 何を測っているか: 大引けのクロージング・オークションまで
+                #      持つか、その手前の5分足終値で成行手仕舞いするか。
+                #      引け成行は「終値ちょうど」で約定する代わりに、
+                #      **引け間際の値動きを丸ごと被る**。
+                #   ⚠ 締切決済は公式終値(day_close)を使わない。使うと
+                #      「オークションを通っていないのに終値で約定」= 先読み。
+                #   ⚠ 推奨(タブ2)が sm を持つならその上で掃く。持たない土台で
+                #      掃くと基準とつまみが2つずれて『比較不能』になる。
+                #   ★ **推奨(タブ2)の名前をそのまま接頭辞に使う**。delay/sm を
+                #     自分で組み直すと基準とつまみが2つずれて『比較不能』になる。
+                if _eqk2:
+                    for _xh in [str(x).strip() for x in str(os.environ.get(
+                            "LSS_EQ_EXIT_HMS", "14:00,15:00,15:15,15:20,15:25")
+                            ).split(",") if str(x).strip()]:
+                        _hvars.append(_eq_var(
+                            f"{_eqb2}決済{_xh.replace(':', '')}",
+                            _eqd2, _eqg2, _eqsm2, _eqtm2, _xh=_xh))
                 # ★★ 損切り幅(sm)を掃く — delay と切り分けるための本命 (2026-08-15)
                 #   ⛔ delay は d0<d1<d2<d3<d4<d5 と**単調に良くなり続け**、
                 #      増分は逓減していた(+669/+498/+250/+169/+49 円/件)。
@@ -11558,7 +11583,10 @@ function switchTbd(id, tab) {{
                 #   v6: h_pc / h_gap_pc_bp / h_atr_pct_pc を追加(2026-08-18)。
                 #       watch の切り方を『合格の捕捉率』で測るのに要る。
                 #   v7: 変種タプルに13要素目(現値判定)を追加(2026-08-18)。
-                _sig = ["v7", _blv, f"{_LSS_SM}/{_LSS_TM}",
+                #   v8: 変種タプルに14要素目(決済の締切 exit_hm)を追加
+                #       (2026-08-21)。short_exit_5m の分岐が増えたので、
+                #       形の違う古いタプルを復元させない。
+                _sig = ["v8", _blv, f"{_LSS_SM}/{_LSS_TM}",
                         f"d{_eh_delay}", repr(_hvars)]
                 for _e in ("LSS_H_LIMIT_TICKS", "LSS_H_AUCTION_ONLY",
                            "LSS_EH_DEDUPE", "LSS_REQUIRE_OPEN_BAR",
@@ -18664,6 +18692,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # 建値の下限。無印 = レポートの --min-price(既定1,000)そのまま。
             _mpn = _re_kn.search(r"下限(\d+)円", _s)
             _k2["pmin"] = int(_mpn.group(1)) if _mpn else 0
+            # ★ 決済の締切時刻 (2026-08-21 ユーザー質問)。無印 = 大引け(引け成行)。
+            #   "決済1520" ならそのバーまでで手仕舞う。1日の実績では判断できないので
+            #   つまみにして walk-forward と前半/後半で判定する(§18.36)。
+            _mxh = _re_kn.search(r"決済(\d{4})", _s)
+            _k2["xhm"] = (f"{_mxh.group(1)[:2]}:{_mxh.group(1)[2:]}"
+                          if _mxh else "引け")
             # ★ 段階/締切 (2026-08-16)。"w10c10"=2段階(09:00/09:10) /
             #   "c10"=一括締切10分 / 無印=09:00 の一発判定。
             _mwv = _re_kn.search(r"(?:w(\d+))?c(\d+)(?![\d])", _s)
@@ -18735,7 +18769,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             #     こちらの漏れも検知できるよう **両方向**で確認する。
             _KN_KEYS = ["delay", "sm", "tm", "atr", "cap", "top", "fill",
                         "dedup", "dedup_post", "div", "watch", "late", "wave",
-                        "method", "g1", "pmax", "pmin"]
+                        "method", "g1", "pmax", "pmin", "xhm"]
 
             # ⛔ 逆向きの漏れ(_knobs にあるのに _KN_KEYS に無い)を検知する。
             #   こちらは例外にならず **変種が黙って消える**ので、下の _miss
@@ -18806,6 +18840,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                              "g1": "1グループの上限(予算比)",
                              "pmax": "建値の上限(1単元の重さ)",
                              "pmin": "建値の下限(安い株を切る)",
+                             "xhm": "決済の締切(引け成行 vs 手前で手仕舞う)",
                              "gap": "ギャップ閾値(bp)"}
 
                     def _fmt_wave(_v3):
