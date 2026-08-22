@@ -16727,7 +16727,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     #     変えないため**(daily は --both なので long も short も生成する)。
     # ⛔ JS の switchDetailTab は detail_<seq>_all の存在を前提にコンテナを
     #   探すので、**all の div は残す**(中身だけ空にする)。
-    _DEF_TAB = next((x for x in ("ehK", "ehL", "ehJ", "ehH", "budget")
+    # ★★ **J を先頭にした** (2026-08-22)。⚖比較 と 設定監査ボードは
+    #   「既定で開くタブ」にだけ積む(HTML を軽くするため)ので、既定が K だと
+    #   **実際に発注している J のタブに判定が1つも無い**状態になる。
+    #   実際 2026-08-22 に「これのどこが判定？」となった。
+    _DEF_TAB = next((x for x in ("ehJ", "ehK", "ehL", "ehH", "budget")
                      if x in _detail_tab_ids),
                     "entry" if (_SHOW_BASE_DETAIL
                                 and "entry" in _detail_tab_ids) else "all")
@@ -21035,6 +21039,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    f'並列読込は稀に落ちるので、同じ条件でも数%ぶれます'
                    f'（§18.33。直列化は <code>set LSS_EH_WORKERS=1</code>）'
                    if _sk_n else '')
+                # ⛔⛔ 土台と選定が **同じファイル** なら、選定フィルタは
+                #   1件も落とさない = **J と L が同一**になり、K も「選定なし」
+                #   ではなく「同じ選定 × watch無制限」になる(2026-08-22)。
+                #   タブ名だけ見ると別物に見えるので必ず画面に出す。
+                + ((f'<br>⛔ <b style="color:#fbbf24">土台と選定が同じファイル'
+                    f'です</b>。選定フィルタが1件も落とさないので '
+                    f'<b>J 実装版 = L 中間版</b>（K も「選定なし」ではなく'
+                    f'「同じ選定 × watch無制限」）。3つを別物として比べたいなら'
+                    f' <code>--lss-proposal lss_proposal_full.py</code>'
+                    f'（選定なしの土台）で回して、そこから選定ありを切り出して'
+                    f'ください（§18.42）')
+                   if (str(_cond.get("pool", "")).split(":")[0]
+                       and str(_cond.get("pool", "")).split(":")[0]
+                       == str(_cond.get("sel", "")).split(":")[0]) else '')
                 + f'</div>')
         _eh_pane += (
             f'<div id="detail_{_dseq}_eh{_ehk}" '
