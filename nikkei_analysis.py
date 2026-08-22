@@ -13149,27 +13149,41 @@ function switchTbd(id, tab) {{
                     _l[6] = _pool
                     return tuple(_l)
 
-                _src_modes = [_m for _m in _eq_modes if _m[6] is None]
+                # ⛔⛔ **モードのタプルは hashable ではない**(2026-08-22)。
+                #   pool は _SEL_POOL = (許可ペア集合, 解禁日**dict**) なので、
+                #   タプルごと set に入れると TypeError: unhashable type: 'dict'。
+                #   実際これで 資金均等の変種生成が丸ごと落ち、**監査ボードが
+                #   画面から消えた**。重複判定は必ず「hashable な鍵」に直す。
+                def _mkey(_m):
+                    _l = list(_m)
+                    _l[6] = ("SEL" if isinstance(_l[6], tuple) else _l[6])
+                    return tuple(_l)
+
+                # ⛔ ここで落ちると **資金均等の変種が丸ごと消える**(=J/K タブも
+                #   監査ボードも画面から無くなる)。増やすだけの処理なので、
+                #   失敗しても元の _eq_modes で続行する。
                 _n_add = 0
-                for _m in _src_modes:
-                    if _SEL_POOL:
-                        _eq_modes.append(_repool(_m, _SEL_POOL))
-                        _n_add += 1
-                    # watch を動かした行(_m[5] != _WATCH_CAP)は K では複製しない
-                    if _m[5] == _WATCH_CAP:
-                        _eq_modes.append(_repool(_m, "IDEAL", 0))
-                        _n_add += 1
-                # 同一タプルの重複を落とす(順序は保つ)。上の複製と、推奨設定に
-                # 明示で足してある実装版/理想版がぶつかるため。
-                _seen_m: set = set()
-                _uniq: list = []
-                for _m in _eq_modes:
-                    if _m not in _seen_m:
-                        _seen_m.add(_m)
-                        _uniq.append(_m)
-                if len(_uniq) != len(_eq_modes):
-                    _n_add -= len(_eq_modes) - len(_uniq)
-                _eq_modes = _uniq
+                try:
+                    _eq_add: list = []
+                    _seen_m = {_mkey(_m) for _m in _eq_modes}
+                    for _m in [_m for _m in _eq_modes if _m[6] is None]:
+                        _cands = []
+                        if _SEL_POOL:
+                            _cands.append(_repool(_m, _SEL_POOL))
+                        # watch を動かした行(_m[5] != _WATCH_CAP)は K では作らない
+                        if _m[5] == _WATCH_CAP:
+                            _cands.append(_repool(_m, "IDEAL", 0))
+                        for _c2 in _cands:
+                            _kk2 = _mkey(_c2)
+                            if _kk2 in _seen_m:
+                                continue  # 推奨設定に明示で足してある分と重複
+                            _seen_m.add(_kk2)
+                            _eq_add.append(_c2)
+                    _eq_modes += _eq_add          # 全部作れてから足す
+                    _n_add = len(_eq_add)
+                except Exception as _pae:
+                    print(f"  ⛔ [母集団の兄弟] {_k}: 生成に失敗したので"
+                          f"従来どおり(L のみ)で続けます: {_pae}", flush=True)
                 if _n_add and _k in (_EQ_TAB_BASE,
                                      str(_EQ_TAB_KEY2).split("資金均等")[0]):
                     print(f"  [母集団の兄弟] {_k}: 実装版(J) / 理想版(K) を"
@@ -19269,10 +19283,32 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _boards.append((_blbl, _bkn0, _bdesc, _board_body(_bkn0)))
             except Exception as _be:
                 print(f"  ⛔ [監査ボード] {_blbl} の生成に失敗: {_be}", flush=True)
+        # ⛔ **1枚も出ないなら L に落として必ず出す**(2026-08-22)。
+        #   J/K の基準が変種に無いだけでボードが画面から丸ごと消えると、
+        #   「無くなったけど合ってる?」と判断できなくなる(実際そうなった)。
+        #   落ちたことが分かるように、ラベルに理由を書く。
+        if not _boards and _EQ_TAB_KEY2 in _avail_bk:
+            print("  ⛔ [監査ボード] J/K の基準が変種にありません。"
+                  "L(選定なし × watch50)に落として出します。"
+                  "→ 提案ファイル(--lss-proposal)が読めているか、"
+                  "`[母集団の兄弟]` の行が出ているかを確認してください",
+                  flush=True)
+            try:
+                _boards.append((
+                    "L 中間版（⛔ J/K の基準が無いので代替）", _EQ_TAB_KEY2,
+                    "選定なし × watch50 = <b>どちらでもない母集団</b>。"
+                    "⛔ <b>実際に発注する J とは枠の厚みが違う</b>ので、"
+                    "上限・閾値・充填・上位N の判定には使えません",
+                    _board_body(_EQ_TAB_KEY2)))
+            except Exception as _be2:
+                print(f"  ⛔ [監査ボード] L も失敗: {_be2}", flush=True)
         if _boards:
             print("  [監査ボード] 基準: "
                   + " / ".join(f"{_l}({_k0})" for _l, _k0, _d, _h in _boards),
                   flush=True)
+        else:
+            print("  ⛔ [監査ボード] 1枚も出せませんでした"
+                  "(資金均等の変種が作られていない可能性)", flush=True)
 
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm, _rc) in _out:
