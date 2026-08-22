@@ -13202,17 +13202,31 @@ function switchTbd(id, tab) {{
         # ★ H だけでなく **推奨(K)** も出す(2026-08-16)。09:00 の発注速度が
         #   どれだけ利益を左右するかを 1分足で測る(measure_entry_decay.py)には、
         #   K が実際にどの銘柄をどの日に建てたかが要る。
-        # ⚠ この "_K.csv" の中身は **基準(_EQ_TAB_KEY2 = 選定なし×watch50)**
-        #    で、タブの『K 理想版』(watch無制限)ではなく **L 中間版**と同じ。
-        #    ファイル名は下流(.\fills の突合 / measure_entry_decay)が参照して
-        #    いるので変えない。中身は「実装できる形」なので用途としては正しい。
+        # ⛔⛔ 中身は **J 実装版(_EQ_TAB_J = 選定あり × watch50)** (2026-08-22 修正)。
+        #    それまで基準(_EQ_TAB_KEY2 = **選定なし** × watch50 = L 中間版)を
+        #    書いており、**実発注(J)より母集団が広かった**(実測 L 137件/月 vs
+        #    J 約105件/月 = +26%)。資金均等は `予算 ÷ その日の合格件数` なので
+        #    件数が違えば **株数が違う** → .\fills の「テスト損益」が実発注では
+        #    有り得ない株数で計算される。滑り(bp)は price 比較なので無事だが、
+        #    円の比較と fill率が狂う。
+        #    ファイル名の "_K" は歴史的な名前。下流(.\fills の突合 /
+        #    measure_entry_decay.py)が参照しているので**変えない**。
+        #    ⚠ どの変種を書いたかは必ず print する(名前と中身が食い違うと
+        #      §18.40b のように半日溶ける)。
         # ⛔ H は **発注リストと同じ母集団**で書く(2026-08-17)。絞らないと
         #   .\fills が「発注リストに1度も出ない銘柄」と実約定を突合してしまい、
         #   乖離の数字が意味を失う(タブ側と同じ 2026-08-16 の取りこぼし)。
         _hdumps = [("H", _pool_keep((_EH_TRADES or {}).get("H") or [],
                                     _IMPL_POOL))]
-        if _EQ_TAB_KEY2:
-            _hdumps.append(("K", (_EH_TRADES or {}).get(_EQ_TAB_KEY2) or []))
+        _kkey = (_EQ_TAB_J if (_EH_TRADES or {}).get(_EQ_TAB_J)
+                 else _EQ_TAB_KEY2)
+        if _kkey:
+            if _kkey != _EQ_TAB_J:
+                print(f"[全取引CSV] ⚠ J実装版 '{_EQ_TAB_J}' が空のため "
+                      f"基準 '{_EQ_TAB_KEY2}' を _K.csv に書きます。"
+                      f"**実発注より母集団が広い**ので .\\fills の"
+                      f"テスト損益・fill率は目安として読むこと", flush=True)
+            _hdumps.append(("K", (_EH_TRADES or {}).get(_kkey) or []))
         for _hsfx, _hsrc in _hdumps:
           if _hpend and _hsrc:
             import csv as _csvmod3
@@ -13246,10 +13260,16 @@ function switchTbd(id, tab) {{
                          or round(_liquidity_of(str(_t.get("symbol", ""))), 0)),
                         "limit", _t.get("pnl", ""), _t.get("entry_time", ""),
                     ])
-            print(f"[全取引CSV] {_hout} に {len(_hrows)}件を出力 "
-                  + ("(H=指値売り。.\\fills はこちらと突合する)" if _hsfx == "H"
-                     else f"({_EQ_TAB_KEY2} = 推奨K。"
-                          f"measure_entry_decay.py がこれを読む)"), flush=True)
+            if _hsfx == "H":
+                _note = "(H=指値売り。J が無いときだけ .\\fills が使う)"
+            elif _kkey == _EQ_TAB_J:
+                _note = (f"(**{_kkey}** = J 実装版。**実発注と同じ母集団**。"
+                         f".\\fills の突合 / measure_entry_decay.py が読む)")
+            else:
+                _note = (f"(**{_kkey}** = 基準(選定なし)。"
+                         f"⚠ 実発注より母集団が広い)")
+            print(f"[全取引CSV] {_hout} に {len(_hrows)}件を出力 {_note}",
+                  flush=True)
     except Exception as _he:
         print(f"[全取引CSV] H の出力失敗: {_he}", flush=True)
 
