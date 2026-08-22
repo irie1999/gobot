@@ -12784,6 +12784,11 @@ function switchTbd(id, tab) {{
         _EQ_TOPS = [int(x) for x in str(os.environ.get(
             "LSS_EQ_TOPS", "3,5,8")).split(",")
             if str(x).strip().isdigit() and int(x) > 0]
+        # ★★★ つまみの兄弟を J 実装版 / K 理想版 の母集団にも作るか
+        #   (2026-08-22 / 既定ON)。0 にすると従来どおり L(選定なし × watch50)
+        #   の上にしか兄弟が作られず、**監査ボードは L の判定しか出せない**。
+        _EQ_POOL_ALL = str(os.environ.get("LSS_EQ_POOL_ALL", "1")).strip() not in (
+            "", "0", "false", "False")
         # 不約定行(= その日 注文は置いたが約定しなかった候補)。指値方式の
         # 分母に要る。⛔ この時点で既に埋まっていること(eh_trades が作る)。
         _EH_NF_SRC = (_EH_TRADES or {}).get("約定せず") or {}
@@ -13112,6 +13117,64 @@ function switchTbd(id, tab) {{
                          "\n          (下限N円上限200万 − 上限200万)"
                          if _n_pxn else ""),
                       flush=True)
+            # ★★★ つまみの兄弟を **J 実装版 / K 理想版 の母集団にも作る**
+            #   (2026-08-22 ユーザー指示「J の基準と K の基準で設定を分けて
+            #    ほしい。L を基準は一番意味が分からない」)。
+            #
+            #   ⛔ それまで `_eq_modes` は全部 pool=None(=L 中間版: 選定なし ×
+            #     watch50)だった。つまり delay/sm/tm/ATR/閾値/上限/建値/充填/
+            #     上位N の**判定がすべて L の上で行われており**、実際に発注する
+            #     J(選定あり × watch50)でも、到達目標の K(選定なし × watch無制限)
+            #     でもなかった。
+            #   ⚠ 資金均等は `予算 ÷ その日の合格件数` なので、**母集団が変われば
+            #     枠の厚みが変わる**(実測 L 137件/月 vs J 約105件/月)。
+            #     上限・閾値・充填・上位N のように件数に依存するつまみは、
+            #     L の判定をそのまま J に持ち込めない。
+            #   ★ 資金均等は5分足を触らない後処理なので、変種を増やしても計算は
+            #     ほとんど増えない(§18.38 実測: 変種生成 0.5s = 全体の 0.1%)。
+            #   ★ 監査ボードの兄弟判定は `_knobs()["_auc"]`(実装版/理想版/同日)が
+            #     一致する行だけを見るので、**母集団をまたいだ比較は起きない**。
+            #   ⛔ K(理想版)は watch 無制限が定義なので、**watch を動かした行は
+            #     複製しない**(ラベルに watch が出ないので名前が衝突する)。
+            if _EQ_POOL_ALL:
+                def _repool(_m, _pool, _watch=None):
+                    """モードの pool(6) と watch(5) だけ差し替える。
+
+                    ⛔ タプルは 8/9/10/11 要素と可変長。**長さを保つこと**
+                       (固定長で作り直すと後ろのつまみが黙って落ちる)。
+                    """
+                    _l = list(_m)
+                    if _watch is not None:
+                        _l[5] = _watch
+                    _l[6] = _pool
+                    return tuple(_l)
+
+                _src_modes = [_m for _m in _eq_modes if _m[6] is None]
+                _n_add = 0
+                for _m in _src_modes:
+                    if _SEL_POOL:
+                        _eq_modes.append(_repool(_m, _SEL_POOL))
+                        _n_add += 1
+                    # watch を動かした行(_m[5] != _WATCH_CAP)は K では複製しない
+                    if _m[5] == _WATCH_CAP:
+                        _eq_modes.append(_repool(_m, "IDEAL", 0))
+                        _n_add += 1
+                # 同一タプルの重複を落とす(順序は保つ)。上の複製と、推奨設定に
+                # 明示で足してある実装版/理想版がぶつかるため。
+                _seen_m: set = set()
+                _uniq: list = []
+                for _m in _eq_modes:
+                    if _m not in _seen_m:
+                        _seen_m.add(_m)
+                        _uniq.append(_m)
+                if len(_uniq) != len(_eq_modes):
+                    _n_add -= len(_eq_modes) - len(_uniq)
+                _eq_modes = _uniq
+                if _n_add and _k in (_EQ_TAB_BASE,
+                                     str(_EQ_TAB_KEY2).split("資金均等")[0]):
+                    print(f"  [母集団の兄弟] {_k}: 実装版(J) / 理想版(K) を"
+                          f" {_n_add}本 追加 (LSS_EQ_POOL_ALL=0 で無効)",
+                          flush=True)
             # ⛔ ループ変数に `_dd` を使わないこと。この関数の中で
             #    `from collections import defaultdict as _dd` を使っており、
             #    代入した瞬間に **_tab5_pnl_html のローカル**になって
@@ -16948,6 +17011,16 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         for _k in sorted(_have):
             if "資金均等" not in str(_k):
                 continue
+            # ★★ **自分の母集団の基準**とも必ずペアにする (2026-08-22)。
+            #   ⛔ ここは全変種を "H"(プレーンな100株固定)とペアにするので、
+            #     差の列を『基準との差』と読むと必ず取り違える。2026-08-22 に
+            #     実際そうなりかけた(3行とも比較相手が月平均25,870円=H だった)。
+            #   → J 実装版の行は J 基準と、K 理想版の行は K 基準と比べる。
+            _suf = ("実装版" if str(_k).endswith("実装版")
+                    else "理想版" if str(_k).endswith("理想版") else "")
+            _ownb = {"実装版": _EQ_TAB_J, "理想版": _EQ_TAB_K}.get(_suf, "")
+            if _ownb and _ownb in _have and _k != _ownb:
+                _PAIRS.append((_k, _ownb))
             _PAIRS.append((_k, "H"))
             _b = str(_k).split("資金均等")[0]
             if _b in _have:
@@ -18851,9 +18924,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                            else "同日")
             return _k2
 
-        _audit = ""
-        _bk = _EQ_TAB_KEY2 if _EQ_TAB_KEY2 in {r[0] for r in _out} else ""
-        if _bk:
+        # ★★★ 基準を引数にした (2026-08-22 ユーザー指示)。以前は
+        #   `_bk = _EQ_TAB_KEY2`(= L 中間版: 選定なし × watch50)固定で、
+        #   **実際に発注する J でも 到達目標の K でもない母集団**の上で
+        #   全つまみを判定していた。J と K それぞれで1枚ずつ出す。
+        def _board_body(_bk):
+            _audit = ""
             _brow = next(r for r in _out if r[0] == _bk)
             _bsg, _bst = _sig_of(_brow[11])
             _bkn = _knobs(_bk)
@@ -19162,6 +19238,41 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'読みたいなら、その土台の上で掃き直してください。'
                     f'いま確定している設定なら掃き直す必要はありません'
                     f'</td></tr>')
+            return _audit
+
+        # ★ 出す基準を決める。**J(実装版) と K(理想版) の2枚**。
+        #   ⛔ L(選定なし × watch50 = 接尾辞なし)は既定では出さない。
+        #     「実際に発注する形」でも「到達目標」でもないので判断に使えない
+        #     (2026-08-22 ユーザー指摘「L を基準は一番意味が分からない」)。
+        #     見たいときだけ set LSS_EQ_BOARD_KEYS=J,K,L。
+        _avail_bk = {r[0] for r in _out}
+        _BK_MAP = {"J": (_EQ_TAB_J, "J 実装版",
+                         "選定あり(cumul) × watch50 = <b>いま実際に発注している形</b>"),
+                   "K": (_EQ_TAB_K, "K 理想版",
+                         "選定なし × watch無制限 = <b>全候補の始値が読めたら</b>"
+                         "（kabu の登録上限50件では実装できない / §18.45）"),
+                   "L": (_EQ_TAB_KEY2, "L 中間版",
+                         "選定なし × watch50 = <b>どちらでもない母集団</b>。"
+                         "判断には使わないこと")}
+        _boards = []
+        for _bkey in [x.strip().upper() for x in str(os.environ.get(
+                "LSS_EQ_BOARD_KEYS", "J,K")).split(",") if x.strip()]:
+            _bcfg = _BK_MAP.get(_bkey)
+            if not _bcfg:
+                continue
+            _bkn0, _blbl, _bdesc = _bcfg
+            if _bkn0 not in _avail_bk:
+                print(f"  ⚠ [監査ボード] 基準 '{_bkn0}' ({_blbl}) が変種に"
+                      f"ありません。この母集団のボードは出ません", flush=True)
+                continue
+            try:
+                _boards.append((_blbl, _bkn0, _bdesc, _board_body(_bkn0)))
+            except Exception as _be:
+                print(f"  ⛔ [監査ボード] {_blbl} の生成に失敗: {_be}", flush=True)
+        if _boards:
+            print("  [監査ボード] 基準: "
+                  + " / ".join(f"{_l}({_k0})" for _l, _k0, _d, _h in _boards),
+                  flush=True)
 
         _rows = ""
         for (_v, _n, _p, _mu, _t, _lo, _hi, _w, _nm, _f1, _f2, _mm, _rc) in _out:
@@ -19274,12 +19385,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _th = 'color:#94a3b8;font-size:0.75rem;padding:2px 8px;text-align:right'
         # ★ 監査ボードは **既定で閉じる**(2026-08-16 ユーザー指示)。
         #   縦に長く、毎日見るものではない(つまみを掃くときだけ)。
-        _abd = ("" if not _audit else (
+        def _board_html(_blbl, _bkn0, _bdesc, _audit):
+          return ("" if not _audit else (
             f'<details style="background:#0f172a;border:2px solid #22d3ee;'
             f'border-radius:8px;padding:12px 16px;margin:0 0 14px">'
             f'<summary style="color:#22d3ee;font-weight:700;font-size:0.95rem;'
             f'margin-bottom:6px;cursor:pointer">'
-            f'☑ 設定監査ボード（つまみを1つだけ動かした版・クリックで展開）</summary>'
+            f'☑ 設定監査ボード ／ 基準 = <b>{_blbl}</b>'
+            f'（つまみを1つだけ動かした版・クリックで展開）</summary>'
+            f'<p style="color:#e2e8f0;font-size:0.78rem;margin:0 0 8px;'
+            f'background:#132a1a;border-left:3px solid #4ade80;padding:6px 10px;'
+            f'line-height:1.7">'
+            f'★ このボードの<b>母集団は {_blbl}</b> = {_bdesc}<br>'
+            f'<span style="color:#94a3b8">基準の変種名: <code>{_bkn0}</code></span><br>'
+            f'⛔ <b>他の母集団のボードと数字を混ぜないこと。</b>資金均等は'
+            f'「予算 ÷ その日の合格件数」なので、<b>母集団が違えば枠の厚みが違い</b>、'
+            f'上限・閾値・充填・上位N のように件数に依存するつまみは'
+            f'結論が変わりえます（2026-08-22）。</p>'
             f'<p style="color:#94a3b8;font-size:0.76rem;margin:0 0 8px;line-height:1.7">'
             f'基準は<b>いま推奨している設定</b>（緑の行）。そこから'
             f'<b>つまみを1つだけ</b>動かした版を並べています。'
@@ -19327,6 +19449,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'font-size:0.66rem">銘柄計95%点 / 最大（予算比）</span></th>'
             f'<th style="{_th};text-align:left">判定</th></tr></thead>'
             f'<tbody>{_audit}</tbody></table></details>'))
+
+        _abd = "".join(_board_html(_l, _k0, _d, _h) for _l, _k0, _d, _h in _boards)
         return (
             _abd
             + f'<details style="background:#0f172a;border:1px solid #475569;'
