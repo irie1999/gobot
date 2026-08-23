@@ -15,8 +15,11 @@ REM   1. log pre-open quotes 08:00-08:45   -> preopen_board_<date>.csv
 REM        This is the opening-price study (18.35). It keeps running daily.
 REM   2. 08:47 warm read (skipping this makes 09:00 take 40-140s)
 REM   3. 09:00 onward, poll every 10s until 09:10:
-REM        for each name that opens, if open >= prev close + 50bp,
+REM        for each name that opens, if open >= prev close + 75bp,
 REM        size it and place a PROTECTIVE LIMIT SELL at open x (1 - 50bp).
+REM        (+75bp is the pass threshold, changed from +50bp on 2026-08-21;
+REM         the -50bp on the limit is unrelated - it is the fill protection.)
+REM        Per-name cap is half the budget (--max-yen-pct, default 50).
 REM        Names that open late (09:02-09:06) are picked up as they come.
 REM
 REM DEFAULTS ON PURPOSE
