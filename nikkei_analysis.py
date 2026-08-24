@@ -13297,13 +13297,18 @@ function switchTbd(id, tab) {{
                                     _IMPL_POOL))]
         _kkey = (_EQ_TAB_J if (_EH_TRADES or {}).get(_EQ_TAB_J)
                  else _EQ_TAB_KEY2)
-        if _kkey:
+        _ksrc = (_EH_TRADES or {}).get(_kkey) or []
+        # ⛔ **書くものが有るときだけ警告する**(2026-08-24)。H タブの経路は
+        #   E/H を作り直さないので _EH_TRADES が空で、フォールバックの警告
+        #   だけが毎回出てノイズになっていた(実際は lss タブ側で正しい
+        #   _K.csv を書き終えている)。
+        if _kkey and _ksrc:
             if _kkey != _EQ_TAB_J:
                 print(f"[全取引CSV] ⚠ J実装版 '{_EQ_TAB_J}' が空のため "
                       f"基準 '{_EQ_TAB_KEY2}' を _K.csv に書きます。"
                       f"**実発注より母集団が広い**ので .\\fills の"
                       f"テスト損益・fill率は目安として読むこと", flush=True)
-            _hdumps.append(("K", (_EH_TRADES or {}).get(_kkey) or []))
+            _hdumps.append(("K", _ksrc))
         for _hsfx, _hsrc in _hdumps:
           if _hpend and _hsrc:
             import csv as _csvmod3
