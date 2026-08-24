@@ -183,8 +183,39 @@ print(f"\n{'=' * 74}\n② ★ 持続性 — TRAIN で良かった {_LBL} は TES
 print(f"  両側で {args.min_trades}件以上ある {_LBL}: **{len(_both)}**"
       f"  (TRAIN {len(_TR)} / TEST {len(_TE)})")
 if len(_both) < 8:
-    print(f"  ⛔ {len(_both)}しかないので判定できません。--min-trades を下げるか"
-          f"、窓を伸ばしてください(.\\daily --days 730)")
+    # ★★ **「足りない」で終わらせない**。どれだけ足りないのか、そもそも
+    #   届くのかまで出す。届かないなら「銘柄では選べない」が結論になる。
+    _per = len(_rows) / max(1, len(_A))
+    _mon_now = len(_dates) / 21.0
+    print(f"  ⛔ {len(_both)}しかないので **判定できません**。")
+    print(f"\n  ★ どれだけ足りないか:")
+    print(f"    現状 {len(_rows):,}件 / {len(_A):,}{_LBL} = "
+          f"**{_per:.2f}件/{_LBL}** ({_mon_now:.1f}ヶ月)")
+    for _need in (4, args.min_trades, 8):
+        _tot = _need * 2
+        print(f"    両側{_need}件(計{_tot}件) … 現状の {_tot / _per:.1f}倍 = "
+              f"約 **{_tot / _per * _mon_now:.0f}ヶ月**ぶん")
+    # 5分足の上限。J は5分足が無いと1件も作れないので、ここが天井。
+    _AVAIL_MON = 25.0     # 2024-07 が最古 / 2年ローリング (CLAUDE.md 18.6)
+    _max_per = _per * _AVAIL_MON / _mon_now
+    print(f"\n  ⛔ **5分足は 2024-07 が最古**(2年ローリング / 18.6)。"
+          f"使える最大の窓は約 {_AVAIL_MON:.0f}ヶ月")
+    print(f"     → 全部使っても 1{_LBL}あたり {_max_per:.1f}件 = "
+          f"**片側 {_max_per / 2:.1f}件**")
+    if _max_per / 2 < args.min_trades:
+        print(f"\n  ★★ つまり **{_LBL}別の選別はデータ量の面から測れません**"
+              f"(全データを使っても片側 {_max_per / 2:.1f}件 < {args.min_trades}件)。\n"
+              f"     窓を伸ばしても届かないので、これは『まだ分からない』ではなく\n"
+              f"     **『この戦略では{_LBL}を選択軸にできない』**という結論です。\n"
+              f"     ⛔ ①の表で上位/下位に見える{_LBL}は数件の平均です。"
+              f"そこから銘柄を選ぶのは 18.12 の BTスコアと同じ失敗になります。")
+    else:
+        print(f"\n  → 窓を伸ばせば届きます: **.\\dailyfast --no-serve --days 730**\n"
+              f"     そのあと python analyze_symbol_edge.py --min-trades 4\n"
+              f"     ⚠ ただし片側4件では検出力がほぼ無く、"
+              f"本当に力があっても ❌ になりがちです。")
+    print(f"\n  ★ いま測れるのは **戦略単位**です(6戦略 × {len(_rows):,}件):")
+    print(f"     python analyze_symbol_edge.py --by strategy --min-trades 30")
     raise SystemExit(0)
 
 
