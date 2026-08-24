@@ -64,6 +64,9 @@ ap.add_argument("--quantiles", type=int, default=5, help="分位の数")
 ap.add_argument("--seeds", type=int, default=200, help="帰無較正の本数")
 ap.add_argument("--exclude-strat", type=str, default="転換",
                 help="除外する戦略(カンマ区切り)。転換は実装不可なので既定で除外")
+ap.add_argument("--symbol", type=str, default="",
+                help="この銘柄の取引履歴だけを出して終了(例 5711)。"
+                     "『あの銘柄また負けてない?』を確かめる用")
 args = ap.parse_args()
 
 
@@ -93,11 +96,15 @@ def _f(x, d=0.0) -> float:
 _path = _pick_csv()
 _skip = {s.strip() for s in args.exclude_strat.split(",") if s.strip()}
 _rows: list[dict] = []
+_raw_rows: list[dict] = []      # ★ --symbol 用。戦略の除外を掛けない生の行
 for r in _csv.DictReader(open(_path, encoding="utf-8-sig")):
     if str(r.get("reason") or "") in ("約定せず", "発注中", "保有中"):
         continue
     if str(r.get("strategy") or "") in _skip:
         continue
+    if len(str(r.get("entry_date") or "")[:10]) == 10 \
+            and _f(r.get("entry_p")) > 0 and _f(r.get("qty")) > 0:
+        _raw_rows.append(dict(r))
     _d = str(r.get("entry_date") or "")[:10]
     _ep, _q = _f(r.get("entry_p")), _f(r.get("qty"))
     _pnl = _f(r.get("pnl"))
@@ -116,6 +123,58 @@ for r in _csv.DictReader(open(_path, encoding="utf-8-sig")):
     })
 if not _rows:
     raise SystemExit(f"[error] {_path} に決済済みの取引がありません")
+_dates0 = sorted({str(r.get("entry_date") or "")[:10] for r in _raw_rows})
+
+# ══════════════════════════════════════════════════════════════════════
+#  --symbol : 1銘柄の履歴だけ出して終わる
+# ══════════════════════════════════════════════════════════════════════
+if args.symbol:
+    _sq = args.symbol.upper().removesuffix(".T").split(".")[0]
+    _hit = [r for r in _raw_rows
+            if str(r.get("symbol", "")).upper().removesuffix(".T").split(".")[0]
+            == _sq]
+    if not _hit:
+        raise SystemExit(f"[error] {args.symbol} の取引が {_path.name} に"
+                         f"ありません(窓 {_dates0[0]}〜{_dates0[-1]})")
+    _nm = str(_hit[0].get("name") or "")
+    print(f"\n{'=' * 74}\n{_sq} {_nm} — {_path.name} の全取引 {len(_hit)}件"
+          f"\n{'=' * 74}")
+    print(f"  {'日付':<12}{'戦略':<9}{'約定値':>9}{'決済値':>9}{'株数':>6}"
+          f"{'損益':>10}{'bp':>8}  理由")
+    _w = _l = 0
+    _bps = []
+    for r in sorted(_hit, key=lambda x: str(x.get("entry_date"))):
+        _ep, _q = _f(r.get("entry_p")), _f(r.get("qty"))
+        _pn = _f(r.get("pnl"))
+        _bp = _pn / (_ep * _q) * 1e4 if _ep > 0 and _q > 0 else 0.0
+        _bps.append(_bp)
+        _w += 1 if _pn > 0 else 0
+        _l += 1 if _pn < 0 else 0
+        print(f"  {str(r.get('entry_date'))[:10]:<12}"
+              f"{str(r.get('strategy') or ''):<9}{_ep:>9,.1f}"
+              f"{_f(r.get('exit_p')):>9,.1f}{int(_q):>6}"
+              f"{_pn:>+10,.0f}{_bp:>+8.1f}  {r.get('reason') or ''}")
+    _tot = sum(_f(r.get("pnl")) for r in _hit)
+    _avg = sum(_bps) / len(_bps)
+    print(f"\n  合計 {_tot:+,.0f}円 / 勝ち{_w} 負け{_l} / "
+          f"1株あたり平均 **{_avg:+.1f}bp**")
+    # ★ 何件あれば『偏っている』と言えるか。ここを出さないと数件の連敗で
+    #   銘柄を外したくなる(18.48 ⑪ で測定不能と確定済み)。
+    _sd = (_st.stdev(_bps) if len(_bps) > 1 else 0.0)
+    _se = _sd / (len(_bps) ** 0.5) if len(_bps) > 1 else 0.0
+    print(f"  ばらつき σ {_sd:.0f}bp → **平均の標準誤差 ±{_se:.0f}bp**"
+          f"({len(_bps)}件)")
+    if _se > 0:
+        print(f"  → この平均 {_avg:+.1f}bp は **±{2 * _se:.0f}bp** の幅を持つ"
+              f"(95%目安)。0 を含む: "
+              f"{'**はい = 偏っているとは言えない**' if abs(_avg) < 2 * _se else 'いいえ'}")
+    print(f"\n  ⛔ **この結果がどうであれ、銘柄を外す根拠にはなりません**"
+          f"(CLAUDE.md 18.48 ⑪)。\n"
+          f"     J は1銘柄あたり 2.3件しか出ないので、銘柄別の良し悪しは"
+          f"5分足の上限(25ヶ月)を\n"
+          f"     全部使っても測れません。連敗は『そういう並びが出た』"
+          f"以上のことを意味しません。")
+    raise SystemExit(0)
 
 _dates = sorted({r["d"] for r in _rows})
 _split = args.split or _dates[len(_dates) // 2]
