@@ -106,6 +106,7 @@ for r in _csv.DictReader(open(_path, encoding="utf-8-sig")):
     # ★ **bp で持つ**。円/件は資金均等で株数が変わるので比較できない。
     _rows.append({
         "d": _d,
+        "sym": str(r.get("symbol") or ""),
         "key": (str(r.get("symbol") or "") if args.by == "symbol"
                 else str(r.get("strategy") or "") if args.by == "strategy"
                 else f"{r.get('symbol')}/{r.get('strategy')}"),
@@ -139,12 +140,18 @@ def _agg(rows: list[dict]) -> dict:
     _m: dict = {}
     for r in rows:
         _e = _m.setdefault(r["key"], {"n": 0, "bp": 0.0, "pnl": 0.0,
-                                      "name": r["name"]})
+                                      "name": r["name"], "syms": set()})
         _e["n"] += 1
         _e["bp"] += r["bp"]
         _e["pnl"] += r["pnl"]
+        # ⛔ --by strategy のとき『最初の行の銘柄名』を出すと
+        #   「VOLTF オプトラン」のような無意味な表示になる(2026-08-24)。
+        #   銘柄単位のときだけ名前、それ以外は **何銘柄ぶんか** を出す。
+        _e["syms"].add(r.get("sym", ""))
     for _e in _m.values():
         _e["avg"] = _e["bp"] / max(1, _e["n"])
+        _e["label"] = (_e["name"][:12] if args.by == "symbol"
+                       else f"{len(_e['syms'])}銘柄")
     return _m
 
 
@@ -162,12 +169,19 @@ if _enough:
           f"乱数でも同じ形の表は必ず出る。\n"
           f"     使えるかどうかは ② の『TRAIN で良かったものが TEST でも"
           f"良いか』で決まる。")
-    print(f"\n  上位5 / 下位5 ({args.min_trades}件以上):")
-    for _k, _v in _enough[:5] + [("…", None)] + _enough[-5:]:
+    # ⛔ 少数のときに [:5] と [-5:] が重なる(2026-08-24: 6戦略で
+    #   上位5と下位5が4つダブって表示された)。全部入るなら全部出す。
+    if len(_enough) <= 12:
+        _show = list(_enough)
+        print(f"\n  全{len(_show)}{_LBL} ({args.min_trades}件以上):")
+    else:
+        _show = _enough[:5] + [("…", None)] + _enough[-5:]
+        print(f"\n  上位5 / 下位5 ({args.min_trades}件以上):")
+    for _k, _v in _show:
         if _v is None:
             print("      …")
             continue
-        print(f"    {_k:<14}{_v['name'][:12]:<13}{_v['n']:>4}件 "
+        print(f"    {_k:<14}{_v['label']:<13}{_v['n']:>4}件 "
               f"{_v['avg']:>+8.1f}bp  ({_v['pnl']:>+10,.0f}円)")
 
 
@@ -182,7 +196,12 @@ print(f"\n{'=' * 74}\n② ★ 持続性 — TRAIN で良かった {_LBL} は TES
       f"\n{'=' * 74}")
 print(f"  両側で {args.min_trades}件以上ある {_LBL}: **{len(_both)}**"
       f"  (TRAIN {len(_TR)} / TEST {len(_TE)})")
-if len(_both) < 8:
+# ⛔ 6戦略しか無いものに『8グループ必要』を課すと **永久に判定できない**
+#   (2026-08-24: --by strategy が必ずここで止まった)。判定に要る最小は
+#   グループ数ではなく **各グループの取引数**。少数のときは分位表の代わりに
+#   TRAIN/TEST を横並びで出す(そちらのほうが読める)。
+_MIN_G = 4
+if len(_both) < _MIN_G:
     # ★★ **「足りない」で終わらせない**。どれだけ足りないのか、そもそも
     #   届くのかまで出す。届かないなら「銘柄では選べない」が結論になる。
     _per = len(_rows) / max(1, len(_A))
@@ -239,8 +258,18 @@ _x = [_TR[k]["avg"] for k in _both]
 _y = [_TE[k]["avg"] for k in _both]
 _rho = _spearman(_x, _y)
 
+# ── 少数なら分位ではなく **横並び**で出す(分位1つに1グループは無意味) ──
+if len(_both) <= 12:
+    print(f"\n  {_LBL}ごとの TRAIN → TEST (1株あたり bp):")
+    print(f"  {_LBL:<12}{'TRAIN 件':>9}{'TRAIN bp':>10}"
+          f"{'TEST 件':>9}{'TEST bp':>10}{'差':>9}")
+    for _k in sorted(_both, key=lambda k: -_TR[k]["avg"]):
+        _d = _TE[_k]["avg"] - _TR[_k]["avg"]
+        print(f"  {_k:<12}{_TR[_k]['n']:>9,}{_TR[_k]['avg']:>+10.1f}"
+              f"{_TE[_k]['n']:>9,}{_TE[_k]['avg']:>+10.1f}{_d:>+9.1f}")
+
 # ── TRAIN分位ごとの TEST 成績 ────────────────────────────────────────
-_q = max(2, args.quantiles)
+_q = max(2, min(args.quantiles, max(2, len(_both) // 2)))
 _ord = sorted(_both, key=lambda k: _TR[k]["avg"])
 _bins: list[list[str]] = [[] for _ in range(_q)]
 for _i, _k in enumerate(_ord):
@@ -259,6 +288,10 @@ for _i, _bk in enumerate(_bins):
     print(f"  {_tag:<12}{len(_bk):>6}{_trbp:>+11.1f}{_n_te:>9,}{_tebp:>+10.1f}")
 _spread = (_qte[-1] - _qte[0]) if len(_qte) >= 2 else 0.0
 print(f"\n  最良分位 − 最悪分位 (TEST) = **{_spread:+.1f}bp**")
+if len(_both) < 8:
+    print(f"  ⚠ {_LBL}が {len(_both)} しかないので **順位相関の検出力はほぼ"
+          f"ありません**(6点の Spearman は帰無でも ±0.6 くらい平気で出る)。\n"
+          f"     本当に力があっても ❌ になりがちです。参考値として読むこと。")
 print(f"  TRAIN↔TEST の順位相関 (Spearman) = **{_rho:+.3f}**")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -281,14 +314,17 @@ for _s in range(args.seeds):
         _keys = [r["key"] for r in _rs]
         _rnd.shuffle(_keys)
         for _r, _k in zip(_rs, _keys):
-            _sh.append({"d": _d, "key": _k, "name": "", "bp": _r["bp"],
+            _sh.append({"d": _d, "key": _k, "name": "",
+                        "sym": _r.get("sym", ""), "bp": _r["bp"],
                         "pnl": _r["pnl"]})
     _str = _agg([r for r in _sh if r["d"] < _split])
     _ste = _agg([r for r in _sh if r["d"] >= _split])
     _sb = [k for k in _str if k in _ste
            and _str[k]["n"] >= args.min_trades
            and _ste[k]["n"] >= args.min_trades]
-    if len(_sb) < 8:
+    # ⛔ 本編と同じ下限を使うこと。8固定だと6戦略では帰無が1本も作れず、
+    #   「帰無を十分に作れませんでした」で毎回止まる(2026-08-24)。
+    if len(_sb) < _MIN_G:
         continue
     _n_rho.append(_spearman([_str[k]["avg"] for k in _sb],
                             [_ste[k]["avg"] for k in _sb]))
