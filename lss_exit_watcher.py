@@ -477,7 +477,13 @@ def _lss_shorts(cli, lss_map: dict, tol: float,
                 #   同じ。毎回 print すると 2026-08-21 のように **7銘柄 × 12回/分 =
                 #   84行/分** が流れ、本当のイベント(損切り・利確・失敗)が埋もれる。
                 #   c2b01d4(--moc-first の失敗ログ)と同じ失敗。値が変わったときだけ出す。
-                if _once(f"oco:{sym}", round(rec["stop"], 1), round(rec["target"], 1)):
+                # ⛔⛔ 鍵に **建玉** を含めること(2026-08-24)。同じ銘柄が
+                #   複数戦略で発火すると建玉が分かれ、平均約定が 0.1円 違う
+                #   (7956: 2,190.2 と 2,190.1)。銘柄だけを鍵にすると2つの値が
+                #   毎周入れ替わって `_once` が常に True になり、抑制したはずの
+                #   ログが **数百行**流れた(表示は両方 2,216 で同じに見える)。
+                if _once(f"oco:{sym}:{kp.get('HoldID') or avg}",
+                         round(rec["stop"], 1), round(rec["target"], 1)):
                     print(f"  [{rec.get('mode')}] {sym} 実約定{avg:,.0f} から OCO を再計算: "
                           f"損切 {_os:,.0f}→{rec['stop']:,.0f} / "
                           f"利確 {_ot:,.0f}→{rec['target']:,.0f} "
@@ -585,8 +591,18 @@ def _lss_shorts(cli, lss_map: dict, tol: float,
     return list(agg.values())
 
 
-def _final_position_check(cli, why: str = "") -> int:
+def _final_position_check(cli, why: str = "", moc_syms=None,
+                          retry: int = 3, wait_s: float = 10.0) -> int:
     """⛔⛔ **終了する前に必ず建玉を数える**(2026-08-19)。
+
+    ★★ 大引け直後は **MOC の約定が建玉に反映されるまで数十秒かかる**
+      (2026-08-24 実測)。その瞬間に読むと「5件残った」と出るが、実際は
+      15:30 の板寄せで全部約定していた。**誤報は本物の持ち越しを見逃す
+      原因になる**(オオカミ少年)ので、MOC を出した銘柄が残って見えるうちは
+      待って読み直す。
+
+      moc_syms … MOC の発注に成功した銘柄コードの集合。ここに入っている
+                 銘柄しか待たない(MOC を出していない残玉は本物なので即報告)。
 
     今日の実損は「落ちたこと」ではなく「**引け決済が飛んだこと**」で出た。
     watcher はどの経路で終わっても、それまで一度も『建玉が残っている』と
@@ -599,16 +615,31 @@ def _final_position_check(cli, why: str = "") -> int:
 
     返り値: 残っている売建の件数(取得できなければ -1)。
     """
-    try:
-        _ps = cli.get_positions(product=2)
-    except Exception as _e:
-        print(f"\n  ⛔ 終了時の建玉確認に失敗しました({_e})。\n"
-              f"     **kabuステーションで建玉を必ず目視確認してください**",
-              flush=True)
-        return -1
-    _left = [p for p in _ps
-             if str(p.get("Side", "")) == "1"
-             and int(p.get("LeavesQty") or p.get("Qty") or 0) > 0]
+    _mocs = {str(x) for x in (moc_syms or ())}
+    _left: list = []
+    for _try in range(max(1, retry)):
+        try:
+            _ps = cli.get_positions(product=2)
+        except Exception as _e:
+            print(f"\n  ⛔ 終了時の建玉確認に失敗しました({_e})。\n"
+                  f"     **kabuステーションで建玉を必ず目視確認してください**",
+                  flush=True)
+            return -1
+        _left = [p for p in _ps
+                 if str(p.get("Side", "")) == "1"
+                 and int(p.get("LeavesQty") or p.get("Qty") or 0) > 0]
+        if not _left:
+            break
+        # ★ 残って見えるのが **全部 MOC 発注済み** なら、板寄せの反映待ちの
+        #   可能性が高いので待って読み直す。1件でも MOC 未発注が混ざって
+        #   いれば本物の持ち越しなので、待たずに即報告する。
+        _pending = [p for p in _left if str(p.get("Symbol", "")) in _mocs]
+        if len(_pending) != len(_left) or _try >= retry - 1:
+            break
+        print(f"  … 残 {len(_left)}件はすべて引け成行(MOC)を発注済みです。"
+              f"板寄せの反映待ちかもしれないので {wait_s:.0f}秒待って"
+              f"読み直します ({_try + 1}/{retry - 1})", flush=True)
+        _time.sleep(wait_s)
     if not _left:
         print("  ✅ 信用売建は残っていません(全決済済み)。", flush=True)
         return 0
@@ -626,8 +657,18 @@ def _final_position_check(cli, why: str = "") -> int:
         _mt = {"1": "制度", "2": "一般(長期)", "3": "一般(デイトレ)"}.get(
             str(_p.get("MarginTradeType") or ""), "?")
         print(f"    {_s} {_p.get('SymbolName') or ''} 売建{_q}株 "
-              f"平均{_num(_p.get('AveragePrice') or _p.get('Price')):,.1f} [{_mt}]",
+              f"平均{_num(_p.get('AveragePrice') or _p.get('Price')):,.1f} [{_mt}]"
+              + ("  ← 引け成行(MOC)は発注済み" if _s in _mocs else ""),
               flush=True)
+    # ★ 全部 MOC 発注済みなら「持ち越し確定」ではなく「反映待ちかもしれない」。
+    #   断定して毎日出すと誰も読まなくなる(2026-08-24 に実際 誤報だった)。
+    if _mocs and all(str(p.get("Symbol", "")) in _mocs for p in _left):
+        print(f"""
+  ⚠ ただし **残っている{len(_left)}件はすべて引け成行(MOC)を発注済み**です。
+     15:30 の板寄せで約定していても、建玉への反映が数十秒遅れることが
+     あります(2026-08-24 実測: この表示が出たが実際は全件決済済みだった)。
+     → **kabuステーションの注文約定照会で『全約定』かどうかを見てください**。
+       約定していれば何もしなくて構いません。""", flush=True)
     if _daytrade:
         print(f"""
   ⛔⛔ うち **{len(_daytrade)}件が一般信用(デイトレ)** です。当日返済が前提の
@@ -969,6 +1010,9 @@ def _run(args, close_at, today) -> int:
     stop_placed: set = set()   # 板逆指値を設置済みの銘柄(pkey=銘柄)。銘柄単位で合計数量に
                                #   1本だけ置く(同一銘柄200株=2建玉でも1本で全建玉をカバー)。
     moc_placed: set = set()    # 引けMOCを出した銘柄(pkey)。引けは銘柄ごとに1回だけ(重複キュー防止)。
+    # ★ MOC の発注に成功した **銘柄コード**(2026-08-24)。終了時の建玉確認で
+    #   「板寄せの反映待ち」と「本物の持ち越し」を区別するために使う。
+    moc_syms: set = set()
     moc_fail: dict = {}        # pkey -> MOC発注の連続失敗回数。3回で即時成行に切替。
     close_cool: dict = {}      # pkey(銘柄) -> 直近に成行決済を送った時刻(unix秒)。部分約定の
                                #   残玉を再決済しつつ、in-flightの二重成行を防ぐクールダウン用。
@@ -1155,6 +1199,7 @@ def _run(args, close_at, today) -> int:
                         print(f"  [引け] {sym} {p['name']} 売建{qty} 現在{_curs} → 引け成行(MOC)買戻し")
                         if _close_moc(cli, sym, qty, hid):
                             moc_placed.add(pk)   # MOCは建玉ごとに1回(重複キュー防止)
+                            moc_syms.add(str(sym))   # 終了時の誤報を防ぐ(2026-08-24)
                             moc_fail.pop(pk, None)
                         else:
                             moc_fail[pk] = _mf + 1
@@ -1166,6 +1211,7 @@ def _run(args, close_at, today) -> int:
                 if args.moc_first and pk not in moc_placed:
                     if _close_moc(cli, sym, qty, hid):
                         moc_placed.add(pk)
+                        moc_syms.add(str(sym))       # 終了時の誤報を防ぐ
                         moc_fail.pop(pk, None)
                         print(f"  [引け予約] {sym} {p['name']} 売建{qty} "
                               f"→ 引け成行(MOC)を板に置きました。"
@@ -1337,7 +1383,8 @@ def _run(args, close_at, today) -> int:
     # ⛔⛔ **どの経路で抜けても建玉を数えてから終わる**(2026-08-19)。
     #   大引け / Ctrl+C / 連続エラー / --once / dry-run のどれでも通る。
     #   dry-run は発注しないので残っていて当然 → 確認しない。
-    _left_n = _final_position_check(cli, "監視終了") if args.execute else 0
+    _left_n = (_final_position_check(cli, "監視終了", moc_syms=moc_syms)
+               if args.execute else 0)
     print("終了しました。")
     # 残玉ありは **異常終了として返す**。呼び元(morning_test の再起動ループ)が
     # 「正常に終わった」と誤認しないように。

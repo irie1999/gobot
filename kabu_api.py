@@ -129,6 +129,9 @@ class KabuClient:
         self._password = password or self._password_from_env(prod)
         self._token: str | None = None
         self._registered: set[tuple[str, int]] = set()  # /board 用 銘柄登録済み
+        # register() の直近の失敗理由。429(レート制限)か 400(不正コード)かを
+        # 呼び出し側が区別するために使う(2026-08-24)。
+        self.last_register_error = ""
 
     @staticmethod
     def _password_from_env(prod: bool) -> str | None:
@@ -217,15 +220,24 @@ class KabuClient:
         raise RuntimeError(f"GET 失敗: {url}")
 
     # ── 情報取得 (GET) ───────────────────────────────────────
-    def register(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
+    def register(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> bool:
         """/board で時価を取る前に必要な銘柄登録 (PUT /register)。
 
         kabu API は登録していない銘柄の /board が空になる仕様。
         一度登録した銘柄は self._registered にキャッシュして再登録を避ける。
+
+        ⛔⛔ **成否を返すこと**(2026-08-24 修正)。以前は例外を握り潰して
+          print だけしていたので、**呼び出し側は失敗を検知できなかった**。
+          log_preopen_board の「429 が3回続いたら打ち切る」ガードが
+          そのせいで一度も発火せず、44連続で 429 を叩き続けて
+          レート制限を悪化させた(2026-08-24 の朝、09:00 の発注に影響した)。
+          失敗の中身は self.last_register_error に入れる(429 の判別用)。
+
+        返り値: True=登録済み / False=失敗(理由は last_register_error)。
         """
         key = (str(symbol), exchange)
         if key in self._registered:
-            return
+            return True
         url = f"{self.base_url}/kabusapi/register"
         body = {"Symbols": [{"Symbol": str(symbol), "Exchange": exchange}]}
         try:
@@ -233,8 +245,12 @@ class KabuClient:
                              json=body, timeout=self.timeout)
             r.raise_for_status()
             self._registered.add(key)
+            self.last_register_error = ""
+            return True
         except Exception as e:
+            self.last_register_error = str(e)
             print(f"  ⚠ {symbol}: 銘柄登録(register)失敗 ({e})")
+            return False
 
     def register_many(self, symbols, exchange: int = EXCHANGE_TOSHO) -> dict:
         """複数銘柄を **1回の PUT で** まとめて登録する。

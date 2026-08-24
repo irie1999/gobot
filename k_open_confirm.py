@@ -1330,6 +1330,14 @@ if args.execute:
               f"2026-08-19 はそこで持ち越しました", flush=True)
         _mn = _mok = 0
         try:
+            # ⛔⛔ **銘柄単位で合算してから1回だけ出す**(2026-08-24 修正)。
+            #   kabu の信用返済は『銘柄単位で建玉を自動選択し、**発注時に既存の
+            #   返済注文を取消す**』。同じ銘柄が複数戦略で発火して建玉が分かれると
+            #   (例 7956 = 100株 × 2)、建玉ごとに send_moc を呼ぶと
+            #   **2本目が1本目の MOC を取り消して自分の100株ぶんだけ置く**ので、
+            #   結果的に半分が無防備になる(2026-08-24 に実際そうなった)。
+            #   lss_exit_watcher は同じ理由で既に銘柄単位に合算している。
+            _bysym: dict = {}
             for _p in cli.get_positions(product=2):
                 if str(_p.get("Side", "")) != "1":
                     continue
@@ -1341,6 +1349,12 @@ if args.execute:
                 if str(_p.get("MarginTradeType") or "") != "3":
                     continue
                 _ps = str(_p.get("Symbol", ""))
+                _e = _bysym.setdefault(_ps, {"qty": 0, "n": 0, "name": ""})
+                _e["qty"] += _q
+                _e["n"] += 1
+                _e["name"] = _e["name"] or (_p.get("SymbolName") or "")
+            for _ps, _e in _bysym.items():
+                _q = int(_e["qty"])
                 _mn += 1
                 try:
                     _r = cli.send_moc(_ps, qty=_q, side="buy", cash_margin=3)
@@ -1349,8 +1363,9 @@ if args.execute:
                     continue
                 if _r.get("Result") == 0 or _r.get("_dry_run"):
                     _mok += 1
-                    print(f"    ✅ {_ps} {_p.get('SymbolName') or ''} "
-                          f"{_q}株 引け成行を設置", flush=True)
+                    print(f"    ✅ {_ps} {_e['name']} {_q}株 引け成行を設置"
+                          + (f" (建玉{_e['n']}本を合算)" if _e["n"] > 1 else ""),
+                          flush=True)
                 else:
                     print(f"    ⛔ {_ps} MOC 設置失敗: {_r}", flush=True)
         except Exception as _mne:

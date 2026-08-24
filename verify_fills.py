@@ -695,12 +695,57 @@ def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
         #     『エントリー滑り -0.77%』と表示され、約定モデルの問題に見えた)。
         _ordp = {r["code"]: r["order_price"] for r in order_rows
                  if r.get("side") == "売" and float(r.get("order_price") or 0) > 0}
-        _mis = []
-        for s in both:
-            _rl = float(_ordp.get(s) or 0)
-            _tl = float(by_sym[s].get("order_limit") or 0)
-            if _rl > 0 and _tl > 0 and abs(_rl - _tl) >= 0.5:
-                _mis.append((s, _rl, _tl))
+        # ⛔⛔ **J では この検査が必ず誤警告になる**(2026-08-24 修正)。
+        #   H は『前日終値-5tick の指値』なので ライブの指値 と テストの
+        #   order_limit が同じ意味で比較できる。J(09:00確認)は違う:
+        #     ライブの指値 = **始値 × (1 - 50bp)** の保護指値(掴まされ防止)
+        #     テストの order_limit = **始値そのもの**(約定値と同じ)
+        #   定義が違うものを引き算しているので、常に -50bp ぶんズレて出る。
+        #   J で意味があるのは「実約定 vs テスト始値」= 上の滑り列のほうで、
+        #   その差は主に **執行遅延**(§18.44: 1分 -15.8bp / 3分 -29.4bp)。
+        if _CMP_MODE == "J":
+            _gaps = []
+            for s in both:
+                _re = float(real_done[s].get("entry(売)") or 0)
+                _tl = float(by_sym[s].get("entry_p") or 0)
+                if _re > 0 and _tl > 0:
+                    _gaps.append((s, _re, _tl, (_re - _tl) / _tl * 1e4))
+            if _gaps:
+                _avg_bp = sum(g[3] for g in _gaps) / len(_gaps)
+                print(f"\n  ★ 【エントリーのズレ】{len(_gaps)}銘柄 — 平均 "
+                      f"{_avg_bp:+.1f}bp (実約定 vs テストの始値)")
+                print(f"  ⛔ ライブの指値(始値-50bp)は**保護指値**なので、"
+                      f"テストの始値と直接比べても意味がありません。ここは"
+                      f"『いくらで売れたか』の比較です。")
+                print(f"  {'コード':>6} {'銘柄':<12}{'実約定':>10}"
+                      f"{'テスト始値':>11}{'差':>8}{'bp':>8}")
+                for s, _re, _tl, _bp in sorted(_gaps, key=lambda g: g[3]):
+                    print(f"  {s:>6} {by_sym[s]['name'][:12]:<12}{_re:>10,.1f}"
+                          f"{_tl:>11,.1f}{_re - _tl:>+8,.1f}{_bp:>+8.1f}")
+                # §18.44 の1分足実測。どれくらい遅れて約定したかの目安になる。
+                _tbl = ((-15.8, "約1分"), (-26.8, "約2分"), (-29.4, "約3分"),
+                        (-36.6, "約5分"))
+                _near = min(_tbl, key=lambda t: abs(t[0] - _avg_bp))
+                if _avg_bp < -5:
+                    print(f"  → 全体にマイナス = **執行が板寄せに間に合わず"
+                          f"ザラ場で約定**しています。§18.44 の減衰実測では "
+                          f"{_avg_bp:+.1f}bp ≒ **{_near[1]}の遅れ**に相当。\n"
+                          f"    (1分 -15.8 / 2分 -26.8 / 3分 -29.4 / 5分 -36.6 bp)\n"
+                          f"    ⚠ レポートは『約定=始値(執行が瞬時)』が前提なので、"
+                          f"このぶんは実運用で目減りします。")
+                elif _avg_bp > 5:
+                    print(f"  → 全体にプラス = テストより**高く売れて**います"
+                          f"(板寄せが指値より上でついた)。")
+                else:
+                    print(f"  → ほぼゼロ。始値の取得と執行が一致しています。")
+            _mis = []
+        else:
+            _mis = []
+            for s in both:
+                _rl = float(_ordp.get(s) or 0)
+                _tl = float(by_sym[s].get("order_limit") or 0)
+                if _rl > 0 and _tl > 0 and abs(_rl - _tl) >= 0.5:
+                    _mis.append((s, _rl, _tl))
         if _mis:
             print(f"\n  ⛔ 【指値のズレ】{len(_mis)}銘柄 — ライブとバックテストで"
                   f"**注文そのものが別物**です(滑りではありません)")

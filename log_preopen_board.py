@@ -629,12 +629,20 @@ def _snap_batch(_b: list[str]) -> list[dict]:
         #   まで巻き添えにするので、429 を見たらフォールバックを打ち切る。
         _good, _bad, _rate = [], [], 0
         for _s1 in _b:
+            # ⛔⛔ **戻り値で判定すること**(2026-08-24 修正)。kabu_api.register は
+            #   以前 例外を握り潰して print だけしていたので、この except は
+            #   **一度も発火しなかった**。結果 429 のガードが死んでいて、
+            #   44連続で叩き続けレート制限を悪化させた(その朝の 09:00 発注に影響)。
             try:
-                cli.register(_s1)
+                _ok1 = cli.register(_s1)
+                _err1 = "" if _ok1 else str(getattr(cli, "last_register_error", ""))
+            except Exception as _re1:            # 将来 raise に変えても拾えるように
+                _ok1, _err1 = False, str(_re1)
+            if _ok1:
                 _good.append(_s1)
                 _rate = 0
-            except Exception as _re1:
-                if "429" in str(_re1):
+            else:
+                if "429" in _err1:
                     _rate += 1
                     if _rate >= 3:
                         print(f"  ⛔ **レート制限(429)が続くのでフォールバックを"
@@ -747,6 +755,8 @@ _lap = 0
 _tot = 0
 _in_final = False
 _nb = -(-len(_syms) // max(1, args.batch))
+_t_start = time.time()   # 母集団の切り詰め判定に使う実測開始時刻
+_capped = False          # 切り詰めは1回だけ
 while True:
     _t0 = time.time()
     if _FINAL and not _in_final and _dt.datetime.now() >= _FINAL:
@@ -779,6 +789,35 @@ while True:
           + (f" ★{_lap}周目 完了" if _wrapped else ""), flush=True)
     if args.once and _wrapped:
         break
+    # ★★ **窓に収まる本数まで母集団を切り詰める**(2026-08-24)。
+    #   場中の /board は 0.5〜1.5件/秒しか出ない(§18.44)。1,540銘柄=31バッチを
+    #   45分で回るのは無理で、実測は 9/31バッチで締切に当たった。
+    #   ⛔ 途中で切れると **毎朝おなじ先頭のバッチだけ**が読まれ、後半の銘柄は
+    #     永久に1件も貯まらない。母集団を広げた意味が消える。
+    #   → 実測の1バッチ時間から到達可能な本数を出し、そこまでに絞る。
+    #     絞ったことは必ず出す(§18.24「no silent caps」)。
+    _elapsed = time.time() - _t_start
+    _done_b = max(1, (_i0 // max(1, args.batch)) + 1)
+    _per_b = _elapsed / _done_b
+    _left_s = (_deadline - _dt.datetime.now()).total_seconds()
+    _can_b = _done_b + int(max(0.0, _left_s) // max(1.0, _per_b))
+    if not _capped and _lap == 0 and _can_b < _nb:
+        _keep = max(args.batch, _can_b * args.batch)
+        if _keep < len(_syms):
+            print(f"  ⛔ このペース(1バッチ {_per_b:.0f}秒)では締切 {args.until} "
+                  f"までに {_can_b}/{_nb}バッチしか回れません。\n"
+                  f"     母集団を **{len(_syms):,} → {_keep:,}銘柄** に切り詰めます"
+                  f"(流動性/候補の上位から)。\n"
+                  f"     ⚠ 途中で切れると毎朝おなじ先頭しか貯まりません。"
+                  f"切り詰めれば毎朝 全部を1周できます。\n"
+                  f"     広げたいなら --until を遅く / --batch を大きく / "
+                  f"母集団を --symbols で絞ってください", flush=True)
+            _syms = _syms[:_keep]
+            _nb = -(-len(_syms) // max(1, args.batch))
+            if _cursor >= len(_syms):
+                _cursor = 0
+                _lap += 1
+        _capped = True
     if _dt.datetime.now() >= _deadline:
         print(f"  [{_dt.datetime.now():%H:%M:%S}] 締切 {args.until} に到達。"
               f"ここで打ち切ります", flush=True)
