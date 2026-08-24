@@ -801,7 +801,11 @@ while True:
     _per_b = _elapsed / _done_b
     _left_s = (_deadline - _dt.datetime.now()).total_seconds()
     _can_b = _done_b + int(max(0.0, _left_s) // max(1.0, _per_b))
-    if not _capped and _lap == 0 and _can_b < _nb:
+    # ⛔ **締切を過ぎてから起動された場合は切り詰めない**(2026-08-24)。
+    #   _left_s が負なので「1バッチしか回れない = 母集団を50件に切れ」と
+    #   誤作動する。窓の外の実行(引け後の誤起動など)は直後の締切判定で
+    #   止まるので、そこに任せる。
+    if not _capped and _lap == 0 and _left_s > 0 and _can_b < _nb:
         _keep = max(args.batch, _can_b * args.batch)
         if _keep < len(_syms):
             print(f"  ⛔ このペース(1バッチ {_per_b:.0f}秒)では締切 {args.until} "
