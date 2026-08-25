@@ -67,7 +67,14 @@ ap.add_argument("--estimate", action="store_true",
                      "yfinance キャッシュを読むので少し時間がかかる")
 ap.add_argument("--all-ordered", action="store_true",
                 help="合格(pass_gap)ではなく **実発注(ordered=1)** だけを分子にする")
+ap.add_argument("--since", type=str, default="",
+                help="この日以降だけを見る (yyyy-MM-dd)。⛔ 方式が変わった日をまたぐと"
+                     "比較にならない。J の実運用は 2026-08-21 から "
+                     "(それ以前は H / slip_daily_log.csv の『方式』列で確認できる)")
+ap.add_argument("--budget-man", type=float, default=400.0,
+                help="レポート側の予算(万円)。予算落ちかどうかの判定に使う (既定400)")
 args = ap.parse_args()
+_SINCE = str(args.since or "")[:10]
 
 
 def _n(s) -> str:
@@ -171,8 +178,15 @@ print("  ⛔ 分母は **ライブが実際に読んだ銘柄** だけ(k_paper �
       "  ⚠ その日が母集団に1件も無い日は『窓外?』= レポートの表示窓の外か、\n"
       "     その日を含む実行をまだ流していない。集計から外す。\n")
 
-_hdr = (f"  {'日付':<12}{'読んだ':>7}{_SHORT:>6}{'母集団に有':>11}"
-        f"{'⛔抜け':>8}{'抜け率':>8}   {'逆(BTのみ)':>10}")
+if _SINCE:
+    print(f"  ★ {_SINCE} 以降だけを見ます（--since）\n")
+else:
+    print("  ⛔ **方式が変わった日をまたいでいないか確認すること**。J の実運用は\n"
+          "     2026-08-21 から。それ以前は H(前夜指値)で、母集団も株数も別物。\n"
+          "     → `--since 2026-08-21` を付けて測り直すこと。\n")
+
+_hdr = (f"  {'日付':<12}{'読んだ':>7}{_SHORT:>6}{'BT件数':>7}{'BT投入':>9}"
+        f"{'母集団に有':>11}{'⛔抜け':>8}{'抜け率':>8}   {'逆':>5}")
 print(_hdr)
 print("  " + "-" * (len(_hdr) - 2))
 
@@ -209,11 +223,19 @@ for p in _papers:
         if ok:
             _pass.append(r)
 
+    if _SINCE and _day < _SINCE:
+        continue
+
+    # その日の母集団の件数と投入額。予算に余裕があれば「予算落ち」ではないと言える。
+    _bt_rows = [t for k, v in _pop.items() if k[0] == _day for t in v]
+    _bt_yen = sum(_f(t.get("entry_p")) * _f(t.get("qty")) for t in _bt_rows)
+    _room = args.budget_man * 1e4 - _bt_yen
+
     # ⚠ その日が母集団に1件も無い = レポートの表示窓の外(または未実行)。
     #   「全部抜けた」と数えると抜け率が意味を失うので、集計から外す。
     if _day not in _POP_DAYS:
-        print(f"  {_day:<12}{len(_read):>7}{len(_pass):>6}"
-              f"{'—':>11}{'—':>8}{'⚠ 窓外?':>9}   {'—':>10}")
+        print(f"  {_day:<12}{len(_read):>7}{len(_pass):>6}{0:>7}{'—':>9}"
+              f"{'—':>11}{'—':>8}{'⚠ 窓外?':>9}   {'—':>5}")
         continue
 
     _hit, _miss = [], []
@@ -238,14 +260,22 @@ for p in _papers:
     _tot_hit += len(_hit)
     _tot_rev += len(_rev)
     _rate = (len(_miss) / len(_pass) * 100) if _pass else 0.0
-    print(f"  {_day:<12}{len(_read):>7}{len(_pass):>8}{len(_hit):>11}"
-          f"{len(_miss):>8}{_rate:>7.0f}%   {len(_rev):>10}")
+    # ★ 予算に1単元ぶんの余裕があれば、その日の抜けは「予算落ち」では説明できない
+    #   = 母集団に本当に無い。余裕が無い日だけ ⚠ を付ける。
+    _tight = "⚠" if _room < 60 * 1e4 else " "
+    print(f"  {_day:<12}{len(_read):>7}{len(_pass):>6}{len(_bt_rows):>7}"
+          f"{_bt_yen / 1e4:>8.0f}万{len(_hit):>11}"
+          f"{len(_miss):>8}{_rate:>7.0f}%   {len(_rev):>4}{_tight}")
 
 print("  " + "-" * (len(_hdr) - 2))
 _miss_n = _tot_pass - _tot_hit
 _rate = (_miss_n / _tot_pass * 100) if _tot_pass else 0.0
-print(f"  {'合計':<12}{_tot_read:>7}{_tot_pass:>8}{_tot_hit:>11}"
-      f"{_miss_n:>8}{_rate:>7.0f}%   {_tot_rev:>10}")
+print(f"  {'合計':<12}{_tot_read:>7}{_tot_pass:>6}{'':>7}{'':>9}{_tot_hit:>11}"
+      f"{_miss_n:>8}{_rate:>7.0f}%   {_tot_rev:>5}")
+print(f"\n  ★ 「BT投入」が予算({args.budget_man:g}万)より 60万以上 少ない日は、"
+      f"予算にまだ1単元ぶんの余裕がある\n"
+      f"     = その日の抜けは **予算落ちでは説明できない**(母集団に本当に無い)。"
+      f"⚠ が付いた日だけ予算落ちが混ざりうる。")
 
 if not _tot_pass:
     raise SystemExit("\n[error] ライブの合格が0件です。k_paper の中身を確認してください")
@@ -263,7 +293,8 @@ else:
     print(f"  {'日付':<12}{'銘柄':>6}{'ギャップ':>9}{'発注':>5}{'株数':>6}"
           f"{'実損益':>10}{'推定損益':>10}  {'推定の内訳'}")
     _real_sum = _real_n = 0
-    _est_sum = _est_n = _est_amb = 0
+    _est_sum = _est_n = _est_amb = _est_zero = 0
+    _est_vals: list[float] = []
     for r in sorted(_miss_all, key=lambda x: (x["_day"], _n(x.get("symbol")))):
         _s = _n(r.get("symbol"))
         _day = r["_day"]
@@ -275,7 +306,12 @@ else:
             _real_sum += _real
             _real_n += 1
         _est_txt, _est = "", None
-        if args.estimate:
+        if args.estimate and _qty <= 0:
+            # ⛔ 株数0(その日の予算枠で1単元も建たなかった)を損益0として平均に
+            #   混ぜると、抜けの期待値がゼロ方向に薄まる。件数だけ数えて除外する。
+            _est_txt = "株数0(推定不能)"
+            _est_zero += 1
+        elif args.estimate:
             _bar = _daily_bar(_s, _day)
             if _bar:
                 _o, _hi, _lo, _cl = _bar
@@ -296,6 +332,7 @@ else:
                 if _est is not None:
                     _est_sum += _est
                     _est_n += 1
+                    _est_vals.append(_est)
             else:
                 _est_txt = "日足なし"
         _rs = f"{_real:+,.0f}" if _real is not None else "—"
@@ -309,9 +346,17 @@ else:
         print(f"  ★ 実約定できた {_real_n}件 の合計: **{_real_sum:+,.0f}円** "
               f"(1件あたり {_real_sum / _real_n:+,.0f}円)")
     if args.estimate and _est_n:
+        _ev = sorted((abs(x), x) for x in _est_vals)
+        _top = _ev[-1][1] if _ev else 0
         print(f"  ★ 日足で推定できた {_est_n}件 の合計: **{_est_sum:+,.0f}円** "
               f"(1件あたり {_est_sum / _est_n:+,.0f}円)"
-              + (f" / 判定不能 {_est_amb}件" if _est_amb else ""))
+              + (f" / 判定不能 {_est_amb}件" if _est_amb else "")
+              + (f" / 株数0で除外 {_est_zero}件" if _est_zero else ""))
+        if _est_n > 1 and abs(_top) > abs(_est_sum) * 0.4:
+            print(f"     ⛔ **最大の1件({_top:+,.0f}円)が合計の "
+                  f"{abs(_top) / max(1, abs(_est_sum)) * 100:.0f}% を占めています。**"
+                  f" 除くと 1件あたり {(_est_sum - _top) / max(1, _est_n - 1):+,.0f}円。"
+                  f"この件数では平均に意味がありません")
     if not args.estimate:
         print("  （--estimate を付けると、発注しなかったぶんも日足で推定します）")
 
