@@ -804,22 +804,37 @@ if a.confirm:
     print("  " + "-" * 42)
     for _nm, _sel in ((f"TRAIN", _sel_tr), (f"TEST", _sel_te)):
         print(f"  {_nm:<12}{len(_sel):>10,}{_bp(_sel):>+10.1f}{_cluster_t(_sel):>+9.2f}")
-    _base = _bp(_tep)
-    _got = _bp(_sel_te)
-    print(f"\n  絞らない場合の TEST: {_base:+.1f}bp / 絞った場合: {_got:+.1f}bp "
-          f"→ 差 {_got - _base:+.1f}bp")
+    _base_tr, _base = _bp(_trp), _bp(_tep)
+    _got_tr, _got = _bp(_sel_tr), _bp(_sel_te)
+    _d_tr, _d_te = _got_tr - _base_tr, _got - _base
+    print(f"\n  {'窓':<8}{'絞らない':>10}{'絞った':>10}{'改善':>10}")
+    print("  " + "-" * 38)
+    print(f"  {'TRAIN':<8}{_base_tr:>+10.1f}{_got_tr:>+10.1f}{_d_tr:>+10.1f}")
+    print(f"  {'TEST':<8}{_base:>+10.1f}{_got:>+10.1f}{_d_te:>+10.1f}")
     _ok1, _ok2 = _got >= PASS_BP, _cluster_t(_sel_te) >= PASS_T
-    print(f"\n  {'✅' if _ok1 else '⛔'} ① TEST bp ≥ {PASS_BP}   {_got:+.1f}bp")
-    print(f"  {'✅' if _ok2 else '⛔'} ② TEST t ≥ {PASS_T}      "
+    print(f"\n  {'✅' if _ok1 else '⛔'} ① TEST bp ≥ {PASS_BP}       {_got:+.1f}bp")
+    print(f"  {'✅' if _ok2 else '⛔'} ② TEST t ≥ {PASS_T}          "
           f"t={_cluster_t(_sel_te):+.2f}")
-    print(f"  {'✅' if _got > _base else '⛔'} ③ 絞らない場合を上回る  "
-          f"{_got - _base:+.1f}bp")
-    print(f"\n  {'=' * 60}")
-    print(f"  {'✅ **合格。**' if (_ok1 and _ok2 and _got > _base) else '⛔ **不合格。**'}"
+    print(f"  {'✅' if _got > _base else '⛔'} ③ TEST で絞らない場合を上回る  {_d_te:+.1f}bp")
+    _ok4 = _d_tr > 0 and (_d_te <= 0 or _d_tr >= _d_te / 3.0)
+    print(f"  {'✅' if _ok4 else '⛔'} ④ **TRAIN でも効いている**    "
+          f"TRAIN {_d_tr:+.1f}bp / TEST {_d_te:+.1f}bp")
+    _core = _ok1 and _ok2 and _got > _base
+    print(f"\n  {'=' * 68}")
+    print(f"  {'✅ **①〜③ 合格。**' if _core else '⛔ **不合格。**'}"
           f" 候補 {AXES[_cax]}:{_cq}")
+    if _core and not _ok4:
+        # §18.13 に自分で書いた作法。③だけだと TEST 期間のノイズを拾う。
+        print(f"\n  ⚠⚠ **ただし ④ が落ちている。そのまま採用してはいけない。**")
+        print(f"     TRAIN の改善 {_d_tr:+.1f}bp に対し TEST は {_d_te:+.1f}bp。")
+        print(f"     §18.13:『TRAIN で効いていないものを候補にしない。符号一致だけを")
+        print(f"     条件にすると TRAIN t=+0.2 のような無意味な値でも通る。**それは")
+        print(f"     検証ではなく TEST 期間のノイズ**』")
+        print(f"     → --explore で TRAIN の分位別を見ること(TEST は汚れません)。")
+        print(f"       TRAIN でも単調に効いていれば本物、Q1 だけ跳ねていればノイズ。")
     print(f"  ⛔ 不合格なら、別の分位・別の軸で試し直さないこと。")
     print(f"     試すたびに TEST が既見になり、検証手段が減ります。")
-    print(f"  {'=' * 60}")
+    print(f"  {'=' * 68}")
     sys.exit(0)
 
 _verdict: dict[str, dict] = {}
