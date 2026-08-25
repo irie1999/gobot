@@ -10583,9 +10583,16 @@ function switchTbd(id, tab) {{
                                               str(x.get("symbol") or "")))
             if len(_rows_out) >= _TRADES_CSV_BEST_N:   # 最長窓(件数最多)だけ採用
                 _TRADES_CSV_BEST_N = len(_rows_out)
+                # ★ days_to_fill: シグナルの何営業日後に約定したか(0=判定日=翌営業日)。
+                #   **ライブの J はシグナル翌営業日しか見ない**ので、
+                #     0 → ライブと一致 / >0 → **ライブは建てない日**(母集団の余分)
+                #   さらに >0 のとき、その注文の『判定日(D+1)』の記録は存在しない
+                #   = 「ギャップアップして D+1 に戻らなかった日」がまだ抜けている
+                #   (§18.50 の残る穴 (c))。ここを数えられるように列に出す。
                 _cols = ["entry_date", "exit_date", "symbol", "name", "strategy",
                          "bt", "wf", "reason", "order_limit", "entry_p", "exit_p",
                          "stop_price", "target_price", "qty", "hold_days",
+                         "days_to_fill",
                          "liquidity", "mode", "pnl", "entry_time"]
                 with open(_trades_csv, "w", newline="", encoding="utf-8-sig") as _f2:
                     _w2 = _csvmod2.writer(_f2)
@@ -10600,7 +10607,7 @@ function switchTbd(id, tab) {{
                             _t.get("order_limit", ""), _t.get("entry_p", ""),
                             _t.get("exit_p", ""), _t.get("order_stop", _t.get("stop_price", "")),
                             _t.get("order_target", _t.get("target_price", "")), _t.get("qty", ""),
-                            _t.get("hold_days", ""),
+                            _t.get("hold_days", ""), _t.get("days_to_fill", ""),
                             # ⛔ トレード dict は liquidity を持たないので、空のまま
                             #    書き出していた。予算タブ本体は _liquidity_of() を
                             #    直接呼ぶので正しいが、CSV だけ列が空になり
@@ -13347,6 +13354,7 @@ function switchTbd(id, tab) {{
                         _t.get("order_stop", _t.get("stop_price", "")),
                         _t.get("order_target", _t.get("target_price", "")),
                         _t.get("qty", ""), _t.get("hold_days", ""),
+                        _t.get("days_to_fill", ""),
                         (_t.get("liquidity")
                          or round(_liquidity_of(str(_t.get("symbol", ""))), 0)),
                         "limit", _t.get("pnl", ""), _t.get("entry_time", ""),
