@@ -463,6 +463,14 @@ def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
     rows.sort(key=lambda x: x[0])
     best = max(rows, key=lambda x: x[2])
     worst = min(rows, key=lambda x: x[2])
+    # ⛔ 日の中で値が一定の軸(曜日など)は、日の中でシャッフルしても何も変わらない
+    #    = 帰無 == 実測 になり較正不能。候補として扱ってはいけない。
+    #    2026-08-25 に曜日で 実測/帰無中央/帰無95% が3つとも +21.7 になって発覚。
+    _const_in_day = bool(sub.groupby("date")["_q"].nunique().max() <= 1)
+    if _const_in_day:
+        return {"label": label, "col": col, "rows": rows, "best": best,
+                "worst": worst, "null_med": float("nan"),
+                "null_p95": float("nan"), "hit": False, "uncalib": True}
     # 帰無: 日の中で分位ラベルだけを入れ替え、**同じく最良分位を選ぶ**
     import random as _rnd
     rng = _rnd.Random(a.seed)
@@ -487,7 +495,7 @@ def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
     med = nulls[len(nulls) // 2]
     return {"label": label, "col": col, "rows": rows, "best": best,
             "worst": worst, "null_med": med, "null_p95": p95,
-            "hit": best[2] > p95}
+            "hit": best[2] > p95, "uncalib": False}
 
 
 def _band(g: float) -> str:
@@ -742,8 +750,13 @@ if a.explore:
         if not _res:
             print(f"  {AXES[_ax]:<22}{'—':>6}{'(データ不足)':>9}")
             continue
-        _tried += 1
         _b = _res["best"]
+        if _res.get("uncalib"):
+            # 日の中で値が一定の軸(曜日) = シャッフルが効かず較正不能
+            print(f"  {_res['label']:<22}{_b[0]:>6}{_b[1]:>9,}{_b[2]:>+9.1f}"
+                  f"{_b[3]:>+8.2f}{'—':>9}{'—':>9}  ⛔ 較正不能(日の中で一定)")
+            continue
+        _tried += 1
         _mk = "✅ 候補" if _res["hit"] else "—"
         if _res["hit"]:
             _hits.append(_res)
@@ -807,6 +820,26 @@ if a.confirm:
     _base_tr, _base = _bp(_trp), _bp(_tep)
     _got_tr, _got = _bp(_sel_tr), _bp(_sel_te)
     _d_tr, _d_te = _got_tr - _base_tr, _got - _base
+    # TEST の**全分位**を出す。判定は指定分位だけだが、形が見えないと
+    # 「最良だけ跳ねている」のか「単調」なのかが分からない。
+    # ⚠ ここで別の分位に乗り換えないこと。それは再探索。
+    if _cax != "dow":
+        print(f"\n  TEST の全分位 (境界は TRAIN で決めたもの / 判定は {_cq} のみ)")
+        print(f"    {'分位':<6}{'件数':>10}{'bp/件':>9}{'日t':>8}   TRAIN")
+        print("    " + "-" * 46)
+        _sv_tr = pd.to_numeric(_trp[_cax], errors="coerce")
+        _sv_te = pd.to_numeric(_tep[_cax], errors="coerce")
+        for _qq in range(len(_edges) - 1):
+            _le = -float("inf") if _qq == 0 else float(_edges[_qq])
+            _he = float("inf") if _qq == len(_edges) - 2 else float(_edges[_qq + 1])
+            _g_te = _tep[(_sv_te >= _le) & (_sv_te < _he)]
+            _g_tr = _trp[(_sv_tr >= _le) & (_sv_tr < _he)]
+            if _g_te.empty:
+                continue
+            _m2 = " ★判定" if _qq == _qi else ""
+            print(f"    Q{_qq + 1:<5}{len(_g_te):>10,}{_bp(_g_te):>+9.1f}"
+                  f"{_cluster_t(_g_te):>+8.2f}{_bp(_g_tr):>+8.1f}{_m2}")
+        print(f"    ⚠ ここで別の分位に乗り換えないこと。それは検証ではなく再探索です。")
     print(f"\n  {'窓':<8}{'絞らない':>10}{'絞った':>10}{'改善':>10}")
     print("  " + "-" * 38)
     print(f"  {'TRAIN':<8}{_base_tr:>+10.1f}{_got_tr:>+10.1f}{_d_tr:>+10.1f}")
