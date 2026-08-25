@@ -227,6 +227,15 @@ ap.add_argument("--list-axes", action="store_true", help="探索できる軸を�
 ap.add_argument("--nq", type=int, default=5, help="軸を何分位に切るか(既定5)")
 ap.add_argument("--axis-seeds", type=int, default=50,
                 help="軸探索の帰無較正の本数(既定50。軸×分位ぶん回るので重い)")
+ap.add_argument("--sweep-barrier", action="store_true",
+                help="★ 損切り/利確を **TRAIN だけ**で掃く。"
+                     "『効果がない』の確認は TRAIN で完結する(TRAIN で効かない"
+                     "ものが TEST で効くことは期待できない / §18.13)ので、"
+                     "**TEST を1回も使わない**")
+ap.add_argument("--sm-list", type=str, default="0,0.1,0.3,0.5,1.0,2.0",
+                help="損切りATR倍率(0=損切りなし=現行)")
+ap.add_argument("--tm-list", type=str, default="0,0.5,1.0,2.0",
+                help="利確ATR倍率(0=利確なし=現行)")
 ap.add_argument("--confirm", type=str, default="",
                 help="★ 検証モード。'軸:分位' を指定して **TEST で1回だけ**測る"
                      "(例 atr_pct:Q1 / dow:0)。⛔ 1つの候補につき1回だけ")
@@ -342,7 +351,8 @@ def _scan(sym: str) -> list[dict]:
     _v = df["volume"] if "volume" in df.columns else pd.Series(0.0, index=df.index)
     _pcs = _c.shift(1)
     _tr = pd.concat([_h - _l, (_h - _pcs).abs(), (_l - _pcs).abs()], axis=1).max(axis=1)
-    _atr_pct = (_tr.ewm(span=14, adjust=False).mean() / _c * 100.0)
+    _atr_v = _tr.ewm(span=14, adjust=False).mean()        # ATR 本体(バリア用)
+    _atr_pct = (_atr_v / _c * 100.0)
     _turn = (_c * _v).rolling(20).mean()                  # 売買代金 20日平均
     _mx20, _mn20 = _c.rolling(20).max(), _c.rolling(20).min()
     _rngpos = ((_c - _mn20) / (_mx20 - _mn20).replace(0.0, float("nan")) * 100.0)
@@ -391,6 +401,13 @@ def _scan(sym: str) -> list[dict]:
             "pnl": (o1 - c1) * a.qty,          # C: 寄りで売って引けで買い戻す
             "sig": 1 if _st else 0,
             "strats": ",".join(sorted(set(_st))),
+            # ── バリア(損切り/利確)を測るための D+1 の値幅 ──
+            # ⚠ 日足なので「高値と安値のどちらが先か」は分からない(§18.6)。
+            #   両方触れた日は 損切り優先/利確優先 の**両方**を出す。
+            "d1_high": float(df["high"].iloc[pos + 1]),
+            "d1_low": float(df["low"].iloc[pos + 1]),
+            "d1_close": c1,
+            "atr": _fv(_atr_v, pos) or 0.0,    # D 時点の ATR(前夜に確定)
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
             "liq": _fv(_turn, pos),
@@ -732,6 +749,90 @@ if a.explore or a.confirm:
     _test_n = "＋".join(n for n, _ in _segs_only[1:]) or "(なし)"
     _test = (pd.concat([s for _, s in _segs_only[1:]])
              if len(_segs_only) > 1 else r_all.iloc[0:0])
+
+if a.sweep_barrier:
+    # ══ 損切り/利確のスイープ (TRAIN のみ) ═══════════════════════════
+    #   ⛔ TEST は 1 回も使わない。「効果がない」の確認は TRAIN で完結する。
+    #   ⚠ 日足なので **高値と安値のどちらが先か分からない**(§18.6)。
+    #      両方触れた日は「損切り優先(保守)」と「利確優先(楽観)」の両方を出す。
+    #      真値はその間にある。
+    #   ⚠ 約定は **ラインちょうど**(楽観)。実際はギャップで飛ぶ(§18.9.1)。
+    #      つまりこの測定は **バリアに有利**。それでも現行に勝てないなら結論は強い。
+    _tb = _pool_of(_train)
+    _tb = _tb[(_tb["atr"] > 0) & _tb["d1_high"].notna() & _tb["d1_low"].notna()]
+    if _tb.empty:
+        sys.exit("[error] バリアを測れる行がありません")
+    _sms = [float(x) for x in a.sm_list.split(",") if x.strip()]
+    _tms = [float(x) for x in a.tm_list.split(",") if x.strip()]
+    print(f"\n{'=' * 78}\n■ 損切り/利確のスイープ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません。『効果がない』の確認は TRAIN で完結します")
+    print(f"  対象 {len(_tb):,}銘柄日 / {_tb['date'].nunique():,}営業日 / "
+          f"ギャップ ≥{a.min_gap_bp:.0f}bp")
+    print(f"  ⚠ 日足なので高値/安値の**順序が分からない**。両方触れた日は"
+          f"『損切り優先(保守)』『利確優先(楽観)』の両方を出します")
+    print(f"  ⚠ 約定は**ラインちょうど**(楽観)。実際はギャップで飛ぶ(§18.9.1)ので、"
+          f"この測定は**バリアに有利**です")
+
+    _ep = _tb["entry_p"].to_numpy(dtype=float)
+    _at = _tb["atr"].to_numpy(dtype=float)
+    _hi = _tb["d1_high"].to_numpy(dtype=float)
+    _lo = _tb["d1_low"].to_numpy(dtype=float)
+    _cl = _tb["d1_close"].to_numpy(dtype=float)
+    _dt = _tb["date"].to_numpy()
+
+    def _bar_pnl(sm: float, tm: float, stop_first: bool):
+        """ショート: 損切り=建値+sm*ATR(上) / 利確=建値-tm*ATR(下)。"""
+        import numpy as _np
+        _stop = _ep + _at * sm if sm > 0 else None
+        _targ = _ep - _at * tm if tm > 0 else None
+        _hit_s = (_hi >= _stop) if _stop is not None else _np.zeros(len(_ep), bool)
+        _hit_t = (_lo <= _targ) if _targ is not None else _np.zeros(len(_ep), bool)
+        _exit = _cl.copy()
+        _both = _hit_s & _hit_t
+        _only_s = _hit_s & ~_hit_t
+        _only_t = _hit_t & ~_hit_s
+        if _stop is not None:
+            _exit = _np.where(_only_s, _stop, _exit)
+        if _targ is not None:
+            _exit = _np.where(_only_t, _targ, _exit)
+        if _both.any():
+            _exit = _np.where(_both, _stop if stop_first else _targ, _exit)
+        return ((_ep - _exit) * a.qty, int(_hit_s.sum()), int(_hit_t.sum()),
+                int(_both.sum()))
+
+    for _order, _olbl in ((True, "損切り優先(保守)"), (False, "利確優先(楽観)")):
+        print(f"\n  ── {_olbl} ── (円/件。**太字が現行 = sm0/tm0 = バリアなし**)")
+        _hdr = f"    {'損切ATR':<9}" + "".join(f"{'tm' + str(t):>12}" for t in _tms)
+        print(_hdr)
+        print("    " + "-" * (9 + 12 * len(_tms)))
+        _base_v = None
+        for _sm in _sms:
+            _row = f"    {('なし' if _sm == 0 else str(_sm)):<9}"
+            for _tm in _tms:
+                _v, _ns, _nt, _nb = _bar_pnl(_sm, _tm, _order)
+                _m = float(_v.mean())
+                if _sm == 0 and _tm == 0:
+                    _base_v = _m
+                _mk = "★" if (_sm == 0 and _tm == 0) else " "
+                _row += f"{_m:>+11,.0f}{_mk}"
+            print(_row)
+        if _base_v is not None:
+            print(f"    ★ = 現行(バリアなし) {_base_v:+,.0f}円/件")
+    # 発動件数(現行に最も近い水準で)
+    for _sm in [s for s in _sms if s > 0][:3]:
+        _v, _ns, _nt, _nb = _bar_pnl(_sm, 1.0, True)
+        print(f"\n  sm{_sm} / tm1.0 の発動: 損切り {_ns:,}件 "
+              f"({_ns / len(_ep) * 100:.0f}%) / 利確 {_nt:,}件 "
+              f"({_nt / len(_ep) * 100:.0f}%) / **両方触れた {_nb:,}件 "
+              f"({_nb / len(_ep) * 100:.0f}%)**")
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 読み方: **★(現行) より明確に良い升が無ければ「意味がない」で確定**。")
+    print(f"     この測定はバリアに有利(ラインちょうど約定・楽観)なので、")
+    print(f"     ここで勝てないなら実運用では確実に負けます。")
+    print(f"  ⛔ 良い升があっても、そこで採用しないこと。TEST での検証が要ります")
+    print(f"     (そして TEST は既に2回使っています)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
 
 if a.explore:
     _tr = _pool_of(_train)
