@@ -217,6 +217,19 @@ ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--out", type=str, default="", help="銘柄日の明細をCSVに書く")
 ap.add_argument("--note", type=str, default="",
                 help="試行記録(gap_edge_trials.csv)に残すメモ。何を試したのか")
+ap.add_argument("--explore", action="store_true",
+                help="★ 探索モード。**TRAIN(最も古い窓)だけ**で選別軸を掃く。"
+                     "TEST は集計すらしない(誤って見ないためのガード)。"
+                     "判定は出さない — 出た候補を --confirm で1回だけ検証する")
+ap.add_argument("--axes", type=str, default="",
+                help="探索する軸(カンマ区切り)。空なら全部。名前は --list-axes で確認")
+ap.add_argument("--list-axes", action="store_true", help="探索できる軸を並べて終了")
+ap.add_argument("--nq", type=int, default=5, help="軸を何分位に切るか(既定5)")
+ap.add_argument("--axis-seeds", type=int, default=50,
+                help="軸探索の帰無較正の本数(既定50。軸×分位ぶん回るので重い)")
+ap.add_argument("--confirm", type=str, default="",
+                help="★ 検証モード。'軸:分位' を指定して **TEST で1回だけ**測る"
+                     "(例 atr_pct:Q1 / dow:0)。⛔ 1つの候補につき1回だけ")
 ap.add_argument("--no-refetch", action="store_true",
                 help="キャッシュが --days ぶん遡っていなくても再ダウンロードしない。"
                      "⛔ 古い窓のデータが欠けたまま測ることになる(第3回の事故)")
@@ -224,6 +237,28 @@ ap.add_argument("--min-density", type=float, default=0.10,
                 help="判定窓の1日あたり銘柄日数が、最も濃い窓の何倍を下回ったら"
                      "『測定不能』にするか(既定0.10=1/10)")
 a = ap.parse_args()
+
+if a.list_axes:
+    print("探索できる軸 (すべて寄り時点で確定 = D までの日足 + D+1 の始値):")
+    _AX = {
+        "atr_pct": "ATR%(ボラ) — 低ボラ銘柄の大ギャップほど異常＝反落しやすい?",
+        "liq": "売買代金20日平均 — 薄いほどオーバーシュートしやすい(が執行も重い)",
+        "range_pos": "20日レンジ位置% — 既に高値圏でのギャップは続伸しやすい?",
+        "ret1": "前日リターン% — 前日も上げていたなら過熱?",
+        "ret5": "5日リターン%",
+        "ret20": "20日リターン%",
+        "up_streak": "連続上昇日数",
+        "vol_ratio": "出来高比(D/20日平均) — ⚠ D の出来高。当日は先読みなので使わない",
+        "entry_p": "建値",
+        "gap_bp": "ギャップbp(参考。既に閾値で切っている)",
+        "dow": "曜日(0=月 〜 4=金)",
+    }
+    for _k, _d in _AX.items():
+        print(f"  {_k:<12}{_d}")
+    print("\n⚠ atr_pct / liq / range_pos / up_streak / entry_p / dow は §18.13 で"
+          "測って候補ゼロ。\n   ただしあれは lss の母集団(約定した日だけ)。"
+          "今回は全銘柄日なので、母集団が違う。")
+    sys.exit(0)
 
 # ① の水準は執行方式で決まる(執行コストの3倍)。**測る前に紐付けてある**
 EXEC_BP = EXEC_COST_BP[a.exec_mode]
@@ -296,6 +331,33 @@ def _scan(sym: str) -> list[dict]:
         except Exception:
             continue
 
+    # ── 選別軸。**すべて D(前日終値)時点で確定しているものだけ** ──────────
+    # ⛔ 当日(D+1)の出来高・高値・安値は引け後にしか分からない = 先読み。使わない。
+    #    使ってよいのは D までの日足と、D+1 の**始値**だけ。
+    _c, _h, _l = df["close"], df["high"], df["low"]
+    _v = df["volume"] if "volume" in df.columns else pd.Series(0.0, index=df.index)
+    _pcs = _c.shift(1)
+    _tr = pd.concat([_h - _l, (_h - _pcs).abs(), (_l - _pcs).abs()], axis=1).max(axis=1)
+    _atr_pct = (_tr.ewm(span=14, adjust=False).mean() / _c * 100.0)
+    _turn = (_c * _v).rolling(20).mean()                  # 売買代金 20日平均
+    _mx20, _mn20 = _c.rolling(20).max(), _c.rolling(20).min()
+    _rngpos = ((_c - _mn20) / (_mx20 - _mn20).replace(0.0, float("nan")) * 100.0)
+    _ret1, _ret5, _ret20 = (_c.pct_change(1) * 100.0, _c.pct_change(5) * 100.0,
+                            _c.pct_change(20) * 100.0)
+    _volr = _v / _v.rolling(20).mean().replace(0.0, float("nan"))
+    _sl, _s = [], 0                                       # 連続上昇日数(D時点まで)
+    for _u in (_c > _c.shift(1)).fillna(False).tolist():
+        _s = _s + 1 if _u else 0
+        _sl.append(_s)
+    _streak = pd.Series(_sl, index=df.index, dtype=float)
+
+    def _fv(s, i):
+        try:
+            x = float(s.iloc[i])
+            return x if x == x else None
+        except Exception:
+            return None
+
     # 全営業日について D → D+1 を測る。シグナル日かどうかはフラグで持つだけ。
     out: list[dict] = []
     _idx = df.index
@@ -325,8 +387,107 @@ def _scan(sym: str) -> list[dict]:
             "pnl": (o1 - c1) * a.qty,          # C: 寄りで売って引けで買い戻す
             "sig": 1 if _st else 0,
             "strats": ",".join(sorted(set(_st))),
+            # ── 選別軸(D時点で確定) ──
+            "atr_pct": _fv(_atr_pct, pos),
+            "liq": _fv(_turn, pos),
+            "range_pos": _fv(_rngpos, pos),
+            "ret1": _fv(_ret1, pos),
+            "ret5": _fv(_ret5, pos),
+            "ret20": _fv(_ret20, pos),
+            "up_streak": _fv(_streak, pos),
+            "vol_ratio": _fv(_volr, pos),
+            "dow": float(d1.dayofweek),
         })
     return out
+
+
+# 探索できる軸。**すべて寄り時点で確定している**(D までの日足 + D+1 の始値)。
+AXES = {
+    "atr_pct":   "ATR%(ボラ)",
+    "liq":       "売買代金20日平均",
+    "range_pos": "20日レンジ位置%",
+    "ret1":      "前日リターン%",
+    "ret5":      "5日リターン%",
+    "ret20":     "20日リターン%",
+    "up_streak": "連続上昇日数",
+    "vol_ratio": "出来高比(D/20日平均)",
+    "entry_p":   "建値",
+    "gap_bp":    "ギャップbp(参考)",
+    "dow":       "曜日",
+}
+
+
+def _qlabel(sub: pd.DataFrame, col: str, nq: int):
+    """軸を分位(または離散値)に切って (ラベル, 添字Series) を返す。"""
+    s = sub[col] if col in sub.columns else None
+    if s is None:
+        return None
+    s = pd.to_numeric(s, errors="coerce")
+    ok = s.notna()
+    if int(ok.sum()) < 500:
+        return None
+    if col == "dow":
+        return s.where(ok).map(lambda x: f"{int(x)}" if x == x else None)
+    try:
+        q = pd.qcut(s[ok], nq, labels=False, duplicates="drop")
+    except Exception:
+        return None
+    out = pd.Series(index=sub.index, dtype=object)
+    out.loc[q.index] = [f"Q{int(v) + 1}" for v in q]
+    return out
+
+
+def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
+    """1軸を分位に切って、最良分位の bp を帰無分布と比べる。
+
+    ⚠ 実測でも帰無でも **同じ『最良を選ぶ』操作**をする。
+       最大値を選ぶ操作それ自体で z が平均 +1 前後ずれる(§18.34b で実測 +1.17)。
+       0 と比べてはいけない。
+    ⚠ シャッフルは **同じ日の中だけ**。日をまたぐと日内相関が壊れて帰無分布が
+       狭くなり、偽陽性を過小評価する(§18.13)。
+    """
+    lab = _qlabel(w, col, nq)
+    if lab is None:
+        return None
+    sub = w.loc[lab.notna()].copy()
+    sub["_q"] = lab[lab.notna()]
+    if sub.empty:
+        return None
+    rows = []
+    for q, g in sub.groupby("_q"):
+        if len(g) < 200:
+            continue
+        rows.append((str(q), len(g), _bp(g), _cluster_t(g)))
+    if len(rows) < 2:
+        return None
+    rows.sort(key=lambda x: x[0])
+    best = max(rows, key=lambda x: x[2])
+    worst = min(rows, key=lambda x: x[2])
+    # 帰無: 日の中で分位ラベルだけを入れ替え、**同じく最良分位を選ぶ**
+    import random as _rnd
+    rng = _rnd.Random(a.seed)
+    groups = [(list(g["_q"]),
+               (g["pnl"] / (g["entry_p"] * a.qty) * 10_000.0).tolist())
+              for _, g in sub.groupby("date")]
+    nulls = []
+    for _ in range(max(1, seeds)):
+        acc: dict[str, list[float]] = {}
+        for qs, vs in groups:
+            qs2 = list(qs)
+            rng.shuffle(qs2)
+            for k, v in zip(qs2, vs):
+                acc.setdefault(k, []).append(v)
+        cand = [sum(v) / len(v) for k, v in acc.items() if len(v) >= 200]
+        if cand:
+            nulls.append(max(cand))
+    if not nulls:
+        return None
+    nulls.sort()
+    p95 = nulls[min(len(nulls) - 1, int(len(nulls) * 0.95))]
+    med = nulls[len(nulls) // 2]
+    return {"label": label, "col": col, "rows": rows, "best": best,
+            "worst": worst, "null_med": med, "null_p95": p95,
+            "hit": best[2] > p95}
 
 
 def _band(g: float) -> str:
@@ -547,6 +708,119 @@ if a.split:
         print(f"  ⚠ ホールドアウトは **上限で切る**(§18.25 の事故)")
         print(f"  ⚠ 落ちたときに『相場が特殊だった』と言わないこと(宣言済み)")
         _windows += _segs
+
+# ══ 探索モード / 検証モード ═══════════════════════════════════════════
+#   探索: TRAIN(最も古い窓)だけを掃く。**TEST は集計すらしない**。
+#   検証: 指定した1候補を TEST で1回だけ測る。
+if a.explore or a.confirm:
+    _segs_only = [(_n, _s) for _n, _s in _windows if _n != "全期間"]
+    if not _segs_only:
+        sys.exit("[error] --split が要ります(TRAIN/TEST を分けないと探索できません)")
+    _train_n, _train = _segs_only[0]
+    _test_n = "＋".join(n for n, _ in _segs_only[1:]) or "(なし)"
+    _test = (pd.concat([s for _, s in _segs_only[1:]])
+             if len(_segs_only) > 1 else r_all.iloc[0:0])
+
+if a.explore:
+    _tr = _pool_of(_train)
+    print(f"\n{'=' * 78}\n■ 軸別探索 — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST({_test_n}) は **集計していません**。誤って見ないためのガードです。")
+    print(f"  対象 {len(_tr):,}銘柄日 / {_tr['date'].nunique():,}営業日 / "
+          f"ギャップ ≥{a.min_gap_bp:.0f}bp / {a.nq}分位")
+    print(f"  ⚠ 帰無は **実測と同じ『最良分位を選ぶ』操作**を掛けて較正します。"
+          f"最大を選ぶだけで z は平均+1ずれる(§18.34b)。0 と比べてはいけません。")
+    _want = [x.strip() for x in a.axes.split(",") if x.strip()] or list(AXES)
+    _hits, _tried = [], 0
+    print(f"\n  {'軸':<22}{'最良':>6}{'件数':>9}{'bp/件':>9}{'日t':>8}"
+          f"{'帰無中央':>9}{'帰無95%':>9}  判定")
+    print("  " + "-" * 84)
+    for _ax in _want:
+        if _ax not in AXES:
+            print(f"  ⚠ 未知の軸: {_ax}(--list-axes で確認)")
+            continue
+        _res = _axis_scan(_tr, _ax, AXES[_ax], a.nq, a.axis_seeds)
+        if not _res:
+            print(f"  {AXES[_ax]:<22}{'—':>6}{'(データ不足)':>9}")
+            continue
+        _tried += 1
+        _b = _res["best"]
+        _mk = "✅ 候補" if _res["hit"] else "—"
+        if _res["hit"]:
+            _hits.append(_res)
+        print(f"  {_res['label']:<22}{_b[0]:>6}{_b[1]:>9,}{_b[2]:>+9.1f}"
+              f"{_b[3]:>+8.2f}{_res['null_med']:>+9.1f}{_res['null_p95']:>+9.1f}  {_mk}")
+    print(f"\n  掃いた軸 {_tried} / **候補 {len(_hits)} 個** "
+          f"(帰無の期待 {_tried * 0.05:.1f} 個)")
+    if _hits:
+        print(f"\n  候補の中身:")
+        for _r in _hits:
+            print(f"    ▶ {_r['label']} ({_r['col']})")
+            for _q, _n, _bpv, _tv in _r["rows"]:
+                _m = " ★最良" if _q == _r["best"][0] else ""
+                print(f"       {_q:<5}{_n:>9,}{_bpv:>+9.1f}bp{_tv:>+8.2f}{_m}")
+        print(f"\n  ⛔ **ここで採用しないこと。** TRAIN で最良を選んだだけです。")
+        print(f"     TEST で検証するには 1候補につき1回だけ:")
+        for _r in _hits:
+            print(f"       python analyze_gap_edge.py --workers {a.workers} "
+                  f"--days {a.days} --min-gap-bp {a.min_gap_bp:.0f} "
+                  f"--split {a.split} --confirm {_r['col']}:{_r['best'][0]}")
+    else:
+        print(f"\n  ⛔ 候補ゼロ。この母集団でも選別軸は見つかりませんでした。")
+        print(f"     §18.13(15軸78検定) / §18.24 / §18.31 / §18.48⑪ と同じ結論です。")
+    sys.exit(0)
+
+if a.confirm:
+    _cax, _, _cq = a.confirm.partition(":")
+    _cax, _cq = _cax.strip(), _cq.strip()
+    if _cax not in AXES or not _cq:
+        sys.exit(f"[error] --confirm は '軸:分位' の形で指定します(例 atr_pct:Q1)。"
+                 f"軸は {', '.join(AXES)}")
+    print(f"\n{'=' * 78}\n■ 検証 — **TEST({_test_n}) で1回だけ**\n{'=' * 78}")
+    print(f"  候補: {AXES[_cax]} の {_cq}  /  ギャップ ≥{a.min_gap_bp:.0f}bp")
+    print(f"  ⚠ 分位の境界は **TRAIN({_train_n}) で決めて TEST に当てはめます**。"
+          f"TEST の分布で切り直すと、それは検証ではなく再探索です。")
+    _trp, _tep = _pool_of(_train), _pool_of(_test)
+    if _cax == "dow":
+        _sel_tr = _trp[_trp["dow"] == float(_cq)]
+        _sel_te = _tep[_tep["dow"] == float(_cq)]
+    else:
+        _s_tr = pd.to_numeric(_trp[_cax], errors="coerce")
+        try:
+            _edges = pd.qcut(_s_tr[_s_tr.notna()], a.nq, retbins=True,
+                             duplicates="drop")[1]
+        except Exception:
+            sys.exit("[error] TRAIN で分位を作れません")
+        _qi = int(_cq.lstrip("Qq")) - 1
+        if not (0 <= _qi < len(_edges) - 1):
+            sys.exit(f"[error] 分位 {_cq} が範囲外(1〜{len(_edges) - 1})")
+        _lo_e = -float("inf") if _qi == 0 else float(_edges[_qi])
+        _hi_e = float("inf") if _qi == len(_edges) - 2 else float(_edges[_qi + 1])
+        print(f"  TRAIN で決めた境界: {_lo_e:,.4g} 〜 {_hi_e:,.4g}")
+        _sel_tr = _trp[(pd.to_numeric(_trp[_cax], errors="coerce") >= _lo_e)
+                       & (pd.to_numeric(_trp[_cax], errors="coerce") < _hi_e)]
+        _sel_te = _tep[(pd.to_numeric(_tep[_cax], errors="coerce") >= _lo_e)
+                       & (pd.to_numeric(_tep[_cax], errors="coerce") < _hi_e)]
+    print(f"\n  {'窓':<12}{'件数':>10}{'bp/件':>10}{'日t':>9}")
+    print("  " + "-" * 42)
+    for _nm, _sel in ((f"TRAIN", _sel_tr), (f"TEST", _sel_te)):
+        print(f"  {_nm:<12}{len(_sel):>10,}{_bp(_sel):>+10.1f}{_cluster_t(_sel):>+9.2f}")
+    _base = _bp(_tep)
+    _got = _bp(_sel_te)
+    print(f"\n  絞らない場合の TEST: {_base:+.1f}bp / 絞った場合: {_got:+.1f}bp "
+          f"→ 差 {_got - _base:+.1f}bp")
+    _ok1, _ok2 = _got >= PASS_BP, _cluster_t(_sel_te) >= PASS_T
+    print(f"\n  {'✅' if _ok1 else '⛔'} ① TEST bp ≥ {PASS_BP}   {_got:+.1f}bp")
+    print(f"  {'✅' if _ok2 else '⛔'} ② TEST t ≥ {PASS_T}      "
+          f"t={_cluster_t(_sel_te):+.2f}")
+    print(f"  {'✅' if _got > _base else '⛔'} ③ 絞らない場合を上回る  "
+          f"{_got - _base:+.1f}bp")
+    print(f"\n  {'=' * 60}")
+    print(f"  {'✅ **合格。**' if (_ok1 and _ok2 and _got > _base) else '⛔ **不合格。**'}"
+          f" 候補 {AXES[_cax]}:{_cq}")
+    print(f"  ⛔ 不合格なら、別の分位・別の軸で試し直さないこと。")
+    print(f"     試すたびに TEST が既見になり、検証手段が減ります。")
+    print(f"  {'=' * 60}")
+    sys.exit(0)
 
 _verdict: dict[str, dict] = {}
 for _wname, _w in _windows:
