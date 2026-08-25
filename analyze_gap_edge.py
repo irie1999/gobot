@@ -917,10 +917,11 @@ if a.confirm:
                   f"{'投入/日':>10}{'損益':>12}{'勝日':>7}")
             print("  " + "-" * 58)
             for _m, _r in _show.iterrows():
+                _wd = f"{int(_r['勝日'])}/{int(_r['日数'])}"
                 print(f"  {_m:<9}{int(_r['日数']):>5}{int(_r['建てた']):>7}"
                       f"{_r['建てた'] / max(1, _r['日数']):>7.1f}"
                       f"{_r['投入'] / 10_000:>9,.0f}万{_r['損益']:>+12,.0f}"
-                      f"{int(_r['勝日'])}/{int(_r['日数']):<4}")
+                      f"{_wd:>8}")
             _mv = _mo["損益"]
             _mu, _sd = float(_mv.mean()), float(_mv.std(ddof=1))
             _tt = (_mu / (_sd / (len(_mv) ** 0.5))) if len(_mv) > 1 and _sd > 0 else 0.0
