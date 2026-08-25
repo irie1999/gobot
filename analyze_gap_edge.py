@@ -217,6 +217,12 @@ ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--out", type=str, default="", help="銘柄日の明細をCSVに書く")
 ap.add_argument("--note", type=str, default="",
                 help="試行記録(gap_edge_trials.csv)に残すメモ。何を試したのか")
+ap.add_argument("--no-refetch", action="store_true",
+                help="キャッシュが --days ぶん遡っていなくても再ダウンロードしない。"
+                     "⛔ 古い窓のデータが欠けたまま測ることになる(第3回の事故)")
+ap.add_argument("--min-density", type=float, default=0.10,
+                help="判定窓の1日あたり銘柄日数が、最も濃い窓の何倍を下回ったら"
+                     "『測定不能』にするか(既定0.10=1/10)")
 a = ap.parse_args()
 
 # ① の水準は執行方式で決まる(執行コストの3倍)。**測る前に紐付けてある**
@@ -226,6 +232,13 @@ PASS_BP = round(EXEC_BP * 3.0, 1)
 import backtest_limit_entry as ble                       # noqa: E402
 from daytrade_data import available_local_symbols        # noqa: E402
 from sameday5m_core import mod_for                       # noqa: E402
+
+# キャッシュにこの日まで遡って入っていることを要求する。足りなければ再ダウンロード。
+# ⚠ これを渡さないと fetch はキャッシュの開始日を見ない(上の _scan のコメント参照)。
+from datetime import timedelta as _td                    # noqa: E402
+_MIN_START = None
+if not a.no_refetch:
+    _MIN_START = (ble.datetime.now(ble.JST).date() - _td(days=a.days + 420))
 
 # エンジンのモードグローバルは触らせない(pnl は自前で日足から計算する)
 ble._MIRROR_PNL = False
@@ -251,7 +264,11 @@ def _scan(sym: str) -> list[dict]:
        読むので、「lss が約定したか」は母集団に一切影響しない。
     """
     try:
-        df = ble.fetch(sym, a.days + 420)
+        # ⛔ min_start_date を渡さないと、fetch は **キャッシュの開始日を一切見ずに**
+        #   返す(backtest_limit_entry.py:456 の else 枝)。--days をいくら伸ばしても
+        #   キャッシュが2020年始まりならそのまま使われる。
+        #   2026-08-25 の第3回はこれで判定窓が 1日1.3銘柄になり、判定不能だった。
+        df = ble.fetch(sym, a.days + 420, min_start_date=_MIN_START)
     except Exception:
         return []
     if df is None or len(df) < 250:
@@ -484,6 +501,7 @@ def _pool_of(w: pd.DataFrame) -> pd.DataFrame:
 #    --split はカンマ区切りで複数可。判定は **最も古い窓**(=未使用期間)に対して行う。
 _windows = [("全期間", r_all)]
 _judge_win = "全期間"
+_DENSITY_FAIL = ""      # 空でなければ「データが入っていない」= 判定を出さない
 if a.split:
     _cuts = [str(pd.Timestamp(x.strip()).date()) for x in a.split.split(",") if x.strip()]
     _cuts.sort()
@@ -505,10 +523,27 @@ if a.split:
         _judge_win = _segs[0][0]          # 最も古い = 未使用期間
         print(f"\n  ★★ **判定するのは最も古い窓だけ** = {_judge_win} "
               f"({_segs[0][1]['date'].nunique():,}営業日)")
+        _dens = []
         for _i, (_nm, _seg) in enumerate(_segs):
             _tag = "★ 未使用(判定対象)" if _i == 0 else "既見(参考)"
+            _d = len(_seg) / max(1, _seg["date"].nunique())
+            _dens.append(_d)
             print(f"     {_nm}  {_seg['date'].nunique():>5,}営業日  "
-                  f"{len(_seg):>9,}銘柄日   {_tag}")
+                  f"{len(_seg):>9,}銘柄日  {_d:>8,.1f}銘柄/日   {_tag}")
+        # ⛔ データ欠落を『不合格』と報告しないための門番。
+        #   2026-08-25 の第3回は判定窓が 1.3銘柄/日(他窓の1/900)で、
+        #   中身が空なのに「不合格」と出た。相場ではこの差は出ない。
+        _dmax = max(_dens) if _dens else 0.0
+        if _dmax > 0 and _dens[0] / _dmax < a.min_density:
+            _DENSITY_FAIL = (f"判定窓の密度 {_dens[0]:.1f}銘柄/日 は "
+                             f"最も濃い窓 {_dmax:.1f}銘柄/日 の "
+                             f"{_dens[0] / _dmax * 100:.1f}% しかない")
+            print(f"\n  ⛔⛔ **{_DENSITY_FAIL}**")
+            print(f"      相場でこの差は出ない = **データが入っていない**。")
+            print(f"      --no-refetch を外して再実行し、キャッシュを "
+                  f"{a.days + 420}日ぶん遡らせること。")
+            print(f"      この実行の判定は **測定不能** として記録する"
+                  f"(不合格ではない)。")
         print(f"  ⚠ ホールドアウトは **上限で切る**(§18.25 の事故)")
         print(f"  ⚠ 落ちたときに『相場が特殊だった』と言わないこと(宣言済み)")
         _windows += _segs
@@ -618,8 +653,17 @@ else:
 for _lbl, _ok, _det in _pass:
     print(f"  {'✅' if _ok else '⛔'} {_lbl:<34}{_det}")
 _ok_all = all(x[1] for x in _pass)
+_result = "合格" if _ok_all else "不合格"
+if _DENSITY_FAIL:
+    _result = "測定不能"          # データ欠落を「不合格」と数えない
 print(f"\n  {'=' * 60}")
-if _ok_all:
+if _DENSITY_FAIL:
+    print(f"  ⛔⛔ **測定不能。上の判定は読まないこと。**")
+    print(f"     {_DENSITY_FAIL}")
+    print(f"     判定窓にデータが入っていないので、①②が落ちるのは当たり前。")
+    print(f"     **これは仮説の不合格ではない。** 試行回数にも数えない。")
+    print(f"     → キャッシュを遡らせて測り直すこと(--no-refetch を付けない)。")
+elif _ok_all:
     print(f"  ✅ **全条件 合格。土台がある。**")
     print(f"     ⛔ ここでパラメータ(sm/tm/delay/予算)を足して最適化しないこと。")
     print(f"        足した瞬間に、これまでと同じ多重検定が始まる。")
@@ -662,11 +706,12 @@ try:
                      f"{_v0.get('bp', 0):.1f}", f"{_v0.get('t', 0):.2f}", _c4,
                      f"{_null[0]:.1f}" if _null else "",
                      f"{_null[2]:.1f}" if _null else "",
-                     "合格" if _ok_all else "不合格", a.note])
-    # ヘッダ行(列が変わると挟まる)を除いた行数 = 試した回数
+                     _result,
+                     (a.note or (f"⛔ {_DENSITY_FAIL}" if _DENSITY_FAIL else ""))])
+    # ヘッダ行を除き、**測定不能は数えない**(データ欠落は仮説を試したことにならない)
     with open(_tp, encoding="utf-8-sig") as _rh:
         _n_trials = sum(1 for _r in _csv.reader(_rh)
-                        if _r and _r[0] != "実行時刻")
+                        if _r and _r[0] != "実行時刻" and "測定不能" not in _r)
     print(f"\n  [試行記録] {TRIALS_CSV} に追記 — **通算 {_n_trials} 回目**")
     if _n_trials >= 3:
         _fp = 1.0 - (0.95 ** _n_trials)
