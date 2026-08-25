@@ -907,6 +907,13 @@ def run_limit_backtest(
 
     # 複数ポジション並行対応: pending / active をリストで管理
     pending_orders:   list[dict] = []   # 発注待ち
+    # ⛔⛔ **期限切れになった注文も記録する**(2026-08-25)。
+    #   旧: `if i > po["expire_idx"]: continue  # 期限切れ → 破棄` で何も残らず、
+    #   E/H/J の母集団(eh_trades:275 が trades+nofills から (銘柄,日) を拾う)から
+    #   **『3営業日 一度も逆指値に触れなかった銘柄日』が丸ごと消えていた**。
+    #   それは「ギャップアップして前日終値まで戻らなかった日」= ライブの J が
+    #   まさに建てる日。判定日で1件だけ残せば、母集団が実発注と揃う。
+    expired_orders:   list[dict] = []   # 期限切れ(未発動のまま失効)
     active_positions: list[dict] = []   # 保有中
 
     for i in range(1, len(df)):
@@ -963,7 +970,8 @@ def run_limit_backtest(
 
         for po in pending_orders:
             if i > po["expire_idx"]:
-                continue  # 期限切れ → 破棄
+                expired_orders.append(po)   # 期限切れ → 判定日で1件だけ記録(下記)
+                continue
             if i < po.get("fill_start_idx", 0):  # 遅延期間中はスキップ
                 remaining_pending.append(po)
                 continue
@@ -1275,7 +1283,7 @@ def run_limit_backtest(
     #     データが伸びても動かないので、**過去の結果が回すたびに変わらなくなる**。
     #   ⚠ 最終バーのシグナル(判定日がまだ無い)は従来どおり最終バーのまま。
     #     §18.36 ② の「当日ぶんを母集団に入れる」処理はそれを前提にしている。
-    for po in pending_orders:
+    for po in pending_orders + expired_orders:
         _ji = min(int(po.get("fill_start_idx", len(df) - 1)), len(df) - 1)
         _jd = df.index[_ji]
         trades.append(dict(

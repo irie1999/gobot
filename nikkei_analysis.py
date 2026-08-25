@@ -10540,13 +10540,20 @@ function switchTbd(id, tab) {{
     #       そのまま使うと『まだ相場が来ていない注文』を当日の寄りで建てたことになる。
     #       → シグナル日が最終バー **未満** のものだけを対象にし、その中の最新日を採る。
     #         最終バーが 08-13 なら、採用するのは 08-12 のシグナル(=08-13 に建てる)。
-    _pend_ent = [d for d in (t.get("entry_d_raw") for t in _eh_pend_all) if d]
-    _last_bar = max(_pend_ent) if _pend_ent else None
-    _pend_sigs = [d for d in (_sig_d(t) for t in _eh_pend_all)
-                  if d and (_last_bar is None or str(d) < str(_last_bar))]
-    _pend_last = max(_pend_sigs) if _pend_sigs else None
-    _eh_pending = ([t for t in _eh_pend_all if _sig_d(t) == _pend_last]
-                   if _pend_last else [])
+    #    ★★ 2026-08-25: エンジン側で **発注中の日付を判定日に固定**したので
+    #       (backtest_limit_entry: entry_dt=fill_start_idx / 期限切れも記録)、
+    #       「数日前のシグナルが当日の寄りに混ざる」問題はもう起きない。
+    #       各注文が自分の判定日に載るので、**最新シグナル日だけに畳む必要は無い**。
+    #       畳んだままだと 3382(シグナル08-21/判定08-24) のように過去日の
+    #       銘柄日が母集団から落ち続ける(実測 抜け率が古い日ほど増える / §18.50)。
+    #       → 残す条件は「**判定日がもう来ている**」= シグナル日 < 最終バー だけ。
+    _all_d = ([d for d in (t.get("entry_d_raw") for t in display_trades) if d]
+              + [d for d in (t.get("exit_d_raw") for t in display_trades) if d])
+    _last_bar = max(_all_d) if _all_d else None
+    _eh_pending = [t for t in _eh_pend_all
+                   if _sig_d(t) and (_last_bar is None
+                                     or str(_sig_d(t)) < str(_last_bar))]
+    _pend_last = max((_sig_d(t) for t in _eh_pending), default=None)
     if _eh_pend_all and not _eh_pending:
         print(f"[E/H] ⚠ 発注中 {len(_eh_pend_all)}件 あるのに **1件も採用できません**"
               f"(最終バー={_last_bar} / シグナル日が取れた件数="
@@ -10554,10 +10561,12 @@ function switchTbd(id, tab) {{
               f"当日の実発注が『テストの母集団に無い』になるので原因を調べること",
               flush=True)
     if _eh_pend_all:
-        print(f"[E/H] 発注中 {len(_eh_pend_all)}件 → シグナル日 {_pend_last} の "
-              f"{len(_eh_pending)}件だけを母集団に入れます"
-              f"(最終バー={_last_bar}。H は寄り1回で判定し、期限3日の持ち越しが"
-              f"無いので、それ以前のシグナルと翌営業日ぶんは除く)", flush=True)
+        print(f"[E/H] 発注中(未発動+期限切れ) {len(_eh_pend_all)}件 → "
+              f"**判定日がもう来ている {len(_eh_pending)}件** を母集団に入れます"
+              f"(最終バー={_last_bar} / 最新シグナル日={_pend_last}。"
+              f"日付はエンジン側で判定日に固定済みなので畳まない / §18.50)。"
+              f"除いた {len(_eh_pend_all) - len(_eh_pending)}件は"
+              f"**当日の終値で出たシグナル**(建てるのは翌営業日)", flush=True)
     sorted_trades  = pending_trades + sorted(done_trades, key=lambda x: x["exit_d_raw"], reverse=True)
 
     # 全取引CSV(env LSS_TRADES_CSV=path): done_trades(全決済済み・全BT・切り捨て無し)を丸ごと出力。
