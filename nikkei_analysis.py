@@ -733,11 +733,48 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
     return {"days": pd.DataFrame(_days), "det": pd.DataFrame(_det)}
 
 
-def _newgap_html(days: int, min_price: float, max_price: float,
-                 symbols: list) -> str:
-    """★ 新方式 N のペイン HTML を返す。失敗しても空文字を返すだけ(レポートを壊さない)。"""
+def _newgap_rows_to_trades(det) -> list:
+    """新方式Nの取引を **既存タブと同じ dict 形式**に直す。
+
+    ⛔ `_build_trade_row` は entry_dt / entry_p / exit_dt / exit_p / hold_days /
+       name / pnl / reason / strategy / symbol / eh を **直接引く**(.get ではない)。
+       1つでも欠けると KeyError でレポート全体が落ちる。
+    """
+    out = []
+    if det is None or det.empty:
+        return out
+    for r in det.itertuples():
+        _d = str(r.date)
+        _md = f"{_d[5:7]}/{_d[8:10]}" if len(_d) >= 10 else _d
+        # 同日決済のショート: pnl = (建値 − 決済値) × qty → 決済値を逆算
+        _ex = float(r.entry_p) - float(r.pnl) / _NG_QTY
+        out.append({
+            "symbol": str(r.symbol), "name": "", "strategy": "N",
+            "entry_d_raw": _d, "exit_d_raw": _d,
+            "entry_dt": _md, "exit_dt": _md,
+            "entry_time": "09:00", "exit_time": "15:30",
+            "entry_p": float(r.entry_p), "exit_p": _ex,
+            "qty": _NG_QTY, "pnl": float(r.pnl),
+            "hold_days": 0, "days_to_fill": 0,
+            "reason": "引け", "eh": "N", "is_short": True,
+            "label": f"前日{r.ret1:+.1f}% / ギャップ{r.gap_bp:+.0f}bp",
+            "color": "#fbbf24", "rank": "", "score": 0,
+            "order_limit": float(r.entry_p), "order_stop": 0.0,
+            "order_target": 0.0,
+        })
+    return out
+
+
+def _newgap_build(days: int, min_price: float, max_price: float,
+                  symbols: list) -> dict:
+    """★ 新方式 N を計算して {head, trades} を返す。
+
+    描画(月別サマリー・日別アコーディオン)は **呼び出し側の `_dup_toggle_html`**
+    に任せる。既存の J/K/L タブと同じ見た目にするため。
+    ここが返す `head` は、この方式にしか無い情報(条件・50件の壁・候補数)だけ。
+    """
     if not _NG_TAB or not symbols:
-        return ""
+        return {}
     _t0 = _time.time()
     _rows: list = []
     try:
@@ -750,10 +787,12 @@ def _newgap_html(days: int, min_price: float, max_price: float,
                 except Exception:
                     pass
     except Exception as _e:
-        return (f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>')
+        return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
+                "trades": []}
     _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
     if not _sim or _sim["days"].empty:
-        return '<div style="color:#94a3b8">新方式N: 対象データがありません</div>'
+        return {"head": '<div style="color:#94a3b8">新方式N: 対象データがありません</div>',
+                "trades": []}
     _dd, _det = _sim["days"], _sim["det"]
     _el = _time.time() - _t0
 
@@ -825,16 +864,18 @@ def _newgap_html(days: int, min_price: float, max_price: float,
         f'（建てた {_nb:,}件 の {_miss_tot / max(1, _nb) * 100:.0f}%）'
         f'</div>')
 
-    # ── 月別 ──
-    _h.append('<table style="width:100%;border-collapse:collapse;font-size:0.8rem;'
-              'margin-bottom:12px"><thead><tr style="background:#1e293b">'
+    # ── 候補数の月別（この方式にしか無い情報。損益は下の共通ブロックが出す）──
+    _h.append('<details style="margin-bottom:12px"><summary style="color:#94a3b8;'
+              'font-size:0.85rem;cursor:pointer">📊 月別の候補数（50件の壁がどれだけ'
+              '効いているか）</summary>'
+              '<table style="width:100%;border-collapse:collapse;font-size:0.8rem;'
+              'margin-top:8px"><thead><tr style="background:#1e293b">'
               + "".join(f'<th style="padding:5px 7px;color:#94a3b8;'
                         f'text-align:{"left" if _c == "月" else "right"}">{_c}</th>'
                         for _c in ("月", "日数", "候補/日", "見た/日", "合格",
-                                   "建てた", "取逃し", "投入/日", "損益", "勝日"))
+                                   "建てた", "取逃し", "投入/日"))
               + '</tr></thead><tbody>')
     for _m, _r in _mo.iterrows():
-        _pc = "#4ade80" if _r["損益"] >= 0 else "#f87171"
         _h.append(
             f'<tr style="border-bottom:1px solid #1e293b">'
             f'<td style="padding:4px 7px;color:#e2e8f0">{_m}</td>'
@@ -845,78 +886,9 @@ def _newgap_html(days: int, min_price: float, max_price: float,
             f'<td style="padding:4px 7px;text-align:right;color:#e2e8f0">{int(_r["建てた"])}</td>'
             f'<td style="padding:4px 7px;text-align:right;color:#f59e0b">{int(_r["取逃し"])}</td>'
             f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
-            f'{_r["投入"] / 10_000:,.0f}万</td>'
-            f'<td style="padding:4px 7px;text-align:right;color:{_pc};font-weight:700">'
-            f'{_r["損益"]:+,.0f}</td>'
-            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
-            f'{int(_r["勝日"])}/{int(_r["日数"])}</td></tr>')
-    _mv = _mo["損益"]
-    _mu = float(_mv.mean()) if len(_mv) else 0.0
-    _sd = float(_mv.std(ddof=1)) if len(_mv) > 1 else 0.0
-    _h.append(f'</tbody></table>'
-              f'<div style="color:#94a3b8;font-size:0.8rem;margin-bottom:12px">'
-              f'{len(_mv)}ヶ月 — 月平均 <b style="color:#e2e8f0">{_mu:+,.0f}円</b> / '
-              f'月次σ {_sd:,.0f}円 / 月平均÷σ '
-              f'<b>{(_mu / _sd if _sd > 0 else 0):.2f}</b>'
-              f'{"" if len(_mv) > 2 else " ⚠ 月数が少なく統計にならない"}</div>')
-
-    # ── 日別(直近30日) ──
-    _rec = _dd.tail(30).iloc[::-1]
-    _h.append('<details><summary style="color:#94a3b8;font-size:0.85rem;cursor:pointer">'
-              '📅 日別（直近30日）</summary>'
-              '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;'
-              'margin-top:8px"><thead><tr style="background:#1e293b">'
-              + "".join(f'<th style="padding:4px 6px;color:#94a3b8;'
-                        f'text-align:{"left" if _c == "日付" else "right"}">{_c}</th>'
-                        for _c in ("日付", "候補", "見た", "合格", "建てた",
-                                   "取逃し", "投入", "損益"))
-              + '</tr></thead><tbody>')
-    for _r in _rec.itertuples():
-        _pc = "#4ade80" if _r.pnl >= 0 else "#f87171"
-        _h.append(
-            f'<tr style="border-bottom:1px solid #1e293b">'
-            f'<td style="padding:3px 6px;color:#e2e8f0">{_r.date}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.cand}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.watched}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.hit}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#e2e8f0">{_r.built}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#f59e0b">{_r.missed}</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
-            f'{_r.used / 10_000:,.0f}万</td>'
-            f'<td style="padding:3px 6px;text-align:right;color:{_pc};font-weight:700">'
-            f'{_r.pnl:+,.0f}</td></tr>')
+            f'{_r["投入"] / 10_000:,.0f}万</td></tr>')
     _h.append('</tbody></table></details>')
-
-    # ── 明細(直近200件) ──
-    if not _det.empty:
-        _d2 = _det.sort_values("date", ascending=False).head(200)
-        _h.append('<details style="margin-top:10px">'
-                  '<summary style="color:#94a3b8;font-size:0.85rem;cursor:pointer">'
-                  f'📋 明細（直近200件 / 全{len(_det):,}件）</summary>'
-                  '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;'
-                  'margin-top:8px"><thead><tr style="background:#1e293b">'
-                  + "".join(f'<th style="padding:4px 6px;color:#94a3b8;'
-                            f'text-align:{"left" if _c in ("日付", "銘柄") else "right"}">'
-                            f'{_c}</th>'
-                            for _c in ("日付", "銘柄", "前日%", "ギャップbp",
-                                       "建値", "損益"))
-                  + '</tr></thead><tbody>')
-        for _r in _d2.itertuples():
-            _pc = "#4ade80" if _r.pnl >= 0 else "#f87171"
-            _h.append(
-                f'<tr style="border-bottom:1px solid #1e293b">'
-                f'<td style="padding:3px 6px;color:#e2e8f0">{_r.date}</td>'
-                f'<td style="padding:3px 6px;color:#e2e8f0">{_r.symbol}</td>'
-                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
-                f'{_r.ret1:+.2f}</td>'
-                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
-                f'{_r.gap_bp:+.0f}</td>'
-                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
-                f'{_r.entry_p:,.1f}</td>'
-                f'<td style="padding:3px 6px;text-align:right;color:{_pc};'
-                f'font-weight:700">{_r.pnl:+,.0f}</td></tr>')
-        _h.append('</tbody></table></details>')
-    return "".join(_h)
+    return {"head": "".join(_h), "trades": _newgap_rows_to_trades(_det)}
 
 
 def _lookup_frozen_bt(sym: str, strat: str):
@@ -21538,20 +21510,34 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # ⛔ available_local_symbols は 5分足のファイル名(J-Quants の5桁
             #    コード)をそのまま返す。**必ず yfinance 形式に直す**(重複も除く)。
             _ng_syms = sorted({_newgap_yf(s) for s in _ng_als()})
-            _ng_body = _newgap_html(
+            _ng = _newgap_build(
                 days,
                 _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
                 _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9,
                 _ng_syms)
-            if _ng_body:
+            if _ng and _ng.get("head"):
+                # ★ 月別サマリー・日別アコーディオン・明細は **既存タブと同じ
+                #   `_dup_toggle_html`** に通す(2026-08-25 ユーザー指摘
+                #   「他のtabと形式が異なりすぎている」)。head はこの方式に
+                #   しか無い情報(条件・50件の壁・候補数)だけ。
+                from collections import defaultdict as _ng_dd
+                _ng_tr = _ng.get("trades") or []
+                _ng_bd = _ng_dd(list)
+                for _t in _ng_tr:
+                    _ng_bd[_t["entry_d_raw"]].append(_t)
+                _ng_dates = sorted(_ng_bd.keys(), reverse=True)
                 _eh_btn += (
                     f'<button class="detail-tab-btn" '
                     f'onclick="switchDetailTab({_dseq},\'newgap\')" '
                     f'style="border-color:#fbbf24">★ 新方式N '
                     f'<span style="font-size:0.72rem;color:#fde68a">'
-                    f'前日%+ギャップ</span></button>')
-                _eh_pane += (f'<div id="detail_{_dseq}_newgap" '
-                             f'class="detail-tab-pane">{_ng_body}</div>')
+                    f'({len(_ng_tr):,}件)</span></button>')
+                _eh_pane += (
+                    f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
+                    + _ng["head"]
+                    + (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates, _dseq, "ng")
+                       if _ng_tr else "")
+                    + '</div>')
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
         except Exception as _nge:
