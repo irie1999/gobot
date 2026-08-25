@@ -73,8 +73,15 @@ ap.add_argument("--since", type=str, default="",
                      "(それ以前は H / slip_daily_log.csv の『方式』列で確認できる)")
 ap.add_argument("--budget-man", type=float, default=400.0,
                 help="レポート側の予算(万円)。予算落ちかどうかの判定に使う (既定400)")
+ap.add_argument("--gap-bp", type=float, default=75.0,
+                help="⛔⛔ **合格を gap_bp から判定し直す閾値(既定75)**。"
+                     "k_paper の pass_gap は『その日 実際に使っていた閾値』での判定なので、"
+                     "閾値を変えた日をまたぐと比較にならない。"
+                     "実例: 2026-08-21 の J は +50bp 運用で、+60.1bp の 2897 を建てている"
+                     "(いまの +75bp なら発注しない)。0 を渡すと pass_gap をそのまま使う")
 args = ap.parse_args()
 _SINCE = str(args.since or "")[:10]
+_GAP = float(args.gap_bp or 0.0)
 
 
 def _n(s) -> str:
@@ -167,8 +174,12 @@ def _daily_bar(sym: str, day: str):
 # ══════════════════════════════════════════════════════════════════════
 #  突合
 # ══════════════════════════════════════════════════════════════════════
-_LBL = "実発注(ordered=1)" if args.all_ordered else "合格(pass_gap=1)"
-_SHORT = "発注" if args.all_ordered else "合格"
+if args.all_ordered:
+    _LBL, _SHORT = "実発注(ordered=1)", "発注"
+elif _GAP > 0:
+    _LBL, _SHORT = f"合格(gap_bp >= {_GAP:g})", "合格"
+else:
+    _LBL, _SHORT = "合格(pass_gap=1 = その日の閾値)", "合格"
 _POP_DAYS = {k[0] for k in _pop}
 print(f"\n{'=' * 78}\n"
       f"■ ライブが {_LBL} と判定した銘柄日が、バックテストの母集団にあるか\n"
@@ -217,6 +228,11 @@ for p in _papers:
             continue
         if args.all_ordered:
             ok = _i(r.get("ordered")) == 1
+        elif _GAP > 0:
+            # ★ **いまの閾値で判定し直す**。pass_gap はその日の閾値なので、
+            #   閾値を変えた日をまたぐとバックテスト(常に現行の閾値)と揃わない。
+            ok = (_f(r.get("gap_bp")) >= _GAP and _i(r.get("guard_ng")) == 0
+                  and _i(r.get("stale_open")) == 0)
         else:
             ok = (_i(r.get("pass_gap")) == 1 and _i(r.get("guard_ng")) == 0
                   and _i(r.get("stale_open")) == 0)

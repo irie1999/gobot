@@ -1815,7 +1815,14 @@ if not _args.date:
 #   これが残っていると require_open_bar が『幻の有無』で母集団を選び、
 #   delay1 の起点も銘柄で1本ずれていた(daytrade_data.normalize_minute_df 参照)。
 #   幻を消すと全銘柄が同じ先頭バーで揃うので、過去のキャッシュとは非互換。
-_BT_LOGIC_VER = "v18"
+# v19 (2026-08-25): 「発注中」(未発動の注文)の日付を **判定日で固定**。
+#   旧 v18 までは entry_dt = 実行時の最終バー だったので、同じ1件の注文が
+#   レポートを回す日によって別の日付になり、E/H/J の母集団(eh_trades:275 が
+#   trades+nofills から (銘柄,日) を拾う)から**過去日の未発動シグナルが
+#   回すたびに消えていた**。実測(audit_population.py)で抜け率が古い日ほど
+#   単調に増える: 08-25 18% / 08-24 29% / 08-19 38% / 08-18 56% / 08-17 100%。
+#   v18 のキャッシュはその不安定な日付を焼き付けているので必ず版を分ける。
+_BT_LOGIC_VER = "v19"
 # lss損切り遅延フラグ(delay1等)を使う場合はBTキャッシュを別管理(ON/OFFで衝突しないよう
 # 版トークンに sd<N> を付与)。env LSS_STOP_DELAY_BARS=1 で有効化(既定0=現行と同一キー)。
 _LSS_STOP_DELAY = int(os.environ.get("LSS_STOP_DELAY_BARS", "0") or "0")
