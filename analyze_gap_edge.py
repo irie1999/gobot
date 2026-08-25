@@ -236,6 +236,14 @@ ap.add_argument("--sm-list", type=str, default="0,0.1,0.3,0.5,1.0,2.0",
                 help="損切りATR倍率(0=損切りなし=現行)")
 ap.add_argument("--tm-list", type=str, default="0,0.5,1.0,2.0",
                 help="利確ATR倍率(0=利確なし=現行)")
+ap.add_argument("--both-orders", action="store_true",
+                help="両方触れた日を『利確優先(楽観)』でも集計して並べる。"
+                     "既定は **損切り優先(悲観)のみ**"
+                     "(sameday5m_firsttouch と同じ / §18.51 C)")
+ap.add_argument("--stop-slip-pct", type=float, default=0.0,
+                help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
+                     "日足ではギャップ幅が分からないので、悲観側の下限を"
+                     "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
 ap.add_argument("--confirm", type=str, default="",
                 help="★ 検証モード。'軸:分位' を指定して **TEST で1回だけ**測る"
                      "(例 atr_pct:Q1 / dow:0)。⛔ 1つの候補につき1回だけ")
@@ -780,56 +788,68 @@ if a.sweep_barrier:
     _cl = _tb["d1_close"].to_numpy(dtype=float)
     _dt = _tb["date"].to_numpy()
 
-    def _bar_pnl(sm: float, tm: float, stop_first: bool):
-        """ショート: 損切り=建値+sm*ATR(上) / 利確=建値-tm*ATR(下)。"""
+    def _bar_pnl(sm: float, tm: float, stop_first: bool = True):
+        """ショート: 損切り=建値+sm*ATR(上) / 利確=建値-tm*ATR(下)。
+
+        ⚠ 両方触れた日は **stop_first=True(損切り優先=悲観)** が既定。
+           sameday5m_firsttouch と同じ扱い(§18.51 C)。
+        ⚠ 損切りの約定は `stop * (1 + --stop-slip-pct)`。既定0=ラインちょうど。
+        """
         import numpy as _np
         _stop = _ep + _at * sm if sm > 0 else None
         _targ = _ep - _at * tm if tm > 0 else None
+        # 損切りは**不利側**に滑る(ショートなので上に払う)
+        _sfill = (_stop * (1.0 + a.stop_slip_pct)) if _stop is not None else None
         _hit_s = (_hi >= _stop) if _stop is not None else _np.zeros(len(_ep), bool)
         _hit_t = (_lo <= _targ) if _targ is not None else _np.zeros(len(_ep), bool)
         _exit = _cl.copy()
         _both = _hit_s & _hit_t
         _only_s = _hit_s & ~_hit_t
         _only_t = _hit_t & ~_hit_s
-        if _stop is not None:
-            _exit = _np.where(_only_s, _stop, _exit)
+        if _sfill is not None:
+            _exit = _np.where(_only_s, _sfill, _exit)
         if _targ is not None:
             _exit = _np.where(_only_t, _targ, _exit)
         if _both.any():
-            _exit = _np.where(_both, _stop if stop_first else _targ, _exit)
+            _exit = _np.where(_both, _sfill if stop_first else _targ, _exit)
         return ((_ep - _exit) * a.qty, int(_hit_s.sum()), int(_hit_t.sum()),
                 int(_both.sum()))
 
-    for _order, _olbl in ((True, "損切り優先(保守)"), (False, "利確優先(楽観)")):
-        print(f"\n  ── {_olbl} ── (円/件。**太字が現行 = sm0/tm0 = バリアなし**)")
-        _hdr = f"    {'損切ATR':<9}" + "".join(f"{'tm' + str(t):>12}" for t in _tms)
-        print(_hdr)
+    _orders = ([(True, "損切り優先(悲観)"), (False, "利確優先(楽観・参考)")]
+               if a.both_orders else [(True, "損切り優先(悲観)")])
+    _base_v = float(_bar_pnl(0.0, 0.0)[0].mean())
+    print(f"\n  ★ 現行(バリアなし) = **{_base_v:+,.0f}円/件**"
+          f"{f' / 損切りスリッページ {a.stop_slip_pct * 100:.2f}%' if a.stop_slip_pct else ''}")
+    for _order, _olbl in _orders:
+        print(f"\n  ── {_olbl} ── **現行との差**(円/件)。+ なら現行より良い")
+        print(f"    {'損切ATR':<9}" + "".join(f"{'tm' + str(t):>12}" for t in _tms))
         print("    " + "-" * (9 + 12 * len(_tms)))
-        _base_v = None
         for _sm in _sms:
             _row = f"    {('なし' if _sm == 0 else str(_sm)):<9}"
             for _tm in _tms:
-                _v, _ns, _nt, _nb = _bar_pnl(_sm, _tm, _order)
-                _m = float(_v.mean())
+                _m = float(_bar_pnl(_sm, _tm, _order)[0].mean())
+                _d = _m - _base_v
                 if _sm == 0 and _tm == 0:
-                    _base_v = _m
-                _mk = "★" if (_sm == 0 and _tm == 0) else " "
-                _row += f"{_m:>+11,.0f}{_mk}"
+                    _row += f"{'★現行':>12}"
+                else:
+                    _row += f"{_d:>+11,.0f}{'✅' if _d > 0 else ' '}"
             print(_row)
-        if _base_v is not None:
-            print(f"    ★ = 現行(バリアなし) {_base_v:+,.0f}円/件")
-    # 発動件数(現行に最も近い水準で)
+    # 発動件数
     for _sm in [s for s in _sms if s > 0][:3]:
-        _v, _ns, _nt, _nb = _bar_pnl(_sm, 1.0, True)
+        _v, _ns, _nt, _nb = _bar_pnl(_sm, 1.0)
         print(f"\n  sm{_sm} / tm1.0 の発動: 損切り {_ns:,}件 "
               f"({_ns / len(_ep) * 100:.0f}%) / 利確 {_nt:,}件 "
               f"({_nt / len(_ep) * 100:.0f}%) / **両方触れた {_nb:,}件 "
-              f"({_nb / len(_ep) * 100:.0f}%)**")
+              f"({_nb / len(_ep) * 100:.0f}%)** ← ここは悲観側(損切り)で数えている")
     print(f"\n  {'=' * 68}")
-    print(f"  ★ 読み方: **★(現行) より明確に良い升が無ければ「意味がない」で確定**。")
-    print(f"     この測定はバリアに有利(ラインちょうど約定・楽観)なので、")
-    print(f"     ここで勝てないなら実運用では確実に負けます。")
-    print(f"  ⛔ 良い升があっても、そこで採用しないこと。TEST での検証が要ります")
+    print(f"  ★ 読み方: **✅ が無ければ「意味がない」で確定**。")
+    if a.stop_slip_pct <= 0:
+        print(f"     ⚠ いまは損切りが **ラインちょうど**で約定する前提(楽観)。")
+        print(f"        実際はギャップで飛ぶ(§18.9.1)ので、"
+              f"--stop-slip-pct 0.005 で悲観側も見ること。")
+    print(f"     この測定は **バリアに有利**なので、ここで勝てないなら")
+    print(f"     実運用では確実に負けます。")
+    print(f"  ⛔ ✅ があっても、そこで採用しないこと。TEST での検証が要ります")
     print(f"     (そして TEST は既に2回使っています)。")
     print(f"  {'=' * 68}")
     sys.exit(0)
