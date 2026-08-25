@@ -595,6 +595,315 @@ def _liquidity_of(sym: str) -> float:
     return v
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ★★ 新方式 N (§18.54) — 前日リターン + ギャップアップ
+# ══════════════════════════════════════════════════════════════════════════
+#   前夜: 前日リターン ≥ +1.753% の銘柄を候補にし、流動性降順で上位 N 件
+#         (kabu の登録上限50件 / §18.44)
+#   09:00: その候補の始値を見て、ギャップ ≥ +100bp なら **成行で空売り**
+#   引け : MOC で買い戻す。**バリア(損切り/利確/delay)を1つも持たない**
+#
+# ⛔ 既存の J/K/L タブとは **母集団が違う**。あちらは eh_trades(lss の
+#    バックテストが作る銘柄日)、こちらは **全銘柄日を日足から直接**作る。
+#    5分足を使わないので軽い。
+#
+# ⚠ 数字の出所は analyze_gap_edge.py (11.6年 / 38万件 / TRAIN・TEST 両方で
+#    合格 / §18.54)。このタブはそれを **表示窓に当てはめた**もの。
+# ⚠ slip=0。板寄せ約定なら呼値を払わないが、09:00に板を読む方式では
+#    読み取りに36秒かかる(§18.44 実測)ぶん不利になる。実測は §18.49。
+_NG_TAB = os.environ.get("LSS_NEWGAP_TAB", "1").strip().lower() not in ("0", "false", "no", "")
+_NG_RET1 = float(os.environ.get("LSS_NEWGAP_RET1", "1.753"))     # 前日リターン下限(%)
+_NG_GAP_BP = float(os.environ.get("LSS_NEWGAP_BP", "100"))       # ギャップ下限(bp)
+_NG_WATCH = int(os.environ.get("LSS_NEWGAP_WATCH", "50"))        # 朝読める上限(0=無制限)
+_NG_BUDGET = float(os.environ.get("LSS_NEWGAP_BUDGET", "400"))   # 予算(万円)
+_NG_QTY = 100
+_NG_WORKERS = int(os.environ.get("LSS_NEWGAP_WORKERS", "8"))
+
+
+def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) -> list:
+    """1銘柄の全営業日について (日付, 前日リターン, ギャップ, 損益, 流動性) を返す。
+
+    ⛔ 5分足も lss のバックテストも使わない。日足の始値・終値だけ。
+    ⚠ 流動性は **その日までの20日平均**(as-of)。`_liquidity_of` は今日の
+       120日平均なので先読みになる(§18.51 B4)。ここでは使わない。
+    """
+    try:
+        from backtest_limit_entry import fetch as _f
+        df = _f(sym, days + 260)
+    except Exception:
+        return []
+    if df is None or len(df) < 60:
+        return []
+    try:
+        _idx = pd.to_datetime(df.index).normalize()
+        _c, _o = df["close"], df["open"]
+        _v = df["volume"] if "volume" in df.columns else pd.Series(0.0, index=df.index)
+        _ret1 = _c.pct_change(1) * 100.0                 # D 時点で確定
+        _turn = (_c * _v).rolling(20).mean()             # D 時点までの20日平均
+    except Exception:
+        return []
+    out = []
+    _cut = _idx[-1] - pd.Timedelta(days=days)
+    for pos in range(21, len(_idx) - 1):
+        d0 = _idx[pos]
+        if d0 < _cut:
+            continue
+        try:
+            pc = float(_c.iloc[pos])
+            o1 = float(_o.iloc[pos + 1])
+            c1 = float(_c.iloc[pos + 1])
+            r1 = float(_ret1.iloc[pos])
+            lq = float(_turn.iloc[pos])
+        except Exception:
+            continue
+        if not (pc > 0 and o1 > 0 and c1 > 0 and r1 == r1):
+            continue
+        if o1 < min_price or o1 > max_price:
+            continue
+        out.append({
+            "date": str(_idx[pos + 1].date()),
+            "symbol": sym,
+            "ret1": r1,                                   # 前夜に確定
+            "liq": lq if lq == lq else 0.0,               # 前夜に確定(as-of)
+            "entry_p": o1,                                # D+1 の始値
+            "gap_bp": (o1 - pc) / pc * 10_000.0,
+            "pnl": (o1 - c1) * _NG_QTY,                   # 寄りで売って引けで買い戻す
+        })
+    return out
+
+
+def _newgap_sim(rows: list, budget_man: float, watch: int,
+                gap_bp: float, ret1_min: float) -> dict:
+    """日ごとに 候補 → watch上限 → ギャップ判定 → 予算 の順で建てる。
+
+    ★ この順番が実運用そのもの。**watch上限を先に掛ける**のが肝で、
+      「候補は多いが朝50件しか板を読めない」という制約をここで再現する。
+    """
+    if not rows:
+        return {}
+    _df = pd.DataFrame(rows)
+    _cap = budget_man * 10_000.0
+    _days, _det = [], []
+    for _d, _g in _df.groupby("date"):
+        # ① 前夜の候補(前日リターン)。ここまでは前夜に確定している
+        _cand = _g[_g["ret1"] >= ret1_min]
+        _n_cand = len(_cand)
+        if _n_cand == 0:
+            _days.append({"date": _d, "cand": 0, "watched": 0, "hit": 0,
+                          "built": 0, "used": 0.0, "pnl": 0.0, "missed": 0})
+            continue
+        # ② 朝に板を読める上限(kabu 登録上限50件 / §18.44)。流動性降順
+        _w = _cand.sort_values("liq", ascending=False, na_position="last")
+        _watched = _w if watch <= 0 else _w.head(watch)
+        # ③ 09:00 の始値でギャップ判定
+        _hit = _watched[_watched["gap_bp"] >= gap_bp]
+        # ④ watch で切り捨てたぶんのうち、本当は建てられた件数(機会損失)
+        _missed = len(_cand[_cand["gap_bp"] >= gap_bp]) - len(_hit)
+        # ⑤ 予算。ギャップ降順(強い順)に埋める
+        _hit = _hit.sort_values("gap_bp", ascending=False)
+        _cash, _p, _n = _cap, 0.0, 0
+        for _r in _hit.itertuples():
+            _cost = float(_r.entry_p) * _NG_QTY
+            if _cost > _cash:
+                continue                      # 貪欲(§18.33: レポート側に揃える)
+            _cash -= _cost
+            _p += float(_r.pnl)
+            _n += 1
+            _det.append({"date": _d, "symbol": _r.symbol, "ret1": _r.ret1,
+                         "gap_bp": _r.gap_bp, "entry_p": _r.entry_p,
+                         "pnl": _r.pnl, "liq": _r.liq})
+        _days.append({"date": _d, "cand": _n_cand, "watched": len(_watched),
+                      "hit": len(_hit), "built": _n, "used": _cap - _cash,
+                      "pnl": _p, "missed": _missed})
+    return {"days": pd.DataFrame(_days), "det": pd.DataFrame(_det)}
+
+
+def _newgap_html(days: int, min_price: float, max_price: float,
+                 symbols: list) -> str:
+    """★ 新方式 N のペイン HTML を返す。失敗しても空文字を返すだけ(レポートを壊さない)。"""
+    if not _NG_TAB or not symbols:
+        return ""
+    _t0 = _time.time()
+    _rows: list = []
+    try:
+        with _TPE(max_workers=max(1, _NG_WORKERS)) as _ex:
+            _fs = {_ex.submit(_newgap_scan_one, s, days, min_price, max_price): s
+                   for s in symbols}
+            for _f in _asc(_fs):
+                try:
+                    _rows.extend(_f.result() or [])
+                except Exception:
+                    pass
+    except Exception as _e:
+        return (f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>')
+    _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
+    if not _sim or _sim["days"].empty:
+        return '<div style="color:#94a3b8">新方式N: 対象データがありません</div>'
+    _dd, _det = _sim["days"], _sim["det"]
+    _el = _time.time() - _t0
+
+    _tot = float(_dd["pnl"].sum())
+    _nb = int(_dd["built"].sum())
+    _bpc = (float(_det["pnl"].sum() / (_det["entry_p"] * _NG_QTY).sum()) * 1e4
+            if not _det.empty else 0.0)
+    _dd = _dd.copy()
+    _dd["month"] = _dd["date"].str[:7]
+    _mo = _dd.groupby("month").agg(
+        日数=("pnl", "size"), 候補=("cand", "mean"), 見た=("watched", "mean"),
+        合格=("hit", "sum"), 建てた=("built", "sum"), 取逃し=("missed", "sum"),
+        投入=("used", "mean"), 損益=("pnl", "sum"),
+        勝日=("pnl", lambda s: int((s > 0).sum())))
+
+    # ── 50件制約がどれだけ効いているか(ユーザーの主要な関心) ──
+    _cap_days = int((_dd["cand"] > _NG_WATCH).sum()) if _NG_WATCH > 0 else 0
+    _miss_tot = int(_dd["missed"].sum())
+    _cand_med = float(_dd["cand"].median())
+    _cand_max = int(_dd["cand"].max())
+
+    _h = [
+        f'<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;'
+        f'padding:12px;margin-bottom:12px">',
+        f'<div style="color:#fbbf24;font-weight:700;font-size:0.95rem;margin-bottom:6px">'
+        f'★ 新方式 N — 前日リターン + ギャップアップ（§18.54）</div>',
+        f'<div style="color:#94a3b8;font-size:0.8rem;line-height:1.7">'
+        f'前夜: 前日リターン <b style="color:#e2e8f0">≥ +{_NG_RET1:.3f}%</b> の銘柄を'
+        f'流動性降順に並べ <b style="color:#e2e8f0">上位{_NG_WATCH}件</b>'
+        f'（kabu の登録上限 / §18.44）<br>'
+        f'09:00: その始値を見て <b style="color:#e2e8f0">ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b> '
+        f'なら空売り。予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
+        f'{_NG_QTY}株固定 / ギャップ降順に充当<br>'
+        f'引け: MOC で買い戻す。<b style="color:#e2e8f0">損切り・利確・delay を'
+        f'1つも持たない</b><br>'
+        f'⛔ <b style="color:#fbbf24">母集団が J/K/L と違います</b>。'
+        f'あちらは eh_trades（lss のバックテストが作る銘柄日）、'
+        f'こちらは <b>全銘柄日を日足から直接</b>（{len(symbols):,}銘柄 / '
+        f'{len(_rows):,}銘柄日 / {_el:.1f}秒）。5分足を使いません<br>'
+        f'⚠ <b style="color:#fbbf24">slip=0 の理論値</b>。'
+        f'09:00に板を読む方式は読み取りに36秒かかる（§18.44 実測）ぶん不利になります'
+        f'</div></div>',
+        f'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">',
+    ]
+    for _lb, _vv, _cc in (
+            ("合計損益", f"{_tot:+,.0f}円", "#4ade80" if _tot >= 0 else "#f87171"),
+            ("建てた", f"{_nb:,}件", "#e2e8f0"),
+            ("1件あたり", f"{_bpc:+.1f}bp", "#4ade80" if _bpc >= 0 else "#f87171"),
+            ("日数", f"{len(_dd):,}日", "#e2e8f0"),
+            ("勝日", f"{int((_dd['pnl'] > 0).sum())}/{len(_dd)}", "#e2e8f0")):
+        _h.append(f'<div style="background:#1e293b;border:1px solid #334155;'
+                  f'border-radius:6px;padding:8px 14px">'
+                  f'<div style="color:#64748b;font-size:0.7rem">{_lb}</div>'
+                  f'<div style="color:{_cc};font-size:1.1rem;font-weight:700">{_vv}</div>'
+                  f'</div>')
+    _h.append('</div>')
+
+    # ── 50件の壁 ──
+    _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
+    _h.append(
+        f'<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;'
+        f'padding:10px;margin-bottom:12px;font-size:0.82rem;color:#cbd5e1">'
+        f'<b style="color:#fbbf24">📵 {_NG_WATCH}件の壁</b>（kabu は総登録50件が上限 / §18.44）<br>'
+        f'前夜の候補: 中央値 <b>{_cand_med:.0f}件/日</b> / 最大 <b>{_cand_max}件</b><br>'
+        f'候補が{_NG_WATCH}件を超えた日: <b>{_cap_days}/{len(_dd)}日 '
+        f'({_cap_days / max(1, len(_dd)) * 100:.0f}%)</b><br>'
+        f'そのせいで取り逃した（ギャップ条件は満たしていたのに板を読めなかった）: '
+        f'<b style="color:{_wall_c}">{_miss_tot:,}件</b>'
+        f'（建てた {_nb:,}件 の {_miss_tot / max(1, _nb) * 100:.0f}%）'
+        f'</div>')
+
+    # ── 月別 ──
+    _h.append('<table style="width:100%;border-collapse:collapse;font-size:0.8rem;'
+              'margin-bottom:12px"><thead><tr style="background:#1e293b">'
+              + "".join(f'<th style="padding:5px 7px;color:#94a3b8;'
+                        f'text-align:{"left" if _c == "月" else "right"}">{_c}</th>'
+                        for _c in ("月", "日数", "候補/日", "見た/日", "合格",
+                                   "建てた", "取逃し", "投入/日", "損益", "勝日"))
+              + '</tr></thead><tbody>')
+    for _m, _r in _mo.iterrows():
+        _pc = "#4ade80" if _r["損益"] >= 0 else "#f87171"
+        _h.append(
+            f'<tr style="border-bottom:1px solid #1e293b">'
+            f'<td style="padding:4px 7px;color:#e2e8f0">{_m}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">{int(_r["日数"])}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">{_r["候補"]:.0f}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">{_r["見た"]:.0f}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">{int(_r["合格"])}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#e2e8f0">{int(_r["建てた"])}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#f59e0b">{int(_r["取逃し"])}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
+            f'{_r["投入"] / 10_000:,.0f}万</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:{_pc};font-weight:700">'
+            f'{_r["損益"]:+,.0f}</td>'
+            f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
+            f'{int(_r["勝日"])}/{int(_r["日数"])}</td></tr>')
+    _mv = _mo["損益"]
+    _mu = float(_mv.mean()) if len(_mv) else 0.0
+    _sd = float(_mv.std(ddof=1)) if len(_mv) > 1 else 0.0
+    _h.append(f'</tbody></table>'
+              f'<div style="color:#94a3b8;font-size:0.8rem;margin-bottom:12px">'
+              f'{len(_mv)}ヶ月 — 月平均 <b style="color:#e2e8f0">{_mu:+,.0f}円</b> / '
+              f'月次σ {_sd:,.0f}円 / 月平均÷σ '
+              f'<b>{(_mu / _sd if _sd > 0 else 0):.2f}</b>'
+              f'{"" if len(_mv) > 2 else " ⚠ 月数が少なく統計にならない"}</div>')
+
+    # ── 日別(直近30日) ──
+    _rec = _dd.tail(30).iloc[::-1]
+    _h.append('<details><summary style="color:#94a3b8;font-size:0.85rem;cursor:pointer">'
+              '📅 日別（直近30日）</summary>'
+              '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;'
+              'margin-top:8px"><thead><tr style="background:#1e293b">'
+              + "".join(f'<th style="padding:4px 6px;color:#94a3b8;'
+                        f'text-align:{"left" if _c == "日付" else "right"}">{_c}</th>'
+                        for _c in ("日付", "候補", "見た", "合格", "建てた",
+                                   "取逃し", "投入", "損益"))
+              + '</tr></thead><tbody>')
+    for _r in _rec.itertuples():
+        _pc = "#4ade80" if _r.pnl >= 0 else "#f87171"
+        _h.append(
+            f'<tr style="border-bottom:1px solid #1e293b">'
+            f'<td style="padding:3px 6px;color:#e2e8f0">{_r.date}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.cand}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.watched}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">{_r.hit}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#e2e8f0">{_r.built}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#f59e0b">{_r.missed}</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
+            f'{_r.used / 10_000:,.0f}万</td>'
+            f'<td style="padding:3px 6px;text-align:right;color:{_pc};font-weight:700">'
+            f'{_r.pnl:+,.0f}</td></tr>')
+    _h.append('</tbody></table></details>')
+
+    # ── 明細(直近200件) ──
+    if not _det.empty:
+        _d2 = _det.sort_values("date", ascending=False).head(200)
+        _h.append('<details style="margin-top:10px">'
+                  '<summary style="color:#94a3b8;font-size:0.85rem;cursor:pointer">'
+                  f'📋 明細（直近200件 / 全{len(_det):,}件）</summary>'
+                  '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;'
+                  'margin-top:8px"><thead><tr style="background:#1e293b">'
+                  + "".join(f'<th style="padding:4px 6px;color:#94a3b8;'
+                            f'text-align:{"left" if _c in ("日付", "銘柄") else "right"}">'
+                            f'{_c}</th>'
+                            for _c in ("日付", "銘柄", "前日%", "ギャップbp",
+                                       "建値", "損益"))
+                  + '</tr></thead><tbody>')
+        for _r in _d2.itertuples():
+            _pc = "#4ade80" if _r.pnl >= 0 else "#f87171"
+            _h.append(
+                f'<tr style="border-bottom:1px solid #1e293b">'
+                f'<td style="padding:3px 6px;color:#e2e8f0">{_r.date}</td>'
+                f'<td style="padding:3px 6px;color:#e2e8f0">{_r.symbol}</td>'
+                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
+                f'{_r.ret1:+.2f}</td>'
+                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
+                f'{_r.gap_bp:+.0f}</td>'
+                f'<td style="padding:3px 6px;text-align:right;color:#94a3b8">'
+                f'{_r.entry_p:,.1f}</td>'
+                f'<td style="padding:3px 6px;text-align:right;color:{_pc};'
+                f'font-weight:700">{_r.pnl:+,.0f}</td></tr>')
+        _h.append('</tbody></table></details>')
+    return "".join(_h)
+
+
 def _lookup_frozen_bt(sym: str, strat: str):
     """(sym, strat) の凍結BTスコアを返す。TF別名でも探す。無ければ None。"""
     v = _FROZEN_BT_SCORES.get((sym, strat))
@@ -21201,6 +21510,35 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                    in ("0", "false", "no")) else '')
             + _dup_toggle_html(_ss, _g[0], _g[1], _dseq, _ehpfx)
             + '</div>')
+
+    # ══ ★★ 新方式 N のタブ (§18.54) ═══════════════════════════════════
+    #   既存の J/K/L とは **母集団が違う**。あちらは eh_trades(lss のバックテスト
+    #   が作る銘柄日)、こちらは **全銘柄日を日足から直接**作る。
+    #   5分足も lss のバックテストも通らないので、ここだけ独立して計算できる。
+    #   ⚠ 失敗してもタブを出さないだけ。レポート本体は壊さない。
+    if _NG_TAB and _LSS_ORDER_MODE:
+        try:
+            _t_ng = _time.time()
+            from daytrade_data import available_local_symbols as _ng_als
+            _ng_syms = sorted(_ng_als())
+            _ng_body = _newgap_html(
+                days,
+                _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
+                _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9,
+                _ng_syms)
+            if _ng_body:
+                _eh_btn += (
+                    f'<button class="detail-tab-btn" '
+                    f'onclick="switchDetailTab({_dseq},\'newgap\')" '
+                    f'style="border-color:#fbbf24">★ 新方式N '
+                    f'<span style="font-size:0.72rem;color:#fde68a">'
+                    f'前日%+ギャップ</span></button>')
+                _eh_pane += (f'<div id="detail_{_dseq}_newgap" '
+                             f'class="detail-tab-pane">{_ng_body}</div>')
+            print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
+                  f"{_time.time() - _t_ng:.1f}s", flush=True)
+        except Exception as _nge:
+            print(f"[新方式N] 失敗(タブを出しません): {_nge}", flush=True)
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
     try:
