@@ -114,6 +114,38 @@ r"""analyze_gap_edge.py — 「上げて寄った銘柄は、その日 下げる
   * 生存バイアス — 今日の上場銘柄しか見ていない(§18.51 B6)。
   * 決算・特別気配・IPO — 全部建てる前提。
 
+════════════════════════════════════════════════════════════════════════════
+★★ 第3回 (2026-08-25 / 回す前に宣言。以後 書き換えない)
+════════════════════════════════════════════════════════════════════════════
+  第2回も **全帯合計**で判定してしまった(母集団の39%がギャップダウン = 仮説に
+  含まれない集団)。第1回は「閾値をどこに置いても両窓は通らない」と確認できたので
+  判定は変わらなかったが、**第2回は変わる**(100〜150bp が未使用・既見の両方で
+  bp≥9.9 かつ t≥2.0 を満たした)。だから閾値を持つ形を**初めて事前宣言して測る**。
+
+  仮説   : 寄りが前日終値 **+100bp 以上**の銘柄を空売りし、**引けで買い戻す**と勝つ
+  閾値   : **100bp 固定。スイープしない。**
+           ⚠ これは第1回・第2回で見た表から決めた値。**既見期間では検証できない。**
+  母集団 : シグナル不問(2回とも「シグナルの寄与ゼロ」と出た)
+  執行   : 前夜に寄付指値 → 板寄せ約定 → 引けMOC。執行コスト 3.3bp
+  検証   : **2015-05 〜 2020-09 (5.4年)。一度も見ていない。**
+           第1回=2024-03以降 / 第2回=2020-09以降 しか見ていない。
+
+  合格 (全部):
+    ① bp/件 ≥ 9.9 (執行3.3bp×3)
+    ② 日クラスタ頑健 t ≥ 2.0
+    ④ **検証期間の前半・後半で両方プラス**(閾値ありだと帯が2つしか残らず
+       単調性 ρ が意味をなさないので、④をこれに差し替える。条件は減っていない)
+    ⑤ 帰無較正の95%点を超える
+
+  ⛔ 落ちたら **終わり**。閾値を動かして再挑戦しない。
+  ⛔ これを回すと **手持ちの未使用データは尽きる**。次は前向きに貯めるしかない。
+  ⛔ 2015-2020 には **コロナショック(2020-03)** が入る。落ちたときに
+     「相場が特殊だった」と言わない。先にそう決めた。
+
+  コマンド:
+    python analyze_gap_edge.py --workers 8 --days 4200 --min-gap-bp 100 \
+                               --split 2020-09-01,2024-03-01
+
 使い方
 ------
   ★ 第2回(ギャップだけを土台にする / 未使用期間で検証):
@@ -159,9 +191,14 @@ ap = argparse.ArgumentParser(
 ap.add_argument("--days", type=int, default=2100,
                 help="遡及日数(既定2100=約6年。キャッシュがそのまま使える)")
 ap.add_argument("--split", type=str, default="2024-03-01",
-                help="期間の境界 yyyy-MM-dd。**この日より前が『未使用期間』**"
-                     "(第1回 §18.52 は --days 800 = 2024-03 以降しか見ていない)。"
-                     "空なら分割しない")
+                help="期間の境界 yyyy-MM-dd。**カンマ区切りで複数可**"
+                     "(例 2020-09-01,2024-03-01 → 3期間)。"
+                     "**判定は最も古い窓に対して行う**(そこが未使用期間)。空なら分割しない")
+ap.add_argument("--min-gap-bp", type=float, default=0.0,
+                help="判定対象をこのギャップ以上に絞る(bp)。"
+                     "0=絞らない。**仮説が『ギャップアップした銘柄』なら必ず指定する**"
+                     "(第1回・第2回はこれを付けず、母集団の39%%を占める"
+                     "ギャップダウンを混ぜて薄めていた)")
 ap.add_argument("--pool", choices=["all", "sig", "nosig"], default="all",
                 help="判定に使う母集団。all=シグナル不問(第2回の土台) / "
                      "sig=シグナルが出た日だけ(第1回と同じ) / nosig=出ていない日だけ")
@@ -433,28 +470,48 @@ print(f"  ⚠ シグナル有無は **参考**(§18.52 で寄与ゼロと出た)
 
 
 def _pool_of(w: pd.DataFrame) -> pd.DataFrame:
+    """判定対象。--pool でシグナル有無、--min-gap-bp でギャップ閾値を掛ける。"""
     if a.pool == "sig":
-        return w[w["sig"] == 1]
-    if a.pool == "nosig":
-        return w[w["sig"] == 0]
+        w = w[w["sig"] == 1]
+    elif a.pool == "nosig":
+        w = w[w["sig"] == 0]
+    if a.min_gap_bp > 0:
+        w = w[w["gap_bp"] >= a.min_gap_bp]
     return w
 
 
-# ── 既見 / 未使用。上限で切る(§18.25) ──────────────────────────────
+# ── 期間分割。**上限で切る**(§18.25) ───────────────────────────────
+#    --split はカンマ区切りで複数可。判定は **最も古い窓**(=未使用期間)に対して行う。
 _windows = [("全期間", r_all)]
+_judge_win = "全期間"
 if a.split:
-    _cut = str(pd.Timestamp(a.split).date())
-    _old = r_all[r_all["date"] < _cut]
-    _new = r_all[r_all["date"] >= _cut]
-    print(f"\n  ★★ **未使用** = date < {_cut} ({_old['date'].nunique():,}営業日) "
-          f"← 第1回(§18.52 / --days 800)では一度も見ていない")
-    print(f"     既見     = date >= {_cut} ({_new['date'].nunique():,}営業日) "
-          f"← 第1回で見た。ここで N を選ぶのは in-sample")
-    print(f"  ⚠ ホールドアウトは **上限で切る**。窓を変えて数字が動くことを"
-          f"必ず確認すること(§18.25 の事故)")
-    print(f"  ⚠ 2020-2021 はコロナ相場でレジームが違う。落ちたときに"
-          f"『レジームのせい』と言い訳しないこと(宣言済み)")
-    _windows += [("未使用", _old), ("既見", _new)]
+    _cuts = [str(pd.Timestamp(x.strip()).date()) for x in a.split.split(",") if x.strip()]
+    _cuts.sort()
+    _bounds = [None] + _cuts + [None]
+    _segs = []
+    for _i in range(len(_bounds) - 1):
+        _lo_b, _hi_b = _bounds[_i], _bounds[_i + 1]
+        _m = pd.Series(True, index=r_all.index)
+        if _lo_b is not None:
+            _m &= r_all["date"] >= _lo_b
+        if _hi_b is not None:
+            _m &= r_all["date"] < _hi_b
+        _seg = r_all[_m]
+        if _seg.empty:
+            continue
+        _nm = (f"{str(_seg['date'].min())[:7]}〜{str(_seg['date'].max())[:7]}")
+        _segs.append((_nm, _seg))
+    if _segs:
+        _judge_win = _segs[0][0]          # 最も古い = 未使用期間
+        print(f"\n  ★★ **判定するのは最も古い窓だけ** = {_judge_win} "
+              f"({_segs[0][1]['date'].nunique():,}営業日)")
+        for _i, (_nm, _seg) in enumerate(_segs):
+            _tag = "★ 未使用(判定対象)" if _i == 0 else "既見(参考)"
+            print(f"     {_nm}  {_seg['date'].nunique():>5,}営業日  "
+                  f"{len(_seg):>9,}銘柄日   {_tag}")
+        print(f"  ⚠ ホールドアウトは **上限で切る**(§18.25 の事故)")
+        print(f"  ⚠ 落ちたときに『相場が特殊だった』と言わないこと(宣言済み)")
+        _windows += _segs
 
 _verdict: dict[str, dict] = {}
 for _wname, _w in _windows:
@@ -478,20 +535,50 @@ for _wname, _w in _windows:
     _all_bp, _all_t = _bp(_wp), _cluster_t(_wp)
     print(f"\n    {'★ 判定対象 合計':<22}{len(_wp):>9,}"
           f"{_wp['pnl'].mean():>+10,.0f}{_all_bp:>+9.1f}{_all_t:>+8.2f}")
-    print(f"    単調性 Spearman = {_rho:+.2f} (合格 ≥ {PASS_RHO})")
+    # ④ 閾値ありだと帯が2つしか残らず ρ が意味をなさない。前半/後半の符号一致に差し替え
+    _h1_bp = _h2_bp = 0.0
+    if a.min_gap_bp > 0 and not _wp.empty:
+        _ds = sorted(_wp["date"].unique())
+        _mid = _ds[len(_ds) // 2]
+        _h1, _h2 = _wp[_wp["date"] < _mid], _wp[_wp["date"] >= _mid]
+        _h1_bp, _h2_bp = _bp(_h1), _bp(_h2)
+        print(f"    前半({str(_ds[0])[:7]}〜) {_bp(_h1):+.1f}bp / "
+              f"後半({str(_mid)[:7]}〜) {_bp(_h2):+.1f}bp   ← ④ 両方プラスが合格")
+    else:
+        print(f"    単調性 Spearman = {_rho:+.2f} (合格 ≥ {PASS_RHO})")
     _verdict[_wname] = {"bp": _all_bp, "t": _all_t, "rho": _rho,
+                        "h1": _h1_bp, "h2": _h2_bp,
                         "n": len(_wp), "rows": _rows_pool}
 
-# ── 帰無較正 (全期間・判定対象の母集団) ────────────────────────────
+# ── 帰無較正 ──────────────────────────────────────────────────────
+#   閾値ありのとき: **判定窓の中で**「閾値以上」vs「ギャップダウン」を比べる。
+#     ⚠ 判定窓に揃えないと、既見期間の数字で較正することになる。
+#   閾値なしのとき: 全期間の最上位帯 vs 最下位帯 (第1回・第2回と同じ)。
 _null = None
 _pool_all = _pool_of(r_all)
-if not _pool_all.empty and len(_verdict.get("全期間", {}).get("rows", [])) >= 2:
-    _rws = _verdict["全期間"]["rows"]
-    _hi, _lo = _rws[-1][0], _rws[0][0]
+_wdict = dict(_windows)
+if a.min_gap_bp > 0:
+    _nsrc = _wdict.get(_judge_win, r_all)
+    if a.pool == "sig":
+        _nsrc = _nsrc[_nsrc["sig"] == 1]
+    elif a.pool == "nosig":
+        _nsrc = _nsrc[_nsrc["sig"] == 0]
+    _nsrc = _nsrc.copy()
+    _hi, _lo = f"≥{int(a.min_gap_bp)}bp", "< 0"
+    _nsrc["band"] = _nsrc["gap_bp"].map(
+        lambda g: _hi if g >= a.min_gap_bp else (_lo if g < 0 else "中間"))
+    _nwin = _judge_win
+else:
+    _nsrc = _pool_all
+    _rws = _verdict.get("全期間", {}).get("rows", [])
+    _hi, _lo = (_rws[-1][0], _rws[0][0]) if len(_rws) >= 2 else ("", "")
+    _nwin = "全期間"
+if _hi and _lo and not _nsrc.empty:
     print(f"\n{'=' * 78}\n■ 帰無較正 — 同じ日の中で帯ラベルをシャッフル ({a.seeds}本)\n{'=' * 78}")
     print(f"  ⛔ 日をまたぐシャッフルは日内相関を壊して帰無分布が狭くなり、"
           f"偽陽性を過小評価する(§18.13)")
-    _obs, _med, _p95 = _null_calib(_pool_all, _hi, _lo)
+    print(f"  対象窓 = {_nwin} ({_nsrc['date'].nunique():,}営業日 / {len(_nsrc):,}銘柄日)")
+    _obs, _med, _p95 = _null_calib(_nsrc, _hi, _lo)
     print(f"\n  スプレッド『{_hi}』−『{_lo}』")
     print(f"    実測      {_obs:+8.1f} bp")
     print(f"    帰無 中央 {_med:+8.1f} bp   ← 0 中心とは限らない。ここと比べること")
@@ -503,7 +590,10 @@ if not _pool_all.empty and len(_verdict.get("全期間", {}).get("rows", [])) >=
 print(f"\n{'=' * 78}\n■ 判定 — 事前宣言した条件\n{'=' * 78}")
 print(f"  母集団={a.pool} / 執行={a.exec_mode}({EXEC_BP:.1f}bp) / "
       f"①の水準は執行コストの3倍 = {PASS_BP}bp")
-_need = ["未使用", "既見"] if a.split else ["全期間"]
+if a.min_gap_bp > 0:
+    print(f"  ★ 判定は **最も古い窓({_judge_win}) だけ**。他は既見なので参考")
+_need = [_judge_win] if a.min_gap_bp > 0 else (
+    [w for w, _ in _windows if w != "全期間"] or ["全期間"])
 _pass = []
 for _k in _need:
     v = _verdict.get(_k)
@@ -512,7 +602,13 @@ for _k in _need:
         continue
     _pass.append((f"① {_k} bp/件 ≥ {PASS_BP}", v["bp"] >= PASS_BP, f"{v['bp']:+.1f}bp"))
     _pass.append((f"② {_k} 日クラスタ t ≥ {PASS_T}", v["t"] >= PASS_T, f"t={v['t']:+.2f}"))
-    _pass.append((f"④ {_k} 単調 ρ ≥ {PASS_RHO}", v["rho"] >= PASS_RHO, f"ρ={v['rho']:+.2f}"))
+    if a.min_gap_bp > 0:
+        _pass.append((f"④ {_k} 前半・後半とも プラス",
+                      v["h1"] > 0 and v["h2"] > 0,
+                      f"前半 {v['h1']:+.1f} / 後半 {v['h2']:+.1f}bp"))
+    else:
+        _pass.append((f"④ {_k} 単調 ρ ≥ {PASS_RHO}", v["rho"] >= PASS_RHO,
+                      f"ρ={v['rho']:+.2f}"))
 if _null:
     _pass.append(("⑤ 帰無の95%点を超える", _null[0] > _null[2],
                   f"{_null[0]:+.1f} vs {_null[2]:+.1f}bp"))
@@ -539,29 +635,38 @@ try:
     import csv as _csv
     from datetime import datetime as _dtn
     from pathlib import Path as _Pth
+    # ⚠ 列は **固定**。判定窓の名前で列名を作ると、窓が変わったときヘッダと
+    #   値がズレる(第2回=未使用/既見・第3回=年月レンジ)。
+    _HDR = ["実行時刻", "母集団", "執行", "閾値bp", "PASS_BP", "遡及日", "境界",
+            "判定窓", "件数", "判定bp", "判定t", "判定④", "帰無実測", "帰無95",
+            "判定", "メモ"]
     _tp = _Pth(TRIALS_CSV)
-    _new_file = not _tp.exists()
-    _v0 = _verdict.get(_need[0], {})
-    _v1 = _verdict.get(_need[-1], {})
+    _old_hdr = None
+    if _tp.exists():
+        try:
+            with open(_tp, encoding="utf-8-sig") as _rh:
+                _old_hdr = next(_csv.reader(_rh), None)
+        except Exception:
+            pass
+    _jw = _need[0] if _need else "全期間"
+    _v0 = _verdict.get(_jw, {})
+    _c4 = (f"前半{_v0.get('h1', 0):+.1f}/後半{_v0.get('h2', 0):+.1f}"
+           if a.min_gap_bp > 0 else f"ρ={_v0.get('rho', 0):+.2f}")
     with open(_tp, "a", newline="", encoding="utf-8-sig") as _fh:
         _w = _csv.writer(_fh)
-        if _new_file:
-            _w.writerow(["実行時刻", "母集団", "執行", "PASS_BP", "遡及日", "境界",
-                         "建値下限", "建値上限", "件数",
-                         f"{_need[0]}_bp", f"{_need[0]}_t", f"{_need[0]}_rho",
-                         f"{_need[-1]}_bp", f"{_need[-1]}_t", f"{_need[-1]}_rho",
-                         "帰無実測", "帰無95", "判定", "メモ"])
+        if _old_hdr != _HDR:
+            _w.writerow(_HDR)
         _w.writerow([_dtn.now().strftime("%Y-%m-%d %H:%M:%S"), a.pool, a.exec_mode,
-                     PASS_BP, a.days, a.split or "-", a.min_price, a.max_price,
-                     len(_pool_all),
-                     f"{_v0.get('bp', 0):.1f}", f"{_v0.get('t', 0):.2f}",
-                     f"{_v0.get('rho', 0):.2f}",
-                     f"{_v1.get('bp', 0):.1f}", f"{_v1.get('t', 0):.2f}",
-                     f"{_v1.get('rho', 0):.2f}",
+                     a.min_gap_bp, PASS_BP, a.days, a.split or "-",
+                     _jw, len(_pool_all),
+                     f"{_v0.get('bp', 0):.1f}", f"{_v0.get('t', 0):.2f}", _c4,
                      f"{_null[0]:.1f}" if _null else "",
                      f"{_null[2]:.1f}" if _null else "",
                      "合格" if _ok_all else "不合格", a.note])
-    _n_trials = sum(1 for _ in open(_tp, encoding="utf-8-sig")) - 1
+    # ヘッダ行(列が変わると挟まる)を除いた行数 = 試した回数
+    with open(_tp, encoding="utf-8-sig") as _rh:
+        _n_trials = sum(1 for _r in _csv.reader(_rh)
+                        if _r and _r[0] != "実行時刻")
     print(f"\n  [試行記録] {TRIALS_CSV} に追記 — **通算 {_n_trials} 回目**")
     if _n_trials >= 3:
         _fp = 1.0 - (0.95 ** _n_trials)
