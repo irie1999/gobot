@@ -620,6 +620,21 @@ _NG_QTY = 100
 _NG_WORKERS = int(os.environ.get("LSS_NEWGAP_WORKERS", "8"))
 
 
+def _newgap_yf(code: str) -> str:
+    """J-Quants の5桁コード(末尾0)を yfinance の `NNNN.T` に直す。
+
+    ⛔ これを忘れると `21200` のような **存在しないシンボル**を yfinance に
+       投げることになり、全銘柄が `possibly delisted; no timezone found` で
+       失敗する(2026-08-25 に実際やった)。`analyze_gap_edge._jq_to_yf` と同じ。
+    """
+    c = str(code).strip()
+    if c.endswith(".T"):
+        return c
+    if len(c) == 5 and c.endswith("0"):
+        c = c[:4]
+    return f"{c}.T"
+
+
 def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) -> list:
     """1銘柄の全営業日について (日付, 前日リターン, ギャップ, 損益, 流動性) を返す。
 
@@ -21520,7 +21535,9 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         try:
             _t_ng = _time.time()
             from daytrade_data import available_local_symbols as _ng_als
-            _ng_syms = sorted(_ng_als())
+            # ⛔ available_local_symbols は 5分足のファイル名(J-Quants の5桁
+            #    コード)をそのまま返す。**必ず yfinance 形式に直す**(重複も除く)。
+            _ng_syms = sorted({_newgap_yf(s) for s in _ng_als()})
             _ng_body = _newgap_html(
                 days,
                 _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
