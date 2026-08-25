@@ -230,6 +230,10 @@ ap.add_argument("--axis-seeds", type=int, default=50,
 ap.add_argument("--confirm", type=str, default="",
                 help="★ 検証モード。'軸:分位' を指定して **TEST で1回だけ**測る"
                      "(例 atr_pct:Q1 / dow:0)。⛔ 1つの候補につき1回だけ")
+ap.add_argument("--budget-man", type=float, default=400.0,
+                help="--confirm のとき月別の実額を出す予算(万円)。0で出さない")
+ap.add_argument("--months", type=int, default=24,
+                help="月別を何ヶ月ぶん表示するか(既定24。0=全部)")
 ap.add_argument("--no-refetch", action="store_true",
                 help="キャッシュが --days ぶん遡っていなくても再ダウンロードしない。"
                      "⛔ 古い窓のデータが欠けたまま測ることになる(第3回の事故)")
@@ -868,6 +872,70 @@ if a.confirm:
     print(f"  ⛔ 不合格なら、別の分位・別の軸で試し直さないこと。")
     print(f"     試すたびに TEST が既見になり、検証手段が減ります。")
     print(f"  {'=' * 68}")
+
+    # ── 月別の実額 (予算シミュレーション) ────────────────────────────
+    #   毎日、候補を **流動性降順**に並べて予算が尽きるまで建てる。
+    #   ⚠ 予算超過は `continue`(貪欲。次の安い注文を試す)。レポート側 _run_budget_sim
+    #     と同じ挙動に揃える(§18.33: ズレたときの正解はレポート側)。
+    #   ⚠ slip=0。呼値も引いていない **理論値の上限**。
+    #   ⚠ 発注順は §18.24 で「何にしてもランダムと区別できない」と出ている。
+    #     流動性降順にするのは、バックテストに映らない執行コストのため(§18.21)。
+    if a.budget_man > 0:
+        def _sim(sel: pd.DataFrame, lbl: str):
+            if sel.empty:
+                return None
+            _cap = a.budget_man * 10_000.0
+            _recs = []
+            for _d, _g in sel.groupby("date"):
+                _g = _g.sort_values("liq", ascending=False, na_position="last")
+                _cash, _p, _n = _cap, 0.0, 0
+                for _ep, _pn in zip(_g["entry_p"], _g["pnl"]):
+                    _cost = float(_ep) * a.qty
+                    if _cost > _cash:
+                        continue
+                    _cash -= _cost
+                    _p += float(_pn)
+                    _n += 1
+                _recs.append({"date": _d, "month": str(_d)[:7], "pnl": _p,
+                              "n": _n, "used": _cap - _cash})
+            return pd.DataFrame(_recs)
+
+        for _lbl, _sel in (("TEST", _sel_te), ("TRAIN", _sel_tr)):
+            _sm = _sim(_sel, _lbl)
+            if _sm is None or _sm.empty:
+                continue
+            _mo = _sm.groupby("month").agg(
+                日数=("pnl", "size"), 建てた=("n", "sum"),
+                投入=("used", "mean"), 損益=("pnl", "sum"),
+                勝日=("pnl", lambda s: int((s > 0).sum())))
+            print(f"\n{'=' * 78}")
+            print(f"■ 月別の実額 — {_lbl} / 予算 {a.budget_man:,.0f}万円 / "
+                  f"流動性降順 / **slip=0 の理論値**")
+            print(f"{'=' * 78}")
+            _show = _mo if a.months <= 0 else _mo.tail(a.months)
+            print(f"  {'月':<9}{'日数':>5}{'建てた':>7}{'件/日':>7}"
+                  f"{'投入/日':>10}{'損益':>12}{'勝日':>7}")
+            print("  " + "-" * 58)
+            for _m, _r in _show.iterrows():
+                print(f"  {_m:<9}{int(_r['日数']):>5}{int(_r['建てた']):>7}"
+                      f"{_r['建てた'] / max(1, _r['日数']):>7.1f}"
+                      f"{_r['投入'] / 10_000:>9,.0f}万{_r['損益']:>+12,.0f}"
+                      f"{int(_r['勝日'])}/{int(_r['日数']):<4}")
+            _mv = _mo["損益"]
+            _mu, _sd = float(_mv.mean()), float(_mv.std(ddof=1))
+            _tt = (_mu / (_sd / (len(_mv) ** 0.5))) if len(_mv) > 1 and _sd > 0 else 0.0
+            print("  " + "-" * 58)
+            print(f"  {len(_mv)}ヶ月  月平均 {_mu:>+11,.0f}円  月次σ {_sd:>10,.0f}円  "
+                  f"月平均/σ {_mu / _sd if _sd > 0 else 0:.2f}  t={_tt:+.2f}")
+            print(f"          プラス月 {int((_mv > 0).sum())}/{len(_mv)}  "
+                  f"最良 {_mv.max():+,.0f}  最悪 {_mv.min():+,.0f}")
+            _need_m = int((2.0 / max(_tt, 1e-9)) ** 2 * len(_mv)) if _tt > 0 else 0
+            if _tt > 0:
+                print(f"          t=2 に届くのに必要な月数: 約{_need_m}ヶ月")
+        print(f"\n  ⚠ **slip=0 / 呼値も引いていない理論値の上限**です。")
+        print(f"     実スプレッドぶん(呼値3.3bp〜)は必ず下がります。")
+        print(f"  ⛔ 月別を見て『良い月だけ採用する』ことはできません。"
+              f"どの月かは事前に選べません。")
     sys.exit(0)
 
 _verdict: dict[str, dict] = {}
