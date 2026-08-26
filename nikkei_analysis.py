@@ -612,6 +612,12 @@ def _liquidity_of(sym: str) -> float:
 # ⚠ slip=0。板寄せ約定なら呼値を払わないが、09:00に板を読む方式では
 #    読み取りに36秒かかる(§18.44 実測)ぶん不利になる。実測は §18.49。
 _NG_TAB = os.environ.get("LSS_NEWGAP_TAB", "1").strip().lower() not in ("0", "false", "no", "")
+# エントリー遅延の bp。**N 自身の母集団で実測**(5分足 14,644銘柄日 / 2026-08-26):
+#   5分後 -10.4bp / 10分後 -9.4 / 15分後 -8.4 (頭打ち)
+#   §18.44 の減衰は凹型(1分が5分の43%)なので、板読み36秒 ≒ 5分の1/4 ≒ -3bp
+# ⚠ J の母集団(§18.44: 5分 -36.6bp)の3分の1以下。N は執行に強い。
+_NG_DELAY_BP = float(os.environ.get("LSS_NEWGAP_DELAY_BP", "3.0"))
+_NG_DECAY5 = -10.4          # 表示用。上の実測値
 _NG_RET1 = float(os.environ.get("LSS_NEWGAP_RET1", "1.753"))     # 前日リターン下限(%)
 _NG_GAP_BP = float(os.environ.get("LSS_NEWGAP_BP", "100"))       # ギャップ下限(bp)
 _NG_WATCH = int(os.environ.get("LSS_NEWGAP_WATCH", "50"))        # 朝読める上限(0=無制限)
@@ -863,6 +869,70 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         f'<b style="color:{_wall_c}">{_miss_tot:,}件</b>'
         f'（建てた {_nb:,}件 の {_miss_tot / max(1, _nb) * 100:.0f}%）'
         f'</div>')
+
+    # ── 執行コストを引くといくら残るか ──────────────────────────
+    #   ⛔ このタブの bp は **グロス**。analyze_gap_edge の EXEC_BP は合格ラインを
+    #      作るのに使うだけで、損益から差し引かれていない。ここで手当てする。
+    try:
+        import eh_trades as _eht
+        _tk_bp = float((_det["entry_p"].map(_eht._tick) / _det["entry_p"]
+                        * 1e4).mean()) if not _det.empty else 0.0
+    except Exception:
+        _tk_bp = 0.0
+    _nmo = max(1, len(_mo))
+    _mavg = _tot / _nmo
+    if _bpc > 0 and _tk_bp > 0:
+        _h.append(
+            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;'
+            f'padding:10px;margin-bottom:12px;font-size:0.82rem;color:#cbd5e1">'
+            f'<b style="color:#fbbf24">💸 執行コストを引くと</b>'
+            f'（上の <b>{_bpc:+.1f}bp</b> は <b style="color:#fbbf24">グロス</b>。'
+            f'呼値も遅延も引かれていません）<br>'
+            f'・建値の平均から <b>呼値 = {_tk_bp:.1f}bp</b>'
+            f'（東証の呼値表。3,000円以下1円 / 5,000円以下5円 / それ以上10円）<br>'
+            f'・<b>エントリー遅延 = {_NG_DELAY_BP:.1f}bp</b>'
+            f'（N 自身の母集団を5分足で実測: 5分後 {_NG_DECAY5:+.1f}bp で頭打ち。'
+            f'§18.44 の凹型で板読み36秒に按分。J の母集団 {-36.6:+.1f}bp の1/3以下）<br>'
+            f'・<b>引けの MOC は板寄せなので呼値を払わない</b>（§18.37 の実測で'
+            f'テストと1円も違わなかった）'
+            f'<table style="width:100%;border-collapse:collapse;font-size:0.8rem;'
+            f'margin-top:8px"><thead><tr style="background:#0f172a">'
+            + "".join(f'<th style="padding:5px 7px;color:#94a3b8;'
+                      f'text-align:{"left" if _c == "前提" else "right"}">{_c}</th>'
+                      for _c in ("前提", "呼値", "遅延", "残る", "残る%",
+                                 f"月平均({_nmo}ヶ月)"))
+            + '</tr></thead><tbody>')
+        for _lb, _sp in (("保守 — 成行で片道1ティック払う", _tk_bp),
+                         ("中庸 — 保護指値で半分に収まる", _tk_bp / 2),
+                         ("楽観 — 板寄せ並みで呼値なし", 0.0)):
+            _net = _bpc - _sp - _NG_DELAY_BP
+            _r = _net / _bpc
+            _c2 = "#4ade80" if _net > 0 else "#f87171"
+            _h.append(
+                f'<tr style="border-bottom:1px solid #0f172a">'
+                f'<td style="padding:4px 7px;color:#e2e8f0">{_lb}</td>'
+                f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
+                f'-{_sp:.1f}bp</td>'
+                f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
+                f'-{_NG_DELAY_BP:.1f}bp</td>'
+                f'<td style="padding:4px 7px;text-align:right;color:{_c2};'
+                f'font-weight:700">{_net:+.1f}bp</td>'
+                f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
+                f'{_r * 100:.0f}%</td>'
+                f'<td style="padding:4px 7px;text-align:right;color:{_c2};'
+                f'font-weight:700">{_mavg * _r:+,.0f}円</td></tr>')
+        _h.append(
+            f'</tbody></table>'
+            f'<div style="color:#94a3b8;margin-top:6px;font-size:0.78rem">'
+            f'⚠ <b>単月ではマイナスが普通</b>。下の月別表の勝日と、月次σ を'
+            f'必ず見ること。<br>'
+            f'⚠ <b>損切りを置いていない</b>ので、1日の最悪は当日の値幅ぶん'
+            f'そのまま来る（§18.55）。<br>'
+            f'⛔ この控除は**手当て**です。シミュ本体は 09:00確認の機構なのに'
+            f'執行コストは auction（呼値なし・遅延なし）の前提で動いています。'
+            f'本来はシミュ側を直すべき部分。<br>'
+            f'　遅延を変えるなら <code>LSS_NEWGAP_DELAY_BP</code>'
+            f'</div></div>')
 
     # ── 候補数の月別（この方式にしか無い情報。損益は下の共通ブロックが出す）──
     _h.append('<details style="margin-bottom:12px"><summary style="color:#94a3b8;'
