@@ -710,6 +710,53 @@ def do_sequence() -> None:
             "ot": str(r.get("open_time") or ""),
             "late": int(float(r.get("late") or 0))})
 
+    # ── ★ まず「3方式それぞれ、どの銘柄が合格したか」 ──────────────
+    #   資金の割り振りとは別に、**選定そのもの**を見たいことが多い。
+    #   J は資金均等で株数の決め方が違うので発注シーケンスには入れないが、
+    #   合格銘柄はここで出す。
+    def _pass_list(tag: str, ik: str, rk: str, gmin: float, up: bool):
+        _r = []
+        for x in rows:
+            _sy = str(x.get("symbol") or "").strip().replace(".T", "")
+            _fl = _flag.get(_sy, {})
+            if not _fl.get(ik):
+                continue
+            if not (0 < _fl.get(rk, 0) <= a.watch):
+                continue                  # その方式の上位50件の外
+            try:
+                _g = float(x.get("gap_bp") or 0)
+                _o = float(x.get("open_p") or 0)
+            except Exception:
+                continue
+            if _o <= 0:
+                continue                  # 寄っていない
+            if (_g >= gmin) if up else (_g <= -gmin):
+                _r.append((_sy, _g, _o))
+        _r.sort(key=lambda t: -abs(t[1]))
+        _n_watch = sum(1 for x in rows
+                       if 0 < _flag.get(str(x.get("symbol") or "")
+                                        .strip().replace(".T", ""), {})
+                       .get(rk, 0) <= a.watch)
+        print(f"\n  {tag}")
+        print(f"    監視 {_n_watch}件 → **合格 {len(_r)}件**")
+        if _r:
+            for _sy, _g, _o in _r:
+                print(f"      {_sy:<8}{_g:>+8.0f}bp  始値 {_o:>9,.1f}")
+        else:
+            print(f"      (なし)")
+
+    print(f"\n{'=' * 78}")
+    print(f"■ 09:00 の合格銘柄 — {_TODAY}")
+    print(f"{'=' * 78}")
+    _pass_list(f"★ N     ギャップ ≥ +{a.gap_bp:.0f}bp → **売り**",
+               "in_n", "rank_n", a.gap_bp, True)
+    _pass_list(f"★ 鏡像   ギャップ ≤ -{a.gap_bp:.0f}bp → **買い**",
+               "in_m", "rank_m", a.gap_bp, False)
+    _pass_list(f"J       ギャップ ≥ +{a.gap_bp_j:.0f}bp → 売り（参考・記録のみ）",
+               "in_j", "rank_j", a.gap_bp_j, True)
+    print(f"\n  ⚠ ここまでは **合格したか**だけ。実際に建てられるかは"
+          f"予算次第なので、下の発注シーケンスを見てください")
+
     _lbl = {1: "売り", -1: "買い"}
     print(f"\n{'=' * 78}")
     print(f"■ 発注シーケンス — {_TODAY} / 予算 {a.budget:,.0f}万 / "
