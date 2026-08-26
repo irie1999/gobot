@@ -939,7 +939,12 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'　遅延を変えるなら <code>LSS_NEWGAP_DELAY_BP</code>'
             f'</div></div>')
 
-    # ── 候補数の月別（この方式にしか無い情報。損益は下の共通ブロックが出す）──
+    # ── 候補数の月別（この方式にしか無い情報。損益は共通ブロックが出す）──
+    #   ⛔ **head ではなく tail**(共通ブロックの後ろ)に置く。前に置くと
+    #      「H と表の構成が違う」に見える(2026-08-26 ユーザー指摘)。
+    #      H/J と同じ月別サマリーを先に見せ、N 固有の情報は後ろに回す。
+    _t2 = []
+    _h, _h_main = _t2, _h          # 以降の append は tail 側へ
     _h.append('<details style="margin-bottom:12px"><summary style="color:#94a3b8;'
               'font-size:0.85rem;cursor:pointer">📊 月別の候補数（50件の壁がどれだけ'
               '効いているか）</summary>'
@@ -963,7 +968,8 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'<td style="padding:4px 7px;text-align:right;color:#94a3b8">'
             f'{_r["投入"] / 10_000:,.0f}万</td></tr>')
     _h.append('</tbody></table></details>')
-    return {"head": "".join(_h), "trades": _newgap_rows_to_trades(_det)}
+    return {"head": "".join(_h_main), "tail": "".join(_t2),
+            "trades": _newgap_rows_to_trades(_det)}
 
 
 def _lookup_frozen_bt(sym: str, strat: str):
@@ -21629,7 +21635,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                           flush=True)
                 _ng_pane = (
                     f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
-                    + _ng["head"] + _ng_common + '</div>')
+                    + _ng["head"] + _ng_common + (_ng.get("tail") or "")
+                    + '</div>')
                 _eh_btn += (
                     f'<button class="detail-tab-btn" '
                     f'onclick="switchDetailTab({_dseq},\'newgap\')" '
