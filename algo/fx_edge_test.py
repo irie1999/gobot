@@ -38,9 +38,10 @@ def load_bars(path: str, tz_src: str | None) -> pd.DataFrame:
         unit = ("s" if mag < 1e11 else "ms" if mag < 1e14 else "us" if mag < 1e17 else "ns")
         idx = pd.to_datetime(s, unit=unit, utc=True)
     else:
-        idx = pd.to_datetime(s, utc=False, errors="coerce")
-        idx = pd.DatetimeIndex(idx)
-        idx = idx.tz_localize(tz_src or "UTC") if idx.tz is None else idx
+        idx = pd.DatetimeIndex(pd.to_datetime(s, utc=False, errors="coerce"))
+        if idx.tz is None:
+            # DST の重複/欠落時刻は NaT にして落とす(ブローカー時間で起きうる)
+            idx = idx.tz_localize(tz_src or "UTC", ambiguous="NaT", nonexistent="NaT")
         idx = idx.tz_convert("UTC")
     df.index = pd.DatetimeIndex(idx).tz_convert(JST)
 
@@ -51,6 +52,7 @@ def load_bars(path: str, tz_src: str | None) -> pd.DataFrame:
             sys.exit(f"'{want}' 列が見つかりません。列: {list(df.columns)}")
         ren[c] = want
     df = df.rename(columns=ren)[["open", "high", "low", "close"]].astype(float)
+    df = df[~df.index.isna()]
     return df[~df.index.duplicated(keep="last")].sort_index()
 
 
