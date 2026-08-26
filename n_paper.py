@@ -107,6 +107,14 @@ ap.add_argument("--merge-j", action="store_true",
                      "⛔ kabu の有効トークンは1つなので J と N を別々には"
                      "読めない。**1回の板読みで両方記録する**ための指定。"
                      "先に `python k_open_confirm.py --collect` を実行しておくこと")
+ap.add_argument("--sequence", action="store_true",
+                help="★ 板読みCSVから **実際に発注が走る順番**を再現して出す"
+                     "(kabu 不要。引け前でも見られる)")
+ap.add_argument("--budget", type=float, default=400.0,
+                help="--sequence の予算(万円)")
+ap.add_argument("--seq-sides", type=str, default="nm",
+                help="--sequence で1つの予算を共有する側。"
+                     "n=N のみ / m=鏡像のみ / nm=両建て(既定)")
 ap.add_argument("--paper-csv", type=str, default="",
                 help="--close が読む板読み結果。"
                      "既定 k_paper_<日付>.csv (n_open_confirm.py の出力)")
@@ -634,7 +642,155 @@ def do_close() -> None:
     print(f"  → {_o2}")
 
 
-if a.collect:
+# ══════════════════════════════════════════════════════════════════════
+# ⑤ --sequence : 実際に発注が走る順番を再現する (kabu 不要)
+# ══════════════════════════════════════════════════════════════════════
+def do_sequence() -> None:
+    """板読みCSVから **発注シーケンス**を作る。
+
+    ★ ライブは「全部が寄るのを待たない」(§18.38 の『即時』)。寄った銘柄から
+      順に配るので、順番は
+
+        ① 寄った時刻のグループ順(先に寄ったグループが先)
+        ② グループの中では |ギャップ| の大きい順
+
+      になる。バックテストは **その日を丸ごと** |ギャップ|降順に並べるので、
+      **遅く寄った大ギャップ銘柄はライブのほうが不利な順位**になる。
+      その差もここで出す。
+
+    ⛔ 株数は **100株固定**(バックテスト `_ops_sim` の a.qty と同じ)。
+       資金均等ではない。J だけは資金均等なので別枠で扱う(§18.48)。
+    """
+    _pcsv = Path(a.paper_csv) if a.paper_csv else Path(f"k_paper_{_YMD}.csv")
+    if not _pcsv.exists():
+        _alt = _PAPER_CSV
+        if not _alt.exists():
+            sys.exit(f"[error] {_pcsv} も {_alt} もありません。"
+                     f"先に朝の板読み(.\\norder)を実行してください")
+        _pcsv = _alt
+    rows = list(_csv.DictReader(open(_pcsv, encoding="utf-8-sig")))
+    if not rows:
+        sys.exit(f"[error] {_pcsv} が空です")
+
+    _flag: dict = {}
+    if _SIG_CSV.exists():
+        for r in _csv.DictReader(open(_SIG_CSV, encoding="utf-8-sig")):
+            _sy = str(r.get("symbol") or "").strip().replace(".T", "")
+            _flag[_sy] = {k: int(float(r.get(k) or 0)) for k in
+                          ("in_n", "in_m", "in_j", "rank_n", "rank_m", "rank_j")}
+    else:
+        print(f"  ⚠ {_SIG_CSV} が無いので方式を判別できません", flush=True)
+
+    _want = str(a.seq_sides).lower()
+    _cand = []
+    for r in rows:
+        _sy = str(r.get("symbol") or "").strip().replace(".T", "")
+        _fl = _flag.get(_sy, {})
+        try:
+            _op = float(r.get("open_p") or 0)
+            _gap = float(r.get("gap_bp") or 0)
+        except Exception:
+            continue
+        if _op <= 0:
+            continue                      # 寄っていない
+        # 方式の判定。**その方式の上位50件に入っているものだけ**建てられる
+        _sd = 0
+        if "n" in _want and _fl.get("in_n") and 0 < _fl.get("rank_n", 0) <= a.watch \
+                and _gap >= a.gap_bp:
+            _sd = 1
+        elif "m" in _want and _fl.get("in_m") and 0 < _fl.get("rank_m", 0) <= a.watch \
+                and _gap <= -a.gap_bp:
+            _sd = -1
+        if _sd == 0:
+            continue
+        _cand.append({
+            "sym": _sy, "side": _sd, "gap": _gap, "op": _op,
+            "grp": int(float(r.get("grp") or 0)),
+            "ts": str(r.get("seen_ts") or ""),
+            "ot": str(r.get("open_time") or ""),
+            "late": int(float(r.get("late") or 0))})
+
+    _lbl = {1: "売り", -1: "買い"}
+    print(f"\n{'=' * 78}")
+    print(f"■ 発注シーケンス — {_TODAY} / 予算 {a.budget:,.0f}万 / "
+          f"{'両建て(N+鏡像)' if _want == 'nm' else ('N のみ' if _want == 'n' else '鏡像のみ')}")
+    print(f"{'=' * 78}")
+    print(f"  ★ ライブは全部が寄るのを待ちません(§18.38)。")
+    print(f"     **寄ったグループ順 → グループ内は |ギャップ| 降順** に発注します。")
+    print(f"  ⛔ 株数は **100株固定**(バックテストと同じ)。資金均等ではありません")
+    if not _cand:
+        print(f"\n  合格ゼロ（{_pcsv} に条件を満たす銘柄がありません）")
+        return
+
+    def _run(order, tag):
+        _cash, _seq, _out = a.budget * 1e4, 0, []
+        for c in order:
+            _cost = c["op"] * QTY
+            _ok = _cost <= _cash
+            if _ok:
+                _cash -= _cost
+                _seq += 1
+            _out.append({**c, "n": _seq if _ok else 0, "ok": _ok,
+                         "cost": _cost, "left": _cash})
+        return _out, _cash
+
+    # ── ライブの順(時刻グループ → |gap|降順) ──
+    _live = sorted(_cand, key=lambda c: (c["grp"], -abs(c["gap"]), c["sym"]))
+    _lv, _lcash = _run(_live, "live")
+    print(f"\n  {'#':<4}{'寄り':<10}{'銘柄':<9}{'方式':<7}{'ギャップ':>10}"
+          f"{'始値':>10}{'必要資金':>12}{'残り':>13}")
+    print("  " + "-" * 76)
+    _gp = None
+    for r in _lv:
+        if r["grp"] != _gp:
+            _gp = r["grp"]
+            print(f"  ── {r['ts']} に寄ったグループ ──")
+        _n = f"{r['n']}" if r["ok"] else "⛔"
+        print(f"  {_n:<4}{(r['ot'] or '')[-8:]:<10}{r['sym']:<9}"
+              f"{_lbl[r['side']]:<7}{r['gap']:>+10.0f}{r['op']:>10,.1f}"
+              f"{r['cost']:>12,.0f}"
+              + (f"{r['left']:>13,.0f}" if r["ok"] else f"{'見送り':>13}"))
+    print("  " + "-" * 76)
+    _nok = sum(1 for r in _lv if r["ok"])
+    _ns = sum(1 for r in _lv if r["ok"] and r["side"] > 0)
+    _nm = _nok - _ns
+    print(f"  **{_nok}件 建てる**(売り {_ns} / 買い {_nm}) / "
+          f"投入 {a.budget * 1e4 - _lcash:,.0f}円 "
+          f"({(a.budget * 1e4 - _lcash) / (a.budget * 1e4) * 100:.0f}%) / "
+          f"見送り {len(_lv) - _nok}件")
+
+    # ── バックテストの順(その日を丸ごと |gap|降順)との差 ──
+    _bt = sorted(_cand, key=lambda c: (-abs(c["gap"]), c["sym"]))
+    _bv, _bcash = _run(_bt, "bt")
+    _lset = {r["sym"] for r in _lv if r["ok"]}
+    _bset = {r["sym"] for r in _bv if r["ok"]}
+    if _lset != _bset:
+        print(f"\n  ⚠ **ライブとバックテストで建てる銘柄が違います**")
+        _only_b = sorted(_bset - _lset)
+        _only_l = sorted(_lset - _bset)
+        if _only_b:
+            print(f"     バックテストなら建てたのに、ライブでは見送り: "
+                  + ", ".join(_only_b))
+            print(f"       → 遅く寄った大ギャップ銘柄が、先に寄った小ギャップに"
+                  f"枠を取られたためです")
+        if _only_l:
+            print(f"     ライブでだけ建てる: " + ", ".join(_only_l))
+        print(f"     ⛔ これは実装の誤りではなく、**待たない方針の代償**です"
+              f"(待つと1分で -15.8bp 逃げる / §18.44)")
+    else:
+        print(f"\n  ✅ ライブの順とバックテストの順で、建てる銘柄は同じでした")
+
+    _dl = [r for r in _lv if r["late"]]
+    if _dl:
+        print(f"\n  遅寄り {len(_dl)}件: "
+              + ", ".join(f"{r['sym']}({(r['ot'] or '')[-8:]})" for r in _dl[:8]))
+    print(f"\n  ⚠ **ペーパー**。実際には発注していません。")
+    print(f"  ⚠ J は資金均等(§18.48)で株数の決め方が違うので、この表には出しません")
+
+
+if a.sequence:
+    do_sequence()
+elif a.collect:
     do_collect()
 elif a.close:
     do_close()
