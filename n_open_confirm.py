@@ -185,6 +185,9 @@ ap.add_argument("--allow-late-orders", action="store_true",
 ap.add_argument("--no-moc-on-exit", action="store_true",
                 help="⛔ 終了前に引け成行(MOC)を置かない。"
                      "置かないと watcher が起動するまで板が空になる")
+ap.add_argument("--n-mode", action="store_true", default=True,
+                help="新方式N として動く(既定ON)。候補CSVの既定を "
+                     "n_signals_<日付>.csv にする")
 args = ap.parse_args()
 
 # ⛔⛔ 記録専用であることを **起動時に確定させる**。
@@ -256,7 +259,9 @@ def _codes_from(path: str) -> list[str]:
     return [x for x in _c if not (x in _seen or _seen.add(x))]
 
 
-_sig_csv = args.signals_csv or f"k_signals_{_dt.date.today():%Y%m%d}.csv"
+_sig_csv = args.signals_csv or (
+    f"n_signals_{_dt.date.today():%Y%m%d}.csv" if args.n_mode
+    else f"k_signals_{_dt.date.today():%Y%m%d}.csv")
 # 銘柄 -> ATR。K の OCO は **実約定価格(始値)** を基準に置くので、
 # 損切り/利確は 09:00 に始値が出て初めて確定する。
 _ATR: dict = {}

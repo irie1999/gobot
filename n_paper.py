@@ -194,9 +194,19 @@ def do_collect() -> None:
     for i, r in enumerate(_cand, 1):
         r["rank_liq"] = i
         r["watched"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
+    # ⛔ 列は **k_signals_<日付>.csv 互換**にする。n_open_confirm.py(板読み)が
+    #    `symbol` / `prev_close` / `liquidity` を読むので、名前を揃えないと
+    #    流動性順に並べられず「銘柄コード順のまま読みます」に落ちる(§18.45 の事故)。
+    for r in _cand:
+        r["name"] = ""
+        r["strategy"] = "N"
+        r["order_price"] = 0.0       # N は寄りで判定するので注文価格を持たない
+        r["atr"] = 0.0               # N はバリアが無いので ATR を使わない
+        r["liquidity"] = r["liq"]
     with open(_SIG_CSV, "w", newline="", encoding="utf-8-sig") as fh:
-        w = _csv.DictWriter(fh, fieldnames=["symbol", "prev_date", "prev_close",
-                                            "ret1", "liq", "rank_liq", "watched"])
+        w = _csv.DictWriter(fh, fieldnames=[
+            "symbol", "name", "strategy", "order_price", "prev_close", "atr",
+            "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched"])
         w.writeheader()
         w.writerows(_cand)
     _nw = sum(r["watched"] for r in _cand)
