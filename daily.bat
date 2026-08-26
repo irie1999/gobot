@@ -107,6 +107,12 @@ REM     Today's SIGNAL list is unaffected - only how past results are scored.
 REM     Costs one extra backtest per pair (window+400d), so the PnL tab is ~2x slower.
 REM     To compare for one run: set LSS_ASOF_BT=0 before calling.
 if not defined LSS_ASOF_BT set "LSS_ASOF_BT=1"
+
+REM Keep the terminal short enough to paste into chat.
+REM Only verdicts, warnings, errors and the output filename get through.
+REM This filters printing ONLY - it never changes any number or the HTML.
+REM Run "set LSS_QUIET=0" first if you want the full log back.
+if not defined LSS_QUIET set "LSS_QUIET=1"
 REM --- BUDGET: must match `.\jorder --budget`. There is no auto-link between
 REM     the report and the live script, so an unset value silently defaults to
 REM     400 while the live side runs something else (that happened 2026-08-21).

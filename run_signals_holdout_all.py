@@ -25,6 +25,11 @@ WATCHLISTの優先順:
 from __future__ import annotations
 
 import argparse
+# ⛔ 出力だけを絞る(LSS_QUIET=1)。**計算にも HTML にも触らない**
+try:
+    import quiet_log as _quiet_log  # noqa: F401
+except Exception:
+    pass
 import copy as _copy
 import csv
 import importlib as _importlib
