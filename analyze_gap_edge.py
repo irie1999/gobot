@@ -920,6 +920,7 @@ if a.sweep_ops:
         # both のときだけ使う。日次の相関とσを出すため
         _daily: dict = {}                      # date -> [short, long]
         _dcap: dict = {}                       # date -> [short投入, long投入]
+        _dcnt: dict = {}                       # date -> [short件数, long件数]
         _byside = {1: [0.0, 0], -1: [0.0, 0]}
         _pushed = {1: 0, -1: 0}                # 予算で押し出された件数
         for _d, _g in _src.groupby("date"):
@@ -961,12 +962,14 @@ if a.sweep_ops:
                 _dv[0 if _sd > 0 else 1] += float(_r.pnl)
                 _cv = _dcap.setdefault(_d, [0.0, 0.0])
                 _cv[0 if _sd > 0 else 1] += _cost
+                _kv = _dcnt.setdefault(_d, [0, 0])
+                _kv[0 if _sd > 0 else 1] += 1
             _cnt += _n
             _used += _cap - _cash
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
                 "daily": _daily, "byside": _byside,
-                "dcap": _dcap, "pushed": _pushed}
+                "dcap": _dcap, "pushed": _pushed, "dcnt": _dcnt}
 
     if a.max_gap_bp > 0:
         _n_hi = int((_train["gap_bp"] > a.max_gap_bp).sum())
@@ -1008,6 +1011,51 @@ if a.sweep_ops:
     print(f"    現行(制限なし) {_b0['pnl']:>+14,.0f} / {_b0['n']:,}件")
     print(f"    1日1回だけ     {_r1['pnl']:>+14,.0f} / {_r1['n']:,}件 "
           f"(差 {_r1['pnl'] - _b0['pnl']:+,.0f})")
+    # ══ 月別 (§18.24: 判定は総額ではなく月次σ/t で行う) ══════════════
+    def _monthly(res, tag: str):
+        _dd, _kk = res["daily"], res["dcnt"]
+        _m: dict = {}
+        for _d, _v in _dd.items():
+            _k = str(_d)[:7]
+            _a = _m.setdefault(_k, [0.0, 0.0, 0, 0])
+            _a[0] += _v[0]; _a[1] += _v[1]
+            _c = _kk.get(_d, [0, 0])
+            _a[2] += _c[0]; _a[3] += _c[1]
+        if not _m:
+            return
+        _ks = sorted(_m)
+        _tot = np.array([_m[k][0] + _m[k][1] for k in _ks], float)
+        _both_side = a.side == "both"
+        print(f"\n  ── 月別 ({tag}) ──")
+        if _both_side:
+            print(f"    {'月':<10}{'ショート':>13}{'ロング':>13}{'合計':>13}"
+                  f"{'件数':>9}")
+        else:
+            print(f"    {'月':<10}{'損益':>13}{'件数':>9}")
+        for k in _ks:
+            _v = _m[k]
+            if _both_side:
+                print(f"    {k:<10}{_v[0]:>+13,.0f}{_v[1]:>+13,.0f}"
+                      f"{_v[0] + _v[1]:>+13,.0f}{_v[2] + _v[3]:>9,}")
+            else:
+                print(f"    {k:<10}{_v[0] + _v[1]:>+13,.0f}{_v[2] + _v[3]:>9,}")
+        _mu, _sd = float(_tot.mean()), float(_tot.std(ddof=1))
+        _t = _mu / (_sd / np.sqrt(len(_tot))) if _sd > 0 else 0.0
+        _ci = 1.96 * _sd / np.sqrt(len(_tot))
+        _pos = int((_tot > 0).sum())
+        print(f"    {'-' * 56}")
+        print(f"    {len(_ks)}ヶ月 / 月平均 {_mu:+,.0f}円 / 月次σ {_sd:,.0f}円 / "
+              f"**月平均÷σ {(_mu / _sd if _sd else 0):.2f}**")
+        print(f"    t = **{_t:+.2f}** / 95%CI {_mu - _ci:+,.0f} 〜 {_mu + _ci:+,.0f}円 "
+              f"/ プラス月 **{_pos}/{len(_ks)}**")
+        if abs(_t) < 2.0:
+            _need = int(np.ceil((2.0 * _sd / max(abs(_mu), 1e-9)) ** 2))
+            print(f"    ⚠ **CI がゼロをまたぎます**(t<2)。"
+                  f"t=2 に届くには約 {_need}ヶ月 必要です")
+        print(f"    ⚠ 端の月は日数が欠けるので上下に振れます")
+
+    _monthly(_b0, "現行 watch50 / 予算400万 / 上限なし")
+
     if a.side == "both":
         # ══ 両建ての本題 = **日次のσが下がるか** ═══════════════════
         #   総額が増えるのは当たり前(遊んでいた資金を使うだけ)。
