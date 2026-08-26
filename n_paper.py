@@ -214,6 +214,7 @@ def do_collect() -> None:
              if r["ret1"] >= a.ret1
              and MIN_PRICE <= r["prev_close"] <= MAX_PRICE]
     _cand.sort(key=lambda r: (-r["liq"], r["symbol"]))
+    _N_CAND = len(_cand)               # ★ 絞る前の真の候補数(表示用)
     for i, r in enumerate(_cand, 1):
         r["rank_liq"] = i
         r["watched"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
@@ -249,28 +250,53 @@ def do_collect() -> None:
                   f"`python k_open_confirm.py --collect` を実行してください。"
                   f"\n     J はマージせず N だけで続行します", flush=True)
         else:
-            _jrows = {}
+            # ⛔⛔ **k_signals の prev_close は空**(2026-08-27 に発覚)。
+            #   k_open_confirm._collect は fieldnames に prev_close を入れて
+            #   いるが値を書いていないので、DictWriter が空文字を出す。
+            #   ここで `prev_close > 0` を条件にすると **J 固有の銘柄が
+            #   1件も追加されない**。実測 2026-08-27: J の67銘柄のうち
+            #   N/鏡像と重なった24件しか読まず、43件を取り逃した。
+            #   → 自前のスキャン結果(rows)から前日終値を引く。
+            #     rows は1,540銘柄ぶん prev_close / liq / ret1 を持っている。
+            _byc = {r["symbol"]: r for r in rows}
+            _jrows, _nofill = {}, []
             for r in _csv.DictReader(open(_jcsv, encoding="utf-8-sig")):
                 _sy = str(r.get("symbol") or "").strip()
                 if not _sy:
                     continue
                 _sy = _sy if _sy.endswith(".T") else f"{_sy}.T"
                 _jset.add(_sy)
-                if _sy not in _jrows:
-                    try:
-                        _jrows[_sy] = {
-                            "symbol": _sy,
-                            "prev_close": float(r.get("prev_close") or 0),
-                            "liq": float(r.get("liquidity") or 0),
-                            "prev_date": "", "ret1": float("nan")}
-                    except Exception:
-                        pass
+                if _sy in _jrows:
+                    continue
+                _src = _byc.get(_sy)
+                try:
+                    _pc = float(r.get("prev_close") or 0)
+                except Exception:
+                    _pc = 0.0
+                if _pc <= 0 and _src:
+                    _pc = float(_src["prev_close"])       # ★ 自前の値で補う
+                try:
+                    _lq = float(r.get("liquidity") or 0)
+                except Exception:
+                    _lq = 0.0
+                if _lq <= 0 and _src:
+                    _lq = float(_src["liq"])
+                if _pc <= 0:
+                    _nofill.append(_sy)                   # 日足が引けなかった
+                    continue
+                _jrows[_sy] = {"symbol": _sy, "prev_close": _pc, "liq": _lq,
+                               "prev_date": (_src or {}).get("prev_date", ""),
+                               "ret1": (_src or {}).get("ret1", float("nan"))}
             _have = {r["symbol"] for r in _cand}
-            _add = [v for k, v in _jrows.items()
-                    if k not in _have and v["prev_close"] > 0]
+            _add = [v for k, v in _jrows.items() if k not in _have]
             _cand.extend(_add)
             print(f"  [merge-j] J の候補 {len(_jset):,}銘柄 → "
-                  f"N に無い {len(_add):,}件を追加", flush=True)
+                  f"N/鏡像に無い {len(_add):,}件を追加"
+                  + (f" / 前日終値が引けず除外 {len(_nofill)}件" if _nofill else ""),
+                  flush=True)
+            if len(_jset) and not _add:
+                print(f"  ⚠ J の追加が0件です。J の候補が全部 N/鏡像と"
+                      f"重なっていない限り、これは異常です", flush=True)
 
     for r in _cand:
         _r1 = r.get("ret1")
@@ -293,6 +319,10 @@ def do_collect() -> None:
         r["watched_j"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
     # 読むのは **3方式の上位50の和集合**だけ。全候補を読むと429を招く(§18.48 ⑦)
     _n_all = len(_cand)
+    _J_CAND = sum(1 for r in _cand if r["in_j"])
+    # ⛔ ここで **読む対象**に絞る。以降の _cand は全候補ではないので、
+    #   件数を表示するときは _N_CAND / len(_mir) / _J_CAND を使うこと
+    #   (2026-08-27: 絞ったあとの数を『候補』と表示して 107件を62件と誤報した)。
     _cand = [r for r in _cand
              if r["watched_n"] or r["watched_m"] or r["watched_j"]]
     print(f"  [読む対象] 候補 {_n_all:,}件 → 3方式の上位{a.watch}の和集合 "
@@ -327,16 +357,18 @@ def do_collect() -> None:
     # ⛔ 板読みは **全候補**を読む(n_open_confirm が50件バッチで回す)。
     #    板の始値は寄れば動かないので、遅れて読んでも選定は正しい。
     #    50件の壁が効くのは **実発注**のときだけなので、方式ごとに上位50件を示す。
-    def _show(tag: str, rows: list, rk: str, wk: str):
+    def _show(tag: str, rows: list, rk: str, wk: str, total: int):
+        """total = **絞る前**の候補数。rows は読む対象に絞ったあとなので、
+        そのまま数えると候補を過少に表示する(2026-08-27 に実際に誤報)。"""
         _r = sorted([x for x in rows if int(float(x.get(rk) or 0)) > 0],
                     key=lambda x: int(float(x[rk])))
         if not _r:
             print(f"\n  {tag}: 候補ゼロ")
             return
         _n = sum(1 for x in _r if int(float(x.get(wk) or 0)) == 1)
-        print(f"\n  {tag}: 候補 {len(_r)}件 → **建てられるのは上位 {_n}件**"
-              + (f" (下位 {len(_r) - _n}件は kabu の登録上限 / §18.44)"
-                 if len(_r) > _n else ""))
+        print(f"\n  {tag}: 候補 {total}件 → **建てられるのは上位 {_n}件**"
+              + (f" (残り {total - _n}件は kabu の登録上限 / §18.44)"
+                 if total > _n else ""))
         print(f"    {'#':<4}{'銘柄':<10}{'前日終値':>10}{'前日%':>8}{'売買代金':>14}")
         for x in _r[:10]:
             print(f"    {int(float(x[rk])):<4}{x['symbol']:<10}"
@@ -344,11 +376,12 @@ def do_collect() -> None:
                   f"{x['liq'] / 1e8:>12,.1f}億")
         if len(_r) > 10:
             print(f"    … 他 {len(_r) - 10}件")
-    _show("★ N (ギャップアップを売る)", _cand, "rank_n", "watched_n")
+    _show("★ N (ギャップアップを売る)", _cand, "rank_n", "watched_n", _N_CAND)
     if a.mirror:
-        _show("★ 鏡像 (ギャップダウンを買う)", _cand, "rank_m", "watched_m")
-    if any(int(float(r.get("rank_j") or 0)) > 0 for r in _cand):
-        _show("J (参考・記録のみ)", _cand, "rank_j", "watched_j")
+        _show("★ 鏡像 (ギャップダウンを買う)", _cand, "rank_m", "watched_m",
+              len(_mir))
+    if _J_CAND:
+        _show("J (参考・記録のみ)", _cand, "rank_j", "watched_j", _J_CAND)
     print(f"\n  ⚠ ここまでは **前夜の候補**。実際にどれが選ばれるかは"
           f"09:00 の始値(ギャップ)で決まります")
 
