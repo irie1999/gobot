@@ -48,6 +48,11 @@ ap.add_argument("--min-bars", type=int, default=10,
                 help="この本数未満の日は捨てる(半日立会など)")
 ap.add_argument("--wide-pct", type=float, default=30.0,
                 help="1日の値幅がこれを超えたら分割汚染の疑いとして報告する")
+ap.add_argument("--price-band", type=str, default="1000,6000",
+                help="⛔ **分割汚染の実効ガード**。5分足は未調整なので、日足"
+                     "(調整済み)で 1,000〜6,000円 でも 5分足では 5万円の日がある"
+                     "(2026-08-26 実測で 732件=5%%)。この帯の外は捨てる。"
+                     "'0,0' で無効")
 a = ap.parse_args()
 
 _D = Path(a.data_dir)
@@ -71,6 +76,12 @@ _n = 0
 _first: dict[str, int] = {}
 _wide: list[tuple] = []
 _days: list[tuple] = []          # (high[], low[], open, close)
+_outband = 0
+try:
+    _pb = [float(x) for x in a.price_band.split(",")]
+    _PB = tuple(_pb) if len(_pb) == 2 and _pb[1] > 0 else None
+except Exception:
+    _PB = None
 
 for f in sorted(_D.glob("*.pkl")):
     try:
@@ -84,6 +95,9 @@ for f in sorted(_D.glob("*.pkl")):
             continue
         o = float(g["open"].iloc[0])
         if not (o > 0):
+            continue
+        if _PB and not (_PB[0] <= o <= _PB[1]):
+            _outband += 1        # ⛔ 分割汚染。値幅ガードでは捕まらない
             continue
         _n += 1
         _k0 = g.index[0].strftime("%H:%M")
@@ -149,6 +163,10 @@ if a.atr:
           f"2026-08-26 に実際にやって、悲観バイアスを一桁 過大評価した")
 else:
     print(f"  幅の単位 = **%%**")
+if _outband:
+    print(f"  ⛔ 建値が {_PB[0]:,.0f}〜{_PB[1]:,.0f}円 の外だった "
+          f"**{_outband:,}銘柄日を除外**(§18.27 の分割汚染。5分足は未調整なので"
+          f"日足では帯内でも5分足では桁が違う。値幅ガードでは捕まらない)")
 print(f"  ⚠ これは export_intraday_cache で切り出した **部分データ**。"
       f"manifest の条件で絞られている")
 
