@@ -168,6 +168,7 @@ import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
 import pandas as pd
 
 # ── 事前宣言した合格ライン。**結果を見てから書き換えない** ──────────────
@@ -199,11 +200,13 @@ ap.add_argument("--min-gap-bp", type=float, default=0.0,
                      "0=絞らない。**仮説が『ギャップアップした銘柄』なら必ず指定する**"
                      "(第1回・第2回はこれを付けず、母集団の39%%を占める"
                      "ギャップダウンを混ぜて薄めていた)")
-ap.add_argument("--side", choices=["short", "long"], default="short",
+ap.add_argument("--side", choices=["short", "long", "both"], default="short",
                 help="short(既定) = 前日上げ × ギャップアップ を空売り(= N)。"
                      "long = その **完全な鏡像**(前日下げ × ギャップダウンを買う)。"
                      "符号を全部反転するだけなので、閾値もスイープも判定も"
-                     "そのまま使える")
+                     "そのまま使える。"
+                     "both = **両方を1つの予算・1つの watch50 で回す**"
+                     "(--sweep-ops 専用)。日次の相関とσも出す")
 ap.add_argument("--max-gap-bp", type=float, default=0.0,
                 help="ギャップの **上限** bp(0=上限なし)。§18.53 の帯別表で "
                      "150bp〜 は +5.3bp と 100〜150bp(+11.8bp)の半分以下だった。"
@@ -318,7 +321,13 @@ if a.list_axes:
 # ★ 鏡像。**符号を全部反転する**ので、下流の
 #   「ret1 >= 1.753」「gap_bp >= 100」「pnl」がそのまま鏡像の条件になる。
 #   long は 前日 -1.753% 以下 × ギャップ -100bp 以下 を **買う**。
-_SIDE = 1.0 if a.side == "short" else -1.0
+#   both は **short 向きでスキャンして、あとから鏡像を複製する**。
+#   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
+_SIDE = -1.0 if a.side == "long" else 1.0
+if a.side == "both" and not a.sweep_ops:
+    sys.exit("[error] --side both は --sweep-ops 専用です。\n"
+             "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
+             "(両側を混ぜると『どちらの効果か』が分離できません)")
 
 EXEC_BP = EXEC_COST_BP[a.exec_mode]
 PASS_BP = round(EXEC_BP * 3.0, 1)
@@ -691,7 +700,9 @@ print(f"[info] 母集団 {len(universe):,}銘柄 / 遡及{a.days}日 / "
 print(f"[info] 判定する母集団 = **{_POOL_LBL[a.pool]}**")
 print(f"[info] 執行方式 = {a.exec_mode} ({_EXEC_LBL[a.exec_mode]}) / "
       f"執行コスト {EXEC_BP:.1f}bp"
-      + (" / ★**鏡像(long: 前日下げ × ギャップダウンを買う)**" if _SIDE < 0 else "")
+      + (" / ★**鏡像(long: 前日下げ × ギャップダウンを買う)**" if a.side == "long"
+         else " / ★**両建て(short + その鏡像を1つの予算・watch50 で)**"
+         if a.side == "both" else "")
       + (f" / ギャップ上限 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 print(f"[info] 測るもの = C(寄りで売って引けで買い戻す)。"
       f"**sm/tm/delay/資金均等/予算/発注順/選定を1つも持たない**")
@@ -806,6 +817,26 @@ if _NEEDS_TRAIN:
     _test_n = "＋".join(n for n, _ in _segs_only[1:]) or "(なし)"
     _test = (pd.concat([s for _, s in _segs_only[1:]])
              if len(_segs_only) > 1 else r_all.iloc[0:0])
+    if a.side == "both":
+        # ★ 鏡像を **複製**して足す。符号を反転すれば、下流の
+        #   「ret1 >= 1.753」「gap_bp >= min_gap_bp」「pnl」がそのまま
+        #   ロング側の条件になる(= --side long と1円まで同じ)。
+        #   ⚠ 同じ (銘柄,日) が両側に入ることは無い。ret1 が
+        #     +1.753% 以上かつ -1.753% 以下になることはないため。
+        _mir = _train.copy()
+        for _c in ("gap_bp", "pnl", "ret1"):
+            _mir[_c] = -_mir[_c]
+        _hi = _mir["d1_high"].copy()
+        _mir["d1_high"] = 2 * _mir["entry_p"] - _mir["d1_low"]
+        _mir["d1_low"] = 2 * _mir["entry_p"] - _hi
+        _mir["side"] = -1
+        _train = _train.copy()
+        _train["side"] = 1
+        _train = pd.concat([_train, _mir], ignore_index=True)
+        print(f"\n[both] 鏡像を複製しました。TRAIN {len(_train):,}行"
+              f"(ショート向き {len(_mir):,} + ロング向き {len(_mir):,})")
+        print(f"       ⚠ **watch も予算も1つを共有**します。kabu の登録上限は"
+              f"合計50件なので、両側の候補を混ぜて売買代金順に上位を取ります")
 
 if a.sweep_grid:
     # ══ 前日リターン × ギャップ の 2次元 (TRAIN のみ) ═══════════════
@@ -873,8 +904,10 @@ if a.sweep_ops:
     print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
     print(f"  ⛔ TEST は1回も使いません")
     print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
-          + (f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp" if _SIDE > 0 else
-           f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
+          + (f"★両建て |ret1| ≥ 1.753% × |gap| ≥ {a.min_gap_bp:.0f}bp "
+             f"(上げ→売り / 下げ→買い)" if a.side == "both" else
+             f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp" if _SIDE > 0 else
+             f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
           + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool):
@@ -884,6 +917,9 @@ if a.sweep_ops:
         # ⚠ 候補は「ret1 で絞る前の全銘柄日」。watch は候補に掛かる
         _src = _train if a.pool == "all" else _ot
         _seen_sym: dict = {}
+        # both のときだけ使う。日次の相関とσを出すため
+        _daily: dict = {}                      # date -> [short, long]
+        _byside = {1: [0.0, 0], -1: [0.0, 0]}
         for _d, _g in _src.groupby("date"):
             _c = _g[_g["ret1"] >= 1.753]
             if _c.empty:
@@ -914,10 +950,16 @@ if a.sweep_ops:
                 _tot += float(_r.pnl)
                 _n += 1
                 _seen_sym[_r.symbol] = _d
+                _sd = int(getattr(_r, "side", 1))
+                _v = _byside.setdefault(_sd, [0.0, 0])
+                _v[0] += float(_r.pnl); _v[1] += 1
+                _dv = _daily.setdefault(_d, [0.0, 0.0])
+                _dv[0 if _sd > 0 else 1] += float(_r.pnl)
             _cnt += _n
             _used += _cap - _cash
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
-                "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0)}
+                "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
+                "daily": _daily, "byside": _byside}
 
     if a.max_gap_bp > 0:
         _n_hi = int((_train["gap_bp"] > a.max_gap_bp).sum())
@@ -959,6 +1001,45 @@ if a.sweep_ops:
     print(f"    現行(制限なし) {_b0['pnl']:>+14,.0f} / {_b0['n']:,}件")
     print(f"    1日1回だけ     {_r1['pnl']:>+14,.0f} / {_r1['n']:,}件 "
           f"(差 {_r1['pnl'] - _b0['pnl']:+,.0f})")
+    if a.side == "both":
+        # ══ 両建ての本題 = **日次のσが下がるか** ═══════════════════
+        #   総額が増えるのは当たり前(遊んでいた資金を使うだけ)。
+        #   価値があるのは「上げ日にショートが負けるとき、ロングが助けるか」。
+        _dd = _b0["daily"]
+        _ss = np.array([v[0] for v in _dd.values()], float)
+        _ll = np.array([v[1] for v in _dd.values()], float)
+        _cc = _ss + _ll
+        _bs, _bl = _b0["byside"].get(1, [0, 0]), _b0["byside"].get(-1, [0, 0])
+        print(f"\n  ── ★ 両建て(予算400万・watch50 を共有) ──")
+        print(f"    {'':<12}{'損益':>14}{'件数':>9}{'円/件':>10}"
+              f"{'月換算':>12}{'日次σ':>12}")
+        for _lb, _p, _n_, _sr in (("ショート", _bs[0], _bs[1], _ss),
+                                  ("ロング", _bl[0], _bl[1], _ll),
+                                  ("合計", _b0["pnl"], _b0["n"], _cc)):
+            print(f"    {_lb:<12}{_p:>+14,.0f}{_n_:>9,}"
+                  f"{(_p / _n_ if _n_ else 0):>+10,.0f}"
+                  f"{_p / _ond * 20:>+12,.0f}{_sr.std(ddof=1):>12,.0f}")
+        _r = (float(np.corrcoef(_ss, _ll)[0, 1])
+              if len(_ss) > 2 and _ss.std() > 0 and _ll.std() > 0 else float("nan"))
+        _sep = float(_ss.std(ddof=1) + _ll.std(ddof=1))
+        _red = (1 - _cc.std(ddof=1) / _sep) * 100 if _sep > 0 else 0.0
+        print(f"\n    日次損益の相関 (ショート vs ロング) = **{_r:+.3f}**")
+        print(f"    σ: 単純合算 {_sep:,.0f} → 実際 {_cc.std(ddof=1):,.0f} "
+              f"= **{_red:+.0f}%**")
+        _neg = _ss < 0
+        if _neg.any():
+            print(f"    ショートが負けた日({int(_neg.sum()):,}日)の"
+                  f"ロング = {_ll[_neg].sum():+,.0f}円 "
+                  f"(1日あたり {_ll[_neg].mean():+,.0f}円)")
+        _mo = _cc.sum() / _ond * 20
+        _sh = _mo / (_cc.std(ddof=1) * np.sqrt(20)) if _cc.std(ddof=1) > 0 else 0.0
+        print(f"\n    月換算 {_mo:+,.0f}円 / 月次σ ≒ "
+              f"{_cc.std(ddof=1) * np.sqrt(20):,.0f}円 / 月平均÷σ **{_sh:.2f}**")
+        print(f"    ⚠ 相関が **0 に近い/マイナス**なら両建ての価値がある。")
+        print(f"       **プラスなら『同じものを2倍やっている』だけ**で、")
+        print(f"       σ も比例して増えるので予算を増やすのと変わらない。")
+        print(f"    ⚠ 資金は競合する。片側だけの投入/日を足した値より、")
+        print(f"       上の『合計』の件数が少なければ **予算で押し出されている**。")
     print(f"\n  {'=' * 68}")
     print(f"  ★ 読み方: **★(現行) より明確に良い行があるか**だけを見る。")
     print(f"     ⚠ 予算は **レバレッジ**。増やせば損益もσも比例して増えるので、")
