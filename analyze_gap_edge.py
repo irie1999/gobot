@@ -273,6 +273,16 @@ ap.add_argument("--min-density", type=float, default=0.10,
                      "『測定不能』にするか(既定0.10=1/10)")
 a = ap.parse_args()
 
+# ── TRAIN を要求するモードは、**スキャンの前に** --split を検査する ──────
+#    1,540銘柄 × 4200日 のスキャンは10分かかる。終わってから落とさない。
+_NEEDS_TRAIN = bool(a.explore or a.confirm or a.sweep_grid
+                    or a.sweep_ops or a.sweep_barrier)
+if _NEEDS_TRAIN and not a.split:
+    import sys as _sys
+    _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
+              "--split 2020-09-01 のように境界を指定してください\n"
+              "        (指定しないと『測ってから良かった方を採る』が再開します)")
+
 if a.list_axes:
     print("探索できる軸 (すべて寄り時点で確定 = D までの日足 + D+1 の始値):")
     _AX = {
@@ -763,7 +773,10 @@ if a.split:
 # ══ 探索モード / 検証モード ═══════════════════════════════════════════
 #   探索: TRAIN(最も古い窓)だけを掃く。**TEST は集計すらしない**。
 #   検証: 指定した1候補を TEST で1回だけ測る。
-if a.explore or a.confirm:
+# ⛔ _train を使うのは explore/confirm だけではない。sweep 3種も使う。
+#    ここを取り違えると **重いスキャンが終わってから NameError で落ちる**
+#    (2026-08-26 に3本とも踏んだ)。必要なモードは _NEEDS_TRAIN に集約する。
+if _NEEDS_TRAIN:
     _segs_only = [(_n, _s) for _n, _s in _windows if _n != "全期間"]
     if not _segs_only:
         sys.exit("[error] --split が要ります(TRAIN/TEST を分けないと探索できません)")
