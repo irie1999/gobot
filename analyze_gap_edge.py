@@ -215,6 +215,9 @@ ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(0=全�
 ap.add_argument("--seeds", type=int, default=200, help="帰無較正の本数")
 ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--out", type=str, default="", help="銘柄日の明細をCSVに書く")
+ap.add_argument("--dump-only", action="store_true",
+                help="CSVを書くだけ。合否を出さず、試行回数にも数えない。"
+                     "export_intraday_cache の --pairs を作るときはこれ")
 ap.add_argument("--note", type=str, default="",
                 help="試行記録(gap_edge_trials.csv)に残すメモ。何を試したのか")
 ap.add_argument("--explore", action="store_true",
@@ -1291,7 +1294,23 @@ if _hi and _lo and not _nsrc.empty:
     print(f"    → {'✅ 帰無の95%点を超えた' if _obs > _p95 else '⛔ 帰無の中。軸として機能していない'}")
 
 # ── 判定 (事前宣言した条件。ここを書き換えたらこの測定は無効) ──────────
+# ⛔ --dump-only は判定しない。--out で CSV を作るだけの実行が「不合格」として
+#    試行回数に積まれると、多重検定の補正が壊れる(2026-08-26 に実際に起きた)。
+if a.dump_only:
+    print(f"\n{'=' * 78}\n■ --dump-only — 合否は出しません\n{'=' * 78}")
+    print(f"  CSV を書くための実行なので、判定も試行記録もしません。")
+    print(f"  仮説を測るときは --min-gap-bp <閾値> を付けて --dump-only を外すこと。")
+    raise SystemExit(0)
+
 print(f"\n{'=' * 78}\n■ 判定 — 事前宣言した条件\n{'=' * 78}")
+if a.min_gap_bp <= 0:
+    print(f"  ⛔⛔ **--min-gap-bp が 0 です。ギャップ仮説を測っていません。**")
+    print(f"     ① の bp/件 は **全 {len(_pool_all):,}銘柄日の平均**"
+          f"(ギャップがマイナスの日も全部込み)。")
+    print(f"     帯別の表では上の帯がプラスでも、合計はほぼ 0 になります。")
+    print(f"     **この『不合格』を『仮説が否定された』と読まないこと。**")
+    print(f"     仮説を測るなら --min-gap-bp 100 のように閾値を付けること。")
+    print(f"     CSV を作りたいだけなら --dump-only を付けること(試行に数えない)。")
 print(f"  母集団={a.pool} / 執行={a.exec_mode}({EXEC_BP:.1f}bp) / "
       f"①の水準は執行コストの3倍 = {PASS_BP}bp")
 if a.min_gap_bp > 0:
@@ -1325,6 +1344,9 @@ _ok_all = all(x[1] for x in _pass)
 _result = "合格" if _ok_all else "不合格"
 if _DENSITY_FAIL:
     _result = "測定不能"          # データ欠落を「不合格」と数えない
+elif a.min_gap_bp <= 0:
+    # 閾値なし = ギャップ仮説を測っていない。記録は残すが試行には数えない。
+    _result = "参考(閾値なし)"
 print(f"\n  {'=' * 60}")
 if _DENSITY_FAIL:
     print(f"  ⛔⛔ **測定不能。上の判定は読まないこと。**")
@@ -1378,10 +1400,28 @@ try:
                      _result,
                      (a.note or (f"⛔ {_DENSITY_FAIL}" if _DENSITY_FAIL else ""))])
     # ヘッダ行を除き、**測定不能は数えない**(データ欠落は仮説を試したことにならない)
+    # ⚠ 数えるのは「仮説を測った実行」だけ。
+    #    ・測定不能(データ欠落) … 仮説を試したことにならない
+    #    ・閾値bp = 0        … ①が全銘柄日の平均になるのでギャップ仮説を
+    #                          測っていない。**過去の行も遡って除外する**
+    #                          (§18.52 に「閾値を事前に決めるべきだった」と
+    #                           自分で記録した設計ミスがそのまま数に入っていた)
+    def _counts(_r: list) -> bool:
+        if not _r or _r[0] == "実行時刻":
+            return False
+        if "測定不能" in _r or "参考" in _r:
+            return False
+        try:
+            return float(_r[3]) > 0        # 閾値bp
+        except Exception:
+            return True                    # 読めない古い行は安全側で数える
     with open(_tp, encoding="utf-8-sig") as _rh:
-        _n_trials = sum(1 for _r in _csv.reader(_rh)
-                        if _r and _r[0] != "実行時刻" and "測定不能" not in _r)
-    print(f"\n  [試行記録] {TRIALS_CSV} に追記 — **通算 {_n_trials} 回目**")
+        _rows = [_r for _r in _csv.reader(_rh)]
+    _n_trials = sum(1 for _r in _rows if _counts(_r))
+    _skipped = sum(1 for _r in _rows
+                   if _r and _r[0] != "実行時刻" and not _counts(_r))
+    print(f"\n  [試行記録] {TRIALS_CSV} に追記 — **通算 {_n_trials} 回目**"
+          + (f"  (数えない行 {_skipped}: 測定不能 / 閾値なし)" if _skipped else ""))
     if _n_trials >= 3:
         _fp = 1.0 - (0.95 ** _n_trials)
         print(f"    ⚠ {_n_trials}回試すと、**中身がランダムでも {_fp*100:.0f}% の確率で"

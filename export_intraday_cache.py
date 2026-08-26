@@ -11,7 +11,7 @@ N の候補は1日あたり26件程度(§18.54)なので、2年ぶんでも1万�
 
   ローカル →  python export_intraday_cache.py --estimate
               (まず実データを測る。↑これが「何MBになるか」の答え)
-              python analyze_gap_edge.py --days 800 --min-gap-bp 0 --out gap_rows.csv
+              python analyze_gap_edge.py --days 800 --min-gap-bp 0 --dump-only --out gap_rows.csv
               python export_intraday_cache.py --export --pairs gap_rows.csv
               git add intraday_5m*.parquet && git commit && git push
   向こう   →  python export_intraday_cache.py --import
@@ -313,7 +313,9 @@ def do_estimate() -> None:
         print(f"\n  ▶ 次: analyze_gap_edge の --out で銘柄日のCSVを作り、")
         print(f"       --pairs に渡すとどれだけ小さくなるか出ます")
         print(f"       python analyze_gap_edge.py --days 800 --min-gap-bp 0 "
-              f"--out gap_rows.csv --workers 8")
+              f"--dump-only --out gap_rows.csv --workers 8")
+        print(f"       ⛔ --dump-only を忘れないこと。付けないと CSV を作る"
+              f"だけの実行が『不合格』として試行回数に積まれます")
         print(f"       python export_intraday_cache.py --estimate "
               f"--pairs gap_rows.csv")
     print(f"\n  ⚠ これ以上small くする手は無い。列を減らす案(volume を落とす)は"
