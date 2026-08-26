@@ -39,21 +39,30 @@ _ON = os.environ.get("LSS_QUIET", "").strip().lower() not in ("", "0", "false", 
 _KEEP_TAGS = (
     "[error]", "[warn]", "[新方式N]", "[BT出所]", "[検算]", "[lss]",
     "[START_DATES]", "[filter]", "[較正]", "[import]", "[export]",
-    "[pairs]", "[⏱", "[試行記録]",
+    "[pairs]", "[⏱ 工程別", "[試行記録]", "[実行条件]", "[発注順]",
 )
 _KEEP_RE = re.compile(r"⛔|⚠|❌|✅|失敗|Traceback|エラー|\.html\b")
 # 進捗行: 先頭が「…」や「  … 200/1540」
-_DROP_RE = re.compile(r"^\s*(…|\.\.\.)")
+# 進捗行と、工程ごとの所要時間(最後の総括だけ残す)
+_DROP_RE = re.compile(r"^\s*(…|\.\.\.)|^\s*\[⏱\s+\d")
 
 _orig_print = builtins.print
 _n_hidden = 0
 _last_blank = False
 
 
+_seen: dict = {}
+
+
 def _keep(line: str) -> bool:
     s = line.strip()
     if not s:
         return True                      # 空行は残す(後で畳む)
+    # ⛔ 同じ文言が何度も出る(変種ごとの注意書きなど)。**完全一致の2回目以降は落とす**
+    if s in _seen:
+        _seen[s] += 1
+        return False
+    _seen[s] = 1
     if _DROP_RE.match(line):
         return False
     if _KEEP_RE.search(s):
@@ -97,8 +106,10 @@ def _quiet_print(*args, **kwargs):
 
 
 def _footer():
+    _dup = sum(v - 1 for v in _seen.values() if v > 1)
     if _n_hidden:
         _orig_print(f"\n[quiet] {_n_hidden:,}行を省略しました"
+                    f"（うち同じ文言の繰り返し {_dup:,}行）"
                     f"（全部見るには set LSS_QUIET=0）", flush=True)
 
 
@@ -108,6 +119,13 @@ def install() -> bool:
         return False
     builtins.print = _quiet_print
     atexit.register(_footer)
+    # yfinance の「possibly delisted」は logging 経由(stderr)なので print では消せない
+    try:
+        import logging as _lg
+        for _nm in ("yfinance", "yfinance.data", "peewee"):
+            _lg.getLogger(_nm).setLevel(_lg.CRITICAL)
+    except Exception:
+        pass
     _orig_print("[quiet] LSS_QUIET=1 — 判定・警告・エラー・出力ファイル名だけ出します"
                 "（全部見るには set LSS_QUIET=0）", flush=True)
     return True

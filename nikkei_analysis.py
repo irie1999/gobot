@@ -11394,7 +11394,10 @@ function switchTbd(id, tab) {{
                 evts.append((xd, 1, -cap, -1))  # 決済=解放(同日約定の後)
         if not evts:
             return 0.0, None, 0, 0, 0.0
-        evts.sort(key=lambda e: (e[0], e[1]))
+        # ⛔ 日付キーは str / datetime.date / Timestamp が混ざりうる。
+        #    素で比べると TypeError。ISO 表記なので str() で並べれば
+        #    **順序は同じ**(値も必要資金も変わらない)。
+        evts.sort(key=lambda e: (str(e[0]), e[1]))
         cur_cap = cur_cnt = 0.0
         peak_cap = 0.0; peak_date = None; peak_cnt = 0; max_cnt = 0
         for d, _o, dcap, dcnt in evts:
@@ -11418,7 +11421,7 @@ function switchTbd(id, tab) {{
             # 転換トレードはOOS期間全体を表示するためカットオフを適用しない
             if _dk >= str(cutoff_d) or _t.get("strategy") == "転換":
                 by_date[_dk].append(_t)
-        return by_date, sorted(by_date.keys(), reverse=True)
+        return by_date, sorted(by_date.keys(), key=str, reverse=True)
 
     _entry_by_date, _sorted_entry_dates = _build_entry_grid(entry_sorted_trades, "e")
     _bt70_entry_sorted = pending_trades + sorted(
@@ -14594,7 +14597,7 @@ function switchTbd(id, tab) {{
             _dk = str(_t.get("exit_d_raw") or "")
             if _dk and _dk >= str(cutoff_d):
                 by_date[_dk].append(_t)
-        return by_date, sorted(by_date.keys(), reverse=True)
+        return by_date, sorted(by_date.keys(), key=str, reverse=True)
 
     def _exit_reason_counts(trades_d):
         n_t = sum(1 for t in trades_d if t.get("reason") == "目標達成")
@@ -14759,7 +14762,7 @@ function switchTbd(id, tab) {{
             keep = [t for t in ts if not t.get("_overlap")]
             if keep:
                 nb[dk] = keep
-        return nl, nb, sorted(nb.keys(), reverse=True)
+        return nl, nb, sorted(nb.keys(), key=str, reverse=True)
 
     def _dup_toggle_html(trades_list, by_date, sorted_dates, dseq, pfx,
                          expand_months=2, expand_tenkan=True):
@@ -21617,8 +21620,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         f'font-size:0.82rem">⛔ 月別サマリー(共通ブロック)の生成に'
                         f'失敗しました: {type(_nge2).__name__}: {_nge2}<br>'
                         f'上の N 固有の情報だけ出しています。</div>')
+                    import traceback as _tbm
                     print(f"[新方式N] 月別サマリーで失敗(head だけ出します): "
                           f"{type(_nge2).__name__}: {_nge2}", flush=True)
+                    print("[新方式N] " + "".join(
+                        _tbm.format_exception(type(_nge2), _nge2,
+                                              _nge2.__traceback__))[-1200:],
+                          flush=True)
                 _ng_pane = (
                     f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
                     + _ng["head"] + _ng_common + '</div>')
