@@ -236,6 +236,17 @@ ap.add_argument("--sm-list", type=str, default="0,0.1,0.3,0.5,1.0,2.0",
                 help="損切りATR倍率(0=損切りなし=現行)")
 ap.add_argument("--tm-list", type=str, default="0,0.5,1.0,2.0",
                 help="利確ATR倍率(0=利確なし=現行)")
+ap.add_argument("--sweep-grid", action="store_true",
+                help="★ 前日リターン × ギャップ の **2次元**を TRAIN だけで掃く。"
+                     "現行(1.753%% × 100bp)は2つを**別々に**決めたので、"
+                     "組み合わせとして最適かは見ていない")
+ap.add_argument("--ret1-list", type=str, default="0,0.5,1.0,1.5,1.753,2.5,3.5",
+                help="前日リターン下限の候補(%%)")
+ap.add_argument("--gap-list", type=str, default="50,75,100,150,200,300",
+                help="ギャップ下限の候補(bp)")
+ap.add_argument("--sweep-ops", action="store_true",
+                help="★ 運用パラメータ(watch上限 / 予算 / 1日の建玉数上限 / "
+                     "同一銘柄の連日)を TRAIN だけで掃く")
 ap.add_argument("--both-orders", action="store_true",
                 help="両方触れた日を『利確優先(楽観)』でも集計して並べる。"
                      "既定は **損切り優先(悲観)のみ**"
@@ -757,6 +768,152 @@ if a.explore or a.confirm:
     _test_n = "＋".join(n for n, _ in _segs_only[1:]) or "(なし)"
     _test = (pd.concat([s for _, s in _segs_only[1:]])
              if len(_segs_only) > 1 else r_all.iloc[0:0])
+
+if a.sweep_grid:
+    # ══ 前日リターン × ギャップ の 2次元 (TRAIN のみ) ═══════════════
+    #   ⛔ TEST は使わない。現行(1.753% × 100bp)は2つを**別々に**決めた:
+    #      ret1 は「ギャップ100bp以上の中での5分位のQ5」、gap は第1回の表。
+    #      組み合わせとして最適かは一度も見ていない。
+    _gt = _train if a.pool == "all" else (
+        _train[_train["sig"] == (1 if a.pool == "sig" else 0)])
+    if _gt.empty:
+        sys.exit("[error] TRAIN が空です")
+    _r1s = [float(x) for x in a.ret1_list.split(",") if x.strip()]
+    _gps = [float(x) for x in a.gap_list.split(",") if x.strip()]
+    _ndays = max(1, _gt["date"].nunique())
+    print(f"\n{'=' * 78}\n■ 前日リターン × ギャップ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  対象 {len(_gt):,}銘柄日 / {_ndays:,}営業日")
+    print(f"  ★ 現行 = ret1 ≥ {1.753}% × gap ≥ 100bp")
+    for _what, _fmt in (("bp/件", "bp"), ("件/日", "n")):
+        print(f"\n  ── {_what} ──")
+        print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
+        print("    " + "-" * (8 + 11 * len(_gps)))
+        for _r1 in _r1s:
+            _row = f"    {_r1:<8.3f}"
+            for _gp in _gps:
+                _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
+                if len(_s) < 200:
+                    _row += f"{'—':>11}"
+                    continue
+                if _fmt == "bp":
+                    _v = _bp(_s)
+                    _mk = "★" if (abs(_r1 - 1.753) < 1e-6 and abs(_gp - 100) < 1e-6) else " "
+                    _row += f"{_v:>+10.1f}{_mk}"
+                else:
+                    _row += f"{len(_s) / _ndays:>11.1f}"
+            print(_row)
+    print(f"\n  ── 日クラスタ t ──")
+    print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
+    print("    " + "-" * (8 + 11 * len(_gps)))
+    for _r1 in _r1s:
+        _row = f"    {_r1:<8.3f}"
+        for _gp in _gps:
+            _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
+            _row += (f"{_cluster_t(_s):>+11.2f}" if len(_s) >= 200 else f"{'—':>11}")
+        print(_row)
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 読み方: **★(現行) と明確に違う升があるか**だけを見る。")
+    print(f"     ⚠ 件数が減れば bp は上がりやすい(強い銘柄だけ残るので)。")
+    print(f"        **bp と 件/日 を必ずセットで**見ること。bp が上がっても")
+    print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
+    print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
+    print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_ops:
+    # ══ 運用パラメータ (TRAIN のみ) ═══════════════════════════════════
+    #   watch上限 / 予算 / 1日の建玉数上限 / 同一銘柄の連日。
+    #   ⛔ TEST は使わない。
+    _ot = _pool_of(_train)
+    if _ot.empty:
+        sys.exit("[error] TRAIN が空です")
+    _ond = max(1, _ot["date"].nunique())
+    print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
+          f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp")
+
+    def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool):
+        """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。"""
+        _cap = budget_man * 10_000.0
+        _tot, _cnt, _used, _miss = 0.0, 0, 0.0, 0
+        # ⚠ 候補は「ret1 で絞る前の全銘柄日」。watch は候補に掛かる
+        _src = _train if a.pool == "all" else _ot
+        _seen_sym: dict = {}
+        for _d, _g in _src.groupby("date"):
+            _c = _g[_g["ret1"] >= 1.753]
+            if _c.empty:
+                continue
+            _w = _c.sort_values("liq", ascending=False, na_position="last")
+            _wd = _w if watch <= 0 else _w.head(watch)
+            _hit = _wd[_wd["gap_bp"] >= a.min_gap_bp]
+            _miss += len(_c[_c["gap_bp"] >= a.min_gap_bp]) - len(_hit)
+            _hit = _hit.sort_values("gap_bp", ascending=False)
+            _cash, _n = _cap, 0
+            for _r in _hit.itertuples():
+                if max_n > 0 and _n >= max_n:
+                    break
+                if one_per_sym and _seen_sym.get(_r.symbol) == _d:
+                    continue
+                _cost = float(_r.entry_p) * a.qty
+                if _cost > _cash:
+                    continue
+                _cash -= _cost
+                _tot += float(_r.pnl)
+                _n += 1
+                _seen_sym[_r.symbol] = _d
+            _cnt += _n
+            _used += _cap - _cash
+        return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
+                "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0)}
+
+    _b0 = _ops_sim(50, 400.0, 0, False)
+    print(f"\n  ★ 現行(watch50 / 予算400万 / 上限なし) = "
+          f"{_b0['pnl']:+,.0f}円 / {_b0['n']:,}件 / {_b0['per']:+,.0f}円/件 / "
+          f"月換算 {_b0['pnl'] / _ond * 20:+,.0f}円")
+    print(f"\n  ── watch上限 ──")
+    print(f"    {'watch':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
+          f"{'取逃し':>9}{'月換算':>12}")
+    for _w in (20, 30, 50, 100, 200, 0):
+        _r = _ops_sim(_w, 400.0, 0, False)
+        _lb = "無制限" if _w == 0 else str(_w)
+        _mk = " ★" if _w == 50 else ""
+        print(f"    {_lb:<10}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+              f"{_r['per']:>+10,.0f}{_r['miss']:>9,}"
+              f"{_r['pnl'] / _ond * 20:>+12,.0f}{_mk}")
+    print(f"\n  ── 予算(watch50 固定) ──")
+    print(f"    {'予算':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
+          f"{'投入/日':>10}{'月換算':>12}")
+    for _bm in (200.0, 300.0, 400.0, 600.0, 800.0, 1200.0):
+        _r = _ops_sim(50, _bm, 0, False)
+        _mk = " ★" if _bm == 400 else ""
+        print(f"    {_bm:<10,.0f}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+              f"{_r['per']:>+10,.0f}{_r['used'] / 1e4:>9,.0f}万"
+              f"{_r['pnl'] / _ond * 20:>+12,.0f}{_mk}")
+    print(f"\n  ── 1日に建てる件数の上限(watch50 / 予算400万) ──")
+    print(f"    {'上限':<10}{'損益':>14}{'件数':>9}{'円/件':>10}{'月換算':>12}")
+    for _mn in (3, 5, 8, 13, 20, 0):
+        _r = _ops_sim(50, 400.0, _mn, False)
+        _lb = "なし" if _mn == 0 else str(_mn)
+        _mk = " ★" if _mn == 0 else ""
+        print(f"    {_lb:<10}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+              f"{_r['per']:>+10,.0f}{_r['pnl'] / _ond * 20:>+12,.0f}{_mk}")
+    _r1 = _ops_sim(50, 400.0, 0, True)
+    print(f"\n  ── 同じ銘柄を1日1回だけ ──")
+    print(f"    現行(制限なし) {_b0['pnl']:>+14,.0f} / {_b0['n']:,}件")
+    print(f"    1日1回だけ     {_r1['pnl']:>+14,.0f} / {_r1['n']:,}件 "
+          f"(差 {_r1['pnl'] - _b0['pnl']:+,.0f})")
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 読み方: **★(現行) より明確に良い行があるか**だけを見る。")
+    print(f"     ⚠ 予算は **レバレッジ**。増やせば損益もσも比例して増えるので、")
+    print(f"        『最適値』ではなく **リスク許容度の宣言**(§18.38 #3b)。")
+    print(f"     ⚠ watch は kabu の登録上限50件が実装上の天井(§18.44)。")
+    print(f"        100/200 が良くても **kabu では実現できません**。")
+    print(f"  ⛔ 良い行があっても採用しないこと。TEST での検証が要ります。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
 
 if a.sweep_barrier:
     # ══ 損切り/利確のスイープ (TRAIN のみ) ═══════════════════════════
