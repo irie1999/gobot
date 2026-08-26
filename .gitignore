@@ -77,3 +77,7 @@ signal_history/
 # 朝の J 記録(k_morning_archive.py)。取り直せないのでローカルに残す
 k_morning/
 k_morning_log.csv
+
+# 5分足の部分スナップショットを復元した先 (export_intraday_cache.py --import)
+# ⛔ 部分データ。本物の stock_5min と混ぜないこと
+stock_5min_subset/
