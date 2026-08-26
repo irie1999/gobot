@@ -199,6 +199,10 @@ ap.add_argument("--min-gap-bp", type=float, default=0.0,
                      "0=絞らない。**仮説が『ギャップアップした銘柄』なら必ず指定する**"
                      "(第1回・第2回はこれを付けず、母集団の39%%を占める"
                      "ギャップダウンを混ぜて薄めていた)")
+ap.add_argument("--max-gap-bp", type=float, default=0.0,
+                help="ギャップの **上限** bp(0=上限なし)。§18.53 の帯別表で "
+                     "150bp〜 は +5.3bp と 100〜150bp(+11.8bp)の半分以下だった。"
+                     "極端なギャップは本物のニュースで続伸しやすい")
 ap.add_argument("--pool", choices=["all", "sig", "nosig"], default="all",
                 help="判定に使う母集団。all=シグナル不問(第2回の土台) / "
                      "sig=シグナルが出た日だけ(第1回と同じ) / nosig=出ていない日だけ")
@@ -672,7 +676,8 @@ print(f"[info] 母集団 {len(universe):,}銘柄 / 遡及{a.days}日 / "
       f"建値 {a.min_price:,.0f}〜{a.max_price:,.0f}円 / {a.qty}株")
 print(f"[info] 判定する母集団 = **{_POOL_LBL[a.pool]}**")
 print(f"[info] 執行方式 = {a.exec_mode} ({_EXEC_LBL[a.exec_mode]}) / "
-      f"執行コスト {EXEC_BP:.1f}bp")
+      f"執行コスト {EXEC_BP:.1f}bp"
+      + (f" / ギャップ上限 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 print(f"[info] 測るもの = C(寄りで売って引けで買い戻す)。"
       f"**sm/tm/delay/資金均等/予算/発注順/選定を1つも持たない**")
 print(f"[info] 母集団は **シグナルから直接**作る(lss のバックテストを通らない / §18.50)")
@@ -716,6 +721,8 @@ def _pool_of(w: pd.DataFrame) -> pd.DataFrame:
         w = w[w["sig"] == 0]
     if a.min_gap_bp > 0:
         w = w[w["gap_bp"] >= a.min_gap_bp]
+    if a.max_gap_bp > 0:
+        w = w[w["gap_bp"] <= a.max_gap_bp]
     return w
 
 
@@ -849,7 +856,8 @@ if a.sweep_ops:
     print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
     print(f"  ⛔ TEST は1回も使いません")
     print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
-          f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp")
+          f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp"
+          + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool):
         """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。"""
@@ -948,7 +956,8 @@ if a.sweep_barrier:
     print(f"\n{'=' * 78}\n■ 損切り/利確のスイープ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
     print(f"  ⛔ TEST は1回も使いません。『効果がない』の確認は TRAIN で完結します")
     print(f"  対象 {len(_tb):,}銘柄日 / {_tb['date'].nunique():,}営業日 / "
-          f"ギャップ ≥{a.min_gap_bp:.0f}bp")
+          f"ギャップ ≥{a.min_gap_bp:.0f}bp"
+          + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
     print(f"  ⚠ 日足なので高値/安値の**順序が分からない**。両方触れた日は"
           f"『損切り優先(保守)』『利確優先(楽観)』の両方を出します")
     print(f"  ⚠ 約定は**ラインちょうど**(楽観)。実際はギャップで飛ぶ(§18.9.1)ので、"
