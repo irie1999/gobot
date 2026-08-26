@@ -744,6 +744,47 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
     return {"days": pd.DataFrame(_days), "det": pd.DataFrame(_det)}
 
 
+_NG_NAMES: dict | None = None
+
+
+def _newgap_names() -> dict:
+    """銘柄コード → 銘柄名。
+
+    ⛔ N の母集団は `available_local_symbols()`(5分足のファイル名)なので
+       **名前を持たない**。他のタブは WATCHLIST の (sym, name, strat) から
+       取っているが N にはそれが無い。上場リストと提案ファイルから引く。
+    """
+    global _NG_NAMES
+    if _NG_NAMES is not None:
+        return _NG_NAMES
+    _m: dict = {}
+    # ① 上場リスト SYMBOLS = [("1301.T", "極洋"), ...]
+    for _f in ("symbols_listed_prime.py", "symbols_listed_all.py",
+               "symbols_listed_standard.py", "symbols_all.py"):
+        try:
+            _ns: dict = {}
+            exec(Path(_f).read_text(encoding="utf-8"), _ns)
+            for _x in (_ns.get("SYMBOLS") or []):
+                if isinstance(_x, (list, tuple)) and len(_x) >= 2 and _x[1]:
+                    _m.setdefault(str(_x[0]), str(_x[1]))
+        except Exception:
+            continue
+    # ② 提案ファイル SELECTED = [("7203.T", "トヨタ自動車", "MACDTF"), ...]
+    for _f in ("lss_proposal_cumul.py", "lss_proposal_full.py"):
+        try:
+            _ns = {}
+            exec(Path(_f).read_text(encoding="utf-8"), _ns)
+            for _k in ("SELECTED", "STOP_WATCHLIST", "BRK_WATCHLIST"):
+                for _x in (_ns.get(_k) or []):
+                    if isinstance(_x, (list, tuple)) and len(_x) >= 2 and _x[1]:
+                        _m.setdefault(str(_x[0]), str(_x[1]))
+        except Exception:
+            continue
+    _NG_NAMES = _m
+    print(f"[新方式N] 銘柄名 {len(_m):,}件を読み込み", flush=True)
+    return _m
+
+
 def _newgap_rows_to_trades(det) -> list:
     """新方式Nの取引を **既存タブと同じ dict 形式**に直す。
 
@@ -754,13 +795,15 @@ def _newgap_rows_to_trades(det) -> list:
     out = []
     if det is None or det.empty:
         return out
+    _nm = _newgap_names()
     for r in det.itertuples():
         _d = str(r.date)
         _md = f"{_d[5:7]}/{_d[8:10]}" if len(_d) >= 10 else _d
         # 同日決済のショート: pnl = (建値 − 決済値) × qty → 決済値を逆算
         _ex = float(r.entry_p) - float(r.pnl) / _NG_QTY
         out.append({
-            "symbol": str(r.symbol), "name": "", "strategy": "N",
+            "symbol": str(r.symbol), "name": _nm.get(str(r.symbol), ""),
+            "strategy": "N",
             "entry_d_raw": _d, "exit_d_raw": _d,
             "entry_dt": _md, "exit_dt": _md,
             "entry_time": "09:00", "exit_time": "15:30",
