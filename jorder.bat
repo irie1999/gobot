@@ -7,7 +7,13 @@ REM           .\jorder --dry-run        (print the schedule and exit)
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
 REM
 REM *** THIS PLACES REAL ORDERS ON THE PRODUCTION ACCOUNT ***
-REM   For a paper run with no orders at all, use .\mtest instead.
+REM   For a paper run with no orders at all, add --no-order:
+REM       .\jorder --budget 300 --no-order
+REM   --no-order BEATS --execute, so nothing is ordered even though this
+REM   script hardcodes --execute. Everything else runs the same way, so the
+REM   two runs are directly comparable.
+REM   .\mtest does the same thing (it just never passes --execute).
+REM   For the N method (gap-up short, 18.54) use .\norder instead.
 REM
 REM WHAT IT DOES, IN ORDER (one kabu token, so strictly sequential)
 REM   0. collect today's signal candidates (yfinance only, no kabu)
@@ -56,6 +62,7 @@ for %%a in (%*) do (
 )
 echo ============================================================
 echo  J SMALL-LOT LIVE ORDERING - production account
+echo    (add --no-order for a paper run with no orders at all)
 echo    default budget 60 (man-yen), hard cap the same
 echo    start this by 07:50 so the pre-open log covers 08:00-08:45
 echo    the exit watcher starts by itself after ordering and runs to 15:30
@@ -66,8 +73,9 @@ python morning_test.py --prod --execute --stop-delay-bars 4 %*
 goto :eof
 
 :help
-echo .\jorder [--budget 60] [--max-notional 60] [--dry-run]
+echo .\jorder [--budget 60] [--max-notional 60] [--dry-run] [--no-order]
 echo   Places REAL J orders on the production account, small lot by default.
+echo   --no-order turns it into a paper run (beats the hardcoded --execute).
 echo   Runs: collect -^> pre-open quote log -^> warm read -^> 09:00 poll+order.
 echo   The exit watcher (--stop-delay-bars 4) starts automatically and runs
 echo   until 15:30. Add --no-watch to start it by hand instead.

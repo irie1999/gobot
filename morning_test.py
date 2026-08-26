@@ -122,6 +122,14 @@ ap.add_argument("--dry-run", action="store_true", help="手順だけ出して終
 # ★★ 実発注 (2026-08-17)。既定OFF。付けない限り手順5は記録だけ。
 ap.add_argument("--execute", action="store_true",
                 help="⚠ 手順5で **実発注する**(J)。既定は記録のみ")
+# ★★ --execute の打ち消し (2026-08-26 ユーザー要望)。
+#   `.\jorder` は --execute をハードコードしているので、そのままでは
+#   「使い慣れたコマンドで発注だけしない」ができない。
+#   ⛔ **--no-order は --execute より強い**。両方あっても発注しない。
+ap.add_argument("--no-order", "--paper", dest="no_order", action="store_true",
+                help="⛔ **--execute を打ち消して発注しない**(ペーパー)。"
+                     "両方渡しても、こちらが勝つ。"
+                     "`.\jorder --budget 300 --no-order` の形で使う")
 # ⛔ 既定は **60万**。価格帯の上限は6,000円なので 1単元=60万 必要。
 #   50万にすると 5,000円超の銘柄が「0単元」で黙って落ちる(実測)。
 #   滑りを測るのが目的なのに、値がさ株だけ母集団から消えると偏る。
@@ -154,6 +162,18 @@ ap.add_argument("--no-watch", action="store_true",
 ap.add_argument("--entry-cutoff", type=str, default="09:15",
                 help="watcher が未約定の新規売りを取り消す時刻(保険)")
 args = ap.parse_args()
+
+# ⛔⛔ **--no-order は --execute より強い**。ここで確定させる。
+#    以降のコードは args.execute だけを見るので、ここで False にしておけば
+#    発注経路(手順5の --execute / 手順6の watcher)は一切通らない。
+if args.no_order and args.execute:
+    print("=" * 62, flush=True)
+    print("⛔ --no-order が指定されたので **発注しません**(--execute を無視)",
+          flush=True)
+    print("   記録だけ取ります。実発注したいなら --no-order を外してください。",
+          flush=True)
+    print("=" * 62, flush=True)
+args.execute = bool(args.execute and not args.no_order)
 
 # ⛔⛔ 実発注するときはポーリングを早く切る (2026-08-17)。
 #   kabu の有効トークンは1つなので、**このスクリプトが終わるまで watcher を
