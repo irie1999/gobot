@@ -97,6 +97,11 @@ ap.add_argument("--board-workers", type=int, default=2,
 ap.add_argument("--ret1", type=float, default=RET1_MIN, help="前日リターン下限(%%)")
 ap.add_argument("--gap-bp", type=float, default=GAP_BP, help="ギャップ下限(bp)")
 ap.add_argument("--watch", type=int, default=WATCH, help="朝読める上限(0=無制限)")
+ap.add_argument("--mirror", action="store_true", default=True,
+                help="★ 鏡像(前日下げ × ギャップダウンを**買う**)の候補も入れる"
+                     "(既定ON)。板読みは1回で済み、判定は後から3通りに分けられる")
+ap.add_argument("--no-mirror", dest="mirror", action="store_false",
+                help="鏡像を入れない(N と J だけ)")
 ap.add_argument("--merge-j", action="store_true",
                 help="★ J の候補(k_signals_<日付>.csv)も取り込んでマージする。"
                      "⛔ kabu の有効トークンは1つなので J と N を別々には"
@@ -204,6 +209,25 @@ def do_collect() -> None:
     for i, r in enumerate(_cand, 1):
         r["rank_liq"] = i
         r["watched"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
+        r["rank_n"], r["watched_n"] = i, r["watched"]
+        r["rank_m"], r["watched_m"] = 0, 0
+    # ── ★ 鏡像 (前日下げ × ギャップダウンを買う) ────────────────────
+    #   §18.55: TRAIN で N と同水準(月+47,839 vs +49,587)。符号を反転するだけ。
+    #   ⚠ 同じ銘柄が N と鏡像の両方に入ることは無い(前日リターンが
+    #     +1.753% 以上かつ -1.753% 以下になることはないため)。
+    _mir = []
+    if a.mirror:
+        _mir = [r for r in rows
+                if r["ret1"] <= -a.ret1
+                and MIN_PRICE <= r["prev_close"] <= MAX_PRICE]
+        _mir.sort(key=lambda r: (-r["liq"], r["symbol"]))
+        for i, r in enumerate(_mir, 1):
+            r["rank_m"], r["watched_m"] = i, 1 if (a.watch <= 0 or i <= a.watch) else 0
+            r["rank_liq"], r["watched"] = 0, 0
+            r["rank_n"], r["watched_n"] = 0, 0
+        _cand.extend(_mir)
+        print(f"  [mirror] 鏡像の候補 {len(_mir):,}件 "
+              f"(前日リターン ≤ -{a.ret1}%)", flush=True)
     # ── J の候補を取り込む (--merge-j) ────────────────────────────
     # ⛔ kabu の有効トークンは1つ。J と N を別々の朝に読むことはできないので、
     #    **候補をマージして1回で読む**。板読みは1回、判定は後から何通りでも
@@ -241,9 +265,32 @@ def do_collect() -> None:
                   f"N に無い {len(_add):,}件を追加", flush=True)
 
     for r in _cand:
-        r["in_n"] = 1 if (r.get("ret1") == r.get("ret1")      # NaN でない
-                          and float(r.get("ret1") or 0) >= a.ret1) else 0
+        _r1 = r.get("ret1")
+        _ok = _r1 == _r1 and _r1 is not None                  # NaN でない
+        r["in_n"] = 1 if (_ok and float(_r1) >= a.ret1) else 0
+        r["in_m"] = 1 if (_ok and float(_r1) <= -a.ret1) else 0
         r["in_j"] = 1 if r["symbol"] in _jset else 0
+        r.setdefault("rank_n", 0); r.setdefault("watched_n", 0)
+        r.setdefault("rank_m", 0); r.setdefault("watched_m", 0)
+        r.setdefault("rank_liq", 0); r.setdefault("watched", 0)
+        r["rank_j"], r["watched_j"] = 0, 0
+    # ★ J も自分の候補の中で上位50を持つ(N・鏡像と同じ扱い)。
+    #   ⛔ 「3方式で50件を分け合う」ではなく **それぞれ50件**
+    #      (2026-08-26 ユーザー指示)。板読みは50件バッチのローテーションで
+    #      回せるうえ、板の始値は寄れば動かないので遅れても選定は正しい。
+    _jc = sorted([r for r in _cand if r["in_j"] == 1],
+                 key=lambda r: (-float(r.get("liq") or 0), r["symbol"]))
+    for i, r in enumerate(_jc, 1):
+        r["rank_j"] = i
+        r["watched_j"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
+    # 読むのは **3方式の上位50の和集合**だけ。全候補を読むと429を招く(§18.48 ⑦)
+    _n_all = len(_cand)
+    _cand = [r for r in _cand
+             if r["watched_n"] or r["watched_m"] or r["watched_j"]]
+    print(f"  [読む対象] 候補 {_n_all:,}件 → 3方式の上位{a.watch}の和集合 "
+          f"**{len(_cand):,}銘柄** "
+          f"({-(-len(_cand) // 50)}バッチ / 板の始値は寄れば動かないので"
+          f"読むのが遅れても選定は正しい)", flush=True)
 
     # ⛔ 列は **k_signals_<日付>.csv 互換**にする。n_open_confirm.py(板読み)が
     #    `symbol` / `prev_close` / `liquidity` を読むので、名前を揃えないと
@@ -258,22 +305,44 @@ def do_collect() -> None:
         w = _csv.DictWriter(fh, fieldnames=[
             "symbol", "name", "strategy", "order_price", "prev_close", "atr",
             "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched",
-            "in_j", "in_n"])
+            "in_j", "in_n", "in_m", "rank_n", "watched_n",
+            "rank_m", "watched_m", "rank_j", "watched_j"])
         w.writeheader()
         w.writerows(_cand)
     _nw = sum(r["watched"] for r in _cand)
-    print(f"\n[collect] 読めた {len(rows):,}銘柄 → **候補 {len(_cand):,}件** "
-          f"→ watch上限{a.watch}で **{_nw}件**", flush=True)
-    if a.watch > 0 and len(_cand) > a.watch:
-        print(f"  ⚠ 候補が上限を {len(_cand) - a.watch}件 超えました。"
-              f"流動性の低い側を切っています(§18.44 の50件の壁)", flush=True)
+    print(f"\n[collect] 読めた {len(rows):,}銘柄 → **読む対象 {len(_cand):,}銘柄** "
+          f"(N {sum(r['watched_n'] for r in _cand)}件 / "
+          f"鏡像 {sum(r['watched_m'] for r in _cand)}件 / "
+          f"J {sum(r['watched_j'] for r in _cand)}件。重複は1回だけ読む)",
+          flush=True)
     print(f"  → {_SIG_CSV}", flush=True)
-    if _cand[:10]:
-        print(f"\n  上位10件 (流動性降順):")
+    # ⛔ 板読みは **全候補**を読む(n_open_confirm が50件バッチで回す)。
+    #    板の始値は寄れば動かないので、遅れて読んでも選定は正しい。
+    #    50件の壁が効くのは **実発注**のときだけなので、方式ごとに上位50件を示す。
+    def _show(tag: str, rows: list, rk: str, wk: str):
+        _r = sorted([x for x in rows if int(float(x.get(rk) or 0)) > 0],
+                    key=lambda x: int(float(x[rk])))
+        if not _r:
+            print(f"\n  {tag}: 候補ゼロ")
+            return
+        _n = sum(1 for x in _r if int(float(x.get(wk) or 0)) == 1)
+        print(f"\n  {tag}: 候補 {len(_r)}件 → **建てられるのは上位 {_n}件**"
+              + (f" (下位 {len(_r) - _n}件は kabu の登録上限 / §18.44)"
+                 if len(_r) > _n else ""))
         print(f"    {'#':<4}{'銘柄':<10}{'前日終値':>10}{'前日%':>8}{'売買代金':>14}")
-        for r in _cand[:10]:
-            print(f"    {r['rank_liq']:<4}{r['symbol']:<10}{r['prev_close']:>10,.1f}"
-                  f"{r['ret1']:>+8.2f}{r['liq'] / 1e8:>12,.1f}億")
+        for x in _r[:10]:
+            print(f"    {int(float(x[rk])):<4}{x['symbol']:<10}"
+                  f"{x['prev_close']:>10,.1f}{x['ret1']:>+8.2f}"
+                  f"{x['liq'] / 1e8:>12,.1f}億")
+        if len(_r) > 10:
+            print(f"    … 他 {len(_r) - 10}件")
+    _show("★ N (ギャップアップを売る)", _cand, "rank_n", "watched_n")
+    if a.mirror:
+        _show("★ 鏡像 (ギャップダウンを買う)", _cand, "rank_m", "watched_m")
+    if any(int(float(r.get("rank_j") or 0)) > 0 for r in _cand):
+        _show("J (参考・記録のみ)", _cand, "rank_j", "watched_j")
+    print(f"\n  ⚠ ここまでは **前夜の候補**。実際にどれが選ばれるかは"
+          f"09:00 の始値(ギャップ)で決まります")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -450,8 +519,13 @@ def do_close() -> None:
         for r in _csv.DictReader(open(_SIG_CSV, encoding="utf-8-sig")):
             _sy = str(r.get("symbol") or "").strip()
             _sy = _sy if _sy.endswith(".T") else f"{_sy}.T"
-            _flag[_sy.replace(".T", "")] = (
-                int(r.get("in_j") or 0), int(r.get("in_n") or 0))
+            _flag[_sy.replace(".T", "")] = {
+                "in_j": int(r.get("in_j") or 0),
+                "in_n": int(r.get("in_n") or 0),
+                "in_m": int(r.get("in_m") or 0),
+                "rank_n": int(float(r.get("rank_n") or 0)),
+                "rank_m": int(float(r.get("rank_m") or 0)),
+                "rank_j": int(float(r.get("rank_j") or 0))}
     else:
         print(f"  ⚠ {_SIG_CSV} が無いので in_j/in_n を復元できません。"
               f"全件を N として集計します", flush=True)
@@ -466,8 +540,11 @@ def do_close() -> None:
             _gap = float(r.get("gap_bp") or 0)
         except Exception:
             _op, _gap = 0.0, 0.0
-        _ij, _in = _flag.get(_sy, (0, 1))
-        r["in_j"], r["in_n"] = _ij, _in
+        _fl = _flag.get(_sy, {"in_j": 0, "in_n": 1, "in_m": 0,
+                              "rank_n": 0, "rank_m": 0, "rank_j": 0})
+        r["in_j"], r["in_n"], r["in_m"] = _fl["in_j"], _fl["in_n"], _fl["in_m"]
+        r["rank_n"], r["rank_m"] = _fl["rank_n"], _fl["rank_m"]
+        r["rank_j"] = _fl.get("rank_j", 0)
         r["close_p"], r["pnl"], r["bp"] = "", "", ""
         if _op > 0:
             try:
@@ -491,40 +568,67 @@ def do_close() -> None:
         w.writeheader()
         w.writerows(_out)
 
-    def _score(tag: str, gap_min: float, key: str):
+    def _score(tag: str, gap_min: float, key: str, side: int = 1,
+               rank_key: str = "", top: int = 0):
+        """side=+1 ショート(ギャップアップを売る) / -1 ロング(ギャップダウンを買う)。
+
+        ⛔ 板読みは全候補を読むが、**実運用で建てられるのは各方式の上位50件**
+           (kabu の登録上限 / §18.44)。top を渡してそこで切る。
+        """
         _sel = [r for r in _out
                 if int(r.get(key) or 0) == 1
                 and r.get("pnl") != ""
-                and float(r.get("gap_bp") or 0) >= gap_min]
+                and (float(r.get("gap_bp") or 0) >= gap_min if side > 0
+                     else float(r.get("gap_bp") or 0) <= -gap_min)]
+        if top > 0 and rank_key:
+            _sel = [r for r in _sel
+                    if 0 < int(float(r.get(rank_key) or 0)) <= top]
+        for r in _sel:                      # ロングは損益の符号が逆
+            r["_p"] = float(r["pnl"]) * side
+            r["_b"] = float(r["bp"]) * side
         print(f"\n{'=' * 74}")
         print(f"■ {tag} — ギャップ ≥ {gap_min:+.0f}bp  ({_TODAY} / ペーパー)")
         print(f"{'=' * 74}")
         if not _sel:
             print(f"  合格ゼロ (または終値がまだ取れません)")
             return
-        _tot = sum(float(r["pnl"]) for r in _sel)
-        _bpm = sum(float(r["bp"]) for r in _sel) / len(_sel)
-        _win = sum(1 for r in _sel if float(r["pnl"]) > 0)
+        _tot = sum(r["_p"] for r in _sel)
+        _bpm = sum(r["_b"] for r in _sel) / len(_sel)
+        _win = sum(1 for r in _sel if r["_p"] > 0)
         print(f"  {'銘柄':<10}{'始値':>10}{'終値':>10}{'損益':>10}"
               f"{'bp':>8}{'ギャップ':>10}")
         print("  " + "-" * 58)
-        for r in sorted(_sel, key=lambda x: -float(x["pnl"])):
+        for r in sorted(_sel, key=lambda x: -x["_p"]):
             print(f"  {str(r['symbol']):<10}{float(r['open_p']):>10,.1f}"
-                  f"{float(r['close_p']):>10,.1f}{float(r['pnl']):>+10,.0f}"
-                  f"{float(r['bp']):>+8.1f}{float(r['gap_bp']):>+10.0f}")
+                  f"{float(r['close_p']):>10,.1f}{r['_p']:>+10,.0f}"
+                  f"{r['_b']:>+8.1f}{float(r['gap_bp']):>+10.0f}")
         print("  " + "-" * 58)
         print(f"  {len(_sel)}件 / 勝ち {_win}件 / **合計 {_tot:+,.0f}円** / "
               f"平均 {_bpm:+.1f}bp")
 
-    _score("★ 新方式 N", a.gap_bp, "in_n")
-    _score("J (参考・記録のみ)", a.gap_bp_j, "in_j")
+    _score("★ 新方式 N (ギャップアップを売る)", a.gap_bp, "in_n",
+           side=1, rank_key="rank_n", top=a.watch)
+    _score("★ 鏡像 (ギャップダウンを買う)", a.gap_bp, "in_m",
+           side=-1, rank_key="rank_m", top=a.watch)
+    _score("J (参考・記録のみ)", a.gap_bp_j, "in_j",
+           side=1, rank_key="rank_j", top=a.watch)
 
+    _nm = sum(1 for r in _out
+              if int(r.get("in_n") or 0) == 1 and int(r.get("in_m") or 0) == 1)
+    if _nm:
+        print(f"\n  ⛔ N と鏡像に同じ銘柄が {_nm} 件あります。"
+              f"前日リターンが +{a.ret1}% 以上かつ -{a.ret1}% 以下は"
+              f"有り得ないので、**集計が壊れています**")
     _both = [r for r in _out
              if int(r.get("in_j") or 0) == 1 and int(r.get("in_n") or 0) == 1]
     print(f"\n  候補の重なり: J∩N {len(_both)}件 / "
           f"J のみ {sum(1 for r in _out if int(r.get('in_j') or 0) == 1 and int(r.get('in_n') or 0) == 0)}件 / "
           f"N のみ {sum(1 for r in _out if int(r.get('in_n') or 0) == 1 and int(r.get('in_j') or 0) == 0)}件")
+    print(f"  鏡像の候補: {sum(1 for r in _out if int(r.get('in_m') or 0) == 1)}件")
     print(f"\n  ⚠ これは **ペーパー**(発注していない)。摩擦ゼロの理論値です。")
+    print(f"  ⚠ 3方式は **1回の板読み**を共有しています。板の始値は寄れば動かない"
+          f"ので、\n     読むのが遅れても『どれが選ばれるか』は正しく出ます"
+          f"(執行の速さが要るのは実発注のときだけ)。")
     print(f"  ⚠ 50件の壁は J と N で **共有**しています。"
           f"単独で読むより両方とも少なくなります(kabu の制約 / §18.44)")
     print(f"  → {_o2}")

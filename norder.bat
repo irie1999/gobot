@@ -48,19 +48,26 @@ for %%a in (%*) do (
   if /i "%%~a"=="/?"     goto :help
 )
 echo ============================================================
-echo  N PAPER RECORDING - no orders, reads the board only
+echo  N + MIRROR + J PAPER RECORDING - no orders, reads the board only
 echo    start this by 08:40; it waits for 08:47 and 09:00 by itself
 echo    do NOT run .\jorder, .\watch or the order server at the same time
 echo    (kabu allows exactly one live token)
 echo ============================================================
 echo.
 echo [0/2] building the candidate list (no kabu)
-REM   J's candidates are merged in so that ONE board read covers both.
-REM   kabu allows exactly one live token, so J and N cannot be read
-REM   separately on the same morning. gap_bp is stored for every name that
-REM   opens, so +75bp (J) and +100bp (N) are scored afterwards from the
-REM   same data. The 50-name cap is SHARED - both sides get fewer names
-REM   than they would alone. That is unavoidable (18.44).
+REM   THREE methods share ONE board read (kabu allows exactly one live token):
+REM     N       prev-day return >= +1.753 pct, open >= prev close +100bp, SELL
+REM     mirror  prev-day return <= -1.753 pct, open <= prev close -100bp, BUY
+REM     J       kept for the record only (18.51 stopped it)
+REM   gap_bp is stored for every name that opens, so all three are scored
+REM   afterwards from the same data.
+REM
+REM   *** THE 50-NAME CAP DOES NOT BIND HERE. ***
+REM   n_open_confirm rotates the register in 50-name batches, and the board's
+REM   OpeningPrice never moves once a name has opened. So reading 250 names
+REM   over a few minutes still gives EXACTLY the right selections. Speed only
+REM   matters when real orders are placed. Each method is still scored on its
+REM   own top-50 by turnover, which is what could actually be traded.
 python k_open_confirm.py --collect
 python n_paper.py --collect --merge-j
 if errorlevel 1 (
@@ -74,7 +81,10 @@ python n_open_confirm.py --prod --poll %*
 echo.
 echo ============================================================
 echo  done. after the close run:  python n_paper.py --close
-echo    (it scores N at +100bp and J at +75bp from the same board read)
+echo    scores all three from the same board read:
+echo      N       gap ^>= +100bp  sell
+echo      mirror  gap ^<= -100bp  buy
+echo      J       gap ^>= +75bp   (record only)
 echo ============================================================
 goto :eof
 
