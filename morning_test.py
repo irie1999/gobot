@@ -407,12 +407,16 @@ if not args.no_kpaper:
         _cmd5 += ["--max-yen", f"{args.max_yen:g}"]
     if args.min_price is not None:
         _cmd5 += ["--min-price", f"{args.min_price:g}"]
+    # ★★ 予算は **記録のみのときも渡す** (2026-08-26 修正)。
+    #   ⛔ 以前は --execute のときだけ渡していたので、`--no-order` で回すと
+    #     k_open_confirm が **既定の予算**でサイジングし、
+    #     「予算300万でどれを建てたか」が k_paper に残らなかった。
+    #     記録の目的は実発注との突合なので、サイジングは必ず揃える。
+    _cmd5 += ["--budget", f"{args.budget:g}",
+              "--max-notional", f"{(args.max_notional or args.budget):g}"]
     # ★★ 実発注 (2026-08-17)。--execute のときだけ。既定は記録のみ。
-    #   少額から始める。--budget も --max-notional も万円。
     if args.execute:
-        _cmd5 += ["--execute", "--budget", f"{args.budget:g}",
-                  "--max-notional",
-                  f"{(args.max_notional or args.budget):g}"]
+        _cmd5 += ["--execute"]
     _res.append((("5. J発注" if args.execute else "5. K記録"), _run(
         f"5. {'J の実発注' if args.execute else 'K のペーパー記録'} — "
         f"{args.k_warm_at} に空読み → {args.open_at} に本番 → "
