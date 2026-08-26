@@ -97,6 +97,16 @@ ap.add_argument("--board-workers", type=int, default=2,
 ap.add_argument("--ret1", type=float, default=RET1_MIN, help="前日リターン下限(%%)")
 ap.add_argument("--gap-bp", type=float, default=GAP_BP, help="ギャップ下限(bp)")
 ap.add_argument("--watch", type=int, default=WATCH, help="朝読める上限(0=無制限)")
+ap.add_argument("--merge-j", action="store_true",
+                help="★ J の候補(k_signals_<日付>.csv)も取り込んでマージする。"
+                     "⛔ kabu の有効トークンは1つなので J と N を別々には"
+                     "読めない。**1回の板読みで両方記録する**ための指定。"
+                     "先に `python k_open_confirm.py --collect` を実行しておくこと")
+ap.add_argument("--paper-csv", type=str, default="",
+                help="--close が読む板読み結果。"
+                     "既定 k_paper_<日付>.csv (n_open_confirm.py の出力)")
+ap.add_argument("--gap-bp-j", type=float, default=75.0,
+                help="--close で J として集計するギャップ(bp)。既定75")
 a = ap.parse_args()
 
 _TODAY = a.date or datetime.now(JST).strftime("%Y-%m-%d")
@@ -194,6 +204,47 @@ def do_collect() -> None:
     for i, r in enumerate(_cand, 1):
         r["rank_liq"] = i
         r["watched"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
+    # ── J の候補を取り込む (--merge-j) ────────────────────────────
+    # ⛔ kabu の有効トークンは1つ。J と N を別々の朝に読むことはできないので、
+    #    **候補をマージして1回で読む**。板読みは1回、判定は後から何通りでも
+    #    (CSV に gap_bp が入るので、+75bp でも +100bp でも再集計できる)。
+    # ⚠ 50件の壁は共有される。J も N も単独で読むより少なくなる(避けられない)。
+    _jset: set = set()
+    if a.merge_j:
+        _jcsv = Path(f"k_signals_{_YMD}.csv")
+        if not _jcsv.exists():
+            print(f"  ⚠ {_jcsv} がありません。先に "
+                  f"`python k_open_confirm.py --collect` を実行してください。"
+                  f"\n     J はマージせず N だけで続行します", flush=True)
+        else:
+            _jrows = {}
+            for r in _csv.DictReader(open(_jcsv, encoding="utf-8-sig")):
+                _sy = str(r.get("symbol") or "").strip()
+                if not _sy:
+                    continue
+                _sy = _sy if _sy.endswith(".T") else f"{_sy}.T"
+                _jset.add(_sy)
+                if _sy not in _jrows:
+                    try:
+                        _jrows[_sy] = {
+                            "symbol": _sy,
+                            "prev_close": float(r.get("prev_close") or 0),
+                            "liq": float(r.get("liquidity") or 0),
+                            "prev_date": "", "ret1": float("nan")}
+                    except Exception:
+                        pass
+            _have = {r["symbol"] for r in _cand}
+            _add = [v for k, v in _jrows.items()
+                    if k not in _have and v["prev_close"] > 0]
+            _cand.extend(_add)
+            print(f"  [merge-j] J の候補 {len(_jset):,}銘柄 → "
+                  f"N に無い {len(_add):,}件を追加", flush=True)
+
+    for r in _cand:
+        r["in_n"] = 1 if (r.get("ret1") == r.get("ret1")      # NaN でない
+                          and float(r.get("ret1") or 0) >= a.ret1) else 0
+        r["in_j"] = 1 if r["symbol"] in _jset else 0
+
     # ⛔ 列は **k_signals_<日付>.csv 互換**にする。n_open_confirm.py(板読み)が
     #    `symbol` / `prev_close` / `liquidity` を読むので、名前を揃えないと
     #    流動性順に並べられず「銘柄コード順のまま読みます」に落ちる(§18.45 の事故)。
@@ -206,7 +257,8 @@ def do_collect() -> None:
     with open(_SIG_CSV, "w", newline="", encoding="utf-8-sig") as fh:
         w = _csv.DictWriter(fh, fieldnames=[
             "symbol", "name", "strategy", "order_price", "prev_close", "atr",
-            "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched"])
+            "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched",
+            "in_j", "in_n"])
         w.writeheader()
         w.writerows(_cand)
     _nw = sum(r["watched"] for r in _cand)
@@ -373,67 +425,109 @@ def do_board(warmup_only: bool) -> None:
 # ④ --close : 引け後に終値を埋めて損益を出す (日足だけ。kabu 不要)
 # ══════════════════════════════════════════════════════════════════════
 def do_close() -> None:
-    if not _PAPER_CSV.exists():
-        sys.exit(f"[error] {_PAPER_CSV} がありません")
-    rows = list(_csv.DictReader(open(_PAPER_CSV, encoding="utf-8-sig")))
-    _pass = [r for r in rows if str(r.get("pass")) == "1"]
-    if not _pass:
-        print(f"[close] {_TODAY} は合格ゼロでした。何もしません")
-        return
-    print(f"[close] {len(_pass)}件の終値を取得中…", flush=True)
+    """引け後: 板読み結果に終値をつけ、**J と N を別々に**集計する。
+
+    ⛔ 板読みは1回きり(kabu のトークンは1つ)。だから判定は後からやる。
+       CSV に gap_bp が入っているので、+75bp(J) でも +100bp(N) でも
+       同じデータから再集計できる。
+    """
+    _pcsv = Path(a.paper_csv) if a.paper_csv else Path(f"k_paper_{_YMD}.csv")
+    if not _pcsv.exists():
+        _alt = _PAPER_CSV
+        if _alt.exists():
+            _pcsv = _alt
+        else:
+            sys.exit(f"[error] {_pcsv} も {_alt} もありません。"
+                     f"先に朝の板読み(.\\norder)を実行してください")
+    rows = list(_csv.DictReader(open(_pcsv, encoding="utf-8-sig")))
+    if not rows:
+        sys.exit(f"[error] {_pcsv} が空です")
+    print(f"[close] {_pcsv} を読みました ({len(rows)}件)", flush=True)
+
+    # ── 候補CSVから in_j / in_n を復元 ────────────────────────────
+    _flag: dict = {}
+    if _SIG_CSV.exists():
+        for r in _csv.DictReader(open(_SIG_CSV, encoding="utf-8-sig")):
+            _sy = str(r.get("symbol") or "").strip()
+            _sy = _sy if _sy.endswith(".T") else f"{_sy}.T"
+            _flag[_sy.replace(".T", "")] = (
+                int(r.get("in_j") or 0), int(r.get("in_n") or 0))
+    else:
+        print(f"  ⚠ {_SIG_CSV} が無いので in_j/in_n を復元できません。"
+              f"全件を N として集計します", flush=True)
+
     import backtest_limit_entry as ble
     _out = []
     for r in rows:
-        r["close_p"] = ""
-        r["pnl"] = ""
-        r["bp"] = ""
-        if str(r.get("pass")) != "1":
-            _out.append(r)
-            continue
+        _sy = str(r.get("symbol") or "").strip().replace(".T", "")
+        _yf = f"{_sy}.T"
         try:
-            df = ble.fetch(r["symbol"], 40)
-            _idx = pd.to_datetime(df.index).normalize()
-            _ts = pd.Timestamp(_TODAY)
-            if _ts not in _idx:
-                _out.append(r)
-                continue
-            _pos = int(_idx.searchsorted(_ts))
-            _cl = float(df["close"].iloc[_pos])
-            _op = float(r["open_p"])
-            _pnl = (_op - _cl) * QTY
-            r["close_p"] = round(_cl, 1)
-            r["pnl"] = round(_pnl, 0)
-            r["bp"] = round(_pnl / (_op * QTY) * 1e4, 1)
+            _op = float(r.get("open_p") or 0)
+            _gap = float(r.get("gap_bp") or 0)
         except Exception:
-            pass
+            _op, _gap = 0.0, 0.0
+        _ij, _in = _flag.get(_sy, (0, 1))
+        r["in_j"], r["in_n"] = _ij, _in
+        r["close_p"], r["pnl"], r["bp"] = "", "", ""
+        if _op > 0:
+            try:
+                df = ble.fetch(_yf, 40)
+                _idx = pd.to_datetime(df.index).normalize()
+                _ts = pd.Timestamp(_TODAY)
+                if _ts in _idx:
+                    _cl = float(df["close"].iloc[int(_idx.searchsorted(_ts))])
+                    _pnl = (_op - _cl) * QTY
+                    r["close_p"] = round(_cl, 1)
+                    r["pnl"] = round(_pnl, 0)
+                    r["bp"] = round(_pnl / (_op * QTY) * 1e4, 1)
+            except Exception:
+                pass
         _out.append(r)
+
     _fld = list(_out[0].keys())
-    with open(_PAPER_CSV, "w", newline="", encoding="utf-8-sig") as fh:
+    _o2 = Path(f"n_close_{_YMD}.csv")
+    with open(_o2, "w", newline="", encoding="utf-8-sig") as fh:
         w = _csv.DictWriter(fh, fieldnames=_fld, extrasaction="ignore")
         w.writeheader()
         w.writerows(_out)
-    _done = [r for r in _out if str(r.get("pass")) == "1" and r.get("pnl") != ""]
-    if not _done:
-        print("[close] 終値をまだ取得できません(日足の反映は 15:40 ごろ / §18.47)")
-        return
-    _tot = sum(float(r["pnl"]) for r in _done)
-    _bpm = sum(float(r["bp"]) for r in _done) / len(_done)
-    _win = sum(1 for r in _done if float(r["pnl"]) > 0)
-    print(f"\n{'=' * 74}")
-    print(f"■ {_TODAY} の結果 (ペーパー / 100株固定 / 摩擦なし)")
-    print(f"{'=' * 74}")
-    print(f"  {'銘柄':<10}{'始値':>10}{'終値':>10}{'損益':>10}{'bp':>8}{'ギャップ':>10}")
-    print("  " + "-" * 58)
-    for r in sorted(_done, key=lambda x: -float(x["pnl"])):
-        print(f"  {r['symbol']:<10}{float(r['open_p']):>10,.1f}"
-              f"{float(r['close_p']):>10,.1f}{float(r['pnl']):>+10,.0f}"
-              f"{float(r['bp']):>+8.1f}{float(r['gap_bp']):>+10.0f}")
-    print("  " + "-" * 58)
-    print(f"  {len(_done)}件 / 勝ち {_win}件 / **合計 {_tot:+,.0f}円** / "
-          f"平均 {_bpm:+.1f}bp")
+
+    def _score(tag: str, gap_min: float, key: str):
+        _sel = [r for r in _out
+                if int(r.get(key) or 0) == 1
+                and r.get("pnl") != ""
+                and float(r.get("gap_bp") or 0) >= gap_min]
+        print(f"\n{'=' * 74}")
+        print(f"■ {tag} — ギャップ ≥ {gap_min:+.0f}bp  ({_TODAY} / ペーパー)")
+        print(f"{'=' * 74}")
+        if not _sel:
+            print(f"  合格ゼロ (または終値がまだ取れません)")
+            return
+        _tot = sum(float(r["pnl"]) for r in _sel)
+        _bpm = sum(float(r["bp"]) for r in _sel) / len(_sel)
+        _win = sum(1 for r in _sel if float(r["pnl"]) > 0)
+        print(f"  {'銘柄':<10}{'始値':>10}{'終値':>10}{'損益':>10}"
+              f"{'bp':>8}{'ギャップ':>10}")
+        print("  " + "-" * 58)
+        for r in sorted(_sel, key=lambda x: -float(x["pnl"])):
+            print(f"  {str(r['symbol']):<10}{float(r['open_p']):>10,.1f}"
+                  f"{float(r['close_p']):>10,.1f}{float(r['pnl']):>+10,.0f}"
+                  f"{float(r['bp']):>+8.1f}{float(r['gap_bp']):>+10.0f}")
+        print("  " + "-" * 58)
+        print(f"  {len(_sel)}件 / 勝ち {_win}件 / **合計 {_tot:+,.0f}円** / "
+              f"平均 {_bpm:+.1f}bp")
+
+    _score("★ 新方式 N", a.gap_bp, "in_n")
+    _score("J (参考・記録のみ)", a.gap_bp_j, "in_j")
+
+    _both = [r for r in _out
+             if int(r.get("in_j") or 0) == 1 and int(r.get("in_n") or 0) == 1]
+    print(f"\n  候補の重なり: J∩N {len(_both)}件 / "
+          f"J のみ {sum(1 for r in _out if int(r.get('in_j') or 0) == 1 and int(r.get('in_n') or 0) == 0)}件 / "
+          f"N のみ {sum(1 for r in _out if int(r.get('in_n') or 0) == 1 and int(r.get('in_j') or 0) == 0)}件")
     print(f"\n  ⚠ これは **ペーパー**(発注していない)。摩擦ゼロの理論値です。")
-    print(f"     レポートの新方式Nタブと同じ日を突き合わせてください。")
-    print(f"  → {_PAPER_CSV}")
+    print(f"  ⚠ 50件の壁は J と N で **共有**しています。"
+          f"単独で読むより両方とも少なくなります(kabu の制約 / §18.44)")
+    print(f"  → {_o2}")
 
 
 if a.collect:

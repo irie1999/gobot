@@ -55,7 +55,14 @@ echo    (kabu allows exactly one live token)
 echo ============================================================
 echo.
 echo [0/2] building the candidate list (no kabu)
-python n_paper.py --collect
+REM   J's candidates are merged in so that ONE board read covers both.
+REM   kabu allows exactly one live token, so J and N cannot be read
+REM   separately on the same morning. gap_bp is stored for every name that
+REM   opens, so +75bp (J) and +100bp (N) are scored afterwards from the
+REM   same data. The 50-name cap is SHARED - both sides get fewer names
+REM   than they would alone. That is unavoidable (18.44).
+python k_open_confirm.py --collect
+python n_paper.py --collect --merge-j
 if errorlevel 1 (
   echo.
   echo *** candidate list failed - stopping here ***
@@ -67,6 +74,7 @@ python n_open_confirm.py --prod --poll %*
 echo.
 echo ============================================================
 echo  done. after the close run:  python n_paper.py --close
+echo    (it scores N at +100bp and J at +75bp from the same board read)
 echo ============================================================
 goto :eof
 
