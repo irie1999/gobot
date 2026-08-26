@@ -199,6 +199,11 @@ ap.add_argument("--min-gap-bp", type=float, default=0.0,
                      "0=絞らない。**仮説が『ギャップアップした銘柄』なら必ず指定する**"
                      "(第1回・第2回はこれを付けず、母集団の39%%を占める"
                      "ギャップダウンを混ぜて薄めていた)")
+ap.add_argument("--side", choices=["short", "long"], default="short",
+                help="short(既定) = 前日上げ × ギャップアップ を空売り(= N)。"
+                     "long = その **完全な鏡像**(前日下げ × ギャップダウンを買う)。"
+                     "符号を全部反転するだけなので、閾値もスイープも判定も"
+                     "そのまま使える")
 ap.add_argument("--max-gap-bp", type=float, default=0.0,
                 help="ギャップの **上限** bp(0=上限なし)。§18.53 の帯別表で "
                      "150bp〜 は +5.3bp と 100〜150bp(+11.8bp)の半分以下だった。"
@@ -310,6 +315,11 @@ if a.list_axes:
     sys.exit(0)
 
 # ① の水準は執行方式で決まる(執行コストの3倍)。**測る前に紐付けてある**
+# ★ 鏡像。**符号を全部反転する**ので、下流の
+#   「ret1 >= 1.753」「gap_bp >= 100」「pnl」がそのまま鏡像の条件になる。
+#   long は 前日 -1.753% 以下 × ギャップ -100bp 以下 を **買う**。
+_SIDE = 1.0 if a.side == "short" else -1.0
+
 EXEC_BP = EXEC_COST_BP[a.exec_mode]
 PASS_BP = round(EXEC_BP * 3.0, 1)
 
@@ -433,22 +443,26 @@ def _scan(sym: str) -> list[dict]:
             "date": str(d1.date()),
             "symbol": sym,
             "entry_p": o1,
-            "gap_bp": (o1 - pc) / pc * 10_000.0,
-            "pnl": (o1 - c1) * a.qty,          # C: 寄りで売って引けで買い戻す
+            "gap_bp": (o1 - pc) / pc * 10_000.0 * _SIDE,
+            # C: 寄りで建てて引けで決済。short=(始-終) / long=(終-始)
+            "pnl": (o1 - c1) * a.qty * _SIDE,
             "sig": 1 if _st else 0,
             "strats": ",".join(sorted(set(_st))),
             # ── バリア(損切り/利確)を測るための D+1 の値幅 ──
             # ⚠ 日足なので「高値と安値のどちらが先か」は分からない(§18.6)。
             #   両方触れた日は 損切り優先/利確優先 の**両方**を出す。
-            "d1_high": float(df["high"].iloc[pos + 1]),
-            "d1_low": float(df["low"].iloc[pos + 1]),
+            # long は建値を軸に上下を反転(バリアの向きを short と揃えるため)
+            "d1_high": (float(df["high"].iloc[pos + 1]) if _SIDE > 0
+                        else 2 * o1 - float(df["low"].iloc[pos + 1])),
+            "d1_low": (float(df["low"].iloc[pos + 1]) if _SIDE > 0
+                       else 2 * o1 - float(df["high"].iloc[pos + 1])),
             "d1_close": c1,
             "atr": _fv(_atr_v, pos) or 0.0,    # D 時点の ATR(前夜に確定)
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
             "liq": _fv(_turn, pos),
             "range_pos": _fv(_rngpos, pos),
-            "ret1": _fv(_ret1, pos),
+            "ret1": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret1, pos)),
             "ret5": _fv(_ret5, pos),
             "ret20": _fv(_ret20, pos),
             "up_streak": _fv(_streak, pos),
@@ -677,6 +691,7 @@ print(f"[info] 母集団 {len(universe):,}銘柄 / 遡及{a.days}日 / "
 print(f"[info] 判定する母集団 = **{_POOL_LBL[a.pool]}**")
 print(f"[info] 執行方式 = {a.exec_mode} ({_EXEC_LBL[a.exec_mode]}) / "
       f"執行コスト {EXEC_BP:.1f}bp"
+      + (" / ★**鏡像(long: 前日下げ × ギャップダウンを買う)**" if _SIDE < 0 else "")
       + (f" / ギャップ上限 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 print(f"[info] 測るもの = C(寄りで売って引けで買い戻す)。"
       f"**sm/tm/delay/資金均等/予算/発注順/選定を1つも持たない**")
@@ -858,7 +873,8 @@ if a.sweep_ops:
     print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
     print(f"  ⛔ TEST は1回も使いません")
     print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
-          f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp"
+          + (f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp" if _SIDE > 0 else
+           f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
           + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool):
@@ -970,7 +986,8 @@ if a.sweep_barrier:
     print(f"\n{'=' * 78}\n■ 損切り/利確のスイープ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
     print(f"  ⛔ TEST は1回も使いません。『効果がない』の確認は TRAIN で完結します")
     print(f"  対象 {len(_tb):,}銘柄日 / {_tb['date'].nunique():,}営業日 / "
-          f"ギャップ ≥{a.min_gap_bp:.0f}bp"
+          + (f"ギャップ ≥{a.min_gap_bp:.0f}bp" if _SIDE > 0 else
+           f"★鏡像 ギャップ ≤-{a.min_gap_bp:.0f}bp を**買う**")
           + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
     print(f"  ⚠ 日足なので高値/安値の**順序が分からない**。両方触れた日は"
           f"『損切り優先(保守)』『利確優先(楽観)』の両方を出します")
