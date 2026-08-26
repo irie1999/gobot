@@ -80,11 +80,19 @@ echo [1/2] warm read at 08:47, then [2/2] poll from 09:00
 python n_open_confirm.py --prod --poll %*
 echo.
 echo ============================================================
-echo  done. after the close run:  python n_paper.py --close
-echo    scores all three from the same board read:
-echo      N       gap ^>= +100bp  sell
-echo      mirror  gap ^<= -100bp  buy
-echo      J       gap ^>= +75bp   (record only)
+echo  done. after the close (15:40 or later) run ONE command:
+echo.
+echo      python n_paper.py --close --budget 400
+echo.
+echo  it prints, in this order, from the same board read:
+echo    1. which names passed, per method
+echo         N       gap ^>= +100bp  sell
+echo         mirror  gap ^<= -100bp  buy
+echo         J       gap ^>= +75bp   (record only)
+echo    2. the order the orders would have gone out in
+echo         (open-time group, then biggest ^|gap^| first)
+echo    3. the paper P^&L for each method
+echo  no kabu needed - it only reads the CSVs written this morning.
 echo ============================================================
 goto :eof
 

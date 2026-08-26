@@ -521,6 +521,17 @@ def do_close() -> None:
         sys.exit(f"[error] {_pcsv} が空です")
     print(f"[close] {_pcsv} を読みました ({len(rows)}件)", flush=True)
 
+    # ★ 先に「どの銘柄が合格し、どの順で発注が走ったか」を出す(2026-08-27)。
+    #   --sequence と同じもの。CSV を読むだけなので引け後に1回でまとまる。
+    #   ⛔ ここで落ちても損益の集計は続ける(表示のための機能なので)。
+    try:
+        do_sequence()
+    except SystemExit:
+        raise
+    except Exception as _e:
+        print(f"  ⚠ 発注シーケンスの表示に失敗: {type(_e).__name__}: {_e}",
+              flush=True)
+
     # ── 候補CSVから in_j / in_n を復元 ────────────────────────────
     _flag: dict = {}
     if _SIG_CSV.exists():
@@ -594,8 +605,10 @@ def do_close() -> None:
         for r in _sel:                      # ロングは損益の符号が逆
             r["_p"] = float(r["pnl"]) * side
             r["_b"] = float(r["bp"]) * side
+        _gl = (f"≥ +{gap_min:.0f}bp" if side > 0 else f"≤ -{gap_min:.0f}bp")
         print(f"\n{'=' * 74}")
-        print(f"■ {tag} — ギャップ ≥ {gap_min:+.0f}bp  ({_TODAY} / ペーパー)")
+        print(f"■ {tag} — ギャップ {_gl}  ({_TODAY} / ペーパー)"
+              + (f" / 上位{top}件" if top > 0 else ""))
         print(f"{'=' * 74}")
         if not _sel:
             print(f"  合格ゼロ (または終値がまだ取れません)")
@@ -637,8 +650,8 @@ def do_close() -> None:
     print(f"  ⚠ 3方式は **1回の板読み**を共有しています。板の始値は寄れば動かない"
           f"ので、\n     読むのが遅れても『どれが選ばれるか』は正しく出ます"
           f"(執行の速さが要るのは実発注のときだけ)。")
-    print(f"  ⚠ 50件の壁は J と N で **共有**しています。"
-          f"単独で読むより両方とも少なくなります(kabu の制約 / §18.44)")
+    print(f"  ⚠ 各方式は **それぞれ上位50件**を監視しています(共有ではない)。"
+          f"\n     板読みは50件バッチのローテーションで回します(§18.44)")
     print(f"  → {_o2}")
 
 
