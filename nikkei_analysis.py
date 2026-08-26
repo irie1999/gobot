@@ -21596,18 +21596,34 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 for _t in _ng_tr:
                     _ng_bd[_t["entry_d_raw"]].append(_t)
                 _ng_dates = sorted(_ng_bd.keys(), reverse=True)
+                # ⛔ **ペインを先に作ってから、ボタンとまとめて足す。**
+                #    以前はボタンを先に足しており、この後の
+                #    `_dup_toggle_html` が落ちると外側の except が拾って
+                #    「ボタンはあるのに押しても何も出ない」状態になった
+                #    (2026-08-26 にユーザーが遭遇)。
+                #    共通ブロックが落ちても N 固有の head だけは必ず出す。
+                try:
+                    _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
+                                                   _dseq, "ng") if _ng_tr else "")
+                except Exception as _nge2:
+                    _ng_common = (
+                        f'<div style="background:#3f1d1d;border:1px solid #7f1d1d;'
+                        f'border-radius:6px;padding:10px;color:#fca5a5;'
+                        f'font-size:0.82rem">⛔ 月別サマリー(共通ブロック)の生成に'
+                        f'失敗しました: {type(_nge2).__name__}: {_nge2}<br>'
+                        f'上の N 固有の情報だけ出しています。</div>')
+                    print(f"[新方式N] 月別サマリーで失敗(head だけ出します): "
+                          f"{type(_nge2).__name__}: {_nge2}", flush=True)
+                _ng_pane = (
+                    f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
+                    + _ng["head"] + _ng_common + '</div>')
                 _eh_btn += (
                     f'<button class="detail-tab-btn" '
                     f'onclick="switchDetailTab({_dseq},\'newgap\')" '
                     f'style="border-color:#fbbf24">★ 新方式N '
                     f'<span style="font-size:0.72rem;color:#fde68a">'
                     f'({len(_ng_tr):,}件)</span></button>')
-                _eh_pane += (
-                    f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
-                    + _ng["head"]
-                    + (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates, _dseq, "ng")
-                       if _ng_tr else "")
-                    + '</div>')
+                _eh_pane += _ng_pane
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
         except Exception as _nge:
