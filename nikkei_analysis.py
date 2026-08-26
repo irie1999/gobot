@@ -10712,11 +10712,34 @@ function switchTbd(id, tab) {{
             if _sym:
                 _recent_stop_map.setdefault(_sym, []).append(_t["exit_d_raw"])
 
+    def _as_date(v):
+        """日付を datetime.date に揃える。str でも date でも Timestamp でも受ける。
+
+        ⛔ `_recent_stop_map` は **all_trades**(H/J のトレード = datetime.date)から
+           作る。一方 新方式N のトレードは `entry_d_raw` が **str**。素で比べると
+           `TypeError: '<' not supported between 'datetime.date' and 'str'` で
+           **N タブの月別サマリーが丸ごと出なくなる**(2026-08-26 に発生)。
+           N 側を直しても直らない。**ここで両側を揃えるのが正しい**。
+        """
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return datetime.strptime(v[:10], "%Y-%m-%d").date()
+            except Exception:
+                return None
+        try:
+            return v.date() if hasattr(v, "hour") else v
+        except Exception:
+            return None
+
     def _stop_warn(sym: str, entry_d) -> str:
+        entry_d = _as_date(entry_d)
         if not sym or entry_d is None or sym not in _recent_stop_map:
             return ""
-        prior = [d for d in _recent_stop_map[sym]
-                 if d < entry_d and (entry_d - d).days <= 30]
+        prior = [_d2 for _d2 in (_as_date(d) for d in _recent_stop_map[sym])
+                 if _d2 is not None and _d2 < entry_d
+                 and (entry_d - _d2).days <= 30]
         if not prior:
             return ""
         days_ago = (entry_d - max(prior)).days
