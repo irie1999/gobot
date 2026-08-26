@@ -64,6 +64,10 @@ ap.add_argument("--quantiles", type=int, default=5, help="分位の数")
 ap.add_argument("--seeds", type=int, default=200, help="帰無較正の本数")
 ap.add_argument("--exclude-strat", type=str, default="転換",
                 help="除外する戦略(カンマ区切り)。転換は実装不可なので既定で除外")
+ap.add_argument("--min-gap-bp", type=float, default=0.0,
+                help="N の CSV(analyze_gap_edge --out)用: ギャップbp の下限")
+ap.add_argument("--min-ret1", type=float, default=-1e9,
+                help="同: 前日リターン%% の下限(N の現行は 1.753)")
 ap.add_argument("--symbol", type=str, default="",
                 help="この銘柄の取引履歴だけを出して終了(例 5711)。"
                      "『あの銘柄また負けてない?』を確かめる用")
@@ -97,17 +101,31 @@ _path = _pick_csv()
 _skip = {s.strip() for s in args.exclude_strat.split(",") if s.strip()}
 _rows: list[dict] = []
 _raw_rows: list[dict] = []      # ★ --symbol 用。戦略の除外を掛けない生の行
+# ⚠ 2種類のCSVを受ける:
+#    lss/J   … entry_date / qty / strategy / reason を持つ
+#    N       … analyze_gap_edge --out。date / entry_p / pnl / gap_bp / ret1
+#              (qty は 100株固定なので列が無い)
+_NGAP, _NRET = 0, 0
 for r in _csv.DictReader(open(_path, encoding="utf-8-sig")):
     if str(r.get("reason") or "") in ("約定せず", "発注中", "保有中"):
         continue
     if str(r.get("strategy") or "") in _skip:
         continue
-    if len(str(r.get("entry_date") or "")[:10]) == 10 \
-            and _f(r.get("entry_p")) > 0 and _f(r.get("qty")) > 0:
-        _raw_rows.append(dict(r))
-    _d = str(r.get("entry_date") or "")[:10]
-    _ep, _q = _f(r.get("entry_p")), _f(r.get("qty"))
+    # N の母集団に絞る(列が無ければ何もしない = lss/J の CSV では無害)
+    if args.min_gap_bp > 0 and "gap_bp" in r:
+        if _f(r.get("gap_bp")) < args.min_gap_bp:
+            _NGAP += 1
+            continue
+    if args.min_ret1 > -1e8 and "ret1" in r:
+        if _f(r.get("ret1")) < args.min_ret1:
+            _NRET += 1
+            continue
+    _d = str(r.get("entry_date") or r.get("date") or "")[:10]
+    _ep = _f(r.get("entry_p"))
+    _q = _f(r.get("qty")) or 100.0        # N は 100株固定で列が無い
     _pnl = _f(r.get("pnl"))
+    if len(_d) == 10 and _ep > 0 and _q > 0:
+        _raw_rows.append(dict(r))
     if len(_d) != 10 or _ep <= 0 or _q <= 0:
         continue
     # ★ **bp で持つ**。円/件は資金均等で株数が変わるので比較できない。
@@ -123,7 +141,11 @@ for r in _csv.DictReader(open(_path, encoding="utf-8-sig")):
     })
 if not _rows:
     raise SystemExit(f"[error] {_path} に決済済みの取引がありません")
-_dates0 = sorted({str(r.get("entry_date") or "")[:10] for r in _raw_rows})
+_dates0 = sorted({str(r.get("entry_date") or r.get("date") or "")[:10]
+                  for r in _raw_rows})
+if _NGAP or _NRET:
+    print(f"[filter] ギャップで除外 {_NGAP:,} / 前日リターンで除外 {_NRET:,} "
+          f"→ 残り {len(_rows):,}件", flush=True)
 
 # ══════════════════════════════════════════════════════════════════════
 #  --symbol : 1銘柄の履歴だけ出して終わる
