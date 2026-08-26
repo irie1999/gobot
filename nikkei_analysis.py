@@ -21608,8 +21608,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _ng_tr = _ng.get("trades") or []
                 _ng_bd = _ng_dd(list)
                 for _t in _ng_tr:
+                    # 保険: 日付フィールドは必ず str。datetime.date が混ざると
+                    # 共通ブロックのソートが TypeError で落ちる
+                    for _k in ("entry_d_raw", "exit_d_raw"):
+                        if _t.get(_k) is not None and not isinstance(_t[_k], str):
+                            _t[_k] = str(_t[_k])
                     _ng_bd[_t["entry_d_raw"]].append(_t)
-                _ng_dates = sorted(_ng_bd.keys(), reverse=True)
+                _ng_dates = sorted(_ng_bd.keys(), key=str, reverse=True)
                 # ⛔ **ペインを先に作ってから、ボタンとまとめて足す。**
                 #    以前はボタンを先に足しており、この後の
                 #    `_dup_toggle_html` が落ちると外側の except が拾って
@@ -21620,13 +21625,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
                                                    _dseq, "ng") if _ng_tr else "")
                 except Exception as _nge2:
+                    # ⛔ **traceback を HTML にも出す。**ターミナルを貼ってもらう
+                    #    より、画面のスクショだけで原因の行が分かるようにする
+                    #    (2026-08-26: 3往復しても場所を特定できなかった)。
+                    import traceback as _tbm
+                    import html as _htm
+                    _tb_txt = "".join(_tbm.format_exception(
+                        type(_nge2), _nge2, _nge2.__traceback__))
+                    # nikkei_analysis.py の行だけ拾う(どの関数で落ちたかが分かる)
+                    _tb_key = [_l.strip() for _l in _tb_txt.split("\n")
+                               if "nikkei_analysis.py" in _l or " in " in _l][-6:]
                     _ng_common = (
                         f'<div style="background:#3f1d1d;border:1px solid #7f1d1d;'
                         f'border-radius:6px;padding:10px;color:#fca5a5;'
                         f'font-size:0.82rem">⛔ 月別サマリー(共通ブロック)の生成に'
                         f'失敗しました: {type(_nge2).__name__}: {_nge2}<br>'
-                        f'上の N 固有の情報だけ出しています。</div>')
-                    import traceback as _tbm
+                        f'上の N 固有の情報だけ出しています。'
+                        f'<pre style="white-space:pre-wrap;font-size:0.72rem;'
+                        f'color:#fecaca;background:#1f1010;padding:8px;'
+                        f'border-radius:4px;margin-top:8px;overflow-x:auto">'
+                        f'{_htm.escape(chr(10).join(_tb_key))}</pre></div>')
                     print(f"[新方式N] 月別サマリーで失敗(head だけ出します): "
                           f"{type(_nge2).__name__}: {_nge2}", flush=True)
                     print("[新方式N] " + "".join(
