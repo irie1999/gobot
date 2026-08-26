@@ -433,6 +433,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
     # 必ず再ダウンロードする。引け直後にキャッシュへ焼き付いた暫定終値を、確定終値へ
     # 手動更新したいとき用(例: $env:GOBOT_REFRESH_DATA="1"; .\daily)。
     _force_refresh = os.environ.get("GOBOT_REFRESH_DATA", "").strip().lower() not in ("", "0", "false", "no")
+    # オフラインモード: GOBOT_OFFLINE=1 でキャッシュの「鮮度」判定を無視し、
+    # ダウンロードも一切試みない。ネットに出られない環境(Claude のコンテナ等)へ
+    # export_daily_cache.py でスナップショットを持ち込んで日足分析を回すため。
+    # ⚠ 最新日はスナップショットを作った日で止まる。当日の判断には使わないこと。
+    _offline = os.environ.get("GOBOT_OFFLINE", "").strip().lower() not in ("", "0", "false", "no")
     persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
     if persistent.exists() and not _force_refresh:
         try:
@@ -446,7 +451,7 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
                 expected    = _expected_latest_bar_date()
                 price_range = float(df["close"].max() - df["close"].min())
                 valid_range = price_range > 0.01 * float(df["close"].mean())
-                if latest_date >= expected and valid_range:
+                if (latest_date >= expected or _offline) and valid_range:
                     # min_start_date チェック: キャッシュが十分遡っているか確認
                     if min_start_date is not None:
                         oldest_bar  = df.index[0]
@@ -464,6 +469,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
                 # 古いキャッシュ → fall through で再取得
         except Exception:
             pass
+
+    # オフラインでは yfinance を叩かない。1,500銘柄ぶんの 403 待ちで固まるだけなので
+    # 「キャッシュに無い = データ無し」として即座に諦める。
+    if _offline:
+        return None
 
     buf_days  = 200 + 30
     total_cal = int((backtest_days + buf_days) * 1.5)
