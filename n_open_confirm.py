@@ -605,12 +605,21 @@ _mode_note = (
      + ("" if args.prod else "  ※ --prod が無いのでデモです"))
     if args.execute else
     "⛔ **発注しません**（記録のみ。出すなら --execute）")
+# ⚠ 50件を超えるとバッチのローテーションになる。文言は f-string の入れ子に
+#   できない(Python 3.11)ので、ここで組み立てておく。
+_NBATCH = -(-len(_syms) // args.batch)
+_BATCH_WARN = "" if len(_syms) <= args.batch else (
+    "\n  ⚠ **kabu の登録上限は50件**。" + str(_NBATCH) + "バッチをローテーション"
+    "するので、\n     1周目は登録し直しのぶん遅くなります"
+    "(実測 50件で30〜96秒 / §18.44)。\n"
+    "     **寄った銘柄は次の周から外す**ので2周目以降は速くなります。\n"
+    "     板の始値は寄れば動かないので、**遅れても選定は正しく出ます**")
 print(f"""
 {'=' * 74}
 ■ J(09:00確認方式) — {_dt.date.today()}
 {'=' * 74}
   {_mode_note}
-  候補 {len(_syms):,}銘柄 / {args.batch}件バッチ × {-(-len(_syms) // args.batch)}回
+  候補 {len(_syms):,}銘柄 / {args.batch}件バッチ × {_NBATCH}回{_BATCH_WARN}
   合格 = 始値が前日終値 {args.gap_bp:+.0f}bp 以上（{args.guard_bp:+.0f}bp 超は見送り）
   予算 {args.budget:.0f}万 / 1銘柄上限 {args.max_yen:.0f}万 / 最大{args.max_lot}単元
   09:00に配る予算 {args.budget * args.g1:.0f}万 (--g1 {args.g1:g}){
@@ -875,13 +884,26 @@ def _order_rows(_sel: list) -> None:
 _REGISTERED: list = []
 
 
-def _read_all(tag: str) -> dict:
-    """全候補を50件バッチで読む。symbol -> board。"""
+def _read_all(tag: str, pending: list | None = None) -> dict:
+    """候補を50件バッチで読む。symbol -> board。
+
+    ★ pending を渡すと **その銘柄だけ**読む(2026-08-27)。
+      OpeningPrice は寄れば動かないので、一度取れた銘柄を読み直す意味は無い。
+      候補が50件を超えるとき、これが無いと毎周 全バッチを読み直すことになり、
+      ・1周が銘柄数に比例して伸びる
+      ・バッチ切替のたびに unregister+register が走る
+        (2026-08-18 に入れた『銘柄集合が変わらなければ登録し直さない』
+         最適化が **完全に無効化される**)
+      ・429 が積み上がる(§18.48 ⑦ で 09:00 の発注が危うくなった前例)
+      1周目のあと残るのは遅寄りだけ(実測 2〜15%)なので、2周目以降は
+      たいてい1バッチに収まる。
+    """
     _t0 = time.time()
     _out: dict = {}
     _n_reg = 0
-    for _i in range(0, len(_syms), args.batch):
-        _b = _syms[_i:_i + args.batch]
+    _tgt = list(pending) if pending is not None else list(_syms)
+    for _i in range(0, len(_tgt), args.batch):
+        _b = _tgt[_i:_i + args.batch]
         if _REGISTERED != _b:
             # 1バッチ運用なら初回だけ通る。複数バッチなら切替のたび。
             try:
@@ -1113,7 +1135,8 @@ if args.poll:
     while True:
         _t0 = time.time()
         _n_poll += 1
-        _bd_all = _read_all(f"poll{_n_poll}")
+        _pend = [x for x in _syms if x not in _seen]
+        _bd_all = _read_all(f"poll{_n_poll}", pending=_pend)
         _now_s = f"{_dt.datetime.now():%H:%M:%S}"
         _new = []
         for _s, _bd in _bd_all.items():
@@ -1130,7 +1153,8 @@ if args.poll:
                 _rows.append(_mk_row(_s, _bd, _now_s,
                                      len(_groups) - 1))
             print(f"  [{_now_s}] **新たに寄った {len(_new)}件** "
-                  f"(通算 {len(_seen)}/{len(_syms)}) "
+                  f"(通算 {len(_seen)}/{len(_syms)} / 今周は未取得 "
+                  f"{len(_pend)}件 = {-(-len(_pend) // args.batch)}バッチ) "
                   f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
             # ★★ 寄った瞬間に配って発注する(= §18.38 の『即時』)。
             #   全部が寄るのを待たない。待つと 1分で -15.8bp 逃げる(§18.44)。
@@ -1141,7 +1165,9 @@ if args.poll:
                 _size_group_live(_gi_now, _sel_now)
                 _order_rows(_sel_now)
         else:
-            print(f"  [{_now_s}] 新規なし (通算 {len(_seen)}/{len(_syms)}) "
+            print(f"  [{_now_s}] 新規なし (通算 {len(_seen)}/{len(_syms)} / "
+                  f"今周は未取得 {len(_pend)}件 = "
+                  f"{-(-len(_pend) // args.batch)}バッチ) "
                   f"/ 読込 {time.time() - _t0:.1f}秒", flush=True)
         # ★ 途中で落ちてもデータを失わないよう毎回書き出す
         _dump(_rows)
