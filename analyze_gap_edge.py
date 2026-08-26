@@ -919,7 +919,9 @@ if a.sweep_ops:
         _seen_sym: dict = {}
         # both のときだけ使う。日次の相関とσを出すため
         _daily: dict = {}                      # date -> [short, long]
+        _dcap: dict = {}                       # date -> [short投入, long投入]
         _byside = {1: [0.0, 0], -1: [0.0, 0]}
+        _pushed = {1: 0, -1: 0}                # 予算で押し出された件数
         for _d, _g in _src.groupby("date"):
             _c = _g[_g["ret1"] >= 1.753]
             if _c.empty:
@@ -945,6 +947,8 @@ if a.sweep_ops:
                     continue
                 _cost = float(_r.entry_p) * a.qty
                 if _cost > _cash:
+                    _pushed[int(getattr(_r, "side", 1))] = \
+                        _pushed.get(int(getattr(_r, "side", 1)), 0) + 1
                     continue
                 _cash -= _cost
                 _tot += float(_r.pnl)
@@ -955,11 +959,14 @@ if a.sweep_ops:
                 _v[0] += float(_r.pnl); _v[1] += 1
                 _dv = _daily.setdefault(_d, [0.0, 0.0])
                 _dv[0 if _sd > 0 else 1] += float(_r.pnl)
+                _cv = _dcap.setdefault(_d, [0.0, 0.0])
+                _cv[0 if _sd > 0 else 1] += _cost
             _cnt += _n
             _used += _cap - _cash
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
-                "daily": _daily, "byside": _byside}
+                "daily": _daily, "byside": _byside,
+                "dcap": _dcap, "pushed": _pushed}
 
     if a.max_gap_bp > 0:
         _n_hi = int((_train["gap_bp"] > a.max_gap_bp).sum())
@@ -1010,15 +1017,28 @@ if a.sweep_ops:
         _ll = np.array([v[1] for v in _dd.values()], float)
         _cc = _ss + _ll
         _bs, _bl = _b0["byside"].get(1, [0, 0]), _b0["byside"].get(-1, [0, 0])
+        _dc = _b0["dcap"]
+        _cs = sum(v[0] for v in _dc.values()) / _ond
+        _cl = sum(v[1] for v in _dc.values()) / _ond
+        _pu = _b0["pushed"]
         print(f"\n  ── ★ 両建て(予算400万・watch50 を共有) ──")
+        print(f"  ⛔ **200万ずつ分けてはいません。** 400万を1つの財布として、"
+              f"両側まぜて\n     |ギャップ| の大きい順に埋めます"
+              f"(片側だけの日はその側が400万まで使えます)")
         print(f"    {'':<12}{'損益':>14}{'件数':>9}{'円/件':>10}"
-              f"{'月換算':>12}{'日次σ':>12}")
-        for _lb, _p, _n_, _sr in (("ショート", _bs[0], _bs[1], _ss),
-                                  ("ロング", _bl[0], _bl[1], _ll),
-                                  ("合計", _b0["pnl"], _b0["n"], _cc)):
+              f"{'月換算':>12}{'日次σ':>12}{'投入/日':>11}{'押出し':>10}")
+        for _lb, _p, _n_, _sr, _cv, _pv in (
+                ("ショート", _bs[0], _bs[1], _ss, _cs, _pu.get(1, 0)),
+                ("ロング", _bl[0], _bl[1], _ll, _cl, _pu.get(-1, 0)),
+                ("合計", _b0["pnl"], _b0["n"], _cc, _cs + _cl,
+                 _pu.get(1, 0) + _pu.get(-1, 0))):
             print(f"    {_lb:<12}{_p:>+14,.0f}{_n_:>9,}"
                   f"{(_p / _n_ if _n_ else 0):>+10,.0f}"
-                  f"{_p / _ond * 20:>+12,.0f}{_sr.std(ddof=1):>12,.0f}")
+                  f"{_p / _ond * 20:>+12,.0f}{_sr.std(ddof=1):>12,.0f}"
+                  f"{_cv / 1e4:>10,.0f}万{_pv:>10,}")
+        print(f"    ⚠ 投入/日 は **平均**。予算が埋まる日と、候補が1件も"
+              f"出ない日の平均なので、\n       稼働率が低くても"
+              f"『混んだ日には押し出されている』ことは普通に起きます")
         _r = (float(np.corrcoef(_ss, _ll)[0, 1])
               if len(_ss) > 2 and _ss.std() > 0 and _ll.std() > 0 else float("nan"))
         _sep = float(_ss.std(ddof=1) + _ll.std(ddof=1))
