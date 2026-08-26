@@ -799,6 +799,8 @@ if a.sweep_grid:
     #      組み合わせとして最適かは一度も見ていない。
     _gt = _train if a.pool == "all" else (
         _train[_train["sig"] == (1 if a.pool == "sig" else 0)])
+    if a.max_gap_bp > 0:                     # ⛔ 同上。_pool_of を通らないので自分で
+        _gt = _gt[_gt["gap_bp"] <= a.max_gap_bp]
     if _gt.empty:
         sys.exit("[error] TRAIN が空です")
     _r1s = [float(x) for x in a.ret1_list.split(",") if x.strip()]
@@ -872,8 +874,16 @@ if a.sweep_ops:
                 continue
             _w = _c.sort_values("liq", ascending=False, na_position="last")
             _wd = _w if watch <= 0 else _w.head(watch)
-            _hit = _wd[_wd["gap_bp"] >= a.min_gap_bp]
-            _miss += len(_c[_c["gap_bp"] >= a.min_gap_bp]) - len(_hit)
+            # ⛔ ここは _pool_of を通らない(候補は ret1 で絞る前が必要)ので、
+            #    **ギャップの上限を自分で掛ける**。2026-08-26 に掛け忘れて
+            #    --max-gap-bp が1円も効かず、上限あり/なしで同じ数字が出た。
+            _gm = _wd["gap_bp"] >= a.min_gap_bp
+            _gc = _c["gap_bp"] >= a.min_gap_bp
+            if a.max_gap_bp > 0:
+                _gm &= _wd["gap_bp"] <= a.max_gap_bp
+                _gc &= _c["gap_bp"] <= a.max_gap_bp
+            _hit = _wd[_gm]
+            _miss += len(_c[_gc]) - len(_hit)
             _hit = _hit.sort_values("gap_bp", ascending=False)
             _cash, _n = _cap, 0
             for _r in _hit.itertuples():
@@ -893,6 +903,10 @@ if a.sweep_ops:
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0)}
 
+    if a.max_gap_bp > 0:
+        _n_hi = int((_train["gap_bp"] > a.max_gap_bp).sum())
+        print(f"  ⚠ ギャップ上限 {a.max_gap_bp:.0f}bp で **{_n_hi:,}銘柄日を除外**"
+              f"(除外前 {len(_train):,})。0件なら上限が効いていない")
     _b0 = _ops_sim(50, 400.0, 0, False)
     print(f"\n  ★ 現行(watch50 / 予算400万 / 上限なし) = "
           f"{_b0['pnl']:+,.0f}円 / {_b0['n']:,}件 / {_b0['per']:+,.0f}円/件 / "
