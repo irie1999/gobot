@@ -629,6 +629,10 @@ _NG_WATCH = int(os.environ.get("LSS_NEWGAP_WATCH", "50"))        # 朝読める�
 _NG_BUDGET = float(os.environ.get("LSS_NEWGAP_BUDGET", "400"))   # 予算(万円)
 _NG_QTY = 100
 _NG_WORKERS = int(os.environ.get("LSS_NEWGAP_WORKERS", "8"))
+# ★ 鏡像(前日下げ × ギャップダウンを買う)のタブ (§18.56)。既定ON。
+#   スキャンは N と共有するので計算はほぼ増えない。切るなら 0。
+_NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 
 
 def _newgap_yf(code: str) -> str:
@@ -785,7 +789,21 @@ def _newgap_names() -> dict:
     return _m
 
 
-def _newgap_rows_to_trades(det) -> list:
+def _newgap_mirror_rows(rows: list) -> list:
+    """★ 鏡像 = 前日下げ × ギャップダウンを **買う**(§18.56)。
+
+    符号を反転するだけで、下流の「ret1 >= 1.753」「gap_bp >= 100」「pnl」が
+    そのままロング側の条件になる。⚠ 同じ(銘柄,日)が両側に入ることは無い
+    (前日リターンが +1.753% 以上かつ -1.753% 以下は有り得ない)。
+    """
+    _o = []
+    for r in rows:
+        _o.append({**r, "ret1": -r["ret1"], "gap_bp": -r["gap_bp"],
+                   "pnl": -r["pnl"]})
+    return _o
+
+
+def _newgap_rows_to_trades(det, side: str = "short") -> list:
     """新方式Nの取引を **既存タブと同じ dict 形式**に直す。
 
     ⛔ `_build_trade_row` は entry_dt / entry_p / exit_dt / exit_p / hold_days /
@@ -796,31 +814,39 @@ def _newgap_rows_to_trades(det) -> list:
     if det is None or det.empty:
         return out
     _nm = _newgap_names()
+    _short = side != "long"
     for r in det.itertuples():
         _d = str(r.date)
         _md = f"{_d[5:7]}/{_d[8:10]}" if len(_d) >= 10 else _d
-        # 同日決済のショート: pnl = (建値 − 決済値) × qty → 決済値を逆算
-        _ex = float(r.entry_p) - float(r.pnl) / _NG_QTY
+        # 同日決済。ショート pnl=(建値−決済値)×qty / ロング pnl=(決済値−建値)×qty
+        _ex = (float(r.entry_p) - float(r.pnl) / _NG_QTY if _short
+               else float(r.entry_p) + float(r.pnl) / _NG_QTY)
         out.append({
             "symbol": str(r.symbol), "name": _nm.get(str(r.symbol), ""),
-            "strategy": "N",
+            "strategy": "N" if _short else "鏡像",
             "entry_d_raw": _d, "exit_d_raw": _d,
             "entry_dt": _md, "exit_dt": _md,
             "entry_time": "09:00", "exit_time": "15:30",
             "entry_p": float(r.entry_p), "exit_p": _ex,
             "qty": _NG_QTY, "pnl": float(r.pnl),
             "hold_days": 0, "days_to_fill": 0,
-            "reason": "引け", "eh": "N", "is_short": True,
-            "label": f"前日{r.ret1:+.1f}% / ギャップ{r.gap_bp:+.0f}bp",
-            "color": "#fbbf24", "rank": "", "score": 0,
+            "reason": "引け", "eh": "N" if _short else "鏡像",
+            "is_short": _short,
+            # ⛔ 鏡像の行は符号を反転してあるので、表示は元に戻す
+            "label": (f"前日{r.ret1:+.1f}% / ギャップ{r.gap_bp:+.0f}bp" if _short
+                      else f"前日{-r.ret1:+.1f}% / ギャップ{-r.gap_bp:+.0f}bp"),
+            "color": "#fbbf24" if _short else "#34d399", "rank": "", "score": 0,
             "order_limit": float(r.entry_p), "order_stop": 0.0,
             "order_target": 0.0,
         })
     return out
 
 
+_NG_ROWS_CACHE: dict = {}
+
+
 def _newgap_build(days: int, min_price: float, max_price: float,
-                  symbols: list) -> dict:
+                  symbols: list, side: str = "short") -> dict:
     """★ 新方式 N を計算して {head, trades} を返す。
 
     描画(月別サマリー・日別アコーディオン)は **呼び出し側の `_dup_toggle_html`**
@@ -830,19 +856,27 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     if not _NG_TAB or not symbols:
         return {}
     _t0 = _time.time()
-    _rows: list = []
-    try:
-        with _TPE(max_workers=max(1, _NG_WORKERS)) as _ex:
-            _fs = {_ex.submit(_newgap_scan_one, s, days, min_price, max_price): s
-                   for s in symbols}
-            for _f in _asc(_fs):
-                try:
-                    _rows.extend(_f.result() or [])
-                except Exception:
-                    pass
-    except Exception as _e:
-        return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
-                "trades": []}
+    # ⛔ スキャンは1,540銘柄で重い。**N と鏡像で同じ結果を使い回す**
+    #   (鏡像は符号を反転するだけなので再スキャンは要らない)。
+    _ck = (days, min_price, max_price, len(symbols))
+    _rows = _NG_ROWS_CACHE.get(_ck)
+    if _rows is None:
+        _rows = []
+        try:
+            with _TPE(max_workers=max(1, _NG_WORKERS)) as _ex:
+                _fs = {_ex.submit(_newgap_scan_one, s, days, min_price, max_price): s
+                       for s in symbols}
+                for _f in _asc(_fs):
+                    try:
+                        _rows.extend(_f.result() or [])
+                    except Exception:
+                        pass
+        except Exception as _e:
+            return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
+                    "trades": []}
+        _NG_ROWS_CACHE[_ck] = _rows
+    if side == "long":
+        _rows = _newgap_mirror_rows(_rows)
     _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
     if not _sim or _sim["days"].empty:
         return {"head": '<div style="color:#94a3b8">新方式N: 対象データがありません</div>',
@@ -868,21 +902,37 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _cand_med = float(_dd["cand"].median())
     _cand_max = int(_dd["cand"].max())
 
+    _shortside = side != "long"
     _h = [
         f'<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;'
         f'padding:12px;margin-bottom:12px">',
-        f'<div style="color:#fbbf24;font-weight:700;font-size:0.95rem;margin-bottom:6px">'
-        f'★ 新方式 N — 前日リターン + ギャップアップ（§18.54）</div>',
+        f'<div style="color:{"#fbbf24" if _shortside else "#34d399"};'
+        f'font-weight:700;font-size:0.95rem;margin-bottom:6px">'
+        + ('★ 新方式 N — 前日リターン + ギャップアップ（§18.54）</div>'
+           if _shortside else
+           '★ 鏡像 — 前日下げ + ギャップダウンを<b>買う</b>（§18.56）</div>'),
         f'<div style="color:#94a3b8;font-size:0.8rem;line-height:1.7">'
-        f'前夜: 前日リターン <b style="color:#e2e8f0">≥ +{_NG_RET1:.3f}%</b> の銘柄を'
+        + (f'前夜: 前日リターン <b style="color:#e2e8f0">≥ +{_NG_RET1:.3f}%</b>'
+           if _shortside else
+           f'前夜: 前日リターン <b style="color:#e2e8f0">≤ −{_NG_RET1:.3f}%</b>')
+        + f' の銘柄を'
         f'流動性降順に並べ <b style="color:#e2e8f0">上位{_NG_WATCH}件</b>'
         f'（kabu の登録上限 / §18.44）<br>'
-        f'09:00: その始値を見て <b style="color:#e2e8f0">ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b> '
-        f'なら空売り。予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
-        f'{_NG_QTY}株固定 / ギャップ降順に充当<br>'
-        f'引け: MOC で買い戻す。<b style="color:#e2e8f0">損切り・利確・delay を'
+        + (f'09:00: その始値を見て <b style="color:#e2e8f0">'
+           f'ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b> なら<b>空売り</b>。'
+           if _shortside else
+           f'09:00: その始値を見て <b style="color:#e2e8f0">'
+           f'ギャップ ≤ −{_NG_GAP_BP:.0f}bp</b> なら<b>買い</b>。')
+        + f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
+        f'{_NG_QTY}株固定 / |ギャップ|降順に充当<br>'
+        + ('引け: MOC で買い戻す。' if _shortside else '引け: MOC で売る。')
+        + f'<b style="color:#e2e8f0">損切り・利確・delay を'
         f'1つも持たない</b><br>'
-        f'⛔ <b style="color:#fbbf24">母集団が J/K/L と違います</b>。'
+        + ('' if _shortside else
+           '⚠ <b style="color:#34d399">TRAIN でしか測っていません</b>'
+           '（月+47,839円 vs N +49,587円 / §18.56）。両建てのσ削減は '
+           '<b>独立29% / 逆相関3%</b> で、<b>ヘッジではなく分散</b>です<br>')
+        + f'⛔ <b style="color:#fbbf24">母集団が J/K/L と違います</b>。'
         f'あちらは eh_trades（lss のバックテストが作る銘柄日）、'
         f'こちらは <b>全銘柄日を日足から直接</b>（{len(symbols):,}銘柄 / '
         f'{len(_rows):,}銘柄日 / {_el:.1f}秒）。5分足を使いません<br>'
@@ -1012,7 +1062,7 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'{_r["投入"] / 10_000:,.0f}万</td></tr>')
     _h.append('</tbody></table></details>')
     return {"head": "".join(_h_main), "tail": "".join(_t2),
-            "trades": _newgap_rows_to_trades(_det)}
+            "trades": _newgap_rows_to_trades(_det, side)}
 
 
 def _lookup_frozen_bt(sym: str, strat: str):
@@ -21660,12 +21710,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             # ⛔ available_local_symbols は 5分足のファイル名(J-Quants の5桁
             #    コード)をそのまま返す。**必ず yfinance 形式に直す**(重複も除く)。
             _ng_syms = sorted({_newgap_yf(s) for s in _ng_als()})
-            _ng = _newgap_build(
-                days,
-                _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
-                _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9,
-                _ng_syms)
-            if _ng and _ng.get("head"):
+            def _ng_build_one(_ng, key, lbl, c1, c2):
+                """N / 鏡像 で共通のタブ組み立て。**1つの実装に揃える**
+
+                ⛔ 2つ書くと片方だけ直して食い違う(§18.48 ⑧d)。
+                """
+                nonlocal _eh_btn, _eh_pane
                 # ★ 月別サマリー・日別アコーディオン・明細は **既存タブと同じ
                 #   `_dup_toggle_html`** に通す(2026-08-25 ユーザー指摘
                 #   「他のtabと形式が異なりすぎている」)。head はこの方式に
@@ -21689,7 +21739,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #    共通ブロックが落ちても N 固有の head だけは必ず出す。
                 try:
                     _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
-                                                   _dseq, "ng") if _ng_tr else "")
+                                                   _dseq, key) if _ng_tr else "")
                 except Exception as _nge2:
                     # ⛔ **traceback を HTML にも出す。**ターミナルを貼ってもらう
                     #    より、画面のスクショだけで原因の行が分かるようにする
@@ -21718,16 +21768,31 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                               _nge2.__traceback__))[-1200:],
                           flush=True)
                 _ng_pane = (
-                    f'<div id="detail_{_dseq}_newgap" class="detail-tab-pane">'
+                    f'<div id="detail_{_dseq}_{key}" class="detail-tab-pane">'
                     + _ng["head"] + _ng_common + (_ng.get("tail") or "")
                     + '</div>')
                 _eh_btn += (
                     f'<button class="detail-tab-btn" '
-                    f'onclick="switchDetailTab({_dseq},\'newgap\')" '
-                    f'style="border-color:#fbbf24">★ 新方式N '
-                    f'<span style="font-size:0.72rem;color:#fde68a">'
+                    f'onclick="switchDetailTab({_dseq},\'{key}\')" '
+                    f'style="border-color:{c1}">{lbl} '
+                    f'<span style="font-size:0.72rem;color:{c2}">'
                     f'({len(_ng_tr):,}件)</span></button>')
                 _eh_pane += _ng_pane
+            # ★ N と鏡像を両方作る(§18.56)。スキャンは _NG_ROWS_CACHE で
+            #   共有するので、2つ目はほぼ計算が増えない(符号を反転するだけ)。
+            _ng_sides = [("short", "newgap", "★ 新方式N", "#fbbf24", "#fde68a")]
+            if _NG_MIRROR_TAB:
+                _ng_sides.append(("long", "newgapm", "★ 鏡像(買い)",
+                                  "#34d399", "#a7f3d0"))
+            for _ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2 in _ng_sides:
+                _ng = _newgap_build(
+                    days,
+                    _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
+                    _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9,
+                    _ng_syms, side=_ng_side)
+                if not (_ng and _ng.get("head")):
+                    continue
+                _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
         except Exception as _nge:
