@@ -2115,9 +2115,12 @@ if a.sweep_ops:
         print(f"\n  ── ★★ ギャップ閾値(bp) ── **watch50 と予算を通した判定**")
         print(f"     ⚠ 母集団は --min-gap-bp {_gsv:.0f} で切ってあるので、"
               f"それ**未満**の升は測れません")
-        print(f"    {'gap':<8}{'損益':>13}{'件/日':>7}{'円/件':>9}"
-              f"{'月平均':>11}{'月次σ':>11}{'÷σ':>7}{'差/月 vs本番':>14}{'対応t':>8}")
+        print(f"    {'gap':<8}{'件/日':>7}{'円/件':>9}"
+              f"{'月平均':>11}{'月次σ':>11}{'÷σ':>7}"
+              f"{'差/月':>11}{'対応t':>7}{'執行後 差/月':>13}{'同 t':>7}")
         _cur_s = None
+        _cur_r = None
+        _mean_ep: dict = {}       # gap -> その設定で実際に建てた建値の平均
         _rows_g = []
         try:
             for _gv in _gl:
@@ -2127,8 +2130,14 @@ if a.sweep_ops:
                 a.min_gap_bp = _gv
                 _r = _ops_sim(50, 400.0, 0, False)
                 _rows_g.append((_gv, (_r, _mser(_r))))
+                # ⚠ 建値の平均は『その閾値を満たした母集団』で近似する。
+                #   watch50/予算を通した実際の建玉そのものではないが、
+                #   閾値間の**差**を出すのが目的なので十分。
+                _pp = _ot[_ot["gap_bp"] >= _gv]
+                _mean_ep[_gv] = (float(_pp["entry_p"].mean()) if len(_pp)
+                                 else 0.0)
                 if abs(_gv - a.ops_gap_ref) < 1e-6:
-                    _cur_s = _mser(_r)
+                    _cur_s, _cur_r = _mser(_r), _r
         finally:
             a.min_gap_bp = _gsv
         # ★ 現行(= --min-gap-bp で切った母集団の下端)を基準にした **対応検定**。
@@ -2158,10 +2167,26 @@ if a.sweep_ops:
                 _dt = f"{_dm:+,.0f}"
                 _dtt = (f"{_dm / (_ds / np.sqrt(len(_df))):+.2f}" if _ds > 0
                         else "—")
+            # ★★ 執行コストを引いた差。**件数に比例するので、件数を増やす方向には
+            #   不利に働く**。これを引かずに閾値を選ぶと、増やす方向が必ず有利に
+            #   見える(2026-08-27 に手計算で気づいたので列にした)。
+            #   1件あたり = 建値 × 100株 × EXEC_BP。建値はその設定の実測平均を使う。
+            _dt2, _dtt2 = "—", "—"
+            if _cur_r is not None and len(_df) > 1:
+                _e1 = _mean_ep.get(_gv, 0.0) * a.qty * EXEC_BP / 10_000.0
+                _e0 = _mean_ep.get(a.ops_gap_ref, 0.0) * a.qty * EXEC_BP / 10_000.0
+                # 月あたりの執行コスト差(件数×単価。20営業日/月に換算)
+                _dc = (_r['n'] / _ond * _e1 - _cur_r['n'] / _ond * _e0) * 20.0
+                _dm2 = float(_df.mean()) - _dc
+                _ds2 = float(_df.std(ddof=1))
+                _dt2 = f"{_dm2:+,.0f}"
+                _dtt2 = (f"{_dm2 / (_ds2 / np.sqrt(len(_df))):+.2f}" if _ds2 > 0
+                         else "—")
             _mk = " ★本番" if abs(_gv - a.ops_gap_ref) < 1e-6 else ""
-            print(f"    {_gv:<8.0f}{_r['pnl']:>+13,.0f}{_r['n'] / _ond:>7.1f}"
+            print(f"    {_gv:<8.0f}{_r['n'] / _ond:>7.1f}"
                   f"{_r['per']:>+9,.0f}{_mu:>+11,.0f}{_sd:>11,.0f}"
-                  f"{(_mu / _sd if _sd else 0):>7.2f}{_dt:>14}{_dtt:>8}{_mk}")
+                  f"{(_mu / _sd if _sd else 0):>7.2f}{_dt:>11}{_dtt:>7}"
+                  f"{_dt2:>13}{_dtt2:>7}{_mk}")
         print(f"     ★★ 見るのは **月平均÷σ** と **対応t**。総額(月平均)だけで"
               f"選ぶと、件数を増やしただけの")
         print(f"        **レバレッジ**を『改善』と読み違えます(§18.28 / §18.38)。")
@@ -2170,9 +2195,11 @@ if a.sweep_ops:
         if _cur_s is None:
             print(f"     ⛔ 本番{a.ops_gap_ref:.0f}bp が母集団の外なので"
                   f"対応検定を出せません(--min-gap-bp を下げてください)")
-        print(f"     ⚠ 執行コストは **件数に比例**します(1件 {EXEC_BP:.1f}bp)。"
-              f"件数を増やす方向には不利に働くので、")
-        print(f"        この表の損益からは **まだ引かれていない**点に注意")
+        print(f"     ★★ **『執行後 差/月』と『同 t』で判定すること。**")
+        print(f"        執行コスト({EXEC_BP:.1f}bp/件)は **件数に比例**するので、"
+              f"件数を増やす方向には必ず不利に働きます。")
+        print(f"        引く前の『差/月』だけを見ると、増やす方向が"
+              f"**常に良く見えます**")
         print(f"     ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
 
     print(f"\n  ── watch上限 ──")
