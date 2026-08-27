@@ -1094,11 +1094,36 @@ if a.sweep_ops:
         print(f"\n    日次損益の相関 (ショート vs ロング) = **{_r:+.3f}**")
         print(f"    σ: 単純合算 {_sep:,.0f} → 実際 {_cc.std(ddof=1):,.0f} "
               f"= **{_red:+.0f}%**")
+        # ★ σ削減の内訳。**独立 と 逆相関 は別物**(2026-08-27)。
+        #   ρ=0 でも sqrt 合成で σ は下がる。そこを分けないと
+        #   「鏡像がショートの負けを打ち消している」と誤読する。
+        _s0, _l0 = float(_ss.std(ddof=1)), float(_ll.std(ddof=1))
+        _indep = float(np.sqrt(_s0 ** 2 + _l0 ** 2))     # ρ=0 のときのσ
+        _act = float(_cc.std(ddof=1))
+        _r_indep = (1 - _indep / _sep) * 100 if _sep > 0 else 0.0
+        _r_corr = (1 - _act / _indep) * 100 if _indep > 0 else 0.0
+        print(f"    内訳: **独立(2本に分けたこと) {_r_indep:+.0f}%** / "
+              f"**逆相関 {_r_corr:+.0f}%**")
+        print(f"      → σ が下がる理由のほとんどは『独立な2本目』であって、"
+              f"\n        『ショートの負けを鏡像が打ち消す』ではありません")
         _neg = _ss < 0
         if _neg.any():
-            print(f"    ショートが負けた日({int(_neg.sum()):,}日)の"
-                  f"ロング = {_ll[_neg].sum():+,.0f}円 "
-                  f"(1日あたり {_ll[_neg].mean():+,.0f}円)")
+            _avg_loss = float(_ss[_neg].mean())
+            _avg_hedge = float(_ll[_neg].mean())
+            _cov = (-_avg_hedge / _avg_loss * 100) if _avg_loss < 0 else 0.0
+            print(f"\n    ── ショートが負けた日 {int(_neg.sum()):,}日 ──")
+            print(f"      ショートの平均損失   {_avg_loss:>+12,.0f}円")
+            print(f"      同じ日のロング       {_avg_hedge:>+12,.0f}円 "
+                  f"(合計 {_ll[_neg].sum():+,.0f}円)")
+            print(f"      **穴埋め率 {_cov:.0f}%**"
+                  + ("  ← 防げていません(ヘッジではなく分散)" if _cov < 50 else ""))
+            _both_neg = int(((_ss < 0) & (_ll < 0)).sum())
+            print(f"      両方とも負けた日     {_both_neg:,}日 "
+                  f"({_both_neg / max(int(_neg.sum()), 1) * 100:.0f}%)")
+            _w5 = np.argsort(_cc)[:5]
+            print(f"      合計の最悪5日: "
+                  + " / ".join(f"{_cc[i]:+,.0f}(S{_ss[i]:+,.0f} L{_ll[i]:+,.0f})"
+                               for i in _w5))
         _mo = _cc.sum() / _ond * 20
         _sh = _mo / (_cc.std(ddof=1) * np.sqrt(20)) if _cc.std(ddof=1) > 0 else 0.0
         print(f"\n    月換算 {_mo:+,.0f}円 / 月次σ ≒ "
