@@ -272,6 +272,10 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--sweep-size", action="store_true",
+                help="★★ **マイナス月を抑えられるか**。サイジング × 1日の件数上限"
+                     "を掃いて、月次σ・最悪月・マイナス月数で見る。"
+                     "TRAIN で選んで TEST で答え合わせ")
 ap.add_argument("--search-switch", action="store_true",
                 help="★★ N と鏡像の使い分けルールを **総当たり**して、"
                      "帰無(日ブロックを保った巡回シフト)で較正する。"
@@ -333,7 +337,7 @@ _BOTH_PASS = {
 }
 
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
-                    or a.search_switch
+                    or a.search_switch or a.sweep_size
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier)
 if _NEEDS_TRAIN and not a.split:
@@ -376,7 +380,7 @@ _RET1_MIN = 1.753
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
-                             or a.search_switch):
+                             or a.search_switch or a.sweep_size):
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
              "--sweep-regime 専用です。\n"
              "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
@@ -917,7 +921,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool,
                  order: str = "gap", alloc: str = "merge", seed: int = 0,
-                 half: int = 0):
+                 half: int = 0, sizing: str = "qty", size_arg: float = 0.0):
         """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。
 
         order … gap(既定|ギャップ|降順) / liq(売買代金降順) / gapasc / price(安い順)
@@ -925,6 +929,11 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
         alloc … merge(既定: 1つの財布) / split50(側ごとに半額) /
                 prop(その日の合格数で按分) / alt(交互に取る)
         half  … 0=全期間 / 1=前半 / 2=後半 (擬似OOS)
+        sizing… qty(既定 100株固定) / equal(金額均等 予算÷合格件数) /
+                cap(100株固定 + 1銘柄の金額上限 size_arg万円) /
+                atr(ATR均等 = リスク均等。1件あたり size_arg円のリスク)
+                ⚠ 100株固定は建値で建玉が6倍ばらつく(§18.30)。
+                  σ を削る唯一の未検証レバー。
         """
         _cap = budget_man * 10_000.0
         _tot, _cnt, _used, _miss = 0.0, 0, 0.0, 0
@@ -986,12 +995,31 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 _hh["_k"] = _hh.groupby("side").cumcount()
                 _hit = _hh.sort_values(["_k", "side"], ascending=[True, False])
             _cash, _n = _cap, 0
+            # ★ サイジング。1件あたりの株数を決める(100株単位)。
+            #   pnl は 100株 で計算済みなので、株数の比で伸縮する。
+            _tgt = (_cap / max(len(_hit), 1)) if sizing == "equal" else 0.0
             for _r in _hit.itertuples():
                 if max_n > 0 and _n >= max_n:
                     break
                 if one_per_sym and _seen_sym.get(_r.symbol) == _d:
                     continue
-                _cost = float(_r.entry_p) * a.qty
+                _px = float(_r.entry_p)
+                _lot = a.qty
+                if sizing == "equal" and _px > 0:
+                    _lot = max(a.qty, int(_tgt / (_px * a.qty)) * a.qty)
+                elif sizing == "atr" and size_arg > 0:
+                    _at = float(getattr(_r, "atr", 0.0) or 0.0)
+                    if _at > 0:
+                        _lot = max(a.qty,
+                                   int(size_arg / (_at * a.qty)) * a.qty)
+                if sizing == "cap" and size_arg > 0:
+                    _lot = min(_lot, max(a.qty,
+                                         int(size_arg * 1e4 / (_px * a.qty)) * a.qty))
+                elif sizing in ("equal", "atr") and size_arg > 0:
+                    _lot = min(_lot, max(a.qty,
+                                         int(size_arg * 1e4 / (_px * a.qty)) * a.qty))
+                _scale = _lot / a.qty
+                _cost = _px * _lot
                 if alloc in ("split50", "prop"):
                     _sd0 = _sd_of(_r)
                     if _cost > _pool[_sd0]:
@@ -1005,14 +1033,15 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     continue
                 else:
                     _cash -= _cost
-                _tot += float(_r.pnl)
+                _pp = float(_r.pnl) * _scale
+                _tot += _pp
                 _n += 1
                 _seen_sym[_r.symbol] = _d
                 _sd = int(getattr(_r, "side", 1))
                 _v = _byside.setdefault(_sd, [0.0, 0])
-                _v[0] += float(_r.pnl); _v[1] += 1
+                _v[0] += _pp; _v[1] += 1
                 _dv = _daily.setdefault(_d, [0.0, 0.0])
-                _dv[0 if _sd > 0 else 1] += float(_r.pnl)
+                _dv[0 if _sd > 0 else 1] += _pp
                 _cv = _dcap.setdefault(_d, [0.0, 0.0])
                 _cv[0 if _sd > 0 else 1] += _cost
                 _kv = _dcnt.setdefault(_d, [0, 0])
@@ -1078,6 +1107,141 @@ if a.sweep_grid:
     print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
     print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
     print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_size:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ マイナス月を抑えられるか — サイジング × 1日の件数上限
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ 損切り(ATR倍/固定円)・利確・決済時刻・寄り5分撤退・ギャップ上限・
+    #     寄り前19変数・銘柄属性 は **すべて棄却済み**(§18.55 / §18.56 /
+    #     §18.34b / §18.13 / §18.24)。
+    #   ★ 残っている唯一の未検証レバーが **サイジング**(§18.30):
+    #     「FIXED_QTY=100 固定で建玉が 10万〜60万と6倍ばらついている。
+    #       σ を削りたいなら1件ごとのバラつきを叩くしかない」
+    #   ⚠ サイジングは決定的な変換なので、ラベルをずらす帰無較正は使えない。
+    #     代わりに **TRAIN で選んで TEST で答え合わせ**+前半/後半で見る。
+    print(f"\n{'=' * 78}")
+    print(f"■ マイナス月を抑えられるか — サイジング × 1日の件数上限")
+    print(f"{'=' * 78}")
+    print(f"  ⛔ 損切り・利確・決済時刻・ギャップ上限・寄り前変数は棄却済み。")
+    print(f"     残っている未検証レバーは **サイジング**だけ(§18.30)")
+    print(f"  ⚠ 100株固定は建値で建玉が **6倍**ばらつく"
+          f"(1,000円株=10万 / 6,000円株=60万)")
+
+    def _mstat2(res, ond):
+        _dd2 = res["daily"]
+        _m: dict = {}
+        for _d, _v in _dd2.items():
+            _k = str(_d)[:7]
+            _m[_k] = _m.get(_k, 0.0) + _v[0] + _v[1]
+        _v2 = np.array([_m[k] for k in sorted(_m)], float)
+        _dv = np.array([v[0] + v[1] for v in _dd2.values()], float)
+        if len(_v2) < 3:
+            return None
+        _mu, _sd = float(_v2.mean()), float(_v2.std(ddof=1))
+        _us = float(res["used"])
+        return {"mu": _mu, "sd": _sd, "r": (_mu / _sd if _sd else 0.0),
+                "worst": float(_v2.min()), "neg": int((_v2 < 0).sum()),
+                "nm": len(_v2), "wd": float(_dv.min()),
+                "n": res["n"], "used": _us,
+                # ★ 資本効率 = 月平均 ÷ 実際に使った額。
+                #   これが横ばいなら **レバレッジを動かしただけ**(§18.38 #3b)。
+                "eff": (_mu / _us * 100.0 if _us > 0 else 0.0)}
+
+    _SZ = [("qty", 0.0, "100株固定 ★現行"),
+           ("equal", 0.0, "金額均等(予算÷件数)"),
+           ("equal", 50.0, "金額均等 上限50万"),
+           ("cap", 30.0, "100株固定 上限30万"),
+           ("cap", 40.0, "100株固定 上限40万"),
+           ("atr", 3000.0, "ATR均等(1件3千円risk)"),
+           ("atr", 5000.0, "ATR均等(1件5千円risk)")]
+    _CAPN = [0, 20, 13, 8, 5]
+
+    _sims = {}
+    for _tag, _df in (("TRAIN", _train), ("TEST", _test)):
+        if _df is None or _df.empty:
+            continue
+        _f, _, _ = _make_ops_sim(_df, _pool_of(_df),
+                                 max(1, _df["date"].nunique()))
+        _sims[_tag] = (_f, max(1, _df["date"].nunique()))
+
+    print(f"\n  ⛔ **投入/日 と 資本効率 を必ず見ること。**")
+    print(f"     月平均もσも同じ比率で増えているなら、それは"
+          f"**レバレッジを上げただけ**で\n     リスクは減っていません"
+          f"(資本効率が横ばいならそれ)。§18.28 / §18.38 #3b")
+    print(f"\n  {'サイジング':<24}{'上限':>6}"
+          + "".join(f"{t + ' 月平均':>13}{'σ':>10}{'÷σ':>7}"
+                   f"{'最悪月':>12}{'負月':>6}{'投入/日':>9}{'効率%':>7}"
+                   for t in _sims))
+    print("  " + "-" * (30 + 64 * len(_sims)))
+    _rows2 = []
+    for _sz, _sa, _lb in _SZ:
+        for _mn in _CAPN:
+            _r2 = {}
+            for _t in _sims:
+                _f, _ond2 = _sims[_t]
+                _r2[_t] = _mstat2(_f(50, 400.0, _mn, False,
+                                     sizing=_sz, size_arg=_sa), _ond2)
+            if not all(_r2.values()):
+                continue
+            _rows2.append(((_sz, _sa, _lb, _mn), _r2))
+    # 現行(100株固定・上限なし)を基準に
+    _b2 = next(x for x in _rows2 if x[0][0] == "qty" and x[0][3] == 0)
+    # TRAIN の 月平均÷σ 降順
+    _rows2.sort(key=lambda x: -x[1]["TRAIN"]["r"])
+    for _key, _r2 in _rows2[:16]:
+        _sz, _sa, _lb, _mn = _key
+        _s3 = f"  {_lb:<24}{('なし' if _mn == 0 else str(_mn)):>6}"
+        for _t in _sims:
+            _x = _r2[_t]
+            _s3 += (f"{_x['mu']:>+13,.0f}{_x['sd']:>10,.0f}{_x['r']:>7.2f}"
+                    f"{_x['worst']:>+12,.0f}{_x['neg']:>4}/{_x['nm']}"
+                    f"{_x['used'] / 1e4:>8,.0f}万{_x['eff']:>7.2f}")
+        print(_s3)
+    print("  " + "-" * (30 + 64 * len(_sims)))
+    _bs = _b2[1]
+    _s3 = f"  {'★現行(100株/上限なし)':<24}{'なし':>6}"
+    for _t in _sims:
+        _x = _bs[_t]
+        _s3 += (f"{_x['mu']:>+13,.0f}{_x['sd']:>10,.0f}{_x['r']:>7.2f}"
+                f"{_x['worst']:>+12,.0f}{_x['neg']:>4}/{_x['nm']}"
+                f"{_x['used'] / 1e4:>8,.0f}万{_x['eff']:>7.2f}")
+    print(_s3)
+
+    # ── 前半/後半 ────────────────────────────────────────────────
+    print(f"\n  ── 上位5つを TRAIN の前半/後半でも見る ──")
+    print(f"  {'サイジング':<24}{'上限':>6}{'前半 ÷σ':>10}{'後半 ÷σ':>10}"
+          f"{'基準 前半':>11}{'基準 後半':>11}{'判定':>8}")
+    _ft, _ond3 = _sims["TRAIN"]
+    _bh = {h: _mstat2(_ft(50, 400.0, 0, False, half=h), _ond3) for h in (1, 2)}
+    for _key, _r2 in _rows2[:5]:
+        _sz, _sa, _lb, _mn = _key
+        _hh2 = {h: _mstat2(_ft(50, 400.0, _mn, False, sizing=_sz,
+                               size_arg=_sa, half=h), _ond3) for h in (1, 2)}
+        if not all(_hh2.values()):
+            continue
+        _ok2 = (_hh2[1]["r"] > _bh[1]["r"]) and (_hh2[2]["r"] > _bh[2]["r"])
+        print(f"  {_lb:<24}{('なし' if _mn == 0 else str(_mn)):>6}"
+              f"{_hh2[1]['r']:>10.2f}{_hh2[2]['r']:>10.2f}"
+              f"{_bh[1]['r']:>11.2f}{_bh[2]['r']:>11.2f}"
+              f"{('✓' if _ok2 else '✗'):>8}")
+
+    print(f"\n  {'=' * 68}")
+    print(f"  ⛔ **100株が最小単位なので、サイジングは『大きくする』方向にしか"
+          f"動けません。**\n     1単元より小さくできない以上、"
+          f"高い銘柄のリスクを下げる手段がありません。")
+    print(f"     σ を下げたいなら 予算を落とす(=レバレッジを下げる)か、"
+          f"件数上限で\n     エクスポージャーを削るしかありません。")
+    print(f"  ★ 読み方: **月平均を落とさずに σ・最悪月・マイナス月数が"
+          f"下がる**ものだけが意味を持つ。")
+    print(f"     月平均が落ちているなら、それは単にサイズを下げただけ"
+          f"(レバレッジの調整)。")
+    print(f"  ⚠ TRAIN で選んで **TEST の列と前半/後半 ✓** の両方を満たさなければ"
+          f"期間依存。")
+    print(f"  ⛔ 予算400万は固定。予算を変えるのは §18.38 #3b のとおり"
+          f"レバレッジであって\n     リスク低減ではない(σ も比例して動く)")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
