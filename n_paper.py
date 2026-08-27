@@ -575,8 +575,9 @@ def do_close() -> None:
     # ★ 先に「どの銘柄が合格し、どの順で発注が走ったか」を出す(2026-08-27)。
     #   --sequence と同じもの。CSV を読むだけなので引け後に1回でまとまる。
     #   ⛔ ここで落ちても損益の集計は続ける(表示のための機能なので)。
+    _seq = None
     try:
-        do_sequence()
+        _seq = do_sequence()
     except SystemExit:
         raise
     except Exception as _e:
@@ -684,6 +685,43 @@ def do_close() -> None:
            side=-1, rank_key="rank_m", top=a.watch)
     _score("J (参考・記録のみ)", a.gap_bp_j, "in_j",
            side=1, rank_key="rank_j", top=a.watch)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 予算制約つきの損益 — **これが実際に取れた額**
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ 上の方式別の表は「合格を全部建てられたら」の値。
+    #     予算400万では建てられない銘柄があるので、実額とは違う。
+    #     2026-08-27 の初日に、見送った3件が全部勝ちで +29,000円 だった。
+    if _seq and _seq.get("built"):
+        _pnl_of = {}
+        for r in _out:
+            _sy = str(r.get("symbol") or "").strip().replace(".T", "")
+            if r.get("pnl") not in ("", None):
+                _pnl_of[_sy] = float(r["pnl"])
+        def _sum(lst):
+            _v = [(sy, sd, _pnl_of[sy] * sd) for sy, sd in lst if sy in _pnl_of]
+            return _v, sum(x[2] for x in _v)
+        _bv, _btot = _sum(_seq["built"])
+        _sv, _stot = _sum(_seq["skip"])
+        print(f"\n{'=' * 74}")
+        print(f"■ ★★ 予算制約つき — **実際に取れた額** ({_TODAY} / ペーパー)")
+        print(f"{'=' * 74}")
+        _ws = sum(1 for _, _, p in _bv if p > 0)
+        print(f"  建てた {len(_bv)}件 / 勝ち {_ws}件 / **合計 {_btot:+,.0f}円**")
+        _ns = sum(p for _, sd, p in _bv if sd > 0)
+        _nl = sum(p for _, sd, p in _bv if sd < 0)
+        print(f"    内訳: N(売り) {_ns:+,.0f}円 / 鏡像(買い) {_nl:+,.0f}円")
+        if _sv:
+            print(f"\n  ⛔ **予算で見送った {len(_sv)}件 = {_stot:+,.0f}円**")
+            for _sy, _sd, _p in sorted(_sv, key=lambda x: -x[2]):
+                print(f"       {_sy:<8}{'売り' if _sd > 0 else '買い':<6}{_p:>+10,.0f}円")
+            if _stot > 0:
+                print(f"     → 見送った側が勝っています。"
+                      f"**待たない方針のコストが {_stot:+,.0f}円**")
+            else:
+                print(f"     → 見送った側が負けています。今日は待たなくて正解でした")
+        print(f"\n  ⚠ 方式別の表(上)は『合格を全部建てられたら』の値なので、"
+              f"この額とは違います")
 
     _nm = sum(1 for r in _out
               if int(r.get("in_n") or 0) == 1 and int(r.get("in_m") or 0) == 1)
@@ -904,12 +942,15 @@ def do_sequence() -> None:
     else:
         print(f"\n  ✅ ライブの順とバックテストの順で、建てる銘柄は同じでした")
 
+    _built = [(r["sym"], r["side"]) for r in _lv if r["ok"]]
+    _skip = [(r["sym"], r["side"]) for r in _lv if not r["ok"]]
     _dl = [r for r in _lv if r["late"]]
     if _dl:
         print(f"\n  遅寄り {len(_dl)}件: "
               + ", ".join(f"{r['sym']}({_hhmmss(r['ot'])})" for r in _dl[:8]))
     print(f"\n  ⚠ **ペーパー**。実際には発注していません。")
     print(f"  ⚠ J は資金均等(§18.48)で株数の決め方が違うので、この表には出しません")
+    return {"built": _built, "skip": _skip}
 
 
 if a.sequence:
