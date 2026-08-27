@@ -1100,6 +1100,14 @@ if a.confirm_both:
         _t = _mu / (_sd / np.sqrt(len(_v))) if _sd > 0 else 0.0
         return _mu, _sd, _t, len(_v), int((_v > 0).sum())
 
+    # ⛔⛔ ① の比較相手は **N単独(予算400万を独り占め)**。
+    #   2026-08-27 の初回実装は「両建ての中のショート成分」と比べていた。
+    #   あれは予算を鏡像と分け合った状態なので、**N単独より不利に出る**。
+    #   条件文は最初から「N単独を上回る」と書いてあるので、これは
+    #   ゴールポストの移動ではなく **実装の誤りの修正**。
+    _test_s = _test[_test.get("side", 1) == 1] if "side" in _test else _test
+    _ssim, _, _ = _make_ops_sim(_test_s, _pool_of(_test_s),
+                                max(1, _test_s["date"].nunique()))
     _res = _tsim(50, 400.0, 0, False)
     _dd = _res["daily"]
     _ss = np.array([v[0] for v in _dd.values()], float)
@@ -1120,14 +1128,39 @@ if a.confirm_both:
     print("  " + "-" * 74)
     print(f"  日次相関(ショート vs ロング) = **{_corr:+.3f}**")
 
-    _r_s = _row[0][0] / _row[0][1] if _row[0][1] else 0.0
+    # ★ N単独(400万を独り占め)を **同じ関数**で測る(§18.48 ⑧d)
+    _sres = _ssim(50, 400.0, 0, False)
+    _sa = _mstats(_sres["daily"], 2)            # 片側なので合計=ショート
+    _r_s = _sa[0] / _sa[1] if _sa[1] else 0.0
     _r_b = _row[2][0] / _row[2][1] if _row[2][1] else 0.0
+    print(f"\n  ── ★ ① の比較相手 = **N単独(予算400万を独り占め)** ──")
+    print(f"  {'N単独':<12}{_sa[0]:>+13,.0f}{_sa[1]:>12,.0f}"
+          f"{_r_s:>11.2f}{_sa[2]:>+8.2f}{_sa[3]:>7}{_sa[4]:>6}/{_sa[3]}")
+    print(f"  ⚠ 上の表の『ショート』は **両建ての中の成分**(予算を鏡像と"
+          f"分け合った状態)。\n     採否の比較相手はこちらです")
+    # ★ 月次の相関も出す。日次と符号が違うことがある(2026-08-27: 日次 -0.055 /
+    #   月次 +0.266)。**月次σ を決めるのは月次の相関**なので、こちらが本質。
+    _mv = {}
+    for _pk in (0, 1, 2):
+        _mm: dict = {}
+        for _d, _v in _dd.items():
+            _k = str(_d)[:7]
+            _mm[_k] = _mm.get(_k, 0.0) + (_v[0] if _pk == 0 else
+                                          _v[1] if _pk == 1 else _v[0] + _v[1])
+        _mv[_pk] = np.array([_mm[k] for k in sorted(_mm)], float)
+    _cm = (float(np.corrcoef(_mv[0], _mv[1])[0, 1])
+           if len(_mv[0]) > 2 and _mv[0].std() > 0 and _mv[1].std() > 0 else 0.0)
+    print(f"\n  **月次**の相関 = {_cm:+.3f}  (日次 {_corr:+.3f})")
+    if _cm > _corr + 0.10:
+        print(f"  ⛔ **月次のほうが正に寄っています。**σ を決めるのは月次の相関"
+              f"なので、\n     日次の相関から期待するほど分散は効きません")
 
     # ⑤ 半期
     _h = {}
     for _hh in (1, 2):
         _rh = _tsim(50, 400.0, 0, False, half=_hh)
-        _ms, _mb = _mstats(_rh["daily"], 0), _mstats(_rh["daily"], 2)
+        _sh = _ssim(50, 400.0, 0, False, half=_hh)     # ★ N単独(同じ半期)
+        _ms, _mb = _mstats(_sh["daily"], 2), _mstats(_rh["daily"], 2)
         _h[_hh] = ((_mb[0] / _mb[1] if _mb[1] else 0.0),
                    (_ms[0] / _ms[1] if _ms[1] else 0.0))
         print(f"  {'前半' if _hh == 1 else '後半'}: "
