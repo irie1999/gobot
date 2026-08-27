@@ -272,6 +272,10 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--confirm-both", action="store_true",
+                help="★★ **TEST を1回だけ使って『両建て(N+鏡像)』を検証する**。"
+                     "合格条件はコードに焼き込んであり(_BOTH_PASS)、"
+                     "実行時に変更できない。⛔ 1回しか使えない")
 ap.add_argument("--confirm", type=str, default="",
                 help="★ 検証モード。'軸:分位' を指定して **TEST で1回だけ**測る"
                      "(例 atr_pct:Q1 / dow:0)。⛔ 1つの候補につき1回だけ")
@@ -289,7 +293,33 @@ a = ap.parse_args()
 
 # ── TRAIN を要求するモードは、**スキャンの前に** --split を検査する ──────
 #    1,540銘柄 × 4200日 のスキャンは10分かかる。終わってから落とさない。
-_NEEDS_TRAIN = bool(a.explore or a.confirm or a.sweep_grid
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 両建ての合格条件 — **2026-08-27 に、TEST を1度も見ずに決めた**
+# ══════════════════════════════════════════════════════════════════════
+#   ⛔ ここを後から緩めないこと。緩めた時点で検証ではなくなる。
+#   ⚠ TEST は1候補につき1回きり(§18.54 で ATR%Q1 を消費した前例あり)。
+#     今回 使うのは **「両建て」1候補**。鏡像単体は別候補にしない。
+#
+#   TRAIN の実測(2015-02〜2020-08 / 予算400万 / watch50):
+#     N単独   月+49,587 / 鏡像単独 月+47,839
+#     両建て  月+88,212 / 日次σ 32,352 / 相関 -0.062
+#     月平均÷σ  片側 0.42 → 両建て 0.61
+_BOTH_PASS = {
+    # ① 両建ての月平均÷σ が N単独を上回る(これが採用の目的そのもの)
+    "ratio_beats_short": True,
+    # ② 両建ての月次 t がこの値以上(利益がノイズと区別できる)
+    "t_min": 2.0,
+    # ③ 鏡像 **単体** も月平均>0 かつ t>=1.0。
+    #    片側が死んでいるのに合成で誤魔化すのを防ぐ。
+    "mirror_t_min": 1.0,
+    # ④ 日次相関がこの値以下(独立性が保たれている。強い正相関なら
+    #    『同じものを2倍やっている』だけでレバレッジと変わらない)
+    "corr_max": 0.30,
+    # ⑤ TEST を半分に割って、**両方の半期**で月平均÷σ が N単独を上回る
+    "both_halves": True,
+}
+
+_NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
@@ -326,8 +356,8 @@ if a.list_axes:
 #   both は **short 向きでスキャンして、あとから鏡像を複製する**。
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
-if a.side == "both" and not a.sweep_ops:
-    sys.exit("[error] --side both は --sweep-ops 専用です。\n"
+if a.side == "both" and not (a.sweep_ops or a.confirm_both):
+    sys.exit("[error] --side both は --sweep-ops / --confirm-both 専用です。\n"
              "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
              "(両側を混ぜると『どちらの効果か』が分離できません)")
 
@@ -825,96 +855,43 @@ if _NEEDS_TRAIN:
         #   ロング側の条件になる(= --side long と1円まで同じ)。
         #   ⚠ 同じ (銘柄,日) が両側に入ることは無い。ret1 が
         #     +1.753% 以上かつ -1.753% 以下になることはないため。
-        _mir = _train.copy()
-        for _c in ("gap_bp", "pnl", "ret1"):
-            _mir[_c] = -_mir[_c]
-        _hi = _mir["d1_high"].copy()
-        _mir["d1_high"] = 2 * _mir["entry_p"] - _mir["d1_low"]
-        _mir["d1_low"] = 2 * _mir["entry_p"] - _hi
-        _mir["side"] = -1
-        _train = _train.copy()
-        _train["side"] = 1
-        _train = pd.concat([_train, _mir], ignore_index=True)
-        print(f"\n[both] 鏡像を複製しました。TRAIN {len(_train):,}行"
-              f"(ショート向き {len(_mir):,} + ロング向き {len(_mir):,})")
+        # ⛔⛔ **TRAIN と TEST の両方に掛けること**(2026-08-27 に踏んだ)。
+        #   TRAIN だけに掛けていたので、--confirm-both で TEST を見ると
+        #   ロングが 0件 になり、両建てがショート単独と同じ数字になった。
+        #   『鏡像単体 t=0.00』という有り得ない結果で気づいた。
+        def _mirror_of(_df):
+            if _df is None or _df.empty:
+                return _df
+            _m = _df.copy()
+            for _c in ("gap_bp", "pnl", "ret1"):
+                _m[_c] = -_m[_c]
+            _hi = _m["d1_high"].copy()
+            _m["d1_high"] = 2 * _m["entry_p"] - _m["d1_low"]
+            _m["d1_low"] = 2 * _m["entry_p"] - _hi
+            _m["side"] = -1
+            _o = _df.copy()
+            _o["side"] = 1
+            return pd.concat([_o, _m], ignore_index=True)
+
+        _n0, _t0 = len(_train), len(_test)
+        _train = _mirror_of(_train)
+        _test = _mirror_of(_test)
+        print(f"\n[both] 鏡像を複製しました。"
+              f"TRAIN {_n0:,}→{len(_train):,}行 / TEST {_t0:,}→{len(_test):,}行")
+        if _t0 and len(_test) != _t0 * 2:
+            print(f"       ⛔ TEST が2倍になっていません。複製に失敗しています")
         print(f"       ⚠ **watch も予算も1つを共有**します。kabu の登録上限は"
               f"合計50件なので、両側の候補を混ぜて売買代金順に上位を取ります")
 
-if a.sweep_grid:
-    # ══ 前日リターン × ギャップ の 2次元 (TRAIN のみ) ═══════════════
-    #   ⛔ TEST は使わない。現行(1.753% × 100bp)は2つを**別々に**決めた:
-    #      ret1 は「ギャップ100bp以上の中での5分位のQ5」、gap は第1回の表。
-    #      組み合わせとして最適かは一度も見ていない。
-    _gt = _train if a.pool == "all" else (
-        _train[_train["sig"] == (1 if a.pool == "sig" else 0)])
-    if a.max_gap_bp > 0:                     # ⛔ 同上。_pool_of を通らないので自分で
-        _gt = _gt[_gt["gap_bp"] <= a.max_gap_bp]
-    if _gt.empty:
-        sys.exit("[error] TRAIN が空です")
-    _r1s = [float(x) for x in a.ret1_list.split(",") if x.strip()]
-    _gps = [float(x) for x in a.gap_list.split(",") if x.strip()]
-    _ndays = max(1, _gt["date"].nunique())
-    print(f"\n{'=' * 78}\n■ 前日リターン × ギャップ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
-    print(f"  ⛔ TEST は1回も使いません")
-    print(f"  対象 {len(_gt):,}銘柄日 / {_ndays:,}営業日")
-    print(f"  ★ 現行 = ret1 ≥ {1.753}% × gap ≥ 100bp")
-    for _what, _fmt in (("bp/件", "bp"), ("件/日", "n")):
-        print(f"\n  ── {_what} ──")
-        print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
-        print("    " + "-" * (8 + 11 * len(_gps)))
-        for _r1 in _r1s:
-            _row = f"    {_r1:<8.3f}"
-            for _gp in _gps:
-                _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
-                if len(_s) < 200:
-                    _row += f"{'—':>11}"
-                    continue
-                if _fmt == "bp":
-                    _v = _bp(_s)
-                    _mk = "★" if (abs(_r1 - 1.753) < 1e-6 and abs(_gp - 100) < 1e-6) else " "
-                    _row += f"{_v:>+10.1f}{_mk}"
-                else:
-                    _row += f"{len(_s) / _ndays:>11.1f}"
-            print(_row)
-    print(f"\n  ── 日クラスタ t ──")
-    print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
-    print("    " + "-" * (8 + 11 * len(_gps)))
-    for _r1 in _r1s:
-        _row = f"    {_r1:<8.3f}"
-        for _gp in _gps:
-            _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
-            _row += (f"{_cluster_t(_s):>+11.2f}" if len(_s) >= 200 else f"{'—':>11}")
-        print(_row)
-    print(f"\n  {'=' * 68}")
-    print(f"  ★ 読み方: **★(現行) と明確に違う升があるか**だけを見る。")
-    print(f"     ⚠ 件数が減れば bp は上がりやすい(強い銘柄だけ残るので)。")
-    print(f"        **bp と 件/日 を必ずセットで**見ること。bp が上がっても")
-    print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
-    print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
-    print(f"     (TEST は既に2回使用済み)。")
-    print(f"  {'=' * 68}")
-    sys.exit(0)
-
-if a.sweep_ops:
-    # ══ 運用パラメータ (TRAIN のみ) ═══════════════════════════════════
-    #   watch上限 / 予算 / 1日の建玉数上限 / 同一銘柄の連日。
-    #   ⛔ TEST は使わない。
-    _ot = _pool_of(_train)
-    if _ot.empty:
-        sys.exit("[error] TRAIN が空です")
-    _ond = max(1, _ot["date"].nunique())
-    print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
-    print(f"  ⛔ TEST は1回も使いません")
-    print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
-          + (f"★両建て |ret1| ≥ 1.753% × |gap| ≥ {a.min_gap_bp:.0f}bp "
-             f"(上げ→売り / 下げ→買い)" if a.side == "both" else
-             f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp" if _SIDE > 0 else
-             f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
-          + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
-
+# ══════════════════════════════════════════════════════════════════════
+# 運用シミュ本体。**TRAIN でも TEST でも同じ関数を使う**(2026-08-27)。
+#   以前は --sweep-ops の中に埋まっていて TEST 側から呼べなかった。
+#   ⛔ 実装を2つ持つと、片方だけ直して食い違う(§18.48 ⑧d の前例)。
+# ══════════════════════════════════════════════════════════════════════
+def _make_ops_sim(_src_all, _pool_df, _ond):
     # ★ 発注順と予算配分を差し替えられるようにする(2026-08-27)。
     #   ⛔ 既定は現行(gap / merge)。**引数を足しただけで挙動は変えていない**。
-    _ALL_D = sorted(_train["date"].unique())
+    _ALL_D = sorted(_src_all["date"].unique())
     _HALF = _ALL_D[len(_ALL_D) // 2] if _ALL_D else ""
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool,
@@ -931,7 +908,7 @@ if a.sweep_ops:
         _cap = budget_man * 10_000.0
         _tot, _cnt, _used, _miss = 0.0, 0, 0.0, 0
         # ⚠ 候補は「ret1 で絞る前の全銘柄日」。watch は候補に掛かる
-        _src = _train if a.pool == "all" else _ot
+        _src = _src_all if a.pool == "all" else _pool_df
         if half == 1:
             _src = _src[_src["date"] < _HALF]
         elif half == 2:
@@ -1025,6 +1002,182 @@ if a.sweep_ops:
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
                 "daily": _daily, "byside": _byside,
                 "dcap": _dcap, "pushed": _pushed, "dcnt": _dcnt}
+    return _ops_sim, _ALL_D, _HALF
+
+
+if a.sweep_grid:
+    # ══ 前日リターン × ギャップ の 2次元 (TRAIN のみ) ═══════════════
+    #   ⛔ TEST は使わない。現行(1.753% × 100bp)は2つを**別々に**決めた:
+    #      ret1 は「ギャップ100bp以上の中での5分位のQ5」、gap は第1回の表。
+    #      組み合わせとして最適かは一度も見ていない。
+    _gt = _train if a.pool == "all" else (
+        _train[_train["sig"] == (1 if a.pool == "sig" else 0)])
+    if a.max_gap_bp > 0:                     # ⛔ 同上。_pool_of を通らないので自分で
+        _gt = _gt[_gt["gap_bp"] <= a.max_gap_bp]
+    if _gt.empty:
+        sys.exit("[error] TRAIN が空です")
+    _r1s = [float(x) for x in a.ret1_list.split(",") if x.strip()]
+    _gps = [float(x) for x in a.gap_list.split(",") if x.strip()]
+    _ndays = max(1, _gt["date"].nunique())
+    print(f"\n{'=' * 78}\n■ 前日リターン × ギャップ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  対象 {len(_gt):,}銘柄日 / {_ndays:,}営業日")
+    print(f"  ★ 現行 = ret1 ≥ {1.753}% × gap ≥ 100bp")
+    for _what, _fmt in (("bp/件", "bp"), ("件/日", "n")):
+        print(f"\n  ── {_what} ──")
+        print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
+        print("    " + "-" * (8 + 11 * len(_gps)))
+        for _r1 in _r1s:
+            _row = f"    {_r1:<8.3f}"
+            for _gp in _gps:
+                _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
+                if len(_s) < 200:
+                    _row += f"{'—':>11}"
+                    continue
+                if _fmt == "bp":
+                    _v = _bp(_s)
+                    _mk = "★" if (abs(_r1 - 1.753) < 1e-6 and abs(_gp - 100) < 1e-6) else " "
+                    _row += f"{_v:>+10.1f}{_mk}"
+                else:
+                    _row += f"{len(_s) / _ndays:>11.1f}"
+            print(_row)
+    print(f"\n  ── 日クラスタ t ──")
+    print(f"    {'前日%':<8}" + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
+    print("    " + "-" * (8 + 11 * len(_gps)))
+    for _r1 in _r1s:
+        _row = f"    {_r1:<8.3f}"
+        for _gp in _gps:
+            _s = _gt[(_gt["ret1"] >= _r1) & (_gt["gap_bp"] >= _gp)]
+            _row += (f"{_cluster_t(_s):>+11.2f}" if len(_s) >= 200 else f"{'—':>11}")
+        print(_row)
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 読み方: **★(現行) と明確に違う升があるか**だけを見る。")
+    print(f"     ⚠ 件数が減れば bp は上がりやすい(強い銘柄だけ残るので)。")
+    print(f"        **bp と 件/日 を必ずセットで**見ること。bp が上がっても")
+    print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
+    print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
+    print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.confirm_both:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 両建ての検証 — **TEST を1回だけ使う**
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ 合格条件は _BOTH_PASS に焼き込んである。実行時に変えられない。
+    #   ⛔ 落ちたら『相場が特殊だった』と言わないこと(宣言済み)。
+    if a.side != "both":
+        sys.exit("[error] --confirm-both は --side both と一緒に使ってください")
+    if _test.empty:
+        sys.exit("[error] TEST が空です(--split を確認してください)")
+    print(f"\n{'=' * 78}")
+    print(f"■ 両建ての検証 — **TEST({_test_n}) で1回だけ**")
+    print(f"{'=' * 78}")
+    print(f"  ⛔ TEST は1候補につき1回きり。今回使うのは **『両建て』1候補**です")
+    print(f"  合格条件(2026-08-27 に TEST を見ずに決定):")
+    print(f"    ① 両建ての 月平均÷σ が **N単独を上回る**")
+    print(f"    ② 両建ての月次 t ≥ {_BOTH_PASS['t_min']:.1f}")
+    print(f"    ③ 鏡像 **単体** も 月平均>0 かつ t ≥ {_BOTH_PASS['mirror_t_min']:.1f}")
+    print(f"    ④ 日次相関 ≤ {_BOTH_PASS['corr_max']:+.2f}")
+    print(f"    ⑤ TEST を半分に割って **両方の半期**で ① が成立")
+    print(f"  ⚠ **5つ全部**を満たしたときだけ合格。1つでも落ちたら不採用")
+
+    _tsim, _tALL, _tHALF = _make_ops_sim(_test, _pool_of(_test),
+                                         max(1, _test["date"].nunique()))
+    _tond = max(1, _test["date"].nunique())
+
+    def _mstats(daily, pick):
+        """日次パネル → 月次の (平均, σ, t, 月数, プラス月)。pick: 0=S 1=L 2=合計"""
+        _m: dict = {}
+        for _d, _v in daily.items():
+            _k = str(_d)[:7]
+            _m[_k] = _m.get(_k, 0.0) + (_v[0] if pick == 0 else
+                                        _v[1] if pick == 1 else _v[0] + _v[1])
+        _v = np.array([_m[k] for k in sorted(_m)], float)
+        if len(_v) < 2:
+            return 0.0, 0.0, 0.0, len(_v), 0
+        _mu, _sd = float(_v.mean()), float(_v.std(ddof=1))
+        _t = _mu / (_sd / np.sqrt(len(_v))) if _sd > 0 else 0.0
+        return _mu, _sd, _t, len(_v), int((_v > 0).sum())
+
+    _res = _tsim(50, 400.0, 0, False)
+    _dd = _res["daily"]
+    _ss = np.array([v[0] for v in _dd.values()], float)
+    _ll = np.array([v[1] for v in _dd.values()], float)
+    _corr = (float(np.corrcoef(_ss, _ll)[0, 1])
+             if len(_ss) > 2 and _ss.std() > 0 and _ll.std() > 0 else 0.0)
+
+    print(f"\n  {'':<12}{'月平均':>13}{'月次σ':>12}{'月平均÷σ':>11}"
+          f"{'t':>8}{'月数':>7}{'プラス月':>9}")
+    print("  " + "-" * 74)
+    _row = {}
+    for _lb, _pk in (("ショート", 0), ("ロング", 1), ("両建て", 2)):
+        _mu, _sd, _t, _nm, _pos = _mstats(_dd, _pk)
+        _row[_pk] = (_mu, _sd, _t)
+        print(f"  {_lb:<12}{_mu:>+13,.0f}{_sd:>12,.0f}"
+              f"{(_mu / _sd if _sd else 0):>11.2f}{_t:>+8.2f}{_nm:>7}"
+              f"{_pos:>6}/{_nm}")
+    print("  " + "-" * 74)
+    print(f"  日次相関(ショート vs ロング) = **{_corr:+.3f}**")
+
+    _r_s = _row[0][0] / _row[0][1] if _row[0][1] else 0.0
+    _r_b = _row[2][0] / _row[2][1] if _row[2][1] else 0.0
+
+    # ⑤ 半期
+    _h = {}
+    for _hh in (1, 2):
+        _rh = _tsim(50, 400.0, 0, False, half=_hh)
+        _ms, _mb = _mstats(_rh["daily"], 0), _mstats(_rh["daily"], 2)
+        _h[_hh] = ((_mb[0] / _mb[1] if _mb[1] else 0.0),
+                   (_ms[0] / _ms[1] if _ms[1] else 0.0))
+        print(f"  {'前半' if _hh == 1 else '後半'}: "
+              f"両建て 月平均÷σ {_h[_hh][0]:.2f} / N単独 {_h[_hh][1]:.2f}")
+
+    _chk = [
+        ("① 月平均÷σ が N単独超", _r_b > _r_s, f"{_r_b:.2f} vs {_r_s:.2f}"),
+        ("② 両建ての t ≥ 2.0", _row[2][2] >= _BOTH_PASS["t_min"],
+         f"t={_row[2][2]:+.2f}"),
+        ("③ 鏡像単体 >0 かつ t ≥ 1.0",
+         _row[1][0] > 0 and _row[1][2] >= _BOTH_PASS["mirror_t_min"],
+         f"月平均{_row[1][0]:+,.0f} t={_row[1][2]:+.2f}"),
+        ("④ 相関 ≤ +0.30", _corr <= _BOTH_PASS["corr_max"], f"{_corr:+.3f}"),
+        ("⑤ 前半・後半とも ①", _h[1][0] > _h[1][1] and _h[2][0] > _h[2][1],
+         f"前半 {_h[1][0]:.2f}>{_h[1][1]:.2f} / 後半 {_h[2][0]:.2f}>{_h[2][1]:.2f}"),
+    ]
+    print(f"\n  {'=' * 68}")
+    for _nm2, _ok, _det in _chk:
+        print(f"  {'✅' if _ok else '❌'} {_nm2:<26}{_det}")
+    _pass = all(x[1] for x in _chk)
+    print(f"  {'=' * 68}")
+    print(f"  ★★ 判定: **{'合格' if _pass else '不合格'}**")
+    if _pass:
+        print(f"     両建ては TRAIN/TEST の両方で N単独を上回りました。")
+        print(f"     ⚠ ただし **執行コストは1円も引いていません**"
+              f"(slip=0 / 呼値なし)。実測は .\\norder を貯めてから")
+    else:
+        print(f"     ❌ が1つでもあれば不採用。**基準を緩めて再判定しないこと**")
+    print(f"  ⛔ TEST はこれで消費しました。同じ窓で別の案を試すと"
+          f"多重検定になります")
+    sys.exit(0)
+
+if a.sweep_ops:
+    # ══ 運用パラメータ (TRAIN のみ) ═══════════════════════════════════
+    #   watch上限 / 予算 / 1日の建玉数上限 / 同一銘柄の連日。
+    #   ⛔ TEST は使わない。
+    _ot = _pool_of(_train)
+    if _ot.empty:
+        sys.exit("[error] TRAIN が空です")
+    _ond = max(1, _ot["date"].nunique())
+    print(f"\n{'=' * 78}\n■ 運用パラメータ — **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  対象 {len(_ot):,}銘柄日 / {_ond:,}営業日 / "
+          + (f"★両建て |ret1| ≥ 1.753% × |gap| ≥ {a.min_gap_bp:.0f}bp "
+             f"(上げ→売り / 下げ→買い)" if a.side == "both" else
+             f"ret1 ≥ 1.753% × gap ≥ {a.min_gap_bp:.0f}bp" if _SIDE > 0 else
+             f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
+          + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
+
+    _ops_sim, _ALL_D, _HALF = _make_ops_sim(_train, _ot, _ond)
 
     if a.max_gap_bp > 0:
         _n_hi = int((_train["gap_bp"] > a.max_gap_bp).sum())
