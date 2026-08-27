@@ -1190,9 +1190,27 @@ if a.sweep_relax:
 
     _axs = [float(x) for x in a.relax_axis_list.split(",") if x.strip()]
     _gps = [float(x) for x in a.relax_gap_list.split(",") if x.strip()]
+
+    # ⛔⛔ 追加分は2種類あって、コストがまったく違う。混ぜて判定してはいけない。
+    #   (A) ret1 >= 1.753 だが gap が閾値に届かず落ちていた
+    #       → **前夜の候補プールに既にいる**(watch50 の抽選に参加済み)。
+    #         プールが増えないので誰も押し出さない = タダ
+    #       ⚠ ただし実質「gap 閾値を下げる」だけ。--sweep-grid で掃き済みの領域
+    #   (B) ret1 < 1.753 だが AXIS が強い
+    #       → **新しく watch する必要がある**。§18.55 で 82%の日が既に50件の壁に
+    #         当たっているので、流動性順で **既存の +15.5bp を押し出す**
+    #       ★ ここだけが本当に新しい。そして無料ではない
+    _watched = _rt["ret1"] >= _RET1_MIN
     _best = None
-    for _lbl, _key in (("追加分だけ bp/件", "bp"), ("追加分だけ 件/日", "n"),
-                       ("追加分だけ 日t", "t"), ("合計 bp/件", "cbp")):
+    for _lbl, _key in (("追加分 **(A) 候補プールを増やさない** bp/件", "bpA"),
+                       ("追加分 (A) 件/日", "nA"),
+                       ("追加分 **(B) 候補プールが増える** bp/件", "bpB"),
+                       ("追加分 (B) 件/日", "nB"),
+                       ("追加分 (B) 日t", "tB"),
+                       ("追加分 (A+B) bp/件 ⚠混合", "bp"),
+                       ("追加分 (A+B) 件/日", "n"),
+                       ("追加分 (A+B) 日t", "t"),
+                       ("合計 bp/件", "cbp")):
         print(f"\n  ── {_lbl} ──")
         print(f"    {a.relax_axis[:9]:<10}"
               + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
@@ -1202,18 +1220,35 @@ if a.sweep_relax:
             for _gp in _gps:
                 _add_m = ((_rt[a.relax_axis] >= _ax) & (_rt["gap_bp"] >= _gp)
                           & ~_base_m)
+                if _key.endswith("A"):
+                    _add_m = _add_m & _watched
+                elif _key.endswith("B"):
+                    _add_m = _add_m & ~_watched
                 _add = _rt[_add_m]
                 if len(_add) < 200:
                     _row += f"{'—':>11}"
                     continue
-                if _key == "bp":
+                if _key in ("bpA", "nA"):
+                    _row += (f"{_bp(_add):>+11.1f}" if _key == "bpA"
+                             else f"{len(_add) / _nd:>11.1f}")
+                elif _key in ("bpB", "nB", "tB"):
+                    _row += (f"{_bp(_add):>+11.1f}" if _key == "bpB" else
+                             f"{len(_add) / _nd:>11.1f}" if _key == "nB" else
+                             f"{_cluster_t(_add):>+11.2f}")
+                elif _key == "bp":
                     _v = _bp(_add)
                     _row += f"{_v:>+11.1f}"
                     _t = _cluster_t(_add)
-                    if _v >= PASS_BP and _t >= PASS_T:
-                        _c = (_v, _t, _ax, _gp, len(_add))
-                        if _best is None or _c[0] > _best[0]:
-                            _best = _c
+                    # ★ 最良は **(B) 新規watchが要る側**だけで判定する。
+                    #   (A) は実質「gap 閾値を下げる」だけで --sweep-grid 掃き済み。
+                    _bm = _add_m & ~_watched
+                    _b = _rt[_bm]
+                    if len(_b) >= 200:
+                        _vb, _tb2 = _bp(_b), _cluster_t(_b)
+                        if _vb >= PASS_BP and _tb2 >= PASS_T:
+                            _c = (_vb, _tb2, _ax, _gp, len(_b))
+                            if _best is None or _c[0] > _best[0]:
+                                _best = _c
                 elif _key == "n":
                     _row += f"{len(_add) / _nd:>11.1f}"
                 elif _key == "t":
@@ -1223,21 +1258,30 @@ if a.sweep_relax:
             print(_row)
 
     print(f"\n  {'=' * 68}")
+    print(f"  ★ 判定は **(B) 候補プールが増える側だけ**に掛けます。")
+    print(f"     (A) は ret1 の条件を満たしていて gap だけ届かなかった分 = "
+          f"実質『gap 閾値を下げる』で、--sweep-grid で掃き済みの領域です。")
     if _best is None:
-        print(f"  ⛔ **追加できる升がありません。**")
-        print(f"     追加分が単体で bp≥{PASS_BP} かつ t≥{PASS_T} を満たす組み合わせは"
-              f"ゼロでした。")
-        print(f"     = 閾値を下げて拾える取引は、拾うだけ薄めます。**現行のまま**。")
+        print(f"\n  ⛔ **(B) に足せる升がありません。**")
+        print(f"     候補プールが増える追加分で bp≥{PASS_BP} かつ t≥{PASS_T} を"
+              f"満たす組み合わせはゼロでした。")
+        print(f"     = watch50 を消費してまで拾う価値のある取引は無い。**現行のまま**。")
     else:
         _v, _t, _ax, _gp, _n = _best
-        print(f"  ★ 追加分が単体で合格する最良: {a.relax_axis} ≥ {_ax:g} × "
+        print(f"\n  ★ (B) が単体で合格する最良: {a.relax_axis} ≥ {_ax:g} × "
               f"gap ≥ {_gp:.0f}bp")
         print(f"     {_n:,}件 / {_n / _nd:.1f}件/日 / **{_v:+.1f}bp** / 日t {_t:+.2f}")
-        print(f"  ⛔ **ここで採用しないこと。** TRAIN で最良を選んだだけです。")
-        print(f"     TEST での検証が要ります(TEST は既に2回使用済み)。")
-    print(f"  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
+        print(f"  ⛔⛔ **これでも採用しないこと。** (B) は "
+              f"**前夜の候補プールを増やします**。")
+        print(f"     §18.55 で **82%の日が既に50件の壁**に当たっているので、"
+              f"新しい候補を入れると")
+        print(f"     流動性順で **現行の +{_bp(_base):.1f}bp の取引が押し出されます**。")
+        print(f"     {_v:+.1f}bp < +{_bp(_base):.1f}bp なら、"
+              f"**入れ替わるだけで悪化**します。")
+        print(f"  ▶ 判断は --sweep-ops(watch50 と予算を通す)でのみ可能です。")
+    print(f"\n  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
           f"増えうる**")
-    print(f"     (N は稼働率40%で資金が余っている)。判断は --sweep-ops で。")
+    print(f"     (N は稼働率40%で資金が余っている)。ただし watch50 が先に効きます。")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
