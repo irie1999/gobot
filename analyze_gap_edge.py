@@ -272,6 +272,14 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--search-switch", action="store_true",
+                help="★★ N と鏡像の使い分けルールを **総当たり**して、"
+                     "帰無(日ブロックを保った巡回シフト)で較正する。"
+                     "TRAIN と TEST を並べて出す。"
+                     "⛔ 『最良を選ぶ』操作ごと帰無に入れるので、"
+                     "何通り試しても比較は公平")
+ap.add_argument("--switch-nulls", type=int, default=200,
+                help="--search-switch の帰無較正の本数")
 ap.add_argument("--sweep-regime", action="store_true",
                 help="★ 相場の状態(前夜に確定)で N と鏡像を使い分けられるか。"
                      "⛔ TRAIN のみ。TEST は使わない")
@@ -325,6 +333,7 @@ _BOTH_PASS = {
 }
 
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
+                    or a.search_switch
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier)
 if _NEEDS_TRAIN and not a.split:
@@ -366,7 +375,8 @@ _RET1_MIN = 1.753
 #   both は **short 向きでスキャンして、あとから鏡像を複製する**。
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
-if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime):
+if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
+                             or a.search_switch):
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
              "--sweep-regime 専用です。\n"
              "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
@@ -1068,6 +1078,188 @@ if a.sweep_grid:
     print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
     print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
     print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.search_switch:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ N と鏡像の使い分けを **総当たり**して帰無で較正する
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ 「何通り試したか」を制限するのではなく、**『最良を選ぶ』操作ごと
+    #     帰無分布に入れる**(§18.13 / §18.24 の作法)。こうすれば何百通り
+    #     試しても比較は公平になる。
+    #   ⛔ 帰無は **日ブロックを保った巡回シフト**。完全シャッフルは日内相関を
+    #     壊して帰無分布が狭くなり、偽陽性を過小評価する(§18.13)。
+    if a.side != "both":
+        sys.exit("[error] --search-switch は --side both と一緒に使ってください")
+    print(f"\n{'=' * 78}")
+    print(f"■ N と鏡像の使い分け — **総当たり + 帰無較正**")
+    print(f"{'=' * 78}")
+
+    def _sides_of(df):
+        _s1 = df[df["side"] == 1] if "side" in df else df
+        _s2 = df[df["side"] == -1] if "side" in df else df.iloc[0:0]
+        return _s1, _s2
+
+    def _panel(df, tag):
+        """N単独 / 鏡像単独 / 両建て の **日次損益**を作る(全部 予算400万)。"""
+        _s1, _s2 = _sides_of(df)
+        _out = {}
+        for _k, _d in (("N", _s1), ("M", _s2), ("B", df)):
+            if _d is None or _d.empty:
+                _out[_k] = {}
+                continue
+            _f, _, _ = _make_ops_sim(_d, _pool_of(_d),
+                                     max(1, _d["date"].nunique()))
+            _r = _f(50, 400.0, 0, False)
+            _out[_k] = {_dt2: (_v[0] + _v[1]) for _dt2, _v in _r["daily"].items()}
+        # 相場の指標(前夜に確定)。ret1 は鏡像側で反転済みなので side==1 だけ
+        _mk2 = (_s1.groupby("date")["ret1"].mean().sort_index()
+                .rename("mkt1").to_frame())
+        _mk2["mkt5"] = _mk2["mkt1"].rolling(5).mean()
+        _mk2["mkt20"] = _mk2["mkt1"].rolling(20).mean()
+        _mk2["absmkt1"] = _mk2["mkt1"].abs()
+        _cn2 = (_s1[_s1["ret1"] >= _RET1_MIN].groupby("date").size().rename("a"))
+        _cm2 = (_s2[_s2["ret1"] >= _RET1_MIN].groupby("date").size().rename("b"))
+        _cc3 = pd.concat([_cn2, _cm2], axis=1).fillna(0.0)
+        _mk2["cand"] = ((_cc3["a"] / (_cc3["a"] + _cc3["b"]).replace(0, np.nan))
+                        .reindex(_mk2.index) * 100.0)
+        # ★ その日の候補の総数(=どれだけ材料が出た日か)。前夜に確定。
+        #   §18.13 は lss で『同日発注数』を掃いて候補ゼロだったが、
+        #   N/鏡像では未検証なので入れる。
+        _mk2["ntot"] = (_cc3["a"] + _cc3["b"]).reindex(_mk2.index)
+        _mk2 = _mk2.dropna()
+        _days = [d for d in _mk2.index
+                 if d in _out["N"] or d in _out["M"] or d in _out["B"]]
+        _days = sorted(_days)
+        _P = {k: np.array([_out[k].get(d, 0.0) for d in _days], float)
+              for k in ("N", "M", "B")}
+        _A = {c: _mk2.loc[_days, c].to_numpy(float)
+              for c in ("mkt1", "mkt5", "mkt20", "absmkt1", "cand", "ntot")}
+        _mo = np.array([int(str(d)[:4]) * 12 + int(str(d)[5:7]) for d in _days])
+        print(f"  {tag}: {len(_days):,}営業日")
+        return _P, _A, _mo
+
+    def _score(v, mo):
+        """日次 → 月次にして (月平均, σ, 月平均÷σ, t) を返す。"""
+        _u = np.unique(mo)
+        _m = np.array([v[mo == x].sum() for x in _u], float)
+        if len(_m) < 3:
+            return 0.0, 0.0, 0.0, 0.0
+        _mu, _sd = float(_m.mean()), float(_m.std(ddof=1))
+        if _sd <= 0:
+            return _mu, 0.0, 0.0, 0.0
+        return _mu, _sd, _mu / _sd, _mu / (_sd / np.sqrt(len(_m)))
+
+    # ── ルールの総当たり ──────────────────────────────────────────
+    #   軸 × 閾値(5分位の切れ目) × (低いとき, 高いとき) の全組み合わせ。
+    #   選択肢は N単独 / 鏡像単独 / 両建て / 建てない の4つ。
+    _CH = ("N", "M", "B", "X")          # X = その日は建てない
+    _AXN = {"mkt1": "前日の相場", "mkt5": "5日の相場", "mkt20": "20日の相場",
+            "absmkt1": "前日の値幅(絶対値)", "cand": "候補の偏り",
+            "ntot": "候補の総数"}
+
+    def _rules():
+        for _ax in _AXN:
+            for _qi in (20, 40, 60, 80):
+                for _lo in _CH:
+                    for _hi in _CH:
+                        if _lo == _hi:
+                            continue
+                        yield (_ax, _qi, _lo, _hi)
+
+    _RULES = list(_rules())
+
+    def _apply(P, A, rule, cut=None):
+        _ax, _qi, _lo, _hi = rule
+        _v = A[_ax]
+        _c = np.percentile(_v, _qi) if cut is None else cut
+        _z = np.zeros(len(_v), float)
+        for _mask, _ch in ((_v < _c, _lo), (_v >= _c, _hi)):
+            if _ch != "X":
+                _z[_mask] = P[_ch][_mask]
+        return _z
+
+    _res = {}
+    for _tag, _df in (("TRAIN", _train), ("TEST", _test)):
+        if _df is None or _df.empty:
+            continue
+        _P, _A, _mo = _panel(_df, _tag)
+        _res[_tag] = (_P, _A, _mo)
+
+    # ── 基準(切り替えなし) ────────────────────────────────────────
+    print(f"\n  ── 基準(切り替えなし) ──")
+    print(f"    {'':<10}" + "".join(f"{t:>34}" for t in _res))
+    print(f"    {'':<10}" + "".join(f"{'月平均':>13}{'月平均÷σ':>11}{'t':>10}"
+                                    for t in _res))
+    _base = {}
+    for _k, _nm3 in (("N", "N単独"), ("M", "鏡像単独"), ("B", "両建て")):
+        _row2 = f"    {_nm3:<10}"
+        for _t in _res:
+            _P, _A, _mo = _res[_t]
+            _mu, _sd, _r, _tt = _score(_P[_k], _mo)
+            _base.setdefault(_t, {})[_k] = _r
+            _row2 += f"{_mu:>+13,.0f}{_r:>11.2f}{_tt:>+10.2f}"
+        print(_row2)
+
+    # ── 総当たり ──────────────────────────────────────────────────
+    print(f"\n  ── 使い分けルールの総当たり ({len(_RULES)}通り) ──")
+    _rank = []
+    for _rule in _RULES:
+        _row3 = {}
+        for _t in _res:
+            _P, _A, _mo = _res[_t]
+            _row3[_t] = _score(_apply(_P, _A, _rule), _mo)
+        _rank.append((_rule, _row3))
+    _rank.sort(key=lambda x: -x[1]["TRAIN"][2])       # TRAIN の 月平均÷σ 順
+
+    print(f"    ⛔ **TRAIN で選ぶ**。TEST は答え合わせに見るだけ")
+    print(f"\n    {'軸':<16}{'閾値':>6}{'低い日':>7}{'高い日':>7}"
+          + "".join(f"{t + ' 月平均':>14}{'÷σ':>8}" for t in _res))
+    print("    " + "-" * 76)
+    for _rule, _row3 in _rank[:12]:
+        _ax, _qi, _lo, _hi = _rule
+        _s2 = f"    {_AXN[_ax]:<16}{_qi:>5}%{_lo:>7}{_hi:>7}"
+        for _t in _res:
+            _s2 += f"{_row3[_t][0]:>+14,.0f}{_row3[_t][2]:>8.2f}"
+        print(_s2)
+
+    # ── 帰無較正: **『最良を選ぶ』操作ごと**シフトする ────────────
+    print(f"\n  ── 帰無較正 ({a.switch_nulls}本 / 日ブロックを保った巡回シフト) ──")
+    print(f"    ⛔ 各シフトでも **同じ{len(_RULES)}通りを掃いて最良を取る**。")
+    print(f"       だから『何通り試したか』は自動的に補正される")
+    _P, _A, _mo = _res["TRAIN"]
+    _n = len(_mo)
+    _rng2 = np.random.default_rng(20260827)
+    _null = []
+    for _i in range(max(10, a.switch_nulls)):
+        _sh = int(_rng2.integers(20, _n - 20))
+        _As = {k: np.roll(v, _sh) for k, v in _A.items()}   # 指標だけずらす
+        _best = max(_score(_apply(_P, _As, r), _mo)[2] for r in _RULES)
+        _null.append(_best)
+    _null = np.array(_null, float)
+    _obs = _rank[0][1]["TRAIN"][2]
+    _b0 = max(_base["TRAIN"].values())
+    _p95 = float(np.percentile(_null, 95))
+    print(f"    実測の最良      **{_obs:.3f}**  ({_AXN[_rank[0][0][0]]} "
+          f"{_rank[0][0][1]}% / 低={_rank[0][0][2]} 高={_rank[0][0][3]})")
+    print(f"    帰無の最良      中央 {float(np.median(_null)):.3f} / "
+          f"95%点 **{_p95:.3f}** / 最大 {float(_null.max()):.3f}")
+    print(f"    基準(切り替えなしの最良) {_b0:.3f}")
+    _pv = float((_null >= _obs).mean())
+    print(f"    p値 = **{_pv:.3f}**  "
+          + ("← 帰無の95%点を超えています" if _obs > _p95 else
+             "← 帰無の中。**偶然の範囲**です"))
+    print(f"\n  {'=' * 68}")
+    if _obs > _p95 and _rank[0][1]["TRAIN"][2] > _b0:
+        print(f"  ★ TRAIN では帰無を超えました。**TEST の列で答え合わせ**を"
+              f"してください。\n     TEST でも基準を超えていれば本物の候補です")
+    else:
+        print(f"  ⛔ **帰無の中です。**{len(_RULES)}通り掃いた中の最良でも、"
+              f"ラベルをずらした\n     偶然の最良と区別できません。"
+              f"使い分けルールは無い、が結論です")
+    print(f"  ⚠ どのルールも slip=0。切り替えは注文数を減らすので、"
+          f"実運用では執行コストが下がる方向に働きます(未計測)")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
