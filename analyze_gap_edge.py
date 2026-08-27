@@ -200,6 +200,8 @@ ap.add_argument("--min-gap-bp", type=float, default=0.0,
                      "0=絞らない。**仮説が『ギャップアップした銘柄』なら必ず指定する**"
                      "(第1回・第2回はこれを付けず、母集団の39%%を占める"
                      "ギャップダウンを混ぜて薄めていた)")
+ap.add_argument("--rank-seeds", type=str, default="42,1,7,99,123,2024,5,17,31,64,88,101",
+                help="発注順の判定に使うランダムのシード(§18.24 の帯)")
 ap.add_argument("--side", choices=["short", "long", "both"], default="short",
                 help="short(既定) = 前日上げ × ギャップアップ を空売り(= N)。"
                      "long = その **完全な鏡像**(前日下げ × ギャップダウンを買う)。"
@@ -910,12 +912,31 @@ if a.sweep_ops:
              f"★鏡像 ret1 ≤ -1.753% × gap ≤ -{a.min_gap_bp:.0f}bp を**買う**")
           + (f" 〜 {a.max_gap_bp:.0f}bp" if a.max_gap_bp > 0 else ""))
 
-    def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool):
-        """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。"""
+    # ★ 発注順と予算配分を差し替えられるようにする(2026-08-27)。
+    #   ⛔ 既定は現行(gap / merge)。**引数を足しただけで挙動は変えていない**。
+    _ALL_D = sorted(_train["date"].unique())
+    _HALF = _ALL_D[len(_ALL_D) // 2] if _ALL_D else ""
+
+    def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool,
+                 order: str = "gap", alloc: str = "merge", seed: int = 0,
+                 half: int = 0):
+        """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。
+
+        order … gap(既定|ギャップ|降順) / liq(売買代金降順) / gapasc / price(安い順)
+                / rand(その日ごとにシャッフル。seed で再現)
+        alloc … merge(既定: 1つの財布) / split50(側ごとに半額) /
+                prop(その日の合格数で按分) / alt(交互に取る)
+        half  … 0=全期間 / 1=前半 / 2=後半 (擬似OOS)
+        """
         _cap = budget_man * 10_000.0
         _tot, _cnt, _used, _miss = 0.0, 0, 0.0, 0
         # ⚠ 候補は「ret1 で絞る前の全銘柄日」。watch は候補に掛かる
         _src = _train if a.pool == "all" else _ot
+        if half == 1:
+            _src = _src[_src["date"] < _HALF]
+        elif half == 2:
+            _src = _src[_src["date"] >= _HALF]
+        _rng = np.random.default_rng(seed) if order == "rand" else None
         _seen_sym: dict = {}
         # both のときだけ使う。日次の相関とσを出すため
         _daily: dict = {}                      # date -> [short, long]
@@ -939,7 +960,33 @@ if a.sweep_ops:
                 _gc &= _c["gap_bp"] <= a.max_gap_bp
             _hit = _wd[_gm]
             _miss += len(_c[_gc]) - len(_hit)
-            _hit = _hit.sort_values("gap_bp", ascending=False)
+            # ── 発注順 ────────────────────────────────────────────
+            if order == "liq":
+                _hit = _hit.sort_values("liq", ascending=False, na_position="last")
+            elif order == "gapasc":
+                _hit = _hit.sort_values("gap_bp", ascending=True)
+            elif order == "price":
+                _hit = _hit.sort_values("entry_p", ascending=True)
+            elif order == "rand":
+                _hit = _hit.iloc[_rng.permutation(len(_hit))] if len(_hit) else _hit
+            else:                                   # gap(既定)
+                _hit = _hit.sort_values("gap_bp", ascending=False)
+            # ── 予算配分 ──────────────────────────────────────────
+            #   merge 以外は側ごとに財布を分ける。alt は1つの財布で交互に取る。
+            _sd_of = (lambda _r: int(getattr(_r, "side", 1)))
+            _pool = {1: _cap, -1: _cap}
+            if alloc == "split50":
+                _pool = {1: _cap / 2, -1: _cap / 2}
+            elif alloc == "prop":
+                _ns = int((_hit["side"].values > 0).sum()) if "side" in _hit else len(_hit)
+                _nl = len(_hit) - _ns
+                _tt = max(_ns + _nl, 1)
+                _pool = {1: _cap * _ns / _tt, -1: _cap * _nl / _tt}
+            elif alloc == "alt" and "side" in _hit and len(_hit):
+                # 側ごとに順位を付け、(順位, 側) で並べ直す = S,L,S,L,…
+                _hh = _hit.copy()
+                _hh["_k"] = _hh.groupby("side").cumcount()
+                _hit = _hh.sort_values(["_k", "side"], ascending=[True, False])
             _cash, _n = _cap, 0
             for _r in _hit.itertuples():
                 if max_n > 0 and _n >= max_n:
@@ -947,11 +994,19 @@ if a.sweep_ops:
                 if one_per_sym and _seen_sym.get(_r.symbol) == _d:
                     continue
                 _cost = float(_r.entry_p) * a.qty
-                if _cost > _cash:
+                if alloc in ("split50", "prop"):
+                    _sd0 = _sd_of(_r)
+                    if _cost > _pool[_sd0]:
+                        _pushed[_sd0] = _pushed.get(_sd0, 0) + 1
+                        continue
+                    _pool[_sd0] -= _cost
+                    _cash -= _cost
+                elif _cost > _cash:
                     _pushed[int(getattr(_r, "side", 1))] = \
                         _pushed.get(int(getattr(_r, "side", 1)), 0) + 1
                     continue
-                _cash -= _cost
+                else:
+                    _cash -= _cost
                 _tot += float(_r.pnl)
                 _n += 1
                 _seen_sym[_r.symbol] = _d
@@ -1133,6 +1188,78 @@ if a.sweep_ops:
         print(f"       σ も比例して増えるので予算を増やすのと変わらない。")
         print(f"    ⚠ 資金は競合する。片側だけの投入/日を足した値より、")
         print(f"       上の『合計』の件数が少なければ **予算で押し出されている**。")
+    # ══ 発注順 と 予算配分 (TRAIN のみ / §18.24 の帯で判定) ═══════════
+    #   ⛔ 2条件を1回ずつ比べて差を語らない。**ランダムの帯を先に作る**。
+    #      帯より小さい差は「改善した」ではなく「測れていない」。
+    _SEEDS = [int(x) for x in str(a.rank_seeds).split(",") if x.strip()]
+    print(f"\n  ── ★ 発注順 (ランダム{len(_SEEDS)}シードの帯で判定) ──")
+    print(f"  ⛔ §18.21/§18.24/§18.31 では J/lss の発注順が **3回とも帰無の中**"
+          f"でした。\n     N でも同じ可能性が高いので、帯の外に出たときだけ意味があります")
+    _band = [_ops_sim(50, 400.0, 0, False, order="rand", seed=_s)["pnl"]
+             for _s in _SEEDS]
+    _bm, _bs = float(np.mean(_band)), float(np.std(_band, ddof=1))
+    _tc = 2.20 if len(_SEEDS) >= 12 else 2.45          # t(n-1) 95%
+    print(f"    ランダム{len(_SEEDS)}本: 平均 {_bm:+,.0f} / σ {_bs:,.0f} / "
+          f"範囲 {min(_band):+,.0f} 〜 {max(_band):+,.0f}")
+    # ⛔ 帯の幅がゼロ/極小 = **予算が効いていない**(押し出しが起きない)ので、
+    #   並べ替えても結果が変わらない。z は発散するだけで意味がない。
+    _degen = _bs <= abs(_bm) * 1e-6
+    if _degen:
+        print(f"    ⛔ **帯の幅がゼロです。予算が効いていないので発注順は"
+              f"比較できません。**\n"
+              f"       (全候補が建てられている = 並べ替えても同じ。"
+              f"押し出しが起きる母集団/予算でだけ意味があります)")
+
+    def _zof(_v):
+        return float("nan") if _degen else (_v - _bm) / _bs
+
+    def _jd_of(_z):
+        if _degen:
+            return "比較不能"
+        return "帯の外" if abs(_z) >= _tc else "帯の中"
+    print(f"\n    {'発注順':<16}{'損益':>14}{'件数':>9}{'円/件':>10}"
+          f"{'z':>8}{'判定':>10}   前半 / 後半")
+    _ORD = [("gap", "|ギャップ|降順 ★現行"), ("liq", "売買代金 降順"),
+            ("price", "建値 安い順"), ("gapasc", "|ギャップ|昇順")]
+    for _o, _lb in _ORD:
+        _r = _ops_sim(50, 400.0, 0, False, order=_o)
+        _z = _zof(_r["pnl"])
+        _h1 = _ops_sim(50, 400.0, 0, False, order=_o, half=1)["pnl"]
+        _h2 = _ops_sim(50, 400.0, 0, False, order=_o, half=2)["pnl"]
+        _b1 = np.mean([_ops_sim(50, 400.0, 0, False, order="rand",
+                                seed=_s, half=1)["pnl"] for _s in _SEEDS[:4]])
+        _b2 = np.mean([_ops_sim(50, 400.0, 0, False, order="rand",
+                                seed=_s, half=2)["pnl"] for _s in _SEEDS[:4]])
+        _sg = "✓" if (_h1 - _b1) * (_h2 - _b2) > 0 else "—"
+        _zs = "  —  " if _degen else f"{_z:>+8.2f}"
+        print(f"    {_lb:<16}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+              f"{_r['per']:>+10,.0f}{_zs:>8}{_jd_of(_z):>10}   "
+              f"{_h1 - _b1:>+10,.0f} / {_h2 - _b2:>+10,.0f} {_sg}")
+    print(f"    ⚠ 前半/後半は **同じ半期のランダム4本の平均との差**。"
+          f"符号が揃って ✓ でなければ期間依存")
+
+    if a.side == "both":
+        print(f"\n  ── ★ 予算配分 (両建てのときだけ意味がある) ──")
+        print(f"    {'配分':<26}{'損益':>14}{'件数':>9}{'円/件':>10}"
+              f"{'投入/日':>10}{'z':>8}{'判定':>10}")
+        _ALC = [("merge", "1つの財布 ★現行"),
+                ("split50", f"側ごとに半額({400 / 2:,.0f}万ずつ)"),
+                ("prop", "その日の合格数で按分"),
+                ("alt", "交互に取る(S,L,S,L…)")]
+        for _al, _lb in _ALC:
+            _r = _ops_sim(50, 400.0, 0, False, alloc=_al)
+            _z = _zof(_r["pnl"])
+            _zs = "  —  " if _degen else f"{_z:>+8.2f}"
+            print(f"    {_lb:<26}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+                  f"{_r['per']:>+10,.0f}{_r['used'] / 1e4:>9,.0f}万"
+                  f"{_zs:>8}{_jd_of(_z):>10}")
+        print(f"    ⚠ **投入/日を必ず見ること。** 側ごとに財布を分けると、"
+              f"片側に候補が無い日に\n       その半分が丸ごと遊びます"
+              f"(1つの財布なら もう一方が使えます)")
+        print(f"    ⚠ z は **発注順のランダム帯**を基準にしています"
+              f"(配分の帯は別に作る必要がありますが、\n"
+              f"       まず『帯と同じオーダーか』を見るだけで足ります)")
+
     print(f"\n  {'=' * 68}")
     print(f"  ★ 読み方: **★(現行) より明確に良い行があるか**だけを見る。")
     print(f"     ⚠ 予算は **レバレッジ**。増やせば損益もσも比例して増えるので、")
