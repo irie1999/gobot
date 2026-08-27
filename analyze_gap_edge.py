@@ -341,6 +341,39 @@ ap.add_argument("--min-density", type=float, default=0.10,
                      "『測定不能』にするか(既定0.10=1/10)")
 a = ap.parse_args()
 
+# ⛔ 数値リストの引数は **スキャンの前に** 検証する。
+#   スキャンは1,540銘柄 × 数千日で10分級。末尾に `]` が紛れただけで
+#   10分走ってから ValueError で落ちるのは無駄が大きい(2026-08-27 に発生)。
+def _numlist(_v: str, _name: str) -> list[float]:
+    _out = []
+    for _x in str(_v).split(","):
+        _x = _x.strip()
+        if not _x:
+            continue
+        try:
+            _out.append(float(_x))
+        except ValueError:
+            import sys as _s
+            _s.exit(f"[error] --{_name} に数値でない値があります: {_x!r}\n"
+                    f"        渡された値: {_v!r}\n"
+                    f"        ⚠ PowerShell では ] や ^ が紛れやすいので確認を")
+    return _out
+
+
+for _nm in ("sm_list", "tm_list", "ret1_list", "gap_list", "ops_gap_list",
+            "relax_axis_list", "relax_gap_list", "seeds", "regime_seeds"):
+    if hasattr(a, _nm):
+        _numlist(getattr(a, _nm), _nm.replace("_", "-"))
+for _nm in ("split",):
+    _v = getattr(a, _nm, "") or ""
+    for _x in str(_v).split(","):
+        if not _x.strip():
+            continue
+        try:
+            pd.Timestamp(_x.strip())
+        except Exception:
+            sys.exit(f"[error] --{_nm} が日付として読めません: {_x!r}")
+
 # ── TRAIN を要求するモードは、**スキャンの前に** --split を検査する ──────
 #    1,540銘柄 × 4200日 のスキャンは10分かかる。終わってから落とさない。
 # ══════════════════════════════════════════════════════════════════════
