@@ -272,6 +272,11 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--sweep-regime", action="store_true",
+                help="★ 相場の状態(前夜に確定)で N と鏡像を使い分けられるか。"
+                     "⛔ TRAIN のみ。TEST は使わない")
+ap.add_argument("--regime-seeds", type=str, default="42,1,7,99,123,2024,5,17",
+                help="--sweep-regime の帰無較正(巡回シフト)の本数")
 ap.add_argument("--confirm-both", action="store_true",
                 help="★★ **TEST を1回だけ使って『両建て(N+鏡像)』を検証する**。"
                      "合格条件はコードに焼き込んであり(_BOTH_PASS)、"
@@ -319,7 +324,8 @@ _BOTH_PASS = {
     "both_halves": True,
 }
 
-_NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_grid
+_NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
+                    or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
@@ -349,6 +355,10 @@ if a.list_axes:
           "今回は全銘柄日なので、母集団が違う。")
     sys.exit(0)
 
+# ★ 前日リターンの下限(§18.54 で TRAIN の5分位 Q5 の境界として決めた値)。
+#   ⛔ _ops_sim にベタ書きしていたので、他から参照できなかった。定数にする。
+_RET1_MIN = 1.753
+
 # ① の水準は執行方式で決まる(執行コストの3倍)。**測る前に紐付けてある**
 # ★ 鏡像。**符号を全部反転する**ので、下流の
 #   「ret1 >= 1.753」「gap_bp >= 100」「pnl」がそのまま鏡像の条件になる。
@@ -356,8 +366,9 @@ if a.list_axes:
 #   both は **short 向きでスキャンして、あとから鏡像を複製する**。
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
-if a.side == "both" and not (a.sweep_ops or a.confirm_both):
-    sys.exit("[error] --side both は --sweep-ops / --confirm-both 専用です。\n"
+if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime):
+    sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
+             "--sweep-regime 専用です。\n"
              "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
              "(両側を混ぜると『どちらの効果か』が分離できません)")
 
@@ -922,7 +933,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
         _byside = {1: [0.0, 0], -1: [0.0, 0]}
         _pushed = {1: 0, -1: 0}                # 予算で押し出された件数
         for _d, _g in _src.groupby("date"):
-            _c = _g[_g["ret1"] >= 1.753]
+            _c = _g[_g["ret1"] >= _RET1_MIN]
             if _c.empty:
                 continue
             _w = _c.sort_values("liq", ascending=False, na_position="last")
@@ -1057,6 +1068,128 @@ if a.sweep_grid:
     print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
     print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
     print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_regime:
+    # ══════════════════════════════════════════════════════════════════
+    # ★ 相場の状態で N と鏡像を使い分けられるか (TRAIN のみ)
+    # ══════════════════════════════════════════════════════════════════
+    #   ★ 仮説(機構つき・後知恵ではない):
+    #     下げ相場のギャップアップ = 逆行した異常値 → 反落しやすい → **N が効く**
+    #     上げ相場のギャップダウン = 逆行した異常値 → 反発しやすい → **鏡像が効く**
+    #   つまり **N は下げ相場、鏡像は上げ相場** で強いはず。対称で機構がある。
+    #
+    #   ⛔ TEST は 2026-08-27 に「両建て」で消費済み。ここで良い結果が出ても
+    #     **同じ窓で検証できない**。前向き(.\norder)でしか確かめられない。
+    #     だから判定は出さず、**TRAIN の中で前半/後半に割って一貫するか**
+    #     だけを見る。
+    if a.side != "both":
+        sys.exit("[error] --sweep-regime は --side both と一緒に使ってください")
+    print(f"\n{'=' * 78}")
+    print(f"■ 相場の状態で使い分けられるか — **TRAIN({_train_n}) だけ**")
+    print(f"{'=' * 78}")
+    print(f"  ★ 仮説: **N は下げ相場 / 鏡像は上げ相場** で強い")
+    print(f"     (逆行したギャップほど異常値で、反対に振れやすい)")
+    print(f"  ⛔ TEST は「両建て」で消費済み。ここで良くても **同じ窓では"
+          f"検証できません**。\n     前向き(.\\norder)でしか確かめられないので、"
+          f"合否は出しません")
+
+    # ── 相場の状態を母集団から作る。**すべて前夜に確定** ──────────────
+    #   mkt1  = その日の全銘柄の前日リターンの平均 = 「前日の相場」
+    #   mkt20 = mkt1 の20日平均 = トレンド
+    #   ⛔ ret1 は鏡像側で符号を反転してあるので **side==1 の行だけ**使う。
+    _ms = _train[_train["side"] == 1] if "side" in _train else _train
+    _mk = (_ms.groupby("date")["ret1"].mean().sort_index()
+           .rename("mkt1").to_frame())
+    _mk["mkt20"] = _mk["mkt1"].rolling(20).mean()
+    # ★ 3本目の軸: **その日どちら側に候補が多いか**。
+    #   候補は ret1(前夜に確定)だけで決まるので、これも前夜に分かる。
+    #   「候補が多い side = その日の相場が向いている side」という直接の指標。
+    if "side" in _train:
+        _cn = (_train[(_train["side"] == 1) & (_train["ret1"] >= _RET1_MIN)]
+               .groupby("date").size().rename("n_n"))
+        _cmm = (_train[(_train["side"] == -1) & (_train["ret1"] >= _RET1_MIN)]
+                .groupby("date").size().rename("n_m"))
+        _cc2 = pd.concat([_cn, _cmm], axis=1).fillna(0.0)
+        _mk["cand_ratio"] = ((_cc2["n_n"] / (_cc2["n_n"] + _cc2["n_m"]))
+                             .reindex(_mk.index) * 100.0)
+    _mk = _mk.dropna()
+    if _mk.empty:
+        sys.exit("[error] 相場の状態を作れませんでした")
+    print(f"\n  相場の指標: {len(_mk):,}営業日 / "
+          f"mkt20 {_mk['mkt20'].min():+.3f}% 〜 {_mk['mkt20'].max():+.3f}%")
+
+    # ⛔ _ot / _ond は --sweep-ops の中でしか定義されていない。ここで作る。
+    _rg_ot = _pool_of(_train)
+    _rg_ond = max(1, _rg_ot["date"].nunique() if not _rg_ot.empty else 1)
+    _sim_all, _, _ = _make_ops_sim(_train, _rg_ot, _rg_ond)
+
+    def _by_regime(col: str, nq: int, half: int = 0):
+        """相場の分位ごとに N単独 / 鏡像単独 の 円/件 を返す。"""
+        _q = pd.qcut(_mk[col], nq, labels=False, duplicates="drop")
+        _lab = dict(zip(_mk.index, _q))
+        _r = _sim_all(50, 400.0, 0, False, half=half)
+        _out = {}
+        for _d, _v in _r["daily"].items():
+            _k = _lab.get(_d)
+            if _k is None or _k != _k:
+                continue
+            _a = _out.setdefault(int(_k), [0.0, 0.0, 0, 0])
+            _a[0] += _v[0]; _a[1] += _v[1]
+            _c = _r["dcnt"].get(_d, [0, 0])
+            _a[2] += _c[0]; _a[3] += _c[1]
+        return _out, _mk[col], _q
+
+    _AX2 = [("mkt20", "トレンド(直近20日の相場)"), ("mkt1", "前日の相場")]
+    if "cand_ratio" in _mk:
+        _AX2.append(("cand_ratio", "その日の候補の偏り(N候補の割合%)"))
+    for _col, _nm2 in _AX2:
+        _o, _sv, _q = _by_regime(_col, 5)
+        print(f"\n  ── {_nm2} の5分位ごと ──")
+        print(f"    {'分位':<8}{'範囲(%)':>16}{'N 円/件':>12}{'鏡像 円/件':>13}"
+              f"{'N 件数':>9}{'鏡像 件数':>10}{'どちらが上':>12}")
+        print("    " + "-" * 80)
+        _dir = []
+        for _k in sorted(_o):
+            _a = _o[_k]
+            _rng = _sv[_q == _k]
+            _pn = _a[0] / _a[2] if _a[2] else 0.0
+            _pm = _a[1] / _a[3] if _a[3] else 0.0
+            _w = "N" if _pn > _pm else "鏡像"
+            _dir.append(_w)
+            print(f"    Q{_k + 1:<7}{_rng.min():>+7.2f}〜{_rng.max():>+7.2f}"
+                  f"{_pn:>+12,.0f}{_pm:>+13,.0f}{_a[2]:>9,}{_a[3]:>10,}"
+                  f"{_w:>12}")
+        print("    " + "-" * 80)
+        # ★ 仮説どおりなら 下(Q1=下げ)で N、上(Q5=上げ)で鏡像
+        _ok = _dir[0] == "N" and _dir[-1] == "鏡像"
+        print(f"    仮説(Q1=N / Q5=鏡像): "
+              + ("**一致** ✓" if _ok else f"不一致 (Q1={_dir[0]} / Q5={_dir[-1]})"))
+        # 前半/後半でも同じ向きか
+        _hd = []
+        for _hh in (1, 2):
+            _oh, _svh, _qh = _by_regime(_col, 5, half=_hh)
+            if not _oh:
+                _hd.append("—")
+                continue
+            _ks = sorted(_oh)
+            _a1, _a5 = _oh[_ks[0]], _oh[_ks[-1]]
+            _p1 = (_a1[0] / _a1[2] if _a1[2] else 0) > (_a1[1] / _a1[3] if _a1[3] else 0)
+            _p5 = (_a5[0] / _a5[2] if _a5[2] else 0) < (_a5[1] / _a5[3] if _a5[3] else 0)
+            _hd.append("✓" if (_p1 and _p5) else "✗")
+        print(f"    前半 {_hd[0]} / 後半 {_hd[1]}"
+              + ("   ← **両方 ✓ なら前向きに試す価値あり**"
+                 if _hd == ["✓", "✓"] else "   ← 片方でも ✗ なら期間依存"))
+
+    print(f"\n  {'=' * 68}")
+    print(f"  ⛔ **ここで良く見えても採用しないこと。**")
+    print(f"     TEST は消費済みなので、この窓では検証できません。")
+    print(f"     確かめる唯一の方法は **.\\norder を前向きに貯めること**です。")
+    print(f"  ⚠ 5分位 × {len(_AX2)}指標 = {5 * len(_AX2)}通り見ています。"
+          f"偶然どれかが仮説に一致する"
+          f"確率は低くありません。\n     **前半・後半の両方で ✓ でなければ"
+          f"ノイズ**として扱ってください")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
