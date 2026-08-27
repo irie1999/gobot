@@ -277,6 +277,12 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--ops-gap-list", type=str, default="100,125,150,200",
+                help="--sweep-ops で掃くギャップ閾値(bp)。⛔ 母集団は"
+                     " --min-gap-bp で切ってあるので、それ未満は測れない。"
+                     "下げる方向を見るなら --min-gap-bp 25 --ops-gap-list "
+                     "25,50,75,100,125 のように **母集団を先に広げる**こと。"
+                     "空文字で無効")
 ap.add_argument("--sweep-relax", action="store_true",
                 help="★★ 「絞る」ではなく「**増やす**」。別の軸が強い銘柄だけ"
                      "ギャップ閾値を下げて拾えるか。"
@@ -2044,6 +2050,39 @@ if a.sweep_ops:
     print(f"\n  ★ 現行(watch50 / 予算400万 / 上限なし) = "
           f"{_b0['pnl']:+,.0f}円 / {_b0['n']:,}件 / {_b0['per']:+,.0f}円/件 / "
           f"月換算 {_b0['pnl'] / _ond * 20:+,.0f}円")
+
+    # ★★ ギャップ閾値 — **一度も ops sim を通していなかった**(2026-08-27)
+    #   --sweep-grid は bp/件 だけを見て「現行のまま」と結論したが、
+    #   N は **件数不足**(稼働率40%)なので、bp/件 が下がっても件数が増えれば
+    #   月の総額は増えうる。watch50 と予算を通して初めて判定できる。
+    #   ⚠ _ops_sim は a.min_gap_bp を **呼び出し時に読む**ので、
+    #     一時的に差し替えれば1回の実行で掃ける(元に戻すこと)。
+    if a.ops_gap_list.strip():
+        _gsv = a.min_gap_bp
+        _gl = sorted({float(x) for x in a.ops_gap_list.split(",") if x.strip()}
+                     | {_gsv})
+        print(f"\n  ── ★★ ギャップ閾値(bp) ── **watch50 と予算を通した判定**")
+        print(f"     ⚠ 母集団は --min-gap-bp {_gsv:.0f} で切ってあるので、"
+              f"それ**未満**の升は測れません")
+        print(f"    {'gap':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
+              f"{'件/日':>8}{'月換算':>12}")
+        try:
+            for _gv in _gl:
+                if _gv < _gsv:
+                    print(f"    {_gv:<10.0f}{'— 母集団の外':>14}")
+                    continue
+                a.min_gap_bp = _gv
+                _r = _ops_sim(50, 400.0, 0, False)
+                _mk = " ★現行" if abs(_gv - _gsv) < 1e-6 else ""
+                print(f"    {_gv:<10.0f}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
+                      f"{_r['per']:>+10,.0f}{_r['n'] / _ond:>8.1f}"
+                      f"{_r['pnl'] / _ond * 20:>+12,.0f}{_mk}")
+        finally:
+            a.min_gap_bp = _gsv
+        print(f"     ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
+        print(f"     ⚠ **円/件 が下がっていても月換算が上がっているなら、"
+              f"件数不足が本当のボトルネック**です")
+
     print(f"\n  ── watch上限 ──")
     print(f"    {'watch':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
           f"{'取逃し':>9}{'月換算':>12}")
