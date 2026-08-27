@@ -272,6 +272,11 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--sweep-market", action="store_true",
+                help="★★ 前日の日経・S&P500・VIX・為替など **寄り前の外部指標**で"
+                     "『その日は建てない』ルールが作れるか。総当たり+帰無較正。"
+                     "⚠ §18.34b は lss で候補ゼロだったが **113営業日しか"
+                     "なかった**。N は2,843営業日ある")
 ap.add_argument("--sweep-size", action="store_true",
                 help="★★ **マイナス月を抑えられるか**。サイジング × 1日の件数上限"
                      "を掃いて、月次σ・最悪月・マイナス月数で見る。"
@@ -337,7 +342,7 @@ _BOTH_PASS = {
 }
 
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
-                    or a.search_switch or a.sweep_size
+                    or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier)
 if _NEEDS_TRAIN and not a.split:
@@ -1107,6 +1112,137 @@ if a.sweep_grid:
     print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
     print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
     print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_market:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 寄り前の外部指標で「その日は建てない」ルールが作れるか
+    # ══════════════════════════════════════════════════════════════════
+    #   ⚠ §18.34b で19変数を掃いて候補ゼロだったが、あれは **lss** で
+    #     **113営業日**しかなかった。N は 2,843営業日 = 25倍。やる価値がある。
+    #   ⛔ 帰無は日ブロックを保った巡回シフト。各シフトでも同じ全ルールを
+    #     掃いて最良を取るので、**何通り試したかは自動的に補正される**。
+    try:
+        from preopen_market import preopen_features as _pof
+    except Exception as _e:
+        sys.exit(f"[error] preopen_market を読めません: {_e}")
+    print(f"\n{'=' * 78}")
+    print(f"■ 寄り前の外部指標で『その日は建てない』ルールが作れるか")
+    print(f"{'=' * 78}")
+    print(f"  ⚠ §18.34b は **lss / 113営業日**で候補ゼロ。"
+          f"N は **{len(set(_train['date']) | set(_test['date'])):,}営業日**")
+
+    _pan = {}
+    for _t, _df in (("TRAIN", _train), ("TEST", _test)):
+        if _df is None or _df.empty:
+            continue
+        _f, _, _ = _make_ops_sim(_df, _pool_of(_df),
+                                 max(1, _df["date"].nunique()))
+        _r = _f(50, 400.0, 0, False)
+        _pan[_t] = {d: (v[0] + v[1]) for d, v in _r["daily"].items()}
+
+    _alld = sorted(set().union(*[set(v) for v in _pan.values()]))
+    print(f"  寄り前の指標を取得します({len(_alld):,}営業日ぶん / yfinance)…",
+          flush=True)
+    _feat = _pof(_alld)
+    _vars: dict = {}
+    for _d, _fv in _feat.items():
+        for _k, _v in (_fv or {}).items():
+            _vars.setdefault(_k, {})[_d] = float(_v)
+    _vars = {k: v for k, v in _vars.items() if len(v) >= len(_alld) * 0.7}
+    if not _vars:
+        sys.exit("[error] 寄り前の指標が1つも取れませんでした")
+    print(f"  使える指標 **{len(_vars)}本**: " + ", ".join(sorted(_vars))[:200])
+
+    def _mk_arr(tag):
+        _dd3 = sorted(d for d in _pan[tag]
+                      if all(d in v for v in _vars.values()))
+        _y = np.array([_pan[tag][d] for d in _dd3], float)
+        _X = {k: np.array([_vars[k][d] for d in _dd3], float) for k in _vars}
+        _mo = np.array([int(str(d)[:4]) * 12 + int(str(d)[5:7]) for d in _dd3])
+        return _y, _X, _mo, _dd3
+
+    def _sc(y, mo):
+        _u = np.unique(mo)
+        _m = np.array([y[mo == x].sum() for x in _u], float)
+        if len(_m) < 3:
+            return 0.0, 0.0, 0.0, 0
+        _mu, _sd = float(_m.mean()), float(_m.std(ddof=1))
+        return _mu, _sd, (_mu / _sd if _sd else 0.0), int((_m < 0).sum())
+
+    # ルール: 「指標 v が 分位 q より 低い日 / 高い日 は建てない」
+    _RL = [(k, q, side) for k in _vars for q in (20, 40, 60, 80)
+           for side in ("low", "high")]
+
+    def _ap(y, X, rule, cuts=None):
+        _k, _q, _sd2 = rule
+        _v = X[_k]
+        _c = np.percentile(_v, _q) if cuts is None else cuts
+        _z = y.copy()
+        _z[(_v < _c) if _sd2 == "low" else (_v >= _c)] = 0.0
+        return _z
+
+    _out2 = {}
+    for _t in _pan:
+        _y, _X, _mo, _dd3 = _mk_arr(_t)
+        _out2[_t] = (_y, _X, _mo)
+        _mu, _sd, _r3, _ng2 = _sc(_y, _mo)
+        print(f"  {_t}: {len(_y):,}日 / 基準 月平均 {_mu:+,.0f} / "
+              f"÷σ {_r3:.2f} / 負月 {_ng2}")
+
+    _yT, _XT, _moT = _out2["TRAIN"]
+    _rank2 = []
+    for _rule in _RL:
+        _a2 = _sc(_ap(_yT, _XT, _rule), _moT)
+        _rank2.append((_rule, _a2))
+    _rank2.sort(key=lambda x: -x[1][2])
+    _b3 = _sc(_yT, _moT)
+
+    print(f"\n  ── 上位12 ({len(_RL)}通り中) ──")
+    print(f"    {'指標':<14}{'閾値':>5}{'捨てる':>7}"
+          + "".join(f"{t + ' 月平均':>13}{'÷σ':>7}{'負月':>6}" for t in _out2))
+    for _rule, _a2 in _rank2[:12]:
+        _k, _q, _sd2 = _rule
+        _s4 = f"    {_k:<14}{_q:>4}%{('低い日' if _sd2 == 'low' else '高い日'):>7}"
+        for _t in _out2:
+            _y2, _X2, _mo2 = _out2[_t]
+            _x2 = _sc(_ap(_y2, _X2, _rule), _mo2)
+            _s4 += f"{_x2[0]:>+13,.0f}{_x2[2]:>7.2f}{_x2[3]:>6}"
+        print(_s4)
+    _s4 = f"    {'★基準(全部建てる)':<14}{'':>5}{'':>7}"
+    for _t in _out2:
+        _y2, _X2, _mo2 = _out2[_t]
+        _x2 = _sc(_y2, _mo2)
+        _s4 += f"{_x2[0]:>+13,.0f}{_x2[2]:>7.2f}{_x2[3]:>6}"
+    print(_s4)
+
+    print(f"\n  ── 帰無較正 ({a.switch_nulls}本 / 日ブロックを保った巡回シフト) ──")
+    _rng3 = np.random.default_rng(20260827)
+    _n3 = len(_yT)
+    _nl2 = []
+    for _i in range(max(10, a.switch_nulls)):
+        _sh2 = int(_rng3.integers(20, _n3 - 20))
+        _Xs = {k: np.roll(v, _sh2) for k, v in _XT.items()}
+        _nl2.append(max(_sc(_ap(_yT, _Xs, r), _moT)[2] for r in _RL))
+    _nl2 = np.array(_nl2, float)
+    _obs2 = _rank2[0][1][2]
+    _p952 = float(np.percentile(_nl2, 95))
+    print(f"    実測の最良  **{_obs2:.3f}**  ({_rank2[0][0][0]} "
+          f"{_rank2[0][0][1]}% {_rank2[0][0][2]})")
+    print(f"    帰無の最良  中央 {float(np.median(_nl2)):.3f} / "
+          f"95%点 **{_p952:.3f}** / 最大 {float(_nl2.max()):.3f}")
+    print(f"    基準(全部建てる) {_b3[2]:.3f}")
+    print(f"    p値 = **{float((_nl2 >= _obs2).mean()):.3f}**  "
+          + ("← 帰無を超えています" if _obs2 > _p952 else
+             "← 帰無の中。**偶然の範囲**です"))
+    print(f"\n  {'=' * 68}")
+    if _obs2 > _p952 and _obs2 > _b3[2]:
+        print(f"  ★ TRAIN で帰無を超えました。**TEST の列**を見てください")
+    else:
+        print(f"  ⛔ **帰無の中です。**{len(_RL)}通り掃いても、"
+              f"寄り前の外部指標で\n     『建てない日』は作れません"
+              f"(§18.34b と同じ結論。今回は25倍のデータで確認)")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
