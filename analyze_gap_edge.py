@@ -300,6 +300,16 @@ ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
                      "『軸が効いた』のか『gap 閾値を下げただけ』なのか判別できない")
 ap.add_argument("--relax-gap-list", type=str, default="25,50,60,75,90",
                 help="緩めたギャップ閾値(bp)")
+ap.add_argument("--tail-diag", action="store_true",
+                help="★★ **大負けの日を寄り前に読めるか**を、順番を追って測る。"
+                     "①事後(同日の相場)でどこまで説明できるか=予測可能性の上限 "
+                     "→ ②寄り前変数→同日の相場 → ③寄り前変数→N の損益(単変量/"
+                     "裾特化/多変量)。TRAIN で作って TEST で答え合わせ。"
+                     "⛔ 一晩かける想定。--tail-nulls で帰無の本数を増やせる")
+ap.add_argument("--tail-nulls", type=int, default=2000,
+                help="--tail-diag の帰無較正(日ブロックを保った巡回シフト)の本数")
+ap.add_argument("--tail-q", type=float, default=0.10,
+                help="『大負けの日』の定義(下位何割か)。既定0.10=下位10%%")
 ap.add_argument("--sweep-market", action="store_true",
                 help="★★ 前日の日経・S&P500・VIX・為替など **寄り前の外部指標**で"
                      "『その日は建てない』ルールが作れるか。総当たり+帰無較正。"
@@ -405,7 +415,8 @@ _BOTH_PASS = {
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
-                    or a.sweep_ops or a.sweep_barrier or a.sweep_relax)
+                    or a.sweep_ops or a.sweep_barrier or a.sweep_relax
+                    or a.tail_diag)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
     _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
@@ -1331,6 +1342,277 @@ if a.sweep_relax:
     print(f"\n  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
           f"増えうる**")
     print(f"     (N は稼働率40%で資金が余っている)。ただし watch50 が先に効きます。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.tail_diag:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 大負けの日を寄り前に読めるか — **順番を追って**測る
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ §18.34b(lss/19変数/113日)も 2026-08-27 の --sweep-market も
+    #      「19変数を掃いて候補ゼロ」で終わった。同じことを繰り返さないため、
+    #      **先に予測可能性の上限を測る**。
+    #
+    #      ① 事後: N の日次損益は **同日の相場**でどこまで説明できるか
+    #         → ここが小さければ、寄り前の変数がどれだけ優秀でも届かない
+    #      ② 事前→事後: 寄り前変数は **同日の相場**をどこまで読めるか
+    #      ③ 事前→損益: 寄り前変数で **N の損益**を直接読めるか
+    #         (a)単変量 (b)裾に特化 (c)多変量
+    #
+    #   ①×② が ③ の上限。①が 0.05 で ②が 0.05 なら ③ は 0.0025 相当で、
+    #   何を掃いても出ない。**出ないことの理由が分かる**のが今回の目的。
+    import math as _math
+
+    _tt = _pool_of(_train)
+    _te = _pool_of(_test) if _test is not None and len(_test) else None
+    if _tt.empty:
+        sys.exit("[error] TRAIN が空です")
+    _tnd = max(1, _tt["date"].nunique())
+    print(f"\n{'=' * 78}")
+    print(f"■ 大負けの日を寄り前に読めるか — **順番を追って測る**")
+    print(f"{'=' * 78}")
+    print(f"  TRAIN {_train_n} / {_tnd:,}営業日"
+          + (f" / TEST {_test_n}" if _te is not None else " / TEST なし"))
+    print(f"  ⚠ 判定は **日次パネル**(1日1行)。実効サンプルは取引件数ではなく"
+          f"**営業日数**です(§18.13 の同日相関)")
+
+    # ── 日次損益パネルを作る(実運用と同じ watch50 / 予算400万 の経路) ────
+    def _daily_panel(src, pool, nd):
+        _sim, _, _ = _make_ops_sim(src, pool, nd)
+        _r = _sim(50, a.budget_man or 400.0, 0, False)
+        _d = {str(k): (v[0] + v[1]) for k, v in _r["daily"].items()}
+        _ks = sorted(_d)
+        return _ks, np.array([_d[k] for k in _ks], float)
+
+    _kd, _pn = _daily_panel(_train, _tt, _tnd)
+    print(f"\n  ── ① 日次損益パネル (watch50 / 予算{a.budget_man or 400:.0f}万) ──")
+    print(f"    {len(_kd):,}営業日 / 平均 {_pn.mean():+,.0f}円 / "
+          f"σ {_pn.std(ddof=1):,.0f}円")
+    _thr = float(np.quantile(_pn, a.tail_q))
+    _bad = _pn <= _thr
+    print(f"    『大負けの日』= 下位{a.tail_q * 100:.0f}% = {int(_bad.sum()):,}日 "
+          f"(損益 ≤ {_thr:+,.0f}円) / その合計 {_pn[_bad].sum():+,.0f}円")
+    print(f"    ⚠ 全体 {_pn.sum():+,.0f}円 に対し、この{int(_bad.sum())}日だけで "
+          f"{_pn[_bad].sum():+,.0f}円 = **少数の日が損益を支配**")
+
+    # ── ② 事後: 同日の相場でどこまで説明できるか(=上限) ─────────────
+    try:
+        from preopen_market import sameday_features, SAMEDAY_LABELS
+        _sd = sameday_features(_kd)
+    except Exception as _e:
+        _sd, SAMEDAY_LABELS = {}, {}
+        print(f"\n  ⛔ 同日の相場を取得できません({_e})。①の上限が測れないので"
+              f"以降は参考値です")
+
+    def _fit(x, y):
+        """単回帰。(β, R², t) を返す。"""
+        _m = np.isfinite(x) & np.isfinite(y)
+        x, y = x[_m], y[_m]
+        if len(x) < 30 or x.std() == 0:
+            return float("nan"), float("nan"), float("nan"), 0
+        _b = np.polyfit(x, y, 1)
+        _p = np.polyval(_b, x)
+        _ss = ((y - y.mean()) ** 2).sum()
+        _r2 = 1.0 - ((y - _p) ** 2).sum() / _ss if _ss > 0 else float("nan")
+        _se = _math.sqrt(max(((y - _p) ** 2).sum() / (len(x) - 2), 0)
+                         / max(((x - x.mean()) ** 2).sum(), 1e-12))
+        return float(_b[0]), float(_r2), (_b[0] / _se if _se > 0 else 0.0), len(x)
+
+    _cap = float("nan")
+    if _sd:
+        print(f"\n  ── ② 【事後・上限】同日の相場でどこまで説明できるか ──")
+        print(f"    ⛔ これは **寄り前には分かりません**。予測可能性の"
+              f"**天井**を知るためだけの数字です")
+        print(f"    {'変数':<34}{'β(円/1%)':>12}{'R²':>8}{'t':>8}")
+        for _k, _lb in SAMEDAY_LABELS.items():
+            _x = np.array([_sd.get(d, {}).get(_k, np.nan) for d in _kd], float)
+            _b, _r2, _t, _n = _fit(_x, _pn)
+            if _n:
+                print(f"    {_lb[:33]:<34}{_b:>+12,.0f}{_r2:>8.3f}{_t:>+8.2f}")
+                if _k == "n225_same_day":
+                    _cap = _r2
+        _x = np.array([_sd.get(d, {}).get("n225_same_day", np.nan) for d in _kd],
+                      float)
+        _mb = np.isfinite(_x)
+        if _mb.any():
+            _bd = _bad & _mb
+            print(f"\n    大負けの日({int(_bd.sum())}日)の 日経 日中%: "
+                  f"平均 {_x[_bd].mean():+.2f}% / 全日 {_x[_mb].mean():+.2f}%")
+            print(f"    大負けの日のうち **日経が日中プラスだった日**: "
+                  f"{int((_x[_bd] > 0).sum())}/{int(_bd.sum())} "
+                  f"({(_x[_bd] > 0).mean() * 100:.0f}%) "
+                  f"— 全日では {(_x[_mb] > 0).mean() * 100:.0f}%")
+        if _cap == _cap:
+            print(f"\n    ★★ **予測可能性の上限 R² = {_cap:.3f}**")
+            if _cap < 0.10:
+                print(f"       ⛔ 同日の相場(=完璧な後知恵)ですら {_cap * 100:.0f}%"
+                      f"しか説明できません。")
+                print(f"          **大負けは銘柄固有**で、寄り前の市場変数では"
+                      f"原理的に読めません。")
+            else:
+                print(f"       ★ 相場で {_cap * 100:.0f}% 説明できます。"
+                      f"あとは『その相場を寄り前に読めるか』(③)次第です")
+
+    # ── ③ 事前: 寄り前変数 ─────────────────────────────────────────
+    try:
+        from preopen_market import preopen_features, LABELS as FEAT_LABELS
+    except Exception:
+        try:
+            from preopen_market import preopen_features
+            FEAT_LABELS = {}
+        except Exception as _e:
+            sys.exit(f"[error] preopen_market を読めません: {_e}")
+    _pf = preopen_features(_kd)
+    _vars = sorted({k for v in _pf.values() for k in v})
+    print(f"\n  ── ③ 寄り前変数 ── **{len(_vars)}本**: {', '.join(_vars)}")
+    if len(_vars) <= 6:
+        print(f"    ⛔⛔ **6本以下はダミーの可能性があります**"
+              f"(本物は15〜19本)。preopen_market.py を確認してください")
+
+    _X = np.array([[_pf.get(d, {}).get(v, np.nan) for v in _vars] for d in _kd],
+                  float)
+
+    if _sd:
+        print(f"\n  ── ③-0 【事前→事後】寄り前変数は『同日の相場』を読めるか ──")
+        _y0 = np.array([_sd.get(d, {}).get("n225_same_day", np.nan) for d in _kd],
+                       float)
+        _rr = []
+        for _i, _v in enumerate(_vars):
+            _b, _r2, _t, _n = _fit(_X[:, _i], _y0)
+            if _n:
+                _rr.append((_r2, _t, _v))
+        _rr.sort(reverse=True)
+        print(f"    {'変数':<16}{'R²':>8}{'t':>8}")
+        for _r2, _t, _v in _rr[:5]:
+            print(f"    {FEAT_LABELS.get(_v, _v)[:15]:<16}{_r2:>8.3f}{_t:>+8.2f}")
+        _best2 = _rr[0][0] if _rr else float("nan")
+        if _cap == _cap and _best2 == _best2:
+            print(f"    ★ ①×② の目安 = {_cap:.3f} × {_best2:.3f} = "
+                  f"**{_cap * _best2:.4f}** ← ③で出せる R² のおおよその天井")
+
+    # ── ③-a 単変量 × 分位 (平均と裾の両方) ───────────────────────────
+    _nq = max(2, a.nq)
+    print(f"\n  ── ③-a 【事前→損益】単変量 × {_nq}分位 ──")
+    print(f"    ⚠ 『裾集中』= 大負けの日がその分位にどれだけ偏るか。"
+          f"均等なら {100 / _nq:.0f}%")
+    print(f"    {'変数':<16}{'最悪分位':>9}{'平均/日':>12}{'裾集中':>8}"
+          f"{'帰無95%':>9}{'判定':>6}")
+
+    _rng = np.random.default_rng(a.seed)
+    _hits = []
+    for _i, _v in enumerate(_vars):
+        _x = _X[:, _i]
+        _m = np.isfinite(_x)
+        if _m.sum() < 200:
+            continue
+        try:
+            _q = pd.qcut(pd.Series(_x[_m]), _nq, labels=False, duplicates="drop")
+        except Exception:
+            continue
+        _q = np.asarray(_q, float)
+        if len(set(_q[np.isfinite(_q)])) < 2:
+            continue
+        _pm, _bm = _pn[_m], _bad[_m]
+
+        def _gm(_arr, _lab, _k):          # 空グループは nan(落とさない)
+            _sel = _lab == _k
+            return float(_arr[_sel].mean()) if _sel.any() else float("nan")
+
+        _ks2 = sorted({int(v) for v in _q if np.isfinite(v)})
+        _means = np.array([_gm(_pm, _q, k) for k in _ks2], float)
+        if not np.isfinite(_means).any():
+            continue
+        _worst = _ks2[int(np.nanargmin(_means))]
+        _wi = _ks2.index(_worst)
+        _conc = float(_bm[_q == _worst].mean()) if (_q == _worst).any() else 0.0
+        # 帰無: 損益を日ブロックのまま巡回シフト(変数の時系列クラスタも保つ)
+        _nl = []
+        _L = len(_pm)
+        for _s2 in range(a.tail_nulls):
+            _sh = int(_rng.integers(1, _L)) if _L > 2 else 1
+            _pr, _br = np.roll(_pm, _sh), np.roll(_bm, _sh)
+            _mn = np.array([_gm(_pr, _q, k) for k in _ks2], float)
+            if not np.isfinite(_mn).any():
+                continue
+            _w = _ks2[int(np.nanargmin(_mn))]
+            _nl.append(float(_br[_q == _w].mean()))
+        if not _nl:
+            continue
+        _p95 = float(np.quantile(_nl, 0.95))
+        _ok = _conc > _p95
+        if _ok:
+            _hits.append((_v, _worst, _conc, _p95))
+        print(f"    {FEAT_LABELS.get(_v, _v)[:15]:<16}Q{_worst + 1:<8}"
+              f"{_means[_wi]:>+12,.0f}{_conc * 100:>7.0f}%"
+              f"{_p95 * 100:>8.0f}%{('  ✅' if _ok else '  —'):>6}")
+    print(f"    掃いた {len(_vars)}本 / **裾が帰無を超えた {len(_hits)}本** "
+          f"(帰無の期待 {len(_vars) * 0.05:.1f}本)")
+
+    # ── ③-c 多変量: TRAIN で作って TEST で答え合わせ ──────────────────
+    print(f"\n  ── ③-c 【多変量】TRAIN で線形モデル → TEST で答え合わせ ──")
+    _fin = np.isfinite(_X).all(axis=1)
+    if _fin.sum() < 200:
+        # 欠損の多い変数を落として作り直す
+        _keep = [i for i in range(len(_vars))
+                 if np.isfinite(_X[:, i]).mean() > 0.9]
+        _X2, _v2 = _X[:, _keep], [_vars[i] for i in _keep]
+        _fin = np.isfinite(_X2).all(axis=1)
+    else:
+        _X2, _v2 = _X, _vars
+    if _fin.sum() < 200:
+        print(f"    ⛔ 欠損が多すぎて作れません({int(_fin.sum())}日)")
+    else:
+        _Xt, _yt = _X2[_fin], _pn[_fin]
+        _mu, _sg = _Xt.mean(axis=0), _Xt.std(axis=0)
+        _sg[_sg == 0] = 1.0
+        _Z = np.hstack([np.ones((len(_Xt), 1)), (_Xt - _mu) / _sg])
+        _co, *_ = np.linalg.lstsq(_Z, _yt, rcond=None)
+        _pred = _Z @ _co
+        _ss = ((_yt - _yt.mean()) ** 2).sum()
+        _r2in = 1.0 - ((_yt - _pred) ** 2).sum() / _ss if _ss > 0 else 0.0
+        print(f"    TRAIN {int(_fin.sum()):,}日 / 変数 {len(_v2)}本 / "
+              f"**in-sample R² {_r2in:.4f}**")
+        _cut = float(np.quantile(_pred, 0.20))
+        _skip = _pred <= _cut
+        print(f"    TRAIN で『予測が下位20%の日は建てない』: "
+              f"{_yt.sum():+,.0f} → {_yt[~_skip].sum():+,.0f}円 "
+              f"({_yt[~_skip].sum() - _yt.sum():+,.0f})")
+        # TEST
+        if _te is not None and len(_te):
+            _tnd2 = max(1, _te["date"].nunique())
+            _kd2, _pn2 = _daily_panel(_test, _te, _tnd2)
+            _pf2 = preopen_features(_kd2)
+            _X3 = np.array([[_pf2.get(d, {}).get(v, np.nan) for v in _v2]
+                            for d in _kd2], float)
+            _f2 = np.isfinite(_X3).all(axis=1)
+            if _f2.sum() >= 100:
+                _Z2 = np.hstack([np.ones((int(_f2.sum()), 1)),
+                                 (_X3[_f2] - _mu) / _sg])
+                _p2, _y2 = _Z2 @ _co, _pn2[_f2]
+                _ss2 = ((_y2 - _y2.mean()) ** 2).sum()
+                _r2out = (1.0 - ((_y2 - _p2) ** 2).sum() / _ss2
+                          if _ss2 > 0 else 0.0)
+                _sk2 = _p2 <= _cut
+                _d2 = _y2[~_sk2].sum() - _y2.sum()
+                print(f"\n    ★ TEST {int(_f2.sum()):,}日 / "
+                      f"**out-of-sample R² {_r2out:.4f}**")
+                print(f"    TEST で同じルール(予測が閾値以下の日は建てない): "
+                      f"{_y2.sum():+,.0f} → {_y2[~_sk2].sum():+,.0f}円 "
+                      f"(**{_d2:+,.0f}**) / 降りた日 {int(_sk2.sum())}日")
+                if _r2out <= 0:
+                    print(f"    ⛔ **out-of-sample R² がマイナス** = "
+                          f"平均を予測に使うより悪い。モデルに予測力なし")
+            else:
+                print(f"    ⛔ TEST の有効日が少なすぎます({int(_f2.sum())}日)")
+
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 読み方(この順で見る):")
+    print(f"    ① 上限 R² が 0.10 未満 → **相場では説明できない**。③で何が出ても偶然")
+    print(f"    ② 寄り前→同日 の R² が小さい → 相場が読めても寄り前には分からない")
+    print(f"    ③ 裾が帰無を超えた本数が『期待 {len(_vars) * 0.05:.1f}本』を"
+          f"明確に上回るか")
+    print(f"    ④ 多変量の **out-of-sample R²** と TEST の実額。ここが本番")
+    print(f"  ⛔ ①②が小さいのに③④で何か出たら、それは多重検定の産物です")
     print(f"  {'=' * 68}")
     sys.exit(0)
 

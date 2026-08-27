@@ -169,3 +169,71 @@ LABELS = {
     "n225_ret":   "日経 前日%",
     "n225_5d":    "日経 5日%",
 }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ ここから下は **事後(hindsight)** の値です。発注判断に使ってはいけません。
+#     「大負け日は そもそも相場で説明できるのか」= 予測可能性の**上限**を
+#     測るためだけに使います(§18.59 / --tail-diag)。
+#     上限が小さければ、寄り前の変数がどれだけ優秀でも原理的に届きません。
+# ══════════════════════════════════════════════════════════════════════
+
+def _load_ohlc(tkr: str, start: str, end: str):
+    """日足の Open/Close を {date(str): (open, close)} で返す。失敗したら空。"""
+    key = ("OHLC", tkr, start, end)
+    if key in _CACHE:
+        return _CACHE[key]
+    out: dict = {}
+    try:
+        import yfinance as yf
+        raw = yf.Ticker(tkr).history(start=start, end=end, interval="1d",
+                                     auto_adjust=False, actions=False)
+        for ts, row in raw.iterrows():
+            o, c = float(row.get("Open") or 0), float(row.get("Close") or 0)
+            if o > 0 and c > 0:
+                out[str(ts.date())] = (o, c)
+    except Exception:
+        out = {}
+    _CACHE[key] = out
+    return out
+
+
+def sameday_features(days: list[str]) -> dict:
+    """⛔ **事後**。その日の日経が実際にどう動いたか。
+
+    返すもの(すべて %):
+      n225_same_ret … 前日終値 → 当日終値      (N の建玉が晒された区間ほぼ全部)
+      n225_same_gap … 前日終値 → 当日**始値**  (N が建てる瞬間)
+      n225_same_day … 当日始値 → 当日終値      (**N が保有している区間そのもの**)
+
+    ★ N は寄りで売って引けで買い戻すので、**n225_same_day が本命**。
+      これで説明できない損失は、相場全体では説明できない = 銘柄固有。
+    """
+    if not days:
+        return {}
+    d0, d1 = min(days), max(days)
+    start = (datetime.fromisoformat(d0) - timedelta(days=40)).strftime("%Y-%m-%d")
+    end = (datetime.fromisoformat(d1) + timedelta(days=2)).strftime("%Y-%m-%d")
+    ser = _load_ohlc("^N225", start, end)
+    ks = sorted(ser)
+    _pos = {k: i for i, k in enumerate(ks)}
+    out: dict = {}
+    for d in days:
+        i = _pos.get(d)
+        if i is None or i == 0:
+            continue
+        o, c = ser[d]
+        pc = ser[ks[i - 1]][1]
+        out[d] = {
+            "n225_same_ret": (c / pc - 1.0) * 100.0,
+            "n225_same_gap": (o / pc - 1.0) * 100.0,
+            "n225_same_day": (c / o - 1.0) * 100.0,
+        }
+    return out
+
+
+SAMEDAY_LABELS = {
+    "n225_same_ret": "日経 当日% (前日終値→終値)",
+    "n225_same_gap": "日経 当日の寄りギャップ%",
+    "n225_same_day": "日経 当日の**日中**% (始値→終値) ★N の保有区間",
+}
