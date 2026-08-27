@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import csv as _csv
+import re as _re
 import os
 import sys
 import time as _time
@@ -118,6 +119,9 @@ ap.add_argument("--seq-sides", type=str, default="nm",
 ap.add_argument("--paper-csv", type=str, default="",
                 help="--close が読む板読み結果。"
                      "既定 k_paper_<日付>.csv (n_open_confirm.py の出力)")
+ap.add_argument("--guard-bp-j", type=float, default=300.0,
+                help="J のギャップ上限(bp)。これを超えたら見送り(§18.32)。"
+                     "⛔ N と鏡像には上限が無い(§18.55 で棄却済み)")
 ap.add_argument("--gap-bp-j", type=float, default=75.0,
                 help="--close で J として集計するギャップ(bp)。既定75")
 a = ap.parse_args()
@@ -142,6 +146,20 @@ def _code4(sym: str) -> str:
     """`7203.T` → `7203` (kabu に渡す形)。"""
     return str(sym).replace(".T", "").strip()
 
+
+
+def _hhmmss(v) -> str:
+    """ISO文字列から HH:MM:SS を取り出す。
+
+    ⛔ 末尾8文字を取ると **タイムゾーン**("00+09:00")になる
+       (2026-08-27 に実際に表示が壊れた)。
+       "2026-08-27T09:03:12+09:00" → "09:03:12"
+    """
+    _m = _re.search(r"T(\d{2}:\d{2}:\d{2})", str(v or ""))
+    if _m:
+        return _m.group(1)
+    _m = _re.search(r"\b(\d{2}:\d{2}:\d{2})\b", str(v or ""))
+    return _m.group(1) if _m else ""
 
 # ══════════════════════════════════════════════════════════════════════
 # ① --collect : 前夜の候補を作る (日足だけ。kabu 不要)
@@ -760,8 +778,15 @@ def do_sequence() -> None:
     #   資金の割り振りとは別に、**選定そのもの**を見たいことが多い。
     #   J は資金均等で株数の決め方が違うので発注シーケンスには入れないが、
     #   合格銘柄はここで出す。
-    def _pass_list(tag: str, ik: str, rk: str, gmin: float, up: bool):
-        _r = []
+    def _pass_list(tag: str, ik: str, rk: str, gmin: float, up: bool,
+                   guard: float = 0.0):
+        """guard>0 なら |ギャップ| がそれを超える銘柄を見送る。
+
+        ⛔ **方式ごとに違う。** J は +300bp 超を見送る(§18.32/§18.48)が、
+           N は上限を持たない(§18.55 で --max-gap-bp 150 を棄却)。
+           ここを揃えてしまうと、どちらかがバックテストと食い違う。
+        """
+        _r, _ng = [], []
         for x in rows:
             _sy = str(x.get("symbol") or "").strip().replace(".T", "")
             _fl = _flag.get(_sy, {})
@@ -776,6 +801,9 @@ def do_sequence() -> None:
                 continue
             if _o <= 0:
                 continue                  # 寄っていない
+            if guard > 0 and abs(_g) > guard:
+                _ng.append((_sy, _g))
+                continue
             if (_g >= gmin) if up else (_g <= -gmin):
                 _r.append((_sy, _g, _o))
         _r.sort(key=lambda t: -abs(t[1]))
@@ -790,6 +818,9 @@ def do_sequence() -> None:
                 print(f"      {_sy:<8}{_g:>+8.0f}bp  始値 {_o:>9,.1f}")
         else:
             print(f"      (なし)")
+        if _ng:
+            print(f"      ⚠ ガード({guard:+.0f}bp 超)で見送り {len(_ng)}件: "
+                  + ", ".join(f"{a_}({b_:+.0f})" for a_, b_ in _ng[:6]))
 
     print(f"\n{'=' * 78}")
     print(f"■ 09:00 の合格銘柄 — {_TODAY}")
@@ -799,7 +830,7 @@ def do_sequence() -> None:
     _pass_list(f"★ 鏡像   ギャップ ≤ -{a.gap_bp:.0f}bp → **買い**",
                "in_m", "rank_m", a.gap_bp, False)
     _pass_list(f"J       ギャップ ≥ +{a.gap_bp_j:.0f}bp → 売り（参考・記録のみ）",
-               "in_j", "rank_j", a.gap_bp_j, True)
+               "in_j", "rank_j", a.gap_bp_j, True, guard=a.guard_bp_j)
     print(f"\n  ⚠ ここまでは **合格したか**だけ。実際に建てられるかは"
           f"予算次第なので、下の発注シーケンスを見てください")
 
@@ -839,7 +870,7 @@ def do_sequence() -> None:
             _gp = r["grp"]
             print(f"  ── {r['ts']} に寄ったグループ ──")
         _n = f"{r['n']}" if r["ok"] else "⛔"
-        print(f"  {_n:<4}{(r['ot'] or '')[-8:]:<10}{r['sym']:<9}"
+        print(f"  {_n:<4}{_hhmmss(r['ot']):<10}{r['sym']:<9}"
               f"{_lbl[r['side']]:<7}{r['gap']:>+10.0f}{r['op']:>10,.1f}"
               f"{r['cost']:>12,.0f}"
               + (f"{r['left']:>13,.0f}" if r["ok"] else f"{'見送り':>13}"))
@@ -876,7 +907,7 @@ def do_sequence() -> None:
     _dl = [r for r in _lv if r["late"]]
     if _dl:
         print(f"\n  遅寄り {len(_dl)}件: "
-              + ", ".join(f"{r['sym']}({(r['ot'] or '')[-8:]})" for r in _dl[:8]))
+              + ", ".join(f"{r['sym']}({_hhmmss(r['ot'])})" for r in _dl[:8]))
     print(f"\n  ⚠ **ペーパー**。実際には発注していません。")
     print(f"  ⚠ J は資金均等(§18.48)で株数の決め方が違うので、この表には出しません")
 
