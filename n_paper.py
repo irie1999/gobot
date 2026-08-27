@@ -640,7 +640,7 @@ def do_close() -> None:
         w.writerows(_out)
 
     def _score(tag: str, gap_min: float, key: str, side: int = 1,
-               rank_key: str = "", top: int = 0):
+               rank_key: str = "", top: int = 0, guard: float = 0.0):
         """side=+1 ショート(ギャップアップを売る) / -1 ロング(ギャップダウンを買う)。
 
         ⛔ 板読みは全候補を読むが、**実運用で建てられるのは各方式の上位50件**
@@ -654,6 +654,11 @@ def do_close() -> None:
         if top > 0 and rank_key:
             _sel = [r for r in _sel
                     if 0 < int(float(r.get(rank_key) or 0)) <= top]
+        # ⛔ **合格銘柄の一覧(上)と同じガードを掛けること。**
+        #   掛け忘れると同じ実行の中で「合格7件」と「損益10件」が並ぶ
+        #   (2026-08-27 に実際に出た)。
+        if guard > 0:
+            _sel = [r for r in _sel if abs(float(r.get("gap_bp") or 0)) <= guard]
         for r in _sel:                      # ロングは損益の符号が逆
             r["_p"] = float(r["pnl"]) * side
             r["_b"] = float(r["bp"]) * side
@@ -684,7 +689,7 @@ def do_close() -> None:
     _score("★ 鏡像 (ギャップダウンを買う)", a.gap_bp, "in_m",
            side=-1, rank_key="rank_m", top=a.watch)
     _score("J (参考・記録のみ)", a.gap_bp_j, "in_j",
-           side=1, rank_key="rank_j", top=a.watch)
+           side=1, rank_key="rank_j", top=a.watch, guard=a.guard_bp_j)
 
     # ══════════════════════════════════════════════════════════════════
     # ★★ 予算制約つきの損益 — **これが実際に取れた額**
