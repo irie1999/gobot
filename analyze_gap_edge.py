@@ -308,6 +308,13 @@ ap.add_argument("--tail-diag", action="store_true",
                      "⛔ 一晩かける想定。--tail-nulls で帰無の本数を増やせる")
 ap.add_argument("--tail-nulls", type=int, default=2000,
                 help="--tail-diag の帰無較正(日ブロックを保った巡回シフト)の本数")
+ap.add_argument("--tail-pairs", action="store_true", default=True,
+                help="--tail-diag で2変数の交互作用も掃く(既定ON)")
+ap.add_argument("--no-tail-pairs", dest="tail_pairs",
+                action="store_false",
+                help="交互作用を掃かない(速くしたいとき)")
+ap.add_argument("--tail-pair-min", type=int, default=60,
+                help="交互作用のセルに要求する最小日数")
 ap.add_argument("--tail-q", type=float, default=0.10,
                 help="『大負けの日』の定義(下位何割か)。既定0.10=下位10%%")
 ap.add_argument("--sweep-market", action="store_true",
@@ -1463,9 +1470,52 @@ if a.tail_diag:
         except Exception as _e:
             sys.exit(f"[error] preopen_market を読めません: {_e}")
     _pf = preopen_features(_kd)
+
+    # ★★ **N 自身の履歴**。外部データが要らず、確実に寄り前に確定していて、
+    #   しかも一度も測っていない。ユーザーの直感『明らかにそういう相場』に
+    #   いちばん近いのはこれ(悪い地合いが続く / ボラが上がっている)。
+    #   ⛔ すべて **前日まで**。当日の値は一切使わない。
+    _self: dict = {}
+    for _i2, _d2 in enumerate(_kd):
+        _h = _pn[:_i2]                       # ← 当日を含まない
+        if len(_h) < 21:
+            continue
+        _f2 = {
+            "self_prev": float(_h[-1]),                    # 前日の損益
+            "self_5d": float(_h[-5:].sum()),               # 直近5日
+            "self_20d": float(_h[-20:].sum()),             # 直近20日
+            "self_vol20": float(_h[-20:].std(ddof=1)),     # 直近20日のσ
+            "self_win20": float((_h[-20:] > 0).mean()),    # 直近20日の勝日率
+        }
+        _neg = 0
+        for _x2 in _h[::-1]:                              # 連続マイナス日数
+            if _x2 < 0:
+                _neg += 1
+            else:
+                break
+        _f2["self_negstreak"] = float(_neg)
+        _self[_d2] = _f2
+    for _d2, _f2 in _self.items():
+        _pf.setdefault(_d2, {}).update(_f2)
+
+    # ★ 非線形: **大きさ**(絶対値)。「大きく動いた日」は符号ではなく幅の話。
+    #   ユーザーの直感『明らかにそういう相場』が幅のことなら、ここに出る。
+    _absk = [k for k in {kk for v in _pf.values() for kk in v}
+             if k.endswith(("_ret", "_chg", "_gap")) and not k.startswith("self_")]
+    for _d2, _f2 in _pf.items():
+        for _k2 in _absk:
+            if _k2 in _f2 and f"{_k2}_abs" not in _f2:
+                _f2[f"{_k2}_abs"] = abs(_f2[_k2])
+
     _vars = sorted({k for v in _pf.values() for k in v})
-    print(f"\n  ── ③ 寄り前変数 ── **{len(_vars)}本**: {', '.join(_vars)}")
-    if len(_vars) <= 6:
+    _n_ext = len([v for v in _vars if not v.startswith("self_")
+                  and not v.endswith("_abs")])
+    _n_abs = len([v for v in _vars if v.endswith("_abs")])
+    _n_slf = len([v for v in _vars if v.startswith("self_")])
+    print(f"\n  ── ③ 寄り前変数 ── **{len(_vars)}本** "
+          f"(外部 {_n_ext} / 絶対値 {_n_abs} / **N自身の履歴 {_n_slf}**)")
+    print(f"     {', '.join(_vars)}")
+    if _n_ext <= 6:
         print(f"    ⛔⛔ **6本以下はダミーの可能性があります**"
               f"(本物は15〜19本)。preopen_market.py を確認してください")
 
@@ -1495,8 +1545,13 @@ if a.tail_diag:
     print(f"\n  ── ③-a 【事前→損益】単変量 × {_nq}分位 ──")
     print(f"    ⚠ 『裾集中』= 大負けの日がその分位にどれだけ偏るか。"
           f"均等なら {100 / _nq:.0f}%")
+    print(f"    ⛔ **帰無を2本出します**(2026-08-27 に合成データで検証):")
+    print(f"       巡回 = 日ブロックを保つ。持続する変数では **効果そのものを"
+          f"吸収して見逃す**(保守的)")
+    print(f"       シャフ = 日を並べ替える。日次パネルなので同日相関は既に"
+          f"潰れており、pnl の自己相関がゼロなら妥当")
     print(f"    {'変数':<16}{'最悪分位':>9}{'平均/日':>12}{'裾集中':>8}"
-          f"{'帰無95%':>9}{'判定':>6}")
+          f"{'巡回95%':>9}{'シャフ95%':>10}{'判定':>8}")
 
     _rng = np.random.default_rng(a.seed)
     _hits = []
@@ -1525,28 +1580,114 @@ if a.tail_diag:
         _worst = _ks2[int(np.nanargmin(_means))]
         _wi = _ks2.index(_worst)
         _conc = float(_bm[_q == _worst].mean()) if (_q == _worst).any() else 0.0
-        # 帰無: 損益を日ブロックのまま巡回シフト(変数の時系列クラスタも保つ)
-        _nl = []
+        # 帰無を2本。どちらも **同じ『最悪分位を選ぶ』操作**を掛ける。
+        _nl, _ns = [], []
         _L = len(_pm)
+
+        def _null_once(_pr, _br, _acc):
+            _mn = np.array([_gm(_pr, _q, k) for k in _ks2], float)
+            if np.isfinite(_mn).any():
+                _acc.append(float(_br[_q == _ks2[int(np.nanargmin(_mn))]].mean()))
+
         for _s2 in range(a.tail_nulls):
             _sh = int(_rng.integers(1, _L)) if _L > 2 else 1
-            _pr, _br = np.roll(_pm, _sh), np.roll(_bm, _sh)
-            _mn = np.array([_gm(_pr, _q, k) for k in _ks2], float)
-            if not np.isfinite(_mn).any():
-                continue
-            _w = _ks2[int(np.nanargmin(_mn))]
-            _nl.append(float(_br[_q == _w].mean()))
-        if not _nl:
+            _null_once(np.roll(_pm, _sh), np.roll(_bm, _sh), _nl)   # 巡回
+            _pi = _rng.permutation(_L)
+            _null_once(_pm[_pi], _bm[_pi], _ns)                     # シャッフル
+        if not _nl or not _ns:
             continue
         _p95 = float(np.quantile(_nl, 0.95))
-        _ok = _conc > _p95
-        if _ok:
+        _s95 = float(np.quantile(_ns, 0.95))
+        _ok = _conc > _p95                       # 両方超えたときだけ ✅
+        _okS = _conc > _s95
+        _jd = ("  ✅両方" if (_ok and _okS) else
+               "  △期間" if _okS else "  —")
+        if _ok and _okS:
             _hits.append((_v, _worst, _conc, _p95))
         print(f"    {FEAT_LABELS.get(_v, _v)[:15]:<16}Q{_worst + 1:<8}"
               f"{_means[_wi]:>+12,.0f}{_conc * 100:>7.0f}%"
-              f"{_p95 * 100:>8.0f}%{('  ✅' if _ok else '  —'):>6}")
-    print(f"    掃いた {len(_vars)}本 / **裾が帰無を超えた {len(_hits)}本** "
+              f"{_p95 * 100:>8.0f}%{_s95 * 100:>9.0f}%{_jd:>8}")
+    _ac = (float(np.corrcoef(_pn[:-1], _pn[1:])[0, 1]) if len(_pn) > 30
+           else float("nan"))
+    print(f"    掃いた {len(_vars)}本 / **両方の帰無を超えた {len(_hits)}本** "
           f"(帰無の期待 {len(_vars) * 0.05:.1f}本)")
+    print(f"    ⚠ 日次損益の1日ラグ自己相関 = **{_ac:+.3f}**。"
+          f"ゼロに近いほどシャッフル帰無が妥当です")
+    print(f"    ⚠ **△期間** = シャッフルだけ超えた = 『その変数が悪い』と"
+          f"『たまたま悪い時期がその変数の値と重なった』を区別できない")
+    print(f"    ★ 読み方(合成データで検証済み / 2026-08-27):")
+    print(f"      ・自己相関がゼロ近く かつ ✅/△ が0本 → **本当に何も無い**")
+    print(f"      ・△/✅ が**多数**出た かつ 自己相関が高い → 『時期』の構造は"
+          f"あるが、**どの変数かは分離できていない**")
+    print(f"        (持続する変数は互いに似た形になるため。③-c の TEST で確かめる)")
+    print(f"      ・効果が実在すると **損益自体に自己相関が現れます**"
+          f"(合成で ar=0 から +0.30 が出た)")
+
+    # ── ③-b 2変数の交互作用 ────────────────────────────────────────
+    #   「VIX が高くて **かつ** 先物がギャップアップ」のような組み合わせ。
+    #   単変量では消えても、条件を重ねると出ることがある。
+    #   ⛔ ペア数が多いので多重検定が強く効く。**帰無にも同じ『最良ペアを
+    #     選ぶ』操作を掛ける**ので、何ペア試しても比較は公平(§18.34b)。
+    if a.tail_pairs:
+        _cd = [v for v in _vars
+               if np.isfinite(_X[:, _vars.index(v)]).mean() > 0.9]
+        _npair = len(_cd) * (len(_cd) - 1) // 2
+        print(f"\n  ── ③-b 2変数の交互作用 ({len(_cd)}本 → {_npair}ペア) ──")
+        _lo, _hi = {}, {}
+        for _v in _cd:
+            _x = _X[:, _vars.index(_v)]
+            _m = np.isfinite(_x)
+            _lo[_v] = _m & (_x <= np.quantile(_x[_m], 1.0 / 3.0))
+            _hi[_v] = _m & (_x >= np.quantile(_x[_m], 2.0 / 3.0))
+        _cells = []
+        for _i2 in range(len(_cd)):
+            for _j2 in range(_i2 + 1, len(_cd)):
+                for _sa, _da in ((_lo, "低"), (_hi, "高")):
+                    for _sb, _db in ((_lo, "低"), (_hi, "高")):
+                        _sel = _sa[_cd[_i2]] & _sb[_cd[_j2]]
+                        if int(_sel.sum()) >= a.tail_pair_min:
+                            _cells.append((_sel, _cd[_i2], _da, _cd[_j2], _db))
+        print(f"    条件を満たすセル {len(_cells):,}個 "
+              f"(最小 {a.tail_pair_min}日)")
+        if not _cells:
+            print(f"    ⛔ セルがありません(--tail-pair-min を下げてください)")
+        else:
+            def _pairbest(_p):
+                _bv, _bi = np.inf, -1
+                for _ix, _c in enumerate(_cells):
+                    _mu2 = float(_p[_c[0]].mean())
+                    if _mu2 < _bv:
+                        _bv, _bi = _mu2, _ix
+                return _bv, _bi
+
+            _bv, _bi = _pairbest(_pn)
+            _nn = max(50, a.tail_nulls // 20)
+            _nl2, _ns2 = [], []
+            for _s3 in range(_nn):
+                _nl2.append(_pairbest(np.roll(_pn, int(_rng.integers(
+                    1, len(_pn)))))[0])
+                _ns2.append(_pairbest(_rng.permutation(_pn))[0])
+            _p05 = float(np.quantile(_nl2, 0.05))
+            _s05 = float(np.quantile(_ns2, 0.05))
+            _, _a2, _da2, _b2, _db2 = _cells[_bi]
+            _n2 = int(_cells[_bi][0].sum())
+            print(f"    最悪のセル: {FEAT_LABELS.get(_a2, _a2)} が{_da2} "
+                  f"かつ {FEAT_LABELS.get(_b2, _b2)} が{_db2}")
+            print(f"      {_n2}日 / 平均 {_bv:+,.0f}円/日 "
+                  f"(全日 {_pn.mean():+,.0f}円/日)")
+            print(f"      帰無({_nn}本 / 同じ『最良セルを選ぶ』操作つき)")
+            print(f"        巡回 5%点 {_p05:+,.0f}円 → "
+                  f"{'✅ 外' if _bv < _p05 else '— 中'}"
+                  f"   シャッフル 5%点 {_s05:+,.0f}円 → "
+                  f"{'✅ 外' if _bv < _s05 else '— 中'}")
+            print(f"        判定: "
+                  + ("**✅ 両方の帰無の外**" if (_bv < _p05 and _bv < _s05)
+                     else "**△ 期間効果**(シャッフルだけ外 = "
+                          "『この組み合わせが悪い』と『悪い時期と重なった』を"
+                          "区別できない)" if _bv < _s05
+                     else "— 帰無の中"))
+            print(f"    ⚠ 帰無の平均が全日平均より低いのは正常です。"
+                  f"**{len(_cells):,}セルから最小を選ぶ操作**だけで下がります")
 
     # ── ③-c 多変量: TRAIN で作って TEST で答え合わせ ──────────────────
     print(f"\n  ── ③-c 【多変量】TRAIN で線形モデル → TEST で答え合わせ ──")
