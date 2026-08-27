@@ -283,6 +283,10 @@ ap.add_argument("--ops-gap-list", type=str, default="100,125,150,200",
                      "下げる方向を見るなら --min-gap-bp 25 --ops-gap-list "
                      "25,50,75,100,125 のように **母集団を先に広げる**こと。"
                      "空文字で無効")
+ap.add_argument("--ops-gap-ref", type=float, default=100.0,
+                help="--sweep-ops のギャップ表で **比較の基準にする閾値**(bp)。"
+                     "既定100 = N の本番設定。対応検定はこの行との差で出す。"
+                     "⛔ --min-gap-bp(母集団の下端)とは別物")
 ap.add_argument("--sweep-relax", action="store_true",
                 help="★★ 「絞る」ではなく「**増やす**」。別の軸が強い銘柄だけ"
                      "ギャップ閾値を下げて拾えるか。"
@@ -2057,31 +2061,86 @@ if a.sweep_ops:
     #   月の総額は増えうる。watch50 と予算を通して初めて判定できる。
     #   ⚠ _ops_sim は a.min_gap_bp を **呼び出し時に読む**ので、
     #     一時的に差し替えれば1回の実行で掃ける(元に戻すこと)。
+    def _mser(res):
+        """月別の合計を日付順の numpy 配列で返す(印字しない)。
+
+        ⛔ 総額だけで閾値を選ぶと必ず罠にかかる(§18.28 / §18.38)。
+           件数を増やせば損益もσも増えるので、**月平均÷σ** を併記しないと
+           『レバレッジ』と『質の改善』を区別できない。
+        """
+        _dd = res["daily"]
+        _m: dict = {}
+        for _d, _v in _dd.items():
+            _m[str(_d)[:7]] = _m.get(str(_d)[:7], 0.0) + _v[0] + _v[1]
+        _ks = sorted(_m)
+        return _ks, np.array([_m[k] for k in _ks], float)
+
     if a.ops_gap_list.strip():
         _gsv = a.min_gap_bp
         _gl = sorted({float(x) for x in a.ops_gap_list.split(",") if x.strip()}
-                     | {_gsv})
+                     | {_gsv, a.ops_gap_ref})
         print(f"\n  ── ★★ ギャップ閾値(bp) ── **watch50 と予算を通した判定**")
         print(f"     ⚠ 母集団は --min-gap-bp {_gsv:.0f} で切ってあるので、"
               f"それ**未満**の升は測れません")
-        print(f"    {'gap':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
-              f"{'件/日':>8}{'月換算':>12}")
+        print(f"    {'gap':<8}{'損益':>13}{'件/日':>7}{'円/件':>9}"
+              f"{'月平均':>11}{'月次σ':>11}{'÷σ':>7}{'差/月 vs本番':>14}{'対応t':>8}")
+        _cur_s = None
+        _rows_g = []
         try:
             for _gv in _gl:
                 if _gv < _gsv:
-                    print(f"    {_gv:<10.0f}{'— 母集団の外':>14}")
+                    _rows_g.append((_gv, None))
                     continue
                 a.min_gap_bp = _gv
                 _r = _ops_sim(50, 400.0, 0, False)
-                _mk = " ★現行" if abs(_gv - _gsv) < 1e-6 else ""
-                print(f"    {_gv:<10.0f}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
-                      f"{_r['per']:>+10,.0f}{_r['n'] / _ond:>8.1f}"
-                      f"{_r['pnl'] / _ond * 20:>+12,.0f}{_mk}")
+                _rows_g.append((_gv, (_r, _mser(_r))))
+                if abs(_gv - a.ops_gap_ref) < 1e-6:
+                    _cur_s = _mser(_r)
         finally:
             a.min_gap_bp = _gsv
+        # ★ 現行(= --min-gap-bp で切った母集団の下端)を基準にした **対応検定**。
+        #   閾値は入れ子(gap150 ⊂ … ⊂ gap25)なので月次系列の相関が高く、
+        #   単独の t より検出力が高い。
+        for _gv, _pk in _rows_g:
+            if _pk is None:
+                print(f"    {_gv:<8.0f}{'— 母集団の外':>13}")
+                continue
+            _r, (_ks, _ms) = _pk
+            _mu = float(_ms.mean()) if len(_ms) else 0.0
+            _sd = float(_ms.std(ddof=1)) if len(_ms) > 1 else 0.0
+            _dt, _dtt = "—", "—"
+            # ⚠ 閾値がきついと取引ゼロの月が出て月数が揃わない。
+            #   **月キーの和集合で 0 埋めして揃える**(揃わないと対応検定が消える)
+            if _cur_s is not None:
+                _um = sorted(set(_ks) | set(_cur_s[0]))
+                _d1 = dict(zip(_ks, _ms))
+                _d0 = dict(zip(_cur_s[0], _cur_s[1]))
+                _df = np.array([_d1.get(k, 0.0) - _d0.get(k, 0.0) for k in _um],
+                               float)
+            else:
+                _df = np.array([], float)
+            if len(_df) > 1:
+                _ds = float(_df.std(ddof=1))
+                _dm = float(_df.mean())
+                _dt = f"{_dm:+,.0f}"
+                _dtt = (f"{_dm / (_ds / np.sqrt(len(_df))):+.2f}" if _ds > 0
+                        else "—")
+            _mk = " ★本番" if abs(_gv - a.ops_gap_ref) < 1e-6 else ""
+            print(f"    {_gv:<8.0f}{_r['pnl']:>+13,.0f}{_r['n'] / _ond:>7.1f}"
+                  f"{_r['per']:>+9,.0f}{_mu:>+11,.0f}{_sd:>11,.0f}"
+                  f"{(_mu / _sd if _sd else 0):>7.2f}{_dt:>14}{_dtt:>8}{_mk}")
+        print(f"     ★★ 見るのは **月平均÷σ** と **対応t**。総額(月平均)だけで"
+              f"選ぶと、件数を増やしただけの")
+        print(f"        **レバレッジ**を『改善』と読み違えます(§18.28 / §18.38)。")
+        print(f"     ⚠ 対応t は **★本番({a.ops_gap_ref:.0f}bp)** との差。"
+              f"閾値は入れ子なので月次の相関が高く、単独の t より検出力があります")
+        if _cur_s is None:
+            print(f"     ⛔ 本番{a.ops_gap_ref:.0f}bp が母集団の外なので"
+                  f"対応検定を出せません(--min-gap-bp を下げてください)")
+        print(f"     ⚠ 執行コストは **件数に比例**します(1件 {EXEC_BP:.1f}bp)。"
+              f"件数を増やす方向には不利に働くので、")
+        print(f"        この表の損益からは **まだ引かれていない**点に注意")
         print(f"     ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
-        print(f"     ⚠ **円/件 が下がっていても月換算が上がっているなら、"
-              f"件数不足が本当のボトルネック**です")
 
     print(f"\n  ── watch上限 ──")
     print(f"    {'watch':<10}{'損益':>14}{'件数':>9}{'円/件':>10}"
