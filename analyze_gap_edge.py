@@ -277,6 +277,17 @@ ap.add_argument("--stop-slip-pct", type=float, default=0.0,
                 help="損切り発動時のスリッページ(0.005=0.5%%不利)。"
                      "日足ではギャップ幅が分からないので、悲観側の下限を"
                      "手で置くためのつまみ。既定0=ラインちょうど(楽観)")
+ap.add_argument("--sweep-relax", action="store_true",
+                help="★★ 「絞る」ではなく「**増やす**」。別の軸が強い銘柄だけ"
+                     "ギャップ閾値を下げて拾えるか。"
+                     "⛔ N は件数不足(稼働率40%%)なので、フィルタで bp を上げても"
+                     "総額は落ちる。足せるかを見る。TRAIN のみ")
+ap.add_argument("--relax-axis", type=str, default="up_streak",
+                help="--sweep-relax で使う軸(--list-axes で一覧)")
+ap.add_argument("--relax-axis-list", type=str, default="2,3,4,5,6",
+                help="--relax-axis の閾値(この値以上を追加対象にする)")
+ap.add_argument("--relax-gap-list", type=str, default="25,50,60,75,90",
+                help="緩めたギャップ閾値(bp)")
 ap.add_argument("--sweep-market", action="store_true",
                 help="★★ 前日の日経・S&P500・VIX・為替など **寄り前の外部指標**で"
                      "『その日は建てない』ルールが作れるか。総当たり+帰無較正。"
@@ -349,7 +360,7 @@ _BOTH_PASS = {
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
-                    or a.sweep_ops or a.sweep_barrier)
+                    or a.sweep_ops or a.sweep_barrier or a.sweep_relax)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
     _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
@@ -1138,6 +1149,95 @@ if a.sweep_grid:
     print(f"        件/日 が予算(1日十数件)を下回ったら、月の総額は落ちます。")
     print(f"  ⛔ 良い升があっても採用しないこと。TEST での検証が要ります")
     print(f"     (TEST は既に2回使用済み)。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_relax:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 「絞る」ではなく「**増やす**」— 別の軸が強い銘柄だけ gap 閾値を下げる
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ N は **件数不足**であって予算不足ではない(§18.55: 稼働率40%)。
+    #      フィルタで bp/件 を上げても、件数が減れば月の総額は落ちる。
+    #      だから探すべきは「どれを捨てるか」ではなく「**どれを足せるか**」。
+    #
+    #      建てる = (ret1 >= 1.753 かつ gap >= 100)          … 現行
+    #             ∪ (AXIS >= 閾値   かつ gap >= 緩めた閾値)   … 追加分
+    #
+    #   ★ 見るのは **追加分が単体でプラスか**。合計だけ見ると、
+    #      件数が増えたぶん薄まっただけでも「良くなった」に見える(§18.28)。
+    #   ⛔ TEST は使わない。TRAIN で完結する。
+    _rt = _train if a.pool == "all" else (
+        _train[_train["sig"] == (1 if a.pool == "sig" else 0)])
+    if a.max_gap_bp > 0:
+        _rt = _rt[_rt["gap_bp"] <= a.max_gap_bp]
+    if _rt.empty or a.relax_axis not in _rt.columns:
+        sys.exit(f"[error] TRAIN が空か、軸 {a.relax_axis} がありません")
+    _nd = max(1, _rt["date"].nunique())
+    _base_m = (_rt["ret1"] >= _RET1_MIN) & (_rt["gap_bp"] >= a.min_gap_bp)
+    _base = _rt[_base_m]
+
+    print(f"\n{'=' * 78}")
+    print(f"■ 閾値を**下げて増やす** — 軸 {a.relax_axis} / **TRAIN({_train_n}) だけ**")
+    print(f"{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  ⚠ N は **件数不足**(§18.55 稼働率40%)。絞るのではなく足せるかを見ます")
+    print(f"  対象 {len(_rt):,}銘柄日 / {_nd:,}営業日")
+    print(f"  ★ 現行 = ret1 ≥ {_RET1_MIN}% × gap ≥ {a.min_gap_bp:.0f}bp"
+          f" … {len(_base):,}件 / {len(_base) / _nd:.1f}件/日 / "
+          f"**{_bp(_base):+.1f}bp** / 日t {_cluster_t(_base):+.2f}")
+    print(f"  ⚠ 合格ライン {PASS_BP}bp は **追加分そのもの**に掛けます"
+          f"(薄い取引を足すだけなら意味がない)")
+
+    _axs = [float(x) for x in a.relax_axis_list.split(",") if x.strip()]
+    _gps = [float(x) for x in a.relax_gap_list.split(",") if x.strip()]
+    _best = None
+    for _lbl, _key in (("追加分だけ bp/件", "bp"), ("追加分だけ 件/日", "n"),
+                       ("追加分だけ 日t", "t"), ("合計 bp/件", "cbp")):
+        print(f"\n  ── {_lbl} ──")
+        print(f"    {a.relax_axis[:9]:<10}"
+              + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
+        print("    " + "-" * (10 + 11 * len(_gps)))
+        for _ax in _axs:
+            _row = f"    {_ax:<10.3g}"
+            for _gp in _gps:
+                _add_m = ((_rt[a.relax_axis] >= _ax) & (_rt["gap_bp"] >= _gp)
+                          & ~_base_m)
+                _add = _rt[_add_m]
+                if len(_add) < 200:
+                    _row += f"{'—':>11}"
+                    continue
+                if _key == "bp":
+                    _v = _bp(_add)
+                    _row += f"{_v:>+11.1f}"
+                    _t = _cluster_t(_add)
+                    if _v >= PASS_BP and _t >= PASS_T:
+                        _c = (_v, _t, _ax, _gp, len(_add))
+                        if _best is None or _c[0] > _best[0]:
+                            _best = _c
+                elif _key == "n":
+                    _row += f"{len(_add) / _nd:>11.1f}"
+                elif _key == "t":
+                    _row += f"{_cluster_t(_add):>+11.2f}"
+                else:
+                    _row += f"{_bp(_rt[_base_m | _add_m]):>+11.1f}"
+            print(_row)
+
+    print(f"\n  {'=' * 68}")
+    if _best is None:
+        print(f"  ⛔ **追加できる升がありません。**")
+        print(f"     追加分が単体で bp≥{PASS_BP} かつ t≥{PASS_T} を満たす組み合わせは"
+              f"ゼロでした。")
+        print(f"     = 閾値を下げて拾える取引は、拾うだけ薄めます。**現行のまま**。")
+    else:
+        _v, _t, _ax, _gp, _n = _best
+        print(f"  ★ 追加分が単体で合格する最良: {a.relax_axis} ≥ {_ax:g} × "
+              f"gap ≥ {_gp:.0f}bp")
+        print(f"     {_n:,}件 / {_n / _nd:.1f}件/日 / **{_v:+.1f}bp** / 日t {_t:+.2f}")
+        print(f"  ⛔ **ここで採用しないこと。** TRAIN で最良を選んだだけです。")
+        print(f"     TEST での検証が要ります(TEST は既に2回使用済み)。")
+    print(f"  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
+          f"増えうる**")
+    print(f"     (N は稼働率40%で資金が余っている)。判断は --sweep-ops で。")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
