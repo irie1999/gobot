@@ -1162,30 +1162,53 @@ if a.sweep_regime:
                   f"{_pn:>+12,.0f}{_pm:>+13,.0f}{_a[2]:>9,}{_a[3]:>10,}"
                   f"{_w:>12}")
         print("    " + "-" * 80)
-        # ★ 仮説どおりなら 下(Q1=下げ)で N、上(Q5=上げ)で鏡像
-        _ok = _dir[0] == "N" and _dir[-1] == "鏡像"
-        print(f"    仮説(Q1=N / Q5=鏡像): "
-              + ("**一致** ✓" if _ok else f"不一致 (Q1={_dir[0]} / Q5={_dir[-1]})"))
-        # 前半/後半でも同じ向きか
-        _hd = []
+        # ★ **両方の向き**を見る(2026-08-27 修正)。
+        #   A(事前宣言) Q1=N / Q5=鏡像   … 逆行した異常値は反転する
+        #   B(逆向き)   Q1=鏡像 / Q5=N   … 相場と同方向に行き過ぎた側が戻る
+        #   ⛔ B は TRAIN の表を見てから思いついたもの。TRAIN の前半/後半で
+        #     安定するかを **ここで(TEST を使わずに)** 確かめる。
+        #     安定して初めて TEST を1回使う価値がある。
+        _okA = _dir[0] == "N" and _dir[-1] == "鏡像"
+        _okB = _dir[0] == "鏡像" and _dir[-1] == "N"
+        print(f"    全期間: Q1={_dir[0]} / Q5={_dir[-1]}  → "
+              + ("**A(事前宣言)に一致**" if _okA else
+                 "**B(逆向き)に一致**" if _okB else "どちらでもない"))
+        # ★ 単調性も見る。**両端だけの比較は2択なので偶然当たる**。
+        #   各側の 円/件 が分位に対して単調なら、機構がある可能性が上がる。
+        _pn_all = [(_o[k][0] / _o[k][2] if _o[k][2] else 0.0) for k in sorted(_o)]
+        _pm_all = [(_o[k][1] / _o[k][3] if _o[k][3] else 0.0) for k in sorted(_o)]
+        def _rho(v):
+            _x = np.arange(len(v), dtype=float)
+            return float(np.corrcoef(_x, np.array(v, float))[0, 1]) if len(v) > 2 else 0.0
+        print(f"    単調性(分位との順位相関): N {_rho(_pn_all):+.2f} / "
+              f"鏡像 {_rho(_pm_all):+.2f}")
+        # 前半/後半で A / B のどちらが立つか
+        _hd = {"A": [], "B": []}
         for _hh in (1, 2):
             _oh, _svh, _qh = _by_regime(_col, 5, half=_hh)
             if not _oh:
-                _hd.append("—")
+                _hd["A"].append("—"); _hd["B"].append("—")
                 continue
             _ks = sorted(_oh)
             _a1, _a5 = _oh[_ks[0]], _oh[_ks[-1]]
-            _p1 = (_a1[0] / _a1[2] if _a1[2] else 0) > (_a1[1] / _a1[3] if _a1[3] else 0)
-            _p5 = (_a5[0] / _a5[2] if _a5[2] else 0) < (_a5[1] / _a5[3] if _a5[3] else 0)
-            _hd.append("✓" if (_p1 and _p5) else "✗")
-        print(f"    前半 {_hd[0]} / 後半 {_hd[1]}"
-              + ("   ← **両方 ✓ なら前向きに試す価値あり**"
-                 if _hd == ["✓", "✓"] else "   ← 片方でも ✗ なら期間依存"))
+            _n1 = _a1[0] / _a1[2] if _a1[2] else 0.0
+            _m1 = _a1[1] / _a1[3] if _a1[3] else 0.0
+            _n5 = _a5[0] / _a5[2] if _a5[2] else 0.0
+            _m5 = _a5[1] / _a5[3] if _a5[3] else 0.0
+            _hd["A"].append("✓" if (_n1 > _m1 and _n5 < _m5) else "✗")
+            _hd["B"].append("✓" if (_m1 > _n1 and _n5 > _m5) else "✗")
+        print(f"    A(Q1=N/Q5=鏡像)  前半 {_hd['A'][0]} / 後半 {_hd['A'][1]}"
+              + ("  ★両方✓" if _hd["A"] == ["✓", "✓"] else ""))
+        print(f"    B(Q1=鏡像/Q5=N)  前半 {_hd['B'][0]} / 後半 {_hd['B'][1]}"
+              + ("  ★両方✓" if _hd["B"] == ["✓", "✓"] else ""))
 
     print(f"\n  {'=' * 68}")
-    print(f"  ⛔ **ここで良く見えても採用しないこと。**")
-    print(f"     TEST は消費済みなので、この窓では検証できません。")
-    print(f"     確かめる唯一の方法は **.\\norder を前向きに貯めること**です。")
+    print(f"  ★ 読み方: **A か B の片方が、前半・後半とも ✓** のときだけ")
+    print(f"     TEST を使う価値があります。両方 ✗ / 半期で入れ替わる = 期間依存。")
+    print(f"  ⚠ TEST(2020-09〜2026-08) は「両建て」で **1回使用済み**です。")
+    print(f"     ここで候補が出たら **通算2回目**になります。")
+    print(f"     禁止ではありませんが、2回試せば帰無でも約10%はどれか通るので、")
+    print(f"     **合格が出たときは必ず『2回目』と併記**してください(§18.53)。")
     print(f"  ⚠ 5分位 × {len(_AX2)}指標 = {5 * len(_AX2)}通り見ています。"
           f"偶然どれかが仮説に一致する"
           f"確率は低くありません。\n     **前半・後半の両方で ✓ でなければ"
