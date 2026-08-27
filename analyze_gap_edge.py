@@ -244,6 +244,11 @@ ap.add_argument("--list-axes", action="store_true", help="探索できる軸を�
 ap.add_argument("--nq", type=int, default=5, help="軸を何分位に切るか(既定5)")
 ap.add_argument("--axis-seeds", type=int, default=50,
                 help="軸探索の帰無較正の本数(既定50。軸×分位ぶん回るので重い)")
+ap.add_argument("--min-ret1", type=float, default=0.0,
+                help="★ 前日リターン%% の下限。**N の母集団そのもの**(1.753)を指定すると、"
+                     "『ret1 を固定した **残差** にまだ軸があるか』を探索できる。"
+                     "⛔ これまでの --explore はこれを掛けずに回していたので、"
+                     "『ret1 が最強』までしか見ていなかった。既定0=掛けない")
 ap.add_argument("--sweep-barrier", action="store_true",
                 help="★ 損切り/利確を **TRAIN だけ**で掃く。"
                      "『効果がない』の確認は TRAIN で完結する(TRAIN で効かない"
@@ -358,8 +363,11 @@ if a.list_axes:
         "liq": "売買代金20日平均 — 薄いほどオーバーシュートしやすい(が執行も重い)",
         "range_pos": "20日レンジ位置% — 既に高値圏でのギャップは続伸しやすい?",
         "ret1": "前日リターン% — 前日も上げていたなら過熱?",
+        "ret2": "2日リターン%(過熱の窓は1日が最適か?)",
+        "ret3": "3日リターン%(同上)",
         "ret5": "5日リターン%",
         "ret20": "20日リターン%",
+        "gap_hi_bp": "前日**高値**からのギャップbp — 終値だけでなく高値も抜けたか",
         "up_streak": "連続上昇日数",
         "vol_ratio": "出来高比(D/20日平均) — ⚠ D の出来高。当日は先読みなので使わない",
         "entry_p": "建値",
@@ -475,6 +483,8 @@ def _scan(sym: str) -> list[dict]:
     _rngpos = ((_c - _mn20) / (_mx20 - _mn20).replace(0.0, float("nan")) * 100.0)
     _ret1, _ret5, _ret20 = (_c.pct_change(1) * 100.0, _c.pct_change(5) * 100.0,
                             _c.pct_change(20) * 100.0)
+    # 過熱の窓は1日が最適か? 2日・3日も並べる(ret1 と同じく _SIDE を掛ける)
+    _ret2, _ret3 = _c.pct_change(2) * 100.0, _c.pct_change(3) * 100.0
     _volr = _v / _v.rolling(20).mean().replace(0.0, float("nan"))
     _sl, _s = [], 0                                       # 連続上昇日数(D時点まで)
     for _u in (_c > _c.shift(1)).fillna(False).tolist():
@@ -534,8 +544,15 @@ def _scan(sym: str) -> list[dict]:
             "liq": _fv(_turn, pos),
             "range_pos": _fv(_rngpos, pos),
             "ret1": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret1, pos)),
+            "ret2": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret2, pos)),
+            "ret3": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret3, pos)),
             "ret5": _fv(_ret5, pos),
             "ret20": _fv(_ret20, pos),
+            # 前日**高値**からのギャップ。前日終値だけでなく高値も抜けているか
+            # (= より強い過熱か)。short は上抜け、long は下抜けを正にする
+            "gap_hi_bp": (lambda _r: None if _r is None or _r <= 0 else
+                          (o1 - _r) / _r * 10_000.0 * _SIDE)(
+                _fv(df["high"] if _SIDE > 0 else df["low"], pos)),
             "up_streak": _fv(_streak, pos),
             "vol_ratio": _fv(_volr, pos),
             "dow": float(d1.dayofweek),
@@ -549,8 +566,11 @@ AXES = {
     "liq":       "売買代金20日平均",
     "range_pos": "20日レンジ位置%",
     "ret1":      "前日リターン%",
+    "ret2":      "2日リターン%(過熱の窓)",
+    "ret3":      "3日リターン%(過熱の窓)",
     "ret5":      "5日リターン%",
     "ret20":     "20日リターン%",
+    "gap_hi_bp": "前日**高値**からのギャップbp(前日終値だけでなく高値も抜けたか)",
     "up_streak": "連続上昇日数",
     "vol_ratio": "出来高比(D/20日平均)",
     "entry_p":   "建値",
@@ -811,6 +831,12 @@ def _pool_of(w: pd.DataFrame) -> pd.DataFrame:
         w = w[w["gap_bp"] >= a.min_gap_bp]
     if a.max_gap_bp > 0:
         w = w[w["gap_bp"] <= a.max_gap_bp]
+    # ★ N の母集団そのもの(前日リターンの下限)。これを掛けると
+    #   「ret1 を固定した**残差**にまだ軸があるか」を探索できる。
+    #   ⛔ これまでの --explore は ret1 を掛けずに回していたので、
+    #      見つかったのは「ret1 が最強」までで、その先を一度も見ていなかった。
+    if a.min_ret1 > 0:
+        w = w[w["ret1"] >= a.min_ret1]
     return w
 
 
