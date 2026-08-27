@@ -284,8 +284,10 @@ ap.add_argument("--sweep-relax", action="store_true",
                      "総額は落ちる。足せるかを見る。TRAIN のみ")
 ap.add_argument("--relax-axis", type=str, default="up_streak",
                 help="--sweep-relax で使う軸(--list-axes で一覧)")
-ap.add_argument("--relax-axis-list", type=str, default="2,3,4,5,6",
-                help="--relax-axis の閾値(この値以上を追加対象にする)")
+ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
+                help="--relax-axis の閾値(この値以上を追加対象にする)。"
+                     "⛔ **0 は『条件なし』のコントロール行**。これが無いと"
+                     "『軸が効いた』のか『gap 閾値を下げただけ』なのか判別できない")
 ap.add_argument("--relax-gap-list", type=str, default="25,50,60,75,90",
                 help="緩めたギャップ閾値(bp)")
 ap.add_argument("--sweep-market", action="store_true",
@@ -1216,7 +1218,7 @@ if a.sweep_relax:
               + "".join(f"{'gap' + str(int(g)):>11}" for g in _gps))
         print("    " + "-" * (10 + 11 * len(_gps)))
         for _ax in _axs:
-            _row = f"    {_ax:<10.3g}"
+            _row = f"    {('条件なし' if _ax <= 0 else f'{_ax:.3g}'):<10}"
             for _gp in _gps:
                 _add_m = ((_rt[a.relax_axis] >= _ax) & (_rt["gap_bp"] >= _gp)
                           & ~_base_m)
@@ -1243,7 +1245,7 @@ if a.sweep_relax:
                     #   (A) は実質「gap 閾値を下げる」だけで --sweep-grid 掃き済み。
                     _bm = _add_m & ~_watched
                     _b = _rt[_bm]
-                    if len(_b) >= 200:
+                    if _ax > 0 and len(_b) >= 200:
                         _vb, _tb2 = _bp(_b), _cluster_t(_b)
                         if _vb >= PASS_BP and _tb2 >= PASS_T:
                             _c = (_vb, _tb2, _ax, _gp, len(_b))
@@ -1258,6 +1260,10 @@ if a.sweep_relax:
             print(_row)
 
     print(f"\n  {'=' * 68}")
+    print(f"  ★★ 読み方: どの升も **『条件なし』の行と比べる**こと。")
+    print(f"     上回っていなければ、効いているのは軸ではなく"
+          f"**gap 閾値を下げたこと**です")
+    print(f"     (それは --sweep-grid で掃き済みの領域)。")
     print(f"  ★ 判定は **(B) 候補プールが増える側だけ**に掛けます。")
     print(f"     (A) は ret1 の条件を満たしていて gap だけ届かなかった分 = "
           f"実質『gap 閾値を下げる』で、--sweep-grid で掃き済みの領域です。")
