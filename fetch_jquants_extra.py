@@ -49,6 +49,17 @@ ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ�
 ap.add_argument("--days", type=int, default=760, help="遡及日数(既定760≒2年)")
 ap.add_argument("--only", type=str, default="", help="取得対象をカンマ区切りで限定(既定=全部)")
 ap.add_argument("--out-dir", type=str, default="jquants_extra", help="CSV出力フォルダ")
+# ── どの項目がどのプランか (2026-08-28 時点) ────────────────────────
+#   全プラン : calendar / master / earnings_cal
+#   Light 〜 : investor_types / TOPIX四本値
+#   Standard〜: short_sale_report(空売り残高) / short_ratio(業種別空売り比率) /
+#              margin_interest(信用週末残高) / margin_alert(日々公表) / 指数四本値
+#   Premium  : breakdown(売買内訳) / **先物四本値** / 前場四本値 / 配当金
+#   アドオン  : 分足・ティック(2年) 5,500円/月
+_PLAN = {"calendar": "全", "master": "全", "earnings_cal": "全",
+         "investor_types": "Light", "short_sale_report": "Standard",
+         "short_ratio": "Standard", "margin_interest": "Standard",
+         "margin_alert": "Standard", "breakdown": "Premium"}
 args = ap.parse_args()
 
 
@@ -79,6 +90,8 @@ def main():
                if args.only else list(DATASETS))
     cli = get_client()
     print(f"[info] 取得 {len(targets)}件 / 遡及{args.days}日 → {out.resolve()}", flush=True)
+    print(f"[info] 必要プラン: "
+          + " / ".join(f"{t}={_PLAN.get(t, '?')}" for t in targets), flush=True)
     ok = ng = 0
     for name in targets:
         mname = DATASETS.get(name)
@@ -87,13 +100,20 @@ def main():
             continue
         method = getattr(cli, mname, None)
         if method is None:
-            print(f"  [skip] {name}: {mname} がクライアントに無い(プラン外?)", flush=True)
+            # ⛔ 『クライアントに無い』は **ライブラリの版が古い**という意味で、
+            #   プランとは別。プラン不足なら呼べるが 403/空になる。
+            #   2026-08-28 に取り違えかけたので、はっきり書き分ける。
+            print(f"  [skip] {name}: **ライブラリに {mname} が無い** "
+                  f"→ pip install -U jquants-api-client で直る可能性",
+                  flush=True)
             ng += 1
             continue
         try:
             df = _try_call(method, start, now)
             if df is None or (hasattr(df, "empty") and df.empty):
-                print(f"  [warn] {name}({mname}): データ空", flush=True)
+                print(f"  [warn] {name}({mname}): **データ空** "
+                      f"— プラン不足でも空が返ることがあります"
+                      f"(エラーにならない)", flush=True)
                 ng += 1
                 continue
             fp = out / f"{name}.csv"
@@ -102,7 +122,19 @@ def main():
             print(f"  [ok] {name}: {len(df)}行 → {fp.name}  cols={cols}", flush=True)
             ok += 1
         except Exception as e:
-            print(f"  [err] {name}({mname}): {e}", file=sys.stderr, flush=True)
+            _m = str(e).lower()
+            if any(k in _m for k in ("403", "forbidden", "not subscribe",
+                                     "subscription", "plan", "unauthorized",
+                                     "401")):
+                _why = "**プラン不足**(Standard 以上が要る項目です)"
+            elif "404" in _m or "not found" in _m:
+                _why = "エンドポイントが無い(ライブラリ/API の版違い)"
+            elif "429" in _m or "rate" in _m:
+                _why = "レート制限(--sleep を増やして再実行)"
+            else:
+                _why = "原因不明"
+            print(f"  [err] {name}({mname}): {_why}\n"
+                  f"        生のエラー: {e}", file=sys.stderr, flush=True)
             ng += 1
     print(f"\n[完了] 成功{ok} / 失敗・空{ng} / 合計{len(targets)}", flush=True)
     print(f"保存先: {out.resolve()}")
