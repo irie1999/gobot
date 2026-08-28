@@ -256,6 +256,28 @@ def describe_coverage(store: dict[str, pd.DataFrame], index_symbol: str) -> None
     print(f"  開始日: 最古 {starts.min():%Y-%m-%d} / 中央 {q[0.5]:%Y-%m-%d} "
           f"/ 90%点 {q[0.9]:%Y-%m-%d}")
     print(f"  最終日: 中央 {ends.median():%Y-%m-%d} / 最新 {ends.max():%Y-%m-%d}")
+    per_year: dict[int, int] = defaultdict(int)
+    for k, v in store.items():
+        if k == index_symbol:
+            continue
+        for y, c in v.index.year.value_counts().items():
+            per_year[int(y)] += int(c)
+    if per_year:
+        yrs = sorted(per_year)
+        print("  年別の銘柄日数 (穴が無いかの確認):")
+        line = []
+        for y in yrs:
+            line.append(f"{y}:{per_year[y]:,}")
+            if len(line) == 5:
+                print("    " + "  ".join(line))
+                line = []
+        if line:
+            print("    " + "  ".join(line))
+        med = sorted(per_year.values())[len(per_year) // 2]
+        thin = [y for y in yrs if per_year[y] < med * 0.5]
+        if thin:
+            print(f"    ⚠ 中央値の半分未満の年: {thin} — キャッシュに穴があります")
+
     span_yrs = (ends.median() - q[0.5]).days / 365.25
     if span_yrs < 5:
         print(f"  ⚠ 中央値で約 {span_yrs:.1f} 年しかありません。年別の符号安定性 (§3) は")
@@ -768,13 +790,86 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         allx = to_daily(sig, "alpha", args.cost_bps, None)
         print(_fmt("全件", stats(allx)))
         print(_fmt(f"上位{args.max_names}件", stats(cap)))
-        eq = float(cap.mean()) * args.capital * args.max_names
-        print(f"  参考: 資金{args.capital/1e4:.0f}万円・{args.max_names}銘柄同時なら "
-              f"1日 {eq:,.0f}円 (年 {eq*TRADING_DAYS:,.0f}円) 相当")
+        # 資金換算: 日次平均は「その日のシグナルに資金を等分した」リターンなので
+        # 資金を掛けるだけでよい (銘柄数を掛けると二重計上になる)。
+        # 発火しない日は 0 なので、年換算は「年あたりの発火日数」で行う。
+        n_years = max((sig["date"].max() - sig["date"].min()).days / 365.25, 1e-9)
+        days_per_year = len(cap) / n_years
+        per_active_day = float(cap.mean()) * args.capital
+        print(f"  発火日 {len(cap):,}日 / 全{len(mkt):,}営業日 "
+              f"({len(cap)/max(len(mkt),1)*100:.1f}%) = 年 {days_per_year:.0f} 日")
+        print(f"  参考: 資金{args.capital/1e4:.0f}万円を発火日にフル投入した場合、"
+              f"発火日あたり {per_active_day:,.0f}円")
+        print(f"        年換算 {per_active_day * days_per_year:,.0f}円 "
+              f"(= 発火日あたり × 年{days_per_year:.0f}日)")
+
+    # ── §8 裾の依存度 ────────────────────────────────────────────
+    print("\n【8】裾の依存度 (少数の日で稼いでいないか)")
+    d = to_daily(sig, "alpha", args.cost_bps, args.max_names).sort_values()
+    if len(d) >= 20:
+        tot = float(d.sum())
+        top5 = float(d.tail(5).sum())
+        top10p = float(d.tail(max(len(d) // 10, 1)).sum())
+        trimmed = d.iloc[int(len(d) * 0.01): len(d) - int(len(d) * 0.01)]
+        print(f"  平均 {d.mean()*10000:>8.2f}bp  /  中央値 {d.median()*10000:>8.2f}bp")
+        if tot > 0:
+            print(f"  上位5日が総損益に占める割合   : {top5/tot*100:>6.1f}%")
+            print(f"  上位10%の日が占める割合       : {top10p/tot*100:>6.1f}%"
+                  + ("   (100%超 = 残りの日は合計でマイナス)"
+                     if top10p / tot > 1 else ""))
+            if top10p / tot > 0.9:
+                print("  ⚠ 上位10%の日で総損益の9割以上。"
+                      "少数の極端な日に依存しています。")
+        else:
+            print("  総損益がプラスでないため、上位日の寄与率は省略します。")
+        st_tr = stats(trimmed)
+        print(_fmt("上下1%を除いた後", st_tr))
+        if st_tr.get("t", 0) < 2:
+            print("  ⚠ 裾を落とすと t が 2 を切ります。エッジの実体は薄いです。")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
     print("            エッジ/コスト比>3 のとき初めて分足での執行検証に進む価値がある。")
+    print("=" * 78)
+
+
+def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
+    """閾値の周辺を総当たりして「台地か尖りか」を見る。
+
+    ある1点だけ成績が良く周囲が悪いなら、それはデータを何度も見た結果の
+    偶然 (多重比較) である可能性が高い。エッジが本物なら、閾値を少し
+    動かしても成績はなだらかに変化する。
+    """
+    global _BOUNCE_SLOPE
+    _BOUNCE_SLOPE = bounce_slope(panel)
+
+    prevs = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+    gaps = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5]
+
+    print("\n" + "=" * 78)
+    print(f"閾値グリッド (コスト {args.cost_bps}bp 控除後の 日次t / グロスα(bp) / 件数)")
+    print("行 = 前日の動き (ATR単位) / 列 = ギャップ (ATR単位)")
+    print("=" * 78)
+    header = "  前日\\ギャップ " + "".join(f"{g:>16.2f}" for g in gaps)
+    print(header)
+    for pv in prevs:
+        cells = []
+        for gp in gaps:
+            sig = apply_signal(panel, mkt, args.raw, pv, gp)
+            if len(sig) < 30:
+                cells.append(f"{'-':>16}")
+                continue
+            d = to_daily(sig, "alpha", args.cost_bps, args.max_names)
+            st = stats(d)
+            if st.get("n", 0) < 10:
+                cells.append(f"{'-':>16}")
+                continue
+            gross = sig["alpha"].mean() * 10000
+            cells.append(f"{st['t']:>5.2f}/{gross:>5.0f}/{len(sig):>4}")
+        print(f"  {pv:>12.2f} " + "".join(cells))
+    print("\n  読み方: t が高い区画が「面」で広がっていれば本物。1区画だけ高く")
+    print("          周囲が低いなら、その閾値はデータを見て選んだ偶然の可能性が高い。")
+    print("          件数が3桁を切る区画は、t の値によらず信頼できない。")
     print("=" * 78)
 
 
@@ -845,6 +940,8 @@ def main() -> int:
                          "存在すれば自動で使う")
     ap.add_argument("--no-cache", dest="no_cache", action="store_true",
                     help="キャッシュを使わず yfinance から取得する")
+    ap.add_argument("--grid", action="store_true",
+                    help="閾値を総当たりして台地か尖りかを見る")
     ap.add_argument("--coverage", action="store_true",
                     help="データの被覆状況だけ出して終了する")
     ap.add_argument("--index-symbol", dest="index_symbol", default=INDEX_SYM,
@@ -902,13 +999,16 @@ def main() -> int:
     if args.coverage:
         print(f"\n対象 {len(syms)} 銘柄。--coverage 指定のためここで終了します。")
         return 0
-    panel, mkt = build_panel(syms, args.workers, args.earnings,
-                             min_prev * (1.0 if args.raw else 0.9),
+    keep_thr = 0.9 if args.grid else min_prev * (1.0 if args.raw else 0.9)
+    panel, mkt = build_panel(syms, args.workers, args.earnings, keep_thr,
                              no_index=args.no_index)
     if args.csv:
         panel.to_csv(args.csv, index=False)
         print(f"パネルを {args.csv} に保存")
-    report(panel, mkt, args)
+    if args.grid:
+        grid_scan(panel, mkt, args)
+    else:
+        report(panel, mkt, args)
     return 0
 
 
