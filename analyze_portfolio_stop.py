@@ -70,6 +70,9 @@ ap.add_argument("--split-date", default="",
 ap.add_argument("--slip-pct", type=float, default=0.0005,
                 help="発火時の決済スリッページ(0.0005=5bp)。全銘柄を成行で畳むので"
                      "個別損切りより不利に見積もる")
+ap.add_argument("--max-dev", type=float, default=0.30,
+                help="5分足と日足のズレの上限(0.30=30%%)。これを超えたら"
+                     "**株式分割の汚染**(§18.27)としてその銘柄日を捨てる")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--min-days", type=int, default=60,
                 help="TRAIN/TEST に最低これだけの営業日が要る")
@@ -147,6 +150,23 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
             return None
         _px = _df["close"].to_numpy(dtype="float64")
         _ts = _df.index
+        # ⛔⛔ **株式分割の汚染ガード**(§18.27)。
+        #   5分足(J-Quants)は保存時のままで、後から分割が起きても再調整されない。
+        #   日足(yfinance)は遡及調整するので、分割銘柄では
+        #   **5分足の価格が日足の 2〜10倍**になる。
+        #   ショートだと (建値 − 5倍の価格) × 株数 で含み損が爆発し、
+        #   予算400万に対して −1億 のような数字が出る(2026-08-28 に実際に出た)。
+        #   picks.csv の d1_close(その日の日足終値)と突き合わせて弾く。
+        _dc = float(getattr(_r, "d1_close", 0.0) or 0.0)
+        if _dc > 0 and abs(float(_px[-1]) / _dc - 1.0) > a.max_dev:
+            _BAD.append((day, str(_r.symbol), float(_px[-1]) / _dc))
+            return None
+        # 建値との整合も見る(寄りの5分足が建値から大きく離れていたら別物)
+        if float(_r.entry_p) > 0 and \
+                abs(float(_px[0]) / float(_r.entry_p) - 1.0) > a.max_dev:
+            _BAD.append((day, str(_r.symbol),
+                         float(_px[0]) / float(_r.entry_p)))
+            return None
         # ショート(side=1) は 建値-現値、ロング(side=-1) は 現値-建値
         _sgn = 1.0 if int(_r.side) > 0 else -1.0
         _pl = (float(_r.entry_p) - _px) * _sgn * int(_r.qty)
@@ -161,6 +181,8 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     return _m.index, _m.sum(axis=1).to_numpy(dtype="float64"), _fin, _n
 
 
+_BAD: list = []                # 分割汚染などで弾いた (日, 銘柄, 倍率)
+
 # 日ごとの建玉(スリッページの基準)。閾値×日 の二重ループで毎回計算しないよう先に持つ
 _NOTIONAL = (P.assign(_n=P["entry_p"] * P["qty"])
              .groupby("date")["_n"].sum().to_dict())
@@ -174,7 +196,23 @@ for _day, _g in P.groupby("date"):
         _skip += 1
         continue
     _days[_day] = _p
-print(f"[経路] 作れた {len(_days):,}営業日 / 5分足が足りず除外 {_skip:,}日")
+print(f"[経路] 作れた {len(_days):,}営業日 / 除外 {_skip:,}日")
+if _BAD:
+    _bs = sorted({b[1] for b in _BAD})
+    print(f"  ⛔ **5分足と日足のズレで弾いた {len(_BAD):,}銘柄日 / "
+          f"{len(_bs):,}銘柄**(株式分割の汚染 / §18.27)")
+    for _d, _sy, _rt in sorted(_BAD, key=lambda x: -abs(x[2]))[:5]:
+        print(f"     {_d} {_sy} … 5分足/日足 = **{_rt:.2f}倍**")
+
+# ★ 自己検算: 経路の最終値の合計 は その日の pnl の合計 と一致するはず。
+#   (最後の5分足の終値 ≒ 日足の終値なので)
+_e = [abs(float(_v[1][-1]) - float(_v[2])) for _v in _days.values()]
+_ee = float(np.mean(_e)) if _e else 0.0
+print(f"  ★ 自己検算: 経路の最終値 vs 日足の損益 … 平均誤差 "
+      f"**{_ee:,.0f}円/日**")
+if _ee > 20000:
+    print(f"     ⛔ **誤差が大きすぎます**。5分足と日足が別物を指している"
+          f"可能性があります(--max-dev を下げて再実行)")
 if len(_days) < a.min_days * 2:
     sys.exit(f"[error] 営業日が少なすぎます({len(_days)}日)。"
              f"5分足は 2024-07〜 の約2年しかありません(§18.6)")
