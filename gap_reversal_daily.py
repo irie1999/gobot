@@ -827,6 +827,23 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         if st_tr.get("t", 0) < 2:
             print("  ⚠ 裾を落とすと t が 2 を切ります。エッジの実体は薄いです。")
 
+    # ── §9 売買方向の分離 ────────────────────────────────────────
+    print("\n【9】方向別 (制度的な制約が全く違うので必ず分けて見る)")
+    print("  空売り側 = ギャップアップを売る。空売り規制・貸株の可否・増担保・")
+    print("             値幅制限が効く。買い側 = ギャップダウンを買う。制約なし。")
+    for sd, name in ((1.0, "買い側 (ギャップダウンを買う)"),
+                     (-1.0, "空売り側 (ギャップアップを売る)")):
+        g = sig[sig["side"] == sd]
+        if len(g) < 30:
+            print(f"  {name}: サンプル不足 ({len(g)}件)")
+            continue
+        st = stats(to_daily(g, "alpha", args.cost_bps, args.max_names))
+        print(_fmt(name, st, width=30))
+        print(f"      グロス {g['alpha'].mean()*10000:>6.1f}bp/件  "
+              f"{len(g):,}件  平均ギャップ {g['gap'].abs().mean()*100:.2f}%")
+    print("  → 買い側だけで成立するなら、空売りの制度的制約を回避できます。")
+    print("     空売り側にしか無いなら、実弾の前に証券会社への照会が必須です。")
+
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
     print("            エッジ/コスト比>3 のとき初めて分足での執行検証に進む価値がある。")
