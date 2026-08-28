@@ -60,6 +60,8 @@ ATR_PERIOD    = 20
 MIN_PRICE     = 1000.0
 MAX_PRICE     = 6000.0
 MIN_TURNOVER  = 3e8     # 20日平均売買代金の下限 (円)。執行可能性のフィルタ
+_BOUNCE_SLOPE = 0.0    # bounce_slope() が実行時に設定する
+
 COST_BPS      = 30.0    # 往復コスト (bp)。呼値+板寄せ+引け成行の想定
 TRADING_DAYS  = 245
 
@@ -67,6 +69,127 @@ TRADING_DAYS  = 245
 # ══════════════════════════════════════════════════════════════════
 # データ取得
 # ══════════════════════════════════════════════════════════════════
+# ローカル日足を読み込んだ場合の置き場 (yfinance を使わずに済ませる)
+_LOCAL: dict[str, pd.DataFrame] | None = None
+
+_NEED = ["open", "high", "low", "close"]
+
+
+def _normalize_daily(df: pd.DataFrame, name: str) -> pd.DataFrame | None:
+    """列名・型・index を揃える。date/Date 列があれば index にする。"""
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated(keep="first")]
+    for c in ("date", "datetime", "time", "日付"):
+        if c in df.columns:
+            df = df.set_index(pd.to_datetime(df[c])).drop(columns=[c])
+            break
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
+    df = df[df.index.notna()].sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    if any(c not in df.columns for c in _NEED):
+        print(f"  skip {name}: 列 {_NEED} が揃っていません "
+              f"({list(df.columns)[:8]})", file=sys.stderr)
+        return None
+    if "volume" not in df.columns:
+        df["volume"] = 0.0
+    out = df[_NEED + ["volume"]].apply(pd.to_numeric, errors="coerce")
+    out = out.dropna(subset=_NEED)
+    out = out[(out[_NEED] > 0).all(axis=1)]
+    return out if len(out) >= 250 else None
+
+
+def _read_any(path: Path) -> pd.DataFrame | None:
+    """csv / csv.gz / tsv / parquet / pkl を読む。"""
+    n = path.name.lower()
+    try:
+        if n.endswith((".parquet", ".pq")):
+            return pd.read_parquet(path)
+        if n.endswith((".pkl", ".pickle")):
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        sep = "\t" if ".tsv" in n else ","
+        return pd.read_csv(path, sep=sep)
+    except Exception as e:
+        print(f"  読み込み失敗 {path.name}: {e}", file=sys.stderr)
+        return None
+
+
+def load_local(data_dir: str | None, data_file: str | None) -> list[str]:
+    """ローカル日足を _LOCAL に載せ、銘柄シンボルの一覧を返す。
+
+    --data-dir : 銘柄ごとのファイル (<SYM>.csv / .csv.gz / .parquet / .pkl)。
+                 ファイル名の拡張子を除いた部分が銘柄コードになる。
+                 `7203_T` のような形は `7203.T` に読み替える。
+    --data-file: 1本の長形式ファイル (symbol,date,open,high,low,close,volume)。
+    どちらも列名は大文字小文字を問わない。日付は date/Date/datetime/index のどれでも可。
+    """
+    global _LOCAL
+    store: dict[str, pd.DataFrame] = {}
+
+    if data_file:
+        raw = _read_any(Path(data_file))
+        if raw is None:
+            raise SystemExit(f"{data_file} を読めません")
+        raw.columns = [str(c).strip().lower() for c in raw.columns]
+        symcol = next((c for c in ("symbol", "code", "ticker", "銘柄コード")
+                       if c in raw.columns), None)
+        if symcol is None:
+            raise SystemExit(
+                f"{data_file} に銘柄列 (symbol/code/ticker) がありません")
+        for sym, g in raw.groupby(symcol):
+            nd = _normalize_daily(g.drop(columns=[symcol]), str(sym))
+            if nd is not None:
+                store[str(sym)] = nd
+
+    if data_dir:
+        d = Path(data_dir)
+        if not d.is_dir():
+            raise SystemExit(f"{data_dir} はディレクトリではありません")
+        files = sorted(
+            f for f in d.iterdir()
+            if f.is_file() and f.name.lower().endswith(
+                (".csv", ".csv.gz", ".tsv", ".parquet", ".pq", ".pkl", ".pickle"))
+        )
+        if not files:
+            raise SystemExit(f"{data_dir} に日足ファイルが見つかりません")
+        for f in files:
+            raw = _read_any(f)
+            if raw is None:
+                continue
+            stem = f.name
+            for suf in (".csv.gz", ".csv", ".tsv", ".parquet", ".pq", ".pkl", ".pickle"):
+                if stem.lower().endswith(suf):
+                    stem = stem[: -len(suf)]
+                    break
+            nd = _normalize_daily(raw, stem)
+            if nd is not None:
+                store[stem] = nd
+
+    if not store:
+        raise SystemExit("ローカルデータを1銘柄も読み込めませんでした")
+
+    # 7203_T / 7203 / 72030 のような表記ゆれを .T 形式にも引けるようにする
+    alias: dict[str, pd.DataFrame] = {}
+    for k, v in store.items():
+        alias[k] = v
+        if k.endswith("_T"):
+            alias[k[:-2] + ".T"] = v
+        elif k.isdigit() and len(k) == 4:
+            alias[k + ".T"] = v
+        elif k.isdigit() and len(k) == 5 and k.endswith("0"):
+            alias[k[:4] + ".T"] = v
+    _LOCAL = alias
+
+    syms = sorted(store.keys())
+    span = min(v.index[0] for v in store.values()), max(v.index[-1] for v in store.values())
+    print(f"ローカル日足: {len(syms)} 銘柄 / {span[0]:%Y-%m-%d} 〜 {span[1]:%Y-%m-%d}")
+    return syms
+
+
 def _cache_path(symbol: str) -> Path:
     return CACHE_DIR / f"{symbol.replace('.', '_').replace('^', 'IDX_')}.pkl"
 
@@ -77,6 +200,9 @@ def fetch_daily(symbol: str, start: str = START_DATE) -> pd.DataFrame | None:
     backtest_limit_entry.fetch はキャッシュの「開始日」を見ないため、
     長期検証には使えない。ここでは開始日も検証する。
     """
+    if _LOCAL is not None:
+        return _LOCAL.get(symbol)
+
     p = _cache_path(symbol)
     want_start = pd.Timestamp(start)
     if p.exists():
@@ -209,10 +335,15 @@ def build_symbol_rows(
     d["prev_ret"] = d["ret"].shift(1)
 
     # 市場成分の控除: ローリングβ (t-1 までの情報のみ)
-    j = d.join(idx[["idx_ret", "idx_gap"]], how="left")
-    cov = j["ret"].rolling(BETA_WINDOW).cov(j["idx_ret"])
-    var = j["idx_ret"].rolling(BETA_WINDOW).var()
-    beta = (cov / var.replace(0, np.nan)).shift(1).clip(-3, 3)
+    j = d.join(idx[["idx_ret", "idx_gap"]], how="left") if len(idx) else d.assign(
+        idx_ret=0.0, idx_gap=0.0)
+    if len(idx):
+        cov = j["ret"].rolling(BETA_WINDOW).cov(j["idx_ret"])
+        var = j["idx_ret"].rolling(BETA_WINDOW).var()
+        beta = (cov / var.replace(0, np.nan)).shift(1).clip(-3, 3)
+    else:
+        # 指数なし: 市場成分を控除しない (resid_gap = 生ギャップ)
+        beta = pd.Series(1.0, index=j.index)
     j["beta"] = beta
     j["resid_gap"] = j["gap"] - beta * j["idx_gap"]
     j["resid_prev"] = j["prev_ret"] - beta * j["idx_ret"].shift(1)
@@ -270,14 +401,24 @@ def build_symbol_rows(
 
 
 def build_panel(
-    symbols: list[str], workers: int, use_earnings: bool, min_prev_atr: float
+    symbols: list[str], workers: int, use_earnings: bool, min_prev_atr: float,
+    no_index: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    idx_df = fetch_daily(INDEX_SYM)
+    idx_df = None if no_index else fetch_daily(INDEX_SYM)
     if idx_df is None:
-        raise SystemExit(f"{INDEX_SYM} の日足を取得できません")
-    idx = pd.DataFrame(index=idx_df.index)
-    idx["idx_ret"] = idx_df["close"].pct_change()
-    idx["idx_gap"] = idx_df["open"] / idx_df["close"].shift(1) - 1.0
+        if not no_index:
+            raise SystemExit(
+                f"{INDEX_SYM} の日足がありません。指数ファイルを同梱するか "
+                f"--index-symbol で名前を指定するか、--no-index で市場成分の控除を "
+                f"省いてください (その場合 resid_gap = 生ギャップ になります)")
+        # 指数なし: β=1・指数リターン0 として扱う (= 市場成分を控除しない)
+        idx = pd.DataFrame(columns=["idx_ret", "idx_gap"], dtype=float)
+        print("警告: 指数なしで実行します。§1 の α は同日ユニバース平均で代替されますが、"
+              "ギャップの市場成分は控除されません。")
+    else:
+        idx = pd.DataFrame(index=idx_df.index)
+        idx["idx_ret"] = idx_df["close"].pct_change()
+        idx["idx_gap"] = idx_df["open"] / idx_df["close"].shift(1) - 1.0
 
     rows: list[pd.DataFrame] = []
     uni_sum: dict = defaultdict(float)
@@ -288,7 +429,7 @@ def build_panel(
         df = fetch_daily(sym)
         if df is None:
             return None
-        earn = fetch_earnings(sym) if use_earnings else None
+        earn = fetch_earnings(sym) if (use_earnings and _LOCAL is None) else None
         return build_symbol_rows(df, idx, sym, earn, min_prev_atr)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -346,11 +487,32 @@ def apply_signal(panel: pd.DataFrame, mkt: pd.Series, raw: bool,
     return attach_pnl(sig, mkt)
 
 
+def bounce_slope(panel: pd.DataFrame) -> float:
+    """全銘柄・全日で o2c を gap に回帰した傾き。
+
+    始値は gap の分子であり o2c の分母でもあるため、始値の測定ノイズ
+    (板寄せの偏り・気配のバウンス) だけで両者は機械的に負の相関を持つ。
+    これは過剰反応とは無関係で、ランダムウォークでも必ず出る。
+    シグナルの α からこの分を差し引かないと、微細構造のノイズを
+    エッジと誤認する。
+    """
+    x = panel["gap"].to_numpy(dtype=float)
+    y = panel["o2c"].to_numpy(dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < 500 or x.std() == 0:
+        return 0.0
+    return float(np.cov(x, y)[0, 1] / x.var())
+
+
 def attach_pnl(sig: pd.DataFrame, mkt: pd.Series) -> pd.DataFrame:
     sig = sig.copy()
     sig["ret"] = sig["side"] * sig["o2c"]
     sig["mkt"] = sig["date"].map(mkt)
     sig["alpha"] = sig["ret"] - sig["side"] * sig["mkt"].fillna(0.0)
+    # 微細構造 (始値ノイズ) で説明できる分を控除した α
+    b = _BOUNCE_SLOPE
+    sig["alpha_x"] = sig["alpha"] - sig["side"] * (b * sig["gap"])
     return sig
 
 
@@ -403,6 +565,9 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     gap_thr = args.gap_thr if args.gap_thr is not None else (
         GAP_PCT if args.raw else GAP_ATR)
 
+    global _BOUNCE_SLOPE
+    _BOUNCE_SLOPE = bounce_slope(panel)
+
     sig = apply_signal(panel, mkt, args.raw, prev_thr, gap_thr)
     mode = "生%" if args.raw else "ATR単位"
     print("\n" + "=" * 78)
@@ -424,6 +589,14 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     d_alp = to_daily(sig, "alpha", args.cost_bps, args.max_names)
     print(_fmt("生リターン", stats(d_ret)))
     print(_fmt("α (市場控除後)", stats(d_alp)))
+    d_ax = to_daily(sig, "alpha_x", args.cost_bps, args.max_names)
+    print(_fmt("α (始値ノイズも控除)", stats(d_ax)))
+    print(f"  無条件回帰 o2c ~ gap の傾き = {_BOUNCE_SLOPE:+.4f}"
+          f"  (平均ギャップ {sig['gap'].abs().mean()*100:.2f}% で "
+          f"{abs(_BOUNCE_SLOPE) * sig['gap'].abs().mean() * 10000:.1f}bp 相当)")
+    print("  始値は gap の分子かつ o2c の分母なので、始値の測定ノイズだけで")
+    print("  両者は機械的に負相関します。ランダムウォークでも出るので、")
+    print("  ★ 最後の行が消えるなら、それは過剰反応ではなく微細構造ノイズです。")
 
     # ── §2 サンプル水増しの実演 ───────────────────────────────────
     print("\n【2】検定単位の違い (トレード単位は t を水増しする)")
@@ -576,16 +749,27 @@ def self_test() -> int:
 
     sig = apply_signal(panel, mkt, False, 1.0, 0.5)
     st = stats(to_daily(sig, "alpha", 0.0, None))
-    ok = st["t"] > 5 and st["mean_bp"] > 5
-    print(f"\nSELF-TEST: 埋め込みエッジ 25bp → 検出 {st['mean_bp']:.1f}bp (t={st['t']:.1f})")
+    sx = stats(to_daily(sig, "alpha_x", 0.0, None))
+    ok = st["t"] > 5 and st["mean_bp"] > 5 and sx["mean_bp"] > 5
+    print(f"\nSELF-TEST: 埋め込みエッジ 25bp → 検出 {st['mean_bp']:.1f}bp (t={st['t']:.1f})"
+          f" / 始値ノイズ控除後 {sx['mean_bp']:.1f}bp (t={sx['t']:.1f})")
     print("SELF-TEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
 
 # ══════════════════════════════════════════════════════════════════
 def main() -> int:
+    global INDEX_SYM
     ap = argparse.ArgumentParser(description="ギャップ反転の日足検証")
     ap.add_argument("--symbols", help="銘柄リスト .py")
+    ap.add_argument("--data-dir", dest="data_dir",
+                    help="ローカル日足のディレクトリ (<SYM>.csv/.parquet/.pkl)")
+    ap.add_argument("--data-file", dest="data_file",
+                    help="ローカル日足の長形式1ファイル (symbol,date,ohlcv)")
+    ap.add_argument("--index-symbol", dest="index_symbol", default=INDEX_SYM,
+                    help=f"市場成分の控除に使う指数 (既定 {INDEX_SYM})")
+    ap.add_argument("--no-index", dest="no_index", action="store_true",
+                    help="指数が無い場合。市場成分を控除せず生ギャップで検証する")
     ap.add_argument("--limit", type=int, help="先頭N銘柄だけ (デバッグ)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--raw", action="store_true", help="ATR正規化せず生%閾値を使う")
@@ -603,11 +787,21 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
+    INDEX_SYM = args.index_symbol
+
     min_prev = (args.prev_thr if args.prev_thr is not None
                 else (PREV_MOVE_PCT if args.raw else PREV_MOVE_ATR))
-    syms = load_universe(args.symbols, args.limit)
+
+    if args.data_dir or args.data_file:
+        syms = load_local(args.data_dir, args.data_file)
+        syms = [s for s in syms if s != INDEX_SYM]
+        if args.limit:
+            syms = syms[: args.limit]
+    else:
+        syms = load_universe(args.symbols, args.limit)
     panel, mkt = build_panel(syms, args.workers, args.earnings,
-                             min_prev * (1.0 if args.raw else 0.9))
+                             min_prev * (1.0 if args.raw else 0.9),
+                             no_index=args.no_index)
     if args.csv:
         panel.to_csv(args.csv, index=False)
         print(f"パネルを {args.csv} に保存")

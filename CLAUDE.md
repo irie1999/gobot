@@ -712,6 +712,18 @@ python forward_test.py --report --aggressive   # aggressive 実績
 **採用の目安**: 日次 t > 3 かつ 年別で大半がプラス かつ 単調性あり かつ
 エッジ/コスト比 > 3。ここを通って初めて、分足での執行検証に進む価値がある。
 
+### 16.3.5 ⛔ 始値ノイズによる見せかけのエッジ
+
+`gap = 始値 / 前日終値` と `o2c = 終値 / 始値` は **同じ始値を分子と分母に
+共有している** ため、始値の測定ノイズ (板寄せの偏り・気配のバウンス) だけで
+機械的に負の相関を持ちます。**ランダムウォークでも必ず出ます。**
+
+実測: 合成ランダムウォーク (エッジ0) で α = +42bp / t = 27。控除すると +2.6bp / t = 1.7。
+
+レポート §1 の 3 行目「α (始値ノイズも控除)」が、全銘柄・全日で
+`o2c ~ gap` を回帰した傾き分を差し引いた値です。**この行が消えるなら、それは
+過剰反応の巻き戻しではなく微細構造ノイズ**なので、そこで打ち切ってください。
+
 ### 16.5 使い方
 
 ```
@@ -722,7 +734,20 @@ python gap_reversal_daily.py --raw            # 1.75%/1.0% の固定閾値版
 python gap_reversal_daily.py --earnings       # 決算日を取得して分離
 python gap_reversal_daily.py --cost-bps 40 --max-names 13
 python gap_reversal_daily.py --csv panel.csv  # 候補パネルを書き出す
+
+# ローカル日足を使う (yfinance を叩かない)
+python gap_reversal_daily.py --data-dir ./daily        # <SYM>.csv/.parquet/.pkl を並べたディレクトリ
+python gap_reversal_daily.py --data-file all.csv       # symbol,date,ohlcv の長形式1ファイル
+python gap_reversal_daily.py --data-dir ./daily --no-index   # 指数ファイルが無い場合
 ```
+
+`--data-dir` / `--data-file` を指定すると yfinance を一切使いません
+(ネットワーク不可の環境用)。列名は大文字小文字を問わず
+`open/high/low/close/volume` (+ 日付は `date`/`datetime`/index のどれでも可)。
+ファイル名 `7203_T.csv` / `7203.csv` / `72030.csv` はいずれも `7203.T` として
+も引けます。市場成分の控除には指数 (既定 `^N225`) が必要で、同じディレクトリに
+`^N225.csv` を置くか `--index-symbol` で名前を指定します。無い場合は
+`--no-index` (β=1・指数リターン0 扱い = 残差ギャップが生ギャップになる)。
 
 `--self-test` は既知の 25bp のエッジを埋め込んだ合成データを流し、レポートが
 それを検出できるかを確認します (ネットワーク不要)。ロジックを触ったら必ず実行。
