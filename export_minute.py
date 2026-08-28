@@ -1,19 +1,24 @@
 r"""export_minute.py — 5分足を「必要な銘柄日だけ」書き出す(他の環境へ渡す用)
 
-なぜ全量ではないのか
---------------------
-1,540銘柄 × 約490営業日 × 約66バー = **約5,000万行**(500MB〜1GB)。
-そのまま渡すのは現実的ではありません。
+既定は **全量**(削らない)
+-------------------------
+1,540銘柄 × 約490営業日 × 約66バー = **約5,000万行 / 数GB**。
 
-一方でこの戦略は **同日決済**なので、必要なのは「候補になった銘柄日」の分だけです。
-候補かどうかは前日の日足だけで決まる(前日リターン)ので、日足で先に絞ってから
-その日の分足だけを切り出せば、桁が2つ落ちます。
+そのままだと ① 一度に concat すると RAM 3GB超 ② 1ファイル2GB超 になるので、
+**銘柄をまとめて処理したら都度ファイルへ吐きます**(`--part-symbols`、既定150)。
+読む側は glob で1つにまとめられます。
 
-  |前日リターン| >= 1.0%   → 約1,400万行(150〜250MB)
-  |前日リターン| >= 1.75%  → 約 600万行( 70〜100MB)
+サイズを落としたいときだけ、日足で先に銘柄日を絞れます(この戦略は**同日決済**
+なので、候補かどうかは前日の日足だけで決まります):
 
-⚠ **既定は 1.0%(緩め)** にしてあります。1.75% で切ると現行ルールの条件そのものに
-  なってしまい、渡した先が別の切り口を思いついても検証できなくなるためです。
+  --min-abs-ret1 0     **既定。全量** 約5,000万行 / 数GB
+  --min-abs-ret1 1.0   約1,400万行(150〜250MB)
+  --min-abs-ret1 1.75  約 600万行( 70〜100MB) ⛔ 現行ルールの条件そのもの
+
+⚠ 1.75% で切ると渡した先が別の切り口を思いついても検証できません。
+  絞るなら 1.0% までにしてください。
+
+`--float32` でサイズがほぼ半分になります(株価6,000円までなら float32 で正確)。
 
 ⛔ 株式分割の扱い(渡した先が必ず踏みます)
 ------------------------------------------
@@ -31,10 +36,10 @@ r"""export_minute.py — 5分足を「必要な銘柄日だけ」書き出す(�
 
 使い方
 ------
-  python export_minute.py                        # 既定 |前日リターン|>=1.0% / 730日
-  python export_minute.py --min-abs-ret1 1.75    # 現行ルールと同じ幅まで絞る
-  python export_minute.py --min-abs-ret1 0       # 全量(⛔ 500MB〜1GB)
-  python export_minute.py --days 400 --workers 8
+  python export_minute.py --limit 50             # ★まず50銘柄で見当をつける
+  python export_minute.py --float32              # 全量。150銘柄ごとに分割
+  python export_minute.py --part-symbols 100     # 1ファイルをもっと小さく
+  python export_minute.py --min-abs-ret1 1.0     # サイズを落としたいとき
   python export_minute.py --csv                  # parquet が使えないとき
 
 ⚠ 照会のみ。発注はしません。
@@ -73,12 +78,23 @@ def main() -> None:
     ap.add_argument("--symbols", default="symbols_listed_prime.py")
     ap.add_argument("--days", type=int, default=730,
                     help="遡る日数(暦日)。分足は2年ローリングなので730が上限相当")
-    ap.add_argument("--min-abs-ret1", type=float, default=1.0,
-                    help="この|前日リターン|%%以上の銘柄日だけ出す。0=全量")
+    ap.add_argument("--min-abs-ret1", type=float, default=0.0,
+                    help="この|前日リターン|%%以上の銘柄日だけ出す。"
+                         "**既定0=全量**(削らずに渡す)")
     ap.add_argument("--limit", type=int, default=0, help="先頭N銘柄だけ(お試し)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--out", default="minute_5m.parquet")
     ap.add_argument("--csv", action="store_true")
+    ap.add_argument("--part-symbols", type=int, default=150,
+                    help="この銘柄数ごとに1ファイルへ分ける。0=1ファイル。"
+                         "⛔ 全量は約5,000万行で、まとめると RAM 3GB超・"
+                         "1ファイル2GB超になります")
+    ap.add_argument("--float32", action="store_true",
+                    help="価格・出来高を float32 で書く(サイズがほぼ半分)。"
+                         "株価6,000円までなら float32 で正確に表せます")
+    ap.add_argument("--compression", default="zstd",
+                    choices=["zstd", "snappy", "gzip", "brotli"],
+                    help="parquet の圧縮。zstd が最も小さい")
     a = ap.parse_args()
 
     if not DATA_DIR.exists():
@@ -87,8 +103,14 @@ def main() -> None:
     syms = _load_symbols(a.symbols)
     if a.limit > 0:
         syms = syms[:a.limit]
-    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / "
-          f"|前日リターン| >= {a.min_abs_ret1:.2f}% / 5分足 {DATA_DIR}")
+    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 5分足 {DATA_DIR}")
+    print(f"[info] 絞り込み … "
+          + ("**なし(全量)**" if a.min_abs_ret1 <= 0
+             else f"|前日リターン| >= {a.min_abs_ret1:.2f}%")
+          + f" / float32={'ON' if a.float32 else 'OFF'} / {a.compression}")
+    if a.min_abs_ret1 <= 0:
+        print(f"  ⚠ 全量は約5,000万行・数GBになります。"
+              f"{a.part_symbols or len(syms)}銘柄ごとにファイルを分けます")
 
     def _one(sym: str):
         # ── ① 日足で「どの日を出すか」を決める ────────────────────
@@ -127,44 +149,84 @@ def main() -> None:
             out.append(_t)
         return pd.concat(out) if out else None
 
-    rows, ng = [], 0
-    with ThreadPoolExecutor(max_workers=a.workers) as ex:
-        for i, r in enumerate(ex.map(_one, syms), 1):
-            if r is None:
-                ng += 1
-            else:
-                rows.append(r)
-            if i % 100 == 0:
-                _n = sum(len(x) for x in rows)
-                print(f"  … {i:,}/{len(syms):,}(取れず {ng:,} / "
-                      f"{_n:,}行)", flush=True)
+    # ── 書き出し ────────────────────────────────────────────────
+    #   ⛔ 全量は約5,000万行。まとめて concat すると RAM 3GB超・1ファイル2GB超に
+    #     なるので、**銘柄をまとめて処理したら都度ファイルへ吐く**。
+    _base = Path(a.out)
+    _stem = _base.with_suffix("").name
+    _dir = _base.parent
+    _ext = ".csv.gz" if a.csv or _base.suffix != ".parquet" else ".parquet"
+    _bs = a.part_symbols if a.part_symbols > 0 else len(syms)
+    _F32 = ["open", "high", "low", "close", "volume", "d_close"]
 
-    if not rows:
-        sys.exit("[error] 1銘柄も取れませんでした")
-
-    df = pd.concat(rows).rename_axis("datetime").reset_index()
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.sort_values(["datetime", "symbol"], ignore_index=True)
-
-    out = Path(a.out)
-    if a.csv or out.suffix != ".parquet":
-        out = Path(str(out.with_suffix("")) + ".csv.gz")
-        df.to_csv(out, index=False, compression="gzip", encoding="utf-8")
-    else:
+    def _write(df: pd.DataFrame, path: Path) -> None:
+        if a.float32:
+            for c in _F32:
+                if c in df.columns:
+                    df[c] = df[c].astype("float32")
+        if _ext == ".csv.gz":
+            df.to_csv(path, index=False, compression="gzip", encoding="utf-8")
+            return
         try:
-            df.to_parquet(out, index=False, compression="snappy")
+            df.to_parquet(path, index=False, compression=a.compression)
         except Exception as e:
             print(f"[warn] parquet で書けません({e}) → csv.gz にします")
-            out = Path(str(out.with_suffix("")) + ".csv.gz")
-            df.to_csv(out, index=False, compression="gzip", encoding="utf-8")
+            df.to_csv(path.with_suffix(".csv.gz"), index=False,
+                      compression="gzip", encoding="utf-8")
 
-    _sd = df.groupby([df["datetime"].dt.date, "symbol"]).ngroups
-    print(f"\n[done] {out}  {out.stat().st_size / 1024 / 1024:,.1f} MB")
-    print(f"  行数       {len(df):,}")
+    _files: list[Path] = []
+    _tot, _sd, _ng, _syms_ok = 0, 0, 0, 0
+    _tmin, _tmax = None, None
+    _cols: list[str] = []
+    _parts = (len(syms) + _bs - 1) // _bs
+    for _p in range(_parts):
+        _batch = syms[_p * _bs:(_p + 1) * _bs]
+        _rows = []
+        with ThreadPoolExecutor(max_workers=a.workers) as ex:
+            for r in ex.map(_one, _batch):
+                if r is None:
+                    _ng += 1
+                else:
+                    _rows.append(r)
+        if not _rows:
+            print(f"  part {_p + 1}/{_parts}: 0行(全部取れず)", flush=True)
+            continue
+        df = pd.concat(_rows).rename_axis("datetime").reset_index()
+        del _rows
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values(["datetime", "symbol"], ignore_index=True)
+        _name = (f"{_stem}{_ext}" if _parts == 1
+                 else f"{_stem}_part{_p + 1:02d}{_ext}")
+        _path = _dir / _name
+        _write(df, _path)
+        _files.append(_path)
+        _tot += len(df)
+        _sd += df.groupby([df["datetime"].dt.date, "symbol"]).ngroups
+        _syms_ok += df["symbol"].nunique()
+        _cols = list(df.columns)
+        _tmin = df["datetime"].min() if _tmin is None else min(_tmin, df["datetime"].min())
+        _tmax = df["datetime"].max() if _tmax is None else max(_tmax, df["datetime"].max())
+        _mb = _path.stat().st_size / 1024 / 1024 if _path.exists() else 0.0
+        print(f"  part {_p + 1}/{_parts}: {_path.name}  {len(df):,}行  "
+              f"{_mb:,.1f} MB  (累計 {_tot:,}行)", flush=True)
+        del df
+
+    if not _files:
+        sys.exit("[error] 1銘柄も取れませんでした")
+
+    _mb = sum(f.stat().st_size for f in _files if f.exists()) / 1024 / 1024
+    print(f"\n[done] {len(_files)}ファイル  合計 {_mb:,.1f} MB")
+    print(f"  行数       {_tot:,}")
     print(f"  銘柄日     {_sd:,}")
-    print(f"  銘柄       {df['symbol'].nunique():,}(取れず {ng:,})")
-    print(f"  期間       {df['datetime'].min()} 〜 {df['datetime'].max()}")
-    print(f"  列         {', '.join(df.columns)}")
+    print(f"  銘柄       {_syms_ok:,}(取れず {_ng:,})")
+    print(f"  期間       {_tmin} 〜 {_tmax}")
+    print(f"  列         {', '.join(_cols)}")
+    if len(_files) > 1:
+        print(f"\n  読み込みは glob で1つにまとめられます:")
+        print(f"    import pandas as pd, glob")
+        print(f"    df = pd.concat(pd.read_parquet(f) "
+              f"for f in sorted(glob.glob('{_stem}_part*{_ext}')))")
+        print(f"  ⚠ 全量なら合計で数GBです。列や期間を絞って読むほうが確実です")
     print(f"\n  ⚠ **行は落としていません**。`d_close`(その日の日足終値)を付けたので、")
     print(f"     受け取った側で『5分足の終値の中央値 ÷ d_close』を見て、")
     print(f"     大きくずれる銘柄日(分割が未調整)を外してください(30%が目安)。")
