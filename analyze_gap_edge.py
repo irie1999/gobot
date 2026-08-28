@@ -292,6 +292,21 @@ ap.add_argument("--sweep-relax", action="store_true",
                      "ギャップ閾値を下げて拾えるか。"
                      "⛔ N は件数不足(稼働率40%%)なので、フィルタで bp を上げても"
                      "総額は落ちる。足せるかを見る。TRAIN のみ")
+ap.add_argument("--sweep-watch", action="store_true",
+                help="★★ **どの50件を読むか**の並べ替えを TRAIN だけで掃く。"
+                     "⛔ 発注順(--sweep-ops の rank)とは別物。あちらは予算が"
+                     "効く日にしか働かないが、こちらは **毎日効く**"
+                     "(候補は中央値120件/日 / watch50 で5,473件を取り逃し)")
+ap.add_argument("--watch-orders", type=str,
+                default="liq,ret1,ret2,ret3,ret5,ret20,atr_pct,range_pos",
+                help="--sweep-watch で掃く軸(すべて降順)。"
+                     "⚠ **D時点で確定する列だけ**。gap_bp / entry_p は"
+                     "D+1 の始値なので先読み")
+ap.add_argument("--watch-nulls", type=int, default=12,
+                help="ランダム順の帯の本数。§18.24: 帯を作ってから判定する")
+ap.add_argument("--confirm-watch", type=str, default="",
+                help="⛔ **TEST を1回消費する。** --sweep-watch で残った軸を"
+                     "1つだけ渡す。1候補につき1回きり")
 ap.add_argument("--relax-axis", type=str, default="up_streak",
                 help="--sweep-relax で使う軸(--list-axes で一覧)")
 ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
@@ -436,6 +451,7 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
+                    or a.sweep_watch or bool(a.confirm_watch)
                     or a.tail_diag or a.hedge or bool(a.dump_picks))
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
@@ -1031,6 +1047,20 @@ if _NEEDS_TRAIN:
         print(f"       ⚠ **watch も予算も1つを共有**します。kabu の登録上限は"
               f"合計50件なので、両側の候補を混ぜて売買代金順に上位を取ります")
 
+# ⛔ watch の並べ替えに使えるのは **D 時点で確定する列だけ**。
+#   D+1 の始値から作る列(gap_bp / entry_p / gap_hi_bp / pnl)は先読み。
+_WATCH_OK = ("liq", "ret1", "ret2", "ret3", "ret5", "ret20",
+             "atr_pct", "range_pos")
+
+
+def _check_worder(worder: str) -> None:
+    if worder != "rand" and worder not in _WATCH_OK:
+        raise ValueError(
+            f"worder='{worder}' は使えません。D時点で確定するのは "
+            f"{', '.join(_WATCH_OK)} と rand だけ"
+            f"(gap_bp/entry_p/gap_hi_bp は D+1 の始値なので先読み)")
+
+
 def _sf(v) -> float:
     """NaN / None / 空を 0.0 にする安全な float。picks の任意列に使う。"""
     try:
@@ -1053,9 +1083,17 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
 
     def _ops_sim(watch: int, budget_man: float, max_n: int, one_per_sym: bool,
                  order: str = "gap", alloc: str = "merge", seed: int = 0,
-                 half: int = 0, sizing: str = "qty", size_arg: float = 0.0):
+                 half: int = 0, sizing: str = "qty", size_arg: float = 0.0,
+                 worder: str = "liq", wseed: int = 0):
         """日ごとに 候補→watch→ギャップ→予算 の順で建てる(N のタブと同じ順序)。
 
+        worder… **どの50件を読むか**の並べ替え。⛔ order(建てる順)とは別物で、
+                こちらは **予算が効かない日にも毎日効く**(候補は中央値120件/日
+                あり、watch50 で5,473件を取り逃している / §18.54)。
+                liq(既定 売買代金降順) / ret1 / ret2 / ret3 / ret5 / ret20 /
+                atr_pct / range_pos の降順、または rand(wseed で再現)。
+                ⚠ **前夜に確定する列だけ**。gap_bp / entry_p / gap_hi_bp は
+                  D+1 の始値を使うので先読みになる。渡しても弾く。
         order … gap(既定|ギャップ|降順) / liq(売買代金降順) / gapasc / price(安い順)
                 / rand(その日ごとにシャッフル。seed で再現)
         alloc … merge(既定: 1つの財布) / split50(側ごとに半額) /
@@ -1076,6 +1114,8 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
         elif half == 2:
             _src = _src[_src["date"] >= _HALF]
         _rng = np.random.default_rng(seed) if order == "rand" else None
+        _check_worder(worder)          # 先読みになる列を弾く(module 直下で定義)
+        _wrng = np.random.default_rng(wseed) if worder == "rand" else None
         _seen_sym: dict = {}
         # both のときだけ使う。日次の相関とσを出すため
         _daily: dict = {}                      # date -> [short, long]
@@ -1088,7 +1128,14 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
             _c = _g[_g["ret1"] >= _RET1_MIN]
             if _c.empty:
                 continue
-            _w = _c.sort_values("liq", ascending=False, na_position="last")
+            if _wrng is not None:
+                _w = _c.sample(frac=1.0, random_state=int(
+                    _wrng.integers(0, 2**31 - 1)))
+            elif worder in _c.columns:
+                _w = _c.sort_values(worder, ascending=False,
+                                    na_position="last")
+            else:                          # その列が無い母集団は現行にフォールバック
+                _w = _c.sort_values("liq", ascending=False, na_position="last")
             _wd = _w if watch <= 0 else _w.head(watch)
             # ⛔ ここは _pool_of を通らない(候補は ret1 で絞る前が必要)ので、
             #    **ギャップの上限を自分で掛ける**。2026-08-26 に掛け忘れて
@@ -1390,6 +1437,120 @@ if a.sweep_relax:
     print(f"\n  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
           f"増えうる**")
     print(f"     (N は稼働率40%で資金が余っている)。ただし watch50 が先に効きます。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_watch or a.confirm_watch:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ **どの50件を読むか** — watch の選び方
+    #
+    #   ⛔ 発注順(§18.21/§18.24/§18.31/§18.59 で3回ヌル)とは別問題。
+    #     発注順が効くのは **予算が効いた日だけ**(N は稼働率40%なので少ない)。
+    #     watch の選び方は **毎日効く**。候補は中央値120件/日 あり、
+    #     watch50 で **5,473件を取り逃している**(§18.54)。
+    #     そして watch を無制限にすると月 +76%(§18.55 ③)= 取り逃している側にも
+    #     ちゃんと利益がある。だから **その50件の選び方**は直接効きうる。
+    #
+    #   ⚠ 現行の liq(売買代金)降順を外すと、**バックテストに映らない執行コスト**が
+    #     上がる(§18.21: シミュは slip=0 なので薄い銘柄の不利が見えない)。
+    #     帯の中なら現行のままにすること。
+    # ══════════════════════════════════════════════════════════════════
+    # ⛔ --confirm-watch は **TEST** を使う。ここを間違えると TRAIN で
+    #   「確かめた」ことになって検証の意味が消える(§18.32 で E/H の複製が
+    #   TRAIN にしか掛かっておらず TEST を1回無駄にしかけた前例)。
+    _wtr = _test if a.confirm_watch else _train
+    if _wtr is None or not len(_wtr):
+        sys.exit("[error] " + ("TEST" if a.confirm_watch else "TRAIN")
+                 + " が空です")
+    _wtp = _pool_of(_wtr)
+    if _wtp.empty:
+        sys.exit("[error] 母集団が空です")
+    print(f"[info] 対象 = {'TEST' if a.confirm_watch else 'TRAIN'} / "
+          f"{_wtr['date'].nunique():,}営業日 / {len(_wtp):,}件")
+    _wsim, _, _ = _make_ops_sim(_wtr, _wtp, max(1, _wtp["date"].nunique()))
+    _WB = a.budget_man or 400.0
+
+    def _wstat(res) -> tuple:
+        """日次 → 月次。(合計, 月平均, σ, ÷σ, t, 月数)"""
+        _dd = res.get("daily") or {}
+        if not _dd:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0
+        _mo: dict = {}
+        for _k, _v in _dd.items():
+            _mo[str(_k)[:7]] = _mo.get(str(_k)[:7], 0.0) + float(sum(_v))
+        _m = np.array([_mo[k] for k in sorted(_mo)], float)
+        if len(_m) < 3:
+            return float(_m.sum()), 0.0, 0.0, 0.0, 0.0, len(_m)
+        _mu, _sd = float(_m.mean()), float(_m.std(ddof=1))
+        return (float(_m.sum()), _mu, _sd,
+                (_mu / _sd if _sd > 0 else 0.0),
+                (_mu / (_sd / np.sqrt(len(_m))) if _sd > 0 else 0.0), len(_m))
+
+    def _run_w(wo: str, ws: int = 0, half: int = 0) -> dict:
+        return _wsim(50, _WB, 0, False, worder=wo, wseed=ws, half=half)
+
+    _cpd = float(_wtp[_wtp["ret1"] >= _RET1_MIN]
+                 .groupby("date").size().median() or 0)
+    print(f"\n{'=' * 74}")
+    print(f"■ ★★ watch に入れる50件をどう選ぶか — "
+          f"{'TEST(1回きり)' if a.confirm_watch else 'TRAIN のみ'}")
+    print(f"{'=' * 74}")
+    print(f"  ⛔ **発注順とは別問題**。発注順は予算が効いた日にしか働かないが、")
+    print(f"     watch の選び方は **毎日効く**(候補 中央値 {_cpd:.0f}件/日 → 50件)")
+    print(f"  ⚠ 現行の liq(売買代金)降順を外すと、**シミュに映らない執行コスト**が")
+    print(f"     上がる(slip=0 / §18.21)。帯の中なら現行のままにすること")
+
+    # ── ランダム順の帯を先に作る(§18.24: 帯を作ってから判定する) ──
+    _nul = [_run_w("rand", 1000 + i) for i in range(max(3, a.watch_nulls))]
+    _ns = np.array([_wstat(r)[0] for r in _nul], float)
+    _nmu, _nsd = float(_ns.mean()), float(_ns.std(ddof=1))
+    _crit = {3: 4.30, 4: 3.18, 5: 2.78, 6: 2.57, 8: 2.36, 10: 2.26,
+             12: 2.20, 16: 2.13, 20: 2.09}.get(len(_ns), 2.10)
+    print(f"\n  ランダム順 {len(_ns)}本 … 平均 {_nmu:+,.0f}円 / σ {_nsd:,.0f}円"
+          f"  (判定は |z| >= {_crit:.2f})")
+
+    _axes = ([a.confirm_watch] if a.confirm_watch
+             else [x.strip() for x in a.watch_orders.split(",") if x.strip()])
+    _h1n = np.array([_wstat(_run_w("rand", 1000 + i, 1))[0]
+                     for i in range(4)], float).mean()
+    _h2n = np.array([_wstat(_run_w("rand", 1000 + i, 2))[0]
+                     for i in range(4)], float).mean()
+
+    print(f"\n  {'軸':<12}{'件数':>7}{'円/件':>9}{'月平均':>12}{'月次σ':>11}"
+          f"{'÷σ':>7}{'t':>7}{'z':>8}  {'前半':<6}{'後半':<6}")
+    _rows_w = []
+    for _ax in _axes:
+        try:
+            _r = _run_w(_ax)
+        except ValueError as e:
+            print(f"  ⛔ {_ax}: {e}")
+            continue
+        _tot, _mu, _sd, _rs, _t, _nm = _wstat(_r)
+        _z = (_tot - _nmu) / _nsd if _nsd > 0 else 0.0
+        _p1 = _wstat(_run_w(_ax, 0, 1))[0] - _h1n
+        _p2 = _wstat(_run_w(_ax, 0, 2))[0] - _h2n
+        _ok = "✓" if (_p1 > 0) == (_p2 > 0) else " "
+        _lb = f"{_ax}(現行)" if _ax == "liq" else _ax
+        print(f"  {_lb:<12}{_r['n']:>7,}{_r['per']:>+9,.0f}{_mu:>+12,.0f}"
+              f"{_sd:>11,.0f}{_rs:>7.2f}{_t:>7.2f}{_z:>+8.2f}  "
+              f"{('+' if _p1 > 0 else '-'):<6}{('+' if _p2 > 0 else '-'):<6}{_ok}")
+        _rows_w.append((_ax, _z, _p1, _p2, _tot))
+
+    print(f"\n  ── 判定 ──")
+    _hit = [r for r in _rows_w
+            if abs(r[1]) >= _crit and (r[2] > 0) == (r[3] > 0) and r[1] > 0
+            and r[0] != "liq"]
+    if not _hit:
+        print(f"     ✅ **帯の外に出た軸は無い**(または前半・後半で符号が逆)。")
+        print(f"        → **現行の liq(売買代金)降順のまま**。しかも liq には")
+        print(f"          シミュに映らない執行コストの利点がある(§18.21)")
+    else:
+        for _ax, _z, _p1, _p2, _tot in sorted(_hit, key=lambda x: -x[1]):
+            print(f"     ⚠ {_ax}: z={_z:+.2f} / 前半後半とも同符号")
+        print(f"     → **TEST で1回だけ確かめる**: --confirm-watch <軸>")
+        print(f"        ⛔ 1候補につき1回きり。落ちたら基準を緩めないこと")
+    if a.confirm_watch:
+        print(f"\n  ⛔ いま TEST を1回消費しました。この軸は二度と測り直せません")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
