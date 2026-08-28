@@ -1469,43 +1469,49 @@ if a.tail_diag:
             FEAT_LABELS = {}
         except Exception as _e:
             sys.exit(f"[error] preopen_market を読めません: {_e}")
-    _pf = preopen_features(_kd)
+    # ⛔⛔ **TRAIN と TEST で同じ関数を使うこと**(2026-08-28 に踏んだ)。
+    #   TRAIN 側だけに self_* と *_abs を足していたので、TEST では
+    #   41変数中23本が全部 NaN になり **有効日ゼロ**で ③-c が動かなかった。
+    #   §18.32「鏡像の複製が TRAIN にしか掛かっていなかった」と同じ形。
+    #   §18.48 ⑧d の教訓どおり、**実装は1つにする**。
+    def _build_feats(_kk, _pp):
+        _f = preopen_features(_kk)
 
-    # ★★ **N 自身の履歴**。外部データが要らず、確実に寄り前に確定していて、
-    #   しかも一度も測っていない。ユーザーの直感『明らかにそういう相場』に
-    #   いちばん近いのはこれ(悪い地合いが続く / ボラが上がっている)。
-    #   ⛔ すべて **前日まで**。当日の値は一切使わない。
-    _self: dict = {}
-    for _i2, _d2 in enumerate(_kd):
-        _h = _pn[:_i2]                       # ← 当日を含まない
-        if len(_h) < 21:
-            continue
-        _f2 = {
-            "self_prev": float(_h[-1]),                    # 前日の損益
-            "self_5d": float(_h[-5:].sum()),               # 直近5日
-            "self_20d": float(_h[-20:].sum()),             # 直近20日
-            "self_vol20": float(_h[-20:].std(ddof=1)),     # 直近20日のσ
-            "self_win20": float((_h[-20:] > 0).mean()),    # 直近20日の勝日率
-        }
-        _neg = 0
-        for _x2 in _h[::-1]:                              # 連続マイナス日数
-            if _x2 < 0:
-                _neg += 1
-            else:
-                break
-        _f2["self_negstreak"] = float(_neg)
-        _self[_d2] = _f2
-    for _d2, _f2 in _self.items():
-        _pf.setdefault(_d2, {}).update(_f2)
+        # ★★ **N 自身の履歴**。外部データが要らず、確実に寄り前に確定して
+        #   いて、しかも一度も測っていない。『明らかにそういう相場』に
+        #   いちばん近いのはこれ(悪い地合いが続く / ボラが上がっている)。
+        #   ⛔ すべて **前日まで**。当日の値は一切使わない。
+        #   ⚠ 窓の先頭21日は履歴が足りないので自然に落ちる。
+        for _i2, _d2 in enumerate(_kk):
+            _h = _pp[:_i2]                    # ← 当日を含まない
+            if len(_h) < 21:
+                continue
+            _neg = 0
+            for _x2 in _h[::-1]:              # 連続マイナス日数
+                if _x2 < 0:
+                    _neg += 1
+                else:
+                    break
+            _f.setdefault(_d2, {}).update({
+                "self_prev": float(_h[-1]),                  # 前日の損益
+                "self_5d": float(_h[-5:].sum()),             # 直近5日
+                "self_20d": float(_h[-20:].sum()),           # 直近20日
+                "self_vol20": float(_h[-20:].std(ddof=1)),   # 直近20日のσ
+                "self_win20": float((_h[-20:] > 0).mean()),  # 直近20日の勝日率
+                "self_negstreak": float(_neg),
+            })
 
-    # ★ 非線形: **大きさ**(絶対値)。「大きく動いた日」は符号ではなく幅の話。
-    #   ユーザーの直感『明らかにそういう相場』が幅のことなら、ここに出る。
-    _absk = [k for k in {kk for v in _pf.values() for kk in v}
-             if k.endswith(("_ret", "_chg", "_gap")) and not k.startswith("self_")]
-    for _d2, _f2 in _pf.items():
-        for _k2 in _absk:
-            if _k2 in _f2 and f"{_k2}_abs" not in _f2:
-                _f2[f"{_k2}_abs"] = abs(_f2[_k2])
+        # ★ 非線形: **大きさ**(絶対値)。「大きく動いた日」は符号ではなく幅。
+        _absk = [k for k in {kk2 for v in _f.values() for kk2 in v}
+                 if k.endswith(("_ret", "_chg", "_gap"))
+                 and not k.startswith("self_")]
+        for _d2, _f2 in _f.items():
+            for _k2 in _absk:
+                if _k2 in _f2 and f"{_k2}_abs" not in _f2:
+                    _f2[f"{_k2}_abs"] = abs(_f2[_k2])
+        return _f
+
+    _pf = _build_feats(_kd, _pn)
 
     _vars = sorted({k for v in _pf.values() for k in v})
     _n_ext = len([v for v in _vars if not v.startswith("self_")
@@ -1722,7 +1728,7 @@ if a.tail_diag:
         if _te is not None and len(_te):
             _tnd2 = max(1, _te["date"].nunique())
             _kd2, _pn2 = _daily_panel(_test, _te, _tnd2)
-            _pf2 = preopen_features(_kd2)
+            _pf2 = _build_feats(_kd2, _pn2)   # ★ TRAIN と同じ関数
             _X3 = np.array([[_pf2.get(d, {}).get(v, np.nan) for v in _v2]
                             for d in _kd2], float)
             _f2 = np.isfinite(_X3).all(axis=1)
@@ -1744,7 +1750,17 @@ if a.tail_diag:
                     print(f"    ⛔ **out-of-sample R² がマイナス** = "
                           f"平均を予測に使うより悪い。モデルに予測力なし")
             else:
-                print(f"    ⛔ TEST の有効日が少なすぎます({int(_f2.sum())}日)")
+                _ms = [(_v3, float(np.isfinite(_X3[:, _i3]).mean()))
+                       for _i3, _v3 in enumerate(_v2)]
+                _ms = [m for m in _ms if m[1] < 0.5]
+                print(f"    ⛔ TEST の有効日が少なすぎます"
+                      f"({int(_f2.sum())}日 / {len(_kd2)}日中)")
+                if _ms:
+                    print(f"       欠損が多い変数: "
+                          + ", ".join(f"{m[0]}({m[1] * 100:.0f}%)"
+                                      for m in _ms[:8]))
+                    print(f"       ⚠ TRAIN と TEST で **同じ変数が作れていない**"
+                          f"可能性があります")
 
     print(f"\n  {'=' * 68}")
     print(f"  ★ 読み方(この順で見る):")
