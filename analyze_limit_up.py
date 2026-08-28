@@ -80,6 +80,8 @@ def main() -> None:
                  f"  → python analyze_gap_edge.py ... --dump-picks {a.picks}")
     if "win" not in df.columns:
         df["win"] = "ALL"
+    if "qty" not in df.columns:
+        df["qty"] = 100
 
     df = df[(df["entry_p"] > 0) & (df["d1_close"] > 0)].copy()
     df["side"] = df["side"].astype(int)
@@ -148,10 +150,42 @@ def main() -> None:
                   f"{(_r.limit_up if _r.side > 0 else _r.limit_dn):>10,.0f}"
                   f"{_r.pnl:>+11,.0f}")
 
-        _per = a.fee + a.overnight
-        print(f"\n  ── ③ 持ち越しコストの概算(§18.46 の実測に当てはめる) ──")
-        print(f"     強制決済手数料 {a.fee:,.0f}円 + 夜間ギャップ {a.overnight:,.0f}円"
-              f" = {_per:,.0f}円/件")
+        # ── ★ ③ 翌朝まで持ち越したときの追加損失 ──────────────────
+        #   ⛔ ②の -17,151円/件は **すでにバックテストの損益に入っている**
+        #     (引けで決済できた前提)。上乗せされるのは手数料と、引け→翌朝の
+        #     値動きだけ。§18.46 の -2,400円/件 は普通の銘柄8件の実測なので、
+        #     ストップ高で買い気配のまま引けた銘柄には当てはまらない可能性が
+        #     高い。d2_open があれば **推測を実測に置き換える**。
+        print(f"\n  ── ③ 翌朝まで持ち越したときの追加コスト ──")
+        print(f"     ⛔ ②の損益はバックテストに **すでに入っている**"
+              f"(引けで決済できた前提)。ここは上乗せぶんだけ")
+        _ov, _src = a.overnight, "§18.46 の実測(普通の銘柄8件)から仮置き"
+        if "d2_open" in df.columns and "qty" in df.columns:
+            _d = _c[(_c["d2_open"] > 0) & (_c["qty"] > 0)].copy()
+            if len(_d):
+                # 引けで決済 → 翌朝の寄りで決済 に置き換えたときの損益差
+                _d["pnl_d2"] = ((_d["entry_p"] - _d["d2_open"])
+                                * _d["qty"] * _d["side"])
+                _d["extra"] = _d["pnl_d2"] - _d["pnl"]
+                _ov = -float(_d["extra"].mean())
+                _src = f"**実測**({len(_d):,}件 / D+2 の始値で決済)"
+                print(f"     引け→翌朝の値動き … {len(_d):,}件で実測")
+                print(f"       合計 {_d['extra'].sum():>+12,.0f}円 / "
+                      f"1件あたり **{_d['extra'].mean():>+9,.0f}円**")
+                for _q, _n in ((0.10, "10%点"), (0.50, "中央"), (0.90, "90%点")):
+                    print(f"       {_n:<8}{_d['extra'].quantile(_q):>+12,.0f}円")
+                _w = int((_d["extra"] < 0).sum())
+                print(f"       さらに悪化した … {_w:,}/{len(_d):,}件 "
+                      f"({_w / len(_d) * 100:.0f}%)")
+            else:
+                print(f"     ⚠ d2_open が入っている行がありません")
+        else:
+            print(f"     ⚠ picks.csv に d2_open / qty が無いので仮置きのままです")
+            print(f"        → python analyze_gap_edge.py ... --dump-picks "
+                  f"{a.picks}  で作り直すと実測に置き換わります")
+        _per = a.fee + _ov
+        print(f"     強制決済手数料 {a.fee:,.0f}円 + 翌朝の逆行 {_ov:,.0f}円"
+              f" = {_per:,.0f}円/件   ({_src})")
         print(f"     × {len(_c):,}件 = **{_per * len(_c):,.0f}円** = "
               f"月 **{_per * len(_c) / _mon:,.0f}円**")
     else:

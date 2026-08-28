@@ -625,6 +625,11 @@ def _scan(sym: str) -> list[dict]:
             "d1_low": (float(df["low"].iloc[pos + 1]) if _SIDE > 0
                        else 2 * o1 - float(df["high"].iloc[pos + 1])),
             "d1_close": c1,
+            # D+2 の始値。**引けで決済できなかったとき**(ストップ高で買い気配の
+            # まま引ける / §18.46)に翌朝いくらで強制決済されるかを測るためだけに
+            # 持つ。⛔ 通常のバックテストでは一切使わない(使えば先読み)。
+            "d2_open": (float(df["open"].iloc[pos + 2])
+                        if pos + 2 < len(_idx) else None),
             "atr": _fv(_atr_v, pos) or 0.0,    # D 時点の ATR(前夜に確定)
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
@@ -1026,6 +1031,15 @@ if _NEEDS_TRAIN:
         print(f"       ⚠ **watch も予算も1つを共有**します。kabu の登録上限は"
               f"合計50件なので、両側の候補を混ぜて売買代金順に上位を取ります")
 
+def _sf(v) -> float:
+    """NaN / None / 空を 0.0 にする安全な float。picks の任意列に使う。"""
+    try:
+        f = float(v)
+        return f if f == f else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 運用シミュ本体。**TRAIN でも TEST でも同じ関数を使う**(2026-08-27)。
 #   以前は --sweep-ops の中に埋まっていて TEST 側から呼べなかった。
@@ -1163,6 +1177,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     "entry_p": float(_px), "qty": int(_lot),
                     "gap_bp": float(getattr(_r, "gap_bp", 0.0) or 0.0),
                     "d1_close": float(getattr(_r, "d1_close", 0.0) or 0.0),
+                    "d2_open": _sf(getattr(_r, "d2_open", None)),
                     "atr": float(getattr(_r, "atr", 0.0) or 0.0),
                     "pnl": _pp,
                 })
