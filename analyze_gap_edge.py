@@ -300,6 +300,10 @@ ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
                      "『軸が効いた』のか『gap 閾値を下げただけ』なのか判別できない")
 ap.add_argument("--relax-gap-list", type=str, default="25,50,60,75,90",
                 help="緩めたギャップ閾値(bp)")
+ap.add_argument("--dump-picks", type=str, default="",
+                help="★ その日実際に建てた明細(銘柄/株数/建値)を CSV に書き出す。"
+                     "ポートフォリオ損切りの検証(analyze_portfolio_stop.py)に使う。"
+                     "TRAIN/TEST の両方を1つのファイルに出す(win 列で区別)")
 ap.add_argument("--hedge", action="store_true",
                 help="★★ **同日ヘッジ**(寄りで日経先物を買い、引けで売る)で"
                      "σ を削れるか。⛔ これは予測ではない(当日の相場を当てる"
@@ -432,7 +436,7 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
-                    or a.tail_diag or a.hedge)
+                    or a.tail_diag or a.hedge or bool(a.dump_picks))
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
     _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
@@ -1064,6 +1068,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
         _dcap: dict = {}                       # date -> [short投入, long投入]
         _dcnt: dict = {}                       # date -> [short件数, long件数]
         _byside = {1: [0.0, 0], -1: [0.0, 0]}
+        _picks: list = []                      # 実際に建てた明細
         _pushed = {1: 0, -1: 0}                # 予算で押し出された件数
         for _d, _g in _src.groupby("date"):
             _c = _g[_g["ret1"] >= _RET1_MIN]
@@ -1150,6 +1155,17 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 _pp = float(_r.pnl) * _scale
                 _tot += _pp
                 _n += 1
+                # ★ 実際に建てた明細。ポートフォリオ損切りの検証に要る
+                #   (どの銘柄を何株建てたかは _ops_sim の中でしか分からない)
+                _picks.append({
+                    "date": _d, "symbol": _r.symbol,
+                    "side": int(getattr(_r, "side", 1)),
+                    "entry_p": float(_px), "qty": int(_lot),
+                    "gap_bp": float(getattr(_r, "gap_bp", 0.0) or 0.0),
+                    "d1_close": float(getattr(_r, "d1_close", 0.0) or 0.0),
+                    "atr": float(getattr(_r, "atr", 0.0) or 0.0),
+                    "pnl": _pp,
+                })
                 _seen_sym[_r.symbol] = _d
                 _sd = int(getattr(_r, "side", 1))
                 _v = _byside.setdefault(_sd, [0.0, 0])
@@ -1163,6 +1179,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
             _cnt += _n
             _used += _cap - _cash
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
+                "picks": _picks,
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
                 "daily": _daily, "byside": _byside,
                 "dcap": _dcap, "pushed": _pushed, "dcnt": _dcnt}
@@ -1359,6 +1376,32 @@ if a.sweep_relax:
           f"増えうる**")
     print(f"     (N は稼働率40%で資金が余っている)。ただし watch50 が先に効きます。")
     print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.dump_picks:
+    # ══ 実際に建てた明細を書き出す ══════════════════════════════════
+    #   ⛔ どの銘柄を何株建てたかは **_ops_sim の中でしか決まらない**
+    #     (watch50 → ギャップ → 予算 の順に効くため)。外から再現できない。
+    _rows_p: list = []
+    for _wn, _wf in (("TRAIN", _train),
+                     ("TEST", _test if _test is not None else None)):
+        if _wf is None or not len(_wf):
+            continue
+        _wp = _pool_of(_wf)
+        if _wp.empty:
+            continue
+        _sim, _, _ = _make_ops_sim(_wf, _wp, max(1, _wp["date"].nunique()))
+        _r = _sim(50, a.budget_man or 400.0, 0, False)
+        for _p in _r["picks"]:
+            _p["win"] = _wn
+            _rows_p.append(_p)
+        print(f"[dump] {_wn}: {len(_r['picks']):,}件 / {_r['pnl']:+,.0f}円")
+    if not _rows_p:
+        sys.exit("[error] 建てた明細がありません")
+    pd.DataFrame(_rows_p).to_csv(a.dump_picks, index=False,
+                                 encoding="utf-8-sig")
+    print(f"[dump] {a.dump_picks} に {len(_rows_p):,}行 書きました")
+    print(f"  ★ 次: python analyze_portfolio_stop.py --picks {a.dump_picks}")
     sys.exit(0)
 
 if a.hedge:

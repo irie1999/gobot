@@ -1,0 +1,320 @@
+r"""analyze_portfolio_stop.py — **ポートフォリオ全体**の損切りを 5分足で検証する。
+
+なぜこれが今までと違うのか (2026-08-28 ユーザー発案)
+----------------------------------------------------
+これまで否定してきたのは **個別の損切り**:
+
+  ・ATR倍 (sm/tm)      … 滑り0.5%で24セル全滅。分岐点 2.6ティック (§18.55)
+  ・固定円 −10,000円/件 … 保険料。平均 −61円/件 でテールを買う (§18.56 ②)
+
+個別が負ける理由は「**銘柄固有のノイズで刈られる**」から。
+ところが **合計で判定すると銘柄固有のノイズは打ち消し合う**(12銘柄なら √12 で薄まる)。
+残るのは **相場全体の動き**だけ。
+
+そして §18.60 で測ったとおり、**大負けの日は相場**:
+  ・大負け日の **81%** が「日経が日中プラスの日」(全日 49%)
+  ・同日の日経日中% で **R² 0.235**
+
+**つまりこの案は、実際に見つかっている構造をそのまま狙い撃ちする。**
+
+ヘッジ(§18.61)より優れている点
+------------------------------
+ヘッジは **毎日コストを払う**(分岐点 1.83bp に対し現実 4.4bp)ので棄却した。
+ポートフォリオ損切りは **発火した日しかコストを払わない**。
+同じ「予測せず事後で対処する」発想だが、コスト構造が根本的に違う。
+
+⚠ 負ける筋も明確
+----------------
+§18.55 の決済時刻スイープ: 5分 +10.3bp → 11:05 +10.5bp → **引け +17.8bp**。
+**N のエッジは『一日かけて下げ続けること』**なので、途中で降りると削る。
+
+  → 問いは1つ: **悪い日は最後まで悪いのか、それとも戻すのか?**
+
+本ツールはそれを直接出す(「発火した日、引けまで持っていたらどうだったか」)。
+
+使い方
+------
+  # ① 実際に建てた明細を書き出す(日足の判定。数時間)
+  python analyze_gap_edge.py --workers 8 --days 4200 --min-gap-bp 100 \
+      --split 2020-09-01 --dump-picks picks.csv
+
+  # ② 5分足でポートフォリオの経路を作り、閾値を掃く(軽い)
+  python analyze_portfolio_stop.py --picks picks.csv
+
+⛔ 5分足は 2024-07〜 の約2年しかない(J-Quants の分足は2年ローリング / §18.6)。
+   TRAIN/TEST を分けると薄いので、**本ツールは日付で自前に分割する**
+   (--split-date。既定は5分足がある期間の真ん中)。
+
+⚠ 照会のみ。発注はしない。
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import numpy as np
+import pandas as pd
+
+ap = argparse.ArgumentParser(
+    description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--picks", default="picks.csv",
+                help="analyze_gap_edge --dump-picks が出した CSV")
+ap.add_argument("--levels", default="20000,30000,50000,80000,100000,150000",
+                help="ポートフォリオ損切りの水準(円 / 含み損がこれを超えたら全決済)")
+ap.add_argument("--trail", default="",
+                help="トレーリング版も掃く(その日の最大益から この額 下げたら全決済)。"
+                     "例 30000,50000,80000。空で無効")
+ap.add_argument("--split-date", default="",
+                help="TRAIN/TEST の境界(yyyy-mm-dd)。空なら5分足のある期間の真ん中")
+ap.add_argument("--slip-pct", type=float, default=0.0005,
+                help="発火時の決済スリッページ(0.0005=5bp)。全銘柄を成行で畳むので"
+                     "個別損切りより不利に見積もる")
+ap.add_argument("--workers", type=int, default=8)
+ap.add_argument("--min-days", type=int, default=60,
+                help="TRAIN/TEST に最低これだけの営業日が要る")
+a = ap.parse_args()
+
+try:
+    from daytrade_data import load_intraday, split_by_day
+except Exception as e:                                    # pragma: no cover
+    sys.exit(f"[error] daytrade_data を読めません: {e}")
+
+_LV = [float(x) for x in a.levels.split(",") if x.strip()]
+_TR = [float(x) for x in a.trail.split(",") if x.strip()]
+
+try:
+    P = pd.read_csv(a.picks)
+except Exception as e:
+    sys.exit(f"[error] {a.picks} を読めません: {e}\n"
+             f"  先に: python analyze_gap_edge.py ... --dump-picks {a.picks}")
+for _c in ("date", "symbol", "side", "entry_p", "qty", "pnl"):
+    if _c not in P.columns:
+        sys.exit(f"[error] {a.picks} に列 {_c} がありません")
+P["date"] = P["date"].astype(str)
+
+print(f"[info] 明細 {len(P):,}件 / {P['date'].nunique():,}営業日 / "
+      f"{P['symbol'].nunique():,}銘柄")
+print(f"[info] 日足ベースの合計損益 {P['pnl'].sum():+,.0f}円")
+print(f"[info] 発火時のスリッページ {a.slip_pct * 100:.3f}%"
+      f"(全銘柄を成行で畳むので個別損切りより不利に見積もる)")
+
+# ── 5分足を読む ───────────────────────────────────────────────────
+_syms = sorted(P["symbol"].astype(str).unique())
+print(f"\n[5分足] {len(_syms):,}銘柄を読み込みます(ローカルのみ)…")
+
+
+def _load(sym: str):
+    try:
+        df = load_intraday(sym, days=1200, source="local")
+    except Exception:
+        return sym, None
+    if df is None or df.empty:
+        return sym, None
+    return sym, split_by_day(df)
+
+
+_bars: dict = {}
+with ThreadPoolExecutor(max_workers=a.workers) as ex:
+    _fs = {ex.submit(_load, s): s for s in _syms}
+    for _i, _f in enumerate(as_completed(_fs), 1):
+        try:
+            _s, _d = _f.result()
+        except Exception:
+            continue
+        if _d:
+            _bars[_s] = _d
+        if _i % 200 == 0:
+            print(f"  … {_i:,}/{len(_syms):,}", flush=True)
+print(f"[5分足] 読めた {len(_bars):,}/{len(_syms):,}銘柄")
+if not _bars:
+    sys.exit("[error] 5分足が1銘柄も読めません(stock_5min の場所を確認)")
+
+
+# ── 日ごとにポートフォリオの含み損益の**経路**を作る ─────────────────
+def _paths_for_day(day: str, grp: pd.DataFrame):
+    """その日の (時刻グリッド, 含み損益の経路, 最終損益, 使えた件数) を返す。
+
+    ⛔ 経路は **銘柄の合計**。個別のノイズは打ち消し合い、相場全体の動きが残る。
+    ⚠ 5分足が無い銘柄はその日から丸ごと除外する(部分的に混ぜると合計が歪む)。
+    """
+    _d0 = pd.Timestamp(day).date()
+    _series, _fin, _n = [], 0.0, 0
+    for _r in grp.itertuples():
+        _b = _bars.get(str(_r.symbol), {})
+        _df = _b.get(_d0)
+        if _df is None or len(_df) < 5:
+            return None
+        _px = _df["close"].to_numpy(dtype="float64")
+        _ts = _df.index
+        # ショート(side=1) は 建値-現値、ロング(side=-1) は 現値-建値
+        _sgn = 1.0 if int(_r.side) > 0 else -1.0
+        _pl = (float(_r.entry_p) - _px) * _sgn * int(_r.qty)
+        _series.append(pd.Series(_pl, index=_ts))
+        _fin += float(_r.pnl)
+        _n += 1
+    if not _series:
+        return None
+    _m = pd.concat(_series, axis=1).ffill().bfill()
+    if _m.isna().any().any():
+        return None
+    return _m.index, _m.sum(axis=1).to_numpy(dtype="float64"), _fin, _n
+
+
+# 日ごとの建玉(スリッページの基準)。閾値×日 の二重ループで毎回計算しないよう先に持つ
+_NOTIONAL = (P.assign(_n=P["entry_p"] * P["qty"])
+             .groupby("date")["_n"].sum().to_dict())
+
+print("\n[経路] ポートフォリオの含み損益を組み立てます…")
+_days: dict = {}
+_skip = 0
+for _day, _g in P.groupby("date"):
+    _p = _paths_for_day(_day, _g)
+    if _p is None:
+        _skip += 1
+        continue
+    _days[_day] = _p
+print(f"[経路] 作れた {len(_days):,}営業日 / 5分足が足りず除外 {_skip:,}日")
+if len(_days) < a.min_days * 2:
+    sys.exit(f"[error] 営業日が少なすぎます({len(_days)}日)。"
+             f"5分足は 2024-07〜 の約2年しかありません(§18.6)")
+
+_ks = sorted(_days)
+_cut = a.split_date or _ks[len(_ks) // 2]
+_tr = [k for k in _ks if k < _cut]
+_te = [k for k in _ks if k >= _cut]
+print(f"[分割] TRAIN {_tr[0]}〜{_tr[-1]} ({len(_tr)}日) / "
+      f"TEST {_te[0]}〜{_te[-1]} ({len(_te)}日)  境界 {_cut}")
+if min(len(_tr), len(_te)) < a.min_days:
+    sys.exit(f"[error] どちらかの窓が {a.min_days}日 未満です。--split-date で調整を")
+
+
+def _apply(day: str, level: float = 0.0, trail: float = 0.0):
+    """その日にルールを当てたときの損益と、発火したかを返す。
+
+    level … 含み損が -level を割ったら全決済
+    trail … その日の最大益から trail 下げたら全決済
+    ⚠ 発火は **その5分足の終値** で検知し、決済は **次の足の始値** ではなく
+      同じ終値に slip を掛ける(次足始値は5分後で、実運用の成行より甘くなる)。
+    """
+    _ts, _path, _fin, _n = _days[day]
+    if level <= 0 and trail <= 0:
+        return _fin, False, -1
+    _hit = -1
+    if level > 0:
+        _w = np.where(_path <= -level)[0]
+        if len(_w):
+            _hit = int(_w[0])
+    if trail > 0:
+        _peak = np.maximum.accumulate(_path)
+        _w = np.where(_path <= _peak - trail)[0]
+        if len(_w):
+            _hit = int(_w[0]) if _hit < 0 else min(_hit, int(_w[0]))
+    if _hit < 0:
+        return _fin, False, -1
+    # 発火時点の含み損益。スリッページは呼び出し側で建玉に対して引く
+    return float(_path[_hit]), True, _hit
+
+
+def _stat(days: list, level: float = 0.0, trail: float = 0.0,
+          cap: float = 0.0):
+    """窓全体の集計。cap は建玉(スリッページの基準)。"""
+    _tot, _fire, _saved = 0.0, 0, 0.0
+    _daily = []
+    for _d in days:
+        _ts, _path, _fin, _n = _days[_d]
+        _v, _f, _i = _apply(_d, level, trail)
+        if _f:
+            # 建玉に対するスリッページ。全銘柄を成行で畳むので個別より不利に見積もる
+            _v -= float(_NOTIONAL.get(_d, 0.0)) * a.slip_pct
+            _fire += 1
+            _saved += (_v - _fin)
+        _tot += _v
+        _daily.append((_d, _v))
+    _m: dict = {}
+    for _d, _v in _daily:
+        _m[_d[:7]] = _m.get(_d[:7], 0.0) + _v
+    _mv = np.array([_m[k] for k in sorted(_m)], float)
+    _mu = float(_mv.mean()) if len(_mv) else 0.0
+    _sd = float(_mv.std(ddof=1)) if len(_mv) > 1 else 0.0
+    return {"tot": _tot, "fire": _fire, "saved": _saved,
+            "mu": _mu, "sd": _sd, "ratio": (_mu / _sd if _sd else 0.0),
+            "pos": int((_mv > 0).sum()), "nm": len(_mv),
+            "worst": float(_mv.min()) if len(_mv) else 0.0}
+
+
+def _table(days: list, label: str):
+    print(f"\n  ── {label} ({len(days)}営業日) ──")
+    _b = _stat(days)
+    print(f"    {'ルール':<22}{'合計':>13}{'月平均':>11}{'月次σ':>11}"
+          f"{'÷σ':>7}{'発火':>6}{'最悪月':>12}")
+    print(f"    {'損切りなし ★現行':<22}{_b['tot']:>+13,.0f}{_b['mu']:>+11,.0f}"
+          f"{_b['sd']:>11,.0f}{_b['ratio']:>7.2f}{'—':>6}"
+          f"{_b['worst']:>+12,.0f}")
+    _out = []
+    for _l in _LV:
+        _s = _stat(days, level=_l)
+        _mk = "  ✅" if _s["ratio"] > _b["ratio"] * 1.10 else ""
+        print(f"    {'合計 −' + f'{_l:,.0f}円':<22}{_s['tot']:>+13,.0f}"
+              f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
+              f"{_s['fire']:>6}{_s['worst']:>+12,.0f}{_mk}")
+        _out.append(("level", _l, _s))
+    for _t in _TR:
+        _s = _stat(days, trail=_t)
+        _mk = "  ✅" if _s["ratio"] > _b["ratio"] * 1.10 else ""
+        print(f"    {'最大益から −' + f'{_t:,.0f}円':<22}{_s['tot']:>+13,.0f}"
+              f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
+              f"{_s['fire']:>6}{_s['worst']:>+12,.0f}{_mk}")
+        _out.append(("trail", _t, _s))
+    return _b, _out
+
+
+print(f"\n{'=' * 78}")
+print(f"■ ポートフォリオ損切り — **合計**で判定する(個別ではない)")
+print(f"{'=' * 78}")
+print(f"  ⛔ 個別の損切りは全滅している(§18.55 / §18.56)。合計で判定すると"
+      f"**銘柄固有のノイズが打ち消し合う**ので別物")
+print(f"  ⚠ 見るのは **月平均÷σ**。合計だけで選ぶと『降りて損を減らした』が"
+      f"『利益も減らした』を隠す")
+
+_btr, _otr = _table(_tr, f"TRAIN {_tr[0]}〜{_tr[-1]}")
+_bte, _ote = _table(_te, f"TEST  {_te[0]}〜{_te[-1]}")
+
+# ── ★ 核心の診断: 発火した日、引けまで持っていたらどうだったか ────────
+print(f"\n{'=' * 78}")
+print(f"■ ★ 発火した日、引けまで持っていたらどうだったか")
+print(f"{'=' * 78}")
+print(f"  §18.55 で『早く降りるほど悪い』と出ている(5分 +10.3bp → 引け +17.8bp)。")
+print(f"  **悪い日は最後まで悪いのか、それとも戻すのか** — これが本質的な問い")
+print(f"    {'水準':<14}{'発火':>6}{'降りた損益':>13}{'引けまで':>13}"
+      f"{'差':>13}{'正解率':>8}")
+for _l in _LV:
+    _f, _cut_pnl, _hold_pnl, _win = 0, 0.0, 0.0, 0
+    for _d in _ks:
+        _v, _fired, _i = _apply(_d, level=_l)
+        if not _fired:
+            continue
+        _ts, _path, _fin, _n = _days[_d]
+        _v -= float(_NOTIONAL.get(_d, 0.0)) * a.slip_pct
+        _f += 1
+        _cut_pnl += _v
+        _hold_pnl += _fin
+        if _v > _fin:
+            _win += 1
+    if not _f:
+        print(f"    {'−' + f'{_l:,.0f}円':<14}{0:>6}{'—':>13}")
+        continue
+    print(f"    {'−' + f'{_l:,.0f}円':<14}{_f:>6}{_cut_pnl:>+13,.0f}"
+          f"{_hold_pnl:>+13,.0f}{_cut_pnl - _hold_pnl:>+13,.0f}"
+          f"{_win / _f * 100:>7.0f}%")
+print(f"  ⚠ 『正解率』= 降りたほうが良かった日の割合。50%前後なら**コイン投げ**")
+print(f"  ⚠ 全期間(TRAIN+TEST)の集計。採否は上の TRAIN/TEST 表で判断すること")
+
+print(f"\n  {'=' * 68}")
+print(f"  ★ 判定(§18.36 のルール):")
+print(f"    ① **月平均÷σ が『損切りなし』より明確に高い**水準があるか")
+print(f"    ② その水準が **TRAIN と TEST で同じ**か(違えば固定できない)")
+print(f"    ③ 『引けまで持っていたら』の差がプラスか(降りて正解だったか)")
+print(f"  ⛔ ①②が揃わなければ採用しない。合計が増えただけでは不十分")
+print(f"  ⚠ 5分足は約2年しかないので、どちらの窓も1年程度。**弱い検定**です")
+print(f"  {'=' * 68}")
