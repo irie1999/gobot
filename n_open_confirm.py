@@ -188,6 +188,12 @@ ap.add_argument("--no-moc-on-exit", action="store_true",
 ap.add_argument("--n-mode", action="store_true", default=True,
                 help="新方式N として動く(既定ON)。候補CSVの既定を "
                      "n_signals_<日付>.csv にする")
+ap.add_argument("--no-futures", action="store_true",
+                help="日経先物のスナップショットを記録しない")
+ap.add_argument("--futures-code", type=str, default="NK225mini",
+                help="記録する先物(NK225 / NK225mini / NK225micro)")
+ap.add_argument("--futures-symbol", type=str, default="",
+                help="銘柄コードを直接指定(自動解決できないとき)")
 args = ap.parse_args()
 
 # ⛔⛔ 記録専用であることを **起動時に確定させる**。
@@ -1103,7 +1109,51 @@ def _size_groups(_rows: list) -> None:
 # ── ① ウォームアップ (登録直後の初回は48〜142秒かかる / §18.38) ───────────
 if not args.now:
     _wait(args.warm_at, "登録して1回空読み(これを飛ばすと09:00が数分かかる)")
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 日経先物のスナップショット (2026-08-28 追加)
+#   **大阪の日中セッションは 08:45 開始 = 現物の15分前**。
+#   その15分間の値動きは日足のどこにも無く、§18.60 の19変数にも入っていない。
+#   バックテストできないので **今日から貯めるしかない**(§18.35 と同じ形)。
+#   ⛔ 照会のみ。発注はしない。失敗しても本体の記録は絶対に止めない。
+_FUT_ROWS: list = []
+_FUT_SYM = ""
+_FUT_EX = 23        # 大阪 日中セッション(08:45 開始)
+
+
+def _fut_snap(tag: str) -> None:
+    """先物の板を1回読んで記録する。例外は握り潰す(本体を止めない)。"""
+    global _FUT_SYM
+    if args.no_futures:
+        return
+    try:
+        if not _FUT_SYM:
+            _FUT_SYM = args.futures_symbol or cli.resolve_future(
+                args.futures_code, 0)
+            if not _FUT_SYM:
+                print("  ⚠ 先物の銘柄コードを解決できません(記録をスキップ)",
+                      flush=True)
+                args.no_futures = True
+                return
+            print(f"  [先物] {args.futures_code} = {_FUT_SYM} "
+                  f"(大阪 日中 / 08:45 開始)", flush=True)
+        b = cli.get_board(_FUT_SYM, _FUT_EX) or {}
+        _FUT_ROWS.append({
+            "ts": _dt.datetime.now(
+                _dt.timezone(_dt.timedelta(hours=9))
+            ).isoformat(timespec="seconds"),
+            "tag": tag, "symbol": _FUT_SYM,
+            "price": b.get("CurrentPrice"), "open": b.get("OpeningPrice"),
+            "high": b.get("HighPrice"), "low": b.get("LowPrice"),
+            "prev_close": b.get("PreviousClose"),
+            "bid": b.get("BidPrice"), "ask": b.get("AskPrice"),
+            "volume": b.get("TradingVolume"),
+        })
+    except Exception as _e:
+        print(f"  ⚠ 先物の記録に失敗（本体は継続）: {_e}", flush=True)
+
+
 print("\n▶ ウォームアップ（空読み。値は使いません）", flush=True)
+_fut_snap("warm")
 _read_all("warm")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1129,6 +1179,7 @@ if args.poll:
                                         second=0, microsecond=0)
     if not args.now:
         _wait(args.open_at, "★ここから本番。寄った銘柄から順に拾う")
+    _fut_snap("open")          # ★ 09:00 直前/直後の先物
     print(f"\n▶ ポーリング開始（{args.every}秒ごと / {args.poll_until} まで）",
           flush=True)
     _n_poll = 0
@@ -1423,6 +1474,30 @@ else:
   ★ 貯めたら 5分足の始値と突合して、**板の始値 = 5分足の始値** かを確認する
     (バックテストの前提そのもの)。ズレるなら J の全数字が影響を受けます。
 """)
+# ★ 先物のスナップショットを保存(§18.62)。**バックテストできないので貯めるしかない**
+if _FUT_ROWS:
+    try:
+        _fp = f"futures_snap_{_dt.date.today():%Y%m%d}.csv"
+        _cols = ["ts", "tag", "symbol", "price", "open", "high", "low",
+                 "prev_close", "bid", "ask", "volume"]
+        with open(_fp, "w", newline="", encoding="utf-8-sig") as _fh:
+            _w = _csv.DictWriter(_fh, fieldnames=_cols)
+            _w.writeheader()
+            _w.writerows(_FUT_ROWS)
+        _p0 = next((r for r in _FUT_ROWS if r["tag"] == "warm"), None)
+        _p1 = next((r for r in _FUT_ROWS if r["tag"] == "open"), None)
+        print(f"[先物] {len(_FUT_ROWS)}点 → {_fp}")
+        if _p0 and _p1 and _p0.get("price") and _p1.get("price"):
+            _mv = (float(_p1["price"]) / float(_p0["price"]) - 1.0) * 100.0
+            print(f"  ★ ウォームアップ({_p0['ts'][11:19]}) {_p0['price']} → "
+                  f"09:00直前({_p1['ts'][11:19]}) {_p1['price']} = "
+                  f"**{_mv:+.3f}%**")
+            print(f"  ⚠ これは **どの日足にも無い情報**です"
+                  f"(大阪の日中セッションは08:45開始 = 現物の15分前)。"
+                  f"数ヶ月貯めてから検定します")
+    except Exception as _e:
+        print(f"  ⚠ 先物の保存に失敗: {_e}")
+
 try:
     cli.unregister_all()
     print("[k_paper] 登録を全解除しました")

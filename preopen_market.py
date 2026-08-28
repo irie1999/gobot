@@ -107,7 +107,11 @@ def preopen_features(days: list[str]) -> dict:
     out: dict = {}
     for d in days:
         f: dict = {}
-        for k in ("sp500", "nasdaq", "sox", "usdjpy", "n225",
+        # ⛔ **nkfut がこのリストから漏れていた**(2026-08-28 に発覚)。
+        #   日経先物そのもののリターン = 『直前の上昇の勢い』が
+        #   一度も変数に入っていなかった。fut_gap(先物と現物の**乖離**)は
+        #   水準であって勢いではない。
+        for k in ("sp500", "nasdaq", "sox", "usdjpy", "n225", "nkfut",
                   "dax", "sx5e", "kospi", "dxy", "oil", "gold", "esfut"):
             b = _prev_bars(ser.get(k) or {}, d, 2)
             if b:
@@ -127,6 +131,20 @@ def preopen_features(days: list[str]) -> dict:
         nb = _prev_bars(ser.get("n225") or {}, d, 1)
         if fb and nb:
             f["fut_gap"] = (fb[0] / nb[0] - 1.0) * 100.0
+        # ★ 『勢い』。水準ではなく **変化の向きと持続**。
+        #   ・nkfut_2d   … 先物の2日リターン(勢いが続いているか)
+        #   ・fut_gap_chg… 先物-現物ギャップの前日差
+        #                  (ギャップが**拡大している**のか縮んでいるのか)
+        _fb = sorted(k for k in (ser.get("nkfut") or {}) if k < d)
+        if len(_fb) >= 3:
+            _sf = ser["nkfut"]
+            f["nkfut_2d"] = (_sf[_fb[-1]] / _sf[_fb[-3]] - 1.0) * 100.0
+        _nb = sorted(k for k in (ser.get("n225") or {}) if k < d)
+        if len(_fb) >= 2 and len(_nb) >= 2:
+            _sf, _sn = ser["nkfut"], ser["n225"]
+            _g0 = (_sf[_fb[-1]] / _sn[_nb[-1]] - 1.0) * 100.0
+            _g1 = (_sf[_fb[-2]] / _sn[_nb[-2]] - 1.0) * 100.0
+            f["fut_gap_chg"] = _g0 - _g1
         # 米10年債は水準(%)そのものと前日差(bp)
         b = _prev_bars(ser.get("us10y") or {}, d, 2)
         if b:
@@ -167,6 +185,9 @@ LABELS = {
     "gold_ret":   "金 前日%",
     "esfut_ret":  "S&P500先物 前日%",
     "n225_ret":   "日経 前日%",
+    "nkfut_ret":  "日経先物 前日% (勢い)",
+    "nkfut_2d":   "日経先物 2日% (勢いの持続)",
+    "fut_gap_chg": "先物ギャップの前日差 (拡大/縮小)",
     "n225_5d":    "日経 5日%",
 }
 

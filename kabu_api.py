@@ -57,6 +57,8 @@ EXCHANGE_TOSHO = 1            # 市場コード: 東証 (board/register/position
 # 新規注文は 9(SOR) か 27(東証＋) を使う。照会系は従来通り 1 でよい。
 EXCHANGE_SOR = 9             # SOR (スマートオーダールーティング) ← 発注の既定
 EXCHANGE_TOKYO_PLUS = 27     # 東証＋ (Tokyo+)
+EXCHANGE_DERIV_DAY = 23      # 大阪(日中セッション) ← 先物は **08:45 開始**
+EXCHANGE_DERIV_NIGHT = 24    # 大阪(夜間セッション)
 
 SIDE_SELL = "1"              # 売
 SIDE_BUY = "2"              # 買
@@ -342,6 +344,21 @@ class KabuClient:
         self.register(symbol, exchange)
         url = f"{self.base_url}/kabusapi/board/{symbol}@{exchange}"
         return self._get_json(url)
+
+    def resolve_future(self, deriv: str = "NK225mini", month: int = 0) -> str:
+        """日経225先物の銘柄コードを解決する(/symbolname/future)。
+
+        deriv  … "NK225" / "NK225mini" / "NK225micro" など
+        month  … 0=直近限月(kabu の DerivMonth=0 が『中心限月』)
+        取れなければ "" を返す。**照会のみ。発注しない。**
+        """
+        url = f"{self.base_url}/kabusapi/symbolname/future"
+        try:
+            j = self._get_json(url, params={"FutureCode": deriv,
+                                            "DerivMonth": month})
+            return str((j or {}).get("Symbol") or "")
+        except Exception:
+            return ""
 
     def get_symbol(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> dict:
         """銘柄マスタ照会 (/symbol)。信用売建可否(MarginSell)・信用買建可否(MarginBuy)・
