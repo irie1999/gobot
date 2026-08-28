@@ -44,6 +44,7 @@ r"""audit_ohlc.py — 日足の**始値**が壊れていないか監査する(�
 from __future__ import annotations
 
 import argparse
+import os
 import importlib
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -80,12 +81,23 @@ def main() -> None:
     ap.add_argument("--list", type=int, default=0, help="該当行をN件並べる")
     ap.add_argument("--purge", action="store_true",
                     help="⛔ 該当した銘柄のキャッシュ pkl を消す(取り直させる)")
+    ap.add_argument("--allow-download", action="store_true",
+                    help="キャッシュに無い銘柄を yfinance から取る。既定は取らない"
+                         "(キャッシュの監査なので不要。上場廃止銘柄で待たされる)")
+    ap.add_argument("--cap-per-symbol", type=int, default=200,
+                    help="1銘柄あたり保持する該当行の上限(メモリ対策)")
     a = ap.parse_args()
+
+    if not a.allow_download:
+        # ⛔ 1,541銘柄を1件ずつ yfinance に問い合わせると、上場廃止銘柄の
+        #   タイムアウトで数分待たされる。監査対象はキャッシュそのもの。
+        os.environ["GOBOT_OFFLINE"] = "1"
 
     syms = _load_symbols(a.symbols)
     if a.limit > 0:
         syms = syms[:a.limit]
-    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 閾値 {a.thr * 100:.0f}%")
+    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 閾値 {a.thr * 100:.0f}%"
+          + ("" if a.allow_download else " / キャッシュのみ(DLしない)"))
     print(f"[info] ⛔ 何も直しません。件数を数えるだけです"
           + ("(--purge 指定あり → 最後に該当銘柄のキャッシュを消します)"
              if a.purge else ""))
@@ -113,52 +125,75 @@ def main() -> None:
         t["bad_intra"] = t["intra"].abs() > a.thr
         t["bad"] = t["bad_ohlc"] | t["bad_gap"] | t["bad_intra"]
         t["n_gap"] = t["gap"] * 10_000.0 >= a.gap_bp     # N の条件を通るか
-        return t
+        t = t.dropna(subset=["prev_close"])
+        # ⛔ 全パネルを返すと 1,541銘柄で 669万行 になり MemoryError。
+        #   **銘柄ごとに集計して捨てる**。持ち帰るのは集計値と該当行(少数)だけ。
+        _g, _i = t["gap"], t["intra"]
+        _ng, _nb = t["n_gap"], t["n_gap"] & t["bad"]
+        _no = t["n_gap"] & ~t["bad"]
+        st = {
+            "n": len(t), "sym": sym,
+            "bad_ohlc": int(t["bad_ohlc"].sum()), "bad_gap": int(t["bad_gap"].sum()),
+            "bad_intra": int(t["bad_intra"].sum()), "bad": int(t["bad"].sum()),
+            "ng": int(_ng.sum()), "ng_bad": int(_nb.sum()), "ng_ok": int(_no.sum()),
+            "ng_bad_gap": float(_g[_nb].sum()), "ng_bad_intra": float(_i[_nb].sum()),
+            "ng_ok_gap": float(_g[_no].sum()), "ng_ok_intra": float(_i[_no].sum()),
+        }
+        _bd = t[t["bad"]]
+        if len(_bd) > a.cap_per_symbol:
+            _bd = _bd.reindex(_bd["gap"].abs().sort_values(ascending=False).index
+                              ).head(a.cap_per_symbol)
+        return st, _bd
 
-    parts, ok = [], 0
+    stats, bads, ok = [], [], 0
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
         for i, r in enumerate(ex.map(_one, syms), 1):
             if r is not None:
-                parts.append(r)
+                stats.append(r[0])
+                if len(r[1]):
+                    bads.append(r[1])
                 ok += 1
             if i % 300 == 0:
                 print(f"  … {i:,}/{len(syms):,}", flush=True)
-    if not parts:
-        sys.exit("[error] 1銘柄も読めませんでした")
+    if not stats:
+        sys.exit("[error] 1銘柄も読めませんでした"
+                 + ("" if a.allow_download else
+                    "(キャッシュのみモードです。--allow-download で取得できます)"))
 
-    t = pd.concat(parts, ignore_index=True).dropna(subset=["prev_close"])
-    _n = len(t)
+    s = pd.DataFrame(stats)
+    _n = int(s["n"].sum())
     print(f"\n{'=' * 72}")
     print(f"■ 日足の始値・OHLC 監査 — {ok:,}銘柄 / {_n:,}銘柄日")
     print(f"{'=' * 72}")
     for _k, _lbl in (("bad_ohlc", "A. OHLC 整合性エラー(始値/終値が安値〜高値の外)"),
                      ("bad_gap", f"B. 始値ギャップが ±{a.thr * 100:.0f}% 超"),
                      ("bad_intra", f"C. 日中変化が ±{a.thr * 100:.0f}% 超")):
-        _c = int(t[_k].sum())
-        print(f"  {_lbl:<44}{_c:>7,}件 ({_c / _n * 100:.4f}%)")
-    _bad = int(t["bad"].sum())
-    print(f"  {'いずれか':<44}{_bad:>7,}件 ({_bad / _n * 100:.4f}%) / "
-          f"{t.loc[t['bad'], 'symbol'].nunique():,}銘柄")
+        _c = int(s[_k].sum())
+        print(f"  {_lbl:<44}{_c:>7,}件 ({_c / max(1, _n) * 100:.4f}%)")
+    _bad = int(s["bad"].sum())
+    print(f"  {'いずれか':<44}{_bad:>7,}件 ({_bad / max(1, _n) * 100:.4f}%) / "
+          f"{int((s['bad'] > 0).sum()):,}銘柄")
 
     # ── ★ 本丸: N のギャップ条件を通ってしまう汚染 ──────────────
-    _ng = t[t["n_gap"]]
-    _nb = _ng[_ng["bad"]]
+    _NG, _NB, _NO = int(s["ng"].sum()), int(s["ng_bad"].sum()), int(s["ng_ok"].sum())
     print(f"\n  ── ★ N のギャップ条件(>= +{a.gap_bp:.0f}bp)を通る行 ──")
-    print(f"     全体          {len(_ng):>8,}件")
-    print(f"     うち汚染      {len(_nb):>8,}件 "
-          f"(**{len(_nb) / max(1, len(_ng)) * 100:.3f}%**)")
-    if len(_nb):
-        print(f"     汚染行の平均ギャップ  {_nb['gap'].mean() * 100:+.1f}%"
-              f"  (正常行 {_ng.loc[~_ng['bad'], 'gap'].mean() * 100:+.2f}%)")
-        print(f"     汚染行の平均 日中変化 {_nb['intra'].mean() * 100:+.1f}%"
-              f"  (正常行 {_ng.loc[~_ng['bad'], 'intra'].mean() * 100:+.2f}%)")
+    print(f"     全体          {_NG:>8,}件")
+    print(f"     うち汚染      {_NB:>8,}件 "
+          f"(**{_NB / max(1, _NG) * 100:.3f}%**)")
+    if _NB:
+        print(f"     汚染行の平均ギャップ  "
+              f"{s['ng_bad_gap'].sum() / _NB * 100:+.1f}%"
+              f"  (正常行 {s['ng_ok_gap'].sum() / max(1, _NO) * 100:+.2f}%)")
+        print(f"     汚染行の平均 日中変化 "
+              f"{s['ng_bad_intra'].sum() / _NB * 100:+.1f}%"
+              f"  (正常行 {s['ng_ok_intra'].sum() / max(1, _NO) * 100:+.2f}%)")
         print(f"     ⚠ 日中変化がショートに有利な向き(マイナス)へ偏っていれば、"
               f"汚染が利益を作っています")
 
-    if a.list > 0 and _bad:
+    t = pd.concat(bads, ignore_index=True) if bads else pd.DataFrame()
+    if a.list > 0 and len(t):
         print(f"\n  ── 該当行(ギャップの大きい順 {a.list}件) ──")
-        _v = t[t["bad"]].reindex(t.loc[t["bad"], "gap"].abs()
-                                 .sort_values(ascending=False).index).head(a.list)
+        _v = t.reindex(t["gap"].abs().sort_values(ascending=False).index).head(a.list)
         print(f"     {'日付':<12}{'銘柄':<9}{'前日終値':>10}{'始値':>10}"
               f"{'安値':>10}{'高値':>10}{'終値':>10}{'ギャップ':>9}{'':>4}")
         for r in _v.itertuples():
@@ -168,9 +203,10 @@ def main() -> None:
                   f"{r.close:>10,.1f}{r.gap * 100:>+8.1f}% {_f:>5}")
 
     print(f"\n  ── 該当が多い銘柄 ──")
-    _bs = t[t["bad"]].groupby("symbol").size().sort_values(ascending=False)
-    for s, c in _bs.head(10).items():
-        print(f"     {s:<10}{c:>5,}件")
+    _bs = (s[s["bad"] > 0].set_index("sym")["bad"]
+           .sort_values(ascending=False))
+    for _s, _c in _bs.head(10).items():
+        print(f"     {_s:<10}{_c:>5,}件")
 
     if a.purge and len(_bs):
         print(f"\n  ⛔ キャッシュを消します({len(_bs):,}銘柄)")
