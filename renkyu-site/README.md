@@ -73,6 +73,7 @@ Python 3.11 以降。サードパーティ製ライブラリは不要。
 
 `.github/workflows/renkyu-site.yml` が毎日 00:10 JST にビルドし、
 GitHub Pages へデプロイする。「次の連休まであと何日」の表示はこれで自動更新される。
+手動で即座に反映したいときは Actions タブから workflow_dispatch で実行する。
 
 初回のみリポジトリ側の設定が必要:
 
@@ -80,6 +81,9 @@ GitHub Pages へデプロイする。「次の連休まであと何日」の表�
    Source を **GitHub Actions** に変更する
 2. `theme.py` の `BASE_URL` を実際の公開 URL に書き換える
    (canonical URL と sitemap に使われる)
+3. push のたびに自動デプロイしたい場合は、ワークフローの `push:` の
+   コメントを外し、`branches:` にデフォルトブランチ名を書く。
+   ブランチを限定しないと作業ブランチへの push で本番が上書きされる
 
 ## 収益化について
 
