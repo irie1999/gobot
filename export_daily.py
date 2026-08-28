@@ -73,12 +73,22 @@ def main() -> None:
     ap.add_argument("--out", default="daily_ohlcv.parquet")
     ap.add_argument("--csv", action="store_true",
                     help="parquet ではなく csv.gz で書く")
+    ap.add_argument("--index-symbols", default="^N225",
+                    help="指数もいっしょに入れる(カンマ区切り)。市場成分を"
+                         "控除するのに要る。空文字で入れない")
+    ap.add_argument("--float32", action="store_true",
+                    help="価格・出来高を float32 で書く(サイズがほぼ半分)")
     a = ap.parse_args()
 
     syms = _load_symbols(a.symbols)
     if a.limit > 0:
         syms = syms[:a.limit]
-    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 並列 {a.workers}")
+    _idx = [s.strip() for s in a.index_symbols.split(",") if s.strip()]
+    if _idx:
+        syms = syms + [s for s in _idx if s not in syms]
+    print(f"[info] 銘柄 {len(syms):,}"
+          + (f"(うち指数 {len(_idx)}: {', '.join(_idx)})" if _idx else "")
+          + f" / 遡り {a.days:,}日 / 並列 {a.workers}")
 
     _min = (pd.Timestamp.today().normalize()
             - pd.Timedelta(days=a.days)).date()
@@ -111,6 +121,10 @@ def main() -> None:
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     df = df.sort_values(["date", "symbol"], ignore_index=True)
 
+    if a.float32:
+        for c in ("open", "high", "low", "close", "volume"):
+            df[c] = df[c].astype("float32")
+
     out = Path(a.out)
     if a.csv or out.suffix != ".parquet":
         out = out.with_suffix("") if out.suffix == ".parquet" else out
@@ -119,7 +133,7 @@ def main() -> None:
         df.to_csv(out, index=False, compression="gzip", encoding="utf-8")
     else:
         try:
-            df.to_parquet(out, index=False, compression="snappy")
+            df.to_parquet(out, index=False, compression="zstd")
         except Exception as e:
             print(f"[warn] parquet で書けません({e}) → csv.gz にします")
             out = Path(str(out.with_suffix("")) + ".csv.gz")
@@ -132,9 +146,32 @@ def main() -> None:
     print(f"  期間     {df['date'].min()} 〜 {df['date'].max()}"
           f"({df['date'].nunique():,}営業日)")
     print(f"  列       {', '.join(df.columns)}")
+
+    # ── ★ 期間のカバレッジ ────────────────────────────────────
+    #   .rsi2_cache は「その時の実行が要求した長さ」しか持っていないことがある。
+    #   min_start_date を渡して取り直しているが、実際に何年ぶん揃ったかは
+    #   **銘柄ごとに違う**ので、ここで必ず出す(「19年ある」と思い込まないため)。
+    # ⚠ date は文字列なので quantile が使えない(pyarrow が落ちる)。並べて拾う
+    _fst = sorted(df.groupby("symbol")["date"].min().tolist())
+    print(f"\n  ── 各銘柄の最古日 ──")
+    for _q, _n in ((0.05, " 5%点"), (0.50, "中央"), (0.95, "95%点")):
+        print(f"     {_n}  {_fst[min(len(_fst) - 1, int(len(_fst) * _q))]}")
+    for _y in ("2010-01-01", "2015-01-01", "2020-01-01", "2024-01-01"):
+        _c = sum(1 for x in _fst if x <= _y)
+        print(f"     {_y} 以前から持っている銘柄  {_c:>5,} "
+              f"({_c / max(1, len(_fst)) * 100:.0f}%)")
+    if _idx:
+        for s in _idx:
+            _g = df[df["symbol"] == s]
+            print(f"     {s:<8} {len(_g):>7,}行  "
+                  + (f"{_g['date'].min()} 〜 {_g['date'].max()}" if len(_g)
+                     else "⛔ **取れていません**"))
+
     print(f"\n  ⚠ 派生列(前日リターン・ギャップ・売買代金)は**入れていません**。")
     print(f"     前処理を入れると、それ自体が渡した先への先入観になります。")
     print(f"  ⚠ 株式分割は **遡及調整済み**です(日足のみ。5分足は未調整)。")
+    print(f"  ⚠ 銘柄ごとに最古日が違います。上の分布を見て、"
+          f"『全銘柄が19年ある』と思い込まないこと。")
 
 
 if __name__ == "__main__":
