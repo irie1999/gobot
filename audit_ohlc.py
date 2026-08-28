@@ -1,0 +1,196 @@
+r"""audit_ohlc.py — 日足の**始値**が壊れていないか監査する(件数を測るだけ)
+
+なぜ要るか (2026-08-28)
+-----------------------
+`backtest_limit_entry._clean_prices` は **終値の前日比が50%を超える行**しか
+落としていません:
+
+    pct = df["close"].pct_change().abs()
+    df  = df[pct <= 0.5].copy()          # ← close だけ。open/high/low は素通り
+
+ところが N は
+  ・**始値**で建てる
+  ・ギャップ = (始値 − 前日終値) / 前日終値 で判定する
+ので、**始値が壊れていると偽のギャップが作られます**。しかも N はギャップが
+大きい銘柄を選ぶので、**壊れた行が系統的に標本へ入ります**。
+§18.27(分足の分割汚染)・§18.50(母集団の抜け)と同じ形で、
+「戦略のフィルタ自身が欠陥データを選び取る」という一番たちの悪い型です。
+
+⛔ このスクリプトは **何も直しません**。件数を数えるだけです。
+   `_clean_prices` を変えると全キャッシュ・全結果が無効になるので、
+   大きさを知ってから決めます。
+
+見るもの
+--------
+  A. OHLC 整合性   始値と終値が 安値〜高値 の内側にあるか / 安値 <= 高値 か
+  B. 始値のギャップ |始値 / 前日終値 - 1| が大きすぎないか(既定30%)
+  C. 日中の値幅     |終値 / 始値 - 1| が大きすぎないか(同上)
+  D. ★ そのうち **N のギャップ条件(>= +100bp)を通ってしまう**のは何件か
+     ← これが本丸。全体の何%が汚染由来かが分かる
+
+⚠ 30% は東証の値幅制限(株価比 14〜30%)より緩い上限です。正常な値動きは
+  1本も落ちません。落ちたものは本物の異常です。
+
+使い方
+------
+  python audit_ohlc.py                        # 既定 プライム全銘柄 / 4200日
+  python audit_ohlc.py --limit 300            # お試し
+  python audit_ohlc.py --thr 0.25             # 判定を厳しく
+  python audit_ohlc.py --list 30              # 該当行を並べる
+  python audit_ohlc.py --purge                # ⛔ 該当銘柄のキャッシュを消す
+
+⚠ 照会のみ。発注はしません。
+"""
+from __future__ import annotations
+
+import argparse
+import importlib
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pandas as pd
+
+from backtest_limit_entry import _CACHE_DIR, fetch
+
+
+def _load_symbols(path: str) -> list[str]:
+    mod = importlib.import_module(Path(path).stem)
+    for name in ("SYMBOLS", "SYMBOL_LIST", "ALL_SYMBOLS"):
+        v = getattr(mod, name, None)
+        if not v:
+            continue
+        return [x[0] if isinstance(x, (tuple, list)) else str(x) for x in v]
+    sys.exit(f"[error] {path} に銘柄リストが見つかりません")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--symbols", default="symbols_listed_prime.py")
+    ap.add_argument("--days", type=int, default=4200)
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--thr", type=float, default=0.30,
+                    help="この比率を超える始値ギャップ/日中変化を異常とみなす。"
+                         "既定0.30は東証の値幅制限(株価比14〜30%%)より緩い上限")
+    ap.add_argument("--gap-bp", type=float, default=100.0,
+                    help="N のギャップ条件(bp)。汚染がここを通る件数を数える")
+    ap.add_argument("--list", type=int, default=0, help="該当行をN件並べる")
+    ap.add_argument("--purge", action="store_true",
+                    help="⛔ 該当した銘柄のキャッシュ pkl を消す(取り直させる)")
+    a = ap.parse_args()
+
+    syms = _load_symbols(a.symbols)
+    if a.limit > 0:
+        syms = syms[:a.limit]
+    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 閾値 {a.thr * 100:.0f}%")
+    print(f"[info] ⛔ 何も直しません。件数を数えるだけです"
+          + ("(--purge 指定あり → 最後に該当銘柄のキャッシュを消します)"
+             if a.purge else ""))
+
+    def _one(sym: str):
+        try:
+            d = fetch(sym, a.days)
+        except Exception:
+            return None
+        if d is None or len(d) < 3:
+            return None
+        o, h, l, c = d["open"], d["high"], d["low"], d["close"]
+        pc = c.shift(1)
+        t = pd.DataFrame({
+            "symbol": sym, "date": d.index,
+            "prev_close": pc.to_numpy(), "open": o.to_numpy(),
+            "high": h.to_numpy(), "low": l.to_numpy(), "close": c.to_numpy(),
+        })
+        # A. OHLC 整合性
+        t["bad_ohlc"] = ((o > h) | (o < l) | (c > h) | (c < l) | (l > h)).to_numpy()
+        # B. 始値のギャップ / C. 日中の値幅
+        t["gap"] = (o / pc - 1.0).to_numpy()
+        t["intra"] = (c / o - 1.0).to_numpy()
+        t["bad_gap"] = t["gap"].abs() > a.thr
+        t["bad_intra"] = t["intra"].abs() > a.thr
+        t["bad"] = t["bad_ohlc"] | t["bad_gap"] | t["bad_intra"]
+        t["n_gap"] = t["gap"] * 10_000.0 >= a.gap_bp     # N の条件を通るか
+        return t
+
+    parts, ok = [], 0
+    with ThreadPoolExecutor(max_workers=a.workers) as ex:
+        for i, r in enumerate(ex.map(_one, syms), 1):
+            if r is not None:
+                parts.append(r)
+                ok += 1
+            if i % 300 == 0:
+                print(f"  … {i:,}/{len(syms):,}", flush=True)
+    if not parts:
+        sys.exit("[error] 1銘柄も読めませんでした")
+
+    t = pd.concat(parts, ignore_index=True).dropna(subset=["prev_close"])
+    _n = len(t)
+    print(f"\n{'=' * 72}")
+    print(f"■ 日足の始値・OHLC 監査 — {ok:,}銘柄 / {_n:,}銘柄日")
+    print(f"{'=' * 72}")
+    for _k, _lbl in (("bad_ohlc", "A. OHLC 整合性エラー(始値/終値が安値〜高値の外)"),
+                     ("bad_gap", f"B. 始値ギャップが ±{a.thr * 100:.0f}% 超"),
+                     ("bad_intra", f"C. 日中変化が ±{a.thr * 100:.0f}% 超")):
+        _c = int(t[_k].sum())
+        print(f"  {_lbl:<44}{_c:>7,}件 ({_c / _n * 100:.4f}%)")
+    _bad = int(t["bad"].sum())
+    print(f"  {'いずれか':<44}{_bad:>7,}件 ({_bad / _n * 100:.4f}%) / "
+          f"{t.loc[t['bad'], 'symbol'].nunique():,}銘柄")
+
+    # ── ★ 本丸: N のギャップ条件を通ってしまう汚染 ──────────────
+    _ng = t[t["n_gap"]]
+    _nb = _ng[_ng["bad"]]
+    print(f"\n  ── ★ N のギャップ条件(>= +{a.gap_bp:.0f}bp)を通る行 ──")
+    print(f"     全体          {len(_ng):>8,}件")
+    print(f"     うち汚染      {len(_nb):>8,}件 "
+          f"(**{len(_nb) / max(1, len(_ng)) * 100:.3f}%**)")
+    if len(_nb):
+        print(f"     汚染行の平均ギャップ  {_nb['gap'].mean() * 100:+.1f}%"
+              f"  (正常行 {_ng.loc[~_ng['bad'], 'gap'].mean() * 100:+.2f}%)")
+        print(f"     汚染行の平均 日中変化 {_nb['intra'].mean() * 100:+.1f}%"
+              f"  (正常行 {_ng.loc[~_ng['bad'], 'intra'].mean() * 100:+.2f}%)")
+        print(f"     ⚠ 日中変化がショートに有利な向き(マイナス)へ偏っていれば、"
+              f"汚染が利益を作っています")
+
+    if a.list > 0 and _bad:
+        print(f"\n  ── 該当行(ギャップの大きい順 {a.list}件) ──")
+        _v = t[t["bad"]].reindex(t.loc[t["bad"], "gap"].abs()
+                                 .sort_values(ascending=False).index).head(a.list)
+        print(f"     {'日付':<12}{'銘柄':<9}{'前日終値':>10}{'始値':>10}"
+              f"{'安値':>10}{'高値':>10}{'終値':>10}{'ギャップ':>9}{'':>4}")
+        for r in _v.itertuples():
+            _f = ("OHLC" if r.bad_ohlc else ("GAP" if r.bad_gap else "INTRA"))
+            print(f"     {str(r.date)[:10]:<12}{r.symbol:<9}{r.prev_close:>10,.1f}"
+                  f"{r.open:>10,.1f}{r.low:>10,.1f}{r.high:>10,.1f}"
+                  f"{r.close:>10,.1f}{r.gap * 100:>+8.1f}% {_f:>5}")
+
+    print(f"\n  ── 該当が多い銘柄 ──")
+    _bs = t[t["bad"]].groupby("symbol").size().sort_values(ascending=False)
+    for s, c in _bs.head(10).items():
+        print(f"     {s:<10}{c:>5,}件")
+
+    if a.purge and len(_bs):
+        print(f"\n  ⛔ キャッシュを消します({len(_bs):,}銘柄)")
+        _d = 0
+        for s in _bs.index:
+            p = _CACHE_DIR / f"{s.replace('.', '_')}.pkl"
+            if p.exists():
+                p.unlink()
+                _d += 1
+        print(f"     {_d:,}件 削除。次回の実行で取り直されます")
+        print(f"     ⚠ 取り直しても直らないなら、yfinance 側のデータが壊れています")
+
+    print(f"\n  {'=' * 66}")
+    print(f"  ⚠ `_clean_prices` は **終値の前日比50%超**しか落としません。")
+    print(f"     始値・高値・安値・OHLC整合性は検査していないので、"
+          f"ここで出た行は素通りしています。")
+    print(f"  ⚠ N はギャップの大きい銘柄を選ぶので、**壊れた始値は"
+          f"選ばれやすい**方向に働きます。")
+    print(f"  {'=' * 66}")
+
+
+if __name__ == "__main__":
+    main()
