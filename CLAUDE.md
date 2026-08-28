@@ -723,6 +723,17 @@ python forward_test.py --report --aggressive   # aggressive 実績
 - **t が高い区画が面で広がっている** → エッジは本物
 - **1区画だけ高く周囲が低い** → その閾値は偶然の可能性が高い
 - **件数が3桁を切る区画** → t の値によらず信頼できない
+- **前日 0.00 の行が下の行と同じ** → 前日の動きという条件は効いていない
+- **端の列で単調増加が続く** → 探索範囲が狭い。`--grid-gap` で伸ばす
+
+前日 0.00 (条件なし) の行を含めるのが要点。パネルは `|gap_z| >= 0.3` の行を
+必ず保持するので、ギャップ閾値 0.3 以上の区画は前日閾値によらず母集団が完全。
+出力は t / グロスα / 件数 の3表で、最後に最良区画とその再現コマンドを出す。
+
+```
+python gap_reversal_daily.py --grid
+python gap_reversal_daily.py --grid --grid-gap "1,2,3,4,5" --grid-prev "0,1,2"
+```
 
 ```
 python gap_reversal_daily.py --grid

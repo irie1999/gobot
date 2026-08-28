@@ -839,37 +839,69 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     ある1点だけ成績が良く周囲が悪いなら、それはデータを何度も見た結果の
     偶然 (多重比較) である可能性が高い。エッジが本物なら、閾値を少し
     動かしても成績はなだらかに変化する。
+
+    前日の動きに 0.0 (条件なし) の行を含めるのが要点。ギャップだけで
+    同じ成績が出るなら、「前日に大きく動いた」という条件は不要である。
+
+    パネルは |gap_z| >= 0.3 の行を必ず保持しているので、ギャップ閾値が
+    0.3 以上の区画は前日閾値によらず完全な母集団になっている。
     """
     global _BOUNCE_SLOPE
     _BOUNCE_SLOPE = bounce_slope(panel)
 
-    prevs = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
-    gaps = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5]
+    def _parse(spec: str, default: list[float]) -> list[float]:
+        if not spec:
+            return default
+        return [float(x) for x in spec.replace(",", " ").split()]
 
-    print("\n" + "=" * 78)
-    print(f"閾値グリッド (コスト {args.cost_bps}bp 控除後の 日次t / グロスα(bp) / 件数)")
-    print("行 = 前日の動き (ATR単位) / 列 = ギャップ (ATR単位)")
-    print("=" * 78)
-    header = "  前日\\ギャップ " + "".join(f"{g:>16.2f}" for g in gaps)
-    print(header)
+    prevs = _parse(args.grid_prev, [0.0, 0.5, 1.0, 1.25, 1.5, 2.0, 2.5])
+    gaps = _parse(args.grid_gap, [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
+    if min(gaps) < 0.3:
+        print("  ⚠ ギャップ閾値 0.3 未満の区画は母集団が不完全です "
+              "(パネルの保持条件が |gap_z| >= 0.3)")
+
+    cells: dict[tuple[float, float], tuple[float, float, int]] = {}
     for pv in prevs:
-        cells = []
         for gp in gaps:
             sig = apply_signal(panel, mkt, args.raw, pv, gp)
             if len(sig) < 30:
-                cells.append(f"{'-':>16}")
                 continue
-            d = to_daily(sig, "alpha", args.cost_bps, args.max_names)
-            st = stats(d)
+            st = stats(to_daily(sig, "alpha", args.cost_bps, args.max_names))
             if st.get("n", 0) < 10:
-                cells.append(f"{'-':>16}")
                 continue
-            gross = sig["alpha"].mean() * 10000
-            cells.append(f"{st['t']:>5.2f}/{gross:>5.0f}/{len(sig):>4}")
-        print(f"  {pv:>12.2f} " + "".join(cells))
-    print("\n  読み方: t が高い区画が「面」で広がっていれば本物。1区画だけ高く")
-    print("          周囲が低いなら、その閾値はデータを見て選んだ偶然の可能性が高い。")
-    print("          件数が3桁を切る区画は、t の値によらず信頼できない。")
+            cells[(pv, gp)] = (st["t"], sig["alpha"].mean() * 10000, len(sig))
+
+    def _table(title: str, pick, fmt: str) -> None:
+        print(f"\n{title}")
+        print("   前日\\ギャップ" + "".join(f"{g:>8.2f}" for g in gaps))
+        for pv in prevs:
+            row = "".join(
+                (f"{pick(cells[(pv, g)]):>8{fmt}}" if (pv, g) in cells
+                 else f"{'-':>8}")
+                for g in gaps)
+            print(f"   {pv:>10.2f}" + row)
+
+    print("\n" + "=" * 78)
+    print(f"閾値グリッド  行 = 前日の動き (ATR単位) / 列 = ギャップ (ATR単位)")
+    print(f"前日 0.00 = 前日の動きを条件にしない")
+    print("=" * 78)
+    _table(f"[1] 日次 t (コスト {args.cost_bps}bp 控除後)", lambda c: c[0], ".2f")
+    _table("[2] グロス α (1トレードあたり bp、コスト控除前)", lambda c: c[1], ".0f")
+    _table("[3] シグナル件数", lambda c: c[2], "d")
+
+    print("\n  読み方:")
+    print("   - t の高い区画が『面』で広がっていれば本物。1区画だけ高く周囲が")
+    print("     低いなら、その閾値はデータを見て選んだ偶然の可能性が高い。")
+    print("   - 前日 0.00 の行が下の行と同じなら、前日の条件は効いていない。")
+    print("   - 件数が3桁を切る区画は、t の値によらず信頼できない。")
+    print("   - 端の列で単調増加が続いているなら、探索範囲が狭い。--grid-gap で伸ばす。")
+    if cells:
+        best = max(cells.items(), key=lambda kv: kv[1][0])
+        (bp, bg), (bt, ba, bn) = best
+        print(f"\n  最良 t: 前日={bp} / ギャップ={bg} → "
+              f"t={bt:.2f} / グロス={ba:.0f}bp / {bn}件")
+        print(f"  そのまま実行するには: "
+              f"--prev-thr {bp} --gap-thr {bg}")
     print("=" * 78)
 
 
@@ -942,6 +974,10 @@ def main() -> int:
                     help="キャッシュを使わず yfinance から取得する")
     ap.add_argument("--grid", action="store_true",
                     help="閾値を総当たりして台地か尖りかを見る")
+    ap.add_argument("--grid-prev", dest="grid_prev", default="",
+                    help="グリッドの前日閾値 (例 \"0,0.5,1,1.5,2\")")
+    ap.add_argument("--grid-gap", dest="grid_gap", default="",
+                    help="グリッドのギャップ閾値 (例 \"1,2,3,4,5\")")
     ap.add_argument("--coverage", action="store_true",
                     help="データの被覆状況だけ出して終了する")
     ap.add_argument("--index-symbol", dest="index_symbol", default=INDEX_SYM,
