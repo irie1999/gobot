@@ -1,0 +1,189 @@
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --text: #1f2328;
+  --muted: #61676e;
+  --line: #e4e2dd;
+  --accent: #b4472e;
+  --accent-soft: #fdf1ed;
+  --sat: #2f6db4;
+  --sun: #c0392b;
+  --radius: 12px;
+  --maxw: 780px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --surface: #1e2126;
+    --text: #e8e6e3;
+    --muted: #9aa0a8;
+    --line: #2e3238;
+    --accent: #e8846a;
+    --accent-soft: #2a201d;
+    --sat: #74a9e0;
+    --sun: #e8836f;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  line-height: 1.75;
+  -webkit-text-size-adjust: 100%;
+}
+a { color: var(--accent); }
+main { max-width: var(--maxw); margin: 0 auto; padding: 0 20px 64px; }
+
+/* --- header / footer --- */
+.site-header {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 18px 20px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); }
+.site-header nav { display: flex; gap: 16px; font-size: .88rem; }
+.site-header nav a { color: var(--muted); text-decoration: none; }
+.site-header nav a:hover { color: var(--accent); }
+.site-footer {
+  border-top: 1px solid var(--line);
+  padding: 24px 20px 48px;
+  max-width: var(--maxw);
+  margin: 0 auto;
+  font-size: .82rem;
+  color: var(--muted);
+}
+.muted { color: var(--muted); }
+
+/* --- hero (次の連休) --- */
+.hero {
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 28px 24px;
+  margin: 8px 0 36px;
+  text-align: center;
+}
+.hero .eyebrow { margin: 0; font-size: .82rem; color: var(--muted); letter-spacing: .08em; }
+.hero h1 { margin: 6px 0 4px; font-size: 1.5rem; line-height: 1.4; }
+.hero .countdown { font-size: 3rem; font-weight: 700; color: var(--accent); line-height: 1.1; }
+.hero .countdown small { font-size: 1rem; font-weight: 400; margin-left: 4px; color: var(--text); }
+.hero .range { margin: 4px 0 16px; color: var(--muted); font-size: .95rem; }
+.hero .btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  padding: 9px 22px;
+  border-radius: 999px;
+  font-size: .9rem;
+}
+
+h2 { font-size: 1.2rem; margin: 40px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--line); }
+h3 { font-size: 1.02rem; margin: 28px 0 8px; }
+
+/* --- 連休カード --- */
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.card {
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s, transform .15s;
+}
+.card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.len { font-size: 1.7rem; font-weight: 700; color: var(--accent); }
+.len small { font-size: .78rem; font-weight: 400; color: var(--muted); margin-left: 2px; }
+.season {
+  font-size: .72rem;
+  background: var(--accent);
+  color: #fff;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.card .range { margin: 6px 0 2px; font-size: .92rem; }
+.card .names { margin: 0; font-size: .8rem; color: var(--muted); }
+
+/* --- テーブル --- */
+table { width: 100%; border-collapse: collapse; font-size: .93rem; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+th { font-size: .8rem; color: var(--muted); font-weight: 600; }
+td.date { white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.wd { width: 2.4em; text-align: center; }
+td.wd.sat { color: var(--sat); }
+td.wd.sun { color: var(--sun); }
+.table-wrap { overflow-x: auto; }
+
+/* --- 日並びの帯 --- */
+.strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; padding: 0; list-style: none; }
+.strip li {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 8px 6px;
+  min-width: 62px;
+  text-align: center;
+  font-size: .78rem;
+}
+.strip li.hol { border-color: var(--accent); background: var(--accent-soft); }
+.strip .d { display: block; font-size: 1.05rem; font-weight: 700; }
+.strip .n { display: block; color: var(--muted); font-size: .68rem; }
+
+/* --- 広告枠 --- */
+.ad-slot {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 28px 0;
+  background: var(--surface);
+  font-size: .88rem;
+  color: var(--muted);
+}
+.ad-label { margin: 0 0 4px; font-size: .68rem; letter-spacing: .1em; color: var(--muted); }
+.ad-slot p:last-child { margin: 0; }
+
+/* --- パンくず / 年ナビ --- */
+.crumb { font-size: .8rem; color: var(--muted); margin: 4px 0 18px; }
+.crumb a { color: var(--muted); }
+.yearnav { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; padding: 0; list-style: none; }
+.yearnav a {
+  display: block;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 5px 14px;
+  text-decoration: none;
+  font-size: .9rem;
+}
+.yearnav a.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.note { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 14px 18px; font-size: .9rem; }
+.lead { font-size: 1.02rem; }
+
+/* --- モバイル --- */
+@media (max-width: 560px) {
+  .site-header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 16px 20px 12px; }
+  .site-header nav { gap: 14px; flex-wrap: wrap; }
+  main { padding: 0 16px 48px; }
+  .cards { grid-template-columns: 1fr; }
+  .hero { padding: 24px 18px; }
+  .hero .countdown { font-size: 2.6rem; }
+  .hero h1 { font-size: 1.28rem; }
+  .strip li { min-width: 56px; }
+}
+
+/* 日本語の禁則処理: 長音符や小書き文字で行頭に来ないようにする */
+h1, h2, h3, .hero h1, .card .range { line-break: strict; word-break: normal; overflow-wrap: break-word; }
+h1 { font-size: 1.6rem; line-height: 1.45; }
+@media (max-width: 560px) { h1 { font-size: 1.38rem; } }
