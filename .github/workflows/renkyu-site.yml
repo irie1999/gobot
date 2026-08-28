@@ -1,0 +1,61 @@
+name: 連休カレンダーを毎日ビルド・公開
+
+on:
+  # 毎日 00:10 JST (= 15:10 UTC) に再生成し、「次の連休まであと何日」を最新にする
+  schedule:
+    - cron: "10 15 * * *"
+  # 手動実行。公開前の動作確認や、変更を即座に反映したいときに使う。
+  workflow_dispatch:
+
+  # push で自動デプロイしたい場合は、下のコメントを外して
+  # branches にこのリポジトリのデフォルトブランチ名を書く。
+  # ブランチを限定しないと、作業ブランチへの push でも
+  # 本番の GitHub Pages が上書きされてしまうので注意。
+  # push:
+  #   branches: [<デフォルトブランチ名>]
+  #   paths:
+  #     - "renkyu-site/**"
+  #     - ".github/workflows/renkyu-site.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: renkyu-site
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: renkyu-site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 祝日の計算が壊れていないことを、公開前に必ず確認する
+      - name: テスト
+        run: python test_holidays.py
+
+      - name: ビルド
+        run: python build.py --out dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: renkyu-site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
