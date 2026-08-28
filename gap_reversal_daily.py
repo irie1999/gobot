@@ -35,6 +35,7 @@ import argparse
 import math
 import pickle
 import sys
+import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -74,6 +75,33 @@ _LOCAL: dict[str, pd.DataFrame] | None = None
 
 _NEED = ["open", "high", "low", "close"]
 
+# 東証には値幅制限があるので、これを超えるギャップは物理的に起こり得ない。
+# 1,000〜6,000円の株の制限値幅は最大でも 30% 程度。
+MAX_GAP = 0.30
+
+# データ破損の集計。ThreadPoolExecutor から触るのでロックを持つ。
+_INTEGRITY: dict[str, int] = defaultdict(int)
+_INTEGRITY_ROWS: list[dict] = []
+_INTEGRITY_LOCK = threading.Lock()
+_AUDIT_CAP = 400
+
+
+def _note_bad(kind: str, n: int, rows: pd.DataFrame | None = None) -> None:
+    if n <= 0:
+        return
+    with _INTEGRITY_LOCK:
+        _INTEGRITY[kind] += n
+        if rows is not None and len(_INTEGRITY_ROWS) < _AUDIT_CAP:
+            for dt, r in rows.head(_AUDIT_CAP - len(_INTEGRITY_ROWS)).iterrows():
+                _INTEGRITY_ROWS.append({
+                    "kind": kind, "date": dt,
+                    "symbol": r.get("symbol", "?"),
+                    "prev_close": r.get("prev_close", float("nan")),
+                    "open": r["open"], "high": r["high"],
+                    "low": r["low"], "close": r["close"],
+                    "gap_pct": r.get("gap", float("nan")) * 100,
+                })
+
 
 def _normalize_daily(df: pd.DataFrame, name: str) -> pd.DataFrame | None:
     """列名・型・index を揃える。date/Date 列があれば index にする。"""
@@ -99,6 +127,15 @@ def _normalize_daily(df: pd.DataFrame, name: str) -> pd.DataFrame | None:
     out = df[_NEED + ["volume"]].apply(pd.to_numeric, errors="coerce")
     out = out.dropna(subset=_NEED)
     out = out[(out[_NEED] > 0).all(axis=1)]
+    # OHLC の整合性。始値・終値は必ず 安値〜高値 の内側にある。
+    # 外れている行はデータ破損 (yfinance の欠損・分割の未調整など)。
+    ok = (out["high"] >= out["low"]) \
+        & out["open"].between(out["low"], out["high"]) \
+        & out["close"].between(out["low"], out["high"])
+    bad = out[~ok]
+    if len(bad):
+        _note_bad("ohlc", len(bad), bad.assign(symbol=name))
+    out = out[ok]
     return out if len(out) >= 250 else None
 
 
@@ -443,6 +480,7 @@ def build_symbol_rows(
     j["beta"] = beta
     j["resid_gap"] = j["gap"] - beta * j["idx_gap"]
     j["resid_prev"] = j["prev_ret"] - beta * j["idx_ret"].shift(1)
+    j["prev_close"] = j["close"].shift(1)
 
     # 有効行
     ok = (
@@ -451,7 +489,13 @@ def build_symbol_rows(
         & j["close"].shift(1).between(MIN_PRICE, MAX_PRICE)
         & (j["atr"] > 0)
     )
-    j = j[ok]
+    # 値幅制限を超えるギャップ / 日中リターンは起こり得ない = データ破損
+    sane = (j["gap"].abs() <= MAX_GAP) & (j["o2c"].abs() <= MAX_GAP) \
+        & (j["ret"].abs() <= MAX_GAP)
+    bad = j[ok & ~sane]
+    if len(bad):
+        _note_bad("gap", len(bad), bad.assign(symbol=symbol))
+    j = j[ok & sane]
     if j.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -560,6 +604,14 @@ def build_panel(
     mkt.name = "mkt_o2c"
     print(f"候補 {len(panel):,} 行 / {panel['symbol'].nunique()} 銘柄 / "
           f"{len(mkt):,} 営業日 (取得失敗 {failed})")
+    if _INTEGRITY:
+        tot = sum(_INTEGRITY.values())
+        print(f"データ破損として除外: {tot:,} 銘柄日 "
+              f"(OHLC不整合 {_INTEGRITY.get('ohlc', 0):,} / "
+              f"値幅制限超え {_INTEGRITY.get('gap', 0):,})")
+        print(f"  始値・終値が安値〜高値の外にある行と、|ギャップ| や |日中変化| が "
+              f"{MAX_GAP*100:.0f}% を超える行を除外しています。")
+        print(f"  内訳を見るには --audit を付けてください。")
     return panel, mkt
 
 
@@ -850,6 +902,41 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print("=" * 78)
 
 
+def audit_report() -> None:
+    """データ破損として除外した行を一覧する。原因の切り分け用。
+
+    典型的な原因:
+      - 株式分割の未調整 (比率がきれいな整数倍になる)
+      - yfinance の欠損・誤植 (始値だけ桁が違う など)
+    """
+    if not _INTEGRITY_ROWS:
+        print("\nデータ破損として除外した行はありません。")
+        return
+    rows = sorted(_INTEGRITY_ROWS,
+                  key=lambda r: abs(r["gap_pct"]) if r["gap_pct"] == r["gap_pct"]
+                  else 0, reverse=True)
+    print("\n" + "=" * 78)
+    print(f"データ破損として除外した行 (最大 {_AUDIT_CAP} 件を保持、"
+          f"|ギャップ| 降順で上位30件)")
+    print("=" * 78)
+    print(f"  {'種別':<6}{'銘柄':<10}{'日付':<12}"
+          f"{'前日終値':>12}{'始値':>12}{'高値':>12}{'安値':>12}{'終値':>12}"
+          f"{'ギャップ%':>14}")
+    def _n(v, w=12, d=1):
+        return f"{'-':>{w}}" if v != v else f"{v:>{w},.{d}f}"
+
+    for r in rows[:30]:
+        dt = r["date"]
+        ds = f"{dt:%Y-%m-%d}" if hasattr(dt, "year") else str(dt)[:10]
+        print(f"  {r['kind']:<6}{str(r['symbol']):<10}{ds:<12}"
+              f"{_n(r['prev_close'])}{_n(r['open'])}"
+              f"{_n(r['high'])}{_n(r['low'])}{_n(r['close'])}"
+              f"{_n(r['gap_pct'], 14)}")
+    print("\n  始値だけが桁違いなら yfinance の誤植、OHLC 全体が整数倍なら")
+    print("  株式分割の未調整です。該当銘柄のキャッシュを消して取り直してください。")
+    print("=" * 78)
+
+
 def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     """閾値の周辺を総当たりして「台地か尖りか」を見る。
 
@@ -995,6 +1082,11 @@ def main() -> int:
                     help="グリッドの前日閾値 (例 \"0,0.5,1,1.5,2\")")
     ap.add_argument("--grid-gap", dest="grid_gap", default="",
                     help="グリッドのギャップ閾値 (例 \"1,2,3,4,5\")")
+    ap.add_argument("--audit", action="store_true",
+                    help="データ破損として除外した行を一覧表示する")
+    ap.add_argument("--max-gap", dest="max_gap", type=float, default=MAX_GAP,
+                    help=f"これを超えるギャップ/日中変化はデータ破損として除外 "
+                         f"(既定 {MAX_GAP})")
     ap.add_argument("--coverage", action="store_true",
                     help="データの被覆状況だけ出して終了する")
     ap.add_argument("--index-symbol", dest="index_symbol", default=INDEX_SYM,
@@ -1019,6 +1111,7 @@ def main() -> int:
         return self_test()
 
     INDEX_SYM = args.index_symbol
+    globals()["MAX_GAP"] = args.max_gap
 
     min_prev = (args.prev_thr if args.prev_thr is not None
                 else (PREV_MOVE_PCT if args.raw else PREV_MOVE_ATR))
@@ -1058,6 +1151,8 @@ def main() -> int:
     if args.csv:
         panel.to_csv(args.csv, index=False)
         print(f"パネルを {args.csv} に保存")
+    if args.audit:
+        audit_report()
     if args.grid:
         grid_scan(panel, mkt, args)
     else:
