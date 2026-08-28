@@ -672,12 +672,31 @@ def bounce_slopes(panel: pd.DataFrame, n_bins: int = 10) -> tuple:
     return qs, np.array(slopes), np.array(counts)
 
 
-def _slope_for(mag: np.ndarray) -> np.ndarray:
-    """各行の |ギャップ| に対応する帯域の傾きを引く。"""
-    edges, slopes, _ = _BOUNCE
-    idx = np.clip(np.searchsorted(edges, mag, side="right") - 1,
-                  0, len(slopes) - 1)
-    return slopes[idx]
+def noise_slope() -> float:
+    """始値の測定ノイズだけで生じる傾きを推定する。
+
+    始値に乗算ノイズ ε があると
+        gap  = 真のギャップ + ε
+        o2c  = 真の日中変化 - ε
+    となり、|ギャップ| が小さい帯域ではノイズが分散を支配するので
+    傾きは -1 に近づく。逆に大きいギャップの帯域ではノイズの寄与は
+    無視できる。
+
+    したがって **ノイズ由来の成分は、最小の帯域の傾きから推定する**。
+    そこが負でなければ、始値ノイズは存在しない。
+
+    シグナル自身の帯域の傾きを引いてしまうと、それは「反転はギャップに
+    比例する」という効果そのものを差し引くことになり、比例する本物の
+    効果まで消してしまう (2026-08 に修正)。
+    """
+    _, slopes, counts = _BOUNCE
+    if len(slopes) < 3:
+        return 0.0
+    # 最小の2帯域。件数の少ない帯域は無視する
+    cand = [sl for sl, c in zip(slopes[:2], counts[:2]) if c >= 200]
+    if not cand:
+        return 0.0
+    return min(0.0, float(min(cand)))
 
 
 def attach_pnl(sig: pd.DataFrame, mkt: pd.Series) -> pd.DataFrame:
@@ -687,7 +706,7 @@ def attach_pnl(sig: pd.DataFrame, mkt: pd.Series) -> pd.DataFrame:
     sig["alpha"] = sig["ret"] - sig["side"] * sig["mkt"].fillna(0.0)
     # 微細構造 (始値ノイズ) で説明できる分を控除した α。
     # 傾きはその行の |ギャップ| が属する帯域のものを使う (線形外挿を避ける)。
-    b = _slope_for(sig["gap"].abs().to_numpy())
+    b = noise_slope()
     sig["alpha_x"] = sig["alpha"] - sig["side"] * (b * sig["gap"])
     return sig
 
@@ -780,12 +799,17 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         hi = edges[i + 1] * 100
         rng = f"{lo:5.2f}% 〜 {hi:6.2f}%" if np.isfinite(hi) else f"{lo:5.2f}% 以上   "
         print(f"    {rng:<22}{slopes[i]:>+10.4f}{counts[i]:>12,}")
-    b_sig = float(np.mean(_slope_for(sig["gap"].abs().to_numpy())))
-    print(f"  シグナル行に当たった平均の傾き = {b_sig:+.4f}"
-          f"  (平均ギャップ {sig['gap'].abs().mean()*100:.2f}% で "
-          f"{abs(b_sig) * sig['gap'].abs().mean() * 10000:.1f}bp 相当)")
-    print("  ★ 上の帯域表で、大きいギャップの帯域でも傾きが残っているなら反転は本物。")
-    print("    大きいギャップで傾きが 0 に近づくなら、小さい帯域だけがノイズです。")
+    nb = noise_slope()
+    print(f"\n  ノイズ由来と推定した傾き (最小帯域から) = {nb:+.4f}"
+          f"  → 控除 {abs(nb) * sig['gap'].abs().mean() * 10000:.1f}bp")
+    if nb > -0.005:
+        print("  ★ 最小の帯域に負の傾きがありません = 始値の測定ノイズは実質ゼロ。")
+        print("    微細構造では説明できないので、この経路での棄却はできません。")
+        print("    (日本株の寄り付きは板寄せで単一の約定価格が付くため、これは自然)")
+    else:
+        print("  ★ 最小の帯域が強く負 = 始値ノイズの兆候。3行目が消えるなら打ち切り。")
+    print("  注: シグナル自身の帯域の傾きを引いてはいけません。それは")
+    print("      「反転はギャップに比例する」という効果そのものの控除になります。")
 
     # ── §2 サンプル水増しの実演 ───────────────────────────────────
     print("\n【2】検定単位の違い (トレード単位は t を水増しする)")
