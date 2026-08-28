@@ -61,7 +61,8 @@ ATR_PERIOD    = 20
 MIN_PRICE     = 1000.0
 MAX_PRICE     = 6000.0
 MIN_TURNOVER  = 3e8     # 20日平均売買代金の下限 (円)。執行可能性のフィルタ
-_BOUNCE_SLOPE = 0.0    # bounce_slope() が実行時に設定する
+_BOUNCE: tuple = (np.array([0.0, np.inf]), np.array([0.0]),
+                  np.array([0]))   # bounce_slopes() が実行時に設定
 
 COST_BPS      = 30.0    # 往復コスト (bp)。呼値+板寄せ+引け成行の想定
 TRADING_DAYS  = 245
@@ -635,22 +636,48 @@ def apply_signal(panel: pd.DataFrame, mkt: pd.Series, raw: bool,
     return attach_pnl(sig, mkt)
 
 
-def bounce_slope(panel: pd.DataFrame) -> float:
-    """全銘柄・全日で o2c を gap に回帰した傾き。
+def bounce_slopes(panel: pd.DataFrame, n_bins: int = 10) -> tuple:
+    """|ギャップ| の帯域ごとに o2c を gap に回帰した傾きを返す。
 
-    始値は gap の分子であり o2c の分母でもあるため、始値の測定ノイズ
-    (板寄せの偏り・気配のバウンス) だけで両者は機械的に負の相関を持つ。
-    これは過剰反応とは無関係で、ランダムウォークでも必ず出る。
-    シグナルの α からこの分を差し引かないと、微細構造のノイズを
-    エッジと誤認する。
+    始値は gap の分子であり o2c の分母でもあるため、始値の測定ノイズだけで
+    両者は機械的に負の相関を持つ。ただし **そのノイズ由来の傾きは小さい
+    ギャップの帯域でしか効かない**。ノイズが分散に占める割合が高いのは
+    小さいギャップの領域で、12% のギャップではノイズは誤差の数%にすぎない。
+
+    したがって全体で1本の傾きを推定して大きいギャップに線形外挿すると、
+    過剰に控除してしまう。帯域ごとに推定して、その帯域の傾きを使う。
+
+    返り値: (帯域の境界 (n_bins+1 個), 帯域ごとの傾き, 帯域ごとの件数)
     """
-    x = panel["gap"].to_numpy(dtype=float)
+    g = panel["gap"].to_numpy(dtype=float)
     y = panel["o2c"].to_numpy(dtype=float)
-    ok = np.isfinite(x) & np.isfinite(y)
-    x, y = x[ok], y[ok]
-    if len(x) < 500 or x.std() == 0:
-        return 0.0
-    return float(np.cov(x, y)[0, 1] / x.var())
+    ok = np.isfinite(g) & np.isfinite(y)
+    g, y = g[ok], y[ok]
+    if len(g) < 2000:
+        return np.array([0.0, np.inf]), np.array([0.0]), np.array([len(g)])
+
+    mag = np.abs(g)
+    qs = np.quantile(mag, np.linspace(0, 1, n_bins + 1))
+    qs[0], qs[-1] = 0.0, np.inf
+    qs = np.unique(qs)
+    slopes, counts = [], []
+    for i in range(len(qs) - 1):
+        m = (mag >= qs[i]) & (mag < qs[i + 1])
+        gx, gy = g[m], y[m]
+        if len(gx) < 200 or gx.std() == 0:
+            slopes.append(0.0)
+        else:
+            slopes.append(float(np.cov(gx, gy)[0, 1] / gx.var()))
+        counts.append(int(m.sum()))
+    return qs, np.array(slopes), np.array(counts)
+
+
+def _slope_for(mag: np.ndarray) -> np.ndarray:
+    """各行の |ギャップ| に対応する帯域の傾きを引く。"""
+    edges, slopes, _ = _BOUNCE
+    idx = np.clip(np.searchsorted(edges, mag, side="right") - 1,
+                  0, len(slopes) - 1)
+    return slopes[idx]
 
 
 def attach_pnl(sig: pd.DataFrame, mkt: pd.Series) -> pd.DataFrame:
@@ -658,8 +685,9 @@ def attach_pnl(sig: pd.DataFrame, mkt: pd.Series) -> pd.DataFrame:
     sig["ret"] = sig["side"] * sig["o2c"]
     sig["mkt"] = sig["date"].map(mkt)
     sig["alpha"] = sig["ret"] - sig["side"] * sig["mkt"].fillna(0.0)
-    # 微細構造 (始値ノイズ) で説明できる分を控除した α
-    b = _BOUNCE_SLOPE
+    # 微細構造 (始値ノイズ) で説明できる分を控除した α。
+    # 傾きはその行の |ギャップ| が属する帯域のものを使う (線形外挿を避ける)。
+    b = _slope_for(sig["gap"].abs().to_numpy())
     sig["alpha_x"] = sig["alpha"] - sig["side"] * (b * sig["gap"])
     return sig
 
@@ -713,8 +741,8 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     gap_thr = args.gap_thr if args.gap_thr is not None else (
         GAP_PCT if args.raw else GAP_ATR)
 
-    global _BOUNCE_SLOPE
-    _BOUNCE_SLOPE = bounce_slope(panel)
+    global _BOUNCE
+    _BOUNCE = bounce_slopes(panel)
 
     sig = apply_signal(panel, mkt, args.raw, prev_thr, gap_thr)
     mode = "生%" if args.raw else "ATR単位"
@@ -739,12 +767,25 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print(_fmt("α (市場控除後)", stats(d_alp)))
     d_ax = to_daily(sig, "alpha_x", args.cost_bps, args.max_names)
     print(_fmt("α (始値ノイズも控除)", stats(d_ax)))
-    print(f"  無条件回帰 o2c ~ gap の傾き = {_BOUNCE_SLOPE:+.4f}"
-          f"  (平均ギャップ {sig['gap'].abs().mean()*100:.2f}% で "
-          f"{abs(_BOUNCE_SLOPE) * sig['gap'].abs().mean() * 10000:.1f}bp 相当)")
+
+    edges, slopes, counts = _BOUNCE
+    print("\n  o2c ~ gap の回帰傾き (|ギャップ| の帯域別)")
     print("  始値は gap の分子かつ o2c の分母なので、始値の測定ノイズだけで")
-    print("  両者は機械的に負相関します。ランダムウォークでも出るので、")
-    print("  ★ 最後の行が消えるなら、それは過剰反応ではなく微細構造ノイズです。")
+    print("  両者は機械的に負相関します。ただしノイズが効くのは小さいギャップの")
+    print("  帯域だけなので、全体で1本の傾きを大きいギャップに外挿すると")
+    print("  控除しすぎます。帯域ごとに推定した傾きを各行に当てています。")
+    print(f"    {'|ギャップ| 帯域':<22}{'傾き':>10}{'件数':>12}")
+    for i in range(len(slopes)):
+        lo = edges[i] * 100
+        hi = edges[i + 1] * 100
+        rng = f"{lo:5.2f}% 〜 {hi:6.2f}%" if np.isfinite(hi) else f"{lo:5.2f}% 以上   "
+        print(f"    {rng:<22}{slopes[i]:>+10.4f}{counts[i]:>12,}")
+    b_sig = float(np.mean(_slope_for(sig["gap"].abs().to_numpy())))
+    print(f"  シグナル行に当たった平均の傾き = {b_sig:+.4f}"
+          f"  (平均ギャップ {sig['gap'].abs().mean()*100:.2f}% で "
+          f"{abs(b_sig) * sig['gap'].abs().mean() * 10000:.1f}bp 相当)")
+    print("  ★ 上の帯域表で、大きいギャップの帯域でも傾きが残っているなら反転は本物。")
+    print("    大きいギャップで傾きが 0 に近づくなら、小さい帯域だけがノイズです。")
 
     # ── §2 サンプル水増しの実演 ───────────────────────────────────
     print("\n【2】検定単位の違い (トレード単位は t を水増しする)")
@@ -950,8 +991,8 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     パネルは |gap_z| >= 0.3 の行を必ず保持しているので、ギャップ閾値が
     0.3 以上の区画は前日閾値によらず完全な母集団になっている。
     """
-    global _BOUNCE_SLOPE
-    _BOUNCE_SLOPE = bounce_slope(panel)
+    global _BOUNCE
+    _BOUNCE = bounce_slopes(panel)
 
     def _parse(spec: str, default: list[float]) -> list[float]:
         if not spec:
