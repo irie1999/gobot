@@ -727,6 +727,8 @@ python forward_test.py --report --aggressive   # aggressive 実績
 ### 16.5 使い方
 
 ```
+python gap_reversal_daily.py --coverage       # データの被覆状況だけ確認して終了
+python gap_reversal_daily.py                  # .rsi2_cache/ を自動検出して実行
 python gap_reversal_daily.py --self-test      # 合成データで配管を確認 (要ネットワーク無し)
 python gap_reversal_daily.py --limit 200      # 200銘柄で試す
 python gap_reversal_daily.py                  # 全ユニバース
@@ -740,6 +742,17 @@ python gap_reversal_daily.py --data-dir ./daily        # <SYM>.csv/.parquet/.pkl
 python gap_reversal_daily.py --data-file all.csv       # symbol,date,ohlcv の長形式1ファイル
 python gap_reversal_daily.py --data-dir ./daily --no-index   # 指数ファイルが無い場合
 ```
+
+**引数なしで実行すると `.rsi2_cache/` を自動で使います** (`--cache-dir` で変更、
+`--no-cache` で無効化)。`backtest_limit_entry.fetch` が作った `<7203_T>.pkl` を
+そのまま読み、`7203_T` → `7203.T` に読み替えます。250本未満の銘柄は除外。
+指数 `^N225.pkl` がキャッシュに無ければ yfinance から取りに行き、それも不可なら
+`--no-index` を促して終了します。
+
+`--coverage` は履歴の開始日の分布 (最古 / 中央 / 90%点) と最終日を出して終了します。
+`.rsi2_cache/` は `fetch` が開始日を見ない設計のため **2007年まで遡っていない
+ことが多い**ので、長期の結論を出す前に必ず確認してください。中央値で5年未満の
+場合は警告が出ます。
 
 `--data-dir` / `--data-file` を指定すると yfinance を一切使いません
 (ネットワーク不可の環境用)。列名は大文字小文字を問わず

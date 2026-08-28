@@ -190,6 +190,80 @@ def load_local(data_dir: str | None, data_file: str | None) -> list[str]:
     return syms
 
 
+def load_cache_dir(cache_dir: str, index_symbol: str,
+                   want_index: bool = True) -> tuple[list[str], bool]:
+    """既存の日足キャッシュ (.rsi2_cache/) をそのまま読む。
+
+    backtest_limit_entry.fetch が作る `<7203_T>.pkl` 形式。index が
+    DatetimeIndex、列が小文字 open/high/low/close/volume の DataFrame。
+
+    返り値は (銘柄リスト, 指数が見つかったか)。
+    """
+    global _LOCAL
+    d = Path(cache_dir)
+    files = sorted(d.glob("*.pkl")) if d.is_dir() else []
+    if not files:
+        return [], False
+
+    store: dict[str, pd.DataFrame] = {}
+    short = bad = 0
+    for f in files:
+        if f.name.startswith("earn_"):
+            continue
+        try:
+            with open(f, "rb") as fh:
+                raw = pickle.load(fh)
+        except Exception:
+            bad += 1
+            continue
+        if not isinstance(raw, pd.DataFrame):
+            bad += 1
+            continue
+        nd = _normalize_daily(raw, f.stem)
+        if nd is None:
+            short += 1
+            continue
+        # 7203_T -> 7203.T  /  ^N225 はそのまま
+        sym = f.stem if f.stem.startswith("^") else f.stem.replace("_", ".")
+        store[sym] = nd
+
+    if not store:
+        return [], False
+
+    _LOCAL = dict(store)
+    for k, v in list(store.items()):
+        if k.endswith(".T"):
+            _LOCAL.setdefault(k[:-2] + "_T", v)
+
+    has_index = index_symbol in store
+    syms = sorted(k for k in store if k != index_symbol)
+    print(f"日足キャッシュ {d}/ : {len(syms)} 銘柄 "
+          f"(250本未満で除外 {short} / 読めず {bad})")
+    describe_coverage(store, index_symbol)
+    if not has_index and want_index:
+        print(f"  ⚠ 指数 {index_symbol} がキャッシュにありません "
+              f"(yfinance から取得を試みます。不可なら --no-index)")
+    return syms, has_index
+
+
+def describe_coverage(store: dict[str, pd.DataFrame], index_symbol: str) -> None:
+    """履歴の開始日の分布を出す。短いキャッシュで長期結論を出さないため。"""
+    starts = pd.Series([v.index[0] for k, v in store.items() if k != index_symbol])
+    ends = pd.Series([v.index[-1] for k, v in store.items() if k != index_symbol])
+    if starts.empty:
+        return
+    q = starts.quantile([0.1, 0.5, 0.9])
+    print(f"  開始日: 最古 {starts.min():%Y-%m-%d} / 中央 {q[0.5]:%Y-%m-%d} "
+          f"/ 90%点 {q[0.9]:%Y-%m-%d}")
+    print(f"  最終日: 中央 {ends.median():%Y-%m-%d} / 最新 {ends.max():%Y-%m-%d}")
+    span_yrs = (ends.median() - q[0.5]).days / 365.25
+    if span_yrs < 5:
+        print(f"  ⚠ 中央値で約 {span_yrs:.1f} 年しかありません。年別の符号安定性 (§3) は")
+        print(f"    参考程度にしかならないので、長期の結論を出す前に日足を取り直してください。")
+    else:
+        print(f"  → 中央値で約 {span_yrs:.1f} 年ぶん")
+
+
 def _cache_path(symbol: str) -> Path:
     return CACHE_DIR / f"{symbol.replace('.', '_').replace('^', 'IDX_')}.pkl"
 
@@ -766,6 +840,13 @@ def main() -> int:
                     help="ローカル日足のディレクトリ (<SYM>.csv/.parquet/.pkl)")
     ap.add_argument("--data-file", dest="data_file",
                     help="ローカル日足の長形式1ファイル (symbol,date,ohlcv)")
+    ap.add_argument("--cache-dir", dest="cache_dir", default=".rsi2_cache",
+                    help="既存の日足キャッシュ (既定 .rsi2_cache)。"
+                         "存在すれば自動で使う")
+    ap.add_argument("--no-cache", dest="no_cache", action="store_true",
+                    help="キャッシュを使わず yfinance から取得する")
+    ap.add_argument("--coverage", action="store_true",
+                    help="データの被覆状況だけ出して終了する")
     ap.add_argument("--index-symbol", dest="index_symbol", default=INDEX_SYM,
                     help=f"市場成分の控除に使う指数 (既定 {INDEX_SYM})")
     ap.add_argument("--no-index", dest="no_index", action="store_true",
@@ -792,13 +873,35 @@ def main() -> int:
     min_prev = (args.prev_thr if args.prev_thr is not None
                 else (PREV_MOVE_PCT if args.raw else PREV_MOVE_ATR))
 
+    syms: list[str] = []
     if args.data_dir or args.data_file:
         syms = load_local(args.data_dir, args.data_file)
-        syms = [s for s in syms if s != INDEX_SYM]
-        if args.limit:
-            syms = syms[: args.limit]
-    else:
+        syms = [x for x in syms if x != INDEX_SYM]
+    elif not args.no_cache:
+        syms, has_index = load_cache_dir(args.cache_dir, INDEX_SYM,
+                                         want_index=not args.no_index)
+        if syms and not has_index and not args.no_index:
+            # 指数だけ yfinance から取りに行く (_LOCAL に無ければ fetch_daily が
+            # None を返すので、ここで明示的に取得して _LOCAL に載せる)
+            saved = _LOCAL
+            globals()["_LOCAL"] = None      # 一時的に yfinance 経路を使う
+            idx_df = fetch_daily(INDEX_SYM)
+            globals()["_LOCAL"] = saved
+            if idx_df is not None:
+                _LOCAL[INDEX_SYM] = idx_df
+                print(f"  指数 {INDEX_SYM} を yfinance から取得しました")
+            else:
+                print(f"  指数 {INDEX_SYM} を取得できませんでした。"
+                      f"--no-index を付けて再実行してください")
+                return 1
+    if not syms:
         syms = load_universe(args.symbols, args.limit)
+    elif args.limit:
+        syms = syms[: args.limit]
+
+    if args.coverage:
+        print(f"\n対象 {len(syms)} 銘柄。--coverage 指定のためここで終了します。")
+        return 0
     panel, mkt = build_panel(syms, args.workers, args.earnings,
                              min_prev * (1.0 if args.raw else 0.9),
                              no_index=args.no_index)
