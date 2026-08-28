@@ -300,6 +300,15 @@ ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
                      "『軸が効いた』のか『gap 閾値を下げただけ』なのか判別できない")
 ap.add_argument("--relax-gap-list", type=str, default="25,50,60,75,90",
                 help="緩めたギャップ閾値(bp)")
+ap.add_argument("--hedge", action="store_true",
+                help="★★ **同日ヘッジ**(寄りで日経先物を買い、引けで売る)で"
+                     "σ を削れるか。⛔ これは予測ではない(当日の相場を当てる"
+                     "必要がない)ので §18.60 の壁を回避する。"
+                     "TRAIN で比率を決めて TEST で答え合わせ")
+ap.add_argument("--hedge-ratios", type=str, default="0,0.25,0.5,0.75,1.0,1.25",
+                help="ヘッジ比率(1.0 = TRAIN の β を丸ごと打ち消す)")
+ap.add_argument("--hedge-cost-bp", type=float, default=1.0,
+                help="先物の往復コスト(bp / 建玉に対して)。既定1.0")
 ap.add_argument("--tail-diag", action="store_true",
                 help="★★ **大負けの日を寄り前に読めるか**を、順番を追って測る。"
                      "①事後(同日の相場)でどこまで説明できるか=予測可能性の上限 "
@@ -423,7 +432,7 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
-                    or a.tail_diag)
+                    or a.tail_diag or a.hedge)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
     _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
@@ -1349,6 +1358,139 @@ if a.sweep_relax:
     print(f"\n  ⚠ 『合計 bp/件』が下がっていても、**件数が増えていれば月の総額は"
           f"増えうる**")
     print(f"     (N は稼働率40%で資金が余っている)。ただし watch50 が先に効きます。")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.hedge:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 同日ヘッジ — 寄りで日経先物を買い、引けで売る
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ **これは予測ではない。** 当日の相場を当てる必要がないので、
+    #     §18.60 の「①相場で説明できる / ②寄り前には読めない」の壁を回避する。
+    #     N は同日決済(寄り→引け)なので、ヘッジも同じ区間で完結する。
+    #
+    #   §18.30 で lss のヘッジを棄却した理由は **R²=0.063 と小さすぎた**こと。
+    #   N は R²=0.235(§18.60)で前提が違うため、測り直す価値がある。
+    #
+    #   ⚠ 見るのは **総額ではなく 月平均÷σ**。ヘッジは α を変えずに σ を削る
+    #     のが狙いなので、総額が動かないのが正常(§18.28 / §18.38 の逆)。
+    import math as _math
+
+    _ht = _pool_of(_train)
+    _he = _pool_of(_test) if _test is not None and len(_test) else None
+    if _ht.empty:
+        sys.exit("[error] TRAIN が空です")
+    try:
+        from preopen_market import sameday_features
+    except Exception as _e:
+        sys.exit(f"[error] 同日の日経を取れません: {_e}")
+
+    print(f"\n{'=' * 78}")
+    print(f"■ 同日ヘッジ — 寄りで日経先物を買い、引けで売る")
+    print(f"{'=' * 78}")
+    print(f"  ⛔ **予測ではありません**。当日の相場を当てる必要がないので、"
+          f"§18.60 の壁(寄り前には読めない)を回避します")
+    print(f"  ⚠ 見るのは **月平均÷σ**。総額が変わらないのが正常です"
+          f"(α は変えず σ だけ削るのが狙い)")
+    print(f"  先物コスト {a.hedge_cost_bp:.1f}bp(往復 / 建玉に対して)")
+
+    def _panel(src, pool):
+        _nd = max(1, pool["date"].nunique())
+        _sim, _, _ = _make_ops_sim(src, pool, _nd)
+        _r = _sim(50, a.budget_man or 400.0, 0, False)
+        _d = {str(k): (v[0] + v[1]) for k, v in _r["daily"].items()}
+        _c = {str(k): (v[0] + v[1]) for k, v in _r["dcap"].items()}
+        _ks = sorted(_d)
+        _sd = sameday_features(_ks)
+        _keep = [k for k in _ks if k in _sd]
+        return (_keep,
+                np.array([_d[k] for k in _keep], float),
+                np.array([_c.get(k, 0.0) for k in _keep], float),
+                np.array([_sd[k]["n225_same_day"] for k in _keep], float))
+
+    _kd, _pn, _cap, _mk = _panel(_train, _ht)
+    if len(_kd) < 100:
+        sys.exit(f"[error] TRAIN の有効日が少なすぎます({len(_kd)}日)")
+
+    # β = 日経の日中1%あたり N の損益がいくら動くか(TRAIN で推定)
+    _b1 = np.polyfit(_mk, _pn, 1)
+    _beta, _alpha = float(_b1[0]), float(_b1[1])
+    _pred = np.polyval(_b1, _mk)
+    _r2 = 1.0 - ((_pn - _pred) ** 2).sum() / ((_pn - _pn.mean()) ** 2).sum()
+    print(f"\n  ── TRAIN({_train_n}) {len(_kd):,}営業日 ──")
+    print(f"    β = **{_beta:+,.0f}円 / 日経日中+1%** / R² {_r2:.3f} / "
+          f"α {_alpha:+,.0f}円/日")
+    print(f"    平均投入 {_cap.mean():,.0f}円/日")
+    # ★★ ヘッジは σ だけでなく **『市場ベータ由来の利益』も消す**。
+    #   N はショートなので、日経が日中に平均で下がっていればその分は
+    #   ベータの取り分。ヘッジすると σ と一緒に消える。
+    #   合成データの検算(2026-08-28)で、σ −7.9% と 平均 −8.2% が相殺して
+    #   月平均÷σ が **1ミリも改善しない**ケースを確認した。
+    #   §18.19 では日中ドリフトはゼロ(t=0.59)なので実データでは小さいはずだが、
+    #   **出さないと判断できない**。
+    _mkm = float(_mk.mean())
+    _lose = -_beta * _mkm            # 比率1.0 のとき1日あたり失う利益
+    print(f"    日経の日中% 平均 = **{_mkm:+.3f}%**"
+          f"(§18.19 ではドリフトはゼロ)")
+    print(f"    → 比率1.0 で失う『ベータ由来の利益』= "
+          f"**{_lose:+,.0f}円/日**(月 {_lose * 20:+,.0f}円)")
+    if abs(_lose * 20) > abs(_pn.mean() * 20) * 0.3:
+        print(f"      ⛔ 月平均 {_pn.mean() * 20:+,.0f}円 の3割を超えます。"
+              f"**ヘッジは σ と一緒に利益も削ります**")
+    _need = -_beta        # β<0 なので買いヘッジ。1%あたりこの額だけ利益が要る
+    print(f"    ヘッジ比率1.0 = 日経+1% で **{_need:+,.0f}円** 得るポジション")
+    print(f"      = 日経マイクロ先物(指数×10)なら 約 **{_need / 4200:.1f}枚** 相当"
+          f"(日経42,000円のとき1枚が+1%で約4,200円)")
+
+    def _stat(_p):
+        _m: dict = {}
+        for _i, _d in enumerate(_kd):
+            _m[_d[:7]] = _m.get(_d[:7], 0.0) + float(_p[_i])
+        _v = np.array([_m[k] for k in sorted(_m)], float)
+        _mu = float(_v.mean())
+        _sd2 = float(_v.std(ddof=1)) if len(_v) > 1 else 0.0
+        _t = _mu / (_sd2 / _math.sqrt(len(_v))) if _sd2 > 0 else 0.0
+        return _mu, _sd2, (_mu / _sd2 if _sd2 else 0.0), _t, int((_v > 0).sum()), len(_v)
+
+    def _apply(_p, _mkt, _capv, _h):
+        """ヘッジ後の日次損益。日経が +x% のとき +_need*_h*x/1 を得る。"""
+        _g = (-_beta) * _h * (_mkt / 1.0)
+        _cost = abs((-_beta) * _h) * 100.0 * (a.hedge_cost_bp / 10_000.0)
+        return _p + _g - _cost
+
+    _hs = [float(x) for x in a.hedge_ratios.split(",") if x.strip()]
+    for _lbl, _kk, _pp, _cc, _mm in (("TRAIN", _kd, _pn, _cap, _mk),) + (
+            (("TEST", *_panel(_test, _he)),) if _he is not None and len(_he) else ()):
+        if _lbl == "TEST":
+            _kd, _pn, _cap, _mk = _kk, _pp, _cc, _mm
+            if len(_kd) < 100:
+                print(f"\n  ⛔ TEST の有効日が少なすぎます({len(_kd)}日)")
+                break
+            _bt = np.polyfit(_mk, _pn, 1)
+            print(f"\n  ── TEST({_test_n}) {len(_kd):,}営業日 ──")
+            print(f"    ⚠ TEST の β = {float(_bt[0]):+,.0f}円/1% "
+                  f"(TRAIN {_beta:+,.0f})。**大きく違えば比率を固定できません**")
+        print(f"    {'比率':<8}{'月平均':>12}{'月次σ':>12}{'÷σ':>8}"
+              f"{'t':>8}{'プラス月':>10}")
+        _base = None
+        for _h in _hs:
+            _q = _apply(_pn, _mk, _cap, _h)
+            _mu, _sd2, _rt, _t, _pos, _nm = _stat(_q)
+            if _h == 0.0:
+                _base = _rt
+            _mk2 = " ★現行" if _h == 0.0 else (
+                "  ✅" if (_base is not None and _rt > _base * 1.10) else "")
+            print(f"    {_h:<8.2f}{_mu:>+12,.0f}{_sd2:>12,.0f}{_rt:>8.2f}"
+                  f"{_t:>+8.2f}{f'{_pos}/{_nm}':>10}{_mk2}")
+
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 判定:")
+    print(f"    ・**月平均÷σ が比率0(現行)より明確に高い**比率があるか")
+    print(f"    ・その比率が **TRAIN と TEST で同じ**か(違えば固定できない)")
+    print(f"    ・TEST の β が TRAIN と近いか(§18.30 では lss の月別βが"
+          f"**2ヶ月符号が逆**だった)")
+    print(f"  ⛔ 総額(月平均)が増えることは期待しないこと。σ を削るのが狙いです")
+    print(f"  ⚠ 先物のコスト・証拠金・kabu の対応は**この数字に入っていません**")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
