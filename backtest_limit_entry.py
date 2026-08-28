@@ -48,7 +48,15 @@ from symbols_all import SYMBOLS
 # ── 定数 ────────────────────────────────────────────────────────
 JST           = timezone(timedelta(hours=9))
 _TODAY        = datetime.now(JST).date()
-_CACHE_DIR    = Path(".rsi2_cache")
+# 日足の永続キャッシュ。既定は作業フォルダ直下の .rsi2_cache。
+# ★ git worktree で作業フォルダを2つ持つと、.rsi2_cache は gitignore なので
+#   片方が空になり 1,500銘柄を再ダウンロードすることになる。環境変数で
+#   1箇所を共有できるようにする(既定は従来どおりなので何も変わらない):
+#     $env:GOBOT_CACHE_DIR = "C:\...\swingtrade\.rsi2_cache"
+# ⚠ 共有するときは **2つのセッションで同時に大量スキャンを走らせないこと**。
+#   同じ銘柄の pkl へ同時に書くと壊れる(読み書きの排他はしていない)。
+_CACHE_DIR    = Path(os.environ.get("GOBOT_CACHE_DIR", "").strip()
+                     or ".rsi2_cache")
 
 ENTRY_EXPIRE  = 0      # 注文の繰越日数。0=翌営業日のみ有効(当日限り・繰越なし=実運用の当日限り注文に一致)。
                        # 1にすると翌営業日で不約定でももう1日繰り越す(=当日+1日後の2日有効)。
