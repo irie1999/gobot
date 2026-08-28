@@ -853,7 +853,7 @@ def main() -> int:
                     help="指数が無い場合。市場成分を控除せず生ギャップで検証する")
     ap.add_argument("--limit", type=int, help="先頭N銘柄だけ (デバッグ)")
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--raw", action="store_true", help="ATR正規化せず生%閾値を使う")
+    ap.add_argument("--raw", action="store_true", help="ATR正規化せず生パーセントの固定閾値を使う")
     ap.add_argument("--prev-thr", dest="prev_thr", type=float)
     ap.add_argument("--gap-thr", dest="gap_thr", type=float)
     ap.add_argument("--cost-bps", dest="cost_bps", type=float, default=COST_BPS)
