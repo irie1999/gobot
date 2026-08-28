@@ -73,6 +73,9 @@ ap.add_argument("--slip-pct", type=float, default=0.0005,
 ap.add_argument("--max-dev", type=float, default=0.30,
                 help="5分足と日足のズレの上限(0.30=30%%)。これを超えたら"
                      "**株式分割の汚染**(§18.27)としてその銘柄日を捨てる")
+ap.add_argument("--min-cover", type=float, default=0.7,
+                help="その日の建玉のうち何割が5分足で再現できれば採用するか"
+                     "(0.7=7割)。これを割った日は『合計』として意味が無いので捨てる")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--min-days", type=int, default=60,
                 help="TRAIN/TEST に最低これだけの営業日が要る")
@@ -147,7 +150,8 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
         _b = _bars.get(str(_r.symbol), {})
         _df = _b.get(_d0)
         if _df is None or len(_df) < 5:
-            return None
+            _MISS.append((day, str(_r.symbol)))
+            continue
         _px = _df["close"].to_numpy(dtype="float64")
         _ts = _df.index
         # ⛔⛔ **株式分割の汚染ガード**(§18.27)。
@@ -157,23 +161,29 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
         #   ショートだと (建値 − 5倍の価格) × 株数 で含み損が爆発し、
         #   予算400万に対して −1億 のような数字が出る(2026-08-28 に実際に出た)。
         #   picks.csv の d1_close(その日の日足終値)と突き合わせて弾く。
+        #   ⚠ 2026-08-28: 最初は **日ごと捨てて**いたので 482日 → 193日 と
+        #     6割が消えた。捨てすぎ。**その銘柄だけ外す**のが正しい。
+        #     『損切りなし』の基準にも同じ銘柄を外して比べるので、
+        #     比較は公平に保たれる(欠けた1銘柄ぶんの摂動が両側に等しく乗る)。
         _dc = float(getattr(_r, "d1_close", 0.0) or 0.0)
         if _dc > 0 and abs(float(_px[-1]) / _dc - 1.0) > a.max_dev:
             _BAD.append((day, str(_r.symbol), float(_px[-1]) / _dc))
-            return None
+            continue
         # 建値との整合も見る(寄りの5分足が建値から大きく離れていたら別物)
         if float(_r.entry_p) > 0 and \
                 abs(float(_px[0]) / float(_r.entry_p) - 1.0) > a.max_dev:
             _BAD.append((day, str(_r.symbol),
                          float(_px[0]) / float(_r.entry_p)))
-            return None
+            continue
         # ショート(side=1) は 建値-現値、ロング(side=-1) は 現値-建値
         _sgn = 1.0 if int(_r.side) > 0 else -1.0
         _pl = (float(_r.entry_p) - _px) * _sgn * int(_r.qty)
         _series.append(pd.Series(_pl, index=_ts))
         _fin += float(_r.pnl)
         _n += 1
-    if not _series:
+    # ⚠ 外しすぎた日は捨てる。**ポートフォリオの合計**を見るのが目的なので、
+    #   半分以上欠けた日は『合計』として意味を持たない。
+    if not _series or _n < max(1, int(len(grp) * a.min_cover)):
         return None
     _m = pd.concat(_series, axis=1).ffill().bfill()
     if _m.isna().any().any():
@@ -182,6 +192,7 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
 
 
 _BAD: list = []                # 分割汚染などで弾いた (日, 銘柄, 倍率)
+_MISS: list = []               # 5分足が無くて外した (日, 銘柄)
 
 # 日ごとの建玉(スリッページの基準)。閾値×日 の二重ループで毎回計算しないよう先に持つ
 _NOTIONAL = (P.assign(_n=P["entry_p"] * P["qty"])
@@ -203,6 +214,10 @@ if _BAD:
           f"{len(_bs):,}銘柄**(株式分割の汚染 / §18.27)")
     for _d, _sy, _rt in sorted(_BAD, key=lambda x: -abs(x[2]))[:5]:
         print(f"     {_d} {_sy} … 5分足/日足 = **{_rt:.2f}倍**")
+    print(f"     ⚠ **その銘柄だけ**外します(日ごとは捨てない)。"
+          f"基準の『損切りなし』にも同じ銘柄を外して比べるので比較は公平です")
+if _MISS:
+    print(f"  ⚠ 5分足が無くて外した {len(_MISS):,}銘柄日")
 
 # ★ 自己検算: 経路の最終値の合計 は その日の pnl の合計 と一致するはず。
 #   (最後の5分足の終値 ≒ 日足の終値なので)
@@ -281,6 +296,19 @@ def _stat(days: list, level: float = 0.0, trail: float = 0.0,
             "worst": float(_mv.min()) if len(_mv) else 0.0}
 
 
+def _judge(_s: dict, _b: dict) -> str:
+    """✅ の判定。
+
+    ⛔ 2026-08-28: `ratio > base * 1.10` と書いていたので、**base がマイナスの
+       ときに不等号が反転**し、発火0回(=現行と完全に同一)の行に ✅ が付いた。
+       比率ではなく **差** で比べ、発火が無い行は必ず — にする。
+    """
+    if _s["fire"] <= 0:
+        return "  —"
+    _d = _s["ratio"] - _b["ratio"]
+    return "  ✅" if _d >= 0.10 else ""
+
+
 def _table(days: list, label: str):
     print(f"\n  ── {label} ({len(days)}営業日) ──")
     _b = _stat(days)
@@ -292,14 +320,14 @@ def _table(days: list, label: str):
     _out = []
     for _l in _LV:
         _s = _stat(days, level=_l)
-        _mk = "  ✅" if _s["ratio"] > _b["ratio"] * 1.10 else ""
+        _mk = _judge(_s, _b)
         print(f"    {'合計 −' + f'{_l:,.0f}円':<22}{_s['tot']:>+13,.0f}"
               f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
               f"{_s['fire']:>6}{_s['worst']:>+12,.0f}{_mk}")
         _out.append(("level", _l, _s))
     for _t in _TR:
         _s = _stat(days, trail=_t)
-        _mk = "  ✅" if _s["ratio"] > _b["ratio"] * 1.10 else ""
+        _mk = _judge(_s, _b)
         print(f"    {'最大益から −' + f'{_t:,.0f}円':<22}{_s['tot']:>+13,.0f}"
               f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
               f"{_s['fire']:>6}{_s['worst']:>+12,.0f}{_mk}")
