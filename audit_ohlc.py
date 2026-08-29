@@ -50,9 +50,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pickle
+
 import pandas as pd
 
-from backtest_limit_entry import _CACHE_DIR, fetch
+from backtest_limit_entry import _CACHE_DIR, _clean_prices, fetch
 
 
 def _load_symbols(path: str) -> list[str]:
@@ -84,6 +86,10 @@ def main() -> None:
     ap.add_argument("--allow-download", action="store_true",
                     help="キャッシュに無い銘柄を yfinance から取る。既定は取らない"
                          "(キャッシュの監査なので不要。上場廃止銘柄で待たされる)")
+    ap.add_argument("--via-fetch", action="store_true",
+                    help="pkl 直読みではなく fetch() 経由にする。fetch は "
+                         "_clean_prices を通すので **落とされた後**の行しか"
+                         "見えない(=汚染を数えられない)。比較用")
     ap.add_argument("--cap-per-symbol", type=int, default=200,
                     help="1銘柄あたり保持する該当行の上限(メモリ対策)")
     a = ap.parse_args()
@@ -92,6 +98,24 @@ def main() -> None:
         # ⛔ 1,541銘柄を1件ずつ yfinance に問い合わせると、上場廃止銘柄の
         #   タイムアウトで数分待たされる。監査対象はキャッシュそのもの。
         os.environ["GOBOT_OFFLINE"] = "1"
+
+    # ★ キャッシュの場所を**必ず表示してから**始める。
+    #   git worktree で作業フォルダを分けると .rsi2_cache は gitignore なので
+    #   新しい側には存在せず、offline だと fetch が全銘柄 None を返して
+    #   「1銘柄も読めませんでした」としか出ない(2026-08-28 に実際に起きた)。
+    #   **黙って0件を返さない**。場所と件数を出して、空なら即座に止める。
+    _pk = sorted(_CACHE_DIR.glob("*.pkl")) if _CACHE_DIR.exists() else []
+    print(f"[info] 日足キャッシュ: {_CACHE_DIR.resolve()}")
+    print(f"[info]   存在={_CACHE_DIR.exists()} / pkl {len(_pk):,}件"
+          + (f" / 例 {_pk[0].name}" if _pk else ""))
+    if not _pk and not a.allow_download:
+        sys.exit(
+            "\n[error] キャッシュが空です。以下のどれかです:\n"
+            "  ① 環境変数 GOBOT_CACHE_DIR が未設定(このウィンドウで設定し直す)\n"
+            '     $env:GOBOT_CACHE_DIR = "C:\\...\\swingtrade\\.rsi2_cache"\n'
+            "  ② 別の作業フォルダで動いている(git worktree は .rsi2_cache を"
+            "共有しません)\n"
+            "  ③ そもそもキャッシュを作っていない → --allow-download で取得")
 
     syms = _load_symbols(a.symbols)
     if a.limit > 0:
@@ -102,11 +126,42 @@ def main() -> None:
           + ("(--purge 指定あり → 最後に該当銘柄のキャッシュを消します)"
              if a.purge else ""))
 
-    def _one(sym: str):
+    _CUT = pd.Timestamp.today().normalize() - pd.Timedelta(days=a.days)
+
+    def _read(sym: str):
+        """⛔ fetch() を通さず pkl を直接読む。
+
+        fetch() は「最新バーが古い」キャッシュを陳腐とみなして捨てるので、
+        オフラインだと None が返る(2026-08-28 に検算で判明)。そして監査の
+        対象は **保存されている中身そのもの** なので、鮮度判定は不要。
+        さらに fetch() は _clean_prices を通すため、**落とされた後**の行しか
+        見えない。それでは「何が落ちているか」を数えられない。
+        """
+        p = _CACHE_DIR / f"{sym.replace('.', '_')}.pkl"
+        if not p.exists():
+            return None
         try:
-            d = fetch(sym, a.days)
+            with open(p, "rb") as f:
+                d = pickle.load(f)
         except Exception:
             return None
+        if not isinstance(d, pd.DataFrame) or d.empty:
+            return None
+        if not all(c in d.columns for c in ("open", "high", "low", "close")):
+            return None
+        try:
+            d = d[d.index >= _CUT]
+        except Exception:
+            return None
+        return d if len(d) >= 3 else None
+
+    def _one(sym: str):
+        d = _read(sym) if not a.via_fetch else None
+        if a.via_fetch:
+            try:
+                d = fetch(sym, a.days)
+            except Exception:
+                return None
         if d is None or len(d) < 3:
             return None
         o, h, l, c = d["open"], d["high"], d["low"], d["close"]
@@ -139,6 +194,14 @@ def main() -> None:
             "ng_bad_gap": float(_g[_nb].sum()), "ng_bad_intra": float(_i[_nb].sum()),
             "ng_ok_gap": float(_g[_no].sum()), "ng_ok_intra": float(_i[_no].sum()),
         }
+        # ★ エンジン(_clean_prices)を通したら何が残るか。
+        #   「キャッシュに汚染がある」と「エンジンがそれを見ている」は別の話。
+        try:
+            _cp = _clean_prices(d.copy())
+        except Exception:
+            _cp = None
+        st["cp_none"] = 1 if _cp is None else 0
+        st["cp_drop"] = 0 if _cp is None else int(len(d) - len(_cp))
         _bd = t[t["bad"]]
         if len(_bd) > a.cap_per_symbol:
             _bd = _bd.reindex(_bd["gap"].abs().sort_values(ascending=False).index
@@ -189,6 +252,12 @@ def main() -> None:
               f"  (正常行 {s['ng_ok_intra'].sum() / max(1, _NO) * 100:+.2f}%)")
         print(f"     ⚠ 日中変化がショートに有利な向き(マイナス)へ偏っていれば、"
               f"汚染が利益を作っています")
+
+    print(f"\n  ── エンジン(_clean_prices)を通すとどうなるか ──")
+    print(f"     終値の前日比50%超で落ちる行   {int(s['cp_drop'].sum()):>7,}件")
+    print(f"     まるごと除外される銘柄        {int(s['cp_none'].sum()):>7,}銘柄")
+    print(f"     ⚠ 上の A/B/C はこの除去を**通り抜けた**ぶんです"
+          f"(終値しか見ていないため)")
 
     t = pd.concat(bads, ignore_index=True) if bads else pd.DataFrame()
     if a.list > 0 and len(t):
