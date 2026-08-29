@@ -1176,3 +1176,92 @@ corr(|ギャップ|, 遅れ)          +0.590
 - 物理的に起こり得ない値の検出 (§16.5.5 の値幅制限)
 - 同じ現象を別経路で測って一致するか (日足の始値 vs 分足の先頭バーの始値)
 - 生データを直接見る (`--dump-bars`)
+
+---
+
+## 18. 前進記録と小ロット運用 (`gap_forward_record.py`)
+
+**発注機能はありません。** 売買系のモジュールを import していません。
+記録と集計だけを担当します。
+
+### 18.1 前夜に確定できるもの
+
+前日終値 / ATR20 / β / 前日方向 (同符号条件) は**すべて前夜に決まります**。
+同符号条件があるので **各銘柄は上下どちらか片側しか発火しません**。
+板の購読上限 (同時50銘柄) に対する候補を半分に絞れます。
+
+```
+python gap_forward_record.py prepare
+```
+
+`forward_records/candidates_<date>.csv` に、銘柄ごとの
+`prev_close / atr20_pct / beta / prev_z / eligible_side` と、
+**指数ギャップ0を仮定したトリガー価格**、および朝の補正係数
+(`idx_adj_per_1pct`) を書き出します。朝は
+
+```
+トリガー価格 = trigger_*_at_idx0 + idx_adj_per_1pct × (指数ギャップ%)
+```
+
+の一次式を計算するだけで済み、09:00 に重い処理をしません。
+
+### 18.2 気配の記録 (別ツール)
+
+証券会社のAPIに依存するので CSV で分離しています。仕様:
+
+```
+date, symbol, poll_time, quote_price, quote_kind, index_level
+```
+
+`quote_kind` は `quote` / `special_quote` / `traded`。1銘柄につき複数行
+(1〜3分おき) を想定。
+
+### 18.3 突合と判定
+
+```
+python gap_forward_record.py reconcile --quotes quotes_2026-09-01.csv
+python gap_forward_record.py report
+```
+
+**判定は誤差の平均ではなく、発火判定の反転率と裾 (90/95%点)** です。
+閾値は中央 約1,000bp なので、誤差が数百bpでも反転はほとんど起きないはず、
+という仮説を検定します。
+
+### 18.4 小ロットの実弾記録
+
+```
+python gap_forward_record.py live-init    # 雛形CSVを作る
+python gap_forward_record.py live         # 集計
+```
+
+`forward_records/live_trades.csv` に1件1行。列は
+`quote_time / quote_price / order_time / expected_price / official_open /
+fill_price / fill_qty / order_qty / exit_time / exit_price / exit_qty / note`。
+
+**測るのは損益ではなく執行です。**
+
+| # | 見るもの | 意味 |
+|---|---|---|
+| 1 | 約定できたか / 一部約定 | 比例配分の有無 |
+| 2 | **約定価格 と 始値 の差** | 板寄せに参加できていれば 0bp |
+| 3 | 引けで決済できたか | ストップ張り付きの実害 |
+| 4 | 損益 | 参考のみ。件数が統計にならない |
+
+**【2】が全件0bpなら、特別気配の銘柄でも板寄せに参加できています。**
+残る未知数はそこだけなので、数件で決着します。
+
+⛔ `forward_records/` は `.gitignore` 済み (実弾の記録なので)。
+
+### 18.5 発注は未実装
+
+`kabu_token.py` はトークン取得のみで、発注は入っていません。
+`FrontOrderType` の寄成コードなどを記憶で書くと実弾で事故るので、
+**デモ口座 (18081) で公式仕様を突き合わせてから**実装します。
+
+### 18.6 未検証のまま残しているもの
+
+実弾のサイズを上げる前に片付ければ間に合う、という判断で保留:
+
+- **廃止銘柄 (サバイバーシップ)** — 買い側の生死を決める。§16.6.35
+- **気配 → 板寄せ価格の予測精度** — §18.3 で並行して測れる
+- **決算の分離** — `--earnings`
